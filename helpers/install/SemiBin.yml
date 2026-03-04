@@ -1,0 +1,7 @@
+name: MF4semibin
+channels:
+- bioconda
+- conda-forge
+#- https://repo.anaconda.com/pkgs/main
+dependencies:
+  - bioconda::semibin=2.0

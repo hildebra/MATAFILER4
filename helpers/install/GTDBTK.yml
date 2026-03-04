@@ -1,0 +1,25 @@
+name: MF4gtdbtk
+channels:
+- bioconda
+- conda-forge
+#- https://repo.anaconda.com/pkgs/main
+dependencies:
+  - conda-forge::numpy
+  - conda-forge::scipy
+  - blas[build=openblas]
+  - gtdbtk=2.6
+  - pigz=2.8
+#  - whokaryote=1.1.2 (downgrades pytorch etc..)
+#  - checkm2 >= 1 (downgrades pytorch etc..)
+  - motus=3.1
+#  - bioconda::metaphlan=4.1 (requires R, too many requirements.. separate package
+#  - mash=2.2.2
+  - gsl=2.6
+#  - samtools=1.16
+#  - bzip2=1.0.8
+
+#  - comebin>=1.0
+#  - metaphlan
+#  - typing_extensions=4.4.0
+#  - pydantic>=1.9
+

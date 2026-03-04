@@ -1,0 +1,6 @@
+name: MGTKwhokar
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - whokaryote=1.1.2
