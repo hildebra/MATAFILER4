@@ -76,12 +76,23 @@ fi
 
 
 if ! find_in_bashrc "##------------> MF4 ADDED" ; then
-	printf "\n\n##------------> MF4 ADDED <----------##\nexport MF4DIR=$MFdir/\nexport PERL5LIB=\"\$PERL5LIB:$MFdir/\"\n##------------> MG-TK ADDED <----------##\n\n" >> ~/.bashrc
+	printf "\n\n##------------> MF4 ADDED <----------##\nexport MF4DIR=$MFdir/\nexport PERL5LIB=\"\$PERL5LIB:$MFdir/\"\n##------------> MF4 ADDED <----------##\n\n" >> ~/.bashrc
 	echo "Added MATAFILER modules to .bashrc"
 fi
 
 
-#exit;
+
+#potential old MGTK versions .. uninstall environments
+
+envsToDEL='MGTK MGTK_R MGTKbinners MGTKcheckm2 MGTKgtdbtk MGTKphylo MGTKsemibin MGTKwhokar'
+for etd in $envsToDEL; do
+	if find_in_mamba_env $etd ; then
+		$MAMBA_E  env remove -y -n  $etd 
+	fi 
+done
+
+
+exit;
 
 
 # For all micromamba installs, we use --channel-priority 1. This sets to 
@@ -290,14 +301,6 @@ fi
 rm -f $MFdir/helpers/install/runningInstall.sto
 
 
-#potential old MGTK versions .. uninstall environments
-
-envsToDEL='MGTK MGTK_R MGTKbinners MGTKcheckm2 MGTKgtdbtk MGTKphylo MGTKsemibin MGTKwhokar'
-for etd in $envsToDEL; do
-	if ! find_in_mamba_env $etd ; then
-		$MAMBA_E  env remove -y -n  $etd 
-	fi 
-done
 
 
 
