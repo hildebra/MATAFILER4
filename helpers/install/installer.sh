@@ -92,7 +92,7 @@ for etd in $envsToDEL; do
 done
 
 
-exit;
+#exit;
 
 
 # For all micromamba installs, we use --channel-priority 1. This sets to 
