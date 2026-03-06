@@ -298,7 +298,7 @@ sub processSubGenes{
 	#systemW $cmdX;
 	#die "Couldn't create gene abundance matrix $GCd/Matrix.$tag.mat , fatal error\n" unless (-e "$GCd/Matrix.$tag.mat");
 	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-	my ($dep1,$qcmd1) = qsubSystem($qsubDir."Matrix.sub.$tag.sh",$cmdX,$cores,int(100/$cores)."G","extE100$tag","","",1,[],$QSBoptHR);
+	my ($dep1,$qcmd1) = qsubSystem($qsubDir."Matrix.sub.$tag.sh",$cmdX,$cores,int(80)."G","extE100$tag","","",1,[],$QSBoptHR);
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 
 	

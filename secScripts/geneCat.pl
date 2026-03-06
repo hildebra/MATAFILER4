@@ -37,7 +37,7 @@ sub combineClstr;#rewrites cd-hit cluster names to my gene Idx numbers
 sub FOAMassign;
 sub geneCatFunc; sub geneCatFunc_emapper;
 sub readSam;
-sub prepCDhit; #gets genes from single dirs, sorts into new files, prepares library layout
+sub collateGenes; #gets genes from single dirs, sorts into new files, prepares library layout
 sub getCanopyDir; sub canopyCluster; #MGS creation
 sub krakenTax; #assign tax to each gene via kraken
 sub kaijuTax; #assign tax to each gene via kraken
@@ -337,7 +337,7 @@ if ($useGTDBmg eq "GTDB"){
 }
 
 #my $logdir = $GCdir."LOGandSUB";
-if ($mapF eq ""){
+if ($mapF eq "" ){
 	die "empty mapfile given\n";
 }
 $mapF =~ s/\/\//\//g;
@@ -349,12 +349,13 @@ if ($mapF =~ m/^\??$/){
 		die "Can't find expected copy of inmap in GC outdir: $GCdir\n";
 	}
 } elsif (-e "$qsubDir/GCmaps.inf" && -e "$qsubDir/GCmaps.inf"){
-	
+	my $mapFInf = `cat $qsubDir/GCmaps.inf`;$mapFInf =~ s/\/\//\//g;
 	my $mapFOri = `cat $qsubDir/GCmaps.ori`;$mapFOri =~ s/\/\//\//g;
-	if ($mapFOri = $mapF){ #same as in input arg.. great, replace with local copies!
-		$mapF = `cat $qsubDir/GCmaps.inf`;
+	if ($mapFOri eq $mapF || $mapFInf eq $mapF ){ #same as in input arg.. great, replace with local copies!
+		#$mapF = `cat $qsubDir/GCmaps.inf`;
 	} else {
-		die "Continuing run, but inmap does not seem to match!\nOriginal map: $mapFOri\n-map arg: $mapF\nExiting.. delete gene cat folder before proceeding (or use original map)\n";
+		die "input maps seems to have changed, neither\n$mapFInf\nnor\n$mapFOri\nAborting run..\n";
+		#die "Continuing run, but inmap does not seem to match!\nOriginal map: $mapFOri\n-map arg: $mapF\nExiting.. delete gene cat folder before proceeding (or use original map)\n";
 	}
 }
 
@@ -460,17 +461,11 @@ if ($batchNum <1){$batchNum = 1;}
 
 #test if base folders even exist..
 my $stoneDir = "$GCdir/checkpoints/";#store checkpoints
-my $prepStone = "$stoneDir/GenesCollated.stone";
-if (!-e $prepStone && (!-e "$GCdir/B0//compl.fna" || !-e "$GCdir/B0//compl.fna.gz" || !-e "$GCdir/B0/compl.srt.fna.gz") ){
-	printL "Genes were not collated, therefore switching to creation mode\n" if ($justCDhit == 1 );
-	$justCDhit = 0;
-}
-
 system "mkdir -p $stoneDir" unless (-d $stoneDir); 
 
 
 #copying genes from dirs into prep files..
-prepCDhit();
+collateGenes();
 
 #big main step
 geneCatFlow($bdir,$bucketCnt,$GCdir,$map{opt}{outDir});#,$GCdir);
@@ -1505,8 +1500,15 @@ sub addingSmpls{
 	}
 }
 
-sub prepCDhit(){
+sub collateGenes(){
 	
+	
+	my $prepStone = "$stoneDir/GenesCollated.stone";
+	if (!-e $prepStone && (!-e "$GCdir/B0//compl.fna" || !-e "$GCdir/B0//compl.fna.gz" || !-e "$GCdir/B0/compl.srt.fna.gz") ){
+		printL "Genes were not collated, therefore switching to creation mode\n" if ($justCDhit == 1 );
+		$justCDhit = 0;
+	}
+
 	return if (-e $prepStone && $justCDhit );
 	system "mkdir -p $GCdir" unless (-d $GCdir);
 	system "mkdir -p $qsubDir" unless (-d $qsubDir);
@@ -1516,7 +1518,8 @@ sub prepCDhit(){
 	my @newMaps;my $cntMaps=0;
 	foreach my $mm (@maps){
 		#system "cp $mm $qsubDir/map.$cntMaps.txt"; 
-		system "envsubst < $mm  > $qsubDir/map.$cntMaps.txt";
+		#print "envsubst < $mm  > $qsubDir/map.$cntMaps.txt\n";
+		system "envsubst < $mm  > $qsubDir/map.$cntMaps.txt" unless (-s "$qsubDir/map.$cntMaps.txt");
 		push (@newMaps,"$qsubDir/map.$cntMaps.txt"); $cntMaps++;
 	}
 	open O,">$qsubDir/GCmaps.inf"; print O join ",",@newMaps; close O;
@@ -1606,13 +1609,17 @@ sub prepCDhit(){
 			#print "$locFrom,$locTo\n";
 			  
 			my $cmd = "$selfScript -mode subprepSmpls -GCd $GCdir -map $mapF -tmp $tmpDir -SmplStart $locFrom -SmplStop $locTo -SmplBatch $batch";
-			#systemW $cmd."\n";
-			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-			my $numCor = 3;
-			my ($jdep,$txtBSUB) = qsubSystem($qsubDir."/preprocess/Preprocess.$batch.sh",$cmd,$numCor,int(30)."G","PrPr$batch","","",1,[],$QSBoptHR);
-			push(@jobs,$jdep);
-			$QSBoptHR->{tmpSpace} =$tmpSHDD;
-			$lastLocTo = $locTo;
+			#die "$cmd\n$batchNum : $maxSmpls\n";
+			if ($batchNum == 1){
+				systemW $cmd."\n";
+			} else {
+				my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
+				my $numCor = 3;
+				my ($jdep,$txtBSUB) = qsubSystem($qsubDir."/preprocess/Preprocess.$batch.sh",$cmd,$numCor,int(30)."G","PrPr$batch","","",1,[],$QSBoptHR);
+				push(@jobs,$jdep);
+				$QSBoptHR->{tmpSpace} =$tmpSHDD;
+				$lastLocTo = $locTo;
+			}
 
 			# addingSmpls($locFrom,$locTo,$batch);  subprepSmpls
 		}
@@ -2500,7 +2507,7 @@ sub geneCatFunc_emapper{
 	$cmd .= "rm -f -r $GLBtmp/eggNOGmapper  $splDir;\n" ; #unless (-e $tarAnno && -s $tarAnno)
 	my ($jobName,$mptCmd) = qsubSystem($qsubDir2."CleanEMAP.sh",$cmd,$clnCores,(70)."G","${shrtDB}_CLN",join(";",@jdeps),"",1,[],$QSBoptHR); #$jdep.";".
 
-
+	print "Done geneCat FuncEMAP sub, submitted all jobs\n";
 
 
 }

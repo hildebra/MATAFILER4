@@ -4,7 +4,6 @@ use warnings;
 use strict;
 #use List::MoreUtils 'first_index'; 
 
-#use Mods::GenoMetaAss qw(qsubSystem);
 
 use Exporter qw(import);
 our @EXPORT_OK = qw(runRaxMLng runRaxML readFMGdir prep40MGgenomes prepNOGSETgenomes getE100 getGenoGenes getFMG renameFMGs 

@@ -699,7 +699,7 @@ sub SVcall_vcf{
 	my $cmdAll = $xtra ."\n\n".$cmd;
 	#print $cmdAll;
 
-	my ($dep,$qcmd) = qsubSystem($SNPIHR->{qsubDir} . "$SNPIHR->{cmdFileTag}.SV.sh",$cmdAll,int($actualCores),int(20/$actualCores)."G","SV$SNPIHR->{JNUM}",$jdep,"",1,[],$SNPIHR->{QSHR});
+	my ($dep,$qcmd) = qsubSystem($SNPIHR->{qsubDir} . "$SNPIHR->{cmdFileTag}.SV.sh",$cmdAll,int($actualCores),"20G","SV$SNPIHR->{JNUM}",$jdep,"",1,[],$SNPIHR->{QSHR});
 	
 	return $dep;
 }

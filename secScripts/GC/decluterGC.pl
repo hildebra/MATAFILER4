@@ -91,7 +91,7 @@ if (!-e "$stone"){
 		push(@{$QSBoptHR->{constraint}}, "sse4");
 		$QSBoptHR->{useLongQueue} = 1;
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		my ($dep,$qcmd) = qsubSystem($c90d."decluter.sh",$cmd,$numCor,int($totMem/$numCor)."G","declut","","",1,[],$QSBoptHR);
+		my ($dep,$qcmd) = qsubSystem($c90d."decluter.sh",$cmd,$numCor,int($totMem)."G","declut","","",1,[],$QSBoptHR);
 		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 		$QSBoptHR->{useLongQueue} = 0;
 

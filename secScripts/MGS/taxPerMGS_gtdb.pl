@@ -37,7 +37,7 @@ if ($GTDBtkBin =~ m/ activate /){
 
 #get GTDBtk version
 my $verSt = `$GTDBtkBin --version`;
-$verSt =~ m/version (\S+) /;
+$verSt =~ m/version (\d\.\d*+) /;
 my $GTDBver = $1+0.0;
 
 #print "$verSt\n\n$1\n";

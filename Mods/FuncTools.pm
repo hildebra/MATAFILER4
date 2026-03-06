@@ -149,7 +149,7 @@ sub buildFSdb{
 	#for (my $i =0 ; $i< @subFls;$i++){
 	my $FSbin = getProgPaths("foldseek");
 	my $DBcmd = "$FSbin createdb $DB $DBout --threads $ncore --prostt5-model $prst5W \n";
-	my ($jN, $tmpCmd) = qsubSystem($qsubDir."foldseekDBprep.sh",$DBcmd,$ncore,"2G","diaDB","","",1,[],$QSBoptHR);
+	my ($jN, $tmpCmd) = qsubSystem($qsubDir."foldseekDBprep.sh",$DBcmd,$ncore,"10G","diaDB","","",1,[],$QSBoptHR);
 	return $jN;
 }
 
@@ -215,7 +215,7 @@ sub assignFuncPerGene{
 		if($aligner eq "diamond" ){
 			$DBcmd .= "$diaBin makedb --in $DBpath$refDB -d $DBpath$refDB.db -p $ncore\n" ;
 			if (!-e "$DBpath$refDB.db.dmnd" && $doQsub){
-				my ($jN, $tmpCmd) = qsubSystem($qsubDir."DiamondDBprep.sh",$DBcmd,$ncore,"2G","diaDB","","",1,[],$QSBoptHR);
+				my ($jN, $tmpCmd) = qsubSystem($qsubDir."DiamondDBprep.sh",$DBcmd,$ncore,"16G","diaDB","","",1,[],$QSBoptHR);
 				$globalDiamondDependence = $jN;
 			}
 		} elsif ($aligner eq "foldseek" ){ 
@@ -309,7 +309,7 @@ sub assignFuncPerGene{
 					push(@{$QSBoptHR->{constraint}}, $avx2Constr);#--constraint=sse4
 					my $preHDDspace=$QSBoptHR->{tmpSpace};
 					$QSBoptHR->{tmpSpace} = ($mem*2) . "G";
-					my ($jobName,$mptCmd) = qsubSystem($qsubDir."D$shrtDB.$i.sh",$cmd,$ncore,($mem/$ncore)."G","D$shrtDB$i",$globalDiamondDependence,"",1,[],$QSBoptHR); #$jdep.";".
+					my ($jobName,$mptCmd) = qsubSystem($qsubDir."D$shrtDB.$i.sh",$cmd,$ncore,($mem)."G","D$shrtDB$i",$globalDiamondDependence,"",1,[],$QSBoptHR); #$jdep.";".
 					@{$QSBoptHR->{constraint}} = @preCons;
 					$QSBoptHR->{tmpSpace} = $preHDDspace;
 					push(@jdeps,$jobName);

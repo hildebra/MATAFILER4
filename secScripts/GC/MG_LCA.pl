@@ -145,7 +145,7 @@ sub submitJobs{
 		
 		if ( ($COGcnt % $blPerJob) == 0 && $collectJobs>= $blPerJob){
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-			my ($dep1,$qcmd1) = qsubSystem($qsubDir."MG_LCA.$COGcnt.sh",$cmd,$cores,int($totMem/$cores)."G","MLCA$COGcnt","","",1,[],$QSBoptHR);
+			my ($dep1,$qcmd1) = qsubSystem($qsubDir."MG_LCA.$COGcnt.sh",$cmd,$cores,int($totMem)."G","MLCA$COGcnt","","",1,[],$QSBoptHR);
 			$QSBoptHR->{tmpSpace} =$tmpSHDD;
 			push (@Deps,$dep1);
 			#die;
@@ -158,7 +158,7 @@ sub submitJobs{
 	if ($cmd ne ""){
 		print "SUB\n\n";
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		my ($dep1,$qcmd1) = qsubSystem($qsubDir."MG_LCA.$COGcnt.sh",$cmd,$cores,int($totMem/$cores)."G","MLCA$COGcnt","","",1,[],$QSBoptHR) ;
+		my ($dep1,$qcmd1) = qsubSystem($qsubDir."MG_LCA.$COGcnt.sh",$cmd,$cores,int($totMem)."G","MLCA$COGcnt","","",1,[],$QSBoptHR) ;
 		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 		push (@Deps,$dep1);
 		#print $cmd."\n";

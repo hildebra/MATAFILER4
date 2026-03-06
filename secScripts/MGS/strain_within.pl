@@ -103,8 +103,8 @@ my $familyVar = ""; my $groupStabilityVars = "";
 #SNP calling
 my $minSNPDepth = 2; #changed to two: seems to give better results
 my $minSNPCallQual = 5; #this is very weak evidence, probably no good..
-my $useAdaptiveQual = 0.2; #adaptive quality filtering in vcf2fna (based on depth)?
-my $depthFilterScale =0.2; # if DP < mean contig depth *x, filter. Default: 0.25
+my $useAdaptiveQual = 0.0; #adaptive quality filtering in vcf2fna (based on depth)? Default: 0 (deactivated)
+my $depthFilterScale =0.15; # if DP < mean contig depth *x, filter. Default: 0.15
 my $indelRange = 5; #SNPs in range of X bp indels will be excluded
 my $forceVCF2FNA = 0; #force the recalc of cons fasta from vcf..
 my $SNPconsLOGs = ""; #logs for recalculating cons SNPs
@@ -194,7 +194,7 @@ GetOptions(
 	"minSNPCallQual=i"  => \$minSNPCallQual,
 	"skipIndels=i"     => \$noIndels,
 	"SNPadaptiveQual=f" => \$useAdaptiveQual, #Default 0 (not active, recommended 0.15-0.5
-	"SNPdepthFilterScale=f" => \$depthFilterScale, #Default 0.25
+	"SNPdepthFilterScale=f" => \$depthFilterScale, #Default 0.15
 	"SNPindelRangeFilt=i" => \$indelRange,
 
 );
@@ -907,7 +907,7 @@ sub prepRun{
 		$outD .= "/" unless ($outD =~ m/\/$/);
 		}
 	$LOGDIR = "$outD/LOGandSUB/";
-	$SNPconsLOGs = "$outD/SNPconsCalls.log" if ($SNPconsLOGs eq "");
+	$SNPconsLOGs = "$outD/SNPconsCalls.$subJob.log" if ($SNPconsLOGs eq "");
 
 	$GCd =~ m/.*\/([^\/]+)\/*/; my $GCname = $1;
 	$outD =~ m/.*\/([^\/]+)\/*/; my $outDname = $1;
@@ -930,7 +930,6 @@ sub prepRun{
 	} else { $locTmpDir = $locTmpDir1;}
 	
 	$preConDir = "$scratchD/preComp/";
-	system "mkdir -p $locTmpDir $scratchD";
 
 
 	print "\n!! WARNING !!: RESUBMISSION mode selected (will resubmit MSA + phylos even for already completed MGS) !!\n" if ($reSubmit);
@@ -965,7 +964,7 @@ sub prepRun{
 	} else {
 			print "============= Strain_within v$version =============\n";
 		print "Creating within species strains for ${mode}s in $GCd\n";
-		print "Outdir: $outD\nTmpDir: $locTmpDir\n";
+		print "Outdir: $outD\nTmpDir: $locTmpDir\nScratchDir: $scratchD\n";
 		print "GC dir: $GCd\nIn Cluster: $MGSfile\nCores: $numCores (max: ${maxCores})\n";
 		print "MAP: $mapF\n";
 		#print "Ref tree: $treeFile\n";
@@ -994,10 +993,10 @@ sub prepRun{
 		}
 	}
 	#prep sorted MGS gene file
-	if (!-e $MGSfile.".srt" && !$subJob){
+	if ((!$onlySubmit || !-e $MGSfile.".srt") && !$subJob){
 		die "In rewriting loop while in a subjob.. aborting\n" if ($subJob);
 		print "base files missing.. preparing complete resubmission and recalc of data\n";
-		system "rm -fr $outD";
+		system "rm -fr $outD $scratchD";
 		system "rm -f $MGSfile.srt*";
 		my $sortMGSgenes = getProgPaths("sortMGSGeneImport_scr");
 		my $cmd = "$sortMGSgenes $GCd $MGSfile $useGTDBmg\n";
@@ -1009,6 +1008,7 @@ sub prepRun{
 	$MGSfile .= ".srt";
 	print "\nnew MGS file: $MGSfile\n\n";
 
+	system "mkdir -p $locTmpDir $scratchD";
 	system "mkdir -p $outD" unless (-d $outD);
 	system "mkdir -p $LOGDIR" unless (-d $LOGDIR);
 	open FO, ">$LOGDIR/strainCmd.txt"; print FO "$cmdCall"; close FO;
@@ -1188,7 +1188,7 @@ sub evalFileStatus{
 		$SIdirs{$MGS} = $outD2;
 		#print "$outD2\n";
 		if (-d $outD2 && $onlySubmit == 0){#don't delete folders if we want to submit a job later..
-			system "rm -rf $outD2/*";
+			system "rm -rf $outD2/* $scratchD/outs/$MGS/*";
 		}
 		system "mkdir -p $outD2" unless (-d $outD2);
 		

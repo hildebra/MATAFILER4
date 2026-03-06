@@ -4,7 +4,6 @@ use warnings;
 use strict;
 #use List::MoreUtils 'first_index'; 
 
-#use Mods::GenoMetaAss qw(qsubSystem);
 
 use Exporter qw(import);
 our @EXPORT_OK = qw( sortgzblast uniq  readTabbed readTabbed2 bam2cram cram2bsam checkMF
@@ -13,7 +12,6 @@ our @EXPORT_OK = qw( sortgzblast uniq  readTabbed readTabbed2 bam2cram cram2bsam
 					);
 use Mods::GenoMetaAss qw(systemW readFasta renameFastHD gzipwrite gzipopen filsizeMB);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
-use Mods::Subm qw ( qsubSystem   );
 
 
 
