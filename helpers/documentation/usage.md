@@ -1,7 +1,7 @@
 
-## Running MG-TK
+## Running MATAFILER4
 
-MG-TK is programmed for HPC environments (Linux) and was conceptualized to process 1000's of metagenomes. It relies therefore on job schedulers (slurm, SGE and LSF are supported) and multiple safeguards to resume failed jobs. Please see examples below for specific runs.
+MATAFILER4 is programmed for HPC environments (Linux) and was conceptualized to process 1000's of metagenomes. It relies therefore on job schedulers (slurm, SGE and LSF are supported) and multiple safeguards to resume failed jobs. Please see examples below for specific runs.
 
 ### Temporary and output files
 
@@ -10,11 +10,11 @@ The output path for storing non-temporary files (like assemblies, binnings, gene
 Since the pipeline is expected to run on a compute cluster, temporary directories are of enormous importance for a) performance and b) file exchange between compute nodes that are usually physically separated clusters.
 The pipeline expects a path to a storage that is globally available on all nodes and a tmp dir that is locally available on each node (given by arguments "globalTmpDir" and "nodeTmpDir" in the config file). 
 
-### Mapping file for MG-TK
+### Mapping file for MATAFILER4
 
 
 Most importantly you need a mapping file to your files. See 'examples' dir for some map examples (also explaining how to do compound assemblies, compound mapping). These column names (headers) are reserved key words in the mapping file (other columns can be eg. metadata per sample etc):
-- **#SmplID** [STRING] MG-TK maps always need to have the first column names *#SmplID*. The string in this column will used in all subsequent analysis, intermediary files, sequence heads etc to uniquely identify samples, therefore choose with extreme care! Good practice would be to include some basic information about the sample in the SMPLID, but should be as short and descriptive as possible. *DO NOT USE SPECIAL CHARACTERS IN THE SMPLID, keep it basic*!  
+- **#SmplID** [STRING] MATAFILER4 maps always need to have the first column names *#SmplID*. The string in this column will used in all subsequent analysis, intermediary files, sequence heads etc to uniquely identify samples, therefore choose with extreme care! Good practice would be to include some basic information about the sample in the SMPLID, but should be as short and descriptive as possible. *DO NOT USE SPECIAL CHARACTERS IN THE SMPLID, keep it basic*!  
 - **Path** [STRING] - is the relative path to fastq[.gz] files for each sample (see #DirPath, this needs to be set to the absolute path). All files ending with .fq or .fastq (can have .gz after) in the dir will be used for that specific samples. 1. or 2. indicates first or second read. E.g. al0-0_12s005629-2-1_lane3.2.fq.gz is the second read, here the pipeline expects to have al0-0_12s005629-2-1_lane3.1.fq.gz in the same dir.  
 Further, you can add the following specifics for each single sample:   
 - **AssmblGrps** [STRING] - set this to a number or string. all samples with the same tag will be assembled together (e.g. samples from the same patient at different time points).  
@@ -42,8 +42,8 @@ Further, you can add the following specifics for each single sample:
 - **#NodeTmpDir**	[Path] temporary dir only accessible within each compute cluster node, overrides **nodeTmpDir** definition in config file
 - **#GlobalTmpDir**	[Path] temporary dir (scratch) accessible from all compute nodes, overrides **globalTmpDir** definition in config file
 - **#mocatFiltPath**	If for some reason you are forced to use mocat filtered fastqs and not the original, unfiltered files (strongly recommended), than you can indicate in which subdir these mocat files can be found
-- **#RelaxSMPLID**	[TRUE/FALSE] 	Use FALSE to deactivate basic checks if the #SmplID adheres to MG-TK formats. Caution: use on your own risk!
-- **#WARNING**	[OFF/ON]	If **OFF** MG-TK won't stop when an error is encountered in the map. Caution: use on your own risk!
+- **#RelaxSMPLID**	[TRUE/FALSE] 	Use FALSE to deactivate basic checks if the #SmplID adheres to MATAFILER4 formats. Caution: use on your own risk!
+- **#WARNING**	[OFF/ON]	If **OFF** MATAFILER4 won't stop when an error is encountered in the map. Caution: use on your own risk!
 
 After this follow the sample IDs and the relative path, where to find the input fastqs.  
 See _examples/example_map_assemblies.map_ for a very complicated mapping file with several source dirs.
@@ -53,7 +53,7 @@ See _examples/example_map_assemblies.map_ for a very complicated mapping file wi
 ```{sh}
 #SmplID	Path	SmplPrefix	AssmblGrps
 #OutPath	/hpc-home/path/to/your/results/folder
-#RunID	NAMEofresultsFOLDER (#MG-TK will make this folder with this name by itself)
+#RunID	NAMEofresultsFOLDER (#MATAFILER4 will make this folder with this name by itself)
 #DESCRIPTION (#not important, but you can mark what is the run is about)
 #DirPath	/path/to/folder/with/raw/reads
 Mouse11t0		PID_C11T0_	M11
@@ -71,13 +71,13 @@ Mouse16t1	SubDir3		M16
 
 #### Tips and recommendataions for creating mapping files
 
-- It is recommended to create the mapping file in **Excel** and copy-paste it in a **.map** text file afterwards (will be tab-delimited by default, the expected MG-TK format). You can use functions like "=VLOOKUP()" to match sample IDs across different tables. 
+- It is recommended to create the mapping file in **Excel** and copy-paste it in a **.map** text file afterwards (will be tab-delimited by default, the expected MATAFILER4 format). You can use functions like "=VLOOKUP()" to match sample IDs across different tables. 
 
 - The **#SmplID** column determines the name of a sample all the way throught the pipeline! Be very careful what ID you choose, as this will impact the sample names you'll have to deal with later, choose something a) short and b) descriptive. Avoid c) special characters (_|$%~\`\*& etc) in the SmplID!
 
 - **AssmblGrps**: Assembly groups are useful for assembling samples from e.g. a time series together, giving a better assembly usually. Choose the name of an assembly group a) unique b) short and descriptive and c) avoid special chars (\[\]{}_|$%~\`\*& etc)!
 
-- If using **assembly groups**, try to keep samples from the same assembly group as a block. MG-TK can also deal with these assembly groups distributed across the map, but in terms of job submission strategy it's best to have these samples next to each other in the map (and also for you organizing your experiment).
+- If using **assembly groups**, try to keep samples from the same assembly group as a block. MATAFILER4 can also deal with these assembly groups distributed across the map, but in terms of job submission strategy it's best to have these samples next to each other in the map (and also for you organizing your experiment).
 
 - <ins>**Loading and saving a mapping file into R will likely lead to problems!**</ins> This is because the #DirPath tag sets the path for all samples underneath. Loading this into R will often skip the #DirPath line or reorder the samples, so saving this again will lead to wrong paths being set!
 
@@ -90,7 +90,7 @@ Mouse16t1	SubDir3		M16
 ## Additional usage scenarios
 
 
-MG-TK can be used for a bulk of tasks not directly related to initial assembly, profiling or MAGs, but often related to postprocessing these. Two usage scenarios (map2tar and building phylogenies) are listed below.
+MATAFILER4 can be used for a bulk of tasks not directly related to initial assembly, profiling or MAGs, but often related to postprocessing these. Two usage scenarios (map2tar and building phylogenies) are listed below.
 
 
 ### map2tar mode
@@ -116,7 +116,7 @@ BERGmock	BERGmock	BERGmock
 
 ```{sh}
 MAP="/path/to/mapping_file.map"
-perl $MF3DIR/MG-TK.pl map2tar \
+perl $MF4DIR/MATAF4.pl map2tar \
 	-map $MAP  -ref '/path/to/reference/mock_community/*.fasta' -filterHumanRds 0 -mappingCores 12 -mapperFilterIll '0.02 0.75 00'  -redo2ndmap 0 -mappingMem 15 -submit 1 -competitive2ndmap -1 -decoyMapping 0
 ```
 
@@ -126,7 +126,7 @@ perl $MF3DIR/MG-TK.pl map2tar \
 
 - output files will contain coverage per window, contig, etc. which can be used for plotting.
 
-### Building phylogenetic trees with MG-TK
+### Building phylogenetic trees with MATAFILER4
 
 1. create a file `phyloScript.pl`
 
@@ -134,7 +134,7 @@ perl $MF3DIR/MG-TK.pl map2tar \
 #!/usr/bin/perl
 use strict; use warnings;
 
-my $bts = "/path/to/MG-TK/secScripts/phylo/buildTree5.pl";
+my $bts = "/path/to/MATAFILER4/secScripts/phylo/buildTree5.pl";
 my $inD = "/path/to/input/dir/phylo/";
 my $outD = $inD."/bts/";
 my $tempD = "/path/to/scratch/dir/treetest/";
@@ -152,5 +152,5 @@ Explanation: $inD is an input dir with complete genomes, the script will extract
 
 - Run with `perl /path/to/phyloScript.pl` together with submission script on cluster.
 
-3. you can do many additional phylogeny / pogen related analysis with the `buildTree5.pl` script ([see flags](#buildtree5.pl-flags)) 
+3. you can do many additional phylogeny / popgen related analysis with the `buildTree5.pl` script ([see flags](#buildtree5.pl-flags))
 
