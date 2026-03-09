@@ -46,22 +46,22 @@ sub zorroFilter{
 
 #builds an MSA, including filtering etc
 sub MSA{
-	my ($tmpInMSA,$tmpOutMSA2,$ncore,$clustalUse,$continue,$numSeq)  = @_;
+	my ($tmpInMSA,$tmpOutMSA2,$ncore,$clustalUse,$numSeq)  = @_;
 	my $cmd = "";
 	if ($clustalUse==1){
 		my $clustaloBin = getProgPaths("clustalo");#= "/g/bork3/home/hildebra/bin/clustalo/clustalo-1.2.0-Ubuntu-x86_64";
-		$cmd = $clustaloBin." -i $tmpInMSA -o $tmpOutMSA2 --outfmt=fasta --threads=$ncore --force\n"; #--guidetree-out $tmpTree 
+		$cmd = $clustaloBin." -i $tmpInMSA -o $tmpOutMSA2 --outfmt=fasta --threads=$ncore --force;"; #--guidetree-out $tmpTree 
 	} elsif ($clustalUse == 0) {
 		my $msapBin = getProgPaths("msaprobs");
-		$cmd = "$msapBin -num_threads $ncore $tmpInMSA > $tmpOutMSA2";
+		$cmd = "$msapBin -num_threads $ncore $tmpInMSA > $tmpOutMSA2;";
 	} elsif ($clustalUse == 2) {
 		my $mafftBin = getProgPaths("mafft");#= "/g/bork3/home/hildebra/bin/clustalo/clustalo-1.2.0-Ubuntu-x86_64";
-		$cmd = "$mafftBin --thread $ncore --quiet $tmpInMSA > $tmpOutMSA2";
+		$cmd = "$mafftBin --thread $ncore --quiet $tmpInMSA > $tmpOutMSA2;";
 	} elsif ($clustalUse == 3) {
 		die "guidance: rework phyloTools.pm\n";
 		my $guid2Path = "/g/bork3/home/hildebra/bin/guidance.v2.02/";
 		#guidance has some strange results..
-		$cmd = " $guid2Path/www/Guidance/guidance.pl --seqFile $tmpInMSA --msaProgram MAFFT --seqType aa ";
+		$cmd = " $guid2Path/www/Guidance/guidance.pl --seqFile $tmpInMSA --msaProgram MAFFT --seqType aa ;";
 		#$cmd .= " --dataset $spl2[1].$cnt --mafft $mafftBin --outDir $tmpD --proc_num $ncore\n";
 	} elsif ($clustalUse == 4) {
 		#my $nseqs = 0;
@@ -69,14 +69,14 @@ sub MSA{
 		my $algo = "-align";
 		$algo = "-super5" if ($numSeq > 300); #just too slow otherwise..
 		my $MUSCLE5Bin = getProgPaths("MUSCLE5");
-		$cmd = "$MUSCLE5Bin $algo $tmpInMSA -output $tmpOutMSA2 -threads $ncore "; #
-
+		$cmd = "$MUSCLE5Bin $algo $tmpInMSA -output $tmpOutMSA2 -threads $ncore ;"; #
+		#cat input.fa | sed 's/*$//g' | sed 's/\.$//g' > input.clean.fa
 	} else {
 		die "msa option ($clustalUse) unknown)\n";
 	}
 	#die $cmd;
-	systemW $cmd unless (-s $tmpOutMSA2 && $continue);
-	return $tmpOutMSA2;
+	#$cmd ="" unless (-s $tmpOutMSA2 && $continue);
+	return $cmd;
 }
 
 sub filterMSA{ #pretty useless atm.. not really used
@@ -87,15 +87,16 @@ sub filterMSA{ #pretty useless atm.. not really used
 		#-out_NT output_NT.fasta -out_AA output_AA.fasta
 		my $macseBin = "java -jar /g/bork3/home/hildebra/bin/macse_v2.03.jar";
 		my $outTag = "-out_AA"; $outTag = "-out_NT" if ($useAA4tree);
-		$cmd = "$macseBin -prog refineAlignment -align $tmpOutMSA2 $outTag $tmpOutMSA2.2";
+		$cmd = "$macseBin -prog refineAlignment -align $tmpOutMSA2 $outTag $tmpOutMSA2.2;";
 	} elsif ($postFilter eq "zorro"){
 		$zScore = zorroFilter($tmpOutMSA2);
-	}
-	if ($zScore > 0.4){
-		$tmpOutMSA2 = "";
+		if ($zScore > 0.4){
+			$tmpOutMSA2 = "";
+		}
+
 	}
 
-	return $tmpOutMSA2;
+	return $cmd;
 
 }
 

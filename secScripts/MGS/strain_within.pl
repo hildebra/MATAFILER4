@@ -52,7 +52,8 @@ sub addOutgroup2MGS;
 #.30: 25.2.26: new code for combining files, subfiles written to scratch to improve speed further
 #.31: 26.2.26: better integration new temp files, pick up from previous job, sorting jobs
 #.32: 27.2.26: allows for subsets of MGS only to be calculated.. (good for testing)
-my $version = 0.32;
+#.33: 7.3.26: speed improvements across the board, more options for vcf2dna
+my $version = 0.33;
 
 die "Not enough args!\n" unless (@ARGV > 1);
 
@@ -86,7 +87,7 @@ my $noIndels = 1;
 my $repairCAT=0;
 
 my $maxNGenes = 400;
-my @subsetMGS=(); my $subsMGSstr;
+my @subsetMGS=(); my $subsMGSstr="";
 my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
 my $phyloProg = 1; # #1=iqtree-fast, 2=veryfasttree, 3=fasttree
 my $GenesPerSpecies = 0.2; #was previously 0.1.. maybe too low?
@@ -102,7 +103,7 @@ my $familyVar = ""; my $groupStabilityVars = "";
 
 #SNP calling
 my $minSNPDepth = 2; #changed to two: seems to give better results
-my $minSNPCallQual = 5; #this is very weak evidence, probably no good..
+my $minSNPCallQual = 20; #this is weak evidence in metag context
 my $useAdaptiveQual = 0.0; #adaptive quality filtering in vcf2fna (based on depth)? Default: 0 (deactivated)
 my $depthFilterScale =0.15; # if DP < mean contig depth *x, filter. Default: 0.15
 my $indelRange = 5; #SNPs in range of X bp indels will be excluded
@@ -323,6 +324,8 @@ if (($dirsNOTPrepped/$#specis > 0.1) || $onlySubmit == 0
 			unlink $checkF; #and delete..
 		}
 		
+		system "cat $outD/SNPconsCalls.*.log > $outD/SNPconsCalls.log;";
+		
 		#combineMGSgenes();
 	}
 	
@@ -447,10 +450,11 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	#fileGZs($FNAtf) / (1024 * 1024); #size in MB
 	#$inputFNAsize*=5 if ($FNAtf =~ m/\.gz$/); #account for compressed input
-	if (  ($MSAprog==4 && $inputFNAsize>700) ){ $QSBoptHR->{useLongQueue} = 1 ;	}
+	if ( 0&& ($MSAprog==4 && $inputFNAsize>700) ){ $QSBoptHR->{useLongQueue} = 1 ;	}
 	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0";
-	my $baseMemMult = 200; $baseMemMult = 50 if ($phyloProg ==3 || $phyloProg ==2);
-	my $totMem = int($inputFNAsize *$baseMemMult * $memMulti);$totMem = 10000*$memMulti if ($totMem < 10000);
+	my $baseMemMult = 150; $baseMemMult = 50 if ($phyloProg ==3 || $phyloProg ==2);
+	my $totMem = int($inputFNAsize *$baseMemMult * $memMulti);
+	$totMem = 10000*$memMulti if ($totMem < 10000);$totMem = 220000*$memMulti if ($totMem > 220000);
 	my $numCoreL = $numCores;	
 	if ($maxCores >0){ #scale cores according to used memory size
 		$numCoreL = int($maxCores * sqrt($inputFNAsize/$sizeOfDirs[0]));
@@ -625,8 +629,9 @@ sub addOutgroup2MGS{
 			foreach my $tags (@spl){
 				#my @spl2 = split (/\\$SaSe/,$tags);
 				#$SIcatLoc {$spl2[1]}{$spl2[0]}  = $tags;print "$spl2[1] : $spl2[0]  = $tags\n";
-				$tags =~ m/^(.*)\|(.*)$/;		
-				$SIcatLoc {$2}{$1}  = $tags;				
+				if ($tags =~ m/^(.*)\|(.*)$/){	
+					$SIcatLoc {$2}{$1}  = $tags;
+				}				
 				$cntItems++;
 				#print "$2 $1  = $tags\n";
 			}
@@ -639,7 +644,7 @@ sub addOutgroup2MGS{
 		print "${MGS}:: $catLines cat lines (should: ". keys (%SIcatLoc) .", $cntItems items: $CATtf\n";
 	} else {
 		print "WARNING:: ${MGS}:: possible error: neither .cat nor .cat.tmp exists in $outD3\n";
-		next;
+		return(0, 0, $OG, 0);;
 
 	}
 	
@@ -660,7 +665,7 @@ sub addOutgroup2MGS{
 		my $OG1 = `$call`; chomp $OG1;
 		die "Can't find outgroup from call $call\n\n" if (!defined $OG1);
 		my @sspl = split /\s/,$OG1; $OG = "";
-		next if (@sspl == 0);
+		return(0,0,$OG,0) if (@sspl == 0);
 		$OG = $sspl[0] if (@sspl); my $cntX=-1;
 		my $cntShrCogs=0;
 		while ( defined($OG) && $cntShrCogs < 10 && $cntX < $#sspl){
@@ -670,14 +675,15 @@ sub addOutgroup2MGS{
 				next;
 			}
 			#$cntShrCogs=0;
-			if (exists($SIgenes_OG{$OG})){
-				foreach my $cog (@curCogs){
-					next unless (exists($SIgenes_OG{$OG}{$cog}));
-					next unless (exists($FNAref{$SIgenes_OG{$OG}{$cog}}));
-					next if ($cog =~ m/uniq\d+/);
-					$cntShrCogs ++;
-				}
+			#if (exists($SIgenes_OG{$OG})){
+			my $ogGenes = $SIgenes_OG{$OG};
+			foreach my $cog (@curCogs){
+				next unless (exists($ogGenes->{$cog}));
+				next unless (exists($FNAref{$ogGenes->{$cog}}));
+				next if ($cog =~ m/uniq\d+/);
+				$cntShrCogs ++;
 			}
+			#}
 			#last if ($cntX >= @sspl || $cntShrCogs >= 10);
 		}
 		if ($cntShrCogs < 1 && $cntX>0){
@@ -699,11 +705,13 @@ sub addOutgroup2MGS{
 	my @tmpFAAog ; my @tmpFNAog ;
 	foreach my $cog (@curCogs){
 		if ($OG ne "" && exists($SIgenes_OG{$OG}{$cog})){#deal with outgroup..
-			next unless (exists($FNAref{$SIgenes_OG{$OG}{$cog}})); #exists($SIgenes_OG{$OG}{$cog}) && 
+			my $geneKey = $SIgenes_OG{$OG}{$cog};
+
+			next unless (exists($FNAref{$geneKey})); #exists($SIgenes_OG{$OG}{$cog}) && 
 			next if ($cog =~ m/^uniq\d+/);
 			my $ng = "$OG$SaSe$cog";
-			push(@tmpFNAog, ">$ng\n$FNAref{$SIgenes_OG{$OG}{$cog}}\n");
-			push(@tmpFAAog , ">$ng\n$FAAref{$SIgenes_OG{$OG}{$cog}}\n");
+			push(@tmpFNAog, ">$ng\n$FNAref{$geneKey}\n");
+			push(@tmpFAAog , ">$ng\n$FAAref{$geneKey}\n");
 			#$SIcat{$MGS}{$cog}{$OG} = $ng;
 			$SIcatLoc{$cog}{$OG} = $ng;
 			$OGgenesUsed++;
@@ -742,10 +750,15 @@ sub addOutgroup2MGS{
 	}
 
 	#note done somewhere how many genes these actually are..
-	system "echo \"OG:$OG\" > $outD3/data.log";
 	my $multiSmpl=0;
 	$multiSmpl = scalar(keys %uniqSmpls);
-	system "rm -f $CATtf.tmp*\n" if (fileGZe("$CATtf.tmp"));
+	#system "rm -f $CATtf.tmp*\n" if (fileGZe("$CATtf.tmp"));
+	#system "echo \"OG:$OG\" > $outD3/data.log";
+	unlink glob("$CATtf.tmp*");
+	open my $log, '>', "$outD3/data.log" or die "...";
+	print $log "OG:$OG\n";
+	close $log;
+
 	
 	
 	#if ($outD3 ne $outD2){system "cp $outD3/* $outD2;";

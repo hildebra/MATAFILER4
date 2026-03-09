@@ -26,5 +26,7 @@ dependencies:
   - perl=5.32.1
   - pal2nal=14
   - veryfasttree=4.0.5
+  - muscle=5.3
+
 #  - smirarab::treeshrink>=1.3  -> needs R
 

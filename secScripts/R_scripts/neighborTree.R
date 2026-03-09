@@ -11,7 +11,8 @@ tree=read.tree(inF)
 cop = cophenetic(tree)
 c1 = cop[tar,]
 sc1=sort(c1)
-res=sc1[sc1>0.01][1:10]
+res=sc1[sc1>=0.01]
+res=res[1:max(length(res),10)]
 cat(paste0(paste(names(res),collapse=" "),"\n"))
 
 

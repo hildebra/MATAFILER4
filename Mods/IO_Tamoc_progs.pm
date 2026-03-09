@@ -235,8 +235,9 @@ sub loadConfigs{
 			$reV =~ s/\[Rscript\]/$Rscriptcmd/ if ($Rscriptset);
 			$reV =~ s/\[Rpath\]/$Rpath/ if ($RpathSet);
 			if ($l =~ m/env:([^#^\t]+)/){
-				
-				$reV = "$CONDA;$CONDcmd activate $1\n$reV";
+				my $tarEnv = $1;
+				#$reV = "$CONDA;$CONDcmd activate $1\n$reV";
+				$reV = "$CONDA;if [[ \$CONDA_DEFAULT_ENV != $tarEnv ]]; then $CONDcmd activate $tarEnv; fi\n$reV";
 			}
 			
 			#return $reV;

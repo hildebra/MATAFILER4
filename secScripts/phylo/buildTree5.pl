@@ -1,8 +1,4 @@
 #!/usr/bin/env perl
-#perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/helpers/buildTree4.pl -fna /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5//T2//renameTEC2//allFNAs.fna -aa /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5//T2//renameTEC2//allFAAs.faa -cats /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5//T2//renameTEC2//categories4ete.txt -outD /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5//T2/testMSA/ -cores 12 -useEte 0 -NTfilt 0.8 -runIQtree 0 -calcDistMat 1 -continue 0
-#perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/helpers/buildTree4.pl -fna /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5//T2//renameTEC2//allFNAs.fna -aa /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5//T2//renameTEC2//allFAAs.faa -cats /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5//T2//renameTEC2//categories4ete.txt -outD /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5//T2/tesssst/ -cores 12 -useEte 0 -NTfilt 0.8 -NonSynTree 0 -SynTree 0 -runRAxML 0 -runGubbins 0
-#perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec//secScripts/phylo/buildTree4.pl -fna /g/scb/bork/hildebra/SNP/GCs/DramaGCv5//Binning/MetaBat///intra_phylo//MB2bin314//allFNAs.fna -aa /g/scb/bork/hildebra/SNP/GCs/DramaGCv5//Binning/MetaBat///intra_phylo//MB2bin314//allFAAs.faa -smplSep '\|' -cats /g/scb/bork/hildebra/SNP/GCs/DramaGCv5//Binning/MetaBat///intra_phylo//MB2bin314//all.cat -outD /g/scb/bork/hildebra/SNP/GCs/DramaGCv5//Binning/MetaBat///intra_phylo//MB2bin314/  -runIQtree 1 -runFastTree 0 -cores 20  -AAtree 0 -bootstrap 000 -NTfiltCount 300 -NTfilt 0.05 -NTfiltPerGene 0.7 -GenesPerSpecies 0.2 -runRaxMLng 0 -minOverlapMSA 2 -SynTree 0 -NonSynTree 0 -MSAprogram 2 -continue 1 -AutoModel 0 -iqFast 1 -superTree 0 -outgroup MB2bin720 -superCheck 1
-# perl /g/scb/bork/luetge/pangenomics/speciation/dNdS/scripts/buildTree4_mod2.pl -fna /g/scb/bork/luetge/pangenomics/speciation/dNdS/fasta/allOrtho_freeze11_cluster_10.fna -aa /g/scb/bork/luetge/pangenomics/speciation/dNdS/fasta/allOrtho_freeze11_cluster_10.faa -cats /g/scb/bork/luetge/pangenomics/speciation/dNdS/catFiles/freeze11_cluster_10_categories4MSA.txt -outD /g/scb/bork/luetge/pangenomics/speciation/dNdS/outFiles/test/ -cores 12 -useEte 0 -NTfilt 0.8 -NonSynTree 0 -SynTree 0 -runRAxML 0 -runGubbins 0 -runLengthCheck 0 -runDNDS 0 -genesToPhylip 0 -continue 1 -runFastgear 0 -runFastGearPostProcessing 1 -clustername cluster_10
 
 #ARGS: ./buildTree.pl -fna [FNA] -faa [FAA] -cat [categoryFile] -outD [outDir] -cores [CPUs] -useEte [1=ETE,0=this script] -NTfilt [filter]
 #versions: ver 2 makes a link to nexus file formats, to be used in MrBayes and BEAST etc
@@ -331,12 +327,12 @@ if ($isAligned){
 } elsif (!$doMSA && $cogCats ne ""){
 	fillGeneList($cogCats);
 } elsif ($doMSA && $cogCats ne ""){
-	my $hr = readFasta($aaFna,1); my %FAA = %{$hr};
-	#die "$aaFna\n";
-	#die $FAA{"1214150.PRJNA171417_05DKX"}."\n";
-	$hr = readFasta($fnFna,1); my %FNA = %{$hr};
-	#die $FNA{"1214150.PRJNA171417_05DKX"}."\n";		
-	print "ReadFasta\n";
+	my $hr = readFasta($fnFna,1); my %FNA = %{$hr};
+	my %FAA;
+	if ($aaFna ne ""){
+		$hr = readFasta($aaFna,1); %FAA = %{$hr};
+	}
+	print "Read Fasta(s)\n";
 
 	############# test length of fna sequences can be divided by 3 ##############################
 		
@@ -380,11 +376,13 @@ if ($isAligned){
 		$spl[0] =~ m/^(.*)$smplSep(.*)$/;	my $sp = $1;my $gene = $2;
 		foreach my $seq (@spl){### $seq = genomeX_NOGY
 			$seq =~ m/^(.*)$smplSep(.*)$/;	$sp = $1;
-			die "can't find AA seq $seq\n" unless (exists ($FAA{$seq}));
+			die "can't find AA seq $seq\n" if ($aaFna ne "" && !exists ($FAA{$seq}));
 			die "can't find fna seq $seq\n" if (!exists ($FNA{$seq}) && !$useAA4tree);
 			#print "$MFAA{$curK}\n";			#my $ss = $FAA{$seq}; 			#filter per sequence 
-			my $num1 = $FAA{$seq} =~ tr/[\-Xx]//;
-			my $geneL = (length( $FAA{$seq})-$num1);#AA length
+			my $num1;
+			#$num1 = $FAA{$seq} =~ tr/[\-Xx]//;
+			$num1 = ($FNA{$seq} =~ tr/[\-Nn]// ) ;
+			my $geneL = (length( $FNA{$seq})-$num1);#AA length
 			$charCnts{$sp}{$seq} = $geneL;
 			push(@geneLs, $geneL);
 		}
@@ -539,8 +537,13 @@ if ($isAligned){
 		#die "@spl\n";
 		my $tmpInMSA = "$tmpD/inMSA$cnt.faa";
 		my $tmpInMSAnt = "$tmpD/inMSA$cnt.fna";
-		my $tmpOutMSA2 = "$MsaD/$spl2[1].$cnt.faa";
-		my $tmpOutMSA = "$MsaD/$spl2[1].$cnt.fna";
+		my $tmpOutMSAaa = "$tmpD/$spl2[1].$cnt.faa";
+		my $tmpOutMSA = "$tmpD/$spl2[1].$cnt.fna";
+		my $finOutMSAaa = "$MsaD/$spl2[1].$cnt.faa";
+		my $finOutMSA = "$MsaD/$spl2[1].$cnt.fna";
+		
+		my $endFileExists=0; $endFileExists =1 if (fileGZs($finOutMSAaa) && fileGZs($finOutMSA));
+		
 		open O,">$tmpInMSA" or die "Can;t open tmp faa file for MSA: $tmpInMSA\n";
 		open O2,">$tmpInMSAnt" or die "Can;t open tmp fna file for MSA: $tmpInMSAnt\n";
 		my $seqType = "AA";my $seqTypeOth = "NT";
@@ -559,10 +562,13 @@ if ($isAligned){
 			if (!$smplDef){#create artificial head tag
 				#TODO.. don't need it now for tec2, since no good NCBI taxid currently...
 			}
-			$samples{$1} = 1; #$genCats{$spl2[1]} = 1; 
-			$FAA{$seq} =~ s/\*//g if (!$clustalUse);
+			$samples{$sp} = 1; #$genCats{$spl2[1]} = 1; 
+			$FAA{$seq} =~ s/\*$//g if ($clustalUse != 0);
+			$FAA{$seq} =~ s/\x00//g;
+
 			print O ">$seq2\n$FAA{$seq}\n";
 			if (!$useAA4tree){
+				$FNA{$seq} =~ s/\x00//g;
 				$FNA{$seq} =~ s/-//g;
 				print O2 ">$seq2\n$FNA{$seq}\n";
 				$seqLength += length($FNA{$seq});
@@ -574,21 +580,29 @@ if ($isAligned){
 		close O;close O2;
 		#done, samples are in O2
 		if ($numSeq <= 3){ #actually pretty useless, no tree can be built from this, so just rm this one...
-			system "rm -f $tmpInMSA $tmpInMSAnt";#
-			next;
+			#system "rm -f $tmpInMSA $tmpInMSAnt";#
+			unlink  $tmpInMSA; unlink $tmpInMSAnt;next;
 		}
 
-		$seqLength /= @spl;
+		$seqLength /= $#spl;
 		#print "$tmpInMSA,$tmpOutMSA2\n";
-		$tmpOutMSA2 = MSA($tmpInMSA,$tmpOutMSA2,$ncore,$clustalUse,$continue,$numSeq);
+		my $cmd1 = MSA($tmpInMSA,$tmpOutMSAaa,$ncore,$clustalUse,$numSeq);
 		#zorro/macse filter.. by default not used ("")
-		$tmpOutMSA2 = filterMSA($tmpInMSA,$tmpOutMSA2,$ncore,$postFilter,$useAA4tree);
-		if ($tmpOutMSA2 eq ""){ #filter failed...
-			print "skipped protein, too many bad positions\n";
-			system "rm -f $tmpOutMSA2 $tmpOutMSA $tmpInMSA $tmpInMSAnt";
-			next;
-		}
+		my $cmd2 = filterMSA($tmpInMSA,$tmpOutMSAaa,$ncore,$postFilter,$useAA4tree);
 		
+		if ($endFileExists){$cmd1="";$cmd2="";}
+		#if ($tmpOutMSA2 eq ""){ #filter failed...
+		#	print "skipped protein, too many bad positions\n";
+		#	system "rm -f $tmpOutMSAaa $tmpOutMSA $tmpInMSA $tmpInMSAnt";
+		#	next;
+		#}
+		#$cmdGrand .= $cmd1."\n".$cmd2."\n";
+		#print "$cmd1\n$cmd2\n";
+		system $cmd1."\n".$cmd2."\n";
+
+		
+		
+		#move into its own for loop
 		#dist mat related
 		my $tmpDMatOth = "$MsaD/${seqTypeOth}_clustalo_percID_${cnt}_".int($seqLength).".txt";
 		my $tmpDMat = "$MsaD/${seqType}_clustalo_percID_${cnt}_".int($seqLength).".txt";
@@ -603,26 +617,35 @@ if ($isAligned){
 			} else { $calcDistMatExtGo = 0;}
 		}
 		
+		
+		
 		#die "@MSAs\n";
 		if (!$useAA4tree){
 			#this part now is all concerned about NT level things..
-			convertMultAli2NT($tmpOutMSA2,$tmpInMSAnt,$tmpOutMSA);
-			my ($tmpOutMSAsyn,$tmpOutMSAnonsyn) = synPosOnly($tmpOutMSA,$tmpOutMSA2,0,$ogrGenes,$calcSyn,$calcNonSyn);
-			#this will not affect 4-fold only etc..
-			my $msaFbin = getProgPaths("MSAfix");
-			$cmd = "$msaFbin -i $tmpOutMSA  -maskLowID -maskBorderGap -rmGapColsGreater ".$maxGapPerCol." -minGoodPosFrac 0.6\n";
-			systemW $cmd;
-			push (@MSAs,$tmpOutMSA);
+			my ($tmpOutMSAsyn,$tmpOutMSAnonsyn) = ($tmpOutMSA, $tmpOutMSA);
+			$tmpOutMSAnonsyn =~ s/\.fna/\.nonsyn\.fna/;$tmpOutMSAsyn =~ s/\.fna/\.syn\.fna/;
+
+			if (!$endFileExists){
+				convertMultAli2NT($tmpOutMSAaa,$tmpInMSAnt,$tmpOutMSA);
+				($tmpOutMSAsyn,$tmpOutMSAnonsyn) = synPosOnly($tmpOutMSA,$tmpOutMSAaa,0,$ogrGenes,$calcSyn,$calcNonSyn);
+				#this will not affect 4-fold only etc..
+				my $msaFbin = getProgPaths("MSAfix");
+				$cmd = "$msaFbin -i $tmpOutMSA  -maskLowID -maskBorderGap -rmGapColsGreater ".$maxGapPerCol." -minGoodPosFrac 0.6\n";
+				systemW $cmd;
+			}
+			push (@MSAs,$finOutMSA);
 			push (@MSAsSyn,$tmpOutMSAsyn) if ($tmpOutMSAsyn ne "");
 			push (@MSAsNonSyn,$tmpOutMSAnonsyn) if ($tmpOutMSAnonsyn ne "");
 			#die "@MSAs\n";
 		} else {
-			push (@MSA_AA,$tmpOutMSA2);
+			push (@MSA_AA,$finOutMSAaa);
 		}
-		system "rm -f $tmpInMSA $tmpInMSAnt";# $tmpOutMSA2";
-		push (@MSrm,$tmpOutMSA2,$tmpOutMSA);
+		#system "rm -f $tmpInMSA $tmpInMSAnt";# $tmpOutMSAaa";
+		unlink  $tmpInMSA; unlink $tmpInMSAnt;
+		push (@MSrm,$finOutMSAaa,$finOutMSA);
 		#die "$MSrm[1]\n";
 		print "$cnt "; 
+		system "mv $tmpOutMSAaa $finOutMSAaa; mv $tmpOutMSA $finOutMSA" unless (fileGZs($finOutMSAaa) && fileGZs($finOutMSA));
 	}
 	
 	my $mergPIDtag = "_merge";
@@ -1037,7 +1060,7 @@ sub singleGeneMSAprocess($){
 	print "No gene categories given, assumming 1 gene / species in input\n";
 	my $tmpInMSA = $aaFna;
 	#my $tmpInMSAnt = $fnFna;
-	my $tmpOutMSA2 = "$tmpD/outMSA.faa";
+	my $tmpOutMSAaa = "$tmpD/outMSA.faa";
 	#my $tmpOutMSAsyn = $multAliSyn;#"$tmpD/outMSA.syn.fna";
 	#my $tmpOutMSAnonsyn = $multAliNonSyn;
 	
@@ -1059,10 +1082,10 @@ sub singleGeneMSAprocess($){
 	}
 	if ($numFas <= 1){print "Not enough Sequences\n"; exit(0);}
 	if ($isAligned){
-		system "cp $inFasta $tmpOutMSA2";
+		system "cp $inFasta $tmpOutMSAaa";
 	} else{
 		#MSA calculation
-		$tmpOutMSA2 = MSA($inFasta,$tmpOutMSA2,$ncore,$clustalUse,$continue,$numFas);
+		$tmpOutMSAaa = MSA($inFasta,$tmpOutMSAaa,$ncore,$clustalUse,$numFas);
 	}
 
 	if ($calcDistMat){
@@ -1075,16 +1098,16 @@ sub singleGeneMSAprocess($){
 	}
 
 	if ($tmpInMSA ne "" && !$useAA4tree){
-		convertMultAli2NT($tmpOutMSA2,$fnFna,$multAli);
+		convertMultAli2NT($tmpOutMSAaa,$fnFna,$multAli);
 		my $msaFbin = getProgPaths("MSAfix");
 		$cmd = "$msaFbin -i $multAli  -maskLowID -maskBorderGap -rmGapColsGreater ".$maxGapPerCol." -minGoodPosFrac 0.6\n";
 		systemW $cmd;
-		($multAliSyn, $multAliNonSyn) = synPosOnly($multAli,$tmpOutMSA2,0,"",$calcSyn,$calcNonSyn);
+		($multAliSyn, $multAliNonSyn) = synPosOnly($multAli,$tmpOutMSAaa,0,"",$calcSyn,$calcNonSyn);
 
-		#system "rm $tmpInMSA $fnFna $tmpOutMSA2";
-		system "rm -f $tmpOutMSA2";
+		#system "rm $tmpInMSA $fnFna $tmpOutMSAaa";
+		system "rm -f $tmpOutMSAaa";
 	} else {
-		system "mv $tmpOutMSA2 $multAli";
+		system "mv $tmpOutMSAaa $multAli";
 	}
 	#$multAli = $tmpOutMSA; $multAliSyn = $tmpOutMSAsyn;
 	
@@ -1599,7 +1622,9 @@ sub convertMultAli2NT($ $ $){
 	if ($tmpMSA){$cmd .= "rm -f $inMSA;mv $outMSA $inMSA;\n";}
 	#print $cmd;
 	#die "$cmd\n";
-	die "Can't execute $cmd\n" if (system $cmd);
+	if (system $cmd){
+		die "Can't execute $cmd\n" ;
+	}
 }
 
 sub synPosOnlyAA($ $){#only leaves "constant" AA positions in MSA file.. 
