@@ -1169,7 +1169,7 @@ sub geneCatFlow($ $ $ $ ){
 		#is a single core script, should be treated and submitted differently from gene cat script 
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
 		
-		my ($dep,$qcmd) = qsubSystem($qsubDir."MGS.sh",$cmd,1,int($idxFileSize*12+15)."G","MGSgc",$CANdep.";".$depExtr,"",1,[],$QSBoptHR); $cmd="";
+		my ($dep,$qcmd) = qsubSystem($qsubDir."MGS.sh",$cmd,1,int($idxFileSize*10+15)."G","MGSgc",$CANdep.";".$depExtr,"",1,[],$QSBoptHR); $cmd="";
 		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 		$QSBoptHR->{useLongQueue} = 0;
 

@@ -51,7 +51,6 @@ sub replaceLowQualMGS4MAG;
 
 #my $metab2Bin = getProgPaths("metabat2");
 
-my $canBin = getProgPaths("canopy");
 my $rareBin = getProgPaths("rare");
 my $Rpath = getProgPaths("Rpath");
 my $filtDeepCanPost = getProgPaths("filtDeepCan");
@@ -521,7 +520,7 @@ if (0 && !-e "$finalClusters2.matL0.txt"){ #deprecated, use specI based annotati
 	printL $cmd;
 #	systemW $cmd;
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
-	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/MGSabund.sh",$cmd,1,int(200/1)."G","AB1_MGS","","",1,[],\%QSBopt) ;
+	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/MGSabund.sh",$cmd,1,int(100)."G","AB1_MGS","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
 }
 
@@ -549,7 +548,7 @@ unless (-e $ABmgsSton && -e "$outD/Annotation/Abundance/MGS.matL0.txt"){#-e "$GC
 	} else {
 		print "Incomplete lambda FMG assignments.. submitting job\n";
 		my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
-		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS.sh",$cmdSI,1,int(300/1)."G","AB2_MGS","","",1,[],\%QSBopt) ;
+		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS.sh",$cmdSI,1,int(200/1)."G","AB2_MGS","","",1,[],\%QSBopt) ;
 		$QSBopt{tmpSpace} =$tmpSHDD;
 	}
 }
@@ -1439,6 +1438,7 @@ sub createDeepCorrM{
 	}
 	return if (-e $CorrM);
 	system "rm -f $CorrE $CorrS" if ($rewrDeepCan );
+	my $canBin = getProgPaths("canopy");
 	my $canDefOpt = "$canBin -i $GCd/Matrix.mat.scaled.gz   --referenceMB2 $guid ";
 	$canDefOpt .= "--maxMB2genes 1000 --dont_use_mmap -n $canCore -b --stop_criteria 0 --filter_max_top3_sample_contribution 1 ";
 	$canDefOpt .= " --cag_filter_min_sample_obs 2 --dont_create_progress_stat_file "; #--redundant_guides

@@ -91,6 +91,7 @@ my @subsetMGS=(); my $subsMGSstr="";
 my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
 my $phyloProg = 1; # #1=iqtree-fast, 2=veryfasttree, 3=fasttree
 my $GenesPerSpecies = 0.2; #was previously 0.1.. maybe too low?
+my $GeneLengthMin = 0.5;
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
@@ -178,6 +179,7 @@ GetOptions(
 	
 	#transferred to buildTRee script..
 	"GenesPerSpecies=f" => \$GenesPerSpecies,
+	"GeneLengthMin=f" => \$GeneLengthMin,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=iqtree-fast, 2=veryfasttree
 	"rmMSA=i"        => \$rmMSA, #remove MSA, to save diskspace
@@ -466,7 +468,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $treeFlag = "-runIQtree 1 "; 
 	if ($phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}if ($phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
 	my $Tcmd= "$bts -fna $FNAtf -aa $FAAtf -smplSep '\\$SaSe' -cats $CATtf -outD $outD2  $treeFlag -cores $numCoreL  "; 
-	$Tcmd .= "-AAtree 0 -bootstrap 0 -NTfiltCount 400 -NTfilt 0.07 -NTfiltPerGene 0.5 -GenesPerSpecies $GenesPerSpecies -runRaxMLng 0 -minOverlapMSA 2 ";
+	$Tcmd .= "-AAtree 0 -bootstrap 0 -NTfiltCount 400 -NTfilt 0.07 -NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies -runRaxMLng 0 -minOverlapMSA 2 ";
 	$Tcmd .= "-subsetSmpls $subsSmpl -fracMaxGenes90pct 0.7 "; #concentrate on almost complete gene groups.. can yield more samples overall and speeds up calc..
 	$Tcmd .= "-rmMSA $rmMSA -gzInput 1 "; #save more diskspace..
 	$Tcmd .= "-SynTree 0 -NonSynTree 0 -MSAprogram $MSAprog -continue $contPhylo -AutoModel 0 -iqFast 1 -superTree $useSuperTree ";
@@ -994,7 +996,7 @@ sub prepRun{
 		print "familyVar=$familyVar\n" unless ($familyVar eq "");
 		
 		print "groupStabilityVars=$groupStabilityVars\n" unless ($groupStabilityVars eq "");
-		print "MSAaligner: $MSAprog, GenesPerSpecies: $GenesPerSpecies\n";
+		print "MSAaligner: $MSAprog, GenesPerSpecies: $GenesPerSpecies, GeneLengthMin: $GeneLengthMin\n";
 		
 		
 		if ($takeAll){print "**************** Take all genes MGS mode\n";}

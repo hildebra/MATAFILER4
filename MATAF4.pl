@@ -944,7 +944,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			my $geneMedTmpFile = $coveragePerCtg; $geneMedTmpFile =~ s/percontig.gz$/median.pergene/;
 			my $tmpMapCovGZ = "$finalMapDir/$SmplName-smd.bam.coverage.gz";
 			system "mkdir -p $ContigStatsDir" unless (-d $ContigStatsDir);
-			system "mkdir -p $finalMapDir" unless (-d $ContigStatsDir);
+			system "mkdir -p $finalMapDir" unless (-d $finalMapDir);
 			system "mkdir -p $curOutDir" unless (-d $curOutDir); $coveragePerCtg =~ s/\.gz$//;
 			system "touch $tmpMapCovGZ $coveragePerCtg $geneCovTmpFile $geneCntTmpFile $geneMedTmpFile $curOutDir/SMPL.empty";
 		} else {
@@ -1017,7 +1017,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			|| (!$ePreAssmblPck && $ePreAssmbly && !$postPreAssmblGo && !$efinAssLoc )  )
 	){ #last sample (assembly) should not map while other maps are still running..
 		print "next due to waiting for preassemblies";
-		#print "$ePreAssmblPck && $ePreAssmbly && !$postPreAssmblGo && !$efinAssLoc \n";
+		print "$ePreAssmblPck && $ePreAssmbly && !$postPreAssmblGo && !$efinAssLoc \n";
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); loop2C_check($cAssGrp,\@sampleDeps); next;
 	}
 
@@ -3162,6 +3162,10 @@ sub movePreAssmData{
 sub prepPreAssmbl{
 	my ($metagD, $mvD,$mapD, $tmpD , $CSdir, $curSmpl, $cAssGrp, $finAssLoc, $efinAssLoc,$finalCommAssDir) = @_;
 	#die "$mvD\n";
+	
+	$AsGrps{$cAssGrp}{CntPreAss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAss}));
+	#print "precnt: $AsGrps{$cAssGrp}{CntPreAss}\n";
+
 	my $ePreAssmbly = 0; $ePreAssmbly = 1 if (-s $finAssLoc && -e "$finalCommAssDir/$STOpreAssmblDone");
 	#die "$ePreAssmbly\n";
 	my $ePreAssmblPck = 0; if (-s $finAssLoc && -e "$mvD/moved.sto") {$ePreAssmbly=1;$ePreAssmblPck = 1;}
@@ -3179,15 +3183,16 @@ sub prepPreAssmbl{
 		if ((!$eCOVmv && !$eCOV) || !$ePreAssmbly){
 			#print "preAssmbl: nothing done yet.. \n$mvD\n$metagD\n";
 			#die;
+			$AsGrps{$cAssGrp}{CntPreAssMiss} ++ ; #needs to be counted as "existing"
 			return ($ePreAssmbly,$doPreAssmFlag, 0, $ePreAssmblPck );
 		}
 	} else {
 		#die;
+		#print "out3\n";
 		return (0,0,0,0); 
 	}
 	#die "$mvD\n";
 	#my $eCOV = 0; $eCOV =1 if ( -e "$CSdir/Coverage.percontig");
-	$AsGrps{$cAssGrp}{CntPreAss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAss}));
 	
 	
 	if ((!$ePreAssmblPck || $eCOV) && -e "$metagD/$STOpreAssmblDone" ){
@@ -3205,7 +3210,9 @@ sub prepPreAssmbl{
 	}
 	my $PostAssemblyGo = 0;
 	#print "UUU $doPreAssmFlag\n";
-	$PostAssemblyGo = 1 if (!$doPreAssmFlag && ($AsGrps{$cAssGrp}{CntPreAss} >= $AsGrps{$cAssGrp}{CntAimAss}) ); #has already seen enough complete preAssmblies
+	my $finJobs = ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssMiss});
+	#print "FIN: $finJobs\n";
+	$PostAssemblyGo = 1 if (!$doPreAssmFlag && ( $finJobs >= $AsGrps{$cAssGrp}{CntAimAss}) ); #has already seen enough complete preAssmblies
 	$doPreAssmFlag = 1 if (!$PostAssemblyGo); 
 	#print "-e $CSdir/Coverage.percontig   $metagD/$STOpreAssmblDone\n" ;
 	#print "preAssm:  $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} >= $AsGrps{$cAssGrp}{CntAimAss} :: $ePreAssmblPck $PostAssemblyGo\n";
@@ -4985,10 +4992,10 @@ sub announce_MGTK{
 #	print "888       888 d88P     888     888  d88P     888 888        8888888 88888888 8888888888 888   T88b \n";
 
 	print "/------------------------------------------------------------------------\\\n";
-#	print "|  _______ _______ _______ _______ _______ _____        _______  ______  |\n";
+	print "|  _______ _______ _______ _______ _______ _____        _______  ______  |\n";
 	print "|  |  |  | |_____|    |    |_____| |______   |   |      |______ |_____/  |\n";
 	print "|  |  |  | |     |    |    |     | |       __|__ |_____ |______ |    \\_  |\n";
-#	print "|                                                                        |\n";
+	print "|                                                                        |\n";
 	print "\\------------------------------------------------------------------------/\n";
 #	print "/--------------------------------------------\\\n";
 #	print "|  ███╗   ███╗ ██████╗    ████████╗██╗  ██╗  |\n";
