@@ -379,10 +379,15 @@ if ($isAligned){
 			die "can't find AA seq $seq\n" if ($aaFna ne "" && !exists ($FAA{$seq}));
 			die "can't find fna seq $seq\n" if (!exists ($FNA{$seq}) && !$useAA4tree);
 			#print "$MFAA{$curK}\n";			#my $ss = $FAA{$seq}; 			#filter per sequence 
-			my $num1;
-			#$num1 = $FAA{$seq} =~ tr/[\-Xx]//;
-			$num1 = ($FNA{$seq} =~ tr/[\-Nn]// ) ;
-			my $geneL = (length( $FNA{$seq})-$num1);#AA length
+			my $geneL;
+			if ($useAA4tree || ! keys(%FNA)){
+				my $num1 = $FAA{$seq} =~ tr/[\-Xx]//;
+				$geneL = (length( $FAA{$seq})-$num1);
+			} else{
+				my $num1 = ($FNA{$seq} =~ tr/[\-Nn]// ) ;
+				$geneL = (length( $FNA{$seq})-$num1);
+			}
+			#AA length
 			$charCnts{$sp}{$seq} = $geneL;
 			push(@geneLs, $geneL);
 		}

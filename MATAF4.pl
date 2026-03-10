@@ -587,6 +587,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#DELETION SECTION
 	#redo run - or parts thereof	
 		
+	if ($MFopt{rewriteGenePred}){
+		print "Deleting gene Predictions and dependent files..\n";
+		system "rm -rf $finalCommAssDir/genePred" if (-d "$finalCommAssDir/genePred");
+		system "rm -rf $ContigStatsDir/*pergene* $ContigStatsDir/GeneStats.tx*";
+	}
 	if ($MFconfig{OKtoRWassGrps} && ($rewrite || $locRewrite)){
 		print "Deleting previous results.. rerun MATAFILER for sample\n";
 		system ("rm -r -f $assDir $finalCommAssDir");
@@ -682,6 +687,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#DEBUG to gzip outputs..
 	if ($MFopt{genePredGZenforce} && $boolGenePredOK && -e "$finalCommAssDir/genePred/genes.gff"){$boolGenePredOK =0;}
 	#die "$boolGenePredOK\n$finalCommAssDir\n";
+
 	
 	#central flag that decides if an assembly is done
 	my $boolAssemblyOK=0;
@@ -1168,7 +1174,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		die "Can't do assembly and pseudoassembly on the same sample!\n" if ($pseudAssFlag || $MFopt{pseudoAssembly});
 		#print "preAsmChk: $ePreAssmbly, $ePreAssmblPck, $doPreAssmFlag, $postPreAssmblGo\n";
 		#die;
-		metagAssemblyRun( $cAssGrp,$cleanSeqSetHR,"$nodeSpTmpD/ass",$metagAssDir ,$shortAssembly, $SmplNameX,$scaffoldFlag,$metaGscaffDir,
+		metagAssemblyRun( $cAssGrp,$cleanSeqSetHR,"$nodeSpTmpD/ass",$metagAssDir ,$geneDir, $shortAssembly, $SmplNameX,$scaffoldFlag,$metaGscaffDir,
 					$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo);
 		push(@{$AsGrps{$cAssGrp}{AssCopies}}, $assDir."/metag/*",$finalCommAssDir);
 
@@ -1180,7 +1186,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		buildAssemblyMapIdx($finAssLoc, $cAssGrp, $mapAssFlag,$mapSuppAssFlag,$SmplName);
 	}
 	#die "$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) \n";
-	if (!$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) ){   # gene predictions on assembly
+	if (!$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) ){   # gene predictions on assembly, assemblies already do exist
 		$metaGassembly = $finAssLoc; #print "No Assembly routines required\n" if ($MFopt{DoAssembly}==0);
 		#die "!$boolGenePredOK && $AssemblyGo \n";
 		if (!$boolGenePredOK && $AssemblyGo ){
@@ -7186,7 +7192,7 @@ sub megahitAssembly{
 
 
 sub metagAssemblyRun{
-	my ( $cAssGrp,$cleanSeqSetHR,$nodeTmp,$metagAssDir ,$shortAssembly, $SmplNameX,$scaffoldFlag,$metaGscaffDir,
+	my ( $cAssGrp,$cleanSeqSetHR,$nodeTmp,$metagAssDir, $geneDir,$shortAssembly, $SmplNameX,$scaffoldFlag,$metaGscaffDir,
 				$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postAssmblGo) = @_;
 				#metagAssembly( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$shortAssembly, $SmplNameX,$scaffoldFlag,
 				#	$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo);
@@ -7210,7 +7216,7 @@ sub metagAssemblyRun{
 				"preAssmbl", $SmplNameX,$hostFilter,$scaffoldFlag) if (!$ePreAssmbly);
 		} elsif ($doPreAssmFlag == 0 && $postAssmblGo) {
 			print "Final combining long assembly step: ";
-			system "rm -fr $metagAssDir\n"; #just clean up assembly dir..
+			system "rm -fr $metagAssDir $geneDir\n"; #just clean up assembly dir..
 			#die;
 			$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$metagAssDir,
 				"hybridmMDBG",$SmplNameX,1,$LasseP) ; #$metaGpreAssmblDir, 
@@ -7607,6 +7613,7 @@ sub setDefaultMFconfig{
 	$MFopt{DoEukGenePred} = 0;
 	$MFopt{GenePredGZ} = 1; #gzip output to reduce storage usage
 	$MFopt{genePredGZenforce}=1; #recheck and rezip if not already done?
+	$MFopt{rewriteGenePred} = 0; #rewrite gene predictions and the few stats related?
 	
 	
 	#MFconfig configuration with defaults
@@ -7777,6 +7784,7 @@ sub getCmdLineOptions{
 		"predictEukGenes=i" => \$MFopt{DoEukGenePred},#severely limits total predicted gene amount (~25% of total genes)
 		"kmerPerGene=i" => \$MFopt{kmerPerGene}, #calculate kmer frequencies for each gene instead of per scaffold
 		"genePredGZenforce=i" => \$MFopt{genePredGZenforce},
+		"rewriteGenePred=i"   => \$MFopt{rewriteGenePred},
 	#mapping
 		"mapper=i" => \$MFopt{MapperProg}, ##1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long) 
 		"mapUnmapped=i" => \$MFopt{useUnmapped},
