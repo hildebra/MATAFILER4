@@ -9,7 +9,7 @@ This section lists a number of typically occurring problems that are usually not
 #### .mfc files
 
 - **Q**: What is a \*.mfc file?
-**A**: mfc stands for 'MATAFILER control file' and refers to the original name of MG-TK: MATAFILER. .mfc files are used to store the call to MG-TK, but could as well be named \*.sh or \*.something
+**A**: mfc stands for 'MATAFILER4 control file', reflecting the pipeline's name. .mfc files are used to store the call to MATAFILER4, but could as well be named \*.sh or \*.something
 
 #### Assembly too large??
 
@@ -26,15 +26,15 @@ This section lists a number of typically occurring problems that are usually not
 
 **Problem:** Usually some jobs run but some jobs are hanging out in queue and never finish. In that case we can use `scontrol show job [ID]` to see which are the jobs and dependencies. 
 
-**Solution:** If the dependencies are never fulfilled then we can delete all those jobs using `scancel`, after that rerun MG-TK. What MG-TK does, is to pick up where it left of - the pipeline is designed in a way that it creates `stone` files for finished processes so the pipeline knows where to continue. Sometimes files are also still in scratch dir and not copied to final dir. You just need to re-run command.
+**Solution:** If the dependencies are never fulfilled then we can delete all those jobs using `scancel`, after that rerun MATAFILER4. What MATAFILER4 does, is to pick up where it left off - the pipeline is designed in a way that it creates `stone` files for finished processes so the pipeline knows where to continue. Sometimes files are also still in scratch dir and not copied to final dir. You just need to re-run command.
 
-You can also delete **all** jobs where the dependency failed, saving you a lot of time (command: `squeue -u $USER | grep 'dencyNev' | cut -f11 -d' ' | xargs  -t -i scancel {}`) or ask MG-TK to do this in case the max number of jobs is reached via the flag `-killDepNever 1`.
+You can also delete **all** jobs where the dependency failed, saving you a lot of time (command: `squeue -u $USER | grep 'dencyNev' | cut -f11 -d' ' | xargs  -t -i scancel {}`) or ask MATAFILER4 to do this in case the max number of jobs is reached via the flag `-killDepNever 1`.
 
 #### local tempdir on node not writable
 
-**Problem:** Sometimes you will encounter an error where a job starts for ~1 sec on a node and immediately aborts, the error log (.etxt) showing something about not being able to create/write to a local dir (e.g. `/nbi/local/tmp/12312421/MG-TK`). This is usually the local SSD space not being available (for various reasons not related to MG-TK). Such nodes act as kind of 'honeypots', accepting a lot of jobs and killing them immediately. This can seriously harm your performance in getting jobs done.
+**Problem:** Sometimes you will encounter an error where a job starts for ~1 sec on a node and immediately aborts, the error log (.etxt) showing something about not being able to create/write to a local dir (e.g. `/nbi/local/tmp/12312421/MF4`). This is usually the local SSD space not being available (for various reasons not related to MATAFILER4). Such nodes act as kind of 'honeypots', accepting a lot of jobs and killing them immediately. This can seriously harm your performance in getting jobs done.
 
-**Solution:**  Therefore it is important to a) let you local sysadming know that the SSD is no longer available on said node (node name is always printed as first line in the MG-TK .otxt logs for a job) and b) you can exclude this node from MG-TK using the `-excludeNodes [nodename1,nodename2]` MG-TK flag.
+**Solution:**  Therefore it is important to a) let your local sysadmin know that the SSD is no longer available on said node (node name is always printed as first line in the MATAFILER4 .otxt logs for a job) and b) you can exclude this node from MATAFILER4 using the `-excludeNodes [nodename1,nodename2]` flag.
 
 #### Recursion error while running contig stats
 
@@ -62,14 +62,14 @@ You can also delete **all** jobs where the dependency failed, saving you a lot o
 
 #### I want to get MAGs of a specific MGS?
 
-**Problem:** I want to extract all MAGs from an MG-TK output that are of a particular MGS (metagenomic species). 
+**Problem:** I want to extract all MAGs from a MATAFILER4 output that are of a particular MGS (metagenomic species). 
 
-**Solution:** We have an accociated repository named [MAGRec-TK](https://github.com/huminfo8/magrec-tk/tree/main) which you can install and run on the MG-TK output. 
+**Solution:** We have an accociated repository named [MAGRec-TK](https://github.com/huminfo8/magrec-tk/tree/main) which you can install and run on the MATAFILER4 output. 
 
 #### Unrecognised CONDcmd (or other similar error during installation)
 
-**Problem:** On startup there are errors, originating in the MG-TK config file (for example, CONDcmd not recognised). 
+**Problem:** On startup there are errors, originating in the MATAFILER4 config file (for example, CONDcmd not recognised). 
 
-**Solution:** MG-TK map and config files are very strictly tab delimited. The whitespace delimiting fields (in the mapping file, or the MG-TK config file) must be a tab, any other kind of whitespace character will cause an error. In vim you can view whitespace using the command `:set list`, and tab appears as "^I". 
+**Solution:** MATAFILER4 map and config files are very strictly tab delimited. The whitespace delimiting fields (in the mapping file, or the MATAFILER4 config file) must be a tab, any other kind of whitespace character will cause an error. In vim you can view whitespace using the command `:set list`, and tab appears as "^I".
 
 </details>
