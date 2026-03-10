@@ -3,15 +3,15 @@
 
 
 
-# MG-TK manual
+# MATAFILER4 manual
 
-MG-TK uses three primary phases to analyse metagenomes: 
-	1. initial raw sequence processing via MG-TK.pl
+MATAFILER4 uses three primary phases to analyse metagenomes:
+	1. initial raw sequence processing via MATAF4.pl
 	2. building a genecatalog via secScripts/geneCat.pl
 	3. reconstructing species from MAGs and inferring intraspecific phylogenies via secScripts/MGS.pl
 	4. (building phylogenies via secScripts/phylo/buildTree5.pl)
 
-### MG-TK.pl flags
+### MATAF4.pl flags
 
 <details>
   <summary>Expand section</summary>
@@ -170,7 +170,7 @@ MG-TK uses three primary phases to analyse metagenomes:
 	-upload2EBI [??$PATH]				copy human read removed raw files to this dir, named after sample
 
 # MODE: map2tar (map2DB / map2GC) mapping raw reads to reference databases (like genomes, functional DBs etc`)
-# this mode is activated by calling ./MG-TK.pl map2tar -ref somthing.fa [..]
+# this mode is activated by calling ./MATAF4.pl map2tar -ref somthing.fa [..]
 	-ref				reference database (.fa format)
 	-mapUnmapped [0|1]			1: map unmapped reads (-saveReadsNotMap2Assembly) onto reference database
 	-decoyMapping [0|1]				1: "Decoy mapping": map against reference genome AND against assembly of metagenome (drawing obvious better hits to metagenome, the "decoy") (Default: 1)
@@ -220,7 +220,7 @@ Comment: usually ‘0’ means switching a mode off, and ‘1’ means switching
 	"cores3=i" 			Num cores for small jobs that really don't require that much power.. 
 	"mem=i" 				Max mem
 	"mem3=i" => 			Max mem for smaller jobs
-	"oldStyleFolders=i"		Deprecated. only used for results calculated with an older MG-TK version
+	"oldStyleFolders=i"		Deprecated. only used for results calculated with an older MATAFILER version
 	"sampleBatches=i"		How many batches to use for initial accumulation of genes? (200-500 samples per batch recommended). Default: Auto
 
 #Binning/MGS related
@@ -358,7 +358,7 @@ Comment: usually ‘0’ means switching a mode off, and ‘1’ means switching
 
 ### General output structure
 
-In MG-TK, output can be either in 
+In MATAFILER4, output can be either in
 
 a) the output dir defined in the .map file. These are usually 1) assemblies, and MAGs, gene predictions, abundances of these 2) SNP callings (==corrected assemblies for practical purposes) 3) assembly independent methods such as riboFinder, metaPhlan, mOTUs, mappings of reads against assemblies/reference databases, 4) outputs from map2tar mode.
 

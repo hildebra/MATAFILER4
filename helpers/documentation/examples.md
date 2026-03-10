@@ -3,25 +3,25 @@
 ## Examples
 
   
-### MG-TK example dataset
+### MATAFILER4 example dataset
 
-We have prepared an example dataset that can be run directly after installing MG-TK and configuring it (see above). This example will 1) download public short and long read metagenomes 2) assemble short reads and 3) assemble short+long reads (hybrid assembly).
+We have prepared an example dataset that can be run directly after installing MATAFILER4 and configuring it (see above). This example will 1) download public short and long read metagenomes 2) assemble short reads and 3) assemble short+long reads (hybrid assembly).
 
-Please go to the directory mg-tk/examples/
+Please go to the directory MATAFILER4/examples/
 
 To download all required data, run first 
 ```{sh}
 bash 0.getExmplData.sh
 ```
 
-After this is finished (check in the newly created mg-tk/examples/data/ dir for ~1.3Gb of data), you can either run 1.runMGTK_illumina.mfc (short read metagenomics) or 2.runMGTK_hybrid.mfc (short+long reads). Note that these are non-seniscal examples, i.e. the short and long reads are from completely independent experiments, don't expect interpretable results, this is purely to check if the technical process can run to completion.
+After this is finished (check in the newly created MATAFILER4/examples/data/ dir for ~1.3Gb of data), you can either run `1.runMF4_illumina.mfc` (short read metagenomics) or `2.runMF4_hybrid.mfc` (short+long reads). Note that these are non-sensical examples, i.e. the short and long reads are from completely independent experiments, don't expect interpretable results, this is purely to check if the technical process can run to completion.
 
-How do you know everything finished as it should? Wait until all submitted jobs have finished, run the 1. or 2. script again until it reports that nothing is left to do. (Note:kill eventual "DependencyNeverSatisified" jobs for 1-2 times, if persists there might be a problem with runnning certain programs, where you need to start checking error logs, see Q&A below). Once everything is finished, MG-TK's postprocessing should complete and you will be able to find metagStats.txt and metagStatsReport.html - browse these files to get an overview of the data. 
+How do you know everything finished as it should? Wait until all submitted jobs have finished, run the 1. or 2. script again until it reports that nothing is left to do. (Note:kill eventual "DependencyNeverSatisified" jobs for 1-2 times, if persists there might be a problem with runnning certain programs, where you need to start checking error logs, see Q&A below). Once everything is finished, MATAFILER4's postprocessing should complete and you will be able to find metagStats.txt and metagStatsReport.html - browse these files to get an overview of the data. 
 
-In the next section we will give examples on how to create your own MG-TK runs.
+In the next section we will give examples on how to create your own MATAFILER4 runs.
   
   
-### MG-TK metagenomic assembly and gene catalog
+### MATAFILER4 metagenomic assembly and gene catalog
 
 The figure below shows example of steps involved in the assembly-dependent mode. White rectangles indicate inputs and outputs, grey boxes name each of the steps, and yellow boxes show names of the scripts that are generated and submitted in each step. Blue boxes indicate additional steps that are required for subsequent MGS analysis.
 
@@ -34,7 +34,7 @@ Typically you would use Excel to create the mapping file and copy-paste it later
 
 #### 2. make script with first command `RUN.mfc`
 
-Insert your MG-TK command, a bash and slurm header in RUN.mfc. 
+Insert your MATAFILER4 command, a bash and slurm header in RUN.mfc. 
 
 Example:
 
@@ -42,18 +42,18 @@ Example:
 #!/bin/bash
 #SBATCH -J SUB_MF
 #SBATCH -N 1 --cpus-per-task=1 --mem=10024 --export=ALL
-#SBATCH -o [currentDir]/run_mgtk_mhit.mfc.otxt
-#SBATCH -e [currentDir]/run_mgtk_mhit.mfc.etxt
+#SBATCH -o [currentDir]/run_mf4_mhit.mfc.otxt
+#SBATCH -e [currentDir]/run_mf4_mhit.mfc.etxt
 #SBATCH -p "ei-long,qib-long"
 
 set -e
 ulimit -c 0;
 MAP=/path/to/your/mapping/file/FILE.map
-perl $MF3DIR/MG-TK.pl -map $MAP-assembleMG 2 -spadesCores 12 -spadesKmers "25,43,67,87,111,131" -spadesMemory 100 -mapReadsOntoAssembly 1 -kmerPerGene 0 -filterHostRds 1  -filterHostKrak2DB /hpc-home//data/DB/kraken2/hsap/ -mappingMem 5 -profileMOTU2 0  -profileMetaphlan3 1 -Binner 2  -maxConcurrentJobs 600 \
+perl $MF4DIR/MATAF4.pl -map $MAP-assembleMG 2 -spadesCores 12 -spadesKmers "25,43,67,87,111,131" -spadesMemory 100 -mapReadsOntoAssembly 1 -kmerPerGene 0 -filterHostRds 1  -filterHostKrak2DB /hpc-home//data/DB/kraken2/hsap/ -mappingMem 5 -profileMOTU2 0  -profileMetaphlan3 1 -Binner 2  -maxConcurrentJobs 600 \
 -from 0 -to 1 -submit 1 -getAssemblConsSNP 0
 ```
 
-- MG-TK now does
+- MATAFILER4 now does
 
     - read filtering and cleaning
     - read profiling (if set like in the above command)
@@ -69,16 +69,16 @@ perl $MF3DIR/MG-TK.pl -map $MAP-assembleMG 2 -spadesCores 12 -spadesKmers "25,43
 
 - if you want to run strain analyses later, set `-getAssemblConsSNP 1` to calculate consensus SNPs needed for strain analysis
 
-#### 4. Running MG-TK
+#### 4. Running MATAFILER4
 
-- Run with `bash run_mgtk_mhit.sh` --> this will submit a lot of different jobs to the HPC queue
+- Run with `bash run_mf4_mhit.sh` --> this will submit a lot of different jobs to the HPC queue
 
  console output:
 ```
-        This is MG-TK 0.33
+        This is MATAFILER4 0.33
         Using qsubsystem: slurm
         Using qsubsystem: slurm
-        /projects/data/results/mgtk_test1/LOGandSUB/qsub.log
+        /projects/data/results/mf4_test1/LOGandSUB/qsub.log
         Reset range of samples to 40
 
         ======= Mouse11T0 - 0 - M11T0 =======
@@ -91,18 +91,18 @@ perl $MF3DIR/MG-TK.pl -map $MAP-assembleMG 2 -spadesCores 12 -spadesKmers "25,43
         SUB:_CS1
 ```
 
-- more advanced usage: run `sbatch run_mgtk_mhit.sh`. This will submit the job to the cluster queue, and from there the .mfc job will submit more jobs. The output from MG-TK will be stored in `#SBATCH -o [currentDir]/run_mgtk_mhit.mfc.otxt` and `#SBATCH -e [currentDir]/run_mgtk_mhit.mfc.etxt` defined above.
+- more advanced usage: run `sbatch run_mf4_mhit.sh`. This will submit the job to the cluster queue, and from there the .mfc job will submit more jobs. The output from MATAFILER4 will be stored in `#SBATCH -o [currentDir]/run_mf4_mhit.mfc.otxt` and `#SBATCH -e [currentDir]/run_mf4_mhit.mfc.etxt` defined above.
 
 
-#### 5. rerun MG-TK
+#### 5. rerun MATAFILER4
 
-MG-TK is conceptualized to detect automatically if certain steps need to be run again (e.g. because the job crashed or some files from other subjobs were not yet available). Therefore you will usually need to rerun the same MG-TK command several times. **However, before restarting MG-TK make sure that all job submissions from your previous run have completed (or don't start due to job dependecies)!**
+MATAFILER4 is conceptualized to detect automatically if certain steps need to be run again (e.g. because the job crashed or some files from other subjobs were not yet available). Therefore you will usually need to rerun the same MATAFILER4 command several times. **However, before restarting MATAFILER4 make sure that all job submissions from your previous run have completed (or don't start due to job dependecies)!**
 
-- Once MG-TK detects no further jobs to be submitted, it will let you know (check the output of the RUN.mfc command). At this point you can advance to creating a gene catalog. MG-TK will create a `GeneCat.sh` script (detailed in RUN.mfc output). 
+- Once MATAFILER4 detects no further jobs to be submitted, it will let you know (check the output of the RUN.mfc command). At this point you can advance to creating a gene catalog. MATAFILER4 will create a `GeneCat.sh` script (detailed in RUN.mfc output).
 
 #### 6. building a gene catalog by running the `GeneCat.sh` script
 
-- After every sample has successfully passed through the pipeline, MG-TK produces GeneCat_pre.sh script that needs to be adapted:
+- After every sample has successfully passed through the pipeline, MATAFILER4 produces `GeneCat_pre.sh` script that needs to be adapted:
 
 - In the `GeneCat.sh` script you need to specify an output directory, max memory usage and the cores you want to use. After that the script can look like this:
 
@@ -116,7 +116,7 @@ set -e
 ulimit -c 0;
 
 #creates gene catalog in the specified outdir with specified cores, attempting to reuse existing dirs (in case catalog creation failed):
-perl /hpc-home/project/mg-tk/secScripts/geneCat.pl \
+perl $MF4DIR/secScripts/geneCat.pl \
 		-map /ei/projects/data/results/mapping_file.map \
 		-GCd /ei/projects/data/results/genecat \
 		-mem 200 -cores 24 -clusterID 95 -doStrains 0 -continue 1 \
@@ -138,7 +138,7 @@ perl /hpc-home/project/mg-tk/secScripts/geneCat.pl \
 
 
 
-### Assembly-independent MG-TK mode
+### Assembly-independent MATAFILER4 mode
 
 
 This mode is especially helpful if your metagenome is from a highly complex (e.g. Soil) microbial community. In such cases often assembly is not possible, instead metagenomic reads can still be mapped to a reference.
@@ -168,7 +168,7 @@ ulimit -c 0;
 
 MAP= /path/to/dir/mapping_file.map
 
-perl $MF3DIR/MG-TK.pl -map $MAP -inputFQregex1 '.*_1\.f[^\.]*q\.gz$' -inputFQregex2 '.*_2\.f[^\.]*q\.gz$' \
+perl $MF4DIR/MATAF4.pl -map $MAP -inputFQregex1 '.*_1\.f[^\.]*q\.gz$' -inputFQregex2 '.*_2\.f[^\.]*q\.gz$' \
 	-mergeReads 0 \
 	-profileFunct 1 -reParseFunct 0 -reProfileFunct 0 \
 	-diamondDBs KGM,NOG,CZy \
@@ -183,21 +183,21 @@ perl $MF3DIR/MG-TK.pl -map $MAP -inputFQregex1 '.*_1\.f[^\.]*q\.gz$' -inputFQreg
 
 #### 3. run the script `run_independent.mfc`
 
-- Run with `sbatch river_independent.mfc` --> this will submit a lot of different jobs to the HPC queue.
+- Run with `sbatch run_independent.mfc` --> this will submit a lot of different jobs to the HPC queue.
 
-#### 4. rerun MG-TK  
+#### 4. rerun MATAFILER4  
 
 - wait till all current jobs are finished, then rerun `sbatch run_independent.mfc`. This will check all jobs completed, and if so, create the feature abundance tables requested. In the above case these are KEGG, eggNOG and CAZy functional tables, as well as metaphlan3 and miTAG taxonomic tables.
 
 
 ### Hybrid assemblies
 
-With hybrid assemblies we mean metagenomic samples that were sequenced with multiple sequencing technologies, such as ill+ONT, ill+mate pair ill or ill+PB. Currently MF support ill+ONT in a basic form (ONT reads only used to improve assemblies) and a more advanced form for ill+PB. This section is describing the ill+PB mode, as it is more powerful, but also more complicated to use.
+With hybrid assemblies we mean metagenomic samples that were sequenced with multiple sequencing technologies, such as ill+ONT, ill+mate pair ill or ill+PB. Currently MATAFILER4 supports ill+ONT in a basic form (ONT reads only used to improve assemblies) and a more advanced form for ill+PB. This section is describing the ill+PB mode, as it is more powerful, but also more complicated to use.
 
 #### 1. setup ill+PB hybrid mode
 
 Create a .map as usual for the illumina reads. Afterwards, add the following column to the .map: **SupportReads**
-For each samples, where support reads (i.e. the PacBio reads) exist, add them to the **SupportReads** column, by indicating that they are PacBio reads through the prefix **PB:** followed by the path to the **.bam** (PB reads are usually saved in bam format). If you have several .bams for the same sample, these could be comma separated and will be automatically used by MF.
+For each samples, where support reads (i.e. the PacBio reads) exist, add them to the **SupportReads** column, by indicating that they are PacBio reads through the prefix **PB:** followed by the path to the **.bam** (PB reads are usually saved in bam format). If you have several .bams for the same sample, these could be comma separated and will be automatically used by MATAFILER4.
 
 E.g. the map could now look like:
 
@@ -217,22 +217,22 @@ S4qiaS2	SRR8797712			hiSeq		I2		S4zm_R1177-S0001	0
 S4qiaS3	SRR8797712			hiSeq		I3		S4zm_R1177-S0001	0
 
 ```
-(note that this map shows a mix of assembl grps, of samples with and without support reads. Further note that the tag **#WARNING	OFF** has to be used, since in this test case samples are being reused - something that would normally trigger MF to stop the run.)
+(note that this map shows a mix of assembl grps, of samples with and without support reads. Further note that the tag **#WARNING	OFF** has to be used, since in this test case samples are being reused - something that would normally trigger MATAFILER4 to stop the run.)
 
-#### 2. setup MG-TK run
+#### 2. setup MATAFILER4 run
 
-Setup your MG-TK run like you would normally setup an assembly dependent metagenomic analysis (see examples above). However, these flags should be defined:
+Setup your MATAFILER4 run like you would normally setup an assembly dependent metagenomic analysis (see examples above). However, these flags should be defined:
  - `-mapSupportReadsOntoAssembly 1`: setting this to `1` will lead to support reads (PB reads in this case) being mapped onto the assembly. A coverage profile is created that is then **separately** used from the illumina coverage profile in the binning step (which in our experience can significantly boost the recovery of MAGs).
  - `-mapper -1`: set the choice of mapper to the default (`-1`) which means that a mapper will be automatically selected. You could set this to e.g. **1** to do all mapping with bowtie2, or **3** to use minimap2 everywhere, but **-1** is the recommended choice as this will use bowtie2 for ill reads and minimap2 for PB reads.
- - `-assembleMG 5`: this flag is crucial and tells MF to conduct a hybrid assembly, using **megahit for illumina** and **metaMDBG for PB** reads.
+ - `-assembleMG 5`: this flag is crucial and tells MATAFILER4 to conduct a hybrid assembly, using **megahit for illumina** and **metaMDBG for PB** reads.
  - `-inputReadLengthSuppl 8000`: not crucial, but good to have. Here we estimated that our support PacBio reads are on average 8000 bp long.
  
-Your example MG-TK call could now look like:
+Your example MATAFILER4 call could now look like:
  
 ```{sh}
 MAP=/path/to/map/PB_hybrid.map
 
-perl $MGTKDIR/MG-TK.pl -map $MAP -inputFQregexSingle '.*\.fastq\.gz' -inputFQregex1 '(.*_R1_001\.fastq\.gz)|(.*[_\.]1\.f[^\.]*q\.gz)$' -inputFQregex2 '(.*_R2_001\.fastq\.gz)|(.*[_\.]2\.f[^\.]*q\.gz)$' -inputBAMregex '.*\.bam$' \
+perl $MF4DIR/MATAF4.pl -map $MAP -inputFQregexSingle '.*\.fastq\.gz' -inputFQregex1 '(.*_R1_001\.fastq\.gz)|(.*[_\.]1\.f[^\.]*q\.gz)$' -inputFQregex2 '(.*_R2_001\.fastq\.gz)|(.*[_\.]2\.f[^\.]*q\.gz)$' -inputBAMregex '.*\.bam$' \
 -assembleMG 5 -spadesCores 12 -spadesKmers "25,43,67,87,111,127" -spadesMemory 200 -MetaBat2 2 \
 -mapper -1 -mapSupportReadsOntoAssembly 1 \
 -filterHostKrak2DB /path/to/kraken2/hsap/ -filterHostRds 1 \
@@ -241,10 +241,10 @@ perl $MGTKDIR/MG-TK.pl -map $MAP -inputFQregexSingle '.*\.fastq\.gz' -inputFQreg
 -from 0 -to 1
 ```
 
-#### 3. running MG-TK in hybrid mode
+#### 3. running MATAFILER4 in hybrid mode
 
-We opted for a bit of a complicated processing of hybrid assemblies, that in the end allows for both usage of existing paths in MG-TK as well as supporting more complicated (assemblyGrps) sample setup.
-What this means for you as the user is simply that you need to run the above MG-TK command several times. In the first iteration this will trigger the megahit illumina-assembly, in the second iteration remaining samples in assemblyGrp are mapped onto this illumina-assembly, in the third iteration the hybrid assembly with metaMDBG is started, fourth iteration will map remaining samples in assemblyGrp onto hybrid-assembly, fifth iteration will then finally starting consensus SNP calling and binning. Remember to wait between iterations until all current jobs have finished (though sample locks should normally prevent double submissions).
+We opted for a bit of a complicated processing of hybrid assemblies, that in the end allows for both usage of existing paths in MATAFILER4 as well as supporting more complicated (assemblyGrps) sample setup.
+What this means for you as the user is simply that you need to run the above MATAFILER4 command several times. In the first iteration this will trigger the megahit illumina-assembly, in the second iteration remaining samples in assemblyGrp are mapped onto this illumina-assembly, in the third iteration the hybrid assembly with metaMDBG is started, fourth iteration will map remaining samples in assemblyGrp onto hybrid-assembly, fifth iteration will then finally starting consensus SNP calling and binning. Remember to wait between iterations until all current jobs have finished (though sample locks should normally prevent double submissions).
 
 _tldr; this mode requires several iterations to complete_ 
 
