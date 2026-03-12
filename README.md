@@ -1,4 +1,4 @@
-<p align="center"><img src="/../dev/images/mf4-logo.png?raw=true" alt="MATAFILER4" width=500 align="center"></img></p>
+<p align="center"><img src="/../add_logo/helpers/images/matafiler-logo.png?raw=true" alt="MATAFILER4" width=500 align="center"></img></p>
 
 ## Introduction
 
