@@ -269,7 +269,7 @@ my %smplsPerMGS; #stats: MGS is represented in how many different samples?
 my %OCstrH ; my %OFstrH ; my %OAstrH ; my %OLstrH ;
 
 
-if (($dirsNOTPrepped/$#specis > 0.1) || $onlySubmit == 0 
+if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0 
 			|| $subJob){
 	#$PhylosExist=0;
 	
@@ -406,7 +406,7 @@ my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 
 #die;
 #go through every SpecI;
-$cnt=0; my $lcnt=-1; my @jobs; my $Nspecis = $#specis;
+$cnt=0; my $lcnt=-1; my @jobs; my $Nspecis = @specis;
 foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTreeScript on..
 	$lcnt++;
 	if (!$reSubmit && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
@@ -670,7 +670,7 @@ sub addOutgroup2MGS{
 		return(0,0,$OG,0) if (@sspl == 0);
 		$OG = $sspl[0] if (@sspl); my $cntX=-1;
 		my $cntShrCogs=0;
-		while ( defined($OG) && $cntShrCogs < 10 && $cntX < $#sspl){
+		while ( defined($OG) && $cntShrCogs < 10 && $cntX < @sspl){
 			$cntX++; 
 			$OG=$sspl[$cntX];
 			if (!exists($SIgenes_OG{$OG})){
@@ -1230,7 +1230,7 @@ sub evalFileStatus{
 			system "rm -rf $scratchD/outs/$MGS" if (-d "$scratchD/outs/$MGS");
 		}
 	}
-	$PhylosExist = 0 if ($CatFileMiss/$#specis > 0.1); #only activate if more than 10% missing..
+	$PhylosExist = 0 if ($CatFileMiss/@specis > 0.1); #only activate if more than 10% missing..
 
 	print "Output dirs status: \nCatFileFinalMiss: $CatFileMiss, CatFileConvert: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent,  Dir done: $doneDirs, Phylo complete: $PhylosExist \n";
 	#die;

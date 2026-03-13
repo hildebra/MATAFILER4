@@ -518,6 +518,7 @@ if ($isAligned){
 	#die;
 	$cnt=-1; #line counter
 	foreach my $aRef (@linesCats3){#go over each gene category, building MSA for each
+	#----------------- main MSA loop ----------------------
 		$cnt++; my @spl = @{$aRef};
 		if (@spl ==0){print "No categories in cat file line $cnt\n";next;}
 		if ($spl[0] =~ m/^#/){shift @spl;}
@@ -650,7 +651,8 @@ if ($isAligned){
 		push (@MSrm,$finOutMSAaa,$finOutMSA);
 		#die "$MSrm[1]\n";
 		print "$cnt "; 
-		system "mv $tmpOutMSAaa $finOutMSAaa; mv $tmpOutMSA $finOutMSA" unless (fileGZs($finOutMSAaa) && fileGZs($finOutMSA));
+		system "mv $tmpOutMSAaa $finOutMSAaa" if (!fileGZs($finOutMSAaa) && -e $tmpOutMSAaa);
+		system "mv $tmpOutMSA $finOutMSA" if (!fileGZs($finOutMSA) && -e $tmpOutMSA);
 	}
 	
 	my $mergPIDtag = "_merge";

@@ -357,6 +357,8 @@ if ($mapF =~ m/^\??$/){
 		die "input maps seems to have changed, neither\n$mapFInf\nnor\n$mapFOri\nAborting run..\n";
 		#die "Continuing run, but inmap does not seem to match!\nOriginal map: $mapFOri\n-map arg: $mapF\nExiting.. delete gene cat folder before proceeding (or use original map)\n";
 	}
+} elsif (!-e $mapF){
+	die "Could not find supplied map: $mapF\n";
 }
 
 my %map; my %AsGrps; my @samples; my $numSmpls=0;
@@ -1545,6 +1547,7 @@ sub collateGenes(){
 				die "Can;t find valid path for $smpl\n";
 			}
 		} 
+		if (-e "$dir2rd/SMPL.empty"){print "Sample $smpl marked as emtpy\n";next;}
 		my $assGo = 0;
 		my $cAssGrp = $map{$smpl}{AssGroup};
 		$AsGrps{$cAssGrp}{CntAss} ++;	

@@ -77,7 +77,8 @@ sub createConsSNPandSVs;
 
 #------- version history MATAFILER / MG-TK --------
 #.75: 4.3.26: ini MATAFILER4 version
-my $MATFILER_ver = 0.75;
+#4.01: 13.3.26: removing bugs from hybrid assembly detection, switching to 4.x versioning
+my $MATFILER_ver = 4.01;
 
 #----------------- defaults ----------------- 
 
@@ -497,7 +498,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#my $doPreAssmFlag = 0; my $postPreAssmblGo =0 ;
 	my ($ePreAssmbly,$doPreAssmFlag,$postPreAssmblGo,$ePreAssmblPck) = prepPreAssmbl($finalCommAssDir,$metaGpreAssmblDir,$finalMapDir, "$smplTmpDir/preAssmblData/",
 				$ContigStatsDir, $curSmpl, $cAssGrp, $finAssLoc,$efinAssLoc,$finalCommAssDir);#moves files to new locations
-	#die "$ePreAssmbly,$doPreAssmFlag,$postPreAssmblGo,$ePreAssmblPck\n$finalCommAssDir/$STOpreAssmblDone\n$metaGpreAssmblDir/moved.sto\n";
+	#print "$ePreAssmbly,$doPreAssmFlag,$postPreAssmblGo,$ePreAssmblPck\n$finalCommAssDir/$STOpreAssmblDone\n$metaGpreAssmblDir/moved.sto\n";
 	my $eCovAsssembly = 1; $eCovAsssembly = 0 if (!fileGZe( $coveragePerCtg) );
 	$eCovAsssembly = 0 if (!fileGZe( $markerGenesPerCtg) && $AssemblyGo);
 
@@ -507,8 +508,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $eFinMapCovGZ = 0; $eFinMapCovGZ = 1 if (-e $STOcram && -e "$finalMapDir/$SmplName-smd.bam.coverage.gz");#"$finalMapDir/$SmplName-smd.bam.coverage.gz"; 
 	#$MFopt{mapSupport2Assembly}
 	my $locMapSup2Assembly =0; $locMapSup2Assembly =1 if ($MFopt{mapSupport2Assembly} && $map{$curSmpl}{"SupportReads"} ne "");
-	my $eFinSupMapCovGZ = 0; $eFinSupMapCovGZ = 1 if ($locMapSup2Assembly && -e $STOsupCram && -e "$finalMapDir/$SmplName.sup-smd.bam.coverage.gz");
-	#die "$locMapSup2Assembly $eFinSupMapCovGZ  $finalMapDir\n";
+	my $eFinSupMapCovGZ = 0; $eFinSupMapCovGZ = 1 if ($locMapSup2Assembly && -e $STOsupCram && fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage"));
+	#die "$locMapSup2Assembly $eFinSupMapCovGZ  $finalMapDir\n$STOsupCram\n";
 	my $dfinalCommAssDir = 0 ; $dfinalCommAssDir = 1 if (-d $finalCommAssDir);
 	my $eFinalMapDir = 0; $eFinalMapDir = 1 if (-s $STOmapFinal);
 	#upload2EBI 
@@ -530,7 +531,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		print "moving finished assembly to final location\n";
 		#print "$metaGassembly\n";
 		systemW "mkdir -p $finalCommAssDir" unless ($dfinalCommAssDir);
-		systemW "rsync -r  --remove-source-files $metagAssDir/* $finalCommAssDir/";
+		#systemW "rsync -r  --remove-source-files $metagAssDir/* $finalCommAssDir/";
+		systemW "mv $metagAssDir/* $finalCommAssDir/";
 		$efinAssLoc = 1; $emetaGassembly = 0;
 	}
 	
@@ -938,9 +940,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($SmplIsEmtpy && exists($inputFileSizeMB{$curSmpl}) && $inputFileSizeMB{$curSmpl} >= $MFconfig{skipSmallSmplsMB}){
 			system "rm -f $curOutDir/SMPL.empty"; $SmplIsEmtpy=0;
 	}
-	if (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || (exists($inputFileSizeMB{$curSmpl}) &&$inputFileSizeMB{$curSmpl} < $MFconfig{skipSmallSmplsMB} ) ){
+	if ( (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || (exists($inputFileSizeMB{$curSmpl}) &&$inputFileSizeMB{$curSmpl} < $MFconfig{skipSmallSmplsMB} )) && !$AssemblyGo){
 		
-		if ($inputFileSizeMB{$curSmpl} < $MFconfig{skipSmallSmplsMB}){
+		if ($inputFileSizeMB{$curSmpl} < $MFconfig{skipSmallSmplsMB} ){
 			print "Skipping sample $curSmpl due to $inputFileSizeMB{$curSmpl} < $MFconfig{skipSmallSmplsMB} MB\n";
 			#still create essentials
 			#	my $coveragePerCtg = "$ContigStatsDir/Coverage.percontig.gz";
@@ -1175,7 +1177,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#print "preAsmChk: $ePreAssmbly, $ePreAssmblPck, $doPreAssmFlag, $postPreAssmblGo\n";
 		#die;
 		metagAssemblyRun( $cAssGrp,$cleanSeqSetHR,"$nodeSpTmpD/ass",$metagAssDir ,$geneDir, $shortAssembly, $SmplNameX,$scaffoldFlag,$metaGscaffDir,
-					$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo);
+					$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo,$finalCommAssDir);
 		push(@{$AsGrps{$cAssGrp}{AssCopies}}, $assDir."/metag/*",$finalCommAssDir);
 
 		#call genes, depends on assembly
@@ -1259,8 +1261,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			#just do it.. 
 			print "Moving mappings from globaltmp to finaldir\n";
 			system "mkdir -p $finalMapDir;sleep 1;" unless (-d $finalMapDir);
-			systemW "rsync -r --remove-source-files $mapOut/* $finalMapDir/";
-			#systemW "mv $mapOut/* $finalMapDir/";
+			#systemW "rsync -r --remove-source-files $mapOut/* $finalMapDir/";
+			systemW "mv -f $mapOut/* $finalMapDir/";
 		} elsif ($map2Ctgs_2 ne "") { #make sure files get copied
 			push(@{$AsGrps{$cAssGrp}{$cpyStrm}},$mapOut."/*",$finalMapDir);
 		}
@@ -1282,12 +1284,13 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$delaySubmCmd .= "\n".$delaySubmCmd_2;
 		$AsGrps{$cAssGrp}{MapDeps} .= $mapSup2Ctgs_2.";";
 		$AsGrps{$cAssGrp}{BinDeps} .= $mapSup2Ctgs_2.";";
-		if (#$mapSup2Ctgs eq "" && $mapSup2Ctgs_2 eq "" 
-			$AsGrps{$cAssGrp}{MapDeps} =~  m/[^;\s]/ && !$eFinSupMapCovGZ && -e "$mapOutSup/$SmplName.sup-smd.bam.coverage.gz"){  # just copy over..
+		my $moveMappings = 0; $moveMappings =1 if (!$eFinSupMapCovGZ && fileGZe("$mapOutSup/$SmplName.sup-smd.bam.coverage"));
+		if (   	$mapSup2Ctgs_2 =~  m/[^;\s]/ && $moveMappings){  # just copy over..
 			print "Moving supplementary mappings from globaltmp to finaldir\n";
+			#print "DEBUG: $mapOutSup/$SmplName.sup-smd.bam.coverage.gz\n" . -s "$mapOutSup/$SmplName.sup-smd.bam.coverage.gz" . "\n";
 			system "mkdir -p $finalMapDir;sleep 1;" unless (-d $finalMapDir);
-			systemW "rsync -r --remove-source-files $mapOutSup/* $finalMapDir/";
-			#systemW "mv $mapOutSup/* $finalMapDir/";
+			#systemW "rsync -r --remove-source-files $mapOutSup/* $finalMapDir/";
+			systemW "mv -f $mapOutSup/* $finalMapDir/";
 		} else {
 			push(@{$AsGrps{$cAssGrp}{MapSupCopies}},$mapOutSup."/*",$finalMapDir);
 		}
@@ -1576,7 +1579,8 @@ sub postprocess{
 	if ($MFopt{DoAssembly}){
 		my $warnMsg = "";
 		$warnMsg = "(may be inaccurate due to loop2complete)" if ($loop2completion_ini);
-		print "Found ".$presentAssemblies." of ". $totalCheckedSamples ." samples already assembled and all tasks done.\n$warnMsg\n";
+		print "Found ". ($presentAssemblies + scalar(@EmptySample))." of ". $totalCheckedSamples ." samples assembled (or ignored) and all tasks done.\n";
+		print "$warnMsg\n" if ($warnMsg ne "");
 		
 	}
 	my $totalScratchUse=0;
@@ -1587,12 +1591,12 @@ sub postprocess{
 	
 	
 	print "Estimated scratch use: " . int($totalScratchUse/1024)."G\n";
-		if (@EmptySample>0){
+	if (@EmptySample>0){
 		print "Found Empty/too small (<". $MFconfig{skipSmallSmplsMB} ."MB) samples (N=". scalar(@EmptySample) . "):\n".join(",",@EmptySample) ."\n\n";
 	}
 
 
-	if ($presentAssemblies >0 && $presentAssemblies == $totalCheckedSamples){
+	if ($presentAssemblies >0 && ($presentAssemblies + scalar(@EmptySample)) == $totalCheckedSamples){
 		my $gcScr = getProgPaths("geneCat_scr");
 		my $GCsub = $baseOut."/GeneCat_pre.sh";
 		my $gcmd = "";
@@ -3149,10 +3153,9 @@ sub movePreAssmData{
 	#my $newCovFile = "$tmpD/$smplID.coverage.perCtg";
 	$cmd .= "mkdir -p $mvD;cp -r $metagD/scaffolds.fasta.filt $metagD/$STOpreAssmblDone $CSdir/Coverage* $mvD;\n";
 	#$cmd .= "cp $CSdir/Coverage.median.percontig $newCovFile\n";
-	$cmd .= "rm -fr $mapD;\n" ;
+	$cmd .= "rm -fr $mapD $CSdir;\n" ;
 	$cmd .= "cp -rf $metagD/AssemblyStats.txt $logDir/preAssmStat.txt\n";
 	#if ($AssemblyGo){$cmd .= "rm -fr $metagD;\n" ; print "removed preASsmbl dir";}
-	$cmd .= "mkdir -p $mvD;\n";
 	#$cmd .= "cp $tmpD/$STOpreAssmblDone $metagD;\n";
 	#$cmd .= "cp -rf $tmpD/* $mvD/;\n";
 	#$cmd .= "rm -fr $tmpD\n";
@@ -3170,6 +3173,7 @@ sub prepPreAssmbl{
 	#die "$mvD\n";
 	
 	$AsGrps{$cAssGrp}{CntPreAss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAss}));
+	$AsGrps{$cAssGrp}{CntPreAssMiss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAssMiss}));
 	#print "precnt: $AsGrps{$cAssGrp}{CntPreAss}\n";
 
 	my $ePreAssmbly = 0; $ePreAssmbly = 1 if (-s $finAssLoc && -e "$finalCommAssDir/$STOpreAssmblDone");
@@ -3180,8 +3184,8 @@ sub prepPreAssmbl{
 		#die;
 		return ($ePreAssmbly,$doPreAssmFlag,0,$ePreAssmblPck);
 	}
-	my $eCOV = 0; $eCOV = 1 if (-e "$CSdir/Coverage.percontig.gz");
-	my $eCOVmv = 0; $eCOVmv = 1 if (-e "$mvD/Coverage.percontig.gz");
+	my $eCOV = 0; $eCOV = 1 if (fileGZe( "$CSdir/Coverage.percontig"));
+	my $eCOVmv = 0; $eCOVmv = 1 if (fileGZe("$mvD/Coverage.percontig"));
 	#print "$eCOV $CSdir/Coverage.percontig\n";
 	if ($MFopt{DoAssembly} == 5 && $AsGrps{$cAssGrp}{SupportReads} =~ m/PB:/){#$map{$curSmpl}{"SupportReads"} =~ m/PB:/ ){ 
 		#condition: right assembly mode and actually secondary support reads
@@ -3210,14 +3214,17 @@ sub prepPreAssmbl{
 	}  
 	#die "XAS\n";
 	if ($ePreAssmblPck){
-		$AsGrps{$cAssGrp}{CntPreAss} ++ ;
+		if ($eCOV || $eCOVmv){
+			$AsGrps{$cAssGrp}{CntPreAss} ++ ;
+			push(@{$AsGrps{$cAssGrp}{preAsmblDir}}, $mvD);
+		}
 		$doPreAssmFlag = 0 ; #everyone else needs to keep
-		push(@{$AsGrps{$cAssGrp}{preAsmblDir}}, $mvD);
+		
 	}
 	my $PostAssemblyGo = 0;
 	#print "UUU $doPreAssmFlag\n";
 	my $finJobs = ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssMiss});
-	#print "FIN: $finJobs\n";
+	#print "FIN: $finJobs  >= $AsGrps{$cAssGrp}{CntAimAss}\n";
 	$PostAssemblyGo = 1 if (!$doPreAssmFlag && ( $finJobs >= $AsGrps{$cAssGrp}{CntAimAss}) ); #has already seen enough complete preAssmblies
 	$doPreAssmFlag = 1 if (!$PostAssemblyGo); 
 	#print "-e $CSdir/Coverage.percontig   $metagD/$STOpreAssmblDone\n" ;
@@ -4902,8 +4909,10 @@ sub check_map_done{
 	my $retVal = 1;
 	if ($doCram && (!-e "$finalD/$baseN-smd.cram.sto" )){# && !-e "$mappDir/$baseN-smd.cram.sto"  ) ){#&& !$params{bamIsNew} ) ){
 		$retVal = 0;
+		#print "C1\n";
 	} elsif (!$doCram && !-e "$finalD/$baseN-smd.bam" ){#&& !$params{bamIsNew}){
 		$retVal = 0;
+		#print "C2\n";
 	}
 	
 	return $retVal;
@@ -4911,7 +4920,7 @@ sub check_map_done{
 sub check_depth_done{
 	my ($doCram, $finalD, $baseN, $mappDir) = @_;
 	my $retVal = 1;
-	if ( !-e "$mappDir/$baseN-smd.bam.coverage.gz" ){#&& (-e "$mappDir/$baseN-smd.bam" || -e "$mappDir/$baseN-smd.cram") ){# && !$params{bamIsNew}){ #already stored in mapping dir, still needs to be copied
+	if ( !fileGZs("$mappDir/$baseN-smd.bam.coverage") && !fileGZs("$finalD/$baseN-smd.bam.coverage") ){#&& (-e "$mappDir/$baseN-smd.bam" || -e "$mappDir/$baseN-smd.cram") ){# && !$params{bamIsNew}){ #already stored in mapping dir, still needs to be copied
 		#die "$mappDir/$baseN-smd.bam.coverage.gz";
 		$retVal = 0;
 	}
@@ -5489,14 +5498,15 @@ sub bamDepth{
 	my $mappingRes = $tmpOut."/$baseN.iniAlignment.bam"; #this is the input, result of previous mapping steps
 	my $cramSTO = "$mappDir/$baseN-smd.cram.sto";
 	my $nxtBAM = "$nodeTmp/$baseN-smd.bam";
+	my $finalBam = "$finalD/$baseN-smd.bam";
 	my $sortTMP = $nodeTmp."/$baseN.srt";
 	my $sortTMP2 = $nodeTmp."/$baseN.2.srt";
  
 	#check if already done
 	my $outstat = check_map_done($doCram, $finalD, $baseN, $mappDir);
 	my $outstat2 = check_depth_done($doCram, $finalD, $baseN, $mappDir);
-	#die "$outstat $mappingRes $nxtBAM\n";
-	if ($outstat2){return ("","",$outstat);}
+	#die "$outstat $outstat2 $mappingRes $nxtBAM\n$mappDir\n$finalD\n";
+	if ($outstat2 && $outstat){return ("","",$outstat);}
 
 	#die "$mappDir/$baseN-smd.bam.coverage.gz\n$finalD/$baseN-smd.bam.coverage.gz\n" ;#if (-e "$finalD/$baseN-smd.bam.coverage.gz");
 		
@@ -5584,7 +5594,7 @@ sub bamDepth{
 	my $newJobN = "SBAM$supTag$JNUM$outName";	
 	#subsequent jobs not dependent on this one
 	my $jobN2 = $jDep; my $retCmds="";
-	$covCmd = "" if ( -s "$nxtBAM.coverage");
+	$covCmd = "" if ( fileGZs( "$nxtBAM.coverage"));
 	
 	#my $cleaner = "mv $tmpD $fin
 	if (0){
@@ -5600,10 +5610,10 @@ sub bamDepth{
 	}
 	
 	#die "$cmd\n$covCmd\n$CRAMcmd\n";
-	if ( ($doCram && !-e $cramSTO) || ( !-s "$nxtBAM.coverage.gz") ){#|| $bamFresh){
+	if ( ($doCram && !-e $cramSTO) || ( !fileGZs("$finalBam.coverage") ) ){#|| $bamFresh){
 		my $preHDDspace=$QSBoptHR->{tmpSpace};		my $baseMapHDD = $HDDspace{mapping} ;  $baseMapHDD =~ s/G$//;
 		$QSBoptHR->{tmpSpace} = int((1.6 * $inputFileSizeMB{$curSmpl}*$baseMapHDD) /1024)+15  ."G";		if (${$dirsHr}{submit}){
-			
+		#die "map2:: $qdir\n$cramSTO\n$nxtBAM.coverage\n";
 		($jobN2,$retCmds) = qsubSystem($qdir.$bashN."map2$supTag.sh",
 				$cmd."\n".$covCmd."\n".$CRAMcmd."\n$nodeCln\n"#.$covCmd2
 				,$numCore,  (int($locSrtMem)+1)."G",$newJobN,$jDep,"",$immediateSubm,$QSBoptHR->{General_Hosts},$QSBoptHR);
@@ -5826,16 +5836,16 @@ sub clean_tmp{#routine moves output from temp dirs to final dirs (that are IO li
 	for (my $i=0;$i<@cps;$i+=2){
 		next if (length($cps[$i+1] ) < 5);
 		if ($i == 0){$cmd .= "mkdir -p $cps[$i+1]\n";} #rm -r -f $cps[$i+1]\n
-		$cmd .= "rsync -r --remove-source-files $cps[$i] $cps[$i+1]\n" ;
-		#$cmd .= "mv $cps[$i] $cps[$i+1]\n" ;
+		#$cmd .= "rsync -r --remove-source-files $cps[$i] $cps[$i+1]\n" ;
+		$cmd .= "mv $cps[$i] $cps[$i+1]\n" ;
 		
 	}
 	die "MGTK.pl::clean_tmp: something wrong with \@cpsND, length % 2 (". scalar(@cpsND) .")\n"  if (scalar(@cpsND) % 2 != 0);
 	for (my $i=0;$i<@cpsND;$i+=2){
 		next if (length($cpsND[$i+1] ) < 5);
 		if ($i == 0){$cmd .= "mkdir -p $cpsND[$i+1]\n";}
-		$cmd .= "rsync -r  --remove-source-files $cpsND[$i] $cpsND[$i+1]\n" ;
-		#$cmd .= "mv $cpsND[$i] $cpsND[$i+1]\n" ;
+		#$cmd .= "rsync -r  --remove-source-files $cpsND[$i] $cpsND[$i+1]\n" ;
+		$cmd .= "mv $cpsND[$i] $cpsND[$i+1]\n" ;
 		
 	}
 	#die "@clDa\n";
@@ -6909,6 +6919,7 @@ sub longRdAssembly{
 			print "(found \"@{$cReadTecAr}\" (size:". @{$cReadTecAr} ."))\nAborting..\n";
 			die;
 		}
+		
 		return "" unless (-e $helpAssembl || $helpAssembl eq "hybridmMDBG");
 	}
 	#my ($p1arX,$p2arX,$singlArX,$cReadTecArX) = getCleanSeqsAssmGrp($asHr, $cAsGrp, 1);
@@ -6933,6 +6944,10 @@ sub longRdAssembly{
 		my $runPar=1;
 		#my $illPathS = ;
 		my @illDirs = @{$AsGrps{$cAsGrp}{preAsmblDir}}; #split /,/,$illPathS;
+		if (@$singlAr > @illDirs){
+			die "hybrid assembly: Unexpected less preDirs (".@illDirs .") than indirs(" . @$singlAr .")\n";
+		}
+
 		$cmdPre .= "echo \"presplitting helper assembly\"\n";
 		#die "preLib num (" .@illDirs . ") != read libs (" . @inRds . ")!" if (@illDirs != @inRds);
 		die "preLib num (" .@illDirs . ") < read libs (" . @inRds . ")!" if (@illDirs < @inRds);
@@ -6949,9 +6964,14 @@ sub longRdAssembly{
 			#merge this split with single reads in tmp dir..
 			if (@{$singlAr} > $i && defined($singlAr->[$i]) &&  $singlAr->[$i] ne ""){
 				#print "\nXX $i\n";
-				$cmdLater .= "cat $singlAr->[$i] >> $dupiAssmbl;\n" ;
+				#dont combine, not a good idea..
+				#$cmdLater .= "cat $singlAr->[$i] >> $dupiAssmbl;\n" ;
 			}
 			$inRds[$i] = $dupiAssmbl;
+		}
+		#instead of combining ill + PacBio fastas in $cmdLater, just add PB as extra libs (makes more sense in any case..)
+		for (my $i=0;$i<@{$singlAr};$i++){
+			push(@inRds,$singlAr->[$i]);
 		}
 		#transfer commands to main #cmd stream..
 		$cmdPre .= "\nwait \$(jobs -p);\n\n" if ($runPar);
@@ -7193,7 +7213,7 @@ sub megahitAssembly{
 
 sub metagAssemblyRun{
 	my ( $cAssGrp,$cleanSeqSetHR,$nodeTmp,$metagAssDir, $geneDir,$shortAssembly, $SmplNameX,$scaffoldFlag,$metaGscaffDir,
-				$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postAssmblGo) = @_;
+				$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postAssmblGo,$finalCommAssDir) = @_;
 				#metagAssembly( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$shortAssembly, $SmplNameX,$scaffoldFlag,
 				#	$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo);
 	print "Assembly step";
@@ -7216,7 +7236,7 @@ sub metagAssemblyRun{
 				"preAssmbl", $SmplNameX,$hostFilter,$scaffoldFlag) if (!$ePreAssmbly);
 		} elsif ($doPreAssmFlag == 0 && $postAssmblGo) {
 			print "Final combining long assembly step: ";
-			system "rm -fr $metagAssDir $geneDir\n"; #just clean up assembly dir..
+			system "rm -fr $metagAssDir $geneDir $finalCommAssDir/genePred/\n"; #just clean up assembly dir..
 			#die;
 			$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$metagAssDir,
 				"hybridmMDBG",$SmplNameX,1,$LasseP) ; #$metaGpreAssmblDir, 
