@@ -849,7 +849,7 @@ sub prepGene2MGS{
 		}
 		$totalNONConsSmpls += $locNonCons ;$totalConsSmpls+=$locConspec;
 	}
-	print $MGSwithConspSmpl ."/" . ($MGSwithConspSmpl + $MGSwithoutConspSmpl) . " MGS with >1 multi-copy gene sample. " . $totalConsSmpls . "/" . ($totalConsSmpls+$totalNONConsSmpls) . " samples with MGS >$multiGeneSmplMax multi-copy gene threshold across all-sample-MGS combinations.\nTotal MGS: ${NMGSTotal}, total genes: $NgenesTotal\n";
+	print $MGSwithConspSmpl ."/" . ($MGSwithConspSmpl + $MGSwithoutConspSmpl) . " MGS with >1 multi-copy gene sample. " . $totalConsSmpls . "/" . ($totalConsSmpls+$totalNONConsSmpls) . " >$multiGeneSmplMax multi-copy gene threshold across all-sample-MGS combinations.\nTotal MGS: ${NMGSTotal}, total genes: $NgenesTotal\n";
 
 		
 	#3: check if an MGS is constantly represented by multi copies, taking into account that difficult samples were removed in (2)
@@ -1081,7 +1081,7 @@ sub preComputeConsSNP{
 			push(@accumVCFcmds,$vcf2fnaCmd);
 			
 			if (@accumVCFcmds > $preCompCons){
-				print "submitting precomp batch $BatchCnt\n" if ($submPreComp);
+				print "Precomp batch $BatchCnt " if ($submPreComp);
 				my $cmdX = "\necho \"BATCH $BatchCnt\"\nmkdir -p $preConDir/;\n\n" . join("\n",@accumVCFcmds);
 				my $tmpSHDD=$QSBoptHR->{tmpSpace} ; $QSBoptHR->{tmpSpace} =0;
 				my ($dep,$qcmd) = qsubSystem($LOGDIR."PreCompConsSNP_B${BatchCnt}.sh",$cmdX,1,"10G","ConsSNP$BatchCnt","","",$submPreComp,[],$QSBoptHR);
@@ -1435,7 +1435,7 @@ sub extractFNAFAA2genes{
 	
 	
 	
-	print "Extracting GC genes from " . scalar(@srtdSmpls). " dirs\n";
+	print "Extracting GC genes from " . scalar(@srtdSmpls). " (of " . scalar(keys(%cl2gene2)) . ") ASsembly Groups\n";
 
 	
 	#different way to go over genes..
@@ -1486,9 +1486,10 @@ sub createConsFastas{
 	my $seqPlatf =$map{$sm}{SeqTech}; #primary reads
 
 	my $cmd ="";
+	if ($seqPlatf eq ""){$seqPlatf = "hiSeq";} #if empty, assume hiSeq
 	if ($secSeqTechS eq ""){
 		#in case of only illumina:
-		if ($seqPlatf eq ""){$seqPlatf = "hiSeq";} #if empty, assume hiSeq
+		
 		#checkSeqTech($seqPlatf);
 		$vcf2fnaOpt = "-seqPlatform $seqPlatf -t 1 -minCallDepth $minSNPDepth -minCallQual $minSNPCallQual ";
 		$vcf2fnaOpt .= "-minCallQualAdaptive $useAdaptiveQual" ;
@@ -1588,6 +1589,10 @@ sub readGenesSample_Singl{
 		my %locMGSgenes; #keep track of genes written for each MGS..
 		my $cD = $map{$sd3}{wrdir}."/";
 		print "$cD\n";
+		if (-e "$cD/SMPL.empty"){
+			print ".. Empty->skip ";
+			next;
+		}
 		my $rename = 0;
 		$rename = 1 if ($sd2 ne $sd3);
 		#print "r:$rename $sd3  (from $sd2) ";

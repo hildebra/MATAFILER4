@@ -592,7 +592,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($MFopt{rewriteGenePred}){
 		print "Deleting gene Predictions and dependent files..\n";
 		system "rm -rf $finalCommAssDir/genePred" if (-d "$finalCommAssDir/genePred");
-		system "rm -rf $ContigStatsDir/*pergene* $ContigStatsDir/GeneStats.tx*";
+		system "rm -rf $finalCommAssDir/ContigStats" if (-d "$finalCommAssDir/ContigStats");
+		system "rm -rf $ContigStatsDir/*pergene* $ContigStatsDir/GeneStats.tx* $ContigStatsDir/GTDBmg $ContigStatsDir/FMG";
 	}
 	if ($MFconfig{OKtoRWassGrps} && ($rewrite || $locRewrite)){
 		print "Deleting previous results.. rerun MATAFILER for sample\n";
@@ -7050,7 +7051,7 @@ sub longRdAssembly{
 		$defTotMem = ($inputFileSizeMB{$curSmpl}*8+1e4)/1024;
 	}
 
-	my $defMem = ($defTotMem/$nCores);
+	my $defMem = ($defTotMem);
 
 	$cmd .= "echo \"MAX MEM ".$defTotMem."G\"\n";
 	$cmd .= "echo \"$nameProg\" > $finalOut/$STOassmbleDone\n";
@@ -7062,7 +7063,7 @@ sub longRdAssembly{
 		$QSBoptHR->{useLongQueue} = 0;#super fast, doesn't need long queue
 		if ( $MFopt{SpadesAlwaysHDDnode}){
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};
-			$QSBoptHR->{tmpSpace} = $HDDspace{riboFind};
+			$QSBoptHR->{tmpSpace} = $HDDspace{metaMDBG};
 			($jname,$tmpCmd) = qsubSystem($logDir."$nameProg.sh",$cmd,(int($nCores)),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
 			$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		} else {
@@ -7499,6 +7500,7 @@ sub setDefaultMFconfig{
 	$HDDspace{spades} = "250G"; 
 	$HDDspace{megaHit} = "140G";
 	$HDDspace{riboFind} = "100G";
+	$HDDspace{metaMDBG} = "150G";
 	$HDDspace{SNPcall} = "60G";
 	$HDDspace{metabat2} = "120G";
 	$HDDspace{mapping} = "4G"; #scales linear per input 1 GB filesize

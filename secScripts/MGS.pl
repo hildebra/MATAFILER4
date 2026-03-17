@@ -642,7 +642,10 @@ if ($numSamples > 1500){#scale with the number of assembly groups
 #my $prunTree = "$outD/between_phylo/prunned.nwk";
 #
 #my $ph2Cmd = "$strain1scr $GCd $finalClustersFilt.mgs $canCore $iniTree 0 1\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
-my $ph2Cmd = "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -maxCores $canCore  -MGSphylo $iniTree -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit 1 -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 \n#consider adapting options: \n#-rmMSA 0 -presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -nodeTmp [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
+my $ph2Cmd = "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -maxCores $canCore  -MGSphylo $iniTree -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit 1 -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ \n";
+
+$ph2Cmd .= "#consider adapting further options: \n#-rmMSA 0 -presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -nodeTmp [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
+$ph2Cmd .= "#-minSNPCallQual 20 -GenesPerSpecies 0.1 -GeneLengthMin 0.5 -skipIndels 0 -minSNPDepth 2 -SNPdepthFilterScale 0.1 -SNPindelRangeFilt 5 -SNPadaptiveQual 0.0";
 printL $ph2Cmd;
 #systemW $ph2Cmd;
 my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "20"; #needs some tmp space for on the fly creations.. 

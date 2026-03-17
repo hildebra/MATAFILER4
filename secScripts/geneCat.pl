@@ -1260,7 +1260,7 @@ sub addingSmpls{
 	print "Direct output to file\n";
 
 	#now really add all files together
-	my $JNUM= -1; my $stopAndRedo=0;
+	my $JNUM= -1; my @stopAndRedo=();
 	my @missedSmpls=();
 	#foreach my $smpl(@samples){
 	for (my $JNUM=$startSmpl; $JNUM<$stopSmpl ; $JNUM++){
@@ -1361,7 +1361,7 @@ sub addingSmpls{
 				print "can't find gff entry for $hd\nDeleting entire gene prediction and coverage..\n$metaGD/$path2GPdir\n";
 				#die;
 				
-				system "rm -r $metaGD/$path2GPdir $metaGD/$path2CS"; $stopAndRedo=1; 
+				system "rm -r $metaGD/$path2GPdir $metaGD/$path2CS"; push(@stopAndRedo,$smpl);
 				next;
 			}
 			unless ($gff{$hd} =~ m/;partial=(\d)(\d);/){ die "Incorrect gene format for gene $hd \n in file $inGenesF\n";}
@@ -1398,11 +1398,20 @@ sub addingSmpls{
 		}
 		
 		if ($doFMGseparation){
+			my $FATALcnt=0;
 			foreach my $k (keys %curFMGsTag){
 				if ($curFMGsTag{$k} == 0){
-					print "FATAL:: missing gene $k\n";
-					$stopAndRedo=1;
+					if ($FATALcnt <5) {
+						print STDERR "missing gene $k\n" ;
+					} elsif($FATALcnt == 5){
+						print STDERR "Skipping further genes\n"
+					}
+					$FATALcnt++;
 				}
+			}
+			if ($FATALcnt){
+				print STDERR "FATAL:: mismatch predicted marker gene and assembly gene predictions (N=$FATALcnt of ". keys(%curFMGsTag) ."):";
+				push(@stopAndRedo,$smpl);
 			}
 		}
 		print $ostr."\n"; 
@@ -1430,12 +1439,13 @@ sub addingSmpls{
 		print STDERR $doubleSmplWarnString."\n\n\n$wrongSmplNms\n\n\n" if ($wrongSmplNms ne "");
 		print STDERR "incomplete; aborting process\n";
 		system "rm -rf @rmSrcDirs" if ($okToRM);
-		$stopAndRedo = 1;
+		push(@stopAndRedo,"unspecific");
 		
 		#exit(21);
 	}
-	if ($stopAndRedo){
+	if (@stopAndRedo){
 		print "Something wrong while extracting metagenomic genes.. you will need to rerun MATAFILER, fatal assemblies have already been deleted and will now need to be re-assembled.\n";
+		print "List of potential problematic samples: @stopAndRedo\n";
 		exit(31);
 	}
 

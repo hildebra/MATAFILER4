@@ -59,6 +59,8 @@ if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 			if ($cnt > 1050){$bonSplit = 400;}
 		}
 		my $SmplName = $map{$smpl}{SmplID};
+		#skip samples where no assembly happened..
+		if (-e "$map{$smpl}{wrdir}/SMPL.empty"){$cntSkips++;next;}
 		my $metaGD = getAssemblPath($map{$smpl}{wrdir});
 		next if (exists($seenAssembls{$metaGD}));
 		$seenAssembls{$metaGD} = 1;
@@ -305,4 +307,5 @@ sub processSubGenes{
 	#system "rm $GCd/$tag.lines";
 	print "Submitted $tag\n";
 	print "Found $catCnt gene categories, with total of $geneCnt members\n";
+	#print "Done\n";
 }
