@@ -201,7 +201,21 @@ else
 	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/Binners.yml
 fi
 
+if ! find_in_mamba_env "MF4genomeface" ; then
+	echo "Creating MF4genomeface environment"
+	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/MF4genomeface.yml
+else 
+	echo "Updating MF4genomeface environment"
+	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/MF4genomeface.yml
+fi
 
+if ! find_in_mamba_env "MF4scgbinner" ; then
+	echo "Creating MF4scgbinner environment"
+	PIP_USER=false $MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/SCGBinner.yml
+else
+	echo "Updating MF4scgbinner environment"
+	PIP_USER=false $MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/SCGBinner.yml
+fi
 
 CM2DB=$DBdir/CM2/
 MP4DB=$DBdir/MP4/

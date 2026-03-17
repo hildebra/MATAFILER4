@@ -8,9 +8,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths convert2Gb);
 
 use Exporter qw(import);
 our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJobAlive
-		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs
-		
-		);#
+		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs);
 
 
 
@@ -116,6 +114,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		}
 		#"#SBATCH --gres=ssd"
 		print O "#SBATCH -p $queues\n";
+		print O "#SBATCH --gres=gpu:".$optHR->{gpuCount}."\n" if ($optHR->{gpuCount} > 0);
 		#print O "#SBATCH --gres=tmp:${tmpSpace2}G\n" if ($tmpSpace2>0); #50g
 		print O "#SBATCH --time=$time\n" unless ($time eq "");
 		print O "#SBATCH --exclude=$exclNodes\n" unless ($exclNodes eq "");
@@ -361,6 +360,7 @@ sub emptyQsubOpt{
 		shortTime => $shortTime, #2hrs
 		useLongQueue => 0,
 		useGPUQueue => 0,
+		gpuCount => 0,
 		useShortQueue => 0,
 		useHiMemQueue => 0,
 		submissionConfig => $subConfig,

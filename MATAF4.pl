@@ -1315,13 +1315,24 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				isLastSampleInAssembly($finalCommAssDir,$curOutDir) ) {
 		my $subprts = $MFconfig{defaultContigSubs}."gFG"; $subprts .= "m" if ($MFopt{DoBinning});
 		$subprts .= "k" if ($MFopt{kmerAssembly} );$subprts .= "4" if ($MFopt{kmerPerGene});
-		
+
+		if ($MFopt{DoMetaBat2} == 4 && $subprts !~ m/F/) {
+			$subprts .= "F";
+			print "GenomeFace requires FetchMG - adding it as a step in contigStats\n";
+		}
+
 		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,$cln1.";".$AsGrps{$cAssGrp}{prodRun},$finalCommAssDir,$subprts,1,$hrefSeqSet->{samplReadLength},$hrefSeqSet->{samplReadLengthX}, $nodeSpTmpD,1,6, $curSmpl) unless ($contigStatsUsed);
-		
+
 		#run contig stats
 		postSubmQsub("$logDir/MultiContigStats.sh",$AsGrps{$cAssGrp}{PostClnCmd},$AsGrps{$cAssGrp}{CSfinJobName},$contRun);
 		$AsGrps{$cAssGrp}{PostClnCmd} = "";$AsGrps{$cAssGrp}{CSfinJobName} = $contRun;
 		$jdep = $contRun;
+
+		if ($MFopt{DoMetaBat2} == 4 && $contRun ne "") {
+			$AsGrps{$cAssGrp}{BinDeps} .= ";$contRun";
+			print "Added main contig stats as a GenomeFace dependency\n";
+		}
+
 	} elsif ( (exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ && $MappingGo) || ($eFinMapCovGZ) ) {
 		#die "test23  $AsGrps{$cAssGrp}{MapDeps}\n";
 		#calculate solely abundance / gene, has to be run after clean & assembly contigstat step and after mapping has started (at all!)
@@ -1663,7 +1674,7 @@ sub rmEmptySmpls{
 
 sub submitGenomeBinner{
 	my ($nodeSpTmpD,$metaGassembly,$MetaBat2out,$cAssGrp,$smplIDs1) = @_; #$finalCommAssDir,
-	#$MFopt{DoMetaBat2} = 1: metabat2, 2: SemiBin 3: MetaDecoder, 4: Genome Face
+	#$MFopt{DoMetaBat2} = 1: metabat2, 2: SemiBin 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
 	#MetaBat2out = file with contigs per bin
 	
 	#die;
@@ -1722,15 +1733,12 @@ sub submitGenomeBinner{
 
 	#execute calcs later in perl script..
 	my $BinnerScr = getProgPaths("Binner_scr");
-	$MBcmd .= "$BinnerScr -binner $MFopt{DoMetaBat2} -binD $BinDir -smplID \"$smplIDs1\" -tmpD \"$nodeSpTmpD2\" -assmbl $metaGassembly -assmblGrp $cAssGrp -cores $MB2coresL -smplDirs " . join(",",@paths) . " -seqTec \"$seqTec\" ";
+	$MBcmd .= "$BinnerScr -binner $MFopt{DoMetaBat2} -binD $BinDir -smplID \"$smplIDs1\" -tmpD \"$nodeSpTmpD2\" -assmbl $metaGassembly -assmblGrp $cAssGrp -cores $MB2coresL -smplDirs " . join(",",@paths) . " -seqTec \"$seqTec\" -logDir \"$paths[-1]LOGandSUB\" ";
 	$MBcmd .= "-SB_env $MFopt{SB_env} " if ($MFopt{SB_env} ne "");
 	$MBcmd .= ";\n";
-	
-	
+
+
 	my $BinnerName = getBinSubdirName($MFopt{DoMetaBat2});
-
-
-	$QSBoptHR->{useGPUQueue} = 1 if ($MFopt{DoMetaBat2} == 4); #semibin/genomeface   #$MFopt{DoMetaBat2} ==2 || 
 
 	system "rm $MetaBat2out*" if (-e $MetaBat2out && -s $MetaBat2out == 0 && !$CM1done && !$CM2done); #hard flag to just redo calculations..
 	$MBcmd = "" if (-s $MetaBat2out);
@@ -6200,7 +6208,7 @@ sub getContamination{
 
 sub getBinnerStats{
 	my ($tmpassD,$SmplN) = @_;
-	my $SBdir = getBinSubdirName(2); my $MB2dir = getBinSubdirName(1); my $MDdir = getBinSubdirName(3); my $GFdir = getBinSubdirName(4);
+	my $SBdir = getBinSubdirName(2); my $MB2dir = getBinSubdirName(1); my $MDdir = getBinSubdirName(3); my $GFdir = getBinSubdirName(4); my $SCdir = getBinSubdirName(5);
 	
 ## binning stats SemiBin
 	my $SBbinCM2 = "$tmpassD/Binning/$SBdir/$SmplN.cm2";
@@ -7792,7 +7800,7 @@ sub getCmdLineOptions{
 		"assemblyLongTime=i" => \$MFopt{SpadesLongtime},
 		"assemblyScaffMinSize=i" => \$MFopt{scaffoldMinSize},
 	#binning
-		"Binner|MetaBat2|binSpeciesMG=i" => \$MFopt{DoMetaBat2}, #0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace
+		"Binner|MetaBat2|binSpeciesMG=i" => \$MFopt{DoMetaBat2}, #0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
 		"BinnerCores=i" => \$MFopt{BinnerCores}, #cores used for Binning process (and checkM)
 		"BinnerMem=i" => \$MFopt{BinnerMem}, # define binning memory, Gb, 0=auto
 		"checkM2=i" => \$MFopt{useCheckM2},
@@ -7941,7 +7949,22 @@ sub getCmdLineOptions{
 	}
 	if ($MFconfig{defaultReadLengthX} < 10){print "Warning: extremely short read length set(-inputReadLengthSuppl): $MFconfig{defaultReadLengthX}\n";
 	}
-	
+
+	if ($MFopt{DoMetaBat2} == 4) {
+		if (!$MFopt{DoAssembly}) {
+			die "ERROR:: GenomeFace binner requires an assembly!\n";
+		}
+		print "GenomeFace binner selected:\n";
+		print " - FetchMG (F) will be automatically included in contig stats and run first\n";
+		print " - GPU queue must be used\n";
+	}
+	if ($MFopt{DoMetaBat2} == 5) {
+		if (!$MFopt{DoAssembly}) {
+			die "ERROR:: SCGBinner requires an assembly!\n";
+		}
+		print "SCGBinner selected: runs on CPU medium queue (~36h, ~32G)\n";
+	}
+
 	$MFopt{memPJob} = int($MFopt{memPJob});
 	
 	#check HDDspace format

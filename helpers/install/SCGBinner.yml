@@ -1,0 +1,27 @@
+name: MF4scgbinner
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.9
+  - biopython
+  - numpy=1.19
+  - scipy
+  - igraph
+  - leidenalg
+  - joblib
+  - pandas=1.4
+  - scikit-learn
+  - pyyaml
+  - tensorboard
+  - tqdm
+  - hnswlib
+  - atomicwrites
+  - bedtools
+  - pip
+  - pip:
+    - --extra-index-url https://download.pytorch.org/whl/cu118
+    - torch==2.0.0
+    - torchvision==0.15.1
+    - torchaudio==2.0.1
+    - git+https://github.com/htaohan/SCGBinner.git
