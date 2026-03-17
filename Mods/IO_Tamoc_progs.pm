@@ -473,24 +473,29 @@ sub jgi_depth_cmd{
 		}
 	}
 	#my $comBAM = join("/mapping/Align_ment-smd.bam ",@dirSS);
+	# Split conda activation prefix from the binary name so the activation can be
+	# emitted before any pipe, keeping just the bare binary after the pipe.
+	my ($jgiActivate, $jgiBin) = ("", $jgiScr);
+	if ($jgiScr =~ /\n/) {
+		($jgiActivate, $jgiBin) = ($jgiScr =~ /^(.*\n)(.+)$/s);
+	}
+
 	my $covCmd = "";
 	$covCmd .= "rm -f $out.jgi.*\n";
 	if ($isCram){
 		die "jgi_depth_cmd:::No reference Fasta given for @dirSS\n" if ($refFA eq "");
-		if (@dirSS == 1){
-			$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $comBAM | ";
-			$comBAM = "-";
-		} else {
-			my @splSS = split /\s/,$comBAM;
-			$comBAM="";
-			for (my $i=0;$i<@splSS;$i++){
-				my $tmpBam = "$out.jgi.tmp.$i.bam";
-				$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $splSS[$i] > $tmpBam\n";
-				$comBAM .= "$tmpBam ";
-			}
+		# Convert all CRAMs to temp BAMs before activation (samtools is in the base env, not MF4binners)
+		my @splSS = split /\s/,$comBAM;
+		$comBAM="";
+		for (my $i=0;$i<@splSS;$i++){
+			next if ($splSS[$i] eq "");
+			my $tmpBam = "$out.jgi.tmp.$i.bam";
+			$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $splSS[$i] > $tmpBam\n";
+			$comBAM .= "$tmpBam ";
 		}
 	}
-	$covCmd .= $jgiScr;#"/g/bork3/home/hildebra/bin/metabat/./jgi_summarize_bam_contig_depths";
+	$covCmd .= $jgiActivate; # conda activation after samtools, before jgi
+	$covCmd .= $jgiBin;
 	#--pairedContigs $out.jgi.pairs.sparse
 	$covCmd .= " --outputDepth $out.jgi.depth.txt  --percentIdentity $perID  $comBAM\n";
 	#$covCmd .= "gzip $out.jgi*\n";

@@ -1,7 +1,7 @@
 package Mods::Binning;
 use Exporter qw(import);
 our @EXPORT_OK = qw(
-				runMetaBat runSemiBin  runMetaDecoder  runGenomeFace
+				runMetaBat runSemiBin  runMetaDecoder  runGenomeFace runSCGBinner
 				runCheckM runCheckM2 
 				getBinSubdirName
 				createBin2 createBinFAA createBinCtgs
@@ -10,6 +10,7 @@ our @EXPORT_OK = qw(
 
 use warnings;
 use strict;
+use File::Basename;
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw (systemW readFasta gzipopen getAssemblPath);
 use Mods::TamocFunc qw (cram2bsam);
@@ -27,6 +28,8 @@ sub getBinSubdirName{
 		$BinnerName = "MD";
 	}elsif ($BinSel == 4){#GenomeFace
 		$BinnerName = "GF";
+	}elsif ($BinSel == 5){#SCGBinner
+		$BinnerName = "SC";
 	}
 	return $BinnerName;
 }
@@ -762,43 +765,71 @@ sub runMetaDecoder{
 
 
 
+sub runSCGBinner{
+	my ($jgO,$outDir, $tmpDir, $nm, $fna, $cores, $dirsAR) = @_;
+
+	my $SCGbin = getProgPaths("SCGBinner");
+	my @dirSS = @{$dirsAR};
+	my $isCram = 0; my $numBams = 0;
+	my @BAMS;
+	my $uncramCmd = "";
+	foreach my $DDI (@dirSS){
+		$numBams++;
+		my $iBAM = $DDI;
+		if ($DDI =~ m/\/$/ || $DDI !~ m/bam$/){
+			unless (-e "$DDI/mapping/done.sto"){print "runSCGBinner:::Can't find $DDI/mapping/done.sto\nAborting SCGBinner prep for $nm\n"; return "";}
+			my $SmplNm = `cat $DDI/mapping/done.sto`;
+			chomp $SmplNm; my $tbam = "$DDI/mapping/$SmplNm";
+			if (!-e $tbam){$isCram=1; $tbam =~ s/\.bam/\.cram/;}
+			unless (-e $tbam){print "runSCGBinner:::Can't find bam or cram at $DDI\nAborting SCGBinner prep for $nm\n"; return "";}
+			$iBAM = $tbam;
+		}
+		next if (-s $iBAM < 15000000);
+		my $oBAM = "$tmpDir/$nm.$numBams.bam";
+		$uncramCmd .= cram2bsam($iBAM,$fna,$oBAM,1,$cores) if ($isCram && !-e $oBAM);
+		push @BAMS, $isCram ? $oBAM : $iBAM;
+	}
+	if (@BAMS == 0){
+		print "runSCGBinner::No bams found, creating fake output\n";
+		system "mkdir -p $outDir; touch $outDir/$nm; touch $outDir/$nm.assStat";
+		open O,">$outDir/$nm.cm2";
+		print O "Name\tCompleteness\tContamination\tCompleteness_Model_Used Translation_Table_Used\tAdditional_Notes\n";
+		close O;
+		return "";
+	}
+
+	my $cmd = "###preparing BAMs..\n$uncramCmd\n\n";
+	$cmd .= "###Running SCGBinner...\n";
+	$cmd .= "mkdir -p $outDir\n";
+	$cmd .= "$SCGbin -a $fna -o $outDir -b " . join(" ",@BAMS) . " -t $cores\n";
+	# move result TSV, then clean intermediate dirs (set -e ensures these only run on success)
+	$cmd .= "mv $outDir/scgbinner_res/SCGBINNER_result.tsv $outDir/$nm\n";
+	$cmd .= "rm -rf $outDir/scgbinner_res $outDir/data_augmentation\n";
+	return $cmd;
+}
+
 sub runGenomeFace{
 	my ($jgO,$outD,$nm, $fna, $ncore, $tmpDir ) = @_;
 
-#!/bin/bash -e
-#SBATCH -t 30 
-#SBATCH -N 1
-#SBATCH -n 1
-#SBATCH -p "ei-gpu"
-#SBATCH -G 1
-#SBATCH --mem "8G"
-#SBATCH --export ALL
+	##genomeface -i $FASTA -a jgi_depths.tsv -g gfmarkers.txt -m 1000 -o GF
+	##sed -E 's|_[0-9]+ |\t|' FMGids.txt | awk -F'=' '$2>1000' > gfmarkers.txt
+	##awk -F'\t' '{print $2"\t"$1}' GF/bins.tsv > GF/outfile && rm GF/bins.tsv
 
-#sed -E 's|_[0-9]+ |\t|' FMGids.txt | awk -F'=' '$2>1000' > gfmarkers.txt
-#genomeface -i $FASTA -a jgi_depths.tsv -g gfmarkers.txt -m 1000 -o GF
-#find GF -name "\d+" -exec rm {} \ #similar to comeBin, the bins themselves are just files named by numbers e.g. 1234. Get rid of them if not needed. 
-#awk -F'\t' '{print $2 $1}' GF/bins.tsv > GF/outfile && rm GF/bins.tsv
+	if (-e "$outD/GeFa.sto"){ return ""; }
 
-	#if (-e "$outD/GeFa.sto"){		return "";	}
-	my $numC = 1;
-	
-	#print "Running MetaBat..\n";
 	my $GFbin = getProgPaths("GenomeFace");
-	#my $mbBin = "/g/bork3/home/hildebra/bin/metabat/./metabat";
-	#my $outCtgNms = "$outD/$nm.ctgs.txt";
-	#my $outFna = "$outD/$nm.fasta.fna";
 	my $outFile = "$outD/$nm";
-	#my $outMat = "$outD/$nm.mat.txt";
-	#my $jgO = "$tmp/depth.jgi";
-	if (!-e $fna){die "Can't find requried scaffold file in metabat routine: $fna\n"; }
-	#start metabat
-	my $cmd = "";#$before."\n";
-	#$cmd .= "$mbBin -i $fna -a $jgO.depth.txt -o $outFna -p $jgO.pairs.sparse -l $outCtgNms --minCVSum  10 -t $numCore --saveCls $outMat -v\n";
-	$cmd .= "mkdir -p $outD\n";
-	$cmd .= "sed -E 's|_[0-9]+ |\\t|' FMGids.txt | awk -F'=' '\$2>1000' > $tmpDir/gfmarkers.txt\n";
-	$cmd .= "$GFbin -i $fna -a $jgO -g $tmpDir/gfmarkers.txt -m 1000 -o $outD \n"; #$outMat    --> replace with $21tmpDir
-	$cmd .= "awk -F'\\t' '{print \$2 \$1}' $outD/bins.tsv > $outFile \n rm $outD/bins.tsv\n";
-	#$cmd .= "echo \"$nm\" > $outD/GeFa.sto\n";
+	if (!-e $fna){die "Can't find required scaffold file in GenomeFace routine: $fna\n"; }
+	my $cmd = "";
+	my $assD = dirname($fna);
+	my $FMGdir = "$assD/ContigStats/FMG";
+	my $gfRawD = "$outD/gfOut";
+	$cmd .= "mkdir -p $tmpDir $outD\n";
+	$cmd .= "rm -rf $gfRawD\n"; # clear any partial previous run; genomeface creates this dir itself
+	$cmd .= "sed -E 's|_[0-9]+ |\\t|' $FMGdir/FMGids.txt | awk -F'=' '\$2>1000' > $tmpDir/gfmarkers.txt\n";
+	$cmd .= "$GFbin -i $fna -a $jgO -g $tmpDir/gfmarkers.txt -m 1000 -o $gfRawD\n";
+	$cmd .= "awk -F'\\t' '{print \$2 \"\\t\" \$1}' $gfRawD/bins.tsv > $outFile && rm -rf $gfRawD\n";
+	$cmd .= "echo \"$nm\" > $outD/GeFa.sto\n";
 	return $cmd;
 
 }

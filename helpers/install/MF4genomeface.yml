@@ -1,0 +1,10 @@
+name: MF4genomeface
+channels:
+  - nvidia
+  - rapidsai
+  - conda-forge
+  - bioconda
+  - https://portal.nersc.gov/project/m1982/genomeface_repo
+dependencies:
+  - genomeface
+  - cuda-version=11.7

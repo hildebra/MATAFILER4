@@ -196,7 +196,7 @@ strobealign	strobealign
 kma	kma
 bwa	bwa
 minimap2	minimap2
-jgiDepth	jgi_summarize_bam_contig_depths #/g/bork3/home/hildebra/bin/metabat/./jgi_summarize_bam_contig_depths
+jgiDepth	jgi_summarize_bam_contig_depths	env:MF4binners #/g/bork3/home/hildebra/bin/metabat/./jgi_summarize_bam_contig_depths
 #bedCov	genomeCoverageBed
 #mosdepth	mosdepth #mosdepth turned out to be even slower than bedtools on metag data..
 hmmsearch	hmmsearch
@@ -276,7 +276,8 @@ foldseek	foldseek
 ## binning ##
 #maxBin	perl [MFLRDir]/bin/MaxBin-1.4.2/run_MaxBin.pl
 metabat2	metabat2	env:MF4binners
-GenomeFace	GenomeFace	env:MF4binners
+GenomeFace	genomeface	env:MF4genomeface
+SCGBinner	scgbinner	env:MF4scgbinner
 # SemiBin	SemiBin	env:MF4binners
 SemiBin	SemiBin	env:MF4semibin
 # SemiBin2	SemiBin2	env:MF4binners
