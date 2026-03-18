@@ -1,8 +1,10 @@
 <p align="center"><img src="/../main/helpers/images/matafiler-logo.png?raw=true" alt="MATAFILER4" width=500 align="center"></img></p>
 
+
+
 ## Introduction
 
-MATAFILER4 is a pipeline developed to
+MATAFILER4 (**M**etagenomic **A**ssembly, **T**axonomic **A**nd **F**unctional Pro**FILER**) is a pipeline developed to:
 - Assemble metagenomes, profile miTags, profile functions, profile taxonomy, build MAGs (metagenomic asssembled genomes) using a variety of approaches (MATAF4.pl)
 - Build a gene catalog based on these assemblies and predicted genes, build abundance matrices from these and annotate the genes functionally (secScripts/geneCat.pl)
 - Merge MAGs into MGS (metagenomic species), build inter- and intra-speciies phylogenies (secScripts/MGS.pl)
