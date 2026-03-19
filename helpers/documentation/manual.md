@@ -141,6 +141,7 @@ MATAFILER4 uses three primary phases to analyse metagenomes:
 	-reProfileFunct [0|1]			redo diamond functional profiling  (Default: 0)
 	-reProfileFuncTogether [0|1]		if any func database needs to be redone, than redo all indicated databases (useful if number of reads changed)  (Default: 0)
 	-diamondCores [#]				number of cores ‘#’ used for diamond run (Default: 12)
+	-diamondMem [#]					memory for diamond run in GB (Default: 7)
 	-DiaParseEvals [#]				evalues at which to accept hits to func database (Default: 1e-7)
 	-DiaSensitiveMode [0|1]			1: run diamond in sensitive mode  (Default: 0)
 	-rmRawDiamondHits [0|1]		1: remove raw diamond hits  (Default: 0)
