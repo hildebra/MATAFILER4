@@ -315,7 +315,7 @@ sub SNPconsensus_vcf{
 	my $minCallQual = $SNPIHR->{minCallQual};#20;
 	#my $SNPstone = $ofasConsDir."SNP.cons.stone";
 	#my $memReq = "20G";
-	my $memReq = $SNPIHR->{memReq};
+	#my $memReq = $SNPIHR->{memReq};
 	my $vcfFile = ""; $vcfFile = $SNPIHR->{vcfFile} if (exists ($SNPIHR->{vcfFile}));
 	my $vcfFileS = ""; $vcfFileS = $SNPIHR->{vcfFileSupp} if (exists ($SNPIHR->{vcfFileSupp}));
 	my $cmdFTag = $SNPIHR->{cmdFileTag};
@@ -411,8 +411,8 @@ sub SNPconsensus_vcf{
 	
 	my $bcramSiz = filsizeMB($tar[0]);
 	my $refSize = filsizeMB($refFA);
-	my $memReqGB = 3; #memory requested by job
-	my @limits = (1500,3500,5500,7500,10000,12000); my @memRperLimit = (5,7,9,11,13,15);
+	my $memReqGB = 20; #memory requested overall
+	my @limits = (1500,3500,5500,7500,10000,12000); my @memRperLimit = (15,20,30,40,60,120);
 	if ($bamcram eq "bam"){ for (my $i=0;$i<@limits;$i++){$limits[$i] *= 1.7;}} #increase limits for bams..
 	for (my $i=0;$i<@limits;$i++){ last if (($bcramSiz+$refSize)<$limits[$i]); $memReqGB = $memRperLimit[$i];}
 	$memReqGB = $memPJob if ($memPJob > 0);;
@@ -565,7 +565,7 @@ sub SNPconsensus_vcf{
 	#die "$run2ctg\n$cmdAll\n";
 	if ($myParL && !$runLocalTmp && $cmdAll ne ""){
 		if ( ($overwrite || !-e "$ofasCons")){
-			my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.cacSNP.sh",$postcmd,1,$memReq."G","Cons$x",join(";",@allDeps2),"",1,[],$QSBoptHR);
+			my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.cacSNP.sh",$postcmd,1,$memReqGB."G","Cons$x",join(";",@allDeps2),"",1,[],$QSBoptHR);
 			$rdep =$dep;
 		}
 	}

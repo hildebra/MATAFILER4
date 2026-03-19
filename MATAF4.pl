@@ -1369,7 +1369,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						smpl => $SmplName,bamcram => $bamcramMap,minDepth => $MFopt{consSNPminDepth},
 						depthF => $coveragePerCtg,firstInSample => 1, #($i == 0 ? 1 : 0)
 						bpSplit => 1e6,runLocal => 1,SeqTech => $map{$curSmpl}{SeqTech},SeqTechSuppl => "",
-						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},memReq => $MFopt{memSNPcall},
+						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
 						dependency => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
 						STOconSNP => $STOsnpCons, STOconSNPsupp => "",
@@ -6655,7 +6655,7 @@ sub scndMap2Genos{
 				cmdFileTag => $bwt2ndMapNmds[$i], minDepth => $MFopt{consSNPminDepth},
 				
 				callSVs => $MFopt{callSVs}, vcfSVfile => "$bwt2outD[$i]/$bamBaseNameS[$i]-smd.SV.vcf", vcfSVfileS => "", callSVsSupp => 0,
-				smpl => $bamBaseNameS[$i], maxCores => $MFopt{maxSNPcores}, memReq => $MFopt{memSNPcall},
+				smpl => $bamBaseNameS[$i], maxCores => $MFopt{maxSNPcores}, #memReq => $MFopt{memSNPcall},
 				bpSplit => 4e5,	runLocal => 1, split_jobs => $MFopt{SNPconsJobsPsmpl}, overwrite => $MFopt{redoSNPcons},
 				minCallQual => $MFopt{SNPminCallQual},
 				);
@@ -7622,9 +7622,10 @@ sub setDefaultMFconfig{
 
 	#SNPs
 	$MFopt{DoConsSNP}=0; $MFopt{DoSuppConsSNP}=0; $MFopt{redoSNPcons} = 0; $MFopt{redoSNPgene} =0; $MFopt{SNPconsJobsPsmpl} = 1; 
-	$MFopt{SNPminCallQual} = 20; $MFopt{memPJob} = 0;
+	$MFopt{SNPminCallQual} = 20; $MFopt{memPJob} = 0; #set to 0 to indicate default estimation
 	$MFopt{saveVCF} = 1; $MFopt{saveConsFastas} = 0;
-	$MFopt{maxSNPcores} = 10; $MFopt{memSNPcall} = 23; $MFopt{consSNPminDepth} = 0; $MFopt{normSNPindels} = 1;
+	#$MFopt{memSNPcall} = 23; -> no longer used
+	$MFopt{maxSNPcores} = 10;  $MFopt{consSNPminDepth} = 0; $MFopt{normSNPindels} = 1;
 	$MFopt{SNPcallerFlag} = "MPI"; #"MPI" mpileup or ".FB" for freebayes
 	$MFopt{callSVs} = 0; #0=not, 1=delly, 2=gridss
 	$MFopt{callSVsSupp} = 0; #same as "callSVs" but for supplemental reads
@@ -7846,7 +7847,7 @@ sub getCmdLineOptions{
 		"getAssemblConsSNP=i" => \$MFopt{DoConsSNP},  #SNPs (onto self assembly) #calculates consensus SNP of assembly (useful for checking assembly gets consensus and Assmbl_grps)
 		"getAssemblConsSNPsuppRds=i" => \$MFopt{DoSuppConsSNP}, #same as getAssemblConsSNP, but SNP calling for support reads
 		"redoAssmblConsSNP=i" => \$MFopt{redoSNPcons},
-		"SNPmemPerJob=i" => \$MFopt{memPJob}, #memory per assigned core, in GB
+		"SNPmem=i" => \$MFopt{memPJob}, #memory per assigned core, in GB
 		"redoGeneExtrSNP=i" => \$MFopt{redoSNPgene},
 		"SNPjobSsplit=i" => \$MFopt{SNPconsJobsPsmpl}, #how many parallel jobs are run on each 
 		"SNPminCallQual=i" => \$MFopt{SNPminCallQual},
@@ -7854,7 +7855,7 @@ sub getCmdLineOptions{
 		"SNPsaveConsFasta=i" => \$MFopt{saveConsFastas}, #Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated..
 		"SNPcaller=s" => \$MFopt{SNPcallerFlag},
 		"SNPcores=i" => \$MFopt{maxSNPcores},
-		"SNPmem=i" => \$MFopt{memSNPcall}, #memory for consensus SNP job in Gb
+		#"SNPmem=i" => \$MFopt{memSNPcall}, #memory for consensus SNP job in Gb
 		"SNPconsMinDepth=i" => \$MFopt{consSNPminDepth}, #how many reads coverage to include position for consensus call?
 		"SNPnormINDEL=i" => \$MFopt{normSNPindels}, #using bcftools norm to left-align indels
 		"SVcaller=i"  => \$MFopt{callSVs}, #calling structural variants: 1=delly, 2=gridss. Default (0).
@@ -7913,7 +7914,7 @@ sub getCmdLineOptions{
 	die "ERROR:: \"-mapSortMem\" argument contains characters: $MFopt{mapSortMemGb}" if ($MFopt{mapSortMemGb} !~ m/[\d-]+/);
 	die "ERROR:: \"-assemblMemory\" argument contains characters: $MFopt{AssemblyMemory}" if ($MFopt{AssemblyMemory} !~ m/[\d-]+/);
 	die "ERROR:: \"-BinnerMem\" argument contains characters: $MFopt{BinnerMem}" if ($MFopt{BinnerMem}  !~ m/[\d-]+/);
-	die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
+	#die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
 	if ($MFopt{MapperMemory} == -1 ){
 		if($MFopt{MapperProg} >2){$MFopt{MapperMemory} = 35 ;
 		} else {$MFopt{MapperMemory} = 20 ;}	
