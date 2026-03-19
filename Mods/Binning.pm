@@ -827,6 +827,7 @@ sub runGenomeFace{
 	$cmd .= "mkdir -p $tmpDir $outD\n";
 	$cmd .= "rm -rf $gfRawD\n"; # clear any partial previous run; genomeface creates this dir itself
 	$cmd .= "sed -E 's|_[0-9]+ |\\t|' $FMGdir/FMGids.txt | awk -F'=' '\$2>1000' > $tmpDir/gfmarkers.txt\n";
+	$cmd .= "[[ ! -s $tmpDir/gfmarkers.txt ]] && echo 'No markers, exiting early.' && exit 1\n";
 	$cmd .= "$GFbin -i $fna -a $jgO -g $tmpDir/gfmarkers.txt -m 1000 -o $gfRawD\n";
 	$cmd .= "awk -F'\\t' '{print \$2 \"\\t\" \$1}' $gfRawD/bins.tsv > $outFile && rm -rf $gfRawD\n";
 	$cmd .= "echo \"$nm\" > $outD/GeFa.sto\n";
