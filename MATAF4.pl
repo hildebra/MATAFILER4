@@ -2956,7 +2956,7 @@ sub runDiamond(){
 		my $globDep = $MFopt{globalDiamondDependence}->{$curDB};
 		$globDep = "" if ($MFopt{globalDiamondDependence}->{$curDB} eq "$shrtDB-1");
 		
-		my $memu = "7G";my $tmpCmd;
+		my $memu = $MFopt{diamondMem} . "G"; my $tmpCmd;
 		if (!-d $outD || !(-e "$out" || -e "$out.gz"|| -e "$out.srt.gz") ){ #diamond alignments
 			$jobName = "_D$shrtDB$JNUM"; 
 			my @preConstr = @{$QSBoptHR->{constraint}};
@@ -7637,6 +7637,7 @@ sub setDefaultMFconfig{
 	$MFopt{maxReqDiaDB} = 6; #max number of databases supported by METAFILER
 	$MFopt{reqDiaDB} = "";#,NOG,MOH,ABR,ABRc,ACL,KGM,PTV,PAB";#,ACL,KGM,ABRc,CZy";#"NOG,CZy"; #"NOG,MOH,CZy,ABR,ABRc,ACL,KGM"   #old KGE,KGB
 	$MFopt{diaEVal} = "1e-7"; $MFopt{diaCores} = 12; ; $MFopt{DiaRmRawHits} = 0; $MFopt{diaRunSensitive} = 0;
+	$MFopt{diamondMem} = 7; #GB memory to request for diamond jobs (qsub --mem)
 	$MFopt{DiaMinAlignLen} = 20; $MFopt{DiaMinFracQueryCov} = 0.1; $MFopt{DiaPercID} =40;
 
 	#gene prediction related
@@ -7865,6 +7866,7 @@ sub getCmdLineOptions{
 		"reProfileFunct=i" => \$MFopt{rewriteDiamond},
 		"reProfileFuncTogether=i" => \$MFopt{rewriteAllIfAnyDiamond}, #if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
 		"diamondCores=i" => \$MFopt{diaCores},
+		"diamondMem=i" => \$MFopt{diamondMem}, # memory in GB for diamond alignment jobs
 		"DiaParseEvals=s" => \$MFopt{diaEVal}, #evalues at which to accept hits to func database
 		"DiaSensitiveMode=i" => \$MFopt{diaRunSensitive},
 		"rmRawDiamondHits=i" => \$MFopt{DiaRmRawHits},
@@ -7914,6 +7916,8 @@ sub getCmdLineOptions{
 	die "ERROR:: \"-assemblMemory\" argument contains characters: $MFopt{AssemblyMemory}" if ($MFopt{AssemblyMemory} !~ m/[\d-]+/);
 	die "ERROR:: \"-BinnerMem\" argument contains characters: $MFopt{BinnerMem}" if ($MFopt{BinnerMem}  !~ m/[\d-]+/);
 	die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
+	die "ERROR:: \"-diamondMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
+	$MFopt{diamondMem} = 7 if ($MFopt{diamondMem} <= 0);
 	if ($MFopt{MapperMemory} == -1 ){
 		if($MFopt{MapperProg} >2){$MFopt{MapperMemory} = 35 ;
 		} else {$MFopt{MapperMemory} = 20 ;}	
