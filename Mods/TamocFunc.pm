@@ -139,6 +139,8 @@ sub checkMFFInstall{
 	#binners
 	checkProg("metabat2 genome binner","metabat2",0);
 	checkProg("SemiBin2 genome binner","SemiBin2",1);
+	checkProg("GenomeFace genome binner", "GenomeFace", 0);
+	checkProg("SCGBinner genome binner", "SCGBinner", 0);
 	#checkProg("MetaDecoder","MetaDecoder",1);
 	
 	checkProg("checkm2 MAG qual","checkm2",0);
