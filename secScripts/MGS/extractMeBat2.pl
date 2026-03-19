@@ -104,7 +104,7 @@ if ($usCheckM2){
 	if ($emptyBin){
 		#system "touch $outFile2";
 		open O,">$outFile2";
-		print O "Name\tCompleteness\tContamination\tCompleteness_Model_Used Translation_Table_Used\tAdditional_Notes\n";
+		print O "Name\tCompleteness\tContamination\tCompleteness_Model_Used\tTranslation_Table_Used\tAdditional_Notes\n";
 		close O;
 
 	} else {
