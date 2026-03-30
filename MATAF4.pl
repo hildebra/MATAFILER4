@@ -7916,13 +7916,9 @@ sub getCmdLineOptions{
 	die "ERROR:: \"-mapSortMem\" argument contains characters: $MFopt{mapSortMemGb}" if ($MFopt{mapSortMemGb} !~ m/[\d-]+/);
 	die "ERROR:: \"-assemblMemory\" argument contains characters: $MFopt{AssemblyMemory}" if ($MFopt{AssemblyMemory} !~ m/[\d-]+/);
 	die "ERROR:: \"-BinnerMem\" argument contains characters: $MFopt{BinnerMem}" if ($MFopt{BinnerMem}  !~ m/[\d-]+/);
-<<<<<<< HEAD
 	#die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
-=======
-	die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
 	die "ERROR:: \"-diamondMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
 	$MFopt{diamondMem} = 7 if ($MFopt{diamondMem} <= 0);
->>>>>>> 1624756017dc962082fd623e5ed1dbdf6807ab5f
 	if ($MFopt{MapperMemory} == -1 ){
 		if($MFopt{MapperProg} >2){$MFopt{MapperMemory} = 35 ;
 		} else {$MFopt{MapperMemory} = 20 ;}	
