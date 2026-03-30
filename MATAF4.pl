@@ -1,11 +1,11 @@
 #!/usr/bin/env perl
-#The Metagenomic Assembly, Genomic Recovery and Assembly Independent Mapping Tool (formerly MATAFILER, now mg-tk)
-#main mg-tk routine
+#The Metagenomic Assembly, Genomic Recovery and Assembly Independent Mapping Tool (MATAFILER)
+#main MATAFILER routine
 # (c) Falk Hildebrand, 2016-2025
 #examples
-#./mg-tk.pl map2tar test/refCtg.fasta,test/refCtg.fasta test1,test2
-#./mg-tk.pl map2tar test/TEC2/v5/TEC2.MM4.BEE.GF.rn.fa TEC2
-#./mg-tk.pl -map dir/map
+#./MATAF4.pl map2tar test/refCtg.fasta,test/refCtg.fasta test1,test2
+#./MATAF4.pl map2tar test/TEC2/v5/TEC2.MM4.BEE.GF.rn.fa TEC2
+#./MATAF4.pl -map dir/map
 
 use warnings;
 use strict;
@@ -7624,7 +7624,7 @@ sub setDefaultMFconfig{
 	$MFopt{DoConsSNP}=0; $MFopt{DoSuppConsSNP}=0; $MFopt{redoSNPcons} = 0; $MFopt{redoSNPgene} =0; $MFopt{SNPconsJobsPsmpl} = 1; 
 	$MFopt{SNPminCallQual} = 20; $MFopt{memPJob} = 0; #set to 0 to indicate default estimation
 	$MFopt{saveVCF} = 1; $MFopt{saveConsFastas} = 0;
-	#$MFopt{memSNPcall} = 23; -> no longer used
+    #$MFopt{memSNPcall} = 23; -> no longer used
 	$MFopt{maxSNPcores} = 10;  $MFopt{consSNPminDepth} = 0; $MFopt{normSNPindels} = 1;
 	$MFopt{SNPcallerFlag} = "MPI"; #"MPI" mpileup or ".FB" for freebayes
 	$MFopt{callSVs} = 0; #0=not, 1=delly, 2=gridss
@@ -7916,13 +7916,9 @@ sub getCmdLineOptions{
 	die "ERROR:: \"-mapSortMem\" argument contains characters: $MFopt{mapSortMemGb}" if ($MFopt{mapSortMemGb} !~ m/[\d-]+/);
 	die "ERROR:: \"-assemblMemory\" argument contains characters: $MFopt{AssemblyMemory}" if ($MFopt{AssemblyMemory} !~ m/[\d-]+/);
 	die "ERROR:: \"-BinnerMem\" argument contains characters: $MFopt{BinnerMem}" if ($MFopt{BinnerMem}  !~ m/[\d-]+/);
-<<<<<<< HEAD
-	#die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
-=======
-	die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
+    #die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
 	die "ERROR:: \"-diamondMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
 	$MFopt{diamondMem} = 7 if ($MFopt{diamondMem} <= 0);
->>>>>>> 1624756017dc962082fd623e5ed1dbdf6807ab5f
 	if ($MFopt{MapperMemory} == -1 ){
 		if($MFopt{MapperProg} >2){$MFopt{MapperMemory} = 35 ;
 		} else {$MFopt{MapperMemory} = 20 ;}	
