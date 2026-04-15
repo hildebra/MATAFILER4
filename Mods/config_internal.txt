@@ -4,8 +4,8 @@
 ## MATAFILER specific C++ progs (hildebrand) 	ESSENTIAL ##
 #rare	rtk2
 rare	[MFLRDir]/bin/./rtk2
-sdm	sdm
-LCA	LCA
+sdm	[MFLRDir]/bin/./sdm
+LCA	[MFLRDir]/bin/./LCA
 readCov	[MFLRDir]/bin/./rdCover
 MSAfix	[MFLRDir]/bin/./MSAfix
 canopy	cc.bin	env:MF4binners
@@ -122,7 +122,7 @@ kmerFreqs	perl [MFLRDir]/secScripts/composition/calc.kmerfreq.pl
 kmerGeneWin	perl [MFLRDir]/secScripts/composition/kmer_Ngenes.pl
 maxBinFrmt	perl [MFLRDir]/secScripts/MGS/maxBin_rewrk.pl
 makeCanoGuides_scr	perl [MFLRDir]/secScripts/MGS/makeCanoGuides.pl
-mb2qualCheck_scr	perl [MFLRDir]/secScripts/MGS/extractMeBat2.pl
+mb2qualCheck_scr	perl [MFLRDir]/secScripts/assemblies/checkBinQual.pl
 taxPerMGS_scr	perl [MFLRDir]/secScripts/MGS/taxPerMGS.pl
 taxPerMGSgtdb_scr	perl [MFLRDir]/secScripts/MGS/taxPerMGS_gtdb.pl
 filtDeepCan	perl [MFLRDir]/secScripts/MGS/filterDeepCan.pl
@@ -224,7 +224,8 @@ raxmlng	raxml-ng	env:MF4phylo
 clustalo	clustalo
 trimal	trimal	env:MF4phylo
 mafft	mafft	env:MF4phylo
-MUSCLE5	muscle
+MUSCLE5	muscle	env:MF4phylo
+FAMSA	famsa	env:MF4phylo
 raxml	raxmlHPC-PTHREADS-SSE3
 fasttree	FastTreeMP	env:MF4phylo
 veryfasttree	VeryFastTree	env:MF4phylo
@@ -288,6 +289,9 @@ semibinGTDB	[DBDir]/mmseqs2-GTDB/
 checkm	checkm
 #checkm2 requires to be installed in a conda environment called "checkm2" (same as in checkm2 github installation docs)
 checkm2	checkm2	env:MF4checkm2
+
+#growth rates
+pilea	pilea	env:MF4binners
 
 ## marker gene detection/ usage ##
 #		miTag related

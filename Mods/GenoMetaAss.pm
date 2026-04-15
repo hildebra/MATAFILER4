@@ -6,24 +6,32 @@ use strict;
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 
 use Exporter qw(import);
-our @EXPORT_OK = qw(convertMSA2NXS gzipwrite gzipopen renameFastaCnts renameFastqCnts readNCBItax   lcp prefix_find
+our @EXPORT_OK = qw(
+		gzipwrite gzipopen lcp prefix_find
+		fileGZe fileGZs filsizeMB
 		
 		readMap 
+		systemW
+		
 		
 		readMapS getDirsPerAssmblGrp checkSeqTech is3rdGenSeqTech 
 		resetAsGrps
+		getRawSeqsAssmGrp getCleanSeqsAssmGrp 
+		addFileLocs2AssmGrp iniCleanSeqSetHR hasSuppRds
+		
+		getAssemblPath getAssemblGFF getAssemblContigs
+		
 		renameFastHD  prefixFAhd parse_duration resolve_path
-		clenSplitFastas getAssemblPath getAssemblGFF getAssemblContigs
-		fileGZe fileGZs filsizeMB
+		clenSplitFastas 
+		
 		readClstrRev  readClstrRevGenes readClstrRevContigSubset readClstrRevSmplCtgGenSubset
-		unzipFileARezip systemW is_integer 
+		unzipFileARezip  is_integer 
 		readGFF reverse_complement reverse_complement_IUPAC
 		
-		readFasta 
-		writeFasta readFastHD splitFastas 
+		readFasta
+		writeFasta readFastHD splitFastas  renameFastaCnts renameFastqCnts
+		
 		readTabByKey convertNT2AA runDiamond median mean quantile
-		getRawSeqsAssmGrp getCleanSeqsAssmGrp addFileLocs2AssmGrp iniCleanSeqSetHR
-		hasSuppRds
 		 );#Binning Related
 
 
@@ -439,19 +447,6 @@ sub is_integer {
 
 
 
-sub readNCBItax($){
-	#reads in Jaime's ete tax file
-	my ($tIn)  = @_;
-	open I,"<$tIn";
-	while (my $l = <I>){
-		chomp $l;
-		my @spl = split (/\t/,$l);
-		my $txID = $spl[0];
-		my $rnksLvl = $spl[2];
-		my $rnks = $spl[3];
-	}
-	close I;
-}
 
 sub readFastHD{#only reads headers
 	my $inF = $_[0];
@@ -1069,6 +1064,7 @@ sub resolve_path($){
 
 sub is3rdGenSeqTech{
 	my $curReadTec = $_[0];
+	if ($curReadTec eq ""){return -1;}
 	my $is3rdGen = 0; #important flag for long reads (Oxford Nanopore / PacBio)
 	$is3rdGen = 1 if ($curReadTec eq "ONT" || $curReadTec eq "PB");
 	return $is3rdGen;
@@ -1083,6 +1079,46 @@ sub checkSeqTech{
 		die "$msg: Can't recognize SeqTech: \"$inT\"\nHas to be one of \"ONT\",\"PB\", \"proto\",\"SLR\", \"ill\", \"miSeq\", \"hiSeq\", \"GAII\",\"GAII_solexa\" or \"\"\n\n";
 	}
 }
+
+
+sub checkAssmblGrp{
+	my ($mapHR) = @_;
+	my %map = %{$mapHR};
+	
+	my %memberAGs = %{$map{opt}{asGrpMemsHr}};
+	foreach my $k (keys %memberAGs){
+		my %curSeqTech; my %curSeqTechGen;
+		my %curSeqTechSupp; my %curSeqTechGenSupp;
+		foreach (@{$memberAGs{$k}}){  
+			$curSeqTech{ $map{$_}{SeqTech} } ++;
+			$curSeqTechGen{ is3rdGenSeqTech($map{$_}{SeqTech})  } ++;
+			if ($map{$_}{SupportReads} ne ""){
+				$map{$_}{SupportReads} =~ m/^([^:]+):/;
+				$curSeqTechSupp{$1}++;
+				$curSeqTechGenSupp{ is3rdGenSeqTech($1)  } ++;
+			}
+		}
+		#DEBUG
+		if ( 0  #just added to allow for || statements easily removable
+			#|| scalar(keys(%curSeqTechGen)) > 1 ||  scalar(keys(%curSeqTechGenSupp)) > 1 
+			|| ( exists($curSeqTechGenSupp{0}) && exists($curSeqTechGen{0}))  
+			|| ( exists($curSeqTechGenSupp{1}) && exists($curSeqTechGen{1})) 
+			|| ( exists($curSeqTechGenSupp{0}) && exists($curSeqTechGen{1}))
+			){
+			my %genNames = ("0"=>"2nd", "1"=>"3rd");	
+			print STDERR "Fatal error in map:\nIt seems that assembly group $k contains a mix of second and third gen seq techs:\nPrimary input: ";
+			foreach my $k(keys %curSeqTech){print "$k(N=$curSeqTech{$k}) " if ($k ne "");}print "\n  Generation : ";
+			foreach my $k(keys %curSeqTechGen){print "$genNames{$k}(N=$curSeqTechGen{$k}) " if ($k != -1);}print "\nSuppl input: ";
+			foreach my $k(keys %curSeqTechSupp){print "$k(N=$curSeqTechSupp{$k}) " if ($k ne "");}print "\n  Generation: ";
+			foreach my $k(keys %curSeqTechGenSupp){print "$genNames{$k}(N=$curSeqTechGenSupp{$k}) " if ($k != -1);}print "\n";
+			print "Assuming this is for hybrid assemblies, MATAFILER only supports 2nd gen for primary reads (e.g. illumina) and 3rd gen for suppl reads (e.g. PacBio). Will exit until fixed\n";
+			die ;
+		}
+		
+		
+	}
+}
+
 sub readMap{
 	my $inF = $_[0];
 	my $Scnt = defined $_[1] ? $_[1] : 0;
@@ -1257,9 +1293,15 @@ sub readMap{
 		$ret{$curSmp}{mapFinSmpl} = $curSmp;
 		$ret{$curSmp}{assFinSmpl} = $curSmp;
 		#ONT,PB,proto,miSeq,GAII etc
-		if ($SeqTech >= 0) { my $RT=$spl[$SeqTech];checkSeqTech($RT);$ret{$curSmp}{SeqTech} = $RT; } else {$ret{$curSmp}{SeqTech} = "";}
+		if ($SeqTech >= 0) { 
+			my $RT=$spl[$SeqTech];checkSeqTech($RT);$ret{$curSmp}{SeqTech} = $RT; 
+			if ($RT ne "" && $ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq ""){
+				die "For sample $curSmp, found read tech, but no primary input file location given. This can lead to undescribed behaviour, please remove readTech entry (set to \"\"), before proceeding.\n";
+			}
+		} else {$ret{$curSmp}{SeqTech} = "";}
 		if ($SeqTechS >= 0) { my $RT=$spl[$SeqTechS];checkSeqTech($RT);$ret{$curSmp}{SeqTechSingl} = $RT; } else {$ret{$curSmp}{SeqTechSingl} = "";}
 		
+		$ret{$curSmp}{hasPrimaryRds}= 1;$ret{$curSmp}{hasPrimaryRds} = 0 if ($ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq "");
 		
 		if ($rLenCol >= 0){$ret{$curSmp}{readLength} = $spl[$rLenCol];} else {$ret{$curSmp}{readLength} = 0;}
 		if ($ExcludeAssemble >= 0){$ret{$curSmp}{ExcludeAssem} = $spl[$ExcludeAssemble];} else {$ret{$curSmp}{ExcludeAssem} = 0;}
@@ -1312,12 +1354,12 @@ sub readMap{
 			$trackAGs{$curAG} = $curSmp;  push(@{$memberAGs{$curAG}},$curSmp);
 			$agBP{$curAG}{prodRun} = "";
 			if (exists($oldAssmGrps{$curAG})){
-				die "Warning: assembly group \"$curAG\" seems to exist in one of the previous maps. This is currently not supported for MATAFILER, please make sure all assembly groups are unique to a single map!\n";
+				die "Warning: assembly group \"$curAG\" seems to exist in one of the previous maps. This is currently not supported for MATAFILER, please make sure all assembly groups are uniquely named across maps!\n";
 			}
 			#print $agBP{$spl[$AssGroupCol]}{CntAimAss}. " :$spl[$AssGroupCol]\n" ;
 		} else {
 			if (exists ($trackAGs{$curAG})){ #should not exist!
-				die "Numerical AssmblGrps defined in .map (e.g. $curAG)? Please amend as this is clashing with autogenerated IDs\n";
+				die "Numerical AssmblGrps defined in .map ($curAG)? Please amend as this is clashing with autogenerated IDs\n";
 			}
 			$ret{$curSmp}{AssGroup} = $curAG; $agBP{$curAG}{CntAimAss}=0;$agBP{$curAG}{prodRun} = "";
 		}
@@ -1374,6 +1416,7 @@ sub readMap{
 		push(@order,$curSmp);
 		#print $spl[0]."\n";
 	}
+	close I; #done reading mapping file
 	
 	#insert final sample destination for all AssGroups and MapGroups
 	foreach my $k (keys %memberMGs){
@@ -1390,7 +1433,7 @@ sub readMap{
 	#my @forbiddenSmplIDs = qw(opt totSmpls smpl_order inDir outDir baseID mocatFiltPath);
 	
 	#die();
-	close I;
+	#if (exists($ret{opt})) {die "Sample ID \"opt\" seems to have been used.. this is a reserved keyword, please rename sample\n";}
 	$ret{opt}{folderStruct} = $infFoldClass;
 	$ret{opt}{inDir} = join(",",@dir2dirsA) ;#if ($dir2dirs ne "");
 	$ret{opt}{outDir} = $dir2out ;#if ($dir2out ne "");
@@ -1407,6 +1450,10 @@ sub readMap{
 	#$ret{mocatFiltPath} = $mocatFiltPath if ($mocatFiltPath ne "");
 	#@order = keys %agBP;die "@order\n";
 	my $asGrpHr = emptyAssGrpsObj(\%agBP);
+	$ret{opt}{asGrpHr} = $asGrpHr;
+	$ret{opt}{asGrpMemsHr} = \%memberAGs;
+	checkAssmblGrp(\%ret);
+	
 
 	return (\%ret,$asGrpHr);
 }
@@ -1478,34 +1525,6 @@ sub writeFasta{
 	}
 	close O;
 	#die $of;
-}
-
-sub convertMSA2NXS{
-	my $filename = $_[0];
-	my $outF = "";
-	$outF = $_[1] if (@_>1);
-	my $hr = readFasta($filename);
-	my %FNAs = %{$hr};
-	my @kk = keys %FNAs;
-	my $ostr="";
-	my $numtaxa = scalar(@kk);
-	my $maxlength = length($FNAs{$kk[0]}); #all seqs should be same length in MSA format Format datatype=dna missing=? gap=-;
-	$ostr = "#NEXUS\nBegin data;\nDimensions ntax=$numtaxa nchar=$maxlength;\nFormat datatype=dna missing=? gap=-;\nMatrix\n";
-
-	foreach my $k (@kk) {
-		my $len=length$FNAs{$k};
-		die "Error nexus format conversion: $len != $maxlength in $k\n" if ($len != $maxlength);
-		#if ($len<$maxlength) { my $add=$maxlength-$len; for (my $j=0; $j<$add; $j++) {$seqs[$i]=$seqs[$i].'-';}}
-		$ostr.= "\n$k\t$FNAs{$k}";
-	}
-
-	$ostr .= "\n;\nend;";
-	if ($outF ne ""){
-		open O,">$outF" or die "Can't open nxs out file $outF";
-		print O $ostr;
-		close O;
-	}
-	return $ostr;
 }
 
 
