@@ -3651,6 +3651,8 @@ sub sdmClean(){
 	$map{$curSmpl}{cleanSeqSet} = $cleanSeqSetHR;
 	return ($jobName);
 }
+
+
 sub mocat_reorder(){
 	my($ar1,$ar2,$singlAr,$inJob) = @_;
 	
@@ -7577,7 +7579,7 @@ sub setDefaultMFconfig{
 	$MFopt{trimAdapters} =1;
 	$MFopt{usePorechop} = 0;
 	$MFopt{SDMlogQualvsLen} = 0; #sdm log of qual per read vs length (eg for PacBio qual checks..)
-	$MFopt{sdmCores} = 4; #sdm specific cores  #currently set to 1, sdm multi thread instability
+	$MFopt{sdmCores} = 6; #sdm specific cores  #currently set to 1, sdm multi thread instability
 	$MFopt{sdm_opt} = {}; #empty object that can be used to modify default sdm parameters
 	$MFopt{tmpSdmminSL} =0; $MFopt{tmpSdmmaxSL}=0;
 	$MFopt{gzipSDMOut} = 1;#zip sdm filtered files
