@@ -24,7 +24,7 @@
 use warnings;
 use strict;
 
-use Mods::GenoMetaAss qw(readGFF readClstrRev reverse_complement_IUPAC readMapS renameFastHD convertNT2AA);
+use Mods::GenoMetaAss qw(readGFF readClstrRev reverse_complement_IUPAC readMapS renameFastHD );
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 
 

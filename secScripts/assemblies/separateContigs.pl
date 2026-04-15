@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 #builds from a contig file several stats to seperate contigs into single species
 #$subparts =~ a=gene abundance g=GC e=essential k=kmer m=metabat s=microsats
 #./separateContigs.pl /g/scb/bork/hildebra/SNP/GNMass/alien-11-374-0/
@@ -6,14 +6,14 @@ use warnings;
 use strict;
 #use Scalar::Util qw(looks_like_number);
 use Getopt::Long qw( GetOptions );
+use Mods::GenoMetaAss qw(systemW is_integer reverse_complement_IUPAC gzipopen fileGZs fileGZe);
+use Mods::IO_Tamoc_progs qw(getProgPaths );
+use Mods::phyloTools qw( getE100);
 
 
 sub readFasta;
 sub geneAbundance; sub runMaxBin;
 sub findMicrSat;
-use Mods::GenoMetaAss qw(systemW is_integer reverse_complement_IUPAC gzipopen fileGZs fileGZe);
-use Mods::IO_Tamoc_progs qw(getProgPaths );
-use Mods::phyloTools qw( getE100);
 
 
 die "Not enough input args\n" if (@ARGV < 2);
@@ -24,7 +24,7 @@ my $readLength = 150;#$ARGV[3]; #primary read length
 my $readLengthSup = 9000; # support reads length, eg PacBio would be ~9000
 my $tmpD = "";#$inD."/tmp/";$tmpD =~ s/\$/\\\$/g;$tmpD = $ARGV[4] if (@ARGV > 4);#die "$tmpD\n";
 my $Nthreads = 1; #$Nthreads = $ARGV[5] if (@ARGV > 5);
-
+my $SmplNm = "";
 
 GetOptions(
 	"threads=i" => \$Nthreads,
@@ -34,6 +34,7 @@ GetOptions(
 	"subparts=s" => \$subparts,
 	"readLength=i" => \$readLength,
 	"readLengthSup=i" => \$readLengthSup,
+	"smplID=s" => \$SmplNm,
 	
 );
 if ($tmpD eq ""){
@@ -71,23 +72,25 @@ system "mkdir -p $tmpD" unless (-d $tmpD);
 
 #gzipped prot/gene files need to be unzipped for hmms etc
 my $unzpped=0;
+
+if ($subparts =~ m/GgFE4/){
+	$proteinsAA .= ".gz" if (-e "$proteinsAA.gz" && !-e $proteinsAA);
+	$genesNT .= ".gz" if (-e "$genesNT.gz" && !-e $genesNT);
+
+	if ($proteinsAA =~ m/\.gz$/){
+		my $newAA = "$tmpD/protsAA.faa"; $unzpped=1;
+		my $cmd = "$pigzBin -d -p $Nthreads -c $proteinsAA > $newAA;";
+		systemW $cmd;
+		$proteinsAA = $newAA;
+	}
+	if ($genesNT =~ m/\.gz$/){
+		my $newNT = "$tmpD/genesNT.fna"; $unzpped=1;
+		my $cmd = "$pigzBin -d -p $Nthreads -c $genesNT > $newNT;";
+		systemW $cmd;
+		$genesNT = $newNT;
+	}
+}
 $genesGFF .= ".gz" if (-e "$genesGFF.gz" && !-e $genesGFF);
-$proteinsAA .= ".gz" if (-e "$proteinsAA.gz" && !-e $proteinsAA);
-$genesNT .= ".gz" if (-e "$genesNT.gz" && !-e $genesNT);
-
-
-if ($proteinsAA =~ m/\.gz$/){
-	my $newAA = "$tmpD/protsAA.faa"; $unzpped=1;
-	my $cmd = "$pigzBin -d -p $Nthreads -c $proteinsAA > $newAA;";
-	systemW $cmd;
-	$proteinsAA = $newAA;
-}
-if ($genesNT =~ m/\.gz$/){
-	my $newNT = "$tmpD/genesNT.fna"; $unzpped=1;
-	my $cmd = "$pigzBin -d -p $Nthreads -c $genesNT > $newNT;";
-	systemW $cmd;
-	$genesNT = $newNT;
-}
 if ($genesGFF =~ m/\.gz$/){
 	my $newGFF = "$tmpD/genes.gff"; $unzpped=1;
 	my $cmd = "$pigzBin -d -p $Nthreads -c $genesGFF > $newGFF;";
@@ -100,8 +103,8 @@ if ($genesGFF =~ m/\.gz$/){
 
 #figure out mapping names
 die "Mapping is not done yet (or not copied)\n" if (!-e "$inD/mapping/done.sto");
-my $SmplNm = `cat $inD/mapping/done.sto`;
-$SmplNm =~ s/-smd.bam\n?//;
+#my $SmplNm = `cat $inD/mapping/done.sto`;
+#$SmplNm =~ s/-smd.bam\n?//;
 #my $inBAM = $inD."mapping/$SmplNm-smd.bam";
 #die "$coverage\n";
 #system "cp $inScaffs $outD";
@@ -113,10 +116,11 @@ $SmplNm =~ s/-smd.bam\n?//;
 ###############################   Coverage per gene  ###############################
 
 
-my $coverage = $inD."mapping/$SmplNm-smd.bam.coverage";
-geneAbundance($coverage,0,$readLength) if ($subparts =~ m/a/);
-my $covSup = $inD."mapping/$SmplNm.sup-smd.bam.coverage";
-geneAbundance($covSup,1,$readLengthSup) if ($subparts =~ m/a/ && (-s $covSup || -s "$covSup.gz" ) );
+
+if ($subparts =~ m/a/){
+	geneAbundance($inD,0,$readLength) ;
+	geneAbundance($inD,1,$readLengthSup);
+}
 #print "$covSup\n";
 
 ###############################   GC content  ###############################
@@ -135,7 +139,6 @@ if ((!-e "$outD/scaff.GC.gz" || !-e "$outD/scaff.pergene.GC.gz"|| !-e "$outD/sca
 } elsif ($subparts =~ m/g/) {
 	print "GC content already calculated\n";
 }
-
 ###############################   essential GTDB proteins  ###############################
 my $oDess = "$outD/ess100genes/";my $outDFMG = "$outD/FMG/"; my $outDGTDB = "$outD/GTDBmg/";
 if ($subparts =~ m/G/ && !-e "$outDGTDB/marker_genes_meta.tsv"){ #GTDB markers, Jogi
@@ -286,7 +289,21 @@ sub calcGeneCov($ $ $){
 }
 
 sub geneAbundance{
-	my ($inF, $isSupport, $readL) = @_;
+	my ($inD, $isSupport, $readL) = @_;
+	
+	my $oPrefix = "Coverage";
+	my $inF = $inD."mapping/$SmplNm-smd.bam.coverage";
+	if ($isSupport){
+		$inF = $inD."mapping/$SmplNm.sup-smd.bam.coverage";
+		$oPrefix = "Cov.sup";
+	}
+
+	
+	if (!fileGZe($inF)){
+		print "Could not find $inF ($isSupport)\n";
+		return;
+	}
+	print "prefi: $oPrefix $isSupport\n";
 	#die "$inF\n";
 	#my $hr = readGFF($inD."assemblies/metag/genePred/genes.gff");
 	my $outF = $inF . ".pergene"; 	my $outF2 = $inF . ".percontig";	
@@ -294,8 +311,6 @@ sub geneAbundance{
 	my $outF5 = $inF . ".count_pergene"; my $outF6 = $inF . ".median.pergene";
 	my $outF7 = $inF . ".median.percontig";
 	my $fileEnd2 = "";
-	my $oPrefix = "Coverage";
-	$oPrefix = "Cov.sup" if ($isSupport);
 	my $outFfin = $outDab . "$oPrefix.pergene$fileEnd2"; 	my $outF2fin = $outDab . "$oPrefix.percontig$fileEnd2";	
 	my $outF3fin = $outDab . "$oPrefix.window$fileEnd2";	my $outF4fin = $outDab . "GeneStats.txt";	
 	my $outF5fin = $outDab . "$oPrefix.count_pergene$fileEnd2";	my $outF6fin = $outDab . "$oPrefix.median.pergene$fileEnd2";
@@ -304,7 +319,7 @@ sub geneAbundance{
 	#print $stone."\n\n";
 	my $inFG = $inF.".gz";
 	if ( fileGZe( $outF7fin)  && fileGZs($outFfin)  && -e $stone){
-		print "Coverage $isSupport was already calculated in $outDab\n";
+		print "Coverage ($isSupport) was already calculated in $outDab\n";
 		#some cleanup operations.. good to run, if already here..
 		if (-s $inFG && -s $inF){system "rm -f $inF";}
 		if (-s $outFfin && !-s "$outFfin.gz"){
@@ -354,4 +369,5 @@ sub geneAbundance{
 	systemW($clnCmd);
 	systemW "touch $stone\n";
 	#print $stone."\n\n";
+	return;
 }

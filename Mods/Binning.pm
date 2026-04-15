@@ -2,7 +2,7 @@ package Mods::Binning;
 use Exporter qw(import);
 our @EXPORT_OK = qw(
 				runMetaBat runSemiBin  runMetaDecoder  runGenomeFace runSCGBinner
-				runCheckM runCheckM2 
+				runCheckM runCheckM2 MB2N50
 				getBinSubdirName
 				createBin2 createBinFAA createBinCtgs
 				readMGS readMGSrev deNovo16S readMGSrevRed minQualFilter 
@@ -521,25 +521,25 @@ sub createBinFAA{
 	my $suffix = "faa";
 	$suffix = $_[3] if (@_ > 3);
 	print "Reading reference MGS $cnopyF\n";
-	my $hr = readMGS($cnopyF);my %clust = %{$hr};
+	my $clustHR = readMGS($cnopyF);#my %clust = %{$hr};
 	print "Reading ref FAA $refFA\n";
-	$hr = readFasta($refFA,1);
-	my %FAA = %{$hr};
+	my $faaHR = readFasta($refFA,1);
+	#my %FAA = %{$faaHR};
 	
 	system "mkdir -p $binD" unless (-d $binD);
-	foreach my $cl (sort keys %clust){
+	foreach my $cl (sort keys %{$clustHR}){
 		my $oF = "$binD/$cl.$suffix";
-		my @refG = @{$clust{$cl}};
+		my @refG = @{$clustHR->{$cl}};
 		my %alreadySeen;
 		my $ostr = ""; my $gcnt=0;
 		foreach my $rg (@refG){
-			unless(exists($FAA{$rg})){
+			unless(exists($faaHR->{$rg})){
 				print "Can't find gene $rg in gene cat\n" ;
 				next;
 			}
 			my $rn = $rg; $rn =~ s/://;
 			next if (exists($alreadySeen{$rn}));
-			$ostr .= ">$rn\n$FAA{$rg}\n";
+			$ostr .= ">$rn\n$faaHR->{$rg}\n";
 			$alreadySeen{$rn} = 1;
 			$gcnt ++;
 		}
@@ -549,6 +549,52 @@ sub createBinFAA{
 			close O;
 		}
 	}
+}
+
+
+
+
+sub MB2N50($){
+	my ($hr) = @_;
+	my %ret;
+	my %M = %{$hr};
+	my %sizes_to_shorthand = (1000     => '1K',
+							  10000    => '10K',
+							  100000   => '100K',
+							  1000000  => '1M',
+							  10000000 => '10M');
+	foreach my $k(keys(%M)){
+		my @mem = @{$M{$k}};
+		my $totL=0; my $ctgs=0; my @lengs;
+		#die @mem;
+		foreach my $x (@mem){
+			$x =~ m/_L=(\d+)=/;
+			push(@lengs,$1);
+			$totL+=$1; $ctgs++;
+		}
+		my $meanL = $totL/$ctgs;
+		
+		$ret{$k}{tL} = $totL; $ret{$k}{meanL} = $meanL;$ret{$k}{cN} = $ctgs;
+		# find number of sequences above certain sizes
+		foreach my $size (1000,10000,100000,1000000){
+			$ret{$k}{$sizes_to_shorthand{$size}}=0;
+			foreach my $l (@lengs){
+				$ret{$k}{$sizes_to_shorthand{$size}} ++ if ($l>=$size);
+			}
+		}
+		#and find N50
+		@lengs = sort { $a <=> $b } @lengs;
+		my $N20 = int ($totL *0.2); my $N50 = int ($totL *0.5);my $N80 = int ($totL *0.8);
+		my $cumL=0;
+		foreach my $l (@lengs){
+			$cumL += $l;
+			if (!exists($ret{$k}{N20}) && $cumL >= $N20){$ret{$k}{N20} = $l;}
+			if (!exists($ret{$k}{N50}) && $cumL >= $N50){$ret{$k}{N50} = $l;}
+			if (!exists($ret{$k}{N80}) && $cumL >= $N80){$ret{$k}{N80} = $l;}
+		}
+
+	}
+	return \%ret;
 }
 
 

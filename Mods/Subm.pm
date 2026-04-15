@@ -87,7 +87,10 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		#$time = "00:45:00";
 		$optHR->{useShortQueue}=0;
 	}
-	my @jspl = split(";",$waitJID); @jspl = grep /\S/, @jspl;
+	my @jspl = split(";",$waitJID); 
+	my %jhash; $jhash{$_}++ for (@jspl);  #remove duplicates
+	@jspl = keys %jhash;
+	@jspl = grep /\S/, @jspl; #and empty entries..
 
 	if ($cwd ne "" && !-d $cwd){system "mkdir -p $cwd";}
 	#if ($memory > 250001){$queues = "\"scb\"";}
@@ -130,6 +133,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		#}
 		if (length($waitJID) >3 && @jspl > 0) {
 			for (@jspl) {s/$rTag//;}
+			
 			#$xtra .= "--dependency=afterok:".join(":",@jspl)." " if (@jspl > 0);
 			if ($optHR->{afterAny}){
 				print O "#SBATCH --dependency=afterany:".join(":",@jspl)."\n" ;

@@ -6,11 +6,57 @@ use strict;
 
 
 use Exporter qw(import);
-our @EXPORT_OK = qw(runRaxMLng runRaxML readFMGdir prep40MGgenomes prepNOGSETgenomes getE100 getGenoGenes getFMG renameFMGs 
+our @EXPORT_OK = qw(convertMSA2NXS runRaxMLng runRaxML readFMGdir prep40MGgenomes prepNOGSETgenomes 
+			getE100 getGenoGenes getFMG renameFMGs readNCBItax
 			runFasttree runVeryFasttree runQItree fixHDs4Phylo getGenoName calcDisPos2 getTreeLeafs filterMSA MSA);
 use Mods::GenoMetaAss qw(filsizeMB systemW readFasta renameFastHD gzipwrite gzipopen);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::FuncTools qw(assignFuncPerGene readGene2Func);
+
+
+
+sub readNCBItax($){
+	#reads in Jaime's ete tax file
+	my ($tIn)  = @_;
+	open I,"<$tIn";
+	while (my $l = <I>){
+		chomp $l;
+		my @spl = split (/\t/,$l);
+		my $txID = $spl[0];
+		my $rnksLvl = $spl[2];
+		my $rnks = $spl[3];
+	}
+	close I;
+}
+
+sub convertMSA2NXS{
+	my $filename = $_[0];
+	my $outF = "";
+	$outF = $_[1] if (@_>1);
+	my $hr = readFasta($filename);
+	my %FNAs = %{$hr};
+	my @kk = keys %FNAs;
+	my $ostr="";
+	my $numtaxa = scalar(@kk);
+	my $maxlength = length($FNAs{$kk[0]}); #all seqs should be same length in MSA format Format datatype=dna missing=? gap=-;
+	$ostr = "#NEXUS\nBegin data;\nDimensions ntax=$numtaxa nchar=$maxlength;\nFormat datatype=dna missing=? gap=-;\nMatrix\n";
+
+	foreach my $k (@kk) {
+		my $len=length$FNAs{$k};
+		die "Error nexus format conversion: $len != $maxlength in $k\n" if ($len != $maxlength);
+		#if ($len<$maxlength) { my $add=$maxlength-$len; for (my $j=0; $j<$add; $j++) {$seqs[$i]=$seqs[$i].'-';}}
+		$ostr.= "\n$k\t$FNAs{$k}";
+	}
+
+	$ostr .= "\n;\nend;";
+	if ($outF ne ""){
+		open O,">$outF" or die "Can't open nxs out file $outF";
+		print O $ostr;
+		close O;
+	}
+	return $ostr;
+}
+
 
 
 sub zorroFilter{
@@ -70,6 +116,11 @@ sub MSA{
 		$algo = "-super5" if ($numSeq > 300); #just too slow otherwise..
 		my $MUSCLE5Bin = getProgPaths("MUSCLE5");
 		$cmd = "$MUSCLE5Bin $algo $tmpInMSA -output $tmpOutMSA2 -threads $ncore ;"; #
+		#cat input.fa | sed 's/*$//g' | sed 's/\.$//g' > input.clean.fa
+	} elsif ($clustalUse == 5) {
+		#FAMSA
+		my $FAMSAbin = getProgPaths("FAMSA");
+		$cmd = "$FAMSAbin -t $ncore $tmpInMSA $tmpOutMSA2  ;"; #
 		#cat input.fa | sed 's/*$//g' | sed 's/\.$//g' > input.clean.fa
 	} else {
 		die "msa option ($clustalUse) unknown)\n";
