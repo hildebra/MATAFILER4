@@ -1826,6 +1826,7 @@ sub DiaPostProcess(){
 	#die;
 	my $mrgDiScr = getProgPaths("mrgDia_scr");
 	my @DBS = split/,/,$MFopt{reqDiaDB};
+	my $mapFiles = $MFconfig{mapFile};
 	foreach my $DB (@DBS){
 		$progStats{$DB}{DiaDBSearchCompl} =0 unless (exists($progStats{$DB}{DiaDBSearchCompl}));
 		$progStats{$DB}{DiaDBSearchIncomplete}=0 unless (exists($progStats{$DB}{DiaDBSearchIncomplete}));
@@ -1833,7 +1834,7 @@ sub DiaPostProcess(){
 		my $refDone = 0; $refDone = int(getFileStr($countFile)) if (-e $countFile);
 		next if (!exists($progStats{$DB}{DiaDBSearchCompl}) || $progStats{$DB}{DiaDBSearchCompl} <= $refDone );
 		print "$DB :: $progStats{$DB}{DiaDBSearchCompl} ($refDone previously done)\n";
-		$cmd .= "$mrgDiScr $baseOut $DB\necho $progStats{$DB}{DiaDBSearchCompl} > $countFile\n" if ($progStats{$DB}{DiaDBSearchCompl}>= 1 );
+		$cmd .= "$mrgDiScr $baseOut $DB $mapFiles\necho $progStats{$DB}{DiaDBSearchCompl} > $countFile\n" if ($progStats{$DB}{DiaDBSearchCompl}>= 1 );
 		#`echo $progStats{$DB}{DiaDBSearchCompl} > $countFile`;
 		#print "$DB: complete $progStats{$DB}{DiaDBSearchCompl} >= incomplete $progStats{$DB}{DiaDBSearchIncomplete}\n"
 	}
@@ -7615,7 +7616,7 @@ sub setDefaultMFconfig{
 	$MFopt{filterHostKr2QuickMode} = "";# "--quick "; deactivated for now..
 	$MFopt{hostileIndex} = "human-t2t-hla";
 	$MFopt{globalKraTaxkDB} = "";
-	$MFopt{globalDiamondDependence} = {CZy=>"",MOH2 => "", MOH=>"",NOG=>"",ABR=>"",ABRc=>"",KGB=>"",KGE=>"",ACL=>"",KGM=>"", PTV=>"", PAB => ""};
+	$MFopt{globalDiamondDependence} = {CZy=>"",MOH2 => "", MOH=>"",NOG=>"",ABR=>"",ABRc=>"",KGB=>"",KGE=>"",ACL=>"",KGM=>"", PTV=>"", PAB => "", URE=>"", URacc=>"", AMI=>""};
 	
 
 
@@ -7635,7 +7636,7 @@ sub setDefaultMFconfig{
 	#Func annotation
 	$MFopt{DoDiamond} = 0; $MFopt{rewriteDiamond} =0; $MFopt{redoDiamondParse} = 0; #redoes matching of reads; redoes interpretation
 	$MFopt{rewriteAllIfAnyDiamond}=0;
-	$MFopt{maxReqDiaDB} = 6; #max number of databases supported by METAFILER
+	$MFopt{maxReqDiaDB} = 6; #max number of databases supported by MATAFILER
 	$MFopt{reqDiaDB} = "";#,NOG,MOH,ABR,ABRc,ACL,KGM,PTV,PAB";#,ACL,KGM,ABRc,CZy";#"NOG,CZy"; #"NOG,MOH,CZy,ABR,ABRc,ACL,KGM"   #old KGE,KGB
 	$MFopt{diaEVal} = "1e-7"; $MFopt{diaCores} = 12; ; $MFopt{DiaRmRawHits} = 0; $MFopt{diaRunSensitive} = 0;
 	$MFopt{diamondMem} = 7; #GB memory to request for diamond jobs (qsub --mem)
@@ -7874,7 +7875,7 @@ sub getCmdLineOptions{
 		"DiaMinAlignLen=i" => \$MFopt{DiaMinAlignLen},
 		"DiaMinFracQueryCov=f" =>  \$MFopt{DiaMinFracQueryCov},
 		"DiaPercID=i" => \$MFopt{DiaPercID},
-		"diamondDBs=s" => \$MFopt{reqDiaDB},#NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2
+		"diamondDBs=s" => \$MFopt{reqDiaDB},#NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 	#functional profiling (Jaime tree)
 		"orthoExtract=i" => \$MFopt{calcOrthoPlacement},
 	#ribo profiling (miTag)

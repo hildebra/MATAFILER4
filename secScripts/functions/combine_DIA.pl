@@ -39,12 +39,15 @@ chomp $DBstr;
 @DBs = split/,/,$DBstr if ($DBstr ne "");
 my $dieOnMissing = 0;
 
+my $mapFiles = $ARGV[2] if (@ARGV>2);
+chomp $mapFiles;
+
 my $calcModules=0;
 
 $inD .= "/" unless ($inD =~ m/\/$/);
 my $outD1 = $inD."pseudoGC/FUNCT/";
 system "mkdir -p $outD1" unless (-d $outD1);
-my ($hrm,$hr2) = readMapS($inD."LOGandSUB/inmap.txt",-1);
+my ($hrm,$hr2) = readMapS($mapFiles,-1);
 my %map = %{$hrm};
 my @samples = @{$map{opt}{smpl_order}};
 #if (!-d $map{$samples[0]}{wrdir}){ #check for new way of reading dir
