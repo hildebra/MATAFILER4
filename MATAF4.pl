@@ -1,11 +1,11 @@
 #!/usr/bin/env perl
-#The Metagenomic Assembly, Genomic Recovery and Assembly Independent Mapping Tool (formerly MATAFILER, now mg-tk)
-#main mg-tk routine
+#The Metagenomic Assembly, Genomic Recovery and Assembly Independent Mapping Tool (MATAFILER)
+#main MATAFILER routine
 # (c) Falk Hildebrand, 2016-2025
 #examples
-#./mg-tk.pl map2tar test/refCtg.fasta,test/refCtg.fasta test1,test2
-#./mg-tk.pl map2tar test/TEC2/v5/TEC2.MM4.BEE.GF.rn.fa TEC2
-#./mg-tk.pl -map dir/map
+#./MATAF4.pl map2tar test/refCtg.fasta,test/refCtg.fasta test1,test2
+#./MATAF4.pl map2tar test/TEC2/v5/TEC2.MM4.BEE.GF.rn.fa TEC2
+#./MATAF4.pl -map dir/map
 
 use warnings;
 use strict;
@@ -1726,6 +1726,7 @@ sub DiaPostProcess(){
 	#die;
 	my $mrgDiScr = getProgPaths("mrgDia_scr");
 	my @DBS = split/,/,$MFopt{reqDiaDB};
+	my $mapFiles = $MFconfig{mapFile};
 	foreach my $DB (@DBS){
 		$progStats{$DB}{DiaDBSearchCompl} =0 unless (exists($progStats{$DB}{DiaDBSearchCompl}));
 		$progStats{$DB}{DiaDBSearchIncomplete}=0 unless (exists($progStats{$DB}{DiaDBSearchIncomplete}));
@@ -1733,7 +1734,7 @@ sub DiaPostProcess(){
 		my $refDone = 0; $refDone = int(getFileStr($countFile)) if (-e $countFile);
 		next if (!exists($progStats{$DB}{DiaDBSearchCompl}) || $progStats{$DB}{DiaDBSearchCompl} <= $refDone );
 		print "$DB :: $progStats{$DB}{DiaDBSearchCompl} ($refDone previously done)\n";
-		$cmd .= "$mrgDiScr $baseOut $DB\necho $progStats{$DB}{DiaDBSearchCompl} > $countFile\n" if ($progStats{$DB}{DiaDBSearchCompl}>= 1 );
+		$cmd .= "$mrgDiScr $baseOut $DB $mapFiles\necho $progStats{$DB}{DiaDBSearchCompl} > $countFile\n" if ($progStats{$DB}{DiaDBSearchCompl}>= 1 );
 		#`echo $progStats{$DB}{DiaDBSearchCompl} > $countFile`;
 		#print "$DB: complete $progStats{$DB}{DiaDBSearchCompl} >= incomplete $progStats{$DB}{DiaDBSearchIncomplete}\n"
 	}
@@ -7647,7 +7648,7 @@ sub setDefaultMFconfig{
 	$MFopt{filterHostKr2QuickMode}{0} = "";$MFopt{filterHostKr2QuickMode}{1} = "";# 0/1 for is3rdGen? "--quick "; deactivated for now..
 	$MFopt{hostileIndex} = "human-t2t-hla";
 	$MFopt{globalKraTaxkDB} = "";
-	$MFopt{globalDiamondDependence} = {CZy=>"",MOH2 => "", MOH=>"",NOG=>"",ABR=>"",ABRc=>"",KGB=>"",KGE=>"",ACL=>"",KGM=>"", PTV=>"", PAB => ""};
+	$MFopt{globalDiamondDependence} = {CZy=>"",MOH2 => "", MOH=>"",NOG=>"",ABR=>"",ABRc=>"",KGB=>"",KGE=>"",ACL=>"",KGM=>"", PTV=>"", PAB => "", URE=>"", URacc=>"", AMI=>""};
 	
 
 
@@ -7656,7 +7657,7 @@ sub setDefaultMFconfig{
 	$MFopt{DoConsSNP}=0; $MFopt{DoSuppConsSNP}=0; $MFopt{redoSNPcons} = 0; $MFopt{redoSNPgene} =0; $MFopt{SNPconsJobsPsmpl} = 1; 
 	$MFopt{SNPminCallQual} = 20; $MFopt{memPJob} = 0; #set to 0 to indicate default estimation
 	$MFopt{saveVCF} = 1; $MFopt{saveConsFastas} = 0;
-	#$MFopt{memSNPcall} = 23; -> no longer used
+    #$MFopt{memSNPcall} = 23; -> no longer used
 	$MFopt{maxSNPcores} = 10;  $MFopt{consSNPminDepth} = 0; $MFopt{normSNPindels} = 1;
 	$MFopt{SNPcallerFlag} = "MPI"; #"MPI" mpileup or ".FB" for freebayes
 	$MFopt{callSVs} = 0; #0=not, 1=delly, 2=gridss
@@ -7667,7 +7668,7 @@ sub setDefaultMFconfig{
 	#Func annotation
 	$MFopt{DoDiamond} = 0; $MFopt{rewriteDiamond} =0; $MFopt{redoDiamondParse} = 0; #redoes matching of reads; redoes interpretation
 	$MFopt{rewriteAllIfAnyDiamond}=0;
-	$MFopt{maxReqDiaDB} = 6; #max number of databases supported by METAFILER
+	$MFopt{maxReqDiaDB} = 6; #max number of databases supported by MATAFILER
 	$MFopt{reqDiaDB} = "";#,NOG,MOH,ABR,ABRc,ACL,KGM,PTV,PAB";#,ACL,KGM,ABRc,CZy";#"NOG,CZy"; #"NOG,MOH,CZy,ABR,ABRc,ACL,KGM"   #old KGE,KGB
 	$MFopt{diaEVal} = "1e-7"; $MFopt{diaCores} = 12; ; $MFopt{DiaRmRawHits} = 0; $MFopt{diaRunSensitive} = 0;
 	$MFopt{diamondMem} = 7; #GB memory to request for diamond jobs (qsub --mem)
@@ -7906,7 +7907,7 @@ sub getCmdLineOptions{
 		"DiaMinAlignLen=i" => \$MFopt{DiaMinAlignLen},
 		"DiaMinFracQueryCov=f" =>  \$MFopt{DiaMinFracQueryCov},
 		"DiaPercID=i" => \$MFopt{DiaPercID},
-		"diamondDBs=s" => \$MFopt{reqDiaDB},#NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2
+		"diamondDBs=s" => \$MFopt{reqDiaDB},#NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 	#functional profiling (Jaime tree)
 		"orthoExtract=i" => \$MFopt{calcOrthoPlacement},
 	#ribo profiling (miTag)

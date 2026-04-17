@@ -53,6 +53,7 @@ PATRIC_VIR_path_DB	[DBDir]/Funct/PATRIC/VirFac_KF/
 ABprod_path_DB	[DBDir]/Funct/ABprod_v1/
 VirDB_path_DB	[DBDir]/Funct/VIRDB/
 Module_path_DB	[DBDir]/Funct//myModules/Feb16/
+URE_path_DB	/ei/projects/e/eb9f7bdf-6585-47cb-8e72-3371fda92c44/data/urease_testing/gtdb/
 
 Kraken2_path_DB	[DBDir]/kraken2/
 Kraken2_mini	minikraken2_v1_8GB/
