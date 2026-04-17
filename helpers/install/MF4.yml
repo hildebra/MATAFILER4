@@ -4,8 +4,8 @@ channels:
 - bioconda
 dependencies:
 #MF specific programs
-  - sdm>=3.11
-  - lca>=0.25
+  - sdm>=3.27
+  - lca>=0.27
 #  - rtk2>=2.11
 
 #sys dependencies

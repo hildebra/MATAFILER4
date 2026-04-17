@@ -27,6 +27,7 @@ dependencies:
   - pal2nal=14
   - veryfasttree=4.0.5
   - muscle=5.3
+  - famsa=2.4.1
 
 #  - smirarab::treeshrink>=1.3  -> needs R
 

@@ -9,13 +9,14 @@
 #14.2.25: v5.03: added treshrink
 #18.2.26: 5.04: MSA gz'ping
 #2.3.26: 5.05: added veryFastTRee
+#5.06: 15.4.26: added famse
 
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
 use Mods::IO_Tamoc_progs qw(getProgPaths);
-use Mods::GenoMetaAss qw( fileGZe fileGZs gzipopen systemW readFasta readFastHD writeFasta convertMSA2NXS quantile);
-use Mods::phyloTools qw(MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree 
+use Mods::GenoMetaAss qw( fileGZe fileGZs gzipopen systemW readFasta readFastHD writeFasta quantile);
+use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree 
 			runFasttree runVeryFasttree fixHDs4Phylo getGenoGenes getFMG readFMGdir );
 			
 			
@@ -44,7 +45,7 @@ sub createTreeOpt;
 sub treePresent;
 
 my $doPhym= 0;
-my $version = 5.05;
+my $version = 5.06;
 
 my $cmdCall = qx/ps -o args $$/;
 
@@ -53,7 +54,7 @@ my $pigzBin  = getProgPaths("pigz");
 #my $trDist = getProgPaths("treeDistScr");
 
 
-my $gubbinsBin = "/g/bork3/home/hildebra/bin/gubbins/python/scripts/run_gubbins.py";
+my $gubbinsBin = "";#"/g/bork3/home/hildebra/bin/gubbins/python/scripts/run_gubbins.py";
 my $pamlBin = "";#getProgPaths("codeml"); #PAML: currently unused
 #my $evoConda = getProgPaths("evoEnv");#systemW "source $evoConda";
 
@@ -67,7 +68,7 @@ my $partiExt=".partition.RAXML";
 #my $ncore = 20;#RAXML cores
 my $ntFrac =0.2; my $ntFracGene = 0.1; 
 my $GeneFracPSpec = 0.1; #replacement for ntFracGene, as works also with supertrees
-my $clustalUse = 2; #do MSA with clustal (1) or msaprobs (0), mafft(2), guidance2(3), MUSCLE5 (4)
+my $MSAprog = 2; #do MSA with clustal (1) or msaprobs (0), mafft(2), guidance2(3), MUSCLE5 (4)
 my $calcDistMat = 0; #distmat of either AA or NT (depending on MSA)
 my $calcDistMatExt = 0; #distmat of other AA or NT (depending on MSA), e.g. running two times an MSA
 my $calcDistMatExtGo = 0;
@@ -149,7 +150,7 @@ GetOptions(
 	"smplSep=s" => \$smplSep, #set the delimiter
 	"outgroup=s"	=> \$outgroup,
 	"AAtree=i" => \$useAA4tree,
-	"MSAprogram=i" => \$clustalUse, #(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
+	"MSAprogram=i" => \$MSAprog, #(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA)
 	"minOverlapMSA=i" => \$minOverlapMSA, #min overlap in MSA columns, in order to retain column
 	"maxGapPerCol=f" =>\$maxGapPerCol, #same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column
 	"calcDistMat=i" => \$calcDistMat,
@@ -225,14 +226,14 @@ if ($subsetSmpls >0){
 }
 ######
 
-if ($clustalUse == 0){print "Warning:  MSAprobs with trimal gives warnings (ignore them)\n";}
+if ($MSAprog == 0){print "Warning:  MSAprobs with trimal gives warnings (ignore them)\n";}
 if ($doCFML && !$doRAXML){die "Need RaxML alignment, if Clonal fram is to be run..\n";}
 
 if ($aaFna eq "" || $useAA4tree){	$calcSyn=0;$calcNonSyn=0;}
 if ($filt <1){$ntFrac=$filt; print "Using filter with $ntFrac fraction of nts\n";}
 if ($outgroup ne ""){print "Using outgroup $outgroup\n";}
 if ($bootStrap>0){print "Using bootstrapping in tree building\n";}
-#if (($calcDistMat || $calcDistMatExt) && $isAligned || !$clustalUse){die"Can't calc distance mat, unless clustalO is being used for MSA\n";}
+#if (($calcDistMat || $calcDistMatExt) && $isAligned || !$MSAprog){die"Can't calc distance mat, unless clustalO is being used for MSA\n";}
 #else {$ntCntTotal = $filt;}
 
 $MSAreq = 0 if (!$doFastTree && !$doVeryFastTree && !$doRAXML && !$doRAXMLng && !$doCFML && !$doGubbins && !$doIQTree);
@@ -569,7 +570,7 @@ if ($isAligned){
 				#TODO.. don't need it now for tec2, since no good NCBI taxid currently...
 			}
 			$samples{$sp} = 1; #$genCats{$spl2[1]} = 1; 
-			$FAA{$seq} =~ s/\*$//g if ($clustalUse != 0);
+			$FAA{$seq} =~ s/\*$//g if ($MSAprog != 0);
 			$FAA{$seq} =~ s/\x00//g;
 
 			print O ">$seq2\n$FAA{$seq}\n";
@@ -592,7 +593,7 @@ if ($isAligned){
 
 		$seqLength /= $#spl;
 		#print "$tmpInMSA,$tmpOutMSA2\n";
-		my $cmd1 = MSA($tmpInMSA,$tmpOutMSAaa,$ncore,$clustalUse,$numSeq);
+		my $cmd1 = MSA($tmpInMSA,$tmpOutMSAaa,$ncore,$MSAprog,$numSeq);
 		#zorro/macse filter.. by default not used ("")
 		my $cmd2 = filterMSA($tmpInMSA,$tmpOutMSAaa,$ncore,$postFilter,$useAA4tree);
 		
@@ -1092,7 +1093,7 @@ sub singleGeneMSAprocess($){
 		system "cp $inFasta $tmpOutMSAaa";
 	} else{
 		#MSA calculation
-		$tmpOutMSAaa = MSA($inFasta,$tmpOutMSAaa,$ncore,$clustalUse,$numFas);
+		$tmpOutMSAaa = MSA($inFasta,$tmpOutMSAaa,$ncore,$MSAprog,$numFas);
 	}
 
 	if ($calcDistMat){
