@@ -73,7 +73,7 @@ system "mkdir -p $tmpD" unless (-d $tmpD);
 #gzipped prot/gene files need to be unzipped for hmms etc
 my $unzpped=0;
 
-if ($subparts =~ m/GgFE4/){
+if ($subparts =~ m/[GgFE4]/){
 	$proteinsAA .= ".gz" if (-e "$proteinsAA.gz" && !-e $proteinsAA);
 	$genesNT .= ".gz" if (-e "$genesNT.gz" && !-e $genesNT);
 

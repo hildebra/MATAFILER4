@@ -19,7 +19,7 @@ use vars qw($CONFIG_FILE);
 
 
 #load MF specific modules
-use Mods::GenoMetaAss qw(readMap readMapS getDirsPerAssmblGrp lcp readFastHD prefixFAhd prefix_find 
+use Mods::GenoMetaAss qw(readMap readMapS getDirsPerAssmblGrp checkAssmblGrp lcp readFastHD prefixFAhd prefix_find 
 			gzipopen fileGZe fileGZs
 			readFasta writeFasta systemW getAssemblPath  filsizeMB resetAsGrps
 			iniCleanSeqSetHR checkSeqTech is3rdGenSeqTech hasSuppRds 
@@ -53,6 +53,7 @@ sub removeHostSeqs; sub krakenTaxEst;sub prepKraken;
 sub loop2C_check;
 
 sub metagAssemblyRun;
+sub buildAssemblyMapIdx;
 sub createPsAssLongReads; #pseudo assembler
 sub prepPreAssmbl; #hybrid pacbio/ill assemblies
 sub genePredictions; sub run_prodigal; #gene prediction
@@ -81,7 +82,8 @@ sub createConsSNPandSVs;
 #.75: 4.3.26: ini MATAFILER4 version
 #4.01: 13.3.26: removing bugs from hybrid assembly detection, switching to 4.x versioning
 #4.02: 15.4.26: updated internal logic for passing read paths, enabled hybrid mode in complex assembly groups
-my $MATFILER_ver = 4.02;
+#4.03: 18.4.26: further fixes to hybrid assembly logic. separateCongigs.pl tech hardened.
+my $MATFILER_ver = 4.03;
 
 #----------------- defaults ----------------- 
 
@@ -403,22 +405,27 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		} else {$statStr.=$curSmpl."\t$dir2rd\t".$curStats."\n"; $statStr5.=$curSmpl."\t$dir2rd\t".$curStats5."\n";}
 	}
 	
-	my $SmplIsEmtpy = 0; $SmplIsEmtpy =1 if (-e "$curOutDir/SMPL.empty");
+	$map{$curSmpl}{inputFilesEmpty} = 0; 
+	if (-e "$curOutDir/SMPL.empty"){$map{$curSmpl}{inputFilesEmpty} = 1;}
 
 	#detect what already exists..
 	my $efinAssLoc = 0; $efinAssLoc = 1  if (-s $finAssLoc && -e "$finalCommAssDir/$stones{asmDone}");
 	#die "$efinAssLoc\n$finalCommAssDir/$stones{asmDone}\n";
 	#activate if two assemblies for single sample required, e.g. hybrid assemblies
 	#my $doPreAssmFlag = 0; my $postPreAssmblGo =0 ;
+	
+	
 	my ($ePreAssmbly,$doPreAssmFlag,$postPreAssmblGo,$ePreAssmblPck) = prepPreAssmbl($finalCommAssDir,$metaGpreAssmblDir,$finalMapDir, "$smplTmpDir/preAssmblData/",
 				$ContigStatsDir, $cAssGrp, $finAssLoc,$finalCommAssDir);#moves files to new locations
+	
+	
 	#print "$ePreAssmbly,$doPreAssmFlag,$postPreAssmblGo,$ePreAssmblPck\n$finalCommAssDir/$stones{preAsmDone}\n$metaGpreAssmblDir/moved.sto\n";
 	
 	my $eCovAsssembly = 1; $eCovAsssembly = 0 if (!fileGZe($coveragePerCtg) );
 	$eCovAsssembly = 0 if (!fileGZe( $markerGenesPerCtg) && $AssemblyGo);
 
 	my $eSuppCovAsssembly = 0; $eSuppCovAsssembly = 1 if (fileGZe($suppCoveragePerCtg));
-	#die "$eSuppCovAsssembly  $suppCoveragePerCtg\n";
+	#die "$eCovAsssembly  $eSuppCovAsssembly  $suppCoveragePerCtg\n";
 	#will be created in contigstats step (not related to bowtie & sortbam)
 	my $eFinMapCovGZ = 0; $eFinMapCovGZ = 1 if (-e $STOcram && -e "$finalMapDir/$SmplName-smd.bam.coverage.gz");#"$finalMapDir/$SmplName-smd.bam.coverage.gz"; 
 	#$MFopt{mapSupport2Assembly}
@@ -570,7 +577,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		print "redoing binning due to empty bins (flag -redoEmptyBins 1) ..\n";
 		system "rm -rf $binningDir";
 	}
-	if ( (!$doPreAssmFlag || !$ePreAssmblPck) && !$SmplIsEmtpy &&
+	if ( (!$doPreAssmFlag || !$ePreAssmblPck) && !$map{$curSmpl}{inputFilesEmpty} &&
 				((!$eFinMapCovGZ && $eCovAsssembly) || ($eSuppCovAsssembly && !$eFinSupMapCovGZ) ) #redo only contigstats related to coverage..
 				 || $MFconfig{redoCS}){
 		#print "redoing contig stats global..\n";
@@ -615,7 +622,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		die "Deleting previous results..\n";
 		system("rm -f -r $curOutDir $smplTmpDir $MFglobal{collectFinished}");
 		$efinAssLoc = 0;	$eFinMapCovGZ = 0;	
-	} elsif ($boolAssemblyOK && $eCovAsssembly && !$SmplIsEmtpy) {
+	} elsif ($boolAssemblyOK && $eCovAsssembly && !$map{$curSmpl}{inputFilesEmpty}) {
 		#check that assembly path fits..
 		getAssemblPath($curOutDir,$finalCommAssDir);
 	}
@@ -714,12 +721,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	#die "$mapSuppAssFlag = 1 if ($locMapSup2Assembly && !$eFinSupMapCovGZ && $efinAssLoc \n";
 
-	my $assemblyBuildIndexFlag=0; 
-	$assemblyBuildIndexFlag=1 if ($MFopt{DoAssembly}  && !$assemblyFlag  && $MFopt{map2Assembly} && ($mapAssFlag || $mapSuppAssFlag ) 
-							# && $AssemblyGo -> do already in first round, store dependency
-							&& ! mapperDBbuilt($finAssLoc,$MFopt{MapperProg}) ); 
-	#die "$assemblyBuildIndexFlag  $MFopt{DoAssembly}  && !$assemblyFlag  && $MFopt{map2Assembly} && ($mapAssFlag || $mapSuppAssFlag ) \n". mapperDBbuilt($finAssLoc,$MFopt{MapperProg})  ."\n";
-	#print "build $assemblyBuildIndexFlag   $MFopt{DoAssembly} && !$assemblyFlag && $MFopt{map2Assembly} && $mapAssFlag && $MFopt{MapperProg}\n";
 	#requires only bam/cram && assembly
 	my $calcConsSNP=0; 
 	if ($MFopt{DoConsSNP} && !$doPreAssmFlag && !$ePreAssmblPck){
@@ -843,8 +844,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#print "$seqSet{pa1}   $seqSet{seqTech}   $seqSet{seqTechX}\n";
 	push (@unzipjobs,$jdep) unless ($jdep eq "");
 	
-	if ($SmplIsEmtpy && exists($map{$curSmpl}{inputFileSizeMB}) && $map{$curSmpl}{inputFileSizeMB} >= $MFconfig{skipSmallSmplsMB}){
-			system "rm -f $curOutDir/SMPL.empty"; $SmplIsEmtpy=0;
+	if ($map{$curSmpl}{inputFilesEmpty} && exists($map{$curSmpl}{inputFileSizeMB}) && $map{$curSmpl}{inputFileSizeMB} >= $MFconfig{skipSmallSmplsMB}){
+			system "rm -f $curOutDir/SMPL.empty"; $map{$curSmpl}{inputFilesEmpty} = 0;
 	}
 	if ( (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || (($map{$curSmpl}{inputFileSizeMB} + + $map{$curSmpl}{inputXFileSizeMB}) < $MFconfig{skipSmallSmplsMB} )) && !$AssemblyGo){
 		
@@ -1068,9 +1069,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"",$smplTmpDir,1);
 	} else {$presentAssemblies++;}
 	
-	if ($assemblyBuildIndexFlag && $AsGrps{$cAssGrp}{AssemblJobName} eq ""){ #in this case asembly was done, but index was never built
-		buildAssemblyMapIdx($finAssLoc, $cAssGrp, $mapAssFlag,$mapSuppAssFlag,$SmplName);
-	}
 	#die "$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) \n";
 	if (!$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) ){   # gene predictions on assembly, assemblies already do exist
 		$metaGassembly = $finAssLoc; #print "No Assembly routines required\n" if ($MFopt{DoAssembly}==0);
@@ -1080,20 +1078,21 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"",$smplTmpDir,1);
 		}
 	}
-	if (0&&$AssemblyGo && $AsGrps{$cAssGrp}{PostAssemblCmd} ne ""){#no assembly required, but maybe still other dependent jobs (i.e. mapping)
-		print "assembly exists, but postassembly jobs unfinished\n" if (!$assemblyFlag);
-		#die "POSTCMD: ".$AsGrps{$cAssGrp}{PostAssemblCmd}."\n";
-		postSubmQsub("$logDir/MultiMapper.sh",$AsGrps{$cAssGrp}{PostAssemblCmd},$AsGrps{$cAssGrp}{AssemblJobName},$AsGrps{$cAssGrp}{AssemblJobName});
-		$AsGrps{$cAssGrp}{PostAssemblCmd} = "";#always add in dep on read extraction
-		#$metaGassembly = $finAssLoc;
-		#die "!$boolGenePredOK && $AssemblyGo && !$assemblyFlag\n";
-	} 
+	
+
+	
+#	if (0&&$AssemblyGo && $AsGrps{$cAssGrp}{PostAssemblCmd} ne ""){#no assembly required, but maybe still other dependent jobs (i.e. mapping)
+#		print "assembly exists, but postassembly jobs unfinished\n" if (!$assemblyFlag);
+#		postSubmQsub("$logDir/MultiMapper.sh",$AsGrps{$cAssGrp}{PostAssemblCmd},$AsGrps{$cAssGrp}{AssemblJobName},$AsGrps{$cAssGrp}{AssemblJobName});
+#		$AsGrps{$cAssGrp}{PostAssemblCmd} = "";#always add in dep on read extraction
+#	} 
 	
 	#-----------------------------------------------------------------
 	#------------------------  MAPPING -------------------------------
 	#-----------------------------------------------------------------
+
 	
-	#-----------------   secondary mapping -----------------
+	#-----------------   mapping to other tars -----------------
 	#2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd
 	# maps on given reference genome(s), not on the assembly itself!!
 	if (@bwt2outD>0 && $MappingGo && (!$boolScndMappingOK || !$boolScndCoverageOK || $calc2ndMapSNP) ){#map reads to specific tar
@@ -1108,8 +1107,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	
 	#%%%%%%%%%%%%%%%%   functions dependent on assembly -> submit post-assembly   #%%%%%%%%%%%%%%%%
-	#  ---------     primary assembly mapping -----------------------   map reads to Assembly      ------------------------------
-	if ($MappingGo && !$eFinMapCovGZ && $MFopt{map2Assembly} && ($MFopt{DoAssembly} || $mapAssFlag)){ #mapping to the assembly (can be multi-sample assembly as well)
+	#  ---------  mapping 2  assembly  -----------------------   map reads to Assembly      ------------------------------
+
+	#need index for mapper?
+	my $doMapping = $MappingGo && !$eFinMapCovGZ && $MFopt{map2Assembly} && ($MFopt{DoAssembly} || $mapAssFlag);
+	
+	my $assemblyBuildIndexFlag=0; 	$assemblyBuildIndexFlag=1 if (-s $finAssLoc && ($doMapping || $mapSuppAssFlag) && ! mapperDBbuilt($finAssLoc,$MFopt{MapperProg}) ); 
+	#die "$assemblyBuildIndexFlag  $MFopt{DoAssembly}  && -s $finAssLoc  && $MFopt{map2Assembly} && ($mapAssFlag || $mapSuppAssFlag ) \n". mapperDBbuilt($finAssLoc,$MFopt{MapperProg})  ."\n";
+	#print "build $assemblyBuildIndexFlag   $MFopt{DoAssembly} && !$assemblyFlag && $MFopt{map2Assembly} && $mapAssFlag && $MFopt{MapperProg}\n";
+	if ($assemblyBuildIndexFlag && $AsGrps{$cAssGrp}{AssemblJobName} eq ""){ #in this case asembly was done, but index was never built
+		buildAssemblyMapIdx($finAssLoc, $cAssGrp, $mapAssFlag,$mapSuppAssFlag,$SmplName);
+	}
+
+	
+	if ($doMapping){ #mapping to the assembly (can be multi-sample assembly as well)
 		my $moveMappings = 0; $moveMappings =1 if (!$eFinMapCovGZ && -e "$mapOut/$SmplName-smd.bam.coverage.gz");
 
 		my $mapNow =0;
@@ -1192,7 +1203,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#die;
 	
 	my $needsContigStats =0; #flag to activate contigStats later..
-	$needsContigStats = 1 if ($MappingGo || $mapSuppAssFlag);	
+	$needsContigStats = 1 if (($MappingGo && !$eCovAsssembly) || ($mapSuppAssFlag && !$eSuppCovAsssembly));	
 	# calc statsitics concercing readqual, mappings, genes & contigs
 	if ($pseudAssFlag || ($AssemblyGo && $MFopt{DoAssembly}) || 
 				isLastSampleInAssembly($finalCommAssDir,$curOutDir) ) {
@@ -2402,6 +2413,8 @@ sub prepareMap{
 	
 
 	my ($hr,$hr2) = readMapS($MFconfig{mapFile},0,\%map,\%AsGrps,$MFconfig{oldStylFolders});
+	checkAssmblGrp($hr);
+
 	%AsGrps = %{$hr2}; %map = %{$hr};
 	if ($MFopt{DoMetaBat2}){ #do any binning?
 		my ($hrD,$hrM) = getDirsPerAssmblGrp(\%map,\%AsGrps);
@@ -3938,6 +3951,20 @@ sub valid_files{
 	return \@paO;
 }
 
+
+
+sub setupInput{
+	
+	
+	
+}
+
+
+
+
+
+
+
 sub seedUnzip2tmp{
 	my ($fastp,$curSmpl,$jDepe,$tmpPath,$finDest, 
 		$calcUnzp,$finalMapDir,$porechopFlag,$inputRawFile) = @_;
@@ -4163,6 +4190,7 @@ sub seedUnzip2tmp{
 		#return ("EMPTY_DO_NEXT",\@pa1,\@pa2, \@pas, 0, "", "",\@libInfo, "",$totalInputSizeMB);
 		$seqSet{pa1} = \@pa1;$seqSet{pa2} = \@pa2;$seqSet{pas} = \@pas;
 		$seqSet{libInfo} = \@libInfo;
+		$map{$curSmpl}{inputFilesEmpty} = 1;
 		return ("EMPTY_DO_NEXT", \%seqSet);
 
 	}
@@ -4414,6 +4442,8 @@ sub seedUnzip2tmp{
 #set global var
 	$map{$curSmpl}{inputFileSizeMB} = $totalInputSizeMB;
 	$map{$curSmpl}{inputXFileSizeMB} = $totalXInputSizeMB;
+	$map{$curSmpl}{inputFilesEmpty} = 0;
+
 	#die "HJASD:@pa1\n@pas\n";
 	%seqSet = (pa1 => \@pa1, pa2 => \@pa2, pas => \@pas, seqTech => $seqTech, is3rdGen =>$is3rdGen,
 			paX1 => \@paX1, paX2 => \@paX2, paXs => \@paXs, seqTechX => $seqTechX, is3rdGenX => $is3rdGenX,
@@ -6614,21 +6644,25 @@ sub RayAssembly(){
  
 sub buildAssemblyMapIdx{
 	my ($finAssLoc,$cAssGrp, $mainRds, $suppRds, $smpl) = @_;
-	print "Building mapper index for assembly $finAssLoc\n ";
-	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
+	my $anybuilds=0;
+	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0;  
 	if ($suppRds){ #if support reads, build a second DB..
 		my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$cAssGrp,$suppRds,$smpl);
 		my $MapperProgLoc = decideMapper($MFopt{MapperProg},${$liar}[0]);
 		my ($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$MapperProgLoc);#$nCores);
 		my ($jname,$tmpCmd) = qsubSystem($logDir."mapperIdxSupp.sh",$cmdDB,(int($MFopt{MapperCores})),(int($MFopt{bwtIdxAssMem})+1)."G","DBidx$JNUM","","",1,[],$QSBoptHR) ;
 		$AsGrps{$cAssGrp}{AssemblJobName} .= ";$jname";
+		$anybuilds =1 if ($cmdDB ne"");
 	}
 	if ($mainRds){
 		my ($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$MFopt{MapperProg});#$nCores);
 		my ($jname,$tmpCmd) = qsubSystem($logDir."mapperIdx.sh",$cmdDB,(int($MFopt{MapperCores})),1+(int($MFopt{bwtIdxAssMem}))."G","bwtIdx$JNUM","","",1,[],$QSBoptHR) ;
 		$AsGrps{$cAssGrp}{AssemblJobName} .= ";$jname";
+		$anybuilds =1 if ($cmdDB ne"");
 	}
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
+	
+	print "Building mapper index for assembly $finAssLoc\n ";
 	
 }
 
@@ -6825,7 +6859,7 @@ sub movePreAssmData{
 	}
 	print "Preparing preassembly package..";
 	#die;
-	die "Coverage does not exist in $CSdir .. can't move preAssembly\n" if (!-e "$CSdir/Coverage.percontig.gz");
+	die "Coverage does not exist in $CSdir .. can't move preAssembly\n" if (!fileGZe("$CSdir/Coverage.percontig"));
 	die "Not a preassebmly?: $metagD\n" unless (-e "$metagD/$stones{preAsmDone}");
 	die "Couldn't find ContigStats in $metagD\n" unless (-d $CSdir);
 	die "Couldn't find Assembly $metagD/scaffolds.fasta.filt\n" unless (-e "$metagD/scaffolds.fasta.filt");
@@ -6855,10 +6889,13 @@ sub movePreAssmData{
 #used in hybrid assemblies
 sub prepPreAssmbl{
 	my ($metagD, $mvD,$mapD, $tmpD , $CSdir,  $cAssGrp, $finAssLoc,$finalCommAssDir) = @_;
-	#die "$mvD\n";
+	print "$mvD\n";
 	
 	$AsGrps{$cAssGrp}{CntPreAss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAss}));
 	$AsGrps{$cAssGrp}{CntPreAssMiss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAssMiss}));
+	$AsGrps{$cAssGrp}{CntPreAssNoPrim} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAssNoPrim}));
+	
+	my $hasPrimary = $map{$curSmpl}{hasPrimaryRds};
 	
 	#my $hasPrimaryRds= 1;$hasPrimaryRds = 0 if ($map{$curSmpl}{prefix} eq "" && $map{$curSmpl}{dir} eq "");
 	
@@ -6874,9 +6911,12 @@ sub prepPreAssmbl{
 		#die;
 		return ($ePreAssmbly,$doPreAssmFlag,0,$ePreAssmblPck);
 	}
-	if (!$map{$curSmpl}{hasPrimaryRds}){#should not be included at all: nothing to assemble within preassembly..
-		$AsGrps{$cAssGrp}{CntPreAssMiss}++ ;
-		return ($ePreAssmbly,$doPreAssmFlag,0,$ePreAssmblPck);
+	
+	if (!$hasPrimary){#should not be included at all: nothing to assemble within preassembly..
+		$AsGrps{$cAssGrp}{CntPreAssNoPrim}++ ;
+		#TOGO:: needs to continue, but debug with examples..
+		
+		#return ($ePreAssmbly,$doPreAssmFlag,0,$ePreAssmblPck);
 	}
 	my $eCOV = 0; $eCOV = 1 if (fileGZe( "$CSdir/Coverage.percontig"));
 	my $eCOVmv = 0; $eCOVmv = 1 if (fileGZe("$mvD/Coverage.percontig"));
@@ -6887,7 +6927,9 @@ sub prepPreAssmbl{
 		if ((!$eCOVmv && !$eCOV) || !$ePreAssmbly){
 			#print "preAssmbl: nothing done yet.. \n$mvD\n$metagD\n";
 			#die;
-			$AsGrps{$cAssGrp}{CntPreAssMiss} ++ ; #needs to be counted as "existing"
+			if ($map{$curSmpl}{inputFilesEmpty}){
+				$AsGrps{$cAssGrp}{CntPreAssNoPrim} ++ ; #needs to be counted as "existing"
+			}
 			return ($ePreAssmbly,$doPreAssmFlag, 0, $ePreAssmblPck );
 		}
 	} else {
@@ -6898,8 +6940,8 @@ sub prepPreAssmbl{
 	
 	#my $eCOV = 0; $eCOV =1 if ( -e "$CSdir/Coverage.percontig");
 	
-	
-	if ((!$ePreAssmblPck || $eCOV) && -e "$metagD/$stones{preAsmDone}" ){
+	#this moves the contig stats (and removes in ori location)
+	if ((!$ePreAssmblPck || (($eCOV || !$hasPrimary) && ($eCOVmv || $map{$curSmpl}{"SupportReads"} eq "" ))) && -e "$metagD/$stones{preAsmDone}" ){
 		#die "preAssmX: $PostAssemblyGo $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} >= $AsGrps{$cAssGrp}{CntAimAss}\n";
 		$doPreAssmFlag = 0 ;#no prep needed any longer.. files will/are saved already!
 		#all ready for second assembly step!
@@ -6908,7 +6950,8 @@ sub prepPreAssmbl{
 	}  
 	#die "XAS\n";
 	if ($ePreAssmblPck){
-		if ($eCOV || $eCOVmv){
+		#print "$ePreAssmblPck || ($eCOV || !$hasPrimary) && ($eCOVmv || $map{$curSmpl}{SupportReads} eq \"\" )\n";
+		if ($ePreAssmblPck || () ){
 			$AsGrps{$cAssGrp}{CntPreAss} ++ ;
 			push(@{$AsGrps{$cAssGrp}{preAsmblDir}}, $mvD);
 		}
@@ -6917,12 +6960,12 @@ sub prepPreAssmbl{
 	}
 	my $PostAssemblyGo = 0;
 	#print "UUU $doPreAssmFlag\n";
-	my $finJobs = ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssMiss});
+	my $finJobs = ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssNoPrim} ); #+ $AsGrps{$cAssGrp}{CntPreAssMiss}
 	#print "FIN: $finJobs ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssMiss}) >= $AsGrps{$cAssGrp}{CntAimAss}\n";
 	$PostAssemblyGo = 1 if (!$doPreAssmFlag && ( $finJobs >= $AsGrps{$cAssGrp}{CntAimAss}) ); #has already seen enough complete preAssmblies
 	$doPreAssmFlag = 1 if (!$PostAssemblyGo); 
 	#print "-e $CSdir/Coverage.percontig   $metagD/$stones{preAsmDone}\n" ;
-	print "preAssm:  $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} >= $AsGrps{$cAssGrp}{CntAimAss} :: $ePreAssmblPck $PostAssemblyGo\n";
+	print "preAssm:  $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} +$AsGrps{$cAssGrp}{CntPreAssNoPrim} >= $AsGrps{$cAssGrp}{CntAimAss} :: $ePreAssmblPck $PostAssemblyGo\n";
 	#die "$doPreAssmFlag\n";
 	return ($ePreAssmbly,$doPreAssmFlag,$PostAssemblyGo,$ePreAssmblPck);
 }
@@ -6969,7 +7012,7 @@ sub longRdAssembly{
 		my $runPar=1;
 		#my $illPathS = ;
 		my @illDirs = @{$AsGrps{$cAsGrp}{preAsmblDir}}; #split /,/,$illPathS;
-		if ((@$singlAr - $AsGrps{$cAsGrp}{CntPreAssMiss}) > (@illDirs)){
+		if ((@$singlAr - $AsGrps{$cAsGrp}{CntPreAssNoPrim}) > (@illDirs)){
 			die "hybrid assembly: Unexpected less preDirs (".@illDirs .") than indirs(" . @$singlAr .")\illDs: @illDirs\nsingl: @$singlAr\n";
 		}
 
@@ -7008,7 +7051,7 @@ sub longRdAssembly{
 	}
 	
 	#die "@inRds\n";
-	#die $cmd;
+	print $cmd;#die;
 	
 	$cmd .= "echo \"Starting $nameProg assembly\"\n";
 	

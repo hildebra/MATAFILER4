@@ -15,7 +15,7 @@ our @EXPORT_OK = qw(
 		
 		
 		readMapS getDirsPerAssmblGrp checkSeqTech is3rdGenSeqTech 
-		resetAsGrps
+		resetAsGrps checkAssmblGrp
 		getRawSeqsAssmGrp getCleanSeqsAssmGrp 
 		addFileLocs2AssmGrp iniCleanSeqSetHR hasSuppRds
 		
@@ -1452,7 +1452,6 @@ sub readMap{
 	my $asGrpHr = emptyAssGrpsObj(\%agBP);
 	$ret{opt}{asGrpHr} = $asGrpHr;
 	$ret{opt}{asGrpMemsHr} = \%memberAGs;
-	checkAssmblGrp(\%ret);
 	
 
 	return (\%ret,$asGrpHr);
