@@ -3732,6 +3732,8 @@ sub uploadRawFilePrep{
 	my %seqSet = %{$map{$smplID}{seqSet}};
 	my ($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"pa1"},$seqSet{"pa2"},$seqSet{"pas"},$seqSet{"libInfo"},$seqSet{"seqTech"});
 	my $samplReadLength = $seqSet{"samplReadLength"};
+	my $gen3 = is3rdGenSeqTech($seqTec);
+
 	#print "XX $seqTec XX";
 	#my ($ar1X,$ar2X,$arsX,$libInfoArX) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"})
 	if ($useXtras){
@@ -3739,6 +3741,7 @@ sub uploadRawFilePrep{
 		($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"},$seqSet{"seqTechX"});
 		$samplReadLength = $seqSet{"samplReadLengthX"};
 		if (!@{$ar1} && !@{$ars}) { return ""; }#nope, no additional reads are requested..
+		$gen3 = is3rdGenSeqTech($seqTec);
 	}
 	my @libInfo = @{$libInfoAr};
 	my $tag = ""; $tag = "X." if ($useXtras);
@@ -3806,7 +3809,9 @@ sub uploadRawFilePrep{
 			
 			if ($i==2){ #single read pair... 
 				#$cmd .= krakHSapSingl("$ofT",$of,$numThr)."\n" unless (-e $of.".gz");
-				$cmd .= hostRmBase($ofT,"",$MFopt{humanFilter},$numThr,$tmpD,"$DBdir$DBname[0]");
+				#	my ($r1,$r2,$hostRMVer,$seqGen,$numThr,$tmpD,$krRefDB) = @_;
+
+				$cmd .= hostRmBase($ofT,"",$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[0]");
 				$cmd .= "$fastqhdsChk $ofT 3;\n";
 				#and move cleaned up file to final locations...
 				$cmd .= "rm -f $of; mv $ofT $of;\n";
@@ -3815,7 +3820,7 @@ sub uploadRawFilePrep{
 			if ($i==0){
 				$cmd .= "rm -f $ofT2;ln -s $rd2 $ofT2\n" unless (-e $of);
 				my $tmpF1 = "$tmpD/krak.tmp_1.fq";my $tmpF2 = "$tmpD/krak.tmp_2.fq";
-				$cmd .= hostRmBase($ofT, $ofT2,$MFopt{humanFilter},$numThr,$tmpD,"$DBdir$DBname[0]");
+				$cmd .= hostRmBase($ofT, $ofT2,$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[0]");
 				$cmd .= "$fastqhdsChk $ofT 1;     $fastqhdsChk $ofT2 2;\n";
 				$cmd .= "rm -f $of; mv $ofT $of;\n";
 				$cmd .= "rm -f $of2; mv $ofT2 $of2;\n";
@@ -4584,6 +4589,7 @@ sub prepKraken(){
 sub hostRmBase{
 	my ($r1,$r2,$hostRMVer,$seqGen,$numThr,$tmpD,$krRefDB) = @_;
 	my $cmd = "";
+	if ($numThr eq ""){die "hostRmBase:: thread arg not correct\n";}
 	return $cmd if ($r1 eq "");
 	my $tmpF ="$tmpD/krak.tmp.fq";
 	my $gzFlag = "";$gzFlag =  "--gzip-compressed" if ($r1 =~ m/\.gz$/);
@@ -4606,7 +4612,8 @@ sub hostRmBase{
 		} else {
 			$tmpF ="$tmpD/krak.tmp#.fq";  $tmpF1 = "$tmpD/krak.tmp_1.fq"; $tmpF2 = "$tmpD/krak.tmp_2.fq"; $kr2flags = "--paired ";
 		}
-		$cmd .= "$krk2Bin --threads $numThr $gzFlag $kr2flags --unclassified-out $tmpF --db $krRefDB --output - $MFopt{filterHostKr2QuickMode}{$seqGen} --confidence $MFopt{krakHostConf} $r1 $r2 \n";
+		my $kr2QuiMod = ""; $kr2QuiMod = $MFopt{filterHostKr2QuickMode}{$seqGen} if (exists($MFopt{filterHostKr2QuickMode}{$seqGen}));
+		$cmd .= "$krk2Bin --threads $numThr $gzFlag $kr2flags --unclassified-out $tmpF --db $krRefDB --output - $kr2QuiMod --confidence $MFopt{krakHostConf} $r1 $r2 \n";
 		$cmd .= "$pigzBin -f -p $numThr $tmpF1 $tmpF2\n" unless ($gzFlag eq "");
 		$cmd .= "rm -f $r1 $r2; \n";
 		$cmd .= "mv $tmpF1$gzEnd $r1;\n ";
@@ -4633,7 +4640,7 @@ sub hostRmBase{
 }
 
 
-sub removeHostSeqs($ $ $ $){
+sub removeHostSeqs($ $ $){
 	my ($tmpD,$jDep,$checkIfExists) = @_;
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
 
@@ -4717,34 +4724,6 @@ sub removeHostSeqs($ $ $ $){
 			$QSBoptHR->{tmpSpace} = $tmpSHDD;
 	}
 	return $jobN;
-}
-
-sub krakHSapSingl($ $){ #just on single file..
-	die "Deprecated.. replaced with hostRmBase()\n";
-	my ($inF, $outF,$numThr) = @_;
-	return "" if ( -e $outF);
-	my $krk2Bin = getProgPaths("kraken2");
-	#my ($DBdir,$DBname) = @_;
-	my $DBdir = $MFglobal{krakenDBDirGlobal}."/";
-	my $DBname = "hum1stTry";# my $numThr = 6;
-	my $cmd  = ""; my $doGZIP=0;
-	if ($outF =~ m/\.gz$/){ $doGZIP = 1;
-		$outF =~ s/\.gz//;
-	}
-	my $gzFlag = "";$gzFlag =  "--gzip-compressed" if ($inF =~ m/\.gz$/);
-	#flag whether to use kraken v1 or v2
-	my $krak1= 1;	if ($krk2Bin ne ""){ $krak1=0; }
-	my $krkBin = "";
-	$krkBin = getProgPaths("kraken") if ($krak1);
-	if ($krak1){
-		$cmd .= "$krkBin --preload --threads $numThr --fastq-input $gzFlag --unclassified-out $outF --db $DBdir$DBname  $inF > /dev/null\n";
-	} else {
-		$cmd .= "$krk2Bin --threads $numThr $gzFlag --unclassified-out $outF --db $DBdir$DBname --output - $MFopt{filterHostKr2QuickMode}{0} --confidence $MFopt{krakHostConf} $inF \n";
-	}
-	if ($doGZIP){
-		$cmd .= "$pigzBin -f -p $numThr $outF \n";
-	}
-	return $cmd;
 }
 
 sub genoSize(){
@@ -6811,10 +6790,11 @@ sub movePreAssmData{
 	}
 	print "Preparing preassembly package..";
 	#die;
-	die "Coverage does not exist in $CSdir .. can't move preAssembly\n" if (!fileGZe("$CSdir/Coverage.percontig"));
-	die "Not a preassebmly?: $metagD\n" unless (-e "$metagD/$stones{preAsmDone}");
-	die "Couldn't find ContigStats in $metagD\n" unless (-d $CSdir);
-	die "Couldn't find Assembly $metagD/scaffolds.fasta.filt\n" unless (-e "$metagD/scaffolds.fasta.filt");
+	die "movePreAssmData::Coverage does not exist in $CSdir .. can't move preAssembly\n" if (!fileGZe("$CSdir/Coverage.percontig"));
+	die "movePreAssmData::Coverage.median.percontig not in $CSdir .. aborting\n" if (!fileGZe("$CSdir/Coverage.median.percontig"));
+	die "movePreAssmData::Not a preassebmly?: $metagD\n" unless (-e "$metagD/$stones{preAsmDone}");
+	die "movePreAssmData::Couldn't find ContigStats in $metagD\n" unless (-d $CSdir);
+	die "movePreAssmData::Couldn't find Assembly $metagD/scaffolds.fasta.filt\n" unless (-e "$metagD/scaffolds.fasta.filt");
 	my $cmd = "";
 	#my $newCovFile = "$tmpD/$smplID.coverage.perCtg";
 	$cmd .= "mkdir -p $mvD;cp -rf $metagD/scaffolds.fasta.filt $metagD/$stones{preAsmDone} $CSdir/Coverage* $mvD;\n";
@@ -6841,7 +6821,7 @@ sub movePreAssmData{
 #used in hybrid assemblies
 sub prepPreAssmbl{
 	my ($metagD, $mvD,$mapD, $tmpD , $CSdir,  $cAssGrp, $finAssLoc,$finalCommAssDir) = @_;
-	print "$mvD\n";
+	#print "$mvD\n";
 	
 	$AsGrps{$cAssGrp}{CntPreAss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAss}));
 	$AsGrps{$cAssGrp}{CntPreAssMiss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAssMiss}));
@@ -6917,7 +6897,7 @@ sub prepPreAssmbl{
 	$PostAssemblyGo = 1 if (!$doPreAssmFlag && ( $finJobs >= $AsGrps{$cAssGrp}{CntAimAss}) ); #has already seen enough complete preAssmblies
 	$doPreAssmFlag = 1 if (!$PostAssemblyGo); 
 	#print "-e $CSdir/Coverage.percontig   $metagD/$stones{preAsmDone}\n" ;
-	print "preAssm:  $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} +$AsGrps{$cAssGrp}{CntPreAssNoPrim} >= $AsGrps{$cAssGrp}{CntAimAss} :: $ePreAssmblPck $PostAssemblyGo\n";
+	#print "preAssm:  $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} +$AsGrps{$cAssGrp}{CntPreAssNoPrim} >= $AsGrps{$cAssGrp}{CntAimAss} :: $ePreAssmblPck $PostAssemblyGo\n";
 	#die "$doPreAssmFlag\n";
 	return ($ePreAssmbly,$doPreAssmFlag,$PostAssemblyGo,$ePreAssmblPck);
 }

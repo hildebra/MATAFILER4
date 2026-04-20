@@ -297,6 +297,17 @@ sub geneAbundance{
 		$inF = $inD."mapping/$SmplNm.sup-smd.bam.coverage";
 		$oPrefix = "Cov.sup";
 	}
+	
+	
+	#LS_change commented and replaced for the next SECTION
+	if (!fileGZe($inF)){
+		if ($isSupport){
+			print "No support-read coverage found for $SmplNm, skipping support coverage\n";
+			return;
+		} else {
+			die "Could not find required coverage file $inF\n";
+		}
+	}
 
 	
 	if (!fileGZe($inF)){
