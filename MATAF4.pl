@@ -1684,12 +1684,15 @@ sub submitGenomeBinner{
 
 sub createConsSNPandSVs{
 	my ($SNPinfohr) = @_;
-	
 	my %SNPinfo = %{$SNPinfohr};
+	#print "SNP\nX$SNPinfo{assembly}X\n";
 	my $preHDDspace=${$QSBoptHR}{tmpSpace};
 	$SNPinfo{qsubDir} = "$logDir/SNP/" unless (exists($SNPinfo{qsubDir}));
 	$SNPinfo{JNUM} = $JNUM;
-	my $ASFS = filsizeMB($SNPinfo{assembly});
+	my $ASFS = 0; 
+	if (exists($SNPinfo{assembly})){
+		$ASFS = filsizeMB($SNPinfo{assembly});
+	} else {die "createConsSNPandSVs:: object SNPinfo{assembly} missing.\n";}
 #	${$QSBoptHR}{tmpSpace}  = int($map{$curSmpl}{inputFileSizeMB}*15/1024)+15  ."G"; #*20 for SNPconsensus_vcf #= $HDDspace{SNPcall};
 	${$QSBoptHR}{tmpSpace}  = int($ASFS*400/1024)+15  ."G"; #*20 for SNPconsensus_vcf #= $HDDspace{SNPcall};
 
@@ -1725,7 +1728,6 @@ sub createConsSNPandSVs{
 		my ($jdep2) = SVcall_vcf(\%SNPinfo);
 		$jdep .= ";$jdep2" if ($jdep2 ne "");
 	}
-		#die;
 
 	
 	return $jdep;
@@ -4158,10 +4160,10 @@ sub seedUnzip2tmp{
 	}
 
 
-	$totalInputSizeMB = filsizeMB($fastp,(@pa1,@pa2,@pas,@paBam));
+	$totalInputSizeMB = filsizeMB($fastp,@pa1,@pa2,@pas,@paBam);
 	$map{$curSmpl}{inputFileSizeMB} = $totalInputSizeMB;
 	#and file size for suppl files..
-	$totalXInputSizeMB= filsizeMB($fastp,(@paX1,@paX2,@paXs,@paBamX));
+	$totalXInputSizeMB= filsizeMB($fastp,@paX1,@paX2,@paXs,@paBamX);
 	$map{$curSmpl}{inputXFileSizeMB} = $totalXInputSizeMB;
 
 
@@ -6856,7 +6858,8 @@ sub prepPreAssmbl{
 	if ($MFopt{DoAssembly} == 5 && $AsGrps{$cAssGrp}{SupportReads} =~ m/PB:/){#$map{$curSmpl}{"SupportReads"} =~ m/PB:/ ){ 
 		#condition: right assembly mode and actually secondary support reads
 		$doPreAssmFlag = 1 ;
-		if ((!$eCOVmv && !$eCOV) || !$ePreAssmbly){
+		#print "XAS\n";
+		if ((!$eCOVmv && !$eCOV) || !$ePreAssmbly || $map{$curSmpl}{inputFilesEmpty}){
 			#print "preAssmbl: nothing done yet.. \n$mvD\n$metagD\n";
 			#die;
 			if ($map{$curSmpl}{inputFilesEmpty}){

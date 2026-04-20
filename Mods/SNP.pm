@@ -399,7 +399,7 @@ sub SNPconsensus_vcf{
 	$xtra .= "echo \"Creating c/bams indexes primary reads\"\n";
 	#my @tar = ("");$tar[0] = ${$SNPIHR->{MAR}}[0]; #$preTar;
 	
-	my @tar=();my $cmdAll = "";my @allDeps2; my @checkF;
+	my @tar= @{$SNPIHR->{MAR}}[0] if ($hasPrimaryRds);my $cmdAll = "";my @allDeps2; my @checkF;
 	my $tmpOut = "$scrDir/$smplNm.cons.vcf";my $depthFile ="";
 
 	#supplementary mappings?
@@ -408,16 +408,19 @@ sub SNPconsensus_vcf{
 	
 	my $memReqGB = 20; #memory requested overall
 	my $bcramSiz = 0; 
-	if ($hasPrimaryRds){$bcramSiz = filsizeMB($tar[0]);}  
+	if ($hasPrimaryRds){$bcramSiz = filsizeMB($tar[0]);} 
 	if (@tarS){my $tmpSI = filsizeMB($tarS[0]); $bcramSiz = $tmpSI if ($tmpSI > $bcramSiz);}
 	my $refSize = filsizeMB($refFA);
 	my @limits = (1500,3500,5500,7500,10000,12000); my @memRperLimit = (15,20,30,40,60,120);
 	if ($bamcram eq "bam"){ for (my $i=0;$i<@limits;$i++){$limits[$i] *= 1.7;}} #increase limits for bams..
 	for (my $i=0;$i<@limits;$i++){ last if (($bcramSiz+$refSize)<$limits[$i]); $memReqGB = $memRperLimit[$i];}
-	$memReqGB = $memPJob if ($memPJob > 0);;
+	$memReqGB = $memPJob if ($memPJob > 0);
+	
+	
+	#die "hasPrimaryRds: $hasPrimaryRds\n";
 
 	if ($hasPrimaryRds){ #primary reads SNP call
-		@tar = @{$SNPIHR->{MAR}}[0]; 
+		
 		die "Can't find input file $tar[0] (SNP.pm)\n" unless (-e $tar[0]);
 		if ($bamcram eq "cram"){ #create index for bam/cram
 			$xtra .= "if [ ! -e $tar[0].crai ] || [ ! -s $tar[0].crai ]; then rm -f $tar[0].crai; $smtBin index -@ $samcores  $tar[0]; fi\n";
@@ -502,7 +505,8 @@ sub SNPconsensus_vcf{
 	}
 	
 	my $postcmd = "";
-	if (!$onlyNormalize && ($hasPrimaryRds || fileGZs($vcfFile)) && ($SNPsuppStone eq "" || fileGZs($vcfFileS)) ){$cmdAll="";}
+	if (!$onlyNormalize && ($hasPrimaryRds && fileGZs($vcfFile)) && ($SNPsuppStone eq "" && fileGZs($vcfFileS)) ){$cmdAll="";}
+	#die "$cmdAll\n!$onlyNormalize && ($hasPrimaryRds || fileGZs($vcfFile)) && ($SNPsuppStone eq  || fileGZs($vcfFileS)) \n";
 	my $vcf2fnaOpt = "";
 	my $vcf2fnaOuts = "-oCtg $ofasCons.gz";
 	if (!-e $SNPIHR->{genefna}){
