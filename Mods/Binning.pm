@@ -675,61 +675,74 @@ sub runCheckM2{#runs checkM2 on *.faa files (each file one Bin)
 
 
 
-sub runSemiBin{
-	my ($jgO,$outDir, $tmpDir, $nm, $fna, $cores, $dirsAR, $seqTec, $giveSBenv ) = @_;
-	#human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/global
-	my $SBbin = getProgPaths("SemiBin2");
-	#my $semibinGTDB = getProgPaths("semibinGTDB");
-	#get list of bams/crams..
-	my @dirSS = @{$dirsAR}; #= split(',',$dirs);
-	#go through each dir and find sample name
-	my $comBAM = "";
-	my $isCram=0; my $numBams=0;
-	my @BAMS;  
+#actual binners start here
+
+
+
+sub createBams{
+	my ($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,$fmt) = @_;
+	my @dirSS = @{$dirsAR};
+	my $isCram = 0; my $numBams = 0;
+	my @BAMS;
 	my $uncramCmd = "";
+	if ($fmt ne "bam" && $fmt ne "sam"){die"createBams:: fmt has to be either bam or sam\nAborting..\n";}
 	foreach my $DDI (@dirSS){
-		$numBams++; my %iBAMS;
-		my $iBAM = $DDI;
-		if ( $DDI =~ m/\/$/ ||  $DDI !~ m/bam$/ ){
-			unless (-e "$DDI/mapping/done.sto"){print "Can't find $DDI/mapping/done.sto!! \n Aborting SemiBin\n"; return "" ;}
-			my $SmplNm = `cat $DDI/mapping/done.sto`;#$SmplNm =~ s/-smd.bam\n?//;
-			chomp $SmplNm;	my $tbam = "$DDI/mapping/$SmplNm";
-			if (!-e $tbam){$isCram=1;$tbam =~ s/\.bam/\.cram/;}
-			unless (-e $tbam){
-				print "runSemiBin:::Can't find either bam nor cram at $DDI\nAborting Binning prep for current sample group $nm\n";
-				return "";
-			}
-			$iBAM = $tbam;
-		} 
-		next if (-s $iBAM < 15000000 ); #cram/bam too small.. prob no good   (15000000)
-		my $oBAM = "$tmpDir/$nm.$numBams.bam";
-		$uncramCmd .= cram2bsam($iBAM,$fna,$oBAM,1,$cores) if ($isCram && ! -e $oBAM);
-		push @BAMS, $oBAM;
-		#check explicitly for suppl mapping being present..
-		if ($iBAM =~ m/\.sup/){
-			$iBAM =~ s/\.sup//;
-		} else {
-			$iBAM =~ s/-smd/\.sup-smd/;
+		$numBams++;
+		my $iBAM = "";
+		my $iBAM2 = "";
+		if ($DDI =~ m/\/$/ || $DDI !~ m/bam$/){
+			unless (-e "$DDI/mapping/done.sto"){print "runSCGBinner:::Can't find $DDI/mapping/done.sto\nAborting SCGBinner prep for $nm\n"; return "";}
+			my $SmplNm = `cat $DDI/mapping/done.sto`;
+			chomp $SmplNm; my $tbam = "$DDI/mapping/$SmplNm";
+			my $tbam2 = $tbam;$tbam2 =~ s/-smd\./\.sup-smd\./;
+			if (!-e $tbam && !-e $tbam2){$isCram=1; $tbam =~ s/\.bam/\.cram/;$tbam2 =~ s/\.bam/\.cram/;}
+			if (!-e $tbam && !-e $tbam2){print "runSCGBinner:::Can't find bam or cram at $DDI\nAborting SCGBinner prep for $nm\n"; next;}
+			$iBAM = $tbam if (-e $tbam && -s $tbam > $minBamSiz); 
+			$iBAM2 = $tbam2 if (-e $tbam2 && -s $tbam2 > $minBamSiz);
 		}
-		if (-e $iBAM){
-			$oBAM = "$tmpDir/$nm.$numBams.sup.bam";
-			$uncramCmd .= cram2bsam($iBAM,$fna,$oBAM,1,$cores) if ($isCram && ! -e $oBAM);
-			push @BAMS, $oBAM;
+		#primary reads
+		next if ( $iBAM eq "" && $iBAM2 eq "" ); 
+		my $oBAM = "$tmpDir/$nm.$numBams.$fmt";
+		if ($isCram && !-e $oBAM && $iBAM ne ""){
+			$uncramCmd .= cram2bsam($iBAM,$fna,$oBAM,1,$cores) ;
+			push @BAMS, $isCram ? $oBAM : $iBAM;
+		}
+		#supplemental reads
+		my $oBAM2 = "$tmpDir/$nm.$numBams.sup.$fmt";
+		if ($isCram && !-e $oBAM2 && $iBAM2 ne ""){
+			$uncramCmd .= cram2bsam($iBAM2,$fna,$oBAM2,1,$cores) ;
+			push @BAMS, $isCram ? $oBAM2 : $iBAM2;
 		}
 	}
-	if (@BAMS == 0){
-		#fake empty entry...
-		print "runSemiBin::No bams found, creating fake output\n";
-		system "mkdir -p $outDir;touch $outDir/$nm;touch $outDir/$nm.assStat";
+	#die "@dirSS\n@BAMS\n";
+	if (@BAMS == 0 && $fakeEmpty){
+		print "runSCGBinner::No bams found, creating fake output\n";
+		system "mkdir -p $outDir; touch $outDir/$nm; touch $outDir/$nm.assStat";
 		open O,">$outDir/$nm.cm2";
 		print O "Name\tCompleteness\tContamination\tCompleteness_Model_Used Translation_Table_Used\tAdditional_Notes\n";
 		close O;
-		return "" ;
+		return "";
 	}
+	return ($uncramCmd,\@BAMS);
+}
+
+
+
+sub runSemiBin{
+	my ($jgO,$outDir, $tmpDir, $nm, $fna, $cores, $dirsAR, $seqTec, $giveSBenv ) = @_;
+	#human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/global
+	#my $semibinGTDB = getProgPaths("semibinGTDB");
+	#get list of bams/crams..
+
 #die;
+	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
+	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
+	my @BAMS = @{$BAMSar};
+	my $numBams = @BAMS;
 	
 	
 	# --environment human_gut, dog_gut, ocean, soil, cat_gut, human_oral, mouse_gut, pig_gut, built_environment, wastewater, chicken_caecum, global
+	my $SBbin = getProgPaths("SemiBin2");
 	my $smode = "single_easy_bin ";
 	my $senvDef = "--environment human_gut";my $senv = $senvDef; 
 	if ($numBams > 1){$senv = "";}#multisample doesn't accept env flag
@@ -763,37 +776,11 @@ sub runMetaDecoder{
 	my $MDbin = getProgPaths("MetaDecoder");
 	my $baseN = "$tmpDir/$nm";
 	#get list of bams/crams..
-	my @dirSS = @{$dirsAR}; #= split(',',$dirs);
-	#go through each dir and find sample name
-	my $comBAM = "";
-	my $isCram=0; my $numBams=0;
-	my @SAMS;  
-	my $uncramCmd = "";
-	foreach my $DDI (@dirSS){
-		$numBams++;
-		my $oSAM = "$tmpDir/$nm.$numBams.sam";
-		my $iBAM = $DDI;
-		if ( $DDI =~ m/\/$/ ||  $DDI !~ m/bam$/ ){
-			my $SmplNm = `cat $DDI/mapping/done.sto`;#$SmplNm =~ s/-smd.bam\n?//;
-			chomp $SmplNm;	my $tbam = "$DDI/mapping/$SmplNm";
-			if (!-e $tbam){$isCram=1;$tbam =~ s/\.bam/\.cram/;}
-			die "runMetaDecoder:::Can't find either bam nor cram at $DDI\n" unless (-e $tbam);
-			$iBAM = $tbam;
-		} 
-		next if (-s $iBAM < 3000);
-		$uncramCmd .= cram2bsam($iBAM,$fna,$oSAM,2,$cores) unless (-e $oSAM);
-		push @SAMS, $oSAM;
-	}
-	if (@SAMS == 0){
-		#fake empty entry...
-		system "mkdir -p $outDir;touch $outDir/$nm;touch $outDir/$nm.assStat";
-		open O,">$outDir/$nm.cm2";
-		print O "Name\tCompleteness\tContamination\tCompleteness_Model_Used Translation_Table_Used\tAdditional_Notes\n";
-		close O;
-		return "" ;
-	}
+	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
+	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"sam");
+	my @SAMS = @{$BAMSar};
 	
-	# --environment human_gut, dog_gut, ocean, soil, cat_gut, human_oral, mouse_gut, pig_gut, built_environment, wastewater, chicken_caecum, global
+
 	my $cmd = "###preparing SAMs..\n$uncramCmd\n\n";
 	$cmd .= "$MDbin coverage -s ". join(" ",@SAMS). " -o $baseN.coverage --threads $cores --mapq 10\n";
 	$cmd .= "$MDbin seed  --threads $cores -f $fna -o $baseN.SEED\n";
@@ -808,49 +795,20 @@ sub runMetaDecoder{
 }
 
 
-
-
-
 sub runSCGBinner{
 	my ($jgO,$outDir, $tmpDir, $nm, $fna, $cores, $dirsAR) = @_;
-
+	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
+	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
+	my @BAMS = @{$BAMSar};
+	#die "runSCGBinner::@BAMS\n";
 	my $SCGbin = getProgPaths("SCGBinner");
-	my @dirSS = @{$dirsAR};
-	my $isCram = 0; my $numBams = 0;
-	my @BAMS;
-	my $uncramCmd = "";
-	foreach my $DDI (@dirSS){
-		$numBams++;
-		my $iBAM = $DDI;
-		if ($DDI =~ m/\/$/ || $DDI !~ m/bam$/){
-			unless (-e "$DDI/mapping/done.sto"){print "runSCGBinner:::Can't find $DDI/mapping/done.sto\nAborting SCGBinner prep for $nm\n"; return "";}
-			my $SmplNm = `cat $DDI/mapping/done.sto`;
-			chomp $SmplNm; my $tbam = "$DDI/mapping/$SmplNm";
-			if (!-e $tbam){$isCram=1; $tbam =~ s/\.bam/\.cram/;}
-			unless (-e $tbam){print "runSCGBinner:::Can't find bam or cram at $DDI\nAborting SCGBinner prep for $nm\n"; return "";}
-			$iBAM = $tbam;
-		}
-		next if (-s $iBAM < 15000000);
-		my $oBAM = "$tmpDir/$nm.$numBams.bam";
-		$uncramCmd .= cram2bsam($iBAM,$fna,$oBAM,1,$cores) if ($isCram && !-e $oBAM);
-		push @BAMS, $isCram ? $oBAM : $iBAM;
-	}
-	if (@BAMS == 0){
-		print "runSCGBinner::No bams found, creating fake output\n";
-		system "mkdir -p $outDir; touch $outDir/$nm; touch $outDir/$nm.assStat";
-		open O,">$outDir/$nm.cm2";
-		print O "Name\tCompleteness\tContamination\tCompleteness_Model_Used Translation_Table_Used\tAdditional_Notes\n";
-		close O;
-		return "";
-	}
-
 	my $cmd = "###preparing BAMs..\n$uncramCmd\n\n";
 	$cmd .= "###Running SCGBinner...\n";
 	$cmd .= "mkdir -p $outDir\n";
-	$cmd .= "$SCGbin -a $fna -o $outDir -b " . join(" ",@BAMS) . " -t $cores\n";
+	$cmd .= "$SCGbin -a $fna -o $tmpDir -b " . join(" ",@BAMS) . " -t $cores\n";
 	# move result TSV, then clean intermediate dirs (set -e ensures these only run on success)
-	$cmd .= "mv $outDir/scgbinner_res/SCGBINNER_result.tsv $outDir/$nm\n";
-	$cmd .= "rm -rf $outDir/scgbinner_res $outDir/data_augmentation\n";
+	$cmd .= "mv $tmpDir/scgbinner_res/SCGBINNER_result.tsv $outDir/$nm\n";
+	$cmd .= "rm -rf $tmpDir\n";##$outDir/scgbinner_res $outDir/data_augmentation\n";
 	return $cmd;
 }
 

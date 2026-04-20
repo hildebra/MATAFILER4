@@ -305,6 +305,7 @@ sub SNPconsensus_vcf{
 	my $overwrite = $SNPIHR->{overwrite};
 	my $runLocalTmp = $SNPIHR->{runLocal};
 	my $maxSNPcores= $SNPIHR->{maxCores};
+	my $hasPrimaryRds = $SNPIHR->{hasPrimaryRds};
 	my $normalizeIndel = 1; $normalizeIndel = $SNPIHR->{normIndels} if (exists($SNPIHR->{normIndels})) ;
 	my $onlyNormalize = 0;
 
@@ -346,7 +347,7 @@ sub SNPconsensus_vcf{
 
 	
 	#key change for C++ program vcf2fasta
-	my $reportVarOnly=1; #was 0 before
+	my $reportVCFonly=1; #was 0 before
 
 
 	my $ofasCons = $SNPIHR->{ofas};
@@ -356,7 +357,7 @@ sub SNPconsensus_vcf{
 	my $run2ctg=1; #flag to determine if I run the cram to bam, mpileup, consensus contig steps..
 	system "rm -f $ofasConsDir/*" if ($overwrite);
 	#die "$ofasCons\n";
-	if (fileGZe ($vcfFile) || (-e "$ofasCons.gz" && -s "$ofasCons.gz" > 200)){
+	if (fileGZe ($vcfFile) || ( -s "$ofasCons.gz" > 200)){
 		$run2ctg =0 ;
 	} else {
 		system "rm -f $ofasConsDir/*"; #better safe than sorry..
@@ -367,7 +368,7 @@ sub SNPconsensus_vcf{
 	if ($splitFAsize>0){$myParL=1;}
 	if ($myParL && $run2ctg){ #no, don't redo freebayes part
 		my ($refAR,$refAR2);
-		if (exists($SNPIHR->{depthF}) && $SNPIHR->{depthF} ne ""){
+		if ($hasPrimaryRds && -e $SNPIHR->{depthF} ne ""){
 			 ($refAR,$refAR2) = getRegionsBamDepth($SNPIHR->{depthF},$SNPIHR->{split_jobs},$maxSNPcores);
 		} else {
 			 ($refAR,$refAR2) = getRegionsBam($splitFAsize,$refFA,$tmpdir);
@@ -397,51 +398,52 @@ sub SNPconsensus_vcf{
 	
 	$xtra .= "echo \"Creating c/bams indexes primary reads\"\n";
 	#my @tar = ("");$tar[0] = ${$SNPIHR->{MAR}}[0]; #$preTar;
-	my @tar = @{$SNPIHR->{MAR}}[0]; 
-	die "Can't find input file $tar[0] (SNP.pm)\n" unless (-e $tar[0]);
-	if ($bamcram eq "cram"){ #create index for bam/cram
-		$xtra .= "if [ ! -e $tar[0].crai ] || [ ! -s $tar[0].crai ]; then rm -f $tar[0].crai; $smtBin index -@ $samcores  $tar[0]; fi\n";
-	} else {
-		$xtra .= "if [ ! -e $tar[0].bai ] || [ ! -s $tar[0].bai ]; then rm -f $tar[0].bai; $smtBin index -@ $samcores  $tar[0]; fi\n";
-	}
 	
-	#find depthfil for input bam (primary)
-	my $depthFile = $tar[0];$depthFile =~ s/\.cram$|\.bam$/\.bam\.coverage\.gz/;
-	if (!-e $depthFile){$depthFile =~ s/\.gz//; die "no depth file found (SNP.pm): $depthFile\n$tar[0]\n" if (!-e $depthFile);}
+	my @tar=();my $cmdAll = "";my @allDeps2; my @checkF;
+	my $tmpOut = "$scrDir/$smplNm.cons.vcf";my $depthFile ="";
+
+	#supplementary mappings?
+	my @tarS = ();@tarS = @{$SNPIHR->{MARsupp}} if ($SNPsuppStone ne "" && exists ($SNPIHR->{MARsupp} ) );
+	my $tmpOut2 = "$scrDir/$smplNm.X.cons.vcf";my $depthFileS  = "";
 	
-	my $bcramSiz = filsizeMB($tar[0]);
-	my $refSize = filsizeMB($refFA);
 	my $memReqGB = 20; #memory requested overall
+	my $bcramSiz = 0; 
+	if ($hasPrimaryRds){$bcramSiz = filsizeMB($tar[0]);}  
+	if (@tarS){my $tmpSI = filsizeMB($tarS[0]); $bcramSiz = $tmpSI if ($tmpSI > $bcramSiz);}
+	my $refSize = filsizeMB($refFA);
 	my @limits = (1500,3500,5500,7500,10000,12000); my @memRperLimit = (15,20,30,40,60,120);
 	if ($bamcram eq "bam"){ for (my $i=0;$i<@limits;$i++){$limits[$i] *= 1.7;}} #increase limits for bams..
 	for (my $i=0;$i<@limits;$i++){ last if (($bcramSiz+$refSize)<$limits[$i]); $memReqGB = $memRperLimit[$i];}
 	$memReqGB = $memPJob if ($memPJob > 0);;
-	
-	
-	#die $depthFile."\n";
-	
-	if (!$runLocalTmp && $run2ctg && (!-e $tar[0] || !-e $refFA) ){
-		my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.CramToBam$x.sh",$xtra,2,"17G","CtB$x",$jdep,"",$samcores,[],$QSBoptHR);
-		$cleanCmd .= "rm -r $scrDir\n";
-		$rdep = $dep;
-		$xtra = "";
-	}
-	$SNPIHR->{run2ctg} = $run2ctg;
-	$SNPIHR->{rdep} = $rdep;
 
-	#$SNPIHR->{assembly} = $refFA;
-	my $cmdAll = ""; $cmdAll .= $xtra if ($run2ctg && !$onlyNormalize);
-	my $tmpOut = "$scrDir/$smplNm.cons.vcf";
-	my ($dAR,$cAR,$pilecmd) =  pileupcall(\@tar,"",$SNPIHR,$QSBoptHR,$scrDir,$tmpOut,$myParL,\@curReg,$reportVarOnly);
-	my @allDeps2 = @{$dAR}; my @checkF = @{$cAR};
-	$cmdAll .= $pilecmd if (!$onlyNormalize);
+	if ($hasPrimaryRds){ #primary reads SNP call
+		@tar = @{$SNPIHR->{MAR}}[0]; 
+		die "Can't find input file $tar[0] (SNP.pm)\n" unless (-e $tar[0]);
+		if ($bamcram eq "cram"){ #create index for bam/cram
+			$xtra .= "if [ ! -e $tar[0].crai ] || [ ! -s $tar[0].crai ]; then rm -f $tar[0].crai; $smtBin index -@ $samcores  $tar[0]; fi\n";
+		} else {
+			$xtra .= "if [ ! -e $tar[0].bai ] || [ ! -s $tar[0].bai ]; then rm -f $tar[0].bai; $smtBin index -@ $samcores  $tar[0]; fi\n";
+		}
+		
+		#find depthfil for input bam (primary)
+		$depthFile = $tar[0];$depthFile =~ s/\.cram$|\.bam$/\.bam\.coverage\.gz/;
+		if (!-e $depthFile){$depthFile =~ s/\.gz//; die "no depth file found (SNP.pm): $depthFile\n$tar[0]\n" if (!-e $depthFile);}
+		if (!$runLocalTmp && $run2ctg && (!-e $tar[0] || !-e $refFA) ){
+			my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.CramToBam$x.sh",$xtra,2,"17G","CtB$x",$jdep,"",$samcores,[],$QSBoptHR);
+			$cleanCmd .= "rm -r $scrDir\n";$rdep = $dep;$xtra = "";
+		}
+		$SNPIHR->{run2ctg} = $run2ctg;$SNPIHR->{rdep} = $rdep;
+
+		#$SNPIHR->{assembly} = $refFA;
+		$cmdAll .= $xtra if ($run2ctg && !$onlyNormalize);
+		my ($dAR,$cAR,$pilecmd) =  pileupcall(\@tar,"",$SNPIHR,$QSBoptHR,$scrDir,$tmpOut,$myParL,\@curReg,$reportVCFonly);
+		@allDeps2 = @{$dAR}; @checkF = @{$cAR};
+		$cmdAll .= $pilecmd if (!$onlyNormalize);
+	}
 	
-		#supplementary mappings?
-	my @tarS = ("");
-	my $tmpOut2 = "$scrDir/$smplNm.X.cons.vcf";my $depthFileS  = "";
-	if ($SNPsuppStone ne "" && exists ($SNPIHR->{MARsupp} ) ){
+	if (@tarS){ #supplementary reads SNP call
 		my $xtra2 .= "echo \"Creating c/bams indexes supplemental reads\"\n";
-		$tarS[0] = ${$SNPIHR->{MARsupp}}[0];
+		
 		$depthFileS = $tarS[0];$depthFileS =~ s/\.cram$|\.bam$/\.bam\.coverage\.gz/;
 		if (!-e $depthFileS){$depthFileS =~ s/\.gz//; die "no suppl depth file found (SNP.pm): $depthFileS\n$tarS[0]\n" if (!-e $depthFileS);}
 		#die "$depthFileS\n";
@@ -450,10 +452,14 @@ sub SNPconsensus_vcf{
 		} else {
 			$xtra2 .= "if [ ! -e $tarS[0].bai ] || [ ! -s $tarS[0].bai ]; then rm -f $tarS[0].bai; $smtBin index -@ $samcores  $tarS[0]; fi\n";
 		}
-		($dAR,$cAR,$pilecmd) =  pileupcall(\@tarS,"sup-",$SNPIHR,$QSBoptHR,$scrDir,$tmpOut2,$myParL,\@curReg,$reportVarOnly);
+		my ($dAR,$cAR,$pilecmd) =  pileupcall(\@tarS,"sup-",$SNPIHR,$QSBoptHR,$scrDir,$tmpOut2,$myParL,\@curReg,$reportVCFonly);
 		$cmdAll .= $xtra2.$pilecmd if (!$onlyNormalize);
 		push(@allDeps2, @{$dAR}); push(@checkF, @{$cAR});
 	}
+	
+	#all bed files should have been removing inside the two pileupcall() subs
+	$cmdAll .= "if ls $qsubDirE/$smplNm.*.bed 1> /dev/null 2>&1 ;then echo \"Bed files still present, probably incorrect run\"; exit 33; else echo \"bed files deleted, looks good\"; fi\n\n" if (@curReg);
+		
 
 	
 	#from here on: merge XX vcf's into one
@@ -462,35 +468,17 @@ sub SNPconsensus_vcf{
 	$vcfFile .= ".gz" unless ($vcfFile =~ m/\.gz$/);
 	if ($myParL && $cmdAll ne ""){
 		#this string simply sorts all output files in correct numerical order.. doesn't touch file contents!
+		#can create quite a bit of data..
 		my $sortedFileList = " | awk -F '.' '{print \$(NF-1),\$0}'  | sort -n -k1 | cut -f2 -d' '";
-		#DEBUG
-		#$sortCmd .= "#DEBUG:\ncat `ls $tmpOut.*.lz4 $sortedFileList` > $ofasConsDir/Dbg.all.lz4\ncp $tmpOut.0.lz4 $ofasConsDir\n";
 		$sortCmd .= "mkdir -p $ofasConsDir;\n";
-		$sortCmd .= "if ls $qsubDirE/$smplNm.*.bed 1> /dev/null 2>&1 ;then echo \"Bed files still present, probably incorrect run\"; exit 33; else echo \"bed files deleted, looks good\"; fi\n\n";
-		#old way to save file.. too much data for production environment
-		$sortCmd .= "cat `ls $tmpOut.* $sortedFileList` >$vcfFile ;\nrm -f $tmpOut.*;\n";
+		if ($hasPrimaryRds){
+			$sortCmd .= "cat `ls $tmpOut.* $sortedFileList` >$vcfFile ;\nrm -f $tmpOut.*;\n";
+		}
 		if ($SNPsuppStone ne "" ){
 			$vcfFileS .= ".gz" unless ($vcfFileS =~ m/\.gz$/);
 			$sortCmd .= "cat `ls $tmpOut2.* $sortedFileList` >$vcfFileS ;\nrm -f $tmpOut2.*;\n";
 			
-			
-			#this way was not robust and had several fixes included that were suboptimal
-			#$postcmd .= "sleep 1;\n$bcftBin index -f $vcfFileS; $bcftBin index -f $vcfFile;\n";
-			#$vcfSuff = ".mrg.bcf";
-			#$postcmd .= "\n\necho \"sync sample names..\"\n";
-			#-d all 
-			#ensure smplname is the same..
-			#$postcmd .= "$bcftBin head $vcfFile | tail -n1 | cut -f10 > $vcfFile.name\n$bcftBin reheader -s $vcfFile.name $vcfFileS > $vcfFileS.2;\nrm -f $vcfFileS; mv $vcfFileS.2 $vcfFileS;\n";
-			#$postcmd .= "\necho \"Merge short- and long-read SNP calls\"\n";
-			#$postcmd .= "$bcftBin concat -a --threads $samcores -O b -o $vcfFile$vcfSuff $vcfFile $vcfFileS;\n\n";				
 		}
-		#$sortCmd .= "echo \"creating consensus SNP call\"\n";
-		#$postcmd .= "$bcftBin view -H $vcfFile$vcfSuff | $vcfcnsScr $ofasCons.depStat $minDepth $minCallQual | $pigzBin -p $samcores -c >$ofasCons.gz ;\n\n"; #$refFA.fai
-		
-		
-		
-		#-depthF m21BR347s3-smd.bam.coverage -ref scaffolds.fasta.filt -gff genes.gff -inVCF test.vcf -t 1 -minCallDepth 1 -minCallQual 20 -oCtg cons.new.fna -oGeneNT cons.new.gene.fna -oGeneAA cons.new.gene.faa
-		#// -seqPlatform ill,PB -minCallDepth 2,1 -depthF m21BR347s3-smd.bam.coverage,m21BR347s3-smd.bam.coverage -ref scaffolds.fasta.filt -gff genes.gff -inVCF test.vcf,test.vcf -t 1 -minCallQual 20 -oCtg cons.new.fna -oGeneNT cons.new.gene.fna -oGeneAA cons.new.gene.faa
 		$cmdAll .= $sortCmd;
 	}
 	
@@ -498,15 +486,15 @@ sub SNPconsensus_vcf{
 	my $cmd3 = "";
 	if($normalizeIndel){#bcftools norm -f ref.fa in.vcf
 		$cmd3.="\necho \"left-normalizing indels\"\n";
-		$cmd3 .= "$bcftBin index $vcfFile\n$bcftBin norm $bcfNormOpts $vcfFile > $vcfFile.norm\n"; # && rm $tmpOut.$tag$i$normPreTag.gz* & 
-		$cmd3 .= "rm $vcfFile $vcfFile.csi; mv $vcfFile.norm $vcfFile;\n";
+		if ($hasPrimaryRds){
+			$cmd3 .= "$bcftBin index $vcfFile\n$bcftBin norm $bcfNormOpts $vcfFile > $vcfFile.norm\n"; # && rm $tmpOut.$tag$i$normPreTag.gz* & 
+			$cmd3 .= "rm $vcfFile $vcfFile.csi; mv $vcfFile.norm $vcfFile;\n";
+		}
 		
 		if ($SNPsuppStone ne "" ){
 			$cmd3 .= "$bcftBin index $vcfFileS\n$bcftBin norm $bcfNormOpts $vcfFileS > $vcfFileS.norm\n"; 
 			$cmd3 .= "rm $vcfFileS $vcfFileS.csi; mv $vcfFileS.norm $vcfFileS;\n";
 		}
-		
-		
 		
 		$cmd3 .= "\necho \"Done normalizing\"\n"; #wait \$(jobs -p);\n
 		#die "$cmd3";
@@ -514,7 +502,7 @@ sub SNPconsensus_vcf{
 	}
 	
 	my $postcmd = "";
-	if (!$onlyNormalize && fileGZs($vcfFile) && ($SNPsuppStone eq "" || fileGZs($vcfFileS)) ){$cmdAll="";}
+	if (!$onlyNormalize && ($hasPrimaryRds || fileGZs($vcfFile)) && ($SNPsuppStone eq "" || fileGZs($vcfFileS)) ){$cmdAll="";}
 	my $vcf2fnaOpt = "";
 	my $vcf2fnaOuts = "-oCtg $ofasCons.gz";
 	if (!-e $SNPIHR->{genefna}){
@@ -524,7 +512,11 @@ sub SNPconsensus_vcf{
 	my $gffF = $SNPIHR->{gffFile}; $gffF .= ".gz" if (-e $gffF . ".gz");
 	my $vcf2fnaIns = "-ref $refFA -gff $gffF ";
 	
-	if ($SNPsuppStone eq "" ){#variant for 1 vcf
+	if (!$hasPrimaryRds){ #only support available..
+		my $tmpST = $SNPIHR->{SeqTechSuppl}; if ($tmpST eq ""){$tmpST = "ill";}
+		$vcf2fnaOpt = "-seqPlatform $tmpST -t 1 -minCallDepth $minDepth -minCallQual $minCallQual ";
+		$vcf2fnaIns .= "-inVCF $vcfFileS -depthF $depthFileS ";
+	} elsif ($SNPsuppStone eq "" ){#only primary reads available..
 		my $tmpST = $SNPIHR->{SeqTech}; if ($tmpST eq ""){$tmpST = "ill";}
 		$vcf2fnaOpt = "-seqPlatform $tmpST -t 1 -minCallDepth $minDepth -minCallQual $minCallQual ";
 		$vcf2fnaIns .= "-inVCF $vcfFile -depthF $depthFile ";
@@ -543,7 +535,7 @@ sub SNPconsensus_vcf{
 	
 	
 	$postcmd .= "rm -f $vcfFile$vcfSuff $vcfFileS.csi $vcfFile.csi;\n" if ($vcfSuff ne ""); #functionality no longer used..
-	$postcmd .= "rm  -f $vcfFileS $vcfFile;\n" if (!$saveVCF && $SNPIHR->{createFastas});
+	$postcmd .= "rm -f $vcfFileS $vcfFile;\n" if (!$saveVCF && $SNPIHR->{createFastas});
 	#} else {
 	#	if ($SNPsuppStone ne "" ){die "support reads activated. combined SNP calling only works current with use of the \"-SNPsaveVCF 1\" MG-TK option. Aborting\n";}
 		#$postcmd .= "#DEBUG\ncp $tmpOut.lz4 $ofasConsDir\n\n";
@@ -558,7 +550,7 @@ sub SNPconsensus_vcf{
 
 
 	if ($cmdAll ne ""){
-		$cmdAll .= "touch $SNPstone\n" ;# unless (-e $SNPstone);
+		$cmdAll .= "touch $SNPstone\n" if ($hasPrimaryRds);# unless (-e $SNPstone);
 		$cmdAll .= "touch $SNPsuppStone\n" if ($SNPsuppStone ne "");
 	}
 	
