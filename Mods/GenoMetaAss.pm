@@ -48,6 +48,7 @@ sub parse_duration {
 #sums up filsizes for 1 or several files; first arg can be path to files, all subsequent args need to be filenames
 sub filsizeMB{
 	my $totalMapSize=0;
+	if (!@_){return  $totalMapSize;}
 	my $path="";
 	if ($_[0] ne "" && -d $_[0]){$path=shift @_;}
 	foreach my $fh (@_){ $totalMapSize += (-s "$path/$fh") / (1024 * 1024) if (-e "$path/$fh");}
