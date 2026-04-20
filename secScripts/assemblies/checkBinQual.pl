@@ -8,7 +8,7 @@ use Getopt::Long qw( GetOptions );
 use Mods::GenoMetaAss qw(  systemW readFasta);
 use Mods::Binning qw(runCheckM runCheckM2 MB2N50);
 use Mods::math qw(medianArray);
-sub MB2assigns; sub MB2N50;
+sub MB2assigns; #sub MB2N50;
 sub createBinFAA;
 
 #0.11: 1.4.26: added getOpt interface, Pilea integration

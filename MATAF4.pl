@@ -691,6 +691,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				&& $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ );
 	#die "$allMapDone\n-e $finalMapDir/$SmplName-smd.$bamcramMap && $eCovAsssembly && !$ePreAssmbly && ($eSuppCovAsssembly || !$locMapSup2Assembly) && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/\n";
 	
+	my $allCovDone = 0;
+	$allCovDone = 1 if (($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$map{$curSmpl}{hasPrimaryRds}) );
+	#print "$allCovDone = 1 if (($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$MappingGo) );\n";
 	my $calcBinning = 0;
 	if ($MFopt{DoMetaBat2} && $boolAssemblyOK && !$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ &&  (!-e "$BinningOut.cm" && !-s "$BinningOut.cm2") ) {
 		$calcBinning=$MFopt{DoMetaBat2};
@@ -1202,8 +1205,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	#die;
 	
-	my $needsContigStats =0; #flag to activate contigStats later..
-	$needsContigStats = 1 if (($MappingGo && !$eCovAsssembly) || ($mapSuppAssFlag && !$eSuppCovAsssembly));	
+	#this flag is essentially $allCovDone 
+	#my $needsContigStats =0; #flag to activate contigStats later..
+	#$needsContigStats = 1 if (($MappingGo && !$eCovAsssembly) || ($mapSuppAssFlag && !$eSuppCovAsssembly));	
 	# calc statsitics concercing readqual, mappings, genes & contigs
 	if ($pseudAssFlag || ($AssemblyGo && $MFopt{DoAssembly}) || 
 				isLastSampleInAssembly($finalCommAssDir,$curOutDir) ) {
@@ -1227,7 +1231,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			print "Added main contig stats as a GenomeFace dependency\n";
 		}
 
-	} elsif ( (exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ && $needsContigStats) || ($eFinMapCovGZ || $eFinSupMapCovGZ) ) {
+	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ ) || $allCovDone) ) {
 		#die "test23  $AsGrps{$cAssGrp}{MapDeps}\n";
 		#calculate solely abundance / gene, has to be run after clean & assembly contigstat step and after mapping has started (at all!)
 		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$cln1 . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},1,$nodeSpTmpD,$AssemblyGo,1, $curSmpl);
@@ -1248,14 +1252,14 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	
 	#die "AT CONS SNP\n$allMapDone\n";
-	if ( ($calcConsSNP || $calcSuppConsSNP || $calcSVs || $calcSVsSupp ) && $allMapDone){
+	if ( ($calcConsSNP || $calcSuppConsSNP || $calcSVs || $calcSVsSupp ) && $allMapDone && $allCovDone){
 		#die "conssnp:: $calcConsSNP $allMapDone $finalMapDir\n";
 		#my $ofas = "$curOutDir/SNP/genePred/genes.shrtHD.SNPc.fna";
 	
 		my %SNPinfo = (gff => "$finalCommAssDir/genePred/genes.gff",
 						assembly => $metaGassembly,
 						mapD => "$finalMapDir",normIndels => $MFopt{normSNPindels},
-						SNPcaller => $MFopt{SNPcallerFlag},
+						SNPcaller => $MFopt{SNPcallerFlag},hasPrimaryRds => $map{$curSmpl}{hasPrimaryRds},
 						createFastas => $MFopt{saveConsFastas},
 						ofas => $contigsSNP, #primary file of contigs
 						genefna => $genePredSNP,genefaa => $genePredAASNP,
@@ -2963,7 +2967,8 @@ sub runContigStats{
 	my $readLX =  $map{$curSmpl}{seqSet}->{samplReadLengthX};
 	
 	#die;
-	$CSfilesComplete = 0 if (  (! fileGZs("$ContigStatsDir/Coverage.count_pergene") || !-e "$path/assemblies/metag/assembly.txt") );
+	$CSfilesComplete = 0 if ( !-e "$path/assemblies/metag/assembly.txt");
+	$CSfilesComplete = 0 if (! fileGZs("$ContigStatsDir/Coverage.count_pergene") && $map{$smpl}{hasPrimaryRds});
 	#print "CSfilesComplete $CSfilesComplete $subprts $ContigStatsDir\n!-s $ContigStatsDir/Coverage.count_pergene.gz || !-e $path/assemblies/metag/assembly.txt\n";
 	$CSfilesComplete = 0  if ($MFopt{kmerPerGene} && $AssemblyGo && ! fileGZs("$ContigStatsDir/scaff.pergene.4kmer.pm5" ));
 	$CSfilesComplete = 0  if ($MFopt{mapSupport2Assembly} && $map{$smpl}{"SupportReads"} ne "" &&  ! fileGZs("$ContigStatsDir/Cov.sup.count_pergene.gz" ));
@@ -6129,80 +6134,26 @@ sub getContamination{
 
 sub getBinnerStats{
 	my ($tmpassD,$SmplN) = @_;
-	my $SBdir = getBinSubdirName(2); my $MB2dir = getBinSubdirName(1); my $MDdir = getBinSubdirName(3); my $GFdir = getBinSubdirName(4); my $SCdir = getBinSubdirName(5);
-	
-## binning stats SemiBin
-	my $SBbinCM2 = "$tmpassD/Binning/$SBdir/$SmplN.cm2";
-	my $addStr = ""; my $addDescr="";
-	if (-e $SBbinCM2){
-		my $HQbinCnt = 0; my $MQbinCnt = 0; my $totBins=0;
-		open I,"<$SBbinCM2" or die $!;
-		while (<I>){my @spl = split/\t/; next if ($spl[1] eq "Completeness");
-			if ($spl[1] >= 90 && $spl[2] <= 5){$HQbinCnt ++ ;
-			} elsif ($spl[1] >= 80 && $spl[2] <= 5){$MQbinCnt ++ ;}
-			$totBins ++;
+	my $addStr = ""; my $addDescr = "";
+	#all binners..
+	for (my $i=1; $i < 6; $i++){
+		my $SCdir = getBinSubdirName($i);
+		my $SBbinCM2 = "$tmpassD/Binning/$SCdir/$SmplN.cm2";
+		if (-s $SBbinCM2){
+			my $HQbinCnt = 0; my $MQbinCnt = 0;my $totBins=0;
+			open I,"<$SBbinCM2" or die $!;
+			while (<I>){my @spl = split/\t/; next if ($spl[1] eq "Completeness");
+				if ($spl[1] >= 90 && $spl[2] <= 5){$HQbinCnt ++ ;
+				} elsif ($spl[1] >= 80 && $spl[2] <= 5){$MQbinCnt ++ ;}
+				$totBins ++;
+			}
+			close I;
+			$addStr .= "$HQbinCnt\t$MQbinCnt\t".($totBins-$HQbinCnt-$MQbinCnt)."\t";
+		} else {
+			$addStr .= "\t" x 3;
 		}
-		close I;
-		$addStr = "$HQbinCnt\t$MQbinCnt\t";
-		#die "$HQbinCnt $MQbinCnt $SBbinCM2\n";
-	} else {
-		$addStr .= "\t" x 2
+		$addDescr .= "HQ_bins_$SCdir\tMQ_bins_$SCdir\t${SCdir}_other_bins\t";
 	}
-	$addDescr .= "HQ_bins_SB\tMQ_bins_SB\t";
-	
-
-
-## binning stats MetaBat2
-	$SBbinCM2 = "$tmpassD/Binning/$MB2dir/$SmplN.cm2";
-	if (-e $SBbinCM2){
-		my $HQbinCnt = 0; my $MQbinCnt = 0;my $totBins=0;
-		open I,"<$SBbinCM2" or die $!;
-		while (<I>){my @spl = split/\t/; next if ($spl[1] eq "Completeness");
-			if ($spl[1] >= 90 && $spl[2] <= 5){$HQbinCnt ++ ;
-			} elsif ($spl[1] >= 80 && $spl[2] <= 5){$MQbinCnt ++ ;}
-			$totBins ++;
-		}
-		close I;
-		$addStr = "$HQbinCnt\t$MQbinCnt\t";
-	} else {
-		$addStr .= "\t" x 2
-	}
-	$addDescr .= "HQ_bins_MB2\tMQ_bins_MB2\t";
-
-## binning stats MetaDecoder
-	$SBbinCM2 = "$tmpassD/Binning/$MDdir/$SmplN.cm2";
-	if (-e $SBbinCM2){
-		my $HQbinCnt = 0; my $MQbinCnt = 0;my $totBins=0;
-		open I,"<$SBbinCM2" or die $!;
-		while (<I>){my @spl = split/\t/; next if ($spl[1] eq "Completeness");
-			if ($spl[1] >= 90 && $spl[2] <= 5){$HQbinCnt ++ ;
-			} elsif ($spl[1] >= 80 && $spl[2] <= 5){$MQbinCnt ++ ;}
-			$totBins ++;
-		}
-		close I;
-		$addStr = "$HQbinCnt\t$MQbinCnt\t";
-	} else {
-		$addStr .= "\t" x 2
-	}
-	$addDescr .= "HQ_bins_MD\tMQ_bins_MD\t";
-	
-	#GenomeFace
-	$SBbinCM2 = "$tmpassD/Binning/$GFdir/$SmplN.cm2";
-	if (-e $SBbinCM2){
-		my $HQbinCnt = 0; my $MQbinCnt = 0;my $totBins=0;
-		open I,"<$SBbinCM2" or die $!;
-		while (<I>){my @spl = split/\t/; next if ($spl[1] eq "Completeness");
-			if ($spl[1] >= 90 && $spl[2] <= 5){$HQbinCnt ++ ;
-			} elsif ($spl[1] >= 80 && $spl[2] <= 5){$MQbinCnt ++ ;}
-			$totBins ++;
-		}
-		close I;
-		$addStr = "$HQbinCnt\t$MQbinCnt\t";
-	} else {
-		$addStr .= "\t" x 2
-	}
-	$addDescr .= "HQ_bins_GF\tMQ_bins_GF\t";
-	
 	
 	return ($addStr,$addDescr);
 }
@@ -7014,7 +6965,7 @@ sub longRdAssembly{
 		#my $illPathS = ;
 		my @illDirs = @{$AsGrps{$cAsGrp}{preAsmblDir}}; #split /,/,$illPathS;
 		if ((@$singlAr - $AsGrps{$cAsGrp}{CntPreAssNoPrim}) > (@illDirs)){
-			die "hybrid assembly: Unexpected less preDirs (".@illDirs .") than indirs(" . @$singlAr .")\illDs: @illDirs\nsingl: @$singlAr\n";
+			die "hybrid assembly: Unexpected less preDirs (".@illDirs .") than indirs(" . @$singlAr .")illDs: @illDirs\nsingl: @$singlAr\n";
 		}
 
 		$cmdPre .= "echo \"presplitting helper assembly\"\n";
@@ -7045,7 +6996,12 @@ sub longRdAssembly{
 		#transfer commands to main #cmd stream..
 		$cmdPre .= "\nwait \$(jobs -p);\n\n" if ($runPar);
 
-		$cmd .= $cmdPre.$cmdLater."echo \"presplitting done\"\n\n";
+		$cmd .= $cmdPre.$cmdLater."\n\n";
+		for (my $i=0;$i<@illDirs;$i++){
+			next if ($inRds[$i] eq "");
+			$cmd .= "if [ ! -s $inRds[$i] ]; then echo \"$inRds[$i] not present.. abort\"; exit 33; fi \n";
+		}
+		$cmd .= "echo \"presplitting done\"\n\n";
 		#die "$cmd\n";
 	} else {
 		@inRds = @{$singlAr};

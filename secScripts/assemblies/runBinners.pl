@@ -10,11 +10,16 @@ use Mods::Binning qw (runMetaBat runCheckM runSemiBin runMetaDecoder getBinSubdi
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive );
 
+
+#perl /hpc-home/hildebra/dev/MATAF4//secScripts/assemblies/runBinners.pl -binner 5 -binD /hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia//assemblies/metag//Binning/SC// -smplID "S4qia" -tmpD /hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia//assemblies/metag//Binning/tmp/ -assmbl /hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia//assemblies/metag//scaffolds.fasta.filt -assmblGrp 5 -cores 9 -smplDirs /hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia/ -seqTec "hybrid" -logDir "/hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia/LOGandSUB" ;
+
+
 #v0.1: 2.3.24: ini version FH
 #v0.11: 23.4.24: added support for hybrid assemblies (i.e. 2 crams / sample)
 #v0.12: 17.1.26: added Genome Face support
 #v0.13: 12.3.26: GPU job submission for GenomeFace
-my $version = 0.13;
+#v0.14: 19.4.26: scgBinner added
+my $version = 0.14;
 
 
 my $DoMetaBat2 = "";
