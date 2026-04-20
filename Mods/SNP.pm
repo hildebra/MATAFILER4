@@ -357,7 +357,7 @@ sub SNPconsensus_vcf{
 	my $run2ctg=1; #flag to determine if I run the cram to bam, mpileup, consensus contig steps..
 	system "rm -f $ofasConsDir/*" if ($overwrite);
 	#die "$ofasCons\n";
-	if (fileGZe ($vcfFile) || ( -s "$ofasCons.gz" > 200)){
+	if (fileGZe ($vcfFile) || ( -e "$ofasCons.gz" && -s "$ofasCons.gz" > 200)){
 		$run2ctg =0 ;
 	} else {
 		system "rm -f $ofasConsDir/*"; #better safe than sorry..

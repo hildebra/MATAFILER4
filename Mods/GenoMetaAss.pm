@@ -49,7 +49,7 @@ sub parse_duration {
 sub filsizeMB{
 	my $totalMapSize=0;
 	my $path="";
-	if (-d $_[0]){$path=shift @_;}
+	if ($_[0] ne "" && -d $_[0]){$path=shift @_;}
 	foreach my $fh (@_){ $totalMapSize += (-s "$path/$fh") / (1024 * 1024) if (-e "$path/$fh");}
 	return $totalMapSize;
 }
