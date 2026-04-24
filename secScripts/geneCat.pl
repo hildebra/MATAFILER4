@@ -15,6 +15,8 @@
 use warnings;
 use strict;
 use File::Basename;
+use File::stat;
+
 use Getopt::Long qw( GetOptions );
 
 use Cwd; use English;
@@ -24,6 +26,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
 use Mods::FuncTools qw(assignFuncPerGene calc_modules);
 use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins  attachProteins3 );
+use Mods::Binning qw(getBinSubdirName);
 
 sub geneCatFlow;
 sub addingSmpls;
@@ -178,7 +181,7 @@ my $extraRdsFNA = "";
 #only used in MGS.pl script:
 my $useCheckM1= 0; my $useCheckM2 =1;
 #only in MGS.pl:
-my $binSpeciesMG = 2;#0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder
+my $binSpeciesMG = 2;#0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder , ...
 
 #$justCDhit = $ARGV[4] if (@ARGV > 4);
 #$extraRdsFNA = $ARGV[5] if (@ARGV > 5);#FNA with (predicted) genes, that are to be artificially added to the new gene catalog (and clutered with new genes)
@@ -238,7 +241,7 @@ GetOptions(
 	"requireAllAssemblies=i" => \$requireAllAssemblies, #normally not exposed, continues even if some assemblies not present..
 	"sampleBatches=i" => \$batchNum, #how many batches to use for initial accumulation of genes? (200-500 samples per batch recommended)
 #Binning/MGS related
-	"binSpeciesMG=i" => \$binSpeciesMG, #use MAGs to create MGS? 1= metaBat2, 2=SemiBin, 3=metaDecoder
+	"binSpeciesMG=i" => \$binSpeciesMG, #use MAGs to create MGS? 1= metaBat2, 2=SemiBin, 3=metaDecoder, 4=GF, 5=SC
 	"useCheckM2=i" => \$useCheckM2, #1: use checkM2 completeness predictions, Default: 1
 	"useCheckM1=i" => \$useCheckM1, #1: use checkM completeness predictions, Default: 0
 	"doStrains=i" => \$doStrains, #1: calculate intraSpecific phylogenies on each MGS
@@ -267,7 +270,7 @@ GetOptions(
 
 
 checkMF(2);
-
+my $binnerShrt=getBinSubdirName($binSpeciesMG);
 
 if ($numCor3 == -1){
 	$numCor3 = $numCor;
@@ -391,7 +394,8 @@ if ($mode eq "mergeCLs"){#was previously mergeCls.pl
 	mergeClsSam($tmpDir,$cdhID,$GCdir);
 	exit(0);
 } elsif ($mode eq "subprepSmpls"){ #subpart sample gene extractions..
-	addingSmpls($SmplStart,$SmplStop,$SmplBatch);
+	my $state = addingSmpls($SmplStart,$SmplStop,$SmplBatch);
+	if ($state){print "error in addingSmpls(), exiting...\n";exit(33);} #throw error
 	exit(0);
 } elsif($mode eq "CANOPY"){ #create MGS/MGU with canopy clustering
 	my $numCor2 = $numCor;
@@ -1146,7 +1150,7 @@ sub geneCatFlow($ $ $ $ ){
 	#mem before was $totMem, but this is more a limiatation of checkM that should be used..
 	
 	#estimate ram size..
-	my $MGSoutD = "$OutD/Bin_SB/";
+	my $MGSoutD = "$OutD/Bin_${binnerShrt}/"; 
 	#if ($submitLocal){systemW $cmd;		$cmd = "";}
 	if (-e $qsubDir."MGS.sh"){
 		my $tmpS = `grep -v '^#' $qsubDir/MGS.sh`;
@@ -1298,10 +1302,11 @@ sub addingSmpls{
 		my $inFMGd = "$metaGD/ContigStats/FMG/";
 		#print "\n$metaGD\n";
 		#print "$dir2rd/assemblies/metag/scaffolds.fasta.filt\n";
-		if ( (! fileGZe("$metaGD/scaffolds.fasta.filt") && ! fileGZe("$metaGD/longReads.fasta.filt"))){# && -d $inFMGd){
+		#print "$metaGD/scaffolds.fasta.filt";
+		if ( !fileGZe("$metaGD/scaffolds.fasta.filt") && ! fileGZe("$metaGD/longReads.fasta.filt")){# && -d $inFMGd){
 			print "Skipping $dir2rd\n";
-			die "no ass1\n $metaGD\n$dir2rd/assemblies/metag/assembly.txt\n" unless (-e "$metaGD/scaffolds.fasta.filt" && !-e "$metaGD/longReads.fasta.filt" ); 
-			die "no ass2\n $metaGD/longReads.fasta.filt\n" unless (-e "$metaGD/longReads.fasta.filt" ); 
+			die "no asm1\n $metaGD\n$dir2rd/assemblies/metag/assembly.txt\n" unless (-e "$metaGD/scaffolds.fasta.filt" && !-e "$metaGD/longReads.fasta.filt" ); 
+			die "no asm2\n $metaGD/longReads.fasta.filt\n" unless (-e "$metaGD/longReads.fasta.filt" ); 
 			push(@skippedSmpls,$map{$smpl}{dir});
 			next;
 		}
@@ -1318,10 +1323,9 @@ sub addingSmpls{
 		my %gff = %{$gffHref};
 		my %curFMGs; #FMGs and their ID
 		my %curFMGsTag; #checks that all FMGs were present in fasta.. can point to corrupted files
+		my $FMGfile = "$metaGD/$path2FMGids";
 		if ($doFMGseparation){
-			my $FMGfile = "$metaGD/$path2FMGids";
-			
-			open I, "<$FMGfile" or die "cant open FMGids:\n$metaGD/$path2FMGids\n";
+			open I, "<$FMGfile" or die "cant open FMGids:\n$FMGfile\n";
 			my $cnt = 0;
 			while (my $line = <I>){
 				chomp $line; my @spl = split(/\s+/,$line); #MM1__C104459_L=563;_1 COG0552
@@ -1404,13 +1408,18 @@ sub addingSmpls{
 					if ($FATALcnt <5) {
 						print STDERR "missing gene $k\n" ;
 					} elsif($FATALcnt == 5){
-						print STDERR "Skipping further genes\n"
+						print STDERR "Skipping further reports..\n"
 					}
 					$FATALcnt++;
 				}
 			}
 			if ($FATALcnt){
 				print STDERR "FATAL:: mismatch predicted marker gene and assembly gene predictions (N=$FATALcnt of ". keys(%curFMGsTag) ."):";
+				#my $statFMH = stat($FMGfile) or die "Cannot stat $FMGfile: $!";
+				#my $statGF = stat("$metaGD/scaffolds.fasta.filt") or die "Cannot stat $metaGD/scaffolds.fasta.filt: $!";
+				
+				print "Deleting $metaGD/$path2CS..\n";
+				system "rm -rf $metaGD/$path2CS" ;# if ($statFMH->mtime < $statGF->mtime); #FMG file was created before gene predictions? probably wrong..
 				push(@stopAndRedo,$smpl);
 			}
 		}
@@ -1446,7 +1455,7 @@ sub addingSmpls{
 	if (@stopAndRedo){
 		print "Something wrong while extracting metagenomic genes.. you will need to rerun MATAFILER, fatal assemblies have already been deleted and will now need to be re-assembled.\n";
 		print "List of potential problematic samples: @stopAndRedo\n";
-		exit(31);
+		return 1;
 	}
 
 	#any extra reads (e.g. from ref genomes?)
@@ -1510,6 +1519,7 @@ sub addingSmpls{
 			sleep(2);
 		} else {die "lock already existed while attempting to write!!\n\n";}
 	}
+	return 0;
 }
 
 sub collateGenes(){
@@ -1573,8 +1583,8 @@ sub collateGenes(){
 		if ((! fileGZe("$metaGD/scaffolds.fasta.filt") || !-e "$metaGD/longReads.fasta.filt") && ! fileGZe("$metaGD/$path2nt")){# && -d $inFMGd){
 			print "Skipping $dir2rd\n";
 			die "no ass1\n $metaGD\n$dir2rd/assemblies/metag/assembly.txt\n" unless (-e "$metaGD/scaffolds.fasta.filt" && !-e "$metaGD/longReads.fasta.filt" ); 
-			die "no ass2\n $metaGD/longReads.fasta.filt\n" unless (-e "$metaGD/longReads.fasta.filt" ); 
-			die "no NT\n" unless ( fileGZe("$metaGD/$path2nt"));
+			die "no ass2\n $metaGD/longReads.fasta.filt\n" unless (-e "$metaGD/longReads.fasta.filt" || fileGZe("$metaGD/scaffolds.fasta.filt")  ); 
+			die "no NT $metaGD/$path2nt\n" unless ( fileGZe("$metaGD/$path2nt"));
 			#push(@skippedSmpls,$map{$smpl}{dir});
 			next;
 		}
