@@ -83,7 +83,8 @@ sub createConsSNPandSVs;
 #4.01: 13.3.26: removing bugs from hybrid assembly detection, switching to 4.x versioning
 #4.02: 15.4.26: updated internal logic for passing read paths, enabled hybrid mode in complex assembly groups
 #4.03: 18.4.26: further fixes to hybrid assembly logic. separateCongigs.pl tech hardened.
-my $MATFILER_ver = 4.03;
+#4.04: 24.4.26: hybrid assembly logic, adapting GC to different binners
+my $MATFILER_ver = 4.04;
 
 #----------------- defaults ----------------- 
 
@@ -162,9 +163,9 @@ checkMF(1);
 my $smtBin = getProgPaths("samtools");#
 my $pigzBin  = getProgPaths("pigz");
 my $avx2Constr =  getProgPaths("avx2_constraint",0);
-my $mvCmd = "rsync -r --remove-source-files "; # "rsync -r  --remove-source-files " or "mv"
+my $mvCmd = "rsync -r --remove-source-files --force "; # "rsync -r  --remove-source-files " or "mv"
 
-
+ 
 #set up link to submission system on cluster
 my $QSBoptHR = setupHPC();
 
@@ -423,7 +424,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	my $eCovAsssembly = 1; $eCovAsssembly = 0 if (!fileGZe($coveragePerCtg) );
 	$eCovAsssembly = 0 if (!fileGZe( $markerGenesPerCtg) && $AssemblyGo);
-
+	#die "COV: $eCovAsssembly\n";
 	my $eSuppCovAsssembly = 0; $eSuppCovAsssembly = 1 if (fileGZe($suppCoveragePerCtg));
 	#die "$eCovAsssembly  $eSuppCovAsssembly  $suppCoveragePerCtg\n";
 	#will be created in contigstats step (not related to bowtie & sortbam)
@@ -670,6 +671,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	
 	
+#	#-----------------------  FLAGS  ------------------------  
 	
 	
 	#check on processes not dependent on assemblies
@@ -691,9 +693,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				&& $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ );
 	#die "$allMapDone\n-e $finalMapDir/$SmplName-smd.$bamcramMap && $eCovAsssembly && !$ePreAssmbly && ($eSuppCovAsssembly || !$locMapSup2Assembly) && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/\n";
 	
-	my $allCovDone = 0;
-	$allCovDone = 1 if (($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$map{$curSmpl}{hasPrimaryRds}) );
-	#print "$allCovDone = 1 if (($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$MappingGo) );\n";
+	#coverage done?
+	#my $allCovDone = 0; $allCovDone = 1 if ( ($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$map{$curSmpl}{hasPrimaryRds}) );
+	my $calcCoverage = 0; $calcCoverage =1 if ((($map{$curSmpl}{hasPrimaryRds} && !$eCovAsssembly) || (!$eSuppCovAsssembly && $locMapSup2Assembly) ) && $MFopt{map2Assembly});
+	#print "$calcCoverage = 1 if (($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$MappingGo) );\n";
+	
+	#binning done?
 	my $calcBinning = 0;
 	if ($MFopt{DoMetaBat2} && $boolAssemblyOK && !$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ &&  (!-e "$BinningOut.cm" && !-s "$BinningOut.cm2") ) {
 		$calcBinning=$MFopt{DoMetaBat2};
@@ -701,11 +706,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	
 
+	#die "$metaGassembly\n$finAssLoc\n$nodeSpTmpD\n$eCovAsssembly\n";
 
-
-	#die "$metaGassembly\n$finAssLoc\n$nodeSpTmpD\n";
-
-#	#-----------------------  FLAGS  ------------------------  
 #	#and some more flags for subprocesses
 	my $nonPareilFlag = !-s "$nonParDir/$SmplName.npo" && $MFopt{DoNonPareil} ;
 	my $scaffoldFlag = 0; if ( !-e $STOfinScaff && $map{$curSmpl}{"SupportReads"} =~ m/mate/i ){$scaffoldFlag = 1 ;}# print "SUPP:: $map{$curSmpl}{SupportReads}\n";}
@@ -715,12 +717,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $calcReadMerge = 0;
 	$calcReadMerge = 1 if ($MFopt{doReadMerge} && ($MFopt{calcOrthoPlacement} || $calcDiamond || $calcGenoSize));
 	my $mapAssFlag = 0; $mapAssFlag = 1 if ($MFopt{map2Assembly} && !$eFinMapCovGZ  );
-	my $calcCoverage = 0; $calcCoverage =1 if ($map{$curSmpl}{hasPrimaryRds} && !$eCovAsssembly && $MFopt{map2Assembly});
 	#only for support reads (from hybrid assemblies)
 	my $mapSuppAssFlag =0;$mapSuppAssFlag = 1 if ($locMapSup2Assembly && !$eFinSupMapCovGZ && $efinAssLoc && !$doPreAssmFlag && !$ePreAssmblPck );#hasSuppRds(\%AsGrps,$cAssGrp,$curSmpl ) );
 	my $calcSuppCoverage = 0; $calcSuppCoverage =1 if ($MFopt{mapSupport2Assembly} && !$eSuppCovAsssembly && $map{$curSmpl}{"SupportReads"} ne "" && $mapSuppAssFlag && !$doPreAssmFlag);
 	
-	#die "$mapAssFlag , $mapSuppAssFlag :: $ePreAssmbly && $doPreAssmFlag XX $postPreAssmblGo,$ePreAssmblPck\n";
+	#die "$calcCoverage\n$mapAssFlag , $mapSuppAssFlag :: $ePreAssmbly && $doPreAssmFlag XX $postPreAssmblGo,$ePreAssmblPck\n";
 	
 	#die "$mapSuppAssFlag = 1 if ($locMapSup2Assembly && !$eFinSupMapCovGZ && $efinAssLoc \n";
 
@@ -920,7 +921,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	if ($ePreAssmblPck && !$efinAssLoc && !$postPreAssmblGo){$mapAssFlag =0; $mapSuppAssFlag=0;}
 	#print "mapCHK $mapSuppAssFlag $mapAssFlag $ePreAssmblPck && ! $efinAssLoc && ! $postPreAssmblGo\n";
-	if ( !$mapAssFlag &&  ( ( ($eCovAsssembly || $ePreAssmblPck) && !$postPreAssmblGo && !$efinAssLoc ) #nothing to do until $doPreAssmFlag releases
+	if ( !$mapAssFlag && $boolGenePredOK && ( ( ($eCovAsssembly || $ePreAssmblPck) && !$postPreAssmblGo && !$efinAssLoc ) #nothing to do until $doPreAssmFlag releases
 			|| (!$ePreAssmblPck && $eCovAsssembly && $ePreAssmbly && !$postPreAssmblGo && !$efinAssLoc )  )
 	){ #last sample (assembly) should not map while other maps are still running..
 		print "next due to waiting for preassemblies..";
@@ -966,7 +967,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#create new dependency flag for both unzip and sdm dep:
 	my $primaryDep = "$UZdep;$sdmjN";
 	
-	if ($pseudAssFlag ){
+	if ($pseudAssFlag ){ #don't do assembly directly, use pre existing files instead..
 		my ($psAssDep, $psFile, $metagDir) = createPsAssLongReads($mergJbN.";".$primaryDep, $pseudoAssFile, $finalCommAssDir, $SmplName);#pseudoAssFileFinal
 		if ($psAssDep ne ""){
 			$AsGrps{$cAssGrp}{pseudoAssmblDep} = $psAssDep;
@@ -1075,7 +1076,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#die "$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) \n";
 	if (!$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) ){   # gene predictions on assembly, assemblies already do exist
 		$metaGassembly = $finAssLoc; #print "No Assembly routines required\n" if ($MFopt{DoAssembly}==0);
-		#die "!$boolGenePredOK && $AssemblyGo \n";
+		#print "GP:: !$boolGenePredOK && $AssemblyGo \n";
 		if (!$boolGenePredOK && $AssemblyGo ){
 			$geneDir = $finalCommAssDir."/genePred/";
 			$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"",$smplTmpDir,1);
@@ -1209,6 +1210,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#my $needsContigStats =0; #flag to activate contigStats later..
 	#$needsContigStats = 1 if (($MappingGo && !$eCovAsssembly) || ($mapSuppAssFlag && !$eSuppCovAsssembly));	
 	# calc statsitics concercing readqual, mappings, genes & contigs
+	#print "COV: $calcCoverage \n";
 	if ($pseudAssFlag || ($AssemblyGo && $MFopt{DoAssembly}) || 
 				isLastSampleInAssembly($finalCommAssDir,$curOutDir) ) {
 		my $subprts = $MFconfig{defaultContigSubs}."gFG"; $subprts .= "m" if ($MFopt{DoBinning});
@@ -1231,7 +1233,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			print "Added main contig stats as a GenomeFace dependency\n";
 		}
 
-	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ ) || $allCovDone) ) {
+	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ ) || $calcCoverage) ) {
 		#die "test23  $AsGrps{$cAssGrp}{MapDeps}\n";
 		#calculate solely abundance / gene, has to be run after clean & assembly contigstat step and after mapping has started (at all!)
 		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$cln1 . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},1,$nodeSpTmpD,$AssemblyGo,1, $curSmpl);
@@ -1252,7 +1254,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	
 	#die "AT CONS SNP\n$allMapDone\n";
-	if ( ($calcConsSNP || $calcSuppConsSNP || $calcSVs || $calcSVsSupp ) && $allMapDone && $allCovDone){
+	if ( ($calcConsSNP || $calcSuppConsSNP || $calcSVs || $calcSVsSupp ) && $allMapDone && !$calcCoverage){
 		#die "conssnp:: $calcConsSNP $allMapDone $finalMapDir\n";
 		#my $ofas = "$curOutDir/SNP/genePred/genes.shrtHD.SNPc.fna";
 	
@@ -3444,6 +3446,8 @@ sub sdmOptSet{
 		return ($MFopt{sdmOpt},$MFopt{sdmOpt});
 	}
 	my $curSDMopt = $MFopt{baseSDMopt}; 
+	
+	my $is3rdGen = is3rdGenSeqTech($curReadTec);
 	#my $iqualOff = 33; #62 for 1st illu
 	
 	#print "XXXXXXXXXXX $curReadTec XXXXXXXXXX\n";
@@ -3457,12 +3461,14 @@ sub sdmOptSet{
 	} elsif ($curReadTec eq "ONT"){ $curSDMopt = getProgPaths("baseSDMoptONT"); 
 	}
 	
-	if ($samplReadLength != 0){
+	if ($samplReadLength != 0 && !$is3rdGen){
 		$curSDMopt = adaptSDMopt($curSDMopt,$MFglobal{globalLogDir},$samplReadLength,$curReadTec);
 	}
-	my $curSDMoptSingl = $MFopt{baseSDMopt};
+	
 	
 	#singletons..
+	my $curSDMoptSingl = $MFopt{baseSDMopt};
+	
 	if ($curSTech eq ""){$curSDMoptSingl=$curSDMopt;
 	} elsif ($curSTech eq "454"){$curSDMoptSingl = getProgPaths("baseSDMopt454"); 
 	} elsif ($curSTech eq "miSeq"){ $curSDMoptSingl = $MFopt{baseSDMoptMiSeq}; 
@@ -3471,7 +3477,7 @@ sub sdmOptSet{
 	} elsif ($curSTech eq "PB"){ $curSDMoptSingl = getProgPaths("baseSDMoptPacBio"); 
 	} elsif ($curReadTec eq "ONT"){ $curSDMopt = getProgPaths("baseSDMoptONT"); 
 	}
-	if ($samplReadLength != 0){
+	if ($samplReadLength != 0 && !$is3rdGen){
 		$curSDMoptSingl = adaptSDMopt($curSDMoptSingl,$MFglobal{globalLogDir},$samplReadLength,$curReadTec);	
 		if ($curSTech eq "PB" && $samplReadLength < 1000 && $samplReadLength != 0){
 			print "WARNING: it seems sequencing technology is PacBio (\"PB\"), but read length is very short: $samplReadLength\nConsider adjusting via \"-inputReadLength\" or  \"-inputReadLengthSuppl\"\n";
@@ -4680,6 +4686,7 @@ sub removeHostSeqs($ $ $){
 	my $DBdir = $MFglobal{krakenDBDirGlobal}."/";
 	
 	my @DBname = ("hum1stTry"); my $numThr = 4;
+	$numThr = 10 if ($MFopt{humanFilter} == 3); #hostile a bit slower, use more cores
 	if (@filterHostDB > 0){
 		@DBname = (); my $cnt=0;
 		foreach my $fhdb (@filterHostDB){
@@ -4687,7 +4694,7 @@ sub removeHostSeqs($ $ $){
 			$DBname[$cnt] = $fhdb; $DBdir=""; $cnt++;
 		}
 	}
-	my $cmd = "\n\nmkdir -p $tmpD\n\n"; 
+	my $cmd = "\n\nmkdir -p $tmpD\n\n";  
 	
 	#loop around different DBs..
 	
@@ -4839,8 +4846,8 @@ sub getRgStr{
 	my ($smpl,$libsOri,$libsOriX,$usePairs,$mapper) = @_;
 	my $rgStr ="noReg";
 	if ($mapper > 1 || $mapper == -2){ #bwa/minimap2 have same format..
-		$rgStr = '\'@RG\\tID:$smpl\\tSM:$smpl\\tPL:ILLUMINA';
-		$rgStr .= '\\tLB:$libsOri\'';
+		$rgStr = '\'@RG\\tID:$smpl\\tSM:'.$smpl.'\\tPL:ILLUMINA';
+		$rgStr .= '\\tLB:'.$libsOri.'\'';
 	}
 	if ($mapper==1 || $mapper ==5){ #bowtie2 & strobealign
 		my $sep=" "; $sep = "=" if ($mapper ==5);
@@ -6823,7 +6830,7 @@ sub movePreAssmData{
 #used in hybrid assemblies
 sub prepPreAssmbl{
 	my ($metagD, $mvD,$mapD, $tmpD , $CSdir,  $cAssGrp, $finAssLoc,$finalCommAssDir) = @_;
-	#print "$mvD\n";
+	print "$mvD\n";
 	
 	$AsGrps{$cAssGrp}{CntPreAss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAss}));
 	$AsGrps{$cAssGrp}{CntPreAssMiss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAssMiss}));
@@ -6833,7 +6840,7 @@ sub prepPreAssmbl{
 	
 	#my $hasPrimaryRds= 1;$hasPrimaryRds = 0 if ($map{$curSmpl}{prefix} eq "" && $map{$curSmpl}{dir} eq "");
 	
-	#print "precnt: $AsGrps{$cAssGrp}{CntPreAss}\n";
+	print "precnt: $AsGrps{$cAssGrp}{CntPreAss}\n";
 
 	my $ePreAssmbly = 0; $ePreAssmbly = 1 if (-s $finAssLoc && -e "$finalCommAssDir/$stones{preAsmDone}");
 	#die "$ePreAssmbly\n";
@@ -6896,7 +6903,7 @@ sub prepPreAssmbl{
 	my $PostAssemblyGo = 0;
 	#print "UUU $doPreAssmFlag\n";
 	my $finJobs = ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssNoPrim} ); #+ $AsGrps{$cAssGrp}{CntPreAssMiss}
-	#print "FIN: $finJobs ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssMiss}) >= $AsGrps{$cAssGrp}{CntAimAss}\n";
+	print "FIN: $finJobs ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssMiss}) >= $AsGrps{$cAssGrp}{CntAimAss}\n";
 	$PostAssemblyGo = 1 if (!$doPreAssmFlag && ( $finJobs >= $AsGrps{$cAssGrp}{CntAimAss}) ); #has already seen enough complete preAssmblies
 	$doPreAssmFlag = 1 if (!$PostAssemblyGo); 
 	#print "-e $CSdir/Coverage.percontig   $metagD/$stones{preAsmDone}\n" ;
@@ -7250,7 +7257,8 @@ sub metagAssemblyRun{
 				"preAssmbl", $SmplNameX,$hostFilter,$scaffoldFlag) if (!$ePreAssmbly);
 		} elsif ($doPreAssmFlag == 0 && $postAssmblGo) {
 			print "Final combining long assembly step: ";
-			system "rm -fr $metagAssDir $geneDir $finalCommAssDir/genePred/\n"; #just clean up assembly dir..
+			system "rm -fr $metagAssDir $geneDir $finalCommAssDir/genePred/ $finalCommAssDir/ContigStats/ \n"; #just clean up assembly dir..
+			#$finalMapDir
 			#die;
 			$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$metagAssDir,
 				"hybridmMDBG",$SmplNameX,1,$LasseP) ; #$metaGpreAssmblDir, 
@@ -7788,7 +7796,6 @@ sub getCmdLineOptions{
 		"mergeReads=i" => \$MFopt{doReadMerge},  #merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances)
 		"ProbRdFilter=i" => \$MFopt{sdmProbabilisticFilter},
 		"pairedReadInput=i" => \$MFconfig{readsRpairs}, #determines if read pairs are expected in each in dir
-		"inputReadLength=i" => \$MFconfig{defaultReadLength},
 		"inputReadLengthSuppl=i" => \$MFconfig{defaultReadLengthX},
 		"filterHostRds|filterHumanRds=i" => \$MFopt{humanFilter}, #0: no, 1:kraken2, 2: kraken1, 3:hostile
 		"filterHostKrak2DB=s" => \ $MFopt{filterHostDB1}, #customize host org to filter (e.g. human, chicken ..)
@@ -7800,6 +7807,7 @@ sub getCmdLineOptions{
 		"logQualvsLen=i" => \$MFopt{SDMlogQualvsLen}, #sdm log file.. can be quite large; logs qual of read vs read length
 
 	#sdm related
+		"inputReadLength=i" => \$MFconfig{defaultReadLength},
 		"gzipSDMout=i" => \$MFopt{gzipSDMOut},
 		"XfirstReads=i" => \$MFconfig{XfirstReads},
 		"minReadLength=i" => \$MFopt{tmpSdmminSL},

@@ -6,7 +6,7 @@ use Data::Dumper;
 use Getopt::Long qw( GetOptions );
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(readMap readClstrRev readClstrRevContigSubset readClstrRevSmplCtgGenSubset getDirsPerAssmblGrp  getAssemblPath systemW gzipopen parse_duration);
-use Mods::Binning qw (runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns minQualFilter calcLCAcompl readCMquals);
+use Mods::Binning qw (getBinSubdirName runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns minQualFilter calcLCAcompl readCMquals);
 use Mods::geneCat qw(readMG_LCA);
 
 
@@ -81,10 +81,7 @@ print "#######################################################\nclusterMAGs algo
 print "Running in legacy mode\n" if ($legacyV);
 
 my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2); 
-
-my $BinnerShrt = "MB2";
-if ($binSpeciesMG == 2){$BinnerShrt = "SB";}#SemiBin
-if ($binSpeciesMG == 3){$BinnerShrt = "MD";}
+my $BinnerShrt = getBinSubdirName($binSpeciesMG);
 if ($outD eq ""){$outD = $inD."/Bin_$BinnerShrt/";}
 $outD .= "/" unless ($outD =~ m/\/$/);
 my $ctg2gen = {};
@@ -116,7 +113,7 @@ my $clMAGsBin = getProgPaths("clusterMAGs");
 my $cmd = "";
 my $canoFlag = ""; $canoFlag = "-canopyDir $camoIn " if ($camoIn ne "");
 #-FILEtag SBx -MGtag MM2 -geneCatIdx C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/compl.incompl.95.fna.clstr.idx -MGdir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/MGs/ -outDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/out/ -map C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.0.txt,C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.1.txt -canopyDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/Cano/
-$cmd .= "$clMAGsBin  -CMsuffix .cm2 -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.95.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
+$cmd .= "$clMAGsBin  -CMsuffix .cm2 -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.95.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
 $cmd .= "-outDir $outD -map $mapF $canoFlag -MGfile $GCd/GTDBmg.subset.cats ;\n";
 $cmd .= "gzip -c $outD/MAGvsGC.txt > $logDir/MAGvsGC.txt.gz;\nrm $outD/MAGvsGC.txt;\n";
 

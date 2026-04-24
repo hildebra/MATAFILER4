@@ -34,7 +34,7 @@ use Mods::GenoMetaAss qw(readMap getDirsPerAssmblGrp readClstrRev unzipFileARezi
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs);
 use Mods::TamocFunc qw ( getFileStr checkMF);
 use Mods::geneCat qw(readMG_LCA);
-use Mods::Binning qw ( createBin2 createBinCtgs runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns);
+use Mods::Binning qw (getBinSubdirName createBin2 createBinCtgs runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns);
 
 #sub MB2assigns;
 sub getGoodMBstats;
@@ -119,7 +119,7 @@ GetOptions(
 	"strains=i" => \$doStrains,			#1: calc instra species strain phylogenies. Default: 0
 	"useCheckM2=i" => \$useCheckM2,		#CheckM2 default qual checking of MAGs/MGS
 	"useCheckM1=i" => \$useCheckM1,		#CheckM default qual checking of MAGs/MGS
-	"binSpeciesMG=i" => \$binSpeciesMG,	#0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder
+	"binSpeciesMG=i" => \$binSpeciesMG,	#0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5
 	"ignoreIncompleteMAGs=i" => \$ignoIncomplMAGs,	#1: assemblies without MAG calculations are ignored. Default: 1
 	"legacy=i" => \$legacyV,			#1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0
 	"genomesPerFamily=i" => \$doBinCtgsPerFam,
@@ -146,9 +146,11 @@ my %QSBopt = %{$QSBoptHR};
 my $singleSample = 0;
 
 die "No MGS set: -binSpeciesMG 0 \n" if ($binSpeciesMG == 0);
-my $BinnerShrt = "MB2";
-if ($binSpeciesMG == 2){$BinnerShrt = "SB";}#SemiBin
-if ($binSpeciesMG == 3){$BinnerShrt = "MD";}
+my $BinnerShrt = getBinSubdirName($binSpeciesMG);
+
+#my $BinnerShrt = "MB2";
+#if ($binSpeciesMG == 2){$BinnerShrt = "SB";}#SemiBin
+#if ($binSpeciesMG == 3){$BinnerShrt = "MD";}
 my $COGdir = "FMG";
 if ($useGTDBmg eq "GTDB"){ 
 	$COGdir = "GTDBmg";
@@ -299,11 +301,13 @@ foreach my $Doo (@DoosD){ #this loops ensures Binner predictions exist for each 
 	my $MBcmd = "";
 	if ($binSpeciesMG == 1){
 		$bef .= jgi_depth_cmd(\@paths,$tmpD2."/depth",95,$numCore,$refFA);# unless (-e );
-		$MBcmd = runMetaBat("$tmpD2/depth.jgi.depth.txt",$metaGD."/Binning/$BinnerShrt",$smplIDs[-1],$refFA);
+		$MBcmd = runMetaBat("$tmpD2/depth.jgi.depth.txt",$metaGD."/Binning/$BinnerShrt/",$smplIDs[-1],$refFA);
 	} elsif ($binSpeciesMG == 2){
 		die "MGS.pl::SemiBin not implemented\n";
 	} elsif ($binSpeciesMG == 3){
 		die "MGS.pl::MetaDecoder not implemented\n";
+	} else {
+		die "Binning option $binSpeciesMG not implemented!\n";
 	}
 	#print $bef.$MBcmd;
 	$bef = "" if ($MBcmd eq "");
