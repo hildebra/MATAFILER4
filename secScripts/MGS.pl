@@ -485,11 +485,11 @@ if (!-e $BinExtrSto){
 	if ($doBinCtgsPerFam){
 	#do I really need per family genomes??
 		print "Also creating family-wise ref genomes\n";
-		createBinCtgs($binDctgFam,$hrM,"$logDir/MAGvsGC.txt.gz",1);
+		createBinCtgs($binDctgFam,$hrM,"$logDir/MAGvsGC.txt.gz",1,$BinnerShrt);
 		#die;
 	}
 
-	createBinCtgs($binDctg,$hrM,"$logDir/MAGvsGC.txt.gz",0);
+	createBinCtgs($binDctg,$hrM,"$logDir/MAGvsGC.txt.gz",0,$BinnerShrt);
 	system "touch $BinExtrSto";
 }
 
@@ -559,7 +559,7 @@ unless (-e $ABmgsSton && -e "$outD/Annotation/Abundance/MGS.matL0.txt"){#-e "$GC
 
 unless (-e $ABmgsSton2){
 	my $MMLscr = getProgPaths("MAGMGSLCA_scr");
-	my $cmdSI2 = "$MMLscr -GCd $GCd -cores 4 -binD $outD;\ntouch $ABmgsSton2\n";
+	my $cmdSI2 = "$MMLscr -GCd $GCd -cores 4 -Binner $BinnerShrt -binD $outD;\ntouch $ABmgsSton2\n";
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS_core.sh",$cmdSI2,4,int(100/4)."G","AB_MGS_core","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
