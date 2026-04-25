@@ -31,12 +31,12 @@ die "-GCd needs to be specified!\n" if ($GCdir eq "");
 #dir in GCdir where marker genes are stored..
 my $COGdir = "FMG";
 if ($useGTDBmg eq "GTDB"){ 	$COGdir = "GTDBmg";}
-$GC_bin_dir = "$GCdir/Bin_SB" if ($GC_bin_dir eq ""); 
+$GC_bin_dir = "$GCdir/Bin_${Binner}" if ($GC_bin_dir eq ""); 
 my $markerGdir  = "$GCdir/$COGdir/";
 my $outDir = "$GC_bin_dir/Annotation/";
 my $outFile = "$outDir/marker2MGS.txt";
 my $outFile2 = "$outDir/marker2MGS.LCA.txt";
-my $primaryClusF = "$GC_bin_dir/SB.clusters.core"; 
+my $primaryClusF = "$GC_bin_dir/$Binner.clusters.core"; 
 my $matrOutDir = "$outDir/Abundance/";
 $MGStaxF = "$outDir/GTDBTK.tax" if ($MGStaxF eq "");
 system "mkdir -p $matrOutDir" unless (-d $matrOutDir);
@@ -289,4 +289,7 @@ $cmd .= "$rarBin sumMat -i $GCdir/Matrix.mat.gz -o $matrOutDir/MGS.mat -t $numCo
 print $cmd;
 systemW $cmd;
 #die "$cmd\n";
+
+
+print "Done with calculating abundances..\n";
 

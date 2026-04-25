@@ -420,7 +420,7 @@ sub getRepresentBinsPerFamily{ #needs some work
 #extract 1 reference genome per MGS, choosing the default rep and extracting its contigs from original assembly file
 sub createBinCtgs{
 	#$binDctg,$hrM,"$logDir/MAGvsGC.txt.gz
-	my ($outD,$hrMap,$guideF,$perFam) = @_;
+	my ($outD,$hrMap,$guideF,$perFam,$BinShrt) = @_;
 	
 	my $hr;
 	if ($perFam){
@@ -456,7 +456,7 @@ sub createBinCtgs{
 			#print "Reading $smpl\n";
 			my $dirIn = $map{$smpl}{wrdir}; 
 			my $assDir = getAssemblPath($dirIn);
-			my $BinDir = "$assDir/Binning/SB/"; my $BinFile = "$BinDir/$smpl";
+			my $BinDir = "$assDir/Binning/$BinShrt/"; my $BinFile = "$BinDir/$smpl";
 			$hr1 = readBinSB($BinFile);
 			$hr2 = readFasta("$assDir/scaffolds.fasta.filt");
 		}

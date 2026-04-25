@@ -3452,14 +3452,18 @@ sub sdmOptSet{
 	
 	#print "XXXXXXXXXXX $curReadTec XXXXXXXXXX\n";
 		
-	if ($curReadTec eq "GAII_solexa" || $curReadTec eq "GAII"|| $curReadTec eq "hiSeq"){
+	if ($is3rdGen){
+		if ($curReadTec eq "PB"){ $curSDMopt = getProgPaths("baseSDMoptPacBio"); 
+		} elsif ($curReadTec eq "ONT"){ $curSDMopt = getProgPaths("baseSDMoptONT"); 
+		} else {
+			print "Unknown 3rd generational seq tech: $curReadTec\n";
+		}
+	} elsif ($curReadTec eq "GAII_solexa" || $curReadTec eq "GAII"|| $curReadTec eq "hiSeq"){
 		#$iqualOff = 59; #really that old??
 	} elsif ($curReadTec eq "miSeq"){ $curSDMopt = $MFopt{baseSDMoptMiSeq}; 
 	} elsif ($curReadTec eq "AVITI"){ $curSDMopt = getProgPaths("baseSDMoptAVITI"); 
 	} elsif ($curReadTec eq "proto"){ $curSDMopt = getProgPaths("baseSDMoptProto"); 
-	} elsif ($curReadTec eq "PB"){ $curSDMopt = getProgPaths("baseSDMoptPacBio"); 
-	} elsif ($curReadTec eq "ONT"){ $curSDMopt = getProgPaths("baseSDMoptONT"); 
-	}
+	} 
 	
 	if ($samplReadLength != 0 && !$is3rdGen){
 		$curSDMopt = adaptSDMopt($curSDMopt,$MFglobal{globalLogDir},$samplReadLength,$curReadTec);
@@ -3476,7 +3480,8 @@ sub sdmOptSet{
 	} elsif ($curSTech eq "proto"){ $curSDMoptSingl = getProgPaths("baseSDMoptProto"); 
 	} elsif ($curSTech eq "PB"){ $curSDMoptSingl = getProgPaths("baseSDMoptPacBio"); 
 	} elsif ($curReadTec eq "ONT"){ $curSDMopt = getProgPaths("baseSDMoptONT"); 
-	}
+	} elsif ($is3rdGen){print "Unknown 3rd generational seq tech: $curReadTec\n";}
+	
 	if ($samplReadLength != 0 && !$is3rdGen){
 		$curSDMoptSingl = adaptSDMopt($curSDMoptSingl,$MFglobal{globalLogDir},$samplReadLength,$curReadTec);	
 		if ($curSTech eq "PB" && $samplReadLength < 1000 && $samplReadLength != 0){
