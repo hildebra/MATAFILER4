@@ -81,6 +81,7 @@ MATAFILER4 uses three primary phases to analyse metagenomes:
 	-XfirstReads [int]				only use X first reads of each input read file
 	-minReadLength [#]			minimum read length in sdm filtering step
 	-maxReadLength [#]			maximum read length in sdm filtering step
+	-sdmMem ["15G"]			memory (as a string, e.g. "30G") for sdm. Default is "15G". 
 
 # assembly
 	-assembleMG [1|2|3|4|5] 			which assembler to use; 1: spades; 2: Megahit 3: FLYE 4: metaMDBG 5: hybrid assemblies (megahit+metaMDBG)

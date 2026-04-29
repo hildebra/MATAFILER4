@@ -3675,7 +3675,7 @@ sub sdmClean(){
 		$jobName = "_SDM${useXtras}_$JNUM"; my $tmpCmd;
 		my $preHDDspace=$QSBoptHR->{tmpSpace};
 		$QSBoptHR->{tmpSpace} = 0;
-		($jobName, $tmpCmd) = qsubSystem($qsubFile,$cmd,$MFopt{sdmCores},"15G",$jobName,$jobd,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
+		($jobName, $tmpCmd) = qsubSystem($qsubFile,$cmd,$MFopt{sdmCores},$MFopt{sdmMem},$jobName,$jobd,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
 		$QSBoptHR->{tmpSpace} = $preHDDspace;
 	}
 	#die "$presence presi\n@ret1\n";
@@ -7582,6 +7582,7 @@ sub setDefaultMFconfig{
 	$MFopt{usePorechop} = 0;
 	$MFopt{SDMlogQualvsLen} = 0; #sdm log of qual per read vs length (eg for PacBio qual checks..)
 	$MFopt{sdmCores} = 6; #sdm specific cores  #currently set to 1, sdm multi thread instability
+	$MFopt{sdmMem} = "15G"; #total mem for sdm job in Gb, default 15
 	$MFopt{sdm_opt} = {}; #empty object that can be used to modify default sdm parameters
 	$MFopt{tmpSdmminSL} =0; $MFopt{tmpSdmmaxSL}=0;
 	$MFopt{gzipSDMOut} = 1;#zip sdm filtered files
@@ -7825,6 +7826,7 @@ sub getCmdLineOptions{
 		"maxReadLength=i" => \$MFopt{tmpSdmmaxSL},
 		"filterAdapters=i" => \$MFopt{trimAdapters},
 		"customSDMopt=s"  => \$MFopt{sdmOpt},
+		"sdmMem=s" => \$MFopt{sdmMem}, #total mem for sdm job in Gb, default 15
 
 	#assembly related
 		"spadesCores|assemblCores=i" => \$MFopt{AssemblyCores},
