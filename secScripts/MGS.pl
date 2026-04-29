@@ -27,6 +27,7 @@ use Getopt::Long qw( GetOptions );
 #.26: 13.8.24: added -genomesPerFamily flag & function
 #.27: 12.11.24: removed necessity for -canopies flag
 #.28: 28.12.25: multi scaling flags for strainScr1 added
+
 my $MGSpipelineVersion = 0.28;
 
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
@@ -84,7 +85,7 @@ my $checkMaxNumJobs = 800; #don't submit more than 800 jobs at once..
 my $wait4stone = "";
 my $useWeightedMGSscores = 1;
 my $doBinCtgsPerFam =0 ; #extract bins for each family (or assembly_grp/sample if family missing)
-
+my $customBinFile = ""; #overrides default per GC global behaviour
 
 
 my $stopAfterCluster = 0; #DEBUG flag!!
@@ -123,6 +124,7 @@ GetOptions(
 	"ignoreIncompleteMAGs=i" => \$ignoIncomplMAGs,	#1: assemblies without MAG calculations are ignored. Default: 1
 	"legacy=i" => \$legacyV,			#1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0
 	"genomesPerFamily=i" => \$doBinCtgsPerFam,
+	#"customBinFile=s" => \$customBinFile, #take all genes per bin from this file -> need to go to withinStr.pl
 );
 
 #check all correct

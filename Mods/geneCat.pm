@@ -161,6 +161,7 @@ sub createGene2MGS{
 	while (my $lin = <I>){
 		chomp $lin; my @spl = split (/\t/,$lin,-1);
 		if (@spl <2){die "incomplete entry in MGS guide file: @spl\n";}
+		next if ($spl[1] =~ m/\D/);# || $spl[1] =~ m/^\?$/); #only accept gene ids which are numbers
 		my @genes = split /,/,$spl[1];
 		#not needed here..
 		#$MGS{$spl[0]} = \@genes;

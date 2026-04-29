@@ -5871,7 +5871,7 @@ sub remComma($){
 }
 
 
-sub sdmStats($$){
+sub sdmStats($ $){
 	my ($inF,$inD) = @_;
 	my $MaxLengthHistBased=0;
 	my $filStats = getFileStr("$inD/LOGandSUB/sdm/filter_lenHist.txt",0);
@@ -6283,33 +6283,39 @@ sub smplStats(){
 
 		
 	my @sdmStat ;#(0,0,0,0,0,0,0,0,0,0,0);
-	if (-s "$inD/LOGandSUB/sdm/filter.log" || -s "$inD/LOGandSUB/sdm/filterS.log"){
-		@sdmStat = sdmStats("$inD/LOGandSUB/sdm/filter.log",$inD);# if (-s "$inD/LOGandSUB/sdm/filter.log");
-		#@sdmStat = @{$ar};
-		#my @sdsm2 =(0,0,0,0,0,0,0,0,0,0,0);
-		my @sdsm2 = sdmStats("$inD/LOGandSUB/sdm/filterS.log",$inD);# if (-s "$inD/LOGandSUB/sdm/filterS.log");
-		#print "$sdsm2[0]\n$sdsm2[3]\n";
-		$sdmStat[0] += $sdsm2[0];$sdmStat[1] += $sdsm2[1];$sdmStat[2] += $sdsm2[2];$sdmStat[3] += $sdsm2[3];
-		$sdmStat[4] += $sdsm2[4];$sdmStat[5] += $sdsm2[5];$sdmStat[6] += $sdsm2[6];
-		$sdmStat[7] = $sdsm2[7] if ($sdmStat[7] == 0);
-		$sdmStat[8] = $sdsm2[8] if ($sdmStat[8] == 0);
-		$sdmStat[9] = $sdsm2[9] if ($sdmStat[9] == 0);
-		$sdmStat[10] = $sdsm2[10] if ($sdmStat[10] == 0);
-		
-	} else {#(-s "$inD/LOGandSUB/sdmReadCleaner.sh.etxt") {
-		@sdmStat = sdmStats("$inD/LOGandSUB/sdmReadCleaner.sh.etxt",$inD);
+	if (-s "$inD/LOGandSUB/sdm/filter.log" || -s "$inD/LOGandSUB/sdmReadCleaner.sh.etxt"){
+		if (-s "$inD/LOGandSUB/sdm/filter.log" ){
+			@sdmStat = sdmStats("$inD/LOGandSUB/sdm/filter.log",$inD);# if (-s "$inD/LOGandSUB/sdm/filter.log");
+		} else {
+			@sdmStat = sdmStats("$inD/LOGandSUB/sdmReadCleaner.sh.etxt",$inD);
+		}
+		#$sdmStat[0] += $sdsm2[0];$sdmStat[1] += $sdsm2[1];$sdmStat[2] += $sdsm2[2];$sdmStat[3] += $sdsm2[3];
+		#$sdmStat[4] += $sdsm2[4];$sdmStat[5] += $sdsm2[5];$sdmStat[6] += $sdsm2[6];
+		$locStats{totRds} = $sdmStat[0];$locStats{Rejected1} = $sdmStat[1];$locStats{Rejected2} = $sdmStat[2];
+		$locStats{Accepted1} = $sdmStat[3];$locStats{Accepted2} = $sdmStat[4];$locStats{Singl1} = $sdmStat[5];
+		$locStats{Singl2} = $sdmStat[6];
+		$outStr .= join("\t",@sdmStat)."\t";
+	} else {
+		$outStr .= "\t" x 11;
 	}
-	$locStats{totRds} = $sdmStat[0];$locStats{Rejected1} = $sdmStat[1];$locStats{Rejected2} = $sdmStat[2];
-	$locStats{Accepted1} = $sdmStat[3];$locStats{Accepted2} = $sdmStat[4];$locStats{Singl1} = $sdmStat[5];
-	$locStats{Singl2} = $sdmStat[6];
-#	if ($sdmStat[0] == 0){
-#		$outStr .= "\t" x 11;
-#	} else {
-	#print "@sdmStat"." xx".@sdmStat."\n";
-	$outStr .= join("\t",@sdmStat)."\t";
 #	}
 ## 11 in total..
 	$outStrDesc .= "totRds\tRejected1\tRejected2\tAccepted1\tAccepted2\tSingl1\tSingl2\tAvgSeqLen\tMaxSeqLength\tAvgSeqQual\taccErr\t";
+	
+	#supplementary reads??
+	if ( -s "$inD/LOGandSUB/sdm/filterS.log" || -s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt"){
+		my @sdsm2;
+		if ( -s "$inD/LOGandSUB/sdm/filterS.log"){
+			@sdsm2 = sdmStats("$inD/LOGandSUB/sdm/filterS.log",$inD);
+		} else {
+			@sdsm2 = sdmStats("$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt",$inD);
+		}
+		$outStr .= join("\t",@sdsm2)."\t";	
+	} else {
+		$outStr .= "\t" x 11;
+	}
+## 11 in total..
+	$outStrDesc .= "totRds_Sup\tRejected1_Sup\tRejected2_Sup\tAccepted1_Sup\tAccepted2_Sup\tSingl1_Sup\tSingl2_Sup\tAvgSeqLen_Sup\tMaxSeqLength_Sup\tAvgSeqQual_Sup\taccErr_Sup\t";
 	
 	
 	#check for flash merged reads
@@ -6835,7 +6841,7 @@ sub movePreAssmData{
 #used in hybrid assemblies
 sub prepPreAssmbl{
 	my ($metagD, $mvD,$mapD, $tmpD , $CSdir,  $cAssGrp, $finAssLoc,$finalCommAssDir) = @_;
-	print "$mvD\n";
+	#print "$mvD\n";
 	
 	$AsGrps{$cAssGrp}{CntPreAss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAss}));
 	$AsGrps{$cAssGrp}{CntPreAssMiss} = 0 unless (exists($AsGrps{$cAssGrp}{CntPreAssMiss}));
