@@ -23,6 +23,7 @@ my $rareBin = getProgPaths("rare");
 my $GCd = $ARGV[0];
 my $MGSfile = $ARGV[1];
 my $useGTDBmg = $ARGV[2];
+my $mode = $ARGV[3];
 my $obsFile = $MGSfile; #$ARGV[3];# if (@ARGV > 3);
 $obsFile =~ s/\.core$//; $obsFile.=".obs";
 die "ARG 2 option has to be \"GTDB\" or \"FMG\"\n" unless ($useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG");
