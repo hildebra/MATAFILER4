@@ -11,6 +11,9 @@ use Mods::IO_Tamoc_progs qw(inputFmtSpades getProgPaths);
 sub smrnaRunCmd; sub outfileCpy;
 
 
+#18.5.26: added versioning to 0.1
+my $cLSUSSUver = 0.1;
+
 #my $tmpP = "/g/scb/bork/hildebra/data2/Soil_finland/tmp_16s/";
 my $tmpP = "";#$ARGV[3];
 my $alignPath = "";#$ARGV[4];
@@ -39,18 +42,28 @@ GetOptions(
 if ($path2DB eq ""){die "database not defined (-DBdir) ! \n";}
 #if (@ARGV<8){die "Not enough input arguments!!\n";}
 
+
+announce();
+
 #die "$doRiboAssembl\n";
 
-#my $smrPath = "/g/bork5/hildebra/bin/sortmerna-2.0/";
-my $smrPath = getProgPaths("srtMRNA_path");
-
+#my $smrPath = getProgPaths("srtMRNA_path");
 #my $path2DB = "$smrPath/rRNA_databases/";
-my $smrnaBin = "$smrPath/./sortmerna";
-my $mergeScript = getProgPaths("mergeRdScr");#"$smrPath/scripts/merge-paired-reads.sh";
-my $unmergeScript = getProgPaths("unmergeRdScr");#"$smrPath/scripts/unmerge-paired-reads.sh";
-my $spadesBin = getProgPaths("spades");#"/g/bork5/hildebra/bin/SPAdes-3.7.0-dev-Linux/bin/spades.py";
+#my $smrnaBin = "$smrPath/./sortmerna";
+
+my $smrnaBin = getProgPaths("sortmerna");
+my $mergeScript = getProgPaths("mergeRdScr");
+my $unmergeScript = getProgPaths("unmergeRdScr");
+my $spadesBin = getProgPaths("spades");
 my $ltslcaP = "$alignPath/ltsLCA/";
 my $singlMode = 0;
+
+#put reads into arrays
+my @r1i = split(",",$read1); my $r1="$tmpP/read1.tmp.fq";
+my @r2i = split(",",$read2); my $r2="$tmpP/read2.tmp.fq";
+my @rSi = split(",",$readS); my $rS="$tmpP/readSingl.tmp.fq";
+if ( @r2i == 0 || $r2i[0] eq "-1" ){$singlMode=1;}
+if ($rSi[0] eq "-1"){$rS="";}
 
 
 if (-e "$alignPath/ITS_pull.sto" && -e "$alignPath/SSU_pull.sto" && -e "$alignPath/LSU_pull.sto" ){
@@ -67,55 +80,33 @@ if (-e "$alignPath/ITS_pull.sto" && -e "$alignPath/SSU_pull.sto" && -e "$alignPa
 	#my @r1i = split(";",$ARGV[0]); my $r1="$tmpP/read1.tmp.fq";
 	#my @r2i = split(";",$ARGV[1]); my $r2="$tmpP/read2.tmp.fq";
 	#my @rSi = split(";",$ARGV[2]); my $rS="$tmpP/readSingl.tmp.fq";
-	my @r1i = split(",",$read1); my $r1="$tmpP/read1.tmp.fq";
-	my @r2i = split(",",$read2); my $r2="$tmpP/read2.tmp.fq";
-	my @rSi = split(",",$readS); my $rS="$tmpP/readSingl.tmp.fq";
-	if ( @r2i == 0 || $r2i[0] eq "-1" ){$singlMode=1;}
-	if ($rSi[0] eq "-1"){$rS="";}
 	#die $singlMode."\n";
 	#die "$r1i[0]\n";
+	
 	my $interLeave = "$tmpP/interleave.fq";
-	system "rm -f $r1 $r2 $interLeave";
-	if (!$singlMode){
-		my $tCnter = 0; while (!-e $r1i[0] ){sleep(1);$tCnter++;print"Wait";last if ($tCnter>=15);}
-		die "input file  $r1i[0]  not existing\n" if (!-e $r1i[0] );
-		print "File prep stage 1 (unzipping, reformatting)\n";
-		for (my $i=0;$i<@r1i;$i++){
-			# merge the files & prepare
-			print "File pair $i\n";
-			if ($r1i[$i] =~ m/\.gz$/){systemW "gunzip -c $r1i[$i] | perl -pe 's/\\n/\\t/ if \$. %4' >> $r1"; }#$r1[$i] = "$tmpP/read1.tmp.fq";
-			else { systemW "perl -pe 's/\\n/\\t/ if \$. %4'  $r1i[$i] >> $r1";}
-			#print "perl -pe 's/\\n/\\t/ if \$. %4'  $r1i[$i] >> $r1\n";
-			if ($r2i[$i] =~ m/\.gz$/){systemW "gunzip -c $r2i[$i] | perl -pe 's/\\n/\\t/ if \$. %4' >> $r2"; } #$r2[$i] = "$tmpP/read2.tmp.fq";
-			else { systemW "perl -pe 's/\\n/\\t/ if \$. %4'  $r2i[$i] >> $r2";}
-		}
-		print "File prep stage 2 (interleaving)\n";
-		#print $r1."\n";
-		#interleaving
-		if (-e $r1 && -e $r2){
-			systemW "paste -d '\n' $r1 $r2 | tr '\t' '\n' > $interLeave";# bash $mergeScript $r1 $r2 $interLeave";
-		}
-		systemW "rm -rf $r1" ;#if ($r1i ne $r1);
-		systemW "rm -rf $r2" ;#if ($r2i ne $r2);
-		die "Could not find interleaved file $interLeave\n" unless (-s $interLeave);
-	} 
-	if ($rS ne ""){
-		my $tCnter = 0; while (!-e $rSi[0] ){sleep(1);$tCnter++;last if ($tCnter>=15);}
-		die "input file  $rSi[0]  not existing\n" if (!-e $rSi[0] );
-		for (my $i=0;$i<@rSi;$i++){
-			if ($rSi[$i] =~ m/\.gz$/){system "gunzip -c $rSi[$i] >>$rS";}
-			else {systemW "cat $rSi[$i] >> $rS";}
-		}
+	if (!$singlMode){ #maybe remove for new version..
+		#not a single read input? create interleaved file instead
+		make_interleave();
 	}
-	#die "File prep complete\n";
-	#my $refDBits = "/g/bork3/home/hildebra/DB/MarkerG/ITS_fungi/sh_general_release_30.12.2014.fasta,/g/bork3/home/hildebra/DB/MarkerG/ITS_fungi/sh_general_release_30.12.2014.idx";
-	
-	my $ITSDBfa = getProgPaths("ITSdbFA"); $ITSDBfa =~ m/([^\/]+)$/; $ITSDBfa = $1; my $ITSDBidx = $ITSDBfa; $ITSDBidx =~ s/\.fa*$/\.idx/;
 
-	my $refDBits = "$path2DB/$ITSDBfa,$path2DB/$ITSDBidx";
+		#new sortmerna takes gz input and multiple inputs...  deactivate
+	#if ($rS ne ""){
+	#	my $tCnter = 0; while (!-e $rSi[0] ){sleep(1);$tCnter++;last if ($tCnter>=15);}
+	#	die "input file  $rSi[0]  not existing\n" if (!-e $rSi[0] );
+		#for (my $i=0;$i<@rSi;$i++){
+		#	if ( $rSi[$i] =~ m/\.gz$/){system "gunzip -c $rSi[$i] >>$rS";}
+		#	else {systemW "cat $rSi[$i] >> $rS";}
+		#}
+	#}
 	
-	my $refDBssu = "$path2DB/silva-euk-18s-id95.fasta,$path2DB/silva-euk-18s-id95.idx:$path2DB/silva-bac-16s-id90.fasta,$path2DB/silva-bac-16s-id90.idx:$path2DB/silva-arc-16s-id95.fasta,$path2DB/silva-arc-16s-id95.idx";
-	my $refDBlsu = "$path2DB/silva-euk-28s-id98.fasta,$path2DB/silva-euk-28s-id98.idx:$path2DB/silva-bac-23s-id98.fasta,$path2DB/silva-bac-23s-id98.idx:$path2DB/silva-arc-23s-id98.fasta,$path2DB/silva-arc-23s-id98.idx";
+	
+	
+	#my $ITSDBfa = getProgPaths("ITSdbFA"); $ITSDBfa =~ m/([^\/]+)$/; $ITSDBfa = $1; my $ITSDBidx = $ITSDBfa; $ITSDBidx =~ s/\.fa*$/\.idx/;
+
+	my $refDBits = getProgPaths("ITSdbFAsrt");# "$path2DB/$ITSDBfa,$path2DB/$ITSDBidx";
+	
+	my $refDBssu = getProgPaths("SSUdbFAsrt");#"$path2DB/silva-euk-18s-id95.fasta,$path2DB/silva-euk-18s-id95.idx:$path2DB/silva-bac-16s-id90.fasta,$path2DB/silva-bac-16s-id90.idx:$path2DB/silva-arc-16s-id95.fasta,$path2DB/silva-arc-16s-id95.idx";
+	my $refDBlsu = getProgPaths("LSUdbFAsrt"); #"$path2DB/silva-euk-28s-id98.fasta,$path2DB/silva-euk-28s-id98.idx:$path2DB/silva-bac-23s-id98.fasta,$path2DB/silva-bac-23s-id98.idx:$path2DB/silva-arc-23s-id98.fasta,$path2DB/silva-arc-23s-id98.idx";
 	#memory dependent on input file
 	#my $outFile = $alignPath."/reds_16S";
 	#unless (system $cmd. "--ref $refDBits") {die "Failed\n$cmd\n";}
@@ -124,8 +115,16 @@ if (-e "$alignPath/ITS_pull.sto" && -e "$alignPath/SSU_pull.sto" && -e "$alignPa
 	unless (-e $curStone){ #ITS seems to be in general unreliable (too diverse?)
 		if (-e "$path2DB/$ITSDBfa" && -e "$path2DB/$ITSDBidx"){
 			my $ltag = "reads_ITS";
-			my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBits,$interLeave,$alignPath,$singlMode);print $runner."\n";
-			$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBssu,$rS,$alignPath,1) if ($rS ne "");#print $runner."\n";
+			#these are the paired reads in interleaved
+			#my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBits,$interLeave,$alignPath,$singlMode);print $runner."\n";
+			#new version with paired reads --> TODO
+			my $read2Str = join(",",@r2i)
+			my $read1Str = join(",",@r1i)
+			
+			my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBits,$read1Str,$read2Str,$alignPath,$singlMode);print $runner."\n";
+			
+			#these are singleton reads (if exists)
+			$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBssu,$rS,"",$alignPath,1) if ($rS ne "");#print $runner."\n";
 			systemW $runner;#unless (system $runner) {die "Failed\n$runner\n";}
 			#renameFastqCnts($alignPath."/reads_ITS.r1.fq",$smpN."__ITS"); renameFastqCnts($alignPath."/reads_ITS.r2.fq",$smpN."__ITS");
 			outfileCpy($tmpP."/$ltag",$alignPath);
@@ -140,7 +139,7 @@ if (-e "$alignPath/ITS_pull.sto" && -e "$alignPath/SSU_pull.sto" && -e "$alignPa
 	unless (-e $curStone){
 		my $ltag = "reads_SSU";
 		my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBssu,$interLeave,$alignPath,$singlMode);#print $runner."\n";
-		$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBssu,$rS,$alignPath,1) if ($rS ne "");#print $runner."\n";
+		$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBssu,$rS,"",$alignPath,1) if ($rS ne "");#print $runner."\n";
 		$runner .= "touch $curStone";
 		#die "$runner\n\n";
 		#if (system $runner) {print "Error in $runner\n"; exit(88);}#unless (system $runner) {die "Failed\n$runner\n";}
@@ -161,7 +160,7 @@ if (-e "$alignPath/ITS_pull.sto" && -e "$alignPath/SSU_pull.sto" && -e "$alignPa
 	unless (-e $curStone){
 		my $ltag = "reads_LSU";
 		my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBlsu,$interLeave,$alignPath,$singlMode);
-		$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBlsu,$rS,$alignPath,1) if ($rS ne "");#print $runner."\n";
+		$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBlsu,$rS,"",$alignPath,1) if ($rS ne "");#print $runner."\n";
 		$runner .= "touch $curStone";
 		#print $runner."\n";
 		system "rm -f $ltslcaP/LSU_ass.sto" if (-e " $ltslcaP/LSU_ass.sto");
@@ -217,20 +216,60 @@ if ($doRiboAssembl && (!-d $outP."/Ass_ITS" || !-e $outP."/Ass_ITS/scaffolds.fas
  exit(0);
 
 
-sub smrnaRunCmd( $ $ $ $ $){
-	my ($outFile,$refDB,$interLeave,$finD, $isSingl) = @_;
+
+
+
+sub smrnaRunCmd( $ $ $ $ $ $){
+	my ($outFile,$refDB,$R1,$R2,$finD, $isSingl) = @_;
 	return "" unless (-e $interLeave);
+	
+	if ($R2 eq ""){
+		..TODO
+		
+	}
 	my $cmd = "$smrnaBin --best 1 --reads $interLeave ";
 	my $pairOpt = ""; 
 	if (!$isSingl){$pairOpt = "--paired_in ";}
 	$cmd .= "--blast 1 -a $threads -e 1e-12 --log $pairOpt  --fastx --aligned '$outFile' --ref '$refDB'\n";
-	if (!$isSingl){
+	
+	#TODO: should write into $outFile.r1.fq $outFile.r2.fq
+	
+	if (!$isSingl){ #interleaved paired reads used..
 		$cmd .= "rm -f $outFile.r*\n";
-		$cmd .= "$unmergeScript $outFile.fq $outFile.r1.fq $outFile.r2.fq\n";#rm -f $outFile.fq";
+		#should be no longer needed --> remove
+		#$cmd .= "$unmergeScript $outFile.fq $outFile.r1.fq $outFile.r2.fq\n";#rm -f $outFile.fq";
 	}
-	#die $cmd;
+	die $cmd;
 	return $cmd;
 }
+
+
+sub make_interleave{
+	#shouldn't exist any longer
+	die "deprecated make_interleave\n";
+	system "rm -f $r1 $r2 $interLeave";
+	my $tCnter = 0; while (!-e $r1i[0] ){sleep(1);$tCnter++;print"Wait";last if ($tCnter>=15);}
+	die "input file  $r1i[0]  not existing\n" if (!-e $r1i[0] );
+	print "File prep stage 1 (unzipping, reformatting)\n";
+	for (my $i=0;$i<@r1i;$i++){
+		# merge the files & prepare
+		print "File pair $i\n";
+		if ($r1i[$i] =~ m/\.gz$/){systemW "gunzip -c $r1i[$i] | perl -pe 's/\\n/\\t/ if \$. %4' >> $r1"; }#$r1[$i] = "$tmpP/read1.tmp.fq";
+		else { systemW "perl -pe 's/\\n/\\t/ if \$. %4'  $r1i[$i] >> $r1";}
+		#print "perl -pe 's/\\n/\\t/ if \$. %4'  $r1i[$i] >> $r1\n";
+		if ($r2i[$i] =~ m/\.gz$/){systemW "gunzip -c $r2i[$i] | perl -pe 's/\\n/\\t/ if \$. %4' >> $r2"; } #$r2[$i] = "$tmpP/read2.tmp.fq";
+		else { systemW "perl -pe 's/\\n/\\t/ if \$. %4'  $r2i[$i] >> $r2";}
+	}
+	print "File prep stage 2 (interleaving)\n";
+	#print $r1."\n";
+	#interleaving
+	if (-e $r1 && -e $r2){
+		systemW "paste -d '\n' $r1 $r2 | tr '\t' '\n' > $interLeave";# bash $mergeScript $r1 $r2 $interLeave";
+	}
+	systemW "rm -rf $r1" ;#if ($r1i ne $r1);
+	systemW "rm -rf $r2" ;#if ($r2i ne $r2);
+	die "Could not find interleaved file $interLeave\n" unless (-s $interLeave);
+} 
 
 sub outfileCpy($ $){
 	my ($outF,$finD) = @_;
@@ -239,5 +278,9 @@ sub outfileCpy($ $){
 	if (-e "$outF.r1.fq"){system "mv $outF.r1.fq $finD";} #else {system "touch $outF.r1.fq";}
 	if (-e "$outF.r2.fq"){system "mv $outF.r2.fq $finD";} #else {system "touch $outF.r2.fq";}
 	print "Moved file to $finD\n";
+}
+
+sub announce{
+	print "catchLSUSSU v $cLSUSSUver\n";
 }
 

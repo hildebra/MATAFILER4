@@ -319,6 +319,7 @@ my $qsubDir = $GCdir."LOGandSUB/";
 #prep base dirs..
 if ($justCDhit==0){
 	if (-d $GCdir && -d $qsubDir){printL "Warning: outdir $GCdir exists.. delete and recreate? (7s wait)\n"; sleep 7;}
+	die "Refusing to delete unsafe path" unless ($GCdir =~ m{^/} && length($GCdir) > 5 && $tmpDir =~ /m^/;);
 	system ("rm -rf $GCdir/* $tmpDir*\n");#mkdir -p $GCdir/globalLOGs");
 } 
 
@@ -351,7 +352,7 @@ if ($mapF =~ m/^\??$/){
 	} else {
 		die "Can't find expected copy of inmap in GC outdir: $GCdir\n";
 	}
-} elsif (-e "$qsubDir/GCmaps.inf" && -e "$qsubDir/GCmaps.inf"){
+} elsif (-e "$qsubDir/GCmaps.inf" && -e "$qsubDir/GCmaps.ori"){
 	my $mapFInf = `cat $qsubDir/GCmaps.inf`;$mapFInf =~ s/\/\//\//g;
 	my $mapFOri = `cat $qsubDir/GCmaps.ori`;$mapFOri =~ s/\/\//\//g;
 	if ($mapFOri eq $mapF || $mapFInf eq $mapF ){ #same as in input arg.. great, replace with local copies!
@@ -403,7 +404,7 @@ if ($mode eq "mergeCLs"){#was previously mergeCls.pl
 	#die "$numCor2\n";
 	canopyCluster($GCdir,$tmpDir,$numCor2);
 	exit(0);
-}elsif ($mode eq "specI" || $mode eq "kraken" | $mode eq "kaiju" ){ #tax assigns
+}elsif ($mode eq "specI" || $mode eq "kraken" || $mode eq "kaiju" ){ #tax assigns
 	my $numCor2 = $numCor;
 	#if (@ARGV > 2){$numCor2 = $ARGV[2];}
 	if ($mode eq "kraken"){

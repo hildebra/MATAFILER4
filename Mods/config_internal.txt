@@ -172,8 +172,6 @@ illuminaTS3se	[MFLRDir]/data/TruSeq3-SE.fa
 mreps	mreps
 
 
-
-
 ### external programs ###
 #more essential programs are usually listed first in the lists
 
@@ -202,6 +200,10 @@ jgiDepth	jgi_summarize_bam_contig_depths	env:MF4binners #/g/bork3/home/hildebra/
 hmmsearch	hmmsearch
 #if read merge is attempted in any step (typically for miTag, profiling)
 flash	flash #
+
+#miTag related
+sortmerna	sortmerna
+
 
 
 ## gene predictions ##
