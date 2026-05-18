@@ -151,7 +151,7 @@ GetOptions(
 	"GCd=s"          => \$GCd,
 	"outD=s"         => \$outDpre,
 	"MGS=s"          => \$MGSfile,
-	"geneSel=s"      => \$geneSelFile,
+	#"geneSel=s"      => \$geneSelFile,
 	"map2=s"         => \$mapF2, #to be given to strain2 script
 	"nodeTmp|tmpD=s" => \$locTmpDir1, 
 	"submit=i"       => \$doSubmit,

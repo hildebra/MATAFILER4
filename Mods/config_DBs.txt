@@ -1,9 +1,13 @@
 
 #requires version 2.0 with databases in "srtMRNA_path/rRNA_databases/silva*"
-srtMRNA_path	[BINDir]/sortmerna-2.0/
-srtMRNA_DBs	silva-euk-18s-id95.fasta,silva-bac-16s-id90.fasta,silva-arc-16s-id95.fasta,silva-euk-28s-id98.fasta,silva-bac-23s-id98.fasta,silva-arc-23s-id98.fasta
-FMGdir	[MFLRDir]/bin/fetchMG/
+#srtMRNA_path	[BINDir]/sortmerna-2.0/
+#srtMRNA_DBs	silva-euk-18s-id95.fasta,silva-bac-16s-id90.fasta,silva-arc-16s-id95.fasta,silva-euk-28s-id98.fasta,silva-bac-23s-id98.fasta,silva-arc-23s-id98.fasta
+#updated to sortmerna v 4.3.4
+ITSdbFAsrt	[DBDir]/
+SSUdbFAsrt	[DBDir]/
+LSUdbFAsrt	[DBDir]/
 
+#for lambda and LCA
 LSUdbFA	[DBDir]/MarkerG/SILVA/138.1/SLV_138.1_LSU.fasta
 LSUtax	[DBDir]/MarkerG/SILVA/138.1/SLV_138.1_LSU.tax
 SSUdbFA	[DBDir]/MarkerG/SILVA/138.1/SLV_138.1_SSU.fasta
@@ -14,6 +18,10 @@ PR2dbFA
 PR2tax	
 #PR2dbFA	[DBDir]/MarkerG/PR2//gb203_pr2_all_10_28_99p.fasta
 #PR2tax	[DBDir]/MarkerG/PR2//PR2_taxonomy.txt
+
+
+FMGdir	[MFLRDir]/bin/fetchMG/
+
 
 metPhl2_db	[DBDir]/MarkerG/metaphlan3.1/mpa_v31_CHOCOPhlAn_201901
 #leave empty to fallback to default install location for motus2

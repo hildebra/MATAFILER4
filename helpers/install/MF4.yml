@@ -94,7 +94,7 @@ dependencies:
 #  - metaeuk=6.a5d39d9
 #  - racon>=1.5.0
   - samtools=1.23
-  - sortmerna=4.3.7
+  - sortmerna=4.3.4
 #  - semibin=1.5.1
   - trimmomatic=0.39
 #  - unicycler>=0.5.0
