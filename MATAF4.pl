@@ -2073,6 +2073,9 @@ sub riboSummary{
 	#system "$mrgCmd";
 }
 
+# I've removed sortmerna (and ITS-related sortmerna) from this, since 
+# the index is now only read once into memory. If this doesn't work, we will need to
+# add it back in. 
 sub detectRibo(){
 	my ( $tmpP,$outP,$jobd,$SMPN,$glbTmpDDB) = @_;
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
@@ -2084,7 +2087,7 @@ sub detectRibo(){
 	#my $lambdaIdxBin = getProgPaths("lambdaIdx");
 	my $lambdaBin = getProgPaths("lambda");#"/g/bork3/home/hildebra/dev/lotus//bin//lambda/lambda";
 	
-	my $srtMRNA_path = getProgPaths("srtMRNA_path");
+	
 	
 	my @re1 = @{$ar1}; my @re2 = @{$ar2}; my @singl = @{$sa1};
 	#print "ri"; 
@@ -2102,47 +2105,55 @@ sub detectRibo(){
 		my $DBcores = 1;
 		$MFopt{globalRiboDependence}->{DBcp}="alreadyCopied";
 		#my $ITSfilePref = $1;
-		my @DBs = split(/,/,getProgPaths("srtMRNA_DBs"));
-		my @DBsIdx = @DBs;my @DBsTestIdx = @DBs; my $filesCopied = 1;
+
+
 		#die @DBs."@DBs\n";
-		if ( !-d $DBrna ){
-			$DBcmd .= "mkdir -p $DBrna\n";
-		}
-		for (my $ii=0;$ii<@DBsIdx;$ii++){
-			$DBsIdx[$ii] =~ s/\.fasta$/\.idx/;
-			$DBsTestIdx[$ii] =~ s/\.fasta$/\.idx\.kmer_0\.dat/;
-			if ( -e "$DBrna//$DBs[$ii]"  && -e "$DBrna//$DBsTestIdx[$ii]"  ){
-				next;
-			}
-			die "\nCould not find expected sortmerna file:\n$srtMRNA_path/rRNA_databases/$DBs[$ii]\n" if ( !-e "$srtMRNA_path/rRNA_databases/$DBs[$ii]"  );
-			if ( !-e "$srtMRNA_path/rRNA_databases/$DBsTestIdx[$ii]"  ){
-				$DBcmd .= "$srtMRNA_path./indexdb_rna --ref $srtMRNA_path/rRNA_databases/$DBs[$ii],$srtMRNA_path/rRNA_databases/$DBsIdx[$ii]\n";
-			}
-			$DBcmd .= "\ncp $srtMRNA_path/rRNA_databases/$DBs[$ii] $srtMRNA_path/rRNA_databases/$DBsIdx[$ii]* $DBrna\n";
-		}
-		#die @DBs."@DBs\n";
-		my $ITSDBfa = getProgPaths("ITSdbFA",0);
-		if ($ITSDBfa ne ""){ #only do if not empty.. otherwise ignore (not required)
-			my $ITSDBpref = $ITSDBfa;$ITSDBpref =~ s/\.fa.*$//;
-			my $ITSDBidx = $ITSDBfa; $ITSDBidx =~ s/\.fa.*$/\.idx/;
-			$ITSDBpref =~ m/\/([^\/]+)$/;
-			$ITSDBpref=~ m/(^.*)\/[^\/]+/;
+
+		###  Uncomment this section if you do actually end up needing sortmerna index ###
+		#my @DBs = split(/,/,getProgPaths("srtMRNA_DBs"));
+		#my @DBsIdx = @DBs;my @DBsTestIdx = @DBs; my $filesCopied = 1;
+		#my $srtMRNA_path = getProgPaths("srtMRNA_path");
+		#if ( !-d $DBrna ){
+		#	$DBcmd .= "mkdir -p $DBrna\n";
+		#}
+		#for (my $ii=0;$ii<@DBsIdx;$ii++){
+		#	$DBsIdx[$ii] =~ s/\.fasta$/\.idx/;
+		#	$DBsTestIdx[$ii] =~ s/\.fasta$/\.idx\.kmer_0\.dat/;
+		#	if ( -e "$DBrna//$DBs[$ii]"  && -e "$DBrna//$DBsTestIdx[$ii]"  ){
+		#		next;
+		#	}
+		#	die "\nCould not find expected sortmerna file:\n$srtMRNA_path/rRNA_databases/$DBs[$ii]\n" if ( !-e "$srtMRNA_path/rRNA_databases/$DBs[$ii]"  );
+		#	if ( !-e "$srtMRNA_path/rRNA_databases/$DBsTestIdx[$ii]"  ){
+		#		$DBcmd .= "$srtMRNA_path./indexdb_rna --ref $srtMRNA_path/rRNA_databases/$DBs[$ii],$srtMRNA_path/rRNA_databases/$DBsIdx[$ii]\n";
+		#	}
+		#	$DBcmd .= "\ncp $srtMRNA_path/rRNA_databases/$DBs[$ii] $srtMRNA_path/rRNA_databases/$DBsIdx[$ii]* $DBrna\n";
+		#}
+		
+		#my $ITSDBfa = getProgPaths("ITSdbFA",0);
+		#if ($ITSDBfa ne ""){ #only do if not empty.. otherwise ignore (not required)
+		#	my $ITSDBpref = $ITSDBfa;$ITSDBpref =~ s/\.fa.*$//;
+		#	my $ITSDBidx = $ITSDBfa; $ITSDBidx =~ s/\.fa.*$/\.idx/;
+		#	$ITSDBpref =~ m/\/([^\/]+)$/;
+		#	$ITSDBpref=~ m/(^.*)\/[^\/]+/;
 			
-			if (!-e "$ITSDBpref.idx.kmer_0.dat"){ #ITS DBs
-				#die "$ITSDBpref\n$$ITSDBpref.idx.kmer_0.dat\n";
-				if (!-e "$ITSDBfa"){
-					print "Missing $ITSDBfa  ITS DB file!\n"; exit(32);
-				}
-				if (!-e "$ITSDBidx.kmer_0.dat"){
-					$DBcmd .= "\n$srtMRNA_path./indexdb_rna --ref $ITSDBfa,$ITSDBidx\n";
-				}
-				$DBcmd .= "\ncp ${ITSDBpref}* $DBrna\n";
+		#	if (!-e "$ITSDBpref.idx.kmer_0.dat"){ #ITS DBs
+				
+		#		if (!-e "$ITSDBfa"){
+		#			print "Missing $ITSDBfa  ITS DB file!\n"; exit(32);
+		#		}
+		#		if (!-e "$ITSDBidx.kmer_0.dat"){
+		#			$DBcmd .= "\n$srtMRNA_path./indexdb_rna --ref $ITSDBfa,$ITSDBidx\n";
+		#		}
+		#		$DBcmd .= "\ncp ${ITSDBpref}* $DBrna\n";
 				#has to be noted that this doesn't need to happen again
 				#print "ribo DB already present\n";
 				
 				#$DBcmd = "";
-			} 
-		}
+		#	} 
+		#}
+		### End of sortmerna index section ###
+
+
 		#and get flash DBs as well over to that dir
 		my @DBn = ("LSUdbFA","LSUtax","SSUdbFA","SSUtax");#,"PR2dbFA","PR2tax"); #"ITSdbFA","ITStax",
 		my $LCAar = getProgPaths(\@DBn,0);
@@ -2206,10 +2217,10 @@ sub detectRibo(){
 		} else {
 			$cmd .=" -RS '-1' "; #tmpP < scratch too slow
 		}
-		$cmd .= "-tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} -DBdir $DBrna\n";#"$tmpDY $outP $numCore $SMPN $MFopt{doRiboAssembl} $DBrna\n\n";
+		$cmd .= "-tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n";#"$tmpDY $outP $numCore $SMPN $MFopt{doRiboAssembl} $DBrna\n\n";
 	} else {
 		$readConfig = 0; 
-		$cmd .= "\n$cLSUSSUscript -R1 '-1' -R2 '-1' -RS '".join(",",@singl)."' -tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} -DBdir $DBrna\n\n"; #tmpP < scratch too slow
+		$cmd .= "\n$cLSUSSUscript -R1 '-1' -R2 '-1' -RS '".join(",",@singl)."' -tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n\n"; #tmpP < scratch too slow
 	}
 	my $sto1 = "$outP/RibFnd.sto";my $stoLCAL = "$outP//ltsLCA/LSU_ass.sto";	my $stoLCAS = "$outP//ltsLCA/SSU_ass.sto";
 	$cmd .= "touch $sto1\n" unless ($cmd eq "");

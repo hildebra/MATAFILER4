@@ -79,7 +79,8 @@ my $lambdaBin = getProgPaths("lambda");#"/g/bork3/home/hildebra/dev/lotus//bin//
 my $vsearchBin= getProgPaths("vsearch");
 #my $lambdaIdxBin = $lambdaBin."_indexer";#getProgPaths("");#"/g/bork3/home/hildebra/dev/lotus//bin//lambda/lambda_indexer";
 my $LCAbin = getProgPaths("LCA");#"/g/bork3/home/hildebra/dev/C++/LCA/./LCA";
-my $srtMRNA_path = getProgPaths("srtMRNA_path");
+my $smrnaBin = getProgPaths("sortmerna");
+
 
 my @DBn = ("LSUdbFA","LSUtax","SSUdbFA","SSUtax","ITSdbFA","ITStax","PR2dbFA","PR2tax");
 my $LCAar = getProgPaths(\@DBn,0);
@@ -461,27 +462,26 @@ sub runBlastLCA(){
 			#systemW $cmd ;#or die "\n$cmd\n failed\n";
 		} elsif ($doblast==3) {
 			$simName = "smRNA";
-			my $smrnaBin = "$srtMRNA_path/sortmerna";
-			my $smrnaMkDB = "$srtMRNA_path/indexdb_rna";
-			my $refDB = "$DB,$DB.sidx";
-			unless (-e "$DB.sidx.stats"){	print "making DB..";systemW "$smrnaMkDB --ref $refDB";	print " done\n";}
-			#die $outdir."inter$id.fna\n";
-			print "Running sortmerna merge\n";
-			my $cmd = "$smrnaBin --best 50 --reads $interLeave ";
-			$cmd .= "--blast 1 -a 20 -e 0.1 -m 10000 --paired_in --fastx --aligned $taxblastf.i ";
-			$cmd .= "--ref $refDB\n";
-			print "$taxblastf.i\n";
-			systemW $cmd;
-			print "Running sortmerna\n";
-			$cmd = "";
-			if ($doQuery ){
-				$cmd .= "$smrnaBin --best 50 --reads $query ";
-				$cmd .= "--blast 1 -a 20 -e 0.1 -m 10000 --aligned $taxblastf ";
-				$cmd .= "--ref $refDB\n";
+
+			my $idxDir = getProgPaths("${MKname}idx", 0);
+			my $idxStr = ($idxDir ne "") ? "--idx-dir '$idxDir' --index 0" : "";
+			my $cmd = "";
+			if ($doInter && -e $interLeave && !-z $interLeave) {
+				print "Running sortmerna on interleaved\n";
+				my $pfx = "$tmpD/smrna_i$DBi";
+				$cmd .= "$smrnaBin --ref '$DB' --reads '$interLeave' $idxStr --blast 1 --threads $BlastCores -e 0.1 --num_alignments 50 --paired_in --aligned '$pfx' --kvdb '${pfx}.kvdb' --readb '${pfx}.readb'\n";
+				$cmd .= "rm -rf '${pfx}.kvdb' '${pfx}.readb'\n";
+				$cmd .= "mv '${pfx}.blast' '$taxblastf2'\n";
+			}
+			if ($doQuery) {
+				print "Running sortmerna on merged reads\n";
+				my $pfx = "$tmpD/smrna_q$DBi";
+				$cmd .= "$smrnaBin --ref '$DB' --reads '$query' $idxStr --blast 1 --threads $BlastCores -e 0.1 --num_alignments 50 --aligned '$pfx' --kvdb '${pfx}.kvdb' --readb '${pfx}.readb'\n";
+				$cmd .= "rm -rf '${pfx}.kvdb' '${pfx}.readb'\n";
+				$cmd .= "mv '${pfx}.blast' '$taxblastf'\n";
 			}
 			systemW $cmd;
-			$taxblastf.=".blast";
-			print "done sortmeRNA assignment\n";
+			print "done sortmerna assignment\n";
 		} elsif ($doblast==4) {
 			my $udbDB = $DB . ".vudb";
 			unless (-e $udbDB){
