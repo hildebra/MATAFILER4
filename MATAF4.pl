@@ -233,6 +233,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $cAssGrp = $curSmpl;my $cMapGrp = $map{$curSmpl}{MapGroup};
 	if ($map{$curSmpl}{AssGroup} ne "-1"){ $cAssGrp = $map{$curSmpl}{AssGroup};}
 	my @sampleDeps = (); #catalogues all job dependencies created in this loop
+	
 
 	#local flow control
 	if (exists($jmp{$JNUM})){loop2C_check($cAssGrp,\@sampleDeps);next;}
@@ -840,6 +841,13 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if (0 && $MFconfig{maxUnzpJobs} >0 && @unzipjobs > $MFconfig{maxUnzpJobs}){#only run X jobs in parallel, lest the cluster IO breaks down..
 		$curUnzipDep = $unzipjobs[-($MFconfig{maxUnzpJobs})];#join(";",@last_n);
 	}
+	
+	if ($map{$curSmpl}{SRA_download} != "" || $map{$curSmpl}{ENA_download} != "") {
+		 #-> do downloads to tmp dir
+		 #function that downloads to tmp dir
+	}
+
+	
 	my ($jdep) =  #,$hrefSeqSet
 			seedUnzip2tmp($curDir,$curSmpl,$curUnzipDep,$nodeSpTmpD,
 			$smplTmpDir,$calcUnzip,$finalMapDir,
