@@ -1140,6 +1140,7 @@ sub readMap{
 	my $SeqTechS = -1; 
 	my $AssGroupCol = -1; my $EstCovCol = -1; my $MapGroupCol = -1; my $SupRdsCol = -1;my $ExcludeAssemble = -1;
 	my $cut5pR1 = -1;my $cut5pR2 = -1; my $FamGroupCol = -1; my $firstXrdsRd = -1;my $firstXrdsWr = -1;
+	my $ENA_DLcol=-1; my $SRA_DLcol=-1;
 	#some global params
 	my $dir2dirs = ""; #dir on file system, where all dirs specified in map can be found (enables different indirs with different mapping files)
 	my $dir2out = "";
@@ -1199,6 +1200,8 @@ sub readMap{
 			$AssGroupCol = first_index { /^AssmblGrps$/ } @spl;
 			$FamGroupCol = first_index { /^FamilyGrps$/ } @spl;
 			$EstCovCol = first_index { /^EstCoverage$/ } @spl;
+			$ENA_DLcol = first_index { /^ENAdownload$/ } @spl;
+			$SRA_DLcol = first_index { /^SRAdownload$/ } @spl;
 			$MapGroupCol = first_index { /^MapGrps$/ } @spl;
 			$SupRdsCol = first_index { /^SupportReads$/ } @spl;
 			$ExcludeAssemble = first_index { /^ExcludeAssembly$/ } @spl;
@@ -1340,6 +1343,11 @@ sub readMap{
 		
 		if ($xtraCol != -1){$ret{$curSmp}{$xtraColStr} = $spl[$xtraCol];}
 		if ($EstCovCol >= 0){$ret{$curSmp}{DoEstCoverage} = $spl[$EstCovCol];} else {$ret{$curSmp}{DoEstCoverage} = 0;}
+		
+		#download samples? this is the ENA/SRA ID
+		if ($ENA_DLcol >= 0){$ret{$curSmp}{ENA_download} = $spl[$ENA_DLcol];} else {$ret{$curSmp}{ENA_download} = "";}
+		if ($SRA_DLcol >= 0){$ret{$curSmp}{SRA_download} = $spl[$SRA_DLcol];} else {$ret{$curSmp}{SRA_download} = "";}
+
 		#create artifical assmblgrp based on counts..
 		my $curAG = $Scnt;
 		#print "$curAG ";
