@@ -842,7 +842,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$curUnzipDep = $unzipjobs[-($MFconfig{maxUnzpJobs})];#join(";",@last_n);
 	}
 	
-	if ($map{$curSmpl}{SRA_download} != "" || $map{$curSmpl}{ENA_download} != "") {
+	if ($map{$curSmpl}{SRA_download} ne "" || $map{$curSmpl}{ENA_download} ne "") {
 		 #-> do downloads to tmp dir
 		 #function that downloads to tmp dir
 	}

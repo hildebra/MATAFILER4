@@ -319,7 +319,7 @@ my $qsubDir = $GCdir."LOGandSUB/";
 #prep base dirs..
 if ($justCDhit==0){
 	if (-d $GCdir && -d $qsubDir){printL "Warning: outdir $GCdir exists.. delete and recreate? (7s wait)\n"; sleep 7;}
-	die "Refusing to delete unsafe path" unless ($GCdir =~ m{^/} && length($GCdir) > 5 && $tmpDir =~ /m^/;);
+	die "Refusing to delete unsafe path" unless ($GCdir =~ m/^\// && length($GCdir) > 5 && $tmpDir =~ /m^\//);
 	system ("rm -rf $GCdir/* $tmpDir*\n");#mkdir -p $GCdir/globalLOGs");
 } 
 
