@@ -1030,7 +1030,7 @@ sub prepRun{
 		my $sortMGSgenes = getProgPaths("sortMGSGeneImport_scr");
 		my $cmd = "$sortMGSgenes $GCd $MGSfile $useGTDBmg $mode\n";
 		print "$cmd\n";
-		die;
+		#die;
 		systemW $cmd;
 	} else {
 		print "Continuing on preped .srt files\n";
