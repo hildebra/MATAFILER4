@@ -1,65 +1,69 @@
-<p align="center"><img src="/../main/helpers/images/matafiler-logo.png?raw=true" alt="MATAFILER4" width=500 align="center"></img></p>
+<!-- Documentation navigation -->
+[Home](documentation/README.md) | [Quick start](documentation/quickstart.md) | [Installation](documentation/install.md) | [Configuration](documentation/configuration.md) | [Mapping files](documentation/mapping_files.md) | [Workflows](documentation/common_workflows.md) | [Outputs](documentation/outputs.md) | [Flag reference](documentation/flag_reference.md) | [FAQ](documentation/FAQ.md) | [Glossary](documentation/glossary.md)
+
+---
+
+# MATAFILER4 documentation
+
+MATAFILER4 is a Linux/HPC-oriented metagenomic processing pipeline for raw shotgun metagenomic reads. It supports assembly-dependent workflows for communities that assemble well, such as many host-associated microbiomes, and assembly-independent profiling workflows for highly complex communities such as soil.
+
+This documentation snapshot was updated against `MATAF4.pl` version `4.04`.
+
+## Which mode should I use?
+
+| Use case | Recommended starting point |
+|---|---|
+| Gut or other host-associated shotgun metagenomes where assemblies are expected to recover substantial read content | [Assembly-dependent workflow](common_workflows.md#assembly-dependent-metagenomic-assembly--gene-catalog) |
+| Highly complex communities where assemblies are unlikely to be informative | [Assembly-independent profiling](common_workflows.md#assembly-independent-profiling) |
+| Short-read plus ONT/PacBio support data | [Hybrid assemblies](common_workflows.md#hybrid-assemblies) |
+| Mapping reads to a defined reference FASTA or database | [map2tar / map2DB / map2GC](common_workflows.md#map2tar-map2db-and-map2gc-reference-mapping) |
+| You already have output and need to know what files matter | [Outputs](outputs.md) |
+| You need the exact current command-line options | [Flag reference](flag_reference.md) |
+
+## Minimal installation
+
+```bash
+git clone https://github.com/hildebra/MATAFILER4.git
+cd MATAFILER4
+bash helpers/install/installer.sh
+micromamba activate MF4
+./MATAF4.pl -checkInstall
+```
+
+## Minimal test pattern
+
+Create or adapt a mapping file, then run a dry-run first:
+
+```bash
+MAP=/path/to/mapping_file.map
+perl $MF4DIR/MATAF4.pl -map "$MAP" -assembleMG 2 -submit 0 -from 0 -to 1
+```
+
+Only submit to the scheduler after the dry-run has validated paths and configuration:
+
+```bash
+perl $MF4DIR/MATAF4.pl -map "$MAP" -assembleMG 2 -submit 1 -from 0 -to 1
+```
+
+## Documentation map
+
+1. [Installation](documentation/install.md) — software, environments, databases and HPC setup.
+2. [Quick start](documentation/quickstart.md) — shortest path from install to a test run.
+3. [Configuration](documentation/configuration.md) — `config.txt`, temporary directories and cluster settings.
+4. [Mapping files](documentation/mapping_files.md) — required map structure and sample metadata fields.
+5. [Common workflows](documentation/common_workflows.md) — assembly-dependent, assembly-independent, hybrid and reference mapping examples.
+6. [Outputs](documentation/outputs.md) — file-by-file description of final and intermediate results.
+7. [Flag reference](documentation/flag_reference.md) — current options parsed from `MATAF4.pl`, `geneCat.pl`, `MGS.pl` and `buildTree5.pl`.
+8. [FAQ](documentation/FAQ.md) — troubleshooting and common failure modes.
+9. [Glossary](documentation/glossary.md) — terms used throughout the pipeline.
 
 
+## Validated flag references
 
-## Introduction
-
-MATAFILER4 (**M**etagenomic **A**ssembly, **T**axonomic **A**nd **F**unctional Pro**FILER**) is a pipeline developed to:
-- Assemble metagenomes, profile miTags, profile functions, profile taxonomy, build MAGs (metagenomic asssembled genomes) using a variety of approaches (MATAF4.pl)
-- Build a gene catalog based on these assemblies and predicted genes, build abundance matrices from these and annotate the genes functionally (secScripts/geneCat.pl)
-- Merge MAGs into MGS (metagenomic species), build inter- and intra-speciies phylogenies (secScripts/MGS.pl)
-- Additional functionalities are available, such as building phylogenetic tree automatically for many genomes and calcualting population genetic statistics on these (secScripts/phylo/buildTree5.pl)
-
-MATAFILER4 is implemented in Perl, C++ and uses R and python scripts.
-
-Author: Falk Hildebrand <Falk.Hildebrand@gmail.com> 
+The command-line reference is generated from the uploaded Perl sources for `MATAF4.pl`, `geneCat.pl`, `MGS.pl` and `buildTree5.pl`. See [Flag reference](documentation/flag_reference.md).
 
 
-## Detailed information
-
-- [Installing MATAFILER4](helpers/documentation/install.md)
-	- [I/O considerations](helpers/documentation/install.md#I/O-considerations)
-	- [Known Issues](helpers/documentation/install.md#Known-issues)
-- [MATAFILER4 manual](helpers/documentation/manual.md)
-	- [MATAF4.pl flags](helpers/documentation/manual.md#MATAF4pl-flags)
-	- [Genecat.pl flags](helpers/documentation/manual.md#genecatpl-flags)
-	- [MGS.pl flags](helpers/documentation/manual.md#mgspl-flags)
-	- [buildTree5.pl flags](helpers/documentation/manual.md#buildtree5pl-flags)
-- [Outputs](helpers/documentation/manual.md#outputs)
-	- [Abundance matrices](helpers/documentation/manual.md#abundance-matrices)
-	- [Gene function & MAG/MGS gene content](helpers/documentation/manual.md#gene-function--magmgs-gene-content)
-- [Running MATAFILER4](helpers/documentation/usage.md)
-	- [Temporary and output files](helpers/documentation/usage.md#temporary-and-output-files)
-	- [Mapping file](helpers/documentation/usage.md#mapping-file-for-matafiler4)
-	- [Additional usage scenarios](helpers/documentation/usage.md#additional-usage-scenarios)
-		- [map2tar mode](helpers/documentation/usage.md#map2tar-mode)
-		- [Building phylogenetic trees with MATAFILER4](helpers/documentation/usage.md#building-phylogenetic-trees-with-matafiler4)
-- [Examples](helpers/documentation/examples.md)
-	- [MATAFILER4 metagenomic assembly and gene catalog](helpers/documentation/examples.md#matafiler4-metagenomic-assembly-and-gene-catalog)
-	- [Assembly-independent MATAFILER4 mode](helpers/documentation/examples.md#assembly-independent-matafiler4-mode)
-	- [Hybrid assemblies](helpers/documentation/examples.md#hybrid-assemblies)
-- [FAQ](helpers/documentation/FAQ.md)
-
-
-
-
-## License, citations etc
-
-<details>
-  <summary> Expand section </summary>
-
-### Used software
-
-plenty.. please refer to helpers/install/\*.yml for software that is available on Conda.
-
-Other software used that was adapted and/or developed specifically for MATAFILER4 (all implemented in C++):
-- [sdm](https://github.com/hildebra/sdm), [LCA](https://github.com/hildebra/LCA): for 1) read qual filtering 2) least common ancestor calculations in tax assignments. Both are part of our amplicons sequencing pipeline [LotuS2](https://lotus2.earlham.ac.uk/)
-- [clusterMAGs](https://github.com/hildebra/clusterMAGs): cluster MAGs into MGS (metagenomic species) based on conserved marker genes
-- [camopy2](https://github.com/hildebra/canopy2): canopy clustering of gene catalogues, a much more efficient implementation of the [original algorithm](http://www.nature.com/articles/nbt.2939)
-- [MSAfix](https://github.com/hildebra/MSAfix): fixes frameshifts in MSA that sometimes occur, important for high senstive intraspecific phylogenies
-- [rdCover](https://github.com/hildebra/rdCover): calculates read coverage of genes, genomes etc based on mappings.
-
-### Citing MATAFILER4
+## Citing MATAFILER4
 
 **Please cite MATAFILER4 with:**
 - Assembly mode: Hildebrand, F. et al. Antibiotics-induced monodominance of a novel gut bacterial order. Gut 68, 1781–1790 (2019).
@@ -69,9 +73,9 @@ Other software used that was adapted and/or developed specifically for MATAFILER
 
 Falk Hildebrand <Falk.Hildebrand@gmail.com>
 
-### License
+## License
 
- Copyright (c) 2017-2024 Falk Hildebrand
+ Copyright (c) 2017-2026 Falk Hildebrand
 
  MATAFILER4 is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
