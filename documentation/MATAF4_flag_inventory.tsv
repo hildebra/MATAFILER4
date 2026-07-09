@@ -1,0 +1,146 @@
+script	version	section	aliases	type	variable	default	status	description
+MATAF4.pl	4.04	Base options	-help,-?,-h	flag			stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Base options	-checkInstall	flag			stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Base options	-map	string	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Base options	-config	string	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Flow related	-redoFails	integer	MFconfig		stable	if any step of requested analysis failed, just redo everything (extraction etc)
+MATAF4.pl	4.04	Flow related	-redoContigStats	integer	MFconfig		stable	runContigStats (coverage per gene, kmers, GC content) will be deleted & started again
+MATAF4.pl	4.04	Flow related	-submSystem	string	MFconfig		stable	qsub,SGE,bsub,LSF.. by default will try to autodetect
+MATAF4.pl	4.04	Flow related	-submit	integer	doSubmit	1	stable	submit any jobs at all? (0= no submission, just for trying if everything is correctly set up)
+MATAF4.pl	4.04	Flow related	-from	integer	FROM1	0	stable	start at which samples from map file?
+MATAF4.pl	4.04	Flow related	-to	integer	TO1	999999999999	stable	stop at which samples from map file?
+MATAF4.pl	4.04	Flow related	-loopTillComplete	string	loop2completion	0	advanced/internal	dangerous flag, script will loop over the assigned samples until all jobs are finished.
+MATAF4.pl	4.04	Flow related	-excludeNodes	string	MFconfig		stable	exclude certain nodes?
+MATAF4.pl	4.04	Flow related	-maxConcurrentJobs	integer	MFconfig		stable	max jobs in queue, useful for large samples sets, currently only works on slurm
+MATAF4.pl	4.04	Flow related	-killDepNever	integer	MFconfig		stable	"kill jobs in ""Dependency never finished"" state?"
+MATAF4.pl	4.04	Flow related	-requireInput	integer	MFconfig		stable	in case input reads are no longer present, 0 will continue pipeline, 1 will abort
+MATAF4.pl	4.04	Flow related	-ignoreSmpls	string	MFconfig		stable	skip a certain sample (sample id)
+MATAF4.pl	4.04	Flow related	-rmSmplLocks	integer	MFconfig		stable	remove existing sample locks (useful if jobs have crashed, leaving abondened sample locks)
+MATAF4.pl	4.04	Flow related	-silent	flag	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Flow related	-maxUnzpJobs	integer	MFconfig		stable	how many unzip jobs to run in parallel (not to overload HPC IO). Default:20
+MATAF4.pl	4.04	Flow related	-skipSmallSmplsMB	integer	MFconfig		stable	skip samples with a combined input smaller than this in MB (raw file size, independent of compressed or raw)
+MATAF4.pl	4.04	Flow related	-forceWriteStats	integer	MFopt		stable	force (re)writing of the metagStats report and text file
+MATAF4.pl	4.04	File strucuture	-rm_tmpdir_reads	integer	MFconfig		stable	Default 1, remove tmpdir with reads
+MATAF4.pl	4.04	File strucuture	-rm_tmpInput	integer	MFconfig		stable	remove raw, human / adaptor filtered reads, if sdm clean created? (and not needed any longer)
+MATAF4.pl	4.04	File strucuture	-reduceScratchUse	integer	MFconfig		advanced/internal	should always be 1, unless debugging..
+MATAF4.pl	4.04	File strucuture	-globalTmpDir	string	sharedTmpDirP		stable	absolute path to global shared tmp dir (like a scratch dir)
+MATAF4.pl	4.04	File strucuture	-nodeTmpDir	string	nodeTmpDirBase		stable	absolute path to tmp dir on local HDD of each executing node
+MATAF4.pl	4.04	File strucuture	-nodeHDDspace	string	MFconfig		stable	HDD tmp space to be requested for each node (in Gb). Some systems don't support this
+MATAF4.pl	4.04	File strucuture	-legacyFolders	integer	MFconfig		deprecated/legacy	legacy option, controls if output folders will use the read dir as name (1) or the name in the mapping file (0). Default=0
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-usePorechop	integer	MFopt		experimental/unsupported	adapter rm for Nanopore.. should actually be automatically with newer sdm (not implemented)
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-inputFQregex1	string	MFconfig		stable	regex for detecting read pair 1 in input fastq files
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-inputFQregex2	string	MFconfig		stable	regex for detecting read pair 2 in input fastq files
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-inputFQregexSingle	string	MFconfig		stable	regex for detecting single end reads in input fastq files
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-inputFQregexTrustSingle	integer	MFconfig		stable	if grep of files (rawSrchString) has multi assignments, which grep to trust more?
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-inputBAMregex	string	MFconfig		stable	bams that will be converted to fastq
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-splitFastaInput	integer	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-mergeReads	integer	MFopt		stable	merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances)
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-ProbRdFilter	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-pairedReadInput	integer	MFconfig		stable	determines if read pairs are expected in each in dir
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-inputReadLengthSuppl	integer	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-filterHostRds,-filterHumanRds	integer	MFopt		stable	Host filtering mode: 0 none, 1 kraken2, 2 kraken1, 3 hostile.
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-filterHostKrak2DB	string			stable	customize host org to filter (e.g. human, chicken ..)
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-filterHostKr2Conf	string	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-filterHostKr2Quick	string	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-hostileIndex	string	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-onlyFilterZip	integer	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-mocatFiltered	integer	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Preprocessing (cleaning reads etc)	-logQualvsLen	integer	MFopt		stable	sdm log file.. can be quite large; logs qual of read vs read length
+MATAF4.pl	4.04	Sdm related	-inputReadLength	integer	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Sdm related	-gzipSDMout	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Sdm related	-XfirstReads	integer	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Sdm related	-minReadLength	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Sdm related	-maxReadLength	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Sdm related	-filterAdapters	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Sdm related	-customSDMopt	string	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Sdm related	-sdmMem	string	MFopt		stable	total mem for sdm job in Gb, default 15
+MATAF4.pl	4.04	Assembly related	-spadesCores,-assemblCores	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Assembly related	-spadesMemory,-assemblMemory	integer	MFopt		stable	in GB
+MATAF4.pl	4.04	Assembly related	-spadesKmers,-assemblyKmers	string	MFopt		stable	comma delimited list
+MATAF4.pl	4.04	Assembly related	-reAssembleMG	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Assembly related	-asssemblyHddSpace	integer	HDDspace		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Assembly related	-assembleMG	integer	MFopt		stable	1=Spades, 2=MegaHIT, 3= flye, 4=metaMDBG, 5=hybrid ill-PB (megahit, metaMDBG)
+MATAF4.pl	4.04	Assembly related	-assemblyLongTime	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Assembly related	-assemblyScaffMinSize	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Binning	-Binner,-MetaBat2,-binSpeciesMG	integer	MFopt		stable	0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
+MATAF4.pl	4.04	Binning	-BinnerCores	integer	MFopt		stable	cores used for Binning process (and checkM)
+MATAF4.pl	4.04	Binning	-BinnerMem	integer	MFopt		stable	define binning memory, Gb, 0=auto
+MATAF4.pl	4.04	Binning	-checkM2	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Binning	-checkM1	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Binning	-BinnerScratchTmp	integer	MFopt		advanced/internal	very specific (undocumented) use of scratch instead of nodetmp dir
+MATAF4.pl	4.04	Binning	-redoEmptyBins	integer	MFopt		advanced/internal	debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes
+MATAF4.pl	4.04	Binning	-redoBinning	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Binning	-SB_env	string	MFopt		stable	"semiBin environment; if given, will avoid re-training de novo binning model. Default: """" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global"
+MATAF4.pl	4.04	Gene prediction on assembly	-predictEukGenes	integer	MFopt		stable	severely limits total predicted gene amount (~25% of total genes)
+MATAF4.pl	4.04	Gene prediction on assembly	-kmerPerGene	integer	MFopt		stable	calculate kmer frequencies for each gene instead of per scaffold
+MATAF4.pl	4.04	Gene prediction on assembly	-genePredGZenforce	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Gene prediction on assembly	-rewriteGenePred	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping	-mapper	integer	MFopt		stable	#1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
+MATAF4.pl	4.04	Mapping	-mapUnmapped	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping	-mappingCoverage	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping	-mappingMem	integer	MFopt		stable	total mem for mini2/kma/bwa/bwt2 in GB
+MATAF4.pl	4.04	Mapping	-mapSortMem	integer	MFopt		stable	total mem for samtools sort in GB
+MATAF4.pl	4.04	Mapping	-rmDuplicates	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping	-mappingCores	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping	-mapperFilterIll	string	MFopt		stable	"defaults to ""0.05 0.75 20 3"", meaning: <=5% ANI, >=75% of read aligned, >=20 mapping quality, rm clipped (by 3 nt) alignments"
+MATAF4.pl	4.04	Mapping	-mapperFilterPB	string	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping	-mapperFilterONT	string	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping	-mapSaveCRAM	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping related (2) (assembly)	-remap2assembly,-redoMap2assembly,-redoMapping	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping related (2) (assembly)	-JGIdepths	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Mapping related (2) (assembly)	-mapReadsOntoAssembly	integer	MFopt		stable	map original reads back on assembly, to estimate abundance etc
+MATAF4.pl	4.04	Mapping related (2) (assembly)	-mapSupportReadsOntoAssembly	integer	MFopt		stable	Map support reads, if provided in SupportReads, onto the final assembly.
+MATAF4.pl	4.04	Mapping related (2) (assembly)	-saveReadsNotMap2Assembly	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Map2tar / map2DB / map2GC	-decoyMapping	integer	MFopt		stable	"1: ""Decoy mapping"": map against reference genome AND against assembly of metagenome (drawing obvious better hits to metagenome, the ""decoy"")"
+MATAF4.pl	4.04	Map2tar / map2DB / map2GC	-competitive2ndmap	integer	MFopt		stable	1: Competitive, 2: combined but report separately per input genome, -1: combined and report all together
+MATAF4.pl	4.04	Map2tar / map2DB / map2GC	-ref	string	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Map2tar / map2DB / map2GC	-mapperLargeRef	integer	MFopt		stable	use flags in mapper index built for large ref DBs?
+MATAF4.pl	4.04	Map2tar / map2DB / map2GC	-mapnms	string	MFopt		stable	name for this final files
+MATAF4.pl	4.04	Map2tar / map2DB / map2GC	-redo2ndmap	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	SNPs	-get2ndMappingConsSNP	integer	MFopt		stable	SNPs (onto mapping)
+MATAF4.pl	4.04	SNPs	-getAssemblConsSNP	integer	MFopt		stable	SNPs (onto self assembly) #calculates consensus SNP of assembly (useful for checking assembly gets consensus and Assmbl_grps)
+MATAF4.pl	4.04	SNPs	-getAssemblConsSNPsuppRds	integer	MFopt		stable	same as getAssemblConsSNP, but SNP calling for support reads
+MATAF4.pl	4.04	SNPs	-redoAssmblConsSNP	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	SNPs	-SNPmem	integer	MFopt		stable	memory per assigned core, in GB
+MATAF4.pl	4.04	SNPs	-redoGeneExtrSNP	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	SNPs	-SNPjobSsplit	integer	MFopt		stable	how many parallel jobs are run on each
+MATAF4.pl	4.04	SNPs	-SNPminCallQual	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	SNPs	-SNPsaveVCF	integer	MFopt		stable	save vcf of SNP calles? DEfault : 1
+MATAF4.pl	4.04	SNPs	-SNPsaveConsFasta	integer	MFopt		stable	Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated..
+MATAF4.pl	4.04	SNPs	-SNPcaller	string	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	SNPs	-SNPcores	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	SNPs	-SNPconsMinDepth	integer	MFopt		stable	how many reads coverage to include position for consensus call?
+MATAF4.pl	4.04	SNPs	-SNPnormINDEL	integer	MFopt		stable	using bcftools norm to left-align indels
+MATAF4.pl	4.04	SNPs	-SVcaller	integer	MFopt		stable	calling structural variants: 1=delly, 2=gridss. Default (0).
+MATAF4.pl	4.04	Functional profiling (diamond)	-profileFunct	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-reParseFunct	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-reProfileFunct	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-reProfileFuncTogether	integer	MFopt		stable	if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
+MATAF4.pl	4.04	Functional profiling (diamond)	-diamondCores	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-diamondMem	integer	MFopt		stable	memory in GB for diamond alignment jobs
+MATAF4.pl	4.04	Functional profiling (diamond)	-DiaParseEvals	string	MFopt		stable	evalues at which to accept hits to func database
+MATAF4.pl	4.04	Functional profiling (diamond)	-DiaSensitiveMode	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-rmRawDiamondHits	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-DiaMinAlignLen	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-DiaMinFracQueryCov	float	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-DiaPercID	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-diamondDBs	string	MFopt		stable	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
+MATAF4.pl	4.04	Functional profiling (Jaime tree)	-orthoExtract	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Ribo profiling (miTag)	-profileRibosome	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Ribo profiling (miTag)	-riobsomalAssembly	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Ribo profiling (miTag)	-reProfileRibosome	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Ribo profiling (miTag)	-reRibosomeLCA	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Ribo profiling (miTag)	-riboMaxRds	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Ribo profiling (miTag)	-saveRiboRds	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Ribo profiling (miTag)	-thoroughCheckRiboFinish	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Other tax profilers..	-profileMetaphlan	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Other tax profilers..	-profileMOTU2	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Other tax profilers..	-profileKraken	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Other tax profilers..	-profileTaxaTarget	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Other tax profilers..	-estGenoSize	integer	MFopt		stable	estimate average size of genomes in data
+MATAF4.pl	4.04	Other tax profilers..	-krakenDB	string	MFopt		stable	"""virusDB"";#= ""minikraken_2015/"";"
+MATAF4.pl	4.04	D2s distance	-calcInterMGdistance	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	IO for specific uses	-newFileStructure	string	MFconfig		stable	just relink raw files for use in mocat
+MATAF4.pl	4.04	IO for specific uses	-upload2EBI	string	MFconfig		stable	copy human read removed raw files to this dir, named after sample
+MATAF4.pl	4.04	Institute specific: EI	-wcKeyJobs	string	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	DEBUG	-OKtoRWassGrps	integer	MFconfig		stable	can delete assemblies, if suspects error in them
