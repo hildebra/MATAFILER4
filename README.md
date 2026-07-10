@@ -3,25 +3,21 @@
 <p align="center">
   <a href="https://github.com/hildebra/MATAFILER4"><img alt="GitHub repository" src="https://img.shields.io/badge/GitHub-MATAFILER4-181717?logo=github"></a>
   <a href="docs/install.md"><img alt="Installation" src="https://img.shields.io/badge/install-micromamba%20%2B%20installer.sh-blue"></a>
-  <a href="docs/quickstart.md"><img alt="Quick start" src="https://img.shields.io/badge/quickstart-dry--run%20first-success"></a>
-  <a href="docs/flag_reference.md"><img alt="Flags validated from source" src="https://img.shields.io/badge/flags-validated%20from%20Perl%20source-informational"></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%2F%20HPC-lightgrey">
   <img alt="Language" src="https://img.shields.io/badge/language-Perl-39457E?logo=perl">
   <img alt="MATAFILER4 version" src="https://img.shields.io/badge/MATAFILER4-v4.04-brightgreen">
-</p>
-
-<p align="center">
-  <a href="https://github.com/hildebra/MATAFILER4/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/hildebra/MATAFILER4?include_prereleases&label=release"></a>
-  <a href="https://github.com/hildebra/MATAFILER4/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/hildebra/MATAFILER4?label=last%20commit"></a>
-  <a href="https://github.com/hildebra/MATAFILER4/issues"><img alt="Open issues" src="https://img.shields.io/github/issues/hildebra/MATAFILER4?label=issues"></a>
   <a href="https://github.com/hildebra/MATAFILER4/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/hildebra/MATAFILER4"></a>
-  <a href="https://github.com/hildebra/MATAFILER4/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/hildebra/MATAFILER4/total?label=downloads"></a>
 </p>
 
 <!--
 Optional CI badges to enable once matching GitHub Actions workflow files exist.
 Replace the workflow filenames if your repository uses different names.
-
+<p align="center">
+  <a href="https://github.com/hildebra/MATAFILER4/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/hildebra/MATAFILER4?include_prereleases&label=release"></a>
+  <a href="https://github.com/hildebra/MATAFILER4/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/hildebra/MATAFILER4?label=last%20commit"></a>
+  <a href="https://github.com/hildebra/MATAFILER4/issues"><img alt="Open issues" src="https://img.shields.io/github/issues/hildebra/MATAFILER4?label=issues"></a>
+  <a href="https://github.com/hildebra/MATAFILER4/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/hildebra/MATAFILER4/total?label=downloads"></a>
+</p>
 [![Installer smoke test](https://github.com/hildebra/MATAFILER4/actions/workflows/installer-smoke-test.yml/badge.svg)](https://github.com/hildebra/MATAFILER4/actions/workflows/installer-smoke-test.yml)
 [![Documentation links](https://github.com/hildebra/MATAFILER4/actions/workflows/docs.yml/badge.svg)](https://github.com/hildebra/MATAFILER4/actions/workflows/docs.yml)
 [![Perl syntax checks](https://github.com/hildebra/MATAFILER4/actions/workflows/perl-syntax.yml/badge.svg)](https://github.com/hildebra/MATAFILER4/actions/workflows/perl-syntax.yml)
@@ -29,7 +25,10 @@ Replace the workflow filenames if your repository uses different names.
 
 
 <!-- Documentation navigation -->
-[Home](README.md) | [Quick start](docs/quickstart.md) | [Installation](docs/install.md) | [Configuration](docs/configuration.md) | [Mapping files](docs/mapping_files.md) | [Workflows](docs/common_workflows.md) | [Outputs](docs/outputs.md) | [Flag reference](docs/flag_reference.md) | [FAQ](docs/FAQ.md) | [Glossary](docs/glossary.md)
+<p align="center">
+<a href="README.md">Home</a> | <a href="docs/quickstart.md">Quick start</a> | <a href="docs/install.md">Installation</a> | <a href="docs/configuration.md">Configuration</a> | <a href="docs/mapping_files.md">Mapping files</a> | <a href="docs/common_workflows.md">Workflows</a> | <a href="docs/outputs.md">Outputs</a> | <a href="docs/flag_reference.md">Flag reference</a> | <a href="docs/FAQ.md">FAQ</a> | <a href="docs/glossary.md">Glossary</a>
+</p>
+
 
 ---
 
