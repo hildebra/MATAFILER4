@@ -9,7 +9,7 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Binning ();
 use Mods::geneCat qw(calculate_spearman_correlation correlation);
-use Mods::GenoMetaAss qw(readGFF renameFastaCnts renameFastqCnts systemW);
+use Mods::GenoMetaAss qw(checkSeqTech readGFF renameFastaCnts renameFastqCnts systemW);
 use Mods::IO_Tamoc_progs qw(mapperDBbuilt);
 use Mods::math qw(meanArray quantileArray round);
 use Mods::SNP ();
@@ -18,6 +18,11 @@ use Mods::TamocFunc qw(bam2cram);
 
 my $root = tempdir(CLEANUP => 1);
 $root =~ s{\\}{/}g;
+
+my $aviti_error = '';
+eval { checkSeqTech('AVITI') };
+$aviti_error = $@;
+is($aviti_error, '', 'AVITI is accepted as a sequencing technology');
 
 is(round(-1.5, 0), -2, 'round handles negative halves symmetrically');
 is(quantileArray(1, 1, 2, 3), 3, 'legacy quantile clamps the upper endpoint');

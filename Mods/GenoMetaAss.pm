@@ -1099,12 +1099,12 @@ sub is3rdGenSeqTech{
 }
 
 sub checkSeqTech{
-	#ONT,PB,proto,miSeq,GAII
+	#ONT,PB,proto,miSeq,AVITI,GAII
 	my $inT = $_[0];
 	my $msg = "Mapping file";
 	$msg = $_[1] if (@_ > 1);
-	if ($inT ne "" && $inT ne "ONT"&& $inT ne "ill"&& $inT ne "hiSeq" && $inT ne "454" && $inT ne "SLR" && $inT ne "PB" && $inT ne "proto" && $inT ne "miSeq" && $inT ne "GAII" && $inT ne "GAII_solexa"){
-		die "$msg: Can't recognize SeqTech: \"$inT\"\nHas to be one of \"ONT\",\"PB\", \"proto\",\"SLR\", \"ill\", \"miSeq\", \"hiSeq\", \"GAII\",\"GAII_solexa\" or \"\"\n\n";
+	if ($inT ne "" && $inT ne "ONT"&& $inT ne "ill"&& $inT ne "hiSeq" && $inT ne "454" && $inT ne "SLR" && $inT ne "PB" && $inT ne "proto" && $inT ne "miSeq" && $inT ne "AVITI" && $inT ne "GAII" && $inT ne "GAII_solexa"){
+		die "$msg: Can't recognize SeqTech: \"$inT\"\nHas to be one of \"ONT\",\"PB\", \"proto\",\"SLR\", \"ill\", \"miSeq\", \"AVITI\", \"hiSeq\", \"454\", \"GAII\",\"GAII_solexa\" or \"\"\n\n";
 	}
 }
 

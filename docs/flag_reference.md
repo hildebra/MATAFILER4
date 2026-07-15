@@ -70,7 +70,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-skipSmallSmplsMB` | integer | `1` | stable | skip samples with a combined input smaller than this in MB (raw file size, independent of compressed or raw) |
 | `-forceWriteStats` | integer | `0` | stable | force (re)writing of the metagStats report and text file |
 
-## File strucuture
+## File structure
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
@@ -91,7 +91,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-inputFQregex2` | string | `'.*2\.f[^\.]*q\.gz$'` | stable | regex for detecting read pair 2 in input fastq files |
 | `-inputFQregexSingle` | string | `""` | stable | regex for detecting single end reads in input fastq files |
 | `-inputFQregexTrustSingle` | integer | `0` | stable | if grep of files (rawSrchString) has multi assignments, which grep to trust more? |
-| `-inputBAMregex` | string | `""` | stable | bams that will be converted to fastq |
+| `-inputBAMregex` | string | `""` | stable | Regex for detecting primary BAM read files under the location selected by the map's `Path` or `SmplPrefix`. Matching BAMs are treated as unpaired reads and converted with `samtools fastq`; for example, use `'.*\.bam$'`. Empty disables BAM discovery. |
 | `-splitFastaInput` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-mergeReads` | integer | `0` | stable | merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances) |
 | `-ProbRdFilter` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
@@ -178,7 +178,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-remap2assembly`, `-redoMap2assembly`, `-redoMapping` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-JGIdepths` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-mapReadsOntoAssembly` | integer | `1` | stable | map original reads back on assembly, to estimate abundance etc |
-| `-mapSupportReadsOntoAssembly` | integer | `1` | stable | (1) map "SupportReads" onto assembly. Default: 0 |
+| `-mapSupportReadsOntoAssembly` | integer | `1` | stable | Map `SupportReads` onto the assembly and calculate their coverage separately. |
 | `-saveReadsNotMap2Assembly` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 
 ## Map2tar / map2db / map2gc

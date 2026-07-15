@@ -35,29 +35,29 @@ nodeTmpDir     /path/to/node/local/tmp/
 A minimal assembly mapping file looks like this:
 
 ```text
-#SmplID	Path	SmplPrefix	AssmblGrps
+#SmplID	Path	AssmblGrps
 #OutPath	/path/to/output_base
 #RunID	my_matafiler_run
 #DirPath	/path/to/raw_reads
-Sample01	Sample01_dir	Sample01_	Sample01
-Sample02	Sample02_dir	Sample02_	Sample02
+Sample01	Sample01_dir	Sample01
+Sample02	Sample02_dir	Sample02
 ```
 
-The file must be tab-delimited. Keep `#SmplID` values short, unique and free of special characters.
+The file must be tab-delimited. Keep `#SmplID` values short, unique and free of special characters. Use either `Path` or `SmplPrefix` to locate a sample's primary reads; do not populate both for the same sample. See [Mapping files](mapping_files.md), including its section on primary BAM input, for the full format.
 
 ## 4. Dry-run one sample
 
 ```bash
 MAP=/path/to/mapping_file.map
-perl $MF4DIR/MATAF4.pl   -map "$MAP"   -assembleMG 2   -assemblCores 12   -assemblMemory 100   -mapReadsOntoAssembly 1   -submit 0   -from 0 -to 1
+perl $MF4DIR/MATAF4.pl   -map "$MAP"   -assembleMG 2   -assemblCores 12   -assemblMemory 100   -mapReadsOntoAssembly 1   -requireInput 1   -submit 0   -from 0 -to 1
 ```
 
-Use `-submit 0` first to check paths, scheduler setup and command construction without submitting the full analysis.
+Use `-submit 0` first to check paths, scheduler setup and command construction without submitting the full analysis. `-requireInput 1` makes this initial run stop if a sample directory is missing or no input files match; the default is `0`, which allows continuation when original reads have intentionally been removed after earlier processing.
 
 ## 5. Submit
 
 ```bash
-perl $MF4DIR/MATAF4.pl   -map "$MAP"   -assembleMG 2   -assemblCores 12   -assemblMemory 100   -mapReadsOntoAssembly 1   -submit 1   -from 0 -to 1
+perl $MF4DIR/MATAF4.pl   -map "$MAP"   -assembleMG 2   -assemblCores 12   -assemblMemory 100   -mapReadsOntoAssembly 1   -requireInput 1   -submit 1   -from 0 -to 1
 ```
 
 After submitted jobs finish, rerun the same command. MATAFILER4 uses completion marker files and should pick up unfinished or missing steps rather than restarting completed work.
