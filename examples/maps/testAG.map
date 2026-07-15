@@ -1,7 +1,7 @@
 #SmplID	SmplPrefix	SupportReads	INFO	SeqTech	Path	AssmblGrps	sampleID	Individual	TimePoint	firstXreadsWr	firstXreadsRd
 #RunID	1.testAG								
-#OutPath	$MGTKDIR/examples/output/								
-#DirPath	$MGTKDIR/examples//data
+#OutPath	$MF4DIR/examples/output/
+#DirPath	$MF4DIR/examples//data
 #WARNING OFF
 S4qiaS3	SRR8797712			hiSeq		I3		S4zm_R1177-S0001	0		
 s4zmS1	SRR8797713			hiSeq		I2		S4zm_R1177-S0001	0		800000

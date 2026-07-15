@@ -1055,7 +1055,15 @@ sub getDirsPerAssmblGrp{
 sub resolve_path($){
 	my ($inP) = @_;
 	return "" if ($inP eq "");
-	$inP =~ s/\$([A-Z0-9_]*)/$ENV{$1}/g;
+	my $originalPath = $inP;
+	$inP =~ s{
+		\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))
+	}{
+		my $envName = defined($1) ? $1 : $2;
+		die "Environment variable \$$envName used in path '$originalPath' is not set\n"
+			unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
+		$ENV{$envName};
+	}gex;
 	#doesn't work: dir might not exist yet!
 	#$inP = `realpath $inP` ; chomp $inP; $inP .= "/";
 	#if (-d $inP && $inP !~ m/\/$/){$inP .= "/";}
@@ -1536,4 +1544,3 @@ sub writeFasta{
 }
 
 
- 
