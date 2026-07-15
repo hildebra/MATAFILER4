@@ -11,6 +11,7 @@ our @EXPORT_OK = qw(
 	hybrid_group_ready
 	hybrid_package_complete
 	missing_input_files
+	source_input_files
 	parse_ignored_samples
 	sample_base_output_dir
 	sample_is_ignored
@@ -107,6 +108,16 @@ sub hybrid_group_ready {
 sub missing_input_files {
 	my (@files) = @_;
 	return [grep { !defined($_) || $_ eq '' || !-e $_ || !-s $_ } @files];
+}
+
+sub source_input_files {
+	my ($base_dir, @files) = @_;
+	$base_dir = '' unless (defined $base_dir);
+	$base_dir =~ s{/$}{};
+	return [map {
+		my $path = defined($_) ? $_ : '';
+		($path eq '' || $path =~ m{^/} || $base_dir eq '') ? $path : "$base_dir/$path";
+	} @files];
 }
 
 sub advance_loop_window {

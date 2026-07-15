@@ -211,7 +211,7 @@ sub inspect_workflow_state {
 		my $membership_matches = $membership_exists ? _same_members(\@expected_dirs, $actual_dirs) : 0;
 		my $hybrid = 0;
 		if ($assembly_mode == 5) {
-			$hybrid = grep { _support_technology($map->{$_}{SupportReads}) eq 'PB' } @member_keys;
+			$hybrid = grep { _support_technology($map->{$_}{SupportReads}) =~ m{^(?:PB|ONT)$} } @member_keys;
 			$hybrid = $hybrid ? 1 : 0;
 		}
 		my $assembly = _stage_state(

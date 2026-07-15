@@ -72,4 +72,20 @@ is($mismatch->{assembly_groups}[0]{membership}{matches}, 0,
 ok(grep($_ eq 'GROUP_MEMBERSHIP_MISMATCH', @{$mismatch->{assembly_groups}[0]{issues}}),
 	'reports group membership mismatch');
 
+my %ont_map = (
+	opt => { smpl_order => ['ONT_SAMPLE'] },
+	ONT_SAMPLE => {
+		SmplID => 'ONT_SAMPLE', wrdir => "$root/run/ONT_SAMPLE/", AssGroup => 'ont_hybrid',
+		SupportReads => 'ONT:/reads/ont.fastq.gz', hasPrimaryRds => 1,
+	},
+);
+my %ont_groups = (ont_hybrid => { CntAimAss => 1 });
+my $ont_report = inspect_workflow_state(
+	map => \%ont_map,
+	groups => \%ont_groups,
+	options => { assembly_mode => 5, run_tmp_dir => "$root/tmp" },
+);
+is($ont_report->{assembly_groups}[0]{hybrid}, 1,
+	'ONT support reads use the same hybrid state logic as PB support reads');
+
 done_testing;

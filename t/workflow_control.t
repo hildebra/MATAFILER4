@@ -10,7 +10,7 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs hybrid_group_ready
-	hybrid_package_complete missing_input_files parse_ignored_samples
+	hybrid_package_complete missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 );
 
@@ -96,6 +96,15 @@ is_deeply(missing_input_files($valid_input), [], 'nonempty input passes validati
 is_deeply(missing_input_files($valid_input, $empty_input, "$root/missing.fastq"),
 	[$empty_input, "$root/missing.fastq"],
 	'all empty and missing libraries are reported, not only the first');
+my $source_dir = "$root/source";
+make_path($source_dir);
+my $source_read = "$source_dir/read.1.fq.gz";
+write_file($source_read, "reads\n");
+my $resolved_sources = source_input_files($source_dir, 'read.1.fq.gz', '/external/read.2.fq.gz');
+is_deeply($resolved_sources, [$source_read, '/external/read.2.fq.gz'],
+	'retry validation resolves original relative inputs without rewriting absolute inputs');
+is_deeply(missing_input_files($resolved_sources->[0]), [],
+	'an existing source remains valid when its generated rawRds destination is absent');
 
 open my $source, '<', File::Spec->catfile($Bin, '..', 'MATAF4.pl')
 	or die "Cannot inspect MATAF4.pl: $!";
@@ -105,10 +114,14 @@ like($mataf4, qr/\$baseOut\s*=\s*sample_base_output_dir\(\$curOutDir,\s*\$curSmp
 	'normal execution uses safe sample base-output derivation');
 like($mataf4, qr/sample_is_ignored\(\$ignoredSamplesHR,\s*\$SmplName\)/,
 	'normal execution uses exact ignored-sample lookup');
-like($mataf4, qr/my \@missingInputs\s*=\s*\@\{missing_input_files\(\@pa1,\s*\@pa2\)\}/,
-	'normal execution validates every paired input library');
+like($mataf4, qr/my \@missingInputs\s*=\s*\@\{missing_input_files\(\@sourceInputs\)\}/,
+	'normal execution validates authoritative inputs instead of generated rawRds destinations');
 like($mataf4, qr/if \(hybrid_package_complete\(\$mvD\)\)/,
 	'hybrid execution uses package-local completeness');
+like($mataf4, qr/SupportReads\}\s*=~\s*m\/\(\?:PB\|ONT\):\//,
+	'hybrid preassembly recognizes both supported long-read technologies');
+like($mataf4, qr/long_reads_detected.*?\(\?:PB\|ONT\)/s,
+	'final hybrid assembly applies the same PB/ONT technology contract');
 unlike($mataf4, qr/die "Deleting previous results/,
 	'unfinished-result repair no longer stops at a debug die');
 unlike($mataf4, qr/die "now recalc/,

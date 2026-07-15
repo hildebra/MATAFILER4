@@ -37,7 +37,7 @@ use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
 use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs parse_ignored_samples
-	hybrid_group_ready hybrid_package_complete missing_input_files
+	hybrid_group_ready hybrid_package_complete missing_input_files source_input_files
 	sample_base_output_dir sample_is_ignored workflow_members_match
 );
 
@@ -71,7 +71,7 @@ sub runContigStats;#sub bam2cram;
 sub mocat_reorder; sub postSubmQsub; 
 sub detectRibo;  sub riboSummary;
 
-sub checkRawProgsFin;
+sub checkRawProgsFin; sub prepareDiamondRerun; sub publishKrakenResults;
 
 sub runOrthoPlacement;
 sub runDiamond; sub DiaPostProcess;
@@ -724,8 +724,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	
 	#check on processes not dependent on assemblies
+	prepareDiamondRerun($curOutDir);
 	my ($calcKraken,$calcDiamond,$calcDiaParse,$calcRibofind,$calcRiboAssign,$calcGenoSize,
 			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar) = checkRawProgsFin($curOutDir,$SmplName);
+	publishKrakenResults($curOutDir,$SmplName) if ($MFopt{DoKraken} && !$calcKraken);
 	#not complete yet? Then delete..
 	if ($MFconfig{redoFails} && ($calcRibofind||$calcDiamond || $calcDiaParse ||$calcMOTU2 || $calcMetaPhlan || $calcTaxaTar)){
 		print "Removing failed results for $curSmpl; this sample will be rebuilt on the next pipeline pass.\n";
@@ -1980,28 +1982,49 @@ sub RiboMeta($ $ $ $){
 }
 
 
+sub prepareDiamondRerun($){
+	my ($curOutDir) = @_;
+	return unless ($MFopt{DoDiamond});
+	my @alldbs = split /,/,$MFopt{reqDiaDB};
+	my $all_requested = @alldbs == $MFopt{maxReqDiaDB};
+
+	if ($MFopt{rewriteDiamond} && $all_requested) {
+		if (-d "$curOutDir/diamond/") {
+			system('rm', '-rf', '--', "$curOutDir/diamond/") == 0
+				or die "Failed to remove $curOutDir/diamond/ for Diamond rebuild\n";
+		}
+		return;
+	}
+	if ($MFopt{redoDiamondParse} && $all_requested) {
+		for my $target (glob("$curOutDir/diamond/CNT*")) {
+			system('rm', '-rf', '--', $target) == 0
+				or die "Failed to remove Diamond parse target $target\n";
+		}
+	}
+	return unless ($MFopt{redoDiamondParse});
+	my $secCogBin = getProgPaths("secCogBin_scr");
+	foreach my $term (@alldbs){
+		unlink glob("$curOutDir/diamond/dia.$term.blast.*.stone");
+		# Preserve the legacy parser input until its XX layout is replaced by a
+		# declared stage artifact.
+		system("$secCogBin -i $curOutDir/diamond/XX -DB $term -eval $MFopt{diaEVal} -mode 4") == 0
+			or die "Diamond reparsing failed for database $term\n";
+		if ($term eq "ABR" && -d "$curOutDir/diamond/ABR/") {
+			system('rm', '-rf', '--', "$curOutDir/diamond/ABR/") == 0
+				or die "Failed to remove stale Diamond ABR output\n";
+		}
+	}
+}
+
 sub IsDiaRunFinished($){
 	my ($curOutDir) = @_;
 	my @alldbs = split /,/,$MFopt{reqDiaDB};
 	if (!$MFopt{DoDiamond}){return (0,0);}
-	my $secCogBin = getProgPaths("secCogBin_scr");
-	if ($MFopt{rewriteDiamond} && @alldbs == $MFopt{maxReqDiaDB}){ 
-		system "rm -r $curOutDir/diamond/" if (-d "$curOutDir/diamond/");
-	}
 	my $cD = 0; my $pD = 0; #dia_calc, dia_parse
 	if ($MFopt{rewriteDiamond}){$MFopt{redoDiamondParse} = 1;}
-	if ($MFopt{redoDiamondParse} && @alldbs == $MFopt{maxReqDiaDB}){
-		system "rm -r $curOutDir/diamond/CNT*";
-	}
 	foreach my $term (@alldbs){
 		#print $term."   $cD, $pD\n";
-		if ($MFopt{redoDiamondParse} ){#&& ( -e "$curOutDir/diamond/dia.$term.blast.gz.stone" || -e "$curOutDir/diamond/dia.$term.blast.srt.gz.stone") ){ 
-			system "rm -f $curOutDir/diamond/dia.$term.blast.*.stone" ;
-			#TODO: is the /XX path here right?? It's present into the oldest matafiler versions, still..
-			system "$secCogBin -i $curOutDir/diamond/XX -DB $term -eval $MFopt{diaEVal} -mode 4";
-			system "rm -fr $curOutDir/diamond/ABR/" if ($term eq "ABR");
-		}
-		if ($MFopt{rewriteDiamond} ){system "rm -f $curOutDir/diamond/dia.$term.blast*" ;$pD=1; $cD=1;}
+		if ($MFopt{rewriteDiamond} ){$pD=1; $cD=1;}
 		#die "$MFopt{rewriteDiamond}\n";
 #print "$curOutDir/diamond/dia.$term.blast.gz\n";
 		#die "$curOutDir/diamond/dia.$term.blast.gz\n$curOutDir/diamond/dia.$term.blast.srt.gz";
@@ -2054,15 +2077,7 @@ sub checkRawProgsFin{
 	
 	my $KrakenOD = $curOutDir."Tax/kraken/$MFopt{globalKraTaxkDB}/";
 	$calcKraken = 1 if ($MFopt{DoKraken} && (!-d $KrakenOD || !-e "$KrakenOD/krakDone.sto"));
-	if (!$calcKraken && $MFopt{DoKraken}){
-		my $dir_KrakFind = $baseOut."pseudoGC/Phylo/KrakenTax/$MFopt{globalKraTaxkDB}/"; #kraken dir
-		opendir D, $KrakenOD; my @krkF = grep {/krak\./} readdir(D); closedir D;
-		foreach my $kf (@krkF){
-			$kf =~ m/krak\.(.*)\.cnt\.tax/; my $thr = $1;# die $thr."  $kf\n";
-			system "mkdir -p $dir_KrakFind/$thr" unless (-d "$dir_KrakFind/$thr"); 
-			system "cp $KrakenOD/$kf $dir_KrakFind/$thr/$SmplName.$thr.krak.txt";
-		}
-	} else {$progStats{KrakTaxFailCnts}++;}
+	$progStats{KrakTaxFailCnts}++ if ($calcKraken && $MFopt{DoKraken});
 
 	
 	$calcGenoSize=1 if ($MFopt{DoGenoSizeEst} && 	!-e "$curOutDir/MicroCens/MC.0.result");
@@ -2507,6 +2522,24 @@ sub workflowStateOptions {
 		map_support_to_assembly => $MFopt{mapSupport2Assembly},
 		run_tmp_dir => $MFglobal{runTmpDirGlobal},
 	};
+}
+
+sub publishKrakenResults{
+	my ($curOutDir,$SmplName) = @_;
+	my $KrakenOD = $curOutDir."Tax/kraken/$MFopt{globalKraTaxkDB}/";
+	return unless (-d $KrakenOD && -e "$KrakenOD/krakDone.sto");
+	my $dir_KrakFind = $baseOut."pseudoGC/Phylo/KrakenTax/$MFopt{globalKraTaxkDB}/";
+	opendir(my $dh, $KrakenOD) or die "Can't read completed Kraken directory $KrakenOD\n";
+	my @krkF = grep { /^krak\.(.+)\.cnt\.tax$/ && -s "$KrakenOD/$_" } readdir($dh);
+	closedir($dh);
+	foreach my $kf (@krkF){
+		$kf =~ /^krak\.(.+)\.cnt\.tax$/;
+		my $thr = $1;
+		my $dest = "$dir_KrakFind/$thr";
+		system('mkdir', '-p', $dest) == 0 or die "Can't create Kraken publication directory $dest\n";
+		system('cp', "$KrakenOD/$kf", "$dest/$SmplName.$thr.krak.txt") == 0
+			or die "Can't publish Kraken result $KrakenOD/$kf\n";
+	}
 }
 
 
@@ -4421,6 +4454,11 @@ sub seedUnzip2tmp{
 #		$seqSet{libInfo} = \@libInfo;
 #		return ("EMPTY_DO_NEXT", \%seqSet);
 #	}
+	# Preserve the authoritative read locations before the arrays are rewritten
+	# to their generated rawRds destinations. A retry must validate the sources,
+	# because missing rawRds files are exactly what this stage recreates.
+	my @sourceInputs = @{source_input_files($fastp, @pa1, @pa2, @pas, @paBam)};
+	push @sourceInputs, @{source_input_files('', @paXs, @paBamX)};
 	die "tmpPath empty: $tmpPath" if ($tmpPath eq "");
 	$tmpPath.="/rawRds/";
 	my $unzipcmd = "";
@@ -4560,7 +4598,7 @@ sub seedUnzip2tmp{
 	my $tmpCmd;
 	#die "$unzipcmd\n$calcUnzp\n";
 	if ($calcUnzp && !-e $finishStone && !$MFconfig{filterFromSource}){ #submit & check for files
-		my @missingInputs = @{missing_input_files(@pa1, @pa2)};
+		my @missingInputs = @{missing_input_files(@sourceInputs)};
 		die "Missing or empty input files before unzip for $curSmpl:\n"
 			.join("\n", @missingInputs)."\n" if (@missingInputs);
 		if (!-e $finishStone){#|| ($useTrimomatic && !-e $trimoStone) ){
@@ -4740,9 +4778,12 @@ sub prepKraken(){
 	#die "krakper\n";
 	foreach my $kk (keys %DBname ){
 		if (!-d "$oriKrakDir$kk"){die "can't find kraken db $oriKrakDir$kk\n";}
-		if (!-d "$MFglobal{krakenDBDirGlobal}/$kk" && !-e "$MFglobal{krakenDBDirGlobal}/$kk/cpFin.stone" ){
-			$cmd =  "cp -r $oriKrakDir$kk $MFglobal{krakenDBDirGlobal}/\n";
-			$cmd .= "touch $MFglobal{krakenDBDirGlobal}/$kk/cpFin.stone\n";
+		my $target = "$MFglobal{krakenDBDirGlobal}/$kk";
+		if (!-d $target || !-e "$target/cpFin.stone" ){
+			$cmd .= "rm -rf $target\n" if (-e $target);
+			$cmd .= "mkdir -p $MFglobal{krakenDBDirGlobal}\n";
+			$cmd .= "cp -r $oriKrakDir$kk $target\n";
+			$cmd .= "touch $target/cpFin.stone\n";
 		}
 	}
 	my $tmpCmd="";
@@ -4964,6 +5005,7 @@ sub krakenTaxEst(){
 	for (my $j=0;$j< @thrs;$j++){
 		$cmd .= "cat $tmpD/krak_$thrs[$j]"."_*.out > $tmpD/allkrak$thrs[$j].out\n";
 		$cmd .= "$krakCnts1 $tmpD/allkrak$thrs[$j].out $outD/krak.$thrs[$j].cnt.tax\n";
+		$cmd .= "[ -s $outD/krak.$thrs[$j].cnt.tax ] || exit 4\n";
 	}
 
 	$cmd .= "touch $krakStone\n";
@@ -4978,29 +5020,23 @@ sub krakenTaxEst(){
 
 sub check_map_done{
 	my ($doCram, $finalD, $baseN, $mappDir) = @_;
-	
-	#my $aa = (stat "$finalD/$baseN-smd.bam")[7];
-	#die "$mappDir/$baseN-smd.bam "."\n";
-
-	my $retVal = 1;
-	if ($doCram && (!-e "$finalD/$baseN-smd.cram.sto" )){# && !-e "$mappDir/$baseN-smd.cram.sto"  ) ){#&& !$params{bamIsNew} ) ){
-		$retVal = 0;
-		#print "C1\n";
-	} elsif (!$doCram && !-e "$finalD/$baseN-smd.bam" ){#&& !$params{bamIsNew}){
-		$retVal = 0;
-		#print "C2\n";
+	foreach my $dir ($finalD, $mappDir){
+		next unless (defined($dir) && $dir ne '');
+		if ($doCram){
+			return 1 if (-s "$dir/$baseN-smd.cram" && -e "$dir/$baseN-smd.cram.sto");
+		} else {
+			return 1 if (-s "$dir/$baseN-smd.bam");
+		}
 	}
-	
-	return $retVal;
+	return 0;
 }
 sub check_depth_done{
-	my ($doCram, $finalD, $baseN, $mappDir) = @_;
-	my $retVal = 1;
-	if ( !fileGZs("$mappDir/$baseN-smd.bam.coverage") && !fileGZs("$finalD/$baseN-smd.bam.coverage") ){#&& (-e "$mappDir/$baseN-smd.bam" || -e "$mappDir/$baseN-smd.cram") ){# && !$params{bamIsNew}){ #already stored in mapping dir, still needs to be copied
-		#die "$mappDir/$baseN-smd.bam.coverage.gz";
-		$retVal = 0;
+	my ($_doCram, $finalD, $baseN, $mappDir) = @_;
+	foreach my $dir ($mappDir, $finalD){
+		next unless (defined($dir) && $dir ne '');
+		return 1 if (fileGZs("$dir/$baseN-smd.bam.coverage"));
 	}
-	return $retVal;
+	return 0;
 }
 
 #create string for mapper to register libraries
@@ -5869,6 +5905,7 @@ sub metphlanMapping{
 	#$cmd .= "$metPhlaBin $sam --input_type sam --ignore_bacteria --ignore_eukaryotes --ignore_archaea $taxinfo $v2params $v3params $finOut_Vo\n";
 	$cmd .= "rm -f $sam\n";
 	my $mergeStr = "$metPhl2Merge *.MP2.txt > $finOutD/comb.MP2.txt";
+	$cmd .= "[ -s $finOut ] || exit 4\n";
 	$cmd .= "echo \' $mergeStr \' > $stone\n";
 	my $jobN = "MP$MFopt{DoMetaPhlan}$JNUM";
 	
@@ -5888,16 +5925,24 @@ sub TaxaTarget{
 	if (!$MFopt{DoTaxaTarget} ||  -e $stone){return;}
 
 	my @car1 = @{$inF1a}; my @car2 = @{$inF2a}; my @sar = @{$inFSa};	
-	my $inF1 = join(",",@car1); my $inF2 = join(",",@car2); my $inFS = join(",",@sar); 
+	die "TaxaTarget requires equal paired-read arrays for sample $smp\n" if (@car1 != @car2);
+	die "TaxaTarget requires at least one paired-read library for sample $smp\n" if (!@car1);
+	die "TaxaTarget does not support singleton reads for sample $smp; disable it or provide paired reads only\n" if (@sar);
 	my $taxTBin = getProgPaths("TaxaTarget");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
 	my $taxTarDir = $taxTBin;
 	$taxTarDir =~ s/run_pipeline_scripts\/run_protist_pipeline_fda.py//;
 	$taxTarDir =~ s/python //;
-	my $tar1 = $car1[0]; my $tar2 = $car2[0];
-	my $cmd = "";
-	#if ($tar =~ m/\.gz$/){		$tar1 =~ s/\.gz$//;		$cmd .= "gunzip -c $tar > $tar1\n";	}
-	#$tmpD 
-	$cmd .= "$taxTBin -r $tar1 -r2 $tar2 -e $taxTarDir/run_pipeline_scripts/environment.txt --tmp -t $Ncore -o $taxTarDir\n";
+	my $sampleOut = "$finOutD/$smp";
+	my $cmd = "mkdir -p $sampleOut $tmpD\n";
+	my @library_outputs;
+	for (my $i=0; $i<@car1; $i++) {
+		my $libraryOut = "$sampleOut/lib$i";
+		push @library_outputs, $libraryOut;
+		$cmd .= "mkdir -p $libraryOut\n";
+		$cmd .= "$taxTBin -r $car1[$i] -r2 $car2[$i] -e $taxTarDir/run_pipeline_scripts/environment.txt --tmp -t $Ncore -o $libraryOut\n";
+		$cmd .= "find $libraryOut -type f -size +0c -print -quit | grep -q .\n";
+	}
+	$cmd .= "printf '%s\\n' '".join("' '", @library_outputs)."' > $stone\n";
 	my $jobN = "TT$JNUM";
 
 	my ($jobN2,$tmpCmd) = qsubSystem($logDir."taxtar.sh",
@@ -7035,7 +7080,7 @@ sub prepPreAssmbl{
 	my $eCOV = 0; $eCOV = 1 if (fileGZe( "$CSdir/Coverage.percontig"));
 	my $eCOVmv = 0; $eCOVmv = 1 if (fileGZe("$mvD/Coverage.percontig"));
 	#print "$eCOV $eCOVmv   $CSdir/Coverage.percontig    $mvD/Coverage.percontig\n";
-	if ($MFopt{DoAssembly} == 5 && $AsGrps{$cAssGrp}{SupportReads} =~ m/PB:/){#$map{$curSmpl}{"SupportReads"} =~ m/PB:/ ){ 
+	if ($MFopt{DoAssembly} == 5 && $AsGrps{$cAssGrp}{SupportReads} =~ m/(?:PB|ONT):/){#$map{$curSmpl}{"SupportReads"} =~ m/PB:/ ){
 		#condition: right assembly mode and actually secondary support reads
 		$doPreAssmFlag = 1 ;
 		#print "XAS\n";
@@ -7096,9 +7141,9 @@ sub longRdAssembly{
 		
 	if ($LassP == 5){#hybrid mode.. check that all required files are present or stop here
 		#if (${$cReadTecAr}[0] ne "PB"){print"Expected PacBio (\"PB\") readTech for metaMDBG, found \"${$cReadTecAr}[0]\"\n";die;}
-		my $PBdetected=0; foreach (@{$cReadTecAr}){$PBdetected=1 if (m/PB/);}
-		if (!$PBdetected){
-			print "Hybrid Assembly.. expected \"PB\" reads for support reads!";
+		my $long_reads_detected=0; foreach (@{$cReadTecAr}){$long_reads_detected=1 if (m/(?:PB|ONT)/);}
+		if (!$long_reads_detected){
+			print "Hybrid Assembly.. expected \"PB\" or \"ONT\" reads for support reads!";
 			print "(found \"@{$cReadTecAr}\" (size:". @{$cReadTecAr} ."))\nAborting..\n";
 			die;
 		}
@@ -7324,7 +7369,7 @@ sub megahitAssembly{
 			$stoneAssmbl = $stones{preAsmDone};
 			$helpAssembl = "";
 		} elsif (-f $helpAssembl) {
-			$cmd .= "--untrusted-contigs $helpAssembl ";
+			die "MEGAHIT does not support a file-valued helper assembly ('$helpAssembl'); use SPAdes or the hybrid preassembly workflow\n";
 		} else { die "Can't decipher helpAssmbl input to megahitAssembly: $helpAssembl\n";}
 	}
 	$cmd .= "-o $nodeTmp  \n";  #--tmp-dir $nodeTmp/tmp/

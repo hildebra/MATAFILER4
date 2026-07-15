@@ -479,32 +479,36 @@ sub qsubSystemWaitMaxJobs{
 
 sub qsubSystem2{
 	my ($tmpsh,$optHR) = @_;
-	my $hxr = $_[2] if (@_ > 2);
+	my $hxr = {};
+	$hxr = $_[2] if (@_ > 2 && defined $_[2]);
 	my %xtras = %{$hxr}; 
 	my $ncores = 0; 
 	if (exists($xtras{cores})){$ncores = $xtras{cores};}
 	my $nthreads= $ncores;
 	if ($ncores =~ m/,/){my @spl = split /,/,$ncores;$ncores = $spl[1]; $nthreads=$spl[0];}
 	if ($ncores != 0){#read in file, change it..
-		open I,"<$tmpsh" or die "qsubSystem2: cant open $tmpsh\n";chomp(my @lines = <I>); close I;
+		open my $in,"<",$tmpsh or die "qsubSystem2: cant open $tmpsh\n";chomp(my @lines = <$in>); close $in;
 		for (my $i=0;$i<@lines;$i++){
 			if ($lines[$i] =~ m/--cpus-per-task/ || $lines[$i] =~ m/--mincpus/){
 				$lines[$i] = "#SBATCH --cpus-per-task=$ncores";
-				$lines[$i] .= "\n#SBATCH --threads-per-core=1\n#SBATCH --hint=compute_bound\n" unless ($lines[$i+1] =~ m/threads-per-core/);
+				my $next_line = $i+1 < @lines ? $lines[$i+1] : "";
+				$lines[$i] .= "\n#SBATCH --threads-per-core=1\n#SBATCH --hint=compute_bound" unless ($next_line =~ m/threads-per-core/);
 			}
 		}
-
+		open my $out,">",$tmpsh or die "qsubSystem2: cant update $tmpsh\n";
+		print {$out} join("\n",@lines), "\n";
+		close $out or die "qsubSystem2: cant close updated $tmpsh\n";
 	}
 	my $xtra = "";
 	my $qbin = "qsub";
 	my $qmode = $optHR->{qmode};
 	if ($qmode eq "slurm"){$qbin="sbatch";
 	} elsif ($qmode eq "sge"){
-	} else {$qbin="bsub";
+	} elsif ($qmode eq "bash"){$qbin="bash";
+	} else {$qbin="bsub";$xtra="<";
 	}
 	my $qcm = "$qbin $xtra $tmpsh \n";
-	die $qcm; #DEBUG
-	system $qcm;
+	system($qcm) == 0 or die "qsubSystem2 failed: $qcm";
 	return $qcm;
 }
 

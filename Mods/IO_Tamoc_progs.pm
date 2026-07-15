@@ -41,11 +41,10 @@ sub checkMapsDoneSH{
 	my @dirSS = @{$inAR};
 	my $ctrlStr = "";
 	foreach my $DDI (@dirSS){
-		my $iBAM = $DDI;
 		if ( $DDI =~ m/\/$/  ){
-			$ctrlStr .= "if [ ! -e $DDI/mapping/done.sto ]; then echo \"Can't find $DDI/mapping/done.sto !! Aborting .. \"; exit 1; fi \n"; 
-		} elsif ($DDI !~ m/\.bam$/ || $DDI !~ m/\.cram$/)  {
-			$ctrlStr .= "if [ ! -e $DDI ]; then echo \"Can't find $DDI !! Aborting ..\"; exit 1; fi \n"; 
+			$ctrlStr .= "if [ ! -e $DDI/mapping/done.sto ] || ! find $DDI/mapping -maxdepth 1 -type f \\( -name '*-smd.bam' -o -name '*-smd.cram' \\) -size +0c -print -quit | grep -q .; then echo \"Can't find a completed mapping in $DDI/mapping !! Aborting .. \"; exit 1; fi \n";
+		} else {
+			$ctrlStr .= "if [ ! -s $DDI ]; then echo \"Can't find non-empty mapping file $DDI !! Aborting ..\"; exit 1; fi \n";
 		}
 	}
 	return $ctrlStr;
@@ -117,7 +116,10 @@ sub truePath{
 	
 	if ($enforce){
 		if ($TMCpath =~ m/\$([^\$^\/^\\]+)/){
-			my $envVar = $ENV{$1};
+			my $envName = $1;
+			die "Environment variable \$$envName used in path '$TMCpath' is not set\n"
+				unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
+			my $envVar = $ENV{$envName};
 			$TMCpath =~ s/\$([^\$^\/^\\]+)/$envVar/;
 		}
 		#die "$TMCpath\n";
@@ -125,7 +127,10 @@ sub truePath{
 	
 	if ($TMCpath =~ m/^\$/){
 		$TMCpath =~ s/^\$//; 
-		$TMCpath = $ENV{$TMCpath};
+		my ($envName, $suffix) = $TMCpath =~ m{^([^/\\]+)(.*)$};
+		die "Environment variable \$$envName used in path '\$$TMCpath' is not set\n"
+			unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
+		$TMCpath = $ENV{$envName} . $suffix;
 	}
 	return $TMCpath;
 
@@ -334,7 +339,7 @@ sub buildMapperIdx($ $ $ $){
 	my $chkFi = $bwtIdx;
 	$MapperProg = decideMapper($MapperProg,"");
 	if ($MapperProg==1){$chkFi .=".1.bt2";
-	}elsif ($MapperProg==2){$chkFi .= $REF.".pac";
+	}elsif ($MapperProg==2){$chkFi = $REF.".pac";
 	} elsif ($MapperProg == 3){$chkFi = $REF.$mini2IdxFileSuffix;
 	} elsif ($MapperProg == 4){$chkFi = $REF.$kmaIdxFileSuffix.".seq.b";
 	}
@@ -392,26 +397,17 @@ sub inputFmtSpades($ $ $ $ $){
 			$sprds .= " ${peTerm}".($i+1) ."-s $singl[$i]";
 		}
 	} else {
-		open O,">$logDir/spadesInput.yaml";
+		open O,">$logDir/spadesInput.yaml" or die "Can't write $logDir/spadesInput.yaml\n";
 		print O "  [\n      {\n        orientation: \"fr\",\n        type: \"paired-end\",\n        left reads: [\n";
-		for (my $i =0; $i<@p2;$i++){
-			next if ($p1[$i] eq ""); #use p1 as guide here..
-			if (($i+1) == @p2){	print O "          \"$p1[$i]\"\n";	} else { print O "          \"$p1[$i]\",\n";}
-		}
+		my @valid_pairs = grep { $p1[$_] ne "" } 0..$#p1;
+		print O join(",\n", map { "          \"$p1[$_]\"" } @valid_pairs), "\n";
 		print O "     ],\n        right reads: [\n";
-		for (my $i =0; $i<@p1;$i++){
-			next if ($p1[$i] eq "");
-			if (($i+1) == @p1){	print O "          \"$p2[$i]\"\n";	} else { print O "          \"$p2[$i]\",\n";}
-			#print O "          \"$p2[$i]\"\n";
-		}
+		print O join(",\n", map { "          \"$p2[$_]\"" } @valid_pairs), "\n";
 		print O "       ]\n      }";
-		if (@singl > 0){
+		my @valid_singletons = grep { $_ ne "" } @singl;
+		if (@valid_singletons > 0){
 			print O ",\n      {\n        type: \"single\",\n        single reads: [\n";
-			for (my $i=0;$i<@singl;$i++){
-			next if ($singl[$i] eq "");
-				if (($i+1) == @singl){	print O "          \"$singl[$i]\"\n";	} else { print O "          \"$singl[$i]\",\n";}
-				#print O  "          \"$singl[$i]\"\n";
-			}
+			print O join(",\n", map { "          \"$_\"" } @valid_singletons), "\n";
 			print O "       ]\n      }";
 		}
 		#end of yaml file
@@ -431,7 +427,9 @@ sub inputFmtSpades($ $ $ $ $){
 	@p2 = grep !/^$/, @p2;
 	@singl = grep !/^$/, @singl;
 
-	if (@p1 != @p2 || @p1 != @singl){print "Unequal paired read array lengths arrays for Spades\np1:@p1\np2:@p2\nsingle:@singl\n"; exit(2);}
+	die "Unequal paired read array lengths for MEGAHIT\np1:@p1\np2:@p2\n"
+		if (@p1 != @p2);
+	die "No read inputs supplied to MEGAHIT\n" if (!@p1 && !@singl);
 	my $sprds = "";
 	
 	if (@p1 > 0){ 

@@ -58,9 +58,9 @@ sub filsizeMB{
 #check if file or file.gz exists
 sub fileGZe{
 	my ($fil) = @_;
-	return 1 if (-e $fil);
-	return 1 if (-e "$fil.gz");
-	return 1 if ($fil =~ m/\.gz$/ && -e substr($fil,0,-3));
+	return 1 if (-s $fil);
+	return 1 if (-s "$fil.gz");
+	return 1 if ($fil =~ m/\.gz$/ && -s substr($fil,0,-3));
 	return 0;
 }
 
@@ -70,6 +70,7 @@ sub fileGZs{
 	my ($fil) = @_;
 	return (-s $fil) if (-e $fil);
 	return ((-s "$fil.gz")*5) if (-e "$fil.gz");
+	return (-s substr($fil,0,-3)) if ($fil =~ m/\.gz$/ && -e substr($fil,0,-3));
 	return 0;
 }
 
