@@ -35,6 +35,11 @@ use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsu
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
+use Mods::WorkflowControl qw(
+	advance_loop_window assembly_group_output_dirs parse_ignored_samples
+	hybrid_group_ready hybrid_package_complete missing_input_files
+	sample_base_output_dir sample_is_ignored workflow_members_match
+);
 
 
 #some useful HPC commands..
@@ -202,6 +207,7 @@ my $scaffTarExtLibTar = ""; my $bwt2ndMapDep = "";
 # the map and some base parameters (base ID, in path, out path) can be (re)set
 my %map; my %AsGrps; my %DOs;#DOs only required for metabat, to use all mappings within an assembly group
 my $workflowIteration = 0;
+my $ignoredSamplesHR = parse_ignored_samples($MFconfig{ignoreSmpl});
 prepareMap();
 my @samples = @{$map{opt}{smpl_order}}; 
 
@@ -282,13 +288,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$curDir = $map{$curSmpl}{rddir};	
 	}
 	
-	$baseOut = $curOutDir; 
-	if (! ($baseOut =~ s/$curSmpl\///)){die"$curOutDir: could not remove $curSmpl via regex.. something wrong\n";}
+	$baseOut = sample_base_output_dir($curOutDir, $curSmpl);
 	if (!-d $baseOut || $baseoutPrev ne $baseOut){
 		$MFglobal{globalLogDir} = $baseOut."LOGandSUB/"; #this is the gloabl logdir (across all samples in current run)
 		system("mkdir -p $MFglobal{globalLogDir}/sdm") unless (-d "$MFglobal{globalLogDir}/sdm");
 		open $QSBoptHR->{LOG},">",$MFglobal{globalLogDir}."qsub.log";# unless ($doSubmit == 0);
-		$MFglobal{collectFinished} = $baseOut."runFinished.log\n";
+		$MFglobal{collectFinished} = $baseOut."runFinished.log";
 		foreach (split /,/,$MFconfig{mapFile}) {system "cp $_ $MFglobal{globalLogDir}/";}
 		print $MFglobal{globalLogDir}."qsub.log\n";
 		$baseoutPrev = $baseOut;
@@ -299,7 +304,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	#ignore samples .. for various reasons ------------------------------------------------------------------------------------
 	if ($MFconfig{ignoreSmpl} ne ""){
-		if ($MFconfig{ignoreSmpl} =~ m/$SmplName/){print "\n ======= Ignoring sample $SmplName =======\n";
+		if (sample_is_ignored($ignoredSamplesHR, $SmplName)){print "\n ======= Ignoring sample $SmplName =======\n";
 		loop2C_check($cAssGrp,\@sampleDeps);next;}
 	}
 	my $smplLockF = "$logDir/$MFcontstants{DefaultSampleLock}";
@@ -495,11 +500,19 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#check if current assembly group is the same as before!
 	my $locRewrite = 0; my $locRedoAssembl = 0;
 	if ($efinAssLoc && -e "$finalCommAssDir/smpls_used.txt"){
-		my $currAssmlCnt = 0;#`cat $finalCommAssDir/smpls_used.txt | grep -v '^\\\$' | wc -l`;
-		open I,"<$finalCommAssDir/smpls_used.txt " or die "Smple used: $!\n"; while (<I>){$currAssmlCnt++ unless m/^$/;} close I;
-		chomp $currAssmlCnt; $currAssmlCnt = int($currAssmlCnt);
-		if ($currAssmlCnt < $AsGrps{$cAssGrp}{CntAimAss}){
-			print "$cAssGrp assembl count has changed! (from $currAssmlCnt to $AsGrps{$cAssGrp}{CntAimAss})\n$finalCommAssDir\nRemoving assembly and all processed reads\n";
+		my @actualMembers;
+		open my $memberFH, '<', "$finalCommAssDir/smpls_used.txt"
+			or die "Could not read assembly-group membership: $!\n";
+		while (my $member = <$memberFH>){
+			chomp $member;
+			push @actualMembers, $member unless ($member =~ m/^\s*$/);
+		}
+		close $memberFH;
+		my $expectedMembers = assembly_group_output_dirs(\%map, $cAssGrp);
+		if (!workflow_members_match($expectedMembers, \@actualMembers)){
+			print "$cAssGrp assembly-group membership has changed! (previous: "
+				.scalar(@actualMembers).", current: ".scalar(@{$expectedMembers}).")\n"
+				."$finalCommAssDir\nRemoving assembly and all processed reads\n";
 			unless ($MFconfig{OKtoRWassGrps}) {print "Stopping MATAFILER, human intervention needed.. use the flag \"-OKtoRWassGrps 1\" to allow MATAFILER to delete files\n"; die;}
 			$locRewrite=1;
 		}
@@ -581,6 +594,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#my $sizemap = -s $CRAMmap;#print "size map: " . $sizemap . "\n";
 	#delete assembly
 	if ($MFopt{redoAssembly} || $locRedoAssembl){
+		if ($AsGrps{$cAssGrp}{CntAimAss} > 1 && !$MFconfig{OKtoRWassGrps}){
+			die "Refusing to rebuild shared assembly group $cAssGrp without -OKtoRWassGrps 1\n";
+		}
 		print "Removing assembly ... \n" if (-e $metaGassembly );
 		system "rm -fr $finalCommAssDir $mapOut $mapOutSup";
 		$efinAssLoc = 0;	
@@ -652,9 +668,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 
 	if ( ( !$boolAssemblyOK && $MFconfig{unfiniRew}==1 ) ){
-		die "Deleting previous results..\n";
-		system("rm -f -r $curOutDir $smplTmpDir $MFglobal{collectFinished}");
-		$efinAssLoc = 0;	$eFinMapCovGZ = 0;	
+		print "Deleting unfinished previous results; this sample will be rebuilt on the next pipeline pass.\n";
+		system('rm', '-rf', '--', $curOutDir, $smplTmpDir, $MFglobal{collectFinished}) == 0
+			or die "Failed to remove unfinished results for $curSmpl\n";
+		loop2C_check($cAssGrp,\@sampleDeps);next;
 	} elsif ($boolAssemblyOK && $eCovAsssembly && !$map{$curSmpl}{inputFilesEmpty}) {
 		#check that assembly path fits..
 		getAssemblPath($curOutDir,$finalCommAssDir);
@@ -711,9 +728,17 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar) = checkRawProgsFin($curOutDir,$SmplName);
 	#not complete yet? Then delete..
 	if ($MFconfig{redoFails} && ($calcRibofind||$calcDiamond || $calcDiaParse ||$calcMOTU2 || $calcMetaPhlan || $calcTaxaTar)){
-		die "now recalc $curSmpl\n";
-		system ("rm -r -f $asmDir $finalCommAssDir");
-		system("rm -f -r $curOutDir $smplTmpDir $MFglobal{collectFinished} ");
+		print "Removing failed results for $curSmpl; this sample will be rebuilt on the next pipeline pass.\n";
+		my @failedSampleTargets = ($curOutDir, $smplTmpDir, $MFglobal{collectFinished});
+		if ($AsGrps{$cAssGrp}{CntAimAss} <= 1){
+			push @failedSampleTargets, $asmDir, $finalCommAssDir;
+		} else {
+			print "Retaining shared assembly-group outputs; use -redoAssembly with "
+				."-OKtoRWassGrps 1 for an explicitly authorized group rebuild.\n";
+		}
+		system('rm', '-rf', '--', @failedSampleTargets) == 0
+			or die "Failed to remove failed results for $curSmpl\n";
+		loop2C_check($cAssGrp,\@sampleDeps);next;
 	}
 
 
@@ -1432,13 +1457,16 @@ sub loop2C_check(){
 			print "Reanalyzing samples $from till $to\n";
 			if ($loop2c_winsize > 0 && !$loop2completion){
 				my $tmpStr = "Changing sample window from $from -> $to to ";
-				$from = $to;$to = $from + $loop2c_winsize; 
-				if ($to > $TO1){
-					$to = $TO1 ;
-					if ($from-1 >= $TO1){
-						print "Last loop, breaking..\n";$from=$TO1;
-					}
-				} else {$loop2completion = $loop2completion_ini;}
+				my $nextWindow = advance_loop_window(
+					from => $from, to => $to, upper => $TO1,
+					window_size => $loop2c_winsize,
+					initial_loops => $loop2completion_ini,
+				);
+				$from = $nextWindow->{from};
+				$to = $nextWindow->{to};
+				$loop2completion = $nextWindow->{loop_count};
+				$JNUM = $nextWindow->{reset_index};
+				print "Last loop, breaking..\n" unless ($nextWindow->{has_window});
 				print "$tmpStr$from -> $to \n";#" . ($JNUM + $loop2c_winsize) . "\n";
 			}
 			$statStr = ""; 
@@ -4532,11 +4560,10 @@ sub seedUnzip2tmp{
 	my $tmpCmd;
 	#die "$unzipcmd\n$calcUnzp\n";
 	if ($calcUnzp && !-e $finishStone && !$MFconfig{filterFromSource}){ #submit & check for files
-		my $presence=1;
-		for (my $i=0;$i<@pa1;$i++){	if (!-e $pa1[0] || -z $pa1[0]){$presence=0; }	}#die "$pa1[0]\n";
-		for (my $i=0;$i<@pa2;$i++){	if ( !-e $pa2[0] || -z $pa2[0]){$presence=0;}	}
-		#die "$presence presi\n";
-		if (!$presence || !-e $finishStone  ){#|| ($useTrimomatic && !-e $trimoStone) ){
+		my @missingInputs = @{missing_input_files(@pa1, @pa2)};
+		die "Missing or empty input files before unzip for $curSmpl:\n"
+			.join("\n", @missingInputs)."\n" if (@missingInputs);
+		if (!-e $finishStone){#|| ($useTrimomatic && !-e $trimoStone) ){
 			if ($lowEffort==1){
 				#die "$unzipcmd\n";
 				systemW $unzipcmd;
@@ -4544,7 +4571,7 @@ sub seedUnzip2tmp{
 				$jobN = "_UZ$JNUM"; 
 				$unzipcmd = $unzipcmdTMP . $unzipcmd ;
 
-				$unzipcmd = "" if ($presence && -e $finishStone && -e $trimoStone);
+				$unzipcmd = "" if (-e $finishStone && -e $trimoStone);
 				my $tmpSHDD = $QSBoptHR->{tmpSpace};
 				$QSBoptHR->{tmpSpace} = $HDDspace{kraken}; #set option how much tmp space is required, and reset afterwards
 				($jobN, $tmpCmd) = qsubSystem($logDir."UNZP.sh",$unzipcmd,$numCore,"20G",$jobN,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
@@ -6986,7 +7013,9 @@ sub prepPreAssmbl{
 	my $ePreAssmbly = 0; $ePreAssmbly = 1 if (-s $finAssLoc && -e "$finalCommAssDir/$stones{preAsmDone}");
 	#die "$ePreAssmbly\n";
 	my $ePreAssmblPck = 0; 
-	if (-s $finAssLoc && -e "$mvD/moved.sto") {$ePreAssmbly=1;$ePreAssmblPck = 1;}
+	if (hybrid_package_complete($mvD)) {
+		$ePreAssmbly=1;$ePreAssmblPck = 1;
+	}
 	my $doPreAssmFlag = 0;
 
 	if (-s $finAssLoc && -e "$finalCommAssDir/$stones{asmDone}"){ #indication that hybrid assembly is already done
@@ -6996,9 +7025,12 @@ sub prepPreAssmbl{
 	
 	if (!$hasPrimary){#should not be included at all: nothing to assemble within preassembly..
 		$AsGrps{$cAssGrp}{CntPreAssNoPrim}++ ;
-		#TOGO:: needs to continue, but debug with examples..
-		
-		#return ($ePreAssmbly,$doPreAssmFlag,0,$ePreAssmblPck);
+		my $postAssemblyGo = hybrid_group_ready(
+			$AsGrps{$cAssGrp}{CntPreAss},
+			$AsGrps{$cAssGrp}{CntPreAssNoPrim},
+			$AsGrps{$cAssGrp}{CntAimAss},
+		);
+		return ($ePreAssmbly,0,$postAssemblyGo,$ePreAssmblPck);
 	}
 	my $eCOV = 0; $eCOV = 1 if (fileGZe( "$CSdir/Coverage.percontig"));
 	my $eCOVmv = 0; $eCOVmv = 1 if (fileGZe("$mvD/Coverage.percontig"));

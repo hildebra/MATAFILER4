@@ -52,18 +52,18 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-redoFails` | integer | `0` | stable | if any step of requested analysis failed, just redo everything (extraction etc) |
+| `-redoFails` | integer | `0` | stable | Remove failed sample-local results and rebuild the sample on the next pass; shared assembly-group outputs are retained. |
 | `-redoContigStats` | integer | `0` | stable | runContigStats (coverage per gene, kmers, GC content) will be deleted & started again |
 | `-submSystem` | string | `""` | stable | qsub,SGE,bsub,LSF.. by default will try to autodetect |
 | `-submit` | integer | `1` | stable | submit any jobs at all? (0= no submission, just for trying if everything is correctly set up) |
 | `-from` | integer | `0` | stable | start at which samples from map file? |
 | `-to` | integer | `999999999999` | stable | stop at which samples from map file? |
-| `-loopTillComplete` | string | `"0"` | advanced | Loop over the selected samples; each next pass waits for current jobs and reruns the workflow preflight first. |
+| `-loopTillComplete` | string | `"0"` | advanced | Loop over selected samples; `X:Y` processes disjoint windows of at most `Y` samples, waiting and rerunning preflight between passes. |
 | `-excludeNodes` | string | `""` | stable | exclude certain nodes? |
 | `-maxConcurrentJobs` | integer | `0` | stable | max jobs in queue, useful for large samples sets, currently only works on slurm |
 | `-killDepNever` | integer | `0` | stable | kill jobs in "Dependency never finished" state? |
 | `-requireInput` | integer | `0` | stable | in case input reads are no longer present, 0 will continue pipeline, 1 will abort |
-| `-ignoreSmpls` | string | `""` | stable | skip a certain sample (sample id) |
+| `-ignoreSmpls` | string | `""` | stable | Comma-separated exact sample IDs to skip; values are not regular expressions or prefix matches. |
 | `-rmSmplLocks` | integer | `0` | stable | remove existing sample locks (useful if jobs have crashed, leaving abondened sample locks) |
 | `-silent` | flag | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-maxUnzpJobs` | integer | `20` | stable | how many unzip jobs to run in parallel (not to overload HPC IO). Default:20 |
@@ -126,7 +126,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-spadesCores`, `-assemblCores` | integer | `8` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-spadesMemory`, `-assemblMemory` | integer | `-1` | stable | in GB |
 | `-spadesKmers`, `-assemblyKmers` | string | `"27,43,67,87,101,127"` | stable | comma delimited list |
-| `-reAssembleMG` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-reAssembleMG` | integer | `0` | stable | Rebuild an assembly; shared assembly groups additionally require `-OKtoRWassGrps 1`. |
 | `-asssemblyHddSpace` | integer | `"-1"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-assembleMG` | integer | `0` | stable | 1=Spades, 2=MegaHIT, 3= flye, 4=metaMDBG, 5=hybrid ill-PB (megahit, metaMDBG) |
 | `-assemblyLongTime` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |

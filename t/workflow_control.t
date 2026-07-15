@@ -1,0 +1,120 @@
+use strict;
+use warnings;
+
+use File::Path qw(make_path);
+use File::Spec;
+use File::Temp qw(tempdir);
+use FindBin qw($Bin);
+use Test::More;
+
+use lib File::Spec->catdir($Bin, '..');
+use Mods::WorkflowControl qw(
+	advance_loop_window assembly_group_output_dirs hybrid_group_ready
+	hybrid_package_complete missing_input_files parse_ignored_samples
+	sample_base_output_dir sample_is_ignored workflow_members_match
+);
+
+sub write_file {
+	my ($path, $contents) = @_;
+	(my $dir = $path) =~ s{/[^/]+$}{};
+	make_path($dir);
+	open my $fh, '>', $path or die "Cannot write $path: $!";
+	print {$fh} $contents;
+	close $fh;
+}
+
+is(sample_base_output_dir('/runs/S.1/archive/S.1/', 'S.1'), '/runs/S.1/archive/',
+	'base output removes only the final literal sample directory');
+eval { sample_base_output_dir('/runs/S10/', 'S1') };
+like($@, qr/does not end in sample directory/, 'base output rejects a non-matching suffix');
+
+my $ignored = parse_ignored_samples('S1, S.2');
+ok(sample_is_ignored($ignored, 'S1'), 'exact ignored sample is selected');
+ok(sample_is_ignored($ignored, 'S.2'), 'regex characters are treated literally');
+ok(!sample_is_ignored($ignored, 'S10'), 'ignore matching does not select prefixes');
+
+ok(workflow_members_match(['/run/A/', '/run/B'], ['/run/B/', '/run/A']),
+	'assembly members compare exactly independent of ordering and trailing slash');
+ok(!workflow_members_match(['/run/A', '/run/B'], ['/run/A', '/run/C']),
+	'same-sized group with a replaced member is rejected');
+ok(!workflow_members_match(['/run/A'], ['/run/A', '/run/B']),
+	'group with an extra member is rejected');
+
+my %map = (
+	opt => { smpl_order => ['A', 'B', 'C'] },
+	A => { AssGroup => 'gut', wrdir => '/run/A/' },
+	B => { AssGroup => 'gut', wrdir => '/run/B/' },
+	C => { AssGroup => '-1', wrdir => '/run/C/' },
+);
+is_deeply(assembly_group_output_dirs(\%map, 'gut'), ['/run/A/', '/run/B/'],
+	'expected group membership comes from the complete map rather than loop progress');
+is_deeply(assembly_group_output_dirs(\%map, 'C'), ['/run/C/'],
+	'single-sample implicit assembly group is supported');
+
+my $window = advance_loop_window(
+	from => 0, to => 250, upper => 600, window_size => 250, initial_loops => 6,
+);
+is_deeply($window, {
+	from => 250, to => 500, loop_count => 6, reset_index => 249, has_window => 1,
+}, 'first completed window advances directly to the next disjoint range');
+$window = advance_loop_window(
+	from => $window->{from}, to => $window->{to}, upper => 600,
+	window_size => 250, initial_loops => 6,
+);
+is_deeply($window, {
+	from => 500, to => 600, loop_count => 6, reset_index => 499, has_window => 1,
+}, 'final partial window starts at the previous upper boundary');
+$window = advance_loop_window(
+	from => $window->{from}, to => $window->{to}, upper => 600,
+	window_size => 250, initial_loops => 6,
+);
+is_deeply($window, {
+	from => 600, to => 600, loop_count => 0, reset_index => 599, has_window => 0,
+}, 'window loop terminates without returning to earlier samples');
+
+my $root = tempdir(CLEANUP => 1);
+$root =~ s{\\}{/}g;
+my $package = "$root/preAssmblGrp_gut";
+write_file("$package/scaffolds.fasta.filt", ">contig\nACGT\n");
+write_file("$package/Coverage.percontig.gz", "coverage\n");
+write_file("$package/Coverage.median.percontig", "median\n");
+write_file("$package/moved.sto", "done\n");
+ok(hybrid_package_complete($package),
+	'hybrid package completeness depends only on package-local outputs');
+unlink "$package/Coverage.percontig.gz";
+ok(!hybrid_package_complete($package), 'hybrid package with a missing output is incomplete');
+
+ok(hybrid_group_ready(2, 1, 3),
+	'no-primary member counts toward final hybrid group readiness');
+ok(!hybrid_group_ready(1, 1, 3), 'hybrid group waits for remaining packages');
+
+my $valid_input = "$root/input.1.fastq";
+my $empty_input = "$root/input.2.fastq";
+write_file($valid_input, "reads\n");
+write_file($empty_input, '');
+is_deeply(missing_input_files($valid_input), [], 'nonempty input passes validation');
+is_deeply(missing_input_files($valid_input, $empty_input, "$root/missing.fastq"),
+	[$empty_input, "$root/missing.fastq"],
+	'all empty and missing libraries are reported, not only the first');
+
+open my $source, '<', File::Spec->catfile($Bin, '..', 'MATAF4.pl')
+	or die "Cannot inspect MATAF4.pl: $!";
+my $mataf4 = do { local $/; <$source> };
+close $source;
+like($mataf4, qr/\$baseOut\s*=\s*sample_base_output_dir\(\$curOutDir,\s*\$curSmpl\)/,
+	'normal execution uses safe sample base-output derivation');
+like($mataf4, qr/sample_is_ignored\(\$ignoredSamplesHR,\s*\$SmplName\)/,
+	'normal execution uses exact ignored-sample lookup');
+like($mataf4, qr/my \@missingInputs\s*=\s*\@\{missing_input_files\(\@pa1,\s*\@pa2\)\}/,
+	'normal execution validates every paired input library');
+like($mataf4, qr/if \(hybrid_package_complete\(\$mvD\)\)/,
+	'hybrid execution uses package-local completeness');
+unlike($mataf4, qr/die "Deleting previous results/,
+	'unfinished-result repair no longer stops at a debug die');
+unlike($mataf4, qr/die "now recalc/,
+	'redo-failed repair no longer stops at a debug die');
+like($mataf4,
+	qr/CntAimAss\}\s*>\s*1\s*&&\s*!\$MFconfig\{OKtoRWassGrps\}.*?Refusing to rebuild shared assembly group/s,
+	'shared assembly rebuild retains the established destructive authorization gate');
+
+done_testing;
