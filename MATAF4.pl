@@ -537,11 +537,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		if (-e $STOcram && (!fileGZe( "$finalMapDir/$SmplName-smd.bam.coverage.gz") || !-e $CRAMmap) ){$locRedoAssMapping = 1 ;print "R3 ";}
 		#if ($eFinMapCovGZ && (exists($locStats{uniqAlign}) && $locStats{uniqAlign} > 20) && -s $CRAMmap <300){$locRedoAssMapping = 1 ;print "R4";}
 		#print "$CRAMmap :: $locRedoAssMapping\n";
-<<<<<<< HEAD
-		if ($locRedoAssMapping){# && -e $CRAMmap){
-=======
 		if ($eFinMapCovGZ && $locRedoAssMapping){# && -e $CRAMmap){
->>>>>>> dev
 			print "redo assem mapping!" . " -s $CRAMmap \n" ;
 			#die;
 		}
@@ -3458,11 +3454,7 @@ sub sdmOptSet{
 		return ($MFopt{sdmOpt},$MFopt{sdmOpt});
 	}
 	my $curSDMopt = $MFopt{baseSDMopt}; 
-<<<<<<< HEAD
-	
-=======
 	#die " $curReadTec\n";
->>>>>>> dev
 	my $is3rdGen = is3rdGenSeqTech($curReadTec);
 	#my $iqualOff = 33; #62 for 1st illu
 	
