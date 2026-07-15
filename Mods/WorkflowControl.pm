@@ -11,12 +11,93 @@ our @EXPORT_OK = qw(
 	hybrid_group_ready
 	hybrid_package_complete
 	missing_input_files
+	normalise_job_dependencies
+	append_job_dependencies
+	augment_deferred_submission
 	source_input_files
 	parse_ignored_samples
 	sample_base_output_dir
 	sample_is_ignored
 	workflow_members_match
 );
+
+sub normalise_job_dependencies {
+	my (@values) = @_;
+	my @pending = @values;
+	my @dependencies;
+	my %seen;
+	while (@pending) {
+		my $value = shift @pending;
+		if (ref($value) eq 'ARRAY') {
+			unshift @pending, @{$value};
+			next;
+		}
+		next unless (defined $value);
+		for my $dependency (split /[;,\s]+/, $value) {
+			next if ($dependency eq '' || $seen{$dependency}++);
+			push @dependencies, $dependency;
+		}
+	}
+	return join(';', @dependencies);
+}
+
+sub append_job_dependencies {
+	my ($target, @values) = @_;
+	die 'append_job_dependencies requires a scalar reference'
+		unless (ref($target) eq 'SCALAR');
+	${$target} = normalise_job_dependencies(${$target}, @values);
+	return ${$target};
+}
+
+sub augment_deferred_submission {
+	my (%args) = @_;
+	my $mode = $args{qmode} || '';
+	my $command = $args{command} || '';
+	my $script = defined($args{script}) ? $args{script} : '';
+	my $rtag = $args{run_tag} || '';
+	my $dependencies = normalise_job_dependencies($args{dependencies});
+	return { command => $command, script => $script }
+		if ($dependencies eq '' || $mode eq 'bash');
+	my @dependencies = split /;/, $dependencies;
+	for (@dependencies) { s/^\Q$rtag\E// if ($rtag ne ''); }
+
+	if ($mode eq 'slurm') {
+		my $new_dependencies = join(':', @dependencies);
+		if ($script =~ /^#SBATCH --dependency=(afterok|afterany):([^\r\n]*)/m) {
+			my ($policy, $existing) = ($1, $2);
+			my $merged = normalise_job_dependencies(split(/:/, $existing), @dependencies);
+			$merged =~ s/;/:/g;
+			$script =~ s/^#SBATCH --dependency=(?:afterok|afterany):[^\r\n]*/#SBATCH --dependency=$policy:$merged/m;
+		} else {
+			$script =~ s/^(#![^\r\n]*\r?\n)/$1#SBATCH --dependency=afterok:$new_dependencies\n/;
+		}
+	} elsif ($mode eq 'sge') {
+		my $new_dependencies = join(',', @dependencies);
+		if ($command =~ /-hold_jid\s+(\S+)/) {
+			my $existing = $1;
+			my $merged = normalise_job_dependencies(split(/,/, $existing), @dependencies);
+			$merged =~ s/;/,/g;
+			$command =~ s/-hold_jid\s+\S+/-hold_jid $merged/;
+		} else {
+			$command =~ s/^(qsub\s+)/$1-hold_jid $new_dependencies /;
+		}
+	} elsif ($mode eq 'lsf') {
+		my @existing;
+		if ($command =~ /-w\s+"([^"]*)"/) {
+			@existing = ($1 =~ /done\(([^)]+)\)/g);
+		}
+		my $merged = normalise_job_dependencies(@existing, @dependencies);
+		my $expression = join(' && ', map { "done($_)" } split(/;/, $merged));
+		if ($command =~ /-w\s+"[^"]*"/) {
+			$command =~ s/-w\s+"[^"]*"/-w "$expression"/;
+		} else {
+			$command =~ s/^(bsub\s+)/$1-w "$expression" /;
+		}
+	} else {
+		die "Cannot augment deferred submission for unknown queue mode '$mode'";
+	}
+	return { command => $command, script => $script };
+}
 
 sub _normalise_path {
 	my ($path) = @_;

@@ -4,6 +4,7 @@ use warnings;
 use strict;
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths convert2Gb);
+use Mods::WorkflowControl qw(normalise_job_dependencies);
 
 
 use Exporter qw(import);
@@ -91,10 +92,8 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		#$time = "00:45:00";
 		$optHR->{useShortQueue}=0;
 	}
-	my @jspl = split(";",$waitJID); 
-	my %jhash; $jhash{$_}++ for (@jspl);  #remove duplicates
-	@jspl = keys %jhash;
-	@jspl = grep /\S/, @jspl; #and empty entries..
+	$waitJID = normalise_job_dependencies($waitJID);
+	my @jspl = split /;/, $waitJID;
 
 	if ($cwd ne "" && !-d $cwd){system "mkdir -p $cwd";}
 	#if ($memory > 250001){$queues = "\"scb\"";}
@@ -135,8 +134,8 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		#foreach (@constrains){
 	#		print O "#SBATCH --constraint=$_\n" if ($_ ne "");
 		#}
-		if (length($waitJID) >3 && @jspl > 0) {
-			for (@jspl) {s/$rTag//;}
+		if (@jspl > 0) {
+			for (@jspl) {s/^\Q$rTag\E//;}
 			
 			#$xtra .= "--dependency=afterok:".join(":",@jspl)." " if (@jspl > 0);
 			if ($optHR->{afterAny}){
@@ -195,7 +194,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	} elsif ($LSF==1){ #bsub #-M memLimit; -q queueName;  -m "host_name[@cluster_name]; -n minProcessors; 
 		if ($optHR->{doSync} == 1){$xtra.="-K ";}
 		if ($jname ne ""){$xtra.="-J $rTag$jname ";}
-		if (length($waitJID) >3) {
+		if (@jspl > 0) {
 			my @jspl = split(";",$waitJID);
 			#remove empty elements
 			@jspl = grep /\S/, @jspl;
@@ -209,7 +208,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	} else{ #qsub
 		if ($optHR->{doSync} == 1){$xtra.="-sync y ";}
 		if ($jname ne ""){$xtra.="-N $rTag$jname ";}
-		if (length($waitJID) >3) {
+		if (@jspl > 0) {
 			for (@jspl) { s/^\Q$rTag\E//; }
 			if (@jspl > 0 ){$xtra.="-hold_jid ".join(",",@jspl) ." ";}
 		}
@@ -418,10 +417,8 @@ sub qsubSystemJobAlive{
 	my ($jAr,$optHR) = @_;
 	my $killFailedJobs=0;
 	$killFailedJobs = $_[2] if (@_ > 2);
-	my @jobs = @{$jAr};
-	#clean up @jobs
-	my %jobsCl;  foreach my $kj (@jobs){my @spl = split /;/,$kj; for (@spl){next if ($_ eq "");$jobsCl{$_}++;}}
-	@jobs = keys %jobsCl;
+	my @jobs = split /;/, normalise_job_dependencies($jAr);
+	return unless (@jobs);
 	
 	
 	my $qmode = $optHR->{qmode};
@@ -538,22 +535,20 @@ sub MFnext($ $ $ $){
 	my $logF = $lckFile; $logF =~ s/\/[^\/]+$/rmLock.sh/;
 	my $cmd = "echo \"all smpl associated jobs seem to have quit. Releasing lock..\"\nrm -f $lckFile\n";
 	#my @jobs = @{$aR};
-	my $jDepe = join(";",@{$aR});
+	my $jDepe = normalise_job_dependencies($aR);
 	my $jobN = "RMLCK$Jnum";
 	#print "$logF\n$jDepe\n\n"; 
 	$QSBoptHR->{afterAny}=1;
 	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
 	$QSBoptHR->{useShortQueue} =1;
-	my ($jN,$jID) = qsubSystem($logF,$cmd,1,"1G",$jobN,$jDepe,"",1,\{},$QSBoptHR);
+	my ($jN,$submitCommand) = qsubSystem($logF,$cmd,1,"1G",$jobN,$jDepe,"",1,[],$QSBoptHR);
 	$QSBoptHR->{afterAny}=0;$QSBoptHR->{useShortQueue}=0;
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
-	push(@{$aR}, $jID);
+	push(@{$aR}, $jN) if ($jN ne "");
 }
 
 
 sub add2SampleDeps($ $){
 	my ($ar1, $ar2) = @_;
-	foreach (@{$ar2}){
-		push (@{$ar1}, $_) if (defined $_ && $_ ne "" && $_ =~ m/[^;]/);
-	}
+	@{$ar1} = split /;/, normalise_job_dependencies($ar1, $ar2);
 }

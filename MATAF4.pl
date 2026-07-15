@@ -39,6 +39,7 @@ use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs parse_ignored_samples
 	hybrid_group_ready hybrid_package_complete missing_input_files source_input_files
 	sample_base_output_dir sample_is_ignored workflow_members_match
+	normalise_job_dependencies append_job_dependencies augment_deferred_submission
 );
 
 
@@ -943,8 +944,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	
 	#$mmpuOutTab .= $dir2rd."\t".$seqSet{"mmpu"}."\n";
-	$AsGrps{$cMapGrp}{SeqUnZDeps} .= $jdep.";";
-	$AsGrps{$cAssGrp}{UnzpDeps} .= $jdep.";";
+	append_job_dependencies(\$AsGrps{$cMapGrp}{SeqUnZDeps}, $jdep);
+	append_job_dependencies(\$AsGrps{$cAssGrp}{UnzpDeps}, $jdep);
 	$AsGrps{$cAssGrp}{readDeps} = $AsGrps{$cAssGrp}{UnzpDeps};
 	my $UZdep = $jdep;
 	
@@ -1004,7 +1005,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#raw files only required for mapping reads to assemblies, so delete o/w
 	#$cfp1ar,$cfp2ar,
 	if (!$MFopt{DoAssembly} && $MFconfig{importMocat}==0 && $MFconfig{removeInputAgain} && !$requireRawReadsFlag){ $sdmjN = cleanInput($sdmjN,$smplTmpDir);}
-	$AsGrps{$cAssGrp}{readDeps} .= ";$mergJbN";
+	append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $mergJbN);
 
 
 	#keeps track of all sdm jobs
@@ -1044,7 +1045,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$AsGrps{$cAssGrp}{pseudoAssmblDep}  = $prodRun;
 		}
 		push(@{$AsGrps{$cAssGrp}{PsAssCopies}}, $asmDir."/metag/*",$finalCommAssDir);
-		$AsGrps{$cAssGrp}{readDeps} .= ";$prodRun";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $prodRun);
 	}
 	
 	if ($MFopt{calcOrthoPlacement}){
@@ -1054,10 +1055,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($calcDiamond || $calcDiaParse){
 		my ($djname,$djCln) = runDiamond($curOutDir."diamond/",$MFglobal{globaldDiaDBdir},$nodeSpTmpD."/diaRefDB/",
 					$mergJbN.";".$primaryDep,$MFopt{reqDiaDB}); #GlbTmpPath
-		$AsGrps{$cAssGrp}{DiamDeps} = $djname.";";
-		$AsGrps{global}{DiamDeps} .= ";$djname";
+		$AsGrps{$cAssGrp}{DiamDeps} = normalise_job_dependencies($djname);
+		append_job_dependencies(\$AsGrps{global}{DiamDeps}, $djname);
 		$AsGrps{global}{DiamCln} = $djCln unless($djCln eq "");
-		$AsGrps{$cAssGrp}{readDeps} .= ";$djname";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $djname);
 	}
 	
 	#DEBUG
@@ -1071,20 +1072,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	if ($calcGenoSize){#use microbeCensus to get avg genome size
 		my $gsJdep = genoSize($curOutDir."MicroCens/",$mergJbN.";".$primaryDep);
-		$AsGrps{$cAssGrp}{readDeps} .= ";$gsJdep";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $gsJdep);
 	}
 	
 	#kraken (estimate taxa abundance
 	if ($calcKraken){
 		my $krJdep = krakenTaxEst($KrakenOD, $nodeSpTmpD."krak/",$SmplName,$primaryDep);
-		$AsGrps{$cAssGrp}{readDeps} .= ";$krJdep";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $krJdep);
 		
 	}
 	if ($calcRibofind || $calcRiboAssign){
 #		die "STOP ribo\n";
 		my $ITSrun = detectRibo($nodeSpTmpD."ITS/",$curOutDir."ribos/",$primaryDep,$SmplName,$MFglobal{runTmpDirGlobal}); #GlbTmpPath  \@cfp1,\@cfp2
 		#$AsGrps{$cAssGrp}{ITSDeps} .= $ITSrun.";";
-		$AsGrps{$cAssGrp}{readDeps} .= ";$ITSrun";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $ITSrun);
 	}
 	
 	#metaphlan2 - taxa abudnance estimates
@@ -1092,20 +1093,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my $dir_MP2 = $baseOut.$preDIRs{dir2MePhl};#"pseudoGC/Phylo/MP2/"; #metaphlan 2 dir
 
 		my $MP2jname = metphlanMapping($nodeSpTmpD."MP2/",$dir_MP2,$SmplName,$MFopt{MapperCores},$primaryDep); #\@cfp1,\@cfp2
-		$AsGrps{$cAssGrp}{readDeps} .= ";$MP2jname";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $MP2jname);
 	}
 	
 	if ($calcTaxaTar){
 		my $dir_TaxTar = $baseOut."pseudoGC/Phylo/TaxaTarget/"; #taxaTar dir
 		my $taxTarjname = TaxaTarget($nodeSpTmpD."TaxTar/",$dir_TaxTar,$SmplName,$MFopt{MapperCores},$primaryDep); 
-		$AsGrps{$cAssGrp}{readDeps} .= ";$taxTarjname";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $taxTarjname);
 	}
 	
 	#mOTU2  - taxa abundance estimates
 	if ($calcMOTU2){
 		my $dir_mOTU2 = $baseOut."pseudoGC/Phylo/mOTU2/"; #mOUT 2 dir
 		my $MP2jname = mOTU2Mapping($nodeSpTmpD."Motu2/",$dir_mOTU2,$SmplName,$MFopt{MapperCores},$primaryDep.";".$mOTU2Deps); #\@cfp1,\@cfp2
-		$AsGrps{$cAssGrp}{readDeps} .= ";$MP2jname";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $MP2jname);
 	}
 	
 	my $SmplNameX = $SmplName;
@@ -1126,7 +1127,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#-----------------------------------------------------------------
 	#------------------------ ASSEMBLY -------------------------------
 	#-----------------------------------------------------------------
-	$AsGrps{$cAssGrp}{SeqClnDeps} .= $sdmjN.";" if ($assemblyFlag);
+	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $sdmjN) if ($assemblyFlag);
 	if ( ($assemblyFlag || $scaffoldFlag || $scaffTarExternal ne "") && $AssemblyGo){ #assembly does not exist
 		die "Can't do assembly and pseudoassembly on the same sample!\n" if ($pseudAssFlag || $MFopt{pseudoAssembly});
 		#print "preAsmChk: $ePreAssmbly, $ePreAssmblPck, $doPreAssmFlag, $postPreAssmblGo\n";
@@ -1151,11 +1152,18 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 
 	
-#	if (0&&$AssemblyGo && $AsGrps{$cAssGrp}{PostAssemblCmd} ne ""){#no assembly required, but maybe still other dependent jobs (i.e. mapping)
-#		print "assembly exists, but postassembly jobs unfinished\n" if (!$assemblyFlag);
-#		postSubmQsub("$logDir/MultiMapper.sh",$AsGrps{$cAssGrp}{PostAssemblCmd},$AsGrps{$cAssGrp}{AssemblJobName},$AsGrps{$cAssGrp}{AssemblJobName});
-#		$AsGrps{$cAssGrp}{PostAssemblCmd} = "";#always add in dep on read extraction
-#	} 
+	my $finalAssemblyScheduled = $efinAssLoc || $MFopt{DoAssembly} != 5 || $postPreAssmblGo;
+	if ($AssemblyGo && $finalAssemblyScheduled && $AsGrps{$cAssGrp}{PostAssemblCmd} ne "") {
+		print "Submitting deferred assembly-group mapping jobs\n";
+		my $deferredDeps = postSubmQsub(
+			"$logDir/MultiMapper.sh", $AsGrps{$cAssGrp}{PostAssemblCmd},
+			$AsGrps{$cAssGrp}{AssemblJobName},
+		);
+		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $deferredDeps);
+		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredDeps);
+		add2SampleDeps(\@sampleDeps, [$deferredDeps]);
+		$AsGrps{$cAssGrp}{PostAssemblCmd} = "";
+	}
 	
 	#-----------------------------------------------------------------
 	#------------------------  MAPPING -------------------------------
@@ -1203,10 +1211,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						readTec => ${$cleanSeqSetHR}{readTec}, submit => 1,submNow => $mapNow,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam);
 		# primary mapping (onto de novo assembly)
-		my ($map2Ctgs,$delaySubmCmd,$mapOptHr) = mapReadsToRef(\%dirset, $AsGrps{$cAssGrp}{AssemblJobName}.";$jdep");#\@libsCFP);
+		my ($map2Ctgs,$delaySubmCmd,$mapOptHr) = mapReadsToRef(\%dirset, normalise_job_dependencies($AsGrps{$cAssGrp}{AssemblJobName}, $jdep));#\@libsCFP);
 		my ($map2Ctgs_2,$delaySubmCmd_2,$mapStat)  = bamDepth(\%dirset,$map2Ctgs,$mapOptHr);
 		$delaySubmCmd .= "\n".$delaySubmCmd_2;
-		$AsGrps{$cAssGrp}{MapDeps} .= $map2Ctgs_2.";";$AsGrps{$cAssGrp}{BinDeps} .= $map2Ctgs_2.";";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $map2Ctgs_2);
+		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $map2Ctgs_2);
 		my $cpyStrm = "MapCopies";
 		$cpyStrm = "MapCopiesNoDel" if ($mapSuppAssFlag || $eFinSupMapCovGZ);
 		$cpyStrm = "nothing" if ($map2Ctgs_2 eq "" );# deactivate copying if no job was submitted..
@@ -1239,11 +1248,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						readTec => "", submit => 1,submNow => $mapNow,mappingStarted=>1,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam);
 		# primary mapping of support reads (onto de novo assembly)
-		my ($mapSup2Ctgs,$delaySubmCmd,$mapOptHr) = mapReadsToRef(\%dirset, $AsGrps{$cAssGrp}{AssemblJobName}.";$jdep");#\@libsCFP);
+		my ($mapSup2Ctgs,$delaySubmCmd,$mapOptHr) = mapReadsToRef(\%dirset, normalise_job_dependencies($AsGrps{$cAssGrp}{AssemblJobName}, $jdep));#\@libsCFP);
 		my ($mapSup2Ctgs_2,$delaySubmCmd_2,$mapStat)  = bamDepth(\%dirset,$mapSup2Ctgs,$mapOptHr);
 			$delaySubmCmd .= "\n".$delaySubmCmd_2;
-		$AsGrps{$cAssGrp}{MapDeps} .= $mapSup2Ctgs_2.";";
-		$AsGrps{$cAssGrp}{BinDeps} .= $mapSup2Ctgs_2.";";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $mapSup2Ctgs_2);
+		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $mapSup2Ctgs_2);
 		my $moveMappings = 0; $moveMappings =1 if (!$eFinSupMapCovGZ && fileGZe("$mapOutSup/$SmplName.sup-smd.bam.coverage"));
 		if (   	$mapSup2Ctgs_2 =~  m/[^;\s]/ && $moveMappings){  # just copy over..
 			print "Moving supplementary mappings from globaltmp to finaldir\n";
@@ -1290,12 +1299,15 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,$cln1.";".$AsGrps{$cAssGrp}{prodRun},$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl) ;
 
 		#run contig stats
-		postSubmQsub("$logDir/MultiContigStats.sh",$AsGrps{$cAssGrp}{PostClnCmd},$AsGrps{$cAssGrp}{CSfinJobName},$contRun);
+		my $deferredContigDeps = postSubmQsub(
+			"$logDir/MultiContigStats.sh", $AsGrps{$cAssGrp}{PostClnCmd}, $contRun,
+		);
 		$AsGrps{$cAssGrp}{PostClnCmd} = "";$AsGrps{$cAssGrp}{CSfinJobName} = $contRun;
-		$jdep = $contRun;
+		$jdep = normalise_job_dependencies($contRun, $deferredContigDeps);
+		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredContigDeps);
 
 		if ($MFopt{DoMetaBat2} == 4 && $contRun ne "") {
-			$AsGrps{$cAssGrp}{BinDeps} .= ";$contRun";
+			append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $contRun);
 			print "Added main contig stats as a GenomeFace dependency\n";
 		}
 
@@ -1305,7 +1317,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$cln1 . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},1,$nodeSpTmpD,$AssemblyGo,1, $curSmpl);
 		$AsGrps{$cAssGrp}{PostClnCmd} .= $delaySubmCmd2;
 		$jdep = $jn;
-		$AsGrps{$cAssGrp}{BinDeps} .= ";$jdep" if ($jdep ne "");
+		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $jdep) if ($jdep ne "");
 	}
 #	die;
 	add2SampleDeps(\@sampleDeps, [$cln1,$jdep]);
@@ -1893,42 +1905,51 @@ sub d2metaDist{
 }
 
 
-sub postSubmQsub(){#("$logDir/MultiMapper.sh",$AsGrps{$cAssGrp}{PostAssemblCmd},$AsGrps{$cAssGrp}{AssemblJobName},$SmplName);
-	my ($outf,$cmdM,$placeh,$jobN) = @_;
-	#die;
-	#return; #deactivated since doesn't work on slurm
-	return if ($cmdM eq "" || !$doSubmit);
-	
-	
-	#print "$cmdM\n";
-	if (0){
-		print "Replacing Job $placeh with $jobN\n";
-		$cmdM =~ s/$placeh/$jobN/g;
-		$cmdM =~ s/-w "done\(\)"//g;
-		$cmdM =~ s/--dependency=afterok[^:]+: / /g; #slurm
-		#die "$cmdM\n";
-	}
-	my @spl = split /\n;/,$cmdM;
-	foreach my $sp (@spl){
-		if ($sp =~ /sbatch.*([\S].sh)/){
-			if (-e $1){
-				my $fil = `cat $1`; my @spl2 = split /\n/,$fil;
-				open O,">$1" or die "Can't open $1\n";
-				foreach my $li (@spl2){
-					if ($li =~ m/#SBATCH --dependency=afterok:/){
-						$li =~ s/$placeh/$jobN/g;
-					}
-					print O $li;
-				}
-			}
+sub postSubmQsub {
+	my ($outf, $commands, $dependencies) = @_;
+	return "" if ($commands eq "" || !$doSubmit);
+	my @submitted;
+	my @augmented_commands;
+	for my $command (grep { /\S/ } split /\r?\n/, $commands) {
+		my ($script_path) = $command =~ /(?:^|\s|<)(\S+\.sh)(?:\s|$)/;
+		die "Deferred submission does not identify a job script: $command\n"
+			unless (defined $script_path && -e $script_path);
+		open my $script_fh, '<', $script_path
+			or die "Cannot read deferred job script $script_path: $!\n";
+		my $script = do { local $/; <$script_fh> };
+		close $script_fh;
+		my $augmented = augment_deferred_submission(
+			qmode => $QSBoptHR->{qmode}, command => $command, script => $script,
+			dependencies => $dependencies, run_tag => $QSBoptHR->{rTag},
+		);
+		if ($augmented->{script} ne $script) {
+			open my $script_out, '>', $script_path
+				or die "Cannot update deferred job script $script_path: $!\n";
+			print {$script_out} $augmented->{script};
+			close $script_out or die "Cannot close deferred job script $script_path: $!\n";
 		}
+		push @augmented_commands, $augmented->{command};
+		my $submitted_before = scalar @submitted;
+		my $output = `$augmented->{command} 2>&1`;
+		my $status = $?;
+		die "Deferred job submission failed: $augmented->{command}\n$output"
+			if ($status != 0);
+		if ($QSBoptHR->{qmode} eq 'slurm') {
+			push @submitted, $QSBoptHR->{rTag}.$1
+				if ($output =~ /^Submitted batch job (\d+)\s*$/m);
+		} elsif ($QSBoptHR->{qmode} eq 'sge') {
+			push @submitted, $QSBoptHR->{rTag}.$1
+				if ($output =~ /\bYour job(?:-array)?\s+(\d+)\b/);
+		} elsif ($QSBoptHR->{qmode} eq 'lsf') {
+			push @submitted, $QSBoptHR->{rTag}.$1 if ($output =~ /\bJob <(\d+)>/);
+		}
+		die "Could not parse deferred scheduler job id: $output\n"
+			if ($QSBoptHR->{qmode} ne 'bash' && @submitted == $submitted_before);
 	}
-
-	#die $AsGrps{$cAssGrp}{PostAssemblCmd}."\n";
-	open O,">$outf"; print O $cmdM; close O;
-	#print "$outf\n";
-	#die;
-	system "bash $outf";
+	open my $audit_fh, '>', $outf or die "Cannot write deferred submission audit $outf: $!\n";
+	print {$audit_fh} join("\n", @augmented_commands), "\n";
+	close $audit_fh or die "Cannot close deferred submission audit $outf: $!\n";
+	return normalise_job_dependencies(\@submitted);
 }
 
 
@@ -6024,11 +6045,13 @@ sub manageFiles{
 	
 	#all dependencies before deleting tmp dirs
 	#die "$AsGrps{$cAssGrp}{SeqClnDeps}\n";
-	my $totJdeps = $jdep . ";" . "$AsGrps{$cAssGrp}{SeqClnDeps}" . ";" . $AsGrps{$cAssGrp}{MapDeps} . ";". 
-				$AsGrps{$cAssGrp}{scndMapping}.";".$AsGrps{$cAssGrp}{readDeps}.";".$AsGrps{$cAssGrp}{prodRun}. 
-				";" . $AsGrps{$cAssGrp}{AssemblJobName};
+	my $totJdeps = normalise_job_dependencies(
+		$jdep, $AsGrps{$cAssGrp}{SeqClnDeps}, $AsGrps{$cAssGrp}{MapDeps},
+		$AsGrps{$cAssGrp}{scndMapping}, $AsGrps{$cAssGrp}{readDeps},
+		$AsGrps{$cAssGrp}{prodRun}, $AsGrps{$cAssGrp}{AssemblJobName},
+	);
 	#die "$totJdeps\n$AsGrps{$cAssGrp}{readDeps}\n";
-	$totJdeps .= ";" . $uplJob if ($uplJob ne "");
+	$totJdeps = normalise_job_dependencies($totJdeps, $uplJob);
 	
 #	for ( ($jdep , $AsGrps{$cAssGrp}{MapDeps} , $AsGrps{$cAssGrp}{scndMapping},$AsGrps{$cAssGrp}{prodRun}) ){
 #		push(@sampleDeps, $_ ) if (defined $_ && $_ ne "");
@@ -6053,7 +6076,8 @@ sub manageFiles{
 	#die "XXYZ\n@cleans\nTTTT\n@moves\nUUUUU\n@copiesNoDels\n";
 	$cln1 = clean_tmp(\@cleans,\@moves, \@copiesNoDels,$totJdeps,$finishedClnDir,"");#$AsGrps{$cAssGrp}{CSfinJobName}); #.";".$contRun
 	
-	$AsGrps{$cAssGrp}{BinDeps} .= ";$cln1" if ($AsGrps{$cAssGrp}{MapDeps} ne "");
+	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $cln1)
+		if ($AsGrps{$cAssGrp}{MapDeps} ne "");
 	$QSBoptHR->{LocationCheckStrg}="";
 	#clean up assembly groups
 	$AsGrps{$cAssGrp}{ClSeqsRm} = ""; @{$AsGrps{$cAssGrp}{MapCopies}} = ();
@@ -6715,7 +6739,7 @@ sub scndMap2Genos{
 		} elsif ($mapStat == 2 || $mapStat==0){#check if files need to be copied..
 			push(@{$AsGrps{$cMapGrp}{MapCopiesNoDel}},$mapOutX."/*",$bwt2outD[$i]);
 		}
-		#$AsGrps{$cMapGrp}{MapDeps} .= $map2CtgsY.";";  -> not needed if all submissions happen later
+		# Per-reference jobs are collected into the combined sort/coverage submission below.
 		$bigCov .= "\n\n#---------- $i -------------\n$delaySubmCmdY\n" if ($delaySubmCmdY ne "");
 		
 		
@@ -6755,14 +6779,14 @@ sub scndMap2Genos{
 	my ($sortJD,$tmpCmd) = qsubSystem($dirset{qsubDir}."SRTB$SmplName.sh",$bigSort,$MFopt{bamSortCores},int(20)."G",$SmplName."SRT2nd",$map2CtgsX,"",1,[],$QSBoptHR);
 	($sortJD,$tmpCmd) = qsubSystem($dirset{qsubDir}."COV$SmplName.sh",$bigCov,1,int(20)."G",$SmplName."COV2nd",$sortJD,"",1,[],$QSBoptHR);
 
-	$AsGrps{$cMapGrp}{MapDeps} .= $sortJD.";";
+	append_job_dependencies(\$AsGrps{$cMapGrp}{MapDeps}, $sortJD);
 	#only used for now for the mapping to spec ref
 	my $cln1 = clean_tmp([],[], $AsGrps{$cMapGrp}{MapCopiesNoDel},$AsGrps{$cMapGrp}{MapDeps},"",
 		"_mcl"."_$JNUM");
 		#die"mcl";
 	#print "XX $AsGrps{$cMapGrp}{MapDeps}\n";
 	$AsGrps{$cMapGrp}{MapCopiesNoDel} = [];#$AsGrps{$cMapGrp}{MapDeps}="";
-	$AsGrps{$cAssGrp}{scndMapping} .= $cln1.";";#tmp dir shouldn't be deleted before this is done
+	append_job_dependencies(\$AsGrps{$cAssGrp}{scndMapping}, $cln1);#tmp dir shouldn't be deleted before this is done
 	#@cleans = {}; #just deactivate clean up for sec mapping..
 }
 
@@ -6804,13 +6828,13 @@ sub buildAssemblyMapIdx{
 		my $MapperProgLoc = decideMapper($MFopt{MapperProg},${$liar}[0]);
 		my ($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$MapperProgLoc);#$nCores);
 		my ($jname,$tmpCmd) = qsubSystem($logDir."mapperIdxSupp.sh",$cmdDB,(int($MFopt{MapperCores})),(int($MFopt{bwtIdxAssMem})+1)."G","DBidx$JNUM","","",1,[],$QSBoptHR) ;
-		$AsGrps{$cAssGrp}{AssemblJobName} .= ";$jname";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $jname);
 		$anybuilds =1 if ($cmdDB ne"");
 	}
 	if ($mainRds){
 		my ($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$MFopt{MapperProg});#$nCores);
 		my ($jname,$tmpCmd) = qsubSystem($logDir."mapperIdx.sh",$cmdDB,(int($MFopt{MapperCores})),1+(int($MFopt{bwtIdxAssMem}))."G","bwtIdx$JNUM","","",1,[],$QSBoptHR) ;
-		$AsGrps{$cAssGrp}{AssemblJobName} .= ";$jname";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $jname);
 		$anybuilds =1 if ($cmdDB ne"");
 	}
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
@@ -7498,7 +7522,7 @@ sub metagAssemblyRun{
 	}
 	#die ;
 	#if mates available, do them here
-	$AsGrps{$cAssGrp}{AssemblJobName} .= ";".$tmpN; #always add in dep on read extraction
+	append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $tmpN); #always add in dep on read extraction
 	
 	
 	# 2nd assembly step: scaffolding; maybe move later further down?
@@ -7510,7 +7534,7 @@ sub metagAssemblyRun{
 				[],[],
 				$metagAssDir,$nodeTmp."/scaff/",$metaGscaffDir,$AsGrps{$cAssGrp}{AssemblJobName},$MFopt{MapperCores}, $SmplNameX,1,"");
 		unless ($sdep eq ""){
-			$AsGrps{$cAssGrp}{AssemblJobName} .= ";$sdep";
+			append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $sdep);
 		}
 	}
 	

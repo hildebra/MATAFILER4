@@ -12,7 +12,34 @@ use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs hybrid_group_ready
 	hybrid_package_complete missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
+	normalise_job_dependencies append_job_dependencies augment_deferred_submission
 );
+
+is(normalise_job_dependencies('run12;;run7', ['run7', '', 'run3;run12']),
+	'run12;run7;run3', 'job dependencies are flattened, deduplicated, and stable');
+my $job_dependencies = 'run12;';
+is(append_job_dependencies(\$job_dependencies, 'run7', 'run12'), 'run12;run7',
+	'job dependencies are appended without empty or duplicate scheduler entries');
+
+my $slurm = augment_deferred_submission(
+	qmode => 'slurm', run_tag => 'run', dependencies => 'run12;run7',
+	command => 'sbatch /tmp/map.sh',
+	script => "#!/bin/bash\n#SBATCH --dependency=afterok:3:12\necho map\n",
+);
+like($slurm->{script}, qr/^#SBATCH --dependency=afterok:3:12:7$/m,
+	'deferred Slurm submission preserves existing dependencies and adds final group jobs');
+my $sge = augment_deferred_submission(
+	qmode => 'sge', run_tag => 'run', dependencies => 'run12;run7',
+	command => 'qsub -hold_jid 3,12 /tmp/map.sh', script => '',
+);
+like($sge->{command}, qr/-hold_jid 3,12,7\b/,
+	'deferred SGE submission merges final dependencies into hold_jid');
+my $lsf = augment_deferred_submission(
+	qmode => 'lsf', run_tag => 'run', dependencies => 'run12;run7',
+	command => 'bsub -w "done(3) && done(12)" < /tmp/map.sh', script => '',
+);
+like($lsf->{command}, qr/-w "done\(3\) && done\(12\) && done\(7\)"/,
+	'deferred LSF submission merges final dependencies into its wait expression');
 
 sub write_file {
 	my ($path, $contents) = @_;
@@ -129,5 +156,21 @@ unlike($mataf4, qr/die "now recalc/,
 like($mataf4,
 	qr/CntAimAss\}\s*>\s*1\s*&&\s*!\$MFconfig\{OKtoRWassGrps\}.*?Refusing to rebuild shared assembly group/s,
 	'shared assembly rebuild retains the established destructive authorization gate');
+like($mataf4, qr/Submitting deferred assembly-group mapping jobs.*?postSubmQsub/s,
+	'assembly-group mappings deferred before the final member are submitted after assembly scheduling');
+unlike($mataf4,
+	qr/\{(?:AssemblJobName|MapDeps|BinDeps|SeqClnDeps|SeqUnZDeps|UnzpDeps|readDeps|DiamDeps|scndMapping|prodRun)\}\s*\.=/,
+	'central workflow dependencies are not assembled with fragile string concatenation');
+
+open my $subm_source, '<', File::Spec->catfile($Bin, '..', 'Mods', 'Subm.pm')
+	or die "Cannot inspect Mods/Subm.pm: $!";
+my $subm = do { local $/; <$subm_source> };
+close $subm_source;
+like($subm, qr/\$waitJID\s*=\s*normalise_job_dependencies\(\$waitJID\)/,
+	'all scheduler submissions use the shared dependency normalizer');
+unlike($subm, qr/length\(\$waitJID\)\s*>\s*3/,
+	'short valid scheduler job ids are not silently discarded');
+like($subm, qr/push\(\@\{\$aR\},\s*\$jN\)/,
+	'lock-release submission tracks the returned job id rather than its shell command');
 
 done_testing;
