@@ -16,6 +16,8 @@ use warnings;
 use strict;
 use File::Basename;
 use File::stat;
+use File::Path qw(make_path remove_tree);
+use File::Spec;
 
 use Getopt::Long qw( GetOptions );
 
@@ -47,6 +49,36 @@ sub kaijuTax; #assign tax to each gene via kraken
 sub specITax;
 sub writeMG_COGs; sub ntMatchGC;
 sub clusterSingleStep;sub clusterMultiStep;
+
+sub _read_single_line_file {
+	my ($file) = @_;
+	open my $fh, '<', $file or die "Cannot open $file: $!\n";
+	my $value = <$fh>;
+	close $fh or die "Cannot close $file: $!\n";
+	die "Expected a path in $file, but the file is empty\n" unless defined $value;
+	chomp $value;
+	return $value;
+}
+
+sub _safe_reset_dir {
+	my ($dir, $label) = @_;
+	my $absolute = File::Spec->rel2abs($dir);
+	$absolute =~ s{/+$}{};
+	my @parts = grep { length } File::Spec->splitdir($absolute);
+	die "Refusing to reset unsafe $label path: $dir\n"
+		unless File::Spec->file_name_is_absolute($absolute) && @parts >= 3;
+	remove_tree($absolute, {error => \my $errors});
+	if (@$errors) {
+		my @messages;
+		for my $entry (@$errors) {
+			my ($path, $message) = %$entry;
+			push @messages, "$path: $message";
+		}
+		die "Failed to reset $label directory $absolute:\n" . join("\n", @messages) . "\n";
+	}
+	make_path($absolute);
+	return "$absolute/";
+}
 
 #.1: : FH
 #.27: added external genes support
@@ -301,8 +333,8 @@ if ($totMem5 == -1){
 
 
 #basic outdir handling..
+die "no valid output (gene cat) dir specified\n" unless length $GCdir;
 $GCdir.="/" unless ($GCdir =~ m/\/$/);
-if ($GCdir eq "" ){die"no valid output (gene cat) dir specified\n";}
 #print "\n\n$GCdir\n";
 
 $GCdir = resolve_path($GCdir);
@@ -310,8 +342,9 @@ $GCdir = resolve_path($GCdir);
 #die "\n\n$GCdir\n";
 
 if ($tmpDirDef eq $tmpDir){
-	$GCdir =~ m/\/([^\/]+)\/?$/;
-	$tmpDir .= $1."/"; $GLBtmp.=$1."/";
+	my $catalog_name = basename($GCdir);
+	die "Cannot derive gene-catalog name from $GCdir\n" unless length $catalog_name;
+	$tmpDir .= $catalog_name."/"; $GLBtmp.=$catalog_name."/";
 }
 
 my $qsubDir = $GCdir."LOGandSUB/";
@@ -319,8 +352,9 @@ my $qsubDir = $GCdir."LOGandSUB/";
 #prep base dirs..
 if ($justCDhit==0){
 	if (-d $GCdir && -d $qsubDir){printL "Warning: outdir $GCdir exists.. delete and recreate? (7s wait)\n"; sleep 7;}
-	die "Refusing to delete unsafe path" unless ($GCdir =~ m/^\// && length($GCdir) > 5 && $tmpDir =~ /m^\//);
-	system ("rm -rf $GCdir/* $tmpDir*\n");#mkdir -p $GCdir/globalLOGs");
+	$GCdir = _safe_reset_dir($GCdir, 'gene catalog');
+	$tmpDir = _safe_reset_dir($tmpDir, 'temporary');
+	$qsubDir = $GCdir."LOGandSUB/";
 } 
 
 
@@ -347,14 +381,14 @@ if ($mapF eq "" ){
 $mapF =~ s/\/\//\//g;
 if ($mapF =~ m/^\??$/){
 	if (-e "$qsubDir/GCmaps.inf"){
-		$mapF = `cat $qsubDir/GCmaps.inf`;
+		$mapF = _read_single_line_file("$qsubDir/GCmaps.inf");
 		die "extracted mapf from $qsubDir/GCmaps.inf\n does not exist:\n$mapF\n" if (!-e $mapF&& $mapF !~ m/,/);
 	} else {
 		die "Can't find expected copy of inmap in GC outdir: $GCdir\n";
 	}
 } elsif (-e "$qsubDir/GCmaps.inf" && -e "$qsubDir/GCmaps.ori"){
-	my $mapFInf = `cat $qsubDir/GCmaps.inf`;$mapFInf =~ s/\/\//\//g;
-	my $mapFOri = `cat $qsubDir/GCmaps.ori`;$mapFOri =~ s/\/\//\//g;
+	my $mapFInf = _read_single_line_file("$qsubDir/GCmaps.inf");$mapFInf =~ s/\/\//\//g;
+	my $mapFOri = _read_single_line_file("$qsubDir/GCmaps.ori");$mapFOri =~ s/\/\//\//g;
 	if ($mapFOri eq $mapF || $mapFInf eq $mapF ){ #same as in input arg.. great, replace with local copies!
 		#$mapF = `cat $qsubDir/GCmaps.inf`;
 	} else {
@@ -454,9 +488,11 @@ if ($mode eq "mergeCLs"){#was previously mergeCls.pl
 
 
 #start logging big genecat run..
-system "mkdir -p $qsubDir" unless (-d $qsubDir);
-open LOG,">$qsubDir/GeneCat.log";
-system "echo \'$version\' > $GCdir/version.txt";
+make_path($qsubDir) unless -d $qsubDir;
+open LOG, ">", "$qsubDir/GeneCat.log" or die "Cannot open $qsubDir/GeneCat.log: $!\n";
+open my $version_fh, '>', "$GCdir/version.txt" or die "Cannot open $GCdir/version.txt: $!\n";
+print {$version_fh} "$version\n" or die "Cannot write $GCdir/version.txt: $!\n";
+close $version_fh or die "Cannot close $GCdir/version.txt: $!\n";
 announceGeneCat();
 
 #autoset batchnum
@@ -595,7 +631,7 @@ sub clusterMultiStep{
 #				foreach my $cog ( @COGlst){#do COGs separate .. too complicated, just ignore for now..
 #					$cmd .= "$mini2Base $FMGFL2{$cog}$mini2IdxFileSuffix $tmpDir/35Pcompl.fna | grep -v '^\@' > $tmpDir/35compl.$cdhID.align.$cog.sam \n"; #$samBin view 
 #				}
-			$cmd .= "if [ -s $tmpDir/35Pcompl.fna ] ; then $mini2Base $bwtIdx $tmpDir/35Pcompl.fna | grep -v '^\@' > $tmpDir/35compl.$cdhID.align.sam ; fi\n"; #$samBin view 
+			$cmd .= "if [ -s $tmpDir/35Pcompl.fna ] ; then $mini2Base $bwtIdx $tmpDir/35Pcompl.fna | awk '!/^\@/' > $tmpDir/35compl.$cdhID.align.sam ; fi\n"; #$samBin view
 		}
 		$cmd .= "cp $xxtra $tmpDir/35compl.$cdhID.align.sam $bdir/SAM/\n" ;
 		
@@ -630,7 +666,7 @@ sub clusterMultiStep{
 			$cmd .= "sed -i -r 's/([ACGT])>/\\1\\n>/g' $tmpDir/incompl.NAl.pre.$cdhID.fna\n";
 			$xxtra = "$tmpDir/incompl.NAl.pre.$cdhID.fna";
 		} else {#mini2 now
-			$cmd .= "if [ -s $queryFNA ]; then $mini2Base $bwtIdx $queryFNA | grep -v '^\@' > $tmpDir/incompl.$cdhID.align.sam ; fi\n"; # $samBin view 2> $bwt35Log
+			$cmd .= "if [ -s $queryFNA ]; then $mini2Base $bwtIdx $queryFNA | awk '!/^\@/' > $tmpDir/incompl.$cdhID.align.sam ; fi\n"; # $samBin view 2> $bwt35Log
 		}
 		$cmd .= "cp $xxtra $tmpDir/incompl.$cdhID.align.sam $bdir/SAM/\n" ;
 	 } else {
@@ -937,19 +973,22 @@ sub geneCatFlow($ $ $ $ ){
 		#print "$cmd1\n";
 		my $cmd2 = "$rareBin geneMat -i $OutD/$primaryClusterCLS -t $numCorL -o $OutD/Mat.cov $newMapp -map $mapF -refD $assDirs $geneMatSupplFlag -useCoverage -gz\n\nrm $OutD/Mat.cov.genes2rows.txt"; #coverage mat
 		my $cmd3 = "$rareBin geneMat -i $OutD/$primaryClusterCLS -t $numCorL -o $OutD/Mat.med $newMapp -map $mapF -refD $assDirs $geneMatSupplFlag -useCovMedian -gz\nrm $OutD/Mat.med.genes2rows.txt"; #coverage mat
-		$cmd1 .= "\ntouch $matrixSton\n";
-		
 		if ($submitLocal){
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
 			my ($dep1,$qcmd1) = qsubSystem($qsubDir."genemat1.sh",$cmd1,$numCorL,int($totMem3)."G","GM1","","",1,[],$QSBoptHR);
 			my ($dep2,$qcmd2) = qsubSystem($qsubDir."genemat2.sh",$cmd2,$numCorL,int($totMem3)."G","GM2","","",1,[],$QSBoptHR);
 			my ($dep3,$qcmd3) = qsubSystem($qsubDir."genemat3.sh",$cmd3,$numCorL,int($totMem3)."G","GM3","","",1,[],$QSBoptHR);
 			$QSBoptHR->{tmpSpace} =$tmpSHDD;
-			@matDeps = ($dep1,$dep2,$dep3);
+			my @matrix_jobs = ($dep1,$dep2,$dep3);
+			my ($done_dep,$done_cmd) = qsubSystem(
+				$qsubDir."genemat.done.sh", "touch $matrixSton\n", 1, "1G", "GMdone",
+				join(";", @matrix_jobs), "", 1, [], $QSBoptHR
+			);
+			@matDeps = ($done_dep);
 			#qsubSystemJobAlive( [$dep1,$dep2,$dep3],$QSBoptHR ); 
 			#systemW $cmd;$cmd = "";
 		} else {
-			$cmd .= $cmd1 . $cmd2 . $cmd3;
+			$cmd .= $cmd1 . $cmd2 . $cmd3 . "\ntouch $matrixSton\n";
 		}
 
 		#die $cmd;
@@ -1245,8 +1284,6 @@ sub addingSmpls{
 	my @skippedSmpls;my $wrongSmplNms = ""; my @rmSrcDirs;
 	my %uniqueSampleNames; 	my $doubleSmplWarnString = ""; 
 	my @OCOMPL = (); my @O3P=(); my @O5P = (); my @OINC = (); #these arrays store complete & incomplete fasta seqs
-	my $okToRM = 1; #flag that allows routine to delete entire MGTK dirs, if fatal error found 
-
 	open QLOG,">$qsubDir/GeneCompleteness.txt.$batch";
 	#print QLOG "Smpl\tComplete\t3'_compl\t5'_compl\tIncomplete\tTotalGenes\n";
 
@@ -1279,10 +1316,10 @@ sub addingSmpls{
 		if ($dir2rd eq "" ){#very specific read dir..
 			if ($map{$smpl}{SupportReads} ne ""){
 				$dir2rd = "$GCdir$smpl/";	
-			}elsif ($requireAllAssemblies){
+			}elsif (!$requireAllAssemblies){
 				print "Can't find valid path for $smpl, continue without\n";push(@missedSmpls, $smpl);next;
 			} else {
-				die "Can;t find valid path for $smpl\n";
+				die "Can't find valid path for $smpl\n";
 			}
 		} 
 		
@@ -1299,19 +1336,34 @@ sub addingSmpls{
 		my $SmplName = $map{$smpl}{SmplID};
 		#$dir2rd = "/g/scb/bork/hildebra/SNP/SimuL/sample-0/";
 		my $metaGD = "$dir2rd/assemblies/metag/";
-		if (!-e "$metaGD/longReads.fasta.filt.sto" && !-e "$metaGD/scaffolds.fasta.filt"){$metaGD = `cat $dir2rd/assemblies/metag/assembly.txt`; chomp $metaGD;}
+		if (!-e "$metaGD/longReads.fasta.filt.sto" && !-e "$metaGD/scaffolds.fasta.filt") {
+			my $assembly_pointer = "$dir2rd/assemblies/metag/assembly.txt";
+			$metaGD = _read_single_line_file($assembly_pointer) if -e $assembly_pointer;
+		}
 		my $inFMGd = "$metaGD/ContigStats/FMG/";
 		#print "\n$metaGD\n";
 		#print "$dir2rd/assemblies/metag/scaffolds.fasta.filt\n";
 		#print "$metaGD/scaffolds.fasta.filt";
 		if ( !fileGZe("$metaGD/scaffolds.fasta.filt") && ! fileGZe("$metaGD/longReads.fasta.filt")){# && -d $inFMGd){
-			print "Skipping $dir2rd\n";
-			die "no asm1\n $metaGD\n$dir2rd/assemblies/metag/assembly.txt\n" unless (-e "$metaGD/scaffolds.fasta.filt" && !-e "$metaGD/longReads.fasta.filt" ); 
-			die "no asm2\n $metaGD/longReads.fasta.filt\n" unless (-e "$metaGD/longReads.fasta.filt" ); 
+			my $message = "No usable assembly for $smpl in $metaGD (expected scaffolds.fasta.filt or longReads.fasta.filt)";
+			die "$message\n" if $requireAllAssemblies;
+			print "$message; skipping sample\n";
 			push(@skippedSmpls,$map{$smpl}{dir});
+			push(@missedSmpls,$smpl);
 			next;
 		}
-		die "no NT: $metaGD/$path2nt\n" unless (fileGZe( "$metaGD/$path2nt"));
+		my @missing_inputs;
+		push @missing_inputs, "$metaGD/$path2nt" unless fileGZe("$metaGD/$path2nt");
+		push @missing_inputs, "$metaGD/$path2gff" unless fileGZe("$metaGD/$path2gff");
+		push @missing_inputs, "$metaGD/$path2FMGids"
+			if $doFMGseparation && !-e "$metaGD/$path2FMGids";
+		if (@missing_inputs) {
+			my $message = "Missing required gene-catalog inputs for $smpl:\n" . join("\n", @missing_inputs);
+			die "$message\n" if $requireAllAssemblies;
+			print "$message\nSkipping sample because -requireAllAssemblies 0 was selected\n";
+			push(@missedSmpls,$smpl);
+			next;
+		}
 
 		#next;
 		print "==== ".$dir2rd." ====\n";
@@ -1363,10 +1415,8 @@ sub addingSmpls{
 			my @spl = split /__/,$hd;
 			if ($spl[0] ne $prevSmpID){if ($prevSmpID eq "") {$prevSmpID = $spl[0];} else {die "Mix of several samples?? $hd, $spl[0] detected, expected sample $prevSmpID !! Aborting\n\n";} }
 			unless (exists $gff{$hd}){
-				print "can't find gff entry for $hd\nDeleting entire gene prediction and coverage..\n$metaGD/$path2GPdir\n";
-				#die;
-				
-				system "rm -r $metaGD/$path2GPdir $metaGD/$path2CS"; push(@stopAndRedo,$smpl);
+				print STDERR "Can't find GFF entry for $hd in $metaGD/$path2gff; leaving source files untouched\n";
+				push(@stopAndRedo,$smpl);
 				next;
 			}
 			unless ($gff{$hd} =~ m/;partial=(\d)(\d);/){ die "Incorrect gene format for gene $hd \n in file $inGenesF\n";}
@@ -1419,8 +1469,7 @@ sub addingSmpls{
 				#my $statFMH = stat($FMGfile) or die "Cannot stat $FMGfile: $!";
 				#my $statGF = stat("$metaGD/scaffolds.fasta.filt") or die "Cannot stat $metaGD/scaffolds.fasta.filt: $!";
 				
-				print "Deleting $metaGD/$path2CS..\n";
-				system "rm -rf $metaGD/$path2CS" ;# if ($statFMH->mtime < $statGF->mtime); #FMG file was created before gene predictions? probably wrong..
+				print STDERR "Marker-gene mismatch in $metaGD; leaving source files untouched for inspection/repair\n";
 				push(@stopAndRedo,$smpl);
 			}
 		}
@@ -1448,13 +1497,12 @@ sub addingSmpls{
 		print STDERR "Recommended to remove: \n'rm -r @rmSrcDirs'\n\n" if (@rmSrcDirs > 0);
 		print STDERR $doubleSmplWarnString."\n\n\n$wrongSmplNms\n\n\n" if ($wrongSmplNms ne "");
 		print STDERR "incomplete; aborting process\n";
-		system "rm -rf @rmSrcDirs" if ($okToRM);
 		push(@stopAndRedo,"unspecific");
 		
 		#exit(21);
 	}
 	if (@stopAndRedo){
-		print "Something wrong while extracting metagenomic genes.. you will need to rerun MATAFILER, fatal assemblies have already been deleted and will now need to be re-assembled.\n";
+		print "Something went wrong while extracting metagenomic genes. Source assemblies were not modified; inspect/repair them and rerun MATAFILER.\n";
 		print "List of potential problematic samples: @stopAndRedo\n";
 		return 1;
 	}
@@ -1572,26 +1620,26 @@ sub collateGenes(){
 		my $assGo = 0;
 		my $cAssGrp = $map{$smpl}{AssGroup};
 		$AsGrps{$cAssGrp}{CntAss} ++;	
-		my $metaGD  = getAssemblPath($map{$smpl}{wrdir},"",0);#"$dir2rd/assemblies/metag/";
+		my $metaGD  = getAssemblPath($dir2rd,"",0);#"$dir2rd/assemblies/metag/";
 		if ($metaGD eq ""){ #something wrong..
 			print "No assmebly file: $map{$smpl}{wrdir}\n" ;
 			push @probSample, $smpl;
 			next;
 		}
 		#my $inFMGd = "$metaGD/ContigStats/FMG/";
-		if ($AsGrps{$cAssGrp}{CntAss}  >= $AsGrps{$cAssGrp}{CntAimAss} ){ $assGo = 1; $AsGrps{$cAssGrp}{CntAss}=0;}
-		unless ($assGo){ next;}#print "Not last in comb assembly: ".$map{$smpl}{dir}."\n";
-		if ((! fileGZe("$metaGD/scaffolds.fasta.filt") || !-e "$metaGD/longReads.fasta.filt") && ! fileGZe("$metaGD/$path2nt")){# && -d $inFMGd){
-			print "Skipping $dir2rd\n";
-			die "no ass1\n $metaGD\n$dir2rd/assemblies/metag/assembly.txt\n" unless (-e "$metaGD/scaffolds.fasta.filt" && !-e "$metaGD/longReads.fasta.filt" ); 
-			die "no ass2\n $metaGD/longReads.fasta.filt\n" unless (-e "$metaGD/longReads.fasta.filt" || fileGZe("$metaGD/scaffolds.fasta.filt")  ); 
-			die "no NT $metaGD/$path2nt\n" unless ( fileGZe("$metaGD/$path2nt"));
-			#push(@skippedSmpls,$map{$smpl}{dir});
-			next;
+		if ($AsGrps{$cAssGrp}{CntAss} >= $AsGrps{$cAssGrp}{CntAimAss}
+				|| $map{$smpl}{assFinSmpl} eq $smpl) {
+			$assGo = 1;
+			$AsGrps{$cAssGrp}{CntAss}=0;
 		}
+		unless ($assGo){ next;}#print "Not last in comb assembly: ".$map{$smpl}{dir}."\n";
 		my $inGenesF = "$metaGD/$path2nt";
 		my $inGenesGFF = "$metaGD/$path2gff";
 		my $problem = 0;
+		if (!fileGZe("$metaGD/scaffolds.fasta.filt") && !fileGZe("$metaGD/longReads.fasta.filt")) {
+			print STDERR "Assembly not present: expected $metaGD/scaffolds.fasta.filt or $metaGD/longReads.fasta.filt\n";
+			$problem = 1;
+		}
 		if (! fileGZe($inGenesF)){
 			print STDERR "Gene predictions not present: $inGenesF\n" ;
 			$problem = 1;
@@ -1622,7 +1670,7 @@ sub collateGenes(){
 		my $batch = 0; my @jobs;
 		system "mkdir -p $tmpDir/$COGdir" unless (-d "$tmpDir/$COGdir");
 		system "mkdir -p $qsubDir/preprocess/" unless (-d "$qsubDir/preprocess/");
-		system "rm -f touch $prepStone.1";
+		unlink "$prepStone.1" if -e "$prepStone.1";
 		my $lastLocTo = 0;
 		for ( $batch = 0; $batch < $batchNum;$batch ++){
 			my $locTo = int($maxSmpls/$batchNum*(1+$batch));
@@ -1803,12 +1851,13 @@ sub kaijuTax{#different tax assignment for gene catalog
 	#die $curDB."\n";
 	#paired read tax assign
 	my $kaDB = "-t $KaDir/nodes.dmp -f $KaDir/kaiju_db.fmi";
-	my $cmd .= "$kaijBin $kaDB -z $NC -i  $geneFNA -o $tmpD/rawKaiju.out\n";
+	my $cmd = "$kaijBin $kaDB -z $NC -i  $geneFNA -o $tmpD/rawKaiju.out\n";
 	$kaDB = "-t $KaDir/nodes.dmp -n $KaDir/names.dmp";
 	$cmd .= "$kaijD/./addTaxonNames $kaDB -i $tmpD/rawKaiju.out -o $tmpD/Kaiju1.anno -u -p \n";
 	$cmd .= "sort $tmpD/Kaiju1.anno > $outD/Kaiju.anno\n";
 	print "Starting kaiju assignments of the gene catalog\n";
 	systemW $cmd;
+	die "Kaiju completed without producing $outD/Kaiju.anno\n" unless -s "$outD/Kaiju.anno";
 	print "All kaiju assignments are done\n";
 }
 sub getCanopyDir{
@@ -2738,11 +2787,6 @@ sub FOAMassign{
 
 
 # /g/bork3/home/hildebra/bin/bbmap/./dedupe.sh in=/g/scb/bork/hildebra/SNP/GCs/SimuB/B0/compl.fna out=/g/scb/bork/hildebra/SNP/GCs/SimuB/X0/ddtest.compl.fna exact=f threads=20 outd=/g/scb/bork/hildebra/SNP/GCs/SimuB/X0/drop.fna minidentity=95 storename=t renameclusters=t usejni=t cluster=t k=18 -Xmx50g
-
-
-
-
-
 
 
 

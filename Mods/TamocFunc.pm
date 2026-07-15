@@ -231,7 +231,14 @@ sub bam2cram($ $ $ $ $ $){#save further space: convert the bam to cram
 		$ret .= "touch $stone\n" if ($stone ne "");
 		return ($ret,$nxtCRAM);
 	}
-	die "bam2cram: input BAM does not exist or is empty: $iBAM\n" unless (-s $iBAM);
+	# The BAM is commonly produced by an upstream scheduler job in node-local
+	# scratch.  Validate it in the generated job, after the dependency has run;
+	# checking it here rejects valid paths such as $SLURM_LOCAL_SCRATCH/...
+	# while MATAF4 is still constructing the submission plan.
+	$ret .= "if [ ! -s \"$iBAM\" ]; then\n";
+	$ret .= "  echo \"bam2cram: input BAM does not exist or is empty: $iBAM\" >&2\n";
+	$ret .= "  exit 3\n";
+	$ret .= "fi\n";
 	#my $stone = $iBAM;	$stone =~ s/\.bam$/\.cram\.sto/;
 	$ret.="rm -f $nxtCRAM\n" if (-e $nxtCRAM);
 	$ret.="$smtBin view -@ $numCore -T $REF -C -o $nxtCRAM $iBAM\n";
@@ -500,7 +507,6 @@ sub sortgzblast{ #function that checks if the diamond output was already sorted 
 	die "Something went wrong in sortgzblast 2\n" if (!-e $input);
 	return $input;
 }
-
 
 
 

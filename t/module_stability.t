@@ -14,6 +14,7 @@ use Mods::IO_Tamoc_progs qw(mapperDBbuilt);
 use Mods::math qw(meanArray quantileArray round);
 use Mods::SNP ();
 use Mods::Subm qw(qsubSystem);
+use Mods::TamocFunc qw(bam2cram);
 
 my $root = tempdir(CLEANUP => 1);
 $root =~ s{\\}{/}g;
@@ -107,5 +108,26 @@ open my $fai_fh, '>', $fai or die $!;
 print {$fai_fh} "ctg\t100\t0\t0\t0\n";
 close $fai_fh;
 is_deeply([Mods::SNP::regionsFromFAI($fai)], ['ctg:1-100'], 'samtools regions are one-based');
+
+my $pending_bam = '$SLURM_LOCAL_SCRATCH/MF4/sample/sample-smd.bam';
+my ($cram_command, $pending_cram);
+my $bam2cram_error = '';
+{
+	no warnings 'redefine';
+	local *Mods::TamocFunc::getProgPaths = sub { return 'samtools' };
+	eval {
+		($cram_command, $pending_cram) = bam2cram(
+			$pending_bam, "$root/reference.fa", 1, 1, "$root/map.cram.sto", 4
+		);
+	};
+}
+$bam2cram_error = $@;
+is($bam2cram_error, '', 'bam2cram accepts a BAM produced later in scheduler-local scratch');
+like($cram_command, qr/if \[ ! -s "\$SLURM_LOCAL_SCRATCH\/MF4\/sample\/sample-smd\.bam" \]/,
+	'bam2cram defers its input check to the generated scheduler command');
+like($cram_command, qr/samtools .*?-o \$SLURM_LOCAL_SCRATCH\/MF4\/sample\/sample-smd\.cram/s,
+	'bam2cram retains scheduler variable expansion in its conversion command');
+is($pending_cram, '$SLURM_LOCAL_SCRATCH/MF4/sample/sample-smd.cram',
+	'bam2cram returns the pending CRAM path');
 
 done_testing;

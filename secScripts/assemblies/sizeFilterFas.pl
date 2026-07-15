@@ -1,69 +1,64 @@
-#!/usr/bin/perl
-
+#!/usr/bin/env perl
 use warnings;
 use strict;
 
-my $sizRestr = 500;my $sizRestr2 = 200;
+die "Usage: $0 <fasta[,fasta...]> [min-size [secondary-min-size [output]]]\n" unless @ARGV;
+my ($inputs, $min_size, $secondary_min, $output) = @ARGV;
+$min_size     = 500 unless defined $min_size;
+$secondary_min = 200 unless defined $secondary_min;
+my $custom_output = defined $output;
+$output       = "$inputs.filt" unless $custom_output;
+my $secondary_output = $custom_output ? "${output}2" : "$inputs.filt2";
 
-if (@ARGV < 1){die"not enough args!\n";}
+open my $primary,   '>', $output           or die "Cannot open $output: $!\n";
+open my $secondary, '>', $secondary_output or die "Cannot open $secondary_output: $!\n";
 
-my $outFile1 = $ARGV[0].".filt";
-my $outFile2 = $ARGV[0].".filt2";
-
-if (@ARGV >1){
-	$sizRestr = $ARGV[1];
-}
-if (@ARGV >2){
-	$sizRestr2 = $ARGV[2];
-}
-if (@ARGV >3){
-	$outFile1 = $ARGV[3]; $outFile2 = $outFile1."2";
-}
-my @singleFiles = split /,/,$ARGV[0];
-open O,">",$outFile1;
-open O2,">",$outFile2;
-for (my $j=0;$j<@singleFiles;$j++){
-	open I,"<",$singleFiles[$j];
-	my $cnt =-1;
-	my $head = ""; my $fas; my $fqMode = 0; my $curSize = 0; my $wrMode=0;#my $wrMode2=0;
-	while (my $line = <I>){
-		$cnt ++;
-		if ($cnt == 0 && $line =~ m/^@/){$fqMode = 1;}
-		
-		if ($fqMode){#fastq reader
-			if ($cnt % 4 == 0){#header
-				$head = ">".substr($line,1);
-			} elsif ($cnt % 4 == 1){$fas = $line;
-				#check here, if size requirements are met
-				if (length($fas) >= $sizRestr){
-					print O $head.$fas; $wrMode=1; 
-				} 
-				#die $head.$fas;
-				#and clean up
-				$head=""; $fas="";
-			}
-			next;
-		}
-		
-		
-		if ($line =~ m/^>/){
-			if ($sizRestr2 > 0 && !$wrMode && $curSize >= $sizRestr2){#check if falls into filter2
-				print O2 $head.$fas; 
-			}
-			$head = $line; $curSize = 0; $wrMode=0;$fas="";
-			next;
-		}
-		if ($wrMode){
-			print O $line;
-		} else {
-			$fas .= $line;
-			$curSize += length($line)-1;
-			if ($curSize >= $sizRestr){
-				print O $head.$fas; $wrMode=1; $head=""; $fas="";
-			} 
-		}
-	}
-	close I;
+sub emit_record {
+    my ($header, $sequence) = @_;
+    return unless length $header;
+    my $length = length $sequence;
+    my $target = $length >= $min_size ? $primary
+               : $secondary_min > 0 && $length >= $secondary_min ? $secondary
+               : undef;
+    return unless $target;
+    $sequence =~ s/(.{1,80})/$1\n/gs;
+    print {$target} "$header\n$sequence" or die "Cannot write filtered sequence: $!\n";
 }
 
-close O;close O2;
+for my $file (split /,/, $inputs) {
+    open my $in, '<', $file or die "Cannot open $file: $!\n";
+    my $first = <$in>;
+    next unless defined $first;
+    seek $in, 0, 0 or die "Cannot rewind $file: $!\n";
+
+    if ($first =~ /^@/) {
+        while (my $header = <$in>) {
+            my $sequence = <$in>;
+            my $plus     = <$in>;
+            my $quality  = <$in>;
+            die "Truncated FASTQ record in $file\n"
+                unless defined $sequence && defined $plus && defined $quality;
+            die "Invalid FASTQ header in $file: $header" unless $header =~ /^@/;
+            chomp($header, $sequence);
+            $header =~ s/^@/>/;
+            emit_record($header, $sequence);
+        }
+    } else {
+        my ($header, $sequence) = ('', '');
+        while (my $line = <$in>) {
+            chomp $line;
+            if ($line =~ /^>/) {
+                emit_record($header, $sequence);
+                ($header, $sequence) = ($line, '');
+            } else {
+                die "Sequence encountered before first FASTA header in $file\n" unless length $header;
+                $sequence .= $line;
+            }
+        }
+        emit_record($header, $sequence);
+    }
+    close $in or die "Cannot close $file: $!\n";
+}
+
+close $primary   or die "Cannot close $output: $!\n";
+close $secondary or die "Cannot close $secondary_output: $!\n";

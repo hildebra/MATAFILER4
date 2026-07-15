@@ -150,7 +150,8 @@ if ($subparts =~ m/G/ && !-e "$outDGTDB/marker_genes_meta.tsv"){ #GTDB markers, 
 	#$cmd .= "mv $outDGTDB/marker_genes.tsv $outDGTDB/GTDBids.txt\n";
 	print $cmd;
 	systemW $cmd;
-	system "touch $outDGTDB/marker_genes_meta.tsv" if (!-e "$outDGTDB/marker_genes_meta.tsv");
+	die "GTDB marker extraction completed without producing $outDGTDB/marker_genes_meta.tsv\n"
+		unless -e "$outDGTDB/marker_genes_meta.tsv";
 } elsif ($subparts !~ m/G/) {
 	print "No GTDB core genes requested\n";
 } else {
@@ -171,7 +172,8 @@ if ( $subparts =~ m/F/  && !-e "$outDFMG/FMGids.txt"){
 			systemW $cmd;
 		}
 		system "rm  -rf $assD/genePred/*.cidx $outDFMG/COG0* $outDFMG/temp $outDFMG/hmmResults";
-		system "touch $outDFMG/FMGids.txt" unless (-e "$outDFMG/FMGids.txt");
+		die "fetchMG completed without producing $outDFMG/FMGids.txt\n"
+			unless -e "$outDFMG/FMGids.txt";
 } elsif ($subparts !~ m/F/) {#(!-e "$outDFMG/FMGids.txt") {
 	print "No FetchMG essential proteins requested\n";
 } else {
@@ -227,7 +229,7 @@ if ( ( !-s "$inD/Binning/MetaBat/MeBa.sto" || !-s "$inD/Binning/MetaBat/$SmplNm.
 #systemW "perl $compoundBinningScr $inD $tmpD";
 }
 
-if (-e "$outD/microsat.txt" && $subparts =~ m/s/ && int(-s "$outD/microsat.txt") == 0 ){
+if ($subparts =~ m/s/ && (!-e "$outD/microsat.txt" || !-s "$outD/microsat.txt")){
 	findMicrSat($inScaffs,"$outD/microsat.txt");
 }
 
@@ -344,7 +346,7 @@ sub geneAbundance{
 	print "Calculating coverage of assemblies..\n";
 	if (-s $outFfin && -s $outF2fin&& -s $outF3fin&& -s $outF4fin && -s $outF5fin && -s $outF6fin){print "Gene abundance was already calculated\n";return;}
 	my $clnCmd = "";
-	if (!-e $inFG && -s $inF){system "$pigzBin -p  $inF $Nthreads";}
+	if (!-e $inFG && -s $inF){systemW "$pigzBin -p $Nthreads $inF";}
 	if (-e $inFG && !-s $inF){system "rm -f $inF";}
 	
 	#no longer needed, rdCov can also read in .gz 

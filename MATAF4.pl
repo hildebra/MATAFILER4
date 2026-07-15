@@ -3095,7 +3095,7 @@ sub runDiamond(){
 		#$cmd2 .= " " if ($getQSeq);
 		if ($curDB eq "ABR"){
 			my $KrisABR = getProgPaths("KrisABR_scr");#"perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/ABRblastFilter.pl";
-			$cmd2 = "$KrisABR $outgz $outD/ABR/ABR.genes.txt $outD/ABR/ABR.cats.txt\n";
+			$cmd2 = "$KrisABR $outgz $outD/ABR/ABR.genes.txt $outD/ABR/ABR.cats.txt $CLrefDBD\n";
 		} elsif ($curDB eq "PAB" && $MFopt{PABtaxChk}){ #NOG assignments
 			$cmd2 .= " -NOGtaxChk $outD/dia.NOG.blast.srt ";
 		}

@@ -17,7 +17,7 @@ sub main;
 sub readGene2COG; sub readNogKingdom; sub createNOGKgd;
 sub readCOGdef; sub readTCDBdef;
 sub readGene2KO;sub readKeggTax;
-sub check_files; sub remove_file;
+sub check_files; sub remove_file; sub result_dir;
 sub writeAllTable;
 sub readMohTax;
 sub combineBlasts;
@@ -318,8 +318,7 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 	if ($writeFastaOut){
 		foreach my $x (@kgdOpts){ #open outstream for fasta output
 			for (my $i=0; $i<@aminBLE ; $i++){
-				my $pathXtra = "/CNT_".$aminBLE[$i]."_".$aminPID[$i]."/";
-				my $outPath = $inP.$pathXtra;
+				my $outPath = result_dir($inP,$aminBLE[$i],$aminPID[$i]);
 				system "mkdir -p $outPath" unless (-d $outPath);
 				open $FAO{$i}{$x},">$outPath/$DBmode.faa";
 			}
@@ -417,8 +416,7 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 	if ($writeSumTbls){
 		print"writing Tables\n";
 		for (my $i=0; $i<@aminBLE ; $i++){
-			my $pathXtra = "/CNT_".$aminBLE[$i]."_".$aminPID[$i]."/";
-			my $outPath = $inP.$pathXtra;
+			my $outPath = result_dir($inP,$aminBLE[$i],$aminPID[$i]);
 			writeAllTable($DBmode."parse",$outPath,$aminBLE[$i],$aminPID[$i],$i);#$st1{$i}, $CAThits{$i},$st3{$i});
 			#and do eggnog mapping for specific filter parameters
 			eggMap_interpret($outPath);
@@ -436,15 +434,13 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 	
 } elsif ($mode==3) { #only checks for presence of run
 	for (my $i=0; $i<@aminBLE ; $i++){
-		my $pathXtra = "/CNT_".$aminBLE[$i]."/";
 		print "$i  $aminBLE[$i]\n";
-		unless(check_files($DBmode."parse",$inP.$pathXtra,$aminBLE[$i])){exit(3);}
+		unless(check_files($DBmode."parse",result_dir($inP,$aminBLE[$i],$aminPID[$i]),$aminBLE[$i])){exit(3);}
 	}
 } elsif ($mode==4) { #removes run
 
 	for (my $i=0; $i<@aminBLE ; $i++){
-		my $pathXtra = "/CNT_".$aminBLE[$i]."/";
-		remove_file($DBmode."parse",$inP.$pathXtra,$aminBLE[$i]);
+		remove_file($DBmode."parse",result_dir($inP,$aminBLE[$i],$aminPID[$i]),$aminBLE[$i]);
 	}
 } else {die"unkown run mode!!!\n";}
 
@@ -591,18 +587,33 @@ sub eggMap_interpret($){ #higher level annotations with egg nog mapper
 	#system "rm ".join(" ",@emFilesDel)." $oFil.1*";
 }
 
+sub result_dir {
+	my ($base,$minBLE,$minPID) = @_;
+	$base =~ s{/+$}{};
+	return "$base/CNT_${minBLE}_${minPID}/";
+}
+
 sub remove_file{
 	my ($outF,$outD,$minBLE) = @_;
 	my $out = $outD."/".$outF;
-	system "rm -f $out*" if (-d $outD);
+	return unless -d $outD;
+	for my $file (glob("$out*")) {
+		unlink $file or die "Cannot remove $file: $!\n" if -f $file;
+	}
 }
 sub check_files{
 	my ($outF,$outD,$minBLE) = @_;
 	my $out = $outD."/".$outF;
-	my @srchFls = (#"$out.$DBmode.GENE2$DBmode", #"$out.GENE2$DBmode"."aCAT"
-	"$out.$DBmode.$kgdNameShrt[0].gene.cnts","$out.$DBmode.$kgdNameShrt[0].cat.cnts");
-	push (@srchFls,"$out.$kgdNameShrt[0].CATcnts") if ( $DBmode eq "NOG");
-	foreach (@srchFls) { unless (-e $_.".gz"){print "Fail $_\n";return 0;}}
+	my @srchFls;
+	for my $normMethod (@normMethods) {
+		for my $y (@kgdOpts) {
+			next if $kgdName[$y] eq '';
+			push @srchFls, "$out.$DBmode.$kgdNameShrt[$y].$normMethod.gene.cnts.gz" if $tabCats == 0;
+			push @srchFls, "$out.$DBmode.$kgdNameShrt[$y].$normMethod.cat.cnts.gz" if $tabCats != 2;
+			push @srchFls, "$out.$kgdNameShrt[$y].$normMethod.CATcnts.gz" if $tabCats;
+		}
+	}
+	foreach (@srchFls) { unless (-s $_){print "Fail $_\n";return 0;}}
 	return 1;
 }
 
@@ -1315,7 +1326,6 @@ sub help(){
 print "Routine to interpret diamond output files to specific datbases (CAZy, KEGG, eggNOG)\n";
 print "-i [diamond output]\n";
 }
-
 
 
 
