@@ -1302,7 +1302,7 @@ sub readMap{
 			if ($RT ne "" && $ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq ""){
 				die "For sample $curSmp, found read tech, but no primary input file location given. This can lead to undescribed behaviour, please remove readTech entry (set to \"\"), before proceeding.\n";
 			}
-		} else {$ret{$curSmp}{SeqTech} = "";}
+		} else {$ret{$curSmp}{SeqTech} = "ill";} #set by default to illumina
 		if ($SeqTechS >= 0) { my $RT=$spl[$SeqTechS];checkSeqTech($RT);$ret{$curSmp}{SeqTechSingl} = $RT; } else {$ret{$curSmp}{SeqTechSingl} = "";}
 		
 		$ret{$curSmp}{hasPrimaryRds}= 1;$ret{$curSmp}{hasPrimaryRds} = 0 if ($ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq "");
