@@ -20,7 +20,7 @@ sub randStr($){ #will be prefixed to jobname, to make jobs unique to each MF run
 	my @letters2=('A'..'Z','a'..'z');
 	my $total=scalar(@letters);
 	my $newletter ="";
-	$newletter = $letters2[rand scalar(@letters)];
+	$newletter = $letters2[int(rand scalar(@letters2))];
 	for (my $i=1;$i<$len;$i++){
 		$newletter .= $letters[rand $total];
 	}
@@ -199,6 +199,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 			my @jspl = split(";",$waitJID);
 			#remove empty elements
 			@jspl = grep /\S/, @jspl;
+			for (@jspl) { s/^\Q$rTag\E//; }
 			if (@jspl > 0 ){
 				$waitJID = join(") && done(",@jspl);
 				$xtra.="-w \"done($waitJID)\" ";
@@ -209,6 +210,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		if ($optHR->{doSync} == 1){$xtra.="-sync y ";}
 		if ($jname ne ""){$xtra.="-N $rTag$jname ";}
 		if (length($waitJID) >3) {
+			for (@jspl) { s/^\Q$rTag\E//; }
 			if (@jspl > 0 ){$xtra.="-hold_jid ".join(",",@jspl) ." ";}
 		}
 			#$waitJID =~ s/;/,/g;$xtra.="-hold_jid $waitJID ";}
@@ -224,14 +226,30 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		#print("$qcm\n\n");
 		print "SUB:$jname\t";
 		#actual job excecution!
-		my $ret = `$qcm`; 
-		#take care of lockFile now.. but only if actual job submission happened
-		if ($lockFile ne "" && $ret !~ m/^sbatch: error:/ && ! -e $lockFile){
-			system "touch $lockFile" ;
+		my $ret = `$qcm`;
+		my $submit_status = $?;
+		if ($submit_status != 0) {
+			my $exit_code = $submit_status == -1 ? -1 : ($submit_status >> 8);
+			die "Job submission failed (exit $exit_code): $qcm$ret";
 		}
 		if ($LSF == 2){#slurm get jobid
-			chomp $ret; $ret =~ m/(\d+)$/; #$ret = $1;
+			chomp $ret;
+			die "Could not parse Slurm job id from submission output: $ret\n"
+				unless ($ret =~ /^Submitted batch job (\d+)\s*$/);
 			$jname=$1;
+		} elsif ($LSF == 0) {
+			die "Could not parse SGE job id from submission output: $ret\n"
+				unless ($ret =~ /\bYour job(?:-array)?\s+(\d+)\b/);
+			$jname=$1;
+		} elsif ($LSF == 1) {
+			die "Could not parse LSF job id from submission output: $ret\n"
+				unless ($ret =~ /\bJob <(\d+)>/);
+			$jname=$1;
+		}
+		# Only record a lock after the scheduler has accepted the job.
+		if ($lockFile ne "" && !-e $lockFile){
+			open my $lock, ">", $lockFile or die "Cannot create lock $lockFile: $!\n";
+			close $lock or die "Cannot close lock $lockFile: $!\n";
 		}
 	}
 	
@@ -249,16 +267,17 @@ sub numPendingJobs($){
 	my $srchCmd="" ;#= "squeue -u \$USER  -t PENDING | wc -l";
 	my $num = 0;
 	if ($qmode eq "slurm"){
-		$srchCmd = "squeue -u \$USER -t PENDING | wc -l";
+		$srchCmd = "squeue -h -u \$USER -t PENDING | wc -l";
 	} elsif ($qmode eq "sge"){
 		$srchCmd = "qstat | grep \$USER  | wc -l";
 		die "Subm.pm::numPendingJobs() not implemented for sge!\n";
 	} elsif ($qmode eq "bash"){
 		return 0;
-	} else {$srchCmd="bsub  | wc -l";
+	} else {$srchCmd="bjobs -p -noheader | wc -l";
 		die "Subm.pm::numPendingJobs() not implemented for bsub!\n";
 	}
-	$num = `$srchCmd`; chomp $num; $num -=1;
+	$num = `$srchCmd`; chomp $num;
+	die "Failed to count pending jobs with: $srchCmd\n" if ($? != 0);
 	return $num;
 }
 sub numUserJobs{
@@ -267,15 +286,16 @@ sub numUserJobs{
 	my $qmode = "slurm"; $qmode = $optHR->{qmode} if (defined($optHR->{qmode}));
 	my $srchCmd ="";#= "squeue -u \$USER   | wc -l";
 	if ($qmode eq "slurm"){
-		$srchCmd = "squeue -u \$USER  | wc -l";
+		$srchCmd = "squeue -h -u \$USER | wc -l";
 	} elsif ($qmode eq "sge"){
 		$srchCmd = "qstat | grep \$USER  | wc -l";
 	} elsif ($qmode eq "bash"){
 		return 0;
-	} else {$srchCmd="bsub  | wc -l";
+	} else {$srchCmd="bjobs -noheader | wc -l";
 	}
 	my $num = 0;
-	$num = `$srchCmd`; chomp $num;$num -=1;
+	$num = `$srchCmd`; chomp $num;
+	die "Failed to count user jobs with: $srchCmd\n" if ($? != 0);
 
 
 	if ($rmSelf && $qmode eq "slurm"){
@@ -311,8 +331,7 @@ sub findQsubSys($){
 		}elsif (!$bpresent && $qpresent){
 			$iniVal = "sge";
 		}elsif (!$qpresent && !$bpresent && !$spresent){
-			print "Warning: No queing system found (sbatch / qsub / bsub command)\nUsing LSF (bsub), though this will likely cause errors\n";
-			
+			die "No queueing system found (sbatch, qsub, or bsub). Use -qsubSystem bash for local execution.\n";
 		}
 	print "Using qsubsystem: $iniVal\n";
 	}
@@ -409,35 +428,33 @@ sub qsubSystemJobAlive{
 	my $cmd1="";
 	my $rTag = $optHR->{rTag};
 
+	for (@jobs) {s/^\Q$rTag\E//;}
 	if ($qmode eq "slurm"){
-		$cmd1 = "squeue -u \$USER ";
-		for (@jobs) {s/$rTag//;}
+		$cmd1 = "squeue -h -u \$USER -o '%i'";
 	} elsif ($qmode eq "sge"){
-		$cmd1 = "qstat | grep \$USER "
+		$cmd1 = "qstat -u \$USER | awk 'NR > 2 {print \$1}'"
 	} elsif ($qmode eq "bash"){
 		return;
-	} else {$cmd1="bsub";
+	} else {$cmd1="bjobs -noheader -o jobid";
 	}
-	my $cmd = "$cmd1";# | grep $_ | wc -l";
-	#my $num = `$cmd`; chomp $num;
-	my $num  = `$cmd`;
-	my $jobsCheckd= scalar @jobs;
-	#print "XX\n@jobs\n\n";
-	foreach (@jobs){
-		$jobsCheckd--;
-		my $waitCnt = 0;
-		while ( $num =~ m/$_/){
-			print "Waiting for $jobsCheckd/".scalar @jobs ." jobs to finish\n" if ($waitCnt==0);
-			sleep (60);
-			$num = `$cmd`; #chomp $num;
-			$waitCnt++;
-			if ($killFailedJobs){
-				my $killed = qsubDepNeverKill();
-				print " Killed $killed jobs with Dependency never completed\n" if ($killed > 0);
-				#die;
-			}
-
+	my %wanted = map { $_ => 1 } @jobs;
+	my $announced = 0;
+	while (1) {
+		my $output = `$cmd1`;
+		die "Failed to query active jobs with: $cmd1\n" if ($? != 0);
+		my %active = map { $_ => 1 }
+			grep { /^\d+$/ }
+			map { my $id = $_; $id =~ s/^\s+|\s+$//g; $id }
+			split /\n/, $output;
+		my @remaining = grep { $active{$_} } keys %wanted;
+		last unless (@remaining);
+		print "Waiting for ".scalar(@remaining)."/".scalar(@jobs)." jobs to finish\n"
+			unless ($announced++);
+		if ($killFailedJobs){
+			my $killed = qsubDepNeverKill();
+			print " Killed $killed jobs with Dependency never completed\n" if ($killed > 0);
 		}
+		sleep (60);
 	}
 	#print "returning\n";
 	return;

@@ -2854,7 +2854,7 @@ sub prepareMap{
 		$DBbtRef =~ s/$MFcontstants{bwt2IdxFileSuffix}$//;
 		$DBbtRef =~ m/.*\/([^\/]+)$/;
 		$DBbtRef = "$MFglobal{runTmpDBDirGlobal}/$1";#set up to scratch dir to map onto
-		my $idxNFini = 0; $idxNFini = 1 if (!-e $chkFile); #mapperDBbuilt($DBbtRef,$MFopt{MapperProg}); #($MFopt{MapperProg}==3 && !-e "$DBbtRef.pak") || ($MFopt{MapperProg}==1 && !-e "$DBbtRef$MFcontstants{bwt2IdxFileSuffix}.rev.1.bt2");
+		my $idxNFini = mapperDBbuilt($refDB[$i],$MFopt{MapperProg}) ? 0 : 1;
 		$cmd.= "\ncp $refDB[$i]* $MFglobal{runTmpDBDirGlobal}\n" if ($idxNFini);# if (!$MFopt{mapModeCovDo} && !-e "$bwt2outDl/$1");
 		#print $cmd."\n";
 		#die $DBbtRef."\n$MFglobal{runTmpDBDirGlobal}/\n";

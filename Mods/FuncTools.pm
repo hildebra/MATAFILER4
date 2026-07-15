@@ -41,7 +41,7 @@ sub lambdaBl{
 	my $lamVer  = 0.4;
 	
 	my $lverTxt = `$lambdaBin --version`;
-	if ( $lverTxt =~ m/.*lambda\d? version: (\d\.\d)[\.0-9]*.*/ ) {$lamVer = $1;}
+	if ( $lverTxt =~ m/lambda\d? version:\s*(\d+(?:\.\d+)+)/i ) {$lamVer = $1;}
 	if ($lamVer < 3.0){die "Found Lambda v $lamVer at $lambdaBin\n no longer supports lambda below version 3.0\nPlease update\n";}
 	
 	
@@ -192,7 +192,7 @@ sub assignFuncPerGene{
 	$fastaSplits = $otpsHR->{fastaSplits} if (exists($otpsHR->{fastaSplits}));
 	$otpsHR->{splitPath} = $tmpD if (!exists($otpsHR->{splitPath}));
 	$otpsHR->{redo} = 0 if (!exists($otpsHR->{redo}));
-	$otpsHR->{keepSplits} = 0 if (!exists($otpsHR->{redo}));
+	$otpsHR->{keepSplits} = 0 if (!exists($otpsHR->{keepSplits}));
 	my $aligner = $otpsHR->{align};
 	my $redo = $otpsHR->{redo};
 	my $globalDiamondDependence = "";
@@ -204,7 +204,7 @@ sub assignFuncPerGene{
 	
 	#build DB
 	my ($DBpath ,$refDB ,$shrtDB) = getSpecificDBpaths($curDB,0);
-	if ($DBpath eq ""){print "Could not find DB $curDB !\n Exiting..\n"; exit(0);}
+	die "Could not find required database $curDB\n" if ($DBpath eq "");
 	#die "$DBpath\n";
 	if ($exe && $DBpath ne "" ){
 		my $DBcmd = "";
@@ -272,8 +272,9 @@ sub assignFuncPerGene{
 			if ($curDB eq "mp3"){
 				my $mp3Dir = getProgPaths("mp3");
 				#$CWD = $mp3Dir;
-				chdir $mp3Dir;	
+				$cmd .= "pushd $mp3Dir >/dev/null\n";
 				$cmd .= "$mp3Dir/./mp3 $subFls[$i] 1 50 0.2\n";#1=complete genes,2=metag prots
+				$cmd .= "popd >/dev/null\n";
 				$subFls[$i] =~ m/\/([^\/]+$)/; my $fnm=$1;
 				if ($localTmp){
 					$outF = "$outD/$fnm.Hybrid.result.gz"; #this is sometimes shared, sometimes local tmp
@@ -286,7 +287,12 @@ sub assignFuncPerGene{
 				$cmd .= "rm $subFls[$i].Hybrid.result\n";
 			}elsif ($aligner eq "foldseek"){
 				my $prst5W = getProgPaths("PtostT5_Weights");
-				$cmd .= "foldseek easy-search $subFls[$i] tinycazy_db result.m8 $tmpD3 --prostt5-model $prst5W";
+				$outF = $localTmp
+					? "$outD/DiaAs.sub.$i.$shrtDB.gz"
+					: "$tmpD3/DiaAs.sub.$i.$shrtDB.gz";
+				my $raw_out = "$tmpD3/foldseek.$i.m8";
+				$cmd .= "$FSbin easy-search $subFls[$i] $DBpath$refDB.DB3di $raw_out $tmpD3 --threads $ncore --prostt5-model $prst5W\n";
+				$cmd .= "gzip -c $raw_out > $outF\nrm -f $raw_out\n";
 			} else {
 				#my $outF = "$GCd/DiaAssignment.sub.$i";
 				if ($localTmp){
@@ -385,9 +391,10 @@ sub calc_modules{
 		my $outMat = $outD2.$modShort[$k];
 		next if (-e $outD2."$modShort[$k].mat");
 		#die "$inMat\n";
-		$cmdMod .= "$rareBin module -i $inMat -o $outMat -refMods $keggDB -description $modD/$modDescr[$k] -hiera  $modD/$modHiera[$k] -redundancy 5 -writeExtraModEstimates -moduleCompl $ModCompl -enzymeCompl $EnzCompl -collapseDblModules\n";
+		my $current_cmd = "$rareBin module -i $inMat -o $outMat -refMods $keggDB -description $modD/$modDescr[$k] -hiera  $modD/$modHiera[$k] -redundancy 5 -writeExtraModEstimates -moduleCompl $ModCompl -enzymeCompl $EnzCompl -collapseDblModules\n";
+		$cmdMod .= $current_cmd;
 		if ($exeLoc){
-			die "Failed module calc:\n$cmdMod\n" if (system "$cmdMod");
+			systemW($current_cmd);
 		}
 	}
 	return $cmdMod;

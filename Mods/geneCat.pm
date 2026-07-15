@@ -5,6 +5,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw( fileGZe systemW gzipopen readFasta);
 use Mods::FuncTools qw( readGene2Func);
 use Mods::math qw( meanArray);
+use List::Util qw(sum);
 
 use Exporter qw(import);
 our @EXPORT_OK = qw(readGeneIdx readGeneIdxSpl correlation calculate_spearman_correlation read_matrix checkAntiOcc
@@ -266,8 +267,8 @@ sub checkAntiOcc{
 		die "can't find gene $GL[$i] in matrix\n" unless (exists($mat{$GL[$i]}));
 		my @g1 = @{$mat{$GL[$i]}};
 		
-		my $dblOcc=0; my $singlOcc=0;
 		for (my $j=($i+1);$j<@GL;$j++){
+			my $dblOcc=0; my $singlOcc=0;
 			die "can't find gene $GL[$j] in matrix\n" unless (exists($mat{$GL[$j]}));
 			my @g2 = @{$mat{$GL[$j]}};
 			#simple countup for non occurrence...
@@ -279,7 +280,8 @@ sub checkAntiOcc{
 				} #else both zero.. ignore
 			}
 			#print "OCC = $singlOcc / $dblOcc\n";
-			$res{$GL[$i]}{$GL[$j]} = $singlOcc / ($singlOcc + $dblOcc);
+			my $observed = $singlOcc + $dblOcc;
+			$res{$GL[$i]}{$GL[$j]} = $observed ? $singlOcc / $observed : 0;
 		}
 	}
 	return \%res;
@@ -351,7 +353,7 @@ sub read_matrix{
 	my $SEP="\t";
 	$SEP = $_[1] if (@_ > 1);
 	my %incl; my $doIncl=0;
-	if (@_ > 1){
+	if (@_ > 2){
 		my $hr = $_[2]; %incl = %{$hr};
 		$doIncl=1;
 	}
@@ -361,6 +363,7 @@ sub read_matrix{
 	my $lcnt=0;
 	#open I,"<$mF" or die "Can't open $mF\n";
 	my ($I,$stat) = gzipopen($mF,"Matrix File",1);
+	die "Could not open matrix $mF\n" unless ($stat && defined $I);
 	my $cnt=0;
 	while (<$I>){
 		chomp; $cnt++;
@@ -397,7 +400,7 @@ sub convert_values_to_ranks {
 
 	# compute the average rank for a given value
 	my %average_ranks =
-		map { $_ => List::Util::sum(@{$sorted{$_}}) / scalar(@{$sorted{$_}}) }
+		map { $_ => sum(@{$sorted{$_}}) / scalar(@{$sorted{$_}}) }
 		keys %sorted;
 
 	# encode the values using average rank of the value in the list
@@ -418,41 +421,47 @@ sub calculate_spearman_correlation {
 	my $ranked_n1 = convert_values_to_ranks($n1);
 	my $ranked_n2 = convert_values_to_ranks($n2);
 
-	my $sum_diff_squared = 0;
-	foreach my $idx ( 0 .. scalar(@$ranked_n1)-1 ) {
-		my $diff = $ranked_n1->[$idx] - $ranked_n2->[$idx];
-		$sum_diff_squared += $diff * $diff;
+	my $N = scalar(@$ranked_n1);
+	die "Spearman correlation requires at least two values\n" if ($N < 2);
+	my $mean1 = sum(@$ranked_n1) / $N;
+	my $mean2 = sum(@$ranked_n2) / $N;
+	my ($cov, $var1, $var2) = (0, 0, 0);
+	for my $idx (0 .. $N - 1) {
+		my $d1 = $ranked_n1->[$idx] - $mean1;
+		my $d2 = $ranked_n2->[$idx] - $mean2;
+		$cov += $d1 * $d2;
+		$var1 += $d1 * $d1;
+		$var2 += $d2 * $d2;
 	}
-
-	my $N   = scalar(@$ranked_n1);
-	my $rho = 1 - ( 6 * $sum_diff_squared / ($N * ($N*$N-1)) );
-	return $rho;
+	return 0 if ($var1 == 0 || $var2 == 0);
+	return $cov / sqrt($var1 * $var2);
 }
- 
+
 sub mean($) {
 	   my ($x)=@_;
 	   return if (@_ == 0);
-	   my $num = scalar(@{$x}) - 1;
+	   my $num = scalar(@{$x});
+	   return if ($num == 0);
 	   my $sum_x = '0';
-	   for (my $i = 1; $i < scalar(@{$x}); ++$i){
+	   for (my $i = 0; $i < scalar(@{$x}); ++$i){
 		  $sum_x += $x->[$i];
 	   }
 	   my $mu_x = $sum_x / $num;
 	   return($mu_x);
 }
- 
+
 ### ss = sum of squared deviations to the mean
 sub ss {
    my ($x,$mean_x,$y,$mean_y)=@_;
    my $sum = '0';
-   for (my $i=1;$i<scalar(@{$x});++$i){
+	for (my $i=0;$i<scalar(@{$x});++$i){
      $sum += ($x->[$i]-$mean_x)*($y->[$i]-$mean_y);
    }
    return $sum;
 }
  sub correl {
    my($ssxx,$ssyy,$ssxy)=@_;
-   if ($ssyy==0 || $ssxy==0){return 0;}
+	   if ($ssxx==0 || $ssyy==0 || $ssxy==0){return 0;}
    my $sign=$ssxy/abs($ssxy);
    my $correl=$sign*sqrt($ssxy*$ssxy/($ssxx*$ssyy));
    return $correl;
@@ -461,11 +470,10 @@ sub correlation {
    my ($x,$y) = @_;
    my ($mean_x) = mean($x);
    my $mean_y = mean($y);
-   my $ssxx=ss($x,$mean_x,$x,$mean_y);
-   my $ssyy=ss($y,$mean_x,$y,$mean_y);
+	my $ssxx=ss($x,$mean_x,$x,$mean_x);
+	my $ssyy=ss($y,$mean_y,$y,$mean_y);
    my $ssxy=ss($x,$mean_x,$y,$mean_y);
    my $correl=correl($ssxx,$ssyy,$ssxy);
    my $xcorrel=sprintf("%.4f",$correl);
    return($xcorrel);
 }
- 

@@ -5,6 +5,7 @@ use strict;
 
 use Exporter qw(import);
 use File::Path qw(remove_tree);
+use Cwd qw(abs_path);
 
 our @EXPORT_OK = qw(apply_workflow_plan);
 
@@ -21,10 +22,16 @@ sub _safe_path {
 	my ($path, $roots) = @_;
 	$path = _normalise_path($path);
 	return 0 if ($path eq '' || $path eq '/' || $path =~ m{(?:^|/)\.\.(?:/|$)});
+	my $resolved_path = (-e $path || -l $path) ? abs_path($path) : $path;
+	return 0 unless (defined $resolved_path);
+	$resolved_path = _normalise_path($resolved_path);
 	for my $root (@{$roots}) {
 		$root = _normalise_path($root);
 		next if ($root eq '' || $root eq '/');
-		return 1 if ($path eq $root || index($path, "$root/") == 0);
+		my $resolved_root = -e $root ? abs_path($root) : $root;
+		next unless (defined $resolved_root);
+		$resolved_root = _normalise_path($resolved_root);
+		return 1 if ($resolved_path eq $resolved_root || index($resolved_path, "$resolved_root/") == 0);
 	}
 	return 0;
 }
