@@ -487,7 +487,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$eCovAsssembly=0;$eFinMapCovGZ=0;$eFinalMapDir=0;$eFinSupMapCovGZ=0;$eSuppCovAsssembly=0;$eSuppCovAsssembly=0;
 	}
 	
-	if ($locStats{totRds}==0 && !defined($locStats{uniqAlign}) && -e $inputRawFile && $eFinMapCovGZ){ #do a deeper look
+	if (defined($locStats{totRds}) && $locStats{totRds}==0 && !defined($locStats{uniqAlign}) && -e $inputRawFile && $eFinMapCovGZ){ #do a deeper look
 		my $line = getFileStr("$inputRawFile",0); #open I,"<$inputRawFile"; my $line = <I>; close I; chomp($line);
 		#my @spl = split /,/,$line; my $inFileSize = -s $spl[0];
 		print "weird empty: $locStats{totRds} $line \nredoing..\n";die;
@@ -537,7 +537,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		if (-e $STOcram && (!fileGZe( "$finalMapDir/$SmplName-smd.bam.coverage.gz") || !-e $CRAMmap) ){$locRedoAssMapping = 1 ;print "R3 ";}
 		#if ($eFinMapCovGZ && (exists($locStats{uniqAlign}) && $locStats{uniqAlign} > 20) && -s $CRAMmap <300){$locRedoAssMapping = 1 ;print "R4";}
 		#print "$CRAMmap :: $locRedoAssMapping\n";
+<<<<<<< HEAD
 		if ($locRedoAssMapping){# && -e $CRAMmap){
+=======
+		if ($eFinMapCovGZ && $locRedoAssMapping){# && -e $CRAMmap){
+>>>>>>> dev
 			print "redo assem mapping!" . " -s $CRAMmap \n" ;
 			#die;
 		}
@@ -3442,17 +3446,6 @@ sub adaptSDMopt{
 	return $newSDMf;
 }
 
-sub getReadTechInMap{
-	my $curReadTec = "hiSeq"; #default	
-	if (exists($map{$curSmpl}{SeqTech})){ $curReadTec = $map{$curSmpl}{SeqTech};}
-	return $curReadTec;
-}
-
-sub getReadTechInMapSingl($){
-	my ($curReadTec )= @_;
-	if (exists($map{$curSmpl}{SeqTechSingl})){ $curReadTec = $map{$curSmpl}{SeqTechSingl};}
-	return $curReadTec;
-}
 
 
 sub sdmOptSet{ 
@@ -3465,7 +3458,11 @@ sub sdmOptSet{
 		return ($MFopt{sdmOpt},$MFopt{sdmOpt});
 	}
 	my $curSDMopt = $MFopt{baseSDMopt}; 
+<<<<<<< HEAD
 	
+=======
+	#die " $curReadTec\n";
+>>>>>>> dev
 	my $is3rdGen = is3rdGenSeqTech($curReadTec);
 	#my $iqualOff = 33; #62 for 1st illu
 	
@@ -3552,8 +3549,8 @@ sub sdmClean(){
 		
 	}
 	
-	my $curReadTec = getReadTechInMap();
-	my $curSTech = getReadTechInMapSingl($curReadTec);
+	my $curReadTec = $map{$curSmpl}{SeqTech};#getReadTechInMap();
+	my $curSTech = $map{$curSmpl}{SeqTechSingl};#getReadTechInMapSingl($curReadTec);
 	if ($seqTec ne ""){#override defaults from map
 		$curReadTec = $seqTec; $curSTech = $seqTec;
 	} 
