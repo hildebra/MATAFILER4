@@ -3,6 +3,10 @@ base options	help,?,h	flag		stable		Show help.
 base options	checkInstall	flag		stable		Check that core MATAFILER4 programs/environments are installed.
 base options	map	string	""""""	stable	$MFconfig{mapFile}	Mapping file describing samples and input/output paths.
 base options	config	string	""""""	stable	$MFconfig{configFile}	Alternative configuration file.
+base options	inspectState	integer	0	stable	$MFconfig{inspectState}	Emit a read-only JSON snapshot of workflow artifacts and markers.
+base options	planState	integer	0	stable	$MFconfig{planState}	Emit a read-only dependency-ordered repair/submission plan.
+base options	stateReport	string	""""""	stable	$MFconfig{stateReport}	Write the inspection JSON to this explicit path.
+base options	planReport	string	""""""	stable	$MFconfig{planReport}	Write the repair/submission plan JSON to this explicit path.
 flow related	redoFails	integer	0	stable	$MFconfig{redoFails}	if any step of requested analysis failed, just redo everything (extraction etc)
 flow related	redoContigStats	integer	0	stable	$MFconfig{redoCS}	runContigStats (coverage per gene, kmers, GC content) will be deleted & started again
 flow related	submSystem	string	""""""	stable	$MFconfig{submSytem}	qsub,SGE,bsub,LSF.. by default will try to autodetect

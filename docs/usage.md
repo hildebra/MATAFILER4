@@ -6,6 +6,78 @@
 # Running MATAFILER4
 
 
+## Stabilized state workflow
+
+The stabilization workflow deliberately separates three concerns:
+
+1. **Inspect:** read files and completion markers and report their current state.
+2. **Plan:** convert that snapshot into reviewable repair and submission actions
+   with explicit dependencies.
+3. **Execute:** run MATAFILER4 separately after reviewing the plan and selecting
+   the normal workflow and authorization flags.
+
+The first two phases never initialize the scheduler, submit jobs, create scratch
+directories, or delete and repair outputs. This branch does not automatically
+apply plan documents; `execution_supported` is therefore `0` in plan JSON.
+
+### Inspect state
+
+Inspect existing sample, mapping, assembly, coverage, and assembly-group state
+without creating scratch directories, deleting outputs, repairing files, or
+submitting jobs:
+
+```bash
+perl MATAF4.pl -map project.map -inspectState 1
+```
+
+The report is JSON on standard output. To write it to a selected file instead:
+
+```bash
+perl MATAF4.pl -map project.map -inspectState 1 -stateReport state.json
+```
+
+Incomplete combinations, such as a completion stone without its expected
+artifact or an assembly-group membership mismatch, are reported as issues. The
+inspection path never applies repairs; execution remains a separate invocation.
+
+### Build a repair/submission plan
+
+Generate an explicit dependency-ordered repair and submission plan from the same
+inspection snapshot:
+
+```bash
+perl MATAF4.pl -map project.map -planState 1
+```
+
+Pass the same workflow flags that would be used for execution, such as
+`-assembleMG 5` for hybrid mode. The plan only proposes stages that were
+requested by those flags.
+
+The plan is JSON on standard output. It embeds the source inspection report and
+lists repairs, confirmation gates, submissions, expected outputs, and
+`depends_on` action IDs. Hybrid mode (`-assembleMG 5`) is represented as
+per-sample preassembly packages followed by the final assembly-group job;
+downstream mappings and contig statistics depend on that final job.
+
+To persist both documents explicitly:
+
+```bash
+perl MATAF4.pl -map project.map -planState 1 \
+  -stateReport state.json -planReport plan.json
+```
+
+Plan generation remains read-only. It does not interpret the plan as shell
+commands, delete any target, initialize the scheduler, or submit jobs.
+Group-wide invalidation actions retain the `OKtoRWassGrps` authorization gate
+in the generated plan.
+
+Each action has a stable `id`, `kind`, `operation`, `scope`, `reason_codes`, and
+`depends_on` list. Repair actions additionally identify their destructive
+targets and required authorization; submission actions list their expected
+outputs. The action graph is validated for missing dependencies and cycles
+before it is emitted.
+
+
 This page describes running behaviour and core concepts. New users should usually read [Quick start](quickstart.md), [Mapping files](mapping_files.md) and [Common workflows](common_workflows.md) before using the full [Flag reference](flag_reference.md).
 
 ## Running MATAFILER4

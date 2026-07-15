@@ -31,6 +31,8 @@ use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName );
 use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs);
+use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
+use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 
 
 #some useful HPC commands..
@@ -74,6 +76,7 @@ sub postprocess;
 sub setDefaultMFconfig;
 sub getCmdLineOptions;
 sub setupHPC;
+sub runStateInspection;
 
 sub createConsSNPandSVs;
 
@@ -123,6 +126,20 @@ my %MFopt;
 #MGstats: global trackers of variables that can change during excecution
 my %MFstats;
 
+# Keep machine-readable inspection and plan output clean. When either read-only
+# mode was requested, ordinary diagnostics use STDERR and JSON is written
+# explicitly to STDOUT.
+my $readOnlyStateRequested = 0;
+for (my $argI = 0; $argI < @ARGV; $argI++) {
+	if ($ARGV[$argI] =~ m{^--?(?:inspectState|planState)=(\d+)$}) {
+		$readOnlyStateRequested = 1 if ($1 != 0);
+	} elsif ($ARGV[$argI] =~ m{^--?(?:inspectState|planState)$}) {
+		$readOnlyStateRequested = 1
+			unless ($argI + 1 < @ARGV && $ARGV[$argI + 1] eq '0');
+	}
+}
+select STDERR if ($readOnlyStateRequested);
+
 
 #keep track of DBs that the metagenome will be filtered against..
 my @filterHostDB = ();
@@ -155,7 +172,8 @@ my %preDIRs = (dir_ContigStats => "/assemblies/metag/ContigStats/",dir2MePhl => 
 announce_MF4();
 setDefaultMFconfig();
 getCmdLineOptions;
-checkMF(1);
+$MFconfig{inspectState} = 1 if ($MFconfig{planState});
+checkMF(1) unless ($MFconfig{inspectState});
 
 
 
@@ -166,8 +184,10 @@ my $avx2Constr =  getProgPaths("avx2_constraint",0);
 my $mvCmd = "rsync -r --remove-source-files --force "; # "rsync -r  --remove-source-files " or "mv"
 
  
-#set up link to submission system on cluster
-my $QSBoptHR = setupHPC();
+#set up link to submission system on cluster. Inspection mode deliberately
+#does not initialise or query the scheduler.
+my $QSBoptHR;
+$QSBoptHR = setupHPC() unless ($MFconfig{inspectState});
 
 #----------- map all reads to a specific reference, preparation ---------
 my $map2ndMpde=0;#0=map2tar;2=map2DB;3=map2GC
@@ -179,6 +199,11 @@ my $scaffTarExtLibTar = ""; my $bwt2ndMapDep = "";
 my %map; my %AsGrps; my %DOs;#DOs only required for metabat, to use all mappings within an assembly group
 prepareMap();
 my @samples = @{$map{opt}{smpl_order}}; 
+
+if ($MFconfig{inspectState}) {
+	runStateInspection();
+	exit(0);
+}
 
 
 #captures statistics for current sample
@@ -537,11 +562,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		if (-e $STOcram && (!fileGZe( "$finalMapDir/$SmplName-smd.bam.coverage.gz") || !-e $CRAMmap) ){$locRedoAssMapping = 1 ;print "R3 ";}
 		#if ($eFinMapCovGZ && (exists($locStats{uniqAlign}) && $locStats{uniqAlign} > 20) && -s $CRAMmap <300){$locRedoAssMapping = 1 ;print "R4";}
 		#print "$CRAMmap :: $locRedoAssMapping\n";
-<<<<<<< HEAD
 		if ($locRedoAssMapping){# && -e $CRAMmap){
-=======
-		if ($eFinMapCovGZ && $locRedoAssMapping){# && -e $CRAMmap){
->>>>>>> dev
 			print "redo assem mapping!" . " -s $CRAMmap \n" ;
 			#die;
 		}
@@ -2440,6 +2461,44 @@ sub isLastSampleInAssembly{
 }
 
 
+sub runStateInspection {
+	my $report = inspect_workflow_state(
+		map => \%map,
+		groups => \%AsGrps,
+		options => {
+			assembly_mode => $MFopt{DoAssembly},
+			map_to_assembly => $MFopt{map2Assembly},
+			map_support_to_assembly => $MFopt{mapSupport2Assembly},
+			run_tmp_dir => $MFglobal{runTmpDirGlobal},
+		},
+	);
+	if ($MFconfig{stateReport} ne '') {
+		my $json = encode_state_report($report);
+		open my $fh, '>', $MFconfig{stateReport}
+			or die "Cannot write state report $MFconfig{stateReport}: $!\n";
+		print {$fh} $json;
+		close $fh;
+		print "Wrote read-only state report to $MFconfig{stateReport}\n";
+	}
+
+	if ($MFconfig{planState}) {
+		my $plan = build_workflow_plan($report);
+		my $json = encode_workflow_plan($plan);
+		if ($MFconfig{planReport} ne '') {
+			open my $fh, '>', $MFconfig{planReport}
+				or die "Cannot write workflow plan $MFconfig{planReport}: $!\n";
+			print {$fh} $json;
+			close $fh;
+			print "Wrote read-only repair/submission plan to $MFconfig{planReport}\n";
+		} else {
+			print STDOUT $json;
+		}
+	} elsif ($MFconfig{stateReport} eq '') {
+		print STDOUT encode_state_report($report);
+	}
+}
+
+
 #preparation of secondary mapping, including wildcard resolution, gene calling, index building
 sub prepareMap{
 	
@@ -2473,6 +2532,9 @@ sub prepareMap{
 
 	$MFglobal{runTmpDirGlobal} = "$sharedTmpDirP/$baseID/";
 	$MFglobal{runTmpDBDirGlobal} = "$MFglobal{runTmpDirGlobal}/DB/";
+	# Inspection is a read-only planning path: do not create scratch directories,
+	# prepare databases, or enqueue any prerequisite jobs.
+	return if ($MFconfig{inspectState});
 	unless (-d $MFglobal{runTmpDBDirGlobal}){
 		system "mkdir -p $MFglobal{runTmpDBDirGlobal}" ;
 		#and check that this dir exists...
@@ -3458,11 +3520,7 @@ sub sdmOptSet{
 		return ($MFopt{sdmOpt},$MFopt{sdmOpt});
 	}
 	my $curSDMopt = $MFopt{baseSDMopt}; 
-<<<<<<< HEAD
 	
-=======
-	#die " $curReadTec\n";
->>>>>>> dev
 	my $is3rdGen = is3rdGenSeqTech($curReadTec);
 	#my $iqualOff = 33; #62 for 1st illu
 	
@@ -7701,6 +7759,10 @@ sub setDefaultMFconfig{
 	
 	#MFconfig configuration with defaults
 	$MFconfig{mapFile} = "";
+	$MFconfig{inspectState} = 0;
+	$MFconfig{planState} = 0;
+	$MFconfig{stateReport} = "";
+	$MFconfig{planReport} = "";
 	$MFconfig{configFile} = "";
 	$MFconfig{nodeHDDspace} = 30; #30 Gb; default value
 	$MFconfig{maxUnzpJobs} = 20; #how many unzip jobs to run in parallel (not to overload HPC IO)
@@ -7779,6 +7841,10 @@ sub getCmdLineOptions{
 		"checkInstall" => sub { checkMFFInstall("",1) },
 		"map=s"      => \$MFconfig{mapFile},
 		"config=s" => \$MFconfig{configFile},
+		"inspectState=i" => \$MFconfig{inspectState},
+		"planState=i" => \$MFconfig{planState},
+		"stateReport=s" => \$MFconfig{stateReport},
+		"planReport=s" => \$MFconfig{planReport},
 
 	#flow related
 		"redoFails=i" =>\$MFconfig{redoFails}, #if any step of requested analysis failed, just redo everything (extraction etc)
@@ -8047,5 +8113,3 @@ sub getCmdLineOptions{
 	print "Done. ";
 
 }
-
-
