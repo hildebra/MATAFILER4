@@ -38,6 +38,9 @@ sub _add_action {
 	$action->{depends_on} ||= [];
 	$action->{reason_codes} ||= [];
 	$action->{targets} ||= [];
+	$action->{automatic_targets} ||= [];
+	$action->{auto_apply} = $action->{auto_apply} ? 1 : 0;
+	$action->{automatic_policy} ||= 'none';
 	$action->{expected_outputs} ||= [];
 	$action->{requires_confirmation} = $action->{requires_confirmation} ? 1 : 0;
 	push @{$actions}, $action;
@@ -49,6 +52,25 @@ sub _partial_stage_repair {
 	my (%args) = @_;
 	my $stage = $args{stage};
 	return '' unless ($stage->{status} eq 'PARTIAL' && @{$stage->{issues} || []});
+	my @targets = _existing_paths($stage);
+	my %automatic_stage = map { $_ => 1 } qw(
+		mapping support_mapping coverage support_coverage preassembly_package
+	);
+	my @automatic_targets;
+	if ($automatic_stage{$args{stage_name}}) {
+		@automatic_targets = @targets;
+	} else {
+		my %issues = map { $_ => 1 } @{$stage->{issues}};
+		if ($issues{MARKER_WITHOUT_VALID_OUTPUT}) {
+			push @automatic_targets, map { $_->{path} }
+				grep { $_->{exists} && defined $_->{path} } @{$stage->{markers} || []};
+		}
+		push @automatic_targets, map { $_->{path} }
+			grep { $_->{exists} && !$_->{nonempty} && defined $_->{path} }
+			@{$stage->{artifacts} || []};
+	}
+	my $automatic = @automatic_targets ? 1 : 0;
+	my $fully_automatic = $automatic && @automatic_targets == @targets ? 1 : 0;
 	return _add_action($args{actions}, $args{by_id}, {
 		id => $args{id},
 		kind => 'repair',
@@ -57,10 +79,13 @@ sub _partial_stage_repair {
 		stage => $args{stage_name},
 		depends_on => $args{depends_on} || [],
 		reason_codes => [@{$stage->{issues}}],
-		targets => [_existing_paths($stage)],
+		targets => \@targets,
+		automatic_targets => \@automatic_targets,
+		auto_apply => $automatic,
+		automatic_policy => $automatic ? 'invalidate_incomplete_stage' : 'none',
 		expected_outputs => [],
-		requires_confirmation => 1,
-		authorization => 'explicit_apply',
+		requires_confirmation => $fully_automatic ? 0 : 1,
+		authorization => $fully_automatic ? 'automatic_safe_repair' : 'explicit_apply',
 		risk => 'destructive',
 	});
 }
@@ -114,6 +139,9 @@ sub build_workflow_plan {
 				stage => 'assembly',
 				reason_codes => \@membership_issues,
 				targets => \@targets,
+				automatic_targets => [],
+				auto_apply => 0,
+				automatic_policy => 'none',
 				requires_confirmation => 1,
 				authorization => 'OKtoRWassGrps',
 				risk => 'group_wide_destructive',
@@ -335,16 +363,19 @@ sub build_workflow_plan {
 	my $repair_count = grep { $_->{kind} eq 'repair' } @actions;
 	my $submit_count = grep { $_->{kind} eq 'submit' } @actions;
 	my $manual_count = grep { $_->{kind} eq 'manual' } @actions;
+	my $automatic_repair_count = grep { $_->{kind} eq 'repair' && $_->{auto_apply} } @actions;
 	my $plan = {
 		schema_version => 1,
 		mode => 'repair_submission_plan',
 		read_only => 1,
 		execution_supported => 0,
+		automatic_repairs_supported => 1,
 		summary => {
 			actions => scalar(@actions),
 			repairs => 0 + $repair_count,
 			submissions => 0 + $submit_count,
 			manual_steps => 0 + $manual_count,
+			automatic_repairs => 0 + $automatic_repair_count,
 			confirmations_required => 0 + grep { $_->{requires_confirmation} } @actions,
 		},
 		actions => \@actions,

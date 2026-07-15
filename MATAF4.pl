@@ -10,6 +10,7 @@
 use warnings;
 use strict;
 use File::Basename;
+use File::Path qw(make_path);
 use Cwd 'abs_path';
 use POSIX;
 use Getopt::Long qw( GetOptions );
@@ -33,6 +34,7 @@ use Mods::Binning qw (getBinSubdirName );
 use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
+use Mods::WorkflowRunner qw(run_workflow_preflight);
 
 
 #some useful HPC commands..
@@ -77,6 +79,8 @@ sub setDefaultMFconfig;
 sub getCmdLineOptions;
 sub setupHPC;
 sub runStateInspection;
+sub runAutomaticWorkflowPreflight;
+sub workflowStateOptions;
 
 sub createConsSNPandSVs;
 
@@ -197,6 +201,7 @@ my $scaffTarExtLibTar = ""; my $bwt2ndMapDep = "";
 
 # the map and some base parameters (base ID, in path, out path) can be (re)set
 my %map; my %AsGrps; my %DOs;#DOs only required for metabat, to use all mappings within an assembly group
+my $workflowIteration = 0;
 prepareMap();
 my @samples = @{$map{opt}{smpl_order}}; 
 
@@ -204,6 +209,7 @@ if ($MFconfig{inspectState}) {
 	runStateInspection();
 	exit(0);
 }
+runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
 
 
 #captures statistics for current sample
@@ -1414,6 +1420,11 @@ sub loop2C_check(){
 
 			#print "L2C:: $loop2completion  @{$sampleDeps_AR}\n";
 			qsubSystemJobAlive( \@grandDeps,$QSBoptHR ,1 );
+			# Reinspect after every completed submission pass. This lets hybrid
+			# preassembly packages and assembly-group outputs become dependencies
+			# for the next pass without requiring a separate user command.
+			$workflowIteration++;
+			runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
 			#reset some key params...
 			@grandDeps = ();
 			resetAsGrps(\%AsGrps);
@@ -2461,16 +2472,21 @@ sub isLastSampleInAssembly{
 }
 
 
+sub workflowStateOptions {
+	return {
+		assembly_mode => $MFopt{DoAssembly},
+		map_to_assembly => $MFopt{map2Assembly},
+		map_support_to_assembly => $MFopt{mapSupport2Assembly},
+		run_tmp_dir => $MFglobal{runTmpDirGlobal},
+	};
+}
+
+
 sub runStateInspection {
 	my $report = inspect_workflow_state(
 		map => \%map,
 		groups => \%AsGrps,
-		options => {
-			assembly_mode => $MFopt{DoAssembly},
-			map_to_assembly => $MFopt{map2Assembly},
-			map_support_to_assembly => $MFopt{mapSupport2Assembly},
-			run_tmp_dir => $MFglobal{runTmpDirGlobal},
-		},
+		options => workflowStateOptions(),
 	);
 	if ($MFconfig{stateReport} ne '') {
 		my $json = encode_state_report($report);
@@ -2496,6 +2512,46 @@ sub runStateInspection {
 	} elsif ($MFconfig{stateReport} eq '') {
 		print STDOUT encode_state_report($report);
 	}
+}
+
+
+sub runAutomaticWorkflowPreflight {
+	my ($iteration) = @_;
+	my $applyRepairs = $doSubmit && $MFconfig{autoRepairState};
+	my $result = run_workflow_preflight(
+		map => \%map,
+		groups => \%AsGrps,
+		options => workflowStateOptions(),
+		apply_repairs => $applyRepairs,
+		allow_group_rewrite => $MFconfig{OKtoRWassGrps},
+		iteration => $iteration,
+	);
+
+	my $auditDir = $baseOut ne '' ? "$baseOut/LOGandSUB/workflow" : '';
+	if ($auditDir ne '') {
+		make_path($auditDir) unless (-d $auditDir);
+		my $suffix = sprintf('%03d', $iteration);
+		my $statePath = "$auditDir/state.iteration-$suffix.json";
+		my $planPath = "$auditDir/plan.iteration-$suffix.json";
+		open my $stateFH, '>', $statePath
+			or die "Cannot write automatic state report $statePath: $!\n";
+		print {$stateFH} encode_state_report($result->{state});
+		close $stateFH;
+		open my $planFH, '>', $planPath
+			or die "Cannot write automatic workflow plan $planPath: $!\n";
+		print {$planFH} encode_workflow_plan($result->{plan});
+		close $planFH;
+	}
+
+	my $repairSummary = $result->{repairs};
+	my $planSummary = $result->{plan}{summary};
+	my $repairWord = $applyRepairs ? 'removed' : 'would remove';
+	my $repairCount = $applyRepairs
+		? $repairSummary->{removed_targets} : $repairSummary->{would_remove_targets};
+	print "Workflow preflight iteration $iteration: $planSummary->{submissions} pending submissions; "
+		."$repairWord $repairCount safe partial targets; "
+		."$repairSummary->{blocked_repairs} protected repairs require explicit authorization.\n";
+	return $result;
 }
 
 
@@ -7761,6 +7817,8 @@ sub setDefaultMFconfig{
 	$MFconfig{mapFile} = "";
 	$MFconfig{inspectState} = 0;
 	$MFconfig{planState} = 0;
+	$MFconfig{autoStatePlan} = 1;
+	$MFconfig{autoRepairState} = 1;
 	$MFconfig{stateReport} = "";
 	$MFconfig{planReport} = "";
 	$MFconfig{configFile} = "";
@@ -7845,6 +7903,8 @@ sub getCmdLineOptions{
 		"planState=i" => \$MFconfig{planState},
 		"stateReport=s" => \$MFconfig{stateReport},
 		"planReport=s" => \$MFconfig{planReport},
+		"autoStatePlan=i" => \$MFconfig{autoStatePlan},
+		"autoRepairState=i" => \$MFconfig{autoRepairState},
 
 	#flow related
 		"redoFails=i" =>\$MFconfig{redoFails}, #if any step of requested analysis failed, just redo everything (extraction etc)

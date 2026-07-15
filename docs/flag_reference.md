@@ -45,6 +45,8 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-planState` | integer | `0` | stable | Emit a read-only, dependency-ordered repair/submission plan from the inspection snapshot. |
 | `-stateReport` | string | `""` | stable | Write the inspection JSON to this explicit path. |
 | `-planReport` | string | `""` | stable | Write the repair/submission plan JSON to this explicit path. |
+| `-autoStatePlan` | integer | `1` | stable | Run the internal inspect/plan preflight before normal execution and at each `loopTillComplete` boundary. |
+| `-autoRepairState` | integer | `1` | stable | Apply only preflight repairs classified as automatically safe when submission is enabled. |
 
 ## Flow related
 
@@ -56,7 +58,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-submit` | integer | `1` | stable | submit any jobs at all? (0= no submission, just for trying if everything is correctly set up) |
 | `-from` | integer | `0` | stable | start at which samples from map file? |
 | `-to` | integer | `999999999999` | stable | stop at which samples from map file? |
-| `-loopTillComplete` | string | `"0"` | advanced | dangerous flag, script will loop over the assigned samples until all jobs are finished. |
+| `-loopTillComplete` | string | `"0"` | advanced | Loop over the selected samples; each next pass waits for current jobs and reruns the workflow preflight first. |
 | `-excludeNodes` | string | `""` | stable | exclude certain nodes? |
 | `-maxConcurrentJobs` | integer | `0` | stable | max jobs in queue, useful for large samples sets, currently only works on slurm |
 | `-killDepNever` | integer | `0` | stable | kill jobs in "Dependency never finished" state? |

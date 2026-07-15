@@ -62,6 +62,12 @@ perl $MF4DIR/MATAF4.pl   -map "$MAP"   -assembleMG 2   -assemblCores 12   -assem
 
 After submitted jobs finish, rerun the same command. MATAFILER4 uses completion marker files and should pick up unfinished or missing steps rather than restarting completed work.
 
+Normal runs automatically inspect and plan current state before submission,
+repair narrowly safe partial outputs, and save JSON audit files under
+`#OutPath/#RunID/LOGandSUB/workflow/`. No separate state or plan command is
+needed. With `-loopTillComplete`, this preflight repeats after the current
+pass's jobs finish and before the next pass begins.
+
 ## 6. Check completion
 
 A successful assembly-dependent run should normally create:

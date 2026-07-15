@@ -8,17 +8,56 @@
 
 ## Stabilized state workflow
 
-The stabilization workflow deliberately separates three concerns:
+For a normal run, no extra planning command or manual approval cycle is needed:
+
+```bash
+perl MATAF4.pl -map project.map [normal workflow flags] -submit 1
+```
+
+MATAFILER4 performs an internal preflight before the ordinary pipeline logic:
+
+1. Inspect files, completion markers, samples, and assembly groups.
+2. Build a dependency-aware repair/submission plan.
+3. Automatically invalidate narrowly scoped partial mapping, coverage, and
+   hybrid preassembly-package outputs.
+4. Reinspect the repaired state, then let the existing submission engine pick
+   up unfinished work.
+
+This preserves the established workflow: users can rerun the same command and
+MATAFILER4 resumes incomplete samples. `-submit 0` previews safe repairs without
+deleting their targets. Set `-autoRepairState 0` to keep automatic inspection
+and planning but disable its repairs, or `-autoStatePlan 0` to disable the
+preflight entirely.
+
+Each preflight writes an audit snapshot beneath
+`#OutPath/#RunID/LOGandSUB/workflow/`. Files are numbered by iteration, for
+example `state.iteration-000.json` and `plan.iteration-000.json`.
+
+With `-loopTillComplete`, the first preflight runs before submission. At every
+loop boundary, MATAFILER4 waits for the jobs submitted by the current pass,
+reinspects completed hybrid packages and assembly-group outputs, applies safe
+repairs, and only then starts the next pass. Completed members of a hybrid
+assembly group are retained while missing members are resubmitted; final group
+assembly remains dependent on all required preassembly packages.
+
+Group-wide invalidation is intentionally not classified as an automatic safe
+repair. An exact assembly-group membership change remains blocked unless the
+existing `-OKtoRWassGrps 1` authorization is supplied.
+
+### Optional expert diagnostics
+
+The stabilization model still separates three concerns for debugging:
 
 1. **Inspect:** read files and completion markers and report their current state.
 2. **Plan:** convert that snapshot into reviewable repair and submission actions
    with explicit dependencies.
-3. **Execute:** run MATAFILER4 separately after reviewing the plan and selecting
-   the normal workflow and authorization flags.
+3. **Execute:** safely repair selected state internally, then use MATAFILER4's
+   established submission functions.
 
-The first two phases never initialize the scheduler, submit jobs, create scratch
-directories, or delete and repair outputs. This branch does not automatically
-apply plan documents; `execution_supported` is therefore `0` in plan JSON.
+The explicit inspect and plan commands are optional expert tools. They never
+initialize the scheduler, submit jobs, create scratch directories, or repair
+outputs. Plan documents are diagnostic rather than executable shell scripts;
+`execution_supported` therefore remains `0` in plan JSON.
 
 ### Inspect state
 
@@ -38,7 +77,7 @@ perl MATAF4.pl -map project.map -inspectState 1 -stateReport state.json
 
 Incomplete combinations, such as a completion stone without its expected
 artifact or an assembly-group membership mismatch, are reported as issues. The
-inspection path never applies repairs; execution remains a separate invocation.
+inspection command never applies repairs.
 
 ### Build a repair/submission plan
 
@@ -68,14 +107,13 @@ perl MATAF4.pl -map project.map -planState 1 \
 
 Plan generation remains read-only. It does not interpret the plan as shell
 commands, delete any target, initialize the scheduler, or submit jobs.
-Group-wide invalidation actions retain the `OKtoRWassGrps` authorization gate
-in the generated plan.
+Group-wide invalidation actions retain the `OKtoRWassGrps` authorization gate.
 
 Each action has a stable `id`, `kind`, `operation`, `scope`, `reason_codes`, and
-`depends_on` list. Repair actions additionally identify their destructive
-targets and required authorization; submission actions list their expected
-outputs. The action graph is validated for missing dependencies and cycles
-before it is emitted.
+`depends_on` list. Repair actions additionally identify their targets,
+`automatic_targets`, automatic policy, and required authorization; submission
+actions list their expected outputs. The action graph is validated for missing
+dependencies and cycles before it is emitted.
 
 
 This page describes running behaviour and core concepts. New users should usually read [Quick start](quickstart.md), [Mapping files](mapping_files.md) and [Common workflows](common_workflows.md) before using the full [Flag reference](flag_reference.md).
