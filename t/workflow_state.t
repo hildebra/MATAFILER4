@@ -49,6 +49,7 @@ write_file("$group_dir/ass.done.sto", "");
 write_file("$group_dir/smpls_used.txt", "$sample_a\n$sample_b\n");
 write_file("$sample_a/mapping/A-smd.cram.sto", "");
 write_file("$sample_a/mapping/A-smd.bam.coverage.gz", "coverage\n");
+write_file("$sample_a/mapping/A-smd.bam.breakpoints.tsv.gz", "breakpoints\n");
 
 my $before = filesystem_snapshot($root);
 my $report = inspect_workflow_state(map => \%map, groups => \%groups);

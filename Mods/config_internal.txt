@@ -30,6 +30,8 @@ sepCts_scr	perl [MFLRDir]/secScripts/assemblies/separateContigs.pl
 assStat_scr	perl [MFLRDir]/secScripts/assemblies/assemblathon_stats.pl
 renameCtg_scr	[MFLRDir]/secScripts/assemblies/renameCtgs.pl
 split_fasta4metaMDBG_scr	perl [MFLRDir]/secScripts/assemblies/split_fasta4metaMDBG.pl
+breakpoints_scr	perl [MFLRDir]/secScripts/assemblies/breakpoints.pl
+compareHybridAssemblies_scr	perl [MFLRDir]/secScripts/assemblies/compare_hybrid_assemblies.pl
 sizFilt_scr	perl [MFLRDir]/secScripts/assemblies/sizeFilterFas.pl
 buildTree_scr	perl [MFLRDir]/secScripts/phylo/buildTree5.pl	env:MF4phylo
 sizSplit_scr	[MFLRDir]/secScripts/assemblies/splitFNAbyLength.pl

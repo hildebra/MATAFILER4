@@ -151,6 +151,9 @@ my $package_a = "$root/tmp/hybrid-run/A/preAssmblGrp_hybrid";
 write_file("$package_a/scaffolds.fasta.filt", ">preassembly\nACGT\n");
 write_file("$package_a/Coverage.percontig.gz", "coverage\n");
 write_file("$package_a/Coverage.median.percontig.gz", "median\n");
+write_file("$package_a/mapping.coverage.gz", "mapping coverage\n");
+write_file("$package_a/breakpoints.tsv.gz", "breakpoints\n");
+write_file("$package_a/package.manifest.tsv", "key\tvalue\nschema_version\t2\n");
 write_file("$package_a/moved.sto", "done\n");
 my $resumed_state = inspect_workflow_state(
 	map => \%hybrid_map,

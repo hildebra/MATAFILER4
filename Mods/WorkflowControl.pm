@@ -177,6 +177,14 @@ sub hybrid_package_complete {
 	return 0 unless (-s "$package_dir/scaffolds.fasta.filt");
 	return 0 unless (_nonempty_with_optional_gzip("$package_dir/Coverage.percontig"));
 	return 0 unless (_nonempty_with_optional_gzip("$package_dir/Coverage.median.percontig"));
+	return 0 unless (-s "$package_dir/mapping.coverage.gz");
+	return 0 unless (-s "$package_dir/breakpoints.tsv.gz");
+	return 0 unless (-s "$package_dir/package.manifest.tsv");
+	open my $manifest, '<', "$package_dir/package.manifest.tsv" or return 0;
+	local $/;
+	my $manifest_text = <$manifest>;
+	close $manifest;
+	return 0 unless defined($manifest_text) && $manifest_text =~ /^schema_version\t2$/m;
 	return -e "$package_dir/moved.sto" ? 1 : 0;
 }
 

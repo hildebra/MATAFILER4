@@ -4,6 +4,9 @@ use Test::More;
 use File::Spec;
 use File::Temp qw(tempdir);
 use IO::Compress::Gzip qw(gzip $GzipError);
+use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
+use IPC::Open3;
+use Symbol qw(gensym);
 
 my $root = File::Spec->rel2abs('.');
 my $tmp = tempdir(CLEANUP => 1);
@@ -39,6 +42,136 @@ is(system($^X, File::Spec->catfile($root, 'secScripts', 'assemblies', 'sizeFilte
 like(read_file("$filter_input.filt"), qr/>long\nAAAAAAAAAA\n/, 'primary output contains long sequence');
 like(read_file("$filter_input.filt2"), qr/>last-secondary\nCCCCCC\n/,
      'secondary output contains the final short FASTA record');
+
+my $synthetic_fasta = File::Spec->catfile($tmp, 'synthetic.fasta');
+write_file($synthetic_fasta,
+           ">ctgA descriptive header\n" . ('A' x 30_000) . "\n>last\n" . ('C' x 1_000) . "\n");
+my $synthetic_coverage = File::Spec->catfile($tmp, 'mapping.coverage.gz');
+my $coverage_text = "ctgA\t0\t10000\t4\nctgA\t10000\t12000\t0\nctgA\t12000\t30000\t1\nlast\t0\t1000\t1\n";
+gzip(\$coverage_text => $synthetic_coverage)
+    or die "Cannot create $synthetic_coverage: $GzipError";
+my $synthetic_fastq = File::Spec->catfile($tmp, 'synthetic.fastq.gz');
+my $simulator = File::Spec->catfile($root, 'secScripts', 'assemblies', 'split_fasta4metaMDBG.pl');
+my $breakpoint_detector = File::Spec->catfile($root, 'secScripts', 'assemblies', 'breakpoints.pl');
+my $breakpoint_tsv = File::Spec->catfile($tmp, 'breakpoints.tsv.gz');
+is(system($^X, '-I' . $root, $breakpoint_detector,
+          '--assembly', $synthetic_fasta, '--coverage', $synthetic_coverage,
+          '--output', $breakpoint_tsv, '--breakpoint-depth', 0.1,
+          '--min-breakpoint-length', 100, '--smooth-gap', 100,
+          '--flank-length', 500, '--min-flank-depth', 1,
+          '--max-flank-fraction', 0.1), 0,
+   'standalone breakpoint detector completes');
+my $breakpoint_text = '';
+gunzip($breakpoint_tsv => \$breakpoint_text)
+    or die "Cannot read $breakpoint_tsv: $GunzipError";
+like($breakpoint_text, qr/^ctgA\t10000\t12000\t2000\t/m,
+     'breakpoint TSV contains the supported internal low-coverage interval');
+my $smooth_fasta = File::Spec->catfile($tmp, 'smooth-break.fasta');
+write_file($smooth_fasta, ">smooth\n" . ('A' x 5_000) . "\n");
+my $smooth_coverage = File::Spec->catfile($tmp, 'smooth-break.coverage.gz');
+my $smooth_coverage_text = join '',
+    "smooth\t0\t2000\t5\n", "smooth\t2000\t2500\t0\n",
+    "smooth\t2500\t2550\t1\n", "smooth\t2550\t3000\t0\n",
+    "smooth\t3000\t4500\t5\n", "smooth\t4500\t5000\t0\n";
+gzip(\$smooth_coverage_text => $smooth_coverage)
+    or die "Cannot create $smooth_coverage: $GzipError";
+my $smooth_tsv = File::Spec->catfile($tmp, 'smooth-breakpoints.tsv.gz');
+is(system($^X, '-I' . $root, $breakpoint_detector,
+          '--assembly', $smooth_fasta, '--coverage', $smooth_coverage,
+          '--output', $smooth_tsv, '--smooth-gap', 100), 0,
+   'breakpoint smoothing run completes');
+my $smooth_result = '';
+gunzip($smooth_tsv => \$smooth_result)
+    or die "Cannot read $smooth_tsv: $GunzipError";
+like($smooth_result, qr/^smooth\t2000\t3000\t1000\t/m,
+     'a short noisy mapping island is smoothed into one supported breakpoint');
+unlike($smooth_result, qr/^smooth\t4500\t5000\t/m,
+       'a terminal low-coverage run is rejected without support on both sides');
+my $simulator_err = gensym;
+my $simulator_pid = open3(undef, my $simulator_out, $simulator_err,
+    $^X, '-I' . $root, $simulator,
+    '--assembly', $synthetic_fasta, '--coverage', $synthetic_coverage,
+    '--breakpoints', $breakpoint_tsv,
+    '--output', $synthetic_fastq, '--mean-read-length', 3_000,
+    '--read-length-sd', 300, '--seed', 7);
+my $simulator_stdout = do { local $/; <$simulator_out> };
+my $simulator_stderr = do { local $/; <$simulator_err> };
+waitpid($simulator_pid, 0);
+is($? >> 8, 0, 'metaMDBG preparation accepts its flag-based interface');
+is($simulator_stderr, '', 'metaMDBG simulation emits no warnings for valid input');
+like($simulator_stdout, qr/Synthetic read simulation summary/,
+     'simulation reports a readable end-of-run summary');
+like($simulator_stdout, qr/Breakpoints identified:\s+1 across 1 contig/,
+     'simulation summary reports identified breakpoints');
+like($simulator_stdout, qr/Simulated reads:\s+20\b/,
+     'simulation summary reports its output read count');
+my $synthetic_text = '';
+gunzip($synthetic_fastq => \$synthetic_text)
+    or die "Cannot read $synthetic_fastq: $GunzipError";
+my @synthetic_headers = ($synthetic_text =~ /^\@([^\n]+)/mg);
+is(scalar @synthetic_headers, 20,
+   'coverage integrals determine the number of randomly placed reads');
+my @ctga_coordinates = map {
+    /^ctgA_SIM_\d+_START_(\d+)_END_(\d+)_ANCHOR_(\d+)$/ ? [$1, $2, $3] : ()
+} @synthetic_headers;
+is(scalar @ctga_coordinates, 19, 'the two covered ctgA blocks produce their expected reads');
+ok(!grep({ !($_->[1] <= 10_000 || $_->[0] >= 12_000) } @ctga_coordinates),
+   'no simulated read overlaps or crosses the zero-coverage breakpoint');
+is(scalar(grep { $_->[2] < 10_000 } @ctga_coordinates), 13,
+   'the four-fold high-coverage block receives proportionally more read anchors');
+is(scalar(grep { $_->[2] >= 12_000 } @ctga_coordinates), 6,
+   'the lower-coverage block receives proportionally fewer read anchors');
+is(scalar(grep { /^last_SIM_000001_START_0_END_1000_ANCHOR_\d+$/ } @synthetic_headers), 1,
+   'the final FASTA contig is retained');
+my @synthetic_sequences = ($synthetic_text =~ /^\@[^\n]+\n([^\n]+)\n\+\n/mg);
+my @ctga_lengths = map { $_->[1] - $_->[0] } @ctga_coordinates;
+ok(scalar(keys %{ { map { $_ => 1 } @ctga_lengths } }) > 3,
+   'simulated read lengths vary around the requested mean');
+my $total_simulated_length = 0;
+$total_simulated_length += $_ for @ctga_lengths;
+my $mean_simulated_length = $total_simulated_length / @ctga_lengths;
+cmp_ok($mean_simulated_length, '>', 2_600, 'simulated mean length remains near the request');
+cmp_ok($mean_simulated_length, '<', 3_400, 'simulated mean length remains near the request');
+
+my $legacy_coverage = File::Spec->catfile($tmp, 'Coverage.median.percontig.gz');
+my $legacy_coverage_text = "ctgA\t1\nlast\t1\n";
+gzip(\$legacy_coverage_text => $legacy_coverage)
+    or die "Cannot create $legacy_coverage: $GzipError";
+my $legacy_fastq = File::Spec->catfile($tmp, 'legacy.fastq.gz');
+my $empty_breakpoints = File::Spec->catfile($tmp, 'no-breakpoints.tsv');
+write_file($empty_breakpoints, "contig\tstart\tend\tlength\tmean_depth\tleft_depth\tright_depth\n");
+is(system($^X, '-I' . $root,
+          $simulator,
+          '--assembly', $synthetic_fasta, '--coverage', $legacy_coverage,
+          '--breakpoints', $empty_breakpoints,
+          '--output', $legacy_fastq, '--mean-read-length', 3_000,
+          '--read-length-sd', 300, '--seed', 7), 0,
+   'older hybrid packages retain contig-wide coverage compatibility');
+my $legacy_text = '';
+gunzip($legacy_fastq => \$legacy_text)
+    or die "Cannot read $legacy_fastq: $GunzipError";
+is(scalar(() = $legacy_text =~ /^\@/mg), 11,
+   'contig-wide fallback preserves its requested coverage and final contig');
+my $comparison = File::Spec->catfile($tmp, 'HybridAssemblyComparison.tsv');
+is(system($^X, File::Spec->catfile($root, 'secScripts', 'assemblies', 'compare_hybrid_assemblies.pl'),
+          '--preassembly', $synthetic_fasta, '--final', $smooth_fasta,
+          '--output', $comparison), 0,
+   'comparative hybrid assembly report completes');
+like(read_file($comparison), qr/^N50\t30000\t5000\t-25000\t/m,
+     'comparative report contains preassembly and final N50 values');
+
+my $depth_converter = File::Spec->catfile($root, 'helpers', 'samcovToBedGraph.pl');
+my $converter_err = gensym;
+my $converter_pid = open3(my $converter_in, my $converter_out, $converter_err, $^X, $depth_converter);
+print {$converter_in} "ctg\t1\t2\nctg\t2\t2\nctg\t4\t2\nctg\t5\t3\n";
+close $converter_in;
+my $converted = do { local $/; <$converter_out> };
+my $converter_errors = do { local $/; <$converter_err> };
+waitpid($converter_pid, 0);
+is($? >> 8, 0, 'samtools-depth converter completes');
+is($converter_errors, '', 'samtools-depth converter emits no warnings');
+is($converted, "ctg\t0\t2\t2\nctg\t3\t4\t2\nctg\t4\t5\t3\n",
+   'bedGraph conversion preserves coordinate gaps and emits the final interval');
 
 my $gene_cat = read_file(File::Spec->catfile($root, 'secScripts', 'geneCat.pl'));
 unlike($gene_cat, qr/rm -rf \$GCdir\/\* \$tmpDir\*/, 'geneCat has no wildcard clean-start deletion');

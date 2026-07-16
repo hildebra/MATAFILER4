@@ -273,10 +273,15 @@ sub inspect_workflow_state {
 			if ($run_tmp_dir ne '') {
 				my $package_dir = _join_path($run_tmp_dir, $sample_id, "preAssmblGrp_$group_id");
 				$preassembly_package = _stage_state(
-					artifacts => [_join_path($package_dir, 'scaffolds.fasta.filt')],
+					artifacts => [
+						_join_path($package_dir, 'scaffolds.fasta.filt'),
+						_join_path($package_dir, 'mapping.coverage.gz'),
+						_join_path($package_dir, 'package.manifest.tsv'),
+					],
 					gzip_artifacts => [
 						_join_path($package_dir, 'Coverage.percontig'),
 						_join_path($package_dir, 'Coverage.median.percontig'),
+						_join_path($package_dir, 'breakpoints.tsv'),
 					],
 					markers => [_join_path($package_dir, 'moved.sto')],
 				);
@@ -288,6 +293,7 @@ sub inspect_workflow_state {
 			artifacts => [
 				_join_path($mapping_dir, "$sample_id-smd.cram"),
 				_join_path($mapping_dir, "$sample_id-smd.bam.coverage.gz"),
+				_join_path($mapping_dir, "$sample_id-smd.bam.breakpoints.tsv.gz"),
 			],
 			markers => [_join_path($mapping_dir, "$sample_id-smd.cram.sto")],
 		) : _not_applicable_state();

@@ -1209,7 +1209,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,mappingStarted =>1,
 						glbTmp => $smplTmpDir."/toMGctgs/",glbMapDir => $mapOut,mapSupport => 0,
 						readTec => ${$cleanSeqSetHR}{readTec}, submit => 1,submNow => $mapNow,
-						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam);
+						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam,
+						# Primary short- and long-read assemblies always receive a breakpoint report.
+						breakpointOutput => "$finalMapDir/$SmplName-smd.bam.breakpoints.tsv.gz",
+						strictHybridCoverage => ($MFopt{DoAssembly} == 5 && $ePreAssmbly && $doPreAssmFlag ? 1 : 0));
 		# primary mapping (onto de novo assembly)
 		my ($map2Ctgs,$delaySubmCmd,$mapOptHr) = mapReadsToRef(\%dirset, normalise_job_dependencies($AsGrps{$cAssGrp}{AssemblJobName}, $jdep));#\@libsCFP);
 		my ($map2Ctgs_2,$delaySubmCmd_2,$mapStat)  = bamDepth(\%dirset,$map2Ctgs,$mapOptHr);
@@ -5199,7 +5202,9 @@ sub alignPostTreat{
 			$algCmd .= " | $bamfilter $MFopt{bamfilterONT}  "; #defaults to ONT (safer parameters)
 		}
 	} else { #illumina parameters
-		$algCmd .= " | $bamfilter $MFopt{bamfilterIll} ";
+		my $ill_filter = $postTreat{strictHybridCoverage}
+			? $MFopt{bamfilterHybridIll} : $MFopt{bamfilterIll};
+		$algCmd .= " | $bamfilter $ill_filter ";
 	}
 
 
@@ -5519,7 +5524,8 @@ sub mapReadsToRef{
 										subBamsAR => \@subBams,unaligned =>$unaligned,baseN => $baseN,xtraSamSteps1 => $xtraSamSteps1,
 										decoyModeActive => $decoyModeActive, map2ndTogether => $map2ndTogether,regsAR => \@regs, 
 										doCram => $doCram, finalDSar => \@finalDS, outNmsAR => \@outNms, mappDirAR => \@mappDir, 
-										reg_lcsAR => \@reg_lcs);
+										reg_lcsAR => \@reg_lcs,
+										strictHybridCoverage => ($dirsHr->{strictHybridCoverage} || 0));
 			
 			my ($algCmdPost,$subBamAR) = alignPostTreat(\%postTreat, $i, $kk);
 			$algCmd .= $algCmdPost;
@@ -5647,8 +5653,10 @@ sub bamDepth{
 	#check if already done
 	my $outstat = check_map_done($doCram, $finalD, $baseN, $mappDir);
 	my $outstat2 = check_depth_done($doCram, $finalD, $baseN, $mappDir);
+	my $breakpointOut = $dirsHr->{breakpointOutput} || "";
+	my $breakpointDone = $breakpointOut eq "" || -s $breakpointOut;
 	#die "$outstat $outstat2 $mappingRes $nxtBAM\n$mappDir\n$finalD\n";
-	if ($outstat2 && $outstat){return ("","",$outstat);}
+	if ($outstat2 && $outstat && $breakpointDone){return ("","",$outstat);}
 
 	#die "$mappDir/$baseN-smd.bam.coverage.gz\n$finalD/$baseN-smd.bam.coverage.gz\n" ;#if (-e "$finalD/$baseN-smd.bam.coverage.gz");
 		
@@ -5711,11 +5719,25 @@ sub bamDepth{
 		#$covCmd = "$bedCovBin -ibam $nxtBAM -bg > $nxtBAM.coverage\n";
 		#$covCmd .= "rm -f $nxtBAM.coverage.gz\n$pigzBin -f -p $numCore $nxtBAM.coverage\n";
 		my $sam2bed = getProgPaths("samcov2bed");
-		$covCmd .= "$smtBin depth -@ $numCore $nxtBAM | $sam2bed | $pigzBin -p $numCore -c > $nxtBAM.coverage.gz\n";
+		my $depthFilters = $dirsHr->{strictHybridCoverage}
+			? "-Q $MFopt{hybridMinMapQ} -q $MFopt{hybridMinBaseQ}" : "";
+		$covCmd .= "$smtBin depth -aa $depthFilters -@ $numCore $nxtBAM | $sam2bed | $pigzBin -p $numCore -c > $nxtBAM.coverage.gz\n";
 		#$covCmd .= "rm -f $nxtBAM.coverage.gz\n$pigzBin -f -p $numCore $nxtBAM.coverage\n";
 		if ($map2ndMpde == 3){ #map unmapped to genecat
 			$covCmd .= "$readCov_Bin $nxtBAM.coverage.gz - 100\n"; #read length doesn't matter, since no win is given out and no gene is present
 		}
+	}
+	if ($breakpointOut ne "" && !-s $breakpointOut) {
+		my $breakpointScr = getProgPaths("breakpoints_scr");
+		my $breakpointDir = dirname($breakpointOut);
+		my $breakpointCoverage = fileGZe("$finalBam.coverage")
+			? "$finalBam.coverage.gz" : "$nxtBAM.coverage.gz";
+		$covCmd .= "mkdir -p $breakpointDir\n";
+		$covCmd .= "$breakpointScr --assembly $REF --coverage $breakpointCoverage --output $breakpointOut "
+			."--breakpoint-depth $MFopt{breakpointDepth} --min-breakpoint-length $MFopt{breakpointMinLength} "
+			."--smooth-gap $MFopt{breakpointSmoothGap} --flank-length $MFopt{breakpointFlankLength} "
+			."--min-flank-depth $MFopt{breakpointMinFlankDepth} --max-flank-fraction $MFopt{breakpointMaxFlankFraction}\n";
+		$covCmd .= "[ -s $breakpointOut ] || exit 34\n";
 	}
 	#die "$covCmd\n";
 	
@@ -5736,7 +5758,7 @@ sub bamDepth{
 	my $newJobN = "SBAM$supTag$JNUM$outName";	
 	#subsequent jobs not dependent on this one
 	my $jobN2 = $jDep; my $retCmds="";
-	$covCmd = "" if ( fileGZs( "$nxtBAM.coverage"));
+	$covCmd = "" if (fileGZs("$nxtBAM.coverage") && $breakpointDone);
 	
 	#my $cleaner = "mv $tmpD $fin
 	if (0){
@@ -5752,7 +5774,7 @@ sub bamDepth{
 	}
 	
 	#die "$cmd\n$covCmd\n$CRAMcmd\n";
-	if ( ($doCram && !-e $cramSTO) || ( !fileGZs("$finalBam.coverage") ) ){#|| $bamFresh){
+	if ( ($doCram && !-e $cramSTO) || (!fileGZs("$finalBam.coverage")) || !$breakpointDone ){#|| $bamFresh){
 		my $preHDDspace=$QSBoptHR->{tmpSpace};		my $baseMapHDD = $HDDspace{mapping} ;  $baseMapHDD =~ s/G$//;
 		$QSBoptHR->{tmpSpace} = int((1.6 * $map{$curSmpl}{inputFileSizeMB}*$baseMapHDD) /1024)+15  ."G";		if (${$dirsHr}{submit}){
 		#die "map2:: $qdir\n$cramSTO\n$nxtBAM.coverage\n";
@@ -6475,6 +6497,29 @@ sub getASsemblyStats{
 	return ($outStr,$outStrDesc);
 }
 
+sub getBreakpointStats {
+	my ($path) = @_;
+	my $header = "BreakpointCount\tBreakpointContigs\tBreakpointBases\tBreakpointMeanLength\tBreakpointMaxLength\t";
+	return ("\t" x 5, $header) unless fileGZe($path);
+	my ($fh) = gzipopen($path, 'breakpoint statistics', 1);
+	my ($count, $bases, $maximum) = (0, 0, 0);
+	my %contigs;
+	while (my $line = <$fh>) {
+		$line =~ s/[\r\n]+$//;
+		next if $line eq '' || $line =~ /^(?:#|contig\tstart\tend(?:\t|$))/;
+		my @fields = split /\t/, $line;
+		next unless @fields >= 3 && $fields[1] =~ /^\d+$/
+			&& $fields[2] =~ /^\d+$/ && $fields[2] > $fields[1];
+		my $length = (@fields >= 4 && $fields[3] =~ /^\d+$/)
+			? $fields[3] : $fields[2] - $fields[1];
+		$count++; $bases += $length; $maximum = $length if $length > $maximum;
+		$contigs{$fields[0]} = 1;
+	}
+	close $fh or die "Cannot close breakpoint report '$path': $!\n";
+	my $mean = $count ? sprintf('%.1f', $bases / $count) : 0;
+	return (join("\t", $count, scalar(keys %contigs), $bases, $mean, $maximum)."\t", $header);
+}
+
 sub smplStats(){
 	my ($inD,$assDir,$SmplN) = @_;
 	my $do500Stat = 0;
@@ -6582,6 +6627,10 @@ sub smplStats(){
 	}
 #print $tmpassD."\n";
 	($t1,$t2) = getASsemblyStats($tmpassD,"AssemblyStats.txt",1);
+	$outStr .= $t1;	$outStrDesc .= $t2;
+	# Breakpoint reports belong to the sample-specific primary mapping because
+	# they are derived from that sample's depth profile, not from the assembly alone.
+	($t1,$t2) = getBreakpointStats("$inD/mapping/$SmplN-smd.bam.breakpoints.tsv.gz");
 	$outStr .= $t1;	$outStrDesc .= $t2;
 	if ($do500Stat){
 		my ($t1,$t2) = getASsemblyStats($tmpassD."AssemblyStats.500.txt",0);
@@ -7029,7 +7078,7 @@ sub spadesAssembly{
 
 
 sub movePreAssmData{
-	my ($metagD, $mvD,$mapD, $CSdir, $smplID ) = @_; #$tmpD ,
+	my ($metagD, $mvD,$mapD, $CSdir, $smplID, $breakpointTsv, $groupID ) = @_; #$tmpD ,
 	#very thorough checks that everything is correctly prepped
 	my $mvSTO = "$mvD/moved.sto";
 #	system "rm -fr $metagD;\n" if ($AssemblyGo && -e $mvSTO);
@@ -7044,22 +7093,31 @@ sub movePreAssmData{
 	die "movePreAssmData::Not a preassebmly?: $metagD\n" unless (-e "$metagD/$stones{preAsmDone}");
 	die "movePreAssmData::Couldn't find ContigStats in $metagD\n" unless (-d $CSdir);
 	die "movePreAssmData::Couldn't find Assembly $metagD/scaffolds.fasta.filt\n" unless (-e "$metagD/scaffolds.fasta.filt");
+	my $mappingCov = "$mapD/$smplID-smd.bam.coverage.gz";
+	die "movePreAssmData::Mapping coverage not found: $mappingCov\n" unless (-s $mappingCov);
+	die "movePreAssmData::Breakpoint report not found: $breakpointTsv\n" unless (-s $breakpointTsv);
 	my $cmd = "";
-	#my $newCovFile = "$tmpD/$smplID.coverage.perCtg";
-	$cmd .= "mkdir -p $mvD;cp -rf $metagD/scaffolds.fasta.filt $metagD/$stones{preAsmDone} $CSdir/Coverage* $mvD;\n";
-	#$cmd .= "cp $CSdir/Coverage.median.percontig $newCovFile\n";
-	$cmd .= "rm -fr $mapD $CSdir;\n" ;
+	# Build a complete sibling directory first. An interrupted copy can never be
+	# mistaken for a usable package, and an older partial package is retained for diagnosis.
+	my $packageTag = time().".$$";
+	my $stage = "$mvD.stage.$packageTag";
+	$cmd .= "rm -rf $stage; mkdir -p $stage;\n";
+	$cmd .= "cp -rf $metagD/scaffolds.fasta.filt $metagD/$stones{preAsmDone} $CSdir/Coverage* $stage;\n";
+	$cmd .= "cp $mappingCov $stage/mapping.coverage.gz; cp $breakpointTsv $stage/breakpoints.tsv.gz;\n";
+	$cmd .= "printf 'key\\tvalue\\nschema_version\\t2\\nsample_id\\t$smplID\\nassembly_group\\t$groupID\\nsimulator\\tcoverage_weighted_v2\\nmax_synthetic_depth\\t$MFopt{hybridSyntheticMaxDepth}\\n' > $stage/package.manifest.tsv;\n";
+	$cmd .= "test -s $stage/scaffolds.fasta.filt && test -s $stage/mapping.coverage.gz && test -s $stage/breakpoints.tsv.gz && test -s $stage/package.manifest.tsv || exit 35;\n";
 	if (-e "$metagD/AssemblyStats.txt"){
 		$cmd .= "mv $metagD/AssemblyStats.txt $logDir/preAssmStat.txt;\n";
 	} elsif (-e "$metagD/AssemblyStats.ini.txt"){
 		$cmd .= "mv $metagD/AssemblyStats.ini.txt $logDir/preAssmStat.txt;\n";
 	}
-	$cmd .= "rm -f $metagD/scaffolds.fasta.filt.*;\n"; #make sure any old indexes are deleted..
+	# Mapper indexes remain with the source assembly; packaging is non-destructive.
 	#if ($AssemblyGo){$cmd .= "rm -fr $metagD;\n" ; print "removed preASsmbl dir";}
 	#$cmd .= "cp $tmpD/$stones{preAsmDone} $metagD;\n";
 	#$cmd .= "cp -rf $tmpD/* $mvD/;\n";
 	#$cmd .= "rm -fr $tmpD\n";
-	$cmd .= "touch $mvSTO\n";
+	$cmd .= "touch $stage/moved.sto\n";
+	$cmd .= "if [ -e $mvD ]; then mv $mvD $mvD.incomplete.$packageTag; fi; mv $stage $mvD\n";
 	#die $cmd;
 	systemW $cmd;
 	print " Done \n";
@@ -7132,7 +7190,8 @@ sub prepPreAssmbl{
 		#die "preAssmX: $PostAssemblyGo $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} >= $AsGrps{$cAssGrp}{CntAimAss}\n";
 		$doPreAssmFlag = 0 ;#no prep needed any longer.. files will/are saved already!
 		#all ready for second assembly step!
-		movePreAssmData($metagD, $mvD,$mapD,  $CSdir, $curSmpl) ;#$tmpD ,
+		movePreAssmData($metagD, $mvD,$mapD,  $CSdir, $curSmpl,
+			"$mapD/$curSmpl-smd.bam.breakpoints.tsv.gz", $cAssGrp) ;#$tmpD ,
 		$ePreAssmblPck = 1;
 	}  
 	#die "XAS\n";
@@ -7164,6 +7223,10 @@ sub longRdAssembly{
 	my ($p1ar,$p2ar,$singlAr,$cReadTecAr) = getCleanSeqsAssmGrp($asHr, $cAsGrp, $useSupportRds);
 	if (@{$p1ar} > 0 &&$p1ar->[0] ne ""){print "Paired reads defined (@{$p1ar}), but long read assemblies rely on singleton reads!\nAborting\n";die;}
 	my $numInLibs = scalar @{$singlAr};
+	my %long_read_tech = map { $_ => 1 } grep { defined($_) && /^(?:PB|ONT)$/ } @{$cReadTecAr};
+	die "Assembly group $cAsGrp mixes ONT and PacBio reads; split these technologies into separate assembly groups\n"
+		if keys(%long_read_tech) > 1;
+	my ($long_read_tech) = keys %long_read_tech;
 	#print "$numInLibs libs\n";
 		
 	if ($LassP == 5){#hybrid mode.. check that all required files are present or stop here
@@ -7187,9 +7250,12 @@ sub longRdAssembly{
 	my $nCores = $MFopt{AssemblyCores};#6
 	
 	my $nodeTmp2 = "$nodeTmp/tmpRawRds/";
- 	my $cmd = "rm -rf $nodeTmp\nmkdir -p $nodeTmp $finalOut $nodeTmp2\n\n"; #\n  mkdir -p $nodeTmp/tmp\n
+	my $stageOut = "$finalOut.hybrid-stage";
+	my $backupOut = "$finalOut.previous";
+	my $cmd = "rm -rf $nodeTmp $stageOut\nmkdir -p $nodeTmp $nodeTmp2\n\n"; #\n  mkdir -p $nodeTmp/tmp\n
 	#input reads for assembly .. expected unpaired, long reads
 	my @inRds;# = @{$singlAr};
+	my @hybridPreassemblies;
 	
 	#metaMDBG "hack" to impute illumina assemblies:
 	my $cmdPre = "";
@@ -7199,6 +7265,7 @@ sub longRdAssembly{
 		my $runPar=1;
 		#my $illPathS = ;
 		my @illDirs = @{$AsGrps{$cAsGrp}{preAsmblDir}}; #split /,/,$illPathS;
+		@hybridPreassemblies = map { "$_/scaffolds.fasta.filt" } @illDirs;
 		if ((@$singlAr - $AsGrps{$cAsGrp}{CntPreAssNoPrim}) > (@illDirs)){
 			die "hybrid assembly: Unexpected less preDirs (".@illDirs .") than indirs(" . @$singlAr .")illDs: @illDirs\nsingl: @$singlAr\n";
 		}
@@ -7206,16 +7273,21 @@ sub longRdAssembly{
 		$cmdPre .= "echo \"presplitting helper assembly\"\n";
 		#die "preLib num (" .@illDirs . ") != read libs (" . @inRds . ")!" if (@illDirs != @inRds);
 		die "preLib num (" .@illDirs . ") < read libs (" . @inRds . ")!" if (@illDirs < @inRds);
-		my $locXtrCmd = ""; $locXtrCmd = " &" if ($runPar);
 		my $cmdLater = "";
+		my $lengthTemplateArgs = join(" ", map { "--length-template $_" } grep { defined($_) && $_ ne "" } @{$singlAr});
 		#condition is not correct: there might be cases where there are less inRds (PB runs), but additional assmblGrp samples have illumina..
 		for (my $i=0;$i<@illDirs;$i++){
 			my $illD = $illDirs[$i];
 			die "longRdAssembly:: $illD is not a dir!" unless (-d $illD);
-			my $contigCov = "$illD/Coverage.median.percontig.gz"; 
+			my $contigCov = "$illD/mapping.coverage.gz";
+			die "Hybrid package $illD lacks mapping.coverage.gz\n" unless fileGZe($contigCov);
+			my $breakpointTsv = "$illD/breakpoints.tsv.gz";
+			die "Hybrid package $illD lacks breakpoints.tsv.gz\n" unless -s $breakpointTsv;
 			my $dupiAssmbl = "$nodeTmp2/assmbl.$i.pre.fastq.gz";
 			my $preAssmbl = "$illD/scaffolds.fasta.filt";
-			$cmdPre .= "$spl4m $preAssmbl $contigCov $dupiAssmbl $locXtrCmd\n";
+			$cmdPre .= "( $spl4m --assembly $preAssmbl --coverage $contigCov --breakpoints $breakpointTsv --output $dupiAssmbl "
+				."--mean-read-length $MFconfig{defaultReadLengthX} $lengthTemplateArgs --max-synthetic-depth $MFopt{hybridSyntheticMaxDepth} ) &\n";
+			$cmdPre .= "sim_pid_$i=\$!\n";
 			#merge this split with single reads in tmp dir..
 			if (@{$singlAr} > $i && defined($singlAr->[$i]) &&  $singlAr->[$i] ne ""){
 				#print "\nXX $i\n";
@@ -7229,12 +7301,19 @@ sub longRdAssembly{
 			push(@inRds,$singlAr->[$i]);
 		}
 		#transfer commands to main #cmd stream..
-		$cmdPre .= "\nwait \$(jobs -p);\n\n" if ($runPar);
+		if ($runPar) {
+			$cmdPre .= "\nsim_failed=0\n";
+			for (my $i=0; $i<@illDirs; $i++) {
+				$cmdPre .= "if ! wait \$sim_pid_$i; then echo \"synthetic-read simulator $i failed\" >&2; sim_failed=1; fi\n";
+			}
+			$cmdPre .= "[ \$sim_failed -eq 0 ] || exit 33\n\n";
+		}
 
 		$cmd .= $cmdPre.$cmdLater."\n\n";
 		for (my $i=0;$i<@illDirs;$i++){
 			next if ($inRds[$i] eq "");
 			$cmd .= "if [ ! -s $inRds[$i] ]; then echo \"$inRds[$i] not present.. abort\"; exit 33; fi \n";
+			$cmd .= "$pigzBin -t $inRds[$i] || exit 33\n";
 		}
 		$cmd .= "echo \"presplitting done\"\n\n";
 		#die "$cmd\n";
@@ -7262,7 +7341,7 @@ sub longRdAssembly{
 		$contigRecovery .= "\nmv $nodeTmp/assembly.fasta $nodeTmp/scaffolds.fasta\n\n";
 	} elsif($MFopt{DoAssembly}==4 || $MFopt{DoAssembly}==5){ #metaMDBG
 		my $inFileFlag = "--in-hifi";
-		$inFileFlag = "--in-ont" if (${$cReadTecAr}[0] eq "ONT");
+		$inFileFlag = "--in-ont" if (defined($long_read_tech) && $long_read_tech eq "ONT");
 		my $mMDBG = getProgPaths("metaMDBG");
 		$cmd .= "$mMDBG asm --threads $nCores --out-dir $nodeTmp $inFileFlag " . join(" ",@inRds) . "\n";
 		$cmd .= "rm -rf $nodeTmp/tmp/;\n";
@@ -7294,6 +7373,12 @@ sub longRdAssembly{
 	$cmd .= "$assStatScr -scaff_size $MFopt{scaffoldMinSize} $nodeTmp/scaffolds.fasta > $nodeTmp/AssemblyStats.500.txt\n";
 	$cmd .= "$assStatScr $nodeTmp/scaffolds.fasta > $nodeTmp/AssemblyStats.ini.txt\n";
 	$cmd .= "$assStatScr $nodeTmp/scaffolds.fasta.filt > $nodeTmp/AssemblyStats.txt\n";
+	if (@hybridPreassemblies) {
+		my $compareScr = getProgPaths("compareHybridAssemblies_scr");
+		my $preArgs = join(" ", map { "--preassembly $_" } @hybridPreassemblies);
+		$cmd .= "$compareScr --final $nodeTmp/scaffolds.fasta.filt $preArgs --output $nodeTmp/HybridAssemblyComparison.tsv\n";
+		$cmd .= "[ -s $nodeTmp/HybridAssemblyComparison.tsv ] || exit 36\n";
+	}
 	
 	my ($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx("$nodeTmp/scaffolds.fasta.filt",$nCores,$MFopt{largeMapperDB},$MFopt{MapperProg});#$nCores);
 	$cmd .= $cmdDB unless( !$MFopt{map2Assembly}); #doesn't need bowtie index
@@ -7301,7 +7386,7 @@ sub longRdAssembly{
 	#clean up
 	$cmd .= "echo \"Zipping non-essential files\"\n";
 	$cmd .= "\n $pigzBin -f -p $nCores $nodeTmp/scaffolds.fasta\n";
-	$cmd .=  "mkdir -p $finalOut\ncp -r $nodeTmp/* $finalOut\n" ;
+	$cmd .=  "mkdir -p $stageOut\ncp -r $nodeTmp/* $stageOut\n" ;
 	$cmd .= "rm -rf $nodeTmp\n";
 	my $jname = "";
 
@@ -7313,7 +7398,13 @@ sub longRdAssembly{
 	my $defMem = ($defTotMem);
 
 	$cmd .= "echo \"MAX MEM ".$defTotMem."G\"\n";
-	$cmd .= "echo \"$nameProg\" > $finalOut/$stones{asmDone}\n";
+	$cmd .= "echo \"$nameProg\" > $stageOut/$stones{asmDone}\n";
+	$cmd .= "test -s $stageOut/scaffolds.fasta.filt && test -s $stageOut/AssemblyStats.txt && test -s $stageOut/$stones{asmDone} || exit 37\n";
+	$cmd .= "test -s $stageOut/HybridAssemblyComparison.tsv || exit 37\n" if @hybridPreassemblies;
+	$cmd .= "rm -rf $backupOut\n";
+	$cmd .= "if [ -e $finalOut ]; then mv $finalOut $backupOut; fi\n";
+	$cmd .= "if ! mv $stageOut $finalOut; then if [ -e $backupOut ]; then mv $backupOut $finalOut; fi; exit 38; fi\n";
+	$cmd .= "rm -rf $backupOut\n";
 	#die "$cmd\n\n";
 	if (!-e "$finalOut/scaffolds.fasta.filt"  || !-e "$finalOut/AssemblyStats.txt"){
 		#my $size_in_mb = (-s $fh) / (1024 * 1024);
@@ -7502,7 +7593,6 @@ sub metagAssemblyRun{
 				"preAssmbl", $SmplNameX,$hostFilter,$scaffoldFlag) if (!$ePreAssmbly);
 		} elsif ($doPreAssmFlag == 0 && $postAssmblGo) {
 			print "Final combining long assembly step: ";
-			system "rm -fr $metagAssDir $geneDir $finalCommAssDir/genePred/ $finalCommAssDir/ContigStats/ \n"; #just clean up assembly dir..
 			#$finalMapDir
 			#die;
 			$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$metagAssDir,
@@ -7859,6 +7949,14 @@ sub setDefaultMFconfig{
 	$MFopt{doBam2Cram} = 1; $MFopt{redoAssMapping} =0;
 	$MFopt{DoJGIcoverage} = 0; #only required for metabat binning, not required any longer..
 	$MFopt{bamfilterIll} = "0.05 0.75 20 3"; $MFopt{bamfilterPB} = "0.05 0.5 30 0"; $MFopt{bamfilterONT} = "0.15 0.5 10 0";
+	# Hybrid preassembly coverage is deliberately conservative: alignments must
+	# cover more of the read and have substantially higher mapping confidence.
+	$MFopt{bamfilterHybridIll} = "0.03 0.90 40 5";
+	$MFopt{hybridMinMapQ} = 40; $MFopt{hybridMinBaseQ} = 20;
+	$MFopt{breakpointDepth} = 0.10; $MFopt{breakpointMinLength} = 100;
+	$MFopt{breakpointSmoothGap} = 100; $MFopt{breakpointFlankLength} = 500;
+	$MFopt{breakpointMinFlankDepth} = 1; $MFopt{breakpointMaxFlankFraction} = 0.10;
+	$MFopt{hybridSyntheticMaxDepth} = 20;
 	$MFopt{mapSaveCram} = 1; #by default, keep the back-mapping bams/crams 
 	$MFopt{MapperCores} = 8;  $MFopt{MapperRmDup} = 1; #mapping cores; ??? ; remove Dups (can be costly if many ref seqs present)
 	$MFopt{bamSortCores} = -1;
@@ -8112,6 +8210,16 @@ sub getCmdLineOptions{
 		"rmDuplicates=i" => \$MFopt{MapperRmDup},
 		"mappingCores=i" => \$MFopt{MapperCores},
 		"mapperFilterIll=s" => \$MFopt{bamfilterIll}, #defaults to "0.05 0.75 20 3", meaning: <=5% ANI, >=75% of read aligned, >=20 mapping quality, rm clipped (by 3 nt) alignments 
+		"mapperFilterHybridIll=s" => \$MFopt{bamfilterHybridIll},
+		"hybridMinMapQ=i" => \$MFopt{hybridMinMapQ},
+		"hybridMinBaseQ=i" => \$MFopt{hybridMinBaseQ},
+		"breakpointDepth=f" => \$MFopt{breakpointDepth},
+		"breakpointMinLength=i" => \$MFopt{breakpointMinLength},
+		"breakpointSmoothGap=i" => \$MFopt{breakpointSmoothGap},
+		"breakpointFlankLength=i" => \$MFopt{breakpointFlankLength},
+		"breakpointMinFlankDepth=f" => \$MFopt{breakpointMinFlankDepth},
+		"breakpointMaxFlankFraction=f" => \$MFopt{breakpointMaxFlankFraction},
+		"hybridSyntheticMaxDepth=f" => \$MFopt{hybridSyntheticMaxDepth},
 		"mapperFilterPB=s" => \$MFopt{bamfilterPB},
 		"mapperFilterONT=s" => \$MFopt{bamfilterONT},
 		"mapSaveCRAM=i" => \$MFopt{mapSaveCram},

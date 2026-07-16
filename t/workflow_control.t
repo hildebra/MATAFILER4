@@ -106,9 +106,12 @@ my $package = "$root/preAssmblGrp_gut";
 write_file("$package/scaffolds.fasta.filt", ">contig\nACGT\n");
 write_file("$package/Coverage.percontig.gz", "coverage\n");
 write_file("$package/Coverage.median.percontig", "median\n");
+write_file("$package/mapping.coverage.gz", "window coverage\n");
+write_file("$package/breakpoints.tsv.gz", "compressed breakpoint fixture\n");
+write_file("$package/package.manifest.tsv", "key\tvalue\nschema_version\t2\n");
 write_file("$package/moved.sto", "done\n");
 ok(hybrid_package_complete($package),
-	'hybrid package completeness depends only on package-local outputs');
+	'versioned hybrid package requires all package-local outputs');
 unlink "$package/Coverage.percontig.gz";
 ok(!hybrid_package_complete($package), 'hybrid package with a missing output is incomplete');
 
@@ -150,6 +153,16 @@ like($mataf4, qr/SupportReads\}\s*=~\s*m\/\(\?:PB\|ONT\):\//,
 	'hybrid preassembly recognizes both supported long-read technologies');
 like($mataf4, qr/long_reads_detected.*?\(\?:PB\|ONT\)/s,
 	'final hybrid assembly applies the same PB/ONT technology contract');
+like($mataf4, qr/mixes ONT and PacBio reads/,
+	'mixed ONT/PacBio hybrid groups are rejected explicitly');
+like($mataf4, qr/sim_failed=0.*?wait \\\$sim_pid_/s,
+	'each background synthetic-read simulator is waited on and validated');
+like($mataf4, qr/HybridAssemblyComparison\.tsv/,
+	'hybrid finalization requires a comparative assembly report');
+like($mataf4, qr{mapping/\$SmplN-smd\.bam\.breakpoints\.tsv\.gz},
+	'metagStats reads the sample breakpoint report from its mapping directory');
+like($mataf4, qr/BreakpointCount.*BreakpointContigs.*BreakpointBases.*BreakpointMeanLength.*BreakpointMaxLength/,
+	'metagStats exposes the important per-sample breakpoint statistics');
 unlike($mataf4, qr/die "Deleting previous results/,
 	'unfinished-result repair no longer stops at a debug die');
 unlike($mataf4, qr/die "now recalc/,
