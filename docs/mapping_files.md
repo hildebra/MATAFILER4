@@ -106,7 +106,7 @@ Sample04	Sample04_dir	Subject02
 | `#SmplID` | yes | Unique sample identifier used throughout output directories, sequence headers, and matrices. | Must not be empty or duplicated. |
 | `Path` | conditional | Relative sample directory under the current `#DirPath`. | Use when each sample has its own directory. |
 | `SmplPrefix` | conditional | File prefix under the current `#DirPath`. | Use when several samples share one directory. |
-| `SeqTech` | no | Sequencing technology for primary reads. | Recognised values: `ONT`, `PB`, `ill`, `hiSeq`, `454`, `SLR`, `proto`, `miSeq`, `GAII`, `GAII_solexa`, or empty. |
+| `SeqTech` | no | Sequencing technology for primary reads. | Recognised values: `ONT`, `PB`, `ill`, `hiSeq`, `454`, `SLR`, `proto`, `miSeq`, `AVITI`, `GAII`, `GAII_solexa`, or empty. `AVITI` selects the AVITI-specific SDM filtering configuration. |
 | `SeqTechSingl` | no | Sequencing technology for single-read input. | Same recognised values as `SeqTech`. |
 | `ReadLength` | no | Expected read length. | Usually autodetected; set only if required. |
 | `AssmblGrps` | no | Samples with the same value are assembled together. | Use descriptive non-numeric group IDs such as `Subject01`. |
@@ -193,7 +193,39 @@ Sample01	Sample01_	Subject01
 Sample02	Sample02_	Subject01
 ```
 
-The exact R1/R2/single-read files are then selected by the command-line regular expressions such as `-inputFQregex1`, `-inputFQregex2`, and `-inputFQregexSingle`.
+The exact R1/R2/single-read files are then selected by the command-line regular expressions such as `-inputFQregex1`, `-inputFQregex2`, and `-inputFQregexSingle`. Primary BAM input is selected in the same way with `-inputBAMregex`, as described below.
+
+### Using BAM files as primary input
+
+The map does not have a separate BAM column. Put the BAM files in the location selected by `#DirPath` plus either `Path` or `SmplPrefix`, just as for FASTQ input, and enable BAM discovery on the command line:
+
+```text
+#SmplID	Path	SeqTech
+#OutPath	/path/to/results
+#RunID	pacbio_bam_run
+#DirPath	/data/pacbio
+Sample01	Sample01	PB
+Sample02	Sample02	PB
+```
+
+```bash
+perl "$MF4DIR/MATAF4.pl" \
+  -map mapping_file.map \
+  -inputBAMregex '.*\.bam$' \
+  -submit 0
+```
+
+For the example above, MATAFILER4 searches `/data/pacbio/Sample01/` and `/data/pacbio/Sample02/` for matching BAM files. With `SmplPrefix`, it searches the shared `#DirPath` directory and requires the file name to match both the sample prefix and `-inputBAMregex`.
+
+Important limitations and behaviour:
+
+- BAM discovery is disabled by default because `-inputBAMregex` defaults to an empty string.
+- Primary BAM input is currently treated as unpaired/single-read data, for example PacBio reads.
+- Matching BAMs are converted to FASTQ with `samtools fastq` before normal read processing; they are not interpreted as read-to-reference alignments.
+- The regular expression applies to file names in the selected directory. Keep it anchored, for example `'.*\.bam$'`, to avoid unintended matches.
+- Set `SeqTech` to the technology represented by the reads, normally `PB` or `ONT` for long-read BAM input.
+
+Use `SupportReads` instead when BAM reads supplement primary short-read data for a hybrid assembly.
 
 ### Duplicate read-location checks
 
@@ -245,11 +277,13 @@ ONT:/path/to/nanopore.fastq.gz
 mate:/path/to/matepair_reads/
 ```
 
-For multiple support-read entries, use semicolons between typed entries:
+For several support-read files of the same technology, put the technology tag once and separate paths with commas:
 
 ```text
-PB:/path/to/pb1.bam;PB:/path/to/pb2.bam
+PB:/path/to/pb1.bam,/path/to/pb2.bam
 ```
+
+Do not repeat the technology tag for every file. A `SupportReads` value represents one support-read technology; mixing `PB:`, `ONT:`, and other tags in one cell is not supported reliably.
 
 MATAFILER4 resolves environment variables in paths such as `$PROJECT` and normalises repeated slashes.
 
@@ -304,10 +338,13 @@ Before launching a full run, check that:
 7. Explicit `AssmblGrps` are descriptive and non-numeric.
 8. Repeated `#DirPath` lines appear before the sample rows they apply to.
 9. `SeqTech` values are one of the values recognised by `readMap()`.
-10. The map passes a dry run, for example:
+10. BAM primary input has a non-empty `-inputBAMregex`; without it, BAM files are not discovered.
+11. Multiple `SupportReads` files use one technology tag followed by comma-separated paths.
+12. New analyses use `-requireInput 1` so missing directories or unmatched input patterns stop rather than silently skipping a sample.
+13. The map passes a dry run, for example:
 
 ```bash
-perl $MF4DIR/MATAF4.pl -map mapping_file.map -submit 0 -from 0 -to 1
+perl $MF4DIR/MATAF4.pl -map mapping_file.map -requireInput 1 -submit 0 -from 0 -to 1
 ```
 
 ## Common problems detected by `readMap()`

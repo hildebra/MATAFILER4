@@ -8,6 +8,7 @@ use warnings;
 use strict;
 use Data::Dumper;
 use Getopt::Long qw( GetOptions );
+use File::Path qw(make_path remove_tree);
 
 #.1: used versioning, just updated Rhcl to (mem efficient) ward clustering, Rhcl checks, Rhcl log reading fixed
 #.11: changed rhcl to Rcpphclust package: complete clustering, seems to give better core clusters than ward, also faster now
@@ -27,8 +28,9 @@ use Getopt::Long qw( GetOptions );
 #.26: 13.8.24: added -genomesPerFamily flag & function
 #.27: 12.11.24: removed necessity for -canopies flag
 #.28: 28.12.25: multi scaling flags for strainScr1 added
+#.29: checkpoint validation, quality-checker consistency, and Rhcl/MAG recovery fixes
 
-my $MGSpipelineVersion = 0.28;
+my $MGSpipelineVersion = 0.29;
 
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
 use Mods::GenoMetaAss qw(readMap getDirsPerAssmblGrp readClstrRev unzipFileARezip getAssemblPath systemW gzipopen);
@@ -47,6 +49,51 @@ sub Rhclusts; sub evalRhcl_Bin; sub refine_Rhcl_MGS;
 sub invertIndex;
 sub createDeepCorrM;
 sub replaceLowQualMGS4MAG;
+
+sub _read_one_line {
+	my ($file) = @_;
+	open my $fh, '<', $file or die "Cannot open $file: $!\n";
+	my $line = <$fh>;
+	close $fh or die "Cannot close $file: $!\n";
+	die "Expected content in $file, but it is empty\n" unless defined $line;
+	chomp $line;
+	return $line;
+}
+
+sub _count_lines {
+	my (@files) = @_;
+	my $count = 0;
+	for my $file (@files) {
+		open my $fh, '<', $file or die "Cannot open $file: $!\n";
+		$count++ while <$fh>;
+		close $fh or die "Cannot close $file: $!\n";
+	}
+	return $count;
+}
+
+sub _touch_checkpoint {
+	my ($file) = @_;
+	open my $fh, '>', $file or die "Cannot create checkpoint $file: $!\n";
+	close $fh or die "Cannot close checkpoint $file: $!\n";
+}
+
+sub _bin_assignments_are_empty {
+	my ($file) = @_;
+	open my $fh, '<', $file or die "Cannot open bin assignments $file: $!\n";
+	my $seen = 0;
+	while (my $line = <$fh>) {
+		chomp $line;
+		next unless length $line;
+		my @fields = split /\t/, $line;
+		$seen = 1;
+		if (defined $fields[1] && $fields[1] ne '0') {
+			close $fh;
+			return 0;
+		}
+	}
+	close $fh or die "Cannot close $file: $!\n";
+	return $seen;
+}
 
 
 
@@ -83,6 +130,7 @@ my $ignoIncomplMAGs = 1; #if 1, will ignore if no Bin in MF3
 my $useGTDBmg = "FMG";
 my $checkMaxNumJobs = 800; #don't submit more than 800 jobs at once..
 my $wait4stone = "";
+my $wait4stoneTimeout = 86400;
 my $useWeightedMGSscores = 1;
 my $doBinCtgsPerFam =0 ; #extract bins for each family (or assembly_grp/sample if family missing)
 my $customBinFile = ""; #overrides default per GC global behaviour
@@ -114,6 +162,7 @@ GetOptions(
 	"redoTax=i" => \$rewrTAX,			#rewrite tax annotations
 	"MGset=s" => \$useGTDBmg,			#GTDB or FMG, which marker genes are used? Default: GTDB
 	"wait4stone=s" => \$wait4stone,     #wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later
+	"wait4stoneTimeout=i" => \$wait4stoneTimeout, #maximum wait in seconds; 0 retains unlimited waiting
 	"mem=i" => \$memG,					#memory used for intensive jobs
 	"completeness=i" => \$complThre,	#what qual should final MGS have at least??
 	"contamination=i" => \$contThre,	#contamination threshold for accepting MGS
@@ -129,6 +178,9 @@ GetOptions(
 
 #check all correct
 checkMF();
+die "Select exactly one quality checker: -useCheckM1 1 -useCheckM2 0, or vice versa\n"
+	unless ($useCheckM1 ? 1 : 0) + ($useCheckM2 ? 1 : 0) == 1;
+die "-wait4stoneTimeout must be zero or a positive number of seconds\n" if $wait4stoneTimeout < 0;
 
 #die "$useCheckM2 $useCheckM1\n";
 
@@ -191,18 +243,18 @@ if (-e "$inD/LOGandSUB/inmap.txt" || -e "$inD/LOGandSUB/GCmaps.inf"){ #this is t
 	print "Compound Assembly MetaBatting..\n";
 } 
 
-system "mkdir -p $RsubmDir $tmpD $outD $logDir $annoDir $chkpDir 1> /dev/null";
+make_path($RsubmDir, $tmpD, $outD, $logDir, $annoDir, $chkpDir);
 
 
 
 my $GCd = "";my $mapF="";
 #die Dumper($hrm);	
 if (-e "$inD/LOGandSUB/GCmaps.inf"){
-	my $tmp = `cat $inD/LOGandSUB/GCmaps.inf`; chomp $tmp;
-	$mapF = $tmp;
+	$mapF = _read_one_line("$inD/LOGandSUB/GCmaps.inf");
 	$GCd = $inD;
 } else{
 	$mapF = $inD."LOGandSUB/inmap.txt";
+	$GCd = $inD;
 	#($hrm,$asGrpObj) = readMap($inD."LOGandSUB/inmap.txt");
 }
 
@@ -221,15 +273,12 @@ my $numSamples = scalar(  @{$map{opt}{smpl_order}}  );#@DoosD;
 my $useCanopies=1;
 if ($numSamples<10 || $canopyF eq ""){$useCanopies=0;}
 
-if (-e "$inD/LOGandSUB/GCmaps.inf"){
-	$inD = $map{outDir} if (exists($map{outDir} ));
-}
 my $ph1flag = 1;
 $ph1flag = 0 if (-e "$outD/$BinnerShrt.clusters.obs");
 my $MGSimproFlag = 1;
 $MGSimproFlag = 0 if (-e $finalClusters2);
 
-open LOG,">$logDir/pipeline.log";
+open LOG, '>', "$logDir/pipeline.log" or die "Cannot open $logDir/pipeline.log: $!\n";
 printL "=====================================================\n";
 printL "Running MGS v$MGSpipelineVersion pipeline in multi sample mode\n";
 printL "GC dir: $inD\n";printL "Map: $mapF\n";
@@ -249,11 +298,20 @@ printL "=====================================================\n";
 my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2); 
 
 #clean up
-system "rm -r $RsubmDir" if ($rewrRHCL);
-system "rm -f $outD/$BinnerShrt.clusters*  $outD/$BinnerShrt.Wclusters*" if ($rewrClusterMAGs);
+if ($rewrRHCL && -d $RsubmDir) {
+	remove_tree($RsubmDir);
+	make_path($RsubmDir);
+}
+if ($rewrClusterMAGs) {
+	for my $file (glob("$outD/$BinnerShrt.clusters*"), glob("$outD/$BinnerShrt.Wclusters*")) {
+		unlink $file or die "Cannot remove $file: $!\n" if -f $file;
+	}
+}
 #my $FMGsubs = `wc -l $GCd/Matrix.$COGdir.mat | cut -f1 -d' '`; chomp $FMGsubs; $FMGsubs = int($FMGsubs);
 # a whole lot faster.. but imprecise!
-my $FMGsubs = `cat $GCd/$COGdir/*.LCA | wc -l`; chomp $FMGsubs; $FMGsubs = int($FMGsubs); 
+my @marker_lca_files = glob("$GCd/$COGdir/*.LCA");
+die "No marker-gene LCA files found in $GCd/$COGdir\n" unless @marker_lca_files;
+my $FMGsubs = _count_lines(@marker_lca_files);
 if ($FMGsubs < 20){die "$GCd/$COGdir/*.LCA suspiciously small (N=$FMGsubs)\n/ Please ensure correctness\n";} #$GCd/Matrix.$COGdir.mat
 #die;
 my $CanoDir = $canopyF;$CanoDir=~s/\/[^\/]+$/\//; $CanoDir .= "Bins/";
@@ -335,7 +393,6 @@ qsubSystemJobAlive( \@jobs,\%QSBopt );
 $cnt=0; my @missedMAGs=();
 printL "Checking all MAGs are present\n";
 foreach my $Doo (@DoosD){
-	last if (-e "$iniMB2sto");
 	printL "$BinnerShrt MAGs per sample group:\n" if ($cnt==0);
 	my @paths = @{$DOs{$Doo}{wrdir}};#split /,/,$allPaths;
 	my @smplIDs = @{$DOs{$Doo}{SmplID}};#split /,/,$smplIDtmp;
@@ -349,17 +406,18 @@ foreach my $Doo (@DoosD){
 	}
 	#check if maybe emtpy Bin?
 	if (!-e "$MBout$cmSuffix" ){
-		my $ret = `cut -f2 $MBout | sort | uniq`;
-		chomp $ret; if ($ret eq "0"){system "touch $MBout$cmSuffix ";}
+		_touch_checkpoint("$MBout$cmSuffix") if _bin_assignments_are_empty($MBout);
 	}
-	my $ret = `wc -l $MBout$cmSuffix`; chomp $ret; $ret =~ s/.*\///;
+	my $ret = -e "$MBout$cmSuffix" ? _count_lines("$MBout$cmSuffix") : 0;
 	#printL "$smplIDs[-1]($Doo)\t$ret\n";
 	die "Bin $MBout seems incomplete\n" unless (-e "$MBout$cmSuffix" && -e "$MBout.assStat");
 	$cnt++;
 }
 printL "Done reading MAGs\n";
 printL "Missed MAGs from " . scalar(@missedMAGs). " assembly groups\n:@missedMAGs\n" if (@missedMAGs);
-system "touch $iniMB2sto" unless (-e $iniMB2sto);
+unlink $iniMB2sto or die "Cannot invalidate stale checkpoint $iniMB2sto: $!\n"
+	if @missedMAGs && -e $iniMB2sto;
+_touch_checkpoint($iniMB2sto) unless -e $iniMB2sto || @missedMAGs;
 
 #if ($cnt){	print "Waiting for jobs to finish.. restart when done\n";	exit(0);}
 
@@ -383,9 +441,10 @@ die if ($stopAfterCluster); #DEBUGing only!!
 
 #decide between weighted and unweighted scores for binning
 if ($useWeightedMGSscores && !-e "${finalClusters2}UW" ){
-	if (!-e $finalClustersW){die "Could not find required file $finalClustersW\n";}
-	system "mv $finalClusters2 ${finalClusters2}UW";
-	system "mv $finalClustersW $finalClusters2";
+	die "Could not find required file $finalClusters2\n" unless -s $finalClusters2;
+	die "Could not find required file $finalClustersW\n" unless -s $finalClustersW;
+	rename $finalClusters2, "${finalClusters2}UW" or die "Cannot preserve $finalClusters2: $!\n";
+	rename $finalClustersW, $finalClusters2 or die "Cannot activate weighted clusters $finalClustersW: $!\n";
 	#system "touch $finalClustersW.mov";
 }
 
@@ -396,7 +455,8 @@ if ($useWeightedMGSscores && !-e "${finalClusters2}UW" ){
 #create a core of metabat2 clusters, based on gene occurrence (between different samples)
 my $RfilterMB2 = getProgPaths("filterMB2core");
 my $postCmd = "$RfilterMB2 $finalClusters2\n" ; #creates $outD/MB2.clusters.core & $outD/MB2.clusters.ext
-systemW $postCmd if (!-e $finalClusters2 || !-e "$finalClusters2.core");
+die "MGS cluster file is missing or empty: $finalClusters2\n" unless -s $finalClusters2;
+systemW $postCmd if !-s "$finalClusters2.core";
 
 if (0&&$useCanopies && $canopyF ne ""  && !-e $finalClusters2) {
 	#merge and compare to canopy clusters
@@ -424,7 +484,9 @@ if ($useRHClust && (!-e "$finalClusters" || $rewrRHCL)){
 	evalRhcl_Bin("$outD/$finalClusters2.ext",$finalClusters,$href,$aref);
 	if (!-e $finalClusters){die "Somthing went wrong creating *.Rhclpre summary\nMissing $finalClusters\n";}
 	refine_Rhcl_MGS($finalClusters);
-	system "rm -f $RsubmDir/*.mat";
+	for my $matrix (glob("$RsubmDir/*.mat")) {
+		unlink $matrix or die "Cannot remove $matrix: $!\n";
+	}
 	filterClustFile($finalClusters2,$finalClustersFilt);
 	$finalClusters2 = "$outD/$finalClusters2$txtDoRhcl.can$txtDoRhcl"; 
 } else {
@@ -459,8 +521,13 @@ if (!-e $BinExtrSto){
 
 
 #clean up a bit..
-system "rm -fr $annoDir/GTDB* $annoDir/kraken2* $annoDir/specI* $GCd//Anno/Tax/SpecI_MGS/" if ($rewrTAX);
-system "touch $st1ston" unless (-e $st1ston);
+if ($rewrTAX) {
+	for my $path (glob("$annoDir/GTDB*"), glob("$annoDir/kraken2*"), glob("$annoDir/specI*"), "$GCd/Anno/Tax/SpecI_MGS") {
+		if (-d $path) { remove_tree($path); }
+		elsif (-f $path) { unlink $path or die "Cannot remove $path: $!\n"; }
+	}
+}
+_touch_checkpoint($st1ston) unless -e $st1ston;
 
 my @jobs2wait=();
 
@@ -474,7 +541,9 @@ if (!-e $GTDBtaxF || !-e"$annoDir/gtdbtk.summary.tsv" || !-e $GTDBtaxSto){
 	my $memGTDB = 230; 
 	$memGTDB = 300;#high mem situation..
 	my $cmd = "$GTDBtax $binD $numCore $nodeTmpD/GTDBmgs/ $outD\n";
-	$cmd .= "mv $outD/GTDBTK.tax $outD/gtdbtk.summary.tsv $annoDir\n\ntouch $GTDBtaxSto";
+	$cmd .= "test -s $outD/GTDBTK.tax\ntest -s $outD/gtdbtk.summary.tsv\n";
+	$cmd .= "mv $outD/GTDBTK.tax $outD/gtdbtk.summary.tsv $annoDir\n";
+	$cmd .= "test -s $GTDBtaxF\ntest -s $annoDir/gtdbtk.summary.tsv\ntouch $GTDBtaxSto\n";
 	#changed mem from 370 to 100 with GTDB-TK 2.1.0
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "150G"; 
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/GTDB.Rhcl.sh",$cmd,$numCore,int($memGTDB)."G","GTDB_MGS","","",1,[],\%QSBopt);
@@ -492,12 +561,13 @@ if (!-e $BinExtrSto){
 	}
 
 	createBinCtgs($binDctg,$hrM,"$logDir/MAGvsGC.txt.gz",0,$BinnerShrt);
-	system "touch $BinExtrSto";
+	_touch_checkpoint($BinExtrSto);
 }
 
 #wait for checkm/GTDB
 qsubSystemJobAlive( \@jobs2wait,\%QSBopt );
-die "GTDBtax missing\n$GTDBtaxF\n" if ( !-e $GTDBtaxF);
+die "GTDB taxonomy stage incomplete\n$GTDBtaxF\n$annoDir/gtdbtk.summary.tsv\n$GTDBtaxSto\n"
+	unless -s $GTDBtaxF && -s "$annoDir/gtdbtk.summary.tsv" && -e $GTDBtaxSto;
 #if (!-e "$finalClusters2$cmSuffix" && -e "$finalClusters3$cmSuffix"){system "mv $finalClusters3$cmSuffix $finalClusters2$cmSuffix";} #needs to be moved
 die "CheckM2 scores missing\n$finalClusters2$cmSuffix\n" if (!-e "$finalClusters2$cmSuffix" );
 #die "$cmSuffix\n";
@@ -542,8 +612,10 @@ unless (-e $ABmgsSton && -e "$outD/Annotation/Abundance/MGS.matL0.txt"){#-e "$GC
 		$specIabu = getProgPaths("specIGC_scr_v0");
 		$cmdSI = "$specIabu $GCd $canCore $finalClustersFilt $GTDBtaxF\n";
 	}
-	$cmdSI .= "touch $ABmgsSton\n";
 	$cmdSI .= "cp $GCd//Anno/Tax/SpecI_MGS/MGS2speci.txt $annoDir/specI.tax\n";
+	$cmdSI .= "test -s $outD/Annotation/Abundance/MGS.matL0.txt\n";
+	$cmdSI .= "test -s $annoDir/specI.tax\n";
+	$cmdSI .= "touch $ABmgsSton\n";
 	printL "Merge with SpecI & get abundance \n";
 	#print "$cmdSI\n";
 
@@ -592,11 +664,15 @@ if (!-e "$outDphylo/phylo/IQtree_allsites.treefile" || !-e "$outD/between_phylo/
 
 	#excute script
 	my $ph1OUT = `$ph1Cmd`;
+	my $ph1Status = $?;
+	die "Between-MGS phylogeny command failed (exit " . ($ph1Status >> 8) . "):\n$ph1Cmd\n$ph1OUT\n"
+		if $ph1Status != 0;
 	#my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 	#my ($jobName2, $tmpCmd) = qsubSystem($logDir."/interMGSphylo.sh",$ph1Cmd,1,int(150/1)."G","MGSphylo","","",1,[],\%QSBopt) ;
 	#	print "WAITID=$dep\n";
 	print $ph1OUT;
-	$ph1OUT =~ m/WAITID=(\d+)/;
+	die "Between-MGS phylogeny command did not report WAITID:\n$ph1OUT\n"
+		unless $ph1OUT =~ m/WAITID=(\d+)/;
 	$treedep = $1;
 }
 
@@ -622,8 +698,12 @@ print "\n\n########################\nStarting strain delineation MGS\n##########
 
 if ($wait4stone ne ""){
 	my $cntWaits=0;
+	my $waitStart = time;
 	while ( !-e $wait4stone){
 		if ($cntWaits == 0){print "\n\nWaiting for process generating $wait4stone\nIf the process aborted with error, please exit this routine as well\n\n";}
+		if ($wait4stoneTimeout > 0 && time - $waitStart >= $wait4stoneTimeout) {
+			die "Timed out after $wait4stoneTimeout seconds waiting for $wait4stone. Check the producing job before rerunning.\n";
+		}
 		$cntWaits++;
 		sleep(10);
 	}
@@ -768,7 +848,7 @@ sub replaceLowQualMGS4MAG{
 			#print "XX $spl[12] $spl[13] XX\n";
 			$MAGfnd++;
 			if (exists($bestMAG{$curMGS})){#compare to find better MAG
-				my $sco = $spl[11]-($spl[12]*2);
+				my $sco = $spl[12]-($spl[13]*2);
 				my $sco2 = ( $bestMAG{$curMGS}{compl}-($bestMAG{$curMGS}{conta}*2) ) 
 							* ($bestMAG{$curMGS}{N50} / $spl[6] );#takes assembly quality into account: will lower chance of mis-binnings
 				if ($sco > $sco2 ){#&& $bestMAG{$curMGS}{N50} < $spl[6] * 0.8){#replace
@@ -847,8 +927,9 @@ sub replaceLowQualMGS4MAG{
 			#do extract the genes associated to bin and their reps in gene cat
 			my @CCs = @{$MB{$bin}};
 			foreach my $cc (@CCs){
+				my $cnt=0; my $miscnt=0;
 				my $testKey = ">${cc}_$cnt";
-				my $curGene = ""; my $cnt=0; my $miscnt=0;
+				my $curGene = "";
 				$curGene = $ctg2gen{$testKey} if exists($ctg2gen{$testKey});
 				#count up how often each gene is found in already existing Bins (from other samples)..
 				while ($cnt < 5 ||  $miscnt <10 || $curGene ne ""){
@@ -924,7 +1005,7 @@ sub replaceLowQualMGS4MAG{
 	#system "rm $finalClusters2.t $finalClusters2.n $finalClusters2.x";
 	#system "cp $binDpre/* $binD/";
 
-	system "touch $CMrefine";
+	_touch_checkpoint($CMrefine);
 	return;
 }
 
@@ -955,8 +1036,10 @@ sub filterClustFile{
 				$cont=0;
 			}
 		}
-		print O join("\t",@spl)."\n" if ($cont);
-		$ngenes++;
+		if ($cont) {
+			print O join("\t",@spl)."\n";
+			$ngenes++;
+		}
 	}
 	close O; close I;
 	print "Kept ".scalar (keys (%C1)) .", filtered ".scalar (keys (%C2)) ." MGS\nWrote $ngenes / $lcnt genes\n";
@@ -1008,7 +1091,7 @@ sub refine_Rhcl_MGS(){
 		#system "rm -r $binD\n" if (-d $binD);
 		createBinFAA("$binDpre",$finalClusters,"$GCd/compl.incompl.95.prot.faa","faa");
 		createBinFAA("$binDpre",$finalClusters,"$GCd/compl.incompl.95.fna","fna");
-		system "touch $EXstone\n";
+		_touch_checkpoint($EXstone);
 	}
 
 	#quality check via checkM or checkM2
@@ -1037,11 +1120,12 @@ sub refine_Rhcl_MGS(){
 
 	#wait for checkM & checkM2
 	qsubSystemJobAlive( \@jobs2wait,\%QSBopt );@jobs2wait = ();
+	die "Quality checking completed without producing $ChkMevalF\n" unless -s $ChkMevalF;
 
 	print "\nReplacing low qual MGS with higher qual MAGs\n";
 	#search MGS at 80,5 qual -> replace these with high scoring MAGs
 	replaceLowQualMGS4MAG($finalClusters,$finalClusters2,$ChkMevalF);
-	system "rm -r $binDpre";
+	remove_tree($binDpre) if -d $binDpre;
 
 }
 
@@ -1185,13 +1269,13 @@ sub Rhclusts{
 			my $LOGstr = getFileStr($clogRchl); 
 			#print "$LOGstr\n";
 	#Correct: MB2bin181, G2, MaxG:72503 [S=1193/1536, MG=27, cop=0, k=32199, medOcc=20, spearman]
-			if ($LOGstr =~ m/\":::Correct:/){
+			if ($LOGstr =~ m/:::Correct:/){
 				#catalog these core genes..
 				open IX,"<$inD/${cbin}core.genes" or die "cant open $inD/${cbin}core.genes\n";
 				while(my $l=<IX>){chomp $l; $OX .= "$cbin\t$l\tRhcl\n";} close IX;
 				$ret{status}{$cbin} = "C";
 				$RHCLsuccess++;
-			} elsif ($LOGstr =~ m/\":::FAIL::/ || $LOGstr =~ m/Too few non-zeros/){# (\S+), (G\d), MaxG:(\d+) \[S=(\d+)\/(\d+), MG=(\d+), cop=([0-9.]+), k=(\d+), medOcc=([0-9.]+), (.*)\]/){
+			} elsif ($LOGstr =~ m/:::FAIL::/ || $LOGstr =~ m/Too few non-zeros/){# (\S+), (G\d), MaxG:(\d+) \[S=(\d+)\/(\d+), MG=(\d+), cop=([0-9.]+), k=(\d+), medOcc=([0-9.]+), (.*)\]/){
 				#print "Failed RHCL for $cbin"; 
 				$ret{status}{$cbin} = "F";
 				next;
@@ -1203,13 +1287,14 @@ sub Rhclusts{
 			#print "$LOGstr\n";
 			#:::Correct: MGS0372, G3, MaxG:1190 [S=1187 (O:0), MG=19 (O:0), cop=0.396, k=2, medOcc=21, complete]
 			#:::Correct: MB2bin1, G4, MaxG:4298 [S=1701 (O:1867), MG=83 (O:24), cop=0.102, k=128, medOcc=67, complete]
-			$LOGstr =~ m/: (\S+), (G\d), MaxG:(\d*) \[S=(\d+) \(O:(\d+)\), MG=(\d+) \(O:\d+\), cop=([0-9.]+), k=(\d+), medOcc=([0-9.]+), (.*)\]/;
-			die "wrong cluster name: \"$1\" != \"$cbin\"\n$LOGstr\n$clogRchl" unless ($1 eq $cbin);
-			$ret{qual}{$cbin} = $2; $ret{MaxG}{$cbin} = $3;
-			$ret{SizMB2}{$cbin} = $5; $ret{SizNow}{$cbin} = $4;
-			$ret{MGs}{$cbin} = $6; $ret{cop}{$cbin} = $7;
-			$ret{CorMode}{$cbin} = $10; 
-			$ret{k}{$cbin}=$8; $ret{medOcc}{$cbin}=$9;
+			my @summary = $LOGstr =~ m/: (\S+), (G\d), MaxG:(\d+) \[S=(\d+) \(O:(\d+)\), MG=(\d+) \(O:\d+\), cop=([0-9.]+), k=(\d+), medOcc=([0-9.]+), (.*)\]/;
+			die "Cannot parse successful Rhcl summary\n$LOGstr\n$clogRchl\n" unless @summary == 10;
+			die "wrong cluster name: \"$summary[0]\" != \"$cbin\"\n$LOGstr\n$clogRchl" unless $summary[0] eq $cbin;
+			$ret{qual}{$cbin} = $summary[1]; $ret{MaxG}{$cbin} = $summary[2];
+			$ret{SizMB2}{$cbin} = $summary[4]; $ret{SizNow}{$cbin} = $summary[3];
+			$ret{MGs}{$cbin} = $summary[5]; $ret{cop}{$cbin} = $summary[6];
+			$ret{CorMode}{$cbin} = $summary[9];
+			$ret{k}{$cbin}=$summary[7]; $ret{medOcc}{$cbin}=$summary[8];
 		
 		}
 	}
@@ -1277,8 +1362,15 @@ sub CanopyPrep{
 	close O;
 	printL "Kept $canCNT/". scalar(keys(%canCnts)) . " Canopy MGS\n";
 	createBinFAA($binCanDir,"$inFc.filt","$GCd/compl.incompl.95.prot.faa","faa");
+	if ($useCheckM1 && !-s $ChkMevalF) {
+		printL "running checkM on new Canopy MGS..\n";
+		my $req_CMmem = 200;
+		my $cmC = runCheckM($binCanDir,$ChkMevalF,"$nodeTmpD/cmCANO/",$numCore,0);
+		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/checkM.cano0.sh",$cmC,$numCore,int($req_CMmem)."G","ChMcano","","",1,[],\%QSBopt);
+		push(@jobs2wait,$jobName2);
+	}
 	#checkM2
-	if ( $useCheckM2 && (!-e $ChkMevalF )){
+	if ( $useCheckM2 && !-s $ChkMevalF ){
 		printL "running checkM2 on new Canopy MGS..\n";
 		my $req_CMmem = 50;	my $cmC = "";
 		$cmC .= runCheckM2($binCanDir,$ChkMevalF,"$nodeTmpD/cmCANO/",$canCore,0) ;	
@@ -1289,6 +1381,7 @@ sub CanopyPrep{
 
 	#wait for checkM & checkM2
 	qsubSystemJobAlive( \@jobs2wait,\%QSBopt );@jobs2wait = ();
+	die "Canopy quality checking completed without producing $ChkMevalF\n" unless -s $ChkMevalF;
 
 }
 
@@ -1414,7 +1507,7 @@ sub getGoodMBstats{
 		close I;
 	}
 	close L;
-	system "mv $logfile.1 $logfile;\n";
+	rename "$logfile.1", $logfile or die "Cannot replace $logfile with $logfile.1: $!\n";
 	print " Done\n";
 }
 
@@ -1484,4 +1577,3 @@ sub createDeepCorrM{
 	print "Created deep canopies..\n";
 
 }
-

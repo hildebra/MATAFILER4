@@ -2,6 +2,7 @@ package Mods::math;
 use warnings;
 use Cwd 'abs_path';
 use strict;
+use POSIX qw(floor ceil);
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 
@@ -23,9 +24,13 @@ sub avgArray{
 	my ($AR) = @_;
 	my @AoA = @{$AR};
 	my $n = scalar @AoA;
+	die "avgArray requires at least one array\n" if ($n == 0);
 	if ($n == 1){return \@{$AoA[0]};}
 	
 	my @ret = @{$AoA[0]};
+	for my $array (@AoA) {
+		die "avgArray requires arrays of equal length\n" unless (@{$array} == @ret);
+	}
 	for (my $i=0;$i<@ret;$i++){$ret[$i] /= $n;} #norm first entry
 	for (my $j=1;$j<$n;$j++){
 		for (my $i=0;$i<@ret;$i++){
@@ -41,7 +46,7 @@ sub roundAr{
 	my @A = @{$AR};
 	
 	for (my $i=0;$i<@A;$i++){
-		$A[$i] = int($A[$i] * $factor+0.5)/$factor;
+		$A[$i] = ($A[$i] < 0 ? ceil($A[$i] * $factor-0.5) : floor($A[$i] * $factor+0.5))/$factor;
 	}
 	return \@A;
 }
@@ -49,16 +54,17 @@ sub roundAr{
 sub round{
 	my ($val,$ndp) = @_;
 	my $factor = 10**$ndp;
-	return (int($val * $factor+0.5)/$factor);
+	return (($val < 0 ? ceil($val * $factor-0.5) : floor($val * $factor+0.5))/$factor);
 }
 sub roundF{
 	my ($val,$factor) = @_;
-	return (int($val * $factor+0.5)/$factor);
+	return (($val < 0 ? ceil($val * $factor-0.5) : floor($val * $factor+0.5))/$factor);
 }
 sub meanArray{
 	return if (@_ == 0);
 	my @AR = @{$_[0]};
 	my $n = scalar @AR; my $sa=0;
+	return if ($n == 0);
 	foreach my $x (@AR){
 		$sa += $x;
 	}
@@ -78,10 +84,13 @@ sub medianArray
 sub quantileArray
 {
 	my $frac = shift;
-	return 1 if (scalar(@_) == 0);
+	return if (scalar(@_) == 0);
+	die "quantileArray fraction must be between 0 and 1\n" if ($frac < 0 || $frac > 1);
     my @vals = sort {$a <=> $b} @_;
     my $len = @vals;
-    return $vals[int($len*$frac)];
+	my $index = int($len*$frac);
+	$index = $len - 1 if ($index >= $len);
+	return $vals[$index];
 }
 
 sub quantileArrayR {

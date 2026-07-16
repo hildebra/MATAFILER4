@@ -4,11 +4,24 @@ use warnings;
 use strict;
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths convert2Gb);
+use Mods::WorkflowControl qw(normalise_job_dependencies);
 
 
 use Exporter qw(import);
 our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJobAlive
 		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs);
+
+my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
+
+sub _continue_after_submission_failure {
+	my ($optHR, $message) = @_;
+	return 0 unless ($optHR->{continueOnSubmitError});
+	$optHR->{submissionErrors} = []
+		unless (ref($optHR->{submissionErrors}) eq 'ARRAY');
+	push @{$optHR->{submissionErrors}}, $message;
+	warn "$message\nMATAFILER will skip dependent jobs and continue with later work.\n";
+	return 1;
+}
 
 
 
@@ -20,7 +33,7 @@ sub randStr($){ #will be prefixed to jobname, to make jobs unique to each MF run
 	my @letters2=('A'..'Z','a'..'z');
 	my $total=scalar(@letters);
 	my $newletter ="";
-	$newletter = $letters2[rand scalar(@letters)];
+	$newletter = $letters2[int(rand scalar(@letters2))];
 	for (my $i=1;$i<$len;$i++){
 		$newletter .= $letters[rand $total];
 	}
@@ -82,15 +95,20 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		$queues = "\"".$optHR->{gpuQueue}."\"";#"\"medium_priority\"";
 		#$time = "23:00:00";
 		$optHR->{useGPUQueue}=0;
+	} elsif (defined $optHR->{useNetQueue} && $optHR->{useNetQueue} ==1){
+		$queues = "\"".$optHR->{netQueue}."\"";
+		$time = $optHR->{longTime};
+		$optHR->{useNetQueue}=0;
 	} elsif ($optHR->{useShortQueue} ==1){
 		$queues = "\"".$optHR->{shortQueue}."\"";#"\"medium_priority\"";
 		#$time = "00:45:00";
 		$optHR->{useShortQueue}=0;
 	}
-	my @jspl = split(";",$waitJID); 
-	my %jhash; $jhash{$_}++ for (@jspl);  #remove duplicates
-	@jspl = keys %jhash;
-	@jspl = grep /\S/, @jspl; #and empty entries..
+	$waitJID = normalise_job_dependencies($waitJID);
+	my @jspl = split /;/, $waitJID;
+	my $has_failed_dependency = grep { $_ eq $FAILED_SUBMISSION_DEPENDENCY } @jspl;
+	@jspl = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY } @jspl;
+	$waitJID = join(';', @jspl);
 
 	if ($cwd ne "" && !-d $cwd){system "mkdir -p $cwd";}
 	#if ($memory > 250001){$queues = "\"scb\"";}
@@ -131,8 +149,8 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		#foreach (@constrains){
 	#		print O "#SBATCH --constraint=$_\n" if ($_ ne "");
 		#}
-		if (length($waitJID) >3 && @jspl > 0) {
-			for (@jspl) {s/$rTag//;}
+		if (@jspl > 0) {
+			for (@jspl) {s/^\Q$rTag\E//;}
 			
 			#$xtra .= "--dependency=afterok:".join(":",@jspl)." " if (@jspl > 0);
 			if ($optHR->{afterAny}){
@@ -191,10 +209,11 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	} elsif ($LSF==1){ #bsub #-M memLimit; -q queueName;  -m "host_name[@cluster_name]; -n minProcessors; 
 		if ($optHR->{doSync} == 1){$xtra.="-K ";}
 		if ($jname ne ""){$xtra.="-J $rTag$jname ";}
-		if (length($waitJID) >3) {
+		if (@jspl > 0) {
 			my @jspl = split(";",$waitJID);
 			#remove empty elements
 			@jspl = grep /\S/, @jspl;
+			for (@jspl) { s/^\Q$rTag\E//; }
 			if (@jspl > 0 ){
 				$waitJID = join(") && done(",@jspl);
 				$xtra.="-w \"done($waitJID)\" ";
@@ -204,7 +223,8 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	} else{ #qsub
 		if ($optHR->{doSync} == 1){$xtra.="-sync y ";}
 		if ($jname ne ""){$xtra.="-N $rTag$jname ";}
-		if (length($waitJID) >3) {
+		if (@jspl > 0) {
+			for (@jspl) { s/^\Q$rTag\E//; }
 			if (@jspl > 0 ){$xtra.="-hold_jid ".join(",",@jspl) ." ";}
 		}
 			#$waitJID =~ s/;/,/g;$xtra.="-hold_jid $waitJID ";}
@@ -215,19 +235,44 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	if (exists $optHR->{LOG}){ $LOGhandle = $optHR->{LOG};}
 	#if (@restrHosts > 0){die $qcm;}
 	if ($optHR->{doSubmit} != 0 && $immSubm){
+		if ($has_failed_dependency) {
+			my $message = "Skipping submission for $tmpsh because an upstream submission failed";
+			return ($FAILED_SUBMISSION_DEPENDENCY, $qcm)
+				if (_continue_after_submission_failure($optHR, $message));
+			die "$message\n";
+		}
 		system "rm -f $tmpsh.otxt $tmpsh.etxt";
 		print $LOGhandle $qcm."\n" unless ($LOGhandle eq "" || !defined($LOGhandle) );
 		#print("$qcm\n\n");
 		print "SUB:$jname\t";
 		#actual job excecution!
-		my $ret = `$qcm`; 
-		#take care of lockFile now.. but only if actual job submission happened
-		if ($lockFile ne "" && $ret !~ m/^sbatch: error:/ && ! -e $lockFile){
-			system "touch $lockFile" ;
+		my $ret = `$qcm`;
+		my $submit_status = $?;
+		if ($submit_status != 0) {
+			my $exit_code = $submit_status == -1 ? -1 : ($submit_status >> 8);
+			my $message = "Job submission failed (exit $exit_code): $qcm$ret";
+			return ($FAILED_SUBMISSION_DEPENDENCY, $qcm)
+				if (_continue_after_submission_failure($optHR, $message));
+			die $message;
 		}
 		if ($LSF == 2){#slurm get jobid
-			chomp $ret; $ret =~ m/(\d+)$/; #$ret = $1;
+			chomp $ret;
+			die "Could not parse Slurm job id from submission output: $ret\n"
+				unless ($ret =~ /^Submitted batch job (\d+)\s*$/);
 			$jname=$1;
+		} elsif ($LSF == 0) {
+			die "Could not parse SGE job id from submission output: $ret\n"
+				unless ($ret =~ /\bYour job(?:-array)?\s+(\d+)\b/);
+			$jname=$1;
+		} elsif ($LSF == 1) {
+			die "Could not parse LSF job id from submission output: $ret\n"
+				unless ($ret =~ /\bJob <(\d+)>/);
+			$jname=$1;
+		}
+		# Only record a lock after the scheduler has accepted the job.
+		if ($lockFile ne "" && !-e $lockFile){
+			open my $lock, ">", $lockFile or die "Cannot create lock $lockFile: $!\n";
+			close $lock or die "Cannot close lock $lockFile: $!\n";
 		}
 	}
 	
@@ -245,16 +290,17 @@ sub numPendingJobs($){
 	my $srchCmd="" ;#= "squeue -u \$USER  -t PENDING | wc -l";
 	my $num = 0;
 	if ($qmode eq "slurm"){
-		$srchCmd = "squeue -u \$USER -t PENDING | wc -l";
+		$srchCmd = "squeue -h -u \$USER -t PENDING | wc -l";
 	} elsif ($qmode eq "sge"){
 		$srchCmd = "qstat | grep \$USER  | wc -l";
 		die "Subm.pm::numPendingJobs() not implemented for sge!\n";
 	} elsif ($qmode eq "bash"){
 		return 0;
-	} else {$srchCmd="bsub  | wc -l";
+	} else {$srchCmd="bjobs -p -noheader | wc -l";
 		die "Subm.pm::numPendingJobs() not implemented for bsub!\n";
 	}
-	$num = `$srchCmd`; chomp $num; $num -=1;
+	$num = `$srchCmd`; chomp $num;
+	die "Failed to count pending jobs with: $srchCmd\n" if ($? != 0);
 	return $num;
 }
 sub numUserJobs{
@@ -263,15 +309,16 @@ sub numUserJobs{
 	my $qmode = "slurm"; $qmode = $optHR->{qmode} if (defined($optHR->{qmode}));
 	my $srchCmd ="";#= "squeue -u \$USER   | wc -l";
 	if ($qmode eq "slurm"){
-		$srchCmd = "squeue -u \$USER  | wc -l";
+		$srchCmd = "squeue -h -u \$USER | wc -l";
 	} elsif ($qmode eq "sge"){
 		$srchCmd = "qstat | grep \$USER  | wc -l";
 	} elsif ($qmode eq "bash"){
 		return 0;
-	} else {$srchCmd="bsub  | wc -l";
+	} else {$srchCmd="bjobs -noheader | wc -l";
 	}
 	my $num = 0;
-	$num = `$srchCmd`; chomp $num;$num -=1;
+	$num = `$srchCmd`; chomp $num;
+	die "Failed to count user jobs with: $srchCmd\n" if ($? != 0);
 
 
 	if ($rmSelf && $qmode eq "slurm"){
@@ -307,8 +354,7 @@ sub findQsubSys($){
 		}elsif (!$bpresent && $qpresent){
 			$iniVal = "sge";
 		}elsif (!$qpresent && !$bpresent && !$spresent){
-			print "Warning: No queing system found (sbatch / qsub / bsub command)\nUsing LSF (bsub), though this will likely cause errors\n";
-			
+			die "No queueing system found (sbatch, qsub, or bsub). Use -qsubSystem bash for local execution.\n";
 		}
 	print "Using qsubsystem: $iniVal\n";
 	}
@@ -328,10 +374,12 @@ sub emptyQsubOpt{
 	my $longQ = getProgPaths("longQueue",0); my $shortQ =  getProgPaths("shortQueue",0); my $medQ = getProgPaths("mediumQueue",1);
 	#die "$shortQ\n";
 	my $gpuQ = getProgPaths("gpuQueue",0);
+	my $netQ = getProgPaths("netQueue",0);
 	my $himemQ = getProgPaths("highMemQueue",0);
 	if ($longQ eq ""){$longQ =  $medQ;}
 	if ($medQ eq "" ){die "FATAL: no medium queue defined!\n";};
 	if ($gpuQ eq "" ){$gpuQ = $medQ;};
+	if ($netQ eq "" ){$netQ = $medQ;};
 	if ($himemQ eq "" ){$himemQ = $medQ;};
 	if ($shortQ eq "" ){$shortQ = $medQ;};
 	my $xtraNodeCmds = getProgPaths("subXtraCmd",0);
@@ -356,6 +404,7 @@ sub emptyQsubOpt{
 		doSync => 0,
 		longQueue => $longQ,
 		gpuQueue => $gpuQ,
+		netQueue => $netQ,
 		highMemQueue => $himemQ,
 		longTime => $longTime,#7days
 		medQueue => $medQ,
@@ -364,6 +413,7 @@ sub emptyQsubOpt{
 		shortTime => $shortTime, #2hrs
 		useLongQueue => 0,
 		useGPUQueue => 0,
+		useNetQueue => 0,
 		gpuCount => 0,
 		useShortQueue => 0,
 		useHiMemQueue => 0,
@@ -391,45 +441,42 @@ sub qsubSystemJobAlive{
 	my ($jAr,$optHR) = @_;
 	my $killFailedJobs=0;
 	$killFailedJobs = $_[2] if (@_ > 2);
-	my @jobs = @{$jAr};
-	#clean up @jobs
-	my %jobsCl;  foreach my $kj (@jobs){my @spl = split /;/,$kj; for (@spl){next if ($_ eq "");$jobsCl{$_}++;}}
-	@jobs = keys %jobsCl;
+	my @jobs = split /;/, normalise_job_dependencies($jAr);
+	@jobs = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY } @jobs;
+	return unless (@jobs);
 	
 	
 	my $qmode = $optHR->{qmode};
 	my $cmd1="";
 	my $rTag = $optHR->{rTag};
 
+	for (@jobs) {s/^\Q$rTag\E//;}
 	if ($qmode eq "slurm"){
-		$cmd1 = "squeue -u \$USER ";
-		for (@jobs) {s/$rTag//;}
+		$cmd1 = "squeue -h -u \$USER -o '%i'";
 	} elsif ($qmode eq "sge"){
-		$cmd1 = "qstat | grep \$USER "
+		$cmd1 = "qstat -u \$USER | awk 'NR > 2 {print \$1}'"
 	} elsif ($qmode eq "bash"){
 		return;
-	} else {$cmd1="bsub";
+	} else {$cmd1="bjobs -noheader -o jobid";
 	}
-	my $cmd = "$cmd1";# | grep $_ | wc -l";
-	#my $num = `$cmd`; chomp $num;
-	my $num  = `$cmd`;
-	my $jobsCheckd= scalar @jobs;
-	#print "XX\n@jobs\n\n";
-	foreach (@jobs){
-		$jobsCheckd--;
-		my $waitCnt = 0;
-		while ( $num =~ m/$_/){
-			print "Waiting for $jobsCheckd/".scalar @jobs ." jobs to finish\n" if ($waitCnt==0);
-			sleep (60);
-			$num = `$cmd`; #chomp $num;
-			$waitCnt++;
-			if ($killFailedJobs){
-				my $killed = qsubDepNeverKill();
-				print " Killed $killed jobs with Dependency never completed\n" if ($killed > 0);
-				#die;
-			}
-
+	my %wanted = map { $_ => 1 } @jobs;
+	my $announced = 0;
+	while (1) {
+		my $output = `$cmd1`;
+		die "Failed to query active jobs with: $cmd1\n" if ($? != 0);
+		my %active = map { $_ => 1 }
+			grep { /^\d+$/ }
+			map { my $id = $_; $id =~ s/^\s+|\s+$//g; $id }
+			split /\n/, $output;
+		my @remaining = grep { $active{$_} } keys %wanted;
+		last unless (@remaining);
+		print "Waiting for ".scalar(@remaining)."/".scalar(@jobs)." jobs to finish\n"
+			unless ($announced++);
+		if ($killFailedJobs){
+			my $killed = qsubDepNeverKill();
+			print " Killed $killed jobs with Dependency never completed\n" if ($killed > 0);
 		}
+		sleep (60);
 	}
 	#print "returning\n";
 	return;
@@ -471,32 +518,36 @@ sub qsubSystemWaitMaxJobs{
 
 sub qsubSystem2{
 	my ($tmpsh,$optHR) = @_;
-	my $hxr = $_[2] if (@_ > 2);
+	my $hxr = {};
+	$hxr = $_[2] if (@_ > 2 && defined $_[2]);
 	my %xtras = %{$hxr}; 
 	my $ncores = 0; 
 	if (exists($xtras{cores})){$ncores = $xtras{cores};}
 	my $nthreads= $ncores;
 	if ($ncores =~ m/,/){my @spl = split /,/,$ncores;$ncores = $spl[1]; $nthreads=$spl[0];}
 	if ($ncores != 0){#read in file, change it..
-		open I,"<$tmpsh" or die "qsubSystem2: cant open $tmpsh\n";chomp(my @lines = <I>); close I;
+		open my $in,"<",$tmpsh or die "qsubSystem2: cant open $tmpsh\n";chomp(my @lines = <$in>); close $in;
 		for (my $i=0;$i<@lines;$i++){
 			if ($lines[$i] =~ m/--cpus-per-task/ || $lines[$i] =~ m/--mincpus/){
 				$lines[$i] = "#SBATCH --cpus-per-task=$ncores";
-				$lines[$i] .= "\n#SBATCH --threads-per-core=1\n#SBATCH --hint=compute_bound\n" unless ($lines[$i+1] =~ m/threads-per-core/);
+				my $next_line = $i+1 < @lines ? $lines[$i+1] : "";
+				$lines[$i] .= "\n#SBATCH --threads-per-core=1\n#SBATCH --hint=compute_bound" unless ($next_line =~ m/threads-per-core/);
 			}
 		}
-
+		open my $out,">",$tmpsh or die "qsubSystem2: cant update $tmpsh\n";
+		print {$out} join("\n",@lines), "\n";
+		close $out or die "qsubSystem2: cant close updated $tmpsh\n";
 	}
 	my $xtra = "";
 	my $qbin = "qsub";
 	my $qmode = $optHR->{qmode};
 	if ($qmode eq "slurm"){$qbin="sbatch";
 	} elsif ($qmode eq "sge"){
-	} else {$qbin="bsub";
+	} elsif ($qmode eq "bash"){$qbin="bash";
+	} else {$qbin="bsub";$xtra="<";
 	}
 	my $qcm = "$qbin $xtra $tmpsh \n";
-	die $qcm; #DEBUG
-	system $qcm;
+	system($qcm) == 0 or die "qsubSystem2 failed: $qcm";
 	return $qcm;
 }
 
@@ -509,22 +560,20 @@ sub MFnext($ $ $ $){
 	my $logF = $lckFile; $logF =~ s/\/[^\/]+$/rmLock.sh/;
 	my $cmd = "echo \"all smpl associated jobs seem to have quit. Releasing lock..\"\nrm -f $lckFile\n";
 	#my @jobs = @{$aR};
-	my $jDepe = join(";",@{$aR});
+	my $jDepe = normalise_job_dependencies($aR);
 	my $jobN = "RMLCK$Jnum";
 	#print "$logF\n$jDepe\n\n"; 
 	$QSBoptHR->{afterAny}=1;
 	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
 	$QSBoptHR->{useShortQueue} =1;
-	my ($jN,$jID) = qsubSystem($logF,$cmd,1,"1G",$jobN,$jDepe,"",1,\{},$QSBoptHR);
+	my ($jN,$submitCommand) = qsubSystem($logF,$cmd,1,"1G",$jobN,$jDepe,"",1,[],$QSBoptHR);
 	$QSBoptHR->{afterAny}=0;$QSBoptHR->{useShortQueue}=0;
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
-	push(@{$aR}, $jID);
+	push(@{$aR}, $jN) if ($jN ne "");
 }
 
 
 sub add2SampleDeps($ $){
 	my ($ar1, $ar2) = @_;
-	foreach (@{$ar2}){
-		push (@{$ar1}, $_) if (defined $_ && $_ ne "" && $_ =~ m/[^;]/);
-	}
+	@{$ar1} = split /;/, normalise_job_dependencies($ar1, $ar2);
 }

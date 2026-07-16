@@ -8,9 +8,14 @@
 #SBATCH -p "ei-medium,qib-medium,qib-long,ei-long"
 #  SBATCH --time=248:00:00
 # #SBATCH --localscratch=ssd:10
-#SBATCH -J 2.MGTKexmpl
+#SBATCH -J 2.MF4exmpl
 set -e
 ulimit -c 0;
+
+if [ -z "${MF4DIR:-}" ]; then
+	echo "MF4DIR is unset; export it to the MATAFILER4 installation directory before running this example." >&2
+	exit 1
+fi
 
 if [ ! -e $MF4DIR/examples/data/SRR8797713_2.fq.gz ]; then
 	echo "Input file not found (data/SRR8797713_2.fq.gz), run first 0.getExmplData.sh"
@@ -44,7 +49,7 @@ perl $MF4DIR/MATAF4.pl -map $MAP -inputFQregexSingle '.*\.f[^\.]*q\.gz' -inputFQ
 -Binner 0 -redoBinning 0 \
 -mapper -1 -mapSaveCRAM 0 -mappingCores 11 -mappingMem 12 -mapSortMem 13 -mapReadsOntoAssembly 1 -mapSupportReadsOntoAssembly 1 -mapperFilterIll '0.05 0.75 20' -mapperFilterPB '0.15 0.75 10' -rmDuplicates 1 \
 -getAssemblConsSNP 1 -getAssemblConsSNPsuppRds 1 -SNPconsMinDepth 2 -SNPsaveVCF 1 \
--rmSmplLocks 0  \
+-rmSmplLocks 0  -loopTillComplete 6:250  \
 -submit 1 -inputReadLength 150 -inputReadLengthSuppl 8000 \
 -from 0 -to 10
 

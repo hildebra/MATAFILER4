@@ -18,7 +18,7 @@ use Mods::FuncTools qw(assignFuncPerGene readGene2Func);
 sub readNCBItax($){
 	#reads in Jaime's ete tax file
 	my ($tIn)  = @_;
-	open I,"<$tIn";
+	open I,"<$tIn" or die "Can't open NCBI taxonomy file $tIn: $!\n";
 	while (my $l = <I>){
 		chomp $l;
 		my @spl = split (/\t/,$l);
@@ -180,7 +180,7 @@ sub fixHDs4Phylo ($){
 		$outF .= ".fix";
 		print "Fixing headers in input file (to $outF)\n";
 		my %newHDs;
-		open O,">$outF";
+		open O,">$outF" or die "Can't write renamed phylogeny input $outF: $!\n";
 		foreach my $hd (keys %FAA){
 			my $hd2 = substr $hd,0,40; #cut to raxml length
 			$hd2 =~ s/[:,\}\{;\]\[']/|/g;
@@ -707,7 +707,7 @@ sub runRaxML{
 			}
 			$bootStrap = $bootStrap - $done ;
 			if (!-e "$raxD/RAxML_bootstrap.$raTmpF2"){
-				my $bootCmd.= "-N $bootStrap -b ". int(rand(10000));
+				my $bootCmd = "-N $bootStrap -b ". int(rand(10000));
 				print "Calculating bootstrap tree with $bootStrap bootstraps..\n";
 				systemW  "$raxmlBin -T$ncore -f d  -s $mAli $raxDef -n $raTmpF2 -w $raxD $bootCmd $outGrpRXML > $raxLogD/ini.log\n";
 				if ($partBoots ne ""){system "cat $partBoots >> $raxD/RAxML_bootstrap.$raTmpF2";}
@@ -751,7 +751,7 @@ sub getGenoGenes{
 	$ntGenes =~ s/\.[^\.]+$/\.genes\.fna/;
 	die "Can't find ref genome $refG\n" unless (-e $refG || (-e $ntGenes && -e $proteins));
 	# ("$pprodigalBin -i $inputBac -o $tmpGene/genes$bacmark.gff -a $tmpGene/proteins.faa -d $tmpGene/genes.fna -f $output_format_prodigal -p meta -T $numThr \n");
-	my $prodigal_cmd .= "$pprodigalBin -i $refG -a $proteins -d $ntGenes -f gff -p single -T $cores > /dev/null\n";
+	my $prodigal_cmd = "$pprodigalBin -i $refG -a $proteins -d $ntGenes -f gff -p single -T $cores > /dev/null\n";
 	#die $prodigal_cmd."\n$rewrite || !-e $proteins || !-e $ntGenes\n";
 	system $prodigal_cmd if ($rewrite || !-e $proteins || !-e $ntGenes);
 	return ($ntGenes,$proteins);
@@ -837,17 +837,17 @@ sub renameFMGs{
 	my ($oDess,$rename,$outN,$renameShrt) = @_;
 	#create an "allFMG" file with the correct fasta header names
 	my %catGe;
-	my $allFine=0;
-	opendir(DIR, $oDess) or die "Can't find: $oDess\n";	
+	opendir(DIR, $oDess) or die "Can't find: $oDess\n";
 	my @fnas = sort ( grep { /COG\d+\.fna/  && -e "$oDess/$_"} readdir(DIR) );	close(DIR);
 	my @fnaT=("","");my $aaT="";
 	foreach my $nf (@fnas){
 		$nf =~ m/(.*)\.fna/;
 		my $cat = $1;
 		for (my $j=0;$j<2;$j++){
+			my $allFine=0;
 			$nf =~ s/\.fna/\.faa/ if ($j==1);
 			my $hdFnd=0;
-			open I ,"<$oDess$nf";
+			open I ,"<$oDess$nf" or die "Can't open $oDess$nf: $!\n";
 			while (my $li=<I>){
 				if ($li =~ m/^>/){ 
 					if ($hdFnd){print "Found > 1 seq in $nf\n";last;}
@@ -862,7 +862,8 @@ sub renameFMGs{
 			}
 			close I;
 			if (!$allFine && $renameShrt==1){
-				open O ,">$oDess$nf"; print O $fnaT[$j]; close O;
+				open O ,">$oDess$nf" or die "Can't write $oDess$nf: $!\n";
+				print O $fnaT[$j]; close O;
 				$fnaT[$j]=""; 
 			}
 		}
@@ -872,7 +873,7 @@ sub renameFMGs{
 		open O,">$oDess/$outN.fna" or die "Can't open renameFMGs outfile $oDess/$outN.fna\n";
 		print O $fnaT[0]; close O;
 		open O,">$oDess/$outN.faa" or die "Can't open renameFMGs outfile $oDess/$outN.faa\n";
-		print O $fnaT[0]; close O;
+		print O $fnaT[1]; close O;
 	}
 	return (\%catGe);
 }

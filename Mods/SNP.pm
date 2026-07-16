@@ -19,7 +19,7 @@ sub regionsFromFAI($){
 	while ( my $line = <I>){
 		chomp $line;
 		my @fields = split /\t/,$line;
-		push(@ret,$fields[0] . ":0-" . $fields[1]);
+		push(@ret,$fields[0] . ":1-" . $fields[1]);
 	}
 	close I;
 	return (@ret);
@@ -32,6 +32,7 @@ sub getRegionsBamDepth{
 	#print "$depthPC\n";
 	#open I ,"<$depthPC" or die "can;t oopen depth file $depthPC\n";
 	my ($IN ,$status) = gzipopen($depthPC,"contig depth file",0);
+	return ([],[]) unless ($status && defined $IN);
 	while (<$IN>){
 		chomp; my @spl = split /\t/;
 		
@@ -60,8 +61,9 @@ sub getRegionsBamDepth{
 	} elsif ($tDep <5e6){
 		$totalSpl = int($maxSNPcores/3);
 	} elsif ($tDep <20e6){
-		$totalSpl = $maxSNPcores/2;
-	} else {$totalSpl = $maxSNPcores/2;}
+		$totalSpl = int($maxSNPcores/2);
+	} else {$totalSpl = int($maxSNPcores/2);}
+	$totalSpl = 1 if ($totalSpl < 1);
 	#print "totalSpl $totalSpl $maxSNPcores $tDep\n";
 	#expected depth per bin
 	my $exD = $tDep/$totalSpl;
@@ -217,12 +219,13 @@ sub pileupcall{
 	}
 	
 	my $cmd = "";  
-	my $locXtrCmd = ""; $locXtrCmd = " &" if ($runLocalTmp);
+	my $locXtrCmd = ""; $locXtrCmd = " &\npids+=(\$!)" if ($runLocalTmp);
 	#my $tag = "primary";
 	#
 	#$cmd .= "mkdir -p $tmpdir\n";
 	my $cmdAll2 = "";
 	$cmdAll2 .= "echo \"Processing bams - mpileup $tag\"\n";
+	$cmdAll2 .= "pids=()\n" if ($runLocalTmp);
 	if ($useFB){
 		my $frbBin = getProgPaths("freebayes");
 		$cmd = "ulimit -s unlimited\n$frbBin -f $refFA  $frAllOpts ";
@@ -263,7 +266,8 @@ sub pileupcall{
 		#last if ($i == 1000);
 	}
 	#$bedJobs =1 if ($bedJobs<1);
-	$cmdAll2 .= "wait \$(jobs -p);\n" if ($run2ctg);
+	$cmdAll2 .= "status=0\nfor pid in \"\${pids[\@]}\"; do if ! wait \"\$pid\"; then status=1; fi; done\ntest \"\$status\" -eq 0\n"
+		if ($run2ctg && $runLocalTmp);
 	$cmdAll2 .= "rm -f $tarR->[0].crai $tarR->[0].bai;\n";
 	
 	
@@ -445,7 +449,7 @@ sub SNPconsensus_vcf{
 	}
 	
 	if (@tarS){ #supplementary reads SNP call
-		my $xtra2 .= "echo \"Creating c/bams indexes supplemental reads\"\n";
+		my $xtra2 = "echo \"Creating c/bams indexes supplemental reads\"\n";
 		
 		$depthFileS = $tarS[0];$depthFileS =~ s/\.cram$|\.bam$/\.bam\.coverage\.gz/;
 		if (!-e $depthFileS){$depthFileS =~ s/\.gz//; die "no suppl depth file found (SNP.pm): $depthFileS\n$tarS[0]\n" if (!-e $depthFileS);}
@@ -674,7 +678,7 @@ sub SVcall_vcf{
 		
 		if (@tarS){#suppl mappings..
 			$dmode = "call"; $dmode = "lr" if ($SNPIHR->{SeqTechSuppl} eq "PB" || $SNPIHR->{SeqTechSuppl} eq "ONT");
-			$cmd .= "echo \"supplemental delly call\";\n$dellyBin $dmode -g $refFA $bamTmp | $bcftBin view -O b -o $tmpVCFS -\n ";
+			$cmd .= "echo \"supplemental delly call\";\n$dellyBin $dmode -g $refFA $bamTmpS | $bcftBin view -O b -o $tmpVCFS -\n ";
 		}
 
 	} else{ #gridss..
@@ -699,7 +703,6 @@ sub SVcall_vcf{
 	
 	return $dep;
 }
-
 
 
 

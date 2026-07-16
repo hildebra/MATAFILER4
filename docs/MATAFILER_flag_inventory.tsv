@@ -3,6 +3,10 @@ MATAF4.pl	4.04	Base options	-help,-?,-h	flag			stable	Accepted by MATAF4.pl; see
 MATAF4.pl	4.04	Base options	-checkInstall	flag			stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Base options	-map	string	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Base options	-config	string	MFconfig		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Base options	-inspectState	integer	MFconfig	0	stable	Emit a read-only JSON snapshot of workflow artifacts and markers.
+MATAF4.pl	4.04	Base options	-planState	integer	MFconfig	0	stable	Emit a read-only dependency-ordered repair/submission plan.
+MATAF4.pl	4.04	Base options	-stateReport	string	MFconfig		stable	Write the inspection JSON to this explicit path.
+MATAF4.pl	4.04	Base options	-planReport	string	MFconfig		stable	Write the repair/submission plan JSON to this explicit path.
 MATAF4.pl	4.04	Flow related	-redoFails	integer	MFconfig		stable	if any step of requested analysis failed, just redo everything (extraction etc)
 MATAF4.pl	4.04	Flow related	-redoContigStats	integer	MFconfig		stable	runContigStats (coverage per gene, kmers, GC content) will be deleted & started again
 MATAF4.pl	4.04	Flow related	-submSystem	string	MFconfig		stable	qsub,SGE,bsub,LSF.. by default will try to autodetect

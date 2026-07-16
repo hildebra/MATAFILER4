@@ -6,6 +6,116 @@
 # Running MATAFILER4
 
 
+## Stabilized state workflow
+
+For a normal run, no extra planning command or manual approval cycle is needed:
+
+```bash
+perl MATAF4.pl -map project.map [normal workflow flags] -submit 1
+```
+
+MATAFILER4 performs an internal preflight before the ordinary pipeline logic:
+
+1. Inspect files, completion markers, samples, and assembly groups.
+2. Build a dependency-aware repair/submission plan.
+3. Automatically invalidate narrowly scoped partial mapping, coverage, and
+   hybrid preassembly-package outputs.
+4. Reinspect the repaired state, then let the existing submission engine pick
+   up unfinished work.
+
+This preserves the established workflow: users can rerun the same command and
+MATAFILER4 resumes incomplete samples. `-submit 0` previews safe repairs without
+deleting their targets. Set `-autoRepairState 0` to keep automatic inspection
+and planning but disable its repairs, or `-autoStatePlan 0` to disable the
+preflight entirely.
+
+Each preflight writes an audit snapshot beneath
+`#OutPath/#RunID/LOGandSUB/workflow/`. Files are numbered by iteration, for
+example `state.iteration-000.json` and `plan.iteration-000.json`.
+
+With `-loopTillComplete`, the first preflight runs before submission. At every
+loop boundary, MATAFILER4 waits for the jobs submitted by the current pass,
+reinspects completed hybrid packages and assembly-group outputs, applies safe
+repairs, and only then starts the next pass. Completed members of a hybrid
+assembly group are retained while missing members are resubmitted; final group
+assembly remains dependent on all required preassembly packages.
+
+Group-wide invalidation is intentionally not classified as an automatic safe
+repair. An exact assembly-group membership change remains blocked unless the
+existing `-OKtoRWassGrps 1` authorization is supplied.
+
+### Optional expert diagnostics
+
+The stabilization model still separates three concerns for debugging:
+
+1. **Inspect:** read files and completion markers and report their current state.
+2. **Plan:** convert that snapshot into reviewable repair and submission actions
+   with explicit dependencies.
+3. **Execute:** safely repair selected state internally, then use MATAFILER4's
+   established submission functions.
+
+The explicit inspect and plan commands are optional expert tools. They never
+initialize the scheduler, submit jobs, create scratch directories, or repair
+outputs. Plan documents are diagnostic rather than executable shell scripts;
+`execution_supported` therefore remains `0` in plan JSON.
+
+### Inspect state
+
+Inspect existing sample, mapping, assembly, coverage, and assembly-group state
+without creating scratch directories, deleting outputs, repairing files, or
+submitting jobs:
+
+```bash
+perl MATAF4.pl -map project.map -inspectState 1
+```
+
+The report is JSON on standard output. To write it to a selected file instead:
+
+```bash
+perl MATAF4.pl -map project.map -inspectState 1 -stateReport state.json
+```
+
+Incomplete combinations, such as a completion stone without its expected
+artifact or an assembly-group membership mismatch, are reported as issues. The
+inspection command never applies repairs.
+
+### Build a repair/submission plan
+
+Generate an explicit dependency-ordered repair and submission plan from the same
+inspection snapshot:
+
+```bash
+perl MATAF4.pl -map project.map -planState 1
+```
+
+Pass the same workflow flags that would be used for execution, such as
+`-assembleMG 5` for hybrid mode. The plan only proposes stages that were
+requested by those flags.
+
+The plan is JSON on standard output. It embeds the source inspection report and
+lists repairs, confirmation gates, submissions, expected outputs, and
+`depends_on` action IDs. Hybrid mode (`-assembleMG 5`) is represented as
+per-sample preassembly packages followed by the final assembly-group job;
+downstream mappings and contig statistics depend on that final job.
+
+To persist both documents explicitly:
+
+```bash
+perl MATAF4.pl -map project.map -planState 1 \
+  -stateReport state.json -planReport plan.json
+```
+
+Plan generation remains read-only. It does not interpret the plan as shell
+commands, delete any target, initialize the scheduler, or submit jobs.
+Group-wide invalidation actions retain the `OKtoRWassGrps` authorization gate.
+
+Each action has a stable `id`, `kind`, `operation`, `scope`, `reason_codes`, and
+`depends_on` list. Repair actions additionally identify their targets,
+`automatic_targets`, automatic policy, and required authorization; submission
+actions list their expected outputs. The action graph is validated for missing
+dependencies and cycles before it is emitted.
+
+
 This page describes running behaviour and core concepts. New users should usually read [Quick start](quickstart.md), [Mapping files](mapping_files.md) and [Common workflows](common_workflows.md) before using the full [Flag reference](flag_reference.md).
 
 ## Running MATAFILER4
@@ -24,15 +134,14 @@ The pipeline expects a path to storage that is globally available on all nodes a
 
 The most important input is a mapping file that describes your samples and raw-read locations. See 'examples' dir for some map examples (also explaining how to do compound assemblies, compound mapping). These column names (headers) are reserved key words in the mapping file (other columns can be eg. metadata per sample etc):
 - **#SmplID** [STRING] MATAFILER4 maps always need to have the first column names *#SmplID*. The string in this column will be used in all subsequent analyses, intermediate files, sequence heads etc to uniquely identify samples, therefore choose with extreme care! Good practice would be to include some basic information about the sample in the SMPLID, but should be as short and descriptive as possible. *DO NOT USE SPECIAL CHARACTERS IN THE SMPLID, keep it basic*!  
-- **Path** [STRING] - is the relative path to fastq[.gz] files for each sample (see #DirPath, this needs to be set to the absolute path). All files ending with .fq or .fastq (can have .gz after) in the dir will be used for that specific samples. 1. or 2. indicates first or second read. E.g. al0-0_12s005629-2-1_lane3.2.fq.gz is the second read, here the pipeline expects to have al0-0_12s005629-2-1_lane3.1.fq.gz in the same dir.  
+- **Path** [STRING] - is the relative path to primary read files for each sample (see #DirPath, this needs to be set to the absolute path). FASTQ files are selected with the `-inputFQregex*` options. Unpaired primary BAM reads, such as PacBio reads, can instead be selected with `-inputBAMregex '.*\.bam$'` and are converted to FASTQ with `samtools fastq`; see [Mapping files](mapping_files.md#using-bam-files-as-primary-input). 1 or 2 in paired FASTQ file names indicates the first or second read. E.g. al0-0_12s005629-2-1_lane3.2.fq.gz is the second read, here the pipeline expects to have al0-0_12s005629-2-1_lane3.1.fq.gz in the same dir.
 Further, you can add the following specifics for each single sample:   
 - **AssmblGrps** [STRING] - set this to a number or string. all samples with the same tag will be assembled together (e.g. samples from the same patient at different time points).  
 - **MapGrps** [STRING] - set a tag here as in AssmblGrps. All reads from these samples will be thrown together, when mapping against target sequences (only works with option "map2tar" and "map2DB").
-- **SupportReads** ['PB', 'mate'] - in case you have additional reads, that are not normal illumina hiSeq, e.g. miSeq or hiSeq in mate pair sequence mode ('mate') or PacBio reads ('PB').
-- **SeqTech** ['ONT', 'PB', 'ill', 'miSeq', 'hiSeq', 'GAII', 'GAII_solexa', 'proto', '454', 'AVITI', 'SLR'] - Sequencing technology used in sample: 3rd gen: Oxford Nanopore ('ONT'), PacBio ('PB'), 2nd gen: illumina short reads ('ill' and it's subtechs miSeq, hiSeq, GAII, GAII_solexa), proton ('proto'), 454 ('454'), Elements AVITI, or synthetic long reads ('SLR').
+- **SeqTech** ['ONT', 'PB', 'ill', 'miSeq', 'hiSeq', 'GAII', 'GAII_solexa', 'proto', '454', 'AVITI', 'SLR'] - Sequencing technology used in sample: 3rd gen: Oxford Nanopore (`ONT`) and PacBio (`PB`); 2nd gen: Illumina short reads (`ill` and its subtechnologies `miSeq`, `hiSeq`, `GAII`, `GAII_solexa`), Ion Proton (`proto`), 454 (`454`), Elements AVITI (`AVITI`), or synthetic long reads (`SLR`). `AVITI` selects the AVITI-specific SDM filtering configuration.
 - **ReadLength** - Expected read length in sample. Is usually automatically determined, use with caution!
 - **EstCoverage** [0/1] - (Deprecated!!) Used to indicate if the avg coverage of genomes should be estimated in sample.
-- **SupportReads** [tag:path] - Additional reads created with a different seq technology. E.g. miSeq ('miSeq:/path/to/file'), mate-pair ('mate:/path/to/file') or PacBio ('PB:/path/to/bam').
+- **SupportReads** [tag:path] - Additional reads created with a different sequencing technology. E.g. miSeq (`miSeq:/path/to/file`), mate-pair (`mate:/path/to/file`) or PacBio (`PB:/path/to/file.bam`). For several files of the same technology, use one tag and comma-separated paths: `PB:/path/to/pb1.bam,/path/to/pb2.bam`.
 - **ExcludeAssembly** [0/1] - Exclude sample from assemblies?
 - **cut5PR1** [INT] - remove the first nts (from 5') on read 1
 - **cut5PR2** [INT] - remove the first nts (from 5') on read 2
