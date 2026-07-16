@@ -6122,7 +6122,7 @@ sub remComma($){
 
 
 sub _smpl_stats_columns {
-	my @sdm = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
+	my @sdm = qw(SDMVersion totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
 	my @binners;
 	for my $mode (1 .. 5) {
 		my $name = getBinSubdirName($mode);
@@ -6187,85 +6187,136 @@ sub _metag_stats_text {
 	return join("\n", @lines)."\n";
 }
 
-sub sdmStats {
-	my ($inF,$inD,$suffix) = @_;
+sub _sdm_version {
+	my ($text) = @_;
+	return '' unless defined($text);
+	return $1 if $text =~ m/\bsdm(?:\s+\([^\n)]*\))?\s+(\d+(?:\.\d+)+)\b/i;
+	return '';
+}
+
+sub _sdm_version_at_least {
+	my ($version, $required_major, $required_minor) = @_;
+	return 0 unless defined($version) && $version =~ m/^(\d+)\.(\d+)/;
+	return $1 > $required_major || ($1 == $required_major && $2 >= $required_minor);
+}
+
+sub _parse_sdm_stats_text {
+	my ($filStats, $MaxLengthHistBased, $suffix) = @_;
+	$filStats ||= '';
+	$MaxLengthHistBased ||= 0;
 	$suffix ||= '';
-	my $MaxLengthHistBased=0;
-	my $filStats = getFileStr("$inD/LOGandSUB/sdm/filter_lenHist.txt",0);
-	if ($filStats ne ""){
-		my @tmpSpl = split(/\n/,$filStats);
-		if (@tmpSpl != 0 && $tmpSpl[$#tmpSpl] =~ m/^(\d+)\s/){$MaxLengthHistBased= $1;}
-	}
-	#tmp deactivate(might still be a bug in some old sdm version):
-	#$MaxLengthHistBased=0;
-	#die "$MaxLengthHistBased\n";
-	$filStats = "";
-	$filStats =getFileStr($inF,0,70);
-	my ($totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr) = 
+	my $sdmVersion = _sdm_version($filStats);
+	my ($totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr) =
 		("0","0","0","0","0","0","0","0","0","0","0");
 	my $parsed = 0;
-	if ($filStats eq ""){
-	}elsif ( $filStats =~ m/Reads processed: ([0-9,]+); ([0-9,]+) \(pa/) ##  paired read mode..
-			{ #only do this if newest format
+
+	# SDM 3.40 introduced a labelled, column-aligned summary and reports
+	# high- and mid-quality accepted reads separately.  Accepted1 remains the
+	# total accepted single-end reads in metagStats, so combine both classes.
+	if (_sdm_version_at_least($sdmVersion, 3, 40)
+			&& $filStats =~ m/^\s*Reads processed:\s*([0-9,]+)/m) {
 		$parsed = 1;
-		$totRds =  remComma($1) + remComma($2);
-		if ($filStats =~ m/Rejected: ([0-9,]+); ([0-9,]+)\n/){
-			$Rejected1 =  remComma($1); $Rejected2 =  remComma($2);
+		if ($filStats =~ m/^\s*Reads processed:\s*([0-9,]+)\s+([0-9,]+)\s*$/m) {
+			# Paired 3.40+ summaries use aligned Read 1 / Read 2 columns.
+			$totRds = remComma($1) + remComma($2);
+			if ($filStats =~ m/^\s*Rejected:\s*([0-9,]+)\s+\([^)]*\)\s+([0-9,]+)/m) {
+				$Rejected1 = remComma($1); $Rejected2 = remComma($2);
+			}
+			my ($high1, $high2, $mid1, $mid2) = (0, 0, 0, 0);
+			if ($filStats =~ m/^\s*Accepted \(high quality\):\s*([0-9,]+)\s+\([^)]*\)\s+([0-9,]+)/mi) {
+				$high1 = remComma($1); $high2 = remComma($2);
+			}
+			if ($filStats =~ m/^\s*Accepted \(mid quality\):\s*([0-9,]+)\s+\([^)]*\)\s+([0-9,]+)/mi) {
+				$mid1 = remComma($1); $mid2 = remComma($2);
+			}
+			$Accepted1 = $high1 + $mid1; $Accepted2 = $high2 + $mid2;
+			if ($filStats =~ m/^\s*Recovered singleton reads:\s*([0-9,]+)\s+([0-9,]+)\s*$/mi) {
+				$Singl1 = remComma($1); $Singl2 = remComma($2);
+			}
+		} else {
+			$filStats =~ m/^\s*Reads processed:\s*([0-9,]+)/m;
+			$totRds = remComma($1);
+			if ($filStats =~ m/^\s*Rejected:\s*([0-9,]+)/m) {
+				$Rejected1 = remComma($1);
+			}
+			my ($acceptedHigh, $acceptedMid) = (0, 0);
+			if ($filStats =~ m/^\s*Accepted \(high quality\):\s*([0-9,]+)/mi) {
+				$acceptedHigh = remComma($1);
+			}
+			if ($filStats =~ m/^\s*Accepted \(mid quality\):\s*([0-9,]+)/mi) {
+				$acceptedMid = remComma($1);
+			}
+			$Accepted1 = $acceptedHigh + $acceptedMid;
+			$Singl1 = $Accepted1;
 		}
-		
-		if ($filStats =~ m/Accepted \(High qual\): ([0-9,]+); ([0-9,]+)\s/){
-			$Accepted1 =  remComma($1); $Accepted2 =  remComma($2);
+		if ($filStats =~ m/^\s*-\s*[Ss]equence Length\s*:\s*[\d.]+\s*\/\s*([\d.]+)\s*\/\s*([\d.]+)/m) {
+			$AvgLen = $1; $MaxLength = $2;
 		}
-		#die "$Accepted1\n";
-		#Singletons among these: 269,516; 6,686
-		if ($filStats =~ m/Singletons among these: ([0-9,]+); ([0-9,]+)\n/){
-			$Singl1 =  remComma($1); $Singl2 =  remComma($2);
-		}
-		
-		if ($filStats =~ m/- [Ss]equence Length :\s*\d+.*\/([^\/]+)\/([^\/]+)\n/){
-			$AvgLen = $1;  $MaxLength=$2;if ($MaxLengthHistBased > $MaxLength){$MaxLength = $MaxLengthHistBased;}
-			#die "$AvgLen\n$filStats\n\n";
-		}
-#		$filStats =~ m/- Seq Length :\s*\d+.*\/(\d+.*)\/\d+.*\n/;
-#		my $AvgLen = $1;
-		if ($filStats =~ m/- Quality :\s*\d+.*\/(\d+.*)\/\d+.*\n/){
+		if ($filStats =~ m/^\s*-\s*Quality\s*:\s*[\d.]+\s*\/\s*([\d.]+)\s*\/\s*[\d.]+/m) {
 			$AvgQual = $1;
 		}
-		if ($filStats =~ m/- Accum\. Error ([\d\.]+)/){
+		if ($filStats =~ m/^\s*-\s*Accum\. Error\s+([\d.]+)/m) {
 			$accErr = $1;
 		}
-		#$outStr .= "$totRds\t$Rejected1\t$Rejected2\t$Accepted1\t$Accepted2\t$Singl1\t$Singl2\t$AvgLen\t$MaxLength\t$AvgQual\t$accErr\t";
-	} elsif ( $filStats =~ m/Reads processed: ([0-9,]+)/){#single end format
+	} elsif ($filStats =~ m/Reads processed: ([0-9,]+); ([0-9,]+) \(pa/) {
 		$parsed = 1;
-		$totRds =  remComma($1);
-		if ($filStats =~ m/Rejected: ([0-9,]+)\n/){
-			$Rejected1 =  remComma($1); $Rejected2 =  0;
+		$totRds = remComma($1) + remComma($2);
+		if ($filStats =~ m/Rejected: ([0-9,]+); ([0-9,]+)\n/) {
+			$Rejected1 = remComma($1); $Rejected2 = remComma($2);
 		}
-		if ($filStats =~ m/Accepted \(High qual\): ([0-9,]+)\s/ ) {
-			$Accepted1 =  remComma($1); $Accepted2 =  0;
-			$Singl1 =  $Accepted1; $Singl2 =  0;
+		if ($filStats =~ m/Accepted \(High qual\): ([0-9,]+); ([0-9,]+)\s/) {
+			$Accepted1 = remComma($1); $Accepted2 = remComma($2);
 		}
-		if ($filStats =~ m/- [Ss]equence Length :\s*\d+.*\/([^\/]+)\/([^\/]+)\n/){
-			$AvgLen = $1; $MaxLength=$2; if ($MaxLengthHistBased > $MaxLength){$MaxLength = $MaxLengthHistBased;}
-			#die "$AvgLen\n$filStats\n\n";
+		if ($filStats =~ m/Singletons among these: ([0-9,]+); ([0-9,]+)\n/) {
+			$Singl1 = remComma($1); $Singl2 = remComma($2);
 		}
-		if ($filStats =~ m/.*- Quality :\s*\d+.*\/(\d+.*)\/\d+.*\n/){
+		if ($filStats =~ m/- [Ss]equence Length :\s*\d+.*\/([^\/]+)\/([^\/]+)\n/) {
+			$AvgLen = $1; $MaxLength = $2;
+		}
+		if ($filStats =~ m/- Quality :\s*\d+.*\/(\d+.*)\/\d+.*\n/) {
 			$AvgQual = $1;
 		}
-		
-		if ($filStats =~ m/.*- Accum\. Error ([\d\.]+)/){
+		if ($filStats =~ m/- Accum\. Error ([\d\.]+)/) {
 			$accErr = $1;
 		}
-		#$outStr .= "$totRds\t$Rejected1\t$Rejected2\t$Accepted1\t$Accepted2\t$Singl1\t$Singl2\t$AvgLen\t$MaxLength\t$AvgQual\t$accErr\t";
+	} elsif ($filStats =~ m/Reads processed: ([0-9,]+)/) {
+		$parsed = 1;
+		$totRds = remComma($1);
+		if ($filStats =~ m/Rejected: ([0-9,]+)\n/) {
+			$Rejected1 = remComma($1);
+		}
+		if ($filStats =~ m/Accepted \(High qual\): ([0-9,]+)\s/) {
+			$Accepted1 = remComma($1); $Singl1 = $Accepted1;
+		}
+		if ($filStats =~ m/- [Ss]equence Length :\s*\d+.*\/([^\/]+)\/([^\/]+)\n/) {
+			$AvgLen = $1; $MaxLength = $2;
+		}
+		if ($filStats =~ m/.*- Quality :\s*\d+.*\/(\d+.*)\/\d+.*\n/) {
+			$AvgQual = $1;
+		}
+		if ($filStats =~ m/.*- Accum\. Error ([\d\.]+)/) {
+			$accErr = $1;
+		}
 	}
-	if ($MaxLengthHistBased > $MaxLength){$MaxLength = $MaxLengthHistBased;}
-	my @names = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
-	my @values = ($totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr);
+	if ($MaxLengthHistBased > $MaxLength) {$MaxLength = $MaxLengthHistBased;}
+	my @names = qw(SDMVersion totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
+	my @values = ($sdmVersion,$totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr);
 	my %result;
 	my @output_values = $parsed ? @values : map { '' } @names;
 	@result{map { "$_$suffix" } @names} = @output_values;
 	return \%result;
-	
+}
+
+sub sdmStats {
+	my ($inF,$inD,$suffix) = @_;
+	my $MaxLengthHistBased = 0;
+	my $length_histogram = getFileStr("$inD/LOGandSUB/sdm/filter_lenHist.txt",0);
+	if ($length_histogram ne '') {
+		my @lines = split(/\n/, $length_histogram);
+		$MaxLengthHistBased = $1 if @lines && $lines[-1] =~ m/^(\d+)\s/;
+	}
+	my $filStats = getFileStr($inF,0,70);
+	return _parse_sdm_stats_text($filStats, $MaxLengthHistBased, $suffix);
 }
 
 
