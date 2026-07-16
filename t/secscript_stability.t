@@ -87,6 +87,32 @@ like($smooth_result, qr/^smooth\t2000\t3000\t1000\t/m,
      'a short noisy mapping island is smoothed into one supported breakpoint');
 unlike($smooth_result, qr/^smooth\t4500\t5000\t/m,
        'a terminal low-coverage run is rejected without support on both sides');
+
+# Breakpoint support is relative to the weaker flank.  A genuinely supported
+# zero-depth interval must therefore be treated identically on a low-depth
+# contig and a high-depth contig, provided both clear the 1x evidence floor.
+my $depth_scale_fasta = File::Spec->catfile($tmp, 'depth-scale.fasta');
+write_file($depth_scale_fasta,
+    ">low2x\n" . ('A' x 5_000) . "\n>high20x\n" . ('C' x 5_000) . "\n");
+my $depth_scale_coverage = File::Spec->catfile($tmp, 'depth-scale.coverage.gz');
+my $depth_scale_text = join '',
+    "low2x\t0\t2000\t2\n", "low2x\t2000\t3000\t0\n", "low2x\t3000\t5000\t2\n",
+    "high20x\t0\t2000\t20\n", "high20x\t2000\t3000\t0\n", "high20x\t3000\t5000\t20\n";
+gzip(\$depth_scale_text => $depth_scale_coverage)
+    or die "Cannot create $depth_scale_coverage: $GzipError";
+my $depth_scale_tsv = File::Spec->catfile($tmp, 'depth-scale.breakpoints.tsv.gz');
+is(system($^X, '-I' . $root, $breakpoint_detector,
+          '--assembly', $depth_scale_fasta, '--coverage', $depth_scale_coverage,
+          '--output', $depth_scale_tsv), 0,
+   'breakpoint detector accepts matched low- and high-depth contigs');
+my $depth_scale_result = '';
+gunzip($depth_scale_tsv => \$depth_scale_result)
+    or die "Cannot read $depth_scale_tsv: $GunzipError";
+like($depth_scale_result, qr/^low2x\t2000\t3000\t1000\t0\.0000\t2\.0000\t2\.0000$/m,
+     'a breakpoint on a 2x contig is retained');
+like($depth_scale_result, qr/^high20x\t2000\t3000\t1000\t0\.0000\t20\.0000\t20\.0000$/m,
+     'the equivalent breakpoint on a 20x contig is retained');
+
 my $simulator_err = gensym;
 my $simulator_pid = open3(undef, my $simulator_out, $simulator_err,
     $^X, '-I' . $root, $simulator,
