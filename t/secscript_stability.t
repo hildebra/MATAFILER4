@@ -233,4 +233,62 @@ like($mgs, qr/_touch_checkpoint\(\$iniMB2sto\) unless -e \$iniMB2sto \|\| \@miss
 unlike($mgs, qr/foreach my \$Doo \(\@DoosD\)\{\s*last if \(-e "\$iniMB2sto"\)/s,
        'MGS validates MAG outputs even when a previous global checkpoint exists');
 
+my $mataf4_stats = read_file(File::Spec->catfile($root, 'MATAF4.pl'));
+like($mataf4_stats, qr/sub _smpl_stats_columns.*?sub _metag_stats_text/s,
+     'sample statistics use one central ordered schema and final serializer');
+like($mataf4_stats, qr/return \{ SNP_TotalResolvedBp=>/,
+     'statistics helpers return named values instead of tab-delimited fragments');
+like($mataf4_stats, qr/ref\(\$seq_set->\{pa1\}\) eq 'ARRAY'/,
+     'sample statistics validate optional read arrays before dereferencing');
+like($mataf4_stats, qr/\$map\{\$SmplN\}\{inputFileSizeMB\}/,
+     'sample statistics use their sample argument for input size');
+unlike($mataf4_stats, qr/system "rm -rf \$inD\/assemblies\/metag\/corrected"/,
+       'sample statistics do not delete assembly data');
+unlike($mataf4_stats, qr/sub smplStats\(\)/,
+       'sample statistics no longer declare a misleading zero-argument prototype');
+like($mataf4_stats, qr/getContamination\([^;]+prepEBI[^;]+\);/s,
+     'EBI contamination fields are emitted unconditionally for a stable schema');
+like($mataf4_stats, qr/\$value =~ s\/\[\\t\\r\\n\]\+\/ \/g/,
+     'central serialization prevents embedded delimiters from corrupting metagStats');
+like($mataf4_stats, qr/my %sampleStats;.*?my \@sampleStatsOrder/s,
+     'statistics are retained in a central per-sample object');
+like($mataf4_stats, qr/grep \{ \$observed\{\$_\} \} \@preferred/,
+     'metagStats emits only columns containing an observed value');
+unlike($mataf4_stats, qr/my \$statStr\b/,
+       'sample-wise tab-string accumulation has been removed');
+like($mataf4_stats, qr/sub getHybridAssemblyStats.*?HybridAssemblyComparison\.tsv/s,
+     'hybrid comparative assembly metrics are merged into sample statistics');
+
+my ($central_stats_code) = $mataf4_stats =~ /(sub _smpl_stats_columns.*?)(?=\nsub sdmStats)/s;
+ok(defined($central_stats_code), 'central statistics implementation can be isolated for testing');
+my $central_eval = "package TestCentralSampleStats; sub getBinSubdirName { return 'B'.\$_[0]; }\n"
+    . $central_stats_code;
+eval $central_eval;
+is($@, '', 'central statistics implementation compiles independently');
+my %central_fixture = (
+    A => { DIR => '/sample/A', values => { RawInputSize => '1.000G', BreakpointCount => '' } },
+    B => { DIR => '/sample/B', values => { RawInputSize => '2.000G', HybridFinalN50 => 5000 } },
+);
+my $central_text = TestCentralSampleStats::_metag_stats_text(\%central_fixture, [qw(A B)]);
+like($central_text, qr/^SMPLID\tDIR\tRawInputSize\tHybridFinalN50$/m,
+     'final statistics header contains only populated columns in preferred order');
+unlike($central_text, qr/BreakpointCount/,
+       'globally empty statistics columns are omitted');
+my @central_lines = split /\n/, $central_text;
+my @central_widths = map { scalar(split /\t/, $_, -1) } @central_lines;
+is_deeply(\@central_widths, [4, 4, 4],
+          'central serialization keeps every sample aligned to the selected columns');
+
+my ($hybrid_stats_code) = $mataf4_stats =~ /(sub getHybridAssemblyStats.*?)(?=\nsub smplStats)/s;
+ok(defined($hybrid_stats_code), 'hybrid statistics parser can be isolated for testing');
+eval "package TestHybridSampleStats; $hybrid_stats_code";
+is($@, '', 'hybrid statistics parser compiles independently');
+my $hybrid_values = TestHybridSampleStats::getHybridAssemblyStats($comparison);
+is($hybrid_values->{HybridPreassemblyCount}, 1,
+   'hybrid statistics report its preassembly count');
+is($hybrid_values->{HybridPreassemblyN50}, 30_000,
+   'hybrid statistics include the source assembly N50');
+is($hybrid_values->{HybridFinalN50}, 5_000,
+   'hybrid statistics include the final assembly N50');
+
 done_testing();

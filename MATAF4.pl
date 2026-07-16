@@ -219,8 +219,11 @@ if ($MFconfig{inspectState}) {
 runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
 
 
-#captures statistics for current sample
-my $statStr = ""; my $statStr5 = "";
+# Central statistics store. Repeated workflow passes replace a sample's
+# snapshot without losing samples collected in earlier loop windows.
+my %sampleStats;
+my @sampleStatsOrder;
+my %sampleStatsSeen;
 #the sample currently worked on, important to keep as a global variable
 my $curSmpl = "";
 #compare to previous dir
@@ -436,12 +439,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	# collect stats on seq qual, assembly etc
 	if ($MFconfig{alwaysDoStats}){
-		my ($statsHD,$curStats,$statsHD5,$curStats5) = smplStats($curOutDir, $asmDir, $SmplName);
-		#add to global string that is later written
-		if ($statStr eq ""){
-			$statStr.="SMPLID\tDIR\t".$statsHD."\n".$curSmpl."\t$dir2rd\t".$curStats."\n";
-			$statStr5.="SMPLID\tDIR\t".$statsHD5."\n".$curSmpl."\t$dir2rd\t".$curStats5."\n";
-		} else {$statStr.=$curSmpl."\t$dir2rd\t".$curStats."\n"; $statStr5.=$curSmpl."\t$dir2rd\t".$curStats5."\n";}
+		push @sampleStatsOrder, $SmplName unless $sampleStatsSeen{$SmplName}++;
+		$sampleStats{$SmplName} = {
+			DIR => $dir2rd,
+			values => smplStats($curOutDir, $asmDir, $SmplName),
+		};
 	}
 	
 	$map{$curSmpl}{inputFilesEmpty} = 0; 
@@ -1486,7 +1488,6 @@ sub loop2C_check(){
 				print "Last loop, breaking..\n" unless ($nextWindow->{has_window});
 				print "$tmpStr$from -> $to \n";#" . ($JNUM + $loop2c_winsize) . "\n";
 			}
-			$statStr = ""; 
 			print "-------------------------------------------\n-------------------------------------------\n";
 			
 			if ($MFopt{redoAssMapping} || $MFopt{BinnerRedoAll} || $MFopt{redoAssembly} || $MFopt{redoSNPcons} || $MFopt{redoSNPgene} ||
@@ -1532,16 +1533,23 @@ sub postprocess{
 	my $MGSfile = "$baseOut/metagStats.txt";
 	my $MGShtml = "$baseOut/metagStatsReport.html";
 	my $prevRep=0; #how many samples reported on?
-	if (-e $MGSfile){$prevRep = `wc -l $MGSfile | cut -f1 -d' '`; chomp $prevRep; $prevRep = int($prevRep);$prevRep--;}
+	if (-e $MGSfile) {
+		open my $previous, '<', $MGSfile;
+		$prevRep++ while <$previous>;
+		close $previous;
+		$prevRep-- if $prevRep;
+	}
 
-#print $statStr."\n\n".@inputRawFQs . " .. ".@allSmplNames." >= $prevRep\n";
-#print "html trig: ".@allSmplNames." > $prevRep\n";
-
-	if ( ($statStr ne "" && @allSmplNames >= $prevRep)  || $MFopt{writeStats}){
-		open O,">$baseOut/metagStats.txt";print O $statStr;close O;
+	if (%sampleStats) {
+		my $statsText = _metag_stats_text(\%sampleStats, \@sampleStatsOrder);
+		my $temporary = "$MGSfile.tmp.$$";
+		open my $statsFH, '>', $temporary or die "Cannot write temporary metagStats '$temporary': $!\n";
+		print {$statsFH} $statsText or die "Cannot write metagStats data: $!\n";
+		close $statsFH or die "Cannot close temporary metagStats '$temporary': $!\n";
+		rename $temporary, $MGSfile or die "Cannot promote metagStats '$temporary' to '$MGSfile': $!\n";
 	}
 	print "Stats in $MGSfile \n";
-	if ($MFopt{writeStats} && (@allSmplNames > $prevRep || !-e $MGShtml ) ){
+	if ($MFopt{writeStats} && (@sampleStatsOrder > $prevRep || !-e $MGShtml ) && -s $MGSfile ){
 		my $qcMakeHTMLReport = getProgPaths("qcMakeHTMLReport");
 		my $Rpath = getProgPaths("Rpath");
 		my $call = "$qcMakeHTMLReport $Rpath $MGSfile $MGShtml 1> /dev/null 2>&1;\n";
@@ -1551,15 +1559,6 @@ sub postprocess{
 		#print $QCRes
 		print "HTML Report in $MGShtml\n";
 	}
-	if (0 && $statStr5 ne ""){
-		open O,">$baseOut/metagStats_500.txt";
-		print O $statStr5;
-		close O;
-		#print "Stats in $baseOut/metagStats_500.txt\n";
-	}
-
-
-
 	my $dir_MP2 = $baseOut.$preDIRs{dir2MePhl}; #metaphlan 2 dir
 	#my $dir_RibFind = $baseOut.$preDIRs{dir2RiboF}; #metaphlan 2 dir
 	#my $dir_KrakFind = $baseOut."pseudoGC/Phylo/KrakenTax/"; #metaphlan 2 dir
@@ -6122,13 +6121,80 @@ sub remComma($){
 }
 
 
-sub sdmStats($ $){
-	my ($inF,$inD) = @_;
+sub _smpl_stats_columns {
+	my @sdm = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
+	my @binners;
+	for my $mode (1 .. 5) {
+		my $name = getBinSubdirName($mode);
+		push @binners, "HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins";
+	}
+	return (
+		qw(RawInputSize InputIsPaired InputIsSingle
+		FilteredContaRdsPerc FilteredContaRds FilteredNonContaRds
+		FilteredContaRdsPerc_EBI FilteredContaRds_EBI FilteredNonContaRds_EBI),
+		@sdm, (map { "${_}_Sup" } @sdm),
+		qw(Merged NotMerged AvgGenomeSizeEst TotalGenomesEst
+		ContigN50 NScaff400 NScaffG1k NScaffG10k NScaffG100k NScaffG1M
+		ScaffN50 ScaffMaxSize ScaffSize CircCtgs CircCtgG1M
+		BreakpointCount BreakpointContigs BreakpointBases BreakpointMeanLength BreakpointMaxLength
+		ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign DisconcAlign SingleUniqAlign SingleMultiAlign
+		OpticalDuplicates PCRduplicates PassedMD EstLibSize
+		GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes Gcomplete G5pComplete G3pComplete Gincomplete),
+		@binners,
+		qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved INDEL_Num INDEL_Passed),
+		qw(HybridPreassemblyCount
+		HybridPreassemblyContigs HybridFinalContigs HybridContigsDelta HybridFinalToPreContigsRatio
+		HybridPreassemblyBases HybridFinalBases HybridBasesDelta HybridFinalToPreBasesRatio
+		HybridPreassemblyN50 HybridFinalN50 HybridN50Delta HybridFinalToPreN50Ratio
+		HybridPreassemblyN90 HybridFinalN90 HybridN90Delta HybridFinalToPreN90Ratio
+		HybridPreassemblyLongest HybridFinalLongest HybridLongestDelta HybridFinalToPreLongestRatio
+		HybridPreassemblyGCPercent HybridFinalGCPercent HybridGCPercentDelta HybridFinalToPreGCPercentRatio),
+	);
+}
+
+sub _metag_stats_text {
+	my ($stats, $order) = @_;
+	my @preferred = _smpl_stats_columns();
+	my %known;
+	my @duplicates;
+	for my $column (@preferred) {
+		push @duplicates, $column if $known{$column};
+		$known{$column} = 1;
+	}
+	die "Duplicate field(s) in sample-stat schema: ".join(', ', @duplicates)."\n" if @duplicates;
+	my %observed;
+	for my $sample (@$order) {
+		my $values = $stats->{$sample}{values} || {};
+		for my $name (keys %$values) {
+			$observed{$name} = 1 if defined($values->{$name}) && $values->{$name} ne '';
+		}
+	}
+	my @unknown = sort grep { !$known{$_} } keys %observed;
+	warn "Appending unknown sample-stat field(s): ".join(', ', @unknown)."\n" if @unknown;
+	my @columns = (grep { $observed{$_} } @preferred, @unknown);
+	my @lines = (join("\t", 'SMPLID', 'DIR', @columns));
+	for my $sample (@$order) {
+		next unless exists $stats->{$sample};
+		my $values = $stats->{$sample}{values} || {};
+		my @row = ($sample, $stats->{$sample}{DIR});
+		for my $name (@columns) {
+			my $value = defined($values->{$name}) ? $values->{$name} : '';
+			$value =~ s/[\t\r\n]+/ /g;
+			push @row, $value;
+		}
+		push @lines, join("\t", @row);
+	}
+	return join("\n", @lines)."\n";
+}
+
+sub sdmStats {
+	my ($inF,$inD,$suffix) = @_;
+	$suffix ||= '';
 	my $MaxLengthHistBased=0;
 	my $filStats = getFileStr("$inD/LOGandSUB/sdm/filter_lenHist.txt",0);
 	if ($filStats ne ""){
 		my @tmpSpl = split(/\n/,$filStats);
-		if (@tmpSpl != 0){$tmpSpl[$#tmpSpl]=~m/^(\d+)\s/; $MaxLengthHistBased= $1;}
+		if (@tmpSpl != 0 && $tmpSpl[$#tmpSpl] =~ m/^(\d+)\s/){$MaxLengthHistBased= $1;}
 	}
 	#tmp deactivate(might still be a bug in some old sdm version):
 	#$MaxLengthHistBased=0;
@@ -6137,9 +6203,11 @@ sub sdmStats($ $){
 	$filStats =getFileStr($inF,0,70);
 	my ($totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr) = 
 		("0","0","0","0","0","0","0","0","0","0","0");
+	my $parsed = 0;
 	if ($filStats eq ""){
 	}elsif ( $filStats =~ m/Reads processed: ([0-9,]+); ([0-9,]+) \(pa/) ##  paired read mode..
 			{ #only do this if newest format
+		$parsed = 1;
 		$totRds =  remComma($1) + remComma($2);
 		if ($filStats =~ m/Rejected: ([0-9,]+); ([0-9,]+)\n/){
 			$Rejected1 =  remComma($1); $Rejected2 =  remComma($2);
@@ -6163,11 +6231,12 @@ sub sdmStats($ $){
 		if ($filStats =~ m/- Quality :\s*\d+.*\/(\d+.*)\/\d+.*\n/){
 			$AvgQual = $1;
 		}
-		if ($filStats =~ m/- Accum. Error ([\d+\.]+)/){
-			my $accErr = $1;
+		if ($filStats =~ m/- Accum\. Error ([\d\.]+)/){
+			$accErr = $1;
 		}
 		#$outStr .= "$totRds\t$Rejected1\t$Rejected2\t$Accepted1\t$Accepted2\t$Singl1\t$Singl2\t$AvgLen\t$MaxLength\t$AvgQual\t$accErr\t";
 	} elsif ( $filStats =~ m/Reads processed: ([0-9,]+)/){#single end format
+		$parsed = 1;
 		$totRds =  remComma($1);
 		if ($filStats =~ m/Rejected: ([0-9,]+)\n/){
 			$Rejected1 =  remComma($1); $Rejected2 =  0;
@@ -6190,8 +6259,12 @@ sub sdmStats($ $){
 		#$outStr .= "$totRds\t$Rejected1\t$Rejected2\t$Accepted1\t$Accepted2\t$Singl1\t$Singl2\t$AvgLen\t$MaxLength\t$AvgQual\t$accErr\t";
 	}
 	if ($MaxLengthHistBased > $MaxLength){$MaxLength = $MaxLengthHistBased;}
-	my @ret = ($totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr);
-	return @ret;
+	my @names = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
+	my @values = ($totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr);
+	my %result;
+	my @output_values = $parsed ? @values : map { '' } @names;
+	@result{map { "$_$suffix" } @names} = @output_values;
+	return \%result;
 	
 }
 
@@ -6202,16 +6275,22 @@ sub bwtLogRd($$$){
 	my %ret = %{$rhr};
 	#DEFAULTS:
 	$ret{uniqAlign}=-1;$ret{multAlign}=0;$ret{DisconcAlign}=0;
-	if (@spl < 5){return (\%ret);}
-	if ($spl[$idx+1] =~ m/\(100.00%\) were unpaired; of these:/){#single end read mapping!
+	return \%ret if $idx < 0 || $idx + 1 >= @spl;
+	my $single_end = $spl[$idx+1] =~ m/\(100.00%\) were unpaired; of these:/ ? 1 : 0;
+	my $last_required = $single_end ? $idx + 5 : $idx + 14;
+	if ($last_required >= @spl) {
+		warn "Incomplete bowtie2 statistics block; expected through line index $last_required\n";
+		return \%ret;
+	}
+	if ($single_end){#single end read mapping!
 		#die "SE\n";
 		if ($spl[$idx+2] =~ m/(\d+) \(.+\) aligned 0 times/){ $ret{notAlign} = $1;} else { $ret{notAlign}=0; print "bwtOut wrg1.1\n";}
 		 $ret{uniqAlign}=0;
 		 $ret{multAlign}=0;
 		$ret{DisconcAlign}=0;
-		if ($spl[$idx+3] =~ m/(\d+) \(.+\) aligned exactly 1 time/ ){ $ret{SinglAlign} = $1;} else { $ret{SinglAlign}=0;print "bwtOut wrg1.5 $spl[14]\n";}
-		if ($spl[$idx+4] =~ m/(\d+) \(.+\) aligned >1 times/ ){ $ret{SinglAlignMult} = $1;} else { $ret{SinglAlignMult}=0;print "bwtOut wrg1.6 $spl[15]\n";}
-		if ( $spl[$idx+5] =~ m/(\d+\.\d+)\% overall alignment rate/ ){ $ret{AlignmRate} = $1;} else {$ret{AlignmRate} = -1; print "bwtOut wrg1.7 $spl[16]\n";}
+		if ($spl[$idx+3] =~ m/(\d+) \(.+\) aligned exactly 1 time/ ){ $ret{SinglAlign} = $1;} else { $ret{SinglAlign}=0; warn "Could not parse single-read unique alignments\n";}
+		if ($spl[$idx+4] =~ m/(\d+) \(.+\) aligned >1 times/ ){ $ret{SinglAlignMult} = $1;} else { $ret{SinglAlignMult}=0; warn "Could not parse single-read multiple alignments\n";}
+		if ( $spl[$idx+5] =~ m/(\d+\.\d+)\% overall alignment rate/ ){ $ret{AlignmRate} = $1;} else {$ret{AlignmRate} = -1; warn "Could not parse overall alignment rate\n";}
 	} else {
 		#die "Pair\n";
 		if ($spl[$idx+2] =~ m/(\d+) \(.+\) aligned concordantly 0 times/){ $ret{notAlign} = $1;} else { $ret{notAlign}=0; print "bwtOut wrg1\n";}
@@ -6219,8 +6298,8 @@ sub bwtLogRd($$$){
 		if ($spl[$idx+4] =~ m/(\d+) \(.+\) aligned concordantly >1 times/ ){ $ret{multAlign} = $1;} else { $ret{multAlign}=0;print "bwtOut wrg3  $spl[6]\n";}
 		if ($spl[$idx+7] =~ m/(\d+) \(.+\) aligned discordantly 1 time/ ){ $ret{DisconcAlign} = $1;} else { $ret{DisconcAlign}=0;print "bwtOut wrg4 $spl[9]\n";}
 		if ($spl[$idx+12] =~ m/(\d+) \(.+\) aligned exactly 1 time/ ){ $ret{SinglAlign} = $1;} else { $ret{SinglAlign}=0;print "bwtOut wrg5 $spl[14]\n";}
-		if (@spl>($idx+12) && $spl[$idx+13] =~ m/(\d+) \(.+\) aligned >1 times/ ){ $ret{SinglAlignMult} = $1;} else { $ret{SinglAlignMult}=0;print "bwtOut wrg6 $spl[15]\n";}
-		if (@spl>($idx+13) && $spl[$idx+14] =~ m/(\d+\.\d+)\% overall alignment rate/ ){ $ret{AlignmRate} = $1;} else {$ret{AlignmRate} = -1; print "bwtOut wrg7 $spl[16]\n";}
+		if ($spl[$idx+13] =~ m/(\d+) \(.+\) aligned >1 times/ ){ $ret{SinglAlignMult} = $1;} else { $ret{SinglAlignMult}=0; warn "Could not parse paired-read multiple alignments\n";}
+		if ($spl[$idx+14] =~ m/(\d+\.\d+)\% overall alignment rate/ ){ $ret{AlignmRate} = $1;} else {$ret{AlignmRate} = -1; warn "Could not parse overall alignment rate\n";}
 	}
 	return (\%ret);
 }
@@ -6238,15 +6317,14 @@ sub getMapStats{
 	}
 	#die "$alignStats\n";
 	my $idx =-1;my $dobwtStat=0;
-	if ($alignStats =~ m/strobealign/){ #m/\[M::worker_pipeline/){
-		$dobwtStat=2;
-	}elsif($alignStats =~ m/This is strobealign/){
+	if ($alignStats =~ m/This is strobealign/){
 		$dobwtStat=3;
+	}elsif($alignStats =~ m/\[M::worker_pipeline/){
+		$dobwtStat=2;
 	}elsif (@spl > 12 && $alignStats =~ m/reads; of these:/){
 		$dobwtStat=1;
-		while($spl[$idx] !~ m/\d+ reads; of these:/){
-			$idx++; 
-			if ($idx >= @spl){$idx=-1;last;}
+		for my $candidate (0 .. $#spl) {
+			if ($spl[$candidate] =~ m/\d+ reads; of these:/) { $idx = $candidate; last; }
 		}
 		if ($idx>=0 && $spl[$idx+0] =~ m/(\d+) reads; of these:/){
 			$locStats{totReadPairs} = $1;
@@ -6255,14 +6333,14 @@ sub getMapStats{
 		}
 	}
 	#die "$spl[$idx]\n$locStats{totReadPairs}\n";
-	my $outStrDesc ="ReadsPaired\tAlignedReads\tOverallAlignment\tUniqueAlgned\tMultAlign\tDisconcAlign\tSingleUniqAlign\tSingleMultiAlign\t";
-	my $outStr = "\t" x 8;
+	my @columns = qw(ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign DisconcAlign SingleUniqAlign SingleMultiAlign);
+	my %result = map { $_ => '' } @columns;
 	
 	my $incoming =0;my $retained =0;my $removed = 0;
-	if ($alignStats =~ m/^Inentries: (\d+)/){
-		my @matc = $alignStats =~ m/^Inentries: (\d+)/g;		foreach (@matc) {$incoming += int($_);}
-		 @matc =$alignStats =~ m/^TotalRetained: (\d+)/g;	foreach (@matc) {$retained += int($_);}
-		 @matc = $alignStats =~ m/^TotalRm: (\d+)/g;	foreach (@matc) {$removed += int($_);} 
+	if ($alignStats =~ m/^Inentries: (\d+)/m){
+		my @matc = $alignStats =~ m/^Inentries: (\d+)/mg;		foreach (@matc) {$incoming += int($_);}
+		 @matc =$alignStats =~ m/^TotalRetained: (\d+)/mg;	foreach (@matc) {$retained += int($_);}
+		 @matc = $alignStats =~ m/^TotalRm: (\d+)/mg;	foreach (@matc) {$removed += int($_);}
 		 $locStats{totReadPairs} = $incoming;
 		 $locStats{uniqAlign} = $retained;
 	} else {
@@ -6276,15 +6354,23 @@ sub getMapStats{
 	} elsif ($dobwtStat == 1){#$alignStats =~ m/reads; of these:/){
 		my ($rhr) = bwtLogRd(\@spl,$idx,\%locStats);
 		%locStats = %{$rhr};
-		$outStr = "$locStats{totReadPairs}\t$retained\t$locStats{AlignmRate}\t".$locStats{uniqAlign}/$locStats{totReadPairs}*100 ."\t".$locStats{multAlign}/$locStats{totReadPairs}*100 ."\t".$locStats{DisconcAlign}/$locStats{totReadPairs}*100 
-		."\t".$locStats{SinglAlign}/$locStats{totReadPairs}*100 ."\t".$locStats{SinglAlignMult}/$locStats{totReadPairs}*100 ."\t";
+		$result{ReadsPaired} = $locStats{totReadPairs};
+		$result{AlignedReads} = $retained;
+		$result{OverallAlignment} = $locStats{AlignmRate};
+		if (($locStats{totReadPairs} || 0) > 0) {
+			$result{UniqueAlgned} = $locStats{uniqAlign}/$locStats{totReadPairs}*100;
+			$result{MultAlign} = $locStats{multAlign}/$locStats{totReadPairs}*100;
+			$result{DisconcAlign} = $locStats{DisconcAlign}/$locStats{totReadPairs}*100;
+			$result{SingleUniqAlign} = $locStats{SinglAlign}/$locStats{totReadPairs}*100;
+			$result{SingleMultiAlign} = $locStats{SinglAlignMult}/$locStats{totReadPairs}*100;
+		}
 	} elsif ($dobwtStat == 2){ #minimap2
 		my @matches = ($alignStats =~ m/\[M::worker_pipeline::.*\] mapped (\d+) sequences/g);
 		#print "@matches\n";
 		my $sum=0; $sum += $_ foreach (@matches);
 		if ($sum>0){
 			my $frac = (1 - ($removed/$sum)) * 100;
-			$outStr = "$sum\t$retained\t".  $frac ."\t\t\t\t\t\t";
+			@result{qw(ReadsPaired AlignedReads OverallAlignment)} = ($sum, $retained, $frac);
 		}
 		#die "minimap!!$sum\n";
 	} elsif ($dobwtStat == 3){ #strobealign
@@ -6293,10 +6379,12 @@ sub getMapStats{
 			#$locStats{totReadPairs} = -1 if (!exists($locStats{totReadPairs}));
 			my $frac = 0; $frac = $incoming/$locStats{totReadPairs} if( $locStats{totReadPairs}>0);
 			$locStats{AlignmRate}=$frac;
-			$outStr = "$locStats{totReadPairs}\t$retained\t".  $frac ."\t"  .$locStats{uniqAlign}/$locStats{totReadPairs}*100 . "\t\t\t\t\t";
+			@result{qw(ReadsPaired AlignedReads OverallAlignment UniqueAlgned)} =
+				($locStats{totReadPairs}, $retained, $frac,
+				 $locStats{uniqAlign}/$locStats{totReadPairs}*100);
 		}
 	}
-	return ($outStr,$outStrDesc);
+	return \%result;
 }
 sub optiDups{
 	my ($inP) = @_;
@@ -6328,24 +6416,20 @@ sub optiDups{
 			if ($alignStats2 =~ m/Improper Pairs\s+(\d+)\s+(\d+)\s+(\d+)/){$locStats{duplOptic} += $3; $locStats{duplPCR} += $2; $locStats{duplPass} += $1;} else {$doDup=0;}#{die "Can't find impr. dupl stats: $alignStats2\n";}
 		}
 	}
-	my $outStr = "";
-	if ($doDup){
-		$outStr = "$locStats{duplOptic}\t$locStats{duplPCR}\t$locStats{duplPass}\t$locStats{EstLibSize}\t";
-	} else {
-		$outStr = "\t" x 4;
-	}
-	my $outStrDesc = "OpticalDuplicates\tPCRduplicates\tPassedMD\tEstLibSize\t";
-	return ($outStr,$outStrDesc);
+	my %result = map { $_ => '' } qw(OpticalDuplicates PCRduplicates PassedMD EstLibSize);
+	@result{qw(OpticalDuplicates PCRduplicates PassedMD EstLibSize)} =
+		@locStats{qw(duplOptic duplPCR duplPass EstLibSize)} if $doDup;
+	return \%result;
 }
 
 sub getContamination{
 	my ($inFi,$inFi2,$idx) = @_;
-	my $outStr = "?\t?\t?\t";my $outStrDesc = "";
-	if ($idx eq ""){
-		$outStrDesc .= "FilteredContaRdsPerc\tFilteredContaRds\tFilteredNonContaRds\t";
-	} else {
-		$outStrDesc .= "FilteredContaRdsPerc_${idx}\tFilteredContaRds_${idx}\tFilteredNonContaRds_${idx}\t";
-	}
+	my $suffix = $idx eq '' ? '' : "_$idx";
+	my %result = (
+		"FilteredContaRdsPerc$suffix" => '',
+		"FilteredContaRds$suffix" => '',
+		"FilteredNonContaRds$suffix" => '',
+	);
 	my $filStats = getFileStr($inFi,0);#`cat $inD/LOGandSUB/KrakHS.sh.etxt`; chomp $filStats;
 	#if ($filStats eq "" ){$outStr .= "?\t?\t?\t";	return ($outStr,$outStrDesc);}
 	
@@ -6363,83 +6447,88 @@ sub getContamination{
 	
 	if (@nonhits > 0){
 		my $totHits=0; my $totNH=0;
-		for (my $i=0;$i<@hits;$i++){
+		my $pair_count = @hits < @nonhits ? scalar(@hits) : scalar(@nonhits);
+		for (my $i=0;$i<$pair_count;$i++){
 			$totHits += $hits[$i];$totNH += $nonhits[$i];
 		}
-		
-		$outStr = join(";",@matches) . "\t$totHits\t$totNH\t";
+		$result{"FilteredContaRdsPerc$suffix"} = join(";",@matches);
+		$result{"FilteredContaRds$suffix"} = $totHits;
+		$result{"FilteredNonContaRds$suffix"} = $totNH;
 	} 
-	
-	
-	
-	#die "$outStr\n$inFi\n";
-	return ($outStr,$outStrDesc);
+	return \%result;
 }
 
 sub getBinnerStats{
 	my ($tmpassD,$SmplN) = @_;
-	my $addStr = ""; my $addDescr = "";
+	my %result;
+	for my $i (1 .. 5) {
+		my $name = getBinSubdirName($i);
+		@result{"HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins"} = ('', '', '');
+	}
+	return \%result unless defined($tmpassD) && $tmpassD ne '' && -d $tmpassD;
 	#all binners..
 	for (my $i=1; $i < 6; $i++){
 		my $SCdir = getBinSubdirName($i);
 		my $SBbinCM2 = "$tmpassD/Binning/$SCdir/$SmplN.cm2";
 		if (-s $SBbinCM2){
 			my $HQbinCnt = 0; my $MQbinCnt = 0;my $totBins=0;
-			open I,"<$SBbinCM2" or die $!;
-			while (<I>){my @spl = split/\t/; next if ($spl[1] eq "Completeness");
+			open my $bin_fh, '<', $SBbinCM2 or do { warn "Cannot read bin statistics '$SBbinCM2': $!\n"; next; };
+			while (<$bin_fh>){my @spl = split/\t/; next unless @spl >= 3; next if ($spl[1] eq "Completeness");
 				if ($spl[1] >= 90 && $spl[2] <= 5){$HQbinCnt ++ ;
 				} elsif ($spl[1] >= 80 && $spl[2] <= 5){$MQbinCnt ++ ;}
 				$totBins ++;
 			}
-			close I;
-			$addStr .= "$HQbinCnt\t$MQbinCnt\t".($totBins-$HQbinCnt-$MQbinCnt)."\t";
+			close $bin_fh or warn "Cannot close bin statistics '$SBbinCM2': $!\n";
+			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins"} =
+				($HQbinCnt, $MQbinCnt, $totBins-$HQbinCnt-$MQbinCnt);
 		} else {
-			$addStr .= "\t" x 3;
+			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins"} = ('', '', '');
 		}
-		$addDescr .= "HQ_bins_$SCdir\tMQ_bins_$SCdir\t${SCdir}_other_bins\t";
 	}
-	
-	return ($addStr,$addDescr);
+	return \%result;
 }
 
 sub getSNPStats{
 	my ($inFi) = @_;
-	#my $outStrDesc = "";  my $outStr = "";
-	my $outStr = "\t" x 4;
-#	my $outStrDesc = "SNPbpResolved	SNPfastaEntries	SNPconflicts\tSNPconlResolv2ndL\tNumSNPs\t";
-	my $outStrDesc = "SNP_TotalResolvedBp\tSNP_fastaEntries\tSNP_Num\tSNP_Passed\tSNP_resolved\tINDEL_Num\tINDEL_Passed\t";
-
 	my $geneStats = getFileStr("${inFi}.etxt",0);
+	my @columns = qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved INDEL_Num INDEL_Passed);
+	my %empty = map { $_ => '' } @columns;
+	my $has_stats = 0;
 	#Total bp written: 34950480 (0 not resolved) on 26727 entries
 	my $bps = 0; my $entrs=0;my $confl=0; my $resol=0;my $snpNum=0; my $indelNuml=0;
 	my $SNPpassed=0; my $INDpassed=0;
 	if ($geneStats =~ m/Total bp written: (\d+) \(\d+ not resolved\) on (\d+) entries/){
+		$has_stats = 1;
 		$bps = $1; $entrs=$2;
-		$geneStats =~ m/Conflicting calls: (\d+) Resolved with second line: (\d+)/;
-		$confl=$1; $resol=$2;
-		$geneStats =~ m/Total SNPs detected: (\d+)/; $snpNum=$1; 
+		if ($geneStats =~ m/Conflicting calls: (\d+) Resolved with second line: (\d+)/) {
+			$confl=$1; $resol=$2;
+		}
+		$snpNum=$1 if $geneStats =~ m/Total SNPs detected: (\d+)/;
 		#$outStr = "$bps\t$entrs\t$confl\t$resol\t$snpNum\t";
 		
 	} else { #try in .otxt
 		$geneStats = getFileStr("${inFi}.otxt",0);
 		if ($geneStats =~ m/Total bp that can be determined: (\d+) in (\d+) entries./){
+			$has_stats = 1;
 			$bps = $1; $entrs=$2;
 			#  - Found 11 SNPs and 5 INDELS.
-			$geneStats =~ m/  - Found (\d+) SNPs and (\d+) INDELS./;
-			$snpNum=$1; $indelNuml=$2;
-			$geneStats =~  m/  - Passed (\d+);(\d+) SNPs and INDELS. Conflicts resolved: 0/;
-			$SNPpassed=$1;  $INDpassed=$2;
+			if ($geneStats =~ m/  - Found (\d+) SNPs and (\d+) INDELS./) {
+				$snpNum=$1; $indelNuml=$2;
+			}
+			if ($geneStats =~ m/  - Passed (\d+);(\d+) SNPs and INDELS. Conflicts resolved: 0/) {
+				$SNPpassed=$1; $INDpassed=$2;
+			}
 		}
 	}
-	$outStr = "$bps\t$entrs\t$snpNum\t$SNPpassed\t$resol\t$indelNuml\t$INDpassed\t";
-	return ($outStr, $outStrDesc);
+	return \%empty unless $has_stats;
+	return { SNP_TotalResolvedBp=>$bps, SNP_fastaEntries=>$entrs, SNP_Num=>$snpNum,
+		SNP_Passed=>$SNPpassed, SNP_resolved=>$resol, INDEL_Num=>$indelNuml, INDEL_Passed=>$INDpassed };
 }
 
 sub getGeneStats{
 	my ($inFi) = @_;
-	#my $outStrDesc = "";  my $outStr = "";
-	my $outStr = "\t" x 9;
-	my $outStrDesc = "GeneNumber	AvgGeneLength	AvgComplGeneLength	BpGenes	BpNotGenes	Gcomplete	G5pComplete	G3pComplete	Gincomplete	";
+	my @columns = qw(GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes Gcomplete G5pComplete G3pComplete Gincomplete);
+	my %result = map { $_ => '' } @columns;
 	my $geneStats = getFileStr("$inFi",0);
 	my @spl1 = split("\n", $geneStats);
 
@@ -6456,230 +6545,173 @@ sub getGeneStats{
 		my @spl = split /\t/,$tmp; 
 		#print @spl . " @spl\n";
 		if (@spl >=9){
-			#bit convoluted way of doing this, but better to be conservative with number of tabs used..
-			$outStr = "$spl[0]\t$spl[1]\t$spl[2]\t$spl[3]\t$spl[4]\t$spl[5]\t$spl[6]\t$spl[7]\t$spl[8]\t";
+			@result{@columns} = @spl[0..8];
 		}
 	}
-	#print $outStr;
-	#close I;
-	return ($outStr, $outStrDesc);
+	return \%result;
 }
 sub getASsemblyStats{
 	my ($tmpassD,$assemblStatsFile,$doCirc) = @_;
-	my $outStr = "";my $outStrDesc = "";
-	my $assStats = getFileStr("$tmpassD/$assemblStatsFile",0);
+	my @columns = qw(ContigN50 NScaff400 NScaffG1k NScaffG10k NScaffG100k NScaffG1M ScaffN50 ScaffMaxSize ScaffSize CircCtgs CircCtgG1M);
+	my %result = map { $_ => '' } @columns;
+	return \%result unless defined($tmpassD) && $tmpassD ne '';
+	$tmpassD =~ s{/$}{};
+	my $stats_path = "$tmpassD/$assemblStatsFile";
+	my $assStats = getFileStr($stats_path,0);
 	if ($assStats ne ""){
-		if ($assStats =~ m/N50 contig length\s+(\d+)/){ $locStats{CtgN50} = $1;} else { $locStats{CtgN50} = 0; print "$assemblStatsFile\ncntgn50 wrg1\n";}
-		if ($assStats =~ m/Number of scaffolds\s+(\d+)/){ $locStats{NScaff} = $1;} else { die "$assemblStatsFile\nscfcnt wrg1\n";}
-		if ($assStats =~ m/Total size of scaffolds\s+(\d+)/){ $locStats{ScaffSize} = $1;} else { die "scfcnt wrg2\n";}
-		if ($assStats =~ m/Longest scaffold\s+(\d+)/){ $locStats{ScaffMaxSize} = $1;} else { die "scfcnt wrg3\n";}
-		if ($assStats =~ m/N50 scaffold length\s+(\d+)/){ $locStats{ScaffN50} = $1;} else {$locStats{ScaffN50}=-1;}# die "$tmpassD\nscfcnt wrg4\n";}
-		if ($assStats =~ m/Number of scaffolds > 1K nt\s+(\d+)/){ $locStats{NScaffG1k} = $1;} else { die "scfcnt wrg5\n";}
-		if ($assStats =~ m/Number of scaffolds > 10K nt\s+(\d+)/){ $locStats{NScaffG10k} = $1;} else { die "scfcnt wrg6\n";}
-		if ($assStats =~ m/Number of scaffolds > 100K nt\s+(\d+)/){ $locStats{NScaffG100k} = $1;} else { die "scfcnt wrg7\n";}
-		if ($assStats =~ m/Number of scaffolds > 1M nt\s+(\d+)/){ $locStats{NScaffG1M} = $1;} else { die "scfcnt wrg8\n";}
-		$outStr .= "$locStats{CtgN50}\t$locStats{NScaff}\t$locStats{NScaffG1k}\t$locStats{NScaffG10k}\t$locStats{NScaffG100k}\t$locStats{NScaffG1M}\t$locStats{ScaffN50}\t$locStats{ScaffMaxSize}\t$locStats{ScaffSize}\t";
-	} else {
-		$outStr .= "\t" x 9;
+		my %patterns = (
+			ContigN50 => qr/N50 contig length\s+(\d+)/,
+			NScaff400 => qr/Number of scaffolds\s+(\d+)/,
+			ScaffSize => qr/Total size of scaffolds\s+(\d+)/,
+			ScaffMaxSize => qr/Longest scaffold\s+(\d+)/,
+			ScaffN50 => qr/N50 scaffold length\s+(\d+)/,
+			NScaffG1k => qr/Number of scaffolds > 1K nt\s+(\d+)/,
+			NScaffG10k => qr/Number of scaffolds > 10K nt\s+(\d+)/,
+			NScaffG100k => qr/Number of scaffolds > 100K nt\s+(\d+)/,
+			NScaffG1M => qr/Number of scaffolds > 1M nt\s+(\d+)/,
+		);
+		my @missing;
+		for my $name (keys %patterns) {
+			if ($assStats =~ $patterns{$name}) { $result{$name} = $1; }
+			else { push @missing, $name; }
+		}
+		warn "Incomplete assembly statistics '$stats_path'; missing: ".join(', ', sort @missing)."\n" if @missing;
+		$locStats{CtgN50} = $result{ContigN50} if $result{ContigN50} ne '';
+		$locStats{NScaff} = $result{NScaff400} if $result{NScaff400} ne '';
+		$locStats{ScaffSize} = $result{ScaffSize} if $result{ScaffSize} ne '';
 	}
-	$outStrDesc .="ContigN50\tNScaff400\tNScaffG1k\tNScaffG10k\tNScaffG100k\tNScaffG1M\tScaffN50\tScaffMaxSize\tScaffSize\t";
-	my $circCtgs=0;my $circg1M=0; 
-	if (-e "$tmpassD/scaffolds.fasta.circ"){
+	if ($assStats ne '') { $result{CircCtgs} = 0; $result{CircCtgG1M} = 0; }
+	if ($doCirc && -e "$tmpassD/scaffolds.fasta.circ"){
+		$result{CircCtgs} = 0; $result{CircCtgG1M} = 0;
 		$assStats = getFileStr("$tmpassD/scaffolds.fasta.circ",0);
-		$circCtgs = $assStats =~ tr/>//;
+		$result{CircCtgs} = $assStats =~ tr/>//;
 		my @matchs = ($assStats =~ m/.*_L=(\d+)=/g);
-		foreach(@matchs){$circg1M++ if ($_ > 1000000);}
-		#die "$circCtgs  XX $g1M YY @matchs\n".@matchs;
-		#$circCtgs = `wc -l $tmpassD/scaffolds.fasta.circ | cut -f1 -d' '`; chomp $circCtgs;
+		foreach(@matchs){$result{CircCtgG1M}++ if ($_ > 1000000);}
 	}
-	$outStr .= "$circCtgs\t$circg1M\t";
-	$outStrDesc .= "CircCtgs\tCircCtgG1M\t";
-	return ($outStr,$outStrDesc);
+	return \%result;
 }
 
 sub getBreakpointStats {
 	my ($path) = @_;
-	my $header = "BreakpointCount\tBreakpointContigs\tBreakpointBases\tBreakpointMeanLength\tBreakpointMaxLength\t";
-	return ("\t" x 5, $header) unless fileGZe($path);
-	my ($fh) = gzipopen($path, 'breakpoint statistics', 1);
+	my @columns = qw(BreakpointCount BreakpointContigs BreakpointBases BreakpointMeanLength BreakpointMaxLength);
+	my %result = map { $_ => '' } @columns;
+	return \%result unless fileGZe($path);
+	my $fh;
+	eval { ($fh) = gzipopen($path, 'breakpoint statistics', 1); 1 }
+		or do { warn "Cannot read breakpoint report '$path': $@"; return \%result; };
 	my ($count, $bases, $maximum) = (0, 0, 0);
-	my %contigs;
+	my (%contigs, $malformed);
 	while (my $line = <$fh>) {
 		$line =~ s/[\r\n]+$//;
 		next if $line eq '' || $line =~ /^(?:#|contig\tstart\tend(?:\t|$))/;
 		my @fields = split /\t/, $line;
-		next unless @fields >= 3 && $fields[1] =~ /^\d+$/
-			&& $fields[2] =~ /^\d+$/ && $fields[2] > $fields[1];
+		unless (@fields >= 3 && $fields[1] =~ /^\d+$/
+			&& $fields[2] =~ /^\d+$/ && $fields[2] > $fields[1]) { $malformed++; next; }
 		my $length = (@fields >= 4 && $fields[3] =~ /^\d+$/)
 			? $fields[3] : $fields[2] - $fields[1];
 		$count++; $bases += $length; $maximum = $length if $length > $maximum;
 		$contigs{$fields[0]} = 1;
 	}
-	close $fh or die "Cannot close breakpoint report '$path': $!\n";
+	close $fh or warn "Cannot close breakpoint report '$path': $!\n";
+	warn "Skipped $malformed malformed breakpoint row(s) in '$path'\n" if $malformed;
 	my $mean = $count ? sprintf('%.1f', $bases / $count) : 0;
-	return (join("\t", $count, scalar(keys %contigs), $bases, $mean, $maximum)."\t", $header);
+	@result{@columns} = ($count, scalar(keys %contigs), $bases, $mean, $maximum);
+	return \%result;
 }
 
-sub smplStats(){
+sub getHybridAssemblyStats {
+	my ($path) = @_;
+	my %result;
+	return \%result unless defined($path) && -s $path;
+	open my $fh, '<', $path or do { warn "Cannot read hybrid assembly report '$path': $!\n"; return \%result; };
+	my %prefix = (
+		contigs => 'Contigs', total_bp => 'Bases', N50 => 'N50', N90 => 'N90',
+		longest => 'Longest', GC_percent => 'GCPercent',
+	);
+	my $malformed = 0;
+	while (my $line = <$fh>) {
+		$line =~ s/[\r\n]+$//;
+		next if $line eq '' || $line =~ /^metric\t/;
+		my @fields = split /\t/, $line, -1;
+		if ($fields[0] eq 'source_preassembly_count') {
+			$result{HybridPreassemblyCount} = $fields[1] if defined($fields[1]) && $fields[1] ne '';
+			next;
+		}
+		my $name = $prefix{$fields[0]};
+		unless (defined($name) && @fields >= 5) { $malformed++; next; }
+		@result{"HybridPreassembly$name", "HybridFinal$name", "Hybrid${name}Delta", "HybridFinalToPre${name}Ratio"}
+			= @fields[1..4];
+	}
+	close $fh or warn "Cannot close hybrid assembly report '$path': $!\n";
+	warn "Skipped $malformed malformed hybrid comparison row(s) in '$path'\n" if $malformed;
+	return \%result;
+}
+
+sub smplStats {
 	my ($inD,$assDir,$SmplN) = @_;
-	my $do500Stat = 0;
-	#print "STATS   \n";
-	#my %ret; 
-	my $outStr = ""; my $outStrDesc = "";my $outStr5 = ""; my $outStrDesc5 = "";
-	
-	my $hasSingle = 0; my $hasPaired = 0;
-	if (exists($map{$SmplN}{seqSet})){ #would normally need to run through sdmClean sub first to get this..
-		my %seqSet = %{$map{$SmplN}{seqSet}};
-		my @pa1 = @{$seqSet{"pa1"}}; my @pas = @{$seqSet{"pas"}};
-		$hasPaired = 1 if (@pa1 > 0);$hasSingle = 1 if (@pas > 0);
+	my %values;
+	my $merge = sub {
+		my ($named) = @_;
+		return unless ref($named) eq 'HASH';
+		@values{keys %$named} = values %$named;
+	};
+	my $seq_set = ref($map{$SmplN}{seqSet}) eq 'HASH' ? $map{$SmplN}{seqSet} : {};
+	my $paired = ref($seq_set->{pa1}) eq 'ARRAY' ? $seq_set->{pa1} : [];
+	my $single = ref($seq_set->{pas}) eq 'ARRAY' ? $seq_set->{pas} : [];
+	$values{InputIsPaired} = @$paired ? 1 : 0;
+	$values{InputIsSingle} = @$single ? 1 : 0;
+	$values{RawInputSize} = exists($map{$SmplN}{inputFileSizeMB})
+		? sprintf('%.3fG', $map{$SmplN}{inputFileSizeMB}/1024) : -1;
+
+	my $contamination = getContamination("$inD/LOGandSUB/KrakHS.sh.etxt", "$inD/LOGandSUB/KrakHS.sh.otxt", '');
+	$merge->($contamination);
+	$locStats{contamination} = $contamination->{FilteredContaRdsPerc};
+	$merge->(getContamination("$inD/LOGandSUB/prepEBI.sh.etxt", "$inD/LOGandSUB/prepEBI.sh.otxt", 'EBI'));
+
+	my $primary_log = -s "$inD/LOGandSUB/sdm/filter.log" ? "$inD/LOGandSUB/sdm/filter.log"
+		: (-s "$inD/LOGandSUB/sdmReadCleaner.sh.etxt" ? "$inD/LOGandSUB/sdmReadCleaner.sh.etxt" : '');
+	if ($primary_log ne '') {
+		my $stats = sdmStats($primary_log, $inD, '');
+		$merge->($stats);
+		$locStats{$_} = $stats->{$_} for qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2);
 	}
+	my $support_log = -s "$inD/LOGandSUB/sdm/filterS.log" ? "$inD/LOGandSUB/sdm/filterS.log"
+		: (-s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt" ? "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt" : '');
+	$merge->(sdmStats($support_log, $inD, '_Sup')) if $support_log ne '';
 
-#first report file size and if this is paired or single..
-	if (exists($map{$curSmpl}{inputFileSizeMB})){
-		$outStr .= int($map{$curSmpl}{inputFileSizeMB}/1024)."G\t";
-	} else {$outStr .= "-1\t";}
-	$outStrDesc .= "RawInputSize\t";
-	$outStr .= $hasPaired. "\t" . $hasSingle. "\t";
-	$outStrDesc .= "InputIsPaired\tInputIsSingle\t";
+	my $text = getFileStr("$inD/LOGandSUB/flashMrg.sh.otxt",0);
+	$values{Merged} = $1 if $text =~ /\[FLASH\]\s+Combined pairs:\s+(\d+)/;
+	$values{NotMerged} = $1 if $text =~ /\[FLASH\]\s+Uncombined pairs:\s+(\d+)/;
+	$text = getFileStr("$inD/MicroCens/MC.0.result",0);
+	$values{AvgGenomeSizeEst} = $1 if $text =~ /average_genome_size:\s*([\d.]+)/;
+	$values{TotalGenomesEst} = $1 if $text =~ /genome_equivalents:\s*([\d.]+)/;
 
-
-	my ($t1,$t2) = getContamination("$inD/LOGandSUB/KrakHS.sh.etxt","$inD/LOGandSUB/KrakHS.sh.otxt","");
-	$locStats{contamination} = $t1;
-	$outStr .= $t1;	$outStrDesc .= $t2;
-	if ($do500Stat){		$outStr5 .= $t1;	$outStrDesc5 .= $t2;	}
-
-	#in case of EBI clean, also get stats for this..
-	if ($MFconfig{uploadRawRds} ne "" || -e "$inD/LOGandSUB/prepEBI.sh.etxt" || $MFstats{EBIstatTrigger}){
-		($t1,$t2) = getContamination("$inD/LOGandSUB/prepEBI.sh.etxt","$inD/LOGandSUB/prepEBI.sh.otxt","EBI");
-		$outStr .= $t1;	$outStrDesc .= $t2;
-		$MFstats{EBIstatTrigger} = 1;
+	my $assembly_dir = '';
+	if (-e "$inD/assemblies/metag/assembly.txt") {
+		my $pointer = getFileStr("$inD/assemblies/metag/assembly.txt",0);
+		($assembly_dir) = grep { $_ ne '' } map { s/^\s+|\s+$//gr } split /[\r\n]+/, $pointer;
+		$assembly_dir ||= '';
+	} elsif (-e "$inD/assemblies/metag/AssemblyStats.txt") {
+		$assembly_dir = "$inD/assemblies/metag";
+	} elsif (-e "$assDir/metag/AssemblyStats.txt") {
+		$assembly_dir = "$assDir/metag";
 	}
-
-		
-	my @sdmStat ;#(0,0,0,0,0,0,0,0,0,0,0);
-	if (-s "$inD/LOGandSUB/sdm/filter.log" || -s "$inD/LOGandSUB/sdmReadCleaner.sh.etxt"){
-		if (-s "$inD/LOGandSUB/sdm/filter.log" ){
-			@sdmStat = sdmStats("$inD/LOGandSUB/sdm/filter.log",$inD);# if (-s "$inD/LOGandSUB/sdm/filter.log");
-		} else {
-			@sdmStat = sdmStats("$inD/LOGandSUB/sdmReadCleaner.sh.etxt",$inD);
-		}
-		#$sdmStat[0] += $sdsm2[0];$sdmStat[1] += $sdsm2[1];$sdmStat[2] += $sdsm2[2];$sdmStat[3] += $sdsm2[3];
-		#$sdmStat[4] += $sdsm2[4];$sdmStat[5] += $sdsm2[5];$sdmStat[6] += $sdsm2[6];
-		$locStats{totRds} = $sdmStat[0];$locStats{Rejected1} = $sdmStat[1];$locStats{Rejected2} = $sdmStat[2];
-		$locStats{Accepted1} = $sdmStat[3];$locStats{Accepted2} = $sdmStat[4];$locStats{Singl1} = $sdmStat[5];
-		$locStats{Singl2} = $sdmStat[6];
-		$outStr .= join("\t",@sdmStat)."\t";
-	} else {
-		$outStr .= "\t" x 11;
+	if ($assembly_dir ne '' && !-d $assembly_dir) {
+		warn "Assembly-statistics pointer is not a directory: '$assembly_dir'\n";
+		$assembly_dir = '';
 	}
-#	}
-## 11 in total..
-	$outStrDesc .= "totRds\tRejected1\tRejected2\tAccepted1\tAccepted2\tSingl1\tSingl2\tAvgSeqLen\tMaxSeqLength\tAvgSeqQual\taccErr\t";
-	
-	#supplementary reads??
-	if ( -s "$inD/LOGandSUB/sdm/filterS.log" || -s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt"){
-		my @sdsm2;
-		if ( -s "$inD/LOGandSUB/sdm/filterS.log"){
-			@sdsm2 = sdmStats("$inD/LOGandSUB/sdm/filterS.log",$inD);
-		} else {
-			@sdsm2 = sdmStats("$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt",$inD);
-		}
-		$outStr .= join("\t",@sdsm2)."\t";	
-	} else {
-		$outStr .= "\t" x 11;
-	}
-## 11 in total..
-	$outStrDesc .= "totRds_Sup\tRejected1_Sup\tRejected2_Sup\tAccepted1_Sup\tAccepted2_Sup\tSingl1_Sup\tSingl2_Sup\tAvgSeqLen_Sup\tMaxSeqLength_Sup\tAvgSeqQual_Sup\taccErr_Sup\t";
-	
-	
-	#check for flash merged reads
-	my $filStats = "";
-	$filStats = getFileStr("$inD/LOGandSUB/flashMrg.sh.otxt",0);
-	if ($filStats ne ""){
-		
-		if ($filStats =~ m/\[FLASH\]     Combined pairs:   (\d+)/){$outStr.="$1\t";} else {$outStr.="?\t";}
-		if ($filStats =~ m/\[FLASH\]     Uncombined pairs: (\d+)/){$outStr.="$1\t";} else {$outStr.="?\t";}
-	} else {
-		$outStr .= "\t\t";
-	}
-	$outStrDesc .= "Merged\tNotMerged\t";
-#geno size estimate
-	$filStats = getFileStr("$inD/MicroCens/MC.0.result",0);
-	if ($filStats ne ""){
-		if ($filStats =~ m/average_genome_size:	([\d\.]+)/){$outStr.="$1\t";} else {$outStr.="?\t";}
-		if ($filStats =~ m/genome_equivalents:	([\d\.]+)/){$outStr.="$1\t";} else {$outStr.="?\t";}
-	} else {
-		$outStr .= "\t\t";
-	}
-	$outStrDesc .= "AvgGenomeSizeEst\tTotalGenomesEst\t";
-	
-	
-	#check if corrected dir still exists..
-	system "rm -rf $inD/assemblies/metag/corrected" if (-d "$inD/assemblies/metag/corrected");
-	#assembly stats
-	my $tmpassD = "";
-	if (-e "$inD/assemblies/metag/assembly.txt"){
-		$tmpassD = getFileStr("$inD/assemblies/metag/assembly.txt",0); chomp $tmpassD;
-	} elsif (-e "$inD/assemblies/metag/AssemblyStats.txt"){
-		$tmpassD = "$inD/assemblies/metag/";
-	} elsif (-e $assDir."metag/AssemblyStats.txt"){
-		$tmpassD = "$assDir/metag/";
-	}
-#print $tmpassD."\n";
-	($t1,$t2) = getASsemblyStats($tmpassD,"AssemblyStats.txt",1);
-	$outStr .= $t1;	$outStrDesc .= $t2;
-	# Breakpoint reports belong to the sample-specific primary mapping because
-	# they are derived from that sample's depth profile, not from the assembly alone.
-	($t1,$t2) = getBreakpointStats("$inD/mapping/$SmplN-smd.bam.breakpoints.tsv.gz");
-	$outStr .= $t1;	$outStrDesc .= $t2;
-	if ($do500Stat){
-		my ($t1,$t2) = getASsemblyStats($tmpassD."AssemblyStats.500.txt",0);
-		$outStr5 .= $t1;	$outStrDesc5 .= $t2;
-	}
-	
-
-	($t1,$t2) = getMapStats("$inD/LOGandSUB/");
-	$outStr .= $t1;	$outStrDesc .= $t2;
-	if ($do500Stat){$outStr5 .= $t1;	$outStrDesc5 .= $t2;}
-	($t1,$t2) = optiDups("$inD/LOGandSUB/");
-	$outStr .= $t1;	$outStrDesc .= $t2;
-	if ($do500Stat){$outStr5 .= $t1;	$outStrDesc5 .= $t2;}
-
-	#return ($outStrDesc,$outStr,$outStrDesc5, $outStr5); #DEBUG
-
-
-	# stats on gene number etc
-	($t1,$t2) = getGeneStats("$inD/$preDIRs{dir_ContigStats}/GeneStats.txt");
-	$outStr .= $t1;	$outStrDesc .= $t2;
-	if ($do500Stat){$outStr5 .= $t1;	$outStrDesc5 .= $t2;}
-
-	#MB2, SemiBin etc hq & mq MAGs
-	($t1,$t2) = getBinnerStats($tmpassD,$SmplN);
-	$outStr .= $t1;	$outStrDesc .= $t2;
-	if ($do500Stat){$outStr5 .= $t1;	$outStrDesc5 .= $t2;}
-
-	($t1,$t2) = getSNPStats("$inD/LOGandSUB/SNP/ConsAssem.oSNPc.sh");
-	$outStr .= $t1;	$outStrDesc .= $t2;
-	if ($do500Stat){$outStr5 .= $t1;	$outStrDesc5 .= $t2;}
-	
-#clean up strings..	
-	chomp $outStrDesc; chomp $outStr;
-	if ($do500Stat){
-		chomp $outStrDesc5; chomp $outStr5;
-	} else {
-		$outStrDesc5 = "";  $outStr5 = "";
-	}
-#	my @gest = split(/\t/,$gsta);
-	#my $nGenes = `wc -l $inD/assemblies/metag/genePred/genes.gff | cut -f1 -d ' '`;	chomp $nGenes;
-	#die ($outStr."\n$nGenes\n");
-#	$outStr .= "$nGenes\t";	$outStrDesc .= "NumGenes\t";
-
-	#print "... END\n";
-	
-	
-	return ($outStrDesc,$outStr,$outStrDesc5, $outStr5);
-	#die $outStr."\n";
+	$merge->(getASsemblyStats($assembly_dir, 'AssemblyStats.txt', 1));
+	$merge->(getBreakpointStats("$inD/mapping/$SmplN-smd.bam.breakpoints.tsv.gz"));
+	$merge->(getMapStats("$inD/LOGandSUB/"));
+	$merge->(optiDups("$inD/LOGandSUB/"));
+	$merge->(getGeneStats("$inD/$preDIRs{dir_ContigStats}/GeneStats.txt"));
+	$merge->(getBinnerStats($assembly_dir,$SmplN));
+	$merge->(getSNPStats("$inD/LOGandSUB/SNP/ConsAssem.oSNPc.sh"));
+	$merge->(getHybridAssemblyStats("$assembly_dir/HybridAssemblyComparison.tsv")) if $assembly_dir ne '';
+	return \%values;
 }
+
+# smplStats is implemented above using the fixed named-value schema.
 
 sub spadesHosts{
 	#figure out if only certain node subset has enough HDD space
