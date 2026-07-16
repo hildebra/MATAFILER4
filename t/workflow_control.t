@@ -8,6 +8,7 @@ use FindBin qw($Bin);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
+use Mods::GenoMetaAss qw(resetAsGrps);
 use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs hybrid_group_ready
 	hybrid_package_complete missing_input_files source_input_files parse_ignored_samples
@@ -179,5 +180,16 @@ my $groups = do { local $/; <$group_source> };
 close $group_source;
 like($groups, qr/sub resetAsGrps.*?\{UnzpDeps\}\s*=\s*""/s,
 	'loop reset removes completed unzip job ids before the next submission pass');
+
+my %loop_groups = (group => {
+	UnzpDeps => 'old-job', nothing => ['discarded'],
+	FilterSeq1 => [], FilterSeq2 => [], FilterSeqS => [], ReadTec => [],
+	MapSupCopies => [],
+});
+resetAsGrps(\%loop_groups);
+is($loop_groups{group}{UnzpDeps}, '',
+	'loop reset behavior removes stale unzip dependencies');
+is_deeply($loop_groups{group}{nothing}, [],
+	'loop reset preserves the discard copy target as an array reference');
 
 done_testing;

@@ -1000,7 +1000,9 @@ sub resetAsGrps{
 		$AsGrps->{$cAssGrp}{BinDeps} = "";
 		$AsGrps->{$cAssGrp}{MapCopies} = [];
 		$AsGrps->{$cAssGrp}{MapCopiesNoDel} = [];
-		$AsGrps->{$cAssGrp}{nothing} = "";
+		# This is a deliberate discard target used through push @{$group->{nothing}}
+		# when a deferred mapping has no files to copy.
+		$AsGrps->{$cAssGrp}{nothing} = [];
 		$AsGrps->{$cAssGrp}{PostClnCmd} = "";
 		$AsGrps->{$cAssGrp}{CSfinJobName} = "";
 	}
