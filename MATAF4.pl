@@ -4766,15 +4766,25 @@ sub mOTU2Mapping{
 
 sub prepKraken(){
 	#my ($DBdir) = @_;
-	$MFglobal{krakenDBDirGlobal} = getProgPaths("Kraken_path_DB");
-	if ( ($MFopt{humanFilter}>0 && $MFopt{humanFilter}<3) && ($MFopt{DoKraken} || $MFopt{DoEukGenePred}   ) ){
-		if (( $MFopt{DoKraken} || $MFopt{DoEukGenePred}) && $MFopt{globalKraTaxkDB} eq ""){die "Kraken tax specified, but no DB specified\n";}
-	} else {
-		return "";
+	$MFglobal{krakenDBDirGlobal} = "";
+	my $usesDefaultHostDB = ($MFopt{humanFilter} > 0 && $MFopt{humanFilter} < 3
+		&& $MFopt{filterHostDB1} eq "");
+	return "" unless ($MFopt{DoKraken} || $MFopt{DoEukGenePred} || $usesDefaultHostDB);
+	if ($MFopt{DoKraken} && $MFopt{globalKraTaxkDB} eq ""){
+		die "Kraken profiling requested, but no database was selected with -krakenDB\n";
 	}
 
+	# Kraken2_path_DB is the current configuration key. Keep the old name as a
+	# non-required fallback for installations with a legacy local config.
+	my $oriKrakDir = getProgPaths("Kraken2_path_DB",0);
+	$oriKrakDir = getProgPaths("Kraken_path_DB",0) if ($oriKrakDir eq "");
+	die "Kraken is enabled, but neither Kraken2_path_DB nor legacy Kraken_path_DB is configured\n"
+		if ($oriKrakDir eq "");
+	$oriKrakDir .= "/" unless ($oriKrakDir =~ m{/$});
+	$MFglobal{krakenDBDirGlobal} = $oriKrakDir;
+
 	my %DBname;
-	if ($MFopt{humanFilter} && $MFopt{filterHostDB1} eq ""){
+	if ($usesDefaultHostDB){
 		$DBname{"hum1stTry"} = 1;
 	}
 	
@@ -4783,7 +4793,6 @@ sub prepKraken(){
 	$DBname{"minikraken_2015"} = 1 if ($MFopt{DoEukGenePred});
 	$DBname{$MFopt{globalKraTaxkDB}} = 1 if ($MFopt{globalKraTaxkDB} ne "");
 	return "" if (keys %DBname == 0);
-	my $oriKrakDir = getProgPaths("Kraken_path_DB");
 	foreach my $kk (keys %DBname ){
 		if (!-d "$oriKrakDir$kk"){die "can't find kraken db $oriKrakDir$kk\n";}
 	}
