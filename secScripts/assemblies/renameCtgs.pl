@@ -6,6 +6,7 @@ die "Usage: $0 <contigs.fasta> <sample-tag>\n" unless @ARGV == 2;
 my ($inF, $tag) = @ARGV;
 die "Input FASTA is missing or empty: $inF\n" unless -s $inF;
 die "Sample tag must not be empty\n" unless length $tag;
+die "Sample tag contains FASTA-delimiting whitespace or '>'\n" if $tag =~ /[\s>]/;
 
 my $tmpOut   = "$inF.tmp";
 my $transOut = "$inF.lnk";

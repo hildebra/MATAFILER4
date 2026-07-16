@@ -2,10 +2,13 @@
 use warnings;
 use strict;
 
-die "Usage: $0 <fasta[,fasta...]> [min-size [secondary-min-size [output]]]\n" unless @ARGV;
+die "Usage: $0 <fasta[,fasta...]> [min-size [secondary-min-size [output]]]\n"
+	unless @ARGV >= 1 && @ARGV <= 4;
 my ($inputs, $min_size, $secondary_min, $output) = @ARGV;
 $min_size     = 500 unless defined $min_size;
 $secondary_min = 200 unless defined $secondary_min;
+die "Minimum sizes must be non-negative integers\n"
+	unless $min_size =~ /\A\d+\z/ && $secondary_min =~ /\A\d+\z/;
 my $custom_output = defined $output;
 $output       = "$inputs.filt" unless $custom_output;
 my $secondary_output = $custom_output ? "${output}2" : "$inputs.filt2";
@@ -39,7 +42,10 @@ for my $file (split /,/, $inputs) {
             die "Truncated FASTQ record in $file\n"
                 unless defined $sequence && defined $plus && defined $quality;
             die "Invalid FASTQ header in $file: $header" unless $header =~ /^@/;
-            chomp($header, $sequence);
+            die "Invalid FASTQ separator in $file: $plus" unless $plus =~ /^\+/;
+            chomp($header, $sequence, $quality);
+            die "FASTQ sequence/quality length mismatch in $file at $header\n"
+				unless length($sequence) == length($quality);
             $header =~ s/^@/>/;
             emit_record($header, $sequence);
         }

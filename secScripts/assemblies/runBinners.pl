@@ -3,6 +3,7 @@
 use warnings;
 use strict;
 use File::Basename;
+use File::Path qw(make_path remove_tree);
 use Getopt::Long qw( GetOptions );
 
 use Mods::GenoMetaAss qw(systemW);
@@ -53,7 +54,21 @@ GetOptions(
 	"seqTec=s" => \$seqTec,  #PB, ONT, ill etc
 	"SB_env=s" => \$giveSBenv,
 	"useGPU=i" => \$GPUused,
-);
+) or die "Invalid runBinners.pl options\n";
+
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
+die "-binner must be one of 1..5\n"
+	unless defined($DoMetaBat2) && $DoMetaBat2 =~ /^\d+$/ && $DoMetaBat2 >= 1 && $DoMetaBat2 <= 5;
+die "-binD, -tmpD, -smplID, -assmbl and -smplDirs are required\n"
+	unless length($BinDir) && length($nodeSpTmpD2) && length($smplIDs1)
+	&& length($metaGassembly) && length($pathsPre);
+die "Assembly is missing or empty: $metaGassembly\n" unless -s $metaGassembly;
+die "-cores must be a positive integer\n" unless $MB2coresL =~ /^\d+$/ && $MB2coresL > 0;
+die "Output and temporary directories must be distinct\n" if $BinDir eq $nodeSpTmpD2;
+for my $directory ($BinDir, $nodeSpTmpD2) {
+	die "Refusing unsafe directory path '$directory'\n"
+		if $directory eq '' || $directory eq '/' || $directory =~ /^\s*\.\.?\s*$/;
+}
 
 
 
@@ -76,8 +91,9 @@ print "======================================================================\n"
 
 my $preCmd = "";#"mkdir -p $nodeSpTmpD2";
 my $BinCmd = "";
-system "rm -rf $nodeSpTmpD2; mkdir -p $nodeSpTmpD2" unless (-d $nodeSpTmpD2);
-system "rm -rf $BinDir; mkdir -p $BinDir;";
+remove_tree($nodeSpTmpD2) if -e $nodeSpTmpD2;
+remove_tree($BinDir) if -e $BinDir;
+make_path($nodeSpTmpD2, $BinDir);
 
 
 #actual work happens here:
@@ -105,8 +121,9 @@ if ($DoMetaBat2 == 1){
 	$BinCmd .= runSCGBinner("",$BinDir,$nodeSpTmpD2,$smplIDs1,$metaGassembly,$MB2coresL,\@paths);
 }
 
+die "Unsupported binner $DoMetaBat2\n" unless length $BinCmd;
 my $stone = "$BinDir/Binning.stone";
-$BinCmd .= "\n echo $smplIDs1 > $stone\n";
+$BinCmd = "set -e\n$BinCmd\nprintf '%s\\n' '$smplIDs1' > '$stone'\n";
 
 
 print "running: $preCmd.$BinCmd\n";

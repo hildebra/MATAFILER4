@@ -6,6 +6,8 @@ use warnings;
 use strict;
 #use Scalar::Util qw(looks_like_number);
 use Getopt::Long qw( GetOptions );
+use File::Path qw(make_path remove_tree);
+use File::Spec;
 use Mods::GenoMetaAss qw(systemW is_integer reverse_complement_IUPAC gzipopen fileGZs fileGZe);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
 use Mods::phyloTools qw( getE100);
@@ -16,7 +18,6 @@ sub geneAbundance; sub runMaxBin;
 sub findMicrSat;
 
 
-die "Not enough input args\n" if (@ARGV < 2);
 my $inD =  "";#$ARGV[0];
 my $assD = "";#$ARGV[1];
 my $subparts = "";#$ARGV[2];
@@ -36,18 +37,19 @@ GetOptions(
 	"readLengthSup=i" => \$readLengthSup,
 	"smplID=s" => \$SmplNm,
 	
-);
-if ($tmpD eq ""){
-	$tmpD = $inD."/tmp/";
-	$tmpD =~ s/\$/\\\$/g;
-}
-
-if ($readLength<2){
-	print "WARNING: non-sensical read length parameter: $readLength\n";
-}
-if ($readLengthSup<2){
-	print "WARNING: non-sensical read length suppl parameter: $readLengthSup\n";
-}
+) or die "Invalid separateContigs.pl options\n";
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
+die "-inD, -assD, -subparts and -smplID are required\n"
+	unless length($inD) && length($assD) && length($subparts) && length($SmplNm);
+die "-threads must be a positive integer\n" unless $Nthreads > 0;
+die "Read lengths must be positive integers\n" unless $readLength > 0 && $readLengthSup > 0;
+my $tmpRoot = length($tmpD) ? $tmpD : File::Spec->catdir($inD, 'tmp');
+die "Refusing unsafe temporary root '$tmpRoot'\n"
+	if $tmpRoot eq '/' || $tmpRoot =~ /^\s*\.\.?\s*$/;
+make_path($tmpRoot) unless -d $tmpRoot;
+$tmpD = File::Spec->catdir($tmpRoot, "separateContigs.$$");
+remove_tree($tmpD) if -e $tmpD;
+make_path($tmpD);
 
 my $rdCovBin =getProgPaths("readCov");
 my $pigzBin = getProgPaths("pigz");
@@ -67,7 +69,6 @@ if ($cleanUp){
 }
 system "mkdir -p $outD" unless (-d $outD);
 system "mkdir -p $outDab" unless (-d $outDab);
-system "mkdir -p $tmpD" unless (-d $tmpD);
 
 
 #gzipped prot/gene files need to be unzipped for hmms etc
@@ -233,7 +234,7 @@ if ($subparts =~ m/s/ && (!-e "$outD/microsat.txt" || !-s "$outD/microsat.txt"))
 	findMicrSat($inScaffs,"$outD/microsat.txt");
 }
 
-system "rm -rf $tmpD";
+remove_tree($tmpD);
 
 print "all done\n";
 exit(0);

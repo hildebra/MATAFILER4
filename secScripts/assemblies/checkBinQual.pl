@@ -27,6 +27,16 @@ my $BinnerChoice = 0;
 #$BinnerChoice = $ARGV[6] if (@ARGV > 6);
 my $read1raw = "";my $read2raw = ""; my $readSraw = ""; #comma delimted list of reads.. only needed for pilea..
 
+if (@ARGV && $ARGV[0] !~ /^-/) {
+	die "Legacy usage: $0 assembly bin-assignments tmp-dir [cores [checkM2 [checkM1 [binner]]]]\n"
+		if @ARGV < 3 || @ARGV > 7;
+	($refFA, $MB2, $tmpD) = splice(@ARGV, 0, 3);
+	$ncore = shift @ARGV if @ARGV;
+	$usCheckM2 = shift @ARGV if @ARGV;
+	$usCheckM1 = shift @ARGV if @ARGV;
+	$BinnerChoice = shift @ARGV if @ARGV;
+}
+
 GetOptions(
 	"asm=s"  => \$refFA,
 	"tmpD=s" => \$tmpD,
@@ -38,10 +48,17 @@ GetOptions(
 	"read1=s" => \$read1raw,
 	"read2=s" => \$read2raw,
 	"readS=s" => \$readSraw,
-);
+) or die "Invalid checkBinQual.pl options\n";
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
+die "-asm, -tmpD and -binF are required\n"
+	unless length($refFA) && length($tmpD) && length($MB2);
+die "Assembly is missing or empty: $refFA\n" unless -s $refFA;
+die "-ncore must be a positive integer\n" unless $ncore > 0;
+die "-binner must be one of 0..5\n"
+	unless $BinnerChoice =~ /^\d+$/ && $BinnerChoice >= 0 && $BinnerChoice <= 5;
+die "Select at least one of -checkM1 or -checkM2\n" unless $usCheckM1 || $usCheckM2;
 
 my $MB2Dir = $MB2; $MB2Dir =~ s/[^\/]+$//;
-$tmpD =~ s/\$/\\\$/g;
 
 #die "$ncore\n";
 #die "$tmpD\n";
@@ -133,7 +150,7 @@ if ($usCheckM2){
 	}
 }
 #and get N50 etc vals for each contig
-if (1 || !-e "$MB2.assStat"){
+if (!-e "$MB2.assStat"){
 	my $hr = MB2N50(\%MB);
 	my %asS = %{$hr};
 	open O,">$MB2.assStat" or die $!;
@@ -182,7 +199,11 @@ sub MB2assigns($){
 	my %ret;
 	open I,"<$inF" or die "Can't open maxbin2 output $inF\n";
 	while (<I>){
-		chomp; my @spl  = split /\t/;
+		chomp;
+		next if /^\s*$/;
+		my @spl  = split /\t/, $_, -1;
+		die "Malformed bin assignment in $inF: $_\n"
+			unless @spl >= 2 && length($spl[0]) && length($spl[1]);
 		next if ($spl[1] eq "0");
 		next if ($spl[0] eq "Sequence ID");
 		push(@{$ret{$spl[1]}}, $spl[0]);

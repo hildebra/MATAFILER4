@@ -1760,7 +1760,7 @@ sub submitGenomeBinner{
 		#only needed for pilea.. deactivate if not needed..
 		
 		my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$cAssGrp,0);
-		$postCmd .= " -read1 ". join(",",@$par1) ." -read2 ". join(",",@$par2) ."-readS ". join(",",@$parS); #currently not implemented.. maybe makes more sense to run this on global MAG collection?
+		$postCmd .= " -read1 ". join(",",@$par1) ." -read2 ". join(",",@$par2) ." -readS ". join(",",@$parS); #currently not implemented.. maybe makes more sense to run this on global MAG collection?
 		$postCmd .= "\n";
 	} 
 	$postCmd .= "\nrm -rf $nodeSpTmpD2\n";

@@ -4,13 +4,14 @@ use warnings;
 use strict;
 #./FMG_rwk.pl /g/scb/bork/hildebra/SNP/GNMass2_singl/alien-11-374-0/assemblies/metag/ContigStats/FMG/
 
+die "Usage: $0 <fetchMG-output-directory>\n" unless @ARGV == 1;
 my $inD1 = $ARGV[0];
 my $inD = $inD1."/temp/";
 
 opendir(DIR, $inD) || die "can't opendir $inD: $!";
-my @FMGs = grep { /\.IDs\.txt/ && -f "$inD/$_" } readdir(DIR);
+my @FMGs = sort grep { /\.IDs\.txt\z/ && -f "$inD/$_" } readdir(DIR);
 closedir DIR;
-open O,">$inD1/FMGids.txt";
+open O,">$inD1/FMGids.txt" or die "Cannot write $inD1/FMGids.txt: $!\n";
 foreach my $FM ( @FMGs){
 	#print $FM."\n";
 	my $ID = $FM; $ID =~ s/\.IDs\.txt//;
@@ -19,4 +20,3 @@ foreach my $FM ( @FMGs){
 	close I;
 }
 close O;
-
