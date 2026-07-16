@@ -7,12 +7,18 @@ use warnings;
 use Getopt::Long qw( GetOptions );
 use Mods::GenoMetaAss qw(renameFastqCnts systemW);
 use Mods::IO_Tamoc_progs qw(inputFmtSpades getProgPaths);
+use File::Copy qw(copy);
+use File::Path qw(make_path remove_tree);
+use File::Spec;
 
-sub smrnaRunCmd; sub outfileCpy;
+sub smrnaRunCmd;
+sub copySortmernaOutputs;
+sub touchFile;
+sub shellQuote;
 
 
 #18.5.26: added versioning to 0.1
-my $cLSUSSUver = 0.1;
+my $cLSUSSUver = 0.2;
 
 #my $tmpP = "/g/scb/bork/hildebra/data2/Soil_finland/tmp_16s/";
 my $tmpP = "";#$ARGV[3];
@@ -38,47 +44,57 @@ GetOptions(
 	#"DBdir=s" => \$path2DB,
 	"assmblRibos=i" => \$doRiboAssembl,
 ) or die("Error in command line arguments\n");
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
+die "-alignDir is required\n" if $alignPath eq "";
+die "-tmpDir is required\n" if $tmpP eq "";
+die "-smplID is required\n" if $smpN eq "";
+die "-cores must be a positive integer\n" if $threads < 1;
+die "Ribosomal assembly is no longer supported\n" if $doRiboAssembl;
+
+my @r1i = grep { $_ ne "" && $_ ne "-1" } split(",",$read1);
+my @r2i = grep { $_ ne "" && $_ ne "-1" } split(",",$read2);
+my @rSi = grep { $_ ne "" && $_ ne "-1" } split(",",$readS);
+die "At least one -R1 or -RS input is required\n" unless @r1i || @rSi;
+die "-R1 and -R2 must contain the same number of files\n" if @r2i && @r1i != @r2i;
+die "-R2 was supplied without -R1\n" if @r2i && !@r1i;
+for my $readFile (@r1i, @r2i, @rSi){
+	die "Read input does not exist: $readFile\n" unless -e $readFile;
+}
+my $rS=join(",",@rSi);
+my $singlMode = @r2i ? 0 : 1;
+
+$alignPath = File::Spec->canonpath(File::Spec->rel2abs($alignPath));
+my $tmpRoot = File::Spec->canonpath(File::Spec->rel2abs($tmpP));
+make_path($alignPath) unless -d $alignPath;
+make_path($tmpRoot) unless -d $tmpRoot;
+die "-alignDir is not a directory: $alignPath\n" unless -d $alignPath;
+die "-tmpDir is not a directory: $tmpRoot\n" unless -d $tmpRoot;
+my $safeSample = $smpN;
+$safeSample =~ s/[^A-Za-z0-9_.-]+/_/g;
+$tmpP = File::Spec->catdir($tmpRoot, "catchLSUSSU_${safeSample}_$$");
+make_path($tmpP);
+
+if (-e "$alignPath/SSU_pull.sto" && -e "$alignPath/LSU_pull.sto"){
+	print "All riboFind SortMeRNA targets are complete\n";
+	remove_tree($tmpP);
+	exit(0);
+}
 
 #if ($path2DB eq ""){die "database not defined (-DBdir) ! \n";}
 #if (@ARGV<8){die "Not enough input arguments!!\n";}
 
-
-announce();
-
-#die "$doRiboAssembl\n";
 
 #my $smrPath = getProgPaths("srtMRNA_path");
 #my $path2DB = "$smrPath/rRNA_databases/";
 #my $smrnaBin = "$smrPath/./sortmerna";
 
 my $smrnaBin = getProgPaths("sortmerna");
+announce($smrnaBin);
 #my $mergeScript = getProgPaths("mergeRdScr");
 #my $unmergeScript = getProgPaths("unmergeRdScr");
 #my $spadesBin = getProgPaths("spades");
 my $ltslcaP = "$alignPath/ltsLCA/";
-my $singlMode = 0;
-
-#put reads into arrays
-my @r1i = split(",",$read1);
-my @r2i = split(",",$read2);
-
-my @rSi = split(",",$readS); my $rS=join(",",@rSi);
-if ($rSi[0] eq "-1"){$rS="";}
-
-if ( @r2i == 0 || $r2i[0] eq "-1" ){$singlMode=1;}
-if ($rSi[0] eq "-1"){$rS="";}
-
-
-if (-e "$alignPath/SSU_pull.sto" && -e "$alignPath/LSU_pull.sto" ){
-	print "All riboFind sortmerna targets seems to be complete\n";
-	if (-e $alignPath."/Ass/allAss.sto"){
-		print ", as well as assemblies\n";
-		exit(0);
-	}
-} else  { #unpack reads 
-	system "rm -fr $tmpP" if (-d $tmpP && $tmpP ne "");
-	system "mkdir -p $tmpP";
-	system "mkdir -p $alignPath";
+if (!-e "$alignPath/SSU_pull.sto" || !-e "$alignPath/LSU_pull.sto") { #unpack reads
 	#preparation of reads
 	#my @r1i = split(";",$ARGV[0]); my $r1="$tmpP/read1.tmp.fq";
 	#my @r2i = split(";",$ARGV[1]); my $r2="$tmpP/read2.tmp.fq";
@@ -115,54 +131,39 @@ if (-e "$alignPath/SSU_pull.sto" && -e "$alignPath/LSU_pull.sto" ){
 	#}
 	print "Skipping ITS\n";
 
-	my $curStone = "$alignPath/SSU_pull.sto"; system "rm $curStone";
+	my $curStone = "$alignPath/SSU_pull.sto";
 	unless (-e $curStone){
 		my $ltag = "reads_SSU";
 		my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBssu,$read1Str,$read2Str,$alignPath,$singlMode,$idxSSU);
 		$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBssu,$rS,"",$alignPath,1,$idxSSU) if ($rS ne "");
-		$runner .= "touch $curStone\n";
-		#die "$runner\n\n";
-		#if (system $runner) {print "Error in $runner\n"; exit(88);}#unless (system $runner) {die "Failed\n$runner\n";}
 		systemW $runner;
-		#outfileCpy("$tmpP/$ltag",$alignPath);
-		if (-e $curStone){
-			system "rm -f $alignPath/${ltag}.r* $alignPath/${ltag}.fq.gz ; cp $tmpP/${ltag}.r* $tmpP/${ltag}.fq.gz $alignPath";
-			#system "rm -f $ltslcaP/SSU_ass.sto" if (-e "$ltslcaP/SSU_ass.sto");
-			system "touch $alignPath/${ltag}.r1.fq.gz" unless (-e "$alignPath/${ltag}.r1.fq.gz");
-			system "touch $alignPath/${ltag}.r2.fq.gz" unless (-e "$alignPath/${ltag}.r2.fq.gz");
-			system "touch $alignPath/${ltag}.fq.gz" if (!-e "$alignPath/${ltag}.fq.gz" && $rS ne "");
-		}
+		copySortmernaOutputs($tmpP, $alignPath, $ltag, $singlMode || $rS ne "");
+		touchFile($curStone);
 		
 		#renameFastqCnts($alignPath."/reads_SSU.r1.fq",$smpN."__SSU"); renameFastqCnts($alignPath."/reads_SSU.r2.fq",$smpN."__SSU");
 		#system "touch $curStone";
 	}
-	$curStone = "$alignPath/LSU_pull.sto"; system "rm $curStone";
+	$curStone = "$alignPath/LSU_pull.sto";
 	unless (-e $curStone){
 		my $ltag = "reads_LSU";
 		my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBlsu,$read1Str,$read2Str,$alignPath,$singlMode,$idxLSU);
 		$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBlsu,$rS,"",$alignPath,1,$idxLSU) if ($rS ne "");
-		$runner .= "touch $curStone\n";
 		#print $runner."\n";
-		system "rm -f $ltslcaP/LSU_ass.sto" if (-e " $ltslcaP/LSU_ass.sto");
+		unlink "$ltslcaP/LSU_ass.sto" if -e "$ltslcaP/LSU_ass.sto";
 		systemW $runner;
 		#if (system $runner) {print "Error in $runner\n"; exit(89);}#unless (system $runner) {die "Failed\n$runner\n";}
 		#outfileCpy($tmpP."/$ltag",$alignPath);
 		#renameFastqCnts($alignPath."/reads_LSU.r1.fq",$smpN."__LSU"); renameFastqCnts($alignPath."/reads_LSU.r2.fq",$smpN."__LSU");
 		#system "touch $curStone";
-		if (-e $curStone){
-			system "rm -f $alignPath/${ltag}.r* $alignPath/${ltag}.fq.gz ; cp $tmpP/${ltag}.r* $tmpP/${ltag}.fq.gz $alignPath";
-			#system "rm -f $ltslcaP/SSU_ass.sto" if (-e "$ltslcaP/SSU_ass.sto");
-			system "touch $alignPath/${ltag}.r1.fq.gz" unless (-e "$alignPath/${ltag}.r1.fq.gz");
-			system "touch $alignPath/${ltag}.r2.fq.gz" unless (-e "$alignPath/${ltag}.r2.fq.gz");
-			system "touch $alignPath/${ltag}.fq.gz"  if (!-e "$alignPath/${ltag}.fq.gz" && $rS ne "");
-		}
+		copySortmernaOutputs($tmpP, $alignPath, $ltag, $singlMode || $rS ne "");
+		touchFile($curStone);
 
 	}
 
 
 }
 
-system "rm -fr $tmpP" if ($tmpP ne "" && -d $tmpP);
+remove_tree($tmpP) if -d $tmpP;
 
 #ribo assemblies.. difficult as high chance for chimeras.. maybe switch assembler later?
 my $outP = $alignPath;
@@ -205,25 +206,34 @@ sub smrnaRunCmd( $ $ $ $ $ $ $){
 	return "" if ($R1 eq "");
 
 	# Build --ref args from colon-separated FASTA paths
-	my $refStr = join(" ", map { "--ref '$_'" } split(":", $refDB));
-	my $idxStr = ($idxDir ne "") ? "--idx-dir '$idxDir' --index 0" : "";
+	my $refStr = join(" ", map { "--ref ".shellQuote($_) } split(":", $refDB));
+	my $idxStr = ($idxDir ne "") ? "--idx-dir ".shellQuote($idxDir)." --index 0" : "";
 
 	my $cmd = "";
 	if ($isSingl){
-		$cmd .= "$smrnaBin --reads '$R1' $refStr $idxStr";
-		$cmd .= " --kvdb '${outFile}.kvdb' --readb '${outFile}.readb' --aligned '$outFile'";
-		$cmd .= " --fastx --threads $threads -e 1e-12 --num_alignments 1 --no-best \n";
-		$cmd .= "rm -rf '${outFile}.kvdb' '${outFile}.readb'\n";
+		my @singleReads = grep { $_ ne "" } split(",", $R1);
+		for (my $i = 0; $i < @singleReads; $i++){
+			my $pfx = @singleReads > 1 ? "${outFile}.tmp${i}" : $outFile;
+			$cmd .= "$smrnaBin --reads ".shellQuote($singleReads[$i])." $refStr $idxStr";
+			$cmd .= " --kvdb ".shellQuote("${outFile}.kvdb${i}")." --readb ".shellQuote("${outFile}.readb${i}")." --aligned ".shellQuote($pfx);
+			$cmd .= " --fastx --threads $threads -e 1e-12 --num_alignments 1 --no-best \n";
+			$cmd .= "rm -rf ".shellQuote("${outFile}.kvdb${i}")." ".shellQuote("${outFile}.readb${i}")."\n";
+		}
+		if (@singleReads > 1){
+			my $outputs = join(" ", map { shellQuote("${outFile}.tmp${_}.fq.gz") } 0..$#singleReads);
+			$cmd .= "cat $outputs > ".shellQuote("${outFile}.fq.gz")." && rm -f $outputs\n";
+		}
 	} else {
 		return "" if ($R2 eq "");
 		my @r1s = split(",", $R1);
 		my @r2s = split(",", $R2);
+		die "Internal error: unequal paired-read lists\n" unless @r1s == @r2s;
 		for (my $i = 0; $i < @r1s; $i++){
 			my $pfx = (@r1s > 1) ? "${outFile}.tmp${i}" : $outFile;
-			$cmd .= "$smrnaBin --reads '$r1s[$i]' --reads '$r2s[$i]' $refStr $idxStr";
-			$cmd .= " --kvdb '${outFile}.kvdb${i}' --readb '${outFile}.readb${i}' --aligned '$pfx'";
+			$cmd .= "$smrnaBin --reads ".shellQuote($r1s[$i])." --reads ".shellQuote($r2s[$i])." $refStr $idxStr";
+			$cmd .= " --kvdb ".shellQuote("${outFile}.kvdb${i}")." --readb ".shellQuote("${outFile}.readb${i}")." --aligned ".shellQuote($pfx);
 			$cmd .= " --fastx --threads $threads -e 1e-12 --num_alignments 1 --no-best --paired_in --out2 \n";
-			$cmd .= "rm -rf '${outFile}.kvdb${i}' '${outFile}.readb${i}'\n";
+			$cmd .= "rm -rf ".shellQuote("${outFile}.kvdb${i}")." ".shellQuote("${outFile}.readb${i}")."\n";
 		}
 		if (@r1s > 1){
 			# multiple input pairs: cat per-pair outputs into final files
@@ -246,8 +256,44 @@ sub make_interleave{
 	die "deprecated make_interleave\n";
 }
 
-sub announce{
-	print "catchLSUSSU v $cLSUSSUver\n";
-	systemW "sortmerna --version | grep SortMeRNA \n";
+sub copySortmernaOutputs{
+	my ($sourceDir, $destinationDir, $tag, $includeSingle) = @_;
+	for my $oldFile (glob(File::Spec->catfile($destinationDir, "${tag}.r*.fq.gz")),
+		glob(File::Spec->catfile($destinationDir, "${tag}.fq.gz"))){
+		unlink $oldFile or die "Cannot remove stale SortMeRNA output $oldFile: $!\n";
+	}
+	my @expected = ("${tag}.r1.fq.gz", "${tag}.r2.fq.gz");
+	push @expected, "${tag}.fq.gz" if $includeSingle;
+	for my $fileName (@expected){
+		my $source = File::Spec->catfile($sourceDir, $fileName);
+		my $destination = File::Spec->catfile($destinationDir, $fileName);
+		if (-e $source){
+			copy($source, $destination) or die "Cannot copy $source to $destination: $!\n";
+		} else {
+			touchFile($destination); # successful search with no hits
+		}
+	}
 }
 
+
+sub touchFile{
+	my ($path) = @_;
+	open my $touchHandle, ">", $path or die "Cannot create checkpoint/output $path: $!\n";
+	close $touchHandle or die "Cannot close checkpoint/output $path: $!\n";
+}
+
+
+sub shellQuote{
+	my ($value) = @_;
+	$value = "" unless defined $value;
+	$value =~ s/'/'"'"'/g;
+	return "'$value'";
+}
+
+
+sub announce{
+	my ($configuredSortmerna) = @_;
+	print "catchLSUSSU v $cLSUSSUver\n";
+	my $status = systemW("$configuredSortmerna --version", 0);
+	warn "Could not query the configured SortMeRNA version\n" if $status;
+}
