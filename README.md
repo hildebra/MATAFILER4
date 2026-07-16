@@ -65,14 +65,16 @@ Create or adapt a mapping file, then run a dry-run first:
 
 ```bash
 MAP=/path/to/mapping_file.map
-perl $MF4DIR/MATAF4.pl -map "$MAP" -assembleMG 2 -submit 0 -from 0 -to 1
+perl $MF4DIR/MATAF4.pl -map "$MAP" -assembleMG 2 -requireInput 1 -submit 0 -from 0 -to 1
 ```
 
 Only submit to the scheduler after the dry-run has validated paths and configuration:
 
 ```bash
-perl $MF4DIR/MATAF4.pl -map "$MAP" -assembleMG 2 -submit 1 -from 0 -to 1
+perl $MF4DIR/MATAF4.pl -map "$MAP" -assembleMG 2 -requireInput 1 -submit 1 -from 0 -to 1
 ```
+
+For new analyses, `-requireInput 1` prevents missing or unmatched input reads from being silently skipped. The default `0` is useful when resuming an older run whose original reads were intentionally removed.
 
 ## Documentation map
 

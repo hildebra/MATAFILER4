@@ -1,93 +1,116 @@
-#! /usr/bin/perl -w
-#perl site_taxon_table.pl Family * > family.ITS.tab ### usage
+#!/usr/bin/env perl
 
 use strict;
-use Mods::GenoMetaAss qw(gzipopen);
+use warnings;
 
-my $tax_level_a= lc shift @ARGV;
-my $outF = shift @ARGV;
-my @tlvls = split(/,/,$tax_level_a);
-my $inDir = shift @ARGV;
-my %sites;
-my %taxa;
-my $numLvl = scalar @tlvls;
+use Mods::GenoMetaAss qw(gzipopen systemW);
 
-opendir(DIR, $inDir) || die "can't opendir $inDir: $!";
-my @files = grep { /\.hiera\.txt\.gz/ && -f "$inDir/$_" } readdir(DIR);
-closedir DIR;
+sub shellQuote;
 
+die "Usage: $0 tax_level[,tax_level...] output_prefix input_directory\n" unless @ARGV == 3;
+my $taxLevelArg = lc shift @ARGV;
+my $outPrefix = shift @ARGV;
+my $inputDir = shift @ARGV;
+my @levels = grep { $_ ne "" } split(/,/, $taxLevelArg);
+die "At least one taxonomic level is required\n" unless @levels;
+die "Output prefix must not be empty\n" if $outPrefix eq "";
+die "Input directory does not exist: $inputDir\n" unless -d $inputDir;
 
-print "Detected ".@files." input files in dir $inDir\n";
-exit(0) if (@files ==0);
-my %column ;
+my %seenLevel;
+die "Duplicate taxonomic levels are not supported\n" if grep { $seenLevel{$_}++ } @levels;
 
-foreach my $file (@files) {
-		#open my $FHANDLE, "< $file" or die "Could not open $file: $!\n";
-		my ($FHANDLE,$readinOk) = gzipopen("$inDir/$file","tax infile");
-		my $tag = $file;
-		$tag =~ s/.*\///;
-		$tag =~ s/\.hiera\.txt$//;
-         my $cset = 0;
-        while (my $row=<$FHANDLE>) {
-			chomp $row;
-			
-			my @temp = split /\t/, $row;
-			if ($cset == 0) {
-				foreach my $l (@tlvls){
-					for (my $i=0; $i<scalar @temp; ++$i) {
-							if (lc $temp[$i] eq $l) { $column{$l} = ($i-1); last; } #new LCA: get rid of first entry
-							if ($i+1 == scalar @temp) { die "Could not find given taxon level $l in $file\n"; }
-					}
-					#$sites{$l}{$tag} = {};
-				}
-				$cset=1;
-			} else {
-				shift @temp; #new LCA: get rid of first entry
-				#foreach my $l (@tlvls){
-				#rm Opisthokonta from PR2 DB.. annoying
-				if ($temp[1] eq "Opisthokonta"){
-					splice @temp, 1, 1;
-					splice @temp, 4, 0, "?";
-				}
-				for (my $ii=0;$ii< $numLvl; $ii++){
-					#die "\n".$column+1 ."\n";
-					my $k = "";
-					#if (@temp <= $column{$l}){
-					if (@temp <= $ii){
-						$k = join (';',@temp) . join(";", "?" x ($ii - $#temp));
-					} else {
-						$k = join (';',@temp[0 .. $ii]);
-					}
-					#print "$column{$l} @temp\n$k\n$file\n";
-					#die $k."\n";
-					++$sites{$ii}{$tag}{$k};
-					++$taxa{$ii}{$k};
-				}
-			}
-		}
-		close $FHANDLE;
+for my $level (@levels){
+	unlink "$outPrefix.$level.txt" if -e "$outPrefix.$level.txt";
+	unlink "$outPrefix.$level.txt.gz" if -e "$outPrefix.$level.txt.gz";
 }
 
-print "removing any old merge files\n";
-system "rm -f $outF*";
+opendir(my $dirHandle, $inputDir) or die "Cannot open directory $inputDir: $!\n";
+my @files = sort grep { /\.hiera\.txt(?:\.gz)?$/ && -f "$inputDir/$_" } readdir($dirHandle);
+closedir($dirHandle) or die "Cannot close directory $inputDir: $!\n";
 
-print "Read input files..\n";
-foreach my $l (@tlvls){
-	my $ii = $column{$l};
-	my @taxa_keys = sort {$taxa{$ii}{$b} <=> $taxa{$ii}{$a}} keys %{$taxa{$ii}};
-	my @sites_keys = sort keys %{$sites{$ii}};
-	my %locSites = %{$sites{$ii}};
-	open O,">$outF.$l.txt"; print O "$l";
-	foreach my $site (@sites_keys) { print O "\t$site"; }
-	print O "\n";
-	foreach my $key (@taxa_keys) {
-		print O $key;
-		foreach my $site (@sites_keys) { 
-			if (exists($locSites{$site}{$key})) { print O "\t$locSites{$site}{$key}"; }
-			else { print O "\t0"; }
+print "Detected ".scalar(@files)." input files in dir $inputDir\n";
+exit(0) unless @files;
+
+my %sites;
+my %taxa;
+my %seenTag;
+
+for my $file (@files) {
+	my ($inputHandle,$readOk) = gzipopen("$inputDir/$file", "tax infile");
+	my $tag = $file;
+	$tag =~ s/\.hiera\.txt(?:\.gz)?$//;
+	die "Duplicate sample tag '$tag' derived from hierarchy inputs\n" if $seenTag{$tag}++;
+
+	my %column;
+	my $header = <$inputHandle>;
+	die "Empty taxonomy hierarchy input: $inputDir/$file\n" unless defined $header;
+	chomp $header;
+	my @headerFields = split /\t/, $header, -1;
+	for my $level (@levels){
+		for (my $i=0; $i<@headerFields; $i++) {
+			if (lc($headerFields[$i]) eq $level) {
+				$column{$level} = $i - 1; # data rows discard the leading read identifier
+				last;
+			}
 		}
-		print O "\n";
+		die "Could not find taxonomic level '$level' in $file\n"
+			unless exists($column{$level}) && $column{$level} >= 0;
 	}
-	close O;
-	system "gzip $outF.$l.txt";
+
+	while (my $row=<$inputHandle>) {
+		chomp $row;
+		next if $row eq "";
+		my @fields = split /\t/, $row, -1;
+		shift @fields; # discard read identifier, matching the header offset above
+
+		# PR2 contains an extra Opisthokonta supergroup. Preserve the historical
+		# normalization while guarding short/malformed records.
+		if (@fields > 1 && $fields[1] eq "Opisthokonta"){
+			splice @fields, 1, 1;
+			splice @fields, 4, 0, "?";
+		}
+
+		for my $level (@levels){
+			my $lastColumn = $column{$level};
+			my @lineage;
+			for my $index (0..$lastColumn){
+				my $value = $index < @fields && defined($fields[$index]) && $fields[$index] ne ""
+					? $fields[$index] : "?";
+				push @lineage, $value;
+			}
+			my $lineage = join(';', @lineage);
+			$sites{$level}{$tag}{$lineage}++;
+			$taxa{$level}{$lineage}++;
+		}
+	}
+	close $inputHandle or die "Cannot close taxonomy input $inputDir/$file: $!\n";
+}
+
+print "Read input files.\n";
+for my $level (@levels){
+	my @taxaKeys = sort {
+		$taxa{$level}{$b} <=> $taxa{$level}{$a} || $a cmp $b
+	} keys %{$taxa{$level}};
+	my @siteKeys = sort keys %{$sites{$level}};
+	my $output = "$outPrefix.$level.txt";
+	open my $outputHandle, '>', $output or die "Cannot write $output: $!\n";
+	print {$outputHandle} $level, map { "\t$_" } @siteKeys;
+	print {$outputHandle} "\n";
+	for my $lineage (@taxaKeys) {
+		print {$outputHandle} $lineage;
+		for my $site (@siteKeys) {
+			print {$outputHandle} "\t", ($sites{$level}{$site}{$lineage} // 0);
+		}
+		print {$outputHandle} "\n";
+	}
+	close $outputHandle or die "Cannot close $output: $!\n";
+	systemW("gzip -f ".shellQuote($output));
+}
+
+
+sub shellQuote{
+	my ($value) = @_;
+	$value = "" unless defined $value;
+	$value =~ s/'/'"'"'/g;
+	return "'$value'";
 }

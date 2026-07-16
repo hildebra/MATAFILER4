@@ -11,8 +11,9 @@ our @EXPORT_OK = qw(
 use warnings;
 use strict;
 use File::Basename;
+use File::Path qw(make_path);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
-use Mods::GenoMetaAss qw (systemW readFasta gzipopen getAssemblPath);
+use Mods::GenoMetaAss qw (systemW readFasta gzipopen getAssemblPath reverse_complement_IUPAC);
 use Mods::TamocFunc qw (cram2bsam);
 
 
@@ -42,20 +43,22 @@ sub readCMquals{
 	my $CM2mode=0; $CM2mode = 1 if ($IQ =~m/\.cm2/);
 	open I,"<$IQ" or die "Can't open maxbin2 quality $IQ\n";
 	while (<I>){
-		chomp; my @spl  = split /\t/;
+		chomp; my @spl  = split /\t/, $_, -1;
 		next if ($spl[0] eq "Bin Id" || $spl[0] eq "Name");
 		#die "can't find Bin \"$spl[0]\"\n" unless (exists($ret{$spl[0]}));
 		my $Bin = shift @spl;
 		if ($CM2mode){
+			die "Malformed CheckM2 row for $Bin in $IQ\n" unless @spl >= 2 && $spl[0] =~ /^\d+(?:\.\d+)?$/ && $spl[1] =~ /^\d+(?:\.\d+)?$/;
 			$rQ{$Bin}{compl} = $spl[0];
 			$rQ{$Bin}{conta} = $spl[1];
 			$rQ{$Bin}{hetero} = 0;
-			#$rQ{$Bin}{line} = join("\t",@spl);
+			$rQ{$Bin}{line} = join("\t",@spl);
 		} else {
+			die "Malformed CheckM row for $Bin in $IQ\n" unless @spl >= 13 && $spl[10] =~ /^\d+(?:\.\d+)?$/ && $spl[11] =~ /^\d+(?:\.\d+)?$/;
 			$rQ{$Bin}{compl} = $spl[10];
 			$rQ{$Bin}{conta} = $spl[11];
 			$rQ{$Bin}{hetero} = $spl[12];
-			#$rQ{$Bin}{line} = join("\t",@spl);
+			$rQ{$Bin}{line} = join("\t",@spl);
 		}
 	}
 	close I;
@@ -69,13 +72,16 @@ sub minQualFilter($ $ $ $ $){
 	my $prevS = scalar(keys %{$hr1});
 	#print "$prevS , " . scalar(keys %{$hr2}) . "size\n";
 	foreach my $bin (keys %{$hr1}){
-		if ($hr2->{$bin}{compl}< $Compl || $hr2->{$bin}{conta}> $Conta || scalar(@{$hr1->{$bin}}) == 0){
+		my $fails_lca = $LCAcompl > 0
+			&& exists($hr2->{$bin}{LCAcompl})
+			&& $hr2->{$bin}{LCAcompl} < $LCAcompl;
+		if ($hr2->{$bin}{compl}< $Compl || $hr2->{$bin}{conta}> $Conta || $fails_lca || scalar(@{$hr1->{$bin}}) == 0){
 			delete ($hr1->{$bin});
 			delete ($hr2->{$bin});
 		}
 	}
 	my $delEntries = $prevS - scalar(keys %{$hr1});
-	print "Deleted $delEntries MAGs due to not meeting min qual criteria (Compl:$Compl, Conta:$Conta, LCA:$LCAcompl)\n" if ($delEntries);
+	print "Deleted $delEntries MAGs due to not meeting min qual criteria (Compl:$Compl, Conta:$Conta, LCA:$LCAcompl where available)\n" if ($delEntries);
 	return ($hr1, $hr2);
 }
 
@@ -85,13 +91,18 @@ sub MB2assigns($ $){
 	#print "$inF\n";
 	open I,"<$inF" or die "Can't open Binner output $inF\n";
 	while (<I>){
-		chomp; my @spl  = split /\t/;
+		chomp; next if /^\s*$/;
+		my @spl  = split /\t/, $_, -1;
+		die "Malformed binner assignment in $inF at line $.\n" unless @spl >= 2 && length($spl[0]) && length($spl[1]);
 		next if ($spl[1] eq "0");
 		push(@{$ret{$spl[1]}}, $spl[0]);
 	}
 	close I;
 	
 	my $rQHR = readCMquals($IQ);
+	foreach my $bin (keys %ret) {
+		die "No quality record for assigned bin '$bin' in $IQ\n" unless exists $rQHR->{$bin};
+	}
 	#print "$inF, $IQ ". scalar(keys %{$rQHR}) ."\n";
 
 	return (\%ret,$rQHR);
@@ -170,7 +181,7 @@ sub filterMGS_CM{
 		$cnt++; next if ($cnt == 1);
 		chomp;my @spl=split/\t/;
 		#next if ($spl[0] eq "Bin Id");
-		if (($spl[$complIdx] <= $complT || $spl[$contIdx] > $contT) ){
+		if (($spl[$complIdx] < $complT || $spl[$contIdx] > $contT) ){
 			$ret{$spl[0]} = [$spl[$complIdx],$spl[$contIdx]] if (!$retBetter);
 			#die "$spl[11],$spl[12]\n" if ($spl[0] eq "MB2bin12");
 		} elsif ($retBetter) {
@@ -192,14 +203,15 @@ sub filterMGS_CM{
 	system "rm -f $newGff" if (-e $newGff);
 	my $rnaBin = getProgPaths("rnammer");
 	my $cmd = "$rnaBin -S bac -m ssu -gff $newGff < $fasFile";
-	system $cmd."\n";
+	systemW $cmd."\n";
 	#FP929038        RNAmmer-1.2     rRNA    507757  508732  1202.9  -       .       16s_rRNA
 	my $genoR = readFasta($fasFile,1); my %geno = %{$genoR};
 	#my @k = keys(%geno); die @k.join(" ",@k)."\n";
-	open II,"<",$newGff; my $gffcnt=0;
+	open II,"<",$newGff or die "Can't open RNAmmer output $newGff: $!\n"; my $gffcnt=0;
 	while(<II>){next if (/^#/ || length($_) < 1);my @spl = split(/\s+/);
 		#print $_;
-		my $newS = substr($geno{$spl[0]},$spl[3],$spl[4]-$spl[3]);
+		next unless (@spl >= 7 && exists $geno{$spl[0]});
+		my $newS = substr($geno{$spl[0]},$spl[3]-1,$spl[4]-$spl[3]+1);
 		if ($spl[6] eq "-"){$newS = reverse_complement_IUPAC($newS);}
 		#die $newS;
 		$ret{$spl[0]."_rrn_".$gffcnt} = $newS;
@@ -421,6 +433,10 @@ sub getRepresentBinsPerFamily{ #needs some work
 sub createBinCtgs{
 	#$binDctg,$hrM,"$logDir/MAGvsGC.txt.gz
 	my ($outD,$hrMap,$guideF,$perFam,$BinShrt) = @_;
+	die "Output directory is required\n" unless defined($outD) && length($outD);
+	die "Mapping data are required\n" unless ref($hrMap) eq 'HASH';
+	die "Representative-bin guide is missing: $guideF\n" unless defined($guideF) && -s $guideF;
+	make_path($outD);
 	
 	my $hr;
 	if ($perFam){
@@ -454,6 +470,7 @@ sub createBinCtgs{
 		if ($lastSmpl ne $smpl){
 			$lastSmpl = $smpl;
 			#print "Reading $smpl\n";
+			die "No assembly mapping for representative sample '$smpl'\n" unless exists($map{$smpl}) && defined($map{$smpl}{wrdir});
 			my $dirIn = $map{$smpl}{wrdir}; 
 			my $assDir = getAssemblPath($dirIn);
 			my $BinDir = "$assDir/Binning/$BinShrt/"; my $BinFile = "$BinDir/$smpl";
@@ -462,14 +479,16 @@ sub createBinCtgs{
 		}
 		
 		
-		my @ctgs = @{${$hr1}{$bin}};
+		die "Representative bin '$bin' was not found for sample '$smpl'\n" unless exists($hr1->{$bin}) && ref($hr1->{$bin}) eq 'ARRAY';
+		my @ctgs = @{$hr1->{$bin}};
 		#die "@ctgs\n". @ctgs . "\n";
 		
 		my $outF = "$outD/$MGS.ctgs.$MAG.fna";
 		#print "writing  $MGS.ctgs.$MAG.fna\n";
 		open O,">$outF" or die "Couldn't open $outF\n";
 		foreach my $ctg (@ctgs){
-			print O ">$ctg\n${$hr2}{$ctg}\n";
+			die "Contig '$ctg' from bin '$bin' is absent from the assembly for '$smpl'\n" unless exists($hr2->{$ctg});
+			print O ">$ctg\n$hr2->{$ctg}\n";
 		}
 		close O;
 		#die "$MAG :: $smpl $bin\n$dirIn\n$assDir\n$BinFile\n";
@@ -486,27 +505,32 @@ sub createBin2{
 	my $seq=""; my $hd=""; my %MGSfxa;
 	my $MGScnt=0; my $geneCnt=0;
 	my $fileEnd = ".fna"; $fileEnd = ".faa" if ($refFA =~ m/\.faa$/);
+	my $store_record = sub {
+		return unless $hd =~ m/^>(\d+)/;
+		my $gene_id = $1;
+		return unless exists($G2MGS{$gene_id});
+		$geneCnt++;
+		for my $MGS (keys %{$G2MGS{$gene_id}}) {
+			$MGSfxa{$MGS}{$hd} = $seq;
+		}
+	};
 	while (my $line = <$I>){
 		chomp $line;
 		if ($line =~ m/^>/){
-			#take care of old fna..
-			if ($hd =~ m/^>(\d+)/ && exists($G2MGS{$1})){
-				$geneCnt++;
-				my @tars = keys %{$G2MGS{$1}};
-				foreach my $MGS (@tars){
-					$MGSfxa{$MGS}{$hd} = $seq;
-				}
-			}
+			$store_record->();
 			$hd = $line; $seq = "";  
 			next;
 		}
 		$seq .= $line;
 	}
+	$store_record->();
 	close $I;
-	print "Found $geneCnt genes in " . scalar(keys%MGSfxa). " MGS (avg " . int($geneCnt/scalar(keys%MGSfxa)*100)/100  . " per MGS). Writing to $binD\n";
-	system "mkdir -p $binD" unless (-d $binD);
+	my $mgs_count = scalar keys %MGSfxa;
+	die "No genes from $cnopyF were found in $refFA\n" unless $mgs_count;
+	print "Found $geneCnt genes in $mgs_count MGS (avg " . int($geneCnt/$mgs_count*100)/100  . " per MGS). Writing to $binD\n";
+	make_path($binD);
 	foreach my $MGS (keys %MGSfxa){
-		open O,">$binD/$MGS$fileEnd";
+		open O,">$binD/$MGS$fileEnd" or die "Cannot write $binD/$MGS$fileEnd: $!\n";
 		foreach my $gen (keys %{$MGSfxa{$MGS}}){
 			print O "$gen\n$MGSfxa{$MGS}{$gen}\n";
 		}
@@ -682,36 +706,53 @@ sub runCheckM2{#runs checkM2 on *.faa files (each file one Bin)
 sub createBams{
 	my ($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,$fmt) = @_;
 	my @dirSS = @{$dirsAR};
-	my $isCram = 0; my $numBams = 0;
+	my $numBams = 0;
 	my @BAMS;
+	my %seen_inputs;
 	my $uncramCmd = "";
 	if ($fmt ne "bam" && $fmt ne "sam"){die"createBams:: fmt has to be either bam or sam\nAborting..\n";}
 	foreach my $DDI (@dirSS){
 		$numBams++;
-		my $iBAM = "";
-		my $iBAM2 = "";
-		if ($DDI =~ m/\/$/ || $DDI !~ m/bam$/){
-			unless (-e "$DDI/mapping/done.sto"){print "runSCGBinner:::Can't find $DDI/mapping/done.sto\nAborting SCGBinner prep for $nm\n"; return "";}
-			my $SmplNm = `cat $DDI/mapping/done.sto`;
-			chomp $SmplNm; my $tbam = "$DDI/mapping/$SmplNm";
-			my $tbam2 = $tbam;$tbam2 =~ s/-smd\./\.sup-smd\./;
-			if (!-e $tbam && !-e $tbam2){$isCram=1; $tbam =~ s/\.bam/\.cram/;$tbam2 =~ s/\.bam/\.cram/;}
-			if (!-e $tbam && !-e $tbam2){print "runSCGBinner:::Can't find bam or cram at $DDI\nAborting SCGBinner prep for $nm\n"; next;}
-			$iBAM = $tbam if (-e $tbam && -s $tbam > $minBamSiz); 
-			$iBAM2 = $tbam2 if (-e $tbam2 && -s $tbam2 > $minBamSiz);
+		my @inputs;
+		if (-f $DDI && $DDI =~ /\.(?:bam|cram)$/i) {
+			push @inputs, $DDI if (-s $DDI > $minBamSiz);
+		} else {
+			$DDI =~ s{/$}{};
+			my $marker = "$DDI/mapping/done.sto";
+			unless (-s $marker){
+				warn "createBams: missing non-empty $marker; skipping $DDI for $nm\n";
+				next;
+			}
+			open my $marker_fh, '<', $marker or die "Cannot read $marker: $!\n";
+			my $mapped_name = <$marker_fh>;
+			close $marker_fh;
+			chomp $mapped_name;
+			my $primary = "$DDI/mapping/$mapped_name";
+			my $supplemental = $primary;
+			$supplemental =~ s/-smd\./.sup-smd./;
+			for my $candidate ($primary, $supplemental) {
+				if (!-e $candidate && $candidate =~ /\.bam$/) {
+					(my $cram = $candidate) =~ s/\.bam$/.cram/;
+					$candidate = $cram if (-e $cram);
+				} elsif (!-e $candidate && $candidate =~ /\.cram$/) {
+					(my $bam = $candidate) =~ s/\.cram$/.bam/;
+					$candidate = $bam if (-e $bam);
+				}
+				push @inputs, $candidate
+					if (-s $candidate && -s $candidate > $minBamSiz && !$seen_inputs{$candidate}++);
+			}
 		}
-		#primary reads
-		next if ( $iBAM eq "" && $iBAM2 eq "" ); 
-		my $oBAM = "$tmpDir/$nm.$numBams.$fmt";
-		if ($isCram && !-e $oBAM && $iBAM ne ""){
-			$uncramCmd .= cram2bsam($iBAM,$fna,$oBAM,1,$cores) ;
-			push @BAMS, $isCram ? $oBAM : $iBAM;
-		}
-		#supplemental reads
-		my $oBAM2 = "$tmpDir/$nm.$numBams.sup.$fmt";
-		if ($isCram && !-e $oBAM2 && $iBAM2 ne ""){
-			$uncramCmd .= cram2bsam($iBAM2,$fna,$oBAM2,1,$cores) ;
-			push @BAMS, $isCram ? $oBAM2 : $iBAM2;
+		for (my $input_no = 0; $input_no < @inputs; $input_no++) {
+			my $input = $inputs[$input_no];
+			if ($fmt eq 'bam' && $input =~ /\.bam$/i) {
+				push @BAMS, $input;
+				next;
+			}
+			my $suffix = $input_no == 0 ? '' : '.sup';
+			my $output = "$tmpDir/$nm.$numBams$suffix.$fmt";
+			$uncramCmd .= cram2bsam($input,$fna,$output,$fmt eq 'bam' ? 1 : 2,$cores)
+				unless (-s $output);
+			push @BAMS, $output;
 		}
 	}
 	#die "@dirSS\n@BAMS\n";
@@ -721,7 +762,7 @@ sub createBams{
 		open O,">$outDir/$nm.cm2";
 		print O "Name\tCompleteness\tContamination\tCompleteness_Model_Used Translation_Table_Used\tAdditional_Notes\n";
 		close O;
-		return "";
+		return ("", []);
 	}
 	return ($uncramCmd,\@BAMS);
 }
@@ -738,6 +779,7 @@ sub runSemiBin{
 	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
 	my @BAMS = @{$BAMSar};
+	return "" unless (@BAMS);
 	my $numBams = @BAMS;
 	
 	
@@ -754,7 +796,7 @@ sub runSemiBin{
 	$cmd1 .= "echo \"CRAM->BAM finished\"\n";
 #	my $cmd = "";
 	#my $output = "$outD/$nm.semibin";
-	my $cmd .= "\n\n###Running SemiBin...\n";
+	my $cmd = "\n\n###Running SemiBin...\n";
 	if (@BAMS == 1 && $jgO ne ""){
 		$cmd .= "$SBbin $smode --depth-metabat2 $jgO -i $fna $senv $seqType --output $outDir $dflags\n";
 #	} elsif (@BAMS == 1){ #by default run with def env, if only 1 bam.. too slow otherwise
@@ -779,6 +821,7 @@ sub runMetaDecoder{
 	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"sam");
 	my @SAMS = @{$BAMSar};
+	return "" unless (@SAMS);
 	
 
 	my $cmd = "###preparing SAMs..\n$uncramCmd\n\n";
@@ -800,6 +843,7 @@ sub runSCGBinner{
 	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
 	my @BAMS = @{$BAMSar};
+	return "" unless (@BAMS);
 	#die "runSCGBinner::@BAMS\n";
 	my $SCGbin = getProgPaths("SCGBinner");
 	my $cmd = "###preparing BAMs..\n$uncramCmd\n\n";
@@ -865,4 +909,3 @@ sub runMetaBat{
 	#my ($jobNameX, $tmpCmd) = qsubSystem($logDir."metaBat.sh",$cmd,$numCore,"60G",$jobName,"","",1,[],$QSBoptHR);
 
 }
-

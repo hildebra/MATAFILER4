@@ -41,11 +41,10 @@ sub checkMapsDoneSH{
 	my @dirSS = @{$inAR};
 	my $ctrlStr = "";
 	foreach my $DDI (@dirSS){
-		my $iBAM = $DDI;
 		if ( $DDI =~ m/\/$/  ){
-			$ctrlStr .= "if [ ! -e $DDI/mapping/done.sto ]; then echo \"Can't find $DDI/mapping/done.sto !! Aborting .. \"; exit 1; fi \n"; 
-		} elsif ($DDI !~ m/\.bam$/ || $DDI !~ m/\.cram$/)  {
-			$ctrlStr .= "if [ ! -e $DDI ]; then echo \"Can't find $DDI !! Aborting ..\"; exit 1; fi \n"; 
+			$ctrlStr .= "if [ ! -e $DDI/mapping/done.sto ] || ! find $DDI/mapping -maxdepth 1 -type f \\( -name '*-smd.bam' -o -name '*-smd.cram' \\) -size +0c -print -quit | grep -q .; then echo \"Can't find a completed mapping in $DDI/mapping !! Aborting .. \"; exit 1; fi \n";
+		} else {
+			$ctrlStr .= "if [ ! -s $DDI ]; then echo \"Can't find non-empty mapping file $DDI !! Aborting ..\"; exit 1; fi \n";
 		}
 	}
 	return $ctrlStr;
@@ -117,7 +116,10 @@ sub truePath{
 	
 	if ($enforce){
 		if ($TMCpath =~ m/\$([^\$^\/^\\]+)/){
-			my $envVar = $ENV{$1};
+			my $envName = $1;
+			die "Environment variable \$$envName used in path '$TMCpath' is not set\n"
+				unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
+			my $envVar = $ENV{$envName};
 			$TMCpath =~ s/\$([^\$^\/^\\]+)/$envVar/;
 		}
 		#die "$TMCpath\n";
@@ -125,7 +127,10 @@ sub truePath{
 	
 	if ($TMCpath =~ m/^\$/){
 		$TMCpath =~ s/^\$//; 
-		$TMCpath = $ENV{$TMCpath};
+		my ($envName, $suffix) = $TMCpath =~ m{^([^/\\]+)(.*)$};
+		die "Environment variable \$$envName used in path '\$$TMCpath' is not set\n"
+			unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
+		$TMCpath = $ENV{$envName} . $suffix;
 	}
 	return $TMCpath;
 
@@ -312,9 +317,12 @@ sub mapperDBbuilt( $ $){
 	my $kmaIdxFileSuffix = ".kma";
 	if ($MapperProg2 == 5){return 1;} #strobealign doesn't need index..
 	#print "($MapperProg2 == 1 || $MapperProg2 == -1) && !-s $DBbtRef$bwt2IdxFileSuffix.rev.2.bt2\n";
+	my @bt2_small = map { "$DBbtRef$bwt2IdxFileSuffix.$_.bt2" } qw(1 2 3 4 rev.1 rev.2);
+	my @bt2_large = map { "$DBbtRef$bwt2IdxFileSuffix.$_.bt2l" } qw(1 2 3 4 rev.1 rev.2);
+	my $bowtie_complete = !(grep { !-s $_ } @bt2_small) || !(grep { !-s $_ } @bt2_large);
 	if ( 
 		($MapperProg2 ==0 && !-e "$DBbtRef$bwt2IdxFileSuffix.0.sa") 
-		|| ( ($MapperProg2 == 1 || $MapperProg2 == -1) && (!-s "$DBbtRef$bwt2IdxFileSuffix.1.bt2l" && !-s "$DBbtRef$bwt2IdxFileSuffix.1.bt2" ) ) #bowtie2
+		|| ( ($MapperProg2 == 1 || $MapperProg2 == -1) && !$bowtie_complete ) #bowtie2
 		||( $MapperProg2 == 2 && !-s "$DBbtRef.pac" ) #bwa
 		||( ($MapperProg2 == 3 || $MapperProg2 == -1 ) && !-s "$DBbtRef$mini2IdxFileSuffix" ) #minimap2
 		||( ($MapperProg2 == 4 ) && !-s "$DBbtRef$kmaIdxFileSuffix.seq.b" )#kma
@@ -333,20 +341,27 @@ sub buildMapperIdx($ $ $ $){
 	my $bwtIdx = $REF.$bwt2IdxFileSuffix;
 	my $chkFi = $bwtIdx;
 	$MapperProg = decideMapper($MapperProg,"");
-	if ($MapperProg==1){$chkFi .=".1.bt2";
-	}elsif ($MapperProg==2){$chkFi .= $REF.".pac";
+	my @required_index_files;
+	if ($MapperProg==1){
+		my $extension = $lrgDB ? 'bt2l' : 'bt2';
+		@required_index_files = map { "$bwtIdx.$_.$extension" } qw(1 2 3 4 rev.1 rev.2);
+		$chkFi = $required_index_files[-1];
+	}elsif ($MapperProg==2){$chkFi = $REF.".pac";
 	} elsif ($MapperProg == 3){$chkFi = $REF.$mini2IdxFileSuffix;
 	} elsif ($MapperProg == 4){$chkFi = $REF.$kmaIdxFileSuffix.".seq.b";
 	}
 	my $dbCmd ="";
-	$dbCmd .= "if [ ! -s $chkFi ];then \n";
+	my $missing_test = @required_index_files
+		? join(' || ', map { "[ ! -s $_ ]" } @required_index_files)
+		: "[ ! -s $chkFi ]";
+	$dbCmd .= "if $missing_test; then \n";
 	$dbCmd .= "echo \"Building index for mapper $MapperProg\"\n";
 	if ($MapperProg==1){
 		my $bwt2Bin = getProgPaths("bwt2");
 		$dbCmd .= $bwt2Bin."-build ";
 		$dbCmd .= " --large-index "if ($lrgDB);
 		$dbCmd .= "-q $REF --threads $ncore $bwtIdx\n";
-		if (-s $REF."$bwt2IdxFileSuffix.1.bt2" || -s $REF."$bwt2IdxFileSuffix.1.bt2l"){$dbCmd = "";} #deactivate if already built
+		$dbCmd = "" if (mapperDBbuilt($REF,1));
 	} elsif($MapperProg==2) { 
 		my $bwaBin  = getProgPaths("bwa");
 		$dbCmd .= $bwaBin." index $REF\n";
@@ -356,7 +371,7 @@ sub buildMapperIdx($ $ $ $){
 		$bwtIdx = $REF.$mini2IdxFileSuffix;
 		my $mini2  = getProgPaths("minimap2");
 		$dbCmd .= "$mini2 -t $ncore -H -d $bwtIdx $REF\n";
-		$dbCmd = "" if (-e $bwtIdx);
+		$dbCmd = "" if (-s $bwtIdx);
 	} elsif ($MapperProg==4){ 			
 		$bwtIdx = $REF.$kmaIdxFileSuffix;
 		my $kmaBin = getProgPaths("kma");
@@ -364,6 +379,9 @@ sub buildMapperIdx($ $ $ $){
 	}
 
 	$dbCmd .= "fi\n" unless ($dbCmd eq "");
+	if ($MapperProg == 1 && $dbCmd eq "") {
+		$chkFi = -s "$bwtIdx.rev.2.bt2l" ? "$bwtIdx.rev.2.bt2l" : "$bwtIdx.rev.2.bt2";
+	}
 	#die "$dbCmd\n";
 	#my $jobN = "_ASDB$JNUM"; my $tmpCmd;
 	#($jobN, $tmpCmd) = qsubSystem($logDir."BAM2CRAMxtra.sh",$dbCmd,1,"10G",$jobN,"","",1,[],\%QSBopt);
@@ -392,26 +410,17 @@ sub inputFmtSpades($ $ $ $ $){
 			$sprds .= " ${peTerm}".($i+1) ."-s $singl[$i]";
 		}
 	} else {
-		open O,">$logDir/spadesInput.yaml";
+		open O,">$logDir/spadesInput.yaml" or die "Can't write $logDir/spadesInput.yaml\n";
 		print O "  [\n      {\n        orientation: \"fr\",\n        type: \"paired-end\",\n        left reads: [\n";
-		for (my $i =0; $i<@p2;$i++){
-			next if ($p1[$i] eq ""); #use p1 as guide here..
-			if (($i+1) == @p2){	print O "          \"$p1[$i]\"\n";	} else { print O "          \"$p1[$i]\",\n";}
-		}
+		my @valid_pairs = grep { $p1[$_] ne "" } 0..$#p1;
+		print O join(",\n", map { "          \"$p1[$_]\"" } @valid_pairs), "\n";
 		print O "     ],\n        right reads: [\n";
-		for (my $i =0; $i<@p1;$i++){
-			next if ($p1[$i] eq "");
-			if (($i+1) == @p1){	print O "          \"$p2[$i]\"\n";	} else { print O "          \"$p2[$i]\",\n";}
-			#print O "          \"$p2[$i]\"\n";
-		}
+		print O join(",\n", map { "          \"$p2[$_]\"" } @valid_pairs), "\n";
 		print O "       ]\n      }";
-		if (@singl > 0){
+		my @valid_singletons = grep { $_ ne "" } @singl;
+		if (@valid_singletons > 0){
 			print O ",\n      {\n        type: \"single\",\n        single reads: [\n";
-			for (my $i=0;$i<@singl;$i++){
-			next if ($singl[$i] eq "");
-				if (($i+1) == @singl){	print O "          \"$singl[$i]\"\n";	} else { print O "          \"$singl[$i]\",\n";}
-				#print O  "          \"$singl[$i]\"\n";
-			}
+			print O join(",\n", map { "          \"$_\"" } @valid_singletons), "\n";
 			print O "       ]\n      }";
 		}
 		#end of yaml file
@@ -431,7 +440,9 @@ sub inputFmtSpades($ $ $ $ $){
 	@p2 = grep !/^$/, @p2;
 	@singl = grep !/^$/, @singl;
 
-	if (@p1 != @p2 || @p1 != @singl){print "Unequal paired read array lengths arrays for Spades\np1:@p1\np2:@p2\nsingle:@singl\n"; exit(2);}
+	die "Unequal paired read array lengths for MEGAHIT\np1:@p1\np2:@p2\n"
+		if (@p1 != @p2);
+	die "No read inputs supplied to MEGAHIT\n" if (!@p1 && !@singl);
 	my $sprds = "";
 	
 	if (@p1 > 0){ 
@@ -461,15 +472,22 @@ sub jgi_depth_cmd{
 	my $comBAM = "";
 	my $isCram=0;
 	foreach my $DDI (@dirSS){
-		if ( $DDI =~ m/\/$/ ||  $DDI !~ m/bam$/ ){
-			my $SmplNm = `cat $DDI/mapping/done.sto`;#$SmplNm =~ s/-smd.bam\n?//;
+		if (-f $DDI && $DDI =~ /\.(?:bam|cram)$/i) {
+			$isCram=1 if ($DDI =~ /\.cram$/i);
+			$comBAM .= "$DDI ";
+		} else {
+			$DDI =~ s{/$}{};
+			my $marker = "$DDI/mapping/done.sto";
+			die "jgi_depth_cmd:::Missing mapping marker $marker\n" unless (-s $marker);
+			open my $marker_fh, '<', $marker or die "Cannot read $marker: $!\n";
+			my $SmplNm = <$marker_fh>;
+			close $marker_fh;
 			chomp $SmplNm;
 			my $tbam = "$DDI/mapping/$SmplNm";
-			if (!-e $tbam){$isCram=1;$tbam =~ s/\.bam/\.cram/;}
-			die "jgi_depth_cmd:::Can't find either bam nor cram at $DDI\n" unless (-e $tbam);
+			if (!-s $tbam && $tbam =~ /\.bam$/){(my $cram = $tbam) =~ s/\.bam$/.cram/; $tbam = $cram if (-s $cram);}
+			die "jgi_depth_cmd:::Can't find a non-empty BAM or CRAM at $DDI\n" unless (-s $tbam);
+			$isCram=1 if ($tbam =~ /\.cram$/i);
 			$comBAM .= "$tbam ";
-		} else {
-			$comBAM .= "$DDI ";
 		}
 	}
 	#my $comBAM = join("/mapping/Align_ment-smd.bam ",@dirSS);
@@ -481,6 +499,7 @@ sub jgi_depth_cmd{
 	}
 
 	my $covCmd = "";
+	my @temporary_bams;
 	$covCmd .= "rm -f $out.jgi.*\n";
 	if ($isCram){
 		die "jgi_depth_cmd:::No reference Fasta given for @dirSS\n" if ($refFA eq "");
@@ -492,14 +511,17 @@ sub jgi_depth_cmd{
 			my $tmpBam = "$out.jgi.tmp.$i.bam";
 			$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $splSS[$i] > $tmpBam\n";
 			$comBAM .= "$tmpBam ";
+			push @temporary_bams, $tmpBam;
 		}
 	}
 	$covCmd .= $jgiActivate; # conda activation after samtools, before jgi
 	$covCmd .= $jgiBin;
 	#--pairedContigs $out.jgi.pairs.sparse
 	$covCmd .= " --outputDepth $out.jgi.depth.txt  --percentIdentity $perID  $comBAM\n";
+	$covCmd .= "test -s $out.jgi.depth.txt\n";
+	$covCmd .= "rm -f ".join(" ", @temporary_bams)."\n" if (@temporary_bams);
 	#$covCmd .= "gzip $out.jgi*\n";
-	if (-e "$out.jgi.depth.txt"){$covCmd="";}
+	if (-s "$out.jgi.depth.txt"){$covCmd="";}
 
 	#$covCmd .= "gzip $nxtBAM.jgi*\n";
 	return $covCmd;
@@ -523,5 +545,7 @@ sub createGapFillopt($ $ $){
 	$opt .= $line;
  }
  #print $opt."\n";
- open O,">",$ofile; print O $opt; close O;
+	 open O,">",$ofile or die "Cannot write GapFiller options $ofile: $!\n";
+	 print O $opt;
+	 close O or die "Cannot close GapFiller options $ofile: $!\n";
 }

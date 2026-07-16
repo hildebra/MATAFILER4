@@ -23,9 +23,12 @@ GetOptions(
 	"cores=i" => \$numCor,
 	"MGStaxFile=s" => \$MGStaxF,
 	
-);
+) or die "Invalid markersPerMGS.pl options\n";
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
 die "-GCd needs to be specified!\n" if ($GCdir eq "");
+die "-MGset must be GTDB or FMG\n" unless $useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG";
+die "-cores must be a positive integer\n" unless $numCor > 0;
 
 
 #dir in GCdir where marker genes are stored..
@@ -69,12 +72,13 @@ while (my $line = <$I>){
 	next if ($MGS eq "?");
 	$mgsCnt++;
 	#die "$spl[0]  $spl[5]\n";
-	my $maxCat = scalar(@MGcats)+22;
-	for (my $i=22; $i < $maxCat; $i++){
-		next unless defined $spl[$i];
-		my @spl2 = split/,/,$spl[$i];
-		foreach my $gene (@spl2){
-			$MGinMGS{$MGS}{$i}{$gene} ++;
+		my $maxCat = scalar(@MGcats)+22;
+		for (my $i=22; $i < $maxCat; $i++){
+			next unless defined $spl[$i];
+			my @spl2 = split/,/,$spl[$i];
+			foreach my $gene (@spl2){
+				next unless length $gene;
+				$MGinMGS{$MGS}{$i - 22}{$gene} ++;
 		}
 		#print "$spl[$i]  ";
 	}
@@ -99,8 +103,11 @@ print O "MGS\t" . join("\t",@MGcats)."\n";
 foreach my $MGS (@MGSids){
 	print O "$MGS";
 	for (my $i=0; $i < (@MGcats); $i++){ 
-		my @genes = keys %{$MGinMGS{$MGS}{$i}};
-		next unless(scalar(@genes));
+		my @genes = exists($MGinMGS{$MGS}{$i}) ? sort keys %{$MGinMGS{$MGS}{$i}} : ();
+		if (!@genes) {
+			print O "\t";
+			next;
+		}
 		$totgenes += scalar(@genes);
 		$catPres++;$cntCatPres+= scalar(@genes);
 		$cntPerCat[$i] += scalar(@genes);
@@ -121,8 +128,9 @@ foreach my $MGS (@MGSids){
 	$totMGS++;
 }
 close O;
+die "No MGS with marker genes found in $MAGrep\n" unless @MGSids;
 for (my $i=0; $i < (@MGcats); $i++){ 
-	$cntPerCat[$i] /=scalar(@MGSids);
+	$cntPerCat[$i] /= scalar(@MGSids);
 }
 
 open Ox,">$outDir/MarkerGeneStats.txt" or die $!;
@@ -137,7 +145,8 @@ for (my $i=0; $i < (@MGcats); $i++){
 	print int(10*$cntPerCat[$i])/10 . " ";
 }
 
-print "Done, on average ". int($totgenes/$totMGS+0.5) ." genes in $totMGS MGS, ". int(100*$totgenes/$totMGS/scalar(@MGcats)+0.5)/100 ." genes per category, " . int(100*$cntCatPres/$catPres+0.5)/100 . " if gene present. Wrote MGs in MGS to $outFile\n";
+my $present_average = $catPres ? int(100*$cntCatPres/$catPres+0.5)/100 : 0;
+print "Done, on average ". int($totgenes/$totMGS+0.5) ." genes in $totMGS MGS, ". int(100*$totgenes/$totMGS/scalar(@MGcats)+0.5)/100 ." genes per category, $present_average if gene present. Wrote MGs in MGS to $outFile\n";
 print "Found $geneAss2MGS genes assigned to MGS clustering, $geneNotAss2MGS genes ambigous and removed\n";
 
 
@@ -203,6 +212,7 @@ my $replTax =0;
 foreach my $MGSl (keys %newMGStax){
 	#$MGSl = "MGS.1";
 	#print "$MGSl  : $MGStax{$MGSl}  \n";
+	next unless exists $MGStax{$MGSl};
 	if ($MGStax{$MGSl} =~ m/\?$/){
 		#print "Yep\n";
 		my @cnts = values %{$newMGStax{$MGSl}};
@@ -276,7 +286,8 @@ close O;
 
 
 
-print "\nWrote $link2MGS / $wrLCA (" . int($link2MGS / $wrLCA * 1000+0.5)/10 . "%) LCA keys with MGS link, $ambGenes ambigous, $dirtGene fuzzy.\n$MGSatSpecLvl/". scalar(keys%MGStax) . " MGS at species level. \nFound $LCAentries genes total in $LCAfiles .LCA files, $TaxTakenGene skipped due to conflicts with MGS tax, used $LCAused LCA assigned genes.\n$outFile2\n";
+my $linked_percent = $wrLCA ? int($link2MGS / $wrLCA * 1000+0.5)/10 : 0;
+print "\nWrote $link2MGS / $wrLCA ($linked_percent%) LCA keys with MGS link, $ambGenes ambigous, $dirtGene fuzzy.\n$MGSatSpecLvl/". scalar(keys%MGStax) . " MGS at species level. \nFound $LCAentries genes total in $LCAfiles .LCA files, $TaxTakenGene skipped due to conflicts with MGS tax, used $LCAused LCA assigned genes.\n$outFile2\n";
 
 
 print "Starting rtk tax sumup..\n";
@@ -292,4 +303,3 @@ systemW $cmd;
 
 
 print "Done with calculating abundances..\n";
-

@@ -15,10 +15,12 @@ sub evalCurMGS;
 #v0.1: adopt .core MGS files to get additional info for sorting genes by importance
 #v0.11: 9.2.24: retain more genes/MGS
 #v0.12: 11.2.24: adopted to weighted multiBin scores; more subs to make script more modifiable
-my $version = 0.12;
+#v0.13: flush the final MGS and handle marker-free groups safely
+my $version = 0.13;
 
 
 # set up some base variables
+die "Usage: $0 GC-dir MGS-file GTDB|FMG mode\n" unless @ARGV == 4;
 my $rareBin = getProgPaths("rare");
 my $GCd = $ARGV[0];
 my $MGSfile = $ARGV[1];
@@ -111,6 +113,7 @@ while (my $line = <I>){
 		my $retS = evalCurMGS($MGS);
 		print O $retS;
 	}
+	die "Malformed MGS row: $line\n" unless @spl >= 6 && defined $spl[1] && length $spl[1];
 	my $gene = $spl[1];
 	#push @genes,$gene; 
 	next if (exists($markers{$gene}));
@@ -125,6 +128,7 @@ while (my $line = <I>){
 	
 
 }
+print O evalCurMGS("") if $curMGS ne "";
 close O;
 close I;
 #report that all went fine
@@ -147,7 +151,7 @@ sub evalCurMGS{
 	#my $medMCp = medianArray(values %multiCp);	my $avgMCp = meanArray([values %multiCp]);
 	my $medMBi = medianArray(values %multiBin);	my $avgMBi = meanArray([values %multiBin]);
 	my $q75MBi =quantileArray(0.75,values %multiBin); 
-	my $q75MBiM =quantileArray(0.75,values %mBinMrks);
+	my $q75MBiM = @mrks ? quantileArray(0.75,values %mBinMrks) : $q75MBi;
 	my $q75MBiMF = $q75MBiM;
 	if ($q75MBiMF > 2.2){$q75MBiMF=2.2;print "Warning: very high markerG multibin: $q75MBiM\n";}
 	foreach my $gn (@mrks){
@@ -157,12 +161,17 @@ sub evalCurMGS{
 			next;
 		} 
 		$finalList{$gn} =  scalar(keys %finalList);
-		$avgOcc += $geneOcc{$gn};
+		$avgOcc += defined($geneOcc{$gn}) ? $geneOcc{$gn} : 0;
 		$mrkCnt++;
 		$maxMocc = $markers{$gn} if ($markers{$gn} > $maxMocc);
 		$minMocc = $markers{$gn} if ($markers{$gn} < $minMocc);
 	}
-	$avgOcc /= $mrkCnt; 
+	if ($mrkCnt) {
+		$avgOcc /= $mrkCnt;
+	} else {
+		my @known_occ = map { $geneOcc{$_} } grep { defined $geneOcc{$_} } keys %occ;
+		$avgOcc = @known_occ ? meanArray(\@known_occ) : 1;
+	}
 	my $avgOcc2 = $avgOcc; $avgOcc2 = 1 if ($avgOcc < 1);
 	my @srtedGenes = sort {$occ{$b} <=> $occ{$a}} keys %occ;
 	#make sure lower and upper bound is not unreasonable..
@@ -170,7 +179,7 @@ sub evalCurMGS{
 	my $avgOccL = int($avgOcc2 *0.5); #if ($avgOccL > 4){$avgOccL = 4;} 
 	foreach my $gn (@srtedGenes){
 		if ($multiBin{$gn} > ($q75MBi*1.1) #|| $multiCp{$gn} > $MGSob001
-				|| $geneOcc{$gn} > ($avgOccH) || $geneOcc{$gn} < $avgOccL
+				|| (defined($geneOcc{$gn}) && ($geneOcc{$gn} > $avgOccH || $geneOcc{$gn} < $avgOccL))
 				){
 			next;
 		}
@@ -196,7 +205,6 @@ sub evalCurMGS{
 	$MGScnt++;
 	return $retStr;
 }
-
 
 
 

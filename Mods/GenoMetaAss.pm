@@ -2,6 +2,8 @@ package Mods::GenoMetaAss;
 use warnings;
 #use Cwd 'abs_path';
 use strict;
+use IO::Compress::Gzip ();
+use IO::Uncompress::Gunzip ();
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 
@@ -58,9 +60,9 @@ sub filsizeMB{
 #check if file or file.gz exists
 sub fileGZe{
 	my ($fil) = @_;
-	return 1 if (-e $fil);
-	return 1 if (-e "$fil.gz");
-	return 1 if ($fil =~ m/\.gz$/ && -e substr($fil,0,-3));
+	return 1 if (-s $fil);
+	return 1 if (-s "$fil.gz");
+	return 1 if ($fil =~ m/\.gz$/ && -s substr($fil,0,-3));
 	return 0;
 }
 
@@ -70,6 +72,7 @@ sub fileGZs{
 	my ($fil) = @_;
 	return (-s $fil) if (-e $fil);
 	return ((-s "$fil.gz")*5) if (-e "$fil.gz");
+	return (-s substr($fil,0,-3)) if ($fil =~ m/\.gz$/ && -e substr($fil,0,-3));
 	return 0;
 }
 
@@ -93,7 +96,8 @@ sub prefixFAhd{
 sub gzipwrite{
 	my ($outF,$descr) = @_;
 	$outF .= ".gz" if ( $outF !~ m/\.gz$/);
-	open (my $O, "| gzip -c > $outF") or die "error starting gzip pipe $outF\n$!\n\n";
+	my $O = IO::Compress::Gzip->new($outF)
+		or die "error opening gzip output $outF: $IO::Compress::Gzip::GzipError\n";
 	#open my $O, ':>gzip', $outF or die "error starting gzip pipe $outF\n$!\n\n";
 	#my $pigzBin = getProgPaths("piz");
 	#open (my $O, "| $pigzBin -c > $outF") or die "error starting gzip pipe $outF\n$!";
@@ -125,7 +129,8 @@ sub gzipopen{
 		if (!-e $inF) {$OK=0; if ($dodie){die $msg;} else { print $msg if ($verbose);}
 		} else {
 			#if (!open($ISTR, "$pigzBin -dc $inF |")) {if ($dodie){die $msg;} else {$OK=0; print $msg if ($verbose);}}
-			if (!open($ISTR, "gunzip -c $inF |")) {if ($dodie){die $msg;} else {$OK=0; print $msg if ($verbose);}}
+			$ISTR = IO::Uncompress::Gunzip->new($inF);
+			if (!$ISTR) {if ($dodie){die "$msg$IO::Uncompress::Gunzip::GunzipError\n";} else {$OK=0; print $msg if ($verbose);}}
 		}
 	} else{
 		if (!open($ISTR, "<", "$inF") ) {if ($dodie){die $msg;} else {$OK=0; print $msg if ($verbose);}}
@@ -171,7 +176,8 @@ sub splitFastas($ $ $){
 	#print "$nFiles[-1]\n";
 	if ($num < 2){
 		print "No split required!\n";
-		system "rm -f $nFiles[-1];ln -s  $inF $nFiles[-1]";
+		unlink $nFiles[-1] if (-e $nFiles[-1] || -l $nFiles[-1]);
+		symlink $inF, $nFiles[-1] or die "Can't link $nFiles[-1] to $inF: $!\n";
 		return \@nFiles;
 	}
 	if (-e $nFiles[-1] && -e "$path/$inF2.".($num-1).".$num" && !-e "$path/$inF2.$num.$num"){
@@ -181,18 +187,21 @@ sub splitFastas($ $ $){
 		}
 		return \@nFiles;
 	}
-	system "rm $nFiles[-1]" if (-e $nFiles[-1]);
-	my $protN = `grep -c '^>' $inF`;chomp $protN;
+	unlink $nFiles[-1] or die "Can't remove old split $nFiles[-1]: $!\n" if (-e $nFiles[-1]);
+	open my $count_fh, '<', $inF or die "Can't open FASTA $inF: $!\n";
+	my $protN = 0;
+	while (my $line = <$count_fh>) { $protN++ if ($line =~ /^>/); }
+	close $count_fh;
 	my $pPerFile = int($protN/$num)+10;
-	open I,"<$inF"; 
-	open my $out,">".$nFiles[-1];
+	open I,"<$inF" or die "Can't open FASTA $inF: $!\n";
+	open my $out,">".$nFiles[-1] or die "Can't write FASTA split $nFiles[-1]: $!\n";
 	while (my $l = <I>){
 		if ($l =~ m/^>/){
 			$curCnt++;
 			if ($curCnt > $pPerFile){
 				$fCnt++; close $out; 
 				push(@nFiles,"$path/$inF2.$fCnt.$num");
-				open $out,">$nFiles[-1]";
+				open $out,">$nFiles[-1]" or die "Can't write FASTA split $nFiles[-1]: $!\n";
 				$curCnt=0;
 			}
 		}
@@ -500,40 +509,41 @@ sub renameFastHD($ $ $){ #set a new name for headers in fasta files
 sub renameFastqCnts($ $){ #set a new name for headers in fastq files, using a simple scheme of prefix and just counts afterwards
 	my ($inF,$prefix) = @_;
 	open I,"<$inF" or die "can t open $inF\n";
-	my $cnt  = 0; my $cnt2 = 0;
-	open O,">$inF.tmp"; my $plusSeen = 1;
+	my $cnt  = 0; my $line_in_record = 0;
+	open O,">$inF.tmp" or die "can't open $inF.tmp\n";
 	while (my $l = <I>){
-		if ($l =~ m/^@/ && $plusSeen && $cnt2 >= 4 ){ #$l =~ m/^@/ && 
+		if ($line_in_record == 0){
+			die "Malformed FASTQ record in $inF: expected header, got $l"
+				unless ($l =~ /^@/);
 			print O "@".$prefix."_".$cnt."\n";
-			$cnt ++; $plusSeen=0;$cnt2=0;
-#			print L ">".$prefix."_".$cnt."\t$l";
+			$cnt++;
 		} else {
 			print O $l;
-			$plusSeen=1 if ($l =~ m/^\+\n$/);
 		}
-		$cnt2 ++;
+		$line_in_record = ($line_in_record + 1) % 4;
 	}
+	die "Malformed FASTQ file $inF: incomplete final record\n" if ($line_in_record != 0);
 	close I; close O;
-	system "rm $inF;mv $inF.tmp $inF";
+	rename "$inF.tmp", $inF or die "Can't replace $inF: $!\n";
 }
 
 sub renameFastaCnts($ $ $){ #set a new name for headers in fasta files, using a simple scheme of prefix and just counts afterwards
 	my ($inF,$prefix,$logF) = @_;
 	open I,"<$inF" or die "can t open $inF\n";
 	my $cnt  = 0;
-	open O,">$inF.tmp";
-	open L,">$logF";
+	open O,">$inF.tmp" or die "can't open $inF.tmp\n";
+	open L,">$logF" or die "can't open $logF\n";
 	while (my $l = <I>){
 		if ($l =~ m/^>/){
 			print O ">".$prefix."_".$cnt."\n";
 			print L ">".$prefix."_".$cnt."\t$l";
+			$cnt ++;
 		} else {
 			print O $l;
 		}
-		$cnt ++;
 	}
 	close I; close O; close L;
-	system "rm $inF;mv $inF.tmp $inF";
+	rename "$inF.tmp", $inF or die "Can't replace $inF: $!\n";
 }
 
 sub readClstrRevSmplCtgGenSubset{
@@ -747,11 +757,18 @@ sub readGFF($){
 		if (m/^#/){$sbcnt=1;next;}
 		chomp;
 		$lcnt++;
-		my @spl = split(/\t/);
-		print "readGFF::too short: line $lcnt, $inF\n" unless (@spl > 7);
-		$spl[8] =~ m/^ID=\d+_(\d+)/;
+		my @spl = split(/\t/, $_, -1);
+		if (@spl < 9) {
+			warn "readGFF::too short: line $lcnt, $inF\n";
+			next;
+		}
+		my ($feature_id) = $spl[8] =~ /(?:^|;)ID=\d+_(\d+)(?:;|$)/;
+		unless (defined $feature_id) {
+			warn "readGFF::missing supported ID attribute: line $lcnt, $inF\n";
+			next;
+		}
 		#my $k = ">".$spl[0]."_$1";
-		my $k = $spl[0]."_$1";
+		my $k = $spl[0]."_$feature_id";
 		#print $k;
 		$ret{$k}=$_;
 		$entries++;
@@ -798,8 +815,9 @@ sub getAssemblPath{
 
 sub getAssemblGFF{
 	my $cD = $_[0];
-	my $assmD = getAssemblPath($cD);
 	my $dieOnFail = 1; $dieOnFail = $_[1] if (@_ > 1);
+	my $assmD = getAssemblPath($cD,"",$dieOnFail);
+	return "" if ($assmD eq "");
 
 	my $gffF = "$assmD//genePred/genes.gff";
 	$gffF .= ".gz" if (-e $gffF . ".gz");
@@ -810,7 +828,8 @@ sub getAssemblGFF{
 sub getAssemblContigs{
 	my $cD = $_[0];
 	my $dieOnFail = 1; $dieOnFail = $_[1] if (@_ > 1);
-	my $assmD = getAssemblPath($cD);
+	my $assmD = getAssemblPath($cD,"",$dieOnFail);
+	return "" if ($assmD eq "");
 	my $ctgF = "$assmD/scaffolds.fasta.filt";
 	$ctgF .= ".gz" if (!-e $ctgF && -e "$ctgF.gz");
 	if (!-s $ctgF){print STDERR "getAssemblContigs::Could not find assembly in dir $cD!:\n$ctgF\n";die if ($dieOnFail);}
@@ -923,18 +942,12 @@ sub emptyAssGrpsObj($){
 		$AsGrps{$k}{DiamDeps} = "";
 		$AsGrps{$k}{SeqClnDeps} = "";
 		#print $AsGrps{$k}{CntAimAss} ."\n";
-		#remove tmp dirs
-		$AsGrps{$k}{ClSeqsRm} = "";
-		#copy to final folder
-		@{$AsGrps{$k}{MapCopies}} = ();
-		@{$AsGrps{$k}{AssCopies}} = ();
-		$AsGrps{$k}{MapCopiesNoDel} = [];
 		#filteredSequenceFiles for assembly
 		$AsGrps{$k}{PostAssemblCmd} = "";
 		$AsGrps{$k}{PostClnCmd} = "";
+		$AsGrps{$k}{PostConsCmd} = "";
 		$AsGrps{$k}{AssemblSmplDirs} = "";
 		$AsGrps{$k}{scndMapping} = "";
-		$AsGrps{$k}{ClSeqsRm} = "";
 		#complex hashes replaces FilterSeq1 ..
 		$AsGrps{$k}{CleanSeqs} = {};
 		$AsGrps{$k}{RawSeqs} = {};
@@ -957,29 +970,31 @@ sub resetAsGrps{
 		$AsGrps->{$cAssGrp}{CntMap} = 0;
 		$AsGrps->{$cAssGrp}{CntAss} = 0;
 		$AsGrps->{$cAssGrp}{CntPreAss} = 0;
+		$AsGrps->{$cAssGrp}{CntPreAssMiss} = 0;
+		$AsGrps->{$cAssGrp}{CntPreAssNoPrim} = 0;
+		$AsGrps->{$cAssGrp}{preAsmblDir} = [];
+		$AsGrps->{$cAssGrp}{AssemblSmplDirs} = "";
 		$AsGrps->{$cAssGrp}{BinDeps} = "";
 		$AsGrps->{$cAssGrp}{readDeps} = "";
 		$AsGrps->{$cAssGrp}{scndMapping} = "";
 		$AsGrps->{$cAssGrp}{SeqUnZDeps} = "";
+		# UnzpDeps is copied into readDeps at the start of each pass. Keeping
+		# completed job IDs here makes the next loop depend on stale Slurm jobs.
+		$AsGrps->{$cAssGrp}{UnzpDeps} = "";
 		@{$AsGrps->{$cAssGrp}{FilterSeq1}} = ();
 		@{$AsGrps->{$cAssGrp}{FilterSeq2}} = ();
 		@{$AsGrps->{$cAssGrp}{FilterSeqS}} = ();
 		@{$AsGrps->{$cAssGrp}{ReadTec}} = ();
-		@{$AsGrps->{$cAssGrp}{MapSupCopies}} = ();
 		$AsGrps->{$cAssGrp}{CleanSeqs} = {};
 		$AsGrps->{$cAssGrp}{RawSeqs} = {};
 		$AsGrps->{$cAssGrp}{SeqClnDeps} = "";
-		$AsGrps->{$cAssGrp}{AssCopies} = [];
 		$AsGrps->{$cAssGrp}{prodRun} = "";
 		$AsGrps->{$cAssGrp}{AssemblJobName} = "";
 		$AsGrps->{$cAssGrp}{PostAssemblCmd} = "";
-		$AsGrps->{$cAssGrp}{ClSeqsRm} = "";
 		$AsGrps->{$cAssGrp}{MapDeps} = "";
 		$AsGrps->{$cAssGrp}{BinDeps} = "";
-		$AsGrps->{$cAssGrp}{MapCopies} = [];
-		$AsGrps->{$cAssGrp}{MapCopiesNoDel} = [];
-		$AsGrps->{$cAssGrp}{nothing} = "";
 		$AsGrps->{$cAssGrp}{PostClnCmd} = "";
+		$AsGrps->{$cAssGrp}{PostConsCmd} = "";
 		$AsGrps->{$cAssGrp}{CSfinJobName} = "";
 	}
 }
@@ -1055,7 +1070,15 @@ sub getDirsPerAssmblGrp{
 sub resolve_path($){
 	my ($inP) = @_;
 	return "" if ($inP eq "");
-	$inP =~ s/\$([A-Z0-9_]*)/$ENV{$1}/g;
+	my $originalPath = $inP;
+	$inP =~ s{
+		\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))
+	}{
+		my $envName = defined($1) ? $1 : $2;
+		die "Environment variable \$$envName used in path '$originalPath' is not set\n"
+			unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
+		$ENV{$envName};
+	}gex;
 	#doesn't work: dir might not exist yet!
 	#$inP = `realpath $inP` ; chomp $inP; $inP .= "/";
 	#if (-d $inP && $inP !~ m/\/$/){$inP .= "/";}
@@ -1072,12 +1095,12 @@ sub is3rdGenSeqTech{
 }
 
 sub checkSeqTech{
-	#ONT,PB,proto,miSeq,GAII
+	#ONT,PB,proto,miSeq,AVITI,GAII
 	my $inT = $_[0];
 	my $msg = "Mapping file";
 	$msg = $_[1] if (@_ > 1);
-	if ($inT ne "" && $inT ne "ONT"&& $inT ne "ill"&& $inT ne "hiSeq" && $inT ne "454" && $inT ne "SLR" && $inT ne "PB" && $inT ne "proto" && $inT ne "miSeq" && $inT ne "GAII" && $inT ne "GAII_solexa"){
-		die "$msg: Can't recognize SeqTech: \"$inT\"\nHas to be one of \"ONT\",\"PB\", \"proto\",\"SLR\", \"ill\", \"miSeq\", \"hiSeq\", \"GAII\",\"GAII_solexa\" or \"\"\n\n";
+	if ($inT ne "" && $inT ne "ONT"&& $inT ne "ill"&& $inT ne "hiSeq" && $inT ne "454" && $inT ne "SLR" && $inT ne "PB" && $inT ne "proto" && $inT ne "miSeq" && $inT ne "AVITI" && $inT ne "GAII" && $inT ne "GAII_solexa"){
+		die "$msg: Can't recognize SeqTech: \"$inT\"\nHas to be one of \"ONT\",\"PB\", \"proto\",\"SLR\", \"ill\", \"miSeq\", \"AVITI\", \"hiSeq\", \"454\", \"GAII\",\"GAII_solexa\" or \"\"\n\n";
 	}
 }
 
@@ -1487,11 +1510,17 @@ sub systemW{
 	my $killOnDead = 1;
 	$killOnDead = $_[1] if (@_ > 1);
 	$cmddd = "set -e\nulimit -c 0;\n$cmddd"; #make sure only single line excecuted.. (and not a huge core dump)
-	my $stat= system $cmddd;
+	my $stat= system('bash', '-o', 'pipefail', '-c', $cmddd);
 	#can use $? also instead for status
 	if ($stat){
-		print "system call \n$cmddd\nfailed with code $stat.\n";
-		exit($?) if ($killOnDead);
+		my $detail = $stat == -1
+			? "could not execute: $!"
+			: ($stat & 127)
+				? "terminated by signal ".($stat & 127)
+				: "exit code ".($stat >> 8);
+		my $message = "system call \n$cmddd\nfailed ($detail).\n";
+		die $message if ($killOnDead);
+		warn $message;
 	}
 	#chomp $stat;
 	return $stat;
@@ -1536,4 +1565,3 @@ sub writeFasta{
 }
 
 
- 

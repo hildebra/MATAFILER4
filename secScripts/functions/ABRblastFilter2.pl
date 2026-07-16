@@ -1,14 +1,22 @@
 #use strict;
 #use warnings;
 use Mods::TamocFunc qw(sortgzblast uniq);
+use Mods::GenoMetaAss qw(gzipopen);
+use Mods::IO_Tamoc_progs qw(getProgPaths);
+use File::Basename qw(dirname);
+use File::Path qw(make_path);
 #use List::MoreUtils qw(uniq);
 use strict; 
-my $ardbfile = "/g/bork1/forslund/tara_resistome/ardb.tabs.parsed";
-my $mapfile = "/g/bork1/forslund/tara_resistome/ardb_and_reforg_mapping";
-my $besthitfile = "/g/bork1/forslund/tara_resistome/ardb_vs_reforg9f.overlap90shortest_famthres_or_symbol.sorted.besthit";
-my $outputfile = $ARGV [1]; # "/g/bork1/forslund/tara_resistome/test.gz";
-my $outputfilecats = $ARGV [2]; # "/g/bork1/forslund/tara_resistome/testCats.gz";
-my $inputfile = $ARGV [0]; # "/g/scb/bork/hildebra/Tamoc/FinSoil/Sample_AV110_4/diamond/dia.ABR.blast.gz";
+die "Usage: $0 <blast.gz> <gene-output> <category-output> [ABR-database-dir]\n" unless @ARGV >= 3;
+my ($inputfile, $outputfile, $outputfilecats, $dbdir) = @ARGV;
+$dbdir //= getProgPaths('ABRfors_path_DB');
+$dbdir =~ s{/+$}{};
+my $ardbfile = "$dbdir/ardb.tabs.parsed";
+my $mapfile = "$dbdir/ardb_and_reforg_mapping";
+my $besthitfile = "$dbdir/ardb_vs_reforg9f.overlap90shortest_famthres_or_symbol.sorted.besthit";
+for my $required ($inputfile, $ardbfile, $mapfile, $besthitfile) {
+	die "Required ABR input is missing or empty: $required\n" unless -s $required;
+}
 
 
 
@@ -17,9 +25,8 @@ $inputfile = sortgzblast($inputfile);
 # die $inputfile."\n";
  
  
-$outputfilecats =~ m/^(.*\/)[^\/]+$/;
-my $outD = $1;
-system "mkdir -p $outD" unless (-d $outD);
+my $outD = dirname($outputfilecats);
+make_path($outD) unless -d $outD;
  
 #reads ardb tabs
 my %ssym = (); #cat 1
@@ -27,8 +34,8 @@ my %scat = (); #cat 2
 my %sthres = (); #cat 3
 
 #read CAT DB
-open (FH, $ardbfile);
-while (<FH>) {
+open my $ardb_fh, '<', $ardbfile or die "Cannot open $ardbfile: $!\n";
+while (<$ardb_fh>) {
 
     my $aLine = $_;
     chomp ($aLine);
@@ -40,22 +47,22 @@ while (<FH>) {
     $scat {$words [0]}{uc ($words [3])} = "";
     $sthres {$words [0]}{uc ($words [7])} = "";
 }
-close (FH);
+close $ardb_fh or die "Cannot close $ardbfile: $!\n";
 
-open (FH, $mapfile);
+open my $map_fh, '<', $mapfile or die "Cannot open $mapfile: $!\n";
 my %sym2drug = (); #specific drug resistance
-while (<FH>) {
+while (<$map_fh>) {
     my $aLine = $_;
     chomp ($aLine);
     my @words = split (/\t/, $aLine);
     $sym2drug {$words [1]} = $words [3];
 }
-close (FH);
+close $map_fh or die "Cannot close $mapfile: $!\n";
 
 
 #read in ID cutoffs
-open (FH, $besthitfile); # besthit file
-while (<FH>) {
+open my $besthit_fh, '<', $besthitfile or die "Cannot open $besthitfile: $!\n";
+while (<$besthit_fh>) {
 	my $aLine = $_;
 	chomp ($aLine);
 	my @words = split (/\t/, $aLine);
@@ -70,14 +77,15 @@ while (<FH>) {
 	}
 }
 
-close (FH);
+close $besthit_fh or die "Cannot close $besthitfile: $!\n";
 
-open (FH2, " > $outputfile");
-open (FH3, " > $outputfilecats");
-open (FH, "zcat $inputfile |") or die "Can't opne input file $inputfile\n";
+open my $gene_out, '>', $outputfile or die "Cannot open $outputfile: $!\n";
+open my $cat_out, '>', $outputfilecats or die "Cannot open $outputfilecats: $!\n";
+my ($blast_fh, $blast_ok) = gzipopen($inputfile, 'ABR blast input', 1);
+die "Cannot open ABR blast input $inputfile\n" unless $blast_ok;
 my $quOld = "";
 my %wordv1; my %wordv2;my ($okhit,$retstr,$jnLine) ;
-while (<FH>) {
+while (<$blast_fh>) {
 	my $aLine = $_;
 	chomp ($aLine);
 
@@ -90,8 +98,8 @@ while (<FH>) {
 		($okhit,$retstr,$jnLine) = workwords(\%wordv1,\%wordv2);
 		
 		if ($okhit){
-			print FH2 "$jnLine\n";
-			print FH3 "$retstr";
+			print {$gene_out} "$jnLine\n";
+			print {$cat_out} "$retstr";
 		}
 		
 		undef %wordv2; undef %wordv1;
@@ -107,15 +115,15 @@ while (<FH>) {
 ($okhit,$retstr,$jnLine) = workwords(\%wordv1,\%wordv2);
 
 if ($okhit){
-	print FH2 "$jnLine\n";
-	print FH3 "$retstr";
+	print {$gene_out} "$jnLine\n";
+	print {$cat_out} "$retstr";
 }
-close (FH);
-close (FH2);
-close (FH3);
+close $blast_fh or die "Cannot finish reading $inputfile: $!\n";
+close $gene_out or die "Cannot close $outputfile: $!\n";
+close $cat_out or die "Cannot close $outputfilecats: $!\n";
 
-
-system "touch $inputfile.stone";
+open my $stone, '>', "$inputfile.stone" or die "Cannot create $inputfile.stone: $!\n";
+close $stone or die "Cannot close $inputfile.stone: $!\n";
 
 
 
@@ -135,8 +143,9 @@ sub combineBlasts($ $){
 			next;
 		}
 		#pair
-		$k =~ s/\/\d$/\/12/;
-		$ret{$k} = $bl1{$k};
+		my $out_key = $k;
+		$out_key =~ s/\/\d$/\/12/;
+		$ret{$out_key} = [@{$bl1{$k}}];
 		my @hit1 = @{$bl1{$k}};
 		my @hit2 = @{$bl2{$k}};
 		
@@ -153,11 +162,11 @@ sub combineBlasts($ $){
 		#overlap?
 		my $overlap = 0;
 		if ($sbss1[1] > $sbss2[0]){ $overlap= ( $sbss1[1] - $sbss2[0]); }#die "${$ret{$k}}[3] = $hit1[3] + $hit2[3] - ( $sbss1[1] - $sbss2[0])\n";}
-		${$ret{$k}}[3] = $hit1[3] + $hit2[3] - $overlap; #ALlength
+		${$ret{$out_key}}[3] = $hit1[3] + $hit2[3] - $overlap; #ALlength
 		#print "$sbss1[1] > $sbss2[0] $sbss1[0]  ${$ret{$k}}[3] $overlap\n";
-		${$ret{$k}}[2] = ($hit1[2] + $hit2[2] ) /2;#%id
-		${$ret{$k}}[11] = ($hit1[11] + $hit2[11]) * (1- $overlap/($hit1[3] + $hit2[3] ) );#bitscore
-		${$ret{$k}}[10] = ($hit1[10], $hit2[10])[$hit1[10] > $hit2[10]];  # min($hit1[10] + $hit2[10]);
+		${$ret{$out_key}}[2] = ($hit1[2] + $hit2[2] ) /2;#%id
+		${$ret{$out_key}}[11] = ($hit1[11] + $hit2[11]) * (1- $overlap/($hit1[3] + $hit2[3] ) );#bitscore
+		${$ret{$out_key}}[10] = ($hit1[10], $hit2[10])[$hit1[10] > $hit2[10]];  # min($hit1[10] + $hit2[10]);
 		#die "@{$ret{$k}}\n";
 		#print "$k \n@sbss1 @sbss2\n@hit1\n";
 	}
@@ -207,7 +216,7 @@ sub bestBlHit($){
 
 sub workwords(){
 	my ($wh1,$wh2) = @_;
-	if (keys %{$wh2} != 0 && keys %{$wh1}==0){my $tmp = $wh1; $wh2 = $wh1; $wh1 = $tmp;}
+	if (keys %{$wh2} != 0 && keys %{$wh1}==0){my $tmp = $wh1; $wh1 = $wh2; $wh2 = $tmp;}
 	if (keys %{$wh1} == 0){return (0,"");}
 	#1st combine scores
 	my $whX = $wh1;

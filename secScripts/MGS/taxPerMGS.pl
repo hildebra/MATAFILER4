@@ -6,6 +6,7 @@ use warnings; use strict;
 use Mods::Binning qw(readMGSrev );
 
 
+die "Usage: $0 MGS-file gene-catalog-dir output-prefix\n" unless @ARGV == 3;
 my $refMGf = $ARGV[0];
 my $GCd = $ARGV[1];
 my $outF = $ARGV[2];
@@ -15,10 +16,11 @@ my $outF = $ARGV[2];
 my $LCAout="$outF.LCA";
 my $taxout = "$outF.tax";
 
-if (-e $LCAout && -e $taxout){exit(0);}
+if (-s $LCAout && -s $taxout){exit(0);}
 
 my $hr = readMGSrev($refMGf);
 my %MGs = %{$hr};
+my %allMGS = map { $_ => 1 } values %MGs;
 my %tCnt;
 my $krakF = "$GCd/Anno/Tax/krak2.txt"; #krak_0.01.txt
 #my $krakF = "$GCd/Anno/Tax/krak_0.01.txt"; #
@@ -38,41 +40,49 @@ while (<I>){
 }
 close I;
 my %tStat;
-open OL,">$LCAout";
-open OC,">$taxout";
-foreach my $mgs (sort keys %tCnt){
+open OL,">$LCAout" or die "Cannot write $LCAout: $!\n";
+open OC,">$taxout" or die "Cannot write $taxout: $!\n";
+foreach my $mgs (sort keys %allMGS){
 	my $tax=""; my $maxD=0;
+	my $lineage_broken = 0;
 	print OC "$mgs\t";
 	print OL "$mgs\t";
 	for (my $i=0;$i<8;$i++){
-		next unless (exists( $tCnt{$mgs}{$i} ));
+		if ($lineage_broken || !exists($tCnt{$mgs}{$i})) {
+			$tax .= "?;";
+			$lineage_broken = 1;
+			next;
+		}
 		my %curT = %{$tCnt{$mgs}{$i}}; my $tSum=0;
-		my $max=0;my$maxT="";
 		print OC "\t$i";
-		foreach my $t (keys %curT){
+		foreach my $t (sort keys %curT){
 			$tSum+=$curT{$t};
 			print OC "$t:$curT{$t};";
-			if ($curT{$t} > $max){
-				$max = $curT{$t};
-				$maxT = $t;
-			}
 		}
-		next if ($tSum < 100);
+		my ($maxT) = sort { $curT{$b} <=> $curT{$a} || $a cmp $b } keys %curT;
+		my $max = defined($maxT) ? $curT{$maxT} : 0;
+		if ($tSum < 100) {
+			$tax .= "?;";
+			$lineage_broken = 1;
+			next;
+		}
 		if (($max/$tSum) > 0.8){
 			$tax .= "${maxT};";
 			$maxD=$i;
 		} else {
 			$tax .= "?;";
+			$lineage_broken = 1;
 		}
 	}
 	$tStat{$maxD}++;
 	print OC "\n";
 	print OL "$tax\n";
 }
+close OL or die "Cannot close $LCAout: $!\n";
+close OC or die "Cannot close $taxout: $!\n";
 #print stats how many LCA levels were hit by MGS:
 foreach my $d (sort(keys%tStat)){
 	print "$d:$tStat{$d}\t";
 }
 print "\n";
-
 

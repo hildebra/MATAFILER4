@@ -44,6 +44,12 @@ Supported systems in the documentation and source are Slurm, SGE/qsub and LSF/bs
 
 `-killDepNever 1` can remove Slurm jobs stuck in dependency states, but use it only when this matches your local scheduler policy.
 
+Sites where compute nodes do not normally have outbound network access can set
+`netQueue` in `config.txt` to a network-enabled queue or Slurm partition. Code
+that sets `useNetQueue` on its submission options will use that queue and the
+configured `longTime` wall time for the next job. If `netQueue` is empty or
+unset, MATAFILER4 falls back to `mediumQueue`.
+
 ## Database setup
 
 GTDB and GTDB-Tk databases are used for MAG and MGS-related classification. The installer provides:

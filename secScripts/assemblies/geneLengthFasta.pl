@@ -1,34 +1,29 @@
 #!/usr/bin/env perl
-use Mods::GenoMetaAss qw(gzipwrite gzipopen readFasta);
+use strict;
+use warnings;
+use Mods::GenoMetaAss qw(gzipopen);
 
-my ($inF,$outF) = @ARGV;
+die "Usage: $0 <genes.fasta[.gz]> <output-lengths.tsv>\n" unless @ARGV == 2;
+my ($input, $output) = @ARGV;
+my ($in, $ok) = gzipopen($input, 'gene FASTA', 1);
+die "Cannot open $input\n" unless $ok && $in;
+open my $out, '>', $output or die "Cannot open $output: $!\n";
 
-my ($I,$OK) = gzipopen($inF,"gene fasta",1);
-die "Can't open $inF" unless ($OK);
-open O,">$outF" or die "Can;t open output DB length file $outF\n";
-my $seqL=0;my $hd="";
-while (my $line = <$I>){
-	chomp $line;
-	#print $line."\n";;
-	if ($line =~ m/^>(\S+)/){
-		#next if ($seqL==0);
-		
-		print O "$hd\t".$seqL."\n" unless ($hd eq "");
-		$seqL = 0; $hd = $1;
-		#print $hd."\n";
+my ($id, $length, $records) = ('', 0, 0);
+while (my $line = <$in>) {
+	$line =~ s/[\r\n]+\z//;
+	if ($line =~ /^>(\S+)/) {
+		print {$out} "$id\t$length\n" or die "Cannot write $output: $!\n" if length $id;
+		($id, $length) = ($1, 0);
+		$records++;
 		next;
 	}
-	$seqL += length($line);
+	die "Sequence encountered before first FASTA header in $input\n" unless length $id;
+	$line =~ s/\s+//g;
+	$length += length($line);
 }
-print O "$hd\t".$seqL."\n" ;
-
-
-#my $fr = readFasta($inF,1);
-#my %FA = %{$fr};
-#foreach my $k (keys %FA){
-#	print O "$k\t".length($FA{$k})."\n";
-#}
-
-close O; close $I;
-
+die "No FASTA records found in $input\n" unless $records;
+print {$out} "$id\t$length\n" or die "Cannot write $output: $!\n";
+close $out or die "Cannot close $output: $!\n";
+close $in or die "Cannot close $input: $!\n";
 print "Done\n";

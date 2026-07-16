@@ -8,7 +8,8 @@ use Mods::IO_Tamoc_progs qw( getProgPaths );
 sub readNogKingdom($);
 
 #scaffolds, path to save files (tmp), cores to use
-die "Not enough input args\n" if (@ARGV < 3);
+die "Usage: $0 <scaffolds> <tmp-dir> <kraken-db-dir> <diamond-db-dir> <cores>\n"
+	unless @ARGV == 5;
 my ($inScaff, $tmpPath, $krakenDBDirGlobal, $DiaDBdir, $numCore) = @ARGV;
 
 my $krkBin = getProgPaths("kraken");#"/g/scb/bork/hildebra/DB/kraken/./kraken";
@@ -59,15 +60,20 @@ while (my $line = <I>){
 	chomp $line;
 	my ($Query,$Subject,$id,$AlLen,$mistmatches,$gapOpe,$qstart,$qend,$sstart,$send,$eval,$bitSc) = split /\t/,$line;
 	next if ($eval > 1e-11 || $id < 70);
-	$Subject =~ m/^(\d+)\./; my $taxid = $1;
-	if (!exists $NOGkingd{$taxid}){print "Can't find $taxid in ref tax\n";}
-	my $kgdm = $NOGkingd{$taxid};
-	if ($kgdm==0 || $kgdm==1){
-		unless (exists ($refQuerys{$Subject} ) ){
-			$refQuerys{$Query} = 1; $bacCnt++;
+		$Subject =~ m/^(\d+)\./; my $taxid = $1;
+		if (!defined($taxid) || !exists $NOGkingd{$taxid}) {
+			warn "Can't find taxonomy for subject $Subject\n";
+			next;
 		}
-	} else {
-		$EukCnt++;
+		my $kgdm = $NOGkingd{$taxid};
+		if ($kgdm==0 || $kgdm==1){
+			unless (exists ($refQuerys{$Query} ) ){
+				$refQuerys{$Query} = 1; $bacCnt++;
+			}
+		} else {
+			unless (exists $EukQuerys{$Query}) {
+				$EukQuerys{$Query} = 1; $EukCnt++;
+			}
 	}
 	#print "XX";
 }
@@ -123,6 +129,5 @@ sub readNogKingdom($){
 	close I;
 	return %ret;
 }
-
 
 

@@ -226,12 +226,25 @@ sub bam2cram($ $ $ $ $ $){#save further space: convert the bam to cram
 
 	if (!$doCram){return ($ret,"");}
 	$nxtCRAM =~ s/\.bam$/\.cram/;
-	if (!-e $iBAM && -e $nxtCRAM){print "CRAM exists, but no stone set\n"; system "rm -f $nxtCRAM";return $ret;}
+	if (!-e $iBAM && -s $nxtCRAM){
+		$ret .= "$smtBin quickcheck $nxtCRAM\n";
+		$ret .= "touch $stone\n" if ($stone ne "");
+		return ($ret,$nxtCRAM);
+	}
+	# The BAM is commonly produced by an upstream scheduler job in node-local
+	# scratch.  Validate it in the generated job, after the dependency has run;
+	# checking it here rejects valid paths such as $SLURM_LOCAL_SCRATCH/...
+	# while MATAF4 is still constructing the submission plan.
+	$ret .= "if [ ! -s \"$iBAM\" ]; then\n";
+	$ret .= "  echo \"bam2cram: input BAM does not exist or is empty: $iBAM\" >&2\n";
+	$ret .= "  exit 3\n";
+	$ret .= "fi\n";
 	#my $stone = $iBAM;	$stone =~ s/\.bam$/\.cram\.sto/;
 	$ret.="rm -f $nxtCRAM\n" if (-e $nxtCRAM);
 	$ret.="$smtBin view -@ $numCore -T $REF -C -o $nxtCRAM $iBAM\n";
+	$ret.="test -s $nxtCRAM\n$smtBin quickcheck $nxtCRAM\n";
 	$ret.="rm -f $iBAM\n" if ($del);
-	$ret .= "touch $stone\n";
+	$ret .= "touch $stone\n" if ($stone ne "");
 	#die $ret;
 	return ($ret,$nxtCRAM);
 }
@@ -242,6 +255,8 @@ sub cram2bsam{
 	my $ret = "";
 	my $smtBin = getProgPaths("samtools");#"/g/bork5/hildebra/bin/samtools-1.2/samtools";
 	if (!$doBAMSAM){return ($ret,"");}
+	die "cram2bsam: output mode must be 1 (BAM) or 2 (SAM)\n"
+		unless ($doBAMSAM == 1 || $doBAMSAM == 2);
 	if ($doBAMSAM == 2){#SAM output
 		$ret.="$smtBin view -h -@ $numCore -T $REF -o $oBSAM $iCRAM\n";
 	} elsif ($doBAMSAM == 1){
@@ -463,29 +478,35 @@ sub sortgzblast{ #function that checks if the diamond output was already sorted 
 		}
 	}
 	#print $input."\n";
+	my $target = $input;
 	unless ($input =~ m/\.srt\.gz$/){ #do sort (and maybe gz)
 		if ($input =~ m/\.srt$/){
-			$cmd = "gzip $input"; $input .= ".gz";
+			$target = "$input.gz";
+			$cmd = "gzip $input";
 		} elsif ($input =~ m/\.gz$/) { #not sorted, but gz
 			system "mkdir -p $tmpd" unless (-d "$tmpd");
-			my $tmpf = "$tmpd/rawBLast$randstring.bla";
-			$cmd = "zcat $input > $tmpf; sort $tmpf | gzip > $input2.srt.gz; rm -f $input $tmpf; ";
+			$target = "$input2.srt.gz";
+			my $tmpf = "$target.tmp.$randstring";
+			$cmd = "gzip -cd $input | sort | gzip -c > $tmpf\n";
+			$cmd .= "test -s $tmpf\ngzip -t $tmpf\nmv $tmpf $target\nrm -f $input\n";
 			if (!-e $input){die "Wrong file as input provided: $input\n";}
 		} else { #not gz, not sort
-			$cmd = "sort $input > $input.srt; gzip $input.srt; rm $input;";
+			$target = "$input.srt.gz";
+			my $tmpf = "$target.tmp.$randstring";
+			$cmd = "sort $input | gzip -c > $tmpf\n";
+			$cmd .= "test -s $tmpf\ngzip -t $tmpf\nmv $tmpf $target\nrm -f $input\n";
 		}
+	} else {
+		$target = $input;
 	}
 	#die $cmd."\n$input\n";
 	unless ($cmd eq ""){
-		if (system $cmd) { die "$cmd \nfailed\n"; }
+		systemW($cmd);
 	}
-	$input = "$input2.srt.gz";
+	$input = $target;
 	die "Something went wrong in sortgzblast 2\n" if (!-e $input);
 	return $input;
 }
-
-
-
 
 
 

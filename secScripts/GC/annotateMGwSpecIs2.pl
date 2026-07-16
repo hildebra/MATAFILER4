@@ -25,7 +25,8 @@ use Getopt::Long qw( GetOptions );
 
 #.11: reverted some of the drastic gene filtering
 #.12 adapted for Bin_SB folder potentially being different..
-my $version = 0.12;
+#.13 validate inputs and repair MGS assignment/output handling
+my $version = 0.13;
 
 sub readMotuTax; sub fixGTDBtax;
 sub readGene2mlinkage; sub readSpecIids;
@@ -90,8 +91,11 @@ GetOptions(
 	"MGStax=s"   => \$MGStax,
 	"MGset=s"    => \$useGTDBmg,#GTDB or FMG
 	"minGenes=i" => \$minGenes,
-);
+) or die "Invalid annotateMGwSpecIs2.pl options\n";
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "Needs option -GCd $GCd\n" if ($GCd eq "");
+die "Gene-catalog directory not found: $GCd\n" unless -d $GCd;
+die "-cores and -minGenes must be positive\n" unless $BlastCores > 0 && $minGenes > 0;
 
 
 my $speciesLink = "specI_lnks"; my $speciesCutoff = "specI_cutoff";
@@ -106,8 +110,9 @@ if ($useGTDBmg eq "GTDB"){
 }
 my %FMGcutoffs = %{readTabbed3(getProgPaths($speciesCutoff,0),1)};
 my $MGdir = "$GCd/$MGterm/";
-$outD = "$GCd/Anno/Tax/$MGterm/" if ($outD eq "");
-if ($MGSfile ne ""){$outD = "$GCd/Anno/Tax/${MGterm}_MGS/";}
+if ($outD eq "") {
+	$outD = $MGSfile ne "" ? "$GCd/Anno/Tax/${MGterm}_MGS/" : "$GCd/Anno/Tax/$MGterm/";
+}
 my $inSImap = getProgPaths($speciesLink);
 my $GTDBspecI = getProgPaths($speciesGTDB);
 my $SpecID=getProgPaths($speciesDir);#directoy with all 40 SpecI marker genes
@@ -400,8 +405,12 @@ sub readMGS{
 		$meanS += $curS;
 		push(@sizes, $curS);
 	}
-	@sizes = sort @sizes;
-	print "Found ". scalar(keys %MGSlist)." MGS with $taxF/".($taxF+$taxN) ." taxonomies. Mean MGs/MGS: " . $meanS /($taxF+$taxN) . "; median: " . median(@sizes) .". $morethan1/".($only1+$morethan1)." with >1 copy.\n";
+	@sizes = sort { $a <=> $b } @sizes;
+	my $tax_total = $taxF + $taxN;
+	my $copy_total = $only1 + $morethan1;
+	my $mean_markers = $tax_total ? $meanS / $tax_total : 0;
+	my $median_markers = @sizes ? median(@sizes) : 0;
+	print "Found ". scalar(keys %MGSlist)." MGS with $taxF/$tax_total taxonomies. Mean MGs/MGS: $mean_markers; median: $median_markers. $morethan1/$copy_total with >1 copy.\n";
 #die "@sizes\n";
 	
 	#print"T::@{$specIfullTax{MGS0287}}\n";
@@ -416,22 +425,25 @@ sub MGSassign{
 	my $logfile = "$outD/MGS2speci.txt";
 	open OM,">$logfile";
 	my $notAssigned=0; my $assignedMGS =0; my @maxAssi;
-	foreach my $MGS (sort {$speci2MGS{$b} <=> $speci2MGS{$a}} keys %speci2MGS){
+	foreach my $MGS (sort keys %speci2MGS){
 		print OM "$MGS";
 		my @SIsAdd;
 		my $valSI="";my $valStr=0;
 		my $totalAssi =0;
 		my $maxassFrac = 0;
 		foreach my $si (keys %{$speci2MGS{$MGS}}){$totalAssi += $speci2MGS{$MGS}{$si}; }
-		
-		foreach my $si (sort {$speci2MGS{$MGS}{$b} <=> $speci2MGS{$MGS}{$a}} keys %{$speci2MGS{$MGS}}){
+		my @ranked_si = sort {
+			$speci2MGS{$MGS}{$b} <=> $speci2MGS{$MGS}{$a} || $a cmp $b
+		} keys %{$speci2MGS{$MGS}};
+		if (@ranked_si && $speci2MGS{$MGS}{$ranked_si[0]} > 5) {
+			$valSI = $ranked_si[0];
+			$valStr = $speci2MGS{$MGS}{$valSI};
+			$valSI = "" if @ranked_si > 1 && $speci2MGS{$MGS}{$ranked_si[1]} > 0.5 * $valStr;
+		}
+
+		foreach my $si (@ranked_si){
 			 push(@SIsAdd,"$si:$speci2MGS{$MGS}{$si}");
-			 if ($valSI eq "" && $speci2MGS{$MGS}{$si}>5){
-				$valSI = $si;$valStr =$speci2MGS{$MGS}{$si}; 
-			 } elsif ($valStr < 0.5*$speci2MGS{$MGS}{$si}){ #just too ambigous..
-				$valSI = "";
-			 }
-			my $assFrac= $speci2MGS{$MGS}{$si}/$totalAssi;
+			my $assFrac = $totalAssi ? $speci2MGS{$MGS}{$si}/$totalAssi : 0;
 			$maxassFrac = $assFrac if ($assFrac >= $maxassFrac);
 		}
 		push(@maxAssi,$maxassFrac);
@@ -444,7 +456,7 @@ sub MGSassign{
 			print OM "\t?;?;?;?;?;?;?";
 		}
 		print OM "\t".join(",",@SIsAdd)."\n";
-		$Si2MGS{$valSI} = $MGS;
+		$Si2MGS{$valSI} = $MGS if $valSI ne "";
 	}
 	
 	close OM;
@@ -462,7 +474,9 @@ sub MGSassign{
 	my $totMGS = $notAssigned+$assignedMGS;
 	print "Matched ${assignedMGS} of ". ($totMGS)  ." MGS to taxa/specIs: $logfile\n";
 	#some stats on how uniform LCA was..
-	print "Mean max assignments MGS: " . mean(@maxAssi) . " , median: " .median(@maxAssi) ."; pot. chimeric (species level and above): $chimera \n";
+	my $mean_assignment = @maxAssi ? mean(@maxAssi) : 0;
+	my $median_assignment = @maxAssi ? median(@maxAssi) : 0;
+	print "Mean max assignments MGS: $mean_assignment , median: $median_assignment; pot. chimeric (species level and above): $chimera \n";
 	
 	
 	
@@ -920,6 +934,7 @@ sub getCorrs{
 					#this assignment is what I need, now I know this gene is blocked for assignment to other SpecI's
 					$dblAssi++ if (add2geneList($k,$c,$sg));
 					for (my $j=0;$j<@tarGenes;$j++){$tarGenes[$j] += ${$FMGmatrix{ $sg }}[$j] ;}
+					$gcnt++;
 				}
 			}
 		}
@@ -1098,8 +1113,6 @@ sub add2geneList($ $ $){ #assign a gene ($sg) to a speci($k), and its COG ($c)
 	$SpecIgenes2{$k}{$c}=$sg;#set mark to block this MG in this specI...
 	return $ret;
 }
-
-
 
 
 

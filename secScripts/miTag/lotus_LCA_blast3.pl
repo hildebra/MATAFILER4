@@ -8,6 +8,10 @@ use warnings;
 use Mods::GenoMetaAss qw(reverse_complement_IUPAC readFasta systemW writeFasta);
 use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile);
 use Getopt::Long qw( GetOptions );
+use File::Basename qw(basename);
+use File::Copy qw(move);
+use File::Path qw(make_path remove_tree);
+use File::Spec;
 
 
 
@@ -18,6 +22,11 @@ sub merge;
 sub fastq2fna; sub flashed;
 sub rework_tmpLines;
 sub extractReads;
+sub materializeReadInput;
+sub resultExists;
+sub touchFile;
+sub shellQuote;
+sub countLines;
 
 
 
@@ -50,23 +59,36 @@ GetOptions(
 	"config=s" => \$cfgFile, #main MATAFILER config file
 	"keepReads=i"      => \$extractDNA,
 	"maxReadNum=i"      => \$maxRds, #how many reads to actually use in LCA
-	"lengthTolerance=i"	=> \$lengthTolerance, #what fraction needs to align
+	"lengthTolerance=f"	=> \$lengthTolerance, #what fraction needs to align
 	"DBdir=s" => \$DBdir,
 ) or die("Error in command line arguments\n");
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
-die "Needs at least \"dir\", \"simplID\" and \"DBdir\" arguments\n" if ($DBdir eq "" || $inD eq "" || $SmplID eq "");
+die "Needs at least -dir, -smplID and -DBdir arguments\n" if ($DBdir eq "" || $inD eq "" || $SmplID eq "");
+die "Input directory does not exist: $inD\n" unless -d $inD;
+die "Database directory does not exist: $DBdir\n" unless -d $DBdir;
+die "-cores must be a positive integer\n" if $BlastCores < 1;
+die "-pairedRds must be 0, 1, or 2\n" unless $readsRpairs == 0 || $readsRpairs == 1 || $readsRpairs == 2;
+die "-simMode must be 2 (LAMBDA), 3 (SortMeRNA), or 4 (VSEARCH)\n"
+	unless $blMode == 2 || $blMode == 3 || $blMode == 4;
+die "-maxReadNum must be zero or greater\n" if $maxRds < 0;
+die "-lengthTolerance must be between 0 and 1\n" if $lengthTolerance < 0 || $lengthTolerance > 1;
 
 $inD .= "/" unless ($inD =~ m/\/$/);
 #dir to store LCA
 my $outdir = $inD."ltsLCA/";
-if ($tmpD eq ""){
-	$tmpD = "$outdir/tmp/";
-}
-#system "rm -rf $tmpD;mkdir -p $tmpD";
+my $tmpRoot = $tmpD eq "" ? "$outdir/tmp/" : $tmpD;
+$tmpRoot = File::Spec->canonpath(File::Spec->rel2abs($tmpRoot));
+make_path($outdir) unless -d $outdir;
+make_path($tmpRoot) unless -d $tmpRoot;
+my $safeSample = $SmplID;
+$safeSample =~ s/[^A-Za-z0-9_.-]+/_/g;
+$tmpD = File::Spec->catdir($tmpRoot, "lotusLCA_${safeSample}_$$");
+make_path($tmpD);
 
 #dir to store merged reads in
 my $mergeD = $tmpD."flashMerge/";
-system "mkdir -p $mergeD";
+make_path($mergeD);
 
 
 #extractReads("/tmp/MATAFILER//FS2ITS//LCA/flashMerge/SSU.extendedFrags.fna","/g/scb/bork/hildebra/Tamoc/SoiSciReb/FS2/ribos/ltsLCA//SSUriboRun_bl.hiera.txt");
@@ -74,12 +96,12 @@ system "mkdir -p $mergeD";
 
 setConfigFile($cfgFile);
 #binaries
-my $flashBin = getProgPaths("flash");#"/g/bork3/home/hildebra/bin/FLASH-1.2.10/flash";
-my $lambdaBin = getProgPaths("lambda");#"/g/bork3/home/hildebra/dev/lotus//bin//lambda/lambda";
-my $vsearchBin= getProgPaths("vsearch");
+my $flashBin = $readsRpairs ? getProgPaths("flash") : "";
+my $lambdaBin = $blMode == 2 ? getProgPaths("lambda") : "";
+my $vsearchBin= $blMode == 4 ? getProgPaths("vsearch") : "";
 #my $lambdaIdxBin = $lambdaBin."_indexer";#getProgPaths("");#"/g/bork3/home/hildebra/dev/lotus//bin//lambda/lambda_indexer";
 my $LCAbin = getProgPaths("LCA");#"/g/bork3/home/hildebra/dev/C++/LCA/./LCA";
-my $smrnaBin = getProgPaths("sortmerna");
+my $smrnaBin = $blMode == 3 ? getProgPaths("sortmerna") : "";
 
 
 my @DBn = ("LSUdbFA","LSUtax","SSUdbFA","SSUtax","ITSdbFA","ITStax","PR2dbFA","PR2tax");
@@ -88,8 +110,7 @@ my @LCAdbs = @{$LCAar};
 #reduce to files
 for (my $i=0;$i<@LCAdbs;$i++){
 	next if ($LCAdbs[$i] eq "");
-	$LCAdbs[$i] =~ m/\/([^\/]+)$/;
-	$LCAdbs[$i] = $1;
+	$LCAdbs[$i] = basename($LCAdbs[$i]);
 }
 
 #datbases
@@ -108,133 +129,108 @@ unless ($LCAdbs[6] eq ""){$PR2dbFA = "$DBdir/$LCAdbs[6]";$PR2tax = "$DBdir/$LCAd
 #my $PR2tax = "$DBdir/PR2_taxonomy.txt";
 #die "$SSUdbFA\n";
 #some cleanups (includes prev runs)
-system "rm -f  $inD/*.blast $outdir/*riboRun_bl"; #$inD/reads_SSU.fq $inD/reads_LSU.fq $inD/reads_ITS.fq
+unlink $_ for (glob("$inD/*.blast"), glob("$outdir/*riboRun_bl"));
 
-system "mkdir -p $outdir" unless (-e $outdir);
-
-my $inputOK=1; #flag
-my $curStone = ""; #flag file for each subpart (SSU,LSU,ITS)
-my @allInFa;my @allSingleIn= ($inD."reads_LSU.fq",$inD."reads_ITS.fq",$inD."reads_SSU.fq");
-if ($readsRpairs ==0){
-	@allInFa = @allSingleIn;
-} else {
-	@allInFa = ($inD."reads_LSU.r1.fq",$inD."reads_LSU.r2.fq",$inD."reads_ITS.r1.fq",$inD."reads_ITS.r2.fq",$inD."reads_SSU.r1.fq",$inD."reads_SSU.r2.fq");
+my @tags=("SSU","LSU");
+my $allAlreadyComplete = -e "$outdir/Assigned.sto";
+for my $tag (@tags){
+	$allAlreadyComplete &&= -e "$outdir/${tag}_ass.sto"
+		&& resultExists("$outdir/${tag}riboRun_bl.hiera.txt", 1);
 }
-
-system "gunzip $inD/*.fq.gz"; #just in case things have been gzipped
-
-
-if ($readsRpairs==1){
-	#pretty circular safety catch.. maybe remove later?
-	#LSU obviously wrong
-	#if (!-z $allInFa[4] && (-z $allInFa[0] ||  -z $allInFa[1])){system "rm -f $inD/LSU_pull.sto $outdir/LSU_ass.sto";}
-	#SSU obviously wrong
-	#if (!-z $allInFa[0] && (-z $allInFa[4] || -z $allInFa[5])){system "rm -f $inD/SSU_pull.sto $outdir/SSU_ass.sto";}
-
-	#all are empty (also wrong)
-	if ( !-e "$inD/RibFnd.sto" && ((-z $inD."reads_LSU.r1.fq" && !-z $inD."reads_LSU.r2.fq") #&& -z $inD."reads_ITS.r1.fq" && -z $inD."reads_ITS.r2.fq"
-				|| (!-z $inD."reads_SSU.r1.fq" && -z $inD."reads_SSU.r2.fq" ))
-				#&& -z $inD."reads_LSU.r1.fq.gz" && -z $inD."reads_LSU.r2.fq.gz" #&& -z $inD."reads_ITS.r1.fq.gz" && -z $inD."reads_ITS.r2.fq.gz"
-				#&& -z $inD."reads_SSU.r1.fq.gz" && -z $inD."reads_SSU.r2.fq.gz"
-				){
-		print "input seems completely wrong.. run has to be repeated\n";
-		system "rm -f $mergeD/*_pull.sto";
-		exit(11);
-	}
-}
-
-#can happen: all empty
-if ( -e "$outdir/RibFnd.sto" && -z $inD."reads_LSU.r1.fq" && -z $inD."reads_LSU.r2.fq" && -z $inD."reads_SSU.r1.fq" && -z $inD."reads_SSU.r2.fq" ) {
-	system "touch $outdir/Assigned.sto $outdir/LSU_ass.sto $outdir/SSU_ass.sto";
-	print "Empty fasta from sortmerna\n";
-}
-
-#all done already
-if (-e "$outdir/Assigned.sto" && -e "$outdir/LSU_ass.sto" && -e "$outdir/SSU_ass.sto"){ #&& -e "$outdir/ITS_ass.sto" 
+if ($allAlreadyComplete){
 	print "All assigned already\n";
-	system "rm -rf $tmpD" if ($tmpD ne "");
-	exit (0);
-}
-
-
-
-#------------- LSU - SSU - ITS ------------------
-my @tags=("SSU","LSU"); #"ITS",
-for (my $i=0;$i<@tags;$i++){
-	$curStone = "$outdir/$tags[$i]_ass.sto";
-	unless (-e $curStone && -e "$outdir/$tags[$i]riboRun_bl.hiera.txt"){
-		my @dbfa; my @dbtax;
-		#print "$curStone\n";
-		if ($tags[$i] eq "LSU") {@dbfa = ($LSUdbFA); @dbtax = ($LSUtax) ;
-		}elsif ($tags[$i] eq "SSU"){ @dbfa = ($PR2dbFA,$SSUdbFA); @dbtax = ($PR2tax,$SSUtax) ;
-		}elsif ($tags[$i] eq "ITS"){ @dbfa = ($ITSdbFA); @dbtax = ($ITStax) ;
-		}else {die "Unrecognized tag $tags[$i]\n";}
-		if ($dbfa[$#dbfa] eq ""){next;}
-		#merge
-		my $go=1;
-		#die "XX$readsRpairs\nXX";
-		my $inFilX = $inD."reads_$tags[$i].fq";
-		$inFilX = $inD."reads_$tags[$i].fq.gz" if (-e $inD."reads_$tags[$i].fq.gz" && !-e $inFilX);
-		if ($readsRpairs>0){
-			$go = flashed($inD."reads_$tags[$i].r1.fq",$inD."reads_$tags[$i].r2.fq",$mergeD,$tags[$i],$inD); 
-			if ($go==3 && !-z $inFilX){
-				$readsRpairs=0; 
-				#die "ASLK\n";
-			}elsif ($go==1){
-				#sim search & LCA
-				runBlastLCA($mergeD.$tags[$i],$inD."reads_$tags[$i].fq",\@dbfa,\@dbtax,"$tags[$i]riboRun_bl",$blMode,$SmplID,$tags[$i],$go);
-			} elsif($go==2) {$inputOK=0;print"Problem with $tags[$i] primary input; run needs to be repeated";}
-		} 
-		if($readsRpairs==0 ) {#single reads, also have specific input fmt
-			$go =0 if (-z $inFilX);
-			runBlastLCA($inFilX,"",\@dbfa,\@dbtax,"$tags[$i]riboRun_bl",$blMode,$SmplID,$tags[$i],$go);
-			#$inD."reads_$tags[$i].fq"
-		}
-		system "touch $curStone";
-	}
-}
-#die("not yet\n");
-#cleanup
-system "rm -rf $tmpD" if ($tmpD ne "");
-
-if ($inputOK){
-	print "$outdir/Assigned.sto";
-	system "touch $outdir/Assigned.sto";
-	#system "gzip -q ".join (" ",@allInFa);
-	unlink(@allInFa,@allSingleIn);
-	
-	#and more clean ups..
-	system "rm -rf $mergeD";
-	#system "gzip $inD/*.fq";
+	remove_tree($tmpD);
 	exit(0);
 }
-print "Finished\n";
-exit(0);
+
+my $inputOK=1;
+for my $tag (@tags){
+	my $checkpoint = "$outdir/${tag}_ass.sto";
+	my $hierarchy = "$outdir/${tag}riboRun_bl.hiera.txt";
+	next if -e $checkpoint && resultExists($hierarchy, 1);
+	unlink $checkpoint if -e $checkpoint;
+
+	my (@dbfa,@dbtax);
+	if ($tag eq "LSU") {@dbfa = ($LSUdbFA); @dbtax = ($LSUtax);
+	} elsif ($tag eq "SSU") {@dbfa = ($PR2dbFA,$SSUdbFA); @dbtax = ($PR2tax,$SSUtax);
+	} else {die "Unrecognized tag $tag\n";}
+	my (@usableDb,@usableTax);
+	for my $index (0..$#dbfa){
+		next if !defined($dbfa[$index]) || $dbfa[$index] eq "";
+		die "Missing $tag reference database: $dbfa[$index]\n" unless -s $dbfa[$index];
+		die "Missing $tag taxonomy database: $dbtax[$index]\n" unless defined($dbtax[$index]) && -s $dbtax[$index];
+		push @usableDb, $dbfa[$index];
+		push @usableTax, $dbtax[$index];
+	}
+	die "No usable databases configured for $tag\n" unless @usableDb;
+
+	my $singleInput = materializeReadInput("$inD/reads_${tag}.fq", $tmpD);
+	my $r1Input = materializeReadInput("$inD/reads_${tag}.r1.fq", $tmpD);
+	my $r2Input = materializeReadInput("$inD/reads_${tag}.r2.fq", $tmpD);
+	my $markerMode = $readsRpairs;
+	my $go = 1;
+	if ($markerMode > 0){
+		$go = flashed($r1Input,$r2Input,$mergeD,$tag,$inD);
+		if ($go == 1){
+			runBlastLCA($mergeD.$tag,$singleInput,\@usableDb,\@usableTax,"${tag}riboRun_bl",$blMode,$SmplID,$tag,$go,$markerMode);
+		} elsif ($go == 3){
+			$markerMode = 0; # marker-local fallback; do not change later markers
+		} else {
+			warn "Problem with $tag paired input; run needs to be repeated\n";
+			$inputOK=0;
+			next;
+		}
+	}
+	if ($markerMode == 0){
+		$go = 0 if $singleInput eq "" || !-s $singleInput;
+		runBlastLCA($singleInput,"",\@usableDb,\@usableTax,"${tag}riboRun_bl",$blMode,$SmplID,$tag,$go,$markerMode);
+	}
+
+	my $allowEmpty = $go == 0;
+	unless (resultExists($hierarchy, $allowEmpty)){
+		warn "Expected hierarchy output was not created for $tag: $hierarchy\n";
+		$inputOK=0;
+		next;
+	}
+	touchFile($checkpoint);
+}
+
+remove_tree($tmpD) if -d $tmpD;
+if ($inputOK){
+	for my $tag (@tags){
+		die "Cannot mark assignment complete; $tag output is incomplete\n"
+			unless -e "$outdir/${tag}_ass.sto" && resultExists("$outdir/${tag}riboRun_bl.hiera.txt", 1);
+	}
+	touchFile("$outdir/Assigned.sto");
+	print "$outdir/Assigned.sto\n";
+	exit(0);
+}
+die "Ribosomal LCA assignment was incomplete\n";
 
 
 #flash merge & some file checks
 sub flashed($ $ $ $ $){
 	my ($r1,$r2,$outD,$outT,$primD) = @_;
-	if ( -e $r2.".gz"){system "rm -f $r2; gunzip $r2.gz";}
-	if ( -e $r1.".gz"){system "rm -f $r1; gunzip $r1.gz";}
-	if (-z $r1 && -z $r2){return 3;}
-	if (    !-e $r2 || !-e $r1 || (-z $r1 && !-z $r2) || (!-z $r1 && -z $r2) 
-	||  (`wc -l $r1 | cut -f1 -d' '` != `wc -l $r2 | cut -f1 -d' '` ) ){
-		print "Empty input $r1\n";
-		system "rm -f $primD/$outT"."_pull.sto";
-		#exit 33;
+	return 3 if ($r1 eq "" || !-s $r1) && ($r2 eq "" || !-s $r2);
+	if ($r1 eq "" || $r2 eq "" || !-s $r1 || !-s $r2){
+		warn "Incomplete paired input for $outT: '$r1' / '$r2'\n";
+		unlink "$primD/${outT}_pull.sto" if -e "$primD/${outT}_pull.sto";
 		return 2;
 	}
-	if (-z $r1 && -z $r2){return 0;}
+	my $r1Lines = countLines($r1);
+	my $r2Lines = countLines($r2);
+	if ($r1Lines != $r2Lines || $r1Lines % 4 != 0){
+		warn "Paired FASTQ files have incompatible record counts: $r1Lines / $r2Lines lines\n";
+		unlink "$primD/${outT}_pull.sto" if -e "$primD/${outT}_pull.sto";
+		return 2;
+	}
 	print "running flash..\n";
-	#die "$flashBin\n";
-	my $mergCmd = "$flashBin -M 200 -o $outT -d $outD -t $BlastCores $r1 $r2";
-	#systemW $mergCmd;
-	if (system $mergCmd){
+	my $mergCmd = "$flashBin -M 200 -o ".shellQuote($outT)." -d ".shellQuote($outD)." -t $BlastCores ".shellQuote($r1)." ".shellQuote($r2);
+	if (systemW($mergCmd, 0)){
 		print STDERR "\n$mergCmd\nfailed\n";
-		system "rm -f $primD/$outT"."_pull.sto";
-		return 3;
-	}# or 
+		unlink "$primD/${outT}_pull.sto" if -e "$primD/${outT}_pull.sto";
+		return 2;
+	}
 	return 1;
 }
 
@@ -250,10 +246,29 @@ sub fastq2fna($ $){
 	die "Couldn't convert $in to .fa ending\n" if ($in eq $out);
 	#die $out;
 	#$out =~ s/\.fq$/\.fna/g;
-	open I,"<$in" or die "Input fastq file $in not available";
-	my $l = <I>; close I; if ($l =~ m/^>/){return $in;}
-	systemW "cat $in | paste - - - - | sed 's/^@/>/g'| cut -f1-2 | tr '\\t' '\\n' > $out";
-	system "rm $in" if ($doDel && $in ne $out);#;;mv $out $in";
+	open my $inputHandle,"<",$in or die "Input fastq file $in not available: $!\n";
+	my $firstLine = <$inputHandle>;
+	die "Input sequence file is empty: $in\n" unless defined $firstLine;
+	if ($firstLine =~ /^>/){close $inputHandle; return $in;}
+	seek($inputHandle, 0, 0) or die "Cannot rewind $in: $!\n";
+	open my $outputHandle, ">", $out or die "Cannot write FASTA output $out: $!\n";
+	my $record = 0;
+	while (my $header = <$inputHandle>){
+		my $sequence = <$inputHandle>;
+		my $plus = <$inputHandle>;
+		my $quality = <$inputHandle>;
+		die "Truncated FASTQ record ".($record + 1)." in $in\n"
+			unless defined($sequence) && defined($plus) && defined($quality);
+		die "Invalid FASTQ header in record ".($record + 1)." of $in\n" unless $header =~ /^@/;
+		die "Invalid FASTQ separator in record ".($record + 1)." of $in\n" unless $plus =~ /^\+/;
+		chomp($header, $sequence);
+		$header =~ s/^@/>/;
+		print {$outputHandle} "$header\n$sequence\n";
+		$record++;
+	}
+	close $inputHandle or die "Cannot close $in: $!\n";
+	close $outputHandle or die "Cannot close $out: $!\n";
+	unlink $in or die "Cannot remove temporary FASTQ $in: $!\n" if $doDel && $in ne $out;
 	return $out;
 }
 
@@ -306,8 +321,8 @@ sub findUnassigned($ $ $ ){
 }
 
 #main routine that does sim search & starts the LCA
-sub runBlastLCA(){
-	my ($queryO,$queryXtrSingl,$DBar,$DBtaxar,$id,$doblast,$SmplID,$MKname,$go) =@_;
+sub runBlastLCA{
+	my ($queryO,$queryXtrSingl,$DBar,$DBtaxar,$id,$doblast,$SmplID,$MKname,$go,$pairedMode) =@_;
 	my $taxblastf_base = $outdir."$id";
 	if ($tmpD ne ""){
 		$taxblastf_base = $tmpD."$id";
@@ -321,23 +336,20 @@ sub runBlastLCA(){
 	if ($go == 2){ return ;}
 	if (!$go){
 		print "$id has empty input files\n";
-		system "touch $hof1";
+		touchFile($hof1);
 		return;
 	}
 
-	if (!$readsRpairs){
+	if (!$pairedMode){
 		die "can't find single read input file: $queryO\n" unless (-e $queryO);
 		#jsut check by default if this is fna
 		$queryO = fastq2fna($queryO,0);
-		push(@allSingleIn,$queryO);
 			#die "$queryO\n";
 		#$queryO = fastq2fna($queryO);
 		#die "$queryO\n";
 	}elsif ($queryO !~ m/\.fa$/){#merged fastq that need to be processed
 		my $queryOx = "$queryO.extendedFrags.fastq";
-		$queryO .= ".extendedFrags.fa";
-		#convert to fasta
-		system "sed -n '1~4s/^@/>/p;2~4p' $queryOx > $queryO; rm $queryOx";
+		$queryO = fastq2fna($queryOx,1);
 		
 		$r1 .= ".notCombined_1.fastq";
 		$r2 .= ".notCombined_2.fastq";
@@ -347,7 +359,7 @@ sub runBlastLCA(){
 		
 		merge($r1,$r2,$interLeaveO) if ($doInter);
 		#die "$queryXtrSingl\n";
-		if ($readsRpairs==2 && -e $queryXtrSingl){
+		if ($pairedMode==2 && -e $queryXtrSingl){
 			print "attaching single reads to interleave";
 			$queryXtrSingl = fastq2fna($queryXtrSingl,0);
 			systemW "cat $queryXtrSingl >> $interLeaveO \nrm $queryXtrSingl";
@@ -380,18 +392,20 @@ sub runBlastLCA(){
 		$totRds1 = scalar(keys(%{$hr}));
 		print "Found $totRds1 merged candidates in $query\n";
 		print "Using max $maxRds of $totRds1 (total).\n" if ($totRds1 > $maxRds);
-		writeFasta($hr,$query,$maxRds);
+		writeFasta($hr,$query,$maxRds - 1) if $totRds1 > $maxRds;
 	}
 
-	if ($doInter && $maxRds > $totRds1 && $maxRds > 0){
-		if ($maxRds > 0){ #pref use merged reads
+	if ($doInter && ($maxRds == 0 || $maxRds > $totRds1)){
+		if ($maxRds > 0){ #prefer merged reads and cap the combined total
 			my $hr = readFasta($interLeave,0);
 			$totRds2 = scalar(keys(%{$hr}));
+			my $remaining = $maxRds-$totRds1;
 			print "..and $totRds2 interleave candidates in $query\n";
-			print "Using of these ".($maxRds-$totRds1)." of $totRds2 ( + $totRds1 total).\n" if ($totRds2 > ($maxRds-$totRds1));
-			writeFasta($hr,$interLeave,$maxRds-$totRds1-1);
+			print "Using $remaining of $totRds2 (+ $totRds1 total).\n" if $totRds2 > $remaining;
+			writeFasta($hr,$interLeave,$remaining - 1) if $totRds2 > $remaining;
 		}
-		systemW "cat $interLeave >> $query; rm $interLeave";
+		systemW("cat ".shellQuote($interLeave)." >> ".shellQuote($query));
+		unlink $interLeave or die "Cannot remove appended interleaved reads $interLeave: $!\n";
 		#$cmd .= "$lambdaBin $defLopt -q $interLeave -i $DB.lambda -o $taxblastf2\n";
 		#$cmd .= "\nmv $tmptaxblastf $taxblastf2\n";
 		#unless ( -e $taxblastf2){	
@@ -485,11 +499,17 @@ sub runBlastLCA(){
 		} elsif ($doblast==4) {
 			my $udbDB = $DB . ".vudb";
 			unless (-e $udbDB){
-				systemW("$vsearchBin  --makeudb_usearch $DB -output $udbDB;");
+				my $temporaryUdb = "$udbDB.$$";
+				systemW("$vsearchBin --makeudb_usearch ".shellQuote($DB)." --output ".shellQuote($temporaryUdb));
+				if (-e $udbDB){
+					unlink $temporaryUdb or die "Cannot remove redundant VSEARCH index $temporaryUdb: $!\n";
+				} else {
+					move($temporaryUdb, $udbDB) or die "Cannot install VSEARCH index $udbDB: $!\n";
+				}
 			}
 			my $cmd = "$vsearchBin ";
 			my $outCols="query+target+id+alnlen+mism+opens+qlo+qhi+tlo+thi+ql";
-			$cmd .= "--usearch_global $query --db $udbDB  --id 0.75 --query_cov 0.5 -userfields $outCols -userout $taxblastf --maxaccepts 100 --maxrejects 100 -strand both --threads $BlastCores;";
+			$cmd .= "--usearch_global ".shellQuote($query)." --db ".shellQuote($udbDB)." --id 0.75 --query_cov $lengthTolerance --userfields $outCols --userout ".shellQuote($taxblastf)." --maxaccepts 100 --maxrejects 100 --strand both --threads $BlastCores;";
 			systemW $cmd;
 		}
 
@@ -498,7 +518,7 @@ sub runBlastLCA(){
 	print "Running LCA..\n";
 	my $LCcmd = "";
 	#$hof1 = writeBlastHiera($fullBlastTaxR,$id,$simName);  undef $BlastTaxR ;
-	my $LCAflags = "-LCAfrac 0.8 -showHitRead -cover 0.6 -minAlignLen 50 ";
+	my $LCAflags = "-LCAfrac 0.8 -showHitRead -cover $lengthTolerance -minAlignLen 50 ";
 	$LCAflags .= "-reportID " if ($extractDNA);
 	$LCcmd .= "$LCAbin -i ". join(",",@taxouts) . " -r ".join(",",@DBtaxa_used)." -o $hof1 $LCAflags\n";
 	
@@ -511,47 +531,44 @@ sub runBlastLCA(){
 	
 	print $LCcmd."\n";
 	systemW $LCcmd;
+	die "LCA command completed without producing $hof1\n" unless -e $hof1;
 
 	#extract also reads?
 	extractReads($query,$hof1,"$outdir/$id.extr.fa");
-	system "rm -f @taxouts @taxouts_inter" ; #die();
-	system "rm -f $queryO"."__U* ";#"."__U*";
-	system "rm -f $interLeaveO*" if ($interLeaveO ne "");
+	unlink $_ for grep { -e $_ } (@taxouts, @taxouts_inter);
+	unlink $_ for glob($queryO."__U*");
+	if ($interLeaveO ne ""){
+		unlink $_ for glob($interLeaveO."*");
+	}
 }
 
 #file operations on paired end files
 sub merge($ $ $){
 	my ($r1,$r2,$interleave) = @_;
-	#die "$interleave\n";
 	$r2 = fastq2fna($r2,1);
 	$r1 = fastq2fna($r1,1); 
-	print "Interleaving 2 files..\n";
-	open I1,"<$r1" or die "1   $r1\n".$!;open I2,"<$r2"or die "2   $r2\n".$!;
-	open O,">$interleave"or die "interl   ".$!;
-	my $line1=<I1>;my $line2=<I2>; $line2="";#read header & get rid of it..
-	$line1=~s/\/1$//;
-	while(1){
-	#die "TOGO\n";
-		#print "X";
-		my $tmp="";
-		while ($tmp !~ m/^>/){chomp $tmp; $line1.=$tmp;$tmp=<I1>; 
-			unless( defined $tmp){last;}
-			if ($tmp =~m/^@/){die "Input to merge routine is fastq:$r1\n..aborting\n";}
-		}
-		
-		print O $line1; if (defined $tmp ){chomp $tmp; $tmp=~s/\/1$//; $line1 = $tmp."\n"; }
-		$tmp=""; 
-		while ($tmp !~ m/^>/){ chomp $tmp; $line2.=$tmp;$tmp=<I2>; unless (defined $tmp){last;}}
-		#print $line2."\n";
-		#get one more line to get rid of header:
-		print O reverse_complement_IUPAC($line2)."\n"; $line2 = "";#$tmp;
-		unless (defined $tmp){last;}
+	print "Combining unmerged read pairs..\n";
+	my %forward = %{readFasta($r1,1)};
+	my %reverse = %{readFasta($r2,1)};
+	my %reverseByPair;
+	for my $id (keys %reverse){
+		my $pairId = $id;
+		$pairId =~ s/\/2$//;
+		die "Duplicate reverse-read identifier after pair normalization: $pairId\n"
+			if exists $reverseByPair{$pairId};
+		$reverseByPair{$pairId} = $reverse{$id};
 	}
-	close O; close I1; close I2;
-	#die "$r1 $r2 $interleave\n"
-#	my $mergeScript = "/g/bork5/hildebra/bin/sortmerna-2.0/scripts/merge-paired-reads.sh";
-#	system "bash $mergeScript $r1 $r2 $interLeave";
-
+	open my $combinedHandle, ">", $interleave or die "Cannot write combined reads $interleave: $!\n";
+	for my $id (sort keys %forward){
+		my $pairId = $id;
+		$pairId =~ s/\/1$//;
+		die "Cannot find reverse mate for $id\n" unless exists $reverseByPair{$pairId};
+		print {$combinedHandle} ">$pairId\n$forward{$id}", reverse_complement_IUPAC($reverseByPair{$pairId}), "\n";
+		delete $reverseByPair{$pairId};
+	}
+	die "Reverse-read file contains unmatched identifiers: ".join(",", sort keys %reverseByPair)."\n"
+		if keys %reverseByPair;
+	close $combinedHandle or die "Cannot close combined reads $interleave: $!\n";
 }
 
 sub extractReads($ $ $){
@@ -572,8 +589,55 @@ sub extractReads($ $ $){
 	}
 	close I;
 	close O;
-	system "gzip $ofile";
+	systemW("gzip -f ".shellQuote($ofile));
 	#die "$ofile\n";
+}
+
+
+sub materializeReadInput{
+	my ($plainPath, $workDir) = @_;
+	return $plainPath if -e $plainPath;
+	my $gzipPath = "$plainPath.gz";
+	return "" unless -e $gzipPath;
+	my $inputDir = File::Spec->catdir($workDir, "inputs");
+	make_path($inputDir) unless -d $inputDir;
+	my $temporary = File::Spec->catfile($inputDir, basename($plainPath));
+	systemW("gzip -dc ".shellQuote($gzipPath)." > ".shellQuote($temporary));
+	die "Could not materialize compressed read input $gzipPath\n" unless -e $temporary;
+	return $temporary;
+}
+
+
+sub resultExists{
+	my ($path, $allowEmpty) = @_;
+	return 1 if -e $path && ($allowEmpty || -s $path);
+	return 1 if -e "$path.gz" && ($allowEmpty || -s "$path.gz");
+	return 0;
+}
+
+
+sub touchFile{
+	my ($path) = @_;
+	open my $touchHandle, ">", $path or die "Cannot create checkpoint $path: $!\n";
+	close $touchHandle or die "Cannot close checkpoint $path: $!\n";
+}
+
+
+sub countLines{
+	my ($path) = @_;
+	open my $lineHandle, "<", $path or die "Cannot count records in $path: $!\n";
+	my $count = 0;
+	$count++ while <$lineHandle>;
+	close $lineHandle or die "Cannot close $path: $!\n";
+	return $count;
+}
+
+
+sub shellQuote{
+	my ($value) = @_;
+	$value = "" unless defined $value;
+	$value =~ s/'/'"'"'/g;
+	return "'$value'";
 }
 
 #function that goes line by line through Blast m8 table
@@ -662,4 +726,3 @@ sub getTaxForOTUfromRefBlast($ $ $ $){
 	
 	return (\%retRef);
 }
-

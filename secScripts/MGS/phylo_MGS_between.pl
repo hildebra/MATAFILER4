@@ -49,9 +49,14 @@ GetOptions(
 	"MSAprogram=i" => \$MSAprog,
 	"xtraMsg=s" => \$xtraMessageInSH,
 	"mem=i" => \$mem,
-);
+) or die "Invalid phylo_MGS_between.pl options\n";
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
 die "No input args\n" if ($GCd eq "" || $MGSfile eq "");
+die "Gene-catalog directory not found: $GCd\n" unless -d $GCd;
+die "MGS file missing or empty: $MGSfile\n" unless -s $MGSfile;
+die "Core and memory requests must be positive\n" unless $numCores > 0 && $mem > 0;
+die "Unsupported MSA program: $MSAprog\n" unless $MSAprog == 2 || $MSAprog == 4;
 $btout = "$GCd/MGS/phylo/" if ($btout eq "");#main output dir
 
 
@@ -90,6 +95,8 @@ if ($addRefGenos ne ""){
 	}
 }
 
+# Between-MGS phylogeny intentionally always uses the FMG marker set, independent
+# of the marker set used for MGS construction.
 #read FMG designation
 my %FMG2COG;
 open I,"<$GCd/FMG.subset.cats" or die "Can't open $GCd/FMG.subset.cats\n";
@@ -129,7 +136,10 @@ while (<I>){
 	}
 }
 close I;
-print "Assigned $mfcnt genes to MGS in ".scalar(keys(%MGSFMG))." MGS (". int(10*$mfcnt/scalar(keys(%MGSFMG)))/10 ." on average, $mfdbl double)\n";
+my $mgs_with_fmg = scalar keys %MGSFMG;
+die "No FMG genes from $GCd/FMG.subset.cats were assigned to any MGS in $MGSfile\n"
+	unless $mgs_with_fmg;
+print "Assigned $mfcnt genes to MGS in $mgs_with_fmg MGS (". int(10*$mfcnt/$mgs_with_fmg)/10 ." on average, $mfdbl double)\n";
 
 
 #routine to do double checking etc and also find targets for merging gene clusters..

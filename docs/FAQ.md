@@ -36,6 +36,10 @@
 3. Inspect `.sto` marker files only as debugging aids; do not create them manually.
 4. Check [Outputs](outputs.md) for the expected file locations.
 
+### A sample was skipped because no input reads were found
+
+`-requireInput` defaults to `0`, allowing MATAFILER4 to continue when original reads have intentionally been removed after successful processing. For a new analysis, use `-requireInput 1` so a missing sample directory or a read-selection regular expression that matches no files aborts the run. Check the map's `#DirPath`, `Path`/`SmplPrefix`, and the relevant `-inputFQregex*` or `-inputBAMregex` option.
+
 ## FAQ
 
 <details>

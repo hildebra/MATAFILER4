@@ -1,63 +1,59 @@
-#!/usr/bin/perl
-#takes a list of FNA's and prints every fna longer than X bp to seperate file
-# ./sepReadLength.pl 7000 /tmp/hildebra/GC/35Pcompl.fna
+#!/usr/bin/env perl
+use strict;
+use warnings;
 
-use strict; use warnings;
+die "Usage: $0 <fasta> <maximum-fragment-length>\n" unless @ARGV == 2;
+my ($input, $fragment_length) = @ARGV;
+die "Fragment length must be a positive integer\n"
+	unless $fragment_length =~ /\A\d+\z/ && $fragment_length > 0;
+die "Input FASTA is missing or empty: $input\n" unless -s $input;
 
-sub splitFNA($ $ $ $){
-	my ($HD,$fna,$len,$OL) = @_;
-	my $pos=0; my $tlen = length($fna);
-	while($pos < $tlen){
-		my $subFNA= substr($fna,$pos,$len);
-		$pos += $len;
-		print $OL $HD."\n".$subFNA."\n";
-	}
-}
+my $temporary = "$input.tmp.$$";
+open my $in, '<', $input or die "Cannot open $input: $!\n";
+open my $out, '>', $temporary or die "Cannot open $temporary: $!\n";
 
+my ($header, $sequence) = ('', '');
+my ($records, $fragments) = (0, 0);
 
-
-if (@ARGV != 2){die "requires 2 args!!!\n";}
-my ($inF,$len) = @ARGV;
-
-open I,"<$inF";
-open my $OL,">$inF.tmp";
-my $fna ="";my $HD; my $bps =0; my $cnt =0; my $isFQ=0;
-my $splCnt=0;
-while (<I>){
-	if ($cnt==0){#detect fastq
-		if ($_ =~ m/^@/){$isFQ=1; print "Fastq file, cannot process\n";last;}
-	}
-	chomp;
-	if ( $_ !~ m/^>/){
-		$fna .= $_;
-	} else {
-		$bps = length($fna);
-		#decide where to write
-		if ($bps> 0){
-			if ($bps < $len){
-				$splCnt++;
-				print $OL $HD."\n".$fna."\n";
-			} else {
-				splitFNA($HD,$fna,$len,$OL);;
-			}
+sub emit_record {
+	return unless length $header;
+	die "FASTA record '$header' has an empty sequence\n" unless length $sequence;
+	$records++;
+	my $part = 0;
+	for (my $start = 0; $start < length($sequence); $start += $fragment_length) {
+		$part++;
+		my $fragment = substr($sequence, $start, $fragment_length);
+		my $end = $start + length($fragment);
+		my $fragment_header = $header;
+		if (length($sequence) > $fragment_length) {
+			my $suffix = sprintf('_part%d_%d-%d', $part, $start + 1, $end);
+			$fragment_header =~ s/^>(\S+)/>$1$suffix/;
 		}
-		$fna = ""; 
-		$HD = $_;
+		print {$out} "$fragment_header\n$fragment\n"
+			or die "Cannot write $temporary: $!\n";
+		$fragments++;
 	}
-	$cnt++;
-}
-if ($isFQ){
-	close $OL; system "rm $inF.tmp"; exit(0);
 }
 
-
-$bps = length($fna);
-if ($bps < $len){
-	print $OL $HD."\n".$fna."\n";
-} else {
-	splitFNA($HD,$fna,$len,$OL);;
+while (my $line = <$in>) {
+	$line =~ s/[\r\n]+\z//;
+	if ($line =~ /^>/) {
+		emit_record();
+		$header = $line;
+		$sequence = '';
+		next;
+	}
+	die "Input appears to be FASTQ, not FASTA\n" if $line =~ /^\@/ && !length($header);
+	die "Sequence encountered before first FASTA header in $input\n"
+		unless length $header;
+	$line =~ s/\s+//g;
+	die "Invalid empty sequence line in $input\n" unless length $line;
+	$sequence .= $line;
 }
+emit_record();
+die "No FASTA records found in $input\n" unless $records;
 
-close $OL; close I;
-print "Found $splCnt sequences longer than $len\n"; 
-system "rm $inF;mv $inF.tmp $inF";
+close $in or die "Cannot close $input: $!\n";
+close $out or die "Cannot close $temporary: $!\n";
+rename $temporary, $input or die "Cannot replace $input with $temporary: $!\n";
+print "Split $records sequence(s) into $fragments fragment(s) of at most $fragment_length bp\n";
