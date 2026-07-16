@@ -1049,11 +1049,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		if ($prodRun ne ""){
 			$AsGrps{$cAssGrp}{pseudoAssmblDep}  = $prodRun;
 		}
-<<<<<<< HEAD
-		$AsGrps{$cAssGrp}{readDeps} .= ";$prodRun";
-=======
 		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $prodRun);
->>>>>>> dev
 	}
 	
 	if ($MFopt{calcOrthoPlacement}){
@@ -1142,14 +1138,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#die;
 		metagAssemblyRun( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$geneDir,  $SmplNameX,$scaffoldFlag,$metaGscaffDir,
 					$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo,$finalCommAssDir);
-<<<<<<< HEAD
-=======
 		my $producedAssemblyDir = ($MFopt{DoAssembly} == 5 && $doPreAssmFlag)
 			? $metagAssDir : $finalCommAssDir;
 		$metaGassembly = "$producedAssemblyDir/scaffolds.fasta.filt";
 		$geneDir = "$producedAssemblyDir/genePred/";
-
->>>>>>> dev
 		#call genes, depends on assembly
 		$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"","$nodeSpTmpD/genePred/",1);
 	} else {$presentAssemblies++;}
@@ -1226,11 +1218,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my $unAlDir = "$finalMapDir/unaligned/";$unAlDir = "" if (!$MFopt{SaveUnalignedReads}); #in most cases we don't need unaligned reads..
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,mappingStarted =>1,
-<<<<<<< HEAD
-						glbTmp => "$finalMapDir/.work/$SmplName/primary_align/",glbMapDir => $mapOut,mapSupport => 0,
-=======
 						glbTmp => $nodeSpTmpD."_mapWork/",glbMapDir => $finalMapDir,mapSupport => 0,
->>>>>>> dev
 						readTec => ${$cleanSeqSetHR}{readTec}, submit => 1,submNow => $mapNow,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam,
 						# Primary short- and long-read assemblies always receive a breakpoint report.
@@ -1246,19 +1234,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$mappingDeferred = 1;
 			#store command for later..
 			$AsGrps{$cAssGrp}{PostAssemblCmd} .= $delaySubmCmd;
-<<<<<<< HEAD
-			push(@{$AsGrps{$cAssGrp}{$cpyStrm}},$mapOut."/*",$finalMapDir);
-			#print "\n\nmapcopydel\n";
-		}elsif ($moveMappings){ 
-			#this part is checking only if files were not copied..
-			#just do it.. 
-			print "Publishing mappings from the final work directory\n";
-			system "mkdir -p $finalMapDir;sleep 1;" unless (-d $finalMapDir);
-			systemW "$mvCmd $mapOut/* $finalMapDir/";
-		} elsif ($map2Ctgs_2 ne "") { #make sure files get copied
-			push(@{$AsGrps{$cAssGrp}{$cpyStrm}},$mapOut."/*",$finalMapDir);
-=======
->>>>>>> dev
 		}
 		#die "$curOutDir/mapping\n" . "$mapOut/$SmplName-smd.bam.coverage.gz"
 	}
@@ -1271,35 +1246,18 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my $unAlDir = "$finalMapDir/unaligned_supp/";$unAlDir = "" if (!$MFopt{SaveUnalignedReads});
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,
-<<<<<<< HEAD
-						glbTmp => "$finalMapDir/.work/$SmplName/support_align/",glbMapDir => $mapOutSup, mapSupport => 1,
-=======
 						glbTmp => $nodeSpTmpD."_mapWorkSupp/",glbMapDir => $finalMapDir, mapSupport => 1,
->>>>>>> dev
 						readTec => "", submit => 1,submNow => $mapNow,mappingStarted=>1,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam);
 		# primary mapping of support reads (onto de novo assembly)
 		my ($mapSup2Ctgs,$delaySubmCmd,$mapOptHr) = mapReadsToRef(\%dirset, normalise_job_dependencies($AsGrps{$cAssGrp}{AssemblJobName}, $jdep));#\@libsCFP);
 		my ($mapSup2Ctgs_2,$delaySubmCmd_2,$mapStat)  = bamDepth(\%dirset,$mapSup2Ctgs,$mapOptHr);
 			$delaySubmCmd .= "\n".$delaySubmCmd_2;
-<<<<<<< HEAD
-		$AsGrps{$cAssGrp}{MapDeps} .= $mapSup2Ctgs_2.";";
-		$AsGrps{$cAssGrp}{BinDeps} .= $mapSup2Ctgs_2.";";
-		my $moveMappings = 0; $moveMappings =1 if (!$eFinSupMapCovGZ && fileGZe("$mapOutSup/$SmplName.sup-smd.bam.coverage"));
-		if (   	$mapSup2Ctgs_2 =~  m/[^;\s]/ && $moveMappings){  # just copy over..
-			print "Publishing supplementary mappings from the final work directory\n";
-			#print "DEBUG: $mapOutSup/$SmplName.sup-smd.bam.coverage.gz\n" . -s "$mapOutSup/$SmplName.sup-smd.bam.coverage.gz" . "\n";
-			system "mkdir -p $finalMapDir;sleep 1;" unless (-d $finalMapDir);
-			systemW "$mvCmd $mapOutSup/* $finalMapDir/";
-		} else {
-			push(@{$AsGrps{$cAssGrp}{MapSupCopies}},$mapOutSup."/*",$finalMapDir);
-=======
 		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $mapSup2Ctgs_2);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $mapSup2Ctgs_2);
 		if ($delaySubmCmd =~ /\S/ && !${$mapOptHr}{immediateSubm}) {
 			$mappingDeferred = 1;
 			$AsGrps{$cAssGrp}{PostAssemblCmd} .= $delaySubmCmd;
->>>>>>> dev
 		}
 #		die;
 	}
@@ -2739,21 +2697,9 @@ sub prepareMap{
 
 
 	$MFglobal{runTmpDirGlobal} = "$sharedTmpDirP/$baseID/";
-<<<<<<< HEAD
-=======
-	$MFglobal{runTmpDBDirGlobal} = "$MFglobal{runTmpDirGlobal}/DB/";
 	# Inspection is a read-only planning path: do not create scratch directories,
 	# prepare databases, or enqueue any prerequisite jobs.
 	return if ($MFconfig{inspectState});
-	unless (-d $MFglobal{runTmpDBDirGlobal}){
-		system "mkdir -p $MFglobal{runTmpDBDirGlobal}" ;
-		#and check that this dir exists...
-		sleep(1);
-		die "Can't create $MFglobal{runTmpDBDirGlobal}\n" unless (-d $MFglobal{runTmpDBDirGlobal});
-	}
-	$MFglobal{globaldDiaDBdir} = $MFglobal{runTmpDBDirGlobal}."DiamDB/";
-	system "mkdir -p $MFglobal{globaldDiaDBdir}" unless (-d $MFglobal{globaldDiaDBdir});
->>>>>>> dev
 
 
 	
@@ -2943,19 +2889,11 @@ sub prepareMap{
 		
 		
 		my ($cmd,$DBbtRef,$chkFile) = buildMapperIdx($refDB[$i],$bwtDBcore,$MFopt{largeMapperDB},$MFopt{MapperProg}) ;
-<<<<<<< HEAD
-		# Keep the durable FASTA as the canonical reference. Mappers derive or load
-		# their adjacent index from this path, while CRAM creation still receives the
-		# FASTA rather than a scratch path or mapper-specific index filename.
+		# The FASTA and its adjacent mapper index are durable inputs.  Keeping the
+		# canonical reference here also ensures CRAM and FASTA-based mappers do not
+		# receive a path into global scratch.
 		$DBbtRef = $refDB[$i];
-		my $idxNFini = 0; $idxNFini = 1 if (!-e $chkFile); #mapperDBbuilt($DBbtRef,$MFopt{MapperProg}); #($MFopt{MapperProg}==3 && !-e "$DBbtRef.pak") || ($MFopt{MapperProg}==1 && !-e "$DBbtRef$MFcontstants{bwt2IdxFileSuffix}.rev.1.bt2");
-=======
-		$DBbtRef =~ s/$MFcontstants{bwt2IdxFileSuffix}$//;
-		$DBbtRef =~ m/.*\/([^\/]+)$/;
-		$DBbtRef = "$MFglobal{runTmpDBDirGlobal}/$1";#set up to scratch dir to map onto
-		my $idxNFini = mapperDBbuilt($refDB[$i],$MFopt{MapperProg}) ? 0 : 1;
-		$cmd.= "\ncp $refDB[$i]* $MFglobal{runTmpDBDirGlobal}\n" if ($idxNFini);# if (!$MFopt{mapModeCovDo} && !-e "$bwt2outDl/$1");
->>>>>>> dev
+		my $idxNFini = !mapperDBbuilt($refDB[$i],$MFopt{MapperProg});
 		#print $cmd."\n";
 		if (!$MFopt{mapModeTogether} && $idxNFini && $cmd ne ""){ #not required for these map modi
 			#system $cmd 
@@ -4848,16 +4786,6 @@ sub prepKraken(){
 	my $oriKrakDir = getProgPaths("Kraken_path_DB");
 	foreach my $kk (keys %DBname ){
 		if (!-d "$oriKrakDir$kk"){die "can't find kraken db $oriKrakDir$kk\n";}
-<<<<<<< HEAD
-=======
-		my $target = "$MFglobal{krakenDBDirGlobal}/$kk";
-		if (!-d $target || !-e "$target/cpFin.stone" ){
-			$cmd .= "rm -rf $target\n" if (-e $target);
-			$cmd .= "mkdir -p $MFglobal{krakenDBDirGlobal}\n";
-			$cmd .= "cp -r $oriKrakDir$kk $target\n";
-			$cmd .= "touch $target/cpFin.stone\n";
-		}
->>>>>>> dev
 	}
 	return "";
 }
@@ -5829,26 +5757,23 @@ sub bamDepth{
 	#$covCmd .= "rm -f $nxtBAM.bai;\n";
 	my ($CRAMcmd,$CRAMf) = bam2cram($nxtBAM,$REF,1,$doCram,"", $numCore);
 	$CRAMcmd = "echo \"Building .cram ...\"\n$CRAMcmd" if ($CRAMcmd ne "");
-<<<<<<< HEAD
-	unless ($mappDir eq $tmpOut){
-		# Move each generated artifact separately.  Optional sidecars (for example
-		# *.breakpoints.tsv.gz) can disappear during tool cleanup; a broad mv glob
-		# then aborts the otherwise successful MAP job with "cannot stat".
-		$CRAMcmd .= "\nfor map_artifact in $CRAMf*; do [ -e \"\$map_artifact\" ] || continue; mv \"\$map_artifact\" \"$mappDir/\" 2>/dev/null || [ ! -e \"\$map_artifact\" ]; done\n" unless ($CRAMf eq "");
-		$CRAMcmd .= "for map_artifact in $nxtBAM*; do [ -e \"\$map_artifact\" ] || continue; mv \"\$map_artifact\" \"$mappDir/\" 2>/dev/null || [ ! -e \"\$map_artifact\" ]; done\n" unless ($nxtBAM eq "");
-=======
 	my $publishStage = "$finalD/.$baseN.mapping-stage";
 	$CRAMcmd .= "\n# Publish the complete mapping from node-local work into its canonical directory.\n";
 	$CRAMcmd .= "rm -rf $publishStage\nmkdir -p $publishStage $finalD\n";
 	$CRAMcmd .= "for f in $CRAMf*; do [ -e \"\$f\" ] || continue; mv \"\$f\" $publishStage/; done\n"
 		unless ($CRAMf eq "");
-	$CRAMcmd .= "for f in $nxtBAM*; do [ -e \"\$f\" ] || continue; mv \"\$f\" $publishStage/; done\n";
-	$CRAMcmd .= "mv $breakpointWork $publishStage/\n" if ($breakpointWork ne "");
+	if ($breakpointWork ne "") {
+		# breakpointWork shares the $nxtBAM prefix. Exclude it from the generic
+		# sidecar loop so the required, validated move below does not publish it twice.
+		$CRAMcmd .= "for f in $nxtBAM*; do [ -e \"\$f\" ] || continue; [ \"\$f\" = \"$breakpointWork\" ] && continue; mv \"\$f\" $publishStage/; done\n";
+		$CRAMcmd .= "test -s $breakpointWork\nmv $breakpointWork $publishStage/\n";
+	} else {
+		$CRAMcmd .= "for f in $nxtBAM*; do [ -e \"\$f\" ] || continue; mv \"\$f\" $publishStage/; done\n";
+	}
 	if ($doCram) {
 		$CRAMcmd .= "test -s $publishStage/$baseN-smd.cram\n$smtBin quickcheck $publishStage/$baseN-smd.cram\n";
 	} else {
 		$CRAMcmd .= "test -s $publishStage/$baseN-smd.bam\n$smtBin quickcheck $publishStage/$baseN-smd.bam\n";
->>>>>>> dev
 	}
 	$CRAMcmd .= "test -s $publishStage/$baseN-smd.bam.coverage.gz\n$pigzBin -t $publishStage/$baseN-smd.bam.coverage.gz\n";
 	$CRAMcmd .= "for f in $publishStage/*; do mv -f \"\$f\" $finalD/; done\nrmdir $publishStage\n";
@@ -6830,13 +6755,7 @@ sub scndMap2Genos{
 	my $samplReadLength = $map{$curSmpl}{seqSet}->{samplReadLength};
 
 	for (my $i=0;$i<@bwt2outD; $i++){
-<<<<<<< HEAD
-		push @mapOutXS, "$bwt2outD[$i]/.work/$SmplName/";
-=======
-		$bwt2outD[$i] =~ m/\/([^\/]+)\/*$/;
-		my $smplXDB = $1;
 		push @mapOutXS, $bwt2outD[$i];
->>>>>>> dev
 		my $fname = $bwt2ndMapNmds[$i]."_".$SmplName."-0";
 		#if (length($fname ) > 20){$bwt2ndMapNmds[$i]."_".$SmplName."-0";
 		push @bamBaseNameS, $fname;
@@ -6849,11 +6768,7 @@ sub scndMap2Genos{
 	my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => join(",",@bwt2outD),unalDir=>"",
 					sbj => join(",",@DBbtRefX),assGrp => $cAssGrp,
 					smplName => $SmplName,#join(",",@bamBaseNameS),
-<<<<<<< HEAD
-					glbTmp => "$baseOut/GlbMap/.work/$SmplName/alignments/", is2ndMap => 1,
-=======
 					glbTmp => $nodeSpTmpD."_xtraMapWork/", is2ndMap => 1,
->>>>>>> dev
 					qsubDir => "$logDir/map2nd/",mapSupport => 0,
 					glbMapDir => join(",",@mapOutXS),mappingStarted =>1,
 					readTec => ${$cleanSeqSetHR}{readTec}, #$map{$curSmpl}{SeqTech}
