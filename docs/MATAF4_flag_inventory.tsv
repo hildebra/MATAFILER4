@@ -86,7 +86,7 @@ mapping	mappingMem	integer	-1	stable	$MFopt{MapperMemory}	total mem for mini2/km
 mapping	mapSortMem	integer	-1	stable	$MFopt{mapSortMemGb}	total mem for samtools sort in GB
 mapping	rmDuplicates	integer	1	stable	$MFopt{MapperRmDup}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 mapping	mappingCores	integer	8	stable	$MFopt{MapperCores}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-mapping	mapperFilterIll	string	"""0.05 0.75 20 3"""	stable	$MFopt{bamfilterIll}	"defaults to ""0.05 0.75 20 3"", meaning: <=5% ANI, >=75% of read aligned, >=20 mapping quality, rm clipped (by 3 nt) alignments"
+mapping	mapperFilterIll	string	"""0.05 0.75 20 3"""	stable	$MFopt{bamfilterIll}	"Maximum NM edit rate, minimum query coverage, minimum mapping quality, and minimum clipping at both ends (0 disables clipping filter)."
 mapping	mapperFilterPB	string	"""0.05 0.5 30 0"""	stable	$MFopt{bamfilterPB}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 mapping	mapperFilterONT	string	"""0.15 0.5 10 0"""	stable	$MFopt{bamfilterONT}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 mapping	mapSaveCRAM	integer	1	stable	$MFopt{mapSaveCram}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.

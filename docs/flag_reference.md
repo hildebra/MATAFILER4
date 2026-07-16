@@ -166,7 +166,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-mapSortMem` | integer | `-1` | stable | total mem for samtools sort in GB |
 | `-rmDuplicates` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-mappingCores` | integer | `8` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-mapperFilterIll` | string | `"0.05 0.75 20 3"` | stable | defaults to "0.05 0.75 20 3", meaning: <=5% ANI, >=75% of read aligned, >=20 mapping quality, rm clipped (by 3 nt) alignments |
+| `-mapperFilterIll` | string | `"0.05 0.75 20 3"` | stable | Maximum NM edit rate, minimum query coverage, minimum mapping quality, and minimum clipping at both ends (0 disables clipping filter). |
 | `-mapperFilterPB` | string | `"0.05 0.5 30 0"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-mapperFilterONT` | string | `"0.15 0.5 10 0"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-mapSaveCRAM` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |

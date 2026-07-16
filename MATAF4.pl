@@ -8297,7 +8297,7 @@ sub getCmdLineOptions{
 		"mapSortMem=i" => \$MFopt{mapSortMemGb}, #total mem for samtools sort in GB
 		"rmDuplicates=i" => \$MFopt{MapperRmDup},
 		"mappingCores=i" => \$MFopt{MapperCores},
-		"mapperFilterIll=s" => \$MFopt{bamfilterIll}, #defaults to "0.05 0.75 20 3", meaning: <=5% ANI, >=75% of read aligned, >=20 mapping quality, rm clipped (by 3 nt) alignments 
+		"mapperFilterIll=s" => \$MFopt{bamfilterIll}, # max NM edit rate, min query coverage, min mapping quality, min clip at both ends (0 disables); default: "0.05 0.75 20 3"
 		"mapperFilterHybridIll=s" => \$MFopt{bamfilterHybridIll},
 		"hybridMinMapQ=i" => \$MFopt{hybridMinMapQ},
 		"hybridMinBaseQ=i" => \$MFopt{hybridMinBaseQ},
