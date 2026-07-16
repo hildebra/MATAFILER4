@@ -197,7 +197,7 @@ my @grandDeps; #used for loop2completion , collects dependencies
 
 #profiler / human filtering preps
 my $krakDeps = prepKraken();
-my $mOTU2Deps = prepMOTU2(); prepMetaphlan();
+my $mOTU2Deps = ""; prepMetaphlan();
 
 
 if ($TO1 > @samples){
@@ -288,16 +288,17 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#set up dirs ------------------------------------------------------------------------------------
 	my $smplTmpDir = "$MFglobal{runTmpDirGlobal}$SmplName/"; #curTmpDir
 	my $nodeSpTmpD = "$nodeTmpDirBase/$SmplName";
+	system "mkdir -p $smplTmpDir" unless (-d $smplTmpDir); #shared raw/cleaned-read staging
 	my @checkLocs = ($smplTmpDir);
 	push(@checkLocs,$curDir)  if ($curDir ne "");
 	$QSBoptHR->{LocationCheckStrg} = checkDrives(\@checkLocs);
 
-	my $mapOut = "$smplTmpDir/mapping/";
-	my $mapOutSup = "$smplTmpDir/mappingSupp/";
-	#$DBpath="$curOutDir/readDB/";
 	my $finalCommAssDir = "$curOutDir/assemblies/metag/";
 	my $finalCommAssDirSingle = $finalCommAssDir; #this is only used for checking..
 	my $finalMapDir = "$curOutDir/mapping/";
+	my $mapOut = "$finalMapDir/.work/$SmplName/primary/";
+	my $mapOutSup = "$finalMapDir/.work/$SmplName/support/";
+	#$DBpath="$curOutDir/readDB/";
 	
 	
 	$AsGrps{$cAssGrp}{AssemblSmplDirs} .= $curOutDir."\n";
@@ -309,10 +310,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#die "AssemblGrp exists already!!: \"$assmGrpTag\"\n" if (exists($assmblGrpLog{$assmGrpTag}));
 	#$assmblGrpLog{$assmGrpTag} = 1;
 
-	my $asmDir="$MFglobal{runTmpDirGlobal}/$assmGrpTag/";
 	$finalCommAssDir = "$baseOut/$assmGrpTag/metag/" if ( !exists($AsGrps{$cAssGrp}{CntAimAss}) || $AsGrps{$cAssGrp}{CntAimAss}>1);
-	#my $metaGpreAssmblDir = "$MFglobal{runTmpDirGlobal}/pre$assmGrpTag/";
-	my $metaGpreAssmblDir = "$smplTmpDir/pre$assmGrpTag/"; #needs to be sample specific (to allow for different coverage)
+	my $asmDir = $finalCommAssDir;
+	$asmDir =~ s/metag\/$//;
+	my $metaGpreAssmblDir = "$curOutDir/assemblies/pre$assmGrpTag/"; #sample-specific durable hybrid-assembly handoff
 
 	#assign job name (dependency) only ONCE
 	if ( !exists($AsGrps{$cAssGrp}{CntAss}) || $AsGrps{$cAssGrp}{CntAss} == 0){
@@ -325,9 +326,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($AsGrps{$cAssGrp}{CntAss}  >= $AsGrps{$cAssGrp}{CntAimAss} ){
 		#print "running assembluy\n";
 		$AssemblyGo = 1;
-		if ($AsGrps{$cAssGrp}{CntAimAss}<=1){
-			$asmDir="$smplTmpDir/assemblies/";
-		}
 	}
 	
 	
@@ -417,7 +415,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#my $doPreAssmFlag = 0; my $postPreAssmblGo =0 ;
 	
 	
-	my ($ePreAssmbly,$doPreAssmFlag,$postPreAssmblGo,$ePreAssmblPck) = prepPreAssmbl($finalCommAssDir,$metaGpreAssmblDir,$finalMapDir, "$smplTmpDir/preAssmblData/",
+	my ($ePreAssmbly,$doPreAssmFlag,$postPreAssmblGo,$ePreAssmblPck) = prepPreAssmbl($finalCommAssDir,$metaGpreAssmblDir,$finalMapDir, "$nodeSpTmpD/preAssmblData/",
 				$ContigStatsDir, $cAssGrp, $finAssLoc,$finalCommAssDir);#moves files to new locations
 	
 	
@@ -598,7 +596,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($locRedoSNPcalling){system "rm -fr $SNPdir";}
 	
 	if ($locRedoSVs){system "rm -fr $SVdir";}
-	if ($MFopt{redoSNPcons}){		system "rm -rf $SNPdir $genePredSNP* $contigsSNP* $genePredAASNP* $smplTmpDir/SNP $logDir/SNP";
+	if ($MFopt{redoSNPcons}){		system "rm -rf $SNPdir $genePredSNP* $contigsSNP* $genePredAASNP* $logDir/SNP";
 	} elsif ($MFopt{redoSNPgene}){		system "rm -rf $genePredSNP* $genePredAASNP* ";
 	}
 	my $boolGenePredOK=0;
@@ -981,11 +979,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$AsGrps{$cAssGrp}{pseudoAssmblDep} = $psAssDep;
 		}
 		#predict genes on assembly
-		my $prodRun = genePredictions($psFile,$metagDir."/genePred/",$psAssDep,$finalCommAssDir,"",$smplTmpDir,1);
+		my $prodRun = genePredictions($psFile,$metagDir."/genePred/",$psAssDep,$finalCommAssDir,"","$nodeSpTmpD/genePred/",1);
 		if ($prodRun ne ""){
 			$AsGrps{$cAssGrp}{pseudoAssmblDep}  = $prodRun;
 		}
-		push(@{$AsGrps{$cAssGrp}{PsAssCopies}}, $asmDir."/metag/*",$finalCommAssDir);
 		$AsGrps{$cAssGrp}{readDeps} .= ";$prodRun";
 	}
 	
@@ -994,7 +991,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 					$mergJbN.";".$primaryDep);
 	}
 	if ($calcDiamond || $calcDiaParse){
-		my ($djname,$djCln) = runDiamond($curOutDir."diamond/",$MFglobal{globaldDiaDBdir},$nodeSpTmpD."/diaRefDB/",
+		my ($djname,$djCln) = runDiamond($curOutDir."diamond/",$baseOut."DB/DiamDB/",$nodeSpTmpD."/diaRefDB/",
 					$mergJbN.";".$primaryDep,$MFopt{reqDiaDB}); #GlbTmpPath
 		$AsGrps{$cAssGrp}{DiamDeps} = $djname.";";
 		$AsGrps{global}{DiamDeps} .= ";$djname";
@@ -1024,7 +1021,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	if ($calcRibofind || $calcRiboAssign){
 #		die "STOP ribo\n";
-		my $ITSrun = detectRibo($nodeSpTmpD."ITS/",$curOutDir."ribos/",$primaryDep,$SmplName,$MFglobal{runTmpDirGlobal}); #GlbTmpPath  \@cfp1,\@cfp2
+		my $ITSrun = detectRibo($nodeSpTmpD."ITS/",$curOutDir."ribos/",$primaryDep,$SmplName,$baseOut."DB/");
 		#$AsGrps{$cAssGrp}{ITSDeps} .= $ITSrun.";";
 		$AsGrps{$cAssGrp}{readDeps} .= ";$ITSrun";
 	}
@@ -1075,10 +1072,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#die;
 		metagAssemblyRun( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$geneDir,  $SmplNameX,$scaffoldFlag,$metaGscaffDir,
 					$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo,$finalCommAssDir);
-		push(@{$AsGrps{$cAssGrp}{AssCopies}}, $asmDir."/metag/*",$finalCommAssDir);
-
 		#call genes, depends on assembly
-		$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"",$smplTmpDir,1);
+		$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"","$nodeSpTmpD/genePred/",1);
 	} else {$presentAssemblies++;}
 	
 	#die "$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) \n";
@@ -1087,7 +1082,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#print "GP:: !$boolGenePredOK && $AssemblyGo \n";
 		if (!$boolGenePredOK && $AssemblyGo ){
 			$geneDir = $finalCommAssDir."/genePred/";
-			$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"",$smplTmpDir,1);
+			$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"","$nodeSpTmpD/genePred/",1);
 		}
 	}
 	
@@ -1108,7 +1103,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd 2nd
 	# maps on given reference genome(s), not on the assembly itself!!
 	if (@bwt2outD>0 && $MappingGo && (!$boolScndMappingOK || !$boolScndCoverageOK || $calc2ndMapSNP) ){#map reads to specific tar
-		scndMap2Genos($SmplName,$cMapGrp,$cAssGrp,$curOutDir,$nodeSpTmpD,$smplTmpDir,
+		scndMap2Genos($SmplName,$cMapGrp,$cAssGrp,$curOutDir,$nodeSpTmpD,
 			\@sampleDeps,$calc2ndMapSNP,$boolScndCoverageOK);
 	} elsif ($MFopt{mapModeActive}) {
 		#still needs delays in cleaning command
@@ -1141,7 +1136,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my $unAlDir = "$mapOut/unaligned/";$unAlDir = "" if (!$MFopt{SaveUnalignedReads}); #in most cases we don't need unaligned reads..
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,mappingStarted =>1,
-						glbTmp => $smplTmpDir."/toMGctgs/",glbMapDir => $mapOut,mapSupport => 0,
+						glbTmp => "$finalMapDir/.work/$SmplName/primary_align/",glbMapDir => $mapOut,mapSupport => 0,
 						readTec => ${$cleanSeqSetHR}{readTec}, submit => 1,submNow => $mapNow,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam);
 		# primary mapping (onto de novo assembly)
@@ -1160,7 +1155,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		}elsif ($moveMappings){ 
 			#this part is checking only if files were not copied..
 			#just do it.. 
-			print "Moving mappings from globaltmp to finaldir\n";
+			print "Publishing mappings from the final work directory\n";
 			system "mkdir -p $finalMapDir;sleep 1;" unless (-d $finalMapDir);
 			systemW "$mvCmd $mapOut/* $finalMapDir/";
 		} elsif ($map2Ctgs_2 ne "") { #make sure files get copied
@@ -1177,7 +1172,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my $unAlDir = "$mapOutSup/unaligned_supp/";$unAlDir = "" if (!$MFopt{SaveUnalignedReads});
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,
-						glbTmp => $smplTmpDir."/toMGctgsSupp/",glbMapDir => $mapOutSup, mapSupport => 1,
+						glbTmp => "$finalMapDir/.work/$SmplName/support_align/",glbMapDir => $mapOutSup, mapSupport => 1,
 						readTec => "", submit => 1,submNow => $mapNow,mappingStarted=>1,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam);
 		# primary mapping of support reads (onto de novo assembly)
@@ -1188,7 +1183,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$AsGrps{$cAssGrp}{BinDeps} .= $mapSup2Ctgs_2.";";
 		my $moveMappings = 0; $moveMappings =1 if (!$eFinSupMapCovGZ && fileGZe("$mapOutSup/$SmplName.sup-smd.bam.coverage"));
 		if (   	$mapSup2Ctgs_2 =~  m/[^;\s]/ && $moveMappings){  # just copy over..
-			print "Moving supplementary mappings from globaltmp to finaldir\n";
+			print "Publishing supplementary mappings from the final work directory\n";
 			#print "DEBUG: $mapOutSup/$SmplName.sup-smd.bam.coverage.gz\n" . -s "$mapOutSup/$SmplName.sup-smd.bam.coverage.gz" . "\n";
 			system "mkdir -p $finalMapDir;sleep 1;" unless (-d $finalMapDir);
 			systemW "$mvCmd $mapOutSup/* $finalMapDir/";
@@ -1274,7 +1269,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						ofas => $contigsSNP, #primary file of contigs
 						genefna => $genePredSNP,genefaa => $genePredAASNP,
 						vcfFile => $vcfSNP,vcfFileSupp => $vcfSNPsupp, gffFile => "$finalCommAssDir/genePred/genes.gff",
-						nodeTmpD => $nodeSpTmpD,scratch => "$smplTmpDir/SNP/",
+						nodeTmpD => $nodeSpTmpD,scratch => "$nodeSpTmpD/SNP/",
 						smpl => $SmplName,bamcram => $bamcramMap,minDepth => $MFopt{consSNPminDepth},
 						depthF => $coveragePerCtg,firstInSample => 1, #($i == 0 ? 1 : 0)
 						bpSplit => 1e6,runLocal => 1,SeqTech => $map{$curSmpl}{SeqTech},SeqTechSuppl => "",
@@ -2468,15 +2463,6 @@ sub prepareMap{
 
 
 	$MFglobal{runTmpDirGlobal} = "$sharedTmpDirP/$baseID/";
-	$MFglobal{runTmpDBDirGlobal} = "$MFglobal{runTmpDirGlobal}/DB/";
-	unless (-d $MFglobal{runTmpDBDirGlobal}){
-		system "mkdir -p $MFglobal{runTmpDBDirGlobal}" ;
-		#and check that this dir exists...
-		sleep(1);
-		die "Can't create $MFglobal{runTmpDBDirGlobal}\n" unless (-d $MFglobal{runTmpDBDirGlobal});
-	}
-	$MFglobal{globaldDiaDBdir} = $MFglobal{runTmpDBDirGlobal}."DiamDB/";
-	system "mkdir -p $MFglobal{globaldDiaDBdir}" unless (-d $MFglobal{globaldDiaDBdir});
 
 
 	
@@ -2617,7 +2603,6 @@ sub prepareMap{
 	
 	if ($MFopt{mapModeTogether}){#the fasta's were already combined into %FNrefDB2ndmap, just built idx now..
 		system "mkdir -p $baseOut/GlbMap/LOGandSUB/" unless (-d "$baseOut/GlbMap/LOGandSUB/");
-		system "mkdir -p $MFglobal{runTmpDBDirGlobal}/$shrtMapNm" unless (-d "$MFglobal{runTmpDBDirGlobal}/$shrtMapNm");
 		system "mkdir -p $baseOut/GlbMap/$shrtMapNm" unless (-d "$baseOut/GlbMap/$shrtMapNm");
 		#system "mkdir -p $map2ndTogRefDB{DB}" unless (-d $map2ndTogRefDB{DB});
 		print "$map2ndTogRefDB{DB}\n";
@@ -2655,8 +2640,7 @@ sub prepareMap{
 		push(@bwt2outD,$bwt2outDl);
 		system "mkdir -p $bwt2outDl" unless (-d $bwt2outDl);
 		if ($MFopt{mapModeTogether} >= 0 && ($rewrite || $MFopt{MapRewrite2nd}) ){
-			print "Deleting previous mapping DBs..\n" if ($i==0);	$refDB[$i] =~ m/.*\/([^\/]+)$/;
-			system("rm -r -f $MFglobal{runTmpDBDirGlobal}/$1*");#;mkdir -p $bwt2outDl
+			print "Rebuilding requested mapping DBs..\n" if ($i==0);
 		}
 		
 		$refDB[$i] =~ m/.*\/([^\/]+)$/;
@@ -2668,14 +2652,13 @@ sub prepareMap{
 		
 		
 		my ($cmd,$DBbtRef,$chkFile) = buildMapperIdx($refDB[$i],$bwtDBcore,$MFopt{largeMapperDB},$MFopt{MapperProg}) ;
-		$DBbtRef =~ s/$MFcontstants{bwt2IdxFileSuffix}$//;
-		$DBbtRef =~ m/.*\/([^\/]+)$/;
-		$DBbtRef = "$MFglobal{runTmpDBDirGlobal}/$1";#set up to scratch dir to map onto
+		# Keep the durable FASTA as the canonical reference. Mappers derive or load
+		# their adjacent index from this path, while CRAM creation still receives the
+		# FASTA rather than a scratch path or mapper-specific index filename.
+		$DBbtRef = $refDB[$i];
 		my $idxNFini = 0; $idxNFini = 1 if (!-e $chkFile); #mapperDBbuilt($DBbtRef,$MFopt{MapperProg}); #($MFopt{MapperProg}==3 && !-e "$DBbtRef.pak") || ($MFopt{MapperProg}==1 && !-e "$DBbtRef$MFcontstants{bwt2IdxFileSuffix}.rev.1.bt2");
-		$cmd.= "\ncp $refDB[$i]* $MFglobal{runTmpDBDirGlobal}\n" if ($idxNFini);# if (!$MFopt{mapModeCovDo} && !-e "$bwt2outDl/$1");
 		#print $cmd."\n";
-		#die $DBbtRef."\n$MFglobal{runTmpDBDirGlobal}/\n";
-		if (!$MFopt{mapModeTogether} && $idxNFini){ #not required for these map modi
+		if (!$MFopt{mapModeTogether} && $idxNFini && $cmd ne ""){ #not required for these map modi
 			#system $cmd 
 			#	my ($bwt2ndMapDep2,$cmd2) = qsubSystem($bwt2outDl."/LOGandSUB/builBwtIdx$i.sh",$cmdBIG,$bwtDBcore,(int(20/$bwtDBcore)+1) ."G","BWI".$i,"","",1,[],$QSBoptHR) ;$bwt2ndMapDep .= ";$bwt2ndMapDep2";
 			$cmdBIG .= "\n\n#====== $i =======\n".$cmd;
@@ -4540,36 +4523,9 @@ sub mOTU2Mapping{
 }
 
 
-sub prepMOTU2(){
-	my $orimotu2 = getProgPaths("motus2_DB",0);
-	return "" if (!$MFopt{DoMOTU2} || $orimotu2 eq "");
-	#my $m2Bin = getProgPaths("motus2");#"python "."$m2Glb/$m2sub/motus";
-	my $m2sub="";
-	if ($orimotu2 =~ m/\/([^\/]+)\/?$/){
-		$m2sub = $1;
-	} elsif (! -d $orimotu2) {
-		die "$orimotu2 seems not to be a dir\n";
-	}
-	my $m2Glb = $MFglobal{runTmpDirGlobal}."DB/";
-	my $cmd = "";
-	#print "$m2Glb/$m2sub && !-e $m2Glb/$m2sub/motu2";
-	if (!-d "$m2Glb/$m2sub"){#&& !-e "$m2Glb/$m2sub/motu2"){
-		$cmd .= "mkdir -p $m2Glb\n";
-		$cmd .= "cp -r $orimotu2 $m2Glb\n";
-	}
-	#$cmd .= "exit(0);\n";
-	#die $cmd;
-	my $tmpCmd=""; my $jobN="";
-	if ($cmd ne ""){
-		$jobN= "_m2DB";
-		($jobN, $tmpCmd) = qsubSystem("$baseOut/LOGandSUB/motu2DB.sh",$cmd,1,"1G",$jobN,"","",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
-	}
-	
-	return ($jobN);
-}
 sub prepKraken(){
 	#my ($DBdir) = @_;
-	$MFglobal{krakenDBDirGlobal} = $MFglobal{runTmpDirGlobal};
+	$MFglobal{krakenDBDirGlobal} = getProgPaths("Kraken_path_DB");
 	if ( ($MFopt{humanFilter}>0 && $MFopt{humanFilter}<3) && ($MFopt{DoKraken} || $MFopt{DoEukGenePred}   ) ){
 		if (( $MFopt{DoKraken} || $MFopt{DoEukGenePred}) && $MFopt{globalKraTaxkDB} eq ""){die "Kraken tax specified, but no DB specified\n";}
 	} else {
@@ -4585,25 +4541,12 @@ sub prepKraken(){
 	#die "$MFopt{humanFilter} && $MFopt{filterHostDB1}\n";
 	$DBname{"minikraken_2015"} = 1 if ($MFopt{DoEukGenePred});
 	$DBname{$MFopt{globalKraTaxkDB}} = 1 if ($MFopt{globalKraTaxkDB} ne "");
-	my $cmd = "";my $jobN= "";
-	return $jobN if (keys %DBname == 0);
+	return "" if (keys %DBname == 0);
 	my $oriKrakDir = getProgPaths("Kraken_path_DB");
-	#die "krakper\n";
 	foreach my $kk (keys %DBname ){
 		if (!-d "$oriKrakDir$kk"){die "can't find kraken db $oriKrakDir$kk\n";}
-		if (!-d "$MFglobal{krakenDBDirGlobal}/$kk" && !-e "$MFglobal{krakenDBDirGlobal}/$kk/cpFin.stone" ){
-			$cmd =  "cp -r $oriKrakDir$kk $MFglobal{krakenDBDirGlobal}/\n";
-			$cmd .= "touch $MFglobal{krakenDBDirGlobal}/$kk/cpFin.stone\n";
-		}
 	}
-	my $tmpCmd="";
-	if ($cmd ne ""){
-		$jobN= "_KRDB";
-		($jobN, $tmpCmd) = qsubSystem("$baseOut/LOGandSUB/krkDB.sh",$cmd,1,"1G",$jobN,"","",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
-		#print "Fix KRDB 2416\n";
-	}
-	#die $cmd;
-	return $jobN;
+	return "";
 }
 
 
@@ -5276,7 +5219,7 @@ sub mapReadsToRef{
 			
 			#$pa1[$i] =~ m/\/([^\/]+)\.f.*q$/;
 			#my $rgID = "$outName";
-			my $rgStr = getRgStr($outName,$libsOri[$i],$libsOri[$iS],$usePairs,$mapperProgLoc);
+			my $rgStr = getRgStr($outName,$libsOri[$i],$libsOri[$i],$usePairs,$mapperProgLoc);
 			#die "$rgStr\n";
 			if ($mapperProgLoc==1){ #bowtie2
 				if ($usePairs){
@@ -5296,12 +5239,12 @@ sub mapReadsToRef{
 			}elsif ($mapperProgLoc==4){ #kma
 				$algCmd .= "$algCmdBase -t_db $REF$MFcontstants{kmaIdxFileSuffix}  ";
 				if ($usePairs) {$algCmd .= " -ipe " . join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] " 
-				if ($iS >= (scalar @pa1)){$algCmd .= " -i $paS[$iS] " ;}
+				else {$algCmd .= " -i " . join(" ",@accRS) ;}
 				$algCmd .= " -o $tmpOutxtra[$i] ";
 			}elsif ($mapperProgLoc==5){ #strobealign
 				$algCmd .= "$algCmdBase $rgStr $REF  ";
 				if ($usePairs) {$algCmd .=  join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] " 
-				if ($iS >= (scalar @pa1)){$algCmd .= " $paS[$iS] " ;}
+				else {$algCmd .= " " . join(" ",@accRS) ;}
 			}
 			@accR1=(); @accR2=(); @accRS=(); #and empty what was already mapped
 
@@ -6463,16 +6406,14 @@ sub readG2M($){
 
 sub scndMap2Genos{
 	# ----------------- 2nd mapping (map to ref genomes supplied by user) ---------------------
-	my ($SmplName,$cMapGrp,$cAssGrp,$curOutDir,$nodeSpTmpD,$smplTmpDir,
+	my ($SmplName,$cMapGrp,$cAssGrp,$curOutDir,$nodeSpTmpD,
 			$sampleDepsAR,$calc2ndMapSNP,$boolScndCoverageOK) = @_;
 	my @mapOutXS;my @bamBaseNameS;
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
 	my $samplReadLength = $map{$curSmpl}{seqSet}->{samplReadLength};
 
 	for (my $i=0;$i<@bwt2outD; $i++){
-		$bwt2outD[$i] =~ m/\/([^\/]+)\/*$/;
-		my $smplXDB = $1;
-		push @mapOutXS, $smplTmpDir."xtraMaps/$smplXDB/";
+		push @mapOutXS, "$bwt2outD[$i]/.work/$SmplName/";
 		my $fname = $bwt2ndMapNmds[$i]."_".$SmplName."-0";
 		#if (length($fname ) > 20){$bwt2ndMapNmds[$i]."_".$SmplName."-0";
 		push @bamBaseNameS, $fname;
@@ -6485,7 +6426,7 @@ sub scndMap2Genos{
 	my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => join(",",@bwt2outD),unalDir=>"",
 					sbj => join(",",@DBbtRefX),assGrp => $cAssGrp,
 					smplName => $SmplName,#join(",",@bamBaseNameS),
-					glbTmp => $smplTmpDir."/xtraMaps/", is2ndMap => 1, 
+					glbTmp => "$baseOut/GlbMap/.work/$SmplName/alignments/", is2ndMap => 1,
 					qsubDir => "$logDir/map2nd/",mapSupport => 0,
 					glbMapDir => join(",",@mapOutXS),mappingStarted =>1,
 					readTec => ${$cleanSeqSetHR}{readTec}, #$map{$curSmpl}{SeqTech}
@@ -6538,7 +6479,7 @@ sub scndMap2Genos{
 				firstInSample => ($i == 0 ? 1 : 0), 
 				SeqTech => $map{$curSmpl}{SeqTech}, SeqTechSuppl => $map{$curSmpl}{seqTechX},
 				nodeTmpD => $dirset{nodeTmp}, #$nodeSpTmpD,
-				scratch => $dirset{glbTmp}, #"$smplTmpDir/SNP/",
+				scratch => $dirset{glbTmp},
 				qsubDir => $dirset{qsubDir}, jdeps => $map2CtgsY.";$bwt2ndMapDep",
 				cmdFileTag => $bwt2ndMapNmds[$i], minDepth => $MFopt{consSNPminDepth},
 				
@@ -7392,10 +7333,10 @@ sub genePredictions($ $ $ $ $) {
 		#first split euk vs bac contigs :: 22.6.23:: deprecated: use whokaryote that requires prodigal annotations first
 		die;
 		my $splCores = 10;
-		my ($refDB,$shrtDB,$clnCmd) = prepDiamondDB("NOG",$MFglobal{globaldDiaDBdir},$splCores,1);
+		my ($refDB,$shrtDB,$clnCmd) = prepDiamondDB("NOG",$baseOut."DB/DiamDB/",$splCores,1);
 		my $scmd = "mkdir -p $outDir\n";
 		my $splitKgdContig = getProgPaths("contigKgdSplit_scr");
-		$scmd .= "$splitKgdContig $inputScaff $scrathD $MFglobal{krakenDBDirGlobal} $MFglobal{globaldDiaDBdir} $splCores\n";
+		$scmd .= "$splitKgdContig $inputScaff $scrathD $MFglobal{krakenDBDirGlobal} ".$baseOut."DB/DiamDB/ $splCores\n";
 #		my $splitKgdContig2 = getProgPaths("contigKgdSplit_scr2");
 #		$scmd .= "$splitKgdContig2 $inputScaff $scrathD $gff $splCores\n";
 		$scmd .= "touch $scrathD/bac.euk.split.sto\n";
@@ -8039,5 +7980,3 @@ sub getCmdLineOptions{
 	print "Done. ";
 
 }
-
-
