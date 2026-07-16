@@ -97,7 +97,8 @@ sub createConsSNPandSVs;
 #4.02: 15.4.26: updated internal logic for passing read paths, enabled hybrid mode in complex assembly groups
 #4.03: 18.4.26: further fixes to hybrid assembly logic. separateCongigs.pl tech hardened.
 #4.04: 24.4.26: hybrid assembly logic, adapting GC to different binners
-my $MATFILER_ver = 4.04;
+#4.10: 16.5.26: CahtGPT 5.6 sol: completely rewrite of calling logic, multiple bugs fixed across various scripts, better metagStats reporting, hybrid assemblies strengthned.
+my $MATFILER_ver = 4.10;
 
 #----------------- defaults ----------------- 
 
