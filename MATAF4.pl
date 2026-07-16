@@ -7111,6 +7111,10 @@ sub spadesAssembly{
 
 sub movePreAssmData{
 	my ($metagD, $mvD,$mapD, $CSdir, $smplID, $breakpointTsv, $groupID ) = @_; #$tmpD ,
+	# Staging and backup directories must be siblings of the final package.
+	# Callers commonly include a trailing slash; strip it before suffixing $mvD,
+	# otherwise the rotation below tries to move the package into itself.
+	$mvD =~ s{/+$}{};
 	#very thorough checks that everything is correctly prepped
 	my $mvSTO = "$mvD/moved.sto";
 #	system "rm -fr $metagD;\n" if ($AssemblyGo && -e $mvSTO);

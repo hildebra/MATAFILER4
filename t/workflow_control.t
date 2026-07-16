@@ -149,6 +149,8 @@ like($mataf4, qr/my \@missingInputs\s*=\s*\@\{missing_input_files\(\@sourceInput
 	'normal execution validates authoritative inputs instead of generated rawRds destinations');
 like($mataf4, qr/if \(hybrid_package_complete\(\$mvD\)\)/,
 	'hybrid execution uses package-local completeness');
+like($mataf4, qr/sub movePreAssmData\s*\{.*?\$mvD\s*=~\s*s\{\/\+\$\}\{\};.*?my \$stage\s*=\s*"\$mvD\.stage\.\$packageTag"/s,
+	'preassembly packaging strips trailing slashes before creating sibling staging directories');
 like($mataf4, qr/SupportReads\}\s*=~\s*m\/\(\?:PB\|ONT\):\//,
 	'hybrid preassembly recognizes both supported long-read technologies');
 like($mataf4, qr/long_reads_detected.*?\(\?:PB\|ONT\)/s,
