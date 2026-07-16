@@ -12,10 +12,6 @@
 set -e
 ulimit -c 0;
 
-if [ -z "${MF4DIR:-}" ]; then
-	echo "MF4DIR is unset; export it to the MATAFILER4 installation directory before running this example." >&2
-	exit 1
-fi
 
 if [ ! -e $MF4DIR/examples/data/SRR8797713_2.fq.gz ]; then
 	echo "Input file not found (data/SRR8797713_2.fq.gz), run first 0.getExmplData.sh"
@@ -36,7 +32,7 @@ perl $MF4DIR/MATAF4.pl -map $MAP -inputFQregexSingle '.*\.fastq\.gz' -inputFQreg
 -assembleMG 2 -assemblCores 12 -assemblyKmers "25,43,67,87,111,127" -assemblMemory  20 -Binner 2  -profileMetaphlan 0 \
 -mapReadsOntoAssembly 1 -saveReadsNotMap2Assembly 0  -mappingMem 7 -filterHostRds 3 -hostileIndex human-t2t-hla \
 -mapper 5  -mapSaveCRAM 1 -getAssemblConsSNP 1 -SNPsaveVCF 1 -rmSmplLocks 1 \
--submit 0 \
+-submit 1 \
 -from 0 -to 20
 #-loopTillComplete 6:250  \
 
@@ -60,3 +56,4 @@ exit
 #-filterHostKrak2DB /path/to/kraken2/DB/human/ -filterHostRds 1 -> filter reads from host against specific, kraken2 database
 
 #there are many more flags in MG-TK. Have a look at the documentation to see these
+

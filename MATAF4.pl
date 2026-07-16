@@ -7244,7 +7244,7 @@ sub longRdAssembly{
 	}
 	
 	#die "@inRds\n";
-	print $cmd;#die;
+	#print $cmd;#die;
 	
 	$cmd .= "echo \"Starting $nameProg assembly\"\n";
 	
