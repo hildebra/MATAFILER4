@@ -1775,7 +1775,12 @@ sub submitGenomeBinner{
 		#only needed for pilea.. deactivate if not needed..
 		
 		my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$cAssGrp,0);
-		$postCmd .= " -read1 ". join(",",@$par1) ." -read2 ". join(",",@$par2) ." -readS ". join(",",@$parS); #currently not implemented.. maybe makes more sense to run this on global MAG collection?
+		# These inputs are optional (and currently only reserved for PileA).
+		# Never emit a bare option: Getopt::Long treats the following option or
+		# newline as its missing value and aborts the complete Bin job.
+		$postCmd .= " -read1 ".join(",",@$par1) if (@$par1);
+		$postCmd .= " -read2 ".join(",",@$par2) if (@$par2);
+		$postCmd .= " -readS ".join(",",@$parS) if (@$parS);
 		$postCmd .= "\n";
 	} 
 	$postCmd .= "\nrm -rf $nodeSpTmpD2\n";
