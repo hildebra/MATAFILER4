@@ -11,6 +11,7 @@ our @EXPORT_OK = qw(
 use warnings;
 use strict;
 use File::Basename;
+use File::Path qw(make_path);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw (systemW readFasta gzipopen getAssemblPath reverse_complement_IUPAC);
 use Mods::TamocFunc qw (cram2bsam);
@@ -42,20 +43,22 @@ sub readCMquals{
 	my $CM2mode=0; $CM2mode = 1 if ($IQ =~m/\.cm2/);
 	open I,"<$IQ" or die "Can't open maxbin2 quality $IQ\n";
 	while (<I>){
-		chomp; my @spl  = split /\t/;
+		chomp; my @spl  = split /\t/, $_, -1;
 		next if ($spl[0] eq "Bin Id" || $spl[0] eq "Name");
 		#die "can't find Bin \"$spl[0]\"\n" unless (exists($ret{$spl[0]}));
 		my $Bin = shift @spl;
 		if ($CM2mode){
+			die "Malformed CheckM2 row for $Bin in $IQ\n" unless @spl >= 2 && $spl[0] =~ /^\d+(?:\.\d+)?$/ && $spl[1] =~ /^\d+(?:\.\d+)?$/;
 			$rQ{$Bin}{compl} = $spl[0];
 			$rQ{$Bin}{conta} = $spl[1];
 			$rQ{$Bin}{hetero} = 0;
-			#$rQ{$Bin}{line} = join("\t",@spl);
+			$rQ{$Bin}{line} = join("\t",@spl);
 		} else {
+			die "Malformed CheckM row for $Bin in $IQ\n" unless @spl >= 13 && $spl[10] =~ /^\d+(?:\.\d+)?$/ && $spl[11] =~ /^\d+(?:\.\d+)?$/;
 			$rQ{$Bin}{compl} = $spl[10];
 			$rQ{$Bin}{conta} = $spl[11];
 			$rQ{$Bin}{hetero} = $spl[12];
-			#$rQ{$Bin}{line} = join("\t",@spl);
+			$rQ{$Bin}{line} = join("\t",@spl);
 		}
 	}
 	close I;
@@ -88,13 +91,18 @@ sub MB2assigns($ $){
 	#print "$inF\n";
 	open I,"<$inF" or die "Can't open Binner output $inF\n";
 	while (<I>){
-		chomp; my @spl  = split /\t/;
+		chomp; next if /^\s*$/;
+		my @spl  = split /\t/, $_, -1;
+		die "Malformed binner assignment in $inF at line $.\n" unless @spl >= 2 && length($spl[0]) && length($spl[1]);
 		next if ($spl[1] eq "0");
 		push(@{$ret{$spl[1]}}, $spl[0]);
 	}
 	close I;
 	
 	my $rQHR = readCMquals($IQ);
+	foreach my $bin (keys %ret) {
+		die "No quality record for assigned bin '$bin' in $IQ\n" unless exists $rQHR->{$bin};
+	}
 	#print "$inF, $IQ ". scalar(keys %{$rQHR}) ."\n";
 
 	return (\%ret,$rQHR);
@@ -173,7 +181,7 @@ sub filterMGS_CM{
 		$cnt++; next if ($cnt == 1);
 		chomp;my @spl=split/\t/;
 		#next if ($spl[0] eq "Bin Id");
-		if (($spl[$complIdx] <= $complT || $spl[$contIdx] > $contT) ){
+		if (($spl[$complIdx] < $complT || $spl[$contIdx] > $contT) ){
 			$ret{$spl[0]} = [$spl[$complIdx],$spl[$contIdx]] if (!$retBetter);
 			#die "$spl[11],$spl[12]\n" if ($spl[0] eq "MB2bin12");
 		} elsif ($retBetter) {
@@ -425,6 +433,10 @@ sub getRepresentBinsPerFamily{ #needs some work
 sub createBinCtgs{
 	#$binDctg,$hrM,"$logDir/MAGvsGC.txt.gz
 	my ($outD,$hrMap,$guideF,$perFam,$BinShrt) = @_;
+	die "Output directory is required\n" unless defined($outD) && length($outD);
+	die "Mapping data are required\n" unless ref($hrMap) eq 'HASH';
+	die "Representative-bin guide is missing: $guideF\n" unless defined($guideF) && -s $guideF;
+	make_path($outD);
 	
 	my $hr;
 	if ($perFam){
@@ -458,6 +470,7 @@ sub createBinCtgs{
 		if ($lastSmpl ne $smpl){
 			$lastSmpl = $smpl;
 			#print "Reading $smpl\n";
+			die "No assembly mapping for representative sample '$smpl'\n" unless exists($map{$smpl}) && defined($map{$smpl}{wrdir});
 			my $dirIn = $map{$smpl}{wrdir}; 
 			my $assDir = getAssemblPath($dirIn);
 			my $BinDir = "$assDir/Binning/$BinShrt/"; my $BinFile = "$BinDir/$smpl";
@@ -466,14 +479,16 @@ sub createBinCtgs{
 		}
 		
 		
-		my @ctgs = @{${$hr1}{$bin}};
+		die "Representative bin '$bin' was not found for sample '$smpl'\n" unless exists($hr1->{$bin}) && ref($hr1->{$bin}) eq 'ARRAY';
+		my @ctgs = @{$hr1->{$bin}};
 		#die "@ctgs\n". @ctgs . "\n";
 		
 		my $outF = "$outD/$MGS.ctgs.$MAG.fna";
 		#print "writing  $MGS.ctgs.$MAG.fna\n";
 		open O,">$outF" or die "Couldn't open $outF\n";
 		foreach my $ctg (@ctgs){
-			print O ">$ctg\n${$hr2}{$ctg}\n";
+			die "Contig '$ctg' from bin '$bin' is absent from the assembly for '$smpl'\n" unless exists($hr2->{$ctg});
+			print O ">$ctg\n$hr2->{$ctg}\n";
 		}
 		close O;
 		#die "$MAG :: $smpl $bin\n$dirIn\n$assDir\n$BinFile\n";
@@ -490,27 +505,32 @@ sub createBin2{
 	my $seq=""; my $hd=""; my %MGSfxa;
 	my $MGScnt=0; my $geneCnt=0;
 	my $fileEnd = ".fna"; $fileEnd = ".faa" if ($refFA =~ m/\.faa$/);
+	my $store_record = sub {
+		return unless $hd =~ m/^>(\d+)/;
+		my $gene_id = $1;
+		return unless exists($G2MGS{$gene_id});
+		$geneCnt++;
+		for my $MGS (keys %{$G2MGS{$gene_id}}) {
+			$MGSfxa{$MGS}{$hd} = $seq;
+		}
+	};
 	while (my $line = <$I>){
 		chomp $line;
 		if ($line =~ m/^>/){
-			#take care of old fna..
-			if ($hd =~ m/^>(\d+)/ && exists($G2MGS{$1})){
-				$geneCnt++;
-				my @tars = keys %{$G2MGS{$1}};
-				foreach my $MGS (@tars){
-					$MGSfxa{$MGS}{$hd} = $seq;
-				}
-			}
+			$store_record->();
 			$hd = $line; $seq = "";  
 			next;
 		}
 		$seq .= $line;
 	}
+	$store_record->();
 	close $I;
-	print "Found $geneCnt genes in " . scalar(keys%MGSfxa). " MGS (avg " . int($geneCnt/scalar(keys%MGSfxa)*100)/100  . " per MGS). Writing to $binD\n";
-	system "mkdir -p $binD" unless (-d $binD);
+	my $mgs_count = scalar keys %MGSfxa;
+	die "No genes from $cnopyF were found in $refFA\n" unless $mgs_count;
+	print "Found $geneCnt genes in $mgs_count MGS (avg " . int($geneCnt/$mgs_count*100)/100  . " per MGS). Writing to $binD\n";
+	make_path($binD);
 	foreach my $MGS (keys %MGSfxa){
-		open O,">$binD/$MGS$fileEnd";
+		open O,">$binD/$MGS$fileEnd" or die "Cannot write $binD/$MGS$fileEnd: $!\n";
 		foreach my $gen (keys %{$MGSfxa{$MGS}}){
 			print O "$gen\n$MGSfxa{$MGS}{$gen}\n";
 		}

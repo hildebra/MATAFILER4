@@ -29,8 +29,9 @@ use File::Path qw(make_path remove_tree);
 #.27: 12.11.24: removed necessity for -canopies flag
 #.28: 28.12.25: multi scaling flags for strainScr1 added
 #.29: checkpoint validation, quality-checker consistency, and Rhcl/MAG recovery fixes
+#.30: repair active-helper contracts, stage dependencies, dry-run behaviour, and checkpoints
 
-my $MGSpipelineVersion = 0.29;
+my $MGSpipelineVersion = 0.30;
 
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
 use Mods::GenoMetaAss qw(readMap getDirsPerAssmblGrp readClstrRev unzipFileARezip getAssemblPath systemW gzipopen);
@@ -174,13 +175,16 @@ GetOptions(
 	"legacy=i" => \$legacyV,			#1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0
 	"genomesPerFamily=i" => \$doBinCtgsPerFam,
 	#"customBinFile=s" => \$customBinFile, #take all genes per bin from this file -> need to go to withinStr.pl
-);
+) or die "Invalid MGS.pl options\n";
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
 #check all correct
 checkMF();
 die "Select exactly one quality checker: -useCheckM1 1 -useCheckM2 0, or vice versa\n"
 	unless ($useCheckM1 ? 1 : 0) + ($useCheckM2 ? 1 : 0) == 1;
 die "-wait4stoneTimeout must be zero or a positive number of seconds\n" if $wait4stoneTimeout < 0;
+die "Core and memory requests must be positive\n" unless $numCore > 0 && $canCore > 0 && $memG > 0;
+die "-binSpeciesMG must be one of 1..5\n" unless $binSpeciesMG >= 1 && $binSpeciesMG <= 5;
 
 #die "$useCheckM2 $useCheckM1\n";
 
@@ -474,21 +478,21 @@ if (0&&$useCanopies && $canopyF ne ""  && !-e $finalClusters2) {
 if ($useRHClust && (!-e "$finalClusters" || $rewrRHCL)){
 	#merge with deep canopies & canopies.. 
 	#collect good cluster core... (really?) -> deactivated by default
-	my $mrgFi = "$outD/$finalClusters2.ext.can";
-	createDeepCorrM($mrgFi,"$outD/$finalClusters2.core") unless (-e $finalClusters);
+	my $mrgFi = "$finalClusters2.ext.can";
+	createDeepCorrM($mrgFi,"$finalClusters2.core") unless (-e $finalClusters);
 	print "Creating Rhclusters\n"; 
 	#this saves old + new Rhcl MGS into $finalClusters
 	my ($href,$aref) = Rhclusts("$RsubmDir",$rewrRHCL,$mrgFi);
 	#now evalutate how many genes are completely new, and how many genes are not included
 	print "Evaluating R hclusters..\n";
-	evalRhcl_Bin("$outD/$finalClusters2.ext",$finalClusters,$href,$aref);
+	evalRhcl_Bin("$finalClusters2.ext",$finalClusters,$href,$aref);
 	if (!-e $finalClusters){die "Somthing went wrong creating *.Rhclpre summary\nMissing $finalClusters\n";}
 	refine_Rhcl_MGS($finalClusters);
 	for my $matrix (glob("$RsubmDir/*.mat")) {
 		unlink $matrix or die "Cannot remove $matrix: $!\n";
 	}
 	filterClustFile($finalClusters2,$finalClustersFilt);
-	$finalClusters2 = "$outD/$finalClusters2$txtDoRhcl.can$txtDoRhcl"; 
+	$finalClusters2 = "$finalClusters2$txtDoRhcl.can$txtDoRhcl";
 } else {
 	print "Rhcl not requested, skipping postclustering in Rhcl\n";
 	#is the default now::
@@ -522,7 +526,11 @@ if (!-e $BinExtrSto){
 
 #clean up a bit..
 if ($rewrTAX) {
-	for my $path (glob("$annoDir/GTDB*"), glob("$annoDir/kraken2*"), glob("$annoDir/specI*"), "$GCd/Anno/Tax/SpecI_MGS") {
+	for my $path (
+		glob("$annoDir/GTDB*"), glob("$annoDir/kraken2*"), glob("$annoDir/specI*"),
+		"$GCd/Anno/Tax/SpecI_MGS", "$GCd/Anno/Tax/${COGdir}_MGS",
+		$ABmgsSton, $ABmgsSton2
+	) {
 		if (-d $path) { remove_tree($path); }
 		elsif (-f $path) { unlink $path or die "Cannot remove $path: $!\n"; }
 	}
@@ -565,23 +573,27 @@ if (!-e $BinExtrSto){
 }
 
 #wait for checkm/GTDB
-qsubSystemJobAlive( \@jobs2wait,\%QSBopt );
-die "GTDB taxonomy stage incomplete\n$GTDBtaxF\n$annoDir/gtdbtk.summary.tsv\n$GTDBtaxSto\n"
-	unless -s $GTDBtaxF && -s "$annoDir/gtdbtk.summary.tsv" && -e $GTDBtaxSto;
+qsubSystemJobAlive( \@jobs2wait,\%QSBopt ) if $doSubmit;
+if ($doSubmit) {
+	die "GTDB taxonomy stage incomplete\n$GTDBtaxF\n$annoDir/gtdbtk.summary.tsv\n$GTDBtaxSto\n"
+		unless -s $GTDBtaxF && -s "$annoDir/gtdbtk.summary.tsv" && -e $GTDBtaxSto;
+}
 #if (!-e "$finalClusters2$cmSuffix" && -e "$finalClusters3$cmSuffix"){system "mv $finalClusters3$cmSuffix $finalClusters2$cmSuffix";} #needs to be moved
-die "CheckM2 scores missing\n$finalClusters2$cmSuffix\n" if (!-e "$finalClusters2$cmSuffix" );
+die "Bin-quality scores missing\n$finalClusters2$cmSuffix\n" if (!-e "$finalClusters2$cmSuffix" );
 #die "$cmSuffix\n";
 
 #get only MGS at >$complThre compl, <5 contamination (middle qual), to be used in abundance, strains etc
 #create filtered down final liste
 
-#generate taxonmy from kraken2 assignments
-if (1){
+#generate taxonomy from kraken2 assignments
+my @kraken_jobs;
+if (!-s "$annoDir/kraken2.LCA" || !-s "$annoDir/kraken2.tax"){
 	my $kr2taxScr = getProgPaths("taxPerMGS_scr");
 	my $cmd =  "$kr2taxScr $finalClustersFilt $GCd $annoDir/kraken2\n";# unless (-e "$finalClusters2.LCA");
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/krak2MGS.sh",$cmd,1,int(200/1)."G","KR2_MGS","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
+	push @kraken_jobs, $jobName2 if $jobName2;
 }
 
 
@@ -605,15 +617,18 @@ if (0 && !-e "$finalClusters2.matL0.txt"){ #deprecated, use specI based annotati
 #annotate specI's with MAGs added..
 
 
-unless (-e $ABmgsSton && -e "$outD/Annotation/Abundance/MGS.matL0.txt"){#-e "$GCd//Anno/Tax/${useGTDBmg}_MGS/MGS2speci.txt" ){
+my $specIoutDir = $legacyV ? "$GCd/Anno/Tax/SpecI_MGS" : "$GCd/Anno/Tax/${COGdir}_MGS";
+my $specIabundance = "$specIoutDir/specI.mat";
+my @annotation_jobs;
+unless (-e $ABmgsSton && -s $specIabundance && -s "$annoDir/specI.tax"){
 	my $specIabu = getProgPaths("specIGC_scr");
-	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS  $finalClustersFilt -MGStax $GTDBtaxF -outD  $outD -MGset $useGTDBmg\n";
+	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS $finalClustersFilt -MGStax $GTDBtaxF -MGset $useGTDBmg\n";
 	if ($legacyV){
 		$specIabu = getProgPaths("specIGC_scr_v0");
 		$cmdSI = "$specIabu $GCd $canCore $finalClustersFilt $GTDBtaxF\n";
 	}
-	$cmdSI .= "cp $GCd//Anno/Tax/SpecI_MGS/MGS2speci.txt $annoDir/specI.tax\n";
-	$cmdSI .= "test -s $outD/Annotation/Abundance/MGS.matL0.txt\n";
+	$cmdSI .= "cp $specIoutDir/MGS2speci.txt $annoDir/specI.tax\n";
+	$cmdSI .= "test -s $specIabundance\n";
 	$cmdSI .= "test -s $annoDir/specI.tax\n";
 	$cmdSI .= "touch $ABmgsSton\n";
 	printL "Merge with SpecI & get abundance \n";
@@ -621,22 +636,43 @@ unless (-e $ABmgsSton && -e "$outD/Annotation/Abundance/MGS.matL0.txt"){#-e "$GC
 
 	my @files = glob ("$GCd/FMG/tax/*tmp.m8");
 	#die "@files\n$GCd/FMG/*tmp.m8\n";
-	if (scalar(@files) >= 40){
+	if (scalar(@files) >= 40 && $doSubmit){
 		systemW $cmdSI ; 
 	} else {
 		print "Incomplete lambda FMG assignments.. submitting job\n";
 		my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS.sh",$cmdSI,1,int(200/1)."G","AB2_MGS","","",1,[],\%QSBopt) ;
 		$QSBopt{tmpSpace} =$tmpSHDD;
+		push @annotation_jobs, $jobName2 if $jobName2;
 	}
 }
 
-unless (-e $ABmgsSton2){
+qsubSystemJobAlive( \@annotation_jobs,\%QSBopt ) if $doSubmit && @annotation_jobs;
+if ($doSubmit) {
+	die "MGS/specI annotation stage incomplete\n$specIabundance\n$annoDir/specI.tax\n$ABmgsSton\n"
+		unless -s $specIabundance && -s "$annoDir/specI.tax" && -e $ABmgsSton;
+}
+
+my @marker_jobs;
+unless (-e $ABmgsSton2 && -s "$outD/Annotation/Abundance/MGS.matL0.txt" && -s "$outD/Annotation/Abundance/MGS.matL7.txt"){
 	my $MMLscr = getProgPaths("MAGMGSLCA_scr");
-	my $cmdSI2 = "$MMLscr -GCd $GCd -cores 4 -Binner $BinnerShrt -binD $outD;\ntouch $ABmgsSton2\n";
+	my $cmdSI2 = "$MMLscr -GCd $GCd -cores 4 -Binner $BinnerShrt -binD $outD\n";
+	$cmdSI2 .= "test -s $outD/Annotation/Abundance/MGS.matL0.txt\n";
+	$cmdSI2 .= "test -s $outD/Annotation/Abundance/MGS.matL7.txt\n";
+	$cmdSI2 .= "touch $ABmgsSton2\n";
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS_core.sh",$cmdSI2,4,int(100/4)."G","AB_MGS_core","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
+	push @marker_jobs, $jobName2 if $jobName2;
+}
+
+qsubSystemJobAlive( \@kraken_jobs,\%QSBopt ) if $doSubmit && @kraken_jobs;
+qsubSystemJobAlive( \@marker_jobs,\%QSBopt ) if $doSubmit && @marker_jobs;
+if ($doSubmit) {
+	die "Kraken MGS taxonomy stage incomplete\n" unless -s "$annoDir/kraken2.LCA" && -s "$annoDir/kraken2.tax";
+	die "Marker-based MGS abundance stage incomplete\n" unless -e $ABmgsSton2
+		&& -s "$outD/Annotation/Abundance/MGS.matL0.txt"
+		&& -s "$outD/Annotation/Abundance/MGS.matL7.txt";
 }
 
 #die;
@@ -662,18 +698,22 @@ if (!-e "$outDphylo/phylo/IQtree_allsites.treefile" || !-e "$outD/between_phylo/
 	$refTreeMsg = "#If you want to include custom reference genomes, use $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]";
 	$ph1Cmd .= " -xtraMsg \"$refTreeMsg\";";
 
-	#excute script
-	my $ph1OUT = `$ph1Cmd`;
-	my $ph1Status = $?;
-	die "Between-MGS phylogeny command failed (exit " . ($ph1Status >> 8) . "):\n$ph1Cmd\n$ph1OUT\n"
-		if $ph1Status != 0;
+	if (!$doSubmit) {
+		print "Dry run: between-MGS launcher was not executed.\n";
+	} else {
+		#execute the launcher and capture its scheduler dependency
+		my $ph1OUT = `$ph1Cmd`;
+		my $ph1Status = $?;
+		die "Between-MGS phylogeny command failed (exit " . ($ph1Status >> 8) . "):\n$ph1Cmd\n$ph1OUT\n"
+			if $ph1Status != 0;
 	#my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 	#my ($jobName2, $tmpCmd) = qsubSystem($logDir."/interMGSphylo.sh",$ph1Cmd,1,int(150/1)."G","MGSphylo","","",1,[],\%QSBopt) ;
 	#	print "WAITID=$dep\n";
-	print $ph1OUT;
-	die "Between-MGS phylogeny command did not report WAITID:\n$ph1OUT\n"
-		unless $ph1OUT =~ m/WAITID=(\d+)/;
-	$treedep = $1;
+		print $ph1OUT;
+		die "Between-MGS phylogeny command did not report WAITID:\n$ph1OUT\n"
+			unless $ph1OUT =~ m/WAITID=(\d+)/;
+		$treedep = $1;
+	}
 }
 
 
@@ -728,7 +768,7 @@ if ($numSamples > 1500){#scale with the number of assembly groups
 #my $prunTree = "$outD/between_phylo/prunned.nwk";
 #
 #my $ph2Cmd = "$strain1scr $GCd $finalClustersFilt.mgs $canCore $iniTree 0 1\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
-my $ph2Cmd = "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -maxCores $canCore  -MGSphylo $iniTree -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit 1 -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ \n";
+my $ph2Cmd = "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -maxCores $canCore  -MGSphylo $iniTree -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ \n";
 
 $ph2Cmd .= "#consider adapting further options: \n#-rmMSA 0 -presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -nodeTmp [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
 $ph2Cmd .= "#-minSNPCallQual 20 -GenesPerSpecies 0.1 -GeneLengthMin 0.5 -skipIndels 0 -minSNPDepth 2 -SNPdepthFilterScale 0.1 -SNPindelRangeFilt 5 -SNPadaptiveQual 0.0";

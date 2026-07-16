@@ -23,8 +23,9 @@ sub MGuniqStats;
 #.17: complete rewrite, MAG clustering now prioritizes low contamination and is much faster
 #.18: switched to reading sample_contig_gene from idx
 #.20: switched to C++ implementation of clusterMAGs.. this is only a hull script now, mostly disused.
+#.21: validate wrapper inputs and honour the selected marker and quality-checker modes
 
-my $version = 0.20;
+my $version = 0.21;
 
 my $startTime = time ;
 
@@ -75,7 +76,13 @@ GetOptions(
 	"ignoreIncompleteMAGs=i" => \$ignoIncomplMAGs,
 	"redo=i" => \$redo,
 	"legacy=i" => \$legacyV,
-);
+) or die "Invalid clusterMAGs.pl options\n";
+die "Unexpected positional arguments: @ARGV\n" if @ARGV;
+die "-GCd is required\n" unless length $inD;
+die "-cores must be a positive integer\n" unless $numCore > 0;
+die "-MGset must be GTDB or FMG\n" unless $useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG";
+die "Select exactly one of -useCheckM1 and -useCheckM2\n"
+	unless ($useCheckM1 ? 1 : 0) + ($useCheckM2 ? 1 : 0) == 1;
 
 print "#######################################################\nclusterMAGs algorithm, v$version\n#######################################################\n\n";
 print "Running in legacy mode\n" if ($legacyV);
@@ -113,13 +120,15 @@ my $clMAGsBin = getProgPaths("clusterMAGs");
 my $cmd = "";
 my $canoFlag = ""; $canoFlag = "-canopyDir $camoIn " if ($camoIn ne "");
 #-FILEtag SBx -MGtag MM2 -geneCatIdx C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/compl.incompl.95.fna.clstr.idx -MGdir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/MGs/ -outDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/out/ -map C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.0.txt,C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.1.txt -canopyDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/Cano/
-$cmd .= "$clMAGsBin  -CMsuffix .cm2 -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.95.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
-$cmd .= "-outDir $outD -map $mapF $canoFlag -MGfile $GCd/GTDBmg.subset.cats ;\n";
-$cmd .= "gzip -c $outD/MAGvsGC.txt > $logDir/MAGvsGC.txt.gz;\nrm $outD/MAGvsGC.txt;\n";
+$cmd .= "$clMAGsBin -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.95.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
+$cmd .= "-outDir $outD -map $mapF $canoFlag -MGfile $GCd/${COGdir}.subset.cats\n";
+$cmd .= "test -s $outD/MAGvsGC.txt\n";
+$cmd .= "gzip -c $outD/MAGvsGC.txt > $logDir/MAGvsGC.txt.gz\n";
+$cmd .= "test -s $logDir/MAGvsGC.txt.gz\nrm $outD/MAGvsGC.txt\n";
 
 if (1){ #C++ path.. better unless for testing something
 	print "$cmd\n";
-	system $cmd;
+	systemW $cmd;
 	print "\n\nDone with binary-based MAG clustering.\n\n";
 	exit;
 }

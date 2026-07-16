@@ -196,6 +196,7 @@ sub pileupcall{
 
 	my $useFB = 1;	$useFB = 0 if (uc($SNPIHR->{SNPcaller}) eq "MPI");
 	my $overwrite = $SNPIHR->{overwrite};
+	my $deferRegionPlanning = $SNPIHR->{deferRegionPlanning} || 0;
 
 	#basic caller options..
 	my $minBQ=30; my $minMQ=30.0;
@@ -242,13 +243,15 @@ sub pileupcall{
 		#$tar[0] = bam file;  $bedF = bedfile with regions
 		next if (!$run2ctg);
 		$bcftViewOpts .= "--no-header " if (scalar(@checkF)==1);
-		system "rm -f $qsubDirE/$smplNm.$tag*.bed" if ($i==0) ;
+		system "rm -f $qsubDirE/$smplNm.$tag*.bed" if ($i==0 && !$deferRegionPlanning) ;
 		my $cmd2 = $cmd ;
 		my $bedF = $qsubDirE."$smplNm.${tag}$i.bed";
 		push @checkF, $bedF;
-		next if (!-e $bedF && -e "$tmpOut.$tag$i" && !$overwrite);
+		next if (!$deferRegionPlanning && !-e $bedF && -e "$tmpOut.$tag$i" && !$overwrite);
 		if ($myParL){
-			open O,">",$bedF or die $!;print O $curReg[$i];close O;
+			unless ($deferRegionPlanning) {
+				open O,">",$bedF or die $!;print O $curReg[$i];close O;
+			}
 			if ($useFB){
 				$cmd2 .= " -t $bedF $tarR->[0] > $tmpOut.$tag$i && rm $bedF $locXtrCmd\n"; #--region '$curReg[$i]'
 			}else{
@@ -311,6 +314,7 @@ sub SNPconsensus_vcf{
 	my $maxSNPcores= $SNPIHR->{maxCores};
 	my $hasPrimaryRds = $SNPIHR->{hasPrimaryRds};
 	my $normalizeIndel = 1; $normalizeIndel = $SNPIHR->{normIndels} if (exists($SNPIHR->{normIndels})) ;
+	my $deferRegionPlanning = $SNPIHR->{deferRegionPlanning} || 0;
 	my $onlyNormalize = 0;
 
 	$memPJob = $SNPIHR->{memPJob};
@@ -370,7 +374,12 @@ sub SNPconsensus_vcf{
 	my @curReg = ("1"); my @regOrd;
 	my $myParL=0;
 	if ($splitFAsize>0){$myParL=1;}
-	if ($myParL && $run2ctg){ #no, don't redo freebayes part
+	if ($myParL && $run2ctg && $deferRegionPlanning) {
+		my $runtimeJobs = $SNPIHR->{split_jobs} || $maxSNPcores || 1;
+		$runtimeJobs = $maxSNPcores if ($runtimeJobs > $maxSNPcores);
+		$runtimeJobs = 1 if ($runtimeJobs < 1);
+		@curReg = (('runtime') x $runtimeJobs);
+	} elsif ($myParL && $run2ctg){ #no, don't redo freebayes part
 		my ($refAR,$refAR2);
 		if ($hasPrimaryRds && -e $SNPIHR->{depthF} ne ""){
 			 ($refAR,$refAR2) = getRegionsBamDepth($SNPIHR->{depthF},$SNPIHR->{split_jobs},$maxSNPcores);
@@ -389,13 +398,23 @@ sub SNPconsensus_vcf{
 		$samcores = $actualCores;#$SNPIHR->{split_jobs};
 	}
 	
-	my $rdep="";
+	my $rdep=$jdep;
 	#prepare files..
 	my $cleanCmd = ""; 
 	my $xtra = "";
 	$xtra .= "echo \"Preparing data\"\n";
 	$xtra .= "mkdir -p $scrDir;\n";
 	$xtra .= "$smtBin faidx $refFA;\n" unless (-e "$refFA.fai");
+	if ($deferRegionPlanning && $myParL && $run2ctg) {
+		my $runtimeJobs = scalar(@curReg);
+		my $bedPrefix = "$qsubDirE/$smplNm.";
+		$xtra .= "rm -f ${bedPrefix}*.bed\n";
+		$xtra .= "awk -v OFS='\\t' -v n=$runtimeJobs -v chunk=$splitFAsize -v prefix='$bedPrefix' 'BEGIN { i=0 } { for (s=0; s<\$2; s+=chunk) { e=s+chunk; if (e>\$2) e=\$2; f=prefix (i%n) \".bed\"; print \$1, s, e >> f; i++ } }' $refFA.fai\n";
+		$xtra .= "for i in \$(seq 0 ".($runtimeJobs - 1)."); do test -s ${bedPrefix}\${i}.bed || exit 42; done\n";
+		if ($SNPsuppStone ne "") {
+			$xtra .= "for i in \$(seq 0 ".($runtimeJobs - 1)."); do cp ${bedPrefix}\${i}.bed ${bedPrefix}sup-\${i}.bed; done\n";
+		}
+	}
 	#$xtra .= "exit\n"; #DEBUG
 	#$xtra .= "cp $refFA $refFA.fai $scrDir;\n";$refFA =~ m/\/([^\/]+$)/;$refFA = "$scrDir/$1";
 	#my $preTar = 
@@ -425,7 +444,8 @@ sub SNPconsensus_vcf{
 
 	if ($hasPrimaryRds){ #primary reads SNP call
 		
-		die "Can't find input file $tar[0] (SNP.pm)\n" unless (-e $tar[0]);
+		die "Can't find input file $tar[0] (SNP.pm)\n"
+			unless ($deferRegionPlanning || -e $tar[0]);
 		if ($bamcram eq "cram"){ #create index for bam/cram
 			$xtra .= "if [ ! -e $tar[0].crai ] || [ ! -s $tar[0].crai ]; then rm -f $tar[0].crai; $smtBin index -@ $samcores  $tar[0]; fi\n";
 		} else {
@@ -434,7 +454,7 @@ sub SNPconsensus_vcf{
 		
 		#find depthfil for input bam (primary)
 		$depthFile = $tar[0];$depthFile =~ s/\.cram$|\.bam$/\.bam\.coverage\.gz/;
-		if (!-e $depthFile){$depthFile =~ s/\.gz//; die "no depth file found (SNP.pm): $depthFile\n$tar[0]\n" if (!-e $depthFile);}
+		if (!-e $depthFile && !$deferRegionPlanning){$depthFile =~ s/\.gz//; die "no depth file found (SNP.pm): $depthFile\n$tar[0]\n" if (!-e $depthFile);}
 		if (!$runLocalTmp && $run2ctg && (!-e $tar[0] || !-e $refFA) ){
 			my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.CramToBam$x.sh",$xtra,2,"17G","CtB$x",$jdep,"",$samcores,[],$QSBoptHR);
 			$cleanCmd .= "rm -r $scrDir\n";$rdep = $dep;$xtra = "";
@@ -452,7 +472,7 @@ sub SNPconsensus_vcf{
 		my $xtra2 = "echo \"Creating c/bams indexes supplemental reads\"\n";
 		
 		$depthFileS = $tarS[0];$depthFileS =~ s/\.cram$|\.bam$/\.bam\.coverage\.gz/;
-		if (!-e $depthFileS){$depthFileS =~ s/\.gz//; die "no suppl depth file found (SNP.pm): $depthFileS\n$tarS[0]\n" if (!-e $depthFileS);}
+		if (!-e $depthFileS && !$deferRegionPlanning){$depthFileS =~ s/\.gz//; die "no suppl depth file found (SNP.pm): $depthFileS\n$tarS[0]\n" if (!-e $depthFileS);}
 		#die "$depthFileS\n";
 		if ($bamcram eq "cram"){ #create index for bam/cram
 			$xtra2 .= "if [ ! -e $tarS[0].crai ] || [ ! -s $tarS[0].crai ]; then rm -f $tarS[0].crai; $smtBin index -@ $samcores  $tarS[0]; fi\n";
@@ -575,7 +595,7 @@ sub SNPconsensus_vcf{
 		#this is the new way of doing this
 		my $tmpS = $QSBoptHR->{tmpSpace};
 		$QSBoptHR->{tmpSpace} = 3*$memReqGB; #in GB
-		my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.oSNPc.sh",$cmdAll,int($actualCores*1.1),$memReqGB."G","Cons$x",join(";",@allDeps2),"",1,[],$QSBoptHR);
+		my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.oSNPc.sh",$cmdAll,int($actualCores*1.1),$memReqGB."G","Cons$x",join(";",$jdep,@allDeps2),"",1,[],$QSBoptHR);
 		$rdep =$dep;
 		$QSBoptHR->{tmpSpace} = $tmpS;
 	}
@@ -703,8 +723,6 @@ sub SVcall_vcf{
 	
 	return $dep;
 }
-
-
 
 
 

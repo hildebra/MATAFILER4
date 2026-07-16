@@ -763,7 +763,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	#binning done?
 	my $calcBinning = 0;
-	if ($MFopt{DoMetaBat2} && $boolAssemblyOK && !$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ &&  (!-e "$BinningOut.cm" && !-s "$BinningOut.cm2") ) {
+	# A downstream job need not wait for its inputs to exist at submission time.
+	# For a normal (non-hybrid-preassembly) group, AssemblyGo means that this
+	# invocation will schedule the final assembly and all of its mappings.  The
+	# binner is submitted later with those scheduler dependencies.
+	if ($MFopt{DoMetaBat2} && !$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo
+			&& (!-e "$BinningOut.cm" && !-s "$BinningOut.cm2") ) {
 		$calcBinning=$MFopt{DoMetaBat2};
 		#die "$MFopt{DoMetaBat2} && $boolAssemblyOK && $AssemblyGo && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ &&  (!-e $BinningOut.cm || !-s $BinningOut.cm2\n";
 	}
@@ -1312,9 +1317,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$jdep = normalise_job_dependencies($contRun, $deferredContigDeps);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredContigDeps);
 
-		if ($MFopt{DoMetaBat2} == 4 && $contRun ne "") {
+		if ($contRun ne "") {
 			append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $contRun);
-			print "Added main contig stats as a GenomeFace dependency\n";
+			print "Added main contig stats as a downstream dependency\n"
+				if ($MFopt{DoMetaBat2} == 4);
 		}
 
 	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ ) || $calcCoverage) ) {
@@ -1332,18 +1338,22 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ( $calcBinning && $AssemblyGo ){  #$allMapDone rm: this is checked now via $AsGrps{$cAssGrp}{MapDeps}
 		my $binnerTmp = $nodeSpTmpD;
 		$binnerTmp = $smplTmpDir if ($MFopt{useBinnerScratch});
-		my $binDep  = submitGenomeBinner($binnerTmp,$metaGassembly,$BinningOut, $cAssGrp,$smplIDs[-1]);
+		my $binDep  = submitGenomeBinner($binnerTmp,$finAssLoc,$BinningOut, $cAssGrp,$smplIDs[-1]);
 		add2SampleDeps(\@sampleDeps, [$binDep]);
 	}
 
 	
 	#die "AT CONS SNP\n$allMapDone\n";
-	if ( ($calcConsSNP || $calcSuppConsSNP || $calcSVs || $calcSVsSupp ) && $allMapDone && !$calcCoverage){
+	my $assemblyDownstreamScheduled = $AssemblyGo && !$doPreAssmFlag && !$ePreAssmblPck
+		&& ($efinAssLoc || $MFopt{DoAssembly} != 5 || $postPreAssmblGo)
+		&& (!$map{$curSmpl}{hasPrimaryRds} || ($MFopt{map2Assembly} && $MappingGo));
+	if ( ($calcConsSNP || $calcSuppConsSNP || $calcSVs || $calcSVsSupp )
+			&& (($allMapDone && !$calcCoverage) || $assemblyDownstreamScheduled)){
 		#die "conssnp:: $calcConsSNP $allMapDone $finalMapDir\n";
 		#my $ofas = "$curOutDir/SNP/genePred/genes.shrtHD.SNPc.fna";
 	
 		my %SNPinfo = (gff => "$finalCommAssDir/genePred/genes.gff",
-						assembly => $metaGassembly,
+						assembly => $finAssLoc,
 						mapD => "$finalMapDir",normIndels => $MFopt{normSNPindels},
 						SNPcaller => $MFopt{SNPcallerFlag},hasPrimaryRds => $map{$curSmpl}{hasPrimaryRds},
 						createFastas => $MFopt{saveConsFastas},
@@ -1355,7 +1365,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						depthF => $coveragePerCtg,firstInSample => 1, #($i == 0 ? 1 : 0)
 						bpSplit => 1e6,runLocal => 1,SeqTech => $map{$curSmpl}{SeqTech},SeqTechSuppl => "",
 						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
-						dependency => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
+						jdeps => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
+						deferRegionPlanning => (!$allMapDone || $calcCoverage ? 1 : 0),
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
 						STOconSNP => $STOsnpCons, STOconSNPsupp => "",
 						minCallQual => $MFopt{SNPminCallQual},
@@ -7295,7 +7306,8 @@ sub prepPreAssmbl{
 	my $PostAssemblyGo = 0;
 	#print "UUU $doPreAssmFlag\n";
 	my $finJobs = ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssNoPrim} ); #+ $AsGrps{$cAssGrp}{CntPreAssMiss}
-	print "FIN: $finJobs ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssMiss}) >= $AsGrps{$cAssGrp}{CntAimAss}\n";
+	print "FIN: $finJobs ($AsGrps{$cAssGrp}{CntPreAss} packages + "
+		."$AsGrps{$cAssGrp}{CntPreAssNoPrim} without-primary) >= $AsGrps{$cAssGrp}{CntAimAss}\n";
 	$PostAssemblyGo = 1 if (!$doPreAssmFlag && ( $finJobs >= $AsGrps{$cAssGrp}{CntAimAss}) ); #has already seen enough complete preAssmblies
 	$doPreAssmFlag = 1 if (!$PostAssemblyGo); 
 	#print "-e $CSdir/Coverage.percontig   $metagD/$stones{preAsmDone}\n" ;
@@ -7307,6 +7319,12 @@ sub prepPreAssmbl{
 
 sub longRdAssembly{
 	my ($asHr,$cAsGrp,$nodeTmp,$finalOut,$helpAssembl,$smplName, $useSupportRds,$LassP) = @_;
+	# $finalOut is normally passed as ".../metag/".  Staging and backup
+	# directories must be siblings of that directory; suffixing a trailing-slash
+	# path creates children such as "metag/.hybrid-stage", after which the
+	# publication rotation attempts to move metag into itself and the next loop
+	# resubmits metaMDBG.  Canonicalise before constructing the atomic paths.
+	$finalOut =~ s{/+$}{};
 	
 	my ($p1ar,$p2ar,$singlAr,$cReadTecAr) = getCleanSeqsAssmGrp($asHr, $cAsGrp, $useSupportRds);
 	if (@{$p1ar} > 0 &&$p1ar->[0] ne ""){print "Paired reads defined (@{$p1ar}), but long read assemblies rely on singleton reads!\nAborting\n";die;}

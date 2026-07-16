@@ -976,6 +976,10 @@ sub resetAsGrps{
 		$AsGrps->{$cAssGrp}{CntMap} = 0;
 		$AsGrps->{$cAssGrp}{CntAss} = 0;
 		$AsGrps->{$cAssGrp}{CntPreAss} = 0;
+		$AsGrps->{$cAssGrp}{CntPreAssMiss} = 0;
+		$AsGrps->{$cAssGrp}{CntPreAssNoPrim} = 0;
+		$AsGrps->{$cAssGrp}{preAsmblDir} = [];
+		$AsGrps->{$cAssGrp}{AssemblSmplDirs} = "";
 		$AsGrps->{$cAssGrp}{BinDeps} = "";
 		$AsGrps->{$cAssGrp}{readDeps} = "";
 		$AsGrps->{$cAssGrp}{scndMapping} = "";

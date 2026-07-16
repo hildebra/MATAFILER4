@@ -174,6 +174,14 @@ like($mataf4,
 	'shared assembly rebuild retains the established destructive authorization gate');
 like($mataf4, qr/Submitting deferred assembly-group mapping jobs.*?postSubmQsub/s,
 	'assembly-group mappings deferred before the final member are submitted after assembly scheduling');
+like($mataf4, qr/if \(\$MFopt\{DoMetaBat2\} && !\$doPreAssmFlag.*?\$AssemblyGo/s,
+	'binning can be scheduled on the first pass once the final group assembly is scheduled');
+like($mataf4, qr/append_job_dependencies\(\\\$AsGrps\{\$cAssGrp\}\{BinDeps\}, \$contRun\)/,
+	'all binners wait for the contig-stat job that creates their coverage inputs');
+like($mataf4, qr/submitGenomeBinner\(\$binnerTmp,\$finAssLoc/,
+	'first-pass binning consumes the final assembly path populated by cleanup');
+like($mataf4, qr/jdeps => \$AsGrps\{\$cAssGrp\}\{BinDeps\}.*?deferRegionPlanning/s,
+	'first-pass consensus receives real scheduler dependencies and defers input inspection');
 unlike($mataf4,
 	qr/\{(?:AssemblJobName|MapDeps|BinDeps|SeqClnDeps|SeqUnZDeps|UnzpDeps|readDeps|DiamDeps|scndMapping|prodRun)\}\s*\.=/,
 	'central workflow dependencies are not assembled with fragile string concatenation');
@@ -199,12 +207,26 @@ like($groups, qr/sub resetAsGrps.*?\{UnzpDeps\}\s*=\s*""/s,
 my %loop_groups = (group => {
 	UnzpDeps => 'old-job', nothing => ['discarded'],
 	FilterSeq1 => [], FilterSeq2 => [], FilterSeqS => [], ReadTec => [],
-	MapSupCopies => [],
+	MapSupCopies => [], CntPreAss => 2, CntPreAssMiss => 3,
+	CntPreAssNoPrim => 4, preAsmblDir => ['old-package'],
+	AssemblSmplDirs => "/old/sample\n",
 });
 resetAsGrps(\%loop_groups);
 is($loop_groups{group}{UnzpDeps}, '',
 	'loop reset behavior removes stale unzip dependencies');
 is_deeply($loop_groups{group}{nothing}, [],
 	'loop reset preserves the discard copy target as an array reference');
+is_deeply(
+	[@{$loop_groups{group}}{qw(CntPreAss CntPreAssMiss CntPreAssNoPrim)}],
+	[0, 0, 0],
+	'hybrid readiness counters do not accumulate across loopTillComplete passes');
+is_deeply($loop_groups{group}{preAsmblDir}, [],
+	'hybrid package paths are rebuilt once per loop pass without duplicates');
+is($loop_groups{group}{AssemblSmplDirs}, '',
+	'assembly membership output is rebuilt once per loop pass without duplicates');
+
+like($mataf4,
+	qr/sub longRdAssembly\s*\{.*?\$finalOut\s*=~\s*s\{\/\+\$\}\{\};.*?my \$stageOut\s*=\s*"\$finalOut\.hybrid-stage"/s,
+	'hybrid publication strips trailing slashes before creating sibling staging directories');
 
 done_testing;
