@@ -5461,8 +5461,11 @@ sub bamDepth{
 	my ($CRAMcmd,$CRAMf) = bam2cram($nxtBAM,$REF,1,$doCram,$cramSTO, $numCore);
 	$CRAMcmd = "echo \"Building .cram ...\"\n$CRAMcmd" if ($CRAMcmd ne "");
 	unless ($mappDir eq $tmpOut){
-		$CRAMcmd .= "\nmv $CRAMf* $mappDir 2>/dev/null \n" unless ($CRAMf eq "");
-		$CRAMcmd .= "mv $nxtBAM* $mappDir 2>/dev/null \n" unless ($nxtBAM eq "");
+		# Move each generated artifact separately.  Optional sidecars (for example
+		# *.breakpoints.tsv.gz) can disappear during tool cleanup; a broad mv glob
+		# then aborts the otherwise successful MAP job with "cannot stat".
+		$CRAMcmd .= "\nfor map_artifact in $CRAMf*; do [ -e \"\$map_artifact\" ] || continue; mv \"\$map_artifact\" \"$mappDir/\" 2>/dev/null || [ ! -e \"\$map_artifact\" ]; done\n" unless ($CRAMf eq "");
+		$CRAMcmd .= "for map_artifact in $nxtBAM*; do [ -e \"\$map_artifact\" ] || continue; mv \"\$map_artifact\" \"$mappDir/\" 2>/dev/null || [ ! -e \"\$map_artifact\" ]; done\n" unless ($nxtBAM eq "");
 	}
 	$CRAMcmd .= "echo \"".basename($nxtBAM)."\" > $mappDir/done.sto\n" if(!$supportRds || !$map{$curSmpl}{hasPrimaryRds});
 
