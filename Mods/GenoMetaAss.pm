@@ -942,19 +942,12 @@ sub emptyAssGrpsObj($){
 		$AsGrps{$k}{DiamDeps} = "";
 		$AsGrps{$k}{SeqClnDeps} = "";
 		#print $AsGrps{$k}{CntAimAss} ."\n";
-		#remove tmp dirs
-		$AsGrps{$k}{ClSeqsRm} = "";
-		#copy to final folder
-		@{$AsGrps{$k}{MapCopies}} = ();
-		@{$AsGrps{$k}{AssCopies}} = ();
-		$AsGrps{$k}{MapCopiesNoDel} = [];
 		#filteredSequenceFiles for assembly
 		$AsGrps{$k}{PostAssemblCmd} = "";
 		$AsGrps{$k}{PostClnCmd} = "";
 		$AsGrps{$k}{PostConsCmd} = "";
 		$AsGrps{$k}{AssemblSmplDirs} = "";
 		$AsGrps{$k}{scndMapping} = "";
-		$AsGrps{$k}{ClSeqsRm} = "";
 		#complex hashes replaces FilterSeq1 ..
 		$AsGrps{$k}{CleanSeqs} = {};
 		$AsGrps{$k}{RawSeqs} = {};
@@ -992,22 +985,14 @@ sub resetAsGrps{
 		@{$AsGrps->{$cAssGrp}{FilterSeq2}} = ();
 		@{$AsGrps->{$cAssGrp}{FilterSeqS}} = ();
 		@{$AsGrps->{$cAssGrp}{ReadTec}} = ();
-		@{$AsGrps->{$cAssGrp}{MapSupCopies}} = ();
 		$AsGrps->{$cAssGrp}{CleanSeqs} = {};
 		$AsGrps->{$cAssGrp}{RawSeqs} = {};
 		$AsGrps->{$cAssGrp}{SeqClnDeps} = "";
-		$AsGrps->{$cAssGrp}{AssCopies} = [];
 		$AsGrps->{$cAssGrp}{prodRun} = "";
 		$AsGrps->{$cAssGrp}{AssemblJobName} = "";
 		$AsGrps->{$cAssGrp}{PostAssemblCmd} = "";
-		$AsGrps->{$cAssGrp}{ClSeqsRm} = "";
 		$AsGrps->{$cAssGrp}{MapDeps} = "";
 		$AsGrps->{$cAssGrp}{BinDeps} = "";
-		$AsGrps->{$cAssGrp}{MapCopies} = [];
-		$AsGrps->{$cAssGrp}{MapCopiesNoDel} = [];
-		# This is a deliberate discard target used through push @{$group->{nothing}}
-		# when a deferred mapping has no files to copy.
-		$AsGrps->{$cAssGrp}{nothing} = [];
 		$AsGrps->{$cAssGrp}{PostClnCmd} = "";
 		$AsGrps->{$cAssGrp}{PostConsCmd} = "";
 		$AsGrps->{$cAssGrp}{CSfinJobName} = "";

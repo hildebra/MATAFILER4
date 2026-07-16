@@ -176,24 +176,44 @@ like($mataf4, qr/Submitting deferred assembly-group mapping jobs.*?postSubmQsub/
 	'assembly-group mappings deferred before the final member are submitted after assembly scheduling');
 like($mataf4,
 	qr/my \$command_dependencies\s*=\s*normalise_job_dependencies\(.*?\$submitted\[-1\]/s,
-	'deferred mapper and sort/depth commands retain their submission order');
+	'deferred combined mapping commands retain their submission order');
 like($mataf4,
-	qr/Submitting deferred assembly-group mapping jobs.*?manageFiles\(.*?\$mappingDeferred\).*?MultiContigStats\.sh.*?MultiConsensus\.sh/s,
-	'assembly groups release mapping, group-final cleanup, contig statistics, and consensus in stages');
+	qr/Submitting deferred assembly-group mapping jobs.*?my \$publicationDeps = normalise_job_dependencies\(.*?MultiContigStats\.sh.*?MultiConsensus\.sh/s,
+	'assembly groups release mapping, producer publication, contig statistics, and consensus in stages');
 like($mataf4,
-	qr/sub manageFiles\s*\{.*?return "" if \(\$deferClean\).*?my \@moves = \(\@\{\$AsGrps\{\$cAssGrp\}\{MapCopies\}\},\@\{\$AsGrps\{\$cAssGrp\}\{AssCopies\}\}\).*?clean_tmp/s,
-	'deferred members retain mapping publication targets for one final group cleanup');
-unlike($mataf4, qr/MultiMapClean\.sh|PostMapCleanCmd|DeferredCleanDeps/,
-	'no per-member cleanup is released before all group mappings are registered');
+	qr/params\{mappingCommand\}.*?my \$mappingCommand = delete\(\$mapparhr->\{mappingCommand\}\).*?qsubSystem\(\$combinedScript/s,
+	'MAP and sort/depth are submitted as one combined scheduler job');
+unlike($mataf4, qr/SBAM/,
+	'the obsolete separate SBAM scheduler stage is no longer named or submitted');
+unlike($mataf4, qr/sub (?:clean_tmp|manageFiles)\b|MapCopies|AssCopies|MapSupCopies|MapCopiesNoDel|PsAssCopies/,
+	'result-moving cleanup routines and copy-state queues have been removed');
 like($mataf4,
-	qr/\$cmd\s*\.\=\s*"mkdir -p \$cps\[\$i\+1\]\\n";.*?\$mvCmd \$cps\[\$i\]/s,
-	'cleanup creates every output destination before moving mapping and assembly results');
+	qr/my \$publishStage = "\$finalD\/\.\$baseN\.mapping-stage".*?quickcheck.*?touch \$cramSTO/s,
+	'mapping publication validates staged output and writes its completion marker last');
+like($mataf4,
+	qr/if \(\$outstat && \$outstat2 && !\$breakpointDone && \$mappingCommand eq ""\).*?my \$breakpointCoverage.*?return \(\$breakpointJob/s,
+	'a missing breakpoint report is repaired from canonical coverage without rebuilding mapping');
+like($mataf4,
+	qr/sub check_map_done.*?Only canonical outputs count as complete.*?sub check_depth_done/s,
+	'mapping completeness is determined only from canonical final outputs');
+like($mataf4,
+	qr/sub spadesAssembly.*?\$finalOut\.assembly-stage.*?mv \$stageOut \$finalOut.*?sub longRdAssembly.*?\$finalOut\.hybrid-stage.*?mv \$stageOut \$finalOut.*?sub megahitAssembly.*?\$finalOut\.assembly-stage.*?mv \$stageOut \$finalOut/s,
+	'all assembly producers validate and rotate staged output into the canonical directory');
+like($mataf4,
+	qr/sub createPsAssLongReads.*?my \$psStage = "\$psFinal\.stage".*?mv -f \$psStage \$psFinal.*?touch \$pseudoAssFileFlag/s,
+	'pseudoassembly is atomically published before its completion marker');
+like($mataf4,
+	qr/sub calcCoverage2nd.*?return \(\$jobName,\$tmpCmd\)/s,
+	'completed secondary coverage does not generate a perpetual combined mapping job');
+like($mataf4,
+	qr/deferMappingCleanup => 1.*?my \$secondMapCmd = \$bigMap\."\\n"\.\$bigCov.*?sharedMapWork/s,
+	'multi-reference mapping keeps shared node-local alignments until every reference is published');
 like($mataf4, qr/if \(\$MFopt\{DoMetaBat2\} && !\$doPreAssmFlag.*?\$AssemblyGo/s,
 	'binning can be scheduled on the first pass once the final group assembly is scheduled');
 like($mataf4, qr/append_job_dependencies\(\\\$AsGrps\{\$cAssGrp\}\{BinDeps\}, \$contRun\)/,
 	'all binners wait for the contig-stat job that creates their coverage inputs');
 like($mataf4, qr/submitGenomeBinner\(\$binnerTmp,\$finAssLoc/,
-	'first-pass binning consumes the final assembly path populated by cleanup');
+	'first-pass binning consumes the producer-published final assembly path');
 like($mataf4, qr/jdeps => \$AsGrps\{\$cAssGrp\}\{BinDeps\}.*?deferRegionPlanning/s,
 	'first-pass consensus receives real scheduler dependencies and defers input inspection');
 unlike($mataf4,
@@ -219,17 +239,15 @@ like($groups, qr/sub resetAsGrps.*?\{UnzpDeps\}\s*=\s*""/s,
 	'loop reset removes completed unzip job ids before the next submission pass');
 
 my %loop_groups = (group => {
-	UnzpDeps => 'old-job', nothing => ['discarded'],
+	UnzpDeps => 'old-job',
 	FilterSeq1 => [], FilterSeq2 => [], FilterSeqS => [], ReadTec => [],
-	MapSupCopies => [], CntPreAss => 2, CntPreAssMiss => 3,
+	CntPreAss => 2, CntPreAssMiss => 3,
 	CntPreAssNoPrim => 4, preAsmblDir => ['old-package'],
 	AssemblSmplDirs => "/old/sample\n", PostConsCmd => 'old-consensus',
 });
 resetAsGrps(\%loop_groups);
 is($loop_groups{group}{UnzpDeps}, '',
 	'loop reset behavior removes stale unzip dependencies');
-is_deeply($loop_groups{group}{nothing}, [],
-	'loop reset preserves the discard copy target as an array reference');
 is_deeply(
 	[@{$loop_groups{group}}{qw(CntPreAss CntPreAssMiss CntPreAssNoPrim)}],
 	[0, 0, 0],

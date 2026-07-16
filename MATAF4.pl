@@ -55,7 +55,6 @@ sub smplStats; sub checkDrives;
 sub isLastSampleInAssembly;
 sub uploadRawFilePrep; sub unploadRawFilePostprocess;
 sub seedUnzip2tmp; sub cleanInput; #unzipping reads; removing these at later stages ; remove tmp dirs
-sub manageFiles;sub clean_tmp; 
 
 sub sdmClean; sub sdmOptSet;  #qual filter reads
 sub mergeReads; #merge reads via flash
@@ -486,7 +485,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if (!$efinAssLoc && -e $metaGassembly && (-e "$metagAssDir/$stones{asmDone}" || -e "$metagAssDir/$stones{preAsmDone}")){
 		my $tagS = "Assembly";
 		if (-e "$metagAssDir/$stones{preAsmDone}"){$tagS = "preAssembly";}
-		print "moving finished $tagS to final location\n";
+		print "Migrating legacy scratch $tagS to final location\n";
 		#print "$metaGassembly\n";
 		systemW "mkdir -p $finalCommAssDir" unless ($dfinalCommAssDir);
 		systemW "$mvCmd $metagAssDir/* $finalCommAssDir/";
@@ -1052,7 +1051,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		if ($prodRun ne ""){
 			$AsGrps{$cAssGrp}{pseudoAssmblDep}  = $prodRun;
 		}
-		push(@{$AsGrps{$cAssGrp}{PsAssCopies}}, $asmDir."/metag/*",$finalCommAssDir);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $prodRun);
 	}
 	
@@ -1142,7 +1140,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#die;
 		metagAssemblyRun( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$geneDir,  $SmplNameX,$scaffoldFlag,$metaGscaffDir,
 					$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo,$finalCommAssDir);
-		push(@{$AsGrps{$cAssGrp}{AssCopies}}, $asmDir."/metag/*",$finalCommAssDir);
+		my $producedAssemblyDir = ($MFopt{DoAssembly} == 5 && $doPreAssmFlag)
+			? $metagAssDir : $finalCommAssDir;
+		$metaGassembly = "$producedAssemblyDir/scaffolds.fasta.filt";
+		$geneDir = "$producedAssemblyDir/genePred/";
 
 		#call genes, depends on assembly
 		$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"",$smplTmpDir,1);
@@ -1185,8 +1186,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		scndMap2Genos($SmplName,$cMapGrp,$cAssGrp,$curOutDir,$nodeSpTmpD,$smplTmpDir,
 			\@sampleDeps,$calc2ndMapSNP,$boolScndCoverageOK);
 	} elsif ($MFopt{mapModeActive}) {
-		#still needs delays in cleaning command
-		$AsGrps{$cMapGrp}{ClSeqsRm} .= ";".$smplTmpDir;
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps); next;
 	}
@@ -1209,14 +1208,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $mappingDeferred = 0;
 	if ($doMapping){ #mapping to the assembly (can be multi-sample assembly as well)
 		my $moveMappings = 0; $moveMappings =1 if (!$eFinMapCovGZ && -e "$mapOut/$SmplName-smd.bam.coverage.gz");
+		if ($moveMappings) {
+			# One-time migration for outputs created by releases that used a separate
+			# result-moving job. New mapping jobs never write completed products here.
+			print "Migrating legacy scratch mapping to finaldir\n";
+			systemW "mkdir -p $finalMapDir\n$mvCmd $mapOut/* $finalMapDir/";
+		}
 
 		my $mapNow =0;
-		$mapNow = 1 if (!$moveMappings && ($AssemblyGo ||  $efinAssLoc || ($ePreAssmbly && $doPreAssmFlag) ) );#controls if several samples are assembled together and this needs to be waited for
+		$mapNow = 1 if ($AssemblyGo ||  $efinAssLoc || ($ePreAssmbly && $doPreAssmFlag) );#controls if several samples are assembled together and this needs to be waited for
 		#print "main map\n";
-		my $unAlDir = "$mapOut/unaligned/";$unAlDir = "" if (!$MFopt{SaveUnalignedReads}); #in most cases we don't need unaligned reads..
+		my $unAlDir = "$finalMapDir/unaligned/";$unAlDir = "" if (!$MFopt{SaveUnalignedReads}); #in most cases we don't need unaligned reads..
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,mappingStarted =>1,
-						glbTmp => $smplTmpDir."/toMGctgs/",glbMapDir => $mapOut,mapSupport => 0,
+						glbTmp => $nodeSpTmpD."_mapWork/",glbMapDir => $finalMapDir,mapSupport => 0,
 						readTec => ${$cleanSeqSetHR}{readTec}, submit => 1,submNow => $mapNow,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam,
 						# Primary short- and long-read assemblies always receive a breakpoint report.
@@ -1228,23 +1233,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$delaySubmCmd .= "\n".$delaySubmCmd_2;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $map2Ctgs_2);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $map2Ctgs_2);
-		my $cpyStrm = "MapCopies";
-		$cpyStrm = "MapCopiesNoDel" if ($mapSuppAssFlag || $eFinSupMapCovGZ);
-		$cpyStrm = "nothing" if ($map2Ctgs_2 eq "" );# deactivate copying if no job was submitted..
-		if (!$moveMappings && !${$mapOptHr}{immediateSubm} ){#$map2Ctgs_2 ne ""){
+		if (!${$mapOptHr}{immediateSubm} && $delaySubmCmd =~ /\S/ ){
 			$mappingDeferred = 1;
 			#store command for later..
 			$AsGrps{$cAssGrp}{PostAssemblCmd} .= $delaySubmCmd;
-			push(@{$AsGrps{$cAssGrp}{$cpyStrm}},$mapOut."/*",$finalMapDir);
-			#print "\n\nmapcopydel\n";
-		}elsif ($moveMappings){ 
-			#this part is checking only if files were not copied..
-			#just do it.. 
-			print "Moving mappings from globaltmp to finaldir\n";
-			system "mkdir -p $finalMapDir;sleep 1;" unless (-d $finalMapDir);
-			systemW "$mvCmd $mapOut/* $finalMapDir/";
-		} elsif ($map2Ctgs_2 ne "") { #make sure files get copied
-			push(@{$AsGrps{$cAssGrp}{$cpyStrm}},$mapOut."/*",$finalMapDir);
 		}
 		#die "$curOutDir/mapping\n" . "$mapOut/$SmplName-smd.bam.coverage.gz"
 	}
@@ -1254,10 +1246,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		print "mapping support reads\n";
 		#print "DEBUG:: !$doPreAssmFlag && !$ePreAssmblPck\n";
 		my $mapNow = 1;
-		my $unAlDir = "$mapOutSup/unaligned_supp/";$unAlDir = "" if (!$MFopt{SaveUnalignedReads});
+		my $unAlDir = "$finalMapDir/unaligned_supp/";$unAlDir = "" if (!$MFopt{SaveUnalignedReads});
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,
-						glbTmp => $smplTmpDir."/toMGctgsSupp/",glbMapDir => $mapOutSup, mapSupport => 1,
+						glbTmp => $nodeSpTmpD."_mapWorkSupp/",glbMapDir => $finalMapDir, mapSupport => 1,
 						readTec => "", submit => 1,submNow => $mapNow,mappingStarted=>1,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam);
 		# primary mapping of support reads (onto de novo assembly)
@@ -1266,14 +1258,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$delaySubmCmd .= "\n".$delaySubmCmd_2;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $mapSup2Ctgs_2);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $mapSup2Ctgs_2);
-		my $moveMappings = 0; $moveMappings =1 if (!$eFinSupMapCovGZ && fileGZe("$mapOutSup/$SmplName.sup-smd.bam.coverage"));
-		if (   	$mapSup2Ctgs_2 =~  m/[^;\s]/ && $moveMappings){  # just copy over..
-			print "Moving supplementary mappings from globaltmp to finaldir\n";
-			#print "DEBUG: $mapOutSup/$SmplName.sup-smd.bam.coverage.gz\n" . -s "$mapOutSup/$SmplName.sup-smd.bam.coverage.gz" . "\n";
-			system "mkdir -p $finalMapDir;sleep 1;" unless (-d $finalMapDir);
-			systemW "$mvCmd $mapOutSup/* $finalMapDir/";
-		} else {
-			push(@{$AsGrps{$cAssGrp}{MapSupCopies}},$mapOutSup."/*",$finalMapDir);
+		if ($delaySubmCmd =~ /\S/ && !${$mapOptHr}{immediateSubm}) {
+			$mappingDeferred = 1;
+			$AsGrps{$cAssGrp}{PostAssemblCmd} .= $delaySubmCmd;
 		}
 #		die;
 	}
@@ -1282,14 +1269,18 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	
 	#-----------------------------------------------------------------
-	#------------------------  cleanup, SNPs -------------------------------
+	#---------------- producer barriers, downstream analysis ---------------
 	#-----------------------------------------------------------------
 	
 	
-	#moves finished assemblies & mappings, deletes temp dirs, logic for when to do that:
-	my $rmRdsFlag=0; $rmRdsFlag=1 if ($MappingGo && ( $AssemblyGo || $efinAssLoc) );
-	#die "$rmRdsFlag ($MappingGo && ( $AssemblyGo || $efinAssLoc) )\n";
-	my $cln1 = manageFiles($cAssGrp, $cMapGrp, $rmRdsFlag,  $doPreAssmFlag, $curOutDir, $jdep, $smplTmpDir, $AssemblyGo,$uplJob,$mappingDeferred);
+	# Completed assemblies and mappings are published by their producer jobs.
+	# This is the explicit publication barrier for downstream work; there is no
+	# separate result-moving cleanup job.
+	my $publicationDeps = normalise_job_dependencies(
+		$jdep, $AsGrps{$cAssGrp}{MapDeps}, $AsGrps{$cAssGrp}{prodRun},
+		$AsGrps{$cAssGrp}{AssemblJobName}, $uplJob,
+	);
+	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $publicationDeps);
 	add2SampleDeps(\@sampleDeps, [$jdep , $AsGrps{$cAssGrp}{MapDeps} , $AsGrps{$cAssGrp}{scndMapping},$AsGrps{$cAssGrp}{prodRun} ]);
 	
 	#die;
@@ -1309,7 +1300,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			print "GenomeFace requires FetchMG - adding it as a step in contigStats\n";
 		}
 
-		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,normalise_job_dependencies($cln1,$AsGrps{$cAssGrp}{prodRun}),$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl) ;
+		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,normalise_job_dependencies($publicationDeps,$AsGrps{$cAssGrp}{prodRun}),$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl) ;
 
 		#run contig stats
 		my $deferredContigDeps = postSubmQsub(
@@ -1327,20 +1318,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ ) || $calcCoverage) ) {
 		#die "test23  $AsGrps{$cAssGrp}{MapDeps}\n";
-		#calculate solely abundance / gene, has to be run after clean & assembly contigstat step and after mapping has started (at all!)
+		#calculate solely abundance / gene after producer publication and assembly contig stats
 		my $submitContigNow = $mappingDeferred ? 0 : 1;
-		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$cln1 . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl);
+		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$publicationDeps . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl);
 		$AsGrps{$cAssGrp}{PostClnCmd} .= $delaySubmCmd2;
 		$jdep = $jn;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $jdep) if ($jdep ne "");
 	}
 #	die;
-	add2SampleDeps(\@sampleDeps, [$cln1,$jdep]);
+	add2SampleDeps(\@sampleDeps, [$publicationDeps,$jdep]);
 	my $deferredConsDeps = "";
 	if ($AssemblyGo) {
 		$deferredConsDeps = postSubmQsub(
 			"$logDir/MultiConsensus.sh", $AsGrps{$cAssGrp}{PostConsCmd},
-			normalise_job_dependencies($jdep, $cln1),
+			normalise_job_dependencies($jdep, $publicationDeps),
 		);
 		$AsGrps{$cAssGrp}{PostConsCmd} = "" if ($deferredConsDeps ne "");
 	}
@@ -3267,7 +3258,6 @@ sub calcCoverage2nd
 	my $jobName = ""; $QSBoptHR->{LocationCheckStrg}=""; my $tmpCmd="";
 	my $cmd = "$readCov_Bin $cov $gff $RL";
 	my $qdir = $logDir; $qdir = ${$dirsHr}{qsubDir} if (exists( ${$dirsHr}{qsubDir} ));
-	my $ret = $cmd;
 	if (!-s $cov.".pergene" || !-s $cov.".percontig" || !-s $cov.".median.percontig" ){
 		$jobName = "_COV$JNUM";
 		$jobName = "$cstNme"."_$JNUM" if ($cstNme ne "");
@@ -3276,11 +3266,13 @@ sub calcCoverage2nd
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
 			($jobName,$tmpCmd) = qsubSystem($qdir."COV$cstNme.sh",$cmd,1,"20G",$jobName,$jobd,"",1,[],$QSBoptHR);
 			$QSBoptHR->{tmpSpace} =$tmpSHDD;
-		} 
+		} else {
+			$tmpCmd = $cmd;
+		}
 	} else {
 		$jobName = $jobd;
 	}
-	return ($jobName,$cmd);
+	return ($jobName,$tmpCmd);
 }
 
 sub checkDrives{
@@ -5079,23 +5071,19 @@ sub krakenTaxEst(){
 }
 
 sub check_map_done{
-	my ($doCram, $finalD, $baseN, $mappDir) = @_;
-	foreach my $dir ($finalD, $mappDir){
-		next unless (defined($dir) && $dir ne '');
-		if ($doCram){
-			return 1 if (-s "$dir/$baseN-smd.cram" && -e "$dir/$baseN-smd.cram.sto");
-		} else {
-			return 1 if (-s "$dir/$baseN-smd.bam");
-		}
+	my ($doCram, $finalD, $baseN, $_legacyMappingDir) = @_;
+	# Only canonical outputs count as complete.  Older scratch-only results are
+	# migrated before planning, rather than making every consumer probe two paths.
+	if ($doCram){
+		return 1 if (-s "$finalD/$baseN-smd.cram" && -e "$finalD/$baseN-smd.cram.sto");
+	} else {
+		return 1 if (-s "$finalD/$baseN-smd.bam");
 	}
 	return 0;
 }
 sub check_depth_done{
-	my ($_doCram, $finalD, $baseN, $mappDir) = @_;
-	foreach my $dir ($mappDir, $finalD){
-		next unless (defined($dir) && $dir ne '');
-		return 1 if (fileGZs("$dir/$baseN-smd.bam.coverage"));
-	}
+	my ($_doCram, $finalD, $baseN, $_legacyMappingDir) = @_;
+	return 1 if (fileGZs("$finalD/$baseN-smd.bam.coverage"));
 	return 0;
 }
 
@@ -5303,7 +5291,7 @@ sub mapReadsToRef{
 	my $is2ndMap = $dirsHr->{is2ndMap};
 	my $doCram = $dirsHr->{cramAlig};
 	my $immediateSubm = $dirsHr->{submNow};
-	my $unaligned = $dirsHr->{unalDir}; #store unaligned reads somewhere ? leave "" to deactivate
+	my $finalUnaligned = $dirsHr->{unalDir}; #final unaligned-read directory; "" disables retention
 	my $Ncore = $dirsHr->{mapCores};
 	my $supportRds = $dirsHr->{mapSupport};
 	my $supTag = ""; if ($supportRds){$supTag = ".sup";}
@@ -5329,7 +5317,8 @@ sub mapReadsToRef{
 	my $qdir = $logDir; $qdir = ${$dirsHr}{qsubDir} if (exists( ${$dirsHr}{qsubDir} ));
 	my $readTec = ${$dirsHr}{readTec};
 	if ($readTec eq "" && @libsOri){$readTec = $libsOri[0];}
-	my $tmpOut = ${$dirsHr}{glbTmp};	my $finalD = ${$dirsHr}{outDir}; #s,m
+	my $tmpOut = ${$dirsHr}{glbTmp};	my $finalD = ${$dirsHr}{outDir}; #node-local work, final mapping
+	my $unaligned = $finalUnaligned eq "" ? "" : $tmpOut."/unaligned/";
 	my $mapperProgLoc = decideMapper($MFopt{MapperProg},$readTec);
 	#die "$finalD\n";
 	my @finalDS = split /,/,$finalD;
@@ -5358,7 +5347,11 @@ sub mapReadsToRef{
 	
 
 	
-	my %params;
+	my %params = (
+		mappingCommand => "",
+		mappingDependencies => $jDepe,
+		mappingStarted => 1,
+	);
 	my $bamFresh = 0; #is the bam newly being created?
 	my $decoyModeActive=0; #decoy mapping
 	my $map2ndTogether = $MFopt{mapModeTogether}; #map competetively among all reference genomes provided might change mapping result, if other genome set is used)
@@ -5383,7 +5376,7 @@ sub mapReadsToRef{
 		#print "$tmpOut22[$k]\n";
 	}
 	for (my $k=0;$k<@outNms;$k++){
-		if ($MFopt{MapRewrite2nd}){$outputExistsNEx++; system "rm -fr $tmpOut22[$k] $finalDS[$k]/$outNms[$k]-smd* $mappDir[$k]/$outNms[$k]-smd*"; next;}
+		if ($MFopt{MapRewrite2nd}){$outputExistsNEx++; system "rm -fr $tmpOut22[$k] $finalDS[$k]/$outNms[$k]-smd*"; next;}
 		my $outstat = check_map_done($doCram, $finalDS[$k], $outNms[$k], $mappDir[$k]);
 		next if ($outstat);#-e "$finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz" );#|| -e "$mappDir[$k]/$outNms[$k]-smd.bam.coverage.gz");
 		#print "-e $finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz || -e $mappDir/$outNms[$k]-smd.bam.coverage.gz";
@@ -5406,7 +5399,8 @@ sub mapReadsToRef{
 	my $retCmds="";my $tmpCmd=""; my $xtraSamSteps1="";
 	#my $nxtCRAM = "$mappDir/$baseN-smd.cram";
 
-	system("mkdir -p ".join(" ",@mappDir)." " .join(" ",split(/,/,$tmpOut)));
+	# All working paths are created by the combined mapping job on its assigned
+	# node.  Submission-time mkdir calls are incorrect for node-local paths.
 	#move ref DB & unzip
 	#system("rm -r $tmpOut\n mkdir -p $tmpOut\n cp $REF $tmpOut");
 	#$REF = $tmpOut.basename($REF);
@@ -5492,7 +5486,7 @@ sub mapReadsToRef{
 		$cntAli++;
 		$bamFresh=1;
 		#print "ali\n";
-		$algCmd .= "#--------------- $kk ---------------\nrm -rf $mappDir[$kk]\nmkdir -p $mappDir[$kk];\n"; 
+		$algCmd .= "#--------------- $kk ---------------\nmkdir -p $mappDir[$kk];\n";
 		$algCmd .= "rm -rf $unaligned $tmpUna;\nmkdir -p $unaligned $tmpUna;\n" if ($unaligned ne "");
 		
 		my $algCmdBase = getAlgnCmdBase($mapperProgLoc,$NcoreL, $readTec,$MFopt{mapModeTogether},$unaligned);
@@ -5613,23 +5607,25 @@ sub mapReadsToRef{
 	$params{mappingStarted} = 1;
 	#print "mappingStarted :: $params{mappingStarted}\n";
 
-	my $nodeCln = "\nrm -rf $nodeTmp\n";
 	#print "$cntAli new alignments\n" if ($cntAli > 0);
-	if ( $bamFresh  ){
-		#die "$unzipcmd.$algCmd.$nodeCln";
-		my $baseMapHDD = $HDDspace{mapping} ;  $baseMapHDD =~ s/G$//;
-		my $preHDDspace=$QSBoptHR->{tmpSpace};
-		$QSBoptHR->{tmpSpace} = int((200+$map{$outName}{inputFileSizeMB})*$baseMapHDD/1024)+15  ."G";
-		#print "$QSBoptHR->{tmpSpace}\n";
-		$jobN = "_MAP$JNUM$supTag.$outNms[0]"; $bamFresh = 1; 
-		($jobN,$tmpCmd) = qsubSystem($qdir.$bashN."map$supTag.sh",
-				$unzipcmd.$algCmd.$nodeCln,  #$unalignCmd
-				$Ncore,int($MFopt{MapperMemory}+1)."G",$jobN,$jDepe,"",$immediateSubm,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
-		$retCmds .= $tmpCmd;
-		$QSBoptHR->{tmpSpace}=$preHDDspace;
+	if ($bamFresh) {
+		# Mapping and post-processing must execute in one scheduler allocation so
+		# the intermediate alignment can remain on node-local storage.
+		$params{mappingCommand} = $unzipcmd.$algCmd;
+		$params{mappingDependencies} = $jDepe;
+		$params{mappingJobName} = "_MAP$JNUM$supTag.$outNms[0]";
+		$params{mappingScript} = $qdir.$bashN."map$supTag.sh";
+		$params{mappingCores} = $Ncore;
+		$params{mappingMemoryGB} = int($MFopt{MapperMemory}+1);
+		$params{mappingWorkDir} = $tmpOut;
+		$params{mapperNodeDir} = $nodeTmp;
+		$params{unalignedWorkDir} = $unaligned;
+		$params{unalignedFinalDir} = $finalUnaligned;
+	} else {
+		$params{mappingCommand} = "";
 	}
 
-	return($jobN,$retCmds,\%params);
+	return("","",\%params);
 }	
 	
 
@@ -5645,7 +5641,8 @@ sub mapReadsToRef{
 sub bamDepth{
 	my ($dirsHr, $jDep,$mapparhr) = @_;
 	#die "bamdep\n";
-	if (!$dirsHr->{mappingStarted} ){
+	if (!$dirsHr->{mappingStarted}
+			|| (exists($mapparhr->{mappingStarted}) && !$mapparhr->{mappingStarted})){
 		#die;
 		return("","","");
 	}
@@ -5668,6 +5665,8 @@ sub bamDepth{
 
 	my %params = %{$mapparhr};
 	my ($isSorted , $bamFresh,$is2ndMap, $usePairs) =($params{sortedbam},$params{bamIsNew},$params{is2ndMap},$params{usePairs});
+	my $mappingCommand = delete($mapparhr->{mappingCommand}) || "";
+	my $mappingDependencies = $params{mappingDependencies} || $jDep;
 	#recreate base pars from map2tar sub
 	my $locDoRmDup = $MFopt{MapperRmDup};
 	$locDoRmDup = 0 if (!$usePairs);
@@ -5677,7 +5676,7 @@ sub bamDepth{
 	my $baseN = "$outName$supTag";
 	my $bashN = "";	if ($is2ndMap){$bashN = "$outName"; $bashN =~ s/,/./;}
 	my $mappingRes = $tmpOut."/$baseN.iniAlignment.bam"; #this is the input, result of previous mapping steps
-	my $cramSTO = "$mappDir/$baseN-smd.cram.sto";
+	my $cramSTO = "$finalD/$baseN-smd.cram.sto";
 	my $nxtBAM = "$nodeTmp/$baseN-smd.bam";
 	my $finalBam = "$finalD/$baseN-smd.bam";
 	my $sortTMP = $nodeTmp."/$baseN.srt";
@@ -5688,12 +5687,48 @@ sub bamDepth{
 	my $outstat2 = check_depth_done($doCram, $finalD, $baseN, $mappDir);
 	my $breakpointOut = $dirsHr->{breakpointOutput} || "";
 	my $breakpointDone = $breakpointOut eq "" || -s $breakpointOut;
+	my $breakpointWork = ($breakpointOut ne "" && !$breakpointDone)
+		? "$nodeTmp/".basename($breakpointOut) : "";
 	#die "$outstat $outstat2 $mappingRes $nxtBAM\n$mappDir\n$finalD\n";
 	if ($outstat2 && $outstat && $breakpointDone){return ("","",$outstat);}
 
 	#die "$mappDir/$baseN-smd.bam.coverage.gz\n$finalD/$baseN-smd.bam.coverage.gz\n" ;#if (-e "$finalD/$baseN-smd.bam.coverage.gz");
 		
 	my $numCore = ${$dirsHr}{sortCores};#new functionality with sambamba
+	# A completed mapping may still predate breakpoint output.  Repair that
+	# single derivative from the canonical coverage without trying to sort a
+	# node-local alignment that no longer exists.
+	if ($outstat && $outstat2 && !$breakpointDone && $mappingCommand eq "") {
+		my $breakpointScr = getProgPaths("breakpoints_scr");
+		my $breakpointDir = dirname($breakpointOut);
+		my $breakpointName = basename($breakpointOut);
+		my $breakpointStage = "$breakpointDir/.$breakpointName.stage";
+		my $breakpointCoverage = -s "$finalBam.coverage.gz"
+			? "$finalBam.coverage.gz" : "$finalBam.coverage";
+		my $breakpointCmd = "rm -rf $nodeTmp $breakpointStage\n"
+			."mkdir -p $nodeTmp $breakpointDir $breakpointStage\n"
+			."test -s $breakpointCoverage\n";
+		$breakpointCmd .= "$pigzBin -t $breakpointCoverage\n" if ($breakpointCoverage =~ /\.gz$/);
+		$breakpointCmd .= "$breakpointScr --assembly $REF --coverage $breakpointCoverage --output $breakpointWork "
+			."--breakpoint-depth $MFopt{breakpointDepth} --min-breakpoint-length $MFopt{breakpointMinLength} "
+			."--smooth-gap $MFopt{breakpointSmoothGap} --flank-length $MFopt{breakpointFlankLength} "
+			."--min-flank-depth $MFopt{breakpointMinFlankDepth} --max-flank-fraction $MFopt{breakpointMaxFlankFraction}\n"
+			."test -s $breakpointWork\n"
+			."mv $breakpointWork $breakpointStage/$breakpointName\n"
+			."mv -f $breakpointStage/$breakpointName $breakpointOut\n"
+			."rmdir $breakpointStage\nrm -rf $nodeTmp\n";
+		my ($breakpointJob, $breakpointSubmission) = ($jDep, "");
+		if (${$dirsHr}{submit}) {
+			($breakpointJob, $breakpointSubmission) = qsubSystem(
+				$qdir.$bashN."breakpoint$supTag.sh", $breakpointCmd,
+				$numCore, "20G", "_MAP$JNUM$supTag.$outName",
+				$mappingDependencies, "", $immediateSubm,
+				$QSBoptHR->{General_Hosts}, $QSBoptHR);
+		} else {
+			$breakpointSubmission = $breakpointCmd;
+		}
+		return ($breakpointJob, $breakpointSubmission, $outstat);
+	}
 	#my $biobambamBin = "bamsormadup";
 	#depth profile
 	#my $cmd = "$smtBin faidx $REF\n $smtBin view -btS $REF.fai $tmpOut/$baseN.sam > $tmpOut/$baseN.bam\n";
@@ -5708,8 +5743,7 @@ sub bamDepth{
 			$mappingRes = "$finalD/$baseN-smd.bam";
 			$allowDeleteMap = 0;
 		} else {
-			#might require extra check on tmp dir, if map were not moved yet..
-			die "bamDepth:: not sure what to do with input..\n";
+			die "bamDepth:: canonical mapping output is missing..\n";
 		}
 	}
 
@@ -5762,15 +5796,15 @@ sub bamDepth{
 	}
 	if ($breakpointOut ne "" && !-s $breakpointOut) {
 		my $breakpointScr = getProgPaths("breakpoints_scr");
-		my $breakpointDir = dirname($breakpointOut);
-		my $breakpointCoverage = fileGZe("$finalBam.coverage")
-			? "$finalBam.coverage.gz" : "$nxtBAM.coverage.gz";
+		my $breakpointDir = dirname($breakpointWork);
+		my $breakpointCoverage = -s "$finalBam.coverage.gz" ? "$finalBam.coverage.gz"
+			: (-s "$finalBam.coverage" ? "$finalBam.coverage" : "$nxtBAM.coverage.gz");
 		$covCmd .= "mkdir -p $breakpointDir\n";
-		$covCmd .= "$breakpointScr --assembly $REF --coverage $breakpointCoverage --output $breakpointOut "
+		$covCmd .= "$breakpointScr --assembly $REF --coverage $breakpointCoverage --output $breakpointWork "
 			."--breakpoint-depth $MFopt{breakpointDepth} --min-breakpoint-length $MFopt{breakpointMinLength} "
 			."--smooth-gap $MFopt{breakpointSmoothGap} --flank-length $MFopt{breakpointFlankLength} "
 			."--min-flank-depth $MFopt{breakpointMinFlankDepth} --max-flank-fraction $MFopt{breakpointMaxFlankFraction}\n";
-		$covCmd .= "[ -s $breakpointOut ] || exit 34\n";
+		$covCmd .= "[ -s $breakpointWork ] || exit 34\n";
 	}
 	#die "$covCmd\n";
 	
@@ -5779,16 +5813,34 @@ sub bamDepth{
 	#$covCmd .= "/g/bork5/hildebra/bin/bedtools2-2.21.0/bin/genomeCoverageBed -ibam $nxtBAM -bg  | ".'awk \'BEGIN {pc=""} {	c=$1;	if (c == pc) {		cov=cov+$2*$5;	} else {		print pc,cov;		cov=$2*$5;	pc=c}';
 	#$covCmd .= "} END {print pc,cov}\' $nxtBAM.coverage | tail -n +2 > $nxtBAM.coverage.percontig";
 	#$covCmd .= "rm -f $nxtBAM.bai;\n";
-	my ($CRAMcmd,$CRAMf) = bam2cram($nxtBAM,$REF,1,$doCram,$cramSTO, $numCore);
+	my ($CRAMcmd,$CRAMf) = bam2cram($nxtBAM,$REF,1,$doCram,"", $numCore);
 	$CRAMcmd = "echo \"Building .cram ...\"\n$CRAMcmd" if ($CRAMcmd ne "");
-	unless ($mappDir eq $tmpOut){
-		$CRAMcmd .= "\nmv $CRAMf* $mappDir 2>/dev/null \n" unless ($CRAMf eq "");
-		$CRAMcmd .= "mv $nxtBAM* $mappDir 2>/dev/null \n" unless ($nxtBAM eq "");
+	my $publishStage = "$finalD/.$baseN.mapping-stage";
+	$CRAMcmd .= "\n# Publish the complete mapping from node-local work into its canonical directory.\n";
+	$CRAMcmd .= "rm -rf $publishStage\nmkdir -p $publishStage $finalD\n";
+	$CRAMcmd .= "for f in $CRAMf*; do [ -e \"\$f\" ] || continue; mv \"\$f\" $publishStage/; done\n"
+		unless ($CRAMf eq "");
+	$CRAMcmd .= "for f in $nxtBAM*; do [ -e \"\$f\" ] || continue; mv \"\$f\" $publishStage/; done\n";
+	$CRAMcmd .= "mv $breakpointWork $publishStage/\n" if ($breakpointWork ne "");
+	if ($doCram) {
+		$CRAMcmd .= "test -s $publishStage/$baseN-smd.cram\n$smtBin quickcheck $publishStage/$baseN-smd.cram\n";
+	} else {
+		$CRAMcmd .= "test -s $publishStage/$baseN-smd.bam\n$smtBin quickcheck $publishStage/$baseN-smd.bam\n";
 	}
-	$CRAMcmd .= "echo \"".basename($nxtBAM)."\" > $mappDir/done.sto\n" if(!$supportRds || !$map{$curSmpl}{hasPrimaryRds});
+	$CRAMcmd .= "test -s $publishStage/$baseN-smd.bam.coverage.gz\n$pigzBin -t $publishStage/$baseN-smd.bam.coverage.gz\n";
+	$CRAMcmd .= "for f in $publishStage/*; do mv -f \"\$f\" $finalD/; done\nrmdir $publishStage\n";
+	if (($params{unalignedFinalDir} || "") ne "") {
+		my $unalignedStage = "$finalD/.$baseN.unaligned-stage";
+		$CRAMcmd .= "if [ -d $params{unalignedWorkDir} ]; then rm -rf $unalignedStage; mkdir -p $unalignedStage; "
+			."cp -a $params{unalignedWorkDir}/. $unalignedStage/; rm -rf $params{unalignedFinalDir}; "
+			."mv $unalignedStage $params{unalignedFinalDir}; fi\n";
+	}
+	# Completion markers are the publication commit record and must be last.
+	$CRAMcmd .= "touch $cramSTO\n" if ($doCram);
+	$CRAMcmd .= "echo \"".basename($nxtBAM)."\" > $finalD/done.sto\n" if(!$supportRds || !$map{$curSmpl}{hasPrimaryRds});
 
 
-	my $newJobN = "SBAM$supTag$JNUM$outName";	
+	my $newJobN = $params{mappingJobName} || "_MAP$JNUM$supTag.$outName";
 	#subsequent jobs not dependent on this one
 	my $jobN2 = $jDep; my $retCmds="";
 	$covCmd = "" if (fileGZs("$nxtBAM.coverage") && $breakpointDone);
@@ -5798,7 +5850,15 @@ sub bamDepth{
 		print "B1 " if ( $doCram && !-e $cramSTO); print "B2 " if (  !-s "$nxtBAM.coverage"); print "B3 " if ( $bamFresh);
 		print " ".$cramSTO."\n";
 	}
-	my $nodeCln = "\nrm -rf $nodeTmp;\necho \"DONE map2\"\n";
+	my $nodeCln = "\nrm -rf $nodeTmp";
+	# Multi-reference mapping reuses the mapper's node-local alignments across
+	# several bamDepth command blocks. Its caller removes shared work only after
+	# the last reference has been published.
+	unless ($dirsHr->{deferMappingCleanup}) {
+		$nodeCln .= " $params{mappingWorkDir}" if (($params{mappingWorkDir} || "") ne "");
+		$nodeCln .= " $params{mapperNodeDir}" if (($params{mapperNodeDir} || "") ne "");
+	}
+	$nodeCln .= ";\necho \"DONE mapping\"\n";
 	my $locSrtMem = $MFopt{mapSortMemGb};
 	my $baseMem=20; 
 	if ($locSrtMem <0){
@@ -5807,17 +5867,21 @@ sub bamDepth{
 	}
 	
 	#die "$cmd\n$covCmd\n$CRAMcmd\n";
-	if ( ($doCram && !-e $cramSTO) || (!fileGZs("$finalBam.coverage")) || !$breakpointDone ){#|| $bamFresh){
+	if ( $mappingCommand ne "" || ($doCram && !-e $cramSTO) || (!fileGZs("$finalBam.coverage")) || !$breakpointDone ){#|| $bamFresh){
 		my $preHDDspace=$QSBoptHR->{tmpSpace};		my $baseMapHDD = $HDDspace{mapping} ;  $baseMapHDD =~ s/G$//;
-		$QSBoptHR->{tmpSpace} = int((1.6 * $map{$curSmpl}{inputFileSizeMB}*$baseMapHDD) /1024)+15  ."G";		if (${$dirsHr}{submit}){
+		$QSBoptHR->{tmpSpace} = int((2.0 * $map{$curSmpl}{inputFileSizeMB}*$baseMapHDD) /1024)+30  ."G";		if (${$dirsHr}{submit}){
 		#die "map2:: $qdir\n$cramSTO\n$nxtBAM.coverage\n";
-		($jobN2,$retCmds) = qsubSystem($qdir.$bashN."map2$supTag.sh",
-				$cmd."\n".$covCmd."\n".$CRAMcmd."\n$nodeCln\n"#.$covCmd2
-				,$numCore,  (int($locSrtMem)+1)."G",$newJobN,$jDep,"",$immediateSubm,$QSBoptHR->{General_Hosts},$QSBoptHR);
+		my $combinedCores = $numCore > ($params{mappingCores} || 0) ? $numCore : ($params{mappingCores} || $numCore);
+		my $combinedMem = int($locSrtMem)+1;
+		$combinedMem = $params{mappingMemoryGB} if (($params{mappingMemoryGB} || 0) > $combinedMem);
+		my $combinedScript = $params{mappingScript} || $qdir.$bashN."map$supTag.sh";
+		($jobN2,$retCmds) = qsubSystem($combinedScript,
+				$mappingCommand."\n".$cmd."\n".$covCmd."\n".$CRAMcmd."\n$nodeCln\n"
+				,$combinedCores,  $combinedMem."G",$newJobN,$mappingDependencies,"",$immediateSubm,$QSBoptHR->{General_Hosts},$QSBoptHR);
 		$QSBoptHR->{tmpSpace}=$preHDDspace;
 		} else {
 			$cmd =~ s/sleep \d+//;
-			$retCmds = $cmd."\n".$covCmd."\n".$CRAMcmd."\n$nodeCln\n";
+			$retCmds = $mappingCommand."\n".$cmd."\n".$covCmd."\n".$CRAMcmd."\n$nodeCln\n";
 		}
 	} 
 	#die();
@@ -6029,128 +6093,6 @@ sub TaxaTarget{
 			
 	#die $logDir;
 	return $jobN2;
-}
-
-
-
-sub clean_tmp{#routine moves output from temp dirs to final dirs (that are IO limited, thus single process)
-	my ($clDar,$cpref,$cpnodel,$jDepe,$tag,$curJname) = @_;
-	my @clDa = @{$clDar};
-	my @cps = @{$cpref};
-	my @cpsND = @{$cpnodel};
-	#die;
-	#die "@cps ==0 && @clDa ==0 && @cpsND\n";
-	if (@cps ==0 && @clDa ==0 && @cpsND==0){return $jDepe;}
-	my $cmd = "";
-	die "MGTK.pl::clean_tmp: something wrong with \@cps, length % 2 (". scalar(@cps) .")\n"  if (scalar(@cps) % 2 != 0);
-	for (my $i=0;$i<@cps;$i+=2){
-		next if (length($cps[$i+1] ) < 5);
-		$cmd .= "mkdir -p $cps[$i+1]\n"; #every move may have a different destination
-		$cmd .= "$mvCmd $cps[$i] $cps[$i+1]\n" ;
-		
-	}
-	die "MGTK.pl::clean_tmp: something wrong with \@cpsND, length % 2 (". scalar(@cpsND) .")\n"  if (scalar(@cpsND) % 2 != 0);
-	for (my $i=0;$i<@cpsND;$i+=2){
-		next if (length($cpsND[$i+1] ) < 5);
-		$cmd .= "mkdir -p $cpsND[$i+1]\n";
-		$cmd .= "$mvCmd $cpsND[$i] $cpsND[$i+1]\n" ;
-		
-	}
-	#die "@clDa\n";
-	$cmd .= "rm -f -r ".join(" ",@clDa)."\n" if (@clDa > 0  );
-	$cmd .= "echo $tag >> $MFglobal{collectFinished}\n" unless ($tag eq "");
-	$cmd .= "echo \"Done cleaning tmp dir\"\n";
-	
-	#die "@clDa\n\n$cmd\n";
-	my $clnBash = $logDir."clean$curJname.sh";
-	if ($curJname eq ""){
-		$curJname = "_cln$JNUM";
-	}
-	#add extra job dependency on d2star
-	my $xtraJDep = "";
-	#$xtraJDep = $QSBoptHR->{rTag}."_d2met";
-	my ($jdep,$tmpCmd) = ("","");
-	#die "$jDepe";
-	if ($jDepe =~ m/^[\s;]+$/){
-		#print "Excecuting copy/rm locally..\n$cmd\n";
-		
-		systemW $cmd;#." \$" if ($cmd ne "");
-	} else {
-	#die "X${jDepe}X\n";
-		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
-		($jdep,$tmpCmd) = qsubSystem($clnBash,$cmd,1,"15G",$curJname,$jDepe.";$xtraJDep","",1,[],$QSBoptHR);
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;
-	}
-	#die "jdeps: $jDepe\n$cmd\n";
-	return wantarray ? ($jdep,$tmpCmd) : $jdep;
-}
-
-
-
-	
-sub manageFiles{
-	my ($cAssGrp, $cMapGrp, $rmRdsFlag, $doPreAssmFlag, $curOutDir , $jdep, $smplTmpDir,$AssemblyGo,$uplJob,$deferClean) = @_;
-	$deferClean ||= 0;
-	# A mapping created before the assembly-group's final member has no scheduler
-	# id yet.  Keep all publication targets and dependencies in group state; the
-	# final member will submit one cleanup after every deferred and current mapping
-	# has been registered.  Submitting a per-member cleanup here can race the final
-	# mapping and is also liable to strand downstream work until a recovery run.
-	return "" if ($deferClean);
-	#cleaning of filtered reads & copying of assembly / mapping files
-	#$AsGrps{$cAssGrp}{ClSeqsRm} .= $smplTmpDir."seqClean/".";";
-	
-	my @copiesNoDels=();
-	push(@copiesNoDels , @{$AsGrps{$cAssGrp}{PsAssCopies}}) if (exists($AsGrps{$cAssGrp}{PsAssCopies}));
-	push(@copiesNoDels , @{$AsGrps{$cAssGrp}{MapCopiesNoDel}} ) if (exists($AsGrps{$cAssGrp}{MapCopiesNoDel}));
-	my @cleans = ();
-	#if ($MappingGo && @bwt2outD==0){ #sync clean of tmp with scnd mapping..
-		#push(@cleans , $smplTmpDir);# $smplTmpDir,$metagAssDir."seqClean/filter*",
-	#}
-	
-	#all dependencies before deleting tmp dirs
-	#die "$AsGrps{$cAssGrp}{SeqClnDeps}\n";
-	my $totJdeps = normalise_job_dependencies(
-		$jdep, $AsGrps{$cAssGrp}{SeqClnDeps}, $AsGrps{$cAssGrp}{MapDeps},
-		$AsGrps{$cAssGrp}{scndMapping}, $AsGrps{$cAssGrp}{readDeps},
-		$AsGrps{$cAssGrp}{prodRun}, $AsGrps{$cAssGrp}{AssemblJobName},
-	);
-	#die "$totJdeps\n$AsGrps{$cAssGrp}{readDeps}\n";
-	$totJdeps = normalise_job_dependencies($totJdeps, $uplJob);
-	
-#	for ( ($jdep , $AsGrps{$cAssGrp}{MapDeps} , $AsGrps{$cAssGrp}{scndMapping},$AsGrps{$cAssGrp}{prodRun}) ){
-#		push(@sampleDeps, $_ ) if (defined $_ && $_ ne "");
-#	}
-	#die "$totJdeps\n";
-	#print $AsGrps{$cAssGrp}{ClSeqsRm}." FF ".$AsGrps{$cMapGrp}{ClSeqsRm}."\n";
-	if ($rmRdsFlag && exists($AsGrps{$cAssGrp}{ClSeqsRm})){push(@cleans,split(/;/,$AsGrps{$cAssGrp}{ClSeqsRm} )); $AsGrps{$cMapGrp}{ClSeqsRm} = "";}
-	if ($MFconfig{rmScratchTmp} && $totJdeps =~ m/^[\s;]*$/ && $rmRdsFlag){push(@cleans,$smplTmpDir);}
-	#print "test\n\n" if ($totJdeps =~ m/^[\s;]*$/);
-	
-	#die "\n@cleans\n$totJdeps\n";
-	
-	my @moves = (@{$AsGrps{$cAssGrp}{MapCopies}},@{$AsGrps{$cAssGrp}{AssCopies}});
-	push(@moves , @{$AsGrps{$cAssGrp}{MapSupCopies}} ) if (exists($AsGrps{$cAssGrp}{MapSupCopies}));
-
-	#die "@copies\n";
-	#print "@cleans\n@moves\n@copiesNoDels\n";
-	my $cln1="";
-	#if ($MFopt{DoAssembly} && $boolAssemblyOK || (!$MFopt{DoAssembly}) ){
-	if (!$MFconfig{remove_reads_tmpDir} || $doPreAssmFlag == 1){@cleans =();}
-	my $finishedClnDir = $curOutDir;  $finishedClnDir = "" if ($doPreAssmFlag);
-	#die "XXYZ\n@cleans\nTTTT\n@moves\nUUUUU\n@copiesNoDels\n";
-	$cln1 = clean_tmp(\@cleans,\@moves, \@copiesNoDels,$totJdeps,$finishedClnDir,"");#$AsGrps{$cAssGrp}{CSfinJobName}); #.";".$contRun
-	
-	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $cln1)
-		if ($AsGrps{$cAssGrp}{MapDeps} ne "");
-	$QSBoptHR->{LocationCheckStrg}="";
-	#clean up assembly groups
-	$AsGrps{$cAssGrp}{ClSeqsRm} = ""; @{$AsGrps{$cAssGrp}{MapCopies}} = ();
-	@{$AsGrps{$cAssGrp}{MapCopiesNoDel}} = (); @{$AsGrps{$cAssGrp}{MapSupCopies}} = ();
-	$AsGrps{$cAssGrp}{MapDeps} = "" if ($AssemblyGo);  
-	$AsGrps{$cAssGrp}{readDeps} = ""; $AsGrps{$cAssGrp}{DiamDeps} = "";
-	#
-	return $cln1;
 }
 
 
@@ -6860,13 +6802,14 @@ sub scndMap2Genos{
 	my ($SmplName,$cMapGrp,$cAssGrp,$curOutDir,$nodeSpTmpD,$smplTmpDir,
 			$sampleDepsAR,$calc2ndMapSNP,$boolScndCoverageOK) = @_;
 	my @mapOutXS;my @bamBaseNameS;
+	my @pendingSecondMapSNP;
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
 	my $samplReadLength = $map{$curSmpl}{seqSet}->{samplReadLength};
 
 	for (my $i=0;$i<@bwt2outD; $i++){
 		$bwt2outD[$i] =~ m/\/([^\/]+)\/*$/;
 		my $smplXDB = $1;
-		push @mapOutXS, $smplTmpDir."xtraMaps/$smplXDB/";
+		push @mapOutXS, $bwt2outD[$i];
 		my $fname = $bwt2ndMapNmds[$i]."_".$SmplName."-0";
 		#if (length($fname ) > 20){$bwt2ndMapNmds[$i]."_".$SmplName."-0";
 		push @bamBaseNameS, $fname;
@@ -6879,41 +6822,36 @@ sub scndMap2Genos{
 	my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => join(",",@bwt2outD),unalDir=>"",
 					sbj => join(",",@DBbtRefX),assGrp => $cAssGrp,
 					smplName => $SmplName,#join(",",@bamBaseNameS),
-					glbTmp => $smplTmpDir."/xtraMaps/", is2ndMap => 1, 
+					glbTmp => $nodeSpTmpD."_xtraMapWork/", is2ndMap => 1,
 					qsubDir => "$logDir/map2nd/",mapSupport => 0,
 					glbMapDir => join(",",@mapOutXS),mappingStarted =>1,
 					readTec => ${$cleanSeqSetHR}{readTec}, #$map{$curSmpl}{SeqTech}
 					submit => 1, submNow => 1, cramAlig => $cramthebam,
-					sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores});
+					sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores},
+					deferMappingCleanup => 1);
 	#die "XX @DBbtRefX\n";
 	# ----------------- 2nd mapping (map to ref genomes supplied by user) ---------------------
 	my ($map2CtgsX,$delaySubmCmdX,$mapOptHr) = mapReadsToRef(\%dirset,$AsGrps{$cMapGrp}{SeqUnZDeps}.";".$bwt2ndMapDep );#$localAssembly);
 	#------------  and calc coverage for each separate
 	#different strategy, a bit hacky: deactivate submissions and collect for one call
-	$dirset{submit} = 0; my $bigSort = "";my $bigCov = "";
+	$dirset{submit} = 0; my $bigMap = "";my $bigCov = "";
 	for (my $i=0;$i<@bwt2outD; $i++){
 		 my $mapOutX = $mapOutXS[$i]; 
 		$dirset{outDir} = $bwt2outD[$i];$dirset{glbMapDir} =$mapOutXS[$i];
 		$dirset{smplName} = $bamBaseNameS[$i];$dirset{sbj} =$DBbtRefX[$i];
 		my ($map2CtgsY,$delaySubmCmdY,$mapStat)  = bamDepth(\%dirset,$map2CtgsX,$mapOptHr);
-		$bigSort .= "\n\n#----------$i -------------\n$delaySubmCmdY\n" if ($delaySubmCmdY ne "");
+		$bigMap .= "\n\n#----------$i -------------\n$delaySubmCmdY\n" if ($delaySubmCmdY ne "");
+		$delaySubmCmdY = "";
 		
 		#die "$map2CtgsY\n$delaySubmCmdY\n$mapStat\n";
-		#call abundance on newly made genes
+		# Derive per-reference abundance from the canonical coverage. When the
+		# mapping is new this command follows its publisher in the same job.
 		if ($MFopt{mapModeCovDo} && !$boolScndCoverageOK){
-			if ($mapStat ==2|| $mapStat==0){ #files still on scratch
-				($map2CtgsY,$delaySubmCmdY) = calcCoverage2nd("$mapOutX/"."$bamBaseNameS[$i]-smd.bam.coverage.gz",$DBbtRefGFF[$i] ,
-					$samplReadLength,$SmplName.".$i",$map2CtgsY.";$bwt2ndMapDep", \%dirset) ;
-				push(@{$AsGrps{$cMapGrp}{MapCopiesNoDel}},$mapOutX."/*",$bwt2outD[$i]);
-			} else { #files are already copied
-				#die "$bwt2outD[$i]/"."$bamBaseNameS[$i]-smd.bam.coverage.gz\nxx\n";
-				my $empty;
-				($empty,$delaySubmCmdY) = calcCoverage2nd("$bwt2outD[$i]/"."$bamBaseNameS[$i]-smd.bam.coverage.gz",$DBbtRefGFF[$i] ,
-					$samplReadLength,$SmplName.".$i",$map2CtgsY.";$bwt2ndMapDep", \%dirset) ;
-			}
+			($map2CtgsY,$delaySubmCmdY) = calcCoverage2nd(
+				"$mapOutX/$bamBaseNameS[$i]-smd.bam.coverage.gz", $DBbtRefGFF[$i],
+				$samplReadLength, $SmplName.".$i",
+				$map2CtgsY.";".$bwt2ndMapDep, \%dirset);
 			#die "ASD\n";
-		} elsif ($mapStat == 2 || $mapStat==0){#check if files need to be copied..
-			push(@{$AsGrps{$cMapGrp}{MapCopiesNoDel}},$mapOutX."/*",$bwt2outD[$i]);
 		}
 		# Per-reference jobs are collected into the combined sort/coverage submission below.
 		$bigCov .= "\n\n#---------- $i -------------\n$delaySubmCmdY\n" if ($delaySubmCmdY ne "");
@@ -6943,26 +6881,50 @@ sub scndMap2Genos{
 				);
 				
 
-			my $consSNPdep = createConsSNPandSVs(\%SNPinfo);
-			add2SampleDeps($sampleDepsAR, [$consSNPdep]);
+			push @pendingSecondMapSNP, \%SNPinfo;
 			#push(@sampleDeps, $consSNPdep) if (defined $consSNPdep && $consSNPdep ne "");
 			#die if ($i==2);
 		}
 	
 	}
 	
-	#actual job submission of concatenated sort & cov jobs..
-	my ($sortJD,$tmpCmd) = qsubSystem($dirset{qsubDir}."SRTB$SmplName.sh",$bigSort,$MFopt{bamSortCores},int(20)."G",$SmplName."SRT2nd",$map2CtgsX,"",1,[],$QSBoptHR);
-	($sortJD,$tmpCmd) = qsubSystem($dirset{qsubDir}."COV$SmplName.sh",$bigCov,1,int(20)."G",$SmplName."COV2nd",$sortJD,"",1,[],$QSBoptHR);
+	# One scheduler allocation maps, sorts, calculates coverage, validates, and
+	# publishes every requested secondary-reference mapping.
+	my $secondMapCmd = $bigMap."\n".$bigCov;
+	if ($secondMapCmd =~ /\S/) {
+		my @sharedMapWork = grep { defined($_) && $_ ne "" }
+			($mapOptHr->{mappingWorkDir}, $mapOptHr->{mapperNodeDir});
+		$secondMapCmd .= "\nrm -rf ".join(" ", @sharedMapWork)."\n" if (@sharedMapWork);
+	}
+	my ($sortJD,$tmpCmd) = ("", "");
+	if ($secondMapCmd =~ /\S/) {
+		my $secondMapCores = $MFopt{bamSortCores} > ($mapOptHr->{mappingCores} || 0)
+			? $MFopt{bamSortCores} : ($mapOptHr->{mappingCores} || $MFopt{bamSortCores});
+		my $secondMapSortMem = $MFopt{mapSortMemGb};
+		if ($secondMapSortMem < 0) {
+			$secondMapSortMem = 20 + (2 * $map{$curSmpl}{inputFileSizeMB}/1024);
+			$secondMapSortMem += 20 if ($MFopt{largeMapperDB});
+		}
+		my $secondMapMem = int($secondMapSortMem) + 1;
+		$secondMapMem = $mapOptHr->{mappingMemoryGB}
+			if (($mapOptHr->{mappingMemoryGB} || 0) > $secondMapMem);
+		my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+		my $baseMapHDD = $HDDspace{mapping};
+		$baseMapHDD =~ s/G$//;
+		$QSBoptHR->{tmpSpace} = int((2.0 * $map{$curSmpl}{inputFileSizeMB} * $baseMapHDD) / 1024) + 30 ."G";
+		($sortJD,$tmpCmd) = qsubSystem($dirset{qsubDir}."MAP$SmplName.sh",$secondMapCmd,
+			$secondMapCores,$secondMapMem."G",$SmplName."MAP2nd",
+			($mapOptHr->{mappingDependencies} || ""),"",1,[],$QSBoptHR);
+		$QSBoptHR->{tmpSpace} = $previousTmpSpace;
+	}
 
 	append_job_dependencies(\$AsGrps{$cMapGrp}{MapDeps}, $sortJD);
-	#only used for now for the mapping to spec ref
-	my $cln1 = clean_tmp([],[], $AsGrps{$cMapGrp}{MapCopiesNoDel},$AsGrps{$cMapGrp}{MapDeps},"",
-		"_mcl"."_$JNUM");
-		#die"mcl";
-	#print "XX $AsGrps{$cMapGrp}{MapDeps}\n";
-	$AsGrps{$cMapGrp}{MapCopiesNoDel} = [];#$AsGrps{$cMapGrp}{MapDeps}="";
-	append_job_dependencies(\$AsGrps{$cAssGrp}{scndMapping}, $cln1);#tmp dir shouldn't be deleted before this is done
+	append_job_dependencies(\$AsGrps{$cAssGrp}{scndMapping}, $sortJD);
+	for my $SNPinfo (@pendingSecondMapSNP) {
+		$SNPinfo->{jdeps} = normalise_job_dependencies($SNPinfo->{jdeps}, $sortJD);
+		my $consSNPdep = createConsSNPandSVs($SNPinfo);
+		add2SampleDeps($sampleDepsAR, [$consSNPdep]);
+	}
 	#@cleans = {}; #just deactivate clean up for sec mapping..
 }
 
@@ -7027,29 +6989,25 @@ sub buildAssemblyMapIdx{
 	my $arp1 = ${$cleanSeqSetHR}{arp1}; my $arp2 = ${$cleanSeqSetHR}{arp2}; my $singAr = ${$cleanSeqSetHR}{singAr}; 
 	
 	my @allRds = (@{$arp1},@{$arp2},@{$singAr});
-	my $psDir = $pseudoAssFile; $psDir =~ s/[^\/]+$//;
-	my $psFinal = $pseudoAssFile; $psFinal =~ s/^.+\//$Fdir\//;
-	#die $psFinal;
-	my $pseudoAssFileFlag = $pseudoAssFile.".sto";
-	
-	my $psFile = $pseudoAssFile;#"$finalCommAssDir/longReads.fasta.filt";
-	if (-d $psFinal){system "rm -fr $psFinal";}
-	if (!-e $pseudoAssFile && -e $psFinal && -e $psFinal.".sto"){
-		$pseudoAssFileFlag = $psFinal.".sto"; 
-		$psFile = $psFinal;
-	}
+	$Fdir =~ s{/+$}{};
+	my $psFinal = "$Fdir/".basename($pseudoAssFile);
+	my $psStage = "$psFinal.stage";
+	my $pseudoAssFileFlag = $psFinal.".sto";
+	my $psFile = $psFinal;
 
 	#die "@allRds\n";
 	my $renameCtgScr = getProgPaths("renameCtg_scr");#"perl renameCtgs.pl";
 	my $sizFiltScr = getProgPaths("sizFilt_scr");#"perl sizeFilterFas.pl";
 	my $cmd = "";
-	$cmd .= "mkdir -p $psDir $Fdir\n";
-	$cmd .= "$sizFiltScr ".join(",",@allRds)." $MFopt{scaffoldMinSize} -1 $pseudoAssFile\n";
-	$cmd .= "$renameCtgScr $psFile $smplName\n";
+	$cmd .= "mkdir -p $Fdir\n";
+	$cmd .= "rm -f $psStage\n";
+	$cmd .= "$sizFiltScr ".join(",",@allRds)." $MFopt{scaffoldMinSize} -1 $psStage\n";
+	$cmd .= "$renameCtgScr $psStage $smplName\n";
+	$cmd .= "test -s $psStage\nmv -f $psStage $psFinal\n";
 	$cmd .= "touch $pseudoAssFileFlag\n";
 	#die $cmd;
 	my ($jname,$tmpCmd) = ("","");
-	if (!-e $pseudoAssFileFlag || !-e $psFinal.".sto"){
+	if (!-e $pseudoAssFileFlag){
 		$jname = "_PA$JNUM";;
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
 		($jname,$tmpCmd) = qsubSystem($logDir."pseudoAssembly.sh",$cmd,1,"5G",$jname,$jdep,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
@@ -7064,6 +7022,9 @@ sub buildAssemblyMapIdx{
 #spadesAssembly( \%AsGrps,$cAssGrp,"$nodeSpTmpD/ass",$metagAssDir,$MFopt{spadesBayHam} ,$MFglobal{shortAssembly}, $SmplNameX,$hostFilter,$scaffoldFlag) ;
 sub spadesAssembly{
 	my ($asHr,$cAsGrp,$nodeTmp,$finalOut,$doClean,$helpAssembl,$smplName,$hostFilter,$mateFlag) = @_;
+	$finalOut =~ s{/+$}{};
+	my $stageOut = "$finalOut.assembly-stage";
+	my $backupOut = "$finalOut.previous";
 
 	
 	#my $p1ar = $AsGrps{$cAsGrp}{FilterSeq1};my $p2ar = $AsGrps{$cAsGrp}{FilterSeq2};my $singlAr = $AsGrps{$cAsGrp}{FilterSeqS};my $cReadTecAr = $AsGrps{$cAsGrp}{ReadTec};
@@ -7088,7 +7049,7 @@ sub spadesAssembly{
 	if ($noTmpOnNode){
 		$nodeTmp = $finalOut;
 	}
- 	my $cmd = "rm -rf $nodeTmp\nmkdir -p $nodeTmp\nmkdir -p $finalOut\n\n";
+	my $cmd = "rm -rf $nodeTmp $stageOut\nmkdir -p $nodeTmp\n\n";
 	$cmd .= "\necho '". $AsGrps{$cAsGrp}{AssemblSmplDirs}. "' > $nodeTmp/smpls_used.txt\n\n";
 	$cmd .= "echo \"Starting Spades assembly\"\n";
 	my $defTotMem = $MFopt{AssemblyMemory};#60;
@@ -7148,7 +7109,7 @@ sub spadesAssembly{
 	$cmd .= "\n $pigzBin -f -p $nCores -r $nodeTmp/scaffolds.fasta $nodeTmp/misc/\n $pigzBin -f -p $nCores -r $nodeTmp/contigs.paths  $nodeTmp/*contigs.fa* \n";
 	$cmd .=  "rm -rf $nodeTmp/assembly_graph*.gfa $nodeTmp/corrected $nodeTmp/*.fastg $nodeTmp/before_rr*\n";
 	unless ($noTmpOnNode){
-		$cmd .=  "mkdir -p $finalOut\ncp -r $nodeTmp/* $finalOut\n" ;
+		$cmd .=  "mkdir -p $stageOut\ncp -r $nodeTmp/* $stageOut\n" ;
 		$cmd .= "rm -rf $nodeTmp\n";
 	}
 	my $jname = "";
@@ -7167,7 +7128,11 @@ sub spadesAssembly{
 		}
 	}
 	$cmd .= "echo \"MAX MEM ".$defTotMem."G\"\n";
-	$cmd .= "echo \"SPADES\" > $finalOut/$stones{asmDone}\n";
+	$cmd .= "echo \"SPADES\" > $stageOut/$stones{asmDone}\n";
+	$cmd .= "test -s $stageOut/scaffolds.fasta.filt && test -s $stageOut/AssemblyStats.txt && test -s $stageOut/$stones{asmDone} || exit 37\n";
+	$cmd .= "rm -rf $backupOut\nif [ -e $finalOut ]; then mv $finalOut $backupOut; fi\n";
+	$cmd .= "if ! mv $stageOut $finalOut; then if [ -e $backupOut ]; then mv $backupOut $finalOut; fi; exit 38; fi\n";
+	$cmd .= "rm -rf $backupOut\n";
 	#print "in Assembly\n$jDepe\n";
 	#print "$finalOut/scaffolds.fasta.filt\n";
 	my $locDiskSpace = $HDDspace{assembler};
@@ -7193,7 +7158,7 @@ sub spadesAssembly{
 		}
 		#$QSBoptHR->{useLongQueue} = 0;
 	} else {
-		print "Spades: Assembly still on tmp dir\n";
+		print "Spades: Assembly already present in final location\n";
 	}
 	#die("SPADE\n");
 	return ($jname);
@@ -7556,7 +7521,7 @@ sub longRdAssembly{
 		}
 		$QSBoptHR->{useLongQueue} = 0;
 	} else {
-		print "longReadAssm:Assembly still on tmp dir\n";
+		print "longReadAssm: Assembly already present in final location\n";
 	}
 	return ($jname);
 
@@ -7566,6 +7531,9 @@ sub longRdAssembly{
 #( \%AsGrps,$cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$MFglobal{shortAssembly}, $SmplNameX,$hostFilter,$scaffoldFlag)
 sub megahitAssembly{
 	my ($asHr,$cAsGrp,$nodeTmp,$finalOut,$helpAssembl,$smplName,$hostFilter,$mateFlag) = @_;
+	$finalOut =~ s{/+$}{};
+	my $stageOut = "$finalOut.assembly-stage";
+	my $backupOut = "$finalOut.previous";
 	my $megahitBin = getProgPaths("megahit");
 	my $stoneAssmbl = "$stones{asmDone}";
 	
@@ -7584,7 +7552,7 @@ sub megahitAssembly{
 	my $nodePreD = $nodeTmp;$nodePreD=~s/\/[^\/]+\/*$/\//;
 	#die "$nodePreD\n$nodeTmp\n";
 	
- 	my $cmd = "rm -rf $nodeTmp\nmkdir -p $nodePreD $finalOut\n\n"; #\n  mkdir -p $nodeTmp/tmp\n
+	my $cmd = "rm -rf $nodeTmp $stageOut\nmkdir -p $nodePreD\n\n"; #\n  mkdir -p $nodeTmp/tmp\n
 	$cmd .= "echo \"Starting megaHit assembly\"\n";
 	my $inputSizeloc = spaceInAssGrp($curSmpl);
 	#die "DS$inputSizeloc\n";
@@ -7670,7 +7638,7 @@ sub megahitAssembly{
 	$cmd .= "\n $pigzBin -f -p $nCores $nodeTmp/scaffolds.fasta.filt2 $nodeTmp/scaffolds.fasta.lnk\n";
 	$cmd .= "rm -f $nodeTmp/scaffolds.fasta\n";
 	unless ($noTmpOnNode){
-		$cmd .=  "mkdir -p $finalOut\ncp -r $nodeTmp/* $finalOut\n" ;
+		$cmd .=  "mkdir -p $stageOut\ncp -r $nodeTmp/* $stageOut\n" ;
 		$cmd .= "rm -rf $nodeTmp\n";
 	}
 	my $jname = "";
@@ -7679,7 +7647,11 @@ sub megahitAssembly{
 #	}
 
 	$cmd .= "echo \"MAX MEM ".$defTotMem."G\"\n";
-	$cmd .= "echo \"MEGAHIT\" > $finalOut/$stoneAssmbl\n";
+	$cmd .= "echo \"MEGAHIT\" > $stageOut/$stoneAssmbl\n";
+	$cmd .= "test -s $stageOut/scaffolds.fasta.filt && test -s $stageOut/AssemblyStats.txt && test -s $stageOut/$stoneAssmbl || exit 37\n";
+	$cmd .= "rm -rf $backupOut\nif [ -e $finalOut ]; then mv $finalOut $backupOut; fi\n";
+	$cmd .= "if ! mv $stageOut $finalOut; then if [ -e $backupOut ]; then mv $backupOut $finalOut; fi; exit 38; fi\n";
+	$cmd .= "rm -rf $backupOut\n";
 	#die "$cmd\n\n";
 	if (!-e "$finalOut/scaffolds.fasta.filt"  || !-e "$finalOut/AssemblyStats.txt"){
 		#my $size_in_mb = (-s $fh) / (1024 * 1024);
@@ -7690,7 +7662,7 @@ sub megahitAssembly{
 		($jname,$tmpCmd) = qsubSystem($logDir."megahitrun.sh",$cmd,$nCores,$defMem."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
 		$QSBoptHR->{tmpSpace} = $tmpSHDD;
 	} else {
-		print "MegaHit: Assembly still on tmp dir\n";
+		print "MegaHit: Assembly already present in final location\n";
 	}
 	#die("SPADE\n");
 	return ($jname);
@@ -7720,17 +7692,22 @@ sub metagAssemblyRun{
 		$LasseP  = 3 if (${$cReadTecAr}[0] eq "ONT");
 		#die "${$cReadTecAr}[0]\nXXXZ\n$LasseP\n";
 	}
+	# Preassemblies remain package-local intermediates. Complete ordinary,
+	# long-read, and final hybrid assemblies publish to the canonical directory.
+	my $assemblyOutDir = ($LasseP == 5 && $doPreAssmFlag)
+		? $metagAssDir : $finalCommAssDir;
+	my $publishedScaffDir = "$assemblyOutDir/scaffolds/";
 	
 	if ($LasseP == 5){ #hybrid assembly: first megahit(2), then metaMDBG(4)
 		if ($doPreAssmFlag == 1){
 			print "Preassembly step: ";
-			$tmpN = megahitAssembly( \%AsGrps,$cAssGrp,$nodeTmp,$metagAssDir ,
+			$tmpN = megahitAssembly( \%AsGrps,$cAssGrp,$nodeTmp,$assemblyOutDir ,
 				"preAssmbl", $SmplNameX,$hostFilter,$scaffoldFlag) if (!$ePreAssmbly);
 		} elsif ($doPreAssmFlag == 0 && $postAssmblGo) {
 			print "Final combining long assembly step: ";
 			#$finalMapDir
 			#die;
-			$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$metagAssDir,
+			$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir,
 				"hybridmMDBG",$SmplNameX,1,$LasseP) ; #$metaGpreAssmblDir, 
 		} elsif ($doPreAssmFlag == 0 ){
 			print "Preassembly: waiting for all samples\n";
@@ -7739,13 +7716,13 @@ sub metagAssemblyRun{
 		}
 #					die;
 	}elsif($LasseP == 1){
-		$tmpN = spadesAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$metagAssDir,$MFopt{spadesBayHam} ,
+		$tmpN = spadesAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir,$MFopt{spadesBayHam} ,
 			$MFglobal{shortAssembly}, $SmplNameX,$hostFilter,$scaffoldFlag) ;
 	}elsif($LasseP == 2){
-		$tmpN = megahitAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$metagAssDir ,
+		$tmpN = megahitAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir ,
 			$MFglobal{shortAssembly}, $SmplNameX,$hostFilter,$scaffoldFlag) ;
 	} elsif( ($LasseP == 3 ||  $LasseP == 4) && ${$cleanSeqSetHR}{is3rdGen} ){
-		$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$metagAssDir,
+		$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir,
 		$MFglobal{shortAssembly}, $SmplNameX,0,$LasseP) ;
 	}
 	#die ;
@@ -7760,7 +7737,7 @@ sub metagAssemblyRun{
 		#$curAssLoc = $finAssLoc if ($efinAssLoc);
 		my ($newScaff,$sdep) = scaffoldCtgs(\%AsGrps,$cAssGrp, #$AsGrps{$cMapGrp}{RawSeq1},$AsGrps{$cMapGrp}{RawSeq2},$AsGrps{$cMapGrp}{Libs},
 				[],[],
-				$metagAssDir,$nodeTmp."/scaff/",$metaGscaffDir,$AsGrps{$cAssGrp}{AssemblJobName},$MFopt{MapperCores}, $SmplNameX,1,"");
+				$assemblyOutDir,$nodeTmp."/scaff/",$publishedScaffDir,$AsGrps{$cAssGrp}{AssemblJobName},$MFopt{MapperCores}, $SmplNameX,1,"");
 		unless ($sdep eq ""){
 			append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $sdep);
 		}
