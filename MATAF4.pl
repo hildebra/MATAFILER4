@@ -1361,7 +1361,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						createFastas => $MFopt{saveConsFastas},
 						ofas => $contigsSNP, #primary file of contigs
 						genefna => $genePredSNP,genefaa => $genePredAASNP,
-						vcfFile => $vcfSNP,vcfFileSupp => $vcfSNPsupp, gffFile => "$finalCommAssDir/genePred/genes.gff",
+						vcfFile => $vcfSNP,vcfFileSupp => $vcfSNPsupp, gffFile => "$finalCommAssDir/genePred/genes.gff.gz",
 						nodeTmpD => $nodeSpTmpD,scratch => "$nodeSpTmpD/SNP/",
 						smpl => $SmplName,bamcram => $bamcramMap,minDepth => $MFopt{consSNPminDepth},
 						depthF => $coveragePerCtg,firstInSample => 1, #($i == 0 ? 1 : 0)
