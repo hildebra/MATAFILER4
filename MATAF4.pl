@@ -1171,6 +1171,14 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredDeps);
 		add2SampleDeps(\@sampleDeps, [$deferredDeps]);
 		$AsGrps{$cAssGrp}{PostAssemblCmd} = "";
+		my $deferredCleanDeps = postSubmQsub(
+			"$logDir/MultiMapClean.sh", $AsGrps{$cAssGrp}{PostMapCleanCmd},
+			$deferredDeps,
+		);
+		$AsGrps{$cAssGrp}{PostMapCleanCmd} = "";
+		append_job_dependencies(\$AsGrps{$cAssGrp}{DeferredCleanDeps}, $deferredCleanDeps);
+		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredCleanDeps);
+		add2SampleDeps(\@sampleDeps, [$deferredCleanDeps]);
 	}
 	
 	#-----------------------------------------------------------------
@@ -1206,6 +1214,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 
 	
+	my $mappingDeferred = 0;
 	if ($doMapping){ #mapping to the assembly (can be multi-sample assembly as well)
 		my $moveMappings = 0; $moveMappings =1 if (!$eFinMapCovGZ && -e "$mapOut/$SmplName-smd.bam.coverage.gz");
 
@@ -1231,6 +1240,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$cpyStrm = "MapCopiesNoDel" if ($mapSuppAssFlag || $eFinSupMapCovGZ);
 		$cpyStrm = "nothing" if ($map2Ctgs_2 eq "" );# deactivate copying if no job was submitted..
 		if (!$moveMappings && !${$mapOptHr}{immediateSubm} ){#$map2Ctgs_2 ne ""){
+			$mappingDeferred = 1;
 			#store command for later..
 			$AsGrps{$cAssGrp}{PostAssemblCmd} .= $delaySubmCmd;
 			push(@{$AsGrps{$cAssGrp}{$cpyStrm}},$mapOut."/*",$finalMapDir);
@@ -1287,7 +1297,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#moves finished assemblies & mappings, deletes temp dirs, logic for when to do that:
 	my $rmRdsFlag=0; $rmRdsFlag=1 if ($MappingGo && ( $AssemblyGo || $efinAssLoc) );
 	#die "$rmRdsFlag ($MappingGo && ( $AssemblyGo || $efinAssLoc) )\n";
-	my $cln1 = manageFiles($cAssGrp, $cMapGrp, $rmRdsFlag,  $doPreAssmFlag, $curOutDir, $jdep, $smplTmpDir, $AssemblyGo,$uplJob);
+	my $cln1 = manageFiles($cAssGrp, $cMapGrp, $rmRdsFlag,  $doPreAssmFlag, $curOutDir, $jdep, $smplTmpDir, $AssemblyGo,$uplJob,$mappingDeferred);
 	add2SampleDeps(\@sampleDeps, [$jdep , $AsGrps{$cAssGrp}{MapDeps} , $AsGrps{$cAssGrp}{scndMapping},$AsGrps{$cAssGrp}{prodRun} ]);
 	
 	#die;
@@ -1307,7 +1317,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			print "GenomeFace requires FetchMG - adding it as a step in contigStats\n";
 		}
 
-		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,$cln1.";".$AsGrps{$cAssGrp}{prodRun},$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl) ;
+		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,normalise_job_dependencies($cln1,$AsGrps{$cAssGrp}{prodRun},$AsGrps{$cAssGrp}{DeferredCleanDeps}),$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl) ;
 
 		#run contig stats
 		my $deferredContigDeps = postSubmQsub(
@@ -1326,13 +1336,24 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ ) || $calcCoverage) ) {
 		#die "test23  $AsGrps{$cAssGrp}{MapDeps}\n";
 		#calculate solely abundance / gene, has to be run after clean & assembly contigstat step and after mapping has started (at all!)
-		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$cln1 . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},1,$nodeSpTmpD,$AssemblyGo,1, $curSmpl);
+		my $submitContigNow = $mappingDeferred ? 0 : 1;
+		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$cln1 . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl);
 		$AsGrps{$cAssGrp}{PostClnCmd} .= $delaySubmCmd2;
 		$jdep = $jn;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $jdep) if ($jdep ne "");
 	}
 #	die;
 	add2SampleDeps(\@sampleDeps, [$cln1,$jdep]);
+	my $deferredConsDeps = "";
+	if ($AssemblyGo) {
+		$deferredConsDeps = postSubmQsub(
+			"$logDir/MultiConsensus.sh", $AsGrps{$cAssGrp}{PostConsCmd},
+			normalise_job_dependencies($jdep, $AsGrps{$cAssGrp}{DeferredCleanDeps}),
+		);
+		$AsGrps{$cAssGrp}{PostConsCmd} = "" if ($deferredConsDeps ne "");
+	}
+	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredConsDeps);
+	add2SampleDeps(\@sampleDeps, [$deferredConsDeps]);
 
 	#Binning, SNP calling: only after copying files from tmp and running contig stats
 	if ( $calcBinning && $AssemblyGo ){  #$allMapDone rm: this is checked now via $AsGrps{$cAssGrp}{MapDeps}
@@ -1347,8 +1368,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $assemblyDownstreamScheduled = $AssemblyGo && !$doPreAssmFlag && !$ePreAssmblPck
 		&& ($efinAssLoc || $MFopt{DoAssembly} != 5 || $postPreAssmblGo)
 		&& (!$map{$curSmpl}{hasPrimaryRds} || ($MFopt{map2Assembly} && $MappingGo));
+	my $assemblyDownstreamDeferred = $mappingDeferred && !$doPreAssmFlag && !$ePreAssmblPck;
 	if ( ($calcConsSNP || $calcSuppConsSNP || $calcSVs || $calcSVsSupp )
-			&& (($allMapDone && !$calcCoverage) || $assemblyDownstreamScheduled)){
+			&& (($allMapDone && !$calcCoverage) || $assemblyDownstreamScheduled || $assemblyDownstreamDeferred)){
 		#die "conssnp:: $calcConsSNP $allMapDone $finalMapDir\n";
 		#my $ofas = "$curOutDir/SNP/genePred/genes.shrtHD.SNPc.fna";
 	
@@ -1367,6 +1389,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
 						jdeps => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
 						deferRegionPlanning => (!$allMapDone || $calcCoverage ? 1 : 0),
+						immediateSubm => ($assemblyDownstreamDeferred ? 0 : 1),
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
 						STOconSNP => $STOsnpCons, STOconSNPsupp => "",
 						minCallQual => $MFopt{SNPminCallQual},
@@ -1381,7 +1404,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$SNPinfo{STOconSNPsupp} = $STOsnpSuppCons   ; #trigger for also looking at cons SNP for support reads
 		}
 		
-		my $consSNPdep = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
+		my ($consSNPdep,$consSNPcmd) = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
+		$AsGrps{$cAssGrp}{PostConsCmd} .= $consSNPcmd if ($assemblyDownstreamDeferred);
 		add2SampleDeps(\@sampleDeps, [$consSNPdep]);
 		#push(@sampleDeps, $consSNPdep) if (defined $consSNPdep && $consSNPdep ne "");
 	}
@@ -1822,7 +1846,7 @@ sub createConsSNPandSVs{
 		
 	} 
 #	my ($ovcf,$jdep) = SNPconsensus_vcf2(\%SNPinfo);
-	my ($jdep) = SNPconsensus_vcf(\%SNPinfo);
+	my ($jdep,$submissionCommands) = SNPconsensus_vcf(\%SNPinfo);
 
 	${$QSBoptHR}{tmpSpace} = $preHDDspace;
 	#SNPconsensus_fasta($ovcf,\%SNPinfo,$jdep,$QSBoptHR);
@@ -1831,12 +1855,13 @@ sub createConsSNPandSVs{
 	
 	#2nd part: call SVs
 	if ($SNPinfo{callSVs}){
-		my ($jdep2) = SVcall_vcf(\%SNPinfo);
+		my ($jdep2,$qcmd2) = SVcall_vcf(\%SNPinfo);
 		$jdep .= ";$jdep2" if ($jdep2 ne "");
+		$submissionCommands .= $qcmd2 if (defined($qcmd2) && $qcmd2 ne "");
 	}
 
 	
-	return $jdep;
+	return wantarray ? ($jdep,$submissionCommands) : $jdep;
 }
 
 
@@ -1936,9 +1961,14 @@ sub postSubmQsub {
 			or die "Cannot read deferred job script $script_path: $!\n";
 		my $script = do { local $/; <$script_fh> };
 		close $script_fh;
+		# Deferred commands are emitted in dependency order (for example MAP then
+		# sort/depth).  Preserve that order now that real scheduler ids exist.
+		my $command_dependencies = normalise_job_dependencies(
+			$dependencies, @submitted ? $submitted[-1] : "",
+		);
 		my $augmented = augment_deferred_submission(
 			qmode => $QSBoptHR->{qmode}, command => $command, script => $script,
-			dependencies => $dependencies, run_tag => $QSBoptHR->{rTag},
+			dependencies => $command_dependencies, run_tag => $QSBoptHR->{rTag},
 		);
 		if ($augmented->{script} ne $script) {
 			open my $script_out, '>', $script_path
@@ -6013,6 +6043,7 @@ sub TaxaTarget{
 
 sub clean_tmp{#routine moves output from temp dirs to final dirs (that are IO limited, thus single process)
 	my ($clDar,$cpref,$cpnodel,$jDepe,$tag,$curJname) = @_;
+	my $immediateSubm = @_ > 6 ? $_[6] : 1;
 	my @clDa = @{$clDar};
 	my @cps = @{$cpref};
 	my @cpsND = @{$cpnodel};
@@ -6023,14 +6054,14 @@ sub clean_tmp{#routine moves output from temp dirs to final dirs (that are IO li
 	die "MGTK.pl::clean_tmp: something wrong with \@cps, length % 2 (". scalar(@cps) .")\n"  if (scalar(@cps) % 2 != 0);
 	for (my $i=0;$i<@cps;$i+=2){
 		next if (length($cps[$i+1] ) < 5);
-		if ($i == 0){$cmd .= "mkdir -p $cps[$i+1]\n";} #rm -r -f $cps[$i+1]\n
+		$cmd .= "mkdir -p $cps[$i+1]\n"; #every move may have a different destination
 		$cmd .= "$mvCmd $cps[$i] $cps[$i+1]\n" ;
 		
 	}
 	die "MGTK.pl::clean_tmp: something wrong with \@cpsND, length % 2 (". scalar(@cpsND) .")\n"  if (scalar(@cpsND) % 2 != 0);
 	for (my $i=0;$i<@cpsND;$i+=2){
 		next if (length($cpsND[$i+1] ) < 5);
-		if ($i == 0){$cmd .= "mkdir -p $cpsND[$i+1]\n";}
+		$cmd .= "mkdir -p $cpsND[$i+1]\n";
 		$cmd .= "$mvCmd $cpsND[$i] $cpsND[$i+1]\n" ;
 		
 	}
@@ -6056,18 +6087,19 @@ sub clean_tmp{#routine moves output from temp dirs to final dirs (that are IO li
 	} else {
 	#die "X${jDepe}X\n";
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
-		($jdep,$tmpCmd) = qsubSystem($clnBash,$cmd,1,"15G",$curJname,$jDepe.";$xtraJDep","",1,[],$QSBoptHR);
+		($jdep,$tmpCmd) = qsubSystem($clnBash,$cmd,1,"15G",$curJname,$jDepe.";$xtraJDep","",$immediateSubm,[],$QSBoptHR);
 		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	}
 	#die "jdeps: $jDepe\n$cmd\n";
-	return ($jdep );
+	return wantarray ? ($jdep,$tmpCmd) : $jdep;
 }
 
 
 
 	
 sub manageFiles{
-	my ($cAssGrp, $cMapGrp, $rmRdsFlag, $doPreAssmFlag, $curOutDir , $jdep, $smplTmpDir,$AssemblyGo,$uplJob) = @_;
+	my ($cAssGrp, $cMapGrp, $rmRdsFlag, $doPreAssmFlag, $curOutDir , $jdep, $smplTmpDir,$AssemblyGo,$uplJob,$deferClean) = @_;
+	$deferClean ||= 0;
 	#cleaning of filtered reads & copying of assembly / mapping files
 	#$AsGrps{$cAssGrp}{ClSeqsRm} .= $smplTmpDir."seqClean/".";";
 	
@@ -6110,7 +6142,9 @@ sub manageFiles{
 	if (!$MFconfig{remove_reads_tmpDir} || $doPreAssmFlag == 1){@cleans =();}
 	my $finishedClnDir = $curOutDir;  $finishedClnDir = "" if ($doPreAssmFlag);
 	#die "XXYZ\n@cleans\nTTTT\n@moves\nUUUUU\n@copiesNoDels\n";
-	$cln1 = clean_tmp(\@cleans,\@moves, \@copiesNoDels,$totJdeps,$finishedClnDir,"");#$AsGrps{$cAssGrp}{CSfinJobName}); #.";".$contRun
+	my $cleanSubmitCmd;
+	($cln1,$cleanSubmitCmd) = clean_tmp(\@cleans,\@moves, \@copiesNoDels,$totJdeps,$finishedClnDir,"",$deferClean ? 0 : 1);#$AsGrps{$cAssGrp}{CSfinJobName}); #.";".$contRun
+	$AsGrps{$cAssGrp}{PostMapCleanCmd} .= $cleanSubmitCmd if ($deferClean);
 	
 	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $cln1)
 		if ($AsGrps{$cAssGrp}{MapDeps} ne "");

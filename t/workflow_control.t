@@ -174,6 +174,15 @@ like($mataf4,
 	'shared assembly rebuild retains the established destructive authorization gate');
 like($mataf4, qr/Submitting deferred assembly-group mapping jobs.*?postSubmQsub/s,
 	'assembly-group mappings deferred before the final member are submitted after assembly scheduling');
+like($mataf4,
+	qr/my \$command_dependencies\s*=\s*normalise_job_dependencies\(.*?\$submitted\[-1\]/s,
+	'deferred mapper and sort/depth commands retain their submission order');
+like($mataf4,
+	qr/PostAssemblCmd.*?MultiMapClean\.sh.*?DeferredCleanDeps.*?MultiContigStats\.sh.*?MultiConsensus\.sh/s,
+	'assembly groups release mapping, cleanup, contig statistics, and consensus in stages');
+like($mataf4,
+	qr/\$cmd\s*\.\=\s*"mkdir -p \$cps\[\$i\+1\]\\n";.*?\$mvCmd \$cps\[\$i\]/s,
+	'cleanup creates every output destination before moving mapping and assembly results');
 like($mataf4, qr/if \(\$MFopt\{DoMetaBat2\} && !\$doPreAssmFlag.*?\$AssemblyGo/s,
 	'binning can be scheduled on the first pass once the final group assembly is scheduled');
 like($mataf4, qr/append_job_dependencies\(\\\$AsGrps\{\$cAssGrp\}\{BinDeps\}, \$contRun\)/,
@@ -209,7 +218,8 @@ my %loop_groups = (group => {
 	FilterSeq1 => [], FilterSeq2 => [], FilterSeqS => [], ReadTec => [],
 	MapSupCopies => [], CntPreAss => 2, CntPreAssMiss => 3,
 	CntPreAssNoPrim => 4, preAsmblDir => ['old-package'],
-	AssemblSmplDirs => "/old/sample\n",
+	AssemblSmplDirs => "/old/sample\n", PostMapCleanCmd => 'old-clean',
+	PostConsCmd => 'old-consensus', DeferredCleanDeps => 'old-dependency',
 });
 resetAsGrps(\%loop_groups);
 is($loop_groups{group}{UnzpDeps}, '',
@@ -224,6 +234,10 @@ is_deeply($loop_groups{group}{preAsmblDir}, [],
 	'hybrid package paths are rebuilt once per loop pass without duplicates');
 is($loop_groups{group}{AssemblSmplDirs}, '',
 	'assembly membership output is rebuilt once per loop pass without duplicates');
+is_deeply(
+	[@{$loop_groups{group}}{qw(PostMapCleanCmd PostConsCmd DeferredCleanDeps)}],
+	['', '', ''],
+	'deferred downstream submission state is cleared between loop passes');
 
 like($mataf4,
 	qr/sub longRdAssembly\s*\{.*?\$finalOut\s*=~\s*s\{\/\+\$\}\{\};.*?my \$stageOut\s*=\s*"\$finalOut\.hybrid-stage"/s,

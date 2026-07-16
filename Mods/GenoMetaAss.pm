@@ -950,7 +950,10 @@ sub emptyAssGrpsObj($){
 		$AsGrps{$k}{MapCopiesNoDel} = [];
 		#filteredSequenceFiles for assembly
 		$AsGrps{$k}{PostAssemblCmd} = "";
+		$AsGrps{$k}{PostMapCleanCmd} = "";
 		$AsGrps{$k}{PostClnCmd} = "";
+		$AsGrps{$k}{PostConsCmd} = "";
+		$AsGrps{$k}{DeferredCleanDeps} = "";
 		$AsGrps{$k}{AssemblSmplDirs} = "";
 		$AsGrps{$k}{scndMapping} = "";
 		$AsGrps{$k}{ClSeqsRm} = "";
@@ -999,6 +1002,7 @@ sub resetAsGrps{
 		$AsGrps->{$cAssGrp}{prodRun} = "";
 		$AsGrps->{$cAssGrp}{AssemblJobName} = "";
 		$AsGrps->{$cAssGrp}{PostAssemblCmd} = "";
+		$AsGrps->{$cAssGrp}{PostMapCleanCmd} = "";
 		$AsGrps->{$cAssGrp}{ClSeqsRm} = "";
 		$AsGrps->{$cAssGrp}{MapDeps} = "";
 		$AsGrps->{$cAssGrp}{BinDeps} = "";
@@ -1008,6 +1012,8 @@ sub resetAsGrps{
 		# when a deferred mapping has no files to copy.
 		$AsGrps->{$cAssGrp}{nothing} = [];
 		$AsGrps->{$cAssGrp}{PostClnCmd} = "";
+		$AsGrps->{$cAssGrp}{PostConsCmd} = "";
+		$AsGrps->{$cAssGrp}{DeferredCleanDeps} = "";
 		$AsGrps->{$cAssGrp}{CSfinJobName} = "";
 	}
 }

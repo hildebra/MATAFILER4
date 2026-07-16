@@ -300,6 +300,8 @@ sub SNPconsensus_vcf{
 	my $samcores = 12;
 	#my %SNPinfo = %{$SNPIHR};
 	my $QSBoptHR = $SNPIHR->{QSHR};
+	my $immediateSubm = exists($SNPIHR->{immediateSubm}) ? $SNPIHR->{immediateSubm} : 1;
+	my $submissionCommands = "";
 	my $x = $SNPIHR->{JNUM};
 	my $jdep = ""; $jdep = $SNPIHR->{jdeps} if (exists($SNPIHR->{jdeps}));
 	my $tmpdir = $SNPIHR->{nodeTmpD};
@@ -456,7 +458,8 @@ sub SNPconsensus_vcf{
 		$depthFile = $tar[0];$depthFile =~ s/\.cram$|\.bam$/\.bam\.coverage\.gz/;
 		if (!-e $depthFile && !$deferRegionPlanning){$depthFile =~ s/\.gz//; die "no depth file found (SNP.pm): $depthFile\n$tar[0]\n" if (!-e $depthFile);}
 		if (!$runLocalTmp && $run2ctg && (!-e $tar[0] || !-e $refFA) ){
-			my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.CramToBam$x.sh",$xtra,2,"17G","CtB$x",$jdep,"",$samcores,[],$QSBoptHR);
+			my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.CramToBam$x.sh",$xtra,2,"17G","CtB$x",$jdep,"",$immediateSubm ? $samcores : 0,[],$QSBoptHR);
+			$submissionCommands .= $qcmd unless ($immediateSubm);
 			$cleanCmd .= "rm -r $scrDir\n";$rdep = $dep;$xtra = "";
 		}
 		$SNPIHR->{run2ctg} = $run2ctg;$SNPIHR->{rdep} = $rdep;
@@ -585,7 +588,8 @@ sub SNPconsensus_vcf{
 	#die "$run2ctg\n$cmdAll\n";
 	if ($myParL && !$runLocalTmp && $cmdAll ne ""){
 		if ( ($overwrite || !-e "$ofasCons")){
-			my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.cacSNP.sh",$postcmd,1,$memReqGB."G","Cons$x",join(";",@allDeps2),"",1,[],$QSBoptHR);
+			my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.cacSNP.sh",$postcmd,1,$memReqGB."G","Cons$x",join(";",@allDeps2),"",$immediateSubm,[],$QSBoptHR);
+			$submissionCommands .= $qcmd unless ($immediateSubm);
 			$rdep =$dep;
 		}
 	}
@@ -595,14 +599,15 @@ sub SNPconsensus_vcf{
 		#this is the new way of doing this
 		my $tmpS = $QSBoptHR->{tmpSpace};
 		$QSBoptHR->{tmpSpace} = 3*$memReqGB; #in GB
-		my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.oSNPc.sh",$cmdAll,int($actualCores*1.1),$memReqGB."G","Cons$x",join(";",$jdep,@allDeps2),"",1,[],$QSBoptHR);
+		my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.oSNPc.sh",$cmdAll,int($actualCores*1.1),$memReqGB."G","Cons$x",join(";",$jdep,@allDeps2),"",$immediateSubm,[],$QSBoptHR);
+		$submissionCommands .= $qcmd unless ($immediateSubm);
 		$rdep =$dep;
 		$QSBoptHR->{tmpSpace} = $tmpS;
 	}
 	#$SNPIHR->{intermedVCF} = $oVcfCons;
 	$SNPIHR->{cleanCmd} = $cleanCmd;
 	#die;
-	return ($rdep);
+	return wantarray ? ($rdep,$submissionCommands) : $rdep;
 }
 
 
@@ -719,11 +724,11 @@ sub SVcall_vcf{
 	my $cmdAll = $xtra ."\n\n".$cmd;
 	#print $cmdAll;
 
-	my ($dep,$qcmd) = qsubSystem($SNPIHR->{qsubDir} . "$SNPIHR->{cmdFileTag}.SV.sh",$cmdAll,int($actualCores),"20G","SV$SNPIHR->{JNUM}",$jdep,"",1,[],$SNPIHR->{QSHR});
+	my $immediateSubm = exists($SNPIHR->{immediateSubm}) ? $SNPIHR->{immediateSubm} : 1;
+	my ($dep,$qcmd) = qsubSystem($SNPIHR->{qsubDir} . "$SNPIHR->{cmdFileTag}.SV.sh",$cmdAll,int($actualCores),"20G","SV$SNPIHR->{JNUM}",$jdep,"",$immediateSubm,[],$SNPIHR->{QSHR});
 	
-	return $dep;
+	return wantarray ? ($dep, $immediateSubm ? "" : $qcmd) : $dep;
 }
-
 
 
 
