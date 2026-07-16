@@ -1502,6 +1502,10 @@ sub postprocess{
 	#print "\n\n###################################\nMain Loop done\n######################################\n";
 	#global clean up cmds (like DB removals from scratch)
 	print "Postprocessing:\n";
+	if (@{$QSBoptHR->{submissionErrors} || []}) {
+		print STDERR "MATAFILER continued after ".scalar(@{$QSBoptHR->{submissionErrors}})
+			." scheduler submission problem(s). Existing sample locks were retained; failed work can be retried on a later run.\n";
+	}
 
 	#print input files, sorted by samples
 	##transfer first..
@@ -7724,6 +7728,10 @@ sub genePredictions($ $ $ $ $) {
 
 sub setupHPC{
 	my $QSBoptHR1 = emptyQsubOpt($doSubmit,"",$MFconfig{submSytem});
+	# Rejecting one job blocks its dependent chain without aborting unrelated
+	# samples in this invocation.
+	$QSBoptHR1->{continueOnSubmitError} = 1;
+	$QSBoptHR1->{submissionErrors} = [];
 	my $currentJobs = numUserJobs($QSBoptHR1,1);
 	print "Found $currentJobs jobs registered to user.";
 	#could be only the submitting job is active? is this within a submission?

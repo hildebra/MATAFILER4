@@ -45,6 +45,20 @@ close $fh;
 unlike($contents, qr/^#SBATCH --dependency=/m,
 	'an empty dependency collection does not create a scheduler dependency directive');
 
+my $continued_script = File::Spec->catfile($root, 'continued-after-failure.sh');
+$options = slurm_options();
+$options->{doSubmit} = 1;
+$options->{continueOnSubmitError} = 1;
+$options->{submissionErrors} = [];
+my ($continued_job, $continued_command) = qsubSystem(
+	$continued_script, 'echo unsafe', 1, '1G', 'blocked',
+	'__MF4_SUBMISSION_FAILED__', '', 1, [], $options,
+);
+is($continued_job, '__MF4_SUBMISSION_FAILED__',
+	'a failed dependency is propagated without submitting its consumer');
+is(scalar @{$options->{submissionErrors}}, 1,
+	'the skipped dependent submission is recorded for the final summary');
+
 $options = slurm_options();
 is(qsubSystemJobAlive([], $options), undef,
 	'waiting on an empty dependency set returns without querying the scheduler');

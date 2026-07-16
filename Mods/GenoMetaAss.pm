@@ -980,6 +980,9 @@ sub resetAsGrps{
 		$AsGrps->{$cAssGrp}{readDeps} = "";
 		$AsGrps->{$cAssGrp}{scndMapping} = "";
 		$AsGrps->{$cAssGrp}{SeqUnZDeps} = "";
+		# UnzpDeps is copied into readDeps at the start of each pass. Keeping
+		# completed job IDs here makes the next loop depend on stale Slurm jobs.
+		$AsGrps->{$cAssGrp}{UnzpDeps} = "";
 		@{$AsGrps->{$cAssGrp}{FilterSeq1}} = ();
 		@{$AsGrps->{$cAssGrp}{FilterSeq2}} = ();
 		@{$AsGrps->{$cAssGrp}{FilterSeqS}} = ();

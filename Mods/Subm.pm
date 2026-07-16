@@ -11,6 +11,18 @@ use Exporter qw(import);
 our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJobAlive
 		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs);
 
+my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
+
+sub _continue_after_submission_failure {
+	my ($optHR, $message) = @_;
+	return 0 unless ($optHR->{continueOnSubmitError});
+	$optHR->{submissionErrors} = []
+		unless (ref($optHR->{submissionErrors}) eq 'ARRAY');
+	push @{$optHR->{submissionErrors}}, $message;
+	warn "$message\nMATAFILER will skip dependent jobs and continue with later work.\n";
+	return 1;
+}
+
 
 
 
@@ -94,6 +106,9 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	}
 	$waitJID = normalise_job_dependencies($waitJID);
 	my @jspl = split /;/, $waitJID;
+	my $has_failed_dependency = grep { $_ eq $FAILED_SUBMISSION_DEPENDENCY } @jspl;
+	@jspl = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY } @jspl;
+	$waitJID = join(';', @jspl);
 
 	if ($cwd ne "" && !-d $cwd){system "mkdir -p $cwd";}
 	#if ($memory > 250001){$queues = "\"scb\"";}
@@ -220,6 +235,12 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	if (exists $optHR->{LOG}){ $LOGhandle = $optHR->{LOG};}
 	#if (@restrHosts > 0){die $qcm;}
 	if ($optHR->{doSubmit} != 0 && $immSubm){
+		if ($has_failed_dependency) {
+			my $message = "Skipping submission for $tmpsh because an upstream submission failed";
+			return ($FAILED_SUBMISSION_DEPENDENCY, $qcm)
+				if (_continue_after_submission_failure($optHR, $message));
+			die "$message\n";
+		}
 		system "rm -f $tmpsh.otxt $tmpsh.etxt";
 		print $LOGhandle $qcm."\n" unless ($LOGhandle eq "" || !defined($LOGhandle) );
 		#print("$qcm\n\n");
@@ -229,7 +250,10 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		my $submit_status = $?;
 		if ($submit_status != 0) {
 			my $exit_code = $submit_status == -1 ? -1 : ($submit_status >> 8);
-			die "Job submission failed (exit $exit_code): $qcm$ret";
+			my $message = "Job submission failed (exit $exit_code): $qcm$ret";
+			return ($FAILED_SUBMISSION_DEPENDENCY, $qcm)
+				if (_continue_after_submission_failure($optHR, $message));
+			die $message;
 		}
 		if ($LSF == 2){#slurm get jobid
 			chomp $ret;
@@ -418,6 +442,7 @@ sub qsubSystemJobAlive{
 	my $killFailedJobs=0;
 	$killFailedJobs = $_[2] if (@_ > 2);
 	my @jobs = split /;/, normalise_job_dependencies($jAr);
+	@jobs = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY } @jobs;
 	return unless (@jobs);
 	
 	

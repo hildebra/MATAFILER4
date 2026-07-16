@@ -173,4 +173,11 @@ unlike($subm, qr/length\(\$waitJID\)\s*>\s*3/,
 like($subm, qr/push\(\@\{\$aR\},\s*\$jN\)/,
 	'lock-release submission tracks the returned job id rather than its shell command');
 
+open my $group_source, '<', File::Spec->catfile($Bin, '..', 'Mods', 'GenoMetaAss.pm')
+	or die "Cannot inspect Mods/GenoMetaAss.pm: $!";
+my $groups = do { local $/; <$group_source> };
+close $group_source;
+like($groups, qr/sub resetAsGrps.*?\{UnzpDeps\}\s*=\s*""/s,
+	'loop reset removes completed unzip job ids before the next submission pass');
+
 done_testing;
