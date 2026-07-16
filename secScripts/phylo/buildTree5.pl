@@ -10,6 +10,7 @@
 #18.2.26: 5.04: MSA gz'ping
 #2.3.26: 5.05: added veryFastTRee
 #5.06: 15.4.26: added famse
+#5.07: 16.7.26: validate paths/options and repair filtering, resume, optional-tree, and cleanup paths
 
 use warnings;
 use strict;
@@ -54,7 +55,7 @@ sub requireConfiguredTool;
 sub shellQuote;
 
 my $doPhym= 0;
-my $version = 5.06;
+my $version = 5.07;
 
 my $pigzBin  = getProgPaths("pigz");
 #my $trDist = getProgPaths("treeDistScr");
