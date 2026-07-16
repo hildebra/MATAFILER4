@@ -1171,14 +1171,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredDeps);
 		add2SampleDeps(\@sampleDeps, [$deferredDeps]);
 		$AsGrps{$cAssGrp}{PostAssemblCmd} = "";
-		my $deferredCleanDeps = postSubmQsub(
-			"$logDir/MultiMapClean.sh", $AsGrps{$cAssGrp}{PostMapCleanCmd},
-			$deferredDeps,
-		);
-		$AsGrps{$cAssGrp}{PostMapCleanCmd} = "";
-		append_job_dependencies(\$AsGrps{$cAssGrp}{DeferredCleanDeps}, $deferredCleanDeps);
-		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredCleanDeps);
-		add2SampleDeps(\@sampleDeps, [$deferredCleanDeps]);
 	}
 	
 	#-----------------------------------------------------------------
@@ -1317,7 +1309,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			print "GenomeFace requires FetchMG - adding it as a step in contigStats\n";
 		}
 
-		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,normalise_job_dependencies($cln1,$AsGrps{$cAssGrp}{prodRun},$AsGrps{$cAssGrp}{DeferredCleanDeps}),$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl) ;
+		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,normalise_job_dependencies($cln1,$AsGrps{$cAssGrp}{prodRun}),$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl) ;
 
 		#run contig stats
 		my $deferredContigDeps = postSubmQsub(
@@ -1348,7 +1340,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($AssemblyGo) {
 		$deferredConsDeps = postSubmQsub(
 			"$logDir/MultiConsensus.sh", $AsGrps{$cAssGrp}{PostConsCmd},
-			normalise_job_dependencies($jdep, $AsGrps{$cAssGrp}{DeferredCleanDeps}),
+			normalise_job_dependencies($jdep, $cln1),
 		);
 		$AsGrps{$cAssGrp}{PostConsCmd} = "" if ($deferredConsDeps ne "");
 	}
@@ -6043,7 +6035,6 @@ sub TaxaTarget{
 
 sub clean_tmp{#routine moves output from temp dirs to final dirs (that are IO limited, thus single process)
 	my ($clDar,$cpref,$cpnodel,$jDepe,$tag,$curJname) = @_;
-	my $immediateSubm = @_ > 6 ? $_[6] : 1;
 	my @clDa = @{$clDar};
 	my @cps = @{$cpref};
 	my @cpsND = @{$cpnodel};
@@ -6087,7 +6078,7 @@ sub clean_tmp{#routine moves output from temp dirs to final dirs (that are IO li
 	} else {
 	#die "X${jDepe}X\n";
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
-		($jdep,$tmpCmd) = qsubSystem($clnBash,$cmd,1,"15G",$curJname,$jDepe.";$xtraJDep","",$immediateSubm,[],$QSBoptHR);
+		($jdep,$tmpCmd) = qsubSystem($clnBash,$cmd,1,"15G",$curJname,$jDepe.";$xtraJDep","",1,[],$QSBoptHR);
 		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	}
 	#die "jdeps: $jDepe\n$cmd\n";
@@ -6100,6 +6091,12 @@ sub clean_tmp{#routine moves output from temp dirs to final dirs (that are IO li
 sub manageFiles{
 	my ($cAssGrp, $cMapGrp, $rmRdsFlag, $doPreAssmFlag, $curOutDir , $jdep, $smplTmpDir,$AssemblyGo,$uplJob,$deferClean) = @_;
 	$deferClean ||= 0;
+	# A mapping created before the assembly-group's final member has no scheduler
+	# id yet.  Keep all publication targets and dependencies in group state; the
+	# final member will submit one cleanup after every deferred and current mapping
+	# has been registered.  Submitting a per-member cleanup here can race the final
+	# mapping and is also liable to strand downstream work until a recovery run.
+	return "" if ($deferClean);
 	#cleaning of filtered reads & copying of assembly / mapping files
 	#$AsGrps{$cAssGrp}{ClSeqsRm} .= $smplTmpDir."seqClean/".";";
 	
@@ -6142,9 +6139,7 @@ sub manageFiles{
 	if (!$MFconfig{remove_reads_tmpDir} || $doPreAssmFlag == 1){@cleans =();}
 	my $finishedClnDir = $curOutDir;  $finishedClnDir = "" if ($doPreAssmFlag);
 	#die "XXYZ\n@cleans\nTTTT\n@moves\nUUUUU\n@copiesNoDels\n";
-	my $cleanSubmitCmd;
-	($cln1,$cleanSubmitCmd) = clean_tmp(\@cleans,\@moves, \@copiesNoDels,$totJdeps,$finishedClnDir,"",$deferClean ? 0 : 1);#$AsGrps{$cAssGrp}{CSfinJobName}); #.";".$contRun
-	$AsGrps{$cAssGrp}{PostMapCleanCmd} .= $cleanSubmitCmd if ($deferClean);
+	$cln1 = clean_tmp(\@cleans,\@moves, \@copiesNoDels,$totJdeps,$finishedClnDir,"");#$AsGrps{$cAssGrp}{CSfinJobName}); #.";".$contRun
 	
 	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $cln1)
 		if ($AsGrps{$cAssGrp}{MapDeps} ne "");

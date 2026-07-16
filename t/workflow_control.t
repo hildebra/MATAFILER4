@@ -178,8 +178,13 @@ like($mataf4,
 	qr/my \$command_dependencies\s*=\s*normalise_job_dependencies\(.*?\$submitted\[-1\]/s,
 	'deferred mapper and sort/depth commands retain their submission order');
 like($mataf4,
-	qr/PostAssemblCmd.*?MultiMapClean\.sh.*?DeferredCleanDeps.*?MultiContigStats\.sh.*?MultiConsensus\.sh/s,
-	'assembly groups release mapping, cleanup, contig statistics, and consensus in stages');
+	qr/Submitting deferred assembly-group mapping jobs.*?manageFiles\(.*?\$mappingDeferred\).*?MultiContigStats\.sh.*?MultiConsensus\.sh/s,
+	'assembly groups release mapping, group-final cleanup, contig statistics, and consensus in stages');
+like($mataf4,
+	qr/sub manageFiles\s*\{.*?return "" if \(\$deferClean\).*?my \@moves = \(\@\{\$AsGrps\{\$cAssGrp\}\{MapCopies\}\},\@\{\$AsGrps\{\$cAssGrp\}\{AssCopies\}\}\).*?clean_tmp/s,
+	'deferred members retain mapping publication targets for one final group cleanup');
+unlike($mataf4, qr/MultiMapClean\.sh|PostMapCleanCmd|DeferredCleanDeps/,
+	'no per-member cleanup is released before all group mappings are registered');
 like($mataf4,
 	qr/\$cmd\s*\.\=\s*"mkdir -p \$cps\[\$i\+1\]\\n";.*?\$mvCmd \$cps\[\$i\]/s,
 	'cleanup creates every output destination before moving mapping and assembly results');
@@ -218,8 +223,7 @@ my %loop_groups = (group => {
 	FilterSeq1 => [], FilterSeq2 => [], FilterSeqS => [], ReadTec => [],
 	MapSupCopies => [], CntPreAss => 2, CntPreAssMiss => 3,
 	CntPreAssNoPrim => 4, preAsmblDir => ['old-package'],
-	AssemblSmplDirs => "/old/sample\n", PostMapCleanCmd => 'old-clean',
-	PostConsCmd => 'old-consensus', DeferredCleanDeps => 'old-dependency',
+	AssemblSmplDirs => "/old/sample\n", PostConsCmd => 'old-consensus',
 });
 resetAsGrps(\%loop_groups);
 is($loop_groups{group}{UnzpDeps}, '',
@@ -235,8 +239,8 @@ is_deeply($loop_groups{group}{preAsmblDir}, [],
 is($loop_groups{group}{AssemblSmplDirs}, '',
 	'assembly membership output is rebuilt once per loop pass without duplicates');
 is_deeply(
-	[@{$loop_groups{group}}{qw(PostMapCleanCmd PostConsCmd DeferredCleanDeps)}],
-	['', '', ''],
+	[@{$loop_groups{group}}{qw(PostConsCmd)}],
+	[''],
 	'deferred downstream submission state is cleared between loop passes');
 
 like($mataf4,
