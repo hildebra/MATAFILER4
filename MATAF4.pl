@@ -37,6 +37,7 @@ use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
 use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs parse_ignored_samples
+	balanced_parallel_batches
 	hybrid_group_ready hybrid_package_complete hybrid_package_sample_id missing_input_files source_input_files
 	hybrid_local_scratch_gb
 	sample_base_output_dir sample_is_ignored workflow_members_match
@@ -7331,6 +7332,7 @@ sub longRdAssembly{
 		#die "preLib num (" .@illDirs . ") != read libs (" . @inRds . ")!" if (@illDirs != @inRds);
 		die "preLib num (" .@illDirs . ") < read libs (" . @inRds . ")!" if (@illDirs < @inRds);
 		my $cmdLater = "";
+		my @simulatorCommands;
 		my ($lengthTemplate) = grep { defined($_) && $_ ne "" } @{$singlAr};
 		my $lengthTemplateArg = defined($lengthTemplate) ? "--length-template $lengthTemplate" : "";
 		#condition is not correct: there might be cases where there are less inRds (PB runs), but additional assmblGrp samples have illumina..
@@ -7347,9 +7349,9 @@ sub longRdAssembly{
 			$packageSample =~ s/[^A-Za-z0-9_.-]+/_/g;
 			my $dupiAssmbl = "$nodeTmp2/$packageSample.synthetic.fastq.gz";
 			my $preAssmbl = "$illD/scaffolds.fasta.filt";
-			$cmdPre .= "( $spl4m --assembly $preAssmbl --coverage $contigCov --breakpoints $breakpointTsv --output $dupiAssmbl "
-				."--mean-read-length $MFconfig{defaultReadLengthX} $lengthTemplateArg --max-synthetic-depth $MFopt{hybridSyntheticMaxDepth} ) &\n";
-			$cmdPre .= "sim_pid_$i=\$!\n";
+			push @simulatorCommands,
+				"( $spl4m --assembly $preAssmbl --coverage $contigCov --breakpoints $breakpointTsv --output $dupiAssmbl "
+				."--mean-read-length $MFconfig{defaultReadLengthX} $lengthTemplateArg --max-synthetic-depth $MFopt{hybridSyntheticMaxDepth} )";
 			#merge this split with single reads in tmp dir..
 			if (@{$singlAr} > $i && defined($singlAr->[$i]) &&  $singlAr->[$i] ne ""){
 				#print "\nXX $i\n";
@@ -7364,11 +7366,23 @@ sub longRdAssembly{
 		}
 		#transfer commands to main #cmd stream..
 		if ($runPar) {
-			$cmdPre .= "\nsim_failed=0\n";
-			for (my $i=0; $i<@illDirs; $i++) {
-				$cmdPre .= "if ! wait \$sim_pid_$i; then echo \"synthetic-read simulator $i failed\" >&2; sim_failed=1; fi\n";
+			my $batchSizes = balanced_parallel_batches(scalar(@simulatorCommands), 20);
+			my $simulatorIndex = 0;
+			for (my $batch = 0; $batch < @{$batchSizes}; $batch++) {
+				my $batchEnd = $simulatorIndex + $batchSizes->[$batch];
+				$cmdPre .= "\necho \"Starting synthetic-read simulator batch ".($batch + 1)
+					."/".scalar(@{$batchSizes})." (".$batchSizes->[$batch]." jobs)\"\n";
+				for (my $i = $simulatorIndex; $i < $batchEnd; $i++) {
+					$cmdPre .= $simulatorCommands[$i]." &\nsim_pid_$i=\$!\n";
+				}
+				$cmdPre .= "sim_failed=0\n";
+				for (my $i = $simulatorIndex; $i < $batchEnd; $i++) {
+					$cmdPre .= "if ! wait \$sim_pid_$i; then echo \"synthetic-read simulator $i failed\" >&2; sim_failed=1; fi\n";
+				}
+				$cmdPre .= "[ \$sim_failed -eq 0 ] || exit 33\n";
+				$simulatorIndex = $batchEnd;
 			}
-			$cmdPre .= "[ \$sim_failed -eq 0 ] || exit 33\n\n";
+			$cmdPre .= "\n";
 		}
 
 		$cmd .= $cmdPre.$cmdLater."\n\n";

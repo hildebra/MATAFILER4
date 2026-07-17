@@ -10,7 +10,7 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(resetAsGrps contig_stats_coverage_complete);
 use Mods::WorkflowControl qw(
-	advance_loop_window assembly_group_output_dirs hybrid_group_ready
+	advance_loop_window assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies augment_deferred_submission
@@ -24,6 +24,12 @@ is(append_job_dependencies(\$job_dependencies, 'run7', 'run12'), 'run12;run7',
 is(hybrid_local_scratch_gb(
 	assembler_gb => 150, preassembly_bytes => 512 * 1024**2, max_synthetic_depth => 20,
 ), 160, 'hybrid scratch adds estimated synthetic reads to assembler workspace');
+is_deeply(balanced_parallel_batches(21, 20), [11, 10],
+	'synthetic simulator batches avoid a nearly empty final wave');
+is_deeply(balanced_parallel_batches(45, 20), [15, 15, 15],
+	'synthetic simulator batches are balanced and capped below the concurrency limit');
+is_deeply(balanced_parallel_batches(40, 20), [20, 20],
+	'exact concurrency multiples retain full balanced waves');
 
 my $slurm = augment_deferred_submission(
 	qmode => 'slurm', run_tag => 'run', dependencies => 'run12;run7',
@@ -175,6 +181,8 @@ like($mataf4, qr/mixes ONT and PacBio reads/,
 	'mixed ONT/PacBio hybrid groups are rejected explicitly');
 like($mataf4, qr/sim_failed=0.*?wait \\\$sim_pid_/s,
 	'each background synthetic-read simulator is waited on and validated');
+like($mataf4, qr/balanced_parallel_batches\(scalar\(\@simulatorCommands\), 20\)/,
+	'synthetic-read simulator command waves are capped at twenty processes');
 is(scalar(() = $mataf4 =~ /--length-template/g), 1,
 	'hybrid command construction emits one length-template argument');
 like($mataf4, qr/\$packageSample\.synthetic\.fastq\.gz/,

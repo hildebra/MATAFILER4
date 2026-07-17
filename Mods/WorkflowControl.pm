@@ -8,6 +8,7 @@ use Exporter qw(import);
 our @EXPORT_OK = qw(
 	advance_loop_window
 	assembly_group_output_dirs
+	balanced_parallel_batches
 	hybrid_group_ready
 	hybrid_package_complete
 	hybrid_package_sample_id
@@ -22,6 +23,18 @@ our @EXPORT_OK = qw(
 	sample_is_ignored
 	workflow_members_match
 );
+
+sub balanced_parallel_batches {
+	my ($total, $maximum) = @_;
+	die 'balanced_parallel_batches requires non-negative total and positive maximum'
+		unless (defined($total) && defined($maximum) && $total >= 0 && $maximum > 0
+			&& int($total) == $total && int($maximum) == $maximum);
+	return [] if ($total == 0);
+	my $batch_count = int(($total + $maximum - 1) / $maximum);
+	my $base_size = int($total / $batch_count);
+	my $remainder = $total % $batch_count;
+	return [map { $base_size + ($_ < $remainder ? 1 : 0) } 0 .. $batch_count - 1];
+}
 
 sub hybrid_package_sample_id {
 	my ($package_dir) = @_;
