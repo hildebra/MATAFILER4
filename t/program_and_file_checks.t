@@ -38,6 +38,13 @@ like($error, qr/Unequal paired read array lengths for MEGAHIT/,
 	is($check_path, "$root/reference.fa.pac", 'BWA index check uses the actual .pac path');
 }
 
+{
+	my ($command, $index_path, $check_path) = buildMapperIdx("$root/reference.fa", 2, 0, -2);
+	is($command, '', 'automatic strobealign selection emits no reference-index command');
+	is($index_path, "$root/reference.fa", 'strobealign maps directly against the reference FASTA');
+	is($check_path, "$root/reference.fa", 'strobealign reference check uses the FASTA itself');
+}
+
 my $empty = "$root/empty.txt";
 open my $empty_fh, '>', $empty or die $!;
 close $empty_fh;

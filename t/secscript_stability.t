@@ -45,9 +45,12 @@ like(read_file("$filter_input.filt2"), qr/>last-secondary\nCCCCCC\n/,
 
 my $synthetic_fasta = File::Spec->catfile($tmp, 'synthetic.fasta');
 write_file($synthetic_fasta,
-           ">ctgA descriptive header\n" . ('A' x 30_000) . "\n>last\n" . ('C' x 1_000) . "\n");
+		   ">ctgA descriptive header\n" . ('A' x 30_000)
+		   . "\n>splitShort\n" . ('G' x 4_000) . "\n>last\n" . ('C' x 1_000) . "\n");
 my $synthetic_coverage = File::Spec->catfile($tmp, 'mapping.coverage.gz');
-my $coverage_text = "ctgA\t0\t10000\t4\nctgA\t10000\t12000\t0\nctgA\t12000\t30000\t1\nlast\t0\t1000\t1\n";
+my $coverage_text = "ctgA\t0\t10000\t4\nctgA\t10000\t12000\t0\nctgA\t12000\t30000\t1\n"
+	. "splitShort\t0\t1800\t2\nsplitShort\t1800\t2200\t0\nsplitShort\t2200\t4000\t2\n"
+	. "last\t0\t1000\t1\n";
 gzip(\$coverage_text => $synthetic_coverage)
     or die "Cannot create $synthetic_coverage: $GzipError";
 my $synthetic_fastq = File::Spec->catfile($tmp, 'synthetic.fastq.gz');
@@ -134,15 +137,15 @@ is($? >> 8, 0, 'metaMDBG preparation accepts its flag-based interface');
 is($simulator_stderr, '', 'metaMDBG simulation emits no warnings for valid input');
 like($simulator_stdout, qr/Synthetic read simulation summary/,
      'simulation reports a readable end-of-run summary');
-like($simulator_stdout, qr/Breakpoints identified:\s+1 across 1 contig/,
+like($simulator_stdout, qr/Breakpoints identified:\s+2 across 2 contig/,
      'simulation summary reports identified breakpoints');
-like($simulator_stdout, qr/Simulated reads:\s+20\b/,
+like($simulator_stdout, qr/Simulated reads:\s+19\b/,
      'simulation summary reports its output read count');
 my $synthetic_text = '';
 gunzip($synthetic_fastq => \$synthetic_text)
     or die "Cannot read $synthetic_fastq: $GunzipError";
 my @synthetic_headers = ($synthetic_text =~ /^\@([^\n]+)/mg);
-is(scalar @synthetic_headers, 20,
+is(scalar @synthetic_headers, 19,
    'coverage integrals determine the number of randomly placed reads');
 my @ctga_coordinates = map {
     /^ctgA_SIM_\d+_START_(\d+)_END_(\d+)_ANCHOR_(\d+)$/ ? [$1, $2, $3] : ()
@@ -154,8 +157,8 @@ is(scalar(grep { $_->[2] < 10_000 } @ctga_coordinates), 13,
    'the four-fold high-coverage block receives proportionally more read anchors');
 is(scalar(grep { $_->[2] >= 12_000 } @ctga_coordinates), 6,
    'the lower-coverage block receives proportionally fewer read anchors');
-is(scalar(grep { /^last_SIM_000001_START_0_END_1000_ANCHOR_\d+$/ } @synthetic_headers), 1,
-   'the final FASTA contig is retained');
+is(scalar(grep { /^(?:last|splitShort)_SIM_/ } @synthetic_headers), 0,
+	'short contigs and breakpoint-shortened fragments emit no synthetic reads');
 my @synthetic_sequences = ($synthetic_text =~ /^\@[^\n]+\n([^\n]+)\n\+\n/mg);
 my @ctga_lengths = map { $_->[1] - $_->[0] } @ctga_coordinates;
 ok(scalar(keys %{ { map { $_ => 1 } @ctga_lengths } }) > 3,
@@ -183,8 +186,8 @@ is(system($^X, '-I' . $root,
 my $legacy_text = '';
 gunzip($legacy_fastq => \$legacy_text)
     or die "Cannot read $legacy_fastq: $GunzipError";
-is(scalar(() = $legacy_text =~ /^\@/mg), 11,
-   'contig-wide fallback preserves its requested coverage and final contig');
+is(scalar(() = $legacy_text =~ /^\@/mg), 10,
+	'contig-wide fallback skips contigs shorter than the synthetic-read minimum');
 my $comparison = File::Spec->catfile($tmp, 'HybridAssemblyComparison.tsv');
 is(system($^X, File::Spec->catfile($root, 'secScripts', 'assemblies', 'compare_hybrid_assemblies.pl'),
           '--preassembly', $synthetic_fasta, '--final', $smooth_fasta,

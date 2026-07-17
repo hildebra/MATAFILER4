@@ -784,7 +784,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#die "$assemblyFlag = 1 if ( $MFopt{DoAssembly} && !$boolAssemblyOK && !$efinAssLoc && !-e $metaGassembly\n $doPreAssmFlag\n";
 	my $calcReadMerge = 0;
 	$calcReadMerge = 1 if ($MFopt{doReadMerge} && ($MFopt{calcOrthoPlacement} || $calcDiamond || $calcGenoSize));
-	my $mapAssFlag = 0; $mapAssFlag = 1 if ($MFopt{map2Assembly} && !$eFinMapCovGZ  );
+	my $mapAssFlag = 0; $mapAssFlag = 1 if ($map{$curSmpl}{hasPrimaryRds} && $MFopt{map2Assembly} && !$eFinMapCovGZ  );
 	#only for support reads (from hybrid assemblies)
 	my $mapSuppAssFlag =0;$mapSuppAssFlag = 1 if ($supportCoverageRequired && !$eFinSupMapCovGZ);#hasSuppRds(\%AsGrps,$cAssGrp,$curSmpl ) );
 	my $calcSuppCoverage = 0; $calcSuppCoverage =1 if ($MFopt{mapSupport2Assembly} && !$eSuppCovAsssembly && $map{$curSmpl}{"SupportReads"} ne "" && $mapSuppAssFlag && !$doPreAssmFlag);
@@ -3742,7 +3742,6 @@ sub sdmClean(){
 		if (!@{$ar1} && !@{$ars}) { #nope, no additional reads are requested..
 			return ($jobd);
 		}
-		print "sdm'ing support reads..\n";
 	}
 	my $sdmBin = getProgPaths("sdm");# sdm program from LotuS2 pipeline
 	my $comprCores=$MFopt{sdmCores};
@@ -3898,6 +3897,7 @@ sub sdmClean(){
 				#print "@{${$cleanSeqSetHR}{arp1}} YY \n";
 
 	if ( ($presence==0 || $assInputFlaw==1 )&& $runThis){
+		print "sdm'ing support reads..\n" if ($useXtras);
 		#die "yes\n";
 		$jobName = "_SDM${useXtras}_$JNUM"; my $tmpCmd;
 		my $preHDDspace=$QSBoptHR->{tmpSpace};
@@ -7457,8 +7457,8 @@ sub longRdAssembly{
 	$cmd .= "$assStatScr $nodeTmp/scaffolds.fasta.filt > $nodeTmp/AssemblyStats.txt\n";
 	if (@hybridPreassemblies) {
 		my $compareScr = getProgPaths("compareHybridAssemblies_scr");
-		my $preArgs = join(" ", map { "--preassembly $_" } @hybridPreassemblies);
-		$cmd .= "$compareScr --final $nodeTmp/scaffolds.fasta.filt $preArgs --output $nodeTmp/HybridAssemblyComparison.tsv\n";
+		my $comparisonPreassembly = $hybridPreassemblies[0];
+		$cmd .= "$compareScr --final $nodeTmp/scaffolds.fasta.filt --preassembly $comparisonPreassembly --output $nodeTmp/HybridAssemblyComparison.tsv\n";
 		$cmd .= "[ -s $nodeTmp/HybridAssemblyComparison.tsv ] || exit 36\n";
 	}
 	

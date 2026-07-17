@@ -54,10 +54,13 @@ if (@length_templates) {
 	($mean_length, $length_sd) = empirical_read_lengths(\@length_templates, $length_sample_size);
 }
 srand($seed);
+my $minimum_synthetic_length = int($mean_length - 3 * $length_sd + 0.5);
+$minimum_synthetic_length = 1 if ($minimum_synthetic_length < 1);
 
 print "Creating coverage-weighted synthetic long reads for metaMDBG\n"
 	."Assembly: $fasta_file\nCoverage: $coverage_file\nOutput: $output_fastq\n"
 	."Breakpoints: $breakpoint_file\nMean length: $mean_length; SD: $length_sd; "
+	."minimum synthetic length: $minimum_synthetic_length; "
 	."maximum synthetic depth: $max_synthetic_depth; seed: $seed\n";
 
 my ($lengths, $order) = read_fasta_lengths($fasta_file);
@@ -145,7 +148,8 @@ while (my $line = <$fasta_fh>) {
 			);
 			my ($reads, $target, $bases, $minimum, $maximum, $blocks_used) = simulate_contig(
 				$header, $sequence, $runs, $blocks,
-				$output_fh, $mean_length, $length_sd, $max_synthetic_depth,
+				$output_fh, $mean_length, $length_sd, $minimum_synthetic_length,
+				$max_synthetic_depth,
 			);
 			$written_reads += $reads; $target_bases += $target; $written_bases += $bases;
 			$supported_blocks += $blocks_used;
@@ -169,7 +173,8 @@ if ($header ne '') {
 	);
 	my ($reads, $target, $bases, $minimum, $maximum, $blocks_used) = simulate_contig(
 		$header, $sequence, $runs, $blocks,
-		$output_fh, $mean_length, $length_sd, $max_synthetic_depth,
+		$output_fh, $mean_length, $length_sd, $minimum_synthetic_length,
+		$max_synthetic_depth,
 	);
 	$written_reads += $reads; $target_bases += $target; $written_bases += $bases;
 	$supported_blocks += $blocks_used;
@@ -421,13 +426,16 @@ sub normal_read_length {
 }
 
 sub simulate_contig {
-	my ($id, $sequence, $runs, $blocks, $fh, $mean, $sd, $max_depth) = @_;
+	my ($id, $sequence, $runs, $blocks, $fh, $mean, $sd, $minimum_allowed_length, $max_depth) = @_;
 	my ($written, $target_bases, $written_bases, $serial, $blocks_used) = (0, 0, 0, 0, 0);
 	my ($minimum_length, $maximum_length);
 	for my $block (@{$blocks}) {
 		my ($block_start, $block_end) = @{$block};
 		my $block_length = $block_end - $block_start;
-		next unless ($block_length > 0);
+		# A breakpoint can leave fragments much shorter than the source contig.
+		# Do not turn those fragments (or intrinsically short contigs) into
+		# synthetic long reads that cannot represent the requested distribution.
+		next if ($block_length < $minimum_allowed_length);
 		my ($weighted, $coverage_bases) = weighted_runs_in_block(
 			$runs, $block_start, $block_end, $max_depth,
 		);

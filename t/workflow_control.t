@@ -197,6 +197,12 @@ like($mataf4,
 	'metaMDBG compressed output is validated before and after normalization');
 like($mataf4, qr/HybridAssemblyComparison\.tsv/,
 	'hybrid finalization requires a comparative assembly report');
+like($mataf4,
+	qr/my \$comparisonPreassembly = \$hybridPreassemblies\[0\];.*?--preassembly \$comparisonPreassembly --output/s,
+	'hybrid comparison receives exactly one deterministic preassembly');
+unlike($mataf4,
+	qr/join\(" ", map \{ "--preassembly \$_" \} \@hybridPreassemblies\)/,
+	'hybrid comparison does not repeat the preassembly option');
 like($mataf4, qr{mapping/\$SmplN-smd\.bam\.breakpoints\.tsv\.gz},
 	'metagStats reads the sample breakpoint report from its mapping directory');
 like($mataf4, qr/BreakpointCount.*BreakpointContigs.*BreakpointBases.*BreakpointMeanLength.*BreakpointMaxLength/,
@@ -320,5 +326,12 @@ is_deeply(
 like($mataf4,
 	qr/sub longRdAssembly\s*\{.*?\$finalOut\s*=~\s*s\{\/\+\$\}\{\};.*?my \$stageOut\s*=\s*"\$finalOut\.hybrid-stage"/s,
 	'hybrid publication strips trailing slashes before creating sibling staging directories');
+
+like($mataf4,
+	qr/\$mapAssFlag\s*=\s*1\s+if\s*\(\$map\{\$curSmpl\}\{hasPrimaryRds\}\s*&&\s*\$MFopt\{map2Assembly\}\s*&&\s*!\$eFinMapCovGZ/s,
+	'primary mapping cannot trigger staging for support-only samples');
+like($mataf4,
+	qr/if\s*\(\s*\(\$presence==0\s*\|\|\s*\$assInputFlaw==1\s*\)\s*&&\s*\$runThis\)\{\s*print\s+"sdm'ing support reads\.\.\\n"\s+if\s*\(\$useXtras\)/s,
+	'support SDM message is emitted only when an SDM job is submitted');
 
 done_testing;

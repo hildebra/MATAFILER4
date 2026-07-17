@@ -335,12 +335,12 @@ sub mapperDBbuilt( $ $){
 sub buildMapperIdx($ $ $ $){
 	my ($REF,$ncore,$lrgDB,$MapperProg) = @_;
 	#1=bowtie2, 2=bwa, 3=minimap2
+	$MapperProg = decideMapper($MapperProg,"");
 	if ($MapperProg == 5){return ("",$REF,$REF);} #strobealign doesn't need index..
 	my $bwt2IdxFileSuffix = ".bw2";my $mini2IdxFileSuffix = ".mmi";
 	my $kmaIdxFileSuffix = ".kma";
 	my $bwtIdx = $REF.$bwt2IdxFileSuffix;
 	my $chkFi = $bwtIdx;
-	$MapperProg = decideMapper($MapperProg,"");
 	my @required_index_files;
 	if ($MapperProg==1){
 		my $extension = $lrgDB ? 'bt2l' : 'bt2';
