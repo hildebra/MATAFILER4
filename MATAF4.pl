@@ -336,8 +336,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $finalCommAssDir = "$curOutDir/assemblies/metag/";
 	my $finalCommAssDirSingle = $finalCommAssDir; #this is only used for checking..
 	my $finalMapDir = "$curOutDir/mapping/";
-	my $mapOut = "$finalMapDir/.work/$SmplName/primary/";
-	my $mapOutSup = "$finalMapDir/.work/$SmplName/support/";
 	#$DBpath="$curOutDir/readDB/";
 	
 	
@@ -450,32 +448,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#detect what already exists..
 	my $efinAssLoc = 0; $efinAssLoc = 1  if (-s $finAssLoc && -e "$finalCommAssDir/$stones{asmDone}");
 	#die "$efinAssLoc\n$finalCommAssDir/$stones{asmDone}\n";
-	# Migrate completed assemblies from layouts used before assembly publication
-	# moved into the canonical output tree. Global scratch is intentionally still
-	# accepted here: it is a legitimate legacy/temporary source, never the target.
-	if (!$efinAssLoc) {
-		my @legacyMetagDirs = (
-			"$MFglobal{runTmpDirGlobal}/$assmGrpTag/metag/", # old grouped layout
-			"$smplTmpDir/assemblies/metag/",                 # old single-sample layout
-		);
-		my $canonicalFinal = $finalCommAssDir;
-		$canonicalFinal =~ s{//+}{/}g;
-		$canonicalFinal =~ s{/$}{};
-		foreach my $legacyMetagDir (@legacyMetagDirs) {
-			my $canonicalLegacy = $legacyMetagDir;
-			$canonicalLegacy =~ s{//+}{/}g;
-			$canonicalLegacy =~ s{/$}{};
-			next if ($canonicalLegacy eq $canonicalFinal);
-			next unless (-s "$legacyMetagDir/scaffolds.fasta.filt"
-				&& (-e "$legacyMetagDir/$stones{asmDone}" || -e "$legacyMetagDir/$stones{preAsmDone}"));
-			my $tagS = -e "$legacyMetagDir/$stones{preAsmDone}" ? "preAssembly" : "Assembly";
-			print "Migrating legacy scratch $tagS from $legacyMetagDir to $finalCommAssDir\n";
-			systemW "mkdir -p $finalCommAssDir" unless (-d $finalCommAssDir);
-			systemW "$mvCmd $legacyMetagDir/* $finalCommAssDir/";
-			last;
-		}
-		$efinAssLoc = 1 if (-s $finAssLoc && -e "$finalCommAssDir/$stones{asmDone}");
-	}
+	# Only canonical MATAFILER4 outputs participate in workflow recovery. Scratch
+	# trees left by older releases are deliberately ignored.
 	#activate if two assemblies for single sample required, e.g. hybrid assemblies
 	#my $doPreAssmFlag = 0; my $postPreAssmblGo =0 ;
 	
@@ -593,7 +567,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#print "locRedoAssMapping : $locRedoAssMapping\n";
 	if ($MFopt{map2Assembly} ){
 		if ($eFinMapCovGZ && !$eFinalMapDir){$locRedoAssMapping = 1 ; print "R0 ";}
-		if (!$efinAssLoc && !$ePreAssmbly  ){$locRedoAssMapping = 1 ;}#print "R1";}
+		my $mappingArtifactsPresent = $eFinMapCovGZ || $eFinalMapDir || -e $STOcram
+			|| -e $CRAMmap || fileGZe("$finalMapDir/$SmplName-smd.bam.coverage.gz");
+		if (!$efinAssLoc && !$ePreAssmbly && $mappingArtifactsPresent){$locRedoAssMapping = 1 ;}
 		if (!$MappingGo && $map{$curSmpl}{hasPrimaryRds} && $eFinalMapDir){$locRedoAssMapping = 1 ;print "R2 ";}
 		if (-e $STOcram && (!fileGZe( "$finalMapDir/$SmplName-smd.bam.coverage.gz") || !-e $CRAMmap) ){$locRedoAssMapping = 1 ;print "R3 ";}
 		#if ($eFinMapCovGZ && (exists($locStats{uniqAlign}) && $locStats{uniqAlign} > 20) && -s $CRAMmap <300){$locRedoAssMapping = 1 ;print "R4";}
@@ -615,7 +591,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			die "Refusing to rebuild shared assembly group $cAssGrp without -OKtoRWassGrps 1\n";
 		}
 		print "Removing assembly ... \n" if (-e $metaGassembly );
-		system "rm -fr $finalCommAssDir $mapOut $mapOutSup";
+		system "rm -fr $finalCommAssDir";
 		$efinAssLoc = 0;	
 		$locRedoAssMapping=1;
 	}
@@ -626,7 +602,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$fileSiz = (-s $CRAMmap) if (-s $CRAMmap);
 		print "Deleting previous assembly mapping, size map: ". $fileSiz . " ; $CRAMmap\n" if ($MappingGo && $eFinalMapDir);
 		#die "$finAssLoc && !-e $metaGassembly\n";
-		system "rm -fr $finalMapDir $mapOut $mapOutSup $ContigStatsDir/Coverage.* $ContigStatsDir/Cov.sup.*";
+		system "rm -fr $finalMapDir $ContigStatsDir/Coverage.* $ContigStatsDir/Cov.sup.*";
 		$eFinMapCovGZ = 0;	
 		$eCovAsssembly = 0; $eSuppCovAsssembly=0; $eFinSupMapCovGZ=0; $eFinalMapDir = 0;
 		#are there SNPs called? remove as well..
@@ -634,7 +610,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	#Case: primary assembly mapping was done, support reads were not yet mapped.. need to redo binning 
 	#print "$locMapSup2Assembly && !$eFinSupMapCovGZ) && ($MFopt{map2Assembly} && $eFinMapCovGZ \n";
-	if ( ($locMapSup2Assembly && !$eFinSupMapCovGZ) && ($MFopt{map2Assembly} && $eFinMapCovGZ ) ){
+	my $binningArtifactsPresent = -e $BinningOut || -e "$BinningOut.cm"
+		|| -e "$BinningOut.cm2" || -e "$BinningOut.assStat";
+	if ( ($locMapSup2Assembly && !$eFinSupMapCovGZ) && ($MFopt{map2Assembly} && $eFinMapCovGZ )
+			&& $binningArtifactsPresent ){
 		print "redoing binning due to support mapping not included..\n";
 		system("rm -rf  $binningDir/");
 	}
@@ -780,7 +759,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	# For a normal (non-hybrid-preassembly) group, AssemblyGo means that this
 	# invocation will schedule the final assembly and all of its mappings.  The
 	# binner is submitted later with those scheduler dependencies.
+	my $supportMappingPublished = !$locMapSup2Assembly || $eFinSupMapCovGZ;
 	if ($MFopt{DoMetaBat2} && !$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo
+			&& $supportMappingPublished
 			&& (!-e "$BinningOut.cm" && !-s "$BinningOut.cm2") ) {
 		$calcBinning=$MFopt{DoMetaBat2};
 		#die "$MFopt{DoMetaBat2} && $boolAssemblyOK && $AssemblyGo && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ &&  (!-e $BinningOut.cm || !-s $BinningOut.cm2\n";
@@ -1220,14 +1201,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	my $mappingDeferred = 0;
 	if ($doMapping){ #mapping to the assembly (can be multi-sample assembly as well)
-		my $moveMappings = 0; $moveMappings =1 if (!$eFinMapCovGZ && -e "$mapOut/$SmplName-smd.bam.coverage.gz");
-		if ($moveMappings) {
-			# One-time migration for outputs created by releases that used a separate
-			# result-moving job. New mapping jobs never write completed products here.
-			print "Migrating legacy scratch mapping to finaldir\n";
-			systemW "mkdir -p $finalMapDir\n$mvCmd $mapOut/* $finalMapDir/";
-		}
-
 		my $mapNow =0;
 		$mapNow = 1 if ($AssemblyGo ||  $efinAssLoc || ($ePreAssmbly && $doPreAssmFlag) );#controls if several samples are assembled together and this needs to be waited for
 		#print "main map\n";
@@ -1251,7 +1224,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			#store command for later..
 			$AsGrps{$cAssGrp}{PostAssemblCmd} .= $delaySubmCmd;
 		}
-		#die "$curOutDir/mapping\n" . "$mapOut/$SmplName-smd.bam.coverage.gz"
 	}
 	
 	
@@ -5043,9 +5015,9 @@ sub krakenTaxEst(){
 }
 
 sub check_map_done{
-	my ($doCram, $finalD, $baseN, $_legacyMappingDir) = @_;
-	# Only canonical outputs count as complete.  Older scratch-only results are
-	# migrated before planning, rather than making every consumer probe two paths.
+	my ($doCram, $finalD, $baseN) = @_;
+	# Only canonical outputs count as complete. Older scratch-only results are
+	# ignored so partial outputs cannot cross MATAFILER version boundaries.
 	if ($doCram){
 		return 1 if (-s "$finalD/$baseN-smd.cram" && -e "$finalD/$baseN-smd.cram.sto");
 	} else {
@@ -5054,7 +5026,7 @@ sub check_map_done{
 	return 0;
 }
 sub check_depth_done{
-	my ($_doCram, $finalD, $baseN, $_legacyMappingDir) = @_;
+	my ($_doCram, $finalD, $baseN) = @_;
 	return 1 if (fileGZs("$finalD/$baseN-smd.bam.coverage"));
 	return 0;
 }
@@ -5220,7 +5192,7 @@ sub alignPostTreat{
 		$algCmd .= "$smtBin index $iTO\n";
 		for (my $k=0;$k<@{$postTreat{regsAR}};$k++){
 			#		print "$k\t$finalDS[$k]\n";
-			if(check_map_done(${$postTreat{doCram}}, ${$postTreat{finalDSar}}[$k], ${$postTreat{outNmsAR}}[$k], ${$postTreat{mappDirAR}}[$k])){$$subBamsAR[$k]="";next;}
+			if(check_map_done(${$postTreat{doCram}}, ${$postTreat{finalDSar}}[$k], ${$postTreat{outNmsAR}}[$k])){$$subBamsAR[$k]="";next;}
 			$algCmd .= "\n\nset +e \n" if ($k==0);
 			$algCmd .= "#  %%%%%%%%%%%%%%%% $k %%%%%%%%%%%%%%%% \n";
 			$algCmd .= "$bamHdFilt_scr $iTO ${$postTreat{reg_lcsAR}}[$k] 0 > $iTO.decoy.sam.$k\n";
@@ -5349,7 +5321,7 @@ sub mapReadsToRef{
 	}
 	for (my $k=0;$k<@outNms;$k++){
 		if ($MFopt{MapRewrite2nd}){$outputExistsNEx++; system "rm -fr $tmpOut22[$k] $finalDS[$k]/$outNms[$k]-smd*"; next;}
-		my $outstat = check_map_done($doCram, $finalDS[$k], $outNms[$k], $mappDir[$k]);
+		my $outstat = check_map_done($doCram, $finalDS[$k], $outNms[$k]);
 		next if ($outstat);#-e "$finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz" );#|| -e "$mappDir[$k]/$outNms[$k]-smd.bam.coverage.gz");
 		#print "-e $finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz || -e $mappDir/$outNms[$k]-smd.bam.coverage.gz";
 		if (-e $tmpOut22[$k] && -s $tmpOut22[$k] < 100){unlink $tmpOut22[$k];}
@@ -5447,11 +5419,11 @@ sub mapReadsToRef{
 			my $allDone=1;
 			for (my $k=0;$k<@outNms;$k++){
 				#print "$finalDS[$k] $outNms[$k] $mappDir[$k]\n";
-				$allDone =0 unless(check_map_done($doCram, $finalDS[$k], $outNms[$k], $mappDir[$kk]));
+				$allDone =0 unless(check_map_done($doCram, $finalDS[$k], $outNms[$k]));
 			}
 			#die;
 			last if ($allDone);
-		} elsif (-e $tmpOut22[$kk] || check_map_done($doCram, $finalDS[$kk], $outNms[$kk], $mappDir[$kk])){ #this check is for non-decoy mode
+		} elsif (-e $tmpOut22[$kk] || check_map_done($doCram, $finalDS[$kk], $outNms[$kk])){ #this check is for non-decoy mode
 			#(-e "$finalDS[$kk]/$outNms[$kk]-smd.bam" && -e "$finalDS[$kk]/$outNms[$kk]-smd.bam.coverage.gz") ){
 			next;
 		} #|| -e "$mappDir[$kk]/$outNms[$kk]-smd.bam.coverage.gz"
@@ -5655,8 +5627,8 @@ sub bamDepth{
 	my $sortTMP2 = $nodeTmp."/$baseN.2.srt";
  
 	#check if already done
-	my $outstat = check_map_done($doCram, $finalD, $baseN, $mappDir);
-	my $outstat2 = check_depth_done($doCram, $finalD, $baseN, $mappDir);
+	my $outstat = check_map_done($doCram, $finalD, $baseN);
+	my $outstat2 = check_depth_done($doCram, $finalD, $baseN);
 	my $breakpointOut = $dirsHr->{breakpointOutput} || "";
 	my $breakpointDone = $breakpointOut eq "" || -s $breakpointOut;
 	my $breakpointWork = ($breakpointOut ne "" && !$breakpointDone)

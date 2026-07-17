@@ -196,6 +196,17 @@ like($mataf4,
 like($mataf4,
 	qr/sub check_map_done.*?Only canonical outputs count as complete.*?sub check_depth_done/s,
 	'mapping completeness is determined only from canonical final outputs');
+unlike($mataf4, qr/Migrating legacy scratch|legacyMetagDirs|moveMappings/,
+	'outputs and partial files from older MATAFILER layouts are ignored');
+like($mataf4,
+	qr/my \$mappingArtifactsPresent\s*=.*?if \(!\$efinAssLoc && !\$ePreAssmbly && \$mappingArtifactsPresent\)/s,
+	'a missing clean-run assembly does not masquerade as a mapping redo');
+like($mataf4,
+	qr/my \$supportMappingPublished\s*=.*?\$eFinSupMapCovGZ.*?\$supportMappingPublished/s,
+	'hybrid binning waits for support mapping to be published');
+like($mataf4,
+	qr/my \$binningArtifactsPresent\s*=.*?redoing binning due to support mapping not included/s,
+	'support-map repair is reported only when binning artifacts actually exist');
 like($mataf4,
 	qr/sub spadesAssembly.*?\$finalOut\.assembly-stage.*?mv \$stageOut \$finalOut.*?sub longRdAssembly.*?\$finalOut\.hybrid-stage.*?mv \$stageOut \$finalOut.*?sub megahitAssembly.*?\$finalOut\.assembly-stage.*?mv \$stageOut \$finalOut/s,
 	'all assembly producers validate and rotate staged output into the canonical directory');
