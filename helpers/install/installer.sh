@@ -20,9 +20,9 @@ then
 fi
 
 if [ -z "${MAMBA_EXE}" ] ; then
-MAMBA_E=$MAMBA_EXE
-else
 MAMBA_E=micromamba
+else
+MAMBA_E=$MAMBA_EXE
 fi
 #which micromamba
 
