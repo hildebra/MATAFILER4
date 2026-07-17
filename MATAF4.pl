@@ -450,6 +450,32 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#detect what already exists..
 	my $efinAssLoc = 0; $efinAssLoc = 1  if (-s $finAssLoc && -e "$finalCommAssDir/$stones{asmDone}");
 	#die "$efinAssLoc\n$finalCommAssDir/$stones{asmDone}\n";
+	# Migrate completed assemblies from layouts used before assembly publication
+	# moved into the canonical output tree. Global scratch is intentionally still
+	# accepted here: it is a legitimate legacy/temporary source, never the target.
+	if (!$efinAssLoc) {
+		my @legacyMetagDirs = (
+			"$MFglobal{runTmpDirGlobal}/$assmGrpTag/metag/", # old grouped layout
+			"$smplTmpDir/assemblies/metag/",                 # old single-sample layout
+		);
+		my $canonicalFinal = $finalCommAssDir;
+		$canonicalFinal =~ s{//+}{/}g;
+		$canonicalFinal =~ s{/$}{};
+		foreach my $legacyMetagDir (@legacyMetagDirs) {
+			my $canonicalLegacy = $legacyMetagDir;
+			$canonicalLegacy =~ s{//+}{/}g;
+			$canonicalLegacy =~ s{/$}{};
+			next if ($canonicalLegacy eq $canonicalFinal);
+			next unless (-s "$legacyMetagDir/scaffolds.fasta.filt"
+				&& (-e "$legacyMetagDir/$stones{asmDone}" || -e "$legacyMetagDir/$stones{preAsmDone}"));
+			my $tagS = -e "$legacyMetagDir/$stones{preAsmDone}" ? "preAssembly" : "Assembly";
+			print "Migrating legacy scratch $tagS from $legacyMetagDir to $finalCommAssDir\n";
+			systemW "mkdir -p $finalCommAssDir" unless (-d $finalCommAssDir);
+			systemW "$mvCmd $legacyMetagDir/* $finalCommAssDir/";
+			last;
+		}
+		$efinAssLoc = 1 if (-s $finAssLoc && -e "$finalCommAssDir/$stones{asmDone}");
+	}
 	#activate if two assemblies for single sample required, e.g. hybrid assemblies
 	#my $doPreAssmFlag = 0; my $postPreAssmblGo =0 ;
 	
@@ -479,16 +505,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	
 	#die "$eFinMapCovGZ $STOcram && -e $finalMapDir/$SmplName-smd.bam.coverage.gz\n";
-	#first take care of moving finished assemblies..
-	if (!$efinAssLoc && -e $metaGassembly && (-e "$metagAssDir/$stones{asmDone}" || -e "$metagAssDir/$stones{preAsmDone}")){
-		my $tagS = "Assembly";
-		if (-e "$metagAssDir/$stones{preAsmDone}"){$tagS = "preAssembly";}
-		print "Migrating legacy scratch $tagS to final location\n";
-		#print "$metaGassembly\n";
-		systemW "mkdir -p $finalCommAssDir" unless ($dfinalCommAssDir);
-		systemW "$mvCmd $metagAssDir/* $finalCommAssDir/";
-		$efinAssLoc = 1; 
-	}
 	#die "$metagAssDir\n";
 	
 
