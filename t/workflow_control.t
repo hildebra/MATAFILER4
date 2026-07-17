@@ -208,6 +208,15 @@ like($mataf4,
 	qr/my \$binningArtifactsPresent\s*=.*?redoing binning due to support mapping not included/s,
 	'support-map repair is reported only when binning artifacts actually exist');
 like($mataf4,
+	qr/my \$supportCoverageRequired\s*=\s*\$locMapSup2Assembly\s*&&\s*\$efinAssLoc.*?\$calcCoverage.*?\$supportCoverageRequired/s,
+	'support coverage becomes required only after final hybrid assembly publication');
+like($mataf4,
+	qr/sub runContigStats.*?\$requireSupportCoverage.*?Cov\.sup\.count_pergene/s,
+	'ContigStats completeness follows the active hybrid phase instead of map metadata alone');
+like($mataf4,
+	qr/indication that hybrid assembly is already done.*?return \(\$ePreAssmbly,\$doPreAssmFlag,0,0\)/s,
+	'completed final assemblies are no longer gated by retained preassembly packages');
+like($mataf4,
 	qr/sub spadesAssembly.*?\$finalOut\.assembly-stage.*?mv \$stageOut \$finalOut.*?sub longRdAssembly.*?\$finalOut\.hybrid-stage.*?mv \$stageOut \$finalOut.*?sub megahitAssembly.*?\$finalOut\.assembly-stage.*?mv \$stageOut \$finalOut/s,
 	'all assembly producers validate and rotate staged output into the canonical directory');
 like($mataf4,

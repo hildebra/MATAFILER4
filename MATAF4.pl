@@ -741,16 +741,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 
 
+	# Support coverage belongs to the final hybrid assembly. During preassembly it
+	# is intentionally absent and must not keep resubmitting no-op ContigStats jobs.
+	my $supportCoverageRequired = $locMapSup2Assembly && $efinAssLoc
+		&& !$doPreAssmFlag && !$ePreAssmblPck;
 	my $allMapDone =0;#used for SNP calling and Binning - but binning requires info if all maps are finished from all samples
 	$allMapDone = 1 if ( 
 				(!$map{$curSmpl}{hasPrimaryRds} || ($eFinMapCovGZ && -e "$finalMapDir/$SmplName-smd.$bamcramMap" && $eCovAsssembly )) #primary
-				&& ($eSuppCovAsssembly || !$locMapSup2Assembly)  #secondary
+				&& ($eSuppCovAsssembly || !$supportCoverageRequired)  #secondary
 				&& $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ );
 	#die "$allMapDone\n-e $finalMapDir/$SmplName-smd.$bamcramMap && $eCovAsssembly && !$ePreAssmbly && ($eSuppCovAsssembly || !$locMapSup2Assembly) && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/\n";
 	
 	#coverage done?
 	#my $allCovDone = 0; $allCovDone = 1 if ( ($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$map{$curSmpl}{hasPrimaryRds}) );
-	my $calcCoverage = 0; $calcCoverage =1 if ((($map{$curSmpl}{hasPrimaryRds} && !$eCovAsssembly) || (!$eSuppCovAsssembly && $locMapSup2Assembly) ) && $MFopt{map2Assembly});
+	my $calcCoverage = 0; $calcCoverage =1 if ((($map{$curSmpl}{hasPrimaryRds} && !$eCovAsssembly) || (!$eSuppCovAsssembly && $supportCoverageRequired) ) && $MFopt{map2Assembly});
 	#print "$calcCoverage = 1 if (($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$MappingGo) );\n";
 	
 	#binning done?
@@ -780,7 +784,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	$calcReadMerge = 1 if ($MFopt{doReadMerge} && ($MFopt{calcOrthoPlacement} || $calcDiamond || $calcGenoSize));
 	my $mapAssFlag = 0; $mapAssFlag = 1 if ($MFopt{map2Assembly} && !$eFinMapCovGZ  );
 	#only for support reads (from hybrid assemblies)
-	my $mapSuppAssFlag =0;$mapSuppAssFlag = 1 if ($locMapSup2Assembly && !$eFinSupMapCovGZ && $efinAssLoc && !$doPreAssmFlag && !$ePreAssmblPck );#hasSuppRds(\%AsGrps,$cAssGrp,$curSmpl ) );
+	my $mapSuppAssFlag =0;$mapSuppAssFlag = 1 if ($supportCoverageRequired && !$eFinSupMapCovGZ);#hasSuppRds(\%AsGrps,$cAssGrp,$curSmpl ) );
 	my $calcSuppCoverage = 0; $calcSuppCoverage =1 if ($MFopt{mapSupport2Assembly} && !$eSuppCovAsssembly && $map{$curSmpl}{"SupportReads"} ne "" && $mapSuppAssFlag && !$doPreAssmFlag);
 	
 	#die "$calcCoverage\n$mapAssFlag , $mapSuppAssFlag :: $ePreAssmbly && $doPreAssmFlag XX $postPreAssmblGo,$ePreAssmblPck\n";
@@ -1285,7 +1289,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			print "GenomeFace requires FetchMG - adding it as a step in contigStats\n";
 		}
 
-		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,normalise_job_dependencies($publicationDeps,$AsGrps{$cAssGrp}{prodRun}),$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl) ;
+		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,normalise_job_dependencies($publicationDeps,$AsGrps{$cAssGrp}{prodRun}),$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl,$supportCoverageRequired) ;
 
 		#run contig stats
 		my $deferredContigDeps = postSubmQsub(
@@ -1305,7 +1309,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#die "test23  $AsGrps{$cAssGrp}{MapDeps}\n";
 		#calculate solely abundance / gene after producer publication and assembly contig stats
 		my $submitContigNow = $mappingDeferred ? 0 : 1;
-		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$publicationDeps . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl);
+		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$publicationDeps . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl,$supportCoverageRequired);
 		$AsGrps{$cAssGrp}{PostClnCmd} .= $delaySubmCmd2;
 		$jdep = $jn;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $jdep) if ($jdep ne "");
@@ -3195,7 +3199,7 @@ sub nopareil(){
 	return $jobName;
 }
 sub runContigStats{
-	my ($path,$jobd,$assD,$subprts,$immSubm,  $tmpD,$AssemblyGo,$Nthr,$smpl) = @_;
+	my ($path,$jobd,$assD,$subprts,$immSubm,  $tmpD,$AssemblyGo,$Nthr,$smpl,$requireSupportCoverage) = @_;
 	my $sepCtsScript = getProgPaths("sepCts_scr");#
 	my $ContigStatsDir  = "$path/$preDIRs{dir_ContigStats}";
 	my $CSfilesComplete = 1;
@@ -3207,7 +3211,8 @@ sub runContigStats{
 	$CSfilesComplete = 0 if (! fileGZs("$ContigStatsDir/Coverage.count_pergene") && $map{$smpl}{hasPrimaryRds});
 	#print "CSfilesComplete $CSfilesComplete $subprts $ContigStatsDir\n!-s $ContigStatsDir/Coverage.count_pergene.gz || !-e $path/assemblies/metag/assembly.txt\n";
 	$CSfilesComplete = 0  if ($MFopt{kmerPerGene} && $AssemblyGo && ! fileGZs("$ContigStatsDir/scaff.pergene.4kmer.pm5" ));
-	$CSfilesComplete = 0  if ($MFopt{mapSupport2Assembly} && $map{$smpl}{"SupportReads"} ne "" &&  ! fileGZs("$ContigStatsDir/Cov.sup.count_pergene.gz" ));
+	$CSfilesComplete = 0 if ($requireSupportCoverage
+		&& !fileGZs("$ContigStatsDir/Cov.sup.count_pergene.gz"));
 	$CSfilesComplete = 0  if ($subprts =~ m/F/ && ! fileGZs( "$assD/ContigStats//FMG/FMGids.txt" ));
 	$CSfilesComplete = 0  if ($subprts =~ m/G/ && ! fileGZs( "$assD/ContigStats/GTDBmg/marker_genes_meta.tsv" ));
 	#die "$CSfilesComplete";
@@ -7191,7 +7196,9 @@ sub prepPreAssmbl{
 
 	if (-s $finAssLoc && -e "$finalCommAssDir/$stones{asmDone}"){ #indication that hybrid assembly is already done
 		#die;
-		return ($ePreAssmbly,$doPreAssmFlag,0,$ePreAssmblPck);
+		# The package remains on disk, but it must no longer gate mappings and
+		# downstream analyses of the final assembly.
+		return ($ePreAssmbly,$doPreAssmFlag,0,0);
 	}
 	
 	if (!$hasPrimary){#should not be included at all: nothing to assemble within preassembly..
