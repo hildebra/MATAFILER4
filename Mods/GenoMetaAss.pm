@@ -10,7 +10,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Exporter qw(import);
 our @EXPORT_OK = qw(
 		gzipwrite gzipopen lcp prefix_find
-		fileGZe fileGZs filsizeMB
+		fileGZe fileGZs filsizeMB contig_stats_coverage_complete
 		
 		readMap 
 		systemW
@@ -74,6 +74,20 @@ sub fileGZs{
 	return ((-s "$fil.gz")*5) if (-e "$fil.gz");
 	return (-s substr($fil,0,-3)) if ($fil =~ m/\.gz$/ && -e substr($fil,0,-3));
 	return 0;
+}
+
+# Keep the workflow planner and separateContigs worker on one completion
+# contract. The stone alone is insufficient because older/interrupted jobs may
+# have published only a subset of the coverage derivatives.
+sub contig_stats_coverage_complete{
+	my ($dir, $prefix) = @_;
+	return 0 unless defined($dir) && defined($prefix) && length($prefix);
+	$dir =~ s{/+$}{};
+	return 0 unless -e "$dir/$prefix.stone";
+	foreach my $suffix (qw(percontig median.percontig pergene count_pergene)){
+		return 0 unless fileGZe("$dir/$prefix.$suffix");
+	}
+	return 1;
 }
 
 sub prefixFAhd{
@@ -1563,5 +1577,4 @@ sub writeFasta{
 	close O;
 	#die $of;
 }
-
 

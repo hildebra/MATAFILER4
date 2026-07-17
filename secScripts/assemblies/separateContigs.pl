@@ -8,7 +8,7 @@ use strict;
 use Getopt::Long qw( GetOptions );
 use File::Path qw(make_path remove_tree);
 use File::Spec;
-use Mods::GenoMetaAss qw(systemW is_integer reverse_complement_IUPAC gzipopen fileGZs fileGZe);
+use Mods::GenoMetaAss qw(systemW is_integer reverse_complement_IUPAC gzipopen fileGZs fileGZe contig_stats_coverage_complete);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
 use Mods::phyloTools qw( getE100);
 
@@ -332,7 +332,7 @@ sub geneAbundance{
 	my $stone = "$outDab/$oPrefix.stone";
 	#print $stone."\n\n";
 	my $inFG = $inF.".gz";
-	if ( fileGZe( $outF7fin)  && fileGZs($outFfin)  && -e $stone){
+	if (contig_stats_coverage_complete($outDab, $oPrefix)){
 		print "Coverage ($isSupport) was already calculated in $outDab\n";
 		#some cleanup operations.. good to run, if already here..
 		if (-s $inFG && -s $inF){system "rm -f $inF";}

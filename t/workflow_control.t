@@ -8,7 +8,7 @@ use FindBin qw($Bin);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
-use Mods::GenoMetaAss qw(resetAsGrps);
+use Mods::GenoMetaAss qw(resetAsGrps contig_stats_coverage_complete);
 use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs hybrid_group_ready
 	hybrid_package_complete missing_input_files source_input_files parse_ignored_samples
@@ -102,6 +102,17 @@ is_deeply($window, {
 
 my $root = tempdir(CLEANUP => 1);
 $root =~ s{\\}{/}g;
+my $coverage_dir = "$root/ContigStats";
+for my $suffix (qw(percontig median.percontig pergene count_pergene)) {
+	write_file("$coverage_dir/Coverage.$suffix.gz", "$suffix\n");
+}
+write_file("$coverage_dir/Coverage.stone", "done\n");
+ok(contig_stats_coverage_complete($coverage_dir, 'Coverage'),
+	'planner and worker share a complete ContigStats coverage contract');
+unlink "$coverage_dir/Coverage.percontig.gz";
+ok(!contig_stats_coverage_complete($coverage_dir, 'Coverage'),
+	'a completion stone cannot hide a missing coverage derivative');
+
 my $package = "$root/preAssmblGrp_gut";
 write_file("$package/scaffolds.fasta.filt", ">contig\nACGT\n");
 write_file("$package/Coverage.percontig.gz", "coverage\n");
@@ -211,7 +222,7 @@ like($mataf4,
 	qr/my \$supportCoverageRequired\s*=\s*\$locMapSup2Assembly\s*&&\s*\$efinAssLoc.*?\$calcCoverage.*?\$supportCoverageRequired/s,
 	'support coverage becomes required only after final hybrid assembly publication');
 like($mataf4,
-	qr/sub runContigStats.*?\$requireSupportCoverage.*?Cov\.sup\.count_pergene/s,
+	qr/sub runContigStats.*?\$requireSupportCoverage.*?contig_stats_coverage_complete\(\$ContigStatsDir, "Cov\.sup"\)/s,
 	'ContigStats completeness follows the active hybrid phase instead of map metadata alone');
 like($mataf4,
 	qr/indication that hybrid assembly is already done.*?return \(\$ePreAssmbly,\$doPreAssmFlag,0,0\)/s,

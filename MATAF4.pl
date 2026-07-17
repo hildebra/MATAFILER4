@@ -21,7 +21,7 @@ use vars qw($CONFIG_FILE);
 
 #load MF specific modules
 use Mods::GenoMetaAss qw(readMap readMapS getDirsPerAssmblGrp checkAssmblGrp lcp readFastHD prefixFAhd prefix_find 
-			gzipopen fileGZe fileGZs
+			gzipopen fileGZe fileGZs contig_stats_coverage_complete
 			readFasta writeFasta systemW getAssemblPath  filsizeMB resetAsGrps
 			iniCleanSeqSetHR checkSeqTech is3rdGenSeqTech hasSuppRds 
 			getRawSeqsAssmGrp getCleanSeqsAssmGrp addFileLocs2AssmGrp);
@@ -3207,12 +3207,11 @@ sub runContigStats{
 	my $readLX =  $map{$curSmpl}{seqSet}->{samplReadLengthX};
 	
 	#die;
-	$CSfilesComplete = 0 if ( !-e "$path/assemblies/metag/assembly.txt");
-	$CSfilesComplete = 0 if (! fileGZs("$ContigStatsDir/Coverage.count_pergene") && $map{$smpl}{hasPrimaryRds});
-	#print "CSfilesComplete $CSfilesComplete $subprts $ContigStatsDir\n!-s $ContigStatsDir/Coverage.count_pergene.gz || !-e $path/assemblies/metag/assembly.txt\n";
+	my $primaryCoverageComplete = contig_stats_coverage_complete($ContigStatsDir, "Coverage");
+	$CSfilesComplete = 0 if (!$primaryCoverageComplete && $map{$smpl}{hasPrimaryRds});
 	$CSfilesComplete = 0  if ($MFopt{kmerPerGene} && $AssemblyGo && ! fileGZs("$ContigStatsDir/scaff.pergene.4kmer.pm5" ));
-	$CSfilesComplete = 0 if ($requireSupportCoverage
-		&& !fileGZs("$ContigStatsDir/Cov.sup.count_pergene.gz"));
+	my $supportCoverageComplete = contig_stats_coverage_complete($ContigStatsDir, "Cov.sup");
+	$CSfilesComplete = 0 if ($requireSupportCoverage && !$supportCoverageComplete);
 	$CSfilesComplete = 0  if ($subprts =~ m/F/ && ! fileGZs( "$assD/ContigStats//FMG/FMGids.txt" ));
 	$CSfilesComplete = 0  if ($subprts =~ m/G/ && ! fileGZs( "$assD/ContigStats/GTDBmg/marker_genes_meta.tsv" ));
 	#die "$CSfilesComplete";
