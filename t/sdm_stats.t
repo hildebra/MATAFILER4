@@ -36,7 +36,8 @@ Min/Avg/Max stats Pair 1
 SDM
 
 my $new = TestSDMStats::_parse_sdm_stats_text($sdm340, 0, '');
-is($new->{SDMVersion}, '3.40', 'SDM 3.40 version is detected');
+is(TestSDMStats::_sdm_version($sdm340), '3.40', 'SDM 3.40 version is detected internally');
+ok(!exists($new->{SDMVersion}), 'SDM version is not exposed as a sample statistic');
 is($new->{totRds}, 1613103, '3.40 processed reads are parsed without separators');
 is($new->{Rejected1}, 47438, '3.40 rejected reads ignore the percentage annotation');
 is($new->{Accepted1}, 1565665, 'high- and mid-quality accepted reads are combined');
@@ -85,6 +86,6 @@ my $old = TestSDMStats::_parse_sdm_stats_text($legacy, 300, '_Sup');
 is($old->{totRds_Sup}, 1000, 'legacy single-end totals remain supported');
 is($old->{Accepted1_Sup}, 900, 'legacy accepted reads remain supported');
 is($old->{MaxSeqLength_Sup}, 300, 'histogram maximum still overrides the log maximum');
-is($old->{SDMVersion_Sup}, '', 'unversioned legacy logs do not invent a version');
+ok(!exists($old->{SDMVersion_Sup}), 'support SDM version is not exposed as a sample statistic');
 
 done_testing();

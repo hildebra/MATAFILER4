@@ -37,7 +37,8 @@ use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
 use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs parse_ignored_samples
-	hybrid_group_ready hybrid_package_complete missing_input_files source_input_files
+	hybrid_group_ready hybrid_package_complete hybrid_package_sample_id missing_input_files source_input_files
+	hybrid_local_scratch_gb
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies augment_deferred_submission
 );
@@ -6059,14 +6060,14 @@ sub remComma($){
 
 
 sub _smpl_stats_columns {
-	my @sdm = qw(SDMVersion totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
+	my @sdm = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
 	my @binners;
 	for my $mode (1 .. 5) {
 		my $name = getBinSubdirName($mode);
 		push @binners, "HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins";
 	}
 	return (
-		qw(RawInputSize InputIsPaired InputIsSingle
+		qw(RawInputSize RawInputSizeSub InputIsPaired InputIsSingle
 		FilteredContaRdsPerc FilteredContaRds FilteredNonContaRds
 		FilteredContaRdsPerc_EBI FilteredContaRds_EBI FilteredNonContaRds_EBI),
 		@sdm, (map { "${_}_Sup" } @sdm),
@@ -6236,8 +6237,8 @@ sub _parse_sdm_stats_text {
 		}
 	}
 	if ($MaxLengthHistBased > $MaxLength) {$MaxLength = $MaxLengthHistBased;}
-	my @names = qw(SDMVersion totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
-	my @values = ($sdmVersion,$totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr);
+	my @names = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
+	my @values = ($totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr);
 	my %result;
 	my @output_values = $parsed ? @values : map { '' } @names;
 	@result{map { "$_$suffix" } @names} = @output_values;
@@ -6650,6 +6651,8 @@ sub smplStats {
 	$values{InputIsSingle} = @$single ? 1 : 0;
 	$values{RawInputSize} = exists($map{$SmplN}{inputFileSizeMB})
 		? sprintf('%.3fG', $map{$SmplN}{inputFileSizeMB}/1024) : -1;
+	$values{RawInputSizeSub} = exists($map{$SmplN}{inputXFileSizeMB})
+		? sprintf('%.3fG', $map{$SmplN}{inputXFileSizeMB}/1024) : -1;
 
 	my $contamination = getContamination("$inD/LOGandSUB/KrakHS.sh.etxt", "$inD/LOGandSUB/KrakHS.sh.otxt", '');
 	$merge->($contamination);
@@ -7328,7 +7331,8 @@ sub longRdAssembly{
 		#die "preLib num (" .@illDirs . ") != read libs (" . @inRds . ")!" if (@illDirs != @inRds);
 		die "preLib num (" .@illDirs . ") < read libs (" . @inRds . ")!" if (@illDirs < @inRds);
 		my $cmdLater = "";
-		my $lengthTemplateArgs = join(" ", map { "--length-template $_" } grep { defined($_) && $_ ne "" } @{$singlAr});
+		my ($lengthTemplate) = grep { defined($_) && $_ ne "" } @{$singlAr};
+		my $lengthTemplateArg = defined($lengthTemplate) ? "--length-template $lengthTemplate" : "";
 		#condition is not correct: there might be cases where there are less inRds (PB runs), but additional assmblGrp samples have illumina..
 		for (my $i=0;$i<@illDirs;$i++){
 			my $illD = $illDirs[$i];
@@ -7337,10 +7341,14 @@ sub longRdAssembly{
 			die "Hybrid package $illD lacks mapping.coverage.gz\n" unless fileGZe($contigCov);
 			my $breakpointTsv = "$illD/breakpoints.tsv.gz";
 			die "Hybrid package $illD lacks breakpoints.tsv.gz\n" unless -s $breakpointTsv;
-			my $dupiAssmbl = "$nodeTmp2/assmbl.$i.pre.fastq.gz";
+			my $packageSample = hybrid_package_sample_id($illD);
+			die "Hybrid package $illD lacks a sample_id in package.manifest.tsv\n"
+				if ($packageSample eq "");
+			$packageSample =~ s/[^A-Za-z0-9_.-]+/_/g;
+			my $dupiAssmbl = "$nodeTmp2/$packageSample.synthetic.fastq.gz";
 			my $preAssmbl = "$illD/scaffolds.fasta.filt";
 			$cmdPre .= "( $spl4m --assembly $preAssmbl --coverage $contigCov --breakpoints $breakpointTsv --output $dupiAssmbl "
-				."--mean-read-length $MFconfig{defaultReadLengthX} $lengthTemplateArgs --max-synthetic-depth $MFopt{hybridSyntheticMaxDepth} ) &\n";
+				."--mean-read-length $MFconfig{defaultReadLengthX} $lengthTemplateArg --max-synthetic-depth $MFopt{hybridSyntheticMaxDepth} ) &\n";
 			$cmdPre .= "sim_pid_$i=\$!\n";
 			#merge this split with single reads in tmp dir..
 			if (@{$singlAr} > $i && defined($singlAr->[$i]) &&  $singlAr->[$i] ne ""){
@@ -7399,7 +7407,13 @@ sub longRdAssembly{
 		my $mMDBG = getProgPaths("metaMDBG");
 		$cmd .= "$mMDBG asm --threads $nCores --out-dir $nodeTmp $inFileFlag " . join(" ",@inRds) . "\n";
 		$cmd .= "rm -rf $nodeTmp/tmp/;\n";
-		$contigRecovery .= "zcat $nodeTmp/contigs.fasta.gz > $nodeTmp/scaffolds.fasta; rm $nodeTmp/contigs.fasta.gz\n\n";
+		# metaMDBG publishes gzip-compressed contigs, while the shared assembly
+		# cleanup below requires an uncompressed scaffolds.fasta. Convert once,
+		# validate it, then discard the redundant compressed copy.
+		$contigRecovery .= "test -s $nodeTmp/contigs.fasta.gz || exit 34\n";
+		$contigRecovery .= "$pigzBin -dc -p $nCores $nodeTmp/contigs.fasta.gz > $nodeTmp/scaffolds.fasta || exit 34\n";
+		$contigRecovery .= "test -s $nodeTmp/scaffolds.fasta || exit 34\n";
+		$contigRecovery .= "rm -f $nodeTmp/contigs.fasta.gz\n\n";
 		
 		#contigs.fasta.gz
 	} else {
@@ -7465,14 +7479,25 @@ sub longRdAssembly{
 		my $tmpCmd="";
 		$jname = "$nameProg$JNUM";#$givenJName;
 		$QSBoptHR->{useLongQueue} = 0;#super fast, doesn't need long queue
+		my $tmpSHDD = $QSBoptHR->{tmpSpace};
+		if ($nameProg eq "mMDBG") {
+			my $assemblerScratchGB = $HDDspace{metaMDBG};
+			$assemblerScratchGB =~ s/G$//;
+			my $preassemblyBytes = 0;
+			$preassemblyBytes += -s $_ for grep { defined($_) && -s $_ } @hybridPreassemblies;
+			my $requestedScratchGB = hybrid_local_scratch_gb(
+				assembler_gb => $assemblerScratchGB,
+				preassembly_bytes => $preassemblyBytes,
+				max_synthetic_depth => $MFopt{hybridSyntheticMaxDepth},
+			);
+			$QSBoptHR->{tmpSpace} = $requestedScratchGB."G";
+		}
 		if ( $MFopt{SpadesAlwaysHDDnode}){
-			my $tmpSHDD = $QSBoptHR->{tmpSpace};
-			$QSBoptHR->{tmpSpace} = $HDDspace{metaMDBG};
 			($jname,$tmpCmd) = qsubSystem($logDir."$nameProg.sh",$cmd,(int($nCores)),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
-			$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		} else {
 			($jname,$tmpCmd) = qsubSystem($logDir."$nameProg.sh",$cmd,(int($nCores)),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 		}
+		$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		$QSBoptHR->{useLongQueue} = 0;
 	} else {
 		print "longReadAssm: Assembly already present in final location\n";

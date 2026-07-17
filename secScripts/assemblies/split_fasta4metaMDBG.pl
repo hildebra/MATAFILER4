@@ -61,7 +61,7 @@ print "Creating coverage-weighted synthetic long reads for metaMDBG\n"
 	."maximum synthetic depth: $max_synthetic_depth; seed: $seed\n";
 
 my ($lengths, $order) = read_fasta_lengths($fasta_file);
-my %intervals = map { $_ => [] } @{$order};
+my %intervals;
 my ($coverage_fh) = gzipopen($coverage_file, 'mapping coverage', 1);
 my ($coverage_lines, $matched_lines, $unknown_lines) = (0, 0, 0);
 while (my $line = <$coverage_fh>) {
@@ -78,7 +78,7 @@ while (my $line = <$coverage_fh>) {
 			next;
 		}
 		$matched_lines++;
-		push @{$intervals{$id}}, [0, $lengths->{$id}, 0 + $depth];
+		push @{$intervals{$id}}, 0, $lengths->{$id}, 0 + $depth;
 		next;
 	}
 	die "Malformed mapping coverage line $coverage_lines: $line\n"
@@ -95,7 +95,7 @@ while (my $line = <$coverage_fh>) {
 	$matched_lines++;
 	next if ($start >= $lengths->{$id});
 	$end = $lengths->{$id} if ($end > $lengths->{$id});
-	push @{$intervals{$id}}, [0 + $start, 0 + $end, 0 + $depth];
+	push @{$intervals{$id}}, 0 + $start, 0 + $end, 0 + $depth;
 }
 close $coverage_fh or die "Cannot close mapping coverage $coverage_file: $!\n";
 die "Mapping coverage $coverage_file has no usable intervals for the assembly\n"
@@ -103,22 +103,27 @@ die "Mapping coverage $coverage_file has no usable intervals for the assembly\n"
 warn "Ignored $unknown_lines coverage interval(s) for contigs absent from the assembly\n"
 	if ($unknown_lines);
 
-# Expand sparse bedGraph data to include implicit zero-depth gaps, then turn
-# the accepted breakpoint TSV into independent blocks that reads cannot cross.
-my (%coverage_runs, %allowed_blocks);
+# Expand sparse bedGraph data to include implicit zero-depth gaps. Replace raw
+# intervals one contig at a time so the two representations never coexist for
+# the complete assembly. Flat numeric arrays also avoid one Perl array object
+# per coverage interval.
+my %coverage_runs;
+for my $id (@{$order}) {
+	my $raw_intervals = delete($intervals{$id}) || [];
+	$coverage_runs{$id} = complete_coverage_runs($id, $lengths->{$id}, $raw_intervals);
+}
+
+# Breakpoint blocks are cheap to derive and are therefore built only while the
+# corresponding contig sequence is in memory.
 my ($breakpoint_count, $breakpoint_bases, $breakpoint_contigs) = (0, 0, 0);
 my $breakpoints = read_breakpoints($breakpoint_file, $lengths);
 for my $id (@{$order}) {
-	$coverage_runs{$id} = complete_coverage_runs($id, $lengths->{$id}, $intervals{$id});
 	my @breaks = sort { $a->[0] <=> $b->[0] } @{$breakpoints->{$id} || []};
-	my (@blocks, $cursor); $cursor = 0;
+	my $cursor = 0;
 	for my $break (@breaks) {
 		die "Overlapping breakpoint intervals for '$id'\n" if $break->[0] < $cursor;
-		push @blocks, [$cursor, $break->[0]] if $break->[0] > $cursor;
 		$cursor = $break->[1];
 	}
-	push @blocks, [$cursor, $lengths->{$id}] if $cursor < $lengths->{$id};
-	$allowed_blocks{$id} = \@blocks;
 	$breakpoint_count += @breaks;
 	$breakpoint_contigs++ if @breaks;
 	$breakpoint_bases += $_->[1] - $_->[0] for @breaks;
@@ -134,8 +139,12 @@ while (my $line = <$fasta_fh>) {
 	$line =~ s/[\r\n]+$//;
 	if ($line =~ /^>(.*)$/) {
 		if ($header ne '') {
+			my $runs = delete($coverage_runs{$header}) || [];
+			my $blocks = allowed_blocks_for_contig(
+				$lengths->{$header}, delete($breakpoints->{$header}) || [],
+			);
 			my ($reads, $target, $bases, $minimum, $maximum, $blocks_used) = simulate_contig(
-				$header, $sequence, $coverage_runs{$header}, $allowed_blocks{$header},
+				$header, $sequence, $runs, $blocks,
 				$output_fh, $mean_length, $length_sd, $max_synthetic_depth,
 			);
 			$written_reads += $reads; $target_bases += $target; $written_bases += $bases;
@@ -154,8 +163,12 @@ while (my $line = <$fasta_fh>) {
 	$sequence .= $line;
 }
 if ($header ne '') {
+	my $runs = delete($coverage_runs{$header}) || [];
+	my $blocks = allowed_blocks_for_contig(
+		$lengths->{$header}, delete($breakpoints->{$header}) || [],
+	);
 	my ($reads, $target, $bases, $minimum, $maximum, $blocks_used) = simulate_contig(
-		$header, $sequence, $coverage_runs{$header}, $allowed_blocks{$header},
+		$header, $sequence, $runs, $blocks,
 		$output_fh, $mean_length, $length_sd, $max_synthetic_depth,
 	);
 	$written_reads += $reads; $target_bases += $target; $written_bases += $bases;
@@ -281,19 +294,52 @@ sub complete_coverage_runs {
 	my ($id, $length, $raw_intervals) = @_;
 	# bedGraph may omit positions with no mapped reads. Insert those omitted
 	# spans explicitly at depth zero so they can become breakpoint candidates.
-	my @sorted = sort { $a->[0] <=> $b->[0] || $a->[1] <=> $b->[1] } @{$raw_intervals};
+	my $already_sorted = 1;
+	for (my $offset = 3; $offset < @{$raw_intervals}; $offset += 3) {
+		my $previous = $offset - 3;
+		if ($raw_intervals->[$offset] < $raw_intervals->[$previous]
+				|| ($raw_intervals->[$offset] == $raw_intervals->[$previous]
+					&& $raw_intervals->[$offset + 1] < $raw_intervals->[$previous + 1])) {
+			$already_sorted = 0;
+			last;
+		}
+	}
+	my @offsets;
+	unless ($already_sorted) {
+		for (my $offset = 0; $offset < @{$raw_intervals}; $offset += 3) {
+			push @offsets, $offset;
+		}
+		@offsets = sort {
+			$raw_intervals->[$a] <=> $raw_intervals->[$b]
+				|| $raw_intervals->[$a + 1] <=> $raw_intervals->[$b + 1]
+		} @offsets;
+	}
 	my (@runs, $cursor);
 	$cursor = 0;
-	for my $interval (@sorted) {
-		my ($start, $end, $depth) = @{$interval};
+	my $interval_count = int(@{$raw_intervals} / 3);
+	for (my $index = 0; $index < $interval_count; $index++) {
+		my $offset = $already_sorted ? $index * 3 : $offsets[$index];
+		my ($start, $end, $depth) = @{$raw_intervals}[$offset .. $offset + 2];
 		die "Overlapping or unsorted mapping coverage for '$id' at $start-$end\n"
 			if ($start < $cursor);
-		push @runs, [$cursor, $start, 0] if ($start > $cursor);
-		push @runs, [$start, $end, $depth];
+		push @runs, $cursor, $start, 0 if ($start > $cursor);
+		push @runs, $start, $end, $depth;
 		$cursor = $end;
 	}
-	push @runs, [$cursor, $length, 0] if ($cursor < $length);
+	push @runs, $cursor, $length, 0 if ($cursor < $length);
 	return \@runs;
+}
+
+sub allowed_blocks_for_contig {
+	my ($length, $breaks) = @_;
+	my (@blocks, $cursor);
+	$cursor = 0;
+	for my $break (sort { $a->[0] <=> $b->[0] } @{$breaks}) {
+		push @blocks, [$cursor, $break->[0]] if ($break->[0] > $cursor);
+		$cursor = $break->[1];
+	}
+	push @blocks, [$cursor, $length] if ($cursor < $length);
+	return \@blocks;
 }
 
 sub read_breakpoints {
@@ -323,8 +369,8 @@ sub weighted_runs_in_block {
 	# can then be translated back to a reference position in O(number of runs).
 	my (@weighted, $total);
 	$total = 0;
-	for my $run (@{$runs}) {
-		my ($start, $end, $depth) = @{$run};
+	for (my $offset = 0; $offset < @{$runs}; $offset += 3) {
+		my ($start, $end, $depth) = @{$runs}[$offset .. $offset + 2];
 		last if ($start >= $block_end);
 		next if ($end <= $block_start || $depth <= 0);
 		my $overlap_start = $start > $block_start ? $start : $block_start;
@@ -335,7 +381,7 @@ sub weighted_runs_in_block {
 		my $weight = ($overlap_end - $overlap_start) * $weighted_depth;
 		next unless ($weight > 0);
 		$total += $weight;
-		push @weighted, [$overlap_start, $overlap_end, $total];
+		push @weighted, $overlap_start, $overlap_end, $total;
 	}
 	return (\@weighted, $total);
 }
@@ -343,11 +389,14 @@ sub weighted_runs_in_block {
 sub sample_anchor {
 	my ($weighted, $total) = @_;
 	my $draw = rand($total);
-	for my $run (@{$weighted}) {
-		next if ($draw >= $run->[2]);
-		return $run->[0] + int(rand($run->[1] - $run->[0]));
+	my ($low, $high) = (0, int(@{$weighted} / 3) - 1);
+	while ($low < $high) {
+		my $middle = int(($low + $high) / 2);
+		if ($draw < $weighted->[$middle * 3 + 2]) { $high = $middle; }
+		else { $low = $middle + 1; }
 	}
-	return $weighted->[-1][1] - 1;
+	my $offset = $low * 3;
+	return $weighted->[$offset] + int(rand($weighted->[$offset + 1] - $weighted->[$offset]));
 }
 
 sub normal_read_length {
@@ -406,7 +455,7 @@ sub simulate_contig {
 			$serial++;
 			my $read_id = sprintf('%s_SIM_%06d_START_%d_END_%d_ANCHOR_%d',
 				$id, $serial, $start, $end, $anchor);
-			print {$fh} "\@$read_id\n$read\n+\n$quality\n";
+			print {$fh} '@', $read_id, "\n", $read, "\n+\n", $quality, "\n";
 			$written++; $written_bases += $length;
 		}
 	}

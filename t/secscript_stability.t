@@ -52,6 +52,13 @@ gzip(\$coverage_text => $synthetic_coverage)
     or die "Cannot create $synthetic_coverage: $GzipError";
 my $synthetic_fastq = File::Spec->catfile($tmp, 'synthetic.fastq.gz');
 my $simulator = File::Spec->catfile($root, 'secScripts', 'assemblies', 'split_fasta4metaMDBG.pl');
+my $simulator_source = read_file($simulator);
+unlike($simulator_source, qr/my %intervals = map/,
+	'synthetic-read simulation does not preallocate per-contig interval arrays');
+like($simulator_source, qr/push \@\{\$intervals\{\$id\}\}, 0, \$lengths/,
+	'coverage intervals use flat storage instead of per-interval array objects');
+like($simulator_source, qr/delete\(\$coverage_runs\{\$header\}\)/,
+	'coverage state is released as each contig is simulated');
 my $breakpoint_detector = File::Spec->catfile($root, 'secScripts', 'assemblies', 'breakpoints.pl');
 my $breakpoint_tsv = File::Spec->catfile($tmp, 'breakpoints.tsv.gz');
 is(system($^X, '-I' . $root, $breakpoint_detector,
@@ -268,6 +275,10 @@ like($mataf4_stats, qr/ref\(\$seq_set->\{pa1\}\) eq 'ARRAY'/,
      'sample statistics validate optional read arrays before dereferencing');
 like($mataf4_stats, qr/\$map\{\$SmplN\}\{inputFileSizeMB\}/,
      'sample statistics use their sample argument for input size');
+like($mataf4_stats, qr/\$values\{RawInputSizeSub\}.*?inputXFileSizeMB/s,
+     'sample statistics report supplementary raw input size separately');
+unlike($mataf4_stats, qr/my \@sdm = qw\(SDMVersion/,
+       'metagStats schema does not expose the internal SDM version');
 unlike($mataf4_stats, qr/system "rm -rf \$inD\/assemblies\/metag\/corrected"/,
        'sample statistics do not delete assembly data');
 unlike($mataf4_stats, qr/sub smplStats\(\)/,
@@ -292,17 +303,17 @@ my $central_eval = "package TestCentralSampleStats; sub getBinSubdirName { retur
 eval $central_eval;
 is($@, '', 'central statistics implementation compiles independently');
 my %central_fixture = (
-    A => { DIR => '/sample/A', values => { RawInputSize => '1.000G', BreakpointCount => '' } },
-    B => { DIR => '/sample/B', values => { RawInputSize => '2.000G', HybridFinalN50 => 5000 } },
+	A => { DIR => '/sample/A', values => { RawInputSize => '1.000G', RawInputSizeSub => '0.250G', BreakpointCount => '' } },
+	B => { DIR => '/sample/B', values => { RawInputSize => '2.000G', HybridFinalN50 => 5000 } },
 );
 my $central_text = TestCentralSampleStats::_metag_stats_text(\%central_fixture, [qw(A B)]);
-like($central_text, qr/^SMPLID\tDIR\tRawInputSize\tHybridFinalN50$/m,
+like($central_text, qr/^SMPLID\tDIR\tRawInputSize\tRawInputSizeSub\tHybridFinalN50$/m,
      'final statistics header contains only populated columns in preferred order');
 unlike($central_text, qr/BreakpointCount/,
        'globally empty statistics columns are omitted');
 my @central_lines = split /\n/, $central_text;
 my @central_widths = map { scalar(split /\t/, $_, -1) } @central_lines;
-is_deeply(\@central_widths, [4, 4, 4],
+is_deeply(\@central_widths, [5, 5, 5],
           'central serialization keeps every sample aligned to the selected columns');
 
 my ($hybrid_stats_code) = $mataf4_stats =~ /(sub getHybridAssemblyStats.*?)(?=\nsub smplStats)/s;

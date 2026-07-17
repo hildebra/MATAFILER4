@@ -11,7 +11,7 @@ use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(resetAsGrps contig_stats_coverage_complete);
 use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs hybrid_group_ready
-	hybrid_package_complete missing_input_files source_input_files parse_ignored_samples
+	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies augment_deferred_submission
 );
@@ -21,6 +21,9 @@ is(normalise_job_dependencies('run12;;run7', ['run7', '', 'run3;run12']),
 my $job_dependencies = 'run12;';
 is(append_job_dependencies(\$job_dependencies, 'run7', 'run12'), 'run12;run7',
 	'job dependencies are appended without empty or duplicate scheduler entries');
+is(hybrid_local_scratch_gb(
+	assembler_gb => 150, preassembly_bytes => 512 * 1024**2, max_synthetic_depth => 20,
+), 160, 'hybrid scratch adds estimated synthetic reads to assembler workspace');
 
 my $slurm = augment_deferred_submission(
 	qmode => 'slurm', run_tag => 'run', dependencies => 'run12;run7',
@@ -119,10 +122,12 @@ write_file("$package/Coverage.percontig.gz", "coverage\n");
 write_file("$package/Coverage.median.percontig", "median\n");
 write_file("$package/mapping.coverage.gz", "window coverage\n");
 write_file("$package/breakpoints.tsv.gz", "compressed breakpoint fixture\n");
-write_file("$package/package.manifest.tsv", "key\tvalue\nschema_version\t2\n");
+write_file("$package/package.manifest.tsv", "key\tvalue\nschema_version\t2\nsample_id\tSample.A\n");
 write_file("$package/moved.sto", "done\n");
 ok(hybrid_package_complete($package),
 	'versioned hybrid package requires all package-local outputs');
+is(hybrid_package_sample_id($package), 'Sample.A',
+	'synthetic-read naming uses the sample recorded in its package');
 unlink "$package/Coverage.percontig.gz";
 ok(!hybrid_package_complete($package), 'hybrid package with a missing output is incomplete');
 
@@ -170,6 +175,18 @@ like($mataf4, qr/mixes ONT and PacBio reads/,
 	'mixed ONT/PacBio hybrid groups are rejected explicitly');
 like($mataf4, qr/sim_failed=0.*?wait \\\$sim_pid_/s,
 	'each background synthetic-read simulator is waited on and validated');
+is(scalar(() = $mataf4 =~ /--length-template/g), 1,
+	'hybrid command construction emits one length-template argument');
+like($mataf4, qr/\$packageSample\.synthetic\.fastq\.gz/,
+	'synthetic read filenames identify their source package sample');
+like($mataf4,
+	qr/hybrid_local_scratch_gb\(.*?assembler_gb.*?preassembly_bytes.*?max_synthetic_depth/s,
+	'metaMDBG local scratch combines assembler space with synthetic-read space');
+unlike($mataf4, qr/zcat \$nodeTmp\/contigs\.fasta\.gz/,
+	'metaMDBG recovery no longer uses an unchecked zcat/remove chain');
+like($mataf4,
+	qr/test -s \$nodeTmp\/contigs\.fasta\.gz.*?\$pigzBin -dc.*?test -s \$nodeTmp\/scaffolds\.fasta/s,
+	'metaMDBG compressed output is validated before and after normalization');
 like($mataf4, qr/HybridAssemblyComparison\.tsv/,
 	'hybrid finalization requires a comparative assembly report');
 like($mataf4, qr{mapping/\$SmplN-smd\.bam\.breakpoints\.tsv\.gz},

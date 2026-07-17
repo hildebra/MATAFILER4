@@ -10,6 +10,8 @@ our @EXPORT_OK = qw(
 	assembly_group_output_dirs
 	hybrid_group_ready
 	hybrid_package_complete
+	hybrid_package_sample_id
+	hybrid_local_scratch_gb
 	missing_input_files
 	normalise_job_dependencies
 	append_job_dependencies
@@ -20,6 +22,38 @@ our @EXPORT_OK = qw(
 	sample_is_ignored
 	workflow_members_match
 );
+
+sub hybrid_package_sample_id {
+	my ($package_dir) = @_;
+	return '' unless defined($package_dir) && length($package_dir);
+	$package_dir =~ s{/$}{};
+	open my $manifest, '<', "$package_dir/package.manifest.tsv" or return '';
+	while (my $line = <$manifest>) {
+		$line =~ s/[\r\n]+$//;
+		if ($line =~ /^sample_id\t(.+)$/) {
+			my $sample_id = $1;
+			close $manifest;
+			return $sample_id;
+		}
+	}
+	close $manifest;
+	return '';
+}
+
+sub hybrid_local_scratch_gb {
+	my (%args) = @_;
+	my $assembler_gb = 0 + ($args{assembler_gb} || 0);
+	my $preassembly_bytes = 0 + ($args{preassembly_bytes} || 0);
+	my $max_depth = 0 + ($args{max_synthetic_depth} || 0);
+	die 'hybrid_local_scratch_gb requires non-negative inputs'
+		if ($assembler_gb < 0 || $preassembly_bytes < 0 || $max_depth < 0);
+	# Synthetic FASTQ is written compressed. Budget one byte per simulated base
+	# at the configured depth cap, rounded up, in addition to assembler scratch.
+	my $synthetic_gb = $preassembly_bytes * $max_depth / (1024 ** 3);
+	$synthetic_gb = int($synthetic_gb) == $synthetic_gb
+		? int($synthetic_gb) : int($synthetic_gb) + 1;
+	return int($assembler_gb + $synthetic_gb);
+}
 
 sub normalise_job_dependencies {
 	my (@values) = @_;
