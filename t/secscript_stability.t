@@ -305,6 +305,24 @@ my $central_eval = "package TestCentralSampleStats; sub getBinSubdirName { retur
     . $central_stats_code;
 eval $central_eval;
 is($@, '', 'central statistics implementation compiles independently');
+my @preferred_columns = TestCentralSampleStats::_smpl_stats_columns();
+my %preferred_position;
+@preferred_position{@preferred_columns} = (0 .. $#preferred_columns);
+my @pipeline_markers = qw(
+	RawInputSize FilteredContaRdsPerc_EBI totRds SDMAcceptedPercent
+	FilteredContaRdsPerc Merged AvgGenomeSizeEst ContigN50 HybridPreassemblyCount
+	ReadsPaired OpticalDuplicates BreakpointCount GeneNumber HQ_bins_B1 SNP_TotalResolvedBp
+);
+ok(!grep({ !exists $preferred_position{$_} } @pipeline_markers),
+	'pipeline-order statistics markers all occur in the preferred schema');
+is_deeply(
+	[sort { $preferred_position{$a} <=> $preferred_position{$b} } @pipeline_markers],
+	\@pipeline_markers,
+	'metagStats program blocks follow workflow submission order');
+like($mataf4_stats, qr/AssemblyBreakpointPercent.*?GeneCodingPercent.*?SNPsPerMbp.*?INDELsPerMbp/s,
+	'useful assembly, gene, and variant-density statistics are reported');
+like($mataf4_stats, qr/"\$\{SCdir\}_total_bins".*?\$totBins/s,
+	'binner statistics expose total bins without requiring downstream column arithmetic');
 my %central_fixture = (
 	A => { DIR => '/sample/A', values => { RawInputSize => '1.000G', RawInputSizeSub => '0.250G', BreakpointCount => '' } },
 	B => { DIR => '/sample/B', values => { RawInputSize => '2.000G', HybridFinalN50 => 5000 } },

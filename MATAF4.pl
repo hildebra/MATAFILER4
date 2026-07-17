@@ -6065,29 +6065,36 @@ sub _smpl_stats_columns {
 	my @binners;
 	for my $mode (1 .. 5) {
 		my $name = getBinSubdirName($mode);
-		push @binners, "HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins";
+		push @binners, "HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins", "${name}_total_bins";
 	}
 	return (
+		# Input discovery and raw-upload preparation.
 		qw(RawInputSize RawInputSizeSub InputIsPaired InputIsSingle
-		FilteredContaRdsPerc FilteredContaRds FilteredNonContaRds
 		FilteredContaRdsPerc_EBI FilteredContaRds_EBI FilteredNonContaRds_EBI),
-		@sdm, (map { "${_}_Sup" } @sdm),
-		qw(Merged NotMerged AvgGenomeSizeEst TotalGenomesEst
-		ContigN50 NScaff400 NScaffG1k NScaffG10k NScaffG100k NScaffG1M
+		# SDM primary/support cleaning, followed by host filtering and FLASH.
+		@sdm, qw(SDMAcceptedPercent), (map { "${_}_Sup" } @sdm), qw(SDMAcceptedPercent_Sup),
+		qw(FilteredContaRdsPerc FilteredContaRds FilteredNonContaRds),
+		qw(Merged NotMerged AvgGenomeSizeEst TotalGenomesEst),
+		# Assembly and the optional hybrid comparison are produced together.
+		qw(ContigN50 NScaff400 NScaffG1k NScaffG10k NScaffG100k NScaffG1M
 		ScaffN50 ScaffMaxSize ScaffSize CircCtgs CircCtgG1M
-		BreakpointCount BreakpointContigs BreakpointBases BreakpointMeanLength BreakpointMaxLength
-		ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign DisconcAlign SingleUniqAlign SingleMultiAlign
-		OpticalDuplicates PCRduplicates PassedMD EstLibSize
-		GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes Gcomplete G5pComplete G3pComplete Gincomplete),
-		@binners,
-		qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved INDEL_Num INDEL_Passed),
-		qw(HybridPreassemblyCount
+		HybridPreassemblyCount
 		HybridPreassemblyContigs HybridFinalContigs HybridContigsDelta HybridFinalToPreContigsRatio
 		HybridPreassemblyBases HybridFinalBases HybridBasesDelta HybridFinalToPreBasesRatio
 		HybridPreassemblyN50 HybridFinalN50 HybridN50Delta HybridFinalToPreN50Ratio
 		HybridPreassemblyN90 HybridFinalN90 HybridN90Delta HybridFinalToPreN90Ratio
 		HybridPreassemblyLongest HybridFinalLongest HybridLongestDelta HybridFinalToPreLongestRatio
 		HybridPreassemblyGCPercent HybridFinalGCPercent HybridGCPercentDelta HybridFinalToPreGCPercentRatio),
+		# Assembly mapping, duplicate handling, and breakpoint detection.
+		qw(ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign DisconcAlign SingleUniqAlign SingleMultiAlign
+		OpticalDuplicates PCRduplicates PassedMD EstLibSize
+		BreakpointCount BreakpointContigs BreakpointBases BreakpointMeanLength BreakpointMaxLength AssemblyBreakpointPercent),
+		# ContigStats gene summary.
+		qw(GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes GeneCodingPercent Gcomplete G5pComplete G3pComplete Gincomplete),
+		# Binning is submitted after ContigStats.
+		@binners,
+		# Consensus SNP/INDEL calling follows binning submission.
+		qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved SNPsPerMbp INDEL_Num INDEL_Passed INDELsPerMbp),
 	);
 }
 
@@ -6453,7 +6460,7 @@ sub getBinnerStats{
 	my %result;
 	for my $i (1 .. 5) {
 		my $name = getBinSubdirName($i);
-		@result{"HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins"} = ('', '', '');
+		@result{"HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins", "${name}_total_bins"} = ('', '', '', '');
 	}
 	return \%result unless defined($tmpassD) && $tmpassD ne '' && -d $tmpassD;
 	#all binners..
@@ -6469,10 +6476,10 @@ sub getBinnerStats{
 				$totBins ++;
 			}
 			close $bin_fh or warn "Cannot close bin statistics '$SBbinCM2': $!\n";
-			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins"} =
-				($HQbinCnt, $MQbinCnt, $totBins-$HQbinCnt-$MQbinCnt);
+			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins", "${SCdir}_total_bins"} =
+				($HQbinCnt, $MQbinCnt, $totBins-$HQbinCnt-$MQbinCnt, $totBins);
 		} else {
-			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins"} = ('', '', '');
+			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins", "${SCdir}_total_bins"} = ('', '', '', '');
 		}
 	}
 	return \%result;
@@ -6481,7 +6488,7 @@ sub getBinnerStats{
 sub getSNPStats{
 	my ($inFi) = @_;
 	my $geneStats = getFileStr("${inFi}.etxt",0);
-	my @columns = qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved INDEL_Num INDEL_Passed);
+	my @columns = qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved SNPsPerMbp INDEL_Num INDEL_Passed INDELsPerMbp);
 	my %empty = map { $_ => '' } @columns;
 	my $has_stats = 0;
 	#Total bp written: 34950480 (0 not resolved) on 26727 entries
@@ -6511,8 +6518,11 @@ sub getSNPStats{
 		}
 	}
 	return \%empty unless $has_stats;
+	my $per_mbp = $bps > 0 ? 1_000_000 / $bps : 0;
 	return { SNP_TotalResolvedBp=>$bps, SNP_fastaEntries=>$entrs, SNP_Num=>$snpNum,
-		SNP_Passed=>$SNPpassed, SNP_resolved=>$resol, INDEL_Num=>$indelNuml, INDEL_Passed=>$INDpassed };
+		SNP_Passed=>$SNPpassed, SNP_resolved=>$resol,
+		SNPsPerMbp=>sprintf('%.3f', $snpNum * $per_mbp), INDEL_Num=>$indelNuml,
+		INDEL_Passed=>$INDpassed, INDELsPerMbp=>sprintf('%.3f', $indelNuml * $per_mbp) };
 }
 
 sub getGeneStats{
@@ -6655,9 +6665,7 @@ sub smplStats {
 	$values{RawInputSizeSub} = exists($map{$SmplN}{inputXFileSizeMB})
 		? sprintf('%.3fG', $map{$SmplN}{inputXFileSizeMB}/1024) : -1;
 
-	my $contamination = getContamination("$inD/LOGandSUB/KrakHS.sh.etxt", "$inD/LOGandSUB/KrakHS.sh.otxt", '');
-	$merge->($contamination);
-	$locStats{contamination} = $contamination->{FilteredContaRdsPerc};
+	# Raw-upload preparation is submitted before read cleaning.
 	$merge->(getContamination("$inD/LOGandSUB/prepEBI.sh.etxt", "$inD/LOGandSUB/prepEBI.sh.otxt", 'EBI'));
 
 	my $primary_log = -s "$inD/LOGandSUB/sdm/filter.log" ? "$inD/LOGandSUB/sdm/filter.log"
@@ -6665,11 +6673,24 @@ sub smplStats {
 	if ($primary_log ne '') {
 		my $stats = sdmStats($primary_log, $inD, '');
 		$merge->($stats);
+		my $accepted = ($stats->{Accepted1} || 0) + ($stats->{Accepted2} || 0);
+		$values{SDMAcceptedPercent} = sprintf('%.3f', 100 * $accepted / $stats->{totRds})
+			if (($stats->{totRds} || 0) > 0);
 		$locStats{$_} = $stats->{$_} for qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2);
 	}
 	my $support_log = -s "$inD/LOGandSUB/sdm/filterS.log" ? "$inD/LOGandSUB/sdm/filterS.log"
 		: (-s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt" ? "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt" : '');
-	$merge->(sdmStats($support_log, $inD, '_Sup')) if $support_log ne '';
+	if ($support_log ne '') {
+		my $stats = sdmStats($support_log, $inD, '_Sup');
+		$merge->($stats);
+		my $accepted = ($stats->{Accepted1_Sup} || 0) + ($stats->{Accepted2_Sup} || 0);
+		$values{SDMAcceptedPercent_Sup} = sprintf('%.3f', 100 * $accepted / $stats->{totRds_Sup})
+			if (($stats->{totRds_Sup} || 0) > 0);
+	}
+
+	my $contamination = getContamination("$inD/LOGandSUB/KrakHS.sh.etxt", "$inD/LOGandSUB/KrakHS.sh.otxt", '');
+	$merge->($contamination);
+	$locStats{contamination} = $contamination->{FilteredContaRdsPerc};
 
 	my $text = getFileStr("$inD/LOGandSUB/flashMrg.sh.otxt",0);
 	$values{Merged} = $1 if $text =~ /\[FLASH\]\s+Combined pairs:\s+(\d+)/;
@@ -6693,13 +6714,18 @@ sub smplStats {
 		$assembly_dir = '';
 	}
 	$merge->(getASsemblyStats($assembly_dir, 'AssemblyStats.txt', 1));
-	$merge->(getBreakpointStats("$inD/mapping/$SmplN-smd.bam.breakpoints.tsv.gz"));
+	$merge->(getHybridAssemblyStats("$assembly_dir/HybridAssemblyComparison.tsv")) if $assembly_dir ne '';
 	$merge->(getMapStats("$inD/LOGandSUB/"));
 	$merge->(optiDups("$inD/LOGandSUB/"));
+	$merge->(getBreakpointStats("$inD/mapping/$SmplN-smd.bam.breakpoints.tsv.gz"));
+	$values{AssemblyBreakpointPercent} = sprintf('%.6f', 100 * $values{BreakpointBases} / $values{ScaffSize})
+		if (($values{ScaffSize} || 0) > 0 && defined($values{BreakpointBases}) && $values{BreakpointBases} ne '');
 	$merge->(getGeneStats("$inD/$preDIRs{dir_ContigStats}/GeneStats.txt"));
+	my $annotated_bases = ($values{BpGenes} || 0) + ($values{BpNotGenes} || 0);
+	$values{GeneCodingPercent} = sprintf('%.3f', 100 * $values{BpGenes} / $annotated_bases)
+		if ($annotated_bases > 0);
 	$merge->(getBinnerStats($assembly_dir,$SmplN));
 	$merge->(getSNPStats("$inD/LOGandSUB/SNP/ConsAssem.oSNPc.sh"));
-	$merge->(getHybridAssemblyStats("$assembly_dir/HybridAssemblyComparison.tsv")) if $assembly_dir ne '';
 	return \%values;
 }
 
