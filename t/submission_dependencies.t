@@ -22,6 +22,14 @@ sub slurm_options {
 	};
 }
 
+sub bash_options {
+	my $options = slurm_options();
+	$options->{qmode} = 'bash';
+	$options->{doSubmit} = 1;
+	$options->{submittedJobs} = 0;
+	return $options;
+}
+
 my $root = tempdir(CLEANUP => 1);
 my $script = File::Spec->catfile($root, 'short-dependency.sh');
 my $options = slurm_options();
@@ -62,5 +70,17 @@ is(scalar @{$options->{submissionErrors}}, 1,
 $options = slurm_options();
 is(qsubSystemJobAlive([], $options), undef,
 	'waiting on an empty dependency set returns without querying the scheduler');
+
+my $bash_script = File::Spec->catfile($root, 'counted-submission.sh');
+$options = bash_options();
+qsubSystem($bash_script, 'echo counted', 1, '1G', 'counted', '', '', 1, [], $options);
+print "\n"; # qsubSystem's progress prefix intentionally has no trailing newline
+is($options->{submittedJobs}, 1,
+	'a successful immediate execution increments the submitted-job counter');
+
+my $deferred_script = File::Spec->catfile($root, 'deferred-submission.sh');
+qsubSystem($deferred_script, 'echo deferred', 1, '1G', 'deferred', '', '', 0, [], $options);
+is($options->{submittedJobs}, 1,
+	'a deferred command does not increment the submitted-job counter');
 
 done_testing;

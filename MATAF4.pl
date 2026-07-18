@@ -251,6 +251,7 @@ my $from = $FROM1; my $to = $TO1;
 if ($loop2c_winsize > 0){
 	$to = $from + $loop2c_winsize; $to = $TO1 if ($to > $TO1);
 }
+my $loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
 
 
 #--------------------------------------------------------------------------------
@@ -1466,24 +1467,34 @@ sub loop2C_check(){
 	if ($loop2completion ){
 		push (@grandDeps, @{$sampleDeps_AR});
 		if ($JNUM == ($to-1)){
-			
-			#$totalChecked -= ($JNUM - $from);
-			$JNUM=($from-1);$loop2completion--;
+			my $submittedThisIteration =
+				($QSBoptHR->{submittedJobs} || 0) - $loopIterationSubmissionStart;
+			$loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
+			my $continueCurrentWindow = $submittedThisIteration > 0;
+			$loop2completion = 0 unless ($continueCurrentWindow);
+			$loop2completion-- if ($continueCurrentWindow);
 			print "\n\n-------------------------------------------\n-------------------------------------------\n";
-			print "Repeating samples loop: going into iteration  - $loop2completion: \n";
+			if ($continueCurrentWindow) {
+				print "Completed loop iteration with $submittedThisIteration submitted job(s); " .
+					($loop2completion ? "repeating with $loop2completion iteration(s) remaining.\n"
+					                  : "iteration limit reached.\n");
+			} else {
+				print "No jobs were submitted in the current iteration; ending this loop early.\n";
+			}
 
 			#print "L2C:: $loop2completion  @{$sampleDeps_AR}\n";
-			qsubSystemJobAlive( \@grandDeps,$QSBoptHR ,1 );
-			# Reinspect after every completed submission pass. This lets hybrid
-			# preassembly packages and assembly-group outputs become dependencies
-			# for the next pass without requiring a separate user command.
-			$workflowIteration++;
-			runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
-			#reset some key params...
+			if ($continueCurrentWindow) {
+				qsubSystemJobAlive( \@grandDeps,$QSBoptHR ,1 );
+				# Reinspect after every completed submission pass. This lets hybrid
+				# preassembly packages and assembly-group outputs become dependencies
+				# for the next pass without requiring a separate user command.
+				$workflowIteration++;
+				runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
+			}
+			# Reset pass-local state before either another iteration or a new window.
 			@grandDeps = ();
 			resetAsGrps(\%AsGrps);
 
-			print "Reanalyzing samples $from till $to\n";
 			if ($loop2c_winsize > 0 && !$loop2completion){
 				my $tmpStr = "Changing sample window from $from -> $to to ";
 				my $nextWindow = advance_loop_window(
@@ -1497,6 +1508,10 @@ sub loop2C_check(){
 				$JNUM = $nextWindow->{reset_index};
 				print "Last loop, breaking..\n" unless ($nextWindow->{has_window});
 				print "$tmpStr$from -> $to \n";#" . ($JNUM + $loop2c_winsize) . "\n";
+			} elsif ($loop2completion) {
+				# The for-loop increment moves this back to the first sample.
+				$JNUM = $from - 1;
+				print "Reanalyzing samples $from till $to\n";
 			}
 			print "-------------------------------------------\n-------------------------------------------\n";
 			

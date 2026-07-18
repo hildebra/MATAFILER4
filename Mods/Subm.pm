@@ -269,6 +269,8 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 				unless ($ret =~ /\bJob <(\d+)>/);
 			$jname=$1;
 		}
+		$optHR->{submittedJobs} = 0 unless (defined $optHR->{submittedJobs});
+		$optHR->{submittedJobs}++;
 		# Only record a lock after the scheduler has accepted the job.
 		if ($lockFile ne "" && !-e $lockFile){
 			open my $lock, ">", $lockFile or die "Cannot create lock $lockFile: $!\n";
@@ -425,6 +427,9 @@ sub emptyQsubOpt{
 		tmpSpace => 15, #default was 15G; unit is G
 		tmpSpaceTag => getProgPaths("nodeTmpDirTAG",0),
 		LOCKfile => "",
+		# Number of commands successfully handed to the configured execution
+		# backend. Callers can snapshot this value to detect no-op passes.
+		submittedJobs => 0,
 		#tmpMinG => 10,
 		afterAny => 0,
 		excludeNodes => "",

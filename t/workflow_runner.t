@@ -150,5 +150,8 @@ close $source;
 like($mataf4,
 	qr/qsubSystemJobAlive\s*\([^;]+;\s*.*?runAutomaticWorkflowPreflight\(\$workflowIteration\).*?resetAsGrps/s,
 	'loopTillComplete runs the repeated preflight after waiting and before resetting group state');
+like($mataf4,
+	qr/No jobs were submitted in the current iteration.*?elsif \(\$loop2completion\).*?\$JNUM = \$from - 1/s,
+	'loopTillComplete only resets the sample index when another iteration is needed');
 
 done_testing;
