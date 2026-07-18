@@ -5225,8 +5225,8 @@ sub mapReadsToRef{
 	my @pa2 = map { $_->{files}{r2} } @{$pairs};
 	my @paS = @{libraryFiles($libraries, 'single')};
 	my @singleLibraries = grep { $_->{files}{single} } @{$libraries};
-	my @libsOri = (map { $_->{label} || $_->{id} || 'library' } @{$pairs},
-		map { $_->{label} || $_->{id} || 'library' } @singleLibraries);
+	my @mappingLibraries = (@{$pairs}, @singleLibraries);
+	my @libsOri = map { $_->{label} || $_->{id} || 'library' } @mappingLibraries;
 	my $recordReadTechnology = libraryTechnology($libraries, "mapping sample $outName", 1);
 	#simple rule for mapper program: for now set to bowtie2
 

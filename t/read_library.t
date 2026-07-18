@@ -151,6 +151,9 @@ like($mataf4, qr/\$flashBin .*?-o \$outTL .*?\$pairs->\[\$i\]\{files\}\{r1\} \$p
 	'FLASH uses the matching pair and a unique output prefix for each library');
 like($mataf4, qr/my \$platform = 'ILLUMINA'.*?'PACBIO'.*?'ONT'.*?PL:\$platform/s,
 	'mapper read groups derive platform metadata from record technology');
+like($mataf4, qr/my \@mappingLibraries = \(\@\{\$pairs\}, \@singleLibraries\);\s*
+	my \@libsOri = map \{ .*? \} \@mappingLibraries;/,
+	'mapper label projection cannot feed singleton labels back into a preceding map');
 like($mataf4, qr/sub cleanInput.*?ensureSeqSetLibraries\(\$map\{\$curSmpl\}\{seqSet\}/s,
 	'raw-read cleanup covers both primary and support record scopes');
 like($mataf4, qr/sub sdmStatsMany.*?glob\("\$inD\/LOGandSUB\/sdm\/filter\*\.log"\).*?glob\("\$inD\/LOGandSUB\/sdm\/filterSuppl\*\.log"\)/s,
