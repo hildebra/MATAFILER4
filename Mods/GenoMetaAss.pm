@@ -6,6 +6,10 @@ use IO::Compress::Gzip ();
 use IO::Uncompress::Gunzip ();
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::ReadLibrary qw(
+	cloneReadLibraries ensureSeqSetLibraries ensureCleanSeqSetLibraries
+	syncCleanSeqSetLegacy readLibrariesByScope legacyLibraryArrays
+);
 
 use Exporter qw(import);
 our @EXPORT_OK = qw(
@@ -17,8 +21,10 @@ our @EXPORT_OK = qw(
 		
 		
 		readMapS getDirsPerAssmblGrp checkSeqTech is3rdGenSeqTech 
+		parseSupportReads normaliseSupportReads discoverReadFiles
 		resetAsGrps checkAssmblGrp
 		getRawSeqsAssmGrp getCleanSeqsAssmGrp 
+		getRawLibrariesAssmGrp getCleanLibrariesAssmGrp
 		addFileLocs2AssmGrp iniCleanSeqSetHR hasSuppRds
 		
 		getAssemblPath getAssemblGFF getAssemblContigs
@@ -53,8 +59,167 @@ sub filsizeMB{
 	if (!@_){return  $totalMapSize;}
 	my $path="";
 	if ($_[0] ne "" && -d $_[0]){$path=shift @_;}
-	foreach my $fh (@_){ $totalMapSize += (-s "$path/$fh") / (1024 * 1024) if (-e "$path/$fh");}
+	foreach my $fh (@_){
+		next unless (defined($fh) && $fh ne "");
+		my $file = $fh;
+		$file = "$path/$fh" if ($path ne "" && !_path_is_absolute($fh));
+		$totalMapSize += (-s $file) / (1024 * 1024) if (-f $file);
+	}
 	return $totalMapSize;
+}
+
+sub _path_is_absolute {
+	my ($path) = @_;
+	return defined($path) && $path =~ m{^(?:/|[A-Za-z]:[\\/]|\\\\)};
+}
+
+sub _join_path {
+	my ($base, $path) = @_;
+	return $path if (!defined($base) || $base eq "" || _path_is_absolute($path));
+	$base =~ s{[\\/]+$}{};
+	$path =~ s{^[\\/]+}{};
+	return "$base/$path";
+}
+
+# SupportReads historically accepted both "TECH:file1,file2" and
+# "TECH:file1;TECH:file2". Parse the technology once, preserve colons in paths
+# (notably Windows drive letters), and anchor relative paths at #DirPath.
+sub parseSupportReads {
+	my ($spec, $base_dir) = @_;
+	return ("", []) unless (defined($spec) && $spec =~ /\S/);
+	$base_dir = "" unless defined($base_dir);
+
+	my $technology = "";
+	my @paths;
+	foreach my $case (split /;/, $spec) {
+		$case =~ s/^\s+|\s+$//g;
+		next if ($case eq "");
+
+		my $payload = $case;
+		if ($case =~ /^([^:,\s]+):(.*)$/s) {
+			my ($case_technology, $case_payload) = ($1, $2);
+			if ($technology ne "" && $case_technology ne $technology) {
+				die "SupportReads mixes technologies '$technology' and '$case_technology' in '$spec'. Use one support technology per sample.\n";
+			}
+			$technology = $case_technology;
+			$payload = $case_payload;
+		} elsif ($technology eq "") {
+			die "SupportReads entry '$case' has no sequencing-technology prefix (for example PB:path/to/reads.fq.gz).\n";
+		}
+
+		foreach my $path (split /,/, $payload) {
+			$path =~ s/^\s+|\s+$//g;
+			next if ($path eq "");
+			# Accept the malformed-but-previously-emitted TECH:a,TECH:b form.
+			$path =~ s/^\Q$technology\E:// if ($technology ne "");
+			$path = resolve_path($path);
+			$path = _join_path($base_dir, $path);
+			push @paths, $path;
+		}
+	}
+
+	die "SupportReads '$spec' does not contain any input paths.\n" if (!@paths);
+	return ($technology, \@paths);
+}
+
+sub normaliseSupportReads {
+	my ($spec, $base_dir) = @_;
+	return "" unless (defined($spec) && $spec =~ /\S/);
+	my ($technology, $paths) = parseSupportReads($spec, $base_dir);
+	return $technology.":".join(",", @{$paths});
+}
+
+sub _natural_cmp {
+	my ($left, $right) = @_;
+	my @left_parts = split /(\d+)/, lc($left);
+	my @right_parts = split /(\d+)/, lc($right);
+	while (@left_parts && @right_parts) {
+		my ($a, $b) = (shift(@left_parts), shift(@right_parts));
+		my $cmp = ($a =~ /^\d+$/ && $b =~ /^\d+$/) ? ($a <=> $b) : ($a cmp $b);
+		return $cmp if $cmp;
+	}
+	return @left_parts <=> @right_parts || $left cmp $right;
+}
+
+sub _mate_key {
+	my ($file) = @_;
+	my $key = lc($file);
+	my $changed = ($key =~ s/([._-])r[12]([._-])/$1r#$2/i);
+	$changed ||= ($key =~ s/([._-])[12](?=[._-](?:f(?:ast)?q|sequence))/$1#/i);
+	$changed ||= ($key =~ s/([._-])[12](?=\.f(?:ast)?q(?:\.(?:gz|bz2))?$)/$1#/i);
+	return ($key, $changed ? 1 : 0);
+}
+
+sub _compile_input_regex {
+	my ($label, $pattern) = @_;
+	return undef unless (defined($pattern) && $pattern ne "");
+	my $regex = eval { qr/$pattern/ };
+	die "Invalid $label input-file regular expression '$pattern': $@" if (!$regex);
+	return $regex;
+}
+
+# Read a directory once, classify each file once, then sort paired reads by a
+# shared mate key. This avoids independent greps silently pairing different
+# lanes when lexical ordering differs.
+sub discoverReadFiles {
+	my ($dir, $prefix, $patterns) = @_;
+	die "discoverReadFiles expects a pattern hash\n" unless (ref($patterns) eq "HASH");
+	die "Input directory does not exist: $dir\n" unless (-d $dir);
+	$prefix = "" unless defined($prefix);
+	my $prefix_regex = qr/^\Q$prefix\E/;
+	my %regex = (
+		read1  => _compile_input_regex("read-1", $patterns->{read1}),
+		read2  => _compile_input_regex("read-2", $patterns->{read2}),
+		single => _compile_input_regex("single-read", $patterns->{single}),
+		bam    => _compile_input_regex("BAM", $patterns->{bam}),
+	);
+
+	opendir(my $dh, $dir) or die "Could not open input directory $dir: $!\n";
+	my @files = grep { -f "$dir/$_" && /$prefix_regex/ } readdir($dh);
+	closedir($dh);
+
+	my %found = (read1 => [], read2 => [], single => [], bam => []);
+	foreach my $file (@files) {
+		push @{$found{read1}}, $file if ($regex{read1} && $file =~ /$regex{read1}/);
+		push @{$found{read2}}, $file if ($regex{read2} && $file =~ /$regex{read2}/);
+		push @{$found{single}}, $file if ($regex{single} && $file =~ /$regex{single}/);
+		push @{$found{bam}}, $file if ($regex{bam} && $file =~ /$regex{bam}/);
+	}
+
+	if ($regex{single}) {
+		my %exclude;
+		if ($patterns->{prefer_single}) {
+			@exclude{@{$found{single}}} = (1) x @{$found{single}};
+			@{$found{read1}} = grep { !$exclude{$_} } @{$found{read1}};
+			@{$found{read2}} = grep { !$exclude{$_} } @{$found{read2}};
+		} else {
+			@exclude{@{$found{read1}}, @{$found{read2}}} = (1) x (@{$found{read1}} + @{$found{read2}});
+			@{$found{single}} = grep { !$exclude{$_} } @{$found{single}};
+		}
+	}
+	my %read1_names = map { $_ => 1 } @{$found{read1}};
+	my @mate_overlap = grep { $read1_names{$_} } @{$found{read2}};
+	die "Files match both read-1 and read-2 patterns in $dir: ".join(", ", @mate_overlap)."\n"
+		if (@mate_overlap);
+
+	foreach my $type (qw(single bam)) {
+		@{$found{$type}} = sort { _natural_cmp($a, $b) } @{$found{$type}};
+	}
+	if (@{$found{read1}} != @{$found{read2}}) {
+		die "Unequal paired-read counts in $dir: ".scalar(@{$found{read1}})." read-1 and ".scalar(@{$found{read2}})." read-2 files.\n";
+	}
+	my @r1 = map { [$_, _mate_key($_)] } @{$found{read1}};
+	my @r2 = map { [$_, _mate_key($_)] } @{$found{read2}};
+	@r1 = sort { _natural_cmp($a->[1], $b->[1]) || _natural_cmp($a->[0], $b->[0]) } @r1;
+	@r2 = sort { _natural_cmp($a->[1], $b->[1]) || _natural_cmp($a->[0], $b->[0]) } @r2;
+	for (my $i = 0; $i < @r1; $i++) {
+		if ($r1[$i][2] && $r2[$i][2] && $r1[$i][1] ne $r2[$i][1]) {
+			die "Paired-read names do not match in $dir: '$r1[$i][0]' and '$r2[$i][0]'.\n";
+		}
+	}
+	$found{read1} = [map { $_->[0] } @r1];
+	$found{read2} = [map { $_->[0] } @r2];
+	return \%found;
 }
 
 #check if file or file.gz exists
@@ -853,20 +1018,54 @@ sub getAssemblContigs{
 
 sub iniCleanSeqSetHR{
 	my ($seqSetHR) = @_;
-	my $HR = {arp1 => ${$seqSetHR}{pa1},arp2 => ${$seqSetHR}{"pa2"},singAr => ${$seqSetHR}{"pas"}, matAr => [],
-					readTec => ${$seqSetHR}{seqTech}, is3rdGen => ${$seqSetHR}{is3rdGen},
-					arpX1 => ${$seqSetHR}{paX1},arpX2 => ${$seqSetHR}{paX2},singArX => ${$seqSetHR}{paXs}, matArX => [],
-					readTecX => ${$seqSetHR}{seqTechX}, is3rdGenX => ${$seqSetHR}{is3rdGenX},
-					mrgHshHR => {}
-				};
+	my $libraries = cloneReadLibraries(ensureSeqSetLibraries($seqSetHR));
+	foreach my $library (@{$libraries}) {$library->{phase} = 'clean';}
+	my $HR = {libraries => $libraries, mrgHshHR => {}};
+	syncCleanSeqSetLegacy($HR);
 	return $HR;
 }
 
 sub addFileLocs2AssmGrp{
 	my ($AsGrpsHR, $cAssGrp,$SmplName, $cleanSeqSetHR, $seqSetHR) = @_;
+	ensureCleanSeqSetLibraries($cleanSeqSetHR, $SmplName);
+	ensureSeqSetLibraries($seqSetHR, $SmplName);
+	$AsGrpsHR->{$cAssGrp}{InputOrder} ||= [];
+	push @{$AsGrpsHR->{$cAssGrp}{InputOrder}}, $SmplName
+		unless grep { $_ eq $SmplName } @{$AsGrpsHR->{$cAssGrp}{InputOrder}};
 	${${$AsGrpsHR}{$cAssGrp}{CleanSeqs}}{$SmplName} = $cleanSeqSetHR;
 	${${$AsGrpsHR}{$cAssGrp}{RawSeqs}}{$SmplName} = $seqSetHR;
 	return $AsGrpsHR;
+}
+
+sub _ordered_group_samples {
+	my ($asG, $grp, $store, $specific) = @_;
+	my %by_sample = %{$asG->{$grp}{$store} || {}};
+	return ($specific) if (defined($specific) && $specific ne '');
+	my @samples = grep { exists($by_sample{$_}) } @{$asG->{$grp}{InputOrder} || []};
+	@samples = sort keys %by_sample if (!@samples);
+	return @samples;
+}
+
+sub getCleanLibrariesAssmGrp {
+	my ($asG, $grp, $support, $specific) = @_;
+	my @libraries;
+	foreach my $sample (_ordered_group_samples($asG, $grp, 'CleanSeqs', $specific)) {
+		my $clean = $asG->{$grp}{CleanSeqs}{$sample}
+			or die "Clean read libraries for sample $sample are unavailable in group $grp\n";
+		push @libraries, @{readLibrariesByScope($clean, $support ? 'support' : 'primary', 1, $sample)};
+	}
+	return \@libraries;
+}
+
+sub getRawLibrariesAssmGrp {
+	my ($asG, $grp, $support, $specific) = @_;
+	my @libraries;
+	foreach my $sample (_ordered_group_samples($asG, $grp, 'RawSeqs', $specific)) {
+		my $raw = $asG->{$grp}{RawSeqs}{$sample}
+			or die "Raw read libraries for sample $sample are unavailable in group $grp\n";
+		push @libraries, @{readLibrariesByScope($raw, $support ? 'support' : 'primary', 0, $sample)};
+	}
+	return \@libraries;
 }
 
 
@@ -875,47 +1074,15 @@ sub getCleanSeqsAssmGrp{
 	my $specSmpl = "";$specSmpl = $_[3] if (@_ >= 4); #specific sample only??
 	my @smpls = ();@smpls = ($specSmpl) if ($specSmpl ne "");
 	
-	my $sizOut = scalar(@smpls);
-	my @pa1; $#pa1=$sizOut; my @pa2; $#pa2=$sizOut;my @pas; $#pas=$sizOut;my @readTec;$#readTec=$sizOut;
-	my %raws = %{${$asG}{$grp}{CleanSeqs}};
-	my @terms = ("arp1","arp2","singAr", "readTec","is3rdGen");
-	@terms = ("arpX1","arpX2","singArX", "readTecX","is3rdGenX") if ($support);
-	@smpls = keys %raws if (!@smpls);
-	my $cnt=0;
-	foreach my $smpl (@smpls){
-		#print "$smpl\n";
-		
-		my $R1 = ""; 
-		if (defined( ${${$raws{$smpl}}{ $terms[0] }}[0] )){
-			$R1 = ${${$raws{$smpl}}{ $terms[0] }}[0] ;# && @{$raws{$smpl}}{ $terms[0] } > 0);
-			if (scalar(@{${$raws{$smpl}}{ $terms[0] }})>1){
-				print STDERR "Warning getCleanSeqsAssmGrp: detected >1 clean input read.. currently not supported!!\n @{${$raws{$smpl}}{ $terms[0] }}\nasG:$asG grp:$grp support:$support\n";
-			}
-		}
-		$pa1[$cnt] =  $R1;
-		my $R2 = ""; $R2 = ${${$raws{$smpl}}{ $terms[1] }}[0] if (defined( ${${$raws{$smpl}}{ $terms[1] }}[0] ) );# && @{$raws{$smpl}}{ $terms[1] } > 0);
-		$pa2[$cnt] = $R2;
-		my $single = ""; $single = ${${$raws{$smpl}}{ $terms[2] }}[0] if (defined( ${${$raws{$smpl}}{ $terms[2] }}[0] ));# && @{$raws{$smpl}}{ $terms[2] } > 0);
-		$pas[$cnt] =  $single;#$single;
-		#print "$cnt $single\n";
-		#my $rT = ""; $rT = ${$raws{$smpl}}{ $terms[3] } if (defined(${$raws{$smpl}}{ $terms[3] }));
-		$readTec[$cnt] = ${$raws{$smpl}}{ $terms[3] } ;
-		$cnt++;
-	}
+	my $libraries = getCleanLibrariesAssmGrp($asG, $grp, $support, $specSmpl);
+	my ($pa1, $pa2, $pas, $labels, $readTec) = legacyLibraryArrays($libraries, 1);
 	#die "getCleanSeqsAssmGrp::\n@pa1 - $grp - $support\n@pa2\n@pas\n";
-	return (\@pa1, \@pa2, \@pas, \@readTec);
+	return ($pa1, $pa2, $pas, $readTec);
 }
 
 sub hasSuppRds{
 	my ($asG, $grp,$smpl) = @_;
-	my %raws = %{${$asG}{$grp}{RawSeqs}};
-	my @smpls = keys %{${$asG}{$grp}{RawSeqs}};
-	#print "GRP:$grp\n@smpls\n";
-#	if (  exists( ${  ${${$asG}{$grp}{RawSeqs}}{$smpl}}{"paXs"} )  ){
-	if (  exists( ${  $raws{$smpl}}{"paXs"} )  ){
-		return 1;
-	}
-	return 0;
+	return scalar(@{getRawLibrariesAssmGrp($asG, $grp, 1, $smpl)}) ? 1 : 0;
 }
 
 sub getRawSeqsAssmGrp{
@@ -924,23 +1091,10 @@ sub getRawSeqsAssmGrp{
 	my $specSmpl = "";$specSmpl = $_[3] if (@_ >= 4); #specific sample only??
 	my @smpls = ();@smpls = ($specSmpl) if ($specSmpl ne "");
 	
-	my @pa1; my @pa2; my @pas; my @libs;my @readTec;
-	my %raws = %{${$asG}{$grp}{RawSeqs}};
-	my @terms = ("pa1","pa2","pas", "libInfo","seqTech","is3rdGen");
-	@terms = ("paX1","paX2","paXs", "libInfoX","seqTechX","is3rdGenX") if ($support);
-	@smpls = keys %raws if (!@smpls);
-	#die "XX @smpls YY\n$support\n@terms\n@{${$raws{$smpls[0]}}{ $terms[2] }}\n";
-	foreach my $smpl (@smpls){
-		#print "$smpl\n"; 
-		die "GenoMetaAss.pm::getRawSeqsAssmGrp: $smpl not included in raw input vector!\n" unless (exists($raws{$smpl}));
-		push(@pa1, @{${$raws{$smpl}}{ $terms[0] }});
-		push(@pa2, @{${$raws{$smpl}}{ $terms[1] }});
-		push(@pas, @{${$raws{$smpl}}{ $terms[2] }});
-		push(@libs, @{${$raws{$smpl}}{ $terms[3] }});
-		push(@readTec, ${$raws{$smpl}}{ $terms[4] });
-	}
+	my $libraries = getRawLibrariesAssmGrp($asG, $grp, $support, $specSmpl);
+	my ($pa1, $pa2, $pas, $libs, $readTec) = legacyLibraryArrays($libraries, 0);
 	#die "@pa1\n@pa2\n@pas\n";
-	return (\@pa1, \@pa2, \@pas, \@libs, \@readTec);
+	return ($pa1, $pa2, $pas, $libs, $readTec);
 }
 
 
@@ -965,6 +1119,7 @@ sub emptyAssGrpsObj($){
 		#complex hashes replaces FilterSeq1 ..
 		$AsGrps{$k}{CleanSeqs} = {};
 		$AsGrps{$k}{RawSeqs} = {};
+		$AsGrps{$k}{InputOrder} = [];
 		#@{$AsGrps{$k}{FilterSeq1}} = (); @{$AsGrps{$k}{FilterSeq2}} = (); @{$AsGrps{$k}{FilterSeqS}} = ();
 		#@{$AsGrps{$k}{RawSeq1}} = (); @{$AsGrps{$k}{RawSeq2}} = (); @{$AsGrps{$k}{Libs}} = ();
 		
@@ -1001,6 +1156,7 @@ sub resetAsGrps{
 		@{$AsGrps->{$cAssGrp}{ReadTec}} = ();
 		$AsGrps->{$cAssGrp}{CleanSeqs} = {};
 		$AsGrps->{$cAssGrp}{RawSeqs} = {};
+		$AsGrps->{$cAssGrp}{InputOrder} = [];
 		$AsGrps->{$cAssGrp}{SeqClnDeps} = "";
 		$AsGrps->{$cAssGrp}{prodRun} = "";
 		$AsGrps->{$cAssGrp}{AssemblJobName} = "";
@@ -1284,19 +1440,20 @@ sub readMap{
 		
 		my $cdir = ""; 
 		#read in the path to sample
-		if ($dirCol >= 0 && @spl>= $dirCol && $spl[$dirCol] ne ""){
-			$cdir = $spl[$dirCol] ; 
+		if ($dirCol >= 0 && @spl > $dirCol && $spl[$dirCol] ne ""){
+			$cdir = resolve_path($spl[$dirCol]);
 			$samplePathUsed=1;
-			if ($DOWARN && exists($trackDirs{"$dir2dirs/$cdir"}) ){ die "Warning: Found the sample path \"$cdir\" more than once. This would lead to using reads twice, aborting.\n $warnDeactivateMsg";}
-			$trackDirs{"$dir2dirs/$cdir"} = 1;
+			my $input_dir = _join_path($dir2dirs, $cdir);
+			if ($DOWARN && exists($trackDirs{$input_dir}) ){ die "Warning: Found the sample path \"$cdir\" more than once. This would lead to using reads twice, aborting.\n $warnDeactivateMsg";}
+			$trackDirs{$input_dir} = 1;
 		}
 		my $cdir2= $cdir;
 		$ret{$curSmp}{dir} = $cdir;#this one should stay without a tag
-		$ret{$curSmp}{rddir} = $dir2dirs.$cdir;
+		$ret{$curSmp}{rddir} = _join_path($dir2dirs, $cdir);
 		$ret{$curSmp}{clip} = $illuminaClip;
 		$ret{$curSmp}{rddir} .="/" unless ($ret{$curSmp}{rddir} =~ m/\/$/);
 		#die "$ret{$curSmp}{rddir} $dirCol $cdir $curSmp\n $smplCol $dirCol\n";
-		if ($SmplPrefixCol>=0 && @spl>= $SmplPrefixCol && $spl[$SmplPrefixCol] ne ""){
+		if ($SmplPrefixCol>=0 && @spl > $SmplPrefixCol && $spl[$SmplPrefixCol] ne ""){
 			$cdir2 = $spl[$SmplPrefixCol];
 			$ret{$curSmp}{prefix} = $cdir2;
 			if ($DOWARN && exists($trackPrefixs{"$dir2dirs/$cdir2"}) ){ die "Warning: Found the sample path \"$cdir2\" more than once. This would lead to using reads twice, aborting.\n $warnDeactivateMsg";}
@@ -1413,24 +1570,13 @@ sub readMap{
 		#die "$SupRdsCol\t@spl\n$spl[$SupRdsCol]\n";
 		$agBP{$curAG}{SupportReads} = "" unless (exists($agBP{$curAG}{SupportReads}));
 		if ($SupRdsCol >= 0 && $SupRdsCol < @spl) { 
-			if(length($spl[$SupRdsCol]) > 0 && $spl[$SupRdsCol] !~ m/\/$/ && -d $spl[$SupRdsCol]) {
-				$spl[$SupRdsCol].="/";
+			$ret{$curSmp}{SupportReads} = normaliseSupportReads($spl[$SupRdsCol], $dir2dirs);
+			if ($ret{$curSmp}{SupportReads} ne "") {
+				my ($support_technology) = parseSupportReads($ret{$curSmp}{SupportReads});
+				checkSeqTech($support_technology, "Mapping file SupportReads for sample $curSmp");
+				$agBP{$curAG}{SupportReads} .= "," if ($agBP{$curAG}{SupportReads} ne "");
+				$agBP{$curAG}{SupportReads} .= $ret{$curSmp}{SupportReads};
 			}
-			#resolve paths.. split on , for multiple files/cases
-			my @spl2 = split /;/,$spl[$SupRdsCol];
-			my @spl4 = ();
-			foreach my $case (@spl2){
-				my @spl3 = split /:/,$case;
-				if (@spl3>=2){
-					my $out = shift @spl3;$out .=  ":";
-					foreach (@spl3){$out .=resolve_path($_);}
-					push (@spl4,$out);
-				} else {
-					push (@spl4,$case);
-				}
-			}
-			$ret{$curSmp}{SupportReads} = join(",",@spl4); 
-			$agBP{$curAG}{SupportReads} .= ",".$ret{$curSmp}{SupportReads};
 			#print "\n\n$ret{$curSmp}{SupportReads} \n\n";
 			
 		} else {
@@ -1577,4 +1723,3 @@ sub writeFasta{
 	close O;
 	#die $of;
 }
-

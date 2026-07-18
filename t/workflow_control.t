@@ -9,6 +9,7 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(resetAsGrps contig_stats_coverage_complete);
+use Mods::IO_Tamoc_progs qw(inputFmtSpades);
 use Mods::WorkflowControl qw(
 	advance_loop_window assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
@@ -159,10 +160,28 @@ is_deeply($resolved_sources, [$source_read, '/external/read.2.fq.gz'],
 is_deeply(missing_input_files($resolved_sources->[0]), [],
 	'an existing source remains valid when its generated rawRds destination is absent');
 
+my $spades_inputs = inputFmtSpades(
+	['A.1.fq.gz', 'B.1.fq.gz'], ['A.2.fq.gz', 'B.2.fq.gz'],
+	['A.s.fq.gz', 'B.s.fq.gz'], $root, ['ill', 'ill'],
+);
+is(scalar(() = $spades_inputs =~ /--pe1-1/g), 2,
+	'metaSPAdes coassembly keeps all left-read files in one paired library');
+is(scalar(() = $spades_inputs =~ /--pe1-2/g), 2,
+	'metaSPAdes coassembly keeps all right-read files in one paired library');
+unlike($spades_inputs, qr/--pe2-/, 'coassembly does not create an unsupported second metaSPAdes library');
+
 open my $source, '<', File::Spec->catfile($Bin, '..', 'MATAF4.pl')
 	or die "Cannot inspect MATAF4.pl: $!";
 my $mataf4 = do { local $/; <$source> };
 close $source;
+like($mataf4, qr/sub spadesAssembly.*?\$cmd \.= " --meta ".*?qsubSystem\([^\n]+\$nCores[^\n]+\$defTotMem/s,
+	'SPAdes always uses metagenome mode and requests the resources used by its command');
+unlike($mataf4, qr/sub spadesAssembly.*?\$cmd \.= " --sc ".*?sub movePreAssmData/s,
+	'SPAdes no longer substitutes single-cell mode for metagenomic coassembly');
+like($mataf4, qr/--nano-raw "\.join\(" ", \@inRds\)/,
+	'Flye receives every long-read file collected for the assembly group');
+like($mataf4, qr/\$primaryInputSize \*= \$totalSmpls \/ \$knownSmpls/,
+	'missing group-member sizes are extrapolated in the correct direction');
 like($mataf4, qr/\$baseOut\s*=\s*sample_base_output_dir\(\$curOutDir,\s*\$curSmpl\)/,
 	'normal execution uses safe sample base-output derivation');
 like($mataf4, qr/sample_is_ignored\(\$ignoredSamplesHR,\s*\$SmplName\)/,
@@ -337,7 +356,7 @@ like($mataf4,
 	qr/\$mapAssFlag\s*=\s*1\s+if\s*\(\$map\{\$curSmpl\}\{hasPrimaryRds\}\s*&&\s*\$MFopt\{map2Assembly\}\s*&&\s*!\$eFinMapCovGZ/s,
 	'primary mapping cannot trigger staging for support-only samples');
 like($mataf4,
-	qr/if\s*\(\s*\(\$presence==0\s*\|\|\s*\$assInputFlaw==1\s*\)\s*&&\s*\$runThis\)\{\s*print\s+"sdm'ing support reads\.\.\\n"\s+if\s*\(\$useXtras\)/s,
+	qr/if\s*\(!\$presence\s*&&\s*\$runThis\)\{\s*print\s+"sdm'ing support reads\.\.\\n"\s+if\s*\(\$useXtras\)/s,
 	'support SDM message is emitted only when an SDM job is submitted');
 
 like($mataf4,
@@ -366,7 +385,7 @@ like($mataf4,
 	qr/my %requiredMappers.*?next if \(\$mapper == 3 \|\| \$mapper == 5\).*?next if \(\$cmdDB eq ""\)/s,
 	'assembly index jobs are deduplicated and omitted for direct-FASTA mappers');
 like($mataf4,
-	qr/my \@readTechnologies = \@\{\$rear\}.*?\$readTec = \$readTechnologies\[0\]/s,
-	'automatic mapper selection uses sequencing technology rather than library metadata');
+	qr/my \$recordReadTechnology = libraryTechnology\(\$libraries,.*?my \$readTec = \$recordReadTechnology \|\| \$declaredReadTechnology/s,
+	'automatic mapper selection uses the validated technology attached to the library records');
 
 done_testing;

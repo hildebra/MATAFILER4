@@ -2,6 +2,7 @@ package Mods::IO_Tamoc_progs;
 use warnings;
 use Cwd 'abs_path';
 use strict;
+use Mods::ReadLibrary qw(legacyLibraryArrays);
 
 use vars qw($CONFIG_FILE @CONFIG_TEXT %CONFIG_HASH);
 $CONFIG_FILE="";
@@ -13,7 +14,7 @@ sub setConfigFile;
 
 use Exporter qw(import);
 our @EXPORT_OK = qw(getProgPaths truePath
-					inputFmtSpades inputFmtMegahit jgi_depth_cmd createGapFillopt setConfigFile 
+					inputFmtSpades inputFmtSpadesLibraries inputFmtMegahit inputFmtMegahitLibraries jgi_depth_cmd createGapFillopt setConfigFile
 					buildMapperIdx mapperDBbuilt decideMapper checkMapsDoneSH greaterComputeSpace convert2Gb);
 
 
@@ -403,12 +404,17 @@ sub inputFmtSpades($ $ $ $ $){
 		for (my $i =0; $i<@p1;$i++){
 			next if ($p1[$i] eq "");
 			my $peTerm = "--pe";$peTerm = "--gemcode" if ($readTec[$i] =~ m/SLR/);
-			$sprds .= " ${peTerm}".($i+1) ."-1 $p1[$i] ${peTerm}".($i+1) ."-2 $p2[$i]";
+			# metaSPAdes accepts one paired-end short-read library. Repeated
+			# --pe1 arguments are multiple files belonging to that same library;
+			# do not turn coassembly samples into separate libraries.
+			my $library = $peTerm eq "--pe" ? 1 : $i + 1;
+			$sprds .= " ${peTerm}${library}-1 $p1[$i] ${peTerm}${library}-2 $p2[$i]";
 		}
 		for (my $i=0;$i<@singl;$i++){
 			next if ($singl[$i] eq "");
 			my $peTerm = "--pe";$peTerm = "--gemcode" if ($readTec[$i] =~ m/SLR/);
-			$sprds .= " ${peTerm}".($i+1) ."-s $singl[$i]";
+			my $library = $peTerm eq "--pe" ? 1 : $i + 1;
+			$sprds .= " ${peTerm}${library}-s $singl[$i]";
 		}
 	} else {
 		open O,">$logDir/spadesInput.yaml" or die "Can't write $logDir/spadesInput.yaml\n";
@@ -526,6 +532,18 @@ sub jgi_depth_cmd{
 
 	#$covCmd .= "gzip $nxtBAM.jgi*\n";
 	return $covCmd;
+}
+
+sub inputFmtSpadesLibraries {
+	my ($libraries, $logDir) = @_;
+	my ($r1, $r2, $single, $labels, $technologies) = legacyLibraryArrays($libraries, 1);
+	return inputFmtSpades($r1, $r2, $single, $logDir, $technologies);
+}
+
+sub inputFmtMegahitLibraries {
+	my ($libraries, $logDir) = @_;
+	my ($r1, $r2, $single) = legacyLibraryArrays($libraries, 1);
+	return inputFmtMegahit($r1, $r2, $single, $logDir);
 }
 
 #2nd: arrray of files, paired sep by ","

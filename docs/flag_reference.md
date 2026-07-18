@@ -399,29 +399,26 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 
 ## MGS.pl
 
-MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. The uploaded source reports version `0.28`.
+MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. The uploaded source reports version `0.32`.
 
 ### General options
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-GCd` | string |  | stable | gene catalog dir |
+| `-clusterID` | integer | `95` | stable | gene-catalog clustering identity percentage |
 | `-outD` | string |  | stable | defaults to $inD/Bin_SB/ |
 | `-tmp` | string |  | stable | temp dir |
 | `-submit` | integer | `1` | stable | 1:submit jobs, 0: dry run. Default: 1 |
 | `-canopies` | string |  | stable | location of canopy clustering output file (clusters.txt) |
 | `-smallCores` | integer | `4` | stable | cores used for normal jobs (not intensive) |
 | `-bottleneckCores` | integer | `12` | stable | cores for compute intensive jobs |
-| `-useRHClust` | integer | `0` | deprecated/legacy | 1: do hierachical clustering of MGS genes. Default:0 |
-| `-redoRhcl` | integer | `0` | deprecated/legacy | rewrite R hierachical clusterings |
 | `-redoCluster` | integer | `0` | stable | Accepted by MGS.pl; see source/help output for detailed behaviour. |
-| `-redoDeepCan` | integer | `0` | deprecated/legacy | rewrite deep corraltions to Rhcl clusters |
 | `-redoTax` | integer | `0` | stable | rewrite tax annotations |
 | `-MGset` | string | `FMG` | stable | GTDB or FMG, which marker genes are used? Default: GTDB |
 | `-wait4stone` | string |  | stable | wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later |
+| `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; zero waits indefinitely |
 | `-mem` | integer | `150` | stable | memory used for intensive jobs |
-| `-completeness` | integer | `90` | stable | what qual should final MGS have at least?? |
-| `-contamination` | integer | `5` | stable | contamination threshold for accepting MGS |
 | `-strains` | integer | `0` | stable | 1: calc instra species strain phylogenies. Default: 0 |
 | `-useCheckM2` | integer | `0` | stable | CheckM2 default qual checking of MAGs/MGS |
 | `-useCheckM1` | integer | `1` | stable | CheckM default qual checking of MAGs/MGS |

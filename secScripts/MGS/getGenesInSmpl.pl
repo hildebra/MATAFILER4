@@ -4,6 +4,10 @@
 use strict; use warnings;
 use Mods::GenoMetaAss qw(readClstrRev);
 
+my $clusterID = @ARGV ? shift @ARGV : 95;
+die "Usage: $0 [cluster-ID]\n" if @ARGV;
+die "cluster-ID must be between 1 and 100\n"
+	unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
 
 my $oname = "T6";
 my $odir = "/g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/$oname/R_filt/";
@@ -23,7 +27,7 @@ my @ks = sort(keys %genes);
 
 my $cnt =0;
 my %rep;
-open I,"<$GCdir/compl.incompl.95.fna.clstr.idx" or die "can t open GC idx\n";
+open I,"<$GCdir/compl.incompl.$clusterID.fna.clstr.idx" or die "can t open GC idx\n";
 while (<I>){
 	$cnt++;
 	chomp; my @spl = split /\t/; next if (@spl < 2);
@@ -49,4 +53,3 @@ foreach my $s (@smpls){
 }
 close O;
 print "$odir/$oname.genes.per.smpl.txt\n";
-

@@ -102,7 +102,7 @@ unlike($separate_contigs,
 like($separate_contigs,
 	qr/sub geneAbundance.*?contig_stats_coverage_complete\(\$outDab, \$oPrefix\).*?if \(!fileGZe\(\$inF\)\)/s,
 	'completed coverage derivatives are recognized before requiring their source coverage file');
-ok(index($separate_contigs, '$inD =~ s{[\\/]+$}{};') >= 0
+ok(index($separate_contigs, '$inD =~ s{[\\\\/]+$}{};') >= 0
 		&& index($separate_contigs, '$inD .= "/";') >= 0,
 	'input directories are normalized instead of requiring a caller-supplied trailing slash');
 unlike($separate_contigs,

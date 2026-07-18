@@ -20,6 +20,7 @@ my $GCd = "";
 my $oDir = "";
 my $multiInF = "";
 my $refSmpl =""; 
+my $clusterID = 95;
 
 GetOptions(
 	"mode=s" => \$mods,
@@ -27,10 +28,12 @@ GetOptions(
 	"iS=s" => \$inF, #single MGS, as used in TEC2
 	"iM=s" => \$multiInF, #multiple MGS
 	"G=s" => \$GCd,
+	"clusterID=i" => \$clusterID,
 	"refSmpl=s" => \$refSmpl, #reference sample
 );
 
 die "Not enough input args given!\n" if (($inF eq "" && $multiInF eq "") || $oDir eq "" || $GCd eq "");
+die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterID <= 100;
 $oDir .= "/" unless ($oDir =~ m/\/$/);$GCd .= "/" unless ($GCd =~ m/\/$/);
 if (!-f $inF && !-f $multiInF){die "Can;t find input gene file $inF$multiInF\nAborting\n";}
 my $refSmplDir = "";
@@ -57,7 +60,7 @@ my %totGenes;
 #read gene list
 readInfile();
 
-my ($hr1s,$hr2s) = readClstrRev("$GCd/compl.incompl.95.fna.clstr.idx",1,\%totGenes);
+my ($hr1s,$hr2s) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",1,\%totGenes);
 $hr1s = undef; #my %gene2cl = %{$hr1s};
 my %cl2gene = %{$hr2s};
 undef %totGenes; #free some mem
@@ -375,7 +378,6 @@ sub readMB2{
 	}
 	return (\%MB1,\%MB2,\%MBq);
 }
-
 
 
 

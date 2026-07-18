@@ -40,6 +40,7 @@ my $redo = 0;
 my $BinTerm = "MGS.";
 my $legacyV=0;
 my $camoIn = "";
+my $clusterID = 95;
 
 my $ph1flag = 1; #sets up for using binnings..
 my %gen2Bin;#structure: {gene}{Bin}=cnt
@@ -60,6 +61,7 @@ my %MAgene; #store genes per MAG.. large hash!
 #options to pipeline..
 GetOptions(
 	"GCd=s"      => \$inD,
+	"clusterID=i" => \$clusterID,
 	"BinDir=s"   => \$outD,
 	"tmp=s" => \$tmpD,
 	#"submit=i" => \$doSubmit,
@@ -80,6 +82,7 @@ GetOptions(
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-GCd is required\n" unless length $inD;
 die "-cores must be a positive integer\n" unless $numCore > 0;
+die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterID <= 100;
 die "-MGset must be GTDB or FMG\n" unless $useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG";
 die "Select exactly one of -useCheckM1 and -useCheckM2\n"
 	unless ($useCheckM1 ? 1 : 0) + ($useCheckM2 ? 1 : 0) == 1;
@@ -120,7 +123,7 @@ my $clMAGsBin = getProgPaths("clusterMAGs");
 my $cmd = "";
 my $canoFlag = ""; $canoFlag = "-canopyDir $camoIn " if ($camoIn ne "");
 #-FILEtag SBx -MGtag MM2 -geneCatIdx C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/compl.incompl.95.fna.clstr.idx -MGdir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/MGs/ -outDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/out/ -map C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.0.txt,C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.1.txt -canopyDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/Cano/
-$cmd .= "$clMAGsBin -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.95.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
+$cmd .= "$clMAGsBin -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.$clusterID.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
 $cmd .= "-outDir $outD -map $mapF $canoFlag -MGfile $GCd/${COGdir}.subset.cats\n";
 $cmd .= "test -s $outD/MAGvsGC.txt\n";
 $cmd .= "gzip -c $outD/MAGvsGC.txt > $logDir/MAGvsGC.txt.gz\n";
@@ -428,7 +431,7 @@ sub clusterMB2{
 	}
 #	$ctg2gen = readClstrRevContigSubset("$GCd/compl.incompl.95.fna.clstr.idx",\%contigsGlobal); $hr2 = {};
 	print parse_duration((time - $startTime)). " - ";
-	$ctg2gen2 = readClstrRevSmplCtgGenSubset("$GCd/compl.incompl.95.fna.clstr.idx",\%contigsGlobal); $hr2 = {};
+	$ctg2gen2 = readClstrRevSmplCtgGenSubset("$GCd/compl.incompl.$clusterID.fna.clstr.idx",\%contigsGlobal); $hr2 = {};
 
 	print parse_duration((time - $startTime)) . " - Converting Bins to gene cat MAGs..\n";
 	my $missed =0; my $incompleteCtgMatch=0; 

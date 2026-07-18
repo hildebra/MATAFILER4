@@ -221,6 +221,44 @@ like($gene_cat, qr/\$map\{\$smpl\}\{assFinSmpl\} eq \$smpl/,
 unlike($gene_cat, qr/!\s*fileGZe\("\$metaGD\/scaffolds\.fasta\.filt"\) \|\| !-e "\$metaGD\/longReads/,
        'hybrid assembly precheck does not require both short- and long-read assemblies');
 unlike($gene_cat, qr/my \$cmd \.= "\$kaijBin/, 'Kaiju command is initialized before concatenation');
+like($gene_cat, qr/"fastaSplit=s"/, 'geneCat accepts human-readable FASTA chunk sizes');
+like($gene_cat, qr/"FuncMinPercSbjCov=f"/, 'geneCat preserves fractional subject-coverage thresholds');
+like($gene_cat, qr/sub _validate_map_files.*?split \/,\/.*?unless -f \$file/s,
+     'geneCat validates every file in a comma-separated map list');
+like($gene_cat, qr/_validate_map_files\(\$mapF\); #validate inputs before deleting/s,
+     'geneCat validates a reset run map before removing prior output');
+unlike($gene_cat, qr/`wc -l \$\{inD\}/, 'protein preflight counts rows without spawning wc');
+unlike($gene_cat, qr/`grep -c '\^>'/, 'protein preflight counts FASTA records without spawning grep');
+like($gene_cat, qr/my \$query = "\$GCd\/compl\.incompl\.\$cdhID\.prot\.faa"/,
+     'annotation modes honor the requested cluster identity');
+like($gene_cat, qr/-mode FuncAssign .*?-clusterID \$cdhID/s,
+     'the main flow propagates cluster identity to functional annotation jobs');
+like($gene_cat, qr/my \$effectiveMem = \$totMem < 250 \? 250 : \$totMem/,
+     'Canopy computes its memory floor without mutating global memory');
+like($gene_cat, qr/if \(!-s "\$oD\/clusters\.txt" \|\| !-s "\$oD\/profiles\.txt"\)/,
+     'Canopy reruns when either required output is missing or empty');
+like($gene_cat, qr/sysopen\(\$lock_fh, \$lock_file, O_CREAT \| O_EXCL/,
+     'parallel gene batches acquire their append lock atomically');
+unlike($gene_cat, qr/open \$OC,"\| gzip/,
+       'batch compression uses in-process gzip instead of shell pipelines');
+like($gene_cat, qr/sub _publish_gzip_output.*?->close\(\).*?_sync_file\(\$partial_file\).*?rename \$partial_file, \$final_file/s,
+     'gzip publication closes, synchronizes, and atomically renames its partial file');
+like($gene_cat, qr/sub _append_file_locked.*?_sync_file\(\$source\).*?->sync\(\)/s,
+     'batch append synchronizes both its completed source and aggregate output');
+like($gene_cat, qr/sub _for_each_fasta_record.*?while \(my \$line = <\$fh>\)/s,
+     'gene collation has a record-at-a-time FASTA reader');
+unlike($gene_cat, qr/readFasta\(\$inGenesF/,
+       'sample nucleotide FASTA is not materialized as a whole-file hash');
+like($gene_cat, qr/if \(grep \{ \$_ eq '--help'.*?\@ARGV\).*?_print_help\(\)/s,
+     '--help is handled before site-program configuration is loaded');
+like($gene_cat, qr/-clusterID \$cdhID -MGset \$useGTDBmg.*?-requireAllAssemblies \$requireAllAssemblies/,
+     'sample collation subjobs inherit catalog identity and input policy');
+like($gene_cat, qr/-MGset \$useGTDBmg -clusterID \$cdhID -outD \$MGSoutD/,
+     'the MGS pipeline inherits gene-catalog identity');
+like($gene_cat, qr/_checkpoint_command\(\$checkpointWriter, \$matrixSton, \$cdhID, 'gene-matrices'/,
+     'gene-catalog stages write checkpoint manifests');
+unlike($gene_cat, qr/length\(\$fnas\{\$hd\}\) <= \$minGeneL/,
+       'genes exactly at the documented minimum length are retained');
 
 my $parse = read_file(File::Spec->catfile($root, 'secScripts', 'functions', 'parseBlastFunct2.pl'));
 like($parse, qr/CNT_\$\{minBLE\}_\$\{minPID\}/, 'functional result checks use threshold and percent identity');
@@ -254,17 +292,19 @@ ok(-e "$abr_blast.stone", 'ABR completion marker is written after successful out
 my $mgs = read_file(File::Spec->catfile($root, 'secScripts', 'MGS.pl'));
 like($mgs, qr/Select exactly one quality checker/, 'MGS rejects ambiguous CheckM/CheckM2 configuration');
 like($mgs, qr/runCheckM\(\$binCanDir,\$ChkMevalF/, 'MGS supports CheckM1 for canopy quality checks');
-like($mgs, qr/my \$sco = \$spl\[12\]-\(\$spl\[13\]\*2\)/,
-     'MAG replacement score uses completeness and contamination columns');
-unlike($mgs, qr/my \$testKey = ">\$\{cc\}_\$cnt";\s*my \$curGene = ""; my \$cnt=0/s,
-       'contig gene lookup does not use the outer counter before initializing its own counter');
-like($mgs, qr/if \(\$LOGstr =~ m\/:::Correct:\/\)/, 'Rhcl success output is recognized without a stray quote');
-unlike($mgs, qr/m\/\\":::Correct:/, 'Rhcl parser no longer requires an impossible leading quote');
-like($mgs, qr/test -s \$GTDBtaxF.*touch \$GTDBtaxSto/s,
-     'GTDB checkpoint follows validation of final taxonomy outputs');
-like($mgs, qr/test -s \$annoDir\/specI\.tax\\n";\s*\$cmdSI \.= "touch \$ABmgsSton/s,
+like($mgs, qr/my \$finalClustersFilt = \$finalClusters2\."\.core"/,
+     'MGS proceeds directly with the filtered core-cluster guide');
+unlike($mgs, qr/"(?:useRHClust|redoRhcl|redoDeepCan)=i"/,
+       'deprecated hierarchical-clustering switches are not accepted');
+unlike($mgs, qr/\b(?:Rhclusts|submitRhcl|refine_Rhcl_MGS|createDeepCorrM|replaceLowQualMGS4MAG)\b/,
+       'deprecated hierarchical and deep-correlation implementations are removed');
+unlike($mgs, qr/(?:PostBinning|filtDeepCan|avx2_constraint)/,
+       'deprecated post-clustering tools are no longer resolved');
+like($mgs, qr/test -s \$GTDBtaxF.*?_checkpoint_command\(\$checkpointWriter, \$GTDBtaxSto/s,
+     'GTDB manifest checkpoint follows validation of final taxonomy outputs');
+like($mgs, qr/test -s \$annoDir\/specI\.tax\\n";\s*\$cmdSI \.= _checkpoint_command\(\$checkpointWriter, \$ABmgsSton/s,
      'MGS abundance checkpoint follows final output validation');
-like($mgs, qr/_touch_checkpoint\(\$iniMB2sto\) unless -e \$iniMB2sto \|\| \@missedMAGs/,
+like($mgs, qr/_touch_checkpoint\(\$iniMB2sto, 'per-sample-mag-quality'\) unless _checkpoint_valid\(\$iniMB2sto\) \|\| \@missedMAGs/,
      'missing MAG groups prevent the global MAG checkpoint from becoming sticky');
 unlike($mgs, qr/foreach my \$Doo \(\@DoosD\)\{\s*last if \(-e "\$iniMB2sto"\)/s,
        'MGS validates MAG outputs even when a previous global checkpoint exists');
@@ -274,8 +314,9 @@ like($mataf4_stats, qr/sub _smpl_stats_columns.*?sub _metag_stats_text/s,
      'sample statistics use one central ordered schema and final serializer');
 like($mataf4_stats, qr/return \{ SNP_TotalResolvedBp=>/,
      'statistics helpers return named values instead of tab-delimited fragments');
-like($mataf4_stats, qr/ref\(\$seq_set->\{pa1\}\) eq 'ARRAY'/,
-     'sample statistics validate optional read arrays before dereferencing');
+like($mataf4_stats,
+     qr/my \$input_libraries = readLibrariesByScope\(\$seq_set, 'primary', 0, \$SmplN\).*?libraryPairs\(\$input_libraries\).*?libraryFiles\(\$input_libraries, 'single'\)/s,
+     'sample statistics derive paired and singleton flags from canonical library records');
 like($mataf4_stats, qr/\$map\{\$SmplN\}\{inputFileSizeMB\}/,
      'sample statistics use their sample argument for input size');
 like($mataf4_stats, qr/\$values\{RawInputSizeSub\}.*?inputXFileSizeMB/s,

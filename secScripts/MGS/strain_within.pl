@@ -67,6 +67,7 @@ my $pigzBin  = getProgPaths("pigz");
 #input args..
 my $GCd = "";#$ARGV[0];
 my $MGSfile = "";#$ARGV[1];
+my $clusterID = 95;
 my $geneSelFile = "";
 my $numCores = 4;#$ARGV[2];
 my $subJob=0;#if 0, is main submitting job..
@@ -150,6 +151,7 @@ checkMF();
 
 GetOptions(
 	"GCd=s"          => \$GCd,
+	"clusterID=i"    => \$clusterID,
 	"outD=s"         => \$outDpre,
 	"MGS=s"          => \$MGSfile,
 	#"geneSel=s"      => \$geneSelFile,
@@ -211,6 +213,7 @@ die "-GCd is required and must be a directory\n" unless length($GCd) && -d $GCd;
 die "Either -MGS or -outD is required\n" unless length($MGSfile) || length($outDpre);
 die "MGS file missing or empty: $MGSfile\n" if length($MGSfile) && !-s $MGSfile;
 die "-MGset must be GTDB or FMG\n" unless $useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG";
+die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterID <= 100;
 die "Invalid subjob settings\n" if $maxSubJob < 0 || $subJob < 0 || ($maxSubJob && $subJob >= $maxSubJob);
 die "Core, memory, and precompute settings must be non-negative\n"
 	if $maxCores == 0 || $selfMemGb <= 0 || $preCompCons < 0;
@@ -300,7 +303,7 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 	if ($maxSubJob && !$subJob){
 		#here needs to submit itself maxSubJob times
 		my $strain1scr = getProgPaths("MGS_strain1_scr"); #self reference
-		my $selfCmd = "$strain1scr -GCd $GCd -outD $outD -MGS $MGSfileOri -submit $doSubmit -onlySubmit 0 -reSubmit 0  -maxSubJob $maxSubJob -MGSminGenesPSmpl $MGStoolowGsThr -multiGeneSmplMax $multiGeneSmplMax -conspGeneSmplMax $conspGeneSmplMax -MGSphylo $treeFile -presortGenes $presortGenes -maxGenes $maxNGenes -MGset $useGTDBmg -redoSubmissionData 0 -deepRepair 0 -rmMSA 0 -minSNPDepth $minSNPDepth -minSNPCallQual $minSNPCallQual -forceSNPcalls 0 -preCompConsSNP $preCompCons";
+		my $selfCmd = "$strain1scr -GCd $GCd -outD $outD -MGS $MGSfileOri -clusterID $clusterID -submit $doSubmit -onlySubmit 0 -reSubmit 0  -maxSubJob $maxSubJob -MGSminGenesPSmpl $MGStoolowGsThr -multiGeneSmplMax $multiGeneSmplMax -conspGeneSmplMax $conspGeneSmplMax -MGSphylo $treeFile -presortGenes $presortGenes -maxGenes $maxNGenes -MGset $useGTDBmg -redoSubmissionData 0 -deepRepair 0 -rmMSA 0 -minSNPDepth $minSNPDepth -minSNPCallQual $minSNPCallQual -forceSNPcalls 0 -preCompConsSNP $preCompCons";
 		$selfCmd .= " -tmpD $locTmpDir1" if ($locTmpDir1 ne "");
 		$selfCmd .= " -MGSsubset $subsMGSstr" if ($subsMGSstr ne "");
 		
@@ -386,7 +389,7 @@ if (1 && $CatNotPrepped || $treeAbsent  || $deepRepair || $dirsNOTPrepped || $on
 	my $refFNA = ""; my $refFAA = ""; my $refNameL = "unknw";
 	if ($mode eq "MGS" || $mode eq "MGSall"){
 		print "Reading reference genecat genes, to create outgroup sequences\n";
-		$refFNA = "$GCd/compl.incompl.95.fna"; $refFAA = "$GCd/compl.incompl.95.prot.faa";
+		$refFNA = "$GCd/compl.incompl.$clusterID.fna"; $refFAA = "$GCd/compl.incompl.$clusterID.prot.faa";
 		$geneCatLoaded=1;$refNameL = "geneCat";
 	} elsif ($mode eq "FMG"){
 		print "reading FMG ref genes..";
@@ -837,7 +840,7 @@ sub writeLogsStep1{
 
 sub prepGene2MGS{
 	print "Preparing base strain alignments, per MGS\nThis might take a good while..\n";
-	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.95.fna.clstr.idx",0,$Gene2COG);
+	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,$Gene2COG);
 	$hr1 = {}; #my %cl2gene = %{$hr2}; 
 	#stores alt names (wihtout M4__ at end)
 	#read binning based on SpecI's 
@@ -1087,7 +1090,7 @@ sub prepRun{
 		remove_tree($scratchD) if -d $scratchD;
 		unlink $_ or die "Cannot remove stale $_: $!\n" for grep { -f $_ || -l $_ } glob("$MGSfile.srt*");
 		my $sortMGSgenes = getProgPaths("sortMGSGeneImport_scr");
-		my $cmd = "$sortMGSgenes $GCd $MGSfile $useGTDBmg $mode\n";
+		my $cmd = "$sortMGSgenes $GCd $MGSfile $useGTDBmg $mode $clusterID\n";
 		print "$cmd\n";
 		#die;
 		systemW $cmd;

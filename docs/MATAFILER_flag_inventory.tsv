@@ -193,30 +193,27 @@ geneCat.pl	0.51	Flags for functional assignment	-FuncMinAlLeng	integer	minAlLeng
 geneCat.pl	0.51	Flags for functional assignment	-FuncMinPercSbjCov	float	minPercSbjCov	0.5	stable	Minimum fraction of subject coverage for functional assignment.
 geneCat.pl	0.51	Flags for functional assignment	-FuncMinPerID	float	minPerID	25	stable	Accepted by geneCat.pl; see source/help output for detailed behaviour.
 geneCat.pl	0.51	Flags for functional assignment	-FuncMinEVal	float	minEVal	1e-8	stable	Accepted by geneCat.pl; see source/help output for detailed behaviour.
-MGS.pl	0.28	General options	-GCd	string	inD		stable	gene catalog dir
-MGS.pl	0.28	General options	-outD	string	outD		stable	defaults to $inD/Bin_SB/
-MGS.pl	0.28	General options	-tmp	string	tmpD		stable	temp dir
-MGS.pl	0.28	General options	-submit	integer	doSubmit	1	stable	1:submit jobs, 0: dry run. Default: 1
-MGS.pl	0.28	General options	-canopies	string	canopyF		stable	location of canopy clustering output file (clusters.txt)
-MGS.pl	0.28	General options	-smallCores	integer	numCore	4	stable	cores used for normal jobs (not intensive)
-MGS.pl	0.28	General options	-bottleneckCores	integer	canCore	12	stable	cores for compute intensive jobs
-MGS.pl	0.28	General options	-useRHClust	integer	useRHClust	0	deprecated/legacy	1: do hierachical clustering of MGS genes. Default:0
-MGS.pl	0.28	General options	-redoRhcl	integer	rewrRHCL	0	deprecated/legacy	rewrite R hierachical clusterings
-MGS.pl	0.28	General options	-redoCluster	integer	rewrClusterMAGs	0	stable	Accepted by MGS.pl; see source/help output for detailed behaviour.
-MGS.pl	0.28	General options	-redoDeepCan	integer	rewrDeepCan	0	deprecated/legacy	rewrite deep corraltions to Rhcl clusters
-MGS.pl	0.28	General options	-redoTax	integer	rewrTAX	0	stable	rewrite tax annotations
-MGS.pl	0.28	General options	-MGset	string	useGTDBmg	FMG	stable	GTDB or FMG, which marker genes are used? Default: GTDB
-MGS.pl	0.28	General options	-wait4stone	string	wait4stone		stable	wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later
-MGS.pl	0.28	General options	-mem	integer	memG	150	stable	memory used for intensive jobs
-MGS.pl	0.28	General options	-completeness	integer	complThre	90	stable	what qual should final MGS have at least??
-MGS.pl	0.28	General options	-contamination	integer	contThre	5	stable	contamination threshold for accepting MGS
-MGS.pl	0.28	General options	-strains	integer	doStrains	0	stable	1: calc instra species strain phylogenies. Default: 0
-MGS.pl	0.28	General options	-useCheckM2	integer	useCheckM2	0	stable	CheckM2 default qual checking of MAGs/MGS
-MGS.pl	0.28	General options	-useCheckM1	integer	useCheckM1	1	stable	CheckM default qual checking of MAGs/MGS
-MGS.pl	0.28	General options	-binSpeciesMG	integer	binSpeciesMG	2	stable	0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5
-MGS.pl	0.28	General options	-ignoreIncompleteMAGs	integer	ignoIncomplMAGs	1	stable	1: assemblies without MAG calculations are ignored. Default: 1
-MGS.pl	0.28	General options	-legacy	integer	legacyV	0	deprecated/legacy	1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0
-MGS.pl	0.28	General options	-genomesPerFamily	integer	doBinCtgsPerFam	0	stable	Accepted by MGS.pl; see source/help output for detailed behaviour.
+MGS.pl	0.32	General options	-GCd	string	inD		stable	gene catalog dir
+MGS.pl	0.32	General options	-clusterID	integer	clusterID	95	stable	gene-catalog clustering identity percentage
+MGS.pl	0.32	General options	-outD	string	outD		stable	defaults to $inD/Bin_SB/
+MGS.pl	0.32	General options	-tmp	string	tmpD		stable	temp dir
+MGS.pl	0.32	General options	-submit	integer	doSubmit	1	stable	1:submit jobs, 0: dry run. Default: 1
+MGS.pl	0.32	General options	-canopies	string	canopyF		stable	location of canopy clustering output file (clusters.txt)
+MGS.pl	0.32	General options	-smallCores	integer	numCore	4	stable	cores used for normal jobs (not intensive)
+MGS.pl	0.32	General options	-bottleneckCores	integer	canCore	12	stable	cores for compute intensive jobs
+MGS.pl	0.32	General options	-redoCluster	integer	rewrClusterMAGs	0	stable	Accepted by MGS.pl; see source/help output for detailed behaviour.
+MGS.pl	0.32	General options	-redoTax	integer	rewrTAX	0	stable	rewrite tax annotations
+MGS.pl	0.32	General options	-MGset	string	useGTDBmg	FMG	stable	GTDB or FMG, which marker genes are used? Default: GTDB
+MGS.pl	0.32	General options	-wait4stone	string	wait4stone		stable	wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later
+MGS.pl	0.32	General options	-wait4stoneTimeout	integer	wait4stoneTimeout	86400	stable	maximum wait in seconds; zero waits indefinitely
+MGS.pl	0.32	General options	-mem	integer	memG	150	stable	memory used for intensive jobs
+MGS.pl	0.32	General options	-strains	integer	doStrains	0	stable	1: calc instra species strain phylogenies. Default: 0
+MGS.pl	0.32	General options	-useCheckM2	integer	useCheckM2	0	stable	CheckM2 default qual checking of MAGs/MGS
+MGS.pl	0.32	General options	-useCheckM1	integer	useCheckM1	1	stable	CheckM default qual checking of MAGs/MGS
+MGS.pl	0.32	General options	-binSpeciesMG	integer	binSpeciesMG	2	stable	0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5
+MGS.pl	0.32	General options	-ignoreIncompleteMAGs	integer	ignoIncomplMAGs	1	stable	1: assemblies without MAG calculations are ignored. Default: 1
+MGS.pl	0.32	General options	-legacy	integer	legacyV	0	deprecated/legacy	1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0
+MGS.pl	0.32	General options	-genomesPerFamily	integer	doBinCtgsPerFam	0	stable	Accepted by MGS.pl; see source/help output for detailed behaviour.
 buildTree5.pl	5.06	General options	-genoInD	string	genoindir		stable	provide a dir with complete genomes, will extract FGMs and build tree between genomes (NT/AA flag)
 buildTree5.pl	5.06	General options	-wildcardflag	string	wildcardflag		stable	Accepted by buildTree5.pl; see source/help output for detailed behaviour.
 buildTree5.pl	5.06	General options	-fna	string	fnFna		stable	Accepted by buildTree5.pl; see source/help output for detailed behaviour.

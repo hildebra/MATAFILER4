@@ -14,7 +14,7 @@ use File::Path qw(make_path);
 use Cwd 'abs_path';
 use POSIX;
 use Getopt::Long qw( GetOptions );
-use List::Util qw(max);
+use List::Util qw(max sum);
 
 use vars qw($CONFIG_FILE);
 
@@ -24,8 +24,15 @@ use Mods::GenoMetaAss qw(readMap readMapS getDirsPerAssmblGrp checkAssmblGrp lcp
 			gzipopen fileGZe fileGZs contig_stats_coverage_complete
 			readFasta writeFasta systemW getAssemblPath  filsizeMB resetAsGrps
 			iniCleanSeqSetHR checkSeqTech is3rdGenSeqTech hasSuppRds 
-			getRawSeqsAssmGrp getCleanSeqsAssmGrp addFileLocs2AssmGrp);
-use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpades inputFmtMegahit createGapFillopt  
+			addFileLocs2AssmGrp getRawLibrariesAssmGrp getCleanLibrariesAssmGrp
+			parseSupportReads discoverReadFiles);
+use Mods::ReadLibrary qw(
+	newReadLibrary cloneReadLibraries readLibrariesFromArrays
+	ensureSeqSetLibraries ensureCleanSeqSetLibraries
+	syncSeqSetLegacy syncCleanSeqSetLegacy replaceScopeLibraries
+	readLibrariesByScope libraryFiles libraryPairs libraryTechnology
+);
+use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpadesLibraries inputFmtMegahitLibraries createGapFillopt
 			buildMapperIdx mapperDBbuilt decideMapper  checkMapsDoneSH greaterComputeSpace);
 use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
@@ -1021,8 +1028,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	$sdmjNamesAll .= ";".$sdmjN;
 	
 	#TODO
-	push(@allFilter1,@{${$cleanSeqSetHR}{arp1}});
-	push(@allFilter2,@{${$cleanSeqSetHR}{arp2}});
+	my $primaryCleanLibraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	push(@allFilter1,@{libraryFiles($primaryCleanLibraries, 'r1')});
+	push(@allFilter2,@{libraryFiles($primaryCleanLibraries, 'r2')});
 	#die;
 	if ($MFconfig{unpackZip}){
 		print "next due to onlyFilterZip 1\n";MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
@@ -1074,7 +1082,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#non pareil (estimate community size etc)
 	if ($nonPareilFlag){
 		my $globalNPD = $baseOut."NonPareil/";
-		nopareil(${$cleanSeqSetHR}{arp1},$nonParDir, $globalNPD, $SmplName,$primaryDep);
+		nopareil(libraryFiles($primaryCleanLibraries, 'r1'),$nonParDir, $globalNPD, $SmplName,$primaryDep);
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps);next;
 	}
@@ -1215,7 +1223,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,mappingStarted =>1,
 						glbTmp => $nodeSpTmpD."_mapWork/",glbMapDir => $finalMapDir,mapSupport => 0,
-						readTec => ${$cleanSeqSetHR}{readTec}, submit => 1,submNow => $mapNow,
+						libraries => getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,0,$SmplName),
+						readTec => '', submit => 1,submNow => $mapNow,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam,
 						# Primary short- and long-read assemblies always receive a breakpoint report.
 						breakpointOutput => "$finalMapDir/$SmplName-smd.bam.breakpoints.tsv.gz",
@@ -1242,6 +1251,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,
 						glbTmp => $nodeSpTmpD."_mapWorkSupp/",glbMapDir => $finalMapDir, mapSupport => 1,
+						libraries => getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,1,$SmplName),
 						readTec => "", submit => 1,submNow => $mapNow,mappingStarted=>1,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam);
 		# primary mapping of support reads (onto de novo assembly)
@@ -1667,8 +1677,10 @@ sub postprocess{
 
 sub spaceInAssGrp{
 #determine how much space is used in total assembly group..
-	my ($curSmplX) = @_;
-	my $inputSizeloc = 0;
+	my ($curSmplX,$includeSupport) = @_;
+	$includeSupport ||= 0;
+	my $primaryInputSize = 0;
+	my $supportInputSize = 0;
 	#print "map: $map{$curSmplX}";
 	my @curMems = (); 
 	@curMems = @{$map{$curSmplX}{AG_members}} if (defined $map{$curSmplX}{AG_members});
@@ -1676,16 +1688,27 @@ sub spaceInAssGrp{
 	foreach my $memsSmpls (@curMems){
 		#print "$memsSmpls $map{$curSmpl}{inputFileSizeMB}{$memsSmpls}\n";
 		if (exists($map{$memsSmpls}{inputFileSizeMB})){
-			$inputSizeloc += $map{$memsSmpls}{inputFileSizeMB} ;
+			$primaryInputSize += $map{$memsSmpls}{inputFileSizeMB} ;
 		} else {
 			#print "Warning: file size estimation not registered for $memsSmpls\n";
 			$missedSmpls++;
 		}
+		$supportInputSize += $map{$memsSmpls}{inputXFileSizeMB}
+			if ($includeSupport && exists($map{$memsSmpls}{inputXFileSizeMB}));
 	}
-	$inputSizeloc += $map{$curSmplX}{inputFileSizeMB} if (!@curMems);
+	if (!@curMems){
+		$primaryInputSize += $map{$curSmplX}{inputFileSizeMB};
+		$supportInputSize += $map{$curSmplX}{inputXFileSizeMB}
+			if ($includeSupport && exists($map{$curSmplX}{inputXFileSizeMB}));
+	}
 	#estimate to account for missed samples..
-	if ($missedSmpls){$inputSizeloc *= (($totalSmpls-$missedSmpls)/$totalSmpls);} 
-	return $inputSizeloc;
+	if ($missedSmpls){
+		my $knownSmpls = $totalSmpls - $missedSmpls;
+		die "Cannot estimate assembly-group input size: no member has a registered input size\n"
+			if ($knownSmpls == 0);
+		$primaryInputSize *= $totalSmpls / $knownSmpls;
+	}
+	return $primaryInputSize + $supportInputSize;
 }
 
 sub rmEmptySmpls{
@@ -1780,13 +1803,17 @@ sub submitGenomeBinner{
 		$postCmd .= "$mb2Qual -asm $metaGassembly -binF $MetaBat2out -tmpD $nodeSpTmpD2 -ncore $MB2coresL -checkM2 $MFopt{useCheckM2} -checkM1 $MFopt{useCheckM1} -binner $MFopt{DoMetaBat2} " ;
 		#only needed for pilea.. deactivate if not needed..
 		
-		my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$cAssGrp,0);
+		my $binLibraries = getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,0);
+		my $binPairs = libraryPairs($binLibraries);
+		my @par1 = map { $_->{files}{r1} } @{$binPairs};
+		my @par2 = map { $_->{files}{r2} } @{$binPairs};
+		my @parS = @{libraryFiles($binLibraries, 'single')};
 		# These inputs are optional (and currently only reserved for PileA).
 		# Never emit a bare option: Getopt::Long treats the following option or
 		# newline as its missing value and aborts the complete Bin job.
-		$postCmd .= " -read1 ".join(",",@$par1) if (@$par1);
-		$postCmd .= " -read2 ".join(",",@$par2) if (@$par2);
-		$postCmd .= " -readS ".join(",",@$parS) if (@$parS);
+		$postCmd .= " -read1 ".join(",",@par1) if (@par1);
+		$postCmd .= " -read2 ".join(",",@par2) if (@par2);
+		$postCmd .= " -readS ".join(",",@parS) if (@parS);
 		$postCmd .= "\n";
 	} 
 	$postCmd .= "\nrm -rf $nodeSpTmpD2\n";
@@ -2218,7 +2245,7 @@ sub riboSummary{
 sub detectRibo(){
 	my ( $tmpP,$outP,$jobd,$SMPN,$glbTmpDDB) = @_;
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $ar1 = ${$cleanSeqSetHR}{arp1}; my $ar2 = ${$cleanSeqSetHR}{arp2}; my $sa1 = ${$cleanSeqSetHR}{singAr}; 
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
 	#print "DEP: $jobd\n";
 	my $numCore = 12;
 	my $numCore2 = 12;
@@ -2228,7 +2255,10 @@ sub detectRibo(){
 	
 	
 	
-	my @re1 = @{$ar1}; my @re2 = @{$ar2}; my @singl = @{$sa1};
+	my $pairs = libraryPairs($libraries);
+	my @re1 = map { $_->{files}{r1} } @{$pairs};
+	my @re2 = map { $_->{files}{r2} } @{$pairs};
+	my @singl = @{libraryFiles($libraries, 'single')};
 	#print "ri"; 
 	if (@re1 > 1 || @re2 > 1){
 		#print"\nWARNING::\nOnly the first read file will be searched for ribosomes\n";
@@ -2533,29 +2563,21 @@ sub prepDiamondDB($ $ $ $){#takes care of copying the respective DB over to scra
 }
 
 
-sub getRdLibs($ $ $ $){
-	my ($ar1,$ar2,$sa1,$mrgHshHR) = @_;
-	my @reads1 = @{$ar1}; my @reads2 = @{$ar2}; my @singlRds = @{$sa1};
-	my %mrgHsh = %{$mrgHshHR};
-	my $mrgMode = 0;
-	$mrgMode =1 if (exists ($mrgHsh{mrg}) && $mrgHsh{mrg} ne "");
-	my $useLibArrays = 3;
-	if ($mrgMode) {$useLibArrays=4;}
-	my %ret;
-	#print "mrgMode : : $mrgMode $useLibArrays \n@reads1\nYTY\n";
-	for (my $kk=0;$kk<$useLibArrays;$kk++){
-		my @rds = @singlRds;
-		if ($mrgMode){
-			if ($kk==1){@rds = $mrgHsh{pair2};}
-			if ($kk==2){@rds = $mrgHsh{pair1};}
-		} else {
-			if ($kk==1){@rds = @reads2;}
-			if ($kk==2){@rds = @reads1;}
-		}
-		if ($kk==3){@rds = $mrgHsh{mrg};}
-		$ret{$kk} = \@rds;
-	}
-	return %ret;
+sub getRdLibraries {
+	my ($libraries, $mergedLibrary) = @_;
+	my $pairs = libraryPairs($libraries);
+	my @reads1 = map { $_->{files}{r1} } @{$pairs};
+	my @reads2 = map { $_->{files}{r2} } @{$pairs};
+	my @single = @{libraryFiles($libraries, 'single')};
+	my $mergeMode = ref($mergedLibrary) eq 'HASH' && ($mergedLibrary->{files}{single} || '') ne '';
+	my %result;
+	$result{0} = \@single if @single;
+	my $usedRead2 = $mergeMode ? [$mergedLibrary->{files}{r2}] : \@reads2;
+	my $usedRead1 = $mergeMode ? [$mergedLibrary->{files}{r1}] : \@reads1;
+	$result{1} = $usedRead2 if grep { defined($_) && $_ ne '' } @{$usedRead2};
+	$result{2} = $usedRead1 if grep { defined($_) && $_ ne '' } @{$usedRead1};
+	$result{3} = [$mergedLibrary->{files}{single}] if ($mergeMode);
+	return %result;
 }
 
 sub isLastSampleInAssembly{
@@ -2975,19 +2997,19 @@ sub runOrthoPlacement(){
 	my ($outD,$tmpP,$jdep) = @_;
 	die "runOrthoPlacement no longer active\n";
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $ar1 = ${$cleanSeqSetHR}{arp1}; my $ar2 = ${$cleanSeqSetHR}{arp2}; my $sa1 = ${$cleanSeqSetHR}{singAr}; 
-	my $mrgHshHR = ${$cleanSeqSetHR}{mrgHshHR};
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	my $mergedLibrary = $cleanSeqSetHR->{merged_library};
 	
 	my $sdmBin = getProgPaths("sdm");#"/g/bork3/home/hildebra/dev/C++/sdm/./sdm";
 	my $fna2faaBin = getProgPaths("fna2faa");
 	system "mkdir -p $outD $tmpP" unless (-d $outD && -d $tmpP);
-	my %RdLibs = getRdLibs($ar1,$ar2,$sa1,$mrgHshHR);
+	my %RdLibs = getRdLibraries($libraries,$mergedLibrary);
 	my $numCore=22;
 	my $scrP = "";my $cmd="";
 	$cmd .= "mkdir -p $tmpP\n";
 	#my $tmpF = ${$RdLibs{$kk}}[0];
 	system "rm -f $tmpP/6fr.fna";
-	for (my $kk=0;$kk<scalar(keys(%RdLibs));$kk++){
+	foreach my $kk (sort {$a <=> $b} keys %RdLibs){
 		my @rds = @{$RdLibs{$kk}};
 		$scrP = $rds[0] if ($scrP eq "");
 		foreach my $fnaI (@rds){
@@ -3064,16 +3086,15 @@ sub runOrthoPlacement(){
 sub runDiamond(){
 	my ($outD,$CLrefDBD,$tmpP,$jdep,$curDB_o) = @_;
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $ar1 = ${$cleanSeqSetHR}{arp1}; my $ar2 = ${$cleanSeqSetHR}{arp2}; my $sa1 = ${$cleanSeqSetHR}{singAr}; my $mrgHshHR = ${$cleanSeqSetHR}{mrgHshHR};
-	
-	#die "runDiamond:: $mrgHshHR\n";
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	my $mergedLibrary = $cleanSeqSetHR->{merged_library};
 	
 	my $secCogBin = getProgPaths("secCogBin_scr");
 	my $diaBin = getProgPaths("diamond");
 	my $mmseqs2Bin = getProgPaths("mmseqs2");
 	my $searchMode = 1;
 	
-	my %RdLibs = getRdLibs($ar1,$ar2,$sa1,$mrgHshHR);
+	my %RdLibs = getRdLibraries($libraries,$mergedLibrary);
 	
 	die "No reads found for sample $outD in runDiamond sub\n" if (scalar(keys(%RdLibs)) == 0);
 	
@@ -3102,7 +3123,7 @@ sub runDiamond(){
 		#run actual diamond
 		my @collect = (); my @collectSingl=();
 		my $cmd ="mkdir -p $tmpP\n";
-		for (my $kk=0;$kk<scalar(keys(%RdLibs));$kk++){
+		foreach my $kk (sort {$a <=> $b} keys %RdLibs){
 			my $rdsUsed = 0;
 			my @rds = @{$RdLibs{$kk}};
 			for (my $ii=0;$ii<@rds;$ii++){
@@ -3131,8 +3152,12 @@ sub runDiamond(){
 		my $outgz = "$out.srt.gz";
 		#die "$outgz\n";
 		#unzip, sort, zip
-		$cmd .= "zcat ".join( " ",@collect) ." | sort -t\$'\\t' -k1 -T $tmpP | $pigzBin --stdout -p $ncore > $outgz \n";
-		$cmd .= "rm -f ". join( " ",@collect) . "\n";
+		if (@collect) {
+			$cmd .= "zcat ".join( " ",@collect) ." | sort -t\$'\\t' -k1 -T $tmpP | $pigzBin --stdout -p $ncore > $outgz \n";
+			$cmd .= "rm -f ". join( " ",@collect) . "\n";
+		} else {
+			$cmd .= "$pigzBin -c </dev/null > $outgz\n";
+		}
 		if (@collectSingl >= 1){
 			#append on gzip, can be done with gzip
 			$cmd .= "cat ".join( " ",@collectSingl) ." >> $outgz\nrm -f " . join( " ",@collectSingl) ."\n"; #$out.srt
@@ -3285,24 +3310,14 @@ sub checkDrives{
 }
 
 # $sdmjN = cleanInput($cfp1ar,$cfp2ar,$sdmjN,$smplTmpDir);
- sub cleanInput( $ $ $){
+sub cleanInput( $ $ $){
 	my ($sdmjN,$saveD) = @_;
-	my %seqSet = %{$map{$curSmpl}{seqSet}};
-	
-	my @c1 = @{$seqSet{"pa1"}}; my @c2 = @{$seqSet{"pa2"}};
+	my $libraries = ensureSeqSetLibraries($map{$curSmpl}{seqSet}, $curSmpl);
 	my $cmd = "";
-	for (my $i=0;$i<@c1;$i++){
-		if ($c1[$i] =~ m/$saveD/){
-			$cmd .= "rm -f $c1[$i] $c2[$i]\n" if (-e $c1[$i] || -e $c2[$i]);
-		} else {
-			#die "$c1[$i] =~ m/$saveD/\n";
-		}
-	}
-	my @cs = @{$seqSet{"pas"}};
-	for (my $i=0;$i<@cs;$i++){
-		if ($c1[$i] =~ m/$saveD/){
-			$cmd .= "rm -f $cs[$i] \n" if (-e $cs[$i] );
-		} 
+	foreach my $library (@{$libraries}) {
+		my @files = grep { defined($_) && $_ ne '' } @{$library->{files}}{qw(r1 r2 single)};
+		my @temporary = grep { /\Q$saveD\E/ && -e $_ } @files;
+		$cmd .= "rm -f ".join(" ", @temporary)."\n" if (@temporary);
 	}
 
 	#die $cmd."\n";
@@ -3321,9 +3336,9 @@ sub checkDrives{
  
 #Gap Filler to refine scaffolds
 sub GapFillCtgs{
-	my($ar1,$ar2,$scaffolds,$GFdir_a,$dep,$xtrTag) = @_; #.= "_GFI1";
+	my($libraries,$scaffolds,$GFdir_a,$dep,$xtrTag) = @_; #.= "_GFI1";
 	my $GFbin = getProgPaths("gapfiller");#"perl /g/bork5/hildebra/bin/GapFiller/GapFiller_n.pl";
-	my @pa1 = @{$ar1}; my @pa2 = @{$ar2};
+	my $pairs = libraryPairs($libraries);
 	my @inserts;
 	my $prefi = "GF";
 	my $numCore = 16;
@@ -3332,9 +3347,10 @@ sub GapFillCtgs{
 	#system("mkdir -p $GFdir_a$prefi");
 	my $GFlib = ($GFdir_a."GFlib.opt");
 	my @libFiles;
-	for (my $i=0;$i<@pa1;$i++){
-		push(@libFiles, ($pa1[$i].",".$pa2[$i]));
-		push(@inserts,450);#default value for our hiSeq runs..
+	for (my $i=0;$i<@{$pairs};$i++){
+		push(@libFiles, ($pairs->[$i]{files}{r1}.",".$pairs->[$i]{files}{r2}));
+		my $metadata = $pairs->[$i]{metadata} || {};
+		push(@inserts, $metadata->{insert_size} || 450);
 	}
 	createGapFillopt($GFlib,\@libFiles,\@inserts);
 #GF round 1
@@ -3355,13 +3371,13 @@ sub GapFillCtgs{
 
 #scaffolding via mate pairs
 sub scaffoldCtgs{
-	my ($AsgHR,$ASG, $xar1,$xar2, $refCtgs, $tmpD1,$outD,$dep,$Ncore,$smplName,$spadesRef,$xtraTag) = @_;
-	my ($ar1,$ar2,$ars,$liar,$rear) = getRawSeqsAssmGrp($AsgHR,$ASG,0);
+	my ($AsgHR,$ASG, $externalLibraries, $refCtgs, $tmpD1,$outD,$dep,$Ncore,$smplName,$spadesRef,$xtraTag) = @_;
+	my $libraries = getRawLibrariesAssmGrp($AsgHR,$ASG,0);
+	my $pairs = libraryPairs($libraries);
 	my $bwt2Bin = getProgPaths("bwt2");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
 	my $besstBin = getProgPaths("BESST");#"/g/bork3/home/hildebra/bin/BESST/./runBESST";
-	my @pa1 = @{$ar1}; my @pa2 = @{$ar2}; my @libs = @{$liar};
-	my @xpa1 = @{$xar1}; my @xpa2 = @{$xar2};
-	return ("",$dep) if (@pa1 ==0 );
+	my $externalPairs = libraryPairs($externalLibraries || []);
+	return ("",$dep) if (@{$pairs} == 0 );
 	my $tmpD = $tmpD1."/scaff/";
 	my $bwtIdx = $refCtgs.$MFcontstants{bwt2IdxFileSuffix}; my $cmdDB="";my $chkFile = "";
 	my $clnCmd = ""; my $spadesDir = ""; my $spadFakeDir = "";
@@ -3384,28 +3400,34 @@ sub scaffoldCtgs{
 	my $algCmd = "$clnCmd\n$cmdDB\n";
 	$algCmd .= "mkdir -p $tmpD\n";
 	my @bams; my $cnt=0; my @insSiz; my @orientations;
-	for (my $i=0;$i<@pa1;$i++){
-		next unless ($libs[$i] =~ m/mate/i);
+	for (my $i=0;$i<@{$pairs};$i++){
+		next unless (($pairs->[$i]{label} || '') =~ m/mate/i);
 		#push @rd1,$rds[$i];push @rd2,$rds[$i+1];
 		my $tmpOut = "$tmpD/tmpMateAlign$cnt.bam";
 		my $tmpBAM = "$tmpD/tmpMateAlign$cnt.srt.bam";
-		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx -X $MFconfig{mateInsertLength} -1 $pa1[$i] -2 $pa2[$i] | $smtBin view -b -F 4 - > $tmpOut\n";
+		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx -X $MFconfig{mateInsertLength} -1 $pairs->[$i]{files}{r1} -2 $pairs->[$i]{files}{r2} | $smtBin view -b -F 4 - > $tmpOut\n";
 		$algCmd .= "$smtBin sort -@ $Ncore -T kk -O bam -o $tmpBAM $tmpOut; $smtBin index $tmpBAM\n";
 		#$algCmd .= "$novosrtBin --ram 50G -o $tmpBAM -i $tmpOut \n";
 		$algCmd .= "rm $tmpOut\n\n";
-		push(@bams,$tmpBAM); push(@insSiz,10000);push(@orientations,"fr");
+		my $metadata = $pairs->[$i]{metadata} || {};
+		push(@bams,$tmpBAM);
+		push(@insSiz,$metadata->{insert_size} || 10000);
+		push(@orientations,$metadata->{orientation} || "fr");
 		$cnt++;
 		#print "sc  mat\n";
 	}
-	for (my $i=0;$i<@xpa1;$i++){#assumes paired end reads
+	for (my $i=0;$i<@{$externalPairs};$i++){
 		#push @rd1,$rds[$i];push @rd2,$rds[$i+1];
 		my $tmpOut = "$tmpD/tmpMateAlign$cnt.bam";
 		my $tmpBAM = "$tmpD/tmpMateAlign$cnt.srt.bam";
-		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx  -1 $xpa1[$i] -2 $xpa2[$i] | $smtBin view -b -F 4 - > $tmpOut\n";
+		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx  -1 $externalPairs->[$i]{files}{r1} -2 $externalPairs->[$i]{files}{r2} | $smtBin view -b -F 4 - > $tmpOut\n";
 		$algCmd .= "$smtBin sort -@ $Ncore -T kk -O bam -o $tmpBAM $tmpOut; $smtBin index $tmpBAM\n";
 		#$algCmd .= "$novosrtBin --ram 50G -o $tmpBAM -i $tmpOut \n";
 		$algCmd .= "rm $tmpOut\n\n";
-		push(@bams,$tmpBAM);push(@insSiz,500);push(@orientations,"fr");
+		my $metadata = $externalPairs->[$i]{metadata} || {};
+		push(@bams,$tmpBAM);
+		push(@insSiz,$metadata->{insert_size} || 500);
+		push(@orientations,$metadata->{orientation} || "fr");
 		$cnt++;
 		#print "sc  mat\n";
 	}
@@ -3464,13 +3486,13 @@ sub scaffoldCtgs{
 	foreach my $matp (@mat){
 		system "mkdir -p $mateD" unless (-d $mateD);
 		my @mateX = split /,/,$matp;
-		push(@sarPre,"$mateD/mate${mateC}.se.fastq.gz");
+		push(@sarPre,"$mateD/mate.${mateC}.se.fastq.gz");
 		push(@mates,"$mateD/mate.${mateC}_R1.unknown.fastq.gz","$mateD/mate.${mateC}_R2.unknown.fastq.gz","$mateD/mate.${mateC}_R1.mp.fastq.gz","$mateD/mate.${mateC}_R2.mp.fastq.gz");
 		next if ( -e "$mateD/matesDone.sto");
 		#--rf keeps reads in rf; --joinreads joins pe
 		$cmd .= "$nxtrimBin --ignorePF --separate -1 $mateX[0] -2 $mateX[1] -O $mateD/mate.$mateC\n";
 		#$nxtrimBin --stdout-mp -1 $rd1 -2 $rd2 | $bwaBin mem $refCtgs -p - > out.sam
-		$ifastasPre .= ";$mateD/mate.${mateC}_R1.pe.fastq.gz,$mateD/mate.${mateC}_R1.pe.fastq.gz";
+		$ifastasPre .= ";$mateD/mate.${mateC}_R1.pe.fastq.gz,$mateD/mate.${mateC}_R2.pe.fastq.gz";
 		$mateC++;
 	}
 	#die "@mates SDS\n";
@@ -3500,11 +3522,11 @@ sub scaffoldCtgs{
 	system "mkdir -p $mateD" unless (-d $mateD);
 	#my @mateX = split /,/,$matp;
 	#--rf keeps reads in rf; --joinreads joins pe
-	$cmd .= "$nxtrimBin --ignorePF --separate -1 $pa1 -2 $pa1 -O $mateD/mate.$mateC\n";
+	$cmd .= "$nxtrimBin --ignorePF --separate -1 $pa1 -2 $pa2 -O $mateD/mate.$mateC\n";
 	$cmd .= "rm -f $pa1 $pa2\n";
 	#$nxtrimBin --stdout-mp -1 $rd1 -2 $rd2 | $bwaBin mem $refCtgs -p - > out.sam
-	$ret{pe1} = "$mateD/mate.${mateC}_R1.pe.fastq.gz"; $ret{pe2} = "$mateD/mate.${mateC}_R1.pe.fastq.gz";
-	$ret{se} =  "$mateD/mate${mateC}.se.fastq.gz";
+	$ret{pe1} = "$mateD/mate.${mateC}_R1.pe.fastq.gz"; $ret{pe2} = "$mateD/mate.${mateC}_R2.pe.fastq.gz";
+	$ret{se} =  "$mateD/mate.${mateC}.se.fastq.gz";
 	$ret{un1} = "$mateD/mate.${mateC}_R1.unknown.fastq.gz"; $ret{un2} = "$mateD/mate.${mateC}_R2.unknown.fastq.gz";
 	$ret{mp1} = "$mateD/mate.${mateC}_R1.mp.fastq.gz"; $ret{mp2} = "$mateD/mate.${mateC}_R2.mp.fastq.gz";
 	$mateC++;
@@ -3600,22 +3622,21 @@ sub mergeReads(){
 	my ($jdep,$outdir,$doMerge,$runThis) = @_;
 
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $arp1 = ${$cleanSeqSetHR}{arp1}; my $arp2 = ${$cleanSeqSetHR}{arp2}; 
+	my $pairs = libraryPairs(readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl));
 
 	my $flashBin = getProgPaths("flash");
 	my $numCores = 8;
 	my $outT = "sdmCln";
 	my %ret = (mrg => "", pair1 => "", pair2 => "");
-	if (!exists(${$cleanSeqSetHR}{mrgHshHR} )) {${$cleanSeqSetHR}{mrgHshHR} = {};}
 	#print "XSADS\n!$doMerge || !$MFconfig{readsRpairs} || !$runThis\n";
-	if (!$doMerge || !$MFconfig{readsRpairs} || @{$arp2} == 0 || !$runThis){return ("");}
+	if (!$doMerge || !$MFconfig{readsRpairs} || @{$pairs} == 0 || !$runThis){return ("");}
 	#print "XSADS1\n";
 	#if (@{$arp1} > 1 ){die "Array with reads provided to merging routine is too large!\n@{$arp1}\n";}
 	my $mergCmd  = "";
-	for (my $i=0; $i<@{$arp1};$i++){
+	for (my $i=0; $i<@{$pairs};$i++){
 		my $outTL = $outT;
 		$outTL .= ".$i" if ($i > 0);
-		$mergCmd .= "$flashBin -M 250 -z -o $outT -d $outdir -t $numCores ${$arp1}[0] ${$arp2}[0]\n";
+		$mergCmd .= "$flashBin -M 250 -z -o $outTL -d $outdir -t $numCores $pairs->[$i]{files}{r1} $pairs->[$i]{files}{r2}\n";
 		if ($i > 0){
 			$mergCmd .= "cat $outTL.extendedFrags.fastq.gz >> $outT.extendedFrags.fastq.gz;cat $outTL.notCombined_2.fastq.gz >> $outT.notCombined_2.fastq.gz; ";
 			$mergCmd .= "cat $outTL.notCombined_1.fastq.gz >> $outT.notCombined_1.fastq.gz;\n";
@@ -3639,7 +3660,13 @@ sub mergeReads(){
 	$ret{pair1} = "$outdir/$outT.notCombined_1.fastq.gz";
 	$ret{pair2} = "$outdir/$outT.notCombined_2.fastq.gz";
 	
-	${$cleanSeqSetHR}{mrgHshHR} = \%ret;
+	$cleanSeqSetHR->{merged_library} = newReadLibrary(
+		id => "$curSmpl:primary:merged", sample => $curSmpl, scope => 'primary',
+		technology => libraryTechnology($pairs, "merged reads for $curSmpl", 1),
+		is_long => 0, label => 'merged', phase => 'merged',
+		files => {r1 => $ret{pair1}, r2 => $ret{pair2}, single => $ret{mrg}, bam => ''},
+	);
+	syncCleanSeqSetLegacy($cleanSeqSetHR);
 	$map{$curSmpl}{cleanSeqSet} = $cleanSeqSetHR;
 
 	
@@ -3718,7 +3745,7 @@ sub sdmOptSet{
 	} elsif ($curSTech eq "AVITI"){ $curSDMoptSingl = getProgPaths("baseSDMoptAVITI"); 
 	} elsif ($curSTech eq "proto"){ $curSDMoptSingl = getProgPaths("baseSDMoptProto"); 
 	} elsif ($curSTech eq "PB"){ $curSDMoptSingl = getProgPaths("baseSDMoptPacBio"); 
-	} elsif ($curReadTec eq "ONT"){ $curSDMopt = getProgPaths("baseSDMoptONT"); 
+	} elsif ($curSTech eq "ONT"){ $curSDMoptSingl = getProgPaths("baseSDMoptONT");
 	} elsif ($is3rdGen){print "Unknown 3rd generational seq tech: $curReadTec\n";}
 	
 	if ($samplReadLength != 0 && !$is3rdGen){
@@ -3737,188 +3764,121 @@ sub sdmOptSet{
 
 sub sdmClean(){
 	my ($curOutDir,$finD,$jobd,$runThis, $useXtras ) = @_;
-	#create ifasta path
-	#die "cllll\n";
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	#my $seqSetHR = $map{$curSmpl}{seqSet};
 	die "sdmClean::Could not find seqSet for $curSmpl \n" if (!exists($map{$curSmpl}{seqSet}));
-	my %seqSet = %{$map{$curSmpl}{seqSet}};	
-	my ($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"pa1"},$seqSet{"pa2"},$seqSet{"pas"},$seqSet{"libInfo"},$seqSet{"seqTech"});
+	my $seqSet = $map{$curSmpl}{seqSet};
+	my $scope = $useXtras ? 'support' : 'primary';
+	my $libraries = readLibrariesByScope($seqSet, $scope, 0, $curSmpl);
+	return $jobd unless @{$libraries};
+
 	my $samplReadLength = 0;
-	$samplReadLength = $seqSet{"samplReadLength"} if (defined($seqSet{"samplReadLength"}));
-	#my ($ar1X,$ar2X,$arsX,$libInfoArX) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"})
+	$samplReadLength = $seqSet->{samplReadLength} if (defined($seqSet->{samplReadLength}));
 	if ($useXtras){
-		#if useXtras flag set, only consider "xtra" defined input reads (eg scaffoling reads, 3rd gen in supplement of main reads etc)
-		($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"},$seqSet{"seqTechX"});
-		$samplReadLength = $seqSet{"samplReadLengthX"};
-		if (!@{$ar1} && !@{$ars}) { #nope, no additional reads are requested..
-			return ($jobd);
-		}
+		$samplReadLength = $seqSet->{samplReadLengthX} || 0;
 	}
+
 	my $sdmBin = getProgPaths("sdm");# sdm program from LotuS2 pipeline
 	my $comprCores=$MFopt{sdmCores};
-	if (@{$ar1} == 0 && @{$ars}==0){return ($jobd);}#die "Empty array to sdmClean given\n";}
-	my $ifastasPre="";my $ifastasPreS=""; my $singlReadMode=0; my $pairReadMode=0;
-	if (@{$ar1} != 0){
-		$ifastasPre = ${$ar1}[0].",".${$ar2}[0]; $pairReadMode=1;
-		for (my $i=1;$i<@{$ar1};$i++){if ($i>0){$ifastasPre .= ";".${$ar1}[$i].",".${$ar2}[$i];}}
-		#die "${$ar1}[0]\n";
-	} 
-	if (@{$ars} > 0)	{
-		$ifastasPreS = ${$ars}[0];
-		for (my $i=1;$i<@{$ars};$i++){if ($i>0){$ifastasPreS .= ";".${$ars}[$i];}}
-		$singlReadMode=1;
-		
-	}
-	
-	my $curReadTec = $map{$curSmpl}{SeqTech};#getReadTechInMap();
-	my $curSTech = $map{$curSmpl}{SeqTechSingl};#getReadTechInMapSingl($curReadTec);
-	if ($seqTec ne ""){#override defaults from map
-		$curReadTec = $seqTec; $curSTech = $seqTec;
-	} 
-	checkSeqTech($curReadTec, "MG-TK.pl::sdmClean");
-	my $is3rdGen = is3rdGenSeqTech($curReadTec);
-
-	
-	my ($sdmO,$sdmS) = sdmOptSet($curSmpl,$samplReadLength, $curReadTec, $curSTech );
-	#print "curReadTec :: $curReadTec $is3rdGen\n$sdmO $sdmS\n";
-	
-	if (!$singlReadMode && !$pairReadMode){
-		die "Couldn't find any valid input files (sdmClean)\n";
-	}
-	#die "$pairReadMode\n$singlReadMode\n";
+	my $fEnd = $MFopt{gzipSDMOut} ? 'fq.gz' : 'fq';
+	my $baseFname = $useXtras ? 'filtered.suppl' : 'filtered';
+	my $logStem = $useXtras ? 'filterSuppl' : 'filter';
 	my $stone = "$finD/filterDone.stone";
-	if (!-e "$curOutDir/input_fil.txt" ){
-		open O,">$curOutDir/input_fil.txt"; print O $ifastasPre; close O;
-	}
-
-	#system("mkdir -p $finD");
-	my $cmd = "";
-	#$cmd .= "mkdir -p $tmpD\n" unless ($tmpD eq "");
-	my $mateD = $finD."/mateCln/";
-	my ($ifastas, $mi_ifastas, $singlIfas, $matAr, $jdep) = get_ifa_mifa($ifastasPre,$ifastasPreS,$libInfoAr,$mateD,0,$jobd,$singlReadMode);
-	$jobd = $jdep; #replaces old dep
-	#die "$ifastas\n";
-	my ($ar1x,$ar2x,$sar) = get_sdm_outf($ifastas, $mi_ifastas,$finD,$singlReadMode,$pairReadMode, $useXtras);
-	
-	#push(@{$sar},@{$singlAddAr});
-	my @ret1=@{$ar1x};my @ret2=@{$ar2x};my @sret=@{$sar};
-	$cmd .= "mkdir -p $finD\n" unless ($finD eq "");
-	$cmd .= "rm -f $stone  $sret[0]\n"; #sret needs to be removed, as I concat later onto it..
-	$cmd .= "rm -f $sret[1]\n" if (@sret > 1);
+	my $cmd = "mkdir -p $finD\nrm -f $stone\n";
 	$cmd .= "mkdir -p $logDir/sdm/\n";
-	
-	
-	#die "$mi_ifastas\n$ifastas XX\n@ret1\n@sret\n";
-	my $ofiles = "";
-	my $mi_ofiles = "";
-	#system("mkdir -p $logDir/sdm/") unless (-d "$logDir/sdm/");
-	my $useLocalTmp = 1;
-	#if ($tmpD eq ""){$useLocalTmp = 0;$tmpD = $finD;}
-	#my $nsdmPair = 2;
 	my $sdm_def= " -ignore_IO_errors 1 -i_qual_offset auto -binomialFilterBothPairs 1 -threads $MFopt{sdmCores} ";
 	$sdm_def .= " -XfirstReads $MFconfig{XfirstReads} " if ($MFconfig{XfirstReads} > 0);
-	$sdm_def .= " -illuminaClip 1 " if ($MFopt{trimAdapters} && $curReadTec ne "PB" && $curReadTec ne "ONT" );
 	my $sdm_Extr = "";
 	$sdm_Extr .= "-logLvsQ 1 " if ($MFopt{SDMlogQualvsLen});
-	# $ret{$curSmp}{cut5pR2}
 	my $sdm_cut = "";
 	$sdm_cut .= "-5PR1cut $map{$curSmpl}{cut5pR1} " if ($map{$curSmpl}{cut5pR1} > 0); $sdm_cut .= "-5PR2cut $map{$curSmpl}{cut5pR2} " if ($map{$curSmpl}{cut5pR2} > 0);
 	$sdm_cut .= "-XfirstReadsRead $map{$curSmpl}{firstXrdsRd} " if ($map{$curSmpl}{firstXrdsRd} > 0);
 	$sdm_cut .= "-XfirstReadsWritten $map{$curSmpl}{firstXrdsWr} " if ($map{$curSmpl}{firstXrdsWr} > 0);
-	
-	my $catCmd = "cat ";
-	#$catCmd = "$pigzBin -p $comprCores -c " if ($MFopt{gzipSDMOut});
-	if ($pairReadMode){
-		$ofiles = $ret1[0].",".$ret2[0];# $finD."/filtered.1.fq,".$finD."/filtered.2.fq";
-		$cmd .= "$sdmBin -i \"$ifastas\" -o_fastq $ofiles -options $sdmO -paired 2 $sdm_Extr -log $logDir/sdm/filter.log $sdm_def $sdm_cut\n\n";
-		my $tmpTar = "$ret1[0]";
-		if ($MFopt{gzipSDMOut}){$tmpTar =~ s/\.\d\.fq\.gz/\.\*\.singl\.fq\.gz/g ;
-		} else {$tmpTar =~ s/\.\d\.fq/\.\*\.singl\.fq/g ;}
-		#ls /path/to/your/files* 1> /dev/null 2>&1; 
-		my $cmdSA = "if ls $tmpTar 1> /dev/null 2>&1; then $catCmd $tmpTar ";
-		$cmd .= $cmdSA . ">>  $sret[0]; \n" ;
-		$cmd .= "rm -f $tmpTar\nfi\n";
-	}
-	if ($singlReadMode){
-		my $tmpO = $sret[0];$tmpO =~ s/(.*)\//$1\/tmp\./;
-		#quick fix for sdm problems with single fq out
-		if (1){	$catCmd = "$pigzBin -f -p $comprCores -c "; $tmpO =~ s/\.fq\.gz/\.fq/ ;}
-		#die $tmpO."\n";
-		$cmd .= "$sdmBin -i \"$singlIfas\" -o_fastq $tmpO -options $sdmS $sdm_Extr -paired 1  -log $logDir/sdm/filterS.log $sdm_def $sdm_cut\n\n";
-		if ($pairReadMode){
-			$cmd .= "$catCmd $tmpO >>  $sret[0]\nrm $tmpO\n" ;
-		} else {
-			if ($tmpO =~ m/\.gz$/){
-			$cmd .= "mv $tmpO $sret[0]\n";
-			} else { 
-				$cmd .= "$catCmd $tmpO >>  $sret[0]\nrm $tmpO\n" ;
-			}
-		}		
-	}
-	if ($mi_ifastas ne ""){ #miSeq specific filtering
-		$mi_ofiles =  $ret1[1].",".$ret2[1];
-		$cmd .= " $sdmBin -i \"$mi_ifastas\" -o_fastq $mi_ofiles $sdm_Extr -options $MFopt{baseSDMoptMiSeq} -paired 2  -log $logDir/sdm/filter_xtra.log $sdm_def $sdm_cut\n\n";
-		if (!$singlReadMode){
-			my $tmpTar = "$ret1[1]";
-			if ($MFopt{gzipSDMOut}){$tmpTar =~ s/\.\d\.fq\.gz/\.\*\.singl\.fq\.gz/g ;
-			} else {$tmpTar =~ s/\.\d\.fq/\.\*\.singl\.fq/g ;}
-			my $cmdSA = "if ls $tmpTar 1> /dev/null 2>&1; then $catCmd $tmpTar ";
-			$cmd .= $cmdSA . ">>  $sret[1]; rm -f $tmpTar; fi\n" ;
-		}
-	}
-	if (!$singlReadMode){
-		$sret[-1] =~ m/\/([^\/]+$)/; my $fname = $1;
-		#$cmd .= "$pigzBin -p $comprCores ".$sret[-1]." \n" ;
-	}
-	$cmd .= "touch $stone\n";
-	#die "$cmd\n";
-	my $jobName = "";
-	my $presence=1; my $gzPres=1;
-	if (!$MFconfig{unpackZip}){
-		foreach my $loc (@ret2,@ret1){	if (!-e $loc || -z $loc){$presence=0;} my $loc2 = $loc;$loc2 =~ s/\.gz$//;	if (!-e $loc2){$gzPres=0;}}
-		if (!-e $sret[0]){$presence=0;}
-	}
-	if (!-e $stone){$presence=0;}
-	
-	#recovery part, that uses previous sdm filtered data..
-	if (!$presence && $gzPres && -e $stone){
-		#exists, but not gzipped..
-		$cmd = "";
-		foreach my $loc (@ret2,@ret1,@sret){
-			my $loc2 = $loc;
-				$loc2 =~ s/\.gz$//;
-			$cmd .= "$pigzBin -f -p $comprCores $loc2\n";
-		}
-	}
-	#die "$presence\n";
-	
-	#common error: spade input failed
-	my $assInputFlaw = 0;
-	my $qsubFile = $logDir."sdmReadCleaner.sh";
-	if ($useXtras){
-		${$cleanSeqSetHR}{arpX1} = \@ret1;${$cleanSeqSetHR}{arpX2} = \@ret2;
-		${$cleanSeqSetHR}{singArX} = \@sret;${$cleanSeqSetHR}{matArX} = $matAr;
-		${$cleanSeqSetHR}{readTecX} = $curReadTec; ${$cleanSeqSetHR}{is3rdGenX} = $is3rdGen;
-		$qsubFile = $logDir."sdmReadCleanerSuppl.sh";
-	} else {#default..
-		${$cleanSeqSetHR}{arp1} = \@ret1;${$cleanSeqSetHR}{arp2} = \@ret2;
-		${$cleanSeqSetHR}{singAr} = \@sret;${$cleanSeqSetHR}{matAr} = $matAr;
-		${$cleanSeqSetHR}{readTec} = $curReadTec;  ${$cleanSeqSetHR}{is3rdGen} = $is3rdGen;
-	}
-				#print "@{${$cleanSeqSetHR}{arp1}} YY \n";
 
-	if ( ($presence==0 || $assInputFlaw==1 )&& $runThis){
+	my @cleanLibraries;
+	my @requiredNonEmpty;
+	my @requiredPresent;
+	for (my $i = 0; $i < @{$libraries}; $i++) {
+		my $library = $libraries->[$i];
+		my $technology = $library->{technology} || ($useXtras ? $map{$curSmpl}{SeqTechX} : $map{$curSmpl}{SeqTech});
+		checkSeqTech($technology, "MATAF4.pl::sdmClean library $library->{id}");
+		my $isLong = $library->{is_long} || is3rdGenSeqTech($technology);
+		my ($sdmPairOpt, $sdmSingleOpt) = sdmOptSet($curSmpl,$samplReadLength,$technology,$technology);
+		my $libraryDef = $sdm_def;
+		$libraryDef .= " -illuminaClip 1 " if ($MFopt{trimAdapters} && !$isLong);
+		my $suffix = $i == 0 ? '' : ".lib$i";
+		my $prefix = "$finD$baseFname$suffix";
+		my $hasPair = ($library->{files}{r1} || '') ne '';
+		my $hasSingle = ($library->{files}{single} || '') ne '';
+		my ($outR1, $outR2, $outSingle) = ('', '', '');
+		my $logSuffix = $i == 0 ? '' : ".$i";
+
+		if ($hasPair) {
+			$outR1 = "$prefix.1.$fEnd";
+			$outR2 = "$prefix.2.$fEnd";
+			$outSingle = "$prefix.singl.$fEnd";
+			$cmd .= "rm -f $outR1 $outR2 $outSingle\n";
+			$cmd .= "$sdmBin -i \"$library->{files}{r1},$library->{files}{r2}\" -o_fastq $outR1,$outR2 -options $sdmPairOpt -paired 2 $sdm_Extr -log $logDir/sdm/$logStem$logSuffix.log $libraryDef $sdm_cut\n";
+			(my $recovered = $outR1) =~ s/\.1\.fq(?:\.gz)?$/.\*.singl.$fEnd/;
+			$cmd .= "if ls $recovered 1> /dev/null 2>&1; then cat $recovered > $outSingle; rm -f $recovered; else $pigzBin -c </dev/null > $outSingle; fi\n"
+				if $MFopt{gzipSDMOut};
+			$cmd .= "if ls $recovered 1> /dev/null 2>&1; then cat $recovered > $outSingle; rm -f $recovered; else : > $outSingle; fi\n"
+				unless $MFopt{gzipSDMOut};
+			push @requiredNonEmpty, $outR1, $outR2;
+			push @requiredPresent, $outSingle;
+		}
+
+		if ($hasSingle) {
+			$outSingle = "$prefix.s.$fEnd" unless $hasPair;
+			my $tmpSingle = "$prefix.input-single.fq";
+			$cmd .= "rm -f $tmpSingle\n";
+			$cmd .= "$sdmBin -i \"$library->{files}{single}\" -o_fastq $tmpSingle -options $sdmSingleOpt $sdm_Extr -paired 1 -log $logDir/sdm/$logStem.S$logSuffix.log $libraryDef $sdm_cut\n";
+			if ($MFopt{gzipSDMOut}) {
+				my $redirect = $hasPair ? '>>' : '>';
+				$cmd .= "$pigzBin -p $comprCores -c $tmpSingle $redirect $outSingle\n";
+			} else {
+				my $redirect = $hasPair ? '>>' : '>';
+				$cmd .= "cat $tmpSingle $redirect $outSingle\n";
+			}
+			$cmd .= "rm -f $tmpSingle\n";
+			push @requiredNonEmpty, $outSingle unless $hasPair;
+			push @requiredPresent, $outSingle if $hasPair;
+		}
+
+		push @cleanLibraries, newReadLibrary(
+			id => $library->{id}, sample => $library->{sample} || $curSmpl,
+			scope => $scope, technology => $technology, is_long => $isLong,
+			label => $library->{label}, phase => 'clean',
+			files => {r1 => $outR1, r2 => $outR2, single => $outSingle, bam => ''},
+			source_files => $library->{files},
+			metadata => {source_library_id => $library->{id}},
+		);
+	}
+
+	if (!-e "$curOutDir/input_fil.txt" && !$useXtras) {
+		open my $inputFH, '>', "$curOutDir/input_fil.txt" or die "Cannot write $curOutDir/input_fil.txt: $!\n";
+		print {$inputFH} join(';', map {
+			$_->{files}{r1} ? "$_->{files}{r1},$_->{files}{r2}" : $_->{files}{single}
+		} @{$libraries});
+		close $inputFH or die "Cannot close $curOutDir/input_fil.txt: $!\n";
+	}
+
+	$cmd .= "touch $stone\n";
+	my $jobName = "";
+	my $presence = -e $stone ? 1 : 0;
+	$presence = 0 if grep { !-s $_ } @requiredNonEmpty;
+	$presence = 0 if grep { !-e $_ } @requiredPresent;
+	my $qsubFile = $logDir."sdmReadCleaner.sh";
+	replaceScopeLibraries($cleanSeqSetHR, $scope, \@cleanLibraries, 1, $curSmpl);
+	$qsubFile = $logDir."sdmReadCleanerSuppl.sh" if ($useXtras);
+
+	if (!$presence && $runThis){
 		print "sdm'ing support reads..\n" if ($useXtras);
-		#die "yes\n";
 		$jobName = "_SDM${useXtras}_$JNUM"; my $tmpCmd;
 		my $preHDDspace=$QSBoptHR->{tmpSpace};
 		$QSBoptHR->{tmpSpace} = 0;
 		($jobName, $tmpCmd) = qsubSystem($qsubFile,$cmd,$MFopt{sdmCores},$MFopt{sdmMem},$jobName,$jobd,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
 		$QSBoptHR->{tmpSpace} = $preHDDspace;
 	}
-	#die "$presence presi\n@ret1\n";
-	#print $cmd."\n$jobName\n";;	
 	$map{$curSmpl}{cleanSeqSet} = $cleanSeqSetHR;
 	return ($jobName);
 }
@@ -3979,23 +3939,14 @@ sub uploadRawFilePrep{
 	if ($MFconfig{uploadRawRds} eq ""){return "" ;}
 
 	my ($tmpD,$smplID, $jdep, $useXtras) = @_;
-	my $totalInputSizeMB = $map{$smplID}{inputFileSizeMB} ;
+	my $totalInputSizeMB = $useXtras
+		? ($map{$smplID}{inputXFileSizeMB} || 0)
+		: ($map{$smplID}{inputFileSizeMB} || 0);
 
-	my %seqSet = %{$map{$smplID}{seqSet}};
-	my ($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"pa1"},$seqSet{"pa2"},$seqSet{"pas"},$seqSet{"libInfo"},$seqSet{"seqTech"});
-	my $samplReadLength = $seqSet{"samplReadLength"};
-	my $gen3 = is3rdGenSeqTech($seqTec);
-
-	#print "XX $seqTec XX";
-	#my ($ar1X,$ar2X,$arsX,$libInfoArX) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"})
-	if ($useXtras){
-		#if useXtras flag set, only consider "xtra" defined input reads (eg scaffoling reads, 3rd gen in supplement of main reads etc)
-		($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"},$seqSet{"seqTechX"});
-		$samplReadLength = $seqSet{"samplReadLengthX"};
-		if (!@{$ar1} && !@{$ars}) { return ""; }#nope, no additional reads are requested..
-		$gen3 = is3rdGenSeqTech($seqTec);
-	}
-	my @libInfo = @{$libInfoAr};
+	my $seqSet = $map{$smplID}{seqSet};
+	my $scope = $useXtras ? 'support' : 'primary';
+	my $libraries = readLibrariesByScope($seqSet, $scope, 0, $smplID);
+	return "" unless @{$libraries};
 	my $tag = ""; $tag = "X." if ($useXtras);
 	if ($useXtras){
 		print "preparing xtra raw fastq upload for ENA/SRA (hostfilter $MFopt{humanFilter}).. ";
@@ -4020,66 +3971,52 @@ sub uploadRawFilePrep{
 	my $outD  ="$MFconfig{uploadRawRds}"; 
 	my $numThr = 4;
 	system "mkdir -p $outD/tmp/ " unless (-d "$outD/tmp");
-	my $rd;
 	$tmpD = "$tmpD/tmp$tag/";
 	my $cmd = "";#"rm -rf $outD/tmp/;mkdir -p $outD/tmp/\n";
-	for (my $i=0;$i<3;$i++){
-		next if ($i==1); #read2 will be dealt with read1
-		my @rds;
-		if ($i==0){
-			@rds=@{$ar1};$rd="1";
-		}
-		#if ($i==1){$rd="2";@rds=@pa2;}
-		my @rds2= @{$ar2};
-		if ($i==2){$rd="single";@rds=@{$ars};}
-		my $idx=0;
-		#print "$i : rd1: @rds\nrd2: @rds2\n". @libInfo . " : @libInfo\n";
-		foreach (my $idx=0;$idx<@rds;$idx++){
-			my $f =$rds[$idx];
-			my $rd2=$rds2[$idx];
-			my $xtra=$tag."$idx.";
-			if ( ($idx < @libInfo ) && $libInfo[$idx] =~ m/.*mate.*/i){$xtra = "mate.${xtra}";}
-			if ( (@libInfo > $idx) && $libInfo[$idx] =~ m/.*miseq.*/i){$xtra = "miSeq.${xtra}";}
-			if ($seqTec eq "PB"){$xtra = "PB.${xtra}";}
-			if ($seqTec eq "ONT"){$xtra = "ONT.${xtra}";}
-			#die "$seqTec\n$libInfo[0]\n";
-			my $of = "$tmpD/$smplID.${xtra}R$rd.fq";  
-			my $of2 = "$tmpD/$smplID.${xtra}R2.fq";  
-			my $tmpF = "$tmpD/$smplID.${xtra}R1R2.fq";  
-			my $ff = "$outD/$smplID.${xtra}R$rd.fq";  
-			my $ff2 = "$outD/$smplID.$xtra$idx.R2.fq";  
-			my $ofT = "$tmpD/tmp/$smplID.${xtra}TEMP.R$rd.fq";
-			my $ofT2 = "$tmpD/tmp/$smplID.${xtra}TEMP.R2.fq";
-			if ($f =~ m/\.gz$/){$of .= ".gz";$ff .= ".gz";$ofT .= ".gz";$of2 .= ".gz";$ff2 .= ".gz";$ofT2 .= ".gz";}
-			#$idx++;
-			#print "$ff\n";
-			next if (-e $ff);
-			$cmd .= "rm -fr $tmpD;\nmkdir -p $tmpD/tmp/ $outD\n";
-			#$cmd .= "rm -f $ofT;cp $inD$f $ofT\n" unless (-e $of);
-			$cmd .= "rm -f $ofT $of;ln -s $f $ofT\n";#unless (-e $of);
-			
-			
-			if ($i==2){ #single read pair... 
-				#$cmd .= krakHSapSingl("$ofT",$of,$numThr)."\n" unless (-e $of.".gz");
-				#	my ($r1,$r2,$hostRMVer,$seqGen,$numThr,$tmpD,$krRefDB) = @_;
+	for (my $idx = 0; $idx < @{$libraries}; $idx++) {
+		my $library = $libraries->[$idx];
+		my $technology = $library->{technology} || '';
+		checkSeqTech($technology, "MATAF4.pl::uploadRawFilePrep library $library->{id}") if $technology ne '';
+		my $isLong = $library->{is_long} || is3rdGenSeqTech($technology);
+		my $xtra = $tag."$idx.";
+		$xtra = "mate.$xtra" if (($library->{label} || '') =~ /mate/i);
+		$xtra = "miSeq.$xtra" if (($library->{label} || '') =~ /miseq/i);
+		$xtra = "PB.$xtra" if ($technology eq 'PB');
+		$xtra = "ONT.$xtra" if ($technology eq 'ONT');
 
-				$cmd .= hostRmBase($ofT,"",$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[0]");
-				$cmd .= "$fastqhdsChk $ofT 3;\n";
-				#and move cleaned up file to final locations...
-				$cmd .= "rm -f $of; mv $ofT $of;\n";
-				$ofT2="";$of2="";
+		if ($library->{files}{r1}) {
+			my ($r1, $r2) = @{$library->{files}}{qw(r1 r2)};
+			die "Upload library $library->{id} mixes compressed and uncompressed mates\n"
+				if (($r1 =~ /\.gz$/) != ($r2 =~ /\.gz$/));
+			my $gz = $r1 =~ /\.gz$/ ? '.gz' : '';
+			my $of1 = "$tmpD/$smplID.${xtra}R1.fq$gz";
+			my $of2 = "$tmpD/$smplID.${xtra}R2.fq$gz";
+			my $tmp1 = "$tmpD/tmp/$smplID.${xtra}TEMP.R1.fq$gz";
+			my $tmp2 = "$tmpD/tmp/$smplID.${xtra}TEMP.R2.fq$gz";
+			my $final1 = "$outD/".basename($of1);
+			my $final2 = "$outD/".basename($of2);
+			unless (-e $final1 && -e $final2) {
+				$cmd .= "rm -fr $tmpD;\nmkdir -p $tmpD/tmp/ $outD\n";
+				$cmd .= "ln -s $r1 $tmp1\nln -s $r2 $tmp2\n";
+				$cmd .= hostRmBase($tmp1,$tmp2,$MFopt{humanFilter},$isLong,$numThr,$tmpD,"$DBdir$DBname[0]");
+				$cmd .= "$fastqhdsChk $tmp1 1; $fastqhdsChk $tmp2 2;\n";
+				$cmd .= "mv $tmp1 $of1\nmv $tmp2 $of2\nmv $of1 $of2 $outD\n\n";
 			}
-			if ($i==0){
-				$cmd .= "rm -f $ofT2;ln -s $rd2 $ofT2\n" unless (-e $of);
-				my $tmpF1 = "$tmpD/krak.tmp_1.fq";my $tmpF2 = "$tmpD/krak.tmp_2.fq";
-				$cmd .= hostRmBase($ofT, $ofT2,$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[0]");
-				$cmd .= "$fastqhdsChk $ofT 1;     $fastqhdsChk $ofT2 2;\n";
-				$cmd .= "rm -f $of; mv $ofT $of;\n";
-				$cmd .= "rm -f $of2; mv $ofT2 $of2;\n";
-				#die "$cmd";
+		}
+
+		if ($library->{files}{single}) {
+			my $single = $library->{files}{single};
+			my $gz = $single =~ /\.gz$/ ? '.gz' : '';
+			my $of = "$tmpD/$smplID.${xtra}Rsingle.fq$gz";
+			my $tmp = "$tmpD/tmp/$smplID.${xtra}TEMP.Rsingle.fq$gz";
+			my $final = "$outD/".basename($of);
+			unless (-e $final) {
+				$cmd .= "rm -fr $tmpD;\nmkdir -p $tmpD/tmp/ $outD\n";
+				$cmd .= "ln -s $single $tmp\n";
+				$cmd .= hostRmBase($tmp,"",$MFopt{humanFilter},$isLong,$numThr,$tmpD,"$DBdir$DBname[0]");
+				$cmd .= "$fastqhdsChk $tmp 3;\n";
+				$cmd .= "mv $tmp $of\nmv $of $outD\n\n";
 			}
-			$cmd .= "rm -f $ofT $ofT2\n";
-			$cmd .= "mv $of $of2 $outD\n\n";
 		}
 	}
 	$cmd .= "rm -rf $tmpD\n" if ($cmd ne "");
@@ -4145,11 +4082,11 @@ sub complexGunzCpMv($ $ $ $ $ $){
 	my $unzipcmd = "";
 	my $lowEffort=1;
 	
-	my $out = $in;
+	my $out = basename($in);
 	if (0&&$in =~ m/\.gz$/){ #deactivated.. takes too much space on file sys
 		$unzipcmd .= "$pigzBin  -f -p $ncore -d -c $fastap$in";
 		$out =~ s/\.gz$//;
-		$unzipcmd .= " > $finDest$in \n";
+		$unzipcmd .= " > $finDest$out \n";
 		$lowEffort=0;
 	}elsif ($in =~ m/\.bz2/){
 		my $bzip2B  = getProgPaths("bzip2");
@@ -4237,7 +4174,6 @@ sub seedUnzip2tmp{
 	my $trimJar = getProgPaths("trimomatic");
 
 	my $smplPrefix = $map{$curSmpl}{prefix};
-	$smplPrefix =~ s/\./\\\./g;   #make sure dots are recognized as such
 
 	my $xtrMapStr = $map{$curSmpl}{SupportReads};
 	my $doMateCln = 1; #nxtrim  mate pairs ?
@@ -4266,23 +4202,21 @@ sub seedUnzip2tmp{
 	
 		#die "Mapping $pa1 to ref\n";
 	if ( $xtrMapStr ne ""){
-		#die "XX$xtrMapStr\n";
-		my @spl = split(/:/,   $map{$samples[$JNUM]}{"SupportReads"}   );
-		if (@spl > 1){
-			$xtraRdsTech = $spl[0];#.$libNum;
-			@fastp2 = split(/,/,$spl[1]);
-			checkSeqTech($xtraRdsTech,"MATFILER.pl::Support Reads");
-			$seqTechX = $xtraRdsTech;
-		}
-		#die @fastp2."\n".$xtraRdsTech."\n";
+		my ($support_technology, $support_paths) = parseSupportReads($xtrMapStr);
+		$xtraRdsTech = $support_technology;
+		@fastp2 = @{$support_paths};
+		checkSeqTech($xtraRdsTech,"MATAF4.pl::SupportReads");
+		$seqTechX = $xtraRdsTech;
 	}
 	my $is3rdGen = is3rdGenSeqTech($seqTech);
 	my $is3rdGenX = is3rdGenSeqTech($seqTechX);
+	my $singleSeqTech = $map{$curSmpl}{SeqTechSingl} || $seqTech;
+	checkSeqTech($singleSeqTech,"MATAF4.pl::singleton reads");
 	
 	#die "$seqTech\n$is3rdGen\n";
 	
 	#create empty return object
-	my %seqSet = (pa1 => \@pa1, pa2 => \@pa2, pas => \@pas, seqTech => $seqTech, is3rdGen => $is3rdGen,
+	my %seqSet = (libraries => [], pa1 => \@pa1, pa2 => \@pa2, pas => \@pas, seqTech => $seqTech, is3rdGen => $is3rdGen,
 			paX1 => \@paX1, paX2 => \@paX2, paXs => \@paXs, seqTechX => $seqTechX, is3rdGenX =>  $is3rdGenX,
 			libInfo => \@libInfo, libInfoX => \@libInfoX,
 			totalInputSizeMB => -1, totalXInputSizeMB => -1,
@@ -4294,11 +4228,14 @@ sub seedUnzip2tmp{
 	#check if unmapped reads requested..
 	if ($MFopt{useUnmapped}){
 		die "useUnmapped needs checking before use.. Exiting\n";
-		$seqSet{pa1} = ("$finalMapDir/unaligned/unal.1.fq.gz");
-		$seqSet{pa2} = ("$finalMapDir/unaligned/unal.2.fq.gz");
-		$seqSet{pas} = ("$finalMapDir/unaligned/unal.fq.gz");
+		$seqSet{libraries} = [newReadLibrary(
+			id => "$curSmpl:primary:unmapped", sample => $curSmpl, scope => 'primary',
+			technology => $seqTech, is_long => $is3rdGen, label => 'unmapped', phase => 'staged',
+			files => {r1 => "$finalMapDir/unaligned/unal.1.fq.gz", r2 => "$finalMapDir/unaligned/unal.2.fq.gz",
+				single => "$finalMapDir/unaligned/unal.fq.gz", bam => ''},
+		)];
+		syncSeqSetLegacy(\%seqSet);
 		$seqSet{totalInputSizeMB} = filsizeMB((@pa1,@pa2,@pas));
-		$seqSet{libInfo} = ("unmapped");
 #		return ("",\@pa1,\@pa2, \@pas, 0, "", "",\@libInfo, "",$totalInputSizeMB);
 		return ("", \%seqSet);
 	}
@@ -4318,48 +4255,19 @@ sub seedUnzip2tmp{
 		#if ($mocatImport==0){
 		#print "$fastp\n";
 		#die "$smplPrefix$rawFileSrchStr2\n";
-		opendir(DIR, $fastp) or die "Infile dir not existing: $fastp\n";	
-		my @DIRf = readdir(DIR) ;
-		close(DIR);
-		if ($MFconfig{rawFileSrchStrSingl} ne ""){
-			@pas = sort ( grep { /$smplPrefix($MFconfig{rawFileSrchStrSingl})/  && -e "$fastp/$_"} @DIRf);	
-		}
-		if ($MFconfig{readsRpairs}!=0){
-			@pa2 = sort ( grep { /$smplPrefix($MFconfig{rawFileSrchStr2})/ && -e "$fastp/$_" } @DIRf );	
-			@pa1 = sort ( grep { /$smplPrefix($MFconfig{rawFileSrchStr1})/  && -e "$fastp/$_"  } @DIRf );	#rewinddir(DIR);
-			#die "readsRpairs::@pa1\n$smplPrefix$rawFileSrchStr1\n";
-		}
-		
-		#sort out multi assignments of read files (grep not uniquely defined)
-		if ($MFconfig{rawFileSrchStrSingl} ne ""){
-			my %h;
-			my $rdPairsBf=scalar @pa1;
-			if ($MFconfig{prefSinglFQgreps}){
-				@h{(@pas)} = undef;
-				@pa1 = grep {not exists $h{$_}} @pa1;
-				@pa2 = grep {not exists $h{$_}} @pa2;
-			} else {
-				@h{(@pa1,@pa2)} = undef;
-				@pas = grep {not exists $h{$_}} @pas;
-			}
-			my $rdPairsAft=scalar @pa1;
-			if ($rdPairsAft != $rdPairsBf){
-				print "corrected from $rdPairsBf read pairs to $rdPairsAft read pairs from input dir\n";
-				print "s: @pas\n1: @pa1\n2: @pa2\n";
-			}
-		}
-		
-		if ($MFconfig{rawFileBamSrchSing} ne "" ){
-			@paBam = sort ( grep { /$smplPrefix($MFconfig{rawFileBamSrchSing})/  && -e "$fastp/$_"  } @DIRf );	
-		}
+		my $found = discoverReadFiles($fastp, $smplPrefix, {
+			read1 => $MFconfig{readsRpairs} != 0 ? $MFconfig{rawFileSrchStr1} : "",
+			read2 => $MFconfig{readsRpairs} != 0 ? $MFconfig{rawFileSrchStr2} : "",
+			single => $MFconfig{rawFileSrchStrSingl},
+			bam => $MFconfig{rawFileBamSrchSing},
+			prefer_single => $MFconfig{prefSinglFQgreps},
+		});
+		@pa1 = @{$found->{read1}}; @pa2 = @{$found->{read2}};
+		@pas = @{$found->{single}}; @paBam = @{$found->{bam}};
 		
 	}
 	#die "1:@pa1\nS:@pas\n$MFconfig{rawFileSrchStrSingl}\n$MFconfig{readsRpairs}\n\n";
 	
-	#import xtra long rds
-	if (@pa1 != @pa2 && $MFconfig{readsRpairs}!=0){
-		print "For dir $fastp, unequal fastq files exist:\nP1\n".join("\n",@pa1)."\nP2:\n".join("\n",@pa2)."\n";@pa1=(); @pa2=();
-	}
 	#check for date of files (special filter)
 	if ($MFconfig{doDateFileCheck}){
 		my @pa1t = @pa1; my @pa2t = @pa2; undef @pa1; undef @pa2;
@@ -4377,35 +4285,46 @@ sub seedUnzip2tmp{
 		$libInfo[$i] = "lib$i";
 	}
 	if(@paBam > 0){ #assumes as input a mix of fq's and bams
-		for (my $i = scalar(@libInfo); $i < scalar(@libInfo)+scalar(@paBam); $i++) {
+		my $firstBamLibrary = scalar(@libInfo);
+		my $lastBamLibrary = $firstBamLibrary + scalar(@paBam);
+		for (my $i = $firstBamLibrary; $i < $lastBamLibrary; $i++) {
 			$libInfo[$i] = "lib$i";
 		}
 		#@libInfo = (@libInfo, ("libS$libNum") x int @paBam);
 	}
 	#$locStats{hasPaired} = 1 if (@pa1 > 0);$locStats{hasSingle} = 1 if (@pas > 0);
 	if ($fastp2[0] ne ""){
-		#die "$fastp2\n\n";
-		if (-d $fastp2[0]){
-			opendir(DIR, $fastp2[0]) or die "Fasta indir not found $fastp2[0]\n";	
-			my @DIRf = readdir(DIR) ;
-			close(DIR);
-			@paX2 = sort ( grep { /$MFconfig{rawFileSrchStrXtra2}/ && -e "$fastp2[0]/$_" } @DIRf );	#rewinddir DIR;
-			@paX1 = sort ( grep { /$MFconfig{rawFileSrchStrXtra1}/  && -e "$fastp2[0]/$_"} @DIRf );	#close(DIR);
-			if (@paX2 != @paX1){die "For dir $fastp, unequal fastq files exist:P1\n".join("\n",@paX1)."\nP2:\n".join("\n",@paX2)."\n";}
-			if (@paX2 == 0){die "Can't find files with pattern $MFconfig{rawFileSrchStrXtra2} in $fastp2[0]\n";}
-			#die $paX1[0]."\n";
-			push @pa1 , @paX1; push @pa2 , @paX2; @libInfoX = $xtraRdsTech x @paX1; push @libInfo, @libInfoX;
-		} elsif (-e $fastp2[0] ){
-			if ($fastp2[0]=~ m/,/){die "MG-TK.pl::support reads have comma: $fastp2[0]!\nExiting..\n";}
-			if ($fastp2[0] !~ m/\.bam$/ && $fastp2[0] !~ m/\.fastq\.gz?$/ && $fastp2[0] !~ m/\.fq\.gz$/){die "MG-TK.pl::support reads not bam or fq.gz formatted: $fastp2[0]!\nExiting..\n";}
-			push @libInfoX, $xtraRdsTech;
-			if ($fastp2[0] =~ m/\.bam$/){
-				push @paBamX, @fastp2;
-			} else {
-				push @paXs, @fastp2;
-			}
+		if (grep { -d $_ } @fastp2) {
+			die "SupportReads may specify one directory or a list of files, not a mixture: @fastp2\n"
+				unless (@fastp2 == 1 && -d $fastp2[0]);
+			my $support_dir = $fastp2[0];
+			my $found = discoverReadFiles($support_dir, "", {
+				read1 => $MFconfig{rawFileSrchStrXtra1},
+				read2 => $MFconfig{rawFileSrchStrXtra2},
+				single => '\\.(?:f(?:ast)?q|f(?:ast)?a)(?:\\.(?:gz|bz2))?$',
+				bam => '\\.bam$', prefer_single => 0,
+			});
+			@paX1 = map { "$support_dir/$_" } @{$found->{read1}};
+			@paX2 = map { "$support_dir/$_" } @{$found->{read2}};
+			@paXs = map { "$support_dir/$_" } @{$found->{single}};
+			@paBamX = map { "$support_dir/$_" } @{$found->{bam}};
+			die "Can't find supported FASTQ, FASTA, or BAM inputs in support directory $support_dir\n"
+				if (!@paX1 && !@paXs && !@paBamX);
 		} else {
-			die "MG-TK.pl:: Can't find support reads @fastp2!\nExiting..\n";
+			foreach my $support_file (@fastp2) {
+				die "Can't find support-read file $support_file\n" unless (-f $support_file);
+				die "Unsupported SupportReads format for $support_file; expected BAM, FASTQ, or FASTA, optionally gz/bz2 compressed.\n"
+					unless ($support_file =~ /\.(?:bam|f(?:ast)?q|f(?:ast)?a)(?:\.(?:gz|bz2))?$/i);
+				if ($support_file =~ /\.bam$/i) { push @paBamX, $support_file; }
+				else { push @paXs, $support_file; }
+			}
+		}
+		@libInfoX = ($xtraRdsTech) x max(scalar(@paX1), scalar(@paXs) + scalar(@paBamX));
+		my %supportBasenames;
+		foreach my $support_file (@paX1, @paX2, @paXs, @paBamX) {
+			my $name = basename($support_file);
+			die "SupportReads contains more than one source named '$name'; staged filenames must be unique.\n"
+				if ($supportBasenames{$name}++);
 		}
 	}
 
@@ -4413,7 +4332,7 @@ sub seedUnzip2tmp{
 	$totalInputSizeMB = filsizeMB($fastp,@pa1,@pa2,@pas,@paBam);
 	$map{$curSmpl}{inputFileSizeMB} = $totalInputSizeMB;
 	#and file size for suppl files..
-	$totalXInputSizeMB= filsizeMB($fastp,@paX1,@paX2,@paXs,@paBamX);
+	$totalXInputSizeMB= filsizeMB("",@paX1,@paX2,@paXs,@paBamX);
 	$map{$curSmpl}{inputXFileSizeMB} = $totalXInputSizeMB;
 
 
@@ -4424,19 +4343,14 @@ sub seedUnzip2tmp{
 	for (my $i = 0; $i<@pa1; $i++){
 		my $pp = $fastp;
 		#$pp = $fastp2 if ($libInfo[$i] eq $xtraRdsTech);
-		if (-l $pp.$pa1[$i]){
-			if (!-f abs_path($pp.$pa1[$i])){die "File $pa1[$i] is not file.\n";}
+		if (-l "$pp/$pa1[$i]"){
+			if (!-f abs_path("$pp/$pa1[$i]")){die "File $pa1[$i] is not file.\n";}
 		}
-		if (-l $pp.$pa2[$i]){
-			if (!-f abs_path($pp.$pa2[$i])){die "File $pa2[$i] does not exist.\n";}
-		}
-		if ($i==0){
-			$rawReads="$pp$pa1[$i],$pp$pa2[$i]";
-		} else {
-			$rawReads.=";".$pp.$pa1[$i].",".$pp.$pa2[$i];
+		if (-l "$pp/$pa2[$i]"){
+			if (!-f abs_path("$pp/$pa2[$i]")){die "File $pa2[$i] does not exist.\n";}
 		}
 #		print "$pp$pa1[$i]\n";
-		my $realP = `readlink -f $pp$pa1[$i]`;
+		my $realP = abs_path("$pp/$pa1[$i]") || "";
 		if (defined $realP && $realP =~ m/\/(MMPU[^\/]+)\//){
 			$mmpu = $1;
 		}
@@ -4446,13 +4360,16 @@ sub seedUnzip2tmp{
 	#@fastap2 = ($fastap2[0]); @fastap1 = ($fastap1[0]);
 	
 	#could not find any files.. report this to user
-	if (@pa1 == 0 && @pas ==0 && @paBam == 0 && @paXs ==0 && @paBamX ==0 ){
+	if (@pa1 == 0 && @pas ==0 && @paBam == 0 && @paX1 == 0 && @paXs ==0 && @paBamX ==0 ){
 		my $msg = "Can;t find files in $fastp\nUsing search pattern: $smplPrefix$MFconfig{rawFileSrchStr1}  $smplPrefix$MFconfig{rawFileSrchStr2}\n$smplPrefix$MFconfig{rawFileSrchStrSingl}\n";
 		die $msg if ($MFconfig{abortOnEmptyInput});
-		print $msg;$totalInputSizeMB=0;$map{$curSmpl}{inputFileSizeMB} =0;$map{$curSmpl}{totalXInputSizeMB} =0;
+		print $msg;$totalInputSizeMB=0;$map{$curSmpl}{inputFileSizeMB} =0;$map{$curSmpl}{inputXFileSizeMB} =0;
 		#return ("EMPTY_DO_NEXT",\@pa1,\@pa2, \@pas, 0, "", "",\@libInfo, "",$totalInputSizeMB);
-		$seqSet{pa1} = \@pa1;$seqSet{pa2} = \@pa2;$seqSet{pas} = \@pas;
-		$seqSet{libInfo} = \@libInfo;
+		$seqSet{libraries} = readLibrariesFromArrays(
+			sample => $curSmpl, scope => 'primary', phase => 'raw', technology => $seqTech,
+			is_long => $is3rdGen, r1 => \@pa1, r2 => \@pa2, single => \@pas, labels => \@libInfo,
+		);
+		syncSeqSetLegacy(\%seqSet);
 		$map{$curSmpl}{inputFilesEmpty} = 1;
 		return ("EMPTY_DO_NEXT", \%seqSet);
 
@@ -4506,7 +4423,8 @@ sub seedUnzip2tmp{
 	# to their generated rawRds destinations. A retry must validate the sources,
 	# because missing rawRds files are exactly what this stage recreates.
 	my @sourceInputs = @{source_input_files($fastp, @pa1, @pa2, @pas, @paBam)};
-	push @sourceInputs, @{source_input_files('', @paXs, @paBamX)};
+	push @sourceInputs, @{source_input_files('', @paX1, @paX2, @paXs, @paBamX)};
+	$rawReads = join(";", @sourceInputs);
 	die "tmpPath empty: $tmpPath" if ($tmpPath eq "");
 	$tmpPath.="/rawRds/";
 	my $unzipcmd = "";
@@ -4536,35 +4454,35 @@ sub seedUnzip2tmp{
 	
 	#first conversion of bam to fastqs::
 	#this is currently only working with unpaired reads!
+	my $primarySingleSourceCount = scalar(@pas);
+	my $supportSingleSourceCount = scalar(@paXs);
 	for (my $i=0; $i<@paBam; $i++){
 		my $pp = $fastp;
 		my $smtBin = getProgPaths("samtools");
-		$pas[$i] = outfiles_Bam("$finDest/rawRds/",$paBam[$i]);
+		my $bamFastq = outfiles_Bam("$finDest/rawRds/",basename($paBam[$i]));
+		push @pas, $bamFastq;
 		$unzipcmd .= "\necho \"Converting bam $i to fastq\"\n";
-		$unzipcmd .= "$smtBin fastq -@ $numCore -t $pp/$paBam[$i] -0 $pas[$i];\n"; #| $pigzBin -p $numCore -c >
+		$unzipcmd .= "$smtBin fastq -@ $numCore -t $pp/$paBam[$i] -0 $bamFastq;\n"; #| $pigzBin -p $numCore -c >
 		$lowEffort = 0;
 	}
 	#and also take care of support reads in bam format
 	for (my $i=0; $i<@paBamX; $i++){
-		my $pp = $fastp;
 		my $smtBin = getProgPaths("samtools");
-		my $BamF = $paBamX[$i]; $BamF =~ s/.*\//\//;
+		my $BamF = basename($paBamX[$i]);
 		my $supportDir = "$finDest/rawRds/Support/";
 		system "mkdir -p $supportDir" if ($i==0 && !-d $supportDir);
-		$paXs[$i] = outfiles_Bam($supportDir,$BamF);
+		my $bamFastq = outfiles_Bam($supportDir,$BamF);
+		push @paXs, $bamFastq;
 		$unzipcmd .= "echo \"Converting support bam $i to fastq\"\n";
 		$unzipcmd .= "mkdir -p $supportDir;\n" if ($i==0);
-		$unzipcmd .= "$smtBin fastq -@ $numCore -t $paBamX[$i] -0 $paXs[$i];\n"; # | $pigzBin -p $numCore -c > 
+		$unzipcmd .= "$smtBin fastq -@ $numCore -t $paBamX[$i] -0 $bamFastq;\n"; # | $pigzBin -p $numCore -c >
 		$lowEffort = 0;
 	}
 	
 	for (my $i=0; $i<@pa1; $i++){
 		#print $pa1[$i]."\n";
 		my $pp = $fastp."/";
-		if (@paBam){
-			#do nothing, all done in paBam step
-			;
-		} elsif ($MFconfig{filterFromSource}){
+		if ($MFconfig{filterFromSource}){
 			$lowEffort =1 if ($lowEffort != 0);
 			$pa1[$i] = $pp.$pa1[$i]; $pa2[$i] = $pp.$pa2[$i];
 		} elsif ($porechopFlag){
@@ -4602,7 +4520,7 @@ sub seedUnzip2tmp{
 	#die "$unzipcmd\n";
 	#for porechop this might be tons of files..
 	
-	for (my $i=0; $i<@pas; $i++){
+	for (my $i=0; $i<$primarySingleSourceCount; $i++){
 		#next if (scalar(@paBam));
 		my $porechopped = "$finDest/rawRds/$pas[$i]"; $porechopped .= ".gz" unless ($porechopped =~ m/\.gz$/);
 		my $pp = $fastp;
@@ -4630,6 +4548,25 @@ sub seedUnzip2tmp{
 			$unzipcmd .= "touch $porechStone\n" if ($porechopFlag);
 			$pas[$i] = ($porechopped);
 		}
+	}
+
+	# Supplementary reads have their own resolved source paths and destination.
+	# Keeping them separate prevents a support directory from being interpreted
+	# relative to the primary input directory.
+	my $supportDest = "$finDest/rawRds/Support/";
+	$unzipcmd .= "mkdir -p $supportDest;\n" if (@paX1 || $supportSingleSourceCount);
+	for (my $i=0; $i<@paX1; $i++) {
+		my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$paX1[$i],$tmpPath,$supportDest,$numCore,0);
+		$unzipcmd .= $tmpCmd."\n"; $paX1[$i] = $newF;
+		$lowEffort = 0 if ($LEloc==0);
+		($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$paX2[$i],$tmpPath,$supportDest,$numCore,0);
+		$unzipcmd .= $tmpCmd."\n"; $paX2[$i] = $newF;
+		$lowEffort = 0 if ($LEloc==0);
+	}
+	for (my $i=0; $i<$supportSingleSourceCount; $i++) {
+		my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$paXs[$i],$tmpPath,$supportDest,$numCore,0);
+		$unzipcmd .= $tmpCmd."\n"; $paXs[$i] = $newF;
+		$lowEffort = 0 if ($LEloc==0);
 	}
 		#die "@pa1\n@pas\n";
 
@@ -4675,34 +4612,31 @@ sub seedUnzip2tmp{
 	#die "$unzipcmd\n";
 	
 		#check already here for mate pair support reads, deactivate fastp2
-	my ($mateCmd,$mateSto) = ("","/sh");
+	my $mateCmd = "";
 #	print "@libInfo\n";
-	my $ii=0; my @matePrps=();
+	my $ii=0; my $mateLibraryIndex = 0; my @matePrps=();
 	while($ii<@libInfo){
 		#print $ii." \n";
 		#next;
 		unless ($libInfo[$ii] =~ m/.*mate.*/i){$ii++;next;} #remove from process
-		my $href;
-		($href,$mateCmd,$mateSto) = check_matesL($pa1[$ii],$pa2[$ii],$finDest."mateCln/",$doMateCln);
+		my $sourceLabel = $libInfo[$ii];
+		my $mateDir = $finDest."mateCln/lib$mateLibraryIndex/";
+		my ($href,$libraryMateCmd,$mateSto) = check_matesL($pa1[$ii],$pa2[$ii],$mateDir,$doMateCln);
+		$mateCmd .= $libraryMateCmd unless -e $mateSto;
 		#remove this ori file from raw reads
 		splice(@pa1,$ii,1);splice(@pa2,$ii,1);splice(@libInfo,$ii,1);
-		push(@matePrps,$href);
+		push(@matePrps,{files => $href, label => $sourceLabel, index => $mateLibraryIndex});
+		$mateLibraryIndex++;
 	}
-	if ( ($mateSto ne "/sh" && !-e $mateSto) && $calcUnzp){
-		$mateCmd = "" if ( -e $mateSto);
+	if ($mateCmd ne "" && $calcUnzp){
 		($jobN, $tmpCmd) = qsubSystem($logDir."MATE.sh",$mateCmd,1,"20G","_MT$JNUM",$jobN,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
-		#### 3 : if mate pairs, process these now (and remove corresponding raw fiiles
-		foreach my $hrr (@matePrps){
-			my %nateFiles = %{$hrr};
-			push(@pa1,$nateFiles{pe1});push(@pa2,$nateFiles{pe2});push(@pas,$nateFiles{se}); push(@libInfo,"pe4mt$ii");
-			push(@pa1,$nateFiles{mp1});push(@pa2,$nateFiles{mp2});push(@libInfo,"mate$ii");
-			push(@pa1,$nateFiles{un1});push(@pa2,$nateFiles{un2});push(@libInfo,"mate_unkn$ii");
-		}
 	}
 	
 	#principally done.. now catalog and save for later
 	if (!-e $inputRawFile || -s $inputRawFile == 0){
-		open O,">$inputRawFile"; print O $seqSet{"rawReads"}; close O;
+		open(my $rawInputFH, ">", $inputRawFile) or die "Cannot write $inputRawFile: $!\n";
+		print {$rawInputFH} $rawReads;
+		close($rawInputFH) or die "Cannot close $inputRawFile: $!\n";
 	}
 
 	
@@ -4712,15 +4646,49 @@ sub seedUnzip2tmp{
 	$map{$curSmpl}{inputFilesEmpty} = 0;
 
 	#die "HJASD:@pa1\n@pas\n";
-	%seqSet = (pa1 => \@pa1, pa2 => \@pa2, pas => \@pas, seqTech => $seqTech, is3rdGen =>$is3rdGen,
-			paX1 => \@paX1, paX2 => \@paX2, paXs => \@paXs, seqTechX => $seqTechX, is3rdGenX => $is3rdGenX,
-			libInfo => \@libInfo, libInfoX => \@libInfoX,
+	my $primaryLibraries = readLibrariesFromArrays(
+		sample => $curSmpl, scope => 'primary', phase => 'staged',
+		technology => $seqTech, pair_technology => $seqTech,
+		single_technology => $singleSeqTech, is_long => $is3rdGen, separate_roles => 1,
+		r1 => \@pa1, r2 => \@pa2, single => \@pas, labels => \@libInfo,
+	);
+	foreach my $mateLibrary (@matePrps) {
+		my $files = $mateLibrary->{files};
+		my $mateIndex = $mateLibrary->{index};
+		my $sourceLabel = $mateLibrary->{label} || "mate$mateIndex";
+		push @{$primaryLibraries}, newReadLibrary(
+			id => "$curSmpl:primary:mate:$mateIndex:pe", sample => $curSmpl,
+			scope => 'primary', technology => $seqTech, is_long => $is3rdGen,
+			label => "$sourceLabel.pe", phase => 'staged',
+			files => {r1 => $files->{pe1}, r2 => $files->{pe2}, single => $files->{se}, bam => ''},
+		);
+		push @{$primaryLibraries}, newReadLibrary(
+			id => "$curSmpl:primary:mate:$mateIndex:mp", sample => $curSmpl,
+			scope => 'primary', technology => $seqTech, is_long => $is3rdGen,
+			label => "$sourceLabel.mate", phase => 'staged',
+			files => {r1 => $files->{mp1}, r2 => $files->{mp2}, single => '', bam => ''},
+		);
+		push @{$primaryLibraries}, newReadLibrary(
+			id => "$curSmpl:primary:mate:$mateIndex:unknown", sample => $curSmpl,
+			scope => 'primary', technology => $seqTech, is_long => $is3rdGen,
+			label => "$sourceLabel.mate_unknown", phase => 'staged',
+			files => {r1 => $files->{un1}, r2 => $files->{un2}, single => '', bam => ''},
+		);
+	}
+	my $supportLibraries = readLibrariesFromArrays(
+		sample => $curSmpl, scope => 'support', phase => 'staged',
+		technology => $seqTechX, pair_technology => $seqTechX,
+		single_technology => $seqTechX, is_long => $is3rdGenX, separate_roles => 1,
+		r1 => \@paX1, r2 => \@paX2, single => \@paXs, labels => \@libInfoX,
+	);
+	%seqSet = (libraries => [@{$primaryLibraries}, @{$supportLibraries}],
 			totalInputSizeMB => $totalInputSizeMB, inputXFileSizeMB => $totalXInputSizeMB,
 			rawReads => $rawReads,
 			mmpu => $mmpu, 
 			samplReadLength => $MFconfig{defaultReadLength}, #some default value for typically short paired reads..
 			samplReadLengthX => $MFconfig{defaultReadLengthX}, #for any supplementary reads (eg PacBio)
 			);
+	syncSeqSetLegacy(\%seqSet);
 	if (exists $map{$curSmpl}{readLength} && $map{$curSmpl}{readLength} != 0){
 		$seqSet{samplReadLength} = $map{$curSmpl}{readLength};
 	}
@@ -4745,7 +4713,7 @@ sub seedUnzip2tmp{
 sub mOTU2Mapping{
 	my ($tmpD,$finOutD,$smp,$Ncore,$deps) = @_;
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $inF1a = ${$cleanSeqSetHR}{arp1}; my $inF2a = ${$cleanSeqSetHR}{arp2}; my $inFSa = ${$cleanSeqSetHR}{singAr}; #my $mergRdsHr = ${$cleanSeqSetHR}{mrgHshHR};
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
 
 	
 	
@@ -4756,7 +4724,10 @@ sub mOTU2Mapping{
 	my $stone = $finOutD."$smp.Motu2.sto";
 	my $DBstr = ""; $DBstr = "-db $DBdir " unless ($DBdir eq "");
 	if (!$MFopt{DoMOTU2} ||  -e $stone){return;}
-	my @car1 = @{$inF1a}; my @car2 = @{$inF2a}; my @sar = @{$inFSa};
+	my $pairs = libraryPairs($libraries);
+	my @car1 = map { $_->{files}{r1} } @{$pairs};
+	my @car2 = map { $_->{files}{r2} } @{$pairs};
+	my @sar = @{libraryFiles($libraries, 'single')};
 	my $inF1 = join(",",@car1); my $inF2 = join(",",@car2); my $inFS = join(",",@sar); 
 	system "mkdir -p $finOutD\n" unless (-d $finOutD);
 	my $cmd = "mkdir -p $tmpD\n";
@@ -4870,22 +4841,15 @@ sub removeHostSeqs($ $ $){
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
 
 	return $jDep unless ($MFopt{humanFilter});
-	my @pa1 = @{${$cleanSeqSetHR}{arp1}}; my @pa2 = @{${$cleanSeqSetHR}{arp2}}; my @pas = @{${$cleanSeqSetHR}{singAr}};
-	my @pa1X = @{${$cleanSeqSetHR}{arpX1}}; my @pa2X = @{${$cleanSeqSetHR}{arpX2}}; my @pasX = @{${$cleanSeqSetHR}{singArX}};
-	my $gen3 = ${$cleanSeqSetHR}{is3rdGen};
-	my $gen3X = ${$cleanSeqSetHR}{is3rdGenX};
+	my $libraries = ensureCleanSeqSetLibraries($cleanSeqSetHR, $curSmpl);
 	
 	my $outputExists=1;
 	my $fileDir = "";
 
 	if ($fileDir eq ""){
-		if (@pa1 > 0){
-			$pa1[0] =~ m/(.*\/)[^\/]+$/; $fileDir= $1 ;
-		} elsif (@pas) {#potentially in pas then
-			$pas[0] =~ m/(.*\/)[^\/]+$/; $fileDir= $1 ;
-		} elsif (@pasX) {#potentially in pas then
-			$pasX[0] =~ m/(.*\/)[^\/]+$/; $fileDir= $1 ;
-		}
+		my ($firstFile) = map { $_->{files}{r1} || $_->{files}{single} }
+			grep { $_->{files}{r1} || $_->{files}{single} } @{$libraries};
+		$firstFile =~ m/(.*\/)[^\/]+$/ and $fileDir = $1 if defined($firstFile);
 	}
 	#return $jDep if ($fileDir eq "");
 	if ($fileDir eq ""){
@@ -4916,19 +4880,11 @@ sub removeHostSeqs($ $ $){
 	#loop around different DBs..
 	
 	for (my $j=0;$j<@DBname ; $j++){
-		#primary reads..
-		for (my $i=0;$i<@pa1;$i++){
-			$cmd .= hostRmBase($pa1[$i],$pa2[$i],$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[$j]");
-		}
-		for (my $i=0;$i<@pas;$i++){
-			$cmd .= hostRmBase($pas[$i],"",$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[$j]");
-		}
-		#supplementray reads..
-		for (my $i=0;$i<@pa1X;$i++){
-			$cmd .= hostRmBase($pa1X[$i],$pa2X[$i],$MFopt{humanFilter},$gen3X,$numThr,$tmpD,"$DBdir$DBname[$j]");
-		}
-		for (my $i=0;$i<@pasX;$i++){
-			$cmd .= hostRmBase($pasX[$i],"",$MFopt{humanFilter},$gen3X,$numThr,$tmpD,"$DBdir$DBname[$j]");
+		foreach my $library (@{$libraries}) {
+			$cmd .= hostRmBase($library->{files}{r1},$library->{files}{r2},$MFopt{humanFilter},$library->{is_long},$numThr,$tmpD,"$DBdir$DBname[$j]")
+				if ($library->{files}{r1});
+			$cmd .= hostRmBase($library->{files}{single},"",$MFopt{humanFilter},$library->{is_long},$numThr,$tmpD,"$DBdir$DBname[$j]")
+				if ($library->{files}{single});
 		}
 	}
 	$cmd .= "\n\n";
@@ -4956,13 +4912,11 @@ sub genoSize(){
 	my ($oD,$jdep) = @_;
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
 
-	my $arp1 = ${$cleanSeqSetHR}{arp1}; my $arp2 = ${$cleanSeqSetHR}{arp2}; my $ars = ${$cleanSeqSetHR}{singAr}; my $mergRdsHr = ${$cleanSeqSetHR}{mrgHshHR};
-
-	my @pa1 = @{$arp1}; my @pa2 = @{$arp2}; my @pas = @{$ars};
+	my $pairs = libraryPairs(readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl));
 	my $cmd = "mkdir -p $oD\n";
 	my $microCensBin = getProgPaths("microCens");
-	for (my $i=0;$i<@pa1;$i++){
-		$cmd .= "$microCensBin -t 2 $pa1[$i],$pa2[$i] $oD/MC.$i.result\n";
+	for (my $i=0;$i<@{$pairs};$i++){
+		$cmd .= "$microCensBin -t 2 $pairs->[$i]{files}{r1},$pairs->[$i]{files}{r2} $oD/MC.$i.result\n";
 	}
 #	die $cmd;
 	my $jobName = "_GS$JNUM"; my $tmpCmd;
@@ -4974,9 +4928,9 @@ sub krakenTaxEst(){
 	my ($outD, $tmpD,$name,$jobd) = @_;
 
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $arp1 = ${$cleanSeqSetHR}{arp1}; my $arp2 = ${$cleanSeqSetHR}{arp2}; my $ars = ${$cleanSeqSetHR}{singAr}; 
-
-	my @pa1 = @{$arp1}; my @pa2 = @{$arp2}; my @pas = @{$ars};
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	my $pairs = libraryPairs($libraries);
+	my @pas = @{libraryFiles($libraries, 'single')};
 	#$outD.= "$MFopt{globalKraTaxkDB}/";
 	my $krakStone = "$outD/krakDone.sto";
 	return $jobd if (-d $outD && -e $krakStone);
@@ -4991,9 +4945,8 @@ sub krakenTaxEst(){
 
 	#die $curDB."\n";
 	#paired read tax assign
-	for (my $i=0;$i<@pa1;$i++){
-		my $r1 = $pa1[$i]; my $r2 = $pa2[$i];
-		$pa1[$i] =~ m/(.*\/)[^\/]+$/; 
+	for (my $i=0;$i<@{$pairs};$i++){
+		my $r1 = $pairs->[$i]{files}{r1}; my $r2 = $pairs->[$i]{files}{r2};
 		$cmd .= "$krkBin --paired --preload --threads $numCore --fastq-input  --db $curDB  $r1 $r2 >$tmpD/rawKrak.$it.out\n";
 		for (my $j=0;$j< @thrs;$j++){
 			$cmd .= "$krkBin-filter --db $curDB  --threshold $thrs[$j] $tmpD/rawKrak.$it.out | $krkBin-translate --mpa-format --db $curDB > $tmpD/krak_$thrs[$j]"."_$it.out\n";
@@ -5051,15 +5004,18 @@ sub check_depth_done{
 
 #create string for mapper to register libraries
 sub getRgStr{ 
-	my ($smpl,$libsOri,$libsOriX,$usePairs,$mapper) = @_;
+	my ($smpl,$libsOri,$libsOriX,$usePairs,$mapper,$readTechnology) = @_;
 	my $rgStr ="noReg";
+	my $platform = 'ILLUMINA';
+	$platform = 'PACBIO' if (($readTechnology || '') eq 'PB');
+	$platform = 'ONT' if (($readTechnology || '') eq 'ONT');
 	if ($mapper > 1 || $mapper == -2){ #bwa/minimap2 have same format..
-		$rgStr = '\'@RG\\tID:$smpl\\tSM:'.$smpl.'\\tPL:ILLUMINA';
+		$rgStr = '\'@RG\\tID:$smpl\\tSM:'.$smpl.'\\tPL:'.$platform;
 		$rgStr .= '\\tLB:'.$libsOri.'\'';
 	}
 	if ($mapper==1 || $mapper ==5){ #bowtie2 & strobealign
 		my $sep=" "; $sep = "=" if ($mapper ==5);
-		$rgStr = "--rg-id${sep}$smpl --rg${sep}SM:$smpl --rg${sep}PL:ILLUMINA "; #PU:lib1
+		$rgStr = "--rg-id${sep}$smpl --rg${sep}SM:$smpl --rg${sep}PL:$platform "; #PU:lib1
 		if ($usePairs){
 			$rgStr .= "--rg${sep}LB:$libsOri ";
 			$rgStr .= " -X $MFconfig{mateInsertLength} " if ($libsOri =~ m/mate/ && $mapper==1);
@@ -5261,9 +5217,17 @@ sub mapReadsToRef{
 
 	my $REF = $dirsHr->{sbj}; #target to map onto, can by ","-spearated list
 	#print "$outName\n";
-	my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$ASG,$supportRds,$outName);
-	my @libsOri = @{$liar};
-	my @readTechnologies = @{$rear};
+	my $libraries = ref($dirsHr->{libraries}) eq 'ARRAY'
+		? $dirsHr->{libraries}
+		: getRawLibrariesAssmGrp(\%AsGrps,$ASG,$supportRds,$outName);
+	my $pairs = libraryPairs($libraries);
+	my @pa1 = map { $_->{files}{r1} } @{$pairs};
+	my @pa2 = map { $_->{files}{r2} } @{$pairs};
+	my @paS = @{libraryFiles($libraries, 'single')};
+	my @singleLibraries = grep { $_->{files}{single} } @{$libraries};
+	my @libsOri = (map { $_->{label} || $_->{id} || 'library' } @{$pairs},
+		map { $_->{label} || $_->{id} || 'library' } @singleLibraries);
+	my $recordReadTechnology = libraryTechnology($libraries, "mapping sample $outName", 1);
 	#simple rule for mapper program: for now set to bowtie2
 
 	#die "$REF\n";
@@ -5278,8 +5242,11 @@ sub mapReadsToRef{
 	my $mappDirPre = ${$dirsHr}{glbMapDir};	my $nodeTmp = ${$dirsHr}{nodeTmp}; #m,s
 	$nodeTmp.="_map${supTag}/";
 	my $qdir = $logDir; $qdir = ${$dirsHr}{qsubDir} if (exists( ${$dirsHr}{qsubDir} ));
-	my $readTec = ${$dirsHr}{readTec};
-	if ($readTec eq "" && @readTechnologies){$readTec = $readTechnologies[0];}
+	my $declaredReadTechnology = ${$dirsHr}{readTec} || '';
+	die "Mapping technology '$declaredReadTechnology' disagrees with library records '$recordReadTechnology' for $outName\n"
+		if ($declaredReadTechnology ne '' && $recordReadTechnology ne ''
+			&& $declaredReadTechnology ne $recordReadTechnology);
+	my $readTec = $recordReadTechnology || $declaredReadTechnology;
 	my $tmpOut = ${$dirsHr}{glbTmp};	my $finalD = ${$dirsHr}{outDir}; #node-local work, final mapping
 	my $unaligned = $finalUnaligned eq "" ? "" : $tmpOut."/unaligned/";
 	my $mapperProgLoc = decideMapper($MFopt{MapperProg},$readTec);
@@ -5308,7 +5275,6 @@ sub mapReadsToRef{
 	my @tmpOutxtra = ($nodeTmp."/$baseN.iniAlignment.xtra");
 	#global value overwrites local value
 	if ($doCram){$doCram = $MFopt{doBam2Cram};}
-	my @pa1 = @{$par1}; my @pa2 = @{$par2}; my @paS = @{$parS};
 	#calculate total input size (to get handle on req disk space
 	
 
@@ -5499,7 +5465,7 @@ sub mapReadsToRef{
 			
 			#$pa1[$i] =~ m/\/([^\/]+)\.f.*q$/;
 			#my $rgID = "$outName";
-			my $rgStr = getRgStr($outName,$libsOri[$i],$libsOri[$i],$usePairs,$mapperProgLoc);
+			my $rgStr = getRgStr($outName,$libsOri[$i],$libsOri[$i],$usePairs,$mapperProgLoc,$readTec);
 			#die "$rgStr\n";
 			if ($mapperProgLoc==1){ #bowtie2
 				if ($usePairs){
@@ -6053,7 +6019,7 @@ sub metphlanMapping{
 	
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
 
-	my $inF1a = ${$cleanSeqSetHR}{arp1}; my $inF2a = ${$cleanSeqSetHR}{arp2}; my $inFSa = ${$cleanSeqSetHR}{singAr}; my $mergRdsHr = ${$cleanSeqSetHR}{mrgHshHR};
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
 
 	
 	my $bwt2Bin = getProgPaths("bwt2");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
@@ -6068,7 +6034,10 @@ sub metphlanMapping{
 	
 	my $stone = $finOutD."$smp.MP2.sto";
 	if (!$MFopt{DoMetaPhlan} ||  -e $stone){return;}
-	my @car1 = @{$inF1a}; my @car2 = @{$inF2a}; my @sar = @{$inFSa};
+	my $pairs = libraryPairs($libraries);
+	my @car1 = map { $_->{files}{r1} } @{$pairs};
+	my @car2 = map { $_->{files}{r2} } @{$pairs};
+	my @sar = @{libraryFiles($libraries, 'single')};
 	my $inF1 = join(",",@car1); my $inF2 = join(",",@car2); my $inFS = join(",",@sar); 
 	system "mkdir -p $finOutD\n" unless (-d $finOutD);
 	my $finOut = $finOutD."$smp.MP2.txt";
@@ -6114,13 +6083,15 @@ sub TaxaTarget{
 	my ($tmpD,$finOutD,$smp,$Ncore,$deps) = @_;
 	
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $inF1a = ${$cleanSeqSetHR}{arp1}; my $inF2a = ${$cleanSeqSetHR}{arp2}; my $inFSa = ${$cleanSeqSetHR}{singAr}; #my $mergRdsHr = ${$cleanSeqSetHR}{mrgHshHR};
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
 
 	my $stone = $finOutD."$smp.TaxTar.sto";
 	if (!$MFopt{DoTaxaTarget} ||  -e $stone){return;}
 
-	my @car1 = @{$inF1a}; my @car2 = @{$inF2a}; my @sar = @{$inFSa};	
-	die "TaxaTarget requires equal paired-read arrays for sample $smp\n" if (@car1 != @car2);
+	my $pairs = libraryPairs($libraries);
+	my @car1 = map { $_->{files}{r1} } @{$pairs};
+	my @car2 = map { $_->{files}{r2} } @{$pairs};
+	my @sar = @{libraryFiles($libraries, 'single')};
 	die "TaxaTarget requires at least one paired-read library for sample $smp\n" if (!@car1);
 	die "TaxaTarget does not support singleton reads for sample $smp; disable it or provide paired reads only\n" if (@sar);
 	my $taxTBin = getProgPaths("TaxaTarget");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
@@ -6359,6 +6330,31 @@ sub sdmStats {
 	}
 	my $filStats = getFileStr($inF,0,70);
 	return _parse_sdm_stats_text($filStats, $MaxLengthHistBased, $suffix);
+}
+
+sub sdmStatsMany {
+	my ($files, $inD, $suffix) = @_;
+	my @countFields = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2);
+	my @averageFields = qw(AvgSeqLen AvgSeqQual accErr);
+	my %combined = map { $_ => 0 } (@countFields, @averageFields, 'MaxSeqLength');
+	my %averageWeights;
+	foreach my $file (@{$files || []}) {
+		next unless defined($file) && $file ne '' && -s $file;
+		my $stats = sdmStats($file, $inD, '');
+		my $weight = ($stats->{totRds} || 0) + 0;
+		$combined{$_} += ($stats->{$_} || 0) for @countFields;
+		foreach my $field (@averageFields) {
+			next unless defined($stats->{$field}) && $stats->{$field} ne '';
+			$combined{$field} += $stats->{$field} * $weight;
+			$averageWeights{$field} += $weight;
+		}
+		$combined{MaxSeqLength} = $stats->{MaxSeqLength}
+			if (($stats->{MaxSeqLength} || 0) > $combined{MaxSeqLength});
+	}
+	$combined{$_} = $averageWeights{$_}
+		? $combined{$_} / $averageWeights{$_} : '' for @averageFields;
+	return {map { ($_.$suffix) => $combined{$_} }
+		(@countFields, @averageFields, 'MaxSeqLength')};
 }
 
 
@@ -6752,10 +6748,9 @@ sub smplStats {
 		@values{keys %$named} = values %$named;
 	};
 	my $seq_set = ref($map{$SmplN}{seqSet}) eq 'HASH' ? $map{$SmplN}{seqSet} : {};
-	my $paired = ref($seq_set->{pa1}) eq 'ARRAY' ? $seq_set->{pa1} : [];
-	my $single = ref($seq_set->{pas}) eq 'ARRAY' ? $seq_set->{pas} : [];
-	$values{InputIsPaired} = @$paired ? 1 : 0;
-	$values{InputIsSingle} = @$single ? 1 : 0;
+	my $input_libraries = readLibrariesByScope($seq_set, 'primary', 0, $SmplN);
+	$values{InputIsPaired} = @{libraryPairs($input_libraries)} ? 1 : 0;
+	$values{InputIsSingle} = @{libraryFiles($input_libraries, 'single')} ? 1 : 0;
 	$values{RawInputSize} = exists($map{$SmplN}{inputFileSizeMB})
 		? sprintf('%.3fG', $map{$SmplN}{inputFileSizeMB}/1024) : -1;
 	$values{RawInputSizeSub} = exists($map{$SmplN}{inputXFileSizeMB})
@@ -6764,20 +6759,22 @@ sub smplStats {
 	# Raw-upload preparation is submitted before read cleaning.
 	$merge->(getContamination("$inD/LOGandSUB/prepEBI.sh.etxt", "$inD/LOGandSUB/prepEBI.sh.otxt", 'EBI'));
 
-	my $primary_log = -s "$inD/LOGandSUB/sdm/filter.log" ? "$inD/LOGandSUB/sdm/filter.log"
-		: (-s "$inD/LOGandSUB/sdmReadCleaner.sh.etxt" ? "$inD/LOGandSUB/sdmReadCleaner.sh.etxt" : '');
-	if ($primary_log ne '') {
-		my $stats = sdmStats($primary_log, $inD, '');
+	my @primary_logs = grep { $_ !~ /filterSuppl/ } glob("$inD/LOGandSUB/sdm/filter*.log");
+	@primary_logs = ("$inD/LOGandSUB/sdmReadCleaner.sh.etxt")
+		if (!@primary_logs && -s "$inD/LOGandSUB/sdmReadCleaner.sh.etxt");
+	if (@primary_logs) {
+		my $stats = sdmStatsMany(\@primary_logs, $inD, '');
 		$merge->($stats);
 		my $accepted = ($stats->{Accepted1} || 0) + ($stats->{Accepted2} || 0);
 		$values{SDMAcceptedPercent} = sprintf('%.3f', 100 * $accepted / $stats->{totRds})
 			if (($stats->{totRds} || 0) > 0);
 		$locStats{$_} = $stats->{$_} for qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2);
 	}
-	my $support_log = -s "$inD/LOGandSUB/sdm/filterS.log" ? "$inD/LOGandSUB/sdm/filterS.log"
-		: (-s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt" ? "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt" : '');
-	if ($support_log ne '') {
-		my $stats = sdmStats($support_log, $inD, '_Sup');
+	my @support_logs = glob("$inD/LOGandSUB/sdm/filterSuppl*.log");
+	@support_logs = ("$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt")
+		if (!@support_logs && -s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt");
+	if (@support_logs) {
+		my $stats = sdmStatsMany(\@support_logs, $inD, '_Sup');
 		$merge->($stats);
 		my $accepted = ($stats->{Accepted1_Sup} || 0) + ($stats->{Accepted2_Sup} || 0);
 		$values{SDMAcceptedPercent_Sup} = sprintf('%.3f', 100 * $accepted / $stats->{totRds_Sup})
@@ -6789,8 +6786,10 @@ sub smplStats {
 	$locStats{contamination} = $contamination->{FilteredContaRdsPerc};
 
 	my $text = getFileStr("$inD/LOGandSUB/flashMrg.sh.otxt",0);
-	$values{Merged} = $1 if $text =~ /\[FLASH\]\s+Combined pairs:\s+(\d+)/;
-	$values{NotMerged} = $1 if $text =~ /\[FLASH\]\s+Uncombined pairs:\s+(\d+)/;
+	my @mergedCounts = $text =~ /\[FLASH\]\s+Combined pairs:\s+(\d+)/g;
+	my @unmergedCounts = $text =~ /\[FLASH\]\s+Uncombined pairs:\s+(\d+)/g;
+	$values{Merged} = sum(@mergedCounts) if @mergedCounts;
+	$values{NotMerged} = sum(@unmergedCounts) if @unmergedCounts;
 	$text = getFileStr("$inD/MicroCens/MC.0.result",0);
 	$values{AvgGenomeSizeEst} = $1 if $text =~ /average_genome_size:\s*([\d.]+)/;
 	$values{TotalGenomesEst} = $1 if $text =~ /genome_equivalents:\s*([\d.]+)/;
@@ -6896,6 +6895,7 @@ sub scndMap2Genos{
 
 	$make2ndMapDecoy{Lib} = $curOutDir if ($MFopt{DoMapModeDecoy});
 	my $cramthebam=0;
+	my $secondMapLibraries = getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,0,$SmplName);
 	#map to all refs at once		
 	my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => join(",",@bwt2outD),unalDir=>"",
 					sbj => join(",",@DBbtRefX),assGrp => $cAssGrp,
@@ -6903,7 +6903,8 @@ sub scndMap2Genos{
 					glbTmp => $nodeSpTmpD."_xtraMapWork/", is2ndMap => 1,
 					qsubDir => "$logDir/map2nd/",mapSupport => 0,
 					glbMapDir => join(",",@mapOutXS),mappingStarted =>1,
-					readTec => ${$cleanSeqSetHR}{readTec}, #$map{$curSmpl}{SeqTech}
+					libraries => $secondMapLibraries,
+					readTec => '',
 					submit => 1, submNow => 1, cramAlig => $cramthebam,
 					sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores},
 					deferMappingCleanup => 1);
@@ -7045,8 +7046,9 @@ sub buildAssemblyMapIdx{
 	my %requiredMappers;
 	for my $request ([$mainRds, 0], [$suppRds, 1]) {
 		next unless $request->[0];
-		my (undef,undef,undef,undef,$readTechnologies) = getRawSeqsAssmGrp(\%AsGrps,$cAssGrp,$request->[1],$smpl);
-		my $readTechnology = @{$readTechnologies} ? $readTechnologies->[0] : "";
+		my $libraries = getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,$request->[1],$smpl);
+		my $readTechnology = libraryTechnology($libraries,
+			"assembly-group $cAssGrp ".($request->[1] ? 'support' : 'primary')." mapper index", 1);
 		my $mapper = decideMapper($MFopt{MapperProg},$readTechnology);
 		# minimap2 and strobealign consume the FASTA directly in mapReadsToRef.
 		next if ($mapper == 3 || $mapper == 5);
@@ -7074,9 +7076,14 @@ sub buildAssemblyMapIdx{
 	my ($jdep, $pseudoAssFile, $Fdir, $smplName) = @_;
 	
 	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $arp1 = ${$cleanSeqSetHR}{arp1}; my $arp2 = ${$cleanSeqSetHR}{arp2}; my $singAr = ${$cleanSeqSetHR}{singAr}; 
-	
-	my @allRds = (@{$arp1},@{$arp2},@{$singAr});
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	die "Pseudoassembly for $curSmpl requires singleton long-read libraries\n"
+		if @{libraryPairs($libraries)};
+	my @nonLong = grep { !$_->{is_long} } @{$libraries};
+	die "Pseudoassembly for $curSmpl received non-long libraries: ".join(', ', map { $_->{id} } @nonLong)."\n"
+		if @nonLong;
+	my @allRds = @{libraryFiles($libraries, 'single')};
+	die "Pseudoassembly for $curSmpl has no singleton reads\n" unless @allRds;
 	$Fdir =~ s{/+$}{};
 	my $psFinal = "$Fdir/".basename($pseudoAssFile);
 	my $psStage = "$psFinal.stage";
@@ -7116,7 +7123,7 @@ sub spadesAssembly{
 
 	
 	#my $p1ar = $AsGrps{$cAsGrp}{FilterSeq1};my $p2ar = $AsGrps{$cAsGrp}{FilterSeq2};my $singlAr = $AsGrps{$cAsGrp}{FilterSeqS};my $cReadTecAr = $AsGrps{$cAsGrp}{ReadTec};
-	my ($p1ar,$p2ar,$singlAr,$cReadTecAr) = getCleanSeqsAssmGrp($asHr, $cAsGrp, 0);
+	my $libraries = getCleanLibrariesAssmGrp($asHr, $cAsGrp, 0);
 	my $jDepe = $AsGrps{$cAsGrp}{SeqClnDeps};
 	
 	
@@ -7124,7 +7131,7 @@ sub spadesAssembly{
 
 	my $spadesBin = getProgPaths("spades");
 	my $isCloudSpades = 0;
-	foreach my $lRT (@{$cReadTecAr}){if ($lRT =~ m/SLR/){$isCloudSpades = 1;}}
+	foreach my $library (@{$libraries}){if (($library->{technology} || '') =~ m/SLR/){$isCloudSpades = 1;}}
 	if ($isCloudSpades){
 		$spadesBin = getProgPaths("cloudspades") ;
 		print "Using CloudSpades\n";
@@ -7142,21 +7149,16 @@ sub spadesAssembly{
 	$cmd .= "echo \"Starting Spades assembly\"\n";
 	my $defTotMem = $MFopt{AssemblyMemory};#60;
 	if ($defTotMem == -1){ #auto set mem
-		$defTotMem = ($map{$curSmpl}{inputFileSizeMB}*4+1e5)/1024;
+		$defTotMem = (spaceInAssGrp($curSmpl)*4+1e5)/1024;
 	}
-
-	my $defMem = ($defTotMem/$nCores);
-	$defTotMem = $defMem * $nCores; #total really available mem (in GB)
 
 	$cmd .= $spadesBin;
 	my $K = $MFopt{AssemblyKmers} ;
 	#insert single reads
 	my $errStep = "";
 	$errStep = "--only-assembler " if ($doClean == 0);
-	my $numInLibs = scalar @{$p1ar};
-	my $sprds = inputFmtSpades($p1ar,$p2ar,$singlAr,$logDir,$cReadTecAr);
-	#$cmd .= " --meta " ;
-	if ($numInLibs <= 1) {$cmd .= " --meta " ;} else {$cmd .= " --sc " ;} #deactivated as never done with other T2 samples..
+	my $sprds = inputFmtSpadesLibraries($libraries,$logDir);
+	$cmd .= " --meta ";
 	$cmd .= " $K $sprds -t $nCores $errStep -m $defTotMem ";#--mismatch-correction "; # --meta  --sc "; #> $log #--meta :buggy in 3.6
 	$cmd .= " --mismatch-correction " if ($MFopt{spadesMisMatCor});
 	if ($helpAssembl ne ""){
@@ -7204,17 +7206,19 @@ sub spadesAssembly{
 	
 	if (-e $logDir."spaderun.sh.otxt"){	#check for out of mem
 		open I,"<$logDir/spaderun.sh.otxt" or die "Can't open old assembly logfile $logDir\n"; my $str = join("", <I>); close I;
-		if ($str =~ / Error in malloc(): out of memory/ ||$str =~ m/TERM_MEMLIMIT: job killed after reaching LSF memory usage limit/){ #memory error for real
+		if ($str =~ / Error in malloc\(\): out of memory/ ||$str =~ m/TERM_MEMLIMIT: job killed after reaching LSF memory usage limit/){ #memory error for real
 			my $replMem  = "";
-			if ($str =~ /\n    Max Memory :     (\d+) MB\n/){	$replMem = int($1*1000/$nCores*1.7);
-			} elsif ($str =~ /\nMAX MEM (\d+)G\n/){	$replMem = int($1/$nCores*1.7);}
+			if ($str =~ /\n    Max Memory :     (\d+) MB\n/){	$replMem = int(($1/1024)*1.7+0.5);
+			} elsif ($str =~ /\nMAX MEM ([\d.]+)G\n/){	$replMem = int($1*1.7+0.5);}
 			unless ($replMem eq ""){
-				if (($replMem *$nCores)< 50){$replMem = 12;} 
-				$defMem = $replMem;
-				print $defMem."G: new MEM\n"; #die $defMem."\n";
+				$replMem = 50 if ($replMem < 50);
+				$defTotMem = $replMem;
+				print $defTotMem."G: new total SPAdes memory\n";
 			}
 		}
 	}
+	# Keep SPAdes' own limit aligned with the scheduler request after an OOM retry.
+	$cmd =~ s/ -m [\d.]+ / -m $defTotMem /;
 	$cmd .= "echo \"MAX MEM ".$defTotMem."G\"\n";
 	$cmd .= "echo \"SPADES\" > $stageOut/$stones{asmDone}\n";
 	$cmd .= "test -s $stageOut/scaffolds.fasta.filt && test -s $stageOut/AssemblyStats.txt && test -s $stageOut/$stones{asmDone} || exit 37\n";
@@ -7238,11 +7242,11 @@ sub spadesAssembly{
 			$QSBoptHR->{useLongQueue} = $MFopt{SpadesLongtime};
 			$QSBoptHR->{tmpSpace} = $locDiskSpace;
 			#$QSBoptHR->{tmpSpace} = $HDDspace{spades}; #set option how much tmp space is required, and reset afterwards
-			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,(int($nCores/2)+1),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
+			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,int($nCores),int($defTotMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
 			$QSBoptHR->{tmpSpace} = $tmpSHDD;
 			$QSBoptHR->{useLongQueue} = 0;
 		} else {
-			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,(int($nCores/2)+1),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
+			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,int($nCores),int($defTotMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 		}
 		#$QSBoptHR->{useLongQueue} = 0;
 	} else {
@@ -7410,10 +7414,13 @@ sub longRdAssembly{
 	# resubmits metaMDBG.  Canonicalise before constructing the atomic paths.
 	$finalOut =~ s{/+$}{};
 	
-	my ($p1ar,$p2ar,$singlAr,$cReadTecAr) = getCleanSeqsAssmGrp($asHr, $cAsGrp, $useSupportRds);
-	if (@{$p1ar} > 0 &&$p1ar->[0] ne ""){print "Paired reads defined (@{$p1ar}), but long read assemblies rely on singleton reads!\nAborting\n";die;}
+	my $libraries = getCleanLibrariesAssmGrp($asHr, $cAsGrp, $useSupportRds);
+	my $pairs = libraryPairs($libraries);
+	if (@{$pairs}){print "Paired reads are defined, but long-read assemblies rely on singleton reads!\nAborting\n";die;}
+	my $singlAr = libraryFiles($libraries, 'single');
 	my $numInLibs = scalar @{$singlAr};
-	my %long_read_tech = map { $_ => 1 } grep { defined($_) && /^(?:PB|ONT)$/ } @{$cReadTecAr};
+	my %long_read_tech = map { ($_->{technology} || '') => 1 }
+		grep { ($_->{technology} || '') =~ /^(?:PB|ONT)$/ } @{$libraries};
 	die "Assembly group $cAsGrp mixes ONT and PacBio reads; split these technologies into separate assembly groups\n"
 		if keys(%long_read_tech) > 1;
 	my ($long_read_tech) = keys %long_read_tech;
@@ -7421,10 +7428,10 @@ sub longRdAssembly{
 		
 	if ($LassP == 5){#hybrid mode.. check that all required files are present or stop here
 		#if (${$cReadTecAr}[0] ne "PB"){print"Expected PacBio (\"PB\") readTech for metaMDBG, found \"${$cReadTecAr}[0]\"\n";die;}
-		my $long_reads_detected=0; foreach (@{$cReadTecAr}){$long_reads_detected=1 if (m/(?:PB|ONT)/);}
+		my $long_reads_detected = keys(%long_read_tech) ? 1 : 0;
 		if (!$long_reads_detected){
 			print "Hybrid Assembly.. expected \"PB\" or \"ONT\" reads for support reads!";
-			print "(found \"@{$cReadTecAr}\" (size:". @{$cReadTecAr} ."))\nAborting..\n";
+			print "(found technologies \"".join(',', map { $_->{technology} || '' } @{$libraries})."\")\nAborting..\n";
 			die;
 		}
 		
@@ -7436,7 +7443,7 @@ sub longRdAssembly{
 	my $jDepe = $AsGrps{$cAsGrp}{SeqClnDeps};
 	
 	my $nameProg= "flye"; $nameProg="mMDBG"if($MFopt{DoAssembly}==4 || $MFopt{DoAssembly}==5);
-	if (${$cReadTecAr}[0] =~ m/SLR/i){die "Can't use synthetic long reads (SLR) with $nameProg\n";}
+	if (grep { ($_->{technology} || '') =~ m/SLR/i } @{$libraries}){die "Can't use synthetic long reads (SLR) with $nameProg\n";}
 	my $nCores = $MFopt{AssemblyCores};#6
 	
 	my $nodeTmp2 = "$nodeTmp/tmpRawRds/";
@@ -7536,10 +7543,11 @@ sub longRdAssembly{
 	
 	my $contigRecovery = "";
 	if ($MFopt{DoAssembly}==3){#FLYE
-		if (${$cReadTecAr}[0] ne "ONT"){print"Expected Oxford Nanopore (\"ONT\") readTech for flye, found \"${$cReadTecAr}[0]\"\n";die;}
+		my $technology = $long_read_tech || '';
+		if ($technology ne "ONT"){print"Expected Oxford Nanopore (\"ONT\") readTech for flye, found \"$technology\"\n";die;}
 		my $flyeBin = getProgPaths("flye");
 		$cmd .= $flyeBin;
-		$cmd .= " --nano-raw $inRds[0] -t $nCores --meta -g 3g ";
+		$cmd .= " --nano-raw ".join(" ", @inRds)." -t $nCores --meta -g 3g ";
 		if ($helpAssembl ne ""){
 			$cmd .= "--subassemblies $helpAssembl ";
 		}
@@ -7606,7 +7614,7 @@ sub longRdAssembly{
 
 	my $defTotMem = $MFopt{AssemblyMemory};#60;
 	if ($defTotMem == -1){ #auto set mem
-		$defTotMem = ($map{$curSmpl}{inputFileSizeMB}*8+1e4)/1024;
+		$defTotMem = (spaceInAssGrp($curSmpl,$useSupportRds)*8+1e4)/1024;
 	}
 
 	my $defMem = ($defTotMem);
@@ -7665,9 +7673,9 @@ sub megahitAssembly{
 #	my $p1ar = $AsGrps{$cAsGrp}{FilterSeq1};my $p2ar = $AsGrps{$cAsGrp}{FilterSeq2};my $singlAr = $AsGrps{$cAsGrp}{FilterSeqS};
 	my $jDepe = $AsGrps{$cAsGrp}{SeqClnDeps};
 #	my $cReadTec = $AsGrps{$cAsGrp}{ReadTec};
-	my ($p1ar,$p2ar,$singlAr,$cReadTec) = getCleanSeqsAssmGrp($asHr, $cAsGrp, 0);
+	my $libraries = getCleanLibrariesAssmGrp($asHr, $cAsGrp, 0);
 
-	if (${$cReadTec}[0] =~ m/SLR/i){die "Can't use synthetic long reads (SLR) with megahit\n";}
+	if (grep { ($_->{technology} || '') =~ m/SLR/i } @{$libraries}){die "Can't use synthetic long reads (SLR) with megahit\n";}
 	#print all samples used 
 	my $nCores = $MFopt{AssemblyCores};#6
 	my $noTmpOnNode = 0; #prevent usage of tmp space on node
@@ -7706,8 +7714,8 @@ sub megahitAssembly{
 	}
 	$K = join(",",@spl);
 	#insert single reads
-	my $numInLibs = scalar @{$p1ar};
-	my $sprds = inputFmtMegahit($p1ar,$p2ar,$singlAr,$logDir);
+	my $numInLibs = scalar @{$libraries};
+	my $sprds = inputFmtMegahitLibraries($libraries,$logDir);
 	$cmd .= $megahitBin;
 	$cmd .= " --k-list $K $sprds -t $nCores -m ". int($defTotMem*1024*1024*1024*0.8) ." --out-prefix megaAss ";
 	if ($helpAssembl ne ""){
@@ -7804,17 +7812,18 @@ sub metagAssemblyRun{
 	my $hostFilter = 0;$hostFilter = 1 if ($AsGrps{$cAssGrp}{CntAimAss} > 3);#reset required HDD space
 	my $tmpN ="";
 	my $LasseP = $MFopt{DoAssembly};
-	my ($p1ar,$p2ar,$singlAr,$cReadTecAr); #for hybrid assemblies, we need to know what reads are potentially available..
-	my ($p1arX,$p2arX,$singlArX,$cReadTecArX);
+	my ($primaryLibraries,$supportLibraries) = ([], []);
 	
 	if ($LasseP == 5){
-		($p1ar,$p2ar,$singlAr,$cReadTecAr) = getCleanSeqsAssmGrp(\%AsGrps, $cAssGrp, 0);
-		($p1arX,$p2arX,$singlArX,$cReadTecArX) = getCleanSeqsAssmGrp(\%AsGrps, $cAssGrp, 1);
+		$primaryLibraries = getCleanLibrariesAssmGrp(\%AsGrps, $cAssGrp, 0);
+		$supportLibraries = getCleanLibrariesAssmGrp(\%AsGrps, $cAssGrp, 1);
 	}
 	if ($LasseP == 5 && $AsGrps{$cAssGrp}{SupportReads} !~ /(?:PB|ONT):/){#$map{$curSmpl}{"SupportReads"} eq ""){#! scalar(@{$singlArX}) ){#decide on single tech
 		$LasseP = 2; #go for megahit by default..
-		$LasseP  = 4 if (${$cReadTecAr}[0] eq "PB");
-		$LasseP  = 3 if (${$cReadTecAr}[0] eq "ONT");
+		my $technology = libraryTechnology($primaryLibraries,
+			"assembly-group $cAssGrp primary assembly selection", 1);
+		$LasseP  = 4 if ($technology eq "PB");
+		$LasseP  = 3 if ($technology eq "ONT");
 		#die "${$cReadTecAr}[0]\nXXXZ\n$LasseP\n";
 	}
 	# Preassemblies remain package-local intermediates. Complete ordinary,
@@ -7846,7 +7855,8 @@ sub metagAssemblyRun{
 	}elsif($LasseP == 2){
 		$tmpN = megahitAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir ,
 			$MFglobal{shortAssembly}, $SmplNameX,$hostFilter,$scaffoldFlag) ;
-	} elsif( ($LasseP == 3 ||  $LasseP == 4) && ${$cleanSeqSetHR}{is3rdGen} ){
+	} elsif( ($LasseP == 3 ||  $LasseP == 4)
+		&& grep { $_->{is_long} } @{readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl)} ){
 		$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir,
 		$MFglobal{shortAssembly}, $SmplNameX,0,$LasseP) ;
 	}
@@ -7860,8 +7870,8 @@ sub metagAssemblyRun{
 	#$finalCommScaffDir "$finalCommScaffDir/scaffDone.sto" $finAssLoc $metaGassembly
 		#my $curAssLoc = $metaGassembly;
 		#$curAssLoc = $finAssLoc if ($efinAssLoc);
-		my ($newScaff,$sdep) = scaffoldCtgs(\%AsGrps,$cAssGrp, #$AsGrps{$cMapGrp}{RawSeq1},$AsGrps{$cMapGrp}{RawSeq2},$AsGrps{$cMapGrp}{Libs},
-				[],[],
+		my ($newScaff,$sdep) = scaffoldCtgs(\%AsGrps,$cAssGrp,
+				[],
 				$assemblyOutDir,$nodeTmp."/scaff/",$publishedScaffDir,$AsGrps{$cAssGrp}{AssemblJobName},$MFopt{MapperCores}, $SmplNameX,1,"");
 		unless ($sdep eq ""){
 			append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $sdep);
@@ -7873,15 +7883,18 @@ sub metagAssemblyRun{
 	#die "inscaff\n";
 	#die "@scaffTarExternalOLib1\n";
 		my $metaGscaffDirExt = "$metaGscaffDir/$scaffTarExternalName/";
-		my ($newScaff,$sdep) = scaffoldCtgs(\%AsGrps,$cAssGrp, #$AsGrps{$cMapGrp}{RawSeq1},$AsGrps{$cMapGrp}{RawSeq2},$AsGrps{$cMapGrp}{Libs},
-				#\@scaffTarExternalOLib1,\@scaffTarExternalOLib2,
-				[],[],
+		my ($newScaff,$sdep) = scaffoldCtgs(\%AsGrps,$cAssGrp,
+				[],
 				$scaffTarExternal,$nodeTmp."/SCFEX$scaffTarExternalName/",$metaGscaffDirExt,$AsGrps{$cAssGrp}{AssemblJobName},$MFopt{MapperCores}, 
 				$SmplNameX,0,$scaffTarExternalName);
 	#my($ar1,$ar2,$scaffolds,$GFdir_a) = @_; #.= "_GFI1";
 		if (@scaffTarExternalOLib1 > 0 ){
 			#die "in gapfill\n$newScaff\n";
-			GapFillCtgs(\@scaffTarExternalOLib1,\@scaffTarExternalOLib2,$newScaff,$metaGscaffDirExt."GapFill/",$sdep,$scaffTarExternalName);
+			my $gapFillLibraries = readLibrariesFromArrays(
+				sample => $SmplNameX, scope => 'primary', phase => 'external',
+				technology => '', r1 => \@scaffTarExternalOLib1, r2 => \@scaffTarExternalOLib2,
+			);
+			GapFillCtgs($gapFillLibraries,$newScaff,$metaGscaffDirExt."GapFill/",$sdep,$scaffTarExternalName);
 		}
 
 		#last;

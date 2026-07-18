@@ -78,5 +78,18 @@ like($strain_source, qr/my \$tree_sample_separator = quotemeta\(\$SaSe\)/,
 my $resort_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'resortMGSgenes4importance.pl'));
 like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 	'gene-priority resorting flushes its final MGS at EOF');
+like($resort_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
+	'gene-priority resorting uses the propagated catalog identity');
+my $mgs_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
+like($mgs_source, qr/"clusterID=i" => \\\$clusterID/,
+	'MGS accepts a gene-catalog cluster identity');
+like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -cores \$numCore/,
+	'MGS passes cluster identity to MAG clustering');
+like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -maxCores \$canCore/,
+	'MGS passes cluster identity to strain analysis');
+unlike($mgs_source, qr/compl\.incompl\.95\.(?:fna|prot)/,
+	'MGS has no active catalog path pinned to identity 95');
+like($strain_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
+	'within-MGS analysis reads the selected catalog index');
 
 done_testing();

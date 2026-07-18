@@ -20,12 +20,15 @@ my $version = 0.13;
 
 
 # set up some base variables
-die "Usage: $0 GC-dir MGS-file GTDB|FMG mode\n" unless @ARGV == 4;
+die "Usage: $0 GC-dir MGS-file GTDB|FMG mode [cluster-ID]\n" unless @ARGV == 4 || @ARGV == 5;
 my $rareBin = getProgPaths("rare");
 my $GCd = $ARGV[0];
 my $MGSfile = $ARGV[1];
 my $useGTDBmg = $ARGV[2];
 my $mode = $ARGV[3];
+my $clusterID = @ARGV == 5 ? $ARGV[4] : 95;
+die "cluster-ID must be between 1 and 100\n"
+	unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
 my $obsFile = $MGSfile; #$ARGV[3];# if (@ARGV > 3);
 $obsFile =~ s/\.core$//; $obsFile.=".obs";
 die "ARG 2 option has to be \"GTDB\" or \"FMG\"\n" unless ($useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG");
@@ -71,7 +74,7 @@ print STDERR "Loaded $totMGSgenes $useGTDBmg marker genes from \n";
 
 #alt: go with compl.incompl.95.fna.clstr.idx to calc gene occurrences..
 my %geneOcc;
-my ($I,$ST) = gzipopen("$GCd/compl.incompl.95.fna.clstr.idx","gene cat index file");
+my ($I,$ST) = gzipopen("$GCd/compl.incompl.$clusterID.fna.clstr.idx","gene cat index file");
 #my $maxOcc = 0;
 while (<$I>){
 	chomp; my @spl= split /\t/;
@@ -205,7 +208,6 @@ sub evalCurMGS{
 	$MGScnt++;
 	return $retStr;
 }
-
 
 
 
