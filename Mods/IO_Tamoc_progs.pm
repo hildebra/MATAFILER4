@@ -313,6 +313,7 @@ sub activateBase{
 
 sub mapperDBbuilt( $ $){
 	my ($DBbtRef, $MapperProg2) = @_;
+	$MapperProg2 = decideMapper($MapperProg2, "");
 	my $bwt2IdxFileSuffix = ".bw2";my $mini2IdxFileSuffix = ".mmi";
 	my $kmaIdxFileSuffix = ".kma";
 	if ($MapperProg2 == 5){return 1;} #strobealign doesn't need index..

@@ -334,4 +334,33 @@ like($mataf4,
 	qr/if\s*\(\s*\(\$presence==0\s*\|\|\s*\$assInputFlaw==1\s*\)\s*&&\s*\$runThis\)\{\s*print\s+"sdm'ing support reads\.\.\\n"\s+if\s*\(\$useXtras\)/s,
 	'support SDM message is emitted only when an SDM job is submitted');
 
+like($mataf4,
+	qr/if \(\$is2ndMap && \$MFopt\{MapRewrite2nd\}\)/,
+	'secondary-map rewrite cannot delete primary assembly mappings');
+unlike($mataf4, qr/gunzip \$REF/,
+	'compressed mapping references are never decompressed in place');
+like($mataf4,
+	qr/\$pigzBin -dc \$compressedReference > \$stagedReference.*?mappingReference/s,
+	'compressed mapping references are staged in mapper-local storage');
+like($mataf4,
+	qr/canonical BAM\/CRAM.*?if \(\$outstat && !\$outstat2 && \$mappingCommand eq ""\).*?\$smtBin depth/s,
+	'missing coverage is repaired directly from the canonical alignment');
+like($mataf4,
+	qr/\$mappingInputSizeMB = \$supportRds\s*\? \(\$map\{\$curSmpl\}\{inputXFileSizeMB\}/s,
+	'support mapping resources are based on support-read input size');
+unlike($mataf4, qr/if \(1\)\{\s*#always active #\(\$numLib > 1\)/,
+	'single BAM segments no longer pass through an unconditional samtools cat');
+like($mataf4,
+	qr/if \(\@bamParts > 1\).*?\$smtBin cat.*?elsif \(\@bamParts == 1\).*?mv \$bamParts\[0\]/s,
+	'samtools cat is reserved for multiple BAM segments');
+like($mataf4,
+	qr/my \$sortMemoryMB = .*?\$locSrtMem.*?\$numCore.*?sort -n -m \$\{sortMemoryMB\}M/s,
+	'samtools per-thread sort memory follows the requested total memory');
+like($mataf4,
+	qr/my %requiredMappers.*?next if \(\$mapper == 3 \|\| \$mapper == 5\).*?next if \(\$cmdDB eq ""\)/s,
+	'assembly index jobs are deduplicated and omitted for direct-FASTA mappers');
+like($mataf4,
+	qr/my \@readTechnologies = \@\{\$rear\}.*?\$readTec = \$readTechnologies\[0\]/s,
+	'automatic mapper selection uses sequencing technology rather than library metadata');
+
 done_testing;

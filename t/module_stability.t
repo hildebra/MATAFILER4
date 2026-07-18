@@ -71,6 +71,10 @@ for my $suffix (qw(1 2 3 4 rev.1 rev.2)) {
 	close $idx;
 }
 ok(mapperDBbuilt("$root/reference.fa", 1), 'a complete Bowtie2 index is accepted');
+ok(mapperDBbuilt("$root/reference.fa", -1),
+	'automatic short-read mapper completeness resolves to Bowtie2 only');
+ok(mapperDBbuilt("$root/reference.fa", -2),
+	'automatic strobealign completeness does not require an index');
 unlink "$index.3.bt2" or die $!;
 ok(!mapperDBbuilt("$root/reference.fa", 1), 'a partial Bowtie2 index is rejected');
 

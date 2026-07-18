@@ -1197,7 +1197,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#need index for mapper?
 	my $doMapping = $MappingGo && !$eFinMapCovGZ && $MFopt{map2Assembly} && ($MFopt{DoAssembly} || $mapAssFlag);
 	
-	my $assemblyBuildIndexFlag=0; 	$assemblyBuildIndexFlag=1 if (-s $finAssLoc && ($doMapping || $mapSuppAssFlag) && ! mapperDBbuilt($finAssLoc,$MFopt{MapperProg}) ); 
+	my $assemblyBuildIndexFlag=0; 	$assemblyBuildIndexFlag=1 if (-s $finAssLoc && ($doMapping || $mapSuppAssFlag));
 	#die "$assemblyBuildIndexFlag  $MFopt{DoAssembly}  && -s $finAssLoc  && $MFopt{map2Assembly} && ($mapAssFlag || $mapSuppAssFlag ) \n". mapperDBbuilt($finAssLoc,$MFopt{MapperProg})  ."\n";
 	#print "build $assemblyBuildIndexFlag   $MFopt{DoAssembly} && !$assemblyFlag && $MFopt{map2Assembly} && $mapAssFlag && $MFopt{MapperProg}\n";
 	if ($assemblyBuildIndexFlag && $AsGrps{$cAssGrp}{AssemblJobName} eq ""){ #in this case asembly was done, but index was never built
@@ -5251,6 +5251,7 @@ sub mapReadsToRef{
 	#print "$outName\n";
 	my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$ASG,$supportRds,$outName);
 	my @libsOri = @{$liar};
+	my @readTechnologies = @{$rear};
 	#simple rule for mapper program: for now set to bowtie2
 
 	#die "$REF\n";
@@ -5266,10 +5267,13 @@ sub mapReadsToRef{
 	$nodeTmp.="_map${supTag}/";
 	my $qdir = $logDir; $qdir = ${$dirsHr}{qsubDir} if (exists( ${$dirsHr}{qsubDir} ));
 	my $readTec = ${$dirsHr}{readTec};
-	if ($readTec eq "" && @libsOri){$readTec = $libsOri[0];}
+	if ($readTec eq "" && @readTechnologies){$readTec = $readTechnologies[0];}
 	my $tmpOut = ${$dirsHr}{glbTmp};	my $finalD = ${$dirsHr}{outDir}; #node-local work, final mapping
 	my $unaligned = $finalUnaligned eq "" ? "" : $tmpOut."/unaligned/";
 	my $mapperProgLoc = decideMapper($MFopt{MapperProg},$readTec);
+	my $mappingInputSizeMB = $supportRds
+		? ($map{$curSmpl}{inputXFileSizeMB} || 0)
+		: ($map{$curSmpl}{inputFileSizeMB} || 0);
 	#die "$finalD\n";
 	my @finalDS = split /,/,$finalD;
 	my @mappDir = split /,/,$mappDirPre;
@@ -5314,6 +5318,23 @@ sub mapReadsToRef{
 			$bwtIdxs[$kk] .= $MFcontstants{bwt2IdxFileSuffix};
 		}
 	}
+	my $referencePreparationCommand = "";
+	if ($REF =~ /\.gz$/) {
+		my $compressedReference = $REF;
+		my $stagedReference = "$nodeTmp/".basename($compressedReference);
+		$stagedReference =~ s/\.gz$//;
+		$referencePreparationCommand .= "mkdir -p $nodeTmp\n";
+		$referencePreparationCommand .= "$pigzBin -dc $compressedReference > $stagedReference\n";
+		$referencePreparationCommand .= "test -s $stagedReference\n";
+		if ($mapperProgLoc == 2 || $mapperProgLoc == 4) {
+			$referencePreparationCommand .= "for f in $compressedReference.*; do [ -e \"\$f\" ] || continue; "
+				."suffix=\${f#$compressedReference}; cp \"\$f\" \"$stagedReference\$suffix\"; done\n";
+		}
+		$REF = $stagedReference;
+	}
+	$params{mappingReference} = $REF;
+	$params{referencePreparationCommand} = $referencePreparationCommand;
+	$params{mappingInputSizeMB} = $mappingInputSizeMB;
 	#die "$isSorted\n";
 	my $anyUsedPairs= 1; $anyUsedPairs = 0 if (scalar @pa1 == 0);
 	$params{sortedbam}=$isSorted; $params{bamIsNew} = $bamFresh; $params{is2ndMap} = $is2ndMap;
@@ -5326,7 +5347,7 @@ sub mapReadsToRef{
 		#print "$tmpOut22[$k]\n";
 	}
 	for (my $k=0;$k<@outNms;$k++){
-		if ($MFopt{MapRewrite2nd}){$outputExistsNEx++; system "rm -fr $tmpOut22[$k] $finalDS[$k]/$outNms[$k]-smd*"; next;}
+		if ($is2ndMap && $MFopt{MapRewrite2nd}){$outputExistsNEx++; system "rm -fr $tmpOut22[$k] $finalDS[$k]/$outNms[$k]-smd*"; next;}
 		my $outstat = check_map_done($doCram, $finalDS[$k], $outNms[$k]);
 		next if ($outstat);#-e "$finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz" );#|| -e "$mappDir[$k]/$outNms[$k]-smd.bam.coverage.gz");
 		#print "-e $finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz || -e $mappDir/$outNms[$k]-smd.bam.coverage.gz";
@@ -5354,8 +5375,6 @@ sub mapReadsToRef{
 	#move ref DB & unzip
 	#system("rm -r $tmpOut\n mkdir -p $tmpOut\n cp $REF $tmpOut");
 	#$REF = $tmpOut.basename($REF);
-	my $unzipcmd = "";
-	if ($REF =~ m/\.gz$/){$unzipcmd .= "gunzip $REF\n";$REF =~ s/\.gz$//;}
 	my $jobN = "";
 	my $tmpUna = $tmpOut."/unalTMP/";
 	#Error: No EOF block on /g/scb/bork/hildebra/SNP/MeHiAss/MH0411//tmp//mapping/Alignment.bam, possibly truncated file.
@@ -5367,6 +5386,7 @@ sub mapReadsToRef{
 	#depending on setup, mappDir == tmpOut
 	my $algCmd = "";
 	$algCmd .= "\nrm -rf $tmpOut $nodeTmp\nmkdir -p $tmpOut\nmkdir -p $nodeTmp\n"; 
+	$algCmd .= $referencePreparationCommand;
 	#die "$algCmd\n@mappDir\n";
 	#my $algCmd = "rm -rf ".join(" ",split(/,/,$mappDir))."\nmkdir -p ".join(" ",split(/,/,$mappDir))." $tmpOut $nodeTmp\n"; 
 	$algCmd .= "mkdir -p $qdir/mapStats/\n";
@@ -5529,13 +5549,12 @@ sub mapReadsToRef{
 			my $tarBam = $tmpOut22[$kk];
 			$tarBam = $tmpOut22[$k] if ($decoyModeActive || $map2ndTogether>0);
 			next if ($subBams[$k] eq "");#case that decoy map has already created parts of the mappings..
-			if (1){   #always active #($numLib > 1){
+			my @bamParts = grep { $_ ne "" } split /\s+/, $subBams[$k];
+			if (@bamParts > 1){
 				$algCmd .= "\n$smtBin cat ".$subBams[$k]." $filterStep > $tarBam\n"; #$k here, because this refers to @regs
 				$algCmd .= "\nrm -f ".$subBams[$k]."\n";
-			} else { #nothing else, compression is now in the bowtie2 phase
-				#$algCmd .= "\n$smtBin view -bS -F 4 -@ $Ncore $subBams[0] > $tmpOut22\n";
-				
-				$algCmd .=  "\nmv $subBams[$k] $tarBam\n"; #kk here, because this is the alignment to each single bwtIdx
+			} elsif (@bamParts == 1) {
+				$algCmd .=  "\nmv $bamParts[0] $tarBam\n";
 			}
 		}
 	}
@@ -5561,7 +5580,7 @@ sub mapReadsToRef{
 	if ($bamFresh) {
 		# Mapping and post-processing must execute in one scheduler allocation so
 		# the intermediate alignment can remain on node-local storage.
-		$params{mappingCommand} = $unzipcmd.$algCmd;
+		$params{mappingCommand} = $algCmd;
 		$params{mappingDependencies} = $jDepe;
 		$params{mappingJobName} = "_MAP$JNUM$supTag.$outNms[0]";
 		$params{mappingScript} = $qdir.$bashN."map$supTag.sh";
@@ -5614,9 +5633,12 @@ sub bamDepth{
 	#readTec
 
 	my %params = %{$mapparhr};
+	$REF = $params{mappingReference} if (($params{mappingReference} || "") ne "");
 	my ($isSorted , $bamFresh,$is2ndMap, $usePairs) =($params{sortedbam},$params{bamIsNew},$params{is2ndMap},$params{usePairs});
 	my $mappingCommand = delete($mapparhr->{mappingCommand}) || "";
 	my $mappingDependencies = $params{mappingDependencies} || $jDep;
+	my $referencePreparationCommand = $params{referencePreparationCommand} || "";
+	my $mappingInputSizeMB = $params{mappingInputSizeMB} || 0;
 	#recreate base pars from map2tar sub
 	my $locDoRmDup = $MFopt{MapperRmDup};
 	$locDoRmDup = 0 if (!$usePairs);
@@ -5645,6 +5667,16 @@ sub bamDepth{
 	#die "$mappDir/$baseN-smd.bam.coverage.gz\n$finalD/$baseN-smd.bam.coverage.gz\n" ;#if (-e "$finalD/$baseN-smd.bam.coverage.gz");
 		
 	my $numCore = ${$dirsHr}{sortCores};#new functionality with sambamba
+	$numCore = 1 if (!$numCore || $numCore < 1);
+	my $locSrtMem = $MFopt{mapSortMemGb};
+	my $baseMem=20;
+	if ($locSrtMem < 0){
+		$locSrtMem = $baseMem + (2 * $mappingInputSizeMB/1024);
+		$locSrtMem += $baseMem if ($MFopt{largeMapperDB});
+	}
+	my $sortMemoryMB = int((($locSrtMem * 1024) - 2048) / $numCore);
+	$sortMemoryMB = 256 if ($sortMemoryMB < 256);
+	$sortMemoryMB = 2048 if ($sortMemoryMB > 2048);
 	# A completed mapping may still predate breakpoint output.  Repair that
 	# single derivative from the canonical coverage without trying to sort a
 	# node-local alignment that no longer exists.
@@ -5657,6 +5689,7 @@ sub bamDepth{
 			? "$finalBam.coverage.gz" : "$finalBam.coverage";
 		my $breakpointCmd = "rm -rf $nodeTmp $breakpointStage\n"
 			."mkdir -p $nodeTmp $breakpointDir $breakpointStage\n"
+			.$referencePreparationCommand
 			."test -s $breakpointCoverage\n";
 		$breakpointCmd .= "$pigzBin -t $breakpointCoverage\n" if ($breakpointCoverage =~ /\.gz$/);
 		$breakpointCmd .= "$breakpointScr --assembly $REF --coverage $breakpointCoverage --output $breakpointWork "
@@ -5666,7 +5699,9 @@ sub bamDepth{
 			."test -s $breakpointWork\n"
 			."mv $breakpointWork $breakpointStage/$breakpointName\n"
 			."mv -f $breakpointStage/$breakpointName $breakpointOut\n"
-			."rmdir $breakpointStage\nrm -rf $nodeTmp\n";
+			."rmdir $breakpointStage\nrm -rf $nodeTmp";
+		$breakpointCmd .= " $params{mapperNodeDir}" if (($params{mapperNodeDir} || "") ne "");
+		$breakpointCmd .= "\n";
 		my ($breakpointJob, $breakpointSubmission) = ($jDep, "");
 		if (${$dirsHr}{submit}) {
 			($breakpointJob, $breakpointSubmission) = qsubSystem(
@@ -5678,6 +5713,60 @@ sub bamDepth{
 			$breakpointSubmission = $breakpointCmd;
 		}
 		return ($breakpointJob, $breakpointSubmission, $outstat);
+	}
+	# A complete canonical BAM/CRAM is authoritative. If only coverage (and
+	# possibly its breakpoint derivative) is missing, derive those files directly
+	# without sorting, duplicate removal, or CRAM conversion a second time.
+	if ($outstat && !$outstat2 && $mappingCommand eq "") {
+		my $canonicalAlignment = $doCram
+			? "$finalD/$baseN-smd.cram" : "$finalD/$baseN-smd.bam";
+		my $repairPrefix = "$nodeTmp/$baseN-smd.bam";
+		my $repairCoverage = "$repairPrefix.coverage.gz";
+		my $repairStage = "$finalD/.$baseN.coverage-stage";
+		my $sam2bed = getProgPaths("samcov2bed");
+		my $depthFilters = $dirsHr->{strictHybridCoverage}
+			? "-Q $MFopt{hybridMinMapQ} -q $MFopt{hybridMinBaseQ}" : "";
+		my $referenceOption = $doCram ? "--reference $REF " : "";
+		my $repairCmd = "rm -rf $nodeTmp $repairStage\nmkdir -p $nodeTmp $finalD $repairStage\n";
+		$repairCmd .= $referencePreparationCommand;
+		$repairCmd .= "test -s $canonicalAlignment\n$smtBin quickcheck $canonicalAlignment\n";
+		$repairCmd .= "$smtBin depth ${referenceOption}-aa $depthFilters -@ $numCore $canonicalAlignment "
+			."| $sam2bed | $pigzBin -p $numCore -c > $repairCoverage\n";
+		$repairCmd .= "test -s $repairCoverage\n$pigzBin -t $repairCoverage\n";
+		$repairCmd .= jgi_depth_cmd([$canonicalAlignment],$repairPrefix,95,$numCore,$REF)
+			if ($MFopt{DoJGIcoverage});
+		if (!$breakpointDone) {
+			my $breakpointScr = getProgPaths("breakpoints_scr");
+			my $breakpointDir = dirname($breakpointOut);
+			my $breakpointStage = "$breakpointOut.stage";
+			$repairCmd .= "mkdir -p $breakpointDir\n";
+			$repairCmd .= "$breakpointScr --assembly $REF --coverage $repairCoverage --output $breakpointWork "
+				."--breakpoint-depth $MFopt{breakpointDepth} --min-breakpoint-length $MFopt{breakpointMinLength} "
+				."--smooth-gap $MFopt{breakpointSmoothGap} --flank-length $MFopt{breakpointFlankLength} "
+				."--min-flank-depth $MFopt{breakpointMinFlankDepth} --max-flank-fraction $MFopt{breakpointMaxFlankFraction}\n";
+			$repairCmd .= "test -s $breakpointWork\nrm -f $breakpointStage\n"
+				."mv $breakpointWork $breakpointStage\nmv -f $breakpointStage $breakpointOut\n";
+		}
+		$repairCmd .= "for f in $repairPrefix*; do [ -e \"\$f\" ] || continue; mv \"\$f\" $repairStage/; done\n";
+		$repairCmd .= "test -s $repairStage/$baseN-smd.bam.coverage.gz\n"
+			."for f in $repairStage/*; do mv -f \"\$f\" $finalD/; done\nrmdir $repairStage\n";
+		$repairCmd .= "rm -rf $nodeTmp";
+		$repairCmd .= " $params{mapperNodeDir}" if (($params{mapperNodeDir} || "") ne "");
+		$repairCmd .= "\n";
+		my ($repairJob, $repairSubmission) = ($jDep, "");
+		if (${$dirsHr}{submit}) {
+			my $repairScratch = $QSBoptHR->{tmpSpace};
+			my $baseMapHDD = $HDDspace{mapping}; $baseMapHDD =~ s/G$//;
+			$QSBoptHR->{tmpSpace} = int((2.0 * $mappingInputSizeMB * $baseMapHDD) / 1024) + 10 ."G";
+			($repairJob,$repairSubmission) = qsubSystem(
+				$qdir.$bashN."coverageRepair$supTag.sh",$repairCmd,$numCore,
+				(int($locSrtMem)+1)."G","_COV$JNUM$supTag.$outName",
+				$mappingDependencies,"",$immediateSubm,$QSBoptHR->{General_Hosts},$QSBoptHR);
+			$QSBoptHR->{tmpSpace} = $repairScratch;
+		} else {
+			$repairSubmission = $repairCmd;
+		}
+		return ($repairJob,$repairSubmission,$outstat);
 	}
 	#my $biobambamBin = "bamsormadup";
 	#depth profile
@@ -5703,7 +5792,7 @@ sub bamDepth{
 		$cmd .= "echo \"Sorting .bam and fixing mates ...\"\n";
 		#$cmd .= "$smtBin sort -n -m 768M -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore - - | $smtBin sort -T $sortTMP2 -m 768M -@ $numCore - | $smtBin markdup -s -r -@ $numCore - $nxtBAM\n";
 		#split in two, as it requires too much mem..
-		$cmd .= "$smtBin sort -n -m 768M -u -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore -u - - | $smtBin sort -T $sortTMP2 -m 768M -@ $numCore -o $nxtBAM.nf;\n";
+		$cmd .= "$smtBin sort -n -m ${sortMemoryMB}M -u -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore -u - - | $smtBin sort -T $sortTMP2 -m ${sortMemoryMB}M -@ $numCore -o $nxtBAM.nf;\n";
 		$cmd .= "echo \"marking duplicates ...\"\n";
 		$cmd .= "$smtBin markdup --use-read-groups --no-multi-dup -d 1000 -T $sortTMP -s -r -O BAM -@ $numCore $nxtBAM.nf $nxtBAM;\n";
 		$cmd .= "rm -f $nxtBAM.nf;\n";
@@ -5712,7 +5801,7 @@ sub bamDepth{
 			$cmd .= "mv $mappingRes $nxtBAM\n";
 		} else {
 			$cmd .= "echo \"Sorting .bam ...\"\n";
-			$cmd .= "$smtBin sort -@ $numCore -m 768M -O BAM -T $sortTMP2 $mappingRes > $nxtBAM\n";
+			$cmd .= "$smtBin sort -@ $numCore -m ${sortMemoryMB}M -O BAM -T $sortTMP2 $mappingRes > $nxtBAM\n";
 		}
 	}
 	$cmd .= "echo \"Building .bam index...\"\n";
@@ -5815,20 +5904,15 @@ sub bamDepth{
 		$nodeCln .= " $params{mapperNodeDir}" if (($params{mapperNodeDir} || "") ne "");
 	}
 	$nodeCln .= ";\necho \"DONE mapping\"\n";
-	my $locSrtMem = $MFopt{mapSortMemGb};
-	my $baseMem=20; 
-	if ($locSrtMem <0){
-		$locSrtMem = $baseMem+ (2 * $map{$curSmpl}{inputFileSizeMB}/1024); #default mme usage..
-		$locSrtMem += $baseMem if ($MFopt{largeMapperDB});
-	}
-	
 	#die "$cmd\n$covCmd\n$CRAMcmd\n";
 	if ( $mappingCommand ne "" || ($doCram && !-e $cramSTO) || (!fileGZs("$finalBam.coverage")) || !$breakpointDone ){#|| $bamFresh){
 		my $preHDDspace=$QSBoptHR->{tmpSpace};		my $baseMapHDD = $HDDspace{mapping} ;  $baseMapHDD =~ s/G$//;
-		$QSBoptHR->{tmpSpace} = int((2.0 * $map{$curSmpl}{inputFileSizeMB}*$baseMapHDD) /1024)+30  ."G";		if (${$dirsHr}{submit}){
+		$QSBoptHR->{tmpSpace} = int((2.0 * $mappingInputSizeMB*$baseMapHDD) /1024)+30  ."G";		if (${$dirsHr}{submit}){
 		#die "map2:: $qdir\n$cramSTO\n$nxtBAM.coverage\n";
 		my $combinedCores = $numCore > ($params{mappingCores} || 0) ? $numCore : ($params{mappingCores} || $numCore);
 		my $combinedMem = int($locSrtMem)+1;
+		my $sortRequiredMem = int(($sortMemoryMB * $numCore) / 1024) + 3;
+		$combinedMem = $sortRequiredMem if ($sortRequiredMem > $combinedMem);
 		$combinedMem = $params{mappingMemoryGB} if (($params{mappingMemoryGB} || 0) > $combinedMem);
 		my $combinedScript = $params{mappingScript} || $qdir.$bashN."map$supTag.sh";
 		($jobN2,$retCmds) = qsubSystem($combinedScript,
@@ -6941,25 +7025,30 @@ sub RayAssembly(){
  
 sub buildAssemblyMapIdx{
 	my ($finAssLoc,$cAssGrp, $mainRds, $suppRds, $smpl) = @_;
-	my $anybuilds=0;
-	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0;  
-	if ($suppRds){ #if support reads, build a second DB..
-		my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$cAssGrp,$suppRds,$smpl);
-		my $MapperProgLoc = decideMapper($MFopt{MapperProg},${$liar}[0]);
-		my ($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$MapperProgLoc);#$nCores);
-		my ($jname,$tmpCmd) = qsubSystem($logDir."mapperIdxSupp.sh",$cmdDB,(int($MFopt{MapperCores})),(int($MFopt{bwtIdxAssMem})+1)."G","DBidx$JNUM","","",1,[],$QSBoptHR) ;
-		append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $jname);
-		$anybuilds =1 if ($cmdDB ne"");
+	my %requiredMappers;
+	for my $request ([$mainRds, 0], [$suppRds, 1]) {
+		next unless $request->[0];
+		my (undef,undef,undef,undef,$readTechnologies) = getRawSeqsAssmGrp(\%AsGrps,$cAssGrp,$request->[1],$smpl);
+		my $readTechnology = @{$readTechnologies} ? $readTechnologies->[0] : "";
+		my $mapper = decideMapper($MFopt{MapperProg},$readTechnology);
+		# minimap2 and strobealign consume the FASTA directly in mapReadsToRef.
+		next if ($mapper == 3 || $mapper == 5);
+		$requiredMappers{$mapper} = 1;
 	}
-	if ($mainRds){
-		my ($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$MFopt{MapperProg});#$nCores);
-		my ($jname,$tmpCmd) = qsubSystem($logDir."mapperIdx.sh",$cmdDB,(int($MFopt{MapperCores})),1+(int($MFopt{bwtIdxAssMem}))."G","bwtIdx$JNUM","","",1,[],$QSBoptHR) ;
+	return unless keys %requiredMappers;
+	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0;
+	my $submitted = 0;
+	for my $mapper (sort {$a <=> $b} keys %requiredMappers) {
+		my ($cmdDB) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$mapper);
+		next if ($cmdDB eq "");
+		my ($jname) = qsubSystem($logDir."mapperIdx.$mapper.sh",$cmdDB,
+			int($MFopt{MapperCores}),(int($MFopt{bwtIdxAssMem})+1)."G",
+			"mapIdx${mapper}_$JNUM","","",1,[],$QSBoptHR);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $jname);
-		$anybuilds =1 if ($cmdDB ne"");
+		$submitted++ if ($jname ne "");
 	}
-	$QSBoptHR->{tmpSpace} =$tmpSHDD;
-	
-	print "Building mapper index for assembly $finAssLoc\n ";
+	$QSBoptHR->{tmpSpace} = $tmpSHDD;
+	print "Building $submitted mapper index job(s) for assembly $finAssLoc\n" if $submitted;
 	
 }
 
