@@ -1363,7 +1363,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						bpSplit => 1e6,runLocal => 1,SeqTech => $map{$curSmpl}{SeqTech},SeqTechSuppl => "",
 						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
 						jdeps => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
-						deferRegionPlanning => (!$allMapDone || $calcCoverage ? 1 : 0),
+						# Region planning reads the assembly and may build its faidx locally.
+						# A scheduled assembly is not available yet, even when a sample with
+						# no primary reads makes mapping/coverage appear complete.
+						deferRegionPlanning => (!$efinAssLoc || !$allMapDone || $calcCoverage ? 1 : 0),
 						immediateSubm => ($assemblyDownstreamDeferred ? 0 : 1),
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
 						STOconSNP => $STOsnpCons, STOconSNPsupp => "",

@@ -244,6 +244,9 @@ like($mataf4,
 	qr/my \$mappingArtifactsPresent\s*=.*?if \(!\$efinAssLoc && !\$ePreAssmbly && \$mappingArtifactsPresent\)/s,
 	'a missing clean-run assembly does not masquerade as a mapping redo');
 like($mataf4,
+	qr/deferRegionPlanning\s*=>\s*\(!\$efinAssLoc \|\| !\$allMapDone \|\| \$calcCoverage \? 1 : 0\)/,
+	'SNP region indexing is deferred until the final assembly has been published');
+like($mataf4,
 	qr/my \$supportMappingPublished\s*=.*?\$eFinSupMapCovGZ.*?\$supportMappingPublished/s,
 	'hybrid binning waits for support mapping to be published');
 like($mataf4,
