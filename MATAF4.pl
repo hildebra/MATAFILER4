@@ -796,7 +796,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	#requires only bam/cram && assembly
 	my $calcConsSNP=0; 
-	if ($MFopt{DoConsSNP} && !$doPreAssmFlag && !$ePreAssmblPck){
+	if ($MFopt{DoConsSNP} && $map{$curSmpl}{hasPrimaryRds} && !$doPreAssmFlag && !$ePreAssmblPck){
 		my $exSNPf= fileGZe($vcfSNP);
 		if ($exSNPf && fileGZs($vcfSNP) == 0){system "rm -f $vcfSNP*";$exSNPf=0;} #some old versions produced an empty vcf file..
 		$calcConsSNP=0; $calcConsSNP =1 if ( !-e $STOsnpCons || ($MFopt{saveConsFastas} &&  fileGZe($genePredSNP)==0  ) || ($MFopt{saveVCF} &&  !$exSNPf ) ) ;
@@ -806,7 +806,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	
 	#structural variants calcs
-	my $calcSVs = 0; $calcSVs = 1 if ( $MFopt{callSVs} && !-e $vcfSV && !$doPreAssmFlag && !$ePreAssmblPck);
+	my $calcSVs = 0; $calcSVs = 1 if ( $map{$curSmpl}{hasPrimaryRds} && $MFopt{callSVs} && !-e $vcfSV && !$doPreAssmFlag && !$ePreAssmblPck);
 	my $calcSVsSupp = 0; $calcSVsSupp = 1 if ($locMapSup2Assembly && !$doPreAssmFlag && !$ePreAssmblPck && $MFopt{callSVsSupp} && !-e $vscSVsupp );
 	if (!$mapAssFlag && ($calcConsSNP || $calcSVsSupp || $calcSVs || $calcSuppConsSNP) && $eFinMapCovGZ && !$allMapDone ){
 		#die $mapAssFlag;
@@ -1319,17 +1319,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 #	die;
 	add2SampleDeps(\@sampleDeps, [$publicationDeps,$jdep]);
-	my $deferredConsDeps = "";
-	if ($AssemblyGo) {
-		$deferredConsDeps = postSubmQsub(
-			"$logDir/MultiConsensus.sh", $AsGrps{$cAssGrp}{PostConsCmd},
-			normalise_job_dependencies($jdep, $publicationDeps),
-		);
-		$AsGrps{$cAssGrp}{PostConsCmd} = "" if ($deferredConsDeps ne "");
-	}
-	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredConsDeps);
-	add2SampleDeps(\@sampleDeps, [$deferredConsDeps]);
-
 	#Binning, SNP calling: only after copying files from tmp and running contig stats
 	if ( $calcBinning && $AssemblyGo ){  #$allMapDone rm: this is checked now via $AsGrps{$cAssGrp}{MapDeps}
 		my $binnerTmp = $nodeSpTmpD;
@@ -1340,12 +1329,21 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	
 	#die "AT CONS SNP\n$allMapDone\n";
-	my $assemblyDownstreamScheduled = $AssemblyGo && !$doPreAssmFlag && !$ePreAssmblPck
-		&& ($efinAssLoc || $MFopt{DoAssembly} != 5 || $postPreAssmblGo)
-		&& (!$map{$curSmpl}{hasPrimaryRds} || ($MFopt{map2Assembly} && $MappingGo));
-	my $assemblyDownstreamDeferred = $mappingDeferred && !$doPreAssmFlag && !$ePreAssmblPck;
-	if ( ($calcConsSNP || $calcSuppConsSNP || $calcSVs || $calcSVsSupp )
-			&& (($allMapDone && !$calcCoverage) || $assemblyDownstreamScheduled || $assemblyDownstreamDeferred)){
+	my $primaryVariantRequested = $calcConsSNP || $calcSVs;
+	my $supportVariantRequested = $calcSuppConsSNP || $calcSVsSupp;
+	my $variantWorkRequested = $primaryVariantRequested || $supportVariantRequested;
+	my $variantCommonInputsReady = $efinAssLoc && $boolGenePredOK
+		&& fileGZe("$finalCommAssDir/genePred/genes.gff");
+	my $primaryVariantInputsReady = !$primaryVariantRequested || (
+		$eFinMapCovGZ && -s "$finalMapDir/$SmplName-smd.$bamcramMap"
+		&& -s "$finalMapDir/$SmplName-smd.bam.coverage.gz" && $eCovAsssembly
+	);
+	my $supportVariantInputsReady = !$supportVariantRequested || (
+		$eFinSupMapCovGZ && -s "$finalMapDir/$SmplName.sup-smd.$bamcramMap"
+		&& fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage") && $eSuppCovAsssembly
+	);
+	if ($variantWorkRequested && $variantCommonInputsReady
+			&& $primaryVariantInputsReady && $supportVariantInputsReady){
 		#die "conssnp:: $calcConsSNP $allMapDone $finalMapDir\n";
 		#my $ofas = "$curOutDir/SNP/genePred/genes.shrtHD.SNPc.fna";
 	
@@ -1363,11 +1361,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						bpSplit => 1e6,runLocal => 1,SeqTech => $map{$curSmpl}{SeqTech},SeqTechSuppl => "",
 						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
 						jdeps => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
-						# Region planning reads the assembly and may build its faidx locally.
-						# A scheduled assembly is not available yet, even when a sample with
-						# no primary reads makes mapping/coverage appear complete.
-						deferRegionPlanning => (!$efinAssLoc || !$allMapDone || $calcCoverage ? 1 : 0),
-						immediateSubm => ($assemblyDownstreamDeferred ? 0 : 1),
+						deferRegionPlanning => 0,
+						immediateSubm => 1,
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
 						STOconSNP => $STOsnpCons, STOconSNPsupp => "",
 						minCallQual => $MFopt{SNPminCallQual},
@@ -1382,8 +1377,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$SNPinfo{STOconSNPsupp} = $STOsnpSuppCons   ; #trigger for also looking at cons SNP for support reads
 		}
 		
-		my ($consSNPdep,$consSNPcmd) = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
-		$AsGrps{$cAssGrp}{PostConsCmd} .= $consSNPcmd if ($assemblyDownstreamDeferred);
+		my ($consSNPdep) = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
 		add2SampleDeps(\@sampleDeps, [$consSNPdep]);
 		#push(@sampleDeps, $consSNPdep) if (defined $consSNPdep && $consSNPdep ne "");
 	}
@@ -7005,6 +6999,11 @@ sub scndMap2Genos{
 	append_job_dependencies(\$AsGrps{$cMapGrp}{MapDeps}, $sortJD);
 	append_job_dependencies(\$AsGrps{$cAssGrp}{scndMapping}, $sortJD);
 	for my $SNPinfo (@pendingSecondMapSNP) {
+		my $secondReference = $SNPinfo->{assembly};
+		my $secondMapping = $SNPinfo->{MAR}->[0];
+		# Do not construct a consensus workflow around future scheduler outputs.
+		# A later pipeline pass will return here after both files are published.
+		next unless -s $secondReference && -s $secondMapping;
 		$SNPinfo->{jdeps} = normalise_job_dependencies($SNPinfo->{jdeps}, $sortJD);
 		my $consSNPdep = createConsSNPandSVs($SNPinfo);
 		add2SampleDeps($sampleDepsAR, [$consSNPdep]);

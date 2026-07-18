@@ -220,8 +220,8 @@ like($mataf4,
 	qr/my \$command_dependencies\s*=\s*normalise_job_dependencies\(.*?\$submitted\[-1\]/s,
 	'deferred combined mapping commands retain their submission order');
 like($mataf4,
-	qr/Submitting deferred assembly-group mapping jobs.*?my \$publicationDeps = normalise_job_dependencies\(.*?MultiContigStats\.sh.*?MultiConsensus\.sh/s,
-	'assembly groups release mapping, producer publication, contig statistics, and consensus in stages');
+	qr/Submitting deferred assembly-group mapping jobs.*?my \$publicationDeps = normalise_job_dependencies\(.*?MultiContigStats\.sh/s,
+	'assembly groups release mapping, producer publication, and contig statistics in stages');
 like($mataf4,
 	qr/params\{mappingCommand\}.*?my \$mappingCommand = delete\(\$mapparhr->\{mappingCommand\}\).*?qsubSystem\(\$combinedScript/s,
 	'MAP and sort/depth are submitted as one combined scheduler job');
@@ -244,8 +244,8 @@ like($mataf4,
 	qr/my \$mappingArtifactsPresent\s*=.*?if \(!\$efinAssLoc && !\$ePreAssmbly && \$mappingArtifactsPresent\)/s,
 	'a missing clean-run assembly does not masquerade as a mapping redo');
 like($mataf4,
-	qr/deferRegionPlanning\s*=>\s*\(!\$efinAssLoc \|\| !\$allMapDone \|\| \$calcCoverage \? 1 : 0\)/,
-	'SNP region indexing is deferred until the final assembly has been published');
+	qr/my \$variantCommonInputsReady = \$efinAssLoc && \$boolGenePredOK.*?genes\.gff.*?\$primaryVariantInputsReady.*?\$eFinMapCovGZ.*?bam\.coverage\.gz.*?\$supportVariantInputsReady.*?\$eFinSupMapCovGZ.*?sup-smd\.bam\.coverage.*?if \(\$variantWorkRequested && \$variantCommonInputsReady/s,
+	'ConsSNP is not called until its assembly, gene predictions, mappings, and coverage are published');
 like($mataf4,
 	qr/my \$supportMappingPublished\s*=.*?\$eFinSupMapCovGZ.*?\$supportMappingPublished/s,
 	'hybrid binning waits for support mapping to be published');
@@ -279,8 +279,11 @@ like($mataf4, qr/append_job_dependencies\(\\\$AsGrps\{\$cAssGrp\}\{BinDeps\}, \$
 	'all binners wait for the contig-stat job that creates their coverage inputs');
 like($mataf4, qr/submitGenomeBinner\(\$binnerTmp,\$finAssLoc/,
 	'first-pass binning consumes the producer-published final assembly path');
-like($mataf4, qr/jdeps => \$AsGrps\{\$cAssGrp\}\{BinDeps\}.*?deferRegionPlanning/s,
-	'first-pass consensus receives real scheduler dependencies and defers input inspection');
+unlike($mataf4, qr/assemblyDownstreamScheduled|assemblyDownstreamDeferred|MultiConsensus\.sh/,
+	'first-pass consensus is not constructed for deferred submission');
+like($mataf4,
+	qr/for my \$SNPinfo \(\@pendingSecondMapSNP\).*?next unless -s \$secondReference && -s \$secondMapping;.*?createConsSNPandSVs\(\$SNPinfo\)/s,
+	'secondary-reference ConsSNP also waits for its published reference and mapping');
 unlike($mataf4,
 	qr/\{(?:AssemblJobName|MapDeps|BinDeps|SeqClnDeps|SeqUnZDeps|UnzpDeps|readDeps|DiamDeps|scndMapping|prodRun)\}\s*\.=/,
 	'central workflow dependencies are not assembled with fragile string concatenation');
