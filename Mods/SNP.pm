@@ -213,7 +213,11 @@ sub pileupcall{
 	}
 	my @allDeps2; my @chunkFiles;
 	#implement in parallel as too slow in single core mode :/
-	my @oldChunks = bsd_glob("$tmpOut.$tag*.vcf.gz");
+	my @oldChunks = (
+		bsd_glob("$tmpOut.$tag*.vcf.gz"),
+		bsd_glob("$tmpOut.$tag*.vcf.gz.csi"),
+		bsd_glob("$tmpOut.$tag*.vcf.gz.tbi"),
+	);
 	unlink @oldChunks if $overwrite && @oldChunks;
 	make_path($qsubDirE) unless -d $qsubDirE;
 	my @oldBeds = bsd_glob("$qsubDirE/$smplNm.$tag*.bed");
@@ -226,17 +230,21 @@ sub pileupcall{
 		my $bedF = $qsubDirE."$smplNm.${tag}$i.bed";
 		my $chunkFile = "$tmpOut.$tag$i.vcf.gz";
 		push @chunkFiles, $chunkFile;
-		next if (-s $chunkFile && !$overwrite);
+		next if (-s $chunkFile && (-s "$chunkFile.csi" || -s "$chunkFile.tbi") && !$overwrite);
 		if ($myParL){
 			unless ($deferRegionPlanning) {
 				open my $bedFH, '>', $bedF or die "can't write BED $bedF: $!\n";
 				print {$bedFH} $curReg[$i];
 				close $bedFH or die "can't close BED $bedF: $!\n";
 			}
-			if ($useFB){
-				$cmd2 .= " -t $bedF $tarR->[0] | $bcftBin view -Oz -o $chunkFile - && test -s $chunkFile && rm -f $bedF $locXtrCmd\n";
+			if (-s $chunkFile && !$overwrite) {
+				# A prior run may have completed the expensive call but failed before
+				# concat. Repair that restart state by indexing the existing BGZF chunk.
+				$cmd2 = "$bcftBin index -f $chunkFile && test -s $chunkFile.csi && rm -f $bedF $locXtrCmd\n";
+			} elsif ($useFB){
+				$cmd2 .= " -t $bedF $tarR->[0] | $bcftBin view -Oz -o $chunkFile - && test -s $chunkFile && $bcftBin index -f $chunkFile && test -s $chunkFile.csi && rm -f $bedF $locXtrCmd\n";
 			}else{
-				$cmd2 .= " -R $bedF $tarR->[0] | $bcftBin call $bcftCallOpts | $bcftBin view -Oz -o $chunkFile - && test -s $chunkFile && rm -f $bedF $locXtrCmd\n";
+				$cmd2 .= " -R $bedF $tarR->[0] | $bcftBin call $bcftCallOpts | $bcftBin view -Oz -o $chunkFile - && test -s $chunkFile && $bcftBin index -f $chunkFile && test -s $chunkFile.csi && rm -f $bedF $locXtrCmd\n";
 			}
 		} else {
 			die "incomplete control structure SNP.pm\n";
@@ -493,12 +501,14 @@ sub SNPconsensus_vcf{
 		if ($hasPrimaryRds){
 			die "no primary VCF chunks were planned\n" unless @primaryChunks;
 			$sortCmd .= "$bcftBin concat -a -Oz -o $vcfFile ".join(" ", @primaryChunks)."\n";
-			$sortCmd .= "test -s $vcfFile\nrm -f ".join(" ", @primaryChunks)."\n";
+			my @primaryChunkArtifacts = map { ($_, "$_.csi", "$_.tbi") } @primaryChunks;
+			$sortCmd .= "test -s $vcfFile\nrm -f ".join(" ", @primaryChunkArtifacts)."\n";
 		}
 		if ($supportRequested){
 			die "no supplementary VCF chunks were planned\n" unless @supportChunks;
 			$sortCmd .= "$bcftBin concat -a -Oz -o $vcfFileS ".join(" ", @supportChunks)."\n";
-			$sortCmd .= "test -s $vcfFileS\nrm -f ".join(" ", @supportChunks)."\n";
+			my @supportChunkArtifacts = map { ($_, "$_.csi", "$_.tbi") } @supportChunks;
+			$sortCmd .= "test -s $vcfFileS\nrm -f ".join(" ", @supportChunkArtifacts)."\n";
 		}
 		$cmdAll .= $sortCmd;
 	}

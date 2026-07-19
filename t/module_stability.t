@@ -168,8 +168,34 @@ is_deeply($chunk_files, ["$root/chunk.0.vcf.gz"], 'pileup declares its exact BGZ
 my $quoted_chunk_file = quotemeta("$root/chunk.0.vcf.gz");
 like($pileup_command, qr/freebayes.*?\| bcftools view -Oz -o $quoted_chunk_file -/s,
 	'FreeBayes output is converted to BGZF instead of receiving a misleading .gz suffix');
+like($pileup_command, qr/test -s $quoted_chunk_file && bcftools index -f $quoted_chunk_file && test -s $quoted_chunk_file\.csi/s,
+	'each FreeBayes VCF chunk is indexed before concat');
 unlike($pileup_command, qr/input\.cram\.(?:crai|bai)/,
 	'pileup does not delete canonical mapping indexes');
+
+my $restart_chunk = "$root/restart-chunk.0.vcf.gz";
+open my $restart_fh, '>', $restart_chunk or die $!;
+print {$restart_fh} "existing BGZF placeholder\n";
+close $restart_fh;
+my $restart_command;
+{
+	no warnings 'redefine';
+	local *Mods::SNP::getProgPaths = sub { return $_[0] };
+	my (undef, undef, $command) = Mods::SNP::pileupcall(
+		["$root/input.cram"], '', {
+			assembly => $split_reference, nodeTmpD => $root, smpl => 'sample',
+			qsubDir => $pileup_bed_dir, runLocal => 1, JNUM => 1,
+			SNPcaller => 'FB', overwrite => 0, deferRegionPlanning => 0,
+			SeqTech => 'ILL', run2ctg => 1, rdep => '', normIndels => 1,
+		}, {}, $root, "$root/restart-chunk", 1, ["ctgA\t0\t10\n"], 1,
+	);
+	$restart_command = $command;
+}
+my $quoted_restart_chunk = quotemeta($restart_chunk);
+like($restart_command, qr/bcftools index -f $quoted_restart_chunk && test -s $quoted_restart_chunk\.csi/s,
+	'a restart repairs an existing unindexed VCF chunk');
+unlike($restart_command, qr/freebayes -f/,
+	'a restart does not repeat an already completed variant call solely to create its index');
 
 my $mpileup_command;
 {
@@ -187,6 +213,9 @@ my $mpileup_command;
 }
 like($mpileup_command, qr/bcftools mpileup .*? -Ou .*? -a FORMAT\/DP,FORMAT\/AD,FORMAT\/ADF,FORMAT\/ADR,FORMAT\/SP/s,
 	'bcftools calling uses a binary pipe and supported optional annotations');
+my $quoted_mpileup_chunk = quotemeta("$root/mpileup-chunk.0.vcf.gz");
+like($mpileup_command, qr/test -s $quoted_mpileup_chunk && bcftools index -f $quoted_mpileup_chunk && test -s $quoted_mpileup_chunk\.csi/s,
+	'each mpileup VCF chunk is indexed before concat');
 unlike($mpileup_command, qr/INFO\/(?:PV4|FS|IDV|MQ0F|BQBZ|SCBZ|RPBZ|MQBZ)/,
 	'bcftools command does not pass obsolete or automatic INFO fields as requested annotations');
 
