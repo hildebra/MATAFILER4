@@ -263,8 +263,11 @@ like($mataf4,
 	qr/my \$mappingArtifactsPresent\s*=.*?if \(!\$efinAssLoc && !\$ePreAssmbly && \$mappingArtifactsPresent\)/s,
 	'a missing clean-run assembly does not masquerade as a mapping redo');
 like($mataf4,
-	qr/my \$variantCommonInputsReady = \$efinAssLoc && \$boolGenePredOK.*?genes\.gff.*?\$primaryVariantInputsReady.*?\$eFinMapCovGZ.*?bam\.coverage\.gz.*?\$supportVariantInputsReady.*?\$eFinSupMapCovGZ.*?sup-smd\.bam\.coverage.*?if \(\$variantWorkRequested && \$variantCommonInputsReady/s,
-	'ConsSNP is not called until its assembly, gene predictions, mappings, and coverage are published');
+	qr/my \$geneConsensusRequested.*?my \$variantCommonInputsReady = \$efinAssLoc.*?genes\.gff.*?\$primaryVariantInputsReady.*?!\$calcConsSNP.*?bam\.coverage.*?\$supportVariantInputsReady.*?!\$calcSuppConsSNP.*?sup-smd\.bam\.coverage.*?if \(\$variantWorkRequested && \$variantCommonInputsReady/s,
+	'variant calls wait for each requested product\'s assembly, annotation, mapping, and coverage inputs');
+like($mataf4,
+	qr/my \$runConsensus =.*?callConsSNP.*?callConsSNPSupp.*?SNPconsensus_vcf\(\\%SNPinfo\) if \$runConsensus/s,
+	'an SV-only request does not execute the SNP-consensus workflow');
 like($mataf4,
 	qr/my \$supportMappingPublished\s*=.*?\$eFinSupMapCovGZ.*?\$supportMappingPublished/s,
 	'hybrid binning waits for support mapping to be published');

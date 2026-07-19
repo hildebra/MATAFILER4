@@ -3,7 +3,7 @@ use Exporter qw(import);
 our @EXPORT_OK = qw(
 				runMetaBat runSemiBin  runMetaDecoder  runGenomeFace runSCGBinner
 				runCheckM runCheckM2 MB2N50
-				getBinSubdirName
+				getBinSubdirName binningOutputsComplete
 				createBin2 createBinFAA createBinCtgs
 				readMGS readMGSrev deNovo16S readMGSrevRed minQualFilter 
 				filterMGS_CM MB2assigns calcLCAcompl readCMquals);
@@ -33,6 +33,14 @@ sub getBinSubdirName{
 		$BinnerName = "SC";
 	}
 	return $BinnerName;
+}
+
+sub binningOutputsComplete {
+	my ($base, $useCheckM1, $useCheckM2) = @_;
+	return 0 unless defined($base) && -e $base && -s "$base.assStat";
+	return 0 if $useCheckM1 && !-e "$base.cm";
+	return 0 if $useCheckM2 && !-s "$base.cm2";
+	return 1;
 }
 
 
@@ -592,9 +600,11 @@ sub MB2N50($){
 		my $totL=0; my $ctgs=0; my @lengs;
 		#die @mem;
 		foreach my $x (@mem){
-			$x =~ m/_L=(\d+)=/;
-			push(@lengs,$1);
-			$totL+=$1; $ctgs++;
+			die "Cannot determine contig length from bin member '$x'\n"
+				unless $x =~ m/_L=(\d+)=/;
+			my $length = $1;
+			push(@lengs,$length);
+			$totL += $length; $ctgs++;
 		}
 		my $meanL = $totL/$ctgs;
 		
@@ -607,7 +617,7 @@ sub MB2N50($){
 			}
 		}
 		#and find N50
-		@lengs = sort { $a <=> $b } @lengs;
+		@lengs = sort { $b <=> $a } @lengs;
 		my $N20 = int ($totL *0.2); my $N50 = int ($totL *0.5);my $N80 = int ($totL *0.8);
 		my $cumL=0;
 		foreach my $l (@lengs){
@@ -630,13 +640,14 @@ sub runCheckM{#runs checkM on *.faa files (each file one Bin)
 	my $gtag = "--genes"; $gtag = "" if ($ext eq "fna");
 	#system "rm -rf $tmpD/CM/";
 	#system "mkdir -p $tmpD/tmp/" unless(-d "$tmpD/tmp/");
-	my $cmC = "";
+	my $cmC = "set -e\n";
 	$cmC .= "rm -rf $tmpD/CM/;mkdir -p $tmpD/tmp/\n";
 	#my $p2a = getProgPaths("py2activate");
 	#my $pd = getProgPaths("pydeacti");
 	my $checkMBin = getProgPaths("checkm");
 	#$cmC .= "$p2a\n";
 	$cmC .= "$checkMBin lineage_wf $gtag -x $ext -t $ncore --tab_table -f $outFile -q --pplacer_threads 3 --tmpdir $tmpD/tmp/ $binD $tmpD/CM/\n";
+	$cmC .= "test -s $outFile\n";
 	#$cmC .= "$pd\n";
 	$cmC .= "rm -rf $tmpD/CM/ $tmpD/tmp/\n";
 	
@@ -646,13 +657,19 @@ sub runCheckM{#runs checkM on *.faa files (each file one Bin)
 		open I,"<$outFile2" or die "No input for runCheckM function:$outFile\n";
 		my %binsFnd;
 		while (my $l =<I>){
-			chomp $l; my @spl = split /\t/,$l;
+			chomp $l;
+			next if $l =~ /^\s*$/;
+			my @spl = split /\t/,$l, -1;
+			next if @spl >= 2 && $spl[0] eq 'Sequence ID';
+			die "Malformed bin assignment in $outFile2: $l\n"
+				unless @spl >= 2 && length($spl[1]);
+			next if $spl[1] eq '0';
 			$binsFnd{$spl[1]} = 1;
 		}
 		close I;
 		my @bins = keys %binsFnd;
-		print "Found ".(scalar( @bins) - 1)  . " metag Bins\n";
-		if (@bins <= 1){$cmC = "\ntouch $outFile\n";}
+		print "Found ".scalar(@bins)." metag Bins\n";
+		if (!@bins){$cmC = "set -e\ntouch $outFile\n";}
 	}
 	print "$cmC\n";
 	
@@ -668,7 +685,7 @@ sub runCheckM2{#runs checkM2 on *.faa files (each file one Bin)
 	my $gtag = "--genes"; $gtag = "" if ($ext eq "fna");
 	#system "rm -rf $tmpD/CM/";
 	#system "mkdir -p $tmpD/tmp/" unless(-d "$tmpD/tmp/");
-	my $cmC = "";
+	my $cmC = "set -e\n";
 	$cmC .= "rm -rf $tmpD/;  mkdir -p $tmpD/\n";
 	my $outD = $outFile; $outD =~ s/\/[^\/]+$/\//; $outD .= "/CHM2/";
 	#my $pd = getProgPaths("pydeacti");
@@ -687,7 +704,7 @@ sub runCheckM2{#runs checkM2 on *.faa files (each file one Bin)
 	#debugging only	
 #	$cmC .= "mkdir -p $outD;cp -r $tmpD $outD\n"; #replace with more targeted function later
 	$cmC .= "cp $tmpD/quality_report.tsv $outFile\n"; #replace with more targeted function later
-	$cmC .= "touch $outFile\n";
+	$cmC .= "test -s $outFile\n";
 	$cmC .= "rm -rf $tmpD\n";
 	
 	if ($runNow > 0){
@@ -757,12 +774,8 @@ sub createBams{
 	}
 	#die "@dirSS\n@BAMS\n";
 	if (@BAMS == 0 && $fakeEmpty){
-		print "runSCGBinner::No bams found, creating fake output\n";
-		system "mkdir -p $outDir; touch $outDir/$nm; touch $outDir/$nm.assStat";
-		open O,">$outDir/$nm.cm2";
-		print O "Name\tCompleteness\tContamination\tCompleteness_Model_Used Translation_Table_Used\tAdditional_Notes\n";
-		close O;
-		return ("", []);
+		warn "No non-empty mapping files found for $nm; publishing an empty bin assignment\n";
+		return ("mkdir -p $outDir\n: > $outDir/$nm\n", []);
 	}
 	return ($uncramCmd,\@BAMS);
 }
@@ -776,19 +789,17 @@ sub runSemiBin{
 	#get list of bams/crams..
 
 #die;
-	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
+	my $fakeEmpty=1;my $minBamSiz = 0;
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
 	my @BAMS = @{$BAMSar};
-	return "" unless (@BAMS);
+	return $uncramCmd unless (@BAMS);
 	my $numBams = @BAMS;
 	
 	
 	# --environment human_gut, dog_gut, ocean, soil, cat_gut, human_oral, mouse_gut, pig_gut, built_environment, wastewater, chicken_caecum, global
 	my $SBbin = getProgPaths("SemiBin2");
 	my $smode = "single_easy_bin ";
-	my $senvDef = "--environment human_gut";my $senv = $senvDef; 
-	if ($numBams > 1){$senv = "";}#multisample doesn't accept env flag
-	if ($giveSBenv ne "") {$senv =  "--environment $giveSBenv" ; }
+	my $senv = $giveSBenv ne "" ? "--environment $giveSBenv" : "";
 	my $dflags = " --random-seed 555 --tmpdir $tmpDir -p $cores";
 	my $seqType = "--sequencing-type=short_read ";
 	$seqType = "--sequencing-type=long_read " if ($seqTec eq "PB" || $seqTec eq "ONT" || $seqTec eq "hybrid");#PAcBIo/ONT
@@ -818,10 +829,10 @@ sub runMetaDecoder{
 	my $MDbin = getProgPaths("MetaDecoder");
 	my $baseN = "$tmpDir/$nm";
 	#get list of bams/crams..
-	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
+	my $fakeEmpty=1;my $minBamSiz = 0;
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"sam");
 	my @SAMS = @{$BAMSar};
-	return "" unless (@SAMS);
+	return $uncramCmd unless (@SAMS);
 	
 
 	my $cmd = "###preparing SAMs..\n$uncramCmd\n\n";
@@ -840,10 +851,10 @@ sub runMetaDecoder{
 
 sub runSCGBinner{
 	my ($jgO,$outDir, $tmpDir, $nm, $fna, $cores, $dirsAR) = @_;
-	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
+	my $fakeEmpty=1;my $minBamSiz = 0;
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
 	my @BAMS = @{$BAMSar};
-	return "" unless (@BAMS);
+	return $uncramCmd unless (@BAMS);
 	#die "runSCGBinner::@BAMS\n";
 	my $SCGbin = getProgPaths("SCGBinner");
 	my $cmd = "###preparing BAMs..\n$uncramCmd\n\n";

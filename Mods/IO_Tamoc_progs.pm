@@ -42,7 +42,8 @@ sub checkMapsDoneSH{
 	my @dirSS = @{$inAR};
 	my $ctrlStr = "";
 	foreach my $DDI (@dirSS){
-		if ( $DDI =~ m/\/$/  ){
+		if (-d $DDI || $DDI =~ m/\/$/){
+			$DDI =~ s{/$}{};
 			$ctrlStr .= "if [ ! -e $DDI/mapping/done.sto ] || ! find $DDI/mapping -maxdepth 1 -type f \\( -name '*-smd.bam' -o -name '*-smd.cram' \\) -size +0c -print -quit | grep -q .; then echo \"Can't find a completed mapping in $DDI/mapping !! Aborting .. \"; exit 1; fi \n";
 		} else {
 			$ctrlStr .= "if [ ! -s $DDI ]; then echo \"Can't find non-empty mapping file $DDI !! Aborting ..\"; exit 1; fi \n";
@@ -476,12 +477,13 @@ sub jgi_depth_cmd{
 
 	my @dirSS = @{$dirsAR};#split(',',$dirs);
 	#go through each dir and find sample name
-	my $comBAM = "";
+	my @mapping_files;
+	my %seen_mapping;
 	my $isCram=0;
 	foreach my $DDI (@dirSS){
 		if (-f $DDI && $DDI =~ /\.(?:bam|cram)$/i) {
-			$isCram=1 if ($DDI =~ /\.cram$/i);
-			$comBAM .= "$DDI ";
+			die "jgi_depth_cmd:::Empty mapping file $DDI\n" unless -s $DDI;
+			push @mapping_files, $DDI unless $seen_mapping{$DDI}++;
 		} else {
 			$DDI =~ s{/$}{};
 			my $marker = "$DDI/mapping/done.sto";
@@ -490,13 +492,27 @@ sub jgi_depth_cmd{
 			my $SmplNm = <$marker_fh>;
 			close $marker_fh;
 			chomp $SmplNm;
-			my $tbam = "$DDI/mapping/$SmplNm";
-			if (!-s $tbam && $tbam =~ /\.bam$/){(my $cram = $tbam) =~ s/\.bam$/.cram/; $tbam = $cram if (-s $cram);}
-			die "jgi_depth_cmd:::Can't find a non-empty BAM or CRAM at $DDI\n" unless (-s $tbam);
-			$isCram=1 if ($tbam =~ /\.cram$/i);
-			$comBAM .= "$tbam ";
+			my $primary = "$DDI/mapping/$SmplNm";
+			my $supplemental = $primary;
+			$supplemental =~ s/-smd\./.sup-smd./;
+			my $primary_found = 0;
+			for my $candidate ($primary, $supplemental) {
+				if (!-s $candidate && $candidate =~ /\.bam$/i) {
+					(my $cram = $candidate) =~ s/\.bam$/.cram/i;
+					$candidate = $cram if -s $cram;
+				} elsif (!-s $candidate && $candidate =~ /\.cram$/i) {
+					(my $bam = $candidate) =~ s/\.cram$/.bam/i;
+					$candidate = $bam if -s $bam;
+				}
+				next unless -s $candidate;
+				$primary_found = 1 if $candidate !~ /\.sup-smd\./;
+				push @mapping_files, $candidate unless $seen_mapping{$candidate}++;
+			}
+			die "jgi_depth_cmd:::Can't find a non-empty primary BAM or CRAM at $DDI\n"
+				unless $primary_found;
 		}
 	}
+	$isCram = scalar grep { /\.cram$/i } @mapping_files;
 	#my $comBAM = join("/mapping/Align_ment-smd.bam ",@dirSS);
 	# Split conda activation prefix from the binary name so the activation can be
 	# emitted before any pipe, keeping just the bare binary after the pipe.
@@ -505,26 +521,24 @@ sub jgi_depth_cmd{
 		($jgiActivate, $jgiBin) = ($jgiScr =~ /^(.*\n)(.+)$/s);
 	}
 
-	my $covCmd = "";
+	my $covCmd = "set -e\n";
 	my @temporary_bams;
 	$covCmd .= "rm -f $out.jgi.*\n";
 	if ($isCram){
 		die "jgi_depth_cmd:::No reference Fasta given for @dirSS\n" if ($refFA eq "");
 		# Convert all CRAMs to temp BAMs before activation (samtools is in the base env, not MF4binners)
-		my @splSS = split /\s/,$comBAM;
-		$comBAM="";
-		for (my $i=0;$i<@splSS;$i++){
-			next if ($splSS[$i] eq "");
+		for (my $i=0;$i<@mapping_files;$i++){
+			next unless $mapping_files[$i] =~ /\.cram$/i;
 			my $tmpBam = "$out.jgi.tmp.$i.bam";
-			$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $splSS[$i] > $tmpBam\n";
-			$comBAM .= "$tmpBam ";
+			$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $mapping_files[$i] > $tmpBam\n";
+			$mapping_files[$i] = $tmpBam;
 			push @temporary_bams, $tmpBam;
 		}
 	}
 	$covCmd .= $jgiActivate; # conda activation after samtools, before jgi
 	$covCmd .= $jgiBin;
 	#--pairedContigs $out.jgi.pairs.sparse
-	$covCmd .= " --outputDepth $out.jgi.depth.txt  --percentIdentity $perID  $comBAM\n";
+	$covCmd .= " --outputDepth $out.jgi.depth.txt  --percentIdentity $perID  ".join(' ', @mapping_files)."\n";
 	$covCmd .= "test -s $out.jgi.depth.txt\n";
 	$covCmd .= "rm -f ".join(" ", @temporary_bams)."\n" if (@temporary_bams);
 	#$covCmd .= "gzip $out.jgi*\n";

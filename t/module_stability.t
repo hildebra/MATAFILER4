@@ -118,6 +118,78 @@ print {$fai_fh} "ctg\t100\t0\t0\t0\n";
 close $fai_fh;
 is_deeply([Mods::SNP::regionsFromFAI($fai)], ['ctg:1-100'], 'samtools regions are one-based');
 
+my $split_reference = "$root/split-reference.fa";
+open my $split_fa, '>', $split_reference or die $!;
+print {$split_fa} ">ctgA\nAAAAAAAAAA\n>ctgB\nCCCCC\n";
+close $split_fa;
+open my $split_fai, '>', "$split_reference.fai" or die $!;
+print {$split_fai} "ctgA\t10\t0\t0\t0\nctgB\t5\t0\t0\t0\n";
+close $split_fai;
+my ($base_regions) = Mods::SNP::getRegionsBam(6, $split_reference, $root);
+is_deeply($base_regions, [
+	"ctgA\t0\t6\n",
+	"ctgA\t6\t10\nctgB\t0\t2\n",
+	"ctgB\t2\t5\n",
+], 'FAI region splitting emits complete zero-based half-open BED coverage');
+
+my $depth_file = "$root/depth.percontig";
+open my $depth_fh, '>', $depth_file or die $!;
+print {$depth_fh} "S__C1_L=1000=\t10000\nS__C2_L=1000=\t10000\n";
+close $depth_fh;
+my ($depth_regions) = Mods::SNP::getRegionsBamDepth($depth_file, 4, 4);
+my %next_start = ("S__C1_L=1000=" => 0, "S__C2_L=1000=" => 0);
+for my $line (map { split /\n/ } @{$depth_regions}) {
+	next unless length $line;
+	my ($contig, $start, $stop) = split /\t/, $line;
+	is($start, $next_start{$contig}, "depth-balanced BED is contiguous for $contig");
+	ok($stop > $start, "depth-balanced BED interval is nonempty for $contig");
+	$next_start{$contig} = $stop;
+}
+is_deeply(\%next_start, {"S__C1_L=1000=" => 1000, "S__C2_L=1000=" => 1000},
+	'depth-balanced splitting neither drops nor duplicates contig bases');
+
+my $pileup_bed_dir = "$root/pileup/";
+my ($chunk_files, $pileup_command);
+{
+	no warnings 'redefine';
+	local *Mods::SNP::getProgPaths = sub { return $_[0] };
+	my (undef, $chunks, $command) = Mods::SNP::pileupcall(
+		["$root/input.cram"], '', {
+			assembly => $split_reference, nodeTmpD => $root, smpl => 'sample',
+			qsubDir => $pileup_bed_dir, runLocal => 1, JNUM => 1,
+			SNPcaller => 'FB', overwrite => 0, deferRegionPlanning => 0,
+			SeqTech => 'ILL', run2ctg => 1, rdep => '', normIndels => 1,
+		}, {}, $root, "$root/chunk", 1, ["ctgA\t0\t10\n"], 1,
+	);
+	$chunk_files = $chunks;
+	$pileup_command = $command;
+}
+is_deeply($chunk_files, ["$root/chunk.0.vcf.gz"], 'pileup declares its exact BGZF chunk output');
+my $quoted_chunk_file = quotemeta("$root/chunk.0.vcf.gz");
+like($pileup_command, qr/freebayes.*?\| bcftools view -Oz -o $quoted_chunk_file -/s,
+	'FreeBayes output is converted to BGZF instead of receiving a misleading .gz suffix');
+unlike($pileup_command, qr/input\.cram\.(?:crai|bai)/,
+	'pileup does not delete canonical mapping indexes');
+
+my $mpileup_command;
+{
+	no warnings 'redefine';
+	local *Mods::SNP::getProgPaths = sub { return $_[0] };
+	my (undef, undef, $command) = Mods::SNP::pileupcall(
+		["$root/input.cram"], '', {
+			assembly => $split_reference, nodeTmpD => $root, smpl => 'sample',
+			qsubDir => $pileup_bed_dir, runLocal => 1, JNUM => 1,
+			SNPcaller => 'MPI', overwrite => 0, deferRegionPlanning => 0,
+			SeqTech => 'ILL', run2ctg => 1, rdep => '', normIndels => 1,
+		}, {}, $root, "$root/mpileup-chunk", 1, ["ctgA\t0\t10\n"], 1,
+	);
+	$mpileup_command = $command;
+}
+like($mpileup_command, qr/bcftools mpileup .*? -Ou .*? -a FORMAT\/DP,FORMAT\/AD,FORMAT\/ADF,FORMAT\/ADR,FORMAT\/SP/s,
+	'bcftools calling uses a binary pipe and supported optional annotations');
+unlike($mpileup_command, qr/INFO\/(?:PV4|FS|IDV|MQ0F|BQBZ|SCBZ|RPBZ|MQBZ)/,
+	'bcftools command does not pass obsolete or automatic INFO fields as requested annotations');
+
 my $pending_bam = '$SLURM_LOCAL_SCRATCH/MF4/sample/sample-smd.bam';
 my ($cram_command, $pending_cram);
 my $bam2cram_error = '';

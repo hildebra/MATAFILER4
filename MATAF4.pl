@@ -37,7 +37,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpa
 use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
 use Mods::phyloTools qw(fixHDs4Phylo);
-use Mods::Binning qw (getBinSubdirName );
+use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
 use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
@@ -769,6 +769,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	#binning done?
 	my $calcBinning = 0;
+	my $binningComplete = binningOutputsComplete(
+		$BinningOut, $MFopt{useCheckM1}, $MFopt{useCheckM2},
+	);
 	# A downstream job need not wait for its inputs to exist at submission time.
 	# For a normal (non-hybrid-preassembly) group, AssemblyGo means that this
 	# invocation will schedule the final assembly and all of its mappings.  The
@@ -776,7 +779,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $supportMappingPublished = !$locMapSup2Assembly || $eFinSupMapCovGZ;
 	if ($MFopt{DoMetaBat2} && !$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo
 			&& $supportMappingPublished
-			&& (!-e "$BinningOut.cm" && !-s "$BinningOut.cm2") ) {
+			&& !$binningComplete) {
 		$calcBinning=$MFopt{DoMetaBat2};
 		#die "$MFopt{DoMetaBat2} && $boolAssemblyOK && $AssemblyGo && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ &&  (!-e $BinningOut.cm || !-s $BinningOut.cm2\n";
 	}
@@ -1342,15 +1345,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $primaryVariantRequested = $calcConsSNP || $calcSVs;
 	my $supportVariantRequested = $calcSuppConsSNP || $calcSVsSupp;
 	my $variantWorkRequested = $primaryVariantRequested || $supportVariantRequested;
-	my $variantCommonInputsReady = $efinAssLoc && $boolGenePredOK
-		&& fileGZe("$finalCommAssDir/genePred/genes.gff");
+	my $geneConsensusRequested = $MFopt{saveConsFastas}
+		&& ($calcConsSNP || $calcSuppConsSNP);
+	my $variantCommonInputsReady = $efinAssLoc
+		&& (!$geneConsensusRequested || ($boolGenePredOK
+			&& fileGZe("$finalCommAssDir/genePred/genes.gff")));
 	my $primaryVariantInputsReady = !$primaryVariantRequested || (
-		$eFinMapCovGZ && -s "$finalMapDir/$SmplName-smd.$bamcramMap"
-		&& -s "$finalMapDir/$SmplName-smd.bam.coverage.gz" && $eCovAsssembly
+		-s "$finalMapDir/$SmplName-smd.$bamcramMap"
+		&& (!$calcConsSNP || ($eFinMapCovGZ
+			&& fileGZe("$finalMapDir/$SmplName-smd.bam.coverage") && $eCovAsssembly))
 	);
 	my $supportVariantInputsReady = !$supportVariantRequested || (
-		$eFinSupMapCovGZ && -s "$finalMapDir/$SmplName.sup-smd.$bamcramMap"
-		&& fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage") && $eSuppCovAsssembly
+		-s "$finalMapDir/$SmplName.sup-smd.$bamcramMap"
+		&& (!$calcSuppConsSNP || ($eFinSupMapCovGZ
+			&& fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage") && $eSuppCovAsssembly))
 	);
 	if ($variantWorkRequested && $variantCommonInputsReady
 			&& $primaryVariantInputsReady && $supportVariantInputsReady){
@@ -1362,6 +1370,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						mapD => "$finalMapDir",normIndels => $MFopt{normSNPindels},
 						SNPcaller => $MFopt{SNPcallerFlag},hasPrimaryRds => $map{$curSmpl}{hasPrimaryRds},
 						createFastas => $MFopt{saveConsFastas},
+						saveVCF => $MFopt{saveVCF},
 						ofas => $contigsSNP, #primary file of contigs
 						genefna => $genePredSNP,genefaa => $genePredAASNP,
 						vcfFile => $vcfSNP,vcfFileSupp => $vcfSNPsupp, gffFile => "$finalCommAssDir/genePred/genes.gff.gz",
@@ -1376,6 +1385,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
 						STOconSNP => $STOsnpCons, STOconSNPsupp => "",
 						minCallQual => $MFopt{SNPminCallQual},
+						callConsSNP => $calcConsSNP, callConsSNPSupp => $calcSuppConsSNP,
 						#struct vars
 						callSVs => $MFopt{callSVs}, vcfSVfile => $vcfSV, vcfSVfileS => $vscSVsupp, callSVsSupp => $MFopt{callSVsSupp},
 					);
@@ -1739,16 +1749,16 @@ sub submitGenomeBinner{
 	#if ($MFconfig{rmBinFailAssmbly}){print"Warning submitGenomeBinner::\n\nremoving $finalCommAssDir\n\n";system"rm -r $finalCommAssDir";return;}
 	my @paths = @{$DOs{$cAssGrp}{wrdir}};#split /,/,$allPaths;
 	@paths = rmEmptySmpls(@paths);
+	die "No non-empty sample directories are available for binning assembly group $cAssGrp\n"
+		unless @paths;
 	my $smplIncl = scalar(@paths);
 	
 	my $CM1done = 0; my $CM2done = 0; my $eBinAssStat=0;
 	$CM1done = 1 if (-e "$MetaBat2out.cm" );
 	$eBinAssStat =1 if (-e "$MetaBat2out.assStat");
-	my $eStone = 0;$eStone = 1 if (-e "$BinDir/Binning.stone");
 	$CM2done = 1 if (-s "$MetaBat2out.cm2" );
 	
-	#die "($CM2done && $MFopt{useCheckM2})";
-	if ($eBinAssStat && (( $MFopt{useCheckM1} && $CM1done) || ($CM2done && $MFopt{useCheckM2}) ) ){
+	if (binningOutputsComplete($MetaBat2out, $MFopt{useCheckM1}, $MFopt{useCheckM2})){
 		return;
 	}
 	#die "$MetaBat2out\n";
@@ -1774,9 +1784,21 @@ sub submitGenomeBinner{
 	$MBcmd .= "\n\n#checking that all required mappings are done\n". checkMapsDoneSH(\@paths) ."#checks done\n\n";
 	#die "$MBcmd\n\n binner\n";
 	
+	my @binLibraries = (
+		@{getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,0)},
+		@{getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,1)},
+	);
+	my @longLibraries = grep { $_->{is_long} } @binLibraries;
+	my @shortLibraries = grep { !$_->{is_long} } @binLibraries;
+	my %longTechnologies = map { ($_->{technology} || '') => 1 } @longLibraries;
+	delete $longTechnologies{''};
 	my $seqTec = "hiSeq";
-	if (exists($map{$curSmpl}{SeqTech})){$seqTec = $map{$curSmpl}{SeqTech};}
-	if ($MFopt{DoAssembly} == 5){$seqTec = "hybrid";}
+	if (@longLibraries) {
+		$seqTec = @shortLibraries || keys(%longTechnologies) != 1
+			? "hybrid"
+			: (keys %longTechnologies)[0];
+	}
+	$seqTec = "hybrid" if ($MFopt{DoAssembly} == 5);
 	#die "$seqTec\n";
 	
 
@@ -1789,31 +1811,19 @@ sub submitGenomeBinner{
 
 	my $BinnerName = getBinSubdirName($MFopt{DoMetaBat2});
 
-	system "rm $MetaBat2out*" if (-e $MetaBat2out && -s $MetaBat2out == 0 && !$CM1done && !$CM2done); #hard flag to just redo calculations..
-	$MBcmd = "" if (-s $MetaBat2out);
+	# An empty assignment is a valid "no bins found" result.  Reuse any
+	# published assignment for quality/statistics repair; -redoEmptyBins is the
+	# explicit opt-in path that removes and recomputes an empty result.
+	$MBcmd = "" if (-e $MetaBat2out);
 	
 	#die $MBcmd;
 	
 	#my $MetaBat2out = "$finalCommAssDir/Binning/MB2/$smplIDs[-1]";
 	my $postCmd = "";
-	my $numCoreCHKM = 3; #fixed --pplacer_threads in routine already..
 	if ( ( $MFopt{useCheckM1} && !$CM1done) || (!$CM2done && $MFopt{useCheckM2})  || !$eBinAssStat){
 		my $mb2Qual = getProgPaths("mb2qualCheck_scr");
 		$postCmd = "\n\nrm -rf $nodeSpTmpD2; mkdir -p $nodeSpTmpD2;\n";
 		$postCmd .= "$mb2Qual -asm $metaGassembly -binF $MetaBat2out -tmpD $nodeSpTmpD2 -ncore $MB2coresL -checkM2 $MFopt{useCheckM2} -checkM1 $MFopt{useCheckM1} -binner $MFopt{DoMetaBat2} " ;
-		#only needed for pilea.. deactivate if not needed..
-		
-		my $binLibraries = getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,0);
-		my $binPairs = libraryPairs($binLibraries);
-		my @par1 = map { $_->{files}{r1} } @{$binPairs};
-		my @par2 = map { $_->{files}{r2} } @{$binPairs};
-		my @parS = @{libraryFiles($binLibraries, 'single')};
-		# These inputs are optional (and currently only reserved for PileA).
-		# Never emit a bare option: Getopt::Long treats the following option or
-		# newline as its missing value and aborts the complete Bin job.
-		$postCmd .= " -read1 ".join(",",@par1) if (@par1);
-		$postCmd .= " -read2 ".join(",",@par2) if (@par2);
-		$postCmd .= " -readS ".join(",",@parS) if (@parS);
 		$postCmd .= "\n";
 	} 
 	$postCmd .= "\nrm -rf $nodeSpTmpD2\n";
@@ -1864,7 +1874,11 @@ sub createConsSNPandSVs{
 		
 	} 
 #	my ($ovcf,$jdep) = SNPconsensus_vcf2(\%SNPinfo);
-	my ($jdep,$submissionCommands) = SNPconsensus_vcf(\%SNPinfo);
+	my ($jdep,$submissionCommands) = ("", "");
+	my $runConsensus = exists($SNPinfo{callConsSNP}) || exists($SNPinfo{callConsSNPSupp})
+		? (($SNPinfo{callConsSNP} || 0) || ($SNPinfo{callConsSNPSupp} || 0))
+		: 1;
+	($jdep,$submissionCommands) = SNPconsensus_vcf(\%SNPinfo) if $runConsensus;
 
 	${$QSBoptHR}{tmpSpace} = $preHDDspace;
 	#SNPconsensus_fasta($ovcf,\%SNPinfo,$jdep,$QSBoptHR);
@@ -1872,7 +1886,7 @@ sub createConsSNPandSVs{
 	
 	
 	#2nd part: call SVs
-	if ($SNPinfo{callSVs}){
+	if (($SNPinfo{callSVs} || 0) || ($SNPinfo{callSVsSupp} || 0)){
 		my ($jdep2,$qcmd2) = SVcall_vcf(\%SNPinfo);
 		$jdep .= ";$jdep2" if ($jdep2 ne "");
 		$submissionCommands .= $qcmd2 if (defined($qcmd2) && $qcmd2 ne "");
@@ -3673,103 +3687,140 @@ sub mergeReads(){
 	return ($jobName);
 }
  
+sub _shell_quote {
+	my ($value) = @_;
+	die "Cannot quote an undefined shell argument\n" unless defined $value;
+	die "Shell argument contains a NUL or newline\n" if $value =~ /[\0\r\n]/;
+	$value =~ s/'/'"'"'/g;
+	return "'$value'";
+}
+
+sub _shell_command {
+	return join(' ', map { _shell_quote($_) } @_);
+}
+
+sub _set_sdm_option {
+	my ($text, $name, $value) = @_;
+	my $displayName = defined($name) ? $name : '<undefined>';
+	die "Invalid SDM option name '$displayName'\n"
+		unless defined($name) && $name =~ /^[A-Za-z][A-Za-z0-9_]*$/;
+	die "Invalid value for SDM option '$name'\n"
+		unless defined($value) && $value !~ /[\0\r\n\t]/;
+	die "Cannot update '$name' in an undefined SDM option file\n" unless defined $text;
+	my $replacement = "$name\t$value\n";
+	my $matches = ($text =~ s/^\Q$name\E\t[^\r\n]*(?:\r?\n|\z)/$replacement/mg);
+	$matches ||= 0;
+	die "Expected one active '$name' entry in the SDM option file, found $matches\n"
+		unless $matches == 1;
+	return $text;
+}
+
 sub adaptSDMopt{
-#adaptSDMopt($baseSDMopt,$MFglobal{globalLogDir},$samplReadLength);
-	my ($baseSF,$oDir,$RL,$RT) = @_;
-	my $newSDMf = $oDir."/sdmo_${RL}_${RT}.txt";
-	my $nRL = $RL - 10 - int($RL/15);
-	open I,"<$baseSF" or die "Can't open sdm opt in:\n $baseSF\n"; my $str = join("", <I>); ;close I;
-	#print "\n\n$RT\n$baseSF\n";
-	if ($RT ne "proto" && $RT ne "PB" && $RT ne "ONT" && $RL != 0){
-		#$str =~ s/minSeqLength\t\d+/minSeqLength\t$nRL/;
-		if ($RL < 50){$str =~ s/maxAccumulatedError\t.*\n/maxAccumulatedError\t0.5\n/;
-		} elsif ($RL < 90){$str =~ s/maxAccumulatedError\t\d+\.\d+/maxAccumulatedError\t1.2/; #really shitty GAII platform
-		} elsif ($RL < 200){$str =~ s/maxAccumulatedError\t\d+\.\d+/maxAccumulatedError\t2.5/;} #really shitty GAII platform
-		if ($RL < 90){$str =~ s/TrimWindowWidth	\d+/TrimWindowWidth	8/;$str =~ s/TrimWindowThreshhold	\d+/TrimWindowThreshhold	16/;	
-		$str =~ s/maxAmbiguousNT	\d+/maxAmbiguousNT	1/;
-		} else {$str =~ s/TrimWindowWidth	\d+/TrimWindowWidth	18/;$str =~ s/TrimWindowThreshhold	\d+/TrimWindowThreshhold	20/;
-		}
-		$str =~ s/maxAmbiguousNT	\d+/maxAmbiguousNT	2/;
+	my ($baseSF, $oDir, $readLength, $technology, $variant) = @_;
+	$variant ||= '';
+	die "Invalid SDM read length '$readLength'\n"
+		unless defined($readLength) && $readLength =~ /^\d+$/;
+	die "Invalid SDM option-file tag '$technology'/'$variant'\n"
+		unless defined($technology) && "$technology$variant" =~ /^[A-Za-z0-9_.-]*$/;
+	my $tag = join('_', grep { $_ ne '' } ($readLength, $technology, $variant));
+	my $newSDMf = "$oDir/sdmo_$tag.txt";
+
+	open my $inputFH, '<', $baseSF or die "Can't open SDM options '$baseSF': $!\n";
+	my $str = do { local $/; <$inputFH> };
+	close $inputFH or die "Can't close SDM options '$baseSF': $!\n";
+
+	if ($technology ne 'proto' && $technology ne 'PB' && $technology ne 'ONT' && $readLength != 0){
+		my $maxError = $readLength < 50 ? '0.5' : $readLength < 90 ? '1.2' : $readLength < 200 ? '2.5' : undef;
+		$str = _set_sdm_option($str, 'maxAccumulatedError', $maxError) if defined $maxError;
+		my ($windowWidth, $windowThreshold, $maxAmbiguous) = $readLength < 90
+			? (8, 16, 1)
+			: (18, 20, 2);
+		$str = _set_sdm_option($str, 'TrimWindowWidth', $windowWidth);
+		$str = _set_sdm_option($str, 'TrimWindowThreshhold', $windowThreshold);
+		$str = _set_sdm_option($str, 'maxAmbiguousNT', $maxAmbiguous);
 	}
-	if ($MFopt{sdmProbabilisticFilter} ==0 ){
-		$str =~ s/BinErrorModelAlpha\t.*\n/BinErrorModelAlpha\t-1\n/;
+	$str = _set_sdm_option($str, 'BinErrorModelAlpha', -1)
+		unless $MFopt{sdmProbabilisticFilter};
+	foreach my $option (sort keys %{$MFopt{sdm_opt}}){
+		$str = _set_sdm_option($str, $option, $MFopt{sdm_opt}{$option});
 	}
-	foreach my $so (keys %{$MFopt{sdm_opt}}){$str =~ s/$so	[^\n]*\n/$so	$MFopt{sdm_opt}->{$so}\n/;}
-	#die $str."\n$baseSF\n";
-	open O,">$newSDMf" or die "Can't open new sdm opt out:\n $newSDMf\n"; print O $str; close O;
-	#print $newSDMf."\n";
+
+	my $temporary = "$newSDMf.$$";
+	open my $outputFH, '>', $temporary or die "Can't write SDM options '$temporary': $!\n";
+	print {$outputFH} $str or die "Can't write SDM options '$temporary': $!\n";
+	close $outputFH or die "Can't close SDM options '$temporary': $!\n";
+	rename $temporary, $newSDMf or die "Can't publish SDM options '$newSDMf': $!\n";
 	return $newSDMf;
 }
 
 
 
-sub sdmOptSet{ 
-	my ($curSmpl,$samplReadLength, $curReadTec, $curSTech) = @_;
-	
+sub sdmOptSet{
+	my ($samplReadLength, $technology) = @_;
+	die "Invalid SDM read length '$samplReadLength'\n"
+		unless defined($samplReadLength) && $samplReadLength =~ /^\d+$/;
+	die "Cannot select SDM options without a sequencing technology\n"
+		unless defined($technology) && $technology ne '';
 	if ($MFopt{sdmOpt} ne ""){
-		if (! -f $MFopt{sdmOpt}){die "-customSDMopt must point to file! (currently: $MFopt{sdmOpt})\n";}
-		if (! -s $MFopt{sdmOpt}){die "-customSDMopt must point to non-empty file! (currently: $MFopt{sdmOpt})\n";}
-		
+		die "-customSDMopt must point to a file (currently: $MFopt{sdmOpt})\n"
+			unless -f $MFopt{sdmOpt};
+		die "-customSDMopt must point to a non-empty file (currently: $MFopt{sdmOpt})\n"
+			unless -s $MFopt{sdmOpt};
 		return ($MFopt{sdmOpt},$MFopt{sdmOpt});
 	}
-	my $curSDMopt = $MFopt{baseSDMopt}; 
-	my $is3rdGen = is3rdGenSeqTech($curReadTec);
-	#my $iqualOff = 33; #62 for 1st illu
-	
-	#print "XXXXXXXXXXX $curReadTec XXXXXXXXXX\n";
-		
-	if ($is3rdGen){
-		if ($curReadTec eq "PB"){ $curSDMopt = getProgPaths("baseSDMoptPacBio"); 
-		} elsif ($curReadTec eq "ONT"){ $curSDMopt = getProgPaths("baseSDMoptONT"); 
-		} else {
-			print "Unknown 3rd generational seq tech: $curReadTec\n";
-		}
-	} elsif ($curReadTec eq "GAII_solexa" || $curReadTec eq "GAII"|| $curReadTec eq "hiSeq"){
-		#$iqualOff = 59; #really that old??
-	} elsif ($curReadTec eq "miSeq"){ $curSDMopt = $MFopt{baseSDMoptMiSeq}; 
-	} elsif ($curReadTec eq "AVITI"){ $curSDMopt = getProgPaths("baseSDMoptAVITI"); 
-	} elsif ($curReadTec eq "proto"){ $curSDMopt = getProgPaths("baseSDMoptProto"); 
-	} 
-	
-	if ($samplReadLength != 0 && !$is3rdGen){
-		$curSDMopt = adaptSDMopt($curSDMopt,$MFglobal{globalLogDir},$samplReadLength,$curReadTec);
+
+	my $pairOpt = $MFopt{baseSDMopt};
+	$pairOpt = getProgPaths('baseSDMoptPacBio') if $technology eq 'PB';
+	$pairOpt = getProgPaths('baseSDMoptONT') if $technology eq 'ONT';
+	$pairOpt = $MFopt{baseSDMoptMiSeq} if $technology eq 'miSeq';
+	$pairOpt = getProgPaths('baseSDMoptAVITI') if $technology eq 'AVITI';
+	$pairOpt = getProgPaths('baseSDMoptProto') if $technology eq 'proto';
+	my $singleOpt = $technology eq '454' ? getProgPaths('baseSDMopt454') : $pairOpt;
+
+	# Always materialise an adapted file: global overrides and probabilistic-filter
+	# settings also apply when read length is unknown or the library is long-read.
+	if ($singleOpt eq $pairOpt){
+		$pairOpt = adaptSDMopt($pairOpt, $MFglobal{globalLogDir}, $samplReadLength, $technology);
+		$singleOpt = $pairOpt;
+	} else {
+		$pairOpt = adaptSDMopt($pairOpt, $MFglobal{globalLogDir}, $samplReadLength, $technology, 'pair');
+		$singleOpt = adaptSDMopt($singleOpt, $MFglobal{globalLogDir}, $samplReadLength, $technology, 'single');
 	}
-	
-	
-	#singletons..
-	my $curSDMoptSingl = $MFopt{baseSDMopt};
-	
-	if ($curSTech eq ""){$curSDMoptSingl=$curSDMopt;
-	} elsif ($curSTech eq "454"){$curSDMoptSingl = getProgPaths("baseSDMopt454"); 
-	} elsif ($curSTech eq "miSeq"){ $curSDMoptSingl = $MFopt{baseSDMoptMiSeq}; 
-	} elsif ($curSTech eq "AVITI"){ $curSDMoptSingl = getProgPaths("baseSDMoptAVITI"); 
-	} elsif ($curSTech eq "proto"){ $curSDMoptSingl = getProgPaths("baseSDMoptProto"); 
-	} elsif ($curSTech eq "PB"){ $curSDMoptSingl = getProgPaths("baseSDMoptPacBio"); 
-	} elsif ($curSTech eq "ONT"){ $curSDMoptSingl = getProgPaths("baseSDMoptONT");
-	} elsif ($is3rdGen){print "Unknown 3rd generational seq tech: $curReadTec\n";}
-	
-	if ($samplReadLength != 0 && !$is3rdGen){
-		$curSDMoptSingl = adaptSDMopt($curSDMoptSingl,$MFglobal{globalLogDir},$samplReadLength,$curReadTec);	
-		if ($curSTech eq "PB" && $samplReadLength < 1000 && $samplReadLength != 0){
-			print "WARNING: it seems sequencing technology is PacBio (\"PB\"), but read length is very short: $samplReadLength\nConsider adjusting via \"-inputReadLength\" or  \"-inputReadLengthSuppl\"\n";
-		}
-		if ($curSTech eq "ONT" && $samplReadLength < 1000 && $samplReadLength != 0){
-			print "WARNING: it seems sequencing technology is Oxford Nanopore (\"ONT\"), but read length is very short: $samplReadLength\nConsider adjusting via \"-inputReadLength\" or  \"-inputReadLengthSuppl\"\n";
-		}
+	if (($technology eq 'PB' || $technology eq 'ONT') && $samplReadLength != 0 && $samplReadLength < 1000){
+		print "WARNING: $technology reads have an unusually short configured length ($samplReadLength). "
+			."Check -inputReadLength or -inputReadLengthSuppl.\n";
 	}
-	#print "$curSDMopt,$curSDMoptSingl\n";
-	return ($curSDMopt,$curSDMoptSingl);
+	return ($pairOpt, $singleOpt);
 }
 
 
 sub sdmClean(){
 	my ($curOutDir,$finD,$jobd,$runThis, $useXtras ) = @_;
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	die "sdmClean::Could not find seqSet for $curSmpl \n" if (!exists($map{$curSmpl}{seqSet}));
+	die "sdmClean::Could not find seqSet for $curSmpl\n"
+		unless ref($map{$curSmpl}{seqSet}) eq 'HASH';
+	die "sdmClean::Could not find cleanSeqSet for $curSmpl\n"
+		unless ref($map{$curSmpl}{cleanSeqSet}) eq 'HASH';
 	my $seqSet = $map{$curSmpl}{seqSet};
+	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
 	my $scope = $useXtras ? 'support' : 'primary';
 	my $libraries = readLibrariesByScope($seqSet, $scope, 0, $curSmpl);
-	return $jobd unless @{$libraries};
+	return '' unless @{$libraries};
+	$finD .= '/' unless $finD =~ m{/$};
+
+	my %integerSetting = (
+		sdmCores => $MFopt{sdmCores},
+		XfirstReads => $MFconfig{XfirstReads},
+		cut5pR1 => $map{$curSmpl}{cut5pR1},
+		cut5pR2 => $map{$curSmpl}{cut5pR2},
+		firstXrdsRd => $map{$curSmpl}{firstXrdsRd},
+		firstXrdsWr => $map{$curSmpl}{firstXrdsWr},
+	);
+	foreach my $name (keys %integerSetting){
+		$integerSetting{$name} = 0 unless defined $integerSetting{$name};
+		die "sdmClean::Invalid non-negative integer for $name: '$integerSetting{$name}'\n"
+			unless $integerSetting{$name} =~ /^\d+$/;
+	}
+	die "sdmClean::sdmCores must be greater than zero\n" unless $integerSetting{sdmCores} > 0;
 
 	my $samplReadLength = 0;
 	$samplReadLength = $seqSet->{samplReadLength} if (defined($seqSet->{samplReadLength}));
@@ -3778,33 +3829,39 @@ sub sdmClean(){
 	}
 
 	my $sdmBin = getProgPaths("sdm");# sdm program from LotuS2 pipeline
-	my $comprCores=$MFopt{sdmCores};
 	my $fEnd = $MFopt{gzipSDMOut} ? 'fq.gz' : 'fq';
 	my $baseFname = $useXtras ? 'filtered.suppl' : 'filtered';
 	my $logStem = $useXtras ? 'filterSuppl' : 'filter';
-	my $stone = "$finD/filterDone.stone";
-	my $cmd = "mkdir -p $finD\nrm -f $stone\n";
-	$cmd .= "mkdir -p $logDir/sdm/\n";
-	my $sdm_def= " -ignore_IO_errors 1 -i_qual_offset auto -binomialFilterBothPairs 1 -threads $MFopt{sdmCores} ";
-	$sdm_def .= " -XfirstReads $MFconfig{XfirstReads} " if ($MFconfig{XfirstReads} > 0);
-	my $sdm_Extr = "";
-	$sdm_Extr .= "-logLvsQ 1 " if ($MFopt{SDMlogQualvsLen});
-	my $sdm_cut = "";
-	$sdm_cut .= "-5PR1cut $map{$curSmpl}{cut5pR1} " if ($map{$curSmpl}{cut5pR1} > 0); $sdm_cut .= "-5PR2cut $map{$curSmpl}{cut5pR2} " if ($map{$curSmpl}{cut5pR2} > 0);
-	$sdm_cut .= "-XfirstReadsRead $map{$curSmpl}{firstXrdsRd} " if ($map{$curSmpl}{firstXrdsRd} > 0);
-	$sdm_cut .= "-XfirstReadsWritten $map{$curSmpl}{firstXrdsWr} " if ($map{$curSmpl}{firstXrdsWr} > 0);
+	my $stone = $finD.($useXtras ? 'filterSupplDone.stone' : 'filterDone.stone');
+	my $sdmLogDir = "$logDir/sdm";
+	my $cmd = _shell_command('mkdir', '-p', '--', $finD)."\n";
+	$cmd .= _shell_command('rm', '-f', '--', $stone)."\n";
+	$cmd .= _shell_command('mkdir', '-p', '--', $sdmLogDir)."\n";
+	my @sdmCommon = (
+		'-ignore_IO_errors', 1, '-i_qual_offset', 'auto',
+		'-binomialFilterBothPairs', 1, '-threads', $integerSetting{sdmCores},
+	);
+	push @sdmCommon, ('-XfirstReads', $integerSetting{XfirstReads})
+		if $integerSetting{XfirstReads} > 0;
+	my @sdmExtra = $MFopt{SDMlogQualvsLen} ? ('-logLvsQ', 1) : ();
+	my @sdmCut;
+	push @sdmCut, ('-5PR1cut', $integerSetting{cut5pR1}) if $integerSetting{cut5pR1} > 0;
+	push @sdmCut, ('-5PR2cut', $integerSetting{cut5pR2}) if $integerSetting{cut5pR2} > 0;
+	push @sdmCut, ('-XfirstReadsRead', $integerSetting{firstXrdsRd}) if $integerSetting{firstXrdsRd} > 0;
+	push @sdmCut, ('-XfirstReadsWritten', $integerSetting{firstXrdsWr}) if $integerSetting{firstXrdsWr} > 0;
 
 	my @cleanLibraries;
-	my @requiredNonEmpty;
-	my @requiredPresent;
+	my @requiredOutputs;
 	for (my $i = 0; $i < @{$libraries}; $i++) {
 		my $library = $libraries->[$i];
 		my $technology = $library->{technology} || ($useXtras ? $map{$curSmpl}{SeqTechX} : $map{$curSmpl}{SeqTech});
 		checkSeqTech($technology, "MATAF4.pl::sdmClean library $library->{id}");
+		die "MATAF4.pl::sdmClean library $library->{id} has no sequencing technology\n"
+			if $technology eq '';
 		my $isLong = $library->{is_long} || is3rdGenSeqTech($technology);
-		my ($sdmPairOpt, $sdmSingleOpt) = sdmOptSet($curSmpl,$samplReadLength,$technology,$technology);
-		my $libraryDef = $sdm_def;
-		$libraryDef .= " -illuminaClip 1 " if ($MFopt{trimAdapters} && !$isLong);
+		my ($sdmPairOpt, $sdmSingleOpt) = sdmOptSet($samplReadLength, $technology);
+		my @libraryArgs = @sdmCommon;
+		push @libraryArgs, ('-illuminaClip', 1) if ($MFopt{trimAdapters} && !$isLong);
 		my $suffix = $i == 0 ? '' : ".lib$i";
 		my $prefix = "$finD$baseFname$suffix";
 		my $hasPair = ($library->{files}{r1} || '') ne '';
@@ -3816,32 +3873,42 @@ sub sdmClean(){
 			$outR1 = "$prefix.1.$fEnd";
 			$outR2 = "$prefix.2.$fEnd";
 			$outSingle = "$prefix.singl.$fEnd";
-			$cmd .= "rm -f $outR1 $outR2 $outSingle\n";
-			$cmd .= "$sdmBin -i \"$library->{files}{r1},$library->{files}{r2}\" -o_fastq $outR1,$outR2 -options $sdmPairOpt -paired 2 $sdm_Extr -log $logDir/sdm/$logStem$logSuffix.log $libraryDef $sdm_cut\n";
-			(my $recovered = $outR1) =~ s/\.1\.fq(?:\.gz)?$/.\*.singl.$fEnd/;
-			$cmd .= "if ls $recovered 1> /dev/null 2>&1; then cat $recovered > $outSingle; rm -f $recovered; else $pigzBin -c </dev/null > $outSingle; fi\n"
-				if $MFopt{gzipSDMOut};
-			$cmd .= "if ls $recovered 1> /dev/null 2>&1; then cat $recovered > $outSingle; rm -f $recovered; else : > $outSingle; fi\n"
-				unless $MFopt{gzipSDMOut};
-			push @requiredNonEmpty, $outR1, $outR2;
-			push @requiredPresent, $outSingle;
+			$cmd .= _shell_command('rm', '-f', '--', $outR1, $outR2, $outSingle)."\n";
+			$cmd .= _shell_command(
+				$sdmBin, '-i', "$library->{files}{r1},$library->{files}{r2}",
+				'-o_fastq', "$outR1,$outR2", '-options', $sdmPairOpt,
+				'-paired', 2, @sdmExtra, '-log', "$sdmLogDir/$logStem$logSuffix.log",
+				@libraryArgs, @sdmCut,
+			)."\n";
+			my $recoveredPattern = "$prefix.*.singl.$fEnd";
+			$cmd .= 'mapfile -t recovered < <(compgen -G '._shell_quote($recoveredPattern)." || true)\n";
+			$cmd .= 'if (( ${#recovered[@]} )); then cat -- "${recovered[@]}" > '
+				._shell_quote($outSingle).'; rm -f -- "${recovered[@]}"; else ';
+			$cmd .= $MFopt{gzipSDMOut}
+				? _shell_command($pigzBin, '-c').' </dev/null > '._shell_quote($outSingle)
+				: ': > '._shell_quote($outSingle);
+			$cmd .= "; fi\n";
+			push @requiredOutputs, $outR1, $outR2, $outSingle;
 		}
 
 		if ($hasSingle) {
 			$outSingle = "$prefix.s.$fEnd" unless $hasPair;
 			my $tmpSingle = "$prefix.input-single.fq";
-			$cmd .= "rm -f $tmpSingle\n";
-			$cmd .= "$sdmBin -i \"$library->{files}{single}\" -o_fastq $tmpSingle -options $sdmSingleOpt $sdm_Extr -paired 1 -log $logDir/sdm/$logStem.S$logSuffix.log $libraryDef $sdm_cut\n";
+			$cmd .= _shell_command('rm', '-f', '--', $tmpSingle)."\n";
+			$cmd .= _shell_command(
+				$sdmBin, '-i', $library->{files}{single}, '-o_fastq', $tmpSingle,
+				'-options', $sdmSingleOpt, @sdmExtra, '-paired', 1,
+				'-log', "$sdmLogDir/$logStem.S$logSuffix.log", @libraryArgs, @sdmCut,
+			)."\n";
+			my $redirect = $hasPair ? '>>' : '>';
 			if ($MFopt{gzipSDMOut}) {
-				my $redirect = $hasPair ? '>>' : '>';
-				$cmd .= "$pigzBin -p $comprCores -c $tmpSingle $redirect $outSingle\n";
+				$cmd .= _shell_command($pigzBin, '-p', $integerSetting{sdmCores}, '-c', $tmpSingle)
+					." $redirect "._shell_quote($outSingle)."\n";
 			} else {
-				my $redirect = $hasPair ? '>>' : '>';
-				$cmd .= "cat $tmpSingle $redirect $outSingle\n";
+				$cmd .= _shell_command('cat', '--', $tmpSingle)." $redirect "._shell_quote($outSingle)."\n";
 			}
-			$cmd .= "rm -f $tmpSingle\n";
-			push @requiredNonEmpty, $outSingle unless $hasPair;
-			push @requiredPresent, $outSingle if $hasPair;
+			$cmd .= _shell_command('rm', '-f', '--', $tmpSingle)."\n";
+			push @requiredOutputs, $outSingle unless $hasPair;
 		}
 
 		push @cleanLibraries, newReadLibrary(
@@ -3862,11 +3929,10 @@ sub sdmClean(){
 		close $inputFH or die "Cannot close $curOutDir/input_fil.txt: $!\n";
 	}
 
-	$cmd .= "touch $stone\n";
+	$cmd .= _shell_command('touch', '--', $stone)."\n";
 	my $jobName = "";
 	my $presence = -e $stone ? 1 : 0;
-	$presence = 0 if grep { !-s $_ } @requiredNonEmpty;
-	$presence = 0 if grep { !-e $_ } @requiredPresent;
+	$presence = 0 if grep { !-e $_ } @requiredOutputs;
 	my $qsubFile = $logDir."sdmReadCleaner.sh";
 	replaceScopeLibraries($cleanSeqSetHR, $scope, \@cleanLibraries, 1, $curSmpl);
 	$qsubFile = $logDir."sdmReadCleanerSuppl.sh" if ($useXtras);
@@ -3874,13 +3940,11 @@ sub sdmClean(){
 	if (!$presence && $runThis){
 		print "sdm'ing support reads..\n" if ($useXtras);
 		$jobName = "_SDM${useXtras}_$JNUM"; my $tmpCmd;
-		my $preHDDspace=$QSBoptHR->{tmpSpace};
-		$QSBoptHR->{tmpSpace} = 0;
-		($jobName, $tmpCmd) = qsubSystem($qsubFile,$cmd,$MFopt{sdmCores},$MFopt{sdmMem},$jobName,$jobd,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
-		$QSBoptHR->{tmpSpace} = $preHDDspace;
+		local $QSBoptHR->{tmpSpace} = 0;
+		($jobName, $tmpCmd) = qsubSystem($qsubFile,$cmd,$integerSetting{sdmCores},$MFopt{sdmMem},$jobName,$jobd,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
 	}
 	$map{$curSmpl}{cleanSeqSet} = $cleanSeqSetHR;
-	return ($jobName);
+	return $jobName;
 }
 
 
@@ -8559,7 +8623,16 @@ sub getCmdLineOptions{
 	die "ERROR:: \"-mappingMem\" argument contains characters: $MFopt{MapperMemory}" if ($MFopt{MapperMemory} !~ m/[\d-]+/);
 	die "ERROR:: \"-mapSortMem\" argument contains characters: $MFopt{mapSortMemGb}" if ($MFopt{mapSortMemGb} !~ m/[\d-]+/);
 	die "ERROR:: \"-assemblMemory\" argument contains characters: $MFopt{AssemblyMemory}" if ($MFopt{AssemblyMemory} !~ m/[\d-]+/);
-	die "ERROR:: \"-BinnerMem\" argument contains characters: $MFopt{BinnerMem}" if ($MFopt{BinnerMem}  !~ m/[\d-]+/);
+	die "ERROR:: -Binner must be one of 0..5\n"
+		unless $MFopt{DoMetaBat2} >= 0 && $MFopt{DoMetaBat2} <= 5;
+	die "ERROR:: -BinnerCores must be a positive integer\n"
+		unless $MFopt{BinnerCores} > 0;
+	die "ERROR:: -BinnerMem must be zero or a positive integer\n"
+		unless $MFopt{BinnerMem} >= 0;
+	die "ERROR:: binning requires -useCheckM1 1 and/or -useCheckM2 1\n"
+		if $MFopt{DoMetaBat2} && !$MFopt{useCheckM1} && !$MFopt{useCheckM2};
+	die "ERROR:: -SB_env is only valid with -Binner 2 (SemiBin)\n"
+		if $MFopt{SB_env} ne '' && $MFopt{DoMetaBat2} != 2;
 	#die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
 	die "ERROR:: \"-diamondMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
 	$MFopt{diamondMem} = 7 if ($MFopt{diamondMem} <= 0);

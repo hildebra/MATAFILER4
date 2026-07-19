@@ -123,7 +123,11 @@ if ($DoMetaBat2 == 1){
 
 die "Unsupported binner $DoMetaBat2\n" unless length $BinCmd;
 my $stone = "$BinDir/Binning.stone";
-$BinCmd = "set -e\n$BinCmd\nprintf '%s\\n' '$smplIDs1' > '$stone'\n";
+my $resultCheck = "test -e '$BinDir/$smplIDs1'";
+if ($DoMetaBat2 == 2) {
+	$resultCheck .= " || test -d '$BinDir/output_recluster_bins' || test -d '$BinDir/output_bins'";
+}
+$BinCmd = "set -e\n$BinCmd\n$resultCheck\nprintf '%s\\n' '$smplIDs1' > '$stone'\n";
 
 
 print "running: $preCmd.$BinCmd\n";
