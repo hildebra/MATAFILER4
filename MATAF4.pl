@@ -7530,18 +7530,13 @@ sub longRdAssembly{
 		#my $illPathS = ;
 		my @illDirs = @{$AsGrps{$cAsGrp}{preAsmblDir}}; #split /,/,$illPathS;
 		@hybridPreassemblies = map { "$_/scaffolds.fasta.filt" } @illDirs;
-		if ((@$singlAr - $AsGrps{$cAsGrp}{CntPreAssNoPrim}) > (@illDirs)){
-			die "hybrid assembly: Unexpected less preDirs (".@illDirs .") than indirs(" . @$singlAr .")illDs: @illDirs\nsingl: @$singlAr\n";
-		}
 
 		$cmdPre .= "echo \"presplitting helper assembly\"\n";
-		#die "preLib num (" .@illDirs . ") != read libs (" . @inRds . ")!" if (@illDirs != @inRds);
-		die "preLib num (" .@illDirs . ") < read libs (" . @inRds . ")!" if (@illDirs < @inRds);
-		my $cmdLater = "";
 		my @simulatorCommands;
 		my ($lengthTemplate) = grep { defined($_) && $_ ne "" } @{$singlAr};
 		my $lengthTemplateArg = defined($lengthTemplate) ? "--length-template $lengthTemplate" : "";
-		#condition is not correct: there might be cases where there are less inRds (PB runs), but additional assmblGrp samples have illumina..
+		# Preassembly packages and long-read libraries are independent collections:
+		# generate one synthetic input per package, then append every PB/ONT input.
 		for (my $i=0;$i<@illDirs;$i++){
 			my $illD = $illDirs[$i];
 			die "longRdAssembly:: $illD is not a dir!" unless (-d $illD);
@@ -7558,12 +7553,6 @@ sub longRdAssembly{
 			push @simulatorCommands,
 				"( $spl4m --assembly $preAssmbl --coverage $contigCov --breakpoints $breakpointTsv --output $dupiAssmbl "
 				."--mean-read-length $MFconfig{defaultReadLengthX} $lengthTemplateArg --max-synthetic-depth $MFopt{hybridSyntheticMaxDepth} )";
-			#merge this split with single reads in tmp dir..
-			if (@{$singlAr} > $i && defined($singlAr->[$i]) &&  $singlAr->[$i] ne ""){
-				#print "\nXX $i\n";
-				#dont combine, not a good idea..
-				#$cmdLater .= "cat $singlAr->[$i] >> $dupiAssmbl;\n" ;
-			}
 			$inRds[$i] = $dupiAssmbl;
 		}
 		#instead of combining ill + PacBio fastas in $cmdLater, just add PB as extra libs (makes more sense in any case..)
@@ -7591,7 +7580,7 @@ sub longRdAssembly{
 			$cmdPre .= "\n";
 		}
 
-		$cmd .= $cmdPre.$cmdLater."\n\n";
+		$cmd .= $cmdPre."\n\n";
 		for (my $i=0;$i<@illDirs;$i++){
 			next if ($inRds[$i] eq "");
 			$cmd .= "if [ ! -s $inRds[$i] ]; then echo \"$inRds[$i] not present.. abort\"; exit 33; fi \n";

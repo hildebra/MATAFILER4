@@ -93,4 +93,10 @@ like($cleaner, qr/grep \{ !-e \$_ \} \@requiredOutputs/,
 unlike($cleaner, qr/requiredNonEmpty/,
 	'redundant size-based completion state has been removed');
 
+my ($longAssembly) = $mataf4 =~ /(sub longRdAssembly\s*\{.*?)(?=^sub megahitAssembly)/ms;
+unlike($longAssembly, qr/Unexpected less preDirs|preLib num/,
+	'multiple support singleton libraries are not counted as preassembly packages');
+like($longAssembly, qr/for \(my \$i=0;\$i<\@illDirs;\$i\+\+\).*?for \(my \$i=0;\$i<\@\{\$singlAr\};\$i\+\+\).*?push\(\@inRds,\$singlAr->\[\$i\]\)/s,
+	'hybrid assembly independently adds one synthetic input per package and every support library');
+
 done_testing();
