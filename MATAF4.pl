@@ -3699,6 +3699,14 @@ sub _shell_command {
 	return join(' ', map { _shell_quote($_) } @_);
 }
 
+sub _validate_sdm_integer_setting {
+	my ($name, $value, $minimum) = @_;
+	$value = 0 unless defined $value;
+	die "sdmClean::Invalid integer for $name: '$value'\n"
+		unless $value =~ /^-?\d+$/ && $value >= $minimum;
+	return int($value);
+}
+
 sub _set_sdm_option {
 	my ($text, $name, $value) = @_;
 	my $displayName = defined($name) ? $name : '<undefined>';
@@ -3808,19 +3816,14 @@ sub sdmClean(){
 	$finD .= '/' unless $finD =~ m{/$};
 
 	my %integerSetting = (
-		sdmCores => $MFopt{sdmCores},
-		XfirstReads => $MFconfig{XfirstReads},
-		cut5pR1 => $map{$curSmpl}{cut5pR1},
-		cut5pR2 => $map{$curSmpl}{cut5pR2},
-		firstXrdsRd => $map{$curSmpl}{firstXrdsRd},
-		firstXrdsWr => $map{$curSmpl}{firstXrdsWr},
+		sdmCores => _validate_sdm_integer_setting('sdmCores', $MFopt{sdmCores}, 1),
+		# -1 is the established disabled sentinel; zero also emits no SDM flag.
+		XfirstReads => _validate_sdm_integer_setting('XfirstReads', $MFconfig{XfirstReads}, -1),
+		cut5pR1 => _validate_sdm_integer_setting('cut5pR1', $map{$curSmpl}{cut5pR1}, 0),
+		cut5pR2 => _validate_sdm_integer_setting('cut5pR2', $map{$curSmpl}{cut5pR2}, 0),
+		firstXrdsRd => _validate_sdm_integer_setting('firstXrdsRd', $map{$curSmpl}{firstXrdsRd}, 0),
+		firstXrdsWr => _validate_sdm_integer_setting('firstXrdsWr', $map{$curSmpl}{firstXrdsWr}, 0),
 	);
-	foreach my $name (keys %integerSetting){
-		$integerSetting{$name} = 0 unless defined $integerSetting{$name};
-		die "sdmClean::Invalid non-negative integer for $name: '$integerSetting{$name}'\n"
-			unless $integerSetting{$name} =~ /^\d+$/;
-	}
-	die "sdmClean::sdmCores must be greater than zero\n" unless $integerSetting{sdmCores} > 0;
 
 	my $samplReadLength = 0;
 	$samplReadLength = $seqSet->{samplReadLength} if (defined($seqSet->{samplReadLength}));

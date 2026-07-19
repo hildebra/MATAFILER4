@@ -20,6 +20,11 @@ is(TestSDMCleaner::_shell_quote("reads/a'b.fq"), q{'reads/a'"'"'b.fq'},
 	'shell quoting safely preserves an apostrophe');
 eval { TestSDMCleaner::_shell_quote("bad\nargument") };
 like($@, qr/NUL or newline/, 'shell arguments containing command separators are rejected');
+is(TestSDMCleaner::_validate_sdm_integer_setting('XfirstReads', -1, -1), -1,
+	'the established XfirstReads disabled sentinel is accepted');
+eval { TestSDMCleaner::_validate_sdm_integer_setting('XfirstReads', -2, -1) };
+like($@, qr/Invalid integer for XfirstReads/,
+	'values below the XfirstReads disabled sentinel are rejected');
 
 my $tmpdir = tempdir(CLEANUP => 1);
 my $baseOptions = File::Spec->catfile($tmpdir, 'base.txt');
