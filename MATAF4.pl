@@ -10,6 +10,7 @@
 use warnings;
 use strict;
 use File::Basename;
+use File::Find ();
 use File::Path qw(make_path);
 use Cwd 'abs_path';
 use POSIX;
@@ -836,7 +837,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $requireRawReadsFlag = 0;#only list modules that really need raw reads
 	$requireRawReadsFlag = 1 if ( !$boolScndMappingOK || $calcContamination);
 	
-	my $seqCleanFlag = 0; $seqCleanFlag =1 if ($dowstreamAnalysisFlag && !-e "$smplTmpDir/seqClean/filterDone.stone" );
+	my $primaryCleanPending = !-e "$smplTmpDir/seqClean/filterDone.stone";
+	my $supportCleanPending = ($map{$curSmpl}{SupportReads} || '') ne ''
+		&& !-e "$smplTmpDir/seqClean/filterSupplDone.stone";
+	my $seqCleanFlag = $dowstreamAnalysisFlag && ($primaryCleanPending || $supportCleanPending) ? 1 : 0;
 	my $porechopFlag = 0;
 	$porechopFlag = 1 if ($MFopt{usePorechop} && $dowstreamAnalysisFlag && !-e "$smplTmpDir/rawRds/poreChopped.stone");
 	#die "$assemblyFlag\t$seqCleanFlag\t$boolScndMappingOK\n";
@@ -3699,6 +3703,21 @@ sub _shell_command {
 	return join(' ', map { _shell_quote($_) } @_);
 }
 
+sub _staged_read_files_present {
+	my ($root, @markers) = @_;
+	return 0 unless defined($root) && -d $root;
+	my %marker = map { $_ => 1 } grep { defined($_) && $_ ne '' } @markers;
+	my $present = 0;
+	File::Find::find({
+		no_chdir => 1,
+		wanted => sub {
+			return if $present || !-f $File::Find::name || $marker{$File::Find::name};
+			$present = 1;
+		},
+	}, $root);
+	return $present;
+}
+
 sub _validate_sdm_integer_setting {
 	my ($name, $value, $minimum) = @_;
 	$value = 0 unless defined $value;
@@ -4507,14 +4526,12 @@ sub seedUnzip2tmp{
 	if ($map{$curSmpl}{clip} ne ""){$illCLip = $map{$curSmpl}{clip};}
 	#die "Can't find illumina trimming file: $illCLip\n" if ($useTrimomatic && !-e $illCLip);
 	
-	# check if only stone exists, but not the files any longer..
-	if (-d "$finDest/rawRds"){
-		opendir(my $dh, "$finDest/rawRds") or die "Could not open $finDest/rawRds for reading: $!\n";
-		my @files = grep { -f "$finDest/rawRds/$_" } readdir($dh);
-		closedir($dh);
-		if (scalar(@files) == 1 && -e $finishStone) {
-			system "rm -rf $finDest/rawRds" ;
-		}
+	# A support-only staging directory stores its reads below rawRds/Support.
+	# Inspect recursively and invalidate only stale markers; never delete valid
+	# staged inputs while another cleaner may be consuming them.
+	if (-d "$finDest/rawRds"
+		&& !_staged_read_files_present("$finDest/rawRds", $finishStone, $trimoStone, $porechStone)){
+		unlink grep { defined($_) && $_ ne '' && -e $_ } ($finishStone, $trimoStone, $porechStone);
 	}
 
 	

@@ -1,6 +1,7 @@
 use strict;
 use warnings;
 
+use File::Find ();
 use File::Spec;
 use File::Temp qw(tempdir);
 use FindBin qw($Bin);
@@ -20,6 +21,22 @@ is(TestSDMCleaner::_shell_quote("reads/a'b.fq"), q{'reads/a'"'"'b.fq'},
 	'shell quoting safely preserves an apostrophe');
 eval { TestSDMCleaner::_shell_quote("bad\nargument") };
 like($@, qr/NUL or newline/, 'shell arguments containing command separators are rejected');
+
+my $stagingDir = tempdir(CLEANUP => 1);
+my $supportDir = File::Spec->catdir($stagingDir, 'Support');
+mkdir $supportDir or die "Cannot create $supportDir: $!";
+my $doneMarker = File::Spec->catfile($stagingDir, 'done.sto');
+open my $markerFH, '>', $doneMarker or die "Cannot write $doneMarker: $!";
+close $markerFH;
+ok(!TestSDMCleaner::_staged_read_files_present($stagingDir, $doneMarker),
+	'a directory containing only staging markers has no reads');
+my $supportRead = File::Spec->catfile($supportDir, 'support.fq.gz');
+open my $supportFH, '>', $supportRead or die "Cannot write $supportRead: $!";
+print {$supportFH} "read data\n";
+close $supportFH;
+ok(TestSDMCleaner::_staged_read_files_present($stagingDir, $doneMarker),
+	'nested support reads prevent staging from being treated as empty');
+
 is(TestSDMCleaner::_validate_sdm_integer_setting('XfirstReads', -1, -1), -1,
 	'the established XfirstReads disabled sentinel is accepted');
 eval { TestSDMCleaner::_validate_sdm_integer_setting('XfirstReads', -2, -1) };
@@ -92,6 +109,10 @@ like($cleaner, qr/grep \{ !-e \$_ \} \@requiredOutputs/,
 	'a successful checkpoint accepts valid empty filtered outputs');
 unlike($cleaner, qr/requiredNonEmpty/,
 	'redundant size-based completion state has been removed');
+like($mataf4, qr/primaryCleanPending.*?filterDone\.stone.*?supportCleanPending.*?filterSupplDone\.stone.*?seqCleanFlag/s,
+	'a missing support-cleaning checkpoint forces raw-read restaging');
+unlike($mataf4, qr/scalar\(\@files\) == 1.*?rm -rf \$finDest\/rawRds/s,
+	'staging repair no longer deletes a directory containing nested support reads');
 
 my ($longAssembly) = $mataf4 =~ /(sub longRdAssembly\s*\{.*?)(?=^sub megahitAssembly)/ms;
 unlike($longAssembly, qr/Unexpected less preDirs|preLib num/,
