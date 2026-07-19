@@ -93,15 +93,26 @@ like(checkMapsDoneSH([$sample_dir]), qr/\Q$sample_dir\/mapping\/done.sto\E/,
 
 my $direct_bam = "$root/direct.bam";
 write_file($direct_bam, 'bam');
-my ($semibin_default, $semibin_environment);
+my $large_bam = "$root/large.bam";
+open my $large_fh, '>', $large_bam or die "Cannot write $large_bam: $!";
+seek($large_fh, 15 * 1024 * 1024, 0) or die "Cannot seek in $large_bam: $!";
+print {$large_fh} 'x';
+close $large_fh or die "Cannot close $large_bam: $!";
+my ($semibin_small, $semibin_default, $semibin_environment);
 {
 	no warnings 'redefine';
 	local *Mods::Binning::getProgPaths = sub { return 'SemiBin2' };
-	$semibin_default = runSemiBin('', "$root/sb", "$root/sbtmp", 'sample',
+	$semibin_small = runSemiBin('', "$root/sb-small", "$root/sbtmp-small", 'sample',
 		"$root/ref.fa", 4, [$direct_bam], 'hiSeq', '');
+	$semibin_default = runSemiBin('', "$root/sb", "$root/sbtmp", 'sample',
+		"$root/ref.fa", 4, [$large_bam], 'hiSeq', '');
 	$semibin_environment = runSemiBin('', "$root/sb2", "$root/sbtmp2", 'sample',
-		"$root/ref.fa", 4, [$direct_bam], 'ONT', 'ocean');
+		"$root/ref.fa", 4, [$large_bam], 'ONT', 'ocean');
 }
+like($semibin_small, qr/: > \Q$root\/sb-small\/sample\E/,
+	'SemiBin excludes BAM files of 15 MiB or less and publishes an empty assignment');
+unlike($semibin_small, qr/SemiBin2 single_easy_bin/,
+	'SemiBin is not invoked with a crash-prone small BAM');
 unlike($semibin_default, qr/--environment/,
 	'an empty SB_env uses SemiBin self-training instead of silently forcing human_gut');
 like($semibin_environment, qr/--environment ocean/,

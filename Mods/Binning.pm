@@ -789,7 +789,10 @@ sub runSemiBin{
 	#get list of bams/crams..
 
 #die;
-	my $fakeEmpty=1;my $minBamSiz = 0;
+	# SemiBin2 can crash on very small alignment files.  Treat mappings of
+	# 15 MiB or less as unusable for this binner; the other binners do not share
+	# this restriction and keep their zero-byte-only cutoff below.
+	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
 	my @BAMS = @{$BAMSar};
 	return $uncramCmd unless (@BAMS);
