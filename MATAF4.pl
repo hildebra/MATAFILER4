@@ -91,6 +91,7 @@ sub nopareil; sub calcCoverage2nd;sub d2metaDist;
 sub metphlanMapping; sub mergeMP2Table;
 sub mOTU2Mapping; sub mergeMotu2Table; sub prepMOTU2;
 sub genoSize; sub check_map_done; sub check_depth_done;
+sub mapping_reference_matches;
 sub postprocess;
 sub setDefaultMFconfig;
 sub getCmdLineOptions;
@@ -500,6 +501,28 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $locRedoSNPcalling =0; 
 	my $locRedoSVs = 0;
 	my $locRedoAssMapping = $MFopt{redoAssMapping};
+	# A hybrid preassembly and the final hybrid assembly intentionally use the
+	# same canonical mapping directory.  Stones and coverage files alone cannot
+	# tell which assembly an existing CRAM targets.  New mappings carry the size
+	# and mtime of their reference; once the final assembly exists, reject a
+	# missing (legacy) or non-matching stamp so preassembly CRAMs are remapped.
+	if ($MFopt{DoAssembly} == 5 && -s $finAssLoc
+			&& -e "$finalCommAssDir/$stones{asmDone}") {
+		my @mappingReferenceChecks;
+		push @mappingReferenceChecks, [
+			"$finalMapDir/$SmplName-smd.reference.stat", 'primary'
+		] if ($eFinMapCovGZ);
+		push @mappingReferenceChecks, [
+			"$finalMapDir/$SmplName.sup-smd.reference.stat", 'supplementary'
+		] if ($eFinSupMapCovGZ);
+		for my $referenceCheck (@mappingReferenceChecks) {
+			my ($stamp, $kind) = @{$referenceCheck};
+			next if mapping_reference_matches($stamp, $finAssLoc);
+			print "Hybrid $kind mapping does not identify the current final assembly; remapping $SmplName\n";
+			$locRedoAssMapping = 1;
+			last;
+		}
+	}
 
 	#check if current assembly group is the same as before!
 	my $locRewrite = 0; my $locRedoAssembl = 0;
@@ -1747,6 +1770,20 @@ sub spaceInAssGrp{
 		$primaryInputSize *= $totalSmpls / $knownSmpls;
 	}
 	return $primaryInputSize + $supportInputSize;
+}
+
+sub mapping_reference_matches {
+	my ($stamp, $reference) = @_;
+	return 0 unless (-s $stamp && -s $reference);
+	open my $stampFH, '<', $stamp or return 0;
+	my $line = <$stampFH>;
+	close $stampFH;
+	return 0 unless defined($line) && $line =~ /^(\d+)\t(\d+)\s*$/;
+	my ($recordedSize, $recordedMtime) = ($1, $2);
+	my @referenceStat = stat($reference);
+	return 0 unless @referenceStat;
+	return $recordedSize == $referenceStat[7]
+		&& $recordedMtime == $referenceStat[9];
 }
 
 sub rmEmptySmpls{
@@ -5959,6 +5996,16 @@ sub bamDepth{
 		$CRAMcmd .= "test -s $publishStage/$baseN-smd.bam\n$smtBin quickcheck $publishStage/$baseN-smd.bam\n";
 	}
 	$CRAMcmd .= "test -s $publishStage/$baseN-smd.bam.coverage.gz\n$pigzBin -t $publishStage/$baseN-smd.bam.coverage.gz\n";
+	# Record which concrete assembly file this alignment targets.  This is a
+	# cheap durable discriminator between a hybrid preassembly and the final
+	# assembly even though both occupy the same path at different workflow
+	# stages.  Secondary multi-reference mappings are not part of that state
+	# transition and may have comma-separated references.
+	if (!$is2ndMap && $REF !~ /,/) {
+		$CRAMcmd .= "test -s \"$REF\"\n";
+		$CRAMcmd .= "stat -c '%s\\t%Y' \"$REF\" > $publishStage/$baseN-smd.reference.stat\n";
+		$CRAMcmd .= "test -s $publishStage/$baseN-smd.reference.stat\n";
+	}
 	$CRAMcmd .= "for f in $publishStage/*; do mv -f \"\$f\" $finalD/; done\nrmdir $publishStage\n";
 	if (($params{unalignedFinalDir} || "") ne "") {
 		my $unalignedStage = "$finalD/.$baseN.unaligned-stage";

@@ -20,7 +20,8 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive );
 #v0.12: 17.1.26: added Genome Face support
 #v0.13: 12.3.26: GPU job submission for GenomeFace
 #v0.14: 19.4.26: scgBinner added
-my $version = 0.14;
+#v0.15: validate every BAM/CRAM sequence dictionary before binning
+my $version = 0.15;
 
 
 my $DoMetaBat2 = "";
@@ -86,6 +87,22 @@ print "     using assembly $metaGassembly\n";
 print "     using $MB2coresL cores, binner \"$DoMetaBat2\" to outdir $BinDir\n";
 print "     using $giveSBenv environment\n" if ($giveSBenv ne "");
 print "======================================================================\n";
+
+
+# CRAM headers can be inspected without decoding their records.  Do this
+# before deleting a previous partial result so stale hybrid-preassembly
+# mappings fail once, concisely, instead of producing thousands of reference
+# lookup errors inside a binner-specific conversion command.
+my $MF4dir = getProgPaths('MFLRDir');
+my $referenceValidator = "$MF4dir/secScripts/assemblies/validate_mapping_references.pl";
+my $samtools = getProgPaths('samtools');
+die "Missing mapping/reference validator: $referenceValidator\n"
+	unless -s $referenceValidator;
+system($^X, $referenceValidator,
+	'--assembly', $metaGassembly,
+	'--samtools', $samtools,
+	'--sample-dirs', join(',', @paths)) == 0
+	or die "Mapping/reference validation failed before binning\n";
 
 
 

@@ -150,5 +150,11 @@ like($runner, qr/my \$resultCheck = "test -e '\$BinDir\/\$smplIDs1'".*?printf .*
 	'the binner assignment is verified before its completion stone is published');
 like($runner, qr/if \(\$DoMetaBat2 == 2\).*?output_recluster_bins.*?output_bins/s,
 	'SemiBin native output is accepted before standardized assignments are generated');
+like($runner, qr/validate_mapping_references\.pl.*?system\(\$\^X, \$referenceValidator/s,
+	'all binners validate mapping sequence dictionaries before conversion');
+like($mataf4, qr/Hybrid \$kind mapping does not identify.*?mapping_reference_matches/s,
+	'final hybrid assemblies invalidate legacy or stale preassembly mappings');
+like($mataf4, qr/stat -c .*?smd\.reference\.stat/s,
+	'mapping publication records a durable reference identity stamp');
 
 done_testing();

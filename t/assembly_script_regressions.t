@@ -81,6 +81,53 @@ like($errors, qr/Invalid FASTQ separator/, 'FASTQ validation explains the failur
 
 my $assembly = File::Spec->catfile($tmp, 'assembly.fa');
 write_file($assembly, ">a\nAAAA\n");
+my $fake_samtools = File::Spec->catfile($tmp, 'fake-samtools');
+write_file($fake_samtools, <<'FAKE_SAMTOOLS');
+#!/usr/bin/env perl
+use strict;
+use warnings;
+if ($ARGV[0] eq 'faidx') {
+	open my $fasta, '<', $ARGV[1] or die $!;
+	open my $fai, '>', "$ARGV[1].fai" or die $!;
+	my ($name, $length) = ('', 0);
+	while (my $line = <$fasta>) {
+		if ($line =~ /^>(\S+)/) {
+			print {$fai} "$name\t$length\t0\t0\t0\n" if length $name;
+			($name, $length) = ($1, 0);
+		} else {
+			$line =~ s/\s+//g;
+			$length += length $line;
+		}
+	}
+	print {$fai} "$name\t$length\t0\t0\t0\n" if length $name;
+	exit 0;
+}
+if ($ARGV[0] eq 'view' && $ARGV[1] eq '-H') {
+	open my $alignment, '<', $ARGV[2] or die $!;
+	print while <$alignment>;
+	exit 0;
+}
+die "unsupported fake samtools invocation: @ARGV\n";
+FAKE_SAMTOOLS
+chmod 0755, $fake_samtools or die $!;
+my $mapping_dir = File::Spec->catdir($tmp, 'mapping');
+mkdir $mapping_dir or die $!;
+write_file(File::Spec->catfile($mapping_dir, 'done.sto'), "sample-smd.cram\n");
+my $alignment = File::Spec->catfile($mapping_dir, 'sample-smd.cram');
+write_file($alignment, "\@HD\tVN:1.6\n\@SQ\tSN:a\tLN:4\n");
+($status, $output, $errors) = run_script('validate_mapping_references.pl',
+	'--assembly', $assembly, '--samtools', $fake_samtools,
+	'--sample-dirs', $tmp);
+is($status, 0, 'binning reference validator accepts a matching CRAM dictionary');
+like($output, qr/Validated 1 mapping file/, 'successful validation reports its alignment count');
+write_file($alignment, "\@HD\tVN:1.6\n\@SQ\tSN:preassembly_contig\tLN:4\n");
+($status, $output, $errors) = run_script('validate_mapping_references.pl',
+	'--assembly', $assembly, '--samtools', $fake_samtools,
+	'--sample-dirs', $tmp);
+isnt($status, 0, 'binning reference validator rejects a stale preassembly CRAM');
+like($errors, qr/mapping\/reference mismatch.*missing 'preassembly_contig'/is,
+	'reference mismatch failure identifies the stale contig and required remap');
+
 my $bin_dir = File::Spec->catdir($tmp, 'bins');
 mkdir $bin_dir or die $!;
 my $sentinel = File::Spec->catfile($bin_dir, 'keep.txt');
