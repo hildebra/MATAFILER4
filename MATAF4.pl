@@ -34,7 +34,7 @@ use Mods::ReadLibrary qw(
 	syncSeqSetLegacy syncCleanSeqSetLegacy replaceScopeLibraries
 	readLibrariesByScope libraryFiles libraryPairs libraryTechnology
 );
-use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpadesLibraries inputFmtMegahitLibraries createGapFillopt
+use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpadesLibraries inputFmtMegahitRuntimeLibraries createGapFillopt
 			buildMapperIdx mapperDBbuilt decideMapper  checkMapsDoneSH greaterComputeSpace);
 use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
@@ -7941,7 +7941,8 @@ sub megahitAssembly{
 	$K = join(",",@spl);
 	#insert single reads
 	my $numInLibs = scalar @{$libraries};
-	my $sprds = inputFmtMegahitLibraries($libraries,$logDir);
+	my ($megahitInputSetup, $sprds) = inputFmtMegahitRuntimeLibraries($libraries, 'megahit_inputs');
+	$cmd .= $megahitInputSetup;
 	$cmd .= $megahitBin;
 	$cmd .= " --k-list $K $sprds -t $nCores -m ". int($defTotMem*1024*1024*1024*0.8) ." --out-prefix megaAss ";
 	if ($helpAssembl ne ""){

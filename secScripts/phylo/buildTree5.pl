@@ -50,6 +50,7 @@ sub prepGenoDirs;
 sub createTreeOpt;
 sub treePresent;
 sub parseSeqId;
+sub geneFileStem;
 sub safeRemoveTree;
 sub requireConfiguredTool;
 sub shellQuote;
@@ -569,8 +570,7 @@ if ($isAligned){
 		if ($spl[0] =~ m/^#/){shift @spl;}
 		my @spl2 = parseSeqId($spl[0], "category line ".($cnt + 1));
 		my $gene = $spl2[1];
-		my $gene_file_stem = $gene;
-		$gene_file_stem =~ s/[^A-Za-z0-9_.-]+/__/g;
+		my $gene_file_stem = geneFileStem($gene);
 		#die "@spl\n";		
 		my $ogrGenes = "";
 		if ($outgroup ne ""){
@@ -1226,12 +1226,29 @@ sub FastGear{
 		
 
 		foreach my $geneF (@geneListF){
-			my $outFG = "$outD/fastGear/fastGear_Results/$geneF";
+			my $gene_file_stem = geneFileStem($geneF);
+			my $outFG = "$outD/fastGear/fastGear_Results/$gene_file_stem";
 			make_path($outFG) unless -d $outFG;
-			my $outFileFG = "$outFG/${geneF}_res.mat";
-			systemW("cat $MsaDF2/$geneF.*.fna | sed 's/_.*\$//' > ".shellQuote("$MsaDF2/$geneF.fna"));
+			my $outFileFG = "$outFG/${gene_file_stem}_res.mat";
+			my @gene_msas = sort glob("$MsaDF2/$gene_file_stem.*.fna");
+			die "No MSA files found for locus $geneF in $MsaDF2\n" unless @gene_msas;
+			my $fastgear_input = "$MsaDF2/$gene_file_stem.fna";
+			open my $fg_out, '>', $fastgear_input
+				or die "Cannot create fastGEAR input $fastgear_input: $!\n";
+			for my $msa (@gene_msas) {
+				open my $fg_in, '<', $msa or die "Cannot read fastGEAR source MSA $msa: $!\n";
+				while (my $line = <$fg_in>) {
+					if ($line =~ /^>(\S+)/) {
+						my ($sample) = parseSeqId($1, "fastGEAR MSA header in $msa");
+						$line = ">$sample\n";
+					}
+					print {$fg_out} $line or die "Cannot write fastGEAR input $fastgear_input: $!\n";
+				}
+				close $fg_in or die "Cannot close fastGEAR source MSA $msa: $!\n";
+			}
+			close $fg_out or die "Cannot close fastGEAR input $fastgear_input: $!\n";
 			my $FGparFile = requireConfiguredTool("MF4_FASTGEAR_PARAM_FILE", "fastGEAR parameter file");
-			runFastgear($geneF, $outFileFG, $MsaDF2, $FGparFile);
+			runFastgear($gene_file_stem, $outFileFG, $MsaDF2, $FGparFile);
 		}
 		safeRemoveTree($outD_clust, $outD);
 		#die;
@@ -2019,7 +2036,7 @@ sub coreHyPhy{
 	my $runCodeML = 0;
 	my @genomeList;
 	opendir(DIR, $MSADir);
-	my @MSAfile = grep(/$gene.*$xtra\.fna/,readdir(DIR));
+	my @MSAfile = grep(/\A\Q$gene\E\.\d+.*$xtra\.fna\z/,readdir(DIR));
 	closedir(DIR);
 	if (@MSAfile == 0){
 		#die "$gene.*$xtra\.fna";
@@ -2095,9 +2112,10 @@ sub selecAnalysis($ $ $ $ $){
 	if (!-e $logF1 ){
 		my %logs;
 		foreach my $gene (@geneListFin){
-			my $logF =  "$codemlOutD/$gene.hyphy.fubar.log";
+			my $gene_file_stem = geneFileStem($gene);
+			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.fubar.log";
 			$logs{$gene} = "$logF";
-			coreHyPhy($MsaD,$gene,"",$nwkFile,$codemlOutDTmp,$logF);
+			coreHyPhy($MsaD,$gene_file_stem,"",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
 		print "reading jsons..";
@@ -2117,9 +2135,10 @@ sub selecAnalysis($ $ $ $ $){
 	if (!-e $logF1 ){
 		my %logs;
 		foreach my $gene (@geneListFin){
-			my $logF =  "$codemlOutD/$gene.hyphy.fubar.unID.log";
+			my $gene_file_stem = geneFileStem($gene);
+			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.fubar.unID.log";
 			$logs{$gene} = $logF;
-			coreHyPhy($MSAsubsD,$gene,"\\.uInd",$nwkFile,$codemlOutDTmp,$logF);
+			coreHyPhy($MSAsubsD,$gene_file_stem,"\\.uInd",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
 		print "reading jsons unID..";
@@ -2143,10 +2162,11 @@ sub selecAnalysis($ $ $ $ $){
 		my $logF1 =  "$codemlOutD/hyphy.fubar.s$subs.txt";
 		next if (-e $logF1 );
 		foreach my $gene (@geneListFin){
-			my $logF =  "$codemlOutD/$gene.hyphy.s$subs.fubar.log";
+			my $gene_file_stem = geneFileStem($gene);
+			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.s$subs.fubar.log";
 			$logs{$gene} = $logF;
 			#COG0008.0.uInd.s20.fna
-			coreHyPhy($MSAsubsD,$gene,"uInd\\.s$subs",$nwkFile,$codemlOutDTmp,$logF);
+			coreHyPhy($MSAsubsD,$gene_file_stem,"uInd\\.s$subs",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
 		print "reading jsons s$subs..";
@@ -2181,14 +2201,15 @@ sub WattTheta{
 	my $otxt = "Gene\tNseqs\tNsites\tSegSites\tWattTheta\n";
 	foreach my $gene (@geneListFin){
 		my $cnt = 0;
-		my $logF =  "$codemlOutD/$gene.hyphy.Theta.log";
+		my $gene_file_stem = geneFileStem($gene);
+		my $logF =  "$codemlOutD/$gene_file_stem.hyphy.Theta.log";
 #		print "$logF\n";
 		$logs{$gene} = $logF;
 		#next if (-e $logF);
 		my @genomeList;
 				
 		opendir(DIR, $MSADir);
-		my @MSAfile = grep(/$gene.*\.fna/,readdir(DIR));
+		my @MSAfile = grep(/\A\Q$gene_file_stem\E\.\d+.*\.fna\z/,readdir(DIR));
 		closedir(DIR);
 		#print "@MSAfile\t$gene\t$MSADir\n";
 		next if (@MSAfile == 0);
@@ -2232,6 +2253,17 @@ sub parseSeqId{
 	}
 	return ($seqId, "", "") if $allowUndelimited && defined($seqId) && $seqId ne "";
 	die "Cannot split $context '$seqId' with -smplSep '$smplSep'\n";
+}
+
+
+sub geneFileStem{
+	my ($gene) = @_;
+	die "Cannot create a filename for an empty gene/locus identifier\n"
+		unless defined($gene) && length($gene);
+	my $stem = $gene;
+	$stem =~ s/_/__/g;
+	$stem =~ s/([^A-Za-z0-9.-])/sprintf("_%02X", ord($1))/ge;
+	return $stem;
 }
 
 
@@ -2281,7 +2313,8 @@ sub runFastgear($ $ $ $){
 	my $fastgearBin = requireConfiguredTool("MF4_FASTGEAR_BIN", "fastGEAR");
 	my $matlabBin = requireConfiguredTool("MF4_FASTGEAR_MATLAB_BIN", "fastGEAR MATLAB runtime");
 
-	$cmd = "$fastgearBin $matlabBin $inD/$geneFG.fna $outFile $parFile";
+	$cmd = "$fastgearBin $matlabBin ".shellQuote("$inD/$geneFG.fna")
+		." ".shellQuote($outFile)." $parFile";
 	systemW($cmd);
 	die "fastGEAR did not produce $outFile for $geneFG\n" unless -s $outFile;
 	print "fastgear on $geneFG finished";

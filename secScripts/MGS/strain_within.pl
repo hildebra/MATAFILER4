@@ -60,7 +60,8 @@ sub writeTooFewMarker;
 #.34: 28.4.26: custom bin file
 #.35: validate inputs and repair resume, outgroup, consensus, and temporary-directory handling
 #.36: preserve locus-level same-COG genes, resolve paralogs, and make sample filters robust to sparse inputs
-my $version = 0.36;
+#.37: expose tree IDs as sample|COG|primaryGeneID while retaining MGS-qualified internal locus keys
+my $version = 0.37;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -236,6 +237,7 @@ my %map; my %AsGrps;my @samples;#map and assembly groups
 my %ConspecificMGS; #list of conspecific MGS
 my %MGSnoTree; #MGS known to have too few samples for a meaningful tree
 my $legacyLocusOutputs = 0;
+my %legacyLocusMGS;
 
 my $gene2taxF; #where to find info what genes (gene cat)
 my $sttime = time;	
@@ -278,6 +280,10 @@ my @specis = sort(keys(%{$SIgenes}));
 die "No MGS matched the selected input"
 	. ($subsMGSstr ne "" ? " or -MGSsubset $subsMGSstr" : "") . "\n"
 	unless @specis;
+for my $MGS (@specis) {
+	die "Unsafe MGS identifier '$MGS': directory separators and pipe characters are not allowed\n"
+		if $MGS eq '.' || $MGS eq '..' || $MGS =~ m{[\\/|]};
+}
 #sort specis by numbers, so start with MGS1, MGS2 etc
 my %sis; foreach (@specis){if (m/(\d+)$/){ $sis{$_}=int($1);} else {$sis{$_}=1; print "Unknown code: $_";}}
 @specis = sort {$sis{$a} <=> $sis{$b} } keys %sis;
@@ -402,10 +408,16 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 #	}
 #}
 if (scalar(keys(%ConspecificMGS)) == 0){
-	my $conlog = "$bindir/LOGandSUB/ConspecificMGS.log";
-	open I,"<$conlog" or die "Can't open conspecific $conlog\n";
-	while (my $l = <I>){my @spl = split /\t/,$l;$ConspecificMGS{$spl[0]} = [split(/,/,$spl[1])];}
-	close I;
+	my $conlog = "$LOGDIR/ConspecificMGS.log";
+	my $legacy_conlog = "$bindir/LOGandSUB/ConspecificMGS.log";
+	$conlog = $legacy_conlog if !-s $conlog && -s $legacy_conlog;
+	if (-s $conlog) {
+		open I,"<$conlog" or die "Can't open conspecific $conlog\n";
+		while (my $l = <I>){my @spl = split /\t/,$l;$ConspecificMGS{$spl[0]} = [split(/,/,$spl[1])];}
+		close I;
+	} else {
+		warn "No prior conspecific-sample log found at $conlog; continuing without historical exclusions\n";
+	}
 }
 
 
@@ -489,7 +501,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
 	
-	if (!$reSubmit && !$repairCAT && !$redoSubmissionData && -e $treeStone && -s $IQtreef ){
+	if (!$reSubmit && !$repairCAT && !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
+			&& -e $treeStone && -s $IQtreef ){
 		print "Skipping $MGS (tree exists?).. ";
 		next;
 	}
@@ -497,7 +510,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	print "At ${MGS} ($lcnt/$Nspecis):: ". timeNice(time - $sttime) . " :"; 
 	my $inputFNAsize = $sizeOfDirs[$lcnt];
 	#PART I: create fasta files required by tree
-	system "mkdir -p $outD2" unless (-d $outD2);
+	make_path($outD2) unless -d $outD2;
 	my $tmpD  = "$scratchD/outs/$MGS/";
 	if ($inputFNAsize ==0){print "empty input $MGS ($outD2 .. $tmpD) .. next.\n";next;} #empty input
 	combineMGSgenesDir($MGS,$tmpD,$tmpD);#$outD2); -> keep in tmpdir for now..
@@ -516,7 +529,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		chomp $OG;
 		$OG =~ s/^OG://;
 	}
-	my $contPhylo = 1; $contPhylo = 0 if ($reSubmit || $redoSubmissionData);
+	my $contPhylo = 1;
+	$contPhylo = 0 if ($reSubmit || $redoSubmissionData || exists($legacyLocusMGS{$MGS}));
 	
 	#main command to build within species strain tree.. missing outgroup so far ($outgS)
 	
@@ -703,15 +717,26 @@ sub combineMGSgenesDir{
 sub locusParts {
 	my ($locus, $default_mgs) = @_;
 	my @parts = split /\|/, ($locus // ''), -1;
-	return @parts[0,1,2] if @parts >= 3;
-	my $cog = $parts[0] // '';
-	if (defined($default_mgs) && exists($COGprios->{$default_mgs})) {
-		for my $candidate (@{$COGprios->{$default_mgs}}) {
-			my @candidate_parts = split /\|/, $candidate, -1;
-			return @candidate_parts[0,1,2] if @candidate_parts >= 3 && $candidate_parts[1] eq $cog;
-		}
-	}
-	return ($default_mgs // '', $cog, '');
+	return @parts if @parts == 3;
+	return ('', '', '') if @parts > 3;
+	return ($default_mgs // '', $parts[0] // '', $parts[1] // '') if @parts == 2;
+	return ($default_mgs // '', $parts[0] // '', '');
+}
+
+sub externalLocusName {
+	my ($locus, $default_mgs) = @_;
+	my (undef, $cog, $primary_gene) = locusParts($locus, $default_mgs);
+	die "Cannot create an external name for malformed locus '$locus'\n"
+		unless length($cog) && length($primary_gene);
+	return join($SaSe, $cog, $primary_gene);
+}
+
+sub internalLocusName {
+	my ($locus, $default_mgs) = @_;
+	my ($mgs, $cog, $primary_gene) = locusParts($locus, $default_mgs);
+	return '' unless length($mgs) && length($cog) && length($primary_gene);
+	return '' if defined($default_mgs) && length($default_mgs) && $mgs ne $default_mgs;
+	return join($SaSe, $mgs, $cog, $primary_gene);
 }
 
 sub outgroupGeneForLocus {
@@ -746,7 +771,8 @@ sub addOutgroup2MGS{
 	my $outD3 = $tmpD;
 	my $outputReady = fileGZe("$outD2/$FNAstdof")
 		&& fileGZe("$outD2/$FAAstdof") && fileGZe("$outD2/$CATstdof");
-	if ($outputReady && !$repairCAT && !$deepRepair && !$redoSubmissionData){
+	if ($outputReady && !$repairCAT && !$deepRepair && !$redoSubmissionData
+			&& !exists($legacyLocusMGS{$MGS})){
 		my %samples_seen;
 		my $genes_seen = 0;
 		my ($cat_fh) = gzipopen("$outD2/$CATstdof", "existing category file");
@@ -764,6 +790,10 @@ sub addOutgroup2MGS{
 	}
 	my $temporaryInput = fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
 		&& (fileGZe("$tmpD/$CATstdof.tmp") || fileGZe("$tmpD/$CATstdof"));
+	if (exists($legacyLocusMGS{$MGS}) && !$temporaryInput) {
+		warn "$MGS has stale sequence identifiers but no regenerated temporary input; skipping it until extraction can be rerun\n";
+		return(0, 0, $OG, 0, 0);
+	}
 	$outD3 = $outD2 if !$temporaryInput && $outputReady;
 	my $FNAtf = "$outD3/$FNAstdof"; my $FAAtf = "$outD3/$FAAstdof";
 	my $CATtf = "$outD3/$CATstdof"; #my $Linkf = "$outD3/$LINKstdof";
@@ -804,8 +834,9 @@ sub addOutgroup2MGS{
 			foreach my $tags (@spl){
 				#my @spl2 = split (/\\$SaSe/,$tags);
 				#$SIcatLoc {$spl2[1]}{$spl2[0]}  = $tags;print "$spl2[1] : $spl2[0]  = $tags\n";
-				my ($sample, $locus) = split /\Q$SaSe\E/, $tags, 2;
-				if (defined($sample) && length($sample) && defined($locus) && length($locus)){
+				my ($sample, $external_locus) = split /\Q$SaSe\E/, $tags, 2;
+				my $locus = defined($external_locus) ? internalLocusName($external_locus, $MGS) : '';
+				if (defined($sample) && length($sample) && length($locus)){
 					$SIcatLoc {$locus}{$sample}  = $tags;
 				} else {
 					$malformedCatEntries++;
@@ -877,7 +908,8 @@ sub addOutgroup2MGS{
 			last if $cntShrCogs >= 10;
 		}
 		if ($cntShrCogs < 10){
-			print "Could not find outgroup for $MGS!!\n@sspl\n@curCogs[1..10]\n";
+			my @locus_preview = @curCogs[0 .. ($#curCogs < 9 ? $#curCogs : 9)];
+			print "Could not find outgroup for $MGS!!\n@sspl\n@locus_preview\n";
 			$OG = "";
 		}
 		if ($OG ne "" && !exists($SIgenes_OG{$OG})){
@@ -903,7 +935,7 @@ sub addOutgroup2MGS{
 
 			next unless length($geneKey) && exists($FNAref{$geneKey}) && exists($FAAref{$geneKey});
 			next if ($annotation =~ m/^uniq\d+$/);
-			my $ng = "$OG$SaSe$cog";
+			my $ng = "$OG$SaSe" . externalLocusName($cog, $MGS);
 			push(@tmpFNAog, ">$ng\n$FNAref{$geneKey}\n") unless exists $existingFNA->{$ng};
 			push(@tmpFAAog , ">$ng\n$FAAref{$geneKey}\n") unless exists $existingFAA->{$ng};
 			#$SIcat{$MGS}{$cog}{$OG} = $ng;
@@ -954,7 +986,7 @@ sub addOutgroup2MGS{
 	for my $stale_cat (glob("$CATtf.tmp*")) {
 		unlink $stale_cat or die "Cannot remove $stale_cat: $!\n";
 	}
-	open my $log, '>', "$outD3/data.log" or die "...";
+	open my $log, '>', "$outD3/data.log" or die "Cannot create $outD3/data.log: $!\n";
 	print $log "OG:$OG\n";
 	close $log or die "Cannot close $outD3/data.log: $!\n";
 
@@ -976,7 +1008,8 @@ sub writeLogsStep1{
 
 
 	#print log file
-	my $conlog = "$bindir/LOGandSUB/ConspecificMGS.log";
+	my $conlog = "$LOGDIR/ConspecificMGS.log";
+	make_path($LOGDIR) unless -d $LOGDIR;
 	open LO,">$conlog" or die "Can't open conspecific log file: $conlog\n";
 	foreach my $MGS (keys %ConspecificMGS){
 		print LO $MGS . "\t" . join(",",@{$ConspecificMGS{$MGS}}) . "\n";
@@ -1255,7 +1288,18 @@ sub preComputeConsSNP{
 	foreach my $smpl (@samples){ # just check that files are there..
 		#check if SNP file is present
 		last if ($onlySubmit && $inputChkd && !$preCompCons);
+		unless (exists($map{$smpl}) && defined($map{$smpl}{wrdir}) && length($map{$smpl}{wrdir})) {
+			warn "No working directory is configured for $smpl; sample will be skipped\n";
+			$fileAbsent = 1;
+			$unavailableSamples{$smpl} = "missing map working directory";
+			push @missing_samples, $smpl;
+			next;
+		}
 		my $cD = $map{$smpl}{wrdir}."/";
+		if (-e "$cD/SMPL.empty") {
+			$unavailableSamples{$smpl} = "sample is marked empty";
+			next;
+		}
 		#my $tarF = $cD."/SNP/genes.shrtHD.SNPc.MPI.fna.gz";
 		my $tarF = $cD."/$lSNPdir/$lConsFNA";
 		my $tarF2 = $cD."/$lSNPdir/$lConsFAA";
@@ -1321,7 +1365,9 @@ sub preComputeConsSNP{
 		warn scalar(@missing_samples)." samples lack required SNP inputs and will be skipped: "
 			.join(",", @missing_samples[0 .. ($#missing_samples < 9 ? $#missing_samples : 9)])
 			.(@missing_samples > 10 ? ",..." : "")."\n";
-		unlink $inputChk or warn "Cannot remove stale input checkpoint $inputChk: $!\n" if -e $inputChk;
+		if (-e $inputChk) {
+			unlink $inputChk or warn "Cannot remove stale input checkpoint $inputChk: $!\n";
+		}
 	}
 	unless ($fileAbsent || -e "$inputChk"){
 		print "All samples have SNP calls\n";
@@ -1393,7 +1439,7 @@ sub getInputSize{
 			}
 		} else {
 			push(@missedMGS,$MGS);
-			$inputFNAsize = 100;
+			$inputFNAsize = 0;
 		}
 		push(@out, $inputFNAsize); 
 	}
@@ -1420,9 +1466,11 @@ sub evalFileStatus{
 		$SIdirs{$MGS} = $outD2;
 		#print "$outD2\n";
 		if (-d $outD2 && $onlySubmit == 0){#don't delete folders if we want to submit a job later..
-			system "rm -rf $outD2/* $scratchD/outs/$MGS/*";
+			remove_tree($outD2);
+			my $scratch_mgs = "$scratchD/outs/$MGS";
+			remove_tree($scratch_mgs) if -d $scratch_mgs;
 		}
-		system "mkdir -p $outD2" unless (-d $outD2);
+		make_path($outD2) unless -d $outD2;
 		my $tooFewMarker = "$outD2/tooFewSamples.sto";
 		if (-s $tooFewMarker && !$deepRepair && !$redoSubmissionData && $onlySubmit != 0) {
 			$MGSnoTree{$MGS} = 1;
@@ -1449,9 +1497,10 @@ sub evalFileStatus{
 				close $category_fh;
 			}
 			my @identifier_parts = split /\Q$SaSe\E/, $first_entry, -1;
-			if (@identifier_parts && @identifier_parts < 4) {
-				warn "$MGS uses the legacy sample|COG identifier format; scheduling locus-aware input regeneration\n";
+			if (@identifier_parts != 3 || grep { !length } @identifier_parts) {
+				warn "$MGS does not use the required sample|COG|primaryGeneID identifier format; scheduling input regeneration\n";
 				$legacyLocusOutputs++;
+				$legacyLocusMGS{$MGS} = 1;
 				$dirsNOTPrepped++;
 				$CatFileMiss++;
 				next;
@@ -1470,10 +1519,10 @@ sub evalFileStatus{
 			#system "rm $SIdirs{$MGS}\n";
 		}elsif(!fileGZs("$SIdirs{$MGS}/phylo/$treeFile")){
 			$treeAbsent++;
-			system "rm -rf $scratchD/outs/$MGS" if (-d "$scratchD/outs/$MGS");
+			remove_tree("$scratchD/outs/$MGS") if -d "$scratchD/outs/$MGS";
 		} elsif(fileGZe("$SIdirs{$MGS}/phylo/$treeFile")) {
 			$doneDirs++;
-			system "rm -rf $scratchD/outs/$MGS" if (-d "$scratchD/outs/$MGS");
+			remove_tree("$scratchD/outs/$MGS") if -d "$scratchD/outs/$MGS";
 		}
 	}
 	$PhylosExist = 0 if ($CatFileMiss/scalar(@specis) > 0.1); #only activate if more than 10% missing..
@@ -1901,7 +1950,7 @@ sub readGenesSample_Singl{
 		
 		#need to recreate fna/faa on the fly?? -> or does user want this?
 		if ( $locForceVCF2FNA  || (! fileGZe( $fastaf ) && fileGZe($fastafVCF))){
-			system "mkdir -p $locSpace";
+			make_path($locSpace) unless -d $locSpace;
 			print "Recreating consensus fasta files on the fly.. ";
 			#store these in scratch, uncompressed (much faster)
 			$fastaf = "$locSpace/$sd3.cons.genes.fna";
@@ -2018,7 +2067,7 @@ sub readGenesSample_Singl{
 				$curLocus{$curG} = $locus;
 				push @abunGs, $bestAB;
 				$accAbu += $bestAB;
-				my $laterHd = "$sd3$SaSe$locus";
+				my $laterHd = "$sd3$SaSe" . externalLocusName($locus, $MGS);
 				$linkStr{$curG} = "$laterHd\t$locus\t$group->{primary_gene}\t".scalar(@genes)
 					."\t".join(",",@genes)."\t$selection->{reason}\n";
 			}
@@ -2071,7 +2120,8 @@ sub readGenesSample_Singl{
 				
 				$locCnt++;
 				#write gene out
-				my $ng = "$sd3$SaSe$curLocus{$gX}"; #sample|MGS|COG|primary catalogue gene
+				my $ng = "$sd3$SaSe" . externalLocusName($curLocus{$gX}, $MGS);
+				# Tree-facing identifier: sample|COG|primary catalogue gene.
 				#die;
 				push(@OFstr , ">$ng\n$FNA->{$gX}\n"); #FNA
 				push(@OAstr ,">$ng\n$strCpy\n"); #FAA

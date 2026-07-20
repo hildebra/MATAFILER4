@@ -14,7 +14,7 @@ sub setConfigFile;
 
 use Exporter qw(import);
 our @EXPORT_OK = qw(getProgPaths truePath
-					inputFmtSpades inputFmtSpadesLibraries inputFmtMegahit inputFmtMegahitLibraries jgi_depth_cmd createGapFillopt setConfigFile
+					inputFmtSpades inputFmtSpadesLibraries inputFmtMegahit inputFmtMegahitLibraries inputFmtMegahitRuntimeLibraries jgi_depth_cmd createGapFillopt setConfigFile
 					buildMapperIdx mapperDBbuilt decideMapper checkMapsDoneSH greaterComputeSpace convert2Gb);
 
 
@@ -558,6 +558,85 @@ sub inputFmtMegahitLibraries {
 	my ($libraries, $logDir) = @_;
 	my ($r1, $r2, $single) = legacyLibraryArrays($libraries, 1);
 	return inputFmtMegahit($r1, $r2, $single, $logDir);
+}
+
+sub _shell_quote_megahit_input {
+	my ($value) = @_;
+	die "Cannot quote an undefined MEGAHIT input\n" unless defined $value;
+	die "MEGAHIT input contains a NUL or newline\n" if $value =~ /[\0\r\n]/;
+	$value =~ s/'/'"'"'/g;
+	return "'$value'";
+}
+
+# Clean-read records describe outputs before their cleaning jobs run.  In
+# particular, SDM's paired-read orphan file is optional and may be absent in
+# older/stale clean directories.  Resolve those optional inputs in the
+# assembly job, after its cleaning dependencies have completed, instead of
+# baking every projected path into MEGAHIT's -r argument.
+sub inputFmtMegahitRuntimeLibraries {
+	my ($libraries, $arrayName) = @_;
+	$arrayName ||= 'megahit_inputs';
+	die "Invalid MEGAHIT shell-array name '$arrayName'\n"
+		unless $arrayName =~ /^[A-Za-z_][A-Za-z0-9_]*$/;
+	my ($r1, $r2, $single) = legacyLibraryArrays($libraries, 1);
+	my (@left, @right, @singletons);
+	for (my $i = 0; $i < @{$r1}; $i++) {
+		my $left = $r1->[$i] || '';
+		my $right = $r2->[$i] || '';
+		die "Read library index $i has only one mate for MEGAHIT\n"
+			if (($left eq '') != ($right eq ''));
+		if ($left ne '') {
+			die "MEGAHIT input paths cannot contain commas: $left / $right\n"
+				if $left =~ /,/ || $right =~ /,/;
+			push @left, $left;
+			push @right, $right;
+		}
+		my $orphan = $single->[$i] || '';
+		if ($orphan ne '') {
+			die "MEGAHIT input paths cannot contain commas: $orphan\n" if $orphan =~ /,/;
+			push @singletons, $orphan;
+		}
+	}
+	die "No read inputs supplied to MEGAHIT\n" unless @left || @singletons;
+
+	my $command = "$arrayName=()\n";
+	if (@left) {
+		for (my $i = 0; $i < @left; $i++) {
+			my $leftQ = _shell_quote_megahit_input($left[$i]);
+			my $rightQ = _shell_quote_megahit_input($right[$i]);
+			my $messageQ = _shell_quote_megahit_input(
+				"Missing or empty paired input for MEGAHIT: $left[$i] / $right[$i]"
+			);
+			$command .= "if [[ ! -s $leftQ || ! -s $rightQ ]]; then "
+				."printf '%s\\n' $messageQ >&2; exit 41; fi\n";
+		}
+		my $leftCSV = _shell_quote_megahit_input(join(',', @left));
+		my $rightCSV = _shell_quote_megahit_input(join(',', @right));
+		$command .= "$arrayName+=( -1 $leftCSV -2 $rightCSV )\n";
+	}
+
+	if (@singletons) {
+		my $singleArray = "${arrayName}_singletons";
+		my $singleCSV = "${arrayName}_singleton_csv";
+		$command .= "$singleArray=()\n";
+		for my $orphan (@singletons) {
+			my $orphanQ = _shell_quote_megahit_input($orphan);
+			my $messageQ = _shell_quote_megahit_input(
+				"Skipping missing or empty optional MEGAHIT singleton: $orphan"
+			);
+			$command .= "if [[ -s $orphanQ ]]; then $singleArray+=( $orphanQ ); "
+				."else printf '%s\\n' $messageQ >&2; fi\n";
+		}
+		my $singleLength = '${#'.$singleArray.'[@]}';
+		my $singleValues = '${'.$singleArray.'[@]}';
+		$command .= "if (( $singleLength )); then "
+			."printf -v $singleCSV '%s,' \"$singleValues\"; "
+			."$singleCSV=\${$singleCSV%,}; $arrayName+=( -r \"\$$singleCSV\" ); fi\n";
+	}
+	my $argumentCount = '${#'.$arrayName.'[@]}';
+	$command .= "if (( $argumentCount == 0 )); then printf '%s\\n' "
+		."'No non-empty read inputs remain for MEGAHIT' >&2; exit 42; fi\n";
+	return ($command, '"${'.$arrayName.'[@]}"');
 }
 
 #2nd: arrray of files, paired sep by ","

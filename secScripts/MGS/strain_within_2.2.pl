@@ -391,8 +391,12 @@ foreach my $d (@k2d){
 		chomp;
 		my @spl = split /\t/;
 		foreach my $gn (@spl){
-			$gn =~ m/^(.*)$SaSe2(.*)$/;
-			$genePres{$2}{$1} = 1; #{COG}{SMPL}
+			my ($sample, $locus) = split /\Q$SaSe\E/, $gn, 2;
+			unless (defined($sample) && length($sample) && defined($locus) && length($locus)) {
+				warn "Ignoring malformed tree sequence identifier '$gn' in $catFile\n";
+				next;
+			}
+			$genePres{$locus}{$sample} = 1; #{COG|primaryGeneID}{SMPL}
 		}
 	}
 	close I;

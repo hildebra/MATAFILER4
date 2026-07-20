@@ -10,8 +10,9 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(fileGZe fileGZs);
 use Mods::IO_Tamoc_progs qw(
-	buildMapperIdx checkMapsDoneSH inputFmtMegahit truePath
+	buildMapperIdx checkMapsDoneSH inputFmtMegahit inputFmtMegahitRuntimeLibraries truePath
 );
+use Mods::ReadLibrary qw(newReadLibrary);
 use Mods::Subm qw(qsubSystem2);
 
 my $root = tempdir(CLEANUP => 1);
@@ -30,6 +31,46 @@ eval { inputFmtMegahit(['a.1.fq'], [], [], $root) };
 $error = $@;
 like($error, qr/Unequal paired read array lengths for MEGAHIT/,
 	'MEGAHIT rejects genuinely unpaired mate arrays');
+
+my $runtime_libraries = [
+	newReadLibrary(
+		id => 'lib0', scope => 'primary', phase => 'clean',
+		files => {r1 => "$root/lib 0.1.fq.gz", r2 => "$root/lib 0.2.fq.gz",
+			single => "$root/lib 0.singl.fq.gz"},
+	),
+	newReadLibrary(
+		id => 'lib1', scope => 'primary', phase => 'clean',
+		files => {r1 => "$root/lib1.1.fq.gz", r2 => "$root/lib1.2.fq.gz",
+			single => "$root/lib1.singl.fq.gz"},
+	),
+];
+my ($runtime_setup, $runtime_args) = inputFmtMegahitRuntimeLibraries(
+	$runtime_libraries, 'mh_args',
+);
+is($runtime_args, '"${mh_args[@]}"',
+	'runtime MEGAHIT arguments use a Bash array without word splitting');
+like($runtime_setup, qr/Skipping missing or empty optional MEGAHIT singleton/,
+	'runtime MEGAHIT setup treats projected singleton files as optional');
+like($runtime_setup, qr/Missing or empty paired input for MEGAHIT/,
+	'runtime MEGAHIT setup still requires both paired-read files');
+my $runtime_script = "$root/megahit-inputs.sh";
+for my $read ("$root/lib 0.1.fq.gz", "$root/lib 0.2.fq.gz",
+	"$root/lib1.1.fq.gz", "$root/lib1.2.fq.gz", "$root/lib1.singl.fq.gz") {
+	open my $read_fh, '>', $read or die $!;
+	print {$read_fh} "non-empty\n";
+	close $read_fh;
+}
+open my $runtime_fh, '>', $runtime_script or die $!;
+print {$runtime_fh} "#!/bin/bash\n$runtime_setup\nprintf '<%s>\\n' $runtime_args\n";
+close $runtime_fh;
+is(system('bash', '-n', $runtime_script), 0,
+	'generated runtime MEGAHIT input setup is valid Bash');
+my $runtime_output = `bash "$runtime_script" 2>/dev/null`;
+is($?, 0, 'runtime MEGAHIT input setup executes successfully');
+like($runtime_output, qr/<-r>\n<\Q${root}\/lib1.singl.fq.gz\E>/,
+	'the generated MEGAHIT -r list retains an existing singleton');
+unlike($runtime_output, qr/lib 0\.singl/,
+	'the generated MEGAHIT -r list omits a missing projected singleton');
 
 {
 	no warnings 'redefine';

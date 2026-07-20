@@ -100,6 +100,8 @@ like($strain2_source, qr/"test -s "\.shellQuote\(\$analysisReport\).*?"touch "\.
 	'new R analyses validate their report before writing a success stone');
 like($strain2_source, qr/my \$MGSd = dirname\(\$FMGpD\);/,
 	'treeWAS receives a trailing-slash-independent parent directory');
+like($strain2_source, qr/split \/\\Q\$SaSe\\E\/, \$gn, 2/,
+	'strain postprocessing splits compound tree identifiers at the first separator');
 my $resort_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'resortMGSgenes4importance.pl'));
 like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 	'gene-priority resorting flushes its final MGS at EOF');
@@ -126,19 +128,31 @@ like($strain_source, qr/'-SNPadaptiveQual', \$useAdaptiveQual/,
 like($strain_source, qr/rename \$mergeFile, \$outfile or die/,
 	'part-file merging publishes completed output atomically');
 like($strain_source,
-	qr/!\$reSubmit && !\$repairCAT && !\$redoSubmissionData && -e \$treeStone/,
+	qr/!\$reSubmit && !\$repairCAT && !\$redoSubmissionData.*?&& -e \$treeStone/s,
 	'explicit repair and resubmission modes bypass completed-tree skipping');
 like($strain_source, qr/tooFewSamples\.sto/,
 	'undersampled MGS are checkpointed separately from missing inputs');
 like($strain_source, qr/falling back to on-the-fly generation/,
 	'failed consensus precomputation has a local fallback');
-like($strain_source, qr/my \$ng = "\$sd3\$SaSe\$curLocus\{\$gX\}"/,
-	'within-MGS sequence identifiers carry the MGS, COG, and primary catalogue gene locus');
+like($strain_source, qr/my \$ng = "\$sd3\$SaSe" \. externalLocusName\(\$curLocus\{\$gX\}, \$MGS\)/,
+	'within-MGS sequence identifiers carry sample, COG, and primary catalogue gene');
+like($strain_source, qr/internalLocusName\(\$external_locus, \$MGS\)/,
+	'external category loci are restored to exact MGS-qualified internal keys');
+like($strain_source, qr/\@identifier_parts != 3/,
+	'stale two- or four-part sequence identifiers trigger input regeneration');
+like($strain_source, qr/!exists\(\$legacyLocusMGS\{\$MGS\}\).*?-e \$treeStone/s,
+	'stale identifier formats cannot be hidden by an existing tree checkpoint');
+like($strain_source, qr/stale sequence identifiers but no regenerated temporary input/,
+	'stale final inputs are not silently reused when regeneration produced no files');
+like($strain_source, qr/No prior conspecific-sample log found.*?continuing without historical exclusions/,
+	'missing optional exclusion logs do not abort sparse-MGS resume runs');
 like($strain_source, qr/robust_depth_mask\(\\\@abunGs\)/,
 	'within-MGS abundance filtering uses a robust depth mask');
 
 my $build_tree_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree_source, qr/\(\?<sample>\.\*\?\).*?\(\?<gene>\.\+\)/,
 	'tree sequence identifiers split at the first separator and retain compound locus names');
+like($build_tree_source, qr/sub geneFileStem.*?sprintf\("_%02X", ord\(\$1\)\)/s,
+	'compound locus names are encoded safely and deterministically for downstream filenames');
 
 done_testing();
