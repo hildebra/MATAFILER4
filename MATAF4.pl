@@ -1778,7 +1778,10 @@ sub mapping_reference_matches {
 	open my $stampFH, '<', $stamp or return 0;
 	my $line = <$stampFH>;
 	close $stampFH;
-	return 0 unless defined($line) && $line =~ /^(\d+)\t(\d+)\s*$/;
+	# GNU stat does not interpret \t in --format consistently across deployed
+	# versions.  Accept the short-lived literal "\\t" format as well as normal
+	# whitespace so mappings produced by the affected release remain usable.
+	return 0 unless defined($line) && $line =~ /^(\d+)(?:\s+|\\t)(\d+)\s*$/;
 	my ($recordedSize, $recordedMtime) = ($1, $2);
 	my @referenceStat = stat($reference);
 	return 0 unless @referenceStat;
@@ -6003,7 +6006,7 @@ sub bamDepth{
 	# transition and may have comma-separated references.
 	if (!$is2ndMap && $REF !~ /,/) {
 		$CRAMcmd .= "test -s \"$REF\"\n";
-		$CRAMcmd .= "stat -c '%s\\t%Y' \"$REF\" > $publishStage/$baseN-smd.reference.stat\n";
+		$CRAMcmd .= "stat -c '%s %Y' \"$REF\" > $publishStage/$baseN-smd.reference.stat\n";
 		$CRAMcmd .= "test -s $publishStage/$baseN-smd.reference.stat\n";
 	}
 	$CRAMcmd .= "for f in $publishStage/*; do mv -f \"\$f\" $finalD/; done\nrmdir $publishStage\n";

@@ -154,7 +154,9 @@ like($runner, qr/validate_mapping_references\.pl.*?system\(\$\^X, \$referenceVal
 	'all binners validate mapping sequence dictionaries before conversion');
 like($mataf4, qr/Hybrid \$kind mapping does not identify.*?mapping_reference_matches/s,
 	'final hybrid assemblies invalidate legacy or stale preassembly mappings');
-like($mataf4, qr/stat -c .*?smd\.reference\.stat/s,
-	'mapping publication records a durable reference identity stamp');
+like($mataf4, qr/stat -c '%s %Y'.*?smd\.reference\.stat/s,
+	'mapping publication records a portable reference identity stamp');
+like($mataf4, qr/\(\?:\\s\+\|\\\\t\)/,
+	'reference identity recovery accepts markers from the literal-tab release');
 
 done_testing();
