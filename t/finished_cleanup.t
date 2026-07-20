@@ -41,6 +41,7 @@ sub run_cleaner {
 		'--scratch-root', $scratch,
 		'--assembly', ($args{assembly} // $assembly),
 		'--snp-log-dir', $args{snp_log_dir};
+	push @command, @{$args{requirements} || []};
 	return system(@command);
 }
 
@@ -68,8 +69,30 @@ for my $sample (qw(S1 S2)) {
 	};
 }
 
+my $terminal_marker = File::Spec->catfile($output, 'S1', 'terminal.stone');
+my $terminal_report = File::Spec->catfile($output, 'S1', 'terminal.report');
+my $terminal_data = File::Spec->catfile($output, 'S1', 'terminal.data');
+my @terminal_requirements = (
+	'--require-exists', $terminal_marker,
+	'--require-nonempty', $terminal_report,
+	'--require-nonempty-file', $terminal_data,
+);
+isnt(run_cleaner(
+	sample => 'S1', members => [qw(S1 S2)],
+	requirements => \@terminal_requirements,
+	%{$sample_paths{S1}},
+), 0, 'cleanup refuses to run before terminal outputs are published');
+ok(-e File::Spec->catfile($sample_paths{S1}{mapping_dir}, 'S1-smd.bam.bai'),
+	'failed prerequisite validation retains mapping indexes');
+ok(-d $sample_paths{S1}{sample_temp},
+	'failed prerequisite validation retains the sample temporary directory');
+write_file($terminal_marker, '');
+write_file($terminal_report, "complete\n");
+write_file("$terminal_data.gz", "data\n");
+
 is(run_cleaner(
 	sample => 'S1', members => [qw(S1 S2)],
+	requirements => \@terminal_requirements,
 	%{$sample_paths{S1}},
 ), 0, 'first completed sample cleanup succeeds');
 ok(!-e File::Spec->catfile($sample_paths{S1}{mapping_dir}, 'S1-smd.bam.bai'),
@@ -155,8 +178,14 @@ unlike($mata_source, qr/'--mode', 'invalidate'/,
 like($mata_source, qr/runFinishedCleanup\(finishedCleanupArguments\(/s,
 	'fully completed samples invoke centralized cleanup');
 like($mata_source,
-	qr/MFnext\(\$smplLockF,\\\@sampleDeps.*?submitFinishedCleanup\(.*?\\\@sampleDeps.*?loop2C_check/s,
-	'normal submissions enqueue cleanup after work completion and lock release');
+	qr/MFnext\(\$smplLockF,\\\@sampleDeps.*?cleanup_stage_barrier\(.*?name => 'contig stats'.*?name => 'binning'.*?name => 'consSNP\/variant analysis'.*?if \(\$cleanupBarrier->\{ready\}\).*?submitFinishedCleanup/s,
+	'normal submissions enqueue cleanup only after every terminal analysis is complete or scheduled');
+like($mata_source,
+	qr/my \@cleanupDependencies = split .*?normalise_job_dependencies\(.*?\\\@sampleDeps, \$cleanupBarrier->\{dependencies\}/s,
+	'cleanup depends on both the complete sample job set and explicit terminal-stage jobs');
+like($mata_source,
+	qr/sub cleanupCompletionRequirements.*?Coverage\.stone.*?FMGids\.txt.*?marker_genes_meta\.tsv.*?binning_base.*?primary_snp_stone/s,
+	'cleanup publishes explicit ContigStats, binning, and ConsSNP output requirements');
 like($mata_source,
 	qr/sub submitFinishedCleanup.*?afterAny\} = 0;.*?qsubSystem\(.*?\$dependencyString/s,
 	'cleanup uses successful scheduler dependencies rather than after-any execution');

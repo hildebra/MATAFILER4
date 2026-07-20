@@ -16,6 +16,7 @@ our @EXPORT_OK = qw(
 	missing_input_files
 	normalise_job_dependencies
 	append_job_dependencies
+	cleanup_stage_barrier
 	augment_deferred_submission
 	source_input_files
 	parse_ignored_samples
@@ -94,6 +95,29 @@ sub append_job_dependencies {
 		unless (ref($target) eq 'SCALAR');
 	${$target} = normalise_job_dependencies(${$target}, @values);
 	return ${$target};
+}
+
+sub cleanup_stage_barrier {
+	my (@stages) = @_;
+	@stages = @{$stages[0]} if @stages == 1 && ref($stages[0]) eq 'ARRAY';
+	my (@dependencies, @blocked);
+	for my $stage (@stages) {
+		die 'cleanup_stage_barrier stages must be hash references'
+			unless ref($stage) eq 'HASH';
+		next unless $stage->{required};
+		next if $stage->{complete};
+		my $stage_dependencies = normalise_job_dependencies($stage->{dependencies});
+		if ($stage_dependencies eq '') {
+			push @blocked, $stage->{name} || 'unnamed stage';
+			next;
+		}
+		push @dependencies, $stage_dependencies;
+	}
+	return {
+		ready => @blocked ? 0 : 1,
+		dependencies => normalise_job_dependencies(@dependencies),
+		blocked => \@blocked,
+	};
 }
 
 sub augment_deferred_submission {

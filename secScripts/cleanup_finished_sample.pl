@@ -13,6 +13,7 @@ use Getopt::Long qw(GetOptions);
 my %opt;
 my @members;
 my @member_locks;
+my (@require_exists, @require_nonempty, @require_file, @require_nonempty_file);
 GetOptions(
 	'sample=s'        => \$opt{sample},
 	'member=s@'       => \@members,
@@ -24,6 +25,10 @@ GetOptions(
 	'scratch-root=s'  => \$opt{scratch_root},
 	'assembly=s'      => \$opt{assembly},
 	'snp-log-dir=s'   => \$opt{snp_log_dir},
+	'require-exists=s@'       => \@require_exists,
+	'require-nonempty=s@'     => \@require_nonempty,
+	'require-file=s@'         => \@require_file,
+	'require-nonempty-file=s@' => \@require_nonempty_file,
 ) or die "invalid cleanup arguments\n";
 
 for my $required (qw(sample state_dir allowed_root mapping_dir sample_temp scratch_root assembly snp_log_dir)) {
@@ -95,7 +100,37 @@ sub remove_files {
 	}
 }
 
+sub plain_or_gzip_stats {
+	my ($path) = @_;
+	my @candidates = $path =~ /\.gz$/ ? ($path, substr($path, 0, -3)) : ($path, "$path.gz");
+	for my $candidate (@candidates) {
+		my @stat = stat($candidate);
+		return ($candidate, \@stat) if @stat;
+	}
+	return;
+}
+
 my $allowed_root = existing_absolute($opt{allowed_root}, 'allowed root');
+my @missing_requirements;
+for my $path (@require_exists) {
+	push @missing_requirements, "$path (missing)" unless stat($path);
+}
+for my $path (@require_nonempty) {
+	my @stat = stat($path);
+	push @missing_requirements, "$path (missing or empty)" unless @stat && $stat[7] > 0;
+}
+for my $path (@require_file) {
+	my (undef, $stat) = plain_or_gzip_stats($path);
+	push @missing_requirements, "${path}[.gz] (missing)" unless $stat;
+}
+for my $path (@require_nonempty_file) {
+	my (undef, $stat) = plain_or_gzip_stats($path);
+	push @missing_requirements, "${path}[.gz] (missing or empty)"
+		unless $stat && $stat->[7] > 0;
+}
+die "cleanup prerequisites are incomplete; retained temporary files: "
+	.join('; ', @missing_requirements)."\n" if @missing_requirements;
+
 my $state_dir = prospective_absolute($opt{state_dir});
 require_below($state_dir, $allowed_root, 'cleanup state directory');
 my $marker = marker_for($state_dir, $opt{sample});

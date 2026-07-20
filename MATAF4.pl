@@ -51,6 +51,7 @@ use Mods::WorkflowControl qw(
 	hybrid_local_scratch_gb
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies augment_deferred_submission
+	cleanup_stage_barrier
 );
 
 
@@ -64,7 +65,7 @@ use Mods::WorkflowControl qw(
 sub announce_MF4;
 sub smplStats; sub checkDrives; 
 sub isLastSampleInAssembly;
-sub finishedCleanupArguments; sub runFinishedCleanup; sub submitFinishedCleanup;
+sub cleanupCompletionRequirements; sub finishedCleanupArguments; sub runFinishedCleanup; sub submitFinishedCleanup;
 sub uploadRawFilePrep; sub unploadRawFilePostprocess;
 sub seedUnzip2tmp; sub cleanInput; #unzipping reads; removing these at later stages ; remove tmp dirs
 
@@ -79,7 +80,7 @@ sub createPsAssLongReads; #pseudo assembler
 sub prepPreAssmbl; #hybrid pacbio/ill assemblies
 sub genePredictions; sub run_prodigal; #gene prediction
 sub mapReadsToRef;  sub scndMap2Genos;
-sub runContigStats;#sub bam2cram;
+sub contigStatsOutputsComplete; sub runContigStats;#sub bam2cram;
 sub mocat_reorder; sub postSubmQsub; 
 sub detectRibo;  sub riboSummary;
 
@@ -881,6 +882,48 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	$calcUnzip=1 if ($calcDiamond || $porechopFlag || $seqCleanFlag  || $mapAssFlag || $mapSuppAssFlag || (!$MFopt{useUnmapped} && !$boolScndMappingOK) || $MFconfig{uploadRawRds} ne ""); 
 	#print "chk1 $mapSuppAssFlag $calcSuppCoverage $eSuppCovAsssembly\n" ;
 
+	# Cleanup is destructive to read-cleaning stones, mapping indexes and staged
+	# reads.  A generic list of jobs submitted in this pass is not proof that the
+	# terminal assembly analyses are complete: in particular ConsSNP may be
+	# deferred to a later pass while its published inputs are still unavailable.
+	my $cleanupContigSubparts = $MFconfig{defaultContigSubs}."gFG";
+	$cleanupContigSubparts .= "m" if ($MFopt{DoBinning});
+	$cleanupContigSubparts .= "k" if ($MFopt{kmerAssembly});
+	$cleanupContigSubparts .= "4" if ($MFopt{kmerPerGene});
+	my $cleanupContigStatsComplete = contigStatsOutputsComplete(
+		$curOutDir, $finalCommAssDir, $cleanupContigSubparts, 1,
+		$curSmpl, $supportCoverageRequired,
+	);
+	my $cleanupPrimaryConsensusRequired = $MFopt{DoConsSNP} && $map{$curSmpl}{hasPrimaryRds};
+	my $cleanupSupportConsensusRequired = $MFopt{DoSuppConsSNP} && $locMapSup2Assembly;
+	my $cleanupConsensusRequired = $cleanupPrimaryConsensusRequired || $cleanupSupportConsensusRequired;
+	my $cleanupVariantRequired =
+		$cleanupConsensusRequired
+		|| ($MFopt{callSVs} && $map{$curSmpl}{hasPrimaryRds})
+		|| ($MFopt{callSVsSupp} && $locMapSup2Assembly);
+	my $cleanupVariantsComplete = !$cleanupVariantRequired
+		|| (!$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp);
+	my $terminalOutputsComplete = !$doPreAssmFlag && !$ePreAssmblPck
+		&& $efinAssLoc && $cleanupContigStatsComplete
+		&& (!$MFopt{DoMetaBat2} || $binningComplete)
+		&& $cleanupVariantsComplete;
+	my $cleanupRequirements = cleanupCompletionRequirements(
+		contig_dir => $ContigStatsDir,
+		assembly_dir => $finalCommAssDir,
+		contig_subparts => $cleanupContigSubparts,
+		primary_coverage_required => $map{$curSmpl}{hasPrimaryRds},
+		support_coverage_required => $supportCoverageRequired,
+		binning_base => $MFopt{DoMetaBat2} ? $BinningOut : '',
+		primary_snp_stone => $cleanupPrimaryConsensusRequired ? $STOsnpCons : '',
+		support_snp_stone => $cleanupSupportConsensusRequired ? $STOsnpSuppCons : '',
+		consensus_contigs => ($cleanupConsensusRequired && $MFopt{saveConsFastas}) ? $contigsSNP : '',
+		consensus_genes => ($cleanupConsensusRequired && $MFopt{saveConsFastas}) ? [$genePredSNP, $genePredAASNP] : [],
+		primary_vcf => ($cleanupPrimaryConsensusRequired && $MFopt{saveVCF}) ? $vcfSNP : '',
+		support_vcf => ($cleanupSupportConsensusRequired && $MFopt{saveVCF}) ? $vcfSNPsupp : '',
+		primary_sv => ($MFopt{callSVs} && $map{$curSmpl}{hasPrimaryRds}) ? $vcfSV : '',
+		support_sv => ($MFopt{callSVsSupp} && $locMapSup2Assembly) ? $vscSVsupp : '',
+	);
+
 	if ($scaffTarExternal ne "" &&  $map{$curSmpl}{"SupportReads"} !~ /mate/i && $scaffTarExtLibTar ne $curSmpl ){print"scNxt\n";loop2C_check($cAssGrp,\@sampleDeps);next;}
 	
 
@@ -891,6 +934,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		!$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp &&
 		!$calcBinning && !$calc2ndMapSNP && $boolAssemblyOK && $boolScndCoverageOK 
 		 && !$calcCoverage && !$calcSuppCoverage && !$dowstreamAnalysisFlag
+		 && $terminalOutputsComplete
 		#&& !$calcRibofind && !$calcRiboAssign && !$MFopt{calcOrthoPlacement} && !$calcGenoSize && !$calcDiamond && !$calcDiaParse && 
 		#!$calcMetaPhlan && !$calcTaxaTar && !$calcMOTU2 && !$calcKraken && $scaffTarExternal eq ""
 	){
@@ -908,7 +952,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		if ($MFconfig{rmScratchTmp}) {
 			runFinishedCleanup(finishedCleanupArguments(
 				$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
-				$smplTmpDir, $finAssLoc, $logDir,
+				$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
 			));
 		}
 		print "next due to sample finished";
@@ -1305,6 +1349,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#-----------------------------------------------------------------
 	#---------------- producer barriers, downstream analysis ---------------
 	#-----------------------------------------------------------------
+	my ($fullContigStatsDep, $binningJobDep, $variantJobDep) = ("", "", "");
 	
 	
 	# Completed assemblies and mappings are published by their producer jobs.
@@ -1316,7 +1361,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	);
 	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $publicationDeps);
 	add2SampleDeps(\@sampleDeps, [$jdep , $AsGrps{$cAssGrp}{MapDeps} , $AsGrps{$cAssGrp}{scndMapping},$AsGrps{$cAssGrp}{prodRun} ]);
-	
+
 	#die;
 	
 	#this flag is essentially $allCovDone 
@@ -1342,6 +1387,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		);
 		$AsGrps{$cAssGrp}{PostClnCmd} = "";$AsGrps{$cAssGrp}{CSfinJobName} = $contRun;
 		$jdep = normalise_job_dependencies($contRun, $deferredContigDeps);
+		$fullContigStatsDep = $jdep if ($tmpCDd && $jdep ne "");
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredContigDeps);
 
 		if ($contRun ne "") {
@@ -1365,8 +1411,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ( $calcBinning && $AssemblyGo ){  #$allMapDone rm: this is checked now via $AsGrps{$cAssGrp}{MapDeps}
 		my $binnerTmp = $nodeSpTmpD;
 		$binnerTmp = $smplTmpDir if ($MFopt{useBinnerScratch});
-		my $binDep  = submitGenomeBinner($binnerTmp,$finAssLoc,$BinningOut, $cAssGrp,$smplIDs[-1]);
-		add2SampleDeps(\@sampleDeps, [$binDep]);
+		$binningJobDep = submitGenomeBinner($binnerTmp,$finAssLoc,$BinningOut, $cAssGrp,$smplIDs[-1]);
+		add2SampleDeps(\@sampleDeps, [$binningJobDep]);
 	}
 
 	
@@ -1425,20 +1471,51 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$SNPinfo{STOconSNPsupp} = $STOsnpSuppCons   ; #trigger for also looking at cons SNP for support reads
 		}
 		
-		my ($consSNPdep) = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
-		add2SampleDeps(\@sampleDeps, [$consSNPdep]);
+		($variantJobDep) = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
+		add2SampleDeps(\@sampleDeps, [$variantJobDep]);
 		#push(@sampleDeps, $consSNPdep) if (defined $consSNPdep && $consSNPdep ne "");
 	}
 	MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR);
+	my $cleanupBarrier = cleanup_stage_barrier(
+		{
+			name => 'final assembly publication', required => 1,
+			complete => (!$doPreAssmFlag && !$ePreAssmblPck && $efinAssLoc),
+			dependencies => (!$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo)
+				? $publicationDeps : '',
+		},
+		{
+			name => 'contig stats', required => 1,
+			complete => $cleanupContigStatsComplete,
+			dependencies => $fullContigStatsDep,
+		},
+		{
+			name => 'binning', required => $MFopt{DoMetaBat2} ? 1 : 0,
+			complete => $binningComplete,
+			dependencies => $binningJobDep,
+		},
+		{
+			name => 'consSNP/variant analysis', required => $cleanupVariantRequired ? 1 : 0,
+			complete => $cleanupVariantsComplete,
+			dependencies => $variantJobDep,
+		},
+	);
 	if ($MFconfig{rmScratchTmp} && @sampleDeps) {
-		my $cleanupJob = submitFinishedCleanup(
-			"$logDir/FinishedCleanup.sh", "CLN$JNUM", \@sampleDeps,
-			finishedCleanupArguments(
-				$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
-				$smplTmpDir, $finAssLoc, $logDir,
-			),
-		);
-		add2SampleDeps(\@sampleDeps, [$cleanupJob]) if $cleanupJob ne '';
+		if ($cleanupBarrier->{ready}) {
+			my @cleanupDependencies = split /;/, normalise_job_dependencies(
+				\@sampleDeps, $cleanupBarrier->{dependencies},
+			);
+			my $cleanupJob = submitFinishedCleanup(
+				"$logDir/FinishedCleanup.sh", "CLN$JNUM", \@cleanupDependencies,
+				finishedCleanupArguments(
+					$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
+					$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
+				),
+			);
+			add2SampleDeps(\@sampleDeps, [$cleanupJob]) if $cleanupJob ne '';
+		} else {
+			print "Deferring finished cleanup for $SmplName; waiting for "
+				.join(', ', @{$cleanupBarrier->{blocked}})."\n";
+		}
 	}
 	### loop2complete functionality
 	loop2C_check($cAssGrp,\@sampleDeps);
@@ -1517,16 +1594,60 @@ exit(0);
 #
 #####################################################
 
+sub cleanupCompletionRequirements {
+	my (%args) = @_;
+	my (@exists, @nonempty, @files, @nonemptyFiles);
+	my $contigDir = $args{contig_dir};
+	$contigDir =~ s{/+$}{};
+	if ($args{primary_coverage_required}) {
+		push @exists, "$contigDir/Coverage.stone";
+		push @files, map { "$contigDir/Coverage.$_" }
+			qw(percontig median.percontig pergene count_pergene);
+	}
+	if ($args{support_coverage_required}) {
+		push @exists, "$contigDir/Cov.sup.stone";
+		push @files, map { "$contigDir/Cov.sup.$_" }
+			qw(percontig median.percontig pergene count_pergene);
+	}
+	my $subparts = $args{contig_subparts} || '';
+	push @nonemptyFiles, "$args{assembly_dir}/ContigStats/FMG/FMGids.txt"
+		if $subparts =~ /F/;
+	push @nonemptyFiles, "$args{assembly_dir}/ContigStats/GTDBmg/marker_genes_meta.tsv"
+		if $subparts =~ /G/;
+	push @nonemptyFiles, "$contigDir/scaff.pergene.4kmer.pm5"
+		if $MFopt{kmerPerGene} && $subparts =~ /4/;
+
+	if ($args{binning_base}) {
+		push @exists, $args{binning_base};
+		push @nonempty, "$args{binning_base}.assStat";
+		push @exists, "$args{binning_base}.cm" if $MFopt{useCheckM1};
+		push @nonempty, "$args{binning_base}.cm2" if $MFopt{useCheckM2};
+	}
+	push @exists, grep { defined($_) && $_ ne '' }
+		@args{qw(primary_snp_stone support_snp_stone)};
+	push @nonemptyFiles, grep { defined($_) && $_ ne '' }
+		@args{qw(consensus_contigs primary_vcf support_vcf)};
+	push @nonemptyFiles, @{$args{consensus_genes} || []};
+	push @nonempty, grep { defined($_) && $_ ne '' }
+		@args{qw(primary_sv support_sv)};
+	return {
+		exists => \@exists,
+		nonempty => \@nonempty,
+		files => \@files,
+		nonempty_files => \@nonemptyFiles,
+	};
+}
+
 sub finishedCleanupArguments {
 	my ($sampleKey, $sampleName, $assemblyDir, $mappingDir,
-		$sampleTemp, $assembly, $sampleLogDir) = @_;
+		$sampleTemp, $assembly, $sampleLogDir, $requirements) = @_;
 	my @memberKeys = exists($map{$sampleKey}{AG_members})
 		? @{$map{$sampleKey}{AG_members}} : ($sampleKey);
 	my @memberArgs = map { ('--member', $map{$_}{SmplID}) } @memberKeys;
 	my @memberLockArgs = map {
 		('--member-lock', "$map{$_}{wrdir}/LOGandSUB/$MFcontstants{DefaultSampleLock}")
 	} @memberKeys;
-	return (
+	my @arguments = (
 		'--sample', $sampleName, @memberArgs, @memberLockArgs,
 		'--state-dir', "$assemblyDir/.cleanup-indexes",
 		'--allowed-root', $baseOut,
@@ -1536,6 +1657,18 @@ sub finishedCleanupArguments {
 		'--assembly', $assembly,
 		'--snp-log-dir', "$sampleLogDir/SNP",
 	);
+	$requirements ||= {};
+	my %requirementFlags = (
+		exists => '--require-exists',
+		nonempty => '--require-nonempty',
+		files => '--require-file',
+		nonempty_files => '--require-nonempty-file',
+	);
+	for my $kind (qw(exists nonempty files nonempty_files)) {
+		push @arguments, map { ($requirementFlags{$kind}, $_) }
+			@{$requirements->{$kind} || []};
+	}
+	return @arguments;
 }
 
 sub runFinishedCleanup {
@@ -3405,15 +3538,10 @@ sub nopareil(){
 	}
 	return $jobName;
 }
-sub runContigStats{
-	my ($path,$jobd,$assD,$subprts,$immSubm,  $tmpD,$AssemblyGo,$Nthr,$smpl,$requireSupportCoverage) = @_;
-	my $sepCtsScript = getProgPaths("sepCts_scr");#
+sub contigStatsOutputsComplete {
+	my ($path,$assD,$subprts,$AssemblyGo,$smpl,$requireSupportCoverage) = @_;
 	my $ContigStatsDir  = "$path/$preDIRs{dir_ContigStats}";
 	my $CSfilesComplete = 1;
-	my $readL =  $map{$curSmpl}{seqSet}->{samplReadLength};
-	my $readLX =  $map{$curSmpl}{seqSet}->{samplReadLengthX};
-	
-	#die;
 	my $primaryCoverageComplete = contig_stats_coverage_complete($ContigStatsDir, "Coverage");
 	$CSfilesComplete = 0 if (!$primaryCoverageComplete && $map{$smpl}{hasPrimaryRds});
 	$CSfilesComplete = 0  if ($MFopt{kmerPerGene} && $AssemblyGo && ! fileGZs("$ContigStatsDir/scaff.pergene.4kmer.pm5" ));
@@ -3421,6 +3549,19 @@ sub runContigStats{
 	$CSfilesComplete = 0 if ($requireSupportCoverage && !$supportCoverageComplete);
 	$CSfilesComplete = 0  if ($subprts =~ m/F/ && ! fileGZs( "$assD/ContigStats//FMG/FMGids.txt" ));
 	$CSfilesComplete = 0  if ($subprts =~ m/G/ && ! fileGZs( "$assD/ContigStats/GTDBmg/marker_genes_meta.tsv" ));
+	return $CSfilesComplete;
+}
+
+sub runContigStats{
+	my ($path,$jobd,$assD,$subprts,$immSubm,  $tmpD,$AssemblyGo,$Nthr,$smpl,$requireSupportCoverage) = @_;
+	my $sepCtsScript = getProgPaths("sepCts_scr");#
+	my $CSfilesComplete = contigStatsOutputsComplete(
+		$path, $assD, $subprts, $AssemblyGo, $smpl, $requireSupportCoverage,
+	);
+	my $readL =  $map{$curSmpl}{seqSet}->{samplReadLength};
+	my $readLX =  $map{$curSmpl}{seqSet}->{samplReadLengthX};
+
+	#die;
 	#die "$CSfilesComplete";
 	return ("","",0) if ($CSfilesComplete);
 	

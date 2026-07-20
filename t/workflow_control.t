@@ -15,6 +15,7 @@ use Mods::WorkflowControl qw(
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies augment_deferred_submission
+	cleanup_stage_barrier
 );
 
 is(normalise_job_dependencies('run12;;run7', ['run7', '', 'run3;run12']),
@@ -22,6 +23,22 @@ is(normalise_job_dependencies('run12;;run7', ['run7', '', 'run3;run12']),
 my $job_dependencies = 'run12;';
 is(append_job_dependencies(\$job_dependencies, 'run7', 'run12'), 'run12;run7',
 	'job dependencies are appended without empty or duplicate scheduler entries');
+my $cleanup_barrier = cleanup_stage_barrier(
+	{name => 'contig stats', required => 1, complete => 1},
+	{name => 'binning', required => 1, complete => 0, dependencies => 'run9;run9'},
+	{name => 'consSNP', required => 1, complete => 0, dependencies => ''},
+	{name => 'disabled stage', required => 0, complete => 0},
+);
+ok(!$cleanup_barrier->{ready}, 'cleanup waits when a required terminal stage is neither complete nor scheduled');
+is_deeply($cleanup_barrier->{blocked}, ['consSNP'], 'cleanup barrier reports the unsatisfied terminal stage');
+is($cleanup_barrier->{dependencies}, 'run9', 'cleanup barrier retains scheduled terminal dependencies');
+$cleanup_barrier = cleanup_stage_barrier(
+	{name => 'contig stats', required => 1, complete => 0, dependencies => 'run4'},
+	{name => 'binning', required => 1, complete => 1},
+	{name => 'consSNP', required => 1, complete => 0, dependencies => ['run8', 'run4']},
+);
+ok($cleanup_barrier->{ready}, 'cleanup may follow every incomplete stage when each has a terminal job');
+is($cleanup_barrier->{dependencies}, 'run4;run8', 'terminal cleanup dependencies are normalized and deduplicated');
 is(hybrid_local_scratch_gb(
 	assembler_gb => 150, preassembly_bytes => 512 * 1024**2, max_synthetic_depth => 20,
 ), 160, 'hybrid scratch adds estimated synthetic reads to assembler workspace');
