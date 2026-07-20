@@ -5800,16 +5800,23 @@ sub bamDepth{
 		$locSrtMem = $baseMem + (2 * $mappingInputSizeMB/1024);
 		$locSrtMem += $baseMem if ($MFopt{largeMapperDB});
 	}
-	# Duplicate removal streams name-sort -> fixmate -> coordinate-sort.  Both
-	# samtools sort processes are alive at once and -m applies per thread, so the
-	# configured total sort memory must be shared across both processes.  The
-	# old single-process calculation could allocate almost twice the Slurm
-	# request and was OOM-killed on large mappings.
-	my $sortProcessCount = $locDoRmDup ? 2 : 1;
+	# Duplicate removal normally streams name-sort -> fixmate -> coordinate-sort.
+	# Both sorts are then alive at once and -m applies per thread.  For large
+	# inputs, materialize the name-sorted BAM so only one sort is resident at a
+	# time.  The mapping scratch request already budgets eight times compressed
+	# input size, which leaves room for this intermediate on local SSD.
+	my $largeSortInputMB = 4 * 1024;
+	my $serialiseDuplicateSorts = $locDoRmDup
+		&& $mappingInputSizeMB >= $largeSortInputMB;
+	my $sortProcessCount = ($locDoRmDup && !$serialiseDuplicateSorts) ? 2 : 1;
 	my $sortMemoryMB = int((($locSrtMem * 1024) - 2048)
 		/ ($numCore * $sortProcessCount));
 	$sortMemoryMB = 256 if ($sortMemoryMB < 256);
-	$sortMemoryMB = 2048 if ($sortMemoryMB > 2048);
+	# Large sorts create substantial buffers outside the nominal -m arena.
+	# Keep their per-thread arena at samtools' conservative default even when an
+	# automatic or user-provided total budget would permit a much larger value.
+	my $sortMemoryCapMB = $serialiseDuplicateSorts ? 768 : 2048;
+	$sortMemoryMB = $sortMemoryCapMB if ($sortMemoryMB > $sortMemoryCapMB);
 	# A completed mapping may still predate breakpoint output.  Repair that
 	# single derivative from the canonical coverage without trying to sort a
 	# node-local alignment that no longer exists.
@@ -5925,8 +5932,15 @@ sub bamDepth{
 		$cmd .= "echo \"samtools sort budget: ${sortMemoryMB}M x $numCore threads x $sortProcessCount concurrent sorts\"\n";
 		$cmd .= "echo \"Sorting .bam and fixing mates ...\"\n";
 		#$cmd .= "$smtBin sort -n -m 768M -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore - - | $smtBin sort -T $sortTMP2 -m 768M -@ $numCore - | $smtBin markdup -s -r -@ $numCore - $nxtBAM\n";
-		#split in two, as it requires too much mem..
-		$cmd .= "$smtBin sort -n -m ${sortMemoryMB}M -u -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore -u - - | $smtBin sort -T $sortTMP2 -m ${sortMemoryMB}M -@ $numCore -o $nxtBAM.nf;\n";
+		if ($serialiseDuplicateSorts) {
+			my $nameSortedBam = "$nodeTmp/$baseN.name-sorted.bam";
+			$cmd .= "echo \"Large mapping input: serializing name and coordinate sorts\"\n";
+			$cmd .= "$smtBin sort -n -m ${sortMemoryMB}M -u -T $sortTMP -@ $numCore -o $nameSortedBam $mappingRes;\n";
+			$cmd .= "$smtBin fixmate -m -@ $numCore -u $nameSortedBam - | $smtBin sort -T $sortTMP2 -m ${sortMemoryMB}M -@ $numCore -o $nxtBAM.nf;\n";
+			$cmd .= "rm -f $nameSortedBam;\n";
+		} else {
+			$cmd .= "$smtBin sort -n -m ${sortMemoryMB}M -u -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore -u - - | $smtBin sort -T $sortTMP2 -m ${sortMemoryMB}M -@ $numCore -o $nxtBAM.nf;\n";
+		}
 		$cmd .= "echo \"marking duplicates ...\"\n";
 		$cmd .= "$smtBin markdup --use-read-groups --no-multi-dup -d 1000 -T $sortTMP -s -r -O BAM -@ $numCore $nxtBAM.nf $nxtBAM;\n";
 		$cmd .= "rm -f $nxtBAM.nf;\n";
@@ -6055,7 +6069,11 @@ sub bamDepth{
 		#die "map2:: $qdir\n$cramSTO\n$nxtBAM.coverage\n";
 		my $combinedCores = $numCore > ($params{mappingCores} || 0) ? $numCore : ($params{mappingCores} || $numCore);
 		my $combinedMem = int($locSrtMem)+1;
-		my $sortRequiredMem = int((($sortMemoryMB * $numCore * $sortProcessCount) + 1023) / 1024) + 3;
+		my $controlledSortMB = $sortMemoryMB * $numCore * $sortProcessCount;
+		# -m is approximate and excludes compression threads, fixmate, pipes, Perl,
+		# libraries and allocator fragmentation.  Add 25% plus 4 GiB rather than
+		# requesting only the nominal samtools arenas.
+		my $sortRequiredMem = int((($controlledSortMB * 1.25) + 4096 + 1023) / 1024);
 		$combinedMem = $sortRequiredMem if ($sortRequiredMem > $combinedMem);
 		$combinedMem = $params{mappingMemoryGB} if (($params{mappingMemoryGB} || 0) > $combinedMem);
 		my $combinedScript = $params{mappingScript} || $qdir.$bashN."map$supTag.sh";

@@ -382,11 +382,17 @@ like($mataf4,
 	qr/if \(\@bamParts > 1\).*?\$smtBin cat.*?elsif \(\@bamParts == 1\).*?mv \$bamParts\[0\]/s,
 	'samtools cat is reserved for multiple BAM segments');
 like($mataf4,
-	qr/my \$sortProcessCount = \$locDoRmDup \? 2 : 1.*?my \$sortMemoryMB = .*?\(\$numCore \* \$sortProcessCount\).*?sort -n -m \$\{sortMemoryMB\}M/s,
+	qr/my \$serialiseDuplicateSorts = \$locDoRmDup.*?my \$sortProcessCount = \(\$locDoRmDup && !\$serialiseDuplicateSorts\) \? 2 : 1.*?my \$sortMemoryMB = .*?\(\$numCore \* \$sortProcessCount\)/s,
 	'samtools per-thread memory shares the total budget across concurrent sorts');
 like($mataf4,
-	qr/my \$sortRequiredMem = .*?\$sortMemoryMB \* \$numCore \* \$sortProcessCount/s,
-	'the mapping scheduler request covers every concurrently active sort process');
+	qr/if \(\$serialiseDuplicateSorts\).*?sort -n .*?-o \$nameSortedBam.*?fixmate .*?\$nameSortedBam - \| .*?sort/s,
+	'large mappings materialize name-sorted data instead of keeping two sorts resident');
+like($mataf4,
+	qr/my \$sortMemoryCapMB = \$serialiseDuplicateSorts \? 768 : 2048/s,
+	'large mappings cap each sort thread at a conservative memory arena');
+like($mataf4,
+	qr/my \$controlledSortMB = \$sortMemoryMB \* \$numCore \* \$sortProcessCount.*?\$controlledSortMB \* 1\.25.*?4096/s,
+	'the mapping scheduler request includes sort-process and non-arena headroom');
 like($mataf4,
 	qr/my %requiredMappers.*?next if \(\$mapper == 3 \|\| \$mapper == 5\).*?next if \(\$cmdDB eq ""\)/s,
 	'assembly index jobs are deduplicated and omitted for direct-FASTA mappers');
