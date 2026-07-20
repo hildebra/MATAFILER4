@@ -2,8 +2,10 @@ package Mods::GenoMetaAss;
 use warnings;
 #use Cwd 'abs_path';
 use strict;
+use Fcntl qw(S_ISDIR S_ISREG);
 use IO::Compress::Gzip ();
 use IO::Uncompress::Gunzip ();
+use Time::HiRes ();
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::ReadLibrary qw(
@@ -14,7 +16,7 @@ use Mods::ReadLibrary qw(
 use Exporter qw(import);
 our @EXPORT_OK = qw(
 		gzipwrite gzipopen lcp prefix_find
-		fileGZe fileGZs filsizeMB contig_stats_coverage_complete
+		fileGZe fileGZs filsizeMB resolveExistingFile contig_stats_coverage_complete
 		
 		readMap 
 		systemW
@@ -42,6 +44,8 @@ our @EXPORT_OK = qw(
 		readTabByKey convertNT2AA runDiamond median mean quantile
 		 );#Binning Related
 
+my %readDirectoryCache;
+
 
 
 sub parse_duration {
@@ -63,7 +67,9 @@ sub filsizeMB{
 		next unless (defined($fh) && $fh ne "");
 		my $file = $fh;
 		$file = "$path/$fh" if ($path ne "" && !_path_is_absolute($fh));
-		$totalMapSize += (-s $file) / (1024 * 1024) if (-f $file);
+		my @fileStat = stat($file);
+		$totalMapSize += $fileStat[7] / (1024 * 1024)
+			if (@fileStat && S_ISREG($fileStat[2]));
 	}
 	return $totalMapSize;
 }
@@ -164,7 +170,9 @@ sub _compile_input_regex {
 sub discoverReadFiles {
 	my ($dir, $prefix, $patterns) = @_;
 	die "discoverReadFiles expects a pattern hash\n" unless (ref($patterns) eq "HASH");
-	die "Input directory does not exist: $dir\n" unless (-d $dir);
+	my @dirStat = Time::HiRes::stat($dir);
+	die "Input directory does not exist: $dir\n"
+		unless (@dirStat && S_ISDIR($dirStat[2]));
 	$prefix = "" unless defined($prefix);
 	my $prefix_regex = qr/^\Q$prefix\E/;
 	my %regex = (
@@ -174,11 +182,32 @@ sub discoverReadFiles {
 		bam    => _compile_input_regex("BAM", $patterns->{bam}),
 	);
 
-	opendir(my $dh, $dir) or die "Could not open input directory $dir: $!\n";
-	my @files = grep { -f "$dir/$_" && /$prefix_regex/ } readdir($dh);
-	closedir($dh);
+	my $dirSignature = join(':', @dirStat[0, 1, 7, 9, 10]);
+	my $cached = $readDirectoryCache{$dir};
+	my @entries;
+	if ($cached && $cached->{signature} eq $dirSignature) {
+		@entries = @{$cached->{entries}};
+	} else {
+		opendir(my $dh, $dir) or die "Could not open input directory $dir: $!\n";
+		@entries = readdir($dh);
+		closedir($dh);
+		$readDirectoryCache{$dir} = {
+			signature => $dirSignature,
+			entries => [@entries],
+		};
+	}
 
-	my %found = (read1 => [], read2 => [], single => [], bam => []);
+	# Apply the cheap sample-prefix filter before statting a directory entry.
+	# Shared raw-read directories can contain files for thousands of samples.
+	my (%fileSizes, @files);
+	for my $file (grep { /$prefix_regex/ } @entries) {
+		my @fileStat = stat("$dir/$file");
+		next unless (@fileStat && S_ISREG($fileStat[2]));
+		$fileSizes{$file} = 0 + $fileStat[7];
+		push @files, $file;
+	}
+
+	my %found = (read1 => [], read2 => [], single => [], bam => [], file_sizes => \%fileSizes);
 	foreach my $file (@files) {
 		push @{$found{read1}}, $file if ($regex{read1} && $file =~ /$regex{read1}/);
 		push @{$found{read2}}, $file if ($regex{read2} && $file =~ /$regex{read2}/);
@@ -223,11 +252,38 @@ sub discoverReadFiles {
 }
 
 #check if file or file.gz exists
+sub resolveExistingFile {
+	my ($file) = @_;
+	return unless (defined($file) && $file ne '');
+	my @candidates = ($file);
+	if ($file =~ m/\.gz$/) {
+		(my $plain = $file) =~ s/\.gz$//;
+		push @candidates, $plain;
+	} else {
+		push @candidates, "$file.gz";
+	}
+	my %seen;
+	for my $candidate (grep { !$seen{$_}++ } @candidates) {
+		my @fileStat = stat($candidate);
+		return wantarray ? ($candidate, \@fileStat) : $candidate if @fileStat;
+	}
+	return;
+}
+
 sub fileGZe{
 	my ($fil) = @_;
-	return 1 if (-s $fil);
-	return 1 if (-s "$fil.gz");
-	return 1 if ($fil =~ m/\.gz$/ && -s substr($fil,0,-3));
+	return 0 unless (defined($fil) && $fil ne '');
+	my @candidates = ($fil);
+	if ($fil =~ m/\.gz$/) {
+		push @candidates, substr($fil, 0, -3);
+	} else {
+		push @candidates, "$fil.gz";
+	}
+	my %seen;
+	for my $candidate (grep { !$seen{$_}++ } @candidates) {
+		my @fileStat = stat($candidate);
+		return 1 if (@fileStat && $fileStat[7] > 0);
+	}
 	return 0;
 }
 
@@ -235,9 +291,16 @@ sub fileGZe{
 #report file size, check if file or file.gz exists
 sub fileGZs{
 	my ($fil) = @_;
-	return (-s $fil) if (-e $fil);
-	return ((-s "$fil.gz")*5) if (-e "$fil.gz");
-	return (-s substr($fil,0,-3)) if ($fil =~ m/\.gz$/ && -e substr($fil,0,-3));
+	return 0 unless (defined($fil) && $fil ne '');
+	my @exactStat = stat($fil);
+	return $exactStat[7] if @exactStat;
+	if ($fil =~ m/\.gz$/) {
+		my @plainStat = stat(substr($fil, 0, -3));
+		return $plainStat[7] if @plainStat;
+	} else {
+		my @gzipStat = stat("$fil.gz");
+		return $gzipStat[7] * 5 if @gzipStat;
+	}
 	return 0;
 }
 
@@ -288,14 +351,16 @@ sub gzipopen{
 	if (@_ > 2){$dodie = $_[2];}
 	my $verbose=1;
 	if (@_ > 3){$verbose = $_[3];}
-	$inF .= ".gz" if (!-e $inF && -e $inF.".gz");
-	#die "$inF";
-	if ($inF =~ m/\.gz$/){
-		my $inFwo = $inF; $inFwo =~ s/\.gz$//;
-		$inF = $inFwo if (-e $inFwo && !-e $inF);
+	my $alreadyResolved = @_ > 4 ? $_[4] : 0;
+	my $knownStat = @_ > 5 ? $_[5] : undef;
+	my ($resolved, $fileStat);
+	if ($alreadyResolved) {
+		my @resolvedStat = ref($knownStat) eq 'ARRAY' ? @{$knownStat} : stat($inF);
+		($resolved, $fileStat) = ($inF, \@resolvedStat) if @resolvedStat;
 	} else {
-		$inF .= ".gz" if (!-e $inF && -e $inF.".gz");
+		($resolved, $fileStat) = resolveExistingFile($inF);
 	}
+	$inF = $resolved if defined($resolved);
 	
 	my $ISTR; my $OK = 1;
 	my $msg = "Can't open $descr file $inF\n";
@@ -303,19 +368,19 @@ sub gzipopen{
 	#if (!-e $inF){{if ($dodie){die $msg;} else { $OK=0;print $msg if ($verbose);}}}
 	#my $pigzBin = getProgPaths("pigz");
 
-	if($inF =~ m/\.gz$/ ){
+	if (!defined($resolved)) {
+		$OK=0;
+		if ($dodie) { die $msg; }
+		print $msg if ($verbose);
+	} elsif($inF =~ m/\.gz$/ ){
 		$msg = "Can't open a pipe to $descr file $inF\n";
-		if (!-e $inF) {$OK=0; if ($dodie){die $msg;} else { print $msg if ($verbose);}
-		} else {
-			#if (!open($ISTR, "$pigzBin -dc $inF |")) {if ($dodie){die $msg;} else {$OK=0; print $msg if ($verbose);}}
-			$ISTR = IO::Uncompress::Gunzip->new($inF);
-			if (!$ISTR) {if ($dodie){die "$msg$IO::Uncompress::Gunzip::GunzipError\n";} else {$OK=0; print $msg if ($verbose);}}
-		}
+		$ISTR = IO::Uncompress::Gunzip->new($inF);
+		if (!$ISTR) {if ($dodie){die "$msg$IO::Uncompress::Gunzip::GunzipError\n";} else {$OK=0; print $msg if ($verbose);}}
 	} else{
 		if (!open($ISTR, "<", "$inF") ) {if ($dodie){die $msg;} else {$OK=0; print $msg if ($verbose);}}
 	}
 	#print "$OK $inF\n";
-	return ($ISTR,$OK);
+	return ($ISTR,$OK,$resolved,$fileStat);
 }
 
 
@@ -1723,3 +1788,5 @@ sub writeFasta{
 	close O;
 	#die $of;
 }
+
+1;

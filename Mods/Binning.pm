@@ -37,9 +37,18 @@ sub getBinSubdirName{
 
 sub binningOutputsComplete {
 	my ($base, $useCheckM1, $useCheckM2) = @_;
-	return 0 unless defined($base) && -e $base && -s "$base.assStat";
-	return 0 if $useCheckM1 && !-e "$base.cm";
-	return 0 if $useCheckM2 && !-s "$base.cm2";
+	return 0 unless defined($base);
+	my @baseStat = stat($base);
+	my @assemblyStat = stat("$base.assStat");
+	return 0 unless @baseStat && @assemblyStat && $assemblyStat[7] > 0;
+	if ($useCheckM1) {
+		my @checkM1Stat = stat("$base.cm");
+		return 0 unless @checkM1Stat;
+	}
+	if ($useCheckM2) {
+		my @checkM2Stat = stat("$base.cm2");
+		return 0 unless @checkM2Stat && $checkM2Stat[7] > 0;
+	}
 	return 1;
 }
 

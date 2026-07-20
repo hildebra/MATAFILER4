@@ -237,6 +237,7 @@ runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
 my %sampleStats;
 my @sampleStatsOrder;
 my %sampleStatsSeen;
+my %sampleStatsContext;
 #the sample currently worked on, important to keep as a global variable
 my $curSmpl = "";
 #compare to previous dir
@@ -450,9 +451,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	# collect stats on seq qual, assembly etc
 	if ($MFconfig{alwaysDoStats}){
 		push @sampleStatsOrder, $SmplName unless $sampleStatsSeen{$SmplName}++;
-		$sampleStats{$SmplName} = {
+		$sampleStatsContext{$SmplName} = {
 			DIR => $dir2rd,
-			values => smplStats($curOutDir, $asmDir, $SmplName),
+			input_dir => $curOutDir,
+			assembly_dir => $asmDir,
 		};
 	}
 	
@@ -558,12 +560,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$eCovAsssembly=0;$eFinMapCovGZ=0;$eFinalMapDir=0;$eFinSupMapCovGZ=0;$eSuppCovAsssembly=0;$eSuppCovAsssembly=0;
 	}
 	
-	if (defined($locStats{totRds}) && $locStats{totRds}==0 && !defined($locStats{uniqAlign}) && -e $inputRawFile && $eFinMapCovGZ){ #do a deeper look
-		my $line = getFileStr("$inputRawFile",0); #open I,"<$inputRawFile"; my $line = <I>; close I; chomp($line);
-		#my @spl = split /,/,$line; my $inFileSize = -s $spl[0];
-		print "weird empty: $locStats{totRds} $line \nredoing..\n";die;
-		$locRewrite = 1;$locRedoAssembl = 1;
-	}
+	# Full sample statistics are collected after the submission loop. They are
+	# reporting data and must not force every sample to open all historical logs
+	# before the fast completion path can run.
 	if ( ($MFconfig{skipWrongPairedSmpls} || $MFconfig{OKtoRWassGrps}) && -e "$logDir/sdmReadCleaner.sh.etxt" && `tail -n 70 $logDir/sdmReadCleaner.sh.etxt | grep 'invalid paired read' ` ne ""){
 		print "$logDir/sdmReadCleaner.sh.etxt problems! Delete outdir\n";
 		if ($MFconfig{OKtoRWassGrps}){
@@ -634,8 +633,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#delete mapping to assembly
 	if ($locRedoAssMapping){
 		#die "locDel\n";
-		my $fileSiz = "NA"; 
-		$fileSiz = (-s $CRAMmap) if (-s $CRAMmap);
+		my @cramStat = stat($CRAMmap);
+		my $fileSiz = @cramStat && $cramStat[7] > 0 ? $cramStat[7] : "NA";
 		print "Deleting previous assembly mapping, size map: ". $fileSiz . " ; $CRAMmap\n" if ($MappingGo && $eFinalMapDir);
 		#die "$finAssLoc && !-e $metaGassembly\n";
 		system "rm -fr $finalMapDir $ContigStatsDir/Coverage.* $ContigStatsDir/Cov.sup.*";
@@ -646,7 +645,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	#Case: primary assembly mapping was done, support reads were not yet mapped.. need to redo binning 
 	#print "$locMapSup2Assembly && !$eFinSupMapCovGZ) && ($MFopt{map2Assembly} && $eFinMapCovGZ \n";
-	my $binningArtifactsPresent = -e $BinningOut || -e "$BinningOut.cm"
+	my @binningBaseStat = stat($BinningOut);
+	my $binningArtifactsPresent = @binningBaseStat || -e "$BinningOut.cm"
 		|| -e "$BinningOut.cm2" || -e "$BinningOut.assStat";
 	if ( ($locMapSup2Assembly && !$eFinSupMapCovGZ) && ($MFopt{map2Assembly} && $eFinMapCovGZ )
 			&& $binningArtifactsPresent ){
@@ -654,7 +654,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		system("rm -rf  $binningDir/");
 	}
 	#debug case: binning was empty
-	if ($MFopt{DoMetaBat2} && ( $MFopt{BinnerRedoAll} || ($MFopt{BinnerRedoEmpty} && -e $BinningOut && !-s $BinningOut) ) ){
+	if ($MFopt{DoMetaBat2} && ( $MFopt{BinnerRedoAll}
+			|| ($MFopt{BinnerRedoEmpty} && @binningBaseStat && $binningBaseStat[7] == 0) ) ){
 		print "redoing binning due to empty bins (flag -redoEmptyBins 1) ..\n";
 		system "rm -rf $binningDir";
 	}
@@ -747,7 +748,14 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 #--------------------- other flags --------------------------
 	#contamination flag: redo/do contaminant removal to eg make sure human contamination is correctly logged
 	my $calcContamination = 0;
-	$calcContamination = 1 if ($locStats{contamination} eq "?\t" && $efinAssLoc && $MFopt{completeContaStats});
+	if ($efinAssLoc && $MFopt{completeContaStats}) {
+		my $contamination = getContamination(
+			"$curOutDir/LOGandSUB/KrakHS.sh.etxt",
+			"$curOutDir/LOGandSUB/KrakHS.sh.otxt", '',
+		);
+		$calcContamination = 1
+			if (($contamination->{FilteredContaRdsPerc} || '') eq "?\t");
+	}
 	#print "Conta: $calcContamination   \"$locStats{contamination}\"\n";
 
 	
@@ -1652,6 +1660,18 @@ sub postprocess{
 	#print "\n\n###################################\nMain Loop done\n######################################\n";
 	#global clean up cmds (like DB removals from scratch)
 	print "Postprocessing:\n";
+	if ($MFconfig{alwaysDoStats}) {
+		for my $sampleName (@sampleStatsOrder) {
+			my $context = $sampleStatsContext{$sampleName} || next;
+			%locStats = ();
+			$sampleStats{$sampleName} = {
+				DIR => $context->{DIR},
+				values => smplStats(
+					$context->{input_dir}, $context->{assembly_dir}, $sampleName,
+				),
+			};
+		}
+	}
 	if (@{$QSBoptHR->{submissionErrors} || []}) {
 		print STDERR "MATAFILER continued after ".scalar(@{$QSBoptHR->{submissionErrors}})
 			." scheduler submission problem(s). Existing sample locks were retained; failed work can be retried on a later run.\n";
@@ -1827,7 +1847,10 @@ sub spaceInAssGrp{
 
 sub mapping_reference_matches {
 	my ($stamp, $reference) = @_;
-	return 0 unless (-s $stamp && -s $reference);
+	my @stampStat = stat($stamp);
+	my @referenceStat = stat($reference);
+	return 0 unless (@stampStat && $stampStat[7] > 0
+		&& @referenceStat && $referenceStat[7] > 0);
 	open my $stampFH, '<', $stamp or return 0;
 	my $line = <$stampFH>;
 	close $stampFH;
@@ -1836,8 +1859,6 @@ sub mapping_reference_matches {
 	# whitespace so mappings produced by the affected release remain usable.
 	return 0 unless defined($line) && $line =~ /^(\d+)(?:\s+|\\t)(\d+)\s*$/;
 	my ($recordedSize, $recordedMtime) = ($1, $2);
-	my @referenceStat = stat($reference);
-	return 0 unless @referenceStat;
 	return $recordedSize == $referenceStat[7]
 		&& $recordedMtime == $referenceStat[9];
 }
@@ -2172,6 +2193,10 @@ sub RiboMeta($ $ $ $){
 		foreach my $RFtag (@RFtags){
 			system "mkdir -p $dir_RibFind/$RFtag/" unless (-d "$dir_RibFind/$RFtag/"); #system "mkdir -p $dir_RibFind/SSU/" unless (-d "$dir_RibFind/SSU/"); system "mkdir -p $dir_RibFind/LSU/" unless (-d "$dir_RibFind/LSU/");
 			my $fromCp = "$curOutDir/ribos/ltsLCA/${RFtag}riboRun_bl.hiera.txt"; my $toCpy = "$dir_RibFind/$RFtag/$SmplName.$RFtag.hiera.txt";
+			my @sourceStat = stat($fromCp);
+			my @sourceGzipStat = stat("$fromCp.gz");
+			my @destinationStat = stat($toCpy);
+			my @destinationGzipStat = stat("$toCpy.gz");
 			if ($MFopt{checkRiboNonEmpty}){
 				#pretty hard check
 				my $numLines=0;
@@ -2182,14 +2207,19 @@ sub RiboMeta($ $ $ $){
 					system "rm -r $curOutDir/ribos//ltsLCA $curOutDir/ribos/*.sto ";last;
 				}
 			}
-			if (!-e $toCpy  || ( (-e $toCpy  || -e "$toCpy.gz" ) && -e $fromCp && -s $fromCp != -s $toCpy)){
-				unlink "$toCpy" if -e ($toCpy);
-				if (-e "$fromCp.gz"  ){
+			my $sourceSize = @sourceStat ? $sourceStat[7]
+				: (@sourceGzipStat ? $sourceGzipStat[7] : undef);
+			my $destinationSize = @destinationStat ? $destinationStat[7]
+				: (@destinationGzipStat ? $destinationGzipStat[7] : undef);
+			if (!defined($destinationSize)
+					|| (defined($sourceSize) && $sourceSize != $destinationSize)){
+				unlink "$toCpy" if @destinationStat;
+				if (@sourceGzipStat){
 					#system "zcat $fromCp.gz > $toCpy" ;
-					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz" if (!-e "$toCpy.gz");
-				} elsif (-e $fromCp) {
+					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz";
+				} elsif (@sourceStat) {
 					system "gzip $fromCp";
-					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz" if (!-e "$toCpy.gz");
+					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz";
 				} elsif($RFtag eq "SSU") {#just redo.. SSU is only essential thing
 					system "rm -rf $curOutDir/ribos\n"; 
 					$calcRibofind = 1; $calcRiboAssign=1;
@@ -3012,7 +3042,9 @@ sub prepareMap{
 		#system "mkdir -p $map2ndTogRefDB{DB}" unless (-d $map2ndTogRefDB{DB});
 		print "$map2ndTogRefDB{DB}\n";
 		#die;
-		writeFasta(\%FNrefDB2ndmap,"$map2ndTogRefDB{DB}") unless (-e $map2ndTogRefDB{DB} && -s $map2ndTogRefDB{DB});
+		my @combinedReferenceStat = stat($map2ndTogRefDB{DB});
+		writeFasta(\%FNrefDB2ndmap,"$map2ndTogRefDB{DB}")
+			unless (@combinedReferenceStat && $combinedReferenceStat[7] > 0);
 		if ($MFopt{mapModeTogether}==-1){
 			@refDB = ($map2ndTogRefDB{DB});
 			@bwt2Name = ($shrtMapNm);
@@ -3180,7 +3212,8 @@ sub runOrthoPlacement(){
 		my $hmmName = $hmmsDB[$i]; $hmmName=~s/\.hmm//;
 		my $hmmN2 = $hmmNms[$i];
 		my $tarFile = "$outD/$hmmName.fna";
-		if (-e $tarFile && -s "$tarFile" == 0){next;}
+		my @targetStat = stat($tarFile);
+		if (@targetStat && $targetStat[7] == 0){next;}
 		#$tarFile = fixHDs4Phylo($tarFile);
 		#fix fasta headers
 #		$cmd .= "cat $tarFile | perl -p -e 's/[:|#+]/_/g' > $tarFile\n";
@@ -4386,6 +4419,7 @@ sub seedUnzip2tmp{
 	$xtrMapStr = "" if (!defined $xtrMapStr) ;
 	my $totalInputSizeMB=10000; #default to something sensible
 	my $totalXInputSizeMB=0; #normally no suppl present..
+	my ($discoveredInputSizes, $discoveredSupportSizes);
 	my $libNum = 0;
 
 	if ($fastp eq "") { print "No primary dir.. \n"; }
@@ -4467,6 +4501,7 @@ sub seedUnzip2tmp{
 		});
 		@pa1 = @{$found->{read1}}; @pa2 = @{$found->{read2}};
 		@pas = @{$found->{single}}; @paBam = @{$found->{bam}};
+		$discoveredInputSizes = $found->{file_sizes};
 		
 	}
 	#die "1:@pa1\nS:@pas\n$MFconfig{rawFileSrchStrSingl}\n$MFconfig{readsRpairs}\n\n";
@@ -4507,6 +4542,10 @@ sub seedUnzip2tmp{
 				single => '\\.(?:f(?:ast)?q|f(?:ast)?a)(?:\\.(?:gz|bz2))?$',
 				bam => '\\.bam$', prefer_single => 0,
 			});
+			$discoveredSupportSizes = {
+				map { ($_ => ($found->{file_sizes}{$_} || 0)) }
+					(@{$found->{read1}}, @{$found->{read2}}, @{$found->{single}}, @{$found->{bam}})
+			};
 			@paX1 = map { "$support_dir/$_" } @{$found->{read1}};
 			@paX2 = map { "$support_dir/$_" } @{$found->{read2}};
 			@paXs = map { "$support_dir/$_" } @{$found->{single}};
@@ -4532,10 +4571,14 @@ sub seedUnzip2tmp{
 	}
 
 
-	$totalInputSizeMB = filsizeMB($fastp,@pa1,@pa2,@pas,@paBam);
+	$totalInputSizeMB = ref($discoveredInputSizes) eq 'HASH'
+		? sum(0, map { $discoveredInputSizes->{$_} || 0 } (@pa1, @pa2, @pas, @paBam)) / (1024 * 1024)
+		: filsizeMB($fastp,@pa1,@pa2,@pas,@paBam);
 	$map{$curSmpl}{inputFileSizeMB} = $totalInputSizeMB;
 	#and file size for suppl files..
-	$totalXInputSizeMB= filsizeMB("",@paX1,@paX2,@paXs,@paBamX);
+	$totalXInputSizeMB = ref($discoveredSupportSizes) eq 'HASH'
+		? sum(0, values %{$discoveredSupportSizes}) / (1024 * 1024)
+		: filsizeMB("",@paX1,@paX2,@paXs,@paBamX);
 	$map{$curSmpl}{inputXFileSizeMB} = $totalXInputSizeMB;
 
 
@@ -4545,15 +4588,19 @@ sub seedUnzip2tmp{
 	#check if raw file is a symlink and if this is valid & create raw read link (HD times):
 	for (my $i = 0; $i<@pa1; $i++){
 		my $pp = $fastp;
+		my $read1Path = "$pp/$pa1[$i]";
+		my $read2Path = "$pp/$pa2[$i]";
+		my $realP = $read1Path;
 		#$pp = $fastp2 if ($libInfo[$i] eq $xtraRdsTech);
-		if (-l "$pp/$pa1[$i]"){
-			if (!-f abs_path("$pp/$pa1[$i]")){die "File $pa1[$i] is not file.\n";}
+		if (-l $read1Path){
+			$realP = abs_path($read1Path) || "";
+			if ($realP eq '' || !-f $realP){die "File $pa1[$i] is not file.\n";}
 		}
-		if (-l "$pp/$pa2[$i]"){
-			if (!-f abs_path("$pp/$pa2[$i]")){die "File $pa2[$i] does not exist.\n";}
+		if (-l $read2Path){
+			my $realMate = abs_path($read2Path) || "";
+			if ($realMate eq '' || !-f $realMate){die "File $pa2[$i] does not exist.\n";}
 		}
 #		print "$pp$pa1[$i]\n";
-		my $realP = abs_path("$pp/$pa1[$i]") || "";
 		if (defined $realP && $realP =~ m/\/(MMPU[^\/]+)\//){
 			$mmpu = $1;
 		}
@@ -4834,7 +4881,8 @@ sub seedUnzip2tmp{
 	}
 	
 	#principally done.. now catalog and save for later
-	if (!-e $inputRawFile || -s $inputRawFile == 0){
+	my @inputRawStat = stat($inputRawFile);
+	if (!@inputRawStat || $inputRawStat[7] == 0){
 		open(my $rawInputFH, ">", $inputRawFile) or die "Cannot write $inputRawFile: $!\n";
 		print {$rawInputFH} $rawReads;
 		close($rawInputFH) or die "Cannot close $inputRawFile: $!\n";
@@ -5530,8 +5578,12 @@ sub mapReadsToRef{
 		my $outstat = check_map_done($doCram, $finalDS[$k], $outNms[$k]);
 		next if ($outstat);#-e "$finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz" );#|| -e "$mappDir[$k]/$outNms[$k]-smd.bam.coverage.gz");
 		#print "-e $finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz || -e $mappDir/$outNms[$k]-smd.bam.coverage.gz";
-		if (-e $tmpOut22[$k] && -s $tmpOut22[$k] < 100){unlink $tmpOut22[$k];}
-		if (!-e $tmpOut22[$k]){ $outputExistsNEx++; }
+		my @temporaryOutputStat = stat($tmpOut22[$k]);
+		if (@temporaryOutputStat && $temporaryOutputStat[7] < 100){
+			unlink $tmpOut22[$k];
+			@temporaryOutputStat = stat($tmpOut22[$k]);
+		}
+		if (!@temporaryOutputStat){ $outputExistsNEx++; }
 	}
 	#die "@outNms \n$outputExistsNEx\n";
 	if ($outputExistsNEx == 0){
@@ -6557,14 +6609,20 @@ sub _parse_sdm_stats_text {
 	return \%result;
 }
 
-sub sdmStats {
-	my ($inF,$inD,$suffix) = @_;
+sub _sdm_histogram_max_length {
+	my ($inD) = @_;
 	my $MaxLengthHistBased = 0;
 	my $length_histogram = getFileStr("$inD/LOGandSUB/sdm/filter_lenHist.txt",0);
 	if ($length_histogram ne '') {
 		my @lines = split(/\n/, $length_histogram);
 		$MaxLengthHistBased = $1 if @lines && $lines[-1] =~ m/^(\d+)\s/;
 	}
+	return $MaxLengthHistBased;
+}
+
+sub sdmStats {
+	my ($inF,$inD,$suffix) = @_;
+	my $MaxLengthHistBased = _sdm_histogram_max_length($inD);
 	my $filStats = getFileStr($inF,0,70);
 	return _parse_sdm_stats_text($filStats, $MaxLengthHistBased, $suffix);
 }
@@ -6575,9 +6633,12 @@ sub sdmStatsMany {
 	my @averageFields = qw(AvgSeqLen AvgSeqQual accErr);
 	my %combined = map { $_ => 0 } (@countFields, @averageFields, 'MaxSeqLength');
 	my %averageWeights;
+	my $MaxLengthHistBased = _sdm_histogram_max_length($inD);
 	foreach my $file (@{$files || []}) {
-		next unless defined($file) && $file ne '' && -s $file;
-		my $stats = sdmStats($file, $inD, '');
+		next unless defined($file) && $file ne '';
+		my $filStats = getFileStr($file,0,70);
+		next if $filStats eq '';
+		my $stats = _parse_sdm_stats_text($filStats, $MaxLengthHistBased, '');
 		my $weight = ($stats->{totRds} || 0) + 0;
 		$combined{$_} += ($stats->{$_} || 0) for @countFields;
 		foreach my $field (@averageFields) {
@@ -8500,7 +8561,7 @@ sub setDefaultMFconfig{
 	$MFconfig{mapFile} = "";
 	$MFconfig{inspectState} = 0;
 	$MFconfig{planState} = 0;
-	$MFconfig{autoStatePlan} = 1;
+	$MFconfig{autoStatePlan} = 0;
 	$MFconfig{autoRepairState} = 1;
 	$MFconfig{stateReport} = "";
 	$MFconfig{planReport} = "";

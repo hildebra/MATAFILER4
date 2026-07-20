@@ -52,9 +52,9 @@ sub _file_state {
 
 	my %seen;
 	for my $path (grep { !$seen{$_}++ } @candidates) {
-		next unless (-e $path);
-		my $size = -s $path;
-		$size = 0 unless (defined $size);
+		my @fileStat = stat($path);
+		next unless @fileStat;
+		my $size = $fileStat[7];
 		return {
 			requested_path => $requested_path,
 			path => $path,

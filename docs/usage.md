@@ -6,7 +6,7 @@
 # Running MATAFILER4
 
 
-## Stabilized state workflow
+## Optional state inspection workflow
 
 For a normal run, no extra planning command or manual approval cycle is needed:
 
@@ -14,7 +14,11 @@ For a normal run, no extra planning command or manual approval cycle is needed:
 perl MATAF4.pl -map project.map [normal workflow flags] -submit 1
 ```
 
-MATAFILER4 performs an internal preflight before the ordinary pipeline logic:
+Normal runs now enter the ordinary pipeline logic directly. This avoids a
+full-workflow metadata scan before the per-sample completion checks. To opt in
+to the state planner and automatic safe repairs, add `-autoStatePlan 1`.
+
+When enabled, the preflight:
 
 1. Inspect files, completion markers, samples, and assembly groups.
 2. Build a dependency-aware repair/submission plan.
@@ -23,22 +27,22 @@ MATAFILER4 performs an internal preflight before the ordinary pipeline logic:
 4. Reinspect the repaired state, then let the existing submission engine pick
    up unfinished work.
 
-This preserves the established workflow: users can rerun the same command and
-MATAFILER4 resumes incomplete samples. `-submit 0` previews safe repairs without
-deleting their targets. Set `-autoRepairState 0` to keep automatic inspection
-and planning but disable its repairs, or `-autoStatePlan 0` to disable the
-preflight entirely.
+Users can still rerun the same command and MATAFILER4 resumes incomplete
+samples from its ordinary completion markers. With `-autoStatePlan 1`,
+`-submit 0` previews safe repairs without deleting their targets, and
+`-autoRepairState 0` keeps inspection and planning but disables repairs.
 
 Each preflight writes an audit snapshot beneath
 `#OutPath/#RunID/LOGandSUB/workflow/`. Files are numbered by iteration, for
 example `state.iteration-000.json` and `plan.iteration-000.json`.
 
-With `-loopTillComplete`, the first preflight runs before submission. At every
-loop boundary, MATAFILER4 waits for the jobs submitted by the current pass,
-reinspects completed hybrid packages and assembly-group outputs, applies safe
-repairs, and only then starts the next pass. Completed members of a hybrid
-assembly group are retained while missing members are resubmitted; final group
-assembly remains dependent on all required preassembly packages.
+When both `-loopTillComplete` and `-autoStatePlan 1` are enabled, the first
+preflight runs before submission. At every loop boundary, MATAFILER4 waits for
+the jobs submitted by the current pass, reinspects completed hybrid packages
+and assembly-group outputs, applies safe repairs, and only then starts the next
+pass. Completed members of a hybrid assembly group are retained while missing
+members are resubmitted; final group assembly remains dependent on all required
+preassembly packages.
 
 Group-wide invalidation is intentionally not classified as an automatic safe
 repair. An exact assembly-group membership change remains blocked unless the

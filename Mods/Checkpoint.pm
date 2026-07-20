@@ -21,8 +21,10 @@ sub _stringify_parameters {
 }
 
 sub read_checkpoint {
-	my ($file) = @_;
-	return unless defined $file && -e $file && -s $file;
+	my ($file, $knownStat) = @_;
+	return unless defined $file;
+	my @fileStat = ref($knownStat) eq 'ARRAY' ? @{$knownStat} : stat($file);
+	return unless @fileStat && $fileStat[7] > 0;
 	open my $fh, '<', $file or return;
 	local $/;
 	my $json = <$fh>;
@@ -34,10 +36,12 @@ sub read_checkpoint {
 
 sub checkpoint_valid {
 	my ($file, %options) = @_;
-	return 0 unless defined $file && -e $file;
-	return 1 unless -s $file; # legacy empty stones remain resumable
+	return 0 unless defined $file;
+	my @fileStat = stat($file);
+	return 0 unless @fileStat;
+	return 1 unless $fileStat[7] > 0; # legacy empty stones remain resumable
 
-	my $manifest = read_checkpoint($file) or return 0;
+	my $manifest = read_checkpoint($file, \@fileStat) or return 0;
 	my $expected = _stringify_parameters($options{parameters});
 	my $actual = $manifest->{parameters};
 	return 0 unless ref($actual) eq 'HASH';
@@ -49,7 +53,6 @@ sub checkpoint_valid {
 	for my $record (@{$manifest->{outputs}}) {
 		return 0 unless ref($record) eq 'HASH' && defined $record->{path};
 		my $path = $record->{path};
-		return 0 unless -e $path;
 		my @stat = stat($path);
 		return 0 unless @stat && $stat[7] == ($record->{size} // -1);
 	}

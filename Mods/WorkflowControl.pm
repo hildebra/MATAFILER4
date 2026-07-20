@@ -243,7 +243,12 @@ sub hybrid_group_ready {
 
 sub missing_input_files {
 	my (@files) = @_;
-	return [grep { !defined($_) || $_ eq '' || !-e $_ || !-s $_ } @files];
+	return [grep {
+		!defined($_) || $_ eq '' || do {
+			my @fileStat = stat($_);
+			!@fileStat || $fileStat[7] <= 0;
+		}
+	} @files];
 }
 
 sub source_input_files {

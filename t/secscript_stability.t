@@ -310,6 +310,16 @@ unlike($mgs, qr/foreach my \$Doo \(\@DoosD\)\{\s*last if \(-e "\$iniMB2sto"\)/s,
        'MGS validates MAG outputs even when a previous global checkpoint exists');
 
 my $mataf4_stats = read_file(File::Spec->catfile($root, 'MATAF4.pl'));
+like($mataf4_stats, qr/\$MFconfig\{autoStatePlan\}\s*=\s*0;/,
+	'automatic full-workflow inspection is disabled by default');
+my ($submission_loop_code) = $mataf4_stats =~ /(my %sampleStats;.*?)(?=\nsub postprocess)/s;
+ok(defined($submission_loop_code), 'submission loop can be isolated from postprocessing');
+unlike($submission_loop_code, qr/values\s*=>\s*smplStats\s*\(/,
+	'the submission loop does not perform full sample-stat collection');
+my ($postprocess_code) = $mataf4_stats =~ /(sub postprocess.*?)(?=\nsub spaceInAssGrp)/s;
+ok(defined($postprocess_code), 'postprocessing can be isolated for statistics checks');
+like($postprocess_code, qr/values\s*=>\s*smplStats\s*\(/,
+	'full sample-stat collection is deferred to postprocessing');
 like($mataf4_stats, qr/sub _smpl_stats_columns.*?sub _metag_stats_text/s,
      'sample statistics use one central ordered schema and final serializer');
 like($mataf4_stats, qr/return \{ SNP_TotalResolvedBp=>/,

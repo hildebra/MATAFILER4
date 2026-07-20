@@ -49,6 +49,13 @@ is_deeply(
 	'paired mates use the same natural lane order',
 );
 is_deeply($found->{single}, ['sample+1_single.fastq.gz'], 'unrelated files are excluded');
+is(
+	$found->{file_sizes}{'sample+1_L2_R1_001.fastq.gz'},
+	-s "$read_dir/sample+1_L2_R1_001.fastq.gz",
+	'input discovery returns the metadata gathered while classifying files',
+);
+ok(!exists $found->{file_sizes}{'unrelated_R1.fastq.gz'},
+	'input discovery applies the sample prefix before gathering file metadata');
 
 touch_file("$read_dir/sample+1_L3_R1_001.fastq.gz");
 my $pair_error = eval {

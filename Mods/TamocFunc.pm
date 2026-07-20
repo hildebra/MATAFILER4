@@ -10,7 +10,7 @@ our @EXPORT_OK = qw( sortgzblast uniq  readTabbed readTabbed2 bam2cram cram2bsam
 					readTabbed3 readTable getSpecificDBpaths  getFileStr displayPOTUS 
 					checkMFFInstall
 					);
-use Mods::GenoMetaAss qw(systemW readFasta renameFastHD gzipwrite gzipopen filsizeMB);
+use Mods::GenoMetaAss qw(systemW readFasta renameFastHD gzipwrite gzipopen resolveExistingFile);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 
 
@@ -272,23 +272,47 @@ sub getFileStr{
 	my $req = 1;
 	my $str = "";$req = $_[1] if (@_ > 1);
 	my $tailN = -1;$tailN = $_[2] if (@_ > 2);
-	if ($tailN >0){
-		if (-e $inF){
-			#print "Using tail: $inF\n";
-			$str = `tail -n $tailN $inF`; chomp $str;
-			return $str;
-		}
-	}
-	my $fsMB = filsizeMB($inF);
-	if ($fsMB > 5){
-		print "getFileStr:: Very large file: ${fsMB}Mb $inF .. reading header only\n";
-		$str = `head -n 2000 $inF`; chomp $str;
+	my ($resolved, $fileStat) = resolveExistingFile($inF);
+	if (!defined($resolved)) {
+		die "getFileStr: Can't open $inF\n" if $req;
 		return $str;
 	}
-	my ($I,$OK) = gzipopen($inF,"",$req,$req) ;
-	die "getFileStr: Can't open $inF\n" if (!$OK && $req);
+	if ($tailN > 0 && $resolved !~ m/\.gz$/) {
+		open my $tailFH, '-|', 'tail', '-n', $tailN, '--', $resolved
+			or die "getFileStr: Can't start tail for $resolved: $!\n";
+		$str .= $_ while (<$tailFH>);
+		close $tailFH or die "getFileStr: tail failed for $resolved\n";
+		chomp $str;
+		return $str;
+	}
+	my $fsMB = $fileStat->[7] / (1024 * 1024);
+	my ($I,$OK) = gzipopen($resolved,"",$req,$req,1,$fileStat) ;
+	die "getFileStr: Can't open $resolved\n" if (!$OK && $req);
 	return $str if (!$OK);
+	if ($tailN > 0) {
+		my @tail;
+		while (my $line = <$I>) {
+			push @tail, $line;
+			shift @tail if @tail > $tailN;
+		}
+		close $I;
+		$str = join('', @tail);
+		chomp $str;
+		return $str;
+	}
+	if ($fsMB > 5){
+		print "getFileStr:: Very large file: ${fsMB}Mb $resolved .. reading header only\n";
+		my $lineCount = 0;
+		while (my $line = <$I>) {
+			$str .= $line;
+			last if (++$lineCount >= 2000);
+		}
+		close $I;
+		chomp $str;
+		return $str;
+	}
 	while (my $l = <$I>){$str.=$l;}
+	close $I;
 	return $str;
 }
 sub displayPOTUS(){
@@ -450,11 +474,16 @@ sub sortgzblast{ #function that checks if the diamond output was already sorted 
 	#print "$input\n";
 	if ( $input =~ m/\.srt\.gz$/ ) { #redo srt in case there's a $trial file
 		my $trial = $input; $trial =~ s/\.srt//; my $trialuse=0;
-		if (!-e $input && !-e $trial){die "$input doesn't exist!\n";}
-		if (-e $trial && -e $input && (-s $trial > -s $input)){$input = $trial; $trialuse=1; }#print "trial\n";
-		if (-e $input && !$trialuse){return $input; }
-		if (-e $trial && !-e $input){$input = $trial;}
-		die "something went wrong in gzip sort 1\n$input\n" unless (-e $input);
+		my @inputStat = stat($input);
+		my @trialStat = stat($trial);
+		if (!@inputStat && !@trialStat){die "$input doesn't exist!\n";}
+		if (@trialStat && @inputStat && $trialStat[7] > $inputStat[7]){
+			$input = $trial; $trialuse=1;
+		}
+		if (@inputStat && !$trialuse){return $input; }
+		if (@trialStat && !@inputStat){$input = $trial;}
+		die "something went wrong in gzip sort 1\n$input\n"
+			unless ($trialuse || @trialStat || @inputStat);
 	}
 	my $tmpd=""; 
 	my $cmd = "";
@@ -507,9 +536,5 @@ sub sortgzblast{ #function that checks if the diamond output was already sorted 
 	die "Something went wrong in sortgzblast 2\n" if (!-e $input);
 	return $input;
 }
-
-
-
-
 
 

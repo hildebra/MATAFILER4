@@ -45,7 +45,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-planState` | integer | `0` | stable | Emit a read-only, dependency-ordered repair/submission plan from the inspection snapshot. |
 | `-stateReport` | string | `""` | stable | Write the inspection JSON to this explicit path. |
 | `-planReport` | string | `""` | stable | Write the repair/submission plan JSON to this explicit path. |
-| `-autoStatePlan` | integer | `1` | stable | Run the internal inspect/plan preflight before normal execution and at each `loopTillComplete` boundary. |
+| `-autoStatePlan` | integer | `0` | advanced | Opt in to the internal inspect/plan preflight before normal execution and at each `loopTillComplete` boundary. Disabled by default to avoid a full metadata scan of every sample. |
 | `-autoRepairState` | integer | `1` | stable | Apply only preflight repairs classified as automatically safe when submission is enabled. |
 
 ## Flow related
@@ -58,7 +58,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-submit` | integer | `1` | stable | submit any jobs at all? (0= no submission, just for trying if everything is correctly set up) |
 | `-from` | integer | `0` | stable | start at which samples from map file? |
 | `-to` | integer | `999999999999` | stable | stop at which samples from map file? |
-| `-loopTillComplete` | string | `"0"` | advanced | Loop over selected samples; `X:Y` processes disjoint windows of at most `Y` samples, waiting and rerunning preflight between passes. |
+| `-loopTillComplete` | string | `"0"` | advanced | Loop over selected samples; `X:Y` processes disjoint windows of at most `Y` samples. Preflight is repeated between passes only when `-autoStatePlan 1` is enabled. |
 | `-excludeNodes` | string | `""` | stable | exclude certain nodes? |
 | `-maxConcurrentJobs` | integer | `0` | stable | max jobs in queue, useful for large samples sets, currently only works on slurm |
 | `-killDepNever` | integer | `0` | stable | kill jobs in "Dependency never finished" state? |

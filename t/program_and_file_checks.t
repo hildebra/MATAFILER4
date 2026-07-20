@@ -8,7 +8,7 @@ use FindBin qw($Bin);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
-use Mods::GenoMetaAss qw(fileGZe fileGZs);
+use Mods::GenoMetaAss qw(fileGZe fileGZs resolveExistingFile);
 use Mods::IO_Tamoc_progs qw(
 	buildMapperIdx checkMapsDoneSH inputFmtMegahit inputFmtMegahitRuntimeLibraries truePath
 );
@@ -102,6 +102,9 @@ print {$gzip_fh} '1234';
 close $gzip_fh;
 is(fileGZs("$root/compressed.txt"), 20,
 	'fileGZs retains the legacy five-times compressed-size estimate');
+my ($resolved_plain, $resolved_stat) = resolveExistingFile("$plain.gz");
+is($resolved_plain, $plain, 'plain/gzip resolution returns the existing alternative');
+is($resolved_stat->[7], 5, 'plain/gzip resolution reuses the selected file stat');
 
 my $mapping_check = checkMapsDoneSH(["$root/sample/"]);
 like($mapping_check, qr/find .*?-smd\.bam.*?-smd\.cram.*?-size \+0c/,
