@@ -170,7 +170,6 @@ sub pileupcall{
 
 	my $useFB = 1;	$useFB = 0 if (uc($SNPIHR->{SNPcaller}) eq "MPI");
 	my $overwrite = $SNPIHR->{overwrite};
-	my $deferRegionPlanning = $SNPIHR->{deferRegionPlanning} || 0;
 
 	#basic caller options..
 	my $minBQ=30; my $minMQ=30.0;
@@ -220,8 +219,6 @@ sub pileupcall{
 	);
 	unlink @oldChunks if $overwrite && @oldChunks;
 	make_path($qsubDirE) unless -d $qsubDirE;
-	my @oldBeds = bsd_glob("$qsubDirE/$smplNm.$tag*.bed");
-	unlink @oldBeds if !$deferRegionPlanning && @oldBeds;
 	my $bedJobs = 0;
 	for (my $i=0;$i<@curReg;$i++){ #go over regions in bed file, submit a job for each "region"
 		#$tar[0] = bam file;  $bedF = bedfile with regions
@@ -232,11 +229,6 @@ sub pileupcall{
 		push @chunkFiles, $chunkFile;
 		next if (-s $chunkFile && (-s "$chunkFile.csi" || -s "$chunkFile.tbi") && !$overwrite);
 		if ($myParL){
-			unless ($deferRegionPlanning) {
-				open my $bedFH, '>', $bedF or die "can't write BED $bedF: $!\n";
-				print {$bedFH} $curReg[$i];
-				close $bedFH or die "can't close BED $bedF: $!\n";
-			}
 			if (-s $chunkFile && !$overwrite) {
 				# A prior run may have completed the expensive call but failed before
 				# concat. Repair that restart state by indexing the existing BGZF chunk.
@@ -287,6 +279,7 @@ sub SNPconsensus_vcf{
 	my $smtBin = getProgPaths("samtools");
 	my $bcftBin = getProgPaths("bcftools");
 	my $vcf2fnaBin = getProgPaths("vcf2fna");
+	my $regionPlanner = getProgPaths("consVCF_region_planner");
 	
 	my $memPJob =0;
 	#get parameteres
@@ -317,7 +310,6 @@ sub SNPconsensus_vcf{
 		? ($SNPIHR->{callConsSNP} ? 1 : 0)
 		: (exists($SNPIHR->{hasPrimaryRds}) ? ($SNPIHR->{hasPrimaryRds} ? 1 : 0) : 1);
 	my $normalizeIndel = 1; $normalizeIndel = $SNPIHR->{normIndels} if (exists($SNPIHR->{normIndels})) ;
-	my $deferRegionPlanning = $SNPIHR->{deferRegionPlanning} || 0;
 	my $onlyNormalize = 0;
 
 	$memPJob = $SNPIHR->{memPJob} || 0;
@@ -370,37 +362,22 @@ sub SNPconsensus_vcf{
 	my $supportRequested = length($SNPsuppStone) ? 1 : 0;
 	my $primaryVcfReady = !$hasPrimaryRds || fileGZe($vcfFile);
 	my $supportVcfReady = !$supportRequested || fileGZe($vcfFileS);
-	my $run2ctg = $overwrite || !$primaryVcfReady || !$supportVcfReady;
+	my $runPrimary = $hasPrimaryRds && ($overwrite || !$primaryVcfReady);
+	my $runSupport = $supportRequested && ($overwrite || !$supportVcfReady);
+	my $run2ctg = $runPrimary || $runSupport;
 	if ($overwrite) {
 		my @oldScratchVcfs = grep { -f $_ } bsd_glob("$scrDir/$smplNm*.vcf.gz");
 		unlink @oldScratchVcfs if @oldScratchVcfs;
 	}
 	#first all important regions on finalDir
-	my @curReg = ("1"); my @regOrd;
+	my @curReg = ("1");
 	my $myParL=0;
 	if ($splitFAsize>0){$myParL=1;}
-	if ($myParL && $run2ctg && $deferRegionPlanning) {
+	if ($myParL && $run2ctg) {
 		my $runtimeJobs = $SNPIHR->{split_jobs} || $maxSNPcores || 1;
 		$runtimeJobs = $maxSNPcores if ($runtimeJobs > $maxSNPcores);
 		$runtimeJobs = 1 if ($runtimeJobs < 1);
 		@curReg = (('runtime') x $runtimeJobs);
-	} elsif ($myParL && $run2ctg){ #no, don't redo freebayes part
-		my ($refAR,$refAR2);
-		if ($hasPrimaryRds && defined($SNPIHR->{depthF})
-				&& length($SNPIHR->{depthF}) && fileGZe($SNPIHR->{depthF})){
-		 ($refAR,$refAR2) = getRegionsBamDepth($SNPIHR->{depthF},$SNPIHR->{split_jobs},$maxSNPcores);
-		 if (!@{$refAR}) {
-			($refAR,$refAR2) = getRegionsBam($splitFAsize,$refFA,$tmpdir);
-		 }
-		} else {
-		 ($refAR,$refAR2) = getRegionsBam($splitFAsize,$refFA,$tmpdir);
-		}
-		@curReg = @{$refAR}; 
-		#@regOrd = @{$refAR2};  #use .fai instead for this..
-		if (@curReg == 0){return wantarray ? ("", "") : "";}
-		
-		#open O,">$refFA.reg" or die "can't open region file $refFA.reg\n";		print O join("\n",@regOrd);		close O;
-		#die "$refFA.reg\n@curReg\n";
 	}
 	if ($runLocalTmp){
 		$actualCores = scalar(@curReg);
@@ -414,21 +391,10 @@ sub SNPconsensus_vcf{
 	$xtra .= "echo \"Preparing data\"\n";
 	$xtra .= "mkdir -p $scrDir;\n";
 	$xtra .= "$smtBin faidx $refFA;\n" unless (-s "$refFA.fai");
-	if ($deferRegionPlanning && $myParL && $run2ctg) {
-		my $runtimeJobs = scalar(@curReg);
-		my $bedPrefix = "$qsubDirE/$smplNm.";
-		$xtra .= "rm -f ${bedPrefix}*.bed\n";
-		$xtra .= "awk -v OFS='\\t' -v n=$runtimeJobs -v chunk=$splitFAsize -v prefix='$bedPrefix' 'BEGIN { i=0 } { for (s=0; s<\$2; s+=chunk) { e=s+chunk; if (e>\$2) e=\$2; f=prefix (i%n) \".bed\"; print \$1, s, e >> f; i++ } }' $refFA.fai\n";
-		$xtra .= "for i in \$(seq 0 ".($runtimeJobs - 1)."); do test -s ${bedPrefix}\${i}.bed || exit 42; done\n";
-		if ($SNPsuppStone ne "") {
-			$xtra .= "for i in \$(seq 0 ".($runtimeJobs - 1)."); do cp ${bedPrefix}\${i}.bed ${bedPrefix}sup-\${i}.bed; done\n";
-		}
-	}
 	#$xtra .= "exit\n"; #DEBUG
 	#$xtra .= "cp $refFA $refFA.fai $scrDir;\n";$refFA =~ m/\/([^\/]+$)/;$refFA = "$scrDir/$1";
 	#my $preTar = 
 	
-	$xtra .= "echo \"Creating c/bams indexes primary reads\"\n";
 	#my @tar = ("");$tar[0] = ${$SNPIHR->{MAR}}[0]; #$preTar;
 	
 	my @tar = $hasPrimaryRds && ref($SNPIHR->{MAR}) eq 'ARRAY' ? ($SNPIHR->{MAR}->[0]) : ();
@@ -441,6 +407,20 @@ sub SNPconsensus_vcf{
 	die "supplementary SNP mapping is missing\n" if $supportRequested && (!@tarS || !defined($tarS[0]) || !-s $tarS[0]);
 	die "SNP reference is missing or empty: $refFA\n" unless -s $refFA;
 	my $tmpOut2 = "$scrDir/$smplNm.X.cons.vcf";my $depthFileS  = "";
+	my ($primaryRegionCmd, $supportRegionCmd) = ("", "");
+	if ($myParL && $run2ctg) {
+		my $runtimeJobs = scalar(@curReg);
+		my $bedPrefix = "$qsubDirE/$smplNm.";
+		$xtra .= "rm -f ${bedPrefix}*.bed\n";
+		if ($runPrimary) {
+			my $depthArg = defined($SNPIHR->{depthF}) && length($SNPIHR->{depthF})
+				? " --depth $SNPIHR->{depthF}" : "";
+			$primaryRegionCmd = "$regionPlanner --fai $refFA.fai --mapping $tar[0]$depthArg --jobs $runtimeJobs --output-prefix $bedPrefix --samtools $smtBin\n";
+		}
+		if ($runSupport) {
+			$supportRegionCmd = "$regionPlanner --fai $refFA.fai --mapping $tarS[0] --jobs $runtimeJobs --output-prefix ${bedPrefix}sup- --samtools $smtBin\n";
+		}
+	}
 	
 	my $memReqGB = 20; #memory requested overall
 	my $bcramSiz = 0; 
@@ -456,40 +436,46 @@ sub SNPconsensus_vcf{
 	#die "hasPrimaryRds: $hasPrimaryRds\n";
 
 	if ($hasPrimaryRds){ #primary reads SNP call
+		$depthFile = _coverage_file_for_mapping($tar[0], "primary SNP");
+	}
+	if ($runPrimary){
+		$xtra .= "echo \"Creating c/bams indexes primary reads\"\n";
 		if ($bamcram eq "cram"){ #create index for bam/cram
 			$xtra .= "if [ ! -e $tar[0].crai ] || [ ! -s $tar[0].crai ]; then rm -f $tar[0].crai; $smtBin index -@ $samcores  $tar[0]; fi\n";
 		} else {
 			$xtra .= "if [ ! -e $tar[0].bai ] || [ ! -s $tar[0].bai ]; then rm -f $tar[0].bai; $smtBin index -@ $samcores  $tar[0]; fi\n";
 		}
+		$xtra .= $primaryRegionCmd;
 		
-		#find depthfil for input bam (primary)
-		$depthFile = _coverage_file_for_mapping($tar[0], "primary SNP");
-		$SNPIHR->{run2ctg} = $run2ctg;$SNPIHR->{rdep} = $rdep;
+		$SNPIHR->{run2ctg} = 1;$SNPIHR->{rdep} = $rdep;
 
 		#$SNPIHR->{assembly} = $refFA;
-		$cmdAll .= $xtra if ($run2ctg && !$onlyNormalize);
+		$cmdAll .= $xtra if (!$onlyNormalize);
 		my ($dAR,$cAR,$pilecmd) =  pileupcall(\@tar,"",$SNPIHR,$QSBoptHR,$scrDir,$tmpOut,$myParL,\@curReg,$reportVCFonly);
 		@allDeps2 = @{$dAR}; @primaryChunks = @{$cAR};
 		$cmdAll .= $pilecmd if (!$onlyNormalize);
 	}
 	
-	if (@tarS){ #supplementary reads SNP call
-		my $xtra2 = "echo \"Creating c/bams indexes supplemental reads\"\n";
-		$cmdAll .= $xtra if !$hasPrimaryRds && $run2ctg && !$onlyNormalize;
-		
+	if (@tarS){
 		$depthFileS = _coverage_file_for_mapping($tarS[0], "supplementary SNP");
+	}
+	if ($runSupport){ #supplementary reads SNP call
+		my $xtra2 = "echo \"Creating c/bams indexes supplemental reads\"\n";
+		$cmdAll .= $xtra if !$runPrimary && !$onlyNormalize;
+		$SNPIHR->{run2ctg} = 1;
 		#die "$depthFileS\n";
 		if ($bamcram eq "cram"){ #create index for bam/cram
 			$xtra2 .= "if [ ! -e $tarS[0].crai ] || [ ! -s $tarS[0].crai ]; then rm -f $tarS[0].crai; $smtBin index -@ $samcores  $tarS[0]; fi\n";
 		} else {
 			$xtra2 .= "if [ ! -e $tarS[0].bai ] || [ ! -s $tarS[0].bai ]; then rm -f $tarS[0].bai; $smtBin index -@ $samcores  $tarS[0]; fi\n";
 		}
+		$xtra2 .= $supportRegionCmd;
 		my ($dAR,$cAR,$pilecmd) =  pileupcall(\@tarS,"sup-",$SNPIHR,$QSBoptHR,$scrDir,$tmpOut2,$myParL,\@curReg,$reportVCFonly);
 		$cmdAll .= $xtra2.$pilecmd if (!$onlyNormalize);
 		push(@allDeps2, @{$dAR}); @supportChunks = @{$cAR};
 	}
 	
-	#all bed files should have been removing inside the two pileupcall() subs
+	# Every successful chunk removes its own BED file.
 	$cmdAll .= "if ls $qsubDirE/$smplNm.*.bed 1> /dev/null 2>&1 ;then echo \"Bed files still present, probably incorrect run\"; exit 33; else echo \"bed files deleted, looks good\"; fi\n\n" if (@curReg);
 		
 
@@ -498,13 +484,13 @@ sub SNPconsensus_vcf{
 	my $sortCmd = "";
 	if ($myParL && $cmdAll ne ""){
 		$sortCmd .= "mkdir -p $ofasConsDir;\n";
-		if ($hasPrimaryRds){
+		if ($runPrimary){
 			die "no primary VCF chunks were planned\n" unless @primaryChunks;
 			$sortCmd .= "$bcftBin concat -a -Oz -o $vcfFile ".join(" ", @primaryChunks)."\n";
 			my @primaryChunkArtifacts = map { ($_, "$_.csi", "$_.tbi") } @primaryChunks;
 			$sortCmd .= "test -s $vcfFile\nrm -f ".join(" ", @primaryChunkArtifacts)."\n";
 		}
-		if ($supportRequested){
+		if ($runSupport){
 			die "no supplementary VCF chunks were planned\n" unless @supportChunks;
 			$sortCmd .= "$bcftBin concat -a -Oz -o $vcfFileS ".join(" ", @supportChunks)."\n";
 			my @supportChunkArtifacts = map { ($_, "$_.csi", "$_.tbi") } @supportChunks;

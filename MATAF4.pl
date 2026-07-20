@@ -16,6 +16,7 @@ use Cwd 'abs_path';
 use POSIX;
 use Getopt::Long qw( GetOptions );
 use List::Util qw(max sum);
+use Text::ParseWords qw(shellwords);
 
 use vars qw($CONFIG_FILE);
 
@@ -63,6 +64,7 @@ use Mods::WorkflowControl qw(
 sub announce_MF4;
 sub smplStats; sub checkDrives; 
 sub isLastSampleInAssembly;
+sub runFinishedCleanup;
 sub uploadRawFilePrep; sub unploadRawFilePostprocess;
 sub seedUnzip2tmp; sub cleanInput; #unzipping reads; removing these at later stages ; remove tmp dirs
 
@@ -861,23 +863,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#&& !$calcRibofind && !$calcRiboAssign && !$MFopt{calcOrthoPlacement} && !$calcGenoSize && !$calcDiamond && !$calcDiaParse && 
 		#!$calcMetaPhlan && !$calcTaxaTar && !$calcMOTU2 && !$calcKraken && $scaffTarExternal eq ""
 	){
-		#free some scratch
-		system "rm -rf $smplTmpDir &" if ($MFconfig{rmScratchTmp} );
-		#system "rm -f $smplLockF" if (-e $smplLockF);
-		
 		if ( ($boolAssemblyOK || ($doPreAssmFlag && $ePreAssmbly && !$ePreAssmblPck)) && !$locRedoAssMapping ){ #causes a lot of overhead but mainly to avoid unpacking reads again..
 			print "present: $curOutDir \n"; $presentAssemblies ++;#= $AsGrps{$cAssGrp}{CntAimAss};
 			#base is present, but is the additions? 
-
-			if ($MFopt{map2Assembly} && $MFopt{doBam2Cram} && #.cram.sto to check that everything went well
-				$AssemblyGo && $MappingGo  && $allMapDone ){
-							#(-e "$finalCommAssDir/scaffolds.fasta.filt.$MFcontstants{mini2IdxFileSuffix}" || -e "$finalCommAssDir/scaffolds.fasta.filt${bwt2IdxFileSuffix}.1.bt2") &&
-				#delete bwt2 index to save some space..
-				#need to ensure that all mapping in mapping group are fine..
-				system "rm -f $finalCommAssDir/scaffolds.fasta.filt$MFcontstants{bwt2IdxFileSuffix}* $finalCommAssDir/scaffolds.fasta.filt.fai $finalCommAssDir/scaffolds.fasta.filt.$MFcontstants{mini2IdxFileSuffix} $finalCommAssDir/scaffolds.fasta.filt.$MFcontstants{kmaIdxFileSuffix}";
-				system "rm -f $finalMapDir/${SmplName}*smd.bam.bai $finalMapDir/${SmplName}*smd.bam.coverage.c* $finalMapDir/${SmplName}*smd.bam.coverage.gen* $finalMapDir/${SmplName}*smd.bam.coverage.m* $finalMapDir/${SmplName}*smd.bam.coverage.p*";
-				
-			}
 			if ($MFopt{map2Assembly} && !$MFopt{mapSaveCram} && -s $BinningOut && (-s "$BinningOut.cm2" || -e "$BinningOut.cm") &&
 				!$calcBinning && !$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp && $eFinMapCovGZ && $efinAssLoc && $eFinalMapDir && -s $CRAMmap){
 #				die;
@@ -885,6 +873,27 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				print "due to flag -mapSaveCRAM 1\n";
 				system "rm -rf $CRAMmap";
 			}
+		}
+		if ($MFconfig{rmScratchTmp}) {
+			my @cleanupMembers = exists($map{$curSmpl}{AG_members})
+				? map { $map{$_}{SmplID} } @{$map{$curSmpl}{AG_members}}
+				: ($SmplName);
+			my @memberArgs = map { ('--member', $_) } @cleanupMembers;
+			my @cleanupMemberKeys = exists($map{$curSmpl}{AG_members})
+				? @{$map{$curSmpl}{AG_members}} : ($curSmpl);
+			my @memberLockArgs = map {
+				('--member-lock', "$map{$_}{wrdir}/LOGandSUB/$MFcontstants{DefaultSampleLock}")
+			} @cleanupMemberKeys;
+			runFinishedCleanup(
+				'--sample', $SmplName, @memberArgs, @memberLockArgs,
+				'--state-dir', "$finalCommAssDir/.cleanup-indexes",
+				'--allowed-root', $baseOut,
+				'--mapping-dir', $finalMapDir,
+				'--sample-temp', $smplTmpDir,
+				'--scratch-root', $MFglobal{runTmpDirGlobal},
+				'--assembly', $finAssLoc,
+				'--snp-log-dir', "$logDir/SNP",
+			);
 		}
 		print "next due to sample finished";
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
@@ -1384,7 +1393,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						bpSplit => 1e6,runLocal => 1,SeqTech => $map{$curSmpl}{SeqTech},SeqTechSuppl => "",
 						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
 						jdeps => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
-						deferRegionPlanning => 0,
 						immediateSubm => 1,
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
 						STOconSNP => $STOsnpCons, STOconSNPsupp => "",
@@ -1482,6 +1490,22 @@ exit(0);
 #####################################################
 #
 #####################################################
+
+sub runFinishedCleanup {
+	my @arguments = @_;
+	my @cleaner = shellwords(getProgPaths("finished_sample_cleanup"));
+	if (!@cleaner) {
+		warn "Finished-sample cleanup command is not configured\n";
+		return 0;
+	}
+	my $status = system(@cleaner, @arguments);
+	if ($status != 0) {
+		my $exitCode = $status == -1 ? -1 : $status >> 8;
+		warn "Finished-sample cleanup failed with exit code $exitCode; retained temporary files\n";
+		return 0;
+	}
+	return 1;
+}
 
 sub loop2C_check(){
 	my ($cAssGrp,$sampleDeps_AR) = @_;

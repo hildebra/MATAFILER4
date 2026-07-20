@@ -27,6 +27,13 @@ MATAFILER4 creates many large temporary files. A stable configuration should use
 
 Relevant flags include `-globalTmpDir`, `-nodeTmpDir`, `-nodeHDDspace`, `-reduceScratchUse`, `-rm_tmpdir_reads` and `-rm_tmpInput`.
 
+With `-reduceScratchUse 1`, cleanup occurs only after a later workflow pass has
+observed the sample as complete. Sample-owned BAM/CRAM indexes, stale SNP BED
+files and the sample scratch directory are then removed. Mapper and FASTA
+indexes adjacent to a generated assembly are retained until every member of
+that assembly group is complete. Indexes adjacent to external references are
+never removed.
+
 ## Scheduler settings
 
 MATAFILER4 can autodetect supported schedulers, but this can be overridden with:

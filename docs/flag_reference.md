@@ -76,7 +76,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 |---|---:|---|---|---|
 | `-rm_tmpdir_reads` | integer | `1` | stable | Default 1, remove tmpdir with reads |
 | `-rm_tmpInput` | integer | `1` | stable | remove raw, human / adaptor filtered reads, if sdm clean created? (and not needed any longer) |
-| `-reduceScratchUse` | integer | `1` | internal/advanced | should always be 1, unless debugging.. |
+| `-reduceScratchUse` | integer | `1` | internal/advanced | remove sample scratch and rebuildable indexes after sample/group completion; set to 0 for debugging |
 | `-globalTmpDir` | string | `""` | stable | absolute path to global shared tmp dir (like a scratch dir) |
 | `-nodeTmpDir` | string | `""` | stable | absolute path to tmp dir on local HDD of each executing node |
 | `-nodeHDDspace` | string | `30` | stable | HDD tmp space to be requested for each node (in Gb). Some systems don't support this |
