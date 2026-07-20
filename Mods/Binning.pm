@@ -800,9 +800,16 @@ sub runSemiBin{
 	
 	
 	# --environment human_gut, dog_gut, ocean, soil, cat_gut, human_oral, mouse_gut, pig_gut, built_environment, wastewater, chicken_caecum, global
+	# A curated environment is valid only for single-sample mode.  Multiple
+	# usable BAMs make this a multi-sample/coassembly run, for which SemiBin2
+	# must train from the supplied samples instead of loading a pretrained
+	# environment.  For one BAM, default to human_gut unless explicitly set.
+	my $selectedEnvironment = $giveSBenv ne "" ? $giveSBenv : "human_gut";
+	die "Invalid SemiBin2 environment '$selectedEnvironment'\n"
+		unless $selectedEnvironment =~ /^[A-Za-z0-9_-]+$/;
+	my $senv = $numBams == 1 ? "--environment $selectedEnvironment" : "";
 	my $SBbin = getProgPaths("SemiBin2");
 	my $smode = "single_easy_bin ";
-	my $senv = $giveSBenv ne "" ? "--environment $giveSBenv" : "";
 	my $dflags = " --random-seed 555 --tmpdir $tmpDir -p $cores";
 	my $seqType = "--sequencing-type=short_read ";
 	$seqType = "--sequencing-type=long_read " if ($seqTec eq "PB" || $seqTec eq "ONT" || $seqTec eq "hybrid");#PAcBIo/ONT

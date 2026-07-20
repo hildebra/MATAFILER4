@@ -98,7 +98,12 @@ open my $large_fh, '>', $large_bam or die "Cannot write $large_bam: $!";
 seek($large_fh, 15 * 1024 * 1024, 0) or die "Cannot seek in $large_bam: $!";
 print {$large_fh} 'x';
 close $large_fh or die "Cannot close $large_bam: $!";
-my ($semibin_small, $semibin_default, $semibin_environment);
+my $large_bam2 = "$root/large2.bam";
+open my $large_fh2, '>', $large_bam2 or die "Cannot write $large_bam2: $!";
+seek($large_fh2, 15 * 1024 * 1024, 0) or die "Cannot seek in $large_bam2: $!";
+print {$large_fh2} 'x';
+close $large_fh2 or die "Cannot close $large_bam2: $!";
+my ($semibin_small, $semibin_default, $semibin_environment, $semibin_multi);
 {
 	no warnings 'redefine';
 	local *Mods::Binning::getProgPaths = sub { return 'SemiBin2' };
@@ -108,17 +113,27 @@ my ($semibin_small, $semibin_default, $semibin_environment);
 		"$root/ref.fa", 4, [$large_bam], 'hiSeq', '');
 	$semibin_environment = runSemiBin('', "$root/sb2", "$root/sbtmp2", 'sample',
 		"$root/ref.fa", 4, [$large_bam], 'ONT', 'ocean');
+	$semibin_multi = runSemiBin('', "$root/sb-multi", "$root/sbtmp-multi", 'sample',
+		"$root/ref.fa", 4, [$large_bam, $large_bam2], 'hiSeq', 'ocean');
 }
 like($semibin_small, qr/: > \Q$root\/sb-small\/sample\E/,
 	'SemiBin excludes BAM files of 15 MiB or less and publishes an empty assignment');
 unlike($semibin_small, qr/SemiBin2 single_easy_bin/,
 	'SemiBin is not invoked with a crash-prone small BAM');
-unlike($semibin_default, qr/--environment/,
-	'an empty SB_env uses SemiBin self-training instead of silently forcing human_gut');
+like($semibin_default, qr/--environment human_gut/,
+	'an empty SB_env defaults SemiBin to the curated human-gut environment');
 like($semibin_environment, qr/--environment ocean/,
 	'an explicitly selected SemiBin environment is passed through');
 like($semibin_environment, qr/--sequencing-type=long_read/,
 	'long-read libraries select SemiBin long-read mode');
+unlike($semibin_multi, qr/--environment/,
+	'multiple usable BAMs omit pretrained environments for SemiBin multi-sample training');
+eval {
+	runSemiBin('', "$root/sb-invalid", "$root/sbtmp-invalid", 'sample',
+		"$root/ref.fa", 4, [$large_bam], 'hiSeq', 'human_gut; touch BAD');
+};
+like($@, qr/Invalid SemiBin2 environment/,
+	'SemiBin environment overrides cannot inject shell commands');
 
 my $assignment = "$root/check-bins";
 write_file($assignment, "contig\tbin1\n");
