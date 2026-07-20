@@ -228,6 +228,10 @@ sub readGene2tax{
 		chomp $line;
 		$totalGenes++;
 		my @spl = split (/\t/,$line,-1);
+		if (@spl < 3 || !defined($spl[0]) || $spl[0] eq "" || !defined($spl[1]) || $spl[1] eq "") {
+			warn "Ignoring malformed gene-to-MGS row in $inF: $line\n";
+			next;
+		}
 		#only read a limited number of genes.. used for MGS to only take first few genes
 		my $MGS = $spl[1];
 		if ($limit>0 && exists($totalTax{$MGS}) && $totalTax{$MGS}  >= $limit){
@@ -244,14 +248,21 @@ sub readGene2tax{
 			$OG="uniq$uniqs{$spl[1]}";
 			#die "$OG\n";
 		}
-		unless (exists($SIgenes->{$MGS}{$OG})){#only register gene if COG is not already reserved..
-			push(@{$cogPrio->{$MGS}},$OG); ;
-			$SIgenes->{$MGS}{$OG} = $spl[0];
-			$Gene2COG->{$spl[0]} = $OG;
-			$Gene2MGS->{$spl[0]} = $MGS;
-			$inclGenes++;
-			$totalTax{$MGS} ++;
+		# COG is a functional/orthology annotation, not a unique locus identifier.
+		# Preserve every ranked catalogue cluster and let the strain workflow merge
+		# compatible alternative seeds after checking sequence, co-occurrence and context.
+		my $gene = $spl[0];
+		my $locus = join('|', $MGS, $OG, $gene);
+		if (exists($Gene2MGS->{$gene})) {
+			warn "Ignoring duplicate catalogue gene $gene in $inF\n";
+			next;
 		}
+		push(@{$cogPrio->{$MGS}},$locus);
+		$SIgenes->{$MGS}{$locus} = $gene;
+		$Gene2COG->{$gene} = $OG;
+		$Gene2MGS->{$gene} = $MGS;
+		$inclGenes++;
+		$totalTax{$MGS} ++;
 	}
 	close I;
 	print "Found ". scalar(keys %totalTax) ." MGS with $inclGenes/$totalGenes included genes\n";

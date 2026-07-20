@@ -132,5 +132,13 @@ like($strain_source, qr/tooFewSamples\.sto/,
 	'undersampled MGS are checkpointed separately from missing inputs');
 like($strain_source, qr/falling back to on-the-fly generation/,
 	'failed consensus precomputation has a local fallback');
+like($strain_source, qr/my \$ng = "\$sd3\$SaSe\$curLocus\{\$gX\}"/,
+	'within-MGS sequence identifiers carry the MGS, COG, and primary catalogue gene locus');
+like($strain_source, qr/robust_depth_mask\(\\\@abunGs\)/,
+	'within-MGS abundance filtering uses a robust depth mask');
+
+my $build_tree_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
+like($build_tree_source, qr/\(\?<sample>\.\*\?\).*?\(\?<gene>\.\+\)/,
+	'tree sequence identifiers split at the first separator and retain compound locus names');
 
 done_testing();

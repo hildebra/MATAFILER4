@@ -7,7 +7,7 @@ use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(gzipopen readFasta writeFasta systemW);
 use Mods::TamocFunc qw(readTabbed);
-use Mods::math qw(meanArray medianArray quantileArray);
+use Mods::math qw(meanArray medianArray);
 
 sub evalCurMGS;
 
@@ -16,7 +16,8 @@ sub evalCurMGS;
 #v0.11: 9.2.24: retain more genes/MGS
 #v0.12: 11.2.24: adopted to weighted multiBin scores; more subs to make script more modifiable
 #v0.13: flush the final MGS and handle marker-free groups safely
-my $version = 0.13;
+#v0.14: count distinct samples, use multicopy evidence, and make ranking deterministic
+my $version = 0.14;
 
 
 # set up some base variables
@@ -48,9 +49,15 @@ print "\n--------------------------------------------------\nResorting MGS genes
 
 die "Can't find main infile $MGSfile\n" unless (-s $MGSfile);
 
-#read MGS occurrence to understand distribution
-my $hr = readTabbed($obsFile);
-my %MGSobs = %{$hr};
+#read MGS occurrence to understand distribution; a missing observation table
+#must not prevent small/partial MGS sets from being ranked.
+my %MGSobs;
+if (-s $obsFile) {
+	my $hr = readTabbed($obsFile);
+	%MGSobs = %{$hr};
+} else {
+	warn "MGS occurrence table $obsFile is unavailable; estimating prevalence from genes\n";
+}
 
 #load GTDB/FMG genes directly..
 my $inMGFile="$GCd/FMG.subset.cats";
@@ -68,7 +75,7 @@ while (<I>){
 	foreach my $gene (@spl2){$MGset{$gene} = 1;$totMGSgenes++;}
 }
 close I;
-print STDERR "Loaded $totMGSgenes $useGTDBmg marker genes from \n";
+print STDERR "Loaded $totMGSgenes $useGTDBmg marker genes from $inMGFile\n";
 
 
 
@@ -79,8 +86,13 @@ my ($I,$ST) = gzipopen("$GCd/compl.incompl.$clusterID.fna.clstr.idx","gene cat i
 while (<$I>){
 	chomp; my @spl= split /\t/;
 	if (@spl<2){next; }#die $1." no tab char\n";}
-	my $count = $spl[1] =~ tr/,//;
-	$geneOcc{$spl[0]} = $count;
+	my %samples;
+	for my $member (split /,/, $spl[1]) {
+		$member =~ s/^>//;
+		my ($sample) = split /__/, $member, 2;
+		$samples{$sample} = 1 if defined($sample) && length($sample);
+	}
+	$geneOcc{$spl[0]} = scalar(keys %samples);
 	#$maxOcc = $spl[1] if ($maxOcc < $spl[1]);
 }
 close $I;
@@ -119,11 +131,13 @@ while (my $line = <I>){
 	die "Malformed MGS row: $line\n" unless @spl >= 6 && defined $spl[1] && length $spl[1];
 	my $gene = $spl[1];
 	#push @genes,$gene; 
-	next if (exists($markers{$gene}));
-	if ($spl[5] == 1){
+	if (exists($multiBin{$gene})) {
+		warn "Ignoring duplicate gene $gene in MGS $MGS\n";
+		next;
+	}
+	if (exists($MGset{$gene})){
 		$markers{$gene}=$spl[2];
 	} else {
-		die "$gene in both markers and not!\n" if (exists($markers{$gene}));
 		$occ{$gene} = $spl[2]; 
 	}		
 	$multiCp{$gene} = $spl[3]; $multiBin{$gene} = $spl[4];
@@ -145,54 +159,62 @@ exit(0);
 sub evalCurMGS{
 	#this routine decides which MGS genes (already pre-filtered for core genes) will be handed on to strain phylo construction.. should be "certain" cutoffs for removing genes (intra phylo will do another round of filtering)
 	my ($MGS) = @_;
-	die "Can't find observed val for MGS $MGSobs{$curMGS}\n" unless (exists($MGSobs{$curMGS}));
-	my %finalList; my $mrkCnt=0; my $avgOcc=0;
-	my $maxMocc=0; my $minMocc=10000000;
-	my $MGSob = $MGSobs{$curMGS}; #my $MGSob001 = ((0.01*$MGSob)+1 );
-	my @mrks = keys %markers;
-	my %mBinMrks = %multiBin{@mrks};
-	#my $medMCp = medianArray(values %multiCp);	my $avgMCp = meanArray([values %multiCp]);
-	my $medMBi = medianArray(values %multiBin);	my $avgMBi = meanArray([values %multiBin]);
-	my $q75MBi =quantileArray(0.75,values %multiBin); 
-	my $q75MBiM = @mrks ? quantileArray(0.75,values %mBinMrks) : $q75MBi;
-	my $q75MBiMF = $q75MBiM;
-	if ($q75MBiMF > 2.2){$q75MBiMF=2.2;print "Warning: very high markerG multibin: $q75MBiM\n";}
-	foreach my $gn (@mrks){
-		if ($multiBin{$gn} > $q75MBiMF #|| $multiCp{$gn} > $MGSob001 
-		){
-			#print "$gn :: $multiBin{$gn} > 1 || $multiCp{$gn} > 0\n";
-			next;
-		} 
-		$finalList{$gn} =  scalar(keys %finalList);
-		$avgOcc += defined($geneOcc{$gn}) ? $geneOcc{$gn} : 0;
-		$mrkCnt++;
-		$maxMocc = $markers{$gn} if ($markers{$gn} > $maxMocc);
-		$minMocc = $markers{$gn} if ($markers{$gn} < $minMocc);
-	}
-	if ($mrkCnt) {
-		$avgOcc /= $mrkCnt;
-	} else {
-		my @known_occ = map { $geneOcc{$_} } grep { defined $geneOcc{$_} } keys %occ;
-		$avgOcc = @known_occ ? meanArray(\@known_occ) : 1;
-	}
-	my $avgOcc2 = $avgOcc; $avgOcc2 = 1 if ($avgOcc < 1);
-	my @srtedGenes = sort {$occ{$b} <=> $occ{$a}} keys %occ;
-	#make sure lower and upper bound is not unreasonable..
-	my $avgOccH = $avgOcc2 *1.5; if ($avgOccH < 4){$avgOccH = 4;} 
-	my $avgOccL = int($avgOcc2 *0.5); #if ($avgOccL > 4){$avgOccL = 4;} 
-	foreach my $gn (@srtedGenes){
-		if ($multiBin{$gn} > ($q75MBi*1.1) #|| $multiCp{$gn} > $MGSob001
-				|| (defined($geneOcc{$gn}) && ($geneOcc{$gn} > $avgOccH || $geneOcc{$gn} < $avgOccL))
-				){
-			next;
+	my %finalList;
+	my $mrkCnt=0;
+	my @all_genes = (keys(%markers), keys(%occ));
+	my @known_occ = map { $geneOcc{$_} } grep { defined($geneOcc{$_}) && $geneOcc{$_} > 0 } @all_genes;
+	my @marker_occ = map { $geneOcc{$_} } grep { defined($geneOcc{$_}) && $geneOcc{$_} > 0 } keys %markers;
+	my $expected_occ = @marker_occ >= 3 ? medianArray(@marker_occ)
+		: @known_occ ? medianArray(@known_occ) : 1;
+	my $MGSob = exists($MGSobs{$curMGS}) ? $MGSobs{$curMGS} : $expected_occ;
+
+	my $copy_fraction = sub {
+		my ($gene) = @_;
+		my $observations = exists($markers{$gene}) ? $markers{$gene} : $occ{$gene};
+		return $observations && $observations > 0 ? ($multiCp{$gene} || 0) / $observations : 0;
+	};
+	my $reject_gene = sub {
+		my ($gene) = @_;
+		my $observations = exists($markers{$gene}) ? $markers{$gene} : $occ{$gene};
+		return 1 if defined($multiBin{$gene}) && $multiBin{$gene} >= 3;
+		# A single duplicate observation is weak evidence in undersampled MGS.
+		return 1 if $observations >= 5 && ($multiCp{$gene} || 0) >= 2
+			&& $copy_fraction->($gene) > 0.2;
+		# Only reject gross prevalence mismatches when enough samples exist.
+		if ($expected_occ >= 4 && defined($geneOcc{$gene})) {
+			return 1 if $geneOcc{$gene} < 0.25 * $expected_occ
+				|| $geneOcc{$gene} > 4 * $expected_occ;
 		}
+		return 0;
+	};
+	my $rank_genes = sub {
+		my ($left, $right, $occ_hr) = @_;
+		return $copy_fraction->($left) <=> $copy_fraction->($right)
+			|| ($multiBin{$left} // 0) <=> ($multiBin{$right} // 0)
+			|| ($occ_hr->{$right} // 0) <=> ($occ_hr->{$left} // 0)
+			|| abs(($geneOcc{$left} // $expected_occ) - $expected_occ)
+				<=> abs(($geneOcc{$right} // $expected_occ) - $expected_occ)
+			|| $left cmp $right;
+	};
+
+	my @mrks = sort { $rank_genes->($a, $b, \%markers) } keys %markers;
+	for my $gn (@mrks) {
+		next if $reject_gene->($gn);
+		$finalList{$gn} = scalar(keys %finalList);
+		$mrkCnt++;
+	}
+	my @srtedGenes = sort { $rank_genes->($a, $b, \%occ) } keys %occ;
+	for my $gn (@srtedGenes) {
+		next if $reject_gene->($gn);
 		$finalList{$gn} = scalar(keys %finalList);
 	}
-	
-	
-	
+
+	my $medMBi = @all_genes ? medianArray(map { $multiBin{$_} } @all_genes) : 0;
+	my $avgMBi = @all_genes ? meanArray([map { $multiBin{$_} } @all_genes]) : 0;
 	print "${curMGS} (".scalar(keys %multiBin)."):: " ;
-	print scalar(keys %finalList) ." genes, $mrkCnt markerGs used, avgOcc: " . int($avgOcc*100)/100 . ", MAG occ: $MGSob, median/avg/q75/q75Mark multiBin $medMBi/" . int($avgMBi*100)/100  . "/". int($q75MBi*100)/100  ."/". int($q75MBiM*100)/100  ."\n";
+	print scalar(keys %finalList) ." genes, $mrkCnt markerGs used, expected prevalence: "
+		. int($expected_occ*100)/100 . ", MAG occ: $MGSob, median/avg multiBin $medMBi/"
+		. int($avgMBi*100)/100 ."\n";
 	
 	$geneCnt+= scalar(keys %finalList);
 	
@@ -208,10 +230,6 @@ sub evalCurMGS{
 	$MGScnt++;
 	return $retStr;
 }
-
-
-
-
 
 
 

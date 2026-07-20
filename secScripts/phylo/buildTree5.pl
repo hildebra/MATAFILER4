@@ -569,6 +569,8 @@ if ($isAligned){
 		if ($spl[0] =~ m/^#/){shift @spl;}
 		my @spl2 = parseSeqId($spl[0], "category line ".($cnt + 1));
 		my $gene = $spl2[1];
+		my $gene_file_stem = $gene;
+		$gene_file_stem =~ s/[^A-Za-z0-9_.-]+/__/g;
 		#die "@spl\n";		
 		my $ogrGenes = "";
 		if ($outgroup ne ""){
@@ -586,10 +588,10 @@ if ($isAligned){
 		#die "@spl\n";
 		my $tmpInMSA = "$tmpD/inMSA$cnt.faa";
 		my $tmpInMSAnt = "$tmpD/inMSA$cnt.fna";
-		my $tmpOutMSAaa = "$tmpD/$spl2[1].$cnt.faa";
-		my $tmpOutMSA = "$tmpD/$spl2[1].$cnt.fna";
-		my $finOutMSAaa = "$MsaD/$spl2[1].$cnt.faa";
-		my $finOutMSA = "$MsaD/$spl2[1].$cnt.fna";
+		my $tmpOutMSAaa = "$tmpD/$gene_file_stem.$cnt.faa";
+		my $tmpOutMSA = "$tmpD/$gene_file_stem.$cnt.fna";
+		my $finOutMSAaa = "$MsaD/$gene_file_stem.$cnt.faa";
+		my $finOutMSA = "$MsaD/$gene_file_stem.$cnt.fna";
 		
 		my $endFileExists=0; $endFileExists =1 if (fileGZs($finOutMSAaa) && fileGZs($finOutMSA));
 		
@@ -2224,7 +2226,7 @@ sub parseSeqId{
 	my ($seqId, $context, $allowUndelimited) = @_;
 	$context ||= "sequence identifier";
 	if (defined($seqId)
-		&& $seqId =~ /^(?<sample>.*)(?<separator>$smplSep)(?<gene>.*)$/
+		&& $seqId =~ /^(?<sample>.*?)(?<separator>$smplSep)(?<gene>.+)$/
 		&& $+{sample} ne "" && $+{gene} ne ""){
 		return ($+{sample}, $+{gene}, $+{separator});
 	}

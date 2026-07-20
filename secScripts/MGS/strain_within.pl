@@ -19,7 +19,8 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystem2 qsubSystemJobAlive qsubSys
 use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
 use Mods::TamocFunc qw(readTabbed getFileStr checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
-use Mods::math qw(quantileArray quantileArrayR);
+use Mods::math qw(quantileArray);
+use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate protein_kmer_similarity robust_depth_mask);
 
 sub extractFNAFAA2genes;
 sub histoMGS;
@@ -58,7 +59,8 @@ sub writeTooFewMarker;
 #.33: 7.3.26: speed improvements across the board, more options for vcf2dna
 #.34: 28.4.26: custom bin file
 #.35: validate inputs and repair resume, outgroup, consensus, and temporary-directory handling
-my $version = 0.35;
+#.36: preserve locus-level same-COG genes, resolve paralogs, and make sample filters robust to sparse inputs
+my $version = 0.36;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -82,9 +84,9 @@ my $treeFile = "";
 my $doSubmit=0;
 my $subMode="";
 my $multiGeneSmplMax = 0.25; #no higher than this rate in single samples conspec genes..
-my $maxOrthoNum = 1; #don't include gene if multiple orthologues
 my $conspGeneSmplMax = 0.05; #no higher than this conspecific genes/MGS/sample
 my $minDepthGene  = 1;
+my $minBadLociForSampleSkip = 3; #avoid rejecting sparse MGS for a single bad locus
 my $noIndels = 1;
 
 
@@ -119,8 +121,6 @@ my $preCompCons=0; #if >0, precompute in these blocks
 
 my $takeAll = 0;
 my $conspecificSpThr = 0.1; #higher fraction of genes being two copies in the same sample (abundance >0), and the whole MGS is removed from that sample
-my $multiCpyThr = 0.2; #kick out specific genes if too many copies / genome: should be relatively high (0.2+) as there are less intrusive mechanisms for removing such genes..
-my $multCpyMGSthr = 0.7; #kick out entire MGS, if it has too many multicopy genes at above threshhold
 my $MGStoolowGsThr = 10; #less genes than this in a single sample -> rm MGS from sample for strains
 my $mode = "MGS";
 my $appendWriteTrigger = 200; #every Xth samples, genes are written (to manage memory); #limit this, perl seems to have some issues with too large strings..
@@ -184,6 +184,7 @@ GetOptions(
 	"MGSminGenesPSmpl=i" => \$MGStoolowGsThr, #less genes than this in a single sample -> rm MGS from sample for strains. default 10
 	"multiGeneSmplMax=f" => \$multiGeneSmplMax, #default 0.15
 	"conspGeneSmplMax=f" => \$conspGeneSmplMax, #default 0.05
+	"minBadLociPSmpl=i" => \$minBadLociForSampleSkip,
 	
 	#transferred to buildTRee script..
 	"GenesPerSpecies=f" => \$GenesPerSpecies,
@@ -218,6 +219,7 @@ die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterI
 die "Invalid subjob settings\n" if $maxSubJob < 0 || $subJob < 0 || ($maxSubJob && $subJob >= $maxSubJob);
 die "Core, memory, and precompute settings must be non-negative\n"
 	if $maxCores == 0 || $selfMemGb <= 0 || $preCompCons < 0;
+die "-minBadLociPSmpl must be positive\n" unless $minBadLociForSampleSkip > 0;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax, $GenesPerSpecies, $GeneLengthMin);
 
@@ -233,6 +235,7 @@ my $bindir;my $outD;my $scratchD;my $preConDir;my $LOGDIR;my $mapF;
 my %map; my %AsGrps;my @samples;#map and assembly groups
 my %ConspecificMGS; #list of conspecific MGS
 my %MGSnoTree; #MGS known to have too few samples for a meaningful tree
+my $legacyLocusOutputs = 0;
 
 my $gene2taxF; #where to find info what genes (gene cat)
 my $sttime = time;	
@@ -245,6 +248,7 @@ createAGlist();
 #foreach (sort keys %AGlist) {   print "$_ : @{$AGlist{$_}}\n";}die;
 
 my %preCompSNPs;
+my %unavailableSamples;
 preComputeConsSNP();
 
 
@@ -253,12 +257,14 @@ my %replN; #my %genesWrite; #keep stats/track
 #my %allFNA; my %allFAA; #big hash with all genes in @allGenes
 #my %gene2genes; #no longer needed
 my %cl2gene2; #contains link from GCgene to fasta header assembly, cleaned up for multi copy already..
+my %candidateSeed; #sample -> locus -> assembled gene -> catalogue seed
+my %LocusByID; my %Gene2Locus; my %MemberContext; my %LocusContext;
+my %catalogProteins;
 #my %SIcat;
 
 
 my $SIgenes; my $Gene2COG; my $Gene2MGS; my $COGprios;
 my %SIdirs; #unified storage of dirs per SI (SI==MGS)
-my %MGSsmplConsp; #saves single samples within a MGS that seem to have too high rates of conspecific genes (controlled by $multiGeneSmplMax )
 
 
 
@@ -294,6 +300,7 @@ my %OCstrH ; my %OFstrH ; my %OAstrH ; my %OLstrH ;
 
 if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			|| $subJob || $redoSubmissionData
+			|| $legacyLocusOutputs
 			|| ($deepRepair && $dirsNOTPrepped)
 			|| ($repairCAT && $CatFileMiss)){
 	#$PhylosExist=0;
@@ -316,7 +323,8 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			'-reSubmit', 0, '-maxSubJob', $maxSubJob,
 			'-MGSminGenesPSmpl', $MGStoolowGsThr,
 			'-multiGeneSmplMax', $multiGeneSmplMax,
-			'-conspGeneSmplMax', $conspGeneSmplMax, '-MGSphylo', $treeFile,
+			'-conspGeneSmplMax', $conspGeneSmplMax,
+			'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
 			'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
 			'-MGset', $useGTDBmg, '-redoSubmissionData', 0, '-deepRepair', 0,
 			'-rmMSA', 0, '-minSNPDepth', $minSNPDepth,
@@ -404,7 +412,8 @@ if (scalar(keys(%ConspecificMGS)) == 0){
 
 
 my %FNAref; my %FAAref;
-my %SIgenes_OG; #later reads in SIgenes again, but no restriction to length 
+my %SIgenes_OG; my %OGgenesByCOG;
+my %outgroupGeneCache;
 
 my $geneCatLoaded=0;
 #read in genecat to create outgroup fasta sequences..
@@ -421,8 +430,16 @@ if ($CatNotPrepped || $treeAbsent || $repairCAT || $deepRepair || $dirsNOTPreppe
 		$refNameL = "FMG ref";
 	}
 	
-	my ($hr1,$Gene2COG_OG,$hr3,$hr4) = readGene2tax($gene2taxF,$presortGenes,\@subsetMGS);
+	# Outgroups can lie outside an explicitly requested target subset.
+	my ($hr1,$Gene2COG_OG,$hr3,$hr4) = readGene2tax($gene2taxF,$presortGenes,[]);
 	%SIgenes_OG = %{$hr1};
+	for my $MGS (keys %{$hr4}) {
+		for my $locus (@{$hr4->{$MGS}}) {
+			my $gene = $hr1->{$MGS}{$locus};
+			next unless defined($gene) && defined($Gene2COG_OG->{$gene});
+			push @{$OGgenesByCOG{$MGS}{$Gene2COG_OG->{$gene}}}, $gene;
+		}
+	}
 	#%SIgenes_OG=%{$hr1}; my %Gene2COG_OG=%{$hr2}; 
 	$hr1 = readFasta($refFAA,1,"\\s",$Gene2COG_OG); %FAAref = %{$hr1};
 	$hr1 = readFasta($refFNA,1,"\\s",$Gene2COG_OG); %FNAref = %{$hr1};
@@ -683,6 +700,46 @@ sub combineMGSgenesDir{
 
 
 	
+sub locusParts {
+	my ($locus, $default_mgs) = @_;
+	my @parts = split /\|/, ($locus // ''), -1;
+	return @parts[0,1,2] if @parts >= 3;
+	my $cog = $parts[0] // '';
+	if (defined($default_mgs) && exists($COGprios->{$default_mgs})) {
+		for my $candidate (@{$COGprios->{$default_mgs}}) {
+			my @candidate_parts = split /\|/, $candidate, -1;
+			return @candidate_parts[0,1,2] if @candidate_parts >= 3 && $candidate_parts[1] eq $cog;
+		}
+	}
+	return ($default_mgs // '', $cog, '');
+}
+
+sub outgroupGeneForLocus {
+	my ($outgroup, $locus, $default_mgs) = @_;
+	my $cache_key = join("\t", $outgroup, $locus);
+	return $outgroupGeneCache{$cache_key} if exists $outgroupGeneCache{$cache_key};
+	my (undef, $cog, $primary_gene) = locusParts($locus, $default_mgs);
+	my @candidates = @{$OGgenesByCOG{$outgroup}{$cog} || []};
+	return $outgroupGeneCache{$cache_key} = '' unless @candidates;
+	my $target_sequence = $FAAref{$primary_gene} // $catalogProteins{$primary_gene};
+	unless (defined($target_sequence) && length($target_sequence)) {
+		return $outgroupGeneCache{$cache_key} = $candidates[0];
+	}
+	my ($best_gene, $best_score) = ('', -1);
+	for my $candidate (@candidates) {
+		next unless defined($FAAref{$candidate}) && length($FAAref{$candidate});
+		my $length_ratio = length($target_sequence) < length($FAAref{$candidate})
+			? length($target_sequence) / length($FAAref{$candidate})
+			: length($FAAref{$candidate}) / length($target_sequence);
+		next if $length_ratio < 0.5;
+		my $score = protein_kmer_similarity($target_sequence, $FAAref{$candidate});
+		if ($score > $best_score || ($score == $best_score && ($best_gene eq '' || $candidate cmp $best_gene) < 0)) {
+			($best_gene, $best_score) = ($candidate, $score);
+		}
+	}
+	return $outgroupGeneCache{$cache_key} = $best_gene;
+}
+
 sub addOutgroup2MGS{
 	my ($MGS,$OG,$tmpD) = @_;
 	my $outD2 = $SIdirs{$MGS};
@@ -747,8 +804,9 @@ sub addOutgroup2MGS{
 			foreach my $tags (@spl){
 				#my @spl2 = split (/\\$SaSe/,$tags);
 				#$SIcatLoc {$spl2[1]}{$spl2[0]}  = $tags;print "$spl2[1] : $spl2[0]  = $tags\n";
-				if ($tags =~ m/^(.*)\|(.*)$/){	
-					$SIcatLoc {$2}{$1}  = $tags;
+				my ($sample, $locus) = split /\Q$SaSe\E/, $tags, 2;
+				if (defined($sample) && length($sample) && defined($locus) && length($locus)){
+					$SIcatLoc {$locus}{$sample}  = $tags;
 				} else {
 					$malformedCatEntries++;
 				}
@@ -809,11 +867,11 @@ sub addOutgroup2MGS{
 			}
 			#$cntShrCogs=0;
 			#if (exists($SIgenes_OG{$OG})){
-			my $ogGenes = $SIgenes_OG{$OG};
 			foreach my $cog (@curCogs){
-				next unless (exists($ogGenes->{$cog}));
-				next unless (exists($FNAref{$ogGenes->{$cog}}));
-				next if ($cog =~ m/uniq\d+/);
+				my (undef, $annotation) = locusParts($cog, $MGS);
+				next if $annotation =~ m/^uniq\d+$/;
+				my $outgroup_gene = outgroupGeneForLocus($OG, $cog, $MGS);
+				next unless length($outgroup_gene) && exists($FNAref{$outgroup_gene});
 				$cntShrCogs ++;
 			}
 			last if $cntShrCogs >= 10;
@@ -839,11 +897,12 @@ sub addOutgroup2MGS{
 	my $existingFNA = fileGZe($FNAtf) ? readFasta($FNAtf,1,"\\s") : {};
 	my $existingFAA = fileGZe($FAAtf) ? readFasta($FAAtf,1,"\\s") : {};
 	foreach my $cog (@curCogs){
-		if ($OG ne "" && exists($SIgenes_OG{$OG}{$cog})){#deal with outgroup..
-			my $geneKey = $SIgenes_OG{$OG}{$cog};
+		if ($OG ne ""){
+			my (undef, $annotation) = locusParts($cog, $MGS);
+			my $geneKey = outgroupGeneForLocus($OG, $cog, $MGS);
 
-			next unless (exists($FNAref{$geneKey}) && exists($FAAref{$geneKey}));
-			next if ($cog =~ m/^uniq\d+/);
+			next unless length($geneKey) && exists($FNAref{$geneKey}) && exists($FAAref{$geneKey});
+			next if ($annotation =~ m/^uniq\d+$/);
 			my $ng = "$OG$SaSe$cog";
 			push(@tmpFNAog, ">$ng\n$FNAref{$geneKey}\n") unless exists $existingFNA->{$ng};
 			push(@tmpFAAog , ">$ng\n$FAAref{$geneKey}\n") unless exists $existingFAA->{$ng};
@@ -939,125 +998,76 @@ sub writeTooFewMarker{
 sub prepGene2MGS{
 	print "Preparing base strain alignments, per MGS\nThis might take a good while..\n";
 	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,$Gene2COG);
-	$hr1 = {}; #my %cl2gene = %{$hr2}; 
-	#stores alt names (wihtout M4__ at end)
-	#read binning based on SpecI's 
+	$hr1 = {};
 
-	#my @allGenes;
-	my $goodGene =0; my $badGene =0; my $geneCntd=0;
-	my %multiGnInMGS; #stores genes kicked out in MGS due to multi copy filtering done in this routine
-	my %singleGnInMGS;
-	my %multiGeneMGSsmpl;
-	my %MGSgeneCnt;
-	my $NgenesTotal = scalar(keys %{$Gene2COG});
-	my $NMGSTotal = scalar(keys %{$COGprios});
-	foreach my $MGS(keys %{$COGprios}){
-		$multiGnInMGS{$MGS} =0;$singleGnInMGS{$MGS} =0;
+	my $protein_file = "$GCd/compl.incompl.$clusterID.prot.faa";
+	if (fileGZe($protein_file)) {
+		my $protein_hr = readFasta($protein_file,1,"\\s",$Gene2COG);
+		%catalogProteins = %{$protein_hr};
+	} else {
+		warn "Catalogue protein file $protein_file is unavailable; keeping same-COG catalogue clusters separate\n";
 	}
-	#1: in this process we can also check for multi genes (genes represent by >1 gene in an assembly)
-	foreach my $gene (keys %{$Gene2COG}){
-		my $geneStr = $cl2gene->{$gene}; 
-		if (!defined($geneStr)){print STDERR "Could not find $gene in cl2gene object! "; next;}
-		$geneStr =~ s/>//g;
-		my %tmpGen; 
-		#my @genegenes = split /,/,$geneStr;die "$gene - @genegenes\n$geneStr\n";#2828988 - SMPL6M31__C1607771_L=26964=_19 SMPL2M32__C332244_L=10947=_18
-		#finding the sample might be slow in the start.. but will pay off long term
-		foreach my $sg (split /,/,$geneStr){
-			my @spls = split /__/,$sg;#die "{$gene}{$spls[0]}\n";
-			push(@{$tmpGen{$spls[0]}}, $sg); #gene in several samples..
+
+	my @records;
+	for my $MGS (keys %{$COGprios}) {
+		my $rank = 0;
+		for my $seed_locus (@{$COGprios->{$MGS}}) {
+			my $gene = $SIgenes->{$MGS}{$seed_locus};
+			next unless defined $gene;
+			push @records, {
+				mgs => $MGS, cog => $Gene2COG->{$gene}, gene => $gene, rank => $rank++,
+			};
 		}
-		my $MGSn = $Gene2MGS->{$gene};
-		$MGSgeneCnt{$MGSn}++;
-		foreach my $sm(keys %tmpGen){ #go over samples found..
-			if (scalar(@{$tmpGen{$sm}}) > 1){
-				$multiGeneMGSsmpl{$MGSn}{$sm}++;
-				#print "@{$tmpGen{$sm}}\n";
+	}
+	my $locus_model = build_locus_groups(\@records, $cl2gene, \%catalogProteins);
+	%LocusByID = %{$locus_model->{locus_by_id}};
+	%Gene2Locus = %{$locus_model->{gene_to_locus}};
+	%MemberContext = %{$locus_model->{member_context}};
+	%LocusContext = %{$locus_model->{locus_context}};
+
+	my ($new_si_genes, $new_priorities) = ({}, {});
+	for my $group (@{$locus_model->{groups}}) {
+		$new_si_genes->{$group->{mgs}}{$group->{locus_id}} = $group->{primary_gene};
+		push @{$new_priorities->{$group->{mgs}}}, $group->{locus_id};
+	}
+	$SIgenes = $new_si_genes;
+	$COGprios = $new_priorities;
+
+	my ($gene_sample_combinations, $ambiguous_seed_samples, $missing_clusters) = (0, 0, 0);
+	for my $group (@{$locus_model->{groups}}) {
+		my %per_sample;
+		for my $seed (@{$group->{genes}}) {
+			my $gene_string = $cl2gene->{$seed};
+			unless (defined $gene_string) {
+				warn "Could not find selected catalogue gene $seed in the cluster index\n";
+				$missing_clusters++;
+				next;
+			}
+			for my $member (split /,/, $gene_string) {
+				$member =~ s/^>//;
+				next unless length $member;
+				my ($sample) = split /__/, $member, 2;
+				unless (defined($sample) && length($sample)) {
+					warn "Ignoring malformed catalogue member '$member' for seed $seed\n";
+					next;
+				}
+				$per_sample{$sample}{$member} = $seed;
 			}
 		}
-	}
-	
-	
-	#2: catalogue if an MGS should not be used in a certain samples..
-	my $MGSwithConspSmpl=0; my $MGSwithoutConspSmpl=0; 
-	my $totalConsSmpls=0; my $totalNONConsSmpls=0;
-	foreach my $MGS(keys %{$COGprios}){
-		my $totGenes = $MGSgeneCnt{$MGS} ;
-		#print "$MGS - $totGenes\n";
-		if (!exists($MGSgeneCnt{$MGS}) || $MGSgeneCnt{$MGS} == 0 || !exists($multiGeneMGSsmpl{$MGS})){$MGSwithoutConspSmpl++;next;}
-		my $locConspec =0; my $locNonCons=0;
-		foreach my $sm (keys %{$multiGeneMGSsmpl{$MGS}}){
-			my $lfrac = ($multiGeneMGSsmpl{$MGS}{$sm} / $totGenes);
-			if ($lfrac > $multiGeneSmplMax){
-				$locConspec++;
-				$MGSsmplConsp{$MGS}{$sm}=1;
-				
-				#print "MGSsmplConsp{$MGS}{$sm};\n";#MGSsmplConsp{MGS.66}{IL140M24};
-			} else {$locNonCons++;}
-		}
-		if ($locConspec>0){$MGSwithConspSmpl++ ;
-		} else {$MGSwithoutConspSmpl++;
-		}
-		$totalNONConsSmpls += $locNonCons ;$totalConsSmpls+=$locConspec;
-	}
-	print $MGSwithConspSmpl ."/" . ($MGSwithConspSmpl + $MGSwithoutConspSmpl) . " MGS with >1 multi-copy gene sample. " . $totalConsSmpls . "/" . ($totalConsSmpls+$totalNONConsSmpls) . " >$multiGeneSmplMax multi-copy gene threshold across all-sample-MGS combinations.\nTotal MGS: ${NMGSTotal}, total genes: $NgenesTotal\n";
-
-		
-	#3: check if an MGS is constantly represented by multi copies, taking into account that difficult samples were removed in (2)
-	foreach my $gene (keys %{$Gene2COG}){
-		my $geneStr = $cl2gene->{$gene}; 
-		if (!defined($geneStr)){print STDERR "Could not find $gene in cl2gene object! "; next;}
-		$geneStr =~ s/>//g;
-		my %tmpGen; 
-		foreach my $sg (split /,/,$geneStr){
-			my @spls = split /__/,$sg;push(@{$tmpGen{$spls[0]}}, $sg); 
-		}
-		my $MGS = $Gene2MGS->{$gene};
-		my $multiGeneCnt =0;
-		foreach my $sm(keys %tmpGen){ #go over samples found..
-			if (scalar(@{$tmpGen{$sm}}) > 1 && !exists($MGSsmplConsp{$MGS}{$sm}) ){
-				$multiGeneCnt++ ;
-			}
-		}
-		
-
-		#fraction of samples where gene was double. Genes were this is obviously too high need to be excluded (multi copy)
-		#my $frac = $multiGeneCnt/$totSmpl;
-		my $frac = $multiGeneCnt/keys(%tmpGen); #print "$frac = $multiGeneCnt/$totSmpl \n"; #fraction of samples with >1 gene   #@genegenes;
-		if ($frac > $multiCpyThr){
-			$badGene++;$multiGnInMGS{$MGS}++;
-			next;
-		}
-		$goodGene ++;$singleGnInMGS{$MGS}++; #in principle good gene (single copy mostly).. but could still be multicopy in single samples..
-		foreach my $sm(keys %tmpGen){
-			#next if (scalar(@{$tmpGen{$sm}}) > 1); #don't copy this gene in this sample .. no decission which is the right one.. -> too harsh?? check for each sample within assembly group instead..
-			#here gene is saved for later usage..
-			@{$cl2gene2{$sm}{$gene}} = @{$tmpGen{$sm}};
-			$geneCntd++;
-			$smplsPerMGS{$MGS}{$sm}++;
+		for my $sample (keys %per_sample) {
+			my @members = sort keys %{$per_sample{$sample}};
+			$cl2gene2{$sample}{$group->{locus_id}} = \@members;
+			$candidateSeed{$sample}{$group->{locus_id}}{$_} = $per_sample{$sample}{$_} for @members;
+			$smplsPerMGS{$group->{mgs}}{$sample}++;
+			$gene_sample_combinations++;
+			$ambiguous_seed_samples++ if @members > 1;
 		}
 	}
-	$cl2gene = {}; #lessen mem
-	print "Found $goodGene / ".($badGene + $goodGene)." genes useable (<$multiCpyThr, \"single copy\"). $geneCntd gene-sample combis added.\n";
-	
-	#find out if any MGS had a too high rate of multicopy genes
-	my %multiCpyRateMGS;
-	foreach my $MGS(keys %{$COGprios}){
-		my $totGenes = $multiGnInMGS{$MGS} + $singleGnInMGS{$MGS};
-		if ($totGenes>0){
-			$multiCpyRateMGS{$MGS} = $multiGnInMGS{$MGS} / ($totGenes );
-		} else {
-			$multiCpyRateMGS{$MGS} = 0;
-		}
-	}
-	my @MGSsrt = sort {$multiCpyRateMGS{$b} <=> $multiCpyRateMGS{$a} } keys %multiCpyRateMGS;
-	print "Too high multicopy genes in MGS (>$multCpyMGSthr): "; my $lcnt=0; 
-	foreach my $MGS (@MGSsrt){
-		next if ($multiCpyRateMGS{$MGS} < $multCpyMGSthr ); 
-		print "$MGS $multiCpyRateMGS{$MGS}; "; $lcnt++; 
-		#push(@{$ConspecificMGS{$MGS}},"multicopy:$multiCpyRateMGS{$MGS}"); -> way too strict!
-	} 
-	print "(none)" if (!@MGSsrt);
-	print "\n";
+	$cl2gene = {};
+	print "Prepared ".scalar(@{$locus_model->{groups}})." loci from ".scalar(@records)
+		." ranked catalogue clusters; merged $locus_model->{merged_seeds} compatible same-COG seeds. "
+		."$gene_sample_combinations locus-sample combinations, $ambiguous_seed_samples with multiple candidates"
+		.($missing_clusters ? ", $missing_clusters missing cluster-index entries" : "").".\n";
 }
 
 sub prepRun{
@@ -1235,7 +1245,8 @@ sub preComputeConsSNP{
 	my $inputChkd = 0;
 	my $inputChk = "$outD/stones/0.fileChk.sto";
 	$inputChkd =1 if (-e "$inputChk");
-	my $fileAbsent = 0; 
+	my $fileAbsent = 0;
+	my @missing_samples;
 	my $submPreComp = 1;#DEBUG
 	$submPreComp = 0 if ($subJob);
 
@@ -1250,12 +1261,18 @@ sub preComputeConsSNP{
 		my $tarF2 = $cD."/$lSNPdir/$lConsFAA";
 		my $tarVCF = $cD."/$lSNPdir/$lConsVCF";
 		if ((!fileGZe($tarVCF) && !fileGZe($tarF)) && !-e "$cD/SMPL.empty" ) {
-			print "Can't find SNP files: $cD\n" ;
+			warn "Can't find SNP inputs for $smpl in $cD; sample will be skipped\n";
 			$fileAbsent = 1;
-			#die "$tarVCF\n";
+			$unavailableSamples{$smpl} = "missing SNP input";
+			push @missing_samples, $smpl;
+			next;
 		}
 		if ($forceVCF2FNA && ! fileGZe($tarVCF)){
-			die "Option -forceSNPcalls 1 used, but missing vcf $tarVCF\n";
+			warn "Option -forceSNPcalls 1 used, but VCF is missing for $smpl; sample will be skipped\n";
+			$fileAbsent = 1;
+			$unavailableSamples{$smpl} = "missing forced VCF";
+			push @missing_samples, $smpl;
+			next;
 		}
 		
 		if ($preCompCons && ( $forceVCF2FNA  || (! fileGZe( $tarF ) && fileGZe($tarVCF)))){
@@ -1301,9 +1318,12 @@ sub preComputeConsSNP{
 		delete $preCompSNPs{$smpl};
 	}
 	if ($fileAbsent) {
-		die "Not all required SNP inputs are present; no input checkpoint was created\n";
+		warn scalar(@missing_samples)." samples lack required SNP inputs and will be skipped: "
+			.join(",", @missing_samples[0 .. ($#missing_samples < 9 ? $#missing_samples : 9)])
+			.(@missing_samples > 10 ? ",..." : "")."\n";
+		unlink $inputChk or warn "Cannot remove stale input checkpoint $inputChk: $!\n" if -e $inputChk;
 	}
-	unless (-e "$inputChk"){
+	unless ($fileAbsent || -e "$inputChk"){
 		print "All samples have SNP calls\n";
 		open my $checkpoint, '>', $inputChk or die "Cannot create $inputChk: $!\n";
 		close $checkpoint or die "Cannot close $inputChk: $!\n";
@@ -1416,6 +1436,27 @@ sub evalFileStatus{
 	#		$dirsNOTPrepped ++;
 	#	} els
 		
+		if (fileGZe("$SIdirs{$MGS}/$CATstdof")) {
+			my ($category_fh) = gzipopen("$SIdirs{$MGS}/$CATstdof", "existing locus category file", 0);
+			my $first_entry = '';
+			if ($category_fh) {
+				while (my $line = <$category_fh>) {
+					chomp $line;
+					next unless length $line;
+					($first_entry) = split /\t/, $line, 2;
+					last;
+				}
+				close $category_fh;
+			}
+			my @identifier_parts = split /\Q$SaSe\E/, $first_entry, -1;
+			if (@identifier_parts && @identifier_parts < 4) {
+				warn "$MGS uses the legacy sample|COG identifier format; scheduling locus-aware input regeneration\n";
+				$legacyLocusOutputs++;
+				$dirsNOTPrepped++;
+				$CatFileMiss++;
+				next;
+			}
+		}
 		if (!fileGZe("$SIdirs{$MGS}/$CATstdof")){
 			$CatFileMiss ++ ; 
 			my @multiM=glob("$scratchD/outs/$MGS/all.cat.tmp*");
@@ -1556,9 +1597,14 @@ sub reportingsMGS{
 			$smplPmgs{$MGS}++ if ($smplsPerMGS{$MGS}{$sm} > 10);
 		}
 	}
-	my $qt50=quantileArray(0.5,values(%smplPmgs));my $qt90=quantileArray(0.90,values(%smplPmgs));
 	my @smplNs = values(%smplPmgs);@smplNs = sort { $b <=> $a}  @smplNs;
-	print "Samples/MGS: QTL 50,90: $qt50 $qt90 . Top 5: $smplNs[0] $smplNs[1] $smplNs[2] $smplNs[3] $smplNs[4]\n";
+	if (@smplNs) {
+		my $qt50=quantileArray(0.5,@smplNs);my $qt90=quantileArray(0.90,@smplNs);
+		my @top = @smplNs[0 .. ($#smplNs < 4 ? $#smplNs : 4)];
+		print "Samples/MGS: QTL 50,90: $qt50 $qt90 . Top 5: ".join(" ",@top)."\n";
+	} else {
+		print "Samples/MGS: none have more than 10 candidate loci\n";
+	}
 	#die;
 	
 }
@@ -1600,8 +1646,8 @@ sub extractFNAFAA2genes{
 		foreach my $gn (keys %{$cl2gene2{$sm}}){
 			#$totGnes{$gn} = 1;
 			$gnCnt++;
-			if (exists($Gene2MGS->{$gn})){
-				$perMGScnts{$Gene2MGS->{$gn}}{$gn}=1;
+			if (exists($LocusByID{$gn})){
+				$perMGScnts{$LocusByID{$gn}{mgs}}{$gn}=1;
 				#print "1";
 				$MGSgeneCnt++;
 			}
@@ -1615,7 +1661,9 @@ sub extractFNAFAA2genes{
 		if ($perMGSgenes < 10){print "WARNING: only $perMGSgenes genes/COGs for MGS $MGS - MGS genes might be multi copy?\n";}
 	}
 	#DBUG
-	print "Genes per MGS (prefiltering, N= ". $gnCnt  ." genes, " .scalar(keys(%perMGScnts)) . " MGS, avg " . int(0.5+ $gnCnt /scalar(keys(%perMGScnts))) . " genes/MGS):\n";	
+	my $represented_mgs = scalar(keys(%perMGScnts));
+	my $average_loci = $represented_mgs ? int(0.5 + $gnCnt / $represented_mgs) : 0;
+	print "Loci per MGS (prefiltering, N= ". $gnCnt  ." loci, $represented_mgs MGS, avg $average_loci loci/MGS):\n";
 	histoMGS(\@histoMGScnts,"Theorectical best Bin sizes: ");
 	#some stats on genes/MGS
 	my @srtdSmpls = sort (keys %cl2gene2);
@@ -1753,7 +1801,7 @@ sub readGenesSample_Singl{
 		#put genes into hash to avoid duplicates..
 		foreach(@{$locCl2G2{$gn}}){$subG{$_} = 1;}
 		
-		my $MGS = $Gene2MGS->{$gn};
+		my $MGS = exists($LocusByID{$gn}) ? $LocusByID{$gn}{mgs} : undef;
 		#stats collection on MGS usage
 		if (defined $MGS){#exists($Gene2MGS->{$gn})){
 			$locMGScnt{$MGS}++;
@@ -1777,13 +1825,18 @@ sub readGenesSample_Singl{
 		#print "map s: " .scalar(keys%map)."\n";
 
 	unless (exists ($map{$sd2}) ) {
-		print STDERR "Can't find map entry for $sd\n"; #die;
+		warn "Can't find map entry for $sd; assembly group will be skipped\n";
 		return;
-		die;
 	}
 	my @subGKs = keys %subG;
-	die "No genes found for sample $sm\n" unless @subGKs;
-	die "regex failed: $subGKs[0]\n" unless ($subGKs[0] =~ m/^(.*)__/);
+	unless (@subGKs) {
+		warn "No candidate genes found for sample $sm; sample will be skipped\n";
+		return;
+	}
+	unless ($subGKs[0] =~ m/^(.*)__/) {
+		warn "Cannot parse catalogue member '$subGKs[0]' for sample $sm; sample will be skipped\n";
+		return;
+	}
 	#find out if other samples are in the same assmblGrp..
 	my @subSds = ($sd2);
 	my $cAssGrp = $map{$sd2}{AssGroup};
@@ -1798,6 +1851,14 @@ sub readGenesSample_Singl{
 	#print "YY @subSds : $sd2 $sd\n";#die;
 	#go into each sample ($sd3) from assembly group ($sd), that an assembly might be associated to (across multiple assemblies in assmblGrp)
 	foreach my $sd3 (@subSds){
+		if (exists $unavailableSamples{$sd3}) {
+			warn "Skipping $sd3: $unavailableSamples{$sd3}\n";
+			next;
+		}
+		unless (exists($map{$sd3}) && defined($map{$sd3}{wrdir}) && length($map{$sd3}{wrdir})) {
+			warn "Skipping $sd3: missing map entry or working directory\n";
+			next;
+		}
 		#print "Time A: " . timeNice(time - $sttime)  . "\n";
 		my $locSpace = "$locTmpDir/$sd3.cons/"; 
 		#my $locSpace = "$preConDir/$sd3.cons/"; 
@@ -1813,8 +1874,11 @@ sub readGenesSample_Singl{
 		my $rename = 0;
 		$rename = 1 if ($sd2 ne $sd3);
 		#print "r:$rename $sd3  (from $sd2) ";
-		my $metaGD = getAssemblPath($cD);
-		if ($metaGD eq ""){die "assembly not available: $cD $sd3";}
+		my $metaGD = getAssemblPath($cD,"",0);
+		if ($metaGD eq ""){
+			warn "Assembly not available for $sd3 in $cD; sample will be skipped\n";
+			next;
+		}
 		#get NT's
 		#my $tar = $metaGD."genePred/genes.shrtHD.fna";
 		
@@ -1891,137 +1955,98 @@ sub readGenesSample_Singl{
 		my $COGpriosZero=0;
 		my $MGScnt = scalar((keys %locMGScnt));
 		foreach my $MGS (keys %locMGScnt) {
-		#foreach my $MGS (@specis){ #("MGS.128"){#
-			#print "$MGS ";
-			my @COGprios1 = @{$COGprios->{$MGS}};
-			#die "Can't find $MGS in COGprios!\n" unless (defined(@COGprios1));#exists($COGprios->{$MGS}));
+			my @COGprios1 = exists($COGprios->{$MGS}) ? @{$COGprios->{$MGS}} : ();
 			if (scalar(@COGprios1) == 0){
 				$COGpriosZero++;
 				next;
 			}
-			#next if (exists($ConspecificMGS{$MGS}));
-			#print "MGSsmplConsp{$MGS}{$sd3}\n";
-			#if (exists($MGSsmplConsp{$MGS}{$sd}) ||  exists($MGSsmplConsp{$MGS}{$sd3} )){next;}#print " DIIIIIIIIIIIIIIIID\n\n"; next;}
-			
-			my $locConSpecGen=0; my $accAbu=0;  my $LmissG=0; my $doubleCntL=0; 
-			 my $LmuissAbu=0;
-			#get actual gene & gene2assmblname
+
+			my $locConSpecGen=0; my $accAbu=0; my $LmissG=0; my $doubleCntL=0;
+			my $LmuissAbu=0; my $evaluableLoci=0;
 			my @genes2 = (); #stores semi-final list of genes
 			my @abunGs = (); #abundance vector of genes
-			my %curcgs ;
+			my %curLocus;
 			my %linkStr; #temp storage for links to gene cat etc of catalogues genes
-			#my $curGcnt=0;
-			my $MGSgcnt = scalar(@COGprios1);
-			
-			# 1: decide which gene to use in case of multiple COGs -> this is no longer needed, each COG should be represented by the first listed gene per MGS (decided in prior routines)
-			
-			foreach my $cog (@COGprios1){ 
-				next if ($cog eq "");
-				my $tar = "";
-				$tar = $SIgenes->{$MGS}{$cog};
-				
-				next unless (exists($locCl2G2{$tar}));
-				my @genes ; 
-				@genes = @{$locCl2G2{$tar}};
-				#my $bestCOGcnt=0; next unless (scalar(@genes) > $bestCOGcnt);$bestCOGcnt = scalar(@genes);
-				
-				my $curG = ""; my $bestAB=0;
-				#if (1 ){#@genes > 1){
-				#$doubleGenes++ if (@genes > 1); #95%gene is represented by >1 gene in sample.. potentially conspecific
-					#if several genes: select most abundant from $abunHR->{}
-				my $gX ; my $nonZeroCnt=0;
-				foreach $gX (  @genes ){
-					next if ($gX eq "");
-					if (!exists($FAA{$gX}) || !exists($FNA->{$gX})){
-						$LmissG++; 
+			foreach my $locus (@COGprios1){
+				next unless length($locus) && exists($locCl2G2{$locus});
+				my @genes = @{$locCl2G2{$locus}};
+				my @candidates;
+				my $had_evaluable = 0;
+				my $csp_rejected = 0;
+				for my $gX (@genes) {
+					next unless length $gX;
+					if (!exists($FAA{$gX}) || !exists($FNA->{$gX})) {
+						$LmissG++;
 						next;
 					}
-					if ($noFilter){
-						$curG = $gX ;
-						$bestAB = 10;
-						last; #use first gene in list per COG
-					}
-					#my $gX2 = $gX;if (exists($gene2genes{$gX}) && exists($FAA{$gene2genes{$gX}}) ){$gX2 = $gene2genes{$gX} ;} 
-					#my $abundLoc = $abunHR->{$gX};
-					my $abundLoc = $depths{$gX};
-					if (defined($abundLoc) && $abundLoc >= $minDepthGene){
-						$nonZeroCnt++ ;
-						if ($abundLoc > $bestAB) {
-							$curG = $gX ;
-							$bestAB = $abundLoc;
-						}
-					} else {
+					my $depth = $depths{$gX};
+					if (!$noFilter && (!defined($depth) || $depth < $minDepthGene)) {
 						$LmuissAbu++;
+						next;
 					}
-				}
-				if (!$noFilter){
-					#first layer filtering: gene represented by too many multi occurring genes?
-					#second layer: conspecific SNPs detected??
-					if ($curG ne "" ){
-						if (exists($conspSc{$curG})){
-							if ($conspSc{$curG} > $conspecificSpThr){#too many indicators that gene is from conspecific strain
-								$locConSpecGen ++ ;  $curG = "";#deactivate COG repri altogether..
-							}
-						} else {print "Can't find CSP for  \"$curG\" \n";}
+					$depth = 1 unless defined($depth) && $depth > 0;
+					$had_evaluable = 1;
+					if (!$noFilter && defined($conspSc{$gX}) && $conspSc{$gX} > $conspecificSpThr) {
+						$csp_rejected++;
+						next;
 					}
-					if ($nonZeroCnt > $maxOrthoNum ){ #either 0 (gene not present) or >1 (too many copies) is not wanted
-						$curG = ""; #deactivate COG repri altogether..
-						$doubleCntL++ ;
-					}  
+					push @candidates, {
+						id => $gX, protein => $FAA{$gX}, depth => $depth,
+						seed => $candidateSeed{$sm}{$locus}{$gX},
+						context => $MemberContext{$gX} || {},
+					};
 				}
-				next if ($curG eq "");
-				
-				push (@genes2 , $curG); 
-				$curcgs{$curG} = $cog;
-				#$curGcnt++;
-				push(@abunGs, $bestAB);
-				$accAbu += $bestAB ;
-				#print " $curG";
-				
-				#write link file, but only needs to be done once.. this avoids doing this later when the cat file is written
-				
-				#header used later: $ng = "$sd3$SaSe$curcgs{$gX}";
-				my $laterHd = "$sd3$SaSe$cog";
-				 $linkStr{$curG} ="$laterHd\t$cog\t$tar\t".scalar @genes . "\t".join(",",@genes)."\n" ;
-				
+				$evaluableLoci++ if $had_evaluable;
+				if ($had_evaluable && !@candidates && $csp_rejected) {
+					$locConSpecGen++;
+					next;
+				}
+				next unless @candidates;
 
+				my $group = $LocusByID{$locus};
+				my %seed_proteins = map {
+					defined($catalogProteins{$_}) ? ($_ => $catalogProteins{$_}) : ()
+				} @{$group->{genes}};
+				my $selection = choose_locus_candidate(\@candidates, \%seed_proteins, $LocusContext{$locus});
+				if ($selection->{status} ne 'selected') {
+					$doubleCntL++;
+					next;
+				}
+				my $curG = $selection->{candidate}{id};
+				my $bestAB = $selection->{candidate}{depth};
+				push @genes2, $curG;
+				$curLocus{$curG} = $locus;
+				push @abunGs, $bestAB;
+				$accAbu += $bestAB;
+				my $laterHd = "$sd3$SaSe$locus";
+				$linkStr{$curG} = "$laterHd\t$locus\t$group->{primary_gene}\t".scalar(@genes)
+					."\t".join(",",@genes)."\t$selection->{reason}\n";
 			}
-		
 
-			#conditions where the MGS is NOT registered for current sample:
-			#1) no genes..
-			next if (scalar(@genes2) == 0 );
-			#2) double gene counts too high  #3) too many conspecific genes
 			$doubleGenes += $doubleCntL;
 			$conspGen+=$locConSpecGen;
 			$missGene += $LmissG;
 			$missAbundance += $LmuissAbu;
-			if (!$noFilter && (($doubleCntL/$MGSgcnt) > $multiGeneSmplMax 
-					|| ($locConSpecGen/$MGSgcnt) >= $conspGeneSmplMax )
-					# || (($locConSpecGen+$doubleCntL)/$MGSgcnt) >= (($conspGeneSmplMax +$multiGeneSmplMax)/2)
-			){
-				#print "$doubleCntL/$MGSgcnt > $multiGeneSmplMax\n";
+			my $double_failure = !$noFilter && $evaluableLoci > 0 && $doubleCntL >= $minBadLociForSampleSkip
+				&& ($doubleCntL / $evaluableLoci) > $multiGeneSmplMax;
+			my $csp_failure = !$noFilter && $evaluableLoci > 0 && $locConSpecGen >= $minBadLociForSampleSkip
+				&& ($locConSpecGen / $evaluableLoci) > $conspGeneSmplMax;
+			if ($double_failure || $csp_failure){
 				push(@{$ConspecificMGS{$MGS}}, "$sd3" ); 
-				if (($doubleCntL/$MGSgcnt) > $multiGeneSmplMax){$doubleGsFail++;}
-				elsif (($locConSpecGen/$MGSgcnt) >= $conspGeneSmplMax){$conSpecFail++;}
-				#elsif ((($locConSpecGen+$doubleCntL)/$MGSgcnt) >= (($conspGeneSmplMax +$multiGeneSmplMax)/2)){$doubleGsFail++;$conSpecFail++;}
-				#print "con filter! ";
+				$doubleGsFail++ if $double_failure;
+				$conSpecFail++ if $csp_failure;
 				next;
 			}
-			
+			next unless @genes2;
 
-			my ($quan10,$quan90) = quantileArrayR(\@abunGs,0.1,0.9);
-			#my $quan90 = quantileArray(0.9,@abunGs);
+			my $depth_mask = $noFilter ? [(1) x scalar(@abunGs)] : robust_depth_mask(\@abunGs);
 			my @genes3=();
-			#filter genes based on their abundance.. only want to include approx same abundant genes
 			for (my $i=0;$i<scalar(@abunGs);$i++){
-				if ($abunGs[$i] <= (0.9*$quan10) || $abunGs[$i] >= (1.1*$quan90)){
+				unless ($depth_mask->[$i]) {
 					$abundFail++; next;
 				}
 				push (@genes3, $genes2[$i]);
 			}
-			
-			#print "SIZE: BF:" . scalar(@genes2) . " AF:" . scalar(@genes3) . ":: $quan10, $quan90, $accAbu\n";
 			
 			if (scalar(@genes3)< $MGStoolowGsThr){
 				$MGStoolowGskip++;next;
@@ -2038,7 +2063,7 @@ sub readGenesSample_Singl{
 				my $strCpy = ""; $strCpy = $FAA{$gX};# if (exists($locFAA{$gX}));
 				my $AAlen = 0; $AAlen = int(length($strCpy)) if (defined($strCpy));
 				if ($AAlen == 0){$SNPresFail++; next;}
-				my $num1 = $strCpy =~ tr/[\-Xx]//;
+				my $num1 = $strCpy =~ tr/\-Xx//;
 				if ($num1 >= ($AAlen-1)){ $SNPresFail++; next;} #all X, exclude..
 				if (!$noFilter){
 				if ($locCnt >= $maxNGenes){ next;}
@@ -2046,12 +2071,12 @@ sub readGenesSample_Singl{
 				
 				$locCnt++;
 				#write gene out
-				my $ng = "$sd3$SaSe$curcgs{$gX}"; #must contain 2 informations: 1)sampleID 2)COG 
+				my $ng = "$sd3$SaSe$curLocus{$gX}"; #sample|MGS|COG|primary catalogue gene
 				#die;
 				push(@OFstr , ">$ng\n$FNA->{$gX}\n"); #FNA
 				push(@OAstr ,">$ng\n$strCpy\n"); #FAA
 				#add to category for later..
-				push(@OCstr , "$MGS\t$curcgs{$gX}\t$sd3\t$ng\n");
+				push(@OCstr , "$MGS\t$curLocus{$gX}\t$sd3\t$ng\n");
 				#$SIcat{$MGS}{$cog}{$sd3} = $ng;
 				#$genesWrite{$MGS}++;
 				
