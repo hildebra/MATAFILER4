@@ -14,7 +14,7 @@ use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::TamocFunc qw ( getFileStr );
 use File::Path qw(make_path remove_tree);
 use File::Copy qw(copy);
-use File::Basename qw(basename);
+use File::Basename qw(basename dirname);
 
 sub sumSummaries;
 sub strainNetwork;
@@ -33,7 +33,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.27: 6.1.26: added Anthony's network scripts, more qsub processes
 #.28: 2.3.26: adapted for different phylo names
 #.29: validate inputs, honour dry-run mode, and repair outgroup/checkpoint handling
-my $version = 0.29;
+#.30: make tree selection, queue handling and R-analysis completion checks robust
+my $version = 0.30;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;
@@ -50,6 +51,7 @@ my $abMatrix = "";#$ARGV[2];
 #discrete and continous tests done on each MGS' strains.. based on column header in map file, comma separated
 #$DiscTests = $ARGV[5]; $ContTests = $ARGV[6]; 
 my $individualVar = "AssmblGrps";
+my $qsubSystem = "";
 
 GetOptions(
 	"GCd=s"          => \$GCd,
@@ -65,6 +67,7 @@ GetOptions(
 	"familyVar=s"      => \$familyVar, #column name in metadata containing family id
 	"groupStabilityVars=s"      => \$groupStabilityVars, #column names of categories used for calculation of resilience and persistence
 	"individualVar=s"      => \$individualVar, #column name specifying individual IDs, AssmblGrps by default
+	"qsubSystem=s"    => \$qsubSystem, #optional queue backend override; dry runs default to bash
 ) or die "Invalid strain_within_2.2.pl options\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-GCd, -map, -FMGdir and -MGSmatrix are required\n"
@@ -73,6 +76,7 @@ die "Gene-catalog and phylogeny directories must exist\n" unless -d $GCd && -d $
 die "Map or MGS abundance matrix is missing\n" unless -s $refMap && -s $abMatrix;
 die "Core requests must be positive\n" unless $nCore > 0 && $nCoreHeavy > 0;
 die "-submit and -reSubmit must be 0 or 1\n" unless $doSubmit =~ /^[01]$/ && $rewriteRanalysis =~ /^[01]$/;
+$FMGpD =~ s{/+$}{} unless $FMGpD eq "/";
 
 
 my $cpDir = "";#$GCd/MGS/R_analysis/";
@@ -83,7 +87,9 @@ my $defTreeFileBase = "IQtree_allsites";
 #die;
 die "MGS phylo dir doesn't exist!\n$FMGpD\n" unless (-d $FMGpD);
 
-my $QSBoptHR = emptyQsubOpt($doSubmit,"");
+my $queueMode = $qsubSystem;
+$queueMode = "bash" if !$doSubmit && $queueMode eq "";
+my $QSBoptHR = emptyQsubOpt($doSubmit,"",$queueMode);
 $QSBoptHR->{tmpSpace} = 0;
 my $bts = getProgPaths("buildTree_scr");
 my $SaSe = "|";
@@ -103,6 +109,9 @@ if ($rewriteRanalysis){ #faster to do once for all..
 	#print "Removing old strain2 analysis..\n";
 	for my $within (glob("$FMGpD/*/within")) { remove_tree($within) if -d $within; }
 	unlink $RsummaryTab or die "Cannot remove $RsummaryTab: $!\n" if -e $RsummaryTab;
+	for my $checkpoint ("$FMGpD/networks/networks.sto", "$FMGpD/GeneEnrich/treeWAS.sto") {
+		unlink $checkpoint or die "Cannot remove stale checkpoint $checkpoint: $!\n" if -e $checkpoint;
+	}
 }
 
 
@@ -136,8 +145,14 @@ $MGstats = "-1" unless (-e $MGstats);
 my $treeAbsent = 0;
 #my @k2d = sort keys %dirs;
 my @k2d = sort { $sizTrees{$b} <=> $sizTrees{$a} } keys(%sizTrees);
+if (!@k2d) {
+	print "No nonempty phylogenies found; skipping strain postprocessing.\n";
+	exit 0;
+}
 
-my $cmd = "ulimit -s 20000\n";my $destD =""; my $wrHead=0; 
+my $cmdPrelude = "ulimit -s 20000\n";
+my $cmd = $cmdPrelude;my $destD =""; my $wrHead=0;
+my %analysisAttempted; my $legacyCompleted = 0;
 my $strainStatsR = getProgPaths("treeSubGrpsR");
 
 foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
@@ -150,12 +165,12 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	#my $locTree = "$destD ../phylo/$defTreeFile"; #two args in one..
 	my $treePath = ""; my $x=0;
 	my $defTree="";
-	while (!-e $treePath && $x < @defTreeFiles){
+	while (!-s $treePath && $x < @defTreeFiles){
 		$treePath = "$dirs{$d}/$defTreeFiles[$x]";
 		$defTree = $defTreeFiles[$x];
 		$x++;
 	}
-	if (!-e $treePath){
+	if (!-s $treePath){
 		$treeAbsent++;
 		next;
 	}
@@ -163,12 +178,15 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		unlink $_ or die "Cannot remove $_: $!\n" for grep { -f $_ || -l $_ } glob("$destD/*");
 		remove_tree($_) for grep { -d $_ } glob("$destD/*");
 	}
-	#next; 
-	next if ( #did script already finish analysis? -> skip dir
-			#-e "$destBaseD/codeml/WithinStrainDiv.txt" && 
-			 -s "$destD/$d.Ranalysis.log"
-			&& -s "$destD/$d.analysis.txt"
-			);
+	# Accept legacy log+report completions so existing successful runs are not
+	# needlessly repeated. New jobs also write an explicit success stone below.
+	my $analysisLog = "$destD/$d.Ranalysis.log";
+	my $analysisReport = "$destD/$d.analysis.txt";
+	my $analysisStone = "$destD/$d.Ranalysis.sto";
+	if (-s $analysisReport && (-e $analysisStone || -s $analysisLog)) {
+		$legacyCompleted++ if !-e $analysisStone;
+		next;
+	}
 	if (-d $destD) {
 		unlink $_ or die "Cannot remove $_: $!\n" for grep { -f $_ || -l $_ } glob("$destD/*");
 		remove_tree($_) for grep { -d $_ } glob("$destD/*");
@@ -185,12 +203,15 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	#system "cp $dirs{$d}/$defTreeFile $destD/$d.nwk";
 	my $BinN = 1000;
 	if ($d =~ m/MB2bin(\d+)/){$BinN = $1;}
-	my $jobCores = 5;
+	my $jobCores = $nCore;
 	
-	$cmd .= "echo \"At tree $d\"\n";
+	$cmd .= "echo ".shellQuote("At tree $d")."\n";
 	$wrHead=1 if ( $cnt == 0);
 	my $OGstr = $OG ne "" ? "--outgroup ".shellQuote($OG)." " : "";
-	$cmd .= "$strainStatsR --path ".shellQuote($destD)." --tree ".shellQuote("../phylo/$defTree")." --taxN ".shellQuote($d)." $OGstr --map ".shellQuote($refMap)." --metagStats ".shellQuote($MGstats)." --abMat ".shellQuote($abMatrix)." --ncore $jobCores --siteMode 1 --MFDir ".shellQuote($MGSTKdir)." --wrColNms $wrHead --discPermTests ".shellQuote($DiscTests)." --contPermTests ".shellQuote($ContTests)." --familyCol ".shellQuote($familyVar)." --groupStabilityVars ".shellQuote($groupStabilityVars)." > ".shellQuote("$destD/$d.Ranalysis.log")."\n";
+	$cmd .= "$strainStatsR --path ".shellQuote($destD)." --tree ".shellQuote("../phylo/$defTree")." --taxN ".shellQuote($d)." $OGstr --map ".shellQuote($refMap)." --metagStats ".shellQuote($MGstats)." --abMat ".shellQuote($abMatrix)." --ncore $jobCores --siteMode 1 --MFDir ".shellQuote($MGSTKdir)." --wrColNms $wrHead --discPermTests ".shellQuote($DiscTests)." --contPermTests ".shellQuote($ContTests)." --familyCol ".shellQuote($familyVar)." --groupStabilityVars ".shellQuote($groupStabilityVars)." > ".shellQuote($analysisLog)."\n";
+	$cmd .= "test -s ".shellQuote($analysisReport)."\n";
+	$cmd .= "touch ".shellQuote($analysisStone)."\n";
+	$analysisAttempted{$d} = { report => $analysisReport, stone => $analysisStone };
 	$wrHead=0;
 	if (0){#rerun popgen stats??
 		my $RpogenS = getProgPaths("pogenStats");
@@ -205,20 +226,20 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	$curBatch++;
 	if ($curBatch > $batchSize){
 		
-		qsubSystemWaitMaxJobs($checkMaxNumJobs);
+		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
 
 		my ($dep,$qcmd) = qsubSystem($destD."Ranalysis.sh",$cmd,$jobCores,"20G","R$cnt","","",1,[],$QSBoptHR);
 		#die " $destD\n";
 		push(@jobs,$dep);
-		$curBatch = 0; $cmd="";
+		$curBatch = 0; $cmd=$cmdPrelude;
 		$submitted++;
 	}
 	#die;
 	#last if ($cnt > 5);
 }
 if ($curBatch > 0){
-	my ($dep,$qcmd) = qsubSystem($destD."Ranalysis.sh",$cmd,5,"10G","R$cnt","","",1,[],$QSBoptHR);
-	$curBatch = 0; $cmd="";
+	my ($dep,$qcmd) = qsubSystem($destD."Ranalysis.sh",$cmd,$nCore,"20G","R$cnt","","",1,[],$QSBoptHR);
+	$curBatch = 0; $cmd=$cmdPrelude;
 	push(@jobs,$dep);
 }
 
@@ -234,7 +255,15 @@ if (@jobs){ #wait for all submitted R scripts, then continue in script
 	print "\n\nwaiting for R analysis to finish before subclustering step\n";
 	qsubSystemJobAlive( \@jobs,$QSBoptHR );
 
-} 
+}
+
+print "Accepted $legacyCompleted legacy R-analysis completions without success stones.\n"
+	if $legacyCompleted;
+my @failedAnalysis = grep {
+	!-s $analysisAttempted{$_}{report} || !-e $analysisAttempted{$_}{stone}
+} sort keys %analysisAttempted;
+die "R analysis failed or produced incomplete output for: ".join(", ", @failedAnalysis)."\n"
+	if @failedAnalysis;
 
 print "$treeAbsent phylos absent\n";
 
@@ -506,7 +535,7 @@ sub treeWas{
 	my $treewasOutfile = "$treewasOut/treeWAS_results.csv";
 	my $summaryOutfile = "$treewasOut/treeWAS_results_functions.csv";
 	my $treeWasStone = "$FMGpD/GeneEnrich/treeWAS.sto";
-	my $MGSd = $FMGpD; $MGSd =~ s/\/[^\/]+[\/]+$/\//;
+	my $MGSd = dirname($FMGpD);
 	make_path($treewasOut);
 	$funCmd .= "mkdir -p ".shellQuote($treewasOut)."\n";
 	$funCmd .= "#1st command: run treewas job\n";

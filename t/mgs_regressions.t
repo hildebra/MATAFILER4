@@ -9,6 +9,7 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Binning qw(createBin2 filterMGS_CM MB2assigns readCMquals);
+use Mods::geneCat qw(createGene2MGS);
 
 sub write_file {
 	my ($path, $contents) = @_;
@@ -25,6 +26,17 @@ sub slurp {
 }
 
 my $tmp = tempdir(CLEANUP => 1);
+
+my $sorted_mgs = File::Spec->catfile($tmp, 'ranked.srt');
+write_file($sorted_mgs, "MGS1\t2,1\n");
+{
+	no warnings 'redefine';
+	local *Mods::geneCat::readGene2Func = sub { return { 1 => 'COG1', 2 => 'COG2' } };
+	my $mapping = createGene2MGS($sorted_mgs, $tmp);
+	is(slurp($mapping), "2\tMGS1\tCOG2\n1\tMGS1\tCOG1\n",
+		'sorted comma-separated MGS genes retain their priority order');
+}
+
 my $mgs = File::Spec->catfile($tmp, 'clusters.txt');
 my $fasta = File::Spec->catfile($tmp, 'genes.fna');
 my $bins = File::Spec->catdir($tmp, 'bins');
@@ -75,6 +87,19 @@ like($between_source, qr/open I,"<\$GCd\/FMG\.subset\.cats"/,
 my $strain_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 like($strain_source, qr/my \$tree_sample_separator = quotemeta\(\$SaSe\)/,
 	'within-MGS tree command escapes the pipe sample separator as a regular expression');
+like($strain_source, qr/\$nxtCmd \.= "-Hcores \$maxCores " if \$maxCores > 0;/,
+	'within-MGS analysis only forwards a configured positive heavy-core limit');
+my $strain2_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
+like($strain2_source, qr/while \(!-s \$treePath && \$x < \@defTreeFiles\)/,
+	'strain postprocessing selects only nonempty fallback trees');
+like($strain2_source, qr/my \$jobCores = \$nCore;/,
+	'strain postprocessing honours its cores option');
+like($strain2_source, qr/qsubSystemWaitMaxJobs\(\$checkMaxNumJobs,0,\$QSBoptHR\) if \$doSubmit;/,
+	'queue throttling uses the selected backend and is disabled for dry runs');
+like($strain2_source, qr/"test -s "\.shellQuote\(\$analysisReport\).*?"touch "\.shellQuote\(\$analysisStone\)/s,
+	'new R analyses validate their report before writing a success stone');
+like($strain2_source, qr/my \$MGSd = dirname\(\$FMGpD\);/,
+	'treeWAS receives a trailing-slash-independent parent directory');
 my $resort_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'resortMGSgenes4importance.pl'));
 like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 	'gene-priority resorting flushes its final MGS at EOF');
@@ -91,5 +116,21 @@ unlike($mgs_source, qr/compl\.incompl\.95\.(?:fna|prot)/,
 	'MGS has no active catalog path pinned to identity 95');
 like($strain_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
 	'within-MGS analysis reads the selected catalog index');
+like($strain_source,
+	qr/\$MGSfile = \$sortedMGS;\s+\$gene2taxF = createGene2MGS\(\$MGSfile,\$GCd\)/s,
+	'within-MGS analysis builds its gene mapping from the sorted guide');
+like($strain_source, qr/'-forceSNPcalls', \$forceVCF2FNA/,
+	'parallel extraction workers inherit forced consensus regeneration');
+like($strain_source, qr/'-SNPadaptiveQual', \$useAdaptiveQual/,
+	'parallel extraction workers inherit adaptive SNP filtering');
+like($strain_source, qr/rename \$mergeFile, \$outfile or die/,
+	'part-file merging publishes completed output atomically');
+like($strain_source,
+	qr/!\$reSubmit && !\$repairCAT && !\$redoSubmissionData && -e \$treeStone/,
+	'explicit repair and resubmission modes bypass completed-tree skipping');
+like($strain_source, qr/tooFewSamples\.sto/,
+	'undersampled MGS are checkpointed separately from missing inputs');
+like($strain_source, qr/falling back to on-the-fly generation/,
+	'failed consensus precomputation has a local fallback');
 
 done_testing();

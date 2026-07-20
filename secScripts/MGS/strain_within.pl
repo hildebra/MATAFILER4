@@ -33,6 +33,7 @@ sub timeNice;
 sub combineMGSgenesDir; sub getInputSize;
 sub evalFileStatus;
 sub addOutgroup2MGS;
+sub writeTooFewMarker;
 
 
 #v.14: reworked massively how many genes get included
@@ -231,6 +232,7 @@ my $MGSfileOri = $MGSfile; #save for later..
 my $bindir;my $outD;my $scratchD;my $preConDir;my $LOGDIR;my $mapF;
 my %map; my %AsGrps;my @samples;#map and assembly groups
 my %ConspecificMGS; #list of conspecific MGS
+my %MGSnoTree; #MGS known to have too few samples for a meaningful tree
 
 my $gene2taxF; #where to find info what genes (gene cat)
 my $sttime = time;	
@@ -267,6 +269,9 @@ my %MGSsmplConsp; #saves single samples within a MGS that seem to have too high 
 ($SIgenes,$Gene2COG,$Gene2MGS,$COGprios) = readGene2tax($gene2taxF,$presortGenes,\@subsetMGS);#
 #%SIgenes=%{$hr1};%Gene2COG=%{$hr2}; %Gene2MGS = %{$hr3}; %COGprios = %{$hr4};
 my @specis = sort(keys(%{$SIgenes}));
+die "No MGS matched the selected input"
+	. ($subsMGSstr ne "" ? " or -MGSsubset $subsMGSstr" : "") . "\n"
+	unless @specis;
 #sort specis by numbers, so start with MGS1, MGS2 etc
 my %sis; foreach (@specis){if (m/(\d+)$/){ $sis{$_}=int($1);} else {$sis{$_}=1; print "Unknown code: $_";}}
 @specis = sort {$sis{$a} <=> $sis{$b} } keys %sis;
@@ -287,8 +292,10 @@ my %smplsPerMGS; #stats: MGS is represented in how many different samples?
 my %OCstrH ; my %OFstrH ; my %OAstrH ; my %OLstrH ;
 
 
-if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0 
-			|| $subJob){
+if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
+			|| $subJob || $redoSubmissionData
+			|| ($deepRepair && $dirsNOTPrepped)
+			|| ($repairCAT && $CatFileMiss)){
 	#$PhylosExist=0;
 	
 	print "\n\n----------------------------------------------------\nPart I:: extracting relevant core MGS genes (SNP consensus called) from original assemblies". "Elapsed time : ", timeNice(time - $sttime) . "\n----------------------------------------------------\n\n";
@@ -303,9 +310,26 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 	if ($maxSubJob && !$subJob){
 		#here needs to submit itself maxSubJob times
 		my $strain1scr = getProgPaths("MGS_strain1_scr"); #self reference
-		my $selfCmd = "$strain1scr -GCd $GCd -outD $outD -MGS $MGSfileOri -clusterID $clusterID -submit $doSubmit -onlySubmit 0 -reSubmit 0  -maxSubJob $maxSubJob -MGSminGenesPSmpl $MGStoolowGsThr -multiGeneSmplMax $multiGeneSmplMax -conspGeneSmplMax $conspGeneSmplMax -MGSphylo $treeFile -presortGenes $presortGenes -maxGenes $maxNGenes -MGset $useGTDBmg -redoSubmissionData 0 -deepRepair 0 -rmMSA 0 -minSNPDepth $minSNPDepth -minSNPCallQual $minSNPCallQual -forceSNPcalls 0 -preCompConsSNP $preCompCons";
-		$selfCmd .= " -tmpD $locTmpDir1" if ($locTmpDir1 ne "");
-		$selfCmd .= " -MGSsubset $subsMGSstr" if ($subsMGSstr ne "");
+		my @selfArgs = (
+			'-GCd', $GCd, '-outD', $outD, '-MGS', $MGSfileOri,
+			'-clusterID', $clusterID, '-submit', $doSubmit, '-onlySubmit', 0,
+			'-reSubmit', 0, '-maxSubJob', $maxSubJob,
+			'-MGSminGenesPSmpl', $MGStoolowGsThr,
+			'-multiGeneSmplMax', $multiGeneSmplMax,
+			'-conspGeneSmplMax', $conspGeneSmplMax, '-MGSphylo', $treeFile,
+			'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
+			'-MGset', $useGTDBmg, '-redoSubmissionData', 0, '-deepRepair', 0,
+			'-rmMSA', 0, '-minSNPDepth', $minSNPDepth,
+			'-minSNPCallQual', $minSNPCallQual, '-forceSNPcalls', $forceVCF2FNA,
+			'-preCompConsSNP', $preCompCons, '-skipIndels', $noIndels,
+			'-SNPadaptiveQual', $useAdaptiveQual,
+			'-SNPdepthFilterScale', $depthFilterScale,
+			'-SNPindelRangeFilt', $indelRange,
+		);
+		push @selfArgs, ('-tmpD', $locTmpDir1) if $locTmpDir1 ne "";
+		push @selfArgs, ('-MGSsubset', $subsMGSstr) if $subsMGSstr ne "";
+		push @selfArgs, ('-submissionMode', $subMode) if $subMode ne "";
+		my $selfCmd = $strain1scr . " " . join(" ", map { shellQuote($_) } @selfArgs);
 		
 		my $tmpHDD=$QSBoptHR->{tmpSpace} ; $QSBoptHR->{tmpSpace} =15; #request some basic amount
 		
@@ -384,7 +408,7 @@ my %SIgenes_OG; #later reads in SIgenes again, but no restriction to length
 
 my $geneCatLoaded=0;
 #read in genecat to create outgroup fasta sequences..
-if (1 && $CatNotPrepped || $treeAbsent  || $deepRepair || $dirsNOTPrepped || $onlySubmit == 0 || $redoSubmissionData == 1){
+if ($CatNotPrepped || $treeAbsent || $repairCAT || $deepRepair || $dirsNOTPrepped || $onlySubmit == 0 || $redoSubmissionData == 1){
 	#also read reference gene seqs (for outgroup)
 	my $refFNA = ""; my $refFAA = ""; my $refNameL = "unknw";
 	if ($mode eq "MGS" || $mode eq "MGSall"){
@@ -426,9 +450,13 @@ my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 $cnt=0; my $lcnt=-1; my @jobs; my $Nspecis = @specis;
 foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTreeScript on..
 	$lcnt++;
-	if (!$reSubmit && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
+	if (!$reSubmit && !$repairCAT && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
 		print "\nAll submission dirs prepared, nothing to do..\n";
 		last;
+	}
+	if (exists $MGSnoTree{$MGS}) {
+		print "Skipping $MGS: previous extraction found too few samples for a tree.\n";
+		next;
 	}
 	# previous condition was too lax: ( ($CatNotPrepped/$#specis) < 0.1)  , just check if we can resubmit anything here..
 	if (exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ m/multicopy/){
@@ -444,7 +472,10 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
 	
-	if (-e $treeStone && -s $IQtreef ){print "Skipping $MGS (tree exists?).. ";next;}
+	if (!$reSubmit && !$repairCAT && !$redoSubmissionData && -e $treeStone && -s $IQtreef ){
+		print "Skipping $MGS (tree exists?).. ";
+		next;
+	}
 	
 	print "At ${MGS} ($lcnt/$Nspecis):: ". timeNice(time - $sttime) . " :"; 
 	my $inputFNAsize = $sizeOfDirs[$lcnt];
@@ -506,20 +537,16 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	#}
 	
 	qsubSystemWaitMaxJobs($checkMaxNumJobs);
-	#early submission.. no further work needed here!
-	if ( !$repairCAT && !$deepRepair && $OG ne "" && $redoSubmissionData == 0 && $onlySubmit==1 && fileGZe($CATtf) ){
-		$cnt ++;$outgS = " -outgroup ".shellQuote($OG)." " if ($OG ne "");
-		unlink("$CATtf.tmp") or die "Cannot remove $CATtf.tmp: $!\n" if -e "$CATtf.tmp";
-		#die "$totMem ;; $inputFNAsize\n\n";
-		my ($dep,$qcmd) = qsubSystem($outD2."treeCmd.sh",$Tcmd.$outgS.$postCmd,$numCoreL,int($totMem) ."M","FT$cnt","","",1,[],$QSBoptHR);
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;$QSBoptHR->{useLongQueue} = 0;push (@jobs,$dep);
+	#reformat .cat.tmp -> .cat and add outgroup fna seqs
+	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
+	($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady)=
+		addOutgroup2MGS($MGS,$OG,$tmpD); #$outD2 $tmpD
+	unless ($inputReady) {
+		$QSBoptHR->{tmpSpace} = $tmpSHDD;
+		$QSBoptHR->{useLongQueue} = 0;
+		print "\n$MGS: input files are not ready; leaving it unmarked so a repair run can retry it.\n";
 		next;
 	}
-	
-	#reformat .cat.tmp -> .cat and add outgroup fna seqs
-	my $multiSmpl;my $ngenes; my $needsCopy = 0;
-	($multiSmpl,$ngenes,$OG,$needsCopy)= 
-		addOutgroup2MGS($MGS,$OG,$tmpD); #$outD2 $tmpD
 	
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
 	my $preCmd = "";
@@ -529,7 +556,15 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 
 	if ($multiSmpl>2){
 		print "$MGS: multiSmpls:\t$multiSmpl\tpotential genes: ". $ngenes ."\tcores:$numCoreL mem:$totMem\n";
-	} else {print "\n$MGS: too few samples ($multiSmpl) for tree stats\n";next;}
+	} else {
+		print "\n$MGS: too few samples ($multiSmpl) for tree stats\n";
+		writeTooFewMarker($outD2, $multiSmpl, $ngenes);
+		remove_tree($tmpD) if $needsCopy && -d $tmpD;
+		$QSBoptHR->{tmpSpace} = $tmpSHDD;
+		$QSBoptHR->{useLongQueue} = 0;
+		next;
+	}
+	unlink "$outD2/tooFewSamples.sto" if -e "$outD2/tooFewSamples.sto";
 	
 	#PART II: qsub tree build command
 	
@@ -553,7 +588,8 @@ $MGSabundance = "$bindir/Annotation/Abundance/MGS.matL7.txt";
 
 my $strain2Scr = getProgPaths("MGS_strain2_scr");
 
-my $nxtCmd = "$strain2Scr -GCd ".shellQuote($GCd)." -FMGdir ".shellQuote($outD)." -MGSmatrix ".shellQuote($MGSabundance)." -cores 4 -Hcores $maxCores -reSubmit 0 -DiscTests ".shellQuote($discTests)." -ContTests ".shellQuote($contTests)." -familyVar ".shellQuote($familyVar)." -groupStabilityVars ".shellQuote($groupStabilityVars)." ";
+my $nxtCmd = "$strain2Scr -GCd ".shellQuote($GCd)." -FMGdir ".shellQuote($outD)." -MGSmatrix ".shellQuote($MGSabundance)." -cores 4 -reSubmit 0 -DiscTests ".shellQuote($discTests)." -ContTests ".shellQuote($contTests)." -familyVar ".shellQuote($familyVar)." -groupStabilityVars ".shellQuote($groupStabilityVars)." ";
+$nxtCmd .= "-Hcores $maxCores " if $maxCores > 0;
 if ($mapF2 eq ""){$nxtCmd .= "-map ".shellQuote($mapF)." ";} else {$nxtCmd .= "-map ".shellQuote($mapF2)." ";}
 
 $nxtCmd .= "\n";
@@ -579,7 +615,17 @@ exit(0);
 #	combineMGSgenesDir($MGS,$outD2);
 sub combineMGSgenesDir{
 	my ($MGS,$tmpD,$outD2) = @_;
-	return if (fileGZe("$outD2/$FNAstdof") && fileGZe("$outD2/$FAAstdof"));
+	my @required = ("$outD2/$FNAstdof", "$outD2/$FAAstdof", "$outD2/$CATstdof.tmp");
+	if (grep { !fileGZe($_) } @required) {
+		# At least one required combined file is absent; merge any available job parts.
+	} else {
+		for my $prefix (map { "$tmpD/$_" } ($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp")) {
+			for my $part (grep { /\.\d+$/ } bsd_glob("$prefix.*")) {
+				unlink $part or warn "Cannot remove already-combined part $part: $!\n";
+			}
+		}
+		return 1;
+	}
 
 	#my $outD3 = $tmpD; #work locally, copy later..
 	my @filesets = (
@@ -589,6 +635,7 @@ sub combineMGSgenesDir{
 		["$CATstdof.tmp","$tmpD/$CATstdof.tmp",  "$tmpD/$CATstdof.tmp"],
 	);
 
+	my @consumedParts;
 	for my $set (@filesets) {
 
 		my ($name, $prefix, $outfile) = @$set;
@@ -596,22 +643,33 @@ sub combineMGSgenesDir{
 			my ($an) = $a =~ /\.(\d+)$/;
 			my ($bn) = $b =~ /\.(\d+)$/;
 			defined($an) && defined($bn) ? $an <=> $bn : $a cmp $b
-		} bsd_glob("$prefix.*");
+		} grep { /\.\d+$/ } bsd_glob("$prefix.*");
 		next unless @parts;
 
-		open my $out, ">", $outfile or die $!;
+		my $mergeFile = "$outfile.merge.$$";
+		open my $out, ">", $mergeFile or die "Cannot create $mergeFile: $!\n";
 		binmode $out;
 
 		for my $file (@parts) {
-		   open my $in, "<", $file or die "Cannot read $file: $!";
+			open my $in, "<", $file or die "Cannot read $file: $!";
+			binmode $in;
 			while (my $line = <$in>) {
-				print $out $line;
+				print {$out} $line or die "Cannot write $mergeFile: $!\n";
 			}
-			close $in;
-			unlink $file;
+			close $in or die "Cannot close $file: $!\n";
 		}
 
-		close $out;
+		close $out or die "Cannot close $mergeFile: $!\n";
+		rename $mergeFile, $outfile or die "Cannot replace $outfile: $!\n";
+		push @consumedParts, @parts;
+	}
+	my $complete = !grep { !fileGZe($_) } @required;
+	if ($complete) {
+		for my $part (@consumedParts) {
+			unlink $part or warn "Cannot remove combined part $part: $!\n";
+		}
+	} elsif (@consumedParts) {
+		warn "Incomplete combined input for $MGS; retaining all source parts for repair\n";
 	}
 	if ($outD2 ne $tmpD) {
 		make_path($outD2);
@@ -620,6 +678,7 @@ sub combineMGSgenesDir{
 				or die "Cannot copy $source to $outD2: $!\n";
 		}
 	}
+	return $complete;
 }
 
 
@@ -628,7 +687,9 @@ sub addOutgroup2MGS{
 	my ($MGS,$OG,$tmpD) = @_;
 	my $outD2 = $SIdirs{$MGS};
 	my $outD3 = $tmpD;
-	if (fileGZe( "$outD2/$FNAstdof")){ #files already transferred?
+	my $outputReady = fileGZe("$outD2/$FNAstdof")
+		&& fileGZe("$outD2/$FAAstdof") && fileGZe("$outD2/$CATstdof");
+	if ($outputReady && !$repairCAT && !$deepRepair && !$redoSubmissionData){
 		my %samples_seen;
 		my $genes_seen = 0;
 		my ($cat_fh) = gzipopen("$outD2/$CATstdof", "existing category file");
@@ -641,16 +702,24 @@ sub addOutgroup2MGS{
 				$samples_seen{$sample} = 1 if defined $sample && length $sample;
 			}
 		}
-		close $cat_fh;
-		return(scalar(keys %samples_seen),$genes_seen,$OG,0);
+		close $cat_fh or die "Cannot close existing category file for $MGS: $!\n";
+		return(scalar(keys %samples_seen),$genes_seen,$OG,0,1);
 	}
+	my $temporaryInput = fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
+		&& (fileGZe("$tmpD/$CATstdof.tmp") || fileGZe("$tmpD/$CATstdof"));
+	$outD3 = $outD2 if !$temporaryInput && $outputReady;
 	my $FNAtf = "$outD3/$FNAstdof"; my $FAAtf = "$outD3/$FAAstdof";
 	my $CATtf = "$outD3/$CATstdof"; #my $Linkf = "$outD3/$LINKstdof";
 	#my $IQtreef= "$outD3/phylo/IQtree_allsites.treefile";
 	my $rmCatTmp=0;
 	my $MSAdir = "$outD3/MSA/";
 	die "Gene cat wasn't loaded, check program logic.\n!$deepRepair && $redoSubmissionData == 0 && $onlySubmit==1 && !$dirsNOTPrepped && !-e $CATtf.tmp \n" if (!$geneCatLoaded);
+	unless (fileGZe($FNAtf) && fileGZe($FAAtf)) {
+		warn "Missing NT or AA input for $MGS in $outD3\n";
+		return(0, 0, $OG, 0, 0);
+	}
 	my %SIcatLoc;
+	my $malformedCatEntries = 0;
 	if (fileGZe( "$CATtf.tmp") && !fileGZe( "$CATtf")){
 		my ($ICT,$status) = gzipopen("$CATtf.tmp","Can't open cat file $CATtf.tmp\n",0);
 		#open ICT,"<$CATtf.tmp" or die "Can't open cat file $CATtf.tmp\n";
@@ -658,6 +727,7 @@ sub addOutgroup2MGS{
 			chomp; my @spl = split /\t/;
 			if (@spl < 4){
 				print "malformed $CATtf string: $_\n";
+				$malformedCatEntries++;
 				next;
 			}
 			die "$_\n$spl[0] not eq $MGS\n" unless ($spl[0] eq $MGS);
@@ -679,7 +749,9 @@ sub addOutgroup2MGS{
 				#$SIcatLoc {$spl2[1]}{$spl2[0]}  = $tags;print "$spl2[1] : $spl2[0]  = $tags\n";
 				if ($tags =~ m/^(.*)\|(.*)$/){	
 					$SIcatLoc {$2}{$1}  = $tags;
-				}				
+				} else {
+					$malformedCatEntries++;
+				}
 				$cntItems++;
 				#print "$2 $1  = $tags\n";
 			}
@@ -687,12 +759,12 @@ sub addOutgroup2MGS{
 		}
 		close $ICT;
 		if ($catLines != keys (%SIcatLoc)){ #redo MSA
-			system "rm -rf $MSAdir;";
+			remove_tree($MSAdir) if -d $MSAdir;
 		}
 		print "${MGS}:: $catLines cat lines (should: ". keys (%SIcatLoc) .", $cntItems items: $CATtf\n";
 	} else {
 		print "WARNING:: ${MGS}:: possible error: neither .cat nor .cat.tmp exists in $outD3\n";
-		return(0, 0, $OG, 0);;
+		return(0, 0, $OG, 0, 0);
 
 	}
 	
@@ -700,7 +772,16 @@ sub addOutgroup2MGS{
 	#my @curCogs = sort keys %{$SIcat{$MGS}};
 	my @curCogs = sort keys %SIcatLoc;
 	if (scalar(@curCogs) < 10){
-		die "$MGS error: \@curCogs is empty or < 10 members\n$CATtf\n";
+		if (!@curCogs && $malformedCatEntries) {
+			warn "$MGS category input is malformed; leaving it unmarked for repair\n";
+			return(0, 0, $OG, 0, 0);
+		}
+		my %fewSamples;
+		for my $cog (@curCogs) {
+			$fewSamples{$_} = 1 for keys %{$SIcatLoc{$cog}};
+		}
+		warn "$MGS has only ".scalar(@curCogs)." usable genes; skipping tree construction\n";
+		return(scalar(keys %fewSamples), scalar(@curCogs), $OG, $outD3 ne $outD2, 1);
 	}
 	#print "COGs: $curCogs[0] $curCogs[1]\n";
 	
@@ -711,10 +792,14 @@ sub addOutgroup2MGS{
 		my $call = "$neiTree ".shellQuote($treeFile)." ".shellQuote($MGS);
 		#print "$call\n";
 		my $OG1 = `$call`;
-		die "Can't find outgroup from call $call\n\n" if $? != 0;
+		if ($? != 0) {
+			warn "Can't find outgroup from call $call; building an ingroup-only tree\n";
+			$OG1 = "";
+		}
 		chomp $OG1;
 		my @sspl = grep { length } split /\s+/,$OG1; $OG = "";
-		return(0,0,$OG,0) if (@sspl == 0);
+		warn "No outgroup candidates returned for $MGS; building an ingroup-only tree\n"
+			if @sspl == 0;
 		my $cntShrCogs=0;
 		for my $candidate (@sspl) {
 			$cntShrCogs = 0;
@@ -769,10 +854,12 @@ sub addOutgroup2MGS{
 			#} else { print OC "\t$ng"; }
 		}
 	}
-	open OF,">>$FNAtf" or die "Can't open NT file $FNAtf\n";
-	open OA,">>$FAAtf" or die "Can't open AA file $FAAtf\n";
-	print OF join("",@tmpFNAog); print OA join("",@tmpFAAog);
-	close OA; close OF;
+	open my $fna_out, '>>', $FNAtf or die "Can't open NT file $FNAtf: $!\n";
+	open my $faa_out, '>>', $FAAtf or die "Can't open AA file $FAAtf: $!\n";
+	print {$fna_out} join("",@tmpFNAog) or die "Can't append NT file $FNAtf: $!\n";
+	print {$faa_out} join("",@tmpFAAog) or die "Can't append AA file $FAAtf: $!\n";
+	close $faa_out or die "Can't close AA file $FAAtf: $!\n";
+	close $fna_out or die "Can't close NT file $FNAtf: $!\n";
 	
 	#print "used $OGgenesUsed genes  ";
 	my @tmpCAT;
@@ -791,12 +878,13 @@ sub addOutgroup2MGS{
 		#print OC "\n";
 		push(@tmpCAT,"\n");
 	}
-	open OC,">$CATtf" or die "Can't open cat file $CATtf\n";
-	print OC join("",@tmpCAT);
-	close OC;
+	open my $cat_out, '>', $CATtf or die "Can't open cat file $CATtf: $!\n";
+	print {$cat_out} join("",@tmpCAT) or die "Can't write cat file $CATtf: $!\n";
+	close $cat_out or die "Can't close cat file $CATtf: $!\n";
 	print "Generated CAT file ";
 	if ($OGgenesUsed ==0 && $OG ne ""){
-		die "Couldn't include any outgroup genes! $OG\n$FNAtf\n";
+		warn "Couldn't include any outgroup genes for $OG; building $MGS without an outgroup\n";
+		$OG = "";
 	}
 
 	#note done somewhere how many genes these actually are..
@@ -816,9 +904,9 @@ sub addOutgroup2MGS{
 	#if ($outD3 ne $outD2){system "cp $outD3/* $outD2;";
 	#local? -> no, give to slurm job..
 	
-	my $needsCopy = 1;
+	my $needsCopy = $outD3 ne $outD2 ? 1 : 0;
 
-	return ($multiSmpl,scalar(@curCogs),$OG,$needsCopy);
+	return ($multiSmpl,scalar(@curCogs),$OG,$needsCopy,1);
 	
 # --------------------------- OUTGROUP DONE ----------------------------------------
 }
@@ -835,6 +923,16 @@ sub writeLogsStep1{
 		print LO $MGS . "\t" . join(",",@{$ConspecificMGS{$MGS}}) . "\n";
 	}
 	close LO;
+}
+
+sub writeTooFewMarker{
+	my ($outD2, $sampleCount, $geneCount) = @_;
+	make_path($outD2) unless -d $outD2;
+	my $marker = "$outD2/tooFewSamples.sto";
+	open my $out, '>', $marker or die "Cannot create $marker: $!\n";
+	print {$out} "samples\t$sampleCount\ngenes\t$geneCount\n"
+		or die "Cannot write $marker: $!\n";
+	close $out or die "Cannot close $marker: $!\n";
 }
 
 
@@ -966,6 +1064,8 @@ sub prepRun{
 
 	$mode = "FMG" if ($MGSfile eq "");
 	if ($mode eq "FMG"){$takeAll = 0;}
+	die "FMG mode does not support -maxSubJob; run it as a single extraction job\n"
+		if $mode eq "FMG" && $maxSubJob;
 	$takeAll = 1 if ($maxNGenes <= 0);
 	if ($takeAll){$maxNGenes = -1;$mode="MGSall"; }
 
@@ -1069,36 +1169,43 @@ sub prepRun{
 
 
 	if ($mode eq "MGS" || $mode eq "MGSall"){
+		my $sortedMGS = "$MGSfile.srt";
+		if ($subJob) {
+			die "Sorted MGS guide is missing for subjob: $sortedMGS\n" unless -s $sortedMGS;
+		} elsif ($mode eq "MGSall" && !-e $sortedMGS) {
+			remove_tree($outD) if -d $outD;
+			remove_tree($scratchD) if -d $scratchD;
+			unlink $_ or die "Cannot remove stale $_: $!\n"
+				for grep { -f $_ || -l $_ } glob("$MGSfile.srt*");
+			symlink($MGSfile, $sortedMGS)
+				or die "Cannot link $sortedMGS to $MGSfile: $!\n";
+		} elsif (!$onlySubmit || !-s $sortedMGS) {
+			print "base files missing.. preparing complete resubmission and recalc of data\n";
+			remove_tree($outD) if -d $outD;
+			remove_tree($scratchD) if -d $scratchD;
+			unlink $_ or die "Cannot remove stale $_: $!\n"
+				for grep { -f $_ || -l $_ } glob("$MGSfile.srt*");
+			my $sortMGSgenes = getProgPaths("sortMGSGeneImport_scr");
+			my $cmd = $sortMGSgenes . " "
+				. join(" ", map { shellQuote($_) } ($GCd, $MGSfile, $useGTDBmg, $mode, $clusterID)) . "\n";
+			print "$cmd\n";
+			systemW $cmd;
+			die "MGS sorting did not create $sortedMGS\n" unless -s $sortedMGS;
+		} else {
+			print "Continuing on prepared .srt files\n";
+		}
+
+		$MGSfile = $sortedMGS;
 		$gene2taxF = createGene2MGS($MGSfile,$GCd);
-		print "Using MGS from $MGSfile, adding eggNOG in: $gene2taxF\n";
-	} 
+		print "Using sorted MGS from $MGSfile, adding eggNOG in: $gene2taxF\n";
+		print "\nnew MGS file: $MGSfile\n\n";
+	} elsif ($subJob && $maxSubJob) {
+		die "FMG mode does not support split MGS extraction jobs\n";
+	}
+
 	if ($subJob){
 		return;
 	}
-
-	
-	#prep sorted MGS gene file
-	if ($mode eq "MGSall" && !-e $MGSfile.".srt"){
-		remove_tree($outD) if -d $outD;
-		remove_tree($scratchD) if -d $scratchD;
-		unlink $_ or die "Cannot remove stale $_: $!\n" for grep { -f $_ || -l $_ } glob("$MGSfile.srt*");
-		symlink($MGSfile, "$MGSfile.srt") or die "Cannot link $MGSfile.srt to $MGSfile: $!\n";
-	}elsif ((!$onlySubmit || !-e $MGSfile.".srt") && !$subJob){
-		die "In rewriting loop while in a subjob.. aborting\n" if ($subJob);
-		print "base files missing.. preparing complete resubmission and recalc of data\n";
-		remove_tree($outD) if -d $outD;
-		remove_tree($scratchD) if -d $scratchD;
-		unlink $_ or die "Cannot remove stale $_: $!\n" for grep { -f $_ || -l $_ } glob("$MGSfile.srt*");
-		my $sortMGSgenes = getProgPaths("sortMGSGeneImport_scr");
-		my $cmd = "$sortMGSgenes $GCd $MGSfile $useGTDBmg $mode $clusterID\n";
-		print "$cmd\n";
-		#die;
-		systemW $cmd;
-	} else {
-		print "Continuing on preped .srt files\n";
-	}
-	$MGSfile .= ".srt";
-	print "\nnew MGS file: $MGSfile\n\n";
 
 	make_path($locTmpDir, $scratchD, $outD, $LOGDIR);
 	open FO, ">$LOGDIR/strainCmd.txt" or die "Cannot write $LOGDIR/strainCmd.txt: $!\n";
@@ -1185,6 +1292,13 @@ sub preComputeConsSNP{
 	}
 	if (@jobsPre){
 		qsubSystemJobAlive( \@jobsPre,$QSBoptHR );
+	}
+	for my $smpl (keys %preCompSNPs) {
+		my $nt = $preCompSNPs{$smpl}{NT};
+		my $aa = $preCompSNPs{$smpl}{AA};
+		next if fileGZe($nt) && fileGZe($aa);
+		warn "Precomputed consensus output is incomplete for $smpl; falling back to on-the-fly generation\n";
+		delete $preCompSNPs{$smpl};
 	}
 	if ($fileAbsent) {
 		die "Not all required SNP inputs are present; no input checkpoint was created\n";
@@ -1273,6 +1387,7 @@ sub getInputSize{
 sub evalFileStatus{
 	my $dirsNOTPrepped = 0; my $CatFileMiss = 0;my $CatNotPrepped = 0; my $treeAbsent=0;
 	my $doneDirs=0;
+	my $tooFewDirs=0;
 	my $PhylosExist = 1;
 	
 	my $treeFile= "IQtree_allsites.treefile";
@@ -1288,6 +1403,14 @@ sub evalFileStatus{
 			system "rm -rf $outD2/* $scratchD/outs/$MGS/*";
 		}
 		system "mkdir -p $outD2" unless (-d $outD2);
+		my $tooFewMarker = "$outD2/tooFewSamples.sto";
+		if (-s $tooFewMarker && !$deepRepair && !$redoSubmissionData && $onlySubmit != 0) {
+			$MGSnoTree{$MGS} = 1;
+			$tooFewDirs++;
+			next;
+		}
+		unlink $tooFewMarker or die "Cannot remove stale $tooFewMarker: $!\n"
+			if -e $tooFewMarker;
 		
 	#	if ( !-d $outD2 ||){ # first phase only has "all.cat.tmp" file..
 	#		$dirsNOTPrepped ++;
@@ -1312,9 +1435,9 @@ sub evalFileStatus{
 			system "rm -rf $scratchD/outs/$MGS" if (-d "$scratchD/outs/$MGS");
 		}
 	}
-	$PhylosExist = 0 if ($CatFileMiss/@specis > 0.1); #only activate if more than 10% missing..
+	$PhylosExist = 0 if ($CatFileMiss/scalar(@specis) > 0.1); #only activate if more than 10% missing..
 
-	print "Output dirs status: \nCatFileFinalMiss: $CatFileMiss, CatFileConvert: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent,  Dir done: $doneDirs, Phylo complete: $PhylosExist \n";
+	print "Output dirs status: \nCatFileFinalMiss: $CatFileMiss, CatFileConvert: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent, Dir done: $doneDirs, too few samples: $tooFewDirs, Phylo complete: $PhylosExist \n";
 	#die;
 	return($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist);
 }
@@ -1344,24 +1467,24 @@ sub appendWriteMGSgenes {
         my $FAAtf = "$outD/$FAAstdof$suffix";
         my $CATtf = "$outD/$CATstdof.tmp$suffix";
 
-        open my $fh_nt, ">>", $FNAtf or die $!;
-        print $fh_nt $nt;
-        close $fh_nt;
+		open my $fh_nt, ">>", $FNAtf or die $!;
+		print {$fh_nt} $nt or die "Cannot append $FNAtf: $!\n";
+		close $fh_nt or die "Cannot close $FNAtf: $!\n";
 
-        open my $fh_aa, ">>", $FAAtf or die $!;
-        print $fh_aa $aa;
-        close $fh_aa;
+		open my $fh_aa, ">>", $FAAtf or die $!;
+		print {$fh_aa} $aa or die "Cannot append $FAAtf: $!\n";
+		close $fh_aa or die "Cannot close $FAAtf: $!\n";
 
         if ($writeLink) {
-            my $Linkf = "$outD/$LINKstdof$suffix";
-            open my $fh_link, ">>", $Linkf or die $!;
-            print $fh_link $link;
-            close $fh_link;
-        }
+			my $Linkf = "$outD/$LINKstdof$suffix";
+			open my $fh_link, ">>", $Linkf or die $!;
+			print {$fh_link} $link or die "Cannot append $Linkf: $!\n";
+			close $fh_link or die "Cannot close $Linkf: $!\n";
+		}
 
-        open my $fh_cat, ">>", $CATtf or die $!;
-        print $fh_cat $cat;
-        close $fh_cat;
+		open my $fh_cat, ">>", $CATtf or die $!;
+		print {$fh_cat} $cat or die "Cannot append $CATtf: $!\n";
+		close $fh_cat or die "Cannot close $CATtf: $!\n";
 
         $OFstrH{$MGS} = "";
         $OAstrH{$MGS} = "";
@@ -1573,33 +1696,36 @@ sub createConsFastas{
 	my $support_reads = defined($map{$sm}{"SupportReads"}) ? $map{$sm}{"SupportReads"} : "";
 	if ($support_reads =~ m/PB:/){$secSeqTechS = "PB" ;
 	} elsif ($support_reads =~ m/ONT:/) {$secSeqTechS = "ONT" ;}
-	my $seqPlatf =$map{$sm}{SeqTech}; #primary reads
+	my $seqPlatf = defined($map{$sm}{SeqTech}) ? $map{$sm}{SeqTech} : ""; #primary reads
 
 	my $cmd ="";
 	if ($seqPlatf eq ""){$seqPlatf = "hiSeq";} #if empty, assume hiSeq
+	my $skipTerm = $noIndels ? " -skipINDELs" : "";
+	my $commonOpt = "-t 1$skipTerm -minCallDepth $minSNPDepth -minCallQual $minSNPCallQual"
+		. " -minCallQualAdaptive $useAdaptiveQual"
+		. " -depthFilterScale $depthFilterScale -indelRange $indelRange";
 	if ($secSeqTechS eq ""){
 		#in case of only illumina:
 		
 		#checkSeqTech($seqPlatf);
-		$vcf2fnaOpt = "-seqPlatform $seqPlatf -t 1 -minCallDepth $minSNPDepth -minCallQual $minSNPCallQual ";
-		$vcf2fnaOpt .= "-minCallQualAdaptive $useAdaptiveQual" ;
-		$vcf2fnaOpt .= " -depthFilterScale $depthFilterScale" ;
-		$vcf2fnaOpt .= " -indelRange $indelRange";
-		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref $refFA -inVCF $vcfFile -depthF $depthFile  ";#-oCtg /dev/null " ;
+		$vcf2fnaOpt = "-seqPlatform ".shellQuote($seqPlatf)." $commonOpt";
+		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref ".shellQuote($refFA)
+			." -inVCF ".shellQuote($vcfFile)." -depthF ".shellQuote($depthFile)."  ";
 	} else {
 		#die;
 		#in case of both PacBio and illumina:
 		#$vcf2fnaOpt = "-seqPlatform $SNPIHR->{SeqTech},$SNPIHR->{SeqTechSuppl} -t 1 -minCallDepth $minDepth,$minDepth -minCallQual $minCallQual ";
 		#$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref $refFA -inVCF $vcfFile,$vcfFileS -depthF $depthFile,$depthFileS ";# -oCtg $ofasCons.gz " ;
 		my $vcfFileS = "$cD/$lSNPdir/$lConsVCFsup";
-		my $skipTerm = ""; $skipTerm="-skipINDELs " if ($noIndels);
 		my $depthFileS = "$cD$lMAPdir/$sm$bamDepthFsuffixSup";
-		$vcf2fnaOpt = "-seqPlatform $seqPlatf,$secSeqTechS -t 1 $skipTerm -minCallDepth $minSNPDepth -minCallQual $minSNPCallQual ";
-		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref $refFA -inVCF $vcfFile,$vcfFileS -depthF $depthFile,$depthFileS  -oCtg /dev/null " ;
+		$vcf2fnaOpt = "-seqPlatform ".shellQuote("$seqPlatf,$secSeqTechS")." $commonOpt";
+		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref ".shellQuote($refFA)
+			." -inVCF ".shellQuote("$vcfFile,$vcfFileS")
+			." -depthF ".shellQuote("$depthFile,$depthFileS")." -oCtg /dev/null ";
 	}
 
-	$cmd .= "-gff $refGFF -oGeneNT $oFNA -oGeneAA $oFAA";
-	if ($append2LOG){$cmd.=" >> $SNPconsLOGs\n";
+	$cmd .= "-gff ".shellQuote($refGFF)." -oGeneNT ".shellQuote($oFNA)." -oGeneAA ".shellQuote($oFAA);
+	if ($append2LOG){$cmd.=" >> ".shellQuote($SNPconsLOGs)."\n";
 	} else {$cmd .= "\n";}
 	if ($returnCmd){ #don't excecute
 		return $cmd;
@@ -1698,11 +1824,15 @@ sub readGenesSample_Singl{
 		my $fastafVCF = "$cD/$lSNPdir/$lConsVCF";
 		my $locForceVCF2FNA=$forceVCF2FNA;
 		
-		if (exists($preCompSNPs{$sd3})){ #precomputation was done before.. no need to calc then again here
+		if (exists($preCompSNPs{$sd3})
+				&& fileGZe($preCompSNPs{$sd3}{NT}) && fileGZe($preCompSNPs{$sd3}{AA})){
 			print "Found precomputed files: $preCompSNPs{$sd3}{NT}\n";
 			$fastaf=$preCompSNPs{$sd3}{NT};
 			$fastafAA=$preCompSNPs{$sd3}{AA};
 			$locForceVCF2FNA=0;
+		} elsif (exists($preCompSNPs{$sd3})) {
+			warn "Ignoring incomplete precomputed consensus files for $sd3\n";
+			delete $preCompSNPs{$sd3};
 		}
 		
 		#need to recreate fna/faa on the fly?? -> or does user want this?

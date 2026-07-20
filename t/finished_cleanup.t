@@ -133,13 +133,35 @@ is(run_cleaner(
 ), 0, 'cleanup safely accepts an external assembly');
 ok(-s "$external_assembly.mmi", 'indexes adjacent to an external reference are retained');
 
+my $scratch_alias = File::Spec->catdir($root, 'scratch-alias');
+symlink($scratch, $scratch_alias) or die "Cannot create scratch alias: $!";
+my $alias_temp_real = File::Spec->catdir($scratch, 'alias-sample');
+my $alias_temp_path = File::Spec->catdir($scratch_alias, 'alias-sample');
+make_path($alias_temp_real);
+write_file(File::Spec->catfile($alias_temp_real, 'temporary.fq'));
+is(run_cleaner(
+	sample => 'alias-sample', members => ['alias-sample'],
+	mapping_dir => $sample_paths{S1}{mapping_dir},
+	snp_log_dir => $sample_paths{S1}{snp_log_dir},
+	sample_temp => $alias_temp_path,
+), 0, 'cleanup accepts a sample temporary path through a scratch symlink alias');
+ok(!-d $alias_temp_real, 'scratch alias cleanup removes the canonical sample temporary directory');
+
 open my $mata_fh, '<', File::Spec->catfile($Bin, '..', 'MATAF4.pl') or die $!;
 my $mata_source = do { local $/; <$mata_fh> };
 close $mata_fh;
 unlike($mata_source, qr/'--mode', 'invalidate'/,
 	'cleanup script is not called before sample completion');
-like($mata_source, qr/runFinishedCleanup\(\s*'--sample'/s,
+like($mata_source, qr/runFinishedCleanup\(finishedCleanupArguments\(/s,
 	'fully completed samples invoke centralized cleanup');
+like($mata_source,
+	qr/MFnext\(\$smplLockF,\\\@sampleDeps.*?submitFinishedCleanup\(.*?\\\@sampleDeps.*?loop2C_check/s,
+	'normal submissions enqueue cleanup after work completion and lock release');
+like($mata_source,
+	qr/sub submitFinishedCleanup.*?afterAny\} = 0;.*?qsubSystem\(.*?\$dependencyString/s,
+	'cleanup uses successful scheduler dependencies rather than after-any execution');
+like($mata_source, qr/sub submitFinishedCleanup.*?--kill-on-invalid-dep=yes/s,
+	'failed Slurm dependency chains cancel cleanup instead of leaving it pending forever');
 unlike($mata_source, qr/system "rm -f \$finalCommAssDir\/scaffolds\.fasta\.filt/s,
 	'legacy inline mapper-index deletion is removed');
 

@@ -4,6 +4,7 @@ use warnings;
 
 use Cwd qw(abs_path);
 use Digest::SHA qw(sha1_hex);
+use File::Basename qw(basename dirname);
 use File::Glob qw(bsd_glob);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
@@ -39,7 +40,18 @@ sub existing_absolute {
 
 sub prospective_absolute {
 	my ($path) = @_;
-	return File::Spec->canonpath(File::Spec->rel2abs($path));
+	my $absolute = File::Spec->canonpath(File::Spec->rel2abs($path));
+	my @missing;
+	my $ancestor = $absolute;
+	while (!-e $ancestor) {
+		my $parent = dirname($ancestor);
+		die "cannot resolve a filesystem ancestor for $path\n" if $parent eq $ancestor;
+		unshift @missing, basename($ancestor);
+		$ancestor = $parent;
+	}
+	my $resolved = abs_path($ancestor);
+	die "cannot resolve filesystem path $ancestor\n" unless defined $resolved;
+	return File::Spec->canonpath(File::Spec->catfile($resolved, @missing));
 }
 
 sub is_below {

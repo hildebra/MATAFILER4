@@ -150,20 +150,25 @@ sub sortFNA{
 sub createGene2MGS{
 	my ($MGSfile,$GCd) = @_;
 	my $outF = "$MGSfile.gene2MGS";
-	return ($outF) if (-e $outF);
+	if (-s $outF) {
+		my $input_mtime = (stat($MGSfile))[9] // 0;
+		my $output_mtime = (stat($outF))[9] // 0;
+		return ($outF) if $output_mtime >= $input_mtime;
+	}
 	
 	#first read in COG assignments / gene
 	my $hr = readGene2Func("$GCd","NOG"); my %COG = %{$hr};
 	#keep some stats..
 	my $COGcnt=0;my %MGS; my $COGnot=0;
 	my %MGScnts;
-	open I,"<$MGSfile" or die "Can't open MGS guide file: $MGSfile\n";
-	open O,">$outF" or die "Can't open gen2MGS file: $outF\n";
-	while (my $lin = <I>){
+	open my $in, '<', $MGSfile or die "Can't open MGS guide file: $MGSfile\n";
+	my $tmpF = "$outF.tmp.$$";
+	open my $out, '>', $tmpF or die "Can't open temporary gen2MGS file $tmpF: $!\n";
+	while (my $lin = <$in>){
 		chomp $lin; my @spl = split (/\t/,$lin,-1);
 		if (@spl <2){die "incomplete entry in MGS guide file: @spl\n";}
-		next if ($spl[1] =~ m/\D/);# || $spl[1] =~ m/^\?$/); #only accept gene ids which are numbers
-		my @genes = split /,/,$spl[1];
+		my @genes = grep { /^\d+$/ } split /,/,$spl[1];
+		next unless @genes;
 		#not needed here..
 		#$MGS{$spl[0]} = \@genes;
 		my $cMGS =$spl[0];
@@ -178,10 +183,13 @@ sub createGene2MGS{
 				$curCOG = $COG{$x};
 				$MGScnts{$cMGS}++;
 			} else {$COGnot++;}
-			print O "$x\t$cMGS\t$curCOG\n";
+			print {$out} "$x\t$cMGS\t$curCOG\n"
+				or die "Can't write temporary gen2MGS file $tmpF: $!\n";
 		}
 	}
-	close I; close O;
+	close $in or die "Can't close MGS guide file $MGSfile: $!\n";
+	close $out or die "Can't close temporary gen2MGS file $tmpF: $!\n";
+	rename $tmpF, $outF or die "Can't replace gen2MGS file $outF: $!\n";
 	#report top lowest MGS
 	print "Lowest represented MGS::\n";
 	my @keys = sort { $MGScnts{$a} <=> $MGScnts{$b} } keys(%MGScnts); my $cntX=0;

@@ -64,7 +64,7 @@ use Mods::WorkflowControl qw(
 sub announce_MF4;
 sub smplStats; sub checkDrives; 
 sub isLastSampleInAssembly;
-sub runFinishedCleanup;
+sub finishedCleanupArguments; sub runFinishedCleanup; sub submitFinishedCleanup;
 sub uploadRawFilePrep; sub unploadRawFilePostprocess;
 sub seedUnzip2tmp; sub cleanInput; #unzipping reads; removing these at later stages ; remove tmp dirs
 
@@ -898,25 +898,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			}
 		}
 		if ($MFconfig{rmScratchTmp}) {
-			my @cleanupMembers = exists($map{$curSmpl}{AG_members})
-				? map { $map{$_}{SmplID} } @{$map{$curSmpl}{AG_members}}
-				: ($SmplName);
-			my @memberArgs = map { ('--member', $_) } @cleanupMembers;
-			my @cleanupMemberKeys = exists($map{$curSmpl}{AG_members})
-				? @{$map{$curSmpl}{AG_members}} : ($curSmpl);
-			my @memberLockArgs = map {
-				('--member-lock', "$map{$_}{wrdir}/LOGandSUB/$MFcontstants{DefaultSampleLock}")
-			} @cleanupMemberKeys;
-			runFinishedCleanup(
-				'--sample', $SmplName, @memberArgs, @memberLockArgs,
-				'--state-dir', "$finalCommAssDir/.cleanup-indexes",
-				'--allowed-root', $baseOut,
-				'--mapping-dir', $finalMapDir,
-				'--sample-temp', $smplTmpDir,
-				'--scratch-root', $MFglobal{runTmpDirGlobal},
-				'--assembly', $finAssLoc,
-				'--snp-log-dir', "$logDir/SNP",
-			);
+			runFinishedCleanup(finishedCleanupArguments(
+				$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
+				$smplTmpDir, $finAssLoc, $logDir,
+			));
 		}
 		print "next due to sample finished";
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
@@ -1436,7 +1421,17 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		add2SampleDeps(\@sampleDeps, [$consSNPdep]);
 		#push(@sampleDeps, $consSNPdep) if (defined $consSNPdep && $consSNPdep ne "");
 	}
-	MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
+	MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR);
+	if ($MFconfig{rmScratchTmp} && @sampleDeps) {
+		my $cleanupJob = submitFinishedCleanup(
+			"$logDir/FinishedCleanup.sh", "CLN$JNUM", \@sampleDeps,
+			finishedCleanupArguments(
+				$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
+				$smplTmpDir, $finAssLoc, $logDir,
+			),
+		);
+		add2SampleDeps(\@sampleDeps, [$cleanupJob]) if $cleanupJob ne '';
+	}
 	### loop2complete functionality
 	loop2C_check($cAssGrp,\@sampleDeps);
 
@@ -1514,6 +1509,27 @@ exit(0);
 #
 #####################################################
 
+sub finishedCleanupArguments {
+	my ($sampleKey, $sampleName, $assemblyDir, $mappingDir,
+		$sampleTemp, $assembly, $sampleLogDir) = @_;
+	my @memberKeys = exists($map{$sampleKey}{AG_members})
+		? @{$map{$sampleKey}{AG_members}} : ($sampleKey);
+	my @memberArgs = map { ('--member', $map{$_}{SmplID}) } @memberKeys;
+	my @memberLockArgs = map {
+		('--member-lock', "$map{$_}{wrdir}/LOGandSUB/$MFcontstants{DefaultSampleLock}")
+	} @memberKeys;
+	return (
+		'--sample', $sampleName, @memberArgs, @memberLockArgs,
+		'--state-dir', "$assemblyDir/.cleanup-indexes",
+		'--allowed-root', $baseOut,
+		'--mapping-dir', $mappingDir,
+		'--sample-temp', $sampleTemp,
+		'--scratch-root', $MFglobal{runTmpDirGlobal},
+		'--assembly', $assembly,
+		'--snp-log-dir', "$sampleLogDir/SNP",
+	);
+}
+
 sub runFinishedCleanup {
 	my @arguments = @_;
 	my @cleaner = shellwords(getProgPaths("finished_sample_cleanup"));
@@ -1528,6 +1544,43 @@ sub runFinishedCleanup {
 		return 0;
 	}
 	return 1;
+}
+
+sub submitFinishedCleanup {
+	my ($scriptFile, $jobName, $dependencies, @arguments) = @_;
+	return '' unless ref($dependencies) eq 'ARRAY' && @{$dependencies};
+	my @cleaner = shellwords(getProgPaths("finished_sample_cleanup"));
+	if (!@cleaner) {
+		warn "Finished-sample cleanup command is not configured\n";
+		return '';
+	}
+	my $command = _shell_command(@cleaner, @arguments)."\n";
+	my $dependencyString = normalise_job_dependencies($dependencies);
+	return '' if $dependencyString eq '';
+
+	my ($oldTmp, $oldShort, $oldAfterAny, $oldSubmissionConfig) =
+		@{$QSBoptHR}{qw(tmpSpace useShortQueue afterAny submissionConfig)};
+	$QSBoptHR->{tmpSpace} = 0;
+	$QSBoptHR->{useShortQueue} = 1;
+	$QSBoptHR->{afterAny} = 0;
+	if (($QSBoptHR->{qmode} || '') eq 'slurm'
+			&& ($QSBoptHR->{submissionConfig} || '') !~ /(?:^|;)--kill-on-invalid-dep=yes(?:;|$)/) {
+		$QSBoptHR->{submissionConfig} = join(';',
+			grep { defined($_) && $_ ne '' }
+				($QSBoptHR->{submissionConfig}, '--kill-on-invalid-dep=yes'));
+	}
+	my ($cleanupJob, $submissionError);
+	eval {
+		($cleanupJob) = qsubSystem(
+			$scriptFile, $command, 1, "1G", $jobName,
+			$dependencyString, "", 1, [], $QSBoptHR,
+		);
+		1;
+	} or $submissionError = $@ || 'unknown cleanup submission failure';
+	@{$QSBoptHR}{qw(tmpSpace useShortQueue afterAny submissionConfig)} =
+		($oldTmp, $oldShort, $oldAfterAny, $oldSubmissionConfig);
+	die $submissionError if defined $submissionError;
+	return $cleanupJob;
 }
 
 sub loop2C_check(){
