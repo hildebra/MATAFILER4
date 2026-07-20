@@ -5800,7 +5800,14 @@ sub bamDepth{
 		$locSrtMem = $baseMem + (2 * $mappingInputSizeMB/1024);
 		$locSrtMem += $baseMem if ($MFopt{largeMapperDB});
 	}
-	my $sortMemoryMB = int((($locSrtMem * 1024) - 2048) / $numCore);
+	# Duplicate removal streams name-sort -> fixmate -> coordinate-sort.  Both
+	# samtools sort processes are alive at once and -m applies per thread, so the
+	# configured total sort memory must be shared across both processes.  The
+	# old single-process calculation could allocate almost twice the Slurm
+	# request and was OOM-killed on large mappings.
+	my $sortProcessCount = $locDoRmDup ? 2 : 1;
+	my $sortMemoryMB = int((($locSrtMem * 1024) - 2048)
+		/ ($numCore * $sortProcessCount));
 	$sortMemoryMB = 256 if ($sortMemoryMB < 256);
 	$sortMemoryMB = 2048 if ($sortMemoryMB > 2048);
 	# A completed mapping may still predate breakpoint output.  Repair that
@@ -5915,6 +5922,7 @@ sub bamDepth{
 	if ($locDoRmDup){
 	#bit complicated in samtools now: first sort by name, then fixmate (samtools 1.8)
 	#".int($MFopt{mapSortMemGb}/$numCore)."G
+		$cmd .= "echo \"samtools sort budget: ${sortMemoryMB}M x $numCore threads x $sortProcessCount concurrent sorts\"\n";
 		$cmd .= "echo \"Sorting .bam and fixing mates ...\"\n";
 		#$cmd .= "$smtBin sort -n -m 768M -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore - - | $smtBin sort -T $sortTMP2 -m 768M -@ $numCore - | $smtBin markdup -s -r -@ $numCore - $nxtBAM\n";
 		#split in two, as it requires too much mem..
@@ -6047,7 +6055,7 @@ sub bamDepth{
 		#die "map2:: $qdir\n$cramSTO\n$nxtBAM.coverage\n";
 		my $combinedCores = $numCore > ($params{mappingCores} || 0) ? $numCore : ($params{mappingCores} || $numCore);
 		my $combinedMem = int($locSrtMem)+1;
-		my $sortRequiredMem = int(($sortMemoryMB * $numCore) / 1024) + 3;
+		my $sortRequiredMem = int((($sortMemoryMB * $numCore * $sortProcessCount) + 1023) / 1024) + 3;
 		$combinedMem = $sortRequiredMem if ($sortRequiredMem > $combinedMem);
 		$combinedMem = $params{mappingMemoryGB} if (($params{mappingMemoryGB} || 0) > $combinedMem);
 		my $combinedScript = $params{mappingScript} || $qdir.$bashN."map$supTag.sh";

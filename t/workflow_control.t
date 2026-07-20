@@ -382,8 +382,11 @@ like($mataf4,
 	qr/if \(\@bamParts > 1\).*?\$smtBin cat.*?elsif \(\@bamParts == 1\).*?mv \$bamParts\[0\]/s,
 	'samtools cat is reserved for multiple BAM segments');
 like($mataf4,
-	qr/my \$sortMemoryMB = .*?\$locSrtMem.*?\$numCore.*?sort -n -m \$\{sortMemoryMB\}M/s,
-	'samtools per-thread sort memory follows the requested total memory');
+	qr/my \$sortProcessCount = \$locDoRmDup \? 2 : 1.*?my \$sortMemoryMB = .*?\(\$numCore \* \$sortProcessCount\).*?sort -n -m \$\{sortMemoryMB\}M/s,
+	'samtools per-thread memory shares the total budget across concurrent sorts');
+like($mataf4,
+	qr/my \$sortRequiredMem = .*?\$sortMemoryMB \* \$numCore \* \$sortProcessCount/s,
+	'the mapping scheduler request covers every concurrently active sort process');
 like($mataf4,
 	qr/my %requiredMappers.*?next if \(\$mapper == 3 \|\| \$mapper == 5\).*?next if \(\$cmdDB eq ""\)/s,
 	'assembly index jobs are deduplicated and omitted for direct-FASTA mappers');
