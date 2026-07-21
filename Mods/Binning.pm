@@ -755,10 +755,13 @@ sub createBams{
 			my $mapped_name = <$marker_fh>;
 			close $marker_fh;
 			chomp $mapped_name;
-			my $primary = "$DDI/mapping/$mapped_name";
-			my $supplemental = $primary;
-			$supplemental =~ s/-smd\./.sup-smd./;
-			for my $candidate ($primary, $supplemental) {
+			my $named_mapping = "$DDI/mapping/$mapped_name";
+			my @candidates = ($named_mapping);
+			if ($mapped_name !~ /\.sup-smd\./i) {
+				(my $supplemental = $named_mapping) =~ s/-smd\./.sup-smd./i;
+				push @candidates, $supplemental if $supplemental ne $named_mapping;
+			}
+			for my $candidate (@candidates) {
 				if (!-e $candidate && $candidate =~ /\.bam$/) {
 					(my $cram = $candidate) =~ s/\.bam$/.cram/;
 					$candidate = $cram if (-e $cram);

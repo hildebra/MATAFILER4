@@ -128,6 +128,17 @@ isnt($status, 0, 'binning reference validator rejects a stale preassembly CRAM')
 like($errors, qr/mapping\/reference mismatch.*missing 'preassembly_contig'/is,
 	'reference mismatch failure identifies the stale contig and required remap');
 
+unlink $alignment or die $!;
+write_file(File::Spec->catfile($mapping_dir, 'done.sto'), "sample.sup-smd.cram\n");
+my $support_alignment = File::Spec->catfile($mapping_dir, 'sample.sup-smd.cram');
+write_file($support_alignment, "\@HD\tVN:1.6\n\@SQ\tSN:a\tLN:4\n");
+($status, $output, $errors) = run_script('validate_mapping_references.pl',
+	'--assembly', $assembly, '--samtools', $fake_samtools,
+	'--sample-dirs', $tmp);
+is($status, 0, 'binning reference validator accepts a support-only mapping');
+like($output, qr/Validated 1 mapping file/,
+	'support-only mapping is validated without inventing a primary mapping');
+
 my $bin_dir = File::Spec->catdir($tmp, 'bins');
 mkdir $bin_dir or die $!;
 my $sentinel = File::Spec->catfile($bin_dir, 'keep.txt');

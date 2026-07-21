@@ -492,11 +492,14 @@ sub jgi_depth_cmd{
 			my $SmplNm = <$marker_fh>;
 			close $marker_fh;
 			chomp $SmplNm;
-			my $primary = "$DDI/mapping/$SmplNm";
-			my $supplemental = $primary;
-			$supplemental =~ s/-smd\./.sup-smd./;
-			my $primary_found = 0;
-			for my $candidate ($primary, $supplemental) {
+			my $named_mapping = "$DDI/mapping/$SmplNm";
+			my @candidates = ($named_mapping);
+			if ($SmplNm !~ /\.sup-smd\./i) {
+				(my $supplemental = $named_mapping) =~ s/-smd\./.sup-smd./i;
+				push @candidates, $supplemental if $supplemental ne $named_mapping;
+			}
+			my $mapping_found = 0;
+			for my $candidate (@candidates) {
 				if (!-s $candidate && $candidate =~ /\.bam$/i) {
 					(my $cram = $candidate) =~ s/\.bam$/.cram/i;
 					$candidate = $cram if -s $cram;
@@ -505,11 +508,11 @@ sub jgi_depth_cmd{
 					$candidate = $bam if -s $bam;
 				}
 				next unless -s $candidate;
-				$primary_found = 1 if $candidate !~ /\.sup-smd\./;
+				$mapping_found = 1;
 				push @mapping_files, $candidate unless $seen_mapping{$candidate}++;
 			}
-			die "jgi_depth_cmd:::Can't find a non-empty primary BAM or CRAM at $DDI\n"
-				unless $primary_found;
+			die "jgi_depth_cmd:::Can't find a non-empty BAM or CRAM named by $marker\n"
+				unless $mapping_found;
 		}
 	}
 	$isCram = scalar grep { /\.cram$/i } @mapping_files;

@@ -66,6 +66,18 @@ is_deeply($alignments, [
 	"$sample_dir/mapping/S1.sup-smd.bam",
 ], 'primary and supplemental mappings are both supplied to BAM-based binners');
 
+my $support_only_dir = "$root/S2";
+make_path("$support_only_dir/mapping");
+write_file("$support_only_dir/mapping/done.sto", "S2.sup-smd.bam\n");
+write_file("$support_only_dir/mapping/S2.sup-smd.bam", 's');
+my ($support_conversion, $support_alignments) = Mods::Binning::createBams(
+	[$support_only_dir], "$root/support-tmp", "$root/support-out", 'support-bins',
+	"$root/ref.fa", 2, 0, 0, 'bam',
+);
+is($support_conversion, '', 'support-only BAM does not require conversion');
+is_deeply($support_alignments, ["$support_only_dir/mapping/S2.sup-smd.bam"],
+	'support-only marker supplies its mapping without constructing a sup.sup filename');
+
 my ($empty_command, $empty_alignments) = Mods::Binning::createBams(
 	[], "$root/tmp", "$root/empty", 'empty', "$root/ref.fa", 2, 1, 0, 'bam',
 );
@@ -88,6 +100,19 @@ like($depth_command, qr/\Q$sample_dir\/mapping\/S1.sup-smd.bam\E/,
 	'JGI depth includes the supplemental alignment');
 like($depth_command, qr/^set -e\n/,
 	'JGI depth generation cannot hide a failed CRAM conversion or depth program');
+my $support_depth_command;
+{
+	no warnings 'redefine';
+	local *Mods::IO_Tamoc_progs::getProgPaths = sub {
+		return $_[0] eq 'samtools' ? 'samtools' : 'jgi_summarize_bam_contig_depths';
+	};
+	$support_depth_command = jgi_depth_cmd(
+		[$support_only_dir], "$root/support-depth", 95, 2, "$root/ref.fa");
+}
+like($support_depth_command, qr/\Q$support_only_dir\/mapping\/S2.sup-smd.bam\E/,
+	'JGI depth accepts a support-only assembly mapping');
+unlike($support_depth_command, qr/\.sup\.sup-smd\./,
+	'support-only depth discovery does not invent a duplicate support suffix');
 like(checkMapsDoneSH([$sample_dir]), qr/\Q$sample_dir\/mapping\/done.sto\E/,
 	'mapping checks recognize existing sample directories without requiring a trailing slash');
 

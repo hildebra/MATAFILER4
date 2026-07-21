@@ -50,11 +50,17 @@ for my $sample_dir (split /,/, $sample_dirs) {
 	die "Invalid mapping filename in $marker\n"
 		unless defined($mapped_name) && $mapped_name =~ /^[^\\\/\r\n]+\.(?:bam|cram)$/i;
 
-	my $primary = "$sample_dir/mapping/$mapped_name";
-	my $supplemental = $primary;
-	$supplemental =~ s/-smd\./.sup-smd./;
-	my $primary_found = 0;
-	for my $candidate ($primary, $supplemental) {
+	my $named_mapping = "$sample_dir/mapping/$mapped_name";
+	my @candidates = ($named_mapping);
+	# A sample with no primary reads legitimately publishes its supplementary
+	# mapping in done.sto.  Only derive a supplementary sibling when the marker
+	# names a primary mapping; otherwise this would invent *.sup.sup-smd.*.
+	if ($mapped_name !~ /\.sup-smd\./i) {
+		(my $supplemental = $named_mapping) =~ s/-smd\./.sup-smd./i;
+		push @candidates, $supplemental if $supplemental ne $named_mapping;
+	}
+	my $mapping_found = 0;
+	for my $candidate (@candidates) {
 		if (!-s $candidate && $candidate =~ /\.bam$/i) {
 			(my $alternate = $candidate) =~ s/\.bam$/.cram/i;
 			$candidate = $alternate if -s $alternate;
@@ -63,10 +69,10 @@ for my $sample_dir (split /,/, $sample_dirs) {
 			$candidate = $alternate if -s $alternate;
 		}
 		next unless -s $candidate;
-		$primary_found = 1 if $candidate !~ /\.sup-smd\./;
+		$mapping_found = 1;
 		push @alignments, $candidate unless $seen_alignment{$candidate}++;
 	}
-	die "No non-empty primary BAM or CRAM named by $marker\n" unless $primary_found;
+	die "No non-empty BAM or CRAM named by or associated with $marker\n" unless $mapping_found;
 }
 
 die "No alignment files were found\n" unless @alignments;
@@ -113,4 +119,3 @@ if (@failures) {
 }
 
 print "Validated ".scalar(@alignments)." mapping file(s) against $assembly\n";
-
