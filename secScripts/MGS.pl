@@ -29,8 +29,9 @@ use Cwd qw(abs_path);
 #.28: 28.12.25: multi scaling flags for strainScr1 added
 #.31: propagate catalog identity and store validated checkpoint manifests
 #.32: remove deprecated hierarchical/deep-correlation post-clustering path
+#.33: harden sparse Canopy/MAG/MGS outcomes, singleton output, weighted resumes, and phylogeny skips
 
-my $MGSpipelineVersion = 0.32;
+my $MGSpipelineVersion = 0.33;
 my $clusterID = 95;
 
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
@@ -65,6 +66,21 @@ sub _count_lines {
 		close $fh or die "Cannot close $file: $!\n";
 	}
 	return $count;
+}
+
+sub _matrix_sample_count {
+	my ($file) = @_;
+	my ($fh, $ok) = gzipopen($file, 'gene abundance matrix', 1, 0);
+	die "Cannot open gene abundance matrix $file\n" unless $ok && defined $fh;
+	my $header = <$fh>;
+	close $fh or die "Cannot close gene abundance matrix $file: $!\n";
+	die "Gene abundance matrix is empty: $file\n" unless defined $header;
+	chomp $header;
+	my @fields = split /\t/, $header, -1;
+	pop @fields while @fields && $fields[-1] eq '';
+	shift @fields if @fields;
+	die "Gene abundance matrix has no sample columns: $file\n" unless @fields;
+	return scalar @fields;
 }
 
 sub _touch_checkpoint {
@@ -104,19 +120,67 @@ sub _checkpoint_command {
 sub _bin_assignments_are_empty {
 	my ($file) = @_;
 	open my $fh, '<', $file or die "Cannot open bin assignments $file: $!\n";
-	my $seen = 0;
 	while (my $line = <$fh>) {
 		chomp $line;
 		next unless length $line;
 		my @fields = split /\t/, $line;
-		$seen = 1;
+		next if @fields >= 2 && $fields[0] eq 'Sequence ID';
 		if (defined $fields[1] && $fields[1] ne '0') {
 			close $fh;
 			return 0;
 		}
 	}
 	close $fh or die "Cannot close $file: $!\n";
-	return $seen;
+	return 1;
+}
+
+sub _mgs_ids {
+	my ($file) = @_;
+	return () unless defined($file) && -f $file;
+	open my $fh, '<', $file or die "Cannot open MGS assignments $file: $!\n";
+	my %ids;
+	while (my $line = <$fh>) {
+		chomp $line;
+		next if $line =~ /^\s*$/;
+		next if $line =~ /^#/;
+		my @fields = split /\t/, $line, -1;
+		next if $fields[0] eq 'Bin';
+		die "Malformed MGS assignment in $file at line $.\n"
+			unless @fields >= 2 && length($fields[0]) && length($fields[1]);
+		$ids{$fields[0]} = 1;
+	}
+	close $fh or die "Cannot close MGS assignments $file: $!\n";
+	return sort keys %ids;
+}
+
+sub _mgs_count {
+	my ($file) = @_;
+	my @ids = _mgs_ids($file);
+	return scalar @ids;
+}
+
+sub _write_single_mgs_observations {
+	my ($cluster_file, $observation_file) = @_;
+	my @ids = _mgs_ids($cluster_file);
+	die "Cannot synthesize observations for " . scalar(@ids) . " MGS in $cluster_file\n"
+		unless @ids == 1;
+	open my $fh, '>', $observation_file
+		or die "Cannot write single-MGS observations $observation_file: $!\n";
+	print {$fh} "Bin\tObservations\tQualTier\tMembers\n$ids[0]\t1\t1\t\n"
+		or die "Cannot write single-MGS observations $observation_file: $!\n";
+	close $fh or die "Cannot close $observation_file: $!\n";
+}
+
+sub _finish_without_mgs {
+	my ($reason, $report_file, $checkpoint_file) = @_;
+	open my $fh, '>', $report_file or die "Cannot write $report_file: $!\n";
+	print {$fh} "MGS reconstruction completed without a usable MGS.\nReason: $reason\n"
+		or die "Cannot write $report_file: $!\n";
+	close $fh or die "Cannot close $report_file: $!\n";
+	_touch_checkpoint($checkpoint_file, 'no-usable-mgs', $report_file);
+	printL "MGS reconstruction completed without a usable MGS: $reason\n";
+	close LOG or die "Cannot close MGS pipeline log: $!\n";
+	exit 0;
 }
 
 
@@ -231,6 +295,8 @@ my $st1ston = "$chkpDir/Stage1.stone";
 my $iniMB2sto = "$chkpDir/$BinnerShrt.cm.stone";
 my $GTDBtaxSto = "$chkpDir/GTDBTK.stone";
 my $BinExtrSto = "$chkpDir/BinExtr.stone";
+my $noMGSSto = "$chkpDir/no-usable-mgs.stone";
+my $noMGSReport = "$outD/NO_MGS.txt";
 
 #main guide files for MGS
 my $finalClusters2 = "$outD/$BinnerShrt.clusters";
@@ -270,8 +336,14 @@ my @DoosD = sort keys %DOs; #dirs of assembly groups
 
 
 my $numSamples = scalar(  @{$map{opt}{smpl_order}}  );#@DoosD;
+die "No samples were found in the mapping input: $mapF\n" unless $numSamples;
+my $profileSamples = _matrix_sample_count("$GCd/Matrix.mat.gz");
 my $useCanopies=1;
-if ($numSamples<10 || $canopyF eq ""){$useCanopies=0;}
+if ($profileSamples<10 || $canopyF eq ""){$useCanopies=0;}
+if ($useCanopies && !-s $canopyF) {
+	warn "Requested Canopy assignments are missing or empty; continuing without Canopy MGS: $canopyF\n";
+	$useCanopies = 0;
+}
 
 my $ph1flag = 1;
 $ph1flag = 0 if (-e "$outD/$BinnerShrt.clusters.obs");
@@ -286,8 +358,10 @@ printL "Tmp dir: $tmpD\n";
 printL "Ref Canopies: $canopyF\n" if ($canopyF ne "" && $useCanopies);
 printL "MGS save dir: $outD\n";
 if (!$useCanopies){
-	printL "No Canopies used due to N<10 samples (N=$numSamples)\n"; 
+	my $reason = $profileSamples < 10 ? "N<10 matrix samples (N=$profileSamples)" : "no usable Canopy assignment file";
+	printL "No Canopies used: $reason\n";
 }
+printL "Samples in map: $numSamples; abundance profiles in matrix: $profileSamples\n";
 printL "Cores used: $canCore\n";
 printL "Memory: ${memG}G\n";
 printL "Rewriting Taxonomy\n" if ($rewrTAX);
@@ -307,20 +381,32 @@ if ($rewrClusterMAGs) {
 my @marker_lca_files = glob("$GCd/$COGdir/*.LCA");
 die "No marker-gene LCA files found in $GCd/$COGdir\n" unless @marker_lca_files;
 my $FMGsubs = _count_lines(@marker_lca_files);
-if ($FMGsubs < 20){die "$GCd/$COGdir/*.LCA suspiciously small (N=$FMGsubs)\n/ Please ensure correctness\n";} #$GCd/Matrix.$COGdir.mat
+if ($FMGsubs < 20) {
+	_finish_without_mgs("only $FMGsubs marker-gene LCA assignments were available for $profileSamples abundance profile(s)", $noMGSReport, $noMGSSto)
+		if $profileSamples < 10;
+	die "$GCd/$COGdir/*.LCA suspiciously small (N=$FMGsubs)\nPlease ensure correctness\n";
+} #$GCd/Matrix.$COGdir.mat
 #die;
-my $CanoDir = $canopyF;$CanoDir=~s/\/[^\/]+$/\//; $CanoDir .= "Bins/";
-#die "$CanoDir";
-CanopyPrep($canopyF,$CanoDir);
-$canopyF = $canopyF.".filt" if ($canopyF ne "");
+my $usableCanopyCount = 0;
+if ($useCanopies) {
+	my $CanoDir = $canopyF;$CanoDir=~s/\/[^\/]+$/\//; $CanoDir .= "Bins/";
+	#die "$CanoDir";
+	$usableCanopyCount = CanopyPrep($canopyF,$CanoDir);
+	if ($usableCanopyCount) {
+		$canopyF .= ".filt";
+	} else {
+		warn "No Canopy MGS passed size/quality preparation; continuing with MAGs only\n";
+		$useCanopies = 0;
+	}
+}
 
 #run metabat on each assembly group
 my $cnt=0; my @jobs;
 printL "Found ".scalar(@DoosD) ." assembly groups, ";
 if ($ph1flag){
-	printL "with Binnings\n"; 
+	printL "clustering available binnings\n";
 } else {
-	printL "calculating $BinnerShrt binnings\n";
+	printL "reusing existing $BinnerShrt MGS clustering\n";
 }
 foreach my $Doo (@DoosD){ #this loops ensures Binner predictions exist for each assembly
 	#print "$Doo\n";
@@ -385,7 +471,7 @@ qsubSystemJobAlive( \@jobs,\%QSBopt );
 
 
 #check that really all cm 's are there
-$cnt=0; my @missedMAGs=();
+$cnt=0; my @missedMAGs=(); my $usableMAGcount=0;
 printL "Checking all MAGs are present\n";
 foreach my $Doo (@DoosD){
 	printL "$BinnerShrt MAGs per sample group:\n" if ($cnt==0);
@@ -406,6 +492,12 @@ foreach my $Doo (@DoosD){
 	my $ret = -e "$MBout$cmSuffix" ? _count_lines("$MBout$cmSuffix") : 0;
 	#printL "$smplIDs[-1]($Doo)\t$ret\n";
 	die "Bin $MBout seems incomplete\n" unless (-e "$MBout$cmSuffix" && -e "$MBout.assStat");
+	my ($bin_assignments, $bin_quality) = MB2assigns($MBout, "$MBout$cmSuffix");
+	for my $bin (keys %{$bin_assignments}) {
+		next unless exists $bin_quality->{$bin};
+		$usableMAGcount++
+			if $bin_quality->{$bin}{compl} >= 60 && $bin_quality->{$bin}{conta} <= 10;
+	}
 	$cnt++;
 }
 printL "Done reading MAGs\n";
@@ -413,6 +505,9 @@ printL "Missed MAGs from " . scalar(@missedMAGs). " assembly groups\n:@missedMAG
 unlink $iniMB2sto or die "Cannot invalidate stale checkpoint $iniMB2sto: $!\n"
 	if @missedMAGs && -e $iniMB2sto;
 _touch_checkpoint($iniMB2sto, 'per-sample-mag-quality') unless _checkpoint_valid($iniMB2sto) || @missedMAGs;
+
+_finish_without_mgs("no assigned MAG passed the minimum 60% completeness/10% contamination screen and no usable Canopy MGS was available", $noMGSReport, $noMGSSto)
+	unless $usableMAGcount || $usableCanopyCount;
 
 #if ($cnt){	print "Waiting for jobs to finish.. restart when done\n";	exit(0);}
 
@@ -435,12 +530,48 @@ if ($ph1flag  || !-e "$outD/$BinnerShrt.clusters" ){
 die if ($stopAfterCluster); #DEBUGing only!!
 
 #decide between weighted and unweighted scores for binning
-if ($useWeightedMGSscores && !-e "${finalClusters2}UW" ){
-	die "Could not find required file $finalClusters2\n" unless -s $finalClusters2;
-	die "Could not find required file $finalClustersW\n" unless -s $finalClustersW;
-	rename $finalClusters2, "${finalClusters2}UW" or die "Cannot preserve $finalClusters2: $!\n";
-	rename $finalClustersW, $finalClusters2 or die "Cannot activate weighted clusters $finalClustersW: $!\n";
+my $activeMGSCount = _mgs_count($finalClusters2);
+my $weightedMGSCount = _mgs_count($finalClustersW);
+my $preservedMGSCount = _mgs_count("${finalClusters2}UW");
+my $activatedOnlyWeighted = 0;
+if (!$activeMGSCount && $preservedMGSCount) {
+	warn "Restoring preserved unweighted MGS assignments after an incomplete weighted handoff\n";
+	rename "${finalClusters2}UW", $finalClusters2
+		or die "Cannot restore ${finalClusters2}UW as $finalClusters2: $!\n";
+	$activeMGSCount = $preservedMGSCount;
+}
+if (!$activeMGSCount && !$preservedMGSCount && $weightedMGSCount) {
+	warn "Activating the only available weighted MGS assignments\n";
+	rename $finalClustersW, $finalClusters2
+		or die "Cannot activate $finalClustersW as $finalClusters2: $!\n";
+	$activeMGSCount = $weightedMGSCount;
+	$weightedMGSCount = 0;
+	$activatedOnlyWeighted = 1;
+}
+if ($useWeightedMGSscores && !$preservedMGSCount && !$activatedOnlyWeighted){
+	unlink "${finalClusters2}UW" or die "Cannot remove empty ${finalClusters2}UW: $!\n"
+		if -e "${finalClusters2}UW";
+	if ($activeMGSCount && $weightedMGSCount) {
+		rename $finalClusters2, "${finalClusters2}UW" or die "Cannot preserve $finalClusters2: $!\n";
+		rename $finalClustersW, $finalClusters2 or die "Cannot activate weighted clusters $finalClustersW: $!\n";
+		$activeMGSCount = $weightedMGSCount;
+	} elsif ($activeMGSCount) {
+		warn "Weighted MGS assignments were not produced; retaining the valid unweighted assignments\n";
+	}
 	#system "touch $finalClustersW.mov";
+}
+
+_finish_without_mgs("MAG/Canopy clustering produced no MGS assignments", $noMGSReport, $noMGSSto)
+	unless $activeMGSCount;
+
+my $observation_file = "$outD/$BinnerShrt.clusters.obs";
+if (!-s $observation_file) {
+	if ($activeMGSCount == 1) {
+		_write_single_mgs_observations($finalClusters2, $observation_file);
+		printL "Synthesized the missing observation table for a single MGS\n";
+	} else {
+		die "MGS observation file is missing for $activeMGSCount MGS: $observation_file\n";
+	}
 }
 
 #alt motulizer?
@@ -452,6 +583,11 @@ my $RfilterMB2 = getProgPaths("filterMB2core");
 my $postCmd = "$RfilterMB2 $finalClusters2\n" ; #creates $outD/MB2.clusters.core & $outD/MB2.clusters.ext
 die "MGS cluster file is missing or empty: $finalClusters2\n" unless -s $finalClusters2;
 systemW $postCmd if !-s $finalClustersFilt;
+my $coreMGSCount = _mgs_count($finalClustersFilt);
+_finish_without_mgs("no MGS retained any core genes after post-filtering", $noMGSReport, $noMGSSto)
+	unless $coreMGSCount;
+unlink $noMGSReport or die "Cannot remove stale $noMGSReport: $!\n" if -e $noMGSReport;
+unlink $noMGSSto or die "Cannot remove stale $noMGSSto: $!\n" if -e $noMGSSto;
 
 #die;
 
@@ -651,7 +787,9 @@ my $ph1Cmd = "$baseTreeCmd -outD $outDphylo -wait2finish $wait4tree "; #superTre
 my $treedep="";
 
 
-if (!-e "$outDphylo/phylo/IQtree_allsites.treefile" || !-e "$outD/between_phylo/phylo/IQtree_allsites.pdf"){
+if ($coreMGSCount < 3) {
+	printL "Skipping between-MGS phylogeny: at least 3 MGS are required, but only $coreMGSCount were retained\n";
+} elsif (!-e "$outDphylo/phylo/IQtree_allsites.treefile" || !-e "$outD/between_phylo/phylo/IQtree_allsites.pdf"){
 	print "Construct phylogeny of all MGS:\n$ph1Cmd\n";
 	
 	my $refTreeMsg = "\n################\n# If you want to include custom reference genomes, use \n# $baseTreeCmd-outD $outD/customRefs/ -refGenos [refs]\n################\n";
@@ -671,9 +809,13 @@ if (!-e "$outDphylo/phylo/IQtree_allsites.treefile" || !-e "$outD/between_phylo/
 	#my ($jobName2, $tmpCmd) = qsubSystem($logDir."/interMGSphylo.sh",$ph1Cmd,1,int(150/1)."G","MGSphylo","","",1,[],\%QSBopt) ;
 	#	print "WAITID=$dep\n";
 		print $ph1OUT;
-		die "Between-MGS phylogeny command did not report WAITID:\n$ph1OUT\n"
-			unless $ph1OUT =~ m/WAITID=(\d+)/;
-		$treedep = $1;
+		if ($ph1OUT =~ m/WAITID=(\d+)/) {
+			$treedep = $1;
+		} elsif ($ph1OUT =~ m/^SKIPPED=(.+)$/m) {
+			printL "Between-MGS phylogeny was skipped by its launcher: $1\n";
+		} else {
+			die "Between-MGS phylogeny command reported neither WAITID nor SKIPPED:\n$ph1OUT\n";
+		}
 	}
 }
 
@@ -729,7 +871,9 @@ if ($numSamples > 1500){#scale with the number of assembly groups
 #my $prunTree = "$outD/between_phylo/prunned.nwk";
 #
 #my $ph2Cmd = "$strain1scr $GCd $finalClustersFilt.mgs $canCore $iniTree 0 1\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
-my $ph2Cmd = "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore  -MGSphylo $iniTree -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ \n";
+my $ph2Cmd = "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ ";
+$ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree;
+$ph2Cmd .= "\n";
 
 $ph2Cmd .= "#consider adapting further options: \n#-rmMSA 0 -presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -nodeTmp [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
 $ph2Cmd .= "#-minSNPCallQual 20 -GenesPerSpecies 0.1 -GeneLengthMin 0.5 -skipIndels 0 -minSNPDepth 2 -SNPdepthFilterScale 0.1 -SNPindelRangeFilt 5 -SNPadaptiveQual 0.0";
@@ -803,16 +947,17 @@ sub invertIndex{
 }
 sub CanopyPrep{
 	my ($inFc,$binCanDir) = @_;
-	if ($canopyF eq ""){print"Canopy not requested, will skip step\n";return ;}
+	if ($canopyF eq ""){print"Canopy not requested, will skip step\n";return 0;}
 	#read genes in canopies..
 	my $ChkMevalF = "$inFc.filt$cmSuffix";
-	return if (-s $ChkMevalF);
+	return _mgs_count("$inFc.filt") if (-s $ChkMevalF);
 	my %cans; my %canCnts; my %can2gene;
 	printL "Prepping Canopy MGS (format, Bin quality)..\n";
 	printL "$inFc\n";
 	open I,"<$inFc" or die "can't open canopy file $inFc\n";
 	while (<I>){
-		chomp; my @spl = split /\t/;
+		chomp; next if /^\s*$/; my @spl = split /\t/;
+		die "Malformed Canopy assignment in $inFc at line $.\n" unless @spl >= 2 && length($spl[0]) && length($spl[1]);
 		#$cans{$spl[1]} = $spl[0];
 		$canCnts{$spl[0]} ++;
 		push(@{$can2gene{$spl[0]}},$spl[1]);
@@ -830,6 +975,7 @@ sub CanopyPrep{
 	}
 	close O;
 	printL "Kept $canCNT/". scalar(keys(%canCnts)) . " Canopy MGS\n";
+	return 0 unless $canCNT;
 	createBinFAA($binCanDir,"$inFc.filt","$GCd/compl.incompl.$clusterID.prot.faa","faa");
 	if ($useCheckM1 && !-s $ChkMevalF) {
 		printL "running checkM on new Canopy MGS..\n";
@@ -850,7 +996,7 @@ sub CanopyPrep{
 	#wait for checkM & checkM2
 	qsubSystemJobAlive( \@jobs2wait,\%QSBopt );@jobs2wait = ();
 	die "Canopy quality checking completed without producing $ChkMevalF\n" unless -s $ChkMevalF;
-
+	return $canCNT;
 }
 
 

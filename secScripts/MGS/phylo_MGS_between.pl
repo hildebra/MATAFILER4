@@ -2,21 +2,19 @@
 #script to get a set of marker genes from each FMG (40 MG), extract them, and build phylo tree
 #relatively simple, since can use genes directly from gene cat, no need to get SNP called genes
 #can also include reference genomes to include in tree
+# 2026-07 sparse-MGS hardening: finish explicitly when fewer than three marker-bearing taxa exist.
 #perl /hpc-home/hildebra/dev/Perl/MATAF3//secScripts/MGS/phylo_MGS_between.pl -GCd /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1/ -MGS /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//MB2.clusters.ext.can.Rhcl.filt -c 10 -outD /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//customRefs/ -refGenos '/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta'
 
 use warnings;
 use strict;
 use Getopt::Long qw( GetOptions );
+use File::Path qw(make_path);
 
 use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
 use Mods::phyloTools qw(calcDisPos2 getGenoGenes getFMG readFMGdir);
 use Mods::geneCat qw(calculate_spearman_correlation read_matrix correlation checkAntiOcc);
-
-my $bts = getProgPaths("buildTree_scr");
-my $vizTree = getProgPaths("vizBtwPhylo_R");
-
 
 if (@ARGV < 2){
 	die "Not enough input args: use \n./phylo_MGS.pl -GCd [path to GC] -MGS [MGS file]\n";
@@ -137,9 +135,21 @@ while (<I>){
 }
 close I;
 my $mgs_with_fmg = scalar keys %MGSFMG;
-die "No FMG genes from $GCd/FMG.subset.cats were assigned to any MGS in $MGSfile\n"
-	unless $mgs_with_fmg;
+if ($mgs_with_fmg < 3) {
+	make_path($btout) unless -d $btout;
+	my $skip_file = "$btout/SKIPPED.txt";
+	open my $skip_fh, '>', $skip_file or die "Cannot write $skip_file: $!\n";
+	print {$skip_fh} "Between-MGS phylogeny skipped: only $mgs_with_fmg marker-bearing MGS were available; at least 3 are required.\n"
+		or die "Cannot write $skip_file: $!\n";
+	close $skip_fh or die "Cannot close $skip_file: $!\n";
+	print "SKIPPED=too_few_marker_bearing_MGS:$mgs_with_fmg\n";
+	exit 0;
+}
+my $bts = getProgPaths("buildTree_scr");
+my $vizTree = getProgPaths("vizBtwPhylo_R");
 print "Assigned $mfcnt genes to MGS in $mgs_with_fmg MGS (". int(10*$mfcnt/$mgs_with_fmg)/10 ." on average, $mfdbl double)\n";
+unlink "$btout/SKIPPED.txt" or die "Cannot remove stale $btout/SKIPPED.txt: $!\n"
+	if -e "$btout/SKIPPED.txt";
 
 
 #routine to do double checking etc and also find targets for merging gene clusters..

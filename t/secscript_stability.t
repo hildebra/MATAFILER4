@@ -237,6 +237,12 @@ like($gene_cat, qr/my \$effectiveMem = \$totMem < 250 \? 250 : \$totMem/,
      'Canopy computes its memory floor without mutating global memory');
 like($gene_cat, qr/if \(!-s "\$oD\/clusters\.txt" \|\| !-s "\$oD\/profiles\.txt"\)/,
      'Canopy reruns when either required output is missing or empty');
+like($gene_cat, qr/my \$stageCmd = "#taxonomic assignments.*?else \{\s*\$cmd \.= \$stageCmd/s,
+     'fire-and-forget annotation stages append without clearing earlier commands');
+unlike($gene_cat, qr/_stone_valid\(\$(?:krakStone|funcStone|emapStone|canopyStone).*?\{\$cmd=""/,
+       'completed optional stages do not erase the shared fire-and-forget command buffer');
+like($gene_cat, qr/declutter-skipped-low-sample-count/,
+     'matrix decluttering records an explicit sparse-run skip');
 like($gene_cat, qr/sysopen\(\$lock_fh, \$lock_file, O_CREAT \| O_EXCL/,
      'parallel gene batches acquire their append lock atomically');
 unlike($gene_cat, qr/open \$OC,"\| gzip/,

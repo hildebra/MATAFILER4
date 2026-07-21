@@ -65,6 +65,14 @@ write_file($assignments, "contig1\t2\n");
 eval { MB2assigns($assignments, $cm2) };
 like($@, qr/No quality record for assigned bin '2'/, 'assigned bins without quality records fail explicitly');
 
+my $empty_assignments = File::Spec->catfile($tmp, 'empty-assignments.tsv');
+my $empty_quality = File::Spec->catfile($tmp, 'empty-quality.cm2');
+write_file($empty_assignments, "Sequence ID\tBin\n");
+write_file($empty_quality, "Name\tCompleteness\tContamination\n");
+my ($empty_bins, $empty_bin_quality) = MB2assigns($empty_assignments, $empty_quality);
+is_deeply($empty_bins, {}, 'a header-only bin assignment is a valid empty biological result');
+is_deeply($empty_bin_quality, {}, 'an empty bin assignment does not require fabricated quality rows');
+
 my $gc = File::Spec->catdir($tmp, 'GC');
 make_path(File::Spec->catdir($gc, 'Anno', 'Tax'));
 my $tax_mgs = File::Spec->catfile($tmp, 'tax.clusters');
@@ -105,6 +113,8 @@ ok(!-e "$missing_kraken_prefix.LCA" && !-e "$missing_kraken_prefix.tax",
 my $between_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'phylo_MGS_between.pl'));
 like($between_source, qr/open I,"<\$GCd\/FMG\.subset\.cats"/,
 	'between-MGS phylogeny intentionally remains tied to the FMG marker set');
+like($between_source, qr/if \(\$mgs_with_fmg < 3\).*?SKIPPED=too_few_marker_bearing_MGS/s,
+	'between-MGS phylogeny reports a successful cardinality skip before invoking a tree builder');
 my $strain_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 like($strain_source, qr/my \$tree_sample_separator = quotemeta\(\$SaSe\)/,
 	'within-MGS tree command escapes the pipe sample separator as a regular expression');
@@ -129,6 +139,8 @@ like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 like($resort_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
 	'gene-priority resorting uses the propagated catalog identity');
 my $mgs_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.33;/,
+	'MGS sparse-run hardening increments the pipeline version');
 like($mgs_source, qr/"clusterID=i" => \\\$clusterID/,
 	'MGS accepts a gene-catalog cluster identity');
 like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -cores \$numCore/,
@@ -141,6 +153,36 @@ like($mgs_source, qr/warn "Optional Kraken MGS taxonomy stage incomplete; contin
 	'missing optional Kraken taxonomy is still reported');
 like($mgs_source, qr/if \(!-s \$krakenInput\).*?skipping MGS Kraken taxonomy:.*?else \{.*?qsubSystem\(\$logDir\."\/krak2MGS\.sh"/s,
 	'MGS does not submit the optional Kraken taxonomy job without its input');
+like($mgs_source, qr/my \$profileSamples = _matrix_sample_count\("\$GCd\/Matrix\.mat\.gz"\)/,
+	'MGS bases Canopy eligibility on the actual abundance-matrix columns');
+like($mgs_source, qr/Requested Canopy assignments are missing or empty; continuing without Canopy MGS/,
+	'MGS treats an absent optional Canopy result as a MAG-only run');
+like($mgs_source, qr/sub _finish_without_mgs.*?no-usable-mgs.*?exit 0/s,
+	'MGS has an explicit successful no-usable-MGS terminal state');
+like($mgs_source, qr/no assigned MAG passed the minimum 60% completeness\/10% contamination screen/,
+	'MGS stops before MAG clustering when sparse input contains no minimally usable bins');
+like($mgs_source, qr/_write_single_mgs_observations\(\$finalClusters2, \$observation_file\)/,
+	'a single MGS receives the observation table omitted by the clustering implementation');
+like($mgs_source, qr/Weighted MGS assignments were not produced; retaining the valid unweighted assignments/,
+	'a valid sparse unweighted result no longer requires a weighted alternative');
+like($mgs_source, qr/my \$coreMGSCount = _mgs_count\(\$finalClustersFilt\).*?no MGS retained any core genes/s,
+	'an empty post-filter result becomes a reported no-MGS outcome');
+unlike($mgs_source, qr/scalar\s*\(?_mgs_ids/,
+	'MGS counts list-returning assignment IDs without imposing scalar context on sort');
+my ($mgs_count_helpers) = $mgs_source =~ /(sub _mgs_ids \{.*?^\}\s+sub _mgs_count \{.*?^\})/ms;
+ok(defined $mgs_count_helpers, 'MGS assignment-count helpers can be isolated for testing');
+my $mgs_helpers_loaded = eval "$mgs_count_helpers\n1;";
+ok($mgs_helpers_loaded, 'MGS assignment-count helpers compile independently') or diag($@);
+my $countable_mgs = File::Spec->catfile($tmp, 'countable.clusters');
+write_file($countable_mgs, "Bin\tGene\nMGS1\tg1\nMGS1\tg2\n");
+is(main::_mgs_count($countable_mgs), 1,
+	'MGS assignment counting returns the number of distinct bins, not scalar-sort output');
+like($mgs_source, qr/Activating the only available weighted MGS assignments.*?\$weightedMGSCount = 0;.*?\$activatedOnlyWeighted = 1;/s,
+	'an already-activated weighted-only result is not moved a second time');
+like($mgs_source, qr/if \(\$coreMGSCount < 3\).*?Skipping between-MGS phylogeny/s,
+	'MGS does not launch a phylogeny with fewer than three taxa');
+like($mgs_source, qr/\$ph2Cmd \.= "-MGSphylo \$iniTree " if -s \$iniTree/,
+	'strain analysis can run without a nonexistent sparse between-MGS tree');
 unlike($mgs_source, qr/compl\.incompl\.95\.(?:fna|prot)/,
 	'MGS has no active catalog path pinned to identity 95');
 like($strain_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
@@ -181,5 +223,27 @@ like($build_tree_source, qr/\(\?<sample>\.\*\?\).*?\(\?<gene>\.\+\)/,
 	'tree sequence identifiers split at the first separator and retain compound locus names');
 like($build_tree_source, qr/sub geneFileStem.*?sprintf\("_%02X", ord\(\$1\)\)/s,
 	'compound locus names are encoded safely and deterministically for downstream filenames');
+
+my $gene_cat_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'geneCat.pl'));
+like($gene_cat_source, qr/my \$version = 0\.53;/,
+	'geneCat sparse-run hardening increments its workflow version');
+like($gene_cat_source, qr/\$matrixSampleCount = _matrix_sample_count\(\$matrixFile\)/,
+	'geneCat uses produced matrix cardinality rather than raw map cardinality for Canopy');
+like($gene_cat_source, qr/matrix_sample_count=\$\(gzip -cd .*?declutter-skipped-low-sample-count/s,
+	'fire-and-forget decluttering defers cardinality checks until the matrix exists');
+like($gene_cat_source, qr/canopy-skipped-low-sample-count.*?SKIPPED\.txt/s,
+	'low-sample Canopy skips are checkpointed with a durable explanation');
+like($gene_cat_source, qr/Canopy clustering completed but found no clusters.*?SKIPPED\.txt/s,
+	'a successful Canopy run with no biological clusters is not treated as a tool crash');
+like($gene_cat_source, qr/Kraken classified no catalog genes; leaving taxonomy outputs empty/s,
+	'an empty Kraken classification does not invoke aggregation with an empty reference');
+
+my $filter_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'R_scripts', 'filterMB2.R'));
+like($filter_source, qr/if \(nrow\(M\) == 0\).*?quit\(save="no", status=0\)/s,
+	'MGS core filtering publishes an empty biological result successfully');
+like($filter_source, qr/Mext = M\[extCriteria,,drop=FALSE\]/,
+	'MGS core filtering preserves table shape for a single retained row');
+like($filter_source, qr/extCriteria\[is\.na\(extCriteria\)\] = FALSE/,
+	'MGS extended-core filtering rejects incomplete logical rows explicitly');
 
 done_testing();

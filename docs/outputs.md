@@ -319,6 +319,14 @@ MGS.pl -outD <output_directory>
 | `MAG.MB2.assStat.summary` | Summary of MetaBAT2 bins found in each sample. |
 | `Bin_SB/LOGandSUB/MAGvsGC.txt.gz` | Links MAGs, MGS, marker genes and other gene-catalog genes. |
 
+Sparse runs can finish successfully without manufacturing cluster or tree data:
+
+- `Canopy_AC/SKIPPED.txt` (or `Canopy/SKIPPED.txt`) explains that Canopy was skipped because the abundance matrix had too few sample columns, or that Canopy completed without finding clusters.
+- `Bin_<binner>/NO_MGS.txt` explains why no usable MGS could be reconstructed (for example, no minimally usable MAGs or no retained core genes).
+- `Bin_<binner>/between_phylo/SKIPPED.txt` records that fewer than three marker-bearing MGS were available for a meaningful between-MGS phylogeny.
+
+These files represent completed, expected low-cardinality outcomes. Missing or partial paired outputs (for example, only one of the Canopy cluster and profile files) remain errors.
+
 ### MGS abundance matrices
 
 Current MGS workflows commonly write abundance matrices by taxonomic level:

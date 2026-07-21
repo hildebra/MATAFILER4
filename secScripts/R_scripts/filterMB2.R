@@ -2,6 +2,7 @@
 
 #script to post filter genes in MGS to identify "core" genes
 #(c) Falk Hildebrand
+# 2026-07 sparse-MGS hardening: support empty and singleton cluster tables without shape loss.
 
 args = commandArgs(trailingOnly=TRUE)
 if (length(args)==0) {
@@ -31,12 +32,25 @@ genesUsed = list()
 
 print(args[1])
 M=read.table(args[1],TRUE,"\t",as.is=TRUE)
+if (ncol(M) < 6) {
+	stop(paste("Malformed MGS cluster table:", args[1], "has", ncol(M), "columns; expected at least 6"), call.=FALSE)
+}
+if (nrow(M) == 0) {
+	# An empty biological result is valid for sparse runs.  Publish the expected
+	# empty files so the caller can record a deliberate no-MGS outcome.
+	writeLines(character(), args[2])
+	writeLines(character(), paste0(args[2], ".cnts"))
+	writeLines(character(), args[3])
+	message("No MGS assignments were available for core filtering")
+	quit(save="no", status=0)
+}
 # All genes, including markers, must have a plausible MGS assignment. Markers
 # receive a slightly more tolerant copy-number allowance, but no longer bypass
 # the copy and multi-bin checks completely.
 copyFraction = ifelse(M[,3] > 0, M[,4]/M[,3], Inf)
 assignmentOK = M[,5] > 0.9 & M[,5] < 3
 coreCriteria = assignmentOK & (copyFraction < 0.1 | (M[,6] & copyFraction < 0.2))
+coreCriteria[is.na(coreCriteria)] = FALSE
 
 print(M[1,])
 
@@ -44,7 +58,11 @@ print(paste0(sum(coreCriteria),"/",dim(M)[1]," Genes passed Core Criteria"))
 
 
 
-Meta = as.matrix(read.table(inObs,FALSE,"\t",as.is=TRUE))
+Meta = read.table(inObs,FALSE,"\t",as.is=TRUE,fill=TRUE)
+if (nrow(Meta) && Meta[1,1] == "Bin") Meta=Meta[-1,,drop=FALSE]
+if (ncol(Meta) < 2 || nrow(Meta) == 0) {
+	stop(paste("MGS observation table has no data rows:", inObs), call.=FALSE)
+}
 Obs = as.numeric(Meta[,2]);names(Obs)=Meta[,1]
 Obs[is.na(Obs)]=0
 Mret=M[FALSE,,drop=FALSE]
@@ -56,9 +74,10 @@ pdf(paste0(picD,"BinPlots.pdf"),7,7)#740,740)
 
 for (b in bins){
 	sel=M[,1]%in%b & coreCriteria
-	maxv = Obs[b]
+	maxv = Obs[as.character(b)]
+	if (length(maxv) != 1 || !is.finite(maxv) || maxv <= 0) maxv = NA_real_
 	vals=M[sel,3]
-	isMG = M[sel,6]
+	isMG = !is.na(M[sel,6]) & as.logical(M[sel,6])
 	if (length(vals)==0) {
 		genesUsed[[b]] = 0
 		next
@@ -137,9 +156,15 @@ dev.off()
 
 #extended core genome - basically everything I would consider truly part of a species
 extCriteria = assignmentOK & ((M[,3] >= minObs[M[,1]]) | (M[,6] & copyFraction < 0.2))
-Mext = M[extCriteria,]
+extCriteria[is.na(extCriteria)] = FALSE
+Mext = M[extCriteria,,drop=FALSE]
 pdf(paste0(picD,"NumGenesPerBinExt.pdf"),12,7)#1500,740)
-plot(table(Mext[,1]),type="p")
+if (nrow(Mext)) {
+	plot(table(Mext[,1]),type="p")
+} else {
+	plot.new()
+	text(0.5,0.5,"No extended-core genes passed filtering")
+}
 dev.off()
 
 

@@ -1,4 +1,5 @@
 package Mods::Binning;
+# 2026-07 sparse-MGS hardening: accept header-only bin assignments as an empty result.
 use Exporter qw(import);
 our @EXPORT_OK = qw(
 				runMetaBat runSemiBin  runMetaDecoder  runGenomeFace runSCGBinner
@@ -111,6 +112,7 @@ sub MB2assigns($ $){
 		chomp; next if /^\s*$/;
 		my @spl  = split /\t/, $_, -1;
 		die "Malformed binner assignment in $inF at line $.\n" unless @spl >= 2 && length($spl[0]) && length($spl[1]);
+		next if $spl[0] eq 'Sequence ID';
 		next if ($spl[1] eq "0");
 		push(@{$ret{$spl[1]}}, $spl[0]);
 	}

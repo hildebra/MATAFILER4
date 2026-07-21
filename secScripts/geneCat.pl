@@ -144,6 +144,22 @@ sub _count_fasta_records {
 	return $count;
 }
 
+sub _matrix_sample_count {
+	my ($file) = @_;
+	my ($fh, $ok) = gzipopen($file, 'gene abundance matrix', 1, 0);
+	die "Cannot open gene abundance matrix $file\n" unless $ok && defined $fh;
+	my $header = <$fh>;
+	close $fh or die "Cannot close gene abundance matrix $file: $!\n";
+	die "Gene abundance matrix is empty: $file\n" unless defined $header;
+	chomp $header;
+	my @fields = split /\t/, $header, -1;
+	pop @fields while @fields && $fields[-1] eq '';
+	die "Gene abundance matrix has no feature column: $file\n" unless @fields;
+	shift @fields;
+	die "Gene abundance matrix has no sample columns: $file\n" unless @fields;
+	return scalar @fields;
+}
+
 sub _for_each_fasta_record {
 	my ($file, $header_separator, $callback) = @_;
 	my ($fh, $ok) = gzipopen($file, 'streaming FASTA input', 1, 0);
@@ -341,7 +357,8 @@ sub _safe_reset_dir {
 #.50: 21.11.24: small fix to intial gene capturing step (subprepSmpls)
 #.51: 26.3.25: small fix to ensure preprocessing takes the right start sample (could skip large numbers sometimes, due to rounding errors)
 #.52: streamed FASTA collation, durable gzip publication, checkpoint manifests, and cluster-ID propagation
-my $version = 0.52;
+#.53: use matrix cardinality for sparse-stage skips, preserve dry-run commands, and accept empty Canopy/Kraken results
+my $version = 0.53;
 $| = 1;
 
 my $justCDhit = 1; #always set default to 0, to dangerous otherwise..
@@ -361,6 +378,7 @@ my $useGTDBmg = "GTDB";#FMG, GTDB
 my $toLclustering=1;#just write out, no sorting etc
 my $bactGenesOnly = 0; #set to zero if no double euk/bac predication was made
 my $canopyAutoCorr=0.15;
+my $minCanopySamples=10;
 my $ignoreIncompleteMAGs = 1;
 my $batchNum = -1;
 my $smplSep = "__"; #separator of samples and gene id in all MF fastas.. pretty static by now, do not modify!
@@ -817,7 +835,7 @@ sub clusterMultiStep{
 		} else { systemW $cmd;}
 		$cmd = "";
 	}
-	
+
 	#5', 3' complete genes and incompletes
 	
 	my $bwtIdx = $REF.".bw2";
@@ -1258,7 +1276,20 @@ sub geneCatFlow($ $ $ $ ){
 	qsubSystemJobAlive( \@matDeps,$QSBoptHR ); 
 	die "Matrices were not created or validated, $matrixSton\n" if ($submitLocal && !_stone_valid($matrixSton, $cdhID));
 	#check matrix..
-	
+	my $matrixFile = "$OutD/$countMatrixF.gz";
+	my $matrixSampleCountKnown = -s $matrixFile ? 1 : 0;
+	my $matrixSampleCount;
+	if ($matrixSampleCountKnown) {
+		$matrixSampleCount = _matrix_sample_count($matrixFile);
+		printL "Gene matrix contains $matrixSampleCount abundance sample column(s)\n";
+	} elsif ($submitLocal) {
+		die "Gene matrix is missing after its completion job: $matrixFile\n";
+	} else {
+		# Fire-and-forget mode may still be composing the command which creates the
+		# matrix.  Canopy and MGS recount it when they actually run.
+		$matrixSampleCount = $numSmpls;
+		printL "Gene matrix is not materialized yet; using $matrixSampleCount mapped sample(s) only for command planning\n";
+	}
 
 
 
@@ -1282,7 +1313,16 @@ sub geneCatFlow($ $ $ $ ){
 	#die;
 	
 	#now decluter based on proteins.
-	if (@samples > 2 && !_stone_valid($declStone, $cdhID) && $doDecluter){
+	if (!$matrixSampleCountKnown && !_stone_valid($declStone, $cdhID) && $doDecluter) {
+		my $localExe = 1;
+		$cmd .= 'matrix_sample_count=$(gzip -cd ' . _shell_quote($matrixFile)
+			. q{ | awk -F '\t' 'NR == 1 { print NF - 1; exit }')} . "\n";
+		$cmd .= "case \"\$matrix_sample_count\" in ''|*[!0-9]*) echo 'Cannot determine gene-matrix sample count' >&2; exit 1;; esac\n";
+		$cmd .= "if [ \"\$matrix_sample_count\" -gt 2 ]; then\n";
+		$cmd .= "  $decluterGC $OutD $tmpDir $numCor $localExe $totMem3 $declStone\n";
+		$cmd .= "else\n  " . _checkpoint_command($checkpointWriter, $declStone, $cdhID, 'declutter-skipped-low-sample-count');
+		$cmd .= "fi\n";
+	} elsif ($matrixSampleCount > 2 && !_stone_valid($declStone, $cdhID) && $doDecluter){
 		my $localExe=1;$localExe=0 if ($submitLocal);
 		$cmd .= "$decluterGC $OutD $tmpDir $numCor $localExe $totMem3 $declStone\n";
 		#$cmd .= "touch $declStone\n";
@@ -1291,6 +1331,9 @@ sub geneCatFlow($ $ $ $ ){
 		die "Can't find valid $declStone\n" if ($submitLocal && !_stone_valid($declStone, $cdhID));
 	}elsif (!$doDecluter){
 		_touch_file($declStone, $cdhID, 'declutter-disabled') unless _stone_valid($declStone, $cdhID);
+	} elsif ($matrixSampleCount <= 2) {
+		_touch_file($declStone, $cdhID, 'declutter-skipped-low-sample-count') unless _stone_valid($declStone, $cdhID);
+		printL "Skipping matrix decluttering for $matrixSampleCount sample column(s); at least 3 are required\n";
 	}
 
 	#get 100 marker genes
@@ -1363,43 +1406,46 @@ sub geneCatFlow($ $ $ $ ){
 		#do not check since this is just running in the background till exhaustion..
 		#die "Can't find $geneStatsStone\n" if ($submitLocal && !-e $geneStatsStone);
 	}
-	
-
-
 
 	#MAG related..
-	$cmd .= "#taxonomic assignments of all genes via kraken\n";
-	$cmd .= "$selfScript -mode kraken -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID\n";
-	$cmd .= _checkpoint_command($checkpointWriter, $krakStone, $cdhID, 'kraken-annotation');
-	if (_stone_valid($krakStone, $cdhID)){$cmd="";}
-	if ($submitLocal && $cmd ne ""){
-		print "submitting kraken tax abundance..\n";
-		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		my ($dep,$qcmd) = qsubSystem($qsubDir."krak_GC.sh",$cmd,$numCor3,int($totMem5)."G","krakGC","","",1,[],$QSBoptHR); $cmd="";
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;
-
+	unless (_stone_valid($krakStone, $cdhID)) {
+		my $stageCmd = "#taxonomic assignments of all genes via kraken\n";
+		$stageCmd .= "$selfScript -mode kraken -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID\n";
+		$stageCmd .= _checkpoint_command($checkpointWriter, $krakStone, $cdhID, 'kraken-annotation');
+		if ($submitLocal) {
+			print "submitting kraken tax abundance..\n";
+			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0";
+			my ($dep,$qcmd) = qsubSystem($qsubDir."krak_GC.sh",$stageCmd,$numCor3,int($totMem5)."G","krakGC","","",1,[],$QSBoptHR);
+			$QSBoptHR->{tmpSpace} =$tmpSHDD;
+		} else {
+			$cmd .= $stageCmd;
+		}
 	}
 	
 	#functional annotations.. just run some by default
-	$cmd .= "#functional assignments of all genes via diamond\n";
-	$cmd .= "$selfScript -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner \n";
-	$cmd .= _checkpoint_command($checkpointWriter, $funcStone, $cdhID, 'functional-annotation');
-	if (_stone_valid($funcStone, $cdhID)){$cmd="";}
-	if ($submitLocal && $cmd ne ""){
-		print "submitting diamond func abundance..\n";
-		my ($dep,$qcmd) = qsubSystem($qsubDir."func_GC.sh",$cmd,1,int($totMem3)."G","funcGC","","",1,[],$QSBoptHR); $cmd="";
-		#systemW $cmd; $cmd = "";
+	unless (_stone_valid($funcStone, $cdhID)) {
+		my $stageCmd = "#functional assignments of all genes via diamond\n";
+		$stageCmd .= "$selfScript -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner \n";
+		$stageCmd .= _checkpoint_command($checkpointWriter, $funcStone, $cdhID, 'functional-annotation');
+		if ($submitLocal) {
+			print "submitting diamond func abundance..\n";
+			my ($dep,$qcmd) = qsubSystem($qsubDir."func_GC.sh",$stageCmd,1,int($totMem3)."G","funcGC","","",1,[],$QSBoptHR);
+		} else {
+			$cmd .= $stageCmd;
+		}
 	}
 
 
-	$cmd .= "#functional assignments via eggNOGmapper\n";
-	#-c $numCor3 .. use max 6 cores for this due to single core emapper final step
-	$cmd .= "$selfScript -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID -stone $emapStone \n";
-	#$cmd .= "touch $emapStone\n";
-	if (_stone_valid($emapStone, $cdhID)){$cmd="";}
-	if ($submitLocal && $cmd ne ""){
-		print "submitting eggNOGmapper func abundance..\n";
-		my ($dep,$qcmd) = qsubSystem($qsubDir."emap_GC.sh",$cmd,1,int($totMem3)."G","emapGC","","",1,[],$QSBoptHR); $cmd="";
+	unless (_stone_valid($emapStone, $cdhID)) {
+		my $stageCmd = "#functional assignments via eggNOGmapper\n";
+		#-c $numCor3 .. use max 6 cores for this due to single core emapper final step
+		$stageCmd .= "$selfScript -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID -stone $emapStone \n";
+		if ($submitLocal) {
+			print "submitting eggNOGmapper func abundance..\n";
+			my ($dep,$qcmd) = qsubSystem($qsubDir."emap_GC.sh",$stageCmd,1,int($totMem3)."G","emapGC","","",1,[],$QSBoptHR);
+		} else {
+			$cmd .= $stageCmd;
+		}
 	}
 	
 	
@@ -1409,18 +1455,30 @@ sub geneCatFlow($ $ $ $ ){
 	#$cmd .= "$selfScript -mode kaiju -MGset $useGTDBmg -o $OutD\n"; #kaiju is too instable.. don't use
 	
 	#$cmd .= cleanUpGC($bdir,$OutD,$cdhID);
-	$cmd .= "#Canopy clustering\n";
-	$cmd .= "#" unless ($doMags);
-	$cmd .= "$GCscr -mode CANOPY -o $OutD -c $numCor -tmp $tmpDir/MGS\n";
-	$cmd .= _checkpoint_command($checkpointWriter, $canopyStone, $cdhID, 'canopy-clustering');
-	if (_stone_valid($canopyStone, $cdhID) || $numSmpls < 10){$cmd="";}
 	my $CANdep="";
-	if ($submitLocal && $cmd ne "" ){
-		print "submitting canopy clustering..\n";
-		$CANdep = canopyCluster($GCdir,"$tmpDir/cano/",$numCor,$canopyStone);
-		$cmd="";
+	if (!$doMags && !_stone_valid($canopyStone, $cdhID)) {
+		_touch_file($canopyStone, $cdhID, 'canopy-disabled');
+	} elsif ($matrixSampleCount < $minCanopySamples && !_stone_valid($canopyStone, $cdhID)) {
+		my $skip_dir = getCanopyDir($OutD);
+		make_path($skip_dir) unless -d $skip_dir;
+		my $skip_file = "$skip_dir/SKIPPED.txt";
+		open my $skip_fh, '>', $skip_file or die "Cannot write $skip_file: $!\n";
+		print {$skip_fh} "Canopy clustering skipped: the gene matrix has $matrixSampleCount sample columns; at least $minCanopySamples are required.\n"
+			or die "Cannot write $skip_file: $!\n";
+		close $skip_fh or die "Cannot close $skip_file: $!\n";
+		_touch_file($canopyStone, $cdhID, 'canopy-skipped-low-sample-count', $skip_file);
+		printL "Skipping Canopy clustering for $matrixSampleCount matrix samples (minimum $minCanopySamples)\n";
+	} elsif ($doMags && !_stone_valid($canopyStone, $cdhID)) {
+		if ($submitLocal) {
+			print "submitting canopy clustering..\n";
+			$CANdep = canopyCluster($GCdir,"$tmpDir/cano/",$numCor,$canopyStone);
+		} else {
+			$cmd .= "#Canopy clustering\n";
+			$cmd .= "$GCscr -mode CANOPY -o $OutD -c $numCor -tmp $tmpDir/MGS -clusterID $cdhID\n";
+			$cmd .= _checkpoint_command($checkpointWriter, $canopyStone, $cdhID, 'canopy-clustering');
+		}
 		#this needs to call the canopy function here, in order to get the correct dependency for the canopy call..
-		#my ($dep,$qcmd) = qsubSystem($qsubDir."canopy_GC.sh",$cmd,$numCor,int($totMem3/$numCor)."G","canGC","","",1,[],$QSBoptHR); $cmd="";
+		#my ($dep,$qcmd) = qsubSystem($qsubDir."canopy_GC.sh",$cmd,$numCor,int($totMem3/$numCor)."G","canGC","","",1,[],$QSBoptHR);
 		#$CANdep = $dep;
 	}
 	$cmd .= "\n" . _checkpoint_command($checkpointWriter, $preMGSstone, $cdhID, 'pre-mgs');
@@ -1453,7 +1511,7 @@ sub geneCatFlow($ $ $ $ ){
 		}
 	}
 	my $canoStr = "-canopies $canopyExpectedDir/clusters.txt ";
-	$canoStr = "" if ($numSmpls < 10);
+	$canoStr = "" if ($matrixSampleCount < $minCanopySamples);
 	#$cmd .= "#wait for eggnogmapper to finish\nuntil [ -f $emapStone ];do sleep 5; done\n" unless (-e $emapStone);
 	$cmd .= "$magPi -mem 150 -GCd $OutD -tmp $tmpDir/MAGs/ -bottleneckCores $numCor $canoStr -strains $doStrains -useCheckM2 $useCheckM2 -useCheckM1 $useCheckM1 -wait4stone $emapStone -binSpeciesMG $binSpeciesMG -ignoreIncompleteMAGs $ignoreIncompleteMAGs -MGset $useGTDBmg -clusterID $cdhID -outD $MGSoutD \n";
 
@@ -2067,7 +2125,11 @@ sub krakenTax{
 		}	
 	}
 	$cmd = "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/krak.mat -t $NC -refD $krakTaxFile $rtkFunDelims \n";
-	systemW $cmd;
+	if (-s $krakTaxFile) {
+		systemW $cmd;
+	} else {
+		warn "Kraken classified no catalog genes; leaving taxonomy outputs empty and skipping taxonomy aggregation\n";
+	}
 }
 
 
@@ -2137,20 +2199,33 @@ sub canopyCluster{
 	my ($GCd,$tmpD,$NC) = @_;
 	my $canopyStone = "";
 	if (@_ > 3){$canopyStone = $_[3];}
-	my $canBin = getProgPaths("canopy");#"/g/bork3/home/hildebra/bin/canclus/cc_x64.bin";
-	my $canGuide = getProgPaths("makeCanoGuides_scr");#"/g/bork3/home/hildebra/bin/canclus/cc_x64.bin";
 	my $matF_pre = "$GCd/$countMatrixF.gz";
 	my $matF = "$GCd/$countMatrixP.mat.scaled";
 	my $cmd = "";
 	my $doDeepCanopy = 0;
+	my $matrixSampleCount = _matrix_sample_count($matF_pre);
+	my $oD = getCanopyDir($GCd);
+	make_path($oD) unless -d $oD;
+	if ($matrixSampleCount < $minCanopySamples) {
+		my $skip_file = "$oD/SKIPPED.txt";
+		open my $skip_fh, '>', $skip_file or die "Cannot write $skip_file: $!\n";
+		print {$skip_fh} "Canopy clustering skipped: the gene matrix has $matrixSampleCount sample columns; at least $minCanopySamples are required.\n"
+			or die "Cannot write $skip_file: $!\n";
+		close $skip_fh or die "Cannot close $skip_file: $!\n";
+		_touch_file($canopyStone, $cdhID, 'canopy-skipped-low-sample-count', $skip_file)
+			if length $canopyStone;
+		print "Canopy clustering skipped for $matrixSampleCount matrix samples (minimum $minCanopySamples)\n";
+		return "";
+	}
+	my $canBin = getProgPaths("canopy");#"/g/bork3/home/hildebra/bin/canclus/cc_x64.bin";
+	my $canGuide = $doDeepCanopy ? getProgPaths("makeCanoGuides_scr") : "";
 	unless (-e "$matF.gz"){
 		print "Normalizing GC matrix.\n";
 		$cmd .= "$rareBin normalize -i $matF_pre -t $NC -o $matF -gz\n";
 		#print "Done\n";
 	}
-	my $oD = getCanopyDir($GCd);
-
-	system "mkdir -p $oD" unless (-d $oD); #rm -r $oD
+	# The directory was created before the cardinality check so skipped runs have
+	# a durable explanation alongside ordinary Canopy output.
 	my $jdeps = "";
 	#die "Can't find matrix infile $matF\n" unless (-e $matF);
 	#./cc.bin -i Matrix.mat.scaled.txt -o Matrix.mat.scaled.clusters -c Matrix.mat.scaled.profiles -p MGS:drama -n 32  --profile_measure 75Q --stop_criteria 0 --filter_max_top3_sample_contribution 0.7 --max_canopy_dist 0.1 --max_merge_dist 0.1
@@ -2160,11 +2235,22 @@ sub canopyCluster{
 		if ($canopyAutoCorr > 0){
 			$xtra .= " --sampleDistMatFile $oD/smpl_dist.mat --sampleDistLog $oD/autocorr.log --sampleMinDist $canopyAutoCorr ";
 		}
-		$cmd .= "$canBin -i $matF.gz -o $oD/clusters.txt -c $oD/profiles.txt -p MGS $xtra --dont_use_mmap -n $NC --progress_stat_file $oD/progress.txt --profile_measure 75Q -b --stop_criteria 100000 --filter_max_top3_sample_contribution 0.7 --max_canopy_dist 0.1 --max_merge_dist 0.1\n\n";
+		$cmd .= "rm -f $oD/SKIPPED.txt\n";
+		$cmd .= "$canBin -i $matF.gz -o $oD/clusters.txt -c $oD/profiles.txt -p MGS $xtra --dont_use_mmap -n $NC --progress_stat_file $oD/progress.txt --profile_measure 75Q -b --stop_criteria 100000 --filter_max_top3_sample_contribution 0.7 --max_canopy_dist 0.1 --max_merge_dist 0.1 || exit \$?\n\n";
 	}
-	$cmd .= "test -s $oD/clusters.txt && test -s $oD/profiles.txt || exit 1\n";
-	$cmd .= "$canGuide $oD/clusters.txt $oD/profiles.txt $oD/guideMGS.txt 100\n" unless (-s "$oD/guideMGS.txt");
-	$cmd .= "test -s $oD/guideMGS.txt || exit 1\n";
+	$cmd .= "if [ -s $oD/clusters.txt ] && [ -s $oD/profiles.txt ]; then\n";
+	if ($doDeepCanopy) {
+		$cmd .= "  $canGuide $oD/clusters.txt $oD/profiles.txt $oD/guideMGS.txt 100\n" unless (-s "$oD/guideMGS.txt");
+		$cmd .= "  test -s $oD/guideMGS.txt || exit 1\n";
+	} else {
+		$cmd .= "  : # ordinary Canopy output is sufficient; no deep-clustering guide is required\n";
+	}
+	$cmd .= "elif [ -s $oD/clusters.txt ] || [ -s $oD/profiles.txt ]; then\n";
+	$cmd .= "  echo 'Canopy produced only one of clusters.txt and profiles.txt' >&2\n  exit 1\n";
+	$cmd .= "else\n";
+	$cmd .= "  echo 'Canopy clustering completed but found no clusters' > $oD/SKIPPED.txt\n";
+	$cmd .= "  rm -f $oD/clusters.txt $oD/profiles.txt $oD/guideMGS.txt\n";
+	$cmd .= "fi\n";
 	#deep canopy prep
 	if ($doDeepCanopy && !-e "$oD/deepClus_spea.txt"){
 		$cmd .= "echo \"Deep Canopy clustering Phase II\"\n";
