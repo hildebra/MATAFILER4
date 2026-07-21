@@ -540,13 +540,20 @@ die "Bin-quality scores missing\n$finalClusters2$cmSuffix\n" if (!-e "$finalClus
 
 #generate taxonomy from kraken2 assignments
 my @kraken_jobs;
+my $krakenInput = "$GCd/Anno/Tax/krak2.txt";
+my $krakenSkipped = 0;
 if (!-s "$annoDir/kraken2.LCA" || !-s "$annoDir/kraken2.tax"){
-	my $kr2taxScr = getProgPaths("taxPerMGS_scr");
-	my $cmd =  "$kr2taxScr $finalClustersFilt $GCd $annoDir/kraken2\n";# unless (-e "$finalClusters2.LCA");
-	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
-	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/krak2MGS.sh",$cmd,1,int(200/1)."G","KR2_MGS","","",1,[],\%QSBopt) ;
-	$QSBopt{tmpSpace} =$tmpSHDD;
-	push @kraken_jobs, $jobName2 if $jobName2;
+	if (!-s $krakenInput) {
+		$krakenSkipped = 1;
+		warn "Optional Kraken input is missing or empty; skipping MGS Kraken taxonomy:\n$krakenInput\n";
+	} else {
+		my $kr2taxScr = getProgPaths("taxPerMGS_scr");
+		my $cmd =  "$kr2taxScr $finalClustersFilt $GCd $annoDir/kraken2\n";# unless (-e "$finalClusters2.LCA");
+		my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0";
+		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/krak2MGS.sh",$cmd,1,int(200/1)."G","KR2_MGS","","",1,[],\%QSBopt) ;
+		$QSBopt{tmpSpace} =$tmpSHDD;
+		push @kraken_jobs, $jobName2 if $jobName2;
+	}
 }
 
 
@@ -622,7 +629,8 @@ unless (_checkpoint_valid($ABmgsSton2) && -s "$outD/Annotation/Abundance/MGS.mat
 qsubSystemJobAlive( \@kraken_jobs,\%QSBopt ) if $doSubmit && @kraken_jobs;
 qsubSystemJobAlive( \@marker_jobs,\%QSBopt ) if $doSubmit && @marker_jobs;
 if ($doSubmit) {
-	die "Kraken MGS taxonomy stage incomplete\n" unless -s "$annoDir/kraken2.LCA" && -s "$annoDir/kraken2.tax";
+	warn "Optional Kraken MGS taxonomy stage incomplete; continuing without Kraken-derived MGS taxonomy\n"
+		unless $krakenSkipped || (-s "$annoDir/kraken2.LCA" && -s "$annoDir/kraken2.tax");
 	die "Marker-based MGS abundance stage incomplete\n" unless _checkpoint_valid($ABmgsSton2)
 		&& -s "$outD/Annotation/Abundance/MGS.matL0.txt"
 		&& -s "$outD/Annotation/Abundance/MGS.matL7.txt";

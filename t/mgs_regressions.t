@@ -5,6 +5,8 @@ use File::Path qw(make_path);
 use File::Spec;
 use File::Temp qw(tempdir);
 use FindBin qw($Bin);
+use IPC::Open3 qw(open3);
+use Symbol qw(gensym);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
@@ -81,6 +83,25 @@ like($lca, qr/^MGS1\tDomain;Phylum;Class;Order;Family;Genus;Species;Strain;$/m,
 like($lca, qr/^MGS2\t\?;\?;\?;\?;\?;\?;\?;\?;$/m,
 	'MGS without Kraken hits is retained with eight unknown ranks');
 
+my $missing_kraken_gc = File::Spec->catdir($tmp, 'missing-kraken-GC');
+make_path(File::Spec->catdir($missing_kraken_gc, 'Anno', 'Tax'));
+my $missing_kraken_prefix = File::Spec->catfile($tmp, 'missing-kraken-taxonomy');
+my $missing_kraken_stdout = gensym;
+my $missing_kraken_stderr = gensym;
+my $missing_kraken_pid = open3(undef, $missing_kraken_stdout, $missing_kraken_stderr,
+	$^X, '-I'.File::Spec->catdir($Bin, '..'),
+	$tax_script, $tax_mgs, $missing_kraken_gc, $missing_kraken_prefix);
+my $missing_kraken_output = do { local $/; <$missing_kraken_stdout> // '' };
+my $missing_kraken_error = do { local $/; <$missing_kraken_stderr> // '' };
+waitpid($missing_kraken_pid, 0);
+my $missing_kraken_status = $? >> 8;
+is($missing_kraken_status, 0, 'taxPerMGS treats missing optional Kraken input as a successful skip');
+is($missing_kraken_output, '', 'missing optional Kraken input produces no normal output');
+like($missing_kraken_error, qr/Optional Kraken input is missing or empty; skipping MGS Kraken taxonomy/,
+	'taxPerMGS explains why optional Kraken taxonomy was skipped');
+ok(!-e "$missing_kraken_prefix.LCA" && !-e "$missing_kraken_prefix.tax",
+	'taxPerMGS does not manufacture taxonomy outputs without Kraken input');
+
 my $between_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'phylo_MGS_between.pl'));
 like($between_source, qr/open I,"<\$GCd\/FMG\.subset\.cats"/,
 	'between-MGS phylogeny intentionally remains tied to the FMG marker set');
@@ -114,6 +135,12 @@ like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -cores \$numCore/
 	'MGS passes cluster identity to MAG clustering');
 like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -maxCores \$canCore/,
 	'MGS passes cluster identity to strain analysis');
+unlike($mgs_source, qr/die "Kraken MGS taxonomy stage incomplete/,
+	'missing optional Kraken taxonomy no longer aborts MGS');
+like($mgs_source, qr/warn "Optional Kraken MGS taxonomy stage incomplete; continuing without Kraken-derived MGS taxonomy/,
+	'missing optional Kraken taxonomy is still reported');
+like($mgs_source, qr/if \(!-s \$krakenInput\).*?skipping MGS Kraken taxonomy:.*?else \{.*?qsubSystem\(\$logDir\."\/krak2MGS\.sh"/s,
+	'MGS does not submit the optional Kraken taxonomy job without its input');
 unlike($mgs_source, qr/compl\.incompl\.95\.(?:fna|prot)/,
 	'MGS has no active catalog path pinned to identity 95');
 like($strain_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
