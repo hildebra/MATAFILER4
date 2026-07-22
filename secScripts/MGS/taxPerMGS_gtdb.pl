@@ -3,9 +3,8 @@
 #./taxPerMGS.pl /g/scb/bork/hildebra/SNP/GCs/DramaGCv5//Binning/MetaBat//MB2.clusters.ext.can.Rhcl /g/scb/bork/hildebra/SNP/GCs/DramaGCv5/
 use warnings; use strict;
 
-use Mods::Binning qw(readMGSrev );
 use Mods::IO_Tamoc_progs qw(getProgPaths );
-use Mods::GenoMetaAss qw( systemW gzipopen);
+use Mods::GenoMetaAss qw(systemW);
 use Mods::GTDBTaxonomy qw(merge_gtdb_summaries);
 use File::Path qw(make_path remove_tree);
 use File::Temp qw(tempdir);

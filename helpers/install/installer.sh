@@ -216,14 +216,20 @@ CHECKM2_VERSION="1.0.2"
 METAPHLAN_VERSION="4.1"
 CM2DB="$DBdir/CM2"
 MP4DB="$DBdir/MP4"
+CM2_DIAMOND_DB="$CM2DB/CheckM2_database/uniref100.KO.1.dmnd"
 CM2_MARKER="$CM2DB/.mf4-checkm2-version"
 MP4_MARKER="$MP4DB/.mf4-metaphlan-version"
 
 if ! database_current "$CM2_MARKER" "$CHECKM2_VERSION"; then
-	echo "Installing CheckM2 $CHECKM2_VERSION database"
-	mkdir -p -- "$CM2DB"
-	retry_command "CheckM2 database download" 5 15 \
-		"$MAMBA_E" run -n MF4checkm2 checkm2 database --download --path "$CM2DB"
+	if ((REFRESH_DATABASES == 0)) && [[ -f "$CM2_DIAMOND_DB" ]] && \
+		"$MAMBA_E" run -n MF4checkm2 checkm2 database --setdblocation "$CM2_DIAMOND_DB"; then
+		echo "Using existing CheckM2 database at $CM2_DIAMOND_DB"
+	else
+		echo "Installing CheckM2 $CHECKM2_VERSION database"
+		mkdir -p -- "$CM2DB"
+		retry_command "CheckM2 database download" 5 15 \
+			"$MAMBA_E" run -n MF4checkm2 checkm2 database --download --path "$CM2DB"
+	fi
 	printf '%s\n' "$CHECKM2_VERSION" > "$CM2_MARKER"
 fi
 

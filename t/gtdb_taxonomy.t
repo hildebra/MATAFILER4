@@ -51,10 +51,12 @@ is($parsed->{'MGS.1'}, 'Bacteria;Firmicutes;Example;?;?;?;?',
 
 my $legacy = File::Spec->catfile($tmp, 'legacy.GTDBTK.tax');
 write_file($legacy, "user_genome\tclassification\nMGS.1\tBacteria;Firmicutes\n"
-	. "user_genome\tclassification\nMGS.2\tArchaea;Thermoproteota\n");
+	. "user_genome\tclassification\nMGS.2\tArchaea;Thermoproteota;\n");
 my $legacy_parsed = read_gtdb_taxonomy($legacy);
 is_deeply([sort keys %{$legacy_parsed}], [qw(MGS.1 MGS.2)],
 	'historical duplicate domain headers are ignored rather than becoming an MGS');
+is($legacy_parsed->{'MGS.2'}, 'Archaea;Thermoproteota;?;?;?;?;?',
+	'empty GTDB rank fields are represented as missing values');
 
 my $empty_domain = File::Spec->catfile($tmp, 'empty-domain.tsv');
 write_file($empty_domain, $header);

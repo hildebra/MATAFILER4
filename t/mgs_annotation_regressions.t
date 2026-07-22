@@ -23,5 +23,8 @@ unlike($source, qr/\$Gene2MGS\{\$gen\} = \$curMGS;\s+\$MGSlist\{\$curMGS\}/,
 	'MGS ownership is not overwritten in input order');
 like($source, qr/foreach my \$MGS \(sort keys %MGSlist\).*?\$curS =0/s,
 	'marker-count summaries retain MGS with zero unambiguous markers');
+like($source,
+	qr/if \(exists\(\$tmpTax\{\$curMGS\}\)\)\{\s+\$specIfullTax\{\$curMGS\} = \$tmpTax\{\$curMGS\}/s,
+	'explicit MGS taxonomy takes precedence over any colliding reference identifier');
 
 done_testing();

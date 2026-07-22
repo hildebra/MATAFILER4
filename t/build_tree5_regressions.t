@@ -40,6 +40,9 @@ like($source, qr/\$continue && -s "\$IQtree\.treefile"/,
 	'IQ-TREE resume requires a nonempty tree');
 like($source, qr/unlink \$treeOpts\{RAXtreeout\}.*?if -e \$treeOpts\{RAXtreeout\} && !-s \$treeOpts\{RAXtreeout\}/s,
 	'an empty legacy RAxML tree cannot suppress continuation recovery');
+like($source,
+	qr/filter_alignment_by_overlap\(\\%MFAA, \$isAA, \$minOverlapMSA\).*?push\(\@lengthsParts,\$len\)/s,
+	'minimum taxon overlap is applied per locus before partition lengths are recorded');
 like($source, qr/for my \$disM \(\@subfls\)/, 'all discovered distance matrices are merged');
 like($source, qr/\$ffd\{\$k\} = 4/, 'fourfold degeneracy is classified by codon family');
 

@@ -11,6 +11,7 @@
 #2.3.26: 5.05: added veryFastTRee
 #5.06: 15.4.26: added famse
 #5.07: 16.7.26: validate paths/options and repair filtering, resume, optional-tree, and cleanup paths
+#5.08: 22.7.26: restore partitions, require nonempty resume outputs, and activate per-locus overlap filtering
 
 use warnings;
 use strict;
@@ -19,6 +20,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw( fileGZe fileGZs gzipopen systemW readFasta readFastHD writeFasta quantile);
 use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree 
 			runFasttree runVeryFasttree fixHDs4Phylo getGenoGenes getFMG readFMGdir );
+use Mods::PhyloAlignment qw(filter_alignment_by_overlap);
 			
 			
 use Getopt::Long qw( GetOptions );
@@ -56,7 +58,7 @@ sub requireConfiguredTool;
 sub shellQuote;
 
 my $doPhym= 0;
-my $version = 5.07;
+my $version = 5.08;
 
 my $pigzBin  = getProgPaths("pigz");
 #my $trDist = getProgPaths("treeDistScr");
@@ -1581,6 +1583,17 @@ sub mergeMSAs($ $ $ $){
 		my ($firstMsaSample, $gcat, $separator) = parseSeqId($Mkeys[0], "MSA header in $MSAf");
 		my $len = length($MFAA{$Mkeys[0]});
 		if ($len == 0){print STDERR "0 length sequence discovered in $MSAf\n";next ;}
+		my $originalLen = $len;
+		my ($filtered, $retainedLen, $removedColumns) =
+			filter_alignment_by_overlap(\%MFAA, $isAA, $minOverlapMSA);
+		%MFAA = %{$filtered};
+		if ($retainedLen == 0) {
+			warn "Overlap filter removed every column from $MSAf; skipping this locus\n";
+			next;
+		}
+		$len = $retainedLen;
+		print "Overlap filter retained $len/$originalLen columns in $MSAf\n"
+			if $removedColumns;
 		push(@lengthsParts,$len);
 		foreach my $sm (@smps){
 			my $curK = $sm.$separator.$gcat;
@@ -1607,8 +1620,7 @@ sub mergeMSAs($ $ $ $){
 	my @ksMSAFAA = sort keys %bigMSAFAA;
 	my $iniSeqNum = @ksMSAFAA; my $remSeqNum = 0;
 	my %charCnts; my $maxNtCnt=0;
-	#my @usedPos; #is now implemented in C++ program..
-	#simply count gaps and N's
+		#simply count gaps and N's
 	foreach my $kk (@ksMSAFAA){
 		#my $strCpy = $bigMSAFAA{$kk};
 		my $num1 = 0;
@@ -1623,7 +1635,6 @@ sub mergeMSAs($ $ $ $){
 		if ( $charCnts{$kk} > $maxNtCnt){
 			$maxNtCnt = $charCnts{$kk};
 		}
-		next; #overlap implemented in C++
 	}
 	if ($maxNtCnt == 0){ #something really wrong
 		die "No usable MSA positions remain after concatenation and filtering\n";
@@ -1654,26 +1665,10 @@ sub mergeMSAs($ $ $ $){
 	my @allKs = sort keys %bigMSAFAA;
 	if (@allKs == 0){die "no genes for nexus output format.\nAborting\n";}
 	print O2 "#NEXUS\nBegin data;\nDimensions ntax=".scalar(@allKs)." nchar=".length($bigMSAFAAnxs{$allKs[0]}).";\nFormat datatype=dna missing=? gap=-;\nMatrix\n";
-	my $scnt=0;
 	foreach my $kk (@allKs){
 		print O ">$kk\n"; my $s1 = $bigMSAFAA{$kk};
 		print O2 "\n$kk\t"; my $s2 = $bigMSAFAAnxs{$kk};
-		#if (length($s1) !=  @usedPos){die "s1 and usedPos are not same length: ".length($s1)." : ".@usedPos."\n";}
-		#if ($minOverlapMSA <=0){
 		print O "$s1\n"; print O2 "$s2\n";
-		#} else {
-		#	my $usedP=0;
-		#	for (my $i=0; $i<length($s1);$i++){
-		#		if ($usedPos[$i] >= $minOverlapMSA){
-		#			print O substr($s1,$i,1);
-		#			print O2 substr($s2,$i,1);
-		#			$usedP++;
-		#		}
-		#	}
-		#	print O "\n"; print O2 "\n";
-		#	print "Used $usedP positions of ". length($s1)  . " total positions.\n" if ($scnt==0);
-		#	$scnt++;			
-		#}
 	}
 	print O2 "\n;\nend;";
 

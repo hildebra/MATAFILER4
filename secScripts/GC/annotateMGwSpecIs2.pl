@@ -399,14 +399,13 @@ sub readMGS{
 
 	my $taxF=0; my $taxN=0;
 	foreach my $curMGS (sort keys %MGSlist) {
-		if (!exists($specIfullTax{$curMGS})){
-			if (exists($tmpTax{$curMGS})){
-				$specIfullTax{$curMGS} = $tmpTax{$curMGS};
-				$taxF++;
-			} else {
-				$specIfullTax{$curMGS} = ["Bins","?","?","?","?","?","?"];
-				$taxN++;
-			}
+		if (exists($tmpTax{$curMGS})){
+			$specIfullTax{$curMGS} = $tmpTax{$curMGS};
+			$taxF++;
+		} else {
+			$specIfullTax{$curMGS} = ["Bins","?","?","?","?","?","?"]
+				unless exists($specIfullTax{$curMGS});
+			$taxN++;
 		}
 	}
 	my $meanS=0; my @sizes; my $morethan1=0; my $only1=0;
@@ -1128,6 +1127,5 @@ sub add2geneList($ $ $){ #assign a gene ($sg) to a speci($k), and its COG ($c)
 	$SpecIgenes2{$k}{$c}=$sg;#set mark to block this MG in this specI...
 	return $ret;
 }
-
 
 

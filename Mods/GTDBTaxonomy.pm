@@ -120,6 +120,9 @@ sub read_gtdb_taxonomy {
 			if exists $taxonomy{$id};
 		$classification = '?' if $classification =~ /Unclassified Bacteria/;
 		my @ranks = split /;/, $classification, -1;
+		for my $rank (@ranks) {
+			$rank = '?' unless defined($rank) && length($rank);
+		}
 		push @ranks, '?' while @ranks < 7;
 		$taxonomy{$id} = join(';', @ranks);
 		$row_count++;
