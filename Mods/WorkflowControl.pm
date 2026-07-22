@@ -7,6 +7,9 @@ use Exporter qw(import);
 
 our @EXPORT_OK = qw(
 	advance_loop_window
+	overlap_loop_window
+	parse_loop_spec
+	should_rerun_locked_window
 	assembly_group_output_dirs
 	balanced_parallel_batches
 	hybrid_group_ready
@@ -306,6 +309,70 @@ sub advance_loop_window {
 		reset_index => $next_from - 1,
 		has_window => $has_window,
 	};
+}
+
+sub overlap_loop_window {
+	my (%args) = @_;
+	my $to = 0 + $args{to};
+	my $upper = 0 + $args{upper};
+	my $window = 0 + $args{window_size};
+	my $submitted = 0 + $args{submitted_jobs};
+	my $already_extended = $args{already_extended} ? 1 : 0;
+	my $last_pass = $args{last_pass} ? 1 : 0;
+	die 'overlap_loop_window requires a positive window size' unless ($window > 0);
+	die 'overlap_loop_window requires a non-negative submitted job count'
+		unless ($submitted >= 0);
+
+	# A pass using no more than one quarter of a normal sample window is treated
+	# as lightly loaded. Keep at least a one-job allowance for small windows.
+	my $job_limit = int($window / 4);
+	$job_limit = 1 if ($job_limit < 1);
+	my $can_extend = !$already_extended && $to < $upper;
+	my $light_pass = $submitted > 0 && $submitted <= $job_limit;
+	# Always merge the following block into the final allowed pass. This keeps
+	# work flowing even when that pass is too busy for the light-pass trigger.
+	my $should_extend = $can_extend && ($light_pass || $last_pass);
+	my $next_to = $to;
+	if ($should_extend) {
+		$next_to += $window;
+		$next_to = $upper if ($next_to > $upper);
+	}
+	return {
+		to => $next_to,
+		extended => $should_extend ? 1 : 0,
+		job_limit => $job_limit,
+	};
+}
+
+sub parse_loop_spec {
+	my ($value) = @_;
+	$value = '0' unless (defined $value);
+	return {loop_count => 0, window_size => 0} if ($value eq '0');
+	if ($value =~ /\A(\d+):(\d+)\z/) {
+		my ($loops, $window) = (0 + $1, 0 + $2);
+		die '-loopTillComplete requires positive X:Y values'
+			unless ($loops > 0 && $window > 0);
+		return {loop_count => $loops, window_size => $window};
+	}
+	# Preserve the historical boolean-style switch, which means six passes over
+	# the complete selected range and has no sample windowing.
+	return {loop_count => 6, window_size => 0} if ($value eq '1');
+	die "Invalid -loopTillComplete value '$value'; expected 0, 1, or X:Y";
+}
+
+sub should_rerun_locked_window {
+	my (%args) = @_;
+	my $active_jobs = 0 + $args{active_jobs};
+	my $sample_count = 0 + $args{sample_count};
+	my $remove_locks = $args{remove_locks} ? 1 : 0;
+	die 'should_rerun_locked_window requires a non-negative active job count'
+		unless ($active_jobs >= 0);
+	die 'should_rerun_locked_window requires a positive sample count'
+		unless ($sample_count > 0);
+	return 0 if ($remove_locks || $active_jobs == 0);
+	# Use integer arithmetic for the strict one-percent comparison so boundary
+	# values such as 10 active jobs among 1,000 samples do not qualify.
+	return ($active_jobs < 3 || $active_jobs * 100 < $sample_count) ? 1 : 0;
 }
 
 1;

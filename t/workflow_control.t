@@ -11,7 +11,7 @@ use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(resetAsGrps contig_stats_coverage_complete);
 use Mods::IO_Tamoc_progs qw(inputFmtSpades);
 use Mods::WorkflowControl qw(
-	advance_loop_window assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
+	advance_loop_window overlap_loop_window parse_loop_spec should_rerun_locked_window assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies augment_deferred_submission
@@ -126,6 +126,80 @@ $window = advance_loop_window(
 is_deeply($window, {
 	from => 600, to => 600, loop_count => 0, reset_index => 599, has_window => 0,
 }, 'window loop terminates without returning to earlier samples');
+
+my $overlap = overlap_loop_window(
+	to => 250, upper => 600, window_size => 250, submitted_jobs => 12,
+);
+is_deeply($overlap, {to => 500, extended => 1, job_limit => 62},
+	'a lightly loaded pass admits the next block before waiting');
+$overlap = overlap_loop_window(
+	to => 250, upper => 600, window_size => 250, submitted_jobs => 63,
+);
+is_deeply($overlap, {to => 250, extended => 0, job_limit => 62},
+	'a normally loaded pass retains the current block boundary');
+$overlap = overlap_loop_window(
+	to => 250, upper => 600, window_size => 250, submitted_jobs => 1000,
+	last_pass => 1,
+);
+is_deeply($overlap, {to => 500, extended => 1, job_limit => 62},
+	'the final pass admits the next block even when it is not lightly loaded');
+$overlap = overlap_loop_window(
+	to => 250, upper => 600, window_size => 250, submitted_jobs => 0,
+	last_pass => 1,
+);
+is_deeply($overlap, {to => 500, extended => 1, job_limit => 62},
+	'an idle final pass merges the next block instead of closing the window first');
+$overlap = overlap_loop_window(
+	to => 500, upper => 600, window_size => 250, submitted_jobs => 1,
+);
+is_deeply($overlap, {to => 600, extended => 1, job_limit => 62},
+	'an overlap extension is capped at the selected sample upper bound');
+$overlap = overlap_loop_window(
+	to => 250, upper => 600, window_size => 250, submitted_jobs => 0,
+);
+ok(!$overlap->{extended},
+	'an idle non-final pass retains the normal completed-block transition');
+$overlap = overlap_loop_window(
+	to => 250, upper => 600, window_size => 250, submitted_jobs => 1,
+	already_extended => 1, last_pass => 1,
+);
+ok(!$overlap->{extended},
+	'only one new block is admitted per submission pass, including a final pass');
+$overlap = overlap_loop_window(
+	to => 600, upper => 600, window_size => 250, submitted_jobs => 1000,
+	last_pass => 1,
+);
+ok(!$overlap->{extended}, 'the final pass cannot extend beyond the selected range');
+
+is_deeply(parse_loop_spec('6:250'), {loop_count => 6, window_size => 250},
+	'a loop window specification is parsed exactly');
+is_deeply(parse_loop_spec('1'), {loop_count => 6, window_size => 0},
+	'the historical boolean-style loop switch keeps its six-pass behavior');
+eval { parse_loop_spec('0:250') };
+like($@, qr/requires positive X:Y values/,
+	'a zero loop count cannot silently truncate processing to the first window');
+eval { parse_loop_spec('6:250garbage') };
+like($@, qr/Invalid -loopTillComplete value/,
+	'a partially matching loop specification is rejected');
+
+ok(should_rerun_locked_window(
+	active_jobs => 9, sample_count => 1000, remove_locks => 0,
+), 'fewer than one percent active jobs reruns a retained-lock window');
+ok(!should_rerun_locked_window(
+	active_jobs => 10, sample_count => 1000, remove_locks => 0,
+), 'exactly one percent active jobs does not satisfy the strict threshold');
+ok(should_rerun_locked_window(
+	active_jobs => 2, sample_count => 100, remove_locks => 0,
+), 'fewer than three active jobs reruns even when one percent is smaller');
+ok(!should_rerun_locked_window(
+	active_jobs => 3, sample_count => 100, remove_locks => 0,
+), 'three active jobs is outside both strict thresholds for a small block');
+ok(!should_rerun_locked_window(
+	active_jobs => 0, sample_count => 1000, remove_locks => 0,
+), 'zero active jobs cannot cause a retained-lock retry loop');
+ok(!should_rerun_locked_window(
+	active_jobs => 1, sample_count => 1000, remove_locks => 1,
+), 'lock-removal mode does not use the retained-lock retry policy');
 
 my $root = tempdir(CLEANUP => 1);
 $root =~ s{\\}{/}g;

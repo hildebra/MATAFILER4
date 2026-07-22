@@ -153,5 +153,22 @@ like($mataf4,
 like($mataf4,
 	qr/No jobs were submitted in the current iteration.*?elsif \(\$loop2completion\).*?\$JNUM = \$from - 1/s,
 	'loopTillComplete only resets the sample index when another iteration is needed');
+like($mataf4,
+	qr/\$lastWindowPass = \$loop2completion == 1.*?overlap_loop_window\(.*?submitted_jobs => \$submittedThisIteration.*?last_pass => \$lastWindowPass.*?if \(\$overlapWindow->\{extended\}\).*?\$loop2completion = \$loop2completion_ini.*?return;/s,
+	'light or final loop passes extend through one more sample block before waiting');
+like($mataf4,
+	qr/if \(\$overlapWindow->\{extended\}\).*?return;\s*}\s*\$loopIterationSubmissionStart =/s,
+	'an extended pass retains its submission snapshot until both blocks reach the wait boundary');
+like($mataf4,
+	qr/\$doSubmit && !\$MFconfig\{rmSmplLocks\} && \$submittedThisIteration == 0.*?numUserJobs\(\$QSBoptHR, 1\).*?should_rerun_locked_window\(.*?if \(\$rerunLockedWindow.*?\$JNUM = \$from - 1;.*?return;/s,
+	'a no-op retained-lock pass reruns its current window when few jobs remain active');
+like($mataf4,
+	qr/\$loop2completion > 1 \|\| !\$loopFinalLockRetryUsed.*?\$loopFinalLockRetryUsed = 1/s,
+	'the retained-lock policy permits only one extra retry beyond the configured pass budget');
+like($mataf4,
+	qr/getCmdLineOptions;.*?rewrite options cannot be combined with -loopTillComplete.*?setupHPC\(\)/s,
+	'unsafe rewrite combinations fail before scheduler setup or job submission');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?my \$MATFILER_ver = 4\.11/s,
+	'MATAFILER version and change history record the overlapping final-pass behavior');
 
 done_testing;

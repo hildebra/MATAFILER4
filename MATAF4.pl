@@ -45,7 +45,7 @@ use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
 use Mods::WorkflowControl qw(
-	advance_loop_window assembly_group_output_dirs parse_ignored_samples
+	advance_loop_window overlap_loop_window parse_loop_spec should_rerun_locked_window assembly_group_output_dirs parse_ignored_samples
 	balanced_parallel_batches
 	hybrid_group_ready hybrid_package_complete hybrid_package_sample_id missing_input_files source_input_files
 	hybrid_local_scratch_gb
@@ -111,7 +111,11 @@ sub createConsSNPandSVs;
 #4.03: 18.4.26: further fixes to hybrid assembly logic. separateCongigs.pl tech hardened.
 #4.04: 24.4.26: hybrid assembly logic, adapting GC to different binners
 #4.10: 16.5.26: CahtGPT 5.6 sol: completely rewrite of calling logic, multiple bugs fixed across various scripts, better metagStats reporting, hybrid assemblies strengthned.
-my $MATFILER_ver = 4.10;
+#4.11: 21.7.26: loopTillComplete overlaps light passes and merges the next block on each final pass.
+#       Retained-lock windows get a bounded retry when at least one but fewer than
+#       1% of their samples or fewer than 3 user jobs remain active.
+#       Loop specifications and incompatible rewrite modes fail early.
+my $MATFILER_ver = 4.11;
 
 #----------------- defaults ----------------- 
 
@@ -197,6 +201,15 @@ announce_MF4();
 setDefaultMFconfig();
 getCmdLineOptions;
 $MFconfig{inspectState} = 1 if ($MFconfig{planState});
+if (!$MFconfig{inspectState} && $loop2completion && (
+		$MFopt{redoAssMapping} || $MFopt{BinnerRedoAll} || $MFopt{redoAssembly}
+		|| $MFopt{redoSNPcons} || $MFopt{redoSNPgene}
+		|| $MFopt{rewriteAllIfAnyDiamond} || $MFopt{rewriteDiamond}
+		|| $MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign}
+	)) {
+	die "MG-TK rewrite options cannot be combined with -loopTillComplete; " .
+		"disable rewrite options before starting a looped run.\n";
+}
 checkMF(1) unless ($MFconfig{inspectState});
 
 
@@ -265,6 +278,8 @@ if ($loop2c_winsize > 0){
 	$to = $from + $loop2c_winsize; $to = $TO1 if ($to > $TO1);
 }
 my $loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
+my $loopIterationExtended = 0;
+my $loopFinalLockRetryUsed = 0;
 
 
 #--------------------------------------------------------------------------------
@@ -1731,7 +1746,65 @@ sub loop2C_check(){
 		if ($JNUM == ($to-1)){
 			my $submittedThisIteration =
 				($QSBoptHR->{submittedJobs} || 0) - $loopIterationSubmissionStart;
+			my $activeJobs = 0;
+			my $rerunLockedWindow = 0;
+			# A pass that submitted work already reruns after its dependency wait.
+			# Check the scheduler only for a no-op pass that may have skipped locks.
+			if ($doSubmit && !$MFconfig{rmSmplLocks} && $submittedThisIteration == 0) {
+				$activeJobs = numUserJobs($QSBoptHR, 1);
+				$rerunLockedWindow = should_rerun_locked_window(
+					active_jobs => $activeJobs,
+					sample_count => $to - $from,
+					remove_locks => $MFconfig{rmSmplLocks},
+				);
+			}
+			if ($rerunLockedWindow
+					&& ($loop2completion > 1 || !$loopFinalLockRetryUsed)) {
+				if ($loop2completion > 1) {
+					$loop2completion--;
+				} else {
+					# Grant one final extra scan, but never spin indefinitely while a
+					# small set of unrelated or long-running jobs remains active.
+					$loopFinalLockRetryUsed = 1;
+				}
+				print "Retained sample locks with $activeJobs active job(s); " .
+					"rerunning samples $from till $to before advancing the window.\n";
+				@grandDeps = ();
+				resetAsGrps(\%AsGrps);
+				$loopIterationExtended = 0;
+				$JNUM = $from - 1;
+				return;
+			}
+			my $lastWindowPass = $loop2completion == 1 ? 1 : 0;
+			my $overlapWindow = $loop2c_winsize > 0
+				? overlap_loop_window(
+					to => $to, upper => $TO1, window_size => $loop2c_winsize,
+					submitted_jobs => $submittedThisIteration,
+					already_extended => $loopIterationExtended,
+					last_pass => $lastWindowPass,
+				)
+				: { extended => 0 };
+			if ($overlapWindow->{extended}) {
+				my $previousTo = $to;
+				$to = $overlapWindow->{to};
+				$loopIterationExtended = 1;
+				$loopFinalLockRetryUsed = 0;
+				# The newly admitted block must receive a full retry allowance. The
+				# current pass counts as its first iteration at the extended boundary.
+				# Keep this pass's dependency list and submission snapshot open so the
+				# eventual wait covers jobs from both blocks.
+				$loop2completion = $loop2completion_ini;
+				my $overlapReason = $lastWindowPass
+					? "Final loop pass"
+					: "Light loop pass ($submittedThisIteration submitted job(s), threshold " .
+						"$overlapWindow->{job_limit})";
+				print "$overlapReason; extending sample window from " .
+					"$from -> $previousTo to $from -> $to before waiting.\n";
+				return;
+			}
 			$loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
+			$loopIterationExtended = 0;
+			$loopFinalLockRetryUsed = 0;
 			my $continueCurrentWindow = $submittedThisIteration > 0;
 			$loop2completion = 0 unless ($continueCurrentWindow);
 			$loop2completion-- if ($continueCurrentWindow);
@@ -1776,12 +1849,6 @@ sub loop2C_check(){
 				print "Reanalyzing samples $from till $to\n";
 			}
 			print "-------------------------------------------\n-------------------------------------------\n";
-			
-			if ($MFopt{redoAssMapping} || $MFopt{BinnerRedoAll} || $MFopt{redoAssembly} || $MFopt{redoSNPcons} || $MFopt{redoSNPgene} ||
-					$MFopt{rewriteAllIfAnyDiamond} || $MFopt{rewriteDiamond} || $MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign} ) {
-				print STDERR "MG-TK rewriting option are active (any of mapping, binning, snp calling, ribo find, func annotations) while looping and might therefore remove newly generated results..\n Deactivate rewriting to use -loopTillComplete option\n";
-				die;
-			}
 			
 		}
 	}
@@ -9067,12 +9134,12 @@ sub getCmdLineOptions{
 	$MFopt{callSVsSupp} = $MFopt{callSVs}; #for now it just enforces doing both suppl and main SVs, if SVs requested at all..
 	
 	#set up further dependencies for MF
-	if ($loop2completion =~ m/(\d+):(\d+)/){
-		$loop2c_winsize = int($2);$loop2completion=$1;$loop2completion_ini=$1;
-		print "Loop2completion=$loop2completion; Window size=$loop2c_winsize\n";
-	} elsif ($loop2completion ne "0") {
-		$loop2completion = 6 ;$loop2completion_ini=6; #set to std number of iterations..
-	}
+	my $loopSpec = parse_loop_spec($loop2completion);
+	$loop2completion = $loopSpec->{loop_count};
+	$loop2completion_ini = $loopSpec->{loop_count};
+	$loop2c_winsize = $loopSpec->{window_size};
+	print "Loop2completion=$loop2completion; Window size=$loop2c_winsize\n"
+		if ($loop2completion);
 	
 	print "Done. ";
 

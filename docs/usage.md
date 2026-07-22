@@ -37,12 +37,27 @@ Each preflight writes an audit snapshot beneath
 example `state.iteration-000.json` and `plan.iteration-000.json`.
 
 When both `-loopTillComplete` and `-autoStatePlan 1` are enabled, the first
-preflight runs before submission. At every loop boundary, MATAFILER4 waits for
-the jobs submitted by the current pass, reinspects completed hybrid packages
-and assembly-group outputs, applies safe repairs, and only then starts the next
-pass. Completed members of a hybrid assembly group are retained while missing
-members are resubmitted; final group assembly remains dependent on all required
+preflight runs before submission. Normally, at each loop boundary MATAFILER4
+waits for the jobs submitted by the current pass, reinspects completed hybrid
+packages and assembly-group outputs, applies safe repairs, and only then starts
+the next pass. A sparse pass is handled differently: when it submits between
+one and `floor(window-size/4)` jobs (with a minimum threshold of one), the next
+sample block is added before the wait. The next block is also always added on
+the final allowed pass of the current block, even when that pass is busy. Only
+one block can be added per pass. This overlaps long-running tail work with new
+work while retaining bounded admission. The expanded range gets a fresh pass
+budget.
+Completed members of a hybrid assembly group are retained while missing members
+are resubmitted; final group assembly remains dependent on all required
 preassembly packages.
+
+With the default `-rmSmplLocks 0`, a pass may submit nothing because active
+samples are still locked. MATAFILER4 checks the scheduler in that case and
+reruns the current expanded range when at least one job remains active and the
+count is either below 3 or strictly below 1% of the range's sample count. These
+rescans consume the configured pass allowance; one additional final rescan is
+permitted, after which normal overlap or window advancement resumes. This guard
+does not run for dry runs, lock-removal mode, or when no scheduler jobs remain.
 
 Group-wide invalidation is intentionally not classified as an automatic safe
 repair. An exact assembly-group membership change remains blocked unless the

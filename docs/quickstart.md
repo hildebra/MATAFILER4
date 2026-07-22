@@ -66,7 +66,12 @@ Normal runs use the sample completion markers directly and do not perform the
 additional full-workflow inspection. Add `-autoStatePlan 1` to inspect and plan
 current state, repair narrowly safe partial outputs, and save JSON audit files
 under `#OutPath/#RunID/LOGandSUB/workflow/`. With `-loopTillComplete`, an enabled
-preflight repeats after the current pass's jobs finish and before the next pass.
+preflight repeats after each wait and before the next pass. A lightly loaded
+pass admits one following sample block before that wait so sparse long-running
+tail jobs do not leave the cluster idle. The final allowed pass of every block
+also admits the following block, regardless of its job count. With retained
+sample locks, a no-submission pass also rescans its current range when at least
+one user job remains and the count is fewer than 3 or below 1% of its samples.
 
 ## 6. Check completion
 
