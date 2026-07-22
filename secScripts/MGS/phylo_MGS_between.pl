@@ -280,5 +280,10 @@ if ($wait4job==1){
 	qsubSystemJobAlive( [$dep],$QSBoptHR );
 }
 if ($wait4job==2){
-	print "WAITID=$dep\n";
+	my $externalDep = $dep;
+	my $localTag = $QSBoptHR->{rTag} // '';
+	$externalDep =~ s/^\Q$localTag\E// if length $localTag;
+	die "Cannot export non-numeric between-tree dependency '$externalDep'\n"
+		unless $externalDep =~ /^\d+$/;
+	print "WAITID=$externalDep\n";
 }

@@ -9,7 +9,8 @@ dependencies:
 #  - rtk2>=2.11
 
 #sys dependencies
-  - python=3.12
+  # eggnog-mapper 2.1.12 supports Python <3.12 in its current Bioconda build.
+  - python=3.11
   - perl=5.32.1
   - vim
   - wget=1.25.0
@@ -47,12 +48,14 @@ dependencies:
 
   - bioconda::spades=4.3.0
   - bioconda::augustus=3.5.0
-  - bioconda::bcftools=1.24
+  # GRIDSS 2.13 requires HTSlib <1.24; keep BCFTools and Samtools on 1.23.
+  - bioconda::bcftools=1.23
 #  - mosdepth>=0.3.4
 #  - bedtools>=2.30
 #  - blas>=1.0
 #  - blast>=2.13.0
-  - bioconda::bowtie2=2.5.5
+  # Hostile 2.0.x requires Bowtie2 2.5.4 exactly.
+  - bioconda::bowtie2=2.5.4
 #  - kma>=1.4.9
 #  - bwa=0.7.17
   - bioconda::cd-hit=4.8.1
@@ -92,13 +95,14 @@ dependencies:
   - pprodigal=1.0.1
 #  - metaeuk=6.a5d39d9
 #  - racon>=1.5.0
-  - samtools=1.24
+  - samtools=1.23
   - bioconda::sortmerna=4.3.7
 #  - semibin=1.5.1
   - trimmomatic=0.41
 #  - unicycler>=0.5.0
 #  - vsearch=2.22
-  - eggnog-mapper=2.1.15
+  # 2.1.15 requires DIAMOND <2.1 and conflicts with the modern toolchain.
+  - eggnog-mapper=2.1.12
   - bioconda::hostile>=2.0
   
   

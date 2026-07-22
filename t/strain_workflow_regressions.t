@@ -66,7 +66,7 @@ like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA
 	'within-strain extraction reads only candidate consensus genes');
 like($strain, qr/test -s "?\.shellQuote\(\$IQtreef\).*?touch "?\.shellQuote\(\$treeStone\)/s,
 	'a tree completion stone is conditional on a nonempty tree');
-like($strain, qr/unlink \$treeStone.*?if \$doSubmit && -e \$treeStone/s,
+like($strain, qr/if \(\$doSubmit\) \{.*?unlink \$treeStone.*?if -e \$treeStone/s,
 	'a submitted tree retry cannot pass through a stale completion stone');
 like($strain, qr/unlink \$IQtreef.*?stale tree output/s,
 	'a submitted tree retry must publish a fresh nonempty tree');
@@ -74,6 +74,12 @@ like($strain, qr/unlink \$checkF.*?stale split-worker checkpoint.*?if \$doSubmit
 	'a submitted split-worker retry clears its stale completion stone');
 like($strain, qr/ConspecificMGS\.\$subJob\.log.*?sub mergeConspecificLogs/s,
 	'split workers write isolated conspecific logs that are explicitly merged');
+like($strain, qr/\$onlySubmit == 0 && !\$subJob/,
+	'split children cannot recursively clean shared MGS output directories');
+like($strain, qr/combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?incomplete combined worker input/s,
+	'the caller rejects incomplete combined worker input');
+like($strain, qr/hasFreshParts.*?lacks required.*?return 0/s,
+	'fresh worker parts replace stale combined inputs only when every required part exists');
 like($strain, qr/qsubSystemJobAlive\([^\n]+QSBoptHR[^\n]+if [^\n]+doSubmit/,
 	'dry runs do not poll scheduler jobs that were never submitted');
 like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,

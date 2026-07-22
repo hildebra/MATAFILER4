@@ -345,6 +345,25 @@ if (-e "$inD/LOGandSUB/GCmaps.inf"){
 	#($hrm,$asGrpObj) = readMap($inD."LOGandSUB/inmap.txt");
 }
 
+# Fast provenance fingerprints for the primary biological inputs.  Size plus
+# mtime avoids hashing very large catalogues on every resume while detecting
+# normal replacements and rewrites.
+my @checkpointInputs = (
+	['matrix',      "$GCd/Matrix.mat.gz"],
+	['catalog_fna', "$GCd/compl.incompl.$clusterID.fna"],
+	['catalog_faa', "$GCd/compl.incompl.$clusterID.prot.faa"],
+);
+my $mapIndex = 0;
+push @checkpointInputs, ["map_".$mapIndex++, $_] for grep { length } split /,/, $mapF;
+push @checkpointInputs, ['canopy', $canopyF] if length($canopyF) && -e $canopyF;
+for my $input (@checkpointInputs) {
+	my ($label, $path) = @$input;
+	my @stat = stat($path);
+	die "Cannot fingerprint required MGS input $path\n" unless @stat;
+	$checkpointParameters{"${label}_size"} = 0 + $stat[7];
+	$checkpointParameters{"${label}_mtime"} = 0 + $stat[9];
+}
+
 #die "$mapF\n";
 #figure out which compound assemblies there are..
 
@@ -395,6 +414,14 @@ my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2);
 if ($rewrClusterMAGs) {
 	for my $file (glob("$outD/$BinnerShrt.clusters*"), glob("$outD/$BinnerShrt.Wclusters*")) {
 		unlink $file or die "Cannot remove $file: $!\n" if -f $file;
+	}
+	for my $checkpoint ($st1ston, $GTDBtaxSto, $BinExtrSto, $ABmgsSton, $ABmgsSton2, $noMGSSto) {
+		unlink $checkpoint or die "Cannot invalidate downstream checkpoint $checkpoint: $!\n"
+			if -e $checkpoint;
+	}
+	unlink $noMGSReport or die "Cannot remove stale $noMGSReport: $!\n" if -e $noMGSReport;
+	for my $phyloDir ("$outD/between_phylo", "$outD/within_phylo") {
+		remove_tree($phyloDir) if -d $phyloDir;
 	}
 }
 #my $FMGsubs = `wc -l $GCd/Matrix.$COGdir.mat | cut -f1 -d' '`; chomp $FMGsubs; $FMGsubs = int($FMGsubs);
@@ -624,9 +651,16 @@ my $binD = "$outD/Genomes/MGS_GC/";
 my $binDctg = "$outD/Genomes/MGS_ctg/";
 my $binDctgFam = "$outD/Genomes/MGS_ctg_fam/";
 make_path($binD, $binDctg, $binDctgFam);
+my $binExtractionValid = _checkpoint_valid($BinExtrSto);
+unless ($binExtractionValid) {
+	# Prevent removed/renamed MGS from surviving as stale genomes after a
+	# clustering or catalogue change.
+	remove_tree($_) for grep { -d $_ } ($binD, $binDctg, $binDctgFam);
+	make_path($binD, $binDctg, $binDctgFam);
+}
 
 #gget repr genomes for each MGS
-if (!_checkpoint_valid($BinExtrSto)){
+if (!$binExtractionValid){
 	print "Creating reference genome fasta's for all MGS based on gene cat genes in\n$binD\n";
 	createBin2($binD,"$finalClustersFilt","$GCd/compl.incompl.$clusterID.prot.faa","faa");
 	createBin2($binD,"$finalClustersFilt","$GCd/compl.incompl.$clusterID.fna","fna");
@@ -662,7 +696,8 @@ if (!-e $GTDBtaxF || !-e"$annoDir/gtdbtk.summary.tsv" || !_checkpoint_valid($GTD
 	$cmd .= "test -s $outD/GTDBTK.tax\ntest -s $outD/gtdbtk.summary.tsv\n";
 	$cmd .= "mv $outD/GTDBTK.tax $outD/gtdbtk.summary.tsv $annoDir\n";
 	$cmd .= "test -s $GTDBtaxF\ntest -s $annoDir/gtdbtk.summary.tsv\n";
-	$cmd .= _checkpoint_command($checkpointWriter, $GTDBtaxSto, 'gtdb-taxonomy', $GTDBtaxF, "$annoDir/gtdbtk.summary.tsv");
+	$cmd .= _checkpoint_command($checkpointWriter, $GTDBtaxSto, 'gtdb-taxonomy',
+		$GTDBtaxF, "$annoDir/gtdbtk.summary.tsv", $finalClustersFilt);
 	#changed mem from 370 to 100 with GTDB-TK 2.1.0
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "150G"; 
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/GTDB.sh",$cmd,$numCore,int($memGTDB)."G","GTDB_MGS","","",1,[],\%QSBopt);
@@ -670,7 +705,7 @@ if (!-e $GTDBtaxF || !-e"$annoDir/gtdbtk.summary.tsv" || !_checkpoint_valid($GTD
 	push(@jobs2wait,$jobName2);
 }
 
-if (!_checkpoint_valid($BinExtrSto)){
+if (!$binExtractionValid){
 	print "\n\nCreating reference genome fasta's for all MGS based on contigs in\n$binDctg\n\n";
 	if ($doBinCtgsPerFam){
 	#do I really need per family genomes??
@@ -680,7 +715,13 @@ if (!_checkpoint_valid($BinExtrSto)){
 	}
 
 	createBinCtgs($binDctg,$hrM,"$logDir/MAGvsGC.txt.gz",0,$BinnerShrt);
-	_touch_checkpoint($BinExtrSto, 'extract-bin-contigs');
+	my @geneBinFiles = grep { -f $_ } glob("$binD/*");
+	my @contigBinFiles = grep { -f $_ } glob("$binDctg/*");
+	my @familyBinFiles = $doBinCtgsPerFam ? grep { -f $_ } glob("$binDctgFam/*") : ();
+	die "Bin extraction produced no gene-based MGS genomes in $binD\n" unless @geneBinFiles;
+	die "Bin extraction produced no representative contig genomes in $binDctg\n" unless @contigBinFiles;
+	_touch_checkpoint($BinExtrSto, 'extract-bin-contigs',
+		$finalClustersFilt, @geneBinFiles, @contigBinFiles, @familyBinFiles);
 }
 
 #wait for checkm/GTDB
@@ -748,7 +789,8 @@ unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/spec
 	$cmdSI .= "cp $specIoutDir/MGS2speci.txt $annoDir/specI.tax\n";
 	$cmdSI .= "test -s $specIabundance\n";
 	$cmdSI .= "test -s $annoDir/specI.tax\n";
-	$cmdSI .= _checkpoint_command($checkpointWriter, $ABmgsSton, 'mgs-abundance', $specIabundance, "$annoDir/specI.tax");
+	$cmdSI .= _checkpoint_command($checkpointWriter, $ABmgsSton, 'mgs-abundance',
+		$specIabundance, "$annoDir/specI.tax", $finalClustersFilt, $GTDBtaxF);
 	printL "Merge with SpecI & get abundance \n";
 	#print "$cmdSI\n";
 
@@ -774,7 +816,9 @@ unless (_checkpoint_valid($ABmgsSton2) && -s "$outD/Annotation/Abundance/MGS.mat
 	my $cmdSI2 = "$MMLscr -GCd $GCd -cores $numCore -MGset $useGTDBmg -Binner $BinnerShrt -binD $outD\n";
 	$cmdSI2 .= "test -s $outD/Annotation/Abundance/MGS.matL0.txt\n";
 	$cmdSI2 .= "test -s $outD/Annotation/Abundance/MGS.matL7.txt\n";
-	$cmdSI2 .= _checkpoint_command($checkpointWriter, $ABmgsSton2, 'marker-mgs-abundance', "$outD/Annotation/Abundance/MGS.matL0.txt", "$outD/Annotation/Abundance/MGS.matL7.txt");
+	$cmdSI2 .= _checkpoint_command($checkpointWriter, $ABmgsSton2, 'marker-mgs-abundance',
+		"$outD/Annotation/Abundance/MGS.matL0.txt", "$outD/Annotation/Abundance/MGS.matL7.txt",
+		$finalClustersFilt, $GTDBtaxF);
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 	# qsubSystem's memory argument is emitted as total memory by the Slurm
 	# backend; keep the intended 100 GiB request independent of thread count.

@@ -119,6 +119,8 @@ like($between_source, qr/if \(!-s \$treeFile\)/,
 	'between-MGS phylogeny rebuilds an empty tree instead of treating it as complete');
 like($between_source, qr/test -s \$treeFile.*?test -s \$treePdf/s,
 	'between-MGS tree jobs validate both tree and visualization outputs');
+like($between_source, qr/\$externalDep =~ s\/\^\\Q\$localTag\\E\/\/.*?WAITID=\$externalDep/s,
+	'between-MGS launcher exports an untagged numeric dependency across processes');
 my $strain_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 like($strain_source, qr/my \$tree_sample_separator = quotemeta\(\$SaSe\)/,
 	'within-MGS tree command escapes the pipe sample separator as a regular expression');
@@ -181,6 +183,14 @@ like($mgs_source,
 	'MGS checkpoints fingerprint marker-set, binner, and quality-checker choices');
 like($mgs_source, qr/return 0 unless defined\(\$file\) && -s \$file;.*?checkpoint_valid/s,
 	'MGS does not accept provenance-free empty checkpoint stones');
+like($mgs_source, qr/checkpointInputs.*?catalog_fna.*?catalog_faa.*?map_/s,
+	'MGS checkpoints fingerprint primary catalogue, matrix, and map inputs');
+like($mgs_source, qr/'gtdb-taxonomy'.*?\$finalClustersFilt.*?'mgs-abundance'.*?\$finalClustersFilt.*?'marker-mgs-abundance'.*?\$finalClustersFilt/s,
+	'downstream taxonomy and abundance checkpoints track the current MGS membership');
+like($mgs_source, qr/binExtractionValid.*?remove_tree.*?geneBinFiles.*?contigBinFiles.*?_touch_checkpoint/s,
+	'bin extraction rebuilds cleanly and records its concrete genome outputs');
+like($mgs_source, qr/if \(\$rewrClusterMAGs\).*?invalidate downstream checkpoint.*?between_phylo.*?within_phylo/s,
+	'reclustering invalidates dependent checkpoints and phylogenies');
 like($mgs_source, qr/"clusterID=i" => \\\$clusterID/,
 	'MGS accepts a gene-catalog cluster identity');
 like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -cores \$numCore/,
