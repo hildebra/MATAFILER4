@@ -93,5 +93,14 @@ like($snp_source,
 like($snp_source,
 	qr/consVCF_region_planner.*?--mapping \$tarS\[0\].*?--output-prefix \$\{bedPrefix\}sup-/s,
 	'supplementary mappings receive independent runtime region planning');
+like($snp_source,
+	qr/sub _coverage_file_for_mapping.*?return "\$coverage\.gz" if \$allowPendingInputs/s,
+	'pending consensus jobs use the canonical future compressed-coverage path');
+like($snp_source,
+	qr/pending SNP inputs require scheduler dependencies.*?test -s \$refFA.*?test -s \$tar\[0\].*?test -s \$depthFile/s,
+	'pending consensus inputs require an afterok chain and are validated inside the allocation');
+like($snp_source,
+	qr/my \$gffAvailable = -s \$gffF \|\| \(\$allowPendingInputs && \$createGeneFastas\).*?test -s \$gffF/s,
+	'future gene annotations are accepted at submission and checked before consensus FASTA creation');
 
 done_testing;

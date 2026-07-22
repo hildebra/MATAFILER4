@@ -259,12 +259,16 @@ sub pileupcall{
 }
 
 sub _coverage_file_for_mapping {
-	my ($mapping, $label) = @_;
+	my ($mapping, $label, $allowPendingInputs) = @_;
 	my $coverage = $mapping;
 	die "$label mapping has an unsupported suffix: $mapping\n"
 		unless $coverage =~ s/\.(?:cram|bam)$/\.bam.coverage/;
 	return "$coverage.gz" if -s "$coverage.gz";
 	return $coverage if -s $coverage;
+	# Canonical assembly mappings publish compressed coverage. When the mapping
+	# job is an afterok dependency, use that known future path rather than
+	# inspecting a file which cannot exist yet.
+	return "$coverage.gz" if $allowPendingInputs;
 	die "$label coverage is missing for $mapping (expected $coverage or $coverage.gz)\n";
 }
 
@@ -290,6 +294,7 @@ sub SNPconsensus_vcf{
 	my $submissionCommands = "";
 	my $x = $SNPIHR->{JNUM};
 	my $jdep = ""; $jdep = $SNPIHR->{jdeps} if (exists($SNPIHR->{jdeps}));
+	my $allowPendingInputs = $SNPIHR->{allowPendingInputs} ? 1 : 0;
 	my $tmpdir = $SNPIHR->{nodeTmpD};
 	my $smplNm = $SNPIHR->{smpl};
 	my $refFA = $SNPIHR->{assembly};
@@ -301,6 +306,8 @@ sub SNPconsensus_vcf{
 	my $runLocalTmp = $SNPIHR->{runLocal} ? 1 : 0;
 	die "SNP consensus requires runLocal mode so preparation, chunks, and finalization share one checked allocation\n"
 		unless $runLocalTmp;
+	die "pending SNP inputs require scheduler dependencies for immediate submission\n"
+		if ($allowPendingInputs && $immediateSubm && $jdep !~ /\S/);
 	my $maxSNPcores= int($SNPIHR->{maxCores});
 	die "maxCores must be positive\n" unless $maxSNPcores > 0;
 	# A sample may have primary reads while this invocation requests only the
@@ -390,7 +397,6 @@ sub SNPconsensus_vcf{
 	my $xtra = "";
 	$xtra .= "echo \"Preparing data\"\n";
 	$xtra .= "mkdir -p $scrDir;\n";
-	$xtra .= "$smtBin faidx $refFA;\n" unless (-s "$refFA.fai");
 	#$xtra .= "exit\n"; #DEBUG
 	#$xtra .= "cp $refFA $refFA.fai $scrDir;\n";$refFA =~ m/\/([^\/]+$)/;$refFA = "$scrDir/$1";
 	#my $preTar = 
@@ -403,9 +409,20 @@ sub SNPconsensus_vcf{
 
 	#supplementary mappings?
 	my @tarS = $supportRequested && ref($SNPIHR->{MARsupp}) eq 'ARRAY' ? ($SNPIHR->{MARsupp}->[0]) : ();
-	die "primary SNP mapping is missing\n" if $hasPrimaryRds && (!@tar || !defined($tar[0]) || !-s $tar[0]);
-	die "supplementary SNP mapping is missing\n" if $supportRequested && (!@tarS || !defined($tarS[0]) || !-s $tarS[0]);
-	die "SNP reference is missing or empty: $refFA\n" unless -s $refFA;
+	die "primary SNP mapping is missing\n"
+		if $hasPrimaryRds && (!@tar || !defined($tar[0])
+			|| (!$allowPendingInputs && !-s $tar[0]));
+	die "supplementary SNP mapping is missing\n"
+		if $supportRequested && (!@tarS || !defined($tarS[0])
+			|| (!$allowPendingInputs && !-s $tarS[0]));
+	die "SNP reference is missing or empty: $refFA\n"
+		unless $allowPendingInputs || -s $refFA;
+	if ($allowPendingInputs) {
+		$xtra .= "test -s $refFA\n";
+		$xtra .= "test -s $tar[0]\n" if $hasPrimaryRds;
+		$xtra .= "test -s $tarS[0]\n" if $supportRequested;
+	}
+	$xtra .= "$smtBin faidx $refFA;\n" unless (-s "$refFA.fai");
 	my $tmpOut2 = "$scrDir/$smplNm.X.cons.vcf";my $depthFileS  = "";
 	my ($primaryRegionCmd, $supportRegionCmd) = ("", "");
 	if ($myParL && $run2ctg) {
@@ -436,7 +453,8 @@ sub SNPconsensus_vcf{
 	#die "hasPrimaryRds: $hasPrimaryRds\n";
 
 	if ($hasPrimaryRds){ #primary reads SNP call
-		$depthFile = _coverage_file_for_mapping($tar[0], "primary SNP");
+		$depthFile = _coverage_file_for_mapping($tar[0], "primary SNP", $allowPendingInputs);
+		$xtra .= "test -s $depthFile\n" if $allowPendingInputs;
 	}
 	if ($runPrimary){
 		$xtra .= "echo \"Creating c/bams indexes primary reads\"\n";
@@ -457,10 +475,11 @@ sub SNPconsensus_vcf{
 	}
 	
 	if (@tarS){
-		$depthFileS = _coverage_file_for_mapping($tarS[0], "supplementary SNP");
+		$depthFileS = _coverage_file_for_mapping($tarS[0], "supplementary SNP", $allowPendingInputs);
 	}
 	if ($runSupport){ #supplementary reads SNP call
 		my $xtra2 = "echo \"Creating c/bams indexes supplemental reads\"\n";
+		$xtra2 .= "test -s $depthFileS\n" if $allowPendingInputs;
 		$cmdAll .= $xtra if !$runPrimary && !$onlyNormalize;
 		$SNPIHR->{run2ctg} = 1;
 		#die "$depthFileS\n";
@@ -536,8 +555,11 @@ sub SNPconsensus_vcf{
 		} elsif (!-s $gffF && -s "$gffF.gz") {
 			$gffF .= ".gz";
 		}
-		$vcf2fnaIns .= "-gff $gffF " if -s $gffF;
-		die "SNP GFF is missing or empty: $gffF\n" if $createGeneFastas && !-s $gffF;
+		my $gffAvailable = -s $gffF || ($allowPendingInputs && $createGeneFastas);
+		$vcf2fnaIns .= "-gff $gffF " if $gffAvailable;
+		die "SNP GFF is missing or empty: $gffF\n"
+			if $createGeneFastas && !$gffAvailable;
+		$postcmd .= "test -s $gffF\n" if $allowPendingInputs && $createGeneFastas;
 	} elsif ($createGeneFastas) {
 		die "SNP GFF is required when gene consensus FASTAs are requested\n";
 	}
@@ -620,6 +642,7 @@ sub SNPconsensus_vcf{
 
 sub SVcall_vcf{
 	my ($SNPIHR) = @_;
+	my $allowPendingInputs = $SNPIHR->{allowPendingInputs} ? 1 : 0;
 	my $hasPrimary = exists($SNPIHR->{hasPrimaryRds}) ? ($SNPIHR->{hasPrimaryRds} ? 1 : 0) : 1;
 	my $callPrimary = $hasPrimary && ($SNPIHR->{callSVs} || 0);
 	my $callSupport = $SNPIHR->{callSVsSupp} || 0;
@@ -671,9 +694,12 @@ sub SVcall_vcf{
 		$tmpVCFS = "$tmpdir/SV.sup-$SNPIHR->{smpl}.bcf";
 		@tarS = @{$SNPIHR->{MARsupp}}[0];
 	}
-	die "primary SV mapping is missing\n" if $callPrimary && (!@tar || !-s $tar[0]);
-	die "supplementary SV mapping is missing\n" if $callSupport && (!@tarS || !-s $tarS[0]);
-	die "SV reference is missing or empty: $refFA\n" unless defined($refFA) && -s $refFA;
+	die "primary SV mapping is missing\n"
+		if $callPrimary && (!@tar || (!$allowPendingInputs && !-s $tar[0]));
+	die "supplementary SV mapping is missing\n"
+		if $callSupport && (!@tarS || (!$allowPendingInputs && !-s $tarS[0]));
+	die "SV reference is missing or empty: $refFA\n"
+		unless defined($refFA) && ($allowPendingInputs || -s $refFA);
 	
 
 	my $smtBin = getProgPaths("samtools");
@@ -681,6 +707,11 @@ sub SVcall_vcf{
 
 	my $xtra = "";$xtra .= "echo \"Preparing data\"\n";
 	$xtra .= "rm -rf $tmpdir\nmkdir -p $tmpdir;\n";
+	if ($allowPendingInputs) {
+		$xtra .= "test -s $refFA\n";
+		$xtra .= "test -s $tar[0]\n" if $callPrimary;
+		$xtra .= "test -s $tarS[0]\n" if $callSupport;
+	}
 	$xtra .= "$smtBin faidx $refFA;\n" unless (-s "$refFA.fai");
 	$xtra .= "echo \"Creating c/bams indexes primary reads\"\n";
 	
@@ -742,6 +773,8 @@ sub SVcall_vcf{
 	#print $cmdAll;
 
 	my $immediateSubm = exists($SNPIHR->{immediateSubm}) ? $SNPIHR->{immediateSubm} : 1;
+	die "pending SV inputs require scheduler dependencies for immediate submission\n"
+		if ($allowPendingInputs && $immediateSubm && $jdep !~ /\S/);
 	my ($dep,$qcmd) = qsubSystem($SNPIHR->{qsubDir} . "$SNPIHR->{cmdFileTag}.SV.sh",$cmdAll,int($actualCores),"20G","SV$SNPIHR->{JNUM}",$jdep,"",$immediateSubm,[],$SNPIHR->{QSHR});
 	
 	return wantarray ? ($dep, $immediateSubm ? "" : $qcmd) : $dep;

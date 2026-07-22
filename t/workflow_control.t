@@ -354,8 +354,8 @@ like($mataf4,
 	qr/my \$mappingArtifactsPresent\s*=.*?if \(!\$efinAssLoc && !\$ePreAssmbly && \$mappingArtifactsPresent\)/s,
 	'a missing clean-run assembly does not masquerade as a mapping redo');
 like($mataf4,
-	qr/my \$geneConsensusRequested.*?my \$variantCommonInputsReady = \$efinAssLoc.*?genes\.gff.*?\$primaryVariantInputsReady.*?!\$calcConsSNP.*?bam\.coverage.*?\$supportVariantInputsReady.*?!\$calcSuppConsSNP.*?sup-smd\.bam\.coverage.*?if \(\$variantWorkRequested && \$variantCommonInputsReady/s,
-	'variant calls wait for each requested product\'s assembly, annotation, mapping, and coverage inputs');
+	qr/my \$assemblyDownstreamScheduled.*?my \$assemblyDownstreamDeferred.*?my \$variantCommonInputsPublished.*?my \$primaryVariantInputsPublished.*?my \$supportVariantInputsPublished.*?my \$variantInputsMayBePending.*?\$variantCommonInputsReady.*?\$primaryVariantInputsReady.*?\$doMapping.*?\$supportVariantInputsReady.*?\$mapSuppAssFlag.*?allowPendingInputs => \(\$variantInputsMayBePending/s,
+	'variant calls accept published inputs or same-pass producer jobs with scheduler dependencies');
 like($mataf4,
 	qr/my \$runConsensus =.*?callConsSNP.*?callConsSNPSupp.*?SNPconsensus_vcf\(\\%SNPinfo\) if \$runConsensus/s,
 	'an SV-only request does not execute the SNP-consensus workflow');
@@ -392,8 +392,12 @@ like($mataf4, qr/append_job_dependencies\(\\\$AsGrps\{\$cAssGrp\}\{BinDeps\}, \$
 	'all binners wait for the contig-stat job that creates their coverage inputs');
 like($mataf4, qr/submitGenomeBinner\(\$binnerTmp,\$finAssLoc/,
 	'first-pass binning consumes the producer-published final assembly path');
-unlike($mataf4, qr/assemblyDownstreamScheduled|assemblyDownstreamDeferred|MultiConsensus\.sh/,
-	'first-pass consensus is not constructed for deferred submission');
+like($mataf4,
+	qr/Submitting deferred assembly-group mapping jobs.*?MultiContigStats\.sh.*?Submitting deferred assembly-group Cons jobs.*?MultiConsensus\.sh/s,
+	'assembly groups release mapping, ContigStats, and deferred Cons jobs in producer order');
+like($mataf4,
+	qr/immediateSubm => \(\$variantSubmissionDeferred \? 0 : 1\).*?PostConsCmd.*?variantSubmissionCommands/s,
+	'first-pass Cons jobs are submitted immediately or retained until group producer ids are available');
 like($mataf4,
 	qr/for my \$SNPinfo \(\@pendingSecondMapSNP\).*?next unless -s \$secondReference && -s \$secondMapping;.*?createConsSNPandSVs\(\$SNPinfo\)/s,
 	'secondary-reference ConsSNP also waits for its published reference and mapping');
@@ -458,6 +462,18 @@ like($mataf4,
 	'secondary-map rewrite cannot delete primary assembly mappings');
 unlike($mataf4, qr/gunzip \$REF/,
 	'compressed mapping references are never decompressed in place');
+
+like($mataf4,
+	qr/print "AssmblGrp: ".*?CntAimAss\} > 1 && !\$MFconfig\{silent\}/s,
+	'assembly-group progress is shown only for multi-sample assembly groups');
+like($mataf4,
+	qr/print "MapGroup: ".*?CntAimMap\} > 1 && !\$MFconfig\{silent\}/s,
+	'mapping-group progress is shown only for multi-sample mapping groups');
+like($mataf4,
+	qr/my \$hybridAssemblyRequested = \$MFopt\{DoAssembly\} == 5.*?print "precnt: .*?if \(\$hybridAssemblyRequested && !\$MFconfig\{silent\}\)/s,
+	'preassembly count is reported only for requested hybrid assemblies');
+unlike($mataf4, qr/Running Contig Stats on assembly \(\$immSubm\)/,
+	'normal immediate ContigStats submission no longer emits a routine status line');
 like($mataf4,
 	qr/\$pigzBin -dc \$compressedReference > \$stagedReference.*?mappingReference/s,
 	'compressed mapping references are staged in mapper-local storage');

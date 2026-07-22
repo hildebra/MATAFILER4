@@ -391,7 +391,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	
 	$AsGrps{$cAssGrp}{CntAss} ++;
-	print "AssmblyGrp: " . $AsGrps{$cAssGrp}{CntAss} .":".$AsGrps{$cAssGrp}{CntAimAss}. "; " if ($AsGrps{$cAssGrp}{CntAimAss} > 1 && !$MFconfig{silent});
+	print "AssmblGrp: " . $AsGrps{$cAssGrp}{CntAss} .":".$AsGrps{$cAssGrp}{CntAimAss}. ";\n"
+		if ($AsGrps{$cAssGrp}{CntAimAss} > 1 && !$MFconfig{silent});
 	if ($AsGrps{$cAssGrp}{CntAss}  >= $AsGrps{$cAssGrp}{CntAimAss} ){
 		#print "running assembluy\n";
 		$AssemblyGo = 1;
@@ -403,7 +404,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#my $hasPrimaryRds= 1;$hasPrimaryRds = 0 if ($map{$curSmpl}{prefix} eq "" && $map{$curSmpl}{dir} eq "");
 	
 
-	print "MapGroup: ".$AsGrps{$cMapGrp}{CntMap} .":".$AsGrps{$cMapGrp}{CntAimMap}.";\n"  unless ($MFconfig{silent});
+	print "MapGroup: ".$AsGrps{$cMapGrp}{CntMap} .":".$AsGrps{$cMapGrp}{CntAimMap}.";\n"
+		if ($AsGrps{$cMapGrp}{CntAimMap} > 1 && !$MFconfig{silent});
 	if (!exists($AsGrps{$cMapGrp}{CntMap})){ die "Can;t find CntMap for $cMapGrp";}
 	if ($AsGrps{$cMapGrp}{CntMap}  >= $AsGrps{$cMapGrp}{CntAimMap} 
 			&& $map{$curSmpl}{hasPrimaryRds} ) {  #ensure primary reads are present and registered
@@ -898,9 +900,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#print "chk1 $mapSuppAssFlag $calcSuppCoverage $eSuppCovAsssembly\n" ;
 
 	# Cleanup is destructive to read-cleaning stones, mapping indexes and staged
-	# reads.  A generic list of jobs submitted in this pass is not proof that the
-	# terminal assembly analyses are complete: in particular ConsSNP may be
-	# deferred to a later pass while its published inputs are still unavailable.
+	# reads. A generic list of jobs submitted in this pass is not proof that the
+	# terminal assembly analyses are complete; track each producer and terminal
+	# analysis explicitly, including same-pass ConsSNP dependencies.
 	my $cleanupContigSubparts = $MFconfig{defaultContigSubs}."gFG";
 	$cleanupContigSubparts .= "m" if ($MFopt{DoBinning});
 	$cleanupContigSubparts .= "k" if ($MFopt{kmerAssembly});
@@ -1429,7 +1431,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$binningJobDep = submitGenomeBinner($binnerTmp,$finAssLoc,$BinningOut, $cAssGrp,$smplIDs[-1]);
 		add2SampleDeps(\@sampleDeps, [$binningJobDep]);
 	}
-
 	
 	#die "AT CONS SNP\n$allMapDone\n";
 	my $primaryVariantRequested = $calcConsSNP || $calcSVs;
@@ -1437,24 +1438,46 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $variantWorkRequested = $primaryVariantRequested || $supportVariantRequested;
 	my $geneConsensusRequested = $MFopt{saveConsFastas}
 		&& ($calcConsSNP || $calcSuppConsSNP);
-	my $variantCommonInputsReady = $efinAssLoc
+	# Assembly, annotation, mapping, and ContigStats outputs can all be valid
+	# future outputs of jobs submitted in this pass. SNP region planning now runs
+	# inside the Cons allocation, so scheduler dependencies can safely replace
+	# launch-time file-existence checks for those pending products.
+	my $assemblyDownstreamScheduled = $AssemblyGo && !$doPreAssmFlag && !$ePreAssmblPck
+		&& ($efinAssLoc || $MFopt{DoAssembly} != 5 || $postPreAssmblGo)
+		&& (!$map{$curSmpl}{hasPrimaryRds} || ($MFopt{map2Assembly} && $MappingGo));
+	my $assemblyDownstreamDeferred = $mappingDeferred
+		&& !$doPreAssmFlag && !$ePreAssmblPck;
+	my $variantCommonInputsPublished = $efinAssLoc
 		&& (!$geneConsensusRequested || ($boolGenePredOK
 			&& fileGZe("$finalCommAssDir/genePred/genes.gff")));
-	my $primaryVariantInputsReady = !$primaryVariantRequested || (
+	my $primaryVariantInputsPublished = !$primaryVariantRequested || (
 		-s "$finalMapDir/$SmplName-smd.$bamcramMap"
 		&& (!$calcConsSNP || ($eFinMapCovGZ
 			&& fileGZe("$finalMapDir/$SmplName-smd.bam.coverage") && $eCovAsssembly))
 	);
-	my $supportVariantInputsReady = !$supportVariantRequested || (
+	my $supportVariantInputsPublished = !$supportVariantRequested || (
 		-s "$finalMapDir/$SmplName.sup-smd.$bamcramMap"
 		&& (!$calcSuppConsSNP || ($eFinSupMapCovGZ
 			&& fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage") && $eSuppCovAsssembly))
 	);
+	my $variantInputsMayBePending = (!$variantCommonInputsPublished
+			|| !$primaryVariantInputsPublished || !$supportVariantInputsPublished)
+		&& ($assemblyDownstreamScheduled || $assemblyDownstreamDeferred);
+	my $variantCommonInputsReady = $variantCommonInputsPublished
+		|| $variantInputsMayBePending;
+	my $primaryVariantInputsReady = $primaryVariantInputsPublished
+		|| ($variantInputsMayBePending && $doMapping);
+	my $supportVariantInputsReady = $supportVariantInputsPublished
+		|| ($variantInputsMayBePending && $mapSuppAssFlag);
+	my $variantSubmissionDeferred = $variantInputsMayBePending
+		&& $assemblyDownstreamDeferred;
 	if ($variantWorkRequested && $variantCommonInputsReady
 			&& $primaryVariantInputsReady && $supportVariantInputsReady){
 		#die "conssnp:: $calcConsSNP $allMapDone $finalMapDir\n";
 		#my $ofas = "$curOutDir/SNP/genePred/genes.shrtHD.SNPc.fna";
 	
+		my $consensusGff = "$finalCommAssDir/genePred/genes.gff";
+		$consensusGff .= ".gz" if ($MFopt{GenePredGZ});
 		my %SNPinfo = (gff => "$finalCommAssDir/genePred/genes.gff",
 						assembly => $finAssLoc,
 						mapD => "$finalMapDir",normIndels => $MFopt{normSNPindels},
@@ -1463,14 +1486,15 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						saveVCF => $MFopt{saveVCF},
 						ofas => $contigsSNP, #primary file of contigs
 						genefna => $genePredSNP,genefaa => $genePredAASNP,
-						vcfFile => $vcfSNP,vcfFileSupp => $vcfSNPsupp, gffFile => "$finalCommAssDir/genePred/genes.gff.gz",
+						vcfFile => $vcfSNP,vcfFileSupp => $vcfSNPsupp, gffFile => $consensusGff,
 						nodeTmpD => $nodeSpTmpD,scratch => "$nodeSpTmpD/SNP/",
 						smpl => $SmplName,bamcram => $bamcramMap,minDepth => $MFopt{consSNPminDepth},
 						depthF => $coveragePerCtg,firstInSample => 1, #($i == 0 ? 1 : 0)
 						bpSplit => 1e6,runLocal => 1,SeqTech => $map{$curSmpl}{SeqTech},SeqTechSuppl => "",
 						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
 						jdeps => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
-						immediateSubm => 1,
+						allowPendingInputs => ($variantInputsMayBePending ? 1 : 0),
+						immediateSubm => ($variantSubmissionDeferred ? 0 : 1),
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
 						STOconSNP => $STOsnpCons, STOconSNPsupp => "",
 						minCallQual => $MFopt{SNPminCallQual},
@@ -1486,9 +1510,23 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$SNPinfo{STOconSNPsupp} = $STOsnpSuppCons   ; #trigger for also looking at cons SNP for support reads
 		}
 		
-		($variantJobDep) = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
+		my $variantSubmissionCommands;
+		($variantJobDep,$variantSubmissionCommands) = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
+		$AsGrps{$cAssGrp}{PostConsCmd} .= $variantSubmissionCommands
+			if ($variantSubmissionDeferred && defined($variantSubmissionCommands));
 		add2SampleDeps(\@sampleDeps, [$variantJobDep]);
 		#push(@sampleDeps, $consSNPdep) if (defined $consSNPdep && $consSNPdep ne "");
+	}
+	my $deferredVariantDeps = "";
+	if ($AssemblyGo && ($AsGrps{$cAssGrp}{PostConsCmd} || "") =~ /\S/) {
+		print "Submitting deferred assembly-group Cons jobs\n";
+		$deferredVariantDeps = postSubmQsub(
+			"$logDir/MultiConsensus.sh", $AsGrps{$cAssGrp}{PostConsCmd},
+			normalise_job_dependencies($AsGrps{$cAssGrp}{BinDeps}, $publicationDeps, $jdep),
+		);
+		$AsGrps{$cAssGrp}{PostConsCmd} = "" if ($doSubmit);
+		$variantJobDep = normalise_job_dependencies($variantJobDep, $deferredVariantDeps);
+		add2SampleDeps(\@sampleDeps, [$deferredVariantDeps]);
 	}
 	MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR);
 	my $cleanupBarrier = cleanup_stage_barrier(
@@ -3632,7 +3670,8 @@ sub runContigStats{
 	#die "$CSfilesComplete";
 	return ("","",0) if ($CSfilesComplete);
 	
-	print "Running Contig Stats on assembly ($immSubm)\n";
+	print "Deferring Contig Stats until its assembly-group mapping is submitted\n"
+		unless ($immSubm);
 	$Nthr =1 unless ($subprts =~m/[FGEm]/);
 	
 	
@@ -7829,7 +7868,10 @@ sub prepPreAssmbl{
 	
 	#my $hasPrimaryRds= 1;$hasPrimaryRds = 0 if ($map{$curSmpl}{prefix} eq "" && $map{$curSmpl}{dir} eq "");
 	
-	print "precnt: $AsGrps{$cAssGrp}{CntPreAss}\n";
+	my $hybridAssemblyRequested = $MFopt{DoAssembly} == 5
+		&& ($map{$curSmpl}{SupportReads} || "") =~ m/(?:PB|ONT):/;
+	print "precnt: $AsGrps{$cAssGrp}{CntPreAss}\n"
+		if ($hybridAssemblyRequested && !$MFconfig{silent});
 
 	my $ePreAssmbly = 0; $ePreAssmbly = 1 if (-s $finAssLoc && -e "$finalCommAssDir/$stones{preAsmDone}");
 	#die "$ePreAssmbly\n";
