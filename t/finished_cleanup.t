@@ -25,7 +25,7 @@ sub write_file {
 	close $fh;
 }
 
-sub run_cleaner {
+sub cleaner_command {
 	my (%args) = @_;
 	my @command = (
 		$^X, $cleaner,
@@ -42,7 +42,23 @@ sub run_cleaner {
 		'--assembly', ($args{assembly} // $assembly),
 		'--snp-log-dir', $args{snp_log_dir};
 	push @command, @{$args{requirements} || []};
+	return @command;
+}
+
+sub run_cleaner {
+	my (%args) = @_;
+	my @command = cleaner_command(%args);
 	return system(@command);
+}
+
+sub run_cleaner_capture {
+	my (%args) = @_;
+	my @command = cleaner_command(%args);
+	open my $pipe, '-|', @command or die "cannot run cleanup command: $!";
+	local $/;
+	my $output = <$pipe> // '';
+	close $pipe;
+	return ($?, $output);
 }
 
 write_file($assembly, ">ctg\nACGT\n");
@@ -103,6 +119,14 @@ ok(-s File::Spec->catfile($sample_paths{S1}{mapping_dir}, 'S1-smd.bam'),
 	'canonical alignment is retained');
 ok(!-d $sample_paths{S1}{sample_temp}, 'sample temporary directory is removed');
 ok(-s "$assembly.mmi", 'shared mapper index remains until every group member completes');
+
+my ($noop_status, $noop_output) = run_cleaner_capture(
+	sample => 'S1', members => [qw(S1 S2)],
+	requirements => \@terminal_requirements,
+	%{$sample_paths{S1}},
+);
+is($noop_status, 0, 'repeated cleanup with nothing to delete succeeds');
+is($noop_output, '', 'repeated cleanup with nothing to delete is silent');
 
 is(run_cleaner(
 	sample => 'S2', members => [qw(S1 S2)],

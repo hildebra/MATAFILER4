@@ -78,7 +78,7 @@ like($strain, qr/qsubSystemJobAlive\([^\n]+QSBoptHR[^\n]+if [^\n]+doSubmit/,
 	'dry runs do not poll scheduler jobs that were never submitted');
 like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,
 	'postprocessing inherits submission state and the selected queue backend');
-like($strain, qr/sub assertSafeWorkflowRemoval .*?Refusing to remove filesystem root.*?matafiler-strain-workdir/s,
+like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,
 	'custom recursive output removal requires a workflow-owned directory');
 
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));

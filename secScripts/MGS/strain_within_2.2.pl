@@ -97,6 +97,12 @@ my $SaSe = "|";
 my $SaSe2 = "\|"; #for regex
 my $numCores = 40; #used for phylos..
 my $RsummaryTab = "$FMGpD/Rsummary.tab";
+my $existingSummaryHeader = '';
+if (!$rewriteRanalysis && -s $RsummaryTab) {
+	open my $old_summary, '<', $RsummaryTab or die "Cannot read $RsummaryTab: $!\n";
+	$existingSummaryHeader = <$old_summary> // '';
+	close $old_summary or die "Cannot close $RsummaryTab: $!\n";
+}
 
 
 my %dirs;my %destDs; my %baseD;
@@ -156,7 +162,7 @@ if (!@k2d) {
 }
 
 my $cmdPrelude = "ulimit -s 20000\n";
-my $cmd = $cmdPrelude;my $destD =""; my $wrHead=1;
+my $cmd = $cmdPrelude;my $destD =""; my $wrHead=1; my $headerOwner='';
 my %analysisAttempted; my $legacyCompleted = 0;
 my $strainStatsR = getProgPaths("treeSubGrpsR");
 
@@ -217,6 +223,7 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	$cmd .= "test -s ".shellQuote($analysisReport)."\n";
 	$cmd .= "touch ".shellQuote($analysisStone)."\n";
 	$analysisAttempted{$d} = { report => $analysisReport, stone => $analysisStone };
+	$headerOwner = $d if $wrHead;
 	$wrHead=0;
 	if (0){#rerun popgen stats??
 		my $RpogenS = getProgPaths("pogenStats");
@@ -327,7 +334,15 @@ if (0){
 #summary  of R stats
 #create summary tables 
 if (1 || !-e $RsummaryTab){
+	my $summaryHeader = $existingSummaryHeader;
+	if ($summaryHeader eq '' && $headerOwner ne '') {
+		my $headerReport = "$destDs{$headerOwner}/${headerOwner}.analysis.txt";
+		open my $header_fh, '<', $headerReport or die "Cannot read header report $headerReport: $!\n";
+		$summaryHeader = <$header_fh> // '';
+		close $header_fh or die "Cannot close header report $headerReport: $!\n";
+	}
 	open my $summary_fh, ">", $RsummaryTab or die "Cannot reset $RsummaryTab: $!\n";
+	print {$summary_fh} $summaryHeader if $summaryHeader ne '';
 
 	foreach my $d (@k2d){
 		my $clsts = "$destDs{$d}/${d}.Ranalysis.log";
@@ -345,7 +360,10 @@ if (1 || !-e $RsummaryTab){
 
 		if (-e $TXTreport && -s $TXTreport){
 			open my $report_fh, "<", $TXTreport or die "Cannot read $TXTreport: $!\n";
-			while (my $line = <$report_fh>) { print {$summary_fh} $line; }
+			while (my $line = <$report_fh>) {
+				next if $summaryHeader ne '' && $line eq $summaryHeader;
+				print {$summary_fh} $line;
+			}
 			close $report_fh or die "Cannot close $TXTreport: $!\n";
 		}
 	}

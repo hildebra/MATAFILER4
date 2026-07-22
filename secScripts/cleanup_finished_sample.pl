@@ -14,6 +14,7 @@ my %opt;
 my @members;
 my @member_locks;
 my (@require_exists, @require_nonempty, @require_file, @require_nonempty_file);
+my $deleted_count = 0;
 GetOptions(
 	'sample=s'        => \$opt{sample},
 	'member=s@'       => \@members,
@@ -93,11 +94,15 @@ sub marker_matches_assembly {
 sub remove_files {
 	my (@files) = @_;
 	my %seen;
+	my $removed = 0;
 	for my $file (@files) {
 		next unless defined($file) && !$seen{$file}++ && -f $file;
 		unlink $file or die "can't remove $file: $!\n";
+		$removed++;
+		$deleted_count++;
 		print "Removed temporary file $file\n";
 	}
+	return $removed;
 }
 
 sub plain_or_gzip_stats {
@@ -156,7 +161,7 @@ my $scratch_root = existing_absolute($opt{scratch_root}, 'scratch root');
 my $sample_temp = prospective_absolute($opt{sample_temp});
 require_below($sample_temp, $scratch_root, 'sample temporary directory');
 if (-d $sample_temp) {
-	remove_tree($sample_temp, {error => \my $errors});
+	my $removed = remove_tree($sample_temp, {error => \my $errors});
 	if (@{$errors}) {
 		my @messages;
 		for my $entry (@{$errors}) {
@@ -165,7 +170,10 @@ if (-d $sample_temp) {
 		}
 		die "failed to remove sample temporary directory: ".join('; ', @messages)."\n";
 	}
-	print "Removed sample temporary directory $sample_temp\n";
+	if ($removed) {
+		$deleted_count += $removed;
+		print "Removed sample temporary directory $sample_temp\n";
+	}
 }
 
 my $assembly = existing_absolute($opt{assembly}, 'assembly');
@@ -186,13 +194,15 @@ for my $lock (@member_locks) {
 	push @active_locks, $absolute_lock if -e $absolute_lock;
 }
 if (@missing_members || @active_locks) {
-	print "Retaining assembly indexes; waiting for ".scalar(@missing_members)
-		." group completion marker(s) and ".scalar(@active_locks)." active job lock(s)\n";
+	if ($deleted_count) {
+		print "Retaining assembly indexes; waiting for ".scalar(@missing_members)
+			." group completion marker(s) and ".scalar(@active_locks)." active job lock(s)\n";
+	}
 	exit 0;
 }
 
 if (!is_below($assembly, $allowed_root)) {
-	print "Retaining mapper indexes for external assembly $assembly\n";
+	print "Retaining mapper indexes for external assembly $assembly\n" if $deleted_count;
 	exit 0;
 }
 
@@ -207,5 +217,6 @@ my @assembly_indexes = (
 	bsd_glob("$assembly.bw2.*.ebwtl"),
 	bsd_glob("$assembly.kma*"),
 );
-remove_files(@assembly_indexes);
-print "All assembly-group members complete; mapper and FASTA indexes are clean\n";
+my $assembly_indexes_removed = remove_files(@assembly_indexes);
+print "All assembly-group members complete; mapper and FASTA indexes are clean\n"
+	if $assembly_indexes_removed;

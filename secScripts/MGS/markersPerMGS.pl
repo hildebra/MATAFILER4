@@ -204,6 +204,9 @@ my %newMGStax;
 foreach my $mark (@mgkeys){
 	if (exists($gene2MGS{$mark})){
 		my @MGSs = sort keys %{$gene2MGS{$mark}};
+		# Shared markers are neither independent abundance evidence nor safe
+		# evidence for replacing an unresolved MGS taxonomy.
+		next if @MGSs > 1;
 		foreach my $MGSl (@MGSs){
 			$newMGStax{$MGSl}{$LCA{$mark}}++;
 		}

@@ -1213,11 +1213,13 @@ sub prepRun{
 
 	$bindir = $MGSfile;$bindir =~ s/[^\/]+$//; 
 	$bindir = $GCd if $bindir eq "";
-	$outD =  $bindir."/intra_phylo/";#"$GCd/$mode/intra_phylo/";
+	my $defaultOutD = $bindir."/intra_phylo/";
+	$outD = $defaultOutD;#"$GCd/$mode/intra_phylo/";
 	if ($outDpre ne ""){
 		$outD = $outDpre ; 
 		$outD .= "/" unless ($outD =~ m/\/$/);
 		}
+	my $safeDefaultOutD = $outDpre eq "" ? $defaultOutD : "";
 	my $outputWasPresent = -d $outD ? 1 : 0;
 	$LOGDIR = "$outD/LOGandSUB/";
 	$SNPconsLOGs = "$outD/SNPconsCalls.$subJob.log" if ($SNPconsLOGs eq "");
@@ -1321,7 +1323,7 @@ sub prepRun{
 		if ($subJob) {
 			die "Sorted MGS guide is missing for subjob: $sortedMGS\n" unless -s $sortedMGS;
 		} elsif ($mode eq "MGSall" && !-e $sortedMGS) {
-			assertSafeWorkflowRemoval($outD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
+			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
 			remove_tree($outD) if -d $outD;
 			remove_tree($scratchD) if -d $scratchD;
 			unlink $_ or die "Cannot remove stale $_: $!\n"
@@ -1330,7 +1332,7 @@ sub prepRun{
 				or die "Cannot link $sortedMGS to $MGSfile: $!\n";
 		} elsif (!$onlySubmit || !-s $sortedMGS) {
 			print "base files missing.. preparing complete resubmission and recalc of data\n";
-			assertSafeWorkflowRemoval($outD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
+			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
 			remove_tree($outD) if -d $outD;
 			remove_tree($scratchD) if -d $scratchD;
 			unlink $_ or die "Cannot remove stale $_: $!\n"
@@ -1793,7 +1795,7 @@ sub consensusInputState {
 }
 
 sub assertSafeWorkflowRemoval {
-	my ($target, @protected) = @_;
+	my ($target, $default_target, @protected) = @_;
 	return unless -d $target;
 	my $resolved = abs_path($target)
 		or die "Cannot resolve workflow output directory before removal: $target\n";
@@ -1816,10 +1818,18 @@ sub assertSafeWorkflowRemoval {
 			if $compare_protected eq $compare_target || index($compare_protected, $prefix) == 0;
 	}
 
-	my $base = basename($resolved);
 	my $owner = File::Spec->catfile($resolved, '.matafiler-strain-workdir');
+	my $is_default = 0;
+	if (defined($default_target) && length($default_target) && -d $default_target) {
+		my $resolved_default = abs_path($default_target);
+		if (defined $resolved_default) {
+			$resolved_default = File::Spec->canonpath($resolved_default);
+			$resolved_default = lc($resolved_default) if $^O eq 'MSWin32';
+			$is_default = 1 if $resolved_default eq $compare_target;
+		}
+	}
 	die "Refusing to remove unowned custom output directory $resolved; expected $owner\n"
-		unless $base eq 'intra_phylo' || $base eq 'within_phylo' || -f $owner;
+		unless $is_default || -f $owner;
 }
 
 sub markStrainWorkflowDirectory {

@@ -776,8 +776,9 @@ unless (_checkpoint_valid($ABmgsSton2) && -s "$outD/Annotation/Abundance/MGS.mat
 	$cmdSI2 .= "test -s $outD/Annotation/Abundance/MGS.matL7.txt\n";
 	$cmdSI2 .= _checkpoint_command($checkpointWriter, $ABmgsSton2, 'marker-mgs-abundance', "$outD/Annotation/Abundance/MGS.matL0.txt", "$outD/Annotation/Abundance/MGS.matL7.txt");
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
-	my $markerMemPerCore = int(100/$numCore); $markerMemPerCore = 1 if $markerMemPerCore < 1;
-	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS_core.sh",$cmdSI2,$numCore,$markerMemPerCore."G","AB_MGS_core","","",1,[],\%QSBopt) ;
+	# qsubSystem's memory argument is emitted as total memory by the Slurm
+	# backend; keep the intended 100 GiB request independent of thread count.
+	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS_core.sh",$cmdSI2,$numCore,"100G","AB_MGS_core","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
 	push @marker_jobs, $jobName2 if $jobName2;
 }

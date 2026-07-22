@@ -150,6 +150,9 @@ like($strain2_source,
 like($strain2_source,
 	qr/my \$wrHead=1;.*?\$analysisAttempted\{\$d\}.*?\$wrHead=0/s,
 	'the first newly attempted R analysis owns the summary header');
+like($strain2_source,
+	qr/existingSummaryHeader.*?headerOwner.*?next if \$summaryHeader ne '' && \$line eq \$summaryHeader/s,
+	'incremental summary assembly retains one canonical header and removes duplicates');
 unlike($strain2_source, qr/\$wrHead=1 if \( \$cnt == 0\)/,
 	'R-analysis header output is no longer tied to the first directory index');
 like($strain2_source,
@@ -187,6 +190,9 @@ like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -maxCores \$canCo
 like($mgs_source,
 	qr/\$cmdSI2 = "\$MMLscr -GCd \$GCd -cores \$numCore -MGset \$useGTDBmg -Binner \$BinnerShrt -binD \$outD/,
 	'MGS forwards its selected marker set and configured small-core count to marker abundance');
+like($mgs_source,
+	qr/qsubSystem\(\$logDir\."\/abundMGS_core\.sh",\$cmdSI2,\$numCore,"100G"/,
+	'marker abundance retains a fixed total-memory request as core count changes');
 like($mgs_source,
 	qr/qsubSystem\(\$logDir\."\/abundMGS\.sh",\$cmdSI,1,/,
 	'MGS consistently runs specI abundance through the configured submission backend');
@@ -245,6 +251,8 @@ like($marker_source, qr/\$gene2MGS\{\$_\}\{\$MGS\} = 1/,
 	'marker-to-MGS links are deduplicated before ambiguity filtering');
 like($marker_source, qr/if \(\@MGSs > 1\) \{\s+\$ambGenes\+\+;\s+next;/s,
 	'ambiguous markers are excluded instead of counted for every candidate MGS');
+like($marker_source, qr/my \@MGSs = sort keys %\{\$gene2MGS\{\$mark\}\};\s+# Shared markers.*?next if \@MGSs > 1;/s,
+	'ambiguous markers are also excluded from taxonomy correction');
 
 my $cluster_wrapper_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'clusterMAGs.pl'));
 like($cluster_wrapper_source, qr/my \$mapF="";my \$GCd = \$inD;/,
