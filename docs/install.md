@@ -112,8 +112,11 @@ export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
    - the MetaPhlAn database
 
 Successful CheckM2 and MetaPhlAn downloads receive tool-version marker files.
-Missing or mismatched markers cause the installer to download the database again;
-`--refresh-databases` forces this behavior.
+Missing or mismatched markers cause the installer to try the database setup again;
+`--refresh-databases` forces a fresh download. Database downloads are best-effort:
+network or permission failures produce warnings but do not abort installation of the
+software environments. If a database directory belongs to the current user but is
+missing its owner write/search bits, the installer repairs those bits before retrying.
 
 ## Configuration after installation
 
@@ -185,6 +188,20 @@ Then rerun the installer.
 The installer already uses flexible channel priority for micromamba environment creation. If conflicts persist, update micromamba and rerun the installer. On managed HPC systems, it may be preferable to ask local support to inspect the failing environment YAML file in `helpers/install/`.
 
 ### CheckM2 or MetaPhlAn database download fails
+
+The database downloads are optional during software installation. A failure leaves
+the corresponding version marker absent and the installer continues, so rerunning it
+will try again. For a MetaPhlAn permission warning, inspect both Unix mode bits and
+any HPC filesystem ACL:
+
+```bash
+ls -ld /path/to/MATAFILER4/data/DBs/MP4
+getfacl /path/to/MATAFILER4/data/DBs/MP4  # if getfacl is available
+```
+
+If you own the directory, `chmod u+rwx /path/to/MATAFILER4/data/DBs/MP4` is normally
+sufficient. Otherwise use a database location you own or ask the directory owner or
+cluster administrator to grant access.
 
 Activate the relevant environment and retry manually:
 

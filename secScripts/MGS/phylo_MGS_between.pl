@@ -2,7 +2,7 @@
 #script to get a set of marker genes from each FMG (40 MG), extract them, and build phylo tree
 #relatively simple, since can use genes directly from gene cat, no need to get SNP called genes
 #can also include reference genomes to include in tree
-# 2026-07 sparse-MGS hardening: finish explicitly when fewer than three marker-bearing taxa exist.
+# v0.2 (2026-07-22): handle sparse MGS sets and exclude ambiguous paralogs deterministically.
 #perl /hpc-home/hildebra/dev/Perl/MATAF3//secScripts/MGS/phylo_MGS_between.pl -GCd /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1/ -MGS /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//MB2.clusters.ext.can.Rhcl.filt -c 10 -outD /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//customRefs/ -refGenos '/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta'
 
 use warnings;

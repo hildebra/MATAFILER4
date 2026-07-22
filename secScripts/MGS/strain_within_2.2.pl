@@ -35,7 +35,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.29: validate inputs, honour dry-run mode, and repair outgroup/checkpoint handling
 #.30: make tree selection, queue handling and R-analysis completion checks robust
 #.31: keep dry runs non-destructive and wait for validated downstream analyses
-my $version = 0.31;
+#.32: preserve summary headers and require validated network and treeWAS outputs
+my $version = 0.32;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;

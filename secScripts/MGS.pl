@@ -31,8 +31,9 @@ use Cwd qw(abs_path);
 #.32: remove deprecated hierarchical/deep-correlation post-clustering path
 #.33: harden sparse Canopy/MAG/MGS outcomes, singleton output, weighted resumes, and phylogeny skips
 #.34: restore the documented GTDB default and fingerprint workflow-defining checkpoint options
+#.35: invalidate stale input-derived products and validate sparse/downstream outputs before resuming
 
-my $MGSpipelineVersion = 0.34;
+my $MGSpipelineVersion = 0.35;
 my $clusterID = 95;
 my %checkpointParameters;
 

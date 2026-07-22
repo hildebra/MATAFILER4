@@ -25,8 +25,9 @@ sub MGuniqStats;
 #.18: switched to reading sample_contig_gene from idx
 #.20: switched to C++ implementation of clusterMAGs.. this is only a hull script now, mostly disused.
 #.21: validate wrapper inputs and honour the selected marker and quality-checker modes
+#.22: make fallback inputs reachable and clean wrapper logs and temporary outputs safely
 
-my $version = 0.21;
+my $version = 0.22;
 
 my $startTime = time ;
 

@@ -48,6 +48,24 @@ retry_command() {
 	done
 }
 
+ensure_writable_directory() {
+	local directory=$1
+
+	mkdir -p -- "$directory" || return 1
+	if [[ -w "$directory" ]]; then
+		return 0
+	fi
+
+	# Repair missing owner write/search bits, but never change a directory owned by
+	# another account or attempt to override an HPC ACL.
+	if [[ -O "$directory" ]] && chmod u+rwx -- "$directory" && [[ -w "$directory" ]]; then
+		echo "Enabled owner write access for $directory"
+		return 0
+	fi
+
+	return 1
+}
+
 while (($#)); do
 	case "$1" in
 		--remove-legacy-envs) REMOVE_LEGACY_ENVS=1 ;;
@@ -182,9 +200,11 @@ ensure_environment MF4 "$INSTdir/MF4.yml"
 
 if "$MAMBA_E" run -n MF4 hostile --help >/dev/null 2>&1; then
 	echo "Installing/updating the Hostile human reference database"
-	retry_command "Hostile database download" 5 15 \
+	if ! ensure_writable_directory "$DBdir/hostile" || ! retry_command "Hostile database download" 5 15 \
 		env HOSTILE_CACHE_DIR="$DBdir/hostile" \
-		"$MAMBA_E" run -n MF4 hostile index fetch --name human-t2t-hla
+		"$MAMBA_E" run -n MF4 hostile index fetch --name human-t2t-hla; then
+		echo "WARNING: Hostile database installation failed; continuing without updating it." >&2
+	fi
 fi
 
 XGTDB_DIR="$MFdir/gits/XGTDB"
@@ -224,21 +244,29 @@ if ! database_current "$CM2_MARKER" "$CHECKM2_VERSION"; then
 	if ((REFRESH_DATABASES == 0)) && [[ -f "$CM2_DIAMOND_DB" ]] && \
 		"$MAMBA_E" run -n MF4checkm2 checkm2 database --setdblocation "$CM2_DIAMOND_DB"; then
 		echo "Using existing CheckM2 database at $CM2_DIAMOND_DB"
+		printf '%s\n' "$CHECKM2_VERSION" > "$CM2_MARKER"
 	else
 		echo "Installing CheckM2 $CHECKM2_VERSION database"
-		mkdir -p -- "$CM2DB"
-		retry_command "CheckM2 database download" 5 15 \
-			"$MAMBA_E" run -n MF4checkm2 checkm2 database --download --path "$CM2DB"
+		if ensure_writable_directory "$CM2DB" && retry_command "CheckM2 database download" 5 15 \
+			"$MAMBA_E" run -n MF4checkm2 checkm2 database --download --path "$CM2DB"; then
+			printf '%s\n' "$CHECKM2_VERSION" > "$CM2_MARKER"
+		else
+			echo "WARNING: CheckM2 database installation failed; continuing without updating it." >&2
+		fi
 	fi
-	printf '%s\n' "$CHECKM2_VERSION" > "$CM2_MARKER"
 fi
 
 if ! database_current "$MP4_MARKER" "$METAPHLAN_VERSION"; then
 	echo "Installing MetaPhlAn $METAPHLAN_VERSION database"
-	mkdir -p -- "$MP4DB"
-	retry_command "MetaPhlAn database download" 5 15 \
-		"$MAMBA_E" run -n MF4checkm2 metaphlan --install --bowtie2db "$MP4DB"
-	printf '%s\n' "$METAPHLAN_VERSION" > "$MP4_MARKER"
+	if ensure_writable_directory "$MP4DB" && retry_command "MetaPhlAn database download" 5 15 \
+		"$MAMBA_E" run -n MF4checkm2 metaphlan --install --bowtie2db "$MP4DB"; then
+		printf '%s\n' "$METAPHLAN_VERSION" > "$MP4_MARKER"
+	else
+		echo "WARNING: MetaPhlAn database installation failed; continuing without updating it." >&2
+		if [[ -e "$MP4DB" ]]; then
+			stat -c 'MetaPhlAn database directory: mode=%A owner=%U group=%G path=%n' -- "$MP4DB" >&2 || true
+		fi
+	fi
 fi
 
 ensure_environment MF4phylo "$INSTdir/phylo.yml"

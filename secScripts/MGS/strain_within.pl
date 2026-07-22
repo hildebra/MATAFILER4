@@ -70,7 +70,8 @@ sub writeTooFewMarker;
 #.36: preserve locus-level same-COG genes, resolve paralogs, and make sample filters robust to sparse inputs
 #.37: expose tree IDs as sample|COG|primaryGeneID while retaining MGS-qualified internal locus keys
 #.38: validate paired consensus inputs, split-job logs, scheduler state, and destructive paths
-my $version = 0.38;
+#.39: make split retries generation-safe, merges atomic, and compressed outgroup updates reliable
+my $version = 0.39;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";

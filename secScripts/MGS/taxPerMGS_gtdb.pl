@@ -1,5 +1,6 @@
 #!/usr/bin/perl
 #uses MGS to cluster genes and kraken tax assignments
+# 2026-07-22: isolate GTDB-Tk attempts and validate merged bacterial/archaeal taxonomy output.
 #./taxPerMGS.pl /g/scb/bork/hildebra/SNP/GCs/DramaGCv5//Binning/MetaBat//MB2.clusters.ext.can.Rhcl /g/scb/bork/hildebra/SNP/GCs/DramaGCv5/
 use warnings; use strict;
 

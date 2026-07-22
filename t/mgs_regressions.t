@@ -179,7 +179,7 @@ like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 like($resort_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
 	'gene-priority resorting uses the propagated catalog identity');
 my $mgs_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.34;/,
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.35;/,
 	'MGS sparse-run hardening increments the pipeline version');
 like($mgs_source, qr/my \$useGTDBmg = "GTDB";/,
 	'MGS uses its documented GTDB marker default');

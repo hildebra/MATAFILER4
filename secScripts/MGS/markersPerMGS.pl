@@ -1,5 +1,6 @@
 #!/usr/bin/env perl
 #script to extract all marker genes associated to single MGS. Used to later make sure each marker gene is only used once in abundance calculations
+# 2026-07-22: deduplicate marker links and exclude markers shared between MGS.
 use warnings;
 use strict;
 use Data::Dumper; 
