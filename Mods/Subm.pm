@@ -44,6 +44,30 @@ sub _slurm_dependency_is_known {
 	return $? == 0;
 }
 
+sub _slurm_dependency_min_age {
+	my ($optHR) = @_;
+	return $optHR->{slurmDependencyMinAge}
+		if defined $optHR->{slurmDependencyMinAge};
+
+	my $output = `scontrol show config 2>/dev/null`;
+	my $min_age = 300; # Slurm's default MinJobAge, in seconds.
+	$min_age = $1 if ($? == 0 && $output =~ /^\s*MinJobAge\s*=\s*(\d+)/m);
+	$optHR->{slurmDependencyMinAge} = $min_age;
+	return $min_age;
+}
+
+sub _slurm_dependencies_need_reconciliation {
+	my ($dependencies, $optHR, $now) = @_;
+	$now = time unless defined $now;
+	my $submitted_at = $optHR->{slurmDependencySubmittedAt} ||= {};
+	my $min_age = _slurm_dependency_min_age($optHR);
+	for my $dependency (@{$dependencies}) {
+		return 1 unless exists $submitted_at->{$dependency};
+		return 1 if $now - $submitted_at->{$dependency} >= $min_age;
+	}
+	return 0;
+}
+
 sub reconcileSlurmDependencies {
 	my ($dependencies, $after_any, $optHR) = @_;
 	$optHR ||= {};
@@ -202,13 +226,23 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	my $dependency_error = '';
 	if ($qmode eq 'slurm' && $optHR->{doSubmit} != 0 && $immSubm && @jspl) {
 		for (@jspl) { s/^\Q$rTag\E//; }
-		my $reconciled;
-		($reconciled, $dependency_error) = reconcileSlurmDependencies(
-			join(';', @jspl), $optHR->{afterAny}, $optHR,
-		);
-		@jspl = split /;/, $reconciled;
-		$waitJID = $reconciled;
-		$has_failed_dependency = 1 if $dependency_error ne '';
+		if (_slurm_dependencies_need_reconciliation(\@jspl, $optHR)) {
+			my $reconciled;
+			($reconciled, $dependency_error) = reconcileSlurmDependencies(
+				join(';', @jspl), $optHR->{afterAny}, $optHR,
+			);
+			@jspl = split /;/, $reconciled;
+			$waitJID = $reconciled;
+			$has_failed_dependency = 1 if $dependency_error ne '';
+			# A live dependency first encountered from another submission context
+			# cannot age out until at least MinJobAge after it subsequently ends.
+			my $now = time;
+			my $submitted_at = $optHR->{slurmDependencySubmittedAt} ||= {};
+			for my $dependency (@jspl) {
+				$submitted_at->{$dependency} = $now
+					unless exists $submitted_at->{$dependency};
+			}
+		}
 	}
 
 	if ($cwd ne "" && !-d $cwd){system "mkdir -p $cwd";}
@@ -362,6 +396,8 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 			die "Could not parse Slurm job id from submission output: $ret\n"
 				unless ($ret =~ /^Submitted batch job (\d+)\s*$/);
 			$jname=$1;
+			$optHR->{slurmDependencySubmittedAt} ||= {};
+			$optHR->{slurmDependencySubmittedAt}{$jname} = time;
 		} elsif ($LSF == 0) {
 			die "Could not parse SGE job id from submission output: $ret\n"
 				unless ($ret =~ /\bYour job(?:-array)?\s+(\d+)\b/);

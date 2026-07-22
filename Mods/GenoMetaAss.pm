@@ -1232,7 +1232,6 @@ sub resetAsGrps{
 		$AsGrps->{$cAssGrp}{BinDeps} = "";
 		$AsGrps->{$cAssGrp}{PostClnCmd} = "";
 		$AsGrps->{$cAssGrp}{PostConsCmd} = "";
-		$AsGrps->{$cAssGrp}{CSfinJobName} = "";
 	}
 }
 

@@ -394,7 +394,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#assign job name (dependency) only ONCE
 	if ( !exists($AsGrps{$cAssGrp}{CntAss}) || $AsGrps{$cAssGrp}{CntAss} == 0){
 		$AsGrps{$cAssGrp}{AssemblJobName} = "";
-		$AsGrps{$cAssGrp}{CSfinJobName} = "";
 	}
 	
 	$AsGrps{$cAssGrp}{CntAss} ++;
@@ -1409,7 +1408,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my $deferredContigDeps = postSubmQsub(
 			"$logDir/MultiContigStats.sh", $AsGrps{$cAssGrp}{PostClnCmd}, $contRun,
 		);
-		$AsGrps{$cAssGrp}{PostClnCmd} = "";$AsGrps{$cAssGrp}{CSfinJobName} = $contRun;
+		$AsGrps{$cAssGrp}{PostClnCmd} = "";
 		$jdep = normalise_job_dependencies($contRun, $deferredContigDeps);
 		$fullContigStatsDep = $jdep if ($tmpCDd && $jdep ne "");
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredContigDeps);
@@ -1424,7 +1423,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#die "test23  $AsGrps{$cAssGrp}{MapDeps}\n";
 		#calculate solely abundance / gene after producer publication and assembly contig stats
 		my $submitContigNow = $mappingDeferred ? 0 : 1;
-		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$publicationDeps . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl,$supportCoverageRequired);
+		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir,$publicationDeps,$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl,$supportCoverageRequired);
 		$AsGrps{$cAssGrp}{PostClnCmd} .= $delaySubmCmd2;
 		$jdep = $jn;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $jdep) if ($jdep ne "");

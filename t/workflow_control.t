@@ -411,6 +411,9 @@ my $subm = do { local $/; <$subm_source> };
 close $subm_source;
 like($subm, qr/\$waitJID\s*=\s*normalise_job_dependencies\(\$waitJID\)/,
 	'all scheduler submissions use the shared dependency normalizer');
+
+unlike($mataf4, qr/CSfinJobName/,
+	'per-sample ContigStats jobs are not serialized behind another sample ContigStats job');
 unlike($subm, qr/length\(\$waitJID\)\s*>\s*3/,
 	'short valid scheduler job ids are not silently discarded');
 like($subm, qr/push\(\@\{\$aR\},\s*\$jN\)/,

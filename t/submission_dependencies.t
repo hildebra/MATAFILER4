@@ -32,6 +32,17 @@ sub bash_options {
 
 my $root = tempdir(CLEANUP => 1);
 
+my $recent_options = {
+	slurmDependencyMinAge => 300,
+	slurmDependencySubmittedAt => { 201 => 900 },
+};
+ok(!Mods::Subm::_slurm_dependencies_need_reconciliation([201], $recent_options, 1000),
+	'a recently submitted dependency does not query Slurm accounting');
+ok(Mods::Subm::_slurm_dependencies_need_reconciliation([201], $recent_options, 1200),
+	'a dependency is reconciled once it reaches the Slurm retention age');
+ok(Mods::Subm::_slurm_dependencies_need_reconciliation([202], $recent_options, 1000),
+	'an externally supplied dependency with unknown age is reconciled');
+
 my $dependency_checks = {
 	slurmDependencyAccountingLookup => sub {
 		return {
