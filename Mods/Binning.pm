@@ -373,7 +373,7 @@ sub getRepresentBinsPerFamily{ #needs some work
 	my %map = %{$hrMap};
 	
 	
-	my %conta; my %compl; my %fam; my %score; my %MGS2bin;
+	my %conta; my %compl; my %fam; my %score;
 	
 	
 	#read in family info for each sample
@@ -389,6 +389,29 @@ sub getRepresentBinsPerFamily{ #needs some work
 			$famSmpl{$smpl} = $smpl; $noGrpFnd++;
 		}
 	}
+
+	my $flushFamilyRepresentatives = sub {
+		return unless length($lastMGS);
+		foreach my $ff (sort keys %fam){
+			my @eligible;
+			foreach my $lBin (sort @{$fam{$ff}}){
+				if ($compl{$lBin} > 60 && $conta{$lBin} < 20){
+					push @eligible, $lBin;
+				} else {
+					$rejQuali++;
+				}
+			}
+			unless (@eligible){
+				warn "No eligible representative bin for family '$ff' in MGS '$lastMGS'; skipping\n";
+				next;
+			}
+			my ($bestBin) = sort {
+				$score{$b} <=> $score{$a} || $a cmp $b
+			} @eligible;
+			my $MGSfam = $ff . "." . $lastMGS;
+			$ret{$MGSfam} = $bestBin;
+		}
+	};
 
 	while (my $line = <$I>){
 		chomp $line; my @spl =  split /\t/,$line;
@@ -408,39 +431,28 @@ sub getRepresentBinsPerFamily{ #needs some work
 		
 		my $curMGS = $spl[1]; my $curBin = $spl[0];
 		if ($curMGS ne $lastMGS){
-			#eval last MGS for family reps
-			foreach my $ff (keys %fam){
-				my @curF = @{$fam{$ff}};
-				#select best MGS in each family
-				my $bestSc = 0; my $bestBin = "";
-				foreach my $lBin (@curF){
-					if ($score{$lBin} > $bestSc){
-						if ($compl{$lBin} > 60 && $conta{$lBin} < 20){
-							$bestSc = $score{$lBin}; $bestBin = $lBin;
-						} else {
-							$rejQuali++;
-						}
-					}
-				}
-				my $MGSfam = $ff . "." .$MGS2bin{$bestBin};
-				#print "$MGSfam     $bestBin  $bestSc $compl{$bestBin} $conta{$bestBin} \n";
-				$ret{$MGSfam} = $bestBin;
-			}
+			# Evaluate the preceding MGS before resetting its candidate state.
+			$flushFamilyRepresentatives->();
 			
 			#reset params
 			$lastMGS = $curMGS;
-			%conta = (); %compl = (); %fam=(); %score = (); %MGS2bin = ();
+			%conta = (); %compl = (); %fam=(); %score = ();
 		}
 		
 		if ($spl[0] !~ m/^Cano__/){
 			#$ret{$curMGS} = $spl[0] ;
 			$conta{$curBin} = $spl[$ContaIdx];$compl{$curBin} = $spl[$ComplIdx];
 			$score{$curBin} = $spl[$ComplIdx] - (2. * $spl[$ContaIdx]);
-			$spl[0] =~ m/^(.+)__(.+)$/;my $cFam = $famSmpl{$1};
+			unless ($spl[0] =~ m/^(.+)__(.+)$/ && defined($famSmpl{$1})){
+				warn "Cannot assign representative candidate '$curBin' in MGS '$curMGS' to a known sample family; skipping\n";
+				next;
+			}
+			my $cFam = $famSmpl{$1};
 			push(@{$fam{$cFam}}, $curBin);
-			$MGS2bin{$spl[0]} = $curMGS;
 		}	
 	}
+	# The loop transition flushes every group except the final MGS in the file.
+	$flushFamilyRepresentatives->();
 	close $I;
 	
 	print "Found representative for ". scalar(keys %ret). " MGS, $rejQuali rejected on Quali\n";

@@ -55,6 +55,14 @@ sub checkpoint_valid {
 		my $path = $record->{path};
 		my @stat = stat($path);
 		return 0 unless @stat && $stat[7] == ($record->{size} // -1);
+		# v1 manifests have always recorded mtime.  Checking it closes the
+		# same-size rewrite hole, while accepting early/third-party v1 records
+		# that omitted the optional field.
+		if (exists $record->{mtime}) {
+			return 0 unless defined($record->{mtime})
+				&& "$record->{mtime}" =~ /^-?\d+$/
+				&& $stat[9] == $record->{mtime};
+		}
 	}
 	return 1;
 }

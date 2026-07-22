@@ -34,7 +34,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.28: 2.3.26: adapted for different phylo names
 #.29: validate inputs, honour dry-run mode, and repair outgroup/checkpoint handling
 #.30: make tree selection, queue handling and R-analysis completion checks robust
-my $version = 0.30;
+#.31: keep dry runs non-destructive and wait for validated downstream analyses
+my $version = 0.31;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;
@@ -106,11 +107,15 @@ print "Strain analysis v $version\n";
 
 if ($rewriteRanalysis){ #faster to do once for all..
 	print "\nWARNING:: Rewriting strain2 results!\n" ;
-	#print "Removing old strain2 analysis..\n";
-	for my $within (glob("$FMGpD/*/within")) { remove_tree($within) if -d $within; }
-	unlink $RsummaryTab or die "Cannot remove $RsummaryTab: $!\n" if -e $RsummaryTab;
-	for my $checkpoint ("$FMGpD/networks/networks.sto", "$FMGpD/GeneEnrich/treeWAS.sto") {
-		unlink $checkpoint or die "Cannot remove stale checkpoint $checkpoint: $!\n" if -e $checkpoint;
+	if ($doSubmit) {
+		#print "Removing old strain2 analysis..\n";
+		for my $within (glob("$FMGpD/*/within")) { remove_tree($within) if -d $within; }
+		unlink $RsummaryTab or die "Cannot remove $RsummaryTab: $!\n" if -e $RsummaryTab;
+		for my $checkpoint ("$FMGpD/networks/networks.sto", "$FMGpD/GeneEnrich/treeWAS.sto") {
+			unlink $checkpoint or die "Cannot remove stale checkpoint $checkpoint: $!\n" if -e $checkpoint;
+		}
+	} else {
+		print "Dry run: existing strain2 results and checkpoints will be preserved.\n";
 	}
 }
 
@@ -151,7 +156,7 @@ if (!@k2d) {
 }
 
 my $cmdPrelude = "ulimit -s 20000\n";
-my $cmd = $cmdPrelude;my $destD =""; my $wrHead=0;
+my $cmd = $cmdPrelude;my $destD =""; my $wrHead=1;
 my %analysisAttempted; my $legacyCompleted = 0;
 my $strainStatsR = getProgPaths("treeSubGrpsR");
 
@@ -174,7 +179,7 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		$treeAbsent++;
 		next;
 	}
-	if ($rewriteRanalysis && -d $destD) {
+	if ($rewriteRanalysis && $doSubmit && -d $destD) {
 		unlink $_ or die "Cannot remove $_: $!\n" for grep { -f $_ || -l $_ } glob("$destD/*");
 		remove_tree($_) for grep { -d $_ } glob("$destD/*");
 	}
@@ -183,11 +188,11 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	my $analysisLog = "$destD/$d.Ranalysis.log";
 	my $analysisReport = "$destD/$d.analysis.txt";
 	my $analysisStone = "$destD/$d.Ranalysis.sto";
-	if (-s $analysisReport && (-e $analysisStone || -s $analysisLog)) {
+	if (!$rewriteRanalysis && -s $analysisReport && (-e $analysisStone || -s $analysisLog)) {
 		$legacyCompleted++ if !-e $analysisStone;
 		next;
 	}
-	if (-d $destD) {
+	if ($doSubmit && -d $destD) {
 		unlink $_ or die "Cannot remove $_: $!\n" for grep { -f $_ || -l $_ } glob("$destD/*");
 		remove_tree($_) for grep { -d $_ } glob("$destD/*");
 	}
@@ -205,8 +210,8 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	if ($d =~ m/MB2bin(\d+)/){$BinN = $1;}
 	my $jobCores = $nCore;
 	
+	$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStone))."\n";
 	$cmd .= "echo ".shellQuote("At tree $d")."\n";
-	$wrHead=1 if ( $cnt == 0);
 	my $OGstr = $OG ne "" ? "--outgroup ".shellQuote($OG)." " : "";
 	$cmd .= "$strainStatsR --path ".shellQuote($destD)." --tree ".shellQuote("../phylo/$defTree")." --taxN ".shellQuote($d)." $OGstr --map ".shellQuote($refMap)." --metagStats ".shellQuote($MGstats)." --abMat ".shellQuote($abMatrix)." --ncore $jobCores --siteMode 1 --MFDir ".shellQuote($MGSTKdir)." --wrColNms $wrHead --discPermTests ".shellQuote($DiscTests)." --contPermTests ".shellQuote($ContTests)." --familyCol ".shellQuote($familyVar)." --groupStabilityVars ".shellQuote($groupStabilityVars)." > ".shellQuote($analysisLog)."\n";
 	$cmd .= "test -s ".shellQuote($analysisReport)."\n";
@@ -348,12 +353,22 @@ if (1 || !-e $RsummaryTab){
 }
 
 ## run network of similar samples
-strainNetwork();
+my ($networkDep, $networkStone) = strainNetwork();
 
 #die;
 
 # functional enrichments of strains in conditions defined by user
-treeWas();
+my ($treeWasDep, $treeWasStone) = treeWas();
+
+my @postAnalysisJobs = grep { defined($_) && length($_) } ($networkDep, $treeWasDep);
+if (@postAnalysisJobs) {
+	print "Waiting for network and treeWAS analyses to finish\n";
+	qsubSystemJobAlive(\@postAnalysisJobs, $QSBoptHR);
+}
+my @missingPostAnalysisStones = grep { !-e $_ } ($networkStone, $treeWasStone);
+die "Downstream strain analyses failed or did not publish checkpoints: "
+	.join(", ", @missingPostAnalysisStones)."\n"
+	if @missingPostAnalysisStones;
 
 
 visualizeSignPhylos();
@@ -512,6 +527,7 @@ sub sumSummaries($ $){
 sub strainNetwork{ #submits Anthony's script to build a network
 	my $netDir = "$FMGpD/networks/";
 	my $networkStone = "$netDir/networks.sto";
+	my $dep = "";
 	if (!-e $networkStone){
 		my $networkScr = getProgPaths("runNetworks_R");#"Rscript $MGSTKdir/runNetworks.R";
 		make_path($netDir);
@@ -522,9 +538,11 @@ sub strainNetwork{ #submits Anthony's script to build a network
 		print "Running network of shared strains..\n$cmd\n";
 		#system $cmd;
 		my $nCore = 1;
-		my ($dep,$qcmd) = qsubSystem($netDir."Network.sh",$cmd,$nCore,"20G","Network","","",1,[],$QSBoptHR);
+		my ($submittedDep,$qcmd) = qsubSystem($netDir."Network.sh",$cmd,$nCore,"20G","Network","","",1,[],$QSBoptHR);
+		$dep = $submittedDep;
 
 	}
+	return ($dep, $networkStone);
 }
 
 
@@ -540,17 +558,28 @@ sub treeWas{
 	my $summaryOutfile = "$treewasOut/treeWAS_results_functions.csv";
 	my $treeWasStone = "$FMGpD/GeneEnrich/treeWAS.sto";
 	my $MGSd = dirname($FMGpD);
+	if (-e $treeWasStone && (!-s $treewasOutfile || !-s $summaryOutfile)) {
+		warn "Ignoring incomplete treeWAS checkpoint $treeWasStone\n";
+		unlink $treeWasStone or die "Cannot remove incomplete treeWAS checkpoint $treeWasStone: $!\n";
+	}
 	make_path($treewasOut);
 	$funCmd .= "mkdir -p ".shellQuote($treewasOut)."\n";
+	$funCmd .= "rm -f ".join(" ", map { shellQuote($_) }
+		($treewasOutfile, $summaryOutfile, $treeWasStone))."\n";
 	$funCmd .= "#1st command: run treewas job\n";
 	$funCmd .= "$treewasRun_R --gene_cat_dir ".shellQuote($GCd)." --n_threads $nCoreHeavy --metadata_vars ".shellQuote($groupStabilityVars)." -o ".shellQuote($treewasOut)." --mgs_dir ".shellQuote($MGSd)." --metadata_file ".shellQuote($refMap)." -r ".shellQuote($MGSTKdir)." -i ".shellQuote($individualVar)."\n";
 	$funCmd .= "#2nd command: process results\n";
 	$funCmd .= "$processTreewas_R -i ".shellQuote($treewasOutfile)." --gene_cat_dir ".shellQuote($GCd)." --annot_files ".shellQuote("NOG,CZy,KGM")." --out_file ".shellQuote($summaryOutfile)." --n_threads $nCoreHeavy -r ".shellQuote($MGSTKdir)."\n";
+	$funCmd .= "test -s ".shellQuote($treewasOutfile)."\n";
+	$funCmd .= "test -s ".shellQuote($summaryOutfile)."\n";
 	$funCmd .= "touch ".shellQuote($treeWasStone)."\n";
 
+	my $dep = "";
 	if (!-e $treeWasStone){
-		my ($dep,$qcmd) = qsubSystem($treewasOut."treeWAS.sh",$funCmd,$nCoreHeavy,"6G","treewas","","",1,[],$QSBoptHR);
+		my ($submittedDep,$qcmd) = qsubSystem($treewasOut."treeWAS.sh",$funCmd,$nCoreHeavy,"6G","treewas","","",1,[],$QSBoptHR);
+		$dep = $submittedDep;
 	}
+	return ($dep, $treeWasStone);
 }
 
 

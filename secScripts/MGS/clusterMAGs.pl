@@ -4,6 +4,7 @@ use warnings;
 use strict;
 use Data::Dumper;
 use Getopt::Long qw( GetOptions );
+use File::Path qw(make_path);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(readMap readClstrRev readClstrRevContigSubset readClstrRevSmplCtgGenSubset getDirsPerAssmblGrp  getAssemblPath systemW gzipopen parse_duration);
 use Mods::Binning qw (getBinSubdirName runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns minQualFilter calcLCAcompl readCMquals);
@@ -94,6 +95,9 @@ my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2);
 my $BinnerShrt = getBinSubdirName($binSpeciesMG);
 if ($outD eq ""){$outD = $inD."/Bin_$BinnerShrt/";}
 $outD .= "/" unless ($outD =~ m/\/$/);
+if ($logDir eq ""){$logDir = $outD."LOGandSUB/";}
+$logDir .= "/" unless ($logDir =~ m/\/$/);
+make_path($outD, $logDir);
 my $ctg2gen = {};
 my $ctg2gen2 = {};
 
@@ -101,19 +105,24 @@ my $ctg2gen2 = {};
 my $COGdir = "FMG";
 if ($useGTDBmg eq "GTDB"){ 	$COGdir = "GTDBmg";}
 
-system "rm $outD/$BinnerShrt.clusters"  if ($redo);
+if ($redo && -e "$outD/$BinnerShrt.clusters") {
+	unlink "$outD/$BinnerShrt.clusters"
+		or die "Cannot remove $outD/$BinnerShrt.clusters: $!\n";
+}
 
 
 #read map to get assembly groups..
-my $mapF="";my $GCd = "";
+my $mapF="";my $GCd = $inD;
 #die Dumper($hrm);	
 if (-e "$inD/LOGandSUB/GCmaps.inf"){
-	my $tmp = `cat $inD/LOGandSUB/GCmaps.inf`; chomp $tmp;
-	$mapF = $tmp;
-	$GCd = $inD;
+	open my $map_info, '<', "$inD/LOGandSUB/GCmaps.inf"
+		or die "Cannot open $inD/LOGandSUB/GCmaps.inf: $!\n";
+	$mapF = <$map_info> // "";
+	close $map_info or die "Cannot close $inD/LOGandSUB/GCmaps.inf: $!\n";
+	chomp $mapF;
+	die "$inD/LOGandSUB/GCmaps.inf is empty\n" unless length $mapF;
 } else{
-	die "can't find indir $inD\n";
-	$mapF = $inD."LOGandSUB/inmap.txt";
+	$mapF = "$inD/LOGandSUB/inmap.txt";
 	#($hrm,$asGrpObj) = readMap($inD."LOGandSUB/inmap.txt");
 }
 die "Couldn't find map file in clusterMAGs.pl:: $mapF\n" unless (-e $mapF|| $mapF =~ m/,/);
@@ -143,7 +152,7 @@ my %map = %{$hrM};
 my %DOs = %{$hrD};
 my @DoosD = sort keys %DOs; #dirs of assembly groups
 print "Found ".scalar(@DoosD) ." assembly groups\n";
-system "mkdir -p $logDir\n";
+make_path($logDir);
 
 
 

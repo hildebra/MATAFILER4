@@ -11,6 +11,8 @@ use File::Path qw(make_path remove_tree);
 use File::Glob qw(bsd_glob);
 use File::Copy qw(copy);
 use File::Basename qw(basename);
+use File::Spec;
+use Cwd qw(abs_path getcwd);
 
 
 
@@ -29,6 +31,7 @@ sub reportingsMGS;
 sub prepRun;
 sub prepGene2MGS;
 sub createAGlist; sub preComputeConsSNP;
+sub mergeConspecificLogs;
 sub timeNice;
 #sub combineMGSgenes;
 sub combineMGSgenesDir; sub getInputSize;
@@ -61,7 +64,8 @@ sub writeTooFewMarker;
 #.35: validate inputs and repair resume, outgroup, consensus, and temporary-directory handling
 #.36: preserve locus-level same-COG genes, resolve paralogs, and make sample filters robust to sparse inputs
 #.37: expose tree IDs as sample|COG|primaryGeneID while retaining MGS-qualified internal locus keys
-my $version = 0.37;
+#.38: validate paired consensus inputs, split-job logs, scheduler state, and destructive paths
+my $version = 0.38;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -223,13 +227,23 @@ die "Core, memory, and precompute settings must be non-negative\n"
 die "-minBadLociPSmpl must be positive\n" unless $minBadLociForSampleSkip > 0;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax, $GenesPerSpecies, $GeneLengthMin);
+die "SNP depth, quality, adaptive filtering, and indel-range settings must be non-negative\n"
+	if $minSNPDepth < 0 || $minSNPCallQual < 0 || $useAdaptiveQual < 0
+		|| $depthFilterScale < 0 || $indelRange < 0;
+die "-phyloMemMulti must be positive\n" unless $memMulti > 0;
+die "-phyloProg must be 1 (IQ-TREE), 2 (VeryFastTree), or 3 (FastTree)\n"
+	unless $phyloProg >= 1 && $phyloProg <= 3;
+die "-MSAprog must be 0, 1, 2, or 4\n"
+	unless grep { $MSAprog == $_ } (0, 1, 2, 4);
 
 @subsetMGS = split /,/,$subsMGSstr if ($subsMGSstr ne "");
 #print "SUBSMGS:: @subsetMGS\n";
 #die timeNice(20) ." ".timeNice(12252)."\n"; #TEST
 
 #define global vars
-my $QSBoptHR = emptyQsubOpt($doSubmit,"",$subMode);
+my $queueMode = $subMode;
+$queueMode = "bash" if !$doSubmit && $queueMode eq "";
+my $QSBoptHR = emptyQsubOpt($doSubmit,"",$queueMode);
 my $MGSfileOri = $MGSfile; #save for later..
 
 my $bindir;my $outD;my $scratchD;my $preConDir;my $LOGDIR;my $mapF;
@@ -281,12 +295,12 @@ die "No MGS matched the selected input"
 	. ($subsMGSstr ne "" ? " or -MGSsubset $subsMGSstr" : "") . "\n"
 	unless @specis;
 for my $MGS (@specis) {
-	die "Unsafe MGS identifier '$MGS': directory separators and pipe characters are not allowed\n"
-		if $MGS eq '.' || $MGS eq '..' || $MGS =~ m{[\\/|]};
+	die "Unsafe MGS identifier '$MGS': use only letters, digits, dot, underscore, colon, plus, and hyphen\n"
+		unless defined($MGS) && $MGS =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
 }
 #sort specis by numbers, so start with MGS1, MGS2 etc
 my %sis; foreach (@specis){if (m/(\d+)$/){ $sis{$_}=int($1);} else {$sis{$_}=1; print "Unknown code: $_";}}
-@specis = sort {$sis{$a} <=> $sis{$b} } keys %sis;
+@specis = sort {$sis{$a} <=> $sis{$b} || $a cmp $b } keys %sis;
 
 
 #die "specis::\n@specis\n";
@@ -351,7 +365,9 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 		for (my $sj = 1; $sj < $maxSubJob; $sj ++){
 			my $cmdX = "$selfCmd -subjob $sj;\n";
 			my $checkF = "$LOGDIR/mainExtr.${sj}.stone";
-			$cmdX .= "touch $checkF\n";
+			unlink $checkF or die "Cannot remove stale split-worker checkpoint $checkF: $!\n"
+				if $doSubmit && -e $checkF;
+			$cmdX .= "touch ".shellQuote($checkF)."\n";
 			#die "$cmdX\n\n";
 			print $LOGDIR."Strain1_B${sj}.sh\n";
 			my ($dep,$qcmd) = qsubSystem($LOGDIR."Strain1_B${sj}.sh",$cmdX,1,"${selfMemGb}G","Str1.$sj","","",1,[],$QSBoptHR);
@@ -372,16 +388,19 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 		exit(0);
 	}
 
-	if (@jobsMain && $maxSubJob && !$subJob){ # second part for main worker: check that everything else is finished..
-		qsubSystemJobAlive( \@jobsMain,$QSBoptHR );
+	if ($maxSubJob && !$subJob){ # second part for main worker: check that everything else is finished..
+		if (@jobsMain && !$doSubmit) {
+			print "Split-worker scripts were generated but not submitted; stopping before incomplete outputs are combined.\n";
+			exit(0);
+		}
+		qsubSystemJobAlive( \@jobsMain,$QSBoptHR ) if @jobsMain && $doSubmit;
 		#check if all required files present
 		for (my $sj = 1; $sj < $maxSubJob; $sj ++){ #job 0 doesn't have stone (is this job..)
 			my $checkF = "$LOGDIR/mainExtr.${sj}.stone";
 			die "Can't find checkfile $checkF .. abort\n" unless (-e $checkF);
 			unlink $checkF; #and delete..
 		}
-		
-		system "cat $outD/SNPconsCalls.*.log > $outD/SNPconsCalls.log;";
+		mergeConspecificLogs();
 		
 		#combineMGSgenes();
 	}
@@ -476,7 +495,7 @@ my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 
 #die;
 #go through every SpecI;
-$cnt=0; my $lcnt=-1; my @jobs; my $Nspecis = @specis;
+$cnt=0; my $lcnt=-1; my @jobs; my %expectedTreeOutputs; my $Nspecis = @specis;
 foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTreeScript on..
 	$lcnt++;
 	if (!$reSubmit && !$repairCAT && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
@@ -513,7 +532,10 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	make_path($outD2) unless -d $outD2;
 	my $tmpD  = "$scratchD/outs/$MGS/";
 	if ($inputFNAsize ==0){print "empty input $MGS ($outD2 .. $tmpD) .. next.\n";next;} #empty input
-	combineMGSgenesDir($MGS,$tmpD,$tmpD);#$outD2); -> keep in tmpdir for now..
+	unless (combineMGSgenesDir($MGS,$tmpD,$tmpD)) {#$outD2); -> keep in tmpdir for now..
+		warn "$MGS has incomplete combined worker input; leaving it for a repair run\n";
+		next;
+	}
 	
 	#final locations (after copying etc)
 	my $FNAtf = "$outD2/$FNAstdof"; my $FAAtf = "$outD2/$FAAstdof";
@@ -558,7 +580,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$Tcmd .= "-rmMSA $rmMSA -gzInput 1 "; #save more diskspace..
 	$Tcmd .= "-SynTree 0 -NonSynTree 0 -MSAprogram $MSAprog -continue $contPhylo -AutoModel 0 -iqFast 1 -superTree $useSuperTree ";
 	$Tcmd .= "-runDNDS 0 -runTheta 0 -tmpD ".shellQuote("$scratchD/$MGS/")." -map ".shellQuote($mapF)." ";
-	my $postCmd = "\n\ntouch $treeStone\n";
+	my $postCmd = "\n\ntest -s ".shellQuote($IQtreef)."\ntouch ".shellQuote($treeStone)."\n";
 		#die "$cmd\n" if ($cnt ==10);
 	
 	#if (!fileGZe($FNAtf) || !fileGZe($FAAtf) ||  ( !fileGZe($CATtf) && !-e "$CATtf.tmp") ){
@@ -567,7 +589,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	#	next;
 	#}
 	
-	qsubSystemWaitMaxJobs($checkMaxNumJobs);
+	qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
 	#reformat .cat.tmp -> .cat and add outgroup fna seqs
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
 	($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady)=
@@ -600,16 +622,31 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	#PART II: qsub tree build command
 	
 	#die "$cmd\n" if ($cnt ==10);
+	if ($doSubmit) {
+		unlink $treeStone or die "Cannot remove stale tree checkpoint $treeStone: $!\n"
+			if -e $treeStone;
+		unlink $IQtreef or die "Cannot remove stale tree output $IQtreef: $!\n"
+			if -e $IQtreef;
+	}
 	my ($dep,$qcmd) = qsubSystem($outD2."treeCmd.sh",$preCmd.$Tcmd.$outgS.$postCmd,$numCoreL,int($totMem) ."M","FT$cnt","","",1,[],$QSBoptHR);
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	$QSBoptHR->{useLongQueue} = 0;
 	$cnt ++;
-	push (@jobs,$dep);
+	push (@jobs,$dep) if defined($dep) && length($dep);
+	$expectedTreeOutputs{$MGS} = [$IQtreef, $treeStone];
 	#die $outD2."treeCmd.sh\n";
 
 }
 #too many jobs to use as job dependency..
-qsubSystemJobAlive( \@jobs,$QSBoptHR );
+qsubSystemJobAlive( \@jobs,$QSBoptHR ) if @jobs && $doSubmit;
+if ($doSubmit) {
+	my @failed = grep {
+		my ($tree, $stone) = @{$expectedTreeOutputs{$_}};
+		!-s $tree || !-e $stone;
+	} sort keys %expectedTreeOutputs;
+	die "Tree jobs completed without valid tree outputs for: ".join(",", @failed)."\n"
+		if @failed;
+}
 print "\nAll done for $cnt Bins\nRun strain_within_2.pl for summary stats:\n";
 
 my $outDX =  $MGSfile;#"$GCd/$mode/intra_phylo/";
@@ -620,6 +657,8 @@ $MGSabundance = "$bindir/Annotation/Abundance/MGS.matL7.txt";
 my $strain2Scr = getProgPaths("MGS_strain2_scr");
 
 my $nxtCmd = "$strain2Scr -GCd ".shellQuote($GCd)." -FMGdir ".shellQuote($outD)." -MGSmatrix ".shellQuote($MGSabundance)." -cores 4 -reSubmit 0 -DiscTests ".shellQuote($discTests)." -ContTests ".shellQuote($contTests)." -familyVar ".shellQuote($familyVar)." -groupStabilityVars ".shellQuote($groupStabilityVars)." ";
+$nxtCmd .= "-submit $doSubmit ";
+$nxtCmd .= "-qsubSystem ".shellQuote($subMode)." " if $subMode ne "";
 $nxtCmd .= "-Hcores $maxCores " if $maxCores > 0;
 if ($mapF2 eq ""){$nxtCmd .= "-map ".shellQuote($mapF)." ";} else {$nxtCmd .= "-map ".shellQuote($mapF2)." ";}
 
@@ -647,16 +686,6 @@ exit(0);
 sub combineMGSgenesDir{
 	my ($MGS,$tmpD,$outD2) = @_;
 	my @required = ("$outD2/$FNAstdof", "$outD2/$FAAstdof", "$outD2/$CATstdof.tmp");
-	if (grep { !fileGZe($_) } @required) {
-		# At least one required combined file is absent; merge any available job parts.
-	} else {
-		for my $prefix (map { "$tmpD/$_" } ($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp")) {
-			for my $part (grep { /\.\d+$/ } bsd_glob("$prefix.*")) {
-				unlink $part or warn "Cannot remove already-combined part $part: $!\n";
-			}
-		}
-		return 1;
-	}
 
 	#my $outD3 = $tmpD; #work locally, copy later..
 	my @filesets = (
@@ -665,16 +694,30 @@ sub combineMGSgenesDir{
 		[$LINKstdof,     "$tmpD/$LINKstdof",     "$tmpD/$LINKstdof"],
 		["$CATstdof.tmp","$tmpD/$CATstdof.tmp",  "$tmpD/$CATstdof.tmp"],
 	);
+	my %partsByName;
+	for my $set (@filesets) {
+		my ($name, $prefix) = @$set;
+		$partsByName{$name} = [sort {
+			my ($an) = $a =~ /\.(\d+)$/;
+			my ($bn) = $b =~ /\.(\d+)$/;
+			defined($an) && defined($bn) ? $an <=> $bn : $a cmp $b
+		} grep { /\.\d+$/ } bsd_glob("$prefix.*")];
+	}
+	my $hasFreshParts = grep { @{$partsByName{$_}} }
+		($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp");
+	return !grep { !fileGZe($_) } @required unless $hasFreshParts;
+	for my $requiredName ($FNAstdof, $FAAstdof, "$CATstdof.tmp") {
+		unless (@{$partsByName{$requiredName}}) {
+			warn "Fresh worker extraction for $MGS lacks required $requiredName parts; retaining parts for repair\n";
+			return 0;
+		}
+	}
 
 	my @consumedParts;
 	for my $set (@filesets) {
 
 		my ($name, $prefix, $outfile) = @$set;
-		my @parts = sort {
-			my ($an) = $a =~ /\.(\d+)$/;
-			my ($bn) = $b =~ /\.(\d+)$/;
-			defined($an) && defined($bn) ? $an <=> $bn : $a cmp $b
-		} grep { /\.\d+$/ } bsd_glob("$prefix.*");
+		my @parts = @{$partsByName{$name}};
 		next unless @parts;
 
 		my $mergeFile = "$outfile.merge.$$";
@@ -1008,13 +1051,68 @@ sub writeLogsStep1{
 
 
 	#print log file
-	my $conlog = "$LOGDIR/ConspecificMGS.log";
+	my $conlog = $maxSubJob
+		? "$LOGDIR/ConspecificMGS.$subJob.log"
+		: "$LOGDIR/ConspecificMGS.log";
 	make_path($LOGDIR) unless -d $LOGDIR;
 	open LO,">$conlog" or die "Can't open conspecific log file: $conlog\n";
-	foreach my $MGS (keys %ConspecificMGS){
-		print LO $MGS . "\t" . join(",",@{$ConspecificMGS{$MGS}}) . "\n";
+	foreach my $MGS (sort keys %ConspecificMGS){
+		my %seen;
+		my @samples = sort grep { defined($_) && length($_) && !$seen{$_}++ }
+			@{$ConspecificMGS{$MGS}};
+		print LO $MGS . "\t" . join(",", @samples) . "\n";
 	}
-	close LO;
+	close LO or die "Can't close conspecific log file: $conlog\n";
+}
+
+sub mergeConspecificLogs {
+	return unless $maxSubJob;
+	my %merged;
+	for my $worker (0 .. $maxSubJob - 1) {
+		my $part = "$LOGDIR/ConspecificMGS.$worker.log";
+		die "Missing conspecific worker log: $part\n" unless -e $part;
+		open my $in, '<', $part or die "Can't open conspecific worker log $part: $!\n";
+		while (my $line = <$in>) {
+			chomp $line;
+			next unless length $line;
+			my ($mgs, $sample_list) = split /\t/, $line, 2;
+			die "Malformed conspecific worker log row in $part: $line\n"
+				unless defined($mgs) && length($mgs) && defined($sample_list);
+			$merged{$mgs}{$_} = 1 for grep { length } split /,/, $sample_list;
+		}
+		close $in or die "Can't close conspecific worker log $part: $!\n";
+	}
+
+	my $canonical = "$LOGDIR/ConspecificMGS.log";
+	my $temporary = "$canonical.tmp.$$";
+	open my $out, '>', $temporary or die "Can't write merged conspecific log $temporary: $!\n";
+	for my $mgs (sort keys %merged) {
+		print {$out} $mgs, "\t", join(',', sort keys %{$merged{$mgs}}), "\n"
+			or die "Can't write merged conspecific log $temporary: $!\n";
+	}
+	close $out or die "Can't close merged conspecific log $temporary: $!\n";
+	rename $temporary, $canonical
+		or die "Can't install merged conspecific log $canonical: $!\n";
+	%ConspecificMGS = map {
+		$_ => [sort keys %{$merged{$_}}]
+	} keys %merged;
+
+	my @snp_parts = grep { -e $_ }
+		map { "$outD/SNPconsCalls.$_.log" } 0 .. $maxSubJob - 1;
+	if (@snp_parts) {
+		my $snp_log = "$outD/SNPconsCalls.log";
+		my $snp_tmp = "$snp_log.tmp.$$";
+		open my $snp_out, '>', $snp_tmp or die "Can't write merged SNP consensus log $snp_tmp: $!\n";
+		for my $part (@snp_parts) {
+			open my $snp_in, '<', $part or die "Can't open SNP consensus worker log $part: $!\n";
+			while (my $line = <$snp_in>) {
+				print {$snp_out} $line or die "Can't write merged SNP consensus log $snp_tmp: $!\n";
+			}
+			close $snp_in or die "Can't close SNP consensus worker log $part: $!\n";
+		}
+		close $snp_out or die "Can't close merged SNP consensus log $snp_tmp: $!\n";
+		rename $snp_tmp, $snp_log or die "Can't install merged SNP consensus log $snp_log: $!\n";
+	}
 }
 
 sub writeTooFewMarker{
@@ -1120,6 +1218,7 @@ sub prepRun{
 		$outD = $outDpre ; 
 		$outD .= "/" unless ($outD =~ m/\/$/);
 		}
+	my $outputWasPresent = -d $outD ? 1 : 0;
 	$LOGDIR = "$outD/LOGandSUB/";
 	$SNPconsLOGs = "$outD/SNPconsCalls.$subJob.log" if ($SNPconsLOGs eq "");
 
@@ -1209,6 +1308,12 @@ sub prepRun{
 	%map = %{$hr1}; %AsGrps = %{$hr2};
 	#get all samples in assembly group, but only last in mapgroup
 	@samples = @{$map{opt}{smpl_order}};
+	my %sample_seen;
+	for my $sample (@samples) {
+		die "Unsafe sample identifier '$sample': use only letters, digits, dot, underscore, colon, plus, and hyphen\n"
+			unless defined($sample) && $sample =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
+		die "Duplicate sample identifier in map: $sample\n" if $sample_seen{$sample}++;
+	}
 
 
 	if ($mode eq "MGS" || $mode eq "MGSall"){
@@ -1216,6 +1321,7 @@ sub prepRun{
 		if ($subJob) {
 			die "Sorted MGS guide is missing for subjob: $sortedMGS\n" unless -s $sortedMGS;
 		} elsif ($mode eq "MGSall" && !-e $sortedMGS) {
+			assertSafeWorkflowRemoval($outD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
 			remove_tree($outD) if -d $outD;
 			remove_tree($scratchD) if -d $scratchD;
 			unlink $_ or die "Cannot remove stale $_: $!\n"
@@ -1224,6 +1330,7 @@ sub prepRun{
 				or die "Cannot link $sortedMGS to $MGSfile: $!\n";
 		} elsif (!$onlySubmit || !-s $sortedMGS) {
 			print "base files missing.. preparing complete resubmission and recalc of data\n";
+			assertSafeWorkflowRemoval($outD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
 			remove_tree($outD) if -d $outD;
 			remove_tree($scratchD) if -d $scratchD;
 			unlink $_ or die "Cannot remove stale $_: $!\n"
@@ -1251,6 +1358,11 @@ sub prepRun{
 	}
 
 	make_path($locTmpDir, $scratchD, $outD, $LOGDIR);
+	my $outputBase = basename(File::Spec->canonpath($outD));
+	my $owner = File::Spec->catfile($outD, '.matafiler-strain-workdir');
+	markStrainWorkflowDirectory($outD)
+		if !$outputWasPresent || !$onlySubmit || $outputBase eq 'intra_phylo'
+			|| $outputBase eq 'within_phylo' || -e $owner;
 	open FO, ">$LOGDIR/strainCmd.txt" or die "Cannot write $LOGDIR/strainCmd.txt: $!\n";
 	print FO $cmdCall;
 	close FO or die "Cannot close $LOGDIR/strainCmd.txt: $!\n";
@@ -1275,9 +1387,7 @@ sub prepRun{
 
 
 sub preComputeConsSNP{
-	my $inputChkd = 0;
 	my $inputChk = "$outD/stones/0.fileChk.sto";
-	$inputChkd =1 if (-e "$inputChk");
 	my $fileAbsent = 0;
 	my @missing_samples;
 	my $submPreComp = 1;#DEBUG
@@ -1286,8 +1396,8 @@ sub preComputeConsSNP{
 	
 	my @accumVCFcmds; my $BatchCnt=0;my @jobsPre;
 	foreach my $smpl (@samples){ # just check that files are there..
-		#check if SNP file is present
-		last if ($onlySubmit && $inputChkd && !$preCompCons);
+		# Always revalidate paired consensus files; an old checkpoint cannot prove
+		# that both the nucleotide and protein cache still exist.
 		unless (exists($map{$smpl}) && defined($map{$smpl}{wrdir}) && length($map{$smpl}{wrdir})) {
 			warn "No working directory is configured for $smpl; sample will be skipped\n";
 			$fileAbsent = 1;
@@ -1304,22 +1414,18 @@ sub preComputeConsSNP{
 		my $tarF = $cD."/$lSNPdir/$lConsFNA";
 		my $tarF2 = $cD."/$lSNPdir/$lConsFAA";
 		my $tarVCF = $cD."/$lSNPdir/$lConsVCF";
-		if ((!fileGZe($tarVCF) && !fileGZe($tarF)) && !-e "$cD/SMPL.empty" ) {
-			warn "Can't find SNP inputs for $smpl in $cD; sample will be skipped\n";
+		my $input_state = consensusInputState(
+			fileGZe($tarVCF), fileGZe($tarF), fileGZe($tarF2), $forceVCF2FNA
+		);
+		if ($input_state eq 'missing') {
+			warn "Can't find a complete consensus pair or a VCF to repair it for $smpl in $cD; sample will be skipped\n";
 			$fileAbsent = 1;
-			$unavailableSamples{$smpl} = "missing SNP input";
-			push @missing_samples, $smpl;
-			next;
-		}
-		if ($forceVCF2FNA && ! fileGZe($tarVCF)){
-			warn "Option -forceSNPcalls 1 used, but VCF is missing for $smpl; sample will be skipped\n";
-			$fileAbsent = 1;
-			$unavailableSamples{$smpl} = "missing forced VCF";
+			$unavailableSamples{$smpl} = "missing consensus pair and repair VCF";
 			push @missing_samples, $smpl;
 			next;
 		}
 		
-		if ($preCompCons && ( $forceVCF2FNA  || (! fileGZe( $tarF ) && fileGZe($tarVCF)))){
+		if ($preCompCons && $input_state eq 'regenerate'){
 			#store these in scratch, uncompressed (much faster)
 			my $fastaf = "$preConDir/$smpl.cons.genes.fna.gz";
 			my $fastafAA = "$preConDir/$smpl.cons.prots.faa.gz";
@@ -1330,12 +1436,12 @@ sub preComputeConsSNP{
 			
 			if (@accumVCFcmds >= $preCompCons){
 				print "Precomp batch $BatchCnt " if ($submPreComp);
-				my $cmdX = "\necho \"BATCH $BatchCnt\"\nmkdir -p $preConDir/;\n\n" . join("\n",@accumVCFcmds);
+				my $cmdX = "\necho \"BATCH $BatchCnt\"\nmkdir -p ".shellQuote($preConDir).";\n\n" . join("\n",@accumVCFcmds);
 				my $tmpSHDD=$QSBoptHR->{tmpSpace} ; $QSBoptHR->{tmpSpace} =0;
 				my ($dep,$qcmd) = qsubSystem($LOGDIR."PreCompConsSNP_B${BatchCnt}.sh",$cmdX,1,"10G","ConsSNP$BatchCnt","","",$submPreComp,[],$QSBoptHR);
 				$QSBoptHR->{tmpSpace} =$tmpSHDD;
 
-				push(@jobsPre,$dep);
+				push(@jobsPre,$dep) if defined($dep) && length($dep);
 				#reset counters etc
 				$BatchCnt++; @accumVCFcmds=();
 
@@ -1346,12 +1452,12 @@ sub preComputeConsSNP{
 	#last batch of jobs..
 	if (@accumVCFcmds){
 		
-		my $cmdX = "\necho \"BATCH $BatchCnt\"\nmkdir -p $preConDir/;\n\n" . join("\n",@accumVCFcmds);
+		my $cmdX = "\necho \"BATCH $BatchCnt\"\nmkdir -p ".shellQuote($preConDir).";\n\n" . join("\n",@accumVCFcmds);
 		my ($dep,$qcmd) = qsubSystem($LOGDIR."PreCompConsSNP_B${BatchCnt}.sh",$cmdX,1,"10G","ConsSNP$BatchCnt","","",$submPreComp,[],$QSBoptHR);
-		push(@jobsPre,$dep);
+		push(@jobsPre,$dep) if defined($dep) && length($dep);
 
 	}
-	if (@jobsPre){
+	if (@jobsPre && $doSubmit){
 		qsubSystemJobAlive( \@jobsPre,$QSBoptHR );
 	}
 	for my $smpl (keys %preCompSNPs) {
@@ -1465,7 +1571,7 @@ sub evalFileStatus{
 		my $outD2 = "$outD/$MGS/";
 		$SIdirs{$MGS} = $outD2;
 		#print "$outD2\n";
-		if (-d $outD2 && $onlySubmit == 0){#don't delete folders if we want to submit a job later..
+		if (-d $outD2 && $onlySubmit == 0 && !$subJob){#only the parent may clean shared folders
 			remove_tree($outD2);
 			my $scratch_mgs = "$scratchD/outs/$MGS";
 			remove_tree($scratch_mgs) if -d $scratch_mgs;
@@ -1678,12 +1784,74 @@ sub shellQuote {
 	return "'$value'";
 }
 
+sub consensusInputState {
+	my ($vcf_ready, $nt_ready, $aa_ready, $force_regeneration) = @_;
+	return 'missing' if $force_regeneration && !$vcf_ready;
+	return 'ready' if !$force_regeneration && $nt_ready && $aa_ready;
+	return 'regenerate' if $vcf_ready;
+	return 'missing';
+}
+
+sub assertSafeWorkflowRemoval {
+	my ($target, @protected) = @_;
+	return unless -d $target;
+	my $resolved = abs_path($target)
+		or die "Cannot resolve workflow output directory before removal: $target\n";
+	$resolved = File::Spec->canonpath($resolved);
+	my ($volume) = File::Spec->splitpath($resolved, 1);
+	my $root = File::Spec->canonpath(File::Spec->catpath($volume, File::Spec->rootdir(), ''));
+	my $compare_target = $^O eq 'MSWin32' ? lc($resolved) : $resolved;
+	my $compare_root = $^O eq 'MSWin32' ? lc($root) : $root;
+	die "Refusing to remove filesystem root as a strain workflow directory: $resolved\n"
+		if $compare_target eq $compare_root;
+
+	my $prefix = $compare_target;
+	$prefix .= File::Spec->catfile('', '') unless $prefix =~ m{[\\/]$};
+	for my $protected (@protected) {
+		next unless defined($protected) && length($protected) && -e $protected;
+		my $resolved_protected = abs_path($protected) or next;
+		$resolved_protected = File::Spec->canonpath($resolved_protected);
+		my $compare_protected = $^O eq 'MSWin32' ? lc($resolved_protected) : $resolved_protected;
+		die "Refusing to remove $resolved because it contains protected path $resolved_protected\n"
+			if $compare_protected eq $compare_target || index($compare_protected, $prefix) == 0;
+	}
+
+	my $base = basename($resolved);
+	my $owner = File::Spec->catfile($resolved, '.matafiler-strain-workdir');
+	die "Refusing to remove unowned custom output directory $resolved; expected $owner\n"
+		unless $base eq 'intra_phylo' || $base eq 'within_phylo' || -f $owner;
+}
+
+sub markStrainWorkflowDirectory {
+	my ($target) = @_;
+	make_path($target) unless -d $target;
+	my $owner = File::Spec->catfile($target, '.matafiler-strain-workdir');
+	return if -e $owner;
+	open my $fh, '>', $owner or die "Cannot create strain workflow ownership marker $owner: $!\n";
+	print {$fh} "strain_within\t$version\n"
+		or die "Cannot write strain workflow ownership marker $owner: $!\n";
+	close $fh or die "Cannot close strain workflow ownership marker $owner: $!\n";
+}
+
 
 
 
 #this routine hast to get genes out of each sample, that are needed
 #and save them to be later written per specI
 sub extractFNAFAA2genes{
+	# Each worker owns one numeric suffix.  A retry must replace, not append to,
+	# that worker's previous partial extraction.
+	for my $pattern (
+		"$scratchD/outs/*/$FNAstdof.$subJob",
+		"$scratchD/outs/*/$FAAstdof.$subJob",
+		"$scratchD/outs/*/$LINKstdof.$subJob",
+		"$scratchD/outs/*/$CATstdof.tmp.$subJob",
+	) {
+		for my $part (bsd_glob($pattern)) {
+			unlink $part or die "Cannot remove stale worker part $part: $!\n"
+				if -f $part || -l $part;
+		}
+	}
 	my %perMGScnts;
 	my $gnCnt=0;
 	#my %totGnes;
@@ -1948,8 +2116,16 @@ sub readGenesSample_Singl{
 			delete $preCompSNPs{$sd3};
 		}
 		
-		#need to recreate fna/faa on the fly?? -> or does user want this?
-		if ( $locForceVCF2FNA  || (! fileGZe( $fastaf ) && fileGZe($fastafVCF))){
+		my $input_state = consensusInputState(
+			fileGZe($fastafVCF), fileGZe($fastaf), fileGZe($fastafAA), $locForceVCF2FNA
+		);
+		if ($input_state eq 'missing') {
+			warn "Skipping $sd3: consensus NT/AA files are incomplete and no repair VCF is available\n";
+			next;
+		}
+		# Rebuild both members of the pair whenever either is missing.  Writing
+		# into sample-local scratch avoids appending a new sidecar beside a .gz cache.
+		if ($input_state eq 'regenerate'){
 			make_path($locSpace) unless -d $locSpace;
 			print "Recreating consensus fasta files on the fly.. ";
 			#store these in scratch, uncompressed (much faster)
@@ -1959,16 +2135,16 @@ sub readGenesSample_Singl{
 		}
 		#print "$fastaf\n";
 		unless (fileGZe($fastaf) && fileGZe($fastafAA)){
-			print "\n=====================================\nCan't find nt file $fastaf -> skip sample\n=====================================\n";
+			print "\n=====================================\nIncomplete consensus pair $fastaf / $fastafAA -> skip sample\n=====================================\n";
 			#die;
 			next;
 		}
 		#print "Time A1: " . timeNice(time - $sttime)  . "\n";
 		#print "$fastaf\n";
 		#read the assemble nt and AA genes from the sample
-		my $FNA = readFasta($fastaf,1,"\\s");#,\%subG);
+		my $FNA = readFasta($fastaf,1,"\\s",\%subG);
 		#my %FNA = %{$hr};
-		my $FAA2 = readFasta($fastafAA,0);#,"\\s",\%subG);#read full head string
+		my $FAA2 = readFasta($fastafAA,0,"\\s",\%subG);# retain full headers for depth/CSP parsing
 		my %FAA ;#= {};
 		my %depths;
 		#my $abunHR = readTabbed($cD.$abundF);

@@ -629,7 +629,7 @@ if ($isAligned){
 		}
 		close O;close O2;
 		#done, samples are in O2
-		if ($numSeq <= 3){ #actually pretty useless, no tree can be built from this, so just rm this one...
+		if ($numSeq < 3){ #three tips are sufficient for the minimal resolved unrooted tree
 			#system "rm -f $tmpInMSA $tmpInMSAnt";#
 			unlink  $tmpInMSA; unlink $tmpInMSAnt;next;
 		}

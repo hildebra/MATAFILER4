@@ -30,9 +30,11 @@ use Cwd qw(abs_path);
 #.31: propagate catalog identity and store validated checkpoint manifests
 #.32: remove deprecated hierarchical/deep-correlation post-clustering path
 #.33: harden sparse Canopy/MAG/MGS outcomes, singleton output, weighted resumes, and phylogeny skips
+#.34: restore the documented GTDB default and fingerprint workflow-defining checkpoint options
 
-my $MGSpipelineVersion = 0.33;
+my $MGSpipelineVersion = 0.34;
 my $clusterID = 95;
+my %checkpointParameters;
 
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
 use Mods::GenoMetaAss qw(readMap getDirsPerAssmblGrp unzipFileARezip getAssemblPath systemW gzipopen);
@@ -86,7 +88,7 @@ sub _matrix_sample_count {
 sub _touch_checkpoint {
 	my ($file, $stage, @outputs) = @_;
 	write_checkpoint($file,
-		parameters => { cluster_id => $clusterID, stage => $stage },
+		parameters => { %checkpointParameters, stage => $stage },
 		outputs => \@outputs,
 	);
 }
@@ -99,7 +101,10 @@ sub _touch_empty_file {
 
 sub _checkpoint_valid {
 	my ($file) = @_;
-	return checkpoint_valid($file, parameters => { cluster_id => $clusterID });
+	# Empty legacy stones cannot encode marker-set, binner, or QC provenance.
+	# Rebuild them in this workflow instead of silently accepting stale state.
+	return 0 unless defined($file) && -s $file;
+	return checkpoint_valid($file, parameters => \%checkpointParameters);
 }
 
 sub _shell_quote {
@@ -111,8 +116,11 @@ sub _shell_quote {
 
 sub _checkpoint_command {
 	my ($writer, $stone, $stage, @outputs) = @_;
-	my @args = ('perl', $writer, '--stone', $stone,
-		'--param', "cluster_id=$clusterID", '--param', "stage=$stage");
+	my %parameters = (%checkpointParameters, stage => $stage);
+	my @args = ('perl', $writer, '--stone', $stone);
+	for my $key (sort keys %parameters) {
+		push @args, ('--param', "$key=$parameters{$key}");
+	}
 	push @args, map { ('--output', $_) } @outputs;
 	return join(' ', map { _shell_quote($_) } @args) . "\n";
 }
@@ -209,7 +217,7 @@ my $nodeTmpD = getProgPaths("nodeTmpDir");
 my $useCheckM2 = 0; my $useCheckM1 = 1;
 my $binSpeciesMG = 2; #defaults to semibin
 my $ignoIncomplMAGs = 1; #if 1, will ignore if no Bin in MF3
-my $useGTDBmg = "FMG";
+my $useGTDBmg = "GTDB";
 my $wait4stone = "";
 my $wait4stoneTimeout = 86400;
 my $useWeightedMGSscores = 1;
@@ -261,6 +269,19 @@ print "\n-------------------------\nMGS v$MGSpipelineVersion\n------------------
 print "Running legacy version\n" if ($legacyV);
 
 die "-MGset option has to be \"GTDB\" or \"FMG\"\n" unless ($useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG");
+
+%checkpointParameters = (
+	cluster_id             => $clusterID,
+	pipeline_version       => $MGSpipelineVersion,
+	marker_set             => $useGTDBmg,
+	binner                 => $binSpeciesMG,
+	quality_checker        => $useCheckM2 ? 'checkm2' : 'checkm1',
+	legacy_mode            => $legacyV ? 1 : 0,
+	weighted_mgs_scores    => $useWeightedMGSscores ? 1 : 0,
+	ignore_incomplete_mags => $ignoIncomplMAGs ? 1 : 0,
+	genomes_per_family     => $doBinCtgsPerFam ? 1 : 0,
+	canopy_file            => $canopyF,
+);
 
 die "Needs input dir arg (-GCd)!" if ($inD eq "");
 #die "$doStrains\n";
@@ -599,9 +620,10 @@ printL "---------------------------------------------------------------------\n"
 
 
 #get checkM quality for new Bins
-my $binD = "$outD/Genomes/MGS_GC/";system "mkdir -p  $binD" unless (-d $binD);
-my $binDctg = "$outD/Genomes/MGS_ctg/";system "mkdir -p  $binDctg" unless (-d $binDctg);
-my $binDctgFam = "$outD/Genomes/MGS_ctg_fam/";system "mkdir -p  $binDctgFam" unless (-d $binDctgFam);
+my $binD = "$outD/Genomes/MGS_GC/";
+my $binDctg = "$outD/Genomes/MGS_ctg/";
+my $binDctgFam = "$outD/Genomes/MGS_ctg_fam/";
+make_path($binD, $binDctg, $binDctgFam);
 
 #gget repr genomes for each MGS
 if (!_checkpoint_valid($BinExtrSto)){
@@ -730,17 +752,14 @@ unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/spec
 	printL "Merge with SpecI & get abundance \n";
 	#print "$cmdSI\n";
 
-	my @files = glob ("$GCd/FMG/tax/*tmp.m8");
-	#die "@files\n$GCd/FMG/*tmp.m8\n";
-	if (scalar(@files) >= 40 && $doSubmit){
-		systemW $cmdSI ; 
-	} else {
-		print "Incomplete lambda FMG assignments.. submitting job\n";
-		my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
-		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS.sh",$cmdSI,1,int(200/1)."G","AB2_MGS","","",1,[],\%QSBopt) ;
-		$QSBopt{tmpSpace} =$tmpSHDD;
-		push @annotation_jobs, $jobName2 if $jobName2;
-	}
+	# The selected marker-set LCA inputs were validated before clustering.  Always
+	# run this expensive aggregation through the configured submission backend;
+	# the previous FMG/tax/*.tmp.m8 shortcut was unrelated to GTDB marker runs and
+	# could execute a large job directly on the launcher node.
+	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0";
+	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS.sh",$cmdSI,1,int(200/1)."G","AB2_MGS","","",1,[],\%QSBopt) ;
+	$QSBopt{tmpSpace} =$tmpSHDD;
+	push @annotation_jobs, $jobName2 if $jobName2;
 }
 
 qsubSystemJobAlive( \@annotation_jobs,\%QSBopt ) if $doSubmit && @annotation_jobs;
@@ -752,12 +771,13 @@ if ($doSubmit) {
 my @marker_jobs;
 unless (_checkpoint_valid($ABmgsSton2) && -s "$outD/Annotation/Abundance/MGS.matL0.txt" && -s "$outD/Annotation/Abundance/MGS.matL7.txt"){
 	my $MMLscr = getProgPaths("MAGMGSLCA_scr");
-	my $cmdSI2 = "$MMLscr -GCd $GCd -cores 4 -Binner $BinnerShrt -binD $outD\n";
+	my $cmdSI2 = "$MMLscr -GCd $GCd -cores $numCore -MGset $useGTDBmg -Binner $BinnerShrt -binD $outD\n";
 	$cmdSI2 .= "test -s $outD/Annotation/Abundance/MGS.matL0.txt\n";
 	$cmdSI2 .= "test -s $outD/Annotation/Abundance/MGS.matL7.txt\n";
 	$cmdSI2 .= _checkpoint_command($checkpointWriter, $ABmgsSton2, 'marker-mgs-abundance', "$outD/Annotation/Abundance/MGS.matL0.txt", "$outD/Annotation/Abundance/MGS.matL7.txt");
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
-	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS_core.sh",$cmdSI2,4,int(100/4)."G","AB_MGS_core","","",1,[],\%QSBopt) ;
+	my $markerMemPerCore = int(100/$numCore); $markerMemPerCore = 1 if $markerMemPerCore < 1;
+	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS_core.sh",$cmdSI2,$numCore,$markerMemPerCore."G","AB_MGS_core","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
 	push @marker_jobs, $jobName2 if $jobName2;
 }
@@ -789,7 +809,7 @@ my $treedep="";
 
 if ($coreMGSCount < 3) {
 	printL "Skipping between-MGS phylogeny: at least 3 MGS are required, but only $coreMGSCount were retained\n";
-} elsif (!-e "$outDphylo/phylo/IQtree_allsites.treefile" || !-e "$outD/between_phylo/phylo/IQtree_allsites.pdf"){
+} elsif (!-s "$outDphylo/phylo/IQtree_allsites.treefile" || !-s "$outD/between_phylo/phylo/IQtree_allsites.pdf"){
 	print "Construct phylogeny of all MGS:\n$ph1Cmd\n";
 	
 	my $refTreeMsg = "\n################\n# If you want to include custom reference genomes, use \n# $baseTreeCmd-outD $outD/customRefs/ -refGenos [refs]\n################\n";
@@ -872,7 +892,7 @@ if ($numSamples > 1500){#scale with the number of assembly groups
 #
 #my $ph2Cmd = "$strain1scr $GCd $finalClustersFilt.mgs $canCore $iniTree 0 1\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
 my $ph2Cmd = "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ ";
-$ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree;
+$ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree || $treedep ne "";
 $ph2Cmd .= "\n";
 
 $ph2Cmd .= "#consider adapting further options: \n#-rmMSA 0 -presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -nodeTmp [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
