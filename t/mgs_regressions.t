@@ -113,6 +113,11 @@ ok(!-e "$missing_kraken_prefix.LCA" && !-e "$missing_kraken_prefix.tax",
 my $between_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'phylo_MGS_between.pl'));
 like($between_source, qr/open I,"<\$GCd\/FMG\.subset\.cats"/,
 	'between-MGS phylogeny intentionally remains tied to the FMG marker set');
+like($between_source,
+	qr/my \$first = delete \$MGSFMG.*?\$ambiguousMGSFMG.*?Retained \$usable_fmg unambiguous FMG genes/s,
+	'between-MGS phylogeny excludes ambiguous paralogous marker cells instead of choosing the first copy');
+like($between_source, qr/foreach my \$mg \(sort keys %MGSFMG\).*?foreach my \$cg \(sort keys %catT\)/s,
+	'between-MGS FASTA and category records are emitted deterministically');
 like($between_source, qr/if \(\$mgs_with_fmg < 3\).*?SKIPPED=too_few_marker_bearing_MGS/s,
 	'between-MGS phylogeny reports a successful cardinality skip before invoking a tree builder');
 like($between_source, qr/if \(!-s \$treeFile\)/,
@@ -185,11 +190,14 @@ like($mgs_source, qr/return 0 unless defined\(\$file\) && -s \$file;.*?checkpoin
 	'MGS does not accept provenance-free empty checkpoint stones');
 like($mgs_source, qr/checkpointInputs.*?catalog_fna.*?catalog_faa.*?map_/s,
 	'MGS checkpoints fingerprint primary catalogue, matrix, and map inputs');
+like($mgs_source,
+	qr/stage1ProvenanceInvalid\s+=.*?!_checkpoint_valid\(\$st1ston\).*?if \(\$rewrClusterMAGs \|\| \$stage1ProvenanceInvalid\).*?my \$ph1flag =.*?_checkpoint_valid\(\$st1ston\)/s,
+	'a clustering-input mismatch invalidates cluster products instead of blessing stale Stage-I output');
 like($mgs_source, qr/'gtdb-taxonomy'.*?\$finalClustersFilt.*?'mgs-abundance'.*?\$finalClustersFilt.*?'marker-mgs-abundance'.*?\$finalClustersFilt/s,
 	'downstream taxonomy and abundance checkpoints track the current MGS membership');
 like($mgs_source, qr/binExtractionValid.*?remove_tree.*?geneBinFiles.*?contigBinFiles.*?_touch_checkpoint/s,
 	'bin extraction rebuilds cleanly and records its concrete genome outputs');
-like($mgs_source, qr/if \(\$rewrClusterMAGs\).*?invalidate downstream checkpoint.*?between_phylo.*?within_phylo/s,
+like($mgs_source, qr/if \(\$rewrClusterMAGs \|\| \$stage1ProvenanceInvalid\).*?invalidate downstream checkpoint.*?between_phylo.*?within_phylo/s,
 	'reclustering invalidates dependent checkpoints and phylogenies');
 like($mgs_source, qr/"clusterID=i" => \\\$clusterID/,
 	'MGS accepts a gene-catalog cluster identity');

@@ -60,7 +60,7 @@ $btout = "$GCd/MGS/phylo/" if ($btout eq "");#main output dir
 
 #main objects to store dna/cats
 my %FAAfmg; my %FNAfmg;my %catT; 
-my %MGS; my %MGSFMG; my %dblList; my %totDbls;
+my %MGS; my %MGSFMG; my %dblList; my %totDbls; my %ambiguousMGSFMG;
 
 
 #is there any ref genomes to add?
@@ -111,7 +111,7 @@ close I;
 print "Found ". scalar(keys(%FMG2COG)) ." FMG genes in total gene cat\n";
 
 #read MGS genes
-my $mfcnt=0; my $mfdbl=0;
+my $mfdbl=0;
 open I,"<$MGSfile" or die "Can't open MGS input\n";
 while (<I>){
 	chomp; my @spl = split /\t/;
@@ -121,20 +121,32 @@ while (<I>){
 	#$MGS{$spl[0]} = \@genes;
 	foreach my $x (@genes){
 		if (exists($FMG2COG{$x})){
-			if (exists($MGSFMG{$spl[0]}{$FMG2COG{$x}})){
+			my $cog = $FMG2COG{$x};
+			if (exists($ambiguousMGSFMG{$spl[0]})
+					&& exists($ambiguousMGSFMG{$spl[0]}{$cog})){
 				$mfdbl++;
-				$dblList{$spl[0]}{$FMG2COG{$x}}{$x} = 1;
-				$dblList{$spl[0]}{$FMG2COG{$x}}{$MGSFMG{$spl[0]}{$FMG2COG{$x}}} = 1;
-				$totDbls{$x} = 1; $totDbls{$MGSFMG{$spl[0]}{$FMG2COG{$x}}} = 1;
+				$dblList{$spl[0]}{$cog}{$x} = 1;
+				$totDbls{$x} = 1;
+			} elsif (exists($MGSFMG{$spl[0]}{$cog})){
+				my $first = delete $MGSFMG{$spl[0]}{$cog};
+				$mfdbl++;
+				$dblList{$spl[0]}{$cog}{$x} = 1;
+				$dblList{$spl[0]}{$cog}{$first} = 1;
+				$totDbls{$x} = 1; $totDbls{$first} = 1;
+				$ambiguousMGSFMG{$spl[0]}{$cog} = 1;
 			} else {
-				$MGSFMG{$spl[0]}{$FMG2COG{$x}} = $x;
+				$MGSFMG{$spl[0]}{$cog} = $x;
 			}
-			$mfcnt ++;
 		}
 	}
 }
 close I;
-my $mgs_with_fmg = scalar keys %MGSFMG;
+my @marker_bearing_mgs = grep { scalar keys %{$MGSFMG{$_}} } keys %MGSFMG;
+my $mgs_with_fmg = scalar @marker_bearing_mgs;
+my $usable_fmg = 0;
+$usable_fmg += scalar keys %{$MGSFMG{$_}} for @marker_bearing_mgs;
+my $ambiguous_cells = 0;
+$ambiguous_cells += scalar keys %{$ambiguousMGSFMG{$_}} for keys %ambiguousMGSFMG;
 if ($mgs_with_fmg < 3) {
 	make_path($btout) unless -d $btout;
 	my $skip_file = "$btout/SKIPPED.txt";
@@ -147,7 +159,8 @@ if ($mgs_with_fmg < 3) {
 }
 my $bts = getProgPaths("buildTree_scr");
 my $vizTree = getProgPaths("vizBtwPhylo_R");
-print "Assigned $mfcnt genes to MGS in $mgs_with_fmg MGS (". int(10*$mfcnt/$mgs_with_fmg)/10 ." on average, $mfdbl double)\n";
+print "Retained $usable_fmg unambiguous FMG genes in $mgs_with_fmg MGS (".
+	int(10*$usable_fmg/$mgs_with_fmg)/10 ." on average); excluded $ambiguous_cells MGS-marker cells with $mfdbl extra copies\n";
 unlink "$btout/SKIPPED.txt" or die "Cannot remove stale $btout/SKIPPED.txt: $!\n"
 	if -e "$btout/SKIPPED.txt";
 
@@ -230,8 +243,8 @@ make_path($btout) unless -d $btout;
 #open ON,">$btout/all.fna"; 
 open OA,">$btout/all.faa"  or die "Can't open faa out file $btout/all.faa\n"; 
 my $SaSe = "|";
-foreach my $mg (keys %MGSFMG){
-	foreach my $cog (keys %{$MGSFMG{$mg}}){
+foreach my $mg (sort keys %MGSFMG){
+	foreach my $cog (sort keys %{$MGSFMG{$mg}}){
 		my $ng = "$mg$SaSe$cog";
 #		print ON ">$ng\n$FNAfmg{$MGSFMG{$mg}{$cog}}\n";
 		die "$MGSFMG{$mg}{$cog}\n" unless (exists( $FAAfmg{$MGSFMG{$mg}{$cog}} ));
@@ -242,7 +255,7 @@ foreach my $mg (keys %MGSFMG){
 close OA;
 
 open OC,">$btout/all.cats" or die "Can't open cat file $btout/all.cats\n";
-foreach my $cg (keys %catT){
+foreach my $cg (sort keys %catT){
 	print OC join("\t",@{$catT{$cg}})."\n";
 }
 close OC;

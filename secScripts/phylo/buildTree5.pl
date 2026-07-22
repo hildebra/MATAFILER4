@@ -942,24 +942,24 @@ sub treePresent{
 	my $checked = 0;
 	if ($doFastTree){
 		$checked = 1;
-		$ret=0 unless ($continue && -e $treeOpts{fastTrOut});
+		$ret=0 unless ($continue && -s $treeOpts{fastTrOut});
 	}
 	if ($doVeryFastTree){
 		$checked = 1;
-		$ret=0 unless ($continue && -e $treeOpts{VfastTrOut});
+		$ret=0 unless ($continue && -s $treeOpts{VfastTrOut});
 	}
 	if ($doIQTree){
 		$checked = 1;
 		my $IQtree = "$treeOpts{IQtreeout}";
-		$ret=0 unless ($continue && -e "$IQtree.treefile");
+		$ret=0 unless ($continue && -s "$IQtree.treefile");
 	}
 	if ($doRAXMLng){
 		$checked = 1;
-		$ret=0 unless ($continue && -e $treeOpts{RAXNGtreeout});
+		$ret=0 unless ($continue && -s $treeOpts{RAXNGtreeout});
 	}
 	if ($doRAXML){
 		$checked = 1;
-		$ret=0 unless ($continue && -e $treeOpts{RAXtreeout});
+		$ret=0 unless ($continue && -s $treeOpts{RAXtreeout});
 	}
 	return $checked ? $ret : 0;
 }
@@ -975,7 +975,9 @@ sub createTreeOpt{
 	$outgroupL = "" if ($isSubTree);
 	my $partiF=$multF.$partiExt;
 	if (-e "$partiF.gz"){systemW("$pigzBin -d ".shellQuote("$partiF.gz"));}
-	$partiF="" unless (-e $partiF);
+	# Keep the expected path even on a fresh run: mergeMSAs creates this file
+	# after the tree options are assembled.  Its existence is resolved only
+	# immediately before a tree program is invoked.
 	#object to transfer options to tree (and get them back..)
 	my $BStag = ""; if ($bootStrap>0){$BStag="_BS$bootStrap";}
 	my %treeOpts = (inMSA => $multF,
@@ -1008,6 +1010,8 @@ sub treeAtHeart{
 	my %treeOpts = %{$hr};
 	my $consTree = $treeOpts{constraintTree}; my $multF = $treeOpts{inMSA};
 	my $silent = $treeOpts{silent}; my $tcnt = $treeOpts{tcnt};
+	my $partition = $treeOpts{partition} // "";
+	$treeOpts{partition} = "" unless $partition ne "" && -s $partition;
 	
 	if ($consTree ne ""){
 		die "ref tree $consTree does not exist\n" unless (-e $consTree);
@@ -1063,33 +1067,38 @@ sub treeAtHeart{
 
 
 	if ($doFastTree){
-		unless ($continue && -e $treeOpts{fastTrOut}){
+		unless ($continue && -s $treeOpts{fastTrOut}){
 			runFasttree($treeOpts{inMSA},$treeOpts{fastTrOut},$treeOpts{useAA},$treeOpts{ncore});
 		}
 		$phyloTree = $treeOpts{fastTrOut};
 	}
 	if ($doVeryFastTree){
-		unless ($continue && -e $treeOpts{VfastTrOut}){
+		unless ($continue && -s $treeOpts{VfastTrOut}){
 			runVeryFasttree($treeOpts{inMSA},$treeOpts{VfastTrOut},$treeOpts{useAA},$treeOpts{ncore});
 		}
 		$phyloTree = $treeOpts{VfastTrOut};
 	}
 	if ($doIQTree){
 		my $IQtree = "$treeOpts{IQtreeout}";
-		unless ($continue && -e "$IQtree.treefile"){
+		unless ($continue && -s "$IQtree.treefile"){
 			runQItree(\%treeOpts);
 		}
 		$phyloTree = "$IQtree.treefile";
 	}
 	if ($doRAXMLng){
-		unless ($continue && -e $treeOpts{RAXNGtreeout}){
+		unless ($continue && -s $treeOpts{RAXNGtreeout}){
 			runRaxMLng(\%treeOpts);
 		}
 		$phyloTree = $treeOpts{RAXNGtreeout};
 	}
 	if ($doRAXML){
 		$treeOpts{inMSA} = "$multF.ph";
-		if (!-e $treeOpts{inMSA}){ die "Can't find expected *.ph file: $multF.ph";}
+		if (!-s $treeOpts{inMSA}){ die "Can't find nonempty expected *.ph file: $multF.ph";}
+		# runRaxML's continuation logic historically keys on path existence.  Do
+		# not let a zero-byte published tree suppress recovery of partial work.
+		unlink $treeOpts{RAXtreeout}
+			or die "Cannot remove empty RAxML tree $treeOpts{RAXtreeout}: $!\n"
+			if -e $treeOpts{RAXtreeout} && !-s $treeOpts{RAXtreeout};
 		runRaxML(\%treeOpts);#"$multF.ph",$bootStrap,$outgroup,"$treeD/RXML_allsites$BStag.nwk",$ncore,$continue,!$useAA4tree);
 		$phyloTree = $treeOpts{RAXtreeout};#"$treeD/RXML_$siteTag$BStag.nwk";
 	}

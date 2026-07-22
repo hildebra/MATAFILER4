@@ -6,7 +6,9 @@ use warnings; use strict;
 use Mods::Binning qw(readMGSrev );
 use Mods::IO_Tamoc_progs qw(getProgPaths );
 use Mods::GenoMetaAss qw( systemW gzipopen);
+use Mods::GTDBTaxonomy qw(merge_gtdb_summaries);
 use File::Path qw(make_path remove_tree);
+use File::Temp qw(tempdir);
 
 
 #my $COND = getProgPaths("CONDA"); #source conda..
@@ -29,8 +31,22 @@ my $pplacer_cores = $ncore;
 $pplacer_cores = 2 if ($ncore > 2);
 
 $tmpD.="/GTDB/";
-my $oDir = "$tmpD/GTDBTK/";
+make_path($tmpD, $Bdir);
+# Each attempt receives a private output directory.  Reusing GTDBTK/ allowed a
+# failed rerun to discover summaries left by an earlier attempt (and made two
+# concurrent jobs share intermediate state).
+my $runD = tempdir("run-XXXXXX", DIR => $tmpD, CLEANUP => 0);
+my $oDir = "$runD/GTDBTK/";
 make_path($oDir);
+
+my $summaryOut = "$Bdir/gtdbtk.summary.tsv";
+my $taxonomyOut = "$Bdir/GTDBTK.tax";
+# Do not let the surrounding shell's output tests accept results from a failed
+# earlier attempt if this invocation exits before publishing new files.
+for my $oldOutput ($summaryOut, $taxonomyOut) {
+	next unless -e $oldOutput;
+	unlink $oldOutput or die "Cannot remove stale GTDB taxonomy output $oldOutput: $!\n";
+}
 
 
 
@@ -74,15 +90,9 @@ systemW $cmd;
 
 my @summaries = sort glob("$oDir/gtdbtk.*.summary.tsv");
 die "GTDB-Tk produced no summary files in $oDir\n" unless @summaries;
-open my $summary_out, '>', "$Bdir/gtdbtk.summary.tsv" or die "Cannot write GTDB summary: $!\n";
-for my $summary (@summaries) {
-	open my $summary_in, '<', $summary or die "Cannot read $summary: $!\n";
-	while (my $line = <$summary_in>) { print {$summary_out} $line; }
-	close $summary_in or die "Cannot close $summary: $!\n";
-}
-close $summary_out or die "Cannot close $Bdir/gtdbtk.summary.tsv: $!\n";
-systemW "cut -f1,2 $Bdir/gtdbtk.summary.tsv | sed 's/.__//g' > $Bdir/GTDBTK.tax";
+my $taxonomyRows = merge_gtdb_summaries(\@summaries, $summaryOut, $taxonomyOut);
+print "Published $taxonomyRows GTDB taxonomy assignments\n";
 systemW "tar -zcvf $refMGd/GTDBtk.tar.gz $oDir";
-remove_tree($tmpD) if -d $tmpD;
+remove_tree($runD) if -d $runD;
 
 #transfer files

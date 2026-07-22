@@ -70,8 +70,8 @@ like($strain, qr/if \(\$doSubmit\) \{.*?unlink \$treeStone.*?if -e \$treeStone/s
 	'a submitted tree retry cannot pass through a stale completion stone');
 like($strain, qr/unlink \$IQtreef.*?stale tree output/s,
 	'a submitted tree retry must publish a fresh nonempty tree');
-like($strain, qr/unlink \$checkF.*?stale split-worker checkpoint.*?if \$doSubmit && -e \$checkF/s,
-	'a submitted split-worker retry clears its stale completion stone');
+like($strain, qr/clear_split_generation\(\$splitManifest.*?write_split_generation\(\$splitManifest.*?printf '%s\\\\n'/s,
+	'a new split generation clears stale state and tags each worker completion');
 like($strain, qr/ConspecificMGS\.\$subJob\.log.*?sub mergeConspecificLogs/s,
 	'split workers write isolated conspecific logs that are explicitly merged');
 like($strain, qr/\$onlySubmit == 0 && !\$subJob/,
@@ -80,6 +80,8 @@ like($strain, qr/combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?incomplete combined
 	'the caller rejects incomplete combined worker input');
 like($strain, qr/hasFreshParts.*?lacks required.*?return 0/s,
 	'fresh worker parts replace stale combined inputs only when every required part exists');
+like($strain, qr/exact_worker_parts\(\$prefix, \$workerCount\).*?split_generation_complete\(\$splitManifest.*?return \$aggregateComplete/s,
+	'partial retries and merge scratch files cannot replace a complete aggregate');
 like($strain, qr/qsubSystemJobAlive\([^\n]+QSBoptHR[^\n]+if [^\n]+doSubmit/,
 	'dry runs do not poll scheduler jobs that were never submitted');
 like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,

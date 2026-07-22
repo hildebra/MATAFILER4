@@ -23,6 +23,11 @@ use Mods::TamocFunc qw(readTabbed getFileStr checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::math qw(quantileArray);
 use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate protein_kmer_similarity robust_depth_mask);
+use Mods::StrainParts qw(
+	exact_worker_parts write_split_generation write_worker_completion
+	split_generation_complete clear_split_generation resolve_fasta_artifact
+	append_fasta_records_atomic
+);
 
 sub extractFNAFAA2genes;
 sub histoMGS;
@@ -34,7 +39,7 @@ sub createAGlist; sub preComputeConsSNP;
 sub mergeConspecificLogs;
 sub timeNice;
 #sub combineMGSgenes;
-sub combineMGSgenesDir; sub getInputSize;
+sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
 sub evalFileStatus;
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
@@ -316,6 +321,9 @@ my %smplsPerMGS; #stats: MGS is represented in how many different samples?
 
 #hashes of strings that keep results to be written for each species..
 my %OCstrH ; my %OFstrH ; my %OAstrH ; my %OLstrH ;
+my $splitGeneration = '';
+my $splitManifest = "$LOGDIR/mainExtr.generation";
+my $splitStonePrefix = "$LOGDIR/mainExtr";
 
 
 if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
@@ -335,6 +343,11 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 	my @jobsMain;
 
 	if ($maxSubJob && !$subJob){
+		# A generation manifest prevents an isolated worker retry from being
+		# mistaken for a complete replacement of previously merged inputs.
+		clear_split_generation($splitManifest, $splitStonePrefix);
+		$splitGeneration = join('.', time, $$, int(rand(1_000_000_000)));
+		write_split_generation($splitManifest, $splitGeneration, $maxSubJob);
 		#here needs to submit itself maxSubJob times
 		my $strain1scr = getProgPaths("MGS_strain1_scr"); #self reference
 		my @selfArgs = (
@@ -365,9 +378,8 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 		for (my $sj = 1; $sj < $maxSubJob; $sj ++){
 			my $cmdX = "$selfCmd -subjob $sj;\n";
 			my $checkF = "$LOGDIR/mainExtr.${sj}.stone";
-			unlink $checkF or die "Cannot remove stale split-worker checkpoint $checkF: $!\n"
-				if $doSubmit && -e $checkF;
-			$cmdX .= "touch ".shellQuote($checkF)."\n";
+			$cmdX .= "printf '%s\\n' ".shellQuote($splitGeneration)
+				." > ".shellQuote($checkF)."\n";
 			#die "$cmdX\n\n";
 			print $LOGDIR."Strain1_B${sj}.sh\n";
 			my ($dep,$qcmd) = qsubSystem($LOGDIR."Strain1_B${sj}.sh",$cmdX,1,"${selfMemGb}G","Str1.$sj","","",1,[],$QSBoptHR);
@@ -382,6 +394,8 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 	%cl2gene2 = (); #no longer needed, delete
 	#write logs to found genes etc.
 	writeLogsStep1();
+	write_worker_completion("$splitStonePrefix.0.stone", $splitGeneration)
+		if $maxSubJob && !$subJob;
 	
 	if ($subJob){
 		print "Finished subJob ${subJob}/$maxSubJob. Exiting..\n";
@@ -394,12 +408,8 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			exit(0);
 		}
 		qsubSystemJobAlive( \@jobsMain,$QSBoptHR ) if @jobsMain && $doSubmit;
-		#check if all required files present
-		for (my $sj = 1; $sj < $maxSubJob; $sj ++){ #job 0 doesn't have stone (is this job..)
-			my $checkF = "$LOGDIR/mainExtr.${sj}.stone";
-			die "Can't find checkfile $checkF .. abort\n" unless (-e $checkF);
-			unlink $checkF; #and delete..
-		}
+		die "Split extraction generation is incomplete; refusing to merge worker subsets\n"
+			unless split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob);
 		mergeConspecificLogs();
 		
 		#combineMGSgenes();
@@ -637,6 +647,11 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	#die $outD2."treeCmd.sh\n";
 
 }
+if ($maxSubJob
+		&& split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob)
+		&& !splitWorkerPartsRemain()) {
+	clear_split_generation($splitManifest, $splitStonePrefix);
+}
 #too many jobs to use as job dependency..
 qsubSystemJobAlive( \@jobs,$QSBoptHR ) if @jobs && $doSubmit;
 if ($doSubmit) {
@@ -695,17 +710,21 @@ sub combineMGSgenesDir{
 		["$CATstdof.tmp","$tmpD/$CATstdof.tmp",  "$tmpD/$CATstdof.tmp"],
 	);
 	my %partsByName;
+	my $workerCount = $maxSubJob || 1;
 	for my $set (@filesets) {
 		my ($name, $prefix) = @$set;
-		$partsByName{$name} = [sort {
-			my ($an) = $a =~ /\.(\d+)$/;
-			my ($bn) = $b =~ /\.(\d+)$/;
-			defined($an) && defined($bn) ? $an <=> $bn : $a cmp $b
-		} grep { /\.\d+$/ } bsd_glob("$prefix.*")];
+		# Exact suffix matching deliberately excludes abandoned
+		# "$outfile.merge.PID" scratch files from worker input.
+		$partsByName{$name} = [exact_worker_parts($prefix, $workerCount)];
 	}
 	my $hasFreshParts = grep { @{$partsByName{$_}} }
 		($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp");
-	return !grep { !fileGZe($_) } @required unless $hasFreshParts;
+	my $aggregateComplete = !grep { !fileGZe($_) } @required;
+	return $aggregateComplete unless $hasFreshParts;
+	if ($maxSubJob && !split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob)) {
+		warn "Ignoring partial worker retry for $MGS: no complete matching split-extraction generation is present\n";
+		return $aggregateComplete;
+	}
 	for my $requiredName ($FNAstdof, $FAAstdof, "$CATstdof.tmp") {
 		unless (@{$partsByName{$requiredName}}) {
 			warn "Fresh worker extraction for $MGS lacks required $requiredName parts; retaining parts for repair\n";
@@ -753,6 +772,16 @@ sub combineMGSgenesDir{
 		}
 	}
 	return $complete;
+}
+
+sub splitWorkerPartsRemain {
+	return 0 unless $maxSubJob;
+	for my $mgs_dir (grep { -d $_ } bsd_glob("$scratchD/outs/*")) {
+		for my $name ($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp") {
+			return 1 if exact_worker_parts("$mgs_dir/$name", $maxSubJob);
+		}
+	}
+	return 0;
 }
 
 
@@ -969,8 +998,10 @@ sub addOutgroup2MGS{
 	
 	my %uniqSmpls;my $OGgenesUsed=0;
 	my @tmpFAAog ; my @tmpFNAog ;
-	my $existingFNA = fileGZe($FNAtf) ? readFasta($FNAtf,1,"\\s") : {};
-	my $existingFAA = fileGZe($FAAtf) ? readFasta($FAAtf,1,"\\s") : {};
+	my $resolvedFNA = resolve_fasta_artifact($FNAtf);
+	my $resolvedFAA = resolve_fasta_artifact($FAAtf);
+	my $existingFNA = length($resolvedFNA) ? readFasta($resolvedFNA,1,"\\s") : {};
+	my $existingFAA = length($resolvedFAA) ? readFasta($resolvedFAA,1,"\\s") : {};
 	foreach my $cog (@curCogs){
 		if ($OG ne ""){
 			my (undef, $annotation) = locusParts($cog, $MGS);
@@ -988,12 +1019,8 @@ sub addOutgroup2MGS{
 			#} else { print OC "\t$ng"; }
 		}
 	}
-	open my $fna_out, '>>', $FNAtf or die "Can't open NT file $FNAtf: $!\n";
-	open my $faa_out, '>>', $FAAtf or die "Can't open AA file $FAAtf: $!\n";
-	print {$fna_out} join("",@tmpFNAog) or die "Can't append NT file $FNAtf: $!\n";
-	print {$faa_out} join("",@tmpFAAog) or die "Can't append AA file $FAAtf: $!\n";
-	close $faa_out or die "Can't close AA file $FAAtf: $!\n";
-	close $fna_out or die "Can't close NT file $FNAtf: $!\n";
+	append_fasta_records_atomic($FNAtf, join("", @tmpFNAog));
+	append_fasta_records_atomic($FAAtf, join("", @tmpFAAog));
 	
 	#print "used $OGgenesUsed genes  ";
 	my @tmpCAT;

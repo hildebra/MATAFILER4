@@ -385,10 +385,14 @@ if ($useCanopies && !-s $canopyF) {
 	$useCanopies = 0;
 }
 
-my $ph1flag = 1;
-$ph1flag = 0 if (-e "$outD/$BinnerShrt.clusters.obs");
-my $MGSimproFlag = 1;
-$MGSimproFlag = 0 if (-e $finalClusters2);
+my @existingClusterProducts = grep { -e $_ } (
+	glob("$outD/$BinnerShrt.clusters*"),
+	glob("$outD/$BinnerShrt.Wclusters*"),
+);
+my $stage1ProvenanceInvalid =
+	@existingClusterProducts && !_checkpoint_valid($st1ston);
+warn "Existing MGS clustering does not match the current inputs/options; invalidating it before reclustering\n"
+	if $stage1ProvenanceInvalid && !$rewrClusterMAGs;
 
 open LOG, '>', "$logDir/pipeline.log" or die "Cannot open $logDir/pipeline.log: $!\n";
 printL "=====================================================\n";
@@ -411,7 +415,7 @@ printL "=====================================================\n";
 my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2); 
 
 #clean up
-if ($rewrClusterMAGs) {
+if ($rewrClusterMAGs || $stage1ProvenanceInvalid) {
 	for my $file (glob("$outD/$BinnerShrt.clusters*"), glob("$outD/$BinnerShrt.Wclusters*")) {
 		unlink $file or die "Cannot remove $file: $!\n" if -f $file;
 	}
@@ -424,6 +428,9 @@ if ($rewrClusterMAGs) {
 		remove_tree($phyloDir) if -d $phyloDir;
 	}
 }
+my $ph1flag =
+	(-s "$outD/$BinnerShrt.clusters.obs" && -s $finalClusters2 && _checkpoint_valid($st1ston))
+	? 0 : 1;
 #my $FMGsubs = `wc -l $GCd/Matrix.$COGdir.mat | cut -f1 -d' '`; chomp $FMGsubs; $FMGsubs = int($FMGsubs);
 # a whole lot faster.. but imprecise!
 my @marker_lca_files = glob("$GCd/$COGdir/*.LCA");

@@ -24,6 +24,30 @@ die() {
 	exit 1
 }
 
+retry_command() {
+	local description=$1
+	local max_attempts=$2
+	local delay_seconds=$3
+	shift 3
+
+	local attempt status
+	for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+		if "$@"; then
+			return 0
+		else
+			status=$?
+		fi
+
+		if ((attempt == max_attempts)); then
+			echo "$description failed after $max_attempts attempts." >&2
+			return "$status"
+		fi
+
+		echo "$description failed (attempt $attempt/$max_attempts); retrying in $delay_seconds seconds." >&2
+		sleep "$delay_seconds"
+	done
+}
+
 while (($#)); do
 	case "$1" in
 		--remove-legacy-envs) REMOVE_LEGACY_ENVS=1 ;;
@@ -158,7 +182,8 @@ ensure_environment MF4 "$INSTdir/MF4.yml"
 
 if "$MAMBA_E" run -n MF4 hostile --help >/dev/null 2>&1; then
 	echo "Installing/updating the Hostile human reference database"
-	env HOSTILE_CACHE_DIR="$DBdir/hostile" \
+	retry_command "Hostile database download" 5 15 \
+		env HOSTILE_CACHE_DIR="$DBdir/hostile" \
 		"$MAMBA_E" run -n MF4 hostile index fetch --name human-t2t-hla
 fi
 
@@ -197,14 +222,16 @@ MP4_MARKER="$MP4DB/.mf4-metaphlan-version"
 if ! database_current "$CM2_MARKER" "$CHECKM2_VERSION"; then
 	echo "Installing CheckM2 $CHECKM2_VERSION database"
 	mkdir -p -- "$CM2DB"
-	"$MAMBA_E" run -n MF4checkm2 checkm2 database --download --path "$CM2DB"
+	retry_command "CheckM2 database download" 5 15 \
+		"$MAMBA_E" run -n MF4checkm2 checkm2 database --download --path "$CM2DB"
 	printf '%s\n' "$CHECKM2_VERSION" > "$CM2_MARKER"
 fi
 
 if ! database_current "$MP4_MARKER" "$METAPHLAN_VERSION"; then
 	echo "Installing MetaPhlAn $METAPHLAN_VERSION database"
 	mkdir -p -- "$MP4DB"
-	"$MAMBA_E" run -n MF4checkm2 metaphlan --install --bowtie2db "$MP4DB"
+	retry_command "MetaPhlAn database download" 5 15 \
+		"$MAMBA_E" run -n MF4checkm2 metaphlan --install --bowtie2db "$MP4DB"
 	printf '%s\n' "$METAPHLAN_VERSION" > "$MP4_MARKER"
 fi
 

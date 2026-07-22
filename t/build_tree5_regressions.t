@@ -30,6 +30,16 @@ like($source, qr/systemW\(\$cmd1\."\\n"\.\$cmd2\."\\n"\)/,
 like($source, qr/MSA command completed without producing/, 'alignment output is verified');
 
 like($source, qr/\$pigzBin -d .*\$partiF\.gz/, 'compressed partition restoration names the gzip file');
+unlike($source, qr/\$partiF\s*=\s*""\s+unless\s*\(-e \$partiF\)/,
+	'a fresh multi-locus run does not discard its not-yet-created partition path');
+like($source, qr/my \$partition = \$treeOpts\{partition\} \/\/ "";.*?\$treeOpts\{partition\} = "" unless \$partition ne "" && -s \$partition;/s,
+	'the partition path is resolved after alignment concatenation, immediately before tree execution');
+unlike($source, qr/\$continue && -e (?:\$treeOpts\{(?:fastTrOut|VfastTrOut|RAXNGtreeout|RAXtreeout)\}|"\$IQtree\.treefile")/,
+	'resume gates do not accept empty tree outputs');
+like($source, qr/\$continue && -s "\$IQtree\.treefile"/,
+	'IQ-TREE resume requires a nonempty tree');
+like($source, qr/unlink \$treeOpts\{RAXtreeout\}.*?if -e \$treeOpts\{RAXtreeout\} && !-s \$treeOpts\{RAXtreeout\}/s,
+	'an empty legacy RAxML tree cannot suppress continuation recovery');
 like($source, qr/for my \$disM \(\@subfls\)/, 'all discovered distance matrices are merged');
 like($source, qr/\$ffd\{\$k\} = 4/, 'fourfold degeneracy is classified by codon family');
 

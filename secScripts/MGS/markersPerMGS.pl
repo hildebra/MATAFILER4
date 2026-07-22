@@ -7,6 +7,7 @@ use Getopt::Long qw( GetOptions );
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(systemW gzipopen);
 use Mods::Binning qw (readMGSrevRed);
+use Mods::GTDBTaxonomy qw(read_gtdb_taxonomy);
 use File::Path qw(make_path);
 
 
@@ -178,19 +179,11 @@ foreach my $GTcat (@MGcats){
 	close I;
 }
 
-#read MGS tax
-my %MGStax;
-open I,"<$MGStaxF" or die $!;
-while (<I>){
-	chomp; my @spl = split /\t/;
-	#$MGStax{$spl[0]} = $spl[1];
-	my $id = shift @spl;
-	$spl[0] = "?" if ($spl[0] =~ m/Unclassified Bacteria/);
-	@spl = split /;/,$spl[0];
-	while (@spl < 7){push(@spl,"?");}
-	$MGStax{$id} = join(";",@spl);
-}
-close I;
+# Read MGS taxonomy while excluding the canonical header (and duplicate
+# headers present in summaries produced by older bac120/ar53 concatenation).
+# Header-only and malformed files now fail here instead of introducing a
+# synthetic MGS named "user_genome" into downstream abundance tables.
+my %MGStax = %{read_gtdb_taxonomy($MGStaxF)};
 print "Read " . scalar(keys %MGStax) . " MGS tax annoations\n"; 
 
 

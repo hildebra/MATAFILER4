@@ -26,7 +26,8 @@ use Getopt::Long qw( GetOptions );
 #.11: reverted some of the drastic gene filtering
 #.12 adapted for Bin_SB folder potentially being different..
 #.13 validate inputs and repair MGS assignment/output handling
-my $version = 0.13;
+#.14 exclude marker genes shared by multiple MGS instead of assigning by input order
+my $version = 0.14;
 
 sub readMotuTax; sub fixGTDBtax;
 sub readGene2mlinkage; sub readSpecIids;
@@ -362,25 +363,42 @@ sub readMGS{
 		}
 		close IT;
 	}
-	#print"T::@{$tmpTax{MGS0287}}\n";
-	my $taxF=0; my $taxN=0;
+	my %markerOwners;
 	open IM,"<$MGSfile" or die "Can't open MGS $MGSfile\n";
 	while (<IM>){ 
-		chomp; my @spl = split /\t/; my @spl2= split /,/,$spl[1]; 
-		my $curMGS = $spl[0]; my $genCnt=0;
+		chomp;
+		next if /^\s*$/ || /^#/;
+		my @spl = split /\t/, $_, -1;
+		next if $spl[0] eq "Bin";
+		die "Malformed MGS row in $MGSfile at line $.: $_\n"
+			unless @spl >= 2 && length($spl[0]) && length($spl[1]);
+		my @spl2 = split /,/,$spl[1];
+		my $curMGS = $spl[0];
+		$MGSlist{$curMGS} = 1;
 		foreach my $gen (@spl2){
-			#chomp $gen;
 			next unless (exists($gene2COG{$gen}));
-			#print "$gen " if ($curMGS eq "MB2bin186");
-			$Gene2MGS{$gen} = $curMGS;
-			$MGSlist{$curMGS} = 1;
-			#just insert in specI related objects.. just pretend it's great
-			#die "$gen $curMGS\n" if ($gen <5);
-			push(@{$SpecIgenes{$curMGS}{$gene2COG{$gen}}},$gen);
-			$gen2SIscore{$gen}{$curMGS}=200;
-			#$genCnt++;
+			$markerOwners{$gen}{$curMGS} = 1;
 		}
-		#just gie it empty tax for now..
+	}
+	close IM;
+
+	my $ambiguousMarkers = 0;
+	foreach my $gen (sort keys %markerOwners) {
+		my @owners = sort keys %{$markerOwners{$gen}};
+		if (@owners != 1) {
+			$ambiguousMarkers++;
+			next;
+		}
+		my $curMGS = $owners[0];
+		$Gene2MGS{$gen} = $curMGS;
+		push(@{$SpecIgenes{$curMGS}{$gene2COG{$gen}}},$gen);
+		$gen2SIscore{$gen}{$curMGS}=200;
+	}
+	print "Excluded $ambiguousMarkers marker genes assigned to multiple MGS\n"
+		if $ambiguousMarkers;
+
+	my $taxF=0; my $taxN=0;
+	foreach my $curMGS (sort keys %MGSlist) {
 		if (!exists($specIfullTax{$curMGS})){
 			if (exists($tmpTax{$curMGS})){
 				$specIfullTax{$curMGS} = $tmpTax{$curMGS};
@@ -390,14 +408,11 @@ sub readMGS{
 				$taxN++;
 			}
 		}
-		#print "0 genes found for MGS $curMGS\n";
 	}
-	close IM;
 	my $meanS=0; my @sizes; my $morethan1=0; my $only1=0;
-	foreach my $MGS (keys %SpecIgenes){
-		#print $MGS." ";
+	foreach my $MGS (sort keys %MGSlist){
 		my $curS =0;
-		foreach my $cat (keys %{$SpecIgenes{$MGS}}){
+		foreach my $cat (sort keys %{$SpecIgenes{$MGS} || {}}){
 			 my $lcurS = @{$SpecIgenes{$MGS}{$cat}};
 			 $curS += $lcurS;
 			 if ($lcurS > 1){$morethan1 ++ ;} else {$only1++;}
@@ -1113,7 +1128,6 @@ sub add2geneList($ $ $){ #assign a gene ($sg) to a speci($k), and its COG ($c)
 	$SpecIgenes2{$k}{$c}=$sg;#set mark to block this MG in this specI...
 	return $ret;
 }
-
 
 
 
