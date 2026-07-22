@@ -98,11 +98,15 @@ export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 | `MF4gtdbtk` | GTDB-Tk-related tools |
 | `MF4semibin` | SemiBin |
 | `MF4binners` | Additional binning tools |
-| `MF4genomeface` | GenomeFace-related functionality |
+| `MF4genomeface` | Optional GenomeFace functionality; uses an external NERSC package channel |
 | `MF4scgbinner` | SCG-based binning |
 | `MF4checkm2` | CheckM2 and MetaPhlAn dependencies |
 | `MF4phylo` | Phylogenetic tools |
 | `MF4_R` | R-based helper scripts |
+
+`MF4genomeface` is best-effort because its package metadata is hosted outside
+conda-forge and Bioconda. If that external channel is unavailable, the installer
+prints a warning and continues; rerun it later to install or update GenomeFace.
 
 6. Clones a pinned `extract_gtdb_mg` revision into `gits/XGTDB/` if missing and
    verifies existing checkouts before use.

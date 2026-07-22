@@ -141,6 +141,18 @@ ensure_environment() {
 	fi
 }
 
+ensure_optional_environment() {
+	local name=$1
+	local definition=$2
+
+	if ensure_environment "$name" "$definition"; then
+		return 0
+	fi
+
+	echo "WARNING: Optional environment $name could not be installed or updated; continuing without it." >&2
+	return 0
+}
+
 database_current() {
 	local marker=$1
 	local expected=$2
@@ -195,6 +207,7 @@ else
 fi
 
 export PIP_USER=false
+export PIP_NO_CACHE_DIR=1
 
 ensure_environment MF4 "$INSTdir/MF4.yml"
 
@@ -228,7 +241,7 @@ fi
 ensure_environment MF4gtdbtk "$INSTdir/GTDBTK.yml"
 ensure_environment MF4semibin "$INSTdir/SemiBin.yml"
 ensure_environment MF4binners "$INSTdir/Binners.yml"
-ensure_environment MF4genomeface "$INSTdir/MF4genomeface.yml"
+ensure_optional_environment MF4genomeface "$INSTdir/MF4genomeface.yml"
 ensure_environment MF4scgbinner "$INSTdir/SCGBinner.yml"
 ensure_environment MF4checkm2 "$INSTdir/checkm2.yml"
 
