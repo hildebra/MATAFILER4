@@ -4,4 +4,4 @@ channels:
 - conda-forge
 #- https://repo.anaconda.com/pkgs/main
 dependencies:
-  - bioconda::semibin=2.0
+  - bioconda::semibin=2.4
