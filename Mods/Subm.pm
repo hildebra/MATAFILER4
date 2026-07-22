@@ -9,9 +9,99 @@ use Mods::WorkflowControl qw(normalise_job_dependencies);
 
 use Exporter qw(import);
 our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJobAlive
-		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs);
+		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs reconcileSlurmDependencies);
 
 my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
+
+sub _slurm_dependency_accounting_lookup {
+	my ($dependencies) = @_;
+	my @job_ids = grep { /^\d+$/ } @{$dependencies};
+	return {} unless (@job_ids);
+
+	my $job_list = join(',', @job_ids);
+	my $output = `sacct -X -n -P -j $job_list --format=JobIDRaw,State,ExitCode 2>/dev/null`;
+	return undef if ($? != 0);
+
+	my %records;
+	for my $line (split /\n/, $output) {
+		my ($job_id, $state, $exit_code) = split /\|/, $line, 4;
+		next unless (defined $job_id && $job_id =~ /^\d+$/);
+		$state = '' unless defined $state;
+		$exit_code = '' unless defined $exit_code;
+		$state =~ s/^\s+|\s+$//g;
+		$state =~ s/\+$//; # sacct truncates long state names with a trailing plus.
+		$state =~ s/\s.*$//; # For example, "CANCELLED by <uid>".
+		$exit_code =~ s/^\s+|\s+$//g;
+		$records{$job_id} = { state => uc($state), exit_code => $exit_code };
+	}
+	return \%records;
+}
+
+sub _slurm_dependency_is_known {
+	my ($job_id) = @_;
+	return 1 unless ($job_id =~ /^\d+$/);
+	system("scontrol show job $job_id >/dev/null 2>&1");
+	return $? == 0;
+}
+
+sub reconcileSlurmDependencies {
+	my ($dependencies, $after_any, $optHR) = @_;
+	$optHR ||= {};
+	my @dependencies = split /;/, normalise_job_dependencies($dependencies);
+	return ('', '') unless (@dependencies);
+
+	my $lookup = $optHR->{slurmDependencyAccountingLookup};
+	my $records = $lookup
+		? $lookup->(\@dependencies)
+		: _slurm_dependency_accounting_lookup(\@dependencies);
+	# If accounting itself is unavailable, retain the original scheduler
+	# dependencies.  This preserves the historical behaviour rather than
+	# guessing that jobs have completed.
+	return (join(';', @dependencies), '') unless defined $records;
+
+	my $known_check = $optHR->{slurmDependencyKnownCheck};
+	my (@remaining, @invalid);
+	my %terminal = map { $_ => 1 } qw(
+		BOOT_FAIL CANCELLED COMPLETED DEADLINE FAILED NODE_FAIL
+		OUT_OF_MEMORY PREEMPTED REVOKED TIMEOUT
+	);
+	for my $dependency (@dependencies) {
+		my $record = $records->{$dependency};
+		if ($record) {
+			my $state = $record->{state} || '';
+			my $exit_code = $record->{exit_code} || '';
+			if ($state eq 'COMPLETED' && $exit_code =~ /^0:0$/) {
+				# A successful prerequisite has already fulfilled both afterok and
+				# afterany.  Omitting it also avoids Slurm's MinJobAge window.
+				next;
+			}
+			if ($terminal{$state}) {
+				# Any terminal job fulfils afterany, but unsuccessful terminal jobs
+				# can never fulfil afterok.
+				next if $after_any;
+				push @invalid, "$dependency ($state, exit $exit_code)";
+				next;
+			}
+			push @remaining, $dependency;
+			next;
+		}
+
+		my $known = $known_check
+			? $known_check->($dependency)
+			: _slurm_dependency_is_known($dependency);
+		if ($known) {
+			# Accounting can lag briefly behind slurmctld for a new job.
+			push @remaining, $dependency;
+		} else {
+			push @invalid, "$dependency (unknown to both sacct and slurmctld)";
+		}
+	}
+
+	my $error = @invalid
+		? 'Cannot submit a Slurm dependency chain: '.join(', ', @invalid)
+		: '';
+	return (join(';', @remaining), $error);
+}
 
 sub _continue_after_submission_failure {
 	my ($optHR, $message) = @_;
@@ -109,6 +199,17 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	my $has_failed_dependency = grep { $_ eq $FAILED_SUBMISSION_DEPENDENCY } @jspl;
 	@jspl = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY } @jspl;
 	$waitJID = join(';', @jspl);
+	my $dependency_error = '';
+	if ($qmode eq 'slurm' && $optHR->{doSubmit} != 0 && $immSubm && @jspl) {
+		for (@jspl) { s/^\Q$rTag\E//; }
+		my $reconciled;
+		($reconciled, $dependency_error) = reconcileSlurmDependencies(
+			join(';', @jspl), $optHR->{afterAny}, $optHR,
+		);
+		@jspl = split /;/, $reconciled;
+		$waitJID = $reconciled;
+		$has_failed_dependency = 1 if $dependency_error ne '';
+	}
 
 	if ($cwd ne "" && !-d $cwd){system "mkdir -p $cwd";}
 	#if ($memory > 250001){$queues = "\"scb\"";}
@@ -237,6 +338,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	if ($optHR->{doSubmit} != 0 && $immSubm){
 		if ($has_failed_dependency) {
 			my $message = "Skipping submission for $tmpsh because an upstream submission failed";
+			$message .= ": $dependency_error" if $dependency_error ne '';
 			return ($FAILED_SUBMISSION_DEPENDENCY, $qcm)
 				if (_continue_after_submission_failure($optHR, $message));
 			die "$message\n";

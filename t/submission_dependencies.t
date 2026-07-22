@@ -7,7 +7,7 @@ use FindBin qw($Bin);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
-use Mods::Subm qw(qsubSystem qsubSystemJobAlive);
+use Mods::Subm qw(qsubSystem qsubSystemJobAlive reconcileSlurmDependencies);
 
 sub slurm_options {
 	return {
@@ -31,6 +31,45 @@ sub bash_options {
 }
 
 my $root = tempdir(CLEANUP => 1);
+
+my $dependency_checks = {
+	slurmDependencyAccountingLookup => sub {
+		return {
+			101 => { state => 'COMPLETED', exit_code => '0:0' },
+			102 => { state => 'RUNNING', exit_code => '0:0' },
+		};
+	},
+	slurmDependencyKnownCheck => sub { return $_[0] == 103; },
+};
+my ($reconciled, $dependency_error) = reconcileSlurmDependencies(
+	'101;102;103', 0, $dependency_checks,
+);
+is($reconciled, '102;103',
+	'successful completed Slurm jobs are omitted while active and newly known jobs remain');
+is($dependency_error, '', 'valid reconciled dependencies have no error');
+
+($reconciled, $dependency_error) = reconcileSlurmDependencies(
+	'104;105', 0, {
+		slurmDependencyAccountingLookup => sub {
+			return { 104 => { state => 'FAILED', exit_code => '1:0' } };
+		},
+		slurmDependencyKnownCheck => sub { return 0; },
+	},
+);
+is($reconciled, '', 'failed and genuinely unknown dependencies are not emitted');
+like($dependency_error, qr/104 \(FAILED, exit 1:0\).*105 \(unknown to both sacct and slurmctld\)/,
+	'failed and aged-out unknown dependencies produce a specific diagnostic');
+
+($reconciled, $dependency_error) = reconcileSlurmDependencies(
+	'106', 1, {
+		slurmDependencyAccountingLookup => sub {
+			return { 106 => { state => 'CANCELLED', exit_code => '0:15' } };
+		},
+	},
+);
+is($reconciled, '', 'a terminal unsuccessful job already fulfils afterany');
+is($dependency_error, '', 'afterany accepts an unsuccessful terminal dependency');
+
 my $script = File::Spec->catfile($root, 'short-dependency.sh');
 my $options = slurm_options();
 my ($job, $command) = qsubSystem(
