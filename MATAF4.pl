@@ -116,7 +116,11 @@ sub createConsSNPandSVs;
 #       Retained-lock windows get a bounded retry when at least one but fewer than
 #       1% of their samples or fewer than 3 user jobs remain active.
 #       Loop specifications and incompatible rewrite modes fail early.
-my $MATFILER_ver = 4.11;
+#4.12: 22.7.26: reconcile aged Slurm dependencies through accounting after MinJobAge,
+#       omitting successfully completed jobs while reporting failed or unknown jobs.
+#       Track fresh submission times to avoid routine accounting queries, and remove
+#       unnecessary cross-sample ContigStats-to-ContigStats dependencies.
+my $MATFILER_ver = 4.12;
 
 #----------------- defaults ----------------- 
 

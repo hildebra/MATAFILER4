@@ -234,13 +234,12 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 			@jspl = split /;/, $reconciled;
 			$waitJID = $reconciled;
 			$has_failed_dependency = 1 if $dependency_error ne '';
-			# A live dependency first encountered from another submission context
-			# cannot age out until at least MinJobAge after it subsequently ends.
+			# A dependency confirmed as live cannot age out until at least
+			# MinJobAge after it subsequently ends, so defer its next lookup.
 			my $now = time;
 			my $submitted_at = $optHR->{slurmDependencySubmittedAt} ||= {};
 			for my $dependency (@jspl) {
-				$submitted_at->{$dependency} = $now
-					unless exists $submitted_at->{$dependency};
+				$submitted_at->{$dependency} = $now;
 			}
 		}
 	}
