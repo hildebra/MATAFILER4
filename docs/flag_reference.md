@@ -9,7 +9,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 
 | Script | Version in uploaded source | Role |
 |---|---:|---|
-| `MATAF4.pl` | `4.04` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
+| `MATAF4.pl` | `4.11` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.28` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
 | `buildTree5.pl` | `5.06` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
@@ -167,6 +167,16 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-rmDuplicates` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-mappingCores` | integer | `8` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-mapperFilterIll` | string | `"0.05 0.75 20 3"` | stable | Maximum NM edit rate, minimum query coverage, minimum mapping quality, and minimum clipping at both ends (0 disables clipping filter). |
+| `-mapperFilterHybridIll` | string | `"0.03 0.90 40 5"` | advanced | Stricter Illumina BAM filter used while deriving coverage for hybrid preassemblies: maximum edit rate, minimum query coverage, minimum mapping quality and minimum clipping at both ends. |
+| `-hybridMinMapQ` | integer | `40` | advanced | Minimum mapping quality passed to `samtools depth` for hybrid-preassembly coverage. |
+| `-hybridMinBaseQ` | integer | `20` | advanced | Minimum base quality passed to `samtools depth` for hybrid-preassembly coverage. |
+| `-breakpointDepth` | float | `0.10` | advanced | Relative coverage threshold used to identify low-depth assembly breakpoints for hybrid read simulation. |
+| `-breakpointMinLength` | integer | `100` | advanced | Minimum length of a low-depth region reported as a hybrid-assembly breakpoint. |
+| `-breakpointSmoothGap` | integer | `100` | advanced | Maximum gap joined while smoothing adjacent low-depth breakpoint regions. |
+| `-breakpointFlankLength` | integer | `500` | advanced | Number of bases inspected on each side of a candidate breakpoint. |
+| `-breakpointMinFlankDepth` | float | `1` | advanced | Minimum flank depth required when accepting a candidate breakpoint. |
+| `-breakpointMaxFlankFraction` | float | `0.10` | advanced | Maximum low-depth fraction allowed within breakpoint flanks. |
+| `-hybridSyntheticMaxDepth` | float | `20` | advanced | Cap on synthetic read depth generated from each hybrid-preassembly package. |
 | `-mapperFilterPB` | string | `"0.05 0.5 30 0"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-mapperFilterONT` | string | `"0.15 0.5 10 0"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-mapSaveCRAM` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |

@@ -16,6 +16,7 @@ use Cwd 'abs_path';
 use POSIX;
 use Getopt::Long qw( GetOptions );
 use List::Util qw(max sum);
+use Text::Wrap qw(wrap);
 use Text::ParseWords qw(shellwords);
 
 use vars qw($CONFIG_FILE);
@@ -196,8 +197,14 @@ my %stones = (preAsmDone => "preassmblDone.sto", asmDone => "ass.done.sto");
 #fixed dirs for specific set of samples
 my %preDIRs = (dir_ContigStats => "/assemblies/metag/ContigStats/",dir2MePhl => "pseudoGC/Phylo/MP2/",dir2RiboF => "pseudoGC/Phylo/RiboFind/");
 
+# Show help before initialising defaults or checking the installation.  Apart
+# from keeping the output clean, this makes the option reference available on
+# systems that have not been configured for a pipeline run yet.
+my $helpRequested = grep { /^(?:--?help|-h|-\?)$/ } @ARGV;
+
 #say hello to user 
 announce_MF4();
+help() if ($helpRequested);
 setDefaultMFconfig();
 getCmdLineOptions;
 $MFconfig{inspectState} = 1 if ($MFconfig{planState});
@@ -8875,9 +8882,95 @@ sub setDefaultMFconfig{
 
 
 sub help {
-	print "Help for MG-TK version $MATFILER_ver\n";
-	print "TODO :( ref to README.md for now..\n\n";
+	my $scriptPath = abs_path(__FILE__) || __FILE__;
+	my $reference = dirname($scriptPath)."/docs/flag_reference.md";
+	my @sections;
+	my $currentSection;
+
+	if (open(my $referenceFH, '<', $reference)) {
+		my $inMataf4Reference = 0;
+		while (my $line = <$referenceFH>) {
+			if ($line =~ /^##\s+MATAF4\.pl\s*$/i) {
+				$inMataf4Reference = 1;
+				next;
+			}
+			last if ($inMataf4Reference
+				&& $line =~ /^##\s+Flag comparison against previous manual\.md\s*$/i);
+			next unless ($inMataf4Reference);
+
+			if ($line =~ /^##\s+(.+?)\s*$/) {
+				$currentSection = { title => $1, options => [] };
+				push @sections, $currentSection;
+				next;
+			}
+			next unless ($line =~ /^\|\s*`-/);
+
+			my @cells = split(/\|/, $line, -1);
+			next unless (@cells >= 7 && defined($currentSection));
+			my ($aliases, $type, $default, $status, $description)
+				= map { _plainHelpCell($_) } @cells[1..5];
+			push @{$currentSection->{options}}, {
+				aliases => $aliases,
+				type => $type,
+				default => $default,
+				status => $status,
+				description => $description,
+			};
+		}
+		close($referenceFH);
+	}
+
+	print "\nMATAFILER4 command-line help (version $MATFILER_ver)\n";
+	print "Usage: MATAF4.pl -map <mapping-file> [options]\n";
+	print "       MATAF4.pl -help | -h | -?\n\n";
+	print "Options may be written with one or two leading dashes.\n";
+
+	if (@sections && grep { @{$_->{options}} } @sections) {
+		print "The complete option list below is read from docs/flag_reference.md.\n";
+		foreach my $section (@sections) {
+			next unless (@{$section->{options}});
+			print "\n$section->{title}:\n";
+			foreach my $option (@{$section->{options}}) {
+				_printHelpOption($option);
+			}
+		}
+		print "\nFull reference: $reference\n";
+	} else {
+		print "\nUnable to read the MATAF4.pl option tables from:\n  $reference\n";
+		print "See that file for the complete flag reference.\n";
+	}
+	print "\n";
 	exit(0);
+}
+
+sub _plainHelpCell {
+	my ($text) = @_;
+	$text = "" unless (defined($text));
+	$text =~ s/^\s+|\s+$//g;
+	$text =~ s/`//g;
+	$text =~ s/\*\*//g;
+	$text =~ s/\[([^\]]+)\]\([^\)]+\)/$1/g;
+	return $text;
+}
+
+sub _printHelpOption {
+	my ($option) = @_;
+	my $signature = $option->{aliases};
+	$signature .= " <$option->{type}>"
+		if ($option->{type} ne "" && lc($option->{type}) ne "flag");
+
+	my $details = $option->{description};
+	my @metadata;
+	push @metadata, "default: $option->{default}" if ($option->{default} ne "");
+	push @metadata, "status: $option->{status}"
+		if ($option->{status} ne "" && lc($option->{status}) ne "stable");
+	$details .= " " if ($details ne "" && @metadata);
+	$details .= "(".join("; ", @metadata).")" if (@metadata);
+
+	local $Text::Wrap::columns = 100;
+	local $Text::Wrap::huge = 'overflow';
+	print "  $signature\n";
+	print wrap("      ", "      ", $details)."\n" if ($details ne "");
 }
 
 
