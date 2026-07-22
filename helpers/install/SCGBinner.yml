@@ -20,8 +20,8 @@ dependencies:
   - bedtools
   - pip
   - pip:
-    - --extra-index-url https://download.pytorch.org/whl/cu118
+    - --index-url https://download.pytorch.org/whl/cu118
     - torch==2.0.0
     - torchvision==0.15.1
     - torchaudio==2.0.1
-    - git+https://github.com/htaohan/SCGBinner.git
+    - git+https://github.com/htaohan/SCGBinner.git@v1.0.1

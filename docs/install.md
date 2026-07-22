@@ -44,6 +44,19 @@ bash helpers/install/installer.sh
 
 The first installation can take a long time because several environments and databases are created or downloaded.
 
+Legacy `MGTK*` environments are reported but left untouched by default. Remove them
+explicitly only after reviewing their contents:
+
+```bash
+bash helpers/install/installer.sh --remove-legacy-envs
+```
+
+To force a fresh CheckM2 and MetaPhlAn database download:
+
+```bash
+bash helpers/install/installer.sh --refresh-databases
+```
+
 After the installer finishes, reload your shell configuration or start a new shell:
 
 ```bash
@@ -75,7 +88,8 @@ export MF4DIR=/path/to/MATAFILER4/
 export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 ```
 
-4. Removes old legacy `MGTK*` environments if present.
+4. Reports old legacy `MGTK*` environments. They are removed only when
+   `--remove-legacy-envs` is supplied.
 5. Creates or updates the MATAFILER4 conda environments, including:
 
 | Environment | Main purpose |
@@ -90,11 +104,16 @@ export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 | `MF4phylo` | Phylogenetic tools |
 | `MF4_R` | R-based helper scripts |
 
-6. Clones `extract_gtdb_mg` into `gits/XGTDB/` if missing.
+6. Clones a pinned `extract_gtdb_mg` revision into `gits/XGTDB/` if missing and
+   verifies existing checkouts before use.
 7. Downloads selected databases where possible, including:
    - the `hostile` human reference index `human-t2t-hla`, if `hostile` is available
    - the CheckM2 database
    - the MetaPhlAn database
+
+Successful CheckM2 and MetaPhlAn downloads receive tool-version marker files.
+Missing or mismatched markers cause the installer to download the database again;
+`--refresh-databases` forces this behavior.
 
 ## Configuration after installation
 

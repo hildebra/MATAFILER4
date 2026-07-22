@@ -5,7 +5,7 @@ channels:
 dependencies:
 
 #R dependencies
-  - r-base=4.4
+  - r-base=4.6.1
   - r-devtools>=2.4.5
   
   - conda-forge::r-biocmanager>=1.30
@@ -17,7 +17,6 @@ dependencies:
   - r-tidytree>=0.4
   - r-phangorn >= 2.11.1
   - r-ggplot2>=3.5
-  - r-devtools>=2.4.5
   - r-getopt>=1.20
   - conda-forge::r-cowplot>=1.2.0
   - r-readr>=2.1

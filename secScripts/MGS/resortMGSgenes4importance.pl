@@ -4,7 +4,6 @@
 use warnings;
 use strict;
 use Mods::geneCat qw(readGene2tax createGene2MGS);
-use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(gzipopen readFasta writeFasta systemW);
 use Mods::TamocFunc qw(readTabbed);
 use Mods::math qw(meanArray medianArray);
@@ -17,12 +16,12 @@ sub evalCurMGS;
 #v0.12: 11.2.24: adopted to weighted multiBin scores; more subs to make script more modifiable
 #v0.13: flush the final MGS and handle marker-free groups safely
 #v0.14: count distinct samples, use multicopy evidence, and make ranking deterministic
-my $version = 0.14;
+#v0.15: trim marker identifiers and remove an unused external-tool config dependency
+my $version = 0.15;
 
 
 # set up some base variables
 die "Usage: $0 GC-dir MGS-file GTDB|FMG mode [cluster-ID]\n" unless @ARGV == 4 || @ARGV == 5;
-my $rareBin = getProgPaths("rare");
 my $GCd = $ARGV[0];
 my $MGSfile = $ARGV[1];
 my $useGTDBmg = $ARGV[2];
@@ -70,9 +69,17 @@ my %MGset=();
 open I,"<$inMGFile" or die "resortMGSgenes4importance.pl: Couldn't open $inMGFile\n"; 
 my $totMGSgenes=0;
 while (<I>){
-	my @spl1 = split /\t/;
+	chomp;
+	s/\r$//;
+	my @spl1 = split /\t/, $_, -1;
+	next unless defined($spl1[2]) && length($spl1[2]);
 	my @spl2 = split /,/,$spl1[2];
-	foreach my $gene (@spl2){$MGset{$gene} = 1;$totMGSgenes++;}
+	foreach my $gene (@spl2){
+		$gene =~ s/^\s+|\s+$//g;
+		next unless length($gene);
+		$MGset{$gene} = 1;
+		$totMGSgenes++;
+	}
 }
 close I;
 print STDERR "Loaded $totMGSgenes $useGTDBmg marker genes from $inMGFile\n";
@@ -230,8 +237,6 @@ sub evalCurMGS{
 	$MGScnt++;
 	return $retStr;
 }
-
-
 
 
 

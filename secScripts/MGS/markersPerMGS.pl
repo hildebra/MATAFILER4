@@ -7,6 +7,7 @@ use Getopt::Long qw( GetOptions );
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(systemW gzipopen);
 use Mods::Binning qw (readMGSrevRed);
+use File::Path qw(make_path);
 
 
 my $MAGrep = ""; my $GCdir = "";
@@ -42,7 +43,7 @@ my $outFile2 = "$outDir/marker2MGS.LCA.txt";
 my $primaryClusF = "$GC_bin_dir/$Binner.clusters.core"; 
 my $matrOutDir = "$outDir/Abundance/";
 $MGStaxF = "$outDir/GTDBTK.tax" if ($MGStaxF eq "");
-system "mkdir -p $matrOutDir" unless (-d $matrOutDir);
+make_path($matrOutDir);
 
 
 if ($MAGrep eq ""){$MAGrep = "$GC_bin_dir/LOGandSUB/MAGvsGC.txt.gz"; print "Inferring MAGMGS file at $MAGrep\n";}
@@ -114,7 +115,10 @@ foreach my $MGS (@MGSids){
 		foreach (@genes){ 
 			#needs to control for what is found in reference MGS clustering to attain clean profile..
 			if (exists($oriG2MGS{$_}{$MGS})){
-				push(@{$gene2MGS{$_}}, $MGS);  $geneAss2MGS++;
+				unless (exists($gene2MGS{$_}{$MGS})) {
+					$gene2MGS{$_}{$MGS} = 1;
+					$geneAss2MGS++;
+				}
 			} else {
 				$geneDirtyMGS{$_} = 1;
 				$geneNotAss2MGS++;
@@ -140,7 +144,7 @@ for (my $i=0; $i < (@MGcats); $i++){
 }
 close Ox;
 
-@cntPerCat = sort(@cntPerCat);
+@cntPerCat = sort { $a <=> $b } @cntPerCat;
 for (my $i=0; $i < (@MGcats); $i++){ 
 	print int(10*$cntPerCat[$i])/10 . " ";
 }
@@ -199,7 +203,10 @@ my @mgkeys = sort(keys %LCA);
 my %newMGStax;
 foreach my $mark (@mgkeys){
 	if (exists($gene2MGS{$mark})){
-		my @MGSs = @{$gene2MGS{$mark}};
+		my @MGSs = sort keys %{$gene2MGS{$mark}};
+		# Shared markers are neither independent abundance evidence nor safe
+		# evidence for replacing an unresolved MGS taxonomy.
+		next if @MGSs > 1;
 		foreach my $MGSl (@MGSs){
 			$newMGStax{$MGSl}{$LCA{$mark}}++;
 		}
@@ -252,8 +259,14 @@ print O2 "geneID\t$LCAhead;MGS\n";
 foreach my $mark (@mgkeys){
 	$wrLCA++;
 	if (exists($gene2MGS{$mark})){
-		my @MGSs = @{$gene2MGS{$mark}};
-		$ambGenes ++ if (@MGSs > 1);
+		my @MGSs = sort keys %{$gene2MGS{$mark}};
+		# A shared marker cannot provide independent abundance evidence for more
+		# than one MGS.  Excluding it avoids counting the same catalog profile in
+		# every candidate MGS while retaining it in marker2MGS.txt for diagnostics.
+		if (@MGSs > 1) {
+			$ambGenes++;
+			next;
+		}
 		foreach my $MGSl (@MGSs){
 			die "Couldn't find MGS tax for $MGSl!\n" unless (exists($MGStax{$MGSl}));
 			print O $mark."\t".$MGStax{$MGSl}.";$MGSl\n";

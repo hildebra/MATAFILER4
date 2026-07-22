@@ -115,6 +115,10 @@ like($between_source, qr/open I,"<\$GCd\/FMG\.subset\.cats"/,
 	'between-MGS phylogeny intentionally remains tied to the FMG marker set');
 like($between_source, qr/if \(\$mgs_with_fmg < 3\).*?SKIPPED=too_few_marker_bearing_MGS/s,
 	'between-MGS phylogeny reports a successful cardinality skip before invoking a tree builder');
+like($between_source, qr/if \(!-s \$treeFile\)/,
+	'between-MGS phylogeny rebuilds an empty tree instead of treating it as complete');
+like($between_source, qr/test -s \$treeFile.*?test -s \$treePdf/s,
+	'between-MGS tree jobs validate both tree and visualization outputs');
 my $strain_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 like($strain_source, qr/my \$tree_sample_separator = quotemeta\(\$SaSe\)/,
 	'within-MGS tree command escapes the pipe sample separator as a regular expression');
@@ -133,20 +137,72 @@ like($strain2_source, qr/my \$MGSd = dirname\(\$FMGpD\);/,
 	'treeWAS receives a trailing-slash-independent parent directory');
 like($strain2_source, qr/split \/\\Q\$SaSe\\E\/, \$gn, 2/,
 	'strain postprocessing splits compound tree identifiers at the first separator');
+like($strain2_source,
+	qr/if \(\$rewriteRanalysis\).*?if \(\$doSubmit\) \{.*?remove_tree\(\$within\).*?Dry run: existing strain2 results and checkpoints will be preserved/s,
+	'a strain postprocessing dry run does not perform global rewrite cleanup');
+like($strain2_source, qr/if \(\$doSubmit && -d \$destD\) \{\s+unlink/s,
+	'a strain postprocessing dry run preserves incomplete per-MGS output');
+like($strain2_source, qr/if \(!\$rewriteRanalysis && -s \$analysisReport/,
+	'a dry rewrite still prepares jobs for previously completed analyses');
+like($strain2_source,
+	qr/rm -f "\.join\(" ", map \{ shellQuote\(\$_\) \} \(\$analysisLog, \$analysisReport, \$analysisStone\)\)/,
+	'an attempted R-analysis job clears only its own stale completion files at execution');
+like($strain2_source,
+	qr/my \$wrHead=1;.*?\$analysisAttempted\{\$d\}.*?\$wrHead=0/s,
+	'the first newly attempted R analysis owns the summary header');
+like($strain2_source,
+	qr/existingSummaryHeader.*?headerOwner.*?next if \$summaryHeader ne '' && \$line eq \$summaryHeader/s,
+	'incremental summary assembly retains one canonical header and removes duplicates');
+unlike($strain2_source, qr/\$wrHead=1 if \( \$cnt == 0\)/,
+	'R-analysis header output is no longer tied to the first directory index');
+like($strain2_source,
+	qr/test -s "\.shellQuote\(\$treewasOutfile\).*?test -s "\.shellQuote\(\$summaryOutfile\).*?touch "\.shellQuote\(\$treeWasStone\)/s,
+	'treeWAS validates both result files before publishing its checkpoint');
+like($strain2_source,
+	qr/rm -f "\.join\(" ", map \{ shellQuote\(\$_\) \}.*?\$treewasOutfile, \$summaryOutfile, \$treeWasStone/s,
+	'treeWAS removes stale result files before validating a fresh attempt');
+like($strain2_source,
+	qr/my \(\$networkDep, \$networkStone\) = strainNetwork\(\);.*?my \(\$treeWasDep, \$treeWasStone\) = treeWas\(\);.*?qsubSystemJobAlive\(\\\@postAnalysisJobs, \$QSBoptHR\).*?missingPostAnalysisStones/s,
+	'strain postprocessing waits for downstream jobs and validates their checkpoints');
+like($strain2_source, qr/return \(\$dep, \$networkStone\).*?return \(\$dep, \$treeWasStone\)/s,
+	'network and treeWAS helpers return dependencies and checkpoint paths');
 my $resort_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'resortMGSgenes4importance.pl'));
 like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 	'gene-priority resorting flushes its final MGS at EOF');
 like($resort_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
 	'gene-priority resorting uses the propagated catalog identity');
 my $mgs_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.33;/,
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.34;/,
 	'MGS sparse-run hardening increments the pipeline version');
+like($mgs_source, qr/my \$useGTDBmg = "GTDB";/,
+	'MGS uses its documented GTDB marker default');
+like($mgs_source,
+	qr/%checkpointParameters = \(.*?marker_set\s+=> \$useGTDBmg.*?binner\s+=> \$binSpeciesMG.*?quality_checker/s,
+	'MGS checkpoints fingerprint marker-set, binner, and quality-checker choices');
+like($mgs_source, qr/return 0 unless defined\(\$file\) && -s \$file;.*?checkpoint_valid/s,
+	'MGS does not accept provenance-free empty checkpoint stones');
 like($mgs_source, qr/"clusterID=i" => \\\$clusterID/,
 	'MGS accepts a gene-catalog cluster identity');
 like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -cores \$numCore/,
 	'MGS passes cluster identity to MAG clustering');
 like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -maxCores \$canCore/,
 	'MGS passes cluster identity to strain analysis');
+like($mgs_source,
+	qr/\$cmdSI2 = "\$MMLscr -GCd \$GCd -cores \$numCore -MGset \$useGTDBmg -Binner \$BinnerShrt -binD \$outD/,
+	'MGS forwards its selected marker set and configured small-core count to marker abundance');
+like($mgs_source,
+	qr/qsubSystem\(\$logDir\."\/abundMGS_core\.sh",\$cmdSI2,\$numCore,"100G"/,
+	'marker abundance retains a fixed total-memory request as core count changes');
+like($mgs_source,
+	qr/qsubSystem\(\$logDir\."\/abundMGS\.sh",\$cmdSI,1,/,
+	'MGS consistently runs specI abundance through the configured submission backend');
+unlike($mgs_source, qr/my \@files = glob \("\$GCd\/FMG\/tax\/\*tmp\.m8"\)/,
+	'MGS abundance scheduling is not gated by hard-coded FMG temporary alignments');
+unlike($mgs_source, qr/systemW\s+\$cmdSI\b/,
+	'MGS does not execute the expensive specI abundance command directly on the launcher');
+like($mgs_source,
+	qr/elsif \(!-s "\$outDphylo\/phylo\/IQtree_allsites\.treefile" \|\| !-s "\$outD\/between_phylo\/phylo\/IQtree_allsites\.pdf"\)/,
+	'MGS rebuilds missing or empty between-MGS tree products');
 unlike($mgs_source, qr/die "Kraken MGS taxonomy stage incomplete/,
 	'missing optional Kraken taxonomy no longer aborts MGS');
 like($mgs_source, qr/warn "Optional Kraken MGS taxonomy stage incomplete; continuing without Kraken-derived MGS taxonomy/,
@@ -181,8 +237,36 @@ like($mgs_source, qr/Activating the only available weighted MGS assignments.*?\$
 	'an already-activated weighted-only result is not moved a second time');
 like($mgs_source, qr/if \(\$coreMGSCount < 3\).*?Skipping between-MGS phylogeny/s,
 	'MGS does not launch a phylogeny with fewer than three taxa');
-like($mgs_source, qr/\$ph2Cmd \.= "-MGSphylo \$iniTree " if -s \$iniTree/,
-	'strain analysis can run without a nonexistent sparse between-MGS tree');
+like($mgs_source, qr/\$ph2Cmd \.= "-MGSphylo \$iniTree " if -s \$iniTree \|\| \$treedep ne ""/,
+	'strain analysis receives an existing or pending between-MGS tree but tolerates a sparse skip');
+like($mgs_source, qr/make_path\(\$binD, \$binDctg, \$binDctgFam\)/,
+	'MGS creates genome output directories without shell interpolation');
+
+my $marker_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'markersPerMGS.pl'));
+like($marker_source, qr/use File::Path qw\(make_path\)/,
+	'marker abundance uses the filesystem API to create its output directory');
+like($marker_source, qr/\@cntPerCat = sort \{ \$a <=> \$b \} \@cntPerCat/,
+	'marker occurrence statistics are sorted numerically');
+like($marker_source, qr/\$gene2MGS\{\$_\}\{\$MGS\} = 1/,
+	'marker-to-MGS links are deduplicated before ambiguity filtering');
+like($marker_source, qr/if \(\@MGSs > 1\) \{\s+\$ambGenes\+\+;\s+next;/s,
+	'ambiguous markers are excluded instead of counted for every candidate MGS');
+like($marker_source, qr/my \@MGSs = sort keys %\{\$gene2MGS\{\$mark\}\};\s+# Shared markers.*?next if \@MGSs > 1;/s,
+	'ambiguous markers are also excluded from taxonomy correction');
+
+my $cluster_wrapper_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'clusterMAGs.pl'));
+like($cluster_wrapper_source, qr/my \$mapF="";my \$GCd = \$inD;/,
+	'clusterMAGs initializes its gene-catalog directory for either map layout');
+like($cluster_wrapper_source, qr/else\{\s+\$mapF = "\$inD\/LOGandSUB\/inmap\.txt";/s,
+	'clusterMAGs has a reachable inmap fallback when GCmaps.inf is absent');
+unlike($cluster_wrapper_source, qr/else\{\s+die "can't find indir \$inD/s,
+	'clusterMAGs no longer aborts before its inmap fallback');
+like($cluster_wrapper_source,
+	qr/if \(\$logDir eq ""\)\{\$logDir = \$outD\."LOGandSUB\/";\}.*?make_path\(\$outD, \$logDir\)/s,
+	'clusterMAGs defaults and creates its output and log directories');
+like($cluster_wrapper_source,
+	qr/if \(\$redo && -e .*?\) \{\s+unlink .*?or die/s,
+	'clusterMAGs redo removes its prior cluster with checked filesystem operations');
 unlike($mgs_source, qr/compl\.incompl\.95\.(?:fna|prot)/,
 	'MGS has no active catalog path pinned to identity 95');
 like($strain_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,

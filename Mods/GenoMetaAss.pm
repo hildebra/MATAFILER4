@@ -468,8 +468,8 @@ sub readFasta{
 		my $hr = $_[3]; %subs = %{$hr};
 		$doSubs = 1;
 	}
-	my $Hseq = {}; 
-	
+	my $Hseq = {};
+
 	my @files = glob $fils;
 	#if (-z $fil){ return \%Hseq;}
 	foreach my $fil (@files){
@@ -480,41 +480,43 @@ sub readFasta{
 		my ($FAS ,$status) = gzipopen($fil,"fasta file to readFasta",0);
 		if (@files == 1 && $status == 0){die "Can't open fasta file $fil\n";}
 		next if ($status==0);
-		my $temp; my $line; 
-		my $trHe =<$FAS>;  my $srcHe = "";
-		if (!defined $trHe){#could be empty file
+		my $first_line = <$FAS>;
+		if (!defined $first_line){#could be empty file
 			print "Empty:: $fil $status\n";
-			close $FAS;return $Hseq;
+			close $FAS;
+			next;
 		}
-		$trHe = substr($trHe,1);
-		if ($cutHd) {$trHe =~ s/$sepChr.*//;} 
-		elsif ($doSubs) {$srcHe = $trHe;$srcHe =~ s/$sepChr.*//;}
-		chomp ($trHe); $trHe = "".$trHe;
-		while($line = <$FAS>){
+		die "Malformed FASTA file $fil: first record has no header\n"
+			unless $first_line =~ /^>/;
+
+		my $prepare_header = sub {
+			my ($line) = @_;
+			chomp $line;
+			my $full_header = substr($line, 1);
+			my $short_header = $full_header;
+			$short_header =~ s/$sepChr.*//;
+			my $stored_header = $cutHd ? $short_header : $full_header;
+			return ($stored_header, $short_header);
+		};
+		my ($trHe, $srcHe) = $prepare_header->($first_line);
+		my $temp = "";
+		my $store_record = sub {
+			return if $doSubs && !exists($subs{$trHe}) && !exists($subs{$srcHe});
+			$Hseq->{$trHe} = $temp;
+		};
+
+		while(my $line = <$FAS>){
 			chomp($line);
 			if ($line =~ m/^>/){
-				#check if fasta within set..
-				if ($doSubs ){
-					if ( exists($subs{$trHe}) || ($srcHe ne "" && exists($subs{$srcHe})) ){
-						$Hseq->{$trHe} = $temp ;
-					}
-				} else { #a lot faster..
-					#finish old fas`
-					$Hseq->{$trHe} = $temp;
-				}				
-				#prep new entry
-				$trHe = substr($line,1);# $trHe =~ s/;size=\d+;.*//; 
-				if ($cutHd) {$trHe =~ s/$sepChr.*//g;}
-				chomp $trHe;
-				$trHe = "".$trHe; #just to ensure it's a string
+				$store_record->();
+				($trHe, $srcHe) = $prepare_header->($line);
 				$temp = "";
-				#die $trHe."\n$sepChr\n";
 				next;
 			}
 			$temp .= ($line);
 		}
-		$Hseq->{$trHe} = $temp;
-		close ($FAS);
+		$store_record->();
+		close ($FAS) or die "Cannot close FASTA file $fil: $!\n";
 	}
 	return $Hseq;
 }

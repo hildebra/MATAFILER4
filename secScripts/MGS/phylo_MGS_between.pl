@@ -225,7 +225,7 @@ print "reading FMG ref genes..";
 my $hr = readFasta("$GCd/FMG/COG*.faa"); %FAAfmg = (%FAAfmg,%{$hr});
 print "done\n";
 
-system "mkdir -p $btout" unless (-d $btout);
+make_path($btout) unless -d $btout;
 
 #open ON,">$btout/all.fna"; 
 open OA,">$btout/all.faa"  or die "Can't open faa out file $btout/all.faa\n"; 
@@ -251,7 +251,7 @@ $QSBoptHR->{useLongQueue} = 1;
 my $treeFile = "$btout/phylo/IQtree_allsites.treefile";
 
 my $cmd = "";
-if (!-e $treeFile){
+if (!-s $treeFile){
 	print "Creating phylogeny for found specI's//\n";
 	$cmd .= "$bts  -aa  $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats -outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores  -AAtree 1 -bootstrap 5000 -NTfiltCount 300 -NTfilt 0.1 -NTfiltPerGene 0.5 -minOverlapMSA 2 -MSAprogram $MSAprog -AutoModel 0 -iqFast 0 \n";
 } else {
@@ -259,11 +259,14 @@ if (!-e $treeFile){
 	$cmd .= "#$bts  -aa  $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats -outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores  -AAtree 1 -bootstrap 5000 -NTfiltCount 300 -NTfilt 0.1 -NTfiltPerGene 0.5 -minOverlapMSA 2 -MSAprogram $MSAprog -AutoModel 0 -iqFast 0 \n";
 }
 $cmd .= "\n\n\n$xtraMessageInSH\n" if ($xtraMessageInSH ne "");
+$cmd .= "test -s $treeFile\n";
 
 #add script for phylo visualization
 $cmd .= "\n#visualize the newly created phylogeny\n";
 my $abundMatrix = $MGSfile;  $abundMatrix =~ s/\/[^\/]+$/\//; $abundMatrix .= "Annotation/Abundance/MGS.matL7.txt";
-$cmd .= "$vizTree $abundMatrix $treeFile $btout/phylo/IQtree_allsites.pdf \n";
+my $treePdf = "$btout/phylo/IQtree_allsites.pdf";
+$cmd .= "$vizTree $abundMatrix $treeFile $treePdf \n";
+$cmd .= "test -s $treePdf\n";
 
 #handle submission
 my $scrNm = "btwFMGtree";
