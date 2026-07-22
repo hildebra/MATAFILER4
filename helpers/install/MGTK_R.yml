@@ -5,7 +5,8 @@ channels:
 dependencies:
 
 #R dependencies
-  - r-base=4.6.1
+  # R 4.4 is the newest ABI series with builds for the complete package set.
+  - r-base=4.4
   - r-devtools>=2.4.5
   
   - conda-forge::r-biocmanager>=1.30
