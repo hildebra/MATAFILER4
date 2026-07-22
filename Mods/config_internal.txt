@@ -221,7 +221,7 @@ whokaryote	whokaryote.py	env:MF4whokar
 
 ## SNPs / tree building - not public currently ##
 #not required unless strain resolved metag is used. Most of this still not needed.. 
-iqtree	iqtree2	env:MF4phylo
+iqtree	$(command -v iqtree3 || command -v iqtree2)	env:MF4phylo
 #vcfLib_dir	[BINDir]/vcflib/bin/
 pal2nal	pal2nal.pl	env:MF4phylo
 vsearch	vsearch

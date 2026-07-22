@@ -18,6 +18,18 @@ use Mods::Subm qw(qsubSystem2);
 my $root = tempdir(CLEANUP => 1);
 $root =~ s{\\}{/}g;
 
+my $internal_config_path = File::Spec->catfile($Bin, '..', 'Mods', 'config_internal.txt');
+open my $internal_config_fh, '<', $internal_config_path or die $!;
+my $internal_config = do { local $/; <$internal_config_fh> };
+close $internal_config_fh;
+my $iqtree_selector = 'iqtree' . "\t" .
+	'$(command -v iqtree3 || command -v iqtree2)' . "\t" . 'env:MF4phylo';
+like(
+	$internal_config,
+	qr/^\Q$iqtree_selector\E$/m,
+	'IQ-TREE configuration prefers iqtree3 and falls back to iqtree2',
+);
+
 my @p1 = ('a.1.fq', 'b.1.fq', 'c.1.fq');
 my @p2 = ('a.2.fq', 'b.2.fq', 'c.2.fq');
 my @singletons = ('single.a.fq', 'single.b.fq');
