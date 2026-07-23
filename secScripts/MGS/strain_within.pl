@@ -43,6 +43,7 @@ sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
 sub evalFileStatus;
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
+sub treeInputPrecopyCommand;
 
 my %limitedWarningStats;
 my %limitedNoticeStats;
@@ -124,7 +125,8 @@ END {
 #.38: validate paired consensus inputs, split-job logs, scheduler state, and destructive paths
 #.39: make split retries generation-safe, merges atomic, and compressed outgroup updates reliable
 #.40: bound repetitive data warnings, summarize suppressed diagnostics, and clarify progress output
-my $version = 0.40;
+#.41: make generated tree-input publication safe to rerun after scratch files have already moved
+my $version = 0.41;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -676,7 +678,9 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
 	my $preCmd = "";
 	if ($needsCopy){
-		$preCmd = "\necho \"precopy from tmp to HPC dir\"\n$pigzBin -p $numCoreL $tmpD/*\nmv $tmpD/* $outD2\n\n";
+		$preCmd = treeInputPrecopyCommand(
+			$tmpD, $outD2, $numCoreL, $FNAtf, $FAAtf, $CATtf
+		);
 	}
 
 	if ($multiSmpl>2){
@@ -1894,6 +1898,50 @@ sub shellQuote {
 	$value = "" unless defined $value;
 	$value =~ s/'/'"'"'/g;
 	return "'$value'";
+}
+
+sub treeInputPrecopyCommand {
+	my ($staging_dir, $output_dir, $cores, @required_inputs) = @_;
+	die "Cannot create a tree-input publication command without required inputs\n"
+		unless @required_inputs;
+
+	my $staging_q = shellQuote($staging_dir);
+	my $output_q = shellQuote($output_dir);
+	my $pigz_q = shellQuote($pigzBin);
+	my $ready_test = join(" && ", map {
+		"(test -s ".shellQuote($_)." || test -s ".shellQuote("$_.gz").")"
+	} @required_inputs);
+	my $required_array = join(" ", map { shellQuote($_) } @required_inputs);
+
+	my $command = "\n# Publish staged inputs once; a retry may find them already in persistent storage.\n";
+	$command .= "staged_inputs=()\n";
+	$command .= "if [[ -d $staging_q ]]; then\n";
+	$command .= "  mapfile -d '' -t staged_inputs < <(find $staging_q -mindepth 1 -maxdepth 1 -type f -print0)\n";
+	$command .= "fi\n";
+	$command .= 'if (( ${#staged_inputs[@]} )); then' . "\n";
+	$command .= "  echo \"Publishing staged tree inputs to persistent storage\"\n";
+	$command .= '  for staged in "${staged_inputs[@]}"; do' . "\n";
+	$command .= '    if [[ "$staged" != *.gz ]]; then' . "\n";
+	$command .= "      $pigz_q -p $cores -- " . '"$staged"' . "\n";
+	$command .= "    fi\n";
+	$command .= "  done\n";
+	$command .= "  mapfile -d '' -t staged_inputs < <(find $staging_q -mindepth 1 -maxdepth 1 -type f -print0)\n";
+	$command .= '  mv -- "${staged_inputs[@]}" ' . "$output_q\n";
+	$command .= "else\n";
+	$command .= "  echo \"No staged tree inputs found; checking persistent recovery inputs\"\n";
+	$command .= "fi\n";
+	$command .= "if ! ( $ready_test ); then\n";
+	$command .= "  echo \"ERROR: tree inputs are incomplete in both staging and persistent storage\" >&2\n";
+	$command .= "  required_inputs=($required_array)\n";
+	$command .= '  for required in "${required_inputs[@]}"; do' . "\n";
+	$command .= '    if [[ ! -s "$required" && ! -s "$required.gz" ]]; then' . "\n";
+	$command .= q{      printf '  missing: %s[.gz]\n' "$required" >&2} . "\n";
+	$command .= "    fi\n";
+	$command .= "  done\n";
+	$command .= "  exit 66\n";
+	$command .= "fi\n";
+	$command .= "echo \"Tree inputs ready in persistent storage\"\n\n";
+	return $command;
 }
 
 sub consensusInputState {

@@ -94,6 +94,15 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
+like($strain, qr/my \$version = 0\.41;/,
+	'within-strain recovery fix increments the workflow version');
+like($strain,
+	qr/sub treeInputPrecopyCommand .*?staged_inputs=\(\).*?if \[\[ -d \$staging_q \]\].*?if \(\( \$\{#staged_inputs\[\@\]\} \)\).*?No staged tree inputs found; checking persistent recovery inputs.*?if ! \( \$ready_test \)/s,
+	'tree input publication can recover after staged inputs have already been moved');
+like($strain, qr/test -s .*?test -s .*?\.gz.*?tree inputs are incomplete in both staging and persistent storage/s,
+	'tree recovery accepts compressed persistent inputs and reports incomplete recovery data');
+unlike($strain, qr/\$pigzBin -p \$numCoreL \$tmpD\/\*/,
+	'generated tree jobs no longer pass an unmatched scratch glob to pigz');
 
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,
