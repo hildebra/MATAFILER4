@@ -21,7 +21,6 @@ sub strainNetwork;
 sub treeWas;
 sub visualizeSignPhylos;
 
-
 my $MGSTKdir = getProgPaths("MGSTKDir");
 
 #.21: added $DiscTests $ContTests
@@ -36,7 +35,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.30: make tree selection, queue handling and R-analysis completion checks robust
 #.31: keep dry runs non-destructive and wait for validated downstream analyses
 #.32: preserve summary headers and require validated network and treeWAS outputs
-my $version = 0.32;
+#.33: summarize per-tree progress and make runtime configuration explicit
+my $version = 0.33;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;
@@ -108,12 +108,24 @@ if (!$rewriteRanalysis && -s $RsummaryTab) {
 
 my %dirs;my %destDs; my %baseD;
 
-print "Strain analysis v $version\n";
+print "=====================================================\n";
+print "Strain postprocessing v$version\n";
+print "Mode: " . ($doSubmit ? "submit" : "dry run") . "; scheduler: $QSBoptHR->{qmode}; "
+	. "rewrite existing results: " . ($rewriteRanalysis ? "yes" : "no") . "\n";
+print "Inputs: gene catalog=$GCd; phylogenies=$FMGpD; map=$refMap; abundance matrix=$abMatrix\n";
+print "Paths: summary=$RsummaryTab; toolkit=$MGSTKdir\n";
+print "Resources: standard cores=$nCore; heavy-analysis cores=$nCoreHeavy; queue throttle=$checkMaxNumJobs jobs\n";
+print "Metadata: individual=" . ($individualVar || "<none>")
+	. "; family=" . ($familyVar || "<none>")
+	. "; stability groups=" . ($groupStabilityVars || "<none>") . "\n";
+print "Association tests: discrete=" . ($DiscTests || "<none>")
+	. "; continuous=" . ($ContTests || "<none>") . "\n";
+print "=====================================================\n";
 
 
 
 if ($rewriteRanalysis){ #faster to do once for all..
-	print "\nWARNING:: Rewriting strain2 results!\n" ;
+	warn "Rewriting existing strain postprocessing results because -reSubmit 1 was requested\n";
 	if ($doSubmit) {
 		#print "Removing old strain2 analysis..\n";
 		for my $within (glob("$FMGpD/*/within")) { remove_tree($within) if -d $within; }
@@ -127,7 +139,7 @@ if ($rewriteRanalysis){ #faster to do once for all..
 }
 
 
-print "Reading dirs..\n";
+print "Scanning for completed within-MGS phylogenies\n";
 opendir DIR, $FMGpD or die "Cannot open $FMGpD: $!\n";
 #loop over intra-phylo dir and check for file presence..
 my %sizTrees;
@@ -150,7 +162,7 @@ while ( my $entry = readdir DIR ) {
 }
 
 closedir DIR;
-print "Found ".scalar(keys %dirs)." dirs with calculated tree\n";
+print "Found ".scalar(keys %dirs)." MGS directories with a nonempty calculated tree\n";
 my $cnt=-1; my $curBatch=0; my $batchSize = 0; my $submitted=0;my @jobs;
 my $MGstats = "$GCd/metagStats.txt";
 $MGstats = "-1" unless (-e $MGstats);
@@ -164,7 +176,7 @@ if (!@k2d) {
 
 my $cmdPrelude = "ulimit -s 20000\n";
 my $cmd = $cmdPrelude;my $destD =""; my $wrHead=1; my $headerOwner='';
-my %analysisAttempted; my $legacyCompleted = 0;
+my %analysisAttempted; my $legacyCompleted = 0; my $reusedAnalysis = 0;
 my $strainStatsR = getProgPaths("treeSubGrpsR");
 
 foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
@@ -197,6 +209,7 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	my $analysisStone = "$destD/$d.Ranalysis.sto";
 	if (!$rewriteRanalysis && -s $analysisReport && (-e $analysisStone || -s $analysisLog)) {
 		$legacyCompleted++ if !-e $analysisStone;
+		$reusedAnalysis++;
 		next;
 	}
 	if ($doSubmit && -d $destD) {
@@ -235,7 +248,6 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	#next;
 	#system $cmd."\n";
 	#$QSBoptHR->{useLongQueue} = 1;
-	print "$d: "; 
 	$curBatch++;
 	if ($curBatch > $batchSize){
 		
@@ -254,7 +266,13 @@ if ($curBatch > 0){
 	my ($dep,$qcmd) = qsubSystem($destD."Ranalysis.sh",$cmd,$nCore,"20G","R$cnt","","",1,[],$QSBoptHR);
 	$curBatch = 0; $cmd=$cmdPrelude;
 	push(@jobs,$dep);
+	$submitted++;
 }
+
+print "R-analysis plan: " . scalar(keys %analysisAttempted) . " MGS analyses prepared in "
+	. "$submitted job script(s), $reusedAnalysis existing result(s) reused";
+print ", $treeAbsent tree(s) became unavailable while planning" if $treeAbsent;
+print "\n";
 
 if (!$doSubmit) {
 	print "Dry run: R-analysis submission scripts were prepared; summaries and downstream analyses were not run.\n";
@@ -277,8 +295,6 @@ my @failedAnalysis = grep {
 } sort keys %analysisAttempted;
 die "R analysis failed or produced incomplete output for: ".join(", ", @failedAnalysis)."\n"
 	if @failedAnalysis;
-
-print "$treeAbsent phylos absent\n";
 
 if (0){#get within strain nuc div
 	my $countStrains=0;
@@ -303,7 +319,6 @@ if (0){#get within strain nuc div
 		$countStrains += (scalar(%seensStrains)-1);
 	}
 	close O;
-	print "Total Strains seen: $countStrains\n";
 }
 
 my %TS; 
@@ -427,7 +442,6 @@ foreach my $d (@k2d){
 		foreach my $gn (@spl){
 			my ($sample, $locus) = split /\Q$SaSe\E/, $gn, 2;
 			unless (defined($sample) && length($sample) && defined($locus) && length($locus)) {
-				warn "Ignoring malformed tree sequence identifier '$gn' in $catFile\n";
 				next;
 			}
 			$genePres{$locus}{$sample} = 1; #{COG|primaryGeneID}{SMPL}
@@ -497,12 +511,9 @@ foreach my $d (@k2d){
 			my $tcnt=$map{$spl[0]}{"Country"};
 			push(@{$cntr{$tcnt}},$spl[0]) ;
 			$cntrFcnt++;
-		} else {
-			print "not found: $spl[0]\n";
 		}
 	}
 	close I;
-	print "$d : $cntrFcnt country\n";
 	#start FST script from alex
 	my $FSTd = "$baseD{$d}/FST/";
 	system "mkdir -p $FSTd" unless (-d $FSTd);
@@ -532,8 +543,6 @@ sub sumSummaries($ $){
 		if (-e "$destD/$inF"){
 			open I,"<$destD/$inF";my $tmp = <I>; 
 			print O1 "\t$tmp" if ($first);while (<I>){print O1 "$d\t$_";	}close I; 
-		} else {
-			print "missing: $destD/$inF\n";
 		}
 		$first=0;
 	}
@@ -554,7 +563,7 @@ sub strainNetwork{ #submits Anthony's script to build a network
 		my $cmd = "$networkScr -i ".shellQuote($FMGpD)." -o ".shellQuote($netDir)." -m ".shellQuote($refMap)." -e $edgeTresh\n";
 		$cmd .= "#consider the following options to change: -c [Column for clustering samples] -e [num shared strains for edges]\n";
 		$cmd .= "touch ".shellQuote($networkStone)."\n";
-		print "Running network of shared strains..\n$cmd\n";
+		print "Submitting shared-strain network analysis; output: $netDir\n";
 		#system $cmd;
 		my $nCore = 1;
 		my ($submittedDep,$qcmd) = qsubSystem($netDir."Network.sh",$cmd,$nCore,"20G","Network","","",1,[],$QSBoptHR);
@@ -610,7 +619,6 @@ sub visualizeSignPhylos{
 	my $cmdPic = "$vizPhylos ".join(" ", map { shellQuote($_) } ($RsummaryTab,$taxFile,$FMGpD,"phylo",$MGSTKdir,$refMap,"-1"))."\n";
 
 	print "Printing figures of most significant phylogenies\nThis might take several hours..\n";
-	print $cmdPic;
 	systemW($cmdPic);
 }
 

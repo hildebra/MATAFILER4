@@ -32,8 +32,9 @@ use Cwd qw(abs_path);
 #.33: harden sparse Canopy/MAG/MGS outcomes, singleton output, weighted resumes, and phylogeny skips
 #.34: restore the documented GTDB default and fingerprint workflow-defining checkpoint options
 #.35: invalidate stale input-derived products and validate sparse/downstream outputs before resuming
+#.36: consolidate repetitive MAG diagnostics and make stage progress easier to scan
 
-my $MGSpipelineVersion = 0.35;
+my $MGSpipelineVersion = 0.36;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -266,9 +267,6 @@ die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterI
 
 #die "$useCheckM2 $useCheckM1\n";
 
-print "\n-------------------------\nMGS v$MGSpipelineVersion\n-------------------------\n";
-print "Running legacy version\n" if ($legacyV);
-
 die "-MGset option has to be \"GTDB\" or \"FMG\"\n" unless ($useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG");
 
 %checkpointParameters = (
@@ -397,21 +395,26 @@ warn "Existing MGS clustering does not match the current inputs/options; invalid
 
 open LOG, '>', "$logDir/pipeline.log" or die "Cannot open $logDir/pipeline.log: $!\n";
 printL "=====================================================\n";
-printL "Running MGS v$MGSpipelineVersion pipeline in multi sample mode\n";
-printL "GC dir: $inD\n";printL "Map: $mapF\n";
-printL "Tmp dir: $tmpD\n";
-printL "Ref Canopies: $canopyF\n" if ($canopyF ne "" && $useCanopies);
-printL "MGS save dir: $outD\n";
+printL "MGS pipeline v$MGSpipelineVersion\n";
+printL "Mode: " . ($doSubmit ? "submit" : "dry run") . "; scheduler: $QSBopt{qmode}\n";
+printL "Legacy parameter mode: " . ($legacyV ? "yes" : "no") . "\n";
+printL "Inputs: gene catalog=$inD; map=$mapF\n";
+printL "Paths: output=$outD; temporary=$tmpD; log=$logDir/pipeline.log\n";
+printL "Clustering: binner=$BinnerShrt; marker set=$useGTDBmg; identity=$clusterID%; weighted scores="
+	. ($useWeightedMGSscores ? "yes" : "no") . "\n";
+printL "Quality: " . ($useCheckM2 ? "CheckM2" : "CheckM1")
+	. "; ignore incomplete MAGs=" . ($ignoIncomplMAGs ? "yes" : "no") . "\n";
+printL "Resources: standard cores=$numCore; bottleneck cores=$canCore; binner memory=${memG}G\n";
+printL "Optional analyses: strains=" . ($doStrains ? "yes" : "no")
+	. "; family genomes=" . ($doBinCtgsPerFam ? "yes" : "no") . "\n";
+printL "Requested rebuilds: clustering=" . ($rewrClusterMAGs ? "yes" : "no")
+	. "; taxonomy=" . ($rewrTAX ? "yes" : "no") . "\n";
+printL "Canopy assignments: $canopyF\n" if ($canopyF ne "" && $useCanopies);
 if (!$useCanopies){
 	my $reason = $profileSamples < 10 ? "N<10 matrix samples (N=$profileSamples)" : "no usable Canopy assignment file";
 	printL "No Canopies used: $reason\n";
 }
 printL "Samples in map: $numSamples; abundance profiles in matrix: $profileSamples\n";
-printL "Cores used: $canCore\n";
-printL "Memory: ${memG}G\n";
-printL "Rewriting Taxonomy\n" if ($rewrTAX);
-printL "Using CheckM2 quals\n" if ($useCheckM2);
-printL "Using Binner $BinnerShrt\n";
 printL "=====================================================\n";
 my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2); 
 
@@ -517,7 +520,6 @@ foreach my $Doo (@DoosD){ #this loops ensures Binner predictions exist for each 
 	$postCmd .= "rm -rf $tmpD2\n";
 	#print "$MBout\n";
 	#die "$bef$MBcmd$postCmd";
-	print "$paths[-1]\n";
 	my ($jobName2, $tmpCmd) = qsubSystem($paths[-1]."LOGandSUB/${BinnerShrt}_bin.sh",$bef.$MBcmd.$postCmd,$numCore,int($memG)."G",$jobName,"","",1,[],\%QSBopt);
 	$cnt++;
 	push (@jobs, $jobName2);
@@ -528,17 +530,14 @@ qsubSystemJobAlive( \@jobs,\%QSBopt );
 
 #check that really all cm 's are there
 $cnt=0; my @missedMAGs=(); my $usableMAGcount=0;
-printL "Checking all MAGs are present\n";
+printL "Checking $BinnerShrt MAG availability across " . scalar(@DoosD) . " assembly groups\n";
 foreach my $Doo (@DoosD){
-	printL "$BinnerShrt MAGs per sample group:\n" if ($cnt==0);
 	my @paths = @{$DOs{$Doo}{wrdir}};#split /,/,$allPaths;
 	my @smplIDs = @{$DOs{$Doo}{SmplID}};#split /,/,$smplIDtmp;
 	my $metaGD = getAssemblPath($paths[-1]);
 	my $MBout = "$metaGD/Binning/$BinnerShrt/$smplIDs[-1]";
 	if ($ignoIncomplMAGs && (!-e $MBout || -s $MBout ==0 ) ){
 		push (@missedMAGs, $smplIDs[-1]);
-		#$missedMAGs++; 
-		printL "no MAG file: $MBout\n";
 		next; 
 	}
 	#check if maybe emtpy Bin?
@@ -556,8 +555,15 @@ foreach my $Doo (@DoosD){
 	}
 	$cnt++;
 }
-printL "Done reading MAGs\n";
-printL "Missed MAGs from " . scalar(@missedMAGs). " assembly groups\n:@missedMAGs\n" if (@missedMAGs);
+printL "MAG availability summary: $cnt usable assembly group(s), "
+	. scalar(@missedMAGs) . " missing/empty, $usableMAGcount bin(s) passed the 60% completeness/10% contamination screen\n";
+if (@missedMAGs) {
+	my @examples = @missedMAGs > 5 ? @missedMAGs[0 .. 4] : @missedMAGs;
+	printL "Missing/empty MAG examples: " . join(", ", @examples) . "\n";
+	printL "No more missing/empty MAG examples are shown here; the complete list is retained in pipeline.log\n"
+		if @missedMAGs > 5;
+	print LOG "All missing/empty MAG assembly groups: " . join(", ", @missedMAGs) . "\n";
+}
 unlink $iniMB2sto or die "Cannot invalidate stale checkpoint $iniMB2sto: $!\n"
 	if @missedMAGs && -e $iniMB2sto;
 _touch_checkpoint($iniMB2sto, 'per-sample-mag-quality') unless _checkpoint_valid($iniMB2sto) || @missedMAGs;
@@ -580,7 +586,7 @@ if ($ph1flag  || !-e "$outD/$BinnerShrt.clusters" ){
 	my $clusscr = getProgPaths("clusterMGS_scr");
 	my $canoIncl = ""; $canoIncl = "-canopies $canopyF" if ($useCanopies);
 	my $cmd = "$clusscr -GCd $GCd -BinDir $outD -logDir $logDir -binSpeciesMG $binSpeciesMG -MGset $useGTDBmg -clusterID $clusterID -cores $numCore -useCheckM1 $useCheckM1 -useCheckM2 $useCheckM2 -legacy $legacyV $canoIncl 1>&2 > $logDir/clusterMGS_scr.log\n";
-	print $cmd."\n"; 
+	printL "Clustering MAGs into MGS; detailed output: $logDir/clusterMGS_scr.log\n";
 	systemW $cmd;
 }
 die if ($stopAfterCluster); #DEBUGing only!!
@@ -772,7 +778,6 @@ if (0 && !-e "$finalClusters2.matL0.txt"){ #deprecated, use specI based annotati
 	invertIndex($finalClusters2,"$finalClusters2.rev") unless (-e "$finalClusters2.rev");
 	my $cmd = "$rareBin sumMat -i $GCd/Matrix.mat.gz -o $finalClusters2.mat -refD $finalClusters2.rev -t $numCore\n";
 	$cmd .= "rm $finalClusters2.rev\n";
-	printL $cmd;
 #	systemW $cmd;
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/MGSabund.sh",$cmd,1,int(100)."G","AB1_MGS","","",1,[],\%QSBopt) ;
@@ -863,9 +868,9 @@ my $treedep="";
 if ($coreMGSCount < 3) {
 	printL "Skipping between-MGS phylogeny: at least 3 MGS are required, but only $coreMGSCount were retained\n";
 } elsif (!-s "$outDphylo/phylo/IQtree_allsites.treefile" || !-s "$outD/between_phylo/phylo/IQtree_allsites.pdf"){
-	print "Construct phylogeny of all MGS:\n$ph1Cmd\n";
+	printL "Preparing between-MGS phylogeny in $outDphylo\n";
 	
-	my $refTreeMsg = "\n################\n# If you want to include custom reference genomes, use \n# $baseTreeCmd-outD $outD/customRefs/ -refGenos [refs]\n################\n";
+	my $refTreeMsg = "\n################\n# If you want to include custom reference genomes, use\n# $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]\n################\n";
 	print $refTreeMsg;
 	$refTreeMsg = "#If you want to include custom reference genomes, use $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]";
 	$ph1Cmd .= " -xtraMsg \"$refTreeMsg\";";
@@ -881,9 +886,9 @@ if ($coreMGSCount < 3) {
 	#my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 	#my ($jobName2, $tmpCmd) = qsubSystem($logDir."/interMGSphylo.sh",$ph1Cmd,1,int(150/1)."G","MGSphylo","","",1,[],\%QSBopt) ;
 	#	print "WAITID=$dep\n";
-		print $ph1OUT;
 		if ($ph1OUT =~ m/WAITID=(\d+)/) {
 			$treedep = $1;
+			printL "Between-MGS phylogeny submitted as job $treedep\n";
 		} elsif ($ph1OUT =~ m/^SKIPPED=(.+)$/m) {
 			printL "Between-MGS phylogeny was skipped by its launcher: $1\n";
 		} else {
@@ -950,14 +955,15 @@ $ph2Cmd .= "\n";
 
 $ph2Cmd .= "#consider adapting further options: \n#-rmMSA 0 -presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -nodeTmp [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
 $ph2Cmd .= "#-minSNPCallQual 20 -GenesPerSpecies 0.1 -GeneLengthMin 0.5 -skipIndels 0 -minSNPDepth 2 -SNPdepthFilterScale 0.1 -SNPindelRangeFilt 5 -SNPadaptiveQual 0.0";
-printL $ph2Cmd;
 #systemW $ph2Cmd;
+printL "Preparing within-MGS strain analysis in $outD/within_phylo/ "
+	. "($canCore cores, ${memUsage}G launcher memory, $NsubJobs subjob partition(s))\n";
 my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "20"; #needs some tmp space for on the fly creations.. 
 my ($jobName2, $tmpCmd) = qsubSystem($logDir."/strainMGS.sh",$ph2Cmd,1,int($memUsage/1)."G","strainKickoff",$treedep,"",1,[],\%QSBopt) ;
 $QSBopt{tmpSpace} =$tmpSHDD;
 
 #get phylogenies intra-species.. this requires a lot of power and best called from big cluster..
-printL "Compound Binning script finished.. run above commands if you want to explore strains\n";
+printL "Compound Binning script finished; within-MGS strain jobs were prepared in $logDir/strainMGS.sh\n";
 close LOG;
 exit(0);
 

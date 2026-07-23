@@ -98,6 +98,16 @@ Mode-specific options include --out, --refDB, --functDB, --functAligner,
 HELP
 }
 
+sub _preview_list {
+	my ($values, $limit) = @_;
+	$limit = 5 unless defined $limit;
+	my @items = @{$values // []};
+	my @preview = @items > $limit ? @items[0 .. $limit - 1] : @items;
+	my $text = join(", ", @preview);
+	$text .= " (+" . (@items - $limit) . " more)" if @items > $limit;
+	return $text;
+}
+
 if (grep { $_ eq '--help' || $_ eq '-h' || $_ eq '-?' } @ARGV) {
 	_print_help();
 	exit 0;
@@ -358,7 +368,7 @@ sub _safe_reset_dir {
 #.51: 26.3.25: small fix to ensure preprocessing takes the right start sample (could skip large numbers sometimes, due to rounding errors)
 #.52: streamed FASTA collation, durable gzip publication, checkpoint manifests, and cluster-ID propagation
 #.53: use matrix cardinality for sparse-stage skips, preserve dry-run commands, and accept empty Canopy/Kraken results
-my $version = 0.53;
+my $version = 0.54;
 $| = 1;
 
 my $justCDhit = 1; #always set default to 0, to dangerous otherwise..
@@ -640,12 +650,9 @@ die "-MGset option has to be \"GTDB\" or \"FMG\"\n" unless ($useGTDBmg eq "GTDB"
 my $speciesCutoff = "specI_cutoff";
 #my $speciesGTDB = "specI_GTDB"; my $speciesDir = "specIPath";my $speciesLink = "specI_lnks"; 
 if ($useGTDBmg eq "GTDB"){ 
-	print "Using GTDB marker genes\n";
 	$path2FMGids = "ContigStats/GTDBmg/marker_genes_meta.tsv";
 	$COGdir = "GTDBmg";$speciesCutoff = "GTDB_cutoff";
 	#$speciesLink = "GTDB_lnks"; $speciesGTDB = "GTDB_GTDB"; $speciesDir = "GTDBPath";
-} else {
-	print "Using FMG marker genes\n";
 }
 
 #my $logdir = $GCdir."LOGandSUB";
@@ -673,7 +680,6 @@ if ($mapF =~ m/^\??$/){
 
 my %map; my %AsGrps; my @samples; my $numSmpls=0;
 _validate_map_files($mapF);
-print "MAP=$mapF\n";
 my ($hr,$hr2) = readMapS($mapF,$oldNameFolders);
 %map = %{$hr};
 die "Mapping parser did not return assembly-group data\n" unless ref($hr2) eq 'HASH';
@@ -763,14 +769,13 @@ open LOG, ">", "$qsubDir/GeneCat.log" or die "Cannot open $qsubDir/GeneCat.log: 
 open my $version_fh, '>', "$GCdir/version.txt" or die "Cannot open $GCdir/version.txt: $!\n";
 print {$version_fh} "$version\n" or die "Cannot write $GCdir/version.txt: $!\n";
 close $version_fh or die "Cannot close $GCdir/version.txt: $!\n";
-announceGeneCat();
-
 #autoset batchnum
 if ($batchNum <1){
 	$batchNum = int(scalar(@samples) / 200 )+1;
 }
 if ($batchNum <1){$batchNum = 1;}
 $batchNum = $numSmpls if $batchNum > $numSmpls;
+announceGeneCat();
 
 
 #test if base folders even exist..
@@ -1515,13 +1520,8 @@ sub geneCatFlow($ $ $ $ ){
 	#$cmd .= "#wait for eggnogmapper to finish\nuntil [ -f $emapStone ];do sleep 5; done\n" unless (-e $emapStone);
 	$cmd .= "$magPi -mem 150 -GCd $OutD -tmp $tmpDir/MAGs/ -bottleneckCores $numCor $canoStr -strains $doStrains -useCheckM2 $useCheckM2 -useCheckM1 $useCheckM1 -wait4stone $emapStone -binSpeciesMG $binSpeciesMG -ignoreIncompleteMAGs $ignoreIncompleteMAGs -MGset $useGTDBmg -clusterID $cdhID -outD $MGSoutD \n";
 
-	print $cmd."\n\n";
-	
-
-	
-
 	if ($submitLocal && $cmd ne ""){
-		print "submitting MGS script..\n";
+		print "Submitting downstream MGS workflow\n";
 		my $idx_file = "$OutD/$primaryClusterCLS.idx";
 		die "Cannot size missing cluster index $idx_file\n" unless -e $idx_file;
 		my $idxFileSize = -s $idx_file; $idxFileSize /= (1024*1024 * 1024); #bytes to GB
@@ -1553,13 +1553,10 @@ sub geneCatFlow($ $ $ $ ){
 
 
 	if (!$submitLocal){
-		print $qsubDir."CDHITexe.sh\n";
+		print "Preparing gene-catalog workflow script: $qsubDir/CDHITexe.sh\n";
 		my $jobd = "";
 		$QSBoptHR->{useLongQueue} = 1;
 		my ($dep,$qcmd) = qsubSystem($qsubDir."CDHITexe.sh",$cmd,$numCor,int($totMem)."G",$jobName,$jobd,"",$qsubNow,[],$QSBoptHR);
-		if ($qsubNow==0){
-			print "$qcmd\n";
-		}
 	}
 	#die ($cmd);
 	
@@ -1596,9 +1593,20 @@ sub ntMatchGC{
 
 sub addingSmpls{
 	my ($startSmpl,$stopSmpl,$batch) = @_;
-	print "Adding up Smpls $startSmpl:$stopSmpl\n" ;#if ($justCDhit==0);
+	print "Collating gene-catalog sample batch $batch (map indexes $startSmpl.." . ($stopSmpl - 1) . ")\n";
 	my @skippedSmpls;my $wrongSmplNms = ""; my @rmSrcDirs;
 	my %uniqueSampleNames; 	my $doubleSmplWarnString = ""; 
+	my $wrongSmplWarnCount = 0; my $doubleSmplWarnCount = 0;
+	my $skippedInputExamples = 0;
+	my $reportSkippedInput = sub {
+		my ($message) = @_;
+		$skippedInputExamples++;
+		warn "$message\n" if $skippedInputExamples <= 5;
+		warn "No more skipped-sample input examples will be shown; see the batch summary and Missed_samples report\n"
+			if $skippedInputExamples == 6;
+	};
+	my $combinedMembersSkipped = 0;
+	my $processedAssemblies = 0;
 	my @OCOMPL = (); my @O3P=(); my @O5P = (); my @OINC = (); #these arrays store complete & incomplete fasta seqs
 	open QLOG, '>', "$qsubDir/GeneCompleteness.txt.$batch"
 		or die "Cannot open $qsubDir/GeneCompleteness.txt.$batch: $!\n";
@@ -1614,7 +1622,7 @@ sub addingSmpls{
 	my ($O5, $O5partial) = _new_gzip_output("$OF5in.$batch");
 	my ($O3, $O3partial) = _new_gzip_output("$OF3in.$batch");
 	my ($OI, $OIpartial) = _new_gzip_output("$OFincompl.$batch");
-	print "Direct output to file\n";
+	print "Writing compressed batch FASTA files directly\n";
 
 	#now really add all files together
 	my $JNUM= -1; my @stopAndRedo=();
@@ -1632,7 +1640,8 @@ sub addingSmpls{
 			if ($map{$smpl}{SupportReads} ne ""){
 				$dir2rd = "$GCdir$smpl/";	
 			}elsif (!$requireAllAssemblies){
-				print "Can't find valid path for $smpl, continue without\n";push(@missedSmpls, $smpl);next;
+				$reportSkippedInput->("No valid input path for $smpl; skipping sample");
+				push(@missedSmpls, $smpl);next;
 			} else {
 				die "Can't find valid path for $smpl\n";
 			}
@@ -1642,12 +1651,11 @@ sub addingSmpls{
 		my $assGo = 0;
 		my $cAssGrp = $map{$smpl}{AssGroup};
 		$AsGrps{$cAssGrp}{CntAss} ++;	
-		print "$JNUM - $smpl - $cAssGrp - $AsGrps{$cAssGrp}{CntAss}:$AsGrps{$cAssGrp}{CntAimAss}\n";
 		if ($AsGrps{$cAssGrp}{CntAss}  >= $AsGrps{$cAssGrp}{CntAimAss} || 
 				$map{$smpl}{assFinSmpl} eq $smpl){ 
 			$assGo = 1;
 		}
-		unless ($assGo){print "Not last in comb assembly: ".$map{$smpl}{dir}."\n"; next;}
+		unless ($assGo){$combinedMembersSkipped++; next;}
 		my $SmplName = $map{$smpl}{SmplID};
 		#$dir2rd = "/g/scb/bork/hildebra/SNP/SimuL/sample-0/";
 		my $metaGD = "$dir2rd/assemblies/metag/";
@@ -1662,7 +1670,7 @@ sub addingSmpls{
 		if ( !fileGZe("$metaGD/scaffolds.fasta.filt") && ! fileGZe("$metaGD/longReads.fasta.filt")){# && -d $inFMGd){
 			my $message = "No usable assembly for $smpl in $metaGD (expected scaffolds.fasta.filt or longReads.fasta.filt)";
 			die "$message\n" if $requireAllAssemblies;
-			print "$message; skipping sample\n";
+			$reportSkippedInput->("$message; skipping sample");
 			push(@skippedSmpls,$map{$smpl}{dir});
 			push(@missedSmpls,$smpl);
 			next;
@@ -1675,13 +1683,12 @@ sub addingSmpls{
 		if (@missing_inputs) {
 			my $message = "Missing required gene-catalog inputs for $smpl:\n" . join("\n", @missing_inputs);
 			die "$message\n" if $requireAllAssemblies;
-			print "$message\nSkipping sample because -requireAllAssemblies 0 was selected\n";
+			$reportSkippedInput->("$message\nSkipping sample because -requireAllAssemblies 0 was selected");
 			push(@missedSmpls,$smpl);
 			next;
 		}
 
 		#next;
-		print "==== ".$dir2rd." ====\n";
 		#print LOG "==== ".$dir2rd." ====\n";
 		my $inGenesF = "$metaGD/$path2nt";
 		my @scnts = (0,0,0,0,0);
@@ -1700,13 +1707,14 @@ sub addingSmpls{
 					#check that samples was only used once
 					if (!$oldNameFolders && $SmplName ne $1 && !exists($map{altNms}{$1})){
 						my $errStr = "expected Sample name $SmplName, found $1\n";
-						$wrongSmplNms .= $errStr;
+						$wrongSmplWarnCount++;
+						$wrongSmplNms .= $errStr if $wrongSmplWarnCount <= 5;
 						push (@rmSrcDirs, $dir2rd,$metaGD) ;
 					}
 					if (exists($uniqueSampleNames{$1})){
 						my $errStr = "$dir2rd: Can't use sample names twice: $1\n$spl[0]\ndblTo:$uniqueSampleNames{$1}\n";
-						print STDERR $errStr;
-						$doubleSmplWarnString .= $errStr;
+						$doubleSmplWarnCount++;
+						$doubleSmplWarnString .= $errStr if $doubleSmplWarnCount <= 5;
 					} else { $uniqueSampleNames{$1} = $dir2rd;}
 					
 				}
@@ -1720,6 +1728,7 @@ sub addingSmpls{
 		}
 		#split into buckets
 		my $tooShrtCnt=0; my $prevSmpID = "";
+		my $missingGffCount = 0;
 		_for_each_fasta_record($inGenesF, qr/\|/, sub {
 			my ($hd, $sequence) = @_;
 			if (length($sequence) < $minGeneL && !exists $curFMGs{$hd}){$tooShrtCnt++;return;}
@@ -1727,8 +1736,9 @@ sub addingSmpls{
 			my @spl = split /__/,$hd;
 			if ($spl[0] ne $prevSmpID){if ($prevSmpID eq "") {$prevSmpID = $spl[0];} else {die "Mix of several samples?? $hd, $spl[0] detected, expected sample $prevSmpID !! Aborting\n\n";} }
 			unless (exists $gff{$hd}){
-				print STDERR "Can't find GFF entry for $hd in $metaGD/$path2gff; leaving source files untouched\n";
-				push(@stopAndRedo,$smpl);
+				$missingGffCount++;
+				warn "Missing GFF entry for $hd in $metaGD/$path2gff\n"
+					if $missingGffCount <= 5;
 				return;
 			}
 			die "Incorrect gene format for gene $hd \n in file $inGenesF\n"
@@ -1751,6 +1761,12 @@ sub addingSmpls{
 				$scnts[3] ++;
 			}
 		});
+		if ($missingGffCount) {
+			warn "No more missing-GFF examples will be shown for $smpl\n"
+				if $missingGffCount > 5;
+			warn "Sample $smpl has $missingGffCount gene(s) without GFF entries; source files were left untouched for inspection/repair\n";
+			push(@stopAndRedo,$smpl);
+		}
 		
 		
 		my $totCnt = $scnts[0] + $scnts[1] + $scnts[2] + $scnts[3] ;
@@ -1771,23 +1787,29 @@ sub addingSmpls{
 			foreach my $k (keys %curFMGsTag){
 				if ($curFMGsTag{$k} == 0){
 					if ($FATALcnt <5) {
-						print STDERR "missing gene $k\n" ;
+						warn "Predicted marker gene is absent from the assembly gene FASTA: $k\n";
 					} elsif($FATALcnt == 5){
-						print STDERR "Skipping further reports..\n"
+						warn "No more missing-marker-gene examples will be shown for $smpl\n";
 					}
 					$FATALcnt++;
 				}
 			}
 			if ($FATALcnt){
-				print STDERR "FATAL:: mismatch predicted marker gene and assembly gene predictions (N=$FATALcnt of ". keys(%curFMGsTag) ."):";
+				warn "Marker-gene/assembly prediction mismatch for $smpl: $FATALcnt of "
+					. scalar(keys(%curFMGsTag)) . " predicted marker gene(s) are absent\n";
 				#my $statFMH = stat($FMGfile) or die "Cannot stat $FMGfile: $!";
 				#my $statGF = stat("$metaGD/scaffolds.fasta.filt") or die "Cannot stat $metaGD/scaffolds.fasta.filt: $!";
 				
-				print STDERR "Marker-gene mismatch in $metaGD; leaving source files untouched for inspection/repair\n";
+				warn "Marker-gene mismatch in $metaGD; source files were left untouched for inspection/repair\n";
 				push(@stopAndRedo,$smpl);
 			}
 		}
-		print $ostr."\n"; 
+		$processedAssemblies++;
+		if ($processedAssemblies <= 5 || $processedAssemblies % 25 == 0) {
+			print $ostr."\n";
+		} elsif ($processedAssemblies == 6) {
+			print "Per-sample completeness output is now shown every 25 assemblies; all rows are retained in GeneCompleteness.txt.$batch\n";
+		}
 		print QLOG "$SmplName\t$prevSmpID\t$scnts[0]\t$scnts[1]\t$scnts[2]\t$scnts[3]\t$totCnt\t$tooShrtCnt\n";
 		$cnt++;
 		if ( 0 && $cnt % 10 == 0) {#write out & submit cdhit job #not used any longer!
@@ -1797,26 +1819,40 @@ sub addingSmpls{
 			@OCOMPL=();@O3P=();@O5P=();@OINC=();#clean old seqs
 		}
 	}
+	print "Batch $batch collation summary: $processedAssemblies assembly group(s) processed";
+	print ", $combinedMembersSkipped non-final combined-assembly member(s) skipped"
+		if $combinedMembersSkipped;
+	print "\n";
 	if (@missedSmpls){
-		print "The following samples were without assembly/gene predictions:\n@missedSmpls\n";
 		my $missed_file = "$qsubDir/Missed_samples.txt.$batch";
 		open SMR, '>', $missed_file or die "Cannot open $missed_file: $!\n";
 		print SMR join("\n",@missedSmpls), "\n" or die "Cannot write $missed_file: $!\n";
 		close SMR or die "Cannot close $missed_file: $!\n";
+		print scalar(@missedSmpls) . " sample(s) lacked assembly/gene predictions: "
+			. _preview_list(\@missedSmpls, 10) . "\n";
+		print "Complete list: $missed_file\n";
 
 	}
-	if ($doubleSmplWarnString ne "" || $wrongSmplNms ne ""){
-		print STDERR "Unrecoverable warnings occurred:\n";
-		print STDERR "Recommended to remove: \n'rm -r @rmSrcDirs'\n\n" if (@rmSrcDirs > 0);
-		print STDERR $doubleSmplWarnString."\n\n\n$wrongSmplNms\n\n\n" if ($wrongSmplNms ne "");
-		print STDERR "incomplete; aborting process\n";
+	if ($doubleSmplWarnCount || $wrongSmplWarnCount){
+		warn "Unrecoverable sample-name conflicts occurred\n";
+		warn "Recommended to remove: \n'rm -r @rmSrcDirs'\n\n" if (@rmSrcDirs > 0);
+		warn $doubleSmplWarnString if $doubleSmplWarnCount;
+		warn "No more duplicate-sample-name examples will be shown ($doubleSmplWarnCount total)\n"
+			if $doubleSmplWarnCount > 5;
+		warn $wrongSmplNms if $wrongSmplWarnCount;
+		warn "No more unexpected-sample-name examples will be shown ($wrongSmplWarnCount total)\n"
+			if $wrongSmplWarnCount > 5;
+		warn "Gene collation is incomplete and will abort after the diagnostic summary\n";
 		push(@stopAndRedo,"unspecific");
 		
 		#exit(21);
 	}
 	if (@stopAndRedo){
+		my %seen_problem;
+		@stopAndRedo = grep { !$seen_problem{$_}++ } @stopAndRedo;
 		print "Something went wrong while extracting metagenomic genes. Source assemblies were not modified; inspect/repair them and rerun MATAFILER.\n";
-		print "List of potential problematic samples: @stopAndRedo\n";
+		print "Potentially problematic samples (" . scalar(@stopAndRedo) . "): "
+			. _preview_list(\@stopAndRedo, 10) . "\n";
 		return 1;
 	}
 
@@ -1843,7 +1879,8 @@ sub addingSmpls{
 	_publish_gzip_output($OI, $OIpartial, "$OFincompl.$batch");
 	close QLOG;
 
-	print "\n\n--skipped: ".join(",",@skippedSmpls)."\n" if (@skippedSmpls > 0);
+	print scalar(@skippedSmpls) . " sample(s) were skipped because no usable assembly was available\n"
+		if @skippedSmpls;
 
 	#die();
 	#writeBucket(\@OCOMPL,\@O3P,\@O5P,\@OINC,$bdir,$bucketCnt);
@@ -1911,6 +1948,7 @@ sub collateGenes(){
 	#die();
 
 	 my @probSample=();
+	my $problemExamplesShown = 0;
 	#detecting and removing wrong / corrupted samples..
 	#first check if all input is present
 	my $JNUM= -1;
@@ -1948,30 +1986,40 @@ sub collateGenes(){
 		my $inGenesF = "$metaGD/$path2nt";
 		my $inGenesGFF = "$metaGD/$path2gff";
 		my $problem = 0;
+		my @missingRequired;
 		if (!fileGZe("$metaGD/scaffolds.fasta.filt") && !fileGZe("$metaGD/longReads.fasta.filt")) {
-			print STDERR "Assembly not present: expected $metaGD/scaffolds.fasta.filt or $metaGD/longReads.fasta.filt\n";
+			push @missingRequired, "assembly";
 			$problem = 1;
 		}
 		if (! fileGZe($inGenesF)){
-			print STDERR "Gene predictions not present: $inGenesF\n" ;
+			push @missingRequired, "gene predictions";
 			$problem = 1;
 		}
 		if (! fileGZe($inGenesGFF)){
-			print STDERR "Gene annotations not present: $inGenesGFF\n" ;
+			push @missingRequired, "gene annotations";
 			$problem = 1;
 		}
 		my $FMGf = "$metaGD/$path2FMGids";#"$inFMGd/FMGids.txt";
 		if ($doFMGseparation && !-e $FMGf ){
-			print STDERR "No FMG ids: $FMGf\n$JNUM : $dir2rd\n" ;
+			push @missingRequired, "$COGdir marker IDs";
 			$problem = 1;
 		}
 		if ($problem ){
 			push @probSample, $smpl;
+			if ($problemExamplesShown < 5) {
+				warn "Incomplete gene-catalog input for $smpl in $metaGD: "
+					. join(", ", @missingRequired) . "\n";
+				$problemExamplesShown++;
+			} elsif ($problemExamplesShown == 5) {
+				warn "No more incomplete-input examples will be shown; the final summary retains affected sample IDs\n";
+				$problemExamplesShown++;
+			}
 		}
 
 	}
 	if (@probSample){
-		print "Found problematic samples:\n@probSample\nPlease check mapping & contig stats\n";
+		print "Found " . scalar(@probSample) . " problematic sample(s): "
+			. _preview_list(\@probSample, 20) . "\nPlease check mapping and contig statistics.\n";
 		exit (23) if ($requireAllAssemblies);
 	} else {	print "All required input files seem to be presents.\n"; }
 
@@ -2141,16 +2189,20 @@ sub printL{
 
 sub announceGeneCat{
 	printL "===================================\n";
-	printL "GeneCat v$version\n";
-	printL "===================================\n";
-	printL "Clustering at $cdhID nt id, using $numCor cores\n";
-	printL "outdir: $GCdir\n";
-	printL "map:    $mapF\n";
-	printL "tmpdir: $tmpDir\n";
-	if ($submitLocal){printL "Running in local submission mode (keep alive long time on single core)\n"} 
-	else {printL "Creating fire and forget bash submission script (a bit slower since single large core machine is used)\n";}
-	if ($justCDhit==0) {printL "Collating Genes from mapping file\n" ;
-	} else { printL "Continuing started run in $GCdir\n";}
+	printL "GeneCat pipeline v$version\n";
+	printL "Mode: $mode; " . ($justCDhit ? "resume" : "rebuild")
+		. "; execution=" . ($submitLocal ? "incremental submission" : "fire-and-forget script")
+		. "; scheduler=$QSBoptHR->{qmode}\n";
+	printL "Inputs: map=$mapF; samples=$numSmpls; marker set=$useGTDBmg\n";
+	printL "Paths: output=$GCdir; temporary=$tmpDir; log=$qsubDir/GeneCat.log\n";
+	printL "Clustering: identity=$cdhID%; minimum gene length=$minGeneL nt; binner=$binnerShrt\n";
+	printL "Resources: main cores=$numCor; clustering cores=$numCor0; small-job cores=$numCor3; "
+		. "main memory=${totMem}G; small-job memory=${totMem3}G\n";
+	printL "Batches: $batchNum; require all assemblies=" . ($requireAllAssemblies ? "yes" : "no")
+		. "; gene matrix=" . ($doGeneMatrix ? "yes" : "no") . "\n";
+	printL "Downstream: quality=" . ($useCheckM2 ? "CheckM2" : "CheckM1")
+		. "; strains=" . ($doStrains ? "yes" : "no")
+		. "; Canopy minimum samples=$minCanopySamples\n";
 	printL "===================================\n";
 	
 }
@@ -2160,7 +2212,7 @@ sub specITax{
 	my $siScr = getProgPaths("specIGC_scr");
 	my $cmd = "$siScr -GCd $GCd -cores $nc -tmp $tmpDir -MGset $useGTDBmg \n";
 	#die "$cmd";
-	print "Calculating tax abundance via SpecI's\n$cmd\n";
+	print "Calculating taxonomic abundance via marker species\n";
 	systemW $cmd;
 }
 sub kaijuTax{#different tax assignment for gene catalog
@@ -2382,9 +2434,11 @@ sub protExtract{
 	#if ($numProts != $numGenes){ print "NUmber of genes read ($numProts) not equal to actual number of genes ($numGenes). Not enough mem?\n";}
 	my $cnt=0;
 	print "Starting Protein Extraction from source assembly folders\n";
+	my @proteinSamples = grep { $_ ne "xtraSmpls" } keys %{$geneIdxH};
+	my $proteinSampleCount = scalar @proteinSamples;
+	my $proteinSamplesDone = 0;
 	#collects all genes from a given sample, that is serving as seed gene for clustering
-	foreach my $curSmpl (keys %{$geneIdxH}){
-		next if ($curSmpl eq "xtraSmpls");
+	foreach my $curSmpl (@proteinSamples){
 		my $curSmpl2 = $curSmpl;
 		#fix MX tag at end of sample
 		unless (exists ($map{$curSmpl})){$curSmpl2 = $map{altNms}{$curSmpl} if (exists ($map{altNms}{$curSmpl}));}
@@ -2394,7 +2448,12 @@ sub protExtract{
 		die "prot file $protIn doesnt exits\n" unless ( fileGZe( $protIn ));
 		attachProteins3($curSmpl,$protF,$protIn,$geneIdxH->{$curSmpl},"__");
 		$cnt += scalar(keys(%{$geneIdxH->{$curSmpl}}));
-		print STDERR $curSmpl2." N=$cnt T=". (time - $start) ."s\n";
+		$proteinSamplesDone++;
+		if ($proteinSamplesDone == 1 || $proteinSamplesDone % 25 == 0
+				|| $proteinSamplesDone == $proteinSampleCount) {
+			print "Protein extraction: $proteinSamplesDone/$proteinSampleCount samples, "
+				. "$cnt proteins, " . (time - $start) . " s elapsed\n";
+		}
 		$geneIdxH->{$curSmpl} = undef;
 	}
 	
@@ -2616,7 +2675,7 @@ sub addCOGgenes{
 	my ($inD,$GCd,$inCclN,$outFfna,$outFcls) = @_;
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	#look for COG genes
-	print "$inD/$COGdir/\n";
+	print "Adding marker-gene clusters from $inD/$COGdir/\n";
 	opendir(DIR, "$inD/$COGdir/") or die $!;
 	my @cogfiles = sort (grep {/.*\.fna\.clstr$/ } readdir(DIR)); close DIR;#&& -f "$inD/COG/$_" 
 	my $logstr = ""; my $inCclNmember = 0;
@@ -2654,10 +2713,8 @@ sub mergeClsSam(){
 	if ($allinClust){
 		unless (-d "$inD/$COGdir/" || -d "$GCd/B0/$COGdir/"){print"No COG specific genes found\n$inD/$COGdir/\n$GCd/B0/$COGdir/\n";return;}
 		my $inCclN = 0;
-		print "$outFcls\n\n";
 		die "Can't find $outFcls\n" unless (-e $outFcls);
 		my $tlW = `tail -n 800 $outFcls| grep '^>' | tail -n 1`;chomp $tlW;
-		print $tlW."\n";
 		if ($tlW !~ m/>Cluster (\d+)/){
 			$tlW = `tail -n 25000 $outFcls| grep '^>' | tail -n 1`;chomp $tlW;
 		}
@@ -3138,7 +3195,6 @@ sub FOAMassign{
 	$cmd .= "rm -f ".join(" ",@allFiles) . "\n";
 	#tr [:blank:] \\t
 	$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $GCd/$DB.mat -t 1 -refD $assigns $rtkFunDelims \n";
-	print "@jdeps\n";
 	$tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
 	($cmd,$jdep) = qsubSystem($qsubDir."collect$DB.sh",$cmd,1,"40G","$DB"."Col",join(";",@jdeps),"",1,[],$QSBoptHR);
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;

@@ -132,6 +132,17 @@ like($strain_source, qr/my \$tree_sample_separator = quotemeta\(\$SaSe\)/,
 like($strain_source, qr/\$nxtCmd \.= "-Hcores \$maxCores " if \$maxCores > 0;/,
 	'within-MGS analysis only forwards a configured positive heavy-core limit');
 my $strain2_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
+like($strain2_source, qr/my \$version = 0\.33;/,
+	'strain postprocessing output cleanup increments its workflow version');
+like($strain2_source,
+	qr/Strain postprocessing v\$version.*?Mode:.*?Inputs:.*?Paths:.*?Resources:.*?Metadata:.*?Association tests:/s,
+	'strain postprocessing starts with a structured runtime configuration header');
+like($strain2_source, qr/R-analysis plan:.*?existing result\(s\) reused/s,
+	'strain postprocessing summarizes per-MGS submission planning');
+unlike($strain2_source, qr/print "\$d: ";/,
+	'strain postprocessing no longer emits an unlabelled fragment for every MGS');
+unlike($strain2_source, qr/Running network of shared strains\.\.\\n\$cmd|print \$cmdPic/,
+	'strain postprocessing does not echo full routine commands');
 like($strain2_source, qr/while \(!-s \$treePath && \$x < \@defTreeFiles\)/,
 	'strain postprocessing selects only nonempty fallback trees');
 like($strain2_source, qr/my \$jobCores = \$nCore;/,
@@ -179,8 +190,19 @@ like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 like($resort_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
 	'gene-priority resorting uses the propagated catalog identity');
 my $mgs_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.35;/,
-	'MGS sparse-run hardening increments the pipeline version');
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.36;/,
+	'MGS output cleanup increments the pipeline version');
+like($mgs_source,
+	qr/MGS pipeline v\$MGSpipelineVersion.*?Mode:.*?Inputs:.*?Paths:.*?Clustering:.*?Quality:.*?Resources:.*?Optional analyses:/s,
+	'MGS starts with a structured runtime configuration header');
+unlike($mgs_source, qr/print \$cmd\."\\n"|printL \$ph2Cmd|print \$ph1OUT/,
+	'MGS does not echo full routine or scheduler commands');
+like($mgs_source, qr/include custom reference genomes.*?\$baseTreeCmd -outD \$outD\/customRefs\/ -refGenos \[refs\]/s,
+	'MGS retains the useful custom-reference phylogeny command');
+like($mgs_source, qr/MAG availability summary:.*?Missing\/empty MAG examples:.*?complete list is retained in pipeline\.log/s,
+	'MGS summarizes missing MAGs while retaining their complete list in the log');
+unlike($mgs_source, qr/printL "no MAG file: \$MBout/,
+	'MGS no longer prints one missing-MAG path per assembly group');
 like($mgs_source, qr/my \$useGTDBmg = "GTDB";/,
 	'MGS uses its documented GTDB marker default');
 like($mgs_source,
@@ -327,8 +349,33 @@ like($build_tree_source, qr/sub geneFileStem.*?sprintf\("_%02X", ord\(\$1\)\)/s,
 	'compound locus names are encoded safely and deterministically for downstream filenames');
 
 my $gene_cat_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'geneCat.pl'));
-like($gene_cat_source, qr/my \$version = 0\.53;/,
-	'geneCat sparse-run hardening increments its workflow version');
+like($gene_cat_source, qr/my \$version = 0\.54;/,
+	'geneCat output cleanup increments its workflow version');
+like($gene_cat_source,
+	qr/GeneCat pipeline v\$version.*?Mode:.*?Inputs:.*?Paths:.*?Clustering:.*?Resources:.*?Batches:.*?Downstream:/s,
+	'geneCat starts with a structured runtime configuration header');
+unlike($gene_cat_source, qr/print \$cmd\."\\n\\n"|print "\$qcmd\\n"/,
+	'geneCat does not echo full routine or scheduler commands');
+like($gene_cat_source,
+	qr/\$missingGffCount <= 5.*?No more missing-GFF examples.*?has \$missingGffCount gene\(s\) without GFF entries/s,
+	'geneCat caps missing-GFF examples and reports their aggregate count');
+like($gene_cat_source, qr/Per-sample completeness output is now shown every 25 assemblies.*?GeneCompleteness/s,
+	'geneCat throttles console completeness progress while identifying the detailed report');
+like($gene_cat_source, qr/No more incomplete-input examples will be shown.*?Found " \. scalar\(\@probSample\)/s,
+	'geneCat bounds repetitive preflight diagnostics and retains an affected-sample summary');
+like($gene_cat_source, qr/Protein extraction: \$proteinSamplesDone\/\$proteinSampleCount samples/s,
+	'geneCat reports periodic aggregate protein-extraction progress');
+like($gene_cat_source, qr/\$doubleSmplWarnCount <= 5.*?No more duplicate-sample-name examples/s,
+	'geneCat bounds duplicate-sample-name conflicts');
+like($gene_cat_source, qr/\$wrongSmplWarnCount <= 5.*?No more unexpected-sample-name examples/s,
+	'geneCat bounds unexpected-sample-name conflicts');
+unlike($gene_cat_source, qr/print STDERR \$errStr/,
+	'geneCat does not print duplicate-sample details both immediately and again in its summary');
+my $submission_source = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'Subm.pm'));
+like($submission_source, qr/Submitted \$requestedJobName as job \$jname/,
+	'scheduler submissions emit one concise stage-and-job-ID line');
+unlike($submission_source, qr/print "SUB:\$jname\\t"/,
+	'scheduler submissions no longer emit incomplete inline fragments');
 like($gene_cat_source, qr/\$matrixSampleCount = _matrix_sample_count\(\$matrixFile\)/,
 	'geneCat uses produced matrix cardinality rather than raw map cardinality for Canopy');
 like($gene_cat_source, qr/matrix_sample_count=\$\(gzip -cd .*?declutter-skipped-low-sample-count/s,

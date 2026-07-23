@@ -163,6 +163,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	# 8[0/1: excute in cwd?] 9[0/1: return qsub cmd or submit job to cluster]
 	# Falk Hildebrand, may 2015
 	my ($tmpsh,$cmd,$ncores,$memory,$jname,$waitJID,$cwd,$immSubm, $restrHostsAR, $optHR) = @_;
+	my $requestedJobName = $jname;
 	#$doSync, 5th arg
 	#14,12G
 	#die $tmpsh."\n";
@@ -379,7 +380,6 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		system "rm -f $tmpsh.otxt $tmpsh.etxt";
 		print $LOGhandle $qcm."\n" unless ($LOGhandle eq "" || !defined($LOGhandle) );
 		#print("$qcm\n\n");
-		print "SUB:$jname\t";
 		#actual job excecution!
 		my $ret = `$qcm`;
 		my $submit_status = $?;
@@ -408,6 +408,11 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		}
 		$optHR->{submittedJobs} = 0 unless (defined $optHR->{submittedJobs});
 		$optHR->{submittedJobs}++;
+		if ($LSF == 3) {
+			print "Completed local job $requestedJobName\n";
+		} else {
+			print "Submitted $requestedJobName as job $jname\n";
+		}
 		# Only record a lock after the scheduler has accepted the job.
 		if ($lockFile ne "" && !-e $lockFile){
 			open my $lock, ">", $lockFile or die "Cannot create lock $lockFile: $!\n";
@@ -495,7 +500,6 @@ sub findQsubSys($){
 		}elsif (!$qpresent && !$bpresent && !$spresent){
 			die "No queueing system found (sbatch, qsub, or bsub). Use -qsubSystem bash for local execution.\n";
 		}
-	print "Using qsubsystem: $iniVal\n";
 	}
 	#die;
 	return $iniVal;
