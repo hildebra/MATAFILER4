@@ -15,6 +15,7 @@
 #5.09: run MSAfix through a validated temporary output before replacing an alignment
 #5.10: consolidate runtime configuration, progress, and repetitive diagnostics
 #5.11: recover to output-local work space when the requested temporary path is unusable
+#5.12: validate persistent continuation checkpoints and restart incomplete stages
 
 use warnings;
 use strict;
@@ -65,7 +66,7 @@ sub limitedWarn;
 sub prepareTemporaryBase;
 
 my $doPhym= 0;
-my $version = 5.11;
+my $version = 5.12;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -419,6 +420,25 @@ my $doMSA = 1;
 my $treesDone = treePresent($tOhr)
 	&& (!$calcNonSyn || treePresent($tOhrNSun))
 	&& (!$calcSyn || treePresent($tOhrSyn));
+my $reusableAlignment = $isAligned || (
+	fileGZe($multAli)
+	&& (!$calcSyn || fileGZe($multAliSyn))
+	&& (!$calcNonSyn || fileGZe($multAliNonSyn))
+);
+if ($continue) {
+	if ($treesDone) {
+		print "Recovery state: complete nonempty tree output found; retaining completed tree stages\n";
+	} elsif ($reusableAlignment) {
+		print "Recovery state: reusable nonempty alignment checkpoint found; rebuilding missing tree stages\n";
+	} else {
+		print "Recovery state: no reusable alignment or complete tree checkpoint; "
+			. "restarting alignment and tree stages from input FASTA/category files\n";
+		safeRemoveTree($MsaD, $removeMSA ? $tmpD : $outD);
+		safeRemoveTree($treeD, $outD);
+		make_path($MsaD) unless -d $MsaD;
+		make_path($treeD) unless -d $treeD;
+	}
+}
 my $calcMSA = !$treesDone && !fileGZe($multAli);
 #if (!$treesDone){#cleanup, avoid checkpoints..
 #	system "rm -f $treeD/*";

@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.11;/,
-	'buildTree temporary-path recovery increments the workflow version');
+like($source, qr/my \$version = 5\.12;/,
+	'buildTree checkpoint recovery increments the workflow version');
 like($source,
 	qr/BuildTree pipeline v\$version.*?Inputs:.*?Paths:.*?Mode:.*?Alignment:.*?Filtering:.*?Trees:.*?Additional analyses:/s,
 	'buildTree starts with a structured runtime configuration header');
@@ -39,6 +39,9 @@ like($source,
 like($source,
 	qr/sub prepareTemporaryBase .*?tempfile\(.*?DIR => \$path.*?print \{\$probeHandle\}.*?unlink \$probePath/s,
 	'a temporary base must pass a create, write, close, and cleanup probe');
+like($source,
+	qr/my \$reusableAlignment = \$isAligned \|\| \(.*?fileGZe\(\$multAli\).*?if \(\$continue\).*?\$treesDone.*?\$reusableAlignment.*?no reusable alignment or complete tree checkpoint.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
+	'continue mode retains only validated checkpoints and restarts incomplete alignment/tree stages');
 like($source, qr/safeRemoveTree\(\$tmpD, \$tmpBase\)/, 'cleanup is limited to the owned temporary directory');
 
 unlike($source, qr/touch \$IQtreef/, 'an empty IQ-TREE checkpoint is not manufactured');

@@ -76,8 +76,11 @@ like($strain, qr/ConspecificMGS\.\$subJob\.log.*?sub mergeConspecificLogs/s,
 	'split workers write isolated conspecific logs that are explicitly merged');
 like($strain, qr/\$onlySubmit == 0 && !\$subJob/,
 	'split children cannot recursively clean shared MGS output directories');
-like($strain, qr/combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?incomplete combined worker input/s,
-	'the caller rejects incomplete combined worker input');
+like($strain,
+	qr/\$publishedInputsReady = fileGZe\("\$outD2\/\$FNAstdof"\).*?fileGZe\("\$outD2\/\$FAAstdof"\).*?fileGZe\("\$outD2\/\$CATstdof"\).*?if \(\$publishedInputsReady && !\$mustRegenerateInputs\).*?combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\)/s,
+	'complete published inputs bypass missing scratch aggregates during tree recovery');
+like($strain, qr/has neither complete published inputs nor complete combined worker input/,
+	'incomplete worker input is reported only when published recovery inputs are also incomplete');
 like($strain, qr/hasFreshParts.*?lacks required.*?return 0/s,
 	'fresh worker parts replace stale combined inputs only when every required part exists');
 like($strain, qr/exact_worker_parts\(\$prefix, \$workerCount\).*?split_generation_complete\(\$splitManifest.*?return \$aggregateComplete/s,
@@ -94,8 +97,11 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.41;/,
-	'within-strain recovery fix increments the workflow version');
+like($strain, qr/my \$version = 0\.42;/,
+	'within-strain published-input resubmission increments the workflow version');
+like($strain,
+	qr/buildTree5 validates its persistent checkpoints.*?my \$contPhylo = 1;.*?-continue \$contPhylo/s,
+	'unfinished trees delegate checkpoint recovery to buildTree continue mode');
 like($strain,
 	qr/sub treeInputPrecopyCommand .*?if \( \$ready_test \).*?Using existing persistent tree inputs.*?staged_inputs=\(\).*?if \[\[ -d \$staging_q \]\].*?if \(\( \$\{#staged_inputs\[\@\]\} \)\).*?No usable staged tree inputs found.*?if ! \( \$ready_test \)/s,
 	'persistent tree inputs take precedence and recovery uses staging only when required');

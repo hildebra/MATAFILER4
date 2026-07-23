@@ -126,7 +126,8 @@ END {
 #.39: make split retries generation-safe, merges atomic, and compressed outgroup updates reliable
 #.40: bound repetitive data warnings, summarize suppressed diagnostics, and clarify progress output
 #.41: make generated tree-input publication safe to rerun after scratch files have already moved
-my $version = 0.41;
+#.42: resubmit unfinished trees from published inputs without requiring scratch aggregates
+my $version = 0.42;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -604,10 +605,19 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		limitedNotice('MGS skipped with empty input', "Skipping $MGS: input is empty.\n");
 		next;
 	} #empty input
-	unless (combineMGSgenesDir($MGS,$tmpD,$tmpD)) {#$outD2); -> keep in tmpdir for now..
-		limitedWarn('MGS with incomplete combined worker input',
-			"$MGS has incomplete combined worker input; leaving it for a repair run\n");
-		next;
+	my $publishedInputsReady = fileGZe("$outD2/$FNAstdof")
+		&& fileGZe("$outD2/$FAAstdof")
+		&& fileGZe("$outD2/$CATstdof");
+	my $mustRegenerateInputs = $repairCAT || $deepRepair || $redoSubmissionData
+		|| exists($legacyLocusMGS{$MGS});
+	if ($publishedInputsReady && !$mustRegenerateInputs) {
+		print "  Recovery input: using complete published FNA/FAA/category files\n";
+	} else {
+		unless (combineMGSgenesDir($MGS,$tmpD,$tmpD)) {#$outD2); -> keep in tmpdir for now..
+			limitedWarn('MGS with incomplete combined worker input',
+				"$MGS has neither complete published inputs nor complete combined worker input; leaving it for an extraction repair run\n");
+			next;
+		}
 	}
 	
 	#final locations (after copying etc)
@@ -624,8 +634,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		chomp $OG;
 		$OG =~ s/^OG://;
 	}
+	# buildTree5 validates its persistent checkpoints and restarts invalid stages.
 	my $contPhylo = 1;
-	$contPhylo = 0 if ($reSubmit || $redoSubmissionData || exists($legacyLocusMGS{$MGS}));
 	
 	#main command to build within species strain tree.. missing outgroup so far ($outgS)
 	
