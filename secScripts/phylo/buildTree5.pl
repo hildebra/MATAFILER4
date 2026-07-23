@@ -12,6 +12,8 @@
 #5.06: 15.4.26: added famse
 #5.07: 16.7.26: validate paths/options and repair filtering, resume, optional-tree, and cleanup paths
 #5.08: 22.7.26: restore partitions, require nonempty resume outputs, and activate per-locus overlap filtering
+#5.09: run MSAfix through a validated temporary output before replacing an alignment
+#5.10: consolidate runtime configuration, progress, and repetitive diagnostics
 
 use warnings;
 use strict;
@@ -56,9 +58,25 @@ sub geneFileStem;
 sub safeRemoveTree;
 sub requireConfiguredTool;
 sub shellQuote;
+sub runMSAFix;
+sub limitedWarn;
 
 my $doPhym= 0;
-my $version = 5.08;
+my $version = 5.10;
+my %limitedWarningCounts;
+my %limitedWarningLimits;
+my $synSummaryCount = 0;
+my $synSiteTotal = 0;
+my $nonSynSiteTotal = 0;
+
+END {
+	for my $category (sort keys %limitedWarningCounts) {
+		my $limit = $limitedWarningLimits{$category} // 5;
+		my $suppressed = $limitedWarningCounts{$category} - $limit;
+		warn "Suppressed $suppressed additional '$category' warning(s)\n"
+			if $suppressed > 0;
+	}
+}
 
 my $pigzBin  = getProgPaths("pigz");
 #my $trDist = getProgPaths("treeDistScr");
@@ -233,8 +251,6 @@ die "Refusing to use filesystem root '$outD' as -outD\n" if $outD eq $volumeRoot
 make_path($outD) unless -d $outD;
 die "Output path is not a directory: $outD\n" unless -d $outD;
 
-print "BuildTree 5 script v$version\nOutDir: $outD\n";
-
 ##### setup dirs
 $codemlOutD = File::Spec->catdir($outD, "codeml") if ($codemlOutD eq "");
 
@@ -261,19 +277,58 @@ if ($subsetSmpls >0){
 }
 ######
 
-if ($MSAprog == 0){print "Warning:  MSAprobs with trimal gives warnings (ignore them)\n";}
+warn "MSAprobs may emit non-fatal trimming warnings\n" if $MSAprog == 0;
 if ($doCFML && !$doRAXML){die "Need RaxML alignment, if Clonal fram is to be run..\n";}
 
 if ($aaFna eq "" || $useAA4tree){	$calcSyn=0;$calcNonSyn=0;}
-if ($filt <1){$ntFrac=$filt; print "Using filter with $ntFrac fraction of nts\n";}
-if ($outgroup ne ""){print "Using outgroup $outgroup\n";}
-if ($bootStrap>0){print "Using bootstrapping in tree building\n";}
+if ($filt <1){$ntFrac=$filt;}
 #if (($calcDistMat || $calcDistMatExt) && $isAligned || !$MSAprog){die"Can't calc distance mat, unless clustalO is being used for MSA\n";}
 #else {$ntCntTotal = $filt;}
 
 $MSAreq = 0 if (!$doFastTree && !$doVeryFastTree && !$doRAXML && !$doRAXMLng && !$doCFML && !$doGubbins && !$doIQTree);
 
 make_path($tmpD) unless -d $tmpD;
+my %msaProgramNames = (
+	0 => "MSAprobs",
+	1 => "Clustal Omega",
+	2 => "MAFFT",
+	4 => "MUSCLE5",
+	5 => "FAMSA2",
+);
+my @treeMethods;
+push @treeMethods, "IQ-TREE" if $doIQTree;
+push @treeMethods, "RAxML" if $doRAXML;
+push @treeMethods, "RAxML-NG" if $doRAXMLng;
+push @treeMethods, "FastTree" if $doFastTree;
+push @treeMethods, "VeryFastTree" if $doVeryFastTree;
+push @treeMethods, "ClonalFrameML" if $doCFML;
+push @treeMethods, "Gubbins" if $doGubbins;
+my @inputDescriptions;
+push @inputDescriptions, "NT=$fnFna" if $fnFna ne "";
+push @inputDescriptions, "AA=$aaFna" if $aaFna ne "";
+push @inputDescriptions, "categories=$cogCats" if $cogCats ne "";
+push @inputDescriptions, "genomes=$genoindir" if $genoindir ne "";
+print "=====================================================\n";
+print "BuildTree pipeline v$version\n";
+print "Inputs: " . join("; ", @inputDescriptions) . "\n";
+print "Paths: output=$outD; temporary=$tmpD; alignments=$MsaD; trees=$treeD\n";
+print "Mode: " . ($cogCats ne "" ? "multi-locus" : "single-locus")
+	. "; sequence=" . ($useAA4tree ? "amino acid" : "nucleotide")
+	. "; input aligned=" . ($isAligned ? "yes" : "no")
+	. "; continue=" . ($continue ? "yes" : "no") . "\n";
+print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
+	. ($postFilter || "<none>") . "; remove MSA=" . ($removeMSA ? "yes" : "no") . "\n";
+print "Filtering: per-gene length fraction=$ntFracGene; species NT fraction=$ntFrac; "
+	. "minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
+print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
+	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
+	. "; supertree=" . ($doSuperTree ? "yes" : "no") . "\n";
+print "Additional analyses: synonymous=" . ($calcSyn ? "yes" : "no")
+	. "; nonsynonymous=" . ($calcNonSyn ? "yes" : "no")
+	. "; distance matrix=" . ($calcDistMat ? "yes" : "no")
+	. "; dN/dS=" . ($doDNDS ? "yes" : "no")
+	. "; TreeShrink=" . ($useTreeShrink ? "yes" : "no") . "\n";
+print "=====================================================\n";
 my $cmd =""; my %usedGeneNms;
 
 
@@ -287,10 +342,9 @@ if ($Ete){
 	make_path($eteOut);
 	$cmd = "$eteBin build -n $fnFna -a $aaFna -w clustalo_default-none-none-none  -m sptree_raxml_all --cpu $ncore -o $eteOut --clearall --nt-switch 0.0 --noimg";
 	$cmd .= " --cogs $cogCats" unless ($cogCats eq "");
-	print "Running tree analysis ..";
-	print $cmd."\n";
+	print "Running ETE tree analysis; detailed output: $eteOut/ETE.log\n";
 	systemW($cmd . " > $eteOut/ETE.log 2>&1");
-	print " Done.\n$eteOut\n";
+	print "ETE tree analysis completed; output: $eteOut\n";
 	exit(0);
 }
 
@@ -374,7 +428,7 @@ if ($isAligned){
 		my $source = abs_path($alignedInput) or die "Cannot resolve aligned input $alignedInput: $!\n";
 		symlink($source, $multAli) || copy($source, $multAli)
 			or die "Cannot link or copy aligned input $source to $multAli: $!\n";
-		print "Using ".($useAA4tree ? "AA" : "NT")." sequences to build tree..\n\n";
+		print "Pre-aligned input staged as $multAli\n";
 	}
 } elsif (!$doMSA && $cogCats ne ""){
 	fillGeneList($cogCats);
@@ -384,7 +438,8 @@ if ($isAligned){
 	if ($aaFna ne ""){
 		$hr = readFasta($aaFna,1); %FAA = %{$hr};
 	}
-	print "Read Fasta(s)\n";
+	print "Loaded sequence inputs: " . scalar(keys %FNA) . " nucleotide and "
+		. scalar(keys %FAA) . " protein records\n";
 
 	############# test length of fna sequences can be divided by 3 ##############################
 		
@@ -396,7 +451,12 @@ if ($isAligned){
 			$div = $length/3;
 			push(@notThrees, $FNAseq) if($div =~ /\D/);
 		}
-		print "FNA seq not divisible by 3 (N=". scalar(@notThrees) . "): @notThrees\n" if (@notThrees);
+		if (@notThrees) {
+			my @examples = @notThrees > 10 ? @notThrees[0 .. 9] : @notThrees;
+			warn "Nucleotide sequences not divisible by 3: " . scalar(@notThrees)
+				. "; examples: " . join(", ", @examples)
+				. (@notThrees > 10 ? " (+".(@notThrees - 10)." more)" : "") . "\n";
+		}
 	}
 
 	############# test if enough seq in Sample to add to tree (avoids confusion in MSA) ##############################
@@ -474,9 +534,13 @@ if ($isAligned){
 		#print @spl . " ";
 	}
 	
-	print "\n\n-----------------  Prefilter  ------------------\n";
-	print "Remaining gene cats: ". scalar(@linesCats3) . "/" . scalar(@linesCats)."; Removed $geneTooShort/$geneTooLong genes < $ntFracGene qtl90 gene length\n";
-	print "Warning:: Size linesCats3:: " . @linesCats3 . " linesCats2:: " .@linesCats2 ."\n$GenesQtl50 || $GenesQtl90 * $fracMaxGenes90pct\n" if (@linesCats3 < 20);
+	print "Gene-category prefilter: retained " . scalar(@linesCats3) . "/"
+		. scalar(@linesCats) . " categories; removed $geneTooShort of "
+		. ($geneTooShort + $geneTooLong) . " sequence(s) below $ntFracGene of their gene-length Q90\n";
+	warn "Only " . scalar(@linesCats3) . " gene categories remain after prefiltering "
+		. "(Q50=$GenesQtl50, Q90=$GenesQtl90, category threshold="
+		. ($GenesQtl90 * $fracMaxGenes90pct) . ")\n"
+		if @linesCats3 < 20;
 	@linesCats2 = (); #make space..
 	$cnt=-1;
 	foreach my $aRef (@linesCats3){
@@ -554,21 +618,25 @@ if ($isAligned){
 	#############################################################################################
 
 	
-	print "------------------------------------------------\n";
-	print "Per species: MaxGenes: $maxGenes, Qtl90Genes: $qtl90Genes, MaxAA: $maxNtCntTotal, Qtl90 NTs: $qtl90NTcntAll\n";
-	print "Species/Smpls removed: <NTs($ntFrac,$ntCntTotal):$tooFewNTs,$tooFewNTs2 ; <genes/species($GeneFracPSpec):$tooFewGenes\n";
-	print "Remaining Smpls/Strains: $specsRemain/".scalar(keys%specList)."\n";
-	print "------------------------------------------------\n";
+	print "Species prefilter: retained $specsRemain/" . scalar(keys %specList)
+		. "; removed for relative NT=$tooFewNTs, minimum NT=$tooFewNTs2, minimum genes=$tooFewGenes\n";
+	print "Species input statistics: maximum genes=$maxGenes; gene-count Q90=$qtl90Genes; "
+		. "maximum informative NT=$maxNtCntTotal; informative-NT Q90=$qtl90NTcntAll\n";
 	#die "$maxGenes\n";
 	@linesCats = (); #empty array
 
 
 	#die;
 	$cnt=-1; #line counter
+	my $alignedLoci = 0;
+	my $candidateLoci = scalar @linesCats3;
 	foreach my $aRef (@linesCats3){#go over each gene category, building MSA for each
 	#----------------- main MSA loop ----------------------
 		$cnt++; my @spl = @{$aRef};
-		if (@spl ==0){print "No categories in cat file line $cnt\n";next;}
+		if (@spl ==0){
+			limitedWarn("empty gene category", "Ignoring empty filtered gene-category entry at index $cnt\n");
+			next;
+		}
 		if ($spl[0] =~ m/^#/){shift @spl;}
 		my @spl2 = parseSeqId($spl[0], "category line ".($cnt + 1));
 		my $gene = $spl2[1];
@@ -682,9 +750,7 @@ if ($isAligned){
 				convertMultAli2NT($tmpOutMSAaa,$tmpInMSAnt,$tmpOutMSA);
 				($tmpOutMSAsyn,$tmpOutMSAnonsyn) = synPosOnly($tmpOutMSA,$tmpOutMSAaa,0,$ogrGenes,$calcSyn,$calcNonSyn);
 				#this will not affect 4-fold only etc..
-				my $msaFbin = getProgPaths("MSAfix");
-				$cmd = "$msaFbin -i $tmpOutMSA  -maskLowID -maskBorderGap -rmGapColsGreater ".$maxGapPerCol." -minGoodPosFrac 0.6\n";
-				systemW $cmd;
+				runMSAFix($tmpOutMSA, $maxGapPerCol);
 			}
 			push (@MSAs,$finOutMSA);
 			push (@MSAsSyn,$tmpOutMSAsyn) if ($tmpOutMSAsyn ne "");
@@ -697,12 +763,15 @@ if ($isAligned){
 		unlink  $tmpInMSA; unlink $tmpInMSAnt;
 		push (@MSrm,$finOutMSAaa,$finOutMSA);
 		#die "$MSrm[1]\n";
-		print "$cnt "; 
 		move($tmpOutMSAaa, $finOutMSAaa) or die "Cannot move $tmpOutMSAaa to $finOutMSAaa: $!\n"
 			if (!fileGZs($finOutMSAaa) && -e $tmpOutMSAaa);
 		move($tmpOutMSA, $finOutMSA) or die "Cannot move $tmpOutMSA to $finOutMSA: $!\n"
 			if (!fileGZs($finOutMSA) && -e $tmpOutMSA);
+		$alignedLoci++;
+		print "Prepared $alignedLoci/$candidateLoci locus alignments\n"
+			if $alignedLoci == 1 || $alignedLoci % 25 == 0;
 	}
+	print "Per-locus alignment summary: $alignedLoci/$candidateLoci candidate loci prepared\n";
 	
 	my $mergPIDtag = "_merge";
 	mergePids("$MsaD/",$cnt, "AA",$mergPIDtag) if ($calcDistMat); #merge different percIDs
@@ -710,12 +779,17 @@ if ($isAligned){
 	
 	#could be used to filter genes further, but not for now
 	#pogenStatsFilter();
-	if ($outgroup ne ""){print "Found $ogrpCnt of $cnt outgroup sequences\n";}
+	print "Outgroup coverage: $ogrpCnt/$candidateLoci candidate loci contained '$outgroup'\n"
+		if $outgroup ne "";
 } elsif ($doMSA) {#no marker way, single gene
 	my $r1; my $r2;
 	#,$r1,$r2)
 	$multAli = singleGeneMSAprocess($multAli)#;,\@MSAs,\@MSA_AA);
 	#@MSAs = @{$r1};	@MSA_AA = @{$r2};
+}
+if ($synSummaryCount) {
+	print "Synonymous-site classification summary: $synSummaryCount alignment(s), "
+		. "$synSiteTotal synonymous-variable and $nonSynSiteTotal nonsynonymous-variable codon(s)\n";
 }
 
 #die "@MSA_AA\n\n";
@@ -775,7 +849,8 @@ my $phyloTree = "";
 if ($doSuperTree || $doSuperCheck){#can be for 2 reasons: 1) build actual super tree 2) quality control
 	my @treeCol;
 	for (my $i=0;$i<@theRealMSAs;$i++){
-		print "===============>  Subtree $i  <===============\n";
+		print "Building subtree " . ($i + 1) . "/" . scalar(@theRealMSAs) . "\n"
+			if $i == 0 || ($i + 1) % 25 == 0;
 		my $tOhrST = createTreeOpt($theRealMSAs[$i],"allsites",$i,1,"");
 		my $trRetH = treeAtHeart($tOhrST);
 		push(@treeCol,${$trRetH}{IQtreeout}.".treefile");
@@ -784,6 +859,7 @@ if ($doSuperTree || $doSuperCheck){#can be for 2 reasons: 1) build actual super 
 		if ($calcNonSyn){
 		}
 	}
+	print "Subtree construction summary: " . scalar(@treeCol) . " subtree(s) prepared\n";
 	if ($doSuperTree){
 		my $outST = "$treeD/IQtree_allsites.treefile";
 		my $specFile = "$treeD/IQtree_allsites.species";
@@ -869,7 +945,7 @@ if ($useTreeShrink){
 	my $inputTree = ${$trRetH}{nwk} // "";
 	die "TreeShrink requested but no completed tree is available\n" unless $inputTree ne "" && -s $inputTree;
 	my $cmd = "$trShr -i $outD -t ".shellQuote($inputTree)." -q 0.05  -O TS. -f";
-	print $cmd."\n";
+	print "Running TreeShrink on $inputTree\n";
 	systemW($cmd);
 }
 
@@ -915,7 +991,8 @@ if ($gzipInput){
 safeRemoveTree($tmpD, $tmpBase);
 	###################### ETE ######################3
 
-print "All done: $outD \n\n";
+print "BuildTree completed successfully\n";
+print "Outputs: alignments=$MsaD; trees=$treeD; run directory=$outD\n";
 exit(0);
 
 
@@ -1142,7 +1219,7 @@ sub singleGeneMSAprocess($){
 	my ($multAli) = @_;#,$MSAsar,$MSA_AAar) = @_;
 	#my @MSAs = @{$MSAsar};
 	#my @MSA_AA=@{$MSA_AAar};
-	print "No gene categories given, assumming 1 gene / species in input\n";
+	print "Single-locus mode: no gene-category file supplied\n";
 	my $tmpInMSA = $aaFna;
 	#my $tmpInMSAnt = $fnFna;
 	my $tmpOutMSAaa = "$tmpD/outMSA.faa";
@@ -1186,9 +1263,7 @@ sub singleGeneMSAprocess($){
 
 	if ($tmpInMSA ne "" && !$useAA4tree){
 		convertMultAli2NT($tmpOutMSAaa,$fnFna,$multAli);
-		my $msaFbin = getProgPaths("MSAfix");
-		$cmd = "$msaFbin -i $multAli  -maskLowID -maskBorderGap -rmGapColsGreater ".$maxGapPerCol." -minGoodPosFrac 0.6\n";
-		systemW $cmd;
+		runMSAFix($multAli, $maxGapPerCol);
 		($multAliSyn, $multAliNonSyn) = synPosOnly($multAli,$tmpOutMSAaa,0,"",$calcSyn,$calcNonSyn);
 
 		#system "rm $tmpInMSA $fnFna $tmpOutMSAaa";
@@ -1198,7 +1273,7 @@ sub singleGeneMSAprocess($){
 	}
 	#$multAli = $tmpOutMSA; $multAliSyn = $tmpOutMSAsyn;
 	
-	print "OUTPUT:: $multAli\n";
+	print "Single-locus alignment ready: $multAli\n";
 	
 	return $multAli;#,\@MSAs,\@MSA_AA);
 
@@ -1218,11 +1293,16 @@ sub FastGear{
 #		open I,"<$cogCats" or die "Can't open cogcats $cogCats\n"; 
 		my ($xI,$ST)= gzipopen($cogCats,"CogCATs phylo");
 
+		my $cnt3 = 0;
 		while (<$xI>){
-			my $cnt3 =0;
 			chomp; my @splF = split /\t/;
 			@splF = grep !/^NA$/, @splF;#remove NAs
-			if (@splF ==0){print "No categories in cat file line $cnt3\n";next;}
+			if (@splF ==0){
+				limitedWarn("empty fastGEAR category",
+					"Ignoring empty fastGEAR category at line " . ($cnt3 + 1) . "\n");
+				$cnt3++;
+				next;
+			}
 			my @splF2 = parseSeqId($splF[0], "fastGEAR category line ".($cnt3 + 1));
 			#die "@spl\n";
 			push(@geneListF, $splF2[1]);
@@ -1236,6 +1316,7 @@ sub FastGear{
 		systemW("cp -r ".shellQuote($MsaDF1)." ".shellQuote($MsaDF2));
 		
 
+		my $fastgearDone = 0;
 		foreach my $geneF (@geneListF){
 			my $gene_file_stem = geneFileStem($geneF);
 			my $outFG = "$outD/fastGear/fastGear_Results/$gene_file_stem";
@@ -1260,7 +1341,11 @@ sub FastGear{
 			close $fg_out or die "Cannot close fastGEAR input $fastgear_input: $!\n";
 			my $FGparFile = requireConfiguredTool("MF4_FASTGEAR_PARAM_FILE", "fastGEAR parameter file");
 			runFastgear($gene_file_stem, $outFileFG, $MsaDF2, $FGparFile);
+			$fastgearDone++;
+			print "fastGEAR progress: $fastgearDone/" . scalar(@geneListF) . " loci\n"
+				if $fastgearDone == 1 || $fastgearDone % 25 == 0;
 		}
+		print "fastGEAR summary: $fastgearDone/" . scalar(@geneListF) . " loci completed\n";
 		safeRemoveTree($outD_clust, $outD);
 		#die;
 	}
@@ -1306,7 +1391,7 @@ sub FastGear{
 
 		my $SRC_cmd = "$fastgearSummaryBin $matlabBin $FGDataD fastGear_";
 		systemW($SRC_cmd);
-		print "fastgear collect recombination statistics finished";
+		print "fastGEAR recombination summary completed: $summaryD\n";
 		my $FG_sumOut = "$summaryD/fastGear__recSummaries.txt";
 		if(-e $FG_sumOut){safeRemoveTree($resultD, $FGDataD);}
 		#die;
@@ -1476,7 +1561,7 @@ sub calcDiffDNA($ $){
 
 	}
 	close O;
-	print "Dont calculating Distance matrix\n";
+	print "Distance matrix written: $opID\n";
 	#die "done\n";
 }
 
@@ -1559,7 +1644,7 @@ sub calcDisPos($ $ $){
 		print O ">$k1\n$seq\n";
 	}
 	close O;
-	print "Dont calculating Distance matrix\n";
+	print "Distance matrix written: $opID\n";
 	#die "done\n";
 }
 
@@ -1573,6 +1658,8 @@ sub mergeMSAs($ $ $ $){
 	}
 	my %bigMSAFAAnxs;my %bigMSAFAA;foreach my $sm (@smps){$bigMSAFAA{$sm} ="";$bigMSAFAAnxs{$sm}="";}
 	my @lengthsParts;
+	my $overlapFilteredLoci = 0;
+	my $overlapColumnsRemoved = 0;
 	foreach my $MSAf (@MSAs){
 		#print $MSAf."\n"; 
 		my $hit =0; my $miss =0;
@@ -1582,18 +1669,24 @@ sub mergeMSAs($ $ $ $){
 		next if (@Mkeys == 0);
 		my ($firstMsaSample, $gcat, $separator) = parseSeqId($Mkeys[0], "MSA header in $MSAf");
 		my $len = length($MFAA{$Mkeys[0]});
-		if ($len == 0){print STDERR "0 length sequence discovered in $MSAf\n";next ;}
+		if ($len == 0){
+			limitedWarn("zero-length MSA", "Ignoring zero-length alignment $MSAf\n");
+			next;
+		}
 		my $originalLen = $len;
 		my ($filtered, $retainedLen, $removedColumns) =
 			filter_alignment_by_overlap(\%MFAA, $isAA, $minOverlapMSA);
 		%MFAA = %{$filtered};
 		if ($retainedLen == 0) {
-			warn "Overlap filter removed every column from $MSAf; skipping this locus\n";
+			limitedWarn("empty overlap-filtered MSA",
+				"Overlap filtering removed every column from $MSAf; skipping this locus\n");
 			next;
 		}
 		$len = $retainedLen;
-		print "Overlap filter retained $len/$originalLen columns in $MSAf\n"
-			if $removedColumns;
+		if ($removedColumns) {
+			$overlapFilteredLoci++;
+			$overlapColumnsRemoved += $removedColumns;
+		}
 		push(@lengthsParts,$len);
 		foreach my $sm (@smps){
 			my $curK = $sm.$separator.$gcat;
@@ -1619,6 +1712,7 @@ sub mergeMSAs($ $ $ $){
 	my $factor = 1; $factor = 3 if ($isAA);
 	my @ksMSAFAA = sort keys %bigMSAFAA;
 	my $iniSeqNum = @ksMSAFAA; my $remSeqNum = 0;
+	my @removedSeqExamples;
 	my %charCnts; my $maxNtCnt=0;
 		#simply count gaps and N's
 	foreach my $kk (@ksMSAFAA){
@@ -1650,13 +1744,9 @@ sub mergeMSAs($ $ $ $){
 		my $num1 = $charCnts{$kk};
 		#print "$num1\n";
 		if ( $maxNtCnt == 0 ||  ($num1 < ($qtl90NTcnts *$ntFrac) && $num1 < $qtl25NTcnts) || ($num1 < ($ntCntTotal/$factor) ) ){
-			print "($num1 / $qtl90NTcnts ) < $ntFrac) && $num1 < $qtl25NTcnts || ($num1 < ($ntCntTotal/$factor) )\n";
 			delete $bigMSAFAA{$kk}; delete $bigMSAFAAnxs{$kk}; $remSeqNum++; 
-			if ($maxNtCnt == 0){
-				print "$kk $num1  infinite $ntFrac \n";
-			} else {
-				print "$kk $num1  " . int($num1*1000 / ($maxNtCnt) )/1000 ." $ntFrac \n";
-			}
+			push @removedSeqExamples, "$kk($num1 informative positions)"
+				if @removedSeqExamples < 5;
 		}
 		#print "$num1  $kk \n";#$bigMSAFAA{$kk}\n\n"; last;
 	}
@@ -1688,7 +1778,12 @@ sub mergeMSAs($ $ $ $){
 	}
 	close O;
 	
-	print "Removed $remSeqNum of $iniSeqNum sequences\n";
+	print "Alignment merge summary: retained " . ($iniSeqNum - $remSeqNum) . "/$iniSeqNum sequences";
+	print "; removed examples: " . join(", ", @removedSeqExamples) if @removedSeqExamples;
+	print "\n";
+	print "Overlap filtering summary: $overlapFilteredLoci locus/loci changed; "
+		. "$overlapColumnsRemoved columns removed\n"
+		if $overlapFilteredLoci;
 }
 
 
@@ -1881,7 +1976,14 @@ sub synPosOnly{#now finished, version is cleaner
 	my ($reportedSample, $reportedGene) = parseSeqId($aSeq[0], "synonymous-site MSA header", 1);
 	$reportedGene = "alignment" if $reportedGene eq "";
 	#die "$outMSA\n";
-	print "$reportedGene ($syn / $nsyn) ".@aSeq." seqs \n";
+	$synSummaryCount++;
+	$synSiteTotal += $syn;
+	$nonSynSiteTotal += $nsyn;
+	print "Site classification example: $reportedGene; synonymous=$syn; nonsynonymous=$nsyn; "
+		. scalar(@aSeq) . " sequences\n"
+		if $synSummaryCount <= 5;
+	print "Further per-locus site-classification messages are suppressed; an aggregate follows alignment generation\n"
+		if $synSummaryCount == 6;
 	#print " only\n";
 	#print "\n";
 	return ($outMSA,$outMSAns);
@@ -1934,7 +2036,6 @@ sub codeml{
 			## run codeml  
 			$cmd = "$pamlBin $codemlOutDTmp/${gene}_${rep}_${modelName}.c\n";			
 			systemW $cmd; 
-			print "finished codeml Model $modelName run $rep on $gene\n";
 			#die;
 			
 			#get lnL and push to array
@@ -1957,6 +2058,7 @@ sub codeml{
 		#die "@repSel\n$repSelected\n";
 		copy("$codemlOutDTmp/codemlOut_${gene}_${repSelected}_${modelName}.txt", "$codemlOutDFile/out_M$modelName.txt")
 			or die "Cannot copy selected codeml result for $gene model $modelName: $!\n";
+		print "codeml summary: gene=$gene; model=$modelName; repeats=$repeatCounts; selected repeat=$repSelected\n";
 	}	
 }
 
@@ -1988,7 +2090,6 @@ sub hyphy{
 	$cmd .= "$hyphyBin CPU=$ncore fubar --alignment $MSAfile2 --tree $nwkFile_gene2 > $log\n";
 	$cmd .= "gzip -c $MSAfile2.FUBAR.json > $log.json.gz\n";
 	$cmd .= "rm -f $MSAfile2.FUBAR.*\n";
-	print $log."\n";
 	systemW $cmd ;#if (!-e $log);
 	#die $cmd ;#if (!-e $log);
 	return $log;
@@ -2061,6 +2162,7 @@ sub coreHyPhy{
 	#		print "$MSAfile2\n";
 
 	open O,">$MSAfile3" or die "can't open MSA out $MSAfile3\n";
+	my $maskedInternalStops = 0;
 	foreach my $genome (keys %FNA){
 		#print "$genome\n";
 		my ($genome2) = parseSeqId($genome, "selection-analysis MSA header");
@@ -2074,8 +2176,8 @@ sub coreHyPhy{
 				$x = index($seq,$sto,$x);
 				last if ($x < 0);
 				if ($x % 3 ==0){
-					print "HIT\n";
 					substr($seq,$x,3) = "NNN";
+					$maskedInternalStops++;
 				}
 				$x++;
 			}
@@ -2084,6 +2186,9 @@ sub coreHyPhy{
 		push (@genomeList, $genome2);
 	} 
 	close O;
+	limitedWarn("internal stop codons",
+		"Masked $maskedInternalStops in-frame stop codon(s) while preparing $gene selection analysis\n")
+		if $maskedInternalStops;
 	if ($cntMissTree>0){print "Removed from MSA $cntMissTree sequences due to not being present in tree\n";}
 	next if(scalar @genomeList <3);
 			
@@ -2122,7 +2227,6 @@ sub selecAnalysis($ $ $ $ $){
 			coreHyPhy($MsaD,$gene_file_stem,"",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
-		print "reading jsons..";
 		foreach my $gene (keys %logs){
 			#my $summary = fubarXML("$logs{$gene}");
 			next unless (-e "$logs{$gene}.json.gz");
@@ -2131,8 +2235,8 @@ sub selecAnalysis($ $ $ $ $){
 			$sumTxt .= "$gene\t$summary";
 			#print "$sumTxt\n";
 		}
-		print "Done reading\n";
 		open O,">$logF1";		print O $sumTxt;		close O;
+		print "Selection summary written: $logF1\n";
 	}
 	#add by hand the unique seqs subset..
 	$logF1 =  "$codemlOutD/hyphy.fubar.unID.txt";
@@ -2145,7 +2249,6 @@ sub selecAnalysis($ $ $ $ $){
 			coreHyPhy($MSAsubsD,$gene_file_stem,"\\.uInd",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
-		print "reading jsons unID..";
 		foreach my $gene (keys %logs){
 			#my $summary = fubarXML("$logs{$gene}");
 			next unless (-e "$logs{$gene}.json.gz");
@@ -2155,8 +2258,8 @@ sub selecAnalysis($ $ $ $ $){
 			$sumTxt .= "$gene\t$summary";
 			#system "rm -f $logs{$gene}*";
 		}
-		print "Done reading\n";
 		open O,">$logF1";		print O $sumTxt;		close O;
+		print "Selection summary written: $logF1\n";
 	}
 	#now go through subsets..
 	
@@ -2173,7 +2276,6 @@ sub selecAnalysis($ $ $ $ $){
 			coreHyPhy($MSAsubsD,$gene_file_stem,"uInd\\.s$subs",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
-		print "reading jsons s$subs..";
 		foreach my $gene (keys %logs){
 			#my $summary = fubarXML("$logs{$gene}");next if ($summary eq "");
 			next unless (-e "$logs{$gene}.json.gz");
@@ -2182,8 +2284,8 @@ sub selecAnalysis($ $ $ $ $){
 			$sumTxt .= "$gene\t$summary";
 			#system "rm -f $logs{$gene}*";
 		}
-		print "Done reading\n";
 		open O,">$logF1";		print O $sumTxt;		close O;
+		print "Selection summary written: $logF1\n";
 	}
 	system "rm -fr $codemlOutDTmp" if (-e $codemlOutDTmp);
 	
@@ -2278,6 +2380,53 @@ sub shellQuote{
 	return "'$value'";
 }
 
+sub limitedWarn {
+	my ($category, $message, $limit) = @_;
+	$limit = 5 unless defined $limit;
+	$limitedWarningLimits{$category} = $limit;
+	my $count = ++$limitedWarningCounts{$category};
+	warn $message if $count <= $limit;
+	warn "No more '$category' warning examples will be shown\n"
+		if $count == $limit + 1;
+}
+
+sub runMSAFix {
+	my ($alignment, $maxGapFraction) = @_;
+	die "MSAfix input is missing or empty: $alignment\n" unless -s $alignment;
+
+	my $msaFbin = getProgPaths("MSAfix");
+	my $tmpOutput = "$alignment.MSAfix.$$.fna";
+	unlink $tmpOutput or die "Cannot remove stale MSAfix output $tmpOutput: $!\n"
+		if -e $tmpOutput;
+
+	my $cmd = join(" ",
+		shellQuote($msaFbin),
+		"-i", shellQuote($alignment),
+		"-o", shellQuote($tmpOutput),
+		"-maskLowID",
+		"-maskBorderGap",
+		"-rmGapColsGreater", $maxGapFraction,
+		"-minGoodPosFrac", "0.6",
+	) . "\n";
+
+	my $ok = eval {
+		systemW($cmd);
+		1;
+	};
+	if (!$ok) {
+		my $error = $@ || "MSAfix failed for $alignment\n";
+		unlink $tmpOutput if -e $tmpOutput;
+		die $error;
+	}
+	if (!-s $tmpOutput) {
+		unlink $tmpOutput if -e $tmpOutput;
+		die "MSAfix completed without producing a nonempty output for $alignment\n";
+	}
+
+	rename $tmpOutput, $alignment
+		or die "Cannot replace $alignment with validated MSAfix output $tmpOutput: $!\n";
+}
+
 
 sub safeRemoveTree{
 	my ($path, $parent) = @_;
@@ -2321,7 +2470,6 @@ sub runFastgear($ $ $ $){
 		." ".shellQuote($outFile)." $parFile";
 	systemW($cmd);
 	die "fastGEAR did not produce $outFile for $geneFG\n" unless -s $outFile;
-	print "fastgear on $geneFG finished";
 	#die;
 }
 
@@ -2341,7 +2489,7 @@ sub prepGenoDirs($){
 		if ($wildcardflag ne ""){
 			$genoindir .= $wildcardflag;#"/*\.fna";
 		} else {
-			print "Warning: please give wildcard for genoIndir.\nAssumming *.fna now..\n";
+			warn "No -wildcardflag supplied for -genoInD; defaulting to *.fna\n";
 			$genoindir .= "/*\.fna";
 		}
 	}
@@ -2350,7 +2498,7 @@ sub prepGenoDirs($){
 	if (scalar(@sfiles) == 0){die "$genoindir contains no files!\n";}
 	
 	#die "@sfiles\n";
-	print "External Genomes: $genoindir\nProcessing ".scalar(@sfiles)." genomes\n";
+	print "External-genome preparation: " . scalar(@sfiles) . " input genome(s) matching $genoindir\n";
 	my %FNAfmg; my %FAAfmg;my %MGSFMG;
 	
 	my $cnt=0;
@@ -2360,11 +2508,12 @@ sub prepGenoDirs($){
 		my $tag = $tarG;
 		$tag =~ s/.*\///;
 		$tag =~ s/\.[^\.]*$//;
-		print "$tarG\n";
 		my ($genes,$prots) = getGenoGenes($tarG,0,$ncore);
 		my $FMGdir = getFMG("",$prots,$genes,$ncore);
 		my ($hrN,$hrA,$hrC) = readFMGdir( "$FMGdir",$tag ,".");
 		$cnt++;
+		print "External-genome progress: $cnt/" . scalar(@sfiles) . " genomes\n"
+			if $cnt == 1 || $cnt % 25 == 0;
 		my %FAA=%{$hrA};
 		my %FNA=%{$hrN};
 		my %COGcat=%{$hrC};
@@ -2379,6 +2528,7 @@ sub prepGenoDirs($){
 		#die;
 		#last if ($cnt>5);#DEBUG
 	}
+	print "External-genome summary: $cnt genome(s) processed\n";
 	
 	
 	open OA,">$aaFna"  or die "Can't open faa out file $aaFna\n"; 

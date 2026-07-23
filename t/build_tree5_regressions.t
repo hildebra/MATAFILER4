@@ -15,6 +15,21 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
+like($source, qr/my \$version = 5\.10;/,
+	'buildTree output cleanup increments the workflow version');
+like($source,
+	qr/BuildTree pipeline v\$version.*?Inputs:.*?Paths:.*?Mode:.*?Alignment:.*?Filtering:.*?Trees:.*?Additional analyses:/s,
+	'buildTree starts with a structured runtime configuration header');
+like($source, qr/sub limitedWarn.*?No more '\$category' warning examples/s,
+	'buildTree caps repetitive warning examples');
+like($source, qr/END \{.*?Suppressed \$suppressed additional/s,
+	'buildTree reports suppressed warning totals');
+like($source, qr/Per-locus alignment summary:.*?Synonymous-site classification summary:/s,
+	'buildTree reports aggregate alignment and site-classification progress');
+like($source, qr/Alignment merge summary:.*?Overlap filtering summary:/s,
+	'buildTree consolidates sequence and overlap filtering diagnostics');
+unlike($source, qr/print \$cmd\."\\n"|print \$cmd\."\\n\\n"/,
+	'buildTree does not echo routine execution commands');
 like($source, qr/-outD is required/, 'an output directory is explicitly required');
 like($source, qr/Refusing to use filesystem root/, 'filesystem roots are rejected as output directories');
 like($source, qr/buildTree5_\$\{tmpTag\}_\$\$/, 'work is isolated in a process-owned temporary directory');
@@ -28,6 +43,15 @@ like($source, qr/my \$lengthInNt = .*\? \$totalNTs\{\$sp\} : \$totalNTs\{\$sp\} 
 like($source, qr/systemW\(\$cmd1\."\\n"\.\$cmd2\."\\n"\)/,
 	'alignment and post-filter commands use checked execution');
 like($source, qr/MSA command completed without producing/, 'alignment output is verified');
+like($source, qr/runMSAFix\(\$tmpOutMSA, \$maxGapPerCol\)/,
+	'per-locus nucleotide alignments use the guarded MSAfix path');
+like($source, qr/runMSAFix\(\$multAli, \$maxGapPerCol\)/,
+	'single-gene nucleotide alignments use the guarded MSAfix path');
+like($source,
+	qr/sub runMSAFix.*?\$tmpOutput = "\$alignment\.MSAfix\.\$\$\.fna".*?"-o", shellQuote\(\$tmpOutput\).*?if \(!-s \$tmpOutput\).*?rename \$tmpOutput, \$alignment/s,
+	'MSAfix writes a nonempty sibling temporary file before atomically replacing its input');
+like($source, qr/if \(!\$ok\).*?unlink \$tmpOutput if -e \$tmpOutput.*?die \$error/s,
+	'a failed MSAfix attempt removes its partial output and preserves the original alignment');
 
 like($source, qr/\$pigzBin -d .*\$partiF\.gz/, 'compressed partition restoration names the gzip file');
 unlike($source, qr/\$partiF\s*=\s*""\s+unless\s*\(-e \$partiF\)/,
