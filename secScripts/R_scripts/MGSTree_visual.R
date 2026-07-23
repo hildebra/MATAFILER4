@@ -85,37 +85,74 @@ read_taxonomy <- function(path, tip_labels) {
     metadata$genus[metadata$species %in% c("", "?")],
     "unclass"
   )
-  metadata$label <- metadata$MGS
+  # ggtree's `%<+%` joins metadata onto the tree by renaming the *first*
+  # column of this data frame to "label" and matching it against the tree's
+  # tip labels. The identifier column (MGS) must therefore come first; and
+  # since that rename creates a "label" column itself, we must not also keep
+  # a separately-named "label" column, or dplyr::rename() fails with
+  # "Names must be unique" (duplicate "label" columns).
+  metadata <- metadata[, c("MGS", setdiff(names(metadata), "MGS"))]
   metadata
 }
 
 root_tree <- function(tree, metadata) {
-  archaea <- unique(metadata$MGS[metadata$superkingdom == "Archaea"])
-  archaea <- intersect(archaea, tree$tip.label)
+  # Group tip labels by superkingdom (e.g. Archaea vs Bacteria) so we can try
+  # rooting the tree between whichever superkingdoms are actually present,
+  # rather than assuming a single fixed outgroup taxon.
+  by_superkingdom <- split(metadata$MGS, metadata$superkingdom)
+  by_superkingdom <- lapply(by_superkingdom, intersect, tree$tip.label)
+  by_superkingdom <- by_superkingdom[lengths(by_superkingdom) > 0L]
 
-  can_use_outgroup <- length(archaea) > 0L && length(archaea) < length(tree$tip.label)
-  if (can_use_outgroup && length(archaea) > 1L) {
-    can_use_outgroup <- isTRUE(ape::is.monophyletic(tree, archaea))
-    if (!can_use_outgroup) {
-      warning("Archaea tips are not monophyletic; using midpoint rooting instead.", call. = FALSE)
-    }
-  }
+  if (length(by_superkingdom) >= 2L) {
+    message(sprintf(
+      "Detected %d superkingdom(s) among the tips: %s.",
+      length(by_superkingdom), paste(names(by_superkingdom), collapse = ", ")
+    ))
 
-  if (can_use_outgroup) {
-    rooted <- tryCatch(
-      ape::root(tree, outgroup = archaea, resolve.root = TRUE),
-      error = function(e) {
-        warning(sprintf(
-          "Could not root on the Archaea outgroup (%s); using midpoint rooting instead.",
-          conditionMessage(e)
-        ), call. = FALSE)
-        NULL
+    # Try the smallest superkingdom group as the outgroup first (most likely
+    # to be genuinely monophyletic and gives the best-supported root
+    # placement between the represented superkingdoms); if it isn't
+    # monophyletic or rooting otherwise fails, fall through to the next
+    # smallest superkingdom.
+    ordered <- by_superkingdom[order(lengths(by_superkingdom))]
+    for (name in names(ordered)) {
+      outgroup <- ordered[[name]]
+      if (length(outgroup) >= length(tree$tip.label)) {
+        next
       }
-    )
-    if (!is.null(rooted)) {
-      message(sprintf("Tree rooted using %d Archaea outgroup tip(s).", length(archaea)))
-      return(rooted)
+
+      is_mono <- length(outgroup) == 1L || isTRUE(ape::is.monophyletic(tree, outgroup))
+      if (!is_mono) {
+        warning(sprintf(
+          "%s tips are not monophyletic; trying another superkingdom split.",
+          name
+        ), call. = FALSE)
+        next
+      }
+
+      rooted <- tryCatch(
+        ape::root(tree, outgroup = outgroup, resolve.root = TRUE),
+        error = function(e) {
+          warning(sprintf(
+            "Could not root between superkingdoms using %s as the outgroup (%s).",
+            name, conditionMessage(e)
+          ), call. = FALSE)
+          NULL
+        }
+      )
+      if (!is.null(rooted)) {
+        message(sprintf(
+          "Tree rooted between superkingdoms using %d %s tip(s) as the outgroup.",
+          length(outgroup), name
+        ))
+        return(rooted)
+      }
     }
+
+    warning(
+      "Could not root between the represented superkingdoms; using midpoint rooting instead.",
+      call. = FALSE
+    )
   }
 
   message("Tree rooted using midpoint rooting.")
@@ -239,7 +276,6 @@ main <- function(args) {
     geom_highlight(
       data = clades,
       aes(node = node, fill = clade),
-      type = "roundrect",
       show.legend = TRUE
     ) +
     geom_tiplab(aes(label = species), size = 1.8) +
@@ -265,7 +301,7 @@ main <- function(args) {
       data = clades,
       aes(node = node, fill = clade),
       alpha = 1,
-      align = TRUE,
+      align = "both",
       extend = tree_xmax * 0.02,
       show.legend = FALSE
     ) +
