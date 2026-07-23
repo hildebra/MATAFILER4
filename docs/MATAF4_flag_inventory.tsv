@@ -107,7 +107,7 @@ SNPs	getAssemblConsSNPsuppRds	integer	0	stable	$MFopt{DoSuppConsSNP}	same as get
 SNPs	redoAssmblConsSNP	integer	0	stable	$MFopt{redoSNPcons}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 SNPs	SNPmem	integer	0	stable	$MFopt{memPJob}	memory per assigned core, in GB
 SNPs	redoGeneExtrSNP	integer	0	stable	$MFopt{redoSNPgene}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-SNPs	SNPjobSsplit	integer	1	stable	$MFopt{SNPconsJobsPsmpl}	how many parallel jobs are run on each
+SNPs	SNPjobSsplit	integer	0	stable	$MFopt{SNPconsJobsPsmpl}	parallel jobs per sample; 0 uses tiered alignment-size estimates from 2 cores at 300 MB to 10 cores at 10 GB
 SNPs	SNPminCallQual	integer	20	stable	$MFopt{SNPminCallQual}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 SNPs	SNPsaveVCF	integer	1	stable	$MFopt{saveVCF}	save vcf of SNP calles? DEfault : 1
 SNPs	SNPsaveConsFasta	integer	0	stable	$MFopt{saveConsFastas}	Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated..

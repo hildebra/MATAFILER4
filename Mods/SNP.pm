@@ -11,7 +11,23 @@ use File::Path qw(make_path);
 
 
 use Exporter qw(import);
-our @EXPORT_OK = qw(SNPconsensus_vcf SVcall_vcf);
+our @EXPORT_OK = qw(SNPconsensus_vcf SVcall_vcf estimateConsensusCores);
+
+sub estimateConsensusCores {
+	my ($inputSizeMB, $maxCores) = @_;
+	$inputSizeMB = 0 unless defined($inputSizeMB) && $inputSizeMB > 0;
+	$maxCores = int($maxCores || 1);
+	$maxCores = 1 if $maxCores < 1;
+
+	# Tiered scaling gives modest mappings useful parallelism early, then adds
+	# workers more gradually for large metagenomes. The final value remains
+	# bounded by the user-configured SNP core ceiling.
+	my @sizeThresholdsMB = (300, 600, 1024, 2048, 4096, 6144, 8192, 9216, 10240);
+	my $cores = 1;
+	$cores++ for grep { $inputSizeMB >= $_ } @sizeThresholdsMB;
+	$cores = $maxCores if $cores > $maxCores;
+	return $cores;
+}
 
 sub regionsFromFAI($){
 	my ($inF) = @_;
@@ -334,6 +350,21 @@ sub SNPconsensus_vcf{
 	my $firstInSample = 0;$firstInSample = $SNPIHR->{firstInSample} if (exists($SNPIHR->{firstInSample}));
 	my $useFB = uc($SNPIHR->{SNPcaller}) eq "MPI" ? 0 : 1;
 	my $actualCores  = $maxSNPcores;
+	my $consensusInputMB = 0;
+	for my $mappingSet (
+		[$hasPrimaryRds, $SNPIHR->{MAR}],
+		[length($SNPsuppStone), $SNPIHR->{MARsupp}],
+	) {
+		next unless $mappingSet->[0] && ref($mappingSet->[1]) eq 'ARRAY';
+		for my $mapping (@{$mappingSet->[1]}) {
+			next unless defined($mapping) && length($mapping) && -s $mapping;
+			my $sizeMB = filsizeMB($mapping);
+			$consensusInputMB = $sizeMB if $sizeMB > $consensusInputMB;
+		}
+	}
+	if ($consensusInputMB <= 0 && ($SNPIHR->{inputSizeMB} || 0) > 0) {
+		$consensusInputMB = $SNPIHR->{inputSizeMB};
+	}
 	
 
 	my $saveVCF = exists($SNPIHR->{saveVCF}) ? ($SNPIHR->{saveVCF} ? 1 : 0) : 1;
@@ -381,7 +412,10 @@ sub SNPconsensus_vcf{
 	my $myParL=0;
 	if ($splitFAsize>0){$myParL=1;}
 	if ($myParL && $run2ctg) {
-		my $runtimeJobs = $SNPIHR->{split_jobs} || $maxSNPcores || 1;
+		my $configuredJobs = int($SNPIHR->{split_jobs} || 0);
+		my $runtimeJobs = $configuredJobs > 0
+			? $configuredJobs
+			: estimateConsensusCores($consensusInputMB, $maxSNPcores);
 		$runtimeJobs = $maxSNPcores if ($runtimeJobs > $maxSNPcores);
 		$runtimeJobs = 1 if ($runtimeJobs < 1);
 		@curReg = (('runtime') x $runtimeJobs);
@@ -396,6 +430,8 @@ sub SNPconsensus_vcf{
 	my $cleanCmd = ""; 
 	my $xtra = "";
 	$xtra .= "echo \"Preparing data\"\n";
+	$xtra .= "echo \"Consensus SNP allocation: $actualCores cores (input estimate: "
+		.int($consensusInputMB + 0.5)." MB)\"\n";
 	$xtra .= "mkdir -p $scrDir;\n";
 	#$xtra .= "exit\n"; #DEBUG
 	#$xtra .= "cp $refFA $refFA.fai $scrDir;\n";$refFA =~ m/\/([^\/]+$)/;$refFA = "$scrDir/$1";
@@ -624,7 +660,7 @@ sub SNPconsensus_vcf{
 		#this is the new way of doing this
 		my $tmpS = $QSBoptHR->{tmpSpace};
 		$QSBoptHR->{tmpSpace} = 3*$memReqGB; #in GB
-		my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.oSNPc.sh",$cmdAll,int($actualCores*1.1),$memReqGB."G","Cons$x",join(";",$jdep,@allDeps2),"",$immediateSubm,[],$QSBoptHR);
+		my ($dep,$qcmd) = qsubSystem($qsubDirE."$cmdFTag.oSNPc.sh",$cmdAll,$actualCores,$memReqGB."G","Cons$x",join(";",$jdep,@allDeps2),"",$immediateSubm,[],$QSBoptHR);
 		$submissionCommands .= $qcmd unless ($immediateSubm);
 		$rdep =$dep;
 		$QSBoptHR->{tmpSpace} = $tmpS;

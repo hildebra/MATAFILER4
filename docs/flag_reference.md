@@ -212,7 +212,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-redoAssmblConsSNP` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-SNPmem` | integer | `0` | stable | memory per assigned core, in GB |
 | `-redoGeneExtrSNP` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-SNPjobSsplit` | integer | `1` | stable | how many parallel jobs are run on each |
+| `-SNPjobSsplit` | integer | `0` | stable | parallel jobs per sample; 0 uses tiered alignment-size estimates from 2 cores at 300 MB to 10 cores at 10 GB |
 | `-SNPminCallQual` | integer | `20` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-SNPsaveVCF` | integer | `1` | stable | save vcf of SNP calles? DEfault : 1 |
 | `-SNPsaveConsFasta` | integer | `0` | stable | Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated.. |

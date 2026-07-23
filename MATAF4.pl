@@ -1503,6 +1503,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						bpSplit => 1e6,runLocal => 1,SeqTech => $map{$curSmpl}{SeqTech},SeqTechSuppl => "",
 						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
 						jdeps => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
+						inputSizeMB => ($map{$curSmpl}{inputFileSizeMB} || 0)
+							+ ($map{$curSmpl}{inputXFileSizeMB} || 0),
 						allowPendingInputs => ($variantInputsMayBePending ? 1 : 0),
 						immediateSubm => ($variantSubmissionDeferred ? 0 : 1),
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
@@ -8790,7 +8792,7 @@ sub setDefaultMFconfig{
 
 
 	#SNPs
-	$MFopt{DoConsSNP}=0; $MFopt{DoSuppConsSNP}=0; $MFopt{redoSNPcons} = 0; $MFopt{redoSNPgene} =0; $MFopt{SNPconsJobsPsmpl} = 1; 
+	$MFopt{DoConsSNP}=0; $MFopt{DoSuppConsSNP}=0; $MFopt{redoSNPcons} = 0; $MFopt{redoSNPgene} =0; $MFopt{SNPconsJobsPsmpl} = 0;
 	$MFopt{SNPminCallQual} = 20; $MFopt{memPJob} = 0; #set to 0 to indicate default estimation
 	$MFopt{saveVCF} = 1; $MFopt{saveConsFastas} = 0;
     #$MFopt{memSNPcall} = 23; -> no longer used
@@ -9128,7 +9130,7 @@ sub getCmdLineOptions{
 		"redoAssmblConsSNP=i" => \$MFopt{redoSNPcons},
 		"SNPmem=i" => \$MFopt{memPJob}, #memory per assigned core, in GB
 		"redoGeneExtrSNP=i" => \$MFopt{redoSNPgene},
-		"SNPjobSsplit=i" => \$MFopt{SNPconsJobsPsmpl}, #how many parallel jobs are run on each 
+		"SNPjobSsplit=i" => \$MFopt{SNPconsJobsPsmpl}, #parallel jobs per sample; 0 estimates from alignment size
 		"SNPminCallQual=i" => \$MFopt{SNPminCallQual},
 		"SNPsaveVCF=i" => \$MFopt{saveVCF}, #save vcf of SNP calles? DEfault : 1
 		"SNPsaveConsFasta=i" => \$MFopt{saveConsFastas}, #Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated..

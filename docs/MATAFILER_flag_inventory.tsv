@@ -107,7 +107,7 @@ MATAF4.pl	4.04	SNPs	-getAssemblConsSNPsuppRds	integer	MFopt		stable	same as getA
 MATAF4.pl	4.04	SNPs	-redoAssmblConsSNP	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	SNPs	-SNPmem	integer	MFopt		stable	memory per assigned core, in GB
 MATAF4.pl	4.04	SNPs	-redoGeneExtrSNP	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
-MATAF4.pl	4.04	SNPs	-SNPjobSsplit	integer	MFopt		stable	how many parallel jobs are run on each
+MATAF4.pl	4.04	SNPs	-SNPjobSsplit	integer	MFopt	0	stable	parallel jobs per sample; 0 uses tiered alignment-size estimates from 2 cores at 300 MB to 10 cores at 10 GB
 MATAF4.pl	4.04	SNPs	-SNPminCallQual	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	SNPs	-SNPsaveVCF	integer	MFopt		stable	save vcf of SNP calles? DEfault : 1
 MATAF4.pl	4.04	SNPs	-SNPsaveConsFasta	integer	MFopt		stable	Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated..

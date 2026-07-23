@@ -6,6 +6,22 @@ use File::Temp qw(tempdir);
 use FindBin qw($Bin);
 use Test::More;
 
+use lib File::Spec->catdir($Bin, '..');
+use Mods::SNP qw(estimateConsensusCores);
+
+is(estimateConsensusCores(0, 10), 1, 'unknown or empty consensus input uses one core');
+is(estimateConsensusCores(299, 10), 1, 'alignment input below 300 MiB remains single-core');
+is(estimateConsensusCores(300, 10), 2, 'alignment input at 300 MiB receives two cores');
+is(estimateConsensusCores(600, 10), 3, 'alignment input at 600 MiB receives three cores');
+is(estimateConsensusCores(1024, 10), 4, 'alignment input at 1 GiB receives four cores');
+is(estimateConsensusCores(2048, 10), 5, 'alignment input at 2 GiB receives five cores');
+is(estimateConsensusCores(4096, 10), 6, 'alignment input at 4 GiB receives six cores');
+is(estimateConsensusCores(6144, 10), 7, 'alignment input at 6 GiB receives seven cores');
+is(estimateConsensusCores(8192, 10), 8, 'alignment input at 8 GiB receives eight cores');
+is(estimateConsensusCores(9216, 10), 9, 'alignment input at 9 GiB receives nine cores');
+is(estimateConsensusCores(10240, 10), 10, 'alignment input at 10 GiB reaches ten cores');
+is(estimateConsensusCores(10241, 8), 8, 'large consensus input is capped by SNPcores');
+
 my $root = tempdir(CLEANUP => 1);
 my $planner = File::Spec->catfile($Bin, '..', 'secScripts', 'SNP', 'plan_consensus_regions.pl');
 my $fai = File::Spec->catfile($root, 'reference.fa.fai');
@@ -102,5 +118,10 @@ like($snp_source,
 like($snp_source,
 	qr/my \$gffAvailable = -s \$gffF \|\| \(\$allowPendingInputs && \$createGeneFastas\).*?test -s \$gffF/s,
 	'future gene annotations are accepted at submission and checked before consensus FASTA creation');
+like($snp_source,
+	qr/estimateConsensusCores\(\$consensusInputMB, \$maxSNPcores\).*?qsubSystem\([^;]+\$cmdFTag\.oSNPc\.sh[^;]+\$actualCores,/s,
+	'oSNPc submission requests the automatically estimated runtime region count');
+unlike($snp_source, qr/int\(\$actualCores\s*\*\s*1\.1\)/,
+	'oSNPc no longer inflates or rounds its estimated core request');
 
 done_testing;
