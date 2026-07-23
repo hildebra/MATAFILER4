@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.10;/,
-	'buildTree output cleanup increments the workflow version');
+like($source, qr/my \$version = 5\.11;/,
+	'buildTree temporary-path recovery increments the workflow version');
 like($source,
 	qr/BuildTree pipeline v\$version.*?Inputs:.*?Paths:.*?Mode:.*?Alignment:.*?Filtering:.*?Trees:.*?Additional analyses:/s,
 	'buildTree starts with a structured runtime configuration header');
@@ -33,6 +33,12 @@ unlike($source, qr/print \$cmd\."\\n"|print \$cmd\."\\n\\n"/,
 like($source, qr/-outD is required/, 'an output directory is explicitly required');
 like($source, qr/Refusing to use filesystem root/, 'filesystem roots are rejected as output directories');
 like($source, qr/buildTree5_\$\{tmpTag\}_\$\$/, 'work is isolated in a process-owned temporary directory');
+like($source,
+	qr/prepareTemporaryBase\(\$tmpBase\).*?Requested temporary path is unusable:.*?falling back to \$fallbackTmpBase.*?prepareTemporaryBase\(\$tmpBase\)/s,
+	'an unusable requested temporary path falls back to output-local workspace');
+like($source,
+	qr/sub prepareTemporaryBase .*?tempfile\(.*?DIR => \$path.*?print \{\$probeHandle\}.*?unlink \$probePath/s,
+	'a temporary base must pass a create, write, close, and cleanup probe');
 like($source, qr/safeRemoveTree\(\$tmpD, \$tmpBase\)/, 'cleanup is limited to the owned temporary directory');
 
 unlike($source, qr/touch \$IQtreef/, 'an empty IQ-TREE checkpoint is not manufactured');

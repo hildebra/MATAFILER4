@@ -14,6 +14,7 @@
 #5.08: 22.7.26: restore partitions, require nonempty resume outputs, and activate per-locus overlap filtering
 #5.09: run MSAfix through a validated temporary output before replacing an alignment
 #5.10: consolidate runtime configuration, progress, and repetitive diagnostics
+#5.11: recover to output-local work space when the requested temporary path is unusable
 
 use warnings;
 use strict;
@@ -37,6 +38,7 @@ use File::Basename qw(basename);
 use File::Copy qw(copy move);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
+use File::Temp qw(tempfile);
 
 
 sub convertMultAli2NT;
@@ -60,9 +62,10 @@ sub requireConfiguredTool;
 sub shellQuote;
 sub runMSAFix;
 sub limitedWarn;
+sub prepareTemporaryBase;
 
 my $doPhym= 0;
-my $version = 5.10;
+my $version = 5.11;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -254,9 +257,20 @@ die "Output path is not a directory: $outD\n" unless -d $outD;
 ##### setup dirs
 $codemlOutD = File::Spec->catdir($outD, "codeml") if ($codemlOutD eq "");
 
-my $tmpBase = $tmpD eq "" ? File::Spec->catdir($outD, "tmp") : File::Spec->canonpath(File::Spec->rel2abs($tmpD));
-make_path($tmpBase) unless -d $tmpBase;
-die "Temporary path is not a directory: $tmpBase\n" unless -d $tmpBase;
+my $requestedTmpBase = $tmpD eq ""
+	? File::Spec->catdir($outD, "tmp")
+	: File::Spec->canonpath(File::Spec->rel2abs($tmpD));
+my $tmpBase = $requestedTmpBase;
+my ($tmpReady, $tmpError) = prepareTemporaryBase($tmpBase);
+if (!$tmpReady && $tmpD ne "") {
+	my $fallbackTmpBase = File::Spec->catdir($outD, "tmp");
+	warn "Requested temporary path is unusable: $tmpBase ($tmpError); "
+		. "falling back to $fallbackTmpBase\n";
+	$tmpBase = $fallbackTmpBase;
+	($tmpReady, $tmpError) = prepareTemporaryBase($tmpBase);
+}
+die "No usable temporary path is available: $tmpBase ($tmpError)\n"
+	unless $tmpReady;
 my $tmpTag = $clusterName eq "" ? "default" : $clusterName;
 $tmpTag =~ s/[^A-Za-z0-9_.-]+/_/g;
 $tmpD = File::Spec->catdir($tmpBase, "buildTree5_${tmpTag}_$$");
@@ -2378,6 +2392,44 @@ sub shellQuote{
 	$value = "" unless defined $value;
 	$value =~ s/'/'"'"'/g;
 	return "'$value'";
+}
+
+sub prepareTemporaryBase {
+	my ($path) = @_;
+	my $created = eval {
+		make_path($path) unless -d $path;
+		1;
+	};
+	if (!$created || !-d $path) {
+		my $error = $@ || "path is not a directory";
+		$error =~ s/\s+$//;
+		return (0, $error);
+	}
+
+	my ($probeHandle, $probePath);
+	my $writeable = eval {
+		($probeHandle, $probePath) = tempfile(
+			".buildTree5-writecheck-XXXXXX",
+			DIR => $path,
+			UNLINK => 0,
+		);
+		print {$probeHandle} "buildTree5 temporary-path check\n"
+			or die "write failed: $!";
+		close $probeHandle or die "close failed: $!";
+		undef $probeHandle;
+		1;
+	};
+	if (!$writeable) {
+		my $error = $@ || "write test failed";
+		$error =~ s/\s+$//;
+		close $probeHandle if defined($probeHandle) && fileno($probeHandle);
+		unlink $probePath if defined($probePath) && -e $probePath;
+		return (0, $error);
+	}
+	unless (unlink $probePath) {
+		return (0, "cannot remove temporary-path write test $probePath: $!");
+	}
+	return (1, "");
 }
 
 sub limitedWarn {

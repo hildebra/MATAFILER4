@@ -97,8 +97,8 @@ unlike($strain, qr/print "\$cD\\n"/,
 like($strain, qr/my \$version = 0\.41;/,
 	'within-strain recovery fix increments the workflow version');
 like($strain,
-	qr/sub treeInputPrecopyCommand .*?staged_inputs=\(\).*?if \[\[ -d \$staging_q \]\].*?if \(\( \$\{#staged_inputs\[\@\]\} \)\).*?No staged tree inputs found; checking persistent recovery inputs.*?if ! \( \$ready_test \)/s,
-	'tree input publication can recover after staged inputs have already been moved');
+	qr/sub treeInputPrecopyCommand .*?if \( \$ready_test \).*?Using existing persistent tree inputs.*?staged_inputs=\(\).*?if \[\[ -d \$staging_q \]\].*?if \(\( \$\{#staged_inputs\[\@\]\} \)\).*?No usable staged tree inputs found.*?if ! \( \$ready_test \)/s,
+	'persistent tree inputs take precedence and recovery uses staging only when required');
 like($strain, qr/test -s .*?test -s .*?\.gz.*?tree inputs are incomplete in both staging and persistent storage/s,
 	'tree recovery accepts compressed persistent inputs and reports incomplete recovery data');
 unlike($strain, qr/\$pigzBin -p \$numCoreL \$tmpD\/\*/,
