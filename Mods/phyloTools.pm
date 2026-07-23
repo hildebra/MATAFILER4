@@ -208,12 +208,11 @@ sub runQItree{
 	unless ($vcheck =~ m/version [23]/){die "Needs iqtree version 2 or 3\n:$vcheck\n";}
 	$treeOut =~ s/\.nwk$//;
 	my $treNM = "IQtree";
-	my $cmd = "$iqTree -s $inMSA -T $ncore -pre $treeOut -seed 678 "; #-nt AUTO -ntmax $ncore
+	my $cmd = "$iqTree -s $inMSA -T $ncore -pre $treeOut -seed 678 -quiet "; #-nt AUTO -ntmax $ncore
 	#$cmd .= " -Q $partiF --merge " unless ($partiF eq "");
 	$cmd .= " -p $partiF --merge " unless ($partiF eq "");
 	$cmd .= "-o $outgr " unless ($outgr eq "" && $outgr !~ m/,/);
 	$cmd .= "-g $constraintTree " unless ($constraintTree eq "");
-	$cmd .= "--quiet " if (exists($treeOpts{silent}) && $treeOpts{silent});
 	unless ($fast == 0){$cmd .= "--fast "; print "IQtree - fast\n"; $treNM .= "_fast";}
 	if ($autoModel){$treNM .= "_autoMOD";}
 	if ($useAA){

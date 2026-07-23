@@ -29,6 +29,15 @@ like(
 	qr/^\Q$iqtree_selector\E$/m,
 	'IQ-TREE configuration prefers iqtree3 and falls back to iqtree2',
 );
+my $phylo_tools_path = File::Spec->catfile($Bin, '..', 'Mods', 'phyloTools.pm');
+open my $phylo_tools_fh, '<', $phylo_tools_path or die $!;
+my $phylo_tools = do { local $/; <$phylo_tools_fh> };
+close $phylo_tools_fh;
+like(
+	$phylo_tools,
+	qr/my \$cmd = "\$iqTree -s \$inMSA -T \$ncore -pre \$treeOut -seed 678 -quiet "/,
+	'IQ-TREE invocations always request quiet output',
+);
 
 my @p1 = ('a.1.fq', 'b.1.fq', 'c.1.fq');
 my @p2 = ('a.2.fq', 'b.2.fq', 'c.2.fq');
