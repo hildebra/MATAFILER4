@@ -220,6 +220,8 @@ sub readGene2tax{
 	my %uniqs; my $cogPrio= {};
 	#some stats
 	my %totalTax; my $totalGenes=0; my $inclGenes=0;
+	my %rowWarnings;
+	my $warningLimit = 5;
 	open I,"<$inF" or die "Can't open gene 2 tax (specI/MGS) file:\n$inF\n";
 	my $curTax = ""; my $curTcnt=0;
 	
@@ -229,7 +231,9 @@ sub readGene2tax{
 		$totalGenes++;
 		my @spl = split (/\t/,$line,-1);
 		if (@spl < 3 || !defined($spl[0]) || $spl[0] eq "" || !defined($spl[1]) || $spl[1] eq "") {
-			warn "Ignoring malformed gene-to-MGS row in $inF: $line\n";
+			$rowWarnings{malformed}++;
+			warn "Ignoring malformed gene-to-MGS row in $inF: $line\n"
+				if $rowWarnings{malformed} <= $warningLimit;
 			next;
 		}
 		#only read a limited number of genes.. used for MGS to only take first few genes
@@ -254,7 +258,9 @@ sub readGene2tax{
 		my $gene = $spl[0];
 		my $locus = join('|', $MGS, $OG, $gene);
 		if (exists($Gene2MGS->{$gene})) {
-			warn "Ignoring duplicate catalogue gene $gene in $inF\n";
+			$rowWarnings{duplicate}++;
+			warn "Ignoring duplicate catalogue gene $gene in $inF\n"
+				if $rowWarnings{duplicate} <= $warningLimit;
 			next;
 		}
 		push(@{$cogPrio->{$MGS}},$locus);
@@ -265,6 +271,16 @@ sub readGene2tax{
 		$totalTax{$MGS} ++;
 	}
 	close I;
+	if (($rowWarnings{malformed} || 0) > $warningLimit) {
+		warn "Suppressed ".($rowWarnings{malformed} - $warningLimit)
+			." additional malformed gene-to-MGS row warnings in $inF "
+			."($rowWarnings{malformed} total)\n";
+	}
+	if (($rowWarnings{duplicate} || 0) > $warningLimit) {
+		warn "Suppressed ".($rowWarnings{duplicate} - $warningLimit)
+			." additional duplicate catalogue gene warnings in $inF "
+			."($rowWarnings{duplicate} total)\n";
+	}
 	print "Found ". scalar(keys %totalTax) ." MGS with $inclGenes/$totalGenes included genes\n";
 	
 	#double check on low represented MGS

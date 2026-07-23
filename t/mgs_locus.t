@@ -28,6 +28,22 @@ is_deeply(
 );
 is($si->{'MGS.1'}{'MGS.1|COG1|11'}, 11, 'seed locus maps to its catalogue cluster');
 
+my $duplicates = File::Spec->catfile($tmp, 'duplicate-genes.gene2MGS');
+write_file($duplicates, join('',
+	"20\tMGS.2\tCOG1\n",
+	map { "20\tMGS.2\tCOG$_\n" } 2 .. 10,
+));
+my $duplicate_warnings = '';
+{
+	local $SIG{__WARN__} = sub { $duplicate_warnings .= join('', @_); };
+	readGene2tax($duplicates, 20, []);
+}
+my @duplicate_examples = $duplicate_warnings =~ /Ignoring duplicate catalogue gene 20/g;
+is(scalar(@duplicate_examples), 5,
+	'duplicate catalogue gene diagnostics are limited to five detailed examples');
+like($duplicate_warnings, qr/Suppressed 4 additional duplicate catalogue gene warnings.*9 total/,
+	'duplicate catalogue gene diagnostics retain an aggregate suppressed count');
+
 my @records = (
 	{ mgs => 'MGS.1', cog => 'COG1', gene => '10', rank => 0 },
 	{ mgs => 'MGS.1', cog => 'COG1', gene => '11', rank => 1 },

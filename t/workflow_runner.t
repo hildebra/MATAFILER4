@@ -168,7 +168,7 @@ like($mataf4,
 like($mataf4,
 	qr/getCmdLineOptions;.*?rewrite options cannot be combined with -loopTillComplete.*?setupHPC\(\)/s,
 	'unsafe rewrite combinations fail before scheduler setup or job submission');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?my \$MATFILER_ver = 4\.11/s,
-	'MATAFILER version and change history record the overlapping final-pass behavior');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?my \$MATFILER_ver = 4\.12/s,
+	'MATAFILER history retains the overlapping final-pass change through version 4.12');
 
 done_testing;

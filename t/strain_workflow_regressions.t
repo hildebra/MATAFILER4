@@ -88,6 +88,12 @@ like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,
 	'postprocessing inherits submission state and the selected queue backend');
 like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,
 	'custom recursive output removal requires a workflow-owned directory');
+like($strain, qr/sub limitedWarn .*?warningExampleLimit.*?Further '\$category' warnings are suppressed/s,
+	'repetitive strain warnings retain examples and announce suppression');
+like($strain, qr/Suppressed warning summary:.*?sort grep/s,
+	'suppressed strain warnings receive a categorized exit summary');
+unlike($strain, qr/print "\$cD\\n"/,
+	'strain extraction no longer prints a raw working-directory path for every sample');
 
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,

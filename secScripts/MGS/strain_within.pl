@@ -44,6 +44,58 @@ sub evalFileStatus;
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
 
+my %limitedWarningStats;
+my %limitedNoticeStats;
+my $warningExampleLimit = 5;
+sub limitedWarn {
+	my ($category, $message) = @_;
+	my $entry = $limitedWarningStats{$category} ||= { total => 0, suppressed => 0 };
+	$entry->{total}++;
+	if ($entry->{total} <= $warningExampleLimit) {
+		warn $message;
+	} else {
+		$entry->{suppressed}++;
+		warn "Further '$category' warnings are suppressed; a total will be reported at exit.\n"
+			if $entry->{total} == $warningExampleLimit + 1;
+	}
+}
+
+sub limitedNotice {
+	my ($category, $message) = @_;
+	my $entry = $limitedNoticeStats{$category} ||= { total => 0, suppressed => 0 };
+	$entry->{total}++;
+	if ($entry->{total} <= $warningExampleLimit) {
+		print $message;
+	} else {
+		$entry->{suppressed}++;
+		print "Further '$category' messages are suppressed; a total will be reported at exit.\n"
+			if $entry->{total} == $warningExampleLimit + 1;
+	}
+}
+
+END {
+	my @suppressed = sort grep {
+		($limitedWarningStats{$_}{suppressed} || 0) > 0
+	} keys %limitedWarningStats;
+	if (@suppressed) {
+		warn "\nSuppressed warning summary:\n";
+		for my $category (@suppressed) {
+			my $entry = $limitedWarningStats{$category};
+			warn "  $category: $entry->{total} total; $entry->{suppressed} not shown\n";
+		}
+	}
+	my @noticeSuppressed = sort grep {
+		($limitedNoticeStats{$_}{suppressed} || 0) > 0
+	} keys %limitedNoticeStats;
+	if (@noticeSuppressed) {
+		print "\nRepeated status summary:\n";
+		for my $category (@noticeSuppressed) {
+			my $entry = $limitedNoticeStats{$category};
+			print "  $category: $entry->{total} total; $entry->{suppressed} not shown\n";
+		}
+	}
+}
+
 
 #v.14: reworked massively how many genes get included
 #v.15: included lessons learned from MGS.pl v0.21 
@@ -71,7 +123,8 @@ sub writeTooFewMarker;
 #.37: expose tree IDs as sample|COG|primaryGeneID while retaining MGS-qualified internal locus keys
 #.38: validate paired consensus inputs, split-job logs, scheduler state, and destructive paths
 #.39: make split retries generation-safe, merges atomic, and compressed outgroup updates reliable
-my $version = 0.39;
+#.40: bound repetitive data warnings, summarize suppressed diagnostics, and clarify progress output
+my $version = 0.40;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -514,12 +567,14 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		last;
 	}
 	if (exists $MGSnoTree{$MGS}) {
-		print "Skipping $MGS: previous extraction found too few samples for a tree.\n";
+		limitedNotice('MGS skipped after too-few-samples extraction',
+			"Skipping $MGS: previous extraction found too few samples for a tree.\n");
 		next;
 	}
 	# previous condition was too lax: ( ($CatNotPrepped/$#specis) < 0.1)  , just check if we can resubmit anything here..
 	if (exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ m/multicopy/){
-		print "Skipping $MGS due to inclusion in conspecific MGS list.\n";next;
+		limitedNotice('MGS skipped as conspecific or multicopy',
+			"Skipping $MGS due to inclusion in conspecific MGS list.\n");next;
 	}
 	if ($startSubFromMGS ne "" ){
 		if ($MGS ne $startSubFromMGS){next;
@@ -533,18 +588,23 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	if (!$reSubmit && !$repairCAT && !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
 			&& -e $treeStone && -s $IQtreef ){
-		print "Skipping $MGS (tree exists?).. ";
+		limitedNotice('MGS skipped with existing trees',
+			"Skipping $MGS: a valid tree already exists.\n");
 		next;
 	}
 	
-	print "At ${MGS} ($lcnt/$Nspecis):: ". timeNice(time - $sttime) . " :"; 
+	print "Processing $MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)."\n";
 	my $inputFNAsize = $sizeOfDirs[$lcnt];
 	#PART I: create fasta files required by tree
 	make_path($outD2) unless -d $outD2;
 	my $tmpD  = "$scratchD/outs/$MGS/";
-	if ($inputFNAsize ==0){print "empty input $MGS ($outD2 .. $tmpD) .. next.\n";next;} #empty input
+	if ($inputFNAsize ==0){
+		limitedNotice('MGS skipped with empty input', "Skipping $MGS: input is empty.\n");
+		next;
+	} #empty input
 	unless (combineMGSgenesDir($MGS,$tmpD,$tmpD)) {#$outD2); -> keep in tmpdir for now..
-		warn "$MGS has incomplete combined worker input; leaving it for a repair run\n";
+		limitedWarn('MGS with incomplete combined worker input',
+			"$MGS has incomplete combined worker input; leaving it for a repair run\n");
 		next;
 	}
 	
@@ -608,7 +668,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	unless ($inputReady) {
 		$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		$QSBoptHR->{useLongQueue} = 0;
-		print "\n$MGS: input files are not ready; leaving it unmarked so a repair run can retry it.\n";
+		limitedNotice('MGS awaiting input repair',
+			"$MGS: input files are not ready; leaving it unmarked so a repair run can retry it.\n");
 		next;
 	}
 	
@@ -619,9 +680,10 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	}
 
 	if ($multiSmpl>2){
-		print "$MGS: multiSmpls:\t$multiSmpl\tpotential genes: ". $ngenes ."\tcores:$numCoreL mem:$totMem\n";
+		print "  Tree input: $multiSmpl samples, $ngenes potential genes; $numCoreL cores, $totMem memory\n";
 	} else {
-		print "\n$MGS: too few samples ($multiSmpl) for tree stats\n";
+		limitedNotice('MGS with too few samples for tree statistics',
+			"$MGS: too few samples ($multiSmpl) for tree statistics\n");
 		writeTooFewMarker($outD2, $multiSmpl, $ngenes);
 		remove_tree($tmpD) if $needsCopy && -d $tmpD;
 		$QSBoptHR->{tmpSpace} = $tmpSHDD;
@@ -723,12 +785,14 @@ sub combineMGSgenesDir{
 	my $aggregateComplete = !grep { !fileGZe($_) } @required;
 	return $aggregateComplete unless $hasFreshParts;
 	if ($maxSubJob && !split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob)) {
-		warn "Ignoring partial worker retry for $MGS: no complete matching split-extraction generation is present\n";
+		limitedWarn('partial worker retries without a complete generation',
+			"Ignoring partial worker retry for $MGS: no complete matching split-extraction generation is present\n");
 		return $aggregateComplete;
 	}
 	for my $requiredName ($FNAstdof, $FAAstdof, "$CATstdof.tmp") {
 		unless (@{$partsByName{$requiredName}}) {
-			warn "Fresh worker extraction for $MGS lacks required $requiredName parts; retaining parts for repair\n";
+			limitedWarn('worker extractions missing required parts',
+				"Fresh worker extraction for $MGS lacks required $requiredName parts; retaining parts for repair\n");
 			return 0;
 		}
 	}
@@ -763,7 +827,8 @@ sub combineMGSgenesDir{
 			unlink $part or warn "Cannot remove combined part $part: $!\n";
 		}
 	} elsif (@consumedParts) {
-		warn "Incomplete combined input for $MGS; retaining all source parts for repair\n";
+		limitedWarn('combined MGS inputs missing source parts',
+			"Incomplete combined input for $MGS; retaining all source parts for repair\n");
 	}
 	if ($outD2 ne $tmpD) {
 		make_path($outD2);
@@ -864,7 +929,8 @@ sub addOutgroup2MGS{
 	my $temporaryInput = fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
 		&& (fileGZe("$tmpD/$CATstdof.tmp") || fileGZe("$tmpD/$CATstdof"));
 	if (exists($legacyLocusMGS{$MGS}) && !$temporaryInput) {
-		warn "$MGS has stale sequence identifiers but no regenerated temporary input; skipping it until extraction can be rerun\n";
+		limitedWarn('MGS with stale identifiers and no regenerated input',
+			"$MGS has stale sequence identifiers but no regenerated temporary input; skipping it until extraction can be rerun\n");
 		return(0, 0, $OG, 0, 0);
 	}
 	$outD3 = $outD2 if !$temporaryInput && $outputReady;
@@ -875,7 +941,7 @@ sub addOutgroup2MGS{
 	my $MSAdir = "$outD3/MSA/";
 	die "Gene cat wasn't loaded, check program logic.\n!$deepRepair && $redoSubmissionData == 0 && $onlySubmit==1 && !$dirsNOTPrepped && !-e $CATtf.tmp \n" if (!$geneCatLoaded);
 	unless (fileGZe($FNAtf) && fileGZe($FAAtf)) {
-		warn "Missing NT or AA input for $MGS in $outD3\n";
+		limitedWarn('MGS missing NT or AA input', "Missing NT or AA input for $MGS in $outD3\n");
 		return(0, 0, $OG, 0, 0);
 	}
 	my %SIcatLoc;
@@ -886,7 +952,8 @@ sub addOutgroup2MGS{
 		while (<$ICT>){
 			chomp; my @spl = split /\t/;
 			if (@spl < 4){
-				print "malformed $CATtf string: $_\n";
+				limitedWarn('malformed temporary category rows',
+					"Malformed category row in $CATtf: $_\n");
 				$malformedCatEntries++;
 				next;
 			}
@@ -923,9 +990,11 @@ sub addOutgroup2MGS{
 		if ($catLines != keys (%SIcatLoc)){ #redo MSA
 			remove_tree($MSAdir) if -d $MSAdir;
 		}
-		print "${MGS}:: $catLines cat lines (should: ". keys (%SIcatLoc) .", $cntItems items: $CATtf\n";
+		print "  Category input: $catLines lines, ".scalar(keys %SIcatLoc)
+			." loci, $cntItems entries ($CATtf)\n";
 	} else {
-		print "WARNING:: ${MGS}:: possible error: neither .cat nor .cat.tmp exists in $outD3\n";
+		limitedWarn('MGS missing category inputs',
+			"$MGS has neither .cat nor .cat.tmp input in $outD3\n");
 		return(0, 0, $OG, 0, 0);
 
 	}
@@ -935,14 +1004,16 @@ sub addOutgroup2MGS{
 	my @curCogs = sort keys %SIcatLoc;
 	if (scalar(@curCogs) < 10){
 		if (!@curCogs && $malformedCatEntries) {
-			warn "$MGS category input is malformed; leaving it unmarked for repair\n";
+			limitedWarn('MGS with malformed category input',
+				"$MGS category input is malformed; leaving it unmarked for repair\n");
 			return(0, 0, $OG, 0, 0);
 		}
 		my %fewSamples;
 		for my $cog (@curCogs) {
 			$fewSamples{$_} = 1 for keys %{$SIcatLoc{$cog}};
 		}
-		warn "$MGS has only ".scalar(@curCogs)." usable genes; skipping tree construction\n";
+		limitedWarn('MGS with too few usable genes for tree construction',
+			"$MGS has only ".scalar(@curCogs)." usable genes; skipping tree construction\n");
 		return(scalar(keys %fewSamples), scalar(@curCogs), $OG, $outD3 ne $outD2, 1);
 	}
 	#print "COGs: $curCogs[0] $curCogs[1]\n";
@@ -955,12 +1026,14 @@ sub addOutgroup2MGS{
 		#print "$call\n";
 		my $OG1 = `$call`;
 		if ($? != 0) {
-			warn "Can't find outgroup from call $call; building an ingroup-only tree\n";
+			limitedWarn('outgroup lookup command failures',
+				"Can't find outgroup from call $call; building an ingroup-only tree\n");
 			$OG1 = "";
 		}
 		chomp $OG1;
 		my @sspl = grep { length } split /\s+/,$OG1; $OG = "";
-		warn "No outgroup candidates returned for $MGS; building an ingroup-only tree\n"
+		limitedWarn('MGS without outgroup candidates',
+			"No outgroup candidates returned for $MGS; building an ingroup-only tree\n")
 			if @sspl == 0;
 		my $cntShrCogs=0;
 		for my $candidate (@sspl) {
@@ -982,14 +1055,16 @@ sub addOutgroup2MGS{
 		}
 		if ($cntShrCogs < 10){
 			my @locus_preview = @curCogs[0 .. ($#curCogs < 9 ? $#curCogs : 9)];
-			print "Could not find outgroup for $MGS!!\n@sspl\n@locus_preview\n";
+			limitedWarn('MGS without a sufficiently represented outgroup',
+				"Could not find a sufficiently represented outgroup for $MGS; candidates: @sspl; loci: @locus_preview\n");
 			$OG = "";
 		}
 		if ($OG ne "" && !exists($SIgenes_OG{$OG})){
-			print "can't find speci $OG\n$OG1\n";
+			limitedWarn('selected outgroups absent from gene catalogue',
+				"Selected outgroup $OG for $MGS is absent from the gene catalogue\n");
 			$OG="";
 		} 
-		print "outgroup $OG ";
+	print "  Using outgroup $OG\n" if $OG ne '';
 		#next;
 	}
 	
@@ -1043,9 +1118,10 @@ sub addOutgroup2MGS{
 	open my $cat_out, '>', $CATtf or die "Can't open cat file $CATtf: $!\n";
 	print {$cat_out} join("",@tmpCAT) or die "Can't write cat file $CATtf: $!\n";
 	close $cat_out or die "Can't close cat file $CATtf: $!\n";
-	print "Generated CAT file ";
+	print "  Generated category file for $MGS\n";
 	if ($OGgenesUsed ==0 && $OG ne ""){
-		warn "Couldn't include any outgroup genes for $OG; building $MGS without an outgroup\n";
+		limitedWarn('MGS with no usable outgroup genes',
+			"Couldn't include any outgroup genes for $OG; building $MGS without an outgroup\n");
 		$OG = "";
 	}
 
@@ -1198,7 +1274,8 @@ sub prepGene2MGS{
 		for my $seed (@{$group->{genes}}) {
 			my $gene_string = $cl2gene->{$seed};
 			unless (defined $gene_string) {
-				warn "Could not find selected catalogue gene $seed in the cluster index\n";
+				limitedWarn('selected catalogue genes absent from cluster index',
+					"Could not find selected catalogue gene $seed in the cluster index\n");
 				$missing_clusters++;
 				next;
 			}
@@ -1207,7 +1284,8 @@ sub prepGene2MGS{
 				next unless length $member;
 				my ($sample) = split /__/, $member, 2;
 				unless (defined($sample) && length($sample)) {
-					warn "Ignoring malformed catalogue member '$member' for seed $seed\n";
+					limitedWarn('malformed catalogue cluster members',
+						"Ignoring malformed catalogue member '$member' for seed $seed\n");
 					next;
 				}
 				$per_sample{$sample}{$member} = $seed;
@@ -1429,7 +1507,8 @@ sub preComputeConsSNP{
 		# Always revalidate paired consensus files; an old checkpoint cannot prove
 		# that both the nucleotide and protein cache still exist.
 		unless (exists($map{$smpl}) && defined($map{$smpl}{wrdir}) && length($map{$smpl}{wrdir})) {
-			warn "No working directory is configured for $smpl; sample will be skipped\n";
+			limitedWarn('samples without working directories',
+				"No working directory is configured for $smpl; sample will be skipped\n");
 			$fileAbsent = 1;
 			$unavailableSamples{$smpl} = "missing map working directory";
 			push @missing_samples, $smpl;
@@ -1448,7 +1527,8 @@ sub preComputeConsSNP{
 			fileGZe($tarVCF), fileGZe($tarF), fileGZe($tarF2), $forceVCF2FNA
 		);
 		if ($input_state eq 'missing') {
-			warn "Can't find a complete consensus pair or a VCF to repair it for $smpl in $cD; sample will be skipped\n";
+			limitedWarn('samples without usable consensus inputs',
+				"Can't find a complete consensus pair or a VCF to repair it for $smpl in $cD; sample will be skipped\n");
 			$fileAbsent = 1;
 			$unavailableSamples{$smpl} = "missing consensus pair and repair VCF";
 			push @missing_samples, $smpl;
@@ -1494,7 +1574,8 @@ sub preComputeConsSNP{
 		my $nt = $preCompSNPs{$smpl}{NT};
 		my $aa = $preCompSNPs{$smpl}{AA};
 		next if fileGZe($nt) && fileGZe($aa);
-		warn "Precomputed consensus output is incomplete for $smpl; falling back to on-the-fly generation\n";
+		limitedWarn('incomplete precomputed consensus outputs',
+			"Precomputed consensus output is incomplete for $smpl; falling back to on-the-fly generation\n");
 		delete $preCompSNPs{$smpl};
 	}
 	if ($fileAbsent) {
@@ -1634,7 +1715,8 @@ sub evalFileStatus{
 			}
 			my @identifier_parts = split /\Q$SaSe\E/, $first_entry, -1;
 			if (@identifier_parts != 3 || grep { !length } @identifier_parts) {
-				warn "$MGS does not use the required sample|COG|primaryGeneID identifier format; scheduling input regeneration\n";
+				limitedWarn('MGS with legacy sequence identifiers',
+					"$MGS does not use the required sample|COG|primaryGeneID identifier format; scheduling input regeneration\n");
 				$legacyLocusOutputs++;
 				$legacyLocusMGS{$MGS} = 1;
 				$dirsNOTPrepped++;
@@ -1671,7 +1753,7 @@ sub evalFileStatus{
 
 sub appendWriteMGSgenes {
     my ($writeLink) = @_;
-    print "Append write start\n";
+	print "Flushing buffered MGS records\n";
 
     my $wrMGS = 0;
     my $suffix = ".$subJob";
@@ -1727,7 +1809,7 @@ sub appendWriteMGSgenes {
 sub appendWriteMGSgene_olds{
 	#write genes to respective MGS intra phyla..
 	my ($writeLink) = @_;
-	print "Append write start\n";
+	print "Flushing buffered MGS records\n";
 	my $wrMGS=0;
 	my @SpecSet = keys(%OFstrH);
 	my @specSetS = shuffle(@SpecSet); #shuffle to further reduce chance of multiple jobs writing consistently to the same files..
@@ -1913,7 +1995,10 @@ sub extractFNAFAA2genes{
 	foreach my $MGS (keys %perMGScnts){
 		my $perMGSgenes = scalar( keys( %{$perMGScnts{$MGS}} ) );
 		push(@histoMGScnts,  $perMGSgenes);
-		if ($perMGSgenes < 10){print "WARNING: only $perMGSgenes genes/COGs for MGS $MGS - MGS genes might be multi copy?\n";}
+	if ($perMGSgenes < 10){
+		limitedWarn('MGS with fewer than 10 candidate loci',
+			"Only $perMGSgenes genes/COGs for MGS $MGS; MGS genes might be multi-copy\n");
+	}
 	}
 	#DBUG
 	my $represented_mgs = scalar(keys(%perMGScnts));
@@ -2080,16 +2165,19 @@ sub readGenesSample_Singl{
 		#print "map s: " .scalar(keys%map)."\n";
 
 	unless (exists ($map{$sd2}) ) {
-		warn "Can't find map entry for $sd; assembly group will be skipped\n";
+		limitedWarn('assembly groups absent from the map',
+			"Can't find map entry for $sd; assembly group will be skipped\n");
 		return;
 	}
 	my @subGKs = keys %subG;
 	unless (@subGKs) {
-		warn "No candidate genes found for sample $sm; sample will be skipped\n";
+		limitedWarn('samples without candidate genes',
+			"No candidate genes found for sample $sm; sample will be skipped\n");
 		return;
 	}
 	unless ($subGKs[0] =~ m/^(.*)__/) {
-		warn "Cannot parse catalogue member '$subGKs[0]' for sample $sm; sample will be skipped\n";
+		limitedWarn('unparseable catalogue members',
+			"Cannot parse catalogue member '$subGKs[0]' for sample $sm; sample will be skipped\n");
 		return;
 	}
 	#find out if other samples are in the same assmblGrp..
@@ -2107,11 +2195,12 @@ sub readGenesSample_Singl{
 	#go into each sample ($sd3) from assembly group ($sd), that an assembly might be associated to (across multiple assemblies in assmblGrp)
 	foreach my $sd3 (@subSds){
 		if (exists $unavailableSamples{$sd3}) {
-			warn "Skipping $sd3: $unavailableSamples{$sd3}\n";
+			limitedWarn('unavailable samples', "Skipping $sd3: $unavailableSamples{$sd3}\n");
 			next;
 		}
 		unless (exists($map{$sd3}) && defined($map{$sd3}{wrdir}) && length($map{$sd3}{wrdir})) {
-			warn "Skipping $sd3: missing map entry or working directory\n";
+			limitedWarn('samples missing map entries or working directories',
+				"Skipping $sd3: missing map entry or working directory\n");
 			next;
 		}
 		#print "Time A: " . timeNice(time - $sttime)  . "\n";
@@ -2121,7 +2210,6 @@ sub readGenesSample_Singl{
 		my %locFAA; my %locFNA;my%locCSP;
 		my %locMGSgenes; #keep track of genes written for each MGS..
 		my $cD = $map{$sd3}{wrdir}."/";
-		print "$cD\n";
 		if (-e "$cD/SMPL.empty"){
 			print ".. Empty->skip ";
 			next;
@@ -2131,7 +2219,8 @@ sub readGenesSample_Singl{
 		#print "r:$rename $sd3  (from $sd2) ";
 		my $metaGD = getAssemblPath($cD,"",0);
 		if ($metaGD eq ""){
-			warn "Assembly not available for $sd3 in $cD; sample will be skipped\n";
+			limitedWarn('samples without assemblies',
+				"Assembly not available for $sd3 in $cD; sample will be skipped\n");
 			next;
 		}
 		#get NT's
@@ -2145,12 +2234,14 @@ sub readGenesSample_Singl{
 		
 		if (exists($preCompSNPs{$sd3})
 				&& fileGZe($preCompSNPs{$sd3}{NT}) && fileGZe($preCompSNPs{$sd3}{AA})){
-			print "Found precomputed files: $preCompSNPs{$sd3}{NT}\n";
+			# The phase summary already reports precomputed consensus usage; avoid
+			# printing one full filesystem path per sample here.
 			$fastaf=$preCompSNPs{$sd3}{NT};
 			$fastafAA=$preCompSNPs{$sd3}{AA};
 			$locForceVCF2FNA=0;
 		} elsif (exists($preCompSNPs{$sd3})) {
-			warn "Ignoring incomplete precomputed consensus files for $sd3\n";
+			limitedWarn('incomplete precomputed consensus files',
+				"Ignoring incomplete precomputed consensus files for $sd3\n");
 			delete $preCompSNPs{$sd3};
 		}
 		
@@ -2158,7 +2249,8 @@ sub readGenesSample_Singl{
 			fileGZe($fastafVCF), fileGZe($fastaf), fileGZe($fastafAA), $locForceVCF2FNA
 		);
 		if ($input_state eq 'missing') {
-			warn "Skipping $sd3: consensus NT/AA files are incomplete and no repair VCF is available\n";
+			limitedWarn('samples without repairable consensus files',
+				"Skipping $sd3: consensus NT/AA files are incomplete and no repair VCF is available\n");
 			next;
 		}
 		# Rebuild both members of the pair whenever either is missing.  Writing
@@ -2195,7 +2287,8 @@ sub readGenesSample_Singl{
 			#$k =~ m/^(\S+)\s.*CSP=([0-9\.]+)/;
 			#requires vcf2fn v 0.25
 			unless ($k =~ m/^(\S+)\sD=([0-9.]+)\s.*CSP=([0-9.]+)/) {
-				warn "Malformed consensus protein header, skipping: $k\n";
+				limitedWarn('malformed consensus protein headers',
+					"Malformed consensus protein header, skipping: $k\n");
 				next;
 			}
 			my ($tmp, $depth, $csp) = ($1, $2, $3);
@@ -2320,7 +2413,8 @@ sub readGenesSample_Singl{
 			my @OCstr; my @OFstr; my @OAstr; my @OLstr ;
 			foreach my $gX (  @genes3 ){
 				unless (exists($FAA{$gX}) && exists($FNA->{$gX})){
-					print STDERR "Could not find \"$gX\" gene\n" ;
+					limitedWarn('catalogue genes absent from consensus sequences',
+						"Could not find '$gX' gene in consensus sequences\n");
 					next;
 				}
 				my $strCpy = ""; $strCpy = $FAA{$gX};# if (exists($locFAA{$gX}));
