@@ -16,6 +16,8 @@ dependencies:
   - r-ape >= 5.7
   - r-phytools >= 2.3_0
   - r-tidytree>=0.4
+  # Bioconductor 3.20 / R 4.4-compatible ggtree release.
+  - bioconda::bioconductor-ggtree=3.14
   - r-phangorn >= 2.11.1
   - r-ggplot2>=3.5
   - r-getopt>=1.20

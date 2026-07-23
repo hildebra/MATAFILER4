@@ -284,6 +284,8 @@ fi
 
 ensure_environment MF4phylo "$INSTdir/phylo.yml"
 ensure_environment MF4_R "$INSTdir/MGTK_R.yml"
+"$MAMBA_E" run -n MF4_R Rscript --vanilla -e \
+	'suppressPackageStartupMessages(library(ggtree))'
 
 echo
 echo "How to download GTDB and GTDB-Tk databases"

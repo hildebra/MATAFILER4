@@ -29,6 +29,24 @@ like(
 	qr/^\Q$iqtree_selector\E$/m,
 	'IQ-TREE configuration prefers iqtree3 and falls back to iqtree2',
 );
+my $r_environment_path = File::Spec->catfile($Bin, '..', 'helpers', 'install', 'MGTK_R.yml');
+open my $r_environment_fh, '<', $r_environment_path or die $!;
+my $r_environment = do { local $/; <$r_environment_fh> };
+close $r_environment_fh;
+like(
+	$r_environment,
+	qr/bioconda::bioconductor-ggtree=3\.14/,
+	'the active MF4 R environment installs the R 4.4-compatible ggtree release',
+);
+my $installer_path = File::Spec->catfile($Bin, '..', 'helpers', 'install', 'installer.sh');
+open my $installer_fh, '<', $installer_path or die $!;
+my $installer = do { local $/; <$installer_fh> };
+close $installer_fh;
+like(
+	$installer,
+	qr/run -n MF4_R Rscript --vanilla -e.*?library\(ggtree\)/s,
+	'the installer verifies that ggtree loads in MF4_R',
+);
 my $phylo_tools_path = File::Spec->catfile($Bin, '..', 'Mods', 'phyloTools.pm');
 open my $phylo_tools_fh, '<', $phylo_tools_path or die $!;
 my $phylo_tools = do { local $/; <$phylo_tools_fh> };
