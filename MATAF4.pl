@@ -41,7 +41,7 @@ use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
-use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs);
+use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs submitSlurmWithDependencyRecovery);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
@@ -2402,8 +2402,14 @@ sub postSubmQsub {
 		}
 		push @augmented_commands, $augmented->{command};
 		my $submitted_before = scalar @submitted;
-		my $output = `$augmented->{command} 2>&1`;
-		my $status = $?;
+		my ($output, $status) = $QSBoptHR->{qmode} eq 'slurm'
+			? submitSlurmWithDependencyRecovery(
+				$augmented->{command}, $script_path, $QSBoptHR,
+			)
+			: do {
+				my $scheduler_output = `$augmented->{command} 2>&1`;
+				($scheduler_output, $?);
+			};
 		die "Deferred job submission failed: $augmented->{command}\n$output"
 			if ($status != 0);
 		if ($QSBoptHR->{qmode} eq 'slurm') {

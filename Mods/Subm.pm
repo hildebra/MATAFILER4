@@ -9,7 +9,8 @@ use Mods::WorkflowControl qw(normalise_job_dependencies);
 
 use Exporter qw(import);
 our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJobAlive
-		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs reconcileSlurmDependencies);
+		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs reconcileSlurmDependencies
+		submitSlurmWithDependencyRecovery);
 
 my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
 
@@ -73,6 +74,7 @@ sub reconcileSlurmDependencies {
 	$optHR ||= {};
 	my @dependencies = split /;/, normalise_job_dependencies($dependencies);
 	return ('', '') unless (@dependencies);
+	my $require_controller = $optHR->{slurmDependencyRequireController} || 0;
 
 	my $lookup = $optHR->{slurmDependencyAccountingLookup};
 	my $records = $lookup
@@ -81,7 +83,9 @@ sub reconcileSlurmDependencies {
 	# If accounting itself is unavailable, retain the original scheduler
 	# dependencies.  This preserves the historical behaviour rather than
 	# guessing that jobs have completed.
-	return (join(';', @dependencies), '') unless defined $records;
+	return (join(';', @dependencies), '')
+		unless defined($records) || $require_controller;
+	$records ||= {};
 
 	my $known_check = $optHR->{slurmDependencyKnownCheck};
 	my (@remaining, @invalid);
@@ -90,6 +94,16 @@ sub reconcileSlurmDependencies {
 		OUT_OF_MEMORY PREEMPTED REVOKED TIMEOUT
 	);
 	for my $dependency (@dependencies) {
+		if ($require_controller) {
+			my $known = $known_check
+				? $known_check->($dependency)
+				: _slurm_dependency_is_known($dependency);
+			if ($known) {
+				push @remaining, $dependency;
+				next;
+			}
+		}
+
 		my $record = $records->{$dependency};
 		if ($record) {
 			my $state = $record->{state} || '';
@@ -106,7 +120,11 @@ sub reconcileSlurmDependencies {
 				push @invalid, "$dependency ($state, exit $exit_code)";
 				next;
 			}
-			push @remaining, $dependency;
+			if ($require_controller) {
+				push @invalid, "$dependency ($state in sacct, absent from slurmctld)";
+			} else {
+				push @remaining, $dependency;
+			}
 			next;
 		}
 
@@ -125,6 +143,93 @@ sub reconcileSlurmDependencies {
 		? 'Cannot submit a Slurm dependency chain: '.join(', ', @invalid)
 		: '';
 	return (join(';', @remaining), $error);
+}
+
+sub _run_slurm_submission {
+	my ($command, $optHR) = @_;
+	if (my $runner = $optHR->{slurmSubmissionRunner}) {
+		return $runner->($command);
+	}
+	my $output = `$command 2>&1`;
+	return ($output, $?);
+}
+
+sub _slurm_script_dependency {
+	my ($script_path) = @_;
+	open my $input, '<', $script_path
+		or die "Cannot inspect Slurm job script $script_path: $!\n";
+	while (my $line = <$input>) {
+		if ($line =~ /^#SBATCH\s+--dependency=(afterok|afterany):([0-9:]+)\s*$/) {
+			close $input;
+			return ($1, split /:/, $2);
+		}
+	}
+	close $input;
+	return ('');
+}
+
+sub _rewrite_slurm_script_dependency {
+	my ($script_path, $dependency_type, $dependencies) = @_;
+	open my $input, '<', $script_path
+		or die "Cannot read Slurm job script $script_path for dependency recovery: $!\n";
+	my @lines = <$input>;
+	close $input or die "Cannot close Slurm job script $script_path: $!\n";
+
+	my $replacement = @{$dependencies}
+		? "#SBATCH --dependency=$dependency_type:".join(':', @{$dependencies})."\n"
+		: '';
+	my $replaced = 0;
+	for my $line (@lines) {
+		next unless $line =~ /^#SBATCH\s+--dependency=/;
+		$line = $replacement;
+		$replaced++;
+	}
+	die "Cannot recover Slurm dependencies: expected one dependency directive in $script_path, found $replaced\n"
+		unless $replaced == 1;
+
+	my @script_stat = stat($script_path);
+	my $temporary = "$script_path.dependency-rewrite.$$";
+	open my $output, '>', $temporary
+		or die "Cannot create dependency-recovery script $temporary: $!\n";
+	print {$output} @lines
+		or die "Cannot write dependency-recovery script $temporary: $!\n";
+	close $output
+		or die "Cannot close dependency-recovery script $temporary: $!\n";
+	chmod($script_stat[2] & 07777, $temporary) if @script_stat;
+	rename $temporary, $script_path
+		or die "Cannot install recovered Slurm script $script_path: $!\n";
+}
+
+sub submitSlurmWithDependencyRecovery {
+	my ($command, $script_path, $optHR) = @_;
+	$optHR ||= {};
+	my ($output, $status) = _run_slurm_submission($command, $optHR);
+	return ($output, $status, 0)
+		unless $status != 0 && $output =~ /Job dependency problem/i;
+
+	my ($dependency_type, @dependencies) = _slurm_script_dependency($script_path);
+	return ($output, $status, 0) unless $dependency_type ne '' && @dependencies;
+
+	my %recovery_options = (%{$optHR}, slurmDependencyRequireController => 1);
+	my ($reconciled, $dependency_error) = reconcileSlurmDependencies(
+		join(';', @dependencies), $dependency_type eq 'afterany', \%recovery_options,
+	);
+	if ($dependency_error ne '') {
+		$output .= "\nSlurm dependency recovery aborted: $dependency_error\n";
+		return ($output, $status, 0);
+	}
+
+	my @reconciled = grep { length } split /;/, $reconciled;
+	my %retained = map { $_ => 1 } @reconciled;
+	my @removed = grep { !$retained{$_} } @dependencies;
+	_rewrite_slurm_script_dependency($script_path, $dependency_type, \@reconciled);
+	warn "Slurm rejected dependencies for $script_path; verified all prerequisites, "
+		. "removed fulfilled job(s) ".(@removed ? join(',', @removed) : '<none>')
+		. ", and retrying once with "
+		. (@reconciled ? join(',', @reconciled) : 'no dependency directive')."\n";
+
+	my ($retry_output, $retry_status) = _run_slurm_submission($command, $optHR);
+	return ($retry_output, $retry_status, 1);
 }
 
 sub _continue_after_submission_failure {
@@ -381,8 +486,12 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		print $LOGhandle $qcm."\n" unless ($LOGhandle eq "" || !defined($LOGhandle) );
 		#print("$qcm\n\n");
 		#actual job excecution!
-		my $ret = `$qcm`;
-		my $submit_status = $?;
+		my ($ret, $submit_status) = $LSF == 2
+			? submitSlurmWithDependencyRecovery($qcm, $tmpsh, $optHR)
+			: do {
+				my $output = `$qcm`;
+				($output, $?);
+			};
 		if ($submit_status != 0) {
 			my $exit_code = $submit_status == -1 ? -1 : ($submit_status >> 8);
 			my $message = "Job submission failed (exit $exit_code): $qcm$ret";

@@ -7,7 +7,10 @@ use FindBin qw($Bin);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
-use Mods::Subm qw(qsubSystem qsubSystemJobAlive reconcileSlurmDependencies);
+use Mods::Subm qw(
+	qsubSystem qsubSystemJobAlive reconcileSlurmDependencies
+	submitSlurmWithDependencyRecovery
+);
 
 sub slurm_options {
 	return {
@@ -80,6 +83,116 @@ like($dependency_error, qr/104 \(FAILED, exit 1:0\).*105 \(unknown to both sacct
 );
 is($reconciled, '', 'a terminal unsuccessful job already fulfils afterany');
 is($dependency_error, '', 'afterany accepts an unsuccessful terminal dependency');
+
+($reconciled, $dependency_error) = reconcileSlurmDependencies(
+	'301;302', 0, {
+		slurmDependencyRequireController => 1,
+		slurmDependencyAccountingLookup => sub {
+			return {
+				301 => { state => 'COMPLETED', exit_code => '0:0' },
+				302 => { state => 'RUNNING', exit_code => '0:0' },
+			};
+		},
+		slurmDependencyKnownCheck => sub { return $_[0] == 302; },
+	},
+);
+is($reconciled, '302',
+	'strict recovery removes a fulfilled aged-out dependency and retains a controller-known job');
+is($dependency_error, '', 'strict recovery accepts the verified dependency set');
+
+my $retry_script = File::Spec->catfile($root, 'retry-dependency.sh');
+open my $retry_fh, '>', $retry_script or die $!;
+print {$retry_fh} "#!/bin/bash\n#SBATCH --dependency=afterok:401:402\necho recovered\n";
+close $retry_fh;
+my $submission_attempts = 0;
+my $retry_options = {
+	slurmSubmissionRunner => sub {
+		$submission_attempts++;
+		return $submission_attempts == 1
+			? ("sbatch: error: Batch job submission failed: Job dependency problem\n", 256)
+			: ("Submitted batch job 999\n", 0);
+	},
+	slurmDependencyAccountingLookup => sub {
+		return {
+			401 => { state => 'COMPLETED', exit_code => '0:0' },
+			402 => { state => 'RUNNING', exit_code => '0:0' },
+		};
+	},
+	slurmDependencyKnownCheck => sub { return $_[0] == 402; },
+};
+my ($retry_output, $retry_status, $did_retry);
+{
+	local $SIG{__WARN__} = sub { };
+	($retry_output, $retry_status, $did_retry) =
+		submitSlurmWithDependencyRecovery('sbatch retry-dependency.sh', $retry_script, $retry_options);
+}
+is($retry_status, 0, 'dependency-problem recovery returns the successful retry status');
+is($retry_output, "Submitted batch job 999\n", 'dependency-problem recovery returns retry output');
+is($did_retry, 1, 'a Slurm dependency problem triggers exactly one controlled retry');
+is($submission_attempts, 2, 'the recovered Slurm script is submitted twice in total');
+open $retry_fh, '<', $retry_script or die $!;
+my $retry_contents = do { local $/; <$retry_fh> };
+close $retry_fh;
+like($retry_contents, qr/^#SBATCH --dependency=afterok:402$/m,
+	'the retry script retains only controller-present dependencies');
+
+my $fulfilled_script = File::Spec->catfile($root, 'fulfilled-dependencies.sh');
+open my $fulfilled_fh, '>', $fulfilled_script or die $!;
+print {$fulfilled_fh} "#!/bin/bash\n#SBATCH --dependency=afterok:451:452\necho independent\n";
+close $fulfilled_fh;
+my $fulfilled_attempts = 0;
+{
+	local $SIG{__WARN__} = sub { };
+	my (undef, $fulfilled_status, $fulfilled_retry) =
+		submitSlurmWithDependencyRecovery(
+			'sbatch fulfilled-dependencies.sh', $fulfilled_script, {
+				slurmSubmissionRunner => sub {
+					$fulfilled_attempts++;
+					return $fulfilled_attempts == 1
+						? ("sbatch: error: Job dependency problem\n", 256)
+						: ("Submitted batch job 1000\n", 0);
+				},
+				slurmDependencyAccountingLookup => sub {
+					return {
+						451 => { state => 'COMPLETED', exit_code => '0:0' },
+						452 => { state => 'COMPLETED', exit_code => '0:0' },
+					};
+				},
+				slurmDependencyKnownCheck => sub { return 0; },
+			},
+		);
+	is($fulfilled_status, 0, 'a job with only fulfilled aged-out dependencies is resubmitted');
+	is($fulfilled_retry, 1, 'fulfilled aged-out dependencies trigger one retry');
+}
+open $fulfilled_fh, '<', $fulfilled_script or die $!;
+my $fulfilled_contents = do { local $/; <$fulfilled_fh> };
+close $fulfilled_fh;
+unlike($fulfilled_contents, qr/^#SBATCH --dependency=/m,
+	'the dependency directive is removed when every prerequisite is already fulfilled');
+
+my $failed_retry_script = File::Spec->catfile($root, 'failed-retry-dependency.sh');
+open my $failed_retry_fh, '>', $failed_retry_script or die $!;
+print {$failed_retry_fh} "#!/bin/bash\n#SBATCH --dependency=afterok:501\necho blocked\n";
+close $failed_retry_fh;
+my $failed_attempts = 0;
+my ($failed_output, $failed_status, $failed_did_retry) =
+	submitSlurmWithDependencyRecovery(
+		'sbatch failed-retry-dependency.sh', $failed_retry_script, {
+			slurmSubmissionRunner => sub {
+				$failed_attempts++;
+				return ("sbatch: error: Job dependency problem\n", 256);
+			},
+			slurmDependencyAccountingLookup => sub {
+				return { 501 => { state => 'FAILED', exit_code => '1:0' } };
+			},
+			slurmDependencyKnownCheck => sub { return 0; },
+		},
+	);
+is($failed_status, 256, 'an unsuccessful prerequisite preserves the original submission failure');
+is($failed_did_retry, 0, 'an unsuccessful prerequisite is never removed for a retry');
+is($failed_attempts, 1, 'unsafe dependency recovery does not resubmit');
+like($failed_output, qr/recovery aborted:.*501 \(FAILED, exit 1:0\)/s,
+	'the failed prerequisite is identified in the recovery diagnostic');
 
 my $script = File::Spec->catfile($root, 'short-dependency.sh');
 my $options = slurm_options();
