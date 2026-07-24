@@ -581,15 +581,26 @@ getGoodMBstats() if (!-e $finalClusters2 );#die;
 
 
 #cluster MAGs based on shared genes between them
+@jobs = ();
 if ($ph1flag  || !-e "$outD/$BinnerShrt.clusters" ){
 	#clusterMB2() if ($ph1flag  && !-e "$outD/$BinnerShrt.clusters" );
 	my $clusscr = getProgPaths("clusterMGS_scr");
 	my $canoIncl = ""; $canoIncl = "-canopies $canopyF" if ($useCanopies);
-	my $cmd = "$clusscr -GCd $GCd -BinDir $outD -logDir $logDir -binSpeciesMG $binSpeciesMG -MGset $useGTDBmg -clusterID $clusterID -cores $numCore -useCheckM1 $useCheckM1 -useCheckM2 $useCheckM2 -legacy $legacyV $canoIncl 1>&2 > $logDir/clusterMGS_scr.log\n";
+	my $cmd = "$clusscr -GCd $GCd -BinDir $outD -logDir $logDir -binSpeciesMG $binSpeciesMG -MGset $useGTDBmg -clusterID $clusterID  -useCheckM1 $useCheckM1 -useCheckM2 $useCheckM2  -legacy $legacyV -log $logDir/clusterMGS_detail.log $canoIncl ";#1>&2 > $logDir/clusterMGS_scr.log\n";
 	printL "Clustering MAGs into MGS; detailed output: $logDir/clusterMGS_scr.log\n";
-	systemW $cmd;
+	my $qsubCMAGs=0;
+	if (!$qsubCMAGs){
+		$cmd .= "-cores 1 1>&2 > $logDir/clusterMGS_scr.log\n";
+		systemW $cmd;
+	} else {
+		$cmd .=  "-cores $numCore \n";
+		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/ClusterMAGs.sh",$cmd,$numCore,"30G","clusterMAGs","","",1,[],\%QSBopt);
+		@jobs = ($jobName2);
+	}
 }
+
 die if ($stopAfterCluster); #DEBUGing only!!
+qsubSystemJobAlive( \@jobs,\%QSBopt ) if (@jobs);
 
 #decide between weighted and unweighted scores for binning
 my $activeMGSCount = _mgs_count($finalClusters2);

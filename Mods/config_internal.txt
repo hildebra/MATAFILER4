@@ -8,7 +8,9 @@ sdm	[MFLRDir]/bin/./sdm
 LCA	[MFLRDir]/bin/./LCA
 readCov	[MFLRDir]/bin/./rdCover
 MSAfix	[MFLRDir]/bin/./MSAfix
-canopy	cc.bin	env:MF4binners
+# canopy	cc.bin	env:MF4binners
+canopy	[MFLRDir]/bin/./cc.bin
+
 clusterMAGs	[MFLRDir]/bin/./clusterMAGs
 vcf2fna	[MFLRDir]/bin/./vcf2fna
 consVCF_region_planner	perl [MFLRDir]/secScripts/SNP/plan_consensus_regions.pl
