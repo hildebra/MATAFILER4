@@ -9,7 +9,7 @@ use Mods::WorkflowControl qw(normalise_job_dependencies);
 
 use Exporter qw(import);
 our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJobAlive
-		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs reconcileSlurmDependencies
+		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs numActiveUserJobs reconcileSlurmDependencies
 		submitSlurmWithDependencyRecovery);
 
 my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
@@ -583,6 +583,49 @@ sub numUserJobs{
 	return $num;
 }
 
+sub numActiveUserJobs{
+	my ($optHR) = @_;
+	my $rmSelf = @_ > 1 ? $_[1] : 0;
+	my $jobIds = @_ > 2 ? $_[2] : undef;
+	my $qmode = defined($optHR->{qmode}) ? $optHR->{qmode} : "slurm";
+	my %wanted;
+	if (defined $jobIds) {
+		my @tracked = split /;/, normalise_job_dependencies($jobIds);
+		my $rTag = $optHR->{rTag} || '';
+		for (@tracked) {
+			s/^\Q$rTag\E//;
+			$wanted{$_} = 1 if /^\d+$/;
+		}
+		return 0 unless %wanted;
+	}
+	my $srchCmd;
+	if ($qmode eq "slurm"){
+		$srchCmd = "squeue -h -u \$USER -t RUNNING,COMPLETING,CONFIGURING -o '%i'";
+	} elsif ($qmode eq "sge"){
+		$srchCmd = "qstat -u \$USER | awk 'NR > 2 && \$5 ~ /^(r|t|Rr|Rt)\$/ {print \$1}'";
+	} elsif ($qmode eq "bash"){
+		return 0;
+	} else {
+		$srchCmd = "bjobs -r -noheader -o jobid";
+	}
+	my ($output, $queryStatus);
+	if (my $runner = $optHR->{activeJobRunner}) {
+		($output, $queryStatus) = $runner->($srchCmd);
+		$queryStatus ||= 0;
+	} else {
+		$output = `$srchCmd`;
+		$queryStatus = $?;
+	}
+	die "Failed to count active user jobs with: $srchCmd\n" if ($queryStatus != 0);
+	my %active = map { $_ => 1 }
+		grep { /^\d+$/ }
+		map { my $id = $_; $id =~ s/^\s+|\s+$//g; $id }
+		split /\n/, $output;
+	delete $active{$ENV{SLURM_JOBID}}
+		if ($rmSelf && $qmode eq "slurm" && ($ENV{SLURM_JOBID} || '') ne '');
+	return scalar grep { !%wanted || $wanted{$_} } keys %active;
+}
+
 
 sub findQsubSys($){
 	my $iniVal = "";
@@ -696,6 +739,11 @@ sub qsubSystemJobAlive{
 	my ($jAr,$optHR) = @_;
 	my $killFailedJobs=0;
 	$killFailedJobs = $_[2] if (@_ > 2);
+	# A non-negative threshold makes loopTillComplete wait only until this many
+	# submitted dependencies are actually executing.  Other callers retain the
+	# historical behaviour of waiting for every queued dependency to disappear.
+	my $activeThreshold=-1;
+	$activeThreshold = $_[3] if (@_ > 3);
 	my @jobs = split /;/, normalise_job_dependencies($jAr);
 	@jobs = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY } @jobs;
 	return unless (@jobs);
@@ -707,25 +755,55 @@ sub qsubSystemJobAlive{
 
 	for (@jobs) {s/^\Q$rTag\E//;}
 	if ($qmode eq "slurm"){
-		$cmd1 = "squeue -h -u \$USER -o '%i'";
+		$cmd1 = "squeue -h -u \$USER -o '%i|%T'";
 	} elsif ($qmode eq "sge"){
-		$cmd1 = "qstat -u \$USER | awk 'NR > 2 {print \$1}'"
+		$cmd1 = "qstat -u \$USER | awk 'NR > 2 {print \$1 \"|\" \$5}'"
 	} elsif ($qmode eq "bash"){
 		return;
-	} else {$cmd1="bjobs -noheader -o jobid";
+	} else {$cmd1="bjobs -noheader -o 'jobid stat'";
 	}
 	my %wanted = map { $_ => 1 } @jobs;
 	my $announced = 0;
 	while (1) {
-		my $output = `$cmd1`;
-		die "Failed to query active jobs with: $cmd1\n" if ($? != 0);
-		my %active = map { $_ => 1 }
-			grep { /^\d+$/ }
-			map { my $id = $_; $id =~ s/^\s+|\s+$//g; $id }
-			split /\n/, $output;
-		my @remaining = grep { $active{$_} } keys %wanted;
+		my ($output, $queryStatus);
+		if (my $runner = $optHR->{jobStatusRunner}) {
+			($output, $queryStatus) = $runner->($cmd1);
+			$queryStatus ||= 0;
+		} else {
+			$output = `$cmd1`;
+			$queryStatus = $?;
+		}
+		die "Failed to query active jobs with: $cmd1\n" if ($queryStatus != 0);
+		my (%queued, %executing);
+		for my $line (split /\n/, $output) {
+			$line =~ s/^\s+|\s+$//g;
+			my ($id, $state);
+			if ($line =~ /^(\d+)\|(\S+)$/) {
+				($id, $state) = ($1, uc($2));
+			} elsif ($line =~ /^(\d+)\s+(\S+)$/) {
+				($id, $state) = ($1, uc($2));
+			} else {
+				next;
+			}
+			$queued{$id} = 1;
+			my $isExecuting =
+				$qmode eq "slurm" ? $state =~ /^(?:RUNNING|COMPLETING|CONFIGURING|RESIZING|SIGNALING|STAGE_OUT)$/
+			  : $qmode eq "sge"   ? $state =~ /^(?:R|T|RR|RT)$/
+			  :                    $state eq "RUN";
+			$executing{$id} = 1 if ($isExecuting);
+		}
+		my @remaining = grep { $queued{$_} } keys %wanted;
+		my @active = grep { $executing{$_} } keys %wanted;
+		if ($activeThreshold >= 0 && @active <= $activeThreshold) {
+			print scalar(@active)." active job(s) remain among ".scalar(@remaining).
+				" queued dependencies; loop threshold $activeThreshold reached.\n";
+			last;
+		}
 		last unless (@remaining);
-		print "Waiting for ".scalar(@remaining)."/".scalar(@jobs)." jobs to finish\n"
+		my $waitDescription = $activeThreshold >= 0
+			? scalar(@active)." active job(s) among ".scalar(@remaining)."/".scalar(@jobs)." queued dependencies"
+			: scalar(@remaining)."/".scalar(@jobs)." jobs";
+		print "Waiting for $waitDescription to finish\n"
 			unless ($announced++);
 		if ($killFailedJobs){
 			my $killed = qsubDepNeverKill();

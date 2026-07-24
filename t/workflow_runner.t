@@ -160,15 +160,21 @@ like($mataf4,
 	qr/if \(\$overlapWindow->\{extended\}\).*?return;\s*}\s*\$loopIterationSubmissionStart =/s,
 	'an extended pass retains its submission snapshot until both blocks reach the wait boundary');
 like($mataf4,
-	qr/\$doSubmit && !\$MFconfig\{rmSmplLocks\} && \$submittedThisIteration == 0.*?numUserJobs\(\$QSBoptHR, 1\).*?should_rerun_locked_window\(.*?if \(\$rerunLockedWindow.*?\$JNUM = \$from - 1;.*?return;/s,
+	qr/\$doSubmit && !\$MFconfig\{rmSmplLocks\} && \$submittedThisIteration == 0.*?numActiveUserJobs\(\s*\$QSBoptHR,\s*1,\s*\[keys %loopSubmittedJobIds\].*?should_rerun_locked_window\(.*?active_job_threshold => \$MFconfig\{loopTillCompleteActiveJobs\}.*?if \(\$rerunLockedWindow.*?\$JNUM = \$from - 1;.*?return;/s,
 	'a no-op retained-lock pass reruns its current window when few jobs remain active');
+like($mataf4,
+	qr/normalise_job_dependencies\(\\\@grandDeps\).*?\$loopJobId =~ s\/\^.*?\$loopSubmittedJobIds\{\$loopJobId\} = 1.*?qsubSystemJobAlive/s,
+	'loopTillComplete retains submitted job ids for scoped active-job checks');
+like($mataf4,
+	qr/qsubSystemJobAlive\(\s*\\\@grandDeps,\s*\$QSBoptHR,\s*1,\s*\$MFconfig\{loopTillCompleteActiveJobs\}/s,
+	'loopTillComplete starts its next pass at the configured active-job threshold');
 like($mataf4,
 	qr/\$loop2completion > 1 \|\| !\$loopFinalLockRetryUsed.*?\$loopFinalLockRetryUsed = 1/s,
 	'the retained-lock policy permits only one extra retry beyond the configured pass budget');
 like($mataf4,
 	qr/getCmdLineOptions;.*?rewrite options cannot be combined with -loopTillComplete.*?setupHPC\(\)/s,
 	'unsafe rewrite combinations fail before scheduler setup or job submission');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?my \$MATFILER_ver = 4\.12/s,
-	'MATAFILER history retains the overlapping final-pass change through version 4.12');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?my \$MATFILER_ver = 4\.13/s,
+	'MATAFILER history records active-job loop triggering in version 4.13');
 
 done_testing;

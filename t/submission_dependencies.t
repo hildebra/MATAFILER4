@@ -8,7 +8,7 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Subm qw(
-	qsubSystem qsubSystemJobAlive reconcileSlurmDependencies
+	qsubSystem qsubSystemJobAlive numActiveUserJobs reconcileSlurmDependencies
 	submitSlurmWithDependencyRecovery
 );
 
@@ -233,6 +233,28 @@ is(scalar @{$options->{submissionErrors}}, 1,
 $options = slurm_options();
 is(qsubSystemJobAlive([], $options), undef,
 	'waiting on an empty dependency set returns without querying the scheduler');
+
+$options = slurm_options();
+$options->{jobStatusRunner} = sub {
+	return ("101|RUNNING\n102|PENDING\n103|PENDING\n", 0);
+};
+my $threshold_output = '';
+{
+	local *STDOUT;
+	open STDOUT, '>', \$threshold_output
+		or die "Cannot capture threshold output: $!";
+	qsubSystemJobAlive([qw(101 102 103)], $options, 0, 3);
+}
+like($threshold_output,
+	qr/1 active job\(s\) remain among 3 queued dependencies; loop threshold 3 reached/,
+	'dependency-pending jobs do not inflate the executing-job threshold');
+
+$options = slurm_options();
+$options->{activeJobRunner} = sub {
+	return ("101\n777\n", 0);
+};
+is(numActiveUserJobs($options, 0, [qw(101 102)]), 1,
+	'active-job counting ignores unrelated user jobs not submitted by this loop');
 
 my $bash_script = File::Spec->catfile($root, 'counted-submission.sh');
 $options = bash_options();

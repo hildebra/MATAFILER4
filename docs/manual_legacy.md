@@ -40,7 +40,7 @@ MATAFILER4 uses three primary phases to analyse metagenomes:
 	-from [#]					run subsample of mapping file starting at sample # (use with -to)
 	-to [#]						run subsample of mapping file ending at sample # (use with -from)
 	-ignoreSmpls [string]			comma separated list of #SmplIDs that are skipped (sample id in .map file)
-	-rmSmplLocks [0|1]				1: remove existing sample locks; with default 0, a no-submission loop pass rescans its current range when at least one user job remains and the count is <3 or <1% of its samples (bounded by loop passes plus one final retry)
+	-rmSmplLocks [0|1]				1: remove existing sample locks; with default 0, a no-submission loop pass rescans its current range when at least one user job remains and the count is at most -loopTillCompleteActiveJobs or <1% of its samples (bounded by loop passes plus one final retry)
 	-redoFails [0|1]				if any step of requested analysis failed, just redo everything (use with care!) 
 	-maxConcurrentJobs [#]			max jobs in queue, useful for large samples sets, currently only works on slurm (see also -killDepNever)
 	-killDepNever [0|1]				kills jobs in the "JobDependencyNeverMet" state, as these will block [maxConcurrentJobs], 	
@@ -48,6 +48,7 @@ MATAFILER4 uses three primary phases to analyse metagenomes:
 	-submSystem [qsub,SGE,bsub,LSF]	set submission system (default: autodetect)
 	-redoContigStats [0|1]				if any step of requested analysis failed, contigStats (coverage per gene, kmers, GC content) will be deleted & started again
 	-loopTillComplete [X:Y]			script will loop over the assigned samples until all jobs are finished #use syntax "X:Y" where X is num loops, Y is the window size, eg "6:250" runs up to 6 passes per block of 250 samples; a pass submitting <= floor(Y/4) jobs or the final pass always admits one following block before waiting (#dangerous flag)
+	-loopTillCompleteActiveJobs [#]	start the next loopTillComplete pass once this many submitted dependencies or fewer are actually executing (default 3; queued dependency-pending jobs are not counted)
 	-requireInput [0/1]		in case input reads are not present (e.g. something wrong in map), 0 will continue pipeline, 1 will abort
 	-silent [0/1] 			Controls how much information is printed on console
 	-OKtoRWassGrps [0|1]			1: can delete assemblies, if suspects error in them, powerful, but careful! (Default: 0)

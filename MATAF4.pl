@@ -41,7 +41,7 @@ use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
-use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs submitSlurmWithDependencyRecovery);
+use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numActiveUserJobs submitSlurmWithDependencyRecovery);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
@@ -114,13 +114,15 @@ sub createConsSNPandSVs;
 #4.10: 16.5.26: CahtGPT 5.6 sol: completely rewrite of calling logic, multiple bugs fixed across various scripts, better metagStats reporting, hybrid assemblies strengthned.
 #4.11: 21.7.26: loopTillComplete overlaps light passes and merges the next block on each final pass.
 #       Retained-lock windows get a bounded retry when at least one but fewer than
-#       1% of their samples or fewer than 3 user jobs remain active.
+#       1% of their samples or at most the configured number of jobs remain active.
 #       Loop specifications and incompatible rewrite modes fail early.
 #4.12: 22.7.26: reconcile aged Slurm dependencies through accounting after MinJobAge,
 #       omitting successfully completed jobs while reporting failed or unknown jobs.
 #       Track fresh submission times to avoid routine accounting queries, and remove
 #       unnecessary cross-sample ContigStats-to-ContigStats dependencies.
-my $MATFILER_ver = 4.12;
+#4.13: 24.7.26: loopTillComplete distinguishes executing jobs from queued
+#       dependencies and starts its next pass at a configurable active-job threshold.
+my $MATFILER_ver = 4.13;
 
 #----------------- defaults ----------------- 
 
@@ -211,6 +213,8 @@ announce_MF4();
 help() if ($helpRequested);
 setDefaultMFconfig();
 getCmdLineOptions;
+die "-loopTillCompleteActiveJobs requires a non-negative integer\n"
+	if ($MFconfig{loopTillCompleteActiveJobs} < 0);
 $MFconfig{inspectState} = 1 if ($MFconfig{planState});
 if (!$MFconfig{inspectState} && $loop2completion && (
 		$MFopt{redoAssMapping} || $MFopt{BinnerRedoAll} || $MFopt{redoAssembly}
@@ -291,6 +295,7 @@ if ($loop2c_winsize > 0){
 my $loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
 my $loopIterationExtended = 0;
 my $loopFinalLockRetryUsed = 0;
+my %loopSubmittedJobIds;
 
 
 #--------------------------------------------------------------------------------
@@ -1801,10 +1806,13 @@ sub loop2C_check(){
 			# A pass that submitted work already reruns after its dependency wait.
 			# Check the scheduler only for a no-op pass that may have skipped locks.
 			if ($doSubmit && !$MFconfig{rmSmplLocks} && $submittedThisIteration == 0) {
-				$activeJobs = numUserJobs($QSBoptHR, 1);
+				$activeJobs = numActiveUserJobs(
+					$QSBoptHR, 1, [keys %loopSubmittedJobIds],
+				);
 				$rerunLockedWindow = should_rerun_locked_window(
 					active_jobs => $activeJobs,
 					sample_count => $to - $from,
+					active_job_threshold => $MFconfig{loopTillCompleteActiveJobs},
 					remove_locks => $MFconfig{rmSmplLocks},
 				);
 			}
@@ -1869,7 +1877,18 @@ sub loop2C_check(){
 
 			#print "L2C:: $loop2completion  @{$sampleDeps_AR}\n";
 			if ($continueCurrentWindow) {
-				qsubSystemJobAlive( \@grandDeps,$QSBoptHR ,1 );
+				my $loopJobTag = $QSBoptHR->{rTag} || '';
+				for my $loopJobId (
+					split /;/, normalise_job_dependencies(\@grandDeps)
+				) {
+					$loopJobId =~ s/^\Q$loopJobTag\E//;
+					$loopSubmittedJobIds{$loopJobId} = 1
+						if ($loopJobId =~ /^\d+$/);
+				}
+				qsubSystemJobAlive(
+					\@grandDeps, $QSBoptHR, 1,
+					$MFconfig{loopTillCompleteActiveJobs},
+				);
 				# Reinspect after every completed submission pass. This lets hybrid
 				# preassembly packages and assembly-group outputs become dependencies
 				# for the next pass without requiring a separate user command.
@@ -1881,6 +1900,7 @@ sub loop2C_check(){
 			resetAsGrps(\%AsGrps);
 
 			if ($loop2c_winsize > 0 && !$loop2completion){
+				%loopSubmittedJobIds = ();
 				my $tmpStr = "Changing sample window from $from -> $to to ";
 				my $nextWindow = advance_loop_window(
 					from => $from, to => $to, upper => $TO1,
@@ -8858,6 +8878,7 @@ sub setDefaultMFconfig{
 	$MFconfig{silent} = 0;
 	$MFconfig{redoFails} = 0;$MFconfig{XfirstReads} = -1;
 	$MFconfig{killDepNever} = 0;  $MFconfig{checkMaxNumJobs} = 0;  #slurm related.. $killDepNever=1 kills jobs in state "DependencyNeverFinished" (happens a lot), while $checkMaxNumJobs=X halts the pipeline if more than X jobs are already queued up
+	$MFconfig{loopTillCompleteActiveJobs} = 3;
 	$MFconfig{excludeNodes} = ""; #excluding certain nodes..
 	$MFconfig{readsRpairs} =-1; #are reads given in pairs? default: -1 = no clue
 	#my $useTrimomatic=0; #trimmomatic step now replaced by sdm solution -> $MFopt{trimAdapters}
@@ -9013,6 +9034,7 @@ sub getCmdLineOptions{
 		"to=i" => \$TO1,   #stop at which samples from map file?
 		"loopTillComplete=s" => \$loop2completion, #dangerous flag, script will loop over the assigned samples until all jobs are finished.
 		#use synatx "X:Y" where X is num loops, Y is the window size, eg "6:250" would run 6 loops of max 250 samples, then move on to next 250 samples
+		"loopTillCompleteActiveJobs=i" => \$MFconfig{loopTillCompleteActiveJobs}, #start the next pass once no more than this many submitted jobs are running
 		"excludeNodes=s" => \$MFconfig{excludeNodes}, #exclude certain nodes?
 		"maxConcurrentJobs=i" => \$MFconfig{checkMaxNumJobs}, #max jobs in queue, useful for large samples sets, currently only works on slurm 
 		"killDepNever=i" => \$MFconfig{killDepNever}, #kill jobs in "Dependency never finished" state? 

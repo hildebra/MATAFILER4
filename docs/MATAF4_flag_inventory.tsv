@@ -14,6 +14,7 @@ flow related	submit	integer	1	stable	$doSubmit	submit any jobs at all? (0= no su
 flow related	from	integer	0	stable	$FROM1	start at which samples from map file?
 flow related	to	integer	999999999999	stable	$TO1	stop at which samples from map file?
 flow related	loopTillComplete	string	"""0"""	advanced	$loop2completion	dangerous flag, script will loop over the assigned samples until all jobs are finished.
+flow related	loopTillCompleteActiveJobs	integer	3	advanced	$MFconfig{loopTillCompleteActiveJobs}	start the next loop pass once no more than this many submitted jobs are actually running
 flow related	excludeNodes	string	""""""	stable	$MFconfig{excludeNodes}	exclude certain nodes?
 flow related	maxConcurrentJobs	integer	0	stable	$MFconfig{checkMaxNumJobs}	max jobs in queue, useful for large samples sets, currently only works on slurm
 flow related	killDepNever	integer	0	stable	$MFconfig{killDepNever}	"kill jobs in ""Dependency never finished"" state?"

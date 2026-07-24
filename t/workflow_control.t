@@ -190,10 +190,14 @@ ok(!should_rerun_locked_window(
 ), 'exactly one percent active jobs does not satisfy the strict threshold');
 ok(should_rerun_locked_window(
 	active_jobs => 2, sample_count => 100, remove_locks => 0,
-), 'fewer than three active jobs reruns even when one percent is smaller');
-ok(!should_rerun_locked_window(
+), 'fewer than the default active-job threshold reruns even when one percent is smaller');
+ok(should_rerun_locked_window(
 	active_jobs => 3, sample_count => 100, remove_locks => 0,
-), 'three active jobs is outside both strict thresholds for a small block');
+), 'the default threshold includes three active jobs');
+ok(!should_rerun_locked_window(
+	active_jobs => 3, active_job_threshold => 2,
+	sample_count => 100, remove_locks => 0,
+), 'a configured active-job threshold overrides the default');
 ok(!should_rerun_locked_window(
 	active_jobs => 0, sample_count => 1000, remove_locks => 0,
 ), 'zero active jobs cannot cause a retained-lock retry loop');

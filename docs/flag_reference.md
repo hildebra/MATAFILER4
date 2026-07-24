@@ -59,12 +59,13 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-from` | integer | `0` | stable | start at which samples from map file? |
 | `-to` | integer | `999999999999` | stable | stop at which samples from map file? |
 | `-loopTillComplete` | string | `"0"` | advanced | Loop over selected samples; `X:Y` processes blocks of at most `Y` samples for up to `X` passes. One following block is admitted before waiting when a pass submits at most `floor(Y/4)` jobs (minimum 1), and always on the final allowed pass of a block. At most one block is added per pass and the enlarged range receives a fresh pass budget. Preflight is repeated after each wait only when `-autoStatePlan 1` is enabled. |
+| `-loopTillCompleteActiveJobs` | integer | `3` | advanced | Start the next loop pass once no more than this many dependencies submitted for the current loop window are actually executing. Queued dependency-pending jobs and unrelated user jobs do not inflate the active count. |
 | `-excludeNodes` | string | `""` | stable | exclude certain nodes? |
 | `-maxConcurrentJobs` | integer | `0` | stable | max jobs in queue, useful for large samples sets, currently only works on slurm |
 | `-killDepNever` | integer | `0` | stable | kill jobs in "Dependency never finished" state? |
 | `-requireInput` | integer | `0` | stable | in case input reads are no longer present, 0 will continue pipeline, 1 will abort |
 | `-ignoreSmpls` | string | `""` | stable | Comma-separated exact sample IDs to skip; values are not regular expressions or prefix matches. |
-| `-rmSmplLocks` | integer | `0` | stable | Remove existing sample locks. With the default `0`, a no-submission `loopTillComplete` pass reruns its current range when at least one user job remains active and the count is either fewer than 3 or strictly below 1% of the range's samples. Retries use the normal pass budget plus at most one final extra scan. |
+| `-rmSmplLocks` | integer | `0` | stable | Remove existing sample locks. With the default `0`, a no-submission `loopTillComplete` pass reruns its current range when at least one user job remains active and the count is at most `-loopTillCompleteActiveJobs` or strictly below 1% of the range's samples. Retries use the normal pass budget plus at most one final extra scan. |
 | `-silent` | flag | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-maxUnzpJobs` | integer | `20` | stable | how many unzip jobs to run in parallel (not to overload HPC IO). Default:20 |
 | `-skipSmallSmplsMB` | integer | `1` | stable | skip samples with a combined input smaller than this in MB (raw file size, independent of compressed or raw) |

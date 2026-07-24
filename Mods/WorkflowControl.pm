@@ -364,15 +364,20 @@ sub should_rerun_locked_window {
 	my (%args) = @_;
 	my $active_jobs = 0 + $args{active_jobs};
 	my $sample_count = 0 + $args{sample_count};
+	my $active_job_threshold = exists $args{active_job_threshold}
+		? 0 + $args{active_job_threshold} : 3;
 	my $remove_locks = $args{remove_locks} ? 1 : 0;
 	die 'should_rerun_locked_window requires a non-negative active job count'
 		unless ($active_jobs >= 0);
 	die 'should_rerun_locked_window requires a positive sample count'
 		unless ($sample_count > 0);
+	die 'should_rerun_locked_window requires a non-negative active job threshold'
+		unless ($active_job_threshold >= 0);
 	return 0 if ($remove_locks || $active_jobs == 0);
 	# Use integer arithmetic for the strict one-percent comparison so boundary
 	# values such as 10 active jobs among 1,000 samples do not qualify.
-	return ($active_jobs < 3 || $active_jobs * 100 < $sample_count) ? 1 : 0;
+	return ($active_jobs <= $active_job_threshold
+		|| $active_jobs * 100 < $sample_count) ? 1 : 0;
 }
 
 1;
