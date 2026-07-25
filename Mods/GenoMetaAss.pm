@@ -909,7 +909,10 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 	#so callers that only need a subset of samples (e.g. one split-worker out of many)
 	#never have to hold the other samples' members in memory in the first place.
 	my $memberSubsHR = undef;
-	$memberSubsHR = $_[3] if (@_ > 3 && ref($_[3]) eq 'HASH' && scalar(keys %{$_[3]}));
+	#An explicitly supplied empty hash is a valid "keep none" partition.  Do
+	#not turn it into undef, which means "do not filter" and would make an
+	#otherwise idle split worker load the complete catalogue.
+	$memberSubsHR = $_[3] if (@_ > 3 && ref($_[3]) eq 'HASH');
 	#my %subs = %{$subsHR};
 	my $doSubset=0;
 	if (scalar(keys(%{$subsHR})) > 0 ){

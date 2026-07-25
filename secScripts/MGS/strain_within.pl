@@ -133,8 +133,9 @@ END {
 #.42: resubmit unfinished trees from published inputs without requiring scratch aggregates
 #.43: avoid redundant candidate scoring and hot-loop container copies during extraction
 #.44: reduce locus-model, FASTA scan, and category-publication peak memory
-#.45: normalize repeated VCF headers and distinguish split-worker sparsity from missing catalogue data
-my $version = 0.45;
+#.45: distinguish split-worker sparsity from missing catalogue data
+#.46: restore every sample in shared assembly groups
+my $version = 0.46;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1278,15 +1279,33 @@ sub prepGene2MGS{
 	#never materialized in this process at all.
 	my $mySamplesHR = undef;
 	if ($maxSubJob){
-		my @srtdAllSmpls = sort @samples;
-		my $Ndirs = scalar(@srtdAllSmpls);
-		my %mine;
-		for (my $i = $subJob; $i < $Ndirs; $i += $maxSubJob){
-			$mine{$srtdAllSmpls[$i]} = 1;
+		# Partition whole assembly groups, never individual samples.  The
+		# catalogue has one shared-reference driver, while every member still
+		# needs its sample-specific VCF/depth consensus below.
+		my (%samplesByGroup, %groupForSample);
+		for my $sample (@samples) {
+			my $group = defined($map{$sample}{AssGroup}) && $map{$sample}{AssGroup} ne '-1'
+				? $map{$sample}{AssGroup} : "__standalone__${sample}";
+			push @{$samplesByGroup{$group}}, $sample;
+			$groupForSample{$sample} = $group;
+		}
+		my @groups = sort keys %samplesByGroup;
+		my (%mine, %ownedGroup);
+		for (my $i = $subJob; $i < @groups; $i += $maxSubJob){
+			my $group = $groups[$i];
+			$ownedGroup{$group} = 1;
+			$mine{$_} = 1 for @{$samplesByGroup{$group}};
+		}
+		# Assembly catalogues can use generated aliases such as sampleM2.
+		for my $alias (keys %{$map{altNms} || {}}) {
+			my $sample = $map{altNms}{$alias};
+			my $group = $groupForSample{$sample};
+			$mine{$alias} = 1 if defined($group) && $ownedGroup{$group};
 		}
 		$mySamplesHR = \%mine;
 		print "Subjob ${subJob}/$maxSubJob: restricting locus-model construction to "
-			. scalar(keys %mine) . " of $Ndirs samples\n";
+			. scalar(keys %ownedGroup)." of ".scalar(@groups)
+			." assembly groups (".scalar(keys %mine)." sample/alias identifiers)\n";
 	}
 
 	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,$Gene2COG,$mySamplesHR);
@@ -1516,7 +1535,8 @@ sub prepRun{
 	#$mapF = $GCd."LOGandSUB/inmap.txt" if ($mapF eq "");
 	my ($hr1,$hr2) = readMapS($mapF,-1);
 	%map = %{$hr1}; %AsGrps = %{$hr2};
-	#get all samples in assembly group, but only last in mapgroup
+	#get every sample: assembly references can be shared, but VCFs, depths, and
+	#consensus sequences remain sample-specific
 	@samples = @{$map{opt}{smpl_order}};
 	my %sample_seen;
 	for my $sample (@samples) {
@@ -1697,20 +1717,22 @@ sub preComputeConsSNP{
 
 
 sub createAGlist{
-	foreach my $smpl (@samples){ #fill up AGlist
-	#and fill %AGlist .. so always let run..
-		next if ($map{$smpl}{AssGroup} eq "-1");
+	%AGlist = ();
+	my %seen;
+	foreach my $smpl (@samples){
+		die "Sample $smpl has no assembly-group assignment\n"
+			unless exists($map{$smpl}) && defined($map{$smpl}{AssGroup});
 		my $cAssGrp = $map{$smpl}{AssGroup};
-		my $cMapGrp = $map{$smpl}{MapGroup};
-		die "Can't find mapping-group counters for $cMapGrp\n"
-			unless exists($AsGrps{$cMapGrp}) && exists($AsGrps{$cMapGrp}{CntAimMap});
-		#print "$smpl $cAssGrp $cMapGrp\n";
-		$AsGrps{$cMapGrp}{CntMap} = 0 unless exists $AsGrps{$cMapGrp}{CntMap};
-		$AsGrps{$cMapGrp}{CntMap} ++;
-		next if ($AsGrps{$cMapGrp}{CntMap}  < $AsGrps{$cMapGrp}{CntAimMap} );
-		push(@{$AGlist{$cAssGrp}} , $smpl);
-		#if ($AsGrps{$cMapGrp}{CntMap}  < $AsGrps{$cMapGrp}{CntAimMap} ){			next;		}
+		next if $cAssGrp eq "-1"; #the caller handles a standalone sample directly
+		next if $seen{$cAssGrp}{$smpl}++;
+		# Mapping-group members may share the reference assembly, but each
+		# sample has its own VCF/depth and must contribute a consensus.
+		push @{$AGlist{$cAssGrp}}, $smpl;
 	}
+	my $groupedSamples = 0;
+	$groupedSamples += scalar(@{$AGlist{$_}}) for keys %AGlist;
+	print "Assembly-group expansion: $groupedSamples samples across "
+		.scalar(keys %AGlist)." shared-reference groups\n";
 }
 
 sub histoMGS{#specifically for MGS..
@@ -2209,17 +2231,11 @@ sub extractFNAFAA2genes{
 	
 	
 	foreach my $sm (@srtdSmpls){
-
 		print "\nAT SMPL:: $smCnt/" . scalar(@srtdSmpls) ." $sm - ". "Elapsed time : ", timeNice(time - $sttime) . "\n";
 		#readGenesSample_Singl($sm, $OFstrHR, $OAstrHR, $OCstrHR, $OLstrHR, $writeLink,$sttime);
 		
-		readGenesSample_Singl($sm, $writeLink,$sttime);
-		$smCnt++; $appCnt++;
-		
-		if ($appCnt >= $appendWriteTrigger){
-			appendWriteMGSgenes( $writeLink);
-			$appCnt=0;
-		}
+		readGenesSample_Singl($sm, $writeLink,$sttime,\$appCnt);
+		$smCnt++;
 	}
 	
 	
@@ -2244,16 +2260,14 @@ sub reduceSeqTech{
 sub createConsFastas{
 	my ($cD,$sm, $oFNA, $oFAA,$append2LOG,$returnCmd) = @_;
 	my $vcf2fnaBin = getProgPaths("vcf2fna");
-	#my $normalizeVCF = abs_path(File::Spec->catfile(dirname(abs_path($0)), '..', 'SNP', 'normalizeVCFHeaders.pl'));
-	#die "Cannot locate VCF header normalizer\n" unless defined($normalizeVCF) && -f $normalizeVCF;
+	# VCF normalization is intentionally not part of this workflow.
 	my $vcf2fnaOpt = "";
 	#my $seqPlatf = "hiSeq"; #-> get this from .map ..
 	my $refFA = getAssemblContigs($cD); my $refGFF = getAssemblGFF($cD);
 	my $depthFile = "$cD$lMAPdir/$sm$bamDepthFsuffix";
 	my $ofasCons = "$cD/$lSNPdir/$lConsCTG";
 	my $vcfFile = "$cD/$lSNPdir/$lConsVCF";
-	my $normalizedVCF = $vcfFile;#"$oFNA.input.vcf";
-	#my @normalizeCommands = ("perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFile)." -output ".shellQuote($normalizedVCF)	);
+	my $inputVCF = $vcfFile;
 	
 	#DEBUG
 	
@@ -2275,26 +2289,24 @@ sub createConsFastas{
 		$seqPlatf = reduceSeqTech($seqPlatf);
 		$vcf2fnaOpt = "-seqPlatform ".shellQuote($seqPlatf)." $commonOpt";
 		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref ".shellQuote($refFA)
-			." -inVCF ".shellQuote($normalizedVCF)." -depthF ".shellQuote($depthFile)."  ";
+			." -inVCF ".shellQuote($inputVCF)." -depthF ".shellQuote($depthFile)."  ";
 	} else {
 		#die;
 		#in case of both PacBio and illumina:
 		#$vcf2fnaOpt = "-seqPlatform $SNPIHR->{SeqTech},$SNPIHR->{SeqTechSuppl} -t 1 -minCallDepth $minDepth,$minDepth -minCallQual $minCallQual ";
 		#$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref $refFA -inVCF $vcfFile,$vcfFileS -depthF $depthFile,$depthFileS ";# -oCtg $ofasCons.gz " ;
 		my $vcfFileS = "$cD/$lSNPdir/$lConsVCFsup";
-		my $normalizedVCFS = $vcfFileS;#"$oFNA.input.sup.vcf";
+		my $inputVCFS = $vcfFileS;
 		$seqPlatf = reduceSeqTech($seqPlatf);
 		$secSeqTechS = reduceSeqTech($secSeqTechS);
-		#push @normalizeCommands,"perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFileS)." -output ".shellQuote($normalizedVCFS);
 		my $depthFileS = "$cD$lMAPdir/$sm$bamDepthFsuffixSup";
 		$vcf2fnaOpt = "-seqPlatform ".shellQuote("$seqPlatf,$secSeqTechS")." $commonOpt";
 		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref ".shellQuote($refFA)
-			." -inVCF ".shellQuote("$normalizedVCF,$normalizedVCFS")
+			." -inVCF ".shellQuote("$inputVCF,$inputVCFS")
 			." -depthF ".shellQuote("$depthFile,$depthFileS")." -oCtg /dev/null ";
 	}
 
 	$cmd .= "-gff ".shellQuote($refGFF)." -oGeneNT ".shellQuote($oFNA)." -oGeneAA ".shellQuote($oFAA);
-	#$cmd = join("\n", @normalizeCommands, $cmd);
 	if ($append2LOG){$cmd.=" >> ".shellQuote($SNPconsLOGs)."\n";
 	} else {$cmd .= "\n";}
 	if ($returnCmd){ #don't excecute
@@ -2310,7 +2322,7 @@ sub createConsFastas{
 sub readGenesSample_Singl{
 	#go into curSpl dir and extract all marked gene reps.. 
 	#write to correct format so they can be used in phylo later
-	my ($sm, $writeLink,$sttime) = @_;
+	my ($sm, $writeLink,$sttime,$bufferedSamplesRef) = @_;
 	#my %subG = %{$subGHR};#$_[0]};
 	
 	my %subG; my %locMGScnt;
@@ -2687,5 +2699,12 @@ sub readGenesSample_Singl{
 		}
 		if ($COGpriosZero>=$MGScnt*0.95){print " $COGpriosZero / $MGScnt no COGprio list! ";}
 		print "\n";
+		if ($bufferedSamplesRef) {
+			${$bufferedSamplesRef}++;
+			if (${$bufferedSamplesRef} >= $appendWriteTrigger) {
+				appendWriteMGSgenes($writeLink);
+				${$bufferedSamplesRef} = 0;
+			}
+		}
 	}
 }

@@ -7,7 +7,7 @@ use FindBin qw($Bin);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
-use Mods::GenoMetaAss qw(readFasta);
+use Mods::GenoMetaAss qw(readClstrRev readFasta);
 
 sub write_file {
 	my ($path, $contents) = @_;
@@ -59,6 +59,15 @@ is_deeply(
 	'an empty member of a FASTA glob does not suppress later files',
 );
 
+my $cluster_index = File::Spec->catfile($tmp, 'cluster.idx');
+write_file($cluster_index, "seed1\tsample1__gene1,sample2__gene2\n");
+my (undef, $empty_cluster_subset) = readClstrRev($cluster_index, 0, {}, {});
+is_deeply(
+	$empty_cluster_subset,
+	{},
+	'an explicitly empty cluster-member subset does not fall back to the complete catalogue',
+);
+
 my $strain = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 like($strain, qr/sub consensusInputState .*?\$nt_ready && \$aa_ready.*?return 'regenerate' if \$vcf_ready/s,
 	'consensus resume requires the paired NT and AA outputs and repairs from VCF');
@@ -98,7 +107,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
 like($strain, qr/my \$version = 0\.46;/,
-	'within-strain compressed VCF normalization update increments the workflow version');
+	'within-strain assembly-group expansion update increments the workflow version');
 like($strain,
 	qr/my \$locCl2G2 = \$cl2gene2\{\$sm\}.*?my \$COGprios1 = \$COGprios->\{\$MGS\}.*?\@candidates == 1.*?reason => 'unique'.*?\$LocusSeedProteins\{\$locus\} \|\|=.*?choose_locus_candidate/s,
 	'within-strain extraction avoids hot-loop container copies and scoring unique candidates');
@@ -117,9 +126,24 @@ like($strain,
 like($strain,
 	qr/contextMembersNeeded.*?contextLociNeeded.*?my %keptMemberContext.*?\$MemberContext = \\%keptMemberContext.*?my %keptLocusContext.*?\$LocusContext = \\%keptLocusContext/s,
 	'within-strain extraction retains scoring contexts only for potentially ambiguous loci');
+unlike($strain,
+	qr/normalizeVCFHeaders\.pl/,
+	'within-strain consensus regeneration does not invoke VCF normalization');
 like($strain,
-	qr/normalizeVCFHeaders\.pl.*?\@normalizeCommands.*?-inVCF "\.shellQuote\(\$normalizedVCF\)/s,
-	'within-strain consensus regeneration normalizes concatenated VCF headers');
+	qr/sub createAGlist.*?push \@\{\$AGlist\{\$cAssGrp\}\}, \$smpl.*?sub histoMGS/s,
+	'within-strain assembly groups retain every sample for consensus extraction');
+unlike($strain,
+	qr/sub createAGlist.*?CntAimMap.*?sub histoMGS/s,
+	'within-strain assembly groups are not collapsed to the last mapping-group sample');
+like($strain,
+	qr/\@subSds = \@\{\$AGlist\{\$cAssGrp\}\}.*?foreach my \$sd3 \(\@subSds\).*?createConsFastas\(\$cD, \$sd3/s,
+	'each assembly-group sample receives sample-specific consensus regeneration');
+like($strain,
+	qr/Partition whole assembly groups.*?samplesByGroup.*?ownedGroup.*?\$mine\{\$alias\} = 1/s,
+	'split extraction assigns complete assembly groups and their catalogue aliases to one worker');
+like($strain,
+	qr/readGenesSample_Singl\(\$sm, \$writeLink,\$sttime,\\\$appCnt\).*?\$\{\$bufferedSamplesRef\}\+\+.*?appendWriteMGSgenes\(\$writeLink\)/s,
+	'expanded assembly-group output is flushed by sample to retain the RAM bound');
 like($strain,
 	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,
 	'split-worker sparsity is summarized instead of reported as missing catalogue data');
