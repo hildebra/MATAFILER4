@@ -1904,7 +1904,7 @@ sub appendWriteMGSgenes {
         $wrMGS++;
     }
 
-    print "\nwrote for $wrMGS MGS data..\n";
+    print "wrote for $wrMGS MGS data..\n";
 }
 
 
