@@ -10,7 +10,7 @@ use List::Util qw/shuffle/;
 use File::Path qw(make_path remove_tree);
 use File::Glob qw(bsd_glob);
 use File::Copy qw(copy);
-use File::Basename qw(basename);
+use File::Basename qw(basename dirname);
 use File::Spec;
 use Cwd qw(abs_path getcwd);
 
@@ -130,7 +130,8 @@ END {
 #.42: resubmit unfinished trees from published inputs without requiring scratch aggregates
 #.43: avoid redundant candidate scoring and hot-loop container copies during extraction
 #.44: reduce locus-model, FASTA scan, and category-publication peak memory
-my $version = 0.44;
+#.45: normalize repeated VCF headers and distinguish split-worker sparsity from missing catalogue data
+my $version = 0.45;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1330,6 +1331,7 @@ sub prepGene2MGS{
 	$COGprios = $new_priorities;
 
 	my ($gene_sample_combinations, $ambiguous_seed_samples, $missing_clusters) = (0, 0, 0);
+	my $unrepresentedWorkerLoci = 0;
 	my (%contextMembersNeeded, %contextLociNeeded);
 	for my $group (@{$locus_model->{groups}}) {
 		my %per_sample;
@@ -1340,6 +1342,12 @@ sub prepGene2MGS{
 			#cl2gene2/candidateSeed structures existed alongside the still-intact $cl2gene).
 			my $gene_string = delete $cl2gene->{$seed};
 			unless (defined $gene_string) {
+				if ($mySamplesHR) {
+					# The cluster reader intentionally omits selected loci with
+					# no member in this worker's sample partition.
+					$unrepresentedWorkerLoci++;
+					next;
+				}
 				limitedWarn('selected catalogue genes absent from cluster index',
 					"Could not find selected catalogue gene $seed in the cluster index\n");
 				$missing_clusters++;
@@ -1393,7 +1401,9 @@ sub prepGene2MGS{
 	print "Prepared ".scalar(@{$locus_model->{groups}})." loci from $ranked_record_count"
 		." ranked catalogue clusters; merged $locus_model->{merged_seeds} compatible same-COG seeds. "
 		."$gene_sample_combinations locus-sample combinations, $ambiguous_seed_samples with multiple candidates"
-		.($missing_clusters ? ", $missing_clusters missing cluster-index entries" : "").".\n";
+		.($missing_clusters ? ", $missing_clusters missing cluster-index entries" : "")
+		.($unrepresentedWorkerLoci ? ", $unrepresentedWorkerLoci loci outside this worker's sample slice" : "")
+		.".\n";
 }
 
 sub prepRun{
@@ -2143,14 +2153,20 @@ sub extractFNAFAA2genes{
 		#print "$sm  $gnCnt $MGSgeneCnt \n";
 	}
 	my @histoMGScnts ;#= values %perMGScnts;
+	my $lowCandidateMGS = 0;
 	foreach my $MGS (keys %perMGScnts){
 		my $perMGSgenes = $perMGScnts{$MGS};
 		push(@histoMGScnts,  $perMGSgenes);
-	if ($perMGSgenes < 10){
-		limitedWarn('MGS with fewer than 10 candidate loci',
-			"Only $perMGSgenes genes/COGs for MGS $MGS; MGS genes might be multi-copy\n");
+		if ($perMGSgenes < 10){
+			$lowCandidateMGS++;
+			limitedWarn('MGS with fewer than 10 candidate loci',
+				"Only $perMGSgenes genes/COGs for MGS $MGS; MGS genes might be multi-copy\n")
+				unless $maxSubJob;
+		}
 	}
-	}
+	print "$lowCandidateMGS MGS have fewer than 10 candidate loci in this worker's sample slice; "
+		."this is expected for sparse split-worker partitions\n"
+		if $maxSubJob && $lowCandidateMGS;
 	#DBUG
 	my $represented_mgs = scalar(keys(%perMGScnts));
 	my $average_loci = $represented_mgs ? int(0.5 + $gnCnt / $represented_mgs) : 0;
@@ -2214,12 +2230,22 @@ sub extractFNAFAA2genes{
 sub createConsFastas{
 	my ($cD,$sm, $oFNA, $oFAA,$append2LOG,$returnCmd) = @_;
 	my $vcf2fnaBin = getProgPaths("vcf2fna");
+	my $normalizeVCF = abs_path(File::Spec->catfile(
+		dirname(abs_path($0)), '..', 'SNP', 'normalizeVCFHeaders.pl'
+	));
+	die "Cannot locate VCF header normalizer\n"
+		unless defined($normalizeVCF) && -f $normalizeVCF;
 	my $vcf2fnaOpt = "";
 	#my $seqPlatf = "hiSeq"; #-> get this from .map ..
 	my $refFA = getAssemblContigs($cD); my $refGFF = getAssemblGFF($cD);
 	my $depthFile = "$cD$lMAPdir/$sm$bamDepthFsuffix";
 	my $ofasCons = "$cD/$lSNPdir/$lConsCTG";
 	my $vcfFile = "$cD/$lSNPdir/$lConsVCF";
+	my $normalizedVCF = "$oFNA.input.vcf";
+	my @normalizeCommands = (
+		"perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFile)
+			." -output ".shellQuote($normalizedVCF)
+	);
 	
 	#DEBUG
 	
@@ -2241,21 +2267,26 @@ sub createConsFastas{
 		#checkSeqTech($seqPlatf);
 		$vcf2fnaOpt = "-seqPlatform ".shellQuote($seqPlatf)." $commonOpt";
 		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref ".shellQuote($refFA)
-			." -inVCF ".shellQuote($vcfFile)." -depthF ".shellQuote($depthFile)."  ";
+			." -inVCF ".shellQuote($normalizedVCF)." -depthF ".shellQuote($depthFile)."  ";
 	} else {
 		#die;
 		#in case of both PacBio and illumina:
 		#$vcf2fnaOpt = "-seqPlatform $SNPIHR->{SeqTech},$SNPIHR->{SeqTechSuppl} -t 1 -minCallDepth $minDepth,$minDepth -minCallQual $minCallQual ";
 		#$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref $refFA -inVCF $vcfFile,$vcfFileS -depthF $depthFile,$depthFileS ";# -oCtg $ofasCons.gz " ;
 		my $vcfFileS = "$cD/$lSNPdir/$lConsVCFsup";
+		my $normalizedVCFS = "$oFNA.input.sup.vcf";
+		push @normalizeCommands,
+			"perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFileS)
+				." -output ".shellQuote($normalizedVCFS);
 		my $depthFileS = "$cD$lMAPdir/$sm$bamDepthFsuffixSup";
 		$vcf2fnaOpt = "-seqPlatform ".shellQuote("$seqPlatf,$secSeqTechS")." $commonOpt";
 		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref ".shellQuote($refFA)
-			." -inVCF ".shellQuote("$vcfFile,$vcfFileS")
+			." -inVCF ".shellQuote("$normalizedVCF,$normalizedVCFS")
 			." -depthF ".shellQuote("$depthFile,$depthFileS")." -oCtg /dev/null ";
 	}
 
 	$cmd .= "-gff ".shellQuote($refGFF)." -oGeneNT ".shellQuote($oFNA)." -oGeneAA ".shellQuote($oFAA);
+	$cmd = join("\n", @normalizeCommands, $cmd);
 	if ($append2LOG){$cmd.=" >> ".shellQuote($SNPconsLOGs)."\n";
 	} else {$cmd .= "\n";}
 	if ($returnCmd){ #don't excecute

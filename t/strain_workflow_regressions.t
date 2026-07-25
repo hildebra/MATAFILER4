@@ -97,8 +97,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.44;/,
-	'within-strain extraction memory update increments the workflow version');
+like($strain, qr/my \$version = 0\.45;/,
+	'within-strain VCF recovery update increments the workflow version');
 like($strain,
 	qr/my \$locCl2G2 = \$cl2gene2\{\$sm\}.*?my \$COGprios1 = \$COGprios->\{\$MGS\}.*?\@candidates == 1.*?reason => 'unique'.*?\$LocusSeedProteins\{\$locus\} \|\|=.*?choose_locus_candidate/s,
 	'within-strain extraction avoids hot-loop container copies and scoring unique candidates');
@@ -117,6 +117,12 @@ like($strain,
 like($strain,
 	qr/contextMembersNeeded.*?contextLociNeeded.*?my %keptMemberContext.*?\$MemberContext = \\%keptMemberContext.*?my %keptLocusContext.*?\$LocusContext = \\%keptLocusContext/s,
 	'within-strain extraction retains scoring contexts only for potentially ambiguous loci');
+like($strain,
+	qr/normalizeVCFHeaders\.pl.*?\@normalizeCommands.*?-inVCF "\.shellQuote\(\$normalizedVCF\)/s,
+	'within-strain consensus regeneration normalizes concatenated VCF headers');
+like($strain,
+	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,
+	'split-worker sparsity is summarized instead of reported as missing catalogue data');
 like($strain,
 	qr/buildTree5 validates its persistent checkpoints.*?my \$contPhylo = 1;.*?-continue \$contPhylo/s,
 	'unfinished trees delegate checkpoint recovery to buildTree continue mode');
