@@ -272,9 +272,9 @@ my $curSmpl = "";
 #compare to previous dir
 my $baseoutPrev = "";
 #used in d2s intersample distance
-my $sdmjNamesAll = "";my @allSmplNames;my @allFilter1; my @allFilter2; 
+my $sdmjNamesAll = "";my %allSmplNames;my @allFilter1; my @allFilter2; 
 #keeps track of empty, finished samples, to be reported later..
-my @EmptySample; my $presentAssemblies = 0; my $totalCheckedSamples=0;
+my %EmptySample; my $presentAssemblies = 0; 
 
 my @unzipjobs; 
 my @grandDeps; #used for loop2completion , collects dependencies 
@@ -368,7 +368,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	%locStats = ();
 	#$locStats{hasPaired} = 0;	$locStats{hasSingle} = 0; 
-	$totalCheckedSamples++;push (@allSmplNames,$SmplName);
+	$allSmplNames{$SmplName}=1;
 	
 	print "\n======= $SmplName - $JNUM - $dir2rd =======\n" unless($MFconfig{silent});
 	
@@ -989,7 +989,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		}
 		print "next due to sample finished";
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
-		loop2C_check($cAssGrp,\@sampleDeps);next;
+		loop2C_check($cAssGrp,\@sampleDeps);
+		next;
 	}
 	
 
@@ -1042,7 +1043,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($map{$curSmpl}{inputFilesEmpty} && exists($map{$curSmpl}{inputFileSizeMB}) && $map{$curSmpl}{inputFileSizeMB} >= $MFconfig{skipSmallSmplsMB}){
 			system "rm -f $curOutDir/SMPL.empty"; $map{$curSmpl}{inputFilesEmpty} = 0;
 	}
-	if ( (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || (($map{$curSmpl}{inputFileSizeMB} + + $map{$curSmpl}{inputXFileSizeMB}) < $MFconfig{skipSmallSmplsMB} )) && !$AssemblyGo){
+	#print "small skip: $MFconfig{skipSmallSmplsMB} $map{$curSmpl}{inputFileSizeMB} $map{$curSmpl}{inputXFileSizeMB} $AssemblyGo \n";
+	if (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || (($map{$curSmpl}{inputFileSizeMB}  + $map{$curSmpl}{inputXFileSizeMB}) < $MFconfig{skipSmallSmplsMB} ) && (!$AssemblyGo || $AsGrps{$cAssGrp}{CntAimAss} <= 1 ) ){
 		
 		if ( ($map{$curSmpl}{inputFileSizeMB} + $map{$curSmpl}{inputXFileSizeMB}) < $MFconfig{skipSmallSmplsMB} ){
 			print "Skipping sample $curSmpl due to $map{$curSmpl}{inputFileSizeMB} < $MFconfig{skipSmallSmplsMB} MB\n";
@@ -1060,7 +1062,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		} else {
 			#print "Sample empty.. next\n";
 		}
-		push(@EmptySample,$curSmpl);
+		$EmptySample{$curSmpl} = $map{$curSmpl}{inputFileSizeMB}  + $map{$curSmpl}{inputXFileSizeMB};
 		reduceProgStats(); #reduce counters for riboFind etc.. no find in this sample!
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps);next;
@@ -1958,11 +1960,11 @@ sub postprocess{
 		}
 	}
 
-	if (scalar(keys(%inputRawFQs)) == @allSmplNames){
+	if (scalar(keys(%inputRawFQs)) == scalar(keys %allSmplNames)){
 		open O,">$baseOut/Input_raw.txt";
-		for (my $i=0;$i<@allSmplNames; $i++){
-			my $cS = $allSmplNames[$i];
-			print O "$cS\t$inputRawFQs{$cS}\n";
+		foreach my $ks (keys %allSmplNames){# (my $i=0;$i<@allSmplNames; $i++){
+			my $cS = $allSmplNames{$ks};
+			print O "$cS\t$inputRawFQs{$cS}\n" if (exists($inputRawFQs{$cS}));
 		}
 		close O;
 	}
@@ -2008,7 +2010,7 @@ sub postprocess{
 	mergeMotu2Table($dir_mOTU2);
 	unploadRawFilePostprocess();
 	DiaPostProcess("",$baseOut);
-	d2metaDist(\@allSmplNames,\@allFilter1,\@allFilter2,$sdmjNamesAll,$baseOut."/d2StarComp/");
+	d2metaDist(\%allSmplNames,\@allFilter1,\@allFilter2,$sdmjNamesAll,$baseOut."/d2StarComp/");
 
 	if ($MFopt{DoKraken} ){
 		if( $progStats{KrakTaxFailCnts}){
@@ -2032,7 +2034,7 @@ sub postprocess{
 	if ($MFopt{DoAssembly}){
 		my $warnMsg = "";
 		$warnMsg = "(may be inaccurate due to loop2complete)" if ($loop2completion_ini);
-		print "Found ". ($presentAssemblies + scalar(@EmptySample))." of ". $totalCheckedSamples ." samples assembled (or ignored) and all tasks done.\n";
+		print "Found ". ($presentAssemblies + scalar(keys %EmptySample))." of ". (scalar keys %allSmplNames) ." samples assembled (or ignored) and all tasks done.\n";
 		print "$warnMsg\n" if ($warnMsg ne "");
 		
 	}
@@ -2043,12 +2045,12 @@ sub postprocess{
 		$totalScratchUse += ($map{$smpl}{inputXFileSizeMB}) *3 if (exists($map{$smpl}{inputXFileSizeMB}));
 	}
 	print "Estimated scratch use: " . int($totalScratchUse/1024)."G\n";
-	if (@EmptySample>0){
-		print "Found Empty/too small (<". $MFconfig{skipSmallSmplsMB} ."MB) samples (N=". scalar(@EmptySample) . "):\n".join(",",@EmptySample) ."\n\n";
+	if (keys %EmptySample>0){
+		print "Found Empty/too small (<". $MFconfig{skipSmallSmplsMB} ."MB) samples (N=". scalar(keys %EmptySample) . "):\n".join(",",keys %EmptySample) ."\n\n";
 	}
 
 
-	if ($presentAssemblies >0 && ($presentAssemblies + scalar(@EmptySample)) == $totalCheckedSamples){
+	if ($presentAssemblies >0 && ($presentAssemblies + scalar(keys %EmptySample)) == scalar( keys %allSmplNames)){
 		my $gcScr = getProgPaths("geneCat_scr");
 		my $GCsub = $baseOut."/GeneCat_pre.sh";
 		my $gcmd = "";
@@ -2363,11 +2365,9 @@ sub mergeMotu2Table($){
 
 #calculates the hmm based freq estimates and divergence from these -> used for dist matrix
 sub d2metaDist{
-	my ($arSmpls,$arPaths1,$arPaths2,$deps,$outPath) = @_;
-
-	
-	my @paths = @{$arPaths1}; my @Smpls = @{$arSmpls};
+	my ($hrSmpls,$arPaths1,$arPaths2,$deps,$outPath) = @_;
 	if(!$MFopt{DoCalcD2s}){return;}
+	my @paths = @{$arPaths1}; my @Smpls = keys (%{$hrSmpls});
 	if (@paths < 1){print "Not enough samples for d2s!\n";return;}
 	my $d2metaBin = getProgPaths("d2meta");#"/g/bork3/home/hildebra/bin/d2Meta/d2Meta/d2Meta.out";
 	print "Calculating kmer distances for ".@paths." samples\n";
@@ -4923,8 +4923,10 @@ sub seedUnzip2tmp{
 	
 	#report on what was found so far..
 	if ($map{$curSmpl}{inputFileSizeMB} > 0){
-		print "Input size raw (Mb): " . int($map{$curSmpl}{inputFileSizeMB}) ;
-		print "; Suppl: " . int($map{$curSmpl}{inputXFileSizeMB} );
+		printf("Raw primary input size: %.1f Mb", $map{$curSmpl}{inputFileSizeMB});     
+		printf("    Suppl: %.1f Mb", $map{$curSmpl}{inputFileSizeMB}) if ($map{$curSmpl}{inputFileSizeMB} > 0);      		
+		#print "Input size raw (Mb): " . int($map{$curSmpl}{inputFileSizeMB}) ;
+		#print "; Suppl: " . int($map{$curSmpl}{inputXFileSizeMB} );
 		if (@pa1 || @pas){
 			print " Fastq pairs: " . scalar(@pa1) if (@pa1);
 			print " Fastq Singls: " . scalar (@pas) if (@pas);
@@ -7535,7 +7537,6 @@ sub scndMap2Genos{
 				scratch => $dirset{glbTmp},
 				qsubDir => $dirset{qsubDir}, jdeps => $map2CtgsY.";$bwt2ndMapDep",
 				cmdFileTag => $bwt2ndMapNmds[$i], minDepth => $MFopt{consSNPminDepth},
-				
 				callSVs => $MFopt{callSVs}, vcfSVfile => "$bwt2outD[$i]/$bamBaseNameS[$i]-smd.SV.vcf", vcfSVfileS => "", callSVsSupp => 0,
 				smpl => $bamBaseNameS[$i], maxCores => $MFopt{maxSNPcores}, #memReq => $MFopt{memSNPcall},
 				bpSplit => 4e5,	runLocal => 1, split_jobs => $MFopt{SNPconsJobsPsmpl}, overwrite => $MFopt{redoSNPcons},

@@ -1380,7 +1380,7 @@ sub prepRun{
 	$mapF = <$map_info> // "";
 	close $map_info or die "Cannot close map information file: $!\n";
 	chomp $mapF;
-	die "Mapping-file reference is empty or missing: $mapF\n" unless length($mapF) && -e $mapF;
+	die "Mapping-file reference is empty or missing: $mapF\n" if ($mapF !~ /,/ && (!length($mapF) || !-e $mapF));
 	
 	#read info gene <-> taxonomy from this file, depends on config..
 	$gene2taxF = "$GCd/FMG/gene2specI.txt";
