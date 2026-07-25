@@ -4,7 +4,7 @@ use Exporter qw(import);
 our @EXPORT_OK = qw(
 				runMetaBat runSemiBin  runMetaDecoder  runGenomeFace runSCGBinner
 				runCheckM runCheckM2 MB2N50
-				getBinSubdirName binningOutputsComplete
+				getBinSubdirName binningOutputsComplete emptyBinnerAssignmentCommand
 				createBin2 createBinFAA createBinCtgs
 				readMGS readMGSrev deNovo16S readMGSrevRed minQualFilter 
 				filterMGS_CM MB2assigns calcLCAcompl readCMquals);
@@ -51,6 +51,13 @@ sub binningOutputsComplete {
 		return 0 unless @checkM2Stat && $checkM2Stat[7] > 0;
 	}
 	return 1;
+}
+
+sub emptyBinnerAssignmentCommand {
+	my ($outDir, $name) = @_;
+	die "emptyBinnerAssignmentCommand requires an output directory and name\n"
+		unless defined($outDir) && length($outDir) && defined($name) && length($name);
+	return "mkdir -p $outDir\n: > $outDir/$name\n";
 }
 
 
@@ -801,7 +808,7 @@ sub createBams{
 	#die "@dirSS\n@BAMS\n";
 	if (@BAMS == 0 && $fakeEmpty){
 		warn "No non-empty mapping files found for $nm; publishing an empty bin assignment\n";
-		return ("mkdir -p $outDir\n: > $outDir/$nm\n", []);
+		return (emptyBinnerAssignmentCommand($outDir, $nm), []);
 	}
 	return ($uncramCmd,\@BAMS);
 }

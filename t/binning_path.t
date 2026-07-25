@@ -10,7 +10,8 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Binning ();
 use Mods::Binning qw(
-	MB2N50 binningOutputsComplete runCheckM runCheckM2 runSemiBin
+	MB2N50 binningOutputsComplete emptyBinnerAssignmentCommand
+	runCheckM runCheckM2 runSemiBin
 );
 use Mods::IO_Tamoc_progs qw(checkMapsDoneSH jgi_depth_cmd);
 
@@ -85,6 +86,8 @@ like($empty_command, qr/: > \Q$root\/empty\/empty\E/,
 	'no-mapping handling returns an explicit empty-assignment command');
 is_deeply($empty_alignments, [], 'no-mapping handling returns no fabricated alignments');
 ok(!-e "$root/empty/empty", 'command construction does not publish outputs prematurely');
+is($empty_command, emptyBinnerAssignmentCommand("$root/empty", 'empty'),
+	'no-mapping and undersized-assembly handling share the empty assignment command');
 
 my $depth_command;
 {
@@ -178,6 +181,8 @@ like($checkm2_command, qr/test -s \Q$assignment.cm2\E/,
 my $mataf4 = slurp(File::Spec->catfile($Bin, '..', 'MATAF4.pl'));
 like($mataf4, qr/my \$binningComplete = binningOutputsComplete.*?&& !\$binningComplete/s,
 	'MATAF4 uses the shared complete-output predicate when scheduling binning');
+like($mataf4, qr/-minAssemblySizeMB \$MFopt\{minBinnerAssemblyMB\}/,
+	'MATAF4 passes the configured minimum assembly size to the binner');
 like($mataf4, qr/\$MBcmd = "" if \(-e \$MetaBat2out\)/,
 	'quality-only repair reuses a valid empty bin assignment');
 like($mataf4, qr/my \@binLibraries = .*?getRawLibrariesAssmGrp.*?0.*?getRawLibrariesAssmGrp.*?1/s,
