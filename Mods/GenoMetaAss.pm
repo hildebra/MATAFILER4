@@ -345,6 +345,18 @@ sub gzipwrite{
 	#open (my $O, "| $pigzBin -c > $outF") or die "error starting gzip pipe $outF\n$!";
 	return $O;
 }
+#cached path to a working pigz binary; resolved at most once per process.
+my $PIGZ_BIN; my $PIGZ_TRIED = 0;
+sub _pigzBinCached {
+	unless ($PIGZ_TRIED) {
+		$PIGZ_TRIED = 1;
+		my $p = eval { getProgPaths("pigz") };
+		$p = "" if $@ || !defined($p);
+		$PIGZ_BIN = (length($p) && -x $p) ? $p : "";
+	}
+	return $PIGZ_BIN;
+}
+
 sub gzipopen{
 	my ($inF,$descr) = @_;
 	my $dodie = 1;
@@ -374,8 +386,26 @@ sub gzipopen{
 		print $msg if ($verbose);
 	} elsif($inF =~ m/\.gz$/ ){
 		$msg = "Can't open a pipe to $descr file $inF\n";
-		$ISTR = IO::Uncompress::Gunzip->new($inF);
-		if (!$ISTR) {if ($dodie){die "$msg$IO::Uncompress::Gunzip::GunzipError\n";} else {$OK=0; print $msg if ($verbose);}}
+		my $pigz = _pigzBinCached();
+		my $usedPigz = 0;
+		if (length($pigz)) {
+			#NOTE: unlike IO::Uncompress::Gunzip->new, a successfully-opened pipe doesn't
+			#guarantee the gzip stream itself is valid -- corruption would only surface
+			#once the caller reads/closes the handle (pigz's own error goes to its stderr,
+			#not to $ISTR). We already know $inF exists at this point (resolveExistingFile
+			#succeeded above), so the main remaining risk is a truncated/corrupt archive
+			#silently reading as if it ended early rather than dying loudly. This is a
+			#deliberate trade-off for a large, consistent speedup on the multi-GB gzip
+			#files this pipeline reads; ask if you'd like close()-time exit-status checks
+			#added on top for stricter corruption detection.
+			if (open($ISTR, "-|", $pigz, "-dc", "--", $inF)) {
+				$usedPigz = 1;
+			}
+		}
+		if (!$usedPigz) {
+			$ISTR = IO::Uncompress::Gunzip->new($inF);
+			if (!$ISTR) {if ($dodie){die "$msg$IO::Uncompress::Gunzip::GunzipError\n";} else {$OK=0; print $msg if ($verbose);}}
+		}
 	} else{
 		if (!open($ISTR, "<", "$inF") ) {if ($dodie){die $msg;} else {$OK=0; print $msg if ($verbose);}}
 	}
@@ -489,12 +519,13 @@ sub readFasta{
 		die "Malformed FASTA file $fil: first record has no header\n"
 			unless $first_line =~ /^>/;
 
+		my $sepRe = qr/$sepChr/; #compile once, reused for every header in this file
 		my $prepare_header = sub {
 			my ($line) = @_;
 			chomp $line;
 			my $full_header = substr($line, 1);
 			my $short_header = $full_header;
-			$short_header =~ s/$sepChr.*//;
+			$short_header =~ s/$sepRe.*//;
 			my $stored_header = $cutHd ? $short_header : $full_header;
 			return ($stored_header, $short_header);
 		};
@@ -873,6 +904,12 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 	$createR = $_[1] if (@_ > 1);
 	my $subsHR = {};
 	$subsHR = $_[2] if (@_ > 2);
+	#optional 4th arg: hashref of sample IDs (the part of a member name before "__").
+	#when given, member lists stored in %retF are pre-filtered to only these samples,
+	#so callers that only need a subset of samples (e.g. one split-worker out of many)
+	#never have to hold the other samples' members in memory in the first place.
+	my $memberSubsHR = undef;
+	$memberSubsHR = $_[3] if (@_ > 3 && ref($_[3]) eq 'HASH' && scalar(keys %{$_[3]}));
 	#my %subs = %{$subsHR};
 	my $doSubset=0;
 	if (scalar(keys(%{$subsHR})) > 0 ){
@@ -883,6 +920,8 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 	}
 	my $retR={}; my %retF;
 	print "Reading clstr $inF  .. \n";
+	print "Restricting cluster members to a subset of " . scalar(keys %{$memberSubsHR}) . " samples\n"
+		if $memberSubsHR;
 	my ($I,$OK) = gzipopen($inF,"ClstrFile");
 	#open I,"<$inF" or die "Can't find rev clustering file $inF\n"; 
 	my $curCl=0;
@@ -900,8 +939,9 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 		#my $rem = $arr[1]; #substr($_,$pos+1);
 		#print $curCl."XX$rem\n";
 		#foreach (split /,/,$rem){$retR{$_} = $curCl;}
+		my @tmpArr; my $tmpArrSplit = 0;
 		if ($createR > 0){
-			my @tmpArr = split /,/,$arr[1];
+			@tmpArr = split /,/,$arr[1]; $tmpArrSplit = 1;
 			if ($doSubset == 1){
 				my $gogo=0;
 				foreach (@tmpArr) {
@@ -915,7 +955,18 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 			@{$retR}{@tmpArr} = ($curCl) x @tmpArr;
 		}
 		if ($createR != 2){
-			$retF{$curCl} = $arr[1];
+			if ($memberSubsHR){
+				@tmpArr = split /,/,$arr[1] unless $tmpArrSplit;
+				my @keep;
+				foreach my $mem (@tmpArr) {
+					my $m2 = $mem; $m2 =~ s/^>//;
+					my ($smp) = split /__/, $m2, 2;
+					push @keep, $mem if defined($smp) && exists($memberSubsHR->{$smp});
+				}
+				$retF{$curCl} = join(",", @keep) if @keep;
+			} else {
+				$retF{$curCl} = $arr[1];
+			}
 		}
 		@arr = ();
 

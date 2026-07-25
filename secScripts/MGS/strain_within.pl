@@ -334,8 +334,12 @@ my %replN; #my %genesWrite; #keep stats/track
 
 #my %allFNA; my %allFAA; #big hash with all genes in @allGenes
 #my %gene2genes; #no longer needed
-my %cl2gene2; #contains link from GCgene to fasta header assembly, cleaned up for multi copy already..
-my %candidateSeed; #sample -> locus -> assembled gene -> catalogue seed
+#contains link from GCgene to fasta header assembly, cleaned up for multi copy already..
+#structure: $cl2gene2{sample}{locus_id} = { member_gene => seed_catalogue_gene, ... }
+#(this used to be a plain array of members plus a fully parallel %candidateSeed
+#hash-of-hash-of-hash holding the same member names again just to carry the seed;
+#folding the seed into the same hash removes that duplicate nesting.)
+my %cl2gene2;
 my %LocusByID; my %Gene2Locus; my %MemberContext; my %LocusContext;
 my %catalogProteins;
 #my %SIcat;
@@ -1246,7 +1250,27 @@ sub writeTooFewMarker{
 
 sub prepGene2MGS{
 	print "Preparing base strain alignments, per MGS\nThis might take a good while..\n";
-	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,$Gene2COG);
+
+	#If this run is split into subjobs, each worker only ever processes 1/maxSubJob of
+	#the samples (see the identical stride logic later in extractFNAFAA2genes()). Previously
+	#every worker still built the *complete* per-sample locus model (all samples, all MGS)
+	#and only discarded the unneeded samples afterwards. Computing the worker's own sample
+	#set up front lets us restrict the cluster-index parse itself, so the discarded data is
+	#never materialized in this process at all.
+	my $mySamplesHR = undef;
+	if ($maxSubJob){
+		my @srtdAllSmpls = sort @samples;
+		my $Ndirs = scalar(@srtdAllSmpls);
+		my %mine;
+		for (my $i = $subJob; $i < $Ndirs; $i += $maxSubJob){
+			$mine{$srtdAllSmpls[$i]} = 1;
+		}
+		$mySamplesHR = \%mine;
+		print "Subjob ${subJob}/$maxSubJob: restricting locus-model construction to "
+			. scalar(keys %mine) . " of $Ndirs samples\n";
+	}
+
+	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,$Gene2COG,$mySamplesHR);
 	$hr1 = {};
 
 	my $protein_file = "$GCd/compl.incompl.$clusterID.prot.faa";
@@ -1286,7 +1310,11 @@ sub prepGene2MGS{
 	for my $group (@{$locus_model->{groups}}) {
 		my %per_sample;
 		for my $seed (@{$group->{genes}}) {
-			my $gene_string = $cl2gene->{$seed};
+			#delete (not just read) so the raw comma-joined membership string is freed the
+			#moment it's consumed, rather than staying resident until a bulk clear at the
+			#very end of this loop (which previously doubled peak memory: the fully-built
+			#cl2gene2/candidateSeed structures existed alongside the still-intact $cl2gene).
+			my $gene_string = delete $cl2gene->{$seed};
 			unless (defined $gene_string) {
 				limitedWarn('selected catalogue genes absent from cluster index',
 					"Could not find selected catalogue gene $seed in the cluster index\n");
@@ -1302,19 +1330,23 @@ sub prepGene2MGS{
 						"Ignoring malformed catalogue member '$member' for seed $seed\n");
 					next;
 				}
+				#belt-and-braces: readClstrRev already restricted members to this worker's
+				#sample slice when $mySamplesHR was given, so this should normally be a no-op.
+				next if $mySamplesHR && !exists $mySamplesHR->{$sample};
 				$per_sample{$sample}{$member} = $seed;
 			}
 		}
 		for my $sample (keys %per_sample) {
-			my @members = sort keys %{$per_sample{$sample}};
-			$cl2gene2{$sample}{$group->{locus_id}} = \@members;
-			$candidateSeed{$sample}{$group->{locus_id}}{$_} = $per_sample{$sample}{$_} for @members;
+			#fold seed provenance directly into cl2gene2 (member => seed) instead of
+			#keeping a fully parallel %candidateSeed hash-of-hash-of-hash with the same
+			#member names duplicated again purely to carry the seed value.
+			$cl2gene2{$sample}{$group->{locus_id}} = $per_sample{$sample};
 			$smplsPerMGS{$group->{mgs}}{$sample}++;
 			$gene_sample_combinations++;
-			$ambiguous_seed_samples++ if @members > 1;
+			$ambiguous_seed_samples++ if scalar(keys %{$per_sample{$sample}}) > 1;
 		}
 	}
-	$cl2gene = {};
+	$cl2gene = {}; #any leftover (unconsumed) entries are dropped here
 	print "Prepared ".scalar(@{$locus_model->{groups}})." loci from ".scalar(@records)
 		." ranked catalogue clusters; merged $locus_model->{merged_seeds} compatible same-COG seeds. "
 		."$gene_sample_combinations locus-sample combinations, $ambiguous_seed_samples with multiple candidates"
@@ -2070,29 +2102,21 @@ sub extractFNAFAA2genes{
 	#some stats on genes/MGS
 	my @srtdSmpls = sort (keys %cl2gene2);
 	
-	#subjob? split up what samples to process..
+	#subjob? samples are already restricted to this worker's slice: prepGene2MGS() now
+	#builds %cl2gene2 directly from a pre-filtered cluster-index parse (see the
+	#$mySamplesHR restriction there), so @srtdSmpls (= sort keys %cl2gene2) is already
+	#exactly this worker's share. Re-applying the same stride split here on the already-
+	#reduced key set would incorrectly select only every Nth *remaining* sample and
+	#silently drop the rest, so we no longer do that -- just report what we got.
 	if ($maxSubJob){
-		my $Ndirs = scalar(@srtdSmpls);
+		my $Ndirs = scalar(@samples);
 		my $Nsmpls=0;
 		foreach my $sd(keys %AGlist){
 			$Nsmpls += scalar (@{$AGlist{$sd}}); #@{$AGlist{$cAssGrp}}
 		}
-		print "total samples: $Nsmpls , ASgrps: $Ndirs\n";
-		#my $start = int( (($subJob-1)/$maxSubJob) * $Ndirs ) ;
-		#my $end = int( (($subJob)/$maxSubJob) * $Ndirs ) ;
-#		for (my $i=$start;$i < $end; $i+=$maxSubJob){
-		my @smp2;my %smp2H;
-		for (my $i=($subJob);$i < $Ndirs; $i+=$maxSubJob){
-			push(@smp2,$srtdSmpls[$i]); 
-			$smp2H{$srtdSmpls[$i]} =1;
-		}
-		@srtdSmpls = @smp2;
-		print "\nSUBJOP: choosen samples: @smp2\n\n";
-		#clean up hashes..
-		foreach my $sm (keys %cl2gene2){
-			delete($cl2gene2{$sm}) unless (exists ($smp2H{$sm}));
-		}
-
+		print "total samples: $Nsmpls , total in map: $Ndirs\n";
+		print "\nSUBJOB ${subJob}/$maxSubJob: pre-restricted to " . scalar(@srtdSmpls)
+			. " samples: @srtdSmpls\n\n";
 	}
 	
 	
@@ -2200,8 +2224,8 @@ sub readGenesSample_Singl{
 	$noFilter = 1 if ($mode eq "MGSall");
 	
 	foreach my $gn (keys %locCl2G2){
-		#put genes into hash to avoid duplicates..
-		foreach(@{$locCl2G2{$gn}}){$subG{$_} = 1;}
+		#put genes into hash to avoid duplicates.. (locCl2G2{$gn} is now {member=>seed})
+		foreach(keys %{$locCl2G2{$gn}}){$subG{$_} = 1;}
 		
 		my $MGS = exists($LocusByID{$gn}) ? $LocusByID{$gn}{mgs} : undef;
 		#stats collection on MGS usage
@@ -2387,7 +2411,8 @@ sub readGenesSample_Singl{
 			my %linkStr; #temp storage for links to gene cat etc of catalogues genes
 			foreach my $locus (@COGprios1){
 				next unless length($locus) && exists($locCl2G2{$locus});
-				my @genes = @{$locCl2G2{$locus}};
+				my $membersHR = $locCl2G2{$locus}; #{member => seed}
+				my @genes = keys %{$membersHR};
 				my @candidates;
 				my $had_evaluable = 0;
 				my $csp_rejected = 0;
@@ -2410,7 +2435,7 @@ sub readGenesSample_Singl{
 					}
 					push @candidates, {
 						id => $gX, protein => $FAA{$gX}, depth => $depth,
-						seed => $candidateSeed{$sm}{$locus}{$gX},
+						seed => $membersHR->{$gX},
 						context => $MemberContext{$gX} || {},
 					};
 				}
