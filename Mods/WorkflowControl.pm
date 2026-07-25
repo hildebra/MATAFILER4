@@ -20,6 +20,7 @@ our @EXPORT_OK = qw(
 	normalise_job_dependencies
 	append_job_dependencies
 	deferred_command_dependencies
+	commands_are_lightweight_filesystem
 	cleanup_stage_barrier
 	augment_deferred_submission
 	source_input_files
@@ -109,6 +110,21 @@ sub deferred_command_dependencies {
 	my $previous = $args{chain_previous} && @{$submitted}
 		? $submitted->[-1] : '';
 	return normalise_job_dependencies($args{dependencies}, $previous);
+}
+
+sub commands_are_lightweight_filesystem {
+	my ($commands) = @_;
+	return 0 unless defined($commands) && $commands =~ /\S/;
+	for my $command (split /[;\r\n]+/, $commands) {
+		$command =~ s/^\s+|\s+$//g;
+		next if $command eq '' || $command =~ /^#/;
+		return 0 if $command =~ /(?:\|\||&&|[|<>`]|\$\()/;
+		my ($program) = $command =~ /^(\S+)/;
+		return 0 unless defined $program;
+		$program =~ s{.*/}{};
+		return 0 unless $program =~ /^(?:ln|mkdir|touch|rm|sleep|echo)$/;
+	}
+	return 1;
 }
 
 sub cleanup_stage_barrier {

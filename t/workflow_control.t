@@ -15,7 +15,7 @@ use Mods::WorkflowControl qw(
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
-	cleanup_stage_barrier
+	commands_are_lightweight_filesystem cleanup_stage_barrier
 );
 
 is(normalise_job_dependencies('run12;;run7', ['run7', '', 'run3;run12']),
@@ -32,6 +32,17 @@ is(deferred_command_dependencies(
 	chain_previous => 1,
 ), 'run12;run7;run21',
 	'genuine multi-stage deferred commands explicitly depend on their predecessor');
+ok(commands_are_lightweight_filesystem(
+	"rm -rf /tmp/sample/rawRds\nmkdir -p /tmp/sample/rawRds;\n"
+	."sleep 1\nln -s /reads/a.fq.gz /tmp/sample/rawRds/a.fq.gz\n"
+	."touch /tmp/sample/rawRds/done.sto\n"
+), 'lightweight UZ filesystem setup is safe to execute locally');
+ok(!commands_are_lightweight_filesystem(
+	"mkdir -p /tmp/sample/rawRds\npigz -d -c /reads/a.fq.gz > /tmp/sample/rawRds/a.fq\n"
+), 'decompression and redirection keep UZ work on the scheduler');
+ok(!commands_are_lightweight_filesystem(
+	"ln -s /reads/a.fq.gz /tmp/sample/rawRds/a.fq.gz && touch /tmp/sample/rawRds/done.sto\n"
+), 'compound shell expressions are not classified as lightweight');
 my $cleanup_barrier = cleanup_stage_barrier(
 	{name => 'contig stats', required => 1, complete => 1},
 	{name => 'binning', required => 1, complete => 0, dependencies => 'run9;run9'},
@@ -342,6 +353,9 @@ like($mataf4, qr/Submitting deferred assembly-group mapping jobs.*?postSubmQsub/
 like($mataf4,
 	qr/deferred_command_dependencies\(.*?chain_previous\s*=>\s*\$options->\{chain_previous\}/s,
 	'deferred command serialization requires an explicit caller option');
+like($mataf4,
+	qr/my \$lightweightLocal = commands_are_lightweight_filesystem\(\$unzipcmd\).*?systemW \$unzipcmd.*?qsubSystem\(\$logDir\."UNZP\.sh"/s,
+	'lightweight UZ setup runs locally while data-processing commands remain scheduled');
 like($mataf4,
 	qr/Submitting deferred assembly-group mapping jobs.*?my \$publicationDeps = normalise_job_dependencies\(.*?MultiContigStats\.sh/s,
 	'assembly groups release mapping, producer publication, and contig statistics in stages');

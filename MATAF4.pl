@@ -52,7 +52,7 @@ use Mods::WorkflowControl qw(
 	hybrid_local_scratch_gb
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
-	cleanup_stage_barrier
+	commands_are_lightweight_filesystem cleanup_stage_barrier
 );
 
 
@@ -5126,10 +5126,12 @@ sub seedUnzip2tmp{
 		die "Missing or empty input files before unzip for $curSmpl:\n"
 			.join("\n", @missingInputs)."\n" if (@missingInputs);
 		if (!-e $finishStone){#|| ($useTrimomatic && !-e $trimoStone) ){
-			if ($lowEffort==1){
-				#die "$unzipcmd\n";
+			my $lightweightLocal = commands_are_lightweight_filesystem($unzipcmd)
+				&& normalise_job_dependencies($jDepe) eq '';
+			if ($lightweightLocal){
+				print "Executing lightweight UZ setup locally for $curSmpl\n";
 				systemW $unzipcmd;
-			} elsif ($lowEffort==0) {
+			} else {
 				$jobN = "_UZ$JNUM"; 
 				$unzipcmd = $unzipcmdTMP . $unzipcmd ;
 
@@ -5138,8 +5140,6 @@ sub seedUnzip2tmp{
 				$QSBoptHR->{tmpSpace} = $HDDspace{kraken}; #set option how much tmp space is required, and reset afterwards
 				($jobN, $tmpCmd) = qsubSystem($logDir."UNZP.sh",$unzipcmd,$numCore,"20G",$jobN,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 				$QSBoptHR->{tmpSpace} = $tmpSHDD;
-			} else {
-				die "MG-TK.pl:: unzipcmd not excecutable due to \$lowEffort not correctly set ($lowEffort)!\n";
 			}
 			#print " FDFS ";
 		}
