@@ -7,7 +7,7 @@ use File::Path qw(make_path remove_tree);
 use Getopt::Long qw( GetOptions );
 
 use Mods::GenoMetaAss qw(systemW);
-use Mods::Binning qw (runMetaBat runCheckM runSemiBin runMetaDecoder getBinSubdirName runGenomeFace runSCGBinner );
+use Mods::Binning qw (runMetaBat runCheckM runSemiBin runMetaDecoder getBinSubdirName runGenomeFace runSCGBinner emptyBinnerAssignmentCommand );
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive );
 
@@ -21,7 +21,8 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive );
 #v0.13: 12.3.26: GPU job submission for GenomeFace
 #v0.14: 19.4.26: scgBinner added
 #v0.15: validate every BAM/CRAM sequence dictionary before binning
-my $version = 0.15;
+#v0.16: publish an empty result when the assembly is below the configured size
+my $version = 0.16;
 
 
 my $DoMetaBat2 = "";
@@ -36,6 +37,7 @@ my $seqTec = "ill";
 my $GPUused = 0;
 my $giveSBenv = ""; #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global
 my $logDir = "";
+my $minAssemblySizeMB = 0;
 
 
 #"$BinnerScr -binner $DoMetaBat2 -binD $Bindir -smplID $smplIDs1 -tmpD $nodeSpTmpD2 -assmbl $metaGassembly -assmblGrp $cAssGrp -cores $MB2coresL -smplDirs " . join(",",@paths) . " -seqTec $seqTec
@@ -55,6 +57,7 @@ GetOptions(
 	"seqTec=s" => \$seqTec,  #PB, ONT, ill etc
 	"SB_env=s" => \$giveSBenv,
 	"useGPU=i" => \$GPUused,
+	"minAssemblySizeMB=f" => \$minAssemblySizeMB,
 ) or die "Invalid runBinners.pl options\n";
 
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
@@ -65,6 +68,7 @@ die "-binD, -tmpD, -smplID, -assmbl and -smplDirs are required\n"
 	&& length($metaGassembly) && length($pathsPre);
 die "Assembly is missing or empty: $metaGassembly\n" unless -s $metaGassembly;
 die "-cores must be a positive integer\n" unless $MB2coresL =~ /^\d+$/ && $MB2coresL > 0;
+die "-minAssemblySizeMB must be non-negative\n" if $minAssemblySizeMB < 0;
 die "Output and temporary directories must be distinct\n" if $BinDir eq $nodeSpTmpD2;
 for my $directory ($BinDir, $nodeSpTmpD2) {
 	die "Refusing unsafe directory path '$directory'\n"
@@ -87,6 +91,43 @@ print "     using assembly $metaGassembly\n";
 print "     using $MB2coresL cores, binner \"$DoMetaBat2\" to outdir $BinDir\n";
 print "     using $giveSBenv environment\n" if ($giveSBenv ne "");
 print "======================================================================\n";
+
+sub fastaTotalBases {
+	my ($fasta) = @_;
+	open my $fh, '<', $fasta or die "Cannot read assembly $fasta: $!\n";
+	my $total = 0;
+	my $records = 0;
+	while (my $line = <$fh>) {
+		if ($line =~ /^>/) {
+			$records++;
+			next;
+		}
+		$line =~ s/\s+//g;
+		die "Malformed FASTA sequence before the first header in $fasta\n"
+			if length($line) && !$records;
+		$total += length($line);
+	}
+	close $fh or die "Cannot close assembly $fasta: $!\n";
+	die "Assembly contains no FASTA records: $fasta\n" unless $records;
+	return $total;
+}
+
+my $assemblyBases = fastaTotalBases($metaGassembly);
+my $minAssemblyBases = $minAssemblySizeMB * 1_000_000;
+if ($minAssemblyBases > 0 && $assemblyBases < $minAssemblyBases) {
+	print "Assembly has $assemblyBases bp, below the ${minAssemblySizeMB} Mb binning minimum; "
+		. "publishing an empty bin assignment\n";
+	remove_tree($nodeSpTmpD2) if -e $nodeSpTmpD2;
+	remove_tree($BinDir) if -e $BinDir;
+	make_path($nodeSpTmpD2, $BinDir);
+	systemW emptyBinnerAssignmentCommand($BinDir, $smplIDs1);
+	my $stone = "$BinDir/Binning.stone";
+	open my $stoneFH, '>', $stone or die "Cannot write $stone: $!\n";
+	print {$stoneFH} "$smplIDs1\n" or die "Cannot write $stone: $!\n";
+	close $stoneFH or die "Cannot close $stone: $!\n";
+	print "Done executing empty binner result for undersized assembly\n";
+	exit 0;
+}
 
 
 # CRAM headers can be inspected without decoding their records.  Do this

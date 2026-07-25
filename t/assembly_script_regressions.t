@@ -150,6 +150,28 @@ write_file($sentinel, "keep\n");
 isnt($status, 0, 'unsupported binner fails before execution');
 ok(-e $sentinel, 'invalid binner does not erase an existing output directory');
 
+my $small_bin_dir = File::Spec->catdir($tmp, 'small-bins');
+my $small_bin_tmp = File::Spec->catdir($tmp, 'small-bin-tmp');
+($status, $output, $errors) = run_script('runBinners.pl',
+	'-binner', 1, '-binD', $small_bin_dir, '-tmpD', $small_bin_tmp,
+	'-smplID', 'small', '-assmbl', $assembly, '-assmblGrp', 1,
+	'-cores', 1, '-smplDirs', $tmp, '-minAssemblySizeMB', 0.000005);
+is($status, 0, 'undersized assembly completes without invoking a binner');
+like($output, qr/Assembly has 4 bp.*publishing an empty bin assignment/s,
+	'undersized assembly reports the measured sequence size and cutoff action');
+my $small_assignment = File::Spec->catfile($small_bin_dir, 'small');
+ok(-e $small_assignment && !-s $small_assignment,
+	'undersized assembly publishes the standard empty bin assignment');
+ok(-s File::Spec->catfile($small_bin_dir, 'Binning.stone'),
+	'undersized assembly publishes the normal binner completion stone');
+($status, $output, $errors) = run_script('checkBinQual.pl',
+	'-asm', $assembly, '-binF', $small_assignment,
+	'-tmpD', File::Spec->catdir($tmp, 'small-quality-tmp'),
+	'-ncore', 1, '-checkM2', 1, '-checkM1', 0, '-binner', 1);
+is($status, 0, 'standard quality postprocessing accepts the undersized pseudo output');
+ok(-s "$small_assignment.cm2" && -s "$small_assignment.assStat",
+	'undersized assembly receives complete empty quality and assembly-stat outputs');
+
 my $separate_contigs = read_file(File::Spec->catfile($scripts, 'separateContigs.pl'));
 like($separate_contigs,
 	qr/my \$anyCoverageAvailable\s*=\s*.*?fileGZe\(\$primaryCoverage\).*?fileGZe\(\$supportCoverage\).*?unless \$anyCoverageAvailable/s,

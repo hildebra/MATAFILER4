@@ -140,6 +140,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-Binner`, `-MetaBat2`, `-binSpeciesMG` | integer | `0` | stable | 0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner |
 | `-BinnerCores` | integer | `9` | stable | cores used for Binning process (and checkM) |
 | `-BinnerMem` | integer | `0` | stable | define binning memory, Gb, 0=auto |
+| `-minBinnerAssemblyMB` | float | `5` | stable | Do not run the binner when the assembly contains fewer than this many million sequence bases. Publish the standard empty binner outputs instead. Set to `0` to disable the cutoff. |
 | `-checkM2` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-checkM1` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-BinnerScratchTmp` | integer | `0` | internal/advanced | very specific (undocumented) use of scratch instead of nodetmp dir |

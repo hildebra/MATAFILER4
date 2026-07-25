@@ -69,6 +69,7 @@ MATAF4.pl	4.04	Assembly related	-assemblyScaffMinSize	integer	MFopt		stable	Acce
 MATAF4.pl	4.04	Binning	-Binner,-MetaBat2,-binSpeciesMG	integer	MFopt		stable	0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
 MATAF4.pl	4.04	Binning	-BinnerCores	integer	MFopt		stable	cores used for Binning process (and checkM)
 MATAF4.pl	4.04	Binning	-BinnerMem	integer	MFopt		stable	define binning memory, Gb, 0=auto
+MATAF4.pl	4.13	Binning	-minBinnerAssemblyMB	float	MFopt	5	stable	skip binning assemblies below this many million sequence bases and publish standard empty binner outputs; 0 disables
 MATAF4.pl	4.04	Binning	-checkM2	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Binning	-checkM1	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Binning	-BinnerScratchTmp	integer	MFopt		advanced/internal	very specific (undocumented) use of scratch instead of nodetmp dir

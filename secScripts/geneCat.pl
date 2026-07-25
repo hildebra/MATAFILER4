@@ -1606,6 +1606,7 @@ sub addingSmpls{
 			if $skippedInputExamples == 6;
 	};
 	my $combinedMembersSkipped = 0;
+	my $emptySamplesSkipped = 0;
 	my $processedAssemblies = 0;
 	my @OCOMPL = (); my @O3P=(); my @O5P = (); my @OINC = (); #these arrays store complete & incomplete fasta seqs
 	open QLOG, '>', "$qsubDir/GeneCompleteness.txt.$batch"
@@ -1646,6 +1647,10 @@ sub addingSmpls{
 				die "Can't find valid path for $smpl\n";
 			}
 		} 
+		if (-e "$dir2rd/SMPL.empty"){
+			$emptySamplesSkipped++;
+			next;
+		}
 		
 		#check if mult assembly and adapt
 		my $assGo = 0;
@@ -1822,6 +1827,8 @@ sub addingSmpls{
 	print "Batch $batch collation summary: $processedAssemblies assembly group(s) processed";
 	print ", $combinedMembersSkipped non-final combined-assembly member(s) skipped"
 		if $combinedMembersSkipped;
+	print ", $emptySamplesSkipped sample(s) marked SMPL.empty skipped"
+		if $emptySamplesSkipped;
 	print "\n";
 	if (@missedSmpls){
 		my $missed_file = "$qsubDir/Missed_samples.txt.$batch";

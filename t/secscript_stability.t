@@ -216,6 +216,9 @@ unlike($gene_cat, qr/system "rm -rf \$metaGD\/\$path2CS/, 'geneCat does not dele
 like($gene_cat, qr/genemat\.done\.sh/, 'matrix completion uses a convergence job');
 like($gene_cat, qr/No usable assembly.*if \$requireAllAssemblies/s,
      'missing assemblies fail only when requireAllAssemblies is enabled');
+like($gene_cat,
+     qr/sub addingSmpls.*?if \(-e "\$dir2rd\/SMPL\.empty"\)\{.*?next;.*?\$AsGrps\{\$cAssGrp\}\{CntAss\} \+\+/s,
+     'gene collation skips samples marked SMPL.empty before assembly validation');
 like($gene_cat, qr/\$map\{\$smpl\}\{assFinSmpl\} eq \$smpl/,
      'assembly-group precheck recognizes the explicitly final assembly sample');
 unlike($gene_cat, qr/!\s*fileGZe\("\$metaGD\/scaffolds\.fasta\.filt"\) \|\| !-e "\$metaGD\/longReads/,

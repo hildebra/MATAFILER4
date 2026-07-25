@@ -215,6 +215,8 @@ setDefaultMFconfig();
 getCmdLineOptions;
 die "-loopTillCompleteActiveJobs requires a non-negative integer\n"
 	if ($MFconfig{loopTillCompleteActiveJobs} < 0);
+die "-minBinnerAssemblyMB requires a non-negative number\n"
+	if ($MFopt{minBinnerAssemblyMB} < 0);
 $MFconfig{inspectState} = 1 if ($MFconfig{planState});
 if (!$MFconfig{inspectState} && $loop2completion && (
 		$MFopt{redoAssMapping} || $MFopt{BinnerRedoAll} || $MFopt{redoAssembly}
@@ -2221,6 +2223,7 @@ sub submitGenomeBinner{
 	#execute calcs later in perl script..
 	my $BinnerScr = getProgPaths("Binner_scr");
 	$MBcmd .= "$BinnerScr -binner $MFopt{DoMetaBat2} -binD $BinDir -smplID \"$smplIDs1\" -tmpD \"$nodeSpTmpD2\" -assmbl $metaGassembly -assmblGrp $cAssGrp -cores $MB2coresL -smplDirs " . join(",",@paths) . " -seqTec \"$seqTec\" -logDir \"$paths[-1]LOGandSUB\" ";
+	$MBcmd .= "-minAssemblySizeMB $MFopt{minBinnerAssemblyMB} ";
 	$MBcmd .= "-SB_env $MFopt{SB_env} " if ($MFopt{SB_env} ne "");
 	$MBcmd .= ";\n";
 
@@ -8756,7 +8759,7 @@ sub setDefaultMFconfig{
 	$MFopt{useBinnerScratch} = 0;$MFopt{BinnerMem} = 0;$MFopt{useCheckM2} = 1;
 	$MFopt{DoBinning} = 0;$MFopt{useCheckM1} = 0;$MFopt{BinnerCores} = 9;
 	$MFopt{DoMetaBat2} = 0; $MFopt{BinnerRedoEmpty} = 0;  $MFopt{SB_env} = "";
-	$MFopt{BinnerRedoAll} =0;
+	$MFopt{BinnerRedoAll} =0; $MFopt{minBinnerAssemblyMB} = 2;
 
 	#read preprocessing
 	$MFopt{unzipCores} = 3; 
@@ -9131,6 +9134,7 @@ sub getCmdLineOptions{
 		"Binner|MetaBat2|binSpeciesMG=i" => \$MFopt{DoMetaBat2}, #0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
 		"BinnerCores=i" => \$MFopt{BinnerCores}, #cores used for Binning process (and checkM)
 		"BinnerMem=i" => \$MFopt{BinnerMem}, # define binning memory, Gb, 0=auto
+		"minBinnerAssemblyMB=f" => \$MFopt{minBinnerAssemblyMB}, #skip binning assemblies below this many million sequence bases; 0 disables
 		"checkM2=i" => \$MFopt{useCheckM2},
 		"checkM1=i" => \$MFopt{useCheckM1},
 		"BinnerScratchTmp=i" => \$MFopt{useBinnerScratch}, #very specific (undocumented) use of scratch instead of nodetmp dir
