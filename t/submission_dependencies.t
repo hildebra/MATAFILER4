@@ -8,7 +8,7 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Subm qw(
-	qsubSystem qsubSystemJobAlive numActiveUserJobs reconcileSlurmDependencies
+	qsubSystem qsubSystemJobAlive numActiveUserJobs reconcileSlurmDependencies MFnext
 	submitSlurmWithDependencyRecovery
 );
 
@@ -267,5 +267,16 @@ my $deferred_script = File::Spec->catfile($root, 'deferred-submission.sh');
 qsubSystem($deferred_script, 'echo deferred', 1, '1G', 'deferred', '', '', 0, [], $options);
 is($options->{submittedJobs}, 1,
 	'a deferred command does not increment the submitted-job counter');
+
+my $release_lock = File::Spec->catfile($root, 'release-sample.lock');
+open my $release_fh, '>', $release_lock or die $!;
+close $release_fh or die $!;
+$options = bash_options();
+@{$options}{qw(afterAny useShortQueue tmpSpace)} = (1, 1, '9G');
+my @release_dependencies = ('upstream');
+MFnext($release_lock, \@release_dependencies, 7, $options);
+is_deeply(
+	[@{$options}{qw(afterAny useShortQueue tmpSpace)}], [1, 1, '9G'],
+	'lock release restores the caller scheduler options after submission');
 
 done_testing;
