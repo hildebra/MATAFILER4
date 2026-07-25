@@ -9,7 +9,7 @@ use File::Basename qw(dirname);
 use File::Path qw(make_path);
 
 use lib "$Bin/../..";
-use Mods::GenoMetaAss qw(gzipopen);
+use Mods::GenoMetaAss qw(gzipopen gzipwrite);
 
 my ($input, $output) = ('', '');
 GetOptions(
@@ -18,28 +18,32 @@ GetOptions(
 ) or die "Usage: $0 -input input.vcf[.gz] -output output.vcf\n";
 die "-input is required\n" unless length($input) && -e $input;
 die "-output is required\n" unless length($output);
+$output .= '.gz' unless $output =~ /\.gz\z/;
 
 my $output_dir = dirname($output);
 make_path($output_dir) unless -d $output_dir;
-my $temporary = "$output.tmp.$$";
+my $temporary = "$output.tmp.$$.gz";
 END {
 	unlink $temporary if defined($temporary) && -e $temporary;
 }
 
 my ($in, $ok) = gzipopen($input, "VCF header normalization", 0);
 die "Cannot read VCF $input\n" unless $ok && defined($in);
-open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+my $out = gzipwrite($temporary, "normalized VCF");
 
 my $chrom_header = '';
 my $duplicate_headers = 0;
 my $late_metadata = 0;
 while (my $line = <$in>) {
-	if ($line =~ /^#CHROM(?:\t|$)/) {
+	if ($line =~ /^#CHROM(?:[ \t]+|$)/) {
 		my $comparison = $line;
 		$comparison =~ s/\r?\n\z//;
+		# VCF requires tab-delimited columns. Accept whitespace-delimited input
+		# from older producers, but publish one canonical header representation.
+		$comparison = join("\t", split /[ \t]+/, $comparison);
 		if (!length($chrom_header)) {
 			$chrom_header = $comparison;
-			print {$out} $line or die "Cannot write $temporary: $!\n";
+			print {$out} "$chrom_header\n" or die "Cannot write $temporary: $!\n";
 		} else {
 			die "VCF $input contains incompatible #CHROM headers; refusing to merge sample columns\n"
 				if $comparison ne $chrom_header;

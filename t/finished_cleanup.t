@@ -202,8 +202,17 @@ unlike($mata_source, qr/'--mode', 'invalidate'/,
 like($mata_source, qr/runFinishedCleanup\(finishedCleanupArguments\(/s,
 	'fully completed samples invoke centralized cleanup');
 like($mata_source,
-	qr/MFnext\(\$smplLockF,\\\@sampleDeps.*?cleanup_stage_barrier\(.*?name => 'contig stats'.*?name => 'binning'.*?name => 'consSNP\/variant analysis'.*?if \(\$cleanupBarrier->\{ready\}\).*?submitFinishedCleanup/s,
+	qr/cleanup_stage_barrier\(.*?name => 'contig stats'.*?name => 'binning'.*?name => 'consSNP\/variant analysis'.*?if \(\$cleanupBarrier->\{ready\}\).*?submitFinishedCleanup.*?add2SampleDeps\(\\\@sampleDeps, \[\$cleanupJob\]\).*?MFnext\(\$smplLockF,\\\@sampleDeps/s,
 	'normal submissions enqueue cleanup only after every terminal analysis is complete or scheduled');
+my $cleanup_barrier_position = index($mata_source, 'my $cleanupBarrier = cleanup_stage_barrier(');
+my $cleanup_submission_position = index($mata_source, 'submitFinishedCleanup(', $cleanup_barrier_position);
+my $terminal_lock_release_position = index(
+	$mata_source, 'MFnext($smplLockF,\@sampleDeps', $cleanup_barrier_position,
+);
+ok($cleanup_barrier_position >= 0
+		&& $cleanup_submission_position > $cleanup_barrier_position
+		&& $terminal_lock_release_position > $cleanup_submission_position,
+	'terminal lock release is placed downstream of finished-sample cleanup');
 like($mata_source,
 	qr/my \@cleanupDependencies = split .*?normalise_job_dependencies\(.*?\\\@sampleDeps, \$cleanupBarrier->\{dependencies\}/s,
 	'cleanup depends on both the complete sample job set and explicit terminal-stage jobs');

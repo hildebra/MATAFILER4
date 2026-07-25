@@ -896,12 +896,14 @@ sub MFnext($ $ $ $){
 	my $jDepe = normalise_job_dependencies($aR);
 	my $jobN = "RMLCK$Jnum";
 	#print "$logF\n$jDepe\n\n"; 
+	my ($oldAfterAny, $oldUseShortQueue, $oldTmpSpace) =
+		@{$QSBoptHR}{qw(afterAny useShortQueue tmpSpace)};
 	$QSBoptHR->{afterAny}=1;
-	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
+	$QSBoptHR->{tmpSpace} = "0"; 
 	$QSBoptHR->{useShortQueue} =1;
 	my ($jN,$submitCommand) = qsubSystem($logF,$cmd,1,"1G",$jobN,$jDepe,"",1,[],$QSBoptHR);
-	$QSBoptHR->{afterAny}=0;$QSBoptHR->{useShortQueue}=0;
-	$QSBoptHR->{tmpSpace} =$tmpSHDD;
+	@{$QSBoptHR}{qw(afterAny useShortQueue tmpSpace)} =
+		($oldAfterAny, $oldUseShortQueue, $oldTmpSpace);
 	push(@{$aR}, $jN) if ($jN ne "");
 }
 

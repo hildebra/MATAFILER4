@@ -354,6 +354,12 @@ like($mataf4,
 	qr/deferred_command_dependencies\(.*?chain_previous\s*=>\s*\$options->\{chain_previous\}/s,
 	'deferred command serialization requires an explicit caller option');
 like($mataf4,
+	qr/sub postSubmQsub.*?\{submittedJobs\}\+\+.*?\{slurmDependencySubmittedAt\}\{\$scheduler_job_id\}\s*=\s*time/s,
+	'accepted deferred submissions update loop and Slurm dependency bookkeeping');
+like($mataf4,
+	qr/sub postSubmQsub.*?my \$lock_file = \$QSBoptHR->\{LOCKfile\}.*?open my \$lock_fh/s,
+	'accepted deferred submissions create the active sample lock');
+like($mataf4,
 	qr/my \$lightweightLocal = commands_are_lightweight_filesystem\(\$unzipcmd\).*?systemW \$unzipcmd.*?qsubSystem\(\$logDir\."UNZP\.sh"/s,
 	'lightweight UZ setup runs locally while data-processing commands remain scheduled');
 like($mataf4,

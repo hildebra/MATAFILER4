@@ -131,7 +131,8 @@ END {
 #.43: avoid redundant candidate scoring and hot-loop container copies during extraction
 #.44: reduce locus-model, FASTA scan, and category-publication peak memory
 #.45: normalize repeated VCF headers and distinguish split-worker sparsity from missing catalogue data
-my $version = 0.45;
+#.46: accept whitespace-delimited VCF column headers and publish normalized VCFs as real gzip streams
+my $version = 0.46;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -2241,7 +2242,7 @@ sub createConsFastas{
 	my $depthFile = "$cD$lMAPdir/$sm$bamDepthFsuffix";
 	my $ofasCons = "$cD/$lSNPdir/$lConsCTG";
 	my $vcfFile = "$cD/$lSNPdir/$lConsVCF";
-	my $normalizedVCF = "$oFNA.input.vcf";
+	my $normalizedVCF = "$oFNA.input.vcf.gz";
 	my @normalizeCommands = (
 		"perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFile)
 			." -output ".shellQuote($normalizedVCF)
@@ -2274,7 +2275,7 @@ sub createConsFastas{
 		#$vcf2fnaOpt = "-seqPlatform $SNPIHR->{SeqTech},$SNPIHR->{SeqTechSuppl} -t 1 -minCallDepth $minDepth,$minDepth -minCallQual $minCallQual ";
 		#$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref $refFA -inVCF $vcfFile,$vcfFileS -depthF $depthFile,$depthFileS ";# -oCtg $ofasCons.gz " ;
 		my $vcfFileS = "$cD/$lSNPdir/$lConsVCFsup";
-		my $normalizedVCFS = "$oFNA.input.sup.vcf";
+		my $normalizedVCFS = "$oFNA.input.sup.vcf.gz";
 		push @normalizeCommands,
 			"perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFileS)
 				." -output ".shellQuote($normalizedVCFS);

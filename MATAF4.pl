@@ -1547,7 +1547,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$variantJobDep = normalise_job_dependencies($variantJobDep, $deferredVariantDeps);
 		add2SampleDeps(\@sampleDeps, [$deferredVariantDeps]);
 	}
-	MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR);
 	my $cleanupBarrier = cleanup_stage_barrier(
 		{
 			name => 'final assembly publication', required => 1,
@@ -1589,6 +1588,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				.join(', ', @{$cleanupBarrier->{blocked}})."\n";
 		}
 	}
+	# Lock release is the final sample action. When cleanup is scheduled, MFnext
+	# receives its job id and cannot release the lock before cleanup terminates.
+	MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR);
 	### loop2complete functionality
 	loop2C_check($cAssGrp,\@sampleDeps);
 
@@ -2426,6 +2428,7 @@ sub postSubmQsub {
 		}
 		push @augmented_commands, $augmented->{command};
 		my $submitted_before = scalar @submitted;
+		my $scheduler_job_id = "";
 		my ($output, $status) = $QSBoptHR->{qmode} eq 'slurm'
 			? submitSlurmWithDependencyRecovery(
 				$augmented->{command}, $script_path, $QSBoptHR,
@@ -2437,16 +2440,36 @@ sub postSubmQsub {
 		die "Deferred job submission failed: $augmented->{command}\n$output"
 			if ($status != 0);
 		if ($QSBoptHR->{qmode} eq 'slurm') {
-			push @submitted, $QSBoptHR->{rTag}.$1
-				if ($output =~ /^Submitted batch job (\d+)\s*$/m);
+			if ($output =~ /^Submitted batch job (\d+)\s*$/m) {
+				$scheduler_job_id = $1;
+				push @submitted, $QSBoptHR->{rTag}.$scheduler_job_id;
+			}
 		} elsif ($QSBoptHR->{qmode} eq 'sge') {
-			push @submitted, $QSBoptHR->{rTag}.$1
-				if ($output =~ /\bYour job(?:-array)?\s+(\d+)\b/);
+			if ($output =~ /\bYour job(?:-array)?\s+(\d+)\b/) {
+				$scheduler_job_id = $1;
+				push @submitted, $QSBoptHR->{rTag}.$scheduler_job_id;
+			}
 		} elsif ($QSBoptHR->{qmode} eq 'lsf') {
-			push @submitted, $QSBoptHR->{rTag}.$1 if ($output =~ /\bJob <(\d+)>/);
+			if ($output =~ /\bJob <(\d+)>/) {
+				$scheduler_job_id = $1;
+				push @submitted, $QSBoptHR->{rTag}.$scheduler_job_id;
+			}
 		}
 		die "Could not parse deferred scheduler job id: $output\n"
 			if ($QSBoptHR->{qmode} ne 'bash' && @submitted == $submitted_before);
+		$QSBoptHR->{submittedJobs} = 0 unless defined $QSBoptHR->{submittedJobs};
+		$QSBoptHR->{submittedJobs}++;
+		if ($QSBoptHR->{qmode} eq 'slurm' && $scheduler_job_id ne "") {
+			$QSBoptHR->{slurmDependencySubmittedAt} ||= {};
+			$QSBoptHR->{slurmDependencySubmittedAt}{$scheduler_job_id} = time;
+		}
+		my $lock_file = $QSBoptHR->{LOCKfile} || "";
+		if ($lock_file ne "" && !-e $lock_file) {
+			open my $lock_fh, '>', $lock_file
+				or die "Cannot create lock $lock_file after deferred submission: $!\n";
+			close $lock_fh
+				or die "Cannot close lock $lock_file after deferred submission: $!\n";
+		}
 	}
 	open my $audit_fh, '>', $outf or die "Cannot write deferred submission audit $outf: $!\n";
 	print {$audit_fh} join("\n", @augmented_commands), "\n";

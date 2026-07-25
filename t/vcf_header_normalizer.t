@@ -4,6 +4,7 @@ use warnings;
 use File::Spec;
 use File::Temp qw(tempdir);
 use FindBin qw($Bin);
+use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use Test::More;
 
 sub write_file {
@@ -15,18 +16,19 @@ sub write_file {
 
 sub slurp {
 	my ($path) = @_;
-	open my $fh, '<', $path or die "Cannot read $path: $!";
-	local $/;
-	return <$fh>;
+	my $contents = '';
+	gunzip $path => \$contents
+		or die "Cannot decompress $path: $GunzipError";
+	return $contents;
 }
 
 my $tmp = tempdir(CLEANUP => 1);
 my $script = File::Spec->catfile(
 	$Bin, '..', 'secScripts', 'SNP', 'normalizeVCFHeaders.pl',
 );
-my $header = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
+my $header = "#CHROM  POS  ID  REF  ALT  QUAL  FILTER  INFO\n";
 my $input = File::Spec->catfile($tmp, 'duplicated.vcf');
-my $output = File::Spec->catfile($tmp, 'normalized.vcf');
+my $output = File::Spec->catfile($tmp, 'normalized.vcf.gz');
 write_file($input,
 	"##fileformat=VCFv4.2\n".$header
 	."ctg1\t1\t.\tA\tC\t30\tPASS\t.\n"
@@ -39,11 +41,13 @@ is(system($^X, $script, '-input', $input, '-output', $output), 0,
 my $normalized = slurp($output);
 is(scalar(() = $normalized =~ /^#CHROM/mg), 1,
 	'normalized VCF contains one column header');
+like($normalized, qr/^#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO$/m,
+	'normalized VCF publishes a canonical tab-delimited column header');
 like($normalized, qr/^ctg1\t1/m, 'records before the repeated header are retained');
 like($normalized, qr/^ctg2\t2/m, 'records after the repeated header are retained');
 
 my $incompatible = File::Spec->catfile($tmp, 'incompatible.vcf');
-my $rejected = File::Spec->catfile($tmp, 'rejected.vcf');
+my $rejected = File::Spec->catfile($tmp, 'rejected.vcf.gz');
 write_file($incompatible,
 	$header."ctg1\t1\t.\tA\tC\t30\tPASS\t.\n"
 	."#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tSAMPLE\n"
