@@ -949,13 +949,13 @@ my $NsubJobs = 0 ; #split job up?
 my $preCompCons = 0;
 
 if ($numSamples > 1500){#scale with the number of assembly groups
-	$memUsage = 120; $NsubJobs = 30; $preCompCons = 0; 
+	$memUsage = 15; $NsubJobs = 30; $preCompCons = 0; 
 } elsif ($numSamples > 700){
-	$memUsage = 120; $NsubJobs = 10; $preCompCons = 0;#at a certain size it makes more sense to handle  preCompCons this in-job
+	$memUsage = 12; $NsubJobs = 10; $preCompCons = 0;#at a certain size it makes more sense to handle  preCompCons this in-job
 } elsif ($numSamples > 400){
-	$memUsage = 70; $NsubJobs = 4; $preCompCons = 10;
+	$memUsage = 7; $NsubJobs = 4; $preCompCons = 10;
 } elsif ($numSamples > 150){ #
-	$memUsage = 50; $NsubJobs = 0; $preCompCons = 5;
+	$memUsage = 5; $NsubJobs = 0; $preCompCons = 5;
 }
 #my $prunTree = "$outD/between_phylo/prunned.nwk";
 #

@@ -46,6 +46,9 @@ sub writeTooFewMarker;
 sub treeInputPrecopyCommand;
 sub readFastaIDs;
 
+sub limitedWarn;sub limitedNotice;
+
+
 my %limitedWarningStats;
 my %limitedNoticeStats;
 my $warningExampleLimit = 5;
@@ -131,8 +134,7 @@ END {
 #.43: avoid redundant candidate scoring and hot-loop container copies during extraction
 #.44: reduce locus-model, FASTA scan, and category-publication peak memory
 #.45: normalize repeated VCF headers and distinguish split-worker sparsity from missing catalogue data
-#.46: accept whitespace-delimited VCF column headers and publish normalized VCFs as real gzip streams
-my $version = 0.46;
+my $version = 0.45;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -2231,22 +2233,16 @@ sub extractFNAFAA2genes{
 sub createConsFastas{
 	my ($cD,$sm, $oFNA, $oFAA,$append2LOG,$returnCmd) = @_;
 	my $vcf2fnaBin = getProgPaths("vcf2fna");
-	my $normalizeVCF = abs_path(File::Spec->catfile(
-		dirname(abs_path($0)), '..', 'SNP', 'normalizeVCFHeaders.pl'
-	));
-	die "Cannot locate VCF header normalizer\n"
-		unless defined($normalizeVCF) && -f $normalizeVCF;
+	#my $normalizeVCF = abs_path(File::Spec->catfile(dirname(abs_path($0)), '..', 'SNP', 'normalizeVCFHeaders.pl'));
+	#die "Cannot locate VCF header normalizer\n" unless defined($normalizeVCF) && -f $normalizeVCF;
 	my $vcf2fnaOpt = "";
 	#my $seqPlatf = "hiSeq"; #-> get this from .map ..
 	my $refFA = getAssemblContigs($cD); my $refGFF = getAssemblGFF($cD);
 	my $depthFile = "$cD$lMAPdir/$sm$bamDepthFsuffix";
 	my $ofasCons = "$cD/$lSNPdir/$lConsCTG";
 	my $vcfFile = "$cD/$lSNPdir/$lConsVCF";
-	my $normalizedVCF = "$oFNA.input.vcf.gz";
-	my @normalizeCommands = (
-		"perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFile)
-			." -output ".shellQuote($normalizedVCF)
-	);
+	my $normalizedVCF = $vcfFile;#"$oFNA.input.vcf";
+	#my @normalizeCommands = ("perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFile)." -output ".shellQuote($normalizedVCF)	);
 	
 	#DEBUG
 	
@@ -2275,10 +2271,8 @@ sub createConsFastas{
 		#$vcf2fnaOpt = "-seqPlatform $SNPIHR->{SeqTech},$SNPIHR->{SeqTechSuppl} -t 1 -minCallDepth $minDepth,$minDepth -minCallQual $minCallQual ";
 		#$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref $refFA -inVCF $vcfFile,$vcfFileS -depthF $depthFile,$depthFileS ";# -oCtg $ofasCons.gz " ;
 		my $vcfFileS = "$cD/$lSNPdir/$lConsVCFsup";
-		my $normalizedVCFS = "$oFNA.input.sup.vcf.gz";
-		push @normalizeCommands,
-			"perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFileS)
-				." -output ".shellQuote($normalizedVCFS);
+		my $normalizedVCFS = $vcfFileS;#"$oFNA.input.sup.vcf";
+		#push @normalizeCommands,"perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFileS)." -output ".shellQuote($normalizedVCFS);
 		my $depthFileS = "$cD$lMAPdir/$sm$bamDepthFsuffixSup";
 		$vcf2fnaOpt = "-seqPlatform ".shellQuote("$seqPlatf,$secSeqTechS")." $commonOpt";
 		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref ".shellQuote($refFA)
@@ -2287,7 +2281,7 @@ sub createConsFastas{
 	}
 
 	$cmd .= "-gff ".shellQuote($refGFF)." -oGeneNT ".shellQuote($oFNA)." -oGeneAA ".shellQuote($oFAA);
-	$cmd = join("\n", @normalizeCommands, $cmd);
+	#$cmd = join("\n", @normalizeCommands, $cmd);
 	if ($append2LOG){$cmd.=" >> ".shellQuote($SNPconsLOGs)."\n";
 	} else {$cmd .= "\n";}
 	if ($returnCmd){ #don't excecute

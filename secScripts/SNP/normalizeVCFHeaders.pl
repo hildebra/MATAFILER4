@@ -35,9 +35,11 @@ my $chrom_header = '';
 my $duplicate_headers = 0;
 my $late_metadata = 0;
 while (my $line = <$in>) {
+	print "$line XX\n";
 	if ($line =~ /^#CHROM(?:[ \t]+|$)/) {
 		my $comparison = $line;
 		$comparison =~ s/\r?\n\z//;
+		die "$line\n";
 		# VCF requires tab-delimited columns. Accept whitespace-delimited input
 		# from older producers, but publish one canonical header representation.
 		$comparison = join("\t", split /[ \t]+/, $comparison);
@@ -63,6 +65,8 @@ close $in or die "Cannot close $input: $!\n";
 close $out or die "Cannot close $temporary: $!\n";
 die "VCF $input has no #CHROM header\n" unless length($chrom_header);
 rename $temporary, $output or die "Cannot replace $output: $!\n";
+
+
 
 warn "Normalized $input: removed $duplicate_headers repeated #CHROM header(s)"
 	.($late_metadata ? " and $late_metadata late metadata line(s)" : "")."\n"
