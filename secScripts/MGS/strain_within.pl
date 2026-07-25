@@ -2230,6 +2230,17 @@ sub extractFNAFAA2genes{
 	return;
 }
 
+sub reduceSeqTech{
+	my ($inST) = @_;
+	#		if (platform != "ill" && platform != "PB" && platform != "ONT" && platform != "unspecified") {
+
+	return $inST if ($inST eq "ill" || $inST eq "ONT" || $inST eq "PB" || $inST eq "unspecified");
+	
+	return "ill" if ($inST eq "hiSeq" || $inST eq "miSeq");
+	return "unspecified";
+	
+}
+
 sub createConsFastas{
 	my ($cD,$sm, $oFNA, $oFAA,$append2LOG,$returnCmd) = @_;
 	my $vcf2fnaBin = getProgPaths("vcf2fna");
@@ -2261,7 +2272,7 @@ sub createConsFastas{
 	if ($secSeqTechS eq ""){
 		#in case of only illumina:
 		
-		#checkSeqTech($seqPlatf);
+		$seqPlatf = reduceSeqTech($seqPlatf);
 		$vcf2fnaOpt = "-seqPlatform ".shellQuote($seqPlatf)." $commonOpt";
 		$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref ".shellQuote($refFA)
 			." -inVCF ".shellQuote($normalizedVCF)." -depthF ".shellQuote($depthFile)."  ";
@@ -2272,6 +2283,8 @@ sub createConsFastas{
 		#$cmd = "$vcf2fnaBin $vcf2fnaOpt -ref $refFA -inVCF $vcfFile,$vcfFileS -depthF $depthFile,$depthFileS ";# -oCtg $ofasCons.gz " ;
 		my $vcfFileS = "$cD/$lSNPdir/$lConsVCFsup";
 		my $normalizedVCFS = $vcfFileS;#"$oFNA.input.sup.vcf";
+		$seqPlatf = reduceSeqTech($seqPlatf);
+		$secSeqTechS = reduceSeqTech($secSeqTechS);
 		#push @normalizeCommands,"perl ".shellQuote($normalizeVCF)." -input ".shellQuote($vcfFileS)." -output ".shellQuote($normalizedVCFS);
 		my $depthFileS = "$cD$lMAPdir/$sm$bamDepthFsuffixSup";
 		$vcf2fnaOpt = "-seqPlatform ".shellQuote("$seqPlatf,$secSeqTechS")." $commonOpt";
