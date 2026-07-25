@@ -70,22 +70,25 @@ sub _find {
 sub build_locus_groups {
 	my ($records, $cluster_members, $proteins, $options) = @_;
 	$options ||= {};
+	my $include_member_to_seed = exists($options->{include_member_to_seed})
+		? $options->{include_member_to_seed} : 1;
+	my $include_gene_to_locus = exists($options->{include_gene_to_locus})
+		? $options->{include_gene_to_locus} : 1;
 	my $context_distance = $options->{context_distance} // 5;
 	my $min_length_ratio = $options->{min_length_ratio} // 0.75;
 	my $min_sequence_with_context = $options->{min_sequence_with_context} // 0.55;
 	my $min_sequence_without_context = $options->{min_sequence_without_context} // 0.72;
 	my $min_context_similarity = $options->{min_context_similarity} // 0.25;
 
-	my (%record_by_gene, %sample_set, %member_seed, %positions);
+	my (%sample_set, %member_seed, %positions);
 	for my $record (@{$records || []}) {
 		my $gene = $record->{gene};
 		next unless defined($gene) && length($gene);
-		$record_by_gene{$gene} = $record;
 		for my $member (_members($cluster_members->{$gene})) {
 			my ($sample, $contig, $position, $clean_member) = _member_parts($member);
 			next unless defined $sample;
 			$sample_set{$gene}{$sample} = 1;
-			$member_seed{$clean_member} = $gene;
+			$member_seed{$clean_member} = $gene if $include_member_to_seed;
 			next unless defined($contig) && defined($position);
 			push @{$positions{$sample}{$contig}}, {
 				position => $position,
@@ -114,6 +117,9 @@ sub build_locus_groups {
 			}
 		}
 	}
+	# Position entries can dominate peak memory for large catalogues and are no
+	# longer needed after their compact context summaries have been built.
+	%positions = ();
 
 	my %by_mgs_cog;
 	for my $record (@{$records || []}) {
@@ -183,7 +189,7 @@ sub build_locus_groups {
 				my $locus_id = join('|', $mgs, $cog, $primary);
 				my %context;
 				for my $seed (@ordered) {
-					$gene_to_locus{$seed->{gene}} = $locus_id;
+					$gene_to_locus{$seed->{gene}} = $locus_id if $include_gene_to_locus;
 					$context{$_} += $gene_context{$seed->{gene}}{$_} for keys %{$gene_context{$seed->{gene}} || {}};
 				}
 				$locus_context{$locus_id} = \%context;
@@ -194,6 +200,12 @@ sub build_locus_groups {
 				};
 				push @groups, $group;
 				$locus_by_id{$locus_id} = $group;
+			}
+			# All comparisons for this MGS/COG are complete.  Release the
+			# expanded per-seed inputs as the compact groups are published.
+			for my $seed (@seeds) {
+				delete $sample_set{$seed->{gene}};
+				delete $gene_context{$seed->{gene}};
 			}
 		}
 	}

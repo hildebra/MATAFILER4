@@ -97,8 +97,26 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.42;/,
-	'within-strain published-input resubmission increments the workflow version');
+like($strain, qr/my \$version = 0\.44;/,
+	'within-strain extraction memory update increments the workflow version');
+like($strain,
+	qr/my \$locCl2G2 = \$cl2gene2\{\$sm\}.*?my \$COGprios1 = \$COGprios->\{\$MGS\}.*?\@candidates == 1.*?reason => 'unique'.*?\$LocusSeedProteins\{\$locus\} \|\|=.*?choose_locus_candidate/s,
+	'within-strain extraction avoids hot-loop container copies and scoring unique candidates');
+like($strain,
+	qr/include_member_to_seed => 0.*?include_gene_to_locus => 0/s,
+	'within-strain extraction omits unused locus indexes');
+like($strain,
+	qr/Only identifiers are needed.*?readFastaIDs\(\$resolvedFNA\).*?sub readFastaIDs/s,
+	'within-strain outgroup handling scans only existing FASTA identifiers');
+like($strain,
+	qr/my \$cat_write = "\$CATtf\.write\.\$\$".*?print \{\$cat_out\}.*?rename \$cat_write, \$CATtf/s,
+	'within-strain category publication streams through an atomic temporary file');
+like($strain,
+	qr/"flushEvery=i"\s+=> \\\$appendWriteTrigger.*?'-flushEvery', \$appendWriteTrigger.*?%outgroupGeneCache = \(\)/s,
+	'within-strain extraction exposes its buffer bound to workers and releases per-MGS outgroup caches');
+like($strain,
+	qr/contextMembersNeeded.*?contextLociNeeded.*?my %keptMemberContext.*?\$MemberContext = \\%keptMemberContext.*?my %keptLocusContext.*?\$LocusContext = \\%keptLocusContext/s,
+	'within-strain extraction retains scoring contexts only for potentially ambiguous loci');
 like($strain,
 	qr/buildTree5 validates its persistent checkpoints.*?my \$contPhylo = 1;.*?-continue \$contPhylo/s,
 	'unfinished trees delegate checkpoint recovery to buildTree continue mode');

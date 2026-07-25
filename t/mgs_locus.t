@@ -61,6 +61,22 @@ is(scalar(@{$model->{groups}}), 2, 'mutually exclusive similar seeds merge but a
 is($model->{gene_to_locus}{10}, 'MGS.1|COG1|10', 'first ranked seed names the merged locus');
 is($model->{gene_to_locus}{11}, 'MGS.1|COG1|10', 'alternative seed maps to the primary locus');
 is($model->{gene_to_locus}{12}, 'MGS.1|COG1|12', 'co-occurring seed retains its own locus');
+is($model->{member_to_seed}{'S1__ctg_1'}, '10',
+	'default locus-model results retain the member-to-seed compatibility index');
+
+my $lean_model = build_locus_groups(
+	\@records, \%members, \%proteins,
+	{ include_member_to_seed => 0, include_gene_to_locus => 0 },
+);
+is_deeply($lean_model->{member_to_seed}, {},
+	'callers can omit the memory-heavy member-to-seed result');
+is_deeply($lean_model->{gene_to_locus}, {},
+	'callers can omit an unused gene-to-locus result');
+is_deeply(
+	[map { $_->{locus_id} } @{$lean_model->{groups}}],
+	[map { $_->{locus_id} } @{$model->{groups}}],
+	'omitting optional indexes does not change locus construction',
+);
 
 my $dominant = choose_locus_candidate([
 	{ id => 'copyA', protein => $protein, depth => 12, seed => '10', context => {} },
