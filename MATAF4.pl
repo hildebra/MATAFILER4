@@ -51,7 +51,7 @@ use Mods::WorkflowControl qw(
 	hybrid_group_ready hybrid_package_complete hybrid_package_sample_id missing_input_files source_input_files
 	hybrid_local_scratch_gb
 	sample_base_output_dir sample_is_ignored workflow_members_match
-	normalise_job_dependencies append_job_dependencies augment_deferred_submission
+	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
 	cleanup_stage_barrier
 );
 
@@ -2393,8 +2393,11 @@ sub d2metaDist{
 
 
 sub postSubmQsub {
-	my ($outf, $commands, $dependencies) = @_;
+	my ($outf, $commands, $dependencies, $options) = @_;
 	return "" if ($commands eq "" || !$doSubmit);
+	$options ||= {};
+	die 'postSubmQsub options must be a hash reference'
+		unless ref($options) eq 'HASH';
 	my @submitted;
 	my @augmented_commands;
 	for my $command (grep { /\S/ } split /\r?\n/, $commands) {
@@ -2405,10 +2408,11 @@ sub postSubmQsub {
 			or die "Cannot read deferred job script $script_path: $!\n";
 		my $script = do { local $/; <$script_fh> };
 		close $script_fh;
-		# Deferred commands are emitted in dependency order (for example MAP then
-		# sort/depth).  Preserve that order now that real scheduler ids exist.
-		my $command_dependencies = normalise_job_dependencies(
-			$dependencies, @submitted ? $submitted[-1] : "",
+		# Deferred batches are independent by default and share only their producer
+		# barrier. A genuinely multi-stage batch must request predecessor chaining.
+		my $command_dependencies = deferred_command_dependencies(
+			dependencies => $dependencies, submitted => \@submitted,
+			chain_previous => $options->{chain_previous},
 		);
 		my $augmented = augment_deferred_submission(
 			qmode => $QSBoptHR->{qmode}, command => $command, script => $script,

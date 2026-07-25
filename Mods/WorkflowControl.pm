@@ -19,6 +19,7 @@ our @EXPORT_OK = qw(
 	missing_input_files
 	normalise_job_dependencies
 	append_job_dependencies
+	deferred_command_dependencies
 	cleanup_stage_barrier
 	augment_deferred_submission
 	source_input_files
@@ -98,6 +99,16 @@ sub append_job_dependencies {
 		unless (ref($target) eq 'SCALAR');
 	${$target} = normalise_job_dependencies(${$target}, @values);
 	return ${$target};
+}
+
+sub deferred_command_dependencies {
+	my (%args) = @_;
+	my $submitted = $args{submitted} || [];
+	die 'deferred_command_dependencies submitted jobs must be an array reference'
+		unless ref($submitted) eq 'ARRAY';
+	my $previous = $args{chain_previous} && @{$submitted}
+		? $submitted->[-1] : '';
+	return normalise_job_dependencies($args{dependencies}, $previous);
 }
 
 sub cleanup_stage_barrier {

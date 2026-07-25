@@ -14,7 +14,7 @@ use Mods::WorkflowControl qw(
 	advance_loop_window overlap_loop_window parse_loop_spec should_rerun_locked_window assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
-	normalise_job_dependencies append_job_dependencies augment_deferred_submission
+	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
 	cleanup_stage_barrier
 );
 
@@ -23,6 +23,15 @@ is(normalise_job_dependencies('run12;;run7', ['run7', '', 'run3;run12']),
 my $job_dependencies = 'run12;';
 is(append_job_dependencies(\$job_dependencies, 'run7', 'run12'), 'run12;run7',
 	'job dependencies are appended without empty or duplicate scheduler entries');
+is(deferred_command_dependencies(
+	dependencies => 'run12;run7', submitted => ['run20', 'run21'],
+), 'run12;run7',
+	'independent deferred commands share only their producer barrier by default');
+is(deferred_command_dependencies(
+	dependencies => 'run12;run7', submitted => ['run20', 'run21'],
+	chain_previous => 1,
+), 'run12;run7;run21',
+	'genuine multi-stage deferred commands explicitly depend on their predecessor');
 my $cleanup_barrier = cleanup_stage_barrier(
 	{name => 'contig stats', required => 1, complete => 1},
 	{name => 'binning', required => 1, complete => 0, dependencies => 'run9;run9'},
@@ -331,8 +340,8 @@ like($mataf4,
 like($mataf4, qr/Submitting deferred assembly-group mapping jobs.*?postSubmQsub/s,
 	'assembly-group mappings deferred before the final member are submitted after assembly scheduling');
 like($mataf4,
-	qr/my \$command_dependencies\s*=\s*normalise_job_dependencies\(.*?\$submitted\[-1\]/s,
-	'deferred combined mapping commands retain their submission order');
+	qr/deferred_command_dependencies\(.*?chain_previous\s*=>\s*\$options->\{chain_previous\}/s,
+	'deferred command serialization requires an explicit caller option');
 like($mataf4,
 	qr/Submitting deferred assembly-group mapping jobs.*?my \$publicationDeps = normalise_job_dependencies\(.*?MultiContigStats\.sh/s,
 	'assembly groups release mapping, producer publication, and contig statistics in stages');
