@@ -135,7 +135,8 @@ END {
 #.44: reduce locus-model, FASTA scan, and category-publication peak memory
 #.45: distinguish split-worker sparsity from missing catalogue data
 #.46: restore every sample in shared assembly groups
-my $version = 0.46;
+#.47: use bounded-memory IQ-TREE 3 pathogen mode with an exact legacy-tree switch
+my $version = 0.47;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -171,7 +172,8 @@ my $repairCAT=0;
 my $maxNGenes = 400;
 my @subsetMGS=(); my $subsMGSstr="";
 my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
-my $phyloProg = 1; # #1=iqtree-fast, 2=veryfasttree, 3=fasttree
+my $phyloProg = 1; #1=IQ-TREE 3 pathogen mode, 2=VeryFastTree, 3=FastTree
+my $legacyMGTK = 0; #restore the exact pre-0.47 IQ-TREE tree-building command
 my $GenesPerSpecies = 0.2; #was previously 0.1.. maybe too low?
 my $GeneLengthMin = 0.5;
 my $presortGenes = 1200;
@@ -266,7 +268,8 @@ GetOptions(
 	"GenesPerSpecies=f" => \$GenesPerSpecies,
 	"GeneLengthMin=f" => \$GeneLengthMin,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
-	"phyloProg=i"    => \$phyloProg, #1=iqtree-fast, 2=veryfasttree
+	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE 3 pathogen mode, 2=VeryFastTree, 3=FastTree
+	"legacyMGTK=i"   => \$legacyMGTK,
 	"rmMSA=i"        => \$rmMSA, #remove MSA, to save diskspace
 	"phyloMemMulti=f" => \$memMulti, #mem used for buildtree. Default: 1.0
 	
@@ -305,6 +308,7 @@ die "SNP depth, quality, adaptive filtering, and indel-range settings must be no
 die "-phyloMemMulti must be positive\n" unless $memMulti > 0;
 die "-phyloProg must be 1 (IQ-TREE), 2 (VeryFastTree), or 3 (FastTree)\n"
 	unless $phyloProg >= 1 && $phyloProg <= 3;
+die "-legacyMGTK must be 0 or 1\n" unless $legacyMGTK == 0 || $legacyMGTK == 1;
 die "-MSAprog must be 0, 1, 2, or 4\n"
 	unless grep { $MSAprog == $_ } (0, 1, 2, 4);
 
@@ -435,6 +439,7 @@ if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
 			'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
 			'-flushEvery', $appendWriteTrigger,
+			'-legacyMGTK', $legacyMGTK,
 			'-MGset', $useGTDBmg, '-redoSubmissionData', 0, '-deepRepair', 0,
 			'-rmMSA', 0, '-minSNPDepth', $minSNPDepth,
 			'-minSNPCallQual', $minSNPCallQual, '-forceSNPcalls', $forceVCF2FNA,
@@ -670,6 +675,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $baseMemMult = 150; $baseMemMult = 50 if ($phyloProg ==3 || $phyloProg ==2);
 	my $totMem = int($inputFNAsize *$baseMemMult * $memMulti);
 	$totMem = 10000*$memMulti if ($totMem < 10000);$totMem = 220000*$memMulti if ($totMem > 220000);
+	my $iqMemMB = int($totMem * 0.9); #reserve 10% for buildTree/Perl and runtime overhead
 	my $numCoreL = $numCores;	
 	if ($maxCores >0){ #scale cores according to used memory size
 		$numCoreL = int($maxCores * sqrt($inputFNAsize/$sizeOfDirs[0]));
@@ -686,6 +692,11 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$Tcmd .= "-subsetSmpls $subsSmpl -fracMaxGenes90pct 0.7 "; #concentrate on almost complete gene groups.. can yield more samples overall and speeds up calc..
 	$Tcmd .= "-rmMSA $rmMSA -gzInput 1 "; #save more diskspace..
 	$Tcmd .= "-SynTree 0 -NonSynTree 0 -MSAprogram $MSAprog -continue $contPhylo -AutoModel 0 -iqFast 1 -superTree $useSuperTree ";
+	if ($phyloProg == 1){
+		$Tcmd .= $legacyMGTK
+			? "-iqLegacy 1 "
+			: "-iqPathogen 1 -iqMemMB $iqMemMB ";
+	}
 	$Tcmd .= "-runDNDS 0 -runTheta 0 -tmpD ".shellQuote("$scratchD/$MGS/")." -map ".shellQuote($mapF)." ";
 	my $postCmd = "\n\ntest -s ".shellQuote($IQtreef)."\ntouch ".shellQuote($treeStone)."\n";
 		#die "$cmd\n" if ($cnt ==10);

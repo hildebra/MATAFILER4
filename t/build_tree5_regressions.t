@@ -15,8 +15,16 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.13;/,
-	'buildTree per-locus fault isolation increments the workflow version');
+like($source, qr/my \$version = 5\.14;/,
+	'buildTree bounded IQ-TREE execution increments the workflow version');
+like($source,
+	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => \\\$iqLegacy/s,
+	'buildTree exposes memory-capped pathogen and legacy IQ-TREE modes');
+like($source, qr/-iqPathogen and -iqLegacy are mutually exclusive/,
+	'buildTree rejects conflicting modern and legacy IQ-TREE modes');
+like($source,
+	qr/iqMemMB => \$iqMemMB.*?iqPathogen => \$iqPathogen.*?iqLegacy => \$iqLegacy/s,
+	'buildTree forwards IQ-TREE execution controls to phyloTools');
 like($source,
 	qr/BuildTree pipeline v\$version.*?Inputs:.*?Paths:.*?Mode:.*?Alignment:.*?Filtering:.*?Trees:.*?Additional analyses:/s,
 	'buildTree starts with a structured runtime configuration header');

@@ -17,6 +17,7 @@
 #5.11: recover to output-local work space when the requested temporary path is unusable
 #5.12: validate persistent continuation checkpoints and restart incomplete stages
 #5.13: isolate recoverable alignment failures to their individual loci
+#5.14: add bounded-memory/auto-thread IQ-TREE mode, pathogen support, and legacy compatibility
 
 use warnings;
 use strict;
@@ -67,7 +68,7 @@ sub limitedWarn;
 sub prepareTemporaryBase;
 
 my $doPhym= 0;
-my $version = 5.13;
+my $version = 5.14;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -131,6 +132,9 @@ my $postFilter = "";
 my $clusterName="";
 my $MSAreq = 1;
 my $iqFast=0;
+my $iqMemMB=0;
+my $iqPathogen=0;
+my $iqLegacy=0;
 my $minOverlapMSA = 0;
 my $maxGapPerCol = 1 ;
 my $minPcId = 0;
@@ -207,6 +211,9 @@ GetOptions(
 	"runIQtree=i" => \$doIQTree,
 	"AutoModel=i" => \$treeAutoModel,
 	"iqFast=i" => \$iqFast, #fast qiTree mode
+	"iqMemMB=i" => \$iqMemMB, #IQ-TREE RAM cap in MB; 0 leaves IQ-TREE uncapped
+	"iqPathogen=i" => \$iqPathogen, #IQ-TREE 3 CMAPLE/native low-divergence selection
+	"iqLegacy=i" => \$iqLegacy, #restore the pre-5.14 IQ-TREE command
 	"runClonalFrameML=i" => \$doCFML,
 	"runGubbins=i" => \$doGubbins,
 	"runLengthCheck=i" => \$doLengthCheck,		#check that sequence length can be divided by 3
@@ -228,6 +235,10 @@ die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-cores must be a positive integer\n" if $ncore < 1;
 die "-bootstrap must be zero or greater\n" if $bootStrap < 0;
 die "-NTfiltCount must be zero or greater\n" if $ntCntTotal < 0;
+die "-iqMemMB must be zero or greater\n" if $iqMemMB < 0;
+die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
+die "-iqLegacy must be 0 or 1\n" unless $iqLegacy == 0 || $iqLegacy == 1;
+die "-iqPathogen and -iqLegacy are mutually exclusive\n" if $iqPathogen && $iqLegacy;
 die "-smplSep must not be empty\n" if $smplSep eq "";
 eval { qr/$smplSep/ } or die "Invalid -smplSep regular expression '$smplSep': $@";
 for my $fraction_name_value (
@@ -338,7 +349,9 @@ print "Filtering: per-gene length fraction=$ntFracGene; species NT fraction=$ntF
 	. "minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
 print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
 	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
-	. "; supertree=" . ($doSuperTree ? "yes" : "no") . "\n";
+	. "; supertree=" . ($doSuperTree ? "yes" : "no")
+	. "; IQ-TREE mode=" . ($iqLegacy ? "legacy" : $iqPathogen ? "pathogen" : "standard")
+	. "; IQ-TREE memory=" . ($iqMemMB ? "${iqMemMB}MB" : "auto") . "\n";
 print "Additional analyses: synonymous=" . ($calcSyn ? "yes" : "no")
 	. "; nonsynonymous=" . ($calcNonSyn ? "yes" : "no")
 	. "; distance matrix=" . ($calcDistMat ? "yes" : "no")
@@ -1180,6 +1193,9 @@ sub createTreeOpt{
 					useAA => $useAA4tree,
 					iqtreeFast => $iqFast,
 					autoModel => $treeAutoModel,
+					iqMemMB => $iqMemMB,
+					iqPathogen => $iqPathogen,
+					iqLegacy => $iqLegacy,
 					cont => $continue,
 					silent => $silent,
 					partition => $partiF,

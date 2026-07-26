@@ -194,10 +194,13 @@ sub fixHDs4Phylo ($){
 
 sub runQItree{
 	my ($hr) = @_; my %treeOpts = %{$hr};
-	my ($inMSA,$treeOut,$ncore,$outgr,$bootStrap,$useAA,$fast,$autoModel,$partiF,$runSafe) = 
+	my ($inMSA,$treeOut,$ncore,$outgr,$bootStrap,$useAA,$fast,$autoModel,$partiF,$runSafe) =
 		($treeOpts{inMSA},$treeOpts{IQtreeout},$treeOpts{ncore},$treeOpts{outgr},$treeOpts{bootStrap},$treeOpts{useAA},
 		$treeOpts{iqtreeFast},$treeOpts{autoModel},$treeOpts{partition},$treeOpts{runSafe});
-	
+	my $iqMemMB = $treeOpts{iqMemMB} // 0;
+	my $iqPathogen = $treeOpts{iqPathogen} // 0;
+	my $iqLegacy = $treeOpts{iqLegacy} // 0;
+
 	#die "AA use $useAA\n";
 	my $inSize = filsizeMB($inMSA);
 	if ($inSize>700){$runSafe=1;} #greater input size than 700 Mb? needs to use safe likelihood kernel..
@@ -205,15 +208,31 @@ sub runQItree{
 	die ("Constraint tree $constraintTree does not exist") if ($constraintTree ne "" && !-e $constraintTree);
 	my $iqTree  = getProgPaths("iqtree");
 	my $vcheck = `$iqTree --version`;
-	unless ($vcheck =~ m/version [23]/){die "Needs iqtree version 2 or 3\n:$vcheck\n";}
+	$vcheck =~ m/version ([23])/
+		or die "Needs iqtree version 2 or 3\n:$vcheck\n";
+	my $iqVersion = $1;
+	die "IQ-TREE pathogen mode requires IQ-TREE version 3\n:$vcheck\n"
+		if $iqPathogen && $iqVersion != 3;
 	$treeOut =~ s/\.nwk$//;
 	my $treNM = "IQtree";
-	my $cmd = "$iqTree -s $inMSA -T $ncore -pre $treeOut -seed 678 -quiet "; #-nt AUTO -ntmax $ncore
+	my $threadOpts = "-T $ncore";
+	unless ($iqLegacy){
+		$threadOpts = $iqVersion == 3
+			? "-T AUTO --threads-max $ncore"
+			: "-T AUTO -ntmax $ncore";
+	}
+	my $cmd = "$iqTree -s $inMSA $threadOpts -pre $treeOut -seed 678 -quiet ";
+	$cmd .= "-mem ${iqMemMB}M " if !$iqLegacy && $iqMemMB > 0;
+	$cmd .= "--pathogen " if $iqPathogen && !$iqLegacy;
 	#$cmd .= " -Q $partiF --merge " unless ($partiF eq "");
-	$cmd .= " -p $partiF --merge " unless ($partiF eq "");
+	$cmd .= " -p $partiF --merge " unless ($partiF eq "" || $iqPathogen);
 	$cmd .= "-o $outgr " unless ($outgr eq "" && $outgr !~ m/,/);
 	$cmd .= "-g $constraintTree " unless ($constraintTree eq "");
-	unless ($fast == 0){$cmd .= "--fast "; print "IQtree - fast\n"; $treNM .= "_fast";}
+	unless ($fast == 0 || $iqPathogen){
+		$cmd .= "--fast ";
+		print "IQtree - fast\n";
+		$treNM .= "_fast";
+	}
 	if ($autoModel){$treNM .= "_autoMOD";}
 	if ($useAA){
 		if ($autoModel){
@@ -223,10 +242,10 @@ sub runQItree{
 		}
 	} else {
 		if ($autoModel){
-			$cmd .= "-m TEST ";#-mset HKY,HKY+F,HKY+F+I,HKY+F+I+G4,JC,F81,K2P,K3P,K81uf,GTR "; 
+			$cmd .= "-m TEST ";#-mset HKY,HKY+F,HKY+F+I,HKY+F+I+G4,JC,F81,K2P,K3P,K81uf,GTR ";
 		} else {
-			$cmd .= "-m GTR+F+I+G4 "; #default model, as spotted on 40 MG for phylo tree..
-			#$cmd .= "-m HKY+F+G "; 
+			$cmd .= $iqLegacy ? "-m GTR+F+I+G4 " : "-m GTR+F+G2 ";
+			#$cmd .= "-m HKY+F+G ";
 		}
 	}
 	if ($runSafe){

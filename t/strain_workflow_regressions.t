@@ -106,8 +106,14 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.46;/,
-	'within-strain assembly-group expansion update increments the workflow version');
+like($strain, qr/my \$version = 0\.47;/,
+	'within-strain IQ-TREE pathogen update increments the workflow version');
+like($strain,
+	qr/"legacyMGTK=i"\s+=> \\\$legacyMGTK.*?-legacyMGTK', \$legacyMGTK/s,
+	'within-strain legacy IQ-TREE selection is validated and propagated to split workers');
+like($strain,
+	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?\$legacyMGTK.*?"-iqLegacy 1 ".*?"-iqPathogen 1 -iqMemMB \$iqMemMB "/s,
+	'within-strain IQ-TREE defaults to memory-capped pathogen mode and retains an exact legacy route');
 like($strain,
 	qr/my \$locCl2G2 = \$cl2gene2\{\$sm\}.*?my \$COGprios1 = \$COGprios->\{\$MGS\}.*?\@candidates == 1.*?reason => 'unique'.*?\$LocusSeedProteins\{\$locus\} \|\|=.*?choose_locus_candidate/s,
 	'within-strain extraction avoids hot-loop container copies and scoring unique candidates');

@@ -53,8 +53,28 @@ my $phylo_tools = do { local $/; <$phylo_tools_fh> };
 close $phylo_tools_fh;
 like(
 	$phylo_tools,
-	qr/my \$cmd = "\$iqTree -s \$inMSA -T \$ncore -pre \$treeOut -seed 678 -quiet "/,
-	'IQ-TREE invocations always request quiet output',
+	qr/my \$cmd = "\$iqTree -s \$inMSA \$threadOpts -pre \$treeOut -seed 678 -quiet "/,
+	'IQ-TREE invocations use the selected bounded thread policy and quiet output',
+);
+like(
+	$phylo_tools,
+	qr/"-T AUTO --threads-max \$ncore"/,
+	'modern IQ-TREE 3 invocations auto-select threads within the allocated core limit',
+);
+like(
+	$phylo_tools,
+	qr/\$cmd \.= "-mem \$\{iqMemMB\}M " if !\$iqLegacy && \$iqMemMB > 0/,
+	'modern IQ-TREE invocations enforce a supplied RAM limit',
+);
+like(
+	$phylo_tools,
+	qr/\$cmd \.= "--pathogen " if \$iqPathogen && !\$iqLegacy/,
+	'IQ-TREE 3 pathogen mode is available to low-divergence callers',
+);
+like(
+	$phylo_tools,
+	qr/\$cmd \.= \$iqLegacy \? "-m GTR\+F\+I\+G4 " : "-m GTR\+F\+G2 "/,
+	'modern nucleotide trees use GTR+F+G2 while legacy mode retains the previous model',
 );
 
 my @p1 = ('a.1.fq', 'b.1.fq', 'c.1.fq');
