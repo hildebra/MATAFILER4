@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.14;/,
-	'buildTree bounded IQ-TREE execution increments the workflow version');
+like($source, qr/my \$version = 5\.15;/,
+	'buildTree CMAPLE length fallback increments the workflow version');
 like($source,
 	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => \\\$iqLegacy/s,
 	'buildTree exposes memory-capped pathogen and legacy IQ-TREE modes');

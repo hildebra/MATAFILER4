@@ -73,6 +73,11 @@ like(
 );
 like(
 	$phylo_tools,
+	qr/my \$cmapleLengthLimit = 32767.*?_fastaAlignmentLength\(\$inMSA\).*?WARNING: IQ-TREE --pathogen disabled.*?falling back to standard IQ-TREE mode/s,
+	'overlong alignments warn and fall back from CMAPLE pathogen mode before IQ-TREE runs',
+);
+like(
+	$phylo_tools,
 	qr/\$cmd \.= \$iqLegacy \? "-m GTR\+F\+I\+G4 " : "-m GTR\+F\+G2 "/,
 	'modern nucleotide trees use GTR+F+G2 while legacy mode retains the previous model',
 );

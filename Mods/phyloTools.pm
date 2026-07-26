@@ -192,6 +192,29 @@ sub fixHDs4Phylo ($){
 	return $outF;
 }
 
+sub _fastaAlignmentLength{
+	my ($inMSA) = @_;
+	my ($in,$ok) = gzipopen($inMSA,"IQ-TREE alignment length check",1,0);
+	return undef unless $ok;
+	my ($seenHeader,$seqLen) = (0,0);
+	while (my $line = <$in>){
+		if ($line =~ /^>/){
+			last if $seenHeader;
+			$seenHeader = 1;
+			next;
+		}
+		next if $line =~ /^\s*$/;
+		unless ($seenHeader){
+			close $in;
+			return undef;
+		}
+		$line =~ s/\s+//g;
+		$seqLen += length($line);
+	}
+	close $in;
+	return $seenHeader ? $seqLen : undef;
+}
+
 sub runQItree{
 	my ($hr) = @_; my %treeOpts = %{$hr};
 	my ($inMSA,$treeOut,$ncore,$outgr,$bootStrap,$useAA,$fast,$autoModel,$partiF,$runSafe) =
@@ -200,6 +223,16 @@ sub runQItree{
 	my $iqMemMB = $treeOpts{iqMemMB} // 0;
 	my $iqPathogen = $treeOpts{iqPathogen} // 0;
 	my $iqLegacy = $treeOpts{iqLegacy} // 0;
+	my $cmapleLengthLimit = 32767; # IQ-TREE 3 CMAPLE default: signed 16-bit LengthType
+	if ($iqPathogen){
+		my $alignmentLength = _fastaAlignmentLength($inMSA);
+		if (defined($alignmentLength) && $alignmentLength > $cmapleLengthLimit){
+			warn "WARNING: IQ-TREE --pathogen disabled for $inMSA: alignment length "
+				. "$alignmentLength exceeds the CMAPLE LengthType limit of "
+				. "$cmapleLengthLimit; falling back to standard IQ-TREE mode.\n";
+			$iqPathogen = 0;
+		}
+	}
 
 	#die "AA use $useAA\n";
 	my $inSize = filsizeMB($inMSA);

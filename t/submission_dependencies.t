@@ -8,7 +8,8 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Subm qw(
-	qsubSystem qsubSystemJobAlive numActiveUserJobs reconcileSlurmDependencies MFnext
+	qsubSystem qsubSystemJobAlive qsubSystemWaitMaxJobs numActiveUserJobs
+	reconcileSlurmDependencies MFnext
 	submitSlurmWithDependencyRecovery
 );
 
@@ -233,6 +234,29 @@ is(scalar @{$options->{submissionErrors}}, 1,
 $options = slurm_options();
 is(qsubSystemJobAlive([], $options), undef,
 	'waiting on an empty dependency set returns without querying the scheduler');
+
+$options = slurm_options();
+$options->{doSubmit} = 1;
+$options->{submittedJobs} = 0;
+$options->{pendingJobCheckInterval} = 60;
+$options->{schedulerClock} = sub { return 1000; };
+my $pending_queries = 0;
+$options->{pendingJobRunner} = sub {
+	$pending_queries++;
+	return (($pending_queries == 1 ? 3 : 4)."\n", 0);
+};
+qsubSystemWaitMaxJobs(10, 0, $options);
+qsubSystemWaitMaxJobs(10, 0, $options);
+is($pending_queries, 1,
+	'repeated per-sample throttling reuses a recent scheduler count');
+$options->{submittedJobs} = 6;
+qsubSystemWaitMaxJobs(10, 0, $options);
+is($pending_queries, 1,
+	'locally submitted jobs are conservatively counted without a scheduler round trip');
+$options->{submittedJobs} = 8;
+qsubSystemWaitMaxJobs(10, 0, $options);
+is($pending_queries, 2,
+	'the scheduler is queried immediately when the conservative estimate exceeds the limit');
 
 $options = slurm_options();
 $options->{jobStatusRunner} = sub {

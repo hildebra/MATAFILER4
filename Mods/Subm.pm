@@ -552,8 +552,18 @@ sub numPendingJobs($){
 	} else {$srchCmd="bjobs -p -noheader | wc -l";
 		die "Subm.pm::numPendingJobs() not implemented for bsub!\n";
 	}
-	$num = `$srchCmd`; chomp $num;
-	die "Failed to count pending jobs with: $srchCmd\n" if ($? != 0);
+	my $queryStatus;
+	if (my $runner = $optHR->{pendingJobRunner}) {
+		($num, $queryStatus) = $runner->($srchCmd);
+		$queryStatus ||= 0;
+	} else {
+		$num = `$srchCmd`;
+		$queryStatus = $?;
+	}
+	chomp $num;
+	die "Failed to count pending jobs with: $srchCmd\n" if ($queryStatus != 0);
+	die "Scheduler returned a nonnumeric pending-job count: '$num'\n"
+		unless $num =~ /^\d+$/;
 	return $num;
 }
 sub numUserJobs{
@@ -834,8 +844,29 @@ sub qsubSystemWaitMaxJobs{
 	my $optHR = {}; $optHR = $_[2] if (@_ > 2);
 	
 	return if ($checkMaxNumJobs <= 0);
+	return if exists($optHR->{doSubmit}) && !$optHR->{doSubmit};
+	my $clock = $optHR->{schedulerClock};
+	my $now = $clock ? $clock->() : time;
+	my $cacheSeconds = defined($optHR->{pendingJobCheckInterval})
+		? 0 + $optHR->{pendingJobCheckInterval} : 30;
+	$cacheSeconds = 0 if $cacheSeconds < 0;
+	my $submittedNow = $optHR->{submittedJobs} || 0;
+	my $cached = $optHR->{pendingJobThrottleState};
+	if ($cached && $now - $cached->{checkedAt} < $cacheSeconds) {
+		my $submittedSince = $submittedNow - $cached->{submittedJobs};
+		$submittedSince = 0 if $submittedSince < 0;
+		# Treat every locally accepted job as pending until the next scheduler
+		# query. This upper bound cannot undercount work created by this process.
+		my $estimatedPending = $cached->{pendingJobs} + $submittedSince;
+		return if $estimatedPending <= $checkMaxNumJobs;
+	}
 	#my $srchCmd = "squeue |grep \$USER | grep PD |wc -l";
 	my $num = numPendingJobs($optHR);
+	$optHR->{pendingJobThrottleState} = {
+		checkedAt => $clock ? $clock->() : time,
+		pendingJobs => $num,
+		submittedJobs => $submittedNow,
+	};
 	my $waitCnt = 0;
 	while ($num > $checkMaxNumJobs){
 		if ($killPend){
@@ -847,6 +878,11 @@ sub qsubSystemWaitMaxJobs{
 		print "waiting for jobs to finish (>$checkMaxNumJobs, qsubSystemWaitMaxJobs)...\n" if ($waitCnt == 0);
 		sleep(40);
 		$num =  numPendingJobs($optHR);;#`$srchCmd`; chomp $num;
+		$optHR->{pendingJobThrottleState} = {
+			checkedAt => $clock ? $clock->() : time,
+			pendingJobs => $num,
+			submittedJobs => $optHR->{submittedJobs} || 0,
+		};
 		$waitCnt++;
 		#print " $num ";
 	}

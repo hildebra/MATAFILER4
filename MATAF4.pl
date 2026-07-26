@@ -328,7 +328,9 @@ my %loopSubmittedJobIds;
 #for loop that goes over every single sample in the .map
 for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
-	qsubSystemWaitMaxJobs($MFconfig{checkMaxNumJobs}, $MFconfig{killDepNever});
+	qsubSystemWaitMaxJobs(
+		$MFconfig{checkMaxNumJobs}, $MFconfig{killDepNever}, $QSBoptHR,
+	);
 	$curSmpl = $samples[$JNUM];
 	
 	
@@ -8779,6 +8781,12 @@ sub setupHPC{
 	$QSBoptHR1->{wcKeysForJob} = $MFconfig{wcKeysForJob};
 	$QSBoptHR1->{excludeNodes} = $MFconfig{excludeNodes};
 	$QSBoptHR1->{jobPollSeconds} = $MFconfig{schedulerPollSeconds};
+	# Queue-size checks used to run once per sample. Cache a successful query,
+	# while counting every locally submitted job conservatively against it.
+	$QSBoptHR1->{pendingJobCheckInterval} =
+		$MFconfig{schedulerPollSeconds} * 3;
+	$QSBoptHR1->{pendingJobCheckInterval} = 30
+		if $QSBoptHR1->{pendingJobCheckInterval} < 30;
 	$QSBoptHR1->{Spades_Hosts} = []; $QSBoptHR1->{General_Hosts} = [];
 	spadesHosts();
 	#my $LocationCheckStrg=""; #command that is put in front of every qsub, to check if drives are connected, sub checkDrives

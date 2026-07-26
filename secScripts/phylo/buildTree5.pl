@@ -18,6 +18,7 @@
 #5.12: validate persistent continuation checkpoints and restart incomplete stages
 #5.13: isolate recoverable alignment failures to their individual loci
 #5.14: add bounded-memory/auto-thread IQ-TREE mode, pathogen support, and legacy compatibility
+#5.15: fall back from pathogen mode when alignments exceed CMAPLE's compiled length limit
 
 use warnings;
 use strict;
@@ -68,7 +69,7 @@ sub limitedWarn;
 sub prepareTemporaryBase;
 
 my $doPhym= 0;
-my $version = 5.14;
+my $version = 5.15;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;

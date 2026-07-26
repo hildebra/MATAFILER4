@@ -425,6 +425,9 @@ like($mataf4,
 	qr/\$MFopt\{AssemblyCores\} = 0;.*?\$MFconfig\{schedulerPollSeconds\} = 20;.*?schedulerPollSeconds=i/s,
 	'automatic assembly scaling and configurable fast scheduler polling are enabled by default');
 like($mataf4,
+	qr/qsubSystemWaitMaxJobs\(\s*\$MFconfig\{checkMaxNumJobs\}, \$MFconfig\{killDepNever\}, \$QSBoptHR/s,
+	'the main sample loop shares scheduler throttle state instead of querying once per sample');
+like($mataf4,
 	qr/Submitting deferred assembly-group mapping jobs.*?my \$publicationDeps = normalise_job_dependencies\(.*?MultiContigStats\.sh/s,
 	'assembly groups release mapping, producer publication, and contig statistics in stages');
 like($mataf4,
