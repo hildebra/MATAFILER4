@@ -138,7 +138,8 @@ END {
 #.46: restore every sample in shared assembly groups
 #.47: use bounded-memory IQ-TREE 3 pathogen mode with an exact legacy-tree switch
 #.48: add tree-only reset and resubmission from published per-MGS inputs
-my $version = 0.48;
+#.49: make IQ-TREE pathogen/CMAPLE mode explicitly opt-in
+my $version = 0.49;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -175,7 +176,8 @@ my $repairCAT=0;
 my $maxNGenes = 400;
 my @subsetMGS=(); my $subsMGSstr="";
 my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
-my $phyloProg = 1; #1=IQ-TREE 3 pathogen mode, 2=VeryFastTree, 3=FastTree
+my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
+my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
 my $legacyMGTK = 0; #restore the exact pre-0.47 IQ-TREE tree-building command
 my $GenesPerSpecies = 0.2; #was previously 0.1.. maybe too low?
 my $GeneLengthMin = 0.5;
@@ -272,7 +274,8 @@ GetOptions(
 	"GenesPerSpecies=f" => \$GenesPerSpecies,
 	"GeneLengthMin=f" => \$GeneLengthMin,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
-	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE 3 pathogen mode, 2=VeryFastTree, 3=FastTree
+	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
+	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
 	"legacyMGTK=i"   => \$legacyMGTK,
 	"rmMSA=i"        => \$rmMSA, #remove MSA, to save diskspace
 	"phyloMemMulti=f" => \$memMulti, #mem used for buildtree. Default: 1.0
@@ -312,7 +315,10 @@ die "SNP depth, quality, adaptive filtering, and indel-range settings must be no
 die "-phyloMemMulti must be positive\n" unless $memMulti > 0;
 die "-phyloProg must be 1 (IQ-TREE), 2 (VeryFastTree), or 3 (FastTree)\n"
 	unless $phyloProg >= 1 && $phyloProg <= 3;
+die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
 die "-legacyMGTK must be 0 or 1\n" unless $legacyMGTK == 0 || $legacyMGTK == 1;
+die "-iqPathogen and -legacyMGTK are mutually exclusive\n" if $iqPathogen && $legacyMGTK;
+die "-iqPathogen requires -phyloProg 1\n" if $iqPathogen && $phyloProg != 1;
 die "-recalcTrees must be 0 or 1\n" unless $recalcTrees == 0 || $recalcTrees == 1;
 die "-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData\n"
 	if $recalcTrees && ($repairCAT || $deepRepair || $redoSubmissionData);
@@ -450,6 +456,7 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
 			'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
 			'-flushEvery', $appendWriteTrigger,
+			'-iqPathogen', $iqPathogen,
 			'-legacyMGTK', $legacyMGTK,
 			'-MGset', $useGTDBmg, '-redoSubmissionData', 0, '-deepRepair', 0,
 			'-rmMSA', 0, '-minSNPDepth', $minSNPDepth,
@@ -720,9 +727,12 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$Tcmd .= "-rmMSA $rmMSA -gzInput 1 "; #save more diskspace..
 	$Tcmd .= "-SynTree 0 -NonSynTree 0 -MSAprogram $MSAprog -continue $contPhylo -AutoModel 0 -iqFast 1 -superTree $useSuperTree ";
 	if ($phyloProg == 1){
-		$Tcmd .= $legacyMGTK
-			? "-iqLegacy 1 "
-			: "-iqPathogen 1 -iqMemMB $iqMemMB ";
+		if ($legacyMGTK){
+			$Tcmd .= "-iqLegacy 1 ";
+		} else {
+			$Tcmd .= "-iqMemMB $iqMemMB ";
+			$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
+		}
 	}
 	$Tcmd .= "-runDNDS 0 -runTheta 0 -tmpD ".shellQuote("$scratchD/$MGS/")." -map ".shellQuote($mapF)." ";
 	my $postCmd = "\n\ntest -s ".shellQuote($IQtreef)."\ntouch ".shellQuote($treeStone)."\n";

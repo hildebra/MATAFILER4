@@ -106,14 +106,17 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.48;/,
-	'within-strain tree-only recalculation increments the workflow version');
+like($strain, qr/my \$version = 0\.49;/,
+	'within-strain pathogen opt-in increments the workflow version');
 like($strain,
-	qr/"legacyMGTK=i"\s+=> \\\$legacyMGTK.*?-legacyMGTK', \$legacyMGTK/s,
-	'within-strain legacy IQ-TREE selection is validated and propagated to split workers');
+	qr/my \$iqPathogen = 0.*?"iqPathogen=i"\s+=> \\\$iqPathogen.*?-iqPathogen', \$iqPathogen/s,
+	'within-strain pathogen mode defaults off and is propagated explicitly to split workers');
 like($strain,
-	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?\$legacyMGTK.*?"-iqLegacy 1 ".*?"-iqPathogen 1 -iqMemMB \$iqMemMB "/s,
-	'within-strain IQ-TREE defaults to memory-capped pathogen mode and retains an exact legacy route');
+	qr/"legacyMGTK=i"\s+=> \\\$legacyMGTK.*?-iqPathogen and -legacyMGTK are mutually exclusive.*?-legacyMGTK', \$legacyMGTK/s,
+	'within-strain legacy IQ-TREE selection remains exclusive and is propagated to split workers');
+like($strain,
+	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(\$legacyMGTK\).*?"-iqLegacy 1 ".*?"-iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
+	'within-strain IQ-TREE defaults to bounded standard mode and enables CMAPLE only by explicit request');
 like($strain,
 	qr/"recalcTrees=i"\s+=> \\\$recalcTrees.*?-recalcTrees must be 0 or 1.*?\$onlySubmit = 1 if \$recalcTrees/s,
 	'tree recalculation is validated and forced into published-input-only recovery mode');
