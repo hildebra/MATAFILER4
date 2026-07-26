@@ -11,12 +11,25 @@ use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(resetAsGrps contig_stats_coverage_complete);
 use Mods::IO_Tamoc_progs qw(inputFmtSpades);
 use Mods::WorkflowControl qw(
-	advance_loop_window overlap_loop_window parse_loop_spec should_rerun_locked_window assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
+	advance_loop_window overlap_loop_window parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
 	commands_are_lightweight_filesystem cleanup_stage_barrier
 );
+
+is(assembly_cores_for_input(input_mb => 0, configured_cores => 0), 8,
+	'automatic assembly cores use the minimum for empty or tiny groups');
+is(assembly_cores_for_input(input_mb => 500, configured_cores => 0), 8,
+	'automatic assembly cores remain at the minimum through 500 MiB');
+is(assembly_cores_for_input(input_mb => 5370, configured_cores => 0), 28,
+	'automatic assembly cores scale linearly through the input range');
+is(assembly_cores_for_input(input_mb => 10 * 1024, configured_cores => 0), 48,
+	'automatic assembly cores reach the maximum at 10 GiB');
+is(assembly_cores_for_input(input_mb => 50 * 1024, configured_cores => 0), 48,
+	'automatic assembly cores are capped for very large groups');
+is(assembly_cores_for_input(input_mb => 50 * 1024, configured_cores => 24), 24,
+	'an explicit assembly-core setting overrides automatic scaling');
 
 is(normalise_job_dependencies('run12;;run7', ['run7', '', 'run3;run12']),
 	'run12;run7;run3', 'job dependencies are flattened, deduplicated, and stable');
@@ -362,6 +375,55 @@ like($mataf4,
 like($mataf4,
 	qr/my \$lightweightLocal = commands_are_lightweight_filesystem\(\$unzipcmd\).*?systemW \$unzipcmd.*?qsubSystem\(\$logDir\."UNZP\.sh"/s,
 	'lightweight UZ setup runs locally while data-processing commands remain scheduled');
+unlike($mataf4,
+	qr/\$unzipcmd \.= .*?mkdir -p \$finDest\/rawRds\/;\\nsleep 1;/,
+	'lightweight UZ setup no longer adds an unconditional one-second delay');
+like($mataf4,
+	qr/if \(\$MFconfig\{maxUnzpJobs\} > 0 && \@unzipjobs >= \$MFconfig\{maxUnzpJobs\}\).*?\$unzipjobs\[-\(\$MFconfig\{maxUnzpJobs\}\)\]/s,
+	'heavy UZ submissions use the configured rolling concurrency cap');
+like($mataf4,
+	qr/populateInputSizesFast\(\$_\) for \@samples;.*?if \(\$MFconfig\{inspectState\}\).*?for \(\$JNUM=\$from/s,
+	'input sizes are populated for every sample before inspection or completion shortcuts');
+like($mataf4,
+	qr/my %runReport = \(.*?samples => \{\}.*?empty_samples => \{\}.*?present_assemblies => 0.*?my %d2Inputs = \(.*?filtered_read1 => \[\].*?dependencies => ""/s,
+	'run reporting and cross-sample distance state are grouped by responsibility');
+unlike($mataf4, qr/^my (?:%jmp|%MFstats|\$baseDir|\$mvCmd)\b/m,
+	'confirmed dead global variables are removed');
+unlike($mataf4, qr/^sub (?:check_sdm_loc|setupInput|fastCovCalc)\b/m,
+	'uncalled empty or explicitly defunct routines are removed');
+like($mataf4,
+	qr/foreach my \$sampleName \(keys %\{\$d2Inputs\{samples\}\}\).*?print O "\$sampleName\\t\$inputRawFQs\{\$sampleName\}/s,
+	'raw-input reporting retains the sample-name key instead of substituting its boolean value');
+like($mataf4,
+	qr/sub discoverSampleInputs.*?my \$cached = \$map\{\$sample\}\{inputDiscovery\};.*?return \$cached.*?doDateFileCheck.*?SupportReads may specify one directory or a list of files.*?Unsupported SupportReads format/s,
+	'one cached discovery covers date-filtered primary reads and both support-input forms');
+like($mataf4,
+	qr/sub populateInputSizesFast.*?discoverSampleInputs\(\$sample\).*?primary_bytes.*?support_bytes.*?sub spaceInAssGrp/s,
+	'fast input sizing uses the shared discovery result');
+like($mataf4,
+	qr/sub seedUnzip2tmp.*?discoverSampleInputs\(\$curSmpl, \$fastp\).*?\@pa1 = \@\{\$inputDiscovery->\{primary\}\{read1\}\}.*?\@paX1 = \@\{\$inputDiscovery->\{support\}\{read1\}\}/s,
+	'input staging reuses the cached primary and support file selections');
+my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
+ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
+unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
+	'input staging contains no duplicate file-discovery implementation');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?my \$MATFILER_ver = 4\.16;/s,
+	'MATAFILER history retains shared input discovery through version 4.16');
+like($mataf4,
+	qr/my %runOptions = \(.*?operationMode.*?sharedTmpDir.*?nodeTmpDir.*?from.*?to.*?submit.*?loopCount.*?loopInitialCount.*?loopWindowSize/s,
+	'runtime and command-line controls are consolidated in one named hash');
+unlike($mataf4,
+	qr/my \$(?:ARGV0|sharedTmpDirP|nodeTmpDirBase|FROM1|TO1|doSubmit|loop2completion|loop2c_winsize|loop2completion_ini)\b/,
+	'retired standalone runtime option globals are not reintroduced');
+like($mataf4,
+	qr/my %checkpointNames = \(.*?preAssemblyDone.*?assemblyDone.*?my %sampleCheckpoints = \(.*?primaryMapping.*?supportMapping.*?mappingComplete.*?primaryConsensus.*?supportConsensus/s,
+	'fixed and sample-resolved checkpoints are consolidated into named hashes');
+like($mataf4,
+	qr/sub metagAssemblyRun.*?spaceInAssGrp\(\$curSmpl, 1\).*?assembly_cores_for_input\(.*?local \$MFopt\{AssemblyCores\} = \$assemblyCores/s,
+	'assembly submissions use group-wide primary and support input for automatic core scaling');
+like($mataf4,
+	qr/\$MFopt\{AssemblyCores\} = 0;.*?\$MFconfig\{schedulerPollSeconds\} = 20;.*?schedulerPollSeconds=i/s,
+	'automatic assembly scaling and configurable fast scheduler polling are enabled by default');
 like($mataf4,
 	qr/Submitting deferred assembly-group mapping jobs.*?my \$publicationDeps = normalise_job_dependencies\(.*?MultiContigStats\.sh/s,
 	'assembly groups release mapping, producer publication, and contig statistics in stages');
@@ -451,6 +513,9 @@ unlike($subm, qr/length\(\$waitJID\)\s*>\s*3/,
 	'short valid scheduler job ids are not silently discarded');
 like($subm, qr/push\(\@\{\$aR\},\s*\$jN\)/,
 	'lock-release submission tracks the returned job id rather than its shell command');
+like($subm,
+	qr/my \$pollSeconds = defined\(\$optHR->\{jobPollSeconds\}\).*?sleep\(\$pollSeconds\)/s,
+	'loop waiting uses the configurable scheduler polling interval');
 
 open my $group_source, '<', File::Spec->catfile($Bin, '..', 'Mods', 'GenoMetaAss.pm')
 	or die "Cannot inspect Mods/GenoMetaAss.pm: $!";

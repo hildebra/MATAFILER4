@@ -321,7 +321,7 @@ unlike($mgs, qr/foreach my \$Doo \(\@DoosD\)\{\s*last if \(-e "\$iniMB2sto"\)/s,
 my $mataf4_stats = read_file(File::Spec->catfile($root, 'MATAF4.pl'));
 like($mataf4_stats, qr/\$MFconfig\{autoStatePlan\}\s*=\s*0;/,
 	'automatic full-workflow inspection is disabled by default');
-my ($submission_loop_code) = $mataf4_stats =~ /(my %sampleStats;.*?)(?=\nsub postprocess)/s;
+my ($submission_loop_code) = $mataf4_stats =~ /(my %runReport = \(.*?)(?=\nsub postprocess)/s;
 ok(defined($submission_loop_code), 'submission loop can be isolated from postprocessing');
 unlike($submission_loop_code, qr/values\s*=>\s*smplStats\s*\(/,
 	'the submission loop does not perform full sample-stat collection');
@@ -350,7 +350,7 @@ like($mataf4_stats, qr/getContamination\([^;]+prepEBI[^;]+\);/s,
      'EBI contamination fields are emitted unconditionally for a stable schema');
 like($mataf4_stats, qr/\$value =~ s\/\[\\t\\r\\n\]\+\/ \/g/,
      'central serialization prevents embedded delimiters from corrupting metagStats');
-like($mataf4_stats, qr/my %sampleStats;.*?my \@sampleStatsOrder/s,
+like($mataf4_stats, qr/my %runReport = \(.*?samples => \{\}.*?order => \[\]/s,
      'statistics are retained in a central per-sample object');
 like($mataf4_stats, qr/grep \{ \$observed\{\$_\} \} \@preferred/,
      'metagStats emits only columns containing an observed value');

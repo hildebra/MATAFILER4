@@ -16,6 +16,7 @@
 #5.10: consolidate runtime configuration, progress, and repetitive diagnostics
 #5.11: recover to output-local work space when the requested temporary path is unusable
 #5.12: validate persistent continuation checkpoints and restart incomplete stages
+#5.13: isolate recoverable alignment failures to their individual loci
 
 use warnings;
 use strict;
@@ -66,7 +67,7 @@ sub limitedWarn;
 sub prepareTemporaryBase;
 
 my $doPhym= 0;
-my $version = 5.12;
+my $version = 5.13;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -344,7 +345,7 @@ print "Additional analyses: synonymous=" . ($calcSyn ? "yes" : "no")
 	. "; dN/dS=" . ($doDNDS ? "yes" : "no")
 	. "; TreeShrink=" . ($useTreeShrink ? "yes" : "no") . "\n";
 print "=====================================================\n";
-my $cmd =""; my %usedGeneNms;
+my $cmd =""; my %usedGeneNms; my %excludedLoci;
 
 
 my $outD_clust = File::Spec->catdir($outD, "fastGear_work_$tmpTag");
@@ -663,6 +664,7 @@ if ($isAligned){
 	#die;
 	$cnt=-1; #line counter
 	my $alignedLoci = 0;
+	my $failedLoci = 0;
 	my $candidateLoci = scalar @linesCats3;
 	foreach my $aRef (@linesCats3){#go over each gene category, building MSA for each
 	#----------------- main MSA loop ----------------------
@@ -752,8 +754,24 @@ if ($isAligned){
 		#}
 		#$cmdGrand .= $cmd1."\n".$cmd2."\n";
 		#print "$cmd1\n$cmd2\n";
-		systemW($cmd1."\n".$cmd2."\n");
-		die "MSA command completed without producing $tmpOutMSAaa\n" unless -s $tmpOutMSAaa;
+		my $msaCommandOK = 1;
+		if (!$endFileExists) {
+			$msaCommandOK = eval {
+				systemW($cmd1."\n".$cmd2."\n");
+				1;
+			};
+		}
+		if (!$msaCommandOK || (!$endFileExists && !-s $tmpOutMSAaa)) {
+			my $error = $@ || "MSA command completed without producing a nonempty output";
+			$error =~ s/\s+$//;
+			$failedLoci++;
+			$excludedLoci{$gene} = 1;
+			limitedWarn("failed locus alignment",
+				"Warning: excluding locus $gene from future calculations: $error\n");
+			unlink $_ for grep { defined($_) && -e $_ }
+				($tmpInMSA, $tmpInMSAnt, $tmpOutMSAaa, $tmpOutMSA);
+			next;
+		}
 
 		
 		
@@ -764,12 +782,25 @@ if ($isAligned){
 		my $inFastaOth = $tmpInMSAnt;
 		my $percIDhr; my $avgID; my $pIDsmplhr;
 		if ($calcDistMat){ #for dmat: calc each gene spearately and merge scores later
-			($avgID,$pIDsmplhr,$percIDhr)  = calcDisPos2($tmpInMSA,$tmpDMat,0,$ncore,$tmpD);
-		#			if ($calcDistMatExt && -e $inFastaOth){
-			if (-e $inFastaOth){ 
-				($avgID,$pIDsmplhr,$percIDhr) = calcDisPos2($inFastaOth,$tmpDMatOth,1,$ncore,$tmpD);
-				$calcDistMatExtGo = $avgID;
-			} else { $calcDistMatExtGo = 0;}
+			my $distanceOK = eval {
+				($avgID,$pIDsmplhr,$percIDhr) =
+					calcDisPos2($tmpInMSA,$tmpDMat,0,$ncore,$tmpD);
+				if (-e $inFastaOth){
+					($avgID,$pIDsmplhr,$percIDhr) =
+						calcDisPos2($inFastaOth,$tmpDMatOth,1,$ncore,$tmpD);
+					$calcDistMatExtGo = $avgID;
+				} else {
+					$calcDistMatExtGo = 0;
+				}
+				1;
+			};
+			if (!$distanceOK) {
+				my $error = $@ || "unknown distance-matrix failure";
+				$error =~ s/\s+$//;
+				limitedWarn("failed optional locus distance matrix",
+					"Warning: retaining locus $gene but omitting its distance matrix: $error\n");
+				unlink $_ for grep { -e $_ } ($tmpDMat, $tmpDMatOth);
+			}
 		}
 		
 		
@@ -781,14 +812,35 @@ if ($isAligned){
 			$tmpOutMSAnonsyn =~ s/\.fna/\.nonsyn\.fna/;$tmpOutMSAsyn =~ s/\.fna/\.syn\.fna/;
 
 			if (!$endFileExists){
-				convertMultAli2NT($tmpOutMSAaa,$tmpInMSAnt,$tmpOutMSA);
-				($tmpOutMSAsyn,$tmpOutMSAnonsyn) = synPosOnly($tmpOutMSA,$tmpOutMSAaa,0,$ogrGenes,$calcSyn,$calcNonSyn);
-				#this will not affect 4-fold only etc..
-				runMSAFix($tmpOutMSA, $maxGapPerCol);
+				my $ntAlignmentOK = eval {
+					convertMultAli2NT($tmpOutMSAaa,$tmpInMSAnt,$tmpOutMSA);
+					die "AA-to-NT conversion completed without producing a nonempty output\n"
+						unless -s $tmpOutMSA;
+					# Validate/filter the primary nucleotide alignment before
+					# deriving any downstream site-class subsets from it.
+					runMSAFix($tmpOutMSA, $maxGapPerCol);
+					($tmpOutMSAsyn,$tmpOutMSAnonsyn) =
+						synPosOnly($tmpOutMSA,$tmpOutMSAaa,0,$ogrGenes,$calcSyn,$calcNonSyn);
+					1;
+				};
+				if (!$ntAlignmentOK) {
+					my $error = $@ || "unknown nucleotide-alignment failure";
+					$error =~ s/\s+$//;
+					$failedLoci++;
+					$excludedLoci{$gene} = 1;
+					limitedWarn("failed locus alignment",
+						"Warning: excluding locus $gene from future calculations: $error\n");
+					unlink $_ for grep { defined($_) && -e $_ }
+						($tmpInMSA, $tmpInMSAnt, $tmpOutMSAaa, $tmpOutMSA,
+							$tmpOutMSAsyn, $tmpOutMSAnonsyn, $finOutMSAaa, $finOutMSA,
+							$tmpDMat, $tmpDMatOth);
+					next;
+				}
 			}
 			push (@MSAs,$finOutMSA);
-			push (@MSAsSyn,$tmpOutMSAsyn) if ($tmpOutMSAsyn ne "");
-			push (@MSAsNonSyn,$tmpOutMSAnonsyn) if ($tmpOutMSAnonsyn ne "");
+			push (@MSAsSyn,$tmpOutMSAsyn) if ($tmpOutMSAsyn ne "" && fileGZs($tmpOutMSAsyn));
+			push (@MSAsNonSyn,$tmpOutMSAnonsyn)
+				if ($tmpOutMSAnonsyn ne "" && fileGZs($tmpOutMSAnonsyn));
 			#die "@MSAs\n";
 		} else {
 			push (@MSA_AA,$finOutMSAaa);
@@ -805,7 +857,8 @@ if ($isAligned){
 		print "Prepared $alignedLoci/$candidateLoci locus alignments\n"
 			if $alignedLoci == 1 || $alignedLoci % 25 == 0;
 	}
-	print "Per-locus alignment summary: $alignedLoci/$candidateLoci candidate loci prepared\n";
+	print "Per-locus alignment summary: $alignedLoci/$candidateLoci candidate loci prepared"
+		. ($failedLoci ? "; $failedLoci failed and were excluded" : "") . "\n";
 	
 	my $mergPIDtag = "_merge";
 	mergePids("$MsaD/",$cnt, "AA",$mergPIDtag) if ($calcDistMat); #merge different percIDs
@@ -859,8 +912,19 @@ if ( $doGenesToPh){
 		my $phylipOut = File::Spec->catfile($phylipD, basename($MSAfn).".ph");
 		unlink $_ or die "Cannot remove stale PHYLIP output $_: $!\n" for glob("$phylipOut*");
 		my $cmd2 = "$fasta2phylip -c 50 ".shellQuote($MSAfn)." > ".shellQuote($phylipOut)."\n";
-		systemW $cmd2;
-		die "PHYLIP conversion did not produce $phylipOut\n" unless -s $phylipOut;
+		my $phylipOK = eval {
+			systemW $cmd2;
+			die "conversion did not produce a nonempty output\n" unless -s $phylipOut;
+			1;
+		};
+		if (!$phylipOK) {
+			my $error = $@ || "unknown PHYLIP conversion failure";
+			$error =~ s/\s+$//;
+			limitedWarn("failed optional per-locus PHYLIP conversion",
+				"Warning: omitting PHYLIP output for $MSAfn: $error\n");
+			unlink $phylipOut if -e $phylipOut;
+			next;
+		}
 		push(@geneList, $phylipOut);
 	}
 }
@@ -886,8 +950,21 @@ if ($doSuperTree || $doSuperCheck){#can be for 2 reasons: 1) build actual super 
 		print "Building subtree " . ($i + 1) . "/" . scalar(@theRealMSAs) . "\n"
 			if $i == 0 || ($i + 1) % 25 == 0;
 		my $tOhrST = createTreeOpt($theRealMSAs[$i],"allsites",$i,1,"");
-		my $trRetH = treeAtHeart($tOhrST);
-		push(@treeCol,${$trRetH}{IQtreeout}.".treefile");
+		my $subtreeFile;
+		my $subtreeOK = eval {
+			my $trRetH = treeAtHeart($tOhrST);
+			$subtreeFile = ${$trRetH}{nwk} // "";
+			die "subtree method produced no nonempty tree\n" unless -s $subtreeFile;
+			1;
+		};
+		if (!$subtreeOK) {
+			my $error = $@ || "unknown subtree failure";
+			$error =~ s/\s+$//;
+			limitedWarn("failed locus subtree",
+				"Warning: excluding subtree for $theRealMSAs[$i]: $error\n");
+			next;
+		}
+		push(@treeCol,$subtreeFile);
 		if ($calcSyn){
 		} 
 		if ($calcNonSyn){
@@ -895,6 +972,7 @@ if ($doSuperTree || $doSuperCheck){#can be for 2 reasons: 1) build actual super 
 	}
 	print "Subtree construction summary: " . scalar(@treeCol) . " subtree(s) prepared\n";
 	if ($doSuperTree){
+		die "No usable locus subtrees remain; no supertree can be created\n" unless @treeCol;
 		my $outST = "$treeD/IQtree_allsites.treefile";
 		my $specFile = "$treeD/IQtree_allsites.species";
 		open OU,">$specFile" or die "Cannot write supertree species file $specFile: $!\n";
@@ -1352,12 +1430,21 @@ sub FastGear{
 
 		my $fastgearDone = 0;
 		foreach my $geneF (@geneListF){
+			if ($excludedLoci{$geneF}) {
+				limitedWarn("excluded fastGEAR locus",
+					"Warning: skipping previously excluded locus $geneF in fastGEAR\n");
+				next;
+			}
 			my $gene_file_stem = geneFileStem($geneF);
 			my $outFG = "$outD/fastGear/fastGear_Results/$gene_file_stem";
 			make_path($outFG) unless -d $outFG;
 			my $outFileFG = "$outFG/${gene_file_stem}_res.mat";
 			my @gene_msas = sort glob("$MsaDF2/$gene_file_stem.*.fna");
-			die "No MSA files found for locus $geneF in $MsaDF2\n" unless @gene_msas;
+			unless (@gene_msas) {
+				limitedWarn("missing fastGEAR locus alignment",
+					"Warning: skipping fastGEAR locus $geneF because no MSA files were found in $MsaDF2\n");
+				next;
+			}
 			my $fastgear_input = "$MsaDF2/$gene_file_stem.fna";
 			open my $fg_out, '>', $fastgear_input
 				or die "Cannot create fastGEAR input $fastgear_input: $!\n";
@@ -1374,7 +1461,17 @@ sub FastGear{
 			}
 			close $fg_out or die "Cannot close fastGEAR input $fastgear_input: $!\n";
 			my $FGparFile = requireConfiguredTool("MF4_FASTGEAR_PARAM_FILE", "fastGEAR parameter file");
-			runFastgear($gene_file_stem, $outFileFG, $MsaDF2, $FGparFile);
+			my $fastgearOK = eval {
+				runFastgear($gene_file_stem, $outFileFG, $MsaDF2, $FGparFile);
+				1;
+			};
+			if (!$fastgearOK) {
+				my $error = $@ || "unknown fastGEAR failure";
+				$error =~ s/\s+$//;
+				limitedWarn("failed fastGEAR locus",
+					"Warning: skipping failed fastGEAR locus $geneF: $error\n");
+				next;
+			}
 			$fastgearDone++;
 			print "fastGEAR progress: $fastgearDone/" . scalar(@geneListF) . " loci\n"
 				if $fastgearDone == 1 || $fastgearDone % 25 == 0;
@@ -1697,26 +1794,72 @@ sub mergeMSAs($ $ $ $){
 	foreach my $MSAf (@MSAs){
 		#print $MSAf."\n"; 
 		my $hit =0; my $miss =0;
-		my $hr = readFasta($MSAf,1); my %MFAA = %{$hr};
+		my $hr;
+		my $readOK = eval {
+			$hr = readFasta($MSAf,1);
+			1;
+		};
+		if (!$readOK) {
+			my $error = $@ || "unreadable alignment";
+			$error =~ s/\s+$//;
+			limitedWarn("invalid locus MSA",
+				"Warning: excluding alignment $MSAf during merge: $error\n");
+			next;
+		}
+		my %MFAA = %{$hr};
 		unlink $MSAf or die "Cannot remove merged MSA component $MSAf: $!\n" if $del && -e $MSAf;
 		my @Mkeys = sort keys %MFAA;
 		next if (@Mkeys == 0);
-		my ($firstMsaSample, $gcat, $separator) = parseSeqId($Mkeys[0], "MSA header in $MSAf");
+		my ($firstMsaSample, $gcat, $separator);
+		my $headerOK = eval {
+			($firstMsaSample, $gcat, $separator) =
+				parseSeqId($Mkeys[0], "MSA header in $MSAf");
+			1;
+		};
+		if (!$headerOK) {
+			my $error = $@ || "unparseable alignment header";
+			$error =~ s/\s+$//;
+			limitedWarn("invalid locus MSA",
+				"Warning: excluding alignment $MSAf during merge: $error\n");
+			next;
+		}
 		my $len = length($MFAA{$Mkeys[0]});
 		if ($len == 0){
 			limitedWarn("zero-length MSA", "Ignoring zero-length alignment $MSAf\n");
+			$excludedLoci{$gcat} = 1;
 			next;
 		}
 		my $originalLen = $len;
-		my ($filtered, $retainedLen, $removedColumns) =
-			filter_alignment_by_overlap(\%MFAA, $isAA, $minOverlapMSA);
+		my ($filtered, $retainedLen, $removedColumns);
+		my $overlapOK = eval {
+			($filtered, $retainedLen, $removedColumns) =
+				filter_alignment_by_overlap(\%MFAA, $isAA, $minOverlapMSA);
+			1;
+		};
+		if (!$overlapOK) {
+			my $error = $@ || "overlap filtering failed";
+			$error =~ s/\s+$//;
+			limitedWarn("invalid locus MSA",
+				"Warning: excluding alignment $MSAf during merge: $error\n");
+			$excludedLoci{$gcat} = 1;
+			next;
+		}
 		%MFAA = %{$filtered};
 		if ($retainedLen == 0) {
 			limitedWarn("empty overlap-filtered MSA",
 				"Overlap filtering removed every column from $MSAf; skipping this locus\n");
+			$excludedLoci{$gcat} = 1;
 			next;
 		}
 		$len = $retainedLen;
+		my @unequal = grep { length($MFAA{$_}) != $len } @Mkeys;
+		if (@unequal) {
+			limitedWarn("invalid locus MSA",
+				"Warning: excluding alignment $MSAf during merge because "
+				.scalar(@unequal)." sequence(s) have unequal lengths\n");
+			$excludedLoci{$gcat} = 1;
+			next;
+		}
 		if ($removedColumns) {
 			$overlapFilteredLoci++;
 			$overlapColumnsRemoved += $removedColumns;
@@ -1726,7 +1869,6 @@ sub mergeMSAs($ $ $ $){
 			my $curK = $sm.$separator.$gcat;
 			if ( exists($MFAA{$curK}) && defined($MFAA{$curK})  ) {
 				my $seq = $MFAA{$curK}; 
-				die "Sequence lengths within MSA unequal: $len != ".length($seq)."\n" if (length($seq) != $len);
 				$hit++;
 				$bigMSAFAA{$sm} .= $seq;
 				$seq =~ s/^(-+)/"?" x length($1)/e;

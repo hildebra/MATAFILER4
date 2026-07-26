@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.12;/,
-	'buildTree checkpoint recovery increments the workflow version');
+like($source, qr/my \$version = 5\.13;/,
+	'buildTree per-locus fault isolation increments the workflow version');
 like($source,
 	qr/BuildTree pipeline v\$version.*?Inputs:.*?Paths:.*?Mode:.*?Alignment:.*?Filtering:.*?Trees:.*?Additional analyses:/s,
 	'buildTree starts with a structured runtime configuration header');
@@ -61,6 +61,33 @@ like($source,
 	'MSAfix writes a nonempty sibling temporary file before atomically replacing its input');
 like($source, qr/if \(!\$ok\).*?unlink \$tmpOutput if -e \$tmpOutput.*?die \$error/s,
 	'a failed MSAfix attempt removes its partial output and preserves the original alignment');
+like($source,
+	qr/my \$ntAlignmentOK = eval \{.*?runMSAFix\(\$tmpOutMSA, \$maxGapPerCol\).*?if \(!\$ntAlignmentOK\).*?excluding locus \$gene from future calculations.*?next;/s,
+	'a failed per-locus MSAfix or nucleotide conversion warns and excludes only that locus');
+like($source,
+	qr/my \$msaCommandOK = 1;.*?eval \{.*?systemW\(\$cmd1\."\\n"\.\$cmd2\."\\n"\).*?failed locus alignment.*?next;/s,
+	'a failed per-locus aligner command does not terminate the multi-locus run');
+like($source,
+	qr/Per-locus alignment summary:.*?\$failedLoci failed and were excluded/s,
+	'failed locus exclusions are included in the alignment summary');
+like($source,
+	qr/my \$distanceOK = eval \{.*?failed optional locus distance matrix.*?retaining locus \$gene/s,
+	'an optional distance-matrix failure retains the successfully aligned locus');
+like($source,
+	qr/my \@unequal = grep.*?invalid locus MSA.*?excluding alignment \$MSAf during merge.*?next;/s,
+	'a malformed unequal-length locus alignment is skipped before concatenation');
+like($source,
+	qr/\$excludedLoci\{\$gene\} = 1.*?\$excludedLoci\{\$geneF\}.*?skipping previously excluded locus/s,
+	'a failed alignment locus is excluded from later fastGEAR processing');
+like($source,
+	qr/my \$phylipOK = eval \{.*?failed optional per-locus PHYLIP conversion.*?next;/s,
+	'an optional per-locus PHYLIP conversion failure does not abort the run');
+like($source,
+	qr/my \$subtreeOK = eval \{.*?failed locus subtree.*?next;.*?No usable locus subtrees remain/s,
+	'individual subtree failures are skipped while an impossible empty supertree remains fatal');
+like($source,
+	qr/my \$fastgearOK = eval \{.*?failed fastGEAR locus.*?next;/s,
+	'an individual fastGEAR tool failure does not abort other loci');
 
 like($source, qr/\$pigzBin -d .*\$partiF\.gz/, 'compressed partition restoration names the gzip file');
 unlike($source, qr/\$partiF\s*=\s*""\s+unless\s*\(-e \$partiF\)/,

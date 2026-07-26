@@ -154,8 +154,18 @@ like($mataf4, qr/my \$platform = 'ILLUMINA'.*?'PACBIO'.*?'ONT'.*?PL:\$platform/s
 like($mataf4, qr/my \@mappingLibraries = \(\@\{\$pairs\}, \@singleLibraries\);\s*
 	my \@libsOri = map \{ .*? \} \@mappingLibraries;/,
 	'mapper label projection cannot feed singleton labels back into a preceding map');
-like($mataf4, qr/sub cleanInput.*?ensureSeqSetLibraries\(\$map\{\$curSmpl\}\{seqSet\}/s,
+like($mataf4, qr/sub cleanInput.*?ensureSeqSetLibraries\(sampleReadSet\(\$curSmpl, "raw"\)/s,
 	'raw-read cleanup covers both primary and support record scopes');
+like($mataf4,
+	qr/sub sampleReadSet.*?\$map\{\$sample\}\{reads\}\{\$phase\} = \$replacement.*?sampleReadSet\(\$curSmpl, "raw", \\%seqSet\).*?sampleReadSet\(\$curSmpl, "clean", \$cleanSeqSetHR\)/s,
+	'raw and clean phases are stored together under the sample read-state object');
+unlike($active_mataf4, qr/\$map\{[^}]+\}\{(?:seqSet|cleanSeqSet)\}/,
+	'MATAF4 no longer maintains separate top-level raw and clean read hashes');
+like($sdm_clean, qr/my \$technology = \$library->\{technology\} \|\| "";/,
+	'SDM takes sequencing technology from the canonical library record');
+like($mataf4,
+	qr/my \$variantPrimaryTechnology = libraryTechnology\(.*?my \$variantSupportTechnology = libraryTechnology\(.*?SeqTech => \$variantPrimaryTechnology.*?SeqTechSuppl => \$variantSupportTechnology/s,
+	'variant calling derives primary and support technologies from read-library records');
 like($mataf4, qr/sub sdmStatsMany.*?glob\("\$inD\/LOGandSUB\/sdm\/filter\*\.log"\).*?glob\("\$inD\/LOGandSUB\/sdm\/filterSuppl\*\.log"\)/s,
 	'primary and support SDM statistics use separate per-library log sets');
 

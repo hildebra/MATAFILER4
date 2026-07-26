@@ -60,6 +60,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-to` | integer | `999999999999` | stable | stop at which samples from map file? |
 | `-loopTillComplete` | string | `"0"` | advanced | Loop over selected samples; `X:Y` processes blocks of at most `Y` samples for up to `X` passes. One following block is admitted before waiting when a pass submits at most `floor(Y/4)` jobs (minimum 1), and always on the final allowed pass of a block. At most one block is added per pass and the enlarged range receives a fresh pass budget. Preflight is repeated after each wait only when `-autoStatePlan 1` is enabled. |
 | `-loopTillCompleteActiveJobs` | integer | `3` | advanced | Start the next loop pass once no more than this many dependencies submitted for the current loop window are actually executing. Queued dependency-pending jobs and unrelated user jobs do not inflate the active count. |
+| `-schedulerPollSeconds` | integer | `20` | advanced | Seconds between scheduler queries while `loopTillComplete` waits. Values must be positive. |
 | `-excludeNodes` | string | `""` | stable | exclude certain nodes? |
 | `-maxConcurrentJobs` | integer | `0` | stable | max jobs in queue, useful for large samples sets, currently only works on slurm |
 | `-killDepNever` | integer | `0` | stable | kill jobs in "Dependency never finished" state? |
@@ -124,7 +125,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-spadesCores`, `-assemblCores` | integer | `8` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-spadesCores`, `-assemblCores` | integer | `0` | stable | `0` automatically scales assembly jobs from 8 cores at up to 500 MiB of assembly-group input to 48 cores at 10 GiB or more. A positive value is an explicit override. |
 | `-spadesMemory`, `-assemblMemory` | integer | `-1` | stable | in GB |
 | `-spadesKmers`, `-assemblyKmers` | string | `"27,43,67,87,101,127"` | stable | comma delimited list |
 | `-reAssembleMG` | integer | `0` | stable | Rebuild an assembly; shared assembly groups additionally require `-OKtoRWassGrps 1`. |

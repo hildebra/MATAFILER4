@@ -10,6 +10,7 @@ our @EXPORT_OK = qw(
 	overlap_loop_window
 	parse_loop_spec
 	should_rerun_locked_window
+	assembly_cores_for_input
 	assembly_group_output_dirs
 	balanced_parallel_batches
 	hybrid_group_ready
@@ -369,6 +370,28 @@ sub overlap_loop_window {
 		extended => $should_extend ? 1 : 0,
 		job_limit => $job_limit,
 	};
+}
+
+sub assembly_cores_for_input {
+	my (%args) = @_;
+	my $input_mb = defined($args{input_mb}) ? 0 + $args{input_mb} : 0;
+	my $configured = defined($args{configured_cores})
+		? 0 + $args{configured_cores} : 0;
+	die 'assembly_cores_for_input requires a non-negative input size'
+		unless ($input_mb >= 0);
+	die 'assembly_cores_for_input requires non-negative configured cores'
+		unless ($configured >= 0);
+	return int($configured) if ($configured > 0);
+
+	my ($minimum_mb, $maximum_mb) = (500, 10 * 1024);
+	my ($minimum_cores, $maximum_cores) = (8, 48);
+	return $minimum_cores if ($input_mb <= $minimum_mb);
+	return $maximum_cores if ($input_mb >= $maximum_mb);
+	my $scaled = $minimum_cores
+		+ ($input_mb - $minimum_mb)
+			* ($maximum_cores - $minimum_cores)
+			/ ($maximum_mb - $minimum_mb);
+	return int($scaled + 0.5);
 }
 
 sub parse_loop_spec {

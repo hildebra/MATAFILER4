@@ -723,6 +723,7 @@ sub emptyQsubOpt{
 		# Number of commands successfully handed to the configured execution
 		# backend. Callers can snapshot this value to detect no-op passes.
 		submittedJobs => 0,
+		jobPollSeconds => 20,
 		#tmpMinG => 10,
 		afterAny => 0,
 		excludeNodes => "",
@@ -809,7 +810,10 @@ sub qsubSystemJobAlive{
 			my $killed = qsubDepNeverKill();
 			print " Killed $killed jobs with Dependency never completed\n" if ($killed > 0);
 		}
-		sleep (60);
+		my $pollSeconds = defined($optHR->{jobPollSeconds})
+			? 0 + $optHR->{jobPollSeconds} : 20;
+		$pollSeconds = 1 if ($pollSeconds < 1);
+		sleep($pollSeconds);
 	}
 	#print "returning\n";
 	return;
