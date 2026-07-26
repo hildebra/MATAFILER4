@@ -164,6 +164,24 @@ ok(-e $small_assignment && !-s $small_assignment,
 	'undersized assembly publishes the standard empty bin assignment');
 ok(-s File::Spec->catfile($small_bin_dir, 'Binning.stone'),
 	'undersized assembly publishes the normal binner completion stone');
+
+my $scg_small_bin_dir = File::Spec->catdir($tmp, 'scg-small-bins');
+my $scg_small_tmp = File::Spec->catdir($tmp, 'scg-small-tmp');
+($status, $output, $errors) = run_script('runBinners.pl',
+	'-binner', 5, '-binD', $scg_small_bin_dir, '-tmpD', $scg_small_tmp,
+	'-smplID', 'scg-small', '-assmbl', $assembly, '-assmblGrp', 1,
+	'-cores', 1, '-smplDirs', $tmp);
+is($status, 0,
+	'SCGBinner input with fewer than two eligible contigs completes as an empty result');
+like($output,
+	qr/SCGBinner preflight: 1 total contigs; 0 contigs >=1000 bp.*?requires at least 2 contigs >=1000 bp.*?publishing an empty bin assignment/s,
+	'SCGBinner reports the exact eligible-contig reason before skipping training');
+ok(-e File::Spec->catfile($scg_small_bin_dir, 'scg-small')
+		&& !-s File::Spec->catfile($scg_small_bin_dir, 'scg-small'),
+	'SCGBinner technical-minimum guard publishes the standard empty assignment');
+ok(-s File::Spec->catfile($scg_small_bin_dir, 'Binning.stone'),
+	'SCGBinner technical-minimum guard publishes the normal completion stone');
+
 ($status, $output, $errors) = run_script('checkBinQual.pl',
 	'-asm', $assembly, '-binF', $small_assignment,
 	'-tmpD', File::Spec->catdir($tmp, 'small-quality-tmp'),

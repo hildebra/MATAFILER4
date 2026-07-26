@@ -893,7 +893,12 @@ sub runMetaDecoder{
 
 
 sub runSCGBinner{
-	my ($jgO,$outDir, $tmpDir, $nm, $fna, $cores, $dirsAR) = @_;
+	my ($jgO,$outDir, $tmpDir, $nm, $fna, $cores, $dirsAR,
+		$batchSize, $eligibleContigs) = @_;
+	$batchSize //= 1024;
+	$eligibleContigs //= "unknown";
+	die "SCGBinner batch size must be a positive integer\n"
+		unless $batchSize =~ /^\d+$/ && $batchSize > 0;
 	my $fakeEmpty=1;my $minBamSiz = 0;
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
 	my @BAMS = @{$BAMSar};
@@ -903,8 +908,19 @@ sub runSCGBinner{
 	my $cmd = "###preparing BAMs..\n$uncramCmd\n\n";
 	$cmd .= "###Running SCGBinner...\n";
 	$cmd .= "mkdir -p $outDir\n";
-	$cmd .= "$SCGbin -a $fna -o $tmpDir -b " . join(" ",@BAMS) . " -t $cores\n";
-	# move result TSV, then clean intermediate dirs (set -e ensures these only run on success)
+	$cmd .= "set +e\n";
+	$cmd .= "$SCGbin -a $fna -o $tmpDir -b \"" . join(" ",@BAMS)
+		. "\" -t $cores -p $batchSize\n";
+	$cmd .= "scgbinner_status=\$?\nset -e\n";
+	$cmd .= "if [[ \$scgbinner_status -ne 0 ]]; then\n";
+	$cmd .= "  echo \"ERROR: SCGBinner failed after preflight found $eligibleContigs "
+		. "contigs >=1000 bp and selected batch size $batchSize. "
+		. "Inspect the preceding SCGBinner marker and feature-generation messages.\" >&2\n";
+	$cmd .= "  exit \$scgbinner_status\nfi\n";
+	$cmd .= "if [[ ! -e $tmpDir/scgbinner_res/SCGBINNER_result.tsv ]]; then\n";
+	$cmd .= "  echo \"ERROR: SCGBinner exited successfully but did not create "
+		. "scgbinner_res/SCGBINNER_result.tsv\" >&2\n  exit 1\nfi\n";
+	# move result TSV, then clean intermediate dirs
 	$cmd .= "mv $tmpDir/scgbinner_res/SCGBINNER_result.tsv $outDir/$nm\n";
 	$cmd .= "rm -rf $tmpDir\n";##$outDir/scgbinner_res $outDir/data_augmentation\n";
 	return $cmd;

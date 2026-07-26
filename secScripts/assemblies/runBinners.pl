@@ -22,7 +22,8 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive );
 #v0.14: 19.4.26: scgBinner added
 #v0.15: validate every BAM/CRAM sequence dictionary before binning
 #v0.16: publish an empty result when the assembly is below the configured size
-my $version = 0.16;
+#v0.17: size SCGBinner batches from >=1 kb contigs and guard empty training input
+my $version = 0.17;
 
 
 my $DoMetaBat2 = "";
@@ -92,31 +93,35 @@ print "     using $MB2coresL cores, binner \"$DoMetaBat2\" to outdir $BinDir\n";
 print "     using $giveSBenv environment\n" if ($giveSBenv ne "");
 print "======================================================================\n";
 
-sub fastaTotalBases {
+sub fastaAssemblyStats {
 	my ($fasta) = @_;
 	open my $fh, '<', $fasta or die "Cannot read assembly $fasta: $!\n";
 	my $total = 0;
 	my $records = 0;
+	my $currentLength = 0;
+	my $scgEligible = 0;
 	while (my $line = <$fh>) {
 		if ($line =~ /^>/) {
+			$scgEligible++ if $records && $currentLength >= 1000;
 			$records++;
+			$currentLength = 0;
 			next;
 		}
 		$line =~ s/\s+//g;
 		die "Malformed FASTA sequence before the first header in $fasta\n"
 			if length($line) && !$records;
 		$total += length($line);
+		$currentLength += length($line);
 	}
 	close $fh or die "Cannot close assembly $fasta: $!\n";
 	die "Assembly contains no FASTA records: $fasta\n" unless $records;
-	return $total;
+	$scgEligible++ if $currentLength >= 1000;
+	return ($total, $records, $scgEligible);
 }
 
-my $assemblyBases = fastaTotalBases($metaGassembly);
-my $minAssemblyBases = $minAssemblySizeMB * 1_000_000;
-if ($minAssemblyBases > 0 && $assemblyBases < $minAssemblyBases) {
-	print "Assembly has $assemblyBases bp, below the ${minAssemblySizeMB} Mb binning minimum; "
-		. "publishing an empty bin assignment\n";
+sub publishEmptyBinnerResult {
+	my ($reason) = @_;
+	print "$reason; publishing an empty bin assignment\n";
 	remove_tree($nodeSpTmpD2) if -e $nodeSpTmpD2;
 	remove_tree($BinDir) if -e $BinDir;
 	make_path($nodeSpTmpD2, $BinDir);
@@ -125,8 +130,29 @@ if ($minAssemblyBases > 0 && $assemblyBases < $minAssemblyBases) {
 	open my $stoneFH, '>', $stone or die "Cannot write $stone: $!\n";
 	print {$stoneFH} "$smplIDs1\n" or die "Cannot write $stone: $!\n";
 	close $stoneFH or die "Cannot close $stone: $!\n";
+}
+
+my ($assemblyBases, $assemblyRecords, $scgEligibleContigs) =
+	fastaAssemblyStats($metaGassembly);
+my $minAssemblyBases = $minAssemblySizeMB * 1_000_000;
+if ($minAssemblyBases > 0 && $assemblyBases < $minAssemblyBases) {
+	publishEmptyBinnerResult(
+		"Assembly has $assemblyBases bp, below the ${minAssemblySizeMB} Mb binning minimum");
 	print "Done executing empty binner result for undersized assembly\n";
 	exit 0;
+}
+my $scgBatchSize = 1024;
+if ($DoMetaBat2 == 5) {
+	print "SCGBinner preflight: $assemblyRecords total contigs; "
+		. "$scgEligibleContigs contigs >=1000 bp are eligible for training\n";
+	if ($scgEligibleContigs < 2) {
+		publishEmptyBinnerResult(
+			"SCGBinner requires at least 2 contigs >=1000 bp, but found $scgEligibleContigs");
+		print "Done executing empty SCGBinner result for insufficient training input\n";
+		exit 0;
+	}
+	$scgBatchSize = $scgEligibleContigs if $scgEligibleContigs < $scgBatchSize;
+	print "SCGBinner training batch size: $scgBatchSize\n";
 }
 
 
@@ -176,7 +202,8 @@ if ($DoMetaBat2 == 1){
 	$BinCmd .= runGenomeFace("$BinDir/depth$cAssGrp.jgi.depth.txt",$BinDir,$smplIDs1,$metaGassembly,$MB2coresL,$BinDir);
 	$GPUused = 1;
 } elsif ($DoMetaBat2 == 5){#SCGBinner
-	$BinCmd .= runSCGBinner("",$BinDir,$nodeSpTmpD2,$smplIDs1,$metaGassembly,$MB2coresL,\@paths);
+	$BinCmd .= runSCGBinner("",$BinDir,$nodeSpTmpD2,$smplIDs1,$metaGassembly,
+		$MB2coresL,\@paths,$scgBatchSize,$scgEligibleContigs);
 }
 
 die "Unsupported binner $DoMetaBat2\n" unless length $BinCmd;

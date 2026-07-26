@@ -11,7 +11,7 @@ use lib File::Spec->catdir($Bin, '..');
 use Mods::Binning ();
 use Mods::Binning qw(
 	MB2N50 binningOutputsComplete emptyBinnerAssignmentCommand
-	runCheckM runCheckM2 runSemiBin
+	runCheckM runCheckM2 runSCGBinner runSemiBin
 );
 use Mods::IO_Tamoc_progs qw(checkMapsDoneSH jgi_depth_cmd);
 
@@ -121,6 +121,21 @@ like(checkMapsDoneSH([$sample_dir]), qr/\Q$sample_dir\/mapping\/done.sto\E/,
 
 my $direct_bam = "$root/direct.bam";
 write_file($direct_bam, 'bam');
+my $scgbinner_command;
+{
+	no warnings 'redefine';
+	local *Mods::Binning::getProgPaths = sub { return 'scgbinner' };
+	$scgbinner_command = runSCGBinner(
+		'', "$root/scg-out", "$root/scg-tmp", 'sample',
+		"$root/ref.fa", 4, [$direct_bam], 17, 42,
+	);
+}
+like($scgbinner_command,
+	qr/scgbinner .*?-b "\Q$direct_bam\E" -t 4 -p 17/,
+	'SCGBinner command uses the preflight-derived batch size and quotes its BAM list');
+is(system('bash', '-n', '-c', $scgbinner_command), 0,
+	'SCGBinner failure-diagnostic command is valid Bash');
+
 my $large_bam = "$root/large.bam";
 open my $large_fh, '>', $large_bam or die "Cannot write $large_bam: $!";
 seek($large_fh, 15 * 1024 * 1024, 0) or die "Cannot seek in $large_bam: $!";
@@ -191,12 +206,24 @@ unlike($mataf4, qr/\$postCmd \.= " -read[12S] /,
 	'MATAF4 no longer passes ignored raw-read options to bin quality checking');
 
 my $runner = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'assemblies', 'runBinners.pl'));
+like($runner, qr/my \$version = 0\.17;/,
+	'SCGBinner training-input guard increments the binner-runner version');
 like($runner, qr/my \$resultCheck = "test -e '\$BinDir\/\$smplIDs1'".*?printf .*?> '\$stone'/s,
 	'the binner assignment is verified before its completion stone is published');
 like($runner, qr/if \(\$DoMetaBat2 == 2\).*?output_recluster_bins.*?output_bins/s,
 	'SemiBin native output is accepted before standardized assignments are generated');
 like($runner, qr/validate_mapping_references\.pl.*?system\(\$\^X, \$referenceValidator/s,
 	'all binners validate mapping sequence dictionaries before conversion');
+like($runner,
+	qr/sub fastaAssemblyStats.*?\$currentLength >= 1000.*?SCGBinner preflight:.*?\$scgEligibleContigs < 2.*?SCGBinner requires at least 2 contigs >=1000 bp.*?\$scgBatchSize = \$scgEligibleContigs/s,
+	'SCGBinner preflight counts eligible contigs, skips unusable input, and bounds its batch size');
+like($runner,
+	qr/runSCGBinner\(""[^;]*?\$scgBatchSize,\$scgEligibleContigs\)/s,
+	'the measured SCGBinner training population is forwarded to command construction');
+my $binning_module = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'Binning.pm'));
+like($binning_module,
+	qr/sub runSCGBinner.*?-b \\".*?-p \$batchSize.*?scgbinner_status=\\\$\?.*?failed after preflight found \$eligibleContigs.*?did not create.*?SCGBINNER_result\.tsv/s,
+	'SCGBinner receives the adaptive batch and reports failed or missing training output explicitly');
 like($mataf4, qr/Hybrid \$kind mapping does not identify.*?mapping_reference_matches/s,
 	'final hybrid assemblies invalidate legacy or stale preassembly mappings');
 like($mataf4, qr/stat -c '%s %Y'.*?smd\.reference\.stat/s,
