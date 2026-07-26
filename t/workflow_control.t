@@ -370,8 +370,11 @@ like($mataf4,
 	qr/sub postSubmQsub.*?\{submittedJobs\}\+\+.*?\{slurmDependencySubmittedAt\}\{\$scheduler_job_id\}\s*=\s*time/s,
 	'accepted deferred submissions update loop and Slurm dependency bookkeeping');
 like($mataf4,
-	qr/sub postSubmQsub.*?my \$lock_file = \$QSBoptHR->\{LOCKfile\}.*?open my \$lock_fh/s,
-	'accepted deferred submissions create the active group-terminal sample lock');
+	qr/sub postSubmQsub.*?recordSampleLockJobs\(\s*\$QSBoptHR->\{LOCKfile\}, \[\$scheduler_job_id\]/s,
+	'accepted deferred submissions record their scheduler ID in the sample lock ledger');
+like($mataf4,
+	qr/sampleLockActiveJobs\(\$smplLockF, \$QSBoptHR\).*?unlink \$smplLockF/s,
+	'MATAF4 releases a sample lock only after its recorded jobs leave the scheduler');
 like($mataf4,
 	qr/my \$lightweightLocal = commands_are_lightweight_filesystem\(\$unzipcmd\).*?systemW \$unzipcmd.*?qsubSystem\(\$logDir\."UNZP\.sh"/s,
 	'lightweight UZ setup runs locally while data-processing commands remain scheduled');
@@ -407,8 +410,11 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?my \$MATFILER_ver = 4\.16;/s,
-	'MATAFILER history retains shared input discovery through version 4.16');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?my \$MATFILER_ver = 4\.18;/s,
+	'MATAFILER history retains shared input discovery through version 4.18');
+like($mataf4,
+	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
+	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');
 like($mataf4,
 	qr/my %runOptions = \(.*?operationMode.*?sharedTmpDir.*?nodeTmpDir.*?from.*?to.*?submit.*?loopCount.*?loopInitialCount.*?loopWindowSize/s,
 	'runtime and command-line controls are consolidated in one named hash');
@@ -514,8 +520,11 @@ unlike($mataf4, qr/CSfinJobName/,
 	'per-sample ContigStats jobs are not serialized behind another sample ContigStats job');
 unlike($subm, qr/length\(\$waitJID\)\s*>\s*3/,
 	'short valid scheduler job ids are not silently discarded');
-like($subm, qr/push\(\@\{\$aR\},\s*\$jN\)/,
-	'lock-release submission tracks the returned job id rather than its shell command');
+like($subm,
+	qr/sub MFnext.*?recordSampleLockJobs\(\$lckFile, \$aR, \$QSBoptHR\)/s,
+	'sample completion persists dependency IDs without submitting an RMLOCK job');
+unlike($subm, qr/RMLCK|rmLock\.sh/,
+	'the submission layer no longer creates scheduler jobs solely to release sample locks');
 like($subm,
 	qr/my \$pollSeconds = defined\(\$optHR->\{jobPollSeconds\}\).*?sleep\(\$pollSeconds\)/s,
 	'loop waiting uses the configurable scheduler polling interval');

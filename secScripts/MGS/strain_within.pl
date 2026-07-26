@@ -46,6 +46,7 @@ sub writeTooFewMarker;
 sub treeInputPrecopyCommand;
 sub readFastaIDs;
 sub resetMGSTreeOutputs;
+sub stepComplete;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -151,7 +152,8 @@ END {
 #.48: add tree-only reset and resubmission from published per-MGS inputs
 #.49: make IQ-TREE pathogen/CMAPLE mode explicitly opt-in
 #.50: account for every tree-submission decision and make termination status explicit
-my $version = 0.50;
+#.51: summarize completion of major initialization and workflow steps
+my $version = 0.51;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -361,16 +363,30 @@ my %legacyLocusMGS;
 my $gene2taxF; #where to find info what genes (gene cat)
 my $sttime = time;	
 
+my $stepStarted = time;
 prepRun();
+stepComplete("configuration and map initialization", $stepStarted,
+	"samples=".scalar(@samples), "mode=$mode", "output=$outD");
 
 
 my %AGlist; #list of assembly groups that need to be processed together;
+$stepStarted = time;
 createAGlist();
+my $groupedSampleCount = 0;
+$groupedSampleCount += scalar(@{$AGlist{$_}}) for keys %AGlist;
+stepComplete("assembly-group expansion", $stepStarted,
+	"groups=".scalar(keys %AGlist), "grouped_samples=$groupedSampleCount",
+	"standalone_samples=".(scalar(@samples) - $groupedSampleCount));
 #foreach (sort keys %AGlist) {   print "$_ : @{$AGlist{$_}}\n";}die;
 
 my %preCompSNPs;
 my %unavailableSamples;
+$stepStarted = time;
 preComputeConsSNP();
+stepComplete("consensus-input audit", $stepStarted,
+	"usable_samples=".(scalar(@samples) - scalar(keys %unavailableSamples)),
+	"unavailable_samples=".scalar(keys %unavailableSamples),
+	"precomputed_consensus=".scalar(keys %preCompSNPs));
 
 
 my %replN; #my %genesWrite; #keep stats/track
@@ -398,6 +414,7 @@ my %SIdirs; #unified storage of dirs per SI (SI==MGS)
 
 #key step to determine with set of genes (representing MGS) is to be MSA'd for strain phylos
 #these might be very limited number of genes here..
+$stepStarted = time;
 ($SIgenes,$Gene2COG,$Gene2MGS,$COGprios) = readGene2tax($gene2taxF,$presortGenes,\@subsetMGS);#
 #%SIgenes=%{$hr1};%Gene2COG=%{$hr2}; %Gene2MGS = %{$hr3}; %COGprios = %{$hr4};
 my @specis = sort(keys(%{$SIgenes}));
@@ -409,6 +426,11 @@ for my $MGS (@specis) {
 	die "Unsafe MGS identifier '$MGS': use only letters, digits, dot, underscore, colon, plus, and hyphen\n"
 		unless defined($MGS) && $MGS =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
 }
+my $selectedSeedLoci = 0;
+$selectedSeedLoci += scalar(keys %{$SIgenes->{$_}}) for @specis;
+stepComplete("MGS and seed-locus selection", $stepStarted,
+	"selected_MGS=".scalar(@specis), "seed_loci=$selectedSeedLoci",
+	"catalogue_genes=".scalar(keys %{$Gene2COG}));
 #sort specis by numbers, so start with MGS1, MGS2 etc
 my %sis; foreach (@specis){if (m/(\d+)$/){ $sis{$_}=int($1);} else {$sis{$_}=1; print "Unknown code: $_";}}
 @specis = sort {$sis{$a} <=> $sis{$b} || $a cmp $b } keys %sis;
@@ -418,8 +440,12 @@ my %sis; foreach (@specis){if (m/(\d+)$/){ $sis{$_}=int($1);} else {$sis{$_}=1; 
 my $cnt=0; my $SaSe = "|"; 
 
 
-my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist) 
+$stepStarted = time;
+my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist)
 			= evalFileStatus();
+stepComplete("existing-output and resume audit", $stepStarted,
+	"prepared_trees=$doneDirs", "missing_trees=$treeAbsent",
+	"missing_categories=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped");
 #DEBUG:getInputSize();
 
 
@@ -441,7 +467,12 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 	
 	print "\n\n----------------------------------------------------\nPart I:: extracting relevant core MGS genes (SNP consensus called) from original assemblies". "Elapsed time : ", timeNice(time - $sttime) . "\n----------------------------------------------------\n\n";
 	
+	$stepStarted = time;
 	prepGene2MGS();
+	stepComplete("locus-model construction", $stepStarted,
+		"catalogue_drivers=".scalar(keys %cl2gene2),
+		"resolved_loci=".scalar(keys %{$LocusByID}),
+		"selected_MGS=".scalar(keys %{$COGprios}));
 	$Gene2COG = {}; #delete, no longer needed..
 	
 	reportingsMGS();
@@ -501,6 +532,9 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 	
 	#and extract the corresponding fna/ faa from every other dir.. main single core work
 	#this will also determine how many genes per MGS are now extracted..
+	my $extractionDriverCount = scalar(keys %cl2gene2);
+	my $extractionLocusCount = scalar(keys %{$LocusByID});
+	$stepStarted = time;
 	extractFNAFAA2genes();#@allGenes);
 	%cl2gene2 = (); #no longer needed, delete
 	$LocusByID = {};
@@ -510,6 +544,10 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 	$COGprios = {};
 	#write logs to found genes etc.
 	writeLogsStep1();
+	stepComplete("consensus-gene extraction and publication", $stepStarted,
+		"catalogue_drivers=$extractionDriverCount",
+		"resolved_loci=$extractionLocusCount",
+		"worker=$subJob");
 	write_worker_completion("$splitStonePrefix.0.stone", $splitGeneration)
 		if $maxSubJob && !$subJob;
 	
@@ -554,6 +592,7 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 #		$PhylosExist =0 if (!-d "$outD2/pjylo/");
 #	}
 #}
+$stepStarted = time;
 if (scalar(keys(%ConspecificMGS)) == 0){
 	my $conlog = "$LOGDIR/ConspecificMGS.log";
 	my $legacy_conlog = "$bindir/LOGandSUB/ConspecificMGS.log";
@@ -566,6 +605,8 @@ if (scalar(keys(%ConspecificMGS)) == 0){
 		warn "No prior conspecific-sample log found at $conlog; continuing without historical exclusions\n";
 	}
 }
+stepComplete("historical exclusion loading", $stepStarted,
+	"excluded_MGS=".scalar(keys %ConspecificMGS));
 
 
 
@@ -576,6 +617,7 @@ my %outgroupGeneCache;
 
 my $geneCatLoaded=0;
 #read in genecat to create outgroup fasta sequences..
+$stepStarted = time;
 if ($recalcTrees || $CatNotPrepped || $treeAbsent || $repairCAT || $deepRepair || $dirsNOTPrepped || $onlySubmit == 0 || $redoSubmissionData == 1){
 	#also read reference gene seqs (for outgroup)
 	my $refFNA = ""; my $refFAA = ""; my $refNameL = "unknw";
@@ -603,8 +645,12 @@ if ($recalcTrees || $CatNotPrepped || $treeAbsent || $repairCAT || $deepRepair |
 	$FAAref = readFasta($refFAA,1,"\\s",$Gene2COG_OG);
 	$FNAref = readFasta($refFNA,1,"\\s",$Gene2COG_OG);
 	print "read ". scalar(keys %{$FNAref})." genes from $refNameL\n";
-	print "done\n";
 }
+stepComplete("outgroup-reference preparation", $stepStarted,
+	"status=".(scalar(keys %{$FNAref}) || scalar(keys %{$FAAref}) ? "loaded" : "not_required"),
+	"reference_NT=".scalar(keys %{$FNAref}),
+	"reference_AA=".scalar(keys %{$FAAref}),
+	"MGS_with_outgroup_candidates=".scalar(keys %OGgenesByCOG));
 
 
 
@@ -615,7 +661,14 @@ print "Part II:: resort .cat files, submit intraStrain phylogenies for " . scala
 die "Tree for outgroup specified, but file not found:$treeFile\nAborting..\n" if  ($treeFile ne "" && !-e $treeFile);
 
 #sort by largest dir first..
+$stepStarted = time;
 my @sizeOfDirs = getInputSize();
+my $nonemptyTreeInputs = scalar(grep { $_ > 0 } @sizeOfDirs);
+my $treeInputMB = 0;
+$treeInputMB += $_ for @sizeOfDirs;
+stepComplete("tree-input sizing", $stepStarted,
+	"selected_MGS=".scalar(@specis), "nonempty_inputs=$nonemptyTreeInputs",
+	"estimated_uncompressed_MB=".int($treeInputMB + 0.5));
 my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 @specis=@specis[@idx];@sizeOfDirs=@sizeOfDirs[@idx];
 #print "SIZE2:: $sizeOfDirs[0] $sizeOfDirs[1] $specis[0] $specis[1]\n"; die;
@@ -1826,10 +1879,6 @@ sub createAGlist{
 		# sample has its own VCF/depth and must contribute a consensus.
 		push @{$AGlist{$cAssGrp}}, $smpl;
 	}
-	my $groupedSamples = 0;
-	$groupedSamples += scalar(@{$AGlist{$_}}) for keys %AGlist;
-	print "Assembly-group expansion: $groupedSamples samples across "
-		.scalar(keys %AGlist)." shared-reference groups\n";
 }
 
 sub histoMGS{#specifically for MGS..
@@ -2108,6 +2157,13 @@ sub timeNice($){
 		return int($tIN/60)."m" . ($tIN%60) . "s";
 	}
 	return $tIN . "s";
+}
+
+sub stepComplete {
+	my ($step, $started, @statistics) = @_;
+	my $elapsed = timeNice(time - $started);
+	my $details = @statistics ? "; ".join(", ", @statistics) : "";
+	print "STEP COMPLETE: $step (${elapsed})$details\n";
 }
 
 sub shellQuote {

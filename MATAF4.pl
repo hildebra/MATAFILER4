@@ -41,7 +41,7 @@ use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
-use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numActiveUserJobs submitSlurmWithDependencyRecovery);
+use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs slurmJobFailureSummary submitSlurmWithDependencyRecovery);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
@@ -95,6 +95,7 @@ sub mOTU2Mapping; sub mergeMotu2Table; sub prepMOTU2;
 sub genoSize; sub check_map_done; sub check_depth_done;
 sub mapping_reference_matches;
 sub postprocess;
+sub reportSlurmJobFailures;
 sub setDefaultMFconfig;
 sub getCmdLineOptions;
 sub setupHPC;
@@ -127,7 +128,11 @@ sub createConsSNPandSVs;
 #4.14: 26.7.26: cache one validated input discovery per sample for sizing and staging.
 #4.15: 26.7.26: group run state and unify raw/clean read sets around library records.
 #4.16: 26.7.26: consolidate runtime options and checkpoint paths into named hashes.
-my $MATFILER_ver = 4.16;
+#4.17: 26.7.26: replace per-sample RMLOCK scheduler jobs with job-ID lock ledgers
+#       that MATAF4 safely releases after their recorded jobs leave the scheduler.
+#4.18: 26.7.26: summarize Slurm failures, including OOM and timeout outcomes,
+#       as an occurrence matrix grouped by MATAFILER job category.
+my $MATFILER_ver = 4.18;
 
 #----------------- defaults ----------------- 
 
@@ -379,7 +384,21 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $smplLockF = "$logDir/$MFcontstants{DefaultSampleLock}";
 	if (-e $smplLockF){
 		if ($MFconfig{rmSmplLocks}){ system "rm -f $smplLockF";
-		} else {print "\n    >>>>>>>>>> Sample $SmplName is locked! <<<<<<<<<<  \n";loop2C_check($cAssGrp,\@sampleDeps);next;}
+		} else {
+			my $activeLockJobs = sampleLockActiveJobs($smplLockF, $QSBoptHR);
+			if (defined($activeLockJobs) && $activeLockJobs == 0) {
+				unlink $smplLockF
+					or die "Cannot release completed sample lock $smplLockF: $!\n";
+				print "Released completed sample lock for $SmplName\n"
+					unless $MFconfig{silent};
+			} else {
+				my $lockReason = defined($activeLockJobs)
+					? "$activeLockJobs recorded job(s) still queued or running"
+					: "legacy/unreadable lock has no verifiable job ledger";
+				print "\n    >>>>>>>>>> Sample $SmplName is locked: $lockReason <<<<<<<<<<  \n";
+				loop2C_check($cAssGrp,\@sampleDeps);next;
+			}
+		}
 	} 
 	$QSBoptHR->{LOCKfile} = $smplLockF; #set lockfile to be created if any job is submitted
 	
@@ -1625,8 +1644,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				.join(', ', @{$cleanupBarrier->{blocked}})."\n";
 		}
 	}
-	# Lock release is the final sample action. When cleanup is scheduled, MFnext
-	# receives its job id and cannot release the lock before cleanup terminates.
+	# Persist every sample owner, including cleanup. A later MATAF4 pass releases
+	# the lock only after all recorded scheduler jobs have terminated.
 	MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR);
 	### loop2complete functionality
 	loop2C_check($cAssGrp,\@sampleDeps);
@@ -2122,7 +2141,43 @@ sub postprocess{
 		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 		$QSBoptHR->{doSubmit} = 1;
 	}
+	reportSlurmJobFailures();
 
+}
+
+sub reportSlurmJobFailures {
+	return unless (($QSBoptHR->{qmode} || '') eq 'slurm');
+	my %jobs = %{$QSBoptHR->{submittedJobRecords} || {}};
+	for my $job_id (keys %{$QSBoptHR->{accountingJobIds} || {}}) {
+		$jobs{$job_id} ||= { requested_name => '' };
+	}
+	return unless %jobs;
+
+	my $summary = slurmJobFailureSummary(\%jobs, $QSBoptHR);
+	if (!defined $summary) {
+		warn "Could not query Slurm accounting for the end-of-run failure summary\n";
+		return;
+	}
+	return unless $summary->{failed};
+
+	my %observedFailure;
+	for my $entry (values %{$summary->{categories}}) {
+		$observedFailure{$_} = 1 for keys %{$entry->{failures}};
+	}
+	my @failureColumns = grep { $observedFailure{$_} }
+		qw(OOM TIMEOUT DEPENDENCY NODE_FAIL PREEMPTED CANCELLED FAILED);
+
+	print STDERR "\nSlurm terminal failures by MATAFILER job category "
+		."(N=$summary->{failed}):\n";
+	print STDERR join("\t", "Job_category", "Total", @failureColumns), "\n";
+	for my $category (sort keys %{$summary->{categories}}) {
+		my $entry = $summary->{categories}{$category};
+		print STDERR join("\t",
+			$category,
+			$entry->{total},
+			map { $entry->{failures}{$_} || 0 } @failureColumns,
+		), "\n";
+	}
 }
 
 
@@ -2677,14 +2732,14 @@ sub postSubmQsub {
 		if ($QSBoptHR->{qmode} eq 'slurm' && $scheduler_job_id ne "") {
 			$QSBoptHR->{slurmDependencySubmittedAt} ||= {};
 			$QSBoptHR->{slurmDependencySubmittedAt}{$scheduler_job_id} = time;
+			my ($slurmJobName) = $augmented->{script} =~ /^#SBATCH\s+-J\s+(\S+)/m;
+			$QSBoptHR->{submittedJobRecords}{$scheduler_job_id} = {
+				requested_name => $slurmJobName || '',
+			};
 		}
-		my $lock_file = $QSBoptHR->{LOCKfile} || "";
-		if ($lock_file ne "" && !-e $lock_file) {
-			open my $lock_fh, '>', $lock_file
-				or die "Cannot create lock $lock_file after deferred submission: $!\n";
-			close $lock_fh
-				or die "Cannot close lock $lock_file after deferred submission: $!\n";
-		}
+		recordSampleLockJobs(
+			$QSBoptHR->{LOCKfile}, [$scheduler_job_id], $QSBoptHR,
+		) if $scheduler_job_id ne "";
 	}
 	open my $audit_fh, '>', $outf or die "Cannot write deferred submission audit $outf: $!\n";
 	print {$audit_fh} join("\n", @augmented_commands), "\n";

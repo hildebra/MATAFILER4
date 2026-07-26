@@ -9,7 +9,8 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Subm qw(
 	qsubSystem qsubSystemJobAlive qsubSystemWaitMaxJobs numActiveUserJobs
-	reconcileSlurmDependencies MFnext
+	reconcileSlurmDependencies MFnext recordSampleLockJobs sampleLockActiveJobs
+	slurmJobFailureSummary
 	submitSlurmWithDependencyRecovery
 );
 
@@ -35,6 +36,108 @@ sub bash_options {
 }
 
 my $root = tempdir(CLEANUP => 1);
+
+my $sample_lock = File::Spec->catfile($root, 'sample.lock');
+my $lock_options = slurm_options();
+$lock_options->{rTag} = 'run';
+recordSampleLockJobs($sample_lock, ['run701', '702', 'not-a-job'], $lock_options);
+open my $sample_lock_fh, '<', $sample_lock or die "Cannot read $sample_lock: $!";
+my $sample_lock_text = do { local $/; <$sample_lock_fh> };
+close $sample_lock_fh;
+is($sample_lock_text, "701\n702\n",
+	'sample locks persist only concrete scheduler job IDs');
+my $lock_queries = 0;
+$lock_options->{sampleLockCheckInterval} = 60;
+$lock_options->{schedulerClock} = sub { 1000 };
+$lock_options->{sampleLockJobRunner} = sub {
+	$lock_queries++;
+	return ("702\n999\n", 0);
+};
+is(sampleLockActiveJobs($sample_lock, $lock_options), 1,
+	'a sample lock remains active while one recorded job is in the scheduler');
+is(sampleLockActiveJobs($sample_lock, $lock_options), 1,
+	'a scheduler snapshot is shared across repeated sample-lock checks');
+is($lock_queries, 1, 'sample-lock checks use one cached scheduler query');
+recordSampleLockJobs($sample_lock, ['703'], $lock_options);
+is(sampleLockActiveJobs($sample_lock, $lock_options), 2,
+	'a locally submitted job is merged safely into the cached active set');
+
+my $finished_lock = File::Spec->catfile($root, 'finished.lock');
+recordSampleLockJobs($finished_lock, ['704'], $lock_options);
+is(sampleLockActiveJobs($finished_lock, $lock_options), 1,
+	'a newly recorded job remains active even with an older scheduler snapshot');
+delete $lock_options->{sampleLockActiveState};
+$lock_options->{sampleLockJobRunner} = sub { return ("999\n", 0); };
+is(sampleLockActiveJobs($finished_lock, $lock_options), 0,
+	'a lock is releasable after all recorded jobs leave the scheduler');
+
+my $legacy_lock = File::Spec->catfile($root, 'legacy.lock');
+open my $legacy_fh, '>', $legacy_lock or die "Cannot create $legacy_lock: $!";
+close $legacy_fh;
+is(sampleLockActiveJobs($legacy_lock, $lock_options), undef,
+	'an empty legacy lock is retained when its ownership cannot be verified');
+
+my $mfnext_lock = File::Spec->catfile($root, 'mfnext.lock');
+my $submitted_before_mfnext = $lock_options->{submittedJobs} || 0;
+my @mfnext_dependencies = ('run705', '706');
+MFnext($mfnext_lock, \@mfnext_dependencies, 42, $lock_options);
+open my $mfnext_fh, '<', $mfnext_lock or die "Cannot read $mfnext_lock: $!";
+my $mfnext_text = do { local $/; <$mfnext_fh> };
+close $mfnext_fh;
+is($mfnext_text, "705\n706\n",
+	'MFnext records all sample dependencies in the lock ledger');
+is($lock_options->{submittedJobs} || 0, $submitted_before_mfnext,
+	'MFnext does not submit a scheduler job to release the lock');
+
+my $accounting_options = slurm_options();
+$accounting_options->{rTag} = 'abc';
+$accounting_options->{jobAccountingRunner} = sub {
+	return (join("\n",
+		"801|abc_mA1492|OUT_OF_MEMORY|0:125|OutOfMemory",
+		"802|abc_mA1493|TIMEOUT|0:0|TimeLimit",
+		"803|abc_GP1492|FAILED|2:0|NonZeroExitCode",
+		"804|abc_GP1493|COMPLETED|0:0|None",
+		"805|abc_MAP1492|PENDING|0:0|Dependency",
+	)."\n", 0);
+};
+my $failure_summary = slurmJobFailureSummary({
+	801 => { requested_name => 'mA1492' },
+	802 => { requested_name => 'mA1493' },
+	803 => { requested_name => '_GP1492' },
+	804 => { requested_name => '_GP1493' },
+	805 => { requested_name => '_MAP1492' },
+}, $accounting_options);
+is($failure_summary->{failed}, 3,
+	'Slurm accounting counts only terminal unsuccessful jobs');
+is_deeply($failure_summary->{categories}{mA}{failures},
+	{ OOM => 1, TIMEOUT => 1 },
+	'OOM and timeout occurrences are grouped under the assembly category');
+is_deeply($failure_summary->{categories}{_GP}{failures},
+	{ FAILED => 1 },
+	'non-zero exits are grouped under their MATAFILER job category');
+ok(!exists $failure_summary->{categories}{_MAP},
+	'pending dependency jobs are not reported as failures');
+
+my $large_accounting_calls = 0;
+my $large_accounting_options = slurm_options();
+$large_accounting_options->{jobAccountingRunner} = sub {
+	$large_accounting_calls++;
+	return ("", 0);
+};
+my %moderately_large_job_set = map {
+	(10_000 + $_) => { requested_name => "_GP$_" }
+} 1 .. 1_200;
+slurmJobFailureSummary(\%moderately_large_job_set, $large_accounting_options);
+is($large_accounting_calls, 1,
+	'a moderately large run is summarized with one sacct call');
+
+$large_accounting_calls = 0;
+my %very_large_job_set = map {
+	(20_000 + $_) => { requested_name => "_MAP$_" }
+} 1 .. 4_100;
+slurmJobFailureSummary(\%very_large_job_set, $large_accounting_options);
+is($large_accounting_calls, 2,
+	'exceptionally large accounting requests are split into bounded sacct calls');
 
 my $recent_options = {
 	slurmDependencyMinAge => 300,

@@ -106,8 +106,20 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.50;/,
-	'within-strain tree-submission accounting increments the workflow version');
+like($strain, qr/my \$version = 0\.51;/,
+	'within-strain step-completion summaries increment the workflow version');
+like($strain,
+	qr/sub stepComplete .*?STEP COMPLETE: \$step/s,
+	'step completion messages use one consistent formatter');
+like($strain,
+	qr/configuration and map initialization.*?assembly-group expansion.*?consensus-input audit.*?MGS and seed-locus selection.*?existing-output and resume audit/s,
+	'startup stages emit consistent completion messages with elapsed time and statistics');
+like($strain,
+	qr/locus-model construction.*?catalogue_drivers=.*?resolved_loci=.*?consensus-gene extraction and publication.*?tree-input sizing/s,
+	'major extraction and tree-preparation stages also report concise completion statistics');
+like($strain,
+	qr/historical exclusion loading.*?excluded_MGS=.*?outgroup-reference preparation.*?reference_NT=.*?MGS_with_outgroup_candidates=/s,
+	'historical exclusions and outgroup-reference preparation report their final counts');
 like($strain,
 	qr/my %treeDisposition.*?\$treeDisposition\{'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
 	'tree submission reports every eligible and skipped MGS disposition before waiting');

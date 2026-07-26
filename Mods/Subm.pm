@@ -2,6 +2,7 @@ package Mods::Subm;
 
 use warnings;
 use strict;
+use Fcntl qw(:flock);
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths convert2Gb);
 use Mods::WorkflowControl qw(normalise_job_dependencies);
@@ -10,9 +11,225 @@ use Mods::WorkflowControl qw(normalise_job_dependencies);
 use Exporter qw(import);
 our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJobAlive
 		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs numActiveUserJobs reconcileSlurmDependencies
+		recordSampleLockJobs sampleLockActiveJobs slurmJobFailureSummary
 		submitSlurmWithDependencyRecovery);
 
 my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
+
+sub recordSampleLockJobs {
+	my ($lock_file, $jobs, $optHR) = @_;
+	return 0 unless defined($lock_file) && $lock_file ne '';
+	my @job_ids = split /;/, normalise_job_dependencies($jobs);
+	my $run_tag = $optHR->{rTag} || '';
+	for (@job_ids) {
+		s/^\Q$run_tag\E//;
+	}
+	@job_ids = grep { /^\d+$/ } @job_ids;
+	return 0 unless @job_ids;
+
+	open my $lock_fh, '>>', $lock_file
+		or die "Cannot update sample job lock $lock_file: $!\n";
+	flock($lock_fh, LOCK_EX)
+		or die "Cannot lock sample job ledger $lock_file: $!\n";
+	print {$lock_fh} "$_\n" for @job_ids;
+	close $lock_fh
+		or die "Cannot close sample job ledger $lock_file: $!\n";
+
+	# A cached scheduler snapshot predating these submissions must still treat
+	# every locally accepted job as active.
+	my $state = $optHR->{sampleLockActiveState};
+	if ($state) {
+		$state->{jobs}{$_} = 1 for @job_ids;
+	}
+	return scalar @job_ids;
+}
+
+sub sampleLockActiveJobs {
+	my ($lock_file, $optHR) = @_;
+	return undef unless defined($lock_file) && -e $lock_file;
+	open my $lock_fh, '<', $lock_file
+		or do {
+			warn "Cannot inspect sample job lock $lock_file: $!\n";
+			return undef;
+		};
+	flock($lock_fh, LOCK_SH)
+		or do {
+			warn "Cannot lock sample job ledger $lock_file for reading: $!\n";
+			close $lock_fh;
+			return undef;
+		};
+	my %wanted;
+	my $malformed = 0;
+	while (my $line = <$lock_fh>) {
+		$line =~ s/^\s+|\s+$//g;
+		next if $line eq '';
+		if ($line =~ /^\d+$/) {
+			$wanted{$line} = 1;
+		} else {
+			$malformed = 1;
+		}
+	}
+	close $lock_fh;
+	# An empty or legacy lock has no ownership evidence. Retain it unless the
+	# caller explicitly requested lock removal.
+	return undef if $malformed || !%wanted;
+	$optHR->{accountingJobIds}{$_} = 1 for keys %wanted;
+
+	my $clock = $optHR->{schedulerClock};
+	my $now = $clock ? $clock->() : time;
+	my $cache_seconds = defined($optHR->{sampleLockCheckInterval})
+		? 0 + $optHR->{sampleLockCheckInterval} : 30;
+	$cache_seconds = 0 if $cache_seconds < 0;
+	my $state = $optHR->{sampleLockActiveState};
+	if (!$state || $now - $state->{checkedAt} >= $cache_seconds) {
+		my $qmode = $optHR->{qmode} || 'slurm';
+		my $command;
+		if ($qmode eq 'slurm') {
+			$command = "squeue -h -u \$USER -o '%i'";
+		} elsif ($qmode eq 'sge') {
+			$command = "qstat -u \$USER | awk 'NR > 2 {print \$1}'";
+		} elsif ($qmode eq 'lsf') {
+			$command = "bjobs -noheader -o jobid";
+		} elsif ($qmode eq 'bash') {
+			return 0;
+		} else {
+			warn "Cannot inspect sample locks for scheduler mode '$qmode'\n";
+			return undef;
+		}
+		my ($output, $status);
+		if (my $runner = $optHR->{sampleLockJobRunner}) {
+			($output, $status) = $runner->($command);
+			$status ||= 0;
+		} else {
+			$output = `$command`;
+			$status = $?;
+		}
+		if ($status != 0) {
+			warn "Failed to query scheduler while inspecting $lock_file; retaining lock\n";
+			return undef;
+		}
+		my %active = map { $_ => 1 }
+			grep { /^\d+$/ }
+			map { my $id = $_; $id =~ s/^\s+|\s+$//g; $id }
+			split /\n/, $output;
+		$state = $optHR->{sampleLockActiveState} = {
+			checkedAt => $clock ? $clock->() : time,
+			jobs => \%active,
+		};
+	}
+	return scalar grep { $state->{jobs}{$_} } keys %wanted;
+}
+
+sub _job_category {
+	my ($job_name, $requested_name, $run_tag) = @_;
+	my $category = defined($requested_name) && $requested_name ne ''
+		? $requested_name : ($job_name || 'unknown');
+	$category =~ s/^\Q$run_tag\E//
+		if defined($run_tag) && $run_tag ne '';
+	$category =~ s/\s.*$//;
+	$category =~ s/(?:[._-]?\d+)+(?:[._-].*)?$//;
+	$category =~ s/[._-]+$//;
+	return $category ne '' ? $category : 'unknown';
+}
+
+sub _failure_class {
+	my ($state, $exit_code, $reason) = @_;
+	$state ||= '';
+	$exit_code ||= '';
+	$reason ||= '';
+	my %terminal = map { $_ => 1 } qw(
+		BOOT_FAIL CANCELLED COMPLETED DEADLINE FAILED NODE_FAIL
+		OUT_OF_MEMORY PREEMPTED REVOKED TIMEOUT
+	);
+	return '' unless $terminal{$state};
+	return 'OOM' if $state eq 'OUT_OF_MEMORY' || $reason =~ /out.?of.?memory/i;
+	return 'TIMEOUT' if $state eq 'TIMEOUT' || $reason =~ /time.?limit/i;
+	return 'DEPENDENCY' if $reason =~ /dependenc/i;
+	return 'NODE_FAIL' if $state =~ /^(?:BOOT_FAIL|NODE_FAIL)$/;
+	return 'PREEMPTED' if $state =~ /^(?:PREEMPTED|REVOKED)$/;
+	return 'CANCELLED' if $state eq 'CANCELLED';
+	return 'FAILED'
+		if $state eq 'FAILED' || ($exit_code ne '' && $exit_code !~ /^0:0$/);
+	return '';
+}
+
+sub slurmJobFailureSummary {
+	my ($jobs, $optHR) = @_;
+	$jobs ||= {};
+	$optHR ||= {};
+	return { queried => 0, failed => 0, unresolved => 0, categories => {} }
+		unless (($optHR->{qmode} || '') eq 'slurm');
+
+	my %requested;
+	if (ref($jobs) eq 'HASH') {
+		for my $job_id (keys %{$jobs}) {
+			next unless $job_id =~ /^\d+$/;
+			my $record = $jobs->{$job_id};
+			$requested{$job_id} = ref($record) eq 'HASH'
+				? ($record->{requested_name} || '') : ($record || '');
+		}
+	} elsif (ref($jobs) eq 'ARRAY') {
+		$requested{$_} = '' for grep { /^\d+$/ } @{$jobs};
+	}
+	my @job_ids = sort { $a <=> $b } keys %requested;
+	return { queried => 0, failed => 0, unresolved => 0, categories => {} }
+		unless @job_ids;
+
+	my (%seen, %categories);
+	my $failed = 0;
+	while (@job_ids) {
+		# Keep normal and moderately large MATAF4 runs to one accounting query.
+		# The dual bound avoids both an excessive SlurmDB request and shell
+		# command-line limits for exceptionally large submissions.
+		my @batch;
+		my $batch_chars = 0;
+		while (@job_ids && @batch < 4000) {
+			my $next_chars = length($job_ids[0]) + (@batch ? 1 : 0);
+			last if @batch && $batch_chars + $next_chars > 48_000;
+			my $job_id = shift @job_ids;
+			push @batch, $job_id;
+			$batch_chars += $next_chars;
+		}
+		my $command = "sacct -X -n -P -j ".join(',', @batch)
+			." --format=JobIDRaw,JobName,State,ExitCode,Reason";
+		my ($output, $status);
+		if (my $runner = $optHR->{jobAccountingRunner}) {
+			($output, $status) = $runner->($command, \@batch);
+			$status ||= 0;
+		} else {
+			$output = `$command 2>/dev/null`;
+			$status = $?;
+		}
+		return undef if $status != 0;
+		for my $line (split /\n/, $output) {
+			my ($job_id, $job_name, $state, $exit_code, $reason) =
+				split /\|/, $line, 5;
+			next unless defined($job_id) && exists $requested{$job_id};
+			$seen{$job_id} = 1;
+			for ($job_name, $state, $exit_code, $reason) {
+				$_ = '' unless defined $_;
+				s/^\s+|\s+$//g;
+			}
+			$state =~ s/\+$//;
+			$state =~ s/\s.*$//;
+			$state = uc($state);
+			my $failure = _failure_class($state, $exit_code, $reason);
+			next if $failure eq '';
+			my $category = _job_category(
+				$job_name, $requested{$job_id}, $optHR->{rTag} || '',
+			);
+			$categories{$category}{total}++;
+			$categories{$category}{failures}{$failure}++;
+			$failed++;
+		}
+	}
+	return {
+		queried => scalar(keys %requested),
+		failed => $failed,
+		unresolved => scalar(grep { !$seen{$_} } keys %requested),
+		categories => \%categories,
+	};
+}
 
 sub _slurm_dependency_accounting_lookup {
 	my ($dependencies) = @_;
@@ -522,12 +739,12 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 			print "Completed local job $requestedJobName\n";
 		} else {
 			print "Submitted $requestedJobName as job $jname\n";
+			$optHR->{submittedJobRecords}{$jname} = {
+				requested_name => $requestedJobName,
+			};
 		}
-		# Only record a lock after the scheduler has accepted the job.
-		if ($lockFile ne "" && !-e $lockFile){
-			open my $lock, ">", $lockFile or die "Cannot create lock $lockFile: $!\n";
-			close $lock or die "Cannot close lock $lockFile: $!\n";
-		}
+		# Only record a lock owner after the scheduler has accepted the job.
+		recordSampleLockJobs($lockFile, [$jname], $optHR) if $LSF != 3;
 	}
 	
 	#die "$qcm\n";
@@ -826,6 +1043,7 @@ sub qsubSystemJobAlive{
 		$pollSeconds = 1 if ($pollSeconds < 1);
 		sleep($pollSeconds);
 	}
+	delete $optHR->{sampleLockActiveState};
 	#print "returning\n";
 	return;
 }
@@ -927,25 +1145,12 @@ sub qsubSystem2{
 
 
 
-#handles deleting of lock file, if all jobs have finished for current sample
+# Persist every job that currently owns this sample. MATAF4 removes the ledger
+# itself on a later pass once none of these jobs remains in the scheduler.
 sub MFnext($ $ $ $){
 	my ($lckFile,$aR,$Jnum,$QSBoptHR) = @_;
 	return if (! @{$aR});
-	my $logF = $lckFile; $logF =~ s/\/[^\/]+$/rmLock.sh/;
-	my $cmd = "echo \"all smpl associated jobs seem to have quit. Releasing lock..\"\nrm -f $lckFile\n";
-	#my @jobs = @{$aR};
-	my $jDepe = normalise_job_dependencies($aR);
-	my $jobN = "RMLCK$Jnum";
-	#print "$logF\n$jDepe\n\n"; 
-	my ($oldAfterAny, $oldUseShortQueue, $oldTmpSpace) =
-		@{$QSBoptHR}{qw(afterAny useShortQueue tmpSpace)};
-	$QSBoptHR->{afterAny}=1;
-	$QSBoptHR->{tmpSpace} = "0"; 
-	$QSBoptHR->{useShortQueue} =1;
-	my ($jN,$submitCommand) = qsubSystem($logF,$cmd,1,"1G",$jobN,$jDepe,"",1,[],$QSBoptHR);
-	@{$QSBoptHR}{qw(afterAny useShortQueue tmpSpace)} =
-		($oldAfterAny, $oldUseShortQueue, $oldTmpSpace);
-	push(@{$aR}, $jN) if ($jN ne "");
+	recordSampleLockJobs($lckFile, $aR, $QSBoptHR);
 }
 
 
