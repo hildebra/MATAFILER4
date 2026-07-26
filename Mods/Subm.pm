@@ -428,6 +428,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		$xtra .= "span[hosts=1]\" -R \"rusage[mem=$memory]\" "; #
 	}
 	#set abortion on program fails
+	print O "echo \"SLURM job ID: \$SLURM_JOB_ID\"\n" if ($qmode eq "slurm");
 	print O "echo \$HOSTNAME;\n";
 	print O "set -eo pipefail\n";
 	print O "ulimit -c 0;\n";

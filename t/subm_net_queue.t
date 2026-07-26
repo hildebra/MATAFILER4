@@ -49,6 +49,9 @@ close $fh;
 
 like($contents, qr/^#SBATCH -p "network"$/m, 'uses the network queue');
 like($contents, qr/^#SBATCH --time=168:00:00$/m, 'uses the long wall time');
+like($contents,
+	qr/^echo "SLURM job ID: \$SLURM_JOB_ID"\necho \$HOSTNAME;$/m,
+	'prints the allocated Slurm job ID before executing the job payload');
 is($options->{useNetQueue}, 0, 'network queue selection is one-shot');
 
 done_testing;

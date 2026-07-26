@@ -53,6 +53,7 @@ sub limitedWarn;sub limitedNotice;
 my %limitedWarningStats;
 my %limitedNoticeStats;
 my $warningExampleLimit = 5;
+my $completionMessage = "";
 sub limitedWarn {
 	my ($category, $message) = @_;
 	my $entry = $limitedWarningStats{$category} ||= { total => 0, suppressed => 0 };
@@ -80,6 +81,7 @@ sub limitedNotice {
 }
 
 END {
+	my $fatalError = $? != 0 ? $@ : "";
 	my @suppressed = sort grep {
 		($limitedWarningStats{$_}{suppressed} || 0) > 0
 	} keys %limitedWarningStats;
@@ -99,6 +101,15 @@ END {
 			my $entry = $limitedNoticeStats{$category};
 			print "  $category: $entry->{total} total; $entry->{suppressed} not shown\n";
 		}
+	}
+	if (defined($fatalError) && length($fatalError)) {
+		$fatalError =~ s/\s+$//;
+		print STDERR "\nFATAL: strain_within.pl terminated: $fatalError\n";
+		# The explicit final diagnostic above follows every shutdown summary.
+		# Clear the active exception so Perl does not print it again out of order.
+		$@ = "";
+	} elsif (length($completionMessage)) {
+		print "\nFINISH: $completionMessage\n";
 	}
 }
 
@@ -139,7 +150,8 @@ END {
 #.47: use bounded-memory IQ-TREE 3 pathogen mode with an exact legacy-tree switch
 #.48: add tree-only reset and resubmission from published per-MGS inputs
 #.49: make IQ-TREE pathogen/CMAPLE mode explicitly opt-in
-my $version = 0.49;
+#.50: account for every tree-submission decision and make termination status explicit
+my $version = 0.50;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -502,12 +514,14 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 		if $maxSubJob && !$subJob;
 	
 	if ($subJob){
+		$completionMessage = "strain_within.pl subjob ${subJob}/$maxSubJob completed normally.";
 		print "Finished subJob ${subJob}/$maxSubJob. Exiting..\n";
 		exit(0);
 	}
 
 	if ($maxSubJob && !$subJob){ # second part for main worker: check that everything else is finished..
 		if (@jobsMain && !$doSubmit) {
+			$completionMessage = "split-worker scripts were generated successfully; submission was disabled.";
 			print "Split-worker scripts were generated but not submitted; stopping before incomplete outputs are combined.\n";
 			exit(0);
 		}
@@ -610,24 +624,32 @@ my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 #die;
 #go through every SpecI;
 $cnt=0; my $lcnt=-1; my @jobs; my %expectedTreeOutputs; my $Nspecis = @specis;
+my $treeMGSVisited = 0;
+my %treeDisposition;
 foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTreeScript on..
 	$lcnt++;
 	if (!$recalcTrees && !$reSubmit && !$repairCAT && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
+		$treeDisposition{'submission pass unnecessary'} += $Nspecis - $treeMGSVisited;
 		print "\nAll submission dirs prepared, nothing to do..\n";
 		last;
 	}
+	$treeMGSVisited++;
 	if (exists $MGSnoTree{$MGS}) {
+		$treeDisposition{'too few samples during extraction'}++;
 		limitedNotice('MGS skipped after too-few-samples extraction',
 			"Skipping $MGS: previous extraction found too few samples for a tree.\n");
 		next;
 	}
 	# previous condition was too lax: ( ($CatNotPrepped/$#specis) < 0.1)  , just check if we can resubmit anything here..
 	if (exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ m/multicopy/){
+		$treeDisposition{'conspecific or multicopy'}++;
 		limitedNotice('MGS skipped as conspecific or multicopy',
 			"Skipping $MGS due to inclusion in conspecific MGS list.\n");next;
 	}
 	if ($startSubFromMGS ne "" ){
-		if ($MGS ne $startSubFromMGS){next;
+		if ($MGS ne $startSubFromMGS){
+			$treeDisposition{'before requested submission start'}++;
+			next;
 		} else { $startSubFromMGS = "";} #deactivate now
 	}
 	my $outD2 = $SIdirs{$MGS};
@@ -637,6 +659,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
 	if ($recalcTrees) {
 		if (exists($legacyLocusMGS{$MGS})) {
+			$treeDisposition{'legacy inputs require regeneration'}++;
 			limitedWarn('MGS requires input regeneration before tree recalculation',
 				"Skipping $MGS: its published identifiers require input regeneration before trees can be recalculated.\n");
 			next;
@@ -645,6 +668,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 			&& fileGZe("$outD2/$FAAstdof")
 			&& fileGZe("$outD2/$CATstdof");
 		unless ($publishedInputsReady) {
+			$treeDisposition{'published inputs missing for recalculation'}++;
 			limitedWarn('MGS missing published inputs for tree recalculation',
 				"Skipping $MGS: -recalcTrees requires complete published FNA/FAA/category files.\n");
 			next;
@@ -654,6 +678,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	if (!$recalcTrees && !$reSubmit && !$repairCAT && !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
 			&& -e $treeStone && -s $IQtreef ){
+		$treeDisposition{'valid tree already present'}++;
 		limitedNotice('MGS skipped with existing trees',
 			"Skipping $MGS: a valid tree already exists.\n");
 		next;
@@ -665,6 +690,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	make_path($outD2) unless -d $outD2;
 	my $tmpD  = "$scratchD/outs/$MGS/";
 	if ($inputFNAsize ==0){
+		$treeDisposition{'empty input'}++;
 		limitedNotice('MGS skipped with empty input', "Skipping $MGS: input is empty.\n");
 		next;
 	} #empty input
@@ -677,6 +703,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		print "  Recovery input: using complete published FNA/FAA/category files\n";
 	} else {
 		unless (combineMGSgenesDir($MGS,$tmpD,$tmpD)) {#$outD2); -> keep in tmpdir for now..
+			$treeDisposition{'incomplete published and worker inputs'}++;
 			limitedWarn('MGS with incomplete combined worker input',
 				"$MGS has neither complete published inputs nor complete combined worker input; leaving it for an extraction repair run\n");
 			next;
@@ -753,6 +780,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	# after this MGS and would otherwise accumulate for the entire submission.
 	%outgroupGeneCache = ();
 	unless ($inputReady) {
+		$treeDisposition{'input awaiting repair'}++;
 		$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		$QSBoptHR->{useLongQueue} = 0;
 		limitedNotice('MGS awaiting input repair',
@@ -771,6 +799,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	if ($multiSmpl>2){
 		print "  Tree input: $multiSmpl samples, $ngenes potential genes; $numCoreL cores, $totMem memory\n";
 	} else {
+		$treeDisposition{'too few samples at tree preparation'}++;
 		limitedNotice('MGS with too few samples for tree statistics',
 			"$MGS: too few samples ($multiSmpl) for tree statistics\n");
 		writeTooFewMarker($outD2, $multiSmpl, $ngenes);
@@ -790,14 +819,30 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		unlink $IQtreef or die "Cannot remove stale tree output $IQtreef: $!\n"
 			if -e $IQtreef;
 	}
-	my ($dep,$qcmd) = qsubSystem($outD2."treeCmd.sh",$preCmd.$Tcmd.$outgS.$postCmd,$numCoreL,int($totMem) ."M","FT$cnt","","",1,[],$QSBoptHR);
+	my $treeJobOrdinal = $cnt + 1;
+	my ($dep,$qcmd) = qsubSystem($outD2."treeCmd.sh",$preCmd.$Tcmd.$outgS.$postCmd,$numCoreL,int($totMem) ."M","FT$treeJobOrdinal","","",1,[],$QSBoptHR);
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	$QSBoptHR->{useLongQueue} = 0;
 	$cnt ++;
+	$treeDisposition{'eligible tree job'}++;
 	push (@jobs,$dep) if defined($dep) && length($dep);
 	$expectedTreeOutputs{$MGS} = [$IQtreef, $treeStone];
 	#die $outD2."treeCmd.sh\n";
 
+}
+my $treeAccounted = 0;
+$treeAccounted += $_ for values %treeDisposition;
+print "\nTree submission accounting: $treeAccounted/$Nspecis selected MGS accounted for; "
+	. "$treeMGSVisited visited by the submission loop.\n";
+for my $reason (sort keys %treeDisposition) {
+	print "  $reason: $treeDisposition{$reason}\n";
+}
+if ($doSubmit) {
+	print "Tree submission pass complete: $cnt eligible tree job(s) submitted; "
+		.scalar(@jobs)." scheduler job ID(s) tracked. "
+		."The following wait count reports jobs still present, not jobs omitted.\n";
+} else {
+	print "Tree submission pass complete: $cnt eligible tree script(s) generated; scheduler submission disabled.\n";
 }
 if ($maxSubJob
 		&& split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob)
@@ -840,7 +885,8 @@ print "\n". $nxtCmd."\n";
 remove_tree($locTmpDir) if -d $locTmpDir;
 remove_tree($preConDir) if ($preCompCons && -d $preConDir);
 
-
+$completionMessage = "strain_within.pl completed normally; $cnt eligible tree job(s) were "
+	. ($doSubmit ? "submitted and validated." : "generated without scheduler submission.");
 exit(0);
 
  

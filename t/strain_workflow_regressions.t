@@ -106,8 +106,26 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.49;/,
-	'within-strain pathogen opt-in increments the workflow version');
+like($strain, qr/my \$version = 0\.50;/,
+	'within-strain tree-submission accounting increments the workflow version');
+like($strain,
+	qr/my %treeDisposition.*?\$treeDisposition\{'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
+	'tree submission reports every eligible and skipped MGS disposition before waiting');
+like($strain,
+	qr/qsubSystem\(\$outD2\."treeCmd\.sh".*?\$cnt \+\+.*?push \(\@jobs,\$dep\).*?\$expectedTreeOutputs\{\$MGS\}.*?qsubSystemJobAlive\( \\\@jobs.*?Tree jobs completed without valid tree outputs/s,
+	'every eligible tree is submitted, tracked, awaited, and output-validated');
+like($strain,
+	qr/The following wait count reports jobs still present, not jobs omitted/,
+	'the scheduler wait count is explicitly distinguished from submission coverage');
+like($strain,
+	qr/my \$treeJobOrdinal = \$cnt \+ 1;.*?"FT\$treeJobOrdinal"/s,
+	'tree scheduler labels use one-based submission ordinals');
+like($strain,
+	qr/END \{.*?Suppressed warning summary:.*?Repeated status summary:.*?FATAL: strain_within\.pl terminated:.*?FINISH:/s,
+	'shutdown summaries precede a final fatal or successful completion diagnostic');
+like($strain,
+	qr/\$completionMessage = "strain_within\.pl completed normally;.*?exit\(0\)/s,
+	'the regular main-process exit records an explicit FINISH message');
 like($strain,
 	qr/my \$iqPathogen = 0.*?"iqPathogen=i"\s+=> \\\$iqPathogen.*?-iqPathogen', \$iqPathogen/s,
 	'within-strain pathogen mode defaults off and is propagated explicitly to split workers');
