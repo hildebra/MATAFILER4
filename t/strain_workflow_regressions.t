@@ -106,14 +106,29 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.47;/,
-	'within-strain IQ-TREE pathogen update increments the workflow version');
+like($strain, qr/my \$version = 0\.48;/,
+	'within-strain tree-only recalculation increments the workflow version');
 like($strain,
 	qr/"legacyMGTK=i"\s+=> \\\$legacyMGTK.*?-legacyMGTK', \$legacyMGTK/s,
 	'within-strain legacy IQ-TREE selection is validated and propagated to split workers');
 like($strain,
 	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?\$legacyMGTK.*?"-iqLegacy 1 ".*?"-iqPathogen 1 -iqMemMB \$iqMemMB "/s,
 	'within-strain IQ-TREE defaults to memory-capped pathogen mode and retains an exact legacy route');
+like($strain,
+	qr/"recalcTrees=i"\s+=> \\\$recalcTrees.*?-recalcTrees must be 0 or 1.*?\$onlySubmit = 1 if \$recalcTrees/s,
+	'tree recalculation is validated and forced into published-input-only recovery mode');
+like($strain,
+	qr/-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData.*?-recalcTrees must be launched by the main strainWithin process/s,
+	'tree recalculation rejects input-regeneration modes and split-worker execution');
+like($strain,
+	qr/if \(!\$recalcTrees && \(.*?Part I:: extracting relevant core MGS genes/s,
+	'tree recalculation bypasses consensus and per-MGS input regeneration');
+like($strain,
+	qr/if \(\$recalcTrees\).*?exists\(\$legacyLocusMGS\{\$MGS\}\).*?requires input regeneration.*?\$publishedInputsReady.*?requires complete published FNA\/FAA\/category files.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
+	'tree outputs are reset only after compatible, complete published per-MGS inputs are verified');
+like($strain,
+	qr/sub resetMGSTreeOutputs .*?dirname\(\$resolvedMGS\) eq \$resolvedRoot.*?basename\(\$resolvedMGS\) eq \$MGS.*?remove_tree\(\$phyloDir, \{safe => 1\}\).*?unlink \$treeStone/s,
+	'tree-only reset is confined to the selected MGS phylo directory and completion checkpoint');
 like($strain,
 	qr/my \$locCl2G2 = \$cl2gene2\{\$sm\}.*?my \$COGprios1 = \$COGprios->\{\$MGS\}.*?\@candidates == 1.*?reason => 'unique'.*?\$LocusSeedProteins\{\$locus\} \|\|=.*?choose_locus_candidate/s,
 	'within-strain extraction avoids hot-loop container copies and scoring unique candidates');

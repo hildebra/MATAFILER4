@@ -45,6 +45,7 @@ sub addOutgroup2MGS;
 sub writeTooFewMarker;
 sub treeInputPrecopyCommand;
 sub readFastaIDs;
+sub resetMGSTreeOutputs;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -136,7 +137,8 @@ END {
 #.45: distinguish split-worker sparsity from missing catalogue data
 #.46: restore every sample in shared assembly groups
 #.47: use bounded-memory IQ-TREE 3 pathogen mode with an exact legacy-tree switch
-my $version = 0.47;
+#.48: add tree-only reset and resubmission from published per-MGS inputs
+my $version = 0.48;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -156,6 +158,7 @@ my $locTmpDir = ""; my $locTmpDir1 = "";
 my $maxCores = -1;
 my $onlySubmit =0;#extract genes anew?
 my $reSubmit=0;
+my $recalcTrees=0; #remove tree-stage outputs and rebuild from published per-MGS inputs
 my $treeFile = "";
 my $doSubmit=0;
 my $subMode="";
@@ -239,6 +242,7 @@ GetOptions(
 	"selfMemGb=i"    => \$selfMemGb,
 	"onlySubmit=i"   => \$onlySubmit, #submit only jobs, or also recreate input fna/faa files? (can take days)
 	"reSubmit=i"     => \$reSubmit, #for all MGS: resubmit tree phylo building
+	"recalcTrees=i"  => \$recalcTrees, #delete tree outputs and rebuild from existing per-MGS inputs
 	"repairCAT=i"    => \$repairCAT,
 	"deepRepair=i"   => \$deepRepair, #for missing MGS phylos: will resubmit phylo and rebuild fna/faa 
 	"redoSubmissionData=i" => \$redoSubmissionData,  #for all MGS: will resubmit phylo and rebuild the fna/faa files..
@@ -309,8 +313,15 @@ die "-phyloMemMulti must be positive\n" unless $memMulti > 0;
 die "-phyloProg must be 1 (IQ-TREE), 2 (VeryFastTree), or 3 (FastTree)\n"
 	unless $phyloProg >= 1 && $phyloProg <= 3;
 die "-legacyMGTK must be 0 or 1\n" unless $legacyMGTK == 0 || $legacyMGTK == 1;
+die "-recalcTrees must be 0 or 1\n" unless $recalcTrees == 0 || $recalcTrees == 1;
+die "-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData\n"
+	if $recalcTrees && ($repairCAT || $deepRepair || $redoSubmissionData);
+die "-recalcTrees must be launched by the main strainWithin process, not a split worker\n"
+	if $recalcTrees && $subJob;
 die "-MSAprog must be 0, 1, 2, or 4\n"
 	unless grep { $MSAprog == $_ } (0, 1, 2, 4);
+
+$onlySubmit = 1 if $recalcTrees; #tree-only recovery must never regenerate or remove published inputs
 
 @subsetMGS = split /,/,$subsMGSstr if ($subsMGSstr ne "");
 #print "SUBSMGS:: @subsetMGS\n";
@@ -403,11 +414,11 @@ my $splitManifest = "$LOGDIR/mainExtr.generation";
 my $splitStonePrefix = "$LOGDIR/mainExtr";
 
 
-if (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
+if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			|| $subJob || $redoSubmissionData
 			|| $legacyLocusOutputs
 			|| ($deepRepair && $dirsNOTPrepped)
-			|| ($repairCAT && $CatFileMiss)){
+			|| ($repairCAT && $CatFileMiss))){
 	#$PhylosExist=0;
 	
 	print "\n\n----------------------------------------------------\nPart I:: extracting relevant core MGS genes (SNP consensus called) from original assemblies". "Elapsed time : ", timeNice(time - $sttime) . "\n----------------------------------------------------\n\n";
@@ -544,7 +555,7 @@ my %outgroupGeneCache;
 
 my $geneCatLoaded=0;
 #read in genecat to create outgroup fasta sequences..
-if ($CatNotPrepped || $treeAbsent || $repairCAT || $deepRepair || $dirsNOTPrepped || $onlySubmit == 0 || $redoSubmissionData == 1){
+if ($recalcTrees || $CatNotPrepped || $treeAbsent || $repairCAT || $deepRepair || $dirsNOTPrepped || $onlySubmit == 0 || $redoSubmissionData == 1){
 	#also read reference gene seqs (for outgroup)
 	my $refFNA = ""; my $refFAA = ""; my $refNameL = "unknw";
 	if ($mode eq "MGS" || $mode eq "MGSall"){
@@ -594,7 +605,7 @@ my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 $cnt=0; my $lcnt=-1; my @jobs; my %expectedTreeOutputs; my $Nspecis = @specis;
 foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTreeScript on..
 	$lcnt++;
-	if (!$reSubmit && !$repairCAT && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
+	if (!$recalcTrees && !$reSubmit && !$repairCAT && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
 		print "\nAll submission dirs prepared, nothing to do..\n";
 		last;
 	}
@@ -617,8 +628,24 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $IQtreef= "$outD2/phylo/IQtree_allsites.treefile";
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
+	if ($recalcTrees) {
+		if (exists($legacyLocusMGS{$MGS})) {
+			limitedWarn('MGS requires input regeneration before tree recalculation',
+				"Skipping $MGS: its published identifiers require input regeneration before trees can be recalculated.\n");
+			next;
+		}
+		my $publishedInputsReady = fileGZe("$outD2/$FNAstdof")
+			&& fileGZe("$outD2/$FAAstdof")
+			&& fileGZe("$outD2/$CATstdof");
+		unless ($publishedInputsReady) {
+			limitedWarn('MGS missing published inputs for tree recalculation',
+				"Skipping $MGS: -recalcTrees requires complete published FNA/FAA/category files.\n");
+			next;
+		}
+		resetMGSTreeOutputs($outD2, $MGS);
+	}
 	
-	if (!$reSubmit && !$repairCAT && !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
+	if (!$recalcTrees && !$reSubmit && !$repairCAT && !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
 			&& -e $treeStone && -s $IQtreef ){
 		limitedNotice('MGS skipped with existing trees',
 			"Skipping $MGS: a valid tree already exists.\n");
@@ -1491,6 +1518,7 @@ sub prepRun{
 
 
 	print "\n!! WARNING !!: RESUBMISSION mode selected (will resubmit MSA + phylos even for already completed MGS) !!\n" if ($reSubmit);
+	print "\n!! WARNING !!: RECALCTREES mode selected (will delete per-MGS tree outputs and rebuild from published inputs) !!\n" if ($recalcTrees);
 	print "\n!! WARNING !!: REDOSUBMISSIONDATA mode selected (will redo and resubmit MSA + phylos even for already completed MGS) !!\n" if ($redoSubmissionData);
 
 	open my $map_info, '<', "$GCd/LOGandSUB/GCmaps.inf"
@@ -1561,6 +1589,8 @@ sub prepRun{
 		my $sortedMGS = "$MGSfile.srt";
 		if ($subJob) {
 			die "Sorted MGS guide is missing for subjob: $sortedMGS\n" unless -s $sortedMGS;
+		} elsif ($recalcTrees && !-s $sortedMGS) {
+			die "-recalcTrees requires the existing sorted MGS guide: $sortedMGS\n";
 		} elsif ($mode eq "MGSall" && !-e $sortedMGS) {
 			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
 			remove_tree($outD) if -d $outD;
@@ -1817,14 +1847,14 @@ sub evalFileStatus{
 		my $outD2 = "$outD/$MGS/";
 		$SIdirs{$MGS} = $outD2;
 		#print "$outD2\n";
-		if (-d $outD2 && $onlySubmit == 0 && !$subJob){#only the parent may clean shared folders
+		if (-d $outD2 && $onlySubmit == 0 && !$subJob && !$recalcTrees){#only the parent may clean shared folders
 			remove_tree($outD2);
 			my $scratch_mgs = "$scratchD/outs/$MGS";
 			remove_tree($scratch_mgs) if -d $scratch_mgs;
 		}
 		make_path($outD2) unless -d $outD2;
 		my $tooFewMarker = "$outD2/tooFewSamples.sto";
-		if (-s $tooFewMarker && !$deepRepair && !$redoSubmissionData && $onlySubmit != 0) {
+		if (-s $tooFewMarker && !$deepRepair && !$redoSubmissionData && ($onlySubmit != 0 || $recalcTrees)) {
 			$MGSnoTree{$MGS} = 1;
 			$tooFewDirs++;
 			next;
@@ -2135,6 +2165,29 @@ sub assertSafeWorkflowRemoval {
 	}
 	die "Refusing to remove unowned custom output directory $resolved; expected $owner\n"
 		unless $is_default || -f $owner;
+}
+
+sub resetMGSTreeOutputs {
+	my ($mgsDir, $MGS) = @_;
+	die "Cannot reset tree outputs for an absent MGS directory: $mgsDir\n"
+		unless -d $mgsDir;
+	my $resolvedRoot = abs_path($outD)
+		or die "Cannot resolve within-strain output directory $outD: $!\n";
+	my $resolvedMGS = abs_path($mgsDir)
+		or die "Cannot resolve MGS output directory $mgsDir: $!\n";
+	die "Refusing to reset tree outputs outside the selected within-strain directory: $resolvedMGS\n"
+		unless dirname($resolvedMGS) eq $resolvedRoot
+			&& basename($resolvedMGS) eq $MGS;
+
+	my $phyloDir = File::Spec->catdir($resolvedMGS, "phylo");
+	my $treeStone = File::Spec->catfile($resolvedMGS, "treeDone.sto");
+	if (-d $phyloDir) {
+		remove_tree($phyloDir, {safe => 1});
+		die "Cannot completely remove tree output directory $phyloDir\n" if -e $phyloDir;
+	}
+	unlink $treeStone or die "Cannot remove tree checkpoint $treeStone: $!\n"
+		if -e $treeStone;
+	print "  Reset tree outputs: removed $phyloDir and tree completion checkpoint\n";
 }
 
 sub markStrainWorkflowDirectory {
