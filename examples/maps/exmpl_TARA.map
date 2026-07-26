@@ -1,6 +1,6 @@
 #SmplID	Path
 #DirPath	/path/to/file/TARA/
-#OutPath	/my/home/dir/for/data/MGTK/
+#OutPath	/my/home/dir/for/data/MATAFILER/
 #RunID	TARA_Bac
 #SmplID	Path	secndName
 TR1	100_DCM_0d2-3	TARA_100_DCM_0.22-3

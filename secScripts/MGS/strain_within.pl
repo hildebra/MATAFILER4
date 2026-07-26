@@ -153,7 +153,8 @@ END {
 #.49: make IQ-TREE pathogen/CMAPLE mode explicitly opt-in
 #.50: account for every tree-submission decision and make termination status explicit
 #.51: summarize completion of major initialization and workflow steps
-my $version = 0.51;
+#.52: let -recalcTrees recover complete staged inputs before resubmitting trees
+my $version = 0.52;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -173,7 +174,7 @@ my $locTmpDir = ""; my $locTmpDir1 = "";
 my $maxCores = -1;
 my $onlySubmit =0;#extract genes anew?
 my $reSubmit=0;
-my $recalcTrees=0; #remove tree-stage outputs and rebuild from published per-MGS inputs
+my $recalcTrees=0; #remove tree-stage outputs and rebuild from published or complete staged per-MGS inputs
 my $treeFile = "";
 my $doSubmit=0;
 my $subMode="";
@@ -341,7 +342,7 @@ die "-recalcTrees must be launched by the main strainWithin process, not a split
 die "-MSAprog must be 0, 1, 2, or 4\n"
 	unless grep { $MSAprog == $_ } (0, 1, 2, 4);
 
-$onlySubmit = 1 if $recalcTrees; #tree-only recovery must never regenerate or remove published inputs
+$onlySubmit = 1 if $recalcTrees; #tree-only recovery reuses published or complete staged inputs
 
 @subsetMGS = split /,/,$subsMGSstr if ($subsMGSstr ne "");
 #print "SUBSMGS:: @subsetMGS\n";
@@ -679,6 +680,7 @@ my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 $cnt=0; my $lcnt=-1; my @jobs; my %expectedTreeOutputs; my $Nspecis = @specis;
 my $treeMGSVisited = 0;
 my %treeDisposition;
+my $recalcScratchRecovered = 0;
 foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTreeScript on..
 	$lcnt++;
 	if (!$recalcTrees && !$reSubmit && !$repairCAT && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
@@ -706,24 +708,29 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		} else { $startSubFromMGS = "";} #deactivate now
 	}
 	my $outD2 = $SIdirs{$MGS};
+	my $tmpD  = "$scratchD/outs/$MGS/";
 	my $treeStone = "$outD2/treeDone.sto";
 	my $IQtreef= "$outD2/phylo/IQtree_allsites.treefile";
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
+	my $publishedInputsReady = !exists($legacyLocusMGS{$MGS})
+		&& fileGZe("$outD2/$FNAstdof")
+		&& fileGZe("$outD2/$FAAstdof")
+		&& fileGZe("$outD2/$CATstdof");
+	my $scratchInputsReady = 0;
 	if ($recalcTrees) {
-		if (exists($legacyLocusMGS{$MGS})) {
-			$treeDisposition{'legacy inputs require regeneration'}++;
-			limitedWarn('MGS requires input regeneration before tree recalculation',
-				"Skipping $MGS: its published identifiers require input regeneration before trees can be recalculated.\n");
-			next;
-		}
-		my $publishedInputsReady = fileGZe("$outD2/$FNAstdof")
-			&& fileGZe("$outD2/$FAAstdof")
-			&& fileGZe("$outD2/$CATstdof");
+		# The sizing pass already recognizes staged inputs. Recover and combine
+		# those inputs here as well, before deciding that this MGS is ineligible.
+		# This also permits a complete new-format staging set to replace legacy
+		# published identifiers without rerunning consensus/extraction.
 		unless ($publishedInputsReady) {
-			$treeDisposition{'published inputs missing for recalculation'}++;
-			limitedWarn('MGS missing published inputs for tree recalculation',
-				"Skipping $MGS: -recalcTrees requires complete published FNA/FAA/category files.\n");
+			$scratchInputsReady = combineMGSgenesDir($MGS,$tmpD,$tmpD);
+			$recalcScratchRecovered++ if $scratchInputsReady;
+		}
+		unless ($publishedInputsReady || $scratchInputsReady) {
+			$treeDisposition{'no recoverable inputs for recalculation'}++;
+			limitedWarn('MGS missing recoverable inputs for tree recalculation',
+				"Skipping $MGS: -recalcTrees found neither complete published inputs nor a complete staged FNA/FAA/category set.\n");
 			next;
 		}
 		resetMGSTreeOutputs($outD2, $MGS);
@@ -741,26 +748,25 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $inputFNAsize = $sizeOfDirs[$lcnt];
 	#PART I: create fasta files required by tree
 	make_path($outD2) unless -d $outD2;
-	my $tmpD  = "$scratchD/outs/$MGS/";
 	if ($inputFNAsize ==0){
 		$treeDisposition{'empty input'}++;
 		limitedNotice('MGS skipped with empty input', "Skipping $MGS: input is empty.\n");
 		next;
 	} #empty input
-	my $publishedInputsReady = fileGZe("$outD2/$FNAstdof")
-		&& fileGZe("$outD2/$FAAstdof")
-		&& fileGZe("$outD2/$CATstdof");
 	my $mustRegenerateInputs = $repairCAT || $deepRepair || $redoSubmissionData
 		|| exists($legacyLocusMGS{$MGS});
 	if ($publishedInputsReady && !$mustRegenerateInputs) {
 		print "  Recovery input: using complete published FNA/FAA/category files\n";
 	} else {
-		unless (combineMGSgenesDir($MGS,$tmpD,$tmpD)) {#$outD2); -> keep in tmpdir for now..
+		$scratchInputsReady ||= combineMGSgenesDir($MGS,$tmpD,$tmpD);
+		unless ($scratchInputsReady) {#$outD2); -> keep in tmpdir for now..
 			$treeDisposition{'incomplete published and worker inputs'}++;
 			limitedWarn('MGS with incomplete combined worker input',
 				"$MGS has neither complete published inputs nor complete combined worker input; leaving it for an extraction repair run\n");
 			next;
 		}
+		print "  Recovery input: using complete staged FNA/FAA/category files; "
+			."the tree job will publish them to the MGS directory\n";
 	}
 	
 	#final locations (after copying etc)
@@ -890,6 +896,8 @@ print "\nTree submission accounting: $treeAccounted/$Nspecis selected MGS accoun
 for my $reason (sort keys %treeDisposition) {
 	print "  $reason: $treeDisposition{$reason}\n";
 }
+print "  staged input sets recovered for -recalcTrees: $recalcScratchRecovered\n"
+	if $recalcTrees;
 if ($doSubmit) {
 	print "Tree submission pass complete: $cnt eligible tree job(s) submitted; "
 		.scalar(@jobs)." scheduler job ID(s) tracked. "
@@ -1627,7 +1635,7 @@ sub prepRun{
 
 
 	print "\n!! WARNING !!: RESUBMISSION mode selected (will resubmit MSA + phylos even for already completed MGS) !!\n" if ($reSubmit);
-	print "\n!! WARNING !!: RECALCTREES mode selected (will delete per-MGS tree outputs and rebuild from published inputs) !!\n" if ($recalcTrees);
+	print "\n!! WARNING !!: RECALCTREES mode selected (will delete per-MGS tree outputs and rebuild from published or complete staged inputs) !!\n" if ($recalcTrees);
 	print "\n!! WARNING !!: REDOSUBMISSIONDATA mode selected (will redo and resubmit MSA + phylos even for already completed MGS) !!\n" if ($redoSubmissionData);
 
 	open my $map_info, '<', "$GCd/LOGandSUB/GCmaps.inf"
@@ -2598,7 +2606,7 @@ sub readGenesSample_Singl{
 		#get NT's
 		#my $tar = $metaGD."genePred/genes.shrtHD.fna";
 		
-		#pre-calculated, as in old MGTK versions (pre 0.69):
+		#pre-calculated, as in older MATAFILER versions (pre 0.69):
 		my $fastaf = "$cD/$lSNPdir/$lConsFNA";
 		my $fastafAA = "$cD/$lSNPdir/$lConsFAA";
 		my $fastafVCF = "$cD/$lSNPdir/$lConsVCF";

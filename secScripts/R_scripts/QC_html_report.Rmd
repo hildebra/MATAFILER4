@@ -1,5 +1,5 @@
 ---
-title: "MG-TK Assembly and Gene QC Statistics"
+title: "MATAFILER Assembly and Gene QC Statistics"
 output: html_document
 params:
     date: !r Sys.Date()
@@ -32,7 +32,7 @@ params:
 
 ## Load Input Data
 
-First we load the data from the MG-TK overall assembly and gene annotation statistics file. This file contains one row for each sample. Samples in the same assembly group share the same assembly and gene statistics. For the purposes of this report, these are not double counted.
+First we load the data from the MATAFILER overall assembly and gene annotation statistics file. This file contains one row for each sample. Samples in the same assembly group share the same assembly and gene statistics. For the purposes of this report, these are not double counted.
 
 ```{r import_df, echo=FALSE, message=FALSE}
     df_orig <- data.frame(
@@ -79,7 +79,7 @@ First we load the data from the MG-TK overall assembly and gene annotation stati
 
 ```{r warn_example, results='asis', echo = FALSE, include = example1ill}
 
-    cat('### Warning! \n **It looks like you are running the Illumina short read example data. The results from this are a little weird - this is somewhat nonsensical data to check MG-TK runs as intended. Two of the input read files are identical, and another pair of files have been pooled into one assembly group.** ')
+    cat('### Warning! \n **It looks like you are running the Illumina short read example data. The results from this are a little weird - this is somewhat nonsensical data to check MATAFILER runs as intended. Two of the input read files are identical, and another pair of files have been pooled into one assembly group.** ')
     cat('In particular, the output from the metagstats.tsv file which is used to produce this data will have some odd looking results: \n ')
     cat(' - Two samples will have similar read error characteristics')
     cat(' - Two others will be pooled during assembly and therefore have the same contig/scaffold statistics.')

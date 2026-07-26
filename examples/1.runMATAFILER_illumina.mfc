@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH -N 1
 #SBATCH --cpus-per-task=1
-#SBATCH -o 1.runMGTK_illumina.mfc.otxt
-#SBATCH -e 1.runMGTK_illumina.mfc.etxt
+#SBATCH -o 1.runMATAFILER_illumina.mfc.otxt
+#SBATCH -e 1.runMATAFILER_illumina.mfc.etxt
 #SBATCH --mem=22400
 #SBATCH --export=ALL
 #SBATCH -p "ei-medium,qib-medium,qib-long,ei-long"
 #  SBATCH --time=248:00:00
 # #SBATCH --localscratch=ssd:10
-#SBATCH -J 1.MGTKexmpl
+#SBATCH -J 1.MATAFILERexmpl
 set -e
 ulimit -c 0;
 
@@ -20,10 +20,10 @@ fi
 
 echo ""
 echo ""
-echo "Simple example (nonsensical data) for testing MG-TK short read metagenomic assembly workflow"
+echo "Simple example (nonsensical data) for testing MATAFILER short read metagenomic assembly workflow"
 echo "Run, wait for all jobs to finish. Then rerun to capture unfinished tasks. Repeat until no further jobs are submitted."
 echo "By default, these results will be saved in $MF4DIR/examples/output/ dir for this test."
-echo "    However, this is not recommended for larger runs, where it is better to keep the input data and results dir separate from the MG-TK dir."
+echo "    However, this is not recommended for larger runs, where it is better to keep the input data and results dir separate from the MATAFILER dir."
 echo ""
 echo ""
 
@@ -39,21 +39,20 @@ perl $MF4DIR/MATAF4.pl -map $MAP -inputFQregexSingle '.*\.fastq\.gz' -inputFQreg
 
 echo ""
 echo ""
-echo "Have a look at this .sh file, to learn more about MG-TK options, while waiting for jobs to finish :)"
+echo "Have a look at this .sh file, to learn more about MATAFILER options, while waiting for jobs to finish :)"
 
 exit
 
 #-mapper 5 -> use strobealign to map. Setting this to -1 will use a default mapper
-#-submit 1  -> set to "0" to dry-run mg-tk (check that all file paths exist)
+#-submit 1  -> set to "0" to dry-run MATAFILER (check that all file paths exist)
 #assembly options: megahit assembler, kmers to be assembled, 20Gb of mem requested 
 #-assembleMG 2 -assemblCores 12 -assemblyKmers "25,43,67,87,111,127" -assemblMemory  20
 #-ignore smpl1,smpl2 -> ignore specific samples
-#-rmSmplLocks 0 -> change to "1" in case you want to enfore MG-TK to start jobs for every sample, even if processes (assembly, mapping etc) are still running for a given sample
+#-rmSmplLocks 0 -> change to "1" in case you want to enfore MATAFILER to start jobs for every sample, even if processes (assembly, mapping etc) are still running for a given sample
 #-mergeReads 0 -> merge reads before assembly (modern assemblers do this better internally, deactivated by default)
-#-maxConcurrentJobs 800 -> how many jobs to have concurrently submitted to this HPC before MG-TK will wait for free'd up submission slots
+#-maxConcurrentJobs 800 -> how many jobs to have concurrently submitted to this HPC before MATAFILER will wait for free'd up submission slots
 
-#if you want to remove host reads, you can create a kraken2 databases for the human genome and link it into MG-TK with this flag:
+#if you want to remove host reads, you can create a kraken2 databases for the human genome and link it into MATAFILER with this flag:
 #-filterHostKrak2DB /path/to/kraken2/DB/human/ -filterHostRds 1 -> filter reads from host against specific, kraken2 database
 
-#there are many more flags in MG-TK. Have a look at the documentation to see these
-
+#there are many more flags in MATAFILER. Have a look at the documentation to see these

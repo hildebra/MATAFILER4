@@ -8,7 +8,7 @@
 #SBATCH -p "ei-medium,qib-medium,qib-long,ei-long"
 #  SBATCH --time=248:00:00
 # #SBATCH --localscratch=ssd:10
-#SBATCH -J 1.MGTKexmpl
+#SBATCH -J 1.MATAFILERexmpl
 set -e
 ulimit -c 0;
 
@@ -38,4 +38,3 @@ perl $MF4DIR/MATAF4.pl -map $MAP -inputFQregexSingle '.*\.fastq\.gz' -inputFQreg
 
 
 #-filterHostRds 3 -hostileIndex human-t2t-hla \
-

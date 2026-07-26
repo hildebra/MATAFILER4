@@ -15,21 +15,21 @@ ulimit -c 0;
 
 echo ""
 echo "Gene Catalogue creation example for illumina data"
-echo "Relies on running and completing first: \"1.runMGTK_illumina.mfc\"  "
-echo "Extension of simple example (nonsensical data) from script \"1.runMGTK_illumina.mfc\""
+echo "Relies on running and completing first: \"1.runMATAFILER_illumina.mfc\"  "
+echo "Extension of simple example (nonsensical data) from script \"1.runMATAFILER_illumina.mfc\""
 echo "By default, these results will be saved in $MF4DIR/examples/output/ dir for this test."
-echo "    However, this is not recommended for larger runs, where it is better to keep the input data and results dir separate from the MG-TK dir."
+echo "    However, this is not recommended for larger runs, where it is better to keep the input data and results dir separate from the MATAFILER dir."
 echo ""
 
 if [ ! -e $MF4DIR/examples/output/1.testAG/S4qiaS2/assemblies/metag/ContigStats/Coverage.pergene.gz ]; then
 	echo "Test file not found (output/1.testAG/S4qiaS2/assemblies/metag/ContigStats/Coverage.pergene.gz)"
-	echo "Ensure that 1.runMGTK_illumina.mfc finished correctly"
+	echo "Ensure that 1.runMATAFILER_illumina.mfc finished correctly"
 	exit
 fi 
 
 if [ ! -e $MF4DIR/examples/output/1.testAG/S4qiaS3/assemblies/metag/Binning/SB/S4qiaS3.cm2 ]; then
 	echo "Test file not found (output/1.testAG/S4qiaS3/assemblies/metag/Binning/SB/S4qiaS3.cm2)"
-	echo "Ensure that 1.runMGTK_illumina.mfc finished correctly"
+	echo "Ensure that 1.runMATAFILER_illumina.mfc finished correctly"
 	exit
 fi 
 
@@ -46,4 +46,3 @@ GCoutdir=$MF4DIR//examples////output///3.testGCill/
 
 
 perl $MF4DIR/secScripts/geneCat.pl -map $MAP -GCd $GCoutdir -mem 50 -cores 12 -clusterID 95 -doStrains 1 -continue 1 -binSpeciesMG 2 -useCheckM2 1 -useCheckM1 0 -MGset GTDB
-

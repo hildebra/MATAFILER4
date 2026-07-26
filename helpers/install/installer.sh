@@ -179,7 +179,7 @@ if [[ ! -e "$MFdir/config.txt" ]]; then
 fi
 
 if find_in_bashrc "##------------> MG-TK ADDED"; then
-	die "$HOME/.bashrc contains an obsolete MG-TK block. Remove that block and rerun the installer."
+	die "$HOME/.bashrc contains an obsolete pre-MATAFILER4 block. Remove that block and rerun the installer."
 fi
 
 if ! find_in_bashrc "##------------> MF4 ADDED"; then

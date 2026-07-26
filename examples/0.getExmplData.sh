@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-#download example data for MG-TK
+#download example data for MATAFILER
 #(c) Falk Hildebrand
 
 if [ -z ${MF4DIR+x} ]; then echo "MF4DIR is unset"; exit; else echo "MF4DIR is set to '$MF4DIR', downloading data to $MF4DIR/examples/data/"; fi

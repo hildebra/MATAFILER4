@@ -16,7 +16,7 @@ if (length(args)>0){
 
 
 libDirs = .libPaths()
-instLib = libDirs[grep("MGTK",libDirs)] #set preferential dir to MFF env..
+instLib = libDirs[grep("MGTK",libDirs)] #legacy environment-name compatibility
 
 print (instLib)
 

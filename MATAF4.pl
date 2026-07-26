@@ -12,6 +12,7 @@ use strict;
 use File::Basename;
 use File::Find ();
 use File::Path qw(make_path);
+use File::Spec;
 use Cwd 'abs_path';
 use POSIX;
 use Getopt::Long qw( GetOptions );
@@ -108,7 +109,7 @@ sub discoverSampleInputs; sub populateInputSizesFast; sub spaceInAssGrp;
 sub createConsSNPandSVs;
 
 
-#------- version history MATAFILER / MG-TK --------
+#------- version history MATAFILER / MATAFILER --------
 #.75: 4.3.26: ini MATAFILER4 version
 #4.01: 13.3.26: removing bugs from hybrid assembly detection, switching to 4.x versioning
 #4.02: 15.4.26: updated internal logic for passing read paths, enabled hybrid mode in complex assembly groups
@@ -136,7 +137,10 @@ sub createConsSNPandSVs;
 #       work is confirmed, keeping completed-sample passes free of staging churn.
 #4.20: 26.7.26: centralize completed-sample filesystem publication and cleanup
 #       policy in cleanup_finished_sample.pl.
-my $MATFILER_ver = 4.20;
+#4.21: 26.7.26: report primary and supplementary input sizes independently
+#       and reject physical input files assigned to both read scopes. Complete
+#       the user-facing transition from the former toolkit name to MATAFILER.
+my $MATFILER_ver = 4.21;
 
 #----------------- defaults ----------------- 
 
@@ -169,7 +173,7 @@ my %MFconfig;
 #MFcontstants: object to store essential paths/file endings
 my %MFcontstants;
 
-#MFopt: global object with options for MG-TK. Added in MF v0.5, slowly rebuild MF around this system
+#MFopt: global object with options for MATAFILER. Added in MF v0.5, slowly rebuild MF around this system
 my %MFopt; 
 
 # Keep machine-readable inspection and plan output clean. When either read-only
@@ -242,7 +246,7 @@ if (!$MFconfig{inspectState} && $runOptions{loopCount} && (
 		|| $MFopt{rewriteAllIfAnyDiamond} || $MFopt{rewriteDiamond}
 		|| $MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign}
 	)) {
-	die "MG-TK rewrite options cannot be combined with -loopTillComplete; " .
+	die "MATAFILER rewrite options cannot be combined with -loopTillComplete; " .
 		"disable rewrite options before starting a looped run.\n";
 }
 checkMF(1) unless ($MFconfig{inspectState});
@@ -1652,7 +1656,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 
 
-print "\n\n###################################\n".$baseOut."\nFINISHED MG-TK submission loop\n";
+print "\n\n###################################\n".$baseOut."\nFINISHED MATAFILER submission loop\n";
 
 postprocess();
 
@@ -2335,6 +2339,34 @@ sub discoverSampleInputs {
 			 @{$result->{support}{single}}, @{$result->{support}{bam}});
 		$result->{support_bytes} =
 			sum(0, map { $result->{support}{file_sizes}{$_} || 0 } keys %selected);
+	}
+
+	# Primary discovery stores names relative to its input directory, whereas
+	# supplementary discovery stores resolved source paths. Compare canonical
+	# identities so a symlink or repeated path cannot be counted in both scopes.
+	if ($result->{primary_error} eq "" && $result->{support_error} eq "") {
+		my %primaryIdentity;
+		for my $file (
+			@{$result->{primary}{read1}}, @{$result->{primary}{read2}},
+			@{$result->{primary}{single}}, @{$result->{primary}{bam}}
+		) {
+			my $path = File::Spec->file_name_is_absolute($file)
+				? $file : "$primaryDir/$file";
+			my $identity = abs_path($path) || File::Spec->canonpath($path);
+			$primaryIdentity{$identity} = $path;
+		}
+		my @overlap;
+		for my $file (
+			@{$result->{support}{read1}}, @{$result->{support}{read2}},
+			@{$result->{support}{single}}, @{$result->{support}{bam}}
+		) {
+			my $identity = abs_path($file) || File::Spec->canonpath($file);
+			push @overlap, $file if exists $primaryIdentity{$identity};
+		}
+		$result->{support_error} =
+			"Primary and supplementary inputs resolve to the same file(s): "
+			.join(", ", @overlap)."\n"
+			if @overlap;
 	}
 
 	$map{$sample}{inputDiscovery} = $result;
@@ -3634,7 +3666,7 @@ sub prepareMap{
 	#die "@refDB\n";
 	
 	#build index for each fasta, and predict genes on these
-	die "MGTK map2nd check failed: @bwt2Name != @refDB" if (@bwt2Name != @refDB);
+	die "MATAFILER map2nd check failed: @bwt2Name != @refDB" if (@bwt2Name != @refDB);
 	#die "X:: @refDB  @bwt2Name\n";
 	for (my $i=0;$i<@refDB; $i++){
 		#$refDB[$i] =~ m/(.*\/)[^\/]+/;
@@ -5101,9 +5133,10 @@ sub seedUnzip2tmp{
 	}
 	
 	#report on what was found so far..
-	if ($map{$curSmpl}{inputFileSizeMB} > 0){
+	if ($map{$curSmpl}{inputFileSizeMB} > 0 || $map{$curSmpl}{inputXFileSizeMB} > 0){
 		printf("Raw primary input size: %.1f Mb", $map{$curSmpl}{inputFileSizeMB});     
-		printf("    Suppl: %.1f Mb", $map{$curSmpl}{inputFileSizeMB}) if ($map{$curSmpl}{inputFileSizeMB} > 0);      		
+		printf("    Suppl: %.1f Mb", $map{$curSmpl}{inputXFileSizeMB})
+			if (@paX1 || @paXs || @paBamX);
 		#print "Input size raw (Mb): " . int($map{$curSmpl}{inputFileSizeMB}) ;
 		#print "; Suppl: " . int($map{$curSmpl}{inputXFileSizeMB} );
 		if (@pa1 || @pas){

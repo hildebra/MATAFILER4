@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 
 """
-Produce a version of GTDB compatible with MG-TK
+Produce a version of GTDB compatible with MATAFILER
 
 This will attempt to download given version of GTDB, and format files to the 
-required structure for MG-TK.
+required structure for MATAFILER.
 There are some differences in how GTDB provide files between version,
 so the standard function is written for 220, and future or past version
 might require some custom work. However I have tried to write this in an
@@ -68,7 +68,7 @@ logger.addHandler(ch)
 class GTDBVersion:
     """
     Class to represent a version of GTDB and methods to download and
-    format it for use in MG-TK. All default implementations are intended
+    format it for use in MATAFILER. All default implementations are intended
     to work for v220. For versions which need alternative implementation,
     subclass and override methods.
 
@@ -373,7 +373,7 @@ class GTDBVersion:
             downloaded_files: Dict[str, Path]
     ) -> None:
         """
-        Extract marker genes to the MG-TK format. Not intended to be called
+        Extract marker genes to the MATAFILER format. Not intended to be called
         directly, but for future GTDB version with different structure,
         it may be useful to be able to override this method. Default extract
         method opens 'labels' in download files and put faa and fna in the
@@ -624,7 +624,7 @@ class GTDBVersion:
 
     @staticmethod
     def ask_config_update(do_update: Optional[bool] = None) -> bool:
-        """Determine whether or not to do MG-TK configuration update."""
+        """Determine whether or not to do MATAFILER configuration update."""
 
         if do_update is not None:
             return do_update
@@ -637,10 +637,10 @@ class GTDBVersion:
         mgtk_dir: Optional[str] = os.environ.get("MGTKDIR")
         if mgtk_dir is None:
             logger.warning(
-                "MG-TK installation not found. \n"
-                "MG-TK configuration will not be updated, as environmental "
+                "MATAFILER installation not found. \n"
+                "MATAFILER configuration will not be updated, as environmental "
                 "variable MGTKDIR could not be found. \n"
-                "Rerun get_gtdb.py configure on the system with MG-TK "
+                "Rerun get_gtdb.py configure on the system with MATAFILER "
                 "installed to complete configuration. \n"
                 "Additionally, instructions on updating the configuration will "
                 "be written to README.txt in the output "
@@ -648,9 +648,9 @@ class GTDBVersion:
             )
             return False
 
-        logger.info("MGTK installation found in %s", mgtk_dir)
+        logger.info("MATAFILER installation found in %s", mgtk_dir)
         x: str = prompt_input_set(
-            "Do you want this script to automatically update MG-TK "
+            "Do you want this script to automatically update MATAFILER "
             "configuration to use the downloaded databases?",
             valid=["yes", "no", "cancel"],
             case=True
@@ -666,18 +666,18 @@ class GTDBVersion:
         out_dir: Path,
         install_tk: bool
     ) -> None:
-        """Attempt to automatically update MG-TK configuration to use new DB."""
+        """Attempt to automatically update MATAFILER configuration to use new DB."""
 
         mgtk_dir_s: Optional[str] = str(self.get_mgtk_dir())
         if mgtk_dir_s is None:
             logger.error(
-                "MG-TK installation not found. Please ensure environmental "
-                "variable MGTKDIR contains path to MG-TK directory."
+                "MATAFILER installation not found. Please ensure environmental "
+                "variable MGTKDIR contains path to MATAFILER directory."
             )
             return
         mgtk_dir: Path = Path(mgtk_dir_s)
 
-        logger.debug("Parse MG-TK config.txt at %s", mgtk_dir / "config.txt")
+        logger.debug("Parse MATAFILER config.txt at %s", mgtk_dir / "config.txt")
         mgtk_config: Dict[str, str] = self.parse_mgtk_config(
             mgtk_dir / "config.txt"
         )
@@ -689,8 +689,8 @@ class GTDBVersion:
             # If databases are stored in the DBDir, use [DBDir] format, 
             # otherwise asbolute paths
             db_res: Path = Path(db_dir.strip()).resolve()
-            logger.info("MG-TK DBDir: %s", db_dir)
-            logger.debug("MG-TK DBDir resolved: %s", db_res)
+            logger.info("MATAFILER DBDir: %s", db_dir)
+            logger.debug("MATAFILER DBDir resolved: %s", db_res)
             logger.debug("GTDB Database resolved: %s", out_res)
             if db_res in out_res.parents:
                 use_abs = False
@@ -705,7 +705,7 @@ class GTDBVersion:
                 use_abs = True
         else:
             logger.info(
-                "DBDir not found in MG-TK config.txt, will use absolute "
+                "DBDir not found in MATAFILER config.txt, will use absolute "
                 "paths to database directories."
             )
             use_abs = True
@@ -746,7 +746,7 @@ class GTDBVersion:
             if not db_config_bup.exists():
                 break
             i += 1
-        logger.info("Backing up current MG-TK config to %s", db_config_bup)
+        logger.info("Backing up current MATAFILER config to %s", db_config_bup)
         shutil.copy(db_config, db_config_bup)
 
         mod_lines: List[str] = []
@@ -835,7 +835,7 @@ class GTDBVersion:
             urls=self.required_urls,
             date=str(datetime.now()),
             script_version=__version__,
-            summary="""GTDB formatted for MG-TK using get_gtdb.py""",
+            summary="""GTDB formatted for MATAFILER using get_gtdb.py""",
         )
 
         with open(dest / "meta.json", "w") as f:
@@ -847,7 +847,7 @@ class GTDBVersion:
         tk: bool
     ) -> str:
         """
-        Write instructions for updating MG-TK and if needed getting GTDBtk data
+        Write instructions for updating MATAFILER and if needed getting GTDBtk data
         if it was not possible to do do automatically.
 
         :param dest: Extraction directory
@@ -870,7 +870,7 @@ class GTDBVersion:
             dest: Path
     ) -> str:
         """
-        Compose instructions on update MG-TK config to use new database.
+        Compose instructions on update MATAFILER config to use new database.
         
         String with the instructions will also be returned, so that it can be
         printed if desired.
@@ -884,17 +884,17 @@ class GTDBVersion:
 
 
         mgtk_dir: Optional[str] = (
-            "[Your MG-TK Dir]" if os.environ.get("MGTKDIR") is None else
+            "[Your MATAFILER Dir]" if os.environ.get("MGTKDIR") is None else
             os.environ.get("MGTKDIR")
         )
         rec_ver: str = f"{self.version:.0f}"
 
         # Format a string with relevant parts
         instructions: str = (
-            f"We recommend moving the output directory ({dest}) to your MGTK "
+            f"We recommend moving the output directory ({dest}) to your MATAFILER "
             "DBDir, and to a version specific subdirectory i.e. to\n\n"
             f"<DBDir>/MarkerG/GTDB_r{rec_ver}_MGTK\n\n"
-            "To use this version in MG-TK, you must update config_DB.txt. This "
+            "To use this version in MATAFILER, you must update config_DB.txt. This "
             f"is in {mgtk_dir}/Mods/config_DB.txt.\n"
             "Update the lines:\n\n"
             f"GTDBPath\t[DBDir]/MarkerG/GTDB_r{rec_ver}_MGTK/markerGenes/\n"
@@ -904,7 +904,7 @@ class GTDBVersion:
             f"gtdb_r{rec_ver}_clustering.tab\n\n"
             "Alternatively, you can run \n"
             f"get_gtdb.py configure -d {dest}\n"
-            "on the system with MG-TK installed."
+            "on the system with MATAFILER installed."
         )
 
         return instructions
@@ -921,7 +921,7 @@ class GTDBVersion:
         """
 
         mgtk_dir: Optional[str] = (
-            "[Your MG-TK Dir]" if os.environ.get("MGTKDIR") is None else
+            "[Your MATAFILER Dir]" if os.environ.get("MGTKDIR") is None else
             os.environ.get("MGTKDIR")
         )
         rec_ver: str = f"{self.version:.0f}"
@@ -984,7 +984,7 @@ class GTDBVersion:
 
     @staticmethod
     def get_mgtk_dir() -> Optional[Path]:
-        """Get the MG-TK install path. Returns None if not found."""
+        """Get the MATAFILER install path. Returns None if not found."""
         dir_s: Optional[str] = os.environ.get("MGTKDIR")
         if dir_s is None:
             return None
@@ -992,7 +992,7 @@ class GTDBVersion:
     
     @staticmethod
     def parse_mgtk_config(cfg: Path) -> Dict[str, Optional[str]]:
-        """Read MG-TK config files into a dictionary."""
+        """Read MATAFILER config files into a dictionary."""
         with cfg.open("r") as f:
             config: Dict[str, Optional[str]] = dict()
             for line in f:
@@ -1036,10 +1036,10 @@ class GTDBVersion:
         dest_dir: Path = Path(os.getcwd()) / "output",
         tk: bool = False,
     ) -> None:
-        """Format GTDB database for MG-TK.
+        """Format GTDB database for MATAFILER.
 
         :param dl_dir: Path GTDB database was downloaded to
-        :param dest_dir: Path to extract MG-TK formatted data to
+        :param dest_dir: Path to extract MATAFILER formatted data to
         :param tk: Handle GTDBtk data
         """
 
@@ -1134,7 +1134,7 @@ class GTDB111(GTDBVersion):
             taxonomy_headers=["ncbi_accession", "taxonomy"])
 
 class GTDB226(GTDBVersion):
-    """Download and process v226 of GTDB for MG-TK
+    """Download and process v226 of GTDB for MATAFILER
     
     The only significant change here is in how the taxonomic metadata is handled
     as marker genes can come from non-representative species."""
@@ -1147,7 +1147,7 @@ class GTDB226(GTDBVersion):
     ) -> None:
         """Make GTDBmg.tax allowing duplicates.
         
-        MG-TK will attempt to automatically make a GTDBmg.tax file mapping 
+        MATAFILER will attempt to automatically make a GTDBmg.tax file mapping 
         from accession to lineage. However, the method it uses will only keep 
         the last accession for the species. We will instead produce this file 
         retaining duplicates.
@@ -1469,10 +1469,10 @@ def cli_all(args):
             install_tk = args.install_tk
         )
     else:
-        logger.warning("Did not update MG-TK configuration update.")
+        logger.warning("Did not update MATAFILER configuration update.")
         logger.warning(
-            "To update MG-TK to use new database version, either run "
-            "'get_gtdb.py configure -d %s' on the system with MG-TK installed "
+            "To update MATAFILER to use new database version, either run "
+            "'get_gtdb.py configure -d %s' on the system with MATAFILER installed "
             "or follow the instructions in %s.",
             str(args.dest),
             str(args.dest / "README.txt")
@@ -1490,7 +1490,7 @@ def main():
         prog="get_gtdb.py",
         description="""
             Download and format versions of the GTDB database for use in 
-            the pipeline MG-TK. This program expects GNU tar and either wget
+            the pipeline MATAFILER. This program expects GNU tar and either wget
             or curl to be available.
         """,
         epilog="""
@@ -1507,10 +1507,10 @@ def main():
             internet access, use 'download' subcommand to download files, then
             transfer to target system, then use 'extract' to process files.
             
-            'configure' will update MG-TK configuration to use an extracted
+            'configure' will update MATAFILER configuration to use an extracted
             database, and install an appropriate version of gtdbtk. If your
             group is sharing copies of the database, once it has been extracted,
-            others should be able to configure MG-TK to use it using the.
+            others should be able to configure MATAFILER to use it using the.
             'configure' sucommand.
         """
     )
@@ -1523,7 +1523,7 @@ def main():
             required=False,
             default=Path(os.getcwd()) / "output",
             help=(
-                "Directory for MG-TK formatted database. When extracting, "
+                "Directory for MATAFILER formatted database. When extracting, "
                 "contents will be overwritten."
             )
         )
@@ -1583,7 +1583,7 @@ def main():
             help=(
                 "Install the version of GTDBtk required for this GTDB release "
                 "into the MGTKgtdbtk environment. This is not done by default, "
-                "as officially MG-TK only supports one release of GTDB and "
+                "as officially MATAFILER only supports one release of GTDB and "
                 "installs the correct GTDBtk using installer shell scripts."
             )
         )
@@ -1616,11 +1616,11 @@ def main():
         "extract",
         help=(
             "Extract downloaded GTDB and GTDBtk databases to the format"
-            "and structure required by MG-TK."
+            "and structure required by MATAFILER."
         ),
         description=(
             "Extract downloaded GTDB and GTDBtk databases to the format"
-            "and structure required by MG-TK."
+            "and structure required by MATAFILER."
         )
     )
     parser_extract.set_defaults(func=cli_extract)
@@ -1630,14 +1630,14 @@ def main():
     parser_configure = subparsers.add_parser(
         "configure",
         help=(
-            "Update MG-TK configuration and install correct version of GTDBtk "
+            "Update MATAFILER configuration and install correct version of GTDBtk "
             "to use a downloaded and extracted database version."
         ),
         description=(
-            "Update MG-TK configuration and install correct version of GTDBtk "
+            "Update MATAFILER configuration and install correct version of GTDBtk "
             "to use a downloaded and extracted database version. Will require "
-            "internet access for MG-TK download. Should be run by the user "
-            "with MG-TK installed."
+            "internet access for MATAFILER download. Should be run by the user "
+            "with MATAFILER installed."
         )
     )
     parser_configure.set_defaults(func=cli_configure)
@@ -1647,7 +1647,7 @@ def main():
     parser_all = subparsers.add_parser(
         "all",
         help=(
-            "Download and extract GTDB and GTDBtk, and configure MG-TK to "
+            "Download and extract GTDB and GTDBtk, and configure MATAFILER to "
             "use download version. Equivalent to runining download, extract, "
             "then configure subcommands. Will required internet access for "
             "download, and GTDBtk install."

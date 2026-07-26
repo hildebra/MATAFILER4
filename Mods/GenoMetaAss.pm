@@ -1502,7 +1502,7 @@ sub readMap{
 		}
 		my @spl = split(/\t/,$line,-1);
 		if ($cnt == 0){
-			#read column headers -> check for MG-TK specific instructions
+			#read column headers -> check for MATAFILER specific instructions
 			#die "@spl\n";
 			$smplCol = first_index { /^#SmplID$/ } @spl;
 			$dirCol = first_index { /^Path$/ } @spl;
@@ -1588,7 +1588,7 @@ sub readMap{
 		if ($DOWARN && $smplPrefixUsed && $samplePathUsed){die"Warning: in mapping file both \"SmplPrefix\" and \"Path\" are set for sample $curSmp!\nThis is not supported\n$warnDeactivateMsg";}
 
 		
-		#old MATAFILER versions, deprecated in MG-TK
+		#old MATAFILER versions, deprecated in MATAFILER
 		if ($folderStrClassical== -1){
 			if (-d  $dir2out.$cdir2 && !-d $dir2out.$curSmp){
 				if ($infFoldClass==0){die "readMap: Inferring old/new folder structure failed, as both folders seem to be valid\n";}

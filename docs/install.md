@@ -177,9 +177,9 @@ This is expected usage and is usually much faster than the initial installation.
 
 Install micromamba and ensure it is available in your `PATH`, then rerun the installer.
 
-### Old `MG-TK` entries in `.bashrc`
+### Old pre-MATAFILER4 entries in `.bashrc`
 
-The installer checks for old `MG-TK` shell configuration blocks. If it finds them, remove the lines after the marker:
+The installer checks for obsolete shell configuration blocks from earlier MATAFILER releases. If it finds them, remove the lines after the legacy marker:
 
 ```text
 ##------------> MG-TK ADDED

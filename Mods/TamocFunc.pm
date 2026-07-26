@@ -100,7 +100,7 @@ sub checkMFFInstall{
 	checkProg("clusterMAGs","clusterMAGs",1);
 	checkProg("rarefaction toolkit2 (rtk2)","rare",1);
 	checkProg("least common ancestor (LCA)","LCA",1);
-	#env MGTKbinners
+	#legacy binner environment
 	checkProg("canopy clustering genome binner","canopy",0);
 	
 	checkProg("pigz","pigz",0);
@@ -536,5 +536,4 @@ sub sortgzblast{ #function that checks if the diamond output was already sorted 
 	die "Something went wrong in sortgzblast 2\n" if (!-e $input);
 	return $input;
 }
-
 

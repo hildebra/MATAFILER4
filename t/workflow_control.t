@@ -404,14 +404,23 @@ like($mataf4,
 	qr/sub populateInputSizesFast.*?discoverSampleInputs\(\$sample\).*?primary_bytes.*?support_bytes.*?sub spaceInAssGrp/s,
 	'fast input sizing uses the shared discovery result');
 like($mataf4,
+	qr/Suppl: %.1f Mb.*?\{inputXFileSizeMB\}.*?if \(\@paX1 \|\| \@paXs \|\| \@paBamX\)/s,
+	'input summary prints supplementary size only for discovered support reads');
+unlike($mataf4,
+	qr/Suppl: %.1f Mb", \$map\{\$curSmpl\}\{inputFileSizeMB\}/,
+	'input summary cannot substitute the primary size for supplementary input');
+like($mataf4,
+	qr/Primary and supplementary inputs resolve to the same file\(s\).*?\@overlap/s,
+	'input discovery rejects physical files assigned to both read scopes');
+like($mataf4,
 	qr/sub seedUnzip2tmp.*?discoverSampleInputs\(\$curSmpl, \$fastp\).*?\@pa1 = \@\{\$inputDiscovery->\{primary\}\{read1\}\}.*?\@paX1 = \@\{\$inputDiscovery->\{support\}\{read1\}\}/s,
 	'input staging reuses the cached primary and support file selections');
 my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?my \$MATFILER_ver = 4\.20;/s,
-	'MATAFILER history retains shared input discovery through version 4.20');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?my \$MATFILER_ver = 4\.21;/s,
+	'MATAFILER history retains shared input discovery through version 4.21');
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');

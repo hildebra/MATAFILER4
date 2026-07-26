@@ -86,7 +86,7 @@ like($strain, qr/ConspecificMGS\.\$subJob\.log.*?sub mergeConspecificLogs/s,
 like($strain, qr/\$onlySubmit == 0 && !\$subJob/,
 	'split children cannot recursively clean shared MGS output directories');
 like($strain,
-	qr/\$publishedInputsReady = fileGZe\("\$outD2\/\$FNAstdof"\).*?fileGZe\("\$outD2\/\$FAAstdof"\).*?fileGZe\("\$outD2\/\$CATstdof"\).*?if \(\$publishedInputsReady && !\$mustRegenerateInputs\).*?combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\)/s,
+	qr/\$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?fileGZe\("\$outD2\/\$FNAstdof"\).*?fileGZe\("\$outD2\/\$FAAstdof"\).*?fileGZe\("\$outD2\/\$CATstdof"\).*?if \(\$publishedInputsReady && !\$mustRegenerateInputs\).*?combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\)/s,
 	'complete published inputs bypass missing scratch aggregates during tree recovery');
 like($strain, qr/has neither complete published inputs nor complete combined worker input/,
 	'incomplete worker input is reported only when published recovery inputs are also incomplete');
@@ -149,7 +149,7 @@ like($strain,
 	'within-strain IQ-TREE defaults to bounded standard mode and enables CMAPLE only by explicit request');
 like($strain,
 	qr/"recalcTrees=i"\s+=> \\\$recalcTrees.*?-recalcTrees must be 0 or 1.*?\$onlySubmit = 1 if \$recalcTrees/s,
-	'tree recalculation is validated and forced into published-input-only recovery mode');
+	'tree recalculation is validated and forced into input-recovery-only mode');
 like($strain,
 	qr/-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData.*?-recalcTrees must be launched by the main strainWithin process/s,
 	'tree recalculation rejects input-regeneration modes and split-worker execution');
@@ -157,8 +157,14 @@ like($strain,
 	qr/if \(!\$recalcTrees && \(.*?Part I:: extracting relevant core MGS genes/s,
 	'tree recalculation bypasses consensus and per-MGS input regeneration');
 like($strain,
-	qr/if \(\$recalcTrees\).*?exists\(\$legacyLocusMGS\{\$MGS\}\).*?requires input regeneration.*?\$publishedInputsReady.*?requires complete published FNA\/FAA\/category files.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
-	'tree outputs are reset only after compatible, complete published per-MGS inputs are verified');
+	qr/my \$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
+	'tree outputs are reset only after complete published or recoverable staged per-MGS inputs are verified');
+like($strain,
+	qr/\$scratchInputsReady \|\|= combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?using complete staged FNA\/FAA\/category files.*?tree job will publish them to the MGS directory/s,
+	'recalculated trees continue staged-input transformation and publication through the normal tree-job path');
+like($strain,
+	qr/staged input sets recovered for -recalcTrees: \$recalcScratchRecovered/,
+	'tree submission accounting reports staged recalculation recovery separately from skipped dispositions');
 like($strain,
 	qr/sub resetMGSTreeOutputs .*?dirname\(\$resolvedMGS\) eq \$resolvedRoot.*?basename\(\$resolvedMGS\) eq \$MGS.*?remove_tree\(\$phyloDir, \{safe => 1\}\).*?unlink \$treeStone/s,
 	'tree-only reset is confined to the selected MGS phylo directory and completion checkpoint');
