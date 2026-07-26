@@ -10,7 +10,7 @@ use File::Path qw(make_path remove_tree);
 use File::Spec;
 use Getopt::Long qw(GetOptions);
 
-my %opt;
+my %opt = (remove_temporary => 1);
 my @members;
 my @member_locks;
 my (@require_exists, @require_nonempty, @require_file, @require_nonempty_file);
@@ -25,6 +25,10 @@ GetOptions(
 	'sample-temp=s'   => \$opt{sample_temp},
 	'scratch-root=s'  => \$opt{scratch_root},
 	'assembly=s'      => \$opt{assembly},
+	'assembly-path-file=s' => \$opt{assembly_path_file},
+	'assembly-dir=s'       => \$opt{assembly_dir},
+	'remove-alignment=s'   => \$opt{remove_alignment},
+	'remove-temporary!'    => \$opt{remove_temporary},
 	'snp-log-dir=s'   => \$opt{snp_log_dir},
 	'require-exists=s@'       => \@require_exists,
 	'require-nonempty=s@'     => \@require_nonempty,
@@ -105,6 +109,17 @@ sub remove_files {
 	return $removed;
 }
 
+sub write_atomic {
+	my ($path, $content) = @_;
+	my $directory = dirname($path);
+	make_path($directory) unless -d $directory;
+	my $temporary = "$path.tmp.$$";
+	open my $fh, '>', $temporary or die "can't write $temporary: $!\n";
+	print {$fh} $content or die "can't write $temporary: $!\n";
+	close $fh or die "can't close $temporary: $!\n";
+	rename $temporary, $path or die "can't replace $path with $temporary: $!\n";
+}
+
 sub plain_or_gzip_stats {
 	my ($path) = @_;
 	my @candidates = $path =~ /\.gz$/ ? ($path, substr($path, 0, -3)) : ($path, "$path.gz");
@@ -135,6 +150,36 @@ for my $path (@require_nonempty_file) {
 }
 die "cleanup prerequisites are incomplete; retained temporary files: "
 	.join('; ', @missing_requirements)."\n" if @missing_requirements;
+
+if (defined($opt{assembly_path_file}) || defined($opt{assembly_dir})) {
+	die "--assembly-path-file and --assembly-dir must be supplied together\n"
+		unless defined($opt{assembly_path_file}) && length($opt{assembly_path_file})
+			&& defined($opt{assembly_dir}) && length($opt{assembly_dir});
+	my $assembly_path_file = prospective_absolute($opt{assembly_path_file});
+	require_below($assembly_path_file, $allowed_root, 'assembly path file');
+	my $assembly_dir = existing_absolute($opt{assembly_dir}, 'assembly directory');
+	require_below($assembly_dir, $allowed_root, 'assembly directory');
+	my $current = '';
+	if (-e $assembly_path_file) {
+		open my $current_fh, '<', $assembly_path_file
+			or die "can't read $assembly_path_file: $!\n";
+		$current = <$current_fh> // '';
+		close $current_fh;
+		chomp $current;
+	}
+	if ($current ne $assembly_dir) {
+		write_atomic($assembly_path_file, "$assembly_dir\n");
+		print "Published assembly path $assembly_path_file\n";
+	}
+}
+
+if (defined($opt{remove_alignment}) && length($opt{remove_alignment})) {
+	my $alignment = prospective_absolute($opt{remove_alignment});
+	require_below($alignment, $allowed_root, 'removable alignment');
+	remove_files($alignment, "$alignment.crai", "$alignment.csi");
+}
+
+exit 0 unless $opt{remove_temporary};
 
 my $state_dir = prospective_absolute($opt{state_dir});
 require_below($state_dir, $allowed_root, 'cleanup state directory');

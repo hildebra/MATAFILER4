@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.15;/,
-	'buildTree CMAPLE length fallback increments the workflow version');
+like($source, qr/my \$version = 5\.17;/,
+	'buildTree compression sorting increments the workflow version');
 like($source,
 	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => \\\$iqLegacy/s,
 	'buildTree exposes memory-capped pathogen and legacy IQ-TREE modes');
@@ -98,6 +98,12 @@ like($source,
 	'an individual fastGEAR tool failure does not abort other loci');
 
 like($source, qr/\$pigzBin -d .*\$partiF\.gz/, 'compressed partition restoration names the gzip file');
+like($source,
+	qr/if \(\$gzipInput\).*?basename\(\$inputFile\).*?sortFastaForCompression\(\$inputFile\).*?allFAAs\.faa.*?allFNAs\.fna.*?\$pigzBin -p \$ncore/s,
+	'buildTree sorts only the named plain FNA/FAA inputs immediately before compressing them');
+like($source,
+	qr/sub fastaCompressionSortKey.*?parseSeqId\(\$identifier, "compression-sort FASTA header",1\).*?join\("\\t", \$gene, \$sample, \$identifier\).*?sub sortFastaForCompression.*?tempfile\(.*?DIR => dirname\(\$inputFile\).*?rename \$tmpFile, \$inputFile/s,
+	'compression sorting orders FASTA records locus-first and replaces the input atomically');
 unlike($source, qr/\$partiF\s*=\s*""\s+unless\s*\(-e \$partiF\)/,
 	'a fresh multi-locus run does not discard its not-yet-created partition path');
 like($source, qr/my \$partition = \$treeOpts\{partition\} \/\/ "";.*?\$treeOpts\{partition\} = "" unless \$partition ne "" && -s \$partition;/s,

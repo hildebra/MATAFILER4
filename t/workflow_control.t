@@ -410,8 +410,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?my \$MATFILER_ver = 4\.18;/s,
-	'MATAFILER history retains shared input discovery through version 4.18');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?my \$MATFILER_ver = 4\.20;/s,
+	'MATAFILER history retains shared input discovery through version 4.20');
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');
@@ -433,6 +433,20 @@ like($mataf4,
 like($mataf4,
 	qr/qsubSystemWaitMaxJobs\(\s*\$MFconfig\{checkMaxNumJobs\}, \$MFconfig\{killDepNever\}, \$QSBoptHR/s,
 	'the main sample loop shares scheduler throttle state instead of querying once per sample');
+my $finished_shortcut_position = index($mataf4, 'Sample already complete; no jobs submitted');
+my $sample_scratch_creation_position = index(
+	$mataf4, 'make_path($smplTmpDir) unless -d $smplTmpDir',
+);
+ok($finished_shortcut_position >= 0
+		&& $sample_scratch_creation_position > $finished_shortcut_position,
+	'completed samples bypass sample scratch creation');
+my $sample_log_creation_position = index(
+	$mataf4, 'make_path($logDir) unless -d $logDir',
+);
+ok($sample_log_creation_position > $finished_shortcut_position,
+	'completed samples bypass creation of a missing per-sample LOGandSUB directory');
+unlike($mataf4, qr/present: \$curOutDir/,
+	'completed samples no longer print a repetitive output-directory message');
 like($mataf4,
 	qr/Submitting deferred assembly-group mapping jobs.*?my \$publicationDeps = normalise_job_dependencies\(.*?MultiContigStats\.sh/s,
 	'assembly groups release mapping, producer publication, and contig statistics in stages');

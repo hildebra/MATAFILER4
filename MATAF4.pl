@@ -132,7 +132,11 @@ sub createConsSNPandSVs;
 #       that MATAF4 safely releases after their recorded jobs leave the scheduler.
 #4.18: 26.7.26: summarize Slurm failures, including OOM and timeout outcomes,
 #       as an occurrence matrix grouped by MATAFILER job category.
-my $MATFILER_ver = 4.18;
+#4.19: 26.7.26: defer sample scratch and LOGandSUB creation until unfinished
+#       work is confirmed, keeping completed-sample passes free of staging churn.
+#4.20: 26.7.26: centralize completed-sample filesystem publication and cleanup
+#       policy in cleanup_finished_sample.pl.
+my $MATFILER_ver = 4.20;
 
 #----------------- defaults ----------------- 
 
@@ -374,7 +378,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 
 	$logDir = "$curOutDir/LOGandSUB/";
-	system("mkdir -p $logDir") unless (-d $logDir);
 
 	#ignore samples .. for various reasons ------------------------------------------------------------------------------------
 	if ($MFconfig{ignoreSmpl} ne ""){
@@ -412,10 +415,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#set up dirs ------------------------------------------------------------------------------------
 	my $smplTmpDir = "$MFglobal{runTmpDirGlobal}$SmplName/"; #curTmpDir
 	my $nodeSpTmpD = "$runOptions{nodeTmpDir}/$SmplName";
-	system "mkdir -p $smplTmpDir" unless (-d $smplTmpDir); #shared raw/cleaned-read staging
-	my @checkLocs = ($smplTmpDir);
-	push(@checkLocs,$curDir)  if ($curDir ne "");
-	$QSBoptHR->{LocationCheckStrg} = checkDrives(\@checkLocs);
 
 	my $finalCommAssDir = "$curOutDir/assemblies/metag/";
 	my $finalCommAssDirSingle = $finalCommAssDir; #this is only used for checking..
@@ -781,9 +780,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		system('rm', '-rf', '--', $curOutDir, $smplTmpDir, $MFglobal{collectFinished}) == 0
 			or die "Failed to remove unfinished results for $curSmpl\n";
 		loop2C_check($cAssGrp,\@sampleDeps);next;
-	} elsif ($boolAssemblyOK && $eCovAsssembly && !$map{$curSmpl}{inputFilesEmpty}) {
-		#check that assembly path fits..
-		getAssemblPath($curOutDir,$finalCommAssDir);
 	}
 
 	
@@ -1014,27 +1010,25 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#!$calcMetaPhlan && !$calcTaxaTar && !$calcMOTU2 && !$calcKraken && $scaffTarExternal eq ""
 	){
 		if ( ($boolAssemblyOK || ($doPreAssmFlag && $ePreAssmbly && !$ePreAssmblPck)) && !$locRedoAssMapping ){ #causes a lot of overhead but mainly to avoid unpacking reads again..
-			print "present: $curOutDir \n"; $runReport{present_assemblies}++;#= $AsGrps{$cAssGrp}{CntAimAss};
-			#base is present, but is the additions? 
-			if ($MFopt{map2Assembly} && !$MFopt{mapSaveCram} && -s $BinningOut && (-s "$BinningOut.cm2" || -e "$BinningOut.cm") &&
-				!$calcBinning && !$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp && $eFinMapCovGZ && $efinAssLoc && $eFinalMapDir && -s $CRAMmap){
-#				die;
-				print "deleting $CRAMmap to save space..\n";
-				print "due to flag -mapSaveCRAM 1\n";
-				system "rm -rf $CRAMmap";
-			}
+			$runReport{present_assemblies}++;#= $AsGrps{$cAssGrp}{CntAimAss};
 		}
-		if ($MFconfig{rmScratchTmp}) {
-			runFinishedCleanup(finishedCleanupArguments(
-				$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
-				$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
-			));
-		}
-		print "next due to sample finished";
+		runFinishedCleanup(finishedCleanupArguments(
+			$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
+			$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
+		));
+		print "Sample already complete; no jobs submitted\n" unless $MFconfig{silent};
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps);
 		next;
 	}
+
+	# Scratch and submission directories are needed only beyond the completed
+	# sample shortcut. Do not create and immediately remove them on no-op passes.
+	make_path($logDir) unless -d $logDir;
+	make_path($smplTmpDir) unless -d $smplTmpDir;
+	my @checkLocs = ($smplTmpDir);
+	push(@checkLocs,$curDir) if ($curDir ne "");
+	$QSBoptHR->{LocationCheckStrg} = checkDrives(\@checkLocs);
 	
 
 
@@ -1785,8 +1779,13 @@ sub finishedCleanupArguments {
 		'--sample-temp', $sampleTemp,
 		'--scratch-root', $MFglobal{runTmpDirGlobal},
 		'--assembly', $assembly,
+		'--assembly-path-file', "$map{$sampleKey}{wrdir}/assemblies/metag/assembly.txt",
+		'--assembly-dir', $assemblyDir,
+		($MFconfig{rmScratchTmp} ? '--remove-temporary' : '--no-remove-temporary'),
 		'--snp-log-dir', "$sampleLogDir/SNP",
 	);
+	push @arguments, ('--remove-alignment', "$mappingDir/$sampleName-smd.cram")
+		if $MFopt{map2Assembly} && !$MFopt{mapSaveCram} && $MFopt{DoMetaBat2};
 	$requirements ||= {};
 	my %requirementFlags = (
 		exists => '--require-exists',

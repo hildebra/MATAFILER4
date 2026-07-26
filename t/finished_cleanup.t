@@ -1,6 +1,7 @@
 use strict;
 use warnings;
 
+use Cwd qw(abs_path);
 use File::Path qw(make_path);
 use File::Spec;
 use File::Temp qw(tempdir);
@@ -41,6 +42,13 @@ sub cleaner_command {
 		'--scratch-root', $scratch,
 		'--assembly', ($args{assembly} // $assembly),
 		'--snp-log-dir', $args{snp_log_dir};
+	push @command, $args{remove_temporary} ? '--remove-temporary' : '--no-remove-temporary'
+		if exists $args{remove_temporary};
+	push @command, ('--assembly-path-file', $args{assembly_path_file},
+		'--assembly-dir', $args{assembly_dir})
+		if $args{assembly_path_file};
+	push @command, ('--remove-alignment', $args{remove_alignment})
+		if $args{remove_alignment};
 	push @command, @{$args{requirements} || []};
 	return @command;
 }
@@ -194,6 +202,41 @@ is(run_cleaner(
 ), 0, 'cleanup accepts a sample temporary path through a scratch symlink alias');
 ok(!-d $alias_temp_real, 'scratch alias cleanup removes the canonical sample temporary directory');
 
+my $policy_sample = 'policy-only';
+my $policy_mapping = File::Spec->catdir($output, $policy_sample, 'mapping');
+my $policy_log = File::Spec->catdir($output, $policy_sample, 'LOGandSUB', 'SNP');
+my $policy_temp = File::Spec->catdir($scratch, $policy_sample);
+my $policy_cram = File::Spec->catfile($policy_mapping, "$policy_sample-smd.cram");
+my $policy_path_file = File::Spec->catfile(
+	$output, $policy_sample, 'assemblies', 'metag', 'assembly.txt',
+);
+make_path($policy_mapping, $policy_log, $policy_temp);
+write_file($policy_cram, 'cram');
+write_file("$policy_cram.crai", 'index');
+write_file(File::Spec->catfile($policy_temp, 'keep.fq'), 'reads');
+write_file(File::Spec->catfile($policy_mapping, "$policy_sample-smd.bam.bai"), 'index');
+is(run_cleaner(
+	sample => $policy_sample, members => [$policy_sample],
+	mapping_dir => $policy_mapping,
+	snp_log_dir => $policy_log,
+	sample_temp => $policy_temp,
+	remove_temporary => 0,
+	assembly_path_file => $policy_path_file,
+	assembly_dir => $group_dir,
+	remove_alignment => $policy_cram,
+), 0, 'centralized filesystem policy runs without general temporary cleanup');
+ok(!-e $policy_cram && !-e "$policy_cram.crai",
+	'centralized policy removes the configured dispensable alignment and index');
+ok(-d $policy_temp
+	&& -e File::Spec->catfile($policy_mapping, "$policy_sample-smd.bam.bai"),
+	'--no-remove-temporary retains scratch and unrelated indexes');
+open my $policy_path_fh, '<', $policy_path_file or die $!;
+my $published_assembly_path = <$policy_path_fh>;
+close $policy_path_fh;
+chomp $published_assembly_path;
+is($published_assembly_path, File::Spec->canonpath(abs_path($group_dir)),
+	'centralized policy atomically publishes the canonical assembly directory');
+
 open my $mata_fh, '<', File::Spec->catfile($Bin, '..', 'MATAF4.pl') or die $!;
 my $mata_source = do { local $/; <$mata_fh> };
 close $mata_fh;
@@ -226,5 +269,12 @@ like($mata_source, qr/sub submitFinishedCleanup.*?--kill-on-invalid-dep=yes/s,
 	'failed Slurm dependency chains cancel cleanup instead of leaving it pending forever');
 unlike($mata_source, qr/system "rm -f \$finalCommAssDir\/scaffolds\.fasta\.filt/s,
 	'legacy inline mapper-index deletion is removed');
+unlike($mata_source, qr/getAssemblPath\(\$curOutDir,\$finalCommAssDir\)/,
+	'completed-sample assembly path publication is no longer performed inline');
+unlike($mata_source, qr/system "rm -rf \$CRAMmap"/,
+	'completed-sample alignment cleanup is no longer performed inline');
+like($mata_source,
+	qr/--assembly-path-file.*?--assembly-dir.*?--remove-temporary.*?--remove-alignment/s,
+	'MATAF4 delegates completed-sample filesystem policy to the cleanup script');
 
 done_testing;

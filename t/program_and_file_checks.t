@@ -63,8 +63,13 @@ like(
 );
 like(
 	$phylo_tools,
-	qr/\$cmd \.= "-mem \$\{iqMemMB\}M " if !\$iqLegacy && \$iqMemMB > 0/,
-	'modern IQ-TREE invocations enforce a supplied RAM limit',
+	qr/my \$usePartitionModel = \$partiF ne "" && !\$iqPathogen.*?if \(!\$iqLegacy && \$iqMemMB > 0\).*?if \(\$usePartitionModel\).*?WARNING: IQ-TREE -mem disabled because partition models do not support.*?else \{\s*\$cmd \.= "-mem \$\{iqMemMB\}M "/s,
+	'modern IQ-TREE uses the RAM cap only when it is compatible with the active model',
+);
+like(
+	$phylo_tools,
+	qr/\$cmd \.= " -p \$partiF --merge " if \$usePartitionModel/,
+	'IQ-TREE partition selection shares the same compatibility decision as the memory cap',
 );
 like(
 	$phylo_tools,

@@ -254,11 +254,19 @@ sub runQItree{
 			? "-T AUTO --threads-max $ncore"
 			: "-T AUTO -ntmax $ncore";
 	}
+	my $usePartitionModel = $partiF ne "" && !$iqPathogen;
 	my $cmd = "$iqTree -s $inMSA $threadOpts -pre $treeOut -seed 678 -quiet ";
-	$cmd .= "-mem ${iqMemMB}M " if !$iqLegacy && $iqMemMB > 0;
+	if (!$iqLegacy && $iqMemMB > 0){
+		if ($usePartitionModel){
+			warn "WARNING: IQ-TREE -mem disabled because partition models do not support "
+				. "-mem; enforce the memory limit through the job scheduler instead.\n";
+		} else {
+			$cmd .= "-mem ${iqMemMB}M ";
+		}
+	}
 	$cmd .= "--pathogen " if $iqPathogen && !$iqLegacy;
 	#$cmd .= " -Q $partiF --merge " unless ($partiF eq "");
-	$cmd .= " -p $partiF --merge " unless ($partiF eq "" || $iqPathogen);
+	$cmd .= " -p $partiF --merge " if $usePartitionModel;
 	$cmd .= "-o $outgr " unless ($outgr eq "" && $outgr !~ m/,/);
 	$cmd .= "-g $constraintTree " unless ($constraintTree eq "");
 	unless ($fast == 0 || $iqPathogen){

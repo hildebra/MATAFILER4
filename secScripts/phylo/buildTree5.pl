@@ -19,6 +19,8 @@
 #5.13: isolate recoverable alignment failures to their individual loci
 #5.14: add bounded-memory/auto-thread IQ-TREE mode, pathogen support, and legacy compatibility
 #5.15: fall back from pathogen mode when alignments exceed CMAPLE's compiled length limit
+#5.16: omit IQ-TREE -mem for incompatible partition-model runs
+#5.17: sort allFNA/allFAA records by locus before buildTree compresses them
 
 use warnings;
 use strict;
@@ -38,7 +40,7 @@ use Mods::IO::PP qw (decode_json);
 use Data::Dumper;
 use Mods::math qw (medianArray avgArray meanArray);
 use Cwd qw(abs_path);
-use File::Basename qw(basename);
+use File::Basename qw(basename dirname);
 use File::Copy qw(copy move);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
@@ -67,9 +69,11 @@ sub shellQuote;
 sub runMSAFix;
 sub limitedWarn;
 sub prepareTemporaryBase;
+sub sortFastaForCompression;
+sub fastaCompressionSortKey;
 
 my $doPhym= 0;
-my $version = 5.15;
+my $version = 5.17;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -1108,8 +1112,16 @@ if ($removeMSA){
 	}
 }
 if ($gzipInput){
+	# Release input caches before a compression-time ordered rewrite.  Only
+	# buildTree-owned plain-to-gzip conversions are sorted; existing .gz inputs
+	# and FASTA files with other names are left untouched.
+	%FNA = ();
+	%FAA = ();
 	for my $inputFile ($aaFna, $fnFna, $cogCats){
 		next if $inputFile eq "" || $inputFile =~ /\.gz$/ || !-f $inputFile;
+		my $inputBasename = basename($inputFile);
+		sortFastaForCompression($inputFile)
+			if $inputBasename eq "allFAAs.faa" || $inputBasename eq "allFNAs.fna";
 		systemW("$pigzBin -p $ncore ".shellQuote($inputFile));
 	}
 }
@@ -2563,6 +2575,40 @@ sub geneFileStem{
 	$stem =~ s/_/__/g;
 	$stem =~ s/([^A-Za-z0-9.-])/sprintf("_%02X", ord($1))/ge;
 	return $stem;
+}
+
+sub fastaCompressionSortKey{
+	my ($header) = @_;
+	my ($identifier) = split /\s+/, $header, 2;
+	my ($sample,$gene) = parseSeqId($identifier, "compression-sort FASTA header",1);
+	return length($gene)
+		? join("\t", $gene, $sample, $identifier)
+		: $identifier;
+}
+
+sub sortFastaForCompression{
+	my ($inputFile) = @_;
+	my $records = readFasta($inputFile,0);
+	die "Cannot sort empty FASTA input before compression: $inputFile\n"
+		unless keys %{$records};
+	my %sortKeys = map { $_ => fastaCompressionSortKey($_) } keys %{$records};
+	my @headers = sort {
+		$sortKeys{$a} cmp $sortKeys{$b}
+			|| $a cmp $b
+	} keys %{$records};
+	my ($out,$tmpFile) = tempfile(
+		basename($inputFile).".sort.XXXXXX",
+		DIR => dirname($inputFile),
+		UNLINK => 0,
+	);
+	for my $header (@headers){
+		print {$out} ">$header\n$records->{$header}\n"
+			or die "Cannot write sorted FASTA temporary file $tmpFile: $!\n";
+	}
+	close $out or die "Cannot close sorted FASTA temporary file $tmpFile: $!\n";
+	rename $tmpFile, $inputFile
+		or die "Cannot replace $inputFile with locus-sorted FASTA: $!\n";
+	print "Sorted ".scalar(@headers)." records by gene/locus before compressing $inputFile\n";
 }
 
 

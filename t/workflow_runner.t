@@ -174,7 +174,7 @@ like($mataf4,
 like($mataf4,
 	qr/getCmdLineOptions;.*?rewrite options cannot be combined with -loopTillComplete.*?setupHPC\(\)/s,
 	'unsafe rewrite combinations fail before scheduler setup or job submission');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?my \$MATFILER_ver = 4\.16/s,
-	'MATAFILER history retains loop triggering changes through version 4.16');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.20:.*?my \$MATFILER_ver = 4\.20/s,
+	'MATAFILER history retains loop triggering changes through version 4.20');
 
 done_testing;
