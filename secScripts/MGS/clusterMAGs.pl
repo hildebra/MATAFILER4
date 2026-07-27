@@ -27,8 +27,10 @@ sub MGuniqStats;
 #.21: validate wrapper inputs and honour the selected marker and quality-checker modes
 #.22: make fallback inputs reachable and clean wrapper logs and temporary outputs safely
 #.23: remove samples marked SMPL.empty from maps passed to the clustering binary
+#.24: require an explicit flag before entering the Perl compatibility algorithm
+#.25: use the compressed MAG report emitted directly by the clustering binary
 
-my $version = 0.23;
+my $version = 0.25;
 
 my $startTime = time ;
 
@@ -44,6 +46,7 @@ my $BinTerm = "MGS.";
 my $legacyV=0;
 my $camoIn = "";
 my $clusterID = 95;
+my $perlClusterMAGs = 0;
 
 my $ph1flag = 1; #sets up for using binnings..
 my %gen2Bin;#structure: {gene}{Bin}=cnt
@@ -111,6 +114,7 @@ GetOptions(
 	"ignoreIncompleteMAGs=i" => \$ignoIncomplMAGs,
 	"redo=i" => \$redo,
 	"legacy=i" => \$legacyV,
+	"perlClusterMAGs!" => \$perlClusterMAGs,
 ) or die "Invalid clusterMAGs.pl options\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-GCd is required\n" unless length $inD;
@@ -172,17 +176,17 @@ my $canoFlag = ""; $canoFlag = "-canopyDir $camoIn " if ($camoIn ne "");
 #-FILEtag SBx -MGtag MM2 -geneCatIdx C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/compl.incompl.95.fna.clstr.idx -MGdir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/MGs/ -outDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/out/ -map C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.0.txt,C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.1.txt -canopyDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/Cano/
 $cmd .= "$clMAGsBin -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.$clusterID.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
 $cmd .= "-outDir $outD -map $clusteringMapF $canoFlag -MGfile $GCd/${COGdir}.subset.cats\n";
-$cmd .= "test -s $outD/MAGvsGC.txt\n";
-$cmd .= "gzip -c $outD/MAGvsGC.txt > $logDir/MAGvsGC.txt.gz\n";
-$cmd .= "test -s $logDir/MAGvsGC.txt.gz\nrm $outD/MAGvsGC.txt\n";
+$cmd .= "test -s $logDir/MAGvsGC.txt.gz\n";
 
-if (1){ #C++ path.. better unless for testing something
+if (!$perlClusterMAGs) {
 	print "$cmd\n";
 	systemW $cmd;
 	print "\n\nDone with binary-based MAG clustering.\n\n";
 	exit;
 }
 
+warn "Entering the explicitly requested Perl clusterMAGs compatibility algorithm; the clusterMAGs binary is the supported default\n";
+$mapF = $clusteringMapF;
 
 
 my ($hrD,$hrM) = getDirsPerAssmblGrp($mapF);

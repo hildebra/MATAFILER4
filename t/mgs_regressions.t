@@ -10,7 +10,9 @@ use Symbol qw(gensym);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
-use Mods::Binning qw(createBin2 filterMGS_CM MB2assigns readCMquals);
+use Mods::Binning qw(
+	createBin2 createBinCtgs filterMGS_CM MB2assigns MB2assignedBinIds readCMquals
+);
 use Mods::geneCat qw(createGene2MGS);
 
 sub write_file {
@@ -48,6 +50,22 @@ createBin2($bins, $mgs, $fasta);
 like(slurp(File::Spec->catfile($bins, 'MGS1.fna')), qr/>1\nAAAA\n/, 'first FASTA record is retained');
 like(slurp(File::Spec->catfile($bins, 'MGS2.fna')), qr/>2\nCCCC\n/, 'final FASTA record is flushed at EOF');
 
+my $many_mgs = File::Spec->catfile($tmp, 'many.clusters.txt');
+my $many_fasta = File::Spec->catfile($tmp, 'many.genes.fna');
+my $many_bins = File::Spec->catdir($tmp, 'many-bins');
+write_file($many_mgs,
+	join('', map { "MGS$_\t$_\n" } 1 .. 70) . "MGS1\t71\n");
+write_file($many_fasta,
+	join('', map { ">$_\nSEQ$_\n" } 1 .. 71));
+createBin2($many_bins, $many_mgs, $many_fasta);
+is(slurp(File::Spec->catfile($many_bins, 'MGS1.fna')),
+	">1\nSEQ1\n>71\nSEQ71\n",
+	'bounded FASTA output handles reopen in append mode without losing records');
+is_deeply(
+	[glob(File::Spec->catfile($many_bins, '*.tmp.*'))], [],
+	'streamed FASTA extraction publishes outputs without leftover temporary files',
+);
+
 my $cm2 = File::Spec->catfile($tmp, 'bins.cm2');
 write_file($cm2, "Name\tCompleteness\tContamination\n1\t95.5\t1.2\n");
 my $quality = readCMquals($cm2);
@@ -72,6 +90,44 @@ write_file($empty_quality, "Name\tCompleteness\tContamination\n");
 my ($empty_bins, $empty_bin_quality) = MB2assigns($empty_assignments, $empty_quality);
 is_deeply($empty_bins, {}, 'a header-only bin assignment is a valid empty biological result');
 is_deeply($empty_bin_quality, {}, 'an empty bin assignment does not require fabricated quality rows');
+
+my $id_assignments = File::Spec->catfile($tmp, 'id-assignments.tsv');
+write_file($id_assignments,
+	"Sequence ID\tBin\ncontig1\t1\ncontig2\t1\nunassigned\t0\n");
+my ($assigned_ids, $assigned_quality) = MB2assignedBinIds($id_assignments, $cm2);
+is_deeply($assigned_ids, { 1 => 1 },
+	'ID-only bin parsing retains unique assigned bin IDs without contig arrays');
+is($assigned_quality->{1}{compl}, '95.5',
+	'ID-only bin parsing retains validated quality records');
+
+my $sample_dir = File::Spec->catdir($tmp, 'sample');
+my $assembly_dir = File::Spec->catdir($tmp, 'assembly');
+my $assembly_pointer_dir = File::Spec->catdir($sample_dir, 'assemblies', 'metag');
+my $assembly_bin_dir = File::Spec->catdir($assembly_dir, 'Binning', 'SB');
+my $contig_output_dir = File::Spec->catdir($tmp, 'representative-contigs');
+make_path($assembly_pointer_dir, $assembly_bin_dir, $contig_output_dir);
+write_file(File::Spec->catfile($assembly_pointer_dir, 'assembly.txt'), "$assembly_dir\n");
+write_file(File::Spec->catfile($assembly_bin_dir, 'S1'),
+	"needed1\t1\nunused\t2\nneeded2\t1\n");
+write_file(File::Spec->catfile($assembly_dir, 'scaffolds.fasta.filt'),
+	">needed1\nAAAA\n>unused\nNNNN\n>needed2\nCCCC\n");
+my $representative_guide = File::Spec->catfile($tmp, 'MAGvsGC.txt');
+write_file($representative_guide,
+	"MAG\tMGS\tRepresentative4MGS\tCompleteness\tContamination\tLCAcompleteness\tN50\n"
+	. "S1__1\tMGS.1\t*\t95\t1\t1\t1000\n");
+my %representative_map = (
+	opt => { smpl_order => ['S1'] },
+	altNms => {},
+	S1 => { wrdir => $sample_dir },
+);
+createBinCtgs(
+	$contig_output_dir, \%representative_map, $representative_guide, 0, 'SB',
+);
+is(
+	slurp(File::Spec->catfile($contig_output_dir, 'MGS.1.ctgs.S1__1.fna')),
+	">needed1\nAAAA\n>needed2\nCCCC\n",
+	'representative-contig extraction retains only contigs from the selected bin',
+);
 
 my $gc = File::Spec->catdir($tmp, 'GC');
 make_path(File::Spec->catdir($gc, 'Anno', 'Tax'));
@@ -193,8 +249,16 @@ like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 like($resort_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
 	'gene-priority resorting uses the propagated catalog identity');
 my $mgs_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.38;/,
-	'MGS empty-sample exclusion increments the pipeline version');
+my $job_resources_source = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'JobResources.pm'));
+my ($mgs_main, $mgs_subroutines) = split /# Subroutines\n/, $mgs_source, 2;
+ok(defined($mgs_subroutines), 'MGS has a distinct subroutine section after its main routing');
+unlike($mgs_main, qr/^sub \w+\s*\{/m,
+	'MGS keeps subroutine definitions below its main routing');
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.42;/,
+	'MGS consumes the binary-produced compressed MAG report');
+like($mgs_source,
+	qr/Starting MGS pipeline v\$MGSpipelineVersion.*?GetOptions\(.*?open LOG,.*?Configuration accepted; loading mapping and catalogue metadata.*?my \@checkpointInputs.*?getDirsPerAssmblGrp/s,
+	'MGS displays startup configuration before loading input metadata');
 like($mgs_source,
 	qr/sub _exclude_empty_samples.*?SMPL\.empty.*?delete \$groups->\{\$group\}.*?delete \$map->\{\$_\}/s,
 	'MGS removes empty samples and all-empty assembly groups before downstream path handling');
@@ -203,7 +267,40 @@ like($mgs_source,
 	'MGS applies empty-sample exclusion before requiring eligible input');
 like($mgs_source, qr/\$checkpointParameters\{empty_samples\} = join\(',', \@emptySamples\)/,
 	'MGS checkpoint provenance records the excluded empty samples');
+like($mgs_source,
+	qr/_count_lines_up_to\(20, \@marker_lca_files\).*?last if \$count >= \$limit/s,
+	'MGS marker-LCA preflight stops as soon as its minimum evidence is established');
+like($mgs_source,
+	qr/MB2assignedBinIds\(\$MBout.*?sub getGoodMBstats.*?MB2assignedBinIds\(\$MBf/s,
+	'MGS validation and MAG statistics use ID-only bin assignment scans');
+like($mgs_source,
+	qr/sub CanopyPrep.*?my %canCnts.*?close \$canopy_input.*?open \$canopy_input.*?kept_canopies/s,
+	'MGS Canopy filtering counts first and streams qualifying records in a second pass');
+unlike($mgs_source, qr/sub CanopyPrep.*?%can2gene/s,
+	'MGS Canopy filtering no longer stores every gene membership in memory');
+like($mgs_source,
+	qr/job_resources\.tsv.*?initialize_job_resource_log\(\$jobResourceLog\).*?timed_job_command/s,
+	'MGS initializes a dedicated resource log and wraps submitted jobs');
+like($job_resources_source,
+	qr/wall_seconds\\tmax_rss_kb.*?sub timed_job_command.*?\/usr\/bin\/time/s,
+	'the job wrapper records wall time and peak RSS');
 my $cluster_mags_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'clusterMAGs.pl'));
+like($mgs_source,
+	qr/"perlClusterMAGs!" => \\\$perlClusterMAGs.*?if \(\$perlClusterMAGs\).*?getProgPaths\("clusterMGS_scr"\).*?else \{.*?getProgPaths\("clusterMAGs"\)/s,
+	'MGS exposes the Perl clustering implementation only through an explicit flag and defaults to the binary');
+like($mgs_source,
+	qr/perl_cluster_mags\s+=> \$perlClusterMAGs \? 1 : 0/,
+	'MGS checkpoints record the selected MAG clustering engine');
+like($cluster_mags_source,
+	qr/"perlClusterMAGs!" => \\\$perlClusterMAGs.*?if \(!\$perlClusterMAGs\).*?systemW \$cmd.*?exit;.*?Entering the explicitly requested Perl clusterMAGs compatibility algorithm/s,
+	'the clusterMAGs wrapper enters its Perl algorithm only when explicitly requested');
+unlike($mgs_source . $cluster_mags_source,
+	qr/gzip -c \$outD\/MAGvsGC\.txt|rm \$outD\/MAGvsGC\.txt/,
+	'binary clustering routes do not recompress or remove an obsolete uncompressed MAG report');
+my @compressed_report_checks =
+	($mgs_source . $cluster_mags_source) =~ /test -s \$logDir\/MAGvsGC\.txt\.gz/g;
+is(scalar(@compressed_report_checks), 2,
+	'both binary clustering routes validate the compressed MAG report emitted in the log directory');
 like($cluster_mags_source,
 	qr/sub mapsWithoutEmptySamples.*?SMPL\.empty.*?next if exists \$empty\{\$sample\}/s,
 	'MAG clustering removes marked empty samples from its derived input maps');
@@ -241,18 +338,18 @@ like($mgs_source, qr/if \(\$rewrClusterMAGs \|\| \$stage1ProvenanceInvalid\).*?i
 like($mgs_source, qr/"clusterID=i" => \\\$clusterID/,
 	'MGS accepts a gene-catalog cluster identity');
 like($mgs_source,
-	qr/-MGset \$useGTDBmg -clusterID \$clusterID.*?\$cmd \.=\s+"-cores \$numCore/s,
-	'MGS passes cluster identity to MAG clustering');
+	qr/-clusterID \$clusterID.*?-geneCatIdx \$GCd\/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/s,
+	'MGS passes cluster identity to both Perl and binary MAG clustering routes');
 like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -maxCores \$canCore/,
 	'MGS passes cluster identity to strain analysis');
 like($mgs_source,
 	qr/\$cmdSI2 = "\$MMLscr -GCd \$GCd -cores \$numCore -MGset \$useGTDBmg -Binner \$BinnerShrt -binD \$outD/,
 	'MGS forwards its selected marker set and configured small-core count to marker abundance');
 like($mgs_source,
-	qr/qsubSystem\(\$logDir\."\/abundMGS_core\.sh",\$cmdSI2,\$numCore,"100G"/,
+	qr/qsubSystem\(\$logDir\."\/abundMGS_core\.sh".*?timed_job_command\('marker_mgs_abundance', \$cmdSI2, \$jobResourceLog\).*?\$numCore,"100G"/s,
 	'marker abundance retains a fixed total-memory request as core count changes');
 like($mgs_source,
-	qr/qsubSystem\(\$logDir\."\/abundMGS\.sh",\$cmdSI,1,/,
+	qr/qsubSystem\(\$logDir\."\/abundMGS\.sh".*?timed_job_command\('speci_mgs_abundance', \$cmdSI, \$jobResourceLog\).*?1,/s,
 	'MGS consistently runs specI abundance through the configured submission backend');
 unlike($mgs_source, qr/my \@files = glob \("\$GCd\/FMG\/tax\/\*tmp\.m8"\)/,
 	'MGS abundance scheduling is not gated by hard-coded FMG temporary alignments');

@@ -7,7 +7,7 @@ our @EXPORT_OK = qw(
 				getBinSubdirName binningOutputsComplete emptyBinnerAssignmentCommand
 				createBin2 createBinFAA createBinCtgs
 				readMGS readMGSrev deNovo16S readMGSrevRed minQualFilter 
-				filterMGS_CM MB2assigns calcLCAcompl readCMquals);
+				filterMGS_CM MB2assigns MB2assignedBinIds calcLCAcompl readCMquals);
 
 use warnings;
 use strict;
@@ -132,6 +132,30 @@ sub MB2assigns($ $){
 	#print "$inF, $IQ ". scalar(keys %{$rQHR}) ."\n";
 
 	return (\%ret,$rQHR);
+}
+
+sub MB2assignedBinIds {
+	my ($inF, $IQ) = @_;
+	my %assigned;
+	open my $input, '<', $inF or die "Can't open Binner output $inF\n";
+	while (my $line = <$input>) {
+		chomp $line;
+		next if $line =~ /^\s*$/;
+		my @fields = split /\t/, $line, -1;
+		die "Malformed binner assignment in $inF at line $.\n"
+			unless @fields >= 2 && length($fields[0]) && length($fields[1]);
+		next if $fields[0] eq 'Sequence ID';
+		next if $fields[1] eq '0';
+		$assigned{$fields[1]} = 1;
+	}
+	close $input or die "Cannot close Binner output $inF: $!\n";
+
+	my $quality = readCMquals($IQ);
+	for my $bin (keys %assigned) {
+		die "No quality record for assigned bin '$bin' in $IQ\n"
+			unless exists $quality->{$bin};
+	}
+	return (\%assigned, $quality);
 }
 
 
@@ -485,51 +509,75 @@ sub createBinCtgs{
 		$hr = getRepresentBins($guideF);
 	}
 	my %repBins = %{$hr};
-	
 	my %map = %{$hrMap};
-	my @allReps =  sort { $repBins{$a} cmp $repBins{$b} } keys %repBins; #@allReps = sort @allReps;
-	#die "@allReps\n";
-	my $hr2;my$hr1; my $lastSmpl = "";
-	foreach my $MGS (@allReps){
+	my %representatives_by_sample;
+
+	for my $MGS (sort keys %repBins) {
 		my $MAG = $repBins{$MGS};
-		if ($MAG =~ m/^Cano__/){
+		if ($MAG =~ m/^Cano__/) {
 			print STDERR "Could not retrieve MAG for $MGS : $MAG , because is Canopy\n";
 			next;
 		}
-		my $smpl = ""; my $bin= "";
-		if ($MAG =~ m/^(.+)__(.+)$/){  $smpl = $1;  $bin=$2;
-		} else { #skip this MAG completely.. but not good
+		unless ($MAG =~ m/^(.+)__(.+)$/) {
 			print STDERR "Could not match \"$MAG\" to sample and contig!\n";
 			next;
 		}
-			
-		
-		$smpl = $map{altNms}{$smpl} if ( defined($map{altNms}{$smpl}) );
-		if ($lastSmpl ne $smpl){
-			$lastSmpl = $smpl;
-			#print "Reading $smpl\n";
-			die "No assembly mapping for representative sample '$smpl'\n" unless exists($map{$smpl}) && defined($map{$smpl}{wrdir});
-			my $dirIn = $map{$smpl}{wrdir}; 
-			my $assDir = getAssemblPath($dirIn);
-			my $BinDir = "$assDir/Binning/$BinShrt/"; my $BinFile = "$BinDir/$smpl";
-			$hr1 = readBinSB($BinFile);
-			$hr2 = readFasta("$assDir/scaffolds.fasta.filt");
+		my ($smpl, $bin) = ($1, $2);
+		$smpl = $map{altNms}{$smpl} if defined($map{altNms}{$smpl});
+		die "No assembly mapping for representative sample '$smpl'\n"
+			unless exists($map{$smpl}) && defined($map{$smpl}{wrdir});
+		push @{$representatives_by_sample{$smpl}{$bin}}, {
+			mgs => $MGS,
+			mag => $MAG,
+		};
+	}
+
+	for my $smpl (sort keys %representatives_by_sample) {
+		my $dirIn = $map{$smpl}{wrdir};
+		my $assDir = getAssemblPath($dirIn);
+		my $BinFile = "$assDir/Binning/$BinShrt/$smpl";
+		my %wanted_bins = map { $_ => 1 } keys %{$representatives_by_sample{$smpl}};
+		my (%contigs_by_bin, %wanted_contigs);
+
+		open my $bin_input, '<', $BinFile or die "can't open bin file $BinFile\n";
+		while (my $line = <$bin_input>) {
+			chomp $line;
+			next if $line =~ /^\s*$/;
+			my @fields = split /\t/, $line, -1;
+			die "Malformed bin assignment in $BinFile at line $.\n"
+				unless @fields >= 2 && length($fields[0]) && length($fields[1]);
+			next if $fields[0] eq 'Sequence ID';
+			next unless $wanted_bins{$fields[1]};
+			push @{$contigs_by_bin{$fields[1]}}, $fields[0];
+			$wanted_contigs{$fields[0]} = 1;
 		}
-		
-		
-		die "Representative bin '$bin' was not found for sample '$smpl'\n" unless exists($hr1->{$bin}) && ref($hr1->{$bin}) eq 'ARRAY';
-		my @ctgs = @{$hr1->{$bin}};
-		#die "@ctgs\n". @ctgs . "\n";
-		
-		my $outF = "$outD/$MGS.ctgs.$MAG.fna";
-		#print "writing  $MGS.ctgs.$MAG.fna\n";
-		open O,">$outF" or die "Couldn't open $outF\n";
-		foreach my $ctg (@ctgs){
-			die "Contig '$ctg' from bin '$bin' is absent from the assembly for '$smpl'\n" unless exists($hr2->{$ctg});
-			print O ">$ctg\n$hr2->{$ctg}\n";
+		close $bin_input or die "Cannot close bin file $BinFile: $!\n";
+
+		for my $bin (keys %wanted_bins) {
+			die "Representative bin '$bin' was not found for sample '$smpl'\n"
+				unless exists($contigs_by_bin{$bin}) && @{$contigs_by_bin{$bin}};
 		}
-		close O;
-		#die "$MAG :: $smpl $bin\n$dirIn\n$assDir\n$BinFile\n";
+		my $sequences = readFasta(
+			"$assDir/scaffolds.fasta.filt", 1, "\\s", \%wanted_contigs,
+		);
+
+		for my $bin (sort keys %{$representatives_by_sample{$smpl}}) {
+			for my $representative (@{$representatives_by_sample{$smpl}{$bin}}) {
+				my $outF = "$outD/$representative->{mgs}.ctgs.$representative->{mag}.fna";
+				my $temporary = "$outF.tmp.$$";
+				open my $output, '>', $temporary or die "Couldn't open $temporary\n";
+				for my $ctg (@{$contigs_by_bin{$bin}}) {
+					die "Contig '$ctg' from bin '$bin' is absent from the assembly for '$smpl'\n"
+						unless exists($sequences->{$ctg});
+					print {$output} ">$ctg\n$sequences->{$ctg}\n"
+						or die "Cannot write $temporary: $!\n";
+				}
+				close $output or die "Cannot close $temporary: $!\n";
+				unlink $outF or die "Cannot replace existing output $outF: $!\n" if -e $outF;
+				rename $temporary, $outF
+					or die "Cannot publish representative contigs $outF: $!\n";
+			}
+		}
 	}
 
 	print "----------------------\nDone\nWrote representative MAGs (contigs) to $outD\n----------------------\n";
@@ -538,18 +586,50 @@ sub createBinCtgs{
 sub createBin2{
 	my ($binD,$cnopyF,$refFA) = @_;
 	my $hr = readMGSrevRed($cnopyF);
-	my %G2MGS = %{$hr};
 	my ($I,$OK) = gzipopen($refFA,"reference gene cat",1);
-	my $seq=""; my $hd=""; my %MGSfxa;
-	my $MGScnt=0; my $geneCnt=0;
+	my $seq=""; my $hd="";
+	my $geneCnt=0;
 	my $fileEnd = ".fna"; $fileEnd = ".faa" if ($refFA =~ m/\.faa$/);
+	my $max_open_outputs = 64;
+	my (%open_outputs, %last_used, %temporary_outputs, %mgs_written);
+	my $access_counter = 0;
+
+	make_path($binD);
+	my $output_handle = sub {
+		my ($MGS) = @_;
+		$access_counter++;
+		if (exists $open_outputs{$MGS}) {
+			$last_used{$MGS} = $access_counter;
+			return $open_outputs{$MGS};
+		}
+		if (keys(%open_outputs) >= $max_open_outputs) {
+			my ($oldest) = sort {
+				$last_used{$a} <=> $last_used{$b} || $a cmp $b
+			} keys %open_outputs;
+			close $open_outputs{$oldest}
+				or die "Cannot close temporary MGS output $temporary_outputs{$oldest}: $!\n";
+			delete $open_outputs{$oldest};
+			delete $last_used{$oldest};
+		}
+		my $temporary = $temporary_outputs{$MGS} ||= "$binD/$MGS$fileEnd.tmp.$$";
+		my $mode = $mgs_written{$MGS} ? '>>' : '>';
+		open my $output, $mode, $temporary
+			or die "Cannot open temporary MGS output $temporary: $!\n";
+		$open_outputs{$MGS} = $output;
+		$last_used{$MGS} = $access_counter;
+		return $output;
+	};
+
 	my $store_record = sub {
 		return unless $hd =~ m/^>(\d+)/;
 		my $gene_id = $1;
-		return unless exists($G2MGS{$gene_id});
+		return unless exists($hr->{$gene_id});
 		$geneCnt++;
-		for my $MGS (keys %{$G2MGS{$gene_id}}) {
-			$MGSfxa{$MGS}{$hd} = $seq;
+		for my $MGS (sort keys %{$hr->{$gene_id}}) {
+			my $output = $output_handle->($MGS);
+			print {$output} "$hd\n$seq\n"
+				or die "Cannot write temporary MGS output $temporary_outputs{$MGS}: $!\n";
+			$mgs_written{$MGS} = 1;
 		}
 	};
 	while (my $line = <$I>){
@@ -562,17 +642,19 @@ sub createBin2{
 		$seq .= $line;
 	}
 	$store_record->();
-	close $I;
-	my $mgs_count = scalar keys %MGSfxa;
+	close $I or die "Cannot close reference gene catalogue $refFA: $!\n";
+	for my $MGS (keys %open_outputs) {
+		close $open_outputs{$MGS}
+			or die "Cannot close temporary MGS output $temporary_outputs{$MGS}: $!\n";
+	}
+	my $mgs_count = scalar keys %mgs_written;
 	die "No genes from $cnopyF were found in $refFA\n" unless $mgs_count;
 	print "Found $geneCnt genes in $mgs_count MGS (avg " . int($geneCnt/$mgs_count*100)/100  . " per MGS). Writing to $binD\n";
-	make_path($binD);
-	foreach my $MGS (keys %MGSfxa){
-		open O,">$binD/$MGS$fileEnd" or die "Cannot write $binD/$MGS$fileEnd: $!\n";
-		foreach my $gen (keys %{$MGSfxa{$MGS}}){
-			print O "$gen\n$MGSfxa{$MGS}{$gen}\n";
-		}
-		close O;
+	for my $MGS (sort keys %mgs_written) {
+		my $output = "$binD/$MGS$fileEnd";
+		unlink $output or die "Cannot replace existing MGS output $output: $!\n" if -e $output;
+		rename $temporary_outputs{$MGS}, $output
+			or die "Cannot publish MGS output $output: $!\n";
 	}
 	print "----------------------\nDone\nWrote representative MAGs (genes) to $binD\n----------------------\n";
 	

@@ -491,11 +491,12 @@ sub readFasta{
 	my $fils = $_[0];
 	my $cutHd=0;
 	my $sepChr= "\\s";
-	my %subs; my $doSubs=0;
+	my $subs; my $doSubs=0;
 	$cutHd = $_[1] if (@_ > 1);
 	$sepChr = $_[2] if (@_ > 2);
 	if (@_ > 3){
-		my $hr = $_[3]; %subs = %{$hr};
+		$subs = $_[3];
+		die "readFasta subset must be a hash reference\n" unless ref($subs) eq 'HASH';
 		$doSubs = 1;
 	}
 	my $Hseq = {};
@@ -532,7 +533,7 @@ sub readFasta{
 		my ($trHe, $srcHe) = $prepare_header->($first_line);
 		my $temp = "";
 		my $store_record = sub {
-			return if $doSubs && !exists($subs{$trHe}) && !exists($subs{$srcHe});
+			return if $doSubs && !exists($subs->{$trHe}) && !exists($subs->{$srcHe});
 			$Hseq->{$trHe} = $temp;
 		};
 
