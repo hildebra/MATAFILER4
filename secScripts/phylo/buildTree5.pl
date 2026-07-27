@@ -21,6 +21,7 @@
 #5.15: fall back from pathogen mode when alignments exceed CMAPLE's compiled length limit
 #5.16: omit IQ-TREE -mem for incompatible partition-model runs
 #5.17: sort allFNA/allFAA records by locus before buildTree compresses them
+#5.18: use the allocated IQ-TREE thread count directly; avoid costly per-tree AUTO benchmarking
 
 use warnings;
 use strict;
@@ -73,7 +74,7 @@ sub sortFastaForCompression;
 sub fastaCompressionSortKey;
 
 my $doPhym= 0;
-my $version = 5.17;
+my $version = 5.18;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;

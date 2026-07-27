@@ -249,11 +249,6 @@ sub runQItree{
 	$treeOut =~ s/\.nwk$//;
 	my $treNM = "IQtree";
 	my $threadOpts = "-T $ncore";
-	unless ($iqLegacy){
-		$threadOpts = $iqVersion == 3
-			? "-T AUTO --threads-max $ncore"
-			: "-T AUTO -ntmax $ncore";
-	}
 	my $usePartitionModel = $partiF ne "" && !$iqPathogen;
 	my $cmd = "$iqTree -s $inMSA $threadOpts -pre $treeOut -seed 678 -quiet ";
 	if (!$iqLegacy && $iqMemMB > 0){

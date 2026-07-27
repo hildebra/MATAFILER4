@@ -58,8 +58,13 @@ like(
 );
 like(
 	$phylo_tools,
-	qr/"-T AUTO --threads-max \$ncore"/,
-	'modern IQ-TREE 3 invocations auto-select threads within the allocated core limit',
+	qr/my \$threadOpts = "-T \$ncore"/,
+	'IQ-TREE uses every core allocated to its cluster job without AUTO benchmarking',
+);
+unlike(
+	$phylo_tools,
+	qr/-T AUTO|threads-max|ntmax/,
+	'IQ-TREE commands no longer repeat automatic thread-efficiency tests',
 );
 like(
 	$phylo_tools,
