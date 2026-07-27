@@ -266,7 +266,7 @@ sub runQItree{
 	}
 	$cmd .= "--pathogen " if $iqPathogen && !$iqLegacy;
 	#$cmd .= " -Q $partiF --merge " unless ($partiF eq "");
-	$cmd .= " -p $partiF --merge " if $usePartitionModel;
+	$cmd .= " -p $partiF " if $usePartitionModel;
 	$cmd .= "-o $outgr " unless ($outgr eq "" && $outgr !~ m/,/);
 	$cmd .= "-g $constraintTree " unless ($constraintTree eq "");
 	unless ($fast == 0 || $iqPathogen){
@@ -277,13 +277,13 @@ sub runQItree{
 	if ($autoModel){$treNM .= "_autoMOD";}
 	if ($useAA){
 		if ($autoModel){
-			$cmd .= "-m TEST  "; 
+			$cmd .= $usePartitionModel ? "-m MFP+MERGE " : "-m TEST ";
 		} else{
 			$cmd .= "-m LG+F+G "; #needs to be HKY for nts
 		}
 	} else {
 		if ($autoModel){
-			$cmd .= "-m TEST ";#-mset HKY,HKY+F,HKY+F+I,HKY+F+I+G4,JC,F81,K2P,K3P,K81uf,GTR ";
+			$cmd .= $usePartitionModel ? "-m MFP+MERGE " : "-m TEST ";
 		} else {
 			$cmd .= $iqLegacy ? "-m GTR+F+I+G4 " : "-m GTR+F+G2 ";
 			#$cmd .= "-m HKY+F+G ";

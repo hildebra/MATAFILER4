@@ -122,8 +122,11 @@ like($between_source, qr/if \(\$mgs_with_fmg < 3\).*?SKIPPED=too_few_marker_bear
 	'between-MGS phylogeny reports a successful cardinality skip before invoking a tree builder');
 like($between_source, qr/if \(!-s \$treeFile\)/,
 	'between-MGS phylogeny rebuilds an empty tree instead of treating it as complete');
-like($between_source, qr/test -s \$treeFile.*?test -s \$treePdf/s,
-	'between-MGS tree jobs validate both tree and visualization outputs');
+like($between_source, qr/test -s \$treeFile.*?if \(\$visualize\).*?test -s \$treePdf/s,
+	'standalone between-MGS jobs validate the tree and conditionally validate visualization');
+like($between_source,
+	qr/-bootstrap 1000.*?-NTfilt 0\.5.*?-NTfiltPerGene 0\.7.*?-GenesPerSpecies 0\.5.*?-minOverlapMSA \$minimumColumnOccupancy.*?-AutoModel 1/s,
+	'between-MGS trees use multi-phyla marker occupancy and partition-aware model selection');
 like($between_source, qr/\$externalDep =~ s\/\^\\Q\$localTag\\E\/\/.*?WAITID=\$externalDep/s,
 	'between-MGS launcher exports an untagged numeric dependency across processes');
 my $strain_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
@@ -190,8 +193,8 @@ like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 like($resort_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
 	'gene-priority resorting uses the propagated catalog identity');
 my $mgs_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.36;/,
-	'MGS output cleanup increments the pipeline version');
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.37;/,
+	'MGS immediate tree launch increments the pipeline version');
 like($mgs_source,
 	qr/MGS pipeline v\$MGSpipelineVersion.*?Mode:.*?Inputs:.*?Paths:.*?Clustering:.*?Quality:.*?Resources:.*?Optional analyses:/s,
 	'MGS starts with a structured runtime configuration header');
@@ -223,7 +226,8 @@ like($mgs_source, qr/if \(\$rewrClusterMAGs \|\| \$stage1ProvenanceInvalid\).*?i
 	'reclustering invalidates dependent checkpoints and phylogenies');
 like($mgs_source, qr/"clusterID=i" => \\\$clusterID/,
 	'MGS accepts a gene-catalog cluster identity');
-like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -cores \$numCore/,
+like($mgs_source,
+	qr/-MGset \$useGTDBmg -clusterID \$clusterID.*?\$cmd \.=\s+"-cores \$numCore/s,
 	'MGS passes cluster identity to MAG clustering');
 like($mgs_source, qr/-MGset \$useGTDBmg -clusterID \$clusterID -maxCores \$canCore/,
 	'MGS passes cluster identity to strain analysis');
@@ -241,8 +245,11 @@ unlike($mgs_source, qr/my \@files = glob \("\$GCd\/FMG\/tax\/\*tmp\.m8"\)/,
 unlike($mgs_source, qr/systemW\s+\$cmdSI\b/,
 	'MGS does not execute the expensive specI abundance command directly on the launcher');
 like($mgs_source,
-	qr/elsif \(!-s "\$outDphylo\/phylo\/IQtree_allsites\.treefile" \|\| !-s "\$outD\/between_phylo\/phylo\/IQtree_allsites\.pdf"\)/,
-	'MGS rebuilds missing or empty between-MGS tree products');
+	qr/Stage I clustering done.*?_touch_checkpoint\(\$st1ston.*?Preparing between-MGS phylogeny immediately after MGS creation.*?#get checkM quality/s,
+	'MGS starts between-MGS inference immediately after publishing the Stage-I MGS set');
+like($mgs_source,
+	qr/-visualize 0.*?Visualization needs the abundance matrix.*?interMGSphyloViz\.sh.*?MGSphyloViz", \$treedep/s,
+	'MGS defers only abundance-dependent tree visualization and preserves the tree dependency');
 unlike($mgs_source, qr/die "Kraken MGS taxonomy stage incomplete/,
 	'missing optional Kraken taxonomy no longer aborts MGS');
 like($mgs_source, qr/warn "Optional Kraken MGS taxonomy stage incomplete; continuing without Kraken-derived MGS taxonomy/,
@@ -356,6 +363,8 @@ like($gene_cat_source,
 	'geneCat starts with a structured runtime configuration header');
 unlike($gene_cat_source, qr/print \$cmd\."\\n\\n"|print "\$qcmd\\n"/,
 	'geneCat does not echo full routine or scheduler commands');
+unlike($gene_cat_source, qr/getProgPaths\("specIphylo_scr"\)/,
+	'geneCat no longer owns or resolves the obsolete interspecies-tree launcher');
 like($gene_cat_source,
 	qr/\$missingGffCount <= 5.*?No more missing-GFF examples.*?has \$missingGffCount gene\(s\) without GFF entries/s,
 	'geneCat caps missing-GFF examples and reports their aggregate count');

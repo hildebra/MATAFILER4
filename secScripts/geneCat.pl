@@ -424,7 +424,6 @@ my $hmmBestHitScr = getProgPaths("hmmBestHit_scr");#needed for HMMer based func 
 #my $tabixBin = "/g/bork5/hildebra/bin/samtools-1.2/tabix-0.2.6/./tabix";
 #my $bgzipBin = "/g/bork5/hildebra/bin/samtools-1.2/tabix-0.2.6/./bgzip";
 my $pigzBin = getProgPaths("pigz");
-my $specIphyloScript = getProgPaths("specIphylo_scr");
 my $decluterGC = getProgPaths("decluterGC_scr");
 my $kmerScr = getProgPaths("kmerPerGene_scr");
 my $rareBin = getProgPaths("rare");#"/g/bork3/home/hildebra/dev/C++/rare/rare";
@@ -1490,12 +1489,6 @@ sub geneCatFlow($ $ $ $ ){
 	my $canopyExpectedDir = getCanopyDir($OutD);
 	#$cmd .= "#MetaBat2 single sample (sample group) MAGs\n";
 	#cross compare MB2, extract more genes via canopy, fix via correlation stats
-	#is dependent on SNPs being called..
-	if ($doStrains){
-		$cmd .= "#run from job distributing node:\n";
-		$cmd .= "#" if (!$submitLocal);
-		#$cmd .= "$specIphyloScript $OutD $numCor"; #I deactivated this script, as same as strainWithin.pl, just without bins.. so useless
-	}
 	$cmd .= "\n\n";
 	#$cmd .= "rm -f $bdir/SAM/compl.$cdhID.fna.b* $bdir/SAM/compl.$cdhID.fna$mini2IdxFileSuffix\n";
 	$cmd .= "echo \"cleaning up B0 tmp dir\"\nrm -rf $bdir\n"; #not really needed any longer

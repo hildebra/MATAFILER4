@@ -68,8 +68,8 @@ like(
 );
 like(
 	$phylo_tools,
-	qr/\$cmd \.= " -p \$partiF --merge " if \$usePartitionModel/,
-	'IQ-TREE partition selection shares the same compatibility decision as the memory cap',
+	qr/\$cmd \.= " -p \$partiF " if \$usePartitionModel.*?-m MFP\+MERGE/s,
+	'partitioned IQ-TREE ModelFinder receives the generated loci and optimizes their merge scheme',
 );
 like(
 	$phylo_tools,

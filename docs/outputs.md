@@ -315,6 +315,7 @@ MGS.pl -outD <output_directory>
 | `GTDBTK.tax` | GTDB-Tk taxonomic assignment; generally the preferred modern taxonomy output when available. |
 | `kraken2.LCA` | Kraken2 lowest-common-ancestor taxonomic assignment. |
 | `between_phylo/phylo/IQtree_allsites.treefile` | De novo phylogeny of MGS. |
+| `between_phylo/phylo/IQtree_allsites.pdf` | Abundance-annotated rendering, generated after the MGS abundance matrix is available. |
 | `RhclClust/*.faa` | Proteins found in each MGS, stored separately per MGS. |
 | `MAG.MB2.assStat.summary` | Summary of MetaBAT2 bins found in each sample. |
 | `Bin_SB/LOGandSUB/MAGvsGC.txt.gz` | Links MAGs, MGS, marker genes and other gene-catalog genes. |
@@ -326,6 +327,8 @@ Sparse runs can finish successfully without manufacturing cluster or tree data:
 - `Bin_<binner>/between_phylo/SKIPPED.txt` records that fewer than three marker-bearing MGS were available for a meaningful between-MGS phylogeny.
 
 These files represent completed, expected low-cardinality outcomes. Missing or partial paired outputs (for example, only one of the Canopy cluster and profile files) remain errors.
+
+The between-MGS tree starts immediately after Stage I publishes the MGS core set and runs concurrently with taxonomy and abundance. It is inferred from concatenated amino-acid FMG alignments with per-locus partitions, partition-aware ModelFinder, 1,000 ultrafast bootstrap replicates, and minimum marker/column occupancy filters. The topology is unrooted unless the standalone launcher is given suitable reference genomes and an explicit downstream rooting strategy.
 
 ### MGS abundance matrices
 

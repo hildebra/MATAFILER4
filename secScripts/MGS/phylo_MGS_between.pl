@@ -3,6 +3,8 @@
 #relatively simple, since can use genes directly from gene cat, no need to get SNP called genes
 #can also include reference genomes to include in tree
 # v0.2 (2026-07-22): handle sparse MGS sets and exclude ambiguous paralogs deterministically.
+# v0.3 (2026-07-27): decouple tree inference from abundance-dependent visualization and
+#                    harden the multi-phyla phylogeny defaults.
 #perl /hpc-home/hildebra/dev/Perl/MATAF3//secScripts/MGS/phylo_MGS_between.pl -GCd /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1/ -MGS /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//MB2.clusters.ext.can.Rhcl.filt -c 10 -outD /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//customRefs/ -refGenos '/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta'
 
 use warnings;
@@ -31,6 +33,7 @@ my $fastphylo = 0;
 my $MSAprog = 4; #4:MUSCLE5, 2:mafft
 my $xtraMessageInSH = "";
 my $mem = 120; #memory request in GB
+my $visualize = 1;
 #$btout = $ARGV[3] if (@ARGV > 3);
 #$wait4job = $ARGV[4] if (@ARGV > 4);
 
@@ -47,6 +50,7 @@ GetOptions(
 	"MSAprogram=i" => \$MSAprog,
 	"xtraMsg=s" => \$xtraMessageInSH,
 	"mem=i" => \$mem,
+	"visualize=i" => \$visualize,
 ) or die "Invalid phylo_MGS_between.pl options\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
@@ -55,6 +59,7 @@ die "Gene-catalog directory not found: $GCd\n" unless -d $GCd;
 die "MGS file missing or empty: $MGSfile\n" unless -s $MGSfile;
 die "Core and memory requests must be positive\n" unless $numCores > 0 && $mem > 0;
 die "Unsupported MSA program: $MSAprog\n" unless $MSAprog == 2 || $MSAprog == 4;
+die "-visualize must be 0 or 1\n" unless $visualize == 0 || $visualize == 1;
 $btout = "$GCd/MGS/phylo/" if ($btout eq "");#main output dir
 
 
@@ -158,7 +163,6 @@ if ($mgs_with_fmg < 3) {
 	exit 0;
 }
 my $bts = getProgPaths("buildTree_scr");
-my $vizTree = getProgPaths("vizBtwPhylo_R");
 print "Retained $usable_fmg unambiguous FMG genes in $mgs_with_fmg MGS (".
 	int(10*$usable_fmg/$mgs_with_fmg)/10 ." on average); excluded $ambiguous_cells MGS-marker cells with $mfdbl extra copies\n";
 unlink "$btout/SKIPPED.txt" or die "Cannot remove stale $btout/SKIPPED.txt: $!\n"
@@ -262,32 +266,40 @@ close OC;
 my $QSBoptHR = emptyQsubOpt(1,"");
 $QSBoptHR->{useLongQueue} = 1;
 my $treeFile = "$btout/phylo/IQtree_allsites.treefile";
+my $minimumColumnOccupancy = int(($mgs_with_fmg * 0.5) + 0.999999);
+$minimumColumnOccupancy = 3 if $minimumColumnOccupancy < 3 && $mgs_with_fmg >= 3;
 
 my $cmd = "";
 if (!-s $treeFile){
 	print "Creating phylogeny for found specI's//\n";
-	$cmd .= "$bts  -aa  $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats -outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores  -AAtree 1 -bootstrap 5000 -NTfiltCount 300 -NTfilt 0.1 -NTfiltPerGene 0.5 -minOverlapMSA 2 -MSAprogram $MSAprog -AutoModel 0 -iqFast 0 \n";
+	$cmd .= "$bts -aa $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats "
+		. "-outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores "
+		. "-AAtree 1 -bootstrap 1000 -NTfiltCount 3000 -NTfilt 0.5 "
+		. "-NTfiltPerGene 0.7 -GenesPerSpecies 0.5 "
+		. "-minOverlapMSA $minimumColumnOccupancy -MSAprogram $MSAprog "
+		. "-AutoModel 1 -iqFast 0 -continue 1\n";
 } else {
 	print "Found already existing tree, skipping tree building\n";
-	$cmd .= "#$bts  -aa  $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats -outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores  -AAtree 1 -bootstrap 5000 -NTfiltCount 300 -NTfilt 0.1 -NTfiltPerGene 0.5 -minOverlapMSA 2 -MSAprogram $MSAprog -AutoModel 0 -iqFast 0 \n";
 }
 $cmd .= "\n\n\n$xtraMessageInSH\n" if ($xtraMessageInSH ne "");
 $cmd .= "test -s $treeFile\n";
 
-#add script for phylo visualization
-$cmd .= "\n#visualize the newly created phylogeny\n";
-my $abundMatrix = $MGSfile;  $abundMatrix =~ s/\/[^\/]+$/\//; $abundMatrix .= "Annotation/Abundance/MGS.matL7.txt";
-my $treePdf = "$btout/phylo/IQtree_allsites.pdf";
-$cmd .= "$vizTree $abundMatrix $treeFile $treePdf \n";
-$cmd .= "test -s $treePdf\n";
+if ($visualize) {
+	# Standalone use retains the historical combined tree-and-visualization job.
+	# MGS.pl disables this and submits visualization only after abundance exists.
+	$cmd .= "\n#visualize the newly created phylogeny\n";
+	my $abundMatrix = $MGSfile;  $abundMatrix =~ s/\/[^\/]+$/\//; $abundMatrix .= "Annotation/Abundance/MGS.matL7.txt";
+	my $treePdf = "$btout/phylo/IQtree_allsites.pdf";
+	my $vizTree = getProgPaths("vizBtwPhylo_R");
+	$cmd .= "$vizTree $abundMatrix $treeFile $treePdf \n";
+	$cmd .= "test -s $treePdf\n";
+}
 
 #handle submission
 my $scrNm = "btwFMGtree";
 $scrNm = "btwCusFMGTree" if ($addRefGenos ne "");
 my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
 my ($dep,$qcmd) = qsubSystem($btout.$scrNm.".sh",$cmd,$numCores,int($mem)."G",$scrNm,"","",1,[],$QSBoptHR);
-#$cmd= "$bts  -aa  $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats -outD ${btout}_ST -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores  -AAtree 1 -bootstrap 000 -NTfiltCount 300 -NTfilt 0.1 -NTfiltPerGene 0.5 -minOverlapMSA 2 -MSAprogram 2 -AutoModel 0 -iqFast 1 -superTree 1 \n";
-#($dep,$qcmd) = qsubSystem($btout."btweenTreeST.sh",$cmd,$numCores,"1G","FMGstStree","","",1,[],$QSBoptHR);
 
 if ($wait4job==1){
 	qsubSystemJobAlive( [$dep],$QSBoptHR );

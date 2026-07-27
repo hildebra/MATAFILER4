@@ -33,8 +33,10 @@ use Cwd qw(abs_path);
 #.34: restore the documented GTDB default and fingerprint workflow-defining checkpoint options
 #.35: invalidate stale input-derived products and validate sparse/downstream outputs before resuming
 #.36: consolidate repetitive MAG diagnostics and make stage progress easier to scan
+#.37: launch the between-MGS tree immediately after Stage I and defer only its
+#     abundance-dependent visualization.
 
-my $MGSpipelineVersion = 0.36;
+my $MGSpipelineVersion = 0.37;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -668,7 +670,57 @@ printL "---------------------------------------------------------------------\n"
 printL "Stage I clustering done, MGS calculated.\nProgressing to Stage II: annotations, phylogenies and abundances\n";
 printL "Using $finalClustersFilt as MGS rep\n";
 printL "---------------------------------------------------------------------\n";
+_touch_checkpoint($st1ston, 'stage-1', $finalClustersFilt) unless _checkpoint_valid($st1ston);
 
+# Start the between-MGS tree as soon as the newly published MGS core set exists.
+# Tree inference depends only on FMG proteins and MGS membership.  Its
+# abundance-annotated visualization is submitted later, after MGS abundance is
+# available, so taxonomy and abundance can run concurrently with the tree.
+my $treeMem = "120";
+if ($numSamples > 2000){ #scale with the number of assembly groups
+	$treeMem = "200";
+}
+my $phyloBetween = getProgPaths("MGSPhyloBetween_scr");
+my $baseTreeCmd = "$phyloBetween -GCd $GCd -MGS $finalClustersFilt -mem $treeMem -c $canCore -MSAprogram 4 -fast 0 ";
+my $wait4tree = 2;
+my $outDphylo = "$outD/between_phylo/";
+my $iniTree = "$outDphylo/phylo/IQtree_allsites.treefile";
+my $treePdf = "$outDphylo/phylo/IQtree_allsites.pdf";
+my $ph1Cmd = "$baseTreeCmd -outD $outDphylo -wait2finish $wait4tree -visualize 0 ";
+my $treedep = "";
+my $betweenTreeSkipped = 0;
+
+if ($coreMGSCount < 3) {
+	$betweenTreeSkipped = 1;
+	printL "Skipping between-MGS phylogeny: at least 3 MGS are required, but only $coreMGSCount were retained\n";
+} elsif (!-s $iniTree) {
+	printL "Preparing between-MGS phylogeny immediately after MGS creation in $outDphylo\n";
+
+	my $refTreeMsg = "\n################\n# If you want to include custom reference genomes, use\n# $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]\n################\n";
+	print $refTreeMsg;
+	$refTreeMsg = "#If you want to include custom reference genomes, use $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]";
+	$ph1Cmd .= " -xtraMsg \"$refTreeMsg\";";
+
+	if (!$doSubmit) {
+		print "Dry run: between-MGS launcher was not executed.\n";
+	} else {
+		my $ph1OUT = `$ph1Cmd`;
+		my $ph1Status = $?;
+		die "Between-MGS phylogeny command failed (exit " . ($ph1Status >> 8) . "):\n$ph1Cmd\n$ph1OUT\n"
+			if $ph1Status != 0;
+		if ($ph1OUT =~ m/WAITID=(\d+)/) {
+			$treedep = $1;
+			printL "Between-MGS phylogeny submitted as job $treedep\n";
+		} elsif ($ph1OUT =~ m/^SKIPPED=(.+)$/m) {
+			$betweenTreeSkipped = 1;
+			printL "Between-MGS phylogeny was skipped by its launcher: $1\n";
+		} else {
+			die "Between-MGS phylogeny command reported neither WAITID nor SKIPPED:\n$ph1OUT\n";
+		}
+	}
+} else {
+	printL "Reusing existing between-MGS phylogeny: $iniTree\n";
+}
 
 
 #get checkM quality for new Bins
@@ -704,8 +756,6 @@ if ($rewrTAX) {
 		elsif (-f $path) { unlink $path or die "Cannot remove $path: $!\n"; }
 	}
 }
-_touch_checkpoint($st1ston, 'stage-1', $finalClustersFilt) unless _checkpoint_valid($st1ston);
-
 my @jobs2wait=();
 
 #basic quality checks are done at this point
@@ -861,50 +911,24 @@ if ($doSubmit) {
 		&& -s "$outD/Annotation/Abundance/MGS.matL7.txt";
 }
 
-#die;
-#/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta
-#and just call between MGS treebuild scr
-my $treeMem = "120";
-if ($numSamples > 2000){ #scale with the number of assembly groups
-	$treeMem = "200";
-}
-my $phyloBetween = getProgPaths("MGSPhyloBetween_scr");
-my $baseTreeCmd = "$phyloBetween -GCd $GCd -MGS $finalClustersFilt -mem $treeMem -c $canCore -MSAprogram 4 -fast 0 ";
-my $wait4tree = 2; $wait4tree = 2 if ($doStrains);
-my $outDphylo = "$outD/between_phylo/";
-my $ph1Cmd = "$baseTreeCmd -outD $outDphylo -wait2finish $wait4tree "; #superTree?
-my $treedep="";
-
-
-if ($coreMGSCount < 3) {
-	printL "Skipping between-MGS phylogeny: at least 3 MGS are required, but only $coreMGSCount were retained\n";
-} elsif (!-s "$outDphylo/phylo/IQtree_allsites.treefile" || !-s "$outD/between_phylo/phylo/IQtree_allsites.pdf"){
-	printL "Preparing between-MGS phylogeny in $outDphylo\n";
-	
-	my $refTreeMsg = "\n################\n# If you want to include custom reference genomes, use\n# $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]\n################\n";
-	print $refTreeMsg;
-	$refTreeMsg = "#If you want to include custom reference genomes, use $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]";
-	$ph1Cmd .= " -xtraMsg \"$refTreeMsg\";";
-
+# Visualization needs the abundance matrix, unlike tree inference itself.
+# Submit it only now, and depend on a newly launched tree when necessary.
+if (!$betweenTreeSkipped && !-s $treePdf) {
+	my $treeAbundance = "$outD/Annotation/Abundance/MGS.matL7.txt";
 	if (!$doSubmit) {
-		print "Dry run: between-MGS launcher was not executed.\n";
+		print "Dry run: between-MGS tree visualization was not submitted.\n";
 	} else {
-		#execute the launcher and capture its scheduler dependency
-		my $ph1OUT = `$ph1Cmd`;
-		my $ph1Status = $?;
-		die "Between-MGS phylogeny command failed (exit " . ($ph1Status >> 8) . "):\n$ph1Cmd\n$ph1OUT\n"
-			if $ph1Status != 0;
-	#my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
-	#my ($jobName2, $tmpCmd) = qsubSystem($logDir."/interMGSphylo.sh",$ph1Cmd,1,int(150/1)."G","MGSphylo","","",1,[],\%QSBopt) ;
-	#	print "WAITID=$dep\n";
-		if ($ph1OUT =~ m/WAITID=(\d+)/) {
-			$treedep = $1;
-			printL "Between-MGS phylogeny submitted as job $treedep\n";
-		} elsif ($ph1OUT =~ m/^SKIPPED=(.+)$/m) {
-			printL "Between-MGS phylogeny was skipped by its launcher: $1\n";
-		} else {
-			die "Between-MGS phylogeny command reported neither WAITID nor SKIPPED:\n$ph1OUT\n";
-		}
+		die "Cannot visualize between-MGS tree without abundance matrix: $treeAbundance\n"
+			unless -s $treeAbundance;
+		my $vizTree = getProgPaths("vizBtwPhylo_R");
+		my $vizCmd = "$vizTree $treeAbundance $iniTree $treePdf\n";
+		$vizCmd .= "test -s $treePdf\n";
+		my ($vizDep, $vizSubmitCmd) = qsubSystem(
+			$logDir."/interMGSphyloViz.sh", $vizCmd, 1, "20G",
+			"MGSphyloViz", $treedep, "", 1, [], \%QSBopt,
+		);
+		printL "Between-MGS visualization submitted as job $vizDep"
+			. ($treedep ne "" ? " after tree job $treedep" : "") . "\n";
 	}
 }
 
@@ -943,7 +967,6 @@ if ($wait4stone ne ""){
 #die "XX\n";
 
 my $strain1scr = getProgPaths("MGS_strain1_scr");
-my $iniTree = "$outD/between_phylo/phylo/IQtree_allsites.treefile";
 my $memUsage = 30; #in Gb
 my $NsubJobs = 0 ; #split job up?
 my $preCompCons = 0;

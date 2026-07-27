@@ -143,8 +143,9 @@ perl $MF4DIR/secScripts/geneCat.pl \
 	- identifies genes that represent marker genes (GTDB)
 	- creates a gene abundance matrix (literally gene catalog millions of genes and their abundance in all metagenomic samples.. very big files!)
     - assigns basic functions to genes in gene catalog (KEGG, eggNOG, CAZy, ARG, ..)
-    - accumulates MAGs and dereplicates these into MGS (metagenomic species)
+	- accumulates MAGs and dereplicates these into MGS (metagenomic species)
 	- calculates abundances of MGS in samples and an MGS taxonomy
+	- starts a between-MGS marker-protein phylogeny as soon as the new MGS set is available
 	- calculates intra-specific phylogenies for each MGS (basically strain tracking across metagenomes)
 
 
