@@ -106,8 +106,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.51;/,
-	'within-strain step-completion summaries increment the workflow version');
+like($strain, qr/my \$version = 0\.54;/,
+	'within-strain first-generation FASTA sorting increments the workflow version');
 like($strain,
 	qr/sub stepComplete .*?STEP COMPLETE: \$step/s,
 	'step completion messages use one consistent formatter');
@@ -126,6 +126,12 @@ like($strain,
 like($strain,
 	qr/qsubSystem\(\$outD2\."treeCmd\.sh".*?\$cnt \+\+.*?push \(\@jobs,\$dep\).*?\$expectedTreeOutputs\{\$MGS\}.*?qsubSystemJobAlive\( \\\@jobs.*?Tree jobs completed without valid tree outputs/s,
 	'every eligible tree is submitted, tracked, awaited, and output-validated');
+like($strain,
+	qr/\@treeJobAccounting.*?requested_mb => int\(\$totMem\).*?qsubSystemJobAlive.*?slurm_tree_memory_summary.*?format_slurm_tree_memory_summary/s,
+	'completed Slurm tree jobs report MaxRSS against their requested memory');
+like($strain,
+	qr/append_fasta_records_atomic\(\$FNAtf.*?append_fasta_records_atomic\(\$FAAtf.*?if \(\$temporaryInput\).*?sort_fasta_by_locus\(\$FNAtf, \$SaSe\).*?sort_fasta_by_locus\(\$FAAtf, \$SaSe\)/s,
+	'first-generation FNA and FAA inputs are locus-sorted after outgroup publication');
 like($strain,
 	qr/The following wait count reports jobs still present, not jobs omitted/,
 	'the scheduler wait count is explicitly distinguished from submission coverage');

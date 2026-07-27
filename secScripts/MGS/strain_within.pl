@@ -26,8 +26,9 @@ use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate protein_kmer_sim
 use Mods::StrainParts qw(
 	exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation resolve_fasta_artifact
-	append_fasta_records_atomic
+	append_fasta_records_atomic sort_fasta_by_locus
 );
+use Mods::SlurmAccounting qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
 
 sub extractFNAFAA2genes;
 sub histoMGS;
@@ -154,7 +155,9 @@ END {
 #.50: account for every tree-submission decision and make termination status explicit
 #.51: summarize completion of major initialization and workflow steps
 #.52: let -recalcTrees recover complete staged inputs before resubmitting trees
-my $version = 0.52;
+#.53: report per-tree SLURM MaxRSS, OOM events, and requested-memory headroom
+#.54: locus-sort first-generation per-MGS FNA/FAA files before compression
+my $version = 0.54;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -677,7 +680,7 @@ my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 
 #die;
 #go through every SpecI;
-$cnt=0; my $lcnt=-1; my @jobs; my %expectedTreeOutputs; my $Nspecis = @specis;
+$cnt=0; my $lcnt=-1; my @jobs; my @treeJobAccounting; my %expectedTreeOutputs; my $Nspecis = @specis;
 my $treeMGSVisited = 0;
 my %treeDisposition;
 my $recalcScratchRecovered = 0;
@@ -885,6 +888,14 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$cnt ++;
 	$treeDisposition{'eligible tree job'}++;
 	push (@jobs,$dep) if defined($dep) && length($dep);
+	if ($doSubmit && $QSBoptHR->{qmode} eq "slurm" && defined($dep)) {
+		my $schedulerJobID = $dep;
+		$schedulerJobID =~ s/^\Q$QSBoptHR->{rTag}\E//;
+		push @treeJobAccounting, {
+			job_id => $schedulerJobID, mgs => $MGS,
+			requested_mb => int($totMem),
+		} if $schedulerJobID =~ /^\d+$/;
+	}
 	$expectedTreeOutputs{$MGS} = [$IQtreef, $treeStone];
 	#die $outD2."treeCmd.sh\n";
 
@@ -912,6 +923,10 @@ if ($maxSubJob
 }
 #too many jobs to use as job dependency..
 qsubSystemJobAlive( \@jobs,$QSBoptHR ) if @jobs && $doSubmit;
+if (@treeJobAccounting) {
+	my $memorySummary = slurm_tree_memory_summary(\@treeJobAccounting);
+	print format_slurm_tree_memory_summary($memorySummary);
+}
 if ($doSubmit) {
 	my @failed = grep {
 		my ($tree, $stone) = @{$expectedTreeOutputs{$_}};
@@ -1295,6 +1310,14 @@ sub addOutgroup2MGS{
 	}
 	append_fasta_records_atomic($FNAtf, $tmpFNAog);
 	append_fasta_records_atomic($FAAtf, $tmpFAAog);
+	if ($temporaryInput) {
+		my $nt_records = sort_fasta_by_locus($FNAtf, $SaSe);
+		my $aa_records = sort_fasta_by_locus($FAAtf, $SaSe);
+		die "Mismatched FNA/FAA record counts after locus sorting for $MGS: "
+			."$nt_records nucleotide versus $aa_records protein records\n"
+			unless $nt_records == $aa_records;
+		print "  Sorted $nt_records FNA/FAA records by eggNOG and primary gene-catalogue ID\n";
+	}
 	
 	#print "used $OGgenesUsed genes  ";
 	my $cat_write = "$CATtf.write.$$";

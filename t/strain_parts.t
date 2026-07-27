@@ -13,6 +13,7 @@ use Mods::StrainParts qw(
 	exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation
 	resolve_fasta_artifact append_fasta_records_atomic
+	sort_fasta_by_locus
 );
 
 sub write_file {
@@ -91,5 +92,23 @@ gzip \">gzip\nCCCC\n" => "$ambiguous.gz"
 	or die "Cannot create ambiguous gzip fixture: $GzipError";
 eval { append_fasta_records_atomic($ambiguous, ">new\nGGGG\n") };
 like($@, qr/Ambiguous FASTA sidecars/, 'ambiguous plain/gzip sidecars fail instead of corrupting either copy');
+
+my $unsorted_fasta = File::Spec->catfile($tmp, 'unsorted.fna');
+write_file($unsorted_fasta,
+	">sampleB|COG2|gene9\nCCCC\n"
+	. ">sampleC|COG1|gene2\nGG\nGG\n"
+	. ">sampleA|COG1|gene2\nAAAA\n"
+	. ">sampleA|COG1|gene1\nTTTT\n");
+is(sort_fasta_by_locus($unsorted_fasta, '|'), 4,
+	'locus sorting reports its FASTA record count');
+open my $sorted_fh, '<', $unsorted_fasta or die "Cannot read $unsorted_fasta: $!";
+my $sorted_contents = do { local $/; <$sorted_fh> };
+close $sorted_fh;
+is($sorted_contents,
+	">sampleA|COG1|gene1\nTTTT\n"
+	. ">sampleA|COG1|gene2\nAAAA\n"
+	. ">sampleC|COG1|gene2\nGG\nGG\n"
+	. ">sampleB|COG2|gene9\nCCCC\n",
+	'FASTA records sort by eggNOG, gene-catalogue ID, then sample without changing multiline sequences');
 
 done_testing();

@@ -18,6 +18,7 @@ our @EXPORT_OK = qw(
 	clear_split_generation
 	resolve_fasta_artifact
 	append_fasta_records_atomic
+	sort_fasta_by_locus
 );
 
 sub exact_worker_parts {
@@ -166,6 +167,66 @@ sub append_fasta_records_atomic {
 		die "Cannot atomically replace FASTA $source: $rename_error\n";
 	}
 	return $source;
+}
+
+sub sort_fasta_by_locus {
+	my ($path, $separator) = @_;
+	die "FASTA path is required for locus sorting\n"
+		unless defined($path) && length($path);
+	die "FASTA locus separator is required\n"
+		unless defined($separator) && length($separator);
+	die "Cannot locus-sort missing or empty FASTA $path\n" unless -s $path;
+	die "sort_fasta_by_locus expects a plain first-generation FASTA, not $path\n"
+		if $path =~ /\.gz$/;
+
+	open my $in, '<', $path or die "Cannot read FASTA $path for locus sorting: $!\n";
+	binmode $in;
+	my (@records, $record_start, $record_key);
+	while (1) {
+		my $line_start = tell($in);
+		my $line = <$in>;
+		last unless defined $line;
+		next unless $line =~ /^>(\S+)/;
+		push @records, [$record_key, $record_start, $line_start - $record_start]
+			if defined $record_start;
+		my $identifier = $1;
+		my @parts = split /\Q$separator\E/, $identifier, -1;
+		die "Cannot locus-sort FASTA header '$identifier': expected sample${separator}eggNOG${separator}gene_catalog_id\n"
+			unless @parts >= 3 && length($parts[0]) && length($parts[1]) && length($parts[2]);
+		my ($sample, $eggnog, $gene_id) = @parts[0, 1, 2];
+		$record_key = join("\t", $eggnog, $gene_id, $sample, $identifier);
+		$record_start = $line_start;
+	}
+	my $file_end = tell($in);
+	push @records, [$record_key, $record_start, $file_end - $record_start]
+		if defined $record_start;
+	die "Cannot locus-sort FASTA without records: $path\n" unless @records;
+
+	my $partial = "$path.sort.$$";
+	open my $out, '>', $partial or die "Cannot create sorted FASTA $partial: $!\n";
+	binmode $out;
+	for my $record (sort {
+		$a->[0] cmp $b->[0] || $a->[1] <=> $b->[1]
+	} @records) {
+		seek($in, $record->[1], 0) or die "Cannot seek in FASTA $path: $!\n";
+		my $remaining = $record->[2];
+		while ($remaining > 0) {
+			my $wanted = $remaining > 1024 * 1024 ? 1024 * 1024 : $remaining;
+			my $read = read($in, my $buffer, $wanted);
+			die "Cannot read FASTA record from $path: $!\n"
+				unless defined($read) && $read > 0;
+			print {$out} $buffer or die "Cannot write sorted FASTA $partial: $!\n";
+			$remaining -= $read;
+		}
+	}
+	close $in or die "Cannot close FASTA $path: $!\n";
+	close $out or die "Cannot close sorted FASTA $partial: $!\n";
+	unless (rename $partial, $path) {
+		my $rename_error = $!;
+		unlink $partial if -e $partial;
+		die "Cannot atomically publish locus-sorted FASTA $path: $rename_error\n";
+	}
+	return scalar @records;
 }
 
 1;
