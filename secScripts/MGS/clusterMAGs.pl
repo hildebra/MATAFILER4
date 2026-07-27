@@ -26,8 +26,9 @@ sub MGuniqStats;
 #.20: switched to C++ implementation of clusterMAGs.. this is only a hull script now, mostly disused.
 #.21: validate wrapper inputs and honour the selected marker and quality-checker modes
 #.22: make fallback inputs reachable and clean wrapper logs and temporary outputs safely
+#.23: remove samples marked SMPL.empty from maps passed to the clustering binary
 
-my $version = 0.22;
+my $version = 0.23;
 
 my $startTime = time ;
 
@@ -56,6 +57,36 @@ my %binName2; #name MAGname->MGS
 my %MAGc; my %MAGq; #overall storage of qual and conta
 my %MAGlcaq; #overall LCA completeness
 my %MAgene; #store genes per MAG.. large hash!
+
+sub mapsWithoutEmptySamples {
+	my ($map_files, $map, $target_dir) = @_;
+	my %empty;
+	for my $sample (@{$map->{opt}{smpl_order} || []}) {
+		my $work_dir = $map->{$sample}{wrdir};
+		next unless defined($work_dir) && length($work_dir);
+		$empty{$sample} = 1 if -e "$work_dir/SMPL.empty";
+	}
+	return ($map_files, []) unless %empty;
+
+	make_path($target_dir);
+	my @filtered_maps;
+	my $map_index = 0;
+	for my $input_map (split /,/, $map_files) {
+		my $output_map = "$target_dir/map.$map_index.txt";
+		open my $input, '<', $input_map or die "Cannot open map $input_map: $!\n";
+		open my $output, '>', $output_map or die "Cannot write filtered map $output_map: $!\n";
+		while (my $line = <$input>) {
+			my ($sample) = split /\t/, $line, 2;
+			next if exists $empty{$sample};
+			print {$output} $line or die "Cannot write filtered map $output_map: $!\n";
+		}
+		close $input or die "Cannot close map $input_map: $!\n";
+		close $output or die "Cannot close filtered map $output_map: $!\n";
+		push @filtered_maps, $output_map;
+		$map_index++;
+	}
+	return (join(',', @filtered_maps), [sort keys %empty]);
+}
 
 
 
@@ -127,6 +158,12 @@ if (-e "$inD/LOGandSUB/GCmaps.inf"){
 	#($hrm,$asGrpObj) = readMap($inD."LOGandSUB/inmap.txt");
 }
 die "Couldn't find map file in clusterMAGs.pl:: $mapF\n" unless (-e $mapF|| $mapF =~ m/,/);
+my ($map_groups, $map_data) = getDirsPerAssmblGrp($mapF);
+my ($clusteringMapF, $emptySamples) =
+	mapsWithoutEmptySamples($mapF, $map_data, "$logDir/nonempty_maps");
+print "Excluded " . scalar(@{$emptySamples}) . " sample(s) marked SMPL.empty from MAG clustering: "
+	. join(", ", @{$emptySamples}) . "\n"
+	if @{$emptySamples};
 
 my $clMAGsBin = getProgPaths("clusterMAGs");
 
@@ -134,7 +171,7 @@ my $cmd = "";
 my $canoFlag = ""; $canoFlag = "-canopyDir $camoIn " if ($camoIn ne "");
 #-FILEtag SBx -MGtag MM2 -geneCatIdx C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/compl.incompl.95.fna.clstr.idx -MGdir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/MGs/ -outDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/out/ -map C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.0.txt,C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.1.txt -canopyDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/Cano/
 $cmd .= "$clMAGsBin -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.$clusterID.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
-$cmd .= "-outDir $outD -map $mapF $canoFlag -MGfile $GCd/${COGdir}.subset.cats\n";
+$cmd .= "-outDir $outD -map $clusteringMapF $canoFlag -MGfile $GCd/${COGdir}.subset.cats\n";
 $cmd .= "test -s $outD/MAGvsGC.txt\n";
 $cmd .= "gzip -c $outD/MAGvsGC.txt > $logDir/MAGvsGC.txt.gz\n";
 $cmd .= "test -s $logDir/MAGvsGC.txt.gz\nrm $outD/MAGvsGC.txt\n";
