@@ -588,7 +588,7 @@ if ($ph1flag  || !-e "$outD/$BinnerShrt.clusters" ){
 	#clusterMB2() if ($ph1flag  && !-e "$outD/$BinnerShrt.clusters" );
 	my $clusscr = getProgPaths("clusterMGS_scr");
 	my $canoIncl = ""; $canoIncl = "-canopies $canopyF" if ($useCanopies);
-	my $cmd = "$clusscr -GCd $GCd -BinDir $outD -logDir $logDir -binSpeciesMG $binSpeciesMG -MGset $useGTDBmg -clusterID $clusterID  -useCheckM1 $useCheckM1 -useCheckM2 $useCheckM2  -legacy $legacyV -log $logDir/clusterMGS_detail.log $canoIncl ";#1>&2 > $logDir/clusterMGS_scr.log\n";
+	my $cmd = "$clusscr -GCd $GCd -BinDir $outD -logDir $logDir -binSpeciesMG $binSpeciesMG -MGset $useGTDBmg -clusterID $clusterID  -useCheckM1 $useCheckM1 -useCheckM2 $useCheckM2  -legacy $legacyV -log $logDir/ $canoIncl ";#1>&2 > $logDir/clusterMGS_scr.log\n";
 	printL "Clustering MAGs into MGS; detailed output: $logDir/clusterMGS_scr.log\n";
 	my $qsubCMAGs=0;
 	if (!$qsubCMAGs){
