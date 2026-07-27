@@ -193,8 +193,22 @@ like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 like($resort_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
 	'gene-priority resorting uses the propagated catalog identity');
 my $mgs_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.37;/,
-	'MGS immediate tree launch increments the pipeline version');
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.38;/,
+	'MGS empty-sample exclusion increments the pipeline version');
+like($mgs_source,
+	qr/sub _exclude_empty_samples.*?SMPL\.empty.*?delete \$groups->\{\$group\}.*?delete \$map->\{\$_\}/s,
+	'MGS removes empty samples and all-empty assembly groups before downstream path handling');
+like($mgs_source,
+	qr/_exclude_empty_samples\(\\%DOs, \\%map\).*?No non-empty samples were found/s,
+	'MGS applies empty-sample exclusion before requiring eligible input');
+like($mgs_source, qr/\$checkpointParameters\{empty_samples\} = join\(',', \@emptySamples\)/,
+	'MGS checkpoint provenance records the excluded empty samples');
+my $cluster_mags_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'clusterMAGs.pl'));
+like($cluster_mags_source,
+	qr/sub mapsWithoutEmptySamples.*?SMPL\.empty.*?next if exists \$empty\{\$sample\}/s,
+	'MAG clustering removes marked empty samples from its derived input maps');
+like($cluster_mags_source, qr/-map \$clusteringMapF/,
+	'the clustering binary receives only the non-empty sample maps');
 like($mgs_source,
 	qr/MGS pipeline v\$MGSpipelineVersion.*?Mode:.*?Inputs:.*?Paths:.*?Clustering:.*?Quality:.*?Resources:.*?Optional analyses:/s,
 	'MGS starts with a structured runtime configuration header');

@@ -35,8 +35,9 @@ use Cwd qw(abs_path);
 #.36: consolidate repetitive MAG diagnostics and make stage progress easier to scan
 #.37: launch the between-MGS tree immediately after Stage I and defer only its
 #     abundance-dependent visualization.
+#.38: exclude samples marked SMPL.empty before resolving assembly-group paths
 
-my $MGSpipelineVersion = 0.37;
+my $MGSpipelineVersion = 0.38;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -87,6 +88,46 @@ sub _matrix_sample_count {
 	shift @fields if @fields;
 	die "Gene abundance matrix has no sample columns: $file\n" unless @fields;
 	return scalar @fields;
+}
+
+sub _exclude_empty_samples {
+	my ($groups, $map) = @_;
+	my %empty;
+
+	for my $sample (@{$map->{opt}{smpl_order} || []}) {
+		my $work_dir = $map->{$sample}{wrdir};
+		next unless defined($work_dir) && length($work_dir);
+		$empty{$sample} = 1 if -e "$work_dir/SMPL.empty";
+	}
+
+	for my $group (keys %{$groups}) {
+		my @sample_ids = @{$groups->{$group}{SmplID} || []};
+		my @work_dirs = @{$groups->{$group}{wrdir} || []};
+		die "Assembly group $group has mismatched sample and working-directory lists\n"
+			unless @sample_ids == @work_dirs;
+
+		my (@eligible_ids, @eligible_dirs);
+		for my $index (0 .. $#sample_ids) {
+			if (-e "$work_dirs[$index]/SMPL.empty") {
+				$empty{$sample_ids[$index]} = 1;
+				next;
+			}
+			push @eligible_ids, $sample_ids[$index];
+			push @eligible_dirs, $work_dirs[$index];
+		}
+
+		if (@eligible_ids) {
+			$groups->{$group}{SmplID} = \@eligible_ids;
+			$groups->{$group}{wrdir} = \@eligible_dirs;
+		} else {
+			delete $groups->{$group};
+		}
+	}
+
+	@{$map->{opt}{smpl_order}} =
+		grep { !$empty{$_} } @{$map->{opt}{smpl_order} || []};
+	delete $map->{$_} for keys %empty;
+	return sort keys %empty;
 }
 
 sub _touch_checkpoint {
@@ -372,12 +413,16 @@ for my $input (@checkpointInputs) {
 my ($hrD,$hrM) = getDirsPerAssmblGrp($mapF);
 my %map = %{$hrM};
 my %DOs = %{$hrD};
+my $rawNumSamples = scalar(@{$map{opt}{smpl_order}});
+my @emptySamples = _exclude_empty_samples(\%DOs, \%map);
+$hrM = \%map;
 my @DoosD = sort keys %DOs; #dirs of assembly groups
 
 
 
 my $numSamples = scalar(  @{$map{opt}{smpl_order}}  );#@DoosD;
-die "No samples were found in the mapping input: $mapF\n" unless $numSamples;
+die "No non-empty samples were found in the mapping input: $mapF\n" unless $numSamples;
+$checkpointParameters{empty_samples} = join(',', @emptySamples);
 my $profileSamples = _matrix_sample_count("$GCd/Matrix.mat.gz");
 my $useCanopies=1;
 if ($profileSamples<10 || $canopyF eq ""){$useCanopies=0;}
@@ -416,7 +461,12 @@ if (!$useCanopies){
 	my $reason = $profileSamples < 10 ? "N<10 matrix samples (N=$profileSamples)" : "no usable Canopy assignment file";
 	printL "No Canopies used: $reason\n";
 }
-printL "Samples in map: $numSamples; abundance profiles in matrix: $profileSamples\n";
+if (@emptySamples) {
+	printL "Excluded " . scalar(@emptySamples)
+		. " sample(s) marked SMPL.empty: " . join(", ", @emptySamples) . "\n";
+}
+printL "Samples in map: $rawNumSamples; eligible non-empty samples: $numSamples; "
+	. "abundance profiles in matrix: $profileSamples\n";
 printL "=====================================================\n";
 my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2); 
 
