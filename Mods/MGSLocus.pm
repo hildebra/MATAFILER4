@@ -42,6 +42,11 @@ sub _set_similarity {
 	return $intersection / scalar(keys %union);
 }
 
+sub _pair_key {
+	my ($left, $right) = @_;
+	return $left le $right ? "$left\t$right" : "$right\t$left";
+}
+
 sub protein_kmer_similarity {
 	my ($left, $right, $k) = @_;
 	$k ||= 4;
@@ -79,6 +84,10 @@ sub build_locus_groups {
 	my $min_sequence_with_context = $options->{min_sequence_with_context} // 0.55;
 	my $min_sequence_without_context = $options->{min_sequence_without_context} // 0.72;
 	my $min_context_similarity = $options->{min_context_similarity} // 0.25;
+	my $allowed_merge_pairs = $options->{allowed_merge_pairs};
+	my $require_complete_linkage = $options->{require_complete_linkage} // 0;
+	my $allow_confirmed_cooccurrence =
+		$options->{allow_confirmed_cooccurrence} // 0;
 
 	my (%sample_set, %member_seed, %positions);
 	for my $record (@{$records || []}) {
@@ -140,11 +149,18 @@ sub build_locus_groups {
 			}
 
 			my @edges;
+			my %edge_ok;
 			for my $i (0 .. $#seeds - 1) {
 				for my $j ($i + 1 .. $#seeds) {
 					my ($left, $right) = ($seeds[$i]{gene}, $seeds[$j]{gene});
+					my $pair_key = _pair_key($left, $right);
+					my $pair_is_confirmed = defined($allowed_merge_pairs)
+						&& $allowed_merge_pairs->{$pair_key};
+					next if defined($allowed_merge_pairs)
+						&& !$pair_is_confirmed;
 					my $cooccurs = grep { exists $sample_set{$right}{$_} } keys %{$sample_set{$left} || {}};
-					next if $cooccurs;
+					next if $cooccurs
+						&& !($allow_confirmed_cooccurrence && $pair_is_confirmed);
 					my ($left_seq, $right_seq) = ($proteins->{$left}, $proteins->{$right});
 					next unless defined($left_seq) && defined($right_seq) && length($left_seq) && length($right_seq);
 					my $length_ratio = length($left_seq) < length($right_seq)
@@ -162,9 +178,11 @@ sub build_locus_groups {
 						left => $left, right => $right,
 						score => $sequence_score + 0.15 * $context_score,
 					};
+					$edge_ok{$pair_key} = 1;
 				}
 			}
 
+			my %component_genes = map { $_->{gene} => { $_->{gene} => 1 } } @seeds;
 			for my $edge (sort {
 				$b->{score} <=> $a->{score} || $a->{left} cmp $b->{left} || $a->{right} cmp $b->{right}
 			} @edges) {
@@ -172,10 +190,25 @@ sub build_locus_groups {
 				my $right_root = _find(\%parent, $edge->{right});
 				next if $left_root eq $right_root;
 				my $overlap = grep { exists $component_samples{$right_root}{$_} } keys %{$component_samples{$left_root}};
-				next if $overlap;
+				next if $overlap && !$allow_confirmed_cooccurrence;
+				if ($require_complete_linkage) {
+					my $all_compatible = 1;
+					OUTER:
+					for my $left_gene (keys %{$component_genes{$left_root}}) {
+						for my $right_gene (keys %{$component_genes{$right_root}}) {
+							unless ($edge_ok{_pair_key($left_gene, $right_gene)}) {
+								$all_compatible = 0;
+								last OUTER;
+							}
+						}
+					}
+					next unless $all_compatible;
+				}
 				$parent{$right_root} = $left_root;
 				$component_samples{$left_root}{$_} = 1 for keys %{$component_samples{$right_root}};
 				delete $component_samples{$right_root};
+				$component_genes{$left_root}{$_} = 1 for keys %{$component_genes{$right_root}};
+				delete $component_genes{$right_root};
 				$merged_seeds++;
 			}
 

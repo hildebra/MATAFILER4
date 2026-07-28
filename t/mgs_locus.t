@@ -78,6 +78,49 @@ is_deeply(
 	'omitting optional indexes does not change locus construction',
 );
 
+my %allow_only_10_11 = ("10\t11" => 1);
+my $catalogue_gated = build_locus_groups(
+	\@records, \%members, \%proteins,
+	{allowed_merge_pairs => \%allow_only_10_11, require_complete_linkage => 1},
+);
+is(scalar(@{$catalogue_gated->{groups}}), 2,
+	'catalogue-confirmed pair can merge while unconfirmed same-COG seeds stay separate');
+
+my @mixed_strain_records = @records[0, 1];
+my %mixed_strain_members = (
+	10 => 'S1__ctg_1,S2__ctg_1,S3__ctg_1',
+	11 => 'S3__ctg_2,S4__ctg_1,S5__ctg_1',
+);
+my $mixed_strain_model = build_locus_groups(
+	\@mixed_strain_records, \%mixed_strain_members, \%proteins,
+	{
+		allowed_merge_pairs => \%allow_only_10_11,
+		require_complete_linkage => 1,
+		allow_confirmed_cooccurrence => 1,
+	},
+);
+is(scalar(@{$mixed_strain_model->{groups}}), 1,
+	'a catalogue-confirmed pair can survive one mixed-strain sample co-occurrence');
+
+my @chain_records = (
+	{mgs => 'MGS.3', cog => 'COG1', gene => '20', rank => 0},
+	{mgs => 'MGS.3', cog => 'COG1', gene => '21', rank => 1},
+	{mgs => 'MGS.3', cog => 'COG1', gene => '22', rank => 2},
+);
+my %chain_members = (
+	20 => 'S1__ctg_1',
+	21 => 'S2__ctg_1',
+	22 => 'S3__ctg_1',
+);
+my %chain_proteins = map { $_ => $protein } qw(20 21 22);
+my %chain_edges = ("20\t21" => 1, "21\t22" => 1);
+my $complete_linkage = build_locus_groups(
+	\@chain_records, \%chain_members, \%chain_proteins,
+	{allowed_merge_pairs => \%chain_edges, require_complete_linkage => 1},
+);
+is(scalar(@{$complete_linkage->{groups}}), 2,
+	'complete linkage prevents transitive mosaic chaining without a 20-22 confirmation');
+
 my $dominant = choose_locus_candidate([
 	{ id => 'copyA', protein => $protein, depth => 12, seed => '10', context => {} },
 	{ id => 'copyB', protein => $protein, depth => 3,  seed => '10', context => {} },

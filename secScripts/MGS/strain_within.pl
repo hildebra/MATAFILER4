@@ -16,13 +16,15 @@ use Cwd qw(abs_path getcwd);
 
 
 
-use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs readClstrRev systemW median mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs checkSeqTech);
+use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrRev systemW median mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs checkSeqTech);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystem2 qsubSystemJobAlive qsubSystemWaitMaxJobs);
 use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
 use Mods::TamocFunc qw(readTabbed getFileStr checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::math qw(quantileArray);
 use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate protein_kmer_similarity robust_depth_mask);
+use Mods::MosaicLoci qw(read_mosaic_catalogue);
+use Mods::StrainQC qw(breakpoint_gene_mask abundance_pattern_mask);
 use Mods::StrainParts qw(
 	exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation resolve_fasta_artifact
@@ -48,6 +50,8 @@ sub treeInputPrecopyCommand;
 sub readFastaIDs;
 sub resetMGSTreeOutputs;
 sub stepComplete;
+sub finalizeSampleQC;
+sub usage;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -157,12 +161,13 @@ END {
 #.52: let -recalcTrees recover complete staged inputs before resubmitting trees
 #.53: report per-tree SLURM MaxRSS, OOM events, and requested-memory headroom
 #.54: locus-sort first-generation per-MGS FNA/FAA files before compression
-my $version = 0.54;
+#.55: separate the gene cap from QC and add mosaic, breakpoint, abundance, and placement QC
+my $version = 0.55;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
 
-my $pigzBin  = getProgPaths("pigz");
+my $pigzBin;
 
 #input args..
 my $GCd = "";#$ARGV[0];
@@ -181,17 +186,38 @@ my $recalcTrees=0; #remove tree-stage outputs and rebuild from published or comp
 my $treeFile = "";
 my $doSubmit=0;
 my $subMode="";
-my $multiGeneSmplMax = 0.25; #no higher than this rate in single samples conspec genes..
-my $conspGeneSmplMax = 0.05; #no higher than this conspecific genes/MGS/sample
-my $minDepthGene  = 1;
-my $minBadLociForSampleSkip = 3; #avoid rejecting sparse MGS for a single bad locus
+my %FILTER_DEFAULT = (
+	multi_gene_sample_max => 0.25,
+	conspecific_gene_sample_max => 0.05,
+	minimum_gene_depth => 1,
+	minimum_bad_loci_for_sample_skip => 3,
+	minimum_mgs_genes_per_sample => 10,
+	maximum_genes_per_sample => 400,
+	breakpoint_gene_flank => 50,
+	abundance_minimum_loci => 8,
+	abundance_minimum_fold => 1 / 3,
+	abundance_maximum_fold => 3,
+	abundance_maximum_modified_z => 3.5,
+);
+my $multiGeneSmplMax = $FILTER_DEFAULT{multi_gene_sample_max};
+my $conspGeneSmplMax = $FILTER_DEFAULT{conspecific_gene_sample_max};
+my $minDepthGene  = $FILTER_DEFAULT{minimum_gene_depth};
+my $minBadLociForSampleSkip = $FILTER_DEFAULT{minimum_bad_loci_for_sample_skip};
 my $noIndels = 1;
 
 
 
 my $repairCAT=0;
 
-my $maxNGenes = 400;
+my $maxNGenes = $FILTER_DEFAULT{maximum_genes_per_sample};
+my $noGeneLimit = 0;
+my $disableQC = 0;
+my $mosaicLociFile = "";
+my $breakpointGeneFlank = $FILTER_DEFAULT{breakpoint_gene_flank};
+my $abundanceMinimumLoci = $FILTER_DEFAULT{abundance_minimum_loci};
+my $abundanceMinimumFold = $FILTER_DEFAULT{abundance_minimum_fold};
+my $abundanceMaximumFold = $FILTER_DEFAULT{abundance_maximum_fold};
+my $abundanceMaximumModifiedZ = $FILTER_DEFAULT{abundance_maximum_modified_z};
 my @subsetMGS=(); my $subsMGSstr="";
 my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
 my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
@@ -221,7 +247,7 @@ my $preCompCons=0; #if >0, precompute in these blocks
 
 my $takeAll = 0;
 my $conspecificSpThr = 0.1; #higher fraction of genes being two copies in the same sample (abundance >0), and the whole MGS is removed from that sample
-my $MGStoolowGsThr = 10; #less genes than this in a single sample -> rm MGS from sample for strains
+my $MGStoolowGsThr = $FILTER_DEFAULT{minimum_mgs_genes_per_sample};
 my $mode = "MGS";
 my $appendWriteTrigger = 200; #every Xth samples, genes are written (to manage memory); #limit this, perl seems to have some issues with too large strings..
 my $startSubFromMGS = ""; #debug option: only start resubmitting tree building from this MGS (e.g. "MGS.1382" )
@@ -238,14 +264,15 @@ my $lConsVCFsup = "allSNP.${SNPcaller}-sup.vcf.gz";
 #set up some base paths specific to pipeline..
 my $FNAstdof = "allFNAs.fna"; my $FAAstdof = "allFAAs.faa";
 my $LINKstdof = "link2GC.txt"; my $CATstdof = "all.cat";
+my $QCstdof = "sampleQC.tsv";
 my $abundF="/assemblies/metag/ContigStats/Coverage.pergene.gz";
 my $bamDepthFsuffix = "-smd.bam.coverage.gz";
 my $bamDepthFsuffixSup = ".sup-smd.bam.coverage.gz";
 my $mapF2 = "";
 my $memMulti = 1; #for buildTree script
+my $help = 0;
 
 
-checkMF();
 #$treeFile = $ARGV[3] if (@ARGV > 3);$onlySubmit = $ARGV[4] if (@ARGV > 4);
 #$doSubmit = $ARGV[5] if (@ARGV > 5);$subMode = $ARGV[6] if (@ARGV > 6);
 
@@ -274,6 +301,9 @@ GetOptions(
 	"maxCores=i"     => \$maxCores, #superseedes -cores, will dynamically allocate num cores based on input file size, if defined
 	"presortGenes=i" => \$presortGenes, #how many potential genes to include, of the original MGS (receovered will vary strongly  between samples)
 	"maxGenes=i"     => \$maxNGenes, #how many genes to try to include? -> will be decided on each samples
+	"noGeneLimit=i"  => \$noGeneLimit, #remove only the gene-count cap; QC remains enabled
+	"disableQC=i"    => \$disableQC, #expert/debug option: disable biological QC independently of the gene cap
+	"mosaicLoci=s"   => \$mosaicLociFile, #catalogue-wide confirmed mosaic/outgroup table
 	"flushEvery=i"   => \$appendWriteTrigger, #samples buffered before per-MGS records are flushed
 	
 	"forceSNPcalls=i"  => \$forceVCF2FNA,
@@ -287,6 +317,11 @@ GetOptions(
 	"multiGeneSmplMax=f" => \$multiGeneSmplMax, #default 0.15
 	"conspGeneSmplMax=f" => \$conspGeneSmplMax, #default 0.05
 	"minBadLociPSmpl=i" => \$minBadLociForSampleSkip,
+	"breakpointGeneFlank=i" => \$breakpointGeneFlank,
+	"abundanceMinLoci=i" => \$abundanceMinimumLoci,
+	"abundanceMinFold=f" => \$abundanceMinimumFold,
+	"abundanceMaxFold=f" => \$abundanceMaximumFold,
+	"abundanceMaxModifiedZ=f" => \$abundanceMaximumModifiedZ,
 	
 	#transferred to buildTRee script..
 	"GenesPerSpecies=f" => \$GenesPerSpecies,
@@ -312,9 +347,16 @@ GetOptions(
 	"SNPadaptiveQual=f" => \$useAdaptiveQual, #Default 0 (not active, recommended 0.15-0.5
 	"SNPdepthFilterScale=f" => \$depthFilterScale, #Default 0.15
 	"SNPindelRangeFilt=i" => \$indelRange,
+	"help|h" => \$help,
 
 ) or die "Invalid strain_within.pl options\n";
+if ($help) {
+	print usage(\%FILTER_DEFAULT);
+	exit 0;
+}
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
+checkMF();
+$pigzBin = getProgPaths("pigz");
 die "-GCd is required and must be a directory\n" unless length($GCd) && -d $GCd;
 die "Either -MGS or -outD is required\n" unless length($MGSfile) || length($outDpre);
 die "MGS file missing or empty: $MGSfile\n" if length($MGSfile) && !-s $MGSfile;
@@ -324,6 +366,8 @@ die "Invalid subjob settings\n" if $maxSubJob < 0 || $subJob < 0 || ($maxSubJob 
 die "Core, memory, and precompute settings must be non-negative\n"
 	if $maxCores == 0 || $selfMemGb <= 0 || $preCompCons < 0;
 die "-minBadLociPSmpl must be positive\n" unless $minBadLociForSampleSkip > 0;
+die "-MGSminGenesPSmpl and -presortGenes must be positive\n"
+	unless $MGStoolowGsThr > 0 && $presortGenes > 0;
 die "-flushEvery must be positive\n" unless $appendWriteTrigger > 0;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax, $GenesPerSpecies, $GeneLengthMin);
@@ -338,12 +382,27 @@ die "-legacyMGTK must be 0 or 1\n" unless $legacyMGTK == 0 || $legacyMGTK == 1;
 die "-iqPathogen and -legacyMGTK are mutually exclusive\n" if $iqPathogen && $legacyMGTK;
 die "-iqPathogen requires -phyloProg 1\n" if $iqPathogen && $phyloProg != 1;
 die "-recalcTrees must be 0 or 1\n" unless $recalcTrees == 0 || $recalcTrees == 1;
+die "-noGeneLimit and -disableQC must each be 0 or 1\n"
+	unless ($noGeneLimit == 0 || $noGeneLimit == 1)
+		&& ($disableQC == 0 || $disableQC == 1);
+die "-breakpointGeneFlank must be non-negative\n" unless $breakpointGeneFlank >= 0;
+die "Abundance-pattern settings are invalid\n"
+	unless $abundanceMinimumLoci > 0 && $abundanceMinimumFold > 0
+		&& $abundanceMaximumFold >= $abundanceMinimumFold
+		&& $abundanceMaximumModifiedZ >= 0;
+die "Confirmed mosaic catalogue is missing or empty: $mosaicLociFile\n"
+	if length($mosaicLociFile) && !-s $mosaicLociFile;
 die "-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData\n"
 	if $recalcTrees && ($repairCAT || $deepRepair || $redoSubmissionData);
 die "-recalcTrees must be launched by the main strainWithin process, not a split worker\n"
 	if $recalcTrees && $subJob;
 die "-MSAprog must be 0, 1, 2, or 4\n"
 	unless grep { $MSAprog == $_ } (0, 1, 2, 4);
+
+$noGeneLimit = 1 if $maxNGenes <= 0; #backward-compatible no-cap spelling; QC is unchanged
+die "-maxGenes must be at least -MGSminGenesPSmpl unless -noGeneLimit 1 is used\n"
+	if !$noGeneLimit && $maxNGenes < $MGStoolowGsThr;
+$maxNGenes = -1 if $noGeneLimit;
 
 $onlySubmit = 1 if $recalcTrees; #tree-only recovery reuses published or complete staged inputs
 
@@ -363,6 +422,17 @@ my %ConspecificMGS; #list of conspecific MGS
 my %MGSnoTree; #MGS known to have too few samples for a meaningful tree
 my $legacyLocusOutputs = 0;
 my %legacyLocusMGS;
+my (%ConfirmedMosaicPairs, %PreferredOutgroup, %PreferredOutgroupGene);
+if (length $mosaicLociFile) {
+	my ($pairs, $outgroups, $outgroup_genes) = read_mosaic_catalogue($mosaicLociFile);
+	%ConfirmedMosaicPairs = %{$pairs};
+	%PreferredOutgroup = %{$outgroups};
+	%PreferredOutgroupGene = %{$outgroup_genes};
+	print "Loaded ".scalar(keys %ConfirmedMosaicPairs)." confirmed mosaic pair(s) and "
+		.scalar(keys %PreferredOutgroup)." consolidated outgroup choice(s) from $mosaicLociFile\n";
+} else {
+	warn "No confirmed mosaic catalogue supplied; same-COG catalogue clusters will remain separate\n";
+}
 
 my $gene2taxF; #where to find info what genes (gene cat)
 my $sttime = time;	
@@ -456,7 +526,7 @@ stepComplete("existing-output and resume audit", $stepStarted,
 my %smplsPerMGS; #stats: MGS is represented in how many different samples?
 
 #hashes of strings that keep results to be written for each species..
-my %OCstrH ; my %OFstrH ; my %OAstrH ; my %OLstrH ;
+my %OCstrH ; my %OFstrH ; my %OAstrH ; my %OLstrH ; my %OQstrH ;
 my $splitGeneration = '';
 my $splitManifest = "$LOGDIR/mainExtr.generation";
 my $splitStonePrefix = "$LOGDIR/mainExtr";
@@ -502,6 +572,12 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			'-conspGeneSmplMax', $conspGeneSmplMax,
 			'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
 			'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
+			'-noGeneLimit', $noGeneLimit, '-disableQC', $disableQC,
+			'-breakpointGeneFlank', $breakpointGeneFlank,
+			'-abundanceMinLoci', $abundanceMinimumLoci,
+			'-abundanceMinFold', $abundanceMinimumFold,
+			'-abundanceMaxFold', $abundanceMaximumFold,
+			'-abundanceMaxModifiedZ', $abundanceMaximumModifiedZ,
 			'-flushEvery', $appendWriteTrigger,
 			'-iqPathogen', $iqPathogen,
 			'-legacyMGTK', $legacyMGTK,
@@ -514,6 +590,7 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			'-SNPindelRangeFilt', $indelRange,
 		);
 		push @selfArgs, ('-tmpD', $locTmpDir1) if $locTmpDir1 ne "";
+		push @selfArgs, ('-mosaicLoci', $mosaicLociFile) if $mosaicLociFile ne "";
 		push @selfArgs, ('-MGSsubset', $subsMGSstr) if $subsMGSstr ne "";
 		push @selfArgs, ('-submissionMode', $subMode) if $subMode ne "";
 		my $selfCmd = $strain1scr . " " . join(" ", map { shellQuote($_) } @selfArgs);
@@ -812,6 +889,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $tree_sample_separator = quotemeta($SaSe);
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
 	$Tcmd .= "-AAtree 0 -bootstrap 0 -NTfiltCount 400 -NTfilt 0.07 -NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies -runRaxMLng 0 -minOverlapMSA 2 ";
+	$Tcmd .= "-strictBackbone 1 ";
 	$Tcmd .= "-subsetSmpls $subsSmpl -fracMaxGenes90pct 0.7 "; #concentrate on almost complete gene groups.. can yield more samples overall and speeds up calc..
 	$Tcmd .= "-rmMSA $rmMSA -gzInput 1 "; #save more diskspace..
 	$Tcmd .= "-SynTree 0 -NonSynTree 0 -MSAprogram $MSAprog -continue $contPhylo -AutoModel 0 -iqFast 1 -superTree $useSuperTree ";
@@ -851,6 +929,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	}
 	
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
+	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
+		if fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof");
 	my $preCmd = "";
 	if ($needsCopy){
 		$preCmd = treeInputPrecopyCommand(
@@ -982,6 +1062,7 @@ sub combineMGSgenesDir{
 		[$FAAstdof,      "$tmpD/$FAAstdof",      "$tmpD/$FAAstdof"],
 		[$LINKstdof,     "$tmpD/$LINKstdof",     "$tmpD/$LINKstdof"],
 		["$CATstdof.tmp","$tmpD/$CATstdof.tmp",  "$tmpD/$CATstdof.tmp"],
+		["$QCstdof.tmp", "$tmpD/$QCstdof.tmp",   "$tmpD/$QCstdof.tmp"],
 	);
 	my %partsByName;
 	my $workerCount = $maxSubJob || 1;
@@ -992,7 +1073,7 @@ sub combineMGSgenesDir{
 		$partsByName{$name} = [exact_worker_parts($prefix, $workerCount)];
 	}
 	my $hasFreshParts = grep { @{$partsByName{$_}} }
-		($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp");
+		($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp");
 	my $aggregateComplete = !grep { !fileGZe($_) } @required;
 	return $aggregateComplete unless $hasFreshParts;
 	if ($maxSubJob && !split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob)) {
@@ -1054,7 +1135,7 @@ sub combineMGSgenesDir{
 sub splitWorkerPartsRemain {
 	return 0 unless $maxSubJob;
 	for my $mgs_dir (grep { -d $_ } bsd_glob("$scratchD/outs/*")) {
-		for my $name ($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp") {
+		for my $name ($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp") {
 			return 1 if exact_worker_parts("$mgs_dir/$name", $maxSubJob);
 		}
 	}
@@ -1093,6 +1174,12 @@ sub outgroupGeneForLocus {
 	my $cache_key = join("\t", $outgroup, $locus);
 	return $outgroupGeneCache{$cache_key} if exists $outgroupGeneCache{$cache_key};
 	my (undef, $cog, $primary_gene) = locusParts($locus, $default_mgs);
+	if (defined($default_mgs)
+		&& ($PreferredOutgroup{$default_mgs} // '') eq $outgroup
+		&& exists($PreferredOutgroupGene{$default_mgs}{$primary_gene})) {
+		return $outgroupGeneCache{$cache_key}
+			= $PreferredOutgroupGene{$default_mgs}{$primary_gene};
+	}
 	my @candidates = @{$OGgenesByCOG{$outgroup}{$cog} || []};
 	return $outgroupGeneCache{$cache_key} = '' unless @candidates;
 	my $target_sequence = $FAAref->{$primary_gene} // $catalogProteins->{$primary_gene};
@@ -1231,18 +1318,26 @@ sub addOutgroup2MGS{
 	
 	# --------------------------- OUTGROUP ----------------------------------------
 	#include outgroup?
-	if ($treeFile ne ""){
-		my $neiTree = getProgPaths("neighborTree");
-		my $call = "$neiTree ".shellQuote($treeFile)." ".shellQuote($MGS);
-		#print "$call\n";
-		my $OG1 = `$call`;
-		if ($? != 0) {
-			limitedWarn('outgroup lookup command failures',
-				"Can't find outgroup from call $call; building an ingroup-only tree\n");
-			$OG1 = "";
+	if ($treeFile ne "" || exists($PreferredOutgroup{$MGS})){
+		my @sspl;
+		push @sspl, $PreferredOutgroup{$MGS}
+			if exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS});
+		if ($treeFile ne "") {
+			my $neiTree = getProgPaths("neighborTree");
+			my $call = "$neiTree ".shellQuote($treeFile)." ".shellQuote($MGS);
+			#print "$call\n";
+			my $OG1 = `$call`;
+			if ($? != 0) {
+				limitedWarn('outgroup lookup command failures',
+					"Can't find outgroup from call $call; trying catalogue-derived candidates\n");
+				$OG1 = "";
+			}
+			chomp $OG1;
+			push @sspl, grep { length } split /\s+/,$OG1;
 		}
-		chomp $OG1;
-		my @sspl = grep { length } split /\s+/,$OG1; $OG = "";
+		my %seen_outgroup;
+		@sspl = grep { !$seen_outgroup{$_}++ } @sspl;
+		$OG = "";
 		limitedWarn('MGS without outgroup candidates',
 			"No outgroup candidates returned for $MGS; building an ingroup-only tree\n")
 			if @sspl == 0;
@@ -1334,6 +1429,7 @@ sub addOutgroup2MGS{
 	}
 	close $cat_out or die "Can't close temporary cat file $cat_write: $!\n";
 	rename $cat_write, $CATtf or die "Can't replace cat file $CATtf: $!\n";
+	finalizeSampleQC($outD3, $MGS);
 	print "  Generated category file for $MGS\n";
 	if ($OGgenesUsed ==0 && $OG ne ""){
 		limitedWarn('MGS with no usable outgroup genes',
@@ -1363,6 +1459,46 @@ sub addOutgroup2MGS{
 	return ($multiSmpl,scalar(@curCogs),$OG,$needsCopy,1);
 	
 # --------------------------- OUTGROUP DONE ----------------------------------------
+}
+
+sub finalizeSampleQC {
+	my ($directory, $MGS) = @_;
+	my $temporary_input = "$directory/$QCstdof.tmp";
+	my $final = "$directory/$QCstdof";
+	return unless fileGZe($temporary_input) || fileGZe($final);
+	my $source = fileGZe($temporary_input) ? $temporary_input : $final;
+	my %sample;
+	my ($fh) = gzipopen($source, "sample-locus QC", 1);
+	while (my $line = <$fh>) {
+		$line =~ s/[\r\n]+$//;
+		next if $line eq '' || $line =~ /^#/ || $line =~ /^MGS\t/;
+		my @fields = split /\t/, $line, -1;
+		die "Malformed sample QC row in $source: $line\n" unless @fields >= 6;
+		die "Sample QC row belongs to $fields[0], expected $MGS\n" unless $fields[0] eq $MGS;
+		my ($sample_id, $status, $ambiguous, $csp, $loci) = @fields[1 .. 5];
+		my $entry = $sample{$sample_id};
+		if (!$entry) {
+			$sample{$sample_id} = [$status, 0 + $ambiguous, 0 + $csp, 0 + $loci];
+		} else {
+			$entry->[0] = 'placement' if $status eq 'placement';
+			$entry->[1] = $ambiguous if $ambiguous > $entry->[1];
+			$entry->[2] = $csp if $csp > $entry->[2];
+			$entry->[3] = $loci if $loci > $entry->[3];
+		}
+	}
+	close $fh or die "Cannot close sample QC input $source: $!\n";
+	my $write = "$final.write.$$";
+	open my $out, '>', $write or die "Cannot create $write: $!\n";
+	print {$out} join("\t", qw(MGS sample status ambiguous_fraction csp_fraction validated_loci)), "\n";
+	for my $sample_id (sort keys %sample) {
+		my $entry = $sample{$sample_id};
+		print {$out} join("\t", $MGS, $sample_id, @{$entry}), "\n";
+	}
+	close $out or die "Cannot close $write: $!\n";
+	rename $write, $final or die "Cannot install $final: $!\n";
+	for my $stale (glob("$directory/$QCstdof.tmp*")) {
+		unlink $stale or die "Cannot remove stale sample QC input $stale: $!\n";
+	}
 }
 
 
@@ -1514,6 +1650,11 @@ sub prepGene2MGS{
 			# parts of the cluster model and are not consumed by this workflow.
 			include_member_to_seed => 0,
 			include_gene_to_locus => 0,
+			# Only catalogue-wide reciprocal unique alignments may join seed
+			# clusters. Complete linkage prevents transitive A-B-C chaining.
+			allowed_merge_pairs => \%ConfirmedMosaicPairs,
+			require_complete_linkage => 1,
+			allow_confirmed_cooccurrence => 1,
 		},
 	);
 	my $ranked_record_count = scalar(@records);
@@ -1612,8 +1753,7 @@ sub prepRun{
 	if ($mode eq "FMG"){$takeAll = 0;}
 	die "FMG mode does not support -maxSubJob; run it as a single extraction job\n"
 		if $mode eq "FMG" && $maxSubJob;
-	$takeAll = 1 if ($maxNGenes <= 0);
-	if ($takeAll){$maxNGenes = -1;$mode="MGSall"; }
+	$takeAll = $noGeneLimit;
 
 
 	$bindir = $MGSfile;$bindir =~ s/[^\/]+$//; 
@@ -1700,8 +1840,14 @@ sub prepRun{
 		print "MSAaligner: $MSAprog, GenesPerSpecies: $GenesPerSpecies, GeneLengthMin: $GeneLengthMin\n";
 		
 		
-		if ($takeAll){print "**************** Take all genes MGS mode\n";}
-		else {print "Using first $maxNGenes genes found per sample\n";}
+		if ($noGeneLimit){print "No per-sample gene limit; biological QC remains "
+			.($disableQC ? "disabled by explicit request\n" : "enabled\n");}
+		else {print "Using at most $maxNGenes genes per sample after QC\n";}
+		print "Filtering defaults: MGSminGenesPSmpl=$MGStoolowGsThr, "
+			."multiGeneSmplMax=$multiGeneSmplMax, conspGeneSmplMax=$conspGeneSmplMax, "
+			."breakpointGeneFlank=$breakpointGeneFlank, abundanceMinLoci=$abundanceMinimumLoci, "
+			."abundanceFold=$abundanceMinimumFold-$abundanceMaximumFold, "
+			."abundanceMaxModifiedZ=$abundanceMaximumModifiedZ\n";
 		print "==============================================\n";
 		if ($onlySubmit){print "Only submission mode\n";
 		} elsif (!$subJob) {
@@ -2068,6 +2214,7 @@ sub appendWriteMGSgenes {
         my $aa   = $OAstrH{$MGS};
         my $cat  = $OCstrH{$MGS};
         my $link = $OLstrH{$MGS};
+        my $qc   = $OQstrH{$MGS} // "";
 
         my $outD = "$baseOut/$MGS";
         make_path($outD) unless -d $outD;
@@ -2075,6 +2222,7 @@ sub appendWriteMGSgenes {
         my $FNAtf = "$outD/$FNAstdof$suffix";
         my $FAAtf = "$outD/$FAAstdof$suffix";
         my $CATtf = "$outD/$CATstdof.tmp$suffix";
+        my $QCtf = "$outD/$QCstdof.tmp$suffix";
 
 		open my $fh_nt, ">>", $FNAtf or die $!;
 		print {$fh_nt} $nt or die "Cannot append $FNAtf: $!\n";
@@ -2094,11 +2242,17 @@ sub appendWriteMGSgenes {
 		open my $fh_cat, ">>", $CATtf or die $!;
 		print {$fh_cat} $cat or die "Cannot append $CATtf: $!\n";
 		close $fh_cat or die "Cannot close $CATtf: $!\n";
+		if (length $qc) {
+			open my $fh_qc, ">>", $QCtf or die $!;
+			print {$fh_qc} $qc or die "Cannot append $QCtf: $!\n";
+			close $fh_qc or die "Cannot close $QCtf: $!\n";
+		}
 
         $OFstrH{$MGS} = "";
         $OAstrH{$MGS} = "";
         $OCstrH{$MGS} = "";
         $OLstrH{$MGS} = "";
+        $OQstrH{$MGS} = "";
 
         $wrMGS++;
     }
@@ -2357,6 +2511,7 @@ sub extractFNAFAA2genes{
 		"$scratchD/outs/*/$FAAstdof.$subJob",
 		"$scratchD/outs/*/$LINKstdof.$subJob",
 		"$scratchD/outs/*/$CATstdof.tmp.$subJob",
+		"$scratchD/outs/*/$QCstdof.tmp.$subJob",
 	) {
 		for my $part (bsd_glob($pattern)) {
 			unlink $part or die "Cannot remove stale worker part $part: $!\n"
@@ -2537,8 +2692,7 @@ sub readGenesSample_Singl{
 	# every locus entry at the start of each sample.
 	my $locCl2G2 = $cl2gene2{$sm};
 
-	my $noFilter =0;
-	$noFilter = 1 if ($mode eq "MGSall");
+	my $noFilter = $disableQC ? 1 : 0;
 	
 	foreach my $gn (keys %{$locCl2G2}){
 		#put genes into hash to avoid duplicates.. (locCl2G2{$gn} is now {member=>seed})
@@ -2703,6 +2857,27 @@ sub readGenesSample_Singl{
 			$FAA{$tmp} = $protein_sequence;
 		}
 		$FAA2 = {};
+		my $breakpointMask = {};
+		unless ($noFilter) {
+			my $breakpoint_file = "$cD/$lMAPdir/$sd3-smd.bam.breakpoints.tsv.gz";
+			if (fileGZe($breakpoint_file)) {
+				my $gff_file = getAssemblGFF($cD);
+				my $breakpoint_ok = eval {
+					$breakpointMask = breakpoint_gene_mask(
+						$gff_file, resolveExistingFile($breakpoint_file),
+						\%subG, $breakpointGeneFlank,
+					);
+					1;
+				};
+				unless ($breakpoint_ok) {
+					my $error = $@ || "unknown breakpoint/GFF parsing failure";
+					$error =~ s/\s+$//;
+					limitedWarn('unusable breakpoint reports',
+						"Could not apply breakpoint masking for $sd3: $error\n");
+					$breakpointMask = {};
+				}
+			}
+		}
 		#print "Time C: " . timeNice(time - $sttime)  . "\n";
 
 		#some stats on gene extractions..
@@ -2710,6 +2885,7 @@ sub readGenesSample_Singl{
 		my $doubleGenes=0; my $MGStoolowGskip=0;my $missAbundance=0;
 		#stats on different ways to filter genes
 		my $geneLost=0; my $conSpecFail=0; my $abundFail=0; my $doubleGsFail=0;
+		my $breakpointFail=0;
 		
 		
 		#3rd part: genes were read and renamed.. now write them out already here to save mem overall
@@ -2740,6 +2916,10 @@ sub readGenesSample_Singl{
 				my $csp_rejected = 0;
 				for my $gX (@genes) {
 					next unless length $gX;
+					if (!$noFilter && exists($breakpointMask->{$gX})) {
+						$breakpointFail++;
+						next;
+					}
 					if (!exists($FAA{$gX}) || !exists($FNA->{$gX})) {
 						$LmissG++;
 						next;
@@ -2814,15 +2994,24 @@ sub readGenesSample_Singl{
 				&& ($doubleCntL / $evaluableLoci) > $multiGeneSmplMax;
 			my $csp_failure = !$noFilter && $evaluableLoci > 0 && $locConSpecGen >= $minBadLociForSampleSkip
 				&& ($locConSpecGen / $evaluableLoci) > $conspGeneSmplMax;
+			my $sampleQCStatus = ($double_failure || $csp_failure) ? 'placement' : 'backbone';
 			if ($double_failure || $csp_failure){
 				push(@{$ConspecificMGS{$MGS}}, "$sd3" ); 
 				$doubleGsFail++ if $double_failure;
 				$conSpecFail++ if $csp_failure;
-				next;
+				# Questionable loci were already masked above. Retain the
+				# remaining validated loci, but keep this sample out of the
+				# strict backbone and place it after backbone inference.
 			}
 			next unless @genes2;
 
-			my $depth_mask = $noFilter ? [(1) x scalar(@abunGs)] : robust_depth_mask(\@abunGs);
+			my $depth_mask = $noFilter ? [(1) x scalar(@abunGs)]
+				: abundance_pattern_mask(\@abunGs, {
+					minimum_count => $abundanceMinimumLoci,
+					minimum_fold => $abundanceMinimumFold,
+					maximum_fold => $abundanceMaximumFold,
+					maximum_modified_z => $abundanceMaximumModifiedZ,
+				});
 			my @genes3=();
 			for (my $i=0;$i<scalar(@abunGs);$i++){
 				unless ($depth_mask->[$i]) {
@@ -2849,9 +3038,7 @@ sub readGenesSample_Singl{
 				if ($AAlen == 0){$SNPresFail++; next;}
 				my $num1 = $strCpy =~ tr/\-Xx//;
 				if ($num1 >= ($AAlen-1)){ $SNPresFail++; next;} #all X, exclude..
-				if (!$noFilter){
-				if ($locCnt >= $maxNGenes){ next;}
-				}
+				next if !$noGeneLimit && $locCnt >= $maxNGenes;
 				
 				$locCnt++;
 				#write gene out
@@ -2880,11 +3067,17 @@ sub readGenesSample_Singl{
 			
 			if (!exists($OAstrH{$MGS})){#set up base strings
 				$OAstrH{$MGS} = "";$OFstrH{$MGS} = "";$OLstrH{$MGS} = "";$OCstrH{$MGS} = "";
+				$OQstrH{$MGS} = "";
 			}
 			if ($locCnt>0){
 				#save in tmp hash (faster than opening bunch of files..
 				$OAstrH{$MGS} .= join("",@OAstr);$OFstrH{$MGS} .= join("",@OFstr);
 				$OLstrH{$MGS} .= join("",@OLstr);$OCstrH{$MGS} .= join("",@OCstr);
+				my $ambiguous_fraction = $evaluableLoci ? $doubleCntL / $evaluableLoci : 0;
+				my $csp_fraction = $evaluableLoci ? $locConSpecGen / $evaluableLoci : 0;
+				$OQstrH{$MGS} .= join("\t", $MGS, $sd3, $sampleQCStatus,
+					sprintf('%.6f', $ambiguous_fraction),
+					sprintf('%.6f', $csp_fraction), $locCnt)."\n";
 				#push(@{$OAstrH{$MGS}},join("",@OAstr));push(@{$OFstrH{$MGS}},join("",@OFstr));
 				#push(@{$OLstrH{$MGS}}, join("",@OLstr));push(@{$OCstrH{$MGS}},join("",@OCstr));
 				$SInum ++ ;
@@ -2898,7 +3091,7 @@ sub readGenesSample_Singl{
 		my @genesPmgs = values %locMGSgenes; 	@genesPmgs = sort { $a <=> $b}  @genesPmgs;
 		histoMGS(\@genesPmgs,"Detected Bin Genes:");
 		
-		print "$sd3 - Missed/MissAbund/lost/abundFilterFail/SNPresFail Gs: ${missGene}/${missAbundance}/${geneLost}/${abundFail}/$SNPresFail\tConspecGs/consMGS/doublGs/failcMGS: ${conspGen}/$conSpecFail/${doubleGenes}/$doubleGsFail\tFoundGs: $foundGene/". scalar(keys %FAA) . "\tused MGS/skipped MGS: ${SInum}/$MGStoolowGskip\t";
+		print "$sd3 - Missed/MissAbund/lost/abundFilterFail/breakpointFail/SNPresFail Gs: ${missGene}/${missAbundance}/${geneLost}/${abundFail}/${breakpointFail}/$SNPresFail\tConspecGs/consMGS/doublGs/failcMGS: ${conspGen}/$conSpecFail/${doubleGenes}/$doubleGsFail\tFoundGs: $foundGene/". scalar(keys %FAA) . "\tused MGS/skipped MGS: ${SInum}/$MGStoolowGskip\t";
 		if (@genesPmgs) {
 			print "GperMGS (median,mean): " . median(@genesPmgs) . "/". int(mean(@genesPmgs)+0.5);
 		} else {
@@ -2914,4 +3107,40 @@ sub readGenesSample_Singl{
 			}
 		}
 	}
+}
+
+sub usage {
+	my ($default) = @_;
+	return <<"USAGE";
+Usage: strain_within.pl -GCd DIR -MGS FILE [options]
+
+Gene selection and biological QC:
+  -maxGenes INT                  Maximum validated loci per sample
+                                 [default $default->{maximum_genes_per_sample}]
+  -noGeneLimit 0|1              Remove the locus cap; QC remains active [default 0]
+  -disableQC 0|1                Disable biological QC (expert/debug only) [default 0]
+  -MGSminGenesPSmpl INT         Minimum validated loci retained per sample
+                                 [default $default->{minimum_mgs_genes_per_sample}]
+  -multiGeneSmplMax FLOAT       Maximum ambiguous-locus fraction
+                                 [default $default->{multi_gene_sample_max}]
+  -conspGeneSmplMax FLOAT       Maximum conspecific-signal locus fraction
+                                 [default $default->{conspecific_gene_sample_max}]
+  -minBadLociPSmpl INT          Minimum bad loci before deferring a sample
+                                 [default $default->{minimum_bad_loci_for_sample_skip}]
+  -mosaicLoci FILE              Confirmed catalogue-wide mosaic/outgroup table
+  -breakpointGeneFlank INT      Mask genes this many bases around mapping breakpoints
+                                 [default $default->{breakpoint_gene_flank}]
+  -abundanceMinLoci INT         Loci required for robust abundance-pattern filtering
+                                 [default $default->{abundance_minimum_loci}]
+  -abundanceMinFold FLOAT       Lowest accepted locus/median depth ratio
+                                 [default $default->{abundance_minimum_fold}]
+  -abundanceMaxFold FLOAT       Highest accepted locus/median depth ratio
+                                 [default $default->{abundance_maximum_fold}]
+  -abundanceMaxModifiedZ FLOAT  Modified-Z threshold for depth outliers
+                                 [default $default->{abundance_maximum_modified_z}]
+
+Questionable sample-locus observations are masked first. Samples with excessive
+ambiguity among the remaining observations are retained for post-tree placement
+instead of being used to infer the strict backbone.
+USAGE
 }

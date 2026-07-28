@@ -22,6 +22,7 @@
 #5.16: omit IQ-TREE -mem for incompatible partition-model runs
 #5.17: sort allFNA/allFAA records by locus before buildTree compresses them
 #5.18: use the allocated IQ-TREE thread count directly; avoid costly per-tree AUTO benchmarking
+#5.19: infer a strict validated backbone and place sparse samples afterwards
 
 use warnings;
 use strict;
@@ -31,6 +32,10 @@ use Mods::GenoMetaAss qw( fileGZe fileGZs gzipopen systemW readFasta readFastHD 
 use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree 
 			runFasttree runVeryFasttree fixHDs4Phylo getGenoGenes getFMG readFMGdir );
 use Mods::PhyloAlignment qw(filter_alignment_by_overlap);
+use Mods::StrainPlacement qw(
+	read_sample_qc split_strict_backbone
+	nearest_backbone_placements write_placed_tree
+);
 			
 			
 use Getopt::Long qw( GetOptions );
@@ -74,7 +79,7 @@ sub sortFastaForCompression;
 sub fastaCompressionSortKey;
 
 my $doPhym= 0;
-my $version = 5.18;
+my $version = 5.19;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -148,6 +153,17 @@ my $doSuperTree =0;
 my $doSuperCheck=0;#check if tree's of single genes behave "strange"
 my $gzipInput =0; my $removeMSA = 0;
 my $useTreeShrink =0;
+my %BACKBONE_DEFAULT = (
+	enabled => 0,
+	coverage_fraction => 0.70,
+	minimum_overlap => 400,
+	minimum_samples => 3,
+);
+my $strictBackbone = $BACKBONE_DEFAULT{enabled};
+my $strictBackboneFraction = $BACKBONE_DEFAULT{coverage_fraction};
+my $placementMinOverlap = $BACKBONE_DEFAULT{minimum_overlap};
+my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
+my $sampleQCFile = "";
 
 
 #EDBUGGIN
@@ -214,6 +230,11 @@ GetOptions(
 	"runFastTree=i" => \$doFastTree,
 	"runVeryFastTree=i" => \$doVeryFastTree,
 	"treeShrink=i" => \$useTreeShrink,
+	"sampleQC=s" => \$sampleQCFile,
+	"strictBackbone=i" => \$strictBackbone,
+	"strictBackboneFraction=f" => \$strictBackboneFraction,
+	"placementMinOverlap=i" => \$placementMinOverlap,
+	"strictBackboneMinSamples=i" => \$strictBackboneMinSamples,
 	"runIQtree=i" => \$doIQTree,
 	"AutoModel=i" => \$treeAutoModel,
 	"iqFast=i" => \$iqFast, #fast qiTree mode
@@ -245,6 +266,19 @@ die "-iqMemMB must be zero or greater\n" if $iqMemMB < 0;
 die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
 die "-iqLegacy must be 0 or 1\n" unless $iqLegacy == 0 || $iqLegacy == 1;
 die "-iqPathogen and -iqLegacy are mutually exclusive\n" if $iqPathogen && $iqLegacy;
+die "-strictBackbone must be 0 or 1 (default $BACKBONE_DEFAULT{enabled})\n"
+	unless $strictBackbone == 0 || $strictBackbone == 1;
+die "-strictBackboneFraction must be between 0 and 1 "
+	."(default $BACKBONE_DEFAULT{coverage_fraction})\n"
+	if $strictBackboneFraction < 0 || $strictBackboneFraction > 1;
+die "-placementMinOverlap must be non-negative "
+	."(default $BACKBONE_DEFAULT{minimum_overlap})\n"
+	if $placementMinOverlap < 0;
+die "-strictBackboneMinSamples must be at least 3 "
+	."(default $BACKBONE_DEFAULT{minimum_samples})\n"
+	if $strictBackboneMinSamples < 3;
+die "-sampleQC does not exist or is empty: $sampleQCFile\n"
+	if length($sampleQCFile) && !fileGZs($sampleQCFile);
 die "-smplSep must not be empty\n" if $smplSep eq "";
 eval { qr/$smplSep/ } or die "Invalid -smplSep regular expression '$smplSep': $@";
 for my $fraction_name_value (
@@ -353,6 +387,11 @@ print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
 	. ($postFilter || "<none>") . "; remove MSA=" . ($removeMSA ? "yes" : "no") . "\n";
 print "Filtering: per-gene length fraction=$ntFracGene; species NT fraction=$ntFrac; "
 	. "minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
+print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
+	. "; sample QC=" . ($sampleQCFile || "<none>")
+	. "; coverage fraction=$strictBackboneFraction"
+	. "; minimum placement overlap=$placementMinOverlap"
+	. "; minimum backbone samples=$strictBackboneMinSamples\n";
 print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
 	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
 	. "; supertree=" . ($doSuperTree ? "yes" : "no")
@@ -436,10 +475,19 @@ my $tOhrSyn = createTreeOpt($multAliSyn,"syn","",0,$Tree1{nwk});
 my @MSAs; my @MSA_AA; my @MSAsSyn; my @MSAsNonSyn;#full MSAs and MSAs with syn / nonsyn pos only
 my @MSrm; 
 my %FAA ; my %FNA ; my @geneList; my @geneListF;
+my $strictSplit;
+my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $doMSA = 1;
 my $treesDone = treePresent($tOhr)
 	&& (!$calcNonSyn || treePresent($tOhrNSun))
 	&& (!$calcSyn || treePresent($tOhrSyn));
+if ($strictBackbone && $treesDone && !-s "$treeD/strict_backbone.samples.tsv") {
+	print "Recovery state: existing tree predates strict-backbone classification; "
+		."rebuilding tree outputs from the retained alignment\n";
+	safeRemoveTree($treeD, $outD);
+	make_path($treeD);
+	$treesDone = 0;
+}
 my $reusableAlignment = $isAligned || (
 	fileGZe($multAli)
 	&& (!$calcSyn || fileGZe($multAliSyn))
@@ -921,6 +969,56 @@ if (!$useAA4tree) {
 	@theRealMSAs = @MSA_AA;
 }
 
+if ($strictBackbone) {
+	my $fullAlignment = "$MsaD/MSAli.full.fna";
+	if (!-s $fullAlignment && -s "$fullAlignment.gz") {
+		systemW("$pigzBin -p $ncore -d ".shellQuote("$fullAlignment.gz"));
+	}
+	if ($calcMSA || !-s $fullAlignment) {
+		copy($multAli, $fullAlignment)
+			or die "Cannot preserve full alignment as $fullAlignment: $!\n";
+	}
+	my $sampleStatus = read_sample_qc($sampleQCFile);
+	$strictSplit = split_strict_backbone(
+		$fullAlignment, $multAli, $placementAlignment, $sampleStatus,
+		{
+			is_aa => $useAA4tree,
+			coverage_fraction => $strictBackboneFraction,
+			minimum_backbone => $strictBackboneMinSamples,
+			outgroup => $outgroup,
+		},
+	);
+	my $classificationFile = "$treeD/strict_backbone.samples.tsv";
+	open my $classification, '>', $classificationFile
+		or die "Cannot write $classificationFile: $!\n";
+	print {$classification} join("\t",
+		qw(sample tree_role reason informative_positions q90_informative)), "\n";
+	my %isPlacement = map { $_ => 1 } @{$strictSplit->{placement}};
+	for my $sample (sort(
+		@{$strictSplit->{backbone}}, @{$strictSplit->{placement}}
+	)) {
+		my $reason = $strictSplit->{reason}{$sample} // 'validated_backbone';
+		$reason = "backbone_fallback:".$strictSplit->{requested_reason}{$sample}
+			if $strictSplit->{fallback}
+				&& exists($strictSplit->{requested_reason}{$sample});
+		print {$classification} join("\t",
+			$sample,
+			$isPlacement{$sample} ? 'placement' : 'backbone',
+			$reason,
+			$strictSplit->{informative}{$sample},
+			sprintf('%.2f', $strictSplit->{q90_informative}),
+		), "\n";
+	}
+	close $classification or die "Cannot close $classificationFile: $!\n";
+	print "Strict-backbone split: ".scalar(@{$strictSplit->{backbone}})
+		." backbone and ".scalar(@{$strictSplit->{placement}})
+		." placement sample(s); full alignment retained at $fullAlignment\n";
+	warn "Strict-backbone fallback: fewer than $strictBackboneMinSamples validated "
+		."backbone samples remained, so all samples were used for inference; "
+		."see $classificationFile\n"
+		if $strictSplit->{fallback};
+}
+
 #phylip conversion??
 if ( $doGenesToPh){ 
 	my $phylipD = File::Spec->catdir($outD, "phylip");
@@ -1067,6 +1165,36 @@ if ($doSuperTree){
 	}
 	if ($calcNonSyn){ #tree at non-syn pos
 		treeAtHeart($tOhrNSun);
+	}
+}
+
+if ($strictSplit && @{$strictSplit->{placement}}) {
+	my $backboneTree = ${$trRetH}{nwk} // "";
+	if ($backboneTree ne "" && -s $backboneTree) {
+		my $placements = nearest_backbone_placements(
+			$multAli, $placementAlignment, $placementMinOverlap, $useAA4tree,
+		);
+		my $report = "$treeD/strict_backbone.placements.tsv";
+		open my $reportFh, '>', $report or die "Cannot write $report: $!\n";
+		print {$reportFh} join("\t",
+			qw(sample status nearest_backbone p_distance validated_overlap reason)), "\n";
+		for my $sample (sort keys %{$placements}) {
+			my $entry = $placements->{$sample};
+			print {$reportFh} join("\t",
+				$sample, $entry->{status}, $entry->{anchor},
+				defined($entry->{distance}) ? sprintf('%.8g', $entry->{distance}) : 'NA',
+				$entry->{overlap}, $strictSplit->{reason}{$sample} // '',
+			), "\n";
+		}
+		close $reportFh or die "Cannot close $report: $!\n";
+		my $placedTree = $backboneTree;
+		$placedTree =~ s/\.treefile$/.placed.treefile/;
+		$placedTree .= ".placed.treefile" if $placedTree eq $backboneTree;
+		write_placed_tree($backboneTree, $placedTree, $placements);
+		print "Sparse-sample distance placements: $report; display tree: $placedTree\n";
+	} else {
+		warn "Strict-backbone samples were separated, but no completed backbone tree "
+			."was available for post-inference placement\n";
 	}
 }
 #system "rm -f $multAli.ph $multAliSyn.ph $multAliNonSyn.ph";

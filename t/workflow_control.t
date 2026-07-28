@@ -390,6 +390,24 @@ like($mataf4,
 like($mataf4,
 	qr/my %runReport = \(.*?samples => \{\}.*?empty_samples => \{\}.*?present_assemblies => 0.*?my %d2Inputs = \(.*?filtered_read1 => \[\].*?dependencies => ""/s,
 	'run reporting and cross-sample distance state are grouped by responsibility');
+like($mataf4,
+	qr/my \$assemblyOutputsRequired = \$MFopt\{DoAssembly\} \? 1 : 0;.*?my \$assemblyWorkflowComplete = !\$assemblyOutputsRequired \|\| \$boolAssemblyOK/s,
+	'assembly-independent completion does not require an assembly checkpoint');
+like($mataf4,
+	qr/my \$terminalOutputsComplete = !\$assemblyOutputsRequired \|\| \(.*?\$efinAssLoc.*?\$cleanupContigStatsComplete/s,
+	'terminal assembly outputs are required only when assembly is enabled');
+like($mataf4,
+	qr/name => 'final assembly publication', required => \$assemblyOutputsRequired.*?name => 'contig stats', required => \$assemblyOutputsRequired/s,
+	'assembly-independent cleanup skips assembly and ContigStats barriers');
+like($mataf4,
+	qr/elsif \(\$boolAssemblyOK && !\$locRedoAssMapping\) \{\s*\$runReport\{present_assemblies\}\+\+/s,
+	'only a verified existing assembly increments the assembly report counter');
+like($mataf4,
+	qr/if \(\$MFopt\{DoAssembly\} && \$runReport\{present_assemblies\} > 0/s,
+	'gene-catalog suggestions are disabled for assembly-independent runs');
+like($mataf4,
+	qr/binning requires -assembleMG.*?!\$MFopt\{DoAssembly\} && \$MFopt\{DoMetaBat2\}.*?assembly consensus SNP calling requires -assembleMG.*?!\$MFopt\{DoAssembly\}.*?structural-variant calling requires -assembleMG/s,
+	'assembly-only binning and variant requests fail early without assembly');
 unlike($mataf4, qr/^my (?:%jmp|%MFstats|\$baseDir|\$mvCmd)\b/m,
 	'confirmed dead global variables are removed');
 unlike($mataf4, qr/^sub (?:check_sdm_loc|setupInput|fastCovCalc)\b/m,
@@ -419,8 +437,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?my \$MATFILER_ver = 4\.21;/s,
-	'MATAFILER history retains shared input discovery through version 4.21');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?my \$MATFILER_ver = 4\.22;/s,
+	'MATAFILER history retains shared input discovery through version 4.22');
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');

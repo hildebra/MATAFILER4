@@ -141,6 +141,7 @@ genRegions_scr	[MFLRDir]/secScripts/SNP/fasta_generate_regions.py
 contig2fast_scr	python [MFLRDir]/secScripts/SNP/contig2fasta.py
 MGS_strain1_scr	perl [MFLRDir]/secScripts/MGS/strain_within.pl
 MGS_strain2_scr	perl [MFLRDir]/secScripts/MGS/strain_within_2.2.pl
+MGS_mosaic_scr	perl [MFLRDir]/secScripts/MGS/prepare_mosaic_loci.pl
 MGSPhyloBetween_scr	perl [MFLRDir]/secScripts/MGS/phylo_MGS_between.pl
 
 #MAGs

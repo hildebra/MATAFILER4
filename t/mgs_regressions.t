@@ -254,8 +254,8 @@ my ($mgs_main, $mgs_subroutines) = split /# Subroutines\n/, $mgs_source, 2;
 ok(defined($mgs_subroutines), 'MGS has a distinct subroutine section after its main routing');
 unlike($mgs_main, qr/^sub \w+\s*\{/m,
 	'MGS keeps subroutine definitions below its main routing');
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.42;/,
-	'MGS consumes the binary-produced compressed MAG report');
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.43;/,
+	'MGS version includes catalogue-wide mosaic preprocessing');
 like($mgs_source,
 	qr/Starting MGS pipeline v\$MGSpipelineVersion.*?GetOptions\(.*?open LOG,.*?Configuration accepted; loading mapping and catalogue metadata.*?my \@checkpointInputs.*?getDirsPerAssmblGrp/s,
 	'MGS displays startup configuration before loading input metadata');
@@ -298,7 +298,7 @@ unlike($mgs_source . $cluster_mags_source,
 	qr/gzip -c \$outD\/MAGvsGC\.txt|rm \$outD\/MAGvsGC\.txt/,
 	'binary clustering routes do not recompress or remove an obsolete uncompressed MAG report');
 my @compressed_report_checks =
-	($mgs_source . $cluster_mags_source) =~ /test -s \$logDir\/MAGvsGC\.txt\.gz/g;
+	($mgs_source . $cluster_mags_source) =~ /test -s \$(?:logDir|outD)\/MAGvsGC\.txt\.gz/g;
 is(scalar(@compressed_report_checks), 2,
 	'both binary clustering routes validate the compressed MAG report emitted in the log directory');
 like($cluster_mags_source,
@@ -457,8 +457,8 @@ like($strain_source, qr/stale sequence identifiers but no regenerated temporary 
 	'stale final inputs are not silently reused when regeneration produced no files');
 like($strain_source, qr/No prior conspecific-sample log found.*?continuing without historical exclusions/,
 	'missing optional exclusion logs do not abort sparse-MGS resume runs');
-like($strain_source, qr/robust_depth_mask\(\\\@abunGs\)/,
-	'within-MGS abundance filtering uses a robust depth mask');
+like($strain_source, qr/abundance_pattern_mask\(\\\@abunGs,/,
+	'within-MGS abundance filtering uses the configurable robust pattern mask');
 
 my $build_tree_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree_source, qr/\(\?<sample>\.\*\?\).*?\(\?<gene>\.\+\)/,

@@ -36,6 +36,12 @@ scratch directory. Mapper and FASTA indexes adjacent to a generated assembly
 are retained until every member of that assembly group is complete. Indexes
 adjacent to external references are never removed.
 
+For assembly-independent runs (`-assembleMG 0`), assembly and ContigStats
+barriers are not required. Cleanup waits for the configured profiling and
+reference-mapping jobs, then removes only sample-owned temporary files and
+indexes. Binning, assembly consensus SNP, and structural-variant options require
+an enabled assembly mode and are rejected during option validation.
+
 ## Scheduler settings
 
 MATAFILER4 can autodetect supported schedulers, but this can be overridden with:

@@ -140,7 +140,10 @@ sub createConsSNPandSVs;
 #4.21: 26.7.26: report primary and supplementary input sizes independently
 #       and reject physical input files assigned to both read scopes. Complete
 #       the user-facing transition from the former toolkit name to MATAFILER.
-my $MATFILER_ver = 4.21;
+#4.22: 28.7.26: complete assembly-independent workflows without assembly
+#       checkpoints, release their sample scratch safely, and reject assembly-only
+#       binning or variant options when assembly is disabled.
+my $MATFILER_ver = 4.22;
 
 #----------------- defaults ----------------- 
 
@@ -774,6 +777,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#central flag that decides if an assembly is done
 	my $boolAssemblyOK=0;
 	$boolAssemblyOK=1 if ($boolGenePredOK && $efinAssLoc );#&& (!$MFopt{map2Assembly} || $eFinMapCovGZ ) );
+	my $assemblyOutputsRequired = $MFopt{DoAssembly} ? 1 : 0;
+	my $assemblyWorkflowComplete = !$assemblyOutputsRequired || $boolAssemblyOK;
 	#die "$boolGenePredOK && $efinAssLoc && (!$MFopt{map2Assembly} || $eFinMapCovGZ ) $locRedoAssMapping\n";
 			#&& (-s "$finalMapDir/$SmplName-smd.bam" || -s "$finalMapDir/$SmplName-smd.cram")
 	#die "$boolAssemblyOK\n$finalCommAssDir/genePred/proteins.shrtHD.faa\n$finalMapDir/$SmplName-smd.bam.coverage.gz\n";
@@ -978,25 +983,27 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		|| ($MFopt{callSVsSupp} && $locMapSup2Assembly);
 	my $cleanupVariantsComplete = !$cleanupVariantRequired
 		|| (!$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp);
-	my $terminalOutputsComplete = !$doPreAssmFlag && !$ePreAssmblPck
+	my $terminalOutputsComplete = !$assemblyOutputsRequired || (
+		!$doPreAssmFlag && !$ePreAssmblPck
 		&& $efinAssLoc && $cleanupContigStatsComplete
 		&& (!$MFopt{DoMetaBat2} || $binningComplete)
-		&& $cleanupVariantsComplete;
+		&& $cleanupVariantsComplete
+	);
 	my $cleanupRequirements = cleanupCompletionRequirements(
 		contig_dir => $ContigStatsDir,
 		assembly_dir => $finalCommAssDir,
-		contig_subparts => $cleanupContigSubparts,
-		primary_coverage_required => $map{$curSmpl}{hasPrimaryRds},
-		support_coverage_required => $supportCoverageRequired,
-		binning_base => $MFopt{DoMetaBat2} ? $BinningOut : '',
-		primary_snp_stone => $cleanupPrimaryConsensusRequired ? $sampleCheckpoints{primaryConsensus} : '',
-		support_snp_stone => $cleanupSupportConsensusRequired ? $sampleCheckpoints{supportConsensus} : '',
-		consensus_contigs => ($cleanupConsensusRequired && $MFopt{saveConsFastas}) ? $contigsSNP : '',
-		consensus_genes => ($cleanupConsensusRequired && $MFopt{saveConsFastas}) ? [$genePredSNP, $genePredAASNP] : [],
-		primary_vcf => ($cleanupPrimaryConsensusRequired && $MFopt{saveVCF}) ? $vcfSNP : '',
-		support_vcf => ($cleanupSupportConsensusRequired && $MFopt{saveVCF}) ? $vcfSNPsupp : '',
-		primary_sv => ($MFopt{callSVs} && $map{$curSmpl}{hasPrimaryRds}) ? $vcfSV : '',
-		support_sv => ($MFopt{callSVsSupp} && $locMapSup2Assembly) ? $vscSVsupp : '',
+		contig_subparts => $assemblyOutputsRequired ? $cleanupContigSubparts : '',
+		primary_coverage_required => $assemblyOutputsRequired && $map{$curSmpl}{hasPrimaryRds},
+		support_coverage_required => $assemblyOutputsRequired && $supportCoverageRequired,
+		binning_base => ($assemblyOutputsRequired && $MFopt{DoMetaBat2}) ? $BinningOut : '',
+		primary_snp_stone => ($assemblyOutputsRequired && $cleanupPrimaryConsensusRequired) ? $sampleCheckpoints{primaryConsensus} : '',
+		support_snp_stone => ($assemblyOutputsRequired && $cleanupSupportConsensusRequired) ? $sampleCheckpoints{supportConsensus} : '',
+		consensus_contigs => ($assemblyOutputsRequired && $cleanupConsensusRequired && $MFopt{saveConsFastas}) ? $contigsSNP : '',
+		consensus_genes => ($assemblyOutputsRequired && $cleanupConsensusRequired && $MFopt{saveConsFastas}) ? [$genePredSNP, $genePredAASNP] : [],
+		primary_vcf => ($assemblyOutputsRequired && $cleanupPrimaryConsensusRequired && $MFopt{saveVCF}) ? $vcfSNP : '',
+		support_vcf => ($assemblyOutputsRequired && $cleanupSupportConsensusRequired && $MFopt{saveVCF}) ? $vcfSNPsupp : '',
+		primary_sv => ($assemblyOutputsRequired && $MFopt{callSVs} && $map{$curSmpl}{hasPrimaryRds}) ? $vcfSV : '',
+		support_sv => ($assemblyOutputsRequired && $MFopt{callSVsSupp} && $locMapSup2Assembly) ? $vscSVsupp : '',
 	);
 
 	if ($scaffTarExternal ne "" &&  $map{$curSmpl}{"SupportReads"} !~ /mate/i && $scaffTarExtLibTar ne $curSmpl ){print"scNxt\n";loop2C_check($cAssGrp,\@sampleDeps);next;}
@@ -1007,7 +1014,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#some more flow control..
 	if ( !$DoUploadRawReads && $boolScndMappingOK && !$MFopt{DoCalcD2s} &&
 		!$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp &&
-		!$calcBinning && !$calc2ndMapSNP && $boolAssemblyOK && $boolScndCoverageOK 
+		!$calcBinning && !$calc2ndMapSNP && $assemblyWorkflowComplete && $boolScndCoverageOK
 		 && !$calcCoverage && !$calcSuppCoverage && !$dowstreamAnalysisFlag
 		 && $terminalOutputsComplete
 		#&& !$calcRibofind && !$calcRiboAssign && !$MFopt{calcOrthoPlacement} && !$calcGenoSize && !$calcDiamond && !$calcDiaParse && 
@@ -1019,6 +1026,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		runFinishedCleanup(finishedCleanupArguments(
 			$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
 			$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
+			$assemblyOutputsRequired,
 		));
 		print "Sample already complete; no jobs submitted\n" unless $MFconfig{silent};
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
@@ -1309,7 +1317,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$geneDir = "$producedAssemblyDir/genePred/";
 		#call genes, depends on assembly
 		$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"","$nodeSpTmpD/genePred/",1);
-	} else {$runReport{present_assemblies}++;}
+	} elsif ($boolAssemblyOK && !$locRedoAssMapping) {
+		$runReport{present_assemblies}++;
+	}
 	
 	#die "$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) \n";
 	if (!$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) ){   # gene predictions on assembly, assemblies already do exist
@@ -1603,28 +1613,28 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	my $cleanupBarrier = cleanup_stage_barrier(
 		{
-			name => 'final assembly publication', required => 1,
+			name => 'final assembly publication', required => $assemblyOutputsRequired,
 			complete => (!$doPreAssmFlag && !$ePreAssmblPck && $efinAssLoc),
 			dependencies => (!$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo)
 				? $publicationDeps : '',
 		},
 		{
-			name => 'contig stats', required => 1,
+			name => 'contig stats', required => $assemblyOutputsRequired,
 			complete => $cleanupContigStatsComplete,
 			dependencies => $fullContigStatsDep,
 		},
 		{
-			name => 'binning', required => $MFopt{DoMetaBat2} ? 1 : 0,
+			name => 'binning', required => ($assemblyOutputsRequired && $MFopt{DoMetaBat2}) ? 1 : 0,
 			complete => $binningComplete,
 			dependencies => $binningJobDep,
 		},
 		{
-			name => 'consSNP/variant analysis', required => $cleanupVariantRequired ? 1 : 0,
+			name => 'consSNP/variant analysis', required => ($assemblyOutputsRequired && $cleanupVariantRequired) ? 1 : 0,
 			complete => $cleanupVariantsComplete,
 			dependencies => $variantJobDep,
 		},
 	);
-	if ($MFconfig{rmScratchTmp} && @sampleDeps) {
+	if ($MFconfig{rmScratchTmp} && !$MFopt{DoCalcD2s} && @sampleDeps) {
 		if ($cleanupBarrier->{ready}) {
 			my @cleanupDependencies = split /;/, normalise_job_dependencies(
 				\@sampleDeps, $cleanupBarrier->{dependencies},
@@ -1634,6 +1644,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				finishedCleanupArguments(
 					$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
 					$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
+					$assemblyOutputsRequired,
 				),
 			);
 			add2SampleDeps(\@sampleDeps, [$cleanupJob]) if $cleanupJob ne '';
@@ -1768,7 +1779,8 @@ sub cleanupCompletionRequirements {
 
 sub finishedCleanupArguments {
 	my ($sampleKey, $sampleName, $assemblyDir, $mappingDir,
-		$sampleTemp, $assembly, $sampleLogDir, $requirements) = @_;
+		$sampleTemp, $assembly, $sampleLogDir, $requirements,
+		$assemblyRequired) = @_;
 	my @memberKeys = exists($map{$sampleKey}{AG_members})
 		? @{$map{$sampleKey}{AG_members}} : ($sampleKey);
 	my @memberArgs = map { ('--member', $map{$_}{SmplID}) } @memberKeys;
@@ -1782,12 +1794,14 @@ sub finishedCleanupArguments {
 		'--mapping-dir', $mappingDir,
 		'--sample-temp', $sampleTemp,
 		'--scratch-root', $MFglobal{runTmpDirGlobal},
-		'--assembly', $assembly,
-		'--assembly-path-file', "$map{$sampleKey}{wrdir}/assemblies/metag/assembly.txt",
-		'--assembly-dir', $assemblyDir,
 		($MFconfig{rmScratchTmp} ? '--remove-temporary' : '--no-remove-temporary'),
 		'--snp-log-dir', "$sampleLogDir/SNP",
 	);
+	push @arguments,
+		'--assembly', $assembly,
+		'--assembly-path-file', "$map{$sampleKey}{wrdir}/assemblies/metag/assembly.txt",
+		'--assembly-dir', $assemblyDir
+		if $assemblyRequired;
 	push @arguments, ('--remove-alignment', "$mappingDir/$sampleName-smd.cram")
 		if $MFopt{map2Assembly} && !$MFopt{mapSaveCram} && $MFopt{DoMetaBat2};
 	$requirements ||= {};
@@ -2118,7 +2132,7 @@ sub postprocess{
 	}
 
 
-	if ($runReport{present_assemblies} > 0
+	if ($MFopt{DoAssembly} && $runReport{present_assemblies} > 0
 		&& ($runReport{present_assemblies} + scalar(keys %{$runReport{empty_samples}}))
 			== scalar(keys %{$d2Inputs{samples}})){
 		my $gcScr = getProgPaths("geneCat_scr");
@@ -9443,6 +9457,8 @@ sub getCmdLineOptions{
 	die "ERROR:: \"-assemblMemory\" argument contains characters: $MFopt{AssemblyMemory}" if ($MFopt{AssemblyMemory} !~ m/[\d-]+/);
 	die "ERROR:: -Binner must be one of 0..5\n"
 		unless $MFopt{DoMetaBat2} >= 0 && $MFopt{DoMetaBat2} <= 5;
+	die "ERROR:: binning requires -assembleMG to select an assembly mode\n"
+		if !$MFopt{DoAssembly} && $MFopt{DoMetaBat2};
 	die "ERROR:: -BinnerCores must be a positive integer\n"
 		unless $MFopt{BinnerCores} > 0;
 	die "ERROR:: -BinnerMem must be zero or a positive integer\n"
@@ -9470,6 +9486,8 @@ sub getCmdLineOptions{
 	
 	die "ERROR:: SNPcaller argument invalid, has to be \"MPI\" or \"FB\"\n" if ($MFopt{SNPcallerFlag} ne "MPI" && $MFopt{SNPcallerFlag} ne "FB");
 	if ($MFopt{DoConsSNP} && !$MFopt{saveConsFastas} && !$MFopt{saveVCF}){die "ERROR:: Can't use -SNPsaveVCF 0 and -SNPsaveConsFasta 0 -> SNP calling would not be saved in any way..\n";}
+	die "ERROR:: assembly consensus SNP calling requires -assembleMG to select an assembly mode\n"
+		if !$MFopt{DoAssembly} && ($MFopt{DoConsSNP} || $MFopt{DoSuppConsSNP});
 
 	
 	#structural variants..
@@ -9477,6 +9495,8 @@ sub getCmdLineOptions{
 	}elsif ($MFopt{callSVs} == 1){	$MFopt{SVcallerFlag} = "DL"; #delly
 	}elsif ($MFopt{callSVs} == 2){	$MFopt{SVcallerFlag} = "GY"; # gridss
 	}else {die"ERROR:: Invalid callSVs option: $MFopt{callSVs}\n";}
+	die "ERROR:: structural-variant calling requires -assembleMG to select an assembly mode\n"
+		if !$MFopt{DoAssembly} && $MFopt{callSVs};
 	
 	if ($MFopt{SB_env} ne ""){
 		if ($MFopt{SB_env} ne "human_gut" && $MFopt{SB_env} ne "dog_gut" && $MFopt{SB_env} ne "ocean" && $MFopt{SB_env} ne "soil" && 

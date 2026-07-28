@@ -106,8 +106,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.54;/,
-	'within-strain first-generation FASTA sorting increments the workflow version');
+like($strain, qr/my \$version = 0\.55;/,
+	'within-strain mosaic and placement QC increments the workflow version');
 like($strain,
 	qr/sub stepComplete .*?STEP COMPLETE: \$step/s,
 	'step completion messages use one consistent formatter');

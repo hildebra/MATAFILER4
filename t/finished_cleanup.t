@@ -40,8 +40,9 @@ sub cleaner_command {
 		'--mapping-dir', $args{mapping_dir},
 		'--sample-temp', $args{sample_temp},
 		'--scratch-root', $scratch,
-		'--assembly', ($args{assembly} // $assembly),
 		'--snp-log-dir', $args{snp_log_dir};
+	push @command, '--assembly', ($args{assembly} // $assembly)
+		unless $args{no_assembly};
 	push @command, $args{remove_temporary} ? '--remove-temporary' : '--no-remove-temporary'
 		if exists $args{remove_temporary};
 	push @command, ('--assembly-path-file', $args{assembly_path_file},
@@ -188,6 +189,27 @@ is(run_cleaner(
 ), 0, 'cleanup safely accepts an external assembly');
 ok(-s "$external_assembly.mmi", 'indexes adjacent to an external reference are retained');
 
+my $profile_sample = 'profile-only';
+my $profile_mapping = File::Spec->catdir($output, $profile_sample, 'mapping');
+my $profile_log = File::Spec->catdir($output, $profile_sample, 'LOGandSUB', 'SNP');
+my $profile_temp = File::Spec->catdir($scratch, $profile_sample);
+make_path($profile_mapping, $profile_log, $profile_temp);
+write_file(File::Spec->catfile($profile_mapping, "$profile_sample-smd.bam.bai"), 'index');
+write_file(File::Spec->catfile($profile_log, "$profile_sample.0.bed"), 'regions');
+write_file(File::Spec->catfile($profile_temp, 'filtered.1.fq.gz'), 'reads');
+is(run_cleaner(
+	sample => $profile_sample, members => [$profile_sample],
+	mapping_dir => $profile_mapping,
+	snp_log_dir => $profile_log,
+	sample_temp => $profile_temp,
+	no_assembly => 1,
+), 0, 'assembly-independent cleanup succeeds without an assembly path');
+ok(!-d $profile_temp, 'assembly-independent cleanup removes sample scratch');
+ok(!-e File::Spec->catfile($profile_mapping, "$profile_sample-smd.bam.bai"),
+	'assembly-independent cleanup removes sample-owned mapping indexes');
+ok(!-e File::Spec->catfile($profile_log, "$profile_sample.0.bed"),
+	'assembly-independent cleanup removes stale SNP region files');
+
 my $scratch_alias = File::Spec->catdir($root, 'scratch-alias');
 symlink($scratch, $scratch_alias) or die "Cannot create scratch alias: $!";
 my $alias_temp_real = File::Spec->catdir($scratch, 'alias-sample');
@@ -274,7 +296,10 @@ unlike($mata_source, qr/getAssemblPath\(\$curOutDir,\$finalCommAssDir\)/,
 unlike($mata_source, qr/system "rm -rf \$CRAMmap"/,
 	'completed-sample alignment cleanup is no longer performed inline');
 like($mata_source,
-	qr/--assembly-path-file.*?--assembly-dir.*?--remove-temporary.*?--remove-alignment/s,
+	qr/--remove-temporary.*?--assembly-path-file.*?--assembly-dir.*?--remove-alignment/s,
 	'MATAF4 delegates completed-sample filesystem policy to the cleanup script');
+like($mata_source,
+	qr/push \@arguments,\s*'--assembly'.*?if \$assemblyRequired/s,
+	'MATAF4 passes assembly ownership to cleanup only for assembly workflows');
 
 done_testing;

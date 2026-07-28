@@ -40,8 +40,9 @@ use Cwd qw(abs_path);
 #.40: announce startup before configuration and input metadata loading
 #.41: use the clusterMAGs binary directly unless the Perl compatibility path is requested
 #.42: consume the clusterMAGs binary's compressed MAG report without recompressing it
+#.43: precompute catalogue-validated mosaic loci and consolidated outgroups
 
-my $MGSpipelineVersion = 0.42;
+my $MGSpipelineVersion = 0.43;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -870,6 +871,7 @@ if ($wait4stone ne ""){
 #die "XX\n";
 
 my $strain1scr = getProgPaths("MGS_strain1_scr");
+my $mosaicScr = getProgPaths("MGS_mosaic_scr");
 my $memUsage = 30; #in Gb
 my $NsubJobs = 0 ; #split job up?
 my $preCompCons = 0;
@@ -886,7 +888,12 @@ if ($numSamples > 1500){#scale with the number of assembly groups
 #my $prunTree = "$outD/between_phylo/prunned.nwk";
 #
 #my $ph2Cmd = "$strain1scr $GCd $finalClustersFilt.mgs $canCore $iniTree 0 1\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
-my $ph2Cmd = "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ ";
+my $mosaicCatalogue = "$annoDir/mosaic_loci.confirmed.tsv";
+my $ph2Cmd = "mkdir -p $outD/within_phylo/ || exit 65\n";
+$ph2Cmd .= "$mosaicScr -GCd $GCd -MGS $finalClustersFilt -clusterID $clusterID "
+	."-threads $canCore -output $mosaicCatalogue || exit 65\n";
+$ph2Cmd .= "test -s $mosaicCatalogue || exit 65\n";
+$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ -mosaicLoci $mosaicCatalogue ";
 $ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree || $treedep ne "";
 $ph2Cmd .= "\n";
 

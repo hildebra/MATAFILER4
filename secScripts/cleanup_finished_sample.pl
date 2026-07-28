@@ -36,7 +36,7 @@ GetOptions(
 	'require-nonempty-file=s@' => \@require_nonempty_file,
 ) or die "invalid cleanup arguments\n";
 
-for my $required (qw(sample state_dir allowed_root mapping_dir sample_temp scratch_root assembly snp_log_dir)) {
+for my $required (qw(sample state_dir allowed_root mapping_dir sample_temp scratch_root snp_log_dir)) {
 	(my $flag = $required) =~ s/_/-/g;
 	die "--$flag is required\n" unless defined($opt{$required}) && length($opt{$required});
 }
@@ -220,6 +220,8 @@ if (-d $sample_temp) {
 		print "Removed sample temporary directory $sample_temp\n";
 	}
 }
+
+exit 0 unless defined($opt{assembly}) && length($opt{assembly});
 
 my $assembly = existing_absolute($opt{assembly}, 'assembly');
 my @assembly_stat = stat($assembly);
