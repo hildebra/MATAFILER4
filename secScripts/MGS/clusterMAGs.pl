@@ -9,6 +9,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(readMap readClstrRev readClstrRevContigSubset readClstrRevSmplCtgGenSubset getDirsPerAssmblGrp  getAssemblPath systemW gzipopen parse_duration);
 use Mods::Binning qw (getBinSubdirName runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns minQualFilter calcLCAcompl readCMquals);
 use Mods::geneCat qw(readMG_LCA);
+use Mods::CatalogPaths qw(resolve_catalog_maps);
 
 
 sub countUpBin;
@@ -30,8 +31,9 @@ sub MGuniqStats;
 #.24: require an explicit flag before entering the Perl compatibility algorithm
 #.25: use the compressed MAG report emitted directly by the clustering binary
 #.26: publish MAGvsGC.txt.gz consistently in the Bin_<binner> directory
+#.27: resolve all catalog maps from LOGandSUB/inmap.txt
 
-my $version = 0.26;
+my $version = 0.27;
 
 my $startTime = time ;
 
@@ -149,20 +151,8 @@ if ($redo && -e "$outD/$BinnerShrt.clusters") {
 
 
 #read map to get assembly groups..
-my $mapF="";my $GCd = $inD;
-#die Dumper($hrm);	
-if (-e "$inD/LOGandSUB/GCmaps.inf"){
-	open my $map_info, '<', "$inD/LOGandSUB/GCmaps.inf"
-		or die "Cannot open $inD/LOGandSUB/GCmaps.inf: $!\n";
-	$mapF = <$map_info> // "";
-	close $map_info or die "Cannot close $inD/LOGandSUB/GCmaps.inf: $!\n";
-	chomp $mapF;
-	die "$inD/LOGandSUB/GCmaps.inf is empty\n" unless length $mapF;
-} else{
-	$mapF = "$inD/LOGandSUB/inmap.txt";
-	#($hrm,$asGrpObj) = readMap($inD."LOGandSUB/inmap.txt");
-}
-die "Couldn't find map file in clusterMAGs.pl:: $mapF\n" unless (-e $mapF|| $mapF =~ m/,/);
+my $GCd = $inD;
+my $mapF = resolve_catalog_maps($GCd);
 my ($map_groups, $map_data) = getDirsPerAssmblGrp($mapF);
 my ($clusteringMapF, $emptySamples) =
 	mapsWithoutEmptySamples($mapF, $map_data, "$logDir/nonempty_maps");

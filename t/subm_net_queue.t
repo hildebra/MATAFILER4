@@ -54,4 +54,25 @@ like($contents,
 	'prints the allocated Slurm job ID before executing the job payload');
 is($options->{useNetQueue}, 0, 'network queue selection is one-shot');
 
+my $scratch_script = File::Spec->catfile($tmpdir, 'scratch.sh');
+$scratch_script =~ s{\\}{/}g;
+$options->{tmpSpace} = '12G';
+{
+	no warnings 'redefine';
+	local *Mods::Subm::getProgPaths = sub {
+		my ($key) = @_;
+		return '/node/local/tmp' if $key eq 'nodeTmpDir';
+		return '';
+	};
+	qsubSystem($scratch_script, 'pwd', 1, '1G', 'scratch', '', '', 0, [], $options);
+}
+open my $scratch_fh, '<', $scratch_script
+	or die "Cannot read $scratch_script: $!";
+my $scratch_contents = do { local $/; <$scratch_fh> };
+close $scratch_fh;
+like($scratch_contents, qr/^node_tmp_root="\/node\/local\/tmp"$/m,
+	'requested node scratch uses the configured node-local root');
+like($scratch_contents, qr/^export TMPDIR="\$node_tmp_workdir"\ncd "\$node_tmp_workdir"$/m,
+	'node-scratch jobs execute from their job-specific local directory');
+
 done_testing;

@@ -5,12 +5,15 @@
 # v0.2 (2026-07-22): handle sparse MGS sets and exclude ambiguous paralogs deterministically.
 # v0.3 (2026-07-27): decouple tree inference from abundance-dependent visualization and
 #                    harden the multi-phyla phylogeny defaults.
+# v0.4 (2026-07-28): normalize custom output paths.
 #perl /hpc-home/hildebra/dev/Perl/MATAF3//secScripts/MGS/phylo_MGS_between.pl -GCd /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1/ -MGS /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//MB2.clusters.ext.can.Rhcl.filt -c 10 -outD /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//customRefs/ -refGenos '/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta'
 
 use warnings;
 use strict;
 use Getopt::Long qw( GetOptions );
 use File::Path qw(make_path);
+use File::Spec;
+use Cwd qw(abs_path);
 
 use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
@@ -60,7 +63,11 @@ die "MGS file missing or empty: $MGSfile\n" unless -s $MGSfile;
 die "Core and memory requests must be positive\n" unless $numCores > 0 && $mem > 0;
 die "Unsupported MSA program: $MSAprog\n" unless $MSAprog == 2 || $MSAprog == 4;
 die "-visualize must be 0 or 1\n" unless $visualize == 0 || $visualize == 1;
+$GCd = abs_path($GCd);
+$MGSfile = abs_path($MGSfile);
 $btout = "$GCd/MGS/phylo/" if ($btout eq "");#main output dir
+$btout = File::Spec->rel2abs($btout);
+$btout .= "/" unless $btout =~ m{/$};
 
 
 #main objects to store dna/cats

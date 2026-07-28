@@ -34,6 +34,7 @@ use Mods::FuncTools qw(assignFuncPerGene calc_modules);
 use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins  attachProteins3 );
 use Mods::Binning qw(getBinSubdirName);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
+use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps write_catalog_maps);
 
 sub geneCatFlow;
 sub addingSmpls;
@@ -368,7 +369,7 @@ sub _safe_reset_dir {
 #.51: 26.3.25: small fix to ensure preprocessing takes the right start sample (could skip large numbers sometimes, due to rounding errors)
 #.52: streamed FASTA collation, durable gzip publication, checkpoint manifests, and cluster-ID propagation
 #.53: use matrix cardinality for sparse-stage skips, preserve dry-run commands, and accept empty Canopy/Kraken results
-my $version = 0.54;
+my $version = 0.55;
 $| = 1;
 
 my $justCDhit = 1; #always set default to 0, to dangerous otherwise..
@@ -618,14 +619,12 @@ $GCdir.="/" unless ($GCdir =~ m/\/$/);
 #print "\n\n$GCdir\n";
 
 $GCdir = resolve_path($GCdir);
+$GCdir = File::Spec->rel2abs($GCdir);
+$GCdir .= "/" unless $GCdir =~ m{/$};
 
 #die "\n\n$GCdir\n";
 
-if ($tmpDirDef eq $tmpDir){
-	my $catalog_name = basename($GCdir);
-	die "Cannot derive gene-catalog name from $GCdir\n" unless length $catalog_name;
-	$tmpDir .= $catalog_name."/"; $GLBtmp.=$catalog_name."/";
-}
+my $usesCatalogDefaultTmp = $tmpDirDef eq $tmpDir;
 
 my $qsubDir = $GCdir."LOGandSUB/";
 
@@ -636,10 +635,15 @@ if ($justCDhit==0){
 	_validate_map_files($mapF); #validate inputs before deleting any prior outputs
 	print "Resetting existing output directory $GCdir\n" if -d $GCdir && -d $qsubDir;
 	$GCdir = _safe_reset_dir($GCdir, 'gene catalog');
-	$tmpDir = _safe_reset_dir($tmpDir, 'temporary');
 	$qsubDir = $GCdir."LOGandSUB/";
 } 
 
+my $catalogIdentity = catalog_identity($GCdir);
+if ($usesCatalogDefaultTmp) {
+	$tmpDir .= "$catalogIdentity/";
+	$GLBtmp .= "$catalogIdentity/";
+}
+$tmpDir = _safe_reset_dir($tmpDir, 'temporary') if $justCDhit == 0;
 
 my $primaryClusterFNA= "compl.incompl.$cdhID.fna";
 my $primaryClusterCLS= "compl.incompl.$cdhID.fna.clstr";
@@ -660,17 +664,12 @@ if ($mapF eq "" ){
 }
 $mapF =~ s/\/\//\//g;
 if ($mapF =~ m/^\??$/){
-	if (-e "$qsubDir/GCmaps.inf"){
-		$mapF = _read_single_line_file("$qsubDir/GCmaps.inf");
-		die "extracted mapf from $qsubDir/GCmaps.inf\n does not exist:\n$mapF\n" if (!-e $mapF&& $mapF !~ m/,/);
-	} else {
-		die "Can't find expected copy of inmap in GC outdir: $GCdir\n";
-	}
-} elsif (-e "$qsubDir/GCmaps.inf" && -e "$qsubDir/GCmaps.ori"){
-	my $mapFInf = _read_single_line_file("$qsubDir/GCmaps.inf");$mapFInf =~ s/\/\//\//g;
+	$mapF = resolve_catalog_maps($GCdir);
+} elsif (-e "$qsubDir/inmap.txt" && -e "$qsubDir/GCmaps.ori"){
+	my $mapFInf = resolve_catalog_maps($GCdir);$mapFInf =~ s/\/\//\//g;
 	my $mapFOri = _read_single_line_file("$qsubDir/GCmaps.ori");$mapFOri =~ s/\/\//\//g;
 	if ($mapFOri eq $mapF || $mapFInf eq $mapF ){ #same as in input arg.. great, replace with local copies!
-		#$mapF = `cat $qsubDir/GCmaps.inf`;
+		$mapF = $mapFInf;
 	} else {
 		die "input maps seems to have changed, neither\n$mapFInf\nnor\n$mapFOri\nAborting run..\n";
 		#die "Continuing run, but inmap does not seem to match!\nOriginal map: $mapFOri\n-map arg: $mapF\nExiting.. delete gene cat folder before proceeding (or use original map)\n";
@@ -1938,9 +1937,7 @@ sub collateGenes(){
 			unless -s "$qsubDir/map.$cntMaps.txt";
 		push (@newMaps,"$qsubDir/map.$cntMaps.txt"); $cntMaps++;
 	}
-	open O, '>', "$qsubDir/GCmaps.inf" or die "Cannot open $qsubDir/GCmaps.inf: $!\n";
-	print O join ",",@newMaps or die "Cannot write $qsubDir/GCmaps.inf: $!\n";
-	close O or die "Cannot close $qsubDir/GCmaps.inf: $!\n";
+	write_catalog_maps($GCdir, \@newMaps);
 	open O, '>', "$qsubDir/GCmaps.ori" or die "Cannot open $qsubDir/GCmaps.ori: $!\n";
 	print O join ",",@maps or die "Cannot write $qsubDir/GCmaps.ori: $!\n";
 	close O or die "Cannot close $qsubDir/GCmaps.ori: $!\n";
@@ -2090,7 +2087,8 @@ sub collateGenes(){
 		# B0 FASTA files are intentionally removed after catalog publication, so
 		# only durable collation metadata belongs in this resumable manifest.
 		_touch_file($prepStone, $cdhID, 'GenesCollated',
-			"$qsubDir/GeneCompleteness.txt", "$qsubDir/GCmaps.inf");
+			"$qsubDir/GeneCompleteness.txt", "$qsubDir/inmap.txt",
+			"$qsubDir/catalog.sha256");
 	}
 
 }

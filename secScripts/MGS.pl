@@ -10,6 +10,7 @@ use Data::Dumper;
 use Getopt::Long qw( GetOptions );
 use File::Path qw(make_path remove_tree);
 use File::Basename qw(dirname);
+use File::Spec;
 use Cwd qw(abs_path);
 
 #.12: checkm2, mem optimizations
@@ -43,8 +44,9 @@ use Cwd qw(abs_path);
 #.43: precompute catalogue-validated mosaic loci and consolidated outgroups
 #.44: remove inline timing wrappers; rely on scheduler sacct accounting
 #.45: standardize MAGvsGC.txt.gz in the Bin_<binner> directory
+#.46: use the catalog map manifest/identity and isolate binner-specific annotations
 
-my $MGSpipelineVersion = 0.45;
+my $MGSpipelineVersion = 0.46;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -55,6 +57,7 @@ use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readMG_LCA);
 use Mods::Binning qw (getBinSubdirName createBin2 createBinCtgs runMetaBat runCheckM runCheckM2 createBinFAA readMGS MB2assignedBinIds);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
+use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 
 sub getGoodMBstats;
 sub printL;
@@ -155,9 +158,17 @@ die "-MGset option has to be \"GTDB\" or \"FMG\"\n" unless ($useGTDBmg eq "GTDB"
 );
 
 die "Needs input dir arg (-GCd)!" if ($inD eq "");
+die "Gene catalog directory does not exist: $inD\n" unless -d $inD;
+die "-legacy is no longer supported\n" if $legacyV;
+$inD = abs_path($inD);
+$inD .= "/" unless $inD =~ m{/$};
+my $catalogIdentity = catalog_identity($inD);
 #die "$doStrains\n";
 #set up basic structures
 $tmpD = $inD."/tmp/" if ($tmpD eq "");
+$tmpD = File::Spec->rel2abs($tmpD);
+$tmpD .= "/" unless $tmpD =~ m{/$};
+$tmpD .= "$catalogIdentity/";
 my $QSBoptHR = emptyQsubOpt($doSubmit,"");
 my %QSBopt = %{$QSBoptHR};
 
@@ -175,6 +186,7 @@ if ($useGTDBmg eq "GTDB"){
 }
 
 $outD = $inD."/Bin_$BinnerShrt/" if ($outD eq "");
+$outD = File::Spec->rel2abs($outD);
 $outD .= "/" unless ($outD =~ m/\/$/);
 my $logDir = $outD."LOGandSUB/";
 my $annoDir = $outD."Annotation/";
@@ -196,7 +208,7 @@ my $finalClustersW = "$outD/$BinnerShrt.Wclusters"; #unweighted verssion..
 my $finalClustersFilt = $finalClusters2.".core";
 
 
-if (-e "$inD/LOGandSUB/inmap.txt" || -e "$inD/LOGandSUB/GCmaps.inf"){ #this is the outdir of a whole MATAFILER run, or geneCat, doesn't matter
+if (-e "$inD/LOGandSUB/inmap.txt"){ #this is the outdir of a whole MATAFILER run, or geneCat, doesn't matter
 	$singleSample = 0;
 	print "Compound Assembly MetaBatting..\n";
 } 
@@ -205,16 +217,9 @@ make_path($tmpD, $outD, $logDir, $annoDir, $chkpDir);
 
 
 
-my $GCd = "";my $mapF="";
-#die Dumper($hrm);	
-if (-e "$inD/LOGandSUB/GCmaps.inf"){
-	$mapF = _read_one_line("$inD/LOGandSUB/GCmaps.inf");
-	$GCd = $inD;
-} else{
-	$mapF = $inD."LOGandSUB/inmap.txt";
-	$GCd = $inD;
-	#($hrm,$asGrpObj) = readMap($inD."LOGandSUB/inmap.txt");
-}
+my $GCd = $inD;
+my $mapF = resolve_catalog_maps($GCd);
+$checkpointParameters{catalog_identity} = $catalogIdentity;
 
 open LOG, '>', "$logDir/pipeline.log" or die "Cannot open $logDir/pipeline.log: $!\n";
 printL "=====================================================\n";
@@ -359,7 +364,7 @@ foreach my $Doo (@DoosD){ #this loops ensures Binner predictions exist for each 
 	last; #should be done in MATAFILER.. deactivate here..
 	last if (!$ph1flag && _checkpoint_valid($iniMB2sto));
 	my $bef = "";
-	my $tmpD2 = $tmpD."$Doo/";
+	my $tmpD2 = "$tmpD$Doo/";
 	my $nodeTmpD2 = "$nodeTmpD/checkM/C$Doo/";
 	#print "$nodeTmpD2\n";
 	$bef .= "mkdir -p $tmpD2\n";# unless (-d $tmpD2);
@@ -641,7 +646,7 @@ if (!$binExtractionValid){
 if ($rewrTAX) {
 	for my $path (
 		glob("$annoDir/GTDB*"), glob("$annoDir/kraken2*"), glob("$annoDir/specI*"),
-		"$GCd/Anno/Tax/SpecI_MGS", "$GCd/Anno/Tax/${COGdir}_MGS",
+		"$annoDir/${COGdir}_MGS",
 		$ABmgsSton, $ABmgsSton2
 	) {
 		if (-d $path) { remove_tree($path); }
@@ -748,12 +753,12 @@ if (0 && !-e "$finalClusters2.matL0.txt"){ #deprecated, use specI based annotati
 #annotate specI's with MAGs added..
 
 
-my $specIoutDir = $legacyV ? "$GCd/Anno/Tax/SpecI_MGS" : "$GCd/Anno/Tax/${COGdir}_MGS";
+my $specIoutDir = "$annoDir/${COGdir}_MGS";
 my $specIabundance = "$specIoutDir/specI.mat";
 my @annotation_jobs;
 unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/specI.tax"){
 	my $specIabu = getProgPaths("specIGC_scr");
-	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS $finalClustersFilt -MGStax $GTDBtaxF -MGset $useGTDBmg\n";
+	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS $finalClustersFilt -MGStax $GTDBtaxF -MGset $useGTDBmg -outD $specIoutDir\n";
 	if ($legacyV){
 		$specIabu = getProgPaths("specIGC_scr_v0");
 		$cmdSI = "$specIabu $GCd $canCore $finalClustersFilt $GTDBtaxF\n";
@@ -892,7 +897,7 @@ my $ph2Cmd = "mkdir -p $outD/within_phylo/ || exit 65\n";
 $ph2Cmd .= "$mosaicScr -GCd $GCd -MGS $finalClustersFilt -clusterID $clusterID "
 	."-threads $canCore -output $mosaicCatalogue || exit 65\n";
 $ph2Cmd .= "test -s $mosaicCatalogue || exit 65\n";
-$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ -mosaicLoci $mosaicCatalogue ";
+$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ -mosaicLoci $mosaicCatalogue ";
 $ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree || $treedep ne "";
 $ph2Cmd .= "\n";
 

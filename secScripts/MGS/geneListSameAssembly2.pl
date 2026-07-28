@@ -8,6 +8,7 @@ use strict;
 use Getopt::Long qw( GetOptions );
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(getDirsPerAssmblGrp readTabByKey systemW readClstrRev readMapS getAssemblPath readFasta);
+use Mods::CatalogPaths qw(resolve_catalog_maps);
 
 sub readInfile;
 sub getContigsMGS;
@@ -38,7 +39,7 @@ $oDir .= "/" unless ($oDir =~ m/\/$/);$GCd .= "/" unless ($GCd =~ m/\/$/);
 if (!-f $inF && !-f $multiInF){die "Can;t find input gene file $inF$multiInF\nAborting\n";}
 my $refSmplDir = "";
 
-my $mapF = `cat $GCd/LOGandSUB/GCmaps.inf`;
+my $mapF = resolve_catalog_maps($GCd);
 
 my ($hrD,$hrm) = getDirsPerAssmblGrp($mapF);
 my %map = %{$hrm};
@@ -378,7 +379,6 @@ sub readMB2{
 	}
 	return (\%MB1,\%MB2,\%MBq);
 }
-
 
 
 

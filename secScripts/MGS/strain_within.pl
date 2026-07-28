@@ -13,6 +13,7 @@ use File::Copy qw(copy);
 use File::Basename qw(basename dirname);
 use File::Spec;
 use Cwd qw(abs_path getcwd);
+use Digest::SHA qw(sha256_hex);
 
 
 
@@ -31,6 +32,7 @@ use Mods::StrainParts qw(
 	append_fasta_records_atomic sort_fasta_by_locus
 );
 use Mods::SlurmAccounting qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
+use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 
 sub extractFNAFAA2genes;
 sub histoMGS;
@@ -163,7 +165,8 @@ END {
 #.54: locus-sort first-generation per-MGS FNA/FAA files before compression
 #.55: separate the gene cap from QC and add mosaic, breakpoint, abundance, and placement QC
 #.56: prepare a confirmed mosaic catalogue on demand for legacy direct invocations
-my $version = 0.56;
+#.57: use persistent catalog identity, map manifests, and explicit abundance paths
+my $version = 0.57;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -215,6 +218,7 @@ my $maxNGenes = $FILTER_DEFAULT{maximum_genes_per_sample};
 my $noGeneLimit = 0;
 my $disableQC = 0;
 my $mosaicLociFile = "";
+my $MGSabundanceOverride = "";
 my $prepareMosaicLoci = $FILTER_DEFAULT{prepare_mosaic_loci};
 my $breakpointGeneFlank = $FILTER_DEFAULT{breakpoint_gene_flank};
 my $abundanceMinimumLoci = $FILTER_DEFAULT{abundance_minimum_loci};
@@ -307,6 +311,7 @@ GetOptions(
 	"noGeneLimit=i"  => \$noGeneLimit, #remove only the gene-count cap; QC remains enabled
 	"disableQC=i"    => \$disableQC, #expert/debug option: disable biological QC independently of the gene cap
 	"mosaicLoci=s"   => \$mosaicLociFile, #catalogue-wide confirmed mosaic/outgroup table
+	"MGSabundance=s" => \$MGSabundanceOverride, #explicit MGS abundance matrix for nonstandard guide locations
 	"prepareMosaicLoci=i" => \$prepareMosaicLoci, #create the default catalogue if absent
 	"flushEvery=i"   => \$appendWriteTrigger, #samples buffered before per-MGS records are flushed
 	
@@ -403,6 +408,14 @@ die "-recalcTrees must be launched by the main strainWithin process, not a split
 	if $recalcTrees && $subJob;
 die "-MSAprog must be 0, 1, 2, or 4\n"
 	unless grep { $MSAprog == $_ } (0, 1, 2, 4);
+
+$GCd = abs_path($GCd);
+$GCd .= "/" unless $GCd =~ m{/$};
+$MGSfile = abs_path($MGSfile) if length $MGSfile;
+$outDpre = File::Spec->rel2abs($outDpre) if length $outDpre;
+$mosaicLociFile = File::Spec->rel2abs($mosaicLociFile) if length $mosaicLociFile;
+$MGSabundanceOverride = File::Spec->rel2abs($MGSabundanceOverride)
+	if length $MGSabundanceOverride;
 
 $noGeneLimit = 1 if $maxNGenes <= 0; #backward-compatible no-cap spelling; QC is unchanged
 die "-maxGenes must be at least -MGSminGenesPSmpl unless -noGeneLimit 1 is used\n"
@@ -632,6 +645,8 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 		);
 		push @selfArgs, ('-tmpD', $locTmpDir1) if $locTmpDir1 ne "";
 		push @selfArgs, ('-mosaicLoci', $mosaicLociFile) if $mosaicLociFile ne "";
+		push @selfArgs, ('-MGSabundance', $MGSabundanceOverride)
+			if $MGSabundanceOverride ne "";
 		push @selfArgs, ('-MGSsubset', $subsMGSstr) if $subsMGSstr ne "";
 		push @selfArgs, ('-submissionMode', $subMode) if $subMode ne "";
 		my $selfCmd = $strain1scr . " " . join(" ", map { shellQuote($_) } @selfArgs);
@@ -1060,8 +1075,10 @@ print "\nAll done for $cnt Bins\nRun strain_within_2.pl for summary stats:\n";
 
 my $outDX =  $MGSfile;#"$GCd/$mode/intra_phylo/";
 $outDX =~ s/[^\/]+$//;
-my $MGSabundance = "$GCd/Anno/Tax/GTDBmg_MGS/specI.mat";
-$MGSabundance = "$bindir/Annotation/Abundance/MGS.matL7.txt";
+my $MGSabundance = $MGSabundanceOverride ne ""
+	? $MGSabundanceOverride
+	: "$bindir/Annotation/Abundance/MGS.matL7.txt";
+die "MGS abundance matrix is missing or empty: $MGSabundance\n" unless -s $MGSabundance;
 
 my $strain2Scr = getProgPaths("MGS_strain2_scr");
 
@@ -1813,26 +1830,29 @@ sub prepRun{
 	my $GCname = basename($GCd);
 	my $outDname = basename($outD);
 	die "Could not derive safe temporary-directory names\n" unless length($GCname) && length($outDname);
+	my $catalogIdentity = catalog_identity($GCd);
+	my $canonicalOutD = abs_path($outD) || File::Spec->rel2abs($outD);
+	my $outputIdentity = substr(sha256_hex($canonicalOutD), 0, 16);
 	$scratchD = getProgPaths("globalTmpDir",0);
 	$scratchD = "$outD/.scratch" if $scratchD eq "";
-	$scratchD .= "/strainsScr1/$GCname.$outDname/";
+	$scratchD .= "/strainsScr1/$catalogIdentity/$outDname.$outputIdentity/";
 	#die "$scratchD  :$GCname :$GCd\n";
 	if ($locTmpDir1 eq ""){
 		my $locTmpN = getProgPaths("nodeTmpDir",0) ;
 		my $suffix = ""; $suffix = "/SJ.${subJob}/" if ($subJob);
 		if ($locTmpN eq ""){
-			$locTmpDir =  "$outD/strainsScr1/$GCname.$outDname/$suffix" ; 
+			$locTmpDir = "$outD/strainsScr1/$catalogIdentity/$outDname.$outputIdentity/$suffix";
 		} else {
 			#my $tmp = `echo \$SLURM_LOCAL_SCRATCH`;
 			#print STDERR "echo $locTmpN\n$tmp\n";
 			#$locTmpN =~ s/\$/\\\$/;$locTmpN = `echo $locTmpN;`; #eval in sys
 			$locTmpN=truePath($locTmpN,1);
 			#die $locTmpN."\n";
-			$locTmpDir =  "$locTmpN/strainsScr1/$GCname.$outDname/$suffix" ; 
+			$locTmpDir = "$locTmpN/strainsScr1/$catalogIdentity/$outDname.$outputIdentity/$suffix";
 		}
 	} else {
 		my $suffix = $subJob ? "/SJ.${subJob}" : "";
-		$locTmpDir = "$locTmpDir1/strainsScr1/$GCname.$outDname$suffix/";
+		$locTmpDir = "$locTmpDir1/strainsScr1/$catalogIdentity/$outDname.$outputIdentity$suffix/";
 	}
 	
 	$preConDir = "$scratchD/preComp/";
@@ -1842,12 +1862,7 @@ sub prepRun{
 	print "\n!! WARNING !!: RECALCTREES mode selected (will delete per-MGS tree outputs and rebuild from published or complete staged inputs) !!\n" if ($recalcTrees);
 	print "\n!! WARNING !!: REDOSUBMISSIONDATA mode selected (will redo and resubmit MSA + phylos even for already completed MGS) !!\n" if ($redoSubmissionData);
 
-	open my $map_info, '<', "$GCd/LOGandSUB/GCmaps.inf"
-		or die "Cannot open $GCd/LOGandSUB/GCmaps.inf: $!\n";
-	$mapF = <$map_info> // "";
-	close $map_info or die "Cannot close map information file: $!\n";
-	chomp $mapF;
-	die "Mapping-file reference is empty or missing: $mapF\n" if ($mapF !~ /,/ && (!length($mapF) || !-e $mapF));
+	$mapF = resolve_catalog_maps($GCd);
 	
 	#read info gene <-> taxonomy from this file, depends on config..
 	$gene2taxF = "$GCd/FMG/gene2specI.txt";
@@ -3169,6 +3184,8 @@ Gene selection and biological QC:
   -minBadLociPSmpl INT          Minimum bad loci before deferring a sample
                                  [default $default->{minimum_bad_loci_for_sample_skip}]
   -mosaicLoci FILE              Confirmed catalogue-wide mosaic/outgroup table
+  -MGSabundance FILE            Explicit MGS abundance matrix; recommended when
+                                 the MGS guide is outside its Bin_* directory
   -prepareMosaicLoci 0|1        If the catalogue is absent, create it beside the
                                  MGS file before extraction
                                  [default $default->{prepare_mosaic_loci}]

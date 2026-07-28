@@ -27,6 +27,11 @@ MATAFILER4 creates many large temporary files. A stable configuration should use
 
 Relevant flags include `-globalTmpDir`, `-nodeTmpDir`, `-nodeHDDspace`, `-reduceScratchUse`, `-rm_tmpdir_reads` and `-rm_tmpInput`.
 
+When a submitted job requests node-local scratch and `nodeTmpDir` is configured,
+the submission wrapper creates a job-specific directory below `nodeTmpDir`,
+exports it as `TMPDIR`, and runs the job from that directory. Generated submission
+scripts and scheduler logs remain in their persistent `LOGandSUB` locations.
+
 With `-reduceScratchUse 1`, cleanup is released only after final assembly
 publication, ContigStats, configured binning, and configured ConsSNP/variant
 work are either already complete or represented by successful terminal scheduler

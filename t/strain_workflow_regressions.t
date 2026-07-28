@@ -106,7 +106,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.56;/,
+like($strain, qr/my \$version = 0\.57;/,
 	'within-strain automatic mosaic preparation increments the workflow version');
 like($strain,
 	qr/\$mosaicLociFile = "\$MGSfile\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?getProgPaths\("MGS_mosaic_scr"\).*?-output.*?\$mosaicLociFile/s,

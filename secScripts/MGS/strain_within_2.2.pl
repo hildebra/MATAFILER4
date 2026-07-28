@@ -12,6 +12,7 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJo
 use Mods::IO_Tamoc_progs qw(getProgPaths );
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::TamocFunc qw ( getFileStr );
+use Mods::CatalogPaths qw(resolve_catalog_maps);
 use File::Path qw(make_path remove_tree);
 use File::Copy qw(copy);
 use File::Basename qw(basename dirname);
@@ -36,7 +37,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.31: keep dry runs non-destructive and wait for validated downstream analyses
 #.32: preserve summary headers and require validated network and treeWAS outputs
 #.33: summarize per-tree progress and make runtime configuration explicit
-my $version = 0.33;
+#.34: resolve catalog maps through LOGandSUB/inmap.txt
+my $version = 0.34;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;
@@ -495,8 +497,7 @@ exit(0); #don't do FST for now..
 #--------------------------------------------------------------
 #calculate FST between countries / cities..
 #depends on Alex's script for calculating FST
-my $mapF = `cat $GCd/LOGandSUB/GCmaps.inf`;
-#$mapF = $GCd."LOGandSUB/inmap.txt" if ($mapF eq "");
+my $mapF = resolve_catalog_maps($GCd);
 my ($hr1,$hr2) = readMapS($mapF,-1,"Country");
 my %map = %{$hr1}; my %AsGrps = %{$hr2};
 my $FSTbin = getProgPaths("FSTpy");

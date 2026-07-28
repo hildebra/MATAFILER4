@@ -649,6 +649,20 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	print O "echo \$HOSTNAME;\n";
 	print O "set -eo pipefail\n";
 	print O "ulimit -c 0;\n";
+	if ($tmpSpace > 0) {
+		my $nodeTmpDir = getProgPaths("nodeTmpDir", 0);
+		if (defined($nodeTmpDir) && $nodeTmpDir ne "") {
+			die "Unsafe nodeTmpDir setting: $nodeTmpDir\n"
+				if $nodeTmpDir =~ /[\r\n`;&|<>]/ || $nodeTmpDir =~ /\$\(/;
+			$nodeTmpDir =~ s/"/\\"/g;
+			print O "node_tmp_root=\"$nodeTmpDir\"\n";
+			print O "node_tmp_job_id=\"\${SLURM_JOB_ID:-\${JOB_ID:-\${LSB_JOBID:-\$\$}}}\"\n";
+			print O "node_tmp_workdir=\"\${node_tmp_root%/}/matafiler4.\${node_tmp_job_id}\"\n";
+			print O "mkdir -p \"\$node_tmp_workdir\"\n";
+			print O "export TMPDIR=\"\$node_tmp_workdir\"\n";
+			print O "cd \"\$node_tmp_workdir\"\n";
+		}
+	}
 	#any xtra commands (like module load perl?)
 	print O "$optHR->{xtraNodeCmds}\n";
 	#prevent core dump files

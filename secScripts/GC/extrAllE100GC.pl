@@ -11,6 +11,7 @@ sub MGintoCats;
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(readMapS systemW readClstrRev readFasta gzipopen getAssemblPath fileGZe);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
+use Mods::CatalogPaths qw(resolve_catalog_maps);
 
 my $smtBin = getProgPaths("samtools");#/g/bork5/hildebra/bin/samtools-1.2/samtools";
 my $rarBin = getProgPaths("rare");#
@@ -20,7 +21,7 @@ die "No input args \n" if (@ARGV < 1);
 my $GCd = $ARGV[0];
 my $tmpD = $ARGV[1];
 my $oldNameFolders = -1;#$ARGV[1];
-my $mapF = `cat $GCd/LOGandSUB/GCmaps.inf`;
+my $mapF = resolve_catalog_maps($GCd);
 print "Reading map(s): $mapF\n";
 my ($hrm,$hr2X) = readMapS($mapF,$oldNameFolders);
 my %map = %{$hrm};

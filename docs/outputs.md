@@ -189,6 +189,19 @@ The directory passed to `-GCd` stores the integrated gene catalog and its derive
 
 ### Core gene catalog files
 
+Every current catalog also stores two durable workflow descriptors under
+`LOGandSUB/`:
+
+| File | Meaning |
+| --- | --- |
+| `inmap.txt` | Map manifest. It contains one relocatable catalog-local `map.N.txt` path per line, so catalogs constructed from multiple mapping files retain the complete ordered set. Older single-map catalogs whose `inmap.txt` is itself a mapping table remain readable. |
+| `catalog.sha256` | Persistent catalog identity. The same SHA-256 value is reused by MGS and strain workflows, including after the complete catalog directory is moved. |
+
+`GCmaps.inf` is still emitted as a write-only, comma-separated compatibility and
+logging artifact, but current code does not read it. Existing catalogs that have
+`map.N.txt` copies but no `inmap.txt` are migrated automatically when their maps
+are next resolved.
+
 | File | Meaning |
 |---|---|
 | `compl.incompl.95.fna` | Nucleotide representation of non-redundant genes clustered at 95% identity. |
@@ -319,6 +332,7 @@ MGS.pl -outD <output_directory>
 | `RhclClust/*.faa` | Proteins found in each MGS, stored separately per MGS. |
 | `MAG.MB2.assStat.summary` | Summary of MetaBAT2 bins found in each sample. |
 | `Bin_SB/MAGvsGC.txt.gz` | Links MAGs, MGS, marker genes and other gene-catalog genes. |
+| `Bin_SB/Annotation/GTDBmg_MGS/` | MGS-specific SpecI annotation and abundance intermediates. These are kept inside the selected binner output so different MGS definitions cannot reuse one another's results. |
 
 Sparse runs can finish successfully without manufacturing cluster or tree data:
 

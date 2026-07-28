@@ -17,6 +17,7 @@ use threads ('yield',
 use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta);
 use Mods::Subm qw(qsubSystem emptyQsubOpt);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
+use Mods::CatalogPaths qw(resolve_catalog_maps);
 my $bts = getProgPaths("buildTree_scr");
 my $neiTree = getProgPaths("neighborTree");
 sub extractFNAFAA2genes;
@@ -43,8 +44,7 @@ print "Using tree $treeFile to create automatically outgroups\n" if ($treeFile n
 print "Only submission mode\n" if ($justSubmit);
 
 
-my $mapF = `cat $GCd/LOGandSUB/GCmaps.inf`;
-#$mapF = $GCd."LOGandSUB/inmap.txt" if ($mapF eq "");
+my $mapF = resolve_catalog_maps($GCd);
 my ($hr1,$hr2) = readMapS($mapF,-1);
 my %map = %{$hr1}; my %AsGrps = %{$hr2};
 my %AGlist;

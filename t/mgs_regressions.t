@@ -191,7 +191,7 @@ like($strain_source, qr/my \$tree_sample_separator = quotemeta\(\$SaSe\)/,
 like($strain_source, qr/\$nxtCmd \.= "-Hcores \$maxCores " if \$maxCores > 0;/,
 	'within-MGS analysis only forwards a configured positive heavy-core limit');
 my $strain2_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
-like($strain2_source, qr/my \$version = 0\.33;/,
+like($strain2_source, qr/my \$version = 0\.34;/,
 	'strain postprocessing output cleanup increments its workflow version');
 like($strain2_source,
 	qr/Strain postprocessing v\$version.*?Mode:.*?Inputs:.*?Paths:.*?Resources:.*?Metadata:.*?Association tests:/s,
@@ -253,7 +253,7 @@ my ($mgs_main, $mgs_subroutines) = split /# Subroutines\n/, $mgs_source, 2;
 ok(defined($mgs_subroutines), 'MGS has a distinct subroutine section after its main routing');
 unlike($mgs_main, qr/^sub \w+\s*\{/m,
 	'MGS keeps subroutine definitions below its main routing');
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.45;/,
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.46;/,
 	'MGS version includes the canonical Bin directory MAG report path');
 like($mgs_source,
 	qr/Starting MGS pipeline v\$MGSpipelineVersion.*?GetOptions\(.*?open LOG,.*?Configuration accepted; loading mapping and catalogue metadata.*?my \@checkpointInputs.*?getDirsPerAssmblGrp/s,
@@ -418,18 +418,26 @@ like($marker_source, qr/my \@MGSs = sort keys %\{\$gene2MGS\{\$mark\}\};\s+# Sha
 	'ambiguous markers are also excluded from taxonomy correction');
 
 my $cluster_wrapper_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'clusterMAGs.pl'));
-like($cluster_wrapper_source, qr/my \$mapF="";my \$GCd = \$inD;/,
-	'clusterMAGs initializes its gene-catalog directory for either map layout');
-like($cluster_wrapper_source, qr/else\{\s+\$mapF = "\$inD\/LOGandSUB\/inmap\.txt";/s,
-	'clusterMAGs has a reachable inmap fallback when GCmaps.inf is absent');
+like($cluster_wrapper_source, qr/my \$mapF = resolve_catalog_maps\(\$GCd\)/,
+	'clusterMAGs resolves every map through the catalog map manifest');
 unlike($cluster_wrapper_source, qr/else\{\s+die "can't find indir \$inD/s,
-	'clusterMAGs no longer aborts before its inmap fallback');
+	'clusterMAGs no longer aborts before its catalog map resolution');
 like($cluster_wrapper_source,
 	qr/if \(\$logDir eq ""\)\{\$logDir = \$outD\."LOGandSUB\/";\}.*?make_path\(\$outD, \$logDir\)/s,
 	'clusterMAGs defaults and creates its output and log directories');
 like($cluster_wrapper_source,
 	qr/if \(\$redo && -e .*?\) \{\s+unlink .*?or die/s,
 	'clusterMAGs redo removes its prior cluster with checked filesystem operations');
+like($mgs_source, qr/my \$mapF = resolve_catalog_maps\(\$GCd\)/,
+	'MGS resolves single and multiple maps through inmap.txt');
+like($mgs_source, qr/my \$specIoutDir = "\$annoDir\/\$\{COGdir\}_MGS"/,
+	'MGS-specific annotation output belongs to the selected Bin directory');
+like($mgs_source, qr/-outD \$specIoutDir/,
+	'MGS passes its binner-local output directory to the annotation worker');
+like($mgs_source, qr/\$tmpD \.= "\/" unless \$tmpD =~ m\{\/\$\}/,
+	'MGS normalizes a custom temporary directory before adding assembly groups');
+unlike($mgs_source, qr/Anno\/Tax\/\$\{COGdir\}_MGS/,
+	'MGS no longer owns active MGS annotation output in a shared catalog directory');
 unlike($mgs_source, qr/compl\.incompl\.95\.(?:fna|prot)/,
 	'MGS has no active catalog path pinned to identity 95');
 like($strain_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
@@ -472,7 +480,7 @@ like($build_tree_source, qr/sub geneFileStem.*?sprintf\("_%02X", ord\(\$1\)\)/s,
 	'compound locus names are encoded safely and deterministically for downstream filenames');
 
 my $gene_cat_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'geneCat.pl'));
-like($gene_cat_source, qr/my \$version = 0\.54;/,
+like($gene_cat_source, qr/my \$version = 0\.55;/,
 	'geneCat output cleanup increments its workflow version');
 like($gene_cat_source,
 	qr/GeneCat pipeline v\$version.*?Mode:.*?Inputs:.*?Paths:.*?Clustering:.*?Resources:.*?Batches:.*?Downstream:/s,
