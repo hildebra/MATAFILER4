@@ -30,6 +30,9 @@ unlike($strain, qr/\$mode\s*=\s*["']MGSall["']/,
 	'unlimited mode no longer enters the legacy QC-free MGSall mode');
 like($strain, qr/my %FILTER_DEFAULT = \(.*?sub usage \{.*?maximum_genes_per_sample/s,
 	'strain runtime defaults are reused by its help text');
+like($strain,
+	qr/prepare_mosaic_loci => 1.*?"prepareMosaicLoci=i".*?default \$default->\{prepare_mosaic_loci\}/s,
+	'automatic mosaic preparation is enabled and documented from a shared default');
 
 like($mgs,
 	qr/MGS_mosaic_scr.*?prepare_mosaic|MGS_mosaic_scr/s,

@@ -249,13 +249,12 @@ like($resort_source, qr/print O evalCurMGS\(""\) if \$curMGS ne "";/,
 like($resort_source, qr/compl\.incompl\.\$clusterID\.fna\.clstr\.idx/,
 	'gene-priority resorting uses the propagated catalog identity');
 my $mgs_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
-my $job_resources_source = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'JobResources.pm'));
 my ($mgs_main, $mgs_subroutines) = split /# Subroutines\n/, $mgs_source, 2;
 ok(defined($mgs_subroutines), 'MGS has a distinct subroutine section after its main routing');
 unlike($mgs_main, qr/^sub \w+\s*\{/m,
 	'MGS keeps subroutine definitions below its main routing');
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.43;/,
-	'MGS version includes catalogue-wide mosaic preprocessing');
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.45;/,
+	'MGS version includes the canonical Bin directory MAG report path');
 like($mgs_source,
 	qr/Starting MGS pipeline v\$MGSpipelineVersion.*?GetOptions\(.*?open LOG,.*?Configuration accepted; loading mapping and catalogue metadata.*?my \@checkpointInputs.*?getDirsPerAssmblGrp/s,
 	'MGS displays startup configuration before loading input metadata');
@@ -278,13 +277,13 @@ like($mgs_source,
 	'MGS Canopy filtering counts first and streams qualifying records in a second pass');
 unlike($mgs_source, qr/sub CanopyPrep.*?%can2gene/s,
 	'MGS Canopy filtering no longer stores every gene membership in memory');
-like($mgs_source,
-	qr/job_resources\.tsv.*?initialize_job_resource_log\(\$jobResourceLog\).*?timed_job_command/s,
-	'MGS initializes a dedicated resource log and wraps submitted jobs');
-like($job_resources_source,
-	qr/wall_seconds\\tmax_rss_kb.*?sub timed_job_command.*?\/usr\/bin\/time/s,
-	'the job wrapper records wall time and peak RSS');
+unlike($mgs_source,
+	qr/job_resources\.tsv|timed_job_command|\/usr\/bin\/time|resource_start_seconds/,
+	'MGS does not add inline resource-accounting wrappers to submitted commands');
 my $cluster_mags_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'clusterMAGs.pl'));
+my $markers_per_mgs_source = slurp(File::Spec->catfile(
+	$Bin, '..', 'secScripts', 'MGS', 'markersPerMGS.pl',
+));
 like($mgs_source,
 	qr/"perlClusterMAGs!" => \\\$perlClusterMAGs.*?if \(\$perlClusterMAGs\).*?getProgPaths\("clusterMGS_scr"\).*?else \{.*?getProgPaths\("clusterMAGs"\)/s,
 	'MGS exposes the Perl clustering implementation only through an explicit flag and defaults to the binary');
@@ -294,13 +293,19 @@ like($mgs_source,
 like($cluster_mags_source,
 	qr/"perlClusterMAGs!" => \\\$perlClusterMAGs.*?if \(!\$perlClusterMAGs\).*?systemW \$cmd.*?exit;.*?Entering the explicitly requested Perl clusterMAGs compatibility algorithm/s,
 	'the clusterMAGs wrapper enters its Perl algorithm only when explicitly requested');
-unlike($mgs_source . $cluster_mags_source,
-	qr/gzip -c \$outD\/MAGvsGC\.txt|rm \$outD\/MAGvsGC\.txt/,
-	'binary clustering routes do not recompress or remove an obsolete uncompressed MAG report');
+unlike($mgs_source . $cluster_mags_source . $markers_per_mgs_source,
+	qr/LOGandSUB\/MAGvsGC\.txt\.gz/,
+	'all MGS producers and consumers use the Bin directory MAG report path');
 my @compressed_report_checks =
-	($mgs_source . $cluster_mags_source) =~ /test -s \$(?:logDir|outD)\/MAGvsGC\.txt\.gz/g;
+	($mgs_source . $cluster_mags_source) =~ /test -s \$outD\/MAGvsGC\.txt\.gz/g;
 is(scalar(@compressed_report_checks), 2,
-	'both binary clustering routes validate the compressed MAG report emitted in the log directory');
+	'both binary clustering routes validate the compressed MAG report in the Bin directory');
+like($cluster_mags_source,
+	qr/open OX,">\$outD\/MAGvsGC\.txt".*?unless -s "\$outD\/MAGvsGC\.txt\.gz"/s,
+	'the Perl compatibility path also publishes and validates the canonical report');
+like($markers_per_mgs_source,
+	qr/\$MAGrep = "\$GC_bin_dir\/MAGvsGC\.txt\.gz"/,
+	'marker aggregation infers the canonical Bin directory report');
 like($cluster_mags_source,
 	qr/sub mapsWithoutEmptySamples.*?SMPL\.empty.*?next if exists \$empty\{\$sample\}/s,
 	'MAG clustering removes marked empty samples from its derived input maps');
@@ -346,10 +351,10 @@ like($mgs_source,
 	qr/\$cmdSI2 = "\$MMLscr -GCd \$GCd -cores \$numCore -MGset \$useGTDBmg -Binner \$BinnerShrt -binD \$outD/,
 	'MGS forwards its selected marker set and configured small-core count to marker abundance');
 like($mgs_source,
-	qr/qsubSystem\(\$logDir\."\/abundMGS_core\.sh".*?timed_job_command\('marker_mgs_abundance', \$cmdSI2, \$jobResourceLog\).*?\$numCore,"100G"/s,
+	qr/qsubSystem\(\$logDir\."\/abundMGS_core\.sh".*?\$cmdSI2,.*?\$numCore,"100G"/s,
 	'marker abundance retains a fixed total-memory request as core count changes');
 like($mgs_source,
-	qr/qsubSystem\(\$logDir\."\/abundMGS\.sh".*?timed_job_command\('speci_mgs_abundance', \$cmdSI, \$jobResourceLog\).*?1,/s,
+	qr/qsubSystem\(\$logDir\."\/abundMGS\.sh".*?\$cmdSI,.*?1,/s,
 	'MGS consistently runs specI abundance through the configured submission backend');
 unlike($mgs_source, qr/my \@files = glob \("\$GCd\/FMG\/tax\/\*tmp\.m8"\)/,
 	'MGS abundance scheduling is not gated by hard-coded FMG temporary alignments');

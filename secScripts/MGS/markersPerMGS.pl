@@ -48,7 +48,7 @@ $MGStaxF = "$outDir/GTDBTK.tax" if ($MGStaxF eq "");
 make_path($matrOutDir);
 
 
-if ($MAGrep eq ""){$MAGrep = "$GC_bin_dir/LOGandSUB/MAGvsGC.txt.gz"; print "Inferring MAGMGS file at $MAGrep\n";}
+if ($MAGrep eq ""){$MAGrep = "$GC_bin_dir/MAGvsGC.txt.gz"; print "Inferring MAGMGS file at $MAGrep\n";}
 #my $outFile = "$markerGdir/marker2MGS.txt";
 
 

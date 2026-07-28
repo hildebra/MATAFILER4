@@ -23,6 +23,7 @@
 #5.17: sort allFNA/allFAA records by locus before buildTree compresses them
 #5.18: use the allocated IQ-TREE thread count directly; avoid costly per-tree AUTO benchmarking
 #5.19: infer a strict validated backbone and place sparse samples afterwards
+#5.20: filter anomalous per-locus alignments before concatenation
 
 use warnings;
 use strict;
@@ -77,9 +78,11 @@ sub limitedWarn;
 sub prepareTemporaryBase;
 sub sortFastaForCompression;
 sub fastaCompressionSortKey;
+sub runPostAlignmentLocusQC;
+sub alignmentFileStem;
 
 my $doPhym= 0;
-my $version = 5.19;
+my $version = 5.20;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -164,6 +167,19 @@ my $strictBackboneFraction = $BACKBONE_DEFAULT{coverage_fraction};
 my $placementMinOverlap = $BACKBONE_DEFAULT{minimum_overlap};
 my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
 my $sampleQCFile = "";
+my %POST_ALIGNMENT_QC_DEFAULT = (
+	enabled => 1,
+	minimum_sequences => 3,
+	minimum_occupancy => 0.35,
+	relative_modified_z => 8.0,
+	minimum_loci_for_relative => 8,
+);
+my $postAlignmentLocusQC = $POST_ALIGNMENT_QC_DEFAULT{enabled};
+my $postAlignmentMinSequences = $POST_ALIGNMENT_QC_DEFAULT{minimum_sequences};
+my $postAlignmentMinOccupancy = $POST_ALIGNMENT_QC_DEFAULT{minimum_occupancy};
+my $postAlignmentRelativeZ = $POST_ALIGNMENT_QC_DEFAULT{relative_modified_z};
+my $postAlignmentMinLociRelative =
+	$POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative};
 
 
 #EDBUGGIN
@@ -235,6 +251,11 @@ GetOptions(
 	"strictBackboneFraction=f" => \$strictBackboneFraction,
 	"placementMinOverlap=i" => \$placementMinOverlap,
 	"strictBackboneMinSamples=i" => \$strictBackboneMinSamples,
+	"postAlignmentLocusQC=i" => \$postAlignmentLocusQC,
+	"postAlignmentMinSequences=i" => \$postAlignmentMinSequences,
+	"postAlignmentMinOccupancy=f" => \$postAlignmentMinOccupancy,
+	"postAlignmentRelativeZ=f" => \$postAlignmentRelativeZ,
+	"postAlignmentMinLociRelative=i" => \$postAlignmentMinLociRelative,
 	"runIQtree=i" => \$doIQTree,
 	"AutoModel=i" => \$treeAutoModel,
 	"iqFast=i" => \$iqFast, #fast qiTree mode
@@ -279,6 +300,21 @@ die "-strictBackboneMinSamples must be at least 3 "
 	if $strictBackboneMinSamples < 3;
 die "-sampleQC does not exist or is empty: $sampleQCFile\n"
 	if length($sampleQCFile) && !fileGZs($sampleQCFile);
+die "-postAlignmentLocusQC must be 0 or 1 "
+	."(default $POST_ALIGNMENT_QC_DEFAULT{enabled})\n"
+	unless $postAlignmentLocusQC == 0 || $postAlignmentLocusQC == 1;
+die "-postAlignmentMinSequences must be at least 2 "
+	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_sequences})\n"
+	if $postAlignmentMinSequences < 2;
+die "-postAlignmentMinOccupancy must be between 0 and 1 "
+	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_occupancy})\n"
+	if $postAlignmentMinOccupancy < 0 || $postAlignmentMinOccupancy > 1;
+die "-postAlignmentRelativeZ must be non-negative "
+	."(default $POST_ALIGNMENT_QC_DEFAULT{relative_modified_z})\n"
+	if $postAlignmentRelativeZ < 0;
+die "-postAlignmentMinLociRelative must be positive "
+	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative})\n"
+	if $postAlignmentMinLociRelative < 1;
 die "-smplSep must not be empty\n" if $smplSep eq "";
 eval { qr/$smplSep/ } or die "Invalid -smplSep regular expression '$smplSep': $@";
 for my $fraction_name_value (
@@ -387,6 +423,12 @@ print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
 	. ($postFilter || "<none>") . "; remove MSA=" . ($removeMSA ? "yes" : "no") . "\n";
 print "Filtering: per-gene length fraction=$ntFracGene; species NT fraction=$ntFrac; "
 	. "minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
+print "Post-alignment locus QC: enabled="
+	. ($postAlignmentLocusQC ? "yes" : "no")
+	. "; minimum sequences=$postAlignmentMinSequences"
+	. "; minimum occupancy=$postAlignmentMinOccupancy"
+	. "; relative modified-Z=$postAlignmentRelativeZ"
+	. "; minimum loci for relative QC=$postAlignmentMinLociRelative\n";
 print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
 	. "; sample QC=" . ($sampleQCFile || "<none>")
 	. "; coverage fraction=$strictBackboneFraction"
@@ -477,6 +519,7 @@ my @MSrm;
 my %FAA ; my %FNA ; my @geneList; my @geneListF;
 my $strictSplit;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
+my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $doMSA = 1;
 my $treesDone = treePresent($tOhr)
 	&& (!$calcNonSyn || treePresent($tOhrNSun))
@@ -485,6 +528,17 @@ if ($strictBackbone && $treesDone && !-s "$treeD/strict_backbone.samples.tsv") {
 	print "Recovery state: existing tree predates strict-backbone classification; "
 		."rebuilding tree outputs from the retained alignment\n";
 	safeRemoveTree($treeD, $outD);
+	make_path($treeD);
+	$treesDone = 0;
+}
+if ($postAlignmentLocusQC && $cogCats ne "" && $continue
+		&& ($treesDone || fileGZe($multAli))
+		&& !-s $postAlignmentQCReport) {
+	print "Recovery state: existing multi-locus alignment predates post-alignment "
+		."locus QC; rebuilding per-locus alignments and tree outputs\n";
+	safeRemoveTree($MsaD, $removeMSA ? $tmpD : $outD);
+	safeRemoveTree($treeD, $outD);
+	make_path($MsaD);
 	make_path($treeD);
 	$treesDone = 0;
 }
@@ -944,6 +998,26 @@ if ($isAligned){
 if ($synSummaryCount) {
 	print "Synonymous-site classification summary: $synSummaryCount alignment(s), "
 		. "$synSiteTotal synonymous-variable and $nonSynSiteTotal nonsynonymous-variable codon(s)\n";
+}
+
+if ($postAlignmentLocusQC && $cogCats ne "") {
+	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
+	if (@{$primaryAlignments}) {
+		my $kept = runPostAlignmentLocusQC(
+			$primaryAlignments,
+			$useAA4tree ? 'aa' : 'nt',
+			$postAlignmentQCReport,
+		);
+		my %keepPath = map { $_ => 1 } @{$kept};
+		my %keepStem = map { alignmentFileStem($_) => 1 } @{$kept};
+		if ($useAA4tree) {
+			@MSA_AA = grep { $keepPath{$_} } @MSA_AA;
+		} else {
+			@MSAs = grep { $keepPath{$_} } @MSAs;
+			@MSAsSyn = grep { $keepStem{alignmentFileStem($_)} } @MSAsSyn;
+			@MSAsNonSyn = grep { $keepStem{alignmentFileStem($_)} } @MSAsNonSyn;
+		}
+	}
 }
 
 #die "@MSA_AA\n\n";
@@ -2746,6 +2820,75 @@ sub shellQuote{
 	$value = "" unless defined $value;
 	$value =~ s/'/'"'"'/g;
 	return "'$value'";
+}
+
+sub alignmentFileStem {
+	my ($path) = @_;
+	my $stem = basename($path);
+	$stem =~ s/\.gz$//;
+	$stem =~ s/\.(?:syn|nonsyn)\.fna$//;
+	$stem =~ s/\.(?:fna|faa)$//;
+	return $stem;
+}
+
+sub runPostAlignmentLocusQC {
+	my ($alignments, $sequenceType, $reportFile) = @_;
+	die "Post-alignment locus QC requires at least one alignment\n"
+		unless @{$alignments};
+	make_path(dirname($reportFile)) unless -d dirname($reportFile);
+	my ($manifestFH, $manifestFile) = tempfile(
+		"post-alignment-loci-XXXXXX",
+		DIR => $tmpD,
+		UNLINK => 0,
+	);
+	print {$manifestFH} "$_\n" for @{$alignments};
+	close $manifestFH or die "Cannot close locus-QC manifest $manifestFile: $!\n";
+	my ($keepFH, $keepFile) = tempfile(
+		"post-alignment-keep-XXXXXX",
+		DIR => $tmpD,
+		UNLINK => 0,
+	);
+	close $keepFH or die "Cannot close locus-QC keep file $keepFile: $!\n";
+
+	my $qcScript = getProgPaths("postAlignmentLocusQC_scr");
+	my $command = join(" ",
+		$qcScript,
+		"-manifest", shellQuote($manifestFile),
+		"-report", shellQuote($reportFile),
+		"-keep", shellQuote($keepFile),
+		"-sequenceType", $sequenceType,
+		"-minSequences", $postAlignmentMinSequences,
+		"-minOccupancy", $postAlignmentMinOccupancy,
+		"-relativeModifiedZ", $postAlignmentRelativeZ,
+		"-minLociForRelative", $postAlignmentMinLociRelative,
+	) . "\n";
+	my $ok = eval {
+		systemW($command);
+		1;
+	};
+	my $error = $@;
+	unlink $manifestFile if -e $manifestFile;
+	if (!$ok) {
+		unlink $keepFile if -e $keepFile;
+		die $error || "Post-alignment locus QC failed\n";
+	}
+	die "Post-alignment locus QC did not produce its report: $reportFile\n"
+		unless -s $reportFile;
+
+	open my $keepRead, '<', $keepFile
+		or die "Cannot open locus-QC keep file $keepFile: $!\n";
+	my @kept;
+	while (my $line = <$keepRead>) {
+		$line =~ s/[\r\n]+$//;
+		push @kept, $line if length($line);
+	}
+	close $keepRead or die "Cannot close locus-QC keep file $keepFile: $!\n";
+	unlink $keepFile or die "Cannot remove locus-QC keep file $keepFile: $!\n";
+	die "Post-alignment locus QC rejected all ".scalar(@{$alignments})
+		." loci; see $reportFile\n" unless @kept;
+	print "Post-alignment locus QC retained ".scalar(@kept)."/"
+		.scalar(@{$alignments})." loci; report: $reportFile\n";
+	return \@kept;
 }
 
 sub prepareTemporaryBase {

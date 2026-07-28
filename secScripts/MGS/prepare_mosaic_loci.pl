@@ -17,6 +17,7 @@ use Mods::MosaicLoci qw(
 	select_outgroup_panel
 );
 
+my $VERSION = '0.10';
 my %DEFAULT = (
 	cluster_id => 95,
 	threads => 4,
@@ -148,7 +149,7 @@ my ($outgroups, $outgroup_genes) = select_outgroup_panel(
 write_confirmed_catalogue($output, $confirmed, $outgroups, $outgroup_genes, \%DEFAULT);
 write_rejections("$output.rejected.tsv", $rejected);
 
-print "Mosaic preprocessing complete: ".scalar(@{$candidates})." candidate pair(s), "
+print "Mosaic preprocessing v$VERSION complete: ".scalar(@{$candidates})." candidate pair(s), "
 	.scalar(@{$confirmed})." confirmed, ".scalar(keys %{$outgroups})
 	." MGS with catalogue-derived outgroups\n";
 print "Candidate table: $candidate_output\nConfirmed catalogue: $output\n";

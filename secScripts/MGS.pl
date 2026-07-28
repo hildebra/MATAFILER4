@@ -41,8 +41,10 @@ use Cwd qw(abs_path);
 #.41: use the clusterMAGs binary directly unless the Perl compatibility path is requested
 #.42: consume the clusterMAGs binary's compressed MAG report without recompressing it
 #.43: precompute catalogue-validated mosaic loci and consolidated outgroups
+#.44: remove inline timing wrappers; rely on scheduler sacct accounting
+#.45: standardize MAGvsGC.txt.gz in the Bin_<binner> directory
 
-my $MGSpipelineVersion = 0.43;
+my $MGSpipelineVersion = 0.45;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -53,7 +55,6 @@ use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readMG_LCA);
 use Mods::Binning qw (getBinSubdirName createBin2 createBinCtgs runMetaBat runCheckM runCheckM2 createBinFAA readMGS MB2assignedBinIds);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
-use Mods::JobResources qw(initialize_job_resource_log timed_job_command);
 
 sub getGoodMBstats;
 sub printL;
@@ -188,7 +189,6 @@ my $GTDBtaxSto = "$chkpDir/GTDBTK.stone";
 my $BinExtrSto = "$chkpDir/BinExtr.stone";
 my $noMGSSto = "$chkpDir/no-usable-mgs.stone";
 my $noMGSReport = "$outD/NO_MGS.txt";
-my $jobResourceLog = "$logDir/job_resources.tsv";
 
 #main guide files for MGS
 my $finalClusters2 = "$outD/$BinnerShrt.clusters";
@@ -202,7 +202,6 @@ if (-e "$inD/LOGandSUB/inmap.txt" || -e "$inD/LOGandSUB/GCmaps.inf"){ #this is t
 } 
 
 make_path($tmpD, $outD, $logDir, $annoDir, $chkpDir);
-initialize_job_resource_log($jobResourceLog);
 
 
 
@@ -224,7 +223,6 @@ printL "Mode: " . ($doSubmit ? "submit" : "dry run") . "; scheduler: $QSBopt{qmo
 printL "Legacy parameter mode: " . ($legacyV ? "yes" : "no") . "\n";
 printL "Inputs: gene catalog=$inD; map=$mapF\n";
 printL "Paths: output=$outD; temporary=$tmpD; log=$logDir/pipeline.log\n";
-printL "Job resource log: $jobResourceLog (wall seconds and peak RSS in KiB)\n";
 printL "Clustering: binner=$BinnerShrt; marker set=$useGTDBmg; identity=$clusterID%; weighted scores="
 	. ($useWeightedMGSscores ? "yes" : "no") . "\n";
 printL "MAG clustering engine: "
@@ -409,10 +407,11 @@ foreach my $Doo (@DoosD){ #this loops ensures Binner predictions exist for each 
 	$postCmd .= "rm -rf $tmpD2\n";
 	#print "$MBout\n";
 	#die "$bef$MBcmd$postCmd";
-	my $timedBinCommand = timed_job_command(
-		'per_sample_binning', $bef.$MBcmd.$postCmd, $jobResourceLog,
+	my ($jobName2, $tmpCmd) = qsubSystem(
+		$paths[-1]."LOGandSUB/${BinnerShrt}_bin.sh",
+		$bef.$MBcmd.$postCmd,
+		$numCore,int($memG)."G",$jobName,"","",1,[],\%QSBopt,
 	);
-	my ($jobName2, $tmpCmd) = qsubSystem($paths[-1]."LOGandSUB/${BinnerShrt}_bin.sh",$timedBinCommand,$numCore,int($memG)."G",$jobName,"","",1,[],\%QSBopt);
 	$cnt++;
 	push (@jobs, $jobName2);
 	#die $paths[-1]."LOGandSUB/MB2_bin.sh";
@@ -669,7 +668,7 @@ if (!-e $GTDBtaxF || !-e"$annoDir/gtdbtk.summary.tsv" || !_checkpoint_valid($GTD
 	#changed mem from 370 to 100 with GTDB-TK 2.1.0
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "150G"; 
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/GTDB.sh",
-		timed_job_command('gtdb_taxonomy', $cmd, $jobResourceLog),
+		$cmd,
 		$numCore,int($memGTDB)."G","GTDB_MGS","","",1,[],\%QSBopt);
 	$QSBopt{tmpSpace} =$tmpSHDD;
 	push(@jobs2wait,$jobName2);
@@ -720,7 +719,7 @@ if (!-s "$annoDir/kraken2.LCA" || !-s "$annoDir/kraken2.tax"){
 		my $cmd =  "$kr2taxScr $finalClustersFilt $GCd $annoDir/kraken2\n";# unless (-e "$finalClusters2.LCA");
 		my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0";
 		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/krak2MGS.sh",
-			timed_job_command('kraken_taxonomy', $cmd, $jobResourceLog),
+			$cmd,
 			1,int(200/1)."G","KR2_MGS","","",1,[],\%QSBopt) ;
 		$QSBopt{tmpSpace} =$tmpSHDD;
 		push @kraken_jobs, $jobName2 if $jobName2;
@@ -739,7 +738,7 @@ if (0 && !-e "$finalClusters2.matL0.txt"){ #deprecated, use specI based annotati
 #	systemW $cmd;
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/MGSabund.sh",
-		timed_job_command('legacy_mgs_abundance', $cmd, $jobResourceLog),
+		$cmd,
 		1,int(100)."G","AB1_MGS","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
 }
@@ -773,7 +772,7 @@ unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/spec
 	# could execute a large job directly on the launcher node.
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0";
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS.sh",
-		timed_job_command('speci_mgs_abundance', $cmdSI, $jobResourceLog),
+		$cmdSI,
 		1,int(200/1)."G","AB2_MGS","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
 	push @annotation_jobs, $jobName2 if $jobName2;
@@ -798,7 +797,7 @@ unless (_checkpoint_valid($ABmgsSton2) && -s "$outD/Annotation/Abundance/MGS.mat
 	# qsubSystem's memory argument is emitted as total memory by the Slurm
 	# backend; keep the intended 100 GiB request independent of thread count.
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS_core.sh",
-		timed_job_command('marker_mgs_abundance', $cmdSI2, $jobResourceLog),
+		$cmdSI2,
 		$numCore,"100G","AB_MGS_core","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
 	push @marker_jobs, $jobName2 if $jobName2;
@@ -828,7 +827,7 @@ if (!$betweenTreeSkipped && !-s $treePdf) {
 		$vizCmd .= "test -s $treePdf\n";
 		my ($vizDep, $vizSubmitCmd) = qsubSystem(
 			$logDir."/interMGSphyloViz.sh",
-			timed_job_command('between_mgs_visualization', $vizCmd, $jobResourceLog), 1, "20G",
+			$vizCmd, 1, "20G",
 			"MGSphyloViz", $treedep, "", 1, [], \%QSBopt,
 		);
 		printL "Between-MGS visualization submitted as job $vizDep"
@@ -904,7 +903,7 @@ printL "Preparing within-MGS strain analysis in $outD/within_phylo/ "
 	. "($canCore cores, ${memUsage}G launcher memory, $NsubJobs subjob partition(s))\n";
 my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "20"; #needs some tmp space for on the fly creations.. 
 my ($jobName2, $tmpCmd) = qsubSystem($logDir."/strainMGS.sh",
-	timed_job_command('strain_launcher', $ph2Cmd, $jobResourceLog),
+	$ph2Cmd,
 	1,int($memUsage/1)."G","strainKickoff",$treedep,"",1,[],\%QSBopt) ;
 $QSBopt{tmpSpace} =$tmpSHDD;
 
@@ -1239,7 +1238,7 @@ sub CanopyPrep{
 		my $req_CMmem = 200;
 		my $cmC = runCheckM($binCanDir,$ChkMevalF,"$nodeTmpD/cmCANO/",$numCore,0);
 		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/checkM.cano0.sh",
-			timed_job_command('canopy_checkm1', $cmC, $jobResourceLog),
+			$cmC,
 			$numCore,int($req_CMmem)."G","ChMcano","","",1,[],\%QSBopt);
 		push(@jobs2wait,$jobName2);
 	}
@@ -1249,7 +1248,7 @@ sub CanopyPrep{
 		my $req_CMmem = 50;	my $cmC = "";
 		$cmC .= runCheckM2($binCanDir,$ChkMevalF,"$nodeTmpD/cmCANO/",$canCore,0) ;	
 		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/checkM2.cano0.sh",
-			timed_job_command('canopy_checkm2', $cmC, $jobResourceLog),
+			$cmC,
 			$canCore,int($req_CMmem)."G","ChM2cano","","",1,[],\%QSBopt);
 		push(@jobs2wait,$jobName2);
 	}

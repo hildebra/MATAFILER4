@@ -162,7 +162,8 @@ END {
 #.53: report per-tree SLURM MaxRSS, OOM events, and requested-memory headroom
 #.54: locus-sort first-generation per-MGS FNA/FAA files before compression
 #.55: separate the gene cap from QC and add mosaic, breakpoint, abundance, and placement QC
-my $version = 0.55;
+#.56: prepare a confirmed mosaic catalogue on demand for legacy direct invocations
+my $version = 0.56;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -198,6 +199,7 @@ my %FILTER_DEFAULT = (
 	abundance_minimum_fold => 1 / 3,
 	abundance_maximum_fold => 3,
 	abundance_maximum_modified_z => 3.5,
+	prepare_mosaic_loci => 1,
 );
 my $multiGeneSmplMax = $FILTER_DEFAULT{multi_gene_sample_max};
 my $conspGeneSmplMax = $FILTER_DEFAULT{conspecific_gene_sample_max};
@@ -213,6 +215,7 @@ my $maxNGenes = $FILTER_DEFAULT{maximum_genes_per_sample};
 my $noGeneLimit = 0;
 my $disableQC = 0;
 my $mosaicLociFile = "";
+my $prepareMosaicLoci = $FILTER_DEFAULT{prepare_mosaic_loci};
 my $breakpointGeneFlank = $FILTER_DEFAULT{breakpoint_gene_flank};
 my $abundanceMinimumLoci = $FILTER_DEFAULT{abundance_minimum_loci};
 my $abundanceMinimumFold = $FILTER_DEFAULT{abundance_minimum_fold};
@@ -304,6 +307,7 @@ GetOptions(
 	"noGeneLimit=i"  => \$noGeneLimit, #remove only the gene-count cap; QC remains enabled
 	"disableQC=i"    => \$disableQC, #expert/debug option: disable biological QC independently of the gene cap
 	"mosaicLoci=s"   => \$mosaicLociFile, #catalogue-wide confirmed mosaic/outgroup table
+	"prepareMosaicLoci=i" => \$prepareMosaicLoci, #create the default catalogue if absent
 	"flushEvery=i"   => \$appendWriteTrigger, #samples buffered before per-MGS records are flushed
 	
 	"forceSNPcalls=i"  => \$forceVCF2FNA,
@@ -385,13 +389,14 @@ die "-recalcTrees must be 0 or 1\n" unless $recalcTrees == 0 || $recalcTrees == 
 die "-noGeneLimit and -disableQC must each be 0 or 1\n"
 	unless ($noGeneLimit == 0 || $noGeneLimit == 1)
 		&& ($disableQC == 0 || $disableQC == 1);
+die "-prepareMosaicLoci must be 0 or 1 "
+	."(default $FILTER_DEFAULT{prepare_mosaic_loci})\n"
+	unless $prepareMosaicLoci == 0 || $prepareMosaicLoci == 1;
 die "-breakpointGeneFlank must be non-negative\n" unless $breakpointGeneFlank >= 0;
 die "Abundance-pattern settings are invalid\n"
 	unless $abundanceMinimumLoci > 0 && $abundanceMinimumFold > 0
 		&& $abundanceMaximumFold >= $abundanceMinimumFold
 		&& $abundanceMaximumModifiedZ >= 0;
-die "Confirmed mosaic catalogue is missing or empty: $mosaicLociFile\n"
-	if length($mosaicLociFile) && !-s $mosaicLociFile;
 die "-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData\n"
 	if $recalcTrees && ($repairCAT || $deepRepair || $redoSubmissionData);
 die "-recalcTrees must be launched by the main strainWithin process, not a split worker\n"
@@ -415,6 +420,41 @@ my $queueMode = $subMode;
 $queueMode = "bash" if !$doSubmit && $queueMode eq "";
 my $QSBoptHR = emptyQsubOpt($doSubmit,"",$queueMode);
 my $MGSfileOri = $MGSfile; #save for later..
+
+if (length($MGSfile)) {
+	my $explicitMosaicCatalogue = length($mosaicLociFile);
+	$mosaicLociFile = "$MGSfile.mosaic_loci.$clusterID.confirmed.tsv"
+		if !$explicitMosaicCatalogue && $prepareMosaicLoci;
+	if (length($mosaicLociFile) && !-s $mosaicLociFile) {
+		if (!$prepareMosaicLoci) {
+			die "Confirmed mosaic catalogue is missing or empty: $mosaicLociFile\n"
+				if $explicitMosaicCatalogue;
+			$mosaicLociFile = "";
+		} elsif ($subJob) {
+			die "Confirmed mosaic catalogue is unavailable to split worker $subJob: "
+				."$mosaicLociFile. Run the main strain_within.pl process first.\n";
+		} else {
+			my $mosaicScript = getProgPaths("MGS_mosaic_scr");
+			my $mosaicThreads = $maxCores > 0 ? $maxCores : $numCores;
+			$mosaicThreads = 1 if $mosaicThreads < 1;
+			my $mosaicCommand = join(" ",
+				$mosaicScript,
+				"-GCd", shellQuote($GCd),
+				"-MGS", shellQuote($MGSfile),
+				"-clusterID", $clusterID,
+				"-threads", $mosaicThreads,
+				"-output", shellQuote($mosaicLociFile),
+			);
+			$mosaicCommand .= " -tmpD ".shellQuote($locTmpDir1)
+				if length($locTmpDir1) && -d $locTmpDir1;
+			print "Confirmed mosaic catalogue is absent; preparing "
+				."$mosaicLociFile before strain extraction\n";
+			systemW("$mosaicCommand\n");
+			die "Mosaic preprocessing completed without a nonempty catalogue: "
+				."$mosaicLociFile\n" unless -s $mosaicLociFile;
+		}
+	}
+}
 
 my $bindir;my $outD;my $scratchD;my $preConDir;my $LOGDIR;my $mapF;
 my %map; my %AsGrps;my @samples;#map and assembly groups
@@ -573,6 +613,7 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
 			'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
 			'-noGeneLimit', $noGeneLimit, '-disableQC', $disableQC,
+			'-prepareMosaicLoci', $prepareMosaicLoci,
 			'-breakpointGeneFlank', $breakpointGeneFlank,
 			'-abundanceMinLoci', $abundanceMinimumLoci,
 			'-abundanceMinFold', $abundanceMinimumFold,
@@ -3128,6 +3169,9 @@ Gene selection and biological QC:
   -minBadLociPSmpl INT          Minimum bad loci before deferring a sample
                                  [default $default->{minimum_bad_loci_for_sample_skip}]
   -mosaicLoci FILE              Confirmed catalogue-wide mosaic/outgroup table
+  -prepareMosaicLoci 0|1        If the catalogue is absent, create it beside the
+                                 MGS file before extraction
+                                 [default $default->{prepare_mosaic_loci}]
   -breakpointGeneFlank INT      Mask genes this many bases around mapping breakpoints
                                  [default $default->{breakpoint_gene_flank}]
   -abundanceMinLoci INT         Loci required for robust abundance-pattern filtering

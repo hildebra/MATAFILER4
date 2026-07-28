@@ -15,8 +15,20 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.19;/,
-	'strict-backbone placement increments the workflow version');
+like($source, qr/my \$version = 5\.20;/,
+	'post-alignment locus QC increments the workflow version');
+like($source,
+	qr/post_alignment_locus_qc\.tsv.*?sub runPostAlignmentLocusQC.*?postAlignmentLocusQC_scr.*?-manifest.*?-report.*?-keep/s,
+	'buildTree invokes external locus QC before concatenation and retains its report');
+like($source,
+	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 8\.0/s,
+	'post-alignment QC is enabled with permissive metagenomic defaults');
+like($source,
+	qr/existing multi-locus alignment predates post-alignment.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
+	'a legacy concatenated checkpoint is rebuilt once when its locus-QC audit is absent');
+like($source,
+	qr/\@MSAs = grep \{ \$keepPath\{\$_\} \} \@MSAs.*?\@MSAsSyn = grep \{ \$keepStem\{alignmentFileStem\(\$_\)\} \} \@MSAsSyn/s,
+	'primary, synonymous, and nonsynonymous alignment sets stay locus-consistent');
 like($source,
 	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => \\\$iqLegacy/s,
 	'buildTree exposes memory-capped pathogen and legacy IQ-TREE modes');

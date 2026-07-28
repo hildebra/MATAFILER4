@@ -38,6 +38,7 @@ breakpoints_scr	perl [MFLRDir]/secScripts/assemblies/breakpoints.pl
 compareHybridAssemblies_scr	perl [MFLRDir]/secScripts/assemblies/compare_hybrid_assemblies.pl
 sizFilt_scr	perl [MFLRDir]/secScripts/assemblies/sizeFilterFas.pl
 buildTree_scr	perl [MFLRDir]/secScripts/phylo/buildTree5.pl	env:MF4phylo
+postAlignmentLocusQC_scr	perl [MFLRDir]/secScripts/phylo/post_alignment_locus_qc.pl
 sizSplit_scr	[MFLRDir]/secScripts/assemblies/splitFNAbyLength.pl
 contigKgdSplit_scr	[MFLRDir]/secScripts/assemblies/sortCtgKingdom.pl
 contigKgdSplit_scr2	[MFLRDir]/secScripts/assemblies/sortCtgKingdom2.pl

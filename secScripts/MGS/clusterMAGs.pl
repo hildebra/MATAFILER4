@@ -29,8 +29,9 @@ sub MGuniqStats;
 #.23: remove samples marked SMPL.empty from maps passed to the clustering binary
 #.24: require an explicit flag before entering the Perl compatibility algorithm
 #.25: use the compressed MAG report emitted directly by the clustering binary
+#.26: publish MAGvsGC.txt.gz consistently in the Bin_<binner> directory
 
-my $version = 0.25;
+my $version = 0.26;
 
 my $startTime = time ;
 
@@ -176,7 +177,7 @@ my $canoFlag = ""; $canoFlag = "-canopyDir $camoIn " if ($camoIn ne "");
 #-FILEtag SBx -MGtag MM2 -geneCatIdx C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/compl.incompl.95.fna.clstr.idx -MGdir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/MGs/ -outDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/out/ -map C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.0.txt,C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.1.txt -canopyDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/Cano/
 $cmd .= "$clMAGsBin -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.$clusterID.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
 $cmd .= "-outDir $outD -map $clusteringMapF $canoFlag -MGfile $GCd/${COGdir}.subset.cats\n";
-$cmd .= "test -s $logDir/MAGvsGC.txt.gz\n";
+$cmd .= "test -s $outD/MAGvsGC.txt.gz\n";
 
 if (!$perlClusterMAGs) {
 	print "$cmd\n";
@@ -904,14 +905,14 @@ sub countStats{
 sub summarizeMAGcontent{
 	my ($hr) =  @_;
 
-	print "Writing detailed MAG->MGS and MAG->genecat report ($logDir/MAGvsGC.txt.gz)..\n";
+	print "Writing detailed MAG->MGS and MAG->genecat report ($outD/MAGvsGC.txt.gz)..\n";
 
 	my %MAG2Bin = %{$hr};
 	my $MAGreprep = "";
 	$MAGreprep .= "Name\tCompleteness\tContamination\tCheckMmodel\tOrigin\n";
 	my $MAG2MGScnt=0;
 	#create file that reports bin stats and genes (almost all bins)
-	open OX,">$logDir/MAGvsGC.txt";
+	open OX,">$outD/MAGvsGC.txt";
 	#HEADER
 	print OX "MAG\tMGS\tRepresentative4MGS\tCompleteness\tContamination\tLCAcompleteness\t";
 	foreach my $COG (keys %uniCOGs){ print OX $COG."\t";}
@@ -963,7 +964,13 @@ sub summarizeMAGcontent{
 		}
 	}
 	close OX;
-	system "rm -f $logDir/MAGvsGC.txt.gz; gzip $logDir/MAGvsGC.txt";
+	my $pigz = getProgPaths("pigz");
+	unlink "$outD/MAGvsGC.txt.gz"
+		or die "Cannot replace $outD/MAGvsGC.txt.gz: $!\n"
+		if -e "$outD/MAGvsGC.txt.gz";
+	systemW "$pigz -f $outD/MAGvsGC.txt\n";
+	die "MAG report compression did not produce $outD/MAGvsGC.txt.gz\n"
+		unless -s "$outD/MAGvsGC.txt.gz";
 	print "Found $MAG2MGScnt MAGs with MGS assignment\n";
 	return $MAGreprep;
 }

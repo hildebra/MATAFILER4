@@ -318,7 +318,7 @@ MGS.pl -outD <output_directory>
 | `between_phylo/phylo/IQtree_allsites.pdf` | Abundance-annotated rendering, generated after the MGS abundance matrix is available. |
 | `RhclClust/*.faa` | Proteins found in each MGS, stored separately per MGS. |
 | `MAG.MB2.assStat.summary` | Summary of MetaBAT2 bins found in each sample. |
-| `Bin_SB/LOGandSUB/MAGvsGC.txt.gz` | Links MAGs, MGS, marker genes and other gene-catalog genes. |
+| `Bin_SB/MAGvsGC.txt.gz` | Links MAGs, MGS, marker genes and other gene-catalog genes. |
 
 Sparse runs can finish successfully without manufacturing cluster or tree data:
 
@@ -353,7 +353,7 @@ At MGS level, features ending in `?` are taxa inferred through marker-gene LCA a
 
 ### MAG/MGS gene content
 
-`Bin_SB/LOGandSUB/MAGvsGC.txt.gz` links MAGs and MGS to their gene content. Important columns include:
+`Bin_SB/MAGvsGC.txt.gz` links MAGs and MGS to their gene content. Important columns include:
 
 | Column | Meaning |
 |---|---|
@@ -396,7 +396,7 @@ and related run-level folders. The precise file names depend on flags such as `-
 | What functions are present? | `<gene_catalog>/Anno/Func/*L0.txt` and broader `L*.txt` summaries. |
 | What taxa are present? | Current MGS abundance matrices under `Bin_SB/Annotation/Abundance/`, or selected `Anno/Tax/` matrices. |
 | Which MGS are present? | `MGS.matL7.txt` and MGS taxonomy files such as `GTDBTK.tax`. |
-| Which genes belong to a MAG or MGS? | `Bin_SB/LOGandSUB/MAGvsGC.txt.gz` and `MB2.clusters.ext.can.Rhcl`. |
+| Which genes belong to a MAG or MGS? | `Bin_SB/MAGvsGC.txt.gz` and `MB2.clusters.ext.can.Rhcl`. |
 | What is the taxonomy of MGS? | `GTDBTK.tax`, `kraken2.LCA`, and MGS abundance feature names. |
 | What are the proteins in an MGS? | `Binning/RhclClust/*.faa` or equivalent `Bin_SB` MGS protein folders. |
 

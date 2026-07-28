@@ -493,7 +493,7 @@ sub getRepresentBinsPerFamily{ #needs some work
 
 #extract 1 reference genome per MGS, choosing the default rep and extracting its contigs from original assembly file
 sub createBinCtgs{
-	#$binDctg,$hrM,"$logDir/MAGvsGC.txt.gz
+	#$binDctg,$hrM,"$binDir/MAGvsGC.txt.gz
 	my ($outD,$hrMap,$guideF,$perFam,$BinShrt) = @_;
 	die "Output directory is required\n" unless defined($outD) && length($outD);
 	die "Mapping data are required\n" unless ref($hrMap) eq 'HASH';

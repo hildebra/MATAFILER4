@@ -11,8 +11,8 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 |---|---:|---|
 | `MATAF4.pl` | `4.11` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
-| `MGS.pl` | `0.28` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `buildTree5.pl` | `5.06` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
+| `buildTree5.pl` | `5.20` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -442,7 +442,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The uploaded source reports version `5.06`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.20`.
 
 ### General options
 
@@ -490,6 +490,11 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-runFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-runVeryFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-treeShrink` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-postAlignmentLocusQC` | integer | `1` | stable | Run external locus-comparability QC before multi-locus concatenation. |
+| `-postAlignmentMinSequences` | integer | `3` | stable | Minimum comparable sequences required for an aligned locus. |
+| `-postAlignmentMinOccupancy` | float | `0.35` | stable | Minimum fraction of unambiguous alignment cells; permissive for metagenomic loci. |
+| `-postAlignmentRelativeZ` | float | `8.0` | stable | Modified-Z threshold for cross-locus consensus-divergence outliers. |
+| `-postAlignmentMinLociRelative` | integer | `8` | stable | Minimum locus count before applying cross-locus robust outlier QC. |
 | `-runIQtree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-AutoModel` | integer | `1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-iqFast` | integer | `0` | stable | fast qiTree mode |
