@@ -486,8 +486,8 @@ if ($ph1flag  || !-e "$outD/$BinnerShrt.clusters" ){
 			$mapF, \@emptySamples, "$logDir/nonempty_maps",
 		);
 		my $canoIncl = $useCanopies ? "-canopyDir $canopyF" : "";
-		$cmd = "$clusterBinary -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.$clusterID.fna.clstr.idx -LCAdir $GCd/$COGdir -outDir $outD -map $clusteringMapF $canoIncl -MGfile $GCd/$COGdir.subset.cats 1>&2 > $logDir/clusterMGS_scr.log\n";
-		$cmd .= "test -s $logDir/MAGvsGC.txt.gz\n";
+		$cmd = "$clusterBinary -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.$clusterID.fna.clstr.idx -log $logDir/clusterMGS_scr.log -LCAdir $GCd/$COGdir -outDir $outD -map $clusteringMapF $canoIncl -MGfile $GCd/$COGdir.subset.cats \n";
+		$cmd .= "test -s $outD/MAGvsGC.txt.gz\n";
 		printL "Clustering MAGs into MGS directly with the clusterMAGs binary; detailed output: $logDir/clusterMGS_scr.log\n";
 	}
 	systemW $cmd;
@@ -679,11 +679,11 @@ if (!$binExtractionValid){
 	if ($doBinCtgsPerFam){
 	#do I really need per family genomes??
 		print "Also creating family-wise ref genomes\n";
-		createBinCtgs($binDctgFam,$hrM,"$logDir/MAGvsGC.txt.gz",1,$BinnerShrt);
+		createBinCtgs($binDctgFam,$hrM,"$outD/MAGvsGC.txt.gz",1,$BinnerShrt);
 		#die;
 	}
 
-	createBinCtgs($binDctg,$hrM,"$logDir/MAGvsGC.txt.gz",0,$BinnerShrt);
+	createBinCtgs($binDctg,$hrM,"$outD/MAGvsGC.txt.gz",0,$BinnerShrt);
 	my @geneBinFiles = grep { -f $_ } glob("$binD/*");
 	my @contigBinFiles = grep { -f $_ } glob("$binDctg/*");
 	my @familyBinFiles = $doBinCtgsPerFam ? grep { -f $_ } glob("$binDctgFam/*") : ();
