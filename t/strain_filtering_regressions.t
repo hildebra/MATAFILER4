@@ -34,15 +34,38 @@ like($strain,
 	qr/prepare_mosaic_loci => 1.*?"prepareMosaicLoci=i".*?default \$default->\{prepare_mosaic_loci\}/s,
 	'automatic mosaic preparation is enabled and documented from a shared default');
 
-like($mgs,
-	qr/MGS_mosaic_scr.*?prepare_mosaic|MGS_mosaic_scr/s,
-	'MGS resolves the catalogue-wide mosaic preprocessing step');
-like($mgs,
-	qr/\$mosaicScr .*?-output \$mosaicCatalogue.*?\$strain1scr .*?-mosaicLoci \$mosaicCatalogue/s,
-	'MGS confirms mosaics before passing their catalogue to strain filtering');
+like($strain,
+	qr/getProgPaths\("MGS_mosaic_scr"\).*?qsubSystem\(/s,
+	'strain workflow resolves and submits catalogue-wide mosaic preprocessing');
+like($strain,
+	qr/qsubSystem\(.*?"MosaicMGS".*?qsubSystemJobAlive\(\[\$mosaicDependency\].*?unless -s \$mosaicLociFile/s,
+	'strain workflow waits for and validates Mosaic before loading its catalogue');
 like($mosaic,
 	qr/discover_mosaic_candidates.*?minimap2.*?confirm_mosaic_candidates.*?select_outgroup_panel/s,
 	'mosaic preprocessing creates candidates, aligns catalogue-wide, confirms pairs, and consolidates outgroups');
+like($mosaic, qr/minimap_preset => 'asm20'.*?write_summary/s,
+	'mosaic preprocessing uses an outgroup-sensitive alignment preset and records stage diagnostics');
+like($mosaic,
+	qr/select_interesting_records.*?Aligning .*?interesting genes together in one minimap2 run.*?'-c', '-D'.*?'-N', \$DEFAULT\{max_secondary_hits\}.*?read_paf_stream/s,
+	'mosaic preprocessing bulk-aligns only genes capable of mosaic or outgroup comparison');
+like($mosaic,
+	qr/open my \$minimap_fh, '-\|', \@command.*?read_paf_stream.*?raw_alignments/s,
+	'mosaic preprocessing streams and filters minimap output without materializing a PAF file');
+like($mosaic,
+	qr/Mosaic preprocessing summary.*?Unique MGS-outgroup links:.*?Proposed outgroup gene links:.*?write_outgroup_table/s,
+	'mosaic preprocessing prints useful final statistics and writes explicit outgroup proposals');
+like($strain,
+	qr/my \$mosaicDirectory = dirname\(\$mosaicLociFile\).*?prepare_mosaic_loci\.log.*?prepare_mosaic_loci\.sh/s,
+	'strain stores Mosaic catalogues, logs, and submission scripts together');
+like($strain,
+	qr/my \$mosaicThreads = \$maxCores > 0 \? \$maxCores : \$numCores.*?qsubSystem\(.*?\$mosaicThreads.*?"\$\{mosaicMemGb\}G".*?"MosaicMGS"/s,
+	'the submitted Mosaic job receives maximum strain cores and dedicated memory');
+like($mgs,
+	qr/"prepareMosaicLoci=i" => \\\$prepareMosaicLoci.*?\$ph2Cmd \.= "-mosaicLoci \$mosaicCatalogue " if \$prepareMosaicLoci/s,
+	'MGS can omit mosaic preprocessing and the mosaic catalogue from strain analysis');
+like($strain,
+	qr/Mosaic checks disabled; same-COG catalogue clusters will remain separate and tree-based outgroups remain available/,
+	'strain analysis reports its safe no-mosaic behavior explicitly');
 
 like($tree, qr/use Mods::StrainPlacement.*?split_strict_backbone/s,
 	'buildTree5 uses the tested strict-backbone splitter');

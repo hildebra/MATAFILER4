@@ -45,8 +45,12 @@ use Cwd qw(abs_path);
 #.44: remove inline timing wrappers; rely on scheduler sacct accounting
 #.45: standardize MAGvsGC.txt.gz in the Bin_<binner> directory
 #.46: use the catalog map manifest/identity and isolate binner-specific annotations
+#.47: build the between-MGS tree from the selected FMG or predefined GTDB markers
+#.48: keep mosaic catalogues, diagnostics, and logs in the binner-local mosaic directory
+#.49: bulk-align only genes with mosaic or outgroup comparison potential
+#.50: allow strain analysis to run without mosaic preprocessing
 
-my $MGSpipelineVersion = 0.46;
+my $MGSpipelineVersion = 0.51;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -86,6 +90,7 @@ my $perlClusterMAGs = 0; #compatibility/debug implementation; binary is the defa
 my $rewrTAX = 0;
 my $rewrClusterMAGs = 0; #redo clusterMAGs analysis
 my $doStrains = 0;
+my $prepareMosaicLoci = 1;
 my $tmpD = ""; 
 my $canopyF = "";
 my $nodeTmpD = getProgPaths("nodeTmpDir");
@@ -119,6 +124,7 @@ GetOptions(
 	"wait4stoneTimeout=i" => \$wait4stoneTimeout, #maximum wait in seconds; 0 retains unlimited waiting
 	"mem=i" => \$memG,					#memory used for intensive jobs
 	"strains=i" => \$doStrains,			#1: calc instra species strain phylogenies. Default: 0
+	"prepareMosaicLoci=i" => \$prepareMosaicLoci, #1: confirm mosaic loci/outgroups before strain analysis; 0: keep seed clusters separate
 	"useCheckM2=i" => \$useCheckM2,		#CheckM2 default qual checking of MAGs/MGS
 	"useCheckM1=i" => \$useCheckM1,		#CheckM default qual checking of MAGs/MGS
 	"binSpeciesMG=i" => \$binSpeciesMG,	#0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5
@@ -138,6 +144,8 @@ die "-wait4stoneTimeout must be zero or a positive number of seconds\n" if $wait
 die "Core and memory requests must be positive\n" unless $numCore > 0 && $canCore > 0 && $memG > 0;
 die "-binSpeciesMG must be one of 1..5\n" unless $binSpeciesMG >= 1 && $binSpeciesMG <= 5;
 die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterID <= 100;
+die "-prepareMosaicLoci must be 0 or 1\n"
+	unless $prepareMosaicLoci == 0 || $prepareMosaicLoci == 1;
 
 #die "$useCheckM2 $useCheckM1\n";
 
@@ -236,6 +244,7 @@ printL "Quality: " . ($useCheckM2 ? "CheckM2" : "CheckM1")
 	. "; ignore incomplete MAGs=" . ($ignoIncomplMAGs ? "yes" : "no") . "\n";
 printL "Resources: standard cores=$numCore; bottleneck cores=$canCore; binner memory=${memG}G\n";
 printL "Optional analyses: strains=" . ($doStrains ? "yes" : "no")
+	. "; mosaic checks=" . ($prepareMosaicLoci ? "yes" : "no")
 	. "; family genomes=" . ($doBinCtgsPerFam ? "yes" : "no") . "\n";
 printL "Requested rebuilds: clustering=" . ($rewrClusterMAGs ? "yes" : "no")
 	. "; taxonomy=" . ($rewrTAX ? "yes" : "no") . "\n";
@@ -570,7 +579,7 @@ printL "---------------------------------------------------------------------\n"
 _touch_checkpoint($st1ston, 'stage-1', $finalClustersFilt) unless _checkpoint_valid($st1ston);
 
 # Start the between-MGS tree as soon as the newly published MGS core set exists.
-# Tree inference depends only on FMG proteins and MGS membership.  Its
+# Tree inference depends only on the selected marker proteins and MGS membership.  Its
 # abundance-annotated visualization is submitted later, after MGS abundance is
 # available, so taxonomy and abundance can run concurrently with the tree.
 my $treeMem = "120";
@@ -578,7 +587,7 @@ if ($numSamples > 2000){ #scale with the number of assembly groups
 	$treeMem = "200";
 }
 my $phyloBetween = getProgPaths("MGSPhyloBetween_scr");
-my $baseTreeCmd = "$phyloBetween -GCd $GCd -MGS $finalClustersFilt -mem $treeMem -c $canCore -MSAprogram 4 -fast 0 ";
+my $baseTreeCmd = "$phyloBetween -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -mem $treeMem -c $canCore -MSAprogram 4 -fast 0 ";
 my $wait4tree = 2;
 my $outDphylo = "$outD/between_phylo/";
 my $iniTree = "$outDphylo/phylo/IQtree_allsites.treefile";
@@ -593,10 +602,14 @@ if ($coreMGSCount < 3) {
 } elsif (!-s $iniTree) {
 	printL "Preparing between-MGS phylogeny immediately after MGS creation in $outDphylo\n";
 
-	my $refTreeMsg = "\n################\n# If you want to include custom reference genomes, use\n# $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]\n################\n";
-	print $refTreeMsg;
-	$refTreeMsg = "#If you want to include custom reference genomes, use $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]";
-	$ph1Cmd .= " -xtraMsg \"$refTreeMsg\";";
+	if ($useGTDBmg eq "FMG") {
+		my $refTreeMsg = "\n################\n# If you want to include custom reference genomes, use\n# $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]\n################\n";
+		print $refTreeMsg;
+		$refTreeMsg = "#If you want to include custom reference genomes, use $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]";
+		$ph1Cmd .= " -xtraMsg \"$refTreeMsg\";";
+	} else {
+		printL "Custom reference genomes are unavailable for predefined GTDB-marker trees; use -MGset FMG for FMG extraction from references\n";
+	}
 
 	if (!$doSubmit) {
 		print "Dry run: between-MGS launcher was not executed.\n";
@@ -875,7 +888,6 @@ if ($wait4stone ne ""){
 #die "XX\n";
 
 my $strain1scr = getProgPaths("MGS_strain1_scr");
-my $mosaicScr = getProgPaths("MGS_mosaic_scr");
 my $memUsage = 30; #in Gb
 my $NsubJobs = 0 ; #split job up?
 my $preCompCons = 0;
@@ -892,24 +904,29 @@ if ($numSamples > 1500){#scale with the number of assembly groups
 #my $prunTree = "$outD/between_phylo/prunned.nwk";
 #
 #my $ph2Cmd = "$strain1scr $GCd $finalClustersFilt.mgs $canCore $iniTree 0 1\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
-my $mosaicCatalogue = "$annoDir/mosaic_loci.confirmed.tsv";
-my $ph2Cmd = "mkdir -p $outD/within_phylo/ || exit 65\n";
-$ph2Cmd .= "$mosaicScr -GCd $GCd -MGS $finalClustersFilt -clusterID $clusterID "
-	."-threads $canCore -output $mosaicCatalogue || exit 65\n";
-$ph2Cmd .= "test -s $mosaicCatalogue || exit 65\n";
-$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ -mosaicLoci $mosaicCatalogue ";
+my $mosaicDir = "$outD/mosaic/";
+my $mosaicCatalogue = "$mosaicDir/$BinnerShrt.clusters.core.mosaic_loci.$clusterID.confirmed.tsv";
+my $ph2Cmd = "mkdir -p "._shell_quote("$outD/within_phylo/")." || exit 65\n";
+$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -mosaicMemGb $memG -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ -prepareMosaicLoci $prepareMosaicLoci ";
+$ph2Cmd .= "-mosaicLoci $mosaicCatalogue " if $prepareMosaicLoci;
 $ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree || $treedep ne "";
 $ph2Cmd .= "\n";
 
 $ph2Cmd .= "#consider adapting further options: \n#-rmMSA 0 -presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -nodeTmp [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
 $ph2Cmd .= "#-minSNPCallQual 20 -GenesPerSpecies 0.1 -GeneLengthMin 0.5 -skipIndels 0 -minSNPDepth 2 -SNPdepthFilterScale 0.1 -SNPindelRangeFilt 5 -SNPadaptiveQual 0.0";
 #systemW $ph2Cmd;
+my $launcherCores = 1;
+my $launcherMemory = $memUsage;
 printL "Preparing within-MGS strain analysis in $outD/within_phylo/ "
-	. "($canCore cores, ${memUsage}G launcher memory, $NsubJobs subjob partition(s))\n";
+	. "($launcherCores cores, ${launcherMemory}G launcher memory, "
+	. ($prepareMosaicLoci
+		? "mosaic checks delegated to a ${canCore}-core prerequisite job"
+		: "mosaic checks disabled")
+	. ", $NsubJobs subjob partition(s))\n";
 my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "20"; #needs some tmp space for on the fly creations.. 
 my ($jobName2, $tmpCmd) = qsubSystem($logDir."/strainMGS.sh",
 	$ph2Cmd,
-	1,int($memUsage/1)."G","strainKickoff",$treedep,"",1,[],\%QSBopt) ;
+	$launcherCores,int($launcherMemory)."G","strainKickoff",$treedep,"",1,[],\%QSBopt) ;
 $QSBopt{tmpSpace} =$tmpSHDD;
 
 #get phylogenies intra-species.. this requires a lot of power and best called from big cluster..

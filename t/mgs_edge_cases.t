@@ -99,4 +99,37 @@ like(
 );
 unlike($warnings, qr/uninitialized/i, 'ineligible families do not trigger undefined-value warnings');
 
+# The between-MGS worker must consume the predefined GTDB catalog files when
+# requested, without falling back to an FMG subset. Two marker-bearing MGS are
+# enough to exercise selection and then reach the intentional sparse-tree skip.
+my $gtdb_gc = File::Spec->catdir($tmp, 'GTDB-GC');
+my $gtdb_out = File::Spec->catdir($tmp, 'GTDB-tree');
+make_path($gtdb_gc);
+write_file(
+	File::Spec->catfile($gtdb_gc, 'GTDBmg.subset.cats'),
+	"bac120_marker\t2\tgeneG1,geneG2\n",
+);
+my $gtdb_mgs = File::Spec->catfile($tmp, 'gtdb.core');
+write_file($gtdb_mgs, "MGS1\tgeneG1\nMGS2\tgeneG2\n");
+my $between = File::Spec->catfile(
+	$Bin, '..', 'secScripts', 'MGS', 'phylo_MGS_between.pl',
+);
+my $between_err = gensym;
+my $between_pid = open3(
+	undef, my $between_out, $between_err,
+	$^X, '-I'.File::Spec->catdir($Bin, '..'),
+	$between, '-GCd', $gtdb_gc, '-MGS', $gtdb_mgs,
+	'-MGset', 'GTDB', '-outD', $gtdb_out,
+);
+my $between_stdout = do { local $/; <$between_out> // '' };
+my $between_stderr = do { local $/; <$between_err> // '' };
+waitpid($between_pid, 0);
+is($? >> 8, 0, 'between-MGS worker accepts predefined GTDB marker genes')
+	or diag($between_stdout, $between_stderr);
+like(
+	$between_stdout,
+	qr/Found 2 GTDB marker genes.*?SKIPPED=too_few_marker_bearing_MGS:2/s,
+	'GTDB selection reaches the expected sparse-tree skip using GTDB marker-bearing MGS',
+);
+
 done_testing;

@@ -1,11 +1,12 @@
 #!/usr/bin/perl
-#script to get a set of marker genes from each FMG (40 MG), extract them, and build phylo tree
+#script to get predefined FMG or GTDB marker genes from each MGS and build a phylogenetic tree
 #relatively simple, since can use genes directly from gene cat, no need to get SNP called genes
-#can also include reference genomes to include in tree
+#FMG trees can also include reference genomes
 # v0.2 (2026-07-22): handle sparse MGS sets and exclude ambiguous paralogs deterministically.
 # v0.3 (2026-07-27): decouple tree inference from abundance-dependent visualization and
 #                    harden the multi-phyla phylogeny defaults.
 # v0.4 (2026-07-28): normalize custom output paths.
+# v0.5 (2026-07-28): support predefined GTDB markers in addition to FMGs.
 #perl /hpc-home/hildebra/dev/Perl/MATAF3//secScripts/MGS/phylo_MGS_between.pl -GCd /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1/ -MGS /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//MB2.clusters.ext.can.Rhcl.filt -c 10 -outD /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//customRefs/ -refGenos '/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta'
 
 use warnings;
@@ -22,7 +23,7 @@ use Mods::phyloTools qw(calcDisPos2 getGenoGenes getFMG readFMGdir);
 use Mods::geneCat qw(calculate_spearman_correlation read_matrix correlation checkAntiOcc);
 
 if (@ARGV < 2){
-	die "Not enough input args: use \n./phylo_MGS.pl -GCd [path to GC] -MGS [MGS file]\n";
+	die "Not enough input args: use \n./phylo_MGS_between.pl -GCd [path to GC] -MGS [MGS file] -MGset GTDB|FMG\n";
 }
 
 my $wait4job = 0;#wait till tree is done? only neccessary in pipeline...
@@ -37,6 +38,7 @@ my $MSAprog = 4; #4:MUSCLE5, 2:mafft
 my $xtraMessageInSH = "";
 my $mem = 120; #memory request in GB
 my $visualize = 1;
+my $markerSet = "FMG";
 #$btout = $ARGV[3] if (@ARGV > 3);
 #$wait4job = $ARGV[4] if (@ARGV > 4);
 
@@ -54,6 +56,7 @@ GetOptions(
 	"xtraMsg=s" => \$xtraMessageInSH,
 	"mem=i" => \$mem,
 	"visualize=i" => \$visualize,
+	"MGset=s" => \$markerSet,
 ) or die "Invalid phylo_MGS_between.pl options\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
@@ -63,6 +66,10 @@ die "MGS file missing or empty: $MGSfile\n" unless -s $MGSfile;
 die "Core and memory requests must be positive\n" unless $numCores > 0 && $mem > 0;
 die "Unsupported MSA program: $MSAprog\n" unless $MSAprog == 2 || $MSAprog == 4;
 die "-visualize must be 0 or 1\n" unless $visualize == 0 || $visualize == 1;
+die "-MGset option has to be \"GTDB\" or \"FMG\"\n"
+	unless $markerSet eq "GTDB" || $markerSet eq "FMG";
+die "-refGenos currently supports only -MGset FMG; GTDB trees use the predefined gene-catalog markers\n"
+	if $markerSet eq "GTDB" && $addRefGenos ne "";
 $GCd = abs_path($GCd);
 $MGSfile = abs_path($MGSfile);
 $btout = "$GCd/MGS/phylo/" if ($btout eq "");#main output dir
@@ -105,11 +112,15 @@ if ($addRefGenos ne ""){
 	}
 }
 
-# Between-MGS phylogeny intentionally always uses the FMG marker set, independent
-# of the marker set used for MGS construction.
-#read FMG designation
+# Select the predefined marker designation and protein files created with the
+# gene catalog. GTDB is exposed as "GTDB" to users but stored under GTDBmg.
+my $markerTag = $markerSet eq "GTDB" ? "GTDBmg" : "FMG";
+my $markerSubset = "$GCd/$markerTag.subset.cats";
+my $markerProteinGlob = "$GCd/$markerTag/*.faa";
+
+#read marker designation
 my %FMG2COG;
-open I,"<$GCd/FMG.subset.cats" or die "Can't open $GCd/FMG.subset.cats\n";
+open I,"<$markerSubset" or die "Can't open $markerSubset\n";
 while (<I>){
 	chomp;
 	my @spl = split /\t/;
@@ -120,7 +131,7 @@ while (<I>){
 }
 close I;
 
-print "Found ". scalar(keys(%FMG2COG)) ." FMG genes in total gene cat\n";
+print "Found ". scalar(keys(%FMG2COG)) ." $markerSet marker genes in total gene cat\n";
 
 #read MGS genes
 my $mfdbl=0;
@@ -170,7 +181,7 @@ if ($mgs_with_fmg < 3) {
 	exit 0;
 }
 my $bts = getProgPaths("buildTree_scr");
-print "Retained $usable_fmg unambiguous FMG genes in $mgs_with_fmg MGS (".
+print "Retained $usable_fmg unambiguous $markerSet marker genes in $mgs_with_fmg MGS (".
 	int(10*$usable_fmg/$mgs_with_fmg)/10 ." on average); excluded $ambiguous_cells MGS-marker cells with $mfdbl extra copies\n";
 unlink "$btout/SKIPPED.txt" or die "Cannot remove stale $btout/SKIPPED.txt: $!\n"
 	if -e "$btout/SKIPPED.txt";
@@ -245,8 +256,8 @@ if (0){
 }
 
 
-print "reading FMG ref genes..";
-my $hr = readFasta("$GCd/FMG/COG*.faa"); %FAAfmg = (%FAAfmg,%{$hr});
+print "reading $markerSet marker genes..";
+my $hr = readFasta($markerProteinGlob); %FAAfmg = (%FAAfmg,%{$hr});
 print "done\n";
 
 make_path($btout) unless -d $btout;
@@ -303,7 +314,7 @@ if ($visualize) {
 }
 
 #handle submission
-my $scrNm = "btwFMGtree";
+my $scrNm = "btw${markerSet}tree";
 $scrNm = "btwCusFMGTree" if ($addRefGenos ne "");
 my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
 my ($dep,$qcmd) = qsubSystem($btout.$scrNm.".sh",$cmd,$numCores,int($mem)."G",$scrNm,"","",1,[],$QSBoptHR);

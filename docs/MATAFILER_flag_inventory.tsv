@@ -209,6 +209,7 @@ MGS.pl	0.32	General options	-wait4stone	string	wait4stone		stable	wait for these
 MGS.pl	0.32	General options	-wait4stoneTimeout	integer	wait4stoneTimeout	86400	stable	maximum wait in seconds; zero waits indefinitely
 MGS.pl	0.32	General options	-mem	integer	memG	150	stable	memory used for intensive jobs
 MGS.pl	0.32	General options	-strains	integer	doStrains	0	stable	1: calc instra species strain phylogenies. Default: 0
+MGS.pl	0.51	General options	-prepareMosaicLoci	integer	prepareMosaicLoci	1	stable	1: have strain_within submit, await, and validate Mosaic as a prerequisite before strain analysis; 0: skip Mosaic preprocessing and keep same-NOG seed clusters separate
 MGS.pl	0.32	General options	-useCheckM2	integer	useCheckM2	0	stable	CheckM2 default qual checking of MAGs/MGS
 MGS.pl	0.32	General options	-useCheckM1	integer	useCheckM1	1	stable	CheckM default qual checking of MAGs/MGS
 MGS.pl	0.32	General options	-binSpeciesMG	integer	binSpeciesMG	2	stable	0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5

@@ -166,7 +166,11 @@ END {
 #.55: separate the gene cap from QC and add mosaic, breakpoint, abundance, and placement QC
 #.56: prepare a confirmed mosaic catalogue on demand for legacy direct invocations
 #.57: use persistent catalog identity, map manifests, and explicit abundance paths
-my $version = 0.57;
+#.58: store automatic mosaic catalogues and logs in the binner-local mosaic directory
+#.59: bulk-align only genes with mosaic or outgroup comparison potential
+#.60: validate and report unique MGS-outgroup connections and their gene links
+#.61: submit missing mosaic preprocessing as a prerequisite job and wait for it
+my $version = 0.61;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -236,6 +240,7 @@ my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
 my $selfMemGb = 10;
+my $mosaicMemGb = 150;
 my $redoSubmissionData = 0;
 my $deepRepair = 0;
 my $rmMSA = 1; #argument passed to buildTree5.pl 
@@ -294,6 +299,7 @@ GetOptions(
 	"nodeTmp|tmpD=s" => \$locTmpDir1, 
 	"submit=i"       => \$doSubmit,
 	"selfMemGb=i"    => \$selfMemGb,
+	"mosaicMemGb=i"  => \$mosaicMemGb,
 	"onlySubmit=i"   => \$onlySubmit, #submit only jobs, or also recreate input fna/faa files? (can take days)
 	"reSubmit=i"     => \$reSubmit, #for all MGS: resubmit tree phylo building
 	"recalcTrees=i"  => \$recalcTrees, #delete tree outputs and rebuild from existing per-MGS inputs
@@ -373,7 +379,7 @@ die "-MGset must be GTDB or FMG\n" unless $useGTDBmg eq "GTDB" || $useGTDBmg eq 
 die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterID <= 100;
 die "Invalid subjob settings\n" if $maxSubJob < 0 || $subJob < 0 || ($maxSubJob && $subJob >= $maxSubJob);
 die "Core, memory, and precompute settings must be non-negative\n"
-	if $maxCores == 0 || $selfMemGb <= 0 || $preCompCons < 0;
+	if $maxCores == 0 || $selfMemGb <= 0 || $mosaicMemGb <= 0 || $preCompCons < 0;
 die "-minBadLociPSmpl must be positive\n" unless $minBadLociForSampleSkip > 0;
 die "-MGSminGenesPSmpl and -presortGenes must be positive\n"
 	unless $MGStoolowGsThr > 0 && $presortGenes > 0;
@@ -436,8 +442,14 @@ my $MGSfileOri = $MGSfile; #save for later..
 
 if (length($MGSfile)) {
 	my $explicitMosaicCatalogue = length($mosaicLociFile);
-	$mosaicLociFile = "$MGSfile.mosaic_loci.$clusterID.confirmed.tsv"
-		if !$explicitMosaicCatalogue && $prepareMosaicLoci;
+	if (!$explicitMosaicCatalogue && $prepareMosaicLoci) {
+		my $mosaicDirectory = File::Spec->catdir(dirname($MGSfile), 'mosaic');
+		make_path($mosaicDirectory);
+		$mosaicLociFile = File::Spec->catfile(
+			$mosaicDirectory,
+			basename($MGSfile).".mosaic_loci.$clusterID.confirmed.tsv",
+		);
+	}
 	if (length($mosaicLociFile) && !-s $mosaicLociFile) {
 		if (!$prepareMosaicLoci) {
 			die "Confirmed mosaic catalogue is missing or empty: $mosaicLociFile\n"
@@ -447,6 +459,8 @@ if (length($MGSfile)) {
 			die "Confirmed mosaic catalogue is unavailable to split worker $subJob: "
 				."$mosaicLociFile. Run the main strain_within.pl process first.\n";
 		} else {
+			my $mosaicDirectory = dirname($mosaicLociFile);
+			make_path($mosaicDirectory);
 			my $mosaicScript = getProgPaths("MGS_mosaic_scr");
 			my $mosaicThreads = $maxCores > 0 ? $maxCores : $numCores;
 			$mosaicThreads = 1 if $mosaicThreads < 1;
@@ -460,11 +474,34 @@ if (length($MGSfile)) {
 			);
 			$mosaicCommand .= " -tmpD ".shellQuote($locTmpDir1)
 				if length($locTmpDir1) && -d $locTmpDir1;
-			print "Confirmed mosaic catalogue is absent; preparing "
-				."$mosaicLociFile before strain extraction\n";
-			systemW("$mosaicCommand\n");
+			my $mosaicLog = File::Spec->catfile(
+				$mosaicDirectory, 'prepare_mosaic_loci.log',
+			);
+			$mosaicCommand .= " > ".shellQuote($mosaicLog)." 2>&1\n";
+			$mosaicCommand .= "test -s ".shellQuote($mosaicLociFile)."\n";
+			my $mosaicJobScript = File::Spec->catfile(
+				$mosaicDirectory, 'prepare_mosaic_loci.sh',
+			);
+			print "Confirmed mosaic catalogue is absent; submitting prerequisite "
+				."Mosaic job with $mosaicThreads cores and ${mosaicMemGb}G memory\n";
+			my ($mosaicDependency, $mosaicSubmissionCommand) = qsubSystem(
+				$mosaicJobScript, $mosaicCommand, $mosaicThreads,
+				"${mosaicMemGb}G", "MosaicMGS", "", "", 1, [], $QSBoptHR,
+			);
+			unless ($doSubmit) {
+				$completionMessage = "Mosaic prerequisite script was generated at "
+					."$mosaicJobScript; submission was disabled.";
+				print "Mosaic prerequisite was not submitted because -submit 0; "
+					."stopping before Mosaic-dependent strain extraction.\n";
+				exit 0;
+			}
+			print "Waiting for prerequisite Mosaic job to finish before loading "
+				."loci/outgroups or starting extraction workers\n";
+			qsubSystemJobAlive([$mosaicDependency], $QSBoptHR);
 			die "Mosaic preprocessing completed without a nonempty catalogue: "
-				."$mosaicLociFile\n" unless -s $mosaicLociFile;
+				."$mosaicLociFile. Inspect $mosaicLog and "
+				."$mosaicJobScript.etxt\n" unless -s $mosaicLociFile;
+			print "Prerequisite Mosaic catalogue is ready: $mosaicLociFile\n";
 		}
 	}
 }
@@ -483,8 +520,31 @@ if (length $mosaicLociFile) {
 	%PreferredOutgroupGene = %{$outgroup_genes};
 	print "Loaded ".scalar(keys %ConfirmedMosaicPairs)." confirmed mosaic pair(s) and "
 		.scalar(keys %PreferredOutgroup)." consolidated outgroup choice(s) from $mosaicLociFile\n";
+	my $connection_number = 0;
+	my $gene_link_number = 0;
+	for my $source (sort keys %PreferredOutgroup) {
+		my @queries = sort keys %{$PreferredOutgroupGene{$source} || {}};
+		$gene_link_number += scalar(@queries);
+		$connection_number++;
+		next if $connection_number > 10;
+		my @preview_queries = @queries
+			? @queries[0 .. ($#queries < 5 ? $#queries : 5)]
+			: ();
+		my @preview = map { $_.'->'.$PreferredOutgroupGene{$source}{$_} }
+			@preview_queries;
+		print "  Mosaic outgroup $source -> $PreferredOutgroup{$source}: "
+			.scalar(@queries)." proposed gene link(s)"
+			.(@preview ? " (".join(', ', @preview)
+				.(scalar(@queries) > @preview ? ", ..." : "").")" : "")."\n";
+	}
+	print "Mosaic outgroup proposals loaded: ".scalar(keys %PreferredOutgroup)
+		." unique MGS-to-MGS connection(s), $gene_link_number gene-to-gene link(s)";
+	print "; detailed previews limited to 10 connections" if $connection_number > 10;
+	print "\n";
 } else {
-	warn "No confirmed mosaic catalogue supplied; same-COG catalogue clusters will remain separate\n";
+	warn($prepareMosaicLoci
+		? "No confirmed mosaic catalogue supplied; same-COG catalogue clusters will remain separate\n"
+		: "Mosaic checks disabled; same-COG catalogue clusters will remain separate and tree-based outgroups remain available\n");
 }
 
 my $gene2taxF; #where to find info what genes (gene cat)
@@ -3187,8 +3247,11 @@ Gene selection and biological QC:
   -MGSabundance FILE            Explicit MGS abundance matrix; recommended when
                                  the MGS guide is outside its Bin_* directory
   -prepareMosaicLoci 0|1        If the catalogue is absent, create it beside the
-                                 MGS file before extraction
+                                 MGS file in a submitted prerequisite job, wait,
+                                 and validate it before extraction
                                  [default $default->{prepare_mosaic_loci}]
+  -mosaicMemGb INT              Total memory requested for that prerequisite job
+                                 [default 150]
   -breakpointGeneFlank INT      Mask genes this many bases around mapping breakpoints
                                  [default $default->{breakpoint_gene_flank}]
   -abundanceMinLoci INT         Loci required for robust abundance-pattern filtering

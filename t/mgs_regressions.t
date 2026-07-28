@@ -167,10 +167,11 @@ ok(!-e "$missing_kraken_prefix.LCA" && !-e "$missing_kraken_prefix.tax",
 	'taxPerMGS does not manufacture taxonomy outputs without Kraken input');
 
 my $between_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'phylo_MGS_between.pl'));
-like($between_source, qr/open I,"<\$GCd\/FMG\.subset\.cats"/,
-	'between-MGS phylogeny intentionally remains tied to the FMG marker set');
 like($between_source,
-	qr/my \$first = delete \$MGSFMG.*?\$ambiguousMGSFMG.*?Retained \$usable_fmg unambiguous FMG genes/s,
+	qr/"MGset=s" => \\\$markerSet.*?my \$markerTag = \$markerSet eq "GTDB" \? "GTDBmg" : "FMG".*?open I,"<\$markerSubset"/s,
+	'between-MGS phylogeny selects predefined GTDB or FMG catalog markers');
+like($between_source,
+	qr/my \$first = delete \$MGSFMG.*?\$ambiguousMGSFMG.*?Retained \$usable_fmg unambiguous \$markerSet marker genes/s,
 	'between-MGS phylogeny excludes ambiguous paralogous marker cells instead of choosing the first copy');
 like($between_source, qr/foreach my \$mg \(sort keys %MGSFMG\).*?foreach my \$cg \(sort keys %catT\)/s,
 	'between-MGS FASTA and category records are emitted deterministically');
@@ -253,8 +254,8 @@ my ($mgs_main, $mgs_subroutines) = split /# Subroutines\n/, $mgs_source, 2;
 ok(defined($mgs_subroutines), 'MGS has a distinct subroutine section after its main routing');
 unlike($mgs_main, qr/^sub \w+\s*\{/m,
 	'MGS keeps subroutine definitions below its main routing');
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.46;/,
-	'MGS version includes the canonical Bin directory MAG report path');
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.51;/,
+	'MGS version includes marker-set-aware between-MGS phylogeny');
 like($mgs_source,
 	qr/Starting MGS pipeline v\$MGSpipelineVersion.*?GetOptions\(.*?open LOG,.*?Configuration accepted; loading mapping and catalogue metadata.*?my \@checkpointInputs.*?getDirsPerAssmblGrp/s,
 	'MGS displays startup configuration before loading input metadata');
@@ -316,8 +317,9 @@ like($mgs_source,
 	'MGS starts with a structured runtime configuration header');
 unlike($mgs_source, qr/print \$cmd\."\\n"|printL \$ph2Cmd|print \$ph1OUT/,
 	'MGS does not echo full routine or scheduler commands');
-like($mgs_source, qr/include custom reference genomes.*?\$baseTreeCmd -outD \$outD\/customRefs\/ -refGenos \[refs\]/s,
-	'MGS retains the useful custom-reference phylogeny command');
+like($mgs_source,
+	qr/if \(\$useGTDBmg eq "FMG"\).*?include custom reference genomes.*?\$baseTreeCmd -outD \$outD\/customRefs\/ -refGenos \[refs\].*?Custom reference genomes are unavailable for predefined GTDB-marker trees/s,
+	'MGS offers custom references only for the FMG extraction path');
 like($mgs_source, qr/MAG availability summary:.*?Missing\/empty MAG examples:.*?complete list is retained in pipeline\.log/s,
 	'MGS summarizes missing MAGs while retaining their complete list in the log');
 unlike($mgs_source, qr/printL "no MAG file: \$MBout/,
@@ -363,6 +365,8 @@ unlike($mgs_source, qr/systemW\s+\$cmdSI\b/,
 like($mgs_source,
 	qr/Stage I clustering done.*?_touch_checkpoint\(\$st1ston.*?Preparing between-MGS phylogeny immediately after MGS creation.*?#get checkM quality/s,
 	'MGS starts between-MGS inference immediately after publishing the Stage-I MGS set');
+like($mgs_source, qr/\$phyloBetween .*?-MGset \$useGTDBmg .*?-MSAprogram 4/,
+	'MGS forwards its selected predefined marker set to the between-MGS phylogeny');
 like($mgs_source,
 	qr/-visualize 0.*?Visualization needs the abundance matrix.*?interMGSphyloViz\.sh.*?MGSphyloViz", \$treedep/s,
 	'MGS defers only abundance-dependent tree visualization and preserves the tree dependency');

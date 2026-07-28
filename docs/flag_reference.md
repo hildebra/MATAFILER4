@@ -433,6 +433,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; zero waits indefinitely |
 | `-mem` | integer | `150` | stable | memory used for intensive jobs |
 | `-strains` | integer | `0` | stable | 1: calc instra species strain phylogenies. Default: 0 |
+| `-prepareMosaicLoci` | integer | `1` | stable | 1: have strain_within submit, await, and validate Mosaic as a prerequisite before strain analysis; 0: skip Mosaic preprocessing and keep same-NOG seed clusters separate |
 | `-useCheckM2` | integer | `0` | stable | CheckM2 default qual checking of MAGs/MGS |
 | `-useCheckM1` | integer | `1` | stable | CheckM default qual checking of MAGs/MGS |
 | `-binSpeciesMG` | integer | `2` | stable | 0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5 |

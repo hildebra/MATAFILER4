@@ -8,7 +8,8 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::MosaicLoci qw(
-	pair_key discover_mosaic_candidates read_paf_hits confirm_mosaic_candidates
+	pair_key select_interesting_records discover_mosaic_candidates
+	read_paf_hits confirm_mosaic_candidates
 	select_outgroup_panel read_mosaic_catalogue
 );
 
@@ -32,14 +33,32 @@ my %members = (
 	3 => 'S2__ctg_2,S5__ctg_1',
 );
 my %sequence = (1 => 'A' x 1000, 2 => 'A' x 950, 3 => 'A' x 980);
+my ($interesting, $interest_statistics) = select_interesting_records([
+	@records,
+	{mgs => 'MGS1', cog => 'UNIQUE', gene => '4', rank => 3},
+	{mgs => 'MGS2', cog => 'SHARED', gene => '5', rank => 0},
+	{mgs => 'MGS3', cog => 'SHARED', gene => '6', rank => 0},
+]);
+is_deeply([map { $_->{gene} } @{$interesting}], [qw(1 2 3 5 6)],
+	'interesting-record selection retains within-MGS and between-MGS comparisons');
+is($interest_statistics->{unshared_records}, 1,
+	'genes with no possible mosaic partner or outgroup are excluded before alignment');
+my %candidate_statistics;
 my $candidate = discover_mosaic_candidates(
-	\@records, \%members, \%sequence, {minimum_length_ratio => 0.8},
+	\@records, \%members, \%sequence,
+	{minimum_length_ratio => 0.8, statistics => \%candidate_statistics},
 );
 is_deeply(
 	[map { [$_->{left}, $_->{right}] } @{$candidate}],
 	[['1', '2'], ['2', '3']],
 	'candidate discovery retains non-cooccurring, length-compatible same-COG seeds',
 );
+is($candidate_statistics{same_cog_pairs}, 3,
+	'candidate diagnostics count every same-COG seed pair');
+is($candidate_statistics{overlap_filtered_pairs}, 1,
+	'candidate diagnostics identify pairs removed by sample overlap');
+is($candidate_statistics{candidates}, 2,
+	'candidate diagnostics report the surviving candidate count');
 my %rare_overlap_members = (
 	1 => join(',', map { "S$_"."__ctg_1" } 1 .. 10),
 	2 => join(',', 'S1__ctg_2', map { "T$_"."__ctg_1" } 2 .. 10),
@@ -112,6 +131,35 @@ cmp_ok(abs($parsed_hits->{1}[0]{identity} - 0.9375), '<', 1e-8,
 is($parsed_hits->{1}[0]{query_coverage}, 0.95,
 	'PAF query coverage is retained for minimum-alignment checks');
 
+my $filtered_paf = File::Spec->catfile($tmp, 'filtered.paf');
+open my $filtered_fh, '>', $filtered_paf or die $!;
+print {$filtered_fh} join("\t",
+	qw(1 1000 0 1000 + 1 1000 0 1000 1000 1000 60)), "\n";
+print {$filtered_fh} join("\t",
+	qw(1 1000 0 900 + 2 1000 0 900 700 900 40)), "\n";
+print {$filtered_fh} join("\t",
+	qw(1 1000 0 900 + 3 1000 0 900 810 900 50)), "\n";
+print {$filtered_fh} join("\t",
+	qw(1 1000 0 950 + 3 1000 0 950 900 950 60)), "\n";
+close $filtered_fh;
+my %paf_statistics;
+my $filtered_hits = read_paf_hits($filtered_paf, {
+	minimum_identity => 0.8,
+	minimum_query_coverage => 0.75,
+	minimum_target_coverage => 0.75,
+	exclude_self => 1,
+	statistics => \%paf_statistics,
+});
+is_deeply([sort map { $_->{target} } @{$filtered_hits->{1}}], ['3'],
+	'streaming PAF parser removes self/weak hits and deduplicates query-target alignments');
+is($filtered_hits->{1}[0]{matches}, 900,
+	'streaming PAF parser retains the strongest duplicate target alignment');
+is_deeply(
+	[@paf_statistics{qw(raw_alignments self_alignments_filtered threshold_alignments_filtered retained_alignments)}],
+	[4, 1, 1, 1],
+	'streaming PAF statistics account for raw, self, thresholded, and retained records',
+);
+
 my $catalogue = File::Spec->catfile($tmp, 'mosaics.tsv');
 open my $fh, '>', $catalogue or die $!;
 print {$fh} "MOSAIC\tMGS1\tCOG1\t1\t2\t0.94\t0.95\t0.94\n";
@@ -122,5 +170,15 @@ my ($pairs, $outgroups, $outgroup_genes) = read_mosaic_catalogue($catalogue);
 ok($pairs->{pair_key(1, 2)}, 'confirmed pair catalogue round-trips into an allowlist');
 is($outgroups->{MGS1}, 'MGS2', 'preferred outgroup is parsed');
 is($outgroup_genes->{MGS1}{a1}, 'b1', 'preferred per-locus outgroup gene is parsed');
+
+my $conflicting_catalogue = File::Spec->catfile($tmp, 'conflicting-outgroup.tsv');
+open my $conflict_fh, '>', $conflicting_catalogue or die $!;
+print {$conflict_fh} "OUTGROUP\tMGS1\tMGS2\t3\t0.88\n";
+print {$conflict_fh} "OUTGROUP_GENE\tMGS1\tMGS3\ta1\tc1\t0.88\t0.95\n";
+close $conflict_fh;
+my $conflict_ok = eval { read_mosaic_catalogue($conflicting_catalogue); 1 };
+ok(!$conflict_ok, 'outgroup gene proposals must belong to the unique source-target MGS connection');
+like($@, qr/target MGS disagrees with the unique MGS1 -> MGS2 connection/,
+	'conflicting outgroup proposal reports the expected MGS connection');
 
 done_testing();

@@ -106,11 +106,20 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.57;/,
-	'within-strain automatic mosaic preparation increments the workflow version');
+like($strain, qr/my \$version = 0\.61;/,
+	'within-strain submitted mosaic preparation increments the workflow version');
 like($strain,
-	qr/\$mosaicLociFile = "\$MGSfile\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?getProgPaths\("MGS_mosaic_scr"\).*?-output.*?\$mosaicLociFile/s,
-	'a missing default mosaic catalogue is prepared beside the MGS file');
+	qr/my \$mosaicDirectory = File::Spec->catdir\(dirname\(\$MGSfile\), 'mosaic'\).*?basename\(\$MGSfile\)\."\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?prepare_mosaic_loci\.log/s,
+	'a missing default mosaic catalogue and its log are prepared in the binner-local mosaic directory');
+like($strain,
+	qr/qsubSystem\(.*?"MosaicMGS".*?qsubSystemJobAlive\(\[\$mosaicDependency\].*?Prerequisite Mosaic catalogue is ready/s,
+	'Mosaic is submitted as a prerequisite and awaited before strain work continues');
+like($strain,
+	qr/unless \(\$doSubmit\).*?stopping before Mosaic-dependent strain extraction.*?exit 0/s,
+	'a no-submission run generates the Mosaic script without consuming absent results');
+like($strain,
+	qr/Mosaic outgroup \$source -> \$PreferredOutgroup\{\$source\}.*?Mosaic outgroup proposals loaded:.*?unique MGS-to-MGS connection.*?gene-to-gene link/s,
+	'strain workflow reports loaded outgroup connections and proposed gene links');
 like($strain,
 	qr/sub stepComplete .*?STEP COMPLETE: \$step/s,
 	'step completion messages use one consistent formatter');

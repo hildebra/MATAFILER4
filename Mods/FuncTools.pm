@@ -93,6 +93,7 @@ sub readGene2Func{
 	my $in = $_[0];
 	my $cat = "";
 	$cat = $_[1] if (@_ > 1);
+	my $gene_subset = $_[2] if @_ > 2;
 	my $inF = "";
 	#first try eggnogMapper
 	
@@ -111,6 +112,7 @@ sub readGene2Func{
 	while (<$I>){
 		chomp;
 		my @spl = split /\t/;
+		next if defined($gene_subset) && !exists($gene_subset->{$spl[0]});
 		$ret{$spl[0]} = $spl[1];
 	}
 	close $I;

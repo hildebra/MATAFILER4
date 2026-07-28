@@ -85,6 +85,14 @@ my $catalogue_gated = build_locus_groups(
 );
 is(scalar(@{$catalogue_gated->{groups}}), 2,
 	'catalogue-confirmed pair can merge while unconfirmed same-COG seeds stay separate');
+my $mosaic_disabled = build_locus_groups(
+	\@records, \%members, \%proteins,
+	{allowed_merge_pairs => {}, require_complete_linkage => 1},
+);
+is(scalar(@{$mosaic_disabled->{groups}}), 3,
+	'an empty mosaic allowlist safely retains every same-COG seed as a separate locus');
+is($mosaic_disabled->{merged_seeds}, 0,
+	'disabling mosaic checks performs no seed-cluster merging');
 
 my @mixed_strain_records = @records[0, 1];
 my %mixed_strain_members = (
