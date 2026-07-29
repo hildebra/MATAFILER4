@@ -3890,6 +3890,7 @@ sub runDiamond(){
 	my $mmsOfmt = "--format-output query,target,fident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"; #mmseqs
 	my $ncore = $MFopt{diaCores}; my $sensBlast = "";
 	$sensBlast = " --sensitive " if ($MFopt{diaRunSensitive});
+	$sensBlast .= " -F $MFopt{diaFrameshift} " if ($MFopt{diaFrameshift});
 	foreach my $curDB (split /,/,$curDB_o){
 		$progStats{$curDB}{DiaDBSearchCompl} = 0 unless (defined($progStats{$curDB}{DiaDBSearchCompl}));
 		$progStats{$curDB}{DiaDBSearchIncomplete} = 0 unless (defined($progStats{$curDB}{DiaDBSearchIncomplete}));
@@ -4115,11 +4116,13 @@ sub cleanInput( $ $ $){
 	my $jobName = $sdmjN;
 	if ($cmd ne ""){
 		print "Removing raw input fastqs..\n";
-		system $cmd;
-		#$jobName = "_PC$JNUM"; my $tmpCmd;
-		#my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		#($jobName, $tmpCmd) = qsubSystem($logDir."ClnUnzip.sh",$cmd,1,"1G",$jobName,$sdmjN,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
-		#$QSBoptHR->{tmpSpace} =$tmpSHDD;
+		# Must wait for $sdmjN (the SDM job consuming these files) to finish before
+		# deleting them: SDM is submitted asynchronously, so an immediate `system`
+		# call here raced the queued job and deleted its inputs before it ran.
+		my $tmpCmd;
+		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0";
+		($jobName, $tmpCmd) = qsubSystem($logDir."ClnUnzip.sh",$cmd,1,"1G","_PC$JNUM",$sdmjN,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
+		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	}
 	return $jobName;
  }
@@ -9065,6 +9068,7 @@ sub setDefaultMFconfig{
 	$MFopt{maxReqDiaDB} = 6; #max number of databases supported by MATAFILER
 	$MFopt{reqDiaDB} = "";#,NOG,MOH,ABR,ABRc,ACL,KGM,PTV,PAB";#,ACL,KGM,ABRc,CZy";#"NOG,CZy"; #"NOG,MOH,CZy,ABR,ABRc,ACL,KGM"   #old KGE,KGB
 	$MFopt{diaEVal} = "1e-7"; $MFopt{diaCores} = 12; ; $MFopt{DiaRmRawHits} = 0; $MFopt{diaRunSensitive} = 0;
+	$MFopt{diaFrameshift} = 0; #diamond -F/--frameshift penalty; 0 disables frameshift alignment mode (recommended for long, error-prone reads e.g. ONT/PacBio)
 	$MFopt{diamondMem} = 7; #GB memory to request for diamond jobs (qsub --mem)
 	$MFopt{DiaMinAlignLen} = 20; $MFopt{DiaMinFracQueryCov} = 0.1; $MFopt{DiaPercID} =40;
 
@@ -9406,15 +9410,16 @@ sub getCmdLineOptions{
 		"reParseFunct=i" => \$MFopt{redoDiamondParse},
 		"reProfileFunct=i" => \$MFopt{rewriteDiamond},
 		"reProfileFuncTogether=i" => \$MFopt{rewriteAllIfAnyDiamond}, #if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
-		"diamondCores=i" => \$MFopt{diaCores},
-		"diamondMem=i" => \$MFopt{diamondMem}, # memory in GB for diamond alignment jobs
+		"DiaCores=i" => \$MFopt{diaCores},
+		"DiaMem=i" => \$MFopt{diamondMem}, # memory in GB for diamond alignment jobs
 		"DiaParseEvals=s" => \$MFopt{diaEVal}, #evalues at which to accept hits to func database
 		"DiaSensitiveMode=i" => \$MFopt{diaRunSensitive},
+		"DiaFrameshift=i" => \$MFopt{diaFrameshift}, #diamond -F/--frameshift penalty (e.g. 15); enables frameshift-aware alignment for long, error-prone reads. 0 = off (default)
 		"rmRawDiamondHits=i" => \$MFopt{DiaRmRawHits},
 		"DiaMinAlignLen=i" => \$MFopt{DiaMinAlignLen},
 		"DiaMinFracQueryCov=f" =>  \$MFopt{DiaMinFracQueryCov},
 		"DiaPercID=i" => \$MFopt{DiaPercID},
-		"diamondDBs=s" => \$MFopt{reqDiaDB},#NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
+		"DiaDBs=s" => \$MFopt{reqDiaDB},#NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 	#functional profiling (Jaime tree)
 		"orthoExtract=i" => \$MFopt{calcOrthoPlacement},
 	#ribo profiling (miTag)
