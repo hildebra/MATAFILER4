@@ -18,7 +18,7 @@ use Mods::MosaicLoci qw(
 	select_outgroup_panel
 );
 
-my $VERSION = '0.16';
+my $VERSION = '0.17';
 my %DEFAULT = (
 	cluster_id => 95,
 	threads => 20,
@@ -150,7 +150,7 @@ if (defined($paf) && length($paf)) {
 	$paf_path = $paf;
 	print "Reusing raw-MGS self-alignment PAF $paf_path\n";
 } else {
-	$paf_path = "$output.minimap2.paf";
+	$paf_path = "$work_dir/raw_mgs.minimap2.paf";
 	unless (-e $paf_path) {
 		my $minimap2 = getProgPaths('minimap2');
 		my $maximum_targets = $DEFAULT{max_secondary_hits} > 0
@@ -186,7 +186,7 @@ if (defined($paf) && length($paf)) {
 	}
 }
 
-my $rtk_prefix = "$output.rtk";
+my $rtk_prefix = "$work_dir/rtk";
 my @rtk_command = (
 	$rtk, 'mosaic', '-i', $matrix, '-reference', $mgs_file,
 	'-paf', $paf_path, '-o', $rtk_prefix,
@@ -206,10 +206,7 @@ system(@rtk_command) == 0
 my $rtk_report = "$rtk_prefix.mosaic.tsv";
 my $rtk_summary_path = "$rtk_prefix.mosaic.summary.tsv";
 die "rtk2 mosaic did not create $rtk_report\n" unless -s $rtk_report;
-if ($rtk_report ne $candidate_output) {
-	copy($rtk_report, $candidate_output)
-		or die "Cannot copy rtk2 report to $candidate_output: $!\n";
-}
+copy_atomic($rtk_report, $candidate_output);
 my ($confirmed, $rejected) = read_rtk_mosaic_results($rtk_report);
 my $rtk_statistics = read_metric_table($rtk_summary_path);
 
@@ -227,8 +224,6 @@ my ($outgroups, $outgroup_genes) = select_outgroup_panel(
 	},
 );
 write_confirmed_catalogue($output, $confirmed, $outgroups, $outgroup_genes, \%DEFAULT);
-write_rejections("$output.rejected.tsv", $rejected);
-write_outgroup_table("$output.outgroups.tsv", $outgroups, $outgroup_genes);
 my $alignment_count = 0;
 $alignment_count += scalar(@{$_}) for values %{$hits};
 my $outgroup_gene_count = 0;
@@ -251,6 +246,8 @@ write_summary("$output.summary.tsv", {
 	threads => $threads,
 	max_secondary_hits => $DEFAULT{max_secondary_hits},
 });
+remove_legacy_intermediates($output,
+	defined($paf) && length($paf) ? $paf_path : undef);
 
 print "\nMosaic preprocessing summary (v$VERSION)\n";
 print "  Raw MGS input genes:         ".scalar(@{$records})."\n";
@@ -271,7 +268,6 @@ print "  Unique MGS-outgroup links:  ".scalar(keys %{$outgroups})."\n";
 print "  Proposed outgroup gene links: $outgroup_gene_count\n";
 print "  Candidate table:            $candidate_output\n";
 print "  Confirmed catalogue:        $output\n";
-print "  Outgroup proposals:         $output.outgroups.tsv\n";
 print "  Diagnostic metrics:         $output.summary.tsv\n";
 warn "No mosaic pairs or outgroups passed selection; inspect $output.summary.tsv for the filtering stage responsible\n"
 	unless @{$confirmed} || keys %{$outgroups};
@@ -326,6 +322,38 @@ sub write_query_fasta {
 	}
 	close $fh or die "Cannot close $path: $!\n";
 	die "No selected catalogue sequences could be written to $path\n" unless -s $path;
+}
+
+sub copy_atomic {
+	my ($source, $destination) = @_;
+	my $temporary = "$destination.tmp.$$";
+	copy($source, $temporary)
+		or die "Cannot copy $source to $temporary: $!\n";
+	rename $temporary, $destination
+		or die "Cannot install $destination: $!\n";
+}
+
+sub remove_legacy_intermediates {
+	my ($prefix, $protected_paf) = @_;
+	my @legacy = map { $prefix.$_ } qw(
+		.minimap2.paf
+		.rtk.mosaic.tsv
+		.rtk.mosaic.summary.tsv
+		.rtk.concat.list
+		.rejected.tsv
+		.outgroups.tsv
+	);
+	my $removed = 0;
+	for my $path (@legacy) {
+		next if defined($protected_paf) && $path eq $protected_paf;
+		next unless -e $path;
+		if (unlink $path) {
+			$removed++;
+		} else {
+			warn "Cannot remove obsolete Mosaic intermediate $path: $!\n";
+		}
+	}
+	print "Removed $removed obsolete persistent Mosaic intermediate(s)\n" if $removed;
 }
 
 sub read_metric_table {
@@ -437,39 +465,6 @@ sub write_summary {
 	rename $temporary, $path or die "Cannot install $path: $!\n";
 }
 
-sub write_outgroup_table {
-	my ($path, $outgroups, $gene_map) = @_;
-	my $temporary = "$path.tmp.$$";
-	open my $fh, '>', $temporary or die "Cannot create $temporary: $!\n";
-	print {$fh} join("\t", qw(
-		source_MGS target_MGS homologous_loci median_identity proposed_gene_pairs
-	)), "\n";
-	for my $source (sort keys %{$outgroups}) {
-		my $entry = $outgroups->{$source};
-		my @pairs = map {
-			$_.'->'.$gene_map->{$source}{$_}{target}
-		} sort keys %{$gene_map->{$source} || {}};
-		print {$fh} join("\t",
-			$source, $entry->{target_mgs}, $entry->{loci},
-			sprintf('%.5f', $entry->{median_identity}), join(',', @pairs),
-		), "\n";
-	}
-	close $fh or die "Cannot close $temporary: $!\n";
-	rename $temporary, $path or die "Cannot install $path: $!\n";
-}
-
-sub write_rejections {
-	my ($path, $rows) = @_;
-	my $temporary = "$path.tmp.$$";
-	open my $fh, '>', $temporary or die "Cannot create $temporary: $!\n";
-	print {$fh} join("\t", qw(MGS COG gene1 gene2 reason)), "\n";
-	for my $row (@{$rows}) {
-		print {$fh} join("\t", @{$row}{qw(mgs cog left right reason)}), "\n";
-	}
-	close $fh or die "Cannot close $temporary: $!\n";
-	rename $temporary, $path or die "Cannot install $path: $!\n";
-}
-
 sub usage {
 	my ($error) = @_;
 	my $prefix = defined($error) ? "Error: $error\n\n" : '';
@@ -484,7 +479,11 @@ to choose an outgroup MGS represented across at least
 $DEFAULT{outgroup_min_loci} loci and with median identity between
 $DEFAULT{outgroup_min_identity} and $DEFAULT{outgroup_max_identity}.
 
-The full rtk report is copied to FILE.candidates.tsv and retained as FILE.rtk.mosaic.tsv.
+Persistent outputs are FILE (the strain rerun checkpoint), FILE.candidates.tsv
+(the complete auditable rtk2 decision table), and FILE.summary.tsv (small run
+metrics). Generated FASTA, minimap2 PAF, and native rtk2 report/summary/concat
+files stay in the temporary workspace and are removed when the run finishes.
+An explicitly supplied -paf file is read but never removed.
 
   -coreMGS FILE                  Optional core table used only for outgroup genes
   -clusterID INT                 Gene-catalogue clustering identity [$DEFAULT{cluster_id}]

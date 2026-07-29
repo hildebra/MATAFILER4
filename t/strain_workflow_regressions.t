@@ -106,11 +106,11 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.62;/,
+like($strain, qr/my \$version = 0\.63;/,
 	'within-strain submitted mosaic preparation increments the workflow version');
 like($strain,
 	qr/my \$mosaicDirectory = File::Spec->catdir\(dirname\(\$mosaicMGSFile\), 'mosaic'\).*?basename\(\$mosaicMGSFile\)\."\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?prepare_mosaic_loci\.log/s,
-	'a missing default mosaic catalogue and its log are named from the raw MGS table');
+	'a missing default Mosaic catalogue is named from the raw MGS table and uses a temporary job log');
 like($strain,
 	qr/qsubSystem\(.*?"MosaicMGS".*?qsubSystemJobAlive\(\[\$mosaicDependency\].*?Prerequisite Mosaic catalogue is ready/s,
 	'Mosaic is submitted as a prerequisite and awaited before strain work continues');

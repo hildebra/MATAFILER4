@@ -12,6 +12,7 @@ use File::Glob qw(bsd_glob);
 use File::Copy qw(copy);
 use File::Basename qw(basename dirname);
 use File::Spec;
+use File::Temp qw(tempdir);
 use Cwd qw(abs_path getcwd);
 use Digest::SHA qw(sha256_hex);
 
@@ -171,7 +172,8 @@ END {
 #.60: validate and report unique MGS-outgroup connections and their gene links
 #.61: submit missing mosaic preprocessing as a prerequisite job and wait for it
 #.62: discover mosaics across the raw MGS gene set and merge confirmed chains transitively
-my $version = 0.62;
+#.63: keep only rerun and audit outputs while cleaning Mosaic intermediates
+my $version = 0.63;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -471,6 +473,10 @@ if (length($MGSfile)) {
 		} else {
 			my $mosaicDirectory = dirname($mosaicLociFile);
 			make_path($mosaicDirectory);
+			my $mosaicRunDirectory = tempdir(
+				'prepare-mosaic-XXXXXX', DIR => $mosaicDirectory,
+				CLEANUP => 0,
+			);
 			my $mosaicScript = getProgPaths("MGS_mosaic_scr");
 			my $mosaicThreads = $maxCores > 0 ? $maxCores : $numCores;
 			$mosaicThreads = 1 if $mosaicThreads < 1;
@@ -486,12 +492,12 @@ if (length($MGSfile)) {
 			$mosaicCommand .= " -tmpD ".shellQuote($locTmpDir1)
 				if length($locTmpDir1) && -d $locTmpDir1;
 			my $mosaicLog = File::Spec->catfile(
-				$mosaicDirectory, 'prepare_mosaic_loci.log',
+				$mosaicRunDirectory, 'prepare_mosaic_loci.log',
 			);
 			$mosaicCommand .= " > ".shellQuote($mosaicLog)." 2>&1\n";
 			$mosaicCommand .= "test -s ".shellQuote($mosaicLociFile)."\n";
 			my $mosaicJobScript = File::Spec->catfile(
-				$mosaicDirectory, 'prepare_mosaic_loci.sh',
+				$mosaicRunDirectory, 'prepare_mosaic_loci.sh',
 			);
 			print "Confirmed mosaic catalogue is absent; submitting prerequisite "
 				."Mosaic job with $mosaicThreads cores and ${mosaicMemGb}G memory\n";
@@ -513,9 +519,12 @@ if (length($MGSfile)) {
 				."$mosaicLociFile. Inspect $mosaicLog and "
 				."$mosaicJobScript.etxt\n" unless -s $mosaicLociFile;
 			print "Prerequisite Mosaic catalogue is ready: $mosaicLociFile\n";
+			remove_tree($mosaicRunDirectory);
+			print "Removed successful Mosaic job workspace $mosaicRunDirectory\n";
 		}
 	}
 }
+cleanupMosaicIntermediates($mosaicLociFile) if length($mosaicLociFile) && -s $mosaicLociFile;
 
 my $bindir;my $outD;my $scratchD;my $preConDir;my $LOGDIR;my $mapF;
 my %map; my %AsGrps;my @samples;#map and assembly groups
@@ -2476,6 +2485,36 @@ sub stepComplete {
 	my $elapsed = timeNice(time - $started);
 	my $details = @statistics ? "; ".join(", ", @statistics) : "";
 	print "STEP COMPLETE: $step (${elapsed})$details\n";
+}
+
+sub cleanupMosaicIntermediates {
+	my ($prefix) = @_;
+	my @paths = (
+		(map { $prefix.$_ } qw(
+			.minimap2.paf
+			.rtk.mosaic.tsv
+			.rtk.mosaic.summary.tsv
+			.rtk.concat.list
+			.rejected.tsv
+			.outgroups.tsv
+		)),
+		(map { File::Spec->catfile(dirname($prefix), $_) } qw(
+			prepare_mosaic_loci.log
+			prepare_mosaic_loci.sh
+			prepare_mosaic_loci.sh.otxt
+			prepare_mosaic_loci.sh.etxt
+		)),
+	);
+	my $removed = 0;
+	for my $path (@paths) {
+		next unless -e $path;
+		if (unlink $path) {
+			$removed++;
+		} else {
+			warn "Cannot remove obsolete Mosaic intermediate $path: $!\n";
+		}
+	}
+	print "Removed $removed obsolete Mosaic intermediate(s)\n" if $removed;
 }
 
 sub shellQuote {

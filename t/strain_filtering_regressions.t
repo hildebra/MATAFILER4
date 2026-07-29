@@ -54,11 +54,16 @@ like($mosaic,
 	qr/open my \$minimap_fh, '-\|', \@command.*?rename \$temporary_paf, \$paf_path.*?system\(\@rtk_command\).*?read_paf_hits\(\$paf_path/s,
 	'mosaic preprocessing materializes minimap PAF, runs rtk, then reuses that PAF for outgroups');
 like($mosaic,
-	qr/Mosaic preprocessing summary.*?Unique MGS-outgroup links:.*?Proposed outgroup gene links:.*?write_outgroup_table/s,
-	'mosaic preprocessing prints useful final statistics and writes explicit outgroup proposals');
+	qr/my \$work_dir = tempdir.*?\$paf_path = "\$work_dir\/raw_mgs\.minimap2\.paf".*?my \$rtk_prefix = "\$work_dir\/rtk".*?copy_atomic\(\$rtk_report, \$candidate_output\).*?remove_legacy_intermediates\(\$output,/s,
+	'generated FASTA, PAF, and native rtk outputs stay temporary while audit outputs are published');
+unlike($mosaic, qr/write_(?:rejections|outgroup_table)\(/,
+	'rejected and outgroup-only duplicate tables are no longer published');
 like($strain,
-	qr/my \$mosaicDirectory = dirname\(\$mosaicLociFile\).*?prepare_mosaic_loci\.log.*?prepare_mosaic_loci\.sh/s,
-	'strain stores Mosaic catalogues, logs, and submission scripts together');
+	qr/my \$mosaicRunDirectory = tempdir\(.*?DIR => \$mosaicDirectory.*?\$mosaicRunDirectory, 'prepare_mosaic_loci\.log'.*?\$mosaicRunDirectory, 'prepare_mosaic_loci\.sh'.*?remove_tree\(\$mosaicRunDirectory\)/s,
+	'successful scheduler scripts and logs are confined to and removed with a per-run workspace');
+like($strain,
+	qr/cleanupMosaicIntermediates\(\$mosaicLociFile\).*?sub cleanupMosaicIntermediates.*?\.minimap2\.paf.*?\.outgroups\.tsv/s,
+	'strain reruns remove obsolete regenerable Mosaic artifacts once the catalogue exists');
 like($strain,
 	qr/my \$mosaicThreads = \$maxCores > 0 \? \$maxCores : \$numCores.*?qsubSystem\(.*?\$mosaicThreads.*?"\$\{mosaicMemGb\}G".*?"MosaicMGS"/s,
 	'the submitted Mosaic job receives maximum strain cores and dedicated memory');
