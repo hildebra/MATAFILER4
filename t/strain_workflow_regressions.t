@@ -106,7 +106,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.64;/,
+like($strain, qr/my \$version = 0\.65;/,
 	'within-strain submitted mosaic preparation increments the workflow version');
 like($strain,
 	qr/my \$mosaicDirectory = File::Spec->catdir\(dirname\(\$mosaicMGSFile\), 'mosaic'\).*?basename\(\$mosaicMGSFile\)\."\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?prepare_mosaic_loci\.log/s,
@@ -117,6 +117,10 @@ like($strain,
 like($strain,
 	qr/unless \(\$doSubmit\).*?stopping before Mosaic-dependent strain extraction.*?exit 0/s,
 	'a no-submission run generates the Mosaic script without consuming absent results');
+like($strain,
+	qr/Reusing existing confirmed Mosaic catalogue: \$mosaicLociFile.*?if \(length\(\$mosaicLociFile\) && !-s \$mosaicLociFile\).*?Raw MGS assignment file for Mosaic is missing or empty/s,
+	'an existing confirmed Mosaic catalogue bypasses prerequisite generation and raw-MGS input requirements');
+
 like($strain,
 	qr/Mosaic outgroup \$source -> \$PreferredOutgroup\{\$source\}.*?Mosaic outgroup proposals loaded:.*?unique MGS-to-MGS connection.*?gene-to-gene link/s,
 	'strain workflow reports loaded outgroup connections and proposed gene links');

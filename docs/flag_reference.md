@@ -491,7 +491,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-runFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-runVeryFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-treeShrink` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-postAlignmentLocusQC` | integer | `1` | stable | Run external locus-comparability QC before multi-locus concatenation. |
+| `-postAlignmentLocusQC` | integer | `1` | stable | Run native MSAfix locus-comparability QC before multi-locus concatenation. |
 | `-postAlignmentMinSequences` | integer | `3` | stable | Minimum comparable sequences required for an aligned locus. |
 | `-postAlignmentMinOccupancy` | float | `0.35` | stable | Minimum fraction of unambiguous alignment cells; permissive for metagenomic loci. |
 | `-postAlignmentRelativeZ` | float | `8.0` | stable | Modified-Z threshold for cross-locus consensus-divergence outliers. |

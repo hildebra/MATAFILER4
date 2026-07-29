@@ -24,6 +24,7 @@
 #5.18: use the allocated IQ-TREE thread count directly; avoid costly per-tree AUTO benchmarking
 #5.19: infer a strict validated backbone and place sparse samples afterwards
 #5.20: filter anomalous per-locus alignments before concatenation
+#5.21: use native MSAfix locus QC and clean its temporary files on every exit
 
 use warnings;
 use strict;
@@ -49,6 +50,7 @@ use Mods::math qw (medianArray avgArray meanArray);
 use Cwd qw(abs_path);
 use File::Basename qw(basename dirname);
 use File::Copy qw(copy move);
+use File::Glob qw(bsd_glob);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
 use File::Temp qw(tempfile);
@@ -82,7 +84,7 @@ sub runPostAlignmentLocusQC;
 sub alignmentFileStem;
 
 my $doPhym= 0;
-my $version = 5.20;
+my $version = 5.21;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -2839,20 +2841,20 @@ sub runPostAlignmentLocusQC {
 	my ($manifestFH, $manifestFile) = tempfile(
 		"post-alignment-loci-XXXXXX",
 		DIR => $tmpD,
-		UNLINK => 0,
+		UNLINK => 1,
 	);
 	print {$manifestFH} "$_\n" for @{$alignments};
 	close $manifestFH or die "Cannot close locus-QC manifest $manifestFile: $!\n";
 	my ($keepFH, $keepFile) = tempfile(
 		"post-alignment-keep-XXXXXX",
 		DIR => $tmpD,
-		UNLINK => 0,
+		UNLINK => 1,
 	);
 	close $keepFH or die "Cannot close locus-QC keep file $keepFile: $!\n";
 
-	my $qcScript = getProgPaths("postAlignmentLocusQC_scr");
+	my $msaFix = getProgPaths("MSAfix");
 	my $command = join(" ",
-		$qcScript,
+		shellQuote($msaFix),
 		"-manifest", shellQuote($manifestFile),
 		"-report", shellQuote($reportFile),
 		"-keep", shellQuote($keepFile),
@@ -2862,28 +2864,43 @@ sub runPostAlignmentLocusQC {
 		"-relativeModifiedZ", $postAlignmentRelativeZ,
 		"-minLociForRelative", $postAlignmentMinLociRelative,
 	) . "\n";
+	my @kept;
 	my $ok = eval {
 		systemW($command);
+		die "Native MSAfix locus QC did not produce its report: $reportFile\n"
+			unless -s $reportFile;
+
+		open my $keepRead, '<', $keepFile
+			or die "Cannot open locus-QC keep file $keepFile: $!\n";
+		while (my $line = <$keepRead>) {
+			$line =~ s/[\r\n]+$//;
+			push @kept, $line if length($line);
+		}
+		close $keepRead or die "Cannot close locus-QC keep file $keepFile: $!\n";
 		1;
 	};
 	my $error = $@;
-	unlink $manifestFile if -e $manifestFile;
-	if (!$ok) {
-		unlink $keepFile if -e $keepFile;
-		die $error || "Post-alignment locus QC failed\n";
+	my @temporaryFiles = (
+		$manifestFile,
+		$keepFile,
+		bsd_glob(quotemeta($reportFile).".tmp.*"),
+		bsd_glob(quotemeta($keepFile).".tmp.*"),
+	);
+	my (%seenTemporary, @cleanupErrors);
+	for my $temporaryFile (@temporaryFiles) {
+		next unless defined($temporaryFile) && -e $temporaryFile;
+		next if $seenTemporary{$temporaryFile}++;
+		push @cleanupErrors, "$temporaryFile: $!"
+			unless unlink $temporaryFile;
 	}
-	die "Post-alignment locus QC did not produce its report: $reportFile\n"
-		unless -s $reportFile;
-
-	open my $keepRead, '<', $keepFile
-		or die "Cannot open locus-QC keep file $keepFile: $!\n";
-	my @kept;
-	while (my $line = <$keepRead>) {
-		$line =~ s/[\r\n]+$//;
-		push @kept, $line if length($line);
+	if (@cleanupErrors) {
+		$error .= "Native MSAfix locus-QC temporary cleanup failed:\n"
+			.join("\n", @cleanupErrors)."\n";
 	}
-	close $keepRead or die "Cannot close locus-QC keep file $keepFile: $!\n";
-	unlink $keepFile or die "Cannot remove locus-QC keep file $keepFile: $!\n";
+	if (!$ok || @cleanupErrors) {
+		$error ||= "Native MSAfix locus QC failed\n";
+		die $error;
+	}
 	die "Post-alignment locus QC rejected all ".scalar(@{$alignments})
 		." loci; see $reportFile\n" unless @kept;
 	print "Post-alignment locus QC retained ".scalar(@kept)."/"

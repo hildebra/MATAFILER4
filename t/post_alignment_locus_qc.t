@@ -7,9 +7,7 @@ use FindBin qw($Bin);
 use Test::More;
 
 my $root = File::Spec->catdir($Bin, '..');
-my $script = File::Spec->catfile(
-	$root, 'secScripts', 'phylo', 'post_alignment_locus_qc.pl',
-);
+my $binary = File::Spec->catfile($root, 'bin', 'MSAfix');
 my $tmp = tempdir(CLEANUP => 1);
 
 sub write_alignment {
@@ -64,15 +62,19 @@ print {$manifest_fh} "$_\n" for @alignments;
 close $manifest_fh or die "Cannot close $manifest: $!";
 
 my $status = system(
-	$^X, '-I'.$root, $script,
+	$binary,
 	'-manifest', $manifest,
 	'-report', $report,
 	'-keep', $keep,
 	'-sequenceType', 'nt',
 );
-is($status, 0, 'post-alignment locus QC completes');
+is($status, 0, 'native MSAfix post-alignment locus QC completes');
 ok(-s $report, 'QC writes an auditable per-locus report');
 ok(-s $keep, 'QC writes a retained-locus manifest');
+my @report_temporary = glob($report.'.tmp.*');
+my @keep_temporary = glob($keep.'.tmp.*');
+is(scalar(@report_temporary), 0, 'native QC leaves no report temporary output');
+is(scalar(@keep_temporary), 0, 'native QC leaves no keep-list temporary output');
 
 open my $keep_fh, '<', $keep or die "Cannot read $keep: $!";
 chomp(my @kept = <$keep_fh>);
@@ -96,7 +98,7 @@ like($report_text, qr/\Q$low_occupancy\E\tREJECT\t[^\n]*low_occupancy/,
 like($report_text, qr/\Q$permissive\E\tPASS\t\./,
 	'report records retained strain-variable loci');
 
-my $help = qx{"$^X" "-I$root" "$script" -help 2>&1};
+my $help = qx{"$binary" -help 2>&1};
 like($help, qr/minOccupancy FLOAT.*0\.35/s,
 	'help documents the permissive metagenomic occupancy default');
 like($help, qr/maxP90Divergence FLOAT.*NT 0\.3/s,

@@ -15,11 +15,17 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.20;/,
-	'post-alignment locus QC increments the workflow version');
+like($source, qr/my \$version = 5\.21;/,
+	'native post-alignment locus QC increments the workflow version');
 like($source,
-	qr/post_alignment_locus_qc\.tsv.*?sub runPostAlignmentLocusQC.*?postAlignmentLocusQC_scr.*?-manifest.*?-report.*?-keep/s,
-	'buildTree invokes external locus QC before concatenation and retains its report');
+	qr/post_alignment_locus_qc\.tsv.*?sub runPostAlignmentLocusQC.*?getProgPaths\("MSAfix"\).*?-manifest.*?-report.*?-keep/s,
+	'buildTree invokes native MSAfix locus QC before concatenation and retains its report');
+unlike($source, qr/postAlignmentLocusQC_scr/,
+	'buildTree no longer invokes the Perl locus-QC script');
+like($source, qr/post-alignment-loci-XXXXXX.*?UNLINK => 1.*?post-alignment-keep-XXXXXX.*?UNLINK => 1/s,
+	'locus-QC manifest and keep-list temporaries are always scheduled for cleanup');
+like($source, qr/my \@temporaryFiles = \(.*?bsd_glob\(quotemeta\(\$reportFile\)\."\.tmp\.\*"\).*?bsd_glob\(quotemeta\(\$keepFile\)\."\.tmp\.\*"\).*?unlink \$temporaryFile/s,
+	'wrapper and partial native locus-QC files are explicitly deleted after every invocation');
 like($source,
 	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 8\.0/s,
 	'post-alignment QC is enabled with permissive metagenomic defaults');

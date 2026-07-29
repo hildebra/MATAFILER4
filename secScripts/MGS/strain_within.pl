@@ -177,7 +177,8 @@ END {
 #.62: discover mosaics across the raw MGS gene set and merge confirmed chains transitively
 #.63: keep only rerun and audit outputs while cleaning Mosaic intermediates
 #.64: persist run-wide recovered/filtered MAG, Mosaic, and outgroup statistics
-my $version = 0.64;
+#.65: reuse an existing confirmed Mosaic catalogue without requiring raw inputs
+my $version = 0.65;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -439,8 +440,6 @@ if (!length($mosaicMGSFile) && length($MGSfile)) {
 	$mosaicMGSFile = $MGSfile;
 	$mosaicMGSFile =~ s/\.core\z//;
 }
-die "Raw MGS assignment file for Mosaic is missing or empty: $mosaicMGSFile\n"
-	if $prepareMosaicLoci && length($MGSfile) && !-s $mosaicMGSFile;
 
 $noGeneLimit = 1 if $maxNGenes <= 0; #backward-compatible no-cap spelling; QC is unchanged
 die "-maxGenes must be at least -MGSminGenesPSmpl unless -noGeneLimit 1 is used\n"
@@ -469,6 +468,9 @@ if (length($MGSfile)) {
 			basename($mosaicMGSFile).".mosaic_loci.$clusterID.confirmed.tsv",
 		);
 	}
+	if (length($mosaicLociFile) && -s $mosaicLociFile) {
+		print "Reusing existing confirmed Mosaic catalogue: $mosaicLociFile\n";
+	}
 	if (length($mosaicLociFile) && !-s $mosaicLociFile) {
 		if (!$prepareMosaicLoci) {
 			die "Confirmed mosaic catalogue is missing or empty: $mosaicLociFile\n"
@@ -479,6 +481,8 @@ if (length($MGSfile)) {
 				."$mosaicLociFile. Run the main strain_within.pl process first.\n";
 		} else {
 			my $mosaicDirectory = dirname($mosaicLociFile);
+			die "Raw MGS assignment file for Mosaic is missing or empty: $mosaicMGSFile\n"
+				unless -s $mosaicMGSFile;
 			make_path($mosaicDirectory);
 			my $mosaicRunDirectory = tempdir(
 				'prepare-mosaic-XXXXXX', DIR => $mosaicDirectory,
