@@ -41,16 +41,16 @@ like($strain,
 	qr/qsubSystem\(.*?"MosaicMGS".*?qsubSystemJobAlive\(\[\$mosaicDependency\].*?unless -s \$mosaicLociFile/s,
 	'strain workflow waits for and validates Mosaic before loading its catalogue');
 like($mosaic,
-	qr/discover_mosaic_candidates.*?minimap2.*?confirm_mosaic_candidates.*?select_outgroup_panel/s,
-	'mosaic preprocessing creates candidates, aligns catalogue-wide, confirms pairs, and consolidates outgroups');
+	qr/discover_mosaic_candidates.*?my \$paf_path.*?system\(\@rtk_command\).*?read_rtk_mosaic_results.*?select_outgroup_panel/s,
+	'mosaic preprocessing creates diagnostics, aligns catalogue-wide, lets rtk confirm pairs, and consolidates outgroups');
 like($mosaic, qr/minimap_preset => 'asm20'.*?write_summary/s,
 	'mosaic preprocessing uses an outgroup-sensitive alignment preset and records stage diagnostics');
 like($mosaic,
-	qr/select_interesting_records.*?Aligning .*?interesting genes together in one minimap2 run.*?'-c', '-D'.*?'-N', \$DEFAULT\{max_secondary_hits\}.*?read_paf_stream/s,
-	'mosaic preprocessing bulk-aligns only genes capable of mosaic or outgroup comparison');
+	qr/select_interesting_records.*?Aligning .*?interesting genes before rtk2.*?'-c', '-D'.*?'-N', \$DEFAULT\{max_secondary_hits\}.*?Running rtk2 mosaic/s,
+	'mosaic preprocessing bulk-aligns only informative genes before abundance-aware rtk confirmation');
 like($mosaic,
-	qr/open my \$minimap_fh, '-\|', \@command.*?read_paf_stream.*?raw_alignments/s,
-	'mosaic preprocessing streams and filters minimap output without materializing a PAF file');
+	qr/open my \$minimap_fh, '-\|', \@command.*?rename \$temporary_paf, \$paf_path.*?system\(\@rtk_command\).*?read_paf_hits\(\$paf_path/s,
+	'mosaic preprocessing materializes minimap PAF, runs rtk, then reuses that PAF for outgroups');
 like($mosaic,
 	qr/Mosaic preprocessing summary.*?Unique MGS-outgroup links:.*?Proposed outgroup gene links:.*?write_outgroup_table/s,
 	'mosaic preprocessing prints useful final statistics and writes explicit outgroup proposals');

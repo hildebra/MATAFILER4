@@ -4,6 +4,7 @@ use warnings;
 
 use Getopt::Long qw(GetOptions);
 use File::Basename qw(dirname);
+use File::Copy qw(copy);
 use File::Path qw(make_path);
 use File::Temp qw(tempdir);
 
@@ -14,11 +15,11 @@ use Mods::GenoMetaAss qw(
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::MosaicLoci qw(
 	select_interesting_records discover_mosaic_candidates
-	read_paf_stream read_paf_hits confirm_mosaic_candidates
+	read_paf_hits
 	select_outgroup_panel
 );
 
-my $VERSION = '0.14';
+my $VERSION = '0.15';
 my %DEFAULT = (
 	cluster_id => 95,
 	threads => 20,
@@ -28,6 +29,7 @@ my %DEFAULT = (
 	min_score_margin => 0.02,
 	min_length_ratio => 0.80,
 	max_sample_overlap_fraction => 0.15,
+	max_abundance_overlap_fraction => 0.15,
 	max_overlap_samples => 1,
 	outgroup_min_identity => 0.80,
 	outgroup_max_identity => 0.95,
@@ -38,7 +40,8 @@ my %DEFAULT = (
 	max_secondary_hits => 50,
 );
 
-my ($GCd, $mgs_file, $output, $candidate_output, $paf, $tmp_base, $help);
+my ($GCd, $mgs_file, $output, $candidate_output, $paf, $matrix,
+	$rtk_override, $tmp_base, $help);
 my $cluster_id = $DEFAULT{cluster_id};
 my $threads = $DEFAULT{threads};
 Getopt::Long::Configure(qw(no_auto_abbrev no_ignore_case));
@@ -48,6 +51,8 @@ GetOptions(
 	'output=s' => \$output,
 	'candidates=s' => \$candidate_output,
 	'paf=s' => \$paf,
+	'matrix=s' => \$matrix,
+	'rtk=s' => \$rtk_override,
 	'tmpD=s' => \$tmp_base,
 	'clusterID=i' => \$cluster_id,
 	'threads=i' => \$threads,
@@ -58,6 +63,7 @@ GetOptions(
 	'minLengthRatio=f' => \$DEFAULT{min_length_ratio},
 	'maxSampleOverlapFraction=f' => \$DEFAULT{max_sample_overlap_fraction},
 	'maxOverlapSamples=i' => \$DEFAULT{max_overlap_samples},
+	'maxAbundanceOverlapFraction=f' => \$DEFAULT{max_abundance_overlap_fraction},
 	'outgroupMinIdentity=f' => \$DEFAULT{outgroup_min_identity},
 	'outgroupMaxIdentity=f' => \$DEFAULT{outgroup_max_identity},
 	'outgroupTargetIdentity=f' => \$DEFAULT{outgroup_target_identity},
@@ -79,7 +85,7 @@ die "-threads must be positive\n" unless $threads > 0;
 die "Mosaic identity/coverage/margin options must be between zero and one\n"
 	if grep { $_ < 0 || $_ > 1 } @DEFAULT{qw(
 		min_identity min_query_coverage min_target_coverage min_score_margin
-		min_length_ratio max_sample_overlap_fraction
+		min_length_ratio max_sample_overlap_fraction max_abundance_overlap_fraction
 		outgroup_min_identity outgroup_max_identity
 		outgroup_target_identity outgroup_min_coverage
 	)};
@@ -96,6 +102,11 @@ die "-minimapPreset must be asm5, asm10, or asm20\n"
 die "-maxTargets must be positive\n" unless $DEFAULT{max_secondary_hits} > 0;
 
 $candidate_output ||= "$output.candidates.tsv";
+$matrix ||= "$GCd/Matrix.mat.gz";
+die "Gene abundance matrix is missing or empty: $matrix\n" unless -s $matrix;
+my $rtk = defined($rtk_override) && length($rtk_override)
+	? $rtk_override : getProgPaths('rare');
+die "rtk executable was not resolved\n" unless defined($rtk) && length($rtk);
 make_path(dirname($output), dirname($candidate_output));
 
 my ($all_records) = read_mgs_records($mgs_file, $GCd);
@@ -159,6 +170,8 @@ my $work_dir = tempdir('mosaic-loci-XXXXXX',
 	CLEANUP => 1);
 my $query_fasta = "$work_dir/selected_genes.fna";
 write_query_fasta($query_fasta, $records, $sequences);
+my $group_file = "$work_dir/gene_to_nog.tsv";
+write_group_file($group_file, $records);
 my %alignment_statistics;
 my $minimum_stream_identity = $DEFAULT{min_identity} < $DEFAULT{outgroup_min_identity}
 	? $DEFAULT{min_identity} : $DEFAULT{outgroup_min_identity};
@@ -175,36 +188,74 @@ my %paf_options = (
 	exclude_self => 1,
 	statistics => \%alignment_statistics,
 );
-my $hits;
+my $paf_path;
 if (defined($paf) && length($paf)) {
 	die "Whole-catalogue alignment is missing or empty: $paf\n" unless -s $paf;
-	$hits = read_paf_hits($paf, \%paf_options);
+	$paf_path = $paf;
+	print "Reusing whole-catalogue PAF $paf_path\n";
 } else {
-	my $minimap2 = getProgPaths('minimap2');
-	print "Aligning ".scalar(@{$records})." interesting genes together in one minimap2 run "
-		."using $threads threads and at most $DEFAULT{max_secondary_hits} secondary targets\n";
-	my @command = (
-		$minimap2, '-x', $DEFAULT{minimap_preset}, '-c', '-D',
-		'--secondary=yes', '-N', $DEFAULT{max_secondary_hits},
-		'-t', $threads, $catalogue_fasta, $query_fasta,
-	);
-	open my $minimap_fh, '-|', @command
-		or die "Cannot start minimap2 whole-catalogue alignment: $!\n";
-	$hits = read_paf_stream($minimap_fh, 'minimap2 stdout', \%paf_options);
-	close $minimap_fh
-		or die "minimap2 whole-catalogue alignment failed with status $?\n";
+	$paf_path = "$output.minimap2.paf";
+	unless (-s $paf_path) {
+		my $minimap2 = getProgPaths('minimap2');
+		print "Aligning ".scalar(@{$records})." interesting genes before rtk2 "
+			."using $threads threads and at most $DEFAULT{max_secondary_hits} secondary targets\n";
+		my @command = (
+			$minimap2, '-x', $DEFAULT{minimap_preset}, '-c', '-D',
+			'--secondary=yes', '-N', $DEFAULT{max_secondary_hits},
+			'-t', $threads, $catalogue_fasta, $query_fasta,
+		);
+		my $temporary_paf = "$paf_path.tmp.$$";
+		open my $paf_fh, '>', $temporary_paf
+			or die "Cannot create temporary PAF $temporary_paf: $!\n";
+		open my $minimap_fh, '-|', @command
+			or die "Cannot start minimap2 whole-catalogue alignment: $!\n";
+		while (my $line = <$minimap_fh>) {
+			print {$paf_fh} $line or die "Cannot write $temporary_paf: $!\n";
+		}
+		my $output_closed = close $paf_fh;
+		my $minimap_closed = close $minimap_fh;
+		my $minimap_status = $?;
+		unless ($output_closed && $minimap_closed) {
+			unlink $temporary_paf;
+			die "minimap2 whole-catalogue alignment failed with status $minimap_status\n";
+		}
+		rename $temporary_paf, $paf_path
+			or die "Cannot install PAF $paf_path: $!\n";
+	} else {
+		print "Reusing existing minimap2 PAF $paf_path\n";
+	}
 }
+
+my $rtk_prefix = "$output.rtk";
+my @rtk_command = (
+	$rtk, 'mosaic', '-i', $matrix, '-reference', $mgs_file,
+	'-paf', $paf_path, '-groups', $group_file, '-o', $rtk_prefix,
+	'-t', $threads,
+	'-mosaicMinIdentity', $DEFAULT{min_identity},
+	'-mosaicMinQueryCoverage', $DEFAULT{min_query_coverage},
+	'-mosaicMinTargetCoverage', $DEFAULT{min_target_coverage},
+	'-mosaicMinScoreMargin', $DEFAULT{min_score_margin},
+	'-mosaicMinLengthRatio', $DEFAULT{min_length_ratio},
+	'-mosaicMaxSampleOverlapFraction', $DEFAULT{max_sample_overlap_fraction},
+	'-mosaicMaxAbundanceOverlapFraction', $DEFAULT{max_abundance_overlap_fraction},
+	'-mosaicRequireCigar',
+);
+print "Running rtk2 mosaic against $matrix after minimap2\n";
+system(@rtk_command) == 0
+	or die "rtk2 mosaic failed with status $?\n";
+my $rtk_report = "$rtk_prefix.mosaic.tsv";
+my $rtk_summary_path = "$rtk_prefix.mosaic.summary.tsv";
+die "rtk2 mosaic did not create $rtk_report\n" unless -s $rtk_report;
+if ($rtk_report ne $candidate_output) {
+	copy($rtk_report, $candidate_output)
+		or die "Cannot copy rtk2 report to $candidate_output: $!\n";
+}
+my ($confirmed, $rejected) = read_rtk_mosaic_results($rtk_report);
+my $rtk_statistics = read_metric_table($rtk_summary_path);
+
+my $hits = read_paf_hits($paf_path, \%paf_options);
 warn "minimap2 found no non-diagonal catalogue alignments; continuing with empty biological results\n"
 	unless ($alignment_statistics{raw_alignments} || 0) > 0;
-my ($confirmed, $rejected) = confirm_mosaic_candidates(
-	$candidates, $hits,
-	{
-		minimum_identity => $DEFAULT{min_identity},
-		minimum_query_coverage => $DEFAULT{min_query_coverage},
-		minimum_target_coverage => $DEFAULT{min_target_coverage},
-		minimum_score_margin => $DEFAULT{min_score_margin},
-	},
-);
 my ($outgroups, $outgroup_genes) = select_outgroup_panel(
 	$records, $hits,
 	{
@@ -233,6 +284,8 @@ write_summary("$output.summary.tsv", {
 	alignments => $alignment_count,
 	confirmed_mosaics => scalar(@{$confirmed}),
 	rejected_mosaics => scalar(@{$rejected}),
+	rtk_candidate_pairs => $rtk_statistics->{candidate_pairs} || 0,
+	rtk_confirmed_pairs => $rtk_statistics->{confirmed_pairs} || 0,
 	outgroup_mgs => scalar(keys %{$outgroups}),
 	outgroup_genes => $outgroup_gene_count,
 	minimap_preset => $DEFAULT{minimap_preset},
@@ -260,6 +313,8 @@ print "    Duplicate target records:  "
 	.(($alignment_statistics{duplicate_alignments_replaced} || 0)
 		+ ($alignment_statistics{duplicate_alignments_filtered} || 0))."\n";
 print "  Confirmed/rejected mosaics: ".scalar(@{$confirmed})."/".scalar(@{$rejected})."\n";
+print "  rtk2 candidate/confirmed:   ".($rtk_statistics->{candidate_pairs} || 0)."/"
+	.($rtk_statistics->{confirmed_pairs} || 0)."\n";
 print "  Unique MGS-outgroup links:  ".scalar(keys %{$outgroups})."\n";
 print "  Proposed outgroup gene links: $outgroup_gene_count\n";
 print "  Candidate table:            $candidate_output\n";
@@ -338,6 +393,78 @@ sub write_query_fasta {
 	die "No selected catalogue sequences could be written to $path\n" unless -s $path;
 }
 
+sub write_group_file {
+	my ($path, $records) = @_;
+	open my $fh, '>', $path or die "Cannot create rtk group map $path: $!\n";
+	for my $record (@{$records || []}) {
+		next unless defined($record->{gene}) && defined($record->{cog});
+		print {$fh} "$record->{gene}\t$record->{cog}\n";
+	}
+	close $fh or die "Cannot close rtk group map $path: $!\n";
+	die "No gene-to-NOG assignments were written to $path\n" unless -s $path;
+}
+
+sub read_metric_table {
+	my ($path) = @_;
+	die "rtk2 summary is missing or empty: $path\n" unless -s $path;
+	open my $fh, '<', $path or die "Cannot open rtk2 summary $path: $!\n";
+	my %metrics;
+	my $header = <$fh>;
+	die "rtk2 summary has no header: $path\n"
+		unless defined($header) && $header =~ /^metric\tvalue/;
+	while (my $line = <$fh>) {
+		$line =~ s/[\r\n]+$//;
+		next unless length($line);
+		my ($metric, $value) = split /\t/, $line, 2;
+		$metrics{$metric} = $value if defined($metric) && defined($value);
+	}
+	close $fh or die "Cannot close rtk2 summary $path: $!\n";
+	return \%metrics;
+}
+
+sub read_rtk_mosaic_results {
+	my ($path) = @_;
+	open my $fh, '<', $path or die "Cannot open rtk2 mosaic report $path: $!\n";
+	my $header = <$fh>;
+	die "rtk2 mosaic report has no header: $path\n" unless defined($header);
+	$header =~ s/[\r\n]+$//;
+	my @header = split /\t/, $header, -1;
+	my %field_index;
+	@field_index{@header} = (0 .. $#header);
+	for my $required (qw(
+		mgs group left right status reason identity query_coverage target_coverage
+	)) {
+		die "rtk2 mosaic report lacks column $required: $path\n"
+			unless exists($field_index{$required});
+	}
+	my (@confirmed, @rejected);
+	my $line_number = 1;
+	while (my $line = <$fh>) {
+		$line_number++;
+		$line =~ s/[\r\n]+$//;
+		next unless length($line);
+		my @fields = split /\t/, $line, -1;
+		die "Short rtk2 mosaic row $line_number in $path\n" if @fields < @header;
+		my $entry = {
+			mgs => $fields[$field_index{mgs}],
+			cog => $fields[$field_index{group}],
+			left => $fields[$field_index{left}],
+			right => $fields[$field_index{right}],
+			reason => $fields[$field_index{reason}],
+			identity => 0 + $fields[$field_index{identity}],
+			query_coverage => 0 + $fields[$field_index{query_coverage}],
+			target_coverage => 0 + $fields[$field_index{target_coverage}],
+		};
+		if ($fields[$field_index{status}] eq 'confirmed') {
+			push @confirmed, $entry;
+		} else {
+			push @rejected, $entry;
+		}
+	}
+	close $fh or die "Cannot close rtk2 mosaic report $path: $!\n";
+	return (\@confirmed, \@rejected);
+}
+
 sub write_confirmed_catalogue {
 	my ($path, $confirmed, $outgroups, $gene_map, $defaults) = @_;
 	my $temporary = "$path.tmp.$$";
@@ -378,7 +505,7 @@ sub write_summary {
 		raw_alignments self_alignments_filtered threshold_alignments_filtered
 		duplicate_alignments_replaced duplicate_alignments_filtered
 		queries_with_retained_alignments retained_alignments
-		confirmed_mosaics rejected_mosaics outgroup_mgs outgroup_genes
+		confirmed_mosaics rejected_mosaics rtk_candidate_pairs rtk_confirmed_pairs outgroup_mgs outgroup_genes
 		minimap_preset threads max_secondary_hits
 	)) {
 		my $value = defined($statistics->{$metric}) ? $statistics->{$metric} : 0;
@@ -427,21 +554,27 @@ sub usage {
 	return $prefix.<<"USAGE";
 Usage: prepare_mosaic_loci.pl -GCd DIR -MGS FILE -output FILE [options]
 
-Creates FILE.candidates.tsv first, aligns every selected gene against the
-complete nucleotide gene catalogue, and writes only reciprocal, unique,
-well-covered >=$DEFAULT{min_identity}-identity mosaic pairs to FILE. The same alignments are used
-to choose an outgroup MGS represented across at least $DEFAULT{outgroup_min_loci} loci and with median
-identity between $DEFAULT{outgroup_min_identity} and $DEFAULT{outgroup_max_identity}.
+Selects annotated genes, writes or reuses FILE.minimap2.paf, and then runs
+rtk2 mosaic against the gene abundance matrix. Only rtk-confirmed sequence and
+abundance-supported pairs are published to FILE. Perl reuses the same PAF after
+rtk2 to choose an outgroup MGS represented across at least
+$DEFAULT{outgroup_min_loci} loci and with median identity between
+$DEFAULT{outgroup_min_identity} and $DEFAULT{outgroup_max_identity}.
+
+The full rtk report is copied to FILE.candidates.tsv and retained as FILE.rtk.mosaic.tsv.
 
   -clusterID INT                 Gene-catalogue clustering identity [$DEFAULT{cluster_id}]
   -threads INT                   minimap2 threads [$DEFAULT{threads}]
   -paf FILE                      Reuse a PAF alignment instead of running minimap2
+	-matrix FILE                   Gene abundance matrix [GCd/Matrix.mat.gz]
+	-rtk FILE                      Override the configured rtk2 executable
   -minIdentity FLOAT             Partner nucleotide identity [$DEFAULT{min_identity}]
   -minQueryCoverage FLOAT        Query alignment coverage [$DEFAULT{min_query_coverage}]
   -minTargetCoverage FLOAT       Target alignment coverage [$DEFAULT{min_target_coverage}]
   -minScoreMargin FLOAT          Required lead over another catalogue hit [$DEFAULT{min_score_margin}]
   -minLengthRatio FLOAT          Candidate prefilter length ratio [$DEFAULT{min_length_ratio}]
   -maxSampleOverlapFraction FLOAT  Maximum co-occurrence fraction [$DEFAULT{max_sample_overlap_fraction}]
+	-maxAbundanceOverlapFraction FLOAT  Maximum abundance overlap [$DEFAULT{max_abundance_overlap_fraction}]
   -maxOverlapSamples INT         Maximum rare co-occurring samples [$DEFAULT{max_overlap_samples}]
   -outgroupMinIdentity FLOAT     Closest permitted outgroup identity [$DEFAULT{outgroup_min_identity}]
   -outgroupMaxIdentity FLOAT     Most similar permitted outgroup identity [$DEFAULT{outgroup_max_identity}]
