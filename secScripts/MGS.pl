@@ -905,9 +905,9 @@ if ($numSamples > 1500){#scale with the number of assembly groups
 #
 #my $ph2Cmd = "$strain1scr $GCd $finalClustersFilt.mgs $canCore $iniTree 0 1\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
 my $mosaicDir = "$outD/mosaic/";
-my $mosaicCatalogue = "$mosaicDir/$BinnerShrt.clusters.core.mosaic_loci.$clusterID.confirmed.tsv";
+my $mosaicCatalogue = "$mosaicDir/$BinnerShrt.clusters.mosaic_loci.$clusterID.confirmed.tsv";
 my $ph2Cmd = "mkdir -p "._shell_quote("$outD/within_phylo/")." || exit 65\n";
-$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -mosaicMemGb $memG -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ -prepareMosaicLoci $prepareMosaicLoci ";
+$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -mosaicMGS $finalClusters2 -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -mosaicMemGb $memG -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ -prepareMosaicLoci $prepareMosaicLoci ";
 $ph2Cmd .= "-mosaicLoci $mosaicCatalogue " if $prepareMosaicLoci;
 $ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree || $treedep ne "";
 $ph2Cmd .= "\n";

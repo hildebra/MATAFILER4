@@ -41,13 +41,15 @@ like($strain,
 	qr/qsubSystem\(.*?"MosaicMGS".*?qsubSystemJobAlive\(\[\$mosaicDependency\].*?unless -s \$mosaicLociFile/s,
 	'strain workflow waits for and validates Mosaic before loading its catalogue');
 like($mosaic,
-	qr/discover_mosaic_candidates.*?my \$paf_path.*?system\(\@rtk_command\).*?read_rtk_mosaic_results.*?select_outgroup_panel/s,
-	'mosaic preprocessing creates diagnostics, aligns catalogue-wide, lets rtk confirm pairs, and consolidates outgroups');
+	qr/my \$records = read_mgs_records\(\$mgs_file.*?my \$query_fasta.*?'-p', '0'.*?\$query_fasta, \$query_fasta.*?\$rtk, 'mosaic'.*?'-reference', \$mgs_file/s,
+	'mosaic preprocessing self-aligns the complete raw MGS gene set before rtk confirmation');
+unlike($mosaic, qr/'-groups'/,
+	'rtk Mosaic discovery is not restricted to genes sharing a NOG');
+like($mosaic,
+	qr/my \$core_records.*?my \@outgroup_records.*?select_outgroup_panel\(\s*\\\@outgroup_records/s,
+	'the core MGS table is reserved for stable outgroup selection');
 like($mosaic, qr/minimap_preset => 'asm20'.*?write_summary/s,
 	'mosaic preprocessing uses an outgroup-sensitive alignment preset and records stage diagnostics');
-like($mosaic,
-	qr/select_interesting_records.*?Aligning .*?interesting genes before rtk2.*?'-c', '-D'.*?'-N', \$DEFAULT\{max_secondary_hits\}.*?Running rtk2 mosaic/s,
-	'mosaic preprocessing bulk-aligns only informative genes before abundance-aware rtk confirmation');
 like($mosaic,
 	qr/open my \$minimap_fh, '-\|', \@command.*?rename \$temporary_paf, \$paf_path.*?system\(\@rtk_command\).*?read_paf_hits\(\$paf_path/s,
 	'mosaic preprocessing materializes minimap PAF, runs rtk, then reuses that PAF for outgroups');
@@ -61,8 +63,8 @@ like($strain,
 	qr/my \$mosaicThreads = \$maxCores > 0 \? \$maxCores : \$numCores.*?qsubSystem\(.*?\$mosaicThreads.*?"\$\{mosaicMemGb\}G".*?"MosaicMGS"/s,
 	'the submitted Mosaic job receives maximum strain cores and dedicated memory');
 like($mgs,
-	qr/"prepareMosaicLoci=i" => \\\$prepareMosaicLoci.*?\$ph2Cmd \.= "-mosaicLoci \$mosaicCatalogue " if \$prepareMosaicLoci/s,
-	'MGS can omit mosaic preprocessing and the mosaic catalogue from strain analysis');
+	qr/"prepareMosaicLoci=i" => \\\$prepareMosaicLoci.*?-MGS \$finalClustersFilt -mosaicMGS \$finalClusters2.*?\$ph2Cmd \.= "-mosaicLoci \$mosaicCatalogue " if \$prepareMosaicLoci/s,
+	'MGS passes raw clusters for Mosaic while retaining core clusters for strain analysis');
 like($strain,
 	qr/Mosaic checks disabled; same-COG catalogue clusters will remain separate and tree-based outgroups remain available/,
 	'strain analysis reports its safe no-mosaic behavior explicitly');

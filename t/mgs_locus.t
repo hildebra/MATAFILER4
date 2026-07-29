@@ -128,6 +128,14 @@ my $complete_linkage = build_locus_groups(
 );
 is(scalar(@{$complete_linkage->{groups}}), 2,
 	'complete linkage prevents transitive mosaic chaining without a 20-22 confirmation');
+my $transitive_mosaic = build_locus_groups(
+	\@chain_records, \%chain_members, \%chain_proteins,
+	{allowed_merge_pairs => \%chain_edges, require_complete_linkage => 0},
+);
+is(scalar(@{$transitive_mosaic->{groups}}), 1,
+	'transitive Mosaic edges can represent three alternatives of one homologue');
+is_deeply($transitive_mosaic->{groups}[0]{genes}, [qw(20 21 22)],
+	'all three genes are retained in the merged Mosaic locus');
 
 my $dominant = choose_locus_candidate([
 	{ id => 'copyA', protein => $protein, depth => 12, seed => '10', context => {} },

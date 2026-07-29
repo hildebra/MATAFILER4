@@ -170,7 +170,8 @@ END {
 #.59: bulk-align only genes with mosaic or outgroup comparison potential
 #.60: validate and report unique MGS-outgroup connections and their gene links
 #.61: submit missing mosaic preprocessing as a prerequisite job and wait for it
-my $version = 0.61;
+#.62: discover mosaics across the raw MGS gene set and merge confirmed chains transitively
+my $version = 0.62;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -221,7 +222,7 @@ my $repairCAT=0;
 my $maxNGenes = $FILTER_DEFAULT{maximum_genes_per_sample};
 my $noGeneLimit = 0;
 my $disableQC = 0;
-my $mosaicLociFile = "";
+my ($mosaicLociFile, $mosaicMGSFile) = ("", "");
 my $MGSabundanceOverride = "";
 my $prepareMosaicLoci = $FILTER_DEFAULT{prepare_mosaic_loci};
 my $breakpointGeneFlank = $FILTER_DEFAULT{breakpoint_gene_flank};
@@ -317,6 +318,7 @@ GetOptions(
 	"noGeneLimit=i"  => \$noGeneLimit, #remove only the gene-count cap; QC remains enabled
 	"disableQC=i"    => \$disableQC, #expert/debug option: disable biological QC independently of the gene cap
 	"mosaicLoci=s"   => \$mosaicLociFile, #catalogue-wide confirmed mosaic/outgroup table
+	"mosaicMGS=s"    => \$mosaicMGSFile, #raw SB.clusters used for comprehensive Mosaic discovery
 	"MGSabundance=s" => \$MGSabundanceOverride, #explicit MGS abundance matrix for nonstandard guide locations
 	"prepareMosaicLoci=i" => \$prepareMosaicLoci, #create the default catalogue if absent
 	"flushEvery=i"   => \$appendWriteTrigger, #samples buffered before per-MGS records are flushed
@@ -418,10 +420,18 @@ die "-MSAprog must be 0, 1, 2, or 4\n"
 $GCd = abs_path($GCd);
 $GCd .= "/" unless $GCd =~ m{/$};
 $MGSfile = abs_path($MGSfile) if length $MGSfile;
+$mosaicMGSFile = File::Spec->rel2abs($mosaicMGSFile) if length $mosaicMGSFile;
 $outDpre = File::Spec->rel2abs($outDpre) if length $outDpre;
 $mosaicLociFile = File::Spec->rel2abs($mosaicLociFile) if length $mosaicLociFile;
 $MGSabundanceOverride = File::Spec->rel2abs($MGSabundanceOverride)
 	if length $MGSabundanceOverride;
+
+if (!length($mosaicMGSFile) && length($MGSfile)) {
+	$mosaicMGSFile = $MGSfile;
+	$mosaicMGSFile =~ s/\.core\z//;
+}
+die "Raw MGS assignment file for Mosaic is missing or empty: $mosaicMGSFile\n"
+	if $prepareMosaicLoci && length($MGSfile) && !-s $mosaicMGSFile;
 
 $noGeneLimit = 1 if $maxNGenes <= 0; #backward-compatible no-cap spelling; QC is unchanged
 die "-maxGenes must be at least -MGSminGenesPSmpl unless -noGeneLimit 1 is used\n"
@@ -443,11 +453,11 @@ my $MGSfileOri = $MGSfile; #save for later..
 if (length($MGSfile)) {
 	my $explicitMosaicCatalogue = length($mosaicLociFile);
 	if (!$explicitMosaicCatalogue && $prepareMosaicLoci) {
-		my $mosaicDirectory = File::Spec->catdir(dirname($MGSfile), 'mosaic');
+		my $mosaicDirectory = File::Spec->catdir(dirname($mosaicMGSFile), 'mosaic');
 		make_path($mosaicDirectory);
 		$mosaicLociFile = File::Spec->catfile(
 			$mosaicDirectory,
-			basename($MGSfile).".mosaic_loci.$clusterID.confirmed.tsv",
+			basename($mosaicMGSFile).".mosaic_loci.$clusterID.confirmed.tsv",
 		);
 	}
 	if (length($mosaicLociFile) && !-s $mosaicLociFile) {
@@ -467,7 +477,8 @@ if (length($MGSfile)) {
 			my $mosaicCommand = join(" ",
 				$mosaicScript,
 				"-GCd", shellQuote($GCd),
-				"-MGS", shellQuote($MGSfile),
+				"-MGS", shellQuote($mosaicMGSFile),
+				"-coreMGS", shellQuote($MGSfile),
 				"-clusterID", $clusterID,
 				"-threads", $mosaicThreads,
 				"-output", shellQuote($mosaicLociFile),
@@ -1768,10 +1779,10 @@ sub prepGene2MGS{
 			# parts of the cluster model and are not consumed by this workflow.
 			include_member_to_seed => 0,
 			include_gene_to_locus => 0,
-			# Only catalogue-wide reciprocal unique alignments may join seed
-			# clusters. Complete linkage prevents transitive A-B-C chaining.
+			# Catalogue-wide confirmed edges define connected components, allowing
+			# three or more alternative genes to represent the same homologue.
 			allowed_merge_pairs => \%ConfirmedMosaicPairs,
-			require_complete_linkage => 1,
+			require_complete_linkage => 0,
 			allow_confirmed_cooccurrence => 1,
 		},
 	);
@@ -3244,6 +3255,8 @@ Gene selection and biological QC:
   -minBadLociPSmpl INT          Minimum bad loci before deferring a sample
                                  [default $default->{minimum_bad_loci_for_sample_skip}]
   -mosaicLoci FILE              Confirmed catalogue-wide mosaic/outgroup table
+  -mosaicMGS FILE               Raw SB.clusters assignment table used to discover
+                                 mosaics; inferred by removing .core from -MGS
   -MGSabundance FILE            Explicit MGS abundance matrix; recommended when
                                  the MGS guide is outside its Bin_* directory
   -prepareMosaicLoci 0|1        If the catalogue is absent, create it beside the
