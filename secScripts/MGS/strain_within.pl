@@ -55,6 +55,9 @@ sub resetMGSTreeOutputs;
 sub stepComplete;
 sub finalizeSampleQC;
 sub usage;
+sub writeRecoveryRow;
+sub mergeRecoveryLogs;
+sub writeStrainSummary;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -173,7 +176,8 @@ END {
 #.61: submit missing mosaic preprocessing as a prerequisite job and wait for it
 #.62: discover mosaics across the raw MGS gene set and merge confirmed chains transitively
 #.63: keep only rerun and audit outputs while cleaning Mosaic intermediates
-my $version = 0.63;
+#.64: persist run-wide recovered/filtered MAG, Mosaic, and outgroup statistics
+my $version = 0.64;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -281,6 +285,9 @@ my $FNAstdof = "allFNAs.fna"; my $FAAstdof = "allFAAs.faa";
 my $LINKstdof = "link2GC.txt"; my $CATstdof = "all.cat";
 my $QCstdof = "sampleQC.tsv";
 my $abundF="/assemblies/metag/ContigStats/Coverage.pergene.gz";
+my $recoveryLogName = "strainRecovery.tsv";
+my $summaryLogName = "strain_within.summary.log";
+my $recoveryLogFH;
 my $bamDepthFsuffix = "-smd.bam.coverage.gz";
 my $bamDepthFsuffixSup = ".sup-smd.bam.coverage.gz";
 my $mapF2 = "";
@@ -761,6 +768,7 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 	$COGprios = {};
 	#write logs to found genes etc.
 	writeLogsStep1();
+	mergeRecoveryLogs() unless $maxSubJob;
 	stepComplete("consensus-gene extraction and publication", $stepStarted,
 		"catalogue_drivers=$extractionDriverCount",
 		"resolved_loci=$extractionLocusCount",
@@ -784,6 +792,7 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 		die "Split extraction generation is incomplete; refusing to merge worker subsets\n"
 			unless split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob);
 		mergeConspecificLogs();
+		mergeRecoveryLogs();
 		
 		#combineMGSgenes();
 	}
@@ -894,6 +903,7 @@ my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 #die;
 #go through every SpecI;
 $cnt=0; my $lcnt=-1; my @jobs; my @treeJobAccounting; my %expectedTreeOutputs; my $Nspecis = @specis;
+my %mosaicOutgroupsUsed;
 my $treeMGSVisited = 0;
 my %treeDisposition;
 my $recalcScratchRecovered = 0;
@@ -1055,6 +1065,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	# Locus names are MGS-qualified, so cached outgroup choices have no reuse
 	# after this MGS and would otherwise accumulate for the entire submission.
 	%outgroupGeneCache = ();
+	$mosaicOutgroupsUsed{$MGS} = 1 if $inputReady && exists($PreferredOutgroup{$MGS})
+		&& length($OG) && $OG eq $PreferredOutgroup{$MGS};
 	unless ($inputReady) {
 		$treeDisposition{'input awaiting repair'}++;
 		$QSBoptHR->{tmpSpace} = $tmpSHDD;
@@ -1123,6 +1135,7 @@ print "\nTree submission accounting: $treeAccounted/$Nspecis selected MGS accoun
 for my $reason (sort keys %treeDisposition) {
 	print "  $reason: $treeDisposition{$reason}\n";
 }
+writeStrainSummary(\%treeDisposition, \%mosaicOutgroupsUsed);
 print "  staged input sets recovered for -recalcTrees: $recalcScratchRecovered\n"
 	if $recalcTrees;
 if ($doSubmit) {
@@ -2487,6 +2500,117 @@ sub stepComplete {
 	print "STEP COMPLETE: $step (${elapsed})$details\n";
 }
 
+sub writeRecoveryRow {
+	my (@fields) = @_;
+	die "MAG recovery log is not open\n" unless $recoveryLogFH;
+	print {$recoveryLogFH} join("\t", @fields), "\n"
+		or die "Cannot write MAG recovery statistics: $!\n";
+}
+
+sub mergeRecoveryLogs {
+	make_path($LOGDIR) unless -d $LOGDIR;
+	my @parts = $maxSubJob
+		? map { "$LOGDIR/$recoveryLogName.$_" } 0 .. $maxSubJob - 1
+		: ("$LOGDIR/$recoveryLogName.0");
+	return unless grep { -e $_ } @parts;
+	my @missing = grep { !-s $_ } @parts;
+	die "Missing MAG recovery worker log(s): ".join(',', @missing)."\n" if @missing;
+	my $final = "$outD/$recoveryLogName";
+	my $temporary = "$final.write.$$";
+	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+	my $header_written = 0;
+	for my $part (@parts) {
+		open my $in, '<', $part or die "Cannot read $part: $!\n";
+		my $header = <$in>;
+		die "MAG recovery worker log has no header: $part\n" unless defined $header;
+		print {$out} $header unless $header_written++;
+		while (my $line = <$in>) { print {$out} $line or die "Cannot write $temporary: $!\n"; }
+		close $in or die "Cannot close $part: $!\n";
+	}
+	close $out or die "Cannot close $temporary: $!\n";
+	rename $temporary, $final or die "Cannot install $final: $!\n";
+	for my $part (@parts) { unlink $part or die "Cannot remove $part: $!\n"; }
+	print "MAG recovery accounting: $final\n";
+}
+
+sub writeStrainSummary {
+	my ($tree_disposition, $mosaic_outgroups_used) = @_;
+	my %used_mosaic_outgroup = %{$mosaic_outgroups_used || {}};
+	for my $mgs (@specis) {
+		next unless exists($PreferredOutgroup{$mgs});
+		for my $path ("$SIdirs{$mgs}/data.log", "$scratchD/outs/$mgs/data.log") {
+			next unless fileGZe($path);
+			my ($fh) = gzipopen($path, "Mosaic outgroup usage log");
+			my $line = <$fh> // '';
+			close $fh;
+			chomp $line;
+			$line =~ s/^OG://;
+			$used_mosaic_outgroup{$mgs} = 1 if length($line) && $line eq $PreferredOutgroup{$mgs};
+			last if exists($used_mosaic_outgroup{$mgs});
+		}
+	}
+	my $recovery = "$outD/$recoveryLogName";
+	my ($evaluated, $recovered, $filtered, $gene_sum, $mosaic_loci) = (0, 0, 0, 0, 0);
+	my (@recovered_genes, %filter_reason, %recovered_status, %represented_samples, %represented_mgs);
+	if (-s $recovery) {
+		open my $fh, '<', $recovery or die "Cannot read $recovery: $!\n";
+		my $header = <$fh>;
+		while (my $line = <$fh>) {
+			chomp $line;
+			next unless length $line;
+			my ($mgs, $sample, $outcome, $reason, $genes, $status, $ambiguous, $conspecific, $row_mosaic_loci) = split /\t/, $line, -1;
+			$evaluated++;
+			$represented_samples{$sample} = 1;
+			$represented_mgs{$mgs} = 1;
+			if ($outcome eq 'recovered') {
+				$recovered++;
+				$recovered_status{$status || 'unspecified'}++;
+				$gene_sum += $genes;
+				$mosaic_loci += $row_mosaic_loci || 0;
+				push @recovered_genes, 0 + $genes;
+			} else {
+				$filtered++;
+				$filter_reason{$reason || 'unspecified'}++;
+			}
+		}
+		close $fh or die "Cannot close $recovery: $!\n";
+	}
+	my $average = $recovered ? $gene_sum / $recovered : 0;
+	my $median_genes = @recovered_genes ? median(@recovered_genes) : 0;
+	my @thresholds = (10, 50, 100, 200, 500, 1000, 2000);
+	my %above;
+	for my $threshold (@thresholds) { $above{$threshold} = scalar(grep { $_ > $threshold } @recovered_genes); }
+	my @lines = (
+		"Strain-within recovery summary (v$version)",
+		"output_directory\t$outD",
+		"recovery_accounting\t".(-s $recovery ? $recovery : 'not_available'),
+		"input_samples\t".scalar(@samples),
+		"usable_samples\t".(scalar(@samples) - scalar(keys %unavailableSamples)),
+		"unavailable_samples\t".scalar(keys %unavailableSamples),
+		"selected_MGS\t".scalar(@specis),
+		"evaluated_sample_MGS\t$evaluated",
+		"recovered_MAGs\t$recovered",
+		"filtered_MAGs\t$filtered",
+		sprintf("average_genes_per_recovered_MAG\t%.2f", $average),
+		"median_genes_per_recovered_MAG\t$median_genes",
+		"recovered_mosaic_loci\t$mosaic_loci",
+		"mosaic_outgroups_used\t".scalar(keys %used_mosaic_outgroup),
+		"samples_with_evaluated_MAGs\t".scalar(keys %represented_samples),
+		"MGS_with_evaluated_samples\t".scalar(keys %represented_mgs),
+	);
+	push @lines, map { "recovered_MAGs.genes_gt_$_\t$above{$_}" } @thresholds;
+	push @lines, map { "recovered_status.$_\t$recovered_status{$_}" } sort keys %recovered_status;
+	push @lines, map { "filtered_reason.$_\t$filter_reason{$_}" } sort keys %filter_reason;
+	push @lines, map { "tree_disposition.$_\t$tree_disposition->{$_}" } sort keys %{$tree_disposition};
+	my $summary = "$outD/$summaryLogName";
+	my $temporary = "$summary.write.$$";
+	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+	print {$out} join("\n", @lines), "\n" or die "Cannot write $temporary: $!\n";
+	close $out or die "Cannot close $temporary: $!\n";
+	rename $temporary, $summary or die "Cannot install $summary: $!\n";
+	print "\n", join("\n", @lines), "\nStatistics log\t$summary\n";
+}
+
 sub cleanupMosaicIntermediates {
 	my ($prefix) = @_;
 	my @paths = (
@@ -2670,6 +2794,16 @@ sub markStrainWorkflowDirectory {
 #this routine hast to get genes out of each sample, that are needed
 #and save them to be later written per specI
 sub extractFNAFAA2genes{
+	my $recovery_part = $maxSubJob
+		? "$LOGDIR/$recoveryLogName.$subJob"
+		: "$LOGDIR/$recoveryLogName.0";
+	open $recoveryLogFH, '>', $recovery_part
+		or die "Cannot create MAG recovery log $recovery_part: $!\n";
+	print {$recoveryLogFH} join("\t", qw(
+		MGS sample outcome reason retained_genes qc_status
+		ambiguous_failure conspecific_failure recovered_mosaic_loci
+	)), "\n";
+
 	# Each worker owns one numeric suffix.  A retry must replace, not append to,
 	# that worker's previous partial extraction.
 	for my $pattern (
@@ -2768,6 +2902,8 @@ sub extractFNAFAA2genes{
 	
 	
 	appendWriteMGSgenes($writeLink);
+	close $recoveryLogFH or die "Cannot close MAG recovery log $recovery_part: $!\n";
+	undef $recoveryLogFH;
 	print "Done writing all genes to subdirs, elapsed time: " . timeNice(time - $sttime)  . "\n";
 	$appCnt=0;
 	#done at the point with gene extractions
@@ -3065,6 +3201,7 @@ sub readGenesSample_Singl{
 			if (!$COGprios1 || !@{$COGprios1}){
 				$COGpriosZero++;
 				next;
+				writeRecoveryRow($MGS, $sd3, 'filtered', 'no_selected_loci', 0, '', 0, 0, 0);
 			}
 
 			my $locConSpecGen=0; my $accAbu=0; my $LmissG=0; my $doubleCntL=0;
@@ -3169,7 +3306,11 @@ sub readGenesSample_Singl{
 				# remaining validated loci, but keep this sample out of the
 				# strict backbone and place it after backbone inference.
 			}
-			next unless @genes2;
+			unless (@genes2) {
+				writeRecoveryRow($MGS, $sd3, 'filtered', 'no_usable_loci', 0,
+					$sampleQCStatus, $double_failure, $csp_failure, 0);
+				next;
+			}
 
 			my $depth_mask = $noFilter ? [(1) x scalar(@abunGs)]
 				: abundance_pattern_mask(\@abunGs, {
@@ -3187,11 +3328,14 @@ sub readGenesSample_Singl{
 			}
 			
 			if (scalar(@genes3)< $MGStoolowGsThr){
-				$MGStoolowGskip++;next;
+				$MGStoolowGskip++;
+				writeRecoveryRow($MGS, $sd3, 'filtered', 'too_few_after_abundance',
+					scalar(@genes3), $sampleQCStatus, $double_failure, $csp_failure, 0);
+				next;
 			}
 				
 			#now write MGS into local temp storage for later tree building..
-			my $locCnt=0;
+			my $locCnt=0; my $locMosaicCnt=0;
 			my @OCstr; my @OFstr; my @OAstr; my @OLstr ;
 			foreach my $gX (  @genes3 ){
 				unless (exists($FAA{$gX}) && exists($FNA->{$gX})){
@@ -3208,6 +3352,8 @@ sub readGenesSample_Singl{
 				
 				$locCnt++;
 				#write gene out
+				my $retained_group = $LocusByID->{$curLocus{$gX}};
+				$locMosaicCnt++ if $retained_group && @{$retained_group->{genes} || []} > 1;
 				my $ng = "$sd3$SaSe" . externalLocusName($curLocus{$gX}, $MGS);
 				# Tree-facing identifier: sample|COG|primary catalogue gene.
 				#die;
@@ -3227,6 +3373,8 @@ sub readGenesSample_Singl{
 			if (scalar(@OFstr) == 0 || $locCnt < $MGStoolowGsThr){ #5 genes is really too little to be considered valid as good strain rep..
 				$MGStoolowGskip++;
 				#delete $locMGSgenes{$MGS};
+				writeRecoveryRow($MGS, $sd3, 'filtered', 'too_few_valid_sequences',
+					$locCnt, $sampleQCStatus, $double_failure, $csp_failure, $locMosaicCnt);
 				next;
 			}
 			$locMGSgenes{$MGS} = $locCnt;
@@ -3238,6 +3386,13 @@ sub readGenesSample_Singl{
 			if ($locCnt>0){
 				#save in tmp hash (faster than opening bunch of files..
 				$OAstrH{$MGS} .= join("",@OAstr);$OFstrH{$MGS} .= join("",@OFstr);
+				my $recovery_reason = $double_failure && $csp_failure
+					? 'placement_ambiguous_and_conspecific'
+					: $double_failure ? 'placement_ambiguous'
+					: $csp_failure ? 'placement_conspecific' : 'passed_qc';
+				writeRecoveryRow($MGS, $sd3, 'recovered', $recovery_reason,
+					$locCnt, $sampleQCStatus, $double_failure, $csp_failure,
+					$locMosaicCnt);
 				$OLstrH{$MGS} .= join("",@OLstr);$OCstrH{$MGS} .= join("",@OCstr);
 				my $ambiguous_fraction = $evaluableLoci ? $doubleCntL / $evaluableLoci : 0;
 				my $csp_fraction = $evaluableLoci ? $locConSpecGen / $evaluableLoci : 0;

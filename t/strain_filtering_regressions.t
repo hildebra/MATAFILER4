@@ -65,6 +65,15 @@ like($strain,
 	qr/cleanupMosaicIntermediates\(\$mosaicLociFile\).*?sub cleanupMosaicIntermediates.*?\.minimap2\.paf.*?\.outgroups\.tsv/s,
 	'strain reruns remove obsolete regenerable Mosaic artifacts once the catalogue exists');
 like($strain,
+	qr/strainRecovery\.tsv.*?mergeRecoveryLogs.*?writeRecoveryRow\(\$MGS, \$sd3, 'filtered'.*?writeRecoveryRow\(\$MGS, \$sd3, 'recovered'/s,
+	'every evaluated sample-MGS is persisted as recovered or filtered with a reason');
+like($strain,
+	qr/sub writeStrainSummary.*?average_genes_per_recovered_MAG.*?recovered_MAGs\.genes_gt_.*?filtered_reason\./s,
+	'the output-folder summary reports gene statistics, cumulative MAG thresholds, and filter reasons');
+like($strain,
+	qr/recovered_mosaic_loci.*?mosaic_outgroups_used.*?used_mosaic_outgroup/s,
+	'the summary counts retained Mosaic loci and Mosaic-derived outgroup use, including resumed inputs');
+like($strain,
 	qr/my \$mosaicThreads = \$maxCores > 0 \? \$maxCores : \$numCores.*?qsubSystem\(.*?\$mosaicThreads.*?"\$\{mosaicMemGb\}G".*?"MosaicMGS"/s,
 	'the submitted Mosaic job receives maximum strain cores and dedicated memory');
 like($mgs,
