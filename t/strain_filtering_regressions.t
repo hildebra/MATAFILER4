@@ -23,9 +23,9 @@ my $mosaic = slurp(File::Spec->catfile(
 like($strain, qr/my \$noFilter = \$disableQC \? 1 : 0/,
 	'QC disabling is controlled only by the explicit disableQC option');
 like($strain, qr/\$takeAll = \$noGeneLimit/,
-	'the no-gene-limit option controls only count capping');
-like($strain, qr/next if !\$noGeneLimit && \$locCnt >= \$maxNGenes/,
-	'unlimited mode does not accidentally reject every validated locus');
+	"the no-gene-limit option controls only count capping");
+like($strain, qr/if \(!\$noGeneLimit && \$locCnt >= \$maxNGenes\).*?\$cappedMGS\+\+.*?\$cappedLoci \+= \$locCappedLoci/s,
+	"the selected maxGenes cap reports exact capped MGS and excluded loci");
 unlike($strain, qr/\$mode\s*=\s*["']MGSall["']/,
 	'unlimited mode no longer enters the legacy QC-free MGSall mode');
 like($strain, qr/my %FILTER_DEFAULT = \(.*?sub usage \{.*?maximum_genes_per_sample/s,
@@ -90,5 +90,21 @@ like($tree,
 	'buildTree5 places deferred samples only after backbone inference');
 like($tree, qr/strict_backbone\.placements\.tsv/,
 	'buildTree5 emits auditable overlap and distance placements');
+
+like($strain, qr/minimum_mgs_genes_per_sample => 8,/,
+	"the default per-sample MGS minimum is eight retained loci");
+unlike($strain, qr/my \@binSiz = \([^\n]*\b500\b/,
+	"histogram bins no longer hard-code a 500-gene boundary");
+like($strain, qr/push \@binSiz, \$maxNGenes if !\$noGeneLimit.*?<=\$_:\$binC/s,
+	"histograms use the selected maxGenes value and inclusive labels");
+like($strain,
+	qr/my \@sampleStatColumns = qw\(.*?selected_mgs.*?candidate_mgs.*?min_genes_per_mgs.*?max_genes.*?qc_enabled.*?min_gene_depth.*?abundance_max_modified_z.*?capped_mgs.*?skip_too_few_after_abundance.*?skip_too_few_valid_sequences/s,
+	"sample TSV fields expose selected-MGS outcomes and their controlling parameters");
+like($strain,
+	qr/print \{\$sampleStatsFH\} join.*?\@sampleStatColumns.*?local \*STDOUT.*?open STDOUT, q\{>&\}, .*?STDERR.*?readGenesSample_Singl/s,
+	"sample processing writes one TSV stream while redirecting other stdout to stderr");
+like($strain,
+	qr/\$MGStoolowGskip\+\+;.*?\$skipNoSelected\+\+.*?\$skipNoUsable\+\+.*?\$skipAfterAbundance\+\+.*?\$skipAfterSequence\+\+.*?\$unaccountedMGS = \$MGScnt - \$SInum - \$MGStoolowGskip/s,
+	"every selected candidate MGS receives an explicit terminal outcome");
 
 done_testing();

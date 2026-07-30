@@ -179,7 +179,8 @@ END {
 #.64: persist run-wide recovered/filtered MAG, Mosaic, and outgroup statistics
 #.65: reuse an existing confirmed Mosaic catalogue without requiring raw inputs
 #.66: let tree recalculation extract missing inputs and use job-local tree scratch
-my $version = 0.66;
+#.67: parameter-driven gene caps, lower minimum, and per-sample TSV statistics
+my $version = 0.67;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -208,7 +209,7 @@ my %FILTER_DEFAULT = (
 	conspecific_gene_sample_max => 0.05,
 	minimum_gene_depth => 1,
 	minimum_bad_loci_for_sample_skip => 3,
-	minimum_mgs_genes_per_sample => 10,
+	minimum_mgs_genes_per_sample => 8,
 	maximum_genes_per_sample => 400,
 	breakpoint_gene_flank => 50,
 	abundance_minimum_loci => 8,
@@ -325,7 +326,7 @@ GetOptions(
 	#"cores=i"        => \$numCores, #not used any longer..
 	"maxCores=i"     => \$maxCores, #superseedes -cores, will dynamically allocate num cores based on input file size, if defined
 	"presortGenes=i" => \$presortGenes, #how many potential genes to include, of the original MGS (receovered will vary strongly  between samples)
-	"maxGenes=i"     => \$maxNGenes, #how many genes to try to include? -> will be decided on each samples
+	"maxGenes=i"     => \$maxNGenes, #maximum validated genes retained for each MGS/sample
 	"noGeneLimit=i"  => \$noGeneLimit, #remove only the gene-count cap; QC remains enabled
 	"disableQC=i"    => \$disableQC, #expert/debug option: disable biological QC independently of the gene cap
 	"mosaicLoci=s"   => \$mosaicLociFile, #catalogue-wide confirmed mosaic/outgroup table
@@ -341,7 +342,7 @@ GetOptions(
 	"MGset=s"        => \$useGTDBmg,
 	
 	#used genes fine tuning..
-	"MGSminGenesPSmpl=i" => \$MGStoolowGsThr, #less genes than this in a single sample -> rm MGS from sample for strains. default 10
+	"MGSminGenesPSmpl=i" => \$MGStoolowGsThr, #less genes than this in a single sample -> rm MGS from sample for strains. default 8
 	"multiGeneSmplMax=f" => \$multiGeneSmplMax, #default 0.15
 	"conspGeneSmplMax=f" => \$conspGeneSmplMax, #default 0.05
 	"minBadLociPSmpl=i" => \$minBadLociForSampleSkip,
@@ -2231,7 +2232,10 @@ sub createAGlist{
 sub histoMGS{#specifically for MGS..
 	my ($aref,$msg) = @_;
 	my @cnts = @{$aref};
-	my @binSiz = (10,20,30,50,70,100,200,300,500,700,1000,2000,5000,10000,1e6);
+	my @binSiz = (10,20,30,50,70,100,200,300,700,1000,2000,5000,10000,1e6);
+	push @binSiz, $maxNGenes if !$noGeneLimit && $maxNGenes > 0;
+	my %seenBin;
+	@binSiz = sort { $a <=> $b } grep { !$seenBin{$_}++ } @binSiz;
 	my %binC; #my $prevC=0;
 	foreach (@binSiz){$binC{$_} = 0;}
 	foreach my $c(@cnts){
@@ -2245,7 +2249,7 @@ sub histoMGS{#specifically for MGS..
 	}
 	#display bin counts..
 	print $msg.": ";#"Bin size distribution: ";
-	foreach (@binSiz){print " <$_:$binC{$_} " if ($binC{$_}>0);}
+	foreach (@binSiz){print " <=$_:$binC{$_} " if ($binC{$_}>0);}
 	print "\n";
 	#DEBUG
 	#print @cnts." : @cnts\n";
@@ -2506,7 +2510,7 @@ sub reportingsMGS{
 	my %smplPmgs;
 	foreach my $MGS (keys %smplsPerMGS){
 		foreach my $sm (keys %{$smplsPerMGS{$MGS}}){
-			$smplPmgs{$MGS}++ if ($smplsPerMGS{$MGS}{$sm} > 10);
+			$smplPmgs{$MGS}++ if ($smplsPerMGS{$MGS}{$sm} >= $MGStoolowGsThr);
 		}
 	}
 	my @smplNs = values(%smplPmgs);@smplNs = sort { $b <=> $a}  @smplNs;
@@ -2515,7 +2519,7 @@ sub reportingsMGS{
 		my @top = @smplNs[0 .. ($#smplNs < 4 ? $#smplNs : 4)];
 		print "Samples/MGS: QTL 50,90: $qt50 $qt90 . Top 5: ".join(" ",@top)."\n";
 	} else {
-		print "Samples/MGS: none have more than 10 candidate loci\n";
+		print "Samples/MGS: none have at least $MGStoolowGsThr candidate loci\n";
 	}
 	#die;
 	
@@ -2832,6 +2836,56 @@ sub markStrainWorkflowDirectory {
 
 
 
+my @sampleStatColumns = qw(
+	sample status selected_mgs candidate_mgs candidate_loci consensus_proteins
+	used_mgs skipped_mgs unaccounted_mgs used_fraction
+	min_genes_per_mgs presort_genes max_genes qc_enabled min_gene_depth min_bad_loci
+	multi_gene_fraction_max csp_gene_fraction_max csp_locus_score_max breakpoint_gene_flank
+	abundance_min_loci abundance_min_fold abundance_max_fold abundance_max_modified_z
+	capped_mgs capped_loci skipped_within_2_loci_of_min
+	retained_loci median_loci_per_used_mgs mean_loci_per_used_mgs
+	pre_abundance_loci post_abundance_loci missing_consensus_loci low_depth_loci
+	breakpoint_loci csp_rejected_loci ambiguous_loci abundance_filtered_loci
+	invalid_protein_loci placement_flagged_mgs skip_no_selected_loci
+	skip_no_usable_loci skip_too_few_after_abundance skip_too_few_valid_sequences
+);
+
+sub newSampleStats {
+	my ($sample, $status, $candidateMGS, $candidateLoci) = @_;
+	my %stats = map { $_ => 0 } @sampleStatColumns;
+	$stats{sample} = $sample;
+	$stats{status} = $status;
+	$stats{selected_mgs} = scalar(@specis);
+	$stats{candidate_mgs} = $candidateMGS;
+	$stats{candidate_loci} = $candidateLoci;
+	$stats{min_genes_per_mgs} = $MGStoolowGsThr;
+	$stats{presort_genes} = $presortGenes;
+	$stats{max_genes} = $noGeneLimit ? q{unlimited} : $maxNGenes;
+	$stats{qc_enabled} = $disableQC ? 0 : 1;
+	$stats{min_gene_depth} = $minDepthGene;
+	$stats{min_bad_loci} = $minBadLociForSampleSkip;
+	$stats{multi_gene_fraction_max} = $multiGeneSmplMax;
+	$stats{csp_gene_fraction_max} = $conspGeneSmplMax;
+	$stats{csp_locus_score_max} = $conspecificSpThr;
+	$stats{breakpoint_gene_flank} = $breakpointGeneFlank;
+	$stats{abundance_min_loci} = $abundanceMinimumLoci;
+	$stats{abundance_min_fold} = $abundanceMinimumFold;
+	$stats{abundance_max_fold} = $abundanceMaximumFold;
+	$stats{abundance_max_modified_z} = $abundanceMaximumModifiedZ;
+	return \%stats;
+}
+
+sub writeSampleStats {
+	my ($fh, $stats) = @_;
+	my @values = map {
+		my $value = defined($stats->{$_}) ? $stats->{$_} : q{};
+		$value =~ s/[\t\r\n]+/ /g;
+		$value;
+	} @sampleStatColumns;
+	print {$fh} join("\t", @values), "\n"
+		or die "Cannot write per-sample statistics: $!\n";
+}
+
 #this routine hast to get genes out of each sample, that are needed
 #and save them to be later written per specI
 sub extractFNAFAA2genes{
@@ -2885,14 +2939,14 @@ sub extractFNAFAA2genes{
 	foreach my $MGS (keys %perMGScnts){
 		my $perMGSgenes = $perMGScnts{$MGS};
 		push(@histoMGScnts,  $perMGSgenes);
-		if ($perMGSgenes < 10){
+		if ($perMGSgenes < $MGStoolowGsThr){
 			$lowCandidateMGS++;
-			limitedWarn('MGS with fewer than 10 candidate loci',
+			limitedWarn("MGS with fewer than $MGStoolowGsThr candidate loci",
 				"Only $perMGSgenes genes/COGs for MGS $MGS; MGS genes might be multi-copy\n")
 				unless $maxSubJob;
 		}
 	}
-	print "$lowCandidateMGS MGS have fewer than 10 candidate loci in this worker's sample slice; "
+	print "$lowCandidateMGS MGS have fewer than $MGStoolowGsThr candidate loci in this worker's sample slice; "
 		."this is expected for sparse split-worker partitions\n"
 		if $maxSubJob && $lowCandidateMGS;
 	#DBUG
@@ -2933,13 +2987,30 @@ sub extractFNAFAA2genes{
 		#DEBUG	@srtdSmpls = ("PDB3.F");
 	
 	
+	my $previousFH = select(STDOUT);
+	$| = 1;
+	select($previousFH);
+	open my $sampleStatsFH, q{>&}, \*STDOUT
+		or die "Cannot duplicate STDOUT for per-sample statistics: $!\n";
+	$previousFH = select($sampleStatsFH);
+	$| = 1;
+	select($previousFH);
+	print {$sampleStatsFH} join("\t", @sampleStatColumns), "\n"
+		or die "Cannot write per-sample statistics header: $!\n";
 	foreach my $sm (@srtdSmpls){
-		print "\nAT SMPL:: $smCnt/" . scalar(@srtdSmpls) ." $sm - ". "Elapsed time : ", timeNice(time - $sttime) . "\n";
-		#readGenesSample_Singl($sm, $OFstrHR, $OAstrHR, $OCstrHR, $OLstrHR, $writeLink,$sttime);
-		
-		readGenesSample_Singl($sm, $writeLink,$sttime,\$appCnt);
+		print STDERR "\nAT SMPL:: $smCnt/" . scalar(@srtdSmpls) ." $sm - ". "Elapsed time : ", timeNice(time - $sttime) . "\n";
+		{
+			# Keep the machine-readable sample table isolated on the original
+			# STDOUT.  Existing progress output and child-process output remain
+			# available to operators on STDERR.
+			local *STDOUT;
+			open STDOUT, q{>&}, \*STDERR
+				or die "Cannot redirect sample diagnostics to STDERR: $!\n";
+			readGenesSample_Singl($sm, $writeLink, $sttime, \$appCnt, $sampleStatsFH);
+		}
 		$smCnt++;
 	}
+	close $sampleStatsFH or die "Cannot close per-sample statistics stream: $!\n";
 	
 	
 	appendWriteMGSgenes($writeLink);
@@ -3027,7 +3098,7 @@ sub createConsFastas{
 sub readGenesSample_Singl{
 	#go into curSpl dir and extract all marked gene reps.. 
 	#write to correct format so they can be used in phylo later
-	my ($sm, $writeLink,$sttime,$bufferedSamplesRef) = @_;
+	my ($sm, $writeLink,$sttime,$bufferedSamplesRef,$sampleStatsFH) = @_;
 	#my %subG = %{$subGHR};#$_[0]};
 	
 	my %subG; my %locMGScnt;
@@ -3048,6 +3119,8 @@ sub readGenesSample_Singl{
 		}
 	}
 	print scalar(keys(%subG))." genes, " . scalar(keys(%locMGScnt)). " MGS\n";
+	my $candidateLoci = 0;
+	$candidateLoci += $_ for values %locMGScnt;
 	my @histoMGScnts = values %locMGScnt;
 	histoMGS(\@histoMGScnts, "Possible Bins in sample");
 
@@ -3067,17 +3140,26 @@ sub readGenesSample_Singl{
 	unless (exists ($map{$sd2}) ) {
 		limitedWarn('assembly groups absent from the map',
 			"Can't find map entry for $sd; assembly group will be skipped\n");
+		my $stats = newSampleStats($sm, q{driver_map_missing}, scalar(keys %locMGScnt), $candidateLoci);
+		$stats->{skipped_mgs} = $stats->{candidate_mgs};
+		writeSampleStats($sampleStatsFH, $stats);
 		return;
 	}
 	my @subGKs = keys %subG;
 	unless (@subGKs) {
 		limitedWarn('samples without candidate genes',
 			"No candidate genes found for sample $sm; sample will be skipped\n");
+		my $stats = newSampleStats($sm, q{no_candidate_genes}, scalar(keys %locMGScnt), $candidateLoci);
+		$stats->{skipped_mgs} = $stats->{candidate_mgs};
+		writeSampleStats($sampleStatsFH, $stats);
 		return;
 	}
 	unless ($subGKs[0] =~ m/^(.*)__/) {
 		limitedWarn('unparseable catalogue members',
 			"Cannot parse catalogue member '$subGKs[0]' for sample $sm; sample will be skipped\n");
+		my $stats = newSampleStats($sm, q{unparseable_catalogue_member}, scalar(keys %locMGScnt), $candidateLoci);
+		$stats->{skipped_mgs} = $stats->{candidate_mgs};
+		writeSampleStats($sampleStatsFH, $stats);
 		return;
 	}
 	#find out if other samples are in the same assmblGrp..
@@ -3094,13 +3176,20 @@ sub readGenesSample_Singl{
 	#print "YY @subSds : $sd2 $sd\n";#die;
 	#go into each sample ($sd3) from assembly group ($sd), that an assembly might be associated to (across multiple assemblies in assmblGrp)
 	foreach my $sd3 (@subSds){
+		my $sampleStats = newSampleStats($sd3, q{processing}, scalar(keys %locMGScnt), $candidateLoci);
 		if (exists $unavailableSamples{$sd3}) {
 			limitedWarn('unavailable samples', "Skipping $sd3: $unavailableSamples{$sd3}\n");
+			$sampleStats->{status} = q{unavailable};
+			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
+			writeSampleStats($sampleStatsFH, $sampleStats);
 			next;
 		}
 		unless (exists($map{$sd3}) && defined($map{$sd3}{wrdir}) && length($map{$sd3}{wrdir})) {
 			limitedWarn('samples missing map entries or working directories',
 				"Skipping $sd3: missing map entry or working directory\n");
+			$sampleStats->{status} = q{map_or_workdir_missing};
+			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
+			writeSampleStats($sampleStatsFH, $sampleStats);
 			next;
 		}
 		#print "Time A: " . timeNice(time - $sttime)  . "\n";
@@ -3112,6 +3201,9 @@ sub readGenesSample_Singl{
 		my $cD = $map{$sd3}{wrdir}."/";
 		if (-e "$cD/SMPL.empty"){
 			print ".. Empty->skip ";
+			$sampleStats->{status} = q{empty_sample};
+			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
+			writeSampleStats($sampleStatsFH, $sampleStats);
 			next;
 		}
 		my $rename = 0;
@@ -3121,6 +3213,9 @@ sub readGenesSample_Singl{
 		if ($metaGD eq ""){
 			limitedWarn('samples without assemblies',
 				"Assembly not available for $sd3 in $cD; sample will be skipped\n");
+			$sampleStats->{status} = q{assembly_missing};
+			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
+			writeSampleStats($sampleStatsFH, $sampleStats);
 			next;
 		}
 		#get NT's
@@ -3151,6 +3246,9 @@ sub readGenesSample_Singl{
 		if ($input_state eq 'missing') {
 			limitedWarn('samples without repairable consensus files',
 				"Skipping $sd3: consensus NT/AA files are incomplete and no repair VCF is available\n");
+			$sampleStats->{status} = q{consensus_missing};
+			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
+			writeSampleStats($sampleStatsFH, $sampleStats);
 			next;
 		}
 		# Rebuild both members of the pair whenever either is missing.  Writing
@@ -3167,6 +3265,9 @@ sub readGenesSample_Singl{
 		unless (fileGZe($fastaf) && fileGZe($fastafAA)){
 			print "\n=====================================\nIncomplete consensus pair $fastaf / $fastafAA -> skip sample\n=====================================\n";
 			#die;
+			$sampleStats->{status} = q{consensus_incomplete};
+			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
+			writeSampleStats($sampleStatsFH, $sampleStats);
 			next;
 		}
 		#print "Time A1: " . timeNice(time - $sttime)  . "\n";
@@ -3227,22 +3328,26 @@ sub readGenesSample_Singl{
 		my $missGene=0; my $foundGene=0; my $SInum=0; my $conspGen=0;my $SNPresFail=0;
 		my $doubleGenes=0; my $MGStoolowGskip=0;my $missAbundance=0;
 		#stats on different ways to filter genes
-		my $geneLost=0; my $conSpecFail=0; my $abundFail=0; my $doubleGsFail=0;
+		my $abundFail=0;
 		my $breakpointFail=0;
+		my ($cappedMGS, $cappedLoci, $nearThresholdMGS) = (0, 0, 0);
+		my ($preAbundanceLoci, $postAbundanceLoci) = (0, 0);
+		my ($skipNoSelected, $skipNoUsable, $skipAfterAbundance, $skipAfterSequence) = (0, 0, 0, 0);
+		my $placementFlaggedMGS = 0;
 		
 		
 		#3rd part: genes were read and renamed.. now write them out already here to save mem overall
 		#currently takes too long in large GCs..
-		my $COGpriosZero=0;
 		my $MGScnt = scalar((keys %locMGScnt));
 		foreach my $MGS (keys %locMGScnt) {
 			# The priority list is immutable during extraction, so do not copy
 			# as many as $presortGenes entries for every sample/MGS pair.
 			my $COGprios1 = $COGprios->{$MGS};
 			if (!$COGprios1 || !@{$COGprios1}){
-				$COGpriosZero++;
-				next;
+				$MGStoolowGskip++;
+				$skipNoSelected++;
 				writeRecoveryRow($MGS, $sd3, 'filtered', 'no_selected_loci', 0, '', 0, 0, 0);
+				next;
 			}
 
 			my $locConSpecGen=0; my $accAbu=0; my $LmissG=0; my $doubleCntL=0;
@@ -3340,19 +3445,21 @@ sub readGenesSample_Singl{
 				&& ($locConSpecGen / $evaluableLoci) > $conspGeneSmplMax;
 			my $sampleQCStatus = ($double_failure || $csp_failure) ? 'placement' : 'backbone';
 			if ($double_failure || $csp_failure){
+				$placementFlaggedMGS++;
 				push(@{$ConspecificMGS{$MGS}}, "$sd3" ); 
-				$doubleGsFail++ if $double_failure;
-				$conSpecFail++ if $csp_failure;
 				# Questionable loci were already masked above. Retain the
 				# remaining validated loci, but keep this sample out of the
 				# strict backbone and place it after backbone inference.
 			}
 			unless (@genes2) {
+				$MGStoolowGskip++;
+				$skipNoUsable++;
 				writeRecoveryRow($MGS, $sd3, 'filtered', 'no_usable_loci', 0,
 					$sampleQCStatus, $double_failure, $csp_failure, 0);
 				next;
 			}
 
+			$preAbundanceLoci += scalar(@genes2);
 			my $depth_mask = $noFilter ? [(1) x scalar(@abunGs)]
 				: abundance_pattern_mask(\@abunGs, {
 					minimum_count => $abundanceMinimumLoci,
@@ -3368,8 +3475,11 @@ sub readGenesSample_Singl{
 				push (@genes3, $genes2[$i]);
 			}
 			
+			$postAbundanceLoci += scalar(@genes3);
 			if (scalar(@genes3)< $MGStoolowGsThr){
 				$MGStoolowGskip++;
+				$skipAfterAbundance++;
+				$nearThresholdMGS++ if scalar(@genes3) >= ($MGStoolowGsThr > 2 ? $MGStoolowGsThr - 2 : 1);
 				writeRecoveryRow($MGS, $sd3, 'filtered', 'too_few_after_abundance',
 					scalar(@genes3), $sampleQCStatus, $double_failure, $csp_failure, 0);
 				next;
@@ -3377,6 +3487,7 @@ sub readGenesSample_Singl{
 				
 			#now write MGS into local temp storage for later tree building..
 			my $locCnt=0; my $locMosaicCnt=0;
+			my $wasCapped=0; my $locCappedLoci=0;
 			my @OCstr; my @OFstr; my @OAstr; my @OLstr ;
 			foreach my $gX (  @genes3 ){
 				unless (exists($FAA{$gX}) && exists($FNA->{$gX})){
@@ -3389,7 +3500,11 @@ sub readGenesSample_Singl{
 				if ($AAlen == 0){$SNPresFail++; next;}
 				my $num1 = $strCpy =~ tr/\-Xx//;
 				if ($num1 >= ($AAlen-1)){ $SNPresFail++; next;} #all X, exclude..
-				next if !$noGeneLimit && $locCnt >= $maxNGenes;
+				if (!$noGeneLimit && $locCnt >= $maxNGenes) {
+					$wasCapped = 1;
+					$locCappedLoci++;
+					next;
+				}
 				
 				$locCnt++;
 				#write gene out
@@ -3411,8 +3526,14 @@ sub readGenesSample_Singl{
 			}
 			
 			
+			if ($wasCapped) {
+				$cappedMGS++;
+				$cappedLoci += $locCappedLoci;
+			}
 			if (scalar(@OFstr) == 0 || $locCnt < $MGStoolowGsThr){ #5 genes is really too little to be considered valid as good strain rep..
 				$MGStoolowGskip++;
+				$skipAfterSequence++;
+				$nearThresholdMGS++ if $locCnt >= ($MGStoolowGsThr > 2 ? $MGStoolowGsThr - 2 : 1);
 				#delete $locMGSgenes{$MGS};
 				writeRecoveryRow($MGS, $sd3, 'filtered', 'too_few_valid_sequences',
 					$locCnt, $sampleQCStatus, $double_failure, $csp_failure, $locMosaicCnt);
@@ -3450,17 +3571,39 @@ sub readGenesSample_Singl{
 		#print "Time D: " . timeNice(time - $sttime)  . "\n";
 		remove_tree($locSpace) if -d $locSpace;
 
-		my @genesPmgs = values %locMGSgenes; 	@genesPmgs = sort { $a <=> $b}  @genesPmgs;
-		histoMGS(\@genesPmgs,"Detected Bin Genes:");
-		
-		print "$sd3 - Missed/MissAbund/lost/abundFilterFail/breakpointFail/SNPresFail Gs: ${missGene}/${missAbundance}/${geneLost}/${abundFail}/${breakpointFail}/$SNPresFail\tConspecGs/consMGS/doublGs/failcMGS: ${conspGen}/$conSpecFail/${doubleGenes}/$doubleGsFail\tFoundGs: $foundGene/". scalar(keys %FAA) . "\tused MGS/skipped MGS: ${SInum}/$MGStoolowGskip\t";
-		if (@genesPmgs) {
-			print "GperMGS (median,mean): " . median(@genesPmgs) . "/". int(mean(@genesPmgs)+0.5);
-		} else {
-			print "GperMGS (median,mean): 0/0";
-		}
-		if ($COGpriosZero>=$MGScnt*0.95){print " $COGpriosZero / $MGScnt no COGprio list! ";}
-		print "\n";
+		my @genesPmgs = sort { $a <=> $b } values %locMGSgenes;
+		histoMGS(\@genesPmgs,"Detected Bin Genes");
+		my $unaccountedMGS = $MGScnt - $SInum - $MGStoolowGskip;
+		limitedWarn(q{unaccounted per-sample MGS},
+			"$sd3 has $unaccountedMGS candidate MGS without a terminal outcome\n")
+			if $unaccountedMGS;
+		$sampleStats->{status} = q{processed};
+		$sampleStats->{consensus_proteins} = scalar(keys %FAA);
+		$sampleStats->{used_mgs} = $SInum;
+		$sampleStats->{skipped_mgs} = $MGStoolowGskip;
+		$sampleStats->{unaccounted_mgs} = $unaccountedMGS;
+		$sampleStats->{used_fraction} = $MGScnt ? sprintf(q{%.6f}, $SInum / $MGScnt) : 0;
+		$sampleStats->{capped_mgs} = $cappedMGS;
+		$sampleStats->{capped_loci} = $cappedLoci;
+		$sampleStats->{skipped_within_2_loci_of_min} = $nearThresholdMGS;
+		$sampleStats->{retained_loci} = $foundGene;
+		$sampleStats->{median_loci_per_used_mgs} = @genesPmgs ? median(@genesPmgs) : 0;
+		$sampleStats->{mean_loci_per_used_mgs} = @genesPmgs ? sprintf(q{%.3f}, mean(@genesPmgs)) : 0;
+		$sampleStats->{pre_abundance_loci} = $preAbundanceLoci;
+		$sampleStats->{post_abundance_loci} = $postAbundanceLoci;
+		$sampleStats->{missing_consensus_loci} = $missGene;
+		$sampleStats->{low_depth_loci} = $missAbundance;
+		$sampleStats->{breakpoint_loci} = $breakpointFail;
+		$sampleStats->{csp_rejected_loci} = $conspGen;
+		$sampleStats->{ambiguous_loci} = $doubleGenes;
+		$sampleStats->{abundance_filtered_loci} = $abundFail;
+		$sampleStats->{invalid_protein_loci} = $SNPresFail;
+		$sampleStats->{placement_flagged_mgs} = $placementFlaggedMGS;
+		$sampleStats->{skip_no_selected_loci} = $skipNoSelected;
+		$sampleStats->{skip_no_usable_loci} = $skipNoUsable;
+		$sampleStats->{skip_too_few_after_abundance} = $skipAfterAbundance;
+		$sampleStats->{skip_too_few_valid_sequences} = $skipAfterSequence;
+		writeSampleStats($sampleStatsFH, $sampleStats);
 		if ($bufferedSamplesRef) {
 			${$bufferedSamplesRef}++;
 			if (${$bufferedSamplesRef} >= $appendWriteTrigger) {
@@ -3477,11 +3620,11 @@ sub usage {
 Usage: strain_within.pl -GCd DIR -MGS FILE [options]
 
 Gene selection and biological QC:
-  -maxGenes INT                  Maximum validated loci per sample
+  -maxGenes INT                  Maximum validated loci per MGS/sample
                                  [default $default->{maximum_genes_per_sample}]
   -noGeneLimit 0|1              Remove the locus cap; QC remains active [default 0]
   -disableQC 0|1                Disable biological QC (expert/debug only) [default 0]
-  -MGSminGenesPSmpl INT         Minimum validated loci retained per sample
+  -MGSminGenesPSmpl INT         Minimum validated loci retained per MGS/sample
                                  [default $default->{minimum_mgs_genes_per_sample}]
   -multiGeneSmplMax FLOAT       Maximum ambiguous-locus fraction
                                  [default $default->{multi_gene_sample_max}]

@@ -106,7 +106,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.66;/,
+like($strain, qr/my \$version = 0\.67;/,
 	'within-strain missing-input tree recovery increments the workflow version');
 like($strain,
 	qr/my \$mosaicDirectory = File::Spec->catdir\(dirname\(\$mosaicMGSFile\), 'mosaic'\).*?basename\(\$mosaicMGSFile\)\."\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?prepare_mosaic_loci\.log/s,
@@ -236,7 +236,7 @@ like($strain,
 	qr/Partition whole assembly groups.*?samplesByGroup.*?ownedGroup.*?\$mine\{\$alias\} = 1/s,
 	'split extraction assigns complete assembly groups and their catalogue aliases to one worker');
 like($strain,
-	qr/readGenesSample_Singl\(\$sm, \$writeLink,\$sttime,\\\$appCnt\).*?\$\{\$bufferedSamplesRef\}\+\+.*?appendWriteMGSgenes\(\$writeLink\)/s,
+	qr/readGenesSample_Singl\(\$sm, \$writeLink, \$sttime, .*?\$appCnt, \$sampleStatsFH\).*?\$\{\$bufferedSamplesRef\}\+\+.*?appendWriteMGSgenes\(\$writeLink\)/s,
 	'expanded assembly-group output is flushed by sample to retain the RAM bound');
 like($strain,
 	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,
