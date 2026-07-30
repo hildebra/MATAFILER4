@@ -3211,9 +3211,12 @@ sub detectRibo(){
 			$jobName = "_RF$JNUM"; 
 			#die "RIBOFIND\n$outP/SSU_pull.sto\n"; 
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};
-			my $curSHFF = int($map{$SMPN}{inputFileSizeMB}/1024*17)+5  ;
+			my $curSHFF = int($map{$SMPN}{inputFileSizeMB}/1024*17)+5;
 			my $predefSHDD = $HDDspace{Ribos}; $predefSHDD =~ s/G$//;
-			if ($QSBoptHR->{tmpSpace} < $predefSHDD){ $QSBoptHR->{tmpSpace} = $HDDspace{Ribos};}#overwrite with larger val
+			# catchLSUSSU writes extracted reads and SortMeRNA work files below
+			# the node-local directory. Preserve the configured floor for small
+			# samples and scale above it for large inputs.
+			$curSHFF = $predefSHDD if ($curSHFF < $predefSHDD);
 			$QSBoptHR->{tmpSpace}= $curSHFF . "G";
 			
 			($jobName, $tmpCmd) = qsubSystem($logDir."RiboFinder.sh",$cmd,$numCore,$mem,$jobName,$jobd,"",1,[],$QSBoptHR);
@@ -5503,8 +5506,14 @@ sub mOTU2Mapping{
 	$cmd .= "if [ -s $finOutD/$smp.motu2.tab.gz ] ; then touch  $stone ; fi\n";
 	#$cmd .= "touch  $stone\n";
 	my $jobN = "mOT$JNUM";
-	#die $cmd."\n";
+	# mOTUs uses the job working directory for sizeable alignment intermediates.
+	# Scale the scheduler request with the compressed input instead of inheriting
+	# the generic per-job scratch default.
+	my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+	$QSBoptHR->{tmpSpace} =
+		int(($map{$curSmpl}{inputFileSizeMB} * 4) / 1024) + 15 ."G";
 	my ($jobN2,$tmpCmd) = qsubSystem($logDir."mOTU2_prof.sh",$cmd,$Ncore,"3G",$jobN,$deps,"",1,[],$QSBoptHR);
+	$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	$jobN  = $jobN2;
 	return $jobN;
 }
@@ -5744,7 +5753,17 @@ sub krakenTaxEst(){
 
 	my $jobName = "_KT$JNUM"; my $tmpCmd;
 	if (!-d $outD || !-e $krakStone){
+		my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+		my $requestedTmpSpace = $HDDspace{kraken};
+		if ($map{$curSmpl}{inputFileSizeMB} > 10000) {
+			# raw classifications plus the translated threshold series coexist in
+			# $tmpD until the final count tables have been validated.
+			$requestedTmpSpace =
+				int(($map{$curSmpl}{inputFileSizeMB} * 6) / 1024) + 30 ."G";
+		}
+		$QSBoptHR->{tmpSpace} = $requestedTmpSpace;
 		($jobName,$tmpCmd) = qsubSystem($logDir."KrkTax.sh",$cmd,$numCore,"20G",$jobName,$jobd.";$krakDeps","",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
+		$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	}
 	return $jobName;
 }
@@ -6862,9 +6881,16 @@ sub metphlanMapping{
 	$cmd .= "[ -s $finOut ] || exit 4\n";
 	$cmd .= "echo \' $mergeStr \' > $stone\n";
 	my $jobN = "MP$MFopt{DoMetaPhlan}$JNUM";
-	
+
+	# Bowtie2 materialises an uncompressed SAM in node-local storage. Its size
+	# can substantially exceed the compressed FASTQ inputs, so do not leave this
+	# submission on the generic per-job scratch default.
+	my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+	$QSBoptHR->{tmpSpace} =
+		int(($map{$curSmpl}{inputFileSizeMB} * 6) / 1024) + 15 ."G";
 	my ($jobN2,$tmpCmd) = qsubSystem($qsubFile,
 			$cmd,$Ncore,"3G",$jobN,$deps,"",1,[],$QSBoptHR);
+	$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	$jobN  = $jobN2;
 	return $jobN;
 }
@@ -8030,7 +8056,7 @@ sub spadesAssembly{
 	#print "in Assembly\n$jDepe\n";
 	#print "$finalOut/scaffolds.fasta.filt\n";
 	my $locDiskSpace = $HDDspace{assembler};
-	if ($locDiskSpace eq "-1"){
+	if ($locDiskSpace eq "-1" || $locDiskSpace eq "-1G"){
 		$locDiskSpace = $HDDspace{spades};
 	}
 	#die "$locDiskSpace\n";
@@ -8039,17 +8065,20 @@ sub spadesAssembly{
 		my $tmpCmd="";
 		$jname = "_A$JNUM";#$givenJName;
 		#$QSBoptHR->{useLongQueue} = 1;
+		my $tmpSHDD = $QSBoptHR->{tmpSpace};
+		# Every SPAdes branch writes its complete work tree to $nodeTmp.
+		# Host selection must not decide whether the matching scratch request is
+		# attached to the submitted job.
+		$QSBoptHR->{tmpSpace} = $locDiskSpace;
 		if ($hostFilter || $MFopt{SpadesAlwaysHDDnode}){
-			my $tmpSHDD = $QSBoptHR->{tmpSpace};
 			$QSBoptHR->{useLongQueue} = $MFopt{SpadesLongtime};
-			$QSBoptHR->{tmpSpace} = $locDiskSpace;
 			#$QSBoptHR->{tmpSpace} = $HDDspace{spades}; #set option how much tmp space is required, and reset afterwards
 			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,int($nCores),int($defTotMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
-			$QSBoptHR->{tmpSpace} = $tmpSHDD;
 			$QSBoptHR->{useLongQueue} = 0;
 		} else {
 			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,int($nCores),int($defTotMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 		}
+		$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		#$QSBoptHR->{useLongQueue} = 0;
 	} else {
 		print "Spades: Assembly already present in final location\n";
@@ -8428,18 +8457,26 @@ sub longRdAssembly{
 		$jname = "$nameProg$JNUM";#$givenJName;
 		$QSBoptHR->{useLongQueue} = 0;#super fast, doesn't need long queue
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};
-		if ($nameProg eq "mMDBG") {
-			my $assemblerScratchGB = $HDDspace{metaMDBG};
+		my $assemblerScratchGB = $HDDspace{assembler};
+		$assemblerScratchGB =~ s/G$//;
+		if ($assemblerScratchGB < 0) {
+			$assemblerScratchGB = $nameProg eq "mMDBG"
+				? $HDDspace{metaMDBG}
+				: int(25 + (4 * spaceInAssGrp($curSmpl,$useSupportRds) / 1024));
 			$assemblerScratchGB =~ s/G$//;
+		}
+		if ($nameProg eq "mMDBG") {
 			my $preassemblyBytes = 0;
 			$preassemblyBytes += -s $_ for grep { defined($_) && -s $_ } @hybridPreassemblies;
-			my $requestedScratchGB = hybrid_local_scratch_gb(
+			$assemblerScratchGB = hybrid_local_scratch_gb(
 				assembler_gb => $assemblerScratchGB,
 				preassembly_bytes => $preassemblyBytes,
 				max_synthetic_depth => $MFopt{hybridSyntheticMaxDepth},
 			);
-			$QSBoptHR->{tmpSpace} = $requestedScratchGB."G";
 		}
+		# Flye and metaMDBG both create their complete assembly work trees below
+		# $nodeTmp, so both require an explicit scheduler scratch request.
+		$QSBoptHR->{tmpSpace} = $assemblerScratchGB."G";
 		if ( $MFopt{SpadesAlwaysHDDnode}){
 			($jname,$tmpCmd) = qsubSystem($logDir."$nameProg.sh",$cmd,(int($nCores)),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
 		} else {

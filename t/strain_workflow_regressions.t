@@ -106,8 +106,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.65;/,
-	'within-strain submitted mosaic preparation increments the workflow version');
+like($strain, qr/my \$version = 0\.66;/,
+	'within-strain missing-input tree recovery increments the workflow version');
 like($strain,
 	qr/my \$mosaicDirectory = File::Spec->catdir\(dirname\(\$mosaicMGSFile\), 'mosaic'\).*?basename\(\$mosaicMGSFile\)\."\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?prepare_mosaic_loci\.log/s,
 	'a missing default Mosaic catalogue is named from the raw MGS table and uses a temporary job log');
@@ -176,8 +176,20 @@ like($strain,
 	qr/-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData.*?-recalcTrees must be launched by the main strainWithin process/s,
 	'tree recalculation rejects input-regeneration modes and split-worker execution');
 like($strain,
-	qr/if \(!\$recalcTrees && \(.*?Part I:: extracting relevant core MGS genes/s,
-	'tree recalculation bypasses consensus and per-MGS input regeneration');
+	qr/my \$runPartI = \(.*?\|\| \(\$recalcTrees && \$dirsNOTPrepped\).*?if \(\$runPartI\).*?Part I:: extracting relevant core MGS genes/s,
+	'tree recalculation reruns extraction when required per-MGS inputs are absent');
+like($strain,
+	qr/next if \$recalcTrees && !\$MGSneedsExtraction\{\$MGS\}.*?\$MGSneedsExtraction\{\$MGS\} = 1/s,
+	'tree recalculation limits its extraction model to MGS with missing inputs');
+like($strain,
+	qr/sub stagedMGSInputsReady .*?aggregateComplete.*?hasFreshParts.*?split_generation_complete.*?return 0 if grep.*?stagedMGSInputsReady\(\$MGS\)/s,
+	'the resume audit accepts only a complete staged FNA/FAA/category set');
+like($strain,
+	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
+	'split extraction workers inherit the missing-input MGS subset');
+like($strain,
+	qr/my \$treeTmpGb = int\(.*?\$QSBoptHR->\{tmpSpace\} = \$nodeTmpConfigured \? \$treeTmpGb : 0.*?'"\$\{TMPDIR\}\/strain_within\/'.\$MGS.'"'.*?-tmpD \$treeTmpBase/s,
+	'tree jobs request and use node-local scratch when it is configured');
 like($strain,
 	qr/my \$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
 	'tree outputs are reset only after complete published or recoverable staged per-MGS inputs are verified');

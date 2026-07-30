@@ -46,7 +46,7 @@ sub mergeConspecificLogs;
 sub timeNice;
 #sub combineMGSgenes;
 sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
-sub evalFileStatus;
+sub stagedMGSInputsReady; sub evalFileStatus;
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
 sub treeInputPrecopyCommand;
@@ -178,7 +178,8 @@ END {
 #.63: keep only rerun and audit outputs while cleaning Mosaic intermediates
 #.64: persist run-wide recovered/filtered MAG, Mosaic, and outgroup statistics
 #.65: reuse an existing confirmed Mosaic catalogue without requiring raw inputs
-my $version = 0.65;
+#.66: let tree recalculation extract missing inputs and use job-local tree scratch
+my $version = 0.66;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -625,6 +626,7 @@ my %LocusSeedProteins;
 
 my $SIgenes; my $Gene2COG; my $Gene2MGS; my $COGprios;
 my %SIdirs; #unified storage of dirs per SI (SI==MGS)
+my %MGSneedsExtraction; #selected MGS with neither published nor staged tree inputs
 
 
 
@@ -676,11 +678,13 @@ my $splitManifest = "$LOGDIR/mainExtr.generation";
 my $splitStonePrefix = "$LOGDIR/mainExtr";
 
 
-if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
+my $runPartI = (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 			|| $subJob || $redoSubmissionData
 			|| $legacyLocusOutputs
 			|| ($deepRepair && $dirsNOTPrepped)
-			|| ($repairCAT && $CatFileMiss))){
+			|| ($repairCAT && $CatFileMiss)
+			|| ($recalcTrees && $dirsNOTPrepped));
+if ($runPartI){
 	#$PhylosExist=0;
 	
 	print "\n\n----------------------------------------------------\nPart I:: extracting relevant core MGS genes (SNP consensus called) from original assemblies". "Elapsed time : ", timeNice(time - $sttime) . "\n----------------------------------------------------\n\n";
@@ -738,7 +742,10 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 		push @selfArgs, ('-mosaicLoci', $mosaicLociFile) if $mosaicLociFile ne "";
 		push @selfArgs, ('-MGSabundance', $MGSabundanceOverride)
 			if $MGSabundanceOverride ne "";
-		push @selfArgs, ('-MGSsubset', $subsMGSstr) if $subsMGSstr ne "";
+		my $workerMGSSubset = $recalcTrees
+			? join(",", grep { $MGSneedsExtraction{$_} } @specis)
+			: $subsMGSstr;
+		push @selfArgs, ('-MGSsubset', $workerMGSSubset) if $workerMGSSubset ne "";
 		push @selfArgs, ('-submissionMode', $subMode) if $subMode ne "";
 		my $selfCmd = $strain1scr . " " . join(" ", map { shellQuote($_) } @selfArgs);
 		
@@ -804,7 +811,7 @@ if (!$recalcTrees && (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 	print "\nGene extraction & redistribution finished, ready to proceed to phylogeny jobs\n";
 
 } else {
-	print "Skipping Part I, outdir already prepared.\n";
+	print "Skipping Part I, all required per-MGS inputs are already prepared.\n";
 }
 
 #die;
@@ -1021,7 +1028,11 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	#fileGZs($FNAtf) / (1024 * 1024); #size in MB
 	#$inputFNAsize*=5 if ($FNAtf =~ m/\.gz$/); #account for compressed input
 	if ( 0&& ($MSAprog==4 && $inputFNAsize>700) ){ $QSBoptHR->{useLongQueue} = 1 ;	}
-	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0";
+	my $tmpSHDD = $QSBoptHR->{tmpSpace};
+	my $nodeTmpConfigured = getProgPaths("nodeTmpDir",0) ne "";
+	my $treeTmpGb = int(($inputFNAsize * 4 + 1023) / 1024);
+	$treeTmpGb = 15 if $treeTmpGb < 15;
+	$QSBoptHR->{tmpSpace} = $nodeTmpConfigured ? $treeTmpGb : 0;
 	my $baseMemMult = 150; $baseMemMult = 50 if ($phyloProg ==3 || $phyloProg ==2);
 	my $totMem = int($inputFNAsize *$baseMemMult * $memMulti);
 	$totMem = 10000*$memMulti if ($totMem < 10000);$totMem = 220000*$memMulti if ($totMem > 220000);
@@ -1051,7 +1062,10 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 			$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
 		}
 	}
-	$Tcmd .= "-runDNDS 0 -runTheta 0 -tmpD ".shellQuote("$scratchD/$MGS/")." -map ".shellQuote($mapF)." ";
+	my $treeTmpBase = $nodeTmpConfigured
+		? '"${TMPDIR}/strain_within/'.$MGS.'"'
+		: shellQuote("$scratchD/$MGS/");
+	$Tcmd .= "-runDNDS 0 -runTheta 0 -tmpD $treeTmpBase -map ".shellQuote($mapF)." ";
 	my $postCmd = "\n\ntest -s ".shellQuote($IQtreef)."\ntouch ".shellQuote($treeStone)."\n";
 		#die "$cmd\n" if ($cnt ==10);
 	
@@ -1789,6 +1803,9 @@ sub prepGene2MGS{
 
 	my @records;
 	for my $MGS (keys %{$COGprios}) {
+		# In tree-recalculation mode, published or complete staged inputs are
+		# reused. Build an extraction model only for MGS that have no such input.
+		next if $recalcTrees && !$MGSneedsExtraction{$MGS};
 		my $rank = 0;
 		for my $seed_locus (@{$COGprios->{$MGS}}) {
 			my $gene = $SIgenes->{$MGS}{$seed_locus};
@@ -2267,6 +2284,26 @@ sub getInputSize{
 }
 
 
+sub stagedMGSInputsReady {
+	my ($MGS) = @_;
+	my $mgsDir = "$scratchD/outs/$MGS";
+	my @requiredNames = ($FNAstdof, $FAAstdof, "$CATstdof.tmp");
+	my @partNames = (@requiredNames, $LINKstdof, "$QCstdof.tmp");
+	my $aggregateComplete = !grep { !fileGZe("$mgsDir/$_") } @requiredNames;
+	my $workerCount = $maxSubJob || 1;
+	my %parts = map {
+		$_ => [exact_worker_parts("$mgsDir/$_", $workerCount)]
+	} @partNames;
+	my $hasFreshParts = grep { @{$parts{$_}} } @partNames;
+	return $aggregateComplete unless $hasFreshParts;
+	if ($maxSubJob && !split_generation_complete(
+			"$LOGDIR/mainExtr.generation", "$LOGDIR/mainExtr", $maxSubJob)) {
+		return $aggregateComplete;
+	}
+	return 0 if grep { !@{$parts{$_}} } @requiredNames;
+	return 1;
+}
+
 sub evalFileStatus{
 	my $dirsNOTPrepped = 0; my $CatFileMiss = 0;my $CatNotPrepped = 0; my $treeAbsent=0;
 	my $doneDirs=0;
@@ -2319,19 +2356,19 @@ sub evalFileStatus{
 					"$MGS does not use the required sample|COG|primaryGeneID identifier format; scheduling input regeneration\n");
 				$legacyLocusOutputs++;
 				$legacyLocusMGS{$MGS} = 1;
+				$MGSneedsExtraction{$MGS} = 1;
 				$dirsNOTPrepped++;
 				$CatFileMiss++;
 				next;
 			}
 		}
 		if (!fileGZe("$SIdirs{$MGS}/$CATstdof")){
-			$CatFileMiss ++ ; 
-			my @multiM=glob("$scratchD/outs/$MGS/all.cat.tmp*");
-			if ( -e "$outD2/all.cat.tmp" || @multiM ){
-				$CatNotPrepped ++; #tmp file exists, needs Part II
+			$CatFileMiss ++ ;
+			if (stagedMGSInputsReady($MGS)) {
+				$CatNotPrepped ++; #complete staged input exists and only needs Part II
 			} else {
-				#print "$scratchD/outs/$MGS\n";
-				$dirsNOTPrepped ++; #needs Part I
+				$MGSneedsExtraction{$MGS} = 1;
+				$dirsNOTPrepped ++; #missing or incomplete input requires Part I
 			}
 			#print "$SIdirs{$MGS}\n";
 			#system "rm $SIdirs{$MGS}\n";

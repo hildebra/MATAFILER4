@@ -337,6 +337,24 @@ like($mataf4, qr/\$packageSample\.synthetic\.fastq\.gz/,
 like($mataf4,
 	qr/hybrid_local_scratch_gb\(.*?assembler_gb.*?preassembly_bytes.*?max_synthetic_depth/s,
 	'metaMDBG local scratch combines assembler space with synthetic-read space');
+like($mataf4,
+	qr/sub spadesAssembly.*?\$QSBoptHR->\{tmpSpace\} = \$locDiskSpace;.*?if \(\$hostFilter \|\| \$MFopt\{SpadesAlwaysHDDnode\}\).*?qsubSystem.*?else \{.*?qsubSystem.*?\$QSBoptHR->\{tmpSpace\} = \$tmpSHDD/s,
+	'both SPAdes host-selection branches request and then restore assembly scratch');
+like($mataf4,
+	qr/sub longRdAssembly.*?my \$assemblerScratchGB = \$HDDspace\{assembler\}.*?if \(\$nameProg eq "mMDBG"\).*?hybrid_local_scratch_gb.*?\$QSBoptHR->\{tmpSpace\} = \$assemblerScratchGB\."G".*?qsubSystem/s,
+	'Flye and metaMDBG submissions explicitly request their node-local assembly space');
+like($mataf4,
+	qr/sub detectRibo.*?\$curSHFF = \$predefSHDD if \(\$curSHFF < \$predefSHDD\).*?\$QSBoptHR->\{tmpSpace\}= \$curSHFF \. "G".*?RiboFinder\.sh/s,
+	'ribosomal extraction scratch keeps its configured floor while scaling with input');
+like($mataf4,
+	qr/sub metphlanMapping.*?inputFileSizeMB\} \* 6.*?qsubSystem\(\$qsubFile.*?\$QSBoptHR->\{tmpSpace\} = \$previousTmpSpace/s,
+	'MetaPhlAn requests input-scaled scratch for its uncompressed SAM');
+like($mataf4,
+	qr/sub mOTU2Mapping.*?inputFileSizeMB\} \* 4.*?qsubSystem\(\$logDir\."mOTU2_prof\.sh".*?\$QSBoptHR->\{tmpSpace\} = \$previousTmpSpace/s,
+	'mOTUs requests input-scaled scratch and restores the submission default');
+like($mataf4,
+	qr/sub krakenTaxEst.*?my \$requestedTmpSpace = \$HDDspace\{kraken\}.*?inputFileSizeMB\} \* 6.*?qsubSystem\(\$logDir\."KrkTax\.sh".*?\$QSBoptHR->\{tmpSpace\} = \$previousTmpSpace/s,
+	'Kraken taxonomy requests space for raw and translated local intermediates');
 unlike($mataf4, qr/zcat \$nodeTmp\/contigs\.fasta\.gz/,
 	'metaMDBG recovery no longer uses an unchecked zcat/remove chain');
 like($mataf4,
