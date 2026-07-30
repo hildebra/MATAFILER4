@@ -40,6 +40,7 @@ sub histoMGS;
 sub readGenesSample_Singl;
 sub reportingsMGS;
 sub prepRun;
+sub printEarlyRunHeader;
 sub prepGene2MGS;
 sub createAGlist; sub preComputeConsSNP;
 sub mergeConspecificLogs;
@@ -57,6 +58,8 @@ sub usage;
 sub writeRecoveryRow;
 sub mergeRecoveryLogs;
 sub indexRecoveryRow;
+sub writeRecoveryContributionIndex;
+sub loadRecoveryContributionIndex;
 sub writeStrainSummary;
 
 sub limitedWarn;sub limitedNotice;
@@ -183,7 +186,8 @@ END {
 #.68: remove blank per-sample progress separators from captured output
 #.69: delegate tree input publication and completion checkpoints to buildTree5
 #.70: require and cardinality-check every recovered split-worker contribution
-my $version = 0.70;
+#.71: persist merge provenance, isolate per-sample TSV output, and print startup immediately
+my $version = 0.71;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -450,6 +454,7 @@ die "-maxGenes must be at least -MGSminGenesPSmpl unless -noGeneLimit 1 is used\
 $maxNGenes = -1 if $noGeneLimit;
 
 $onlySubmit = 1 if $recalcTrees; #tree-only recovery reuses published or complete staged inputs
+printEarlyRunHeader();
 
 @subsetMGS = split /,/,$subsMGSstr if ($subsMGSstr ne "");
 #print "SUBSMGS:: @subsetMGS\n";
@@ -679,7 +684,8 @@ my $splitGeneration = '';
 my $splitManifest = "$LOGDIR/mainExtr.generation";
 my $splitStonePrefix = "$LOGDIR/mainExtr";
 my (%recoveryWorkersByMGS, %recoveryRecordsByMGS, %recoveryRowsByMGS);
-my %recoverySamplesByMGS;
+my (%recoveryWorkerRecordsByMGS, %recoveryWorkerRowsByMGS);
+my (%recoverySamplesByMGS, %recoveryUniqueSamplesByMGS);
 my $recoveryContributionIndexReady = 0;
 
 
@@ -818,6 +824,7 @@ if ($runPartI){
 } else {
 	print "Skipping Part I, all required per-MGS inputs are already prepared.\n";
 }
+loadRecoveryContributionIndex() unless $recoveryContributionIndexReady;
 
 #die;
 
@@ -1218,7 +1225,11 @@ exit(0);
 #	combineMGSgenesDir($MGS,$outD2);
 sub combineMGSgenesDir{
 	my ($MGS,$tmpD,$outD2) = @_;
-	my @required = ("$tmpD/$FNAstdof", "$tmpD/$FAAstdof", "$tmpD/$CATstdof.tmp");
+	my @required = (
+		"$tmpD/$FNAstdof", "$tmpD/$FAAstdof", "$tmpD/$LINKstdof",
+		"$tmpD/$CATstdof.tmp", "$tmpD/$QCstdof.tmp",
+	);
+	my $mergeCheckpoint = "$tmpD/merge.complete.tsv";
 	my @filesets = (
 		[$FNAstdof,       "$tmpD/$FNAstdof",       "$tmpD/$FNAstdof"],
 		[$FAAstdof,       "$tmpD/$FAAstdof",       "$tmpD/$FAAstdof"],
@@ -1240,6 +1251,7 @@ sub combineMGSgenesDir{
 	my $hasFreshParts = grep { @{$partsByName{$_}} }
 		($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp");
 	my $aggregateComplete = !grep { !fileGZe($_) } @required;
+	$aggregateComplete &&= -s $mergeCheckpoint;
 	return $aggregateComplete unless $hasFreshParts;
 	if ($maxSubJob && !split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob)) {
 		limitedWarn('partial worker retries without a complete generation',
@@ -1247,45 +1259,36 @@ sub combineMGSgenesDir{
 		return $aggregateComplete;
 	}
 
-	my @expectedWorkers;
-	if ($maxSubJob && !$recoveryContributionIndexReady) {
+	unless ($recoveryContributionIndexReady) {
 		limitedWarn('missing recovery contribution index',
-			"Rejecting split-worker merge for $MGS: no worker contribution index is available; retaining worker parts\n");
-		return 0;
+			"Rejecting fresh merge for $MGS: no recovery contribution index is available; retaining worker parts\n");
+		return $aggregateComplete;
 	}
-	if ($recoveryContributionIndexReady) {
-		@expectedWorkers = sort { $a <=> $b } keys %{$recoveryWorkersByMGS{$MGS} || {}};
-		unless (@expectedWorkers) {
-			limitedWarn('worker parts without recovery rows',
-				"Rejecting worker parts for $MGS: the recovery ledger has no recovered samples for this MGS\n");
-			return 0;
-		}
-		my %expected = map { $_ => 1 } @expectedWorkers;
-		my @contributorNames = ($FNAstdof, $FAAstdof, "$CATstdof.tmp", "$QCstdof.tmp");
-		push @contributorNames, $LINKstdof if @{$partsByName{$LINKstdof}};
-		for my $name (@contributorNames) {
-			my @actual = sort { $a <=> $b } keys %{$partByWorker{$name} || {}};
-			my @missing = grep { !exists $partByWorker{$name}{$_} } @expectedWorkers;
-			my @unexpected = grep { !$expected{$_} } @actual;
-			if (@missing || @unexpected) {
-				my $details = 'missing='.(@missing ? join(',', @missing) : 'none')
-					.' unexpected='.(@unexpected ? join(',', @unexpected) : 'none');
-				limitedWarn('incomplete worker contribution set',
-					"Rejecting merge for $MGS/$name: $details; retaining worker parts\n");
-				return 0;
-			}
-		}
-	} else {
-		for my $requiredName ($FNAstdof, $FAAstdof, "$CATstdof.tmp") {
-			unless (@{$partsByName{$requiredName}}) {
-				limitedWarn('worker extractions missing required parts',
-					"Fresh worker extraction for $MGS lacks required $requiredName parts; retaining parts for repair\n");
-				return 0;
-			}
+	my @expectedWorkers = sort { $a <=> $b }
+		keys %{$recoveryWorkersByMGS{$MGS} || {}};
+	unless (@expectedWorkers) {
+		limitedWarn('worker parts without recovery rows',
+			"Rejecting worker parts for $MGS: the recovery ledger has no recovered samples for this MGS\n");
+		return $aggregateComplete;
+	}
+	my %expected = map { $_ => 1 } @expectedWorkers;
+	my @contributorNames = (
+		$FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp",
+	);
+	for my $name (@contributorNames) {
+		my @actual = sort { $a <=> $b } keys %{$partByWorker{$name} || {}};
+		my @missing = grep { !exists $partByWorker{$name}{$_} } @expectedWorkers;
+		my @unexpected = grep { !$expected{$_} } @actual;
+		if (@missing || @unexpected) {
+			my $details = 'missing='.(@missing ? join(',', @missing) : 'none')
+				.' unexpected='.(@unexpected ? join(',', @unexpected) : 'none');
+			limitedWarn('incomplete worker contribution set',
+				"Rejecting merge for $MGS/$name: $details; retaining worker parts\n");
+			return $aggregateComplete;
 		}
 	}
 
-	my (%mergeFileByName, %observedRows);
+	my (%mergeFileByName, %observedRows, %identifierDigest);
 	my @consumedParts;
 	for my $set (@filesets) {
 		my ($name, undef, $outfile) = @$set;
@@ -1295,19 +1298,38 @@ sub combineMGSgenesDir{
 		open my $out, '>', $mergeFile or die "Cannot create $mergeFile: $!\n";
 		binmode $out;
 		my $rows = 0;
+		my $digest = $name eq "$QCstdof.tmp" ? undef : Digest::SHA->new(256);
 		for my $file (@parts) {
 			open my $part_fh, '<', $file or die "Cannot read $file: $!\n";
 			binmode $part_fh;
 			while (my $line = <$part_fh>) {
 				print {$out} $line or die "Cannot write $mergeFile: $!\n";
-				$rows++ if ($name eq $FNAstdof || $name eq $FAAstdof)
-					? $line =~ /^>/ : $line =~ /\S/;
+				my $identifier;
+				if ($name eq $FNAstdof || $name eq $FAAstdof) {
+					if ($line =~ /^>(\S+)/) {
+						$rows++;
+						$identifier = $1;
+					}
+				} elsif ($line =~ /\S/) {
+					$rows++;
+					my @field = split /\t/, $line, -1;
+					if ($name eq "$CATstdof.tmp") {
+						die "Malformed category worker row in $file\n" unless @field >= 4 && length $field[3];
+						$identifier = $field[3];
+					} elsif ($name eq $LINKstdof) {
+						die "Malformed link worker row in $file\n" unless @field && length $field[0];
+						$identifier = $field[0];
+					}
+				}
+				$identifier =~ s/[\r\n]+\z// if defined $identifier;
+				$digest->add($identifier, "\n") if $digest && defined $identifier;
 			}
 			close $part_fh or die "Cannot close $file: $!\n";
 		}
 		close $out or die "Cannot close $mergeFile: $!\n";
 		$mergeFileByName{$name} = $mergeFile;
 		$observedRows{$name} = $rows;
+		$identifierDigest{$name} = $digest->hexdigest if $digest;
 		push @consumedParts, @parts;
 	}
 
@@ -1317,10 +1339,17 @@ sub combineMGSgenesDir{
 	my $catRows = $observedRows{"$CATstdof.tmp"} // -1;
 	push @validationErrors, "FNA=$fnaRows FAA=$faaRows category=$catRows"
 		unless $fnaRows >= 0 && $fnaRows == $faaRows && $fnaRows == $catRows;
+	my $linkRows = $observedRows{$LINKstdof} // -1;
+	push @validationErrors, "links=$linkRows FNA=$fnaRows" unless $linkRows == $fnaRows;
+	for my $name ($FAAstdof, "$CATstdof.tmp", $LINKstdof) {
+		push @validationErrors, "identifier order differs: $FNAstdof vs $name"
+			unless ($identifierDigest{$FNAstdof} // '') eq ($identifierDigest{$name} // '');
+	}
 	if ($recoveryContributionIndexReady) {
 		my $expectedRecords = $recoveryRecordsByMGS{$MGS} // 0;
 		my $expectedRows = $recoveryRowsByMGS{$MGS} // 0;
-		my $uniqueSamples = scalar keys %{$recoverySamplesByMGS{$MGS} || {}};
+		my $uniqueSamples = $recoveryUniqueSamplesByMGS{$MGS}
+			// scalar keys %{$recoverySamplesByMGS{$MGS} || {}};
 		push @validationErrors, "records=$fnaRows expected=$expectedRecords"
 			unless $fnaRows == $expectedRecords;
 		push @validationErrors, "QC=".($observedRows{"$QCstdof.tmp"} // -1)." expected=$expectedRows"
@@ -1336,15 +1365,30 @@ sub combineMGSgenesDir{
 		unlink $_ for values %mergeFileByName;
 		limitedWarn('worker merge count mismatch',
 			"Rejecting merge for $MGS: ".join('; ', @validationErrors)."; retaining worker parts\n");
-		return 0;
+		return $aggregateComplete;
 	}
 
+	# Invalidate the previous commit only after the complete retry has passed all
+	# contributor, cardinality, and identifier-order checks. A validation error or
+	# crash while constructing merge files therefore leaves the old aggregate usable.
+	unlink $mergeCheckpoint or die "Cannot invalidate stale merge checkpoint $mergeCheckpoint: $!\n"
+		if -e $mergeCheckpoint;
 	for my $set (@filesets) {
 		my ($name, undef, $outfile) = @$set;
 		next unless exists $mergeFileByName{$name};
 		rename $mergeFileByName{$name}, $outfile or die "Cannot replace $outfile: $!\n";
 	}
+	my $checkpointTemporary = "$mergeCheckpoint.write.$$";
+	open my $checkpointFH, '>', $checkpointTemporary
+		or die "Cannot create $checkpointTemporary: $!\n";
+	print {$checkpointFH} join("\t", "strain-merge-v1", $MGS,
+		$recoveryRowsByMGS{$MGS} // 0, $fnaRows, $identifierDigest{$FNAstdof} // ''), "\n"
+		or die "Cannot write $checkpointTemporary: $!\n";
+	close $checkpointFH or die "Cannot close $checkpointTemporary: $!\n";
+	rename $checkpointTemporary, $mergeCheckpoint
+		or die "Cannot publish $mergeCheckpoint: $!\n";
 	my $complete = !grep { !fileGZe($_) } @required;
+	$complete &&= -s $mergeCheckpoint;
 	if ($complete) {
 		for my $part (@consumedParts) {
 			unlink $part or warn "Cannot remove combined part $part: $!\n";
@@ -2052,9 +2096,9 @@ sub prepRun{
 	#---------------
 	#everything after is only for main submission job..
 	if ($subJob){
-		print "=============\n=============\nStrain_within v$version, subjob ${subJob}/$maxSubJob\n=============\n=============\n";
+		print "----- Resolved run configuration: worker ${subJob}/$maxSubJob -----\n";
 	} else {
-			print "============= Strain_within v$version =============\n";
+		print "----- Resolved run configuration -----\n";
 		print "Creating within species strains for ${mode}s in $GCd\n";
 		print "Outdir: $outD\nTmpDir: $locTmpDir\nScratchDir: $scratchD\n";
 		print "GC dir: $GCd\nIn Cluster: $MGSfile\nCores: $numCores (max: ${maxCores})\n";
@@ -2357,14 +2401,17 @@ sub getInputSize{
 sub stagedMGSInputsReady {
 	my ($MGS) = @_;
 	my $mgsDir = "$scratchD/outs/$MGS";
-	my @requiredNames = ($FNAstdof, $FAAstdof, "$CATstdof.tmp");
-	my @partNames = (@requiredNames, $LINKstdof, "$QCstdof.tmp");
+	my @requiredNames = (
+		$FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp",
+	);
+	my $mergeCheckpoint = "$mgsDir/merge.complete.tsv";
 	my $aggregateComplete = !grep { !fileGZe("$mgsDir/$_") } @requiredNames;
+	$aggregateComplete &&= -s $mergeCheckpoint;
 	my $workerCount = $maxSubJob || 1;
 	my %parts = map {
 		$_ => [exact_worker_parts("$mgsDir/$_", $workerCount)]
-	} @partNames;
-	my $hasFreshParts = grep { @{$parts{$_}} } @partNames;
+	} @requiredNames;
+	my $hasFreshParts = grep { @{$parts{$_}} } @requiredNames;
 	return $aggregateComplete unless $hasFreshParts;
 	if ($maxSubJob && !split_generation_complete(
 			"$LOGDIR/mainExtr.generation", "$LOGDIR/mainExtr", $maxSubJob)) {
@@ -2633,7 +2680,71 @@ sub indexRecoveryRow {
 	$recoveryWorkersByMGS{$mgs}{$worker} = 1;
 	$recoveryRecordsByMGS{$mgs} += $retained_genes;
 	$recoveryRowsByMGS{$mgs}++;
+	$recoveryWorkerRecordsByMGS{$mgs}{$worker} += $retained_genes;
+	$recoveryWorkerRowsByMGS{$mgs}{$worker}++;
 	$recoverySamplesByMGS{$mgs}{$sample} = 1;
+}
+
+sub writeRecoveryContributionIndex {
+	my $path = "$LOGDIR/$recoveryLogName.contributors.tsv";
+	my $temporary = "$path.write.$$";
+	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+	print {$out} join("\t", qw(MGS worker recovered_rows retained_records unique_samples)), "\n"
+		or die "Cannot write $temporary: $!\n";
+	for my $mgs (sort keys %recoveryWorkersByMGS) {
+		my $unique = scalar keys %{$recoverySamplesByMGS{$mgs} || {}};
+		$recoveryUniqueSamplesByMGS{$mgs} = $unique;
+		die "Recovery ledger contains duplicate recovered samples for $mgs\n"
+			unless $unique == ($recoveryRowsByMGS{$mgs} // 0);
+		for my $worker (sort { $a <=> $b } keys %{$recoveryWorkersByMGS{$mgs}}) {
+			print {$out} join("\t", $mgs, $worker,
+				$recoveryWorkerRowsByMGS{$mgs}{$worker} // 0,
+				$recoveryWorkerRecordsByMGS{$mgs}{$worker} // 0, $unique), "\n"
+				or die "Cannot write $temporary: $!\n";
+		}
+	}
+	close $out or die "Cannot close $temporary: $!\n";
+	rename $temporary, $path or die "Cannot publish $path: $!\n";
+}
+
+sub loadRecoveryContributionIndex {
+	my $path = "$LOGDIR/$recoveryLogName.contributors.tsv";
+	return 0 unless -s $path;
+	open my $in, '<', $path or die "Cannot read $path: $!\n";
+	my $header = <$in> // '';
+	chomp $header;
+	die "Unsupported recovery contribution index header in $path\n"
+		unless $header eq join("\t", qw(MGS worker recovered_rows retained_records unique_samples));
+	while (my $line = <$in>) {
+		chomp $line;
+		next unless length $line;
+		my ($mgs, $worker, $rows, $records, $unique) = split /\t/, $line, -1;
+		die "Malformed recovery contribution index row in $path: $line\n"
+			unless defined($mgs) && length($mgs) && defined($unique)
+				&& $worker =~ /^\d+\z/ && $rows =~ /^\d+\z/
+				&& $records =~ /^\d+\z/ && $unique =~ /^\d+\z/;
+		die "Duplicate recovery contribution index row for $mgs worker $worker\n"
+			if $recoveryWorkersByMGS{$mgs}{$worker};
+		$recoveryWorkersByMGS{$mgs}{$worker} = 1;
+		$recoveryWorkerRowsByMGS{$mgs}{$worker} = $rows;
+		$recoveryWorkerRecordsByMGS{$mgs}{$worker} = $records;
+		$recoveryRowsByMGS{$mgs} += $rows;
+		$recoveryRecordsByMGS{$mgs} += $records;
+		if (exists $recoveryUniqueSamplesByMGS{$mgs}) {
+			die "Inconsistent unique-sample count for $mgs in $path\n"
+				unless $recoveryUniqueSamplesByMGS{$mgs} == $unique;
+		} else {
+			$recoveryUniqueSamplesByMGS{$mgs} = $unique;
+		}
+	}
+	close $in or die "Cannot close $path: $!\n";
+	for my $mgs (keys %recoveryRowsByMGS) {
+		die "Recovery contribution index has duplicate samples for $mgs\n"
+			unless $recoveryRowsByMGS{$mgs} == $recoveryUniqueSamplesByMGS{$mgs};
+	}
+	$recoveryContributionIndexReady = 1;
+	warn "Loaded recovery contribution index: $path\n";
+	return 1;
 }
 
 sub mergeRecoveryLogs {
@@ -2658,6 +2769,7 @@ sub mergeRecoveryLogs {
 		close $in or die "Cannot close $part: $!\n";
 	}
 	close $out or die "Cannot close $temporary: $!\n";
+	writeRecoveryContributionIndex();
 	rename $temporary, $final or die "Cannot install $final: $!\n";
 	for my $part (@parts) { unlink $part or die "Cannot remove $part: $!\n"; }
 	$recoveryContributionIndexReady = 1;
@@ -2740,6 +2852,26 @@ sub writeStrainSummary {
 	close $out or die "Cannot close $temporary: $!\n";
 	rename $temporary, $summary or die "Cannot install $summary: $!\n";
 	print "\n", join("\n", @lines), "\nStatistics log\t$summary\n";
+}
+
+sub printEarlyRunHeader {
+	my $earlyMode = length($MGSfile) ? 'MGS' : 'FMG';
+	my $inputDirectory = length($MGSfile) ? dirname($MGSfile) : $GCd;
+	my $requestedOutput = length($outDpre)
+		? $outDpre : File::Spec->catdir($inputDirectory, 'intra_phylo');
+	my $selected = select(STDOUT);
+	$| = 1;
+	select($selected);
+	print "============= Strain_within v$version =============\n";
+	print "Started: ".scalar(localtime())."\n";
+	print "Mode: $earlyMode".($subJob ? "; split worker $subJob/$maxSubJob" : '')."\n";
+	print "GC dir: $GCd\n";
+	print "MGS input: ".(length($MGSfile) ? $MGSfile : '(FMG mode)')."\n";
+	print "Requested output: $requestedOutput\n";
+	print "Cores: $numCores (max: $maxCores); submit=$doSubmit; "
+		."onlySubmit=$onlySubmit; recalcTrees=$recalcTrees; redoSubmissionData=$redoSubmissionData\n";
+	print "Initializing paths, maps, and catalogues...\n";
+	print "==============================================\n";
 }
 
 sub cleanupMosaicIntermediates {
@@ -2875,7 +3007,7 @@ sub markStrainWorkflowDirectory {
 
 
 my @sampleStatColumns = qw(
-	sample status selected_mgs candidate_mgs candidate_loci consensus_proteins
+	sample worker assembly_driver status selected_mgs candidate_mgs candidate_loci consensus_proteins
 	used_mgs skipped_mgs unaccounted_mgs used_fraction
 	min_genes_per_mgs presort_genes max_genes qc_enabled min_gene_depth min_bad_loci
 	multi_gene_fraction_max csp_gene_fraction_max csp_locus_score_max breakpoint_gene_flank
@@ -2889,9 +3021,11 @@ my @sampleStatColumns = qw(
 );
 
 sub newSampleStats {
-	my ($sample, $status, $candidateMGS, $candidateLoci) = @_;
+	my ($sample, $status, $candidateMGS, $candidateLoci, $assemblyDriver) = @_;
 	my %stats = map { $_ => 0 } @sampleStatColumns;
 	$stats{sample} = $sample;
+	$stats{worker} = $subJob;
+	$stats{assembly_driver} = defined($assemblyDriver) ? $assemblyDriver : $sample;
 	$stats{status} = $status;
 	$stats{selected_mgs} = scalar(@specis);
 	$stats{candidate_mgs} = $candidateMGS;
@@ -2914,13 +3048,20 @@ sub newSampleStats {
 }
 
 sub writeSampleStats {
-	my ($fh, $stats) = @_;
+	my ($fh, $stats, $seen) = @_;
+	my $sample = $stats->{sample} // '';
+	die "Cannot emit per-sample statistics without a sample name\n" unless length $sample;
+	die "Per-sample statistics would contain a duplicate row for $sample\n"
+		if $seen && $seen->{$sample}++;
 	my @values = map {
 		my $value = defined($stats->{$_}) ? $stats->{$_} : q{};
 		$value =~ s/[\t\r\n]+/ /g;
 		$value;
 	} @sampleStatColumns;
-	print {$fh} join("\t", @values), "\n"
+	my $row = join("\t", @values);
+	die "Refusing to emit an empty per-sample statistics row for $sample\n"
+		unless $row =~ /\S/;
+	print {$fh} $row, "\n"
 		or die "Cannot write per-sample statistics: $!\n";
 }
 
@@ -3035,20 +3176,24 @@ sub extractFNAFAA2genes{
 	select($previousFH);
 	print {$sampleStatsFH} join("\t", @sampleStatColumns), "\n"
 		or die "Cannot write per-sample statistics header: $!\n";
-	foreach my $sm (@srtdSmpls){
-		print STDERR "AT SMPL:: $smCnt/" . scalar(@srtdSmpls) ." $sm - ". "Elapsed time : ", timeNice(time - $sttime) . "\n";
-		{
-			# Keep the machine-readable sample table isolated on the original
-			# STDOUT.  Existing progress output and child-process output remain
-			# available to operators on STDERR.
-			local *STDOUT;
-			open STDOUT, q{>&}, \*STDERR
-				or die "Cannot redirect sample diagnostics to STDERR: $!\n";
-			readGenesSample_Singl($sm, $writeLink, $sttime, \$appCnt, $sampleStatsFH);
+	my %sampleStatsSeen;
+	{
+		# Redirect diagnostics once for the complete accumulation loop. Reopening
+		# STDOUT for every assembly group produced empty scheduler records on some
+		# systems. The duplicated handle above remains the TSV-only stream.
+		local *STDOUT;
+		open STDOUT, q{>&}, \*STDERR
+			or die "Cannot redirect sample diagnostics to STDERR: $!\n";
+		foreach my $sm (@srtdSmpls){
+			print STDERR "AT SMPL:: $smCnt/" . scalar(@srtdSmpls) ." $sm - ". "Elapsed time : ", timeNice(time - $sttime) . "\n";
+			readGenesSample_Singl(
+				$sm, $writeLink, $sttime, \$appCnt, $sampleStatsFH, \%sampleStatsSeen,
+			);
+			$smCnt++;
 		}
-		$smCnt++;
 	}
 	close $sampleStatsFH or die "Cannot close per-sample statistics stream: $!\n";
+	warn "Per-sample statistics emitted: ".scalar(keys %sampleStatsSeen)." nonempty row(s)\n";
 	
 	
 	appendWriteMGSgenes($writeLink);
@@ -3136,7 +3281,7 @@ sub createConsFastas{
 sub readGenesSample_Singl{
 	#go into curSpl dir and extract all marked gene reps.. 
 	#write to correct format so they can be used in phylo later
-	my ($sm, $writeLink,$sttime,$bufferedSamplesRef,$sampleStatsFH) = @_;
+	my ($sm, $writeLink,$sttime,$bufferedSamplesRef,$sampleStatsFH,$sampleStatsSeen) = @_;
 	#my %subG = %{$subGHR};#$_[0]};
 	
 	my %subG; my %locMGScnt;
@@ -3180,7 +3325,7 @@ sub readGenesSample_Singl{
 			"Can't find map entry for $sd; assembly group will be skipped\n");
 		my $stats = newSampleStats($sm, q{driver_map_missing}, scalar(keys %locMGScnt), $candidateLoci);
 		$stats->{skipped_mgs} = $stats->{candidate_mgs};
-		writeSampleStats($sampleStatsFH, $stats);
+		writeSampleStats($sampleStatsFH, $stats, $sampleStatsSeen);
 		return;
 	}
 	my @subGKs = keys %subG;
@@ -3189,7 +3334,7 @@ sub readGenesSample_Singl{
 			"No candidate genes found for sample $sm; sample will be skipped\n");
 		my $stats = newSampleStats($sm, q{no_candidate_genes}, scalar(keys %locMGScnt), $candidateLoci);
 		$stats->{skipped_mgs} = $stats->{candidate_mgs};
-		writeSampleStats($sampleStatsFH, $stats);
+		writeSampleStats($sampleStatsFH, $stats, $sampleStatsSeen);
 		return;
 	}
 	unless ($subGKs[0] =~ m/^(.*)__/) {
@@ -3197,7 +3342,7 @@ sub readGenesSample_Singl{
 			"Cannot parse catalogue member '$subGKs[0]' for sample $sm; sample will be skipped\n");
 		my $stats = newSampleStats($sm, q{unparseable_catalogue_member}, scalar(keys %locMGScnt), $candidateLoci);
 		$stats->{skipped_mgs} = $stats->{candidate_mgs};
-		writeSampleStats($sampleStatsFH, $stats);
+		writeSampleStats($sampleStatsFH, $stats, $sampleStatsSeen);
 		return;
 	}
 	#find out if other samples are in the same assmblGrp..
@@ -3214,12 +3359,12 @@ sub readGenesSample_Singl{
 	#print "YY @subSds : $sd2 $sd\n";#die;
 	#go into each sample ($sd3) from assembly group ($sd), that an assembly might be associated to (across multiple assemblies in assmblGrp)
 	foreach my $sd3 (@subSds){
-		my $sampleStats = newSampleStats($sd3, q{processing}, scalar(keys %locMGScnt), $candidateLoci);
+		my $sampleStats = newSampleStats($sd3, q{processing}, scalar(keys %locMGScnt), $candidateLoci, $sm);
 		if (exists $unavailableSamples{$sd3}) {
 			limitedWarn('unavailable samples', "Skipping $sd3: $unavailableSamples{$sd3}\n");
 			$sampleStats->{status} = q{unavailable};
 			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
-			writeSampleStats($sampleStatsFH, $sampleStats);
+			writeSampleStats($sampleStatsFH, $sampleStats, $sampleStatsSeen);
 			next;
 		}
 		unless (exists($map{$sd3}) && defined($map{$sd3}{wrdir}) && length($map{$sd3}{wrdir})) {
@@ -3227,7 +3372,7 @@ sub readGenesSample_Singl{
 				"Skipping $sd3: missing map entry or working directory\n");
 			$sampleStats->{status} = q{map_or_workdir_missing};
 			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
-			writeSampleStats($sampleStatsFH, $sampleStats);
+			writeSampleStats($sampleStatsFH, $sampleStats, $sampleStatsSeen);
 			next;
 		}
 		#print "Time A: " . timeNice(time - $sttime)  . "\n";
@@ -3241,7 +3386,7 @@ sub readGenesSample_Singl{
 			print ".. Empty->skip ";
 			$sampleStats->{status} = q{empty_sample};
 			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
-			writeSampleStats($sampleStatsFH, $sampleStats);
+			writeSampleStats($sampleStatsFH, $sampleStats, $sampleStatsSeen);
 			next;
 		}
 		my $rename = 0;
@@ -3253,7 +3398,7 @@ sub readGenesSample_Singl{
 				"Assembly not available for $sd3 in $cD; sample will be skipped\n");
 			$sampleStats->{status} = q{assembly_missing};
 			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
-			writeSampleStats($sampleStatsFH, $sampleStats);
+			writeSampleStats($sampleStatsFH, $sampleStats, $sampleStatsSeen);
 			next;
 		}
 		#get NT's
@@ -3286,7 +3431,7 @@ sub readGenesSample_Singl{
 				"Skipping $sd3: consensus NT/AA files are incomplete and no repair VCF is available\n");
 			$sampleStats->{status} = q{consensus_missing};
 			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
-			writeSampleStats($sampleStatsFH, $sampleStats);
+			writeSampleStats($sampleStatsFH, $sampleStats, $sampleStatsSeen);
 			next;
 		}
 		# Rebuild both members of the pair whenever either is missing.  Writing
@@ -3305,7 +3450,7 @@ sub readGenesSample_Singl{
 			#die;
 			$sampleStats->{status} = q{consensus_incomplete};
 			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
-			writeSampleStats($sampleStatsFH, $sampleStats);
+			writeSampleStats($sampleStatsFH, $sampleStats, $sampleStatsSeen);
 			next;
 		}
 		#print "Time A1: " . timeNice(time - $sttime)  . "\n";
@@ -3641,7 +3786,7 @@ sub readGenesSample_Singl{
 		$sampleStats->{skip_no_usable_loci} = $skipNoUsable;
 		$sampleStats->{skip_too_few_after_abundance} = $skipAfterAbundance;
 		$sampleStats->{skip_too_few_valid_sequences} = $skipAfterSequence;
-		writeSampleStats($sampleStatsFH, $sampleStats);
+		writeSampleStats($sampleStatsFH, $sampleStats, $sampleStatsSeen);
 		if ($bufferedSamplesRef) {
 			${$bufferedSamplesRef}++;
 			if (${$bufferedSamplesRef} >= $appendWriteTrigger) {

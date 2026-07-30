@@ -99,8 +99,26 @@ like($strain,
 	qr/exact_worker_parts\(\$prefix, \$workerCount\).*?split_generation_complete\(\$splitManifest.*?\@missing.*?\@unexpected.*?Rejecting merge/s,
 	"worker merge requires the complete recovery-ledger contributor set from a completed generation");
 like($strain,
-	qr/records=\$fnaRows expected=\$expectedRecords.*?QC=.*?expected=\$expectedRows.*?if \(\@validationErrors\).*?unlink \$_ for values %mergeFileByName.*?return 0.*?rename \$mergeFileByName.*?unlink \$part/s,
+	qr/records=\$fnaRows expected=\$expectedRecords.*?QC=.*?expected=\$expectedRows.*?if \(\@validationErrors\).*?unlink \$_ for values %mergeFileByName.*?return \$aggregateComplete.*?unlink \$mergeCheckpoint.*?rename \$mergeFileByName.*?unlink \$part/s,
 	"merged record and sample cardinalities are validated before aggregate publication or part deletion");
+like($strain,
+	qr/my \@required = \(.*?\$LINKstdof.*?\$QCstdof\.tmp.*?my \@contributorNames = \(.*?\$LINKstdof.*?\$QCstdof\.tmp/s,
+	'link and QC files are mandatory members of every worker contribution set');
+like($strain,
+	qr/sub stagedMGSInputsReady .*?\$LINKstdof.*?\$QCstdof\.tmp.*?merge\.complete\.tsv.*?\$aggregateComplete &&= -s \$mergeCheckpoint/s,
+	'staged readiness requires every merge artifact and the last-written commit checkpoint');
+like($strain,
+	qr/unless \(\$recoveryContributionIndexReady\).*?Rejecting fresh merge.*?return \$aggregateComplete/s,
+	'fresh merges without persisted recovery provenance are rejected without discarding a committed aggregate');
+like($strain,
+	qr/Digest::SHA->new\(256\).*?\$digest->add.*?identifier order differs: \$FNAstdof vs \$name/s,
+	'FNA, FAA, category, and link streams must contain the same identifiers in the same order');
+like($strain,
+	qr/loadRecoveryContributionIndex\(\) unless \$recoveryContributionIndexReady.*?sub writeRecoveryContributionIndex.*?rename \$temporary, \$path.*?sub loadRecoveryContributionIndex.*?\$recoveryContributionIndexReady = 1.*?sub mergeRecoveryLogs.*?writeRecoveryContributionIndex\(\);.*?rename \$temporary, \$final.*?unlink \$part/s,
+	'worker provenance is persisted before disposable recovery logs are removed and is reloadable after restart');
+like($strain,
+	qr/\$aggregateComplete &&= -s \$mergeCheckpoint.*?my \@expectedWorkers.*?if \(\@validationErrors\).*?return \$aggregateComplete.*?unlink \$mergeCheckpoint.*?rename \$checkpointTemporary, \$mergeCheckpoint.*?unlink \$part/s,
+	'a last-written checkpoint protects committed aggregates and worker parts survive until validation and commit');
 like($strain, qr/qsubSystemJobAlive\([^\n]+QSBoptHR[^\n]+if [^\n]+doSubmit/,
 	'dry runs do not poll scheduler jobs that were never submitted');
 like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,
@@ -113,10 +131,22 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.70;/,
-	'validated split-worker merging increments the workflow version');
+like($strain, qr/my \$version = 0\.71;/,
+	'restart-safe validated merging increments the workflow version');
 unlike($strain, qr/print STDERR "\nAT SMPL::/,
 	"sample progress does not emit a leading blank line per assembly group");
+like($strain,
+	qr/printEarlyRunHeader\(\);.*?read_mosaic_catalogue\(.*?prepRun\(\)/s,
+	'the autoflushed basic header is emitted before Mosaic, map, and catalogue loading');
+like($strain,
+	qr/sub printEarlyRunHeader \{.*?Strain_within v\$version.*?Started:.*?Requested output:.*?Initializing paths, maps, and catalogues/s,
+	'the immediate header identifies the run before expensive initialization starts');
+like($strain,
+	qr/print \{\$sampleStatsFH\} join.*?my %sampleStatsSeen;.*?local \*STDOUT;.*?open STDOUT.*?STDERR.*?foreach my \$sm \(\@srtdSmpls\).*?readGenesSample_Singl/s,
+	'STDOUT is redirected once around the complete sample loop while the duplicated handle carries only TSV records');
+like($strain,
+	qr/sub writeSampleStats \{.*?without a sample name.*?duplicate row.*?Refusing to emit an empty.*?print \{\$fh\} \$row, "\\n"/s,
+	'every sample-statistics record has a sample name, is nonempty, and is emitted at most once');
 like($strain,
 	qr/my \$mosaicDirectory = File::Spec->catdir\(dirname\(\$mosaicMGSFile\), 'mosaic'\).*?basename\(\$mosaicMGSFile\)\."\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?prepare_mosaic_loci\.log/s,
 	'a missing default Mosaic catalogue is named from the raw MGS table and uses a temporary job log');
@@ -245,8 +275,8 @@ like($strain,
 	qr/Partition whole assembly groups.*?samplesByGroup.*?ownedGroup.*?\$mine\{\$alias\} = 1/s,
 	'split extraction assigns complete assembly groups and their catalogue aliases to one worker');
 like($strain,
-	qr/readGenesSample_Singl\(\$sm, \$writeLink, \$sttime, .*?\$appCnt, \$sampleStatsFH\).*?\$\{\$bufferedSamplesRef\}\+\+.*?appendWriteMGSgenes\(\$writeLink\)/s,
-	'expanded assembly-group output is flushed by sample to retain the RAM bound');
+	qr/readGenesSample_Singl\(\s*\$sm, \$writeLink, \$sttime, .*?\$appCnt, \$sampleStatsFH, .*?sampleStatsSeen.*?\$\{\$bufferedSamplesRef\}\+\+.*?appendWriteMGSgenes\(\$writeLink\)/s,
+	'expanded assembly-group output is accounted once and flushed by sample to retain the RAM bound');
 like($strain,
 	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,
 	'split-worker sparsity is summarized instead of reported as missing catalogue data');

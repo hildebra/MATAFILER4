@@ -101,8 +101,10 @@ like($strain,
 	qr/my \@sampleStatColumns = qw\(.*?selected_mgs.*?candidate_mgs.*?min_genes_per_mgs.*?max_genes.*?qc_enabled.*?min_gene_depth.*?abundance_max_modified_z.*?capped_mgs.*?skip_too_few_after_abundance.*?skip_too_few_valid_sequences/s,
 	"sample TSV fields expose selected-MGS outcomes and their controlling parameters");
 like($strain,
-	qr/print \{\$sampleStatsFH\} join.*?\@sampleStatColumns.*?local \*STDOUT.*?open STDOUT, q\{>&\}, .*?STDERR.*?readGenesSample_Singl/s,
-	"sample processing writes one TSV stream while redirecting other stdout to stderr");
+	qr/print \{\$sampleStatsFH\} join.*?\@sampleStatColumns.*?my %sampleStatsSeen;.*?local \*STDOUT.*?open STDOUT.*?STDERR.*?foreach my \$sm.*?readGenesSample_Singl/s,
+	"sample processing writes one validated TSV stream while redirecting every other sample-loop message to stderr");
+like($strain, qr/sample\s+worker\s+assembly_driver\s+status\s+selected_mgs/,
+	"sample TSV rows identify both the biological sample and its assembly-group driver");
 like($strain,
 	qr/\$MGStoolowGskip\+\+;.*?\$skipNoSelected\+\+.*?\$skipNoUsable\+\+.*?\$skipAfterAbundance\+\+.*?\$skipAfterSequence\+\+.*?\$unaccountedMGS = \$MGScnt - \$SInum - \$MGStoolowGskip/s,
 	"every selected candidate MGS receives an explicit terminal outcome");
