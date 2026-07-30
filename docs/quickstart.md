@@ -74,7 +74,9 @@ Previously completed samples use a short, ordered output probe; the loop still
 performs one final full-range verification pass before collecting sample
 statistics. Scheduler state is collected once per pass for all sample locks,
 and `-maxConcurrentJobs` counts both pending and running user jobs before every
-Slurm submission.
+Slurm submission. A full queue defers new submissions without skipping sample
+completion or cleanup checks; the same rolling range is retried after the
+configured scheduler polling interval.
 
 ## 6. Check completion
 

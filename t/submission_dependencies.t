@@ -13,6 +13,8 @@ use Mods::Subm qw(
 	primeSampleLockJobSnapshot
 	slurmJobFailureSummary
 	submitSlurmWithDependencyRecovery
+	deferredSubmissionDependency submissionDependencyDeferred
+	handleSubmissionFailure
 );
 
 sub slurm_options {
@@ -400,6 +402,54 @@ $options->{submittedJobs} = 8;
 qsubSystemWaitMaxJobs(10, 0, $options);
 is($pending_queries, 2,
 	'the scheduler is queried immediately when the conservative estimate exceeds the limit');
+
+my $capacity_options = slurm_options();
+$capacity_options->{doSubmit} = 1;
+$capacity_options->{submittedJobs} = 0;
+$capacity_options->{pendingJobCheckInterval} = 0;
+$capacity_options->{nonblockingMaxConcurrentJobs} = 1;
+my $capacity_queries = 0;
+$capacity_options->{liveJobRunner} = sub {
+	$capacity_queries++;
+	return ("201\n202\n", 0);
+};
+my ($capacity_admitted, $capacity_output);
+{
+	local *STDOUT;
+	open STDOUT, '>', \$capacity_output
+		or die "Cannot capture capacity output: $!";
+	$capacity_admitted = qsubSystemWaitMaxJobs(2, 0, $capacity_options);
+}
+is($capacity_admitted, 0,
+	'loop-mode throttling yields immediately instead of waiting at the live-job cap');
+ok($capacity_options->{capacityDeferred},
+	'the non-blocking throttle records a pass-level capacity deferral');
+like($capacity_output, qr/deferring further submissions until the next loop pass/,
+	'the capacity deferral is reported explicitly');
+is(qsubSystemWaitMaxJobs(2, 0, $capacity_options), 0,
+	'later submissions in the same pass remain deferred');
+is($capacity_queries, 1,
+	'a capacity-deferred pass does not repeat scheduler queries for every sample');
+
+my $capacity_script = File::Spec->catfile($root, 'capacity-deferred.sh');
+my $capacity_submission_attempts = 0;
+$capacity_options->{maxConcurrentJobs} = 2;
+$capacity_options->{slurmSubmissionRunner} = sub {
+	$capacity_submission_attempts++;
+	return ("Submitted batch job 9999\n", 0);
+};
+my ($capacity_job) = qsubSystem(
+	$capacity_script, 'echo later', 1, '1G', 'capacity', '', '', 1, [],
+	$capacity_options,
+);
+is($capacity_job, deferredSubmissionDependency(),
+	'central submission propagates the capacity-deferral dependency marker');
+is($capacity_submission_attempts, 0,
+	'capacity-deferred work is not passed to sbatch');
+ok(submissionDependencyDeferred("17;".deferredSubmissionDependency()),
+	'the capacity marker remains detectable when combined with real dependencies');
+
+my $continued_failure = { continueOnSubmitError => 1, submissionErrors => [] };
 
 $options = slurm_options();
 my $live_command = '';

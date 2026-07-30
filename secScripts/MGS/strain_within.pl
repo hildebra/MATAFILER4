@@ -180,7 +180,8 @@ END {
 #.65: reuse an existing confirmed Mosaic catalogue without requiring raw inputs
 #.66: let tree recalculation extract missing inputs and use job-local tree scratch
 #.67: parameter-driven gene caps, lower minimum, and per-sample TSV statistics
-my $version = 0.67;
+#.68: remove blank per-sample progress separators from captured output
+my $version = 0.68;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -2247,10 +2248,11 @@ sub histoMGS{#specifically for MGS..
 		#print " X$c:${bs}X ";
 		$binC{$binSiz[$bs]} ++;
 	}
-	#display bin counts..
-	print $msg.": ";#"Bin size distribution: ";
-	foreach (@binSiz){print " <=$_:$binC{$_} " if ($binC{$_}>0);}
-	print "\n";
+	# Emit the complete diagnostic in one write.  A bare newline write can
+	# appear as an empty stdout record in scheduler stream collectors.
+	my @displayBins = map { " <=$_:$binC{$_} " }
+		grep { $binC{$_} > 0 } @binSiz;
+	print $msg.": ".join("", @displayBins)."\n";
 	#DEBUG
 	#print @cnts." : @cnts\n";
 }
@@ -2501,7 +2503,7 @@ sub appendWriteMGSgene_olds{
 		
 		system "rm -f $blockF";
 	}
-	print "\nwrote for $wrMGS MGS data..\n";
+	print "wrote for $wrMGS MGS data..\n";
 }
 
 
@@ -2998,7 +3000,7 @@ sub extractFNAFAA2genes{
 	print {$sampleStatsFH} join("\t", @sampleStatColumns), "\n"
 		or die "Cannot write per-sample statistics header: $!\n";
 	foreach my $sm (@srtdSmpls){
-		print STDERR "\nAT SMPL:: $smCnt/" . scalar(@srtdSmpls) ." $sm - ". "Elapsed time : ", timeNice(time - $sttime) . "\n";
+		print STDERR "AT SMPL:: $smCnt/" . scalar(@srtdSmpls) ." $sm - ". "Elapsed time : ", timeNice(time - $sttime) . "\n";
 		{
 			# Keep the machine-readable sample table isolated on the original
 			# STDOUT.  Existing progress output and child-process output remain

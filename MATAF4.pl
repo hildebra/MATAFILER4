@@ -42,7 +42,7 @@ use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
-use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery);
+use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred handleSubmissionFailure);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
@@ -148,7 +148,10 @@ sub createConsSNPandSVs;
 #       verification pass, shared batched Slurm lock/accounting snapshots, and
 #       running-plus-pending admission control. Repeated completed-sample visits
 #       use an ordered priority-output probe before deeper filesystem checks.
-my $MATFILER_ver = 4.23;
+#4.24: 30.7.26: prevent loopTillComplete from blocking indefinitely at the
+#       live-job cap; defer only submissions, retain sample cleanup checks, and
+#       continue past failed deferred dependency chains.
+my $MATFILER_ver = 4.24;
 
 #----------------- defaults ----------------- 
 
@@ -339,6 +342,7 @@ my %loopSubmittedJobIds;
 my %loopSampleCompleted;
 my $loopFinalVerification = 0;
 my $loopSawActiveLocks = 0;
+$QSBoptHR->{nonblockingMaxConcurrentJobs} = $runOptions{loopCount} ? 1 : 0;
 primeLoopSchedulerSnapshot($from, $to) if $runOptions{loopCount};
 
 
@@ -354,9 +358,11 @@ primeLoopSchedulerSnapshot($from, $to) if $runOptions{loopCount};
 #for loop that goes over every single sample in the .map
 for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
-	qsubSystemWaitMaxJobs(
-		$MFconfig{checkMaxNumJobs}, $MFconfig{killDepNever}, $QSBoptHR,
-	);
+	unless ($runOptions{loopCount}) {
+		qsubSystemWaitMaxJobs(
+			$MFconfig{checkMaxNumJobs}, $MFconfig{killDepNever}, $QSBoptHR,
+		);
+	}
 	$curSmpl = $samples[$JNUM];
 	
 	
@@ -2009,11 +2015,15 @@ sub loop2C_check(){
 		if ($JNUM == ($to-1)){
 			my $submittedThisIteration =
 				($QSBoptHR->{submittedJobs} || 0) - $loopIterationSubmissionStart;
+			my $capacityDeferred = delete($QSBoptHR->{capacityDeferred}) ? 1 : 0;
+			delete $QSBoptHR->{capacityDeferralAnnounced};
+
 			my $activeJobs = 0;
 			my $rerunLockedWindow = 0;
 			# A pass that submitted work already reruns after its dependency wait.
 			# Check the scheduler only for a no-op pass that may have skipped locks.
-			if ($runOptions{submit} && !$MFconfig{rmSmplLocks} && $submittedThisIteration == 0) {
+			if (!$capacityDeferred && $runOptions{submit}
+					&& !$MFconfig{rmSmplLocks} && $submittedThisIteration == 0) {
 				$activeJobs = numActiveUserJobs(
 					$QSBoptHR, 1, [keys %loopSubmittedJobIds],
 				);
@@ -2043,7 +2053,7 @@ sub loop2C_check(){
 				return;
 			}
 			my $lastWindowPass = $runOptions{loopCount} == 1 ? 1 : 0;
-			my $overlapWindow = $runOptions{loopWindowSize} > 0
+			my $overlapWindow = !$capacityDeferred && $runOptions{loopWindowSize} > 0
 				? overlap_loop_window(
 					to => $to, upper => $runOptions{to}, window_size => $runOptions{loopWindowSize},
 					submitted_jobs => $submittedThisIteration,
@@ -2073,14 +2083,23 @@ sub loop2C_check(){
 			$loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
 			$loopIterationExtended = 0;
 			$loopFinalLockRetryUsed = 0;
-			my $continueCurrentWindow = $submittedThisIteration > 0;
-			$runOptions{loopCount} = 0 unless ($continueCurrentWindow);
-			$runOptions{loopCount}-- if ($continueCurrentWindow);
+			my $continueCurrentWindow = $submittedThisIteration > 0 || $capacityDeferred;
+			if ($capacityDeferred) {
+				# Capacity is temporary scheduler state, not a consumed workflow pass.
+				$runOptions{loopCount} = $runOptions{loopInitialCount};
+			} else {
+				$runOptions{loopCount} = 0 unless $continueCurrentWindow;
+				$runOptions{loopCount}-- if $continueCurrentWindow;
+			}
 			print "\n\n-------------------------------------------\n-------------------------------------------\n";
 			if ($continueCurrentWindow) {
-				print "Completed loop iteration with $submittedThisIteration submitted job(s); " .
-					($runOptions{loopCount} ? "repeating with $runOptions{loopCount} iteration(s) remaining.\n"
-					                  : "iteration limit reached.\n");
+				if ($capacityDeferred) {
+					print "Loop pass reached the Slurm job limit; the same range will be revisited.\n";
+				} else {
+					print "Completed loop iteration with $submittedThisIteration submitted job(s); " .
+						($runOptions{loopCount} ? "repeating with $runOptions{loopCount} iteration(s) remaining.\n"
+						                  : "iteration limit reached.\n");
+				}
 			} else {
 				print "No jobs were submitted in the current iteration; ending this loop early.\n";
 			}
@@ -2099,6 +2118,9 @@ sub loop2C_check(){
 					\@grandDeps, $QSBoptHR, 1,
 					$MFconfig{loopTillCompleteActiveJobs},
 				);
+				if ($capacityDeferred) {
+					sleep($MFconfig{schedulerPollSeconds});
+				}
 				# Reinspect after every completed submission pass. This lets hybrid
 				# preassembly packages and assembly-group outputs become dependencies
 				# for the next pass without requiring a separate user command.
@@ -2909,6 +2931,10 @@ sub postSubmQsub {
 			dependencies => $dependencies, submitted => \@submitted,
 			chain_previous => $options->{chain_previous},
 		);
+		if (submissionDependencyDeferred($command_dependencies)) {
+			push @submitted, deferredSubmissionDependency();
+			last;
+		}
 		my $augmented = augment_deferred_submission(
 			qmode => $QSBoptHR->{qmode}, command => $command, script => $script,
 			dependencies => $command_dependencies, run_tag => $QSBoptHR->{rTag},
@@ -2922,9 +2948,13 @@ sub postSubmQsub {
 		push @augmented_commands, $augmented->{command};
 		my $submitted_before = scalar @submitted;
 		my $scheduler_job_id = "";
-		qsubSystemWaitMaxJobs(
+		my $capacityAvailable = qsubSystemWaitMaxJobs(
 			$MFconfig{checkMaxNumJobs}, $MFconfig{killDepNever}, $QSBoptHR,
 		);
+		unless ($capacityAvailable) {
+			push @submitted, deferredSubmissionDependency();
+			last;
+		}
 		my ($output, $status) = $QSBoptHR->{qmode} eq 'slurm'
 			? submitSlurmWithDependencyRecovery(
 				$augmented->{command}, $script_path, $QSBoptHR,
@@ -2933,8 +2963,12 @@ sub postSubmQsub {
 				my $scheduler_output = `$augmented->{command} 2>&1`;
 				($scheduler_output, $?);
 			};
-		die "Deferred job submission failed: $augmented->{command}\n$output"
-			if ($status != 0);
+		if ($status != 0) {
+			my $message = "Deferred job submission failed: "
+				."$augmented->{command}\n$output";
+			push @submitted, handleSubmissionFailure($QSBoptHR, $message);
+			last;
+		}
 		if ($QSBoptHR->{qmode} eq 'slurm') {
 			if ($output =~ /^Submitted batch job (\d+)\s*$/m) {
 				$scheduler_job_id = $1;

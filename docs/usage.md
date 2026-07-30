@@ -71,7 +71,11 @@ At the beginning of each loop pass, sample lock job IDs are collected first.
 MATAFILER4 uses one `squeue` snapshot and bounded, multi-job `sacct` calls for
 tracked IDs no longer present in `squeue`; all samples and dependency checks in
 that pass reuse the result. `-maxConcurrentJobs` counts both running and pending
-jobs and is enforced immediately before each scheduler submission.
+jobs and is enforced immediately before each scheduler submission. During
+`-loopTillComplete`, reaching the cap defers submissions rather than blocking
+inside one sample: output and cleanup checks continue for the remaining samples,
+then the same rolling range is retried after `-schedulerPollSeconds`. Outside
+loop mode, the cap retains its blocking behaviour.
 
 Group-wide invalidation is intentionally not classified as an automatic safe
 repair. An exact assembly-group membership change remains blocked unless the

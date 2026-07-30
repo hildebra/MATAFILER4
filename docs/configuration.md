@@ -64,7 +64,10 @@ Supported systems in the documentation and source are Slurm, SGE/qsub and LSF/bs
 
 `-maxConcurrentJobs` counts all of the user's running and pending Slurm jobs,
 not only dependency-pending work. The count is cached conservatively between
-submissions to reduce scheduler queries. `-killDepNever 1` can remove Slurm jobs
+submissions to reduce scheduler queries. In `-loopTillComplete` mode, a full
+queue defers only new submissions; sample completion and cleanup inspection
+continues, followed by a bounded scheduler polling delay and a retry of the same
+range. `-killDepNever 1` can remove Slurm jobs
 stuck in dependency states, but use it only when this matches your local scheduler policy.
 
 Sites where compute nodes do not normally have outbound network access can set

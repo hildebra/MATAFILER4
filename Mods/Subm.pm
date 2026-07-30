@@ -12,9 +12,18 @@ use Exporter qw(import);
 our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJobAlive
 		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs reconcileSlurmDependencies
 		recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary
-		submitSlurmWithDependencyRecovery);
+		submitSlurmWithDependencyRecovery deferredSubmissionDependency
+		submissionDependencyDeferred handleSubmissionFailure);
 
 my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
+my $DEFERRED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_DEFERRED__';
+
+sub deferredSubmissionDependency { return $DEFERRED_SUBMISSION_DEPENDENCY; }
+sub submissionDependencyDeferred {
+	return scalar grep { $_ eq $DEFERRED_SUBMISSION_DEPENDENCY }
+		split /;/, normalise_job_dependencies(@_);
+}
+
 
 sub recordSampleLockJobs {
 	my ($lock_file, $jobs, $optHR) = @_;
@@ -558,6 +567,14 @@ sub _continue_after_submission_failure {
 	return 1;
 }
 
+sub handleSubmissionFailure {
+	my ($optHR, $message) = @_;
+	return $FAILED_SUBMISSION_DEPENDENCY
+		if _continue_after_submission_failure($optHR, $message);
+	die "$message\n";
+}
+
+
 
 
 
@@ -643,7 +660,9 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	$waitJID = normalise_job_dependencies($waitJID);
 	my @jspl = split /;/, $waitJID;
 	my $has_failed_dependency = grep { $_ eq $FAILED_SUBMISSION_DEPENDENCY } @jspl;
-	@jspl = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY } @jspl;
+	my $has_deferred_dependency = grep { $_ eq $DEFERRED_SUBMISSION_DEPENDENCY } @jspl;
+	@jspl = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY
+		&& $_ ne $DEFERRED_SUBMISSION_DEPENDENCY } @jspl;
 	$waitJID = join(';', @jspl);
 	my $dependency_error = '';
 	if ($qmode eq 'slurm' && $optHR->{doSubmit} != 0 && $immSubm && @jspl) {
@@ -806,6 +825,9 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	if (exists $optHR->{LOG}){ $LOGhandle = $optHR->{LOG};}
 	#if (@restrHosts > 0){die $qcm;}
 	if ($optHR->{doSubmit} != 0 && $immSubm){
+		return ($DEFERRED_SUBMISSION_DEPENDENCY, $qcm)
+			if $has_deferred_dependency;
+
 		if ($has_failed_dependency) {
 			my $message = "Skipping submission for $tmpsh because an upstream submission failed";
 			$message .= ": $dependency_error" if $dependency_error ne '';
@@ -813,11 +835,13 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 				if (_continue_after_submission_failure($optHR, $message));
 			die "$message\n";
 		}
-		qsubSystemWaitMaxJobs(
+		my $capacityAvailable = qsubSystemWaitMaxJobs(
 			$optHR->{maxConcurrentJobs} || 0,
 			$optHR->{killDependencyNever} || 0,
 			$optHR,
 		);
+		return ($DEFERRED_SUBMISSION_DEPENDENCY, $qcm)
+			unless $capacityAvailable;
 		system "rm -f $tmpsh.otxt $tmpsh.etxt";
 		print $LOGhandle $qcm."\n" unless ($LOGhandle eq "" || !defined($LOGhandle) );
 		#print("$qcm\n\n");
@@ -1119,7 +1143,8 @@ sub qsubSystemJobAlive{
 	my $activeThreshold=-1;
 	$activeThreshold = $_[3] if (@_ > 3);
 	my @jobs = split /;/, normalise_job_dependencies($jAr);
-	@jobs = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY } @jobs;
+	@jobs = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY
+		&& $_ ne $DEFERRED_SUBMISSION_DEPENDENCY } @jobs;
 	return unless (@jobs);
 	
 	
@@ -1207,9 +1232,11 @@ sub qsubSystemWaitMaxJobs{
 	my $killPend = $_[1] if (@_ > 1);
 	my $optHR = {}; $optHR = $_[2] if (@_ > 2);
 	
-	return if ($checkMaxNumJobs <= 0);
-	return if exists($optHR->{doSubmit}) && !$optHR->{doSubmit};
+	return 1 if ($checkMaxNumJobs <= 0);
+	return 1 if exists($optHR->{doSubmit}) && !$optHR->{doSubmit};
 	my $clock = $optHR->{schedulerClock};
+	return 0 if $optHR->{nonblockingMaxConcurrentJobs}
+		&& $optHR->{capacityDeferred};
 	my $now = $clock ? $clock->() : time;
 	my $cacheSeconds = defined($optHR->{pendingJobCheckInterval})
 		? 0 + $optHR->{pendingJobCheckInterval} : 30;
@@ -1222,7 +1249,7 @@ sub qsubSystemWaitMaxJobs{
 		# Treat every locally accepted job as live until the next scheduler
 		# query. This upper bound cannot undercount work created by this process.
 		my $estimatedLive = $cached->{liveJobs} + $submittedSince;
-		return if $estimatedLive < $checkMaxNumJobs;
+		return 1 if $estimatedLive < $checkMaxNumJobs;
 	}
 	my $num = numLiveUserJobs($optHR, 1);
 	$optHR->{liveJobThrottleState} = {
@@ -1230,6 +1257,20 @@ sub qsubSystemWaitMaxJobs{
 		liveJobs => $num,
 		submittedJobs => $submittedNow,
 	};
+	if ($num >= $checkMaxNumJobs && $optHR->{nonblockingMaxConcurrentJobs}) {
+		if ($killPend) {
+			my $killed = qsubDepNeverKill();
+			print " Killed $killed jobs with Dependency never completed\n"
+				if $killed > 0;
+		}
+		$optHR->{capacityDeferred} = 1;
+		unless ($optHR->{capacityDeferralAnnounced}) {
+			print "running + pending jobs are at the $checkMaxNumJobs limit; "
+				."deferring further submissions until the next loop pass.\n";
+			$optHR->{capacityDeferralAnnounced} = 1;
+		}
+		return 0;
+	}
 	my $waitCnt = 0;
 	while ($num >= $checkMaxNumJobs){
 		if ($killPend){
@@ -1249,7 +1290,7 @@ sub qsubSystemWaitMaxJobs{
 		$waitCnt++;
 		#print " $num ";
 	}
-	return;
+	return 1;
 }
 
 sub qsubSystem2{

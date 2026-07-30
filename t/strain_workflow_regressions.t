@@ -106,8 +106,10 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.67;/,
+like($strain, qr/my \$version = 0\.68;/,
 	'within-strain missing-input tree recovery increments the workflow version');
+unlike($strain, qr/print STDERR "\nAT SMPL::/,
+	"sample progress does not emit a leading blank line per assembly group");
 like($strain,
 	qr/my \$mosaicDirectory = File::Spec->catdir\(dirname\(\$mosaicMGSFile\), 'mosaic'\).*?basename\(\$mosaicMGSFile\)\."\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?prepare_mosaic_loci\.log/s,
 	'a missing default Mosaic catalogue is named from the raw MGS table and uses a temporary job log');

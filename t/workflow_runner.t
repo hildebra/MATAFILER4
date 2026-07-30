@@ -160,7 +160,7 @@ like($mataf4,
 	qr/if \(\$overlapWindow->\{extended\}\).*?return;\s*}\s*\$loopIterationSubmissionStart =/s,
 	'an extended pass retains its submission snapshot until both blocks reach the wait boundary');
 like($mataf4,
-	qr/\$runOptions\{submit\} && !\$MFconfig\{rmSmplLocks\} && \$submittedThisIteration == 0.*?numActiveUserJobs\(\s*\$QSBoptHR,\s*1,\s*\[keys %loopSubmittedJobIds\].*?should_rerun_locked_window\(.*?active_job_threshold => \$MFconfig\{loopTillCompleteActiveJobs\}.*?if \(\$rerunLockedWindow.*?\$JNUM = \$from - 1;.*?return;/s,
+	qr/!\$capacityDeferred && \$runOptions\{submit\}.*?!\$MFconfig\{rmSmplLocks\} && \$submittedThisIteration == 0.*?numActiveUserJobs\(\s*\$QSBoptHR,\s*1,\s*\[keys %loopSubmittedJobIds\].*?should_rerun_locked_window\(.*?active_job_threshold => \$MFconfig\{loopTillCompleteActiveJobs\}.*?if \(\$rerunLockedWindow.*?\$JNUM = \$from - 1;.*?return;/s,
 	'a no-op retained-lock pass reruns its current window when few jobs remain active');
 like($mataf4,
 	qr/normalise_job_dependencies\(\\\@grandDeps\).*?\$loopJobId =~ s\/\^.*?\$loopSubmittedJobIds\{\$loopJobId\} = 1.*?qsubSystemJobAlive/s,
@@ -194,7 +194,19 @@ like($mataf4,
 like($mataf4,
 	qr/sub postSubmQsub.*?qsubSystemWaitMaxJobs\(\s*\$MFconfig\{checkMaxNumJobs\}/s,
 	'deferred direct submissions also enforce the live-job cap');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?my \$MATFILER_ver = 4\.23/s,
-	'MATAFILER history retains loop triggering changes through version 4.23');
+like($mataf4,
+	qr/nonblockingMaxConcurrentJobs.*?for \(\$JNUM=.*?unless \(\$runOptions\{loopCount\}\).*?qsubSystemWaitMaxJobs.*?\$curSmpl = \$samples\[\$JNUM\]/s,
+	'loopTillComplete keeps inspecting samples while only actual submissions yield at capacity');
+like($mataf4,
+	qr/capacityDeferred.*?same range will be revisited.*?sleep\(\$MFconfig\{schedulerPollSeconds\}\)/s,
+	'a capacity-deferred range retries after one bounded poll interval rather than busy-spinning');
+like($mataf4,
+	qr/sub postSubmQsub.*?submissionDependencyDeferred.*?handleSubmissionFailure\(\$QSBoptHR, \$message\)/s,
+	'deferred batches propagate capacity and scheduler failures without terminating the controller');
+unlike($mataf4,
+	qr/die "Deferred job submission failed:/,
+	'the formerly fatal deferred sbatch path has been removed');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?my \$MATFILER_ver = 4\.24/s,
+	'MATAFILER history retains loop triggering changes through version 4.24');
 
 done_testing;
