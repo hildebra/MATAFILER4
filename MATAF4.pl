@@ -76,6 +76,7 @@ sub mergeReads; #merge reads via flash
 sub removeHostSeqs; sub krakenTaxEst;sub prepKraken;
 sub loop2C_check;
 sub primeLoopSchedulerSnapshot;
+sub deferLoopProducerWave;
 
 sub metagAssemblyRun;
 sub buildAssemblyMapIdx;
@@ -151,7 +152,10 @@ sub createConsSNPandSVs;
 #4.24: 30.7.26: prevent loopTillComplete from blocking indefinitely at the
 #       live-job cap; defer only submissions, retain sample cleanup checks, and
 #       continue past failed deferred dependency chains.
-my $MATFILER_ver = 4.24;
+#4.25: 30.7.26: submit loopTillComplete producers in readiness waves, so input
+#       staging, quality/host filtering, assembly, mapping, and contig statistics
+#       complete before their consumers are submitted.
+my $MATFILER_ver = 4.25;
 
 #----------------- defaults ----------------- 
 
@@ -1241,6 +1245,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps);next;
 	}
+	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $jdep) if ($assemblyFlag);
+	if (deferLoopProducerWave(
+			'input staging', $jdep, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	
 	
 	#$mmpuOutTab .= $dir2rd."\t".$seqSet{"mmpu"}."\n";
@@ -1270,6 +1278,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my $sdmjN2 = sdmClean($curOutDir, $smplTmpDir."seqClean/",$jdep,$dowstreamAnalysisFlag,1) ;
 		$sdmjN .= ";$sdmjN2" if ($sdmjN2 ne "");
 	}  
+	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $sdmjN) if ($assemblyFlag);
+	if (deferLoopProducerWave(
+			'quality filtering', $sdmjN, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	#adds raw and cleaned read file location to the whole assembly group
 	
 	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
@@ -1300,8 +1312,15 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	#filter human or other hosts..
 	$sdmjN = removeHostSeqs($nodeSpTmpD,$sdmjN,1) if ($dowstreamAnalysisFlag && (!$boolAssemblyOK || $calcContamination));
+	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $sdmjN) if ($assemblyFlag);
+	if (deferLoopProducerWave(
+			'host filtering', $sdmjN, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	#merge reads?
 	($mergJbN) = mergeReads($sdmjN,$smplTmpDir."merge_clean/",$calcReadMerge,$dowstreamAnalysisFlag);
+	if (deferLoopProducerWave(
+			'read merging', $mergJbN, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	
 	#raw files only required for mapping reads to assemblies, so delete o/w
 	#$cfp1ar,$cfp2ar,
@@ -1429,12 +1448,24 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#------------------------ ASSEMBLY -------------------------------
 	#-----------------------------------------------------------------
 	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $sdmjN) if ($assemblyFlag);
+	if ($assemblyFlag && deferLoopProducerWave(
+			'input preparation', $sdmjN, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
+	if ($AssemblyGo && deferLoopProducerWave(
+			'assembly-group input preparation', $AsGrps{$cAssGrp}{SeqClnDeps},
+			$smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
+
 	if ( ($assemblyFlag || $scaffoldFlag || $scaffTarExternal ne "") && $AssemblyGo){ #assembly does not exist
 		die "Can't do assembly and pseudoassembly on the same sample!\n" if ($pseudAssFlag || $MFopt{pseudoAssembly});
 		#print "preAsmChk: $ePreAssmbly, $ePreAssmblPck, $doPreAssmFlag, $postPreAssmblGo\n";
 		#die;
 		metagAssemblyRun( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$geneDir,  $SmplNameX,$scaffoldFlag,$metaGscaffDir,
 					$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo,$finalCommAssDir);
+		if (deferLoopProducerWave(
+				'assembly', $AsGrps{$cAssGrp}{AssemblJobName},
+				$smplLockF, $cAssGrp, \@sampleDeps,
+		)) { next; }
 		my $producedAssemblyDir = ($MFopt{DoAssembly} == 5 && $doPreAssmFlag)
 			? $metagAssDir : $finalCommAssDir;
 		$metaGassembly = "$producedAssemblyDir/scaffolds.fasta.filt";
@@ -1454,9 +1485,14 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"","$nodeSpTmpD/genePred/",1);
 		}
 	}
+	if (deferLoopProducerWave(
+			'gene prediction', $AsGrps{$cAssGrp}{prodRun},
+			$smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	
 
 	
+	my $currentMappingDeps = '';
 	my $finalAssemblyScheduled = $efinAssLoc || $MFopt{DoAssembly} != 5 || $postPreAssmblGo;
 	if ($AssemblyGo && $finalAssemblyScheduled && $AsGrps{$cAssGrp}{PostAssemblCmd} ne "") {
 		print "Submitting deferred assembly-group mapping jobs\n";
@@ -1466,6 +1502,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $deferredDeps);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredDeps);
+		append_job_dependencies(\$currentMappingDeps, $deferredDeps);
 		add2SampleDeps(\@sampleDeps, [$deferredDeps]);
 		$AsGrps{$cAssGrp}{PostAssemblCmd} = "";
 	}
@@ -1498,6 +1535,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#print "build $assemblyBuildIndexFlag   $MFopt{DoAssembly} && !$assemblyFlag && $MFopt{map2Assembly} && $mapAssFlag && $MFopt{MapperProg}\n";
 	if ($assemblyBuildIndexFlag && $AsGrps{$cAssGrp}{AssemblJobName} eq ""){ #in this case asembly was done, but index was never built
 		buildAssemblyMapIdx($finAssLoc, $cAssGrp, $mapAssFlag,$mapSuppAssFlag,$SmplName);
+		if (deferLoopProducerWave(
+				'mapping index', $AsGrps{$cAssGrp}{AssemblJobName},
+				$smplLockF, $cAssGrp, \@sampleDeps,
+		)) { next; }
 	}
 
 	
@@ -1521,6 +1562,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my ($map2Ctgs_2,$delaySubmCmd_2,$mapStat)  = bamDepth(\%dirset,$map2Ctgs,$mapOptHr);
 		$delaySubmCmd .= "\n".$delaySubmCmd_2;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $map2Ctgs_2);
+		append_job_dependencies(\$currentMappingDeps, $map2Ctgs_2);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $map2Ctgs_2);
 		if (!${$mapOptHr}{immediateSubm} && $delaySubmCmd =~ /\S/ ){
 			$mappingDeferred = 1;
@@ -1546,6 +1588,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my ($mapSup2Ctgs_2,$delaySubmCmd_2,$mapStat)  = bamDepth(\%dirset,$mapSup2Ctgs,$mapOptHr);
 			$delaySubmCmd .= "\n".$delaySubmCmd_2;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $mapSup2Ctgs_2);
+		append_job_dependencies(\$currentMappingDeps, $mapSup2Ctgs_2);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $mapSup2Ctgs_2);
 		if ($delaySubmCmd =~ /\S/ && !${$mapOptHr}{immediateSubm}) {
 			$mappingDeferred = 1;
@@ -1554,6 +1597,13 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 #		die;
 	}
 	
+	my $mappingWaveDeps = normalise_job_dependencies(
+		$currentMappingDeps, $AsGrps{$cAssGrp}{MapDeps},
+	);
+	if (deferLoopProducerWave(
+			'assembly mapping', $mappingWaveDeps,
+			$smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 #		die "$MappingGo && !$eFinMapCovGZ && $MFopt{map2Assembly} && ($MFopt{DoAssembly} || $mapAssFlag)";
 
 	
@@ -1561,6 +1611,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#---------------- producer barriers, downstream analysis ---------------
 	#-----------------------------------------------------------------
 	my ($fullContigStatsDep, $binningJobDep, $variantJobDep) = ("", "", "");
+	my $currentContigStatsDeps = '';
 	
 	
 	# Completed assemblies and mappings are published by their producer jobs.
@@ -1602,6 +1653,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		);
 		$AsGrps{$cAssGrp}{PostClnCmd} = "";
 		$jdep = normalise_job_dependencies($contRun, $deferredContigDeps);
+		append_job_dependencies(\$currentContigStatsDeps, $jdep);
 		$fullContigStatsDep = $jdep if ($tmpCDd && $jdep ne "");
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredContigDeps);
 
@@ -1618,10 +1670,18 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir,$publicationDeps,$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl,$supportCoverageRequired);
 		$AsGrps{$cAssGrp}{PostClnCmd} .= $delaySubmCmd2;
 		$jdep = $jn;
+		append_job_dependencies(\$currentContigStatsDeps, $jdep);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $jdep) if ($jdep ne "");
 	}
 #	die;
 	add2SampleDeps(\@sampleDeps, [$publicationDeps,$jdep]);
+	my $contigStatsWaveDeps = normalise_job_dependencies(
+		$currentContigStatsDeps, $AsGrps{$cAssGrp}{BinDeps},
+	);
+	if (deferLoopProducerWave(
+			'contig statistics', $contigStatsWaveDeps,
+			$smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	#Binning, SNP calling: only after copying files from tmp and running contig stats
 	if ( $calcBinning && $AssemblyGo ){  #$allMapDone rm: this is checked now via $AsGrps{$cAssGrp}{MapDeps}
 		my $binnerTmp = $nodeSpTmpD;
@@ -2007,6 +2067,21 @@ sub primeLoopSchedulerSnapshot {
 	} $start .. $stop - 1;
 	primeSampleLockJobSnapshot(\@lockFiles, $QSBoptHR);
 }
+
+sub deferLoopProducerWave {
+	my ($reason, $dependencies, $lockFile, $assemblyGroup, $sampleDeps) = @_;
+	return 0 unless $runOptions{loopCount};
+	my $barrier = normalise_job_dependencies($dependencies);
+	return 0 if $barrier eq '';
+	add2SampleDeps($sampleDeps, [$barrier]);
+	print "Producer wave '$reason' is pending for $curSmpl; "
+		."deferring downstream jobs until a later loop pass.\n"
+		unless $MFconfig{silent};
+	MFnext($lockFile, $sampleDeps, $JNUM, $QSBoptHR);
+	loop2C_check($assemblyGroup, $sampleDeps);
+	return 1;
+}
+
 
 sub loop2C_check(){
 	my ($cAssGrp,$sampleDeps_AR) = @_;

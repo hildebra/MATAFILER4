@@ -40,7 +40,12 @@ When both `-loopTillComplete` and `-autoStatePlan 1` are enabled, the first
 preflight runs before submission. Normally, at each loop boundary MATAFILER4
 waits for the jobs submitted by the current pass, reinspects completed hybrid
 packages and assembly-group outputs, applies safe repairs, and only then starts
-the next pass. A sparse pass is handled differently: when it submits between
+the next pass. Producer work is submitted in readiness waves: input staging,
+quality filtering, host filtering, assembly, annotation/mapping, and contig
+statistics must publish their outputs before later consumers are submitted.
+This prevents one failed upstream job from leaving an entire assembly group in
+`DependencyNeverSatisfied`.
+A sparse pass is handled differently: when it submits between
 one and `floor(window-size/4)` jobs (with a minimum threshold of one), the next
 sample block is added before the wait. The next block is also always added on
 the final allowed pass of the current block, even when that pass is busy. Only

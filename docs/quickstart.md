@@ -72,7 +72,9 @@ requested outputs are complete and whose temporary directories have been
 cleaned, keeping unfinished samples in rotation while admitting new ones.
 Previously completed samples use a short, ordered output probe; the loop still
 performs one final full-range verification pass before collecting sample
-statistics. Scheduler state is collected once per pass for all sample locks,
+statistics. Each visit submits only the next ready producer wave, so a failed
+input filter is retried before assembly, mapping, binning, or consensus jobs are
+created. Scheduler state is collected once per pass for all sample locks,
 and `-maxConcurrentJobs` counts both pending and running user jobs before every
 Slurm submission. A full queue defers new submissions without skipping sample
 completion or cleanup checks; the same rolling range is retried after the

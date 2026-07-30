@@ -206,7 +206,7 @@ like($mataf4,
 unlike($mataf4,
 	qr/die "Deferred job submission failed:/,
 	'the formerly fatal deferred sbatch path has been removed');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?my \$MATFILER_ver = 4\.24/s,
-	'MATAFILER history retains loop triggering changes through version 4.24');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?my \$MATFILER_ver = 4\.25/s,
+	'MATAFILER history retains loop triggering changes through version 4.25');
 
 done_testing;

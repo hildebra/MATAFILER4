@@ -499,8 +499,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?my \$MATFILER_ver = 4\.24;/s,
-	'MATAFILER history retains shared input discovery through version 4.24');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?my \$MATFILER_ver = 4\.25;/s,
+	'MATAFILER history retains shared input discovery through version 4.25');
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');
@@ -605,6 +605,24 @@ like($mataf4,
 like($mataf4,
 	qr/immediateSubm => \(\$variantSubmissionDeferred \? 0 : 1\).*?PostConsCmd.*?variantSubmissionCommands/s,
 	'first-pass Cons jobs are submitted immediately or retained until group producer ids are available');
+like($mataf4,
+	qr/sub deferLoopProducerWave.*?return 0 unless \$runOptions\{loopCount\}.*?MFnext\(.*?loop2C_check\(/s,
+	'producer-wave deferral is loop-only and preserves lock and loop bookkeeping');
+like($mataf4,
+	qr/seedUnzip2tmp.*?append_job_dependencies\(\\\$AsGrps\{\$cAssGrp\}\{SeqClnDeps\}, \$jdep\).*?deferLoopProducerWave\(\s*'input staging'.*?sdmClean.*?append_job_dependencies\(\\\$AsGrps\{\$cAssGrp\}\{SeqClnDeps\}, \$sdmjN\).*?deferLoopProducerWave\(\s*'quality filtering'.*?removeHostSeqs.*?append_job_dependencies\(\\\$AsGrps\{\$cAssGrp\}\{SeqClnDeps\}, \$sdmjN\).*?deferLoopProducerWave\(\s*'host filtering'.*?mergeReads.*?deferLoopProducerWave\(\s*'read merging'/s,
+	'input waves also hold back a multi-sample assembly until every member is ready');
+like($mataf4,
+	qr/SeqClnDeps\}, \$sdmjN.*?deferLoopProducerWave\(\s*'input preparation'.*?deferLoopProducerWave\(\s*'assembly-group input preparation'.*?metagAssemblyRun/s,
+	'host cleaning and other input producers must finish before group assembly is submitted');
+like($mataf4,
+	qr/metagAssemblyRun.*?deferLoopProducerWave\(\s*'assembly'.*?genePredictions/s,
+	'loop mode stops after assembly instead of creating an assembly-to-annotation chain');
+like($mataf4,
+	qr/my \$currentMappingDeps.*?append_job_dependencies\(\\\$currentMappingDeps, \$deferredDeps\).*?append_job_dependencies\(\\\$currentMappingDeps, \$map2Ctgs_2\).*?append_job_dependencies\(\\\$currentMappingDeps, \$mapSup2Ctgs_2\).*?my \$mappingWaveDeps = normalise_job_dependencies\(\s*\$currentMappingDeps, \$AsGrps\{\$cAssGrp\}\{MapDeps\}.*?deferLoopProducerWave\(\s*'assembly mapping', \$mappingWaveDeps.*?#---------------- producer barriers/s,
+	'deferred, primary, and support mappings form an assembly-group wave before downstream work');
+like($mataf4,
+	qr/my \$currentContigStatsDeps.*?append_job_dependencies\(\\\$currentContigStatsDeps, \$jdep\).*?my \$contigStatsWaveDeps = normalise_job_dependencies\(\s*\$currentContigStatsDeps, \$AsGrps\{\$cAssGrp\}\{BinDeps\}.*?deferLoopProducerWave\(\s*'contig statistics', \$contigStatsWaveDeps.*?submitGenomeBinner.*?createConsSNPandSVs/s,
+	'contig statistics complete in an earlier pass than binning and consensus');
 like($mataf4,
 	qr/for my \$SNPinfo \(\@pendingSecondMapSNP\).*?next unless -s \$secondReference && -s \$secondMapping;.*?createConsSNPandSVs\(\$SNPinfo\)/s,
 	'secondary-reference ConsSNP also waits for its published reference and mapping');
