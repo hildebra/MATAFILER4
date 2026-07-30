@@ -8,6 +8,8 @@ use Exporter qw(import);
 our @EXPORT_OK = qw(
 	advance_loop_window
 	overlap_loop_window
+	rolling_completed_frontier
+	priority_outputs_complete
 	parse_loop_spec
 	should_rerun_locked_window
 	assembly_cores_for_input
@@ -428,6 +430,63 @@ sub should_rerun_locked_window {
 	# values such as 10 active jobs among 1,000 samples do not qualify.
 	return ($active_jobs <= $active_job_threshold
 		|| $active_jobs * 100 < $sample_count) ? 1 : 0;
+}
+
+sub rolling_completed_frontier {
+	my (%args) = @_;
+	my $from = 0 + $args{from};
+	my $upper = 0 + $args{upper};
+	my $window = 0 + ($args{window_size} || 0);
+	my $completed = $args{completed} || {};
+	die 'rolling_completed_frontier requires a valid selected range'
+		if $from < 0 || $upper < $from;
+	my $next_from = $from;
+	$next_from++ while $next_from < $upper && $completed->{$next_from};
+	my $next_to = $upper;
+	if ($window > 0) {
+		$next_to = $next_from + $window;
+		$next_to = $upper if $next_to > $upper;
+	}
+	return {
+		from => $next_from,
+		to => $next_to,
+		advanced => $next_from - $from,
+		finished => $next_from >= $upper ? 1 : 0,
+	};
+}
+
+sub priority_outputs_complete {
+	my ($stages, $checker) = @_;
+	$stages ||= [];
+	$checker ||= sub {
+		my ($path, $kind) = @_;
+		return $kind eq 'exists' ? -e $path : -s $path;
+	};
+	for my $stage (@{$stages}) {
+		next unless $stage->{required};
+		my $kind = $stage->{kind} || 'nonempty';
+		for my $path (@{$stage->{all} || []}) {
+			next if !defined($path) || $path eq '';
+			return { complete => 0, missing_stage => $stage->{name}, missing => $path }
+				unless $checker->($path, $kind, $stage);
+		}
+		my $alternatives = $stage->{any} || [];
+		if (@{$alternatives}) {
+			my $present;
+			for my $path (@{$alternatives}) {
+				next if !defined($path) || $path eq '';
+				if ($checker->($path, $kind, $stage)) {
+					$present = 1;
+					last;
+				}
+			}
+			return {
+				complete => 0, missing_stage => $stage->{name},
+				missing => join(' or ', @{$alternatives}),
+			} unless $present;
+		}
+	}
+	return { complete => 1 };
 }
 
 1;

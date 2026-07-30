@@ -58,11 +58,11 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-submit` | integer | `1` | stable | submit any jobs at all? (0= no submission, just for trying if everything is correctly set up) |
 | `-from` | integer | `0` | stable | start at which samples from map file? |
 | `-to` | integer | `999999999999` | stable | stop at which samples from map file? |
-| `-loopTillComplete` | string | `"0"` | advanced | Loop over selected samples; `X:Y` processes blocks of at most `Y` samples for up to `X` passes. One following block is admitted before waiting when a pass submits at most `floor(Y/4)` jobs (minimum 1), and always on the final allowed pass of a block. At most one block is added per pass and the enlarged range receives a fresh pass budget. Preflight is repeated after each wait only when `-autoStatePlan 1` is enabled. |
+| `-loopTillComplete` | string | `"0"` | advanced | Loop over selected samples; `X:Y` starts with `Y` samples and advances its start only across the continuously completed, cleaned prefix. Completed slots admit later samples, while sparse or final passes may add one further block. Every normally terminating loop performs one final full-range verification before sample statistics are collected; discovered work returns it to rolling mode. Preflight is repeated after each wait only when `-autoStatePlan 1` is enabled. |
 | `-loopTillCompleteActiveJobs` | integer | `3` | advanced | Start the next loop pass once no more than this many dependencies submitted for the current loop window are actually executing. Queued dependency-pending jobs and unrelated user jobs do not inflate the active count. |
 | `-schedulerPollSeconds` | integer | `20` | advanced | Seconds between scheduler queries while `loopTillComplete` waits. Values must be positive. |
 | `-excludeNodes` | string | `""` | stable | exclude certain nodes? |
-| `-maxConcurrentJobs` | integer | `0` | stable | max jobs in queue, useful for large samples sets, currently only works on slurm |
+| `-maxConcurrentJobs` | integer | `0` | stable | Maximum live user jobs (running plus pending) allowed before another submission. The cap is checked at each central and deferred submission and currently works on Slurm. |
 | `-killDepNever` | integer | `0` | stable | kill jobs in "Dependency never finished" state? |
 | `-requireInput` | integer | `0` | stable | in case input reads are no longer present, 0 will continue pipeline, 1 will abort |
 | `-ignoreSmpls` | string | `""` | stable | Comma-separated exact sample IDs to skip; values are not regular expressions or prefix matches. |

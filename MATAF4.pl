@@ -42,12 +42,12 @@ use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
-use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs slurmJobFailureSummary submitSlurmWithDependencyRecovery);
+use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
 use Mods::WorkflowControl qw(
-	advance_loop_window overlap_loop_window parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs parse_ignored_samples
+	advance_loop_window overlap_loop_window rolling_completed_frontier priority_outputs_complete parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs parse_ignored_samples
 	balanced_parallel_batches
 	hybrid_group_ready hybrid_package_complete hybrid_package_sample_id missing_input_files source_input_files
 	hybrid_local_scratch_gb
@@ -75,6 +75,7 @@ sub sdmClean; sub sdmOptSet;  #qual filter reads
 sub mergeReads; #merge reads via flash
 sub removeHostSeqs; sub krakenTaxEst;sub prepKraken;
 sub loop2C_check;
+sub primeLoopSchedulerSnapshot;
 
 sub metagAssemblyRun;
 sub buildAssemblyMapIdx;
@@ -143,7 +144,11 @@ sub createConsSNPandSVs;
 #4.22: 28.7.26: complete assembly-independent workflows without assembly
 #       checkpoints, release their sample scratch safely, and reject assembly-only
 #       binning or variant options when assembly is disabled.
-my $MATFILER_ver = 4.22;
+#4.23: 30.7.26: use a rolling completed-sample frontier, a final full-range
+#       verification pass, shared batched Slurm lock/accounting snapshots, and
+#       running-plus-pending admission control. Repeated completed-sample visits
+#       use an ordered priority-output probe before deeper filesystem checks.
+my $MATFILER_ver = 4.23;
 
 #----------------- defaults ----------------- 
 
@@ -322,6 +327,7 @@ if ($runOptions{to} > @samples){
 	print "Reset range of samples to ". @samples."\n"; $runOptions{to} = @samples;
 }
 my $from = $runOptions{from}; my $to = $runOptions{to};
+my ($selectedFrom, $selectedTo) = ($runOptions{from}, $runOptions{to});
 #die "\"@samples\"\n";
 if ($runOptions{loopWindowSize} > 0){
 	$to = $from + $runOptions{loopWindowSize}; $to = $runOptions{to} if ($to > $runOptions{to});
@@ -330,6 +336,10 @@ my $loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
 my $loopIterationExtended = 0;
 my $loopFinalLockRetryUsed = 0;
 my %loopSubmittedJobIds;
+my %loopSampleCompleted;
+my $loopFinalVerification = 0;
+my $loopSawActiveLocks = 0;
+primeLoopSchedulerSnapshot($from, $to) if $runOptions{loopCount};
 
 
 #--------------------------------------------------------------------------------
@@ -402,6 +412,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				print "Released completed sample lock for $SmplName\n"
 					unless $MFconfig{silent};
 			} else {
+				$loopSawActiveLocks = 1
+					if defined($activeLockJobs) && $activeLockJobs > 0;
 				my $lockReason = defined($activeLockJobs)
 					? "$activeLockJobs recorded job(s) still queued or running"
 					: "legacy/unreadable lock has no verifiable job ledger";
@@ -528,6 +540,107 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($MFopt{normSNPindels}) {
 		$sampleCheckpoints{primaryConsensus} =~ s/\.stone/\.norm\.stone/;
 		$sampleCheckpoints{supportConsensus} =~ s/\.stone/\.norm\.stone/;
+	}
+
+	# Once a sample has passed the full completion and cleanup path in this run,
+	# revisit only its most informative requested outputs. Checks are deliberately
+	# ordered so a missing early-stage product avoids lower-priority filesystem IO.
+	if ($runOptions{loopCount} && !$loopFinalVerification
+			&& $loopSampleCompleted{$JNUM}) {
+		my $supportMappingRequested = $MFopt{mapSupport2Assembly}
+			&& ($map{$curSmpl}{SupportReads} || '') ne '';
+		my @priorityStages = (
+			{
+				name => 'mapping',
+				required => $MFopt{map2Assembly} && $map{$curSmpl}{hasPrimaryRds},
+				kind => 'exists', all => [$sampleCheckpoints{mappingComplete}],
+			},
+			{
+				name => 'support mapping', required => $supportMappingRequested,
+				kind => 'exists', all => [$sampleCheckpoints{supportMapping}],
+			},
+			{
+				name => 'depth',
+				required => $MFopt{DoAssembly} && $MFopt{map2Assembly}
+					&& $map{$curSmpl}{hasPrimaryRds},
+				any => [
+					$coveragePerCtg, "$finalMapDir/$SmplName-smd.bam.coverage.gz",
+					"$finalMapDir/$SmplName-smd.cram.coverage.gz",
+				],
+			},
+			{
+				name => 'assembly checkpoint', required => $MFopt{DoAssembly},
+				kind => 'exists',
+				all => ["$finalCommAssDir/$checkpointNames{assemblyDone}"],
+			},
+			{
+				name => 'assembly outputs', required => $MFopt{DoAssembly},
+				all => [$finAssLoc],
+				any => [
+					"$finalCommAssDir/genePred/proteins.shrtHD.faa",
+					"$finalCommAssDir/genePred/proteins.shrtHD.faa.gz",
+					"$finalCommAssDir/genePred/proteins.bac.shrtHD.faa",
+					"$finalCommAssDir/genePred/proteins.bac.shrtHD.faa.gz",
+				],
+			},
+			{
+				name => 'binning assignment', required => $MFopt{DoMetaBat2},
+				kind => 'exists', all => [$BinningOut],
+			},
+			{
+				name => 'binning statistics', required => $MFopt{DoMetaBat2},
+				all => ["$BinningOut.assStat"],
+			},
+			{
+				name => 'CheckM', required => $MFopt{DoMetaBat2} && $MFopt{useCheckM1},
+				kind => 'exists', all => ["$BinningOut.cm"],
+			},
+			{
+				name => 'CheckM2', required => $MFopt{DoMetaBat2} && $MFopt{useCheckM2},
+				all => ["$BinningOut.cm2"],
+			},
+			{
+				name => 'SNP consensus',
+				required => $MFopt{DoConsSNP} && $map{$curSmpl}{hasPrimaryRds},
+				kind => 'exists', all => [$sampleCheckpoints{primaryConsensus}],
+			},
+			{
+				name => 'SNP VCF',
+				required => $MFopt{DoConsSNP} && $map{$curSmpl}{hasPrimaryRds}
+					&& $MFopt{saveVCF},
+				any => [$vcfSNP, "$vcfSNP.gz"],
+			},
+			{
+				name => 'support SNP consensus',
+				required => $MFopt{DoSuppConsSNP} && $supportMappingRequested,
+				kind => 'exists', all => [$sampleCheckpoints{supportConsensus}],
+			},
+			{
+				name => 'support SNP VCF',
+				required => $MFopt{DoSuppConsSNP} && $supportMappingRequested
+					&& $MFopt{saveVCF},
+				any => [$vcfSNPsupp, "$vcfSNPsupp.gz"],
+			},
+			{
+				name => 'structural variants',
+				required => $MFopt{callSVs} && $map{$curSmpl}{hasPrimaryRds},
+				all => [$vcfSV],
+			},
+			{
+				name => 'support structural variants',
+				required => $MFopt{callSVsSupp} && $supportMappingRequested,
+				all => [$vscSVsupp],
+			},
+		);
+		my $priority = priority_outputs_complete(\@priorityStages);
+		if ($priority->{complete}
+				&& (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
+			print "Sample remains complete after priority output check\n"
+				unless $MFconfig{silent};
+			loop2C_check($cAssGrp, \@sampleDeps);
+			next;
+		}
+		delete $loopSampleCompleted{$JNUM};
 	}
 	
 	# collect stats on seq qual, assembly etc
@@ -1023,11 +1136,16 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		if ( ($boolAssemblyOK || ($doPreAssmFlag && $ePreAssmbly && !$ePreAssmblPck)) && !$locRedoAssMapping ){ #causes a lot of overhead but mainly to avoid unpacking reads again..
 			$runReport{present_assemblies}++;#= $AsGrps{$cAssGrp}{CntAimAss};
 		}
-		runFinishedCleanup(finishedCleanupArguments(
+		my $cleanupComplete = runFinishedCleanup(finishedCleanupArguments(
 			$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
 			$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
 			$assemblyOutputsRequired,
 		));
+		if ($cleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
+			$loopSampleCompleted{$JNUM} = 1;
+		} else {
+			delete $loopSampleCompleted{$JNUM};
+		}
 		print "Sample already complete; no jobs submitted\n" unless $MFconfig{silent};
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps);
@@ -1871,6 +1989,19 @@ sub submitFinishedCleanup {
 	return $cleanupJob;
 }
 
+sub primeLoopSchedulerSnapshot {
+	my ($start, $stop) = @_;
+	return unless $runOptions{loopCount};
+	$start = $selectedFrom if !defined($start) || $start < $selectedFrom;
+	$stop = $selectedTo if !defined($stop) || $stop > $selectedTo;
+	return if $start >= $stop;
+	my @lockFiles = map {
+		my $sampleKey = $samples[$_];
+		"$map{$sampleKey}{wrdir}/LOGandSUB/$MFcontstants{DefaultSampleLock}";
+	} $start .. $stop - 1;
+	primeSampleLockJobSnapshot(\@lockFiles, $QSBoptHR);
+}
+
 sub loop2C_check(){
 	my ($cAssGrp,$sampleDeps_AR) = @_;
 	if ($runOptions{loopCount} ){
@@ -1908,6 +2039,7 @@ sub loop2C_check(){
 				resetAsGrps(\%AsGrps);
 				$loopIterationExtended = 0;
 				$JNUM = $from - 1;
+				primeLoopSchedulerSnapshot($from, $to);
 				return;
 			}
 			my $lastWindowPass = $runOptions{loopCount} == 1 ? 1 : 0;
@@ -1935,6 +2067,7 @@ sub loop2C_check(){
 						"$overlapWindow->{job_limit})";
 				print "$overlapReason; extending sample window from " .
 					"$from -> $previousTo to $from -> $to before waiting.\n";
+				primeLoopSchedulerSnapshot($from, $to);
 				return;
 			}
 			$loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
@@ -1976,25 +2109,70 @@ sub loop2C_check(){
 			@grandDeps = ();
 			resetAsGrps(\%AsGrps);
 
-			if ($runOptions{loopWindowSize} > 0 && !$runOptions{loopCount}){
-				%loopSubmittedJobIds = ();
-				my $tmpStr = "Changing sample window from $from -> $to to ";
-				my $nextWindow = advance_loop_window(
-					from => $from, to => $to, upper => $runOptions{to},
+			my $hadActiveLocks = $loopSawActiveLocks;
+			$loopSawActiveLocks = 0;
+			unless ($loopFinalVerification) {
+				my $frontier = rolling_completed_frontier(
+					from => $from, upper => $selectedTo,
 					window_size => $runOptions{loopWindowSize},
-					initial_loops => $runOptions{loopInitialCount},
+					completed => \%loopSampleCompleted,
 				);
-				$from = $nextWindow->{from};
-				$to = $nextWindow->{to};
-				$runOptions{loopCount} = $nextWindow->{loop_count};
-				$JNUM = $nextWindow->{reset_index};
-				print "Last loop, breaking..\n" unless ($nextWindow->{has_window});
-				print "$tmpStr$from -> $to \n";#" . ($JNUM + $runOptions{loopWindowSize}) . "\n";
-			} elsif ($runOptions{loopCount}) {
-				# The for-loop increment moves this back to the first sample.
-				$JNUM = $from - 1;
-				print "Reanalyzing samples $from till $to\n";
+				if ($frontier->{advanced}) {
+					my $oldFrom = $from;
+					$from = $frontier->{from};
+					if ($runOptions{loopWindowSize} > 0) {
+						$to += $frontier->{advanced};
+						$to = $selectedTo if $to > $selectedTo;
+					}
+					print "Advanced completed-sample frontier from $oldFrom to $from; "
+						."active scan is $from -> $to.\n";
+				}
 			}
+
+			if ($loopFinalVerification) {
+				if ($continueCurrentWindow || $hadActiveLocks) {
+					print "Final verification found "
+						.($continueCurrentWindow ? 'newly submitted work' : 'active sample locks')
+						."; returning to the rolling loop.\n";
+					$loopFinalVerification = 0;
+					my $frontier = rolling_completed_frontier(
+						from => $selectedFrom, upper => $selectedTo,
+						window_size => $runOptions{loopWindowSize},
+						completed => \%loopSampleCompleted,
+					);
+					$from = $frontier->{finished} ? $selectedFrom : $frontier->{from};
+					$to = $runOptions{loopWindowSize} > 0
+						? $from + $runOptions{loopWindowSize} : $selectedTo;
+					$to = $selectedTo if $to > $selectedTo;
+					$runOptions{loopCount} = $runOptions{loopInitialCount};
+					$JNUM = $from - 1;
+					sleep($MFconfig{schedulerPollSeconds})
+						if $hadActiveLocks && !$continueCurrentWindow;
+				} else {
+					$runOptions{loopCount} = 0;
+					print "Final full-range verification completed; sample statistics may now be collected.\n";
+				}
+			} elsif ($runOptions{loopCount}) {
+				$JNUM = $from - 1;
+				print "Reanalyzing rolling sample range $from till $to\n";
+			} elsif ($runOptions{loopWindowSize} > 0 && $to < $selectedTo) {
+				my $previousTo = $to;
+				$to += $runOptions{loopWindowSize};
+				$to = $selectedTo if $to > $selectedTo;
+				$runOptions{loopCount} = $runOptions{loopInitialCount};
+				$JNUM = $from - 1;
+				%loopSubmittedJobIds = ();
+				print "Expanded rolling sample range $from -> $previousTo to $from -> $to.\n";
+			} else {
+				$loopFinalVerification = 1;
+				$from = $selectedFrom;
+				$to = $selectedTo;
+				$runOptions{loopCount} = 1;
+				$JNUM = $from - 1;
+				%loopSubmittedJobIds = ();
+				print "Starting final full-range verification pass $from -> $to before statistics.\n";
+			}
+			primeLoopSchedulerSnapshot($from, $to) if $runOptions{loopCount};
 			print "-------------------------------------------\n-------------------------------------------\n";
 			
 		}
@@ -2744,6 +2922,9 @@ sub postSubmQsub {
 		push @augmented_commands, $augmented->{command};
 		my $submitted_before = scalar @submitted;
 		my $scheduler_job_id = "";
+		qsubSystemWaitMaxJobs(
+			$MFconfig{checkMaxNumJobs}, $MFconfig{killDepNever}, $QSBoptHR,
+		);
 		my ($output, $status) = $QSBoptHR->{qmode} eq 'slurm'
 			? submitSlurmWithDependencyRecovery(
 				$augmented->{command}, $script_path, $QSBoptHR,
@@ -8922,6 +9103,8 @@ sub setupHPC{
 	$QSBoptHR1->{wcKeysForJob} = $MFconfig{wcKeysForJob};
 	$QSBoptHR1->{excludeNodes} = $MFconfig{excludeNodes};
 	$QSBoptHR1->{jobPollSeconds} = $MFconfig{schedulerPollSeconds};
+	$QSBoptHR1->{maxConcurrentJobs} = $MFconfig{checkMaxNumJobs};
+	$QSBoptHR1->{killDependencyNever} = $MFconfig{killDepNever};
 	# Queue-size checks used to run once per sample. Cache a successful query,
 	# while counting every locally submitted job conservatively against it.
 	$QSBoptHR1->{pendingJobCheckInterval} =
@@ -9303,12 +9486,12 @@ sub getCmdLineOptions{
 		"submit=i" => \$runOptions{submit},  #submit any jobs at all? (0= no submission, just for trying if everything is correctly set up)
 		"from=i" => \$runOptions{from},  #start at which samples from map file?
 		"to=i" => \$runOptions{to},   #stop at which samples from map file?
-		"loopTillComplete=s" => \$runOptions{loopCount}, #dangerous flag, script will loop over the assigned samples until all jobs are finished.
-		#use synatx "X:Y" where X is num loops, Y is the window size, eg "6:250" would run 6 loops of max 250 samples, then move on to next 250 samples
+		"loopTillComplete=s" => \$runOptions{loopCount}, #rolling completion loop followed by one final full-range verification pass
+		#use syntax "X:Y" where X is the pass budget and Y is the active rolling window size
 		"loopTillCompleteActiveJobs=i" => \$MFconfig{loopTillCompleteActiveJobs}, #start the next pass once no more than this many submitted jobs are running
 		"schedulerPollSeconds=i" => \$MFconfig{schedulerPollSeconds}, #seconds between loopTillComplete scheduler queries
 		"excludeNodes=s" => \$MFconfig{excludeNodes}, #exclude certain nodes?
-		"maxConcurrentJobs=i" => \$MFconfig{checkMaxNumJobs}, #max jobs in queue, useful for large samples sets, currently only works on slurm 
+		"maxConcurrentJobs=i" => \$MFconfig{checkMaxNumJobs}, #max running plus pending user jobs, enforced before every Slurm submission
 		"killDepNever=i" => \$MFconfig{killDepNever}, #kill jobs in "Dependency never finished" state? 
 		"requireInput=i" => \$MFconfig{abortOnEmptyInput},  #in case input reads are no longer present, 0 will continue pipeline, 1 will abort
 		"ignoreSmpls=s" => \$MFconfig{ignoreSmpl},  #skip a certain sample (sample id)

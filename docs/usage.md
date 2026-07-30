@@ -50,6 +50,14 @@ budget.
 Completed members of a hybrid assembly group are retained while missing members
 are resubmitted; final group assembly remains dependent on all required
 preassembly packages.
+As fully complete samples have their temporary data removed, the range start
+advances across that continuous prefix and later samples replenish the rolling
+range. A completed sample is revisited through an ordered fast probe (mapping,
+depth, assembly, binning and requested variant outputs); a missing priority
+output restores the full inspection path. When rolling processing reaches its
+normal end, MATAFILER4 makes one final full-range verification pass. Statistics
+are collected only after that pass finds neither newly submitted work nor
+active sample locks.
 
 With the default `-rmSmplLocks 0`, a pass may submit nothing because active
 samples are still locked. MATAFILER4 checks the scheduler in that case and
@@ -58,6 +66,12 @@ count is either below 3 or strictly below 1% of the range's sample count. These
 rescans consume the configured pass allowance; one additional final rescan is
 permitted, after which normal overlap or window advancement resumes. This guard
 does not run for dry runs, lock-removal mode, or when no scheduler jobs remain.
+
+At the beginning of each loop pass, sample lock job IDs are collected first.
+MATAFILER4 uses one `squeue` snapshot and bounded, multi-job `sacct` calls for
+tracked IDs no longer present in `squeue`; all samples and dependency checks in
+that pass reuse the result. `-maxConcurrentJobs` counts both running and pending
+jobs and is enforced immediately before each scheduler submission.
 
 Group-wide invalidation is intentionally not classified as an automatic safe
 repair. An exact assembly-group membership change remains blocked unless the

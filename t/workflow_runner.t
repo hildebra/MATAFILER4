@@ -174,7 +174,27 @@ like($mataf4,
 like($mataf4,
 	qr/getCmdLineOptions;.*?rewrite options cannot be combined with -loopTillComplete.*?setupHPC\(\)/s,
 	'unsafe rewrite combinations fail before scheduler setup or job submission');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?my \$MATFILER_ver = 4\.22/s,
-	'MATAFILER history retains loop triggering changes through version 4.22');
+like($mataf4,
+	qr/sub primeLoopSchedulerSnapshot.*?primeSampleLockJobSnapshot\(\\\@lockFiles, \$QSBoptHR\)/s,
+	'one pass-level scheduler and accounting snapshot serves all sample locks');
+like($mataf4,
+	qr/priority_outputs_complete\(\\\@priorityStages\).*?Sample remains complete after priority output check.*?delete \$loopSampleCompleted/s,
+	'completed samples use an ordered fast probe and fall back when an output disappears');
+like($mataf4,
+	qr/rolling_completed_frontier\(.*?Advanced completed-sample frontier.*?active scan is/s,
+	'the loop start advances only through the continuously completed sample prefix');
+like($mataf4, qr/Starting final full-range verification pass/,
+	'a normal loop end starts a mandatory all-sample verification pass');
+like($mataf4,
+	qr/Final full-range verification completed; sample statistics may now be collected.*?sub postprocess/s,
+	'the final all-sample verification gates statistics collection');
+like($mataf4,
+	qr/\$QSBoptHR1->\{maxConcurrentJobs\} = \$MFconfig\{checkMaxNumJobs\}/,
+	'the configured live-job cap is passed into central submission options');
+like($mataf4,
+	qr/sub postSubmQsub.*?qsubSystemWaitMaxJobs\(\s*\$MFconfig\{checkMaxNumJobs\}/s,
+	'deferred direct submissions also enforce the live-job cap');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?my \$MATFILER_ver = 4\.23/s,
+	'MATAFILER history retains loop triggering changes through version 4.23');
 
 done_testing;

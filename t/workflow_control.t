@@ -11,7 +11,7 @@ use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(resetAsGrps contig_stats_coverage_complete);
 use Mods::IO_Tamoc_progs qw(inputFmtSpades);
 use Mods::WorkflowControl qw(
-	advance_loop_window overlap_loop_window parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
+	advance_loop_window overlap_loop_window rolling_completed_frontier priority_outputs_complete parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
@@ -203,6 +203,50 @@ $overlap = overlap_loop_window(
 	last_pass => 1,
 );
 ok(!$overlap->{extended}, 'the final pass cannot extend beyond the selected range');
+
+my $rolling = rolling_completed_frontier(
+	from => 0, upper => 10, window_size => 4,
+	completed => { 0 => 1, 1 => 1, 3 => 1 },
+);
+is_deeply($rolling, { from => 2, to => 6, advanced => 2, finished => 0 },
+	'the frontier advances only across the continuously completed prefix');
+$rolling = rolling_completed_frontier(
+	from => 2, upper => 10, window_size => 4,
+	completed => { 2 => 1, 3 => 1, 4 => 1, 7 => 1 },
+);
+is_deeply($rolling, { from => 5, to => 9, advanced => 3, finished => 0 },
+	'completed slots replenish the rolling range without skipping a gap');
+$rolling = rolling_completed_frontier(
+	from => 8, upper => 10, window_size => 4,
+	completed => { 8 => 1, 9 => 1 },
+);
+ok($rolling->{finished} && $rolling->{from} == 10,
+	'a fully completed prefix reaches the selected upper bound');
+
+my @priority_visits;
+my %priority_present = map { $_ => 1 } qw(mapping depth-2 assembly);
+my $priority = priority_outputs_complete([
+	{ name => 'mapping', required => 1, all => ['mapping'] },
+	{ name => 'depth', required => 1, any => ['depth-1', 'depth-2'] },
+	{ name => 'assembly', required => 1, all => ['assembly'] },
+	{ name => 'binning', required => 0, all => ['binning'] },
+], sub {
+	my ($path) = @_;
+	push @priority_visits, $path;
+	return $priority_present{$path};
+});
+ok($priority->{complete}, 'ordered priority probing accepts every requested stage');
+is_deeply(\@priority_visits, [qw(mapping depth-1 depth-2 assembly)],
+	'priority probing checks stages in order and stops an alternative group once found');
+@priority_visits = ();
+delete $priority_present{mapping};
+$priority = priority_outputs_complete([
+	{ name => 'mapping', required => 1, all => ['mapping'] },
+	{ name => 'assembly', required => 1, all => ['assembly'] },
+], sub { push @priority_visits, $_[0]; return $priority_present{$_[0]}; });
+is($priority->{missing_stage}, 'mapping', 'the first missing priority stage is reported');
+is_deeply(\@priority_visits, ['mapping'],
+	'a missing high-priority output prevents lower-priority filesystem checks');
 
 is_deeply(parse_loop_spec('6:250'), {loop_count => 6, window_size => 250},
 	'a loop window specification is parsed exactly');
@@ -455,8 +499,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?my \$MATFILER_ver = 4\.22;/s,
-	'MATAFILER history retains shared input discovery through version 4.22');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?my \$MATFILER_ver = 4\.23;/s,
+	'MATAFILER history retains shared input discovery through version 4.23');
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');

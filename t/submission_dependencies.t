@@ -8,8 +8,9 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Subm qw(
-	qsubSystem qsubSystemJobAlive qsubSystemWaitMaxJobs numActiveUserJobs
+	qsubSystem qsubSystemJobAlive qsubSystemWaitMaxJobs numLiveUserJobs numActiveUserJobs
 	reconcileSlurmDependencies MFnext recordSampleLockJobs sampleLockActiveJobs
+	primeSampleLockJobSnapshot
 	slurmJobFailureSummary
 	submitSlurmWithDependencyRecovery
 );
@@ -76,6 +77,43 @@ open my $legacy_fh, '>', $legacy_lock or die "Cannot create $legacy_lock: $!";
 close $legacy_fh;
 is(sampleLockActiveJobs($legacy_lock, $lock_options), undef,
 	'an empty legacy lock is retained when its ownership cannot be verified');
+
+my $batch_lock_a = File::Spec->catfile($root, 'batch-a.lock');
+my $batch_lock_b = File::Spec->catfile($root, 'batch-b.lock');
+recordSampleLockJobs($batch_lock_a, [901, 902], $lock_options);
+recordSampleLockJobs($batch_lock_b, [903], $lock_options);
+my ($batch_queue_calls, $batch_accounting_calls) = (0, 0);
+my $batch_options = slurm_options();
+$batch_options->{sampleLockJobRunner} = sub {
+	$batch_queue_calls++;
+	return ("901|RUNNING\n999|PENDING\n", 0);
+};
+$batch_options->{sampleLockAccountingRunner} = sub {
+	my ($command, $ids) = @_;
+	$batch_accounting_calls++;
+	is_deeply($ids, [902, 903],
+		'one accounting batch receives every tracked job absent from squeue');
+	return ("902|COMPLETED|0:0\n903|FAILED|1:0\n", 0);
+};
+my $batch_snapshot = primeSampleLockJobSnapshot(
+	[$batch_lock_a, $batch_lock_b], $batch_options,
+);
+is_deeply($batch_snapshot, { tracked => 3, queued => 1, accounted => 2 },
+	'the pass snapshot combines scheduler and accounting state');
+is(sampleLockActiveJobs($batch_lock_a, $batch_options), 1,
+	'all samples reuse the primed active-job snapshot');
+is(sampleLockActiveJobs($batch_lock_b, $batch_options), 0,
+	'a terminal accounted job no longer keeps its sample lock active');
+is($batch_queue_calls, 1, 'the pass performs one squeue query');
+is($batch_accounting_calls, 1, 'the pass performs one batched sacct query');
+my ($batch_reconciled, $batch_error) = reconcileSlurmDependencies(
+	'902;903', 0, $batch_options,
+);
+is($batch_reconciled, '', 'cached successful and failed terminal dependencies are removed');
+like($batch_error, qr/903 \(FAILED, exit 1:0\)/,
+	'the cached failed prerequisite is still reported');
+is($batch_accounting_calls, 1,
+	'dependency reconciliation reuses the pass accounting cache');
 
 my $mfnext_lock = File::Spec->catfile($root, 'mfnext.lock');
 my $submitted_before_mfnext = $lock_options->{submittedJobs} || 0;
@@ -346,7 +384,9 @@ $options->{schedulerClock} = sub { return 1000; };
 my $pending_queries = 0;
 $options->{pendingJobRunner} = sub {
 	$pending_queries++;
-	return (($pending_queries == 1 ? 3 : 4)."\n", 0);
+	return ($pending_queries == 1
+		? "101\n102\n103\n"
+		: "101\n102\n103\n104\n", 0);
 };
 qsubSystemWaitMaxJobs(10, 0, $options);
 qsubSystemWaitMaxJobs(10, 0, $options);
@@ -360,6 +400,15 @@ $options->{submittedJobs} = 8;
 qsubSystemWaitMaxJobs(10, 0, $options);
 is($pending_queries, 2,
 	'the scheduler is queried immediately when the conservative estimate exceeds the limit');
+
+$options = slurm_options();
+my $live_command = '';
+$options->{liveJobRunner} = sub {
+	$live_command = $_[0];
+	return ("11\n12\n13\n14\n", 0);
+};
+is(numLiveUserJobs($options), 4, 'live-job accounting counts running and pending queue entries together');
+unlike($live_command, qr/-t\s+PENDING/, 'the maxConcurrentJobs query is not restricted to pending jobs');
 
 $options = slurm_options();
 $options->{jobStatusRunner} = sub {
