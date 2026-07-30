@@ -15,8 +15,23 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.21;/,
-	'native post-alignment locus QC increments the workflow version');
+like($source, qr/my \$version = 5\.22;/,
+	'Perl-owned tree job lifecycle increments the workflow version');
+like($source,
+	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
+	"buildTree strain preset owns the fixed strain-tree settings");
+like($source,
+	qr/"stagedInputDir=s".*?"tmpSubdir=s".*?"completionMarker=s".*?publishStagedTreeInputs\(\$stagedInputDir.*?for my \$input_spec/s,
+	"buildTree5 publishes staged inputs before validating its input paths");
+like($source,
+	qr/sub publishStagedTreeInputs.*?unless \(\@missing\).*?Using existing persistent tree inputs.*?opendir.*?sortFastaForCompression.*?move\(\$source, \$destination\).*?Tree inputs remain incomplete/s,
+	"persistent inputs take precedence and staged publication is validated in Perl");
+like($source,
+	qr/length\(\$tmpSubdir\).*?\$ENV\{TMPDIR\}.*?File::Spec->catdir\(\$temporaryRoot.*?prepareTemporaryBase/s,
+	"TMPDIR-relative work paths are resolved inside buildTree5");
+like($source,
+	qr/safeRemoveTree\(\$tmpD, \$tmpBase\).*?writeCompletionMarker\(\$completionMarker, \$\{\$trRetH\}\{nwk\}.*?sub writeCompletionMarker.*?nonempty primary tree.*?rename \$temporaryMarker, \$marker/s,
+	"buildTree5 atomically publishes a completion marker only after validating its primary tree");
 like($source,
 	qr/post_alignment_locus_qc\.tsv.*?sub runPostAlignmentLocusQC.*?getProgPaths\("MSAfix"\).*?-manifest.*?-report.*?-keep/s,
 	'buildTree invokes native MSAfix locus QC before concatenation and retains its report');

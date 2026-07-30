@@ -25,6 +25,7 @@
 #5.19: infer a strict validated backbone and place sparse samples afterwards
 #5.20: filter anomalous per-locus alignments before concatenation
 #5.21: use native MSAfix locus QC and clean its temporary files on every exit
+#5.22: own staged-input publication, node-local temp selection, and completion markers
 
 use warnings;
 use strict;
@@ -82,9 +83,11 @@ sub sortFastaForCompression;
 sub fastaCompressionSortKey;
 sub runPostAlignmentLocusQC;
 sub alignmentFileStem;
+sub publishStagedTreeInputs;
+sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.21;
+my $version = 5.22;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -130,6 +133,8 @@ my $fracMaxGenes90pct = 0.25; #gene cats to keep, e.g. 25% of 90th percentile
 my $ntCntTotal =0; my $bootStrap=0; my $subsetSmpls = -1;
 my ($fnFna, $aaFna,$cogCats,$outD,$ncore,$Ete, $filt,$smplDef,$smplSep,$calcSyn,$calcNonSyn,
 			$useAA4tree,$calcDNAdiff,$tmpD ) = ("","","","",1,0,0.8,1,"_",0,0,0,0,"");
+my ($stagedInputDir, $tmpSubdir, $completionMarker) = ("", "", "");
+my $strainWithinPreset = 0;
 
 my ($continue,$isAligned) = (0,0);#overwrite already existing files?
 my $outgroup="";
@@ -213,6 +218,10 @@ GetOptions(
 	"cats=s"      => \$cogCats,
 	"outD=s"      => \$outD,
 	"tmpD=s" => \$tmpD,
+	"stagedInputDir=s" => \$stagedInputDir,
+	"tmpSubdir=s" => \$tmpSubdir,
+	"completionMarker=s" => \$completionMarker,
+	"strainWithinPreset=i" => \$strainWithinPreset,
 	"cores=i" => \$ncore,
 	"superTree=i" => \$doSuperTree,
 	"superCheck=i" => \$doSuperCheck,
@@ -280,6 +289,28 @@ GetOptions(
 	"map=s" =>\$mapF,
 	"clustername=s" => \$clusterName,
 ) or die("Error in command line arguments\n");
+die "-strainWithinPreset must be 0 or 1\n"
+	unless $strainWithinPreset == 0 || $strainWithinPreset == 1;
+if ($strainWithinPreset) {
+	$useAA4tree = 0;
+	$bootStrap = 0;
+	$ntCntTotal = 400;
+	$filt = 0.07;
+	$doRAXMLng = 0;
+	$minOverlapMSA = 2;
+	$strictBackbone = 1;
+	$subsetSmpls = -1;
+	$fracMaxGenes90pct = 0.7;
+	$gzipInput = 1;
+	$calcSyn = 0;
+	$calcNonSyn = 0;
+	$continue = 1;
+	$treeAutoModel = 0;
+	$iqFast = 1;
+	$doSuperTree = 0;
+	$doDNDS = 0;
+	$doTheta = 0;
+}
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
 die "-cores must be a positive integer\n" if $ncore < 1;
@@ -300,8 +331,6 @@ die "-placementMinOverlap must be non-negative "
 die "-strictBackboneMinSamples must be at least 3 "
 	."(default $BACKBONE_DEFAULT{minimum_samples})\n"
 	if $strictBackboneMinSamples < 3;
-die "-sampleQC does not exist or is empty: $sampleQCFile\n"
-	if length($sampleQCFile) && !fileGZs($sampleQCFile);
 die "-postAlignmentLocusQC must be 0 or 1 "
 	."(default $POST_ALIGNMENT_QC_DEFAULT{enabled})\n"
 	unless $postAlignmentLocusQC == 0 || $postAlignmentLocusQC == 1;
@@ -317,6 +346,12 @@ die "-postAlignmentRelativeZ must be non-negative "
 die "-postAlignmentMinLociRelative must be positive "
 	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative})\n"
 	if $postAlignmentMinLociRelative < 1;
+die "-tmpD and -tmpSubdir are mutually exclusive\n" if length($tmpD) && length($tmpSubdir);
+if (length($tmpSubdir)) {
+	die "-tmpSubdir must be a safe relative path\n"
+		if File::Spec->file_name_is_absolute($tmpSubdir)
+			|| grep { $_ eq File::Spec->updir } File::Spec->splitdir($tmpSubdir);
+}
 die "-smplSep must not be empty\n" if $smplSep eq "";
 eval { qr/$smplSep/ } or die "Invalid -smplSep regular expression '$smplSep': $@";
 for my $fraction_name_value (
@@ -345,15 +380,33 @@ die "Refusing to use filesystem root '$outD' as -outD\n" if $outD eq $volumeRoot
 make_path($outD) unless -d $outD;
 die "Output path is not a directory: $outD\n" unless -d $outD;
 
+if (length($stagedInputDir)) {
+	my @requiredInputs = grep { defined($_) && length($_) } ($fnFna, $aaFna, $cogCats);
+	publishStagedTreeInputs($stagedInputDir, $outD, $ncore, \@requiredInputs);
+}
+die "-sampleQC does not exist or is empty: $sampleQCFile\n"
+	if length($sampleQCFile) && !fileGZs($sampleQCFile);
+
 ##### setup dirs
 $codemlOutD = File::Spec->catdir($outD, "codeml") if ($codemlOutD eq "");
 
-my $requestedTmpBase = $tmpD eq ""
-	? File::Spec->catdir($outD, "tmp")
-	: File::Spec->canonpath(File::Spec->rel2abs($tmpD));
+my $requestedTmpBase;
+if (length($tmpSubdir)) {
+	my $environmentTmp = $ENV{TMPDIR} // "";
+	my $temporaryRoot = length($environmentTmp)
+		? $environmentTmp
+		: File::Spec->catdir($outD, "tmp");
+	$requestedTmpBase = File::Spec->canonpath(
+		File::Spec->catdir($temporaryRoot, File::Spec->splitdir($tmpSubdir))
+	);
+} else {
+	$requestedTmpBase = $tmpD eq ""
+		? File::Spec->catdir($outD, "tmp")
+		: File::Spec->canonpath(File::Spec->rel2abs($tmpD));
+}
 my $tmpBase = $requestedTmpBase;
 my ($tmpReady, $tmpError) = prepareTemporaryBase($tmpBase);
-if (!$tmpReady && $tmpD ne "") {
+if (!$tmpReady && (length($tmpD) || length($tmpSubdir))) {
 	my $fallbackTmpBase = File::Spec->catdir($outD, "tmp");
 	warn "Requested temporary path is unusable: $tmpBase ($tmpError); "
 		. "falling back to $fallbackTmpBase\n";
@@ -1332,6 +1385,8 @@ if ($gzipInput){
 }
 
 safeRemoveTree($tmpD, $tmpBase);
+writeCompletionMarker($completionMarker, ${$trRetH}{nwk}, $outD)
+	if length($completionMarker);
 	###################### ETE ######################3
 
 print "BuildTree completed successfully\n";
@@ -2991,6 +3046,92 @@ sub runMSAFix {
 
 	rename $tmpOutput, $alignment
 		or die "Cannot replace $alignment with validated MSAfix output $tmpOutput: $!\n";
+}
+
+
+sub publishStagedTreeInputs {
+	my ($stagingDirectory, $outputDirectory, $cores, $requiredInputs) = @_;
+	my @missing = grep { !fileGZs($_) } @{$requiredInputs};
+	unless (@missing) {
+		print "Using existing persistent tree inputs\n";
+		return;
+	}
+
+	my $staging = File::Spec->canonpath(File::Spec->rel2abs($stagingDirectory));
+	my $output = File::Spec->canonpath(File::Spec->rel2abs($outputDirectory));
+	die "Staged tree-input directory does not exist: $staging\n" unless -d $staging;
+	die "Staged tree-input directory must differ from output directory: $staging\n"
+		if $staging eq $output;
+
+	opendir my $directoryHandle, $staging
+		or die "Cannot read staged tree-input directory $staging: $!\n";
+	my @stagedFiles = sort map { File::Spec->catfile($staging, $_) }
+		grep {
+			$_ ne File::Spec->curdir && $_ ne File::Spec->updir
+				&& -f File::Spec->catfile($staging, $_)
+				&& -s File::Spec->catfile($staging, $_)
+		} readdir $directoryHandle;
+	closedir $directoryHandle
+		or die "Cannot close staged tree-input directory $staging: $!\n";
+	die "No usable staged tree inputs found in $staging\n" unless @stagedFiles;
+	my %stagedBasename = map { basename($_) => 1 } @stagedFiles;
+	my @unavailable = grep {
+		my $requiredBasename = basename($_);
+		!$stagedBasename{$requiredBasename} && !$stagedBasename{"$requiredBasename.gz"};
+	} @missing;
+	die "Required tree inputs are absent from both persistent and staged storage: "
+		.join(", ", @unavailable)."\n" if @unavailable;
+
+	print "Publishing ".scalar(@stagedFiles)." staged tree-input file(s) to $output\n";
+	for my $source (@stagedFiles) {
+		if ($source !~ /\.gz$/) {
+			my $sourceBasename = basename($source);
+			sortFastaForCompression($source)
+				if $sourceBasename eq "allFAAs.faa" || $sourceBasename eq "allFNAs.fna";
+			my $compressionStatus = system {$pigzBin} $pigzBin, "-p", $cores, "--", $source;
+			die "Could not execute pigz for staged tree input $source: $!\n"
+				if $compressionStatus == -1;
+			die "pigz failed for staged tree input $source with status $compressionStatus\n"
+				if $compressionStatus != 0;
+			$source .= ".gz";
+			die "Compression did not produce staged tree input $source\n" unless -s $source;
+		}
+		my $destination = File::Spec->catfile($output, basename($source));
+		move($source, $destination)
+			or die "Cannot publish staged tree input $source as $destination: $!\n";
+	}
+
+	@missing = grep { !fileGZs($_) } @{$requiredInputs};
+	if (@missing) {
+		die "Tree inputs remain incomplete after staged publication; missing: "
+			.join(", ", map { $_ . "[.gz]" } @missing)."\n";
+	}
+	print "Tree inputs ready in persistent storage\n";
+}
+
+sub writeCompletionMarker {
+	my ($markerPath, $treePath, $outputDirectory) = @_;
+	die "Cannot create completion marker without a nonempty primary tree: $treePath\n"
+		unless defined($treePath) && length($treePath) && -s $treePath;
+
+	my $marker = File::Spec->canonpath(File::Spec->rel2abs($markerPath));
+	my $output = File::Spec->canonpath(File::Spec->rel2abs($outputDirectory));
+	my $relative = File::Spec->abs2rel($marker, $output);
+	my @relativeParts = File::Spec->splitdir($relative);
+	die "Completion marker must be inside the output directory: $marker\n"
+		if $relative eq File::Spec->curdir || grep { $_ eq File::Spec->updir } @relativeParts;
+
+	my $temporaryMarker = "$marker.tmp.$$";
+	unlink $temporaryMarker or die "Cannot remove stale completion marker $temporaryMarker: $!\n"
+		if -e $temporaryMarker;
+	open my $markerHandle, ">", $temporaryMarker
+		or die "Cannot create completion marker $temporaryMarker: $!\n";
+	print {$markerHandle} "buildTree5\t$version\t$treePath\n"
+		or die "Cannot write completion marker $temporaryMarker: $!\n";
+	close $markerHandle or die "Cannot close completion marker $temporaryMarker: $!\n";
+	rename $temporaryMarker, $marker
+		or die "Cannot publish completion marker $marker: $!\n";
+	print "Validated primary tree and published completion marker: $marker\n";
 }
 
 

@@ -49,7 +49,6 @@ sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
 sub stagedMGSInputsReady; sub evalFileStatus;
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
-sub treeInputPrecopyCommand;
 sub readFastaIDs;
 sub resetMGSTreeOutputs;
 sub stepComplete;
@@ -57,6 +56,7 @@ sub finalizeSampleQC;
 sub usage;
 sub writeRecoveryRow;
 sub mergeRecoveryLogs;
+sub indexRecoveryRow;
 sub writeStrainSummary;
 
 sub limitedWarn;sub limitedNotice;
@@ -181,12 +181,13 @@ END {
 #.66: let tree recalculation extract missing inputs and use job-local tree scratch
 #.67: parameter-driven gene caps, lower minimum, and per-sample TSV statistics
 #.68: remove blank per-sample progress separators from captured output
-my $version = 0.68;
+#.69: delegate tree input publication and completion checkpoints to buildTree5
+#.70: require and cardinality-check every recovered split-worker contribution
+my $version = 0.70;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
 
-my $pigzBin;
 
 #input args..
 my $GCd = "";#$ARGV[0];
@@ -386,7 +387,6 @@ if ($help) {
 }
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 checkMF();
-$pigzBin = getProgPaths("pigz");
 die "-GCd is required and must be a directory\n" unless length($GCd) && -d $GCd;
 die "Either -MGS or -outD is required\n" unless length($MGSfile) || length($outDpre);
 die "MGS file missing or empty: $MGSfile\n" if length($MGSfile) && !-s $MGSfile;
@@ -678,6 +678,9 @@ my %OCstrH ; my %OFstrH ; my %OAstrH ; my %OLstrH ; my %OQstrH ;
 my $splitGeneration = '';
 my $splitManifest = "$LOGDIR/mainExtr.generation";
 my $splitStonePrefix = "$LOGDIR/mainExtr";
+my (%recoveryWorkersByMGS, %recoveryRecordsByMGS, %recoveryRowsByMGS);
+my %recoverySamplesByMGS;
+my $recoveryContributionIndexReady = 0;
 
 
 my $runPartI = (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
@@ -1022,8 +1025,6 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		chomp $OG;
 		$OG =~ s/^OG://;
 	}
-	# buildTree5 validates its persistent checkpoints and restarts invalid stages.
-	my $contPhylo = 1;
 	
 	#main command to build within species strain tree.. missing outgroup so far ($outgS)
 	
@@ -1045,17 +1046,14 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		$numCoreL = 4 if ($numCoreL < 4);		$numCoreL = $maxCores if ($numCoreL > $maxCores);
 	}
 	
-	my $subsSmpl = -1;my $useSuperTree = 0;
+
 	my $bts = getProgPaths("buildTree_scr");
 	my $treeFlag = "-runIQtree 1 "; 
 	if ($phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}if ($phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
 	my $tree_sample_separator = quotemeta($SaSe);
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
-	$Tcmd .= "-AAtree 0 -bootstrap 0 -NTfiltCount 400 -NTfilt 0.07 -NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies -runRaxMLng 0 -minOverlapMSA 2 ";
-	$Tcmd .= "-strictBackbone 1 ";
-	$Tcmd .= "-subsetSmpls $subsSmpl -fracMaxGenes90pct 0.7 "; #concentrate on almost complete gene groups.. can yield more samples overall and speeds up calc..
-	$Tcmd .= "-rmMSA $rmMSA -gzInput 1 "; #save more diskspace..
-	$Tcmd .= "-SynTree 0 -NonSynTree 0 -MSAprogram $MSAprog -continue $contPhylo -AutoModel 0 -iqFast 1 -superTree $useSuperTree ";
+	$Tcmd .= "-strainWithinPreset 1 -NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies ";
+	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
 	if ($phyloProg == 1){
 		if ($legacyMGTK){
 			$Tcmd .= "-iqLegacy 1 ";
@@ -1064,11 +1062,10 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 			$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
 		}
 	}
-	my $treeTmpBase = $nodeTmpConfigured
-		? '"${TMPDIR}/strain_within/'.$MGS.'"'
-		: shellQuote("$scratchD/$MGS/");
-	$Tcmd .= "-runDNDS 0 -runTheta 0 -tmpD $treeTmpBase -map ".shellQuote($mapF)." ";
-	my $postCmd = "\n\ntest -s ".shellQuote($IQtreef)."\ntouch ".shellQuote($treeStone)."\n";
+	my $treeTmpOption = $nodeTmpConfigured
+		? "-tmpSubdir ".shellQuote("strain_within/$MGS")
+		: "-tmpD ".shellQuote("$scratchD/$MGS/");
+	$Tcmd .= "$treeTmpOption -map ".shellQuote($mapF)." ";
 		#die "$cmd\n" if ($cnt ==10);
 	
 	#if (!fileGZe($FNAtf) || !fileGZe($FAAtf) ||  ( !fileGZe($CATtf) && !-e "$CATtf.tmp") ){
@@ -1099,12 +1096,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
 		if fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof");
-	my $preCmd = "";
-	if ($needsCopy){
-		$preCmd = treeInputPrecopyCommand(
-			$tmpD, $outD2, $numCoreL, $FNAtf, $FAAtf, $CATtf
-		);
-	}
+	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if $needsCopy;
+	$Tcmd .= "-completionMarker ".shellQuote($treeStone)." ";
 
 	if ($multiSmpl>2){
 		print "  Tree input: $multiSmpl samples, $ngenes potential genes; $numCoreL cores, $totMem memory\n";
@@ -1130,7 +1123,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 			if -e $IQtreef;
 	}
 	my $treeJobOrdinal = $cnt + 1;
-	my ($dep,$qcmd) = qsubSystem($outD2."treeCmd.sh",$preCmd.$Tcmd.$outgS.$postCmd,$numCoreL,int($totMem) ."M","FT$treeJobOrdinal","","",1,[],$QSBoptHR);
+	my ($dep,$qcmd) = qsubSystem($outD2."treeCmd.sh",$Tcmd.$outgS."\n",$numCoreL,int($totMem) ."M","FT$treeJobOrdinal","","",1,[],$QSBoptHR);
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	$QSBoptHR->{useLongQueue} = 0;
 	$cnt ++;
@@ -1225,23 +1218,24 @@ exit(0);
 #	combineMGSgenesDir($MGS,$outD2);
 sub combineMGSgenesDir{
 	my ($MGS,$tmpD,$outD2) = @_;
-	my @required = ("$outD2/$FNAstdof", "$outD2/$FAAstdof", "$outD2/$CATstdof.tmp");
-
-	#my $outD3 = $tmpD; #work locally, copy later..
+	my @required = ("$tmpD/$FNAstdof", "$tmpD/$FAAstdof", "$tmpD/$CATstdof.tmp");
 	my @filesets = (
-		[$FNAstdof,      "$tmpD/$FNAstdof",      "$tmpD/$FNAstdof"],
-		[$FAAstdof,      "$tmpD/$FAAstdof",      "$tmpD/$FAAstdof"],
-		[$LINKstdof,     "$tmpD/$LINKstdof",     "$tmpD/$LINKstdof"],
-		["$CATstdof.tmp","$tmpD/$CATstdof.tmp",  "$tmpD/$CATstdof.tmp"],
-		["$QCstdof.tmp", "$tmpD/$QCstdof.tmp",   "$tmpD/$QCstdof.tmp"],
+		[$FNAstdof,       "$tmpD/$FNAstdof",       "$tmpD/$FNAstdof"],
+		[$FAAstdof,       "$tmpD/$FAAstdof",       "$tmpD/$FAAstdof"],
+		[$LINKstdof,      "$tmpD/$LINKstdof",      "$tmpD/$LINKstdof"],
+		["$CATstdof.tmp", "$tmpD/$CATstdof.tmp", "$tmpD/$CATstdof.tmp"],
+		["$QCstdof.tmp",  "$tmpD/$QCstdof.tmp",  "$tmpD/$QCstdof.tmp"],
 	);
-	my %partsByName;
+	my (%partsByName, %partByWorker);
 	my $workerCount = $maxSubJob || 1;
 	for my $set (@filesets) {
 		my ($name, $prefix) = @$set;
-		# Exact suffix matching deliberately excludes abandoned
-		# "$outfile.merge.PID" scratch files from worker input.
-		$partsByName{$name} = [exact_worker_parts($prefix, $workerCount)];
+		my @parts = exact_worker_parts($prefix, $workerCount);
+		$partsByName{$name} = \@parts;
+		for my $part (@parts) {
+			die "Cannot determine worker suffix for $part\n" unless $part =~ /\.(\d+)\z/;
+			$partByWorker{$name}{$1} = $part;
+		}
 	}
 	my $hasFreshParts = grep { @{$partsByName{$_}} }
 		($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp");
@@ -1252,44 +1246,114 @@ sub combineMGSgenesDir{
 			"Ignoring partial worker retry for $MGS: no complete matching split-extraction generation is present\n");
 		return $aggregateComplete;
 	}
-	for my $requiredName ($FNAstdof, $FAAstdof, "$CATstdof.tmp") {
-		unless (@{$partsByName{$requiredName}}) {
-			limitedWarn('worker extractions missing required parts',
-				"Fresh worker extraction for $MGS lacks required $requiredName parts; retaining parts for repair\n");
+
+	my @expectedWorkers;
+	if ($maxSubJob && !$recoveryContributionIndexReady) {
+		limitedWarn('missing recovery contribution index',
+			"Rejecting split-worker merge for $MGS: no worker contribution index is available; retaining worker parts\n");
+		return 0;
+	}
+	if ($recoveryContributionIndexReady) {
+		@expectedWorkers = sort { $a <=> $b } keys %{$recoveryWorkersByMGS{$MGS} || {}};
+		unless (@expectedWorkers) {
+			limitedWarn('worker parts without recovery rows',
+				"Rejecting worker parts for $MGS: the recovery ledger has no recovered samples for this MGS\n");
 			return 0;
+		}
+		my %expected = map { $_ => 1 } @expectedWorkers;
+		my @contributorNames = ($FNAstdof, $FAAstdof, "$CATstdof.tmp", "$QCstdof.tmp");
+		push @contributorNames, $LINKstdof if @{$partsByName{$LINKstdof}};
+		for my $name (@contributorNames) {
+			my @actual = sort { $a <=> $b } keys %{$partByWorker{$name} || {}};
+			my @missing = grep { !exists $partByWorker{$name}{$_} } @expectedWorkers;
+			my @unexpected = grep { !$expected{$_} } @actual;
+			if (@missing || @unexpected) {
+				my $details = 'missing='.(@missing ? join(',', @missing) : 'none')
+					.' unexpected='.(@unexpected ? join(',', @unexpected) : 'none');
+				limitedWarn('incomplete worker contribution set',
+					"Rejecting merge for $MGS/$name: $details; retaining worker parts\n");
+				return 0;
+			}
+		}
+	} else {
+		for my $requiredName ($FNAstdof, $FAAstdof, "$CATstdof.tmp") {
+			unless (@{$partsByName{$requiredName}}) {
+				limitedWarn('worker extractions missing required parts',
+					"Fresh worker extraction for $MGS lacks required $requiredName parts; retaining parts for repair\n");
+				return 0;
+			}
 		}
 	}
 
+	my (%mergeFileByName, %observedRows);
 	my @consumedParts;
 	for my $set (@filesets) {
-
-		my ($name, $prefix, $outfile) = @$set;
+		my ($name, undef, $outfile) = @$set;
 		my @parts = @{$partsByName{$name}};
 		next unless @parts;
-
 		my $mergeFile = "$outfile.merge.$$";
-		open my $out, ">", $mergeFile or die "Cannot create $mergeFile: $!\n";
+		open my $out, '>', $mergeFile or die "Cannot create $mergeFile: $!\n";
 		binmode $out;
-
+		my $rows = 0;
 		for my $file (@parts) {
-			open my $in, "<", $file or die "Cannot read $file: $!";
-			binmode $in;
-			while (my $line = <$in>) {
+			open my $part_fh, '<', $file or die "Cannot read $file: $!\n";
+			binmode $part_fh;
+			while (my $line = <$part_fh>) {
 				print {$out} $line or die "Cannot write $mergeFile: $!\n";
+				$rows++ if ($name eq $FNAstdof || $name eq $FAAstdof)
+					? $line =~ /^>/ : $line =~ /\S/;
 			}
-			close $in or die "Cannot close $file: $!\n";
+			close $part_fh or die "Cannot close $file: $!\n";
 		}
-
 		close $out or die "Cannot close $mergeFile: $!\n";
-		rename $mergeFile, $outfile or die "Cannot replace $outfile: $!\n";
+		$mergeFileByName{$name} = $mergeFile;
+		$observedRows{$name} = $rows;
 		push @consumedParts, @parts;
+	}
+
+	my @validationErrors;
+	my $fnaRows = $observedRows{$FNAstdof} // -1;
+	my $faaRows = $observedRows{$FAAstdof} // -1;
+	my $catRows = $observedRows{"$CATstdof.tmp"} // -1;
+	push @validationErrors, "FNA=$fnaRows FAA=$faaRows category=$catRows"
+		unless $fnaRows >= 0 && $fnaRows == $faaRows && $fnaRows == $catRows;
+	if ($recoveryContributionIndexReady) {
+		my $expectedRecords = $recoveryRecordsByMGS{$MGS} // 0;
+		my $expectedRows = $recoveryRowsByMGS{$MGS} // 0;
+		my $uniqueSamples = scalar keys %{$recoverySamplesByMGS{$MGS} || {}};
+		push @validationErrors, "records=$fnaRows expected=$expectedRecords"
+			unless $fnaRows == $expectedRecords;
+		push @validationErrors, "QC=".($observedRows{"$QCstdof.tmp"} // -1)." expected=$expectedRows"
+			unless ($observedRows{"$QCstdof.tmp"} // -1) == $expectedRows;
+		push @validationErrors, "recovery_rows=$expectedRows unique_samples=$uniqueSamples"
+			unless $expectedRows == $uniqueSamples;
+		if (exists $mergeFileByName{$LINKstdof}) {
+			push @validationErrors, "links=$observedRows{$LINKstdof} expected=$expectedRecords"
+				unless $observedRows{$LINKstdof} == $expectedRecords;
+		}
+	}
+	if (@validationErrors) {
+		unlink $_ for values %mergeFileByName;
+		limitedWarn('worker merge count mismatch',
+			"Rejecting merge for $MGS: ".join('; ', @validationErrors)."; retaining worker parts\n");
+		return 0;
+	}
+
+	for my $set (@filesets) {
+		my ($name, undef, $outfile) = @$set;
+		next unless exists $mergeFileByName{$name};
+		rename $mergeFileByName{$name}, $outfile or die "Cannot replace $outfile: $!\n";
 	}
 	my $complete = !grep { !fileGZe($_) } @required;
 	if ($complete) {
 		for my $part (@consumedParts) {
 			unlink $part or warn "Cannot remove combined part $part: $!\n";
 		}
-	} elsif (@consumedParts) {
+		if ($recoveryContributionIndexReady) {
+			warn "Merged $MGS: workers=".join(',', @expectedWorkers)
+				.", samples=$recoveryRowsByMGS{$MGS}, records=$recoveryRecordsByMGS{$MGS}\n";
+		}
+	} else {
 		limitedWarn('combined MGS inputs missing source parts',
 			"Incomplete combined input for $MGS; retaining all source parts for repair\n");
 	}
@@ -2554,6 +2618,24 @@ sub writeRecoveryRow {
 		or die "Cannot write MAG recovery statistics: $!\n";
 }
 
+sub indexRecoveryRow {
+	my ($worker, $line, $source) = @_;
+	my $copy = $line;
+	$copy =~ s/[\r\n]+\z//;
+	return unless length $copy;
+	my @field = split /\t/, $copy, -1;
+	die "Malformed MAG recovery row in $source: expected at least 9 tab-delimited fields\n"
+		unless @field >= 9;
+	my ($mgs, $sample, $outcome, undef, $retained_genes) = @field[0 .. 4];
+	return unless $outcome eq "recovered";
+	die "Malformed retained-gene count '$retained_genes' for $mgs/$sample in $source\n"
+		unless $retained_genes =~ /^\d+\z/;
+	$recoveryWorkersByMGS{$mgs}{$worker} = 1;
+	$recoveryRecordsByMGS{$mgs} += $retained_genes;
+	$recoveryRowsByMGS{$mgs}++;
+	$recoverySamplesByMGS{$mgs}{$sample} = 1;
+}
+
 sub mergeRecoveryLogs {
 	make_path($LOGDIR) unless -d $LOGDIR;
 	my @parts = $maxSubJob
@@ -2566,17 +2648,19 @@ sub mergeRecoveryLogs {
 	my $temporary = "$final.write.$$";
 	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
 	my $header_written = 0;
-	for my $part (@parts) {
+	for my $worker (0 .. $#parts) {
+		my $part = $parts[$worker];
 		open my $in, '<', $part or die "Cannot read $part: $!\n";
 		my $header = <$in>;
 		die "MAG recovery worker log has no header: $part\n" unless defined $header;
 		print {$out} $header unless $header_written++;
-		while (my $line = <$in>) { print {$out} $line or die "Cannot write $temporary: $!\n"; }
+		while (my $line = <$in>) { indexRecoveryRow($worker, $line, $part); print {$out} $line or die "Cannot write $temporary: $!\n"; }
 		close $in or die "Cannot close $part: $!\n";
 	}
 	close $out or die "Cannot close $temporary: $!\n";
 	rename $temporary, $final or die "Cannot install $final: $!\n";
 	for my $part (@parts) { unlink $part or die "Cannot remove $part: $!\n"; }
+	$recoveryContributionIndexReady = 1;
 	print "MAG recovery accounting: $final\n";
 }
 
@@ -2693,54 +2777,6 @@ sub shellQuote {
 	$value = "" unless defined $value;
 	$value =~ s/'/'"'"'/g;
 	return "'$value'";
-}
-
-sub treeInputPrecopyCommand {
-	my ($staging_dir, $output_dir, $cores, @required_inputs) = @_;
-	die "Cannot create a tree-input publication command without required inputs\n"
-		unless @required_inputs;
-
-	my $staging_q = shellQuote($staging_dir);
-	my $output_q = shellQuote($output_dir);
-	my $pigz_q = shellQuote($pigzBin);
-	my $ready_test = join(" && ", map {
-		"(test -s ".shellQuote($_)." || test -s ".shellQuote("$_.gz").")"
-	} @required_inputs);
-	my $required_array = join(" ", map { shellQuote($_) } @required_inputs);
-
-	my $command = "\n# Persistent inputs take precedence during recovery; use staging only when needed.\n";
-	$command .= "if ( $ready_test ); then\n";
-	$command .= "  echo \"Using existing persistent tree inputs\"\n";
-	$command .= "else\n";
-	$command .= "  staged_inputs=()\n";
-	$command .= "  if [[ -d $staging_q ]]; then\n";
-	$command .= "    mapfile -d '' -t staged_inputs < <(find $staging_q -mindepth 1 -maxdepth 1 -type f -print0)\n";
-	$command .= "  fi\n";
-	$command .= '  if (( ${#staged_inputs[@]} )); then' . "\n";
-	$command .= "    echo \"Publishing staged tree inputs to persistent storage\"\n";
-	$command .= '    for staged in "${staged_inputs[@]}"; do' . "\n";
-	$command .= '      if [[ "$staged" != *.gz ]]; then' . "\n";
-	$command .= "        $pigz_q -p $cores -- " . '"$staged"' . "\n";
-	$command .= "      fi\n";
-	$command .= "    done\n";
-	$command .= "    mapfile -d '' -t staged_inputs < <(find $staging_q -mindepth 1 -maxdepth 1 -type f -print0)\n";
-	$command .= '    mv -- "${staged_inputs[@]}" ' . "$output_q\n";
-	$command .= "  else\n";
-	$command .= "    echo \"No usable staged tree inputs found\"\n";
-	$command .= "  fi\n";
-	$command .= "fi\n";
-	$command .= "if ! ( $ready_test ); then\n";
-	$command .= "  echo \"ERROR: tree inputs are incomplete in both staging and persistent storage\" >&2\n";
-	$command .= "  required_inputs=($required_array)\n";
-	$command .= '  for required in "${required_inputs[@]}"; do' . "\n";
-	$command .= '    if [[ ! -s "$required" && ! -s "$required.gz" ]]; then' . "\n";
-	$command .= q{      printf '  missing: %s[.gz]\n' "$required" >&2} . "\n";
-	$command .= "    fi\n";
-	$command .= "  done\n";
-	$command .= "  exit 66\n";
-	$command .= "fi\n";
-	$command .= "echo \"Tree inputs ready in persistent storage\"\n\n";
-	return $command;
 }
 
 sub readFastaIDs {

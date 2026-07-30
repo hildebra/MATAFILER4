@@ -73,8 +73,10 @@ like($strain, qr/sub consensusInputState .*?\$nt_ready && \$aa_ready.*?return 'r
 	'consensus resume requires the paired NT and AA outputs and repairs from VCF');
 like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA,0,"\\\\s",\\%subG\)/s,
 	'within-strain extraction reads only candidate consensus genes');
-like($strain, qr/test -s "?\.shellQuote\(\$IQtreef\).*?touch "?\.shellQuote\(\$treeStone\)/s,
-	'a tree completion stone is conditional on a nonempty tree');
+like($strain, qr/-completionMarker "?\.shellQuote\(\$treeStone\)/,
+	"tree jobs delegate validated completion markers to buildTree5");
+unlike($strain, qr/test -s "?\.shellQuote\(\$IQtreef\).*?touch "?\.shellQuote\(\$treeStone\)/s,
+	"tree jobs no longer encode completion validation in shell");
 like($strain, qr/if \(\$doSubmit\) \{.*?unlink \$treeStone.*?if -e \$treeStone/s,
 	'a submitted tree retry cannot pass through a stale completion stone');
 like($strain, qr/unlink \$IQtreef.*?stale tree output/s,
@@ -90,10 +92,15 @@ like($strain,
 	'complete published inputs bypass missing scratch aggregates during tree recovery');
 like($strain, qr/has neither complete published inputs nor complete combined worker input/,
 	'incomplete worker input is reported only when published recovery inputs are also incomplete');
-like($strain, qr/hasFreshParts.*?lacks required.*?return 0/s,
-	'fresh worker parts replace stale combined inputs only when every required part exists');
-like($strain, qr/exact_worker_parts\(\$prefix, \$workerCount\).*?split_generation_complete\(\$splitManifest.*?return \$aggregateComplete/s,
-	'partial retries and merge scratch files cannot replace a complete aggregate');
+like($strain,
+	qr/sub indexRecoveryRow .*?recoveryWorkersByMGS.*?recoveryRecordsByMGS.*?for my \$worker \(0 \.\. \$#parts\).*?indexRecoveryRow\(\$worker/s,
+	"recovery rows index the exact workers and record cardinality expected for each MGS");
+like($strain,
+	qr/exact_worker_parts\(\$prefix, \$workerCount\).*?split_generation_complete\(\$splitManifest.*?\@missing.*?\@unexpected.*?Rejecting merge/s,
+	"worker merge requires the complete recovery-ledger contributor set from a completed generation");
+like($strain,
+	qr/records=\$fnaRows expected=\$expectedRecords.*?QC=.*?expected=\$expectedRows.*?if \(\@validationErrors\).*?unlink \$_ for values %mergeFileByName.*?return 0.*?rename \$mergeFileByName.*?unlink \$part/s,
+	"merged record and sample cardinalities are validated before aggregate publication or part deletion");
 like($strain, qr/qsubSystemJobAlive\([^\n]+QSBoptHR[^\n]+if [^\n]+doSubmit/,
 	'dry runs do not poll scheduler jobs that were never submitted');
 like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,
@@ -106,8 +113,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.68;/,
-	'within-strain missing-input tree recovery increments the workflow version');
+like($strain, qr/my \$version = 0\.70;/,
+	'validated split-worker merging increments the workflow version');
 unlike($strain, qr/print STDERR "\nAT SMPL::/,
 	"sample progress does not emit a leading blank line per assembly group");
 like($strain,
@@ -190,7 +197,7 @@ like($strain,
 	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
 	'split extraction workers inherit the missing-input MGS subset');
 like($strain,
-	qr/my \$treeTmpGb = int\(.*?\$QSBoptHR->\{tmpSpace\} = \$nodeTmpConfigured \? \$treeTmpGb : 0.*?'"\$\{TMPDIR\}\/strain_within\/'.\$MGS.'"'.*?-tmpD \$treeTmpBase/s,
+	qr/my \$treeTmpGb = int\(.*?\$QSBoptHR->\{tmpSpace\} = \$nodeTmpConfigured \? \$treeTmpGb : 0.*?\? "-tmpSubdir ".*?strain_within\/\$MGS.*?: "-tmpD "/s,
 	'tree jobs request and use node-local scratch when it is configured');
 like($strain,
 	qr/my \$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
@@ -244,15 +251,18 @@ like($strain,
 	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,
 	'split-worker sparsity is summarized instead of reported as missing catalogue data');
 like($strain,
-	qr/buildTree5 validates its persistent checkpoints.*?my \$contPhylo = 1;.*?-continue \$contPhylo/s,
-	'unfinished trees delegate checkpoint recovery to buildTree continue mode');
+	qr/-strainWithinPreset 1 -NTfiltPerGene .*? -GenesPerSpecies /,
+	'unfinished trees delegate checkpoint recovery and fixed strain settings to buildTree');
+unlike($strain,
+	qr/-AAtree 0|-bootstrap 0|-NTfiltCount 400|-strictBackbone 1|-continue |-gzInput 1|-runDNDS 0|-runTheta 0/,
+	"fixed buildTree strain settings are no longer serialized into the submitted command");
 like($strain,
-	qr/sub treeInputPrecopyCommand .*?if \( \$ready_test \).*?Using existing persistent tree inputs.*?staged_inputs=\(\).*?if \[\[ -d \$staging_q \]\].*?if \(\( \$\{#staged_inputs\[\@\]\} \)\).*?No usable staged tree inputs found.*?if ! \( \$ready_test \)/s,
-	'persistent tree inputs take precedence and recovery uses staging only when required');
-like($strain, qr/test -s .*?test -s .*?\.gz.*?tree inputs are incomplete in both staging and persistent storage/s,
-	'tree recovery accepts compressed persistent inputs and reports incomplete recovery data');
-unlike($strain, qr/\$pigzBin -p \$numCoreL \$tmpD\/\*/,
-	'generated tree jobs no longer pass an unmatched scratch glob to pigz');
+	qr/-tmpSubdir .*?strain_within\/\$MGS.*?-stagedInputDir .*?\$tmpD.*?-completionMarker .*?\$treeStone/s,
+	"tree jobs pass lifecycle paths to buildTree5 as ordinary options");
+unlike($strain, qr/sub treeInputPrecopyCommand|staged_inputs=\(\)|mapfile -d|ready_test/,
+	"strain_within no longer generates Bash input-publication logic");
+unlike($strain, qr/\$\{TMPDIR\}\/strain_within|my \$postCmd|touch "?\.shellQuote\(\$treeStone\)/,
+	"tree commands contain neither shell TMPDIR expansion nor shell checkpoints");
 
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,
