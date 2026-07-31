@@ -1327,7 +1327,14 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	#raw files only required for mapping reads to assemblies, so delete o/w
 	#$cfp1ar,$cfp2ar,
-	if (!$MFopt{DoAssembly} && $MFconfig{importMocat}==0 && $MFconfig{removeInputAgain} && !$requireRawReadsFlag){ $sdmjN = cleanInput($sdmjN,$smplTmpDir);}
+	my $rawReadSetHR = sampleReadSet($curSmpl, "raw");
+	my $stagedReadsMaterialized = ref($rawReadSetHR) eq 'HASH'
+		&& $rawReadSetHR->{stagedReadsMaterialized};
+	if (!$MFopt{DoAssembly} && $MFconfig{importMocat}==0
+			&& $MFconfig{removeInputAgain} && !$requireRawReadsFlag
+			&& $stagedReadsMaterialized){
+		$sdmjN = cleanInput($sdmjN,$smplTmpDir);
+	}
 	append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $mergJbN);
 
 
@@ -4417,10 +4424,18 @@ sub cleanInput( $ $ $){
 	my ($sdmjN,$saveD) = @_;
 	my $libraries = ensureSeqSetLibraries(sampleReadSet($curSmpl, "raw"), $curSmpl);
 	my $cmd = "";
+	my $cleanupRoot = File::Spec->canonpath(File::Spec->rel2abs($saveD));
 	foreach my $library (@{$libraries}) {
 		my @files = grep { defined($_) && $_ ne '' } @{$library->{files}}{qw(r1 r2 single)};
-		my @temporary = grep { /\Q$saveD\E/ && -e $_ } @files;
-		$cmd .= "rm -f ".join(" ", @temporary)."\n" if (@temporary);
+		my @temporary = grep {
+			my $candidate = File::Spec->canonpath(File::Spec->rel2abs($_));
+			my $relative = File::Spec->abs2rel($candidate, $cleanupRoot);
+			$candidate ne $cleanupRoot
+				&& $relative ne File::Spec->updir()
+				&& $relative !~ m{^\.\.(?:[\\/]|$)}
+				&& !File::Spec->file_name_is_absolute($relative);
+		} @files;
+		$cmd .= _shell_command('rm', '-f', '--', @temporary)."\n" if (@temporary);
 	}
 
 	#die $cmd."\n";
@@ -5524,6 +5539,11 @@ sub seedUnzip2tmp{
 	#make sure input is unzipped <- deprecated, in newer MF versions input is .gz
 	my $testf1 = "";my $testf2 = "";
 	my $lowEffort =-1; my $allowLinks=0;
+	# FinishedCleanup eventually removes the complete sample scratch directory.
+	# ClnUnzip is useful only when staging consumed additional space by copying
+	# or generating reads; a rawRds directory containing only symlinks can wait
+	# for the terminal cleanup.
+	my $stagedReadsMaterialized = 0;
 	$allowLinks = 1 if (@pa1 == 1);
 	$allowLinks = 1 if (@pa1 == 0 && @pas == 1 && !$porechopFlag);
 	my $illCLip = $himipeSeqAd;
@@ -5553,6 +5573,7 @@ sub seedUnzip2tmp{
 		$unzipcmd .= "\necho \"Converting bam $i to fastq\"\n";
 		$unzipcmd .= "$smtBin fastq -@ $numCore -t $pp/$paBam[$i] -0 $bamFastq;\n"; #| $pigzBin -p $numCore -c >
 		$lowEffort = 0;
+		$stagedReadsMaterialized = 1;
 	}
 	#and also take care of support reads in bam format
 	for (my $i=0; $i<@paBamX; $i++){
@@ -5567,6 +5588,7 @@ sub seedUnzip2tmp{
 		$unzipcmd .= "mkdir -p $supportDir;\n" if ($i==0);
 		$unzipcmd .= "$smtBin fastq -@ $numCore -t $paBamX[$i] -0 $bamFastq;\n"; # | $pigzBin -p $numCore -c >
 		$lowEffort = 0;
+		$stagedReadsMaterialized = 1;
 	}
 	
 	for (my $i=0; $i<@pa1; $i++){
@@ -5595,11 +5617,13 @@ sub seedUnzip2tmp{
 			$unzipcmd .= $tmpCmd."\n";
 			$pa1[$i] = $newF;
 			$lowEffort = 0 if ($LEloc==0);
+			$stagedReadsMaterialized = 1 if ($LEloc==0);
 			($tmpCmd,$newF,$LEloc) = complexGunzCpMv($pp,$pa2[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
 			$unzipcmd .= $tmpCmd."\n";
 			$pa2[$i] = $newF;
 			
 			$lowEffort = 0 if ($LEloc==0);
+			$stagedReadsMaterialized = 1 if ($LEloc==0);
 			#$lowEffort = 1 if ($allowLinks && $lowEffort == -1);
 		}
 	}
@@ -5623,14 +5647,17 @@ sub seedUnzip2tmp{
 			#porechop is running really slow and instable, probably better to get fast5 and use modern basecaller, that will do this automatically..
 			my $porechBin = getProgPaths("porechop");
 			$unzipcmd .= "$porechBin -i $pp/$pas[$i] -t $numCore  --adapter_threshold 90 |gzip -c >> $porechopped\n";
+			$stagedReadsMaterialized = 1;
 			if (@pa1 > 0 ){die "no paired end reads can be given together with porechopped long reads!\n";}
 		} else {
-			my ($tmpCmd,$newF) = complexGunzCpMv($pp,$pas[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
+			my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv($pp,$pas[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
 			$unzipcmd .= $tmpCmd."\n";
 			$pas[$i] = $newF;
+			$stagedReadsMaterialized = 1 if ($LEloc==0);
 			if ($MFconfig{splitFastaInput} != 0){ #in case of input assemblies (MG-RAST.. arghh!!)
 				my $sizSplitScr = getProgPaths("sizSplit_scr");
 				$unzipcmd .= "\n$sizSplitScr $pas[$i] $MFconfig{splitFastaInput}\n";
+				$stagedReadsMaterialized = 1;
 			}
 			$lowEffort = 1 if ($allowLinks &&  $lowEffort != 0);
 		}
@@ -5649,14 +5676,17 @@ sub seedUnzip2tmp{
 		my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$paX1[$i],$tmpPath,$supportDest,$numCore,0);
 		$unzipcmd .= $tmpCmd."\n"; $paX1[$i] = $newF;
 		$lowEffort = 0 if ($LEloc==0);
+		$stagedReadsMaterialized = 1 if ($LEloc==0);
 		($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$paX2[$i],$tmpPath,$supportDest,$numCore,0);
 		$unzipcmd .= $tmpCmd."\n"; $paX2[$i] = $newF;
 		$lowEffort = 0 if ($LEloc==0);
+		$stagedReadsMaterialized = 1 if ($LEloc==0);
 	}
 	for (my $i=0; $i<$supportSingleSourceCount; $i++) {
 		my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$paXs[$i],$tmpPath,$supportDest,$numCore,0);
 		$unzipcmd .= $tmpCmd."\n"; $paXs[$i] = $newF;
 		$lowEffort = 0 if ($LEloc==0);
+		$stagedReadsMaterialized = 1 if ($LEloc==0);
 	}
 		#die "@pa1\n@pas\n";
 
@@ -5719,6 +5749,7 @@ sub seedUnzip2tmp{
 		$mateLibraryIndex++;
 	}
 	if ($mateCmd ne "" && $calcUnzp){
+		$stagedReadsMaterialized = 1;
 		($jobN, $tmpCmd) = qsubSystem($logDir."MATE.sh",$mateCmd,1,"20G","_MT$JNUM",$jobN,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 	}
 	
@@ -5796,6 +5827,7 @@ sub seedUnzip2tmp{
 	}
 	%seqSet = (libraries => [@{$primaryLibraries}, @{$supportLibraries}],
 			totalInputSizeMB => $totalInputSizeMB, inputXFileSizeMB => $totalXInputSizeMB,
+			stagedReadsMaterialized => $stagedReadsMaterialized ? 1 : 0,
 			rawReads => $rawReads,
 			mmpu => $mmpu, 
 			samplReadLength => $MFconfig{defaultReadLength}, #some default value for typically short paired reads..

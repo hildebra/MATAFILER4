@@ -169,6 +169,18 @@ like($mataf4, qr/my \@mappingLibraries = \(\@\{\$pairs\}, \@singleLibraries\);\s
 like($mataf4, qr/sub cleanInput.*?ensureSeqSetLibraries\(sampleReadSet\(\$curSmpl, "raw"\)/s,
 	'raw-read cleanup covers both primary and support record scopes');
 like($mataf4,
+	qr/my \$stagedReadsMaterialized = ref\(\$rawReadSetHR\).*?&& \$stagedReadsMaterialized\)\{.*?cleanInput/s,
+	'early raw-read cleanup is submitted only when staging materialized data');
+like($seed_unzip,
+	qr/my \$stagedReadsMaterialized = 0;.*?Converting bam.*?\$stagedReadsMaterialized = 1;.*?\$stagedReadsMaterialized = 1 if \(\$LEloc==0\).*?stagedReadsMaterialized => \$stagedReadsMaterialized/s,
+	'copy, conversion, and transformation staging records materialized raw reads');
+like($seed_unzip,
+	qr/my \(\$tmpCmd,\$newF,\$LEloc\) = complexGunzCpMv\(\$pp,\$pas\[\$i\].*?\$stagedReadsMaterialized = 1 if \(\$LEloc==0\)/s,
+	'single-read staging propagates the copy-versus-link result');
+like($mataf4,
+	qr/sub cleanInput.*?File::Spec->abs2rel.*?_shell_command\('rm', '-f', '--', \@temporary\)/s,
+	'deferred raw cleanup validates planned scratch paths and shell-quotes them');
+like($mataf4,
 	qr/sub sampleReadSet.*?\$map\{\$sample\}\{reads\}\{\$phase\} = \$replacement.*?sampleReadSet\(\$curSmpl, "raw", \\%seqSet\).*?sampleReadSet\(\$curSmpl, "clean", \$cleanSeqSetHR\)/s,
 	'raw and clean phases are stored together under the sample read-state object');
 unlike($active_mataf4, qr/\$map\{[^}]+\}\{(?:seqSet|cleanSeqSet)\}/,

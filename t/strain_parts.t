@@ -10,11 +10,37 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::StrainParts qw(
-	exact_worker_parts write_split_generation write_worker_completion
+	balance_assembly_groups exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation
 	resolve_fasta_artifact append_fasta_records_atomic
 	sort_fasta_by_locus
 );
+
+my %unbalanced_groups = (
+	A_big => [map { "A$_" } 1 .. 10],
+	B_small => ['B1'],
+	C_big => [map { "C$_" } 1 .. 9],
+	D_small => ['D1'],
+);
+my ($group_worker, $worker_load) =
+	balance_assembly_groups(\%unbalanced_groups, 2);
+is_deeply($worker_load, [13, 12],
+	'sample-aware balancing includes one fixed unit per group and one per sample');
+is_deeply($group_worker,
+	{ A_big => 0, B_small => 1, C_big => 1, D_small => 0 },
+	'largest assembly groups are assigned first to the currently lightest worker');
+my @round_robin_load = (0, 0);
+my @sorted_groups = sort keys %unbalanced_groups;
+for my $index (0 .. $#sorted_groups) {
+	$round_robin_load[$index % 2] +=
+		1 + scalar(@{$unbalanced_groups{$sorted_groups[$index]}});
+}
+cmp_ok(abs($worker_load->[0] - $worker_load->[1]), '<',
+	abs($round_robin_load[0] - $round_robin_load[1]),
+	'sample-aware assignment improves on sorted assembly-group round robin');
+eval { balance_assembly_groups({ broken => 'not-an-array' }, 2) };
+like($@, qr/samples must be an array reference/,
+	'invalid assembly-group sample collections fail clearly');
 
 sub write_file {
 	my ($path, $contents) = @_;

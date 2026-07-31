@@ -11,6 +11,7 @@ use IO::Compress::Gzip qw($GzipError);
 use IO::Uncompress::Gunzip qw($GunzipError);
 
 our @EXPORT_OK = qw(
+	balance_assembly_groups
 	exact_worker_parts
 	write_split_generation
 	write_worker_completion
@@ -20,6 +21,34 @@ our @EXPORT_OK = qw(
 	append_fasta_records_atomic
 	sort_fasta_by_locus
 );
+
+sub balance_assembly_groups {
+	my ($samples_by_group, $worker_count) = @_;
+	die "assembly-group sample map must be a hash reference\n"
+		unless ref($samples_by_group) eq 'HASH';
+	die "worker count must be positive\n"
+		unless defined($worker_count) && $worker_count =~ /^\d+$/ && $worker_count > 0;
+
+	for my $group (keys %{$samples_by_group}) {
+		die "assembly-group '$group' samples must be an array reference\n"
+			unless ref($samples_by_group->{$group}) eq 'ARRAY';
+	}
+	my @worker_load = (0) x $worker_count;
+	my %worker_for_group;
+	for my $group (sort {
+		scalar(@{$samples_by_group->{$b}}) <=> scalar(@{$samples_by_group->{$a}})
+			|| $a cmp $b
+	} keys %{$samples_by_group}) {
+		my ($worker) = sort {
+			$worker_load[$a] <=> $worker_load[$b] || $a <=> $b
+		} 0 .. $worker_count - 1;
+		$worker_for_group{$group} = $worker;
+		# One unit represents the fixed group-level work; the sample count
+		# represents sample-specific VCF/depth consensus work.
+		$worker_load[$worker] += 1 + scalar(@{$samples_by_group->{$group}});
+	}
+	return (\%worker_for_group, \@worker_load);
+}
 
 sub exact_worker_parts {
 	my ($prefix, $worker_count) = @_;

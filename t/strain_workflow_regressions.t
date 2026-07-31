@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.74;/,
-	'all-worker sample-statistics aggregation increments the workflow version');
+like($strain, qr/my \$version = 0\.75;/,
+	'sample-aware Step 1 balancing increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -289,6 +289,9 @@ like($strain,
 like($strain,
 	qr/Partition whole assembly groups.*?samplesByGroup.*?ownedGroup.*?\$mine\{\$alias\} = 1/s,
 	'split extraction assigns complete assembly groups and their catalogue aliases to one worker');
+like($strain,
+	qr/balance_assembly_groups\(\\%samplesByGroup, \$maxSubJob\).*?\$workerForGroup->\{\$group\} == \$subJob.*?estimated load \$workerLoads->\[\$subJob\]\/\$totalWorkerLoad/s,
+	'split extraction balances fixed group work plus sample-specific work and reports its estimate');
 like($strain,
 	qr/readGenesSample_Singl\(\s*\$sm, \$writeLink, \$sttime, .*?\$appCnt, \$sampleStatsFH, .*?sampleStatsSeen.*?\$\{\$bufferedSamplesRef\}\+\+.*?appendWriteMGSgenes\(\$writeLink\)/s,
 	'expanded assembly-group output is accounted once and flushed by sample to retain the RAM bound');

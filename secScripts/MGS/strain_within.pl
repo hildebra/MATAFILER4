@@ -28,7 +28,7 @@ use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate protein_kmer_sim
 use Mods::MosaicLoci qw(read_mosaic_catalogue);
 use Mods::StrainQC qw(breakpoint_gene_mask abundance_pattern_mask);
 use Mods::StrainParts qw(
-	exact_worker_parts write_split_generation write_worker_completion
+	balance_assembly_groups exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation resolve_fasta_artifact
 	append_fasta_records_atomic sort_fasta_by_locus
 );
@@ -195,7 +195,8 @@ END {
 #.72: initialize sample-statistics columns before the executable workflow
 #.73: persist, merge, and summarize sample statistics across extraction workers
 #.74: print key:value summaries, use assembly-group terminology, and aggregate retained-locus histograms
-my $version = 0.74;
+#.75: balance Step 1 workers by assembly-group count and samples per group
+my $version = 0.75;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1898,9 +1899,11 @@ sub prepGene2MGS{
 			$groupForSample{$sample} = $group;
 		}
 		my @groups = sort keys %samplesByGroup;
+		my ($workerForGroup, $workerLoads) =
+			balance_assembly_groups(\%samplesByGroup, $maxSubJob);
 		my (%mine, %ownedGroup);
-		for (my $i = $subJob; $i < @groups; $i += $maxSubJob){
-			my $group = $groups[$i];
+		for my $group (@groups) {
+			next unless $workerForGroup->{$group} == $subJob;
 			$ownedGroup{$group} = 1;
 			$mine{$_} = 1 for @{$samplesByGroup{$group}};
 		}
@@ -1911,9 +1914,12 @@ sub prepGene2MGS{
 			$mine{$alias} = 1 if defined($group) && $ownedGroup{$group};
 		}
 		$mySamplesHR = \%mine;
+		my $totalWorkerLoad = 0;
+		$totalWorkerLoad += $_ for @{$workerLoads};
 		print "Subjob ${subJob}/$maxSubJob: restricting locus-model construction to "
 			. scalar(keys %ownedGroup)." of ".scalar(@groups)
-			." assembly groups (".scalar(keys %mine)." sample/alias identifiers)\n";
+			." assembly groups (".scalar(keys %mine)." sample/alias identifiers; "
+			."estimated load $workerLoads->[$subJob]/$totalWorkerLoad)\n";
 	}
 
 	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,$Gene2COG,$mySamplesHR);
