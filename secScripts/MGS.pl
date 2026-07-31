@@ -67,6 +67,7 @@ sub getGoodMBstats;
 sub printL;
 sub CanopyPrep;
 sub invertIndex;
+sub _representative_contig_outputs_valid;
 
 $| = 1;
 print "Starting MGS pipeline v$MGSpipelineVersion; parsing configuration before loading inputs.\n";
@@ -639,6 +640,9 @@ my $binDctg = "$outD/Genomes/MGS_ctg/";
 my $binDctgFam = "$outD/Genomes/MGS_ctg_fam/";
 make_path($binD, $binDctg, $binDctgFam);
 my $binExtractionValid = _checkpoint_valid($BinExtrSto);
+$binExtractionValid &&= _representative_contig_outputs_valid($binDctg);
+$binExtractionValid &&= _representative_contig_outputs_valid($binDctgFam)
+	if $doBinCtgsPerFam;
 unless ($binExtractionValid) {
 	# Prevent removed/renamed MGS from surviving as stale genomes after a
 	# clustering or catalogue change.
@@ -1092,6 +1096,16 @@ sub _checkpoint_valid {
 	# Rebuild them in this workflow instead of silently accepting stale state.
 	return 0 unless defined($file) && -s $file;
 	return checkpoint_valid($file, parameters => \%checkpointParameters);
+}
+
+sub _representative_contig_outputs_valid {
+	my ($directory) = @_;
+	return 0 unless defined($directory) && -d $directory;
+	my @outputs = grep { -f $_ } glob("$directory/*");
+	return 0 unless @outputs;
+	return !grep {
+		$_ !~ /\.(?:fa|fna|fasta)\.gz\z/i
+	} @outputs;
 }
 
 sub _shell_quote {

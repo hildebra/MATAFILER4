@@ -6,6 +6,7 @@ use File::Spec;
 use File::Temp qw(tempdir);
 use FindBin qw($Bin);
 use IPC::Open3 qw(open3);
+use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use Symbol qw(gensym);
 use Test::More;
 
@@ -108,13 +109,13 @@ my $contig_output_dir = File::Spec->catdir($tmp, 'representative-contigs');
 make_path($assembly_pointer_dir, $assembly_bin_dir, $contig_output_dir);
 write_file(File::Spec->catfile($assembly_pointer_dir, 'assembly.txt'), "$assembly_dir\n");
 write_file(File::Spec->catfile($assembly_bin_dir, 'S1'),
-	"needed1\t1\nunused\t2\nneeded2\t1\n");
+	"needed1\t1.fa.gz\nunused\t2\nneeded2\t1.fa.gz\n");
 write_file(File::Spec->catfile($assembly_dir, 'scaffolds.fasta.filt'),
 	">needed1\nAAAA\n>unused\nNNNN\n>needed2\nCCCC\n");
 my $representative_guide = File::Spec->catfile($tmp, 'MAGvsGC.txt');
 write_file($representative_guide,
 	"MAG\tMGS\tRepresentative4MGS\tCompleteness\tContamination\tLCAcompleteness\tN50\n"
-	. "S1__1\tMGS.1\t*\t95\t1\t1\t1000\n");
+	. "S1__1.fa.gz\tMGS.1\t*\t95\t1\t1\t1000\n");
 my %representative_map = (
 	opt => { smpl_order => ['S1'] },
 	altNms => {},
@@ -123,11 +124,19 @@ my %representative_map = (
 createBinCtgs(
 	$contig_output_dir, \%representative_map, $representative_guide, 0, 'SB',
 );
+my $compressed_contigs =
+	File::Spec->catfile($contig_output_dir, 'MGS.1.ctgs.S1__1.fa.gz');
+my $contig_contents = '';
+ok(gunzip($compressed_contigs => \$contig_contents),
+	'representative contigs are published as a valid gzip stream')
+	or diag($GunzipError);
 is(
-	slurp(File::Spec->catfile($contig_output_dir, 'MGS.1.ctgs.S1__1.fna')),
+	$contig_contents,
 	">needed1\nAAAA\n>needed2\nCCCC\n",
-	'representative-contig extraction retains only contigs from the selected bin',
+	'representative-contig extraction preserves the MAG FASTA suffix and selected contigs',
 );
+ok(!-e "$compressed_contigs.fna",
+	'a pre-compressed MAG identifier does not receive a trailing .fna suffix');
 
 my $gc = File::Spec->catdir($tmp, 'GC');
 make_path(File::Spec->catdir($gc, 'Anno', 'Tax'));
@@ -340,6 +349,9 @@ like($mgs_source, qr/'gtdb-taxonomy'.*?\$finalClustersFilt.*?'mgs-abundance'.*?\
 	'downstream taxonomy and abundance checkpoints track the current MGS membership');
 like($mgs_source, qr/binExtractionValid.*?remove_tree.*?geneBinFiles.*?contigBinFiles.*?_touch_checkpoint/s,
 	'bin extraction rebuilds cleanly and records its concrete genome outputs');
+like($mgs_source,
+	qr/binExtractionValid.*?_representative_contig_outputs_valid.*?sub _representative_contig_outputs_valid.*?fa\|fna\|fasta.*?\\.gz/s,
+	'bin extraction rejects stale uncompressed or malformed representative-contig outputs');
 like($mgs_source, qr/if \(\$rewrClusterMAGs \|\| \$stage1ProvenanceInvalid\).*?invalidate downstream checkpoint.*?between_phylo.*?within_phylo/s,
 	'reclustering invalidates dependent checkpoints and phylogenies');
 like($mgs_source, qr/"clusterID=i" => \\\$clusterID/,
@@ -453,7 +465,7 @@ like($strain_source, qr/'-forceSNPcalls', \$forceVCF2FNA/,
 	'parallel extraction workers inherit forced consensus regeneration');
 like($strain_source, qr/'-SNPadaptiveQual', \$useAdaptiveQual/,
 	'parallel extraction workers inherit adaptive SNP filtering');
-like($strain_source, qr/rename \$mergeFile, \$outfile or die/,
+like($strain_source, qr/rename \$mergeFileByName\{\$name\}, \$outfile or die/,
 	'part-file merging publishes completed output atomically');
 like($strain_source,
 	qr/!\$reSubmit && !\$repairCAT && !\$redoSubmissionData.*?&& -e \$treeStone/s,

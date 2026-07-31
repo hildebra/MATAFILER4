@@ -14,7 +14,7 @@ use strict;
 use File::Basename;
 use File::Path qw(make_path);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
-use Mods::GenoMetaAss qw (systemW readFasta gzipopen getAssemblPath reverse_complement_IUPAC);
+use Mods::GenoMetaAss qw (systemW readFasta gzipopen gzipwrite getAssemblPath reverse_complement_IUPAC);
 use Mods::TamocFunc qw (cram2bsam);
 
 
@@ -563,9 +563,14 @@ sub createBinCtgs{
 
 		for my $bin (sort keys %{$representatives_by_sample{$smpl}}) {
 			for my $representative (@{$representatives_by_sample{$smpl}{$bin}}) {
-				my $outF = "$outD/$representative->{mgs}.ctgs.$representative->{mag}.fna";
-				my $temporary = "$outF.tmp.$$";
-				open my $output, '>', $temporary or die "Couldn't open $temporary\n";
+				my $output_name = "$representative->{mgs}.ctgs.$representative->{mag}";
+				$output_name =~ s/\.gz\z//i;
+				$output_name .= ".fna"
+					unless $output_name =~ /\.(?:fa|fna|fasta)\z/i;
+				$output_name .= ".gz";
+				my $outF = "$outD/$output_name";
+				my $temporary = "$outF.tmp.$$.gz";
+				my $output = gzipwrite($temporary, "representative MGS contigs");
 				for my $ctg (@{$contigs_by_bin{$bin}}) {
 					die "Contig '$ctg' from bin '$bin' is absent from the assembly for '$smpl'\n"
 						unless exists($sequences->{$ctg});
