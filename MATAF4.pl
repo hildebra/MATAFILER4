@@ -42,7 +42,7 @@ use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
-use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred handleSubmissionFailure);
+use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred handleSubmissionFailure);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
@@ -155,7 +155,10 @@ sub createConsSNPandSVs;
 #4.25: 30.7.26: submit loopTillComplete producers in readiness waves, so input
 #       staging, quality/host filtering, assembly, mapping, and contig statistics
 #       complete before their consumers are submitted.
-my $MATFILER_ver = 4.25;
+#4.26: 31.7.26: after the first final full-range verification, wait for every
+#       job submitted by this invocation to leave the scheduler before starting
+#       another full-range pass.
+my $MATFILER_ver = 4.26;
 
 #----------------- defaults ----------------- 
 
@@ -2097,7 +2100,7 @@ sub loop2C_check(){
 			my $rerunLockedWindow = 0;
 			# A pass that submitted work already reruns after its dependency wait.
 			# Check the scheduler only for a no-op pass that may have skipped locks.
-			if (!$capacityDeferred && $runOptions{submit}
+			if (!$loopFinalVerification && !$capacityDeferred && $runOptions{submit}
 					&& !$MFconfig{rmSmplLocks} && $submittedThisIteration == 0) {
 				$activeJobs = numActiveUserJobs(
 					$QSBoptHR, 1, [keys %loopSubmittedJobIds],
@@ -2199,8 +2202,10 @@ sub loop2C_check(){
 				# Reinspect after every completed submission pass. This lets hybrid
 				# preassembly packages and assembly-group outputs become dependencies
 				# for the next pass without requiring a separate user command.
-				$workflowIteration++;
-				runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
+				unless ($loopFinalVerification) {
+					$workflowIteration++;
+					runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
+				}
 			}
 			# Reset pass-local state before either another iteration or a new window.
 			@grandDeps = ();
@@ -2227,24 +2232,37 @@ sub loop2C_check(){
 			}
 
 			if ($loopFinalVerification) {
-				if ($continueCurrentWindow || $hadActiveLocks) {
-					print "Final verification found "
-						.($continueCurrentWindow ? 'newly submitted work' : 'active sample locks')
-						."; returning to the rolling loop.\n";
-					$loopFinalVerification = 0;
-					my $frontier = rolling_completed_frontier(
-						from => $selectedFrom, upper => $selectedTo,
-						window_size => $runOptions{loopWindowSize},
-						completed => \%loopSampleCompleted,
-					);
-					$from = $frontier->{finished} ? $selectedFrom : $frontier->{from};
-					$to = $runOptions{loopWindowSize} > 0
-						? $from + $runOptions{loopWindowSize} : $selectedTo;
-					$to = $selectedTo if $to > $selectedTo;
-					$runOptions{loopCount} = $runOptions{loopInitialCount};
+				my @invocationJobIds = sort { $a <=> $b }
+					grep { /^\d+$/ }
+					keys %{$QSBoptHR->{submittedJobRecords} || {}};
+				my $liveInvocationJobs = @invocationJobIds
+					? numLiveUserJobs($QSBoptHR, 1, \@invocationJobIds) : 0;
+				if ($continueCurrentWindow || $hadActiveLocks || $liveInvocationJobs > 0) {
+					my $reason = $continueCurrentWindow
+						? 'newly submitted work'
+						: $hadActiveLocks ? 'active sample locks'
+						: "$liveInvocationJobs pending or running invocation job(s)";
+					print "Final verification found $reason; waiting for "
+						."$liveInvocationJobs active job(s) submitted by this invocation "
+						."before another full-range pass.\n";
+					if (@invocationJobIds) {
+						# No active-job threshold here: pending and running jobs from this
+						# invocation must all leave the scheduler before the next full scan.
+						qsubSystemJobAlive(\@invocationJobIds, $QSBoptHR, 1);
+					} elsif ($hadActiveLocks) {
+						# Locks can predate this invocation. Avoid a tight rescan when no
+						# locally submitted job ID is available to wait on.
+						sleep($MFconfig{schedulerPollSeconds});
+					}
+					$workflowIteration++;
+					runAutomaticWorkflowPreflight($workflowIteration)
+						if ($MFconfig{autoStatePlan});
+					$from = $selectedFrom;
+					$to = $selectedTo;
+					$runOptions{loopCount} = 1;
 					$JNUM = $from - 1;
-					sleep($MFconfig{schedulerPollSeconds})
-						if $hadActiveLocks && !$continueCurrentWindow;
+					print "Submitted jobs have finished; starting another full-range verification pass "
+						."$from -> $to.\n";
 				} else {
 					$runOptions{loopCount} = 0;
 					print "Final full-range verification completed; sample statistics may now be collected.\n";

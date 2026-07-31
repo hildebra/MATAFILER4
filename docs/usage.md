@@ -61,8 +61,11 @@ range. A completed sample is revisited through an ordered fast probe (mapping,
 depth, assembly, binning and requested variant outputs); a missing priority
 output restores the full inspection path. When rolling processing reaches its
 normal end, MATAFILER4 makes one final full-range verification pass. Statistics
-are collected only after that pass finds neither newly submitted work nor
-active sample locks.
+are collected only after a full-range pass finds neither newly submitted work
+nor active sample locks. The first full-range pass starts immediately. If it
+finds active locks or submits more work, MATAFILER4 waits until every pending or
+running job submitted by this invocation has left the scheduler before making
+another full-range pass.
 
 With the default `-rmSmplLocks 0`, a pass may submit nothing because active
 samples are still locked. MATAFILER4 checks the scheduler in that case and

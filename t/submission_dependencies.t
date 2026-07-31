@@ -458,6 +458,8 @@ $options->{liveJobRunner} = sub {
 	return ("11\n12\n13\n14\n", 0);
 };
 is(numLiveUserJobs($options), 4, 'live-job accounting counts running and pending queue entries together');
+is(numLiveUserJobs($options, 0, [qw(11 13 99)]), 2,
+	'live-job accounting can be restricted to IDs submitted by this invocation');
 unlike($live_command, qr/-t\s+PENDING/, 'the maxConcurrentJobs query is not restricted to pending jobs');
 
 $options = slurm_options();

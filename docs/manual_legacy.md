@@ -47,7 +47,7 @@ MATAFILER4 uses three primary phases to analyse metagenomes:
 	-excludeNodes [string]					exclude certain HPC nodes, comma separated list e.g. node1,node2,..
 	-submSystem [qsub,SGE,bsub,LSF]	set submission system (default: autodetect)
 	-redoContigStats [0|1]				if any step of requested analysis failed, contigStats (coverage per gene, kmers, GC content) will be deleted & started again
-	-loopTillComplete [X:Y]			script rolls over assigned samples, advancing only across the continuously completed/cleaned prefix; X is the retry budget and Y the initial active sample range. A final full-range verification runs before statistics (#advanced flag)
+	-loopTillComplete [X:Y]			script rolls over assigned samples, advancing only across the continuously completed/cleaned prefix; X is the retry budget and Y the initial active sample range. The first final full-range verification starts immediately; all jobs submitted by this invocation must finish before another full pass (#advanced flag)
 	-loopTillCompleteActiveJobs [#]	start the next loopTillComplete pass once this many submitted dependencies or fewer are actually executing (default 3; queued dependency-pending jobs are not counted)
 	-requireInput [0/1]		in case input reads are not present (e.g. something wrong in map), 0 will continue pipeline, 1 will abort
 	-silent [0/1] 			Controls how much information is printed on console

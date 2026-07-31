@@ -72,7 +72,9 @@ requested outputs are complete and whose temporary directories have been
 cleaned, keeping unfinished samples in rotation while admitting new ones.
 Previously completed samples use a short, ordered output probe; the loop still
 performs one final full-range verification pass before collecting sample
-statistics. Each visit submits only the next ready producer wave, so a failed
+statistics. That first full-range pass starts immediately; another full-range
+pass cannot start until all pending and running jobs submitted by this invocation
+have finished. Each visit submits only the next ready producer wave, so a failed
 input filter is retried before assembly, mapping, binning, or consensus jobs are
 created. Scheduler state is collected once per pass for all sample locks,
 and `-maxConcurrentJobs` counts both pending and running user jobs before every

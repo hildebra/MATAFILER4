@@ -13,7 +13,7 @@ flow related	submSystem	string	""""""	stable	$MFconfig{submSytem}	qsub,SGE,bsub,
 flow related	submit	integer	1	stable	$doSubmit	submit any jobs at all? (0= no submission, just for trying if everything is correctly set up)
 flow related	from	integer	0	stable	$FROM1	start at which samples from map file?
 flow related	to	integer	999999999999	stable	$TO1	stop at which samples from map file?
-flow related	loopTillComplete	string	"""0"""	advanced	$loop2completion	loop over assigned samples with a rolling completed frontier, then perform one final full verification pass before collecting statistics
+flow related	loopTillComplete	string	"""0"""	advanced	$loop2completion	loop over assigned samples with a rolling completed frontier; run one immediate final full verification, then wait for all invocation jobs before any further full pass
 flow related	loopTillCompleteActiveJobs	integer	3	advanced	$MFconfig{loopTillCompleteActiveJobs}	start the next loop pass once no more than this many submitted jobs are actually running
 flow related	excludeNodes	string	""""""	stable	$MFconfig{excludeNodes}	exclude certain nodes?
 flow related	maxConcurrentJobs	integer	0	stable	$MFconfig{checkMaxNumJobs}	maximum running plus pending user jobs, enforced before each Slurm submission

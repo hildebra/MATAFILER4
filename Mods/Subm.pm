@@ -956,6 +956,12 @@ sub numUserJobs{
 sub numLiveUserJobs {
 	my ($optHR) = @_;
 	my $rmSelf = @_ > 1 ? $_[1] : 0;
+	my $jobIds = @_ > 2 ? $_[2] : undef;
+	my %wanted;
+	if (defined $jobIds) {
+		my @tracked = split /;/, normalise_job_dependencies($jobIds);
+		$wanted{$_} = 1 for grep { /^\d+$/ } @tracked;
+	}
 	my $qmode = defined($optHR->{qmode}) ? $optHR->{qmode} : "slurm";
 	my $command;
 	if ($qmode eq "slurm") {
@@ -977,7 +983,7 @@ sub numLiveUserJobs {
 		split /\n/, $output;
 	delete $live{$ENV{SLURM_JOBID}}
 		if ($rmSelf && $qmode eq "slurm" && ($ENV{SLURM_JOBID} || '') ne '');
-	return scalar keys %live;
+	return scalar grep { !%wanted || $wanted{$_} } keys %live;
 }
 
 sub numActiveUserJobs{

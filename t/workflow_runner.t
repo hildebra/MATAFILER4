@@ -186,6 +186,15 @@ like($mataf4,
 like($mataf4, qr/Starting final full-range verification pass/,
 	'a normal loop end starts a mandatory all-sample verification pass');
 like($mataf4,
+	qr/if \(\$loopFinalVerification\).*?keys %\{\$QSBoptHR->\{submittedJobRecords\} \|\| \{\}\}.*?numLiveUserJobs\(\$QSBoptHR, 1, \\\@invocationJobIds\).*?qsubSystemJobAlive\(\\\@invocationJobIds, \$QSBoptHR, 1\).*?\$from = \$selectedFrom;.*?\$to = \$selectedTo;.*?\$runOptions\{loopCount\} = 1;.*?\$JNUM = \$from - 1/s,
+	'the first full-range verification waits for all jobs from this invocation before another full pass');
+like($mataf4,
+	qr/if \(!\$loopFinalVerification && !\$capacityDeferred.*?\$rerunLockedWindow/s,
+	'the retained-lock fast retry cannot spin during final full-range verification');
+unlike($mataf4,
+	qr/if \(\$loopFinalVerification\).*?returning to the rolling loop/s,
+	'final verification remains in full-range mode after waiting');
+like($mataf4,
 	qr/Final full-range verification completed; sample statistics may now be collected.*?sub postprocess/s,
 	'the final all-sample verification gates statistics collection');
 like($mataf4,
@@ -206,7 +215,7 @@ like($mataf4,
 unlike($mataf4,
 	qr/die "Deferred job submission failed:/,
 	'the formerly fatal deferred sbatch path has been removed');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?my \$MATFILER_ver = 4\.25/s,
-	'MATAFILER history retains loop triggering changes through version 4.25');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?my \$MATFILER_ver = 4\.26/s,
+	'MATAFILER history retains loop triggering changes through version 4.26');
 
 done_testing;
