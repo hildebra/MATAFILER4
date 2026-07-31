@@ -191,8 +191,10 @@ like($between_source, qr/if \(!-s \$treeFile\)/,
 like($between_source, qr/test -s \$treeFile.*?if \(\$visualize\).*?test -s \$treePdf/s,
 	'standalone between-MGS jobs validate the tree and conditionally validate visualization');
 like($between_source,
-	qr/-bootstrap 1000.*?-NTfilt 0\.5.*?-NTfiltPerGene 0\.7.*?-GenesPerSpecies 0\.5.*?-minOverlapMSA \$minimumColumnOccupancy.*?-AutoModel 1/s,
-	'between-MGS trees use multi-phyla marker occupancy and partition-aware model selection');
+	qr/-bootstrap 1000.*?-NTfilt 0\.5.*?-NTfiltPerGene 0\.7.*?-GenesPerSpecies 0\.5.*?-MSAprogram \$MSAprog.*?-AutoModel 1/s,
+	'between-MGS trees use broad-phylogeny filtering and partition-aware model selection');
+unlike($between_source, qr/minimumColumnOccupancy|-minOverlapMSA/,
+	'between-MGS trees do not impose a fixed taxon-count overlap filter on alignment columns');
 like($between_source, qr/\$externalDep =~ s\/\^\\Q\$localTag\\E\/\/.*?WAITID=\$externalDep/s,
 	'between-MGS launcher exports an untagged numeric dependency across processes');
 my $strain_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
@@ -203,6 +205,8 @@ like($strain_source, qr/\$nxtCmd \.= "-Hcores \$maxCores " if \$maxCores > 0;/,
 my $strain2_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
 like($strain2_source, qr/my \$version = 0\.34;/,
 	'strain postprocessing output cleanup increments its workflow version');
+like($strain2_source, qr/-withinSpecies 1 -AAtree 0/,
+	'legacy within-MGS tree jobs explicitly enable within-species filtering');
 like($strain2_source,
 	qr/Strain postprocessing v\$version.*?Mode:.*?Inputs:.*?Paths:.*?Resources:.*?Metadata:.*?Association tests:/s,
 	'strain postprocessing starts with a structured runtime configuration header');

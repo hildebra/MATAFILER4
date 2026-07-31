@@ -98,6 +98,31 @@ like($report_text, qr/\Q$low_occupancy\E\tREJECT\t[^\n]*low_occupancy/,
 like($report_text, qr/\Q$permissive\E\tPASS\t\./,
 	'report records retained strain-variable loci');
 
+my $broad_manifest = File::Spec->catfile($tmp, 'broad-aa-manifest.txt');
+my $broad_report = File::Spec->catfile($tmp, 'broad-aa-report.tsv');
+my $broad_keep = File::Spec->catfile($tmp, 'broad-aa-keep.txt');
+open my $broad_manifest_fh, '>', $broad_manifest
+	or die "Cannot create $broad_manifest: $!";
+print {$broad_manifest_fh} "$wrong_orthologue\n";
+close $broad_manifest_fh or die "Cannot close $broad_manifest: $!";
+my $broad_status = system(
+	$binary,
+	'-manifest', $broad_manifest,
+	'-report', $broad_report,
+	'-keep', $broad_keep,
+	'-sequenceType', 'aa',
+	'-maxMedianDivergence', 1,
+	'-maxP90Divergence', 1,
+	'-relativeModifiedZ', 1_000_001,
+);
+is($broad_status, 0, 'broad-AA locus QC profile completes');
+open my $broad_keep_fh, '<', $broad_keep
+	or die "Cannot read $broad_keep: $!";
+chomp(my @broad_kept = <$broad_keep_fh>);
+close $broad_keep_fh;
+is_deeply(\@broad_kept, [$wrong_orthologue],
+	'broad-AA profile retains a structurally valid locus despite deep between-species divergence');
+
 my $help = qx{"$binary" -help 2>&1};
 like($help, qr/minOccupancy FLOAT.*0\.35/s,
 	'help documents the permissive metagenomic occupancy default');

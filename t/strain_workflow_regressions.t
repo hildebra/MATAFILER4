@@ -296,8 +296,8 @@ like($strain,
 	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,
 	'split-worker sparsity is summarized instead of reported as missing catalogue data');
 like($strain,
-	qr/-strainWithinPreset 1 -NTfiltPerGene .*? -GenesPerSpecies /,
-	'unfinished trees delegate checkpoint recovery and fixed strain settings to buildTree');
+	qr/-withinSpecies 1 -strainWithinPreset 1 -NTfiltPerGene .*? -GenesPerSpecies /,
+	'unfinished trees explicitly select within-species filtering and delegate fixed strain settings to buildTree');
 unlike($strain,
 	qr/-AAtree 0|-bootstrap 0|-NTfiltCount 400|-strictBackbone 1|-continue |-gzInput 1|-runDNDS 0|-runTheta 0/,
 	"fixed buildTree strain settings are no longer serialized into the submitted command");

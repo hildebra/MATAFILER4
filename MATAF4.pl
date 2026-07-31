@@ -5117,6 +5117,11 @@ sub uploadRawFilePrep{
 	my $cmd = "";#"rm -rf $outD/tmp/;mkdir -p $outD/tmp/\n";
 	for (my $idx = 0; $idx < @{$libraries}; $idx++) {
 		my $library = $libraries->[$idx];
+		# Uploads must use map-resolved sources: staged rawRds symlinks can
+		# legitimately disappear when scratch is cleaned or a run is resumed.
+		my $files = ref($library->{source_files}) eq 'HASH'
+			? $library->{source_files}
+			: $library->{files};
 		my $technology = $library->{technology} || '';
 		checkSeqTech($technology, "MATAF4.pl::uploadRawFilePrep library $library->{id}") if $technology ne '';
 		my $isLong = $library->{is_long} || is3rdGenSeqTech($technology);
@@ -5126,8 +5131,8 @@ sub uploadRawFilePrep{
 		$xtra = "PB.$xtra" if ($technology eq 'PB');
 		$xtra = "ONT.$xtra" if ($technology eq 'ONT');
 
-		if ($library->{files}{r1}) {
-			my ($r1, $r2) = @{$library->{files}}{qw(r1 r2)};
+		if ($files->{r1}) {
+			my ($r1, $r2) = @{$files}{qw(r1 r2)};
 			die "Upload library $library->{id} mixes compressed and uncompressed mates\n"
 				if (($r1 =~ /\.gz$/) != ($r2 =~ /\.gz$/));
 			my $gz = $r1 =~ /\.gz$/ ? '.gz' : '';
@@ -5146,8 +5151,8 @@ sub uploadRawFilePrep{
 			}
 		}
 
-		if ($library->{files}{single}) {
-			my $single = $library->{files}{single};
+		if ($files->{single}) {
+			my $single = $files->{single};
 			my $gz = $single =~ /\.gz$/ ? '.gz' : '';
 			my $of = "$tmpD/$smplID.${xtra}Rsingle.fq$gz";
 			my $tmp = "$tmpD/tmp/$smplID.${xtra}TEMP.Rsingle.fq$gz";
@@ -5382,6 +5387,13 @@ sub seedUnzip2tmp{
 	@paX2 = @{$inputDiscovery->{support}{read2}};
 	@paXs = @{$inputDiscovery->{support}{single}};
 	@paBamX = @{$inputDiscovery->{support}{bam}};
+	# Preserve authoritative inputs before the arrays are rewritten to rawRds.
+	my @sourcePa1 = @{source_input_files($fastp, @pa1)};
+	my @sourcePa2 = @{source_input_files($fastp, @pa2)};
+	my @sourcePas = @{source_input_files($fastp, @pas)};
+	my @sourcePaX1 = @{source_input_files('', @paX1)};
+	my @sourcePaX2 = @{source_input_files('', @paX2)};
+	my @sourcePaXs = @{source_input_files('', @paXs)};
 	
 	#create libinfo array 
 	for (my $i = 0; $i < max((scalar(@pas),scalar(@pa1))); $i++) {
@@ -5535,6 +5547,7 @@ sub seedUnzip2tmp{
 		my $pp = $fastp;
 		my $smtBin = getProgPaths("samtools");
 		my $bamFastq = outfiles_Bam("$finDest/rawRds/",basename($paBam[$i]));
+		push @sourcePas, $bamFastq;
 		push @pas, $bamFastq;
 		$unzipcmd .= "\necho \"Converting bam $i to fastq\"\n";
 		$unzipcmd .= "$smtBin fastq -@ $numCore -t $pp/$paBam[$i] -0 $bamFastq;\n"; #| $pigzBin -p $numCore -c >
@@ -5547,6 +5560,7 @@ sub seedUnzip2tmp{
 		my $supportDir = "$finDest/rawRds/Support/";
 		system "mkdir -p $supportDir" if ($i==0 && !-d $supportDir);
 		my $bamFastq = outfiles_Bam($supportDir,$BamF);
+		push @sourcePaXs, $bamFastq;
 		push @paXs, $bamFastq;
 		$unzipcmd .= "echo \"Converting support bam $i to fastq\"\n";
 		$unzipcmd .= "mkdir -p $supportDir;\n" if ($i==0);
@@ -5693,6 +5707,7 @@ sub seedUnzip2tmp{
 		#print $ii." \n";
 		#next;
 		unless ($libInfo[$ii] =~ m/.*mate.*/i){$ii++;next;} #remove from process
+		splice(@sourcePa1,$ii,1);splice(@sourcePa2,$ii,1);
 		my $sourceLabel = $libInfo[$ii];
 		my $mateDir = $finDest."mateCln/lib$mateLibraryIndex/";
 		my ($href,$libraryMateCmd,$mateSto) = check_matesL($pa1[$ii],$pa2[$ii],$mateDir,$doMateCln);
@@ -5727,6 +5742,17 @@ sub seedUnzip2tmp{
 		single_technology => $singleSeqTech, is_long => $is3rdGen, separate_roles => 1,
 		r1 => \@pa1, r2 => \@pa2, single => \@pas, labels => \@libInfo,
 	);
+	for (my $i = 0; $i < @pa1; $i++) {
+		$primaryLibraries->[$i]{source_files} = {
+			r1 => $sourcePa1[$i], r2 => $sourcePa2[$i], single => '', bam => '',
+		};
+	}
+	my $primaryPairCount = scalar(@pa1);
+	for (my $i = 0; $i < @pas; $i++) {
+		$primaryLibraries->[$primaryPairCount + $i]{source_files} = {
+			r1 => '', r2 => '', single => $sourcePas[$i], bam => '',
+		};
+	}
 	foreach my $mateLibrary (@matePrps) {
 		my $files = $mateLibrary->{files};
 		my $mateIndex = $mateLibrary->{index};
@@ -5756,6 +5782,17 @@ sub seedUnzip2tmp{
 		single_technology => $seqTechX, is_long => $is3rdGenX, separate_roles => 1,
 		r1 => \@paX1, r2 => \@paX2, single => \@paXs, labels => \@libInfoX,
 	);
+	for (my $i = 0; $i < @paX1; $i++) {
+		$supportLibraries->[$i]{source_files} = {
+			r1 => $sourcePaX1[$i], r2 => $sourcePaX2[$i], single => '', bam => '',
+		};
+	}
+	my $supportPairCount = scalar(@paX1);
+	for (my $i = 0; $i < @paXs; $i++) {
+		$supportLibraries->[$supportPairCount + $i]{source_files} = {
+			r1 => '', r2 => '', single => $sourcePaXs[$i], bam => '',
+		};
+	}
 	%seqSet = (libraries => [@{$primaryLibraries}, @{$supportLibraries}],
 			totalInputSizeMB => $totalInputSizeMB, inputXFileSizeMB => $totalXInputSizeMB,
 			rawReads => $rawReads,

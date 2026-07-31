@@ -147,6 +147,13 @@ unlike($upload_prep, qr/legacyLibraryArrays/,
 	'raw upload preparation keeps mate, label, and technology associations on records');
 like($mataf4, qr/-1 \$pa1 -2 \$pa2 .*?pe2\} = "\$mateD\/mate\.\$\{mateC\}_R2\.pe/s,
 	'mate preprocessing uses R2 as the second input and output');
+like($upload_prep,
+	qr/my \$files = ref\(\$library->\{source_files\}\).*?\$files->\{r1\}.*?\$files->\{single\}/s,
+	'raw upload preparation links authoritative sources rather than disposable staged reads');
+my ($seed_unzip) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=^sub mOTU2Mapping)/ms;
+like($seed_unzip,
+	qr/source_input_files\(\$fastp, \@pa1\).*?\{source_files\}.*?\$sourcePa1\[\$i\]/s,
+	'unzip staging preserves map-resolved source paths on raw library records');
 like($mataf4, qr/\$flashBin .*?-o \$outTL .*?\$pairs->\[\$i\]\{files\}\{r1\} \$pairs->\[\$i\]\{files\}\{r2\}/s,
 	'FLASH uses the matching pair and a unique output prefix for each library');
 like($mataf4, qr/my \$platform = 'ILLUMINA'.*?'PACBIO'.*?'ONT'.*?PL:\$platform/s,

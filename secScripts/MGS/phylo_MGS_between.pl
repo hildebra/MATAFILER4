@@ -284,8 +284,6 @@ close OC;
 my $QSBoptHR = emptyQsubOpt(1,"");
 $QSBoptHR->{useLongQueue} = 1;
 my $treeFile = "$btout/phylo/IQtree_allsites.treefile";
-my $minimumColumnOccupancy = int(($mgs_with_fmg * 0.5) + 0.999999);
-$minimumColumnOccupancy = 3 if $minimumColumnOccupancy < 3 && $mgs_with_fmg >= 3;
 
 my $cmd = "";
 if (!-s $treeFile){
@@ -294,7 +292,7 @@ if (!-s $treeFile){
 		. "-outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores "
 		. "-AAtree 1 -bootstrap 1000 -NTfiltCount 3000 -NTfilt 0.5 "
 		. "-NTfiltPerGene 0.7 -GenesPerSpecies 0.5 "
-		. "-minOverlapMSA $minimumColumnOccupancy -MSAprogram $MSAprog "
+		. "-MSAprogram $MSAprog "
 		. "-AutoModel 1 -iqFast 0 -continue 1\n";
 } else {
 	print "Found already existing tree, skipping tree building\n";

@@ -1074,7 +1074,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	if ($phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}if ($phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
 	my $tree_sample_separator = quotemeta($SaSe);
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
-	$Tcmd .= "-strainWithinPreset 1 -NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies ";
+	$Tcmd .= "-withinSpecies 1 -strainWithinPreset 1 -NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
 	if ($phyloProg == 1){
 		if ($legacyMGTK){

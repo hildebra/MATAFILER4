@@ -26,6 +26,7 @@
 #5.20: filter anomalous per-locus alignments before concatenation
 #5.21: use native MSAfix locus QC and clean its temporary files on every exit
 #5.22: own staged-input publication, node-local temp selection, and completion markers
+#5.23: default to broad/inter-species locus filtering; make strain-level filtering explicit
 
 use warnings;
 use strict;
@@ -82,12 +83,13 @@ sub prepareTemporaryBase;
 sub sortFastaForCompression;
 sub fastaCompressionSortKey;
 sub runPostAlignmentLocusQC;
+sub writePostAlignmentQCPolicy;
 sub alignmentFileStem;
 sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.22;
+my $version = 5.23;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -134,6 +136,7 @@ my $ntCntTotal =0; my $bootStrap=0; my $subsetSmpls = -1;
 my ($fnFna, $aaFna,$cogCats,$outD,$ncore,$Ete, $filt,$smplDef,$smplSep,$calcSyn,$calcNonSyn,
 			$useAA4tree,$calcDNAdiff,$tmpD ) = ("","","","",1,0,0.8,1,"_",0,0,0,0,"");
 my ($stagedInputDir, $tmpSubdir, $completionMarker) = ("", "", "");
+my $withinSpecies = 0;
 my $strainWithinPreset = 0;
 
 my ($continue,$isAligned) = (0,0);#overwrite already existing files?
@@ -156,7 +159,7 @@ my $iqFast=0;
 my $iqMemMB=0;
 my $iqPathogen=0;
 my $iqLegacy=0;
-my $minOverlapMSA = 0;
+my $minOverlapMSA;
 my $maxGapPerCol = 1 ;
 my $minPcId = 0;
 my $doSuperTree =0;
@@ -187,6 +190,7 @@ my $postAlignmentMinOccupancy = $POST_ALIGNMENT_QC_DEFAULT{minimum_occupancy};
 my $postAlignmentRelativeZ = $POST_ALIGNMENT_QC_DEFAULT{relative_modified_z};
 my $postAlignmentMinLociRelative =
 	$POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative};
+my $postAlignmentDivergenceQC;
 
 
 #EDBUGGIN
@@ -221,6 +225,7 @@ GetOptions(
 	"stagedInputDir=s" => \$stagedInputDir,
 	"tmpSubdir=s" => \$tmpSubdir,
 	"completionMarker=s" => \$completionMarker,
+	"withinSpecies=i" => \$withinSpecies,
 	"strainWithinPreset=i" => \$strainWithinPreset,
 	"cores=i" => \$ncore,
 	"superTree=i" => \$doSuperTree,
@@ -265,6 +270,7 @@ GetOptions(
 	"postAlignmentLocusQC=i" => \$postAlignmentLocusQC,
 	"postAlignmentMinSequences=i" => \$postAlignmentMinSequences,
 	"postAlignmentMinOccupancy=f" => \$postAlignmentMinOccupancy,
+	"postAlignmentDivergenceQC=i" => \$postAlignmentDivergenceQC,
 	"postAlignmentRelativeZ=f" => \$postAlignmentRelativeZ,
 	"postAlignmentMinLociRelative=i" => \$postAlignmentMinLociRelative,
 	"runIQtree=i" => \$doIQTree,
@@ -289,9 +295,12 @@ GetOptions(
 	"map=s" =>\$mapF,
 	"clustername=s" => \$clusterName,
 ) or die("Error in command line arguments\n");
+die "-withinSpecies must be 0 or 1\n"
+	unless $withinSpecies == 0 || $withinSpecies == 1;
 die "-strainWithinPreset must be 0 or 1\n"
 	unless $strainWithinPreset == 0 || $strainWithinPreset == 1;
 if ($strainWithinPreset) {
+	$withinSpecies = 1;
 	$useAA4tree = 0;
 	$bootStrap = 0;
 	$ntCntTotal = 400;
@@ -311,11 +320,15 @@ if ($strainWithinPreset) {
 	$doDNDS = 0;
 	$doTheta = 0;
 }
+$minOverlapMSA = $withinSpecies ? 2 : 0 unless defined $minOverlapMSA;
+$postAlignmentDivergenceQC = $withinSpecies ? 1 : 0
+	unless defined $postAlignmentDivergenceQC;
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
 die "-cores must be a positive integer\n" if $ncore < 1;
 die "-bootstrap must be zero or greater\n" if $bootStrap < 0;
 die "-NTfiltCount must be zero or greater\n" if $ntCntTotal < 0;
+die "-minOverlapMSA must be zero or greater\n" if $minOverlapMSA < 0;
 die "-iqMemMB must be zero or greater\n" if $iqMemMB < 0;
 die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
 die "-iqLegacy must be 0 or 1\n" unless $iqLegacy == 0 || $iqLegacy == 1;
@@ -340,6 +353,9 @@ die "-postAlignmentMinSequences must be at least 2 "
 die "-postAlignmentMinOccupancy must be between 0 and 1 "
 	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_occupancy})\n"
 	if $postAlignmentMinOccupancy < 0 || $postAlignmentMinOccupancy > 1;
+die "-postAlignmentDivergenceQC must be 0 or 1 "
+	."(default: 0 between species, 1 within species)\n"
+	unless $postAlignmentDivergenceQC == 0 || $postAlignmentDivergenceQC == 1;
 die "-postAlignmentRelativeZ must be non-negative "
 	."(default $POST_ALIGNMENT_QC_DEFAULT{relative_modified_z})\n"
 	if $postAlignmentRelativeZ < 0;
@@ -471,6 +487,7 @@ print "BuildTree pipeline v$version\n";
 print "Inputs: " . join("; ", @inputDescriptions) . "\n";
 print "Paths: output=$outD; temporary=$tmpD; alignments=$MsaD; trees=$treeD\n";
 print "Mode: " . ($cogCats ne "" ? "multi-locus" : "single-locus")
+	. "; scope=" . ($withinSpecies ? "within-species" : "between-species/broad")
 	. "; sequence=" . ($useAA4tree ? "amino acid" : "nucleotide")
 	. "; input aligned=" . ($isAligned ? "yes" : "no")
 	. "; continue=" . ($continue ? "yes" : "no") . "\n";
@@ -480,9 +497,11 @@ print "Filtering: per-gene length fraction=$ntFracGene; species NT fraction=$ntF
 	. "minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
 print "Post-alignment locus QC: enabled="
 	. ($postAlignmentLocusQC ? "yes" : "no")
+	. "; divergence QC=" . ($postAlignmentDivergenceQC ? "yes" : "no")
 	. "; minimum sequences=$postAlignmentMinSequences"
 	. "; minimum occupancy=$postAlignmentMinOccupancy"
-	. "; relative modified-Z=$postAlignmentRelativeZ"
+	. "; relative modified-Z="
+	. ($postAlignmentDivergenceQC ? $postAlignmentRelativeZ : "<disabled>")
 	. "; minimum loci for relative QC=$postAlignmentMinLociRelative\n";
 print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
 	. "; sample QC=" . ($sampleQCFile || "<none>")
@@ -575,6 +594,33 @@ my %FAA ; my %FNA ; my @geneList; my @geneListF;
 my $strictSplit;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
+my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
+my $postAlignmentQCPolicy = join("\t",
+	"schema=1",
+	"scope=".($withinSpecies ? "within" : "between"),
+	"sequence=".($useAA4tree ? "aa" : "nt"),
+	"minimum_overlap=$minOverlapMSA",
+	"maximum_gap_fraction=$maxGapPerCol",
+	"minimum_sequences=$postAlignmentMinSequences",
+	"minimum_occupancy=$postAlignmentMinOccupancy",
+	"divergence_qc=$postAlignmentDivergenceQC",
+	"relative_modified_z=".($postAlignmentDivergenceQC
+		? $postAlignmentRelativeZ : "disabled"),
+	"minimum_loci_relative=$postAlignmentMinLociRelative",
+)."\n";
+my $postAlignmentQCPolicyMatches = 0;
+if (-s $postAlignmentQCPolicyFile) {
+	open my $policyRead, "<", $postAlignmentQCPolicyFile
+		or die "Cannot read locus-QC policy $postAlignmentQCPolicyFile: $!\n";
+	my $existingPolicy = do { local $/; <$policyRead> };
+	close $policyRead
+		or die "Cannot close locus-QC policy $postAlignmentQCPolicyFile: $!\n";
+	$postAlignmentQCPolicyMatches = $existingPolicy eq $postAlignmentQCPolicy;
+}
+my $legacyWithinSpeciesQCAudit = $withinSpecies
+	&& -s $postAlignmentQCReport && !-e $postAlignmentQCPolicyFile;
+my $postAlignmentQCAuditCurrent = -s $postAlignmentQCReport
+	&& ($postAlignmentQCPolicyMatches || $legacyWithinSpeciesQCAudit);
 my $doMSA = 1;
 my $treesDone = treePresent($tOhr)
 	&& (!$calcNonSyn || treePresent($tOhrNSun))
@@ -588,9 +634,9 @@ if ($strictBackbone && $treesDone && !-s "$treeD/strict_backbone.samples.tsv") {
 }
 if ($postAlignmentLocusQC && $cogCats ne "" && $continue
 		&& ($treesDone || fileGZe($multAli))
-		&& !-s $postAlignmentQCReport) {
-	print "Recovery state: existing multi-locus alignment predates post-alignment "
-		."locus QC; rebuilding per-locus alignments and tree outputs\n";
+		&& !$postAlignmentQCAuditCurrent) {
+	print "Recovery state: existing multi-locus alignment predates the current "
+		."post-alignment locus-QC policy; rebuilding per-locus alignments and tree outputs\n";
 	safeRemoveTree($MsaD, $removeMSA ? $tmpD : $outD);
 	safeRemoveTree($treeD, $outD);
 	make_path($MsaD);
@@ -1062,6 +1108,8 @@ if ($postAlignmentLocusQC && $cogCats ne "") {
 			$primaryAlignments,
 			$useAA4tree ? 'aa' : 'nt',
 			$postAlignmentQCReport,
+			$postAlignmentQCPolicyFile,
+			$postAlignmentQCPolicy,
 		);
 		my %keepPath = map { $_ => 1 } @{$kept};
 		my %keepStem = map { alignmentFileStem($_) => 1 } @{$kept};
@@ -2879,6 +2927,22 @@ sub shellQuote{
 	return "'$value'";
 }
 
+sub writePostAlignmentQCPolicy {
+	my ($policyFile, $policyText) = @_;
+	make_path(dirname($policyFile)) unless -d dirname($policyFile);
+	my ($policyFH, $temporaryPolicy) = tempfile(
+		"post-alignment-policy-XXXXXX",
+		DIR => dirname($policyFile),
+		UNLINK => 1,
+	);
+	print {$policyFH} $policyText
+		or die "Cannot write locus-QC policy $temporaryPolicy: $!\n";
+	close $policyFH
+		or die "Cannot close locus-QC policy $temporaryPolicy: $!\n";
+	rename $temporaryPolicy, $policyFile
+		or die "Cannot publish locus-QC policy $policyFile: $!\n";
+}
+
 sub alignmentFileStem {
 	my ($path) = @_;
 	my $stem = basename($path);
@@ -2889,7 +2953,7 @@ sub alignmentFileStem {
 }
 
 sub runPostAlignmentLocusQC {
-	my ($alignments, $sequenceType, $reportFile) = @_;
+	my ($alignments, $sequenceType, $reportFile, $policyFile, $policyText) = @_;
 	die "Post-alignment locus QC requires at least one alignment\n"
 		unless @{$alignments};
 	make_path(dirname($reportFile)) unless -d dirname($reportFile);
@@ -2908,6 +2972,13 @@ sub runPostAlignmentLocusQC {
 	close $keepFH or die "Cannot close locus-QC keep file $keepFile: $!\n";
 
 	my $msaFix = getProgPaths("MSAfix");
+	my @divergenceArguments = $postAlignmentDivergenceQC
+		? ("-relativeModifiedZ", $postAlignmentRelativeZ)
+		: (
+			"-maxMedianDivergence", 1,
+			"-maxP90Divergence", 1,
+			"-relativeModifiedZ", 1_000_001,
+		);
 	my $command = join(" ",
 		shellQuote($msaFix),
 		"-manifest", shellQuote($manifestFile),
@@ -2916,7 +2987,7 @@ sub runPostAlignmentLocusQC {
 		"-sequenceType", $sequenceType,
 		"-minSequences", $postAlignmentMinSequences,
 		"-minOccupancy", $postAlignmentMinOccupancy,
-		"-relativeModifiedZ", $postAlignmentRelativeZ,
+		@divergenceArguments,
 		"-minLociForRelative", $postAlignmentMinLociRelative,
 	) . "\n";
 	my @kept;
@@ -2932,6 +3003,7 @@ sub runPostAlignmentLocusQC {
 			push @kept, $line if length($line);
 		}
 		close $keepRead or die "Cannot close locus-QC keep file $keepFile: $!\n";
+		writePostAlignmentQCPolicy($policyFile, $policyText);
 		1;
 	};
 	my $error = $@;

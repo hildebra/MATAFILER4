@@ -12,7 +12,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 | `MATAF4.pl` | `4.11` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `buildTree5.pl` | `5.20` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.23` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -443,7 +443,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.20`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.23`.
 
 ### General options
 
@@ -456,6 +456,8 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-cats` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-outD` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-tmpD` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-withinSpecies` | integer | `0` | stable | Enable within-species filtering: require two called sequences per retained column by default and enable divergence-based locus QC. |
+| `-strainWithinPreset` | integer | `0` | advanced/internal | Apply the fixed MATAFILER strain-tree preset; implies `-withinSpecies 1`. |
 | `-cores` | integer | `1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-superTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-superCheck` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
@@ -471,7 +473,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-outgroup` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-AAtree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-MSAprogram` | integer | `2` | stable | (0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA) |
-| `-minOverlapMSA` | integer | `0` | stable | min overlap in MSA columns, in order to retain column |
+| `-minOverlapMSA` | integer | `0` between species; `2` within species | stable | Minimum number of called sequences required to retain an MSA column. An explicit value overrides the `-withinSpecies` default. |
 | `-maxGapPerCol` | float | `1` | stable | same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column |
 | `-calcDistMat` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-calcDistMatExt` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
@@ -494,7 +496,8 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-postAlignmentLocusQC` | integer | `1` | stable | Run native MSAfix locus-comparability QC before multi-locus concatenation. |
 | `-postAlignmentMinSequences` | integer | `3` | stable | Minimum comparable sequences required for an aligned locus. |
 | `-postAlignmentMinOccupancy` | float | `0.35` | stable | Minimum fraction of unambiguous alignment cells; permissive for metagenomic loci. |
-| `-postAlignmentRelativeZ` | float | `8.0` | stable | Modified-Z threshold for cross-locus consensus-divergence outliers. |
+| `-postAlignmentDivergenceQC` | integer | `0` between species; `1` within species | stable | Reject absolute and cross-locus divergence outliers. Structural locus QC remains active when this is disabled. |
+| `-postAlignmentRelativeZ` | float | `8.0` | stable | Modified-Z threshold for cross-locus consensus-divergence outliers when divergence QC is enabled. |
 | `-postAlignmentMinLociRelative` | integer | `8` | stable | Minimum locus count before applying cross-locus robust outlier QC. |
 | `-runIQtree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-AutoModel` | integer | `1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
@@ -513,3 +516,5 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-runFastGearPostProcessing` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-map` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-clustername` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+
+Broad or between-species phylogeny is the default. In this mode `buildTree5.pl` does not remove columns using a fixed taxon-count overlap threshold, and post-alignment QC checks locus structure/occupancy without rejecting deep AA divergence. Use `-withinSpecies 1` for strain or other within-species trees. `-minOverlapMSA` and `-postAlignmentDivergenceQC` can override the individual mode defaults. Existing `-strainWithinPreset 1` calls remain compatible and imply within-species mode. With `-continue 1`, a stored QC-policy marker prevents reuse of a concatenated alignment built under different broad-mode settings; legacy within-species audits remain compatible.

@@ -15,11 +15,17 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.22;/,
-	'Perl-owned tree job lifecycle increments the workflow version');
+like($source, qr/my \$version = 5\.23;/,
+	'broad-phylogeny defaults increment the workflow version');
 like($source,
-	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
-	"buildTree strain preset owns the fixed strain-tree settings");
+	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
+	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
+like($source,
+	qr/my \$withinSpecies = 0;.*?my \$minOverlapMSA;.*?"withinSpecies=i".*?\$minOverlapMSA = \$withinSpecies \? 2 : 0 unless defined \$minOverlapMSA;.*?\$postAlignmentDivergenceQC = \$withinSpecies \? 1 : 0/s,
+	"between-species filtering is the default and within-species filtering is explicit");
+like($source,
+	qr/my \@divergenceArguments = \$postAlignmentDivergenceQC.*?"-maxMedianDivergence", 1,.*?"-maxP90Divergence", 1,.*?"-relativeModifiedZ", 1_000_001/s,
+	"broad phylogenies retain structural QC while disabling strain-divergence rejection");
 like($source,
 	qr/"stagedInputDir=s".*?"tmpSubdir=s".*?"completionMarker=s".*?publishStagedTreeInputs\(\$stagedInputDir.*?for my \$input_spec/s,
 	"buildTree5 publishes staged inputs before validating its input paths");
@@ -43,10 +49,13 @@ like($source, qr/my \@temporaryFiles = \(.*?bsd_glob\(quotemeta\(\$reportFile\)\
 	'wrapper and partial native locus-QC files are explicitly deleted after every invocation');
 like($source,
 	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 8\.0/s,
-	'post-alignment QC is enabled with permissive metagenomic defaults');
+	'post-alignment structural QC remains enabled independently of the phylogeny scope');
 like($source,
-	qr/existing multi-locus alignment predates post-alignment.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
-	'a legacy concatenated checkpoint is rebuilt once when its locus-QC audit is absent');
+	qr/post_alignment_locus_qc\.policy\.tsv.*?\$legacyWithinSpeciesQCAudit = \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
+	'stale broad checkpoints are rebuilt while legacy within-species QC audits remain compatible');
+like($source,
+	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?rename \$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
+	'the exact locus-filter policy is published atomically after native QC succeeds');
 like($source,
 	qr/\@MSAs = grep \{ \$keepPath\{\$_\} \} \@MSAs.*?\@MSAsSyn = grep \{ \$keepStem\{alignmentFileStem\(\$_\)\} \} \@MSAsSyn/s,
 	'primary, synonymous, and nonsynonymous alignment sets stay locus-consistent');

@@ -311,6 +311,9 @@ system $cmd;
 
 Explanation: $inD is an input dir with complete genomes, the script will extract FGMs and build tree between genomes. `-AAtree 1` tells the script to use AA MSAs to build the phylogeny via iqTree. `-wildcardflag '/*.f*a'` tells the script how to look for reference genomes in $inD. 
 
+Between-species/broad phylogeny is the default. For a within-species or strain phylogeny, add `-withinSpecies 1`; this enables the stricter overlap and divergence filters. Broad mode still performs structural and occupancy checks on each locus.
+
+
 2. run the script `phyloScript.pl`
 
 - Run with `perl /path/to/phyloScript.pl` together with submission script on cluster.
