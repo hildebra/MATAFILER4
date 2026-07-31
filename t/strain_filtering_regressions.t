@@ -104,8 +104,10 @@ like($sample_stats,
 like($strain,
 	qr/print \{\$sampleStatsFH\} \$sampleStatsHeader.*?my %sampleStatsSeen;.*?local \*STDOUT.*?open STDOUT.*?STDERR.*?foreach my \$sm.*?readGenesSample_Singl/s,
 	"sample processing writes one validated TSV stream while redirecting every other sample-loop message to stderr");
-like($sample_stats, qr/sample\s+worker\s+assembly_driver\s+status\s+selected_mgs/,
-	"sample TSV rows identify both the biological sample and its assembly-group driver");
+like($sample_stats, qr/sample\s+worker\s+assembly_group\s+status\s+selected_mgs/,
+	"sample TSV rows identify both the biological sample and its MATAFILER4 assembly group");
+like($sample_stats, qr/used_mgs_loci_histogram/,
+	"sample TSV rows persist the used-MGS retained-locus distribution");
 like($strain,
 	qr/\$MGStoolowGskip\+\+;.*?\$skipNoSelected\+\+.*?\$skipNoUsable\+\+.*?\$skipAfterAbundance\+\+.*?\$skipAfterSequence\+\+.*?\$unaccountedMGS = \$MGScnt - \$SInum - \$MGStoolowGskip/s,
 	"every selected candidate MGS receives an explicit terminal outcome");

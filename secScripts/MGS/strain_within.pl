@@ -36,6 +36,7 @@ use Mods::SlurmAccounting qw(slurm_tree_memory_summary format_slurm_tree_memory_
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 use Mods::StrainSampleStats qw(
 	sample_stat_columns sample_summary_columns aggregate_sample_rows
+	encode_loci_histogram loci_histogram_rows
 );
 
 sub extractFNAFAA2genes;
@@ -193,7 +194,8 @@ END {
 #.71: persist merge provenance, isolate per-sample TSV output, and print startup immediately
 #.72: initialize sample-statistics columns before the executable workflow
 #.73: persist, merge, and summarize sample statistics across extraction workers
-my $version = 0.73;
+#.74: print key:value summaries, use assembly-group terminology, and aggregate retained-locus histograms
+my $version = 0.74;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -2778,11 +2780,30 @@ sub mergeSampleStats {
 
 	warn "Per-sample statistics cover ".scalar(@allRows)." of ".scalar(@samples)
 		." configured samples\n" if @samples && @allRows != @samples;
-	my @allValues = map { defined($allSummary->{$_}) ? $allSummary->{$_} : '' }
-		@summaryColumns;
+	my @humanColumns = grep { $_ ne "used_mgs_loci_histogram" } @summaryColumns;
+	my @summaryPairs = map {
+		my $value = defined($allSummary->{$_}) ? $allSummary->{$_} : "";
+		$value =~ s/\s+/_/g;
+		"$_:$value";
+	} @humanColumns;
 	print "STEP 1 SAMPLE SUMMARY (all workers)\n";
-	print join("\t", @summaryColumns), "\n";
-	print join("\t", @allValues), "\n";
+	print join(" ", @summaryPairs), "\n";
+	my @histogramRows = loci_histogram_rows(
+		$allSummary->{used_mgs_loci_histogram}, $allSummary->{min_genes_per_mgs}
+	);
+	my $largestBin = 0;
+	for my $row (@histogramRows) {
+		$largestBin = $row->[1] if $row->[1] > $largestBin;
+	}
+	print "Used MGS retained-loci histogram (MGS-sample observations):\n";
+	for my $row (@histogramRows) {
+		my ($label, $count) = @$row;
+		my $fraction = $allSummary->{used_mgs}
+			? 100 * $count / $allSummary->{used_mgs} : 0;
+		my $barWidth = $largestBin ? int(30 * $count / $largestBin + 0.5) : 0;
+		$barWidth = 1 if $count && !$barWidth;
+		printf "  %-10s %8d %6.2f%% %s\n", $label, $count, $fraction, "#" x $barWidth;
+	}
 	print "Merged per-sample statistics: $final\n";
 	print "Per-worker and all-worker summary: $summary\n";
 	return $allSummary;
@@ -3111,11 +3132,11 @@ sub markStrainWorkflowDirectory {
 
 
 sub newSampleStats {
-	my ($sample, $status, $candidateMGS, $candidateLoci, $assemblyDriver) = @_;
+	my ($sample, $status, $candidateMGS, $candidateLoci, $assemblyGroup) = @_;
 	my %stats = map { $_ => 0 } @sampleStatColumns;
 	$stats{sample} = $sample;
 	$stats{worker} = $subJob;
-	$stats{assembly_driver} = defined($assemblyDriver) ? $assemblyDriver : $sample;
+	$stats{assembly_group} = defined($assemblyGroup) ? $assemblyGroup : $sample;
 	$stats{status} = $status;
 	$stats{selected_mgs} = scalar(@specis);
 	$stats{candidate_mgs} = $candidateMGS;
@@ -3134,6 +3155,7 @@ sub newSampleStats {
 	$stats{abundance_min_fold} = $abundanceMinimumFold;
 	$stats{abundance_max_fold} = $abundanceMaximumFold;
 	$stats{abundance_max_modified_z} = $abundanceMaximumModifiedZ;
+	$stats{used_mgs_loci_histogram} = encode_loci_histogram([], $MGStoolowGsThr);
 	return \%stats;
 }
 
@@ -3874,6 +3896,9 @@ sub readGenesSample_Singl{
 		$sampleStats->{retained_loci} = $foundGene;
 		$sampleStats->{median_loci_per_used_mgs} = @genesPmgs ? median(@genesPmgs) : 0;
 		$sampleStats->{mean_loci_per_used_mgs} = @genesPmgs ? sprintf(q{%.3f}, mean(@genesPmgs)) : 0;
+		$sampleStats->{used_mgs_loci_histogram} = encode_loci_histogram(
+			\@genesPmgs, $MGStoolowGsThr
+		);
 		$sampleStats->{pre_abundance_loci} = $preAbundanceLoci;
 		$sampleStats->{post_abundance_loci} = $postAbundanceLoci;
 		$sampleStats->{missing_consensus_loci} = $missGene;

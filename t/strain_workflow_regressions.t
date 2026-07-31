@@ -131,7 +131,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.73;/,
+like($strain, qr/my \$version = 0\.74;/,
 	'all-worker sample-statistics aggregation increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
@@ -153,6 +153,9 @@ like($strain,
 like($strain,
 	qr/sub mergeSampleStats .*?Wrong sample-statistics field count.*?Duplicate sample-statistics row.*?aggregate_sample_rows.*?STEP 1 SAMPLE SUMMARY \(all workers\)/s,
 	'all worker tables are validated, aggregated, saved, and reported at the end of Step 1');
+like($strain,
+	qr/STEP 1 SAMPLE SUMMARY \(all workers\).*?join\(" ", \@summaryPairs\).*?loci_histogram_rows.*?Used MGS retained-loci histogram/s,
+	'the all-worker stdout summary uses key:value pairs and includes a retained-locus histogram');
 like($strain,
 	qr/mergeRecoveryLogs\(\) unless \$maxSubJob.*?mergeSampleStats\(\) unless \$maxSubJob.*?if \(\$maxSubJob && !\$subJob\).*?mergeRecoveryLogs\(\);.*?mergeSampleStats\(\);/s,
 	'both single-worker and split-worker extraction produce the combined sample summary');
