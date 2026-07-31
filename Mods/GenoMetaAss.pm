@@ -345,18 +345,6 @@ sub gzipwrite{
 	#open (my $O, "| $pigzBin -c > $outF") or die "error starting gzip pipe $outF\n$!";
 	return $O;
 }
-#cached path to a working pigz binary; resolved at most once per process.
-my $PIGZ_BIN; my $PIGZ_TRIED = 0;
-sub _pigzBinCached {
-	unless ($PIGZ_TRIED) {
-		$PIGZ_TRIED = 1;
-		my $p = eval { getProgPaths("pigz") };
-		$p = "" if $@ || !defined($p);
-		$PIGZ_BIN = (length($p) && -x $p) ? $p : "";
-	}
-	return $PIGZ_BIN;
-}
-
 sub gzipopen{
 	my ($inF,$descr) = @_;
 	my $dodie = 1;
@@ -378,7 +366,6 @@ sub gzipopen{
 	my $msg = "Can't open $descr file $inF\n";
 	#print "$dodie  $verbose  $inF\n";
 	#if (!-e $inF){{if ($dodie){die $msg;} else { $OK=0;print $msg if ($verbose);}}}
-	#my $pigzBin = getProgPaths("pigz");
 
 	if (!defined($resolved)) {
 		$OK=0;
@@ -386,7 +373,7 @@ sub gzipopen{
 		print $msg if ($verbose);
 	} elsif($inF =~ m/\.gz$/ ){
 		$msg = "Can't open a pipe to $descr file $inF\n";
-		my $pigz = _pigzBinCached();
+		my $pigz = eval { getProgPaths("pigz") } // "";
 		my $usedPigz = 0;
 		if (length($pigz)) {
 			#NOTE: unlike IO::Uncompress::Gunzip->new, a successfully-opened pipe doesn't
@@ -403,7 +390,11 @@ sub gzipopen{
 			}
 		}
 		if (!$usedPigz) {
-			$ISTR = IO::Uncompress::Gunzip->new($inF);
+			# MultiStream is required: several callers write concatenated
+			# gzip streams (e.g. per-fragment diamond output appended
+			# together), and IO::Uncompress::Gunzip only reads the first
+			# member by default, silently truncating everything after it.
+			$ISTR = IO::Uncompress::Gunzip->new($inF, MultiStream => 1);
 			if (!$ISTR) {if ($dodie){die "$msg$IO::Uncompress::Gunzip::GunzipError\n";} else {$OK=0; print $msg if ($verbose);}}
 		}
 	} else{
