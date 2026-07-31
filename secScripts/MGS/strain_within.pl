@@ -187,7 +187,8 @@ END {
 #.69: delegate tree input publication and completion checkpoints to buildTree5
 #.70: require and cardinality-check every recovered split-worker contribution
 #.71: persist merge provenance, isolate per-sample TSV output, and print startup immediately
-my $version = 0.71;
+#.72: initialize sample-statistics columns before the executable workflow
+my $version = 0.72;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -303,6 +304,20 @@ my $mapF2 = "";
 my $memMulti = 1; #for buildTree script
 my $help = 0;
 
+
+my @sampleStatColumns = qw(
+	sample worker assembly_driver status selected_mgs candidate_mgs candidate_loci consensus_proteins
+	used_mgs skipped_mgs unaccounted_mgs used_fraction
+	min_genes_per_mgs presort_genes max_genes qc_enabled min_gene_depth min_bad_loci
+	multi_gene_fraction_max csp_gene_fraction_max csp_locus_score_max breakpoint_gene_flank
+	abundance_min_loci abundance_min_fold abundance_max_fold abundance_max_modified_z
+	capped_mgs capped_loci skipped_within_2_loci_of_min
+	retained_loci median_loci_per_used_mgs mean_loci_per_used_mgs
+	pre_abundance_loci post_abundance_loci missing_consensus_loci low_depth_loci
+	breakpoint_loci csp_rejected_loci ambiguous_loci abundance_filtered_loci
+	invalid_protein_loci placement_flagged_mgs skip_no_selected_loci
+	skip_no_usable_loci skip_too_few_after_abundance skip_too_few_valid_sequences
+);
 
 #$treeFile = $ARGV[3] if (@ARGV > 3);$onlySubmit = $ARGV[4] if (@ARGV > 4);
 #$doSubmit = $ARGV[5] if (@ARGV > 5);$subMode = $ARGV[6] if (@ARGV > 6);
@@ -3006,19 +3021,6 @@ sub markStrainWorkflowDirectory {
 
 
 
-my @sampleStatColumns = qw(
-	sample worker assembly_driver status selected_mgs candidate_mgs candidate_loci consensus_proteins
-	used_mgs skipped_mgs unaccounted_mgs used_fraction
-	min_genes_per_mgs presort_genes max_genes qc_enabled min_gene_depth min_bad_loci
-	multi_gene_fraction_max csp_gene_fraction_max csp_locus_score_max breakpoint_gene_flank
-	abundance_min_loci abundance_min_fold abundance_max_fold abundance_max_modified_z
-	capped_mgs capped_loci skipped_within_2_loci_of_min
-	retained_loci median_loci_per_used_mgs mean_loci_per_used_mgs
-	pre_abundance_loci post_abundance_loci missing_consensus_loci low_depth_loci
-	breakpoint_loci csp_rejected_loci ambiguous_loci abundance_filtered_loci
-	invalid_protein_loci placement_flagged_mgs skip_no_selected_loci
-	skip_no_usable_loci skip_too_few_after_abundance skip_too_few_valid_sequences
-);
 
 sub newSampleStats {
 	my ($sample, $status, $candidateMGS, $candidateLoci, $assemblyDriver) = @_;

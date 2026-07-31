@@ -131,8 +131,11 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.71;/,
-	'restart-safe validated merging increments the workflow version');
+like($strain, qr/my \$version = 0\.72;/,
+	'early sample-statistics initialization increments the workflow version');
+like($strain,
+	qr/my \@sampleStatColumns = qw\(.*?skip_too_few_valid_sequences.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
+	'sample-statistics columns are initialized before the executable workflow begins');
 unlike($strain, qr/print STDERR "\nAT SMPL::/,
 	"sample progress does not emit a leading blank line per assembly group");
 like($strain,
