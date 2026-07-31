@@ -34,6 +34,9 @@ use Mods::StrainParts qw(
 );
 use Mods::SlurmAccounting qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
+use Mods::StrainSampleStats qw(
+	sample_stat_columns sample_summary_columns aggregate_sample_rows
+);
 
 sub extractFNAFAA2genes;
 sub histoMGS;
@@ -61,6 +64,7 @@ sub indexRecoveryRow;
 sub writeRecoveryContributionIndex;
 sub loadRecoveryContributionIndex;
 sub writeStrainSummary;
+sub mergeSampleStats;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -188,7 +192,8 @@ END {
 #.70: require and cardinality-check every recovered split-worker contribution
 #.71: persist merge provenance, isolate per-sample TSV output, and print startup immediately
 #.72: initialize sample-statistics columns before the executable workflow
-my $version = 0.72;
+#.73: persist, merge, and summarize sample statistics across extraction workers
+my $version = 0.73;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -298,6 +303,9 @@ my $abundF="/assemblies/metag/ContigStats/Coverage.pergene.gz";
 my $recoveryLogName = "strainRecovery.tsv";
 my $summaryLogName = "strain_within.summary.log";
 my $recoveryLogFH;
+my $sampleStatsLogName = "strainSampleStats.tsv";
+my $sampleStatsSummaryLogName = "strainSampleStats.summary.tsv";
+my $sampleStatsPartFH;
 my $bamDepthFsuffix = "-smd.bam.coverage.gz";
 my $bamDepthFsuffixSup = ".sup-smd.bam.coverage.gz";
 my $mapF2 = "";
@@ -305,19 +313,7 @@ my $memMulti = 1; #for buildTree script
 my $help = 0;
 
 
-my @sampleStatColumns = qw(
-	sample worker assembly_driver status selected_mgs candidate_mgs candidate_loci consensus_proteins
-	used_mgs skipped_mgs unaccounted_mgs used_fraction
-	min_genes_per_mgs presort_genes max_genes qc_enabled min_gene_depth min_bad_loci
-	multi_gene_fraction_max csp_gene_fraction_max csp_locus_score_max breakpoint_gene_flank
-	abundance_min_loci abundance_min_fold abundance_max_fold abundance_max_modified_z
-	capped_mgs capped_loci skipped_within_2_loci_of_min
-	retained_loci median_loci_per_used_mgs mean_loci_per_used_mgs
-	pre_abundance_loci post_abundance_loci missing_consensus_loci low_depth_loci
-	breakpoint_loci csp_rejected_loci ambiguous_loci abundance_filtered_loci
-	invalid_protein_loci placement_flagged_mgs skip_no_selected_loci
-	skip_no_usable_loci skip_too_few_after_abundance skip_too_few_valid_sequences
-);
+my @sampleStatColumns = sample_stat_columns();
 
 #$treeFile = $ARGV[3] if (@ARGV > 3);$onlySubmit = $ARGV[4] if (@ARGV > 4);
 #$doSubmit = $ARGV[5] if (@ARGV > 5);$subMode = $ARGV[6] if (@ARGV > 6);
@@ -779,7 +775,7 @@ if ($runPartI){
 		
 		#submission of self-subjobs..
 		for (my $sj = 1; $sj < $maxSubJob; $sj ++){
-			my $cmdX = "$selfCmd -subjob $sj;\n";
+			my $cmdX = "$selfCmd -subjob $sj &&\n";
 			my $checkF = "$LOGDIR/mainExtr.${sj}.stone";
 			$cmdX .= "printf '%s\\n' ".shellQuote($splitGeneration)
 				." > ".shellQuote($checkF)."\n";
@@ -806,6 +802,7 @@ if ($runPartI){
 	#write logs to found genes etc.
 	writeLogsStep1();
 	mergeRecoveryLogs() unless $maxSubJob;
+	mergeSampleStats() unless $maxSubJob;
 	stepComplete("consensus-gene extraction and publication", $stepStarted,
 		"catalogue_drivers=$extractionDriverCount",
 		"resolved_loci=$extractionLocusCount",
@@ -830,6 +827,7 @@ if ($runPartI){
 			unless split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob);
 		mergeConspecificLogs();
 		mergeRecoveryLogs();
+		mergeSampleStats();
 		
 		#combineMGSgenes();
 	}
@@ -2700,6 +2698,96 @@ sub indexRecoveryRow {
 	$recoverySamplesByMGS{$mgs}{$sample} = 1;
 }
 
+sub mergeSampleStats {
+	make_path($outD) unless -d $outD;
+	my @parts = $maxSubJob
+		? map { "$LOGDIR/$sampleStatsLogName.$_" } 0 .. $maxSubJob - 1
+		: ("$LOGDIR/$sampleStatsLogName.0");
+	my @missing = grep { !-s $_ } @parts;
+	die "Missing per-worker sample statistics: ".join(',', @missing)."\n" if @missing;
+
+	my $expectedHeader = join("\t", @sampleStatColumns);
+	my $final = "$outD/$sampleStatsLogName";
+	my $finalTemporary = "$final.write.$$";
+	open my $merged, '>', $finalTemporary or die "Cannot create $finalTemporary: $!\n";
+	print {$merged} $expectedHeader, "\n"
+		or die "Cannot write $finalTemporary: $!\n";
+	my (@allRows, %rowsByWorker, %seenSample);
+	for my $worker (0 .. $#parts) {
+		my $part = $parts[$worker];
+		open my $in, '<', $part or die "Cannot read $part: $!\n";
+		my $header = <$in>;
+		die "Per-worker sample statistics have no header: $part\n" unless defined $header;
+		$header =~ s/[\r\n]+\z//;
+		die "Unexpected per-worker sample-statistics header in $part\n"
+			unless $header eq $expectedHeader;
+		my $lineNumber = 1;
+		while (my $line = <$in>) {
+			$lineNumber++;
+			$line =~ s/[\r\n]+\z//;
+			die "Empty sample-statistics row in $part line $lineNumber\n" unless length $line;
+			my @values = split /\t/, $line, -1;
+			die "Wrong sample-statistics field count in $part line $lineNumber: got "
+				.scalar(@values).", expected ".scalar(@sampleStatColumns)."\n"
+				unless @values == @sampleStatColumns;
+			my %row;
+			@row{@sampleStatColumns} = @values;
+			my $sample = $row{sample} // '';
+			die "Sample-statistics row has no sample in $part line $lineNumber\n"
+				unless length $sample;
+			die "Duplicate sample-statistics row for $sample across workers\n"
+				if $seenSample{$sample}++;
+			die "Sample-statistics worker mismatch for $sample: row=$row{worker}, file=$worker\n"
+				unless defined($row{worker}) && $row{worker} =~ /^\d+\z/
+					&& $row{worker} == $worker;
+			print {$merged} $line, "\n" or die "Cannot write $finalTemporary: $!\n";
+			push @allRows, \%row;
+			push @{$rowsByWorker{$worker}}, \%row;
+		}
+		close $in or die "Cannot close $part: $!\n";
+	}
+	close $merged or die "Cannot close $finalTemporary: $!\n";
+	die "No sample-statistics rows were recovered from worker tables\n" unless @allRows;
+
+	my @summaryColumns = sample_summary_columns();
+	my @summaryRows = map {
+		aggregate_sample_rows($rowsByWorker{$_} || [], "worker.$_")
+	} 0 .. $#parts;
+	$summaryRows[$_]->{workers} = 1 for 0 .. $#parts;
+	my $allSummary = aggregate_sample_rows(\@allRows, 'ALL');
+	$allSummary->{workers} = scalar(@parts);
+	push @summaryRows, $allSummary;
+	my $summary = "$outD/$sampleStatsSummaryLogName";
+	my $summaryTemporary = "$summary.write.$$";
+	open my $summaryFH, '>', $summaryTemporary
+		or die "Cannot create $summaryTemporary: $!\n";
+	print {$summaryFH} join("\t", @summaryColumns), "\n"
+		or die "Cannot write $summaryTemporary: $!\n";
+	for my $row (@summaryRows) {
+		my @values = map {
+			my $value = defined($row->{$_}) ? $row->{$_} : '';
+			$value =~ s/[\t\r\n]+/ /g;
+			$value;
+		} @summaryColumns;
+		print {$summaryFH} join("\t", @values), "\n"
+			or die "Cannot write $summaryTemporary: $!\n";
+	}
+	close $summaryFH or die "Cannot close $summaryTemporary: $!\n";
+	rename $finalTemporary, $final or die "Cannot publish $final: $!\n";
+	rename $summaryTemporary, $summary or die "Cannot publish $summary: $!\n";
+
+	warn "Per-sample statistics cover ".scalar(@allRows)." of ".scalar(@samples)
+		." configured samples\n" if @samples && @allRows != @samples;
+	my @allValues = map { defined($allSummary->{$_}) ? $allSummary->{$_} : '' }
+		@summaryColumns;
+	print "STEP 1 SAMPLE SUMMARY (all workers)\n";
+	print join("\t", @summaryColumns), "\n";
+	print join("\t", @allValues), "\n";
+	print "Merged per-sample statistics: $final\n";
+	print "Per-worker and all-worker summary: $summary\n";
+	return $allSummary;
+}
+
 sub writeRecoveryContributionIndex {
 	my $path = "$LOGDIR/$recoveryLogName.contributors.tsv";
 	my $temporary = "$path.write.$$";
@@ -3063,8 +3151,11 @@ sub writeSampleStats {
 	my $row = join("\t", @values);
 	die "Refusing to emit an empty per-sample statistics row for $sample\n"
 		unless $row =~ /\S/;
-	print {$fh} $row, "\n"
-		or die "Cannot write per-sample statistics: $!\n";
+	for my $target ($fh, $sampleStatsPartFH) {
+		next unless $target;
+		print {$target} $row, "\n"
+			or die "Cannot write per-sample statistics: $!\n";
+	}
 }
 
 #this routine hast to get genes out of each sample, that are needed
@@ -3079,6 +3170,12 @@ sub extractFNAFAA2genes{
 		MGS sample outcome reason retained_genes qc_status
 		ambiguous_failure conspecific_failure recovered_mosaic_loci
 	)), "\n";
+	my $sampleStatsHeader = join("\t", @sampleStatColumns);
+	my $sample_stats_part = "$LOGDIR/$sampleStatsLogName.$subJob";
+	open $sampleStatsPartFH, '>', $sample_stats_part
+		or die "Cannot create per-worker sample statistics $sample_stats_part: $!\n";
+	print {$sampleStatsPartFH} $sampleStatsHeader, "\n"
+		or die "Cannot write per-worker sample-statistics header: $!\n";
 
 	# Each worker owns one numeric suffix.  A retry must replace, not append to,
 	# that worker's previous partial extraction.
@@ -3176,7 +3273,7 @@ sub extractFNAFAA2genes{
 	$previousFH = select($sampleStatsFH);
 	$| = 1;
 	select($previousFH);
-	print {$sampleStatsFH} join("\t", @sampleStatColumns), "\n"
+	print {$sampleStatsFH} $sampleStatsHeader, "\n"
 		or die "Cannot write per-sample statistics header: $!\n";
 	my %sampleStatsSeen;
 	{
@@ -3195,6 +3292,9 @@ sub extractFNAFAA2genes{
 		}
 	}
 	close $sampleStatsFH or die "Cannot close per-sample statistics stream: $!\n";
+	close $sampleStatsPartFH
+		or die "Cannot close per-worker sample statistics $sample_stats_part: $!\n";
+	undef $sampleStatsPartFH;
 	warn "Per-sample statistics emitted: ".scalar(keys %sampleStatsSeen)." nonempty row(s)\n";
 	
 	

@@ -131,10 +131,10 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.72;/,
-	'early sample-statistics initialization increments the workflow version');
+like($strain, qr/my \$version = 0\.73;/,
+	'all-worker sample-statistics aggregation increments the workflow version');
 like($strain,
-	qr/my \@sampleStatColumns = qw\(.*?skip_too_few_valid_sequences.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
+	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
 unlike($strain, qr/print STDERR "\nAT SMPL::/,
 	"sample progress does not emit a leading blank line per assembly group");
@@ -145,11 +145,20 @@ like($strain,
 	qr/sub printEarlyRunHeader \{.*?Strain_within v\$version.*?Started:.*?Requested output:.*?Initializing paths, maps, and catalogues/s,
 	'the immediate header identifies the run before expensive initialization starts');
 like($strain,
-	qr/print \{\$sampleStatsFH\} join.*?my %sampleStatsSeen;.*?local \*STDOUT;.*?open STDOUT.*?STDERR.*?foreach my \$sm \(\@srtdSmpls\).*?readGenesSample_Singl/s,
+	qr/print \{\$sampleStatsFH\} \$sampleStatsHeader.*?my %sampleStatsSeen;.*?local \*STDOUT;.*?open STDOUT.*?STDERR.*?foreach my \$sm \(\@srtdSmpls\).*?readGenesSample_Singl/s,
 	'STDOUT is redirected once around the complete sample loop while the duplicated handle carries only TSV records');
 like($strain,
-	qr/sub writeSampleStats \{.*?without a sample name.*?duplicate row.*?Refusing to emit an empty.*?print \{\$fh\} \$row, "\\n"/s,
-	'every sample-statistics record has a sample name, is nonempty, and is emitted at most once');
+	qr/sub writeSampleStats \{.*?without a sample name.*?duplicate row.*?Refusing to emit an empty.*?for my \$target \(\$fh, \$sampleStatsPartFH\).*?print \{\$target\} \$row, "\\n"/s,
+	'every sample-statistics record has a sample name, is nonempty, and is emitted to stdout and its worker table at most once');
+like($strain,
+	qr/sub mergeSampleStats .*?Wrong sample-statistics field count.*?Duplicate sample-statistics row.*?aggregate_sample_rows.*?STEP 1 SAMPLE SUMMARY \(all workers\)/s,
+	'all worker tables are validated, aggregated, saved, and reported at the end of Step 1');
+like($strain,
+	qr/mergeRecoveryLogs\(\) unless \$maxSubJob.*?mergeSampleStats\(\) unless \$maxSubJob.*?if \(\$maxSubJob && !\$subJob\).*?mergeRecoveryLogs\(\);.*?mergeSampleStats\(\);/s,
+	'both single-worker and split-worker extraction produce the combined sample summary');
+like($strain,
+	qr/\$selfCmd -subjob \$sj &&\\n.*?write_worker_completion/s,
+	'split workers publish completion only after sample statistics and extraction finish successfully');
 like($strain,
 	qr/my \$mosaicDirectory = File::Spec->catdir\(dirname\(\$mosaicMGSFile\), 'mosaic'\).*?basename\(\$mosaicMGSFile\)\."\.mosaic_loci\.\$clusterID\.confirmed\.tsv".*?prepare_mosaic_loci\.log/s,
 	'a missing default Mosaic catalogue is named from the raw MGS table and uses a temporary job log');
