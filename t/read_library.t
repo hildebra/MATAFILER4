@@ -149,7 +149,12 @@ like($mataf4, qr/-1 \$pa1 -2 \$pa2 .*?pe2\} = "\$mateD\/mate\.\$\{mateC\}_R2\.pe
 	'mate preprocessing uses R2 as the second input and output');
 like($upload_prep,
 	qr/my \$files = ref\(\$library->\{source_files\}\).*?\$files->\{r1\}.*?\$files->\{single\}/s,
-	'raw upload preparation links authoritative sources rather than disposable staged reads');
+	'raw upload preparation selects authoritative sources rather than disposable staged reads');
+unlike($upload_prep, qr/ln -s/,
+	'raw upload preparation never exposes authoritative inputs through symlinks');
+like($upload_prep,
+	qr/_shell_command\('cp', '-L', '--reflink=auto', '--'.*?\$r1, \$tmp1.*?\$single, \$tmp/s,
+	'raw upload preparation creates private copy-on-write or copied working files');
 my ($seed_unzip) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=^sub mOTU2Mapping)/ms;
 like($seed_unzip,
 	qr/source_input_files\(\$fastp, \@pa1\).*?\{source_files\}.*?\$sourcePa1\[\$i\]/s,

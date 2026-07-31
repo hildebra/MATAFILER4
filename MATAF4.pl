@@ -5144,7 +5144,8 @@ sub uploadRawFilePrep{
 			my $final2 = "$outD/".basename($of2);
 			unless (-e $final1 && -e $final2) {
 				$cmd .= "rm -fr $tmpD;\nmkdir -p $tmpD/tmp/ $outD\n";
-				$cmd .= "ln -s $r1 $tmp1\nln -s $r2 $tmp2\n";
+				$cmd .= _shell_command('cp', '-L', '--reflink=auto', '--', $r1, $tmp1)."\n";
+				$cmd .= _shell_command('cp', '-L', '--reflink=auto', '--', $r2, $tmp2)."\n";
 				$cmd .= hostRmBase($tmp1,$tmp2,$MFopt{humanFilter},$isLong,$numThr,$tmpD,"$DBdir$DBname[0]");
 				$cmd .= "$fastqhdsChk $tmp1 1; $fastqhdsChk $tmp2 2;\n";
 				$cmd .= "mv $tmp1 $of1\nmv $tmp2 $of2\nmv $of1 $of2 $outD\n\n";
@@ -5159,7 +5160,7 @@ sub uploadRawFilePrep{
 			my $final = "$outD/".basename($of);
 			unless (-e $final) {
 				$cmd .= "rm -fr $tmpD;\nmkdir -p $tmpD/tmp/ $outD\n";
-				$cmd .= "ln -s $single $tmp\n";
+				$cmd .= _shell_command('cp', '-L', '--reflink=auto', '--', $single, $tmp)."\n";
 				$cmd .= hostRmBase($tmp,"",$MFopt{humanFilter},$isLong,$numThr,$tmpD,"$DBdir$DBname[0]");
 				$cmd .= "$fastqhdsChk $tmp 3;\n";
 				$cmd .= "mv $tmp $of\nmv $of $outD\n\n";

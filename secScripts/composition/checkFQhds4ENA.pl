@@ -8,6 +8,8 @@ use Mods::GenoMetaAss qw(gzipopen gzipwrite);
 
 my $inF = $ARGV[0];
 my $readP = $ARGV[1];
+die "Refusing ENA header normalization through symbolic link $inF\n"
+	if (defined($inF) && -l $inF);
 
 my $LTHR = 255;
 my $LCUT = $LTHR -5;
