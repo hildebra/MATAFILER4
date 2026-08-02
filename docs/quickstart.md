@@ -66,8 +66,15 @@ Normal runs use the sample completion markers directly and do not perform the
 additional full-workflow inspection. Add `-autoStatePlan 1` to inspect and plan
 current state, repair narrowly safe partial outputs, and save JSON audit files
 under `#OutPath/#RunID/LOGandSUB/workflow/`. With `-loopTillComplete`, an enabled
-preflight repeats after each wait and before the next pass. Samples are revisited
-in a rolling window. Its start advances only across the contiguous prefix whose
+preflight repeats after each wait and before the next pass.
+
+Input directories are checked lazily as unfinished samples reach input staging,
+so startup no longer scans every mapped sample. Use `-precheckInputDirs 1` only
+when an eager all-sample scan is desired; combine it with `-requireInput 1` to
+abort on missing or invalid inputs.
+
+Samples are revisited in a rolling window. Its start advances only across the
+contiguous prefix whose
 requested outputs are complete and whose temporary directories have been
 cleaned, keeping unfinished samples in rotation while admitting new ones.
 Previously completed samples use a short, ordered output probe; the loop still

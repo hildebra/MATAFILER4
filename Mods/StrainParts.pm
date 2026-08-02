@@ -7,8 +7,7 @@ use Exporter qw(import);
 use File::Basename qw(dirname);
 use File::Glob qw(bsd_glob);
 use File::Path qw(make_path);
-use IO::Compress::Gzip qw($GzipError);
-use IO::Uncompress::Gunzip qw($GunzipError);
+use Mods::GenoMetaAss qw(gzipopen gzipwrite);
 
 our @EXPORT_OK = qw(
 	balance_assembly_groups
@@ -162,14 +161,14 @@ sub append_fasta_records_atomic {
 	my $source = resolve_fasta_artifact($nominal_path);
 	die "Cannot append to missing FASTA ${nominal_path}[.gz]\n" unless length $source;
 	my $compressed = $source eq "$nominal_path.gz";
-	my $partial = "$source.rewrite.$$";
+	my $partial = "$source.rewrite.$$" . ($compressed ? '.gz' : '');
 
 	my ($in, $out);
 	if ($compressed) {
-		$in = IO::Uncompress::Gunzip->new($source)
-			or die "Cannot read gzip FASTA $source: $GunzipError\n";
-		$out = IO::Compress::Gzip->new($partial)
-			or die "Cannot create gzip FASTA $partial: $GzipError\n";
+		my $ok;
+		($in, $ok) = gzipopen($source, 'gzip FASTA', 1, 0);
+		die "Cannot read gzip FASTA $source\n" unless $ok && defined $in;
+		$out = gzipwrite($partial, 'rewritten gzip FASTA', { threads => 1 });
 	} else {
 		open $in, '<', $source or die "Cannot read FASTA $source: $!\n";
 		open $out, '>', $partial or die "Cannot create FASTA $partial: $!\n";

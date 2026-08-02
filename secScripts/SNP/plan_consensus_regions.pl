@@ -5,7 +5,6 @@ use warnings;
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
 use Getopt::Long qw(GetOptions);
-use IO::Uncompress::Gunzip qw($GunzipError);
 
 my %opt = (jobs => 1);
 GetOptions(
@@ -14,6 +13,7 @@ GetOptions(
 	'depth=s'         => \$opt{depth},
 	'jobs=i'          => \$opt{jobs},
 	'output-prefix=s' => \$opt{output_prefix},
+	'pigz=s'          => \$opt{pigz},
 	'samtools=s'      => \$opt{samtools},
 ) or die "invalid region-planner arguments\n";
 
@@ -45,8 +45,10 @@ my %depth_for;
 if (defined($opt{depth}) && length($opt{depth}) && -s $opt{depth}) {
 	my $depth_fh;
 	if ($opt{depth} =~ /\.gz$/) {
-		$depth_fh = IO::Uncompress::Gunzip->new($opt{depth})
-			or die "can't open $opt{depth}: $GunzipError\n";
+		die "--pigz is required for compressed depth input\n"
+			unless defined($opt{pigz}) && length($opt{pigz});
+		open $depth_fh, '-|', $opt{pigz}, '-dc', '--', $opt{depth}
+			or die "can't start $opt{pigz} for $opt{depth}: $!\n";
 	} else {
 		open $depth_fh, '<', $opt{depth} or die "can't open $opt{depth}: $!\n";
 	}

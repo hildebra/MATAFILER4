@@ -41,6 +41,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-checkInstall` | flag | `` | stable | Check that core MATAFILER4 programs/environments are installed. |
 | `-map` | string | `""` | stable | Mapping file describing samples and input/output paths. |
 | `-config` | string | `""` | stable | Alternative configuration file. |
+| `-precheckInputDirs` | integer | `0` | advanced | Scan and cache input-file selections and sizes for every mapped sample before processing. Disabled by default; normal runs discover inputs lazily when an unfinished sample is staged. Combine with `-requireInput 1` to make missing or invalid inputs fatal during the precheck. |
 | `-inspectState` | integer | `0` | stable | Emit a read-only JSON snapshot of workflow artifacts and markers. |
 | `-planState` | integer | `0` | stable | Emit a read-only, dependency-ordered repair/submission plan from the inspection snapshot. |
 | `-stateReport` | string | `""` | stable | Write the inspection JSON to this explicit path. |

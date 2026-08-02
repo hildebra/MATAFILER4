@@ -9,6 +9,8 @@ use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
+use lib File::Spec->catdir($Bin, 'lib');
+use MFTestConfig;
 use Mods::StrainParts qw(
 	balance_assembly_groups exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation

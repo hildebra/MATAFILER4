@@ -992,7 +992,10 @@ sub _matrix_sample_count {
 	my ($fh, $ok) = gzipopen($file, 'gene abundance matrix', 1, 0);
 	die "Cannot open gene abundance matrix $file\n" unless $ok && defined $fh;
 	my $header = <$fh>;
-	close $fh or die "Cannot close gene abundance matrix $file: $!\n";
+	# This is deliberately a header-only read. Closing the pipe before pigz has
+	# emitted the multi-GB matrix body gives pigz SIGPIPE and therefore a false
+	# close() status; that is expected here and must not abort a resumed run.
+	close $fh;
 	die "Gene abundance matrix is empty: $file\n" unless defined $header;
 	chomp $header;
 	my @fields = split /\t/, $header, -1;

@@ -18,6 +18,12 @@ Normal runs now enter the ordinary pipeline logic directly. This avoids a
 full-workflow metadata scan before the per-sample completion checks. To opt in
 to the state planner and automatic safe repairs, add `-autoStatePlan 1`.
 
+Raw-read directories are also discovered lazily, when an unfinished sample
+reaches input staging. Completed samples therefore do not cause raw-input IO at
+startup. Use `-precheckInputDirs 1` to restore the all-sample startup scan when
+an eager validation/cache warm-up is wanted; add `-requireInput 1` if a missing
+or invalid input should abort that precheck.
+
 When enabled, the preflight:
 
 1. Inspect files, completion markers, samples, and assembly groups.

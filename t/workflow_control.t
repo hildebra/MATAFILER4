@@ -447,8 +447,11 @@ like($mataf4,
 	qr/if \(\$MFconfig\{maxUnzpJobs\} > 0 && \@unzipjobs >= \$MFconfig\{maxUnzpJobs\}\).*?\$unzipjobs\[-\(\$MFconfig\{maxUnzpJobs\}\)\]/s,
 	'heavy UZ submissions use the configured rolling concurrency cap');
 like($mataf4,
-	qr/populateInputSizesFast\(\$_\) for \@samples;.*?if \(\$MFconfig\{inspectState\}\).*?for \(\$JNUM=\$from/s,
-	'input sizes are populated for every sample before inspection or completion shortcuts');
+	qr/if \(\$MFconfig\{precheckInputDirs\}\) \{.*?populateInputSizesFast\(\$_\) for \@samples;.*?if \(\$MFconfig\{inspectState\}\).*?for \(\$JNUM=\$from/s,
+	'full input-directory sizing is opt-in before inspection or sample processing');
+like($mataf4,
+	qr/\$MFconfig\{precheckInputDirs\}\s*=\s*0;.*?"precheckInputDirs=i"\s*=>\s*\\\$MFconfig\{precheckInputDirs\}/s,
+	'the expensive all-sample input precheck is disabled by default and exposed explicitly');
 like($mataf4,
 	qr/my %runReport = \(.*?samples => \{\}.*?empty_samples => \{\}.*?present_assemblies => 0.*?my %d2Inputs = \(.*?filtered_read1 => \[\].*?dependencies => ""/s,
 	'run reporting and cross-sample distance state are grouped by responsibility');
@@ -499,8 +502,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?my \$MATFILER_ver = 4\.26;/s,
-	'MATAFILER history retains shared input discovery through version 4.26');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?my \$MATFILER_ver = 4\.27;/s,
+	'MATAFILER history retains shared input discovery through version 4.27');
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');

@@ -11,6 +11,8 @@ use Symbol qw(gensym);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
+use lib File::Spec->catdir($Bin, 'lib');
+use MFTestConfig;
 use Mods::Binning qw(
 	createBin2 createBinCtgs filterMGS_CM MB2assigns MB2assignedBinIds readCMquals
 );
@@ -531,8 +533,13 @@ unlike($submission_source, qr/print "SUB:\$jname\\t"/,
 	'scheduler submissions no longer emit incomplete inline fragments');
 like($gene_cat_source, qr/\$matrixSampleCount = _matrix_sample_count\(\$matrixFile\)/,
 	'geneCat uses produced matrix cardinality rather than raw map cardinality for Canopy');
-like($gene_cat_source, qr/matrix_sample_count=\$\(gzip -cd .*?declutter-skipped-low-sample-count/s,
+like($gene_cat_source,
+	qr/matrix_sample_count=\$\(' \. _shell_quote\(\$pigzBin\) \. ' -dc -- .*?declutter-skipped-low-sample-count/s,
 	'fire-and-forget decluttering defers cardinality checks until the matrix exists');
+like($mgs_source, qr/header-only read.*?close \$fh;/s,
+	'MGS permits the expected pigz SIGPIPE after reading only the matrix header');
+unlike($mgs_source, qr/Cannot close gene abundance matrix/,
+	'MGS resume does not treat an intentionally partial pigz read as a close failure');
 like($gene_cat_source, qr/canopy-skipped-low-sample-count.*?SKIPPED\.txt/s,
 	'low-sample Canopy skips are checkpointed with a durable explanation');
 like($gene_cat_source, qr/Canopy clustering completed but found no clusters.*?SKIPPED\.txt/s,

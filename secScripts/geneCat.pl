@@ -20,13 +20,12 @@ use File::Path qw(make_path remove_tree);
 use File::Spec;
 use Fcntl qw(O_CREAT O_EXCL O_WRONLY);
 use Errno qw(EEXIST);
-use IO::Compress::Gzip qw($GzipError);
 use IO::Handle;
 
 use Getopt::Long qw( GetOptions );
 
 use Cwd; use English;
-use Mods::GenoMetaAss qw( readFasta fileGZe gzipopen splitFastas readMapS systemW readGFF getAssemblPath resolve_path);
+use Mods::GenoMetaAss qw( readFasta fileGZe gzipopen gzipwrite splitFastas readMapS systemW readGFF getAssemblPath resolve_path);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
@@ -160,7 +159,9 @@ sub _matrix_sample_count {
 	my ($fh, $ok) = gzipopen($file, 'gene abundance matrix', 1, 0);
 	die "Cannot open gene abundance matrix $file\n" unless $ok && defined $fh;
 	my $header = <$fh>;
-	close $fh or die "Cannot close gene abundance matrix $file: $!\n";
+	# Header-only reads intentionally stop pigz before the matrix body. Its
+	# resulting SIGPIPE is not an input failure, so do not require close success.
+	close $fh;
 	die "Gene abundance matrix is empty: $file\n" unless defined $header;
 	chomp $header;
 	my @fields = split /\t/, $header, -1;
@@ -237,17 +238,20 @@ sub _sync_file {
 
 sub _new_gzip_output {
 	my ($final_file) = @_;
-	my $partial_file = "$final_file.part";
+	my $partial_file = "$final_file.part.gz";
 	unlink $partial_file or die "Cannot remove stale partial file $partial_file: $!\n"
 		if -e $partial_file;
-	my $gzip = IO::Compress::Gzip->new($partial_file, -Level => 3)
-		or die "Cannot create $partial_file: $GzipError\n";
+	my $gzip = gzipwrite(
+		$partial_file,
+		'gene-catalog batch FASTA',
+		{ level => 3, threads => 1 },
+	);
 	return ($gzip, $partial_file);
 }
 
 sub _publish_gzip_output {
 	my ($gzip, $partial_file, $final_file) = @_;
-	$gzip->close() or die "gzip failed while writing $partial_file: $GzipError\n";
+	close $gzip or die "pigz failed while writing $partial_file (status $?)\n";
 	die "gzip produced an empty file: $partial_file\n" unless -s $partial_file;
 	_sync_file($partial_file);
 	unless (rename $partial_file, $final_file) {
@@ -1318,7 +1322,7 @@ sub geneCatFlow($ $ $ $ ){
 	#now decluter based on proteins.
 	if (!$matrixSampleCountKnown && !_stone_valid($declStone, $cdhID) && $doDecluter) {
 		my $localExe = 1;
-		$cmd .= 'matrix_sample_count=$(gzip -cd ' . _shell_quote($matrixFile)
+		$cmd .= 'matrix_sample_count=$(' . _shell_quote($pigzBin) . ' -dc -- ' . _shell_quote($matrixFile)
 			. q{ | awk -F '\t' 'NR == 1 { print NF - 1; exit }')} . "\n";
 		$cmd .= "case \"\$matrix_sample_count\" in ''|*[!0-9]*) echo 'Cannot determine gene-matrix sample count' >&2; exit 1;; esac\n";
 		$cmd .= "if [ \"\$matrix_sample_count\" -gt 2 ]; then\n";

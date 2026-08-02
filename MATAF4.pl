@@ -158,7 +158,9 @@ sub createConsSNPandSVs;
 #4.26: 31.7.26: after the first final full-range verification, wait for every
 #       job submitted by this invocation to leave the scheduler before starting
 #       another full-range pass.
-my $MATFILER_ver = 4.26;
+#4.27: 2.8.26: discover input directories lazily during sample processing;
+#       retain the former all-sample startup scan only as an explicit precheck.
+my $MATFILER_ver = 4.27;
 
 #----------------- defaults ----------------- 
 
@@ -294,7 +296,11 @@ my $workflowIteration = 0;
 my $ignoredSamplesHR = parse_ignored_samples($MFconfig{ignoreSmpl});
 prepareMap();
 my @samples = @{$map{opt}{smpl_order}}; 
-populateInputSizesFast($_) for @samples;
+if ($MFconfig{precheckInputDirs}) {
+	print "Prechecking input directories for all mapped samples...\n"
+		unless $MFconfig{silent};
+	populateInputSizesFast($_) for @samples;
+}
 
 if ($MFconfig{inspectState}) {
 	runStateInspection();
@@ -9502,6 +9508,7 @@ sub setDefaultMFconfig{
 	$MFconfig{inspectState} = 0;
 	$MFconfig{planState} = 0;
 	$MFconfig{autoStatePlan} = 0;
+	$MFconfig{precheckInputDirs} = 0;
 	$MFconfig{autoRepairState} = 1;
 	$MFconfig{stateReport} = "";
 	$MFconfig{planReport} = "";
@@ -9670,6 +9677,7 @@ sub getCmdLineOptions{
 		"checkInstall" => sub { checkMFFInstall("",1) },
 		"map=s"      => \$MFconfig{mapFile},
 		"config=s" => \$MFconfig{configFile},
+		"precheckInputDirs=i" => \$MFconfig{precheckInputDirs},
 		"inspectState=i" => \$MFconfig{inspectState},
 		"planState=i" => \$MFconfig{planState},
 		"stateReport=s" => \$MFconfig{stateReport},

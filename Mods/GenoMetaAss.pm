@@ -365,9 +365,10 @@ sub gzipwrite{
 			syswrite(STDERR, "Cannot connect pigz output to $outF: $!\n");
 			_exit(127);
 		};
-		exec {$pigz} $pigz, @pigzOptions, '-c', '--';
-		syswrite(STDERR, "Cannot execute configured pigz $pigz: $!\n");
-		_exit(127);
+		exec {$pigz} $pigz, @pigzOptions, '-c', '--' or do {
+			syswrite(STDERR, "Cannot execute configured pigz $pigz: $!\n");
+			_exit(127);
+		};
 	}
 	close $destination
 		or die "error closing parent copy of $descr file $outF: $!\n";

@@ -10,6 +10,9 @@ use Symbol qw(gensym);
 
 my $root = File::Spec->rel2abs('.');
 my $tmp = tempdir(CLEANUP => 1);
+my $test_lib = File::Spec->catdir($root, 't', 'lib');
+local $ENV{PERL5OPT} = join ' ', grep { defined($_) && length($_) }
+	"-I$root", "-I$test_lib", '-MMFTestConfig', $ENV{PERL5OPT};
 
 sub write_file {
     my ($path, $contents) = @_;
@@ -260,8 +263,8 @@ like($gene_cat, qr/declutter-skipped-low-sample-count/,
 like($gene_cat, qr/sysopen\(\$lock_fh, \$lock_file, O_CREAT \| O_EXCL/,
      'parallel gene batches acquire their append lock atomically');
 unlike($gene_cat, qr/open \$OC,"\| gzip/,
-       'batch compression uses in-process gzip instead of shell pipelines');
-like($gene_cat, qr/sub _publish_gzip_output.*?->close\(\).*?_sync_file\(\$partial_file\).*?rename \$partial_file, \$final_file/s,
+       'batch compression avoids inline gzip shell pipelines');
+like($gene_cat, qr/sub _publish_gzip_output.*?close \$gzip.*?_sync_file\(\$partial_file\).*?rename \$partial_file, \$final_file/s,
      'gzip publication closes, synchronizes, and atomically renames its partial file');
 like($gene_cat, qr/sub _append_file_locked.*?_sync_file\(\$source\).*?->sync\(\)/s,
      'batch append synchronizes both its completed source and aggregate output');

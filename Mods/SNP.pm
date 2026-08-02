@@ -300,6 +300,7 @@ sub SNPconsensus_vcf{
 	my $bcftBin = getProgPaths("bcftools");
 	my $vcf2fnaBin = getProgPaths("vcf2fna");
 	my $regionPlanner = getProgPaths("consVCF_region_planner");
+	my $pigzBin = getProgPaths("pigz");
 	
 	my $memPJob =0;
 	#get parameteres
@@ -468,10 +469,10 @@ sub SNPconsensus_vcf{
 		if ($runPrimary) {
 			my $depthArg = defined($SNPIHR->{depthF}) && length($SNPIHR->{depthF})
 				? " --depth $SNPIHR->{depthF}" : "";
-			$primaryRegionCmd = "$regionPlanner --fai $refFA.fai --mapping $tar[0]$depthArg --jobs $runtimeJobs --output-prefix $bedPrefix --samtools $smtBin\n";
+			$primaryRegionCmd = "$regionPlanner --fai $refFA.fai --mapping $tar[0]$depthArg --jobs $runtimeJobs --output-prefix $bedPrefix --samtools $smtBin --pigz $pigzBin\n";
 		}
 		if ($runSupport) {
-			$supportRegionCmd = "$regionPlanner --fai $refFA.fai --mapping $tarS[0] --jobs $runtimeJobs --output-prefix ${bedPrefix}sup- --samtools $smtBin\n";
+			$supportRegionCmd = "$regionPlanner --fai $refFA.fai --mapping $tarS[0] --jobs $runtimeJobs --output-prefix ${bedPrefix}sup- --samtools $smtBin --pigz $pigzBin\n";
 		}
 	}
 	
