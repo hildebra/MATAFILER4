@@ -38,23 +38,26 @@ sub help;
 #Platypus (assumes stable SNP freq), free bayes (assumes stable SNP freq)
 #--debug
 #binaries
-my $frDir = "/g/bork3/home/hildebra/bin/freebayes/bin/";
-my $frbBin = "$frDir/freebayes";
-my $vcfTools = "/g/bork3/home/hildebra/bin/vcflib/bin/";
-my $vtBin = "/g/bork3/home/hildebra/bin/vt/vt";
+my $frbBin = getProgPaths("freebayes");
+
+my $vcfFilBin = getProgPaths("vcffilter");
+my $vcfStrSrt = getProgPaths("vcfstreamsort");
+my $vcfUniq = getProgPaths("vcfuniq");
+my $vcf1stHd = getProgPaths("vcffirstheader");
+my $vtBin = getProgPaths("vt");
 my $smtBin = getProgPaths("samtools");#"/g/bork5/hildebra/bin/samtools-1.2/samtools";
 my $consCntupVCFscr = getProgPaths("consCntupVCF_scr");
 
-my $varscanBin = "java -jar /g/bork3/home/hildebra/bin/varscan2/VarScan.v2.3.8.jar ";
-my $vcfFilBin = "$vcfTools/vcffilter";
-my $bcBin = "/g/bork3/home/hildebra/bin/bcftools-1.3.1/./bcftools"; 
-my $vcftls = "/g/bork3/home/hildebra/bin/vcftools/vcft/bin/./vcf-merge";
-#my $lfBin = "/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/SebSNP/tools/./lofreq";
-my $lfBin = "/g/bork3/home/hildebra/bin/lofreq_star-2.1.2/bin/./lofreq";
-my $concatScr = "/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/helpers/SNP/./concatVCF.pl";
-my $vcfcnsScr = "perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/helpers/SNP/vcf2cons.pl ";
-my $comDepWinScr = "perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/helpers/SNP/comDepWins.pl";
-my $colStatsScr = "/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/helpers/SNP/collectStatsCons.pl";
+my $varscanBin = "java -jar ".getProgPaths("varscan");
+
+my $bcBin = getProgPaths("bcftools");
+my $vcftls = getProgPaths("vcfMerge");
+#my $lfBin = getProgPaths("lofreq");
+my $lfBin = getProgPaths("lofreq");
+my $concatScr = getProgPaths("concatVCF_scr");
+my $vcfcnsScr = getProgPaths("vcfCons_FB_scr");
+my $comDepWinScr = getProgPaths("comDepWin_scr");
+my $colStatsScr = getProgPaths("collectStatsCons_scr");
 
 my $frAllOpts= "-u -i -C 1 -F 0.1 -k -X --pooled-continuous --report-monomorphic  --min-repeat-entropy 1 --use-best-n-alleles 2 -G 1 ";
 
@@ -86,15 +89,15 @@ my $overwrite = 0; my $redoFreeBayes = 0; #controls freebays and perl script
 
 
 #hard coded paths for internal testing
-my @refFAs = ("/g/bork5/hildebra/results/TEC2/v5/TEC2.MM4.BEE.GF.rn.fa","/g/bork5/hildebra/results/TEC2/v5/T3/T3.mini2.3smpl.fna",
-"/g/bork5/hildebra/results/TEC2/v5/T4/T4.mini2.3smpl.fna",
+my @refFAs = map { getProgPaths($_) } qw(legacyTEC2FNA legacyTEC3FNA legacyTEC4FNA legacyTEC6FNA);
+
 #"/g/scb/bork/hildebra/SNP/GNMass3/TECtime/v4/T5/R_filt/contigs/MM3.ctgs.fna",
-"/g/bork5/hildebra/results/TEC2/v5/T6/TEC6.ctgs.rn.fna");
+
 my @name = ("T2d","T3d","T4d","T6d");
 my $inDir = "";#/g/scb/bork/hildebra/SNP/GNMass3/GlbMap/$name[$idx]/";
 my $mapF = "";#g/bork5/hildebra/data/metaGgutEMBL/MM_at_v5_T2subset.txt";
 my $odir = "";#/g/bork3/home/hildebra/data/TEC2_related/v5/SNPcalls/$name[$idx]/";
-my $tmpdir = "/scratch/bork/hildebra/SNP/";
+my $tmpdir = getProgPaths("legacySNPTmp");
 
 #internal flow control
 my $doPar = 0; #really stupid script, use myPar instead
@@ -131,9 +134,9 @@ if (@ARGV > 0){#non-hardcoded paths
 	#$mapF = $1 . "/LOGandSUB/inmap.txt";
 	die "Can;t find mapping file at $mapF!\n" if (!-e $mapF);
 } else { #old tec2 calls
-	$inDir = "/g/scb/bork/hildebra/SNP/GNMass3/GlbMap/$name[$idx]/";
-	$mapF = "/g/bork5/hildebra/data/metaGgutEMBL/MM_at_v5_T2subset.txt";
-	$odir = "/g/bork3/home/hildebra/data/TEC2_related/v5/SNPcalls/$name[$idx]/";
+	$inDir = getProgPaths("legacySNPInput");
+	$mapF = getProgPaths("legacyTECMap");
+	$odir = getProgPaths("legacySNPOutput");
 
 }
 die "doQsub is invalid without myPar\n" if ($doQsub && !$myPar);
@@ -316,7 +319,7 @@ foreach my $LOC (@LOCs){
 			if ($DoConvert2fasta){#consensus
 				my $mergF = "$odir/$name[$idx].cons.vcf";
 				system "$consCntupVCFscr $refFA ".join (" ",@consFastas) . " > $mergF";
-				system "cat $mergF | /g/bork3/home/hildebra/bin/vcflib/bin/./vcfstreamsort -a | /g/bork3/home/hildebra/bin/vcflib/bin/./vcfuniq > $mergF.1\n";
+				system "cat $mergF | $vcfStrSrt -a | $vcfUniq > $mergF.1\n";
 				system "rm $mergF;mv $mergF.1 $mergF";
 				system "\nbgzip -f $mergF; tabix -f -p vcf $mergF.gz;\n";
 				$mergF.=".gz";
@@ -507,7 +510,7 @@ sub lowfreqSNP(){
 				my ($dep,$qcmd) = qsubSystem($qsubDir."lofreq$cnt.$dcnt.sh",$cmd,1,"10G","${ID}LF$cnt.$dcnt","","",1,[],$QSBoptHR);push(@ddps,$dep);
 				$dcnt++;
 			}
-			$postcmd = "cat $tmpOut.* | /g/bork3/x86_64/bin/python /g/bork3/home/hildebra/bin/vcflib/bin/vcffirstheader | /g/bork3/home/hildebra/bin/vcflib/bin/./vcfstreamsort -a | /g/bork3/home/hildebra/bin/vcflib/bin/./vcfuniq > $outF\n";
+			$postcmd = "cat $tmpOut.* | $vcf1stHd | $vcfStrSrt -a | $vcfUniq > $outF\n";
 			$postcmd .= "rm $tmpOut.*\n";
 			$postcmd .= "bgzip $outF; tabix -p vcf $outF.gz\n";
 			my ($dep,$qcmd) = qsubSystem($qsubDir."lofreq$cnt.post.sh",$postcmd,1,"10G","${ID}LF$cnt",join(";",@ddps),"",1,[],$QSBoptHR);
@@ -646,8 +649,8 @@ sub createConsensus($ $ $ $ $ $ $){
 	my $postcmd ="";
 
 	if ($myParL && $overwrite ){
-		my $vcf1stHd = "/g/bork3/x86_64/bin/python /g/bork3/home/hildebra/bin/vcflib/bin/vcffirstheader";
-		my $vcfStrSrt = "/g/bork3/home/hildebra/bin/vcflib/bin/./vcfstreamsort";
+		my $vcf1stHd = getProgPaths("vcffirstheader");
+		my $vcfStrSrt = getProgPaths("vcfstreamsort");
 		$postcmd .= "cat $tmpOut.* | $vcf1stHd | $vcfStrSrt -a > $oVcfCons\n";
 		$postcmd .= "bgzip $oVcfCons; tabix -p vcf $oVcfCons.gz\n";
 		$postcmd .= "zcat $oVcfCons.gz | $vcfcnsScr  >$ofasCons 2> $ofasCons.depStat\n\n";
@@ -741,7 +744,7 @@ sub freebayes_multi(){ #freebayes in multicore mode
 
 	my $postcmd ="";
 	if ($myPar){
-		$postcmd .= "cat $tmpOut.* | /g/bork3/x86_64/bin/python /g/bork3/home/hildebra/bin/vcflib/bin/vcffirstheader | /g/bork3/home/hildebra/bin/vcflib/bin/./vcfstreamsort -a | /g/bork3/home/hildebra/bin/vcflib/bin/./vcfuniq > $tmpOut\n\n";
+		$postcmd .= "cat $tmpOut.* | $vcf1stHd | $vcfStrSrt -a | $vcfUniq > $tmpOut\n\n";
 		$postcmd .= "rm $tmpOut.*\n"
 	}
 	my $postFilter = "| $vcfFilBin -f \"QUAL > 20 & QUAL / AO > 2 & SAF > 1 & SAR > 1 & RPR > 1 & RPL > 1 ";

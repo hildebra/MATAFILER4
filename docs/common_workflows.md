@@ -97,7 +97,7 @@ This mode is useful for highly complex communities where assembly is not expecte
 ```bash
 MAP=/path/to/dir/mapping_file.map
 
-perl "$MF4DIR/MATAF4.pl"   -map "$MAP"   -inputFQregex1 '.*_1\.f[^\.]*q\.gz$'   -inputFQregex2 '.*_2\.f[^\.]*q\.gz$'   -mergeReads 0   -profileFunct 1   -reParseFunct 0   -reProfileFunct 0   -diamondDBs KGM,NOG,CZy   -diamondCores 8   -maxConcurrentJobs 300   -profileRibosome 1   -reProfileRibosome 0   -profileMOTU2 0   -profileMetaphlan 1   -filterHostRds 0   -inputReadLength 150   -assembleMG 0   -submit 1   -from 0 -to 40
+perl "$MF4DIR/MATAF4.pl"   -map "$MAP"   -inputFQregex1 '.*_1\.f[^\.]*q\.gz$'   -inputFQregex2 '.*_2\.f[^\.]*q\.gz$'   -mergeReads 0   -profileFunct 1   -reParseFunct 0   -reProfileFunct 0   -DiaDBs KGM,NOG,CZy   -DiaCores 8   -maxConcurrentJobs 300   -profileRibosome 1   -reProfileRibosome 0   -profileMOTU2 0   -profileMetaphlan 1   -filterHostRds 0   -inputReadLength 150   -assembleMG 0   -submit 1   -from 0 -to 40
 ```
 
 Expected outputs are primarily in run-level profiling folders such as `pseudoGC/`, plus summary files such as `metagStats.txt` and `metagStatsReport.html`.

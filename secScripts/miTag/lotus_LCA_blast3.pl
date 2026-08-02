@@ -428,8 +428,8 @@ sub runBlastLCA{
 			die "using blast is deprecated and no longer supported!\n";
 			$taxblastf.=".blast"; $simName="blast";
 			print "Running Blast\n";
-			my $mkBldbBin = "/g/bork5/hildebra/dev/lotus//bin//ncbi-blast-2.2.29+/bin/makeblastdb";
-			my $blastBin = "/g/bork5/hildebra/dev/lotus//bin//ncbi-blast-2.2.29+/bin/blastn";
+			my $mkBldbBin = getProgPaths("makeblastdb");
+			my $blastBin = getProgPaths("blastn");
 			my $cmd = "$mkBldbBin -in $DB -dbtype 'nucl'\n";
 			unless (-f $DB.".nhr"){	systemW($cmd);}
 			my $strand = "both";

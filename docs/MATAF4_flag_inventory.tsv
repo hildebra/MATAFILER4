@@ -121,15 +121,16 @@ functional profiling (diamond)	profileFunct	integer	0	stable	$MFopt{DoDiamond}	A
 functional profiling (diamond)	reParseFunct	integer	0	stable	$MFopt{redoDiamondParse}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 functional profiling (diamond)	reProfileFunct	integer	0	stable	$MFopt{rewriteDiamond}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 functional profiling (diamond)	reProfileFuncTogether	integer	0	stable	$MFopt{rewriteAllIfAnyDiamond}	if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
-functional profiling (diamond)	diamondCores	integer	12	stable	$MFopt{diaCores}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-functional profiling (diamond)	diamondMem	integer	7	stable	$MFopt{diamondMem}	memory in GB for diamond alignment jobs
+functional profiling (diamond)	DiaCores	integer	12	stable	$MFopt{diaCores}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+functional profiling (diamond)	DiaMem	integer	7	stable	$MFopt{diamondMem}	memory in GB for diamond alignment jobs
 functional profiling (diamond)	DiaParseEvals	string	"""1e-7"""	stable	$MFopt{diaEVal}	evalues at which to accept hits to func database
 functional profiling (diamond)	DiaSensitiveMode	integer	0	stable	$MFopt{diaRunSensitive}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+functional profiling (diamond)	DiaFrameshift	integer	0	stable	$MFopt{diaFrameshift}	DIAMOND frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment.
 functional profiling (diamond)	rmRawDiamondHits	integer	0	stable	$MFopt{DiaRmRawHits}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 functional profiling (diamond)	DiaMinAlignLen	integer	20	stable	$MFopt{DiaMinAlignLen}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 functional profiling (diamond)	DiaMinFracQueryCov	float	0.1	stable	$MFopt{DiaMinFracQueryCov}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 functional profiling (diamond)	DiaPercID	integer	40	stable	$MFopt{DiaPercID}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-functional profiling (diamond)	diamondDBs	string	""""""	stable	$MFopt{reqDiaDB}	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
+functional profiling (diamond)	DiaDBs	string	""""""	stable	$MFopt{reqDiaDB}	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 functional profiling (Jaime tree)	orthoExtract	integer	0	stable	$MFopt{calcOrthoPlacement}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 ribo profiling (miTag)	profileRibosome	integer	0	stable	$MFopt{DoRibofind}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
 ribo profiling (miTag)	riobsomalAssembly	integer	0	stable	$MFopt{doRiboAssembl}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.

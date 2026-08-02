@@ -121,15 +121,16 @@ MATAF4.pl	4.04	Functional profiling (diamond)	-profileFunct	integer	MFopt		stabl
 MATAF4.pl	4.04	Functional profiling (diamond)	-reParseFunct	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Functional profiling (diamond)	-reProfileFunct	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Functional profiling (diamond)	-reProfileFuncTogether	integer	MFopt		stable	if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
-MATAF4.pl	4.04	Functional profiling (diamond)	-diamondCores	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
-MATAF4.pl	4.04	Functional profiling (diamond)	-diamondMem	integer	MFopt		stable	memory in GB for diamond alignment jobs
+MATAF4.pl	4.04	Functional profiling (diamond)	-DiaCores	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-DiaMem	integer	MFopt		stable	memory in GB for diamond alignment jobs
 MATAF4.pl	4.04	Functional profiling (diamond)	-DiaParseEvals	string	MFopt		stable	evalues at which to accept hits to func database
 MATAF4.pl	4.04	Functional profiling (diamond)	-DiaSensitiveMode	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
+MATAF4.pl	4.04	Functional profiling (diamond)	-DiaFrameshift	integer	MFopt		stable	DIAMOND frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment.
 MATAF4.pl	4.04	Functional profiling (diamond)	-rmRawDiamondHits	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Functional profiling (diamond)	-DiaMinAlignLen	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Functional profiling (diamond)	-DiaMinFracQueryCov	float	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Functional profiling (diamond)	-DiaPercID	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
-MATAF4.pl	4.04	Functional profiling (diamond)	-diamondDBs	string	MFopt		stable	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
+MATAF4.pl	4.04	Functional profiling (diamond)	-DiaDBs	string	MFopt		stable	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 MATAF4.pl	4.04	Functional profiling (Jaime tree)	-orthoExtract	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Ribo profiling (miTag)	-profileRibosome	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.
 MATAF4.pl	4.04	Ribo profiling (miTag)	-riobsomalAssembly	integer	MFopt		stable	Accepted by MATAF4.pl; see source/help output for detailed behaviour.

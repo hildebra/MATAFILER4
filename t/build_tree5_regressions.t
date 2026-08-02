@@ -162,11 +162,12 @@ like($source,
 like($source, qr/for my \$disM \(\@subfls\)/, 'all discovered distance matrices are merged');
 like($source, qr/\$ffd\{\$k\} = 4/, 'fourfold degeneracy is classified by codon family');
 
-for my $environment_name (qw(
-	MF4_GUBBINS_BIN MF4_CLONALFRAMEML_BIN MF4_FASTGEAR_BIN
-	MF4_FASTGEAR_MATLAB_BIN MF4_FASTGEAR_PARAM_FILE
+for my $config_key (qw(
+	gubbins clonalframeml fastgear fastgearSummary fastgearReorder
+	fastgearMatlab fastgearParam
 )) {
-	like($source, qr/\Q$environment_name\E/, "$environment_name documents dormant-tool reactivation");
+	like($source, qr/requireConfiguredTool\("\Q$config_key\E"/,
+		"$config_key documents config-backed dormant-tool reactivation");
 }
 
 done_testing();

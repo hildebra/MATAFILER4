@@ -210,7 +210,7 @@ if (0){
 				print O2 ">$c.$x\n$FNAfmg{$x}\n";
 			}
 			close O2;
-			my $avgID = calcDisPos2("$sdir/$mg.$c.fna","",1,10,"/tmp/hildebra/test/");
+			my $avgID = calcDisPos2("$sdir/$mg.$c.fna","",1,10,$sdir);
 			$avgIDs[$j] = $avgID;
 			unlink("$sdir/$mg.$c.fna");
 		}

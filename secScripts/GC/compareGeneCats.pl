@@ -13,14 +13,11 @@ my $smtBin = getProgPaths("samtools");#"/g/bork5/hildebra/bin/samtools-1.2/samto
 
 my $selfSearch=2;#set to -1 to deactivate
 
-my $DB = "/g/bork3/home/hildebra/data/SNP/GCs/SoilCatv2b1/compl.incompl.95.fna";
-$DB = "/g/bork3/home/hildebra/DB/GeneCats/Soil/soil.catalog.95nr.fna";
-$DB = "/scratch/bork/hildebra/geneCat/soil.catalog.95nr.fna";
-my @fnaRefs = ("/g/bork3/home/hildebra/DB/freeze11/freeze11.genes.representatives.fa","/g/bork3/home/hildebra/DB/GeneCats/Tara/Tara.fna","/g/bork3/home/hildebra/DB/GeneCats/IGC/1000RefGeneCat.fna","/scratch/bork/hildebra/geneCat/soil.catalog.95nr.fna");
+my $DB = getProgPaths("legacyCompareGeneCatsDB");
+my @fnaRefs = map { getProgPaths($_) } qw(legacyFrz11FNA legacyTaraFNA legacyIGCFNA legacySoilFNA);
 my @fnRNms = ("frz11","tara","gut1000","soil");
-my $odir = "/g/bork3/home/hildebra/DB/GeneCats/Soil/cmp2otherGC/";
-my $tmpDir = "/local/hildebra/cmpGC/";
-$tmpDir = "\$TMPDIR/hildebra/cmpGC/";
+my $odir = getProgPaths("legacyCompareGeneCatsOutput");
+my $tmpDir = getProgPaths("legacyCompareGeneCatsTmp");
 my @tdirs = ("9305","9350","20250","20205");
 my $DBn = "Soil";
 if ($selfSearch>=0){

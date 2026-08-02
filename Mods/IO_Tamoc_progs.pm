@@ -4,10 +4,11 @@ use Cwd 'abs_path';
 use strict;
 use Mods::ReadLibrary qw(legacyLibraryArrays);
 
-use vars qw($CONFIG_FILE @CONFIG_TEXT %CONFIG_HASH);
+use vars qw($CONFIG_FILE @CONFIG_TEXT %CONFIG_HASH $CONFIG_LOADED);
 $CONFIG_FILE="";
 @CONFIG_TEXT = ();
 %CONFIG_HASH = ();
+$CONFIG_LOADED = 0;
 sub setConfigFile;
 
 #TAMOC programs related to IO to other programs, program paths .. not real subroutines that do anything
@@ -89,80 +90,100 @@ sub convert2Gb($){
 	return $tmpSpace;
 }
 
+sub _bundledConfigFile{
+	my ($fileName) = @_;
+	my $modDir = $INC{"Mods/IO_Tamoc_progs.pm"} || __FILE__;
+	$modDir =~ s{IO_Tamoc_progs\.pm$}{};
+	return $modDir.$fileName;
+}
+
 sub setConfigFile{
 	my @var = @_;
 	my $customCfg = 0;
+	my $newConfig;
 	if (@var == 1 && $var[0] eq "internal"){
-		my $modDir = $INC{"Mods/IO_Tamoc_progs.pm"};
-		$modDir =~ s/IO_Tamoc_progs.pm//;
-		$CONFIG_FILE = "$modDir/../Mods/config_internal.txt";
+		$newConfig = _bundledConfigFile("config_internal.txt");
 	} elsif (@var == 1 && $var[0] eq "DBconfig"){
-		my $modDir = $INC{"Mods/IO_Tamoc_progs.pm"};
-		$modDir =~ s/IO_Tamoc_progs.pm//;
-		$CONFIG_FILE = "$modDir/../Mods/config_DBs.txt";
+		$newConfig = _bundledConfigFile("config_DBs.txt");
 	} elsif (@var == 1 && $var[0] ne ""){
-		$CONFIG_FILE = $var[0];
+		$newConfig = $var[0];
 		$customCfg = 1;
 	} else {#default value
-		my $modDir = $INC{"Mods/IO_Tamoc_progs.pm"};
-		$modDir =~ s/IO_Tamoc_progs.pm//;
-		$CONFIG_FILE = "$modDir/MATAFILERcfg.txt";
+		$newConfig = _bundledConfigFile("MATAFILERcfg.txt");
 	}
+	$CONFIG_FILE = $newConfig;
 	die "Can't find MATAFILER config file: $CONFIG_FILE\nConsider changing path to config file via \"-config\" argument.\n Aborting..\n" unless (-e $CONFIG_FILE);
+	# An explicit selection starts a fresh configuration generation. This matters
+	# to test harnesses and long-lived callers that select another site config
+	# after an earlier lookup.
+	@CONFIG_TEXT = ();
+	%CONFIG_HASH = ();
+	$CONFIG_LOADED = 0;
 	print "Using config file : $CONFIG_FILE\n" if ($customCfg);
 }
 
 sub truePath{
-	my ($TMCpath) = $_[0];
-	my $enforce=0; $enforce = $_[1] if (@_ > 1);
-	
-	if ($enforce){
-		if ($TMCpath =~ m/\$([^\$^\/^\\]+)/){
-			my $envName = $1;
-			die "Environment variable \$$envName used in path '$TMCpath' is not set\n"
-				unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
-			my $envVar = $ENV{$envName};
-			$TMCpath =~ s/\$([^\$^\/^\\]+)/$envVar/;
-		}
-		#die "$TMCpath\n";
-	}
-	
-	if ($TMCpath =~ m/^\$/){
-		$TMCpath =~ s/^\$//; 
-		my ($envName, $suffix) = $TMCpath =~ m{^([^/\\]+)(.*)$};
-		die "Environment variable \$$envName used in path '\$$TMCpath' is not set\n"
-			unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
-		$TMCpath = $ENV{$envName} . $suffix;
-	}
-	return $TMCpath;
+	my ($TMCpath, $enforce) = @_;
+	$enforce = 0 unless defined $enforce;
+	return $TMCpath unless ($enforce || $TMCpath =~ /^\$/);
 
+	# Expand every $NAME or ${NAME} occurrence. Historically only the first
+	# occurrence was expanded and braced names were interpreted incorrectly.
+	$TMCpath =~ s{
+		\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))
+	}{
+		my $envName = defined($1) ? $1 : $2;
+		die "Environment variable \$$envName used in path '$TMCpath' is not set\n"
+			unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
+		$ENV{$envName};
+	}gex;
+	return $TMCpath;
 }
 
 sub loadConfigs{
 	#loads once in every program run the entire config file(s) into hash %CONFIG_HASH
-	if (scalar @CONFIG_TEXT == 0){
-		setConfigFile() if ($CONFIG_FILE eq "");
-		print "READING config files \"$CONFIG_FILE\" .. ";
-		if ($CONFIG_FILE eq "" ){die "IO_Tamoc_progs.pm::loadConfigs: CONFIG_FILE not set!\n";}
-		open I,"<$CONFIG_FILE" or die "Can't open $CONFIG_FILE\n";
-		chomp(@CONFIG_TEXT = <I>);
-		close I;
-		setConfigFile("internal") ;
-		if ($CONFIG_FILE eq "" ){die "IO_Tamoc_progs.pm::loadConfigs: CONFIG_FILE internal not set!\n";}
-		open I,"<$CONFIG_FILE" or die "Can't open internal $CONFIG_FILE\n";
-		my @INTtmp;
-		chomp(@INTtmp = <I>);
-		close I;
-		push(@CONFIG_TEXT,@INTtmp);
-		#DB config read..
-		setConfigFile("DBconfig") ;
-		if ($CONFIG_FILE eq "" ){die "IO_Tamoc_progs.pm::loadConfigs: CONFIG_FILE DB not set!\n";}
-		open I,"<$CONFIG_FILE" or die "Can't open DBconfig $CONFIG_FILE\n";
-		@INTtmp=();
-		chomp(@INTtmp = <I>);
-		close I;
-		push(@CONFIG_TEXT,@INTtmp);
+	return if $CONFIG_LOADED;
+	setConfigFile() if ($CONFIG_FILE eq "");
+	my $selectedConfig = $CONFIG_FILE;
+	print "READING config files \"$selectedConfig\" .. ";
+	@CONFIG_TEXT = ();
+	%CONFIG_HASH = ();
+	my @configFiles = (
+		[$selectedConfig, "selected"],
+		[_bundledConfigFile("config_internal.txt"), "internal"],
+		[_bundledConfigFile("config_DBs.txt"), "database"],
+	);
+	my %seenConfig;
+	for my $configSpec (@configFiles){
+		my ($configPath, $configKind) = @{$configSpec};
+		next if $seenConfig{$configPath}++;
+		open my $configFH, "<", $configPath
+			or die "Can\x27t open $configKind config $configPath: $!\n";
+		my @configLines = <$configFH>;
+		close $configFH or die "Can\x27t close $configKind config $configPath: $!\n";
+		chomp @configLines;
+		s/\r$// for @configLines;
+		push @CONFIG_TEXT, @configLines;
 	}
+	# Resolve foundational keys before ordinary entries. Source order is retained
+	# within each key, so selected-user values still precede bundled defaults,
+	# while placeholder expansion no longer depends on line order.
+	my @foundationOrder = qw(MFLRDir BINDir DBDir MGSTKDir SINGcmd CONDcmd CONDA CONDAbaseEnv PY3cmd Rscript Rpath);
+	my %foundationRank;
+	@foundationRank{@foundationOrder} = (0 .. $#foundationOrder);
+	my @foundationLines = map { [] } @foundationOrder;
+	my @ordinaryLines;
+	for my $line (@CONFIG_TEXT){
+		my ($key) = $line =~ /^([^\t]+)/;
+		if (defined($key) && exists($foundationRank{$key})){
+			push @{$foundationLines[$foundationRank{$key}]}, $line;
+		} else {
+			push @ordinaryLines, $line;
+		}
+	}
+	# Stable buckets keep this initialization linear in the number of config
+	# lines. It is paid once; subsequent getProgPaths calls are hash lookups.
+	@CONFIG_TEXT = ((map { @{$_} } @foundationLines), @ordinaryLines);
 	#my $condaA = getProgPaths("CONDA");
 	#die "@CONFIG_TEXT\n";
 	print "converting config files.. ";
@@ -180,7 +201,7 @@ sub loadConfigs{
 		} elsif (!$RpathSet && $l =~ m/^Rpath\t([^#]+)/){
 			my $prePath = $1;
 			if (!$Tset){die"Problem in configs: MFLRDir needs to be set before Rpath\n";}
-			$prePath =~s/\[MFLRDir\]/$TMCpath/;
+			$prePath =~s/\[MFLRDir\]/$TMCpath/g;
 			$Rpath= truePath($prePath);
 			$RpathSet=1;
 			#die "\n\n$prePath\n$Rpath\n";
@@ -224,23 +245,26 @@ sub loadConfigs{
 			#print "$l\n";
 			my @spl = split (/\t/,$l);
 			$XVar = $spl[0];
-			if (@spl == 1) {$CONFIG_HASH{$XVar} = "";next;}
+			if (@spl == 1) {
+				$CONFIG_HASH{$XVar} = "" unless exists($CONFIG_HASH{$XVar});
+				next;
+			}
 			
 			if ($l !~ m/^$XVar\t([^#^\t]+)/){next;}
 			my $reV = $1;
 			
 			#die "$reV  $XVar  $l\n";
 			die "$reV\n" if (!defined($reV));
-			$reV =~ s/\[MFLRDir\]/$TMCpath/ if ($Tset);
+			$reV =~ s/\[MFLRDir\]/$TMCpath/g if ($Tset);
 			if ($MGSTKDirset){
-				$reV =~ s/\[MGSTKDir\]/$MGSTKDir/ ;
+				$reV =~ s/\[MGSTKDir\]/$MGSTKDir/g;
 			}
-			$reV =~ s/\[BINDir\]/$BINpath/ if ($Bset);
-			$reV =~ s/\[DBDir\]/$DBpath/ if ($DBset);
-			$reV =~ s/\[SINGcmd\]/$SINGcmd/ if ($SINGset);
-			$reV =~ s/\[PY3\]/$PY3cmd/ if ($PY3set);
-			$reV =~ s/\[Rscript\]/$Rscriptcmd/ if ($Rscriptset);
-			$reV =~ s/\[Rpath\]/$Rpath/ if ($RpathSet);
+			$reV =~ s/\[BINDir\]/$BINpath/g if ($Bset);
+			$reV =~ s/\[DBDir\]/$DBpath/g if ($DBset);
+			$reV =~ s/\[SINGcmd\]/$SINGcmd/g if ($SINGset);
+			$reV =~ s/\[PY3\]/$PY3cmd/g if ($PY3set);
+			$reV =~ s/\[Rscript\]/$Rscriptcmd/g if ($Rscriptset);
+			$reV =~ s/\[Rpath\]/$Rpath/g if ($RpathSet);
 			if ($l =~ m/env:([^#^\t]+)/){
 				my $tarEnv = $1;
 				#$reV = "$CONDA;$CONDcmd activate $1\n$reV";
@@ -248,7 +272,10 @@ sub loadConfigs{
 			}
 			
 			#return $reV;
-			$CONFIG_HASH{$XVar} = $reV;
+			# Configuration sources are loaded from most to least specific:
+			# the selected user config, internal defaults, then database defaults.
+			# Preserve the first definition so a user can override shipped values.
+			$CONFIG_HASH{$XVar} = $reV unless exists($CONFIG_HASH{$XVar});
 		}
 	}
 	#some check about basic params being set..
@@ -265,6 +292,7 @@ sub loadConfigs{
 	$CONFIG_HASH{"Rscript"} = $Rscriptcmd;
 	$CONFIG_HASH{"Rpath"} = $Rpath;
 	$CONFIG_HASH{"MGSTKDir"} = $MGSTKDir;
+	$CONFIG_LOADED = 1;
 	print "  Done. ";
 }
 
@@ -281,21 +309,20 @@ sub getProgPaths{
 		#print "ARRAY\n";
 		@multVars = @{$srchVar};
 	}
-	if (scalar(keys %CONFIG_HASH) == 0){
-		#read in config hash _once_
-		loadConfigs();
-	}
-	if (scalar(keys %CONFIG_HASH) == 0){
-		die "Something went wrong loading MATAFILER configs.. aborting\n";
-	}
+	# Parsing and placeholder expansion are paid once per selected config. The
+	# many pipeline lookups after this point are ordinary hash reads.
+	loadConfigs() unless $CONFIG_LOADED;
+	die "Something went wrong loading MATAFILER configs.. aborting\n" unless $CONFIG_LOADED;
 	
 	
 	if (@multVars > 0){
-		my @retA;
-		for (my$i=0;$i<scalar(@multVars);$i++){if (exists($CONFIG_HASH{$multVars[$i]})) { $retA[$i] = $CONFIG_HASH{$multVars[$i]};}} 
+		my @missing = grep { !exists($CONFIG_HASH{$_}) || ($required != 0 && $CONFIG_HASH{$_} eq "") } @multVars;
+		die "Can't find configuration for ".join(", ", @missing)." in MATAFILER config ($CONFIG_FILE)\n"
+			if $required != 0 && @missing;
+		my @retA = map { exists($CONFIG_HASH{$_}) ? $CONFIG_HASH{$_} : "" } @multVars;
 		return \@retA;
 	}
-	if (exists($CONFIG_HASH{$srchVar})){
+	if (exists($CONFIG_HASH{$srchVar}) && ($required == 0 || $CONFIG_HASH{$srchVar} ne "")){
 		return $CONFIG_HASH{$srchVar};
 	} else {
 		die "Can't find configuration for $srchVar in MATAFILER config ($CONFIG_FILE)\n" if ($required != 0);

@@ -105,9 +105,9 @@ sub MSA{
 		$cmd = "$mafftBin --thread $ncore --quiet $tmpInMSA > $tmpOutMSA2;";
 	} elsif ($clustalUse == 3) {
 		die "guidance: rework phyloTools.pm\n";
-		my $guid2Path = "/g/bork3/home/hildebra/bin/guidance.v2.02/";
+		my $guid2Path = getProgPaths("guidance2");
 		#guidance has some strange results..
-		$cmd = " $guid2Path/www/Guidance/guidance.pl --seqFile $tmpInMSA --msaProgram MAFFT --seqType aa ;";
+		$cmd = " $guid2Path --seqFile $tmpInMSA --msaProgram MAFFT --seqType aa ;";
 		#$cmd .= " --dataset $spl2[1].$cnt --mafft $mafftBin --outDir $tmpD --proc_num $ncore\n";
 	} elsif ($clustalUse == 4) {
 		#my $nseqs = 0;
@@ -136,7 +136,7 @@ sub filterMSA{ #pretty useless atm.. not really used
 	my $cmd = "";
 	if ($postFilter eq "macse"){ #gives strange results..
 		#-out_NT output_NT.fasta -out_AA output_AA.fasta
-		my $macseBin = "java -jar /g/bork3/home/hildebra/bin/macse_v2.03.jar";
+		my $macseBin = getProgPaths("macse");
 		my $outTag = "-out_AA"; $outTag = "-out_NT" if ($useAA4tree);
 		$cmd = "$macseBin -prog refineAlignment -align $tmpOutMSA2 $outTag $tmpOutMSA2.2;";
 	} elsif ($postFilter eq "zorro"){

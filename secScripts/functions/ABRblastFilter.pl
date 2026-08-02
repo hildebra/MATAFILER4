@@ -1,11 +1,12 @@
 #use strict;
 #use warnings;
 use Mods::TamocFunc qw(sortgzblast);
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 
 
-$ardbfile = "/g/bork1/forslund/tara_resistome/ardb.tabs.parsed";
-$mapfile = "/g/bork1/forslund/tara_resistome/ardb_and_reforg_mapping";
-$besthitfile = "/g/bork1/forslund/tara_resistome/ardb_vs_reforg9f.overlap90shortest_famthres_or_symbol.sorted.besthit";
+$ardbfile = getProgPaths("ABRlegacyArdb_DB");
+$mapfile = getProgPaths("ABRlegacyMap_DB");
+$besthitfile = getProgPaths("ABRlegacyBestHit_DB");
 $outputfile = $ARGV [1]; # "/g/bork1/forslund/tara_resistome/test.gz";
 $outputfilecats = $ARGV [2]; # "/g/bork1/forslund/tara_resistome/testCats.gz";
 $inputfile = $ARGV [0]; # "/g/scb/bork/hildebra/Tamoc/FinSoil/Sample_AV110_4/diamond/dia.ABR.blast.gz";

@@ -49,7 +49,7 @@ Example:
 set -e
 ulimit -c 0;
 MAP=/path/to/your/mapping/file/FILE.map
-perl $MF4DIR/MATAF4.pl -map $MAP-assembleMG 2 -spadesCores 12 -spadesKmers "25,43,67,87,111,131" -spadesMemory 100 -mapReadsOntoAssembly 1 -kmerPerGene 0 -filterHostRds 1  -filterHostKrak2DB /hpc-home//data/DB/kraken2/hsap/ -mappingMem 5 -profileMOTU2 0  -profileMetaphlan3 1 -Binner 2  -maxConcurrentJobs 600 \
+perl $MF4DIR/MATAF4.pl -map $MAP-assembleMG 2 -spadesCores 12 -spadesKmers "25,43,67,87,111,131" -spadesMemory 100 -mapReadsOntoAssembly 1 -kmerPerGene 0 -filterHostRds 1  -filterHostKrak2DB $HOST_KRAKEN_DB -mappingMem 5 -profileMOTU2 0  -profileMetaphlan3 1 -Binner 2  -maxConcurrentJobs 600 \
 -from 0 -to 1 -submit 1 -getAssemblConsSNP 0
 ```
 
@@ -109,7 +109,7 @@ MATAFILER4 is conceptualized to detect automatically if certain steps need to be
 ```{sh}
 #!/bin/bash
 #SBATCH -N 1 --cpus-per-task=1
-#SBATCH -o /ei/projects/data/results/GeneCat_pre.sh.otxt -e /ei/projects/data/results/GeneCat_pre.sh.etxt
+#SBATCH -o GeneCat_pre.sh.otxt -e GeneCat_pre.sh.etxt
 #SBATCH --export=ALL --mem=81920 -J myFirstGeCat
 #SBATCH -p "ei-medium,qib-medium,ei-long,qib-long"
 set -e
@@ -117,8 +117,8 @@ ulimit -c 0;
 
 #creates gene catalog in the specified outdir with specified cores, attempting to reuse existing dirs (in case catalog creation failed):
 perl $MF4DIR/secScripts/geneCat.pl \
-		-map /ei/projects/data/results/mapping_file.map \
-		-GCd /ei/projects/data/results/genecat \
+		-map $MAP \
+		-GCd $GENECAT_DIR \
 		-mem 200 -cores 24 -clusterID 95 -doStrains 0 -continue 1 \
 		-Binner 2 -useCheckM1 0 -useCheckM2 1 -MGset GTDB 
 ```
@@ -153,8 +153,8 @@ This mode is especially helpful if your metagenome is from a highly complex (e.g
 #!/bin/bash
 #SBATCH -N 1
 #SBATCH --cpus-per-task=1
-#SBATCH -o /hpc-home/project/run_independent.mfc.otxt
-#SBATCH -e /hpc-home/project/run_independent.mfc.etxt
+#SBATCH -o run_independent.mfc.otxt
+#SBATCH -e run_independent.mfc.etxt
 #SBATCH --mem=102400
 #SBATCH --export=ALL
 #SBATCH -p "ei-medium,ei-long,qib-medium"
@@ -205,7 +205,7 @@ E.g. the map could now look like:
 #SmplID	SmplPrefix	SupportReads	INFO	SeqTech	Path	AssmblGrps	sampleID	Individual	TimePoint
 #RunID	PB.PAGE2								
 #WARNING	OFF
-#OutPath	/hpc-home/hildebra/grp/data/projects/								
+#OutPath	/path/to/project/results/
 #DirPath	/ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/cloudpool/data/raw/Public/PRJNA529586/
 S4zm	SRR8797713	PB:/path/tp/PB//test.hifi_reads.bc1011_tmp.bam		hiSeq				S4zm_R1177-S0001	0
 S4qia	SRR8797712	PB:/path/tp/PB//test.hifi_reads.bc1012_tmp.bam,/path/tp/PB//test.hifi_reads.bc1011_tmp.bam		hiSeq				S4zm_R1177-S0001	0

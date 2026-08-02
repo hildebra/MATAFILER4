@@ -750,7 +750,9 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	} else {
 		$LSF = 1;$qbin="bsub";
 		print O "#!/bin/bash\n";
-		print O "export LD_LIBRARY_PATH=/g/bork3/home/hildebra/env/env/miniconda/lib/:/g/bork3/home/hildebra/env/zlib-1.2.8/:/g/bork8/costea/boost_1_53_0/:/shared/ibm/platform_lsf/9.1/linux2.6-glibc2.3-x86_64/lib:/g/bork3/x86_64/lib64:/g/bork3/x86_64/lib:\${LD_LIBRARY_PATH}\n\n";
+		my $lsfLibraryPath = getProgPaths("lsfLDLibraryPath", 0);
+		print O "export LD_LIBRARY_PATH=$lsfLibraryPath:\${LD_LIBRARY_PATH}\n\n"
+			if $lsfLibraryPath ne "";
 		#print O "export LD_LIBRARY_PATH=/g/bork3/home/hildebra/env/zlib-1.2.8:/g/bork3/x86_64/lib64:/lib:/lib64:/usr/lib64:\${LD_LIBRARY_PATH}\n\n";#:/g/software/linux/pack/python-2.7/lib/\nexport PATH=/g/bork3/home/zeller/py-virtualenvs/py2.7_bio1/bin/:\${PATH}\n\n";
 		##BSUB -n $ncores\n#BSUB -o $tmpsh.otxt\n#BSUB -e $tmpsh.etxt\n#BSUB -M $mem\n#\$ -v LD_LIBRARY_PATH=/g/bork3/x86_64/lib64:/lib:/lib64:/usr/lib64\n#\$ -v TMPDIR=/dev/shm\n#BSUB -q medium_priority\n";
 		my @restrHosts = @{$restrHostsAR};

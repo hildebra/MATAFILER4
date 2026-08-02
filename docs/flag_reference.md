@@ -9,7 +9,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 
 | Script | Version in uploaded source | Role |
 |---|---:|---|
-| `MATAF4.pl` | `4.11` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
+| `MATAF4.pl` | `4.26` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
 | `buildTree5.pl` | `5.23` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
@@ -233,15 +233,16 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-reParseFunct` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-reProfileFunct` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-reProfileFuncTogether` | integer | `0` | stable | if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..) |
-| `-diamondCores` | integer | `12` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-diamondMem` | integer | `7` | stable | memory in GB for diamond alignment jobs |
+| `-DiaCores` | integer | `12` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-DiaMem` | integer | `7` | stable | memory in GB for diamond alignment jobs |
 | `-DiaParseEvals` | string | `"1e-7"` | stable | evalues at which to accept hits to func database |
 | `-DiaSensitiveMode` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-DiaFrameshift` | integer | `0` | stable | DIAMOND frameshift penalty for long, error-prone reads; `0` disables frameshift-aware alignment. |
 | `-rmRawDiamondHits` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-DiaMinAlignLen` | integer | `20` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-DiaMinFracQueryCov` | float | `0.1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
 | `-DiaPercID` | integer | `40` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-diamondDBs` | string | `""` | stable | NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI |
+| `-DiaDBs` | string | `""` | stable | NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI |
 
 ## Functional profiling (jaime tree)
 

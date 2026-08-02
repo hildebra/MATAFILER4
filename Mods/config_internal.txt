@@ -75,7 +75,7 @@ samcov2bed	perl [MFLRDir]/helpers/samcovToBedGraph.pl
 taxid2tax_scr	python [MFLRDir]/secScripts/phylo/get_ranks.py
 
 #Python scripts
-FSTpy	/g/bork3/home/hildebra/dev/python/FST/scripts/fst_from_fasta.py
+FSTpy	fst_from_fasta.py
 fubarJson_scr	python [MFLRDir]/secScripts/phylo/fubarDNDS.py
 
 
@@ -99,7 +99,7 @@ metPhl2Merge	merge_metaphlan_tables.py	env:MF4checkm2
 kraken2	kraken2
 hostile	hostile
 hostileDB	[MFLRDir]/data/DBs/hostile/
-TaxaTarget	python /hpc-home/hildebra/bin/taxaTarget/run_pipeline_scripts/run_protist_pipeline_fda.py
+TaxaTarget	python run_protist_pipeline_fda.py
 motus2	motus	env:MF4gtdbtk
 #kaijuDir	[BINDir]/kaiju/bin/
 #microCens	python [BINDir]/MicrobeCensus-1.1.0/scripts/run_microbe_census.py
@@ -245,6 +245,127 @@ phyml	phyml	env:MF4phylo
 modeltest	modeltest-ng	env:MF4phylo
 treeshrink	run_treeshrink.py	env:MF4phylo
 
+# Optional and dormant tools. Bare commands are portable defaults; site-specific
+# installations belong in the selected user configuration.
+seecer	bash run_seecer.sh
+ray	Ray
+guidance2	guidance.pl	env:MF4phylo
+macse	macse	env:MF4phylo
+gubbins	run_gubbins.py	env:MF4phylo
+clonalframeml	ClonalFrameML	env:MF4phylo
+hyphy	hyphy	env:MF4phylo
+wattersonTheta_scr	[MFLRDir]/secScripts/phylo/WattetrsonTheta.hyphy
+makeblastdb	makeblastdb
+blastn	blastn
+nucmer	nucmer
+minimus2	minimus2
+toAmos	toAmos
+vcffirstheader	vcffirstheader
+vcfstreamsort	vcfstreamsort
+vcfuniq	vcfuniq
+vt	vt
+lofreq	lofreq
+varscan	VarScan.jar
+lsfLDLibraryPath
+fastgear
+fastgearSummary
+fastgearReorder
+fastgearMatlab
+fastgearParam
+emapperBigg
+emapperBiggTable
+ortho_extract_domains_scr	python extract_domains.py
+
+tabix	tabix
+bgzip	bgzip
+vcffilter	vcffilter
+vcfMerge	vcf-merge
+showCoords	show-coords
+showSnps	show-snps
+showTiling	show-tiling
+eteToolsDir	[BINDir]/ete/ext_apps-latest
+variantEffectPredictorDir
+snpEffJar
+snpEffConfig
+snpEffData
+concatVCF_scr	perl [MFLRDir]/secScripts/SNP/concatVCF.pl
+comDepWin_scr	perl [MFLRDir]/secScripts/SNP/comDepWins.pl
+collectStatsCons_scr	perl [MFLRDir]/secScripts/SNP/collectStatsCons.pl
+fastgearReconstr
+
+# Site-specific paths used only by retained legacy one-off scripts. They are
+# deliberately unset here; configure the relevant key before using a script.
+legacyCombineMarkersMap
+legacyCombineMarkersOutput
+legacyCompareGeneCatsDB
+legacyCompareGeneCatsOutput
+legacyCompareGeneCatsTmp
+legacyExtractTECGC
+legacyExtractTECGenomeDir
+legacyExtractTECMap
+legacyExtractTECOutput
+legacyExtractTECSampleDir
+legacyExtractTECScaffold
+legacyFixGCDir
+legacyFixGCMap
+legacyFuncAnnoOutput
+legacyGeneExtractionInput
+legacyGenesInSampleGC
+legacyGenesInSampleOutput
+legacyGenoCmpInput1
+legacyGenoCmpInput2
+legacyGenoCmpOutput
+legacyLotus16S_DB
+legacyLotusRunsDir
+legacyLotusTaxBlast
+legacyMiniSmplsInput
+legacyMotuFasta
+legacyMotuLinkMap
+legacyMotuMGOutput
+legacyMotuMap
+legacySNPInput
+legacySNPOutput
+legacySNPTmp
+legacySpecIGenomeDir
+legacyTEC2FNA
+legacyTEC2GFF
+legacyTEC3FNA
+legacyTEC4FNA
+legacyTEC6FNA
+legacyTECMap
+legacyTranspeptidaseFAA
+legacyTranspeptidaseOutput
+legacyVCFDegInput
+legacyVEF_fna
+legacyVEF_gbk
+legacyVEF_gff
+legacyVEF_inputVCF
+legacyVEF_outputDir
+legacyVEF_outputVCF
+
+# Additional optional legacy tools. Site-specific paths are intentionally blank.
+MetaDecoder	metadecoder	env:MF4binners
+bam2cns
+blat	blat
+br2dCnt
+d2meta
+fastq2phylip_scr
+gapfiller
+growthP
+kaijuDir
+kraken	kraken
+lambdaIdx	lambda_indexer
+maxBin
+microCens
+nonpareil
+mp3
+msaprobs	msaprobs	env:MF4phylo
+rnammer	rnammer
+seqtk	seqtk
+sinvict
+supertree
+zorro	zorro	env:MF4phylo
+
 #Structural variants
 delly	delly
 gridss	gridss
@@ -264,7 +385,7 @@ megahit	megahit
 nxtrim	nxtrim
 BESST	runBESST
 #gapfiller	perl [BINDir]/GapFiller/GapFiller_n.pl
-cloudspades	/ei/software/cb/cloudspades/3.12.0/x86_64/bin/spades.py  #used for 10X like assemblies
+cloudspades	spades.py  # optional 10X-compatible SPAdes override
 flye	flye  #used for ONT/PacBio assemblies
 #metaMDBG	[MFLRDir]/bin/./metaMDBG	#	env:MF4metaMDBG
 metaMDBG	metaMDBG

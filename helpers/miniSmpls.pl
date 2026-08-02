@@ -7,8 +7,8 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt);
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd inputFmtSpades createGapFillopt  buildMapperIdx);
 sub nucEstDbl;
 my $renameCtgScr = getProgPaths("renameCtg_scr");#"perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/renameCtgs.pl";
-my $nucmerBin = "/g/bork3/home/hildebra/bin/MUMmer3.23/nucmer";
-my $mini2Bin = "/g/bork3/home/hildebra/bin/amos-3.1.0_broken/bin/minimus2";
+my $nucmerBin = getProgPaths("nucmer");
+my $mini2Bin = getProgPaths("minimus2");
 
 
 my $runID = "T3"; #name of files
@@ -20,7 +20,7 @@ if (0){
 	 $runID = "T4";
 }
 my @subsets = split (",",$preSbst);
-my $inP = "/g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/$runID/R_filt/contigs2";
+my $inP = getProgPaths("legacyMiniSmplsInput");
 my $odir = "$inP/mini2/"; #output dir
 my $tdir = "$odir/tmp/"; #temp
 
@@ -41,7 +41,7 @@ foreach my $secFNA (@subsets){
 	 my $curBP=0;
 	$cmd="";
 	$cmd .= "cat $firstFNA $secFNA > $combFNA\n";
-	$cmd .= "/g/bork3/home/hildebra/bin/amos-3.1.0_broken/bin/toAmos -s $combFNA -o $tdir$runID.afg\n";
+	$cmd .= getProgPaths("toAmos")." -s $combFNA -o $tdir$runID.afg\n";
 	my $seqCnt = `grep -c '^>' $firstFNA`; chomp $seqCnt;
 	my $hr = readFasta($firstFNA); my %fna = %{$hr}; foreach (keys %fna){$curBP += length($fna{$_});}
 	push(@iniCtgs,$seqCnt); push (@iniBP,$curBP);

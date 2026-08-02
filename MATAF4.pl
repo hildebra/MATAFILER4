@@ -3348,6 +3348,9 @@ sub detectRibo(){
 	my $numCore = 12;
 	my $numCore2 = 12;
 	my $cLSUSSUscript = getProgPaths("cLSUSSU_scr");#"perl /g/bork3/home/hildebra/dev/Perl/16Stools/catchLSUSSU.pl";
+	my $cLSUSSUconfig = $MFconfig{configFile} ne ""
+		? " -config "._shell_quote($MFconfig{configFile})
+		: "";
 	#my $lambdaIdxBin = getProgPaths("lambdaIdx");
 	my $lambdaBin = getProgPaths("lambda");#"/g/bork3/home/hildebra/dev/lotus//bin//lambda/lambda";
 	
@@ -3477,7 +3480,7 @@ sub detectRibo(){
 	#die "$MFconfig{readsRpairs}\n";
 	my $readConfig = 1;
 	if (@re1 > 0){
-		$cmd .= "\n$cLSUSSUscript -R1 '".join(",",@re1)."' -R2 '". join(",",@re2)."' ";
+		$cmd .= "\n$cLSUSSUscript$cLSUSSUconfig -R1 '".join(",",@re1)."' -R2 '". join(",",@re2)."' ";
 		if (@singl>0){
 			$cmd .= " -RS '".join(",",@singl) . "' "; #tmpP < scratch too slow
 		} else {
@@ -3486,7 +3489,7 @@ sub detectRibo(){
 		$cmd .= "-tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n";#"$tmpDY $outP $numCore $SMPN $MFopt{doRiboAssembl} $DBrna\n\n";
 	} else {
 		$readConfig = 0; 
-		$cmd .= "\n$cLSUSSUscript -R1 '-1' -R2 '-1' -RS '".join(",",@singl)."' -tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n\n"; #tmpP < scratch too slow
+		$cmd .= "\n$cLSUSSUscript$cLSUSSUconfig -R1 '-1' -R2 '-1' -RS '".join(",",@singl)."' -tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n\n"; #tmpP < scratch too slow
 	}
 	my $sto1 = "$outP/RibFnd.sto";my $stoLCAL = "$outP//ltsLCA/LSU_ass.sto";	my $stoLCAS = "$outP//ltsLCA/SSU_ass.sto";
 	$cmd .= "touch $sto1\n" unless ($cmd eq "");
@@ -4119,8 +4122,8 @@ sub runOrthoPlacement(){
 	}
 	$scrP =~ s/\/[^\/]+$//;
 	#die $scrP."\n";
-	my $hmmscr = "python /g/bork3/home/hildebra/dev/Perl/SoilHelpers/extract_domains.py";
-	my $hmmD = "/g/bork3/home/hildebra/DB/HMMs/FungiAB/";
+	my $hmmscr = getProgPaths("ortho_extract_domains_scr");
+	my $hmmD = getProgPaths("ortho_hmm_DB");
 	my @hmmsDB=("Condensation.hmm","dmat.hmm","AMP-binding.hmm","PKS_KS.hmm","Terpene_synth_C.hmm");
 	my @hmmNms = ("Condensation","dmat","AMP","PKS","Terpene");
 	my $onceExtr=0;
@@ -4152,7 +4155,7 @@ sub runOrthoPlacement(){
 
 		my $clustaloBin = getProgPaths("clustalo");
 		my $raxMLbin = getProgPaths("raxml");
-		my $treeDBdir = "/g/bork3/home/hildebra/data/SoilABdoms/Jaime/JaimeT2/";
+		my $treeDBdir = getProgPaths("ortho_tree_DB");
 #		my $refTREE = "$treeDBdir/$hmmN2/final_alg/phylo/FASTTREE_allsites.nwk";
 		my $refTREE = "$treeDBdir/$hmmN2/final_alg/phylo/IQtree_fast_allsites.treefile";
 		my $refMSA = "$treeDBdir/$hmmN2/final_alg/outMSA.faa";
@@ -5062,7 +5065,7 @@ sub SEEECER(){
 		system("cat ".join(" ",@p1)." > $tmpD/pair.1.fastq");	system("cat ".join(" ",@p2)." > $tmpD/pair.2.fastq");
 		@p1 = ("$tmpD/pair.1.fastq"); @p2 = ("$tmpD/pair.2.fastq");
 	}
-	my $SEEbin = "bash /g/bork5/hildebra/bin/SEECER-0.1.3/SEECER/bin/run_seecer.sh";
+	my $SEEbin = getProgPaths("seecer");
 	system("mkdir -p $tmpD/tmpS");
 	my $cmd = $SEEbin . " -t $tmpD/tmpS $p1[0] $p2[0]";
 	#qsubSystem($logDir."SEECERCleaner.sh",$cmd,1,"30G",1);
@@ -8243,7 +8246,7 @@ sub ReadsFromMapping{
 }
 
 sub RayAssembly(){
- "mpiexec -n 1 /g/bork5/hildebra/bin/Ray-2.3.1/ray-build/Ray -o test -p test/test_1.fastq test/test_2.fastq -k 31"
+ return getProgPaths("ray")." -o test -p test/test_1.fastq test/test_2.fastq -k 31"
  }
  
  
@@ -9395,10 +9398,8 @@ sub setDefaultMFconfig{
 	#which read filtering option to use in sdm?
 	$MFopt{useSDM} = 2;	
 	$MFopt{sdmOpt} = "";
-	$MFopt{baseSDMopt} = getProgPaths("baseSDMopt_rel"); 
-	if ($MFopt{useSDM} ==2 ){$MFopt{baseSDMopt} = getProgPaths("baseSDMopt");}
-	$MFopt{baseSDMoptMiSeq} = getProgPaths("baseSDMoptMiSeq_rel");
-	if ($MFopt{useSDM} ==2 ){$MFopt{baseSDMoptMiSeq} = getProgPaths("baseSDMoptMiSeq");}
+	$MFopt{baseSDMopt} = "";
+	$MFopt{baseSDMoptMiSeq} = "";
 
 
 	$MFopt{writeStats} = 0;
@@ -9869,6 +9870,11 @@ sub getCmdLineOptions{
 	
 	# ------------------------------------------ options post processing ------------------------------------------
 	setConfigFile($MFconfig{configFile});
+	# Resolve config-backed defaults only after -config has selected the user
+	# file. Resolving these in setDefaultMFconfig cached the default site config
+	# before command-line parsing and made custom values ineffective.
+	$MFopt{baseSDMopt} = getProgPaths($MFopt{useSDM} == 2 ? "baseSDMopt" : "baseSDMopt_rel");
+	$MFopt{baseSDMoptMiSeq} = getProgPaths($MFopt{useSDM} == 2 ? "baseSDMoptMiSeq" : "baseSDMoptMiSeq_rel");
 
 	die "ERROR:: No mapping file provided (-map)\n" if ($MFconfig{mapFile} eq "");
 	if (!$MFopt{DoAssembly}){

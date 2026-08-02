@@ -10,9 +10,9 @@ die "cluster-ID must be between 1 and 100\n"
 	unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
 
 my $oname = "T6";
-my $odir = "/g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/$oname/R_filt/";
+my $odir = getProgPaths("legacyGenesInSampleOutput");
 my $refF = "$odir/${oname}_filt.txt";
-my $GCdir = "/g/bork3/home/hildebra/data/SNP/GCs/T2_HM3_GNM3_ABR/";
+my $GCdir = getProgPaths("legacyGenesInSampleGC");
 my %genes ;
 open I,"<$refF" or die "can;t open $refF\n"; while(<I>){chomp; next if ($_ eq "");$genes{$_}=1;} close I;
 

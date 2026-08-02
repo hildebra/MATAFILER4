@@ -399,7 +399,7 @@ These outputs are commonly summarized in or near:
 #OutPath/#RunID/pseudoGC/
 ```
 
-and related run-level folders. The precise file names depend on flags such as `-profileFunct`, `-diamondDBs`, `-profileRibosome`, `-profileMOTU2`, `-profileMetaphlan2` or `-profileKraken`.
+and related run-level folders. The precise file names depend on flags such as `-profileFunct`, `-DiaDBs`, `-profileRibosome`, `-profileMOTU2`, `-profileMetaphlan2` or `-profileKraken`.
 
 ## Recommended files for common downstream questions
 

@@ -3,8 +3,7 @@ use warnings;
 #use Cwd 'abs_path';
 use strict;
 use Fcntl qw(S_ISDIR S_ISREG);
-use IO::Compress::Gzip ();
-use IO::Uncompress::Gunzip ();
+use POSIX qw(_exit);
 use Time::HiRes ();
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
@@ -336,13 +335,42 @@ sub prefixFAhd{
 
 		
 sub gzipwrite{
-	my ($outF,$descr) = @_;
+	my ($outF,$descr,$options) = @_;
 	$outF .= ".gz" if ( $outF !~ m/\.gz$/);
-	my $O = IO::Compress::Gzip->new($outF)
-		or die "error opening gzip output $outF: $IO::Compress::Gzip::GzipError\n";
-	#open my $O, ':>gzip', $outF or die "error starting gzip pipe $outF\n$!\n\n";
-	#my $pigzBin = getProgPaths("piz");
-	#open (my $O, "| $pigzBin -c > $outF") or die "error starting gzip pipe $outF\n$!";
+	$descr = "gzip output" unless defined($descr) && length($descr);
+	$options = {} unless ref($options) eq 'HASH';
+	my $threads = exists($options->{threads}) ? $options->{threads} : 1;
+	die "invalid pigz thread count for $descr: $threads\n"
+		unless defined($threads) && $threads =~ /^\d+$/ && $threads > 0;
+	my @pigzOptions = ('-p', $threads);
+	if (exists($options->{level})) {
+		my $level = $options->{level};
+		die "invalid pigz compression level for $descr: $level\n"
+			unless defined($level) && $level =~ /^\d+$/ && $level <= 9;
+		push @pigzOptions, "-$level";
+	}
+
+	my $pigz = getProgPaths("pigz");
+	open my $destination, '>', $outF
+		or die "error opening $descr file $outF: $!\n";
+	binmode $destination;
+	my $pid = open(my $O, '|-');
+	if (!defined($pid)) {
+		my $openError = $!;
+		close $destination;
+		die "error starting pigz for $descr file $outF: $openError\n";
+	}
+	if ($pid == 0) {
+		open STDOUT, '>&', $destination or do {
+			syswrite(STDERR, "Cannot connect pigz output to $outF: $!\n");
+			_exit(127);
+		};
+		exec {$pigz} $pigz, @pigzOptions, '-c', '--';
+		syswrite(STDERR, "Cannot execute configured pigz $pigz: $!\n");
+		_exit(127);
+	}
+	close $destination
+		or die "error closing parent copy of $descr file $outF: $!\n";
 	return $O;
 }
 sub gzipopen{
@@ -373,29 +401,12 @@ sub gzipopen{
 		print $msg if ($verbose);
 	} elsif($inF =~ m/\.gz$/ ){
 		$msg = "Can't open a pipe to $descr file $inF\n";
-		my $pigz = eval { getProgPaths("pigz") } // "";
-		my $usedPigz = 0;
-		if (length($pigz)) {
-			#NOTE: unlike IO::Uncompress::Gunzip->new, a successfully-opened pipe doesn't
-			#guarantee the gzip stream itself is valid -- corruption would only surface
-			#once the caller reads/closes the handle (pigz's own error goes to its stderr,
-			#not to $ISTR). We already know $inF exists at this point (resolveExistingFile
-			#succeeded above), so the main remaining risk is a truncated/corrupt archive
-			#silently reading as if it ended early rather than dying loudly. This is a
-			#deliberate trade-off for a large, consistent speedup on the multi-GB gzip
-			#files this pipeline reads; ask if you'd like close()-time exit-status checks
-			#added on top for stricter corruption detection.
-			if (open($ISTR, "-|", $pigz, "-dc", "--", $inF)) {
-				$usedPigz = 1;
-			}
-		}
-		if (!$usedPigz) {
-			# MultiStream is required: several callers write concatenated
-			# gzip streams (e.g. per-fragment diamond output appended
-			# together), and IO::Uncompress::Gunzip only reads the first
-			# member by default, silently truncating everything after it.
-			$ISTR = IO::Uncompress::Gunzip->new($inF, MultiStream => 1);
-			if (!$ISTR) {if ($dodie){die "$msg$IO::Uncompress::Gunzip::GunzipError\n";} else {$OK=0; print $msg if ($verbose);}}
+		my $pigz = getProgPaths("pigz");
+		# A successful pipe open only proves that the child was forked. Callers
+		# which consume the complete stream must check close(), because pigz
+		# reports corrupt/truncated input through its exit status at that point.
+		if (!open($ISTR, "-|", $pigz, "-dc", "--", $inF)) {
+			if ($dodie){die "$msg$!\n";} else {$OK=0; print $msg if ($verbose);}
 		}
 	} else{
 		if (!open($ISTR, "<", "$inF") ) {if ($dodie){die $msg;} else {$OK=0; print $msg if ($verbose);}}

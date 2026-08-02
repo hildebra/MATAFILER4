@@ -3,6 +3,7 @@
 
 use warnings;
 use strict;
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 #use Mods::GenoMetaAss qw(readMap qsubSystem emptyQsubOpt );
 #use Mods::IO_Tamoc_progs qw(jgi_depth_cmd inputFmtSpades createGapFillopt getProgPaths);
 my %collctGns;
@@ -11,10 +12,10 @@ my $doStep1=0; #extraction of high coverage genes from bam mapping files
 my $doStep2=1; #sdm based extraction of genes, that had high coverage
 my $at = 0;
 my @nms = ("frz11","Tara","IGC");
-my @fnaRefs = ("/g/bork3/home/hildebra/DB/freeze11/freeze11.genes.representatives.fa","/g/bork3/home/hildebra/DB/GeneCats/Tara/Tara.fna","/g/bork3/home/hildebra/DB/GeneCats/IGC/1000RefGeneCat.fna");
-my @faaRefs = ("/g/bork3/home/hildebra/DB/freeze11/freeze11.proteins.representatives.fa","/g/bork3/home/hildebra/DB/GeneCats/Tara/Tara.faa.gz","/g/bork3/home/hildebra/DB/GeneCats/IGC/1000RefGeneCat.faa");
+my @fnaRefs = map { getProgPaths($_) } qw(legacyFrz11FNA legacyTaraFNA legacyIGCFNA);
+my @faaRefs = map { getProgPaths($_) } qw(legacyFrz11FAA legacyTaraFAA legacyIGCFAA);
 
-my $inD = "/g/scb/bork/hildebra/Tamoc/FinSoil/GlbMap/$nms[$at]/";#Tara/";#frz11/ IGC/
+my $inD = getProgPaths("legacyGeneExtractionInput");#frz11/ IGC/
 my $fnaRef = $fnaRefs[$at];
 my $faaRef = $faaRefs[$at];
 my (@FList) = glob($inD."/*.jgi.depth.txt.gz");
@@ -60,8 +61,8 @@ if ($doStep1){
 
 if ($doStep2){
 	my $cmd = "";
-	#$cmd .= "/g/bork3/home/hildebra/dev/C++/sdm/./sdm -i_fna $fnaRef -o_fna $inD/extr.rds -paired 1 -specificReads $inD/CoveredGenes.txt -log nolog\n";
-	$cmd .= "/g/bork3/home/hildebra/dev/C++/sdm/./sdm -i_fna $faaRef -o_fna $inD/extr.AA -paired 1 -specificReads $inD/CoveredGenes.txt -log nolog\n";
+	#$cmd .= getProgPaths("sdm")." -i_fna $fnaRef -o_fna $inD/extr.rds -paired 1 -specificReads $inD/CoveredGenes.txt -log nolog\n";
+	$cmd .= getProgPaths("sdm")." -i_fna $faaRef -o_fna $inD/extr.AA -paired 1 -specificReads $inD/CoveredGenes.txt -log nolog\n";
 	print $cmd."\n";
 	system $cmd."\n";
 }

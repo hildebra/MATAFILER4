@@ -510,8 +510,10 @@ sub eggMap_interpret($){ #higher level annotations with egg nog mapper
 	my $KOoutF = "$outD/KOfromEggNogMapper.txt";
 	#$print $cmd."\n";
 	my %KOperGene;
-	if (-e "/g/bork1/huerta/_soft/eggnog-mapper-bigg/emapper.py" && $KOfromNOG){
-		$cmd = "/g/bork1/huerta/_soft/eggnog-mapper-bigg/emapper.py --big /g/bork1/huerta/_shared/kegg77_to_egggnog.m8.emapper_table 95 9 -d none -o $oFil.1 --annotate_hits_table $tmpEM";
+	my $emapperBigg = getProgPaths("emapperBigg", 0);
+	my $emapperBiggTable = getProgPaths("emapperBiggTable", 0);
+	if ($emapperBigg ne "" && $emapperBiggTable ne "" && $KOfromNOG){
+		$cmd = "$emapperBigg --big $emapperBiggTable 95 9 -d none -o $oFil.1 --annotate_hits_table $tmpEM";
 		print $cmd."\n";
 	} else {
 		$cmd .= "$emBin -d none --cpu $ncore --no_search --temp_dir $tmpD --no_file_comments --override --no_refine --annotate_hits_table $tmpEM -o $oFil.1\n" ;

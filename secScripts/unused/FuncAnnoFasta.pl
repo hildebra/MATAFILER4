@@ -5,6 +5,7 @@
 
 use warnings;
 use strict;
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::FuncTools qw(assignFuncPerGene calc_modules);
 use Mods::FuncTools qw(readGene2COG);
 use Mods::Subm qw(qsubSystem emptyQsubOpt );
@@ -41,7 +42,7 @@ if (0){
 	print "Done\n";
 }
 #read ref DB
-my $DButil = "/hpc-home/hildebra/DB/Funct/eggNOG10/";
+my $DButil = getProgPaths("eggNOG40_path_DB");
 my $bl2dbF = "$DButil/NOG.members.tsv";
 my ($hr1,$hr2) = readGene2COG($bl2dbF);
 my %g2COG = %{$hr1}; my %c2CAT = %{$hr2};
@@ -71,7 +72,7 @@ close O;
 print "Done reading annotation\n";
 
 print "Rewriting NOG tables\n";
-my $Ndir = "/ei/workarea/users/hildebra/projects/keyTaxa/";
+my $Ndir = getProgPaths("legacyFuncAnnoOutput");
 my @subNs = ("NOG.mat.ARC.cnt.1e-9_50.txt.gz","NOG.mat.BAC.cnt.1e-9_50.txt.gz","NOG.mat.EUK.cnt.1e-9_50.txt.gz","NOG.mat.FNG.cnt.1e-9_50.txt.gz");
 foreach my $subN (@subNs){
 	print "$subN\n";

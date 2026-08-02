@@ -54,17 +54,17 @@ my $msaFbin = getProgPaths("MSAfix");
 my $RpogenS = getProgPaths("pogenStats");
 my $stBin = "";
 my $eteBin = getProgPaths("ete3");
-my $gubbinsBin = "/g/bork3/home/hildebra/bin/gubbins/python/scripts/run_gubbins.py";
+my $gubbinsBin = getProgPaths("gubbins");
 my $pamlBin = getProgPaths("codeml");
 #my $evoConda = getProgPaths("evoEnv");#systemW "source $evoConda";
 
 
 
-my $fastgearBin = "/g/bork3/home/luetge/softs/fastGEARpackageLinux64bit/run_fastGEAR.sh";
-my $matlabBin = "/g/bork3/home/luetge/softs/matlab/v901";
-my $fastgearSummaryBin = "/g/bork3/home/luetge/softs/fastGearPostprocessingLinux64bit/run_collectRecombinationStatistics.sh";
-my $fastgearReconstrBin = "/g/bork3/home/luetge/softs/fastGearPostprocessingLinux64bit/run_startAncestryReconstruction.sh";
-my $fastgearReorderBin = "/g/bork3/home/luetge/softs/fastGearPostprocessingLinux64bit/run_reorderMultipleGenes.sh";
+my $fastgearBin = getProgPaths("fastgear");
+my $matlabBin = getProgPaths("fastgearMatlab");
+my $fastgearSummaryBin = getProgPaths("fastgearSummary");
+my $fastgearReconstrBin = getProgPaths("fastgearReconstr");
+my $fastgearReorderBin = getProgPaths("fastgearReorder");
 my $partiExt=".partition.RAXML";
 
 #die "TODO $trimalBin\n";
@@ -207,12 +207,12 @@ my $cmd =""; my %usedGeneNms;
 
 my $outD_clust = "";
 if($clusterName eq ""){$outD_clust = "$outD/MSA_FG";}
-else {my $outD_clust = "/g/bork5/luetge/$clusterName";}
+else {my $outD_clust = "$outD/$clusterName";}
 
 #------------------------------------------
 #sorting by COG, MSA & syn position extraction
 if ($Ete){
-	$cmd = "ete3 build -n $fnFna -a $aaFna -w clustalo_default-none-none-none  -m sptree_raxml_all --cpu $ncore -o $outD/tree --clearall --nt-switch 0.0 --noimg  --tools-dir /g/bork3/home/hildebra/bin/ete/ext_apps-latest"; #--no-seq-checks
+	$cmd = "ete3 build -n $fnFna -a $aaFna -w clustalo_default-none-none-none  -m sptree_raxml_all --cpu $ncore -o $outD/tree --clearall --nt-switch 0.0 --noimg  --tools-dir ".getProgPaths("eteToolsDir").""; #--no-seq-checks
 	$cmd .= " --cogs $cogCats" unless ($cogCats eq "");
 	print "Running tree analysis ..";
 	print $cmd."\n";
@@ -826,7 +826,7 @@ sub treeAtHeart{
 		my $outDG = "$outD/clonalFrameML/";
 		system "mkdir -p $outDG" unless (-d $outDG);
 		$outDG .= "CFML";
-		my $CFMLbin = "/g/bork3/home/hildebra/bin/ClonalFrameML/src/./ClonalFrameML";
+		my $CFMLbin = getProgPaths("clonalframeml");
 		my $cmd = "$CFMLbin $phyloTree $multF $outDG\n";
 		die $cmd;
 	}
@@ -973,7 +973,7 @@ sub FastGear{
 			system "mkdir -p  $outFG" unless(-d "$outFG");
 			my $outFileFG = "$outFG/${geneF}_res.mat";
 			system "cat $MsaDF2/$geneF.*.fna | sed 's/_.*\$//' > $MsaDF2/$geneF.fna";
-			my $FGparFile ="/g/bork3/home/luetge/softs/fastGEARpackageLinux64bit/fG_input_specs.txt";
+			my $FGparFile = getProgPaths("fastgearParam");
 			runFastgear($geneF, $outFileFG, $MsaDF2, $FGparFile);
 		}
 		system "rm -r $outD_clust";
@@ -1892,7 +1892,7 @@ sub WattTheta{
 		my $MSAfile2 = "$MSADir/$MSAfile[0]";
 		my $hyphyBin=getProgPaths("hyphy");
 		my $cmd = "";#"source activate hyphy\n";
-		$cmd .= "$hyphyBin CPU=$ncore /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/phylo/WattetrsonTheta.hyphy --alignment $MSAfile2 ";#> $logF\n";
+		$cmd .= "$hyphyBin CPU=$ncore ".getProgPaths("wattersonTheta_scr")." --alignment $MSAfile2 ";#> $logF\n";
 		my $txt = `$cmd`;
 #		print $txt."\n";
 		$txt =~ m/Sequences          = (\d+)\nSites              = (\d+)\nSegregating Sites  = (\d+)\n.*Watterson.s theta  = ([\d\.]+)/;

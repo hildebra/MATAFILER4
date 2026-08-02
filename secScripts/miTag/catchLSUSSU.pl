@@ -6,7 +6,7 @@ use strict;
 use warnings;
 use Getopt::Long qw( GetOptions );
 use Mods::GenoMetaAss qw(renameFastqCnts systemW);
-use Mods::IO_Tamoc_progs qw(inputFmtSpades getProgPaths);
+use Mods::IO_Tamoc_progs qw(inputFmtSpades getProgPaths setConfigFile);
 use File::Copy qw(copy);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
@@ -15,6 +15,8 @@ sub smrnaRunCmd;
 sub copySortmernaOutputs;
 sub touchFile;
 sub shellQuote;
+sub validateSortmernaReference;
+sub validateSortmernaIndex;
 
 
 #18.5.26: added versioning to 0.1
@@ -27,6 +29,7 @@ my $threads = 1;#$ARGV[5];
 my $smpN = "";#$ARGV[6];
 my $doRiboAssembl = 0;#$ARGV[7];
 my $path2DB = "";#$ARGV[8];
+my $configFile = "";
 my 	$read1 ="";
 my $read2 = "";
 my $readS = "";
@@ -41,6 +44,7 @@ GetOptions(
 	"smplID=s"      => \$smpN,
 	"tmpDir=s"      => \$tmpP,
 	"cores=i" => \$threads,
+	"config=s" => \$configFile,
 	#"DBdir=s" => \$path2DB,
 	"assmblRibos=i" => \$doRiboAssembl,
 ) or die("Error in command line arguments\n");
@@ -79,6 +83,7 @@ if (-e "$alignPath/SSU_pull.sto" && -e "$alignPath/LSU_pull.sto"){
 	remove_tree($tmpP);
 	exit(0);
 }
+setConfigFile($configFile);
 
 #if ($path2DB eq ""){die "database not defined (-DBdir) ! \n";}
 #if (@ARGV<8){die "Not enough input arguments!!\n";}
@@ -89,7 +94,6 @@ if (-e "$alignPath/SSU_pull.sto" && -e "$alignPath/LSU_pull.sto"){
 #my $smrnaBin = "$smrPath/./sortmerna";
 
 my $smrnaBin = getProgPaths("sortmerna");
-announce($smrnaBin);
 #my $mergeScript = getProgPaths("mergeRdScr");
 #my $unmergeScript = getProgPaths("unmergeRdScr");
 #my $spadesBin = getProgPaths("spades");
@@ -114,6 +118,11 @@ if (!-e "$alignPath/SSU_pull.sto" || !-e "$alignPath/LSU_pull.sto") { #unpack re
 	my $refDBlsu = getProgPaths("LSUdbFAsrt");
 	my $idxSSU   = getProgPaths("SSUidx", 0);
 	my $idxLSU   = getProgPaths("LSUidx", 0);
+	validateSortmernaReference("SSUdbFAsrt", $refDBssu);
+	validateSortmernaReference("LSUdbFAsrt", $refDBlsu);
+	validateSortmernaIndex("SSUidx", $idxSSU);
+	validateSortmernaIndex("LSUidx", $idxLSU);
+	announce($smrnaBin);
 
 	#my $curStone = "$alignPath/ITS_pull.sto";
 	#unless (-e $curStone){ #ITS seems to be in general unreliable (too diverse?)
@@ -290,6 +299,26 @@ sub shellQuote{
 	return "'$value'";
 }
 
+
+sub validateSortmernaReference{
+	my ($configKey, $configuredReferences) = @_;
+	die "SortMeRNA configuration '$configKey' has no reference path\n"
+		if !defined($configuredReferences) || $configuredReferences eq "";
+	for my $reference (split(":", $configuredReferences, -1)){
+		die "SortMeRNA configuration '$configKey' contains an empty reference path\n"
+			if $reference eq "";
+		die "Configured SortMeRNA reference '$configKey' is not a readable file: $reference\n"
+			unless -f $reference && -r $reference;
+	}
+}
+
+
+sub validateSortmernaIndex{
+	my ($configKey, $indexDirectory) = @_;
+	return if !defined($indexDirectory) || $indexDirectory eq "";
+	die "Configured SortMeRNA index '$configKey' is not a readable directory: $indexDirectory\n"
+		unless -d $indexDirectory && -r $indexDirectory && -x $indexDirectory;
+}
 
 sub announce{
 	my ($configuredSortmerna) = @_;

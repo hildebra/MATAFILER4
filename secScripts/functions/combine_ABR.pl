@@ -5,10 +5,11 @@
 use warnings;
 use strict;
 use Mods::GenoMetaAss qw(gzipopen readMap);
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 sub writeMat;
 
 my @DBs = ("ABR"); # ("KGB","KGE","CZy","NOG","ABR","MOH");#("NOG","CZy","MOH");
-my $rareBin = "/g/bork3/home/hildebra/dev/C++/rare/./rare";
+my $rareBin = getProgPaths("rare");
 
 my $inD = $ARGV[0];
 $inD .= "/" unless ($inD =~ m/\/$/);

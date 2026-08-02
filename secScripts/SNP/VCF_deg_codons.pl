@@ -17,14 +17,14 @@ die "STOP: did this in R in the end, this code is not functional at the moment!!
 
 
 
-my @refFAs = ("/g/bork5/hildebra/results/TEC2/v5/TEC2.MM4.BEE.GF.rn.fa","/g/bork5/hildebra/results/TEC2/v5/T3/T3.mini2.3smpl.fna",
-"/g/bork5/hildebra/results/TEC2/v5/T4/T4.mini2.3smpl.fna",
+my @refFAs = map { getProgPaths($_) } qw(legacyTEC2FNA legacyTEC3FNA legacyTEC4FNA legacyTEC6FNA);
+
 #"/g/scb/bork/hildebra/SNP/GNMass3/TECtime/v4/T5/R_filt/contigs/MM3.ctgs.fna",
-"/g/bork5/hildebra/results/TEC2/v5/T6/TEC6.ctgs.rn.fna");
-my @refGFFs = ("/g/bork5/hildebra/results/TEC2/v5/Genomes/T2/6666666.214148.gff","","","","");
+
+my @refGFFs = (getProgPaths("legacyTEC2GFF"), "", "", "");
 my @name = ("T2d","T3d","T4d","T6d");
-my $inDir = "/g/scb/bork/hildebra/SNP/GNMass3/GlbMap/$name[$idx]/";
-my $mapF = "/g/bork5/hildebra/data/metaGgutEMBL/MM_at_v5_T2subset.txt";
+my $inDir = getProgPaths("legacyVCFDegInput");
+my $mapF = getProgPaths("legacyTECMap");
 my $MAP = "30"; my $BQUAL = "25"; my $LOC = "ali";
 
 my $refVCF = "$odir2/FB_reGT_${LOC}_$MAP"."_$BQUAL.vcf"

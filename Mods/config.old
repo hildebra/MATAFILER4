@@ -7,6 +7,7 @@ CONDA	eval "$([CONDcmd] shell hook -s bash)"
 CONDAbaseEnv	MGTK
 
 MFLRDir	$MGTKDIR
+MGSTKDir	$MGTKDIR
 BINDir	empty
 DBDir	empty
 
@@ -26,6 +27,9 @@ subXtraCmd
 
 mediumQueue	ei-medium,qib-medium,ei-long,qib-long	#24 hour WALLtime, default queue
 longQueue	ei-long,qib-long	#334 hour WALLtime
+shortTime
+medTime
+longTime
 gpuQueue	ei-gpu	#leave empty if no GPU queue available; queue specifically for gpu jobs (deep neural nets etc)
 netQueue		#leave empty to use mediumQueue; queue/partition for jobs requiring outbound network access
 highMemQueue	ei-largemem

@@ -1290,7 +1290,7 @@ if ($calcDNAdiff){
 
 
 if ($doGubbins){
-	$gubbinsBin = requireConfiguredTool("MF4_GUBBINS_BIN", "Gubbins") if $gubbinsBin eq "";
+	$gubbinsBin = requireConfiguredTool("gubbins", "Gubbins") if $gubbinsBin eq "";
 	my $gubbinsOutDir = File::Spec->catdir($outD, "gubbins");
 	make_path($gubbinsOutDir) unless -d $gubbinsOutDir;
 	my $outDG = File::Spec->catfile($gubbinsOutDir, "GD");
@@ -1634,7 +1634,7 @@ sub treeAtHeart{
 		my $outDG = File::Spec->catdir($outD, "clonalFrameML");
 		make_path($outDG) unless -d $outDG;
 		$outDG = File::Spec->catfile($outDG, "CFML");
-		my $CFMLbin = requireConfiguredTool("MF4_CLONALFRAMEML_BIN", "ClonalFrameML");
+		my $CFMLbin = requireConfiguredTool("clonalframeml", "ClonalFrameML");
 		my $cmd = "$CFMLbin $phyloTree $multF $outDG\n";
 		systemW($cmd);
 		die "ClonalFrameML did not produce its expected labelled-tree output for $outDG\n"
@@ -1733,9 +1733,9 @@ sub singleGeneMSAprocess($){
 sub FastGear{
 	my ($fastgearSummaryBin, $fastgearReorderBin, $matlabBin);
 	if ($doFastGearSummary){
-		$fastgearSummaryBin = requireConfiguredTool("MF4_FASTGEAR_SUMMARY_BIN", "fastGEAR summary");
-		$fastgearReorderBin = requireConfiguredTool("MF4_FASTGEAR_REORDER_BIN", "fastGEAR reorder");
-		$matlabBin = requireConfiguredTool("MF4_FASTGEAR_MATLAB_BIN", "fastGEAR MATLAB runtime");
+		$fastgearSummaryBin = requireConfiguredTool("fastgearSummary", "fastGEAR summary");
+		$fastgearReorderBin = requireConfiguredTool("fastgearReorder", "fastGEAR reorder");
+		$matlabBin = requireConfiguredTool("fastgearMatlab", "fastGEAR MATLAB runtime");
 	}
 
 	if($doFastGear){
@@ -1797,7 +1797,7 @@ sub FastGear{
 				close $fg_in or die "Cannot close fastGEAR source MSA $msa: $!\n";
 			}
 			close $fg_out or die "Cannot close fastGEAR input $fastgear_input: $!\n";
-			my $FGparFile = requireConfiguredTool("MF4_FASTGEAR_PARAM_FILE", "fastGEAR parameter file");
+			my $FGparFile = requireConfiguredTool("fastgearParam", "fastGEAR parameter file");
 			my $fastgearOK = eval {
 				runFastgear($gene_file_stem, $outFileFG, $MsaDF2, $FGparFile);
 				1;
@@ -2835,7 +2835,7 @@ sub WattTheta{
 		my $MSAfile2 = "$MSADir/$MSAfile[0]";
 		my $hyphyBin=getProgPaths("hyphy");
 		my $cmd = "";#"source activate hyphy\n";
-		$cmd .= "$hyphyBin CPU=$ncore /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/phylo/WattetrsonTheta.hyphy --alignment $MSAfile2 ";#> $logF\n";
+		$cmd .= "$hyphyBin CPU=$ncore ".getProgPaths("wattersonTheta_scr")." --alignment $MSAfile2 ";#> $logF\n";
 		my $txt = `$cmd`;
 #		print $txt."\n";
 		$txt =~ m/Sequences          = (\d+)\nSites              = (\d+)\nSegregating Sites  = (\d+)\n.*Watterson.s theta  = ([\d\.]+)/;
@@ -3229,12 +3229,11 @@ sub safeRemoveTree{
 
 
 sub requireConfiguredTool{
-	my ($environmentName, $description) = @_;
-	my $path = $ENV{$environmentName} // "";
-	die "$description support is dormant and not configured. Set $environmentName to reactivate it.\n"
-		if $path eq "";
-	die "$description configured by $environmentName does not exist: $path\n" unless -e $path;
-	return shellQuote(File::Spec->canonpath(File::Spec->rel2abs($path)));
+	my ($configKey, $description) = @_;
+	my $configured = getProgPaths($configKey, 0);
+	die "$description support is dormant and not configured. Set $configKey in the selected MATAFILER config to reactivate it.\n"
+		if $configured eq "";
+	return $configured;
 }
 
 
@@ -3242,8 +3241,8 @@ sub requireConfiguredTool{
 ### Fastgear -> test for recombination 
 sub runFastgear($ $ $ $){
 	my ($geneFG, $outFile, $inD, $parFile) = @_;
-	my $fastgearBin = requireConfiguredTool("MF4_FASTGEAR_BIN", "fastGEAR");
-	my $matlabBin = requireConfiguredTool("MF4_FASTGEAR_MATLAB_BIN", "fastGEAR MATLAB runtime");
+	my $fastgearBin = requireConfiguredTool("fastgear", "fastGEAR");
+	my $matlabBin = requireConfiguredTool("fastgearMatlab", "fastGEAR MATLAB runtime");
 
 	$cmd = "$fastgearBin $matlabBin ".shellQuote("$inD/$geneFG.fna")
 		." ".shellQuote($outFile)." $parFile";

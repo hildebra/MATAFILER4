@@ -9,10 +9,6 @@ if (length(args)==0) {
 	stop("At least one argument must be supplied (input file).n", call.=FALSE)
 } 
 
-if (FALSE){
-	args=c()
-	args[1] = "C:/Users/hildebra/OneDrive/science/data/test/Cano_Alien//SB.clusters"
-}
 
 
 inP = args[1]

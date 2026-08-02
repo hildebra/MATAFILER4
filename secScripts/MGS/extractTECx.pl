@@ -17,9 +17,9 @@ use threads ('yield',
 
 
 #binary configuration
-my $MATAdir = "/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/";
+my $MATAdir = getProgPaths("MFLRDir");
 my $hdir = "$MATAdir/helpers/";
-my $GenomeDir = "/g/bork3/home/hildebra/results/prelimGenomes/v4/";
+my $GenomeDir = getProgPaths("legacyExtractTECGenomeDir");
 my $onlyRfilt = 0;
 
 system "mkdir -p $GenomeDir" unless (-d $GenomeDir);
@@ -39,10 +39,10 @@ my @SmplN = ("MM4","MM3","MM3","","MM14","MM35","MM11","MM18");#exclusively dete
 my @motuName = ("motu_linkage_group_838","","","","Cluster1088","Cluster1104","Cluster1630","Cluster1576","Cluster1092");
 my @num=("2","3","4","5","6","7","8","9","10");
 my @MBnum = ("2","2","3","4","2","2","2","2","3");
-my $smplDir = "/g/scb/bork/hildebra/SNP/GNMass3/";
-my $odir = "/g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/";
-my $gcat= "/g/scb/bork/hildebra/SNP/GCs/T2_HM3_GNM3_ABR";
-my $maps = "/g/bork5/hildebra/data/metaGgutEMBL/MM_at_v5_T2subset.txt";
+my $smplDir = getProgPaths("legacyExtractTECSampleDir");
+my $odir = getProgPaths("legacyExtractTECOutput");
+my $gcat = getProgPaths("legacyExtractTECGC");
+my $maps = getProgPaths("legacyExtractTECMap");
 my $LpreClus= "$gcat/LuisSpecs/";
 my @thrs;#array to save threads in..
 #helpers/./getMarkersMultiSmpl.pl FMGcrossSmpls alien-11-376-0/ 2 TEC2 /g/scb/bork/hildebra/SNP/GNMass3/ /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v4/T2/ /g/scb/bork/hildebra/SNP/GCs/T2_HM3_GNM3_ABR 90
@@ -124,7 +124,7 @@ for (my $j=$st;$j<$en;$j++){
 	system "rm -r $GenomeDir/T$i";
 	system "mkdir -p $GenomeDir/T$i/" unless (-d "$GenomeDir/T$i/");
 	my $tarFil = "$odir/T$i/R_filt/contigs/$chFs[$j].ctgs.fna";
-	$tarFil = "/g/scb/bork/hildebra/SNP/GNMass3/alien-11-377-0/scaffolds/TEC$i/BESST_output/pass2/Scaffolds_pass2.fa";
+	$tarFil = getProgPaths("legacyExtractTECScaffold");
 	die "can't find tar file $tarFil\n" unless (-e $tarFil);
 	my $genRestF = "$GenomeDir/T$i/TEC$i.ctgs.fna";
 	system "cp $tarFil $genRestF";
