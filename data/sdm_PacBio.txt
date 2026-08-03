@@ -7,7 +7,6 @@ TruncateSequenceLength	-1
 
 #Ambiguous bases in Sequence - uclust only supports 0 ambiguous nucleotides
 maxAmbiguousNT	500
-*maxAmbiguousNT	1
 
 #Homonucleotide Runs.. this should normally be filtered by sequencer software
 maxHomonucleotide	28
@@ -21,7 +20,7 @@ TrimWindowWidth	20
 TrimWindowThreshhold	0
 
 #Max number of accumulated P for a mismatch. After this length, the rest of the sequence will be deleted. Complimentary to TrimWindowThreshhold. (-1) deactivates this option.
-maxAccumulatedError	20
+maxAccumulatedError	-1
 
 
 #Barcode Errors - currently this can only be 0; 
@@ -42,13 +41,11 @@ TechnicalAdapter
 #delete X NTs (e.g. if the first 5 bases are known to have strange biases)
 TrimStartNTs	0
 
-#correct PE header format (1/2) this is to accomodate the illumina miSeq paired end annotations 2="@XXX 1:0:4" insteand of 1="@XXX/1". Note that the format will be automatically detected
+#correct PE header format (1/2) this is to accomodate the illumina miSeq paired end annotations 2="@XXX 1:0:4" instead of 1="@XXX/1". Note that the format will be automatically detected
 PEheaderPairFmt	1
 
 #sets if sequences without match to reverse primer will be accepted (T=reject ; F=accept all); default=F
 RejectSeqWithoutRevPrim	F
-*RejectSeqWithoutRevPrim	F
 
 #sets if sequences without a forward (LinkerPrimerSequence) primer will be accepted (T=reject ; F=accept all); default=F
 RejectSeqWithoutFwdPrim	F
-*RejectSeqWithoutFwdPrim	F
