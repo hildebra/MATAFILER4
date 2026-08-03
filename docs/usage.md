@@ -63,15 +63,22 @@ are resubmitted; final group assembly remains dependent on all required
 preassembly packages.
 As fully complete samples have their temporary data removed, the range start
 advances across that continuous prefix and later samples replenish the rolling
-range. A completed sample is revisited through an ordered fast probe (mapping,
-depth, assembly, binning and requested variant outputs); a missing priority
-output restores the full inspection path. When rolling processing reaches its
-normal end, MATAFILER4 makes one final full-range verification pass. Statistics
-are collected only after a full-range pass finds neither newly submitted work
-nor active sample locks. The first full-range pass starts immediately. If it
-finds active locks or submits more work, MATAFILER4 waits until every pending or
-running job submitted by this invocation has left the scheduler before making
-another full-range pass.
+range. After all requested output checks (or a terminal empty/too-small
+classification) and final cleanup pass, MATAFILER4
+atomically writes `<SmplID>/MATAFILER.sample.complete.json`. A later visit with
+the same sample definition and requested workflow reads this one file, reports
+`Sample already complete; no jobs submitted`, and skips the deeper output and
+log checks. A changed request, an explicit redo option, or an invalid sentinel
+removes it before normal sample processing continues. ContigStats, SNP, and
+binner work also invalidate the affected sentinel before changing outputs.
+
+When rolling processing reaches its normal end, MATAFILER4 makes one final
+full-range verification pass. Statistics are published only after a full-range
+pass finds neither newly submitted work nor active sample locks, and the summary
+stage reads each closed sample metagStats record directly from its sentinel. The
+first full-range pass starts immediately. If it finds active locks or submits
+more work, MATAFILER4 waits until every pending or running job submitted by this
+invocation has left the scheduler before making another full-range pass.
 
 With the default `-rmSmplLocks 0`, a pass may submit nothing because active
 samples are still locked. MATAFILER4 checks the scheduler in that case and

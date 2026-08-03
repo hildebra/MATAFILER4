@@ -6,6 +6,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw( gzipopen systemW filsizeMB readFasta readGFF writeFasta reverse_complement_IUPAC fileGZs fileGZe );
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystem2);
 use Mods::TamocFunc qw (cram2bsam);
+use Mods::SampleCompletion qw(invalidate_sample_completion);
 use File::Glob qw(bsd_glob);
 use File::Path qw(make_path);
 
@@ -296,6 +297,7 @@ sub SNPconsensus_vcf{
 		die "SNP consensus option '$required' is missing\n"
 			unless exists($SNPIHR->{$required}) && defined($SNPIHR->{$required}) && length($SNPIHR->{$required});
 	}
+	invalidate_sample_completion($SNPIHR->{sampleRoot}) if $SNPIHR->{sampleRoot};
 	my $smtBin = getProgPaths("samtools");
 	my $bcftBin = getProgPaths("bcftools");
 	my $vcf2fnaBin = getProgPaths("vcf2fna");
@@ -692,6 +694,7 @@ sub SVcall_vcf{
 	if ($mode == 1){	$SVcallerFlag = "DL"; #delly
 	}elsif ($mode == 2){	$SVcallerFlag = "GY"; # gridss
 	}else {die"Invalid callSVs option: $mode\n";}
+	invalidate_sample_completion($SNPIHR->{sampleRoot}) if $SNPIHR->{sampleRoot};
 	my $bcftBin = getProgPaths("bcftools");
 
 	

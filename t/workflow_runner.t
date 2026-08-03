@@ -178,8 +178,8 @@ like($mataf4,
 	qr/sub primeLoopSchedulerSnapshot.*?primeSampleLockJobSnapshot\(\\\@lockFiles, \$QSBoptHR\)/s,
 	'one pass-level scheduler and accounting snapshot serves all sample locks');
 like($mataf4,
-	qr/priority_outputs_complete\(\\\@priorityStages\).*?Sample remains complete after priority output check.*?delete \$loopSampleCompleted/s,
-	'completed samples use an ordered fast probe and fall back when an output disappears');
+	qr/read_sample_completion\(.*?if \(\$closedSample\).*?Sample already complete; no jobs submitted.*?if \(-e \$completionSentinel\).*?invalidate_sample_completion\(\$curOutDir\)/s,
+	"matching sample sentinels skip deep checks and rejected sentinels reopen samples");
 like($mataf4,
 	qr/rolling_completed_frontier\(.*?Advanced completed-sample frontier.*?active scan is/s,
 	'the loop start advances only through the continuously completed sample prefix');
@@ -221,7 +221,7 @@ like($mataf4,
 unlike($mataf4,
 	qr/die "Deferred job submission failed:/,
 	'the formerly fatal deferred sbatch path has been removed');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?my \$MATFILER_ver = 4\.28/s,
-	'MATAFILER history retains loop triggering changes through version 4.28');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?my \$MATFILER_ver = 4\.29/s,
+	'MATAFILER history retains loop triggering changes through version 4.29');
 
 done_testing;

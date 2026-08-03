@@ -206,8 +206,10 @@ unlike($mataf4, qr/\$postCmd \.= " -read[12S] /,
 	'MATAF4 no longer passes ignored raw-read options to bin quality checking');
 
 my $runner = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'assemblies', 'runBinners.pl'));
-like($runner, qr/my \$version = 0\.17;/,
+like($runner, qr/my \$version = 0\.18;/,
 	'SCGBinner training-input guard increments the binner-runner version');
+like($runner, qr/invalidate_sample_completion\(\$_\) for \@paths/,
+	"binner workers invalidate every assembly-group sample sentinel before output changes");
 like($runner, qr/my \$resultCheck = "test -e '\$BinDir\/\$smplIDs1'".*?printf .*?> '\$stone'/s,
 	'the binner assignment is verified before its completion stone is published');
 like($runner, qr/if \(\$DoMetaBat2 == 2\).*?output_recluster_bins.*?output_bins/s,

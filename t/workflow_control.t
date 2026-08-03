@@ -486,8 +486,8 @@ like($mataf4,
 	qr/name => 'final assembly publication', required => \$assemblyOutputsRequired.*?name => 'contig stats', required => \$assemblyOutputsRequired/s,
 	'assembly-independent cleanup skips assembly and ContigStats barriers');
 like($mataf4,
-	qr/elsif \(\$boolAssemblyOK && !\$locRedoAssMapping\) \{\s*\$runReport\{present_assemblies\}\+\+/s,
-	'only a verified existing assembly increments the assembly report counter');
+	qr/sub postprocess.*?\$runReport\{present_assemblies\} = 0.*?\$closedSample->\{present_assembly\}/s,
+	"only sentinel-confirmed assemblies increment the final report counter");
 like($mataf4,
 	qr/if \(\$MFopt\{DoAssembly\} && \$runReport\{present_assemblies\} > 0/s,
 	'gene-catalog suggestions are disabled for assembly-independent runs');
@@ -523,8 +523,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?my \$MATFILER_ver = 4\.28;/s,
-	'MATAFILER history retains shared input discovery through version 4.28');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?my \$MATFILER_ver = 4\.29;/s,
+	'MATAFILER history retains shared input discovery through version 4.29');
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');

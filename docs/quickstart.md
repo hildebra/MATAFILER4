@@ -77,11 +77,14 @@ Samples are revisited in a rolling window. Its start advances only across the
 contiguous prefix whose
 requested outputs are complete and whose temporary directories have been
 cleaned, keeping unfinished samples in rotation while admitting new ones.
-Previously completed samples use a short, ordered output probe; the loop still
-performs one final full-range verification pass before collecting sample
-statistics. That first full-range pass starts immediately; another full-range
-pass cannot start until all pending and running jobs submitted by this invocation
-have finished. Each visit submits only the next ready producer wave, so a failed
+A sample that passes every requested output and cleanup check is closed with
+`<SmplID>/MATAFILER.sample.complete.json`. Matching later visits read only that
+record and report the sample complete. A changed workflow request, redo option,
+or downstream ContigStats, SNP, or binner work removes the sentinel and restores
+full checking. The loop still performs one final full-range verification pass
+before publishing statistics from the sentinels. That first full-range pass
+starts immediately; another full-range pass cannot start until all pending and
+running jobs submitted by this invocation have finished. Each visit submits only the next ready producer wave, so a failed
 input filter is retried before assembly, mapping, binning, or consensus jobs are
 created. Scheduler state is collected once per pass for all sample locks,
 and `-maxConcurrentJobs` counts both pending and running user jobs before every
@@ -96,6 +99,7 @@ A successful assembly-dependent run should normally create:
 ```text
 #OutPath/#RunID/metagStats.txt
 #OutPath/#RunID/metagStatsReport.html
+#OutPath/#RunID/<SmplID>/MATAFILER.sample.complete.json
 #OutPath/#RunID/<SmplID>/assemblies/
 #OutPath/#RunID/<SmplID>/assemblies/metag/genePred/
 #OutPath/#RunID/<SmplID>/assemblies/metag/ContigStats/

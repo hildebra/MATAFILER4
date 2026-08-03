@@ -152,11 +152,15 @@ ok(-e $sentinel, 'invalid binner does not erase an existing output directory');
 
 my $small_bin_dir = File::Spec->catdir($tmp, 'small-bins');
 my $small_bin_tmp = File::Spec->catdir($tmp, 'small-bin-tmp');
+my $sample_completion = File::Spec->catfile($tmp, "MATAFILER.sample.complete.json");
+write_file($sample_completion, "closed\n");
 ($status, $output, $errors) = run_script('runBinners.pl',
 	'-binner', 1, '-binD', $small_bin_dir, '-tmpD', $small_bin_tmp,
 	'-smplID', 'small', '-assmbl', $assembly, '-assmblGrp', 1,
 	'-cores', 1, '-smplDirs', $tmp, '-minAssemblySizeMB', 0.000005);
 is($status, 0, 'undersized assembly completes without invoking a binner');
+ok(!-e $sample_completion,
+	"binner execution invalidates the sample completion sentinel before publishing output");
 like($output, qr/Assembly has 4 bp.*publishing an empty bin assignment/s,
 	'undersized assembly reports the measured sequence size and cutoff action');
 my $small_assignment = File::Spec->catfile($small_bin_dir, 'small');
@@ -203,6 +207,9 @@ like($separate_contigs,
 ok(index($separate_contigs, '$inD =~ s{[\\\\/]+$}{};') >= 0
 		&& index($separate_contigs, '$inD .= "/";') >= 0,
 	'input directories are normalized instead of requiring a caller-supplied trailing slash');
+like($separate_contigs,
+	qr/invalidate_sample_completion\(\$inD\).*?\$inD \.= "\/"/s,
+	"ContigStats workers invalidate the normalized sample root before output changes");
 unlike($separate_contigs,
 	qr/if \(-s \$outFfin.*?Gene abundance was already calculated/s,
 	'incomplete uncompressed output subsets cannot bypass the shared completion contract');

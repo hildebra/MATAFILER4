@@ -48,6 +48,11 @@ use Mods::StatsLogReader qw(
 	reset_stats_log_sampling
 	stats_log_sampling_summary
 );
+use Mods::SampleCompletion qw(
+	sample_completion_path completion_request_signature
+	read_sample_completion write_sample_completion
+	invalidate_sample_completion
+);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
 use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred handleSubmissionFailure);
@@ -55,7 +60,7 @@ use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
 use Mods::WorkflowControl qw(
-	advance_loop_window overlap_loop_window rolling_completed_frontier rolling_loop_transition priority_outputs_complete parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs parse_ignored_samples
+	advance_loop_window overlap_loop_window rolling_completed_frontier rolling_loop_transition parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs parse_ignored_samples
 	balanced_parallel_batches
 	hybrid_group_ready hybrid_package_complete hybrid_package_sample_id missing_input_files source_input_files
 	hybrid_local_scratch_gb
@@ -115,6 +120,8 @@ sub runAutomaticWorkflowPreflight;
 sub workflowStateOptions;
 sub sampleReadSet;
 sub discoverSampleInputs; sub populateInputSizesFast; sub spaceInAssGrp;
+sub sampleCompletionRequestSignature; sub sampleCompletionForcedInvalidation;
+sub createSampleCompletionSentinel;
 
 sub createConsSNPandSVs;
 
@@ -170,7 +177,10 @@ sub createConsSNPandSVs;
 #       retain the former all-sample startup scan only as an explicit precheck.
 #4.28: 3.8.26: force an exhausted rolling sample range into final full-range
 #       verification and audit every selected sample visit.
-my $MATFILER_ver = 4.28;
+#4.29: 3.8.26: close fully checked samples with an atomic, request-versioned
+#       sentinel containing their complete metagStats record; downstream work
+#       invalidates the sentinel before modifying sample outputs.
+my $MATFILER_ver = 4.29;
 
 #----------------- defaults ----------------- 
 
@@ -576,117 +586,45 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$sampleCheckpoints{supportConsensus} =~ s/\.stone/\.norm\.stone/;
 	}
 
-	# Once a sample has passed the full completion and cleanup path in this run,
-	# revisit only its most informative requested outputs. Checks are deliberately
-	# ordered so a missing early-stage product avoids lower-priority filesystem IO.
-	if ($runOptions{loopCount} && !$loopFinalVerification
-			&& $loopSampleCompleted{$JNUM}) {
-		my $supportMappingRequested = $MFopt{mapSupport2Assembly}
-			&& ($map{$curSmpl}{SupportReads} || '') ne '';
-		my @priorityStages = (
-			{
-				name => 'mapping',
-				required => $MFopt{map2Assembly} && $map{$curSmpl}{hasPrimaryRds},
-				kind => 'exists', all => [$sampleCheckpoints{mappingComplete}],
-			},
-			{
-				name => 'support mapping', required => $supportMappingRequested,
-				kind => 'exists', all => [$sampleCheckpoints{supportMapping}],
-			},
-			{
-				name => 'depth',
-				required => $MFopt{DoAssembly} && $MFopt{map2Assembly}
-					&& $map{$curSmpl}{hasPrimaryRds},
-				any => [
-					$coveragePerCtg, "$finalMapDir/$SmplName-smd.bam.coverage.gz",
-					"$finalMapDir/$SmplName-smd.cram.coverage.gz",
-				],
-			},
-			{
-				name => 'assembly checkpoint', required => $MFopt{DoAssembly},
-				kind => 'exists',
-				all => ["$finalCommAssDir/$checkpointNames{assemblyDone}"],
-			},
-			{
-				name => 'assembly outputs', required => $MFopt{DoAssembly},
-				all => [$finAssLoc],
-				any => [
-					"$finalCommAssDir/genePred/proteins.shrtHD.faa",
-					"$finalCommAssDir/genePred/proteins.shrtHD.faa.gz",
-					"$finalCommAssDir/genePred/proteins.bac.shrtHD.faa",
-					"$finalCommAssDir/genePred/proteins.bac.shrtHD.faa.gz",
-				],
-			},
-			{
-				name => 'binning assignment', required => $MFopt{DoMetaBat2},
-				kind => 'exists', all => [$BinningOut],
-			},
-			{
-				name => 'binning statistics', required => $MFopt{DoMetaBat2},
-				all => ["$BinningOut.assStat"],
-			},
-			{
-				name => 'CheckM', required => $MFopt{DoMetaBat2} && $MFopt{useCheckM1},
-				kind => 'exists', all => ["$BinningOut.cm"],
-			},
-			{
-				name => 'CheckM2', required => $MFopt{DoMetaBat2} && $MFopt{useCheckM2},
-				all => ["$BinningOut.cm2"],
-			},
-			{
-				name => 'SNP consensus',
-				required => $MFopt{DoConsSNP} && $map{$curSmpl}{hasPrimaryRds},
-				kind => 'exists', all => [$sampleCheckpoints{primaryConsensus}],
-			},
-			{
-				name => 'SNP VCF',
-				required => $MFopt{DoConsSNP} && $map{$curSmpl}{hasPrimaryRds}
-					&& $MFopt{saveVCF},
-				any => [$vcfSNP, "$vcfSNP.gz"],
-			},
-			{
-				name => 'support SNP consensus',
-				required => $MFopt{DoSuppConsSNP} && $supportMappingRequested,
-				kind => 'exists', all => [$sampleCheckpoints{supportConsensus}],
-			},
-			{
-				name => 'support SNP VCF',
-				required => $MFopt{DoSuppConsSNP} && $supportMappingRequested
-					&& $MFopt{saveVCF},
-				any => [$vcfSNPsupp, "$vcfSNPsupp.gz"],
-			},
-			{
-				name => 'structural variants',
-				required => $MFopt{callSVs} && $map{$curSmpl}{hasPrimaryRds},
-				all => [$vcfSV],
-			},
-			{
-				name => 'support structural variants',
-				required => $MFopt{callSVsSupp} && $supportMappingRequested,
-				all => [$vscSVsupp],
-			},
-		);
-		my $priority = priority_outputs_complete(\@priorityStages);
-		if ($priority->{complete}
-				&& (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
-			print "Sample remains complete after priority output check\n"
-				unless $MFconfig{silent};
-			loop2C_check($cAssGrp, \@sampleDeps);
-			next;
-		}
-		delete $loopSampleCompleted{$JNUM};
-	}
-	
-	# collect stats on seq qual, assembly etc
-	if ($MFconfig{alwaysDoStats}){
+	# Register the sentinel path before the completion gate. Postprocessing reads
+	# only this cached record and never rescans sample outputs or logs.
+	my $completionSignature = sampleCompletionRequestSignature($curSmpl);
+	my $completionSentinel = sample_completion_path($curOutDir);
+	if ($MFconfig{alwaysDoStats}) {
 		push @{$runReport{order}}, $SmplName unless $runReport{seen}{$SmplName}++;
 		$runReport{context}{$SmplName} = {
-			DIR => $dir2rd,
-			input_dir => $curOutDir,
-			assembly_dir => $asmDir,
+			sentinel => $completionSentinel,
+			request_signature => $completionSignature,
 		};
 	}
-	
+
+	# A valid sentinel is the sole fast-completion authority. Rewrite requests,
+	# changed workflow parameters, or malformed sentinels reopen the sample.
+	my @forcedReopen = sampleCompletionForcedInvalidation();
+	my ($closedSample, $completionError);
+	($closedSample, $completionError) = read_sample_completion(
+		path => $completionSentinel,
+		sample => $SmplName,
+		request_signature => $completionSignature,
+	) unless @forcedReopen;
+	if ($closedSample) {
+		$loopSampleCompleted{$JNUM} = 1;
+		print "Sample already complete; no jobs submitted\n"
+			unless $MFconfig{silent};
+		MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+		loop2C_check($cAssGrp, \@sampleDeps);
+		next;
+	}
+	if (-e $completionSentinel) {
+		my $reason = @forcedReopen
+			? 'rewrite requested: '.join(', ', @forcedReopen)
+			: ($completionError || 'completion sentinel was not accepted');
+		invalidate_sample_completion($curOutDir);
+		print "Reopening sample $SmplName; removed completion sentinel ($reason)\n"
+			unless $MFconfig{silent};
+	}
+	delete $loopSampleCompleted{$JNUM};
+
 	$map{$curSmpl}{inputFilesEmpty} = 0; 
 	if (-e "$curOutDir/SMPL.empty"){$map{$curSmpl}{inputFilesEmpty} = 1;}
 
@@ -1167,20 +1105,32 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		#&& !$calcRibofind && !$calcRiboAssign && !$MFopt{calcOrthoPlacement} && !$calcGenoSize && !$calcDiamond && !$calcDiaParse && 
 		#!$calcMetaPhlan && !$calcTaxaTar && !$calcMOTU2 && !$calcKraken && $scaffTarExternal eq ""
 	){
-		if ( ($boolAssemblyOK || ($doPreAssmFlag && $ePreAssmbly && !$ePreAssmblPck)) && !$locRedoAssMapping ){ #causes a lot of overhead but mainly to avoid unpacking reads again..
-			$runReport{present_assemblies}++;#= $AsGrps{$cAssGrp}{CntAimAss};
-		}
+		my $presentAssembly =
+			($boolAssemblyOK || ($doPreAssmFlag && $ePreAssmbly && !$ePreAssmblPck))
+			&& !$locRedoAssMapping ? 1 : 0;
 		my $cleanupComplete = runFinishedCleanup(finishedCleanupArguments(
 			$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
 			$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
 			$assemblyOutputsRequired,
 		));
 		if ($cleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
+			createSampleCompletionSentinel(
+				sample_root => $curOutDir,
+				sample_name => $SmplName,
+				input_label => $dir2rd,
+				input_dir => $curOutDir,
+				assembly_dir => $asmDir,
+				request_signature => $completionSignature,
+				present_assembly => $presentAssembly,
+			);
 			$loopSampleCompleted{$JNUM} = 1;
+			print "Sample already complete; no jobs submitted\n"
+				unless $MFconfig{silent};
 		} else {
 			delete $loopSampleCompleted{$JNUM};
+			print "Sample output checks passed, but cleanup is incomplete; sample remains open\n"
+				unless $MFconfig{silent};
 		}
-		print "Sample already complete; no jobs submitted\n" unless $MFconfig{silent};
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps);
 		next;
@@ -1265,6 +1215,33 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		}
 		$runReport{empty_samples}{$curSmpl} =
 			$map{$curSmpl}{inputFileSizeMB} + $map{$curSmpl}{inputXFileSizeMB};
+		my $emptyWorkPending = $jdep ne "" && $jdep ne "EMPTY_DO_NEXT";
+		if (!$emptyWorkPending) {
+			my $emptyCleanupComplete = runFinishedCleanup(finishedCleanupArguments(
+				$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
+				$smplTmpDir, $finAssLoc, $logDir, {}, 0,
+			));
+			if ($emptyCleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
+				createSampleCompletionSentinel(
+					sample_root => $curOutDir,
+					sample_name => $SmplName,
+					input_label => $dir2rd,
+					input_dir => $curOutDir,
+					assembly_dir => $asmDir,
+					request_signature => $completionSignature,
+					present_assembly => 0,
+					empty_sample => 1,
+					empty_input_size_mb => $runReport{empty_samples}{$curSmpl},
+				);
+				$loopSampleCompleted{$JNUM} = 1;
+				print "Sample already complete; no jobs submitted\n"
+					unless $MFconfig{silent};
+			} else {
+				delete $loopSampleCompleted{$JNUM};
+			}
+		} else {
+			delete $loopSampleCompleted{$JNUM};
+		}
 		reduceProgStats(); #reduce counters for riboFind etc.. no find in this sample!
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps);next;
@@ -1777,6 +1754,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my $consensusGff = "$finalCommAssDir/genePred/genes.gff";
 		$consensusGff .= ".gz" if ($MFopt{GenePredGZ});
 		my %SNPinfo = (gff => "$finalCommAssDir/genePred/genes.gff",
+			sampleRoot => $curOutDir,
 						assembly => $finAssLoc,
 						mapD => "$finalMapDir",normIndels => $MFopt{normSNPindels},
 						SNPcaller => $MFopt{SNPcallerFlag},hasPrimaryRds => $map{$curSmpl}{hasPrimaryRds},
@@ -1970,6 +1948,116 @@ exit(0);
 #####################################################
 #
 #####################################################
+
+sub sampleCompletionRequestSignature {
+	my ($sampleKey) = @_;
+	my @memberKeys = exists($map{$sampleKey}{AG_members})
+		? @{$map{$sampleKey}{AG_members}} : ($sampleKey);
+	my @mapFields = qw(
+		SmplID AssGroup MapGroup ExcludeAssem hasPrimaryRds SupportReads
+		SeqTech SeqTechSingl
+	);
+	my %sampleDefinition = map {
+		my $key = $_;
+		($key => (defined($map{$sampleKey}{$key}) ? $map{$sampleKey}{$key} : ''))
+	} @mapFields;
+	$sampleDefinition{assembly_members} = [
+		map { defined($map{$_}{SmplID}) ? $map{$_}{SmplID} : $_ } @memberKeys
+	];
+
+	my @optionKeys = qw(
+		DoAssembly pseudoAssembly map2Assembly mapSupport2Assembly
+		mapModeActive mapModeCovDo mapModeTogether DoMapModeDecoy
+		refDBall bwt2NameAll Do2ndMapSNP
+		DoMetaBat2 useCheckM1 useCheckM2 minBinnerAssemblyMB
+		kmerAssembly kmerPerGene
+		DoConsSNP DoSuppConsSNP saveVCF saveConsFastas normSNPindels
+		SNPcallerFlag callSVs callSVsSupp SVcallerFlag
+		DoNonPareil calcOrthoPlacement DoCalcD2s DoGenoSizeEst
+		DoDiamond reqDiaDB DoKraken DoRibofind doRiboAssembl
+		DoMOTU2 DoMetaPhlan DoTaxaTarget humanFilter
+		doReadMerge usePorechop
+	);
+	my @configKeys = qw(
+		unpackZip uploadRawRds defaultContigSubs remove_reads_tmpDir
+		rmScratchTmp skipSmallSmplsMB
+	);
+	my %requested = map {
+		my $key = $_;
+		($key => (defined($MFopt{$key}) ? $MFopt{$key} : ''))
+	} @optionKeys;
+	my %configuration = map {
+		my $key = $_;
+		($key => (defined($MFconfig{$key}) ? $MFconfig{$key} : ''))
+	} @configKeys;
+
+	return completion_request_signature({
+		completion_contract => 1,
+		metagstats_schema => [_smpl_stats_columns()],
+		operation_mode => $runOptions{operationMode},
+		sample => \%sampleDefinition,
+		requested => \%requested,
+		configuration => \%configuration,
+	});
+}
+
+sub sampleCompletionForcedInvalidation {
+	my @requested;
+	for my $key (qw(redoFails redoCS unfiniRew rmBinFailAssmbly)) {
+		push @requested, $key if $MFconfig{$key};
+	}
+	for my $key (qw(
+		redoAssembly redoAssMapping BinnerRedoAll BinnerRedoEmpty
+		redoSNPcons redoSNPgene rewriteGenePred rewriteDiamond
+		redoDiamondParse rewriteAllIfAnyDiamond RedoKraken
+		RedoRiboFind RedoRiboAssign MapRewrite2nd redoMapping
+	)) {
+		push @requested, $key if $MFopt{$key};
+	}
+	return @requested;
+}
+
+sub createSampleCompletionSentinel {
+	my (%args) = @_;
+	for my $required (qw(
+		sample_root sample_name input_label input_dir assembly_dir
+		request_signature
+	)) {
+		die "sample completion argument '$required' is required\n"
+			unless defined($args{$required});
+	}
+
+	my $started = clock_gettime(CLOCK_MONOTONIC);
+	reset_stats_log_sampling();
+	%locStats = ();
+	my $metagstats = {
+		DIR => $args{input_label},
+		values => smplStats(
+			$args{input_dir}, $args{assembly_dir}, $args{sample_name},
+		),
+	};
+	my $path = write_sample_completion(
+		root => $args{sample_root},
+		sample => $args{sample_name},
+		request_signature => $args{request_signature},
+		present_assembly => $args{present_assembly},
+		metagstats => $metagstats,
+	);
+	printf "Closed sample %s in %.2f s; cached metagStats in %s\n",
+		$args{sample_name}, clock_gettime(CLOCK_MONOTONIC) - $started, $path
+		unless $MFconfig{silent};
+
+	my $sampling = stats_log_sampling_summary();
+	if ($sampling->{large_files}) {
+		my $compressedNote = $sampling->{compressed_files}
+			? sprintf(", including %d compressed stream(s) scanned in bounded memory",
+				$sampling->{compressed_files}) : '';
+		printf "Statistics log safeguard sampled %d log(s) over 5 MiB: retained %.2f of %.2f MiB%s.\n",
+			$sampling->{large_files}, $sampling->{retained_bytes} / 1048576,
+			$sampling->{source_bytes} / 1048576, $compressedNote;
+	}
+	return $path;
+}
 
 sub cleanupCompletionRequirements {
 	my (%args) = @_;
@@ -2357,17 +2445,26 @@ sub postprocess{
 	#global clean up cmds (like DB removals from scratch)
 	print "Postprocessing:\n";
 	my $statsStarted = clock_gettime(CLOCK_MONOTONIC);
-	reset_stats_log_sampling();
 	if ($MFconfig{alwaysDoStats}) {
+		$runReport{samples} = {};
+		$runReport{present_assemblies} = 0;
+		$runReport{empty_samples} = {};
 		for my $sampleName (@{$runReport{order}}) {
 			my $context = $runReport{context}{$sampleName} || next;
-			%locStats = ();
-			$runReport{samples}{$sampleName} = {
-				DIR => $context->{DIR},
-				values => smplStats(
-					$context->{input_dir}, $context->{assembly_dir}, $sampleName,
-				),
-			};
+			my ($closedSample, $error) = read_sample_completion(
+				path => $context->{sentinel},
+				sample => $sampleName,
+				request_signature => $context->{request_signature},
+			);
+			if (!$closedSample) {
+				warn "Skipping metagStats for open sample $sampleName ($error)\n"
+					unless $error eq 'missing';
+				next;
+			}
+			$runReport{samples}{$sampleName} = $closedSample->{metagstats};
+			$runReport{present_assemblies}++ if $closedSample->{present_assembly};
+			$runReport{empty_samples}{$sampleName} = $closedSample->{empty_input_size_mb}
+				if $closedSample->{empty_sample};
 		}
 	}
 	my $statsCollectionSeconds = clock_gettime(CLOCK_MONOTONIC) - $statsStarted;
@@ -2418,15 +2515,6 @@ sub postprocess{
 			+ clock_gettime(CLOCK_MONOTONIC) - $statsWriteStarted;
 		printf "Created sample summary table for %d sample(s) in %.2f s.\n",
 			scalar(keys %{$runReport{samples}}), $statsSeconds;
-		my $sampling = stats_log_sampling_summary();
-		if ($sampling->{large_files}) {
-			my $compressedNote = $sampling->{compressed_files}
-				? sprintf(", including %d compressed stream(s) scanned in bounded memory",
-					$sampling->{compressed_files}) : '';
-			printf "Statistics log safeguard sampled %d log(s) over 5 MiB: retained %.2f of %.2f MiB%s.\n",
-				$sampling->{large_files}, $sampling->{retained_bytes} / 1048576,
-				$sampling->{source_bytes} / 1048576, $compressedNote;
-		}
 	}
 	print "Stats in $MGSfile \n";
 	if ($MFopt{writeStats} && (@{$runReport{order}} > $prevRep || !-e $MGShtml ) && -s $MGSfile ){
@@ -2858,6 +2946,7 @@ sub submitGenomeBinner{
 	if (binningOutputsComplete($MetaBat2out, $MFopt{useCheckM1}, $MFopt{useCheckM2})){
 		return;
 	}
+	invalidate_sample_completion($_) for @paths;
 	#die "$MetaBat2out\n";
 	my $totMem = 80;#80;
 	$totMem = 90 if ($CM1done || !$MFopt{useCheckM1});
@@ -4433,6 +4522,7 @@ sub runContigStats{
 	#die;
 	#die "$CSfilesComplete";
 	return ("","",0) if ($CSfilesComplete);
+	invalidate_sample_completion($path);
 	
 	print "Deferring Contig Stats until its assembly-group mapping is submitted\n"
 		unless ($immSubm);
@@ -8219,6 +8309,7 @@ sub scndMap2Genos{
 		
 		if ($calc2ndMapSNP){ #2nd mapping SNP calling (consensus) (not assembly!!)
 			my %SNPinfo = (
+			sampleRoot => $curOutDir,
 				assembly => "$bwt2outD[$i]/$bwt2ndMapNmds[$i].fa",#$DBbtRefX[$i],
 				MAR => ["$bwt2outD[$i]/$bamBaseNameS[$i]-smd.bam"],
 				SNPcaller => $MFopt{SNPcallerFlag},bamcram=>"bam",normIndels => $MFopt{normSNPindels},

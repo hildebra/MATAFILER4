@@ -10,6 +10,7 @@ use Mods::GenoMetaAss qw(systemW);
 use Mods::Binning qw (runMetaBat runCheckM runSemiBin runMetaDecoder getBinSubdirName runGenomeFace runSCGBinner emptyBinnerAssignmentCommand );
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive );
+use Mods::SampleCompletion qw(invalidate_sample_completion);
 
 
 #perl /hpc-home/hildebra/dev/MATAF4//secScripts/assemblies/runBinners.pl -binner 5 -binD /hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia//assemblies/metag//Binning/SC// -smplID "S4qia" -tmpD /hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia//assemblies/metag//Binning/tmp/ -assmbl /hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia//assemblies/metag//scaffolds.fasta.filt -assmblGrp 5 -cores 9 -smplDirs /hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia/ -seqTec "hybrid" -logDir "/hpc-home/hildebra/dev/MATAF4/examples/output/2.testPB/S4qia/LOGandSUB" ;
@@ -23,7 +24,8 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive );
 #v0.15: validate every BAM/CRAM sequence dictionary before binning
 #v0.16: publish an empty result when the assembly is below the configured size
 #v0.17: size SCGBinner batches from >=1 kb contigs and guard empty training input
-my $version = 0.17;
+#v0.18: invalidate sample completion sentinels before changing binning outputs
+my $version = 0.18;
 
 
 my $DoMetaBat2 = "";
@@ -80,6 +82,7 @@ for my $directory ($BinDir, $nodeSpTmpD2) {
 
 
 my @paths = split /,/,$pathsPre;
+invalidate_sample_completion($_) for @paths;
 my $BinnerName = getBinSubdirName($DoMetaBat2);
 if ($logDir eq ""){
 	$logDir = $BinDir;

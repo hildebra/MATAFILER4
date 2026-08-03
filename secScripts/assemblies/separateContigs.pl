@@ -11,6 +11,7 @@ use File::Spec;
 use Mods::GenoMetaAss qw(systemW is_integer reverse_complement_IUPAC gzipopen fileGZs fileGZe contig_stats_coverage_complete);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
 use Mods::phyloTools qw( getE100);
+use Mods::SampleCompletion qw(invalidate_sample_completion);
 
 
 sub readFasta;
@@ -44,6 +45,7 @@ die "-inD, -assD, -subparts and -smplID are required\n"
 die "-threads must be a positive integer\n" unless $Nthreads > 0;
 $inD =~ s{[\\/]+$}{};
 $assD =~ s{[\\/]+$}{};
+invalidate_sample_completion($inD);
 $inD .= "/";
 $assD .= "/";
 my $tmpRoot = length($tmpD) ? $tmpD : File::Spec->catdir($inD, 'tmp');

@@ -94,11 +94,13 @@ close $mataf4_fh or die "Cannot close MATAF4.pl: $!";
 my ($postprocess_code) = $mataf4_stats =~ /(sub postprocess.*?)(?=\nsub spaceInAssGrp)/s;
 ok(defined($postprocess_code), 'postprocessing can be isolated for performance checks');
 like($postprocess_code,
-	qr/my \$statsStarted = clock_gettime\(CLOCK_MONOTONIC\).*?values\s*=>\s*smplStats\s*\(.*?my \$statsCollectionSeconds.*?my \$statsWriteStarted.*?_metag_stats_text.*?rename \$temporary, \$MGSfile.*?Created sample summary table/s,
-	'summary timing covers sample collection plus table serialization and publication');
-like($postprocess_code,
-	qr/reset_stats_log_sampling\(\).*?stats_log_sampling_summary\(\).*?Statistics log safeguard/s,
-	'postprocessing resets and reports oversized statistics-log sampling');
+	qr/read_sample_completion\(.*?\$closedSample->\{metagstats\}.*?my \$statsCollectionSeconds.*?my \$statsWriteStarted.*?_metag_stats_text.*?rename \$temporary, \$MGSfile.*?Created sample summary table/s,
+	"summary timing covers sentinel reads plus table serialization and publication");
+my ($completion_stats_code) = $mataf4_stats =~ /(sub createSampleCompletionSentinel.*?)(?=\nsub cleanupCompletionRequirements)/s;
+ok(defined($completion_stats_code), "sample closure statistics can be isolated");
+like($completion_stats_code,
+	qr/reset_stats_log_sampling\(\).*?values\s*=>\s*smplStats\s*\(.*?write_sample_completion\(.*?stats_log_sampling_summary\(\).*?Statistics log safeguard/s,
+	"sample closure caches statistics and reports oversized log sampling");
 my ($sample_stats_code) = $mataf4_stats =~ /(sub smplStats .*?)(?=\n# smplStats is implemented)/s;
 ok(defined($sample_stats_code), 'per-sample statistics implementation can be isolated');
 my @sdm_log_globs = $sample_stats_code =~ /glob\("\$inD\/LOGandSUB\/sdm\/filter\*\.log"\)/g;

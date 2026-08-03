@@ -26,6 +26,7 @@ MATAFILER4 creates many intermediate and final files. For most downstream analys
 ```text
 #OutPath/#RunID/metagStats.txt
 #OutPath/#RunID/metagStatsReport.html
+#OutPath/#RunID/<SmplID>/MATAFILER.sample.complete.json
 #OutPath/#RunID/<SmplID>/assemblies/
 #OutPath/#RunID/<SmplID>/assemblies/metag/genePred/
 #OutPath/#RunID/<SmplID>/assemblies/metag/ContigStats/
@@ -111,6 +112,18 @@ mapping/
 ```
 
 The exact files depend on the run flags. A minimal completed assembly usually contains the assembly FASTA files, assembly statistics, contig statistics, gene predictions and mapping-derived coverage information.
+
+### Sample completion sentinel
+
+After every requested sample output and final cleanup check succeeds, or an empty/too-small sample reaches its terminal cleanup, MATAFILER4 atomically publishes:
+
+```text
+#OutPath/#RunID/<SmplID>/MATAFILER.sample.complete.json
+```
+
+This versioned JSON record is the authoritative closed-sample marker. It records the sample identity, a SHA-256 signature of the sample definition and requested workflow, whether an assembly is present, and the complete `DIR` plus named values needed for that sample row in `metagStats.txt`. Later loop visits can therefore confirm completion with one small read, and run-level summary generation does not rescan sample outputs or large log files.
+
+MATAFILER4 removes the sentinel before proceeding when the workflow signature changes, a redo request is active, or the record is invalid. ContigStats, SNP, and binner entry points also remove it before modifying sample outputs; assembly-group binning invalidates every member sample. The sentinel is recreated only after the full completion and cleanup gate passes again. It should not be created or edited manually.
 
 ### `assemblies/`
 
