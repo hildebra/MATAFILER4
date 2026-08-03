@@ -11,7 +11,7 @@ use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(resetAsGrps contig_stats_coverage_complete);
 use Mods::IO_Tamoc_progs qw(inputFmtSpades);
 use Mods::WorkflowControl qw(
-	advance_loop_window overlap_loop_window rolling_completed_frontier priority_outputs_complete parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
+	advance_loop_window overlap_loop_window rolling_completed_frontier rolling_loop_transition priority_outputs_complete parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs balanced_parallel_batches hybrid_group_ready
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
@@ -159,6 +159,27 @@ $window = advance_loop_window(
 is_deeply($window, {
 	from => 600, to => 600, loop_count => 0, reset_index => 599, has_window => 0,
 }, 'window loop terminates without returning to earlier samples');
+
+my $transition = rolling_loop_transition(
+	from => 500, to => 600, upper => 600, loop_count => 3, window_size => 250,
+);
+is_deeply($transition, {action => 'repeat', to => 600},
+	'a nonempty final partial window retains its remaining loop passes');
+$transition = rolling_loop_transition(
+	from => 600, to => 600, upper => 600, loop_count => 3, window_size => 250,
+);
+is_deeply($transition, {action => 'verify', to => 600},
+	'an exhausted frontier cannot repeat an empty range even with loop passes remaining');
+$transition = rolling_loop_transition(
+	from => 250, to => 500, upper => 600, loop_count => 0, window_size => 250,
+);
+is_deeply($transition, {action => 'expand', to => 600},
+	'a completed rolling range admits the capped final partial window');
+$transition = rolling_loop_transition(
+	from => 500, to => 600, upper => 600, loop_count => 0, window_size => 250,
+);
+is_deeply($transition, {action => 'verify', to => 600},
+	'an exhausted nonempty final window proceeds to full-range verification');
 
 my $overlap = overlap_loop_window(
 	to => 250, upper => 600, window_size => 250, submitted_jobs => 12,
@@ -502,8 +523,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?my \$MATFILER_ver = 4\.27;/s,
-	'MATAFILER history retains shared input discovery through version 4.27');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?my \$MATFILER_ver = 4\.28;/s,
+	'MATAFILER history retains shared input discovery through version 4.28');
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');

@@ -9,6 +9,7 @@ our @EXPORT_OK = qw(
 	advance_loop_window
 	overlap_loop_window
 	rolling_completed_frontier
+	rolling_loop_transition
 	priority_outputs_complete
 	parse_loop_spec
 	should_rerun_locked_window
@@ -372,6 +373,29 @@ sub overlap_loop_window {
 		extended => $should_extend ? 1 : 0,
 		job_limit => $job_limit,
 	};
+}
+
+sub rolling_loop_transition {
+	my (%args) = @_;
+	my $from = 0 + $args{from};
+	my $to = 0 + $args{to};
+	my $upper = 0 + $args{upper};
+	my $loop_count = 0 + ($args{loop_count} || 0);
+	my $window = 0 + ($args{window_size} || 0);
+	die 'rolling_loop_transition requires a valid selected range'
+		if $from < 0 || $from > $to || $to > $upper;
+	die 'rolling_loop_transition requires non-negative loop and window values'
+		if $loop_count < 0 || $window < 0;
+
+	if ($loop_count > 0 && $from < $to) {
+		return {action => 'repeat', to => $to};
+	}
+	if ($window > 0 && $to < $upper) {
+		my $next_to = $to + $window;
+		$next_to = $upper if $next_to > $upper;
+		return {action => 'expand', to => $next_to};
+	}
+	return {action => 'verify', to => $upper};
 }
 
 sub assembly_cores_for_input {

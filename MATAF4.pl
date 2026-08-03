@@ -15,6 +15,7 @@ use File::Path qw(make_path);
 use File::Spec;
 use Cwd 'abs_path';
 use POSIX;
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 use Getopt::Long qw( GetOptions );
 use List::Util qw(max sum);
 use Text::Wrap qw(wrap);
@@ -40,6 +41,11 @@ use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpa
 			buildMapperIdx mapperDBbuilt decideMapper  checkMapsDoneSH greaterComputeSpace);
 use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
+use Mods::StatsLogReader qw(
+	read_stats_log_excerpt
+	reset_stats_log_sampling
+	stats_log_sampling_summary
+);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
 use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred handleSubmissionFailure);
@@ -47,7 +53,7 @@ use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
 use Mods::WorkflowControl qw(
-	advance_loop_window overlap_loop_window rolling_completed_frontier priority_outputs_complete parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs parse_ignored_samples
+	advance_loop_window overlap_loop_window rolling_completed_frontier rolling_loop_transition priority_outputs_complete parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs parse_ignored_samples
 	balanced_parallel_batches
 	hybrid_group_ready hybrid_package_complete hybrid_package_sample_id missing_input_files source_input_files
 	hybrid_local_scratch_gb
@@ -160,7 +166,9 @@ sub createConsSNPandSVs;
 #       another full-range pass.
 #4.27: 2.8.26: discover input directories lazily during sample processing;
 #       retain the former all-sample startup scan only as an explicit precheck.
-my $MATFILER_ver = 4.27;
+#4.28: 3.8.26: force an exhausted rolling sample range into final full-range
+#       verification and audit every selected sample visit.
+my $MATFILER_ver = 4.28;
 
 #----------------- defaults ----------------- 
 
@@ -353,6 +361,7 @@ my $loopIterationExtended = 0;
 my $loopFinalLockRetryUsed = 0;
 my %loopSubmittedJobIds;
 my %loopSampleCompleted;
+my (%loopSampleVisited, %loopFinalSampleVisited);
 my $loopFinalVerification = 0;
 my $loopSawActiveLocks = 0;
 $QSBoptHR->{nonblockingMaxConcurrentJobs} = $runOptions{loopCount} ? 1 : 0;
@@ -377,6 +386,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		);
 	}
 	$curSmpl = $samples[$JNUM];
+	if ($runOptions{loopInitialCount}) {
+		$loopSampleVisited{$JNUM} = 1;
+		$loopFinalSampleVisited{$JNUM} = 1 if $loopFinalVerification;
+	}
 	
 	
 	#set up initial local paths for a given sample
@@ -1862,6 +1875,29 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#print "END2\n@sampleDeps\n".@sampleDeps."\n";
 }
 
+if ($runOptions{loopInitialCount}) {
+	my @selectedIndices = $selectedFrom < $selectedTo ? ($selectedFrom .. $selectedTo - 1) : ();
+	my @missingVisits = grep { !$loopSampleVisited{$_} } @selectedIndices;
+	my @missingFinalVisits = grep { !$loopFinalSampleVisited{$_} } @selectedIndices;
+	my @coverageProblems;
+	for my $failure (
+		['never visited', \@missingVisits],
+		['not final-verified', \@missingFinalVisits],
+	) {
+		my ($label, $indices) = @{$failure};
+		next unless @{$indices};
+		my @previewIndices = @{$indices};
+		splice @previewIndices, 10 if @previewIndices > 10;
+		my $preview = join(', ',
+			map { "$_=$samples[$_]" } @previewIndices,
+		);
+		push @coverageProblems, "$label ".scalar(@{$indices})
+			." sample(s) (first: $preview)";
+	}
+	die "loopTillComplete range audit failed: ".join('; ', @coverageProblems)."\n"
+		if @coverageProblems;
+}
+
 
 
 
@@ -2243,6 +2279,12 @@ sub loop2C_check(){
 						."active scan is $from -> $to.\n";
 				}
 			}
+			my $rollingTransition = $loopFinalVerification ? undef
+				: rolling_loop_transition(
+					from => $from, to => $to, upper => $selectedTo,
+					loop_count => $runOptions{loopCount},
+					window_size => $runOptions{loopWindowSize},
+				);
 
 			if ($loopFinalVerification) {
 				my @invocationJobIds = sort { $a <=> $b }
@@ -2280,13 +2322,12 @@ sub loop2C_check(){
 					$runOptions{loopCount} = 0;
 					print "Final full-range verification completed; sample statistics may now be collected.\n";
 				}
-			} elsif ($runOptions{loopCount}) {
+			} elsif ($rollingTransition->{action} eq 'repeat') {
 				$JNUM = $from - 1;
 				print "Reanalyzing rolling sample range $from till $to\n";
-			} elsif ($runOptions{loopWindowSize} > 0 && $to < $selectedTo) {
+			} elsif ($rollingTransition->{action} eq 'expand') {
 				my $previousTo = $to;
-				$to += $runOptions{loopWindowSize};
-				$to = $selectedTo if $to > $selectedTo;
+				$to = $rollingTransition->{to};
 				$runOptions{loopCount} = $runOptions{loopInitialCount};
 				$JNUM = $from - 1;
 				%loopSubmittedJobIds = ();
@@ -2313,6 +2354,8 @@ sub postprocess{
 	#print "\n\n###################################\nMain Loop done\n######################################\n";
 	#global clean up cmds (like DB removals from scratch)
 	print "Postprocessing:\n";
+	my $statsStarted = clock_gettime(CLOCK_MONOTONIC);
+	reset_stats_log_sampling();
 	if ($MFconfig{alwaysDoStats}) {
 		for my $sampleName (@{$runReport{order}}) {
 			my $context = $runReport{context}{$sampleName} || next;
@@ -2325,6 +2368,7 @@ sub postprocess{
 			};
 		}
 	}
+	my $statsCollectionSeconds = clock_gettime(CLOCK_MONOTONIC) - $statsStarted;
 	if (@{$QSBoptHR->{submissionErrors} || []}) {
 		print STDERR "MATAFILER continued after ".scalar(@{$QSBoptHR->{submissionErrors}})
 			." scheduler submission problem(s). Existing sample locks were retained; failed work can be retried on a later run.\n";
@@ -2361,12 +2405,26 @@ sub postprocess{
 	}
 
 	if (%{$runReport{samples}}) {
+		my $statsWriteStarted = clock_gettime(CLOCK_MONOTONIC);
 		my $statsText = _metag_stats_text($runReport{samples}, $runReport{order});
 		my $temporary = "$MGSfile.tmp.$$";
 		open my $statsFH, '>', $temporary or die "Cannot write temporary metagStats '$temporary': $!\n";
 		print {$statsFH} $statsText or die "Cannot write metagStats data: $!\n";
 		close $statsFH or die "Cannot close temporary metagStats '$temporary': $!\n";
 		rename $temporary, $MGSfile or die "Cannot promote metagStats '$temporary' to '$MGSfile': $!\n";
+		my $statsSeconds = $statsCollectionSeconds
+			+ clock_gettime(CLOCK_MONOTONIC) - $statsWriteStarted;
+		printf "Created sample summary table for %d sample(s) in %.2f s.\n",
+			scalar(keys %{$runReport{samples}}), $statsSeconds;
+		my $sampling = stats_log_sampling_summary();
+		if ($sampling->{large_files}) {
+			my $compressedNote = $sampling->{compressed_files}
+				? sprintf(", including %d compressed stream(s) scanned in bounded memory",
+					$sampling->{compressed_files}) : '';
+			printf "Statistics log safeguard sampled %d log(s) over 5 MiB: retained %.2f of %.2f MiB%s.\n",
+				$sampling->{large_files}, $sampling->{retained_bytes} / 1048576,
+				$sampling->{source_bytes} / 1048576, $compressedNote;
+		}
 	}
 	print "Stats in $MGSfile \n";
 	if ($MFopt{writeStats} && (@{$runReport{order}} > $prevRep || !-e $MGShtml ) && -s $MGSfile ){
@@ -7525,32 +7583,30 @@ sub _parse_sdm_stats_text {
 
 sub _sdm_histogram_max_length {
 	my ($inD) = @_;
-	my $MaxLengthHistBased = 0;
-	my $length_histogram = getFileStr("$inD/LOGandSUB/sdm/filter_lenHist.txt",0);
-	if ($length_histogram ne '') {
-		my @lines = split(/\n/, $length_histogram);
-		$MaxLengthHistBased = $1 if @lines && $lines[-1] =~ m/^(\d+)\s/;
-	}
-	return $MaxLengthHistBased;
+	my $lengthTail = read_stats_log_excerpt("$inD/LOGandSUB/sdm/filter_lenHist.txt",
+		mode => 'tail', tail_lines => 20);
+	my @lengths = ($lengthTail =~ /^(\d+)\s/mg);
+	return @lengths ? $lengths[-1] : 0;
 }
 
 sub sdmStats {
 	my ($inF,$inD,$suffix) = @_;
 	my $MaxLengthHistBased = _sdm_histogram_max_length($inD);
-	my $filStats = getFileStr($inF,0,70);
+	my $filStats = read_stats_log_excerpt($inF, mode => 'tail', tail_lines => 70);
 	return _parse_sdm_stats_text($filStats, $MaxLengthHistBased, $suffix);
 }
 
 sub sdmStatsMany {
-	my ($files, $inD, $suffix) = @_;
+	my ($files, $inD, $suffix, $MaxLengthHistBased) = @_;
 	my @countFields = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2);
 	my @averageFields = qw(AvgSeqLen AvgSeqQual accErr);
 	my %combined = map { $_ => 0 } (@countFields, @averageFields, 'MaxSeqLength');
 	my %averageWeights;
-	my $MaxLengthHistBased = _sdm_histogram_max_length($inD);
+	$MaxLengthHistBased = _sdm_histogram_max_length($inD)
+		unless defined $MaxLengthHistBased;
 	foreach my $file (@{$files || []}) {
 		next unless defined($file) && $file ne '';
-		my $filStats = getFileStr($file,0,70);
+		my $filStats = read_stats_log_excerpt($file, mode => 'tail', tail_lines => 70);
 		next if $filStats eq '';
 		my $stats = _parse_sdm_stats_text($filStats, $MaxLengthHistBased, '');
 		my $weight = ($stats->{totRds} || 0) + 0;
@@ -7612,8 +7668,8 @@ sub getMapStats{
 	$inFi = "$inP/bwtMap.sh.etxt" if (!-e $inFi && -e "$inP/bwtMap.sh.etxt"); #old MF file names..
 	#my $outStrDesc = "";
 	my @spl = ();
-	my $alignStats = getFileStr($inFi,0);
-	if (-s $inFi){
+	my $alignStats = read_stats_log_excerpt($inFi);
+	if ($alignStats ne ''){
 		@spl = split(/\n/,$alignStats);
 	}
 	#die "$alignStats\n";
@@ -7692,7 +7748,7 @@ sub optiDups{
 	$inFi = "$inP/bwtMap2.sh.etxt" if (!-e $inFi); #old MF file names..
 	#my $outStrDesc = "";
 	$locStats{duplOptic}=0; $locStats{duplPCR}=0;$locStats{duplPass}=0; $locStats{EstLibSize} = 0;
-	my $doDup = 0;my $alignStats2 = getFileStr($inFi,0);
+	my $doDup = 0;my $alignStats2 = read_stats_log_excerpt($inFi);
 	if ($alignStats2 ne "" ){if (defined ($alignStats2)){$doDup=1;}}
 	if ($doDup){
 		
@@ -7730,7 +7786,7 @@ sub getContamination{
 		"FilteredContaRds$suffix" => '',
 		"FilteredNonContaRds$suffix" => '',
 	);
-	my $filStats = getFileStr($inFi,0);#`cat $inD/LOGandSUB/KrakHS.sh.etxt`; chomp $filStats;
+	my $filStats = read_stats_log_excerpt($inFi);
 	#if ($filStats eq "" ){$outStr .= "?\t?\t?\t";	return ($outStr,$outStrDesc);}
 	
 	my @matches = ($filStats =~ m/\d+ sequences classified \((\d+\.?\d*)%\)/g);
@@ -7738,7 +7794,7 @@ sub getContamination{
 	my @nonhits = ($filStats =~ m/(\d+) sequences unclassified \(\d+\.?\d*%\)/g);
 	
 	if (@nonhits == 0){#check if this was done via hostile..
-		$filStats = getFileStr($inFi2,0); #paired reads should be counted as two.. but are counted as one in hostile..
+		$filStats = read_stats_log_excerpt($inFi2); #paired reads should be counted as two.. but are counted as one in hostile..
 		@hits = ($filStats =~ m/"reads_removed": (\d*),/g); #"reads_removed": 202,
 		@nonhits = ($filStats =~ m/"reads_out": (\d*),/g); 
 		@matches = ($filStats =~ m/"reads_removed_proportion": (\d*),/g); 
@@ -7790,7 +7846,7 @@ sub getBinnerStats{
 
 sub getSNPStats{
 	my ($inFi) = @_;
-	my $geneStats = getFileStr("${inFi}.etxt",0);
+	my $geneStats = read_stats_log_excerpt("${inFi}.etxt");
 	my @columns = qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved SNPsPerMbp INDEL_Num INDEL_Passed INDELsPerMbp);
 	my %empty = map { $_ => '' } @columns;
 	my $has_stats = 0;
@@ -7807,7 +7863,7 @@ sub getSNPStats{
 		#$outStr = "$bps\t$entrs\t$confl\t$resol\t$snpNum\t";
 		
 	} else { #try in .otxt
-		$geneStats = getFileStr("${inFi}.otxt",0);
+		$geneStats = read_stats_log_excerpt("${inFi}.otxt");
 		if ($geneStats =~ m/Total bp that can be determined: (\d+) in (\d+) entries./){
 			$has_stats = 1;
 			$bps = $1; $entrs=$2;
@@ -7832,25 +7888,20 @@ sub getGeneStats{
 	my ($inFi) = @_;
 	my @columns = qw(GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes Gcomplete G5pComplete G3pComplete Gincomplete);
 	my %result = map { $_ => '' } @columns;
-	my $geneStats = getFileStr("$inFi",0);
-	my @spl1 = split("\n", $geneStats);
-
-	#if (!-e "$inFi" || -s "$inFi" == 0){	
-	#	return ($outStr, $outStrDesc);
-	#}
-	#open I,"<$inFi" or die $!; 
-	#GeneNumber	AvgGeneLength	AvgComplGeneLength	BpGenes	BpNotGenesGcomplete	G5pComplete	G3pComplete	Gincomplete
-	#my $tmp ="";$tmp = <I>;#if (defined($tmp)){chomp($tmp);$outStrDesc .= $tmp."\t";}$tmp = <I>;
-	#while (my $tmp = <I>){
-	foreach my $tmp (@spl1){
-		chomp($tmp);#$outStr = $tmp."\t"; $outStr5 .= $tmp."\t" if ($do500Stat); 
-		next if ($tmp =~ m/^GeneNumber/);
-		my @spl = split /\t/,$tmp; 
-		#print @spl . " @spl\n";
-		if (@spl >=9){
-			@result{@columns} = @spl[0..8];
+	return \%result unless -s $inFi;
+	open my $geneFH, '<', $inFi or do {
+		warn "Cannot read gene statistics '$inFi': $!\n";
+		return \%result;
+	};
+	while (my $line = <$geneFH>) {
+		$line =~ s/[\r\n]+$//;
+		next if $line eq '' || $line =~ /^GeneNumber/;
+		my @fields = split /\t/, $line;
+		if (@fields >= 9) {
+			@result{@columns} = @fields[0..8];
 		}
 	}
+	close $geneFH or warn "Cannot close gene statistics '$inFi': $!\n";
 	return \%result;
 }
 sub getASsemblyStats{
@@ -7886,10 +7937,17 @@ sub getASsemblyStats{
 	if ($assStats ne '') { $result{CircCtgs} = 0; $result{CircCtgG1M} = 0; }
 	if ($doCirc && -e "$tmpassD/scaffolds.fasta.circ"){
 		$result{CircCtgs} = 0; $result{CircCtgG1M} = 0;
-		$assStats = getFileStr("$tmpassD/scaffolds.fasta.circ",0);
-		$result{CircCtgs} = $assStats =~ tr/>//;
-		my @matchs = ($assStats =~ m/.*_L=(\d+)=/g);
-		foreach(@matchs){$result{CircCtgG1M}++ if ($_ > 1000000);}
+		my $circPath = "$tmpassD/scaffolds.fasta.circ";
+		if (open my $circFH, '<', $circPath) {
+			while (my $header = <$circFH>) {
+				next unless $header =~ /^>/;
+				$result{CircCtgs}++;
+				$result{CircCtgG1M}++ if $header =~ /_L=(\d+)=/ && $1 > 1000000;
+			}
+			close $circFH or warn "Cannot close circular-contig FASTA '$circPath': $!\n";
+		} else {
+			warn "Cannot read circular-contig FASTA '$circPath': $!\n";
+		}
 	}
 	return \%result;
 }
@@ -7971,22 +8029,26 @@ sub smplStats {
 	# Raw-upload preparation is submitted before read cleaning.
 	$merge->(getContamination("$inD/LOGandSUB/prepEBI.sh.etxt", "$inD/LOGandSUB/prepEBI.sh.otxt", 'EBI'));
 
-	my @primary_logs = grep { $_ !~ /filterSuppl/ } glob("$inD/LOGandSUB/sdm/filter*.log");
+	my @sdm_logs = glob("$inD/LOGandSUB/sdm/filter*.log");
+	my @primary_logs = grep { $_ !~ /filterSuppl/ } @sdm_logs;
+	my @support_logs = grep { $_ =~ /filterSuppl/ } @sdm_logs;
 	@primary_logs = ("$inD/LOGandSUB/sdmReadCleaner.sh.etxt")
 		if (!@primary_logs && -s "$inD/LOGandSUB/sdmReadCleaner.sh.etxt");
+	@support_logs = ("$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt")
+		if (!@support_logs && -s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt");
+	my $sdmHistogramMax = (@primary_logs || @support_logs)
+		? _sdm_histogram_max_length($inD) : 0;
+
 	if (@primary_logs) {
-		my $stats = sdmStatsMany(\@primary_logs, $inD, '');
+		my $stats = sdmStatsMany(\@primary_logs, $inD, '', $sdmHistogramMax);
 		$merge->($stats);
 		my $accepted = ($stats->{Accepted1} || 0) + ($stats->{Accepted2} || 0);
 		$values{SDMAcceptedPercent} = sprintf('%.3f', 100 * $accepted / $stats->{totRds})
 			if (($stats->{totRds} || 0) > 0);
 		$locStats{$_} = $stats->{$_} for qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2);
 	}
-	my @support_logs = glob("$inD/LOGandSUB/sdm/filterSuppl*.log");
-	@support_logs = ("$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt")
-		if (!@support_logs && -s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt");
 	if (@support_logs) {
-		my $stats = sdmStatsMany(\@support_logs, $inD, '_Sup');
+		my $stats = sdmStatsMany(\@support_logs, $inD, '_Sup', $sdmHistogramMax);
 		$merge->($stats);
 		my $accepted = ($stats->{Accepted1_Sup} || 0) + ($stats->{Accepted2_Sup} || 0);
 		$values{SDMAcceptedPercent_Sup} = sprintf('%.3f', 100 * $accepted / $stats->{totRds_Sup})
@@ -7997,7 +8059,7 @@ sub smplStats {
 	$merge->($contamination);
 	$locStats{contamination} = $contamination->{FilteredContaRdsPerc};
 
-	my $text = getFileStr("$inD/LOGandSUB/flashMrg.sh.otxt",0);
+	my $text = read_stats_log_excerpt("$inD/LOGandSUB/flashMrg.sh.otxt");
 	my @mergedCounts = $text =~ /\[FLASH\]\s+Combined pairs:\s+(\d+)/g;
 	my @unmergedCounts = $text =~ /\[FLASH\]\s+Uncombined pairs:\s+(\d+)/g;
 	$values{Merged} = sum(@mergedCounts) if @mergedCounts;

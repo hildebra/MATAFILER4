@@ -151,7 +151,7 @@ like($mataf4,
 	qr/qsubSystemJobAlive\s*\([^;]+;\s*.*?runAutomaticWorkflowPreflight\(\$workflowIteration\).*?resetAsGrps/s,
 	'loopTillComplete runs the repeated preflight after waiting and before resetting group state');
 like($mataf4,
-	qr/No jobs were submitted in the current iteration.*?elsif \(\$runOptions\{loopCount\}\).*?\$JNUM = \$from - 1/s,
+	qr/No jobs were submitted in the current iteration.*?rolling_loop_transition\(.*?elsif \(\$rollingTransition->\{action\} eq 'repeat'\).*?\$JNUM = \$from - 1/s,
 	'loopTillComplete only resets the sample index when another iteration is needed');
 like($mataf4,
 	qr/\$lastWindowPass = \$runOptions\{loopCount\} == 1.*?overlap_loop_window\(.*?submitted_jobs => \$submittedThisIteration.*?last_pass => \$lastWindowPass.*?if \(\$overlapWindow->\{extended\}\).*?\$runOptions\{loopCount\} = \$runOptions\{loopInitialCount\}.*?return;/s,
@@ -186,6 +186,12 @@ like($mataf4,
 like($mataf4, qr/Starting final full-range verification pass/,
 	'a normal loop end starts a mandatory all-sample verification pass');
 like($mataf4,
+	qr/elsif \(\$rollingTransition->\{action\} eq 'repeat'\).*?elsif \(\$rollingTransition->\{action\} eq 'expand'\).*?else \{\s*\$loopFinalVerification = 1/s,
+	'every non-repeat/non-expand rolling state enters final verification');
+like($mataf4,
+	qr/\$loopSampleVisited\{\$JNUM\} = 1.*?\$loopFinalSampleVisited\{\$JNUM\} = 1.*?loopTillComplete range audit failed/s,
+	'loopTillComplete fails loudly if overall or final-verification coverage is incomplete');
+like($mataf4,
 	qr/if \(\$loopFinalVerification\).*?keys %\{\$QSBoptHR->\{submittedJobRecords\} \|\| \{\}\}.*?numLiveUserJobs\(\$QSBoptHR, 1, \\\@invocationJobIds\).*?qsubSystemJobAlive\(\\\@invocationJobIds, \$QSBoptHR, 1\).*?\$from = \$selectedFrom;.*?\$to = \$selectedTo;.*?\$runOptions\{loopCount\} = 1;.*?\$JNUM = \$from - 1/s,
 	'the first full-range verification waits for all jobs from this invocation before another full pass');
 like($mataf4,
@@ -215,7 +221,7 @@ like($mataf4,
 unlike($mataf4,
 	qr/die "Deferred job submission failed:/,
 	'the formerly fatal deferred sbatch path has been removed');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?my \$MATFILER_ver = 4\.27/s,
-	'MATAFILER history retains loop triggering changes through version 4.27');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?my \$MATFILER_ver = 4\.28/s,
+	'MATAFILER history retains loop triggering changes through version 4.28');
 
 done_testing;
