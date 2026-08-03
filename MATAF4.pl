@@ -391,12 +391,6 @@ primeLoopSchedulerSnapshot($from, $to) if $runOptions{loopCount};
 #die $to."\n";
 #for loop that goes over every single sample in the .map
 for ($JNUM=$from; $JNUM<$to;$JNUM++){
-	
-	unless ($runOptions{loopCount}) {
-		qsubSystemWaitMaxJobs(
-			$MFconfig{checkMaxNumJobs}, $MFconfig{killDepNever}, $QSBoptHR,
-		);
-	}
 	$curSmpl = $samples[$JNUM];
 	if ($runOptions{loopInitialCount}) {
 		$loopSampleVisited{$JNUM} = 1;

@@ -209,9 +209,9 @@ like($mataf4,
 like($mataf4,
 	qr/sub postSubmQsub.*?qsubSystemWaitMaxJobs\(\s*\$MFconfig\{checkMaxNumJobs\}/s,
 	'deferred direct submissions also enforce the live-job cap');
-like($mataf4,
-	qr/nonblockingMaxConcurrentJobs.*?for \(\$JNUM=.*?unless \(\$runOptions\{loopCount\}\).*?qsubSystemWaitMaxJobs.*?\$curSmpl = \$samples\[\$JNUM\]/s,
-	'loopTillComplete keeps inspecting samples while only actual submissions yield at capacity');
+unlike($mataf4,
+	qr/for \(\$JNUM=.*?qsubSystemWaitMaxJobs.*?\$curSmpl = \$samples\[\$JNUM\]/s,
+	'completed samples do not query scheduler capacity before their completion gate');
 like($mataf4,
 	qr/capacityDeferred.*?same range will be revisited.*?sleep\(\$MFconfig\{schedulerPollSeconds\}\)/s,
 	'a capacity-deferred range retries after one bounded poll interval rather than busy-spinning');
