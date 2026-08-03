@@ -1477,6 +1477,7 @@ sub readMap{
 	my %trackPrefixs;
 	
 	my $DOWARN = 1;
+	my $mapColumnCount = 0;
 	my $warnDeactivateMsg = "In case you want to continue, insert \"#WARNING OFF\" underneath the header of your map file.\n";
 	
 	#print $inF."\n";
@@ -1507,6 +1508,7 @@ sub readMap{
 		my @spl = split(/\t/,$line,-1);
 		if ($cnt == 0){
 			#read column headers -> check for MATAFILER specific instructions
+			$mapColumnCount = scalar(@spl);
 			#die "@spl\n";
 			$smplCol = first_index { /^#SmplID$/ } @spl;
 			$dirCol = first_index { /^Path$/ } @spl;
@@ -1536,6 +1538,10 @@ sub readMap{
 			die "Either \"SmplPrefix\" or \"Path\" has to be second column in .map\n" unless ($dirCol == 1 || $SmplPrefixCol == 1);
 			next;
 		} #maybe later check for col labels etc
+		# Treat omitted trailing columns like explicitly empty tab-separated fields.
+		# This is useful for concise maps where optional columns (for example
+		# SupportReads and AssmblGrps) are declared but unused by a sample.
+		push @spl, ("") x ($mapColumnCount - @spl) if (@spl < $mapColumnCount);
 		my $smplPrefixUsed=0; my $samplePathUsed=0;
 		$Scnt++;
 		#die "1 $GlbTmpD 2 $NodeTmpD map\n";

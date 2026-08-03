@@ -117,6 +117,35 @@ is(
 	'assembly-group support summary has no synthetic leading comma',
 );
 
+my $bam_dir = "$tmp/bam_reads";
+make_path($bam_dir);
+touch_file("$bam_dir/QIBS1.hifi_reads.bam");
+touch_file("$bam_dir/QIBS10.hifi_reads.bam");
+my $bam_map_file = "$tmp/bam_only.map";
+open(my $bam_map_fh, '>', $bam_map_file) or die "Cannot create map: $!";
+print {$bam_map_fh} join("\t", '#SmplID', qw(SmplPrefix SeqTech SupportReads AssmblGrps)), "\r\n";
+print {$bam_map_fh} "#DirPath $bam_dir\r\n#OutPath $out_dir\r\n#RunID bam_run\r\n";
+print {$bam_map_fh} join("\t", 'QIBS1.', 'QIBS1.hifi_reads.bam', 'PB'), "\r\n";
+print {$bam_map_fh} join("\t", 'QIBS10', 'QIBS10.hifi_reads.bam', 'PB'), "\r\n";
+close($bam_map_fh);
+my $bam_map_warnings = '';
+my ($bam_map, $bam_groups);
+{
+	local $SIG{__WARN__} = sub { $bam_map_warnings .= join('', @_); };
+	($bam_map, $bam_groups) = readMap($bam_map_file, -1, {}, {}, 0);
+}
+is($bam_map_warnings, '', 'BAM-only map rows may omit unused trailing columns without warnings');
+is($bam_map->{'QIBS1.'}{SupportReads}, '', 'omitted SupportReads is treated as empty');
+is($bam_map->{'QIBS1.'}{AssGroup}, 0, 'omitted AssmblGrps gets an automatic group');
+my $bam_found = discoverReadFiles($bam_dir, 'QIBS1.', {
+	read1 => '', read2 => '', single => '', bam => '.*\.bam$', prefer_single => 0,
+});
+is_deeply(
+	$bam_found->{bam},
+	['QIBS1.hifi_reads.bam'],
+	'BAM-only primary input is discovered from its sample prefix',
+);
+
 my %assembly_groups = (groupA => { CleanSeqs => {}, RawSeqs => {}, InputOrder => [] });
 my $raw_b = {
 	pa1 => ['B.1.fq.gz'], pa2 => ['B.2.fq.gz'], pas => [], libInfo => ['B'], seqTech => 'ill',
