@@ -1,6 +1,8 @@
 use strict;
 use warnings;
 
+use Cwd qw(getcwd);
+use File::Temp qw(tempdir);
 use FindBin qw($Bin);
 use Test::More;
 
@@ -46,13 +48,18 @@ is_deeply(
 	'docs/flag_reference.md documents every accepted MATAF4.pl option and alias',
 );
 
-local $ENV{PERL5LIB} = join(
-	$^O eq 'MSWin32' ? ';' : ':',
-	$root,
-	grep { defined($_) && $_ ne '' } ($ENV{PERL5LIB}),
-);
-my $help = qx{"$^X" "$script" --help 2>&1};
-is($? >> 8, 0, '--help exits successfully');
+my $outside = tempdir(CLEANUP => 1);
+my $original_dir = getcwd();
+chdir($outside) or die "Cannot enter $outside: $!";
+my ($help, $help_status);
+{
+	local $ENV{PERL5LIB};
+	delete $ENV{PERL5LIB};
+	$help = qx{"$^X" "$script" --help 2>&1};
+	$help_status = $? >> 8;
+}
+chdir($original_dir) or die "Cannot return to $original_dir: $!";
+is($help_status, 0, '--help loads checkout-local modules and exits successfully outside the repository');
 like($help, qr/Usage:\s+MATAF4\.pl -map <mapping-file> \[options\]/,
 	'help shows command syntax');
 like($help, qr/read from docs\/flag_reference\.md/,

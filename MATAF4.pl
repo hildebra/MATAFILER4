@@ -9,6 +9,8 @@
 
 use warnings;
 use strict;
+use FindBin qw($RealBin);
+use lib $RealBin;
 use File::Basename;
 use File::Find ();
 use File::Path qw(make_path);
