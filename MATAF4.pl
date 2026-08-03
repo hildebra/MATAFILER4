@@ -5146,21 +5146,21 @@ sub sdmClean(){
 
 		if ($hasSingle) {
 			$outSingle = "$prefix.s.$fEnd" unless $hasPair;
-			my $tmpSingle = "$prefix.input-single.fq";
-			$cmd .= _shell_command('rm', '-f', '--', $tmpSingle)."\n";
+			# SDM selects gzip output from the .gz suffix. Write singleton-only
+			# libraries directly to their final destination; when paired output
+			# already occupies that path, append a second gzip member instead of
+			# materialising and recompressing an uncompressed FASTQ.
+			my $singleOutput = $hasPair ? "$prefix.input-single.$fEnd" : $outSingle;
+			$cmd .= _shell_command('rm', '-f', '--', $singleOutput)."\n";
 			$cmd .= _shell_command(
-				$sdmBin, '-i', $library->{files}{single}, '-o_fastq', $tmpSingle,
+				$sdmBin, '-i', $library->{files}{single}, '-o_fastq', $singleOutput,
 				'-options', $sdmSingleOpt, @sdmExtra, '-paired', 1,
 				'-log', "$sdmLogDir/$logStem.S$logSuffix.log", @libraryArgs, @sdmCut,
 			)."\n";
-			my $redirect = $hasPair ? '>>' : '>';
-			if ($MFopt{gzipSDMOut}) {
-				$cmd .= _shell_command($pigzBin, '-p', $integerSetting{sdmCores}, '-c', $tmpSingle)
-					." $redirect "._shell_quote($outSingle)."\n";
-			} else {
-				$cmd .= _shell_command('cat', '--', $tmpSingle)." $redirect "._shell_quote($outSingle)."\n";
+			if ($hasPair) {
+				$cmd .= _shell_command('cat', '--', $singleOutput)." >> "._shell_quote($outSingle)."\n";
+				$cmd .= _shell_command('rm', '-f', '--', $singleOutput)."\n";
 			}
-			$cmd .= _shell_command('rm', '-f', '--', $tmpSingle)."\n";
 			push @requiredOutputs, $outSingle unless $hasPair;
 		}
 

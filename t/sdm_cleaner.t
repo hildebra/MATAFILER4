@@ -103,6 +103,17 @@ like($cleaner, qr/filterSupplDone\.stone.*?filterDone\.stone|filterDone\.stone.*
 	'primary and support cleaning use independent checkpoints');
 like($cleaner, qr/_shell_command\(\s*\$sdmBin,/s,
 	'SDM commands quote executable, input, output, and option arguments');
+my ($singleCleaner) = $cleaner =~ /(if \(\$hasSingle\) \{.*?)(?=\n\t\tpush \@cleanLibraries)/s;
+like($singleCleaner,
+	qr/my \$singleOutput = \$hasPair \? "\$prefix\.input-single\.\$fEnd" : \$outSingle;.*?'-o_fastq', \$singleOutput/s,
+	'SDM writes singleton reads directly to a gzip-suffixed output');
+unlike($singleCleaner, qr/_shell_command\(\$pigzBin/,
+	'SDM singleton filtering does not recompress an uncompressed intermediate with pigz');
+like($singleCleaner,
+	qr/if \(\$hasPair\).*?_shell_command\('cat', '--', \$singleOutput\).*?\$outSingle/s,
+	'paired-plus-single libraries append the SDM gzip member directly');
+like($mataf4, qr/my \$pigzBin\s*=\s*getProgPaths\("pigz"\)/,
+	'MATAF4 resolves pigz through the configured program path');
 like($cleaner, qr/local \$QSBoptHR->\{tmpSpace\} = 0/,
 	'scheduler scratch settings are restored even if submission fails');
 like($cleaner, qr/grep \{ !-e \$_ \} \@requiredOutputs/,
