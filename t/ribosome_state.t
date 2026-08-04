@@ -8,7 +8,10 @@ use File::Temp qw(tempdir);
 use Test::More;
 
 use lib File::Spec->catdir(File::Spec->rel2abs('.'));
-use Mods::RibosomeState qw(prepare_ribosome_rerun);
+use Mods::RibosomeState qw(
+	normalise_ribosome_request
+	prepare_ribosome_rerun
+);
 use Mods::SampleCompletion qw(sample_completion_path);
 
 sub write_file {
@@ -55,6 +58,32 @@ sub populate_results {
 }
 
 my $root = tempdir(CLEANUP => 1);
+my %profile_redo = (
+	DoRibofind => 0,
+	RedoRiboFind => 1,
+	RedoRiboAssign => 0,
+);
+ok(normalise_ribosome_request(\%profile_redo),
+	'profile redo enables ribosomal profiling');
+is($profile_redo{DoRibofind}, 1,
+	'profile redo cannot fall through the no-work completion path');
+
+my %assignment_redo = (
+	DoRibofind => 0,
+	RedoRiboFind => 0,
+	RedoRiboAssign => 1,
+);
+ok(normalise_ribosome_request(\%assignment_redo),
+	'assignment redo enables ribosomal profiling');
+
+my %ordinary_request = (
+	DoRibofind => 0,
+	RedoRiboFind => 0,
+	RedoRiboAssign => 0,
+);
+ok(!normalise_ribosome_request(\%ordinary_request),
+	'ordinary runs do not enable ribosomal profiling');
+
 my $sample_root = File::Spec->catdir($root, 'S1');
 my $central_root = File::Spec->catdir($root, 'central results', 'RiboFind');
 my $sample = 'S1';

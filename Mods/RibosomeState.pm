@@ -10,7 +10,19 @@ use File::Spec;
 
 use Mods::SampleCompletion qw(invalidate_sample_completion);
 
-our @EXPORT_OK = qw(prepare_ribosome_rerun);
+our @EXPORT_OK = qw(
+	normalise_ribosome_request
+	prepare_ribosome_rerun
+);
+
+sub normalise_ribosome_request {
+	my ($options) = @_;
+	die "normalise_ribosome_request requires an option hash\n"
+		unless ref($options) eq 'HASH';
+	$options->{DoRibofind} = 1
+		if $options->{RedoRiboFind} || $options->{RedoRiboAssign};
+	return $options->{DoRibofind} ? 1 : 0;
+}
 
 sub _remove_tree_checked {
 	my ($path) = @_;

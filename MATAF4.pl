@@ -53,7 +53,10 @@ use Mods::SampleCompletion qw(
 	read_sample_completion write_sample_completion
 	invalidate_sample_completion
 );
-use Mods::RibosomeState qw(prepare_ribosome_rerun);
+use Mods::RibosomeState qw(
+	normalise_ribosome_request
+	prepare_ribosome_rerun
+);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
 use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred handleSubmissionFailure);
@@ -187,7 +190,9 @@ sub createConsSNPandSVs;
 #       accepted submissions, while accounting for every intervening job.
 #4.32: 4.8.26: invalidate RiboFind outputs before assessing rerun completion.
 #       Remove stale per-sample links and merged profiles at the same time.
-my $MATFILER_ver = 4.32;
+#4.33: 4.8.26: make either RiboFind redo flag enable ribosomal profiling, so
+#       the reopened sample cannot immediately close through the no-work path.
+my $MATFILER_ver = 4.33;
 
 #----------------- defaults ----------------- 
 
@@ -10099,6 +10104,7 @@ sub getCmdLineOptions{
 	$MFopt{baseSDMopt} = getProgPaths($MFopt{useSDM} == 2 ? "baseSDMopt" : "baseSDMopt_rel");
 	$MFopt{baseSDMoptMiSeq} = getProgPaths($MFopt{useSDM} == 2 ? "baseSDMoptMiSeq" : "baseSDMoptMiSeq_rel");
 
+	normalise_ribosome_request(\%MFopt);
 	die "ERROR:: No mapping file provided (-map)\n" if ($MFconfig{mapFile} eq "");
 	if (!$MFopt{DoAssembly}){
 		$MFopt{mapSupport2Assembly}=0;$MFopt{map2Assembly}=0;

@@ -9,7 +9,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 
 | Script | Version in uploaded source | Role |
 |---|---:|---|
-| `MATAF4.pl` | `4.32` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
+| `MATAF4.pl` | `4.33` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
 | `buildTree5.pl` | `5.23` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
@@ -258,8 +258,8 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 |---|---:|---|---|---|
 | `-profileRibosome` | integer | `0` | stable | Run SSU/LSU read extraction and taxonomic assignment. |
 | `-riobsomalAssembly` | integer | `0` | stable | Assemble extracted ribosomal reads. |
-| `-reProfileRibosome` | integer | `0` | stable | Remove existing RiboFind extraction and assignment results, plus merged profiles, then rerun; requires `-profileRibosome 1`. |
-| `-reRibosomeLCA` | integer | `0` | stable | Remove existing RiboFind assignments and merged results, then rerun LCA; requires `-profileRibosome 1`. |
+| `-reProfileRibosome` | integer | `0` | stable | Remove existing RiboFind extraction and assignment results plus merged profiles, then rerun; implies `-profileRibosome 1`. |
+| `-reRibosomeLCA` | integer | `0` | stable | Remove existing RiboFind assignments and merged results, then rerun LCA; implies `-profileRibosome 1`. |
 | `-riboMaxRds` | integer | `250000` | stable | Maximum extracted reads assigned per ribosomal marker. |
 | `-saveRiboRds` | integer | `0` | stable | Retain reads used during ribosomal assignment. |
 | `-thoroughCheckRiboFinish` | integer | `0` | stable | Require non-empty RiboFind assignment output before accepting completion. |

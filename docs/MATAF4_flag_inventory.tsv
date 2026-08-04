@@ -136,8 +136,8 @@ functional profiling (diamond)	DiaDBs	string	""""""	stable	$MFopt{reqDiaDB}	NOG,
 functional profiling (Jaime tree)	orthoExtract	integer	0	stable	$MFopt{calcOrthoPlacement}	Run translated-read orthologue placement.
 ribo profiling (miTag)	profileRibosome	integer	0	stable	$MFopt{DoRibofind}	Run SSU/LSU read extraction and taxonomic assignment.
 ribo profiling (miTag)	riobsomalAssembly	integer	0	stable	$MFopt{doRiboAssembl}	Assemble extracted ribosomal reads.
-ribo profiling (miTag)	reProfileRibosome	integer	0	stable	$MFopt{RedoRiboFind}	Remove existing RiboFind extraction and assignment results, plus merged profiles, then rerun; requires -profileRibosome 1.
-ribo profiling (miTag)	reRibosomeLCA	integer	0	stable	$MFopt{RedoRiboAssign}	Remove existing RiboFind assignments and merged results, then rerun LCA; requires -profileRibosome 1.
+ribo profiling (miTag)	reProfileRibosome	integer	0	stable	$MFopt{RedoRiboFind}	Remove existing RiboFind extraction and assignment results plus merged profiles, then rerun; implies -profileRibosome 1.
+ribo profiling (miTag)	reRibosomeLCA	integer	0	stable	$MFopt{RedoRiboAssign}	Remove existing RiboFind assignments and merged results, then rerun LCA; implies -profileRibosome 1.
 ribo profiling (miTag)	riboMaxRds	integer	250000	stable	$MFopt{riboLCAmaxRds}	Maximum extracted reads assigned per ribosomal marker.
 ribo profiling (miTag)	saveRiboRds	integer	0	stable	$MFopt{riboStoreRds}	Retain reads used during ribosomal assignment.
 ribo profiling (miTag)	thoroughCheckRiboFinish	integer	0	stable	$MFopt{checkRiboNonEmpty}	Require non-empty RiboFind assignment output before accepting completion.
