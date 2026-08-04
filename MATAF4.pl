@@ -180,7 +180,9 @@ sub createConsSNPandSVs;
 #4.29: 3.8.26: close fully checked samples with an atomic, request-versioned
 #       sentinel containing their complete metagStats record; downstream work
 #       invalidates the sentinel before modifying sample outputs.
-my $MATFILER_ver = 4.29;
+#4.30: 4.8.26: make gene prediction and ContigStats explicit ConsSNP
+#       prerequisites; always provide vcf2fna with its required GFF.
+my $MATFILER_ver = 4.30;
 
 #----------------- defaults ----------------- 
 
@@ -842,14 +844,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($MFopt{redoSNPcons}){		system "rm -rf $SNPdir $genePredSNP* $contigsSNP* $genePredAASNP* $logDir/SNP";
 	} elsif ($MFopt{redoSNPgene}){		system "rm -rf $genePredSNP* $genePredAASNP* ";
 	}
-	my $boolGenePredOK=0;
-	if ($MFopt{DoEukGenePred}){
-		$boolGenePredOK = 1 if ( fileGZe("$finalCommAssDir/genePred/proteins.bac.shrtHD.faa") || ($MFopt{pseudoAssembly} && fileGZe("$finalCommAssDir/genePred/proteins.bac.shrtHD.faa")));
-	} else {
-		$boolGenePredOK = 1 if (fileGZe("$finalCommAssDir/genePred/proteins.shrtHD.faa") || ($MFopt{pseudoAssembly} && fileGZe("$finalCommAssDir/genePred/proteins.shrtHD.faa")) );
-	}
-	#DEBUG to gzip outputs..
-	if ($MFopt{genePredGZenforce} && $boolGenePredOK && -e "$finalCommAssDir/genePred/genes.gff"){$boolGenePredOK =0;}
+	my $genePredMarker = $MFopt{DoEukGenePred} ? ".bac" : "";
+	my $genePredProtein = "$finalCommAssDir/genePred/proteins$genePredMarker.shrtHD.faa";
+	my $genePredGff = "$finalCommAssDir/genePred/genes$genePredMarker.gff";
+	my $boolGenePredOK = fileGZe($genePredProtein) && fileGZe($genePredGff);
+	# Force the canonical compressed representation when requested.
+	if ($MFopt{genePredGZenforce} && $boolGenePredOK && -e $genePredGff){$boolGenePredOK =0;}
 	#die "$boolGenePredOK\n$finalCommAssDir\n";
 
 	
@@ -999,13 +999,23 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#die "$mapSuppAssFlag = 1 if ($locMapSup2Assembly && !$eFinSupMapCovGZ && $efinAssLoc \n";
 
 	#requires only bam/cram && assembly
+	my $consensusFastasComplete = !$MFopt{saveConsFastas}
+		|| (fileGZe($contigsSNP) && fileGZe($genePredSNP) && fileGZe($genePredAASNP));
 	my $calcConsSNP=0; 
 	if ($MFopt{DoConsSNP} && $map{$curSmpl}{hasPrimaryRds} && !$doPreAssmFlag && !$ePreAssmblPck){
 		my $exSNPf= fileGZe($vcfSNP);
 		if ($exSNPf && fileGZs($vcfSNP) == 0){system "rm -f $vcfSNP*";$exSNPf=0;} #some old versions produced an empty vcf file..
-		$calcConsSNP=0; $calcConsSNP =1 if ( !-e $sampleCheckpoints{primaryConsensus} || ($MFopt{saveConsFastas} &&  fileGZe($genePredSNP)==0  ) || ($MFopt{saveVCF} &&  !$exSNPf ) ) ;
+		my $primaryConsensusComplete = -e $sampleCheckpoints{primaryConsensus}
+			&& $consensusFastasComplete && (!$MFopt{saveVCF} || $exSNPf);
+		$calcConsSNP = 1 unless $primaryConsensusComplete;
 	}
-	my $calcSuppConsSNP=0; $calcSuppConsSNP =1 if (!$doPreAssmFlag && !$ePreAssmblPck && $locMapSup2Assembly && $MFopt{DoSuppConsSNP} && (!-e  $sampleCheckpoints{supportConsensus}  ));
+	my $calcSuppConsSNP=0;
+	if (!$doPreAssmFlag && !$ePreAssmblPck && $locMapSup2Assembly && $MFopt{DoSuppConsSNP}) {
+		my $supportVcfComplete = !$MFopt{saveVCF} || fileGZe($vcfSNPsupp);
+		my $supportConsensusComplete = -e $sampleCheckpoints{supportConsensus}
+			&& $consensusFastasComplete && $supportVcfComplete;
+		$calcSuppConsSNP = 1 unless $supportConsensusComplete;
+	}
 	
 	
 	
@@ -1614,6 +1624,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#-----------------------------------------------------------------
 	my ($fullContigStatsDep, $binningJobDep, $variantJobDep) = ("", "", "");
 	my $currentContigStatsDeps = '';
+	my $contigStatsSubmissionDeferred = 0;
+	my $consensusNeedsContigStats = ($calcConsSNP || $calcSuppConsSNP)
+		&& !$cleanupContigStatsComplete;
 	
 	
 	# Completed assemblies and mappings are published by their producer jobs.
@@ -1665,12 +1678,17 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				if ($MFopt{DoMetaBat2} == 4);
 		}
 
-	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ ) || $calcCoverage) ) {
+	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ )
+			|| $calcCoverage || $consensusNeedsContigStats) ) {
 		#die "test23  $AsGrps{$cAssGrp}{MapDeps}\n";
 		#calculate solely abundance / gene after producer publication and assembly contig stats
 		my $submitContigNow = $mappingDeferred ? 0 : 1;
-		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir,$publicationDeps,$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl,$supportCoverageRequired);
+		my $contigSubparts = $consensusNeedsContigStats
+			? $cleanupContigSubparts : $MFconfig{defaultContigSubs};
+		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir,$publicationDeps,$finalCommAssDir,$contigSubparts,$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl,$supportCoverageRequired);
 		$AsGrps{$cAssGrp}{PostClnCmd} .= $delaySubmCmd2;
+		$contigStatsSubmissionDeferred = 1
+			if !$submitContigNow && $delaySubmCmd2 =~ /\S/;
 		$jdep = $jn;
 		append_job_dependencies(\$currentContigStatsDeps, $jdep);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $jdep) if ($jdep ne "");
@@ -1696,8 +1714,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $primaryVariantRequested = $calcConsSNP || $calcSVs;
 	my $supportVariantRequested = $calcSuppConsSNP || $calcSVsSupp;
 	my $variantWorkRequested = $primaryVariantRequested || $supportVariantRequested;
-	my $geneConsensusRequested = $MFopt{saveConsFastas}
-		&& ($calcConsSNP || $calcSuppConsSNP);
+	my $consensusStatsRequested = $calcConsSNP || $calcSuppConsSNP;
 	# Assembly, annotation, mapping, and ContigStats outputs can all be valid
 	# future outputs of jobs submitted in this pass. SNP region planning now runs
 	# inside the Cons allocation, so scheduler dependencies can safely replace
@@ -1708,30 +1725,51 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $assemblyDownstreamDeferred = $mappingDeferred
 		&& !$doPreAssmFlag && !$ePreAssmblPck;
 	my $variantCommonInputsPublished = $efinAssLoc
-		&& (!$geneConsensusRequested || ($boolGenePredOK
+		&& (!$consensusStatsRequested || ($boolGenePredOK
 			&& fileGZe("$finalCommAssDir/genePred/genes.gff")));
-	my $primaryVariantInputsPublished = !$primaryVariantRequested || (
+	my $primaryVariantMappingPublished = !$primaryVariantRequested || (
 		-s "$finalMapDir/$SmplName-smd.$bamcramMap"
 		&& (!$calcConsSNP || ($eFinMapCovGZ
-			&& fileGZe("$finalMapDir/$SmplName-smd.bam.coverage") && $eCovAsssembly))
+			&& fileGZe("$finalMapDir/$SmplName-smd.bam.coverage")))
 	);
-	my $supportVariantInputsPublished = !$supportVariantRequested || (
+	my $supportVariantMappingPublished = !$supportVariantRequested || (
 		-s "$finalMapDir/$SmplName.sup-smd.$bamcramMap"
 		&& (!$calcSuppConsSNP || ($eFinSupMapCovGZ
-			&& fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage") && $eSuppCovAsssembly))
+			&& fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage")))
 	);
-	my $variantInputsMayBePending = (!$variantCommonInputsPublished
-			|| !$primaryVariantInputsPublished || !$supportVariantInputsPublished)
-		&& ($assemblyDownstreamScheduled || $assemblyDownstreamDeferred);
+	my $contigStatsForConsensusPending = $consensusStatsRequested
+		&& ($currentContigStatsDeps =~ /\S/ || $contigStatsSubmissionDeferred);
+	my $contigStatsForConsensusReady = !$consensusStatsRequested
+		|| $cleanupContigStatsComplete || $contigStatsForConsensusPending;
+	my $variantPrerequisiteDeps = normalise_job_dependencies(
+		$publicationDeps, $currentContigStatsDeps, $AsGrps{$cAssGrp}{BinDeps},
+	);
+	my $variantCommonInputsPending = !$variantCommonInputsPublished
+		&& ($AsGrps{$cAssGrp}{AssemblJobName} =~ /\S/
+			|| ($consensusStatsRequested && $AsGrps{$cAssGrp}{prodRun} =~ /\S/));
+	my $primaryVariantMappingPending = !$primaryVariantMappingPublished
+		&& $doMapping && ($currentMappingDeps =~ /\S/
+			|| $AsGrps{$cAssGrp}{MapDeps} =~ /\S/ || $mappingDeferred);
+	my $supportVariantMappingPending = !$supportVariantMappingPublished
+		&& $mapSuppAssFlag && ($currentMappingDeps =~ /\S/
+			|| $AsGrps{$cAssGrp}{MapDeps} =~ /\S/ || $mappingDeferred);
+	my $variantInputsMayBePending = $variantCommonInputsPending
+		|| $primaryVariantMappingPending || $supportVariantMappingPending
+		|| $contigStatsForConsensusPending;
 	my $variantCommonInputsReady = $variantCommonInputsPublished
-		|| $variantInputsMayBePending;
-	my $primaryVariantInputsReady = $primaryVariantInputsPublished
-		|| ($variantInputsMayBePending && $doMapping);
-	my $supportVariantInputsReady = $supportVariantInputsPublished
-		|| ($variantInputsMayBePending && $mapSuppAssFlag);
+		|| $variantCommonInputsPending;
+	my $primaryVariantInputsReady = $primaryVariantMappingPublished
+		&& (!$calcConsSNP || $cleanupContigStatsComplete
+			|| $contigStatsForConsensusPending);
+	$primaryVariantInputsReady ||= $primaryVariantMappingPending;
+	my $supportVariantInputsReady = $supportVariantMappingPublished
+		&& (!$calcSuppConsSNP || $cleanupContigStatsComplete
+			|| $contigStatsForConsensusPending);
+	$supportVariantInputsReady ||= $supportVariantMappingPending;
 	my $variantSubmissionDeferred = $variantInputsMayBePending
-		&& $assemblyDownstreamDeferred;
-	if ($variantWorkRequested && $variantCommonInputsReady
+		&& ($assemblyDownstreamDeferred || $contigStatsSubmissionDeferred);
+	if ($variantWorkRequested && $contigStatsForConsensusReady
+			&& $variantCommonInputsReady
 			&& $primaryVariantInputsReady && $supportVariantInputsReady){
 		my $rawReadSet = sampleReadSet($curSmpl, "raw");
 		my $variantPrimaryTechnology = libraryTechnology(
@@ -1764,7 +1802,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 						SeqTech => $variantPrimaryTechnology,
 						SeqTechSuppl => $variantSupportTechnology,
 						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
-						jdeps => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
+						jdeps => $variantPrerequisiteDeps,split_jobs => $MFopt{SNPconsJobsPsmpl},
 						inputSizeMB => ($map{$curSmpl}{inputFileSizeMB} || 0)
 							+ ($map{$curSmpl}{inputXFileSizeMB} || 0),
 						allowPendingInputs => ($variantInputsMayBePending ? 1 : 0),
@@ -1792,7 +1830,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		print "Submitting deferred assembly-group Cons jobs\n";
 		$deferredVariantDeps = postSubmQsub(
 			"$logDir/MultiConsensus.sh", $AsGrps{$cAssGrp}{PostConsCmd},
-			normalise_job_dependencies($AsGrps{$cAssGrp}{BinDeps}, $publicationDeps, $jdep),
+			normalise_job_dependencies($variantPrerequisiteDeps, $jdep),
 		);
 		$AsGrps{$cAssGrp}{PostConsCmd} = "" if ($runOptions{submit});
 		$variantJobDep = normalise_job_dependencies($variantJobDep, $deferredVariantDeps);
@@ -4191,7 +4229,7 @@ sub prepareMap{
 		#$DBbtRefX = $DBbtRef;
 		#die "$DBbtRef\n";
 		push(@DBbtRefX,$DBbtRef);
-		if($MFopt{mapModeCovDo} && $map2ndMpde != 3){ #get the coverage per gene etc; for this I need a gene prediction
+		if(($MFopt{mapModeCovDo} || $MFopt{Do2ndMapSNP}) && $map2ndMpde != 3){ # coverage and vcf2fna require a reference GFF
 												#but not for GC mapping (these are genes already)
 			my $gDir = $bwt2outDl."";
 			my $nativeGFF = $refDB[$i];$nativeGFF =~ s/\.[^\.]+$/\.gff/;
@@ -8307,6 +8345,7 @@ sub scndMap2Genos{
 				assembly => "$bwt2outD[$i]/$bwt2ndMapNmds[$i].fa",#$DBbtRefX[$i],
 				MAR => ["$bwt2outD[$i]/$bamBaseNameS[$i]-smd.bam"],
 				SNPcaller => $MFopt{SNPcallerFlag},bamcram=>"bam",normIndels => $MFopt{normSNPindels},
+				gffFile => ($DBbtRefGFF[$i] // ""),
 				#doesn't work, if contig name and length is not given..
 				#depthF => "$bwt2outD[$i]/$bamBaseNameS[$i]-smd.bam.coverage.gz.percontig",
 				ofas => "$bwt2outD[$i]/$bamBaseNameS[$i].SNPc.$MFopt{SNPcallerFlag}.fna", #only output needed for this.. unless I later want to add also a gene calling.. (not needed for TEC2 reb)
@@ -9308,9 +9347,10 @@ sub genePredictions($ $ $ $ $) {
 	#print "$outDir/proteins$bacmark.shrtHD.faa\n";
 #	if ( (-s "$expectedD/proteins$bacmark.shrtHD.faa" && -s "$expectedD/genes$bacmark.gff") ||
 #			(-s "$outDir/proteins$bacmark.shrtHD.faa" && -s "$outDir/genes$bacmark.gff") ){
-	if ( ( fileGZs("$expectedD/proteins$bacmark.shrtHD.faa") ) 
-			||(fileGZs("$outDir/proteins$bacmark.shrtHD.faa") ) 
-			){
+	if ( (fileGZs("$expectedD/proteins$bacmark.shrtHD.faa")
+			&& fileGZs("$expectedD/genes$bacmark.gff"))
+			|| (fileGZs("$outDir/proteins$bacmark.shrtHD.faa")
+				&& fileGZs("$outDir/genes$bacmark.gff")) ) {
 		#check if protein/genes were already gzip'd
 		if ( $MFopt{GenePredGZ} && -e "$expectedD/genes$bacmark.gff" ){
 			my $cmd = "";

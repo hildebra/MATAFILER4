@@ -27,6 +27,7 @@
 #5.21: use native MSAfix locus QC and clean its temporary files on every exit
 #5.22: own staged-input publication, node-local temp selection, and completion markers
 #5.23: default to broad/inter-species locus filtering; make strain-level filtering explicit
+#5.24: retain all prepared loci by default for broad phylogenies; preserve opt-in locus QC
 
 use warnings;
 use strict;
@@ -89,7 +90,7 @@ sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.23;
+my $version = 5.24;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -178,13 +179,14 @@ my $placementMinOverlap = $BACKBONE_DEFAULT{minimum_overlap};
 my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
 my $sampleQCFile = "";
 my %POST_ALIGNMENT_QC_DEFAULT = (
-	enabled => 1,
+	between_species_enabled => 0,
+	within_species_enabled => 1,
 	minimum_sequences => 3,
 	minimum_occupancy => 0.35,
 	relative_modified_z => 8.0,
 	minimum_loci_for_relative => 8,
 );
-my $postAlignmentLocusQC = $POST_ALIGNMENT_QC_DEFAULT{enabled};
+my $postAlignmentLocusQC;
 my $postAlignmentMinSequences = $POST_ALIGNMENT_QC_DEFAULT{minimum_sequences};
 my $postAlignmentMinOccupancy = $POST_ALIGNMENT_QC_DEFAULT{minimum_occupancy};
 my $postAlignmentRelativeZ = $POST_ALIGNMENT_QC_DEFAULT{relative_modified_z};
@@ -321,6 +323,10 @@ if ($strainWithinPreset) {
 	$doTheta = 0;
 }
 $minOverlapMSA = $withinSpecies ? 2 : 0 unless defined $minOverlapMSA;
+$postAlignmentLocusQC = $withinSpecies
+	? $POST_ALIGNMENT_QC_DEFAULT{within_species_enabled}
+	: $POST_ALIGNMENT_QC_DEFAULT{between_species_enabled}
+	unless defined $postAlignmentLocusQC;
 $postAlignmentDivergenceQC = $withinSpecies ? 1 : 0
 	unless defined $postAlignmentDivergenceQC;
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
@@ -345,7 +351,7 @@ die "-strictBackboneMinSamples must be at least 3 "
 	."(default $BACKBONE_DEFAULT{minimum_samples})\n"
 	if $strictBackboneMinSamples < 3;
 die "-postAlignmentLocusQC must be 0 or 1 "
-	."(default $POST_ALIGNMENT_QC_DEFAULT{enabled})\n"
+	."(default: 0 between species, 1 within species)\n"
 	unless $postAlignmentLocusQC == 0 || $postAlignmentLocusQC == 1;
 die "-postAlignmentMinSequences must be at least 2 "
 	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_sequences})\n"
@@ -596,7 +602,8 @@ my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=1",
+	"schema=2",
+	"enabled=$postAlignmentLocusQC",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
 	"minimum_overlap=$minOverlapMSA",
@@ -619,8 +626,9 @@ if (-s $postAlignmentQCPolicyFile) {
 }
 my $legacyWithinSpeciesQCAudit = $withinSpecies
 	&& -s $postAlignmentQCReport && !-e $postAlignmentQCPolicyFile;
-my $postAlignmentQCAuditCurrent = -s $postAlignmentQCReport
-	&& ($postAlignmentQCPolicyMatches || $legacyWithinSpeciesQCAudit);
+my $postAlignmentQCAuditCurrent = $postAlignmentQCPolicyMatches
+	&& (!$postAlignmentLocusQC || -s $postAlignmentQCReport);
+$postAlignmentQCAuditCurrent = 1 if $legacyWithinSpeciesQCAudit;
 my $doMSA = 1;
 my $treesDone = treePresent($tOhr)
 	&& (!$calcNonSyn || treePresent($tOhrNSun))
@@ -632,11 +640,11 @@ if ($strictBackbone && $treesDone && !-s "$treeD/strict_backbone.samples.tsv") {
 	make_path($treeD);
 	$treesDone = 0;
 }
-if ($postAlignmentLocusQC && $cogCats ne "" && $continue
+if ($cogCats ne "" && $continue
 		&& ($treesDone || fileGZe($multAli))
 		&& !$postAlignmentQCAuditCurrent) {
 	print "Recovery state: existing multi-locus alignment predates the current "
-		."post-alignment locus-QC policy; rebuilding per-locus alignments and tree outputs\n";
+		."post-alignment locus-retention policy; rebuilding per-locus alignments and tree outputs\n";
 	safeRemoveTree($MsaD, $removeMSA ? $tmpD : $outD);
 	safeRemoveTree($treeD, $outD);
 	make_path($MsaD);
@@ -1121,6 +1129,16 @@ if ($postAlignmentLocusQC && $cogCats ne "") {
 			@MSAsNonSyn = grep { $keepStem{alignmentFileStem($_)} } @MSAsNonSyn;
 		}
 	}
+} elsif ($cogCats ne "") {
+	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
+	my $candidateCount = scalar @{$primaryAlignments};
+	print "Post-alignment locus QC disabled; retaining all $candidateCount prepared loci\n"
+		if $candidateCount;
+	if (-e $postAlignmentQCReport) {
+		unlink $postAlignmentQCReport
+			or die "Cannot remove stale locus-QC report $postAlignmentQCReport: $!\n";
+	}
+	writePostAlignmentQCPolicy($postAlignmentQCPolicyFile, $postAlignmentQCPolicy);
 }
 
 #die "@MSA_AA\n\n";

@@ -188,13 +188,14 @@ like($between_source, qr/foreach my \$mg \(sort keys %MGSFMG\).*?foreach my \$cg
 	'between-MGS FASTA and category records are emitted deterministically');
 like($between_source, qr/if \(\$mgs_with_fmg < 3\).*?SKIPPED=too_few_marker_bearing_MGS/s,
 	'between-MGS phylogeny reports a successful cardinality skip before invoking a tree builder');
-like($between_source, qr/if \(!-s \$treeFile\)/,
-	'between-MGS phylogeny rebuilds an empty tree instead of treating it as complete');
+like($between_source,
+	qr/post_alignment_locus_qc\.policy\.tsv.*?\$policy\{schema\}.*?eq "2".*?\$policy\{enabled\}.*?eq "0".*?\$policy\{scope\}.*?eq "between".*?if \(!-s \$treeFile \|\| !\$broadLocusRetentionCurrent\)/s,
+	'between-MGS phylogeny rebuilds empty or previously QC-filtered tree checkpoints');
 like($between_source, qr/test -s \$treeFile.*?if \(\$visualize\).*?test -s \$treePdf/s,
 	'standalone between-MGS jobs validate the tree and conditionally validate visualization');
 like($between_source,
-	qr/-bootstrap 1000.*?-NTfilt 0\.5.*?-NTfiltPerGene 0\.7.*?-GenesPerSpecies 0\.5.*?-MSAprogram \$MSAprog.*?-AutoModel 1/s,
-	'between-MGS trees use broad-phylogeny filtering and partition-aware model selection');
+	qr/-bootstrap 1000.*?-NTfilt 0\.5.*?-NTfiltPerGene 0\.7.*?-GenesPerSpecies 0\.5.*?-postAlignmentLocusQC 0.*?-MSAprogram \$MSAprog.*?-AutoModel 1/s,
+	'between-MGS trees retain all prepared loci while using broad species filtering and partition-aware model selection');
 unlike($between_source, qr/minimumColumnOccupancy|-minOverlapMSA/,
 	'between-MGS trees do not impose a fixed taxon-count overlap filter on alignment columns');
 like($between_source, qr/\$externalDep =~ s\/\^\\Q\$localTag\\E\/\/.*?WAITID=\$externalDep/s,

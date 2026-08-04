@@ -406,6 +406,38 @@ sub SNPconsensus_vcf{
 	my $runPrimary = $hasPrimaryRds && ($overwrite || !$primaryVcfReady);
 	my $runSupport = $supportRequested && ($overwrite || !$supportVcfReady);
 	my $run2ctg = $runPrimary || $runSupport;
+	my $primaryNormStone = "$vcfFile.norm.ok";
+	my $supportNormStone = length($vcfFileS) ? "$vcfFileS.norm.ok" : "";
+	my $primaryNormReady = $primaryVcfReady && -e $primaryNormStone
+		&& (stat($primaryNormStone))[9] >= (stat($vcfFile))[9];
+	my $supportNormReady = $supportVcfReady && length($supportNormStone)
+		&& -e $supportNormStone
+		&& (stat($supportNormStone))[9] >= (stat($vcfFileS))[9];
+	# vcf2fna requires the gene annotation even when it is invoked only to
+	# calculate consensus statistics. Resolve the canonical annotation at
+	# submission time, but retain its future path while an afterok producer is
+	# still pending.
+	my $gffF = $SNPIHR->{gffFile} // "";
+	die "SNP GFF is required for consensus statistics\n" unless length($gffF);
+	if (!-s $gffF && $gffF =~ /\.gz$/) {
+		(my $plainGff = $gffF) =~ s/\.gz$//;
+		$gffF = $plainGff if -s $plainGff;
+	} elsif (!-s $gffF && -s "$gffF.gz") {
+		$gffF .= ".gz";
+	}
+	die "SNP GFF is missing or empty: $gffF\n"
+		unless $allowPendingInputs || -s $gffF;
+	my $contigDepthF = $SNPIHR->{depthF} // "";
+	if ($runPrimary && length($contigDepthF)) {
+		if (!-s $contigDepthF && $contigDepthF =~ /\.gz$/) {
+			(my $plainDepth = $contigDepthF) =~ s/\.gz$//;
+			$contigDepthF = $plainDepth if -s $plainDepth;
+		} elsif (!-s $contigDepthF && -s "$contigDepthF.gz") {
+			$contigDepthF .= ".gz";
+		}
+		die "SNP ContigStats depth is missing or empty: $contigDepthF\n"
+			unless $allowPendingInputs || -s $contigDepthF;
+	}
 	if ($overwrite) {
 		my @oldScratchVcfs = grep { -f $_ } bsd_glob("$scrDir/$smplNm*.vcf.gz");
 		unlink @oldScratchVcfs if @oldScratchVcfs;
@@ -436,6 +468,7 @@ sub SNPconsensus_vcf{
 	$xtra .= "echo \"Consensus SNP allocation: $actualCores cores (input estimate: "
 		.int($consensusInputMB + 0.5)." MB)\"\n";
 	$xtra .= "mkdir -p $scrDir;\n";
+	$xtra .= "rm -f $primaryNormStone\n" if $runPrimary;
 	#$xtra .= "exit\n"; #DEBUG
 	#$xtra .= "cp $refFA $refFA.fai $scrDir;\n";$refFA =~ m/\/([^\/]+$)/;$refFA = "$scrDir/$1";
 	#my $preTar = 
@@ -460,6 +493,8 @@ sub SNPconsensus_vcf{
 		$xtra .= "test -s $refFA\n";
 		$xtra .= "test -s $tar[0]\n" if $hasPrimaryRds;
 		$xtra .= "test -s $tarS[0]\n" if $supportRequested;
+		$xtra .= "test -s $gffF\n";
+		$xtra .= "test -s $contigDepthF\n" if $runPrimary && length($contigDepthF);
 	}
 	$xtra .= "$smtBin faidx $refFA;\n" unless (-s "$refFA.fai");
 	my $tmpOut2 = "$scrDir/$smplNm.X.cons.vcf";my $depthFileS  = "";
@@ -469,8 +504,7 @@ sub SNPconsensus_vcf{
 		my $bedPrefix = "$qsubDirE/$smplNm.";
 		$xtra .= "rm -f ${bedPrefix}*.bed\n";
 		if ($runPrimary) {
-			my $depthArg = defined($SNPIHR->{depthF}) && length($SNPIHR->{depthF})
-				? " --depth $SNPIHR->{depthF}" : "";
+			my $depthArg = length($contigDepthF) ? " --depth $contigDepthF" : "";
 			$primaryRegionCmd = "$regionPlanner --fai $refFA.fai --mapping $tar[0]$depthArg --jobs $runtimeJobs --output-prefix $bedPrefix --samtools $smtBin --pigz $pigzBin\n";
 		}
 		if ($runSupport) {
@@ -518,6 +552,7 @@ sub SNPconsensus_vcf{
 	}
 	if ($runSupport){ #supplementary reads SNP call
 		my $xtra2 = "echo \"Creating c/bams indexes supplemental reads\"\n";
+		$xtra2 .= "rm -f $supportNormStone\n" if length($supportNormStone);
 		$xtra2 .= "test -s $depthFileS\n" if $allowPendingInputs;
 		$cmdAll .= $xtra if !$runPrimary && !$onlyNormalize;
 		$SNPIHR->{run2ctg} = 1;
@@ -557,25 +592,27 @@ sub SNPconsensus_vcf{
 		$cmdAll .= $sortCmd;
 	}
 	
-	my $bcfNormOpts = " -O z -f $refFA "; #-a -m '+both'
+	my $bcfNormOpts = " -O z -f $refFA ";
 	my $cmd3 = "";
-	if($normalizeIndel){#bcftools norm -f ref.fa in.vcf
+	my $normalizePrimaryNow = $normalizeIndel && $hasPrimaryRds
+		&& ($runPrimary || $onlyNormalize || !$primaryNormReady);
+	my $normalizeSupportNow = $normalizeIndel && $supportRequested
+		&& ($runSupport || $onlyNormalize || !$supportNormReady);
+	if($normalizePrimaryNow || $normalizeSupportNow){#bcftools norm -f ref.fa in.vcf
 		$cmd3.="\necho \"left-normalizing indels\"\n";
-		if ($hasPrimaryRds){
+		if ($normalizePrimaryNow){
 			$cmd3 .= "$bcftBin index -f $vcfFile\n$bcftBin norm $bcfNormOpts -o $vcfFile.norm $vcfFile\n";
-			$cmd3 .= "test -s $vcfFile.norm\nrm -f $vcfFile $vcfFile.csi; mv $vcfFile.norm $vcfFile;\n";
+			$cmd3 .= "test -s $vcfFile.norm\nrm -f $vcfFile $vcfFile.csi; mv $vcfFile.norm $vcfFile; touch $primaryNormStone\n";
 		}
 		
-		if ($supportRequested){
+		if ($normalizeSupportNow){
 			$cmd3 .= "$bcftBin index -f $vcfFileS\n$bcftBin norm $bcfNormOpts -o $vcfFileS.norm $vcfFileS\n";
-			$cmd3 .= "test -s $vcfFileS.norm\nrm -f $vcfFileS $vcfFileS.csi; mv $vcfFileS.norm $vcfFileS;\n";
+			$cmd3 .= "test -s $vcfFileS.norm\nrm -f $vcfFileS $vcfFileS.csi; mv $vcfFileS.norm $vcfFileS; touch $supportNormStone\n";
 		}
 		
-		$cmd3 .= "\necho \"Done normalizing\"\n"; #wait \$(jobs -p);\n
-		#die "$cmd3";
+		$cmd3 .= "\necho \"Done normalizing\"\n";
 		$cmdAll .= $cmd3;
 	}
-	
 	my $postcmd = "";
 	my $vcf2fnaOpt = "";
 	my $createFastas = $SNPIHR->{createFastas} ? 1 : 0;
@@ -585,23 +622,7 @@ sub SNPconsensus_vcf{
 	if ($createGeneFastas && !fileGZe($SNPIHR->{genefna})){
 		$vcf2fnaOuts .= " -oGeneNT $SNPIHR->{genefna} -oGeneAA $SNPIHR->{genefaa} ";
 	}
-	my $vcf2fnaIns = "-ref $refFA ";
-	if (defined($SNPIHR->{gffFile}) && length($SNPIHR->{gffFile})) {
-		my $gffF = $SNPIHR->{gffFile};
-		if (!-s $gffF && $gffF =~ /\.gz$/) {
-			(my $plainGff = $gffF) =~ s/\.gz$//;
-			$gffF = $plainGff if -s $plainGff;
-		} elsif (!-s $gffF && -s "$gffF.gz") {
-			$gffF .= ".gz";
-		}
-		my $gffAvailable = -s $gffF || ($allowPendingInputs && $createGeneFastas);
-		$vcf2fnaIns .= "-gff $gffF " if $gffAvailable;
-		die "SNP GFF is missing or empty: $gffF\n"
-			if $createGeneFastas && !$gffAvailable;
-		$postcmd .= "test -s $gffF\n" if $allowPendingInputs && $createGeneFastas;
-	} elsif ($createGeneFastas) {
-		die "SNP GFF is required when gene consensus FASTAs are requested\n";
-	}
+	my $vcf2fnaIns = "-ref $refFA -gff $gffF ";
 	
 	if (!$hasPrimaryRds){ #only support available..
 		my $tmpST = $SNPIHR->{SeqTechSuppl} // ""; if ($tmpST eq ""){$tmpST = "ill";}
@@ -628,7 +649,7 @@ sub SNPconsensus_vcf{
 	$postcmd .= "test -s $ofasCons.gz\n" if $createFastas;
 	$postcmd .= "test -s $SNPIHR->{genefna}\ntest -s $SNPIHR->{genefaa}\n" if $createGeneFastas;
 	$postcmd .= "rm -f $vcfFile.csi $vcfFileS.csi\n";
-	$postcmd .= "rm -f $vcfFile $vcfFileS\n" if !$saveVCF;
+	$postcmd .= "rm -f $vcfFile $vcfFileS $primaryNormStone $supportNormStone\n" if !$saveVCF;
 	#} else {
 	#	if ($SNPsuppStone ne "" ){die "support reads activated. combined SNP calling only works current with use of the \"-SNPsaveVCF 1\" MATAFILER option. Aborting\n";}
 		#$postcmd .= "#DEBUG\ncp $tmpOut.lz4 $ofasConsDir\n\n";

@@ -15,17 +15,17 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.23;/,
-	'broad-phylogeny defaults increment the workflow version');
+like($source, qr/my \$version = 5\.24;/,
+	'broad-locus retention increments the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
 like($source,
-	qr/my \$withinSpecies = 0;.*?my \$minOverlapMSA;.*?"withinSpecies=i".*?\$minOverlapMSA = \$withinSpecies \? 2 : 0 unless defined \$minOverlapMSA;.*?\$postAlignmentDivergenceQC = \$withinSpecies \? 1 : 0/s,
-	"between-species filtering is the default and within-species filtering is explicit");
+	qr/my \$withinSpecies = 0;.*?my \$minOverlapMSA;.*?"withinSpecies=i".*?\$minOverlapMSA = \$withinSpecies \? 2 : 0 unless defined \$minOverlapMSA;.*?\$postAlignmentLocusQC = \$withinSpecies.*?unless defined \$postAlignmentLocusQC;.*?\$postAlignmentDivergenceQC = \$withinSpecies \? 1 : 0/s,
+	"between-species locus retention is the default and within-species filtering is explicit");
 like($source,
 	qr/my \@divergenceArguments = \$postAlignmentDivergenceQC.*?"-maxMedianDivergence", 1,.*?"-maxP90Divergence", 1,.*?"-relativeModifiedZ", 1_000_001/s,
-	"broad phylogenies retain structural QC while disabling strain-divergence rejection");
+	"explicit broad-tree QC disables strain-divergence rejection");
 like($source,
 	qr/"stagedInputDir=s".*?"tmpSubdir=s".*?"completionMarker=s".*?publishStagedTreeInputs\(\$stagedInputDir.*?for my \$input_spec/s,
 	"buildTree5 publishes staged inputs before validating its input paths");
@@ -48,14 +48,17 @@ like($source, qr/post-alignment-loci-XXXXXX.*?UNLINK => 1.*?post-alignment-keep-
 like($source, qr/my \@temporaryFiles = \(.*?bsd_glob\(quotemeta\(\$reportFile\)\."\.tmp\.\*"\).*?bsd_glob\(quotemeta\(\$keepFile\)\."\.tmp\.\*"\).*?unlink \$temporaryFile/s,
 	'wrapper and partial native locus-QC files are explicitly deleted after every invocation');
 like($source,
-	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 8\.0/s,
-	'post-alignment structural QC remains enabled independently of the phylogeny scope');
+	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?between_species_enabled => 0.*?within_species_enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 8\.0.*?my \$postAlignmentLocusQC;/s,
+	'broad trees retain all loci by default while within-species trees retain structural QC');
 like($source,
-	qr/post_alignment_locus_qc\.policy\.tsv.*?\$legacyWithinSpeciesQCAudit = \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
-	'stale broad checkpoints are rebuilt while legacy within-species QC audits remain compatible');
+	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=2".*?"enabled=\$postAlignmentLocusQC".*?\$legacyWithinSpeciesQCAudit = \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
+	'changed locus-retention policies rebuild stale checkpoints while legacy within-species audits remain compatible');
 like($source,
 	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?rename \$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
-	'the exact locus-filter policy is published atomically after native QC succeeds');
+	'the exact locus-retention policy is published atomically');
+like($source,
+	qr/elsif \(\$cogCats ne ""\).*?Post-alignment locus QC disabled; retaining all \$candidateCount prepared loci.*?unlink \$postAlignmentQCReport.*?writePostAlignmentQCPolicy\(\$postAlignmentQCPolicyFile, \$postAlignmentQCPolicy\)/s,
+	'disabled locus QC retains all prepared alignments and replaces stale QC audit state');
 like($source,
 	qr/\@MSAs = grep \{ \$keepPath\{\$_\} \} \@MSAs.*?\@MSAsSyn = grep \{ \$keepStem\{alignmentFileStem\(\$_\)\} \} \@MSAsSyn/s,
 	'primary, synonymous, and nonsynonymous alignment sets stay locus-consistent');

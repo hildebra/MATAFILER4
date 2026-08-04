@@ -7,6 +7,7 @@
 #                    harden the multi-phyla phylogeny defaults.
 # v0.4 (2026-07-28): normalize custom output paths.
 # v0.5 (2026-07-28): support predefined GTDB markers in addition to FMGs.
+# v0.6 (2026-08-04): retain all prepared marker loci in broad multi-phyla trees.
 #perl /hpc-home/hildebra/dev/Perl/MATAF3//secScripts/MGS/phylo_MGS_between.pl -GCd /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1/ -MGS /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//MB2.clusters.ext.can.Rhcl.filt -c 10 -outD /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//customRefs/ -refGenos '/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta'
 
 use warnings;
@@ -284,18 +285,33 @@ close OC;
 my $QSBoptHR = emptyQsubOpt(1,"");
 $QSBoptHR->{useLongQueue} = 1;
 my $treeFile = "$btout/phylo/IQtree_allsites.treefile";
+my $locusPolicyFile = "$btout/phylo/post_alignment_locus_qc.policy.tsv";
+my $broadLocusRetentionCurrent = 0;
+if (-s $locusPolicyFile) {
+	open my $policyFH, "<", $locusPolicyFile
+		or die "Cannot read locus-retention policy $locusPolicyFile: $!\n";
+	my $policyLine = <$policyFH> // "";
+	close $policyFH
+		or die "Cannot close locus-retention policy $locusPolicyFile: $!\n";
+	chomp $policyLine;
+	my %policy = map { split /=/, $_, 2 } split /\t/, $policyLine;
+	$broadLocusRetentionCurrent = ($policy{schema} // "") eq "2"
+		&& ($policy{enabled} // "") eq "0"
+		&& ($policy{scope} // "") eq "between";
+}
 
 my $cmd = "";
-if (!-s $treeFile){
+if (!-s $treeFile || !$broadLocusRetentionCurrent){
 	print "Creating phylogeny for found specI's//\n";
 	$cmd .= "$bts -aa $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats "
 		. "-outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores "
 		. "-AAtree 1 -bootstrap 1000 -NTfiltCount 3000 -NTfilt 0.5 "
 		. "-NTfiltPerGene 0.7 -GenesPerSpecies 0.5 "
+		. "-postAlignmentLocusQC 0 "
 		. "-MSAprogram $MSAprog "
 		. "-AutoModel 1 -iqFast 0 -continue 1\n";
 } else {
-	print "Found already existing tree, skipping tree building\n";
+	print "Found existing tree with current broad-locus retention policy, skipping tree building\n";
 }
 $cmd .= "\n\n\n$xtraMessageInSH\n" if ($xtraMessageInSH ne "");
 $cmd .= "test -s $treeFile\n";

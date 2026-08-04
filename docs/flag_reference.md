@@ -495,10 +495,10 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-runFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-runVeryFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-treeShrink` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-postAlignmentLocusQC` | integer | `1` | stable | Run native MSAfix locus-comparability QC before multi-locus concatenation. |
+| `-postAlignmentLocusQC` | integer | `0` between species; `1` within species | stable | Run native MSAfix locus-comparability QC before multi-locus concatenation. Broad trees retain every prepared locus unless QC is explicitly enabled. |
 | `-postAlignmentMinSequences` | integer | `3` | stable | Minimum comparable sequences required for an aligned locus. |
 | `-postAlignmentMinOccupancy` | float | `0.35` | stable | Minimum fraction of unambiguous alignment cells; permissive for metagenomic loci. |
-| `-postAlignmentDivergenceQC` | integer | `0` between species; `1` within species | stable | Reject absolute and cross-locus divergence outliers. Structural locus QC remains active when this is disabled. |
+| `-postAlignmentDivergenceQC` | integer | `0` between species; `1` within species | stable | Reject absolute and cross-locus divergence outliers. When locus QC is enabled, its structural checks remain active even if divergence QC is disabled. |
 | `-postAlignmentRelativeZ` | float | `8.0` | stable | Modified-Z threshold for cross-locus consensus-divergence outliers when divergence QC is enabled. |
 | `-postAlignmentMinLociRelative` | integer | `8` | stable | Minimum locus count before applying cross-locus robust outlier QC. |
 | `-runIQtree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
