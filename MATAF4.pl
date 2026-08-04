@@ -192,7 +192,9 @@ sub createConsSNPandSVs;
 #       Remove stale per-sample links and merged profiles at the same time.
 #4.33: 4.8.26: make either RiboFind redo flag enable ribosomal profiling, so
 #       the reopened sample cannot immediately close through the no-work path.
-my $MATFILER_ver = 4.33;
+#4.34: 4.8.26: carry explicit RiboFind redo requirements through completion
+#       assessment instead of re-inferring them solely from filesystem stones.
+my $MATFILER_ver = 4.34;
 
 #----------------- defaults ----------------- 
 
@@ -934,8 +936,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	
 	#check on processes not dependent on assemblies
+	my $riboRedo = {removed => 0, profile => 0, assignment => 0};
 	if ($MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign}) {
-		my $riboRedo = prepare_ribosome_rerun(
+		$riboRedo = prepare_ribosome_rerun(
 			sample_root => $curOutDir,
 			central_root => $baseOut.$preDIRs{dir2RiboF},
 			sample => $SmplName,
@@ -945,9 +948,16 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		print "Removed previous RiboFind results for $SmplName\n"
 			if $riboRedo->{removed} && !$MFconfig{silent};
 	}
+	if (($riboRedo->{profile} || $riboRedo->{assignment}) && !$MFconfig{silent}) {
+		my $scope = $riboRedo->{profile} ? 'extraction and assignment' : 'assignment';
+		print "RiboFind rerun required for $SmplName ($scope)\n";
+	}
+
 	prepareDiamondRerun($curOutDir);
 	my ($calcKraken,$calcDiamond,$calcDiaParse,$calcRibofind,$calcRiboAssign,$calcGenoSize,
-			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar) = checkRawProgsFin($curOutDir,$SmplName);
+			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar) = checkRawProgsFin(
+				$curOutDir, $SmplName, $riboRedo->{profile}, $riboRedo->{assignment},
+			);
 	publishKrakenResults($curOutDir,$SmplName) if ($MFopt{DoKraken} && !$calcKraken);
 	#not complete yet? Then delete..
 	if ($MFconfig{redoFails} && ($calcRibofind||$calcDiamond || $calcDiaParse ||$calcMOTU2 || $calcMetaPhlan || $calcTaxaTar)){
@@ -3461,7 +3471,7 @@ sub reduceProgStats{
 
 #check if programes have finished, that rely only on raw reads
 sub checkRawProgsFin{
-	my ($curOutDir,$SmplName) = @_;
+	my ($curOutDir,$SmplName,$forcedRiboProfile,$forcedRiboAssignment) = @_;
 	my ($calcDiamond,$calcDiaParse) = IsDiaRunFinished($curOutDir);
 	
 	my $calcRibofind = 0; my $calcRiboAssign = 0;my $calcGenoSize=0; 
@@ -3479,6 +3489,8 @@ sub checkRawProgsFin{
 	$calcGenoSize=1 if ($MFopt{DoGenoSizeEst} && 	!-e "$curOutDir/MicroCens/MC.0.result");
 	$calcRibofind = 1 if ($MFopt{DoRibofind} && (!-e "$curOutDir/ribos//SSU_pull.sto"|| !-e "$curOutDir/ribos//LSU_pull.sto" || ($MFopt{doRiboAssembl} && !-e "$curOutDir/ribos/Ass/allAss.sto" ))); #!-e "$curOutDir/ribos//ITS_pull.sto"|| 
 	$calcRiboAssign = 1 if ($MFopt{DoRibofind} && ( !-e "$curOutDir/ribos//ltsLCA/Assigned.sto"  || !-e "$curOutDir/ribos//ltsLCA/SSU_ass.sto") );		#!-e "$curOutDir/ribos//ltsLCA/ITS_ass.sto"||  #ITS no longer required.. unreliable imo
+	$calcRibofind = 1 if $forcedRiboProfile;
+	$calcRiboAssign = 1 if $forcedRiboAssignment;
 	RiboMeta($calcRibofind,$calcRiboAssign,$curOutDir,$SmplName);
 
 	#die $dir_MP2."$SmplName.MP2.sto";

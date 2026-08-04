@@ -96,6 +96,10 @@ my $assignment_result = prepare_ribosome_rerun(
 	redo_profile => 0,
 	redo_assignment => 1,
 );
+ok(!$assignment_result->{profile},
+	'assignment rerun does not require a new extraction');
+ok($assignment_result->{assignment},
+	'assignment rerun explicitly requires replacement LCA work');
 ok($assignment_result->{removed} > 0,
 	'assignment rerun reports removed results');
 ok(-d File::Spec->catdir($sample_root, 'ribos'),
@@ -130,6 +134,8 @@ my $profile_result = prepare_ribosome_rerun(
 	redo_profile => 1,
 	redo_assignment => 0,
 );
+ok($profile_result->{assignment},
+	'profile rerun explicitly requires replacement LCA work');
 ok($profile_result->{profile}, 'profile rerun records extraction invalidation');
 ok(!-e File::Spec->catdir($sample_root, 'ribos'),
 	'profile rerun removes the complete sample-local RiboFind directory');

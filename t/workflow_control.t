@@ -523,12 +523,14 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?my \$MATFILER_ver = 4\.33;/s,
-	"MATAFILER history retains shared input discovery through version 4.33");
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?my \$MATFILER_ver = 4\.34;/s,
+	"MATAFILER history retains shared input discovery through version 4.34");
 like($mataf4, qr/setConfigFile\(\$MFconfig\{configFile\}\);.*?normalise_ribosome_request\(\\%MFopt\);/s,
 	'RiboFind redo flags enable profiling during option post-processing');
-like($mataf4, qr/prepare_ribosome_rerun\(.*?checkRawProgsFin\(/s,
-	'RiboFind rerun cleanup precedes completion assessment');
+like($mataf4, qr/my \$riboRedo = \{.*?prepare_ribosome_rerun\(.*?checkRawProgsFin\(.*?\$riboRedo->\{profile\}.*?\$riboRedo->\{assignment\}/s,
+	'RiboFind rerun requirements are carried into completion assessment');
+like($mataf4, qr/\$calcRibofind = 1 if \$forcedRiboProfile;.*?\$calcRiboAssign = 1 if \$forcedRiboAssignment;.*?RiboMeta\(/s,
+	'explicit RiboFind redo work is enforced before counters and sentinel gating');
 unlike($mataf4, qr/if \(\$MFopt\{RedoRiboFind\}\)\{system "rm -rf/,
 	'the stale late RiboFind cleanup path is absent');
 like($mataf4,
