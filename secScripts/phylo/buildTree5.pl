@@ -28,6 +28,7 @@
 #5.22: own staged-input publication, node-local temp selection, and completion markers
 #5.23: default to broad/inter-species locus filtering; make strain-level filtering explicit
 #5.24: retain all prepared loci by default for broad phylogenies; preserve opt-in locus QC
+#5.25: fingerprint input filters and allow rare nonempty categories in broad marker trees
 
 use warnings;
 use strict;
@@ -90,7 +91,7 @@ sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.24;
+my $version = 5.25;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -499,7 +500,8 @@ print "Mode: " . ($cogCats ne "" ? "multi-locus" : "single-locus")
 	. "; continue=" . ($continue ? "yes" : "no") . "\n";
 print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
 	. ($postFilter || "<none>") . "; remove MSA=" . ($removeMSA ? "yes" : "no") . "\n";
-print "Filtering: per-gene length fraction=$ntFracGene; species NT fraction=$ntFrac; "
+print "Filtering: per-gene length fraction=$ntFracGene; category Q90 fraction=$fracMaxGenes90pct; "
+	. "species NT fraction=$ntFrac; species gene fraction=$GeneFracPSpec; "
 	. "minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
 print "Post-alignment locus QC: enabled="
 	. ($postAlignmentLocusQC ? "yes" : "no")
@@ -602,10 +604,15 @@ my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=2",
+	"schema=3",
 	"enabled=$postAlignmentLocusQC",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
+	"per_gene_length_fraction=$ntFracGene",
+	"minimum_category_q90_fraction=$fracMaxGenes90pct",
+	"species_nt_fraction=$ntFrac",
+	"minimum_gene_fraction_per_species=$GeneFracPSpec",
+	"minimum_nt=$ntCntTotal",
 	"minimum_overlap=$minOverlapMSA",
 	"maximum_gap_fraction=$maxGapPerCol",
 	"minimum_sequences=$postAlignmentMinSequences",
@@ -790,10 +797,12 @@ if ($isAligned){
 	#die;
 	my $GenesQtl90 = quantile(0.9,@genesPerCat);
 	my $GenesQtl50 = quantile(0.5,@genesPerCat);
+	my $minimumCategorySequences = $GenesQtl90 * $fracMaxGenes90pct;
+	$minimumCategorySequences = 1 if $minimumCategorySequences < 1;
 	$cnt=-1;
 	foreach my $aRef (@linesCats2){ #remove genes with just too few genes..
 		$cnt++; my @spl = @{$aRef};
-		if (@spl >= (($GenesQtl90 * $fracMaxGenes90pct) ) ){ #$GenesQtl50 || 
+		if (@spl >= $minimumCategorySequences){ #$GenesQtl50 ||
 			push(@linesCats3,\@spl);
 		}
 		#print @spl . " ";
@@ -801,10 +810,11 @@ if ($isAligned){
 	
 	print "Gene-category prefilter: retained " . scalar(@linesCats3) . "/"
 		. scalar(@linesCats) . " categories; removed $geneTooShort of "
-		. ($geneTooShort + $geneTooLong) . " sequence(s) below $ntFracGene of their gene-length Q90\n";
+		. ($geneTooShort + $geneTooLong) . " sequence(s) below $ntFracGene of their gene-length Q90; "
+		. "category-size Q90=$GenesQtl90, minimum category sequences=$minimumCategorySequences\n";
 	warn "Only " . scalar(@linesCats3) . " gene categories remain after prefiltering "
 		. "(Q50=$GenesQtl50, Q90=$GenesQtl90, category threshold="
-		. ($GenesQtl90 * $fracMaxGenes90pct) . ")\n"
+		. "$minimumCategorySequences)\n"
 		if @linesCats3 < 20;
 	@linesCats2 = (); #make space..
 	$cnt=-1;

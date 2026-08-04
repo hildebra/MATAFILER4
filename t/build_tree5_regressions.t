@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.24;/,
-	'broad-locus retention increments the workflow version');
+like($source, qr/my \$version = 5\.25;/,
+	'rare broad-locus retention increments the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
@@ -51,7 +51,7 @@ like($source,
 	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?between_species_enabled => 0.*?within_species_enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 8\.0.*?my \$postAlignmentLocusQC;/s,
 	'broad trees retain all loci by default while within-species trees retain structural QC');
 like($source,
-	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=2".*?"enabled=\$postAlignmentLocusQC".*?\$legacyWithinSpeciesQCAudit = \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
+	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=3".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"minimum_gene_fraction_per_species=\$GeneFracPSpec".*?\$legacyWithinSpeciesQCAudit = \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
 	'changed locus-retention policies rebuild stale checkpoints while legacy within-species audits remain compatible');
 like($source,
 	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?rename \$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
@@ -59,6 +59,9 @@ like($source,
 like($source,
 	qr/elsif \(\$cogCats ne ""\).*?Post-alignment locus QC disabled; retaining all \$candidateCount prepared loci.*?unlink \$postAlignmentQCReport.*?writePostAlignmentQCPolicy\(\$postAlignmentQCPolicyFile, \$postAlignmentQCPolicy\)/s,
 	'disabled locus QC retains all prepared alignments and replaces stale QC audit state');
+like($source,
+	qr/my \$minimumCategorySequences = \$GenesQtl90 \* \$fracMaxGenes90pct;.*?= 1 if \$minimumCategorySequences < 1;.*?if \(\@spl >= \$minimumCategorySequences\).*?minimum category sequences=\$minimumCategorySequences/s,
+	'a zero category-prevalence fraction retains every nonempty locus and reports the effective threshold');
 like($source,
 	qr/\@MSAs = grep \{ \$keepPath\{\$_\} \} \@MSAs.*?\@MSAsSyn = grep \{ \$keepStem\{alignmentFileStem\(\$_\)\} \} \@MSAsSyn/s,
 	'primary, synonymous, and nonsynonymous alignment sets stay locus-consistent');

@@ -8,6 +8,7 @@
 # v0.4 (2026-07-28): normalize custom output paths.
 # v0.5 (2026-07-28): support predefined GTDB markers in addition to FMGs.
 # v0.6 (2026-08-04): retain all prepared marker loci in broad multi-phyla trees.
+# v0.7 (2026-08-04): retain rare lineage-specific loci and relax broad species filters.
 #perl /hpc-home/hildebra/dev/Perl/MATAF3//secScripts/MGS/phylo_MGS_between.pl -GCd /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1/ -MGS /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//MB2.clusters.ext.can.Rhcl.filt -c 10 -outD /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//customRefs/ -refGenos '/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta'
 
 use warnings;
@@ -295,9 +296,14 @@ if (-s $locusPolicyFile) {
 		or die "Cannot close locus-retention policy $locusPolicyFile: $!\n";
 	chomp $policyLine;
 	my %policy = map { split /=/, $_, 2 } split /\t/, $policyLine;
-	$broadLocusRetentionCurrent = ($policy{schema} // "") eq "2"
+	$broadLocusRetentionCurrent = ($policy{schema} // "") eq "3"
 		&& ($policy{enabled} // "") eq "0"
-		&& ($policy{scope} // "") eq "between";
+		&& ($policy{scope} // "") eq "between"
+		&& ($policy{per_gene_length_fraction} // "") eq "0.4"
+		&& ($policy{minimum_category_q90_fraction} // "") eq "0"
+		&& ($policy{species_nt_fraction} // "") eq "0.5"
+		&& ($policy{minimum_gene_fraction_per_species} // "") eq "0.3"
+		&& ($policy{minimum_nt} // "") eq "3000";
 }
 
 my $cmd = "";
@@ -306,7 +312,7 @@ if (!-s $treeFile || !$broadLocusRetentionCurrent){
 	$cmd .= "$bts -aa $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats "
 		. "-outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores "
 		. "-AAtree 1 -bootstrap 1000 -NTfiltCount 3000 -NTfilt 0.5 "
-		. "-NTfiltPerGene 0.7 -GenesPerSpecies 0.5 "
+		. "-NTfiltPerGene 0.4 -GenesPerSpecies 0.3 -fracMaxGenes90pct 0 "
 		. "-postAlignmentLocusQC 0 "
 		. "-MSAprogram $MSAprog "
 		. "-AutoModel 1 -iqFast 0 -continue 1\n";

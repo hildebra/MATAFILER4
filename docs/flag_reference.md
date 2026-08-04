@@ -445,7 +445,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.23`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.25`.
 
 ### General options
 
@@ -468,7 +468,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-NTfilt` | float | `0.8` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-NTfiltPerGene` | float | `0.1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-GenesPerSpecies` | float | `0.1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-fracMaxGenes90pct` | float | `0.25` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-fracMaxGenes90pct` | float | `0.25` | stable | Minimum locus size as a fraction of the category-size Q90. Set to `0` to retain every category containing at least one length-filtered sequence. |
 | `-NTfiltCount` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-smplDef` | integer | `1` | stable | is the genome somehow quantified with a delimiter (_) ? |
 | `-smplSep` | string | `_` | stable | set the delimiter |
