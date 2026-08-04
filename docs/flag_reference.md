@@ -9,7 +9,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 
 | Script | Version in uploaded source | Role |
 |---|---:|---|
-| `MATAF4.pl` | `4.26` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
+| `MATAF4.pl` | `4.32` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
 | `buildTree5.pl` | `5.23` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
@@ -41,12 +41,12 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-checkInstall` | flag | `` | stable | Check that core MATAFILER4 programs/environments are installed. |
 | `-map` | string | `""` | stable | Mapping file describing samples and input/output paths. |
 | `-config` | string | `""` | stable | Alternative configuration file. |
-| `-precheckInputDirs` | integer | `0` | advanced | Scan and cache input-file selections and sizes for every mapped sample before processing. Disabled by default; normal runs discover inputs lazily when an unfinished sample is staged. Combine with `-requireInput 1` to make missing or invalid inputs fatal during the precheck. |
+| `-precheckInputDirs` | integer | `0` | advanced | Pre-scan all mapped sample inputs and cache their sizes. Disabled by default; use `-requireInput 1` to fail on missing or invalid input. |
 | `-inspectState` | integer | `0` | stable | Emit a read-only JSON snapshot of workflow artifacts and markers. |
 | `-planState` | integer | `0` | stable | Emit a read-only, dependency-ordered repair/submission plan from the inspection snapshot. |
 | `-stateReport` | string | `""` | stable | Write the inspection JSON to this explicit path. |
 | `-planReport` | string | `""` | stable | Write the repair/submission plan JSON to this explicit path. |
-| `-autoStatePlan` | integer | `0` | advanced | Opt in to the internal inspect/plan preflight before normal execution and at each `loopTillComplete` boundary. Disabled by default to avoid a full metadata scan of every sample. |
+| `-autoStatePlan` | integer | `0` | advanced | Run the state preflight before execution and at each loop boundary. Disabled by default. |
 | `-autoRepairState` | integer | `1` | stable | Apply only preflight repairs classified as automatically safe when submission is enabled. |
 
 ## Flow related
@@ -59,17 +59,17 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-submit` | integer | `1` | stable | submit any jobs at all? (0= no submission, just for trying if everything is correctly set up) |
 | `-from` | integer | `0` | stable | start at which samples from map file? |
 | `-to` | integer | `999999999999` | stable | stop at which samples from map file? |
-| `-loopTillComplete` | string | `"0"` | advanced | Loop over selected samples; `X:Y` starts with `Y` samples and advances its start only across the continuously completed, cleaned prefix. Completed slots admit later samples, while sparse or final passes may add one further block. Each visit submits only the next ready producer wave, preventing failed input, assembly, or mapping jobs from creating a large `DependencyNeverSatisfied` fan-out. At normal completion, one immediate full-range verification is performed. If it finds locks or submits work, every pending or running job submitted by this invocation must finish before another full-range pass begins. Statistics are collected only after a full pass finds no work or locks. Preflight is repeated after each wait only when `-autoStatePlan 1` is enabled. |
-| `-loopTillCompleteActiveJobs` | integer | `3` | advanced | Start the next loop pass once no more than this many dependencies submitted for the current loop window are actually executing. Queued dependency-pending jobs and unrelated user jobs do not inflate the active count. |
+| `-loopTillComplete` | string | `"0"` | advanced | Repeat selected samples in rolling windows until complete. Advance only across the continuously completed, cleaned prefix; each visit submits the next ready producer wave. After reaching the end, run one full verification pass, wait for this invocation's jobs if it finds locks or work, and repeat. Collect statistics only after a clean full pass. |
+| `-loopTillCompleteActiveJobs` | integer | `3` | advanced | Begin the next rolling pass when at most this many jobs from the current window are running; dependency-pending and unrelated jobs are excluded. |
 | `-schedulerPollSeconds` | integer | `20` | advanced | Seconds between scheduler queries while `loopTillComplete` waits. Values must be positive. |
-| `-schedulerCapacityCheckJobs` | integer | `10` | advanced | Refresh the exact running-plus-pending Slurm count after this many accepted submissions. Intervening jobs are counted locally, and MATAFILER4 refreshes sooner if that conservative estimate reaches `-maxConcurrentJobs`. Values must be positive. |
+| `-schedulerCapacityCheckJobs` | integer | `10` | advanced | Refresh the exact running-plus-pending Slurm count after this many submissions, or sooner when the cached count reaches `-maxConcurrentJobs`. |
 | `-excludeNodes` | string | `""` | stable | exclude certain nodes? |
-| `-maxConcurrentJobs` | integer | `0` | stable | Maximum live user jobs (running plus pending) allowed before another submission. Central and deferred submissions use the same conservative cached count; exact Slurm queries occur in configurable submission batches or sooner at the cap. With `-loopTillComplete`, a full queue defers submissions while sample output/cleanup checks continue, then retries the same range after one scheduler polling interval; non-loop runs wait at the cap. |
+| `-maxConcurrentJobs` | integer | `0` | stable | Maximum running plus pending user jobs. Counts are cached between submission batches and refreshed at the cap. Loop runs defer and revisit when full; non-loop runs wait. |
 | `-killDepNever` | integer | `0` | stable | kill jobs in "Dependency never finished" state? |
 | `-requireInput` | integer | `0` | stable | in case input reads are no longer present, 0 will continue pipeline, 1 will abort |
 | `-ignoreSmpls` | string | `""` | stable | Comma-separated exact sample IDs to skip; values are not regular expressions or prefix matches. |
-| `-rmSmplLocks` | integer | `0` | stable | Remove existing sample locks. With the default `0`, a no-submission `loopTillComplete` pass reruns its current range when at least one user job remains active and the count is at most `-loopTillCompleteActiveJobs` or strictly below 1% of the range's samples. Retries use the normal pass budget plus at most one final extra scan. |
-| `-silent` | flag | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-rmSmplLocks` | integer | `0` | stable | Remove existing sample lock files. |
+| `-silent` | flag | `0` | stable | Suppress routine progress messages. |
 | `-maxUnzpJobs` | integer | `20` | stable | how many unzip jobs to run in parallel (not to overload HPC IO). Default:20 |
 | `-skipSmallSmplsMB` | integer | `1` | stable | skip samples with a combined input smaller than this in MB (raw file size, independent of compressed or raw) |
 | `-forceWriteStats` | integer | `0` | stable | force (re)writing of the metagStats report and text file |
@@ -96,31 +96,31 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-inputFQregexSingle` | string | `""` | stable | regex for detecting single end reads in input fastq files |
 | `-inputFQregexTrustSingle` | integer | `0` | stable | if grep of files (rawSrchString) has multi assignments, which grep to trust more? |
 | `-inputBAMregex` | string | `""` | stable | Regex for detecting primary BAM read files under the location selected by the map's `Path` or `SmplPrefix`. Matching BAMs are treated as unpaired reads and converted with `samtools fastq`; for example, use `'.*\.bam$'`. Empty disables BAM discovery. |
-| `-splitFastaInput` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-splitFastaInput` | integer | `0` | stable | Enable FASTA input splitting during read staging. |
 | `-mergeReads` | integer | `0` | stable | merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances) |
-| `-ProbRdFilter` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-ProbRdFilter` | integer | `1` | stable | Enable probabilistic SDM read filtering. |
 | `-pairedReadInput` | integer | `-1` | stable | determines if read pairs are expected in each in dir |
-| `-inputReadLengthSuppl` | integer | `5000` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-inputReadLengthSuppl` | integer | `5000` | stable | Default supplementary-read length used for planning. |
 | `-filterHostRds`, `-filterHumanRds` | integer | `0` | stable | 0: no, 1:kraken2, 2: kraken1, 3:hostile |
 | `-filterHostKrak2DB` | string | `""` | stable | customize host org to filter (e.g. human, chicken ..) |
-| `-filterHostKr2Conf` | string | `0.01` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-filterHostKr2Quick` | string | `` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-hostileIndex` | string | `"human-t2t-hla"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-onlyFilterZip` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-mocatFiltered` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-filterHostKr2Conf` | string | `0.01` | stable | Kraken2 confidence threshold for host assignment. |
+| `-filterHostKr2Quick` | string | `` | stable | Kraken2 quick-mode option for host filtering. |
+| `-hostileIndex` | string | `"human-t2t-hla"` | stable | Hostile reference index used for host filtering. |
+| `-onlyFilterZip` | integer | `0` | stable | Stage and filter reads, then stop before downstream analyses. |
+| `-mocatFiltered` | integer | `0` | stable | Import reads from the configured MOCAT filtered-output layout. |
 | `-logQualvsLen` | integer | `0` | stable | sdm log file.. can be quite large; logs qual of read vs read length |
 
 ## Sdm related
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-inputReadLength` | integer | `150` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-gzipSDMout` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-XfirstReads` | integer | `-1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-minReadLength` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-maxReadLength` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-filterAdapters` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-customSDMopt` | string | `""` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-inputReadLength` | integer | `150` | stable | Default primary-read length used for planning. |
+| `-gzipSDMout` | integer | `1` | stable | Compress SDM-filtered FASTQ output. |
+| `-XfirstReads` | integer | `-1` | stable | Process only the first N reads; -1 processes all reads. |
+| `-minReadLength` | integer | `0` | stable | Override the minimum read length accepted by SDM; 0 keeps its configured value. |
+| `-maxReadLength` | integer | `0` | stable | Override the maximum read length accepted by SDM; 0 keeps its configured value. |
+| `-filterAdapters` | integer | `1` | stable | Enable adapter trimming during SDM filtering. |
+| `-customSDMopt` | string | `""` | stable | Use the specified non-empty SDM options file. |
 | `-sdmMem` | string | `"15G"` | stable | total mem for sdm job in Gb, default 15 |
 
 ## Assembly related
@@ -131,10 +131,10 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-spadesMemory`, `-assemblMemory` | integer | `-1` | stable | in GB |
 | `-spadesKmers`, `-assemblyKmers` | string | `"27,43,67,87,101,127"` | stable | comma delimited list |
 | `-reAssembleMG` | integer | `0` | stable | Rebuild an assembly; shared assembly groups additionally require `-OKtoRWassGrps 1`. |
-| `-asssemblyHddSpace` | integer | `"-1"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-asssemblyHddSpace` | integer | `"-1"` | stable | Assembler scratch request in GB; -1 uses the assembler-specific default. |
 | `-assembleMG` | integer | `0` | stable | 1=Spades, 2=MegaHIT, 3= flye, 4=metaMDBG, 5=hybrid ill-PB (megahit, metaMDBG) |
-| `-assemblyLongTime` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-assemblyScaffMinSize` | integer | `500` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-assemblyLongTime` | integer | `0` | stable | Submit assembly jobs with the long-runtime setting. |
+| `-assemblyScaffMinSize` | integer | `500` | stable | Minimum retained scaffold length in bases. |
 
 ## Binning
 
@@ -144,11 +144,11 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-BinnerCores` | integer | `9` | stable | cores used for Binning process (and checkM) |
 | `-BinnerMem` | integer | `0` | stable | define binning memory, Gb, 0=auto |
 | `-minBinnerAssemblyMB` | float | `5` | stable | Do not run the binner when the assembly contains fewer than this many million sequence bases. Publish the standard empty binner outputs instead. Set to `0` to disable the cutoff. |
-| `-checkM2` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-checkM1` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-checkM2` | integer | `1` | stable | Assess recovered bins with CheckM2. |
+| `-checkM1` | integer | `0` | stable | Assess recovered bins with CheckM1. |
 | `-BinnerScratchTmp` | integer | `0` | internal/advanced | very specific (undocumented) use of scratch instead of nodetmp dir |
 | `-redoEmptyBins` | integer | `0` | internal/advanced | debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes |
-| `-redoBinning` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-redoBinning` | integer | `0` | stable | Remove and rebuild requested binning results. |
 | `-SB_env` | string | `""` | stable | semiBin environment; if given, will avoid re-training de novo binning model. Default: "" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global |
 
 ## Gene prediction on assembly
@@ -157,20 +157,20 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 |---|---:|---|---|---|
 | `-predictEukGenes` | integer | `0` | stable | severely limits total predicted gene amount (~25% of total genes) |
 | `-kmerPerGene` | integer | `0` | stable | calculate kmer frequencies for each gene instead of per scaffold |
-| `-genePredGZenforce` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-rewriteGenePred` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-genePredGZenforce` | integer | `1` | stable | Require the canonical compressed gene-prediction outputs. |
+| `-rewriteGenePred` | integer | `0` | stable | Remove and rebuild gene predictions and dependent statistics. |
 
 ## Mapping
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-mapper` | integer | `-1` | stable | #1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long) |
-| `-mapUnmapped` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-mappingCoverage` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-mapUnmapped` | integer | `0` | stable | Pass reads left unmapped by one reference to the next mapping. |
+| `-mappingCoverage` | integer | `1` | stable | Calculate per-contig and per-gene coverage for reference mappings. |
 | `-mappingMem` | integer | `-1` | stable | total mem for mini2/kma/bwa/bwt2 in GB |
 | `-mapSortMem` | integer | `-1` | stable | total mem for samtools sort in GB |
-| `-rmDuplicates` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-mappingCores` | integer | `8` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-rmDuplicates` | integer | `1` | stable | Remove duplicate alignments before coverage calculation. |
+| `-mappingCores` | integer | `8` | stable | CPU cores requested for each mapping job. |
 | `-mapperFilterIll` | string | `"0.05 0.75 20 3"` | stable | Maximum NM edit rate, minimum query coverage, minimum mapping quality, and minimum clipping at both ends (0 disables clipping filter). |
 | `-mapperFilterHybridIll` | string | `"0.03 0.90 40 5"` | advanced | Stricter Illumina BAM filter used while deriving coverage for hybrid preassemblies: maximum edit rate, minimum query coverage, minimum mapping quality and minimum clipping at both ends. |
 | `-hybridMinMapQ` | integer | `40` | advanced | Minimum mapping quality passed to `samtools depth` for hybrid-preassembly coverage. |
@@ -182,19 +182,19 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-breakpointMinFlankDepth` | float | `1` | advanced | Minimum flank depth required when accepting a candidate breakpoint. |
 | `-breakpointMaxFlankFraction` | float | `0.10` | advanced | Maximum low-depth fraction allowed within breakpoint flanks. |
 | `-hybridSyntheticMaxDepth` | float | `20` | advanced | Cap on synthetic read depth generated from each hybrid-preassembly package. |
-| `-mapperFilterPB` | string | `"0.05 0.5 30 0"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-mapperFilterONT` | string | `"0.15 0.5 10 0"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-mapSaveCRAM` | integer | `1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-mapperFilterPB` | string | `"0.05 0.5 30 0"` | stable | PacBio alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping. |
+| `-mapperFilterONT` | string | `"0.15 0.5 10 0"` | stable | Nanopore alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping. |
+| `-mapSaveCRAM` | integer | `1` | stable | Retain assembly back-mapping alignments as CRAM files. |
 
 ## Mapping related (2) (assembly)
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-remap2assembly`, `-redoMap2assembly`, `-redoMapping` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-JGIdepths` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-remap2assembly`, `-redoMap2assembly`, `-redoMapping` | integer | `0` | stable | Remove and rebuild read mappings to the assembly. |
+| `-JGIdepths` | integer | `0` | stable | Generate JGI depth output for assembly mappings. |
 | `-mapReadsOntoAssembly` | integer | `1` | stable | map original reads back on assembly, to estimate abundance etc |
 | `-mapSupportReadsOntoAssembly` | integer | `1` | stable | Map `SupportReads` onto the assembly and calculate their coverage separately. |
-| `-saveReadsNotMap2Assembly` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-saveReadsNotMap2Assembly` | integer | `0` | stable | Save reads that do not map to the assembly. |
 
 ## Map2tar / map2db / map2gc
 
@@ -202,10 +202,10 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 |---|---:|---|---|---|
 | `-decoyMapping` | integer | `1` | stable | 1: "Decoy mapping": map against reference genome AND against assembly of metagenome (drawing obvious better hits to metagenome, the "decoy") |
 | `-competitive2ndmap` | integer | `-1` | stable | 1: Competitive, 2: combined but report separately per input genome, -1: combined and report all together |
-| `-ref` | string | `""` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-ref` | string | `""` | stable | Comma-separated reference FASTA files for secondary mapping. |
 | `-mapperLargeRef` | integer | `0` | stable | use flags in mapper index built for large ref DBs? |
 | `-mapnms` | string | `""` | stable | name for this final files |
-| `-redo2ndmap` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-redo2ndmap` | integer | `0` | stable | Remove and rebuild secondary-reference mappings. |
 
 ## Snps
 
@@ -214,15 +214,15 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-get2ndMappingConsSNP` | integer | `0` | stable | SNPs (onto mapping) |
 | `-getAssemblConsSNP` | integer | `0` | stable | SNPs (onto self assembly) #calculates consensus SNP of assembly (useful for checking assembly gets consensus and Assmbl_grps) |
 | `-getAssemblConsSNPsuppRds` | integer | `0` | stable | same as getAssemblConsSNP, but SNP calling for support reads |
-| `-redoAssmblConsSNP` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-redoAssmblConsSNP` | integer | `0` | stable | Remove and rebuild assembly consensus SNP outputs. |
 | `-SNPmem` | integer | `0` | stable | memory per assigned core, in GB |
-| `-redoGeneExtrSNP` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-redoGeneExtrSNP` | integer | `0` | stable | Rebuild gene and protein sequences derived from consensus SNPs. |
 | `-SNPjobSsplit` | integer | `0` | stable | parallel jobs per sample; 0 uses tiered alignment-size estimates from 2 cores at 300 MB to 10 cores at 10 GB |
-| `-SNPminCallQual` | integer | `20` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-SNPminCallQual` | integer | `20` | stable | Minimum variant quality used for consensus calls. |
 | `-SNPsaveVCF` | integer | `1` | stable | save vcf of SNP calles? DEfault : 1 |
 | `-SNPsaveConsFasta` | integer | `0` | stable | Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated.. |
-| `-SNPcaller` | string | `"MPI"` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-SNPcores` | integer | `10` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-SNPcaller` | string | `"MPI"` | stable | Consensus variant caller: MPI for mpileup or FB for FreeBayes. |
+| `-SNPcores` | integer | `10` | stable | Maximum cores used by consensus SNP calling. |
 | `-SNPconsMinDepth` | integer | `0` | stable | how many reads coverage to include position for consensus call? |
 | `-SNPnormINDEL` | integer | `1` | stable | using bcftools norm to left-align indels |
 | `-SVcaller` | integer | `0` | stable | calling structural variants: 1=delly, 2=gridss. Default (0). |
@@ -231,47 +231,47 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-profileFunct` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-reParseFunct` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-reProfileFunct` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-profileFunct` | integer | `0` | stable | Run DIAMOND-based functional profiling. |
+| `-reParseFunct` | integer | `0` | stable | Reparse existing DIAMOND hits. |
+| `-reProfileFunct` | integer | `0` | stable | Remove and rebuild DIAMOND alignments and parsed profiles. |
 | `-reProfileFuncTogether` | integer | `0` | stable | if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..) |
-| `-DiaCores` | integer | `12` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-DiaCores` | integer | `12` | stable | CPU cores requested for DIAMOND jobs. |
 | `-DiaMem` | integer | `7` | stable | memory in GB for diamond alignment jobs |
 | `-DiaParseEvals` | string | `"1e-7"` | stable | evalues at which to accept hits to func database |
-| `-DiaSensitiveMode` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-DiaSensitiveMode` | integer | `0` | stable | Enable DIAMOND sensitive mode. |
 | `-DiaFrameshift` | integer | `0` | stable | DIAMOND frameshift penalty for long, error-prone reads; `0` disables frameshift-aware alignment. |
-| `-rmRawDiamondHits` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-DiaMinAlignLen` | integer | `20` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-DiaMinFracQueryCov` | float | `0.1` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-DiaPercID` | integer | `40` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-rmRawDiamondHits` | integer | `0` | stable | Delete raw DIAMOND hits after successful parsing. |
+| `-DiaMinAlignLen` | integer | `20` | stable | Minimum accepted DIAMOND alignment length. |
+| `-DiaMinFracQueryCov` | float | `0.1` | stable | Minimum accepted fraction of the query aligned. |
+| `-DiaPercID` | integer | `40` | stable | Minimum accepted DIAMOND percent identity. |
 | `-DiaDBs` | string | `""` | stable | NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI |
 
 ## Functional profiling (jaime tree)
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-orthoExtract` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-orthoExtract` | integer | `0` | stable | Run translated-read orthologue placement. |
 
 ## Ribo profiling (mitag)
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-profileRibosome` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-riobsomalAssembly` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-reProfileRibosome` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-reRibosomeLCA` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-riboMaxRds` | integer | `250000` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-saveRiboRds` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-thoroughCheckRiboFinish` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-profileRibosome` | integer | `0` | stable | Run SSU/LSU read extraction and taxonomic assignment. |
+| `-riobsomalAssembly` | integer | `0` | stable | Assemble extracted ribosomal reads. |
+| `-reProfileRibosome` | integer | `0` | stable | Remove existing RiboFind extraction and assignment results, plus merged profiles, then rerun; requires `-profileRibosome 1`. |
+| `-reRibosomeLCA` | integer | `0` | stable | Remove existing RiboFind assignments and merged results, then rerun LCA; requires `-profileRibosome 1`. |
+| `-riboMaxRds` | integer | `250000` | stable | Maximum extracted reads assigned per ribosomal marker. |
+| `-saveRiboRds` | integer | `0` | stable | Retain reads used during ribosomal assignment. |
+| `-thoroughCheckRiboFinish` | integer | `0` | stable | Require non-empty RiboFind assignment output before accepting completion. |
 
 ## Other tax profilers..
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-profileMetaphlan` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-profileMOTU2` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-profileKraken` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
-| `-profileTaxaTarget` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-profileMetaphlan` | integer | `0` | stable | Run MetaPhlAn taxonomic profiling. |
+| `-profileMOTU2` | integer | `0` | stable | Run mOTUs taxonomic profiling. |
+| `-profileKraken` | integer | `0` | stable | Run Kraken taxonomic profiling. |
+| `-profileTaxaTarget` | integer | `0` | stable | Run target-taxon profiling. |
 | `-estGenoSize` | integer | `0` | stable | estimate average size of genomes in data |
 | `-krakenDB` | string | `""` | stable | "virusDB";#= "minikraken_2015/"; |
 
@@ -279,7 +279,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-calcInterMGdistance` | integer | `0` | stable | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-calcInterMGdistance` | integer | `0` | stable | Calculate the legacy inter-metagenome D2 distance matrix. |
 
 ## Io for specific uses
 
@@ -292,7 +292,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-wcKeyJobs` | string | `""` | internal/advanced | Accepted by MATAF4.pl; inspect source or help output for detailed behaviour. |
+| `-wcKeyJobs` | string | `""` | internal/advanced | Slurm work-category or accounting key added to submitted jobs. |
 
 ## Debug
 
@@ -355,13 +355,13 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 |---|---:|---|---|---|
 | `-1stepClust` | integer | `1` | stable | cluster incomplete genes separate? |
 | `-submitLocal` | integer | `1` | stable | pretty important run mode switch, to submit jobs while geneCat is runnning single core |
-| `-submSystem` | string |  | stable | Accepted by geneCat.pl; see source/help output for detailed behaviour. |
+| `-submSystem` | string |  | stable | See source/help for details. |
 | `-continue`, `-justCDhit` | integer | `1` | stable | flow control, 1: continue with found files 0: delete existing (partial) gene cat, start again |
-| `-c`, `-cores` | integer | `20` | stable | Accepted by geneCat.pl; see source/help output for detailed behaviour. |
+| `-c`, `-cores` | integer | `20` | stable | See source/help for details. |
 | `-c0`, `-cores0` | integer | `-1` | stable | specifcally cores only for the big main clustering job.. |
 | `-c3`, `-cores3` | integer | `-1` | stable | for small jobs that really don't require that much power.. |
 | `-mem` | integer | `200` | stable | max mem |
-| `-stone` | string |  | stable | Accepted by geneCat.pl; see source/help output for detailed behaviour. |
+| `-stone` | string |  | stable | See source/help for details. |
 | `-mem3` | integer | `-1` | stable | max mem for smaller jobs |
 
 ### Sample processing related
@@ -407,11 +407,11 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-FuncMinBitSc` | float | `45` | stable | Accepted by geneCat.pl; see source/help output for detailed behaviour. |
-| `-FuncMinAlLeng` | integer | `30` | stable | Accepted by geneCat.pl; see source/help output for detailed behaviour. |
+| `-FuncMinBitSc` | float | `45` | stable | See source/help for details. |
+| `-FuncMinAlLeng` | integer | `30` | stable | See source/help for details. |
 | `-FuncMinPercSbjCov` | float | `0.5` | stable | Minimum fraction of subject coverage for functional assignment. |
-| `-FuncMinPerID` | float | `25` | stable | Accepted by geneCat.pl; see source/help output for detailed behaviour. |
-| `-FuncMinEVal` | float | `1e-8` | stable | Accepted by geneCat.pl; see source/help output for detailed behaviour. |
+| `-FuncMinPerID` | float | `25` | stable | See source/help for details. |
+| `-FuncMinEVal` | float | `1e-8` | stable | See source/help for details. |
 
 ## MGS.pl
 
@@ -429,7 +429,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-canopies` | string |  | stable | location of canopy clustering output file (clusters.txt) |
 | `-smallCores` | integer | `4` | stable | cores used for normal jobs (not intensive) |
 | `-bottleneckCores` | integer | `12` | stable | cores for compute intensive jobs |
-| `-redoCluster` | integer | `0` | stable | Accepted by MGS.pl; see source/help output for detailed behaviour. |
+| `-redoCluster` | integer | `0` | stable | See source/help for details. |
 | `-redoTax` | integer | `0` | stable | rewrite tax annotations |
 | `-MGset` | string | `FMG` | stable | GTDB or FMG, which marker genes are used? Default: GTDB |
 | `-wait4stone` | string |  | stable | wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later |
@@ -442,7 +442,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-binSpeciesMG` | integer | `2` | stable | 0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5 |
 | `-ignoreIncompleteMAGs` | integer | `1` | stable | 1: assemblies without MAG calculations are ignored. Default: 1 |
 | `-legacy` | integer | `0` | deprecated/legacy | 1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0 |
-| `-genomesPerFamily` | integer | `0` | stable | Accepted by MGS.pl; see source/help output for detailed behaviour. |
+| `-genomesPerFamily` | integer | `0` | stable | See source/help for details. |
 
 ## buildTree5.pl
 
@@ -453,49 +453,49 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-genoInD` | string |  | stable | provide a dir with complete genomes, will extract FGMs and build tree between genomes (NT/AA flag) |
-| `-wildcardflag` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-fna` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-wildcardflag` | string |  | stable | See source/help for details. |
+| `-fna` | string |  | stable | See source/help for details. |
 | `-aa` | string |  | stable | Amino-acid FASTA input. Note: source flag is -aa, not -faa. |
-| `-cats` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-outD` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-tmpD` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-cats` | string |  | stable | See source/help for details. |
+| `-outD` | string |  | stable | See source/help for details. |
+| `-tmpD` | string |  | stable | See source/help for details. |
 | `-withinSpecies` | integer | `0` | stable | Enable within-species filtering: require two called sequences per retained column by default and enable divergence-based locus QC. |
 | `-strainWithinPreset` | integer | `0` | advanced/internal | Apply the fixed MATAFILER strain-tree preset; implies `-withinSpecies 1`. |
-| `-cores` | integer | `1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-superTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-superCheck` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-cores` | integer | `1` | stable | See source/help for details. |
+| `-superTree` | integer | `0` | stable | See source/help for details. |
+| `-superCheck` | integer | `0` | stable | See source/help for details. |
 | `-fixHeaders` | integer | `0` | stable | # fix the fasta headers, if too long or containing not allowed symbols (nwk reserved) |
-| `-useEte` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-NTfilt` | float | `0.8` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-NTfiltPerGene` | float | `0.1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-GenesPerSpecies` | float | `0.1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-useEte` | integer | `0` | stable | See source/help for details. |
+| `-NTfilt` | float | `0.8` | stable | See source/help for details. |
+| `-NTfiltPerGene` | float | `0.1` | stable | See source/help for details. |
+| `-GenesPerSpecies` | float | `0.1` | stable | See source/help for details. |
 | `-fracMaxGenes90pct` | float | `0.25` | stable | Minimum locus size as a fraction of the category-size Q90. Set to `0` to retain every category containing at least one length-filtered sequence. |
-| `-NTfiltCount` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-NTfiltCount` | integer | `0` | stable | See source/help for details. |
 | `-smplDef` | integer | `1` | stable | is the genome somehow quantified with a delimiter (_) ? |
 | `-smplSep` | string | `_` | stable | set the delimiter |
-| `-outgroup` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-AAtree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-outgroup` | string |  | stable | See source/help for details. |
+| `-AAtree` | integer | `0` | stable | See source/help for details. |
 | `-MSAprogram` | integer | `2` | stable | (0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA) |
 | `-minOverlapMSA` | integer | `0` between species; `2` within species | stable | Minimum number of called sequences required to retain an MSA column. An explicit value overrides the `-withinSpecies` default. |
 | `-maxGapPerCol` | float | `1` | stable | same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column |
-| `-calcDistMat` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-calcDistMatExt` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-calcDiffDNA` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-calcDistMat` | integer | `0` | stable | See source/help for details. |
+| `-calcDistMatExt` | integer | `0` | stable | See source/help for details. |
+| `-calcDiffDNA` | integer | `0` | stable | See source/help for details. |
 | `-minPcId` | float | `0` | stable | sequence is filtered from data, unless the average minPcId is >= $minPcId |
-| `-SynTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-NonSynTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-continue` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-bootstrap` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-subsetSmpls` | integer | `-1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-SynTree` | integer | `0` | stable | See source/help for details. |
+| `-NonSynTree` | integer | `0` | stable | See source/help for details. |
+| `-continue` | integer | `0` | stable | See source/help for details. |
+| `-bootstrap` | integer | `0` | stable | See source/help for details. |
+| `-subsetSmpls` | integer | `-1` | stable | See source/help for details. |
 | `-postFilter` | string |  | stable | "," sep list of zorro,guidance2,macse |
 | `-rmMSA` | integer | `0` | stable | to save diskspace |
 | `-gzInput` | integer | `0` | stable | to save diskspace |
-| `-isAligned` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-runRAxML` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-runRaxMLng` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-runFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-runVeryFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-treeShrink` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-isAligned` | integer | `0` | stable | See source/help for details. |
+| `-runRAxML` | integer | `0` | stable | See source/help for details. |
+| `-runRaxMLng` | integer | `0` | stable | See source/help for details. |
+| `-runFastTree` | integer | `0` | stable | See source/help for details. |
+| `-runVeryFastTree` | integer | `0` | stable | See source/help for details. |
+| `-treeShrink` | integer | `0` | stable | See source/help for details. |
 | `-strictBackbone` | integer | `0` | advanced | Infer an ML backbone from well-covered samples and graft severe coverage outliers onto it. Enabled by the strain preset. |
 | `-strictBackboneFraction` | float | `0.35` | advanced | Defer a sample only when its called alignment sites are below this fraction of the sample Q90. Locus-QC status alone does not defer a sample after questionable loci have been masked. |
 | `-strictBackboneMinSamples` | integer | `3` | advanced | Fall back to the complete alignment if coverage filtering would leave fewer backbone samples. |
@@ -507,23 +507,23 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-postAlignmentDivergenceQC` | integer | `0` between species; `1` within species | stable | Reject absolute and cross-locus divergence outliers. When locus QC is enabled, its structural checks remain active even if divergence QC is disabled. |
 | `-postAlignmentRelativeZ` | float | `8.0` | stable | Modified-Z threshold for cross-locus consensus-divergence outliers when divergence QC is enabled. |
 | `-postAlignmentMinLociRelative` | integer | `8` | stable | Minimum locus count before applying cross-locus robust outlier QC. |
-| `-runIQtree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-AutoModel` | integer | `1` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-runIQtree` | integer | `0` | stable | See source/help for details. |
+| `-AutoModel` | integer | `1` | stable | See source/help for details. |
 | `-iqFast` | integer | `0` | stable | fast qiTree mode |
-| `-runClonalFrameML` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-runGubbins` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-runClonalFrameML` | integer | `0` | stable | See source/help for details. |
+| `-runGubbins` | integer | `0` | stable | See source/help for details. |
 | `-runLengthCheck` | integer | `1` | stable | check that sequence length can be divided by 3 |
 | `-runDNDS` | integer | `0` | stable | run dNdS analysis |
-| `-runTheta` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-runTheta` | integer | `0` | stable | See source/help for details. |
 | `-genesForDNDS` | string |  | stable | list with selected genes just for dnds |
 | `-DNDSonSubset` | integer | `0` | stable | run dnds just on subset (given by genesForDNDS) of genes |
-| `-codemlRepeats` | integer | `2` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-outDCodeml` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-genesToPhylip` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-runFastgear` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-runFastGearPostProcessing` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-map` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
-| `-clustername` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-codemlRepeats` | integer | `2` | stable | See source/help for details. |
+| `-outDCodeml` | string |  | stable | See source/help for details. |
+| `-genesToPhylip` | integer | `0` | stable | See source/help for details. |
+| `-runFastgear` | integer | `0` | stable | See source/help for details. |
+| `-runFastGearPostProcessing` | integer | `0` | stable | See source/help for details. |
+| `-map` | string |  | stable | See source/help for details. |
+| `-clustername` | string |  | stable | See source/help for details. |
 
 Completed IQ-TREE runs are accepted only when the log contains its completion signature and the inferred backbone contains exactly the backbone-alignment taxa. IQ-TREE's standard identical-sequence handling is retained; `-keep-ident` is not used. The safe likelihood kernel is enabled pre-emptively for alignments with at least 750 taxa or over 700 MB; a numerical-underflow diagnostic also triggers one clean retry with `-safe`. Successful runs remove IQ-TREE transient files such as `.uniqueseq.phy`, while retaining the final tree, report, and log.
 

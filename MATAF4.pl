@@ -53,6 +53,7 @@ use Mods::SampleCompletion qw(
 	read_sample_completion write_sample_completion
 	invalidate_sample_completion
 );
+use Mods::RibosomeState qw(prepare_ribosome_rerun);
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
 use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred handleSubmissionFailure);
@@ -184,7 +185,9 @@ sub createConsSNPandSVs;
 #       prerequisites; always provide vcf2fna with its required GFF.
 #4.31: 4.8.26: refresh exact Slurm capacity after a configurable batch of
 #       accepted submissions, while accounting for every intervening job.
-my $MATFILER_ver = 4.31;
+#4.32: 4.8.26: invalidate RiboFind outputs before assessing rerun completion.
+#       Remove stale per-sample links and merged profiles at the same time.
+my $MATFILER_ver = 4.32;
 
 #----------------- defaults ----------------- 
 
@@ -836,8 +839,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	my $KrakenOD = $curOutDir."Tax/kraken/$MFopt{globalKraTaxkDB}/";
 	if ($MFopt{RedoKraken} && -d $KrakenOD) {system "rm -r $KrakenOD" ;}
-	if ($MFopt{RedoRiboFind}){system "rm -rf $curOutDir/ribos";}
-	if ($MFopt{RedoRiboAssign}){system "rm -rf $curOutDir/ribos//ltsLCA";}
 	if ($MFopt{DoRibofind} && -e "$curOutDir/LOGandSUB/RiboLCA.sh.etxt"){
 		#my $LCAetxt = `cat $curOutDir/LOGandSUB/RiboLCA.sh.etxt`;
 		#if ($LCAetxt =~ m/ParseError thrown: Unexpected character .\@. found/){system "rm -rf $curOutDir/ribos";}
@@ -928,6 +929,17 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	
 	#check on processes not dependent on assemblies
+	if ($MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign}) {
+		my $riboRedo = prepare_ribosome_rerun(
+			sample_root => $curOutDir,
+			central_root => $baseOut.$preDIRs{dir2RiboF},
+			sample => $SmplName,
+			redo_profile => $MFopt{RedoRiboFind},
+			redo_assignment => $MFopt{RedoRiboAssign},
+		);
+		print "Removed previous RiboFind results for $SmplName\n"
+			if $riboRedo->{removed} && !$MFconfig{silent};
+	}
 	prepareDiamondRerun($curOutDir);
 	my ($calcKraken,$calcDiamond,$calcDiaParse,$calcRibofind,$calcRiboAssign,$calcGenoSize,
 			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar) = checkRawProgsFin($curOutDir,$SmplName);

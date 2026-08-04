@@ -42,6 +42,20 @@ while (my $line = <$reference_fh>) {
 }
 close($reference_fh);
 
+open($reference_fh, '<', $reference) or die "Cannot read $reference: $!";
+my $reference_text = do { local $/; <$reference_fh> };
+close($reference_fh);
+unlike(
+	$reference_text,
+	qr/Accepted by [A-Za-z0-9_.]+; (?:inspect|see) source\/help/i,
+	'flag descriptions omit repetitive acceptance boilerplate',
+);
+like(
+	$reference_text,
+	qr/`-reProfileRibosome`.*?Remove existing RiboFind extraction and assignment results/s,
+	'flag reference describes RiboFind profile invalidation',
+);
+
 is_deeply(
 	[sort keys %documented],
 	[sort keys %accepted],

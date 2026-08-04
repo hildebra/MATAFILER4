@@ -23,7 +23,7 @@ flow related	killDepNever	integer	0	stable	$MFconfig{killDepNever}	"kill jobs in
 flow related	requireInput	integer	0	stable	$MFconfig{abortOnEmptyInput}	in case input reads are no longer present, 0 will continue pipeline, 1 will abort
 flow related	ignoreSmpls	string	""""""	stable	$MFconfig{ignoreSmpl}	skip a certain sample (sample id)
 flow related	rmSmplLocks	integer	0	stable	$MFconfig{rmSmplLocks}	remove existing sample locks (useful if jobs have crashed, leaving abondened sample locks)
-flow related	silent	flag	0	stable	$MFconfig{silent}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+flow related	silent	flag	0	stable	$MFconfig{silent}	Suppress routine progress messages.
 flow related	maxUnzpJobs	integer	20	stable	$MFconfig{maxUnzpJobs}	how many unzip jobs to run in parallel (not to overload HPC IO). Default:20
 flow related	skipSmallSmplsMB	integer	1	stable	$MFconfig{skipSmallSmplsMB}	skip samples with a combined input smaller than this in MB (raw file size, independent of compressed or raw)
 flow related	forceWriteStats	integer	0	stable	$MFopt{writeStats}	force (re)writing of the metagStats report and text file
@@ -40,115 +40,115 @@ preprocessing (cleaning reads etc)	inputFQregex2	string	'.*2\.f[^\.]*q\.gz$'	sta
 preprocessing (cleaning reads etc)	inputFQregexSingle	string	""""""	stable	$MFconfig{rawFileSrchStrSingl}	regex for detecting single end reads in input fastq files
 preprocessing (cleaning reads etc)	inputFQregexTrustSingle	integer	0	stable	$MFconfig{prefSinglFQgreps}	if grep of files (rawSrchString) has multi assignments, which grep to trust more?
 preprocessing (cleaning reads etc)	inputBAMregex	string	""""""	stable	$MFconfig{rawFileBamSrchSing}	bams that will be converted to fastq
-preprocessing (cleaning reads etc)	splitFastaInput	integer	0	stable	$MFconfig{splitFastaInput}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+preprocessing (cleaning reads etc)	splitFastaInput	integer	0	stable	$MFconfig{splitFastaInput}	Enable FASTA input splitting during read staging.
 preprocessing (cleaning reads etc)	mergeReads	integer	0	stable	$MFopt{doReadMerge}	merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances)
-preprocessing (cleaning reads etc)	ProbRdFilter	integer	1	stable	$MFopt{sdmProbabilisticFilter}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+preprocessing (cleaning reads etc)	ProbRdFilter	integer	1	stable	$MFopt{sdmProbabilisticFilter}	Enable probabilistic SDM read filtering.
 preprocessing (cleaning reads etc)	pairedReadInput	integer	-1	stable	$MFconfig{readsRpairs}	determines if read pairs are expected in each in dir
-preprocessing (cleaning reads etc)	inputReadLengthSuppl	integer	5000	stable	$MFconfig{defaultReadLengthX}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+preprocessing (cleaning reads etc)	inputReadLengthSuppl	integer	5000	stable	$MFconfig{defaultReadLengthX}	Default supplementary-read length used for planning.
 preprocessing (cleaning reads etc)	filterHostRds,filterHumanRds	integer	0	stable	$MFopt{humanFilter}	0: no, 1:kraken2, 2: kraken1, 3:hostile
 preprocessing (cleaning reads etc)	filterHostKrak2DB	string	""""""	stable	$MFopt{filterHostDB1}	customize host org to filter (e.g. human, chicken ..)
-preprocessing (cleaning reads etc)	filterHostKr2Conf	string	0.01	stable	$MFopt{krakHostConf}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-preprocessing (cleaning reads etc)	filterHostKr2Quick	string		stable	$MFopt{filterHostKr2QuickMode}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-preprocessing (cleaning reads etc)	hostileIndex	string	"""human-t2t-hla"""	stable	$MFopt{hostileIndex}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-preprocessing (cleaning reads etc)	onlyFilterZip	integer	0	stable	$MFconfig{unpackZip}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-preprocessing (cleaning reads etc)	mocatFiltered	integer	0	stable	$MFconfig{importMocat}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+preprocessing (cleaning reads etc)	filterHostKr2Conf	string	0.01	stable	$MFopt{krakHostConf}	Kraken2 confidence threshold for host assignment.
+preprocessing (cleaning reads etc)	filterHostKr2Quick	string		stable	$MFopt{filterHostKr2QuickMode}	Kraken2 quick-mode option for host filtering.
+preprocessing (cleaning reads etc)	hostileIndex	string	"""human-t2t-hla"""	stable	$MFopt{hostileIndex}	Hostile reference index used for host filtering.
+preprocessing (cleaning reads etc)	onlyFilterZip	integer	0	stable	$MFconfig{unpackZip}	Stage and filter reads, then stop before downstream analyses.
+preprocessing (cleaning reads etc)	mocatFiltered	integer	0	stable	$MFconfig{importMocat}	Import reads from the configured MOCAT filtered-output layout.
 preprocessing (cleaning reads etc)	logQualvsLen	integer	0	stable	$MFopt{SDMlogQualvsLen}	sdm log file.. can be quite large; logs qual of read vs read length
-sdm related	inputReadLength	integer	150	stable	$MFconfig{defaultReadLength}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-sdm related	gzipSDMout	integer	1	stable	$MFopt{gzipSDMOut}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-sdm related	XfirstReads	integer	-1	stable	$MFconfig{XfirstReads}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-sdm related	minReadLength	integer	0	stable	$MFopt{tmpSdmminSL}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-sdm related	maxReadLength	integer	0	stable	$MFopt{tmpSdmmaxSL}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-sdm related	filterAdapters	integer	1	stable	$MFopt{trimAdapters}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-sdm related	customSDMopt	string	""""""	stable	$MFopt{sdmOpt}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+sdm related	inputReadLength	integer	150	stable	$MFconfig{defaultReadLength}	Default primary-read length used for planning.
+sdm related	gzipSDMout	integer	1	stable	$MFopt{gzipSDMOut}	Compress SDM-filtered FASTQ output.
+sdm related	XfirstReads	integer	-1	stable	$MFconfig{XfirstReads}	Process only the first N reads; -1 processes all reads.
+sdm related	minReadLength	integer	0	stable	$MFopt{tmpSdmminSL}	Override the minimum read length accepted by SDM; 0 keeps its configured value.
+sdm related	maxReadLength	integer	0	stable	$MFopt{tmpSdmmaxSL}	Override the maximum read length accepted by SDM; 0 keeps its configured value.
+sdm related	filterAdapters	integer	1	stable	$MFopt{trimAdapters}	Enable adapter trimming during SDM filtering.
+sdm related	customSDMopt	string	""""""	stable	$MFopt{sdmOpt}	Use the specified non-empty SDM options file.
 sdm related	sdmMem	string	"""15G"""	stable	$MFopt{sdmMem}	total mem for sdm job in Gb, default 15
-assembly related	spadesCores,assemblCores	integer	8	stable	$MFopt{AssemblyCores}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+assembly related	spadesCores,assemblCores	integer	8	stable	$MFopt{AssemblyCores}	Assembly threads per sample.
 assembly related	spadesMemory,assemblMemory	integer	-1	stable	$MFopt{AssemblyMemory}	in GB
 assembly related	spadesKmers,assemblyKmers	string	"""27,43,67,87,101,127"""	stable	$MFopt{AssemblyKmers}	comma delimited list
-assembly related	reAssembleMG	integer	0	stable	$MFopt{redoAssembly}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-assembly related	asssemblyHddSpace	integer	"""-1"""	stable	$HDDspace{assembler}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+assembly related	reAssembleMG	integer	0	stable	$MFopt{redoAssembly}	Remove existing assembly results and rebuild the metagenome assembly.
+assembly related	asssemblyHddSpace	integer	"""-1"""	stable	$HDDspace{assembler}	Assembler scratch request in GB; -1 uses the assembler-specific default.
 assembly related	assembleMG	integer	0	stable	$MFopt{DoAssembly}	1=Spades, 2=MegaHIT, 3= flye, 4=metaMDBG, 5=hybrid ill-PB (megahit, metaMDBG)
-assembly related	assemblyLongTime	integer	0	stable	$MFopt{SpadesLongtime}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-assembly related	assemblyScaffMinSize	integer	500	stable	$MFopt{scaffoldMinSize}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+assembly related	assemblyLongTime	integer	0	stable	$MFopt{SpadesLongtime}	Submit assembly jobs with the long-runtime setting.
+assembly related	assemblyScaffMinSize	integer	500	stable	$MFopt{scaffoldMinSize}	Minimum retained scaffold length in bases.
 binning	Binner,MetaBat2,binSpeciesMG	integer	0	stable	$MFopt{DoMetaBat2}	0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
 binning	BinnerCores	integer	9	stable	$MFopt{BinnerCores}	cores used for Binning process (and checkM)
 binning	BinnerMem	integer	0	stable	$MFopt{BinnerMem}	define binning memory, Gb, 0=auto
-binning	checkM2	integer	1	stable	$MFopt{useCheckM2}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-binning	checkM1	integer	0	stable	$MFopt{useCheckM1}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+binning	checkM2	integer	1	stable	$MFopt{useCheckM2}	Assess recovered bins with CheckM2.
+binning	checkM1	integer	0	stable	$MFopt{useCheckM1}	Assess recovered bins with CheckM1.
 binning	BinnerScratchTmp	integer	0	internal/advanced	$MFopt{useBinnerScratch}	very specific (undocumented) use of scratch instead of nodetmp dir
 binning	redoEmptyBins	integer	0	internal/advanced	$MFopt{BinnerRedoEmpty}	debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes
-binning	redoBinning	integer	0	stable	$MFopt{BinnerRedoAll}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+binning	redoBinning	integer	0	stable	$MFopt{BinnerRedoAll}	Remove and rebuild requested binning results.
 binning	SB_env	string	""""""	stable	$MFopt{SB_env}	"semiBin environment; if given, will avoid re-training de novo binning model. Default: """" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global"
 gene prediction on assembly	predictEukGenes	integer	0	stable	$MFopt{DoEukGenePred}	severely limits total predicted gene amount (~25% of total genes)
 gene prediction on assembly	kmerPerGene	integer	0	stable	$MFopt{kmerPerGene}	calculate kmer frequencies for each gene instead of per scaffold
-gene prediction on assembly	genePredGZenforce	integer	1	stable	$MFopt{genePredGZenforce}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-gene prediction on assembly	rewriteGenePred	integer	0	stable	$MFopt{rewriteGenePred}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+gene prediction on assembly	genePredGZenforce	integer	1	stable	$MFopt{genePredGZenforce}	Require the canonical compressed gene-prediction outputs.
+gene prediction on assembly	rewriteGenePred	integer	0	stable	$MFopt{rewriteGenePred}	Remove and rebuild gene predictions and dependent statistics.
 mapping	mapper	integer	-1	stable	$MFopt{MapperProg}	#1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
-mapping	mapUnmapped	integer	0	stable	$MFopt{useUnmapped}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-mapping	mappingCoverage	integer	1	stable	$MFopt{mapModeCovDo}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+mapping	mapUnmapped	integer	0	stable	$MFopt{useUnmapped}	Pass reads left unmapped by one reference to the next mapping.
+mapping	mappingCoverage	integer	1	stable	$MFopt{mapModeCovDo}	Calculate per-contig and per-gene coverage for reference mappings.
 mapping	mappingMem	integer	-1	stable	$MFopt{MapperMemory}	total mem for mini2/kma/bwa/bwt2 in GB
 mapping	mapSortMem	integer	-1	stable	$MFopt{mapSortMemGb}	total mem for samtools sort in GB
-mapping	rmDuplicates	integer	1	stable	$MFopt{MapperRmDup}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-mapping	mappingCores	integer	8	stable	$MFopt{MapperCores}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+mapping	rmDuplicates	integer	1	stable	$MFopt{MapperRmDup}	Remove duplicate alignments before coverage calculation.
+mapping	mappingCores	integer	8	stable	$MFopt{MapperCores}	CPU cores requested for each mapping job.
 mapping	mapperFilterIll	string	"""0.05 0.75 20 3"""	stable	$MFopt{bamfilterIll}	"Maximum NM edit rate, minimum query coverage, minimum mapping quality, and minimum clipping at both ends (0 disables clipping filter)."
-mapping	mapperFilterPB	string	"""0.05 0.5 30 0"""	stable	$MFopt{bamfilterPB}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-mapping	mapperFilterONT	string	"""0.15 0.5 10 0"""	stable	$MFopt{bamfilterONT}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-mapping	mapSaveCRAM	integer	1	stable	$MFopt{mapSaveCram}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-mapping related (2) (assembly)	remap2assembly,redoMap2assembly,redoMapping	integer	0	stable	$MFopt{redoAssMapping}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-mapping related (2) (assembly)	JGIdepths	integer	0	stable	$MFopt{DoJGIcoverage}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+mapping	mapperFilterPB	string	"""0.05 0.5 30 0"""	stable	$MFopt{bamfilterPB}	PacBio alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping.
+mapping	mapperFilterONT	string	"""0.15 0.5 10 0"""	stable	$MFopt{bamfilterONT}	Nanopore alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping.
+mapping	mapSaveCRAM	integer	1	stable	$MFopt{mapSaveCram}	Retain assembly back-mapping alignments as CRAM files.
+mapping related (2) (assembly)	remap2assembly,redoMap2assembly,redoMapping	integer	0	stable	$MFopt{redoAssMapping}	Remove and rebuild read mappings to the assembly.
+mapping related (2) (assembly)	JGIdepths	integer	0	stable	$MFopt{DoJGIcoverage}	Generate JGI depth output for assembly mappings.
 mapping related (2) (assembly)	mapReadsOntoAssembly	integer	1	stable	$MFopt{map2Assembly}	map original reads back on assembly, to estimate abundance etc
 mapping related (2) (assembly)	mapSupportReadsOntoAssembly	integer	1	stable	$MFopt{mapSupport2Assembly}	"(1) map ""SupportReads"" onto assembly. Default: 0"
-mapping related (2) (assembly)	saveReadsNotMap2Assembly	integer	0	stable	$MFopt{SaveUnalignedReads}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+mapping related (2) (assembly)	saveReadsNotMap2Assembly	integer	0	stable	$MFopt{SaveUnalignedReads}	Save reads that do not map to the assembly.
 map2tar / map2DB / map2GC	decoyMapping	integer	1	stable	$MFopt{DoMapModeDecoy}	"1: ""Decoy mapping"": map against reference genome AND against assembly of metagenome (drawing obvious better hits to metagenome, the ""decoy"")"
 map2tar / map2DB / map2GC	competitive2ndmap	integer	-1	stable	$MFopt{mapModeTogether}	1: Competitive, 2: combined but report separately per input genome, -1: combined and report all together
-map2tar / map2DB / map2GC	ref	string	""""""	stable	$MFopt{refDBall}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+map2tar / map2DB / map2GC	ref	string	""""""	stable	$MFopt{refDBall}	Comma-separated reference FASTA files for secondary mapping.
 map2tar / map2DB / map2GC	mapperLargeRef	integer	0	stable	$MFopt{largeMapperDB}	use flags in mapper index built for large ref DBs?
 map2tar / map2DB / map2GC	mapnms	string	""""""	stable	$MFopt{bwt2NameAll}	name for this final files
-map2tar / map2DB / map2GC	redo2ndmap	integer	0	stable	$MFopt{MapRewrite2nd}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+map2tar / map2DB / map2GC	redo2ndmap	integer	0	stable	$MFopt{MapRewrite2nd}	Remove and rebuild secondary-reference mappings.
 SNPs	get2ndMappingConsSNP	integer	0	stable	$MFopt{Do2ndMapSNP}	SNPs (onto mapping)
 SNPs	getAssemblConsSNP	integer	0	stable	$MFopt{DoConsSNP}	SNPs (onto self assembly) #calculates consensus SNP of assembly (useful for checking assembly gets consensus and Assmbl_grps)
 SNPs	getAssemblConsSNPsuppRds	integer	0	stable	$MFopt{DoSuppConsSNP}	same as getAssemblConsSNP, but SNP calling for support reads
-SNPs	redoAssmblConsSNP	integer	0	stable	$MFopt{redoSNPcons}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+SNPs	redoAssmblConsSNP	integer	0	stable	$MFopt{redoSNPcons}	Remove and rebuild assembly consensus SNP outputs.
 SNPs	SNPmem	integer	0	stable	$MFopt{memPJob}	memory per assigned core, in GB
-SNPs	redoGeneExtrSNP	integer	0	stable	$MFopt{redoSNPgene}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+SNPs	redoGeneExtrSNP	integer	0	stable	$MFopt{redoSNPgene}	Rebuild gene and protein sequences derived from consensus SNPs.
 SNPs	SNPjobSsplit	integer	0	stable	$MFopt{SNPconsJobsPsmpl}	parallel jobs per sample; 0 uses tiered alignment-size estimates from 2 cores at 300 MB to 10 cores at 10 GB
-SNPs	SNPminCallQual	integer	20	stable	$MFopt{SNPminCallQual}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+SNPs	SNPminCallQual	integer	20	stable	$MFopt{SNPminCallQual}	Minimum variant quality used for consensus calls.
 SNPs	SNPsaveVCF	integer	1	stable	$MFopt{saveVCF}	save vcf of SNP calles? DEfault : 1
 SNPs	SNPsaveConsFasta	integer	0	stable	$MFopt{saveConsFastas}	Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated..
-SNPs	SNPcaller	string	"""MPI"""	stable	$MFopt{SNPcallerFlag}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-SNPs	SNPcores	integer	10	stable	$MFopt{maxSNPcores}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+SNPs	SNPcaller	string	"""MPI"""	stable	$MFopt{SNPcallerFlag}	Consensus variant caller: MPI for mpileup or FB for FreeBayes.
+SNPs	SNPcores	integer	10	stable	$MFopt{maxSNPcores}	Maximum cores used by consensus SNP calling.
 SNPs	SNPconsMinDepth	integer	0	stable	$MFopt{consSNPminDepth}	how many reads coverage to include position for consensus call?
 SNPs	SNPnormINDEL	integer	1	stable	$MFopt{normSNPindels}	using bcftools norm to left-align indels
 SNPs	SVcaller	integer	0	stable	$MFopt{callSVs}	calling structural variants: 1=delly, 2=gridss. Default (0).
-functional profiling (diamond)	profileFunct	integer	0	stable	$MFopt{DoDiamond}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-functional profiling (diamond)	reParseFunct	integer	0	stable	$MFopt{redoDiamondParse}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-functional profiling (diamond)	reProfileFunct	integer	0	stable	$MFopt{rewriteDiamond}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+functional profiling (diamond)	profileFunct	integer	0	stable	$MFopt{DoDiamond}	Run DIAMOND-based functional profiling.
+functional profiling (diamond)	reParseFunct	integer	0	stable	$MFopt{redoDiamondParse}	Reparse existing DIAMOND hits.
+functional profiling (diamond)	reProfileFunct	integer	0	stable	$MFopt{rewriteDiamond}	Remove and rebuild DIAMOND alignments and parsed profiles.
 functional profiling (diamond)	reProfileFuncTogether	integer	0	stable	$MFopt{rewriteAllIfAnyDiamond}	if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
-functional profiling (diamond)	DiaCores	integer	12	stable	$MFopt{diaCores}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+functional profiling (diamond)	DiaCores	integer	12	stable	$MFopt{diaCores}	CPU cores requested for DIAMOND jobs.
 functional profiling (diamond)	DiaMem	integer	7	stable	$MFopt{diamondMem}	memory in GB for diamond alignment jobs
 functional profiling (diamond)	DiaParseEvals	string	"""1e-7"""	stable	$MFopt{diaEVal}	evalues at which to accept hits to func database
-functional profiling (diamond)	DiaSensitiveMode	integer	0	stable	$MFopt{diaRunSensitive}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+functional profiling (diamond)	DiaSensitiveMode	integer	0	stable	$MFopt{diaRunSensitive}	Enable DIAMOND sensitive mode.
 functional profiling (diamond)	DiaFrameshift	integer	0	stable	$MFopt{diaFrameshift}	DIAMOND frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment.
-functional profiling (diamond)	rmRawDiamondHits	integer	0	stable	$MFopt{DiaRmRawHits}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-functional profiling (diamond)	DiaMinAlignLen	integer	20	stable	$MFopt{DiaMinAlignLen}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-functional profiling (diamond)	DiaMinFracQueryCov	float	0.1	stable	$MFopt{DiaMinFracQueryCov}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-functional profiling (diamond)	DiaPercID	integer	40	stable	$MFopt{DiaPercID}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+functional profiling (diamond)	rmRawDiamondHits	integer	0	stable	$MFopt{DiaRmRawHits}	Delete raw DIAMOND hits after successful parsing.
+functional profiling (diamond)	DiaMinAlignLen	integer	20	stable	$MFopt{DiaMinAlignLen}	Minimum accepted DIAMOND alignment length.
+functional profiling (diamond)	DiaMinFracQueryCov	float	0.1	stable	$MFopt{DiaMinFracQueryCov}	Minimum accepted fraction of the query aligned.
+functional profiling (diamond)	DiaPercID	integer	40	stable	$MFopt{DiaPercID}	Minimum accepted DIAMOND percent identity.
 functional profiling (diamond)	DiaDBs	string	""""""	stable	$MFopt{reqDiaDB}	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
-functional profiling (Jaime tree)	orthoExtract	integer	0	stable	$MFopt{calcOrthoPlacement}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-ribo profiling (miTag)	profileRibosome	integer	0	stable	$MFopt{DoRibofind}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-ribo profiling (miTag)	riobsomalAssembly	integer	0	stable	$MFopt{doRiboAssembl}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-ribo profiling (miTag)	reProfileRibosome	integer	0	stable	$MFopt{RedoRiboFind}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-ribo profiling (miTag)	reRibosomeLCA	integer	0	stable	$MFopt{RedoRiboAssign}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-ribo profiling (miTag)	riboMaxRds	integer	250000	stable	$MFopt{riboLCAmaxRds}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-ribo profiling (miTag)	saveRiboRds	integer	0	stable	$MFopt{riboStoreRds}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-ribo profiling (miTag)	thoroughCheckRiboFinish	integer	0	stable	$MFopt{checkRiboNonEmpty}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-other tax profilers..	profileMetaphlan	integer	0	stable	$MFopt{DoMetaPhlan}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-other tax profilers..	profileMOTU2	integer	0	stable	$MFopt{DoMOTU2}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-other tax profilers..	profileKraken	integer	0	stable	$MFopt{DoKraken}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
-other tax profilers..	profileTaxaTarget	integer	0	stable	$MFopt{DoTaxaTarget}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+functional profiling (Jaime tree)	orthoExtract	integer	0	stable	$MFopt{calcOrthoPlacement}	Run translated-read orthologue placement.
+ribo profiling (miTag)	profileRibosome	integer	0	stable	$MFopt{DoRibofind}	Run SSU/LSU read extraction and taxonomic assignment.
+ribo profiling (miTag)	riobsomalAssembly	integer	0	stable	$MFopt{doRiboAssembl}	Assemble extracted ribosomal reads.
+ribo profiling (miTag)	reProfileRibosome	integer	0	stable	$MFopt{RedoRiboFind}	Remove existing RiboFind extraction and assignment results, plus merged profiles, then rerun; requires -profileRibosome 1.
+ribo profiling (miTag)	reRibosomeLCA	integer	0	stable	$MFopt{RedoRiboAssign}	Remove existing RiboFind assignments and merged results, then rerun LCA; requires -profileRibosome 1.
+ribo profiling (miTag)	riboMaxRds	integer	250000	stable	$MFopt{riboLCAmaxRds}	Maximum extracted reads assigned per ribosomal marker.
+ribo profiling (miTag)	saveRiboRds	integer	0	stable	$MFopt{riboStoreRds}	Retain reads used during ribosomal assignment.
+ribo profiling (miTag)	thoroughCheckRiboFinish	integer	0	stable	$MFopt{checkRiboNonEmpty}	Require non-empty RiboFind assignment output before accepting completion.
+other tax profilers..	profileMetaphlan	integer	0	stable	$MFopt{DoMetaPhlan}	Run MetaPhlAn taxonomic profiling.
+other tax profilers..	profileMOTU2	integer	0	stable	$MFopt{DoMOTU2}	Run mOTUs taxonomic profiling.
+other tax profilers..	profileKraken	integer	0	stable	$MFopt{DoKraken}	Run Kraken taxonomic profiling.
+other tax profilers..	profileTaxaTarget	integer	0	stable	$MFopt{DoTaxaTarget}	Run target-taxon profiling.
 other tax profilers..	estGenoSize	integer	0	stable	$MFopt{DoGenoSizeEst}	estimate average size of genomes in data
 other tax profilers..	krakenDB	string	""""""	stable	$MFopt{globalKraTaxkDB}	"""virusDB"";#= ""minikraken_2015/"";"
-D2s distance	calcInterMGdistance	integer	0	stable	$MFopt{DoCalcD2s}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+D2s distance	calcInterMGdistance	integer	0	stable	$MFopt{DoCalcD2s}	Calculate the legacy inter-metagenome D2 distance matrix.
 IO for specific uses	newFileStructure	string	""""""	internal/advanced	$MFconfig{mocatLinkDir}	just relink raw files for use in mocat
 IO for specific uses	upload2EBI	string	""""""	internal/advanced	$MFconfig{uploadRawRds}	copy human read removed raw files to this dir, named after sample
-institute specific: EI	wcKeyJobs	string	""""""	internal/advanced	$MFconfig{wcKeysForJob}	Accepted by MATAF4.pl; inspect source or help output for detailed behaviour.
+institute specific: EI	wcKeyJobs	string	""""""	internal/advanced	$MFconfig{wcKeysForJob}	Slurm work-category or accounting key added to submitted jobs.
 DEBUG	OKtoRWassGrps	integer	0	internal/advanced	$MFconfig{OKtoRWassGrps}	can delete assemblies, if suspects error in them
