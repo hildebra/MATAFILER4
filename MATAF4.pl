@@ -198,7 +198,9 @@ sub createConsSNPandSVs;
 #       assessment instead of re-inferring them solely from filesystem stones.
 #4.35: 4.8.26: make RiboFind artifacts part of the sample-completion sentinel
 #       contract and record explicit terminal outcomes for skipped samples.
-my $MATFILER_ver = 4.35;
+#4.36: 4.8.26: keep map-resolved primary input paths authoritative through
+#       unzip staging and refresh audit scripts for lightweight local setup.
+my $MATFILER_ver = 4.36;
 
 #----------------- defaults ----------------- 
 
@@ -2085,7 +2087,7 @@ sub sampleCompletionRequestSignature {
 	my @memberKeys = exists($map{$sampleKey}{AG_members})
 		? @{$map{$sampleKey}{AG_members}} : ($sampleKey);
 	my @mapFields = qw(
-		SmplID AssGroup MapGroup ExcludeAssem hasPrimaryRds SupportReads
+		SmplID dir rddir prefix AssGroup MapGroup ExcludeAssem hasPrimaryRds SupportReads
 		SeqTech SeqTechSingl
 	);
 	my %sampleDefinition = map {
@@ -5665,6 +5667,19 @@ sub valid_files{
 sub seedUnzip2tmp{
 	my ($fastp,$curSmpl,$jDepe,$tmpPath,$finDest, 
 		$calcUnzp,$finalMapDir,$porechopFlag,$inputRawFile) = @_;
+	# The map-resolved rddir is the authority for primary inputs. Do not let a
+	# caller reconstruct it from SmplPrefix/Path and silently drop #DirPath.
+	my $configuredPrimaryDir = $map{$curSmpl}{hasPrimaryRds}
+		? ($map{$curSmpl}{rddir} || "") : "";
+	if ($configuredPrimaryDir ne "") {
+		my $receivedPrimaryDir = defined($fastp) ? $fastp : "";
+		(my $configuredComparable = $configuredPrimaryDir) =~ s{/+$}{};
+		(my $receivedComparable = $receivedPrimaryDir) =~ s{/+$}{};
+		die "Internal input-directory mismatch for $curSmpl: map resolves to "
+			."$configuredPrimaryDir but unzip received $receivedPrimaryDir\n"
+			if ($receivedComparable ne "" && $receivedComparable ne $configuredComparable);
+		$fastp = $configuredPrimaryDir;
+	}
 	my $himipeSeqAd = getProgPaths("illuminaTS3pe"); #for trimomatic
 	my $trimJar = getProgPaths("trimomatic");
 
@@ -5673,6 +5688,7 @@ sub seedUnzip2tmp{
 	my $numCore=$MFopt{unzipCores};
 	my $rawReads=""; my $mmpu = "";
 	my $inputDiscovery = discoverSampleInputs($curSmpl, $fastp);
+	my $primarySourceDir = $inputDiscovery->{primary_dir};
 	my $xtraRdsTech = $inputDiscovery->{support_technology};
 	my $totalInputSizeMB=10000; #default to something sensible
 	my $totalXInputSizeMB=0; #normally no suppl present..
@@ -5750,9 +5766,10 @@ sub seedUnzip2tmp{
 	@paXs = @{$inputDiscovery->{support}{single}};
 	@paBamX = @{$inputDiscovery->{support}{bam}};
 	# Preserve authoritative inputs before the arrays are rewritten to rawRds.
-	my @sourcePa1 = @{source_input_files($fastp, @pa1)};
-	my @sourcePa2 = @{source_input_files($fastp, @pa2)};
-	my @sourcePas = @{source_input_files($fastp, @pas)};
+	my @sourcePa1 = @{source_input_files($primarySourceDir, @pa1)};
+	my @sourcePa2 = @{source_input_files($primarySourceDir, @pa2)};
+	my @sourcePas = @{source_input_files($primarySourceDir, @pas)};
+	my @sourcePaBam = @{source_input_files($primarySourceDir, @paBam)};
 	my @sourcePaX1 = @{source_input_files('', @paX1)};
 	my @sourcePaX2 = @{source_input_files('', @paX2)};
 	my @sourcePaXs = @{source_input_files('', @paXs)};
@@ -5786,9 +5803,8 @@ sub seedUnzip2tmp{
 	
 	#check if raw file is a symlink and if this is valid & create raw read link (HD times):
 	for (my $i = 0; $i<@pa1; $i++){
-		my $pp = $fastp;
-		my $read1Path = "$pp/$pa1[$i]";
-		my $read2Path = "$pp/$pa2[$i]";
+		my $read1Path = $sourcePa1[$i];
+		my $read2Path = $sourcePa2[$i];
 		my $realP = $read1Path;
 		if (-l $read1Path){
 			$realP = abs_path($read1Path) || "";
@@ -5873,7 +5889,7 @@ sub seedUnzip2tmp{
 	# Preserve the authoritative read locations before the arrays are rewritten
 	# to their generated rawRds destinations. A retry must validate the sources,
 	# because missing rawRds files are exactly what this stage recreates.
-	my @sourceInputs = @{source_input_files($fastp, @pa1, @pa2, @pas, @paBam)};
+	my @sourceInputs = (@sourcePa1, @sourcePa2, @sourcePas, @sourcePaBam);
 	push @sourceInputs, @{source_input_files('', @paX1, @paX2, @paXs, @paBamX)};
 	$rawReads = join(";", @sourceInputs);
 	die "tmpPath empty: $tmpPath" if ($tmpPath eq "");
@@ -5911,13 +5927,12 @@ sub seedUnzip2tmp{
 	my $primarySingleSourceCount = scalar(@pas);
 	my $supportSingleSourceCount = scalar(@paXs);
 	for (my $i=0; $i<@paBam; $i++){
-		my $pp = $fastp;
 		my $smtBin = getProgPaths("samtools");
 		my $bamFastq = outfiles_Bam("$finDest/rawRds/",basename($paBam[$i]));
 		push @sourcePas, $bamFastq;
 		push @pas, $bamFastq;
 		$unzipcmd .= "\necho \"Converting bam $i to fastq\"\n";
-		$unzipcmd .= "$smtBin fastq -@ $numCore -t $pp/$paBam[$i] -0 $bamFastq;\n"; #| $pigzBin -p $numCore -c >
+		$unzipcmd .= "$smtBin fastq -@ $numCore -t $sourcePaBam[$i] -0 $bamFastq;\n"; #| $pigzBin -p $numCore -c >
 		$lowEffort = 0;
 		$stagedReadsMaterialized = 1;
 	}
@@ -5939,10 +5954,9 @@ sub seedUnzip2tmp{
 	
 	for (my $i=0; $i<@pa1; $i++){
 		#print $pa1[$i]."\n";
-		my $pp = $fastp."/";
 		if ($MFconfig{filterFromSource}){
 			$lowEffort =1 if ($lowEffort != 0);
-			$pa1[$i] = $pp.$pa1[$i]; $pa2[$i] = $pp.$pa2[$i];
+			$pa1[$i] = $sourcePa1[$i]; $pa2[$i] = $sourcePa2[$i];
 		} elsif ($porechopFlag){
 #			$unzipcmd .= "$porechBin \n";
 			die "porechop is not implemented for read pairs!\n";
@@ -5952,19 +5966,19 @@ sub seedUnzip2tmp{
 			#trimomatic instead of unzip
 			my ($OFp1,$OFu1) = outfiles_trimall("$finDest/rawRds/",$pa1[$i]);
 			my ($OFp2,$OFu2) = outfiles_trimall("$finDest/rawRds/",$pa2[$i]);
-			$unzipcmd .= "java -jar $trimJar PE -threads $numCore $pp/$pa1[$i] $pp/$pa2[$i] $OFp1 $OFu1 $OFp2 $OFu2 ILLUMINACLIP:$illCLip:2:30:10\n";
+			$unzipcmd .= "java -jar $trimJar PE -threads $numCore $sourcePa1[$i] $sourcePa2[$i] $OFp1 $OFu1 $OFp2 $OFu2 ILLUMINACLIP:$illCLip:2:30:10\n";
 			#for now: discard of singletons
 			$unzipcmd .= "rm -f $OFu1 $OFu2\n";
 			$pa1[$i] = $OFp1; $pa2[$i] = $OFp2;
 			$lowEffort=0;
 		} else {
 		#old style
-			my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv($pp,$pa1[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
+			my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$sourcePa1[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
 			$unzipcmd .= $tmpCmd."\n";
 			$pa1[$i] = $newF;
 			$lowEffort = 0 if ($LEloc==0);
 			$stagedReadsMaterialized = 1 if ($LEloc==0);
-			($tmpCmd,$newF,$LEloc) = complexGunzCpMv($pp,$pa2[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
+			($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$sourcePa2[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
 			$unzipcmd .= $tmpCmd."\n";
 			$pa2[$i] = $newF;
 			
@@ -5983,20 +5997,19 @@ sub seedUnzip2tmp{
 	for (my $i=0; $i<$primarySingleSourceCount; $i++){
 		#next if (scalar(@paBam));
 		my $porechopped = "$finDest/rawRds/$pas[$i]"; $porechopped .= ".gz" unless ($porechopped =~ m/\.gz$/);
-		my $pp = $fastp;
 		if ($i==0 && ($porechopFlag && $is3rdGen) && !$allowLinks){$unzipcmd .=  "\nrm -f $porechopped\ntouch $porechopped\n\n";}
 		#print "$libInfo[$i] eq $xtraRdsTech\n";
 		#$pp = $fastp2 if ($libInfo[$i] eq $xtraRdsTech);
 		if ($MFconfig{filterFromSource}){
-			$pas[$i] = $pp.$pas[$i]; 
+			$pas[$i] = $sourcePas[$i];
 		} elsif ($porechopFlag){
 			#porechop is running really slow and instable, probably better to get fast5 and use modern basecaller, that will do this automatically..
 			my $porechBin = getProgPaths("porechop");
-			$unzipcmd .= "$porechBin -i $pp/$pas[$i] -t $numCore  --adapter_threshold 90 |gzip -c >> $porechopped\n";
+			$unzipcmd .= "$porechBin -i $sourcePas[$i] -t $numCore  --adapter_threshold 90 |gzip -c >> $porechopped\n";
 			$stagedReadsMaterialized = 1;
 			if (@pa1 > 0 ){die "no paired end reads can be given together with porechopped long reads!\n";}
 		} else {
-			my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv($pp,$pas[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
+			my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$sourcePas[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
 			$unzipcmd .= $tmpCmd."\n";
 			$pas[$i] = $newF;
 			$stagedReadsMaterialized = 1 if ($LEloc==0);
@@ -6055,7 +6068,17 @@ sub seedUnzip2tmp{
 			my $lightweightLocal = commands_are_lightweight_filesystem($unzipcmd)
 				&& normalise_job_dependencies($jDepe) eq '';
 			if ($lightweightLocal){
-				print "Executing lightweight UZ setup locally for $curSmpl\n";
+				# Refresh the conventional audit script even when no scheduler job is
+				# submitted; otherwise an old UNZP.sh misleadingly describes this run.
+				my $localUnzipScript = $logDir."UNZP.sh";
+				open(my $localUnzipFH, '>', $localUnzipScript)
+					or die "Cannot write local unzip script $localUnzipScript: $!\n";
+				print {$localUnzipFH} "#!/bin/bash\nset -eo pipefail\n", $unzipcmd
+					or die "Cannot populate local unzip script $localUnzipScript: $!\n";
+				close($localUnzipFH)
+					or die "Cannot close local unzip script $localUnzipScript: $!\n";
+				chmod 0755, $localUnzipScript;
+				print "Executing lightweight UZ setup locally for $curSmpl; refreshed $localUnzipScript\n";
 				systemW $unzipcmd;
 			} else {
 				$jobN = "_UZ$JNUM"; 

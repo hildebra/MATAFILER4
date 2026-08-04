@@ -157,7 +157,7 @@ like($upload_prep,
 	'raw upload preparation creates private copy-on-write or copied working files');
 my ($seed_unzip) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=^sub mOTU2Mapping)/ms;
 like($seed_unzip,
-	qr/source_input_files\(\$fastp, \@pa1\).*?\{source_files\}.*?\$sourcePa1\[\$i\]/s,
+	qr/source_input_files\(\$primarySourceDir, \@pa1\).*?\{source_files\}.*?\$sourcePa1\[\$i\]/s,
 	'unzip staging preserves map-resolved source paths on raw library records');
 like($mataf4, qr/\$flashBin .*?-o \$outTL .*?\$pairs->\[\$i\]\{files\}\{r1\} \$pairs->\[\$i\]\{files\}\{r2\}/s,
 	'FLASH uses the matching pair and a unique output prefix for each library');
@@ -175,7 +175,7 @@ like($seed_unzip,
 	qr/my \$stagedReadsMaterialized = 0;.*?Converting bam.*?\$stagedReadsMaterialized = 1;.*?\$stagedReadsMaterialized = 1 if \(\$LEloc==0\).*?stagedReadsMaterialized => \$stagedReadsMaterialized/s,
 	'copy, conversion, and transformation staging records materialized raw reads');
 like($seed_unzip,
-	qr/my \(\$tmpCmd,\$newF,\$LEloc\) = complexGunzCpMv\(\$pp,\$pas\[\$i\].*?\$stagedReadsMaterialized = 1 if \(\$LEloc==0\)/s,
+	qr/my \(\$tmpCmd,\$newF,\$LEloc\) = complexGunzCpMv\("",\$sourcePas\[\$i\].*?\$stagedReadsMaterialized = 1 if \(\$LEloc==0\)/s,
 	'single-read staging propagates the copy-versus-link result');
 like($mataf4,
 	qr/sub cleanInput.*?File::Spec->abs2rel.*?_shell_command\('rm', '-f', '--', \@temporary\)/s,
@@ -190,7 +190,7 @@ like($sdm_clean, qr/my \$technology = \$library->\{technology\} \|\| "";/,
 like($mataf4,
 	qr/my \$variantPrimaryTechnology = libraryTechnology\(.*?my \$variantSupportTechnology = libraryTechnology\(.*?SeqTech => \$variantPrimaryTechnology.*?SeqTechSuppl => \$variantSupportTechnology/s,
 	'variant calling derives primary and support technologies from read-library records');
-like($mataf4, qr/sub sdmStatsMany.*?glob\("\$inD\/LOGandSUB\/sdm\/filter\*\.log"\).*?glob\("\$inD\/LOGandSUB\/sdm\/filterSuppl\*\.log"\)/s,
-	'primary and support SDM statistics use separate per-library log sets');
+like($mataf4, qr/sub sdmStatsMany.*?my \@sdm_logs = glob\("\$inD\/LOGandSUB\/sdm\/filter\*\.log"\).*?my \@primary_logs = grep \{ \$_ !~ \/filterSuppl\/ \} \@sdm_logs.*?my \@support_logs = grep \{ \$_ =~ \/filterSuppl\/ \} \@sdm_logs/s,
+	'primary and support SDM statistics partition the shared per-library log list');
 
 done_testing();

@@ -10,6 +10,7 @@ use Mods::GenoMetaAss qw(
 	addFileLocs2AssmGrp getRawSeqsAssmGrp getCleanSeqsAssmGrp hasSuppRds
 	getRawLibrariesAssmGrp getCleanLibrariesAssmGrp
 );
+use Mods::WorkflowControl qw(source_input_files);
 
 my $tmp = tempdir(CLEANUP => 1);
 my $read_dir = "$tmp/reads";
@@ -115,6 +116,30 @@ is(
 	$groups->{groupA}{SupportReads},
 	$map->{S1}{SupportReads},
 	'assembly-group support summary has no synthetic leading comma',
+);
+
+my $transfer_parent = "$tmp/Ileal_samples";
+my $transfer_dir = "$transfer_parent/Transfer";
+make_path($transfer_dir);
+touch_file("$transfer_dir/IL7_1.fq.gz");
+touch_file("$transfer_dir/IL7_2.fq.gz");
+my $prefix_map_file = "$tmp/prefix_input_root.map";
+open(my $prefix_map_fh, '>', $prefix_map_file) or die "Cannot create map: $!";
+print {$prefix_map_fh} join("\t", '#SmplID', qw(SmplPrefix SeqTech)), "\n";
+print {$prefix_map_fh} "#DirPath\t$transfer_dir/\n#OutPath\t$out_dir\n#RunID\tprefix_run\n";
+print {$prefix_map_fh} join("\t", 'IL7', 'IL7_', 'ill'), "\n";
+close($prefix_map_fh);
+my ($prefix_map) = readMap($prefix_map_file, -1, {}, {}, 0);
+is($prefix_map->{IL7}{rddir}, "$transfer_dir/",
+	'#DirPath remains the primary input directory for SmplPrefix-only map rows');
+my $prefix_found = discoverReadFiles($prefix_map->{IL7}{rddir}, $prefix_map->{IL7}{prefix}, {
+	read1 => '.*1\\.fq\\.gz$', read2 => '.*2\\.fq\\.gz$',
+	single => '', bam => '', prefer_single => 0,
+});
+is_deeply(
+	source_input_files($prefix_map->{IL7}{rddir}, @{$prefix_found->{read1}}),
+	["$transfer_dir/IL7_1.fq.gz"],
+	'unzip source resolution retains the complete map #DirPath including its final directory',
 );
 
 my $bam_dir = "$tmp/bam_reads";
