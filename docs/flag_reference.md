@@ -25,7 +25,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 
 - `geneCat.pl` does **not** accept `-Binner`; use `-binSpeciesMG` for gene-catalog/MGS binning selection.
 - `MATAF4.pl` accepts `-Binner`, `-MetaBat2` and `-binSpeciesMG` as aliases for the sample-level binning option.
-- `MATAF4.pl` accepts `-profileMetaphlan`, not `-profileMetaphlan3`.
+- `-profileMetaphlan3` remains a compatibility alias for `-profileMetaphlan`.
 - `buildTree5.pl` accepts `-aa` for the amino-acid FASTA input; the older comment spelling `-faa` is not a parsed flag.
 - `geneCat.pl -MGset` and `MGS.pl -MGset` are constrained in source to `GTDB` or `FMG`.
 
@@ -268,7 +268,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-profileMetaphlan` | integer | `0` | stable | Run MetaPhlAn taxonomic profiling. |
+| `-profileMetaphlan`, `-profileMetaphlan3` | integer | `0` | stable | Run MetaPhlAn taxonomic profiling. |
 | `-profileMOTU2` | integer | `0` | stable | Run mOTUs taxonomic profiling. |
 | `-profileKraken` | integer | `0` | stable | Run Kraken taxonomic profiling. |
 | `-profileTaxaTarget` | integer | `0` | stable | Run target-taxon profiling. |

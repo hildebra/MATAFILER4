@@ -15,7 +15,7 @@ use Mods::WorkflowControl qw(
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
-	commands_are_lightweight_filesystem cleanup_stage_barrier
+	commands_are_lightweight_filesystem input_terminal_status reconcile_sample_empty_marker cleanup_stage_barrier
 );
 
 is(assembly_cores_for_input(input_mb => 0, configured_cores => 0), 8,
@@ -56,6 +56,27 @@ ok(!commands_are_lightweight_filesystem(
 ok(!commands_are_lightweight_filesystem(
 	"ln -s /reads/a.fq.gz /tmp/sample/rawRds/a.fq.gz && touch /tmp/sample/rawRds/done.sto\n"
 ), 'compound shell expressions are not classified as lightweight');
+
+is(input_terminal_status(input_size_mb => 0, threshold_mb => 1),
+	'skipped_empty_input', 'zero input has the explicit empty terminal status');
+is(input_terminal_status(input_size_mb => 0.5, threshold_mb => 1),
+	'skipped_too_small', 'nonzero input below the threshold is explicitly too small');
+is(input_terminal_status(input_size_mb => 8272.7, threshold_mb => 1), '',
+	'multi-gigabyte input cannot retain an empty or too-small outcome');
+my $empty_state_root = tempdir(CLEANUP => 1);
+my $empty_marker = File::Spec->catfile($empty_state_root, 'SMPL.empty');
+open(my $empty_marker_fh, '>', $empty_marker) or die "Cannot create $empty_marker: $!";
+close($empty_marker_fh) or die "Cannot close $empty_marker: $!";
+is(reconcile_sample_empty_marker(
+	sample_root => $empty_state_root, input_size_mb => 8272.7, threshold_mb => 1,
+), 0, 'authoritative nonempty input clears the cached empty state');
+ok(!-e $empty_marker, 'stale SMPL.empty is physically removed');
+open($empty_marker_fh, '>', $empty_marker) or die "Cannot recreate $empty_marker: $!";
+close($empty_marker_fh) or die "Cannot close $empty_marker: $!";
+is(reconcile_sample_empty_marker(
+	sample_root => $empty_state_root, input_size_mb => 0.5, threshold_mb => 1,
+), 1, 'a genuinely too-small sample retains its empty marker');
+ok(-e $empty_marker, 'valid SMPL.empty remains present for a too-small sample');
 my $cleanup_barrier = cleanup_stage_barrier(
 	{name => 'contig stats', required => 1, complete => 1},
 	{name => 'binning', required => 1, complete => 0, dependencies => 'run9;run9'},
@@ -526,8 +547,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?my \$MATFILER_ver = 4\.36;/s,
-	"MATAFILER history retains shared input discovery through version 4.36");
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?my \$MATFILER_ver = 4\.37;/s,
+	"MATAFILER history retains shared input discovery through version 4.37");
 like($mataf4, qr/setConfigFile\(\$MFconfig\{configFile\}\);.*?normalise_ribosome_request\(\\%MFopt\);/s,
 	'RiboFind redo flags enable profiling during option post-processing');
 like($mataf4, qr/my \$riboRedo = \{.*?prepare_ribosome_rerun\(.*?checkRawProgsFin\(.*?\$riboRedo->\{profile\}.*?\$riboRedo->\{assignment\}/s,
@@ -546,6 +567,12 @@ like($mataf4,
 like($mataf4,
 	qr/my \$combinedInputSizeMB = .*?inputFileSizeMB.*?inputXFileSizeMB.*?terminal_status => \$emptyTerminalStatus/s,
 	'small-sample terminal state uses combined primary and supplementary input');
+like($mataf4,
+	qr/SMPL\.empty.*?populateInputSizesFast\(\$curSmpl\).*?reconcile_sample_empty_marker.*?checkRawProgsFin/s,
+	'a stale empty marker is reconciled from authoritative input sizes before requested workflow checks');
+like($mataf4,
+	qr/currentTerminalStatus.*?current input size no longer qualifies for the stored terminal outcome/s,
+	'a false empty-sample sentinel reopens even when it stored the same nonempty input size');
 like($mataf4,
 	qr/terminal_status => 'skipped_sdm_warning'.*?sdm_warning_type => 'invalid_paired_read'/s,
 	'SDM invalid-pair skips are retained as explicit sentinel outcomes');

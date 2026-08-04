@@ -141,7 +141,7 @@ MATAF4.pl	4.34	Ribo profiling (miTag)	-reRibosomeLCA	integer	MFopt		stable	Remov
 MATAF4.pl	4.34	Ribo profiling (miTag)	-riboMaxRds	integer	MFopt		stable	Maximum extracted reads assigned per ribosomal marker.
 MATAF4.pl	4.34	Ribo profiling (miTag)	-saveRiboRds	integer	MFopt		stable	Retain reads used during ribosomal assignment.
 MATAF4.pl	4.34	Ribo profiling (miTag)	-thoroughCheckRiboFinish	integer	MFopt		stable	Require non-empty RiboFind assignment output before accepting completion.
-MATAF4.pl	4.34	Other tax profilers..	-profileMetaphlan	integer	MFopt		stable	Run MetaPhlAn taxonomic profiling.
+MATAF4.pl	4.34	Other tax profilers..	-profileMetaphlan,-profileMetaphlan3	integer	MFopt		stable	Run MetaPhlAn taxonomic profiling.
 MATAF4.pl	4.34	Other tax profilers..	-profileMOTU2	integer	MFopt		stable	Run mOTUs taxonomic profiling.
 MATAF4.pl	4.34	Other tax profilers..	-profileKraken	integer	MFopt		stable	Run Kraken taxonomic profiling.
 MATAF4.pl	4.34	Other tax profilers..	-profileTaxaTarget	integer	MFopt		stable	Run target-taxon profiling.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-04 — MATAFILER4 4.37 empty-state recovery
+
+- Revalidate a cached `SMPL.empty` marker against the current map-resolved primary and supplementary input sizes before it can suppress requested work.
+- Reopen a stored empty/too-small completion sentinel when its current input size no longer qualifies for that terminal outcome, even when the sentinel recorded the same nonempty size.
+- Reject internally contradictory empty-sample classification instead of silently closing a valid sample.
+- Accept `-profileMetaphlan3` as a compatibility alias for `-profileMetaphlan`.
+
 ## 2026-08-04 — IQ-TREE completion and strain-tip recovery
 
 - Updated `buildTree5.pl` from 5.25 to 5.27.

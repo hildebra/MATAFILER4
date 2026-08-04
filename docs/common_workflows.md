@@ -37,7 +37,7 @@ Notes:
 
 - Start with `-submit 0`; switch to `-submit 1` only after checking the dry-run.
 - `-spadesCores`, `-spadesKmers`, `-spadesMemory`, `-MetaBat2` and `-binSpeciesMG` are still accepted as aliases, but the clearer names are `-assemblCores`, `-assemblyKmers`, `-assemblMemory` and `-Binner`.
-- `-profileMetaphlan` is the current accepted MATAF4.pl flag; the old `-profileMetaphlan3` spelling is not accepted directly by the uploaded `MATAF4.pl`.
+- Prefer `-profileMetaphlan`; `-profileMetaphlan3` remains accepted as a compatibility alias.
 
 ### 3. Run and rerun
 

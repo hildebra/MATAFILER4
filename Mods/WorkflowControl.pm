@@ -25,6 +25,8 @@ our @EXPORT_OK = qw(
 	append_job_dependencies
 	deferred_command_dependencies
 	commands_are_lightweight_filesystem
+	input_terminal_status
+	reconcile_sample_empty_marker
 	cleanup_stage_barrier
 	augment_deferred_submission
 	source_input_files
@@ -129,6 +131,34 @@ sub commands_are_lightweight_filesystem {
 		return 0 unless $program =~ /^(?:ln|mkdir|touch|rm|sleep|echo)$/;
 	}
 	return 1;
+}
+
+sub input_terminal_status {
+	my (%args) = @_;
+	my $input_size_mb = 0 + ($args{input_size_mb} || 0);
+	my $threshold_mb = 0 + ($args{threshold_mb} || 0);
+	die 'input_terminal_status requires non-negative input and threshold sizes'
+		if $input_size_mb < 0 || $threshold_mb < 0;
+	return 'skipped_empty_input' if $input_size_mb == 0;
+	return 'skipped_too_small' if $input_size_mb < $threshold_mb;
+	return '';
+}
+
+sub reconcile_sample_empty_marker {
+	my (%args) = @_;
+	my $sample_root = $args{sample_root};
+	die 'reconcile_sample_empty_marker requires sample_root'
+		unless defined($sample_root) && length($sample_root);
+	my $status = input_terminal_status(
+		input_size_mb => $args{input_size_mb},
+		threshold_mb => $args{threshold_mb},
+	);
+	my $marker = "$sample_root/SMPL.empty";
+	if ($status eq '' && (-e $marker || -l $marker)) {
+		unlink $marker
+			or die "Cannot remove stale nonempty-sample marker $marker: $!\n";
+	}
+	return (-e $marker || -l $marker) ? 1 : 0;
 }
 
 sub cleanup_stage_barrier {

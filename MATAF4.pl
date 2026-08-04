@@ -71,7 +71,7 @@ use Mods::WorkflowControl qw(
 	hybrid_local_scratch_gb
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
-	commands_are_lightweight_filesystem cleanup_stage_barrier
+	commands_are_lightweight_filesystem input_terminal_status reconcile_sample_empty_marker cleanup_stage_barrier
 );
 
 
@@ -200,7 +200,9 @@ sub createConsSNPandSVs;
 #       contract and record explicit terminal outcomes for skipped samples.
 #4.36: 4.8.26: keep map-resolved primary input paths authoritative through
 #       unzip staging and refresh audit scripts for lightweight local setup.
-my $MATFILER_ver = 4.36;
+#4.37: 4.8.26: reconcile stale SMPL.empty markers with authoritative input
+#       sizes before completion checks, so valid samples reach requested jobs.
+my $MATFILER_ver = 4.37;
 
 #----------------- defaults ----------------- 
 
@@ -628,11 +630,18 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		populateInputSizesFast($curSmpl);
 		my $currentPrimaryMB = 0 + ($map{$curSmpl}{inputFileSizeMB} || 0);
 		my $currentSupplementaryMB = 0 + ($map{$curSmpl}{inputXFileSizeMB} || 0);
+		my $currentTerminalStatus = input_terminal_status(
+			input_size_mb => $currentPrimaryMB + $currentSupplementaryMB,
+			threshold_mb => $MFconfig{skipSmallSmplsMB},
+		);
 		my $storedSizes = $closedSample->{outcome}{input_size_mb} || {};
 		if ($currentPrimaryMB != ($storedSizes->{primary} || 0)
 				|| $currentSupplementaryMB != ($storedSizes->{supplementary} || 0)) {
 			$closedSample = undef;
 			$completionError = 'primary or supplementary input size changed after the sample was skipped';
+		} elsif ($currentTerminalStatus ne $closedSample->{outcome}{status}) {
+			$closedSample = undef;
+			$completionError = 'current input size no longer qualifies for the stored terminal outcome';
 		}
 	}
 	if ($closedSample) {
@@ -660,8 +669,23 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	delete $loopSampleCompleted{$JNUM};
 
-	$map{$curSmpl}{inputFilesEmpty} = 0; 
-	if (-e "$curOutDir/SMPL.empty"){$map{$curSmpl}{inputFilesEmpty} = 1;}
+	$map{$curSmpl}{inputFilesEmpty} = 0;
+	my $sampleEmptyMarker = "$curOutDir/SMPL.empty";
+	if (-e $sampleEmptyMarker || -l $sampleEmptyMarker) {
+		# SMPL.empty is only a cached conclusion. Revalidate it against the
+		# authoritative map-resolved inputs before it can suppress any work.
+		populateInputSizesFast($curSmpl);
+		my $currentInputSizeMB = ($map{$curSmpl}{inputFileSizeMB} || 0)
+			+ ($map{$curSmpl}{inputXFileSizeMB} || 0);
+		$map{$curSmpl}{inputFilesEmpty} = reconcile_sample_empty_marker(
+			sample_root => $curOutDir,
+			input_size_mb => $currentInputSizeMB,
+			threshold_mb => $MFconfig{skipSmallSmplsMB},
+		);
+		print "Removed stale SMPL.empty for $SmplName after discovering "
+			.sprintf('%.1f', $currentInputSizeMB)." MB of input\n"
+			if !$map{$curSmpl}{inputFilesEmpty} && !$MFconfig{silent};
+	}
 
 	#detect what already exists..
 	my $efinAssLoc = 0; $efinAssLoc = 1  if (-s $finAssLoc && -e "$finalCommAssDir/$checkpointNames{assemblyDone}");
@@ -1284,9 +1308,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	my $combinedInputSizeMB = ($map{$curSmpl}{inputFileSizeMB} || 0)
 		+ ($map{$curSmpl}{inputXFileSizeMB} || 0);
-	if ($map{$curSmpl}{inputFilesEmpty} && $combinedInputSizeMB >= $MFconfig{skipSmallSmplsMB}){
-			system "rm -f $curOutDir/SMPL.empty"; $map{$curSmpl}{inputFilesEmpty} = 0;
-	}
+	$map{$curSmpl}{inputFilesEmpty} = reconcile_sample_empty_marker(
+		sample_root => $curOutDir,
+		input_size_mb => $combinedInputSizeMB,
+		threshold_mb => $MFconfig{skipSmallSmplsMB},
+	);
 	#print "small skip: $MFconfig{skipSmallSmplsMB} $map{$curSmpl}{inputFileSizeMB} $map{$curSmpl}{inputXFileSizeMB} $AssemblyGo \n";
 	if (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB}) && (!$AssemblyGo || $AsGrps{$cAssGrp}{CntAimAss} <= 1 ) ){
 		
@@ -1311,8 +1337,13 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			#print "Sample empty.. next\n";
 		}
 		$runReport{empty_samples}{$curSmpl} = $combinedInputSizeMB;
-		my $emptyTerminalStatus = $combinedInputSizeMB > 0
-			? 'skipped_too_small' : 'skipped_empty_input';
+		my $emptyTerminalStatus = input_terminal_status(
+			input_size_mb => $combinedInputSizeMB,
+			threshold_mb => $MFconfig{skipSmallSmplsMB},
+		);
+		die "Internal empty-sample classification error for $curSmpl: "
+			."$combinedInputSizeMB MB does not qualify as empty or too small\n"
+			if $emptyTerminalStatus eq '';
 		my $emptyWorkPending = $jdep ne "" && $jdep ne "EMPTY_DO_NEXT";
 		if (!$emptyWorkPending) {
 			my $emptyCleanupComplete = runFinishedCleanup(finishedCleanupArguments(
@@ -10231,8 +10262,7 @@ sub getCmdLineOptions{
 		"saveRiboRds=i" => \$MFopt{riboStoreRds},
 		"thoroughCheckRiboFinish=i" => \$MFopt{checkRiboNonEmpty},
 	#other tax profilers..
-		"profileMetaphlan=i"=> \$MFopt{DoMetaPhlan},
-		#"profileMetaphlan3=i"=> \$MFopt{DoMetaPhlan3},
+		"profileMetaphlan|profileMetaphlan3=i"=> \$MFopt{DoMetaPhlan},
 		"profileMOTU2=i" => \$MFopt{DoMOTU2},
 		"profileKraken=i"=> \$MFopt{DoKraken},
 		"profileTaxaTarget=i" => \$MFopt{DoTaxaTarget},
