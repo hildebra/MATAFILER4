@@ -17,7 +17,7 @@ our @EXPORT_OK = qw(
 
 my $SENTINEL_NAME = 'MATAFILER.sample.complete.json';
 my $SCHEMA_NAME = 'MATAFILER.sample-completion';
-my $SCHEMA_VERSION = 1;
+my $SCHEMA_VERSION = 2;
 
 sub _sample_root {
 	my ($root) = @_;
@@ -45,6 +45,42 @@ sub completion_request_signature {
 
 sub _json_codec {
 	return JSON::PP->new->canonical(1)->pretty(1)->utf8(1);
+}
+
+sub _completion_record_error {
+	my ($record, $expected_components) = @_;
+	return 'sentinel outcome record is missing'
+		unless ref($record->{outcome}) eq 'HASH'
+			&& defined($record->{outcome}{status})
+			&& $record->{outcome}{status} ne '';
+	my %allowed_status = map { $_ => 1 } qw(
+		completed skipped_too_small skipped_empty_input skipped_sdm_warning
+	);
+	return "unknown sentinel outcome '$record->{outcome}{status}'"
+		unless $allowed_status{$record->{outcome}{status}};
+	return 'sentinel component evidence is missing'
+		unless ref($record->{components}) eq 'HASH';
+	for my $name (sort keys %{$record->{components}}) {
+		my $component = $record->{components}{$name};
+		return "sentinel component '$name' is malformed"
+			unless ref($component) eq 'HASH'
+				&& defined($component->{requested})
+				&& defined($component->{complete});
+		if ($record->{outcome}{status} eq 'completed'
+				&& $component->{requested} && !$component->{complete}) {
+			return "sentinel says requested component '$name' is incomplete";
+		}
+	}
+	return '' unless defined($expected_components);
+	return 'expected component evidence is malformed'
+		unless ref($expected_components) eq 'HASH';
+	# Deliberately skipped samples have no workflow artifacts to revalidate.
+	return '' if $record->{outcome}{status} ne 'completed';
+	my $stored = JSON::PP->new->canonical(1)->encode($record->{components});
+	my $current = JSON::PP->new->canonical(1)->encode($expected_components);
+	return 'required workflow component outputs have changed or are missing'
+		if $stored ne $current;
+	return '';
 }
 
 sub read_sample_completion {
@@ -83,6 +119,8 @@ sub read_sample_completion {
 			|| !defined($record->{metagstats}{DIR})
 			|| ref($record->{metagstats}{values}) ne 'HASH') {
 		$error = 'sentinel metagStats record is incomplete';
+	} else {
+		$error = _completion_record_error($record, $args{expected_components});
 	}
 	return wantarray ? (undef, $error) : undef if $error ne '';
 	return wantarray ? ($record, '') : $record;
@@ -90,7 +128,7 @@ sub read_sample_completion {
 
 sub write_sample_completion {
 	my (%args) = @_;
-	for my $required (qw(root sample request_signature metagstats)) {
+	for my $required (qw(root sample request_signature metagstats components outcome)) {
 		die "sample completion $required is required\n"
 			unless exists($args{$required}) && defined($args{$required});
 	}
@@ -100,6 +138,16 @@ sub write_sample_completion {
 		unless ref($args{metagstats}) eq 'HASH'
 			&& defined($args{metagstats}{DIR})
 			&& ref($args{metagstats}{values}) eq 'HASH';
+	die "sample completion components must be a hash reference\n"
+		unless ref($args{components}) eq 'HASH';
+	die "sample completion outcome must contain a status\n"
+		unless ref($args{outcome}) eq 'HASH'
+			&& defined($args{outcome}{status}) && $args{outcome}{status} ne '';
+	my $validation_error = _completion_record_error({
+		components => $args{components}, outcome => $args{outcome},
+	});
+	die "invalid sample completion evidence: $validation_error\n"
+		if $validation_error ne '';
 
 	my $path = sample_completion_path($args{root});
 	my $directory = dirname($path);
@@ -113,6 +161,8 @@ sub write_sample_completion {
 		present_assembly => $args{present_assembly} ? 1 : 0,
 		empty_sample => $args{empty_sample} ? 1 : 0,
 		empty_input_size_mb => 0 + ($args{empty_input_size_mb} || 0),
+		components => $args{components},
+		outcome => $args{outcome},
 		metagstats => $args{metagstats},
 	};
 	my $temporary = "$path.tmp.$$";

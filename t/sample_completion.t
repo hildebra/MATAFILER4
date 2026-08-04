@@ -27,11 +27,25 @@ isnt(completion_request_signature({
 	%{$request}, requested => {%{$request->{requested}}, binner => 2},
 }), $signature, 'changing requested outputs changes the completion signature');
 
+my $components = {
+	ribofind => {
+		requested => 1, complete => 1,
+		profile_complete => 1, taxonomy_complete => 1,
+	},
+};
+my $outcome = {
+	status => 'completed',
+	input_size_mb => {primary => 10, supplementary => 2, total => 12},
+	small_sample => 0,
+	sdm_warning => {detected => 0, type => '', log => ''},
+};
 my $path = write_sample_completion(
 	root => $sample_root,
 	sample => 'S1',
 	request_signature => $signature,
 	present_assembly => 1,
+	components => $components,
+	outcome => $outcome,
 	metagstats => {
 		DIR => '/reads/S1',
 		values => {RawInputSize => '1.250G', ScaffN50 => 12345},
@@ -44,15 +58,34 @@ ok(!-e "$path.tmp.$$", 'atomic publication leaves no temporary sentinel');
 
 my ($record, $error) = read_sample_completion(
 	root => $sample_root, sample => 'S1', request_signature => $signature,
+	expected_components => $components,
 );
 is($error, '', 'matching sentinel is valid');
 is($record->{sample}, 'S1', 'sentinel records its sample identity');
 is($record->{present_assembly}, 1, 'sentinel records assembly availability');
 is($record->{empty_sample}, 0, "ordinary completion is not marked empty");
+is_deeply($record->{components}, $components,
+	'sentinel records the verified workflow-component evidence');
+is_deeply($record->{outcome}, $outcome,
+	'sentinel records input sizes and the explicit terminal outcome');
 is_deeply($record->{metagstats}, {
 	DIR => '/reads/S1',
 	values => {RawInputSize => '1.250G', ScaffN50 => 12345},
 }, 'sentinel stores the complete metagStats sample object');
+
+my $missing_ribo = {
+	ribofind => {
+		requested => 1, complete => 0,
+		profile_complete => 1, taxonomy_complete => 0,
+	},
+};
+($record, $error) = read_sample_completion(
+	root => $sample_root, sample => 'S1', request_signature => $signature,
+	expected_components => $missing_ribo,
+);
+ok(!defined($record), 'missing live RiboFind output reopens a completed sample');
+like($error, qr/workflow component outputs have changed or are missing/,
+	'component-evidence mismatch explains the reopen');
 
 my $different_signature = completion_request_signature({contract => 2});
 ($record, $error) = read_sample_completion(
@@ -69,6 +102,19 @@ ok(!defined($record), 'sentinel cannot close a different sample');
 like($error, qr/belongs to sample 'S1'/,
 	'sample mismatch is reported');
 
+my $invalid_root = File::Spec->catdir($root, 'invalid');
+eval {
+	write_sample_completion(
+		root => $invalid_root, sample => 'S1',
+		request_signature => $signature,
+		components => $missing_ribo,
+		outcome => {status => 'completed'},
+		metagstats => {DIR => '/reads/S1', values => {}},
+	);
+};
+like($@, qr/requested component 'ribofind' is incomplete/,
+	'a normal completion sentinel cannot publish incomplete requested work');
+
 ok(invalidate_sample_completion($sample_root),
 	'invalidation removes an existing sentinel');
 ok(!-e $path, 'invalidated sentinel is absent');
@@ -81,6 +127,13 @@ write_sample_completion(
 	request_signature => $signature,
 	empty_sample => 1,
 	empty_input_size_mb => 0.75,
+	components => $missing_ribo,
+	outcome => {
+		status => 'skipped_too_small',
+		input_size_mb => {primary => 0.5, supplementary => 0.25, total => 0.75},
+		small_sample => 1,
+		sdm_warning => {detected => 0, type => '', log => ''},
+	},
 	metagstats => {DIR => "/reads/S1", values => {RawInputSize => "0.001G"}},
 );
 ($record, $error) = read_sample_completion(
@@ -88,6 +141,10 @@ write_sample_completion(
 );
 is($record->{empty_sample}, 1, "terminal empty samples are represented in the sentinel");
 is($record->{empty_input_size_mb}, 0.75, "empty-sample input size survives serialization");
+is($record->{outcome}{status}, 'skipped_too_small',
+	'small samples retain their terminal reason');
+is($record->{outcome}{input_size_mb}{total}, 0.75,
+	'terminal input size adds primary and supplementary input');
 ok(invalidate_sample_completion($sample_root), "empty-sample sentinel is invalidated normally");
 
 open my $bad, '>', $path or die $!;

@@ -13,7 +13,54 @@ use Mods::SampleCompletion qw(invalidate_sample_completion);
 our @EXPORT_OK = qw(
 	normalise_ribosome_request
 	prepare_ribosome_rerun
+	ribosome_completion_evidence
 );
+
+sub _result_present {
+	my ($path) = @_;
+	return (-e $path || -e "$path.gz") ? 1 : 0;
+}
+
+sub ribosome_completion_evidence {
+	my (%args) = @_;
+	my $requested = $args{requested} ? 1 : 0;
+	return {requested => 0, complete => 1} unless $requested;
+
+	my $ribo_root = $args{ribo_root};
+	if (!defined($ribo_root) || $ribo_root eq '') {
+		my $sample_root = $args{sample_root};
+		die "ribosome_completion_evidence requires sample_root or ribo_root\n"
+			unless defined($sample_root) && length($sample_root);
+		$ribo_root = File::Spec->catdir($sample_root, 'ribos');
+	}
+	my $lca_root = File::Spec->catdir($ribo_root, 'ltsLCA');
+	my $assembly_requested = $args{assembly_requested} ? 1 : 0;
+	my %evidence = (
+		requested => 1,
+		assembly_requested => $assembly_requested,
+		ssu_profile_complete => -e File::Spec->catfile($ribo_root, 'SSU_pull.sto') ? 1 : 0,
+		lsu_profile_complete => -e File::Spec->catfile($ribo_root, 'LSU_pull.sto') ? 1 : 0,
+		assembly_complete => (!$assembly_requested
+			|| -e File::Spec->catfile($ribo_root, 'Ass', 'allAss.sto')) ? 1 : 0,
+		assignment_complete_stone => -e File::Spec->catfile($lca_root, 'Assigned.sto') ? 1 : 0,
+		ssu_assignment_complete => -e File::Spec->catfile($lca_root, 'SSU_ass.sto') ? 1 : 0,
+		lsu_assignment_complete => -e File::Spec->catfile($lca_root, 'LSU_ass.sto') ? 1 : 0,
+		ssu_hierarchy_complete => _result_present(
+			File::Spec->catfile($lca_root, 'SSUriboRun_bl.hiera.txt'),
+		),
+		lsu_hierarchy_complete => _result_present(
+			File::Spec->catfile($lca_root, 'LSUriboRun_bl.hiera.txt'),
+		),
+	);
+	$evidence{profile_complete} = $evidence{ssu_profile_complete}
+		&& $evidence{lsu_profile_complete} && $evidence{assembly_complete} ? 1 : 0;
+	$evidence{taxonomy_complete} = $evidence{assignment_complete_stone}
+		&& $evidence{ssu_assignment_complete} && $evidence{lsu_assignment_complete}
+		&& $evidence{ssu_hierarchy_complete} && $evidence{lsu_hierarchy_complete} ? 1 : 0;
+	$evidence{complete} = $evidence{profile_complete}
+		&& $evidence{taxonomy_complete} ? 1 : 0;
+	return \%evidence;
+}
 
 sub normalise_ribosome_request {
 	my ($options) = @_;

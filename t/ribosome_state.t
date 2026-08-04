@@ -11,6 +11,7 @@ use lib File::Spec->catdir(File::Spec->rel2abs('.'));
 use Mods::RibosomeState qw(
 	normalise_ribosome_request
 	prepare_ribosome_rerun
+	ribosome_completion_evidence
 );
 use Mods::SampleCompletion qw(sample_completion_path);
 
@@ -88,6 +89,44 @@ my $sample_root = File::Spec->catdir($root, 'S1');
 my $central_root = File::Spec->catdir($root, 'central results', 'RiboFind');
 my $sample = 'S1';
 populate_results($sample_root, $central_root, $sample);
+
+my $evidence = ribosome_completion_evidence(
+	sample_root => $sample_root, requested => 1, assembly_requested => 0,
+);
+ok($evidence->{complete},
+	'RiboFind completion requires both extraction and taxonomy artifacts');
+ok($evidence->{ssu_hierarchy_complete} && $evidence->{lsu_hierarchy_complete},
+	'compressed SSU and LSU hierarchy outputs are accepted');
+my $lsu_hierarchy = File::Spec->catfile(
+	$sample_root, 'ribos', 'ltsLCA', 'LSUriboRun_bl.hiera.txt.gz',
+);
+write_file($lsu_hierarchy, '');
+$evidence = ribosome_completion_evidence(
+	sample_root => $sample_root, requested => 1, assembly_requested => 0,
+);
+ok($evidence->{complete},
+	'a zero-hit hierarchy remains complete when its producer stones are present');
+unlink $lsu_hierarchy or die "Cannot remove $lsu_hierarchy: $!";
+$evidence = ribosome_completion_evidence(
+	sample_root => $sample_root, requested => 1, assembly_requested => 0,
+);
+ok(!$evidence->{taxonomy_complete} && !$evidence->{complete},
+	'missing LSU hierarchy output makes RiboFind incomplete');
+write_file($lsu_hierarchy);
+
+$evidence = ribosome_completion_evidence(
+	sample_root => $sample_root, requested => 1, assembly_requested => 1,
+);
+ok(!$evidence->{profile_complete},
+	'requested ribosomal assembly requires its own completion stone');
+write_file(File::Spec->catfile(
+	$sample_root, 'ribos', 'Ass', 'allAss.sto',
+));
+$evidence = ribosome_completion_evidence(
+	sample_root => $sample_root, requested => 1, assembly_requested => 1,
+);
+ok($evidence->{complete},
+	'complete extraction, assembly, and taxonomy evidence closes RiboFind');
 
 my $assignment_result = prepare_ribosome_rerun(
 	sample_root => $sample_root,

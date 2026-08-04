@@ -56,6 +56,7 @@ use Mods::SampleCompletion qw(
 use Mods::RibosomeState qw(
 	normalise_ribosome_request
 	prepare_ribosome_rerun
+	ribosome_completion_evidence
 );
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
@@ -125,6 +126,7 @@ sub workflowStateOptions;
 sub sampleReadSet;
 sub discoverSampleInputs; sub populateInputSizesFast; sub spaceInAssGrp;
 sub sampleCompletionRequestSignature; sub sampleCompletionForcedInvalidation;
+sub sampleCompletionComponents;
 sub createSampleCompletionSentinel;
 
 sub createConsSNPandSVs;
@@ -194,7 +196,9 @@ sub createConsSNPandSVs;
 #       the reopened sample cannot immediately close through the no-work path.
 #4.34: 4.8.26: carry explicit RiboFind redo requirements through completion
 #       assessment instead of re-inferring them solely from filesystem stones.
-my $MATFILER_ver = 4.34;
+#4.35: 4.8.26: make RiboFind artifacts part of the sample-completion sentinel
+#       contract and record explicit terminal outcomes for skipped samples.
+my $MATFILER_ver = 4.35;
 
 #----------------- defaults ----------------- 
 
@@ -616,11 +620,30 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		path => $completionSentinel,
 		sample => $SmplName,
 		request_signature => $completionSignature,
+		expected_components => sampleCompletionComponents($curOutDir),
 	) unless @forcedReopen;
+	if ($closedSample && $closedSample->{outcome}{status} =~ /^skipped_(?:too_small|empty_input)$/) {
+		populateInputSizesFast($curSmpl);
+		my $currentPrimaryMB = 0 + ($map{$curSmpl}{inputFileSizeMB} || 0);
+		my $currentSupplementaryMB = 0 + ($map{$curSmpl}{inputXFileSizeMB} || 0);
+		my $storedSizes = $closedSample->{outcome}{input_size_mb} || {};
+		if ($currentPrimaryMB != ($storedSizes->{primary} || 0)
+				|| $currentSupplementaryMB != ($storedSizes->{supplementary} || 0)) {
+			$closedSample = undef;
+			$completionError = 'primary or supplementary input size changed after the sample was skipped';
+		}
+	}
 	if ($closedSample) {
 		$loopSampleCompleted{$JNUM} = 1;
-		print "Sample already complete; no jobs submitted\n"
-			unless $MFconfig{silent};
+		my $status = $closedSample->{outcome}{status};
+		my $riboEvidence = $closedSample->{components}{ribofind} || {};
+		$progStats{riboFindComplCnts}++
+			if $status eq 'completed' && $riboEvidence->{requested}
+				&& $riboEvidence->{complete};
+		my $completionMessage = $status eq 'completed'
+			? "Sample already complete; no jobs submitted\n"
+			: "Sample has terminal outcome $status; no jobs submitted\n";
+		print $completionMessage unless $MFconfig{silent};
 		MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
 		loop2C_check($cAssGrp, \@sampleDeps);
 		next;
@@ -740,11 +763,36 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	# Full sample statistics are collected after the submission loop. They are
 	# reporting data and must not force every sample to open all historical logs
 	# before the fast completion path can run.
-	if ( ($MFconfig{skipWrongPairedSmpls} || $MFconfig{OKtoRWassGrps}) && -e "$logDir/sdmReadCleaner.sh.etxt" && `tail -n 70 $logDir/sdmReadCleaner.sh.etxt | grep 'invalid paired read' ` ne ""){
-		print "$logDir/sdmReadCleaner.sh.etxt problems! Delete outdir\n";
+	my $sdmWarningLog = "$logDir/sdmReadCleaner.sh.etxt";
+	my $sdmInvalidPairs = ($MFconfig{skipWrongPairedSmpls}
+		|| $MFconfig{OKtoRWassGrps}) && -e $sdmWarningLog
+		&& `tail -n 70 $sdmWarningLog | grep 'invalid paired read' ` ne "";
+	if ($sdmInvalidPairs){
+		print "$sdmWarningLog problems! Delete outdir\n";
 		if ($MFconfig{OKtoRWassGrps}){
 			$locRewrite=1 ;
 		}elsif ($MFconfig{skipWrongPairedSmpls}){
+			populateInputSizesFast($curSmpl)
+				unless exists($map{$curSmpl}{inputFileSizeMB})
+					&& exists($map{$curSmpl}{inputXFileSizeMB});
+			my $closedPath = createSampleCompletionSentinel(
+				sample_root => $curOutDir,
+				sample_name => $SmplName,
+				input_label => $dir2rd,
+				input_dir => $curOutDir,
+				assembly_dir => $asmDir,
+				request_signature => $completionSignature,
+				present_assembly => $efinAssLoc,
+				terminal_status => 'skipped_sdm_warning',
+				sdm_warning => 1,
+				sdm_warning_type => 'invalid_paired_read',
+				sdm_warning_log => $sdmWarningLog,
+				primary_input_size_mb => $map{$curSmpl}{inputFileSizeMB},
+				supplementary_input_size_mb => $map{$curSmpl}{inputXFileSizeMB},
+			);
+			$loopSampleCompleted{$JNUM} = 1 if $closedPath;
+			print "Sample skipped after SDM invalid-pair warning; outcome cached in completion sentinel\n"
+				if $closedPath && !$MFconfig{silent};
 			loop2C_check($cAssGrp,\@sampleDeps);next;
 		}
 	}
@@ -1149,7 +1197,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$assemblyOutputsRequired,
 		));
 		if ($cleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
-			createSampleCompletionSentinel(
+			my $closedPath = createSampleCompletionSentinel(
 				sample_root => $curOutDir,
 				sample_name => $SmplName,
 				input_label => $dir2rd,
@@ -1157,10 +1205,16 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				assembly_dir => $asmDir,
 				request_signature => $completionSignature,
 				present_assembly => $presentAssembly,
+				primary_input_size_mb => $map{$curSmpl}{inputFileSizeMB},
+				supplementary_input_size_mb => $map{$curSmpl}{inputXFileSizeMB},
 			);
-			$loopSampleCompleted{$JNUM} = 1;
-			print "Sample already complete; no jobs submitted\n"
-				unless $MFconfig{silent};
+			if ($closedPath) {
+				$loopSampleCompleted{$JNUM} = 1;
+				print "Sample already complete; no jobs submitted\n"
+					unless $MFconfig{silent};
+			} else {
+				delete $loopSampleCompleted{$JNUM};
+			}
 		} else {
 			delete $loopSampleCompleted{$JNUM};
 			print "Sample output checks passed, but cleanup is incomplete; sample remains open\n"
@@ -1226,14 +1280,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#print "$seqSet{pa1}   $seqSet{seqTech}   $seqSet{seqTechX}\n";
 	push (@unzipjobs,$jdep) unless ($jdep eq "");
 	
-	if ($map{$curSmpl}{inputFilesEmpty} && exists($map{$curSmpl}{inputFileSizeMB}) && $map{$curSmpl}{inputFileSizeMB} >= $MFconfig{skipSmallSmplsMB}){
+	my $combinedInputSizeMB = ($map{$curSmpl}{inputFileSizeMB} || 0)
+		+ ($map{$curSmpl}{inputXFileSizeMB} || 0);
+	if ($map{$curSmpl}{inputFilesEmpty} && $combinedInputSizeMB >= $MFconfig{skipSmallSmplsMB}){
 			system "rm -f $curOutDir/SMPL.empty"; $map{$curSmpl}{inputFilesEmpty} = 0;
 	}
 	#print "small skip: $MFconfig{skipSmallSmplsMB} $map{$curSmpl}{inputFileSizeMB} $map{$curSmpl}{inputXFileSizeMB} $AssemblyGo \n";
-	if (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || (($map{$curSmpl}{inputFileSizeMB}  + $map{$curSmpl}{inputXFileSizeMB}) < $MFconfig{skipSmallSmplsMB} ) && (!$AssemblyGo || $AsGrps{$cAssGrp}{CntAimAss} <= 1 ) ){
+	if (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB}) && (!$AssemblyGo || $AsGrps{$cAssGrp}{CntAimAss} <= 1 ) ){
 		
-		if ( ($map{$curSmpl}{inputFileSizeMB} + $map{$curSmpl}{inputXFileSizeMB}) < $MFconfig{skipSmallSmplsMB} ){
-			print "Skipping sample $curSmpl due to $map{$curSmpl}{inputFileSizeMB} < $MFconfig{skipSmallSmplsMB} MB\n";
+		if ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB} ){
+			printf "Skipping sample %s because combined primary + supplementary input is %.1f MB (%.1f + %.1f), below %.1f MB\n",
+				$curSmpl, $combinedInputSizeMB,
+				($map{$curSmpl}{inputFileSizeMB} || 0),
+				($map{$curSmpl}{inputXFileSizeMB} || 0),
+				$MFconfig{skipSmallSmplsMB};
 			#still create essentials
 			#	my $coveragePerCtg = "$ContigStatsDir/Coverage.percontig.gz";
 			#!$eFinMapCovGZ && $eCovAsssembly) || ($eSuppCovAsssembly && !$eFinSupMapCovGZ)
@@ -1248,8 +1308,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		} else {
 			#print "Sample empty.. next\n";
 		}
-		$runReport{empty_samples}{$curSmpl} =
-			$map{$curSmpl}{inputFileSizeMB} + $map{$curSmpl}{inputXFileSizeMB};
+		$runReport{empty_samples}{$curSmpl} = $combinedInputSizeMB;
+		my $emptyTerminalStatus = $combinedInputSizeMB > 0
+			? 'skipped_too_small' : 'skipped_empty_input';
 		my $emptyWorkPending = $jdep ne "" && $jdep ne "EMPTY_DO_NEXT";
 		if (!$emptyWorkPending) {
 			my $emptyCleanupComplete = runFinishedCleanup(finishedCleanupArguments(
@@ -1257,7 +1318,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				$smplTmpDir, $finAssLoc, $logDir, {}, 0,
 			));
 			if ($emptyCleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
-				createSampleCompletionSentinel(
+				my $closedPath = createSampleCompletionSentinel(
 					sample_root => $curOutDir,
 					sample_name => $SmplName,
 					input_label => $dir2rd,
@@ -1267,10 +1328,17 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 					present_assembly => 0,
 					empty_sample => 1,
 					empty_input_size_mb => $runReport{empty_samples}{$curSmpl},
+					terminal_status => $emptyTerminalStatus,
+					primary_input_size_mb => $map{$curSmpl}{inputFileSizeMB},
+					supplementary_input_size_mb => $map{$curSmpl}{inputXFileSizeMB},
 				);
-				$loopSampleCompleted{$JNUM} = 1;
-				print "Sample already complete; no jobs submitted\n"
-					unless $MFconfig{silent};
+				if ($closedPath) {
+					$loopSampleCompleted{$JNUM} = 1;
+					print "Sample already complete; no jobs submitted\n"
+						unless $MFconfig{silent};
+				} else {
+					delete $loopSampleCompleted{$JNUM};
+				}
 			} else {
 				delete $loopSampleCompleted{$JNUM};
 			}
@@ -2037,13 +2105,13 @@ sub sampleCompletionRequestSignature {
 		DoConsSNP DoSuppConsSNP saveVCF saveConsFastas normSNPindels
 		SNPcallerFlag callSVs callSVsSupp SVcallerFlag
 		DoNonPareil calcOrthoPlacement DoCalcD2s DoGenoSizeEst
-		DoDiamond reqDiaDB DoKraken DoRibofind doRiboAssembl
+		DoDiamond reqDiaDB DoKraken DoRibofind doRiboAssembl checkRiboNonEmpty
 		DoMOTU2 DoMetaPhlan DoTaxaTarget humanFilter
 		doReadMerge usePorechop
 	);
 	my @configKeys = qw(
 		unpackZip uploadRawRds defaultContigSubs remove_reads_tmpDir
-		rmScratchTmp skipSmallSmplsMB
+		rmScratchTmp skipSmallSmplsMB skipWrongPairedSmpls
 	);
 	my %requested = map {
 		my $key = $_;
@@ -2055,7 +2123,7 @@ sub sampleCompletionRequestSignature {
 	} @configKeys;
 
 	return completion_request_signature({
-		completion_contract => 1,
+		completion_contract => 2,
 		metagstats_schema => [_smpl_stats_columns()],
 		operation_mode => $runOptions{operationMode},
 		sample => \%sampleDefinition,
@@ -2080,6 +2148,17 @@ sub sampleCompletionForcedInvalidation {
 	return @requested;
 }
 
+sub sampleCompletionComponents {
+	my ($sampleRoot) = @_;
+	return {
+		ribofind => ribosome_completion_evidence(
+			sample_root => $sampleRoot,
+			requested => $MFopt{DoRibofind},
+			assembly_requested => $MFopt{doRiboAssembl},
+		),
+	};
+}
+
 sub createSampleCompletionSentinel {
 	my (%args) = @_;
 	for my $required (qw(
@@ -2089,6 +2168,32 @@ sub createSampleCompletionSentinel {
 		die "sample completion argument '$required' is required\n"
 			unless defined($args{$required});
 	}
+
+	my $components = sampleCompletionComponents($args{sample_root});
+	my $terminalStatus = $args{terminal_status} || 'completed';
+	if ($terminalStatus eq 'completed'
+			&& $components->{ribofind}{requested}
+			&& !$components->{ribofind}{complete}) {
+		warn "Cannot close sample $args{sample_name}: requested RiboFind outputs are incomplete\n";
+		return;
+	}
+	my $primaryInputMB = 0 + ($args{primary_input_size_mb} || 0);
+	my $supplementaryInputMB = 0 + ($args{supplementary_input_size_mb} || 0);
+	my $outcome = {
+		status => $terminalStatus,
+		input_size_mb => {
+			primary => $primaryInputMB,
+			supplementary => $supplementaryInputMB,
+			total => $primaryInputMB + $supplementaryInputMB,
+		},
+		small_sample => $terminalStatus eq 'skipped_too_small' ? 1 : 0,
+		small_sample_threshold_mb => 0 + ($MFconfig{skipSmallSmplsMB} || 0),
+		sdm_warning => {
+			detected => $args{sdm_warning} ? 1 : 0,
+			type => $args{sdm_warning_type} || '',
+			log => $args{sdm_warning_log} || '',
+		},
+	};
 
 	my $started = clock_gettime(CLOCK_MONOTONIC);
 	reset_stats_log_sampling();
@@ -2104,6 +2209,10 @@ sub createSampleCompletionSentinel {
 		sample => $args{sample_name},
 		request_signature => $args{request_signature},
 		present_assembly => $args{present_assembly},
+		empty_sample => $args{empty_sample},
+		empty_input_size_mb => $args{empty_input_size_mb},
+		components => $components,
+		outcome => $outcome,
 		metagstats => $metagstats,
 	);
 	printf "Closed sample %s in %.2f s; cached metagStats in %s\n",
@@ -3487,8 +3596,13 @@ sub checkRawProgsFin{
 
 	
 	$calcGenoSize=1 if ($MFopt{DoGenoSizeEst} && 	!-e "$curOutDir/MicroCens/MC.0.result");
-	$calcRibofind = 1 if ($MFopt{DoRibofind} && (!-e "$curOutDir/ribos//SSU_pull.sto"|| !-e "$curOutDir/ribos//LSU_pull.sto" || ($MFopt{doRiboAssembl} && !-e "$curOutDir/ribos/Ass/allAss.sto" ))); #!-e "$curOutDir/ribos//ITS_pull.sto"|| 
-	$calcRiboAssign = 1 if ($MFopt{DoRibofind} && ( !-e "$curOutDir/ribos//ltsLCA/Assigned.sto"  || !-e "$curOutDir/ribos//ltsLCA/SSU_ass.sto") );		#!-e "$curOutDir/ribos//ltsLCA/ITS_ass.sto"||  #ITS no longer required.. unreliable imo
+	my $riboEvidence = ribosome_completion_evidence(
+		sample_root => $curOutDir,
+		requested => $MFopt{DoRibofind},
+		assembly_requested => $MFopt{doRiboAssembl},
+	);
+	$calcRibofind = 1 if ($MFopt{DoRibofind} && !$riboEvidence->{profile_complete});
+	$calcRiboAssign = 1 if ($MFopt{DoRibofind} && !$riboEvidence->{taxonomy_complete});
 	$calcRibofind = 1 if $forcedRiboProfile;
 	$calcRiboAssign = 1 if $forcedRiboAssignment;
 	RiboMeta($calcRibofind,$calcRiboAssign,$curOutDir,$SmplName);
@@ -3525,7 +3639,11 @@ sub riboSummary{
 	if( $progStats{riboFindFailCnts}>0){
 		print "$progStats{riboFindFailCnts} / $progStats{riboFindComplCnts} samples with incomplete RiboFind\n";
 		return;
-	} 
+	}
+	if (($progStats{riboFindComplCnts} || 0) <= 0) {
+		print "No completed RiboFind samples; skipping SSU/LSU merge jobs\n";
+		return;
+	}
 	my $dir_RibFind = $baseOut.$preDIRs{dir2RiboF};#"pseudoGC/Phylo/RiboFind/"; #ribofinder dir
 	my $prevItems = 0;
 	if ( -e "$dir_RibFind/SSU.cnt.stone"){
@@ -3714,7 +3832,7 @@ sub detectRibo(){
 		$readConfig = 0; 
 		$cmd .= "\n$cLSUSSUscript$cLSUSSUconfig -R1 '-1' -R2 '-1' -RS '".join(",",@singl)."' -tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n\n"; #tmpP < scratch too slow
 	}
-	my $sto1 = "$outP/RibFnd.sto";my $stoLCAL = "$outP//ltsLCA/LSU_ass.sto";	my $stoLCAS = "$outP//ltsLCA/SSU_ass.sto";
+	my $sto1 = "$outP/RibFnd.sto";
 	$cmd .= "touch $sto1\n" unless ($cmd eq "");
 	#this part assigns tax
 	my $tmpDX = "$tmpP/LCA/"; 
@@ -3735,20 +3853,21 @@ sub detectRibo(){
 	#die $cmd2."\n";
 	my $jobName="";
 	my $Scmd = "";
-	my $allLCAstones = 0; 
-	$allLCAstones = 1 if ( -e $stoLCAL && -e $stoLCAS );#&& -e "$outP//ltsLCA/ITS_ass.sto");
+	my $riboEvidence = ribosome_completion_evidence(
+		ribo_root => $outP,
+		requested => 1,
+		assembly_requested => $MFopt{doRiboAssembl},
+	);
 
-	if (-d $outP  && -e "$outP/SSU_pull.sto" && -e "$outP/LSU_pull.sto" &&  #&& -e "$outP/ITS_pull.sto"
-		-s "$outP//ltsLCA/LSUriboRun_bl.hiera.txt" && $allLCAstones &&
-		($MFopt{doRiboAssembl} && -e $outP."/Ass/allAss.sto" ) ){
-		#really everything done
+	if ($riboEvidence->{complete}) {
 		$jobName = $jobd;
 	} else {
 		$jobd.=";".$MFopt{globalRiboDependence}->{DBcp} unless ($MFopt{globalRiboDependence}->{DBcp} eq "alreadyCopied");
 		my $tmpCmd; my $mem = "3G";
-		#better to double check calcRiboFind
-		my $calcRiboFind=0;$calcRiboFind = 1 if( !-e "$outP/SSU_pull.sto"|| !-e "$outP/LSU_pull.sto" || ($MFopt{doRiboAssembl} && !-e $outP."/Ass/allAss.sto"));
-		if (  $calcRiboFind ){ #!-e "$outP/ITS_pull.sto"||
+		# Re-evaluate extraction and assignment from the same evidence contract
+		# used by the sample sentinel.
+		my $calcRiboFind = $riboEvidence->{profile_complete} ? 0 : 1;
+		if ($calcRiboFind) {
 			$jobName = "_RF$JNUM"; 
 			#die "RIBOFIND\n$outP/SSU_pull.sto\n"; 
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};
@@ -3765,7 +3884,7 @@ sub detectRibo(){
 		} else {
 			$jobName = $jobd;
 		}
-		if (!-e "$outP//ltsLCA/LSUriboRun_bl.hiera.txt" || !-e "$outP//ltsLCA/SSUriboRun_bl.hiera.txt" || !$allLCAstones ){ #|| !-e "$outP//ltsLCA/ITSriboRun_bl.hiera.txt" 
+		if ($calcRiboFind || !$riboEvidence->{taxonomy_complete}) {
 			$jobd=$jobName; $mem="4G";
 			$jobd .= ";".$MFopt{globalRiboDependence}->{DBcp} unless ($MFopt{globalRiboDependence}->{DBcp} eq "alreadyCopied");
 			$QSBoptHR->{useLongQueue} = 0;

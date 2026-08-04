@@ -523,14 +523,29 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?my \$MATFILER_ver = 4\.34;/s,
-	"MATAFILER history retains shared input discovery through version 4.34");
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?my \$MATFILER_ver = 4\.35;/s,
+	"MATAFILER history retains shared input discovery through version 4.35");
 like($mataf4, qr/setConfigFile\(\$MFconfig\{configFile\}\);.*?normalise_ribosome_request\(\\%MFopt\);/s,
 	'RiboFind redo flags enable profiling during option post-processing');
 like($mataf4, qr/my \$riboRedo = \{.*?prepare_ribosome_rerun\(.*?checkRawProgsFin\(.*?\$riboRedo->\{profile\}.*?\$riboRedo->\{assignment\}/s,
 	'RiboFind rerun requirements are carried into completion assessment');
 like($mataf4, qr/\$calcRibofind = 1 if \$forcedRiboProfile;.*?\$calcRiboAssign = 1 if \$forcedRiboAssignment;.*?RiboMeta\(/s,
 	'explicit RiboFind redo work is enforced before counters and sentinel gating');
+like($mataf4,
+	qr/read_sample_completion\(.*?expected_components\s*=>\s*sampleCompletionComponents\(\$curOutDir\)/s,
+	'the fast completion gate revalidates requested workflow artifacts');
+like($mataf4,
+	qr/sub sampleCompletionComponents.*?ribosome_completion_evidence\(.*?sub createSampleCompletionSentinel.*?requested RiboFind outputs are incomplete/s,
+	'RiboFind evidence is stored and incomplete normal samples cannot close');
+like($mataf4,
+	qr/No completed RiboFind samples; skipping SSU\/LSU merge jobs.*?return/s,
+	'zero completed RiboFind samples cannot create empty merge jobs');
+like($mataf4,
+	qr/my \$combinedInputSizeMB = .*?inputFileSizeMB.*?inputXFileSizeMB.*?terminal_status => \$emptyTerminalStatus/s,
+	'small-sample terminal state uses combined primary and supplementary input');
+like($mataf4,
+	qr/terminal_status => 'skipped_sdm_warning'.*?sdm_warning_type => 'invalid_paired_read'/s,
+	'SDM invalid-pair skips are retained as explicit sentinel outcomes');
 unlike($mataf4, qr/if \(\$MFopt\{RedoRiboFind\}\)\{system "rm -rf/,
 	'the stale late RiboFind cleanup path is absent');
 like($mataf4,
