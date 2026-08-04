@@ -157,8 +157,8 @@ for my $tag (@tags){
 	my (@usableDb,@usableTax);
 	for my $index (0..$#dbfa){
 		next if !defined($dbfa[$index]) || $dbfa[$index] eq "";
-		die "Missing $tag reference database: $dbfa[$index]\n" unless -s $dbfa[$index];
-		die "Missing $tag taxonomy database: $dbtax[$index]\n" unless defined($dbtax[$index]) && -s $dbtax[$index];
+		die "Missing $tag reference database: $dbfa[$index]\n" unless -e $dbfa[$index];
+		die "Missing $tag taxonomy database: $dbtax[$index]\n" unless defined($dbtax[$index]) && -e $dbtax[$index];
 		push @usableDb, $dbfa[$index];
 		push @usableTax, $dbtax[$index];
 	}

@@ -20,8 +20,8 @@ sub validateSortmernaIndex;
 
 
 #18.5.26: added versioning to 0.1
-#4.8.26: v0.3 validate SortMeRNA references with an actual read probe
-my $cLSUSSUver = 0.3;
+#4.8.26: v0.4 limit SortMeRNA database preflight validation to existence checks
+my $cLSUSSUver = 0.4;
 
 #my $tmpP = "/g/scb/bork/hildebra/data2/Soil_finland/tmp_16s/";
 my $tmpP = "";#$ARGV[3];
@@ -310,20 +310,6 @@ sub validateSortmernaReference{
 			if $reference eq "";
 		die "Configured SortMeRNA reference '$configKey' does not exist: $reference\n"
 			unless -e $reference;
-		die "Configured SortMeRNA reference '$configKey' is not a regular file: $reference\n"
-			unless -f $reference;
-		my $credentialContext = "effective uid=$>; effective groups=$)";
-		open my $referenceHandle, '<', $reference or die
-			"Configured SortMeRNA reference '$configKey' exists but cannot be opened "
-			."for reading: $reference: $! ($credentialContext)\n";
-		my $probe = '';
-		my $bytesRead = read($referenceHandle, $probe, 1);
-		die "Configured SortMeRNA reference '$configKey' could not be read: $reference: $!\n"
-			unless defined $bytesRead;
-		die "Configured SortMeRNA reference '$configKey' is empty: $reference\n"
-			unless $bytesRead;
-		close $referenceHandle
-			or die "Cannot close SortMeRNA reference '$configKey' after validation: $reference: $!\n";
 	}
 }
 
@@ -331,8 +317,8 @@ sub validateSortmernaReference{
 sub validateSortmernaIndex{
 	my ($configKey, $indexDirectory) = @_;
 	return if !defined($indexDirectory) || $indexDirectory eq "";
-	die "Configured SortMeRNA index '$configKey' is not a readable directory: $indexDirectory\n"
-		unless -d $indexDirectory && -r $indexDirectory && -x $indexDirectory;
+	die "Configured SortMeRNA index '$configKey' does not exist: $indexDirectory\n"
+		unless -e $indexDirectory;
 }
 
 sub announce{
