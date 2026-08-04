@@ -523,8 +523,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?my \$MATFILER_ver = 4\.30;/s,
-	"MATAFILER history retains shared input discovery through version 4.30");
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?my \$MATFILER_ver = 4\.31;/s,
+	"MATAFILER history retains shared input discovery through version 4.31");
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');
@@ -541,8 +541,8 @@ like($mataf4,
 	qr/sub metagAssemblyRun.*?spaceInAssGrp\(\$curSmpl, 1\).*?assembly_cores_for_input\(.*?local \$MFopt\{AssemblyCores\} = \$assemblyCores/s,
 	'assembly submissions use group-wide primary and support input for automatic core scaling');
 like($mataf4,
-	qr/\$MFopt\{AssemblyCores\} = 0;.*?\$MFconfig\{schedulerPollSeconds\} = 20;.*?schedulerPollSeconds=i/s,
-	'automatic assembly scaling and configurable fast scheduler polling are enabled by default');
+	qr/\$MFopt\{AssemblyCores\} = 0;.*?\$MFconfig\{schedulerPollSeconds\} = 20;.*?\$MFconfig\{schedulerCapacityCheckJobs\} = 10;.*?schedulerPollSeconds=i.*?schedulerCapacityCheckJobs=i/s,
+	'automatic assembly scaling and batched scheduler capacity checks are enabled by default');
 like($mataf4,
 	qr/qsubSystemWaitMaxJobs\(\s*\$MFconfig\{checkMaxNumJobs\}, \$MFconfig\{killDepNever\}, \$QSBoptHR/s,
 	'the main sample loop shares scheduler throttle state instead of querying once per sample');

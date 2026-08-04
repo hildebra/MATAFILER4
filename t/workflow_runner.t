@@ -207,6 +207,9 @@ like($mataf4,
 	qr/\$QSBoptHR1->\{maxConcurrentJobs\} = \$MFconfig\{checkMaxNumJobs\}/,
 	'the configured live-job cap is passed into central submission options');
 like($mataf4,
+	qr/my \$currentJobs = numUserJobs\(\$QSBoptHR1,1\).*?capacityCheckEverySubmissions.*?liveJobThrottleState.*?liveJobs => \$currentJobs/s,
+	'the startup job count seeds the batched submission-capacity cache');
+like($mataf4,
 	qr/sub postSubmQsub.*?qsubSystemWaitMaxJobs\(\s*\$MFconfig\{checkMaxNumJobs\}/s,
 	'deferred direct submissions also enforce the live-job cap');
 unlike($mataf4,
@@ -221,7 +224,7 @@ like($mataf4,
 unlike($mataf4,
 	qr/die "Deferred job submission failed:/,
 	'the formerly fatal deferred sbatch path has been removed');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?my \$MATFILER_ver = 4\.30/s,
-	'MATAFILER history retains loop triggering changes through version 4.30');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?my \$MATFILER_ver = 4\.31/s,
+	'MATAFILER history retains loop triggering changes through version 4.31');
 
 done_testing;

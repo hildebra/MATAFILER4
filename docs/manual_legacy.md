@@ -42,7 +42,8 @@ MATAFILER4 uses three primary phases to analyse metagenomes:
 	-ignoreSmpls [string]			comma separated list of #SmplIDs that are skipped (sample id in .map file)
 	-rmSmplLocks [0|1]				1: remove existing sample locks; with default 0, a no-submission loop pass rescans its current range when at least one user job remains and the count is at most -loopTillCompleteActiveJobs or <1% of its samples (bounded by loop passes plus one final retry)
 	-redoFails [0|1]				if any step of requested analysis failed, just redo everything (use with care!) 
-	-maxConcurrentJobs [#]			maximum running + pending user jobs before another submission; enforced per submission, currently only works on Slurm (see also -killDepNever)
+	-schedulerCapacityCheckJobs [#]	refresh exact Slurm capacity after this many accepted submissions (default 10; earlier when the cached count reaches the cap)
+	-maxConcurrentJobs [#]			maximum running + pending user jobs before another submission; conservatively enforced from a batched Slurm count (see also -killDepNever)
 	-killDepNever [0|1]				kills jobs in the "JobDependencyNeverMet" state, as these will block [maxConcurrentJobs], 	
 	-excludeNodes [string]					exclude certain HPC nodes, comma separated list e.g. node1,node2,..
 	-submSystem [qsub,SGE,bsub,LSF]	set submission system (default: autodetect)

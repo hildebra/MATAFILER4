@@ -59,12 +59,15 @@ Supported systems in the documentation and source are Slurm, SGE/qsub and LSF/bs
 
 ```bash
 -maxConcurrentJobs 600
+-schedulerCapacityCheckJobs 10
 -killDepNever 1
 ```
 
 `-maxConcurrentJobs` counts all of the user's running and pending Slurm jobs,
-not only dependency-pending work. The count is cached conservatively between
-submissions to reduce scheduler queries. In `-loopTillComplete` mode, a full
+not only dependency-pending work. MATAFILER4 adds each accepted submission to
+the cached count and refreshes the exact scheduler count after
+`-schedulerCapacityCheckJobs` submissions (default 10), or sooner when the
+conservative count reaches the cap. In `-loopTillComplete` mode, a full
 queue defers only new submissions; sample completion and cleanup inspection
 continues, followed by a bounded scheduler polling delay and a retry of the same
 range. `-killDepNever 1` can remove Slurm jobs

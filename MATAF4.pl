@@ -182,7 +182,9 @@ sub createConsSNPandSVs;
 #       invalidates the sentinel before modifying sample outputs.
 #4.30: 4.8.26: make gene prediction and ContigStats explicit ConsSNP
 #       prerequisites; always provide vcf2fna with its required GFF.
-my $MATFILER_ver = 4.30;
+#4.31: 4.8.26: refresh exact Slurm capacity after a configurable batch of
+#       accepted submissions, while accounting for every intervening job.
+my $MATFILER_ver = 4.31;
 
 #----------------- defaults ----------------- 
 
@@ -277,6 +279,8 @@ die "-loopTillCompleteActiveJobs requires a non-negative integer\n"
 	if ($MFconfig{loopTillCompleteActiveJobs} < 0);
 die "-schedulerPollSeconds requires a positive integer\n"
 	if ($MFconfig{schedulerPollSeconds} < 1);
+die "-schedulerCapacityCheckJobs requires a positive integer\n"
+	if ($MFconfig{schedulerCapacityCheckJobs} < 1);
 die "-assemblCores requires a non-negative integer (0 enables automatic scaling)\n"
 	if ($MFopt{AssemblyCores} < 0);
 die "-minBinnerAssemblyMB requires a non-negative number\n"
@@ -3251,6 +3255,7 @@ sub postSubmQsub {
 				($scheduler_output, $?);
 			};
 		if ($status != 0) {
+			delete $QSBoptHR->{liveJobThrottleState};
 			my $message = "Deferred job submission failed: "
 				."$augmented->{command}\n$output";
 			push @submitted, handleSubmissionFailure($QSBoptHR, $message);
@@ -3272,8 +3277,10 @@ sub postSubmQsub {
 				push @submitted, $QSBoptHR->{rTag}.$scheduler_job_id;
 			}
 		}
-		die "Could not parse deferred scheduler job id: $output\n"
-			if ($QSBoptHR->{qmode} ne 'bash' && @submitted == $submitted_before);
+		if ($QSBoptHR->{qmode} ne 'bash' && @submitted == $submitted_before) {
+			delete $QSBoptHR->{liveJobThrottleState};
+			die "Could not parse deferred scheduler job id: $output\n";
+		}
 		$QSBoptHR->{submittedJobs} = 0 unless defined $QSBoptHR->{submittedJobs};
 		$QSBoptHR->{submittedJobs}++;
 		if ($QSBoptHR->{qmode} eq 'slurm' && $scheduler_job_id ne "") {
@@ -9502,12 +9509,15 @@ sub setupHPC{
 	$QSBoptHR1->{jobPollSeconds} = $MFconfig{schedulerPollSeconds};
 	$QSBoptHR1->{maxConcurrentJobs} = $MFconfig{checkMaxNumJobs};
 	$QSBoptHR1->{killDependencyNever} = $MFconfig{killDepNever};
-	# Queue-size checks used to run once per sample. Cache a successful query,
-	# while counting every locally submitted job conservatively against it.
-	$QSBoptHR1->{pendingJobCheckInterval} =
-		$MFconfig{schedulerPollSeconds} * 3;
-	$QSBoptHR1->{pendingJobCheckInterval} = 30
-		if $QSBoptHR1->{pendingJobCheckInterval} < 30;
+	$QSBoptHR1->{capacityCheckEverySubmissions} =
+		$MFconfig{schedulerCapacityCheckJobs};
+	# Reuse the startup scheduler count until the configured submission batch
+	# is reached; the throttle refreshes sooner when its upper bound hits the cap.
+	$QSBoptHR1->{liveJobThrottleState} = {
+		checkedAt => time,
+		liveJobs => $currentJobs,
+		submittedJobs => $QSBoptHR1->{submittedJobs} || 0,
+	};
 	$QSBoptHR1->{Spades_Hosts} = []; $QSBoptHR1->{General_Hosts} = [];
 	spadesHosts();
 	#my $LocationCheckStrg=""; #command that is put in front of every qsub, to check if drives are connected, sub checkDrives
@@ -9730,6 +9740,7 @@ sub setDefaultMFconfig{
 	$MFconfig{killDepNever} = 0;  $MFconfig{checkMaxNumJobs} = 0;  #slurm related.. $killDepNever=1 kills jobs in state "DependencyNeverFinished" (happens a lot), while $checkMaxNumJobs=X halts the pipeline if more than X jobs are already queued up
 	$MFconfig{loopTillCompleteActiveJobs} = 3;
 	$MFconfig{schedulerPollSeconds} = 20;
+	$MFconfig{schedulerCapacityCheckJobs} = 10;
 	$MFconfig{excludeNodes} = ""; #excluding certain nodes..
 	$MFconfig{readsRpairs} =-1; #are reads given in pairs? default: -1 = no clue
 	#my $useTrimomatic=0; #trimmomatic step now replaced by sdm solution -> $MFopt{trimAdapters}
@@ -9887,8 +9898,9 @@ sub getCmdLineOptions{
 		#use syntax "X:Y" where X is the pass budget and Y is the active rolling window size
 		"loopTillCompleteActiveJobs=i" => \$MFconfig{loopTillCompleteActiveJobs}, #start the next pass once no more than this many submitted jobs are running
 		"schedulerPollSeconds=i" => \$MFconfig{schedulerPollSeconds}, #seconds between loopTillComplete scheduler queries
+		"schedulerCapacityCheckJobs=i" => \$MFconfig{schedulerCapacityCheckJobs}, #refresh exact live-job count after this many accepted submissions
 		"excludeNodes=s" => \$MFconfig{excludeNodes}, #exclude certain nodes?
-		"maxConcurrentJobs=i" => \$MFconfig{checkMaxNumJobs}, #max running plus pending user jobs, enforced before every Slurm submission
+		"maxConcurrentJobs=i" => \$MFconfig{checkMaxNumJobs}, #max running plus pending user jobs, enforced from cached conservative accounting
 		"killDepNever=i" => \$MFconfig{killDepNever}, #kill jobs in "Dependency never finished" state? 
 		"requireInput=i" => \$MFconfig{abortOnEmptyInput},  #in case input reads are no longer present, 0 will continue pipeline, 1 will abort
 		"ignoreSmpls=s" => \$MFconfig{ignoreSmpl},  #skip a certain sample (sample id)

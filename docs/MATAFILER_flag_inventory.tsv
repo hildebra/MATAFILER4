@@ -14,8 +14,10 @@ MATAF4.pl	4.04	Flow related	-submit	integer	doSubmit	1	stable	submit any jobs at
 MATAF4.pl	4.04	Flow related	-from	integer	FROM1	0	stable	start at which samples from map file?
 MATAF4.pl	4.04	Flow related	-to	integer	TO1	999999999999	stable	stop at which samples from map file?
 MATAF4.pl	4.04	Flow related	-loopTillComplete	string	loop2completion	0	advanced/internal	dangerous flag, script will loop over the assigned samples until all jobs are finished.
+MATAF4.pl	4.31	Flow related	-schedulerPollSeconds	integer	MFconfig	20	advanced	seconds between loopTillComplete scheduler queries while waiting
+MATAF4.pl	4.31	Flow related	-schedulerCapacityCheckJobs	integer	MFconfig	10	advanced	refresh exact running plus pending Slurm count after this many accepted submissions
 MATAF4.pl	4.04	Flow related	-excludeNodes	string	MFconfig		stable	exclude certain nodes?
-MATAF4.pl	4.04	Flow related	-maxConcurrentJobs	integer	MFconfig		stable	max jobs in queue, useful for large samples sets, currently only works on slurm
+MATAF4.pl	4.04	Flow related	-maxConcurrentJobs	integer	MFconfig		stable	maximum running plus pending jobs, conservatively enforced with batched Slurm accounting
 MATAF4.pl	4.04	Flow related	-killDepNever	integer	MFconfig		stable	"kill jobs in ""Dependency never finished"" state?"
 MATAF4.pl	4.04	Flow related	-requireInput	integer	MFconfig		stable	in case input reads are no longer present, 0 will continue pipeline, 1 will abort
 MATAF4.pl	4.04	Flow related	-ignoreSmpls	string	MFconfig		stable	skip a certain sample (sample id)

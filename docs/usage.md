@@ -92,9 +92,13 @@ At the beginning of each loop pass, sample lock job IDs are collected first.
 MATAFILER4 uses one `squeue` snapshot and bounded, multi-job `sacct` calls for
 tracked IDs no longer present in `squeue`; all samples and dependency checks in
 that pass reuse the result. `-maxConcurrentJobs` counts both running and pending
-jobs and is enforced immediately before each scheduler submission. During
-`-loopTillComplete`, reaching the cap defers submissions rather than blocking
-inside one sample: output and cleanup checks continue for the remaining samples,
+jobs. Each submission is admitted from a conservative cached count, so the
+submission path does not normally query Slurm for every job. The exact count is
+refreshed after every `-schedulerCapacityCheckJobs` accepted submissions (default
+10), or earlier when the cached count plus intervening submissions reaches the
+cap. During `-loopTillComplete`, reaching the cap defers submissions rather
+than blocking inside one sample: output and cleanup checks continue for the
+remaining samples,
 then the same rolling range is retried after `-schedulerPollSeconds`. Outside
 loop mode, the cap retains its blocking behaviour.
 

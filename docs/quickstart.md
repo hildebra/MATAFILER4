@@ -87,8 +87,11 @@ starts immediately; another full-range pass cannot start until all pending and
 running jobs submitted by this invocation have finished. Each visit submits only the next ready producer wave, so a failed
 input filter is retried before assembly, mapping, binning, or consensus jobs are
 created. Scheduler state is collected once per pass for all sample locks,
-and `-maxConcurrentJobs` counts both pending and running user jobs before every
-Slurm submission. A full queue defers new submissions without skipping sample
+and `-maxConcurrentJobs` counts both pending and running user jobs. Accepted
+jobs are added to a conservative local counter; the exact scheduler count is
+refreshed every `-schedulerCapacityCheckJobs` submissions (10 by default), or
+sooner when the estimate reaches the cap. A full queue defers new submissions
+without skipping sample
 completion or cleanup checks; the same rolling range is retried after the
 configured scheduler polling interval.
 

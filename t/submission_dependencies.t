@@ -381,8 +381,7 @@ is(qsubSystemJobAlive([], $options), undef,
 $options = slurm_options();
 $options->{doSubmit} = 1;
 $options->{submittedJobs} = 0;
-$options->{pendingJobCheckInterval} = 60;
-$options->{schedulerClock} = sub { return 1000; };
+$options->{capacityCheckEverySubmissions} = 10;
 my $pending_queries = 0;
 $options->{pendingJobRunner} = sub {
 	$pending_queries++;
@@ -390,23 +389,41 @@ $options->{pendingJobRunner} = sub {
 		? "101\n102\n103\n"
 		: "101\n102\n103\n104\n", 0);
 };
-qsubSystemWaitMaxJobs(10, 0, $options);
-qsubSystemWaitMaxJobs(10, 0, $options);
+qsubSystemWaitMaxJobs(100, 0, $options);
+qsubSystemWaitMaxJobs(100, 0, $options);
 is($pending_queries, 1,
-	'repeated per-sample throttling reuses a recent scheduler count');
-$options->{submittedJobs} = 6;
-qsubSystemWaitMaxJobs(10, 0, $options);
+	'repeated per-submission throttling reuses the cached scheduler count');
+$options->{submittedJobs} = 9;
+qsubSystemWaitMaxJobs(100, 0, $options);
 is($pending_queries, 1,
 	'locally submitted jobs are conservatively counted without a scheduler round trip');
-$options->{submittedJobs} = 8;
-qsubSystemWaitMaxJobs(10, 0, $options);
+$options->{submittedJobs} = 10;
+qsubSystemWaitMaxJobs(100, 0, $options);
 is($pending_queries, 2,
-	'the scheduler is queried immediately when the conservative estimate exceeds the limit');
+	'the scheduler count is refreshed after the configured submission batch');
+
+my $near_cap_options = slurm_options();
+$near_cap_options->{doSubmit} = 1;
+$near_cap_options->{submittedJobs} = 0;
+$near_cap_options->{capacityCheckEverySubmissions} = 10;
+my $near_cap_queries = 0;
+$near_cap_options->{pendingJobRunner} = sub {
+	$near_cap_queries++;
+	return ("101\n102\n103\n", 0);
+};
+qsubSystemWaitMaxJobs(10, 0, $near_cap_options);
+$near_cap_options->{submittedJobs} = 6;
+qsubSystemWaitMaxJobs(10, 0, $near_cap_options);
+is($near_cap_queries, 1,
+	'the conservative count avoids a query while capacity remains below the cap');
+$near_cap_options->{submittedJobs} = 7;
+qsubSystemWaitMaxJobs(10, 0, $near_cap_options);
+is($near_cap_queries, 2,
+	'the scheduler is queried before the conservative count can exceed the cap');
 
 my $capacity_options = slurm_options();
 $capacity_options->{doSubmit} = 1;
 $capacity_options->{submittedJobs} = 0;
-$capacity_options->{pendingJobCheckInterval} = 0;
 $capacity_options->{nonblockingMaxConcurrentJobs} = 1;
 my $capacity_queries = 0;
 $capacity_options->{liveJobRunner} = sub {

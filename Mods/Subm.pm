@@ -855,6 +855,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 				($output, $?);
 			};
 		if ($submit_status != 0) {
+			delete $optHR->{liveJobThrottleState};
 			my $exit_code = $submit_status == -1 ? -1 : ($submit_status >> 8);
 			my $message = "Job submission failed (exit $exit_code): $qcm$ret";
 			return ($FAILED_SUBMISSION_DEPENDENCY, $qcm)
@@ -863,8 +864,10 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		}
 		if ($LSF == 2){#slurm get jobid
 			chomp $ret;
-			die "Could not parse Slurm job id from submission output: $ret\n"
-				unless ($ret =~ /^Submitted batch job (\d+)\s*$/);
+			unless ($ret =~ /^Submitted batch job (\d+)\s*$/) {
+				delete $optHR->{liveJobThrottleState};
+				die "Could not parse Slurm job id from submission output: $ret\n";
+			}
 			$jname=$1;
 			$optHR->{slurmDependencySubmittedAt} ||= {};
 			$optHR->{slurmDependencySubmittedAt}{$jname} = time;
@@ -947,9 +950,8 @@ sub numUserJobs{
 
 
 	if ($rmSelf && $qmode eq "slurm"){
-		my $SjobID = `echo \$SLURM_JOBID`; chomp $SjobID;
-		#print "\"$SjobID\"\n";
-		if ($SjobID ne ""){$num --;}
+		my $schedulerJobId = $ENV{SLURM_JOBID} || "";
+		$num-- if $schedulerJobId ne "";
 	}
 
 	return $num;
@@ -1128,6 +1130,7 @@ sub emptyQsubOpt{
 		# Number of commands successfully handed to the configured execution
 		# backend. Callers can snapshot this value to detect no-op passes.
 		submittedJobs => 0,
+		capacityCheckEverySubmissions => 10,
 		jobPollSeconds => 20,
 		#tmpMinG => 10,
 		afterAny => 0,
@@ -1245,19 +1248,20 @@ sub qsubSystemWaitMaxJobs{
 	my $clock = $optHR->{schedulerClock};
 	return 0 if $optHR->{nonblockingMaxConcurrentJobs}
 		&& $optHR->{capacityDeferred};
-	my $now = $clock ? $clock->() : time;
-	my $cacheSeconds = defined($optHR->{pendingJobCheckInterval})
-		? 0 + $optHR->{pendingJobCheckInterval} : 30;
-	$cacheSeconds = 0 if $cacheSeconds < 0;
 	my $submittedNow = $optHR->{submittedJobs} || 0;
+	my $refreshEvery = defined($optHR->{capacityCheckEverySubmissions})
+		? int($optHR->{capacityCheckEverySubmissions}) : 10;
+	$refreshEvery = 1 if $refreshEvery < 1;
 	my $cached = $optHR->{liveJobThrottleState};
-	if ($cached && $now - $cached->{checkedAt} < $cacheSeconds) {
-		my $submittedSince = $submittedNow - $cached->{submittedJobs};
+	if ($cached) {
+		my $submittedSince = $submittedNow - ($cached->{submittedJobs} || 0);
 		$submittedSince = 0 if $submittedSince < 0;
 		# Treat every locally accepted job as live until the next scheduler
-		# query. This upper bound cannot undercount work created by this process.
+		# query. Refresh after a bounded submission batch, or sooner when this
+		# conservative upper bound reaches the configured cap.
 		my $estimatedLive = $cached->{liveJobs} + $submittedSince;
-		return 1 if $estimatedLive < $checkMaxNumJobs;
+		return 1 if $estimatedLive < $checkMaxNumJobs
+			&& $submittedSince < $refreshEvery;
 	}
 	my $num = numLiveUserJobs($optHR, 1);
 	$optHR->{liveJobThrottleState} = {
