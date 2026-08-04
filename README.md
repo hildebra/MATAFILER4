@@ -5,7 +5,7 @@
   <a href="docs/install.md"><img alt="Installation" src="https://img.shields.io/badge/install-micromamba%20%2B%20installer.sh-blue"></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%2F%20HPC-lightgrey">
   <img alt="Language" src="https://img.shields.io/badge/language-Perl-39457E?logo=perl">
-  <img alt="MATAFILER4 version" src="https://img.shields.io/badge/MATAFILER4-v4.04-brightgreen">
+  <img alt="MATAFILER4 version" src="https://img.shields.io/badge/MATAFILER4-v4.38-brightgreen">
   <a href="https://github.com/hildebra/MATAFILER4/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/hildebra/MATAFILER4"></a>
 </p>
 
@@ -36,7 +36,7 @@ Replace the workflow filenames if your repository uses different names.
 
 MATAFILER4 is a Linux/HPC-oriented metagenomic processing pipeline for raw shotgun metagenomic reads. It supports assembly-dependent workflows for communities that assemble well, such as many host-associated microbiomes, and assembly-independent profiling workflows for highly complex communities such as soil.
 
-This documentation snapshot was updated against `MATAF4.pl` version `4.04`.
+This documentation snapshot was updated against `MATAF4.pl` version `4.38`.
 
 ## Which mode should I use?
 

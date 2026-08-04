@@ -50,6 +50,11 @@ sub recordSampleLockJobs {
 	if ($state) {
 		$state->{jobs}{$_} = 1 for @job_ids;
 	}
+	my $queue_state = $optHR->{schedulerQueueState};
+	if ($queue_state) {
+		$queue_state->{jobs}{$_} = 1 for @job_ids;
+		$queue_state->{states}{$_} ||= 'PENDING' for @job_ids;
+	}
 	return scalar @job_ids;
 }
 
@@ -93,12 +98,78 @@ sub _run_scheduler_query {
 	return ($output, $?);
 }
 
-sub _batched_slurm_accounting_lookup {
-	my ($job_ids, $optHR) = @_;
-	my %records;
+sub _scheduler_queue_command {
+	my ($qmode) = @_;
+	return "squeue -h -u \$USER -o '%i|%T'" if $qmode eq 'slurm';
+	return "qstat -u \$USER | awk 'NR > 2 {print \$1 \"|\" \$5}'"
+		if $qmode eq 'sge';
+	return "bjobs -noheader -o 'jobid stat'" if $qmode eq 'lsf';
+	return '' if $qmode eq 'bash';
+	die "Cannot inspect jobs for scheduler mode '$qmode'\n";
+}
+
+sub _scheduler_state_is_executing {
+	my ($qmode, $state) = @_;
+	$state = uc($state || '');
+	return $state =~ /^(?:RUNNING|COMPLETING|CONFIGURING|RESIZING|SIGNALING|STAGE_OUT)$/
+		if $qmode eq 'slurm';
+	return $state =~ /^(?:R|T|RR|RT)$/ if $qmode eq 'sge';
+	return $state eq 'RUN' if $qmode eq 'lsf';
+	return 0;
+}
+
+sub _scheduler_queue_snapshot {
+	my ($optHR, %args) = @_;
+	$optHR ||= {};
+	my $qmode = $optHR->{qmode} || 'slurm';
+	return {
+		checkedAt => time, jobs => {}, states => {}, qmode => $qmode,
+	} if $qmode eq 'bash';
+
+	my $clock = $optHR->{schedulerClock};
+	my $now = $clock ? $clock->() : time;
+	my $cached = $optHR->{schedulerQueueState};
+	my $reuse_seconds = 0 + ($args{reuse_seconds} || 0);
+	if ($cached && $reuse_seconds > 0
+			&& $now - ($cached->{checkedAt} || 0) < $reuse_seconds) {
+		return $cached;
+	}
+
+	my $command = _scheduler_queue_command($qmode);
+	my ($output, $status) = _run_scheduler_query($args{runner}, $command);
+	die($args{error} || "Failed to query scheduler jobs with: $command\n")
+		if $status != 0;
+	my (%jobs, %states);
+	for my $line (split /\n/, $output) {
+		$line =~ s/^\s+|\s+$//g;
+		next if $line eq '';
+		my ($job_id, $state);
+		if ($line =~ /^(\d+)\|(\S+)$/) {
+			($job_id, $state) = ($1, uc($2));
+		} elsif ($line =~ /^(\d+)\s+(\S+)$/) {
+			($job_id, $state) = ($1, uc($2));
+		} elsif ($line =~ /^(\d+)$/) {
+			($job_id, $state) = ($1, $args{bare_state} || '');
+		} else {
+			next;
+		}
+		$jobs{$job_id} = 1;
+		$states{$job_id} = $state;
+	}
+	my $snapshot = {
+		checkedAt => $clock ? $clock->() : time,
+		jobs => \%jobs,
+		states => \%states,
+		qmode => $qmode,
+	};
+	$optHR->{schedulerQueueState} = $snapshot;
+	return $snapshot;
+}
+
+sub _slurm_job_batches {
+	my ($job_ids) = @_;
 	my @remaining = grep { /^\d+$/ } @{$job_ids || []};
-	my $runner = $optHR->{sampleLockAccountingRunner}
-		|| $optHR->{slurmDependencyAccountingRunner};
+	my @batches;
 	while (@remaining) {
 		my (@batch, $batch_chars);
 		while (@remaining && @batch < 4000) {
@@ -108,9 +179,20 @@ sub _batched_slurm_accounting_lookup {
 			push @batch, $job_id;
 			$batch_chars += $next_chars;
 		}
-		my $command = "sacct -X -n -P -j ".join(',', @batch)
+		push @batches, \@batch;
+	}
+	return @batches;
+}
+
+sub _batched_slurm_accounting_lookup {
+	my ($job_ids, $optHR) = @_;
+	my %records;
+	my $runner = $optHR->{sampleLockAccountingRunner}
+		|| $optHR->{slurmDependencyAccountingRunner};
+	for my $batch (_slurm_job_batches($job_ids)) {
+		my $command = "sacct -X -n -P -j ".join(',', @{$batch})
 			." --format=JobIDRaw,State,ExitCode";
-		my ($output, $status) = _run_scheduler_query($runner, $command, \@batch);
+		my ($output, $status) = _run_scheduler_query($runner, $command, $batch);
 		return undef if $status != 0;
 		for my $line (split /\n/, $output) {
 			my ($job_id, $state, $exit_code) = split /\|/, $line, 3;
@@ -124,7 +206,7 @@ sub _batched_slurm_accounting_lookup {
 			$records{$job_id} = { state => uc($state), exit_code => $exit_code };
 		}
 		$records{$_} ||= { state => '', exit_code => '' }
-			for @batch;
+			for @{$batch};
 	}
 	return \%records;
 }
@@ -140,35 +222,31 @@ sub primeSampleLockJobSnapshot {
 		$tracked{$_} = 1 for keys %{$wanted || {}};
 	}
 	$optHR->{accountingJobIds}{$_} = 1 for keys %tracked;
-	my $command = "squeue -h -u \$USER -o '%i|%T'";
-	my ($output, $status) = _run_scheduler_query($optHR->{sampleLockJobRunner}, $command);
-	if ($status != 0) {
+	my $state = eval {
+		_scheduler_queue_snapshot(
+			$optHR,
+			runner => $optHR->{sampleLockJobRunner},
+			error => "Failed to query scheduler while priming sample locks\n",
+		);
+	};
+	if (!$state) {
 		warn "Failed to query scheduler while priming sample locks; retaining existing lock state\n";
 		return undef;
 	}
-	my (%queued, %states);
-	for my $line (split /\n/, $output) {
-		$line =~ s/^\s+|\s+$//g;
-		next unless $line =~ /^(\d+)\|(\S+)$/;
-		$queued{$1} = 1;
-		$states{$1} = uc($2);
-	}
-	my $clock = $optHR->{schedulerClock};
-	my $checked_at = $clock ? $clock->() : time;
-	$optHR->{sampleLockActiveState} = {
-		checkedAt => $checked_at, jobs => \%queued, states => \%states, passSnapshot => 1,
-	};
-	my $throttle_live_jobs = scalar keys %queued;
+	$state->{passSnapshot} = 1;
+	$optHR->{sampleLockActiveState} = $state;
+	my $throttle_live_jobs = scalar keys %{$state->{jobs}};
 	$throttle_live_jobs--
-		if (($ENV{SLURM_JOBID} || '') ne '' && $queued{$ENV{SLURM_JOBID}});
+		if (($ENV{SLURM_JOBID} || '') ne '' && $state->{jobs}{$ENV{SLURM_JOBID}});
 	$optHR->{liveJobThrottleState} = {
-		checkedAt => $checked_at, liveJobs => $throttle_live_jobs,
+		checkedAt => $state->{checkedAt}, liveJobs => $throttle_live_jobs,
 		submittedJobs => $optHR->{submittedJobs} || 0,
 	};
 	$optHR->{slurmDependencyAccountingCache} ||= {};
 	$optHR->{slurmDependencyAccountingCache}{$_} =
-		{ state => $states{$_}, exit_code => '' } for grep { $tracked{$_} } keys %queued;
-	my @missing = grep { !$queued{$_} } sort { $a <=> $b } keys %tracked;
+		{ state => $state->{states}{$_}, exit_code => '' }
+		for grep { $tracked{$_} } keys %{$state->{jobs}};
+	my @missing = grep { !$state->{jobs}{$_} } sort { $a <=> $b } keys %tracked;
 	my $records = @missing ? _batched_slurm_accounting_lookup(\@missing, $optHR) : {};
 	if (defined $records) {
 		$optHR->{slurmDependencyAccountingCache} ||= {};
@@ -176,7 +254,7 @@ sub primeSampleLockJobSnapshot {
 	}
 	return {
 		tracked => scalar(keys %tracked),
-		queued => scalar(grep { $tracked{$_} } keys %queued),
+		queued => scalar(grep { $tracked{$_} } keys %{$state->{jobs}}),
 		accounted => defined($records) ? scalar(keys %{$records}) : 0,
 	};
 }
@@ -197,40 +275,21 @@ sub sampleLockActiveJobs {
 	my $state = $optHR->{sampleLockActiveState};
 	if (!$state || (!$state->{passSnapshot}
 			&& $now - $state->{checkedAt} >= $cache_seconds)) {
-		my $qmode = $optHR->{qmode} || 'slurm';
-		my $command;
-		if ($qmode eq 'slurm') {
-			$command = "squeue -h -u \$USER -o '%i'";
-		} elsif ($qmode eq 'sge') {
-			$command = "qstat -u \$USER | awk 'NR > 2 {print \$1}'";
-		} elsif ($qmode eq 'lsf') {
-			$command = "bjobs -noheader -o jobid";
-		} elsif ($qmode eq 'bash') {
+		if (($optHR->{qmode} || 'slurm') eq 'bash') {
 			return 0;
-		} else {
-			warn "Cannot inspect sample locks for scheduler mode '$qmode'\n";
-			return undef;
 		}
-		my ($output, $status);
-		if (my $runner = $optHR->{sampleLockJobRunner}) {
-			($output, $status) = $runner->($command);
-			$status ||= 0;
-		} else {
-			$output = `$command`;
-			$status = $?;
-		}
-		if ($status != 0) {
+		$state = eval {
+			_scheduler_queue_snapshot(
+				$optHR,
+				runner => $optHR->{sampleLockJobRunner},
+				error => "Failed to query scheduler while inspecting $lock_file\n",
+			);
+		};
+		if (!$state) {
 			warn "Failed to query scheduler while inspecting $lock_file; retaining lock\n";
 			return undef;
 		}
-		my %active = map { $_ => 1 }
-			grep { /^\d+$/ }
-			map { my $id = $_; $id =~ s/^\s+|\s+$//g; $id }
-			split /\n/, $output;
-		$state = $optHR->{sampleLockActiveState} = {
-			checkedAt => $clock ? $clock->() : time,
-			jobs => \%active,
-		};
+		$optHR->{sampleLockActiveState} = $state;
 	}
 	return scalar grep { $state->{jobs}{$_} } keys %{$wanted};
 }
@@ -292,24 +351,12 @@ sub slurmJobFailureSummary {
 
 	my (%seen, %categories);
 	my $failed = 0;
-	while (@job_ids) {
-		# Keep normal and moderately large MATAF4 runs to one accounting query.
-		# The dual bound avoids both an excessive SlurmDB request and shell
-		# command-line limits for exceptionally large submissions.
-		my @batch;
-		my $batch_chars = 0;
-		while (@job_ids && @batch < 4000) {
-			my $next_chars = length($job_ids[0]) + (@batch ? 1 : 0);
-			last if @batch && $batch_chars + $next_chars > 48_000;
-			my $job_id = shift @job_ids;
-			push @batch, $job_id;
-			$batch_chars += $next_chars;
-		}
-		my $command = "sacct -X -n -P -j ".join(',', @batch)
+	for my $batch (_slurm_job_batches(\@job_ids)) {
+		my $command = "sacct -X -n -P -j ".join(',', @{$batch})
 			." --format=JobIDRaw,JobName,State,ExitCode,Reason";
 		my ($output, $status);
 		if (my $runner = $optHR->{jobAccountingRunner}) {
-			($output, $status) = $runner->($command, \@batch);
+			($output, $status) = $runner->($command, $batch);
 			$status ||= 0;
 		} else {
 			$output = `$command 2>/dev/null`;
@@ -902,92 +949,39 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 
 
 
-sub numPendingJobs($){
-	my ($optHR) = @_;
-	my $qmode = "slurm"; $qmode = $optHR->{qmode} if (defined($optHR->{qmode}));
-	my $srchCmd="" ;#= "squeue -u \$USER  -t PENDING | wc -l";
-	my $num = 0;
-	if ($qmode eq "slurm"){
-		$srchCmd = "squeue -h -u \$USER -t PENDING | wc -l";
-	} elsif ($qmode eq "sge"){
-		$srchCmd = "qstat | grep \$USER  | wc -l";
-		die "Subm.pm::numPendingJobs() not implemented for sge!\n";
-	} elsif ($qmode eq "bash"){
-		return 0;
-	} else {$srchCmd="bjobs -p -noheader | wc -l";
-		die "Subm.pm::numPendingJobs() not implemented for bsub!\n";
+
+sub _wanted_scheduler_jobs {
+	my ($job_ids, $run_tag) = @_;
+	my %wanted;
+	return \%wanted unless defined $job_ids;
+	for my $job_id (split /;/, normalise_job_dependencies($job_ids)) {
+		$job_id =~ s/^\Q$run_tag\E// if defined($run_tag) && $run_tag ne '';
+		$wanted{$job_id} = 1 if $job_id =~ /^\d+$/;
 	}
-	my $queryStatus;
-	if (my $runner = $optHR->{pendingJobRunner}) {
-		($num, $queryStatus) = $runner->($srchCmd);
-		$queryStatus ||= 0;
-	} else {
-		$num = `$srchCmd`;
-		$queryStatus = $?;
-	}
-	chomp $num;
-	die "Failed to count pending jobs with: $srchCmd\n" if ($queryStatus != 0);
-	die "Scheduler returned a nonnumeric pending-job count: '$num'\n"
-		unless $num =~ /^\d+$/;
-	return $num;
+	return \%wanted;
 }
+
 sub numUserJobs{
-	my ($optHR) = $_[0];
-	my $rmSelf=0; $rmSelf = $_[1] if (@_>1);
-	my $qmode = "slurm"; $qmode = $optHR->{qmode} if (defined($optHR->{qmode}));
-	my $srchCmd ="";#= "squeue -u \$USER   | wc -l";
-	if ($qmode eq "slurm"){
-		$srchCmd = "squeue -h -u \$USER | wc -l";
-	} elsif ($qmode eq "sge"){
-		$srchCmd = "qstat | grep \$USER  | wc -l";
-	} elsif ($qmode eq "bash"){
-		return 0;
-	} else {$srchCmd="bjobs -noheader | wc -l";
-	}
-	my $num = 0;
-	$num = `$srchCmd`; chomp $num;
-	die "Failed to count user jobs with: $srchCmd\n" if ($? != 0);
-
-
-	if ($rmSelf && $qmode eq "slurm"){
-		my $schedulerJobId = $ENV{SLURM_JOBID} || "";
-		$num-- if $schedulerJobId ne "";
-	}
-
-	return $num;
+	return numLiveUserJobs(@_);
 }
 
 sub numLiveUserJobs {
 	my ($optHR) = @_;
 	my $rmSelf = @_ > 1 ? $_[1] : 0;
 	my $jobIds = @_ > 2 ? $_[2] : undef;
-	my %wanted;
-	if (defined $jobIds) {
-		my @tracked = split /;/, normalise_job_dependencies($jobIds);
-		$wanted{$_} = 1 for grep { /^\d+$/ } @tracked;
-	}
 	my $qmode = defined($optHR->{qmode}) ? $optHR->{qmode} : "slurm";
-	my $command;
-	if ($qmode eq "slurm") {
-		$command = "squeue -h -u \$USER -o '%i'";
-	} elsif ($qmode eq "sge") {
-		$command = "qstat -u \$USER | awk 'NR > 2 {print \$1}'";
-	} elsif ($qmode eq "bash") {
-		return 0;
-	} else {
-		$command = "bjobs -noheader -o jobid";
-	}
-	my ($output, $status) = _run_scheduler_query(
-		$optHR->{liveJobRunner} || $optHR->{pendingJobRunner}, $command,
+	return 0 if $qmode eq 'bash';
+	my $wanted = _wanted_scheduler_jobs($jobIds, $optHR->{rTag} || '');
+	return 0 if defined($jobIds) && !%{$wanted};
+	my $snapshot = _scheduler_queue_snapshot(
+		$optHR,
+		runner => $optHR->{liveJobRunner} || $optHR->{pendingJobRunner},
+		error => "Failed to count live user jobs\n",
 	);
-	die "Failed to count live user jobs with: $command\n" if $status != 0;
-	my %live = map { $_ => 1 }
-		grep { /^\d+$/ }
-		map { my $id = $_; $id =~ s/^\s+|\s+$//g; $id }
-		split /\n/, $output;
+	my %live = %{$snapshot->{jobs}};
 	delete $live{$ENV{SLURM_JOBID}}
 		if ($rmSelf && $qmode eq "slurm" && ($ENV{SLURM_JOBID} || '') ne '');
-	return scalar grep { !%wanted || $wanted{$_} } keys %live;
+	return scalar grep { !%{$wanted} || $wanted->{$_} } keys %live;
 }
 
 sub numActiveUserJobs{
@@ -995,42 +989,22 @@ sub numActiveUserJobs{
 	my $rmSelf = @_ > 1 ? $_[1] : 0;
 	my $jobIds = @_ > 2 ? $_[2] : undef;
 	my $qmode = defined($optHR->{qmode}) ? $optHR->{qmode} : "slurm";
-	my %wanted;
-	if (defined $jobIds) {
-		my @tracked = split /;/, normalise_job_dependencies($jobIds);
-		my $rTag = $optHR->{rTag} || '';
-		for (@tracked) {
-			s/^\Q$rTag\E//;
-			$wanted{$_} = 1 if /^\d+$/;
-		}
-		return 0 unless %wanted;
-	}
-	my $srchCmd;
-	if ($qmode eq "slurm"){
-		$srchCmd = "squeue -h -u \$USER -t RUNNING,COMPLETING,CONFIGURING -o '%i'";
-	} elsif ($qmode eq "sge"){
-		$srchCmd = "qstat -u \$USER | awk 'NR > 2 && \$5 ~ /^(r|t|Rr|Rt)\$/ {print \$1}'";
-	} elsif ($qmode eq "bash"){
-		return 0;
-	} else {
-		$srchCmd = "bjobs -r -noheader -o jobid";
-	}
-	my ($output, $queryStatus);
-	if (my $runner = $optHR->{activeJobRunner}) {
-		($output, $queryStatus) = $runner->($srchCmd);
-		$queryStatus ||= 0;
-	} else {
-		$output = `$srchCmd`;
-		$queryStatus = $?;
-	}
-	die "Failed to count active user jobs with: $srchCmd\n" if ($queryStatus != 0);
-	my %active = map { $_ => 1 }
-		grep { /^\d+$/ }
-		map { my $id = $_; $id =~ s/^\s+|\s+$//g; $id }
-		split /\n/, $output;
+	return 0 if $qmode eq 'bash';
+	my $wanted = _wanted_scheduler_jobs($jobIds, $optHR->{rTag} || '');
+	return 0 if defined($jobIds) && !%{$wanted};
+	my $snapshot = _scheduler_queue_snapshot(
+		$optHR,
+		runner => $optHR->{activeJobRunner},
+		bare_state => $qmode eq 'slurm' ? 'RUNNING'
+			: $qmode eq 'sge' ? 'R' : 'RUN',
+		error => "Failed to count active user jobs\n",
+	);
+	my %active = map { $_ => 1 } grep {
+		_scheduler_state_is_executing($qmode, $snapshot->{states}{$_})
+	} keys %{$snapshot->{jobs}};
 	delete $active{$ENV{SLURM_JOBID}}
 		if ($rmSelf && $qmode eq "slurm" && ($ENV{SLURM_JOBID} || '') ne '');
-	return scalar grep { !%wanted || $wanted{$_} } keys %active;
+	return scalar grep { !%{$wanted} || $wanted->{$_} } keys %active;
 }
 
 
@@ -1160,50 +1134,26 @@ sub qsubSystemJobAlive{
 	
 	
 	my $qmode = $optHR->{qmode};
-	my $cmd1="";
 	my $rTag = $optHR->{rTag};
 
 	for (@jobs) {s/^\Q$rTag\E//;}
-	if ($qmode eq "slurm"){
-		$cmd1 = "squeue -h -u \$USER -o '%i|%T'";
-	} elsif ($qmode eq "sge"){
-		$cmd1 = "qstat -u \$USER | awk 'NR > 2 {print \$1 \"|\" \$5}'"
-	} elsif ($qmode eq "bash"){
-		return;
-	} else {$cmd1="bjobs -noheader -o 'jobid stat'";
-	}
+	return if $qmode eq "bash";
 	my %wanted = map { $_ => 1 } @jobs;
 	my $announced = 0;
+	my $first_poll = 1;
 	while (1) {
-		my ($output, $queryStatus);
-		if (my $runner = $optHR->{jobStatusRunner}) {
-			($output, $queryStatus) = $runner->($cmd1);
-			$queryStatus ||= 0;
-		} else {
-			$output = `$cmd1`;
-			$queryStatus = $?;
-		}
-		die "Failed to query active jobs with: $cmd1\n" if ($queryStatus != 0);
-		my (%queued, %executing);
-		for my $line (split /\n/, $output) {
-			$line =~ s/^\s+|\s+$//g;
-			my ($id, $state);
-			if ($line =~ /^(\d+)\|(\S+)$/) {
-				($id, $state) = ($1, uc($2));
-			} elsif ($line =~ /^(\d+)\s+(\S+)$/) {
-				($id, $state) = ($1, uc($2));
-			} else {
-				next;
-			}
-			$queued{$id} = 1;
-			my $isExecuting =
-				$qmode eq "slurm" ? $state =~ /^(?:RUNNING|COMPLETING|CONFIGURING|RESIZING|SIGNALING|STAGE_OUT)$/
-			  : $qmode eq "sge"   ? $state =~ /^(?:R|T|RR|RT)$/
-			  :                    $state eq "RUN";
-			$executing{$id} = 1 if ($isExecuting);
-		}
-		my @remaining = grep { $queued{$_} } keys %wanted;
-		my @active = grep { $executing{$_} } keys %wanted;
+		my $snapshot = _scheduler_queue_snapshot(
+			$optHR,
+			runner => $optHR->{jobStatusRunner},
+			reuse_seconds => $first_poll ? 2 : 0,
+			error => "Failed to query active jobs\n",
+		);
+		$first_poll = 0;
+		my @remaining = grep { $snapshot->{jobs}{$_} } keys %wanted;
+		my @active = grep {
+			$snapshot->{jobs}{$_}
+				&& _scheduler_state_is_executing($qmode, $snapshot->{states}{$_})
+		} keys %wanted;
 		if ($activeThreshold >= 0 && @active <= $activeThreshold) {
 			print scalar(@active)." active job(s) remain among ".scalar(@remaining).
 				" queued dependencies; loop threshold $activeThreshold reached.\n";
@@ -1225,7 +1175,7 @@ sub qsubSystemJobAlive{
 		sleep($pollSeconds);
 	}
 	delete $optHR->{sampleLockActiveState};
-	#print "returning\n";
+	delete $optHR->{schedulerQueueState};
 	return;
 }
 

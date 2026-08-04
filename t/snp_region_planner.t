@@ -101,20 +101,23 @@ open my $snp_fh, '<', File::Spec->catfile($Bin, '..', 'Mods', 'SNP.pm') or die $
 my $snp_source = do { local $/; <$snp_fh> };
 close $snp_fh;
 like($snp_source,
-	qr/if \(\$runSupport\).*?\$cmdAll \.= \$xtra2\.\$pilecmd if \(!\$onlyNormalize\)/s,
-	'existing supplementary VCFs cannot trigger concat without planned chunks');
+	qr/my \@snpScopes = \(.*?name => 'primary'.*?mapping => \$tar\[0\].*?name => 'supplementary'.*?mapping => \$tarS\[0\]/s,
+	'primary and supplementary consensus products share one explicit scope model');
 like($snp_source,
-	qr/consVCF_region_planner.*?--mapping \$tar\[0\].*?--output-prefix \$bedPrefix/s,
-	'primary region planning is emitted into the SNP allocation');
+	qr/for my \$scope \(grep \{ \$_->\{run\} \} \@snpScopes\).*?\$regionPlanner.*?--mapping \$scope->\{mapping\}.*?--output-prefix \$outputPrefix/s,
+	'all requested mappings use the same runtime region-planning path');
 like($snp_source,
-	qr/consVCF_region_planner.*?--mapping \$tarS\[0\].*?--output-prefix \$\{bedPrefix\}sup-/s,
-	'supplementary mappings receive independent runtime region planning');
+	qr/for my \$scope \(grep \{ \$_->\{run\} \} \@snpScopes\).*?pileupcall\(.*?\[\$scope->\{mapping\}\].*?\$scope->\{chunks\} = \$chunks/s,
+	'all requested mappings use the same pileup and chunk-collection path');
+like($snp_source,
+	qr/for my \$scope \(grep \{ \$_->\{run\} \} \@snpScopes\).*?my \@chunks = \@\{\$scope->\{chunks\}\}.*?\$bcftBin concat.*?\$scope->\{vcf\}/s,
+	'only scopes with planned chunks enter the shared VCF concatenation path');
 like($snp_source,
 	qr/sub _coverage_file_for_mapping.*?return "\$coverage\.gz" if \$allowPendingInputs/s,
 	'pending consensus jobs use the canonical future compressed-coverage path');
 like($snp_source,
-	qr/pending SNP inputs require scheduler dependencies.*?test -s \$refFA.*?test -s \$tar\[0\].*?test -s \$depthFile/s,
-	'pending consensus inputs require an afterok chain and are validated inside the allocation');
+	qr/pending SNP inputs require scheduler dependencies.*?test -s \$refFA.*?test -s \$_->\{mapping\}.*?test -s \$contigDepthF/s,
+	'pending consensus inputs require an afterok chain and validate every requested scope inside the allocation');
 like($snp_source,
 	qr/SNP GFF is required for consensus statistics.*?unless \$allowPendingInputs \|\| -s \$gffF.*?test -s \$gffF.*?my \$vcf2fnaIns = "-ref \$refFA -gff \$gffF "/s,
 	"vcf2fna always receives its GFF, including stats-only and pending-producer runs");
@@ -122,8 +125,11 @@ like($snp_source,
 	qr/SNP ContigStats depth is missing or empty.*?test -s \$contigDepthF.*?--depth \$contigDepthF/s,
 	"primary consensus validates ContigStats depth before runtime region planning");
 like($snp_source,
-	qr/my \$primaryNormStone.*?my \$primaryNormReady.*?rm -f \$primaryNormStone.*?touch \$primaryNormStone/s,
-	"normalization checkpoints distinguish a reusable normalized VCF from an interrupted normalization");
+	qr/my \@normalizeScopes = grep.*?for my \$scope \(\@normalizeScopes\).*?rm -f \$vcf \$vcf\.csi.*?touch \$normStone/s,
+	"all requested scopes use the same normalization checkpoint path");
+like($snp_source,
+	qr/my \@consensusScopes = grep.*?-inVCF .*?map \{ \$_->\{vcf\} \} \@consensusScopes.*?-depthF .*?\$_->\{depth_file\}/s,
+	"vcf2fna inputs and depth files are derived from the same requested scopes");
 like($snp_source,
 	qr/estimateConsensusCores\(\$consensusInputMB, \$maxSNPcores\).*?qsubSystem\([^;]+\$cmdFTag\.oSNPc\.sh[^;]+\$actualCores,/s,
 	'oSNPc submission requests the automatically estimated runtime region count');

@@ -1,157 +1,157 @@
 script	version	section	aliases	type	variable	default	status	description
-MATAF4.pl	4.34	Base options	-help,-?,-h	flag			stable	Show help.
-MATAF4.pl	4.34	Base options	-checkInstall	flag			stable	Check that core MATAFILER4 programs/environments are installed.
-MATAF4.pl	4.34	Base options	-map	string	MFconfig		stable	Mapping file describing samples and input/output paths.
-MATAF4.pl	4.34	Base options	-config	string	MFconfig		stable	Alternative configuration file.
-MATAF4.pl	4.34	Base options	-inspectState	integer	MFconfig	0	stable	Emit a read-only JSON snapshot of workflow artifacts and markers.
-MATAF4.pl	4.34	Base options	-planState	integer	MFconfig	0	stable	Emit a read-only dependency-ordered repair/submission plan.
-MATAF4.pl	4.34	Base options	-stateReport	string	MFconfig		stable	Write the inspection JSON to this explicit path.
-MATAF4.pl	4.34	Base options	-planReport	string	MFconfig		stable	Write the repair/submission plan JSON to this explicit path.
-MATAF4.pl	4.34	Flow related	-redoFails	integer	MFconfig		stable	if any step of requested analysis failed, just redo everything (extraction etc)
-MATAF4.pl	4.34	Flow related	-redoContigStats	integer	MFconfig		stable	runContigStats (coverage per gene, kmers, GC content) will be deleted & started again
-MATAF4.pl	4.34	Flow related	-submSystem	string	MFconfig		stable	qsub,SGE,bsub,LSF.. by default will try to autodetect
-MATAF4.pl	4.34	Flow related	-submit	integer	doSubmit	1	stable	submit any jobs at all? (0= no submission, just for trying if everything is correctly set up)
-MATAF4.pl	4.34	Flow related	-from	integer	FROM1	0	stable	start at which samples from map file?
-MATAF4.pl	4.34	Flow related	-to	integer	TO1	999999999999	stable	stop at which samples from map file?
-MATAF4.pl	4.34	Flow related	-loopTillComplete	string	loop2completion	0	advanced/internal	loop over assigned samples with a rolling completed frontier; run one immediate final full verification, then wait for all invocation jobs before any further full pass
-MATAF4.pl	4.34	Flow related	-schedulerPollSeconds	integer	MFconfig	20	advanced	seconds between loopTillComplete scheduler queries while waiting
-MATAF4.pl	4.34	Flow related	-schedulerCapacityCheckJobs	integer	MFconfig	10	advanced	refresh exact running plus pending Slurm count after this many accepted submissions
-MATAF4.pl	4.34	Flow related	-excludeNodes	string	MFconfig		stable	exclude certain nodes?
-MATAF4.pl	4.34	Flow related	-maxConcurrentJobs	integer	MFconfig		stable	maximum running plus pending user jobs, enforced with conservative batched Slurm accounting
-MATAF4.pl	4.34	Flow related	-killDepNever	integer	MFconfig		stable	"kill jobs in ""Dependency never finished"" state?"
-MATAF4.pl	4.34	Flow related	-requireInput	integer	MFconfig		stable	in case input reads are no longer present, 0 will continue pipeline, 1 will abort
-MATAF4.pl	4.34	Flow related	-ignoreSmpls	string	MFconfig		stable	skip a certain sample (sample id)
-MATAF4.pl	4.34	Flow related	-rmSmplLocks	integer	MFconfig		stable	remove existing sample locks (useful if jobs have crashed, leaving abondened sample locks)
-MATAF4.pl	4.34	Flow related	-silent	flag	MFconfig		stable	Suppress routine progress messages.
-MATAF4.pl	4.34	Flow related	-maxUnzpJobs	integer	MFconfig		stable	how many unzip jobs to run in parallel (not to overload HPC IO). Default:20
-MATAF4.pl	4.34	Flow related	-skipSmallSmplsMB	integer	MFconfig		stable	skip samples with a combined input smaller than this in MB (raw file size, independent of compressed or raw)
-MATAF4.pl	4.34	Flow related	-forceWriteStats	integer	MFopt		stable	force (re)writing of the metagStats report and text file
-MATAF4.pl	4.34	File strucuture	-rm_tmpdir_reads	integer	MFconfig		stable	Default 1, remove tmpdir with reads
-MATAF4.pl	4.34	File strucuture	-rm_tmpInput	integer	MFconfig		stable	remove raw, human / adaptor filtered reads, if sdm clean created? (and not needed any longer)
-MATAF4.pl	4.34	File strucuture	-reduceScratchUse	integer	MFconfig		advanced/internal	should always be 1, unless debugging..
-MATAF4.pl	4.34	File strucuture	-globalTmpDir	string	sharedTmpDirP		stable	absolute path to global shared tmp dir (like a scratch dir)
-MATAF4.pl	4.34	File strucuture	-nodeTmpDir	string	nodeTmpDirBase		stable	absolute path to tmp dir on local HDD of each executing node
-MATAF4.pl	4.34	File strucuture	-nodeHDDspace	string	MFconfig		stable	HDD tmp space to be requested for each node (in Gb). Some systems don't support this
-MATAF4.pl	4.34	File strucuture	-legacyFolders	integer	MFconfig		deprecated/legacy	legacy option, controls if output folders will use the read dir as name (1) or the name in the mapping file (0). Default=0
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-usePorechop	integer	MFopt		experimental/unsupported	adapter rm for Nanopore.. should actually be automatically with newer sdm (not implemented)
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-inputFQregex1	string	MFconfig		stable	regex for detecting read pair 1 in input fastq files
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-inputFQregex2	string	MFconfig		stable	regex for detecting read pair 2 in input fastq files
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-inputFQregexSingle	string	MFconfig		stable	regex for detecting single end reads in input fastq files
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-inputFQregexTrustSingle	integer	MFconfig		stable	if grep of files (rawSrchString) has multi assignments, which grep to trust more?
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-inputBAMregex	string	MFconfig		stable	bams that will be converted to fastq
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-splitFastaInput	integer	MFconfig		stable	Enable FASTA input splitting during read staging.
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-mergeReads	integer	MFopt		stable	merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances)
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-ProbRdFilter	integer	MFopt		stable	Enable probabilistic SDM read filtering.
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-pairedReadInput	integer	MFconfig		stable	determines if read pairs are expected in each in dir
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-inputReadLengthSuppl	integer	MFconfig		stable	Default supplementary-read length used for planning.
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-filterHostRds,-filterHumanRds	integer	MFopt		stable	0: no, 1:kraken2, 2: kraken1, 3:hostile
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-filterHostKrak2DB	string			stable	customize host org to filter (e.g. human, chicken ..)
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-filterHostKr2Conf	string	MFopt		stable	Kraken2 confidence threshold for host assignment.
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-filterHostKr2Quick	string	MFopt		stable	Kraken2 quick-mode option for host filtering.
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-hostileIndex	string	MFopt		stable	Hostile reference index used for host filtering.
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-onlyFilterZip	integer	MFconfig		stable	Stage and filter reads, then stop before downstream analyses.
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-mocatFiltered	integer	MFconfig		stable	Import reads from the configured MOCAT filtered-output layout.
-MATAF4.pl	4.34	Preprocessing (cleaning reads etc)	-logQualvsLen	integer	MFopt		stable	sdm log file.. can be quite large; logs qual of read vs read length
-MATAF4.pl	4.34	Sdm related	-inputReadLength	integer	MFconfig		stable	Default primary-read length used for planning.
-MATAF4.pl	4.34	Sdm related	-gzipSDMout	integer	MFopt		stable	Compress SDM-filtered FASTQ output.
-MATAF4.pl	4.34	Sdm related	-XfirstReads	integer	MFconfig		stable	Process only the first N reads; -1 processes all reads.
-MATAF4.pl	4.34	Sdm related	-minReadLength	integer	MFopt		stable	Override the minimum read length accepted by SDM; 0 keeps its configured value.
-MATAF4.pl	4.34	Sdm related	-maxReadLength	integer	MFopt		stable	Override the maximum read length accepted by SDM; 0 keeps its configured value.
-MATAF4.pl	4.34	Sdm related	-filterAdapters	integer	MFopt		stable	Enable adapter trimming during SDM filtering.
-MATAF4.pl	4.34	Sdm related	-customSDMopt	string	MFopt		stable	Use the specified non-empty SDM options file.
-MATAF4.pl	4.34	Sdm related	-sdmMem	string	MFopt		stable	total mem for sdm job in Gb, default 15
-MATAF4.pl	4.34	Assembly related	-spadesCores,-assemblCores	integer	MFopt		stable	Assembly threads per sample.
-MATAF4.pl	4.34	Assembly related	-spadesMemory,-assemblMemory	integer	MFopt		stable	in GB
-MATAF4.pl	4.34	Assembly related	-spadesKmers,-assemblyKmers	string	MFopt		stable	comma delimited list
-MATAF4.pl	4.34	Assembly related	-reAssembleMG	integer	MFopt		stable	Remove existing assembly results and rebuild the metagenome assembly.
-MATAF4.pl	4.34	Assembly related	-asssemblyHddSpace	integer	HDDspace		stable	Assembler scratch request in GB; -1 uses the assembler-specific default.
-MATAF4.pl	4.34	Assembly related	-assembleMG	integer	MFopt		stable	1=Spades, 2=MegaHIT, 3= flye, 4=metaMDBG, 5=hybrid ill-PB (megahit, metaMDBG)
-MATAF4.pl	4.34	Assembly related	-assemblyLongTime	integer	MFopt		stable	Submit assembly jobs with the long-runtime setting.
-MATAF4.pl	4.34	Assembly related	-assemblyScaffMinSize	integer	MFopt		stable	Minimum retained scaffold length in bases.
-MATAF4.pl	4.34	Binning	-Binner,-MetaBat2,-binSpeciesMG	integer	MFopt		stable	0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
-MATAF4.pl	4.34	Binning	-BinnerCores	integer	MFopt		stable	cores used for Binning process (and checkM)
-MATAF4.pl	4.34	Binning	-BinnerMem	integer	MFopt		stable	define binning memory, Gb, 0=auto
-MATAF4.pl	4.34	Binning	-minBinnerAssemblyMB	float	MFopt	5	stable	skip binning assemblies below this many million sequence bases and publish standard empty binner outputs; 0 disables
-MATAF4.pl	4.34	Binning	-checkM2	integer	MFopt		stable	Assess recovered bins with CheckM2.
-MATAF4.pl	4.34	Binning	-checkM1	integer	MFopt		stable	Assess recovered bins with CheckM1.
-MATAF4.pl	4.34	Binning	-BinnerScratchTmp	integer	MFopt		advanced/internal	very specific (undocumented) use of scratch instead of nodetmp dir
-MATAF4.pl	4.34	Binning	-redoEmptyBins	integer	MFopt		advanced/internal	debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes
-MATAF4.pl	4.34	Binning	-redoBinning	integer	MFopt		stable	Remove and rebuild requested binning results.
-MATAF4.pl	4.34	Binning	-SB_env	string	MFopt		stable	"semiBin environment; if given, will avoid re-training de novo binning model. Default: """" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global"
-MATAF4.pl	4.34	Gene prediction on assembly	-predictEukGenes	integer	MFopt		stable	severely limits total predicted gene amount (~25% of total genes)
-MATAF4.pl	4.34	Gene prediction on assembly	-kmerPerGene	integer	MFopt		stable	calculate kmer frequencies for each gene instead of per scaffold
-MATAF4.pl	4.34	Gene prediction on assembly	-genePredGZenforce	integer	MFopt		stable	Require the canonical compressed gene-prediction outputs.
-MATAF4.pl	4.34	Gene prediction on assembly	-rewriteGenePred	integer	MFopt		stable	Remove and rebuild gene predictions and dependent statistics.
-MATAF4.pl	4.34	Mapping	-mapper	integer	MFopt		stable	#1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
-MATAF4.pl	4.34	Mapping	-mapUnmapped	integer	MFopt		stable	Pass reads left unmapped by one reference to the next mapping.
-MATAF4.pl	4.34	Mapping	-mappingCoverage	integer	MFopt		stable	Calculate per-contig and per-gene coverage for reference mappings.
-MATAF4.pl	4.34	Mapping	-mappingMem	integer	MFopt		stable	total mem for mini2/kma/bwa/bwt2 in GB
-MATAF4.pl	4.34	Mapping	-mapSortMem	integer	MFopt		stable	total mem for samtools sort in GB
-MATAF4.pl	4.34	Mapping	-rmDuplicates	integer	MFopt		stable	Remove duplicate alignments before coverage calculation.
-MATAF4.pl	4.34	Mapping	-mappingCores	integer	MFopt		stable	CPU cores requested for each mapping job.
-MATAF4.pl	4.34	Mapping	-mapperFilterIll	string	MFopt		stable	"Maximum NM edit rate, minimum query coverage, minimum mapping quality, and minimum clipping at both ends (0 disables clipping filter)."
-MATAF4.pl	4.34	Mapping	-mapperFilterPB	string	MFopt		stable	PacBio alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping.
-MATAF4.pl	4.34	Mapping	-mapperFilterONT	string	MFopt		stable	Nanopore alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping.
-MATAF4.pl	4.34	Mapping	-mapSaveCRAM	integer	MFopt		stable	Retain assembly back-mapping alignments as CRAM files.
-MATAF4.pl	4.34	Mapping related (2) (assembly)	-remap2assembly,-redoMap2assembly,-redoMapping	integer	MFopt		stable	Remove and rebuild read mappings to the assembly.
-MATAF4.pl	4.34	Mapping related (2) (assembly)	-JGIdepths	integer	MFopt		stable	Generate JGI depth output for assembly mappings.
-MATAF4.pl	4.34	Mapping related (2) (assembly)	-mapReadsOntoAssembly	integer	MFopt		stable	map original reads back on assembly, to estimate abundance etc
-MATAF4.pl	4.34	Mapping related (2) (assembly)	-mapSupportReadsOntoAssembly	integer	MFopt		stable	"(1) map ""SupportReads"" onto assembly. Default: 0"
-MATAF4.pl	4.34	Mapping related (2) (assembly)	-saveReadsNotMap2Assembly	integer	MFopt		stable	Save reads that do not map to the assembly.
-MATAF4.pl	4.34	Map2tar / map2DB / map2GC	-decoyMapping	integer	MFopt		stable	"1: ""Decoy mapping"": map against reference genome AND against assembly of metagenome (drawing obvious better hits to metagenome, the ""decoy"")"
-MATAF4.pl	4.34	Map2tar / map2DB / map2GC	-competitive2ndmap	integer	MFopt		stable	1: Competitive, 2: combined but report separately per input genome, -1: combined and report all together
-MATAF4.pl	4.34	Map2tar / map2DB / map2GC	-ref	string	MFopt		stable	Comma-separated reference FASTA files for secondary mapping.
-MATAF4.pl	4.34	Map2tar / map2DB / map2GC	-mapperLargeRef	integer	MFopt		stable	use flags in mapper index built for large ref DBs?
-MATAF4.pl	4.34	Map2tar / map2DB / map2GC	-mapnms	string	MFopt		stable	name for this final files
-MATAF4.pl	4.34	Map2tar / map2DB / map2GC	-redo2ndmap	integer	MFopt		stable	Remove and rebuild secondary-reference mappings.
-MATAF4.pl	4.34	SNPs	-get2ndMappingConsSNP	integer	MFopt		stable	SNPs (onto mapping)
-MATAF4.pl	4.34	SNPs	-getAssemblConsSNP	integer	MFopt		stable	SNPs (onto self assembly) #calculates consensus SNP of assembly (useful for checking assembly gets consensus and Assmbl_grps)
-MATAF4.pl	4.34	SNPs	-getAssemblConsSNPsuppRds	integer	MFopt		stable	same as getAssemblConsSNP, but SNP calling for support reads
-MATAF4.pl	4.34	SNPs	-redoAssmblConsSNP	integer	MFopt		stable	Remove and rebuild assembly consensus SNP outputs.
-MATAF4.pl	4.34	SNPs	-SNPmem	integer	MFopt		stable	memory per assigned core, in GB
-MATAF4.pl	4.34	SNPs	-redoGeneExtrSNP	integer	MFopt		stable	Rebuild gene and protein sequences derived from consensus SNPs.
-MATAF4.pl	4.34	SNPs	-SNPjobSsplit	integer	MFopt	0	stable	parallel jobs per sample; 0 uses tiered alignment-size estimates from 2 cores at 300 MB to 10 cores at 10 GB
-MATAF4.pl	4.34	SNPs	-SNPminCallQual	integer	MFopt		stable	Minimum variant quality used for consensus calls.
-MATAF4.pl	4.34	SNPs	-SNPsaveVCF	integer	MFopt		stable	save vcf of SNP calles? DEfault : 1
-MATAF4.pl	4.34	SNPs	-SNPsaveConsFasta	integer	MFopt		stable	Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated..
-MATAF4.pl	4.34	SNPs	-SNPcaller	string	MFopt		stable	Consensus variant caller: MPI for mpileup or FB for FreeBayes.
-MATAF4.pl	4.34	SNPs	-SNPcores	integer	MFopt		stable	Maximum cores used by consensus SNP calling.
-MATAF4.pl	4.34	SNPs	-SNPconsMinDepth	integer	MFopt		stable	how many reads coverage to include position for consensus call?
-MATAF4.pl	4.34	SNPs	-SNPnormINDEL	integer	MFopt		stable	using bcftools norm to left-align indels
-MATAF4.pl	4.34	SNPs	-SVcaller	integer	MFopt		stable	calling structural variants: 1=delly, 2=gridss. Default (0).
-MATAF4.pl	4.34	Functional profiling (diamond)	-profileFunct	integer	MFopt		stable	Run DIAMOND-based functional profiling.
-MATAF4.pl	4.34	Functional profiling (diamond)	-reParseFunct	integer	MFopt		stable	Reparse existing DIAMOND hits.
-MATAF4.pl	4.34	Functional profiling (diamond)	-reProfileFunct	integer	MFopt		stable	Remove and rebuild DIAMOND alignments and parsed profiles.
-MATAF4.pl	4.34	Functional profiling (diamond)	-reProfileFuncTogether	integer	MFopt		stable	if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
-MATAF4.pl	4.34	Functional profiling (diamond)	-DiaCores	integer	MFopt		stable	CPU cores requested for DIAMOND jobs.
-MATAF4.pl	4.34	Functional profiling (diamond)	-DiaMem	integer	MFopt		stable	memory in GB for diamond alignment jobs
-MATAF4.pl	4.34	Functional profiling (diamond)	-DiaParseEvals	string	MFopt		stable	evalues at which to accept hits to func database
-MATAF4.pl	4.34	Functional profiling (diamond)	-DiaSensitiveMode	integer	MFopt		stable	Enable DIAMOND sensitive mode.
-MATAF4.pl	4.34	Functional profiling (diamond)	-DiaFrameshift	integer	MFopt		stable	DIAMOND frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment.
-MATAF4.pl	4.34	Functional profiling (diamond)	-rmRawDiamondHits	integer	MFopt		stable	Delete raw DIAMOND hits after successful parsing.
-MATAF4.pl	4.34	Functional profiling (diamond)	-DiaMinAlignLen	integer	MFopt		stable	Minimum accepted DIAMOND alignment length.
-MATAF4.pl	4.34	Functional profiling (diamond)	-DiaMinFracQueryCov	float	MFopt		stable	Minimum accepted fraction of the query aligned.
-MATAF4.pl	4.34	Functional profiling (diamond)	-DiaPercID	integer	MFopt		stable	Minimum accepted DIAMOND percent identity.
-MATAF4.pl	4.34	Functional profiling (diamond)	-DiaDBs	string	MFopt		stable	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
-MATAF4.pl	4.34	Functional profiling (Jaime tree)	-orthoExtract	integer	MFopt		stable	Run translated-read orthologue placement.
-MATAF4.pl	4.34	Ribo profiling (miTag)	-profileRibosome	integer	MFopt		stable	Run SSU/LSU read extraction and taxonomic assignment.
-MATAF4.pl	4.34	Ribo profiling (miTag)	-riobsomalAssembly	integer	MFopt		stable	Assemble extracted ribosomal reads.
-MATAF4.pl	4.34	Ribo profiling (miTag)	-reProfileRibosome	integer	MFopt		stable	Remove existing RiboFind extraction and assignment results plus merged profiles, then rerun; implies -profileRibosome 1.
-MATAF4.pl	4.34	Ribo profiling (miTag)	-reRibosomeLCA	integer	MFopt		stable	Remove existing RiboFind assignments and merged results, then rerun LCA; implies -profileRibosome 1.
-MATAF4.pl	4.34	Ribo profiling (miTag)	-riboMaxRds	integer	MFopt		stable	Maximum extracted reads assigned per ribosomal marker.
-MATAF4.pl	4.34	Ribo profiling (miTag)	-saveRiboRds	integer	MFopt		stable	Retain reads used during ribosomal assignment.
-MATAF4.pl	4.34	Ribo profiling (miTag)	-thoroughCheckRiboFinish	integer	MFopt		stable	Require non-empty RiboFind assignment output before accepting completion.
-MATAF4.pl	4.34	Other tax profilers..	-profileMetaphlan,-profileMetaphlan3	integer	MFopt		stable	Run MetaPhlAn taxonomic profiling.
-MATAF4.pl	4.34	Other tax profilers..	-profileMOTU2	integer	MFopt		stable	Run mOTUs taxonomic profiling.
-MATAF4.pl	4.34	Other tax profilers..	-profileKraken	integer	MFopt		stable	Run Kraken taxonomic profiling.
-MATAF4.pl	4.34	Other tax profilers..	-profileTaxaTarget	integer	MFopt		stable	Run target-taxon profiling.
-MATAF4.pl	4.34	Other tax profilers..	-estGenoSize	integer	MFopt		stable	estimate average size of genomes in data
-MATAF4.pl	4.34	Other tax profilers..	-krakenDB	string	MFopt		stable	"""virusDB"";#= ""minikraken_2015/"";"
-MATAF4.pl	4.34	D2s distance	-calcInterMGdistance	integer	MFopt		stable	Calculate the legacy inter-metagenome D2 distance matrix.
-MATAF4.pl	4.34	IO for specific uses	-newFileStructure	string	MFconfig		stable	just relink raw files for use in mocat
-MATAF4.pl	4.34	IO for specific uses	-upload2EBI	string	MFconfig		stable	copy human read removed raw files to this dir, named after sample
-MATAF4.pl	4.34	Institute specific: EI	-wcKeyJobs	string	MFconfig		stable	Slurm work-category or accounting key added to submitted jobs.
-MATAF4.pl	4.34	DEBUG	-OKtoRWassGrps	integer	MFconfig		stable	can delete assemblies, if suspects error in them
+MATAF4.pl	4.38	Base options	-help,-?,-h	flag			stable	Show help.
+MATAF4.pl	4.38	Base options	-checkInstall	flag			stable	Check that core MATAFILER4 programs/environments are installed.
+MATAF4.pl	4.38	Base options	-map	string	MFconfig		stable	Mapping file describing samples and input/output paths.
+MATAF4.pl	4.38	Base options	-config	string	MFconfig		stable	Alternative configuration file.
+MATAF4.pl	4.38	Base options	-inspectState	integer	MFconfig	0	stable	Emit a read-only JSON snapshot of workflow artifacts and markers.
+MATAF4.pl	4.38	Base options	-planState	integer	MFconfig	0	stable	Emit a read-only dependency-ordered repair/submission plan.
+MATAF4.pl	4.38	Base options	-stateReport	string	MFconfig		stable	Write the inspection JSON to this explicit path.
+MATAF4.pl	4.38	Base options	-planReport	string	MFconfig		stable	Write the repair/submission plan JSON to this explicit path.
+MATAF4.pl	4.38	Flow related	-redoFails	integer	MFconfig		stable	if any step of requested analysis failed, just redo everything (extraction etc)
+MATAF4.pl	4.38	Flow related	-redoContigStats	integer	MFconfig		stable	runContigStats (coverage per gene, kmers, GC content) will be deleted & started again
+MATAF4.pl	4.38	Flow related	-submSystem	string	MFconfig		stable	qsub,SGE,bsub,LSF.. by default will try to autodetect
+MATAF4.pl	4.38	Flow related	-submit	integer	doSubmit	1	stable	submit any jobs at all? (0= no submission, just for trying if everything is correctly set up)
+MATAF4.pl	4.38	Flow related	-from	integer	FROM1	0	stable	start at which samples from map file?
+MATAF4.pl	4.38	Flow related	-to	integer	TO1	999999999999	stable	stop at which samples from map file?
+MATAF4.pl	4.38	Flow related	-loopTillComplete	string	loop2completion	0	advanced/internal	loop over assigned samples with a rolling completed frontier; run one immediate final full verification, then wait for all invocation jobs before any further full pass
+MATAF4.pl	4.38	Flow related	-schedulerPollSeconds	integer	MFconfig	20	advanced	seconds between loopTillComplete scheduler queries while waiting
+MATAF4.pl	4.38	Flow related	-schedulerCapacityCheckJobs	integer	MFconfig	10	advanced	refresh exact running plus pending Slurm count after this many accepted submissions
+MATAF4.pl	4.38	Flow related	-excludeNodes	string	MFconfig		stable	exclude certain nodes?
+MATAF4.pl	4.38	Flow related	-maxConcurrentJobs	integer	MFconfig		stable	maximum running plus pending user jobs, enforced with conservative batched Slurm accounting
+MATAF4.pl	4.38	Flow related	-killDepNever	integer	MFconfig		stable	"kill jobs in ""Dependency never finished"" state?"
+MATAF4.pl	4.38	Flow related	-requireInput	integer	MFconfig		stable	in case input reads are no longer present, 0 will continue pipeline, 1 will abort
+MATAF4.pl	4.38	Flow related	-ignoreSmpls	string	MFconfig		stable	skip a certain sample (sample id)
+MATAF4.pl	4.38	Flow related	-rmSmplLocks	integer	MFconfig		stable	remove existing sample locks (useful if jobs have crashed, leaving abondened sample locks)
+MATAF4.pl	4.38	Flow related	-silent	flag	MFconfig		stable	Suppress routine progress messages.
+MATAF4.pl	4.38	Flow related	-maxUnzpJobs	integer	MFconfig		stable	how many unzip jobs to run in parallel (not to overload HPC IO). Default:20
+MATAF4.pl	4.38	Flow related	-skipSmallSmplsMB	integer	MFconfig		stable	skip samples with a combined input smaller than this in MB (raw file size, independent of compressed or raw)
+MATAF4.pl	4.38	Flow related	-forceWriteStats	integer	MFopt		stable	force (re)writing of the metagStats report and text file
+MATAF4.pl	4.38	File strucuture	-rm_tmpdir_reads	integer	MFconfig		stable	Default 1, remove tmpdir with reads
+MATAF4.pl	4.38	File strucuture	-rm_tmpInput	integer	MFconfig		stable	remove raw, human / adaptor filtered reads, if sdm clean created? (and not needed any longer)
+MATAF4.pl	4.38	File strucuture	-reduceScratchUse	integer	MFconfig		advanced/internal	should always be 1, unless debugging..
+MATAF4.pl	4.38	File strucuture	-globalTmpDir	string	sharedTmpDirP		stable	absolute path to global shared tmp dir (like a scratch dir)
+MATAF4.pl	4.38	File strucuture	-nodeTmpDir	string	nodeTmpDirBase		stable	absolute path to tmp dir on local HDD of each executing node
+MATAF4.pl	4.38	File strucuture	-nodeHDDspace	string	MFconfig		stable	HDD tmp space to be requested for each node (in Gb). Some systems don't support this
+MATAF4.pl	4.38	File strucuture	-legacyFolders	integer	MFconfig		deprecated/legacy	legacy option, controls if output folders will use the read dir as name (1) or the name in the mapping file (0). Default=0
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-usePorechop	integer	MFopt		experimental/unsupported	adapter rm for Nanopore.. should actually be automatically with newer sdm (not implemented)
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputFQregex1	string	MFconfig		stable	regex for detecting read pair 1 in input fastq files
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputFQregex2	string	MFconfig		stable	regex for detecting read pair 2 in input fastq files
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputFQregexSingle	string	MFconfig		stable	regex for detecting single end reads in input fastq files
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputFQregexTrustSingle	integer	MFconfig		stable	if grep of files (rawSrchString) has multi assignments, which grep to trust more?
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputBAMregex	string	MFconfig		stable	bams that will be converted to fastq
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-splitFastaInput	integer	MFconfig		stable	Enable FASTA input splitting during read staging.
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-mergeReads	integer	MFopt		stable	merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances)
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-ProbRdFilter	integer	MFopt		stable	Enable probabilistic SDM read filtering.
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-pairedReadInput	integer	MFconfig		stable	determines if read pairs are expected in each in dir
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputReadLengthSuppl	integer	MFconfig		stable	Default supplementary-read length used for planning.
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-filterHostRds,-filterHumanRds	integer	MFopt		stable	0: no, 1:kraken2, 2: kraken1, 3:hostile
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-filterHostKrak2DB	string			stable	customize host org to filter (e.g. human, chicken ..)
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-filterHostKr2Conf	string	MFopt		stable	Kraken2 confidence threshold for host assignment.
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-filterHostKr2Quick	string	MFopt		stable	Kraken2 quick-mode option for host filtering.
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-hostileIndex	string	MFopt		stable	Hostile reference index used for host filtering.
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-onlyFilterZip	integer	MFconfig		stable	Stage and filter reads, then stop before downstream analyses.
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-mocatFiltered	integer	MFconfig		stable	Import reads from the configured MOCAT filtered-output layout.
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-logQualvsLen	integer	MFopt		stable	sdm log file.. can be quite large; logs qual of read vs read length
+MATAF4.pl	4.38	Sdm related	-inputReadLength	integer	MFconfig		stable	Default primary-read length used for planning.
+MATAF4.pl	4.38	Sdm related	-gzipSDMout	integer	MFopt		stable	Compress SDM-filtered FASTQ output.
+MATAF4.pl	4.38	Sdm related	-XfirstReads	integer	MFconfig		stable	Process only the first N reads; -1 processes all reads.
+MATAF4.pl	4.38	Sdm related	-minReadLength	integer	MFopt		stable	Override the minimum read length accepted by SDM; 0 keeps its configured value.
+MATAF4.pl	4.38	Sdm related	-maxReadLength	integer	MFopt		stable	Override the maximum read length accepted by SDM; 0 keeps its configured value.
+MATAF4.pl	4.38	Sdm related	-filterAdapters	integer	MFopt		stable	Enable adapter trimming during SDM filtering.
+MATAF4.pl	4.38	Sdm related	-customSDMopt	string	MFopt		stable	Use the specified non-empty SDM options file.
+MATAF4.pl	4.38	Sdm related	-sdmMem	string	MFopt		stable	total mem for sdm job in Gb, default 15
+MATAF4.pl	4.38	Assembly related	-spadesCores,-assemblCores	integer	MFopt		stable	Assembly threads per sample.
+MATAF4.pl	4.38	Assembly related	-spadesMemory,-assemblMemory	integer	MFopt		stable	in GB
+MATAF4.pl	4.38	Assembly related	-spadesKmers,-assemblyKmers	string	MFopt		stable	comma delimited list
+MATAF4.pl	4.38	Assembly related	-reAssembleMG	integer	MFopt		stable	Remove existing assembly results and rebuild the metagenome assembly.
+MATAF4.pl	4.38	Assembly related	-asssemblyHddSpace	integer	HDDspace		stable	Assembler scratch request in GB; -1 uses the assembler-specific default.
+MATAF4.pl	4.38	Assembly related	-assembleMG	integer	MFopt		stable	1=Spades, 2=MegaHIT, 3= flye, 4=metaMDBG, 5=hybrid ill-PB (megahit, metaMDBG)
+MATAF4.pl	4.38	Assembly related	-assemblyLongTime	integer	MFopt		stable	Submit assembly jobs with the long-runtime setting.
+MATAF4.pl	4.38	Assembly related	-assemblyScaffMinSize	integer	MFopt		stable	Minimum retained scaffold length in bases.
+MATAF4.pl	4.38	Binning	-Binner,-MetaBat2,-binSpeciesMG	integer	MFopt		stable	0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
+MATAF4.pl	4.38	Binning	-BinnerCores	integer	MFopt		stable	cores used for Binning process (and checkM)
+MATAF4.pl	4.38	Binning	-BinnerMem	integer	MFopt		stable	define binning memory, Gb, 0=auto
+MATAF4.pl	4.38	Binning	-minBinnerAssemblyMB	float	MFopt	5	stable	skip binning assemblies below this many million sequence bases and publish standard empty binner outputs; 0 disables
+MATAF4.pl	4.38	Binning	-checkM2	integer	MFopt		stable	Assess recovered bins with CheckM2.
+MATAF4.pl	4.38	Binning	-checkM1	integer	MFopt		stable	Assess recovered bins with CheckM1.
+MATAF4.pl	4.38	Binning	-BinnerScratchTmp	integer	MFopt		advanced/internal	very specific (undocumented) use of scratch instead of nodetmp dir
+MATAF4.pl	4.38	Binning	-redoEmptyBins	integer	MFopt		advanced/internal	debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes
+MATAF4.pl	4.38	Binning	-redoBinning	integer	MFopt		stable	Remove and rebuild requested binning results.
+MATAF4.pl	4.38	Binning	-SB_env	string	MFopt		stable	"semiBin environment; if given, will avoid re-training de novo binning model. Default: """" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global"
+MATAF4.pl	4.38	Gene prediction on assembly	-predictEukGenes	integer	MFopt		stable	severely limits total predicted gene amount (~25% of total genes)
+MATAF4.pl	4.38	Gene prediction on assembly	-kmerPerGene	integer	MFopt		stable	calculate kmer frequencies for each gene instead of per scaffold
+MATAF4.pl	4.38	Gene prediction on assembly	-genePredGZenforce	integer	MFopt		stable	Require the canonical compressed gene-prediction outputs.
+MATAF4.pl	4.38	Gene prediction on assembly	-rewriteGenePred	integer	MFopt		stable	Remove and rebuild gene predictions and dependent statistics.
+MATAF4.pl	4.38	Mapping	-mapper	integer	MFopt		stable	#1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
+MATAF4.pl	4.38	Mapping	-mapUnmapped	integer	MFopt		stable	Pass reads left unmapped by one reference to the next mapping.
+MATAF4.pl	4.38	Mapping	-mappingCoverage	integer	MFopt		stable	Calculate per-contig and per-gene coverage for reference mappings.
+MATAF4.pl	4.38	Mapping	-mappingMem	integer	MFopt		stable	total mem for mini2/kma/bwa/bwt2 in GB
+MATAF4.pl	4.38	Mapping	-mapSortMem	integer	MFopt		stable	total mem for samtools sort in GB
+MATAF4.pl	4.38	Mapping	-rmDuplicates	integer	MFopt		stable	Remove duplicate alignments before coverage calculation.
+MATAF4.pl	4.38	Mapping	-mappingCores	integer	MFopt		stable	CPU cores requested for each mapping job.
+MATAF4.pl	4.38	Mapping	-mapperFilterIll	string	MFopt		stable	"Maximum NM edit rate, minimum query coverage, minimum mapping quality, and minimum clipping at both ends (0 disables clipping filter)."
+MATAF4.pl	4.38	Mapping	-mapperFilterPB	string	MFopt		stable	PacBio alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping.
+MATAF4.pl	4.38	Mapping	-mapperFilterONT	string	MFopt		stable	Nanopore alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping.
+MATAF4.pl	4.38	Mapping	-mapSaveCRAM	integer	MFopt		stable	Retain assembly back-mapping alignments as CRAM files.
+MATAF4.pl	4.38	Mapping related (2) (assembly)	-remap2assembly,-redoMap2assembly,-redoMapping	integer	MFopt		stable	Remove and rebuild read mappings to the assembly.
+MATAF4.pl	4.38	Mapping related (2) (assembly)	-JGIdepths	integer	MFopt		stable	Generate JGI depth output for assembly mappings.
+MATAF4.pl	4.38	Mapping related (2) (assembly)	-mapReadsOntoAssembly	integer	MFopt		stable	map original reads back on assembly, to estimate abundance etc
+MATAF4.pl	4.38	Mapping related (2) (assembly)	-mapSupportReadsOntoAssembly	integer	MFopt		stable	"(1) map ""SupportReads"" onto assembly. Default: 0"
+MATAF4.pl	4.38	Mapping related (2) (assembly)	-saveReadsNotMap2Assembly	integer	MFopt		stable	Save reads that do not map to the assembly.
+MATAF4.pl	4.38	Map2tar / map2DB / map2GC	-decoyMapping	integer	MFopt		stable	"1: ""Decoy mapping"": map against reference genome AND against assembly of metagenome (drawing obvious better hits to metagenome, the ""decoy"")"
+MATAF4.pl	4.38	Map2tar / map2DB / map2GC	-competitive2ndmap	integer	MFopt		stable	1: Competitive, 2: combined but report separately per input genome, -1: combined and report all together
+MATAF4.pl	4.38	Map2tar / map2DB / map2GC	-ref	string	MFopt		stable	Comma-separated reference FASTA files for secondary mapping.
+MATAF4.pl	4.38	Map2tar / map2DB / map2GC	-mapperLargeRef	integer	MFopt		stable	use flags in mapper index built for large ref DBs?
+MATAF4.pl	4.38	Map2tar / map2DB / map2GC	-mapnms	string	MFopt		stable	name for this final files
+MATAF4.pl	4.38	Map2tar / map2DB / map2GC	-redo2ndmap	integer	MFopt		stable	Remove and rebuild secondary-reference mappings.
+MATAF4.pl	4.38	SNPs	-get2ndMappingConsSNP	integer	MFopt		stable	SNPs (onto mapping)
+MATAF4.pl	4.38	SNPs	-getAssemblConsSNP	integer	MFopt		stable	SNPs (onto self assembly) #calculates consensus SNP of assembly (useful for checking assembly gets consensus and Assmbl_grps)
+MATAF4.pl	4.38	SNPs	-getAssemblConsSNPsuppRds	integer	MFopt		stable	same as getAssemblConsSNP, but SNP calling for support reads
+MATAF4.pl	4.38	SNPs	-redoAssmblConsSNP	integer	MFopt		stable	Remove and rebuild assembly consensus SNP outputs.
+MATAF4.pl	4.38	SNPs	-SNPmem	integer	MFopt		stable	memory per assigned core, in GB
+MATAF4.pl	4.38	SNPs	-redoGeneExtrSNP	integer	MFopt		stable	Rebuild gene and protein sequences derived from consensus SNPs.
+MATAF4.pl	4.38	SNPs	-SNPjobSsplit	integer	MFopt	0	stable	parallel jobs per sample; 0 uses tiered alignment-size estimates from 2 cores at 300 MB to 10 cores at 10 GB
+MATAF4.pl	4.38	SNPs	-SNPminCallQual	integer	MFopt		stable	Minimum variant quality used for consensus calls.
+MATAF4.pl	4.38	SNPs	-SNPsaveVCF	integer	MFopt		stable	save vcf of SNP calles? DEfault : 1
+MATAF4.pl	4.38	SNPs	-SNPsaveConsFasta	integer	MFopt		stable	Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated..
+MATAF4.pl	4.38	SNPs	-SNPcaller	string	MFopt		stable	Consensus variant caller: MPI for mpileup or FB for FreeBayes.
+MATAF4.pl	4.38	SNPs	-SNPcores	integer	MFopt		stable	Maximum cores used by consensus SNP calling.
+MATAF4.pl	4.38	SNPs	-SNPconsMinDepth	integer	MFopt		stable	how many reads coverage to include position for consensus call?
+MATAF4.pl	4.38	SNPs	-SNPnormINDEL	integer	MFopt		stable	using bcftools norm to left-align indels
+MATAF4.pl	4.38	SNPs	-SVcaller	integer	MFopt		stable	calling structural variants: 1=delly, 2=gridss. Default (0).
+MATAF4.pl	4.38	Functional profiling (diamond)	-profileFunct	integer	MFopt		stable	Run DIAMOND-based functional profiling.
+MATAF4.pl	4.38	Functional profiling (diamond)	-reParseFunct	integer	MFopt		stable	Reparse existing DIAMOND hits.
+MATAF4.pl	4.38	Functional profiling (diamond)	-reProfileFunct	integer	MFopt		stable	Remove and rebuild DIAMOND alignments and parsed profiles.
+MATAF4.pl	4.38	Functional profiling (diamond)	-reProfileFuncTogether	integer	MFopt		stable	if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaCores	integer	MFopt		stable	CPU cores requested for DIAMOND jobs.
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaMem	integer	MFopt		stable	memory in GB for diamond alignment jobs
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaParseEvals	string	MFopt		stable	evalues at which to accept hits to func database
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaSensitiveMode	integer	MFopt		stable	Enable DIAMOND sensitive mode.
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaFrameshift	integer	MFopt		stable	DIAMOND frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment.
+MATAF4.pl	4.38	Functional profiling (diamond)	-rmRawDiamondHits	integer	MFopt		stable	Delete raw DIAMOND hits after successful parsing.
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaMinAlignLen	integer	MFopt		stable	Minimum accepted DIAMOND alignment length.
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaMinFracQueryCov	float	MFopt		stable	Minimum accepted fraction of the query aligned.
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaPercID	integer	MFopt		stable	Minimum accepted DIAMOND percent identity.
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaDBs	string	MFopt		stable	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
+MATAF4.pl	4.38	Functional profiling (Jaime tree)	-orthoExtract	integer	MFopt		stable	Run translated-read orthologue placement.
+MATAF4.pl	4.38	Ribo profiling (miTag)	-profileRibosome	integer	MFopt		stable	Run SSU/LSU read extraction and taxonomic assignment.
+MATAF4.pl	4.38	Ribo profiling (miTag)	-riobsomalAssembly	integer	MFopt		stable	Assemble extracted ribosomal reads.
+MATAF4.pl	4.38	Ribo profiling (miTag)	-reProfileRibosome	integer	MFopt		stable	Remove existing RiboFind extraction and assignment results plus merged profiles, then rerun; implies -profileRibosome 1.
+MATAF4.pl	4.38	Ribo profiling (miTag)	-reRibosomeLCA	integer	MFopt		stable	Remove existing RiboFind assignments and merged results, then rerun LCA; implies -profileRibosome 1.
+MATAF4.pl	4.38	Ribo profiling (miTag)	-riboMaxRds	integer	MFopt		stable	Maximum extracted reads assigned per ribosomal marker.
+MATAF4.pl	4.38	Ribo profiling (miTag)	-saveRiboRds	integer	MFopt		stable	Retain reads used during ribosomal assignment.
+MATAF4.pl	4.38	Ribo profiling (miTag)	-thoroughCheckRiboFinish	integer	MFopt		stable	Require non-empty RiboFind assignment output before accepting completion.
+MATAF4.pl	4.38	Other tax profilers..	-profileMetaphlan,-profileMetaphlan3	integer	MFopt		stable	Run MetaPhlAn taxonomic profiling.
+MATAF4.pl	4.38	Other tax profilers..	-profileMOTU2	integer	MFopt		stable	Run mOTUs taxonomic profiling.
+MATAF4.pl	4.38	Other tax profilers..	-profileKraken	integer	MFopt		stable	Run Kraken taxonomic profiling.
+MATAF4.pl	4.38	Other tax profilers..	-profileTaxaTarget	integer	MFopt		stable	Run target-taxon profiling.
+MATAF4.pl	4.38	Other tax profilers..	-estGenoSize	integer	MFopt		stable	estimate average size of genomes in data
+MATAF4.pl	4.38	Other tax profilers..	-krakenDB	string	MFopt		stable	"""virusDB"";#= ""minikraken_2015/"";"
+MATAF4.pl	4.38	D2s distance	-calcInterMGdistance	integer	MFopt		stable	Calculate the legacy inter-metagenome D2 distance matrix.
+MATAF4.pl	4.38	IO for specific uses	-newFileStructure	string	MFconfig		stable	just relink raw files for use in mocat
+MATAF4.pl	4.38	IO for specific uses	-upload2EBI	string	MFconfig		stable	copy human read removed raw files to this dir, named after sample
+MATAF4.pl	4.38	Institute specific: EI	-wcKeyJobs	string	MFconfig		stable	Slurm work-category or accounting key added to submitted jobs.
+MATAF4.pl	4.38	DEBUG	-OKtoRWassGrps	integer	MFconfig		stable	can delete assemblies, if suspects error in them
 geneCat.pl	0.51	Directories/files	-o,-GCd	string	GCdir		stable	main save location for gene catalog and supporting files
 geneCat.pl	0.51	Directories/files	-tmp	string	tmpDir	$GLBtmp	stable	tmp dir, global availalbe
 geneCat.pl	0.51	Directories/files	-glbTmp	string	GLBtmp		stable	global tmp dir, same as -tmp usually
@@ -219,62 +219,62 @@ MGS.pl	0.32	General options	-binSpeciesMG	integer	binSpeciesMG	2	stable	0=no, 1=
 MGS.pl	0.32	General options	-ignoreIncompleteMAGs	integer	ignoIncomplMAGs	1	stable	1: assemblies without MAG calculations are ignored. Default: 1
 MGS.pl	0.32	General options	-legacy	integer	legacyV	0	deprecated/legacy	1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0
 MGS.pl	0.32	General options	-genomesPerFamily	integer	doBinCtgsPerFam	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-genoInD	string	genoindir		stable	provide a dir with complete genomes, will extract FGMs and build tree between genomes (NT/AA flag)
-buildTree5.pl	5.06	General options	-wildcardflag	string	wildcardflag		stable	See source/help for details.
-buildTree5.pl	5.06	General options	-fna	string	fnFna		stable	See source/help for details.
-buildTree5.pl	5.06	General options	-aa	string	aaFna		stable	Amino-acid FASTA input. Note: source flag is -aa, not -faa.
-buildTree5.pl	5.06	General options	-cats	string	cogCats		stable	See source/help for details.
-buildTree5.pl	5.06	General options	-outD	string	outD		stable	See source/help for details.
-buildTree5.pl	5.06	General options	-tmpD	string	tmpD		stable	See source/help for details.
-buildTree5.pl	5.06	General options	-cores	integer	ncore	1	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-superTree	integer	doSuperTree	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-superCheck	integer	doSuperCheck	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-fixHeaders	integer	fixHeaders	0	stable	# fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
-buildTree5.pl	5.06	General options	-useEte	integer	Ete	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-NTfilt	float	filt	0.8	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-NTfiltPerGene	float	ntFracGene	0.1	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-GenesPerSpecies	float	GeneFracPSpec	0.1	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-fracMaxGenes90pct	float	fracMaxGenes90pct	0.25	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-NTfiltCount	integer	ntCntTotal	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-smplDef	integer	smplDef	1	stable	is the genome somehow quantified with a delimiter (_) ?
-buildTree5.pl	5.06	General options	-smplSep	string	smplSep	_	stable	set the delimiter
-buildTree5.pl	5.06	General options	-outgroup	string	outgroup		stable	See source/help for details.
-buildTree5.pl	5.06	General options	-AAtree	integer	useAA4tree	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-MSAprogram	integer	MSAprog	2	stable	(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA)
-buildTree5.pl	5.06	General options	-minOverlapMSA	integer	minOverlapMSA	0	stable	min overlap in MSA columns, in order to retain column
-buildTree5.pl	5.06	General options	-maxGapPerCol	float	maxGapPerCol	1	stable	same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column
-buildTree5.pl	5.06	General options	-calcDistMat	integer	calcDistMat	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-calcDistMatExt	integer	calcDistMatExt	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-calcDiffDNA	integer	calcDNAdiff	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-minPcId	float	minPcId	0	stable	sequence is filtered from data, unless the average minPcId is >= $minPcId
-buildTree5.pl	5.06	General options	-SynTree	integer	calcSyn	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-NonSynTree	integer	calcNonSyn	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-continue	integer	continue	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-bootstrap	integer	bootStrap	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-subsetSmpls	integer	subsetSmpls	-1	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-postFilter	string	postFilter		stable	""","" sep list of zorro,guidance2,macse"
-buildTree5.pl	5.06	General options	-rmMSA	integer	removeMSA	0	stable	to save diskspace
-buildTree5.pl	5.06	General options	-gzInput	integer	gzipInput	0	stable	to save diskspace
-buildTree5.pl	5.06	General options	-isAligned	integer	isAligned	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-runRAxML	integer	doRAXML	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-runRaxMLng	integer	doRAXMLng	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-runFastTree	integer	doFastTree	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-runVeryFastTree	integer	doVeryFastTree	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-treeShrink	integer	useTreeShrink	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-runIQtree	integer	doIQTree	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-AutoModel	integer	treeAutoModel	1	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-iqFast	integer	iqFast	0	stable	fast qiTree mode
-buildTree5.pl	5.06	General options	-runClonalFrameML	integer	doCFML	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-runGubbins	integer	doGubbins	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-runLengthCheck	integer	doLengthCheck	1	stable	check that sequence length can be divided by 3
-buildTree5.pl	5.06	General options	-runDNDS	integer	doDNDS	0	stable	run dNdS analysis
-buildTree5.pl	5.06	General options	-runTheta	integer	doTheta	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-genesForDNDS	string	genesExtra		stable	list with selected genes just for dnds
-buildTree5.pl	5.06	General options	-DNDSonSubset	integer	selGene	0	stable	run dnds just on subset (given by genesForDNDS) of genes
-buildTree5.pl	5.06	General options	-codemlRepeats	integer	repeatCounts	2	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-outDCodeml	string	codemlOutD		stable	See source/help for details.
-buildTree5.pl	5.06	General options	-genesToPhylip	integer	doGenesToPh	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-runFastgear	integer	doFastGear	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-runFastGearPostProcessing	integer	doFastGearSummary	0	stable	See source/help for details.
-buildTree5.pl	5.06	General options	-map	string	mapF		stable	See source/help for details.
-buildTree5.pl	5.06	General options	-clustername	string	clusterName		stable	See source/help for details.
+buildTree5.pl	5.28	General options	-genoInD	string	genoindir		stable	provide a dir with complete genomes, will extract FGMs and build tree between genomes (NT/AA flag)
+buildTree5.pl	5.28	General options	-wildcardflag	string	wildcardflag		stable	See source/help for details.
+buildTree5.pl	5.28	General options	-fna	string	fnFna		stable	See source/help for details.
+buildTree5.pl	5.28	General options	-aa	string	aaFna		stable	Amino-acid FASTA input. Note: source flag is -aa, not -faa.
+buildTree5.pl	5.28	General options	-cats	string	cogCats		stable	See source/help for details.
+buildTree5.pl	5.28	General options	-outD	string	outD		stable	See source/help for details.
+buildTree5.pl	5.28	General options	-tmpD	string	tmpD		stable	See source/help for details.
+buildTree5.pl	5.28	General options	-cores	integer	ncore	1	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-superTree	integer	doSuperTree	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-superCheck	integer	doSuperCheck	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-fixHeaders	integer	fixHeaders	0	stable	# fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
+buildTree5.pl	5.28	General options	-useEte	integer	Ete	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-NTfilt	float	filt	0.8	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-NTfiltPerGene	float	ntFracGene	0.1	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-GenesPerSpecies	float	GeneFracPSpec	0.1	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-fracMaxGenes90pct	float	fracMaxGenes90pct	0.25	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-NTfiltCount	integer	ntCntTotal	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-smplDef	integer	smplDef	1	stable	is the genome somehow quantified with a delimiter (_) ?
+buildTree5.pl	5.28	General options	-smplSep	string	smplSep	_	stable	set the delimiter
+buildTree5.pl	5.28	General options	-outgroup	string	outgroup		stable	See source/help for details.
+buildTree5.pl	5.28	General options	-AAtree	integer	useAA4tree	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-MSAprogram	integer	MSAprog	2	stable	(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA)
+buildTree5.pl	5.28	General options	-minOverlapMSA	integer	minOverlapMSA	0	stable	min overlap in MSA columns, in order to retain column
+buildTree5.pl	5.28	General options	-maxGapPerCol	float	maxGapPerCol	1	stable	same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column
+buildTree5.pl	5.28	General options	-calcDistMat	integer	calcDistMat	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-calcDistMatExt	integer	calcDistMatExt	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-calcDiffDNA	integer	calcDNAdiff	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-minPcId	float	minPcId	0	stable	sequence is filtered from data, unless the average minPcId is >= $minPcId
+buildTree5.pl	5.28	General options	-SynTree	integer	calcSyn	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-NonSynTree	integer	calcNonSyn	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-continue	integer	continue	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-bootstrap	integer	bootStrap	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-subsetSmpls	integer	subsetSmpls	-1	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-postFilter	string	postFilter		stable	""","" sep list of zorro,guidance2,macse"
+buildTree5.pl	5.28	General options	-rmMSA	integer	removeMSA	0	stable	to save diskspace
+buildTree5.pl	5.28	General options	-gzInput	integer	gzipInput	0	stable	to save diskspace
+buildTree5.pl	5.28	General options	-isAligned	integer	isAligned	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-runRAxML	integer	doRAXML	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-runRaxMLng	integer	doRAXMLng	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-runFastTree	integer	doFastTree	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-runVeryFastTree	integer	doVeryFastTree	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-treeShrink	integer	useTreeShrink	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-runIQtree	integer	doIQTree	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-AutoModel	integer	treeAutoModel	1	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-iqFast	integer	iqFast	0	stable	fast qiTree mode
+buildTree5.pl	5.28	General options	-runClonalFrameML	integer	doCFML	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-runGubbins	integer	doGubbins	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-runLengthCheck	integer	doLengthCheck	1	stable	check that sequence length can be divided by 3
+buildTree5.pl	5.28	General options	-runDNDS	integer	doDNDS	0	stable	run dNdS analysis
+buildTree5.pl	5.28	General options	-runTheta	integer	doTheta	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-genesForDNDS	string	genesExtra		stable	list with selected genes just for dnds
+buildTree5.pl	5.28	General options	-DNDSonSubset	integer	selGene	0	stable	run dnds just on subset (given by genesForDNDS) of genes
+buildTree5.pl	5.28	General options	-codemlRepeats	integer	repeatCounts	2	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-outDCodeml	string	codemlOutD		stable	See source/help for details.
+buildTree5.pl	5.28	General options	-genesToPhylip	integer	doGenesToPh	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-runFastgear	integer	doFastGear	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-runFastGearPostProcessing	integer	doFastGearSummary	0	stable	See source/help for details.
+buildTree5.pl	5.28	General options	-map	string	mapF		stable	See source/help for details.
+buildTree5.pl	5.28	General options	-clustername	string	clusterName		stable	See source/help for details.

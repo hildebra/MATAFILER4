@@ -314,7 +314,6 @@ sub SNPconsensus_vcf{
 	my $x = $SNPIHR->{JNUM};
 	my $jdep = ""; $jdep = $SNPIHR->{jdeps} if (exists($SNPIHR->{jdeps}));
 	my $allowPendingInputs = $SNPIHR->{allowPendingInputs} ? 1 : 0;
-	my $tmpdir = $SNPIHR->{nodeTmpD};
 	my $smplNm = $SNPIHR->{smpl};
 	my $refFA = $SNPIHR->{assembly};
 	my $qsubDirE = $SNPIHR->{qsubDir};
@@ -350,8 +349,6 @@ sub SNPconsensus_vcf{
 	my $vcfFile = ""; $vcfFile = $SNPIHR->{vcfFile} if (exists ($SNPIHR->{vcfFile}));
 	my $vcfFileS = ""; $vcfFileS = $SNPIHR->{vcfFileSupp} if (exists ($SNPIHR->{vcfFileSupp}));
 	my $cmdFTag = $SNPIHR->{cmdFileTag} // "ConsSNP";
-	my $firstInSample = 0;$firstInSample = $SNPIHR->{firstInSample} if (exists($SNPIHR->{firstInSample}));
-	my $useFB = uc($SNPIHR->{SNPcaller}) eq "MPI" ? 0 : 1;
 	my $actualCores  = $maxSNPcores;
 	my $consensusInputMB = 0;
 	for my $mappingSet (
@@ -468,7 +465,6 @@ sub SNPconsensus_vcf{
 	$xtra .= "echo \"Consensus SNP allocation: $actualCores cores (input estimate: "
 		.int($consensusInputMB + 0.5)." MB)\"\n";
 	$xtra .= "mkdir -p $scrDir;\n";
-	$xtra .= "rm -f $primaryNormStone\n" if $runPrimary;
 	#$xtra .= "exit\n"; #DEBUG
 	#$xtra .= "cp $refFA $refFA.fai $scrDir;\n";$refFA =~ m/\/([^\/]+$)/;$refFA = "$scrDir/$1";
 	#my $preTar = 
@@ -476,39 +472,54 @@ sub SNPconsensus_vcf{
 	#my @tar = ("");$tar[0] = ${$SNPIHR->{MAR}}[0]; #$preTar;
 	
 	my @tar = $hasPrimaryRds && ref($SNPIHR->{MAR}) eq 'ARRAY' ? ($SNPIHR->{MAR}->[0]) : ();
-	my $cmdAll = "";my @allDeps2; my (@primaryChunks, @supportChunks);
-	my $tmpOut = "$scrDir/$smplNm.cons.vcf";my $depthFile ="";
-
-	#supplementary mappings?
 	my @tarS = $supportRequested && ref($SNPIHR->{MARsupp}) eq 'ARRAY' ? ($SNPIHR->{MARsupp}->[0]) : ();
-	die "primary SNP mapping is missing\n"
-		if $hasPrimaryRds && (!@tar || !defined($tar[0])
-			|| (!$allowPendingInputs && !-s $tar[0]));
-	die "supplementary SNP mapping is missing\n"
-		if $supportRequested && (!@tarS || !defined($tarS[0])
-			|| (!$allowPendingInputs && !-s $tarS[0]));
+	my $cmdAll = "";
+	my @allDeps2;
+	my $tmpOut = "$scrDir/$smplNm.cons.vcf";
+	my $tmpOut2 = "$scrDir/$smplNm.X.cons.vcf";
+	my ($depthFile, $depthFileS) = ("", "");
+	my @snpScopes = (
+		{
+			name => 'primary', reads_label => 'primary', tag => '',
+			requested => $hasPrimaryRds, run => $runPrimary,
+			mapping => $tar[0], vcf => $vcfFile, stone => $SNPstone,
+			norm_stone => $primaryNormStone, norm_ready => $primaryNormReady,
+			tmp_out => $tmpOut, depth_file => \$depthFile, chunks => [],
+		},
+		{
+			name => 'supplementary', reads_label => 'supplemental', tag => 'sup-',
+			requested => $supportRequested, run => $runSupport,
+			mapping => $tarS[0], vcf => $vcfFileS, stone => $SNPsuppStone,
+			norm_stone => $supportNormStone, norm_ready => $supportNormReady,
+			tmp_out => $tmpOut2, depth_file => \$depthFileS, chunks => [],
+		},
+	);
+	for my $scope (grep { $_->{requested} } @snpScopes) {
+		die "$scope->{name} SNP mapping is missing\n"
+			if !defined($scope->{mapping}) || !length($scope->{mapping})
+				|| (!$allowPendingInputs && !-s $scope->{mapping});
+	}
 	die "SNP reference is missing or empty: $refFA\n"
 		unless $allowPendingInputs || -s $refFA;
 	if ($allowPendingInputs) {
 		$xtra .= "test -s $refFA\n";
-		$xtra .= "test -s $tar[0]\n" if $hasPrimaryRds;
-		$xtra .= "test -s $tarS[0]\n" if $supportRequested;
+		$xtra .= "test -s $_->{mapping}\n" for grep { $_->{requested} } @snpScopes;
 		$xtra .= "test -s $gffF\n";
 		$xtra .= "test -s $contigDepthF\n" if $runPrimary && length($contigDepthF);
 	}
-	$xtra .= "$smtBin faidx $refFA;\n" unless (-s "$refFA.fai");
-	my $tmpOut2 = "$scrDir/$smplNm.X.cons.vcf";my $depthFileS  = "";
-	my ($primaryRegionCmd, $supportRegionCmd) = ("", "");
+	$xtra .= "$smtBin faidx $refFA;\n" unless -s "$refFA.fai";
 	if ($myParL && $run2ctg) {
 		my $runtimeJobs = scalar(@curReg);
 		my $bedPrefix = "$qsubDirE/$smplNm.";
 		$xtra .= "rm -f ${bedPrefix}*.bed\n";
-		if ($runPrimary) {
-			my $depthArg = length($contigDepthF) ? " --depth $contigDepthF" : "";
-			$primaryRegionCmd = "$regionPlanner --fai $refFA.fai --mapping $tar[0]$depthArg --jobs $runtimeJobs --output-prefix $bedPrefix --samtools $smtBin --pigz $pigzBin\n";
-		}
-		if ($runSupport) {
-			$supportRegionCmd = "$regionPlanner --fai $refFA.fai --mapping $tarS[0] --jobs $runtimeJobs --output-prefix ${bedPrefix}sup- --samtools $smtBin --pigz $pigzBin\n";
+		for my $scope (grep { $_->{run} } @snpScopes) {
+			my $depthArg = $scope->{name} eq 'primary' && length($contigDepthF)
+				? " --depth $contigDepthF" : "";
+			my $outputPrefix = $bedPrefix.$scope->{tag};
+			$scope->{region_cmd} =
+				"$regionPlanner --fai $refFA.fai --mapping $scope->{mapping}$depthArg "
+				."--jobs $runtimeJobs --output-prefix $outputPrefix "
+				."--samtools $smtBin --pigz $pigzBin\n";
 		}
 	}
 	
@@ -525,47 +536,32 @@ sub SNPconsensus_vcf{
 	
 	#die "hasPrimaryRds: $hasPrimaryRds\n";
 
-	if ($hasPrimaryRds){ #primary reads SNP call
-		$depthFile = _coverage_file_for_mapping($tar[0], "primary SNP", $allowPendingInputs);
-		$xtra .= "test -s $depthFile\n" if $allowPendingInputs;
+	for my $scope (grep { $_->{requested} } @snpScopes) {
+		${$scope->{depth_file}} = _coverage_file_for_mapping(
+			$scope->{mapping}, "$scope->{name} SNP", $allowPendingInputs,
+		);
+		$xtra .= "test -s ${$scope->{depth_file}}\n" if $allowPendingInputs;
 	}
-	if ($runPrimary){
-		$xtra .= "echo \"Creating c/bams indexes primary reads\"\n";
-		if ($bamcram eq "cram"){ #create index for bam/cram
-			$xtra .= "if [ ! -e $tar[0].crai ] || [ ! -s $tar[0].crai ]; then rm -f $tar[0].crai; $smtBin index -@ $samcores  $tar[0]; fi\n";
-		} else {
-			$xtra .= "if [ ! -e $tar[0].bai ] || [ ! -s $tar[0].bai ]; then rm -f $tar[0].bai; $smtBin index -@ $samcores  $tar[0]; fi\n";
-		}
-		$xtra .= $primaryRegionCmd;
-		
-		$SNPIHR->{run2ctg} = 1;$SNPIHR->{rdep} = $rdep;
-
-		#$SNPIHR->{assembly} = $refFA;
-		$cmdAll .= $xtra if (!$onlyNormalize);
-		my ($dAR,$cAR,$pilecmd) =  pileupcall(\@tar,"",$SNPIHR,$QSBoptHR,$scrDir,$tmpOut,$myParL,\@curReg,$reportVCFonly);
-		@allDeps2 = @{$dAR}; @primaryChunks = @{$cAR};
-		$cmdAll .= $pilecmd if (!$onlyNormalize);
-	}
-	
-	if (@tarS){
-		$depthFileS = _coverage_file_for_mapping($tarS[0], "supplementary SNP", $allowPendingInputs);
-	}
-	if ($runSupport){ #supplementary reads SNP call
-		my $xtra2 = "echo \"Creating c/bams indexes supplemental reads\"\n";
-		$xtra2 .= "rm -f $supportNormStone\n" if length($supportNormStone);
-		$xtra2 .= "test -s $depthFileS\n" if $allowPendingInputs;
-		$cmdAll .= $xtra if !$runPrimary && !$onlyNormalize;
-		$SNPIHR->{run2ctg} = 1;
-		#die "$depthFileS\n";
-		if ($bamcram eq "cram"){ #create index for bam/cram
-			$xtra2 .= "if [ ! -e $tarS[0].crai ] || [ ! -s $tarS[0].crai ]; then rm -f $tarS[0].crai; $smtBin index -@ $samcores  $tarS[0]; fi\n";
-		} else {
-			$xtra2 .= "if [ ! -e $tarS[0].bai ] || [ ! -s $tarS[0].bai ]; then rm -f $tarS[0].bai; $smtBin index -@ $samcores  $tarS[0]; fi\n";
-		}
-		$xtra2 .= $supportRegionCmd;
-		my ($dAR,$cAR,$pilecmd) =  pileupcall(\@tarS,"sup-",$SNPIHR,$QSBoptHR,$scrDir,$tmpOut2,$myParL,\@curReg,$reportVCFonly);
-		$cmdAll .= $xtra2.$pilecmd if (!$onlyNormalize);
-		push(@allDeps2, @{$dAR}); @supportChunks = @{$cAR};
+	$cmdAll .= $xtra if $run2ctg && !$onlyNormalize;
+	$SNPIHR->{run2ctg} = 1;
+	$SNPIHR->{rdep} = $rdep;
+	for my $scope (grep { $_->{run} } @snpScopes) {
+		my $scopeCmd = "echo \"Creating c/bams indexes $scope->{reads_label} reads\"\n";
+		$scopeCmd .= "rm -f $scope->{norm_stone}\n"
+			if length($scope->{norm_stone});
+		my $indexSuffix = $bamcram eq "cram" ? "crai" : "bai";
+		$scopeCmd .= "if [ ! -e $scope->{mapping}.$indexSuffix ] "
+			."|| [ ! -s $scope->{mapping}.$indexSuffix ]; then "
+			."rm -f $scope->{mapping}.$indexSuffix; "
+			."$smtBin index -@ $samcores  $scope->{mapping}; fi\n";
+		$scopeCmd .= $scope->{region_cmd} || "";
+		my ($deps, $chunks, $pileCmd) = pileupcall(
+			[$scope->{mapping}], $scope->{tag}, $SNPIHR, $QSBoptHR,
+			$scrDir, $scope->{tmp_out}, $myParL, \@curReg, $reportVCFonly,
+		);
+		push @allDeps2, @{$deps};
+		$scope->{chunks} = $chunks;
+		$cmdAll .= $scopeCmd.$pileCmd if !$onlyNormalize;
 	}
 	
 	# Every successful chunk removes its own BED file.
@@ -574,44 +570,35 @@ sub SNPconsensus_vcf{
 
 	
 	#from here on: merge XX vcf's into one
-	my $sortCmd = "";
 	if ($myParL && $cmdAll ne ""){
-		$sortCmd .= "mkdir -p $ofasConsDir;\n";
-		if ($runPrimary){
-			die "no primary VCF chunks were planned\n" unless @primaryChunks;
-			$sortCmd .= "$bcftBin concat -a -Oz -o $vcfFile ".join(" ", @primaryChunks)."\n";
-			my @primaryChunkArtifacts = map { ($_, "$_.csi", "$_.tbi") } @primaryChunks;
-			$sortCmd .= "test -s $vcfFile\nrm -f ".join(" ", @primaryChunkArtifacts)."\n";
+		$cmdAll .= "mkdir -p $ofasConsDir;\n";
+		for my $scope (grep { $_->{run} } @snpScopes) {
+			my @chunks = @{$scope->{chunks}};
+			die "no $scope->{name} VCF chunks were planned\n" unless @chunks;
+			$cmdAll .= "$bcftBin concat -a -Oz -o $scope->{vcf} "
+				.join(" ", @chunks)."\n";
+			my @chunkArtifacts = map { ($_, "$_.csi", "$_.tbi") } @chunks;
+			$cmdAll .= "test -s $scope->{vcf}\nrm -f "
+				.join(" ", @chunkArtifacts)."\n";
 		}
-		if ($runSupport){
-			die "no supplementary VCF chunks were planned\n" unless @supportChunks;
-			$sortCmd .= "$bcftBin concat -a -Oz -o $vcfFileS ".join(" ", @supportChunks)."\n";
-			my @supportChunkArtifacts = map { ($_, "$_.csi", "$_.tbi") } @supportChunks;
-			$sortCmd .= "test -s $vcfFileS\nrm -f ".join(" ", @supportChunkArtifacts)."\n";
-		}
-		$cmdAll .= $sortCmd;
 	}
 	
 	my $bcfNormOpts = " -O z -f $refFA ";
-	my $cmd3 = "";
-	my $normalizePrimaryNow = $normalizeIndel && $hasPrimaryRds
-		&& ($runPrimary || $onlyNormalize || !$primaryNormReady);
-	my $normalizeSupportNow = $normalizeIndel && $supportRequested
-		&& ($runSupport || $onlyNormalize || !$supportNormReady);
-	if($normalizePrimaryNow || $normalizeSupportNow){#bcftools norm -f ref.fa in.vcf
-		$cmd3.="\necho \"left-normalizing indels\"\n";
-		if ($normalizePrimaryNow){
-			$cmd3 .= "$bcftBin index -f $vcfFile\n$bcftBin norm $bcfNormOpts -o $vcfFile.norm $vcfFile\n";
-			$cmd3 .= "test -s $vcfFile.norm\nrm -f $vcfFile $vcfFile.csi; mv $vcfFile.norm $vcfFile; touch $primaryNormStone\n";
+	my @normalizeScopes = grep {
+		$normalizeIndel && $_->{requested}
+			&& ($_->{run} || $onlyNormalize || !$_->{norm_ready})
+	} @snpScopes;
+	if (@normalizeScopes) {
+		$cmdAll .= "\necho \"left-normalizing indels\"\n";
+		for my $scope (@normalizeScopes) {
+			my $vcf = $scope->{vcf};
+			my $normStone = $scope->{norm_stone};
+			$cmdAll .= "$bcftBin index -f $vcf\n"
+				."$bcftBin norm $bcfNormOpts -o $vcf.norm $vcf\n"
+				."test -s $vcf.norm\nrm -f $vcf $vcf.csi; "
+				."mv $vcf.norm $vcf; touch $normStone\n";
 		}
-		
-		if ($normalizeSupportNow){
-			$cmd3 .= "$bcftBin index -f $vcfFileS\n$bcftBin norm $bcfNormOpts -o $vcfFileS.norm $vcfFileS\n";
-			$cmd3 .= "test -s $vcfFileS.norm\nrm -f $vcfFileS $vcfFileS.csi; mv $vcfFileS.norm $vcfFileS; touch $supportNormStone\n";
-		}
-		
-		$cmd3 .= "\necho \"Done normalizing\"\n";
-		$cmdAll .= $cmd3;
+		$cmdAll .= "\necho \"Done normalizing\"\n";
 	}
 	my $postcmd = "";
 	my $vcf2fnaOpt = "";
@@ -624,18 +611,19 @@ sub SNPconsensus_vcf{
 	}
 	my $vcf2fnaIns = "-ref $refFA -gff $gffF ";
 	
-	if (!$hasPrimaryRds){ #only support available..
-		my $tmpST = $SNPIHR->{SeqTechSuppl} // ""; if ($tmpST eq ""){$tmpST = "ill";}
-		$vcf2fnaOpt = "-seqPlatform $tmpST -t 1 -minCallDepth $minDepth -minCallQual $minCallQual ";
-		$vcf2fnaIns .= "-inVCF $vcfFileS -depthF $depthFileS ";
-	} elsif ($SNPsuppStone eq "" ){#only primary reads available..
-		my $tmpST = $SNPIHR->{SeqTech} // ""; if ($tmpST eq ""){$tmpST = "ill";}
-		$vcf2fnaOpt = "-seqPlatform $tmpST -t 1 -minCallDepth $minDepth -minCallQual $minCallQual ";
-		$vcf2fnaIns .= "-inVCF $vcfFile -depthF $depthFile ";
-	} else {#and for two vcfs..
-		$vcf2fnaOpt = "-seqPlatform $SNPIHR->{SeqTech},$SNPIHR->{SeqTechSuppl} -t 1 -minCallDepth $minDepth,$minDepth -minCallQual $minCallQual ";
-		$vcf2fnaIns .= "-inVCF $vcfFile,$vcfFileS -depthF $depthFile,$depthFileS ";
-	}
+	my @consensusScopes = grep { $_->{requested} } @snpScopes;
+	die "SNP consensus requires at least one requested read scope\n"
+		unless @consensusScopes;
+	my @platforms = map {
+		my $technologyKey = $_->{name} eq 'primary' ? 'SeqTech' : 'SeqTechSuppl';
+		my $technology = $SNPIHR->{$technologyKey} // '';
+		length($technology) ? $technology : 'ill';
+	} @consensusScopes;
+	$vcf2fnaOpt = "-seqPlatform ".join(',', @platforms)
+		." -t 1 -minCallDepth ".join(',', map { $minDepth } @consensusScopes)
+		." -minCallQual $minCallQual ";
+	$vcf2fnaIns .= "-inVCF ".join(',', map { $_->{vcf} } @consensusScopes)
+		." -depthF ".join(',', map { ${$_->{depth_file}} } @consensusScopes)." ";
 	if (!$createFastas){
 		$postcmd.="\n##In case you want to create consensus fastas, use (uncomment):\n##$vcf2fnaBin $vcf2fnaOpt $vcf2fnaIns $vcf2fnaOuts\n";
 		$postcmd.="#create stats only of hypothetical consensus generations:\n$vcf2fnaBin $vcf2fnaOpt $vcf2fnaIns; \n\n"
@@ -664,10 +652,10 @@ sub SNPconsensus_vcf{
 
 
 	if ($cmdAll ne ""){
-		$cmdAll .= "test -s $vcfFile\n" if $hasPrimaryRds && $saveVCF;
-		$cmdAll .= "test -s $vcfFileS\n" if $supportRequested && $saveVCF;
-		$cmdAll .= "touch $SNPstone\n" if $hasPrimaryRds && length($SNPstone);
-		$cmdAll .= "touch $SNPsuppStone\n" if $supportRequested && length($SNPsuppStone);
+		for my $scope (grep { $_->{requested} } @snpScopes) {
+			$cmdAll .= "test -s $scope->{vcf}\n" if $saveVCF;
+			$cmdAll .= "touch $scope->{stone}\n" if length($scope->{stone});
+		}
 	}
 	
 	#die "$run2ctg\n$cmdAll\n";

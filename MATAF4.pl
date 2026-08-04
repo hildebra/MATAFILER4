@@ -202,7 +202,9 @@ sub createConsSNPandSVs;
 #       unzip staging and refresh audit scripts for lightweight local setup.
 #4.37: 4.8.26: reconcile stale SMPL.empty markers with authoritative input
 #       sizes before completion checks, so valid samples reach requested jobs.
-my $MATFILER_ver = 4.37;
+#4.38: 4.8.26: consolidate sample closure, scheduler snapshots and accounting
+#       batches, and primary/support consensus-SNP generation paths.
+my $MATFILER_ver = 4.38;
 
 #----------------- defaults ----------------- 
 
@@ -615,6 +617,32 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			request_signature => $completionSignature,
 		};
 	}
+	# Every terminal path publishes the same sample identity, workflow signature,
+	# and authoritative input sizes. Keep that bookkeeping in one closure so the
+	# normal, empty-input, and SDM-warning paths cannot drift apart.
+	my $closeSampleOutcome = sub {
+		my (%outcome) = @_;
+		my $message = delete($outcome{completion_message})
+			|| "Sample already complete; no jobs submitted\n";
+		my $closedPath = createSampleCompletionSentinel(
+			sample_root => $curOutDir,
+			sample_name => $SmplName,
+			input_label => $dir2rd,
+			input_dir => $curOutDir,
+			assembly_dir => $asmDir,
+			request_signature => $completionSignature,
+			primary_input_size_mb => $map{$curSmpl}{inputFileSizeMB},
+			supplementary_input_size_mb => $map{$curSmpl}{inputXFileSizeMB},
+			%outcome,
+		);
+		if ($closedPath) {
+			$loopSampleCompleted{$JNUM} = 1;
+			print $message unless $MFconfig{silent};
+		} else {
+			delete $loopSampleCompleted{$JNUM};
+		}
+		return $closedPath;
+	};
 
 	# A valid sentinel is the sole fast-completion authority. Rewrite requests,
 	# changed workflow parameters, or malformed sentinels reopen the sample.
@@ -801,24 +829,15 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			populateInputSizesFast($curSmpl)
 				unless exists($map{$curSmpl}{inputFileSizeMB})
 					&& exists($map{$curSmpl}{inputXFileSizeMB});
-			my $closedPath = createSampleCompletionSentinel(
-				sample_root => $curOutDir,
-				sample_name => $SmplName,
-				input_label => $dir2rd,
-				input_dir => $curOutDir,
-				assembly_dir => $asmDir,
-				request_signature => $completionSignature,
+			$closeSampleOutcome->(
 				present_assembly => $efinAssLoc,
 				terminal_status => 'skipped_sdm_warning',
 				sdm_warning => 1,
 				sdm_warning_type => 'invalid_paired_read',
 				sdm_warning_log => $sdmWarningLog,
-				primary_input_size_mb => $map{$curSmpl}{inputFileSizeMB},
-				supplementary_input_size_mb => $map{$curSmpl}{inputXFileSizeMB},
+				completion_message =>
+					"Sample skipped after SDM invalid-pair warning; outcome cached in completion sentinel\n",
 			);
-			$loopSampleCompleted{$JNUM} = 1 if $closedPath;
-			print "Sample skipped after SDM invalid-pair warning; outcome cached in completion sentinel\n"
-				if $closedPath && !$MFconfig{silent};
 			loop2C_check($cAssGrp,\@sampleDeps);next;
 		}
 	}
@@ -1223,24 +1242,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$assemblyOutputsRequired,
 		));
 		if ($cleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
-			my $closedPath = createSampleCompletionSentinel(
-				sample_root => $curOutDir,
-				sample_name => $SmplName,
-				input_label => $dir2rd,
-				input_dir => $curOutDir,
-				assembly_dir => $asmDir,
-				request_signature => $completionSignature,
+			$closeSampleOutcome->(
 				present_assembly => $presentAssembly,
-				primary_input_size_mb => $map{$curSmpl}{inputFileSizeMB},
-				supplementary_input_size_mb => $map{$curSmpl}{inputXFileSizeMB},
 			);
-			if ($closedPath) {
-				$loopSampleCompleted{$JNUM} = 1;
-				print "Sample already complete; no jobs submitted\n"
-					unless $MFconfig{silent};
-			} else {
-				delete $loopSampleCompleted{$JNUM};
-			}
 		} else {
 			delete $loopSampleCompleted{$JNUM};
 			print "Sample output checks passed, but cleanup is incomplete; sample remains open\n"
@@ -1351,27 +1355,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				$smplTmpDir, $finAssLoc, $logDir, {}, 0,
 			));
 			if ($emptyCleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
-				my $closedPath = createSampleCompletionSentinel(
-					sample_root => $curOutDir,
-					sample_name => $SmplName,
-					input_label => $dir2rd,
-					input_dir => $curOutDir,
-					assembly_dir => $asmDir,
-					request_signature => $completionSignature,
+				$closeSampleOutcome->(
 					present_assembly => 0,
 					empty_sample => 1,
 					empty_input_size_mb => $runReport{empty_samples}{$curSmpl},
 					terminal_status => $emptyTerminalStatus,
-					primary_input_size_mb => $map{$curSmpl}{inputFileSizeMB},
-					supplementary_input_size_mb => $map{$curSmpl}{inputXFileSizeMB},
 				);
-				if ($closedPath) {
-					$loopSampleCompleted{$JNUM} = 1;
-					print "Sample already complete; no jobs submitted\n"
-						unless $MFconfig{silent};
-				} else {
-					delete $loopSampleCompleted{$JNUM};
-				}
 			} else {
 				delete $loopSampleCompleted{$JNUM};
 			}

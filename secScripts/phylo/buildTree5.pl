@@ -31,6 +31,7 @@
 #5.25: fingerprint input filters and allow rare nonempty categories in broad marker trees
 #5.26: validate complete IQ-TREE outputs, retry numerical underflow safely, and relax strain backbones
 #5.27: publish the placed strain tree by default and retain ML inference as .backbone.treefile
+#5.28: centralize reusable alignment and per-method tree checkpoint state
 
 use warnings;
 use strict;
@@ -77,6 +78,8 @@ sub pruneTree;
 sub prepGenoDirs;
 sub createTreeOpt;
 sub treePresent;
+sub requestedTreeMethods;
+sub treeMethodState;
 sub parseSeqId;
 sub geneFileStem;
 sub safeRemoveTree;
@@ -94,7 +97,7 @@ sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.27;
+my $version = 5.28;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -662,11 +665,11 @@ if ($cogCats ne "" && $continue
 	make_path($treeD);
 	$treesDone = 0;
 }
-my $reusableAlignment = $isAligned || (
-	fileGZe($multAli)
-	&& (!$calcSyn || fileGZe($multAliSyn))
-	&& (!$calcNonSyn || fileGZe($multAliNonSyn))
-);
+my $primaryAlignmentReady = fileGZe($multAli);
+my $siteAlignmentsReady = (!$calcSyn || fileGZe($multAliSyn))
+	&& (!$calcNonSyn || fileGZe($multAliNonSyn));
+my $reusableAlignment = $isAligned
+	|| ($primaryAlignmentReady && $siteAlignmentsReady);
 if ($continue) {
 	if ($treesDone) {
 		print "Recovery state: complete nonempty tree output found; retaining completed tree stages\n";
@@ -681,21 +684,17 @@ if ($continue) {
 		make_path($treeD) unless -d $treeD;
 	}
 }
-my $calcMSA = !$treesDone && !fileGZe($multAli);
-#if (!$treesDone){#cleanup, avoid checkpoints..
-#	system "rm -f $treeD/*";
-#}
-$doMSA =0 if ($isAligned || (
-			$continue && (fileGZe($multAli) || !$calcMSA) && (fileGZe($multAliSyn) ||!$calcSyn)&& (fileGZe($multAliNonSyn) ||!$calcNonSyn)) );  ## checks if MSA already exists
+my $calcMSA = !$treesDone && !$primaryAlignmentReady;
+$doMSA = !(
+	$isAligned
+	|| ($continue && ($treesDone || $primaryAlignmentReady) && $siteAlignmentsReady)
+);
 			
 #test if MSA is gzed
 if (!-e $multAli && -e "${multAli}.gz"){
 	my $gunCmd = "$pigzBin -p $ncore -d ${multAli}.gz\n";
 	systemW($gunCmd);
 }
-#die "$doMSA $calcMSA $treesDone $continue $multAli\n";
-#die "$doDNDS\n";
-#my @xx = keys %FAA; die "$xx[0] $xx[1]\n$FAA{HM29_COG0185}\n";
 if ($isAligned){
 	my $alignedInput = $useAA4tree ? $aaFna : $fnFna;
 	die "-isAligned currently requires an uncompressed input file: $alignedInput\n" unless -f $alignedInput;
@@ -1514,35 +1513,38 @@ exit(0);
 
 
 
+sub requestedTreeMethods{
+	return grep { $_->{enabled} } (
+		{name => "FastTree",     enabled => $doFastTree,     outputKey => "fastTrOut"},
+		{name => "VeryFastTree", enabled => $doVeryFastTree, outputKey => "VfastTrOut"},
+		{name => "IQ-TREE",      enabled => $doIQTree,       outputKey => "IQtreeout", iqtree => 1},
+		{name => "RAxML-NG",     enabled => $doRAXMLng,      outputKey => "RAXNGtreeout"},
+		{name => "RAxML",        enabled => $doRAXML,        outputKey => "RAXtreeout"},
+	);
+}
+
+sub treeMethodState{
+	my ($method, $hr) = @_;
+	my $output = $method->{iqtree}
+		? "$hr->{$method->{outputKey}}.treefile"
+		: $hr->{$method->{outputKey}};
+	my $validationReason = '';
+	my $outputComplete = $method->{iqtree}
+		? iqtreeOutputComplete($hr->{$method->{outputKey}}, $hr->{inMSA}, \$validationReason)
+		: (-s $output ? 1 : 0);
+	return {
+		%{$method},
+		output => $output,
+		outputComplete => $outputComplete,
+		checkpointComplete => ($continue && $outputComplete ? 1 : 0),
+		validationReason => $validationReason,
+	};
+}
+
 sub treePresent{
 	my ($hr) = @_;
-	my %treeOpts = %{$hr};
-	my $ret = 1;
-	my $checked = 0;
-	if ($doFastTree){
-		$checked = 1;
-		$ret=0 unless ($continue && -s $treeOpts{fastTrOut});
-	}
-	if ($doVeryFastTree){
-		$checked = 1;
-		$ret=0 unless ($continue && -s $treeOpts{VfastTrOut});
-	}
-	if ($doIQTree){
-		$checked = 1;
-		my $IQtree = "$treeOpts{IQtreeout}";
-		my $reason = '';
-		$ret=0 unless ($continue
-			&& iqtreeOutputComplete($IQtree, $treeOpts{inMSA}, \$reason));
-	}
-	if ($doRAXMLng){
-		$checked = 1;
-		$ret=0 unless ($continue && -s $treeOpts{RAXNGtreeout});
-	}
-	if ($doRAXML){
-		$checked = 1;
-		$ret=0 unless ($continue && -s $treeOpts{RAXtreeout});
-	}
-	return $checked ? $ret : 0;
+	my @states = map { treeMethodState($_, $hr) } requestedTreeMethods();
+	return @states && !grep { !$_->{checkpointComplete} } @states;
 }
 
 
@@ -1641,58 +1643,62 @@ sub treeAtHeart{
 	#print "cons: $treeOpts{constraintTree}\n";
 	#convert MSA to NEXUS
 	#convertMSA2NXS($multAli,"$multAli.nxs");
-	#format conversion for raxml..
-	if ($doRAXML){
-		my $f = $treeOpts{inMSA};
-		my $fasta2phylip = getProgPaths("fasta2phylip_scr");
-		my $tcmd = "rm -f $f.ph*; $fasta2phylip -c 50 $f > $f.ph\n";
-		systemW $tcmd;#) {die "fasta2phylim failed:\n$tcmd\n";}
-	}
-
+	my @treeMethods = requestedTreeMethods();
+	my %treeState = map {
+		my $state = treeMethodState($_, \%treeOpts);
+		($state->{name} => $state);
+	} @treeMethods;
 
 	if ($doFastTree){
-		unless ($continue && -s $treeOpts{fastTrOut}){
+		unless ($treeState{"FastTree"}{checkpointComplete}){
 			runFasttree($treeOpts{inMSA},$treeOpts{fastTrOut},$treeOpts{useAA},$treeOpts{ncore});
 		}
-		$phyloTree = $treeOpts{fastTrOut};
+		$phyloTree = $treeState{"FastTree"}{output};
 	}
 	if ($doVeryFastTree){
-		unless ($continue && -s $treeOpts{VfastTrOut}){
+		unless ($treeState{"VeryFastTree"}{checkpointComplete}){
 			runVeryFasttree($treeOpts{inMSA},$treeOpts{VfastTrOut},$treeOpts{useAA},$treeOpts{ncore});
 		}
-		$phyloTree = $treeOpts{VfastTrOut};
+		$phyloTree = $treeState{"VeryFastTree"}{output};
 	}
 	if ($doIQTree){
-		my $IQtree = "$treeOpts{IQtreeout}";
-		my $validationReason = '';
-		unless ($continue
-			&& iqtreeOutputComplete($IQtree, $treeOpts{inMSA}, \$validationReason)){
-			print "IQ-TREE checkpoint will be rebuilt/resumed: $validationReason\n"
+		my $state = $treeState{"IQ-TREE"};
+		my $IQtree = $treeOpts{IQtreeout};
+		unless ($state->{checkpointComplete}){
+			print "IQ-TREE checkpoint will be rebuilt/resumed: $state->{validationReason}\n"
 				if $continue && (-e "$IQtree.treefile" || -e "$IQtree.log");
 			runQItree(\%treeOpts);
 		} else {
 			cleanupIQTreeTransients($IQtree);
 		}
-		die "IQ-TREE output failed post-run validation: $validationReason\n"
-			unless iqtreeOutputComplete($IQtree, $treeOpts{inMSA}, \$validationReason);
-		$phyloTree = "$IQtree.treefile";
+		my $postRunState = treeMethodState($state, \%treeOpts);
+		die "IQ-TREE output failed post-run validation: $postRunState->{validationReason}\n"
+			unless $postRunState->{outputComplete};
+		$phyloTree = $postRunState->{output};
 	}
 	if ($doRAXMLng){
-		unless ($continue && -s $treeOpts{RAXNGtreeout}){
+		unless ($treeState{"RAxML-NG"}{checkpointComplete}){
 			runRaxMLng(\%treeOpts);
 		}
-		$phyloTree = $treeOpts{RAXNGtreeout};
+		$phyloTree = $treeState{"RAxML-NG"}{output};
 	}
 	if ($doRAXML){
-		$treeOpts{inMSA} = "$multF.ph";
-		if (!-s $treeOpts{inMSA}){ die "Can't find nonempty expected *.ph file: $multF.ph";}
-		# runRaxML's continuation logic historically keys on path existence.  Do
-		# not let a zero-byte published tree suppress recovery of partial work.
-		unlink $treeOpts{RAXtreeout}
-			or die "Cannot remove empty RAxML tree $treeOpts{RAXtreeout}: $!\n"
-			if -e $treeOpts{RAXtreeout} && !-s $treeOpts{RAXtreeout};
-		runRaxML(\%treeOpts);#"$multF.ph",$bootStrap,$outgroup,"$treeD/RXML_allsites$BStag.nwk",$ncore,$continue,!$useAA4tree);
-		$phyloTree = $treeOpts{RAXtreeout};#"$treeD/RXML_$siteTag$BStag.nwk";
+		unless ($treeState{"RAxML"}{checkpointComplete}){
+			my $f = $treeOpts{inMSA};
+			my $fasta2phylip = getProgPaths("fasta2phylip_scr");
+			my $tcmd = "rm -f $f.ph*; $fasta2phylip -c 50 $f > $f.ph\n";
+			systemW $tcmd;
+			$treeOpts{inMSA} = "$multF.ph";
+			die "Can't find nonempty expected *.ph file: $multF.ph"
+				unless -s $treeOpts{inMSA};
+			# runRaxML's continuation logic historically keys on path existence. Do
+			# not let a zero-byte published tree suppress recovery of partial work.
+			unlink $treeOpts{RAXtreeout}
+				or die "Cannot remove empty RAxML tree $treeOpts{RAXtreeout}: $!\n"
+				if -e $treeOpts{RAXtreeout} && !-s $treeOpts{RAXtreeout};
+			runRaxML(\%treeOpts);
+		}
+		$phyloTree = $treeState{"RAxML"}{output};
 	}
 	if ($doCFML && !$treeOpts{isSubTree}){
 		my $outDG = File::Spec->catdir($outD, "clonalFrameML");

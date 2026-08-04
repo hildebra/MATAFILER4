@@ -478,6 +478,30 @@ is(numLiveUserJobs($options), 4, 'live-job accounting counts running and pending
 is(numLiveUserJobs($options, 0, [qw(11 13 99)]), 2,
 	'live-job accounting can be restricted to IDs submitted by this invocation');
 unlike($live_command, qr/-t\s+PENDING/, 'the maxConcurrentJobs query is not restricted to pending jobs');
+my ($shared_queue_calls, $wait_queue_calls) = (0, 0);
+$options = slurm_options();
+$options->{schedulerClock} = sub { 1000 };
+$options->{liveJobRunner} = sub {
+	$shared_queue_calls++;
+	return ("21|RUNNING\n22|PENDING\n23|PENDING\n", 0);
+};
+$options->{jobStatusRunner} = sub {
+	$wait_queue_calls++;
+	return ("21|RUNNING\n22|PENDING\n23|PENDING\n", 0);
+};
+is(numLiveUserJobs($options), 3,
+	'a live-job count records a reusable full queue snapshot');
+{
+	local *STDOUT;
+	open STDOUT, '>', \my $shared_wait_output
+		or die "Cannot capture shared-snapshot output: $!";
+	qsubSystemJobAlive([qw(21 22 23)], $options, 0, 1);
+}
+is($shared_queue_calls, 1,
+	'the live-job count performs one full scheduler query');
+is($wait_queue_calls, 0,
+	'the immediately following dependency wait reuses that scheduler snapshot');
+
 
 $options = slurm_options();
 $options->{jobStatusRunner} = sub {

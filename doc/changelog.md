@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-04 — MATAFILER4 4.38 orchestration consolidation
+
+- Route normal, SDM-warning, and empty/too-small completion through one sentinel-publication path with shared metagStats and input-size data.
+- Reuse one parsed scheduler queue snapshot for live counts, sample locks, and immediate dependency waits; share bounded Slurm accounting batches between dependency reconciliation and failure summaries.
+- Generate primary and supplementary SNP products from one scope model covering validation, region planning, pileup, concatenation, normalization, vcf2fna inputs, and completion stones.
+- Centralize BuildTree alignment recovery and per-engine checkpoint state so completion tests and execution decisions cannot diverge.
+- Remove the obsolete pending-only scheduler counter and unused SNP locals, and regenerate structural regression assertions for the consolidated paths.
+- Validate SortMeRNA references with a real open/read probe and distinguish missing, non-file, empty, and permission-denied paths; access failures now report effective job credentials.
+
 ## 2026-08-04 — MATAFILER4 4.37 empty-state recovery
 
 - Revalidate a cached `SMPL.empty` marker against the current map-resolved primary and supplementary input sizes before it can suppress requested work.

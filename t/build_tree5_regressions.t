@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.27;/,
-	'default placed-tree publication increments the workflow version');
+like($source, qr/my \$version = 5\.28;/,
+	'shared tree-method checkpoint state increments the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
@@ -96,8 +96,8 @@ like($source,
 	qr/sub prepareTemporaryBase .*?tempfile\(.*?DIR => \$path.*?print \{\$probeHandle\}.*?unlink \$probePath/s,
 	'a temporary base must pass a create, write, close, and cleanup probe');
 like($source,
-	qr/my \$reusableAlignment = \$isAligned \|\| \(.*?fileGZe\(\$multAli\).*?if \(\$continue\).*?\$treesDone.*?\$reusableAlignment.*?no reusable alignment or complete tree checkpoint.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
-	'continue mode retains only validated checkpoints and restarts incomplete alignment/tree stages');
+	qr/my \$primaryAlignmentReady = fileGZe\(\$multAli\).*?my \$siteAlignmentsReady =.*?my \$reusableAlignment = \$isAligned.*?if \(\$continue\).*?\$treesDone.*?\$reusableAlignment.*?no reusable alignment or complete tree checkpoint.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD.*?my \$calcMSA = !\$treesDone && !\$primaryAlignmentReady.*?\$doMSA = !\(/s,
+	'continue mode derives reporting and MSA recovery from one validated alignment state');
 like($source, qr/safeRemoveTree\(\$tmpD, \$tmpBase\)/, 'cleanup is limited to the owned temporary directory');
 
 unlike($source, qr/touch \$IQtreef/, 'an empty IQ-TREE checkpoint is not manufactured');
@@ -159,8 +159,11 @@ like($source, qr/my \$partition = \$treeOpts\{partition\} \/\/ "";.*?\$treeOpts\
 unlike($source, qr/\$continue && -e (?:\$treeOpts\{(?:fastTrOut|VfastTrOut|RAXNGtreeout|RAXtreeout)\}|"\$IQtree\.treefile")/,
 	'resume gates do not accept empty tree outputs');
 like($source,
-	qr/\$continue\s*&& iqtreeOutputComplete\(\$IQtree, \$treeOpts\{inMSA\}, \\\$reason\)/,
-	'IQ-TREE resume requires a successful log and exact alignment/tree taxon parity');
+	qr/sub requestedTreeMethods.*?name => "IQ-TREE".*?iqtree => 1.*?sub treeMethodState.*?iqtreeOutputComplete\(\$hr->\{\$method->\{outputKey\}\}, \$hr->\{inMSA\}, \\\$validationReason\).*?checkpointComplete => \(\$continue && \$outputComplete/s,
+	'IQ-TREE resume uses the shared successful-log and exact-taxon-parity checkpoint state');
+like($source,
+	qr/sub treePresent.*?treeMethodState\(\$_, \$hr\).*?sub treeAtHeart.*?my %treeState = map.*?treeMethodState\(\$_, \\%treeOpts\)/s,
+	'tree recovery and execution derive completion from the same method-state helper');
 like($source,
 	qr/my %BACKBONE_DEFAULT = \(.*?coverage_fraction => 0\.35/s,
 	'strict strain backbones use the relaxed severe-outlier coverage threshold');

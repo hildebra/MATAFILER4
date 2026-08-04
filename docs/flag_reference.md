@@ -9,10 +9,10 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 
 | Script | Version in uploaded source | Role |
 |---|---:|---|
-| `MATAF4.pl` | `4.34` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
+| `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `buildTree5.pl` | `5.23` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.28` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -446,7 +446,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.27`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.28`.
 
 ### General options
 
