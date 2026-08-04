@@ -445,7 +445,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.25`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.27`.
 
 ### General options
 
@@ -495,6 +495,11 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-runFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-runVeryFastTree` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-treeShrink` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+| `-strictBackbone` | integer | `0` | advanced | Infer an ML backbone from well-covered samples and graft severe coverage outliers onto it. Enabled by the strain preset. |
+| `-strictBackboneFraction` | float | `0.35` | advanced | Defer a sample only when its called alignment sites are below this fraction of the sample Q90. Locus-QC status alone does not defer a sample after questionable loci have been masked. |
+| `-strictBackboneMinSamples` | integer | `3` | advanced | Fall back to the complete alignment if coverage filtering would leave fewer backbone samples. |
+| `-placementMinOverlap` | integer | `400` | advanced | Minimum pairwise called-site overlap for approximate nearest-backbone grafting. |
+| `-sampleQC` | string |  | advanced | Optional sample-QC audit table. A placement flag is retained for reporting but removes a sample only when it is also a severe coverage outlier. |
 | `-postAlignmentLocusQC` | integer | `0` between species; `1` within species | stable | Run native MSAfix locus-comparability QC before multi-locus concatenation. Broad trees retain every prepared locus unless QC is explicitly enabled. |
 | `-postAlignmentMinSequences` | integer | `3` | stable | Minimum comparable sequences required for an aligned locus. |
 | `-postAlignmentMinOccupancy` | float | `0.35` | stable | Minimum fraction of unambiguous alignment cells; permissive for metagenomic loci. |
@@ -518,5 +523,9 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-runFastGearPostProcessing` | integer | `0` | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-map` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
 | `-clustername` | string |  | stable | Accepted by buildTree5.pl; see source/help output for detailed behaviour. |
+
+Completed IQ-TREE runs are accepted only when the log contains its completion signature and the inferred backbone contains exactly the backbone-alignment taxa. IQ-TREE's standard identical-sequence handling is retained; `-keep-ident` is not used. The safe likelihood kernel is enabled pre-emptively for alignments with at least 750 taxa or over 700 MB; a numerical-underflow diagnostic also triggers one clean retry with `-safe`. Successful runs remove IQ-TREE transient files such as `.uniqueseq.phy`, while retaining the final tree, report, and log.
+
+In strict-backbone IQ-TREE mode, `IQtree_allsites.backbone.treefile` contains the ML-inferred backbone and `IQtree_allsites.treefile` is the default primary tree containing the nearest-backbone grafts. Each deferred query is grafted beside its closest backbone sample by observed distance over mutually called sites. This is not likelihood-based phylogenetic placement and does not refine the inferred backbone topology.
 
 Broad or between-species phylogeny is the default. In this mode `buildTree5.pl` does not remove columns using a fixed taxon-count overlap threshold, and post-alignment QC checks locus structure/occupancy without rejecting deep AA divergence. Use `-withinSpecies 1` for strain or other within-species trees. `-minOverlapMSA` and `-postAlignmentDivergenceQC` can override the individual mode defaults. Existing `-strainWithinPreset 1` calls remain compatible and imply within-species mode. With `-continue 1`, a stored QC-policy marker prevents reuse of a concatenated alignment built under different broad-mode settings; legacy within-species audits remain compatible.

@@ -6,9 +6,10 @@ use strict;
 
 
 use Exporter qw(import);
-our @EXPORT_OK = qw(convertMSA2NXS runRaxMLng runRaxML readFMGdir prep40MGgenomes prepNOGSETgenomes 
+our @EXPORT_OK = qw(convertMSA2NXS runRaxMLng runRaxML readFMGdir prep40MGgenomes prepNOGSETgenomes
 			getE100 getGenoGenes getFMG renameFMGs readNCBItax
-			runFasttree runVeryFasttree runQItree fixHDs4Phylo getGenoName calcDisPos2 getTreeLeafs filterMSA MSA);
+			runFasttree runVeryFasttree runQItree iqtreeOutputComplete cleanupIQTreeTransients
+			fixHDs4Phylo getGenoName calcDisPos2 getTreeLeafs filterMSA MSA);
 use Mods::GenoMetaAss qw(filsizeMB systemW readFasta renameFastHD gzipwrite gzipopen);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::FuncTools qw(assignFuncPerGene readGene2Func);
@@ -215,6 +216,129 @@ sub _fastaAlignmentLength{
 	return $seenHeader ? $seqLen : undef;
 }
 
+sub _fastaIdentifiers {
+	my ($path) = @_;
+	return undef unless defined($path) && length($path)
+		&& (-s $path || -s "$path.gz");
+	my ($in,$ok) = gzipopen($path, "IQ-TREE alignment identifiers", 1, 0);
+	return undef unless $ok;
+	my (%identifier, @ordered);
+	while (my $line = <$in>) {
+		next unless $line =~ /^>(\S+)/;
+		my $id = $1;
+		die "Duplicate FASTA identifier '$id' in $path\n" if $identifier{$id}++;
+		push @ordered, $id;
+	}
+	close $in or die "Cannot close IQ-TREE alignment $path: $!\n";
+	return \@ordered;
+}
+
+sub _newickLeafIdentifiers {
+	my ($path) = @_;
+	open my $in, '<', $path or die "Cannot read IQ-TREE tree $path: $!\n";
+	local $/;
+	my $tree = <$in> // '';
+	close $in or die "Cannot close IQ-TREE tree $path: $!\n";
+	my (%identifier, @duplicate);
+	while ($tree =~ /(?:\A|[(,])\s*(?:'((?:[^']|'')*)'|([^'():,;\s]+))\s*(?=[:),;])/g) {
+		my $id = defined($1) ? $1 : $2;
+		$id =~ s/''/'/g if defined($1);
+		push @duplicate, $id if $identifier{$id}++;
+	}
+	return (\%identifier, \@duplicate);
+}
+
+sub iqtreeOutputComplete {
+	my ($prefix, $alignment, $reasonRef) = @_;
+	my $fail = sub {
+		my ($reason) = @_;
+		${$reasonRef} = $reason if ref($reasonRef) eq 'SCALAR';
+		return 0;
+	};
+	return $fail->("missing or empty tree") unless -s "$prefix.treefile";
+	return $fail->("missing or empty IQ-TREE log") unless -s "$prefix.log";
+
+	open my $logFh, '<', "$prefix.log"
+		or return $fail->("cannot read IQ-TREE log: $!");
+	my $log;
+	{
+		local $/;
+		$log = <$logFh> // '';
+	}
+	close $logFh or return $fail->("cannot close IQ-TREE log: $!");
+	my $successPosition = rindex($log, 'Analysis results written to:');
+	my $errorPosition = rindex($log, 'ERROR:');
+	return $fail->("IQ-TREE log has no successful completion signature")
+		if $successPosition < 0;
+	return $fail->("IQ-TREE log ends in an error after its last completion signature")
+		if $errorPosition > $successPosition;
+
+	my $expected = _fastaIdentifiers($alignment);
+	if (defined($expected)) {
+		my ($observed, $duplicates) = _newickLeafIdentifiers("$prefix.treefile");
+		return $fail->("final tree contains duplicate tip labels: ".join(',', @{$duplicates}))
+			if @{$duplicates};
+		my %expectedIdentifier = map { $_ => 1 } @{$expected};
+		my @missing = grep { !$observed->{$_} } @{$expected};
+		my @extra = grep { !$expectedIdentifier{$_} } keys %{$observed};
+		if (@missing || @extra) {
+			my @detail;
+			push @detail, scalar(@missing)." missing (".join(',', @missing[0 .. ($#missing < 4 ? $#missing : 4)]).")"
+				if @missing;
+			push @detail, scalar(@extra)." unexpected (".join(',', @extra[0 .. ($#extra < 4 ? $#extra : 4)]).")"
+				if @extra;
+			return $fail->("alignment/tree taxon mismatch: ".join('; ', @detail));
+		}
+	}
+	${$reasonRef} = '' if ref($reasonRef) eq 'SCALAR';
+	return 1;
+}
+
+sub cleanupIQTreeTransients {
+	my ($prefix) = @_;
+	for my $suffix (qw(
+		.bionj .ckp.gz .mldist .uniqueseq.phy .uniqueseq.phy.gz .varsites
+	)) {
+		my $path = $prefix.$suffix;
+		next unless -e $path;
+		unlink $path or warn "Cannot remove completed IQ-TREE temporary file $path: $!\n";
+	}
+}
+
+sub _iqtreeLogRequestsSafeKernel {
+	my ($prefix, $error) = @_;
+	my $diagnostic = $error // '';
+	if (-s "$prefix.log") {
+		open my $logFh, '<', "$prefix.log" or die "Cannot read failed IQ-TREE log $prefix.log: $!\n";
+		local $/;
+		$diagnostic .= "\n".(<$logFh> // '');
+		close $logFh or die "Cannot close failed IQ-TREE log $prefix.log: $!\n";
+	}
+	return $diagnostic =~ /Numerical underflow|safe likelihood kernel|run again with (?:the )?(?:--?safe)/i;
+}
+
+sub _archiveIQTreeLog {
+	my ($prefix, $tag) = @_;
+	return unless -e "$prefix.log";
+	my $archive = "$prefix.$tag.log";
+	unlink $archive or die "Cannot replace old IQ-TREE diagnostic $archive: $!\n" if -e $archive;
+	rename "$prefix.log", $archive
+		or die "Cannot preserve failed IQ-TREE log as $archive: $!\n";
+}
+
+sub _clearIQTreeAttempt {
+	my ($prefix) = @_;
+	for my $suffix (qw(
+		.treefile .iqtree .log .ckp.gz .bionj .mldist .uniqueseq.phy
+		.uniqueseq.phy.gz .varsites .model.gz .best_scheme.nex .boottrees
+		.contree .splits.nex
+	)) {
+		my $path = $prefix.$suffix;
+		next unless -e $path;
+		unlink $path or die "Cannot clear incomplete IQ-TREE output $path: $!\n";
+	}
+}
+
 sub runQItree{
 	my ($hr) = @_; my %treeOpts = %{$hr};
 	my ($inMSA,$treeOut,$ncore,$outgr,$bootStrap,$useAA,$fast,$autoModel,$partiF,$runSafe) =
@@ -236,7 +360,13 @@ sub runQItree{
 
 	#die "AA use $useAA\n";
 	my $inSize = filsizeMB($inMSA);
-	if ($inSize>700){$runSafe=1;} #greater input size than 700 Mb? needs to use safe likelihood kernel..
+	my $alignmentIdentifiers = _fastaIdentifiers($inMSA);
+	my $taxonCount = defined($alignmentIdentifiers) ? scalar(@{$alignmentIdentifiers}) : 0;
+	if ($inSize > 700 || $taxonCount >= 750) {
+		$runSafe = 1;
+		print "IQ-TREE safe likelihood kernel enabled pre-emptively: "
+			."taxa=$taxonCount, alignment size=${inSize}MB\n";
+	}
 	my $constraintTree = $treeOpts{constraintTree};
 	die ("Constraint tree $constraintTree does not exist") if ($constraintTree ne "" && !-e $constraintTree);
 	my $iqTree  = getProgPaths("iqtree");
@@ -284,9 +414,6 @@ sub runQItree{
 			#$cmd .= "-m HKY+F+G ";
 		}
 	}
-	if ($runSafe){
-		$cmd .= " --safe ";
-	}
 	if ($bootStrap >0){
 		if ($bootStrap < 1000){
 			print "standard non parametric bootstrap ($bootStrap). Use >1000 bootstraps to do ultrafast bootstrap\n";
@@ -307,8 +434,49 @@ sub runQItree{
 	#TODO: include booster for better bootstrap values
 	#booster -a tbe -i 40MG.IQtree.treefile -b 40MG.IQtree.boottrees -@ 8 -o 40MG.IQtree_booster.tre
 	$cmd .= "";
-	#die $cmd ;#if ($constraintTree ne "");
-	systemW $cmd;
+	# A previous interrupted invocation may have left a nonempty intermediate
+	# tree. Preserve resumable checkpoints, but never resume a numerical
+	# underflow with the unsafe kernel.
+	if (_iqtreeLogRequestsSafeKernel($treeOut, '')) {
+		$runSafe = 1;
+		_archiveIQTreeLog($treeOut, 'unsafe');
+		_clearIQTreeAttempt($treeOut);
+		print "Restarting prior numerically unstable IQ-TREE attempt with -safe\n";
+	} elsif (-s "$treeOut.treefile" && !-s "$treeOut.ckp.gz") {
+		_archiveIQTreeLog($treeOut, 'incomplete');
+		_clearIQTreeAttempt($treeOut);
+		print "Discarded incomplete, non-resumable IQ-TREE outputs for $treeOut\n";
+	}
+	my $execute = sub {
+		my ($safe) = @_;
+		my $attempt = $cmd;
+		$attempt .= " -safe " if $safe;
+		systemW($attempt);
+	};
+	my $ok = eval {
+		$execute->($runSafe);
+		1;
+	};
+	my $unsafeError = $@;
+	if (!$runSafe && _iqtreeLogRequestsSafeKernel($treeOut, $unsafeError)) {
+		_archiveIQTreeLog($treeOut, 'unsafe');
+		_clearIQTreeAttempt($treeOut);
+		warn "IQ-TREE reported numerical underflow; restarting once with -safe\n";
+		$ok = eval {
+			$execute->(1);
+			1;
+		};
+		if (!$ok) {
+			die "IQ-TREE safe-kernel retry failed after an unsafe numerical underflow. "
+				."Initial failure: $unsafeError\nSafe retry: $@";
+		}
+	} elsif (!$ok) {
+		die $unsafeError;
+	}
+	my $validationReason = '';
+	die "IQ-TREE returned successfully but its output is incomplete: $validationReason\n"
+		unless iqtreeOutputComplete($treeOut, $inMSA, \$validationReason);
+	cleanupIQTreeTransients($treeOut);
 	#$treNM .= ".nwk";
 	#"mv $treeOut/IQtree_fast_allsites.treefile $treeOut/$treNM";
 }

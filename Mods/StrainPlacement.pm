@@ -86,42 +86,43 @@ sub split_strict_backbone {
 	$options ||= {};
 	my $is_aa = $options->{is_aa} // 0;
 	my $minimum_backbone = $options->{minimum_backbone} // 3;
-	my $coverage_fraction = $options->{coverage_fraction} // 0.70;
+	my $coverage_fraction = $options->{coverage_fraction} // 0.35;
 	my $outgroup = $options->{outgroup} // '';
 	my $seq = _read_fasta($full_fasta);
 	my @ids = sort keys %{$seq};
 	die "Strict-backbone input $full_fasta contains no sequences\n" unless @ids;
 	my %informative = map { $_ => _informative_count($seq->{$_}, $is_aa) } @ids;
 	my $q90 = _quantile(0.90, values %informative);
-	my (%place_reason, @backbone, @placement);
+	my (%classification_reason, %requested_reason, @backbone, @placement);
 	for my $id (@ids) {
-		my @reason;
-		push @reason, 'sample_locus_qc'
-			if ($status->{$id} // '') eq 'placement';
-		push @reason, 'low_validated_coverage'
-			if $q90 > 0 && $informative{$id} < $coverage_fraction * $q90;
-		@reason = () if length($outgroup) && $id eq $outgroup;
-		if (@reason) {
+		my $sampleLocusQC = ($status->{$id} // '') eq 'placement';
+		my $lowCoverage = $q90 > 0
+			&& $informative{$id} < $coverage_fraction * $q90;
+		$lowCoverage = 0 if length($outgroup) && $id eq $outgroup;
+		if ($lowCoverage) {
+			my @reason = ('low_validated_coverage');
+			push @reason, 'sample_locus_qc' if $sampleLocusQC;
 			push @placement, $id;
-			$place_reason{$id} = join(',', @reason);
+			$classification_reason{$id} = join(',', @reason);
+			$requested_reason{$id} = $classification_reason{$id};
 		} else {
 			push @backbone, $id;
+			$classification_reason{$id} = 'retained_after_locus_qc_masking'
+				if $sampleLocusQC;
 		}
 	}
-	my %requested_reason = %place_reason;
 	my $fallback = 0;
 	if (@backbone < $minimum_backbone) {
 		$fallback = 1;
 		@backbone = @ids;
 		@placement = ();
-		%place_reason = ();
 	}
 	_write_fasta($backbone_fasta, $seq, \@backbone);
 	_write_fasta($placement_fasta, $seq, \@placement);
 	return {
 		backbone => \@backbone,
 		placement => \@placement,
-		reason => \%place_reason,
+		reason => \%classification_reason,
 		informative => \%informative,
 		q90_informative => $q90,
 		fallback => $fallback,
@@ -200,9 +201,16 @@ sub write_placed_tree {
 		die "Could not find unique placement anchor '$anchor' in $backbone_tree\n"
 			unless $count == 1;
 	}
-	open my $out, '>', $output_tree or die "Cannot write placed tree $output_tree: $!\n";
+	my $temporary_output = "$output_tree.tmp.$$";
+	unlink $temporary_output
+		or die "Cannot remove stale placed-tree temporary $temporary_output: $!\n"
+		if -e $temporary_output;
+	open my $out, '>', $temporary_output
+		or die "Cannot write placed tree $temporary_output: $!\n";
 	print {$out} $tree;
-	close $out or die "Cannot close placed tree $output_tree: $!\n";
+	close $out or die "Cannot close placed tree $temporary_output: $!\n";
+	rename $temporary_output, $output_tree
+		or die "Cannot publish placed tree $temporary_output as $output_tree: $!\n";
 }
 
 1;

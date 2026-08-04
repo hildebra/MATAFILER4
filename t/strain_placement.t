@@ -36,28 +36,44 @@ write_file($full, join('',
 	">C\nAACCGGTTAAGG\n",
 	">D\nAACCGG------\n",
 	">E\nAACCGGTTAACC\n",
+	">F\nAAC---------\n",
 ));
 my $split = split_strict_backbone(
 	$full, $backbone, $queries, {E => 'placement'},
-	{coverage_fraction => 0.70, minimum_backbone => 3},
+	{coverage_fraction => 0.35, minimum_backbone => 3},
 );
-is_deeply($split->{backbone}, [qw(A B C)],
-	'strict backbone retains validated well-covered samples');
-is_deeply($split->{placement}, [qw(D E)],
-	'low-coverage and locus-QC-marked samples are deferred to placement');
+is_deeply($split->{backbone}, [qw(A B C D E)],
+	'strict backbone retains all but severe coverage outliers');
+is_deeply($split->{placement}, [qw(F)],
+	'only the severe low-coverage sample is deferred to placement');
+is($split->{reason}{E}, 'retained_after_locus_qc_masking',
+	'locus-QC status alone does not remove a well-covered sample after masking');
 
 my $fallback_backbone = File::Spec->catfile($tmp, 'fallback-backbone.fna');
 my $fallback_queries = File::Spec->catfile($tmp, 'fallback-placement.fna');
 my $fallback = split_strict_backbone(
 	$full, $fallback_backbone, $fallback_queries,
-	{A => 'placement', B => 'placement', C => 'placement'},
-	{coverage_fraction => 0.70, minimum_backbone => 4},
+	{E => 'placement', F => 'placement'},
+	{coverage_fraction => 0.95, minimum_backbone => 5},
 );
 ok($fallback->{fallback}, 'underpowered strict backbones fall back explicitly');
-ok(exists($fallback->{requested_reason}{A}),
+ok(exists($fallback->{requested_reason}{F}),
 	'fallback retains the QC reason for audit rather than silently relabelling the sample');
 
-my $placements = nearest_backbone_placements($backbone, $queries, 5);
+my $placement_backbone = File::Spec->catfile($tmp, 'placement-backbone.fna');
+my $placement_queries = File::Spec->catfile($tmp, 'placement-queries.fna');
+write_file($placement_backbone, join('',
+	">A\nAACCGGTTAACC\n",
+	">B\nAACCGGTTAACA\n",
+	">C\nAACCGGTTAAGG\n",
+));
+write_file($placement_queries, join('',
+	">D\nAACCGG------\n",
+	">E\nAACCGGTTAACC\n",
+));
+my $placements = nearest_backbone_placements(
+	$placement_backbone, $placement_queries, 5,
+);
 is($placements->{D}{anchor}, 'A',
 	'lower-coverage sample is placed using only its validated overlap');
 is($placements->{D}{overlap}, 6, 'placement reports the validated overlap');

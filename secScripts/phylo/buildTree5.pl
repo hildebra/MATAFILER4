@@ -29,6 +29,8 @@
 #5.23: default to broad/inter-species locus filtering; make strain-level filtering explicit
 #5.24: retain all prepared loci by default for broad phylogenies; preserve opt-in locus QC
 #5.25: fingerprint input filters and allow rare nonempty categories in broad marker trees
+#5.26: validate complete IQ-TREE outputs, retry numerical underflow safely, and relax strain backbones
+#5.27: publish the placed strain tree by default and retain ML inference as .backbone.treefile
 
 use warnings;
 use strict;
@@ -36,7 +38,8 @@ use strict;
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw( fileGZe fileGZs gzipopen systemW readFasta readFastHD writeFasta quantile);
 use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree 
-			runFasttree runVeryFasttree fixHDs4Phylo getGenoGenes getFMG readFMGdir );
+			runFasttree runVeryFasttree iqtreeOutputComplete cleanupIQTreeTransients
+			fixHDs4Phylo getGenoGenes getFMG readFMGdir );
 use Mods::PhyloAlignment qw(filter_alignment_by_overlap);
 use Mods::StrainPlacement qw(
 	read_sample_qc split_strict_backbone
@@ -91,7 +94,7 @@ sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.25;
+my $version = 5.27;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -170,7 +173,7 @@ my $gzipInput =0; my $removeMSA = 0;
 my $useTreeShrink =0;
 my %BACKBONE_DEFAULT = (
 	enabled => 0,
-	coverage_fraction => 0.70,
+	coverage_fraction => 0.35,
 	minimum_overlap => 400,
 	minimum_samples => 3,
 );
@@ -584,6 +587,7 @@ my $MSAcat = "$MsaD/MSAcat.fna";
 
 #prep tree Options
 my $tOhr = createTreeOpt($multAli,"allsites","",0,"");
+$tOhr->{IQtreeout} .= ".backbone" if $strictBackbone && $doIQTree;
 my %Tree1 = %{$tOhr};
 my $tOhrNSun = createTreeOpt($multAliNonSyn,"nonsyn","",0,$Tree1{nwk});
 my $tOhrSyn = createTreeOpt($multAliSyn,"syn","",0,$Tree1{nwk});
@@ -1373,30 +1377,52 @@ if ($doSuperTree){
 	}
 }
 
-if ($strictSplit && @{$strictSplit->{placement}}) {
+if ($strictSplit) {
 	my $backboneTree = ${$trRetH}{nwk} // "";
 	if ($backboneTree ne "" && -s $backboneTree) {
-		my $placements = nearest_backbone_placements(
-			$multAli, $placementAlignment, $placementMinOverlap, $useAA4tree,
-		);
-		my $report = "$treeD/strict_backbone.placements.tsv";
-		open my $reportFh, '>', $report or die "Cannot write $report: $!\n";
-		print {$reportFh} join("\t",
-			qw(sample status nearest_backbone p_distance validated_overlap reason)), "\n";
-		for my $sample (sort keys %{$placements}) {
-			my $entry = $placements->{$sample};
+		my $primaryTree = $backboneTree;
+		my $dedicatedBackbone = $primaryTree =~ s/\.backbone\.treefile$/.treefile/;
+		if (@{$strictSplit->{placement}}) {
+			my $placements = nearest_backbone_placements(
+				$multAli, $placementAlignment, $placementMinOverlap, $useAA4tree,
+			);
+			my $report = "$treeD/strict_backbone.placements.tsv";
+			open my $reportFh, '>', $report or die "Cannot write $report: $!\n";
 			print {$reportFh} join("\t",
-				$sample, $entry->{status}, $entry->{anchor},
-				defined($entry->{distance}) ? sprintf('%.8g', $entry->{distance}) : 'NA',
-				$entry->{overlap}, $strictSplit->{reason}{$sample} // '',
-			), "\n";
+				qw(sample status nearest_backbone p_distance validated_overlap reason)), "\n";
+			for my $sample (sort keys %{$placements}) {
+				my $entry = $placements->{$sample};
+				print {$reportFh} join("\t",
+					$sample, $entry->{status}, $entry->{anchor},
+					defined($entry->{distance}) ? sprintf('%.8g', $entry->{distance}) : 'NA',
+					$entry->{overlap}, $strictSplit->{reason}{$sample} // '',
+				), "\n";
+			}
+			close $reportFh or die "Cannot close $report: $!\n";
+			if (!$dedicatedBackbone) {
+				$primaryTree =~ s/\.treefile$/.placed.treefile/;
+				$primaryTree .= ".placed.treefile" if $primaryTree eq $backboneTree;
+			}
+			write_placed_tree($backboneTree, $primaryTree, $placements);
+			print "Sparse-sample distance placements: $report; primary tree: $primaryTree; "
+				."backbone tree: $backboneTree\n";
+		} elsif ($dedicatedBackbone) {
+			my $temporaryPrimary = "$primaryTree.tmp.$$";
+			unlink $temporaryPrimary
+				or die "Cannot remove stale primary-tree temporary $temporaryPrimary: $!\n"
+				if -e $temporaryPrimary;
+			copy($backboneTree, $temporaryPrimary)
+				or die "Cannot copy backbone tree $backboneTree to $temporaryPrimary: $!\n";
+			rename $temporaryPrimary, $primaryTree
+				or die "Cannot publish primary tree $primaryTree: $!\n";
+			print "No samples required placement; primary tree: $primaryTree; "
+				."backbone tree: $backboneTree\n";
 		}
-		close $reportFh or die "Cannot close $report: $!\n";
-		my $placedTree = $backboneTree;
-		$placedTree =~ s/\.treefile$/.placed.treefile/;
-		$placedTree .= ".placed.treefile" if $placedTree eq $backboneTree;
-		write_placed_tree($backboneTree, $placedTree, $placements);
-		print "Sparse-sample distance placements: $report; display tree: $placedTree\n";
+		if ($primaryTree ne $backboneTree) {
+			${$trRetH}{backbone_nwk} = $backboneTree;
+			${$trRetH}{nwk} = $primaryTree;
+			$phyloTree = $primaryTree;
+		}
 	} else {
 		warn "Strict-backbone samples were separated, but no completed backbone tree "
 			."was available for post-inference placement\n";
@@ -1504,7 +1530,9 @@ sub treePresent{
 	if ($doIQTree){
 		$checked = 1;
 		my $IQtree = "$treeOpts{IQtreeout}";
-		$ret=0 unless ($continue && -s "$IQtree.treefile");
+		my $reason = '';
+		$ret=0 unless ($continue
+			&& iqtreeOutputComplete($IQtree, $treeOpts{inMSA}, \$reason));
 	}
 	if ($doRAXMLng){
 		$checked = 1;
@@ -1636,9 +1664,17 @@ sub treeAtHeart{
 	}
 	if ($doIQTree){
 		my $IQtree = "$treeOpts{IQtreeout}";
-		unless ($continue && -s "$IQtree.treefile"){
+		my $validationReason = '';
+		unless ($continue
+			&& iqtreeOutputComplete($IQtree, $treeOpts{inMSA}, \$validationReason)){
+			print "IQ-TREE checkpoint will be rebuilt/resumed: $validationReason\n"
+				if $continue && (-e "$IQtree.treefile" || -e "$IQtree.log");
 			runQItree(\%treeOpts);
+		} else {
+			cleanupIQTreeTransients($IQtree);
 		}
+		die "IQ-TREE output failed post-run validation: $validationReason\n"
+			unless iqtreeOutputComplete($IQtree, $treeOpts{inMSA}, \$validationReason);
 		$phyloTree = "$IQtree.treefile";
 	}
 	if ($doRAXMLng){

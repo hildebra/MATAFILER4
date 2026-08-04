@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.25;/,
-	'rare broad-locus retention increments the workflow version');
+like($source, qr/my \$version = 5\.27;/,
+	'default placed-tree publication increments the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
@@ -158,8 +158,18 @@ like($source, qr/my \$partition = \$treeOpts\{partition\} \/\/ "";.*?\$treeOpts\
 	'the partition path is resolved after alignment concatenation, immediately before tree execution');
 unlike($source, qr/\$continue && -e (?:\$treeOpts\{(?:fastTrOut|VfastTrOut|RAXNGtreeout|RAXtreeout)\}|"\$IQtree\.treefile")/,
 	'resume gates do not accept empty tree outputs');
-like($source, qr/\$continue && -s "\$IQtree\.treefile"/,
-	'IQ-TREE resume requires a nonempty tree');
+like($source,
+	qr/\$continue\s*&& iqtreeOutputComplete\(\$IQtree, \$treeOpts\{inMSA\}, \\\$reason\)/,
+	'IQ-TREE resume requires a successful log and exact alignment/tree taxon parity');
+like($source,
+	qr/my %BACKBONE_DEFAULT = \(.*?coverage_fraction => 0\.35/s,
+	'strict strain backbones use the relaxed severe-outlier coverage threshold');
+like($source,
+	qr/\$tOhr->\{IQtreeout\} \.= "\.backbone" if \$strictBackbone && \$doIQTree/,
+	'strict IQ-TREE inference uses a dedicated backbone output prefix');
+like($source,
+	qr/my \$dedicatedBackbone = \$primaryTree =~ s\/\\\.backbone\\\.treefile\$\/\.treefile\/.*?write_placed_tree\(\$backboneTree, \$primaryTree, \$placements\).*?\$\{\$trRetH\}\{backbone_nwk\} = \$backboneTree;.*?\$\{\$trRetH\}\{nwk\} = \$primaryTree;/s,
+	'the placed tree becomes the primary .treefile while the ML tree remains .backbone.treefile');
 like($source, qr/unlink \$treeOpts\{RAXtreeout\}.*?if -e \$treeOpts\{RAXtreeout\} && !-s \$treeOpts\{RAXtreeout\}/s,
 	'an empty legacy RAxML tree cannot suppress continuation recovery');
 like($source,

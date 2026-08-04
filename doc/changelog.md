@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-04 — IQ-TREE completion and strain-tip recovery
+
+- Updated `buildTree5.pl` from 5.25 to 5.27.
+- Retained IQ-TREE's standard identical-sequence handling without `-keep-ident`, while requiring exact alignment/tree taxon parity before accepting the inferred backbone as complete.
+- Rejected partial tree files whose logs lack the IQ-TREE completion marker or end in an error. Numerical-underflow failures now restart once with the safe likelihood kernel; large strain alignments use that kernel pre-emptively.
+- Removed completed-run IQ-TREE transients, including `.uniqueseq.phy`, checkpoints, distance matrices, and variable-site intermediates.
+- Relaxed strict-backbone filtering from 70% to 35% of Q90 called-site coverage. A locus-QC placement flag alone no longer removes a well-covered sample after the affected loci have already been masked.
+- Published the approximate nearest-backbone grafted tree as the default `IQtree_allsites.treefile` and retained the ML inference as `IQtree_allsites.backbone.treefile`; the grafts do not alter or improve the ML backbone topology.
+
 ## 2026-07-22 — MGS and strain workflow hardening
 
 This release hardens the Perl orchestration around species clustering, taxonomic abundance estimation, and between- and within-species phylogeny construction. The `clusterMAGs` C++ clustering algorithm itself was not reviewed in this pass.

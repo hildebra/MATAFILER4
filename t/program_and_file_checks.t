@@ -56,6 +56,11 @@ like(
 	qr/my \$cmd = "\$iqTree -s \$inMSA \$threadOpts -pre \$treeOut -seed 678 -quiet "/,
 	'IQ-TREE invocations use the selected bounded thread policy and quiet output',
 );
+unlike(
+	$phylo_tools,
+	qr/(?:^|\s)-keep-ident(?:\s|$)/m,
+	'IQ-TREE uses its standard identical-sequence handling without -keep-ident',
+);
 like(
 	$phylo_tools,
 	qr/my \$threadOpts = "-T \$ncore"/,
@@ -90,6 +95,16 @@ like(
 	$phylo_tools,
 	qr/\$cmd \.= \$iqLegacy \? "-m GTR\+F\+I\+G4 " : "-m GTR\+F\+G2 "/,
 	'modern nucleotide trees use GTR+F+G2 while legacy mode retains the previous model',
+);
+like(
+	$phylo_tools,
+	qr/\$taxonCount >= 750.*?\$runSafe = 1.*?_iqtreeLogRequestsSafeKernel.*?restarting once with -safe/s,
+	'large strain trees start with the safe kernel and explicit underflow triggers one safe retry',
+);
+like(
+	$phylo_tools,
+	qr/iqtreeOutputComplete\(\$treeOut, \$inMSA.*?cleanupIQTreeTransients\(\$treeOut\)/s,
+	'IQ-TREE completion is taxon-validated before temporary artifacts are removed',
 );
 
 my @p1 = ('a.1.fq', 'b.1.fq', 'c.1.fq');
