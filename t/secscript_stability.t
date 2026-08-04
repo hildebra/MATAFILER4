@@ -421,6 +421,18 @@ my @central_widths = map { scalar(split /\t/, $_, -1) } @central_lines;
 is_deeply(\@central_widths, [5, 5, 5],
           'central serialization keeps every sample aligned to the selected columns');
 
+my $missing_dir_warning = "";
+my $missing_dir_text;
+{
+	local $SIG{__WARN__} = sub { $missing_dir_warning .= $_[0] };
+	$missing_dir_text = TestCentralSampleStats::_metag_stats_text(
+		{ C => {values => {RawInputSize => "3.000G"}} }, ["C"],
+	);
+}
+is($missing_dir_warning, "", "undefined cached DIR values do not warn during serialization");
+like($missing_dir_text, qr/^C\t\t3\.000G$/m,
+	"undefined cached DIR values serialize as an empty field");
+
 my ($hybrid_stats_code) = $mataf4_stats =~ /(sub getHybridAssemblyStats.*?)(?=\nsub smplStats)/s;
 ok(defined($hybrid_stats_code), 'hybrid statistics parser can be isolated for testing');
 eval "package TestHybridSampleStats; $hybrid_stats_code";

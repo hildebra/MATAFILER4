@@ -7574,7 +7574,9 @@ sub _metag_stats_text {
 	for my $sample (@$order) {
 		next unless exists $stats->{$sample};
 		my $values = $stats->{$sample}{values} || {};
-		my @row = ($sample, $stats->{$sample}{DIR});
+		my $directory = defined($stats->{$sample}{DIR}) ? $stats->{$sample}{DIR} : "";
+		$directory =~ s/[\t\r\n]+/ /g;
+		my @row = ($sample, $directory);
 		for my $name (@columns) {
 			my $value = defined($values->{$name}) ? $values->{$name} : '';
 			$value =~ s/[\t\r\n]+/ /g;

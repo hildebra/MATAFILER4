@@ -523,8 +523,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?my \$MATFILER_ver = 4\.29;/s,
-	'MATAFILER history retains shared input discovery through version 4.29');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?my \$MATFILER_ver = 4\.30;/s,
+	"MATAFILER history retains shared input discovery through version 4.30");
 like($mataf4,
 	qr/return unless \$summary->\{failed\};.*?my \@failureColumns.*?Job_category/s,
 	'the end-of-run Slurm failure report is an occurrence matrix shown only when failures exist');
@@ -585,8 +585,8 @@ like($mataf4,
 	qr/my \$mappingArtifactsPresent\s*=.*?if \(!\$efinAssLoc && !\$ePreAssmbly && \$mappingArtifactsPresent\)/s,
 	'a missing clean-run assembly does not masquerade as a mapping redo');
 like($mataf4,
-	qr/my \$assemblyDownstreamScheduled.*?my \$assemblyDownstreamDeferred.*?my \$variantCommonInputsPublished.*?my \$primaryVariantInputsPublished.*?my \$supportVariantInputsPublished.*?my \$variantInputsMayBePending.*?\$variantCommonInputsReady.*?\$primaryVariantInputsReady.*?\$doMapping.*?\$supportVariantInputsReady.*?\$mapSuppAssFlag.*?allowPendingInputs => \(\$variantInputsMayBePending/s,
-	'variant calls accept published inputs or same-pass producer jobs with scheduler dependencies');
+	qr/my \$variantCommonInputsPublished.*?my \$variantCommonInputsPending.*?my \$primaryVariantMappingPending.*?my \$supportVariantMappingPending.*?my \$variantInputsMayBePending.*?allowPendingInputs => \(\$variantInputsMayBePending/s,
+	"variant calls accept each published input or its own same-pass producer");
 like($mataf4,
 	qr/my \$runConsensus =.*?callConsSNP.*?callConsSNPSupp.*?SNPconsensus_vcf\(\\%SNPinfo\) if \$runConsensus/s,
 	'an SV-only request does not execute the SNP-consensus workflow');
@@ -650,6 +650,15 @@ like($mataf4,
 like($mataf4,
 	qr/for my \$SNPinfo \(\@pendingSecondMapSNP\).*?next unless -s \$secondReference && -s \$secondMapping;.*?createConsSNPandSVs\(\$SNPinfo\)/s,
 	'secondary-reference ConsSNP also waits for its published reference and mapping');
+like($mataf4,
+	qr/my \$consensusFastasComplete.*?fileGZe\(\$contigsSNP\).*?fileGZe\(\$genePredSNP\).*?fileGZe\(\$genePredAASNP\).*?my \$primaryConsensusComplete.*?my \$supportConsensusComplete/s,
+	"ConsSNP completion covers every requested consensus FASTA, VCF, and stone");
+like($mataf4,
+	qr/my \$genePredGff.*?my \$boolGenePredOK = fileGZe\(\$genePredProtein\) && fileGZe\(\$genePredGff\).*?sub genePredictions.*?fileGZs\("\$expectedD\/genes\$bacmark\.gff"\)/s,
+	"gene prediction is complete only when its GFF is published with the protein output");
+like($mataf4,
+	qr/my \$consensusNeedsContigStats.*?!\$cleanupContigStatsComplete.*?\|\| \$consensusNeedsContigStats.*?my \$variantPrerequisiteDeps = normalise_job_dependencies\(\s*\$publicationDeps, \$currentContigStatsDeps, \$AsGrps\{\$cAssGrp\}\{BinDeps\}.*?jdeps => \$variantPrerequisiteDeps/s,
+	"ConsSNP explicitly repairs and depends on the requested ContigStats products");
 unlike($mataf4,
 	qr/\{(?:AssemblJobName|MapDeps|BinDeps|SeqClnDeps|SeqUnZDeps|UnzpDeps|readDeps|DiamDeps|scndMapping|prodRun)\}\s*\.=/,
 	'central workflow dependencies are not assembled with fragile string concatenation');

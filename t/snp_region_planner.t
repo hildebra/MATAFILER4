@@ -116,8 +116,14 @@ like($snp_source,
 	qr/pending SNP inputs require scheduler dependencies.*?test -s \$refFA.*?test -s \$tar\[0\].*?test -s \$depthFile/s,
 	'pending consensus inputs require an afterok chain and are validated inside the allocation');
 like($snp_source,
-	qr/my \$gffAvailable = -s \$gffF \|\| \(\$allowPendingInputs && \$createGeneFastas\).*?test -s \$gffF/s,
-	'future gene annotations are accepted at submission and checked before consensus FASTA creation');
+	qr/SNP GFF is required for consensus statistics.*?unless \$allowPendingInputs \|\| -s \$gffF.*?test -s \$gffF.*?my \$vcf2fnaIns = "-ref \$refFA -gff \$gffF "/s,
+	"vcf2fna always receives its GFF, including stats-only and pending-producer runs");
+like($snp_source,
+	qr/SNP ContigStats depth is missing or empty.*?test -s \$contigDepthF.*?--depth \$contigDepthF/s,
+	"primary consensus validates ContigStats depth before runtime region planning");
+like($snp_source,
+	qr/my \$primaryNormStone.*?my \$primaryNormReady.*?rm -f \$primaryNormStone.*?touch \$primaryNormStone/s,
+	"normalization checkpoints distinguish a reusable normalized VCF from an interrupted normalization");
 like($snp_source,
 	qr/estimateConsensusCores\(\$consensusInputMB, \$maxSNPcores\).*?qsubSystem\([^;]+\$cmdFTag\.oSNPc\.sh[^;]+\$actualCores,/s,
 	'oSNPc submission requests the automatically estimated runtime region count');
