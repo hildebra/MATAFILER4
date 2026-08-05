@@ -115,7 +115,7 @@ The exact files depend on the run flags. A minimal completed assembly usually co
 
 ### Sample completion sentinel
 
-After every requested sample output and final cleanup check succeeds, or an empty/too-small sample reaches its terminal cleanup, MATAFILER4 atomically publishes:
+After every requested sample output and final cleanup check succeeds, or an empty, empty-after-cleaning, or too-small sample reaches its terminal cleanup, MATAFILER4 atomically publishes:
 
 ```text
 #OutPath/#RunID/<SmplID>/MF4.sentinel.<SmplID>.json
@@ -126,6 +126,8 @@ This versioned JSON record is the authoritative closed-sample marker. It keeps o
 Every matched file check records `size_bytes`; checks with alternative paths also record the matched path. If a valid sentinel for an already-complete sample lacks a recorded size, the next visit refreshes only the component evidence and rewrites the JSON while reusing its cached metagStats values. It does not rerun sample statistics collection. Later loop visits can therefore confirm completion with one small read, and run-level summary generation does not rescan sample outputs or large log files.
 
 MATAFILER4 removes the sentinel before proceeding when the workflow signature changes, a redo request is active, or the record is invalid. ContigStats, SNP, and binner entry points also remove it before modifying sample outputs; assembly-group binning invalidates every member sample. The sentinel is recreated only after the full completion and cleanup gate passes again. It should not be created or edited manually.
+
+If SDM quality/host filtering leaves no primary FASTQ records, MATAFILER4 writes `SMPL.empty` with the reason `cleaned_primary_reads_empty`, closes the sample as `skipped_cleaned_empty`, and omits it from assembly work. MEGAHIT also checks the actual cleaned FASTQ content at runtime, so a nonzero gzip header alone cannot produce an empty assembly.
 
 ### `assemblies/`
 

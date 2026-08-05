@@ -120,6 +120,9 @@ like($cleaner, qr/grep \{ !-e \$_ \} \@requiredOutputs/,
 	'a successful checkpoint accepts valid empty filtered outputs');
 unlike($cleaner, qr/requiredNonEmpty/,
 	'redundant size-based completion state has been removed');
+like($cleaner,
+	qr/if \(!\$useXtras\).*?SMPL\.empty.*?mf4_sdm_fastq_has_records.*?cleaned_primary_reads_empty/s,
+	'primary SDM cleaning marks a sample when no FASTQ records remain after filtering');
 like($mataf4, qr/primaryCleanPending.*?filterDone\.stone.*?supportCleanPending.*?filterSupplDone\.stone.*?seqCleanFlag/s,
 	'a missing support-cleaning checkpoint forces raw-read restaging');
 unlike($mataf4, qr/scalar\(\@files\) == 1.*?rm -rf \$finDest\/rawRds/s,

@@ -15,7 +15,7 @@ use Mods::WorkflowControl qw(
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
-	commands_are_lightweight_filesystem input_terminal_status reconcile_sample_empty_marker cleanup_stage_barrier
+	commands_are_lightweight_filesystem input_terminal_status sample_empty_marker_reason reconcile_sample_empty_marker cleanup_stage_barrier
 );
 
 is(assembly_cores_for_input(input_mb => 0, configured_cores => 0), 8,
@@ -77,6 +77,15 @@ is(reconcile_sample_empty_marker(
 	sample_root => $empty_state_root, input_size_mb => 0.5, threshold_mb => 1,
 ), 1, 'a genuinely too-small sample retains its empty marker');
 ok(-e $empty_marker, 'valid SMPL.empty remains present for a too-small sample');
+open($empty_marker_fh, '>', $empty_marker) or die "Cannot rewrite $empty_marker: $!";
+print {$empty_marker_fh} "cleaned_primary_reads_empty\n";
+close($empty_marker_fh) or die "Cannot close $empty_marker: $!";
+is(sample_empty_marker_reason($empty_state_root), 'cleaned_primary_reads_empty',
+	'a reasoned cleaner marker records that no primary reads survived');
+is(reconcile_sample_empty_marker(
+	sample_root => $empty_state_root, input_size_mb => 8272.7, threshold_mb => 1,
+), 1, 'a cleaned-empty marker remains authoritative despite large raw input');
+ok(-e $empty_marker, 'cleaned-empty marker is retained for the next submission pass');
 my $cleanup_barrier = cleanup_stage_barrier(
 	{name => 'contig stats', required => 1, complete => 1},
 	{name => 'binning', required => 1, complete => 0, dependencies => 'run9;run9'},
@@ -550,8 +559,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?#4\.39:.*?#4\.40:.*?#4\.41:.*?my \$MATFILER_ver = 4\.41;/s,
-	'MATAFILER history retains shared input discovery through version 4.41');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?#4\.39:.*?#4\.40:.*?#4\.41:.*?#4\.42:.*?my \$MATFILER_ver = 4\.42;/s,
+	'MATAFILER history retains shared input discovery through version 4.42');
 like($mataf4, qr/setConfigFile\(\$MFconfig\{configFile\}\);.*?normalise_ribosome_request\(\\%MFopt\);/s,
 	'RiboFind redo flags enable profiling during option post-processing');
 like($mataf4, qr/my \$riboRedo = \{.*?prepare_ribosome_rerun\(.*?checkRawProgsFin\(.*?\$riboRedo->\{profile\}.*?\$riboRedo->\{assignment\}/s,
@@ -588,6 +597,9 @@ like($mataf4,
 like($mataf4,
 	qr/terminal_status => 'skipped_sdm_warning'.*?sdm_warning_type => 'invalid_paired_read'/s,
 	'SDM invalid-pair skips are retained as explicit sentinel outcomes');
+like($mataf4,
+	qr/cleaned_primary_reads_empty.*?Skipping sample \$curSmpl because no primary FASTQ records remained after SDM filtering.*?skipped_cleaned_empty.*?cleaned_input_scope => \$cleanedEmpty \? 'primary'/s,
+	'a post-SDM empty marker closes the sample without attempting an assembly');
 unlike($mataf4, qr/if \(\$MFopt\{RedoRiboFind\}\)\{system "rm -rf/,
 	'the stale late RiboFind cleanup path is absent');
 like($mataf4,

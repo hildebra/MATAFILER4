@@ -73,7 +73,7 @@ use Mods::WorkflowControl qw(
 	hybrid_local_scratch_gb
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
-	commands_are_lightweight_filesystem input_terminal_status reconcile_sample_empty_marker cleanup_stage_barrier
+	commands_are_lightweight_filesystem input_terminal_status sample_empty_marker_reason reconcile_sample_empty_marker cleanup_stage_barrier
 );
 
 
@@ -212,7 +212,9 @@ sub createConsSNPandSVs;
 #       contracts and persist lightweight evidence for every raw-read workflow.
 #4.41: 5.8.26: focus sentinel v3, record output byte sizes, and use
 #       sample-specific MF4.sentinel.<SampleID>.json filenames.
-my $MATFILER_ver = 4.41;
+#4.42: 5.8.26: mark primary cleaned-read sets with no FASTQ records as
+#       SMPL.empty and prevent empty MEGAHIT assemblies.
+my $MATFILER_ver = 4.42;
 
 #----------------- defaults ----------------- 
 
@@ -701,6 +703,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$closedSample = undef;
 			$completionError = 'current input size no longer qualifies for the stored terminal outcome';
 		}
+	}
+	if ($closedSample && $closedSample->{outcome}{status} eq 'skipped_cleaned_empty'
+			&& sample_empty_marker_reason($curOutDir) ne 'cleaned_primary_reads_empty') {
+		$closedSample = undef;
+		$completionError = 'the cleaned-empty marker is absent';
 	}
 	if ($closedSample && completion_record_needs_refresh($closedSample)) {
 		$expectedCompletionComponents = sampleCompletionComponents(
@@ -1370,18 +1377,21 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		input_size_mb => $combinedInputSizeMB,
 		threshold_mb => $MFconfig{skipSmallSmplsMB},
 	);
+	my $cleanedEmpty = sample_empty_marker_reason($curOutDir) eq 'cleaned_primary_reads_empty';
 	#print "small skip: $MFconfig{skipSmallSmplsMB} $map{$curSmpl}{inputFileSizeMB} $map{$curSmpl}{inputXFileSizeMB} $AssemblyGo \n";
 	if (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB}) && (!$AssemblyGo || $AsGrps{$cAssGrp}{CntAimAss} <= 1 ) ){
-		
-		if ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB} ){
-			printf "Skipping sample %s because combined primary + supplementary input is %.1f MB (%.1f + %.1f), below %.1f MB\n",
-				$curSmpl, $combinedInputSizeMB,
-				($map{$curSmpl}{inputFileSizeMB} || 0),
-				($map{$curSmpl}{inputXFileSizeMB} || 0),
-				$MFconfig{skipSmallSmplsMB};
-			#still create essentials
-			#	my $coveragePerCtg = "$ContigStatsDir/Coverage.percontig.gz";
-			#!$eFinMapCovGZ && $eCovAsssembly) || ($eSuppCovAsssembly && !$eFinSupMapCovGZ)
+		if ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB} || $cleanedEmpty ){
+			if ($cleanedEmpty) {
+				print "Skipping sample $curSmpl because no primary FASTQ records remained after SDM filtering\n";
+			} else {
+				printf "Skipping sample %s because combined primary + supplementary input is %.1f MB (%.1f + %.1f), below %.1f MB\n",
+					$curSmpl, $combinedInputSizeMB,
+					($map{$curSmpl}{inputFileSizeMB} || 0),
+					($map{$curSmpl}{inputXFileSizeMB} || 0),
+					$MFconfig{skipSmallSmplsMB};
+			}
+			# Still create the lightweight downstream placeholders expected for a
+			# terminal empty sample, including one emptied by quality filtering.
 			my $geneCovTmpFile = $coveragePerCtg; $geneCovTmpFile =~ s/percontig.gz$/count_pergene/;
 			my $geneCntTmpFile = $coveragePerCtg; $geneCntTmpFile =~ s/percontig.gz$/pergene/;
 			my $geneMedTmpFile = $coveragePerCtg; $geneMedTmpFile =~ s/percontig.gz$/median.pergene/;
@@ -1390,11 +1400,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			system "mkdir -p $finalMapDir" unless (-d $finalMapDir);
 			system "mkdir -p $curOutDir" unless (-d $curOutDir); $coveragePerCtg =~ s/\.gz$//;
 			system "touch $tmpMapCovGZ $coveragePerCtg $geneCovTmpFile $geneCntTmpFile $geneMedTmpFile $curOutDir/SMPL.empty";
-		} else {
-			#print "Sample empty.. next\n";
 		}
 		$runReport{empty_samples}{$curSmpl} = $combinedInputSizeMB;
-		my $emptyTerminalStatus = input_terminal_status(
+		my $emptyTerminalStatus = $cleanedEmpty ? 'skipped_cleaned_empty' : input_terminal_status(
 			input_size_mb => $combinedInputSizeMB,
 			threshold_mb => $MFconfig{skipSmallSmplsMB},
 		);
@@ -1411,6 +1419,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				$closeSampleOutcome->(
 					present_assembly => 0,
 					terminal_status => $emptyTerminalStatus,
+					cleaned_input_scope => $cleanedEmpty ? 'primary' : '',
 				);
 			} else {
 				delete $loopSampleCompleted{$JNUM};
@@ -1419,7 +1428,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			delete $loopSampleCompleted{$JNUM};
 		}
 		reduceProgStats(); #reduce counters for riboFind etc.. no find in this sample!
-		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
+		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR);
 		loop2C_check($cAssGrp,\@sampleDeps);next;
 	}
 	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $jdep) if ($assemblyFlag);
@@ -2678,6 +2687,8 @@ sub createSampleCompletionSentinel {
 		type => $args{sdm_warning_type} || '',
 		log => $args{sdm_warning_log} || '',
 	} if $terminalStatus eq 'skipped_sdm_warning';
+	$outcome->{cleaned_input_scope} = $args{cleaned_input_scope} || 'primary'
+		if $terminalStatus eq 'skipped_cleaned_empty';
 
 	my $started = clock_gettime(CLOCK_MONOTONIC);
 	reset_stats_log_sampling();
@@ -3122,7 +3133,7 @@ sub postprocess{
 			$runReport{samples}{$sampleName} = $closedSample->{metagstats};
 			$runReport{present_assemblies}++ if $closedSample->{present_assembly};
 			my $outcomeStatus = $closedSample->{outcome}{status} || '';
-			if ($outcomeStatus =~ /^skipped_(?:too_small|empty_input)$/) {
+			if ($outcomeStatus =~ /^skipped_(?:too_small|empty_input|cleaned_empty)$/) {
 				$runReport{empty_samples}{$sampleName} =
 					0 + ($closedSample->{outcome}{input_size_mb}{total} || 0);
 			}
@@ -3231,7 +3242,6 @@ sub postprocess{
 		print "Found ". ($runReport{present_assemblies} + scalar(keys %{$runReport{empty_samples}}))." of ".
 			(scalar keys %{$d2Inputs{samples}}) ." samples assembled (or ignored) and all tasks done.\n";
 		print "$warnMsg\n" if ($warnMsg ne "");
-		
 	}
 	my $totalScratchUse=0;
 	foreach my $smpl (@samples){
@@ -3241,7 +3251,7 @@ sub postprocess{
 	}
 	print "Estimated scratch use: " . int($totalScratchUse/1024)."G\n";
 	if (keys %{$runReport{empty_samples}} > 0){
-		print "Found Empty/too small (<". $MFconfig{skipSmallSmplsMB} ."MB) samples (N=".
+		print "Found empty-after-cleaning or too-small (<". $MFconfig{skipSmallSmplsMB} ."MB) samples (N=".
 			scalar(keys %{$runReport{empty_samples}}) . "):\n".
 			join(",", keys %{$runReport{empty_samples}}) ."\n\n";
 	}
@@ -5858,6 +5868,40 @@ sub sdmClean(){
 		close $inputFH or die "Cannot close $curOutDir/input_fil.txt: $!\n";
 	}
 
+	if (!$useXtras) {
+		my $emptyMarker = "$curOutDir/SMPL.empty";
+		$cmd .= <<'SDM_EMPTY_GUARD';
+mf4_sdm_fastq_has_records() {
+    local mf4_fastq="$1"
+    [[ -s "$mf4_fastq" ]] || return 1
+    local mf4_first_line=""
+    if [[ "$mf4_fastq" == *.gz ]]; then
+        mf4_first_line=$(set +o pipefail; gzip -cd -- "$mf4_fastq" 2>/dev/null | head -n 1)
+    else
+        IFS= read -r mf4_first_line < "$mf4_fastq" || true
+    fi
+    [[ "$mf4_first_line" == @* ]]
+}
+mf4_primary_records=0
+SDM_EMPTY_GUARD
+		for my $library (@cleanLibraries) {
+			my $files = $library->{files} || {};
+			if (($files->{r1} || '') ne '') {
+				my $r1 = _shell_quote($files->{r1});
+				my $r2 = _shell_quote($files->{r2});
+				$cmd .= "if mf4_sdm_fastq_has_records $r1 && mf4_sdm_fastq_has_records $r2; then mf4_primary_records=1; fi\n";
+			}
+			if (($files->{single} || '') ne '') {
+				my $single = _shell_quote($files->{single});
+				$cmd .= "if mf4_sdm_fastq_has_records $single; then mf4_primary_records=1; fi\n";
+			}
+		}
+		my $markerQ = _shell_quote($emptyMarker);
+		my $messageQ = _shell_quote("SDM retained no primary FASTQ records for $curSmpl; marked SMPL.empty");
+		$cmd .= "if (( ! mf4_primary_records )); then printf '%s\\n' cleaned_primary_reads_empty > $markerQ; "
+			."printf '%s\\n' $messageQ >&2; "
+			."elif [[ -f $markerQ ]] && [[ \"\$(head -n 1 -- $markerQ)\" == cleaned_primary_reads_empty ]]; then rm -f -- $markerQ; fi\n";
+	}
 	$cmd .= _shell_command('touch', '--', $stone)."\n";
 	my $jobName = "";
 	my $presence = -e $stone ? 1 : 0;

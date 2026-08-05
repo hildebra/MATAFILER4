@@ -23,6 +23,13 @@ sub write_alignment {
 	return $path;
 }
 
+sub sequence_with_c_block {
+	my ($length, $offset, $count) = @_;
+	my $sequence = 'A' x $length;
+	substr($sequence, $offset, $count) = 'C' x $count;
+	return $sequence;
+}
+
 my @alignments;
 for my $index (1 .. 8) {
 	push @alignments, write_alignment(
@@ -122,6 +129,80 @@ chomp(my @broad_kept = <$broad_keep_fh>);
 close $broad_keep_fh;
 is_deeply(\@broad_kept, [$wrong_orthologue],
 	'broad-AA profile retains a structurally valid locus despite deep between-species divergence');
+
+my @relative_loci;
+for my $index (1 .. 8) {
+	my $third_distance = (70, 70, 90, 90, 110, 110, 130, 130)[$index - 1];
+	my $fourth_distance = (156, 156, 161, 161, 167, 167, 173, 173)[$index - 1];
+	push @relative_loci, write_alignment(
+		"relative_stable$index",
+		[
+			'A' x 1000,
+			sequence_with_c_block(1000, 0, 10),
+			sequence_with_c_block(1000, 200, $third_distance),
+			sequence_with_c_block(1000, 500, $fourth_distance),
+		],
+	);
+}
+my $relative_outlier = write_alignment(
+	'relative_rate_outlier',
+	[
+		'A' x 1000,
+		sequence_with_c_block(1000, 0, 10),
+		sequence_with_c_block(1000, 200, 200),
+		sequence_with_c_block(1000, 500, 271),
+	],
+);
+my $relative_manifest = File::Spec->catfile($tmp, 'relative-manifest.txt');
+open my $relative_manifest_fh, '>', $relative_manifest
+	or die "Cannot create $relative_manifest: $!";
+print {$relative_manifest_fh} "$_\n" for @relative_loci, $relative_outlier;
+close $relative_manifest_fh or die "Cannot close $relative_manifest: $!";
+
+my $permissive_relative_report = File::Spec->catfile($tmp, 'relative-z8-report.tsv');
+my $permissive_relative_keep = File::Spec->catfile($tmp, 'relative-z8-keep.txt');
+my $permissive_relative_status = system(
+	$binary,
+	'-manifest', $relative_manifest,
+	'-report', $permissive_relative_report,
+	'-keep', $permissive_relative_keep,
+	'-sequenceType', 'nt',
+	'-relativeModifiedZ', 8,
+);
+is($permissive_relative_status, 0, 'permissive relative-divergence QC completes');
+open my $permissive_relative_keep_fh, '<', $permissive_relative_keep
+	or die "Cannot read $permissive_relative_keep: $!";
+chomp(my @permissive_relative_kept = <$permissive_relative_keep_fh>);
+close $permissive_relative_keep_fh;
+ok(grep($_ eq $relative_outlier, @permissive_relative_kept),
+	'an intermediate divergence locus passes the former Z=8 cutoff');
+
+my $strict_relative_report = File::Spec->catfile($tmp, 'relative-z5-report.tsv');
+my $strict_relative_keep = File::Spec->catfile($tmp, 'relative-z5-keep.txt');
+my $strict_relative_status = system(
+	$binary,
+	'-manifest', $relative_manifest,
+	'-report', $strict_relative_report,
+	'-keep', $strict_relative_keep,
+	'-sequenceType', 'nt',
+	'-relativeModifiedZ', 5,
+);
+is($strict_relative_status, 0, 'strict relative-divergence QC completes');
+open my $strict_relative_keep_fh, '<', $strict_relative_keep
+	or die "Cannot read $strict_relative_keep: $!";
+chomp(my @strict_relative_kept = <$strict_relative_keep_fh>);
+close $strict_relative_keep_fh;
+is(scalar(@strict_relative_kept), scalar(@relative_loci),
+	'the stricter cutoff removes exactly the divergence-outlier locus');
+ok(!grep($_ eq $relative_outlier, @strict_relative_kept),
+	'the stricter cutoff excludes the anomalously fast locus rather than a sample');
+open my $strict_relative_report_fh, '<', $strict_relative_report
+	or die "Cannot read $strict_relative_report: $!";
+my $strict_relative_text = do { local $/; <$strict_relative_report_fh> };
+close $strict_relative_report_fh;
+like($strict_relative_text,
+	qr/\Q$relative_outlier\E\tREJECT\t[^\n]*relative_p90_divergence_outlier/,
+	'the strict report records the locus-level P90 divergence reason');
 
 my $help = qx{"$binary" -help 2>&1};
 like($help, qr/minOccupancy FLOAT.*0\.35/s,

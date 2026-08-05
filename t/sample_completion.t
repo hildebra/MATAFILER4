@@ -292,6 +292,24 @@ is_deeply($record->{outcome}{sdm_warning},
 	{type => 'invalid_paired_read', log => '/tmp/sdm.log'},
 	'SDM terminal outcomes retain only the useful warning details');
 
+write_sample_completion(
+	root => $sample_root, sample => 'S1', request_signature => $signature,
+	components => $missing_ribo,
+	outcome => {
+		status => 'skipped_cleaned_empty',
+		input_size_mb => {primary => 8272.7, supplementary => 0, total => 8272.7},
+		cleaned_input_scope => 'primary',
+	},
+	metagstats => stats_record(),
+);
+($record, $error) = read_sample_completion(
+	root => $sample_root, sample => 'S1', request_signature => $signature,
+);
+is($record->{outcome}{status}, 'skipped_cleaned_empty',
+	'a zero-record cleaned input retains its explicit terminal outcome');
+is($record->{outcome}{cleaned_input_scope}, 'primary',
+	'cleaned-empty outcome records the read scope that became empty');
+
 my $decoded = read_json($path);
 $decoded->{schema_version} = 2;
 write_file($path, JSON::PP->new->canonical(1)->encode($decoded));

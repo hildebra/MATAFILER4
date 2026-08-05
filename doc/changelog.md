@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-05 — Strain locus outlier QC and partition merging
+
+- Updated `buildTree5.pl` to 5.32. Within-species MSAfix locus QC now uses a modified-Z cutoff of 5.0 (previously 8.0) for consensus-divergence outliers, rejecting anomalous loci while leaving sample retention unchanged.
+- The strain preset now defaults to IQ-TREE AutoModel. Partitioned nucleotide trees use `MFP+MERGE`, allowing IQ-TREE to merge compatible locus partitions instead of estimating an unstable independent rate for every short locus. `-AutoModel 0` remains an explicit fixed-model opt-out.
+- The continuation policy records the AutoModel choice, so a cached result inferred under a different tree-model policy is rebuilt rather than reused.
+
 ## 2026-08-05 — Taxon-aware strain locus selection
 
 - Updated `buildTree5.pl` to 5.31 and kept the selector localized in the tree workflow rather than splitting MSA orchestration into another script.

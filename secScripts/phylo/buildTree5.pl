@@ -35,6 +35,7 @@
 #5.29: add opt-in taxon-aware two-stage locus selection around the existing MSA workflow
 #5.30: enable taxon-aware locus selection by default
 #5.31: keep IQ-TREE inference unrooted; root published output downstream
+#5.32: reject stronger locus-level divergence outliers and enable partition merging by default for strain trees
 
 use warnings;
 use strict;
@@ -108,7 +109,7 @@ sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.31;
+my $version = 5.32;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -147,6 +148,7 @@ my $calcDistMat = 0; #distmat of either AA or NT (depending on MSA)
 my $calcDistMatExt = 0; #distmat of other AA or NT (depending on MSA), e.g. running two times an MSA
 my $calcDistMatExtGo = 0;
 my $treeAutoModel=1; #iqtree: choose model automatically (a bit slower)
+my $treeAutoModelExplicit=0;
 my $fracMaxGenesFilter = 0.2;
 my $fracMaxGenes90pct = 0.25; #gene cats to keep, e.g. 25% of 90th percentile
 
@@ -201,7 +203,7 @@ my %POST_ALIGNMENT_QC_DEFAULT = (
 	within_species_enabled => 1,
 	minimum_sequences => 3,
 	minimum_occupancy => 0.35,
-	relative_modified_z => 8.0,
+	relative_modified_z => 5.0,
 	minimum_loci_for_relative => 8,
 );
 my $postAlignmentLocusQC;
@@ -318,7 +320,10 @@ GetOptions(
 	"taxonAwareTargetLoci=i" => \$taxonAwareTargetLoci,
 	"taxonAwareTargetNT=i" => \$taxonAwareTargetNT,
 	"runIQtree=i" => \$doIQTree,
-	"AutoModel=i" => \$treeAutoModel,
+	"AutoModel=i" => sub {
+		$treeAutoModel = $_[1];
+		$treeAutoModelExplicit = 1;
+	},
 	"iqFast=i" => \$iqFast, #fast qiTree mode
 	"iqMemMB=i" => \$iqMemMB, #IQ-TREE RAM cap in MB; 0 leaves IQ-TREE uncapped
 	"iqPathogen=i" => \$iqPathogen, #IQ-TREE 3 CMAPLE/native low-divergence selection
@@ -343,6 +348,8 @@ die "-withinSpecies must be 0 or 1\n"
 	unless $withinSpecies == 0 || $withinSpecies == 1;
 die "-strainWithinPreset must be 0 or 1\n"
 	unless $strainWithinPreset == 0 || $strainWithinPreset == 1;
+die "-AutoModel must be 0 or 1\n"
+	unless $treeAutoModel == 0 || $treeAutoModel == 1;
 if ($strainWithinPreset) {
 	$withinSpecies = 1;
 	$useAA4tree = 0;
@@ -358,7 +365,10 @@ if ($strainWithinPreset) {
 	$calcSyn = 0;
 	$calcNonSyn = 0;
 	$continue = 1;
-	$treeAutoModel = 0;
+	# MFP+MERGE retains all selected loci while avoiding one independently
+	# estimated partition rate per short strain locus. Preserve an explicit
+	# caller opt-out for reproducibility or diagnostic comparisons.
+	$treeAutoModel = 1 unless $treeAutoModelExplicit;
 	$iqFast = 1;
 	$doSuperTree = 0;
 	$doDNDS = 0;
@@ -577,6 +587,7 @@ print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
 	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
 	. "; supertree=" . ($doSuperTree ? "yes" : "no")
 	. "; IQ-TREE mode=" . ($iqLegacy ? "legacy" : $iqPathogen ? "pathogen" : "standard")
+	. "; IQ-TREE model=" . ($treeAutoModel ? "AutoModel" : "fixed")
 	. "; IQ-TREE memory=" . ($iqMemMB ? "${iqMemMB}MB" : "auto") . "\n";
 print "Additional analyses: synonymous=" . ($calcSyn ? "yes" : "no")
 	. "; nonsynonymous=" . ($calcNonSyn ? "yes" : "no")
@@ -663,7 +674,7 @@ my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=4",
+	"schema=5",
 	"enabled=$postAlignmentLocusQC",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
@@ -680,6 +691,7 @@ my $postAlignmentQCPolicy = join("\t",
 	"relative_modified_z=".($postAlignmentDivergenceQC
 		? $postAlignmentRelativeZ : "disabled"),
 	"minimum_loci_relative=$postAlignmentMinLociRelative",
+	"iqtree_auto_model=$treeAutoModel",
 	"taxon_aware=$taxonAwareLocusSelection",
 	"taxon_aware_maximum_loci=$taxonAwareMaxLoci",
 	"taxon_aware_core_loci=$taxonAwareCoreLoci",

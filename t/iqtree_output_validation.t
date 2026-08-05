@@ -146,4 +146,32 @@ ok(iqtreeOutputComplete($retryPrefix, $alignment, \$reason),
 ok(!-e "$retryPrefix.uniqueseq.phy",
 	'the successful retry removes its unique-sequence temporary file');
 
+my $partition = File::Spec->catfile($tmp, 'alignment.partition.RAXML');
+write_file($partition, "DNA, locus1 = 1-4\n");
+my $autoModelPrefix = File::Spec->catfile($tmp, 'IQtree_auto_model');
+{
+	no warnings 'redefine';
+	local *Mods::phyloTools::getProgPaths = sub { return $fakeIqtree };
+	runQItree({
+		inMSA => $alignment,
+		IQtreeout => $autoModelPrefix,
+		ncore => 1,
+		outgr => '',
+		bootStrap => 0,
+		useAA => 0,
+		iqtreeFast => 0,
+		autoModel => 1,
+		partition => $partition,
+		runSafe => 0,
+		iqMemMB => 0,
+		iqPathogen => 0,
+		iqLegacy => 0,
+		constraintTree => '',
+	});
+}
+my @auto_model_calls = grep { length } split /\n/, slurp("$autoModelPrefix.calls");
+like($auto_model_calls[0],
+	qr/(?:^|\s)-p \Q$partition\E(?=\s|$).*?(?:^|\s)-m MFP\+MERGE(?:\s|$)/,
+	'AutoModel uses MFP+MERGE for a partitioned alignment');
+
 done_testing();

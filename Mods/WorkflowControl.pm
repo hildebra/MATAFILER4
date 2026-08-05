@@ -2,6 +2,7 @@ package Mods::WorkflowControl;
 
 use warnings;
 use strict;
+use IO::Uncompress::Gunzip qw($GunzipError);
 
 use Exporter qw(import);
 
@@ -26,6 +27,8 @@ our @EXPORT_OK = qw(
 	deferred_command_dependencies
 	commands_are_lightweight_filesystem
 	input_terminal_status
+	cleaned_primary_libraries_empty
+	sample_empty_marker_reason
 	reconcile_sample_empty_marker
 	cleanup_stage_barrier
 	augment_deferred_submission
@@ -144,6 +147,65 @@ sub input_terminal_status {
 	return '';
 }
 
+sub _fastq_file_has_records {
+	my ($path) = @_;
+	return undef unless defined($path) && -e $path && -s $path;
+	my $fh;
+	if ($path =~ /\.gz$/i) {
+		$fh = IO::Uncompress::Gunzip->new($path);
+		return undef unless $fh;
+	} else {
+		open $fh, '<', $path or return undef;
+	}
+	my $first_line = <$fh>;
+	close $fh;
+	return defined($first_line) && $first_line =~ /^\@/ ? 1 : 0;
+}
+
+sub cleaned_primary_libraries_empty {
+	my ($libraries) = @_;
+	die 'cleaned_primary_libraries_empty requires an array reference'
+		unless ref($libraries) eq 'ARRAY';
+	my $saw_input = 0;
+	for my $library (@{$libraries}) {
+		next unless ref($library) eq 'HASH';
+		my $files = $library->{files} || {};
+		my ($r1, $r2, $single) = @{$files}{qw(r1 r2 single)};
+		if (defined($r1) && $r1 ne '') {
+			return 0 unless defined($r2) && $r2 ne '' && -e $r1 && -e $r2;
+			my $r1_has_records = _fastq_file_has_records($r1);
+			my $r2_has_records = _fastq_file_has_records($r2);
+			return 0 unless defined($r1_has_records) && defined($r2_has_records);
+			return 0 if $r1_has_records != $r2_has_records;
+			return 0 if $r1_has_records;
+			$saw_input = 1;
+		}
+		if (defined($single) && $single ne '') {
+			return 0 unless -e $single;
+			my $single_has_records = _fastq_file_has_records($single);
+			return 0 unless defined($single_has_records);
+			return 0 if $single_has_records;
+			$saw_input = 1;
+		}
+	}
+	return $saw_input ? 1 : 0;
+}
+
+sub sample_empty_marker_reason {
+	my ($sample_root) = @_;
+	die 'sample_empty_marker_reason requires sample_root'
+		unless defined($sample_root) && length($sample_root);
+	my $marker = "$sample_root/SMPL.empty";
+	return '' unless -f $marker;
+	open my $fh, '<', $marker
+		or die "Cannot read sample empty marker $marker: $!\n";
+	my $reason = <$fh>;
+	close $fh or die "Cannot close sample empty marker $marker: $!\n";
+	return '' unless defined($reason);
+	$reason =~ s/[\r\n]+$//;
+	return $reason eq 'cleaned_primary_reads_empty' ? $reason : '';
+}
+
 sub reconcile_sample_empty_marker {
 	my (%args) = @_;
 	my $sample_root = $args{sample_root};
@@ -154,6 +216,10 @@ sub reconcile_sample_empty_marker {
 		threshold_mb => $args{threshold_mb},
 	);
 	my $marker = "$sample_root/SMPL.empty";
+	# A marker written by the primary read cleaner means that the map-resolved
+	# source may be large but no assembly input survived filtering. It remains
+	# authoritative until a cleaner rerun replaces or clears it.
+	return 1 if sample_empty_marker_reason($sample_root) eq 'cleaned_primary_reads_empty';
 	if ($status eq '' && (-e $marker || -l $marker)) {
 		unlink $marker
 			or die "Cannot remove stale nonempty-sample marker $marker: $!\n";

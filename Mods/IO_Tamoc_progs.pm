@@ -608,64 +608,86 @@ sub inputFmtMegahitRuntimeLibraries {
 	$arrayName ||= 'megahit_inputs';
 	die "Invalid MEGAHIT shell-array name '$arrayName'\n"
 		unless $arrayName =~ /^[A-Za-z_][A-Za-z0-9_]*$/;
-	my ($r1, $r2, $single) = legacyLibraryArrays($libraries, 1);
-	my (@left, @right, @singletons);
-	for (my $i = 0; $i < @{$r1}; $i++) {
-		my $left = $r1->[$i] || '';
-		my $right = $r2->[$i] || '';
+	my @clean_libraries = @{$libraries || []};
+	die "No read inputs supplied to MEGAHIT\n" unless @clean_libraries;
+
+	my $command = <<'BASH';
+mf4_fastq_has_records() {
+    local mf4_fastq="$1"
+    [[ -s "$mf4_fastq" ]] || return 1
+    local mf4_first_line=""
+    if [[ "$mf4_fastq" == *.gz ]]; then
+        mf4_first_line=$(set +o pipefail; gzip -cd -- "$mf4_fastq" 2>/dev/null | head -n 1)
+    else
+        IFS= read -r mf4_first_line < "$mf4_fastq" || true
+    fi
+    [[ "$mf4_first_line" == @* ]]
+}
+BASH
+	my $leftArray = "${arrayName}_left";
+	my $rightArray = "${arrayName}_right";
+	my $singleArray = "${arrayName}_singletons";
+	my $leftCsv = "${leftArray}_csv";
+	my $rightCsv = "${rightArray}_csv";
+	my $singleCsv = "${singleArray}_csv";
+	$command .= "$arrayName=()\n$leftArray=()\n$rightArray=()\n$singleArray=()\n";
+	for (my $i = 0; $i < @clean_libraries; $i++) {
+		my $files = $clean_libraries[$i]{files} || {};
+		my $left = $files->{r1} || '';
+		my $right = $files->{r2} || '';
 		die "Read library index $i has only one mate for MEGAHIT\n"
 			if (($left eq '') != ($right eq ''));
 		if ($left ne '') {
 			die "MEGAHIT input paths cannot contain commas: $left / $right\n"
 				if $left =~ /,/ || $right =~ /,/;
-			push @left, $left;
-			push @right, $right;
+			my $leftQ = _shell_quote_megahit_input($left);
+			my $rightQ = _shell_quote_megahit_input($right);
+			my $missingQ = _shell_quote_megahit_input(
+				"Missing paired input for MEGAHIT: $left / $right"
+			);
+			my $skippedQ = _shell_quote_megahit_input(
+				"Skipping zero-record cleaned paired library for MEGAHIT: $left / $right"
+			);
+			my $mismatchQ = _shell_quote_megahit_input(
+				"Cleaner produced mismatched paired read content for MEGAHIT: $left / $right"
+			);
+			$command .= "if [[ ! -e $leftQ || ! -e $rightQ ]]; then printf '%s\\n' $missingQ >&2; exit 41; fi\n";
+			$command .= "mf4_left_has_$i=0; mf4_right_has_$i=0\n";
+			$command .= "if mf4_fastq_has_records $leftQ; then mf4_left_has_$i=1; fi\n";
+			$command .= "if mf4_fastq_has_records $rightQ; then mf4_right_has_$i=1; fi\n";
+			$command .= "if (( mf4_left_has_$i && mf4_right_has_$i )); then $leftArray+=( $leftQ ); $rightArray+=( $rightQ ); "
+				."elif (( ! mf4_left_has_$i && ! mf4_right_has_$i )); then printf '%s\\n' $skippedQ >&2; "
+				."else printf '%s\\n' $mismatchQ >&2; exit 43; fi\n";
 		}
-		my $orphan = $single->[$i] || '';
+		my $orphan = $files->{single} || '';
 		if ($orphan ne '') {
 			die "MEGAHIT input paths cannot contain commas: $orphan\n" if $orphan =~ /,/;
-			push @singletons, $orphan;
-		}
-	}
-	die "No read inputs supplied to MEGAHIT\n" unless @left || @singletons;
-
-	my $command = "$arrayName=()\n";
-	if (@left) {
-		for (my $i = 0; $i < @left; $i++) {
-			my $leftQ = _shell_quote_megahit_input($left[$i]);
-			my $rightQ = _shell_quote_megahit_input($right[$i]);
-			my $messageQ = _shell_quote_megahit_input(
-				"Missing or empty paired input for MEGAHIT: $left[$i] / $right[$i]"
-			);
-			$command .= "if [[ ! -s $leftQ || ! -s $rightQ ]]; then "
-				."printf '%s\\n' $messageQ >&2; exit 41; fi\n";
-		}
-		my $leftCSV = _shell_quote_megahit_input(join(',', @left));
-		my $rightCSV = _shell_quote_megahit_input(join(',', @right));
-		$command .= "$arrayName+=( -1 $leftCSV -2 $rightCSV )\n";
-	}
-
-	if (@singletons) {
-		my $singleArray = "${arrayName}_singletons";
-		my $singleCSV = "${arrayName}_singleton_csv";
-		$command .= "$singleArray=()\n";
-		for my $orphan (@singletons) {
 			my $orphanQ = _shell_quote_megahit_input($orphan);
-			my $messageQ = _shell_quote_megahit_input(
-				"Skipping missing or empty optional MEGAHIT singleton: $orphan"
+			my $missingQ = _shell_quote_megahit_input(
+				"Skipping missing optional MEGAHIT singleton: $orphan"
 			);
-			$command .= "if [[ -s $orphanQ ]]; then $singleArray+=( $orphanQ ); "
-				."else printf '%s\\n' $messageQ >&2; fi\n";
+			my $skippedQ = _shell_quote_megahit_input(
+				"Skipping zero-record cleaned MEGAHIT singleton: $orphan"
+			);
+			$command .= "if [[ ! -e $orphanQ ]]; then printf '%s\\n' $missingQ >&2; "
+				."elif mf4_fastq_has_records $orphanQ; then $singleArray+=( $orphanQ ); "
+				."else printf '%s\\n' $skippedQ >&2; fi\n";
 		}
-		my $singleLength = '${#'.$singleArray.'[@]}';
-		my $singleValues = '${'.$singleArray.'[@]}';
-		$command .= "if (( $singleLength )); then "
-			."printf -v $singleCSV '%s,' \"$singleValues\"; "
-			."$singleCSV=\${$singleCSV%,}; $arrayName+=( -r \"\$$singleCSV\" ); fi\n";
 	}
+	my $leftLength = '${#'.$leftArray.'[@]}';
+	my $leftValues = '${'.$leftArray.'[@]}';
+	my $rightValues = '${'.$rightArray.'[@]}';
+	my $singleLength = '${#'.$singleArray.'[@]}';
+	my $singleValues = '${'.$singleArray.'[@]}';
+	$command .= "if (( $leftLength )); then printf -v $leftCsv '%s,' \"$leftValues\"; "
+		."printf -v $rightCsv '%s,' \"$rightValues\"; "
+		."$leftCsv=\${$leftCsv%,}; $rightCsv=\${$rightCsv%,}; "
+		."$arrayName+=( -1 \"\$$leftCsv\" -2 \"\$$rightCsv\" ); fi\n";
+	$command .= "if (( $singleLength )); then printf -v $singleCsv '%s,' \"$singleValues\"; "
+		."$singleCsv=\${$singleCsv%,}; $arrayName+=( -r \"\$$singleCsv\" ); fi\n";
 	my $argumentCount = '${#'.$arrayName.'[@]}';
 	$command .= "if (( $argumentCount == 0 )); then printf '%s\\n' "
-		."'No non-empty read inputs remain for MEGAHIT' >&2; exit 42; fi\n";
+		."'No FASTQ records remain for MEGAHIT after cleaning; refusing an empty assembly' >&2; exit 42; fi\n";
 	return ($command, '"${'.$arrayName.'[@]}"');
 }
 

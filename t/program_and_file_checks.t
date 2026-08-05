@@ -7,6 +7,7 @@ use File::Temp qw(tempdir);
 use FindBin qw($Bin);
 use Test::More;
 
+use IO::Compress::Gzip qw(gzip $GzipError);
 use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(fileGZe fileGZs resolveExistingFile);
 use Mods::IO_Tamoc_progs qw(
@@ -138,28 +139,44 @@ my ($runtime_setup, $runtime_args) = inputFmtMegahitRuntimeLibraries(
 );
 is($runtime_args, '"${mh_args[@]}"',
 	'runtime MEGAHIT arguments use a Bash array without word splitting');
-like($runtime_setup, qr/Skipping missing or empty optional MEGAHIT singleton/,
-	'runtime MEGAHIT setup treats projected singleton files as optional');
-like($runtime_setup, qr/Missing or empty paired input for MEGAHIT/,
-	'runtime MEGAHIT setup still requires both paired-read files');
+like($runtime_setup, qr/mf4_fastq_has_records/,
+	'runtime MEGAHIT setup tests for actual FASTQ records rather than compressed byte size');
+like($runtime_setup, qr/Skipping zero-record cleaned paired library for MEGAHIT/,
+	'runtime MEGAHIT setup skips a cleaner output that contains no paired records');
+like($runtime_setup, qr/No FASTQ records remain for MEGAHIT after cleaning/,
+	'runtime MEGAHIT setup stops an all-empty assembly group before invoking MEGAHIT');
 my $runtime_script = "$root/megahit-inputs.sh";
-for my $read ("$root/lib 0.1.fq.gz", "$root/lib 0.2.fq.gz",
-	"$root/lib1.1.fq.gz", "$root/lib1.2.fq.gz", "$root/lib1.singl.fq.gz") {
-	open my $read_fh, '>', $read or die $!;
-	print {$read_fh} "non-empty\n";
-	close $read_fh;
+sub write_gzip {
+	my ($path, $contents) = @_;
+	gzip \$contents => $path or die "Cannot gzip $path: $GzipError";
+}
+write_gzip("$root/lib 0.1.fq.gz", '');
+write_gzip("$root/lib 0.2.fq.gz", '');
+my $fastq = "\@read\nACGT\n+\n!!!!\n";
+for my $read ("$root/lib1.1.fq.gz", "$root/lib1.2.fq.gz", "$root/lib1.singl.fq.gz") {
+	write_gzip($read, $fastq);
 }
 open my $runtime_fh, '>', $runtime_script or die $!;
-print {$runtime_fh} "#!/bin/bash\n$runtime_setup\nprintf '<%s>\\n' $runtime_args\n";
+print {$runtime_fh} "#!/bin/bash\nset -eo pipefail\n$runtime_setup\nprintf '<%s>\\n' $runtime_args\n";
 close $runtime_fh;
 is(system('bash', '-n', $runtime_script), 0,
 	'generated runtime MEGAHIT input setup is valid Bash');
 my $runtime_output = `bash "$runtime_script" 2>/dev/null`;
-is($?, 0, 'runtime MEGAHIT input setup executes successfully');
+is($?, 0, 'runtime MEGAHIT input setup executes successfully with another nonempty library');
+like($runtime_output, qr/<-1>\n<\Q${root}\/lib1.1.fq.gz\E>\n<-2>\n<\Q${root}\/lib1.2.fq.gz\E>/,
+	'the generated MEGAHIT paired inputs exclude the header-only gzip library');
 like($runtime_output, qr/<-r>\n<\Q${root}\/lib1.singl.fq.gz\E>/,
-	'the generated MEGAHIT -r list retains an existing singleton');
-unlike($runtime_output, qr/lib 0\.singl/,
-	'the generated MEGAHIT -r list omits a missing projected singleton');
+	'the generated MEGAHIT -r list retains an existing singleton with FASTQ records');
+unlike($runtime_output, qr/lib 0\.(?:1|2)\.fq\.gz/,
+	'the generated MEGAHIT command omits zero-record paired files');
+unlink "$root/lib1.1.fq.gz" or die $!;
+unlink "$root/lib1.2.fq.gz" or die $!;
+unlink "$root/lib1.singl.fq.gz" or die $!;
+write_gzip("$root/lib1.1.fq.gz", '');
+write_gzip("$root/lib1.2.fq.gz", '');
+write_gzip("$root/lib1.singl.fq.gz", '');
+is(system('bash', $runtime_script) >> 8, 42,
+	'an all-zero-record assembly group exits before MEGAHIT can create an empty FASTA');
 
 {
 	no warnings 'redefine';

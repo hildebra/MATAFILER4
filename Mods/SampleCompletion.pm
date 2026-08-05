@@ -222,7 +222,8 @@ sub _completion_record_error {
 			&& defined($record->{outcome}{status})
 			&& $record->{outcome}{status} ne '';
 	my %allowed_status = map { $_ => 1 } qw(
-		completed skipped_too_small skipped_empty_input skipped_sdm_warning
+		completed skipped_too_small skipped_empty_input skipped_cleaned_empty
+		skipped_sdm_warning
 	);
 	return "unknown sentinel outcome '$record->{outcome}{status}'"
 		unless $allowed_status{$record->{outcome}{status}};
@@ -417,6 +418,8 @@ sub _compact_outcome {
 	$compact{small_sample_threshold_mb} =
 		0 + ($outcome->{small_sample_threshold_mb} || 0)
 		if $outcome->{status} eq 'skipped_too_small';
+	$compact{cleaned_input_scope} = $outcome->{cleaned_input_scope} || 'primary'
+		if $outcome->{status} eq 'skipped_cleaned_empty';
 	if ($outcome->{status} eq 'skipped_sdm_warning') {
 		my $warning = $outcome->{sdm_warning} || {};
 		$compact{sdm_warning} = {

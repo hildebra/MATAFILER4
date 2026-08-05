@@ -224,7 +224,7 @@ like($mataf4,
 unlike($mataf4,
 	qr/die "Deferred job submission failed:/,
 	'the formerly fatal deferred sbatch path has been removed');
-like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?#4\.39:.*?#4\.40:.*?#4\.41:.*?my \$MATFILER_ver = 4\.41/s,
-	'MATAFILER history retains loop and scheduler changes through version 4.41');
+like($mataf4, qr/#4\.11:.*?loopTillComplete.*?#4\.12:.*?#4\.13:.*?#4\.14:.*?#4\.15:.*?#4\.16:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?#4\.39:.*?#4\.40:.*?#4\.41:.*?#4\.42:.*?my \$MATFILER_ver = 4\.42/s,
+	'MATAFILER history retains loop and scheduler changes through version 4.42');
 
 done_testing;

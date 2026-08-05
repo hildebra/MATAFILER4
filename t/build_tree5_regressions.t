@@ -15,11 +15,14 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.31;/,
-	'default taxon-aware locus selection increments the workflow version');
+like($source, qr/my \$version = 5\.32;/,
+	'stronger locus-level QC and strain AutoModel defaults increment the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
+like($source,
+	qr/my \$treeAutoModel=1;.*?my \$treeAutoModelExplicit=0;.*?"AutoModel=i" => sub \{.*?\$treeAutoModel = \$_\[1\];.*?\$treeAutoModelExplicit = 1;.*?if \(\$strainWithinPreset\) \{.*?\$treeAutoModel = 1 unless \$treeAutoModelExplicit;/s,
+	'strain trees default to AutoModel while an explicit -AutoModel 0 remains an opt-out');
 like($source,
 	qr/my \$withinSpecies = 0;.*?my \$minOverlapMSA;.*?"withinSpecies=i".*?\$minOverlapMSA = \$withinSpecies \? 2 : 0 unless defined \$minOverlapMSA;.*?\$postAlignmentLocusQC = \$withinSpecies.*?unless defined \$postAlignmentLocusQC;.*?\$postAlignmentDivergenceQC = \$withinSpecies \? 1 : 0/s,
 	"between-species locus retention is the default and within-species filtering is explicit");
@@ -48,10 +51,10 @@ like($source, qr/post-alignment-loci-XXXXXX.*?UNLINK => 1.*?post-alignment-keep-
 like($source, qr/my \@temporaryFiles = \(.*?bsd_glob\(quotemeta\(\$reportFile\)\."\.tmp\.\*"\).*?bsd_glob\(quotemeta\(\$keepFile\)\."\.tmp\.\*"\).*?unlink \$temporaryFile/s,
 	'wrapper and partial native locus-QC files are explicitly deleted after every invocation');
 like($source,
-	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?between_species_enabled => 0.*?within_species_enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 8\.0.*?my \$postAlignmentLocusQC;/s,
-	'broad trees retain all loci by default while within-species trees retain structural QC');
+	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?between_species_enabled => 0.*?within_species_enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 5\.0.*?my \$postAlignmentLocusQC;/s,
+	'broad trees retain all loci by default while within-species trees reject stronger divergence outliers');
 like($source,
-	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=4".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"minimum_gene_fraction_per_species=\$GeneFracPSpec".*?"taxon_aware=\$taxonAwareLocusSelection".*?\$legacyWithinSpeciesQCAudit = !\$taxonAwareLocusSelection && \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
+	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=5".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"minimum_gene_fraction_per_species=\$GeneFracPSpec".*?"iqtree_auto_model=\$treeAutoModel".*?"taxon_aware=\$taxonAwareLocusSelection".*?\$legacyWithinSpeciesQCAudit = !\$taxonAwareLocusSelection && \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
 	'changed locus-retention policies rebuild stale checkpoints while legacy within-species audits remain compatible');
 like($source,
 	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?rename \$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
