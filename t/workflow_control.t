@@ -619,6 +619,15 @@ like($mataf4,
 like($mataf4,
 	qr/my \$finalizeEmptySample.*?skipped_cleaned_empty.*?Skipping sample \$curSmpl because no primary FASTQ records remained after SDM filtering.*?cleaned_input_scope => \$isCleanedEmpty \? 'primary'/s,
 	'a post-SDM empty marker closes the sample without attempting an assembly');
+like($mataf4,
+	qr/my \$terminalEmptySample.*?my \$releaseSharedAssembly = \$terminalEmptySample.*?AssemblSmplDirs\} =~ s\/.*?metagAssemblyRun\(.*?genePredictions\(.*?PostAssemblCmd.*?input_dependency => '', advance_loop => 0/s,
+	'a terminally empty final member releases the earlier assembly-group inputs without joining its reads');
+like($mataf4,
+	qr{my \$sharedAssemblyMissing = \$AssemblyGo.*?\$closedSample->\{outcome\}\{status\} =~ /\^skipped_/.*?shared assembly group has not been released}s,
+	'an existing terminal sentinel reopens once to release a missing shared assembly');
+like($mataf4,
+	qr/Deferring shared assembly release until terminal input staging.*?add2SampleDeps\(\\\@sampleDeps, \[\$jdep\]\).*?leaving terminal sample \$curSmpl open/s,
+	'a terminal member with active staging remains open until a safe shared-assembly release is possible');
 unlike($mataf4, qr/if \(\$MFopt\{RedoRiboFind\}\)\{system "rm -rf/,
 	'the stale late RiboFind cleanup path is absent');
 like($mataf4,

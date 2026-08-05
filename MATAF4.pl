@@ -709,6 +709,18 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$closedSample = undef;
 		$completionError = 'the cleaned-empty marker is absent';
 	}
+	# A terminal empty member cannot suppress the map-defined release of an
+	# incomplete shared assembly. Reopen it only to submit that group work; it
+	# will immediately receive the same terminal sentinel once submission is safe.
+	my $sharedAssemblyMissing = $AssemblyGo && $AsGrps{$cAssGrp}{CntAimAss} > 1
+		&& $MFopt{DoAssembly}
+		&& !(-s "$finalCommAssDir/scaffolds.fasta.filt"
+			&& -e "$finalCommAssDir/$checkpointNames{assemblyDone}");
+	if ($closedSample && $closedSample->{outcome}{status} =~ /^skipped_/
+			&& $sharedAssemblyMissing) {
+		$closedSample = undef;
+		$completionError = 'shared assembly group has not been released';
+	}
 	if ($closedSample && completion_record_needs_refresh($closedSample)) {
 		$expectedCompletionComponents = sampleCompletionComponents(
 			$curOutDir, $SmplName, $completionComponentContext,
@@ -1430,13 +1442,81 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			delete $loopSampleCompleted{$JNUM};
 		}
 		reduceProgStats();
+		return if exists($args{advance_loop}) && !$args{advance_loop};
 		MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
 		loop2C_check($cAssGrp, \@sampleDeps);
 	};
 	#print "small skip: $MFconfig{skipSmallSmplsMB} $map{$curSmpl}{inputFileSizeMB} $map{$curSmpl}{inputXFileSizeMB} $AssemblyGo \n";
-	if (-e "$curOutDir/SMPL.empty" || $jdep eq 'EMPTY_DO_NEXT'
-			|| ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB}
-				&& (!$AssemblyGo || $AsGrps{$cAssGrp}{CntAimAss} <= 1))) {
+	my $terminalEmptySample = -e "$curOutDir/SMPL.empty" || $jdep eq 'EMPTY_DO_NEXT'
+		|| $combinedInputSizeMB < $MFconfig{skipSmallSmplsMB};
+	# A terminal member may itself have no usable reads, but it can still be the
+	# map-defined release point for work accumulated from earlier members.  Do
+	# not add it to CleanSeqs/SeqClnDeps; submit only the pending shared assembly
+	# and mappings, each chained to the earlier members' producer jobs.
+	my $releaseSharedAssembly = $terminalEmptySample && $AssemblyGo
+		&& $AsGrps{$cAssGrp}{CntAimAss} > 1 && $MFopt{DoAssembly}
+		&& !$boolAssemblyOK && !$efinAssLoc;
+	if ($terminalEmptySample) {
+		if ($releaseSharedAssembly) {
+			# The terminal member was counted while traversing the map, but it must
+			# not appear in the published list of inputs used for this assembly.
+			$AsGrps{$cAssGrp}{AssemblSmplDirs} =~ s/\Q$curOutDir\n\E\z//;
+			if ($jdep ne '' && $jdep ne 'EMPTY_DO_NEXT') {
+				print "Deferring shared assembly release until terminal input staging for $curSmpl is finished\n";
+				add2SampleDeps(\@sampleDeps, [$jdep]);
+				delete $loopSampleCompleted{$JNUM};
+				MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+				loop2C_check($cAssGrp, \@sampleDeps);
+				next;
+			}
+			my $releaseName = $SmplName . "M" . $AsGrps{$cAssGrp}{CntAss};
+			print "Final assembly-group member $curSmpl is terminally empty; "
+				."releasing the shared assembly from earlier eligible members\n";
+			metagAssemblyRun(
+				$cAssGrp, "$nodeSpTmpD/ass", $metagAssDir, $geneDir, $releaseName,
+				0, $metaGscaffDir, $assemblyFlag, $AssemblyGo, $ePreAssmbly,
+				$doPreAssmFlag, $postPreAssmblGo, $finalCommAssDir,
+			);
+			my $assemblyReleased = $AsGrps{$cAssGrp}{AssemblJobName} =~ /\S/;
+			if ($assemblyReleased) {
+				my $producedAssemblyDir = ($MFopt{DoAssembly} == 5 && $doPreAssmFlag)
+					? $metagAssDir : $finalCommAssDir;
+				$AsGrps{$cAssGrp}{prodRun} = genePredictions(
+					"$producedAssemblyDir/scaffolds.fasta.filt",
+					"$producedAssemblyDir/genePred/", $AsGrps{$cAssGrp}{AssemblJobName},
+					$finalCommAssDir, "", "$nodeSpTmpD/genePred/", 1,
+				);
+				if (($AsGrps{$cAssGrp}{PostAssemblCmd} || '') =~ /\S/) {
+					print "Submitting deferred assembly-group mapping jobs\n";
+					my $deferredDeps = postSubmQsub(
+						"$logDir/MultiMapper.sh", $AsGrps{$cAssGrp}{PostAssemblCmd},
+						$AsGrps{$cAssGrp}{AssemblJobName},
+					);
+					append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $deferredDeps);
+					append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredDeps);
+					$AsGrps{$cAssGrp}{PostAssemblCmd} = "";
+				}
+				add2SampleDeps(\@sampleDeps, [
+					$AsGrps{$cAssGrp}{AssemblJobName}, $AsGrps{$cAssGrp}{prodRun},
+					$AsGrps{$cAssGrp}{MapDeps},
+				]);
+			} else {
+				print "Shared assembly group $cAssGrp has no eligible assembly job yet; "
+					."leaving terminal sample $curSmpl open for a later release\n";
+				delete $loopSampleCompleted{$JNUM};
+				MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+				loop2C_check($cAssGrp, \@sampleDeps);
+				next;
+			}
+			$finalizeEmptySample->(
+				cleaned_empty => $cleanedEmpty,
+				# The small member's UZ work is irrelevant to the group release.
+				input_dependency => '', advance_loop => 0,
+			);
+			MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+			loop2C_check($cAssGrp, \@sampleDeps);
+			next;
+		}
 		$finalizeEmptySample->(
 			cleaned_empty => $cleanedEmpty,
 			input_dependency => $jdep,
@@ -9960,23 +10040,19 @@ sub metagAssemblyRun{
 	local $MFopt{AssemblyCores} = $assemblyCores;
 	printf "Assembly step using %d core(s) for %.1f MiB of assembly-group input. ",
 		$assemblyCores, $assemblyInputMB;
-	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
 	my $hostFilter = 0;$hostFilter = 1 if ($AsGrps{$cAssGrp}{CntAimAss} > 3);#reset required HDD space
 	my $tmpN ="";
 	my $LasseP = $MFopt{DoAssembly};
-	my ($primaryLibraries,$supportLibraries) = ([], []);
-	
-	if ($LasseP == 5){
-		$primaryLibraries = getCleanLibrariesAssmGrp(\%AsGrps, $cAssGrp, 0);
-		$supportLibraries = getCleanLibrariesAssmGrp(\%AsGrps, $cAssGrp, 1);
-	}
-	if ($LasseP == 5 && $AsGrps{$cAssGrp}{SupportReads} !~ /(?:PB|ONT):/){#$map{$curSmpl}{"SupportReads"} eq ""){#! scalar(@{$singlArX}) ){#decide on single tech
+	# Assembly choice must reflect the group inputs, not the map-order member
+	# that happens to release the group (which can be terminally empty).
+	my $primaryLibraries = getCleanLibrariesAssmGrp(\%AsGrps, $cAssGrp, 0);
+	my $supportLibraries = getCleanLibrariesAssmGrp(\%AsGrps, $cAssGrp, 1);
+	if ($LasseP == 5 && $AsGrps{$cAssGrp}{SupportReads} !~ /(?:PB|ONT):/){
 		$LasseP = 2; #go for megahit by default..
 		my $technology = libraryTechnology($primaryLibraries,
 			"assembly-group $cAssGrp primary assembly selection", 1);
 		$LasseP  = 4 if ($technology eq "PB");
 		$LasseP  = 3 if ($technology eq "ONT");
-		#die "${$cReadTecAr}[0]\nXXXZ\n$LasseP\n";
 	}
 	# Preassemblies remain package-local intermediates. Complete ordinary,
 	# long-read, and final hybrid assemblies publish to the canonical directory.
@@ -10007,12 +10083,11 @@ sub metagAssemblyRun{
 	}elsif($LasseP == 2){
 		$tmpN = megahitAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir ,
 			$MFglobal{shortAssembly}, $SmplNameX,$hostFilter,$scaffoldFlag) ;
-	} elsif( ($LasseP == 3 ||  $LasseP == 4)
-		&& grep { $_->{is_long} } @{readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl)} ){
+	} elsif (($LasseP == 3 || $LasseP == 4)
+			&& grep { $_->{is_long} } @{$primaryLibraries}) {
 		$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir,
-		$MFglobal{shortAssembly}, $SmplNameX,0,$LasseP) ;
+			$MFglobal{shortAssembly}, $SmplNameX,0,$LasseP);
 	}
-	#die ;
 	#if mates available, do them here
 	append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $tmpN); #always add in dep on read extraction
 	
