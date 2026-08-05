@@ -2,11 +2,11 @@
 
 ## 2026-08-05 — Taxon-aware strain locus selection
 
-- Updated `buildTree5.pl` to 5.29 and kept the advanced selector localized in the tree workflow rather than splitting MSA orchestration into another script.
-- Added opt-in `-taxonAwareLocusSelection 1`: it aligns a bounded robust/core-plus-taxon-rescue candidate set, carries 150 extra loci as QC backfill, and chooses the final 500 loci after MSAfix from observed occupancy and parsimony-informative sites.
-- Replaced relative species rejection in the opt-in path with an anchor rule: well-covered samples are backbone candidates, sparse samples remain placement candidates, and only samples lacking usable placement overlap are removed.
+- Updated `buildTree5.pl` to 5.30 and kept the selector localized in the tree workflow rather than splitting MSA orchestration into another script.
+- Added taxon-aware locus selection and subsequently made `-taxonAwareLocusSelection 1` the default. Direct calls align a bounded 400-core/100-rescue set, carry 150 extra loci as QC backfill, and choose the final 500 loci after MSAfix from observed occupancy and parsimony-informative sites.
+- Replaced relative species rejection in the taxon-aware path with an anchor rule: well-covered samples are backbone candidates, sparse samples remain placement candidates, and only samples lacking usable placement overlap are removed.
 - Added candidate/final locus and sample TSV audits under the tree output directory, and fingerprinted selector settings in continuation policy state.
-- Updated `strain_within.pl` to 0.76. Its defaults are now gene-length fraction 0.3, per-species gene fraction 0.05, and relative informative-NT fraction 0.02; the advanced selector remains explicitly activated by command line.
+- Updated `strain_within.pl` to 0.77. Taxon-aware selection is enabled by default and its 80% core, 20% rescue, and 30% additional backfill hierarchy scales to the effective `maxGenes`/`presortGenes` budget. The other defaults remain gene-length fraction 0.3, per-species gene fraction 0.05, and relative informative-NT fraction 0.02.
 
 ## 2026-08-04 — MATAFILER4 4.38 orchestration consolidation
 

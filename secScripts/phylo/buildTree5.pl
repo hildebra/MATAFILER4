@@ -33,6 +33,7 @@
 #5.27: publish the placed strain tree by default and retain ML inference as .backbone.treefile
 #5.28: centralize reusable alignment and per-method tree checkpoint state
 #5.29: add opt-in taxon-aware two-stage locus selection around the existing MSA workflow
+#5.30: enable taxon-aware locus selection by default
 
 use warnings;
 use strict;
@@ -106,7 +107,7 @@ sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.29;
+my $version = 5.30;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -210,7 +211,7 @@ my $postAlignmentMinLociRelative =
 	$POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative};
 my $postAlignmentDivergenceQC;
 my %TAXON_AWARE_DEFAULT = (
-	enabled => 0,
+	enabled => 1,
 	maximum_loci => 500,
 	core_loci => 400,
 	candidate_extra => 150,

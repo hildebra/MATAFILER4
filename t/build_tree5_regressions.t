@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.29;/,
-	'taxon-aware locus selection increments the workflow version');
+like($source, qr/my \$version = 5\.30;/,
+	'default taxon-aware locus selection increments the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
@@ -66,11 +66,11 @@ like($source,
 	qr/\@MSAs = grep \{ \$keepPath\{\$_\} \} \@MSAs.*?\@MSAsSyn = grep \{ \$keepStem\{alignmentFileStem\(\$_\)\} \} \@MSAsSyn/s,
 	'primary, synonymous, and nonsynonymous alignment sets stay locus-consistent');
 like($source,
-	qr/my %TAXON_AWARE_DEFAULT = \(.*?enabled => 0.*?maximum_loci => 500.*?core_loci => 400.*?candidate_extra => 150.*?target_loci_per_sample => 25.*?target_nt_per_sample => 7500.*?"taxonAwareLocusSelection=i"/s,
-	'taxon-aware locus selection is explicitly activated and has bounded candidate/core defaults');
+	qr/my %TAXON_AWARE_DEFAULT = \(.*?enabled => 1.*?maximum_loci => 500.*?core_loci => 400.*?candidate_extra => 150.*?target_loci_per_sample => 25.*?target_nt_per_sample => 7500.*?"taxonAwareLocusSelection=i"/s,
+	'taxon-aware locus selection is enabled by default and has bounded candidate/core defaults');
 like($source,
 	qr/if \(\$taxonAwareLocusSelection\) \{.*?selectTaxonAwareCandidateLoci\(.*?candidate_limit => \$taxonAwareMaxLoci \+ \$taxonAwareCandidateExtra.*?\@linesCats3 = \@\{\$candidateSelection->\{categories\}\}/s,
-	'the opt-in pre-MSA pass chooses robust, rescue, and QC-backfill candidates in buildTree5');
+	'the taxon-aware pre-MSA pass chooses robust, rescue, and QC-backfill candidates in buildTree5');
 like($source,
 	qr/sub chooseTaxonAwareLoci.*?robust_core.*?\$coverageGain.*?qc_backfill.*?taxon_rescue/s,
 	'locus choice combines a robust core with rarity-weighted taxon rescue and backfill');

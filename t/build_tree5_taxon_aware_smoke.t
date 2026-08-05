@@ -103,7 +103,7 @@ my @command = (
 	'-fna', $fna, '-aa', $faa, '-cats', $categories,
 	'-outD', $output, '-smplSep', '\\|', '-AAtree', 0,
 	'-MSAprogram', 2, '-runLengthCheck', 0, '-postAlignmentLocusQC', 0,
-	'-taxonAwareLocusSelection', 1, '-taxonAwareMaxLoci', 3,
+	'-taxonAwareMaxLoci', 3,
 	'-taxonAwareCoreLoci', 2, '-taxonAwareCandidateExtra', 1,
 	'-taxonAwareMinSequenceNT', 9, '-taxonAwareTargetLoci', 2,
 	'-taxonAwareTargetNT', 30, '-placementMinOverlap', 6,

@@ -66,6 +66,7 @@ sub writeRecoveryContributionIndex;
 sub loadRecoveryContributionIndex;
 sub writeStrainSummary;
 sub mergeSampleStats;
+sub taxonAwareLocusBudgets;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -197,7 +198,8 @@ END {
 #.74: print key:value summaries, use assembly-group terminology, and aggregate retained-locus histograms
 #.75: balance Step 1 workers by assembly-group count and samples per group
 #.76: relax strain-tree defaults and expose buildTree5 taxon-aware locus selection
-my $version = 0.76;
+#.77: enable taxon-aware selection and scale its hierarchy to the strain gene budget
+my $version = 0.77;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -263,7 +265,7 @@ my $legacyMGTK = 0; #restore the exact pre-0.47 IQ-TREE tree-building command
 my $GenesPerSpecies = 0.05;
 my $GeneLengthMin = 0.3;
 my $relativeNTFraction = 0.02;
-my $taxonAwareLocusSelection = 0;
+my $taxonAwareLocusSelection = 1;
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
@@ -427,6 +429,15 @@ die "Fractional filtering options must be between 0 and 1\n"
 		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction);
 die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
+my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
+	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
+if ($taxonAwareLocusSelection) {
+	$taxonAwareGeneBudget = $noGeneLimit
+		? $presortGenes
+		: ($maxNGenes < $presortGenes ? $maxNGenes : $presortGenes);
+	($taxonAwareMaxLoci, $taxonAwareCoreLoci, $taxonAwareCandidateExtra) =
+		taxonAwareLocusBudgets($taxonAwareGeneBudget);
+}
 die "SNP depth, quality, adaptive filtering, and indel-range settings must be non-negative\n"
 	if $minSNPDepth < 0 || $minSNPCallQual < 0 || $useAdaptiveQual < 0
 		|| $depthFilterScale < 0 || $indelRange < 0;
@@ -1085,7 +1096,12 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
 	$Tcmd .= "-withinSpecies 1 -strainWithinPreset 1 -NTfilt $relativeNTFraction "
 		."-NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies ";
-	$Tcmd .= "-taxonAwareLocusSelection 1 " if $taxonAwareLocusSelection;
+	$Tcmd .= "-taxonAwareLocusSelection $taxonAwareLocusSelection ";
+	if ($taxonAwareLocusSelection) {
+		$Tcmd .= "-taxonAwareMaxLoci $taxonAwareMaxLoci "
+			."-taxonAwareCoreLoci $taxonAwareCoreLoci "
+			."-taxonAwareCandidateExtra $taxonAwareCandidateExtra ";
+	}
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
 	if ($phyloProg == 1){
 		if ($legacyMGTK){
@@ -2151,6 +2167,11 @@ sub prepRun{
 		print "MSAaligner: $MSAprog, GenesPerSpecies: $GenesPerSpecies, "
 			."GeneLengthMin: $GeneLengthMin, relativeNTFraction: $relativeNTFraction, "
 			."taxonAwareLocusSelection: $taxonAwareLocusSelection\n";
+		print "Taxon-aware locus hierarchy: geneBudget=$taxonAwareGeneBudget, "
+			."robustCore=$taxonAwareCoreLoci, taxonRescue="
+			.($taxonAwareMaxLoci - $taxonAwareCoreLoci)
+			.", qcBackfill=$taxonAwareCandidateExtra\n"
+			if $taxonAwareLocusSelection;
 		
 		
 		if ($noGeneLimit){print "No per-sample gene limit; biological QC remains "
@@ -3995,6 +4016,18 @@ Tree locus filtering:
                                  [default 0.02]
   -taxonAwareLocusSelection 0|1 Align a robust-plus-backfill candidate set, then
                                  select robust/core and taxon-rescue loci after MSA QC
-                                 [default 0]
+                                 [default 1]
 USAGE
+}
+
+sub taxonAwareLocusBudgets {
+	my ($geneBudget) = @_;
+	die "Taxon-aware locus selection requires a positive strain gene budget\n"
+		unless defined($geneBudget) && $geneBudget > 0;
+	my $maximumLoci = int($geneBudget);
+	my $coreLoci = int($maximumLoci * 0.8 + 0.5);
+	$coreLoci = 1 if $coreLoci < 1;
+	$coreLoci = $maximumLoci if $coreLoci > $maximumLoci;
+	my $candidateExtra = int($maximumLoci * 0.3 + 0.5);
+	return ($maximumLoci, $coreLoci, $candidateExtra);
 }
