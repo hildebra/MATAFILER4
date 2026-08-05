@@ -103,4 +103,13 @@ ok(index($lca_source, 'unless -s $dbfa[$index]') < 0
 	&& index($lca_source, '-s $dbtax[$index]') < 0,
 	'downstream database preflight contains no size probe');
 
+like($source, qr/--workdir .*? --aligned /,
+	'SortMeRNA uses an isolated work directory for each input pair');
+unlike($source, qr/ --kvdb | --readb /,
+	'catchLSUSSU does not manually override SortMeRNA internal database paths');
+like($source, qr/--fastx --no-best --paired_in --out2 --threads \$threads -e 1e-12 --num_alignments 1/,
+	'paired SortMeRNA Boolean flags precede value-bearing options');
+like($source, qr/--fastx --no-best --threads \$threads -e 1e-12 --num_alignments 1/,
+	'single-read SortMeRNA Boolean flags precede value-bearing options');
+
 done_testing;

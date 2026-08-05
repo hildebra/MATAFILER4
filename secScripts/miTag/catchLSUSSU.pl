@@ -21,7 +21,8 @@ sub validateSortmernaIndex;
 
 #18.5.26: added versioning to 0.1
 #4.8.26: v0.4 limit SortMeRNA database preflight validation to existence checks
-my $cLSUSSUver = 0.4;
+#4.8.26: v0.5 isolate SortMeRNA work directories and avoid trailing Boolean flags
+my $cLSUSSUver = 0.5;
 
 #my $tmpP = "/g/scb/bork/hildebra/data2/Soil_finland/tmp_16s/";
 my $tmpP = "";#$ARGV[3];
@@ -224,10 +225,11 @@ sub smrnaRunCmd( $ $ $ $ $ $ $){
 		my @singleReads = grep { $_ ne "" } split(",", $R1);
 		for (my $i = 0; $i < @singleReads; $i++){
 			my $pfx = @singleReads > 1 ? "${outFile}.tmp${i}" : $outFile;
-			$cmd .= "$smrnaBin --reads ".shellQuote($singleReads[$i])." $refStr $idxStr";
-			$cmd .= " --kvdb ".shellQuote("${outFile}.kvdb${i}")." --readb ".shellQuote("${outFile}.readb${i}")." --aligned ".shellQuote($pfx);
-			$cmd .= " --fastx --threads $threads -e 1e-12 --num_alignments 1 --no-best \n";
-			$cmd .= "rm -rf ".shellQuote("${outFile}.kvdb${i}")." ".shellQuote("${outFile}.readb${i}")."\n";
+			my $workDir = "${outFile}.work${i}";
+			$cmd .= "$smrnaBin $refStr --reads ".shellQuote($singleReads[$i])." $idxStr";
+			$cmd .= " --workdir ".shellQuote($workDir)." --aligned ".shellQuote($pfx);
+			$cmd .= " --fastx --no-best --threads $threads -e 1e-12 --num_alignments 1\n";
+			$cmd .= "rm -rf ".shellQuote($workDir)."\n";
 		}
 		if (@singleReads > 1){
 			my $outputs = join(" ", map { shellQuote("${outFile}.tmp${_}.fq.gz") } 0..$#singleReads);
@@ -240,10 +242,11 @@ sub smrnaRunCmd( $ $ $ $ $ $ $){
 		die "Internal error: unequal paired-read lists\n" unless @r1s == @r2s;
 		for (my $i = 0; $i < @r1s; $i++){
 			my $pfx = (@r1s > 1) ? "${outFile}.tmp${i}" : $outFile;
-			$cmd .= "$smrnaBin --reads ".shellQuote($r1s[$i])." --reads ".shellQuote($r2s[$i])." $refStr $idxStr";
-			$cmd .= " --kvdb ".shellQuote("${outFile}.kvdb${i}")." --readb ".shellQuote("${outFile}.readb${i}")." --aligned ".shellQuote($pfx);
-			$cmd .= " --fastx --threads $threads -e 1e-12 --num_alignments 1 --no-best --paired_in --out2 \n";
-			$cmd .= "rm -rf ".shellQuote("${outFile}.kvdb${i}")." ".shellQuote("${outFile}.readb${i}")."\n";
+			my $workDir = "${outFile}.work${i}";
+			$cmd .= "$smrnaBin $refStr --reads ".shellQuote($r1s[$i])." --reads ".shellQuote($r2s[$i])." $idxStr";
+			$cmd .= " --workdir ".shellQuote($workDir)." --aligned ".shellQuote($pfx);
+			$cmd .= " --fastx --no-best --paired_in --out2 --threads $threads -e 1e-12 --num_alignments 1\n";
+			$cmd .= "rm -rf ".shellQuote($workDir)."\n";
 		}
 		if (@r1s > 1){
 			# multiple input pairs: cat per-pair outputs into final files

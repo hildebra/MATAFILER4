@@ -8,6 +8,7 @@
 - Centralize BuildTree alignment recovery and per-engine checkpoint state so completion tests and execution decisions cannot diverge.
 - Remove the obsolete pending-only scheduler counter and unused SNP locals, and regenerate structural regression assertions for the consolidated paths.
 - Limit SortMeRNA reference, optional-index, and downstream ribosomal-database preflight validation to path existence, leaving access validation to the tools on the allocated node.
+- Build RiboFinder SortMeRNA commands with per-invocation work directories and place Boolean flags before value-bearing options, avoiding ambiguous trailing-flag parsing and shared default work state.
 
 ## 2026-08-04 — MATAFILER4 4.37 empty-state recovery
 
