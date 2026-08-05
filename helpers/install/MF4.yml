@@ -96,7 +96,7 @@ dependencies:
 #  - metaeuk=6.a5d39d9
 #  - racon>=1.5.0
   - samtools=1.23
-  - bioconda::sortmerna=4.3.6
+  - conda-forge::sortmerna=7.0.0
 #  - semibin=1.5.1
   - trimmomatic=0.41
 #  - unicycler>=0.5.0
