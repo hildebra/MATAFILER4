@@ -360,8 +360,8 @@ like($mataf4_stats, qr/return \{ SNP_TotalResolvedBp=>/,
 like($mataf4_stats,
      qr/my \$input_libraries = readLibrariesByScope\(\$seq_set, 'primary', 0, \$SmplN\).*?libraryPairs\(\$input_libraries\).*?libraryFiles\(\$input_libraries, 'single'\)/s,
      'sample statistics derive paired and singleton flags from canonical library records');
-like($mataf4_stats, qr/\$map\{\$SmplN\}\{inputFileSizeMB\}/,
-     'sample statistics use their sample argument for input size');
+like($mataf4_stats, qr/\$map\{\$sampleKey\}\{inputFileSizeMB\}/,
+     'sample statistics use the canonical map key for input size');
 like($mataf4_stats, qr/\$values\{RawInputSizeSub\}.*?inputXFileSizeMB/s,
      'sample statistics report supplementary raw input size separately');
 unlike($mataf4_stats, qr/my \@sdm = qw\(SDMVersion/,

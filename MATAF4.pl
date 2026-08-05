@@ -50,6 +50,7 @@ use Mods::StatsLogReader qw(
 );
 use Mods::SampleCompletion qw(
 	sample_completion_path completion_request_signature
+	completion_component_evidence
 	read_sample_completion write_sample_completion
 	invalidate_sample_completion
 );
@@ -126,7 +127,7 @@ sub workflowStateOptions;
 sub sampleReadSet;
 sub discoverSampleInputs; sub populateInputSizesFast; sub spaceInAssGrp;
 sub sampleCompletionRequestSignature; sub sampleCompletionForcedInvalidation;
-sub sampleCompletionComponents;
+sub sampleCompletionComponents; sub sampleStatisticsEvidence;
 sub createSampleCompletionSentinel;
 
 sub createConsSNPandSVs;
@@ -206,7 +207,9 @@ sub createConsSNPandSVs;
 #       batches, and primary/support consensus-SNP generation paths.
 #4.39: 5.8.26: harden RiboFind extraction and LCA recovery, require published
 #       profile outputs for completion, and raise extraction memory to 20 GiB.
-my $MATFILER_ver = 4.39;
+#4.40: 5.8.26: version sample sentinels as independent component/statistics
+#       contracts and persist lightweight evidence for every raw-read workflow.
+my $MATFILER_ver = 4.40;
 
 #----------------- defaults ----------------- 
 
@@ -608,6 +611,26 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$sampleCheckpoints{supportConsensus} =~ s/\.stone/\.norm\.stone/;
 	}
 
+	my $completionComponentContext = {
+		sample_key => $curSmpl,
+		assembly_fasta => $finAssLoc,
+		assembly_dir => $finalCommAssDir,
+		mapping_dir => $finalMapDir,
+		contig_stats_dir => $ContigStatsDir,
+		binning_output => $BinningOut,
+		primary_mapping => $CRAMmap,
+		support_mapping => $SupCRAMmap,
+		primary_mapping_stone => $sampleCheckpoints{primaryMapping},
+		support_mapping_stone => $sampleCheckpoints{supportMapping},
+		primary_consensus_stone => $sampleCheckpoints{primaryConsensus},
+		support_consensus_stone => $sampleCheckpoints{supportConsensus},
+		consensus_contigs => $contigsSNP,
+		consensus_genes => [$genePredSNP, $genePredAASNP],
+		primary_vcf => $vcfSNP,
+		support_vcf => $vcfSNPsupp,
+		primary_sv => $vcfSV,
+		support_sv => $vscSVsupp,
+	};
 	# Register the sentinel path before the completion gate. Postprocessing reads
 	# only this cached record and never rescans sample outputs or logs.
 	my $completionSignature = sampleCompletionRequestSignature($curSmpl);
@@ -633,6 +656,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			input_dir => $curOutDir,
 			assembly_dir => $asmDir,
 			request_signature => $completionSignature,
+			component_context => $completionComponentContext,
 			primary_input_size_mb => $map{$curSmpl}{inputFileSizeMB},
 			supplementary_input_size_mb => $map{$curSmpl}{inputXFileSizeMB},
 			%outcome,
@@ -654,7 +678,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		path => $completionSentinel,
 		sample => $SmplName,
 		request_signature => $completionSignature,
-		expected_components => sampleCompletionComponents($curOutDir),
+		expected_components => sampleCompletionComponents($curOutDir, $SmplName, $completionComponentContext),
 	) unless @forcedReopen;
 	if ($closedSample && $closedSample->{outcome}{status} =~ /^skipped_(?:too_small|empty_input)$/) {
 		populateInputSizesFast($curSmpl);
@@ -1227,7 +1251,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 #	#-----------------------  END FLAGS  ------------------------  
 
 	#some more flow control..
-	if ( !$DoUploadRawReads && $boolScndMappingOK && !$MFopt{DoCalcD2s} &&
+	if ( !$DoUploadRawReads && !$nonPareilFlag
+		&& $boolScndMappingOK && !$MFopt{DoCalcD2s} &&
 		!$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp &&
 		!$calcBinning && !$calc2ndMapSNP && $assemblyWorkflowComplete && $boolScndCoverageOK
 		 && !$calcCoverage && !$calcSuppCoverage && !$dowstreamAnalysisFlag
@@ -1265,14 +1290,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	push(@checkLocs,$curDir) if ($curDir ne "");
 	$QSBoptHR->{LocationCheckStrg} = checkDrives(\@checkLocs);
 	
-
-
-	#report for debugging:
-	#print " !$DoUploadRawReads && $boolScndMappingOK && !$MFopt{DoCalcD2s} &&
-	#	!$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp &&
-	#	!$calcBinning && !$calc2ndMapSNP && $boolAssemblyOK && $boolScndCoverageOK 
-	#	 && !$calcCoverage && !$calcSuppCoverage && !$dowstreamAnalysisFlag\n";
-	 #die;
 	
 
 
@@ -2147,7 +2164,7 @@ sub sampleCompletionRequestSignature {
 	} @configKeys;
 
 	return completion_request_signature({
-		completion_contract => 2,
+		completion_contract => 3,
 		metagstats_schema => [_smpl_stats_columns()],
 		operation_mode => $runOptions{operationMode},
 		sample => \%sampleDefinition,
@@ -2173,14 +2190,429 @@ sub sampleCompletionForcedInvalidation {
 }
 
 sub sampleCompletionComponents {
-	my ($sampleRoot) = @_;
+	my ($sampleRoot, $sampleName, $context) = @_;
+	$context ||= {};
+	my $sampleKey = $context->{sample_key} || $sampleName;
+	die "sampleCompletionComponents requires sample root and name\n"
+		unless defined($sampleRoot) && $sampleRoot ne ''
+			&& defined($sampleName) && $sampleName ne '';
+
+	my @krakenChecks = ({
+		id => 'completion_stone', kind => 'exists',
+		path => "$sampleRoot/Tax/kraken/$MFopt{globalKraTaxkDB}/krakDone.sto",
+	});
+	for my $threshold (qw(0.01 0.02 0.04 0.06 0.1 0.2 0.3)) {
+		push @krakenChecks, {
+			id => "threshold_$threshold", kind => 'nonempty',
+			path => "$sampleRoot/Tax/kraken/$MFopt{globalKraTaxkDB}/krak.$threshold.cnt.tax",
+		};
+	}
+
+	my @diamondChecks;
+	for my $database (grep { $_ ne '' } split /,/, ($MFopt{reqDiaDB} || '')) {
+		my $prefix = "$sampleRoot/diamond/dia.$database.blast";
+		push @diamondChecks,
+			{id => $database."_parse_stone", kind => 'exists',
+				path => "$prefix.srt.gz.stone"},
+			{id => $database."_search_output", kind => 'nonempty_any',
+				paths => ["$prefix.gz", "$prefix.srt.gz"], required => 0};
+	}
+
+	my @secondaryMappingChecks;
+	for (my $i = 0; $i < @bwt2outD; $i++) {
+		my $prefix = "$bwt2outD[$i]/$bwt2ndMapNmds[$i]_".$sampleName."-0-smd.bam";
+		push @secondaryMappingChecks,
+			{id => "reference_".$i."_bam", kind => 'nonempty', path => $prefix},
+			{id => "reference_".$i."_coverage", kind => 'nonempty',
+				path => "$prefix.coverage.gz"};
+		if ($MFopt{mapModeCovDo}) {
+			for my $suffix (qw(median.percontig percontig pergene)) {
+				push @secondaryMappingChecks, {
+					id => "reference_".$i."_".$suffix, kind => 'nonempty',
+					path => "$prefix.coverage.gz.$suffix",
+				};
+			}
+		}
+	}
+	my $candidateFiles = sub {
+		my ($path) = @_;
+		return [] unless defined($path) && $path ne '';
+		if ($path =~ /\.gz$/) {
+			(my $plain = $path) =~ s/\.gz$//;
+			return [$path, $plain];
+		}
+		return [$path, "$path.gz"];
+	};
+	my $primaryAssemblyMapping = $MFopt{DoAssembly} && $MFopt{map2Assembly}
+		&& $map{$sampleKey}{hasPrimaryRds};
+	my $supportAssemblyMapping = $MFopt{DoAssembly} && $MFopt{mapSupport2Assembly}
+		&& ($map{$sampleKey}{SupportReads} || '') ne '';
+	if ($MFopt{DoAssembly}) {
+		for my $required (qw(
+			assembly_fasta assembly_dir mapping_dir contig_stats_dir
+			primary_consensus_stone support_consensus_stone
+		)) {
+			die "sample completion assembly context '$required' is missing\n"
+				unless defined($context->{$required}) && $context->{$required} ne '';
+		}
+	}
+	my $geneMarker = $MFopt{DoEukGenePred} ? '.bac' : '';
+	my @assemblyChecks = (
+		{id => 'fasta', kind => 'nonempty', path => $context->{assembly_fasta}},
+		{id => 'completion_stone', kind => 'exists',
+			path => ($context->{assembly_dir} || '').$checkpointNames{assemblyDone}},
+		{id => 'statistics', kind => 'nonempty',
+			path => ($context->{assembly_dir} || '').'AssemblyStats.txt'},
+		{id => 'predicted_proteins', kind => 'nonempty_any', paths =>
+			$candidateFiles->(($context->{assembly_dir} || '')
+				."genePred/proteins$geneMarker.shrtHD.faa")},
+		{id => 'predicted_genes', kind => 'nonempty_any', paths =>
+			$candidateFiles->(($context->{assembly_dir} || '')
+				."genePred/genes$geneMarker.gff")},
+	);
+	my @primaryMappingChecks = (
+		{id => 'completion_stone', kind => 'exists',
+			path => $context->{primary_mapping_stone}},
+		{id => 'coverage', kind => 'nonempty',
+			path => ($context->{mapping_dir} || '')."$sampleName-smd.bam.coverage.gz"},
+		{id => 'alignment', kind => 'nonempty',
+			path => $context->{primary_mapping}, required => 0},
+	);
+	my @supportMappingChecks = (
+		{id => 'completion_stone', kind => 'exists',
+			path => $context->{support_mapping_stone}},
+		{id => 'coverage', kind => 'nonempty',
+			path => ($context->{mapping_dir} || '')."$sampleName.sup-smd.bam.coverage.gz"},
+		{id => 'alignment', kind => 'nonempty',
+			path => $context->{support_mapping}, required => 0},
+	);
+	my @contigStatsChecks;
+	my $contigRoot = $context->{contig_stats_dir} || '';
+	for my $scope (
+		[$primaryAssemblyMapping, 'Coverage', 'primary'],
+		[$supportAssemblyMapping, 'Cov.sup', 'support'],
+	) {
+		my ($required, $prefix, $idPrefix) = @{$scope};
+		next unless $required;
+		push @contigStatsChecks, {
+			id => $idPrefix.'_stone', kind => 'exists',
+			path => "$contigRoot/$prefix.stone",
+		};
+		for my $suffix (qw(percontig median.percontig pergene count_pergene)) {
+			push @contigStatsChecks, {
+				id => $idPrefix.'_'.$suffix, kind => 'nonempty_any',
+				paths => $candidateFiles->("$contigRoot/$prefix.$suffix"),
+			};
+		}
+	}
+	push @contigStatsChecks,
+		{id => 'fetchmg', kind => 'nonempty_any', paths => $candidateFiles->(
+			($context->{assembly_dir} || '').'ContigStats/FMG/FMGids.txt')},
+		{id => 'gtdb_markers', kind => 'nonempty_any', paths => $candidateFiles->(
+			($context->{assembly_dir} || '').'ContigStats/GTDBmg/marker_genes_meta.tsv')},
+		{id => 'gene_statistics', kind => 'nonempty',
+			path => "$contigRoot/GeneStats.txt", required => 0};
+	if ($MFopt{kmerPerGene}) {
+		push @contigStatsChecks, {
+			id => 'gene_kmers', kind => 'nonempty_any',
+			paths => $candidateFiles->("$contigRoot/scaff.pergene.4kmer.pm5"),
+		};
+	}
+	my @binningChecks = (
+		{id => 'assignment', kind => 'exists', path => $context->{binning_output}},
+		{id => 'assembly_statistics', kind => 'nonempty',
+			path => ($context->{binning_output} || '').'.assStat'},
+	);
+	push @binningChecks, {
+		id => 'checkm1', kind => 'exists',
+		path => ($context->{binning_output} || '').'.cm',
+	} if $MFopt{useCheckM1};
+	push @binningChecks, {
+		id => 'checkm2', kind => 'nonempty',
+		path => ($context->{binning_output} || '').'.cm2',
+	} if $MFopt{useCheckM2};
+	my $primaryConsensusRequested = $MFopt{DoAssembly} && $MFopt{DoConsSNP}
+		&& $map{$sampleKey}{hasPrimaryRds};
+	my $supportConsensusRequested = $MFopt{DoAssembly}
+		&& $MFopt{mapSupport2Assembly} && $MFopt{DoSuppConsSNP}
+		&& ($map{$sampleKey}{SupportReads} || '') ne '';
+	my $consensusChecks = sub {
+		my ($scope) = @_;
+		my @checks = ({
+			id => 'completion_stone', kind => 'exists',
+			path => $context->{$scope.'_consensus_stone'},
+		});
+		if ($MFopt{saveConsFastas}) {
+			push @checks, {
+				id => 'consensus_contigs', kind => 'nonempty_any',
+				paths => $candidateFiles->($context->{consensus_contigs}),
+			};
+			my $index = 0;
+			for my $gene (@{$context->{consensus_genes} || []}) {
+				push @checks, {
+					id => 'consensus_gene_'.$index++, kind => 'nonempty_any',
+					paths => $candidateFiles->($gene),
+				};
+			}
+		}
+		if ($MFopt{saveVCF}) {
+			push @checks, {
+				id => 'vcf', kind => 'nonempty_any',
+				paths => $candidateFiles->($context->{$scope.'_vcf'}),
+			};
+		}
+		return \@checks;
+	};
+
+	my $readProcessingRequested = $MFopt{DoAssembly}
+		|| $MFopt{DoDiamond} || $MFopt{DoKraken} || $MFopt{DoRibofind}
+		|| $MFopt{DoMOTU2} || $MFopt{DoMetaPhlan} || $MFopt{DoTaxaTarget}
+		|| $MFopt{DoNonPareil} || $MFopt{DoGenoSizeEst}
+		|| $MFopt{calcOrthoPlacement} || $MFopt{DoCalcD2s}
+		|| @bwt2outD || $MFconfig{uploadRawRds} ne '';
+	my $transient = sub {
+		my ($requested, $reason) = @_;
+		return completion_component_evidence(
+			requested => $requested,
+			applicable => 0,
+			reason => $reason,
+		);
+	};
+
 	return {
+		assembly => completion_component_evidence(
+			requested => $MFopt{DoAssembly},
+			checks => \@assemblyChecks,
+		),
+		primary_assembly_mapping => completion_component_evidence(
+			requested => $primaryAssemblyMapping,
+			checks => \@primaryMappingChecks,
+		),
+		support_assembly_mapping => completion_component_evidence(
+			requested => $supportAssemblyMapping,
+			checks => \@supportMappingChecks,
+		),
+		contig_stats => completion_component_evidence(
+			requested => $MFopt{DoAssembly},
+			checks => \@contigStatsChecks,
+		),
+		binning => completion_component_evidence(
+			requested => $MFopt{DoAssembly} && $MFopt{DoMetaBat2},
+			checks => \@binningChecks,
+		),
+		primary_consensus_snp => completion_component_evidence(
+			requested => $primaryConsensusRequested,
+			checks => $consensusChecks->('primary'),
+		),
+		support_consensus_snp => completion_component_evidence(
+			requested => $supportConsensusRequested,
+			checks => $consensusChecks->('support'),
+		),
+		primary_structural_variants => completion_component_evidence(
+			requested => $MFopt{DoAssembly} && $MFopt{callSVs}
+				&& $map{$sampleKey}{hasPrimaryRds},
+			checks => [{
+				id => 'variant_file', kind => 'nonempty',
+				path => $context->{primary_sv},
+			}],
+		),
+		support_structural_variants => completion_component_evidence(
+			requested => $MFopt{DoAssembly} && $MFopt{mapSupport2Assembly}
+				&& $MFopt{callSVsSupp}
+				&& ($map{$sampleKey}{SupportReads} || '') ne '',
+			checks => [{
+				id => 'variant_file', kind => 'nonempty',
+				path => $context->{support_sv},
+			}],
+		),
+		input_staging => $transient->(
+			$readProcessingRequested || $MFconfig{unpackZip},
+			'transient scratch inputs are removed after their persistent consumers pass',
+		),
+		read_cleaning => $transient->(
+			$readProcessingRequested && $MFopt{useSDM},
+			'clean-read scratch products are removed after terminal consumers pass',
+		),
+		host_filtering => $transient->(
+			$readProcessingRequested && $MFopt{humanFilter},
+			'host-filter intermediates are transient; persistent consumer outputs are checked',
+		),
+		read_merge => $transient->(
+			$MFopt{doReadMerge},
+			'merged-read intermediates are transient; persistent consumer outputs are checked',
+		),
+		long_read_trimming => $transient->(
+			$readProcessingRequested && $MFopt{usePorechop},
+			'adapter-trimmed long reads are transient scratch inputs',
+		),
+		raw_upload => $transient->(
+			$MFconfig{uploadRawRds} ne '',
+			'raw-read export is finalized by invocation-level checksum jobs rather than a sample-local artifact',
+		),
+		d2_distance => $transient->(
+			$MFopt{DoCalcD2s},
+			'D2 distance is a cross-sample output and is not a per-sample artifact',
+		),
+		ortholog_placement => $transient->(
+			$MFopt{calcOrthoPlacement},
+			'ortholog placement is not an active MATAFILER4 workflow',
+		),
+		secondary_mapping => completion_component_evidence(
+			requested => scalar(@bwt2outD) ? 1 : 0,
+			checks => \@secondaryMappingChecks,
+		),
+		secondary_mapping_consensus => $transient->(
+			$MFopt{Do2ndMapSNP},
+			'the legacy secondary-reference consensus route has no durable per-sample completion artifact',
+		),
+		nonpareil => completion_component_evidence(
+			requested => $MFopt{DoNonPareil},
+			checks => [{
+				id => 'profile', kind => 'nonempty',
+				path => "$sampleRoot/nonpareil/$sampleName.npo",
+			}],
+		),
+		genome_size => completion_component_evidence(
+			requested => $MFopt{DoGenoSizeEst},
+			checks => [{
+				id => 'microbecensus_result', kind => 'nonempty',
+				path => "$sampleRoot/MicroCens/MC.0.result",
+			}],
+		),
+		diamond => completion_component_evidence(
+			requested => $MFopt{DoDiamond},
+			checks => \@diamondChecks,
+		),
+		kraken => completion_component_evidence(
+			requested => $MFopt{DoKraken},
+			checks => \@krakenChecks,
+		),
 		ribofind => ribosome_completion_evidence(
 			sample_root => $sampleRoot,
 			requested => $MFopt{DoRibofind},
 			assembly_requested => $MFopt{doRiboAssembl},
 		),
+		metaphlan => completion_component_evidence(
+			requested => $MFopt{DoMetaPhlan},
+			checks => [
+				{id => 'completion_stone', kind => 'exists',
+					path => $baseOut.$preDIRs{dir2MePhl}."$sampleName.MP2.sto"},
+				{id => 'profile', kind => 'nonempty',
+					path => $baseOut.$preDIRs{dir2MePhl}."$sampleName.MP2.txt"},
+			],
+		),
+		motus => completion_component_evidence(
+			requested => $MFopt{DoMOTU2},
+			checks => [
+				{id => 'completion_stone', kind => 'exists',
+					path => $baseOut."pseudoGC/Phylo/mOTU2/$sampleName.Motu2.sto"},
+				{id => 'profile', kind => 'nonempty',
+					path => $baseOut."pseudoGC/Phylo/mOTU2/$sampleName.motu2.tab.gz"},
+			],
+		),
+		taxa_target => completion_component_evidence(
+			requested => $MFopt{DoTaxaTarget},
+			checks => [{
+				id => 'library_manifest', kind => 'nonempty',
+				path => $baseOut."pseudoGC/Phylo/TaxaTarget/$sampleName.TaxTar.sto",
+			}],
+		),
 	};
+}
+
+sub sampleStatisticsEvidence {
+	my ($values, $sampleKey) = @_;
+	die "sampleStatisticsEvidence requires a value hash\n"
+		unless ref($values) eq 'HASH';
+	my %available = map {
+		my $value = $values->{$_};
+		($_ => defined($value) && $value ne '' && $value ne '-1' ? 1 : 0)
+	} _smpl_stats_columns();
+
+	my $supportRequested = 0 + ($map{$sampleKey}{inputXFileSizeMB} || 0) > 0;
+	my %families;
+	my $addFamily = sub {
+		my ($name, $requested, $fields, $required) = @_;
+		my %fieldState = map { $_ => ($available{$_} || 0) } @{$fields};
+		my $present = scalar grep { $fieldState{$_} } keys %fieldState;
+		my $requiredOk = !grep { !$fieldState{$_} } @{$required};
+		my $status = !$requested ? 'not_applicable'
+			: !$present ? 'missing'
+			: $requiredOk ? 'complete' : 'partial';
+		$families{$name} = {
+			requested => $requested ? 1 : 0,
+			applicable => $requested ? 1 : 0,
+			ok => !$requested || $requiredOk ? 1 : 0,
+			status => $status,
+			fields => \%fieldState,
+		};
+	};
+
+	$addFamily->('input', 1,
+		[qw(RawInputSize RawInputSizeSub InputIsPaired InputIsSingle)],
+		[qw(RawInputSize RawInputSizeSub InputIsPaired InputIsSingle)]);
+	$addFamily->('raw_upload_filter', $MFconfig{uploadRawRds} ne '',
+		[qw(FilteredContaRdsPerc_EBI FilteredContaRds_EBI FilteredNonContaRds_EBI)],
+		[qw(FilteredContaRdsPerc_EBI)]);
+	$addFamily->('quality_filter_primary', $MFopt{useSDM} ? 1 : 0,
+		[qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2
+			AvgSeqLen MaxSeqLength AvgSeqQual accErr SDMAcceptedPercent)],
+		[qw(totRds)]);
+	$addFamily->('quality_filter_support', $MFopt{useSDM} && $supportRequested,
+		[qw(totRds_Sup Rejected1_Sup Rejected2_Sup Accepted1_Sup Accepted2_Sup
+			Singl1_Sup Singl2_Sup AvgSeqLen_Sup MaxSeqLength_Sup AvgSeqQual_Sup
+			accErr_Sup SDMAcceptedPercent_Sup)],
+		[qw(totRds_Sup)]);
+	$addFamily->('host_filter', $MFopt{humanFilter} ? 1 : 0,
+		[qw(FilteredContaRdsPerc FilteredContaRds FilteredNonContaRds)],
+		[qw(FilteredContaRdsPerc)]);
+	$addFamily->('read_merge', $MFopt{doReadMerge} ? 1 : 0,
+		[qw(Merged NotMerged)], [qw(Merged NotMerged)]);
+	$addFamily->('genome_size', $MFopt{DoGenoSizeEst} ? 1 : 0,
+		[qw(AvgGenomeSizeEst TotalGenomesEst)],
+		[qw(AvgGenomeSizeEst TotalGenomesEst)]);
+	$addFamily->('assembly', $MFopt{DoAssembly} ? 1 : 0,
+		[qw(ContigN50 NScaff400 NScaffG1k NScaffG10k NScaffG100k NScaffG1M
+			ScaffN50 ScaffMaxSize ScaffSize CircCtgs CircCtgG1M)],
+		[qw(ScaffN50 ScaffSize)]);
+	$addFamily->('hybrid_assembly', $MFopt{DoAssembly} == 5 ? 1 : 0,
+		[qw(HybridPreassemblyCount
+			HybridPreassemblyContigs HybridFinalContigs HybridContigsDelta HybridFinalToPreContigsRatio
+			HybridPreassemblyBases HybridFinalBases HybridBasesDelta HybridFinalToPreBasesRatio
+			HybridPreassemblyN50 HybridFinalN50 HybridN50Delta HybridFinalToPreN50Ratio
+			HybridPreassemblyN90 HybridFinalN90 HybridN90Delta HybridFinalToPreN90Ratio
+			HybridPreassemblyLongest HybridFinalLongest HybridLongestDelta HybridFinalToPreLongestRatio
+			HybridPreassemblyGCPercent HybridFinalGCPercent HybridGCPercentDelta HybridFinalToPreGCPercentRatio)],
+		[qw(HybridPreassemblyCount HybridFinalBases)]);
+	$addFamily->('assembly_mapping', $MFopt{DoAssembly} && $MFopt{map2Assembly},
+		[qw(ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign
+			DisconcAlign SingleUniqAlign SingleMultiAlign)],
+		[qw(OverallAlignment)]);
+	$addFamily->('duplicate_marking', $MFopt{DoAssembly} && $MFopt{map2Assembly},
+		[qw(OpticalDuplicates PCRduplicates PassedMD EstLibSize)],
+		[qw(PassedMD)]);
+	$addFamily->('breakpoints', $MFopt{DoAssembly} && $MFopt{map2Assembly},
+		[qw(BreakpointCount BreakpointContigs BreakpointBases
+			BreakpointMeanLength BreakpointMaxLength AssemblyBreakpointPercent)],
+		[qw(BreakpointCount)]);
+	$addFamily->('gene_prediction', $MFopt{DoAssembly} ? 1 : 0,
+		[qw(GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes
+			GeneCodingPercent Gcomplete G5pComplete G3pComplete Gincomplete)],
+		[qw(GeneNumber BpGenes)]);
+	my $binMode = $MFopt{DoMetaBat2} ? getBinSubdirName($MFopt{DoMetaBat2}) : '';
+	$addFamily->('binning', $MFopt{DoMetaBat2} ? 1 : 0,
+		$binMode eq '' ? [] : [
+			"HQ_bins_".$binMode, "MQ_bins_".$binMode,
+			$binMode."_other_bins", $binMode."_total_bins",
+		],
+		$binMode eq '' ? [] : [$binMode."_total_bins"]);
+	$addFamily->('consensus_snp',
+		$MFopt{DoAssembly} && ($MFopt{DoConsSNP} || $MFopt{DoSuppConsSNP}) ? 1 : 0,
+		[qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved
+			SNPsPerMbp INDEL_Num INDEL_Passed INDELsPerMbp)],
+		[qw(SNP_Num INDEL_Num)]);
+
+	return (\%available, \%families);
 }
 
 sub createSampleCompletionSentinel {
@@ -2193,12 +2625,15 @@ sub createSampleCompletionSentinel {
 			unless defined($args{$required});
 	}
 
-	my $components = sampleCompletionComponents($args{sample_root});
+	my $components = sampleCompletionComponents($args{sample_root}, $args{sample_name}, $args{component_context});
 	my $terminalStatus = $args{terminal_status} || 'completed';
-	if ($terminalStatus eq 'completed'
-			&& $components->{ribofind}{requested}
-			&& !$components->{ribofind}{complete}) {
-		warn "Cannot close sample $args{sample_name}: requested RiboFind outputs are incomplete\n";
+	my @incompleteComponents = sort grep {
+		$components->{$_}{requested} && $components->{$_}{applicable}
+			&& !$components->{$_}{complete}
+	} keys %{$components};
+	if ($terminalStatus eq 'completed' && @incompleteComponents) {
+		warn "Cannot close sample $args{sample_name}: requested output checks are incomplete for "
+			.join(', ', @incompleteComponents)."\n";
 		return;
 	}
 	my $primaryInputMB = 0 + ($args{primary_input_size_mb} || 0);
@@ -2222,11 +2657,18 @@ sub createSampleCompletionSentinel {
 	my $started = clock_gettime(CLOCK_MONOTONIC);
 	reset_stats_log_sampling();
 	%locStats = ();
+	my $sampleKey = $args{component_context}{sample_key} || $args{sample_name};
+	my $statValues = smplStats(
+		$args{input_dir}, $args{assembly_dir}, $args{sample_name}, $sampleKey,
+	);
+	my ($fieldAvailability, $statFamilies) = sampleStatisticsEvidence(
+		$statValues, $sampleKey,
+	);
 	my $metagstats = {
 		DIR => $args{input_label},
-		values => smplStats(
-			$args{input_dir}, $args{assembly_dir}, $args{sample_name},
-		),
+		values => $statValues,
+		field_availability => $fieldAvailability,
+		families => $statFamilies,
 	};
 	my $path = write_sample_completion(
 		root => $args{sample_root},
@@ -8335,22 +8777,23 @@ sub getHybridAssemblyStats {
 }
 
 sub smplStats {
-	my ($inD,$assDir,$SmplN) = @_;
+	my ($inD,$assDir,$SmplN,$sampleKey) = @_;
+	$sampleKey ||= $SmplN;
 	my %values;
 	my $merge = sub {
 		my ($named) = @_;
 		return unless ref($named) eq 'HASH';
 		@values{keys %$named} = values %$named;
 	};
-	my $rawReadSet = sampleReadSet($SmplN, "raw");
+	my $rawReadSet = sampleReadSet($sampleKey, "raw");
 	my $seq_set = ref($rawReadSet) eq 'HASH' ? $rawReadSet : {};
 	my $input_libraries = readLibrariesByScope($seq_set, 'primary', 0, $SmplN);
 	$values{InputIsPaired} = @{libraryPairs($input_libraries)} ? 1 : 0;
 	$values{InputIsSingle} = @{libraryFiles($input_libraries, 'single')} ? 1 : 0;
-	$values{RawInputSize} = exists($map{$SmplN}{inputFileSizeMB})
-		? sprintf('%.3fG', $map{$SmplN}{inputFileSizeMB}/1024) : -1;
-	$values{RawInputSizeSub} = exists($map{$SmplN}{inputXFileSizeMB})
-		? sprintf('%.3fG', $map{$SmplN}{inputXFileSizeMB}/1024) : -1;
+	$values{RawInputSize} = exists($map{$sampleKey}{inputFileSizeMB})
+		? sprintf('%.3fG', $map{$sampleKey}{inputFileSizeMB}/1024) : -1;
+	$values{RawInputSizeSub} = exists($map{$sampleKey}{inputXFileSizeMB})
+		? sprintf('%.3fG', $map{$sampleKey}{inputXFileSizeMB}/1024) : -1;
 
 	# Raw-upload preparation is submitted before read cleaning.
 	$merge->(getContamination("$inD/LOGandSUB/prepEBI.sh.etxt", "$inD/LOGandSUB/prepEBI.sh.otxt", 'EBI'));

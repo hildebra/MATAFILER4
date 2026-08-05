@@ -550,8 +550,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?#4\.39:.*?my \$MATFILER_ver = 4\.39;/s,
-	"MATAFILER history retains shared input discovery through version 4.39");
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?#4\.39:.*?#4\.40:.*?my \$MATFILER_ver = 4\.40;/s,
+	'MATAFILER history retains shared input discovery through version 4.40');
 like($mataf4, qr/setConfigFile\(\$MFconfig\{configFile\}\);.*?normalise_ribosome_request\(\\%MFopt\);/s,
 	'RiboFind redo flags enable profiling during option post-processing');
 like($mataf4, qr/my \$riboRedo = \{.*?prepare_ribosome_rerun\(.*?checkRawProgsFin\(.*?\$riboRedo->\{profile\}.*?\$riboRedo->\{assignment\}/s,
@@ -559,11 +559,20 @@ like($mataf4, qr/my \$riboRedo = \{.*?prepare_ribosome_rerun\(.*?checkRawProgsFi
 like($mataf4, qr/\$calcRibofind = 1 if \$forcedRiboProfile;.*?\$calcRiboAssign = 1 if \$forcedRiboAssignment;.*?RiboMeta\(/s,
 	'explicit RiboFind redo work is enforced before counters and sentinel gating');
 like($mataf4,
-	qr/read_sample_completion\(.*?expected_components\s*=>\s*sampleCompletionComponents\(\$curOutDir\)/s,
+	qr/read_sample_completion\(.*?expected_components\s*=>\s*sampleCompletionComponents\(\$curOutDir, \$SmplName, \$completionComponentContext\)/s,
 	'the fast completion gate revalidates requested workflow artifacts');
 like($mataf4,
-	qr/sub sampleCompletionComponents.*?ribosome_completion_evidence\(.*?sub createSampleCompletionSentinel.*?requested RiboFind outputs are incomplete/s,
-	'RiboFind evidence is stored and incomplete normal samples cannot close');
+	qr/sub sampleCompletionComponents.*?assembly =>.*?primary_assembly_mapping.*?contig_stats.*?binning.*?primary_consensus_snp.*?primary_structural_variants.*?secondary_mapping.*?nonpareil.*?genome_size.*?diamond.*?kraken.*?ribofind.*?metaphlan.*?motus.*?taxa_target/s,
+	'the sentinel inventories durable assembly and non-assembly workflows');
+like($mataf4,
+	qr/sub createSampleCompletionSentinel.*?incompleteComponents.*?requested output checks are incomplete/s,
+	'all requested persistent components gate normal sample closure');
+like($mataf4,
+	qr/sub sampleStatisticsEvidence.*?field_availability.*?families/s,
+	'the sentinel caches per-field and per-family statistics availability');
+like($mataf4,
+	qr/if \( !\$DoUploadRawReads && !\$nonPareilFlag/s,
+	'missing Nonpareil output cannot pass through the no-work closure gate');
 like($mataf4,
 	qr/No completed RiboFind samples; skipping SSU\/LSU merge jobs.*?return/s,
 	'zero completed RiboFind samples cannot create empty merge jobs');

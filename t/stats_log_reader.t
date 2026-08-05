@@ -99,7 +99,7 @@ like($postprocess_code,
 my ($completion_stats_code) = $mataf4_stats =~ /(sub createSampleCompletionSentinel.*?)(?=\nsub cleanupCompletionRequirements)/s;
 ok(defined($completion_stats_code), "sample closure statistics can be isolated");
 like($completion_stats_code,
-	qr/reset_stats_log_sampling\(\).*?values\s*=>\s*smplStats\s*\(.*?write_sample_completion\(.*?stats_log_sampling_summary\(\).*?Statistics log safeguard/s,
+	qr/reset_stats_log_sampling\(\).*?my \$statValues = smplStats\(.*?values\s*=>\s*\$statValues.*?write_sample_completion\(.*?stats_log_sampling_summary\(\).*?Statistics log safeguard/s,
 	"sample closure caches statistics and reports oversized log sampling");
 my ($sample_stats_code) = $mataf4_stats =~ /(sub smplStats .*?)(?=\n# smplStats is implemented)/s;
 ok(defined($sample_stats_code), 'per-sample statistics implementation can be isolated');

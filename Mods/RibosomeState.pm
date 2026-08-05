@@ -8,33 +8,19 @@ use File::Glob qw(bsd_glob GLOB_NOSORT);
 use File::Path qw(remove_tree);
 use File::Spec;
 
-use Mods::SampleCompletion qw(invalidate_sample_completion);
+use Mods::SampleCompletion qw(
+	completion_component_evidence invalidate_sample_completion
+);
 
 our @EXPORT_OK = qw(
 	normalise_ribosome_request
 	prepare_ribosome_rerun
 	ribosome_completion_evidence
 );
-
-sub _result_present {
-	my ($path) = @_;
-	return (-e $path || -e "$path.gz") ? 1 : 0;
-}
-
-sub _profile_outputs_present {
-	my ($root, $tag) = @_;
-	for my $suffix ('r1.fq.gz', 'r2.fq.gz', 'fq.gz') {
-		return 0 unless -s File::Spec->catfile(
-			$root, "reads_$tag.$suffix",
-		);
-	}
-	return 1;
-}
-
 sub ribosome_completion_evidence {
 	my (%args) = @_;
 	my $requested = $args{requested} ? 1 : 0;
-	return {requested => 0, complete => 1} unless $requested;
+	return completion_component_evidence(requested => 0) unless $requested;
 
 	my $ribo_root = $args{ribo_root};
 	if (!defined($ribo_root) || $ribo_root eq '') {
@@ -45,36 +31,73 @@ sub ribosome_completion_evidence {
 	}
 	my $lca_root = File::Spec->catdir($ribo_root, 'ltsLCA');
 	my $assembly_requested = $args{assembly_requested} ? 1 : 0;
-	my %evidence = (
-		requested => 1,
-		assembly_requested => $assembly_requested,
-		ssu_profile_complete => -e File::Spec->catfile($ribo_root, 'SSU_pull.sto') ? 1 : 0,
-		lsu_profile_complete => -e File::Spec->catfile($ribo_root, 'LSU_pull.sto') ? 1 : 0,
-		ssu_profile_outputs_complete => _profile_outputs_present($ribo_root, 'SSU'),
-		lsu_profile_outputs_complete => _profile_outputs_present($ribo_root, 'LSU'),
-		assembly_complete => (!$assembly_requested
-			|| -e File::Spec->catfile($ribo_root, 'Ass', 'allAss.sto')) ? 1 : 0,
-		assignment_complete_stone => -e File::Spec->catfile($lca_root, 'Assigned.sto') ? 1 : 0,
-		ssu_assignment_complete => -e File::Spec->catfile($lca_root, 'SSU_ass.sto') ? 1 : 0,
-		lsu_assignment_complete => -e File::Spec->catfile($lca_root, 'LSU_ass.sto') ? 1 : 0,
-		ssu_hierarchy_complete => _result_present(
+	my @checks = (
+		{id => 'ssu_profile_stone', kind => 'exists',
+			path => File::Spec->catfile($ribo_root, 'SSU_pull.sto')},
+		{id => 'lsu_profile_stone', kind => 'exists',
+			path => File::Spec->catfile($ribo_root, 'LSU_pull.sto')},
+		(map {
+			+{id => "ssu_profile_$_", kind => 'nonempty',
+				path => File::Spec->catfile($ribo_root, "reads_SSU.$_")}
+		} ('r1.fq.gz', 'r2.fq.gz', 'fq.gz')),
+		(map {
+			+{id => "lsu_profile_$_", kind => 'nonempty',
+				path => File::Spec->catfile($ribo_root, "reads_LSU.$_")}
+		} ('r1.fq.gz', 'r2.fq.gz', 'fq.gz')),
+		{id => 'assignment_stone', kind => 'exists',
+			path => File::Spec->catfile($lca_root, 'Assigned.sto')},
+		{id => 'ssu_assignment_stone', kind => 'exists',
+			path => File::Spec->catfile($lca_root, 'SSU_ass.sto')},
+		{id => 'lsu_assignment_stone', kind => 'exists',
+			path => File::Spec->catfile($lca_root, 'LSU_ass.sto')},
+		{id => 'ssu_hierarchy', kind => 'exists_any', paths => [
 			File::Spec->catfile($lca_root, 'SSUriboRun_bl.hiera.txt'),
-		),
-		lsu_hierarchy_complete => _result_present(
+			File::Spec->catfile($lca_root, 'SSUriboRun_bl.hiera.txt.gz'),
+		]},
+		{id => 'lsu_hierarchy', kind => 'exists_any', paths => [
 			File::Spec->catfile($lca_root, 'LSUriboRun_bl.hiera.txt'),
-		),
+			File::Spec->catfile($lca_root, 'LSUriboRun_bl.hiera.txt.gz'),
+		]},
 	);
-	$evidence{profile_complete} = $evidence{ssu_profile_complete}
-		&& $evidence{lsu_profile_complete}
-		&& $evidence{ssu_profile_outputs_complete}
-		&& $evidence{lsu_profile_outputs_complete}
-		&& $evidence{assembly_complete} ? 1 : 0;
-	$evidence{taxonomy_complete} = $evidence{assignment_complete_stone}
-		&& $evidence{ssu_assignment_complete} && $evidence{lsu_assignment_complete}
-		&& $evidence{ssu_hierarchy_complete} && $evidence{lsu_hierarchy_complete} ? 1 : 0;
-	$evidence{complete} = $evidence{profile_complete}
-		&& $evidence{taxonomy_complete} ? 1 : 0;
-	return \%evidence;
+	push @checks, {
+		id => 'ribosomal_assembly_stone', kind => 'exists',
+		path => File::Spec->catfile($ribo_root, 'Ass', 'allAss.sto'),
+	} if $assembly_requested;
+
+	my $evidence = completion_component_evidence(
+		requested => 1,
+		checks => \@checks,
+	);
+	my $ok = sub {
+		my ($id) = @_;
+		return $evidence->{checks}{$id}{ok} ? 1 : 0;
+	};
+	$evidence->{assembly_requested} = $assembly_requested;
+	$evidence->{ssu_profile_complete} = $ok->('ssu_profile_stone');
+	$evidence->{lsu_profile_complete} = $ok->('lsu_profile_stone');
+	$evidence->{ssu_profile_outputs_complete} =
+		!grep { !$ok->("ssu_profile_$_") } ('r1.fq.gz', 'r2.fq.gz', 'fq.gz');
+	$evidence->{lsu_profile_outputs_complete} =
+		!grep { !$ok->("lsu_profile_$_") } ('r1.fq.gz', 'r2.fq.gz', 'fq.gz');
+	$evidence->{assembly_complete} = !$assembly_requested
+		|| $ok->('ribosomal_assembly_stone') ? 1 : 0;
+	$evidence->{assignment_complete_stone} = $ok->('assignment_stone');
+	$evidence->{ssu_assignment_complete} = $ok->('ssu_assignment_stone');
+	$evidence->{lsu_assignment_complete} = $ok->('lsu_assignment_stone');
+	$evidence->{ssu_hierarchy_complete} = $ok->('ssu_hierarchy');
+	$evidence->{lsu_hierarchy_complete} = $ok->('lsu_hierarchy');
+	$evidence->{profile_complete} = $evidence->{ssu_profile_complete}
+		&& $evidence->{lsu_profile_complete}
+		&& $evidence->{ssu_profile_outputs_complete}
+		&& $evidence->{lsu_profile_outputs_complete}
+		&& $evidence->{assembly_complete} ? 1 : 0;
+	$evidence->{taxonomy_complete} = $evidence->{assignment_complete_stone}
+		&& $evidence->{ssu_assignment_complete} && $evidence->{lsu_assignment_complete}
+		&& $evidence->{ssu_hierarchy_complete} && $evidence->{lsu_hierarchy_complete} ? 1 : 0;
+	$evidence->{complete} = $evidence->{profile_complete}
+		&& $evidence->{taxonomy_complete} ? 1 : 0;
+	$evidence->{status} = $evidence->{complete} ? 'complete' : 'incomplete';
+	return $evidence;
 }
 
 sub normalise_ribosome_request {
