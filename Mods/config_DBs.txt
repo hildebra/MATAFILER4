@@ -2,11 +2,11 @@
 # SortMeRNA v4.3.x. Override these keys in the user configuration when the
 # databases live outside DBDir.
 #ITSdbFAsrt	[DBDir]/ # no longer using ITS
-SSUdbFAsrt	[DBDir]/sortmerna_database/ssu/smr_v4.3_default_db_ssu.fasta
-LSUdbFAsrt	[DBDir]/sortmerna_database/lsu/smr_v4.3_default_db_lsu.fasta
+SSUdbFAsrt	[DBDir]/MarkerG/sortmerna_database/v4.3_sens_clean/ssu/smr_v4.3_sens_clean_db_ssu.fasta
+LSUdbFAsrt	[DBDir]/MarkerG/sortmerna_database/v4.3/lsu/smr_v4.3_default_db_lsu.fasta
 #ITSidx	[DBDir]/
-SSUidx	[DBDir]/sortmerna_database/ssu/idx
-LSUidx	[DBDir]/sortmerna_database/lsu/idx
+SSUidx	[DBDir]/MarkerG/sortmerna_database/v4.3_sens_clean/ssu/idx
+LSUidx	[DBDir]/MarkerG/sortmerna_database/v4.3/lsu/idx
 
 #for lambda and LCA
 LSUdbFA	[DBDir]/MarkerG/SILVA/138.1/SLV_138.1_LSU.fasta

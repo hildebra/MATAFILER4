@@ -1,7 +1,7 @@
 #sequence length refers to sequence length AFTER removal of Primers, Barcodes and trimming. this ensures that downstream analyis tools will have appropiate sequence information
 minSeqLength	250
-maxSeqLength	100000
-minAvgQuality	25
+maxSeqLength	1000000
+minAvgQuality	18
 #truncate total Sequence length to X (length after Barcode, Adapter and Primer removals)
 TruncateSequenceLength	-1
 
@@ -12,8 +12,8 @@ maxAmbiguousNT	500
 maxHomonucleotide	28
 
 #Filter whole sequence if one window of quality scores is below average
-QualWindowWidth	50
-QualWindowThreshhold	22
+QualWindowWidth	250
+QualWindowThreshhold	20
 
 #Trim the end of a sequence if a window falls below quality threshhold. Useful for removing low qulaity trailing ends of sequence
 TrimWindowWidth	20
