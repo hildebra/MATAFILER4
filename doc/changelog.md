@@ -2,7 +2,8 @@
 
 ## 2026-08-05 — Taxon-aware strain locus selection
 
-- Updated `buildTree5.pl` to 5.30 and kept the selector localized in the tree workflow rather than splitting MSA orchestration into another script.
+- Updated `buildTree5.pl` to 5.31 and kept the selector localized in the tree workflow rather than splitting MSA orchestration into another script.
+- Keep IQ-TREE inference unrooted: `-outgroup` remains available for locus anchoring and downstream backbone/placed-tree rooting, but is no longer passed as IQ-TREE's cosmetic `-o` flag.
 - Added taxon-aware locus selection and subsequently made `-taxonAwareLocusSelection 1` the default. Direct calls align a bounded 400-core/100-rescue set, carry 150 extra loci as QC backfill, and choose the final 500 loci after MSAfix from observed occupancy and parsimony-informative sites.
 - Replaced relative species rejection in the taxon-aware path with an anchor rule: well-covered samples are backbone candidates, sparse samples remain placement candidates, and only samples lacking usable placement overlap are removed.
 - Added candidate/final locus and sample TSV audits under the tree output directory, and fingerprinted selector settings in continuation policy state.

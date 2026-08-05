@@ -34,6 +34,7 @@
 #5.28: centralize reusable alignment and per-method tree checkpoint state
 #5.29: add opt-in taxon-aware two-stage locus selection around the existing MSA workflow
 #5.30: enable taxon-aware locus selection by default
+#5.31: keep IQ-TREE inference unrooted; root published output downstream
 
 use warnings;
 use strict;
@@ -107,7 +108,7 @@ sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.30;
+my $version = 5.31;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;

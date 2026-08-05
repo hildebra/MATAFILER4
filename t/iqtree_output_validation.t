@@ -117,7 +117,7 @@ my $retryPrefix = File::Spec->catfile($tmp, 'IQtree_retry');
 		inMSA => $alignment,
 		IQtreeout => $retryPrefix,
 		ncore => 1,
-		outgr => '',
+		outgr => 'C',
 		bootStrap => 0,
 		useAA => 0,
 		iqtreeFast => 0,
@@ -134,6 +134,8 @@ my @calls = grep { length } split /\n/, slurp("$retryPrefix.calls");
 is(scalar(@calls), 2, 'numerical underflow triggers exactly one retry');
 unlike($calls[0], qr/(?:^|\s)-keep-ident(?:\s|$)/,
 	'the IQ-TREE command does not use -keep-ident');
+unlike($calls[0], qr/(?:^|\s)-o(?:\s|$)/,
+	'a supplied outgroup is not passed to IQ-TREE');
 unlike($calls[0], qr/(?:^|\s)-safe(?:\s|$)/,
 	'the small initial test attempt uses the normal likelihood kernel');
 like($calls[1], qr/(?:^|\s)-safe(?:\s|$)/,

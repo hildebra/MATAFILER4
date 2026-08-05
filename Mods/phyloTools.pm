@@ -341,8 +341,8 @@ sub _clearIQTreeAttempt {
 
 sub runQItree{
 	my ($hr) = @_; my %treeOpts = %{$hr};
-	my ($inMSA,$treeOut,$ncore,$outgr,$bootStrap,$useAA,$fast,$autoModel,$partiF,$runSafe) =
-		($treeOpts{inMSA},$treeOpts{IQtreeout},$treeOpts{ncore},$treeOpts{outgr},$treeOpts{bootStrap},$treeOpts{useAA},
+	my ($inMSA,$treeOut,$ncore,$bootStrap,$useAA,$fast,$autoModel,$partiF,$runSafe) =
+		($treeOpts{inMSA},$treeOpts{IQtreeout},$treeOpts{ncore},$treeOpts{bootStrap},$treeOpts{useAA},
 		$treeOpts{iqtreeFast},$treeOpts{autoModel},$treeOpts{partition},$treeOpts{runSafe});
 	my $iqMemMB = $treeOpts{iqMemMB} // 0;
 	my $iqPathogen = $treeOpts{iqPathogen} // 0;
@@ -392,7 +392,9 @@ sub runQItree{
 	$cmd .= "--pathogen " if $iqPathogen && !$iqLegacy;
 	#$cmd .= " -Q $partiF --merge " unless ($partiF eq "");
 	$cmd .= " -p $partiF " if $usePartitionModel;
-	$cmd .= "-o $outgr " unless ($outgr eq "" && $outgr !~ m/,/);
+	# IQ-TREE's -o affects only presentation under our reversible models.  Root
+	# downstream output after inference instead: -o can assert when the anchor
+	# is absent from an internal reduced or partition-specific tree.
 	$cmd .= "-g $constraintTree " unless ($constraintTree eq "");
 	unless ($fast == 0 || $iqPathogen){
 		$cmd .= "--fast ";

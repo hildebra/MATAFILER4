@@ -12,7 +12,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 | `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `buildTree5.pl` | `5.30` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.31` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -473,7 +473,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-NTfiltCount` | integer | `0` | stable | See source/help for details. |
 | `-smplDef` | integer | `1` | stable | is the genome somehow quantified with a delimiter (_) ? |
 | `-smplSep` | string | `_` | stable | set the delimiter |
-| `-outgroup` | string |  | stable | See source/help for details. |
+| `-outgroup` | string |  | stable | Retained as the anchor for filtering, downstream backbone rooting, and placement; not passed to IQ-TREE, where `-o` is cosmetic under reversible models and can fail on an internal sparse tree. |
 | `-AAtree` | integer | `0` | stable | See source/help for details. |
 | `-MSAprogram` | integer | `2` | stable | (0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA) |
 | `-minOverlapMSA` | integer | `0` between species; `2` within species | stable | Minimum number of called sequences required to retain an MSA column. An explicit value overrides the `-withinSpecies` default. |
