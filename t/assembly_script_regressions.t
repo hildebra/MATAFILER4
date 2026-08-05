@@ -152,7 +152,7 @@ ok(-e $sentinel, 'invalid binner does not erase an existing output directory');
 
 my $small_bin_dir = File::Spec->catdir($tmp, 'small-bins');
 my $small_bin_tmp = File::Spec->catdir($tmp, 'small-bin-tmp');
-my $sample_completion = File::Spec->catfile($tmp, "MATAFILER.sample.complete.json");
+my $sample_completion = File::Spec->catfile($tmp, "MF4.sentinel.small.json");
 write_file($sample_completion, "closed\n");
 ($status, $output, $errors) = run_script('runBinners.pl',
 	'-binner', 1, '-binD', $small_bin_dir, '-tmpD', $small_bin_tmp,

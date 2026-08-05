@@ -32,7 +32,7 @@ sub populate_results {
 	write_file(File::Spec->catfile($lca_root, 'Assigned.sto'));
 	write_file(File::Spec->catfile($lca_root, 'SSU_ass.sto'));
 	write_file(File::Spec->catfile($lca_root, 'LSU_ass.sto'));
-	write_file(sample_completion_path($sample_root), "closed\n");
+	write_file(sample_completion_path($sample_root, $sample), "closed\n");
 
 	for my $tag (qw(SSU LSU)) {
 		for my $suffix (qw(r1.fq.gz r2.fq.gz fq.gz)) {
@@ -163,7 +163,7 @@ ok(!-e File::Spec->catdir($sample_root, 'ribos', 'ltsLCA'),
 	'assignment rerun removes the old LCA results');
 ok(-e File::Spec->catfile($sample_root, 'ribos', 'SSU_pull.sto'),
 	'assignment rerun retains the RiboFind extraction stones');
-ok(!-e sample_completion_path($sample_root),
+ok(!-e sample_completion_path($sample_root, $sample),
 	'assignment rerun invalidates the sample completion sentinel');
 
 for my $tag (qw(SSU LSU)) {
@@ -194,11 +194,11 @@ ok($profile_result->{assignment},
 ok($profile_result->{profile}, 'profile rerun records extraction invalidation');
 ok(!-e File::Spec->catdir($sample_root, 'ribos'),
 	'profile rerun removes the complete sample-local RiboFind directory');
-ok(!-e sample_completion_path($sample_root),
+ok(!-e sample_completion_path($sample_root, $sample),
 	'profile rerun invalidates the completion sentinel');
 
 write_file(File::Spec->catfile($sample_root, 'ribos', 'keep.txt'));
-write_file(sample_completion_path($sample_root), "closed\n");
+write_file(sample_completion_path($sample_root, $sample), "closed\n");
 my $no_redo_result = prepare_ribosome_rerun(
 	sample_root => $sample_root,
 	central_root => $central_root,
@@ -209,7 +209,7 @@ my $no_redo_result = prepare_ribosome_rerun(
 is($no_redo_result->{removed}, 0, 'ordinary runs perform no redo cleanup');
 ok(-e File::Spec->catfile($sample_root, 'ribos', 'keep.txt'),
 	'ordinary runs retain RiboFind results');
-ok(-e sample_completion_path($sample_root),
+ok(-e sample_completion_path($sample_root, $sample),
 	'ordinary runs retain the completion sentinel');
 
 done_testing;

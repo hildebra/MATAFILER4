@@ -59,6 +59,9 @@ ok(!exists $found->{file_sizes}{'unrelated_R1.fastq.gz'},
 	'input discovery applies the sample prefix before gathering file metadata');
 
 touch_file("$read_dir/sample+1_L3_R1_001.fastq.gz");
+my $cache_bust_time = time + 2;
+utime($cache_bust_time, $cache_bust_time, $read_dir) == 1
+	or die "Cannot advance input-directory timestamp for cache test: $!";
 my $pair_error = eval {
 	discoverReadFiles($read_dir, 'sample+1', {
 		read1 => '.*R1.*\.fastq\.gz$', read2 => '.*R2.*\.fastq\.gz$',

@@ -51,6 +51,7 @@ use Mods::StatsLogReader qw(
 use Mods::SampleCompletion qw(
 	sample_completion_path completion_request_signature
 	completion_component_evidence
+	completion_record_needs_refresh
 	read_sample_completion write_sample_completion
 	invalidate_sample_completion
 );
@@ -209,7 +210,9 @@ sub createConsSNPandSVs;
 #       profile outputs for completion, and raise extraction memory to 20 GiB.
 #4.40: 5.8.26: version sample sentinels as independent component/statistics
 #       contracts and persist lightweight evidence for every raw-read workflow.
-my $MATFILER_ver = 4.40;
+#4.41: 5.8.26: focus sentinel v3, record output byte sizes, and use
+#       sample-specific MF4.sentinel.<SampleID>.json filenames.
+my $MATFILER_ver = 4.41;
 
 #----------------- defaults ----------------- 
 
@@ -634,7 +637,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	# Register the sentinel path before the completion gate. Postprocessing reads
 	# only this cached record and never rescans sample outputs or logs.
 	my $completionSignature = sampleCompletionRequestSignature($curSmpl);
-	my $completionSentinel = sample_completion_path($curOutDir);
+	my $completionSentinel = sample_completion_path($curOutDir, $SmplName);
 	if ($MFconfig{alwaysDoStats}) {
 		push @{$runReport{order}}, $SmplName unless $runReport{seen}{$SmplName}++;
 		$runReport{context}{$SmplName} = {
@@ -673,13 +676,14 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	# A valid sentinel is the sole fast-completion authority. Rewrite requests,
 	# changed workflow parameters, or malformed sentinels reopen the sample.
 	my @forcedReopen = sampleCompletionForcedInvalidation();
-	my ($closedSample, $completionError);
-	($closedSample, $completionError) = read_sample_completion(
-		path => $completionSentinel,
-		sample => $SmplName,
-		request_signature => $completionSignature,
-		expected_components => sampleCompletionComponents($curOutDir, $SmplName, $completionComponentContext),
-	) unless @forcedReopen;
+	my ($closedSample, $completionError, $expectedCompletionComponents);
+	unless (@forcedReopen) {
+		($closedSample, $completionError) = read_sample_completion(
+			path => $completionSentinel,
+			sample => $SmplName,
+			request_signature => $completionSignature,
+		);
+	}
 	if ($closedSample && $closedSample->{outcome}{status} =~ /^skipped_(?:too_small|empty_input)$/) {
 		populateInputSizesFast($curSmpl);
 		my $currentPrimaryMB = 0 + ($map{$curSmpl}{inputFileSizeMB} || 0);
@@ -696,6 +700,37 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		} elsif ($currentTerminalStatus ne $closedSample->{outcome}{status}) {
 			$closedSample = undef;
 			$completionError = 'current input size no longer qualifies for the stored terminal outcome';
+		}
+	}
+	if ($closedSample && completion_record_needs_refresh($closedSample)) {
+		$expectedCompletionComponents = sampleCompletionComponents(
+			$curOutDir, $SmplName, $completionComponentContext,
+		);
+		($closedSample, $completionError) = read_sample_completion(
+			path => $completionSentinel,
+			sample => $SmplName,
+			request_signature => $completionSignature,
+			expected_components => $expectedCompletionComponents,
+		);
+		if ($closedSample) {
+			write_sample_completion(
+				root => $curOutDir,
+				sample => $SmplName,
+				request_signature => $completionSignature,
+				present_assembly => $closedSample->{present_assembly},
+				components => $expectedCompletionComponents,
+				outcome => $closedSample->{outcome},
+				metagstats => $closedSample->{metagstats},
+			);
+			($closedSample, $completionError) = read_sample_completion(
+				path => $completionSentinel,
+				sample => $SmplName,
+				request_signature => $completionSignature,
+			);
+			die "Cannot refresh completion sentinel for $SmplName: $completionError\n"
+				unless $closedSample;
+			print "Updated completion sentinel for $SmplName with current output file sizes\n"
+				unless $MFconfig{silent};
 		}
 	}
 	if ($closedSample) {
@@ -717,7 +752,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my $reason = @forcedReopen
 			? 'rewrite requested: '.join(', ', @forcedReopen)
 			: ($completionError || 'completion sentinel was not accepted');
-		invalidate_sample_completion($curOutDir);
+		invalidate_sample_completion($curOutDir, $SmplName);
 		print "Reopening sample $SmplName; removed completion sentinel ($reason)\n"
 			unless $MFconfig{silent};
 	}
@@ -858,7 +893,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$closeSampleOutcome->(
 				present_assembly => $efinAssLoc,
 				terminal_status => 'skipped_sdm_warning',
-				sdm_warning => 1,
 				sdm_warning_type => 'invalid_paired_read',
 				sdm_warning_log => $sdmWarningLog,
 				completion_message =>
@@ -1376,8 +1410,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			if ($emptyCleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
 				$closeSampleOutcome->(
 					present_assembly => 0,
-					empty_sample => 1,
-					empty_input_size_mb => $runReport{empty_samples}{$curSmpl},
 					terminal_status => $emptyTerminalStatus,
 				);
 			} else {
@@ -2539,13 +2571,7 @@ sub sampleStatisticsEvidence {
 		my $status = !$requested ? 'not_applicable'
 			: !$present ? 'missing'
 			: $requiredOk ? 'complete' : 'partial';
-		$families{$name} = {
-			requested => $requested ? 1 : 0,
-			applicable => $requested ? 1 : 0,
-			ok => !$requested || $requiredOk ? 1 : 0,
-			status => $status,
-			fields => \%fieldState,
-		};
+		$families{$name} = $status;
 	};
 
 	$addFamily->('input', 1,
@@ -2612,7 +2638,7 @@ sub sampleStatisticsEvidence {
 			SNPsPerMbp INDEL_Num INDEL_Passed INDELsPerMbp)],
 		[qw(SNP_Num INDEL_Num)]);
 
-	return (\%available, \%families);
+	return \%families;
 }
 
 sub createSampleCompletionSentinel {
@@ -2645,14 +2671,13 @@ sub createSampleCompletionSentinel {
 			supplementary => $supplementaryInputMB,
 			total => $primaryInputMB + $supplementaryInputMB,
 		},
-		small_sample => $terminalStatus eq 'skipped_too_small' ? 1 : 0,
-		small_sample_threshold_mb => 0 + ($MFconfig{skipSmallSmplsMB} || 0),
-		sdm_warning => {
-			detected => $args{sdm_warning} ? 1 : 0,
-			type => $args{sdm_warning_type} || '',
-			log => $args{sdm_warning_log} || '',
-		},
 	};
+	$outcome->{small_sample_threshold_mb} = 0 + ($MFconfig{skipSmallSmplsMB} || 0)
+		if $terminalStatus eq 'skipped_too_small';
+	$outcome->{sdm_warning} = {
+		type => $args{sdm_warning_type} || '',
+		log => $args{sdm_warning_log} || '',
+	} if $terminalStatus eq 'skipped_sdm_warning';
 
 	my $started = clock_gettime(CLOCK_MONOTONIC);
 	reset_stats_log_sampling();
@@ -2661,13 +2686,10 @@ sub createSampleCompletionSentinel {
 	my $statValues = smplStats(
 		$args{input_dir}, $args{assembly_dir}, $args{sample_name}, $sampleKey,
 	);
-	my ($fieldAvailability, $statFamilies) = sampleStatisticsEvidence(
-		$statValues, $sampleKey,
-	);
+	my $statFamilies = sampleStatisticsEvidence($statValues, $sampleKey);
 	my $metagstats = {
 		DIR => $args{input_label},
 		values => $statValues,
-		field_availability => $fieldAvailability,
 		families => $statFamilies,
 	};
 	my $path = write_sample_completion(
@@ -2675,8 +2697,6 @@ sub createSampleCompletionSentinel {
 		sample => $args{sample_name},
 		request_signature => $args{request_signature},
 		present_assembly => $args{present_assembly},
-		empty_sample => $args{empty_sample},
-		empty_input_size_mb => $args{empty_input_size_mb},
 		components => $components,
 		outcome => $outcome,
 		metagstats => $metagstats,
@@ -3101,8 +3121,11 @@ sub postprocess{
 			}
 			$runReport{samples}{$sampleName} = $closedSample->{metagstats};
 			$runReport{present_assemblies}++ if $closedSample->{present_assembly};
-			$runReport{empty_samples}{$sampleName} = $closedSample->{empty_input_size_mb}
-				if $closedSample->{empty_sample};
+			my $outcomeStatus = $closedSample->{outcome}{status} || '';
+			if ($outcomeStatus =~ /^skipped_(?:too_small|empty_input)$/) {
+				$runReport{empty_samples}{$sampleName} =
+					0 + ($closedSample->{outcome}{input_size_mb}{total} || 0);
+			}
 		}
 	}
 	my $statsCollectionSeconds = clock_gettime(CLOCK_MONOTONIC) - $statsStarted;

@@ -65,7 +65,7 @@ As fully complete samples have their temporary data removed, the range start
 advances across that continuous prefix and later samples replenish the rolling
 range. After all requested output checks (or a terminal empty/too-small
 classification) and final cleanup pass, MATAFILER4
-atomically writes `<SmplID>/MATAFILER.sample.complete.json`. A later visit with
+atomically writes `<SmplID>/MF4.sentinel.<SmplID>.json`. A later visit with
 the same sample definition and requested workflow reads this one file, reports
 `Sample already complete; no jobs submitted`, and skips the deeper output and
 log checks. A changed request, an explicit redo option, or an invalid sentinel

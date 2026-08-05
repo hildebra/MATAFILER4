@@ -78,7 +78,7 @@ contiguous prefix whose
 requested outputs are complete and whose temporary directories have been
 cleaned, keeping unfinished samples in rotation while admitting new ones.
 A sample that passes every requested output and cleanup check is closed with
-`<SmplID>/MATAFILER.sample.complete.json`. Matching later visits read only that
+`<SmplID>/MF4.sentinel.<SmplID>.json`. Matching later visits read only that
 record and report the sample complete. A changed workflow request, redo option,
 or downstream ContigStats, SNP, or binner work removes the sentinel and restores
 full checking. The loop still performs one final full-range verification pass
@@ -102,7 +102,7 @@ A successful assembly-dependent run should normally create:
 ```text
 #OutPath/#RunID/metagStats.txt
 #OutPath/#RunID/metagStatsReport.html
-#OutPath/#RunID/<SmplID>/MATAFILER.sample.complete.json
+#OutPath/#RunID/<SmplID>/MF4.sentinel.<SmplID>.json
 #OutPath/#RunID/<SmplID>/assemblies/
 #OutPath/#RunID/<SmplID>/assemblies/metag/genePred/
 #OutPath/#RunID/<SmplID>/assemblies/metag/ContigStats/

@@ -10,7 +10,7 @@ use Test::More;
 use lib File::Spec->catdir(File::Spec->rel2abs('.'));
 use Mods::SampleCompletion qw(
 	sample_completion_path completion_request_signature
-	completion_component_evidence
+	completion_component_evidence completion_record_needs_refresh
 	read_sample_completion write_sample_completion invalidate_sample_completion
 );
 
@@ -23,18 +23,20 @@ sub write_file {
 	close $fh or die "Cannot close $path: $!";
 }
 
+sub read_json {
+	my ($path) = @_;
+	open my $fh, '<:raw', $path or die "Cannot read $path: $!";
+	local $/;
+	my $record = JSON::PP->new->decode(<$fh>);
+	close $fh or die "Cannot close $path: $!";
+	return $record;
+}
+
 sub stats_record {
 	return {
 		DIR => '/reads/S1',
 		values => {RawInputSize => '1.250G', ScaffN50 => 12345},
-		field_availability => {RawInputSize => 1, ScaffN50 => 1},
-		families => {
-			input => {
-				requested => 1, applicable => 1, ok => 1,
-				status => 'complete',
-				fields => {RawInputSize => 1},
-			},
-		},
+		families => {input => 'complete', assembly => 'complete'},
 	};
 }
 
@@ -56,6 +58,7 @@ isnt(completion_request_signature({
 
 my $ribo_result = File::Spec->catfile($sample_root, 'ribos', 'Assigned.sto');
 my $ribo_optional = File::Spec->catfile($sample_root, 'ribos', 'diagnostic.txt');
+my $missing_alternative = File::Spec->catfile($sample_root, 'ribos', 'missing.txt');
 write_file($ribo_optional, "diagnostic\n");
 write_file($ribo_result, '');
 my $components = {
@@ -65,6 +68,8 @@ my $components = {
 			{id => 'assignment', kind => 'exists', path => $ribo_result},
 			{id => 'diagnostic', kind => 'nonempty',
 				path => $ribo_optional, required => 0},
+			{id => 'alternative', kind => 'exists_any',
+				paths => [$missing_alternative, $ribo_optional], required => 0},
 		],
 	),
 	kraken => completion_component_evidence(requested => 0),
@@ -73,11 +78,13 @@ my $components = {
 		reason => 'transient output',
 	),
 };
+# RiboFind exposes these derived values while scheduling; the generic checks are
+# the authoritative persisted evidence, so the serializer must not duplicate them.
+$components->{ribofind}{profile_complete} = 1;
+$components->{ribofind}{taxonomy_complete} = 1;
 my $outcome = {
 	status => 'completed',
 	input_size_mb => {primary => 10, supplementary => 2, total => 12},
-	small_sample => 0,
-	sdm_warning => {detected => 0, type => '', log => ''},
 };
 my $path = write_sample_completion(
 	root => $sample_root,
@@ -88,8 +95,10 @@ my $path = write_sample_completion(
 	outcome => $outcome,
 	metagstats => stats_record(),
 );
-is($path, sample_completion_path($sample_root),
-	'sentinel uses the fixed sample-local filename');
+is($path, sample_completion_path($sample_root, 'S1'),
+	'sentinel filename includes the sample id');
+like($path, qr/MF4\.sentinel\.S1\.json$/,
+	'sentinel uses the requested MF4 filename');
 ok(-s $path, 'completion sentinel is published nonempty');
 ok(!-e "$path.tmp.$$", 'atomic publication leaves no temporary sentinel');
 
@@ -103,30 +112,63 @@ is($record->{contracts}{components}{schema_version}, 1,
 	'component evidence has an independent version');
 is($record->{contracts}{metagstats}{schema_version}, 1,
 	'statistics evidence has an independent version');
-is_deeply($record->{contracts}{components}{inventory},
-	[sort keys %{$components}],
-	'component contract records its complete inventory');
-is_deeply($record->{contracts}{metagstats}{fields},
-	[qw(RawInputSize ScaffN50)],
-	'statistics contract records its field inventory');
-is_deeply($record->{contracts}{metagstats}{families}, ['input'],
-	'statistics contract records its family inventory');
+ok(!exists($record->{contracts}{components}{inventory}),
+	'component keys are not repeated in a contract inventory');
+ok(!exists($record->{contracts}{metagstats}{fields})
+	&& !exists($record->{contracts}{metagstats}{families}),
+	'statistics keys are not repeated in contract inventories');
 is($record->{sample}, 'S1', 'sentinel records its sample identity');
 is($record->{present_assembly}, 1, 'sentinel records assembly availability');
-is($record->{empty_sample}, 0, 'ordinary completion is not marked empty');
-is($record->{components}{ribofind}{status}, 'complete',
-	'requested persistent component records complete status');
-is($record->{components}{ribofind}{checks}{assignment}{ok}, 1,
-	'individual persistent file check is recorded');
-is($record->{components}{kraken}{status}, 'not_requested',
-	'unrequested workflow is explicit in the sentinel');
-is($record->{components}{read_cleaning}{status}, 'not_applicable',
-	'transient workflow is explicit without blocking closure');
-is_deeply($record->{metagstats}{field_availability},
-	{RawInputSize => 1, ScaffN50 => 1},
-	'sentinel stores per-field statistics availability');
-is($record->{metagstats}{families}{input}{status}, 'complete',
-	'sentinel stores statistics-family status');
+ok(!exists($record->{empty_sample}) && !exists($record->{empty_input_size_mb}),
+	'empty-sample facts are not duplicated outside the outcome');
+ok(!exists($record->{components}{ribofind}{status}),
+	'component status is derived rather than persisted');
+ok(!exists($record->{components}{ribofind}{profile_complete})
+	&& !exists($record->{components}{ribofind}{taxonomy_complete}),
+	'RiboFind derived booleans are not duplicated in the sentinel');
+is($record->{components}{ribofind}{checks}{assignment}{size_bytes}, 0,
+	'zero-byte completion stones record their file size');
+is($record->{components}{ribofind}{checks}{diagnostic}{size_bytes},
+	length("diagnostic\n"), 'nonempty outputs record their file size');
+is($record->{components}{ribofind}{checks}{alternative}{matched_path},
+	$ribo_optional, 'multi-path checks record which file matched');
+is($record->{components}{ribofind}{checks}{alternative}{size_bytes},
+	length("diagnostic\n"), 'the matched alternative records its file size');
+ok(!exists($record->{components}{ribofind}{checks}{assignment}{required}),
+	'the default required=true value is omitted');
+is($record->{components}{ribofind}{checks}{diagnostic}{required}, 0,
+	'optional checks remain explicit');
+ok(!exists($record->{metagstats}{field_availability}),
+	'metagStats values are not duplicated by an availability map');
+is($record->{metagstats}{families}{input}, 'complete',
+	'statistics families persist only their status');
+ok(!completion_record_needs_refresh($record, $components),
+	'newly written sentinel has complete file-size evidence');
+
+my $without_size = read_json($path);
+delete $without_size->{components}{ribofind}{checks}{assignment}{size_bytes};
+write_file($path, JSON::PP->new->canonical(1)->encode($without_size));
+($record, $error) = read_sample_completion(
+	root => $sample_root, sample => 'S1', request_signature => $signature,
+	expected_components => $components,
+);
+is($error, '', 'a valid completed sample remains closed while sizes are backfilled');
+ok(completion_record_needs_refresh($record, $components),
+	'a completed sentinel missing a file size requests a lightweight refresh');
+write_sample_completion(
+	root => $sample_root, sample => 'S1', request_signature => $signature,
+	present_assembly => $record->{present_assembly}, components => $components,
+	outcome => $record->{outcome}, metagstats => $record->{metagstats},
+);
+($record, $error) = read_sample_completion(
+	root => $sample_root, sample => 'S1', request_signature => $signature,
+	expected_components => $components,
+);
+is($record->{components}{ribofind}{checks}{assignment}{size_bytes}, 0,
+	'lightweight refresh restores the missing file size');
+ok(!completion_record_needs_refresh($record, $components),
+	'refreshed sentinel does not request another rewrite');
+
 unlink $ribo_optional or die $!;
 my $optional_missing_components = {
 	%{$components},
@@ -136,6 +178,8 @@ my $optional_missing_components = {
 			{id => 'assignment', kind => 'exists', path => $ribo_result},
 			{id => 'diagnostic', kind => 'nonempty',
 				path => $ribo_optional, required => 0},
+			{id => 'alternative', kind => 'exists_any',
+				paths => [$missing_alternative, $ribo_optional], required => 0},
 		],
 	),
 };
@@ -143,9 +187,9 @@ my $optional_missing_components = {
 	root => $sample_root, sample => 'S1', request_signature => $signature,
 	expected_components => $optional_missing_components,
 );
-is($error, '', 'removing an optional diagnostic does not reopen a sample');
-ok(defined($record), 'required component evidence remains authoritative');
-
+is($error, '', 'removing optional diagnostics does not reopen a sample');
+ok(completion_record_needs_refresh($record, $optional_missing_components),
+	'removing an optional file clears its stale stored size on the next visit');
 
 unlink $ribo_result or die $!;
 my $missing_components = {
@@ -163,6 +207,7 @@ ok(!defined($record), 'missing live component output reopens a completed sample'
 like($error, qr/workflow component outputs have changed or are missing/,
 	'component-evidence mismatch explains the reopen');
 write_file($ribo_result, '');
+write_file($ribo_optional, "diagnostic\n");
 
 my $different_signature = completion_request_signature({contract => 4});
 ($record, $error) = read_sample_completion(
@@ -171,13 +216,16 @@ my $different_signature = completion_request_signature({contract => 4});
 ok(!defined($record), 'changed workflow does not accept an old sentinel');
 like($error, qr/requested workflow differs/,
 	'signature mismatch explains why the sample must reopen');
-
 ($record, $error) = read_sample_completion(
 	root => $sample_root, sample => 'another', request_signature => $signature,
+	path => $path,
 );
 ok(!defined($record), 'sentinel cannot close a different sample');
 like($error, qr/belongs to sample 'S1'/,
 	'sample mismatch is reported');
+
+eval { sample_completion_path($sample_root, '../unsafe') };
+like($@, qr/unsafe sample id/, 'unsafe sample ids cannot escape the sample directory');
 
 my $missing_ribo = {
 	ribofind => completion_component_evidence(
@@ -189,64 +237,68 @@ my $missing_ribo = {
 my $invalid_root = File::Spec->catdir($root, 'invalid');
 eval {
 	write_sample_completion(
-		root => $invalid_root, sample => 'S1',
-		request_signature => $signature,
-		components => $missing_ribo,
-		outcome => {status => 'completed'},
+		root => $invalid_root, sample => 'S1', request_signature => $signature,
+		components => $missing_ribo, outcome => $outcome,
 		metagstats => stats_record(),
 	);
 };
 like($@, qr/requested component 'ribofind' is incomplete/,
 	'a normal completion sentinel cannot publish incomplete requested work');
 
-ok(invalidate_sample_completion($sample_root),
-	'invalidation removes an existing sentinel');
+ok(invalidate_sample_completion($sample_root, 'S1'),
+	'exact invalidation removes an existing sentinel');
 ok(!-e $path, 'invalidated sentinel is absent');
-ok(!invalidate_sample_completion($sample_root),
-	'invalidation is idempotent when no sentinel exists');
+ok(!invalidate_sample_completion($sample_root, 'S1'),
+	'exact invalidation is idempotent');
 
 write_sample_completion(
-	root => $sample_root,
-	sample => 'S1',
-	request_signature => $signature,
-	empty_sample => 1,
-	empty_input_size_mb => 0.75,
+	root => $sample_root, sample => 'S1', request_signature => $signature,
 	components => $missing_ribo,
 	outcome => {
 		status => 'skipped_too_small',
 		input_size_mb => {primary => 0.5, supplementary => 0.25, total => 0.75},
-		small_sample => 1,
-		sdm_warning => {detected => 0, type => '', log => ''},
+		small_sample_threshold_mb => 1,
 	},
 	metagstats => stats_record(),
 );
 ($record, $error) = read_sample_completion(
 	root => $sample_root, sample => 'S1', request_signature => $signature,
 );
-is($record->{empty_sample}, 1, 'terminal empty samples are represented in the sentinel');
-is($record->{empty_input_size_mb}, 0.75, 'empty-sample input size survives serialization');
 is($record->{outcome}{status}, 'skipped_too_small',
 	'small samples retain their terminal reason');
 is($record->{outcome}{input_size_mb}{total}, 0.75,
 	'terminal input size adds primary and supplementary input');
-ok(invalidate_sample_completion($sample_root), 'empty-sample sentinel is invalidated normally');
+is($record->{outcome}{small_sample_threshold_mb}, 1,
+	'too-small outcomes retain the threshold that classified them');
+ok(!exists($record->{outcome}{small_sample}),
+	'too-small state is not duplicated as a boolean');
+ok(invalidate_sample_completion($sample_root),
+	'root-level invalidation finds the sample-specific sentinel');
 
 write_sample_completion(
 	root => $sample_root, sample => 'S1', request_signature => $signature,
-	components => $components, outcome => $outcome, metagstats => stats_record(),
+	components => $missing_ribo,
+	outcome => {
+		status => 'skipped_sdm_warning',
+		input_size_mb => {primary => 8, supplementary => 1, total => 9},
+		sdm_warning => {type => 'invalid_paired_read', log => '/tmp/sdm.log'},
+	},
+	metagstats => stats_record(),
 );
-open my $json_fh, '<', $path or die $!;
-local $/;
-my $json = <$json_fh>;
-close $json_fh or die $!;
-my $decoded = JSON::PP->new->decode($json);
+($record, $error) = read_sample_completion(
+	root => $sample_root, sample => 'S1', request_signature => $signature,
+);
+is_deeply($record->{outcome}{sdm_warning},
+	{type => 'invalid_paired_read', log => '/tmp/sdm.log'},
+	'SDM terminal outcomes retain only the useful warning details');
+
+my $decoded = read_json($path);
 $decoded->{schema_version} = 2;
 write_file($path, JSON::PP->new->canonical(1)->encode($decoded));
 ($record, $error) = read_sample_completion(root => $sample_root, sample => 'S1');
-ok(!defined($record), 'legacy schema sentinel is rejected for one-time regeneration');
+ok(!defined($record), 'non-v3 sentinel is rejected');
 like($error, qr/unsupported sentinel schema version/,
-	'legacy schema rejection is diagnostic');
-
+	'schema rejection is diagnostic');
 $decoded->{schema_version} = 3;
 $decoded->{contracts}{components}{schema_version} = 99;
 write_file($path, JSON::PP->new->canonical(1)->encode($decoded));
@@ -254,14 +306,6 @@ write_file($path, JSON::PP->new->canonical(1)->encode($decoded));
 ok(!defined($record), 'unknown component-evidence version is rejected');
 like($error, qr/component contract is unsupported/,
 	'component-contract incompatibility is diagnostic');
-$decoded->{contracts}{components}{schema_version} = 1;
-pop @{$decoded->{contracts}{components}{inventory}};
-write_file($path, JSON::PP->new->canonical(1)->encode($decoded));
-($record, $error) = read_sample_completion(root => $sample_root, sample => 'S1');
-ok(!defined($record), 'a partial component inventory is rejected');
-like($error, qr/component contract inventory does not match/,
-	'component-inventory corruption is diagnostic');
-
 
 write_file($path, "not JSON\n");
 ($record, $error) = read_sample_completion(root => $sample_root, sample => 'S1');
@@ -270,6 +314,7 @@ like($error, qr/invalid JSON/, 'malformed sentinel reports its parse failure');
 
 my $snp_path = File::Spec->catfile(File::Spec->rel2abs('.'), 'Mods', 'SNP.pm');
 open my $snp_fh, '<', $snp_path or die "Cannot read $snp_path: $!";
+local $/;
 my $snp_source = <$snp_fh>;
 close $snp_fh or die "Cannot close $snp_path: $!";
 like($snp_source,

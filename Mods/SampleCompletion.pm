@@ -12,11 +12,12 @@ use JSON::PP ();
 our @EXPORT_OK = qw(
 	sample_completion_path completion_request_signature
 	completion_component_evidence
+	completion_record_needs_refresh
 	read_sample_completion write_sample_completion
 	invalidate_sample_completion
 );
 
-my $SENTINEL_NAME = 'MATAFILER.sample.complete.json';
+my $SENTINEL_PREFIX = 'MF4.sentinel.';
 my $SCHEMA_NAME = 'MATAFILER.sample-completion';
 my $SCHEMA_VERSION = 3;
 my $COMPONENT_SCHEMA_NAME = 'MATAFILER.sample-components';
@@ -36,9 +37,16 @@ sub _sample_root {
 }
 
 sub sample_completion_path {
-	my ($root) = @_;
-	return File::Spec->catfile(_sample_root($root), $SENTINEL_NAME);
+	my ($root, $sample) = @_;
+	die "sample completion sample id is required\n"
+		unless defined($sample) && length($sample);
+	die "unsafe sample id '$sample' for completion sentinel\n"
+		if $sample =~ m{[\\/\x00]} || $sample eq '.' || $sample eq '..';
+	return File::Spec->catfile(
+		_sample_root($root), $SENTINEL_PREFIX.$sample.'.json',
+	);
 }
+
 
 sub completion_request_signature {
 	my ($request) = @_;
@@ -52,25 +60,36 @@ sub _json_codec {
 	return JSON::PP->new->canonical(1)->pretty(1)->utf8(1);
 }
 
-sub _check_ok {
+sub _check_evidence {
 	my ($check) = @_;
 	my $kind = $check->{kind} || '';
+	my ($ok, $matched) = (0, undef);
 	if ($kind eq 'exists') {
-		return -e $check->{path} ? 1 : 0;
+		$ok = -e $check->{path} ? 1 : 0;
+		$matched = $check->{path} if $ok;
+	} elsif ($kind eq 'nonempty') {
+		$ok = -s $check->{path} ? 1 : 0;
+		$matched = $check->{path} if $ok;
+	} elsif ($kind eq 'exists_any') {
+		($matched) = grep { -e $_ } @{$check->{paths}};
+		$ok = defined($matched) ? 1 : 0;
+	} elsif ($kind eq 'nonempty_any') {
+		($matched) = grep { -s $_ } @{$check->{paths}};
+		$ok = defined($matched) ? 1 : 0;
+	} elsif ($kind eq 'directory') {
+		$ok = -d $check->{path} ? 1 : 0;
+	} else {
+		die "unknown completion check kind '$kind'\n";
 	}
-	if ($kind eq 'nonempty') {
-		return -s $check->{path} ? 1 : 0;
+	my %evidence = (ok => $ok);
+	if (defined($matched)) {
+		$evidence{matched_path} = $matched
+			if $kind eq 'exists_any' || $kind eq 'nonempty_any';
+		my $size = -s $matched;
+		$evidence{size_bytes} = defined($size) ? 0 + $size : 0
+			unless -d $matched;
 	}
-	if ($kind eq 'exists_any') {
-		return scalar(grep { -e $_ } @{$check->{paths}}) ? 1 : 0;
-	}
-	if ($kind eq 'nonempty_any') {
-		return scalar(grep { -s $_ } @{$check->{paths}}) ? 1 : 0;
-	}
-	if ($kind eq 'directory') {
-		return -d $check->{path} ? 1 : 0;
-	}
-	die "unknown completion check kind '$kind'\n";
+	return \%evidence;
 }
 
 sub completion_component_evidence {
@@ -103,7 +122,7 @@ sub completion_component_evidence {
 			);
 			$record{path} = $check->{path} if defined($check->{path});
 			$record{paths} = [@{$check->{paths}}] if ref($check->{paths}) eq 'ARRAY';
-			$record{ok} = _check_ok({%{$check}, kind => $kind});
+			%record = (%record, %{_check_evidence({%{$check}, kind => $kind})});
 			$evidence_checks{$id} = \%record;
 		}
 	}
@@ -142,26 +161,11 @@ sub _contracts_error {
 		unless ref($stats) eq 'HASH'
 			&& ($stats->{schema} || '') eq $STATS_SCHEMA_NAME
 			&& ($stats->{schema_version} || 0) == $STATS_SCHEMA_VERSION;
-	my @inventories = (
-		['component', $components->{inventory},
-			ref($record->{components}) eq 'HASH' ? [keys %{$record->{components}}] : []],
-		['metagStats field', $stats->{fields},
-			ref($record->{metagstats}{field_availability}) eq 'HASH'
-				? [keys %{$record->{metagstats}{field_availability}}] : []],
-		['metagStats family', $stats->{families},
-			ref($record->{metagstats}{families}) eq 'HASH'
-				? [keys %{$record->{metagstats}{families}}] : []],
-	);
-	for my $inventory (@inventories) {
-		my ($label, $stored, $actual) = @{$inventory};
-		return "sentinel $label contract inventory is missing"
-			unless ref($stored) eq 'ARRAY';
-		my $stored_json = JSON::PP->new->canonical(1)->encode([sort @{$stored}]);
-		my $actual_json = JSON::PP->new->canonical(1)->encode([sort @{$actual}]);
-		return "sentinel $label contract inventory does not match its evidence"
-			if $stored_json ne $actual_json;
-	}
 	return '';
+}
+sub _check_required {
+	my ($check) = @_;
+	return exists($check->{required}) ? ($check->{required} ? 1 : 0) : 1;
 }
 
 sub _component_revalidation_projection {
@@ -173,14 +177,22 @@ sub _component_revalidation_projection {
 		my %checks;
 		for my $check_name (sort keys %{$component->{checks} || {}}) {
 			my $check = $component->{checks}{$check_name};
-			next unless ref($check) eq 'HASH' && $check->{required};
-			$checks{$check_name} = {%{$check}};
+			next unless ref($check) eq 'HASH' && _check_required($check);
+			my %identity = (
+				kind => $check->{kind} || '',
+				required => 1,
+				ok => $check->{ok} ? 1 : 0,
+			);
+			$identity{path} = $check->{path} if defined($check->{path});
+			$identity{paths} = [@{$check->{paths}}]
+				if ref($check->{paths}) eq 'ARRAY';
+			$checks{$check_name} = \%identity;
 		}
 		$projection{$name} = {
 			requested => $component->{requested} ? 1 : 0,
-			applicable => $component->{applicable} ? 1 : 0,
+			applicable => exists($component->{applicable})
+				? ($component->{applicable} ? 1 : 0) : 1,
 			complete => $component->{complete} ? 1 : 0,
-			status => $component->{status} || '',
 			checks => \%checks,
 		};
 	}
@@ -192,49 +204,17 @@ sub _metagstats_error {
 	return 'sentinel metagStats record is incomplete'
 		unless ref($stats) eq 'HASH' && defined($stats->{DIR})
 			&& ref($stats->{values}) eq 'HASH'
-			&& ref($stats->{field_availability}) eq 'HASH'
 			&& ref($stats->{families}) eq 'HASH';
-	for my $field (sort keys %{$stats->{field_availability}}) {
-		my $available = $stats->{field_availability}{$field};
-		return "sentinel metagStats availability for '$field' is malformed"
-			unless defined($available) && $available =~ /^(?:0|1)$/;
-		my $value = $stats->{values}{$field};
-		my $derived = exists($stats->{values}{$field})
-			&& defined($value) && $value ne '' && $value ne '-1' ? 1 : 0;
-		return "sentinel metagStats availability for '$field' is inconsistent"
-			if $available != $derived;
-	}
 	my %allowed_status = map { $_ => 1 } qw(
 		not_applicable missing partial complete
 	);
 	for my $name (sort keys %{$stats->{families}}) {
-		my $family = $stats->{families}{$name};
+		my $status = $stats->{families}{$name};
 		return "sentinel metagStats family '$name' is malformed"
-			unless ref($family) eq 'HASH'
-				&& defined($family->{requested}) && $family->{requested} =~ /^(?:0|1)$/
-				&& defined($family->{applicable}) && $family->{applicable} =~ /^(?:0|1)$/
-				&& defined($family->{ok}) && $family->{ok} =~ /^(?:0|1)$/
-				&& defined($family->{status})
-				&& $allowed_status{$family->{status}}
-				&& ref($family->{fields}) eq 'HASH';
-		return "sentinel metagStats family '$name' has inconsistent applicability"
-			if ($family->{requested} != $family->{applicable});
-		my $expected_ok = $family->{status} =~ /^(?:not_applicable|complete)$/ ? 1 : 0;
-		return "sentinel metagStats family '$name' has inconsistent status"
-			if ($family->{ok} != $expected_ok);
-		for my $field (sort keys %{$family->{fields}}) {
-			my $available = $family->{fields}{$field};
-			return "sentinel metagStats family '$name' field '$field' is malformed"
-				unless defined($available) && $available =~ /^(?:0|1)$/;
-			return "sentinel metagStats family '$name' field '$field' is not declared"
-				unless exists($stats->{field_availability}{$field});
-			return "sentinel metagStats family '$name' field '$field' is inconsistent"
-				if $available != $stats->{field_availability}{$field};
-		}
+			if ref($status) || !defined($status) || !$allowed_status{$status};
 	}
 	return '';
 }
-
 sub _completion_record_error {
 	my ($record, $expected_components) = @_;
 	return 'sentinel outcome record is missing'
@@ -255,16 +235,10 @@ sub _completion_record_error {
 				&& defined($component->{requested}) && $component->{requested} =~ /^(?:0|1)$/
 				&& defined($component->{applicable}) && $component->{applicable} =~ /^(?:0|1)$/
 				&& defined($component->{complete}) && $component->{complete} =~ /^(?:0|1)$/
-				&& defined($component->{status})
 				&& ref($component->{checks}) eq 'HASH';
 		return "sentinel component '$name' has no completion checks"
 			if $component->{requested} && $component->{applicable}
 				&& !keys %{$component->{checks}};
-		my $expected_status = !$component->{requested} ? 'not_requested'
-			: !$component->{applicable} ? 'not_applicable'
-			: $component->{complete} ? 'complete' : 'incomplete';
-		return "sentinel component '$name' has inconsistent status"
-			unless $component->{status} eq $expected_status;
 		my $failed_required = 0;
 		for my $check_name (sort keys %{$component->{checks}}) {
 			my $check = $component->{checks}{$check_name};
@@ -272,14 +246,17 @@ sub _completion_record_error {
 				unless ref($check) eq 'HASH'
 					&& defined($check->{kind})
 					&& $check->{kind} =~ /^(?:exists|nonempty|exists_any|nonempty_any|directory)$/
-					&& defined($check->{required}) && $check->{required} =~ /^(?:0|1)$/
+					&& (!exists($check->{required}) || $check->{required} =~ /^(?:0|1)$/)
 					&& defined($check->{ok}) && $check->{ok} =~ /^(?:0|1)$/;
-			$failed_required = 1 if $check->{required} && !$check->{ok};
+			return "sentinel component '$name' check '$check_name' has a malformed size"
+				if exists($check->{size_bytes})
+					&& (!defined($check->{size_bytes}) || $check->{size_bytes} !~ /^\d+$/);
+			$failed_required = 1 if _check_required($check) && !$check->{ok};
 		}
 		my $derived_complete = $component->{requested} && $component->{applicable}
 			? !$failed_required : 1;
 		return "sentinel component '$name' has inconsistent completeness"
-			if ($component->{complete} != $derived_complete);
+			if $component->{complete} != $derived_complete;
 		if ($record->{outcome}{status} eq 'completed'
 				&& $component->{requested} && $component->{applicable}
 				&& !$component->{complete}) {
@@ -301,10 +278,46 @@ sub _completion_record_error {
 	return '';
 }
 
+sub completion_record_needs_refresh {
+	my ($record, $expected_components) = @_;
+	return 1 unless ref($record) eq 'HASH';
+	for my $component (values %{$record->{components} || {}}) {
+		next unless ref($component) eq 'HASH';
+		for my $check (values %{$component->{checks} || {}}) {
+			next unless ref($check) eq 'HASH' && $check->{ok};
+			next if ($check->{kind} || '') eq 'directory';
+			return 1 unless exists($check->{size_bytes});
+			return 1 if ($check->{kind} || '') =~ /_any$/
+				&& !defined($check->{matched_path});
+		}
+	}
+	return 0 unless ref($expected_components) eq 'HASH';
+	for my $name (keys %{$expected_components}) {
+		my $expected = $expected_components->{$name};
+		my $stored = $record->{components}{$name};
+		next unless ref($expected) eq 'HASH' && ref($stored) eq 'HASH';
+		for my $check_name (keys %{$expected->{checks} || {}}) {
+			my $expected_check = $expected->{checks}{$check_name};
+			my $stored_check = $stored->{checks}{$check_name};
+			next unless ref($expected_check) eq 'HASH' && ref($stored_check) eq 'HASH';
+			my $expected_has_size = exists($expected_check->{size_bytes});
+			my $stored_has_size = exists($stored_check->{size_bytes});
+			return 1 if $expected_has_size != $stored_has_size;
+			return 1 if $expected_has_size
+				&& $stored_check->{size_bytes} != $expected_check->{size_bytes};
+			my $expected_has_match = exists($expected_check->{matched_path});
+			my $stored_has_match = exists($stored_check->{matched_path});
+			return 1 if $expected_has_match != $stored_has_match;
+			return 1 if $expected_has_match
+				&& $stored_check->{matched_path} ne $expected_check->{matched_path};
+		}
+	}
+	return 0;
+}
 sub read_sample_completion {
 	my (%args) = @_;
 	my $path = defined($args{path}) && length($args{path})
-		? $args{path} : sample_completion_path($args{root});
+		? $args{path} : sample_completion_path($args{root}, $args{sample});
 	return wantarray ? (undef, 'missing') : undef unless -e $path;
 	return wantarray ? (undef, 'empty sentinel') : undef unless -s $path;
 
@@ -345,6 +358,75 @@ sub read_sample_completion {
 	return wantarray ? ($record, '') : $record;
 }
 
+sub _compact_components {
+	my ($components) = @_;
+	my %compact;
+	for my $name (sort keys %{$components}) {
+		my $component = $components->{$name};
+		my %checks;
+		for my $check_name (sort keys %{$component->{checks} || {}}) {
+			my $check = $component->{checks}{$check_name};
+			my %record = (
+				kind => $check->{kind},
+				ok => $check->{ok} ? 1 : 0,
+			);
+			$record{required} = 0 unless _check_required($check);
+			$record{path} = $check->{path} if defined($check->{path});
+			$record{paths} = [@{$check->{paths}}]
+				if ref($check->{paths}) eq 'ARRAY';
+			$record{matched_path} = $check->{matched_path}
+				if defined($check->{matched_path});
+			$record{size_bytes} = 0 + $check->{size_bytes}
+				if exists($check->{size_bytes});
+			$checks{$check_name} = \%record;
+		}
+		my %record = (
+			requested => $component->{requested} ? 1 : 0,
+			applicable => $component->{applicable} ? 1 : 0,
+			complete => $component->{complete} ? 1 : 0,
+			checks => \%checks,
+		);
+		$record{reason} = $component->{reason}
+			if defined($component->{reason}) && $component->{reason} ne '';
+		$compact{$name} = \%record;
+	}
+	return \%compact;
+}
+
+sub _compact_metagstats {
+	my ($stats) = @_;
+	my %families = %{$stats->{families} || {}};
+	return {
+		DIR => $stats->{DIR},
+		values => {%{$stats->{values} || {}}},
+		families => \%families,
+	};
+}
+
+sub _compact_outcome {
+	my ($outcome) = @_;
+	my $sizes = $outcome->{input_size_mb} || {};
+	my %compact = (
+		status => $outcome->{status},
+		input_size_mb => {
+			primary => 0 + ($sizes->{primary} || 0),
+			supplementary => 0 + ($sizes->{supplementary} || 0),
+			total => 0 + ($sizes->{total} || 0),
+		},
+	);
+	$compact{small_sample_threshold_mb} =
+		0 + ($outcome->{small_sample_threshold_mb} || 0)
+		if $outcome->{status} eq 'skipped_too_small';
+	if ($outcome->{status} eq 'skipped_sdm_warning') {
+		my $warning = $outcome->{sdm_warning} || {};
+		$compact{sdm_warning} = {
+			type => $warning->{type} || '',
+			log => $warning->{log} || '',
+		};
+	}
+	return \%compact;
+}
+
 sub write_sample_completion {
 	my (%args) = @_;
 	for my $required (qw(root sample request_signature metagstats components outcome)) {
@@ -353,21 +435,24 @@ sub write_sample_completion {
 	}
 	die "sample completion request signature is invalid\n"
 		unless $args{request_signature} =~ /^[0-9a-f]{64}$/;
-	my $stats_validation_error = _metagstats_error($args{metagstats});
-	die "invalid sample completion metagStats evidence: $stats_validation_error\n"
-		if $stats_validation_error ne '';
 	die "sample completion components must be a hash reference\n"
 		unless ref($args{components}) eq 'HASH';
 	die "sample completion outcome must contain a status\n"
 		unless ref($args{outcome}) eq 'HASH'
 			&& defined($args{outcome}{status}) && $args{outcome}{status} ne '';
+	my $components = _compact_components($args{components});
+	my $metagstats = _compact_metagstats($args{metagstats});
+	my $outcome = _compact_outcome($args{outcome});
+	my $stats_validation_error = _metagstats_error($metagstats);
+	die "invalid sample completion metagStats evidence: $stats_validation_error\n"
+		if $stats_validation_error ne '';
 	my $validation_error = _completion_record_error({
-		components => $args{components}, outcome => $args{outcome},
+		components => $components, outcome => $outcome,
 	});
 	die "invalid sample completion evidence: $validation_error\n"
 		if $validation_error ne '';
 
-	my $path = sample_completion_path($args{root});
+	my $path = sample_completion_path($args{root}, $args{sample});
 	my $directory = dirname($path);
 	make_path($directory) unless -d $directory;
 	my $record = {
@@ -377,24 +462,19 @@ sub write_sample_completion {
 			components => {
 				schema => $COMPONENT_SCHEMA_NAME,
 				schema_version => $COMPONENT_SCHEMA_VERSION,
-				inventory => [sort keys %{$args{components}}],
 			},
 			metagstats => {
 				schema => $STATS_SCHEMA_NAME,
 				schema_version => $STATS_SCHEMA_VERSION,
-				fields => [sort keys %{$args{metagstats}{field_availability}}],
-				families => [sort keys %{$args{metagstats}{families}}],
 			},
 		},
 		sample => $args{sample},
 		request_signature => $args{request_signature},
 		created_epoch => time,
 		present_assembly => $args{present_assembly} ? 1 : 0,
-		empty_sample => $args{empty_sample} ? 1 : 0,
-		empty_input_size_mb => 0 + ($args{empty_input_size_mb} || 0),
-		components => $args{components},
-		outcome => $args{outcome},
-		metagstats => $args{metagstats},
+		components => $components,
+		outcome => $outcome,
+		metagstats => $metagstats,
 	};
 	my $temporary = "$path.tmp.$$";
 	my $json = _json_codec()->encode($record);
@@ -410,11 +490,27 @@ sub write_sample_completion {
 }
 
 sub invalidate_sample_completion {
-	my ($root) = @_;
-	my $path = sample_completion_path($root);
-	return 0 unless -e $path;
-	unlink $path or die "cannot invalidate sample completion sentinel $path: $!\n";
-	return 1;
+	my ($root, $sample) = @_;
+	my $sample_root = _sample_root($root);
+	return 0 unless -d $sample_root;
+	my @paths;
+	if (defined($sample) && length($sample)) {
+		@paths = (sample_completion_path($sample_root, $sample));
+	} else {
+		opendir my $dh, $sample_root
+			or die "cannot inspect sample completion root $sample_root: $!\n";
+		@paths = map { File::Spec->catfile($sample_root, $_) }
+			grep { /^\Q$SENTINEL_PREFIX\E.+\.json$/ } readdir($dh);
+		closedir $dh
+			or die "cannot close sample completion root $sample_root: $!\n";
+	}
+	my $removed = 0;
+	for my $path (@paths) {
+		next unless -e $path;
+		unlink $path or die "cannot invalidate sample completion sentinel $path: $!\n";
+		$removed++;
+	}
+	return $removed;
 }
 
 1;
