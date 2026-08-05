@@ -36,6 +36,8 @@
 #5.30: enable taxon-aware locus selection by default
 #5.31: keep IQ-TREE inference unrooted; root published output downstream
 #5.32: reject stronger locus-level divergence outliers and enable partition merging by default for strain trees
+#5.33: restore the fast fixed IQ-TREE model as the strain-tree default; retain AutoModel as an opt-in
+#5.34: deterministically merge strain loci into rate/GC partition bins before IQ-TREE
 
 use warnings;
 use strict;
@@ -105,11 +107,15 @@ sub writeTaxonAwareLocusAudit;
 sub writeTaxonAwareSampleAudit;
 sub writePostAlignmentQCPolicy;
 sub alignmentFileStem;
+sub readPostAlignmentRateMetrics;
+sub alignmentGCMetric;
+sub deterministicRatePartitions;
+sub writeRatePartitionAudit;
 sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.32;
+my $version = 5.34;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -213,6 +219,17 @@ my $postAlignmentRelativeZ = $POST_ALIGNMENT_QC_DEFAULT{relative_modified_z};
 my $postAlignmentMinLociRelative =
 	$POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative};
 my $postAlignmentDivergenceQC;
+my %RATE_MERGE_DEFAULT = (
+	enabled => 0,
+	maximum_bins => 8,
+	minimum_loci_per_bin => 20,
+	minimum_sites_per_bin => 20_000,
+);
+my $rateMergePartitions = $RATE_MERGE_DEFAULT{enabled};
+my $rateMergePartitionsExplicit = 0;
+my $rateMergeMaxBins = $RATE_MERGE_DEFAULT{maximum_bins};
+my $rateMergeMinLoci = $RATE_MERGE_DEFAULT{minimum_loci_per_bin};
+my $rateMergeMinSites = $RATE_MERGE_DEFAULT{minimum_sites_per_bin};
 my %TAXON_AWARE_DEFAULT = (
 	enabled => 1,
 	maximum_loci => 500,
@@ -312,6 +329,13 @@ GetOptions(
 	"postAlignmentDivergenceQC=i" => \$postAlignmentDivergenceQC,
 	"postAlignmentRelativeZ=f" => \$postAlignmentRelativeZ,
 	"postAlignmentMinLociRelative=i" => \$postAlignmentMinLociRelative,
+	"rateMergePartitions=i" => sub {
+		$rateMergePartitions = $_[1];
+		$rateMergePartitionsExplicit = 1;
+	},
+	"rateMergeMaxBins=i" => \$rateMergeMaxBins,
+	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
+	"rateMergeMinSites=i" => \$rateMergeMinSites,
 	"taxonAwareLocusSelection=i" => \$taxonAwareLocusSelection,
 	"taxonAwareMaxLoci=i" => \$taxonAwareMaxLoci,
 	"taxonAwareCoreLoci=i" => \$taxonAwareCoreLoci,
@@ -365,10 +389,11 @@ if ($strainWithinPreset) {
 	$calcSyn = 0;
 	$calcNonSyn = 0;
 	$continue = 1;
-	# MFP+MERGE retains all selected loci while avoiding one independently
-	# estimated partition rate per short strain locus. Preserve an explicit
-	# caller opt-out for reproducibility or diagnostic comparisons.
-	$treeAutoModel = 1 unless $treeAutoModelExplicit;
+	# ModelFinder partition merging is prohibitive for hundreds of strain
+	# loci. The fixed GTR+F+G2 model remains the fast production default;
+	# callers can explicitly request AutoModel for a diagnostic comparison.
+	$treeAutoModel = 0 unless $treeAutoModelExplicit;
+	$rateMergePartitions = 1 unless $rateMergePartitionsExplicit;
 	$iqFast = 1;
 	$doSuperTree = 0;
 	$doDNDS = 0;
@@ -420,6 +445,15 @@ die "-postAlignmentRelativeZ must be non-negative "
 die "-postAlignmentMinLociRelative must be positive "
 	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative})\n"
 	if $postAlignmentMinLociRelative < 1;
+die "-rateMergePartitions must be 0 or 1\n"
+	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
+die "-rateMergeMaxBins, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
+	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeMinLoci, $rateMergeMinSites);
+die "-rateMergePartitions requires nucleotide trees (-AAtree 0)\n"
+	if $rateMergePartitions && $useAA4tree;
+die "-rateMergePartitions requires -postAlignmentLocusQC 1 or "
+	."-taxonAwareLocusSelection 1 to supply a rate proxy\n"
+	if $rateMergePartitions && !$postAlignmentLocusQC && !$taxonAwareLocusSelection;
 die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
 die "-taxonAwareMaxLoci, -taxonAwareCoreLoci, -taxonAwareMinSequenceNT, "
@@ -572,6 +606,9 @@ print "Post-alignment locus QC: enabled="
 	. "; relative modified-Z="
 	. ($postAlignmentDivergenceQC ? $postAlignmentRelativeZ : "<disabled>")
 	. "; minimum loci for relative QC=$postAlignmentMinLociRelative\n";
+print "Partition merging: enabled=" . ($rateMergePartitions ? "yes" : "no")
+	. "; maximum bins=$rateMergeMaxBins"
+	. "; minimum bin size=$rateMergeMinLoci loci/$rateMergeMinSites sites\n";
 print "Taxon-aware locus selection: enabled="
 	. ($taxonAwareLocusSelection ? "yes" : "no")
 	. "; final loci=$taxonAwareMaxLoci; robust core=$taxonAwareCoreLoci"
@@ -669,12 +706,13 @@ my @MSAs; my @MSA_AA; my @MSAsSyn; my @MSAsNonSyn;#full MSAs and MSAs with syn /
 my @MSrm; 
 my %FAA ; my %FNA ; my @geneList; my @geneListF;
 my (%primaryAlignmentGene, %taxonAwarePreMetrics, %taxonAwareUniverseSamples);
+my (%partitionRateProxy, %partitionSelectionPhase, %taxonAwareFinalMetricByPath);
 my $strictSplit;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=5",
+	"schema=6",
 	"enabled=$postAlignmentLocusQC",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
@@ -692,6 +730,10 @@ my $postAlignmentQCPolicy = join("\t",
 		? $postAlignmentRelativeZ : "disabled"),
 	"minimum_loci_relative=$postAlignmentMinLociRelative",
 	"iqtree_auto_model=$treeAutoModel",
+	"rate_partition_merge=$rateMergePartitions",
+	"rate_partition_maximum_bins=$rateMergeMaxBins",
+	"rate_partition_minimum_loci=$rateMergeMinLoci",
+	"rate_partition_minimum_sites=$rateMergeMinSites",
 	"taxon_aware=$taxonAwareLocusSelection",
 	"taxon_aware_maximum_loci=$taxonAwareMaxLoci",
 	"taxon_aware_core_loci=$taxonAwareCoreLoci",
@@ -709,7 +751,8 @@ if (-s $postAlignmentQCPolicyFile) {
 		or die "Cannot close locus-QC policy $postAlignmentQCPolicyFile: $!\n";
 	$postAlignmentQCPolicyMatches = $existingPolicy eq $postAlignmentQCPolicy;
 }
-my $legacyWithinSpeciesQCAudit = !$taxonAwareLocusSelection && $withinSpecies
+my $legacyWithinSpeciesQCAudit = !$taxonAwareLocusSelection
+	&& !$rateMergePartitions && $withinSpecies
 	&& -s $postAlignmentQCReport && !-e $postAlignmentQCPolicyFile;
 my $postAlignmentQCAuditCurrent = $postAlignmentQCPolicyMatches
 	&& (!$postAlignmentLocusQC || -s $postAlignmentQCReport);
@@ -1320,11 +1363,32 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			delete $samples{$sample}
 				if ($finalSelection->{sample_metrics}{$sample}{role} // "remove") eq "remove";
 		}
+		%taxonAwareFinalMetricByPath = map {
+			my $metric = $finalSelection->{locus_metrics}{$_};
+			$metric->{path} => $metric
+		} grep {
+			$finalSelection->{locus_metrics}{$_}{selected}
+		} keys %{$finalSelection->{locus_metrics}};
 		print "Taxon-aware final selection retained "
 			. scalar(@{$finalSelection->{alignments}}) . "/"
 			. $postQCAlignmentCount
 			. " post-QC loci; reports: $treeD/taxon_aware_locus_selection.tsv, "
 			. "$treeD/taxon_aware_sample_selection.tsv\n";
+	}
+}
+
+if ($rateMergePartitions && $cogCats ne "") {
+	%partitionRateProxy = %{readPostAlignmentRateMetrics($postAlignmentQCReport)};
+	for my $alignment (keys %taxonAwareFinalMetricByPath) {
+		$partitionSelectionPhase{$alignment} =
+			$taxonAwareFinalMetricByPath{$alignment}{selection_phase} // '';
+		next if exists $partitionRateProxy{$alignment};
+		my $metric = $taxonAwareFinalMetricByPath{$alignment};
+		my $sites = $metric->{alignment_length_nt} // 0;
+		$partitionRateProxy{$alignment} = {
+			value => $sites ? ($metric->{variable_sites} // 0) / $sites : 0,
+			source => 'variable_site_fraction',
+		};
 	}
 }
 
@@ -2360,6 +2424,240 @@ sub calcDisPos($ $ $){
 	#die "done\n";
 }
 
+sub readPostAlignmentRateMetrics {
+	my ($reportFile) = @_;
+	return {} unless defined($reportFile) && -s $reportFile;
+	open my $report, '<', $reportFile
+		or die "Cannot read post-alignment locus-QC report $reportFile: $!\n";
+	my $header = <$report>;
+	die "Post-alignment locus-QC report is empty: $reportFile\n"
+		unless defined $header;
+	$header =~ s/[\r\n]+$//;
+	my @columns = split /\t/, $header, -1;
+	my %columnIndex = map { $columns[$_] => $_ } 0 .. $#columns;
+	for my $required (qw(alignment status p90_consensus_divergence)) {
+		die "Post-alignment locus-QC report $reportFile lacks column '$required'\n"
+			unless exists $columnIndex{$required};
+	}
+	my %metrics;
+	while (my $line = <$report>) {
+		$line =~ s/[\r\n]+$//;
+		next unless length($line);
+		my @fields = split /\t/, $line, -1;
+		next unless ($fields[$columnIndex{status}] // '') eq 'PASS';
+		my $path = $fields[$columnIndex{alignment}] // '';
+		my $value = $fields[$columnIndex{p90_consensus_divergence}] // '';
+		next unless length($path) && $value =~ /\A(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?\z/;
+		$metrics{$path} = {
+			value => 0 + $value,
+			source => 'p90_consensus_divergence',
+		};
+	}
+	close $report
+		or die "Cannot close post-alignment locus-QC report $reportFile: $!\n";
+	return \%metrics;
+}
+
+sub alignmentGCMetric {
+	my ($alignment) = @_;
+	my ($gc, $called) = (0, 0);
+	for my $sequence (values %{$alignment}) {
+		$gc += $sequence =~ tr/GCgc/GCgc/;
+		$called += $sequence =~ tr/ACGTacgt/ACGTacgt/;
+	}
+	return ($called ? $gc / $called : 0, $called);
+}
+
+sub deterministicRatePartitions {
+	my ($loci) = @_;
+	die "Deterministic partition merging received no loci\n" unless @{$loci};
+	my $locusCount = scalar @{$loci};
+	my $desiredBins = $locusCount <= 100 ? 4 : $locusCount <= 250 ? 6 : 8;
+	$desiredBins = $rateMergeMaxBins if $desiredBins > $rateMergeMaxBins;
+	my $gcBands = $desiredBins >= 4 ? 2 : 1;
+	my $rateBands = int($desiredBins / $gcBands);
+	$rateBands = 1 if $rateBands < 1;
+
+	my $quantileCutoffs = sub {
+		my ($values, $bands) = @_;
+		return [] if $bands <= 1 || @{$values} <= 1;
+		my @sorted = sort { $a <=> $b } @{$values};
+		my (@cutoffs, %seenCutoff);
+		for my $boundary (1 .. $bands - 1) {
+			my $right = int(@sorted * $boundary / $bands);
+			$right = 1 if $right < 1;
+			$right = $#sorted if $right > $#sorted;
+			my $left = $right - 1;
+			if ($sorted[$left] == $sorted[$right]) {
+				my $differentRight = $right;
+				$differentRight++ while $differentRight <= $#sorted
+					&& $sorted[$differentRight] == $sorted[$left];
+				if ($differentRight <= $#sorted) {
+					$right = $differentRight;
+				} else {
+					my $differentLeft = $left;
+					$differentLeft-- while $differentLeft >= 0
+						&& $sorted[$differentLeft] == $sorted[$right];
+					$left = $differentLeft;
+				}
+			}
+			next if $left < 0 || $right > $#sorted
+				|| $sorted[$left] == $sorted[$right];
+			my $cutoff = ($sorted[$left] + $sorted[$right]) / 2;
+			next if $seenCutoff{$cutoff}++;
+			push @cutoffs, $cutoff;
+		}
+		@cutoffs = sort { $a <=> $b } @cutoffs;
+		return \@cutoffs;
+	};
+	my @rescueLoci = grep { ($_->{selection_phase} // '') eq 'taxon_rescue' } @{$loci};
+	my @binningLoci = grep { ($_->{selection_phase} // '') ne 'taxon_rescue' } @{$loci};
+	unless (@binningLoci) {
+		@binningLoci = @{$loci};
+		@rescueLoci = ();
+	}
+	my @rates = map { $_->{rate_proxy} } @{$loci};
+	my @gcFractions = map { $_->{gc_fraction} } @{$loci};
+	my @binningRates = map { $_->{rate_proxy} } @binningLoci;
+	my @binningGC = map { $_->{gc_fraction} } @binningLoci;
+	my $rateCutoffs = $quantileCutoffs->(\@binningRates, $rateBands);
+	my $gcCutoffs = $quantileCutoffs->(\@binningGC, $gcBands);
+	my $metricBand = sub {
+		my ($value, $cutoffs) = @_;
+		my $band = 1;
+		$band++ for grep { $value > $_ } @{$cutoffs};
+		return $band;
+	};
+
+	my %bins;
+	for my $locus (@binningLoci) {
+		my $rateBand = $metricBand->($locus->{rate_proxy}, $rateCutoffs);
+		my $gcBand = $metricBand->($locus->{gc_fraction}, $gcCutoffs);
+		my $initialBin = sprintf('rate%02d_gc%02d', $rateBand, $gcBand);
+		$locus->{initial_bin} = $initialBin;
+		push @{$bins{$initialBin}}, $locus;
+	}
+
+	my $summarize = sub {
+		my ($members) = @_;
+		my ($alignmentSites, $effectiveSites, $rate, $gc) = (0, 0, 0, 0);
+		for my $member (@{$members}) {
+			$alignmentSites += $member->{length};
+			$effectiveSites += $member->{effective_sites};
+			$rate += $member->{rate_proxy};
+			$gc += $member->{gc_fraction};
+		}
+		my $count = scalar @{$members};
+		return {
+			loci => $count,
+			sites => $effectiveSites,
+			alignment_sites => $alignmentSites,
+			mean_rate => $count ? $rate / $count : 0,
+			mean_gc => $count ? $gc / $count : 0,
+		};
+	};
+	my ($minimumRate, $maximumRate) = (sort { $a <=> $b } @rates)[0, -1];
+	my ($minimumGC, $maximumGC) = (sort { $a <=> $b } @gcFractions)[0, -1];
+	my $rateRange = $maximumRate - $minimumRate;
+	my $gcRange = $maximumGC - $minimumGC;
+	for my $locus (@rescueLoci) {
+		my %summary = map { $_ => $summarize->($bins{$_}) } keys %bins;
+		my ($target) = sort {
+			my $distanceA = ($rateRange
+				? abs($locus->{rate_proxy} - $summary{$a}{mean_rate}) / $rateRange : 0)
+				+ ($gcRange
+					? abs($locus->{gc_fraction} - $summary{$a}{mean_gc}) / $gcRange : 0);
+			my $distanceB = ($rateRange
+				? abs($locus->{rate_proxy} - $summary{$b}{mean_rate}) / $rateRange : 0)
+				+ ($gcRange
+					? abs($locus->{gc_fraction} - $summary{$b}{mean_gc}) / $gcRange : 0);
+			$distanceA <=> $distanceB || $a cmp $b;
+		} keys %bins;
+		$locus->{initial_bin} = 'taxon_rescue_to_'.$target;
+		push @{$bins{$target}}, $locus;
+	}
+
+	while (keys(%bins) > 1) {
+		my %summary = map { $_ => $summarize->($bins{$_}) } keys %bins;
+		my @undersized = sort {
+			$summary{$a}{loci} <=> $summary{$b}{loci}
+				|| $summary{$a}{sites} <=> $summary{$b}{sites}
+				|| $a cmp $b
+		} grep {
+			$summary{$_}{loci} < $rateMergeMinLoci
+				|| $summary{$_}{sites} < $rateMergeMinSites
+		} keys %bins;
+		last unless @undersized;
+		my $source = $undersized[0];
+		my @targets = grep { $_ ne $source } keys %bins;
+		my ($target) = sort {
+			my $distanceA = ($rateRange
+				? abs($summary{$source}{mean_rate} - $summary{$a}{mean_rate}) / $rateRange : 0)
+				+ ($gcRange
+					? abs($summary{$source}{mean_gc} - $summary{$a}{mean_gc}) / $gcRange : 0);
+			my $distanceB = ($rateRange
+				? abs($summary{$source}{mean_rate} - $summary{$b}{mean_rate}) / $rateRange : 0)
+				+ ($gcRange
+					? abs($summary{$source}{mean_gc} - $summary{$b}{mean_gc}) / $gcRange : 0);
+			$distanceA <=> $distanceB || $a cmp $b;
+		} @targets;
+		push @{$bins{$target}}, @{$bins{$source}};
+		delete $bins{$source};
+	}
+
+	my %summary = map { $_ => $summarize->($bins{$_}) } keys %bins;
+	my @orderedKeys = sort {
+		$summary{$a}{mean_rate} <=> $summary{$b}{mean_rate}
+			|| $summary{$a}{mean_gc} <=> $summary{$b}{mean_gc}
+			|| $a cmp $b
+	} keys %bins;
+	my @partitions;
+	for my $index (0 .. $#orderedKeys) {
+		my $key = $orderedKeys[$index];
+		my $name = sprintf('rateGC%02d', $index + 1);
+		my @members = sort { $a->{start} <=> $b->{start} } @{$bins{$key}};
+		$_->{partition} = $name for @members;
+		push @partitions, {
+			name => $name,
+			members => \@members,
+			%{$summary{$key}},
+		};
+	}
+	return \@partitions;
+}
+
+sub writeRatePartitionAudit {
+	my ($path, $loci, $partitions) = @_;
+	make_path(dirname($path)) unless -d dirname($path);
+	my ($audit, $temporary) = tempfile(
+		'rate-merged-partitions-XXXXXX',
+		DIR => dirname($path),
+		UNLINK => 1,
+	);
+	print {$audit} join("\t", qw(
+		locus alignment selection_phase start end alignment_sites effective_called_sites
+		rate_proxy rate_proxy_source gc_fraction called_cells initial_bin partition
+		partition_loci partition_effective_sites partition_alignment_sites
+	)), "\n";
+	my %partitionByName = map { $_->{name} => $_ } @{$partitions};
+	for my $locus (sort { $a->{start} <=> $b->{start} } @{$loci}) {
+		my $partition = $partitionByName{$locus->{partition}};
+		print {$audit} join("\t",
+			$locus->{locus}, $locus->{alignment}, $locus->{selection_phase},
+			@{$locus}{qw(start end length)},
+			sprintf('%.8g', $locus->{effective_sites}),
+			sprintf('%.8g', $locus->{rate_proxy}), $locus->{rate_proxy_source},
+			sprintf('%.8g', $locus->{gc_fraction}), $locus->{called_cells},
+			$locus->{initial_bin}, $locus->{partition},
+			$partition->{loci}, sprintf('%.8g', $partition->{sites}),
+			$partition->{alignment_sites},
+		), "\n";
+	}
+	close $audit or die "Cannot close rate-partition audit $temporary: $!\n";
+	rename $temporary, $path
+		or die "Cannot publish rate-partition audit $path: $!\n";
+}
+
 sub mergeMSAs($ $ $ $){
 	my ($MSAsAr,$samplesHr,$multAliF,$del,$isAA) = @_;
 	my @MSAs = @{$MSAsAr}; my %samples = %{$samplesHr};
@@ -2370,6 +2668,9 @@ sub mergeMSAs($ $ $ $){
 	}
 	my %bigMSAFAAnxs;my %bigMSAFAA;foreach my $sm (@smps){$bigMSAFAA{$sm} ="";$bigMSAFAAnxs{$sm}="";}
 	my @lengthsParts;
+	my @partitionLoci;
+	my $partitionCoordinate = 0;
+	my $applyRateMerging = $rateMergePartitions && !$isAA && $multAliF eq $multAli;
 	my $overlapFilteredLoci = 0;
 	my $overlapColumnsRemoved = 0;
 	foreach my $MSAf (@MSAs){
@@ -2446,6 +2747,35 @@ sub mergeMSAs($ $ $ $){
 			$overlapColumnsRemoved += $removedColumns;
 		}
 		push(@lengthsParts,$len);
+		if ($applyRateMerging) {
+			my %retainedAlignment;
+			for my $sm (@smps) {
+				my $sequenceId = $sm.$separator.$gcat;
+				$retainedAlignment{$sequenceId} = $MFAA{$sequenceId}
+					if exists $MFAA{$sequenceId};
+			}
+			my ($gcFraction, $calledCells) = alignmentGCMetric(\%retainedAlignment);
+			my $rateMetric = $partitionRateProxy{$MSAf};
+			unless ($rateMetric) {
+				limitedWarn('partition rate proxy unavailable',
+					"Warning: no post-alignment rate proxy for $MSAf; using zero\n");
+				$rateMetric = {value => 0, source => 'unavailable'};
+			}
+			push @partitionLoci, {
+				locus => $gcat,
+				alignment => $MSAf,
+				start => $partitionCoordinate + 1,
+				end => $partitionCoordinate + $len,
+				length => $len,
+				rate_proxy => $rateMetric->{value},
+				rate_proxy_source => $rateMetric->{source},
+				selection_phase => $partitionSelectionPhase{$MSAf} // '',
+				gc_fraction => $gcFraction,
+				called_cells => $calledCells,
+				effective_sites => @smps ? $calledCells / @smps : 0,
+			};
+		}
+		$partitionCoordinate += $len;
 		foreach my $sm (@smps){
 			my $curK = $sm.$separator.$gcat;
 			if ( exists($MFAA{$curK}) && defined($MFAA{$curK})  ) {
@@ -2538,10 +2868,26 @@ sub mergeMSAs($ $ $ $){
 	my $lastP=0;
 	my $TypeTag = "DNA";
 	$TypeTag = "LG" if ($isAA); #this is the model to be used...
-	for (my $i=0;$i<@lengthsParts;$i++){
-		#DNA, part1 = 1-100
-		print O "$TypeTag, part".($i+1) ." = ". ($lastP+1) ."-". ($lengthsParts[$i]+$lastP) ."\n";
-		$lastP+=$lengthsParts[$i];
+	if ($applyRateMerging) {
+		my $partitions = deterministicRatePartitions(\@partitionLoci);
+		for my $partition (@{$partitions}) {
+			my @ranges = map { $_->{start}."-".$_->{end} } @{$partition->{members}};
+			print O "$TypeTag, $partition->{name} = ".join(", ", @ranges)."\n";
+		}
+		my $auditPath = "$treeD/rate_merged_partitions.tsv";
+		writeRatePartitionAudit($auditPath, \@partitionLoci, $partitions);
+		print "Deterministic rate/GC partition merging: ".scalar(@partitionLoci)
+			." loci -> ".scalar(@{$partitions})." partition(s); audit=$auditPath\n";
+	} else {
+		for (my $i=0;$i<@lengthsParts;$i++){
+			#DNA, part1 = 1-100
+			print O "$TypeTag, part".($i+1) ." = ". ($lastP+1) ."-". ($lengthsParts[$i]+$lastP) ."\n";
+			$lastP+=$lengthsParts[$i];
+		}
+		my $auditPath = "$treeD/rate_merged_partitions.tsv";
+		unlink $auditPath
+			or die "Cannot remove stale rate-partition audit $auditPath: $!\n"
+			if $multAliF eq $multAli && -e $auditPath;
 	}
 	close O;
 	
@@ -3497,6 +3843,7 @@ sub selectTaxonAwareFinalLoci {
 	return {
 		alignments => \@selectedAlignments,
 		sample_metrics => $sampleMetrics,
+		locus_metrics => \%metrics,
 	};
 }
 

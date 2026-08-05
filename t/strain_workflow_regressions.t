@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.77;/,
-	'default scaled taxon-aware tree filtering increments the workflow version');
+like($strain, qr/my \$version = 0\.78;/,
+	'default deterministic partition merging increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -304,6 +304,9 @@ like($strain,
 like($strain,
 	qr/my \$GenesPerSpecies = 0\.05;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.02;.*?my \$taxonAwareLocusSelection = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
 	'strainWithin uses the relaxed defaults, enables taxon-aware selection, and forwards explicit disablement');
+like($strain,
+	qr/my \$rateMergePartitions = 1;.*?my \$rateMergeMaxBins = 8;.*?my \$rateMergeMinLoci = 20;.*?my \$rateMergeMinSites = 20_000;.*?"rateMergePartitions=i" => \\\$rateMergePartitions.*?-rateMergePartitions \$rateMergePartitions.*?-rateMergeMaxBins \$rateMergeMaxBins.*?-rateMergeMinLoci \$rateMergeMinLoci.*?-rateMergeMinSites \$rateMergeMinSites/s,
+	'strainWithin enables deterministic rate merging and forwards all bin controls');
 like($strain,
 	qr/if \(\$taxonAwareLocusSelection\) \{.*?\$taxonAwareGeneBudget = \$noGeneLimit.*?\$presortGenes.*?\$maxNGenes < \$presortGenes.*?taxonAwareLocusBudgets\(\$taxonAwareGeneBudget\).*?-taxonAwareMaxLoci \$taxonAwareMaxLoci.*?-taxonAwareCoreLoci \$taxonAwareCoreLoci.*?-taxonAwareCandidateExtra \$taxonAwareCandidateExtra.*?sub taxonAwareLocusBudgets.*?\$maximumLoci \* 0\.8.*?\$maximumLoci \* 0\.3/s,
 	'strainWithin scales 80% core, 20% rescue capacity, and 30% QC backfill to its effective gene budget');

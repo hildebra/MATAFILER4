@@ -199,7 +199,8 @@ END {
 #.75: balance Step 1 workers by assembly-group count and samples per group
 #.76: relax strain-tree defaults and expose buildTree5 taxon-aware locus selection
 #.77: enable taxon-aware selection and scale its hierarchy to the strain gene budget
-my $version = 0.77;
+#.78: use deterministic rate/GC partition merging for strain trees by default
+my $version = 0.78;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -266,6 +267,10 @@ my $GenesPerSpecies = 0.05;
 my $GeneLengthMin = 0.3;
 my $relativeNTFraction = 0.02;
 my $taxonAwareLocusSelection = 1;
+my $rateMergePartitions = 1;
+my $rateMergeMaxBins = 8;
+my $rateMergeMinLoci = 20;
+my $rateMergeMinSites = 20_000;
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
@@ -382,6 +387,10 @@ GetOptions(
 	"GeneLengthMin=f" => \$GeneLengthMin,
 	"relativeNTFraction=f" => \$relativeNTFraction,
 	"taxonAwareLocusSelection=i" => \$taxonAwareLocusSelection,
+	"rateMergePartitions=i" => \$rateMergePartitions,
+	"rateMergeMaxBins=i" => \$rateMergeMaxBins,
+	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
+	"rateMergeMinSites=i" => \$rateMergeMinSites,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
@@ -429,6 +438,10 @@ die "Fractional filtering options must be between 0 and 1\n"
 		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction);
 die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
+die "-rateMergePartitions must be 0 or 1\n"
+	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
+die "-rateMergeMaxBins, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
+	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeMinLoci, $rateMergeMinSites);
 my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
 	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
 if ($taxonAwareLocusSelection) {
@@ -772,6 +785,10 @@ if ($runPartI){
 			'-abundanceMaxFold', $abundanceMaximumFold,
 			'-abundanceMaxModifiedZ', $abundanceMaximumModifiedZ,
 			'-flushEvery', $appendWriteTrigger,
+			'-rateMergePartitions', $rateMergePartitions,
+			'-rateMergeMaxBins', $rateMergeMaxBins,
+			'-rateMergeMinLoci', $rateMergeMinLoci,
+			'-rateMergeMinSites', $rateMergeMinSites,
 			'-iqPathogen', $iqPathogen,
 			'-legacyMGTK', $legacyMGTK,
 			'-MGset', $useGTDBmg, '-redoSubmissionData', 0, '-deepRepair', 0,
@@ -1102,6 +1119,10 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 			."-taxonAwareCoreLoci $taxonAwareCoreLoci "
 			."-taxonAwareCandidateExtra $taxonAwareCandidateExtra ";
 	}
+	$Tcmd .= "-rateMergePartitions $rateMergePartitions "
+		."-rateMergeMaxBins $rateMergeMaxBins "
+		."-rateMergeMinLoci $rateMergeMinLoci "
+		."-rateMergeMinSites $rateMergeMinSites ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
 	if ($phyloProg == 1){
 		if ($legacyMGTK){
@@ -2167,6 +2188,9 @@ sub prepRun{
 		print "MSAaligner: $MSAprog, GenesPerSpecies: $GenesPerSpecies, "
 			."GeneLengthMin: $GeneLengthMin, relativeNTFraction: $relativeNTFraction, "
 			."taxonAwareLocusSelection: $taxonAwareLocusSelection\n";
+		print "Rate/GC partition merging: enabled=$rateMergePartitions, "
+			."maximumBins=$rateMergeMaxBins, minimumBin=$rateMergeMinLoci loci/"
+			."$rateMergeMinSites sites\n";
 		print "Taxon-aware locus hierarchy: geneBudget=$taxonAwareGeneBudget, "
 			."robustCore=$taxonAwareCoreLoci, taxonRescue="
 			.($taxonAwareMaxLoci - $taxonAwareCoreLoci)
@@ -4017,6 +4041,13 @@ Tree locus filtering:
   -taxonAwareLocusSelection 0|1 Align a robust-plus-backfill candidate set, then
                                  select robust/core and taxon-rescue loci after MSA QC
                                  [default 1]
+  -rateMergePartitions 0|1      Merge final loci into deterministic rate/GC bins
+                                 before IQ-TREE [default 1]
+  -rateMergeMaxBins INT         Maximum deterministic partition bins [default 8]
+  -rateMergeMinLoci INT         Minimum loci per bin before nearest-bin merging
+                                 [default 20]
+  -rateMergeMinSites INT        Minimum alignment sites per bin before merging
+                                 [default 20000]
 USAGE
 }
 

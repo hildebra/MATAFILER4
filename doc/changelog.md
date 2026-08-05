@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-05 — Deterministic strain partition merging
+
+- Updated `buildTree5.pl` to 5.34 and `strain_within.pl` to 0.78. Strain trees now deterministically pool final nucleotide loci into bounded rate/GC partitions while retaining fixed `GTR+F+G2`; direct `buildTree5.pl` calls can opt in with `-rateMergePartitions 1`.
+- Initial partition capacity scales to 4, 6, or 8 bins for up to 100, 250, or more loci. Bins below 20 loci or 20,000 effective called sites merge into their nearest normalized divergence/GC neighbour; taxon-rescue loci join the nearest robust bin.
+- The rate proxy reuses post-alignment P90 consensus divergence, with taxon-aware variable-site fraction as a fallback. `phylo/rate_merged_partitions.tsv` audits all metrics, coordinates, and assignments, and the continuation fingerprint includes every merge setting.
+
+## 2026-08-05 — Fast fixed strain-tree model
+
+- Updated `buildTree5.pl` to 5.33. The strain preset again uses fixed `GTR+F+G2` by default because full `MFP+MERGE` model and partition selection is too expensive for hundreds of loci. `-AutoModel 1` remains available for an explicit diagnostic run.
+
 ## 2026-08-05 — Strain locus outlier QC and partition merging
 
 - Updated `buildTree5.pl` to 5.32. Within-species MSAfix locus QC now uses a modified-Z cutoff of 5.0 (previously 8.0) for consensus-divergence outliers, rejecting anomalous loci while leaving sample retention unchanged.

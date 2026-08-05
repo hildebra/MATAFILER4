@@ -138,6 +138,8 @@ unlike($calls[0], qr/(?:^|\s)-o(?:\s|$)/,
 	'a supplied outgroup is not passed to IQ-TREE');
 unlike($calls[0], qr/(?:^|\s)-safe(?:\s|$)/,
 	'the small initial test attempt uses the normal likelihood kernel');
+like($calls[0], qr/(?:^|\s)-m GTR\+F\+G2(?:\s|$)/,
+	'the fixed nucleotide path uses the fast GTR+F+G2 model');
 like($calls[1], qr/(?:^|\s)-safe(?:\s|$)/,
 	'the numerical-underflow retry uses the safe likelihood kernel');
 ok(-s "$retryPrefix.unsafe.log", 'the failed unsafe diagnostic is preserved');

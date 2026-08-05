@@ -12,7 +12,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 | `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `buildTree5.pl` | `5.32` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.34` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -446,7 +446,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.32`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.34`.
 
 ### General options
 
@@ -507,6 +507,10 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-postAlignmentDivergenceQC` | integer | `0` between species; `1` within species | stable | Reject absolute and cross-locus divergence outliers. When locus QC is enabled, its structural checks remain active even if divergence QC is disabled. |
 | `-postAlignmentRelativeZ` | float | `5.0` | stable | Modified-Z threshold for cross-locus consensus-divergence outliers when divergence QC is enabled. The stricter within-species default rejects anomalously fast loci, not samples. |
 | `-postAlignmentMinLociRelative` | integer | `8` | stable | Minimum locus count before applying cross-locus robust outlier QC. |
+| `-rateMergePartitions` | integer | `0` direct; `1` strain preset | stable | Replace one partition per retained locus with deterministic divergence/GC bins for the primary nucleotide tree. `strain_within.pl` enables this by default. |
+| `-rateMergeMaxBins` | integer | `8` | advanced | Upper bound on deterministic bins. The initial target scales to 4 bins for at most 100 loci, 6 for 101–250 loci, and 8 above 250 loci. |
+| `-rateMergeMinLoci` | integer | `20` | advanced | Merge a bin with its nearest normalized divergence/GC neighbour while it contains fewer loci than this threshold. |
+| `-rateMergeMinSites` | integer | `20000` | advanced | Merge a bin with its nearest neighbour while its effective called sites are below this threshold. A locus contributes its mean number of called bases across retained taxa, so missing data reduce support. |
 | `-taxonAwareLocusSelection` | integer | `1` | stable | Enable two-stage locus selection. A permissive robust/core-plus-rescue candidate set is aligned first; the final set is chosen after MSA QC using occupancy and parsimony-informative sites. Set to `0` for the legacy filters. |
 | `-taxonAwareMaxLoci` | integer | `500` | advanced | Maximum loci retained in the final concatenated alignment. |
 | `-taxonAwareCoreLoci` | integer | `400` | advanced | Highest-scoring robust loci selected before greedy taxon-coverage rescue. Must not exceed `-taxonAwareMaxLoci`. |
@@ -515,7 +519,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-taxonAwareTargetLoci` | integer | `25` | advanced | Per-sample locus target used by greedy coverage rescue and backbone-candidate reporting. |
 | `-taxonAwareTargetNT` | integer | `7500` | advanced | Per-sample informative-NT target used by greedy coverage rescue and backbone-candidate reporting. |
 | `-runIQtree` | integer | `0` | stable | See source/help for details. |
-| `-AutoModel` | integer | `1` | stable | Use IQ-TREE model selection; for partitioned alignments this runs `MFP+MERGE` to merge compatible loci. This is the strain-preset default; set to `0` for a fixed model. |
+| `-AutoModel` | integer | `1` | stable | Use IQ-TREE model selection; for partitioned alignments this runs `MFP+MERGE` to merge compatible loci. Strain presets instead default to the fixed `GTR+F+G2` model; set this flag to `1` there only for a deliberate model-selection run. |
 | `-iqFast` | integer | `0` | stable | fast qiTree mode |
 | `-runClonalFrameML` | integer | `0` | stable | See source/help for details. |
 | `-runGubbins` | integer | `0` | stable | See source/help for details. |
@@ -540,4 +544,6 @@ Broad or between-species phylogeny is the default. In this mode `buildTree5.pl` 
 
 Taxon-aware selection is enabled by default and stays inside `buildTree5.pl` so it can reuse the normal alignment and MSAfix stages. For direct calls, the pre-MSA pass ranks length-stable, complete, prevalent loci, retains a 400-locus robust core, and greedily adds up to 100 loci that improve the least-represented taxa; up to 150 further loci provide QC backfill. After MSAfix, the final pass reranks surviving loci using observed alignment occupancy and parsimony-informative sites, then selects at most 500 loci with the same core-plus-taxon-rescue strategy. Sparse samples are retained as placement candidates whenever the selected alignment provides the configured placement/minimum-NT anchor; only samples without such an anchor are removed. Decisions are written to `phylo/taxon_aware_locus_candidates.tsv`, `phylo/taxon_aware_sample_candidates.tsv`, `phylo/taxon_aware_locus_selection.tsv`, and `phylo/taxon_aware_sample_selection.tsv`.
 
-`strain_within.pl` 0.77 also enables the selector by default. It scales the hierarchy to its effective selected-gene budget: 80% robust core, 20% taxon-rescue capacity, and an additional 30% QC-backfill candidate pool. The budget is `min(maxGenes, presortGenes)`, or `presortGenes` under `-noGeneLimit 1`. Thus 500 selected genes produce 400 core + 100 rescue + 150 backfill, while the default 400-gene cap produces 320 + 80 + 120. Its other filtering defaults remain `-GeneLengthMin 0.3`, `-GenesPerSpecies 0.05`, and `-relativeNTFraction 0.02`. Within-species locus QC now rejects cross-locus consensus-divergence outliers above modified-Z 5.0, while AutoModel uses `MFP+MERGE` to merge compatible gene partitions without dropping taxa or alignment sites.
+`strain_within.pl` 0.78 also enables the selector by default. It scales the hierarchy to its effective selected-gene budget: 80% robust core, 20% taxon-rescue capacity, and an additional 30% QC-backfill candidate pool. The budget is `min(maxGenes, presortGenes)`, or `presortGenes` under `-noGeneLimit 1`. Thus 500 selected genes produce 400 core + 100 rescue + 150 backfill, while the default 400-gene cap produces 320 + 80 + 120. Its other filtering defaults remain `-GeneLengthMin 0.3`, `-GenesPerSpecies 0.05`, and `-relativeNTFraction 0.02`. Within-species locus QC rejects cross-locus consensus-divergence outliers above modified-Z 5.0. The strain preset uses fixed `GTR+F+G2` and deterministic rate/GC merging; `-AutoModel 1` remains an intentional, slower comparison.
+
+Deterministic merging runs after MSA QC and final taxon-aware locus selection, so it never changes the selected loci or taxa. It bins robust/backfill loci by the native QC report's P90 consensus divergence and final gap-free GC fraction. Taxon-rescue loci join the nearest existing robust bin and cannot create sparse rescue-only partitions. If locus QC is disabled, the taxon-aware variable-site fraction supplies the rate proxy. Quantile bins are collapsed into the nearest normalized rate/GC centroid until every remaining bin meets both minimum-size rules, or only one bin remains. The site rule uses effective called sites—the sum of each locus's mean called bases across retained taxa—so sparse missing-data loci contribute less. The resulting `MSA/MSAli.fna.partition.RAXML` uses comma-separated, non-contiguous locus ranges, and `phylo/rate_merged_partitions.tsv` records every locus, selection phase, coordinate, missing-data-aware site count, metric source, initial bin, and final partition. These settings are included in the continuation-policy fingerprint, so changing them rebuilds stale alignments and trees.
