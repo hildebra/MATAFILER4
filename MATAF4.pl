@@ -73,7 +73,7 @@ use Mods::WorkflowControl qw(
 	hybrid_local_scratch_gb
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
-	commands_are_lightweight_filesystem input_terminal_status sample_empty_marker_reason reconcile_sample_empty_marker cleanup_stage_barrier
+	commands_are_lightweight_filesystem input_terminal_status cleaned_primary_libraries_empty sample_empty_marker_reason reconcile_sample_empty_marker cleanup_stage_barrier
 );
 
 
@@ -1378,38 +1378,40 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		threshold_mb => $MFconfig{skipSmallSmplsMB},
 	);
 	my $cleanedEmpty = sample_empty_marker_reason($curOutDir) eq 'cleaned_primary_reads_empty';
-	#print "small skip: $MFconfig{skipSmallSmplsMB} $map{$curSmpl}{inputFileSizeMB} $map{$curSmpl}{inputXFileSizeMB} $AssemblyGo \n";
-	if (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB}) && (!$AssemblyGo || $AsGrps{$cAssGrp}{CntAimAss} <= 1 ) ){
-		if ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB} || $cleanedEmpty ){
-			if ($cleanedEmpty) {
-				print "Skipping sample $curSmpl because no primary FASTQ records remained after SDM filtering\n";
-			} else {
-				printf "Skipping sample %s because combined primary + supplementary input is %.1f MB (%.1f + %.1f), below %.1f MB\n",
-					$curSmpl, $combinedInputSizeMB,
-					($map{$curSmpl}{inputFileSizeMB} || 0),
-					($map{$curSmpl}{inputXFileSizeMB} || 0),
-					$MFconfig{skipSmallSmplsMB};
-			}
-			# Still create the lightweight downstream placeholders expected for a
-			# terminal empty sample, including one emptied by quality filtering.
-			my $geneCovTmpFile = $coveragePerCtg; $geneCovTmpFile =~ s/percontig.gz$/count_pergene/;
-			my $geneCntTmpFile = $coveragePerCtg; $geneCntTmpFile =~ s/percontig.gz$/pergene/;
-			my $geneMedTmpFile = $coveragePerCtg; $geneMedTmpFile =~ s/percontig.gz$/median.pergene/;
-			my $tmpMapCovGZ = "$finalMapDir/$SmplName-smd.bam.coverage.gz";
-			system "mkdir -p $ContigStatsDir" unless (-d $ContigStatsDir);
-			system "mkdir -p $finalMapDir" unless (-d $finalMapDir);
-			system "mkdir -p $curOutDir" unless (-d $curOutDir); $coveragePerCtg =~ s/\.gz$//;
-			system "touch $tmpMapCovGZ $coveragePerCtg $geneCovTmpFile $geneCntTmpFile $geneMedTmpFile $curOutDir/SMPL.empty";
-		}
-		$runReport{empty_samples}{$curSmpl} = $combinedInputSizeMB;
-		my $emptyTerminalStatus = $cleanedEmpty ? 'skipped_cleaned_empty' : input_terminal_status(
+	# Use one terminal route for ordinary small inputs and inputs emptied by SDM.
+	# It is also called after an existing filterDone.stone is validated, before
+	# the sample can be included in an assembly group.
+	my $finalizeEmptySample = sub {
+		my (%args) = @_;
+		my $isCleanedEmpty = $args{cleaned_empty} ? 1 : 0;
+		my $emptyDependency = defined($args{input_dependency}) ? $args{input_dependency} : '';
+		my $emptyTerminalStatus = $isCleanedEmpty ? 'skipped_cleaned_empty' : input_terminal_status(
 			input_size_mb => $combinedInputSizeMB,
 			threshold_mb => $MFconfig{skipSmallSmplsMB},
 		);
 		die "Internal empty-sample classification error for $curSmpl: "
 			."$combinedInputSizeMB MB does not qualify as empty or too small\n"
 			if $emptyTerminalStatus eq '';
-		my $emptyWorkPending = $jdep ne "" && $jdep ne "EMPTY_DO_NEXT";
+		if ($isCleanedEmpty) {
+			print "Skipping sample $curSmpl because no primary FASTQ records remained after SDM filtering\n";
+		} else {
+			printf "Skipping sample %s because combined primary + supplementary input is %.1f MB (%.1f + %.1f), below %.1f MB\n",
+				$curSmpl, $combinedInputSizeMB,
+				($map{$curSmpl}{inputFileSizeMB} || 0),
+				($map{$curSmpl}{inputXFileSizeMB} || 0),
+				$MFconfig{skipSmallSmplsMB};
+		}
+		# Preserve the lightweight files expected by downstream summary handling.
+		my $geneCovTmpFile = $coveragePerCtg; $geneCovTmpFile =~ s/percontig.gz$/count_pergene/;
+		my $geneCntTmpFile = $coveragePerCtg; $geneCntTmpFile =~ s/percontig.gz$/pergene/;
+		my $geneMedTmpFile = $coveragePerCtg; $geneMedTmpFile =~ s/percontig.gz$/median.pergene/;
+		my $tmpMapCovGZ = "$finalMapDir/$SmplName-smd.bam.coverage.gz";
+		system "mkdir -p $ContigStatsDir" unless (-d $ContigStatsDir);
+		system "mkdir -p $finalMapDir" unless (-d $finalMapDir);
+		system "mkdir -p $curOutDir" unless (-d $curOutDir); $coveragePerCtg =~ s/\.gz$//;
+		system "touch $tmpMapCovGZ $coveragePerCtg $geneCovTmpFile $geneCntTmpFile $geneMedTmpFile $curOutDir/SMPL.empty";
+		$runReport{empty_samples}{$curSmpl} = $combinedInputSizeMB;
+		my $emptyWorkPending = $emptyDependency ne '' && $emptyDependency ne 'EMPTY_DO_NEXT';
 		if (!$emptyWorkPending) {
 			my $emptyCleanupComplete = runFinishedCleanup(finishedCleanupArguments(
 				$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
@@ -1419,7 +1421,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				$closeSampleOutcome->(
 					present_assembly => 0,
 					terminal_status => $emptyTerminalStatus,
-					cleaned_input_scope => $cleanedEmpty ? 'primary' : '',
+					cleaned_input_scope => $isCleanedEmpty ? 'primary' : '',
 				);
 			} else {
 				delete $loopSampleCompleted{$JNUM};
@@ -1427,9 +1429,19 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		} else {
 			delete $loopSampleCompleted{$JNUM};
 		}
-		reduceProgStats(); #reduce counters for riboFind etc.. no find in this sample!
-		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR);
-		loop2C_check($cAssGrp,\@sampleDeps);next;
+		reduceProgStats();
+		MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+		loop2C_check($cAssGrp, \@sampleDeps);
+	};
+	#print "small skip: $MFconfig{skipSmallSmplsMB} $map{$curSmpl}{inputFileSizeMB} $map{$curSmpl}{inputXFileSizeMB} $AssemblyGo \n";
+	if (-e "$curOutDir/SMPL.empty" || $jdep eq 'EMPTY_DO_NEXT'
+			|| ($combinedInputSizeMB < $MFconfig{skipSmallSmplsMB}
+				&& (!$AssemblyGo || $AsGrps{$cAssGrp}{CntAimAss} <= 1))) {
+		$finalizeEmptySample->(
+			cleaned_empty => $cleanedEmpty,
+			input_dependency => $jdep,
+		);
+		next;
 	}
 	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $jdep) if ($assemblyFlag);
 	if (deferLoopProducerWave(
@@ -1459,6 +1471,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	# punsh the whole thing through sdm.. 
 	if ( (!$boolAssemblyOK||$calcContamination) && $MFopt{useSDM}!=0 ){#&& !$is3rdGen) {
 		$sdmjN  = sdmClean($curOutDir, $smplTmpDir."seqClean/",$jdep,$dowstreamAnalysisFlag,0) ;
+			if (sample_empty_marker_reason($curOutDir) eq 'cleaned_primary_reads_empty') {
+				$finalizeEmptySample->(cleaned_empty => 1);
+				next;
+			}
 		# check for support reads as well..
 		#job on support  reads
 		my $sdmjN2 = sdmClean($curOutDir, $smplTmpDir."seqClean/",$jdep,$dowstreamAnalysisFlag,1) ;
@@ -5908,6 +5924,16 @@ SDM_EMPTY_GUARD
 	$presence = 0 if grep { !-e $_ } @requiredOutputs;
 	my $qsubFile = $logDir."sdmReadCleaner.sh";
 	replaceScopeLibraries($cleanSeqSetHR, $scope, \@cleanLibraries, 1, $curSmpl);
+	if (!$useXtras && $presence && cleaned_primary_libraries_empty(\@cleanLibraries)) {
+		my $emptyMarker = "$curOutDir/SMPL.empty";
+		open my $emptyFH, '>', $emptyMarker
+			or die "Cannot write cleaned-empty marker $emptyMarker: $!\n";
+		print {$emptyFH} "cleaned_primary_reads_empty\n";
+		close $emptyFH
+			or die "Cannot close cleaned-empty marker $emptyMarker: $!\n";
+		print "Detected no primary FASTQ records in completed SDM output for $curSmpl; marked SMPL.empty\n"
+			unless $MFconfig{silent};
+	}
 	$qsubFile = $logDir."sdmReadCleanerSuppl.sh" if ($useXtras);
 
 	if (!$presence && $runThis){

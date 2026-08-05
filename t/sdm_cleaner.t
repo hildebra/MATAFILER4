@@ -123,6 +123,9 @@ unlike($cleaner, qr/requiredNonEmpty/,
 like($cleaner,
 	qr/if \(!\$useXtras\).*?SMPL\.empty.*?mf4_sdm_fastq_has_records.*?cleaned_primary_reads_empty/s,
 	'primary SDM cleaning marks a sample when no FASTQ records remain after filtering');
+like($cleaner,
+	qr/my \$presence = -e \$stone.*?replaceScopeLibraries\(\$cleanSeqSetHR.*?cleaned_primary_libraries_empty\(\\\@cleanLibraries\).*?cleaned_primary_reads_empty/s,
+	'a completed primary SDM checkpoint is checked locally before another assembly can be submitted');
 like($mataf4, qr/primaryCleanPending.*?filterDone\.stone.*?supportCleanPending.*?filterSupplDone\.stone.*?seqCleanFlag/s,
 	'a missing support-cleaning checkpoint forces raw-read restaging');
 unlike($mataf4, qr/scalar\(\@files\) == 1.*?rm -rf \$finDest\/rawRds/s,

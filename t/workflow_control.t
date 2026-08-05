@@ -7,6 +7,7 @@ use File::Temp qw(tempdir);
 use FindBin qw($Bin);
 use Test::More;
 
+use IO::Compress::Gzip qw(gzip $GzipError);
 use lib File::Spec->catdir($Bin, '..');
 use Mods::GenoMetaAss qw(resetAsGrps contig_stats_coverage_complete);
 use Mods::IO_Tamoc_progs qw(inputFmtSpades);
@@ -15,7 +16,7 @@ use Mods::WorkflowControl qw(
 	hybrid_package_complete hybrid_package_sample_id hybrid_local_scratch_gb missing_input_files source_input_files parse_ignored_samples
 	sample_base_output_dir sample_is_ignored workflow_members_match
 	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
-	commands_are_lightweight_filesystem input_terminal_status sample_empty_marker_reason reconcile_sample_empty_marker cleanup_stage_barrier
+	commands_are_lightweight_filesystem input_terminal_status cleaned_primary_libraries_empty sample_empty_marker_reason reconcile_sample_empty_marker cleanup_stage_barrier
 );
 
 is(assembly_cores_for_input(input_mb => 0, configured_cores => 0), 8,
@@ -85,6 +86,24 @@ is(sample_empty_marker_reason($empty_state_root), 'cleaned_primary_reads_empty',
 is(reconcile_sample_empty_marker(
 	sample_root => $empty_state_root, input_size_mb => 8272.7, threshold_mb => 1,
 ), 1, 'a cleaned-empty marker remains authoritative despite large raw input');
+my $cleaned_r1 = File::Spec->catfile($empty_state_root, 'filtered.1.fq.gz');
+my $cleaned_r2 = File::Spec->catfile($empty_state_root, 'filtered.2.fq.gz');
+my $cleaned_single = File::Spec->catfile($empty_state_root, 'filtered.singl.fq.gz');
+my $empty_fastq = '';
+gzip \$empty_fastq => $cleaned_r1 or die "Cannot write $cleaned_r1: $GzipError";
+gzip \$empty_fastq => $cleaned_r2 or die "Cannot write $cleaned_r2: $GzipError";
+gzip \$empty_fastq => $cleaned_single or die "Cannot write $cleaned_single: $GzipError";
+my $cleaned_libraries = [{
+	files => {r1 => $cleaned_r1, r2 => $cleaned_r2, single => $cleaned_single},
+}];
+ok(cleaned_primary_libraries_empty($cleaned_libraries),
+	'header-only gzip cleaner outputs are recognized as empty primary FASTQ libraries');
+unlink $cleaned_single or die "Cannot replace $cleaned_single: $!";
+my $one_fastq_record = "\@read\nACGT\n+\n!!!!\n";
+gzip \$one_fastq_record => $cleaned_single
+	or die "Cannot write $cleaned_single: $GzipError";
+ok(!cleaned_primary_libraries_empty($cleaned_libraries),
+	'a single surviving FASTQ record keeps a completed cleaner output eligible for assembly');
 ok(-e $empty_marker, 'cleaned-empty marker is retained for the next submission pass');
 my $cleanup_barrier = cleanup_stage_barrier(
 	{name => 'contig stats', required => 1, complete => 1},
@@ -598,7 +617,7 @@ like($mataf4,
 	qr/terminal_status => 'skipped_sdm_warning'.*?sdm_warning_type => 'invalid_paired_read'/s,
 	'SDM invalid-pair skips are retained as explicit sentinel outcomes');
 like($mataf4,
-	qr/cleaned_primary_reads_empty.*?Skipping sample \$curSmpl because no primary FASTQ records remained after SDM filtering.*?skipped_cleaned_empty.*?cleaned_input_scope => \$cleanedEmpty \? 'primary'/s,
+	qr/my \$finalizeEmptySample.*?skipped_cleaned_empty.*?Skipping sample \$curSmpl because no primary FASTQ records remained after SDM filtering.*?cleaned_input_scope => \$isCleanedEmpty \? 'primary'/s,
 	'a post-SDM empty marker closes the sample without attempting an assembly');
 unlike($mataf4, qr/if \(\$MFopt\{RedoRiboFind\}\)\{system "rm -rf/,
 	'the stale late RiboFind cleanup path is absent');
