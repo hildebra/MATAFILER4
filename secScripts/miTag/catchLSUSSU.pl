@@ -1,332 +1,391 @@
 #!/usr/bin/env perl
-#./catchLSUSSU.pl /g/scb/bork/hildebra/data2/Soil_finland/Project_150108/Sample_S141_170/S141_170_TCCGCGAA-ATAGAGGC_L002_R1_001.fastq.gz /g/scb/bork/hildebra/data2/Soil_finland/Project_150108/Sample_S141_170/S141_170_TCCGCGAA-ATAGAGGC_L002_R2_001.fastq.gz /g/scb/bork/hildebra/data2/Soil_finland/tmp_16s/ /g/scb/bork/hildebra/data2/Soil_finland/tmp_16s/aligned/ 10 1
-# ./catchLSUSSU.pl '/scratch/bork/hildebra/SimuB/simulated_metaG3SA_0//tmp/seqClean/filtered.1.fastq' '/scratch/bork/hildebra/SimuB/simulated_metaG3SA_0//tmp/seqClean/filtered.2.fastq' /tmp/hildebra/simulated_metaG3SA_0ITS//SMRNA/ /g/scb/bork/hildebra/SNP///SimuB/simulated_metaG3SA_0/ribos/ 12 Sb1 0 /scratch/bork/hildebra/SimuB//rnaDB/
 
 use strict;
 use warnings;
-use Getopt::Long qw( GetOptions );
-use Mods::GenoMetaAss qw(renameFastqCnts systemW);
-use Mods::IO_Tamoc_progs qw(inputFmtSpades getProgPaths setConfigFile);
+
 use File::Copy qw(copy);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
+use Getopt::Long qw(GetOptions);
+use IO::Compress::Gzip qw(gzip $GzipError);
+use Mods::GenoMetaAss qw(systemW);
+use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile);
 
-sub smrnaRunCmd;
-sub copySortmernaOutputs;
-sub touchFile;
-sub shellQuote;
-sub validateSortmernaReference;
-sub validateSortmernaIndex;
-
-
-#18.5.26: added versioning to 0.1
-#4.8.26: v0.4 limit SortMeRNA database preflight validation to existence checks
-#4.8.26: v0.5 isolate SortMeRNA work directories and avoid trailing Boolean flags
-my $cLSUSSUver = 0.5;
-
-#my $tmpP = "/g/scb/bork/hildebra/data2/Soil_finland/tmp_16s/";
-my $tmpP = "";#$ARGV[3];
-my $alignPath = "";#$ARGV[4];
-my $threads = 1;#$ARGV[5];
-my $smpN = "";#$ARGV[6];
-my $doRiboAssembl = 0;#$ARGV[7];
-my $path2DB = "";#$ARGV[8];
-my $configFile = "";
-my 	$read1 ="";
-my $read2 = "";
-my $readS = "";
-
+my $VERSION = '0.6';
+my ($read1, $read2, $readS) = ('', '', '');
+my ($alignPath, $tmpRoot, $sample, $configFile) = ('', '', '', '');
+my $threads = 1;
+my $doRiboAssembly = 0;
 
 GetOptions(
-	"R1=s" => \$read1, 
-	"R2=s" => \$read2, 
-	"RS=s" => \$readS,
-
-	"alignDir=s" => \$alignPath,
-	"smplID=s"      => \$smpN,
-	"tmpDir=s"      => \$tmpP,
-	"cores=i" => \$threads,
-	"config=s" => \$configFile,
-	#"DBdir=s" => \$path2DB,
-	"assmblRibos=i" => \$doRiboAssembl,
-) or die("Error in command line arguments\n");
+	'R1=s'          => \$read1,
+	'R2=s'          => \$read2,
+	'RS=s'          => \$readS,
+	'alignDir=s'    => \$alignPath,
+	'smplID=s'      => \$sample,
+	'tmpDir=s'      => \$tmpRoot,
+	'cores=i'       => \$threads,
+	'config=s'      => \$configFile,
+	'assmblRibos=i' => \$doRiboAssembly,
+) or die "Error in command line arguments\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
-die "-alignDir is required\n" if $alignPath eq "";
-die "-tmpDir is required\n" if $tmpP eq "";
-die "-smplID is required\n" if $smpN eq "";
+die "-alignDir is required\n" if $alignPath eq '';
+die "-tmpDir is required\n" if $tmpRoot eq '';
+die "-smplID is required\n" if $sample eq '';
 die "-cores must be a positive integer\n" if $threads < 1;
-die "Ribosomal assembly is no longer supported\n" if $doRiboAssembl;
+die "Ribosomal assembly is no longer supported\n" if $doRiboAssembly;
 
-my @r1i = grep { $_ ne "" && $_ ne "-1" } split(",",$read1);
-my @r2i = grep { $_ ne "" && $_ ne "-1" } split(",",$read2);
-my @rSi = grep { $_ ne "" && $_ ne "-1" } split(",",$readS);
-die "At least one -R1 or -RS input is required\n" unless @r1i || @rSi;
-die "-R1 and -R2 must contain the same number of files\n" if @r2i && @r1i != @r2i;
-die "-R2 was supplied without -R1\n" if @r2i && !@r1i;
-for my $readFile (@r1i, @r2i, @rSi){
+my @r1 = parseReadList($read1);
+my @r2 = parseReadList($read2);
+my @single = parseReadList($readS);
+die "At least one -R1 or -RS input is required\n" unless @r1 || @single;
+die "-R2 was supplied without -R1\n" if @r2 && !@r1;
+die "-R1 and -R2 must contain the same number of files\n"
+	if @r2 && @r1 != @r2;
+for my $readFile (@r1, @r2, @single) {
 	die "Read input does not exist: $readFile\n" unless -e $readFile;
 }
-my $rS=join(",",@rSi);
-my $singlMode = @r2i ? 0 : 1;
+
+my (@pairedR1, @pairedR2);
+if (@r2) {
+	@pairedR1 = @r1;
+	@pairedR2 = @r2;
+} else {
+	push @single, @r1;
+}
+my $hasPairs = @pairedR1 ? 1 : 0;
+my $hasSingles = @single ? 1 : 0;
 
 $alignPath = File::Spec->canonpath(File::Spec->rel2abs($alignPath));
-my $tmpRoot = File::Spec->canonpath(File::Spec->rel2abs($tmpP));
+$tmpRoot = File::Spec->canonpath(File::Spec->rel2abs($tmpRoot));
 make_path($alignPath) unless -d $alignPath;
 make_path($tmpRoot) unless -d $tmpRoot;
 die "-alignDir is not a directory: $alignPath\n" unless -d $alignPath;
 die "-tmpDir is not a directory: $tmpRoot\n" unless -d $tmpRoot;
-my $safeSample = $smpN;
+
+my $safeSample = $sample;
 $safeSample =~ s/[^A-Za-z0-9_.-]+/_/g;
-$tmpP = File::Spec->catdir($tmpRoot, "catchLSUSSU_${safeSample}_$$");
-make_path($tmpP);
+my $tmpPath = File::Spec->catdir(
+	$tmpRoot, "catchLSUSSU_${safeSample}_$$",
+);
+make_path($tmpPath);
 
-if (-e "$alignPath/SSU_pull.sto" && -e "$alignPath/LSU_pull.sto"){
-	print "All riboFind SortMeRNA targets are complete\n";
-	remove_tree($tmpP);
-	exit(0);
+for my $tag (qw(SSU LSU)) {
+	repairInvalidCheckpoint(
+		$alignPath, $tag, $hasPairs, $hasSingles,
+	);
 }
+if (allMarkersComplete($alignPath, $hasPairs, $hasSingles)) {
+	print "All RiboFind SortMeRNA targets are complete\n";
+	remove_tree($tmpPath);
+	exit 0;
+}
+
 setConfigFile($configFile);
+my $sortmerna = getProgPaths('sortmerna');
+announceSortmerna($sortmerna);
 
-#if ($path2DB eq ""){die "database not defined (-DBdir) ! \n";}
-#if (@ARGV<8){die "Not enough input arguments!!\n";}
+print "Skipping ITS\n";
+for my $tag (qw(SSU LSU)) {
+	next if markerComplete($alignPath, $tag, $hasPairs, $hasSingles);
 
+	my $referenceKey = $tag eq 'SSU' ? 'SSUdbFAsrt' : 'LSUdbFAsrt';
+	my $indexKey = $tag eq 'SSU' ? 'SSUidx' : 'LSUidx';
+	my $reference = getProgPaths($referenceKey);
+	my $index = getProgPaths($indexKey, 0);
+	validateSortmernaReference($referenceKey, $reference);
+	validateSortmernaIndex($indexKey, $index);
 
-#my $smrPath = getProgPaths("srtMRNA_path");
-#my $path2DB = "$smrPath/rRNA_databases/";
-#my $smrnaBin = "$smrPath/./sortmerna";
-
-my $smrnaBin = getProgPaths("sortmerna");
-#my $mergeScript = getProgPaths("mergeRdScr");
-#my $unmergeScript = getProgPaths("unmergeRdScr");
-#my $spadesBin = getProgPaths("spades");
-my $ltslcaP = "$alignPath/ltsLCA/";
-if (!-e "$alignPath/SSU_pull.sto" || !-e "$alignPath/LSU_pull.sto") { #unpack reads
-	#preparation of reads
-	#my @r1i = split(";",$ARGV[0]); my $r1="$tmpP/read1.tmp.fq";
-	#my @r2i = split(";",$ARGV[1]); my $r2="$tmpP/read2.tmp.fq";
-	#my @rSi = split(";",$ARGV[2]); my $rS="$tmpP/readSingl.tmp.fq";
-	#die $singlMode."\n";
-	#die "$r1i[0]\n";
-	
-	my $read1Str = join(",", @r1i);
-	my $read2Str = join(",", @r2i);
-	
-	
-	
-	#my $ITSDBfa = getProgPaths("ITSdbFA"); $ITSDBfa =~ m/([^\/]+)$/; $ITSDBfa = $1; my $ITSDBidx = $ITSDBfa; $ITSDBidx =~ s/\.fa*$/\.idx/;
-
-	#my $refDBits = getProgPaths("ITSdbFAsrt");
-	my $refDBssu = getProgPaths("SSUdbFAsrt");
-	my $refDBlsu = getProgPaths("LSUdbFAsrt");
-	my $idxSSU   = getProgPaths("SSUidx", 0);
-	my $idxLSU   = getProgPaths("LSUidx", 0);
-	validateSortmernaReference("SSUdbFAsrt", $refDBssu);
-	validateSortmernaReference("LSUdbFAsrt", $refDBlsu);
-	validateSortmernaIndex("SSUidx", $idxSSU);
-	validateSortmernaIndex("LSUidx", $idxLSU);
-	announce($smrnaBin);
-
-	#my $curStone = "$alignPath/ITS_pull.sto";
-	#unless (-e $curStone){ #ITS seems to be in general unreliable (too diverse?)
-	#	if ($refDBits ne ""){
-	#		my $ltag = "reads_ITS";
-	#		my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBits,$read1Str,$read2Str,$alignPath,$singlMode,$kvdbITS);
-	#		$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBits,$rS,"",$alignPath,1,$kvdbITS) if ($rS ne "");
-	#		systemW $runner;
-	#		outfileCpy($tmpP."/$ltag",$alignPath);
-	#		systemW "rm -f $ltslcaP/ITS_ass.sto" if (-e " $ltslcaP/ITS_ass.sto");
-	#		systemW "touch $curStone" unless (`wc -l $alignPath/$ltag.r1.fq | cut -f1 -d' '` != `wc -l $alignPath/$ltag.r1.fq | cut -f1 -d' '` );
-	#	} else {
-	#		print "Skipping ITS since DB could not be found\n"
-	#	}
-	#}
-	print "Skipping ITS\n";
-
-	my $curStone = "$alignPath/SSU_pull.sto";
-	unless (-e $curStone){
-		my $ltag = "reads_SSU";
-		my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBssu,$read1Str,$read2Str,$alignPath,$singlMode,$idxSSU);
-		$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBssu,$rS,"",$alignPath,1,$idxSSU) if ($rS ne "");
-		systemW $runner;
-		copySortmernaOutputs($tmpP, $alignPath, $ltag, $singlMode || $rS ne "");
-		touchFile($curStone);
-		
-		#renameFastqCnts($alignPath."/reads_SSU.r1.fq",$smpN."__SSU"); renameFastqCnts($alignPath."/reads_SSU.r2.fq",$smpN."__SSU");
-		#system "touch $curStone";
-	}
-	$curStone = "$alignPath/LSU_pull.sto";
-	unless (-e $curStone){
-		my $ltag = "reads_LSU";
-		my $runner = smrnaRunCmd($tmpP."/$ltag",$refDBlsu,$read1Str,$read2Str,$alignPath,$singlMode,$idxLSU);
-		$runner .= "\n\n". smrnaRunCmd($tmpP."/$ltag",$refDBlsu,$rS,"",$alignPath,1,$idxLSU) if ($rS ne "");
-		#print $runner."\n";
-		unlink "$ltslcaP/LSU_ass.sto" if -e "$ltslcaP/LSU_ass.sto";
-		systemW $runner;
-		#if (system $runner) {print "Error in $runner\n"; exit(89);}#unless (system $runner) {die "Failed\n$runner\n";}
-		#outfileCpy($tmpP."/$ltag",$alignPath);
-		#renameFastqCnts($alignPath."/reads_LSU.r1.fq",$smpN."__LSU"); renameFastqCnts($alignPath."/reads_LSU.r2.fq",$smpN."__LSU");
-		#system "touch $curStone";
-		copySortmernaOutputs($tmpP, $alignPath, $ltag, $singlMode || $rS ne "");
-		touchFile($curStone);
-
-	}
-
-
+	invalidateMarkerState($alignPath, $tag);
+	my %outputs = runMarker(
+		sortmerna => $sortmerna,
+		tag => $tag,
+		reference => $reference,
+		index => $index,
+		paired_r1 => \@pairedR1,
+		paired_r2 => \@pairedR2,
+		single => \@single,
+		work_dir => $tmpPath,
+		threads => $threads,
+	);
+	publishMarkerOutputs($tmpPath, $alignPath, $tag, \%outputs);
+	touchFile(File::Spec->catfile($alignPath, "${tag}_pull.sto"));
+	die "$tag checkpoint could not be validated after publication\n"
+		unless markerComplete($alignPath, $tag, $hasPairs, $hasSingles);
 }
 
-remove_tree($tmpP) if -d $tmpP;
-
-#ribo assemblies.. difficult as high chance for chimeras.. maybe switch assembler later?
-my $outP = $alignPath;
-if ($doRiboAssembl && (!-d $outP."/Ass_ITS" || !-e $outP."/Ass_ITS/scaffolds.fasta" || !-e "$outP/Ass/allAss.sto") ){#assembly of ITS, LSU, SSU seperately
-	die "catchLSUSSU.pl::riboassembly no longer supported\n";
-	# my $K =  "-k 27,33,55,71,125";
-	# my $logDir = "$outP/Ass/logs/";
-	# my $Scmd = "mkdir -p $logDir\n\n";
-	# my $nodeTmp = $outP."Ass/SSU/";
-	# if (!-z "$outP/reads_SSU.r1.fq"){ #check if input is empty
-		# $Scmd .= "\nmkdir -p $nodeTmp\n$spadesBin $K ".inputFmtSpades([$outP."/reads_SSU.r1.fq"],[$outP."/reads_SSU.r2.fq"],[],$logDir)." -t $threads --meta -m 60 ";#SSU --mismatch-correction 
-		# $Scmd .= "-o $nodeTmp\nrm -f -r $nodeTmp/K* $nodeTmp/tmp $nodeTmp/mismatch_corrector $nodeTmp/corrected $nodeTmp/misc \n";
-	# }
-	# $nodeTmp = $outP."Ass/LSU/";
-	# if (!-z "$outP/reads_LSU.r1.fq"){
-		# $Scmd .= "\nmkdir -p $nodeTmp\n$spadesBin $K ".inputFmtSpades([$outP."/reads_LSU.r1.fq"],[$outP."/reads_LSU.r2.fq"],[],$logDir)." -t $threads --meta -m 60 ";#LSU
-		# $Scmd .= "-o $nodeTmp\nrm -f -r $nodeTmp/K* $nodeTmp/tmp $nodeTmp/mismatch_corrector $nodeTmp/corrected $nodeTmp/misc \n";
-	# }
-	# $nodeTmp = $outP."Ass/ITS/";
-	# if (!-z "$outP/reads_ITS.r1.fq"){
-		# $Scmd .= "\nmkdir -p $nodeTmp\n$spadesBin $K ".inputFmtSpades([$outP."/reads_ITS.r1.fq"],[$outP."/reads_ITS.r2.fq"],[],$logDir)." -t $threads --meta -m 60 ";#ITS
-		# $Scmd .= "-o $nodeTmp\nrm -f -r $nodeTmp/K* $nodeTmp/tmp $nodeTmp/mismatch_corrector $nodeTmp/corrected $nodeTmp/misc \n";
-	# }
-	# $Scmd .= "touch $outP/Ass/allAss.sto\n";
-	# systemW $Scmd;
-}
-
- print "Finished pull out \n";
- print "(and eventually assembly)\n" if ($doRiboAssembl);
- exit(0);
+remove_tree($tmpPath) if -d $tmpPath;
+print "Finished pulling out ribosomal reads\n";
+exit 0;
 
 
-
-
-
-sub smrnaRunCmd( $ $ $ $ $ $ $){
-	my ($outFile, $refDB, $R1, $R2, $finD, $isSingl, $idxDir) = @_;
-	$idxDir = "" unless defined $idxDir;
-
-	return "" if ($R1 eq "");
-
-	# Build --ref args from colon-separated FASTA paths
-	my $refStr = join(" ", map { "--ref ".shellQuote($_) } split(":", $refDB));
-	my $idxStr = ($idxDir ne "") ? "--idx-dir ".shellQuote($idxDir)." --index 0" : "";
-
-	my $cmd = "";
-	if ($isSingl){
-		my @singleReads = grep { $_ ne "" } split(",", $R1);
-		for (my $i = 0; $i < @singleReads; $i++){
-			my $pfx = @singleReads > 1 ? "${outFile}.tmp${i}" : $outFile;
-			my $workDir = "${outFile}.work${i}";
-			$cmd .= "$smrnaBin $refStr --reads ".shellQuote($singleReads[$i])." $idxStr";
-			$cmd .= " --workdir ".shellQuote($workDir)." --aligned ".shellQuote($pfx);
-			$cmd .= " --fastx --no-best --threads $threads -e 1e-12 --num_alignments 1\n";
-			$cmd .= "rm -rf ".shellQuote($workDir)."\n";
-		}
-		if (@singleReads > 1){
-			my $outputs = join(" ", map { shellQuote("${outFile}.tmp${_}.fq.gz") } 0..$#singleReads);
-			$cmd .= "cat $outputs > ".shellQuote("${outFile}.fq.gz")." && rm -f $outputs\n";
-		}
-	} else {
-		return "" if ($R2 eq "");
-		my @r1s = split(",", $R1);
-		my @r2s = split(",", $R2);
-		die "Internal error: unequal paired-read lists\n" unless @r1s == @r2s;
-		for (my $i = 0; $i < @r1s; $i++){
-			my $pfx = (@r1s > 1) ? "${outFile}.tmp${i}" : $outFile;
-			my $workDir = "${outFile}.work${i}";
-			$cmd .= "$smrnaBin $refStr --reads ".shellQuote($r1s[$i])." --reads ".shellQuote($r2s[$i])." $idxStr";
-			$cmd .= " --workdir ".shellQuote($workDir)." --aligned ".shellQuote($pfx);
-			$cmd .= " --fastx --no-best --paired_in --out2 --threads $threads -e 1e-12 --num_alignments 1\n";
-			$cmd .= "rm -rf ".shellQuote($workDir)."\n";
-		}
-		if (@r1s > 1){
-			# multiple input pairs: cat per-pair outputs into final files
-			my $fwdF = join(" ", map { "'${outFile}.tmp${_}_fwd.fq.gz'" } 0..$#r1s);
-			my $revF = join(" ", map { "'${outFile}.tmp${_}_rev.fq.gz'" } 0..$#r1s);
-			$cmd .= "cat $fwdF > '${outFile}.r1.fq.gz' && rm -f $fwdF\n";
-			$cmd .= "cat $revF > '${outFile}.r2.fq.gz' && rm -f $revF\n";
-		} else {
-			# v4 --out2 writes _fwd.fq / _rev.fq; rename to .r1.fq / .r2.fq
-			# NOTE: verify these suffixes match your sortmerna 4.3.4 build if output is missing
-			$cmd .= "mv -f '${outFile}_fwd.fq.gz' '${outFile}.r1.fq.gz'\n";
-			$cmd .= "mv -f '${outFile}_rev.fq.gz' '${outFile}.r2.fq.gz'\n";
-		}
-	}
-	return $cmd;
-}
-
-
-sub make_interleave{
-	die "deprecated make_interleave\n";
-}
-
-sub copySortmernaOutputs{
-	my ($sourceDir, $destinationDir, $tag, $includeSingle) = @_;
-	for my $oldFile (glob(File::Spec->catfile($destinationDir, "${tag}.r*.fq.gz")),
-		glob(File::Spec->catfile($destinationDir, "${tag}.fq.gz"))){
-		unlink $oldFile or die "Cannot remove stale SortMeRNA output $oldFile: $!\n";
-	}
-	my @expected = ("${tag}.r1.fq.gz", "${tag}.r2.fq.gz");
-	push @expected, "${tag}.fq.gz" if $includeSingle;
-	for my $fileName (@expected){
-		my $source = File::Spec->catfile($sourceDir, $fileName);
-		my $destination = File::Spec->catfile($destinationDir, $fileName);
-		if (-e $source){
-			copy($source, $destination) or die "Cannot copy $source to $destination: $!\n";
-		} else {
-			touchFile($destination); # successful search with no hits
-		}
-	}
-}
-
-
-sub touchFile{
-	my ($path) = @_;
-	open my $touchHandle, ">", $path or die "Cannot create checkpoint/output $path: $!\n";
-	close $touchHandle or die "Cannot close checkpoint/output $path: $!\n";
-}
-
-
-sub shellQuote{
+sub parseReadList {
 	my ($value) = @_;
-	$value = "" unless defined $value;
-	$value =~ s/'/'"'"'/g;
-	return "'$value'";
+	return grep { defined($_) && $_ ne '' && $_ ne '-1' }
+		split(/,/, $value // '');
 }
 
 
-sub validateSortmernaReference{
+sub allMarkersComplete {
+	my ($directory, $hasPaired, $hasSingle) = @_;
+	for my $tag (qw(SSU LSU)) {
+		return 0 unless markerComplete(
+			$directory, $tag, $hasPaired, $hasSingle,
+		);
+	}
+	return 1;
+}
+
+
+sub markerComplete {
+	my ($directory, $tag, $hasPaired, $hasSingle) = @_;
+	return 0 unless -e File::Spec->catfile(
+		$directory, "${tag}_pull.sto",
+	);
+	if ($hasPaired) {
+		return 0 unless -s File::Spec->catfile(
+			$directory, "reads_${tag}.r1.fq.gz",
+		);
+		return 0 unless -s File::Spec->catfile(
+			$directory, "reads_${tag}.r2.fq.gz",
+		);
+	}
+	if ($hasSingle) {
+		return 0 unless -s File::Spec->catfile(
+			$directory, "reads_${tag}.fq.gz",
+		);
+	}
+	return 1;
+}
+
+
+sub repairInvalidCheckpoint {
+	my ($directory, $tag, $hasPaired, $hasSingle) = @_;
+	my $stone = File::Spec->catfile($directory, "${tag}_pull.sto");
+	return unless -e $stone;
+	return if markerComplete($directory, $tag, $hasPaired, $hasSingle);
+	warn "$tag profile checkpoint has missing or empty outputs; rerunning marker\n";
+	invalidateMarkerState($directory, $tag);
+}
+
+
+sub invalidateMarkerState {
+	my ($directory, $tag) = @_;
+	my $lcaDir = File::Spec->catdir($directory, 'ltsLCA');
+	for my $path (
+		File::Spec->catfile($directory, "${tag}_pull.sto"),
+		File::Spec->catfile($lcaDir, "${tag}_ass.sto"),
+		File::Spec->catfile($lcaDir, 'Assigned.sto'),
+		File::Spec->catfile($lcaDir, "${tag}riboRun_bl.hiera.txt"),
+		File::Spec->catfile($lcaDir, "${tag}riboRun_bl.hiera.txt.gz"),
+	) {
+		unlinkChecked($path);
+	}
+}
+
+
+sub runMarker {
+	my (%args) = @_;
+	my %outputs = (r1 => [], r2 => [], single => []);
+	my $pairR1 = $args{paired_r1};
+	my $pairR2 = $args{paired_r2};
+	for my $index (0 .. $#{$pairR1}) {
+		my $prefix = File::Spec->catfile(
+			$args{work_dir}, "reads_$args{tag}.pair$index",
+		);
+		runSortmerna(
+			%args,
+			prefix => $prefix,
+			read1 => $pairR1->[$index],
+			read2 => $pairR2->[$index],
+		);
+		push @{$outputs{r1}}, findSortmernaOutput($prefix, 'fwd');
+		push @{$outputs{r2}}, findSortmernaOutput($prefix, 'rev');
+	}
+	for my $index (0 .. $#{$args{single}}) {
+		my $prefix = File::Spec->catfile(
+			$args{work_dir}, "reads_$args{tag}.single$index",
+		);
+		runSortmerna(
+			%args,
+			prefix => $prefix,
+			read1 => $args{single}->[$index],
+			read2 => '',
+		);
+		push @{$outputs{single}}, findSortmernaOutput($prefix, 'single');
+	}
+	return %outputs;
+}
+
+
+sub runSortmerna {
+	my (%args) = @_;
+	my $referenceArgs = join ' ', map {
+		'--ref '.shellQuote($_)
+	} split(/:/, $args{reference});
+	my $indexArgs = $args{index} ne ''
+		? '--idx-dir '.shellQuote($args{index}).' --index 0'
+		: '';
+	my $workDir = "$args{prefix}.work";
+	my $command = join ' ',
+		$args{sortmerna},
+		$referenceArgs,
+		'--reads', shellQuote($args{read1}),
+		($args{read2} ne ''
+			? ('--reads', shellQuote($args{read2}))
+			: ()),
+		$indexArgs,
+		'--workdir', shellQuote($workDir),
+		'--aligned', shellQuote($args{prefix}),
+		'--fastx',
+		($args{read2} ne '' ? ('--paired_in', '--out2') : ()),
+		'--no-best',
+		'--zip-out', 1,
+		'--threads', $args{threads},
+		'-e', '1e-12',
+		'--num_alignments', 1;
+	systemW($command);
+	remove_tree($workDir) if -d $workDir;
+}
+
+
+sub findSortmernaOutput {
+	my ($prefix, $kind) = @_;
+	my $stem = $kind eq 'fwd' ? "${prefix}_fwd"
+		: $kind eq 'rev' ? "${prefix}_rev"
+		: $prefix;
+	my @candidates = map { "$stem.$_" } qw(fq.gz fa.gz);
+	my @found = grep { -e $_ } @candidates;
+	die "SortMeRNA produced no expected $kind output for $prefix\n"
+		unless @found;
+	die "SortMeRNA produced ambiguous $kind outputs for $prefix: @found\n"
+		if @found > 1;
+	assertGzipOutput($found[0]);
+	return $found[0];
+}
+
+
+sub assertGzipOutput {
+	my ($path) = @_;
+	die "SortMeRNA output is empty or incomplete: $path\n" unless -s $path;
+	open my $handle, '<', $path
+		or die "Cannot inspect SortMeRNA output $path: $!\n";
+	binmode $handle;
+	my $magic = '';
+	my $bytes = read($handle, $magic, 2);
+	close $handle or die "Cannot close SortMeRNA output $path: $!\n";
+	die "SortMeRNA output is not gzip-compressed despite --zip-out: $path\n"
+		unless defined($bytes) && $bytes == 2 && $magic eq "\x1f\x8b";
+}
+
+
+sub publishMarkerOutputs {
+	my ($workDir, $destinationDir, $tag, $outputs) = @_;
+	my %suffix = (
+		r1 => 'r1.fq.gz',
+		r2 => 'r2.fq.gz',
+		single => 'fq.gz',
+	);
+	for my $kind (qw(r1 r2 single)) {
+		my $staged = File::Spec->catfile(
+			$workDir, "reads_$tag.$suffix{$kind}.publish",
+		);
+		if (@{$outputs->{$kind}}) {
+			concatenateFiles($outputs->{$kind}, $staged);
+		} else {
+			my $empty = '';
+			gzip(\$empty => $staged)
+				or die "Cannot create empty gzip output $staged: $GzipError\n";
+		}
+		assertGzipOutput($staged);
+		my $destination = File::Spec->catfile(
+			$destinationDir, "reads_$tag.$suffix{$kind}",
+		);
+		installAtomically($staged, $destination);
+	}
+}
+
+
+sub concatenateFiles {
+	my ($sources, $destination) = @_;
+	open my $output, '>', $destination
+		or die "Cannot create merged SortMeRNA output $destination: $!\n";
+	binmode $output;
+	for my $source (@{$sources}) {
+		open my $input, '<', $source
+			or die "Cannot read SortMeRNA output $source: $!\n";
+		binmode $input;
+		my $buffer;
+		while (read($input, $buffer, 1024 * 1024)) {
+			print {$output} $buffer
+				or die "Cannot write merged SortMeRNA output $destination: $!\n";
+		}
+		die "Cannot finish reading SortMeRNA output $source: $!\n" if $!;
+		close $input or die "Cannot close SortMeRNA output $source: $!\n";
+	}
+	close $output
+		or die "Cannot close merged SortMeRNA output $destination: $!\n";
+}
+
+
+sub installAtomically {
+	my ($source, $destination) = @_;
+	my $temporary = "$destination.tmp.$$";
+	unlinkChecked($temporary);
+	copy($source, $temporary)
+		or die "Cannot stage $source as $temporary: $!\n";
+	rename($temporary, $destination)
+		or die "Cannot install $destination atomically: $!\n";
+}
+
+
+sub touchFile {
+	my ($path) = @_;
+	open my $handle, '>', $path
+		or die "Cannot create checkpoint $path: $!\n";
+	close $handle or die "Cannot close checkpoint $path: $!\n";
+}
+
+
+sub unlinkChecked {
+	my ($path) = @_;
+	return unless -e $path || -l $path;
+	unlink $path or die "Cannot remove stale RiboFind result $path: $!\n";
+}
+
+
+sub validateSortmernaReference {
 	my ($configKey, $configuredReferences) = @_;
 	die "SortMeRNA configuration '$configKey' has no reference path\n"
-		if !defined($configuredReferences) || $configuredReferences eq "";
-	for my $reference (split(":", $configuredReferences, -1)){
+		if !defined($configuredReferences) || $configuredReferences eq '';
+	for my $reference (split(/:/, $configuredReferences, -1)) {
 		die "SortMeRNA configuration '$configKey' contains an empty reference path\n"
-			if $reference eq "";
+			if $reference eq '';
 		die "Configured SortMeRNA reference '$configKey' does not exist: $reference\n"
 			unless -e $reference;
 	}
 }
 
 
-sub validateSortmernaIndex{
+sub validateSortmernaIndex {
 	my ($configKey, $indexDirectory) = @_;
-	return if !defined($indexDirectory) || $indexDirectory eq "";
+	return if !defined($indexDirectory) || $indexDirectory eq '';
 	die "Configured SortMeRNA index '$configKey' does not exist: $indexDirectory\n"
 		unless -e $indexDirectory;
 }
 
-sub announce{
-	my ($configuredSortmerna) = @_;
-	print "catchLSUSSU v $cLSUSSUver\n";
-	my $status = systemW("$configuredSortmerna --version", 0);
+
+sub announceSortmerna {
+	my ($sortmerna) = @_;
+	print "catchLSUSSU v$VERSION\n";
+	my $status = systemW("$sortmerna --version", 0);
 	warn "Could not query the configured SortMeRNA version\n" if $status;
+}
+
+
+sub shellQuote {
+	my ($value) = @_;
+	$value = '' unless defined $value;
+	$value =~ s/'/'"'"'/g;
+	return "'$value'";
 }

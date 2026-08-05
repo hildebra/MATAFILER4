@@ -10,7 +10,10 @@ use IPC::Open3;
 use Symbol qw(gensym);
 use Test::More;
 
-my $root = File::Spec->catdir($Bin, '..');
+my $root = File::Spec->rel2abs(File::Spec->catdir($Bin, '..'));
+my $test_lib = File::Spec->catdir($root, 't', 'lib');
+local $ENV{PERL5OPT} = join ' ', grep { defined($_) && length($_) }
+	"-I$root", "-I$test_lib", '-MMFTestConfig', $ENV{PERL5OPT};
 my $scripts = File::Spec->catdir($root, 'secScripts', 'miTag');
 my $tmp = tempdir(CLEANUP => 1);
 
@@ -54,6 +57,7 @@ my $unrelated = "$outputPrefix.keep";
 write_file($unrelated, "preserve\n");
 my ($status, $output, $errors) = run_script('miTagTaxTable.pl', 'family', $outputPrefix, $hierarchyDir);
 is($status, 0, 'tax table supports a non-prefix subset of requested ranks');
+diag($errors) if $status;
 my $familyOutput = read_gzip("$outputPrefix.family.txt.gz");
 like($familyOutput, qr/^family\tsample$/m, 'gzip suffix is removed from the sample column name');
 like($familyOutput, qr/^Bacteria;Firmicutes;Bacilli;Bacillales;Bacillaceae\t1$/m,

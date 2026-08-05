@@ -347,7 +347,7 @@ my ($submission_loop_code) = $mataf4_stats =~ /(my %runReport = \(.*?)(?=\nsub p
 ok(defined($submission_loop_code), 'submission loop can be isolated from postprocessing');
 like($submission_loop_code, qr/createSampleCompletionSentinel\(.*?sample_root\s*=>\s*\$curOutDir.*?request_signature\s*=>\s*\$completionSignature/s,
 	"successful sample checks create the statistics sentinel during closure");
-my ($postprocess_code) = $mataf4_stats =~ /(sub postprocess.*?)(?=\nsub spaceInAssGrp)/s;
+my ($postprocess_code) = $mataf4_stats =~ /(sub postprocess\s*\{.*?)(?=\nsub spaceInAssGrp)/s;
 ok(defined($postprocess_code), "postprocessing can be isolated for statistics checks");
 unlike($postprocess_code, qr/values\s*=>\s*smplStats\s*\(/,
 	"postprocessing does not rescan sample files for statistics");

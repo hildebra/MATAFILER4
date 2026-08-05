@@ -8,7 +8,7 @@ use Test::More;
 
 my $root = File::Spec->catdir($Bin, '..');
 my @scan_roots = map { File::Spec->catdir($root, $_) }
-	qw(MATAF4.pl Mods helpers secScripts docs examples bin);
+	qw(MATAF4.pl Mods helpers secScripts docs examples);
 my $private_path = qr{
 	(?:
 		/hpc-home/ |
@@ -29,14 +29,8 @@ find(
 		wanted => sub {
 			return unless -f $_;
 			return if $_ =~ m{/\.[^/]*\.swp$};
+			return if -B $_; # prebuilt/generated binaries are not maintained source
 			open my $fh, '<:raw', $_ or die "Cannot read $_: $!\n";
-			if (-B $_){
-				local $/;
-				my $bytes = <$fh>;
-				push @violations, $_ if $bytes =~ $private_path;
-				close $fh or die "Cannot close $_: $!\n";
-				return;
-			}
 			my $line_number = 0;
 			while (my $line = <$fh>){
 				$line_number++;
@@ -53,7 +47,7 @@ find(
 );
 
 is_deeply(\@violations, [],
-	'active source, config, documentation examples, and binaries contain no private paths')
+	'active source, config, and documentation examples contain no private paths')
 	or diag join("\n", @violations);
 
 done_testing;

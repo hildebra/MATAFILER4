@@ -433,6 +433,9 @@ like($mataf4,
 	qr/sub detectRibo.*?\$curSHFF = \$predefSHDD if \(\$curSHFF < \$predefSHDD\).*?\$QSBoptHR->\{tmpSpace\}= \$curSHFF \. "G".*?RiboFinder\.sh/s,
 	'ribosomal extraction scratch keeps its configured floor while scaling with input');
 like($mataf4,
+	qr/sub detectRibo.*?my \$tmpCmd; my \$mem = "20G".*?RiboFinder\.sh/s,
+	'RiboFinder extraction requests at least 20 GiB of memory');
+like($mataf4,
 	qr/sub metphlanMapping.*?inputFileSizeMB\} \* 6.*?qsubSystem\(\$qsubFile.*?\$QSBoptHR->\{tmpSpace\} = \$previousTmpSpace/s,
 	'MetaPhlAn requests input-scaled scratch for its uncompressed SAM');
 like($mataf4,
@@ -547,8 +550,8 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?my \$MATFILER_ver = 4\.38;/s,
-	"MATAFILER history retains shared input discovery through version 4.38");
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?#4\.39:.*?my \$MATFILER_ver = 4\.39;/s,
+	"MATAFILER history retains shared input discovery through version 4.39");
 like($mataf4, qr/setConfigFile\(\$MFconfig\{configFile\}\);.*?normalise_ribosome_request\(\\%MFopt\);/s,
 	'RiboFind redo flags enable profiling during option post-processing');
 like($mataf4, qr/my \$riboRedo = \{.*?prepare_ribosome_rerun\(.*?checkRawProgsFin\(.*?\$riboRedo->\{profile\}.*?\$riboRedo->\{assignment\}/s,

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-08-05 — Taxon-aware strain locus selection
+
+- Updated `buildTree5.pl` to 5.29 and kept the advanced selector localized in the tree workflow rather than splitting MSA orchestration into another script.
+- Added opt-in `-taxonAwareLocusSelection 1`: it aligns a bounded robust/core-plus-taxon-rescue candidate set, carries 150 extra loci as QC backfill, and chooses the final 500 loci after MSAfix from observed occupancy and parsimony-informative sites.
+- Replaced relative species rejection in the opt-in path with an anchor rule: well-covered samples are backbone candidates, sparse samples remain placement candidates, and only samples lacking usable placement overlap are removed.
+- Added candidate/final locus and sample TSV audits under the tree output directory, and fingerprinted selector settings in continuation policy state.
+- Updated `strain_within.pl` to 0.76. Its defaults are now gene-length fraction 0.3, per-species gene fraction 0.05, and relative informative-NT fraction 0.02; the advanced selector remains explicitly activated by command line.
+
 ## 2026-08-04 — MATAFILER4 4.38 orchestration consolidation
 
 - Route normal, SDM-warning, and empty/too-small completion through one sentinel-publication path with shared metagStats and input-size data.

@@ -35,6 +35,11 @@ sub populate_results {
 	write_file(sample_completion_path($sample_root), "closed\n");
 
 	for my $tag (qw(SSU LSU)) {
+		for my $suffix (qw(r1.fq.gz r2.fq.gz fq.gz)) {
+			write_file(File::Spec->catfile(
+				$ribo_root, 'reads_'.$tag.'.'.$suffix,
+			), "gzip container\n");
+		}
 		my $source = File::Spec->catfile(
 			$lca_root, $tag."riboRun_bl.hiera.txt.gz",
 		);
@@ -97,6 +102,17 @@ ok($evidence->{complete},
 	'RiboFind completion requires both extraction and taxonomy artifacts');
 ok($evidence->{ssu_hierarchy_complete} && $evidence->{lsu_hierarchy_complete},
 	'compressed SSU and LSU hierarchy outputs are accepted');
+my $ssu_profile_output = File::Spec->catfile(
+	$sample_root, 'ribos', 'reads_SSU.fq.gz',
+);
+unlink $ssu_profile_output
+	or die "Cannot remove $ssu_profile_output: $!";
+$evidence = ribosome_completion_evidence(
+	sample_root => $sample_root, requested => 1, assembly_requested => 0,
+);
+ok(!$evidence->{profile_complete} && !$evidence->{complete},
+	'a profile stone cannot mask a missing extracted-read output');
+write_file($ssu_profile_output, "gzip container\n");
 my $lsu_hierarchy = File::Spec->catfile(
 	$sample_root, 'ribos', 'ltsLCA', 'LSUriboRun_bl.hiera.txt.gz',
 );

@@ -32,6 +32,7 @@
 #5.26: validate complete IQ-TREE outputs, retry numerical underflow safely, and relax strain backbones
 #5.27: publish the placed strain tree by default and retain ML inference as .backbone.treefile
 #5.28: centralize reusable alignment and per-method tree checkpoint state
+#5.29: add opt-in taxon-aware two-stage locus selection around the existing MSA workflow
 
 use warnings;
 use strict;
@@ -91,13 +92,21 @@ sub prepareTemporaryBase;
 sub sortFastaForCompression;
 sub fastaCompressionSortKey;
 sub runPostAlignmentLocusQC;
+sub selectTaxonAwareCandidateLoci;
+sub selectTaxonAwareFinalLoci;
+sub chooseTaxonAwareLoci;
+sub classifyTaxonAwareSamples;
+sub taxonAwareAlignmentMetrics;
+sub informativeSequenceLength;
+sub writeTaxonAwareLocusAudit;
+sub writeTaxonAwareSampleAudit;
 sub writePostAlignmentQCPolicy;
 sub alignmentFileStem;
 sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.28;
+my $version = 5.29;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -200,6 +209,23 @@ my $postAlignmentRelativeZ = $POST_ALIGNMENT_QC_DEFAULT{relative_modified_z};
 my $postAlignmentMinLociRelative =
 	$POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative};
 my $postAlignmentDivergenceQC;
+my %TAXON_AWARE_DEFAULT = (
+	enabled => 0,
+	maximum_loci => 500,
+	core_loci => 400,
+	candidate_extra => 150,
+	minimum_sequence_nt => 60,
+	target_loci_per_sample => 25,
+	target_nt_per_sample => 7500,
+);
+my $taxonAwareLocusSelection = $TAXON_AWARE_DEFAULT{enabled};
+my $taxonAwareMaxLoci = $TAXON_AWARE_DEFAULT{maximum_loci};
+my $taxonAwareCoreLoci = $TAXON_AWARE_DEFAULT{core_loci};
+my $taxonAwareCandidateExtra = $TAXON_AWARE_DEFAULT{candidate_extra};
+my $taxonAwareMinSequenceNT = $TAXON_AWARE_DEFAULT{minimum_sequence_nt};
+my $taxonAwareTargetLoci = $TAXON_AWARE_DEFAULT{target_loci_per_sample};
+my $taxonAwareTargetNT = $TAXON_AWARE_DEFAULT{target_nt_per_sample};
+my $ntFiltExplicit = 0;
 
 
 #EDBUGGIN
@@ -241,7 +267,7 @@ GetOptions(
 	"superCheck=i" => \$doSuperCheck,
 	"fixHeaders=i" => \$fixHeaders, ## fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
 	"useEte=i"      => \$Ete,
-	"NTfilt=f"      => \$filt,
+	"NTfilt=f"      => sub { $filt = $_[1]; $ntFiltExplicit = 1; },
 	"NTfiltPerGene=f"      => \$ntFracGene,
 	"GenesPerSpecies=f" => \$GeneFracPSpec,
 	"fracMaxGenes90pct=f" => \$fracMaxGenes90pct,
@@ -282,6 +308,13 @@ GetOptions(
 	"postAlignmentDivergenceQC=i" => \$postAlignmentDivergenceQC,
 	"postAlignmentRelativeZ=f" => \$postAlignmentRelativeZ,
 	"postAlignmentMinLociRelative=i" => \$postAlignmentMinLociRelative,
+	"taxonAwareLocusSelection=i" => \$taxonAwareLocusSelection,
+	"taxonAwareMaxLoci=i" => \$taxonAwareMaxLoci,
+	"taxonAwareCoreLoci=i" => \$taxonAwareCoreLoci,
+	"taxonAwareCandidateExtra=i" => \$taxonAwareCandidateExtra,
+	"taxonAwareMinSequenceNT=i" => \$taxonAwareMinSequenceNT,
+	"taxonAwareTargetLoci=i" => \$taxonAwareTargetLoci,
+	"taxonAwareTargetNT=i" => \$taxonAwareTargetNT,
 	"runIQtree=i" => \$doIQTree,
 	"AutoModel=i" => \$treeAutoModel,
 	"iqFast=i" => \$iqFast, #fast qiTree mode
@@ -313,7 +346,7 @@ if ($strainWithinPreset) {
 	$useAA4tree = 0;
 	$bootStrap = 0;
 	$ntCntTotal = 400;
-	$filt = 0.07;
+	$filt = 0.02 unless $ntFiltExplicit;
 	$doRAXMLng = 0;
 	$minOverlapMSA = 2;
 	$strictBackbone = 1;
@@ -375,6 +408,16 @@ die "-postAlignmentRelativeZ must be non-negative "
 die "-postAlignmentMinLociRelative must be positive "
 	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative})\n"
 	if $postAlignmentMinLociRelative < 1;
+die "-taxonAwareLocusSelection must be 0 or 1\n"
+	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
+die "-taxonAwareMaxLoci, -taxonAwareCoreLoci, -taxonAwareMinSequenceNT, "
+	."-taxonAwareTargetLoci, and -taxonAwareTargetNT must be positive\n"
+	if grep { $_ < 1 } ($taxonAwareMaxLoci, $taxonAwareCoreLoci,
+		$taxonAwareMinSequenceNT, $taxonAwareTargetLoci, $taxonAwareTargetNT);
+die "-taxonAwareCandidateExtra must be zero or greater\n"
+	if $taxonAwareCandidateExtra < 0;
+die "-taxonAwareCoreLoci cannot exceed -taxonAwareMaxLoci\n"
+	if $taxonAwareCoreLoci > $taxonAwareMaxLoci;
 die "-tmpD and -tmpSubdir are mutually exclusive\n" if length($tmpD) && length($tmpSubdir);
 if (length($tmpSubdir)) {
 	die "-tmpSubdir must be a safe relative path\n"
@@ -517,6 +560,12 @@ print "Post-alignment locus QC: enabled="
 	. "; relative modified-Z="
 	. ($postAlignmentDivergenceQC ? $postAlignmentRelativeZ : "<disabled>")
 	. "; minimum loci for relative QC=$postAlignmentMinLociRelative\n";
+print "Taxon-aware locus selection: enabled="
+	. ($taxonAwareLocusSelection ? "yes" : "no")
+	. "; final loci=$taxonAwareMaxLoci; robust core=$taxonAwareCoreLoci"
+	. "; alignment backfill=$taxonAwareCandidateExtra"
+	. "; minimum sequence NT=$taxonAwareMinSequenceNT"
+	. "; sample target=$taxonAwareTargetLoci loci/$taxonAwareTargetNT NT\n";
 print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
 	. "; sample QC=" . ($sampleQCFile || "<none>")
 	. "; coverage fraction=$strictBackboneFraction"
@@ -606,12 +655,13 @@ my $tOhrSyn = createTreeOpt($multAliSyn,"syn","",0,$Tree1{nwk});
 my @MSAs; my @MSA_AA; my @MSAsSyn; my @MSAsNonSyn;#full MSAs and MSAs with syn / nonsyn pos only
 my @MSrm; 
 my %FAA ; my %FNA ; my @geneList; my @geneListF;
+my (%primaryAlignmentGene, %taxonAwarePreMetrics, %taxonAwareUniverseSamples);
 my $strictSplit;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=3",
+	"schema=4",
 	"enabled=$postAlignmentLocusQC",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
@@ -628,6 +678,13 @@ my $postAlignmentQCPolicy = join("\t",
 	"relative_modified_z=".($postAlignmentDivergenceQC
 		? $postAlignmentRelativeZ : "disabled"),
 	"minimum_loci_relative=$postAlignmentMinLociRelative",
+	"taxon_aware=$taxonAwareLocusSelection",
+	"taxon_aware_maximum_loci=$taxonAwareMaxLoci",
+	"taxon_aware_core_loci=$taxonAwareCoreLoci",
+	"taxon_aware_candidate_extra=$taxonAwareCandidateExtra",
+	"taxon_aware_minimum_sequence_nt=$taxonAwareMinSequenceNT",
+	"taxon_aware_target_loci=$taxonAwareTargetLoci",
+	"taxon_aware_target_nt=$taxonAwareTargetNT",
 )."\n";
 my $postAlignmentQCPolicyMatches = 0;
 if (-s $postAlignmentQCPolicyFile) {
@@ -638,7 +695,7 @@ if (-s $postAlignmentQCPolicyFile) {
 		or die "Cannot close locus-QC policy $postAlignmentQCPolicyFile: $!\n";
 	$postAlignmentQCPolicyMatches = $existingPolicy eq $postAlignmentQCPolicy;
 }
-my $legacyWithinSpeciesQCAudit = $withinSpecies
+my $legacyWithinSpeciesQCAudit = !$taxonAwareLocusSelection && $withinSpecies
 	&& -s $postAlignmentQCReport && !-e $postAlignmentQCPolicyFile;
 my $postAlignmentQCAuditCurrent = $postAlignmentQCPolicyMatches
 	&& (!$postAlignmentLocusQC || -s $postAlignmentQCReport);
@@ -785,7 +842,10 @@ if ($isAligned){
 		foreach my $seq (@spl){
 			my ($sp) = parseSeqId($seq, "category line ".($cnt + 1));
 			#quantile(0.8,values(%{$charCnts{$sp}}));
-			if ( $charCnts{$sp}{$seq} >= ($qtl90NTcnt{$gene}  * $ntFracGene)){
+			my $ntEquivalentLength = $charCnts{$sp}{$seq} * ($useAA4tree ? 3 : 1);
+			if ( $charCnts{$sp}{$seq} >= ($qtl90NTcnt{$gene}  * $ntFracGene)
+					&& (!$taxonAwareLocusSelection
+						|| $ntEquivalentLength >= $taxonAwareMinSequenceNT)){
 				push(@spl2, $seq);
 				$geneTooLong++;
 			} else {
@@ -802,19 +862,40 @@ if ($isAligned){
 	my $GenesQtl50 = quantile(0.5,@genesPerCat);
 	my $minimumCategorySequences = $GenesQtl90 * $fracMaxGenes90pct;
 	$minimumCategorySequences = 1 if $minimumCategorySequences < 1;
-	$cnt=-1;
-	foreach my $aRef (@linesCats2){ #remove genes with just too few genes..
-		$cnt++; my @spl = @{$aRef};
-		if (@spl >= $minimumCategorySequences){ #$GenesQtl50 ||
-			push(@linesCats3,\@spl);
+	if ($taxonAwareLocusSelection) {
+		my $candidateSelection = selectTaxonAwareCandidateLoci(
+			categories => \@linesCats2,
+			char_counts => \%charCnts,
+			candidate_limit => $taxonAwareMaxLoci + $taxonAwareCandidateExtra,
+			final_limit => $taxonAwareMaxLoci,
+			core_limit => $taxonAwareCoreLoci,
+			target_loci => $taxonAwareTargetLoci,
+			target_nt => $taxonAwareTargetNT,
+			use_aa => $useAA4tree,
+			report => "$treeD/taxon_aware_locus_candidates.tsv",
+		);
+		@linesCats3 = @{$candidateSelection->{categories}};
+		%taxonAwarePreMetrics = %{$candidateSelection->{metrics}};
+		%taxonAwareUniverseSamples = %{$candidateSelection->{samples}};
+		print "Taxon-aware gene-category prefilter: retained "
+			. scalar(@linesCats3) . "/" . scalar(@linesCats)
+			. " alignment candidates (up to $taxonAwareCandidateExtra are QC backfill); "
+			. "removed $geneTooShort of " . ($geneTooShort + $geneTooLong)
+			. " sequence(s) below the $ntFracGene gene-length Q90/minimum-NT rule\n";
+	} else {
+		$cnt=-1;
+		foreach my $aRef (@linesCats2){ #remove genes with just too few genes..
+			$cnt++; my @spl = @{$aRef};
+			if (@spl >= $minimumCategorySequences){ #$GenesQtl50 ||
+				push(@linesCats3,\@spl);
+			}
+			#print @spl . " ";
 		}
-		#print @spl . " ";
+		print "Gene-category prefilter: retained " . scalar(@linesCats3) . "/"
+			. scalar(@linesCats) . " categories; removed $geneTooShort of "
+			. ($geneTooShort + $geneTooLong) . " sequence(s) below $ntFracGene of their gene-length Q90; "
+			. "category-size Q90=$GenesQtl90, minimum category sequences=$minimumCategorySequences\n";
 	}
-	
-	print "Gene-category prefilter: retained " . scalar(@linesCats3) . "/"
-		. scalar(@linesCats) . " categories; removed $geneTooShort of "
-		. ($geneTooShort + $geneTooLong) . " sequence(s) below $ntFracGene of their gene-length Q90; "
-		. "category-size Q90=$GenesQtl90, minimum category sequences=$minimumCategorySequences\n";
 	warn "Only " . scalar(@linesCats3) . " gene categories remain after prefiltering "
 		. "(Q50=$GenesQtl50, Q90=$GenesQtl90, category threshold="
 		. "$minimumCategorySequences)\n"
@@ -850,6 +931,10 @@ if ($isAligned){
 			$totalNTs{$sp} += $charCnts{$sp}{$seq};
 		}
 	}
+	if ($taxonAwareLocusSelection) {
+		$specList{$_} //= 0 for keys %taxonAwareUniverseSamples;
+		$totalNTs{$_} //= 0 for keys %taxonAwareUniverseSamples;
+	}
 	#die "@genesPerCat\n$GenesQtl90\n".$fracMaxGenes90pct*$GenesQtl90."\n" ;
 	my @specs = keys %specList;
 	#print "specs:: @specs\n";
@@ -870,23 +955,49 @@ if ($isAligned){
 	my %smplsRmvd; my $tooFewGenes=0;my $tooFewNTs=0;my $tooFewNTs2=0; my $specsRemain = 0;
 	#print "Samples removed due to low gene presence:\n";
 	my $OGfnd=0;
-	foreach my $sp (@specs){
-		my $isOG=0;  if ($outgroup ne "" && $outgroup eq $sp){$isOG = 1;$OGfnd++;}
-		
-		my $NTfilter = 0; $NTfilter =1 if ( $totalNTs{$sp} < ($qtl90NTcntAll * $ntFrac));
-		my $lengthInNt = (!$useAA4tree && keys(%FNA)) ? $totalNTs{$sp} : $totalNTs{$sp} * 3;
-		my $NTfilter2 =  0;$NTfilter2 = 1 if ($lengthInNt < $ntCntTotal);
-		my $NTlengFilt = 0; $NTlengFilt =1 if ($specList{$sp} <  ($qtl90Genes * $GeneFracPSpec) );
-
-		if (!$isOG && ($NTlengFilt || $NTfilter || $NTfilter2) ){
-			$smplsRmvd{$sp}=1;
-			$tooFewNTs++ if ($NTfilter);
-			$tooFewNTs2++ if ($NTfilter2);
-			$tooFewGenes++ if ($NTlengFilt);
+	if ($taxonAwareLocusSelection) {
+		my $minimumAnchorNT = $ntCntTotal > $placementMinOverlap
+			? $ntCntTotal : $placementMinOverlap;
+		my $sampleSelection = classifyTaxonAwareSamples(
+			metrics => \%taxonAwarePreMetrics,
+			samples => \%taxonAwareUniverseSamples,
+			target_loci => $taxonAwareTargetLoci,
+			target_nt => $taxonAwareTargetNT,
+			minimum_anchor_nt => $minimumAnchorNT,
+			selected_only => 1,
+			outgroup => $outgroup,
+		);
+		writeTaxonAwareSampleAudit(
+			"$treeD/taxon_aware_sample_candidates.tsv", $sampleSelection);
+		for my $sp (@specs) {
+			$OGfnd++ if $outgroup ne "" && $outgroup eq $sp;
+			if (($sampleSelection->{$sp}{role} // "remove") eq "remove") {
+				$smplsRmvd{$sp} = 1;
+			} else {
+				$specsRemain++;
+			}
+		}
+		print "Taxon-aware species prefilter: retained $specsRemain/"
+			. scalar(keys %specList) . "; only samples without $minimumAnchorNT usable NT "
+			. "in the selected candidates were removed; audit: "
+			. "$treeD/taxon_aware_sample_candidates.tsv\n";
+	} else {
+		foreach my $sp (@specs){
+			my $isOG=0;  if ($outgroup ne "" && $outgroup eq $sp){$isOG = 1;$OGfnd++;}
 			
-			#print " $sp:$specList{$sp}:$totalNTs{$sp}; ";
-		} else {
-			$specsRemain ++;
+			my $NTfilter = 0; $NTfilter =1 if ( $totalNTs{$sp} < ($qtl90NTcntAll * $ntFrac));
+			my $lengthInNt = (!$useAA4tree && keys(%FNA)) ? $totalNTs{$sp} : $totalNTs{$sp} * 3;
+			my $NTfilter2 =  0;$NTfilter2 = 1 if ($lengthInNt < $ntCntTotal);
+			my $NTlengFilt = 0; $NTlengFilt =1 if ($specList{$sp} <  ($qtl90Genes * $GeneFracPSpec) );
+
+			if (!$isOG && ($NTlengFilt || $NTfilter || $NTfilter2) ){
+				$smplsRmvd{$sp}=1;
+				$tooFewNTs++ if ($NTfilter);
+				$tooFewNTs2++ if ($NTfilter2);
+				$tooFewGenes++ if ($NTlengFilt);
+			} else {
+				$specsRemain ++;
+			}
 		}
 	}
 	
@@ -897,7 +1008,8 @@ if ($isAligned){
 
 	
 	print "Species prefilter: retained $specsRemain/" . scalar(keys %specList)
-		. "; removed for relative NT=$tooFewNTs, minimum NT=$tooFewNTs2, minimum genes=$tooFewGenes\n";
+		. "; removed for relative NT=$tooFewNTs, minimum NT=$tooFewNTs2, minimum genes=$tooFewGenes\n"
+		unless $taxonAwareLocusSelection;
 	print "Species input statistics: maximum genes=$maxGenes; gene-count Q90=$qtl90Genes; "
 		. "maximum informative NT=$maxNtCntTotal; informative-NT Q90=$qtl90NTcntAll\n";
 	#die "$maxGenes\n";
@@ -954,7 +1066,10 @@ if ($isAligned){
 		foreach my $seq (@spl){### $seq = genomeX_NOGY
 			my ($sp) = parseSeqId($seq, "category line ".($cnt + 1));
 			next if (exists($smplsRmvd{$sp}));
-			if ($specList{$sp} <  ($qtl90Genes * $GeneFracPSpec) ){die "buildTree: GeneFracPSpec maxGenes shouldn't be here!\n";}
+			if (!$taxonAwareLocusSelection
+					&& $specList{$sp} < ($qtl90Genes * $GeneFracPSpec)) {
+				die "buildTree: GeneFracPSpec maxGenes shouldn't be here!\n";
+			}
 			my $seq2 = $seq;
 			#just for this singular case applying..
 			#next if ( $charCnts{$sp}{$seq} < ($qtl90NTcnt{$gene}  * $ntFracGene));  #maxNtCnt{$gene}
@@ -1081,12 +1196,14 @@ if ($isAligned){
 				}
 			}
 			push (@MSAs,$finOutMSA);
+			$primaryAlignmentGene{$finOutMSA} = $gene;
 			push (@MSAsSyn,$tmpOutMSAsyn) if ($tmpOutMSAsyn ne "" && fileGZs($tmpOutMSAsyn));
 			push (@MSAsNonSyn,$tmpOutMSAnonsyn)
 				if ($tmpOutMSAnonsyn ne "" && fileGZs($tmpOutMSAnonsyn));
 			#die "@MSAs\n";
 		} else {
 			push (@MSA_AA,$finOutMSAaa);
+			$primaryAlignmentGene{$finOutMSAaa} = $gene;
 		}
 		#system "rm -f $tmpInMSA $tmpInMSAnt";# $tmpOutMSAaa";
 		unlink  $tmpInMSA; unlink $tmpInMSAnt;
@@ -1152,6 +1269,49 @@ if ($postAlignmentLocusQC && $cogCats ne "") {
 			or die "Cannot remove stale locus-QC report $postAlignmentQCReport: $!\n";
 	}
 	writePostAlignmentQCPolicy($postAlignmentQCPolicyFile, $postAlignmentQCPolicy);
+}
+
+if ($taxonAwareLocusSelection && $cogCats ne "") {
+	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
+	if (@{$primaryAlignments}) {
+		my $postQCAlignmentCount = scalar @{$primaryAlignments};
+		my $minimumAnchorNT = $ntCntTotal > $placementMinOverlap
+			? $ntCntTotal : $placementMinOverlap;
+		my $finalSelection = selectTaxonAwareFinalLoci(
+			alignments => $primaryAlignments,
+			path_gene => \%primaryAlignmentGene,
+			pre_metrics => \%taxonAwarePreMetrics,
+			samples => \%taxonAwareUniverseSamples,
+			maximum_loci => $taxonAwareMaxLoci,
+			core_loci => $taxonAwareCoreLoci,
+			target_loci => $taxonAwareTargetLoci,
+			target_nt => $taxonAwareTargetNT,
+			minimum_anchor_nt => $minimumAnchorNT,
+			use_aa => $useAA4tree,
+			outgroup => $outgroup,
+			locus_report => "$treeD/taxon_aware_locus_selection.tsv",
+			sample_report => "$treeD/taxon_aware_sample_selection.tsv",
+		);
+		my %keepPath = map { $_ => 1 } @{$finalSelection->{alignments}};
+		my %keepStem = map { alignmentFileStem($_) => 1 }
+			@{$finalSelection->{alignments}};
+		if ($useAA4tree) {
+			@MSA_AA = grep { $keepPath{$_} } @MSA_AA;
+		} else {
+			@MSAs = grep { $keepPath{$_} } @MSAs;
+			@MSAsSyn = grep { $keepStem{alignmentFileStem($_)} } @MSAsSyn;
+			@MSAsNonSyn = grep { $keepStem{alignmentFileStem($_)} } @MSAsNonSyn;
+		}
+		for my $sample (keys %samples) {
+			delete $samples{$sample}
+				if ($finalSelection->{sample_metrics}{$sample}{role} // "remove") eq "remove";
+		}
+		print "Taxon-aware final selection retained "
+			. scalar(@{$finalSelection->{alignments}}) . "/"
+			. $postQCAlignmentCount
+			. " post-QC loci; reports: $treeD/taxon_aware_locus_selection.tsv, "
+			. "$treeD/taxon_aware_sample_selection.tsv\n";
+	}
 }
 
 #die "@MSA_AA\n\n";
@@ -2326,7 +2486,17 @@ sub mergeMSAs($ $ $ $){
 	foreach my $kk (@ksMSAFAA){
 		my $num1 = $charCnts{$kk};
 		#print "$num1\n";
-		if ( $maxNtCnt == 0 ||  ($num1 < ($qtl90NTcnts *$ntFrac) && $num1 < $qtl25NTcnts) || ($num1 < ($ntCntTotal/$factor) ) ){
+		my $removeSample;
+		if ($taxonAwareLocusSelection && $multAliF eq $multAli) {
+			my $minimumAnchorNT = $ntCntTotal > $placementMinOverlap
+				? $ntCntTotal : $placementMinOverlap;
+			$removeSample = $maxNtCnt == 0 || ($num1 * $factor) < $minimumAnchorNT;
+		} else {
+			$removeSample = $maxNtCnt == 0
+				|| ($num1 < ($qtl90NTcnts * $ntFrac) && $num1 < $qtl25NTcnts)
+				|| ($num1 < ($ntCntTotal / $factor));
+		}
+		if ($removeSample){
 			delete $bigMSAFAA{$kk}; delete $bigMSAFAAnxs{$kk}; $remSeqNum++; 
 			push @removedSeqExamples, "$kk($num1 informative positions)"
 				if @removedSeqExamples < 5;
@@ -2995,6 +3165,376 @@ sub shellQuote{
 	$value = "" unless defined $value;
 	$value =~ s/'/'"'"'/g;
 	return "'$value'";
+}
+
+sub informativeSequenceLength {
+	my ($sequence, $useAA) = @_;
+	$sequence = uc($sequence // "");
+	if ($useAA) {
+		$sequence =~ s/[^ACDEFGHIKLMNPQRSTVWY]//g;
+	} else {
+		$sequence =~ s/[^ACGTU]//g;
+	}
+	return length($sequence);
+}
+
+sub selectTaxonAwareCandidateLoci {
+	my %args = @_;
+	my $categories = $args{categories};
+	my $charCounts = $args{char_counts};
+	my (%metrics, %samples);
+	my $categoryIndex = -1;
+	for my $category (@{$categories}) {
+		$categoryIndex++;
+		next unless @{$category};
+		my (undef, $gene) = parseSeqId(
+			$category->[0], "taxon-aware category ".($categoryIndex + 1));
+		die "Duplicate locus '$gene' in taxon-aware category input\n"
+			if exists $metrics{$gene};
+		my (%bestSequence, %bestSites);
+		for my $sequenceId (@{$category}) {
+			my ($sample, $sequenceGene) = parseSeqId(
+				$sequenceId, "taxon-aware category ".($categoryIndex + 1));
+			die "Wrong gene in $sequenceId, expected $gene!\n"
+				if $sequenceGene ne $gene;
+			my $sites = $charCounts->{$sample}{$sequenceId} // 0;
+			$sites *= 3 if $args{use_aa};
+			if (!exists($bestSites{$sample}) || $sites > $bestSites{$sample}) {
+				$bestSites{$sample} = $sites;
+				$bestSequence{$sample} = $sequenceId;
+			}
+		}
+		next if keys(%bestSequence) < 3;
+		my @siteCounts = values %bestSites;
+		my $q90 = quantile(0.9, @siteCounts);
+		my $medianSites = quantile(0.5, @siteCounts);
+		my @absoluteDeviations = map { abs($_ - $medianSites) } @siteCounts;
+		my $mad = @absoluteDeviations ? quantile(0.5, @absoluteDeviations) : 0;
+		my @completeness = map { $q90 > 0 ? ($_ / $q90 > 1 ? 1 : $_ / $q90) : 0 }
+			@siteCounts;
+		my $medianCompleteness = @completeness ? quantile(0.5, @completeness) : 0;
+		my $lengthStability = $medianSites > 0
+			? 1 - ($mad / $medianSites > 1 ? 1 : $mad / $medianSites)
+			: 0;
+		my @sequenceIds = map { $bestSequence{$_} } sort keys %bestSequence;
+		$metrics{$gene} = {
+			gene => $gene,
+			category => \@sequenceIds,
+			sample_sites => \%bestSites,
+			sample_count => scalar(keys %bestSequence),
+			q90_nt => $q90,
+			median_completeness => $medianCompleteness,
+			length_stability => $lengthStability,
+			quality_score => 0,
+		};
+		for my $sample (keys %bestSites) {
+			$samples{$sample}{available_loci}++;
+			$samples{$sample}{available_nt} += $bestSites{$sample};
+		}
+	}
+	die "Taxon-aware selection found no category with at least three usable samples\n"
+		unless keys %metrics;
+	my $maximumSampleCount = 1;
+	for my $metric (values %metrics) {
+		$maximumSampleCount = $metric->{sample_count}
+			if $metric->{sample_count} > $maximumSampleCount;
+	}
+	for my $metric (values %metrics) {
+		my $prevalence = $metric->{sample_count} / $maximumSampleCount;
+		$metric->{robust_score} = 0.55 * $prevalence
+			+ 0.30 * $metric->{median_completeness}
+			+ 0.15 * $metric->{length_stability};
+		$metric->{quality_score} = $metric->{robust_score};
+	}
+	my $selectedGenes = chooseTaxonAwareLoci(
+		metrics => \%metrics,
+		limit => $args{candidate_limit},
+		core_limit => $args{core_limit},
+		final_limit => $args{final_limit},
+		target_loci => $args{target_loci},
+		target_nt => $args{target_nt},
+		stage => "candidate",
+	);
+	my @selectedCategories = map { $metrics{$_}{category} } @{$selectedGenes};
+	writeTaxonAwareLocusAudit($args{report}, "candidate", \%metrics);
+	return {
+		categories => \@selectedCategories,
+		metrics => \%metrics,
+		samples => \%samples,
+	};
+}
+
+sub chooseTaxonAwareLoci {
+	my %args = @_;
+	my $metrics = $args{metrics};
+	for my $metric (values %{$metrics}) {
+		delete @{$metric}{qw(selected selection_rank selection_phase selection_objective)};
+	}
+	my @eligible = sort {
+		($metrics->{$b}{quality_score} // 0) <=> ($metrics->{$a}{quality_score} // 0)
+			|| $a cmp $b
+	} grep { ($metrics->{$_}{sample_count} // 0) >= 3 } keys %{$metrics};
+	my $limit = $args{limit} < @eligible ? $args{limit} : scalar(@eligible);
+	my $coreLimit = $args{core_limit} < $limit ? $args{core_limit} : $limit;
+	my (%selected, %sampleLoci, %sampleSites, %availability);
+	for my $gene (@eligible) {
+		$availability{$_}++ for keys %{$metrics->{$gene}{sample_sites}};
+	}
+	my $maximumAvailability = 1;
+	for my $available (values %availability) {
+		$maximumAvailability = $available if $available > $maximumAvailability;
+	}
+	my @chosen;
+	for my $gene (@eligible[0 .. $coreLimit - 1]) {
+		push @chosen, $gene;
+		$selected{$gene} = 1;
+		$metrics->{$gene}{selection_phase} = "robust_core";
+		$metrics->{$gene}{selection_objective} = $metrics->{$gene}{quality_score};
+		for my $sample (keys %{$metrics->{$gene}{sample_sites}}) {
+			$sampleLoci{$sample}++;
+			$sampleSites{$sample} += $metrics->{$gene}{sample_sites}{$sample};
+		}
+	}
+	while (@chosen < $limit) {
+		my ($bestGene, $bestObjective);
+		for my $gene (@eligible) {
+			next if $selected{$gene};
+			my $coverageGain = 0;
+			for my $sample (keys %{$metrics->{$gene}{sample_sites}}) {
+				my $rarityWeight = sqrt(
+					$maximumAvailability / ($availability{$sample} || 1));
+				$rarityWeight = 6 if $rarityWeight > 6;
+				$coverageGain += $rarityWeight / $args{target_loci}
+					if ($sampleLoci{$sample} // 0) < $args{target_loci};
+				my $siteDeficit = $args{target_nt} - ($sampleSites{$sample} // 0);
+				if ($siteDeficit > 0) {
+					my $siteGain = $metrics->{$gene}{sample_sites}{$sample};
+					$siteGain = $siteDeficit if $siteGain > $siteDeficit;
+					$coverageGain += $rarityWeight * $siteGain / $args{target_nt};
+				}
+			}
+			my $objective = $coverageGain
+				+ 0.25 * ($metrics->{$gene}{quality_score} // 0);
+			if (!defined($bestObjective) || $objective > $bestObjective
+					|| ($objective == $bestObjective && $gene lt $bestGene)) {
+				($bestGene, $bestObjective) = ($gene, $objective);
+			}
+		}
+		last unless defined $bestGene;
+		push @chosen, $bestGene;
+		$selected{$bestGene} = 1;
+		my $nextRank = scalar(@chosen);
+		$metrics->{$bestGene}{selection_phase} =
+			$args{stage} eq "candidate"
+				&& $nextRank > ($args{final_limit} // $args{limit})
+			? "qc_backfill" : "taxon_rescue";
+		$metrics->{$bestGene}{selection_objective} = $bestObjective;
+		for my $sample (keys %{$metrics->{$bestGene}{sample_sites}}) {
+			$sampleLoci{$sample}++;
+			$sampleSites{$sample} += $metrics->{$bestGene}{sample_sites}{$sample};
+		}
+	}
+	for my $index (0 .. $#chosen) {
+		$metrics->{$chosen[$index]}{selected} = 1;
+		$metrics->{$chosen[$index]}{selection_rank} = $index + 1;
+	}
+	return \@chosen;
+}
+
+sub taxonAwareAlignmentMetrics {
+	my ($alignment, $useAA, $gene) = @_;
+	my $records = readFasta($alignment, 1);
+	die "Taxon-aware selector cannot read alignment $alignment\n"
+		unless ref($records) eq 'HASH' && keys %{$records};
+	my @sequenceIds = sort keys %{$records};
+	my $alignmentLength = 0;
+	for my $sequenceId (@sequenceIds) {
+		my $length = length($records->{$sequenceId} // "");
+		$alignmentLength = $length if $length > $alignmentLength;
+	}
+	my (%sampleSites, @sequences);
+	my $validCells = 0;
+	for my $sequenceId (@sequenceIds) {
+		my $sequence = uc($records->{$sequenceId} // "");
+		push @sequences, $sequence;
+		my ($sample) = parseSeqId($sequenceId, "taxon-aware alignment $gene");
+		my $sites = informativeSequenceLength($sequence, $useAA);
+		$sites *= 3 if $useAA;
+		$sampleSites{$sample} = $sites
+			if !exists($sampleSites{$sample}) || $sites > $sampleSites{$sample};
+		$validCells += $useAA ? int($sites / 3) : $sites;
+	}
+	my ($variableSites, $parsimonyInformativeSites) = (0, 0);
+	for my $position (0 .. $alignmentLength - 1) {
+		my %stateCount;
+		for my $sequence (@sequences) {
+			my $state = substr($sequence, $position, 1);
+			next unless $useAA
+				? $state =~ /^[ACDEFGHIKLMNPQRSTVWY]$/
+				: $state =~ /^[ACGTU]$/;
+			$stateCount{$state}++;
+		}
+		$variableSites++ if keys(%stateCount) >= 2;
+		my $repeatedStates = grep { $_ >= 2 } values %stateCount;
+		$parsimonyInformativeSites++ if $repeatedStates >= 2;
+	}
+	my $occupancyDenominator = scalar(@sequenceIds) * $alignmentLength;
+	return {
+		gene => $gene,
+		path => $alignment,
+		sample_sites => \%sampleSites,
+		sample_count => scalar(keys %sampleSites),
+		alignment_length_nt => $alignmentLength * ($useAA ? 3 : 1),
+		occupancy => $occupancyDenominator
+			? $validCells / $occupancyDenominator : 0,
+		variable_sites => $variableSites,
+		parsimony_informative_sites => $parsimonyInformativeSites,
+	};
+}
+
+sub classifyTaxonAwareSamples {
+	my %args = @_;
+	my $metrics = $args{metrics};
+	my %result;
+	for my $sample (sort keys %{$args{samples}}) {
+		my ($selectedLoci, $selectedNT) = (0, 0);
+		for my $metric (values %{$metrics}) {
+			next if $args{selected_only} && !$metric->{selected};
+			next unless ($metric->{sample_sites}{$sample} // 0) > 0;
+			$selectedLoci++;
+			$selectedNT += $metric->{sample_sites}{$sample};
+		}
+		my $available = $args{samples}{$sample};
+		my $availableLoci = ref($available) eq 'HASH'
+			? ($available->{available_loci} // 0) : 0;
+		my $availableNT = ref($available) eq 'HASH'
+			? ($available->{available_nt} // 0) : 0;
+		my ($role, $reason);
+		if ($selectedNT <= 0) {
+			($role, $reason) = ("remove", "no_selected_anchor");
+		} elsif ($selectedNT < $args{minimum_anchor_nt}) {
+			($role, $reason) = ("remove", "below_minimum_anchor_nt");
+		} elsif ($selectedLoci >= $args{target_loci}
+				&& $selectedNT >= $args{target_nt}) {
+			($role, $reason) = ("backbone_candidate", "coverage_target_met");
+		} else {
+			($role, $reason) = ("placement_candidate", "usable_sparse_anchor");
+		}
+		$result{$sample} = {
+			available_loci => $availableLoci,
+			available_nt => $availableNT,
+			selected_loci => $selectedLoci,
+			selected_nt => $selectedNT,
+			role => $role,
+			reason => $reason,
+		};
+	}
+	if (($args{outgroup} // "") ne ""
+			&& (!exists($result{$args{outgroup}})
+				|| $result{$args{outgroup}}{role} eq "remove")) {
+		die "Taxon-aware selection could not retain an aligned anchor for outgroup "
+			."'$args{outgroup}'\n";
+	}
+	return \%result;
+}
+
+sub selectTaxonAwareFinalLoci {
+	my %args = @_;
+	my (%metrics, %seenGene);
+	for my $alignment (@{$args{alignments}}) {
+		my $gene = $args{path_gene}{$alignment};
+		die "Taxon-aware selector has no locus mapping for alignment $alignment\n"
+			unless defined($gene) && length($gene);
+		die "Taxon-aware selector received duplicate alignment for locus $gene\n"
+			if $seenGene{$gene}++;
+		my $metric = taxonAwareAlignmentMetrics($alignment, $args{use_aa}, $gene);
+		my $preScore = $args{pre_metrics}{$gene}{robust_score} // 0;
+		my $informationScore = log(1 + $metric->{parsimony_informative_sites}) / log(21);
+		$informationScore = 1 if $informationScore > 1;
+		$metric->{robust_score} = $preScore;
+		$metric->{information_score} = $informationScore;
+		$metric->{quality_score} = 0.45 * $preScore
+			+ 0.35 * $metric->{occupancy} + 0.20 * $informationScore;
+		$metrics{$gene} = $metric;
+	}
+	my $selectedGenes = chooseTaxonAwareLoci(
+		metrics => \%metrics,
+		limit => $args{maximum_loci},
+		core_limit => $args{core_loci},
+		final_limit => $args{maximum_loci},
+		target_loci => $args{target_loci},
+		target_nt => $args{target_nt},
+		stage => "final",
+	);
+	die "Taxon-aware final selection found no usable locus\n"
+		unless @{$selectedGenes};
+	my @selectedAlignments = map { $metrics{$_}{path} } @{$selectedGenes};
+	my $sampleMetrics = classifyTaxonAwareSamples(
+		metrics => \%metrics,
+		samples => $args{samples},
+		target_loci => $args{target_loci},
+		target_nt => $args{target_nt},
+		minimum_anchor_nt => $args{minimum_anchor_nt},
+		selected_only => 1,
+		outgroup => $args{outgroup},
+	);
+	writeTaxonAwareLocusAudit($args{locus_report}, "final", \%metrics);
+	writeTaxonAwareSampleAudit($args{sample_report}, $sampleMetrics);
+	return {
+		alignments => \@selectedAlignments,
+		sample_metrics => $sampleMetrics,
+	};
+}
+
+sub writeTaxonAwareLocusAudit {
+	my ($path, $stage, $metrics) = @_;
+	make_path(dirname($path)) unless -d dirname($path);
+	open my $output, '>', $path
+		or die "Cannot write taxon-aware locus audit $path: $!\n";
+	print {$output} join("\t", qw(
+		stage gene selected rank phase quality_score robust_score occupancy
+		sample_count q90_nt alignment_length_nt variable_sites
+		parsimony_informative_sites median_completeness length_stability
+		selection_objective alignment
+	))."\n";
+	for my $gene (sort {
+		($metrics->{$a}{selected} ? 0 : 1) <=> ($metrics->{$b}{selected} ? 0 : 1)
+			|| ($metrics->{$a}{selection_rank} // 1_000_000)
+				<=> ($metrics->{$b}{selection_rank} // 1_000_000)
+			|| $a cmp $b
+	} keys %{$metrics}) {
+		my $metric = $metrics->{$gene};
+		my @values = (
+			$stage, $gene, $metric->{selected} ? 1 : 0,
+			$metric->{selection_rank} // "", $metric->{selection_phase} // "",
+			map({ defined($metric->{$_}) ? sprintf("%.6f", $metric->{$_}) : "" }
+				qw(quality_score robust_score occupancy)),
+			$metric->{sample_count} // "", $metric->{q90_nt} // "",
+			$metric->{alignment_length_nt} // "", $metric->{variable_sites} // "",
+			$metric->{parsimony_informative_sites} // "",
+			map({ defined($metric->{$_}) ? sprintf("%.6f", $metric->{$_}) : "" }
+				qw(median_completeness length_stability selection_objective)),
+			$metric->{path} // "",
+		);
+		print {$output} join("\t", @values)."\n";
+	}
+	close $output or die "Cannot close taxon-aware locus audit $path: $!\n";
+}
+
+sub writeTaxonAwareSampleAudit {
+	my ($path, $samples) = @_;
+	make_path(dirname($path)) unless -d dirname($path);
+	open my $output, '>', $path
+		or die "Cannot write taxon-aware sample audit $path: $!\n";
+	print {$output} "sample\tavailable_loci\tavailable_nt\tselected_loci\tselected_nt\trole\treason\n";
+	for my $sample (sort keys %{$samples}) {
+		my $metric = $samples->{$sample};
+		print {$output} join("\t", $sample,
+			map({ $metric->{$_} // "" } qw(
+				available_loci available_nt selected_loci selected_nt role reason
+			)))."\n";
+	}
+	close $output or die "Cannot close taxon-aware sample audit $path: $!\n";
 }
 
 sub writePostAlignmentQCPolicy {

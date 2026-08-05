@@ -204,7 +204,9 @@ sub createConsSNPandSVs;
 #       sizes before completion checks, so valid samples reach requested jobs.
 #4.38: 4.8.26: consolidate sample closure, scheduler snapshots and accounting
 #       batches, and primary/support consensus-SNP generation paths.
-my $MATFILER_ver = 4.38;
+#4.39: 5.8.26: harden RiboFind extraction and LCA recovery, require published
+#       profile outputs for completion, and raise extraction memory to 20 GiB.
+my $MATFILER_ver = 4.39;
 
 #----------------- defaults ----------------- 
 
@@ -3885,7 +3887,7 @@ sub detectRibo(){
 		$jobName = $jobd;
 	} else {
 		$jobd.=";".$MFopt{globalRiboDependence}->{DBcp} unless ($MFopt{globalRiboDependence}->{DBcp} eq "alreadyCopied");
-		my $tmpCmd; my $mem = "3G";
+		my $tmpCmd; my $mem = "20G";
 		# Re-evaluate extraction and assignment from the same evidence contract
 		# used by the sample sentinel.
 		my $calcRiboFind = $riboEvidence->{profile_complete} ? 0 : 1;

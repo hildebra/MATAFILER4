@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.75;/,
-	'sample-aware Step 1 balancing increments the workflow version');
+like($strain, qr/my \$version = 0\.76;/,
+	'taxon-aware tree filtering increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -299,8 +299,11 @@ like($strain,
 	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,
 	'split-worker sparsity is summarized instead of reported as missing catalogue data');
 like($strain,
-	qr/-withinSpecies 1 -strainWithinPreset 1 -NTfiltPerGene .*? -GenesPerSpecies /,
-	'unfinished trees explicitly select within-species filtering and delegate fixed strain settings to buildTree');
+	qr/-withinSpecies 1 -strainWithinPreset 1 -NTfilt \$relativeNTFraction .*?-NTfiltPerGene \$GeneLengthMin -GenesPerSpecies \$GenesPerSpecies/s,
+	'unfinished trees explicitly pass the relaxed strain coverage filters to buildTree');
+like($strain,
+	qr/my \$GenesPerSpecies = 0\.05;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.02;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection 1/s,
+	'strainWithin uses the relaxed defaults and forwards explicit taxon-aware activation');
 unlike($strain,
 	qr/-AAtree 0|-bootstrap 0|-NTfiltCount 400|-strictBackbone 1|-continue |-gzInput 1|-runDNDS 0|-runTheta 0/,
 	"fixed buildTree strain settings are no longer serialized into the submitted command");

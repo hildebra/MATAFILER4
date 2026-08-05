@@ -12,7 +12,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 | `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `buildTree5.pl` | `5.28` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.29` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -507,6 +507,13 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-postAlignmentDivergenceQC` | integer | `0` between species; `1` within species | stable | Reject absolute and cross-locus divergence outliers. When locus QC is enabled, its structural checks remain active even if divergence QC is disabled. |
 | `-postAlignmentRelativeZ` | float | `8.0` | stable | Modified-Z threshold for cross-locus consensus-divergence outliers when divergence QC is enabled. |
 | `-postAlignmentMinLociRelative` | integer | `8` | stable | Minimum locus count before applying cross-locus robust outlier QC. |
+| `-taxonAwareLocusSelection` | integer | `0` | advanced | Opt into two-stage locus selection. A permissive robust/core-plus-rescue candidate set is aligned first; the final set is chosen after MSA QC using occupancy and parsimony-informative sites. |
+| `-taxonAwareMaxLoci` | integer | `500` | advanced | Maximum loci retained in the final concatenated alignment. |
+| `-taxonAwareCoreLoci` | integer | `400` | advanced | Highest-scoring robust loci selected before greedy taxon-coverage rescue. Must not exceed `-taxonAwareMaxLoci`. |
+| `-taxonAwareCandidateExtra` | integer | `150` | advanced | Extra pre-MSA candidate loci available to backfill alignment failures and MSA-QC rejections. |
+| `-taxonAwareMinSequenceNT` | integer | `60` | advanced | Minimum unambiguous nucleotide-equivalent sequence length for an occurrence in the taxon-aware candidate pass. |
+| `-taxonAwareTargetLoci` | integer | `25` | advanced | Per-sample locus target used by greedy coverage rescue and backbone-candidate reporting. |
+| `-taxonAwareTargetNT` | integer | `7500` | advanced | Per-sample informative-NT target used by greedy coverage rescue and backbone-candidate reporting. |
 | `-runIQtree` | integer | `0` | stable | See source/help for details. |
 | `-AutoModel` | integer | `1` | stable | See source/help for details. |
 | `-iqFast` | integer | `0` | stable | fast qiTree mode |
@@ -530,3 +537,7 @@ Completed IQ-TREE runs are accepted only when the log contains its completion si
 In strict-backbone IQ-TREE mode, `IQtree_allsites.backbone.treefile` contains the ML-inferred backbone and `IQtree_allsites.treefile` is the default primary tree containing the nearest-backbone grafts. Each deferred query is grafted beside its closest backbone sample by observed distance over mutually called sites. This is not likelihood-based phylogenetic placement and does not refine the inferred backbone topology.
 
 Broad or between-species phylogeny is the default. In this mode `buildTree5.pl` does not remove columns using a fixed taxon-count overlap threshold, and post-alignment QC checks locus structure/occupancy without rejecting deep AA divergence. Use `-withinSpecies 1` for strain or other within-species trees. `-minOverlapMSA` and `-postAlignmentDivergenceQC` can override the individual mode defaults. Existing `-strainWithinPreset 1` calls remain compatible and imply within-species mode. With `-continue 1`, a stored QC-policy marker prevents reuse of a concatenated alignment built under different broad-mode settings; legacy within-species audits remain compatible.
+
+With `-taxonAwareLocusSelection 1`, locus selection stays inside `buildTree5.pl` so it can reuse the normal alignment and MSAfix stages. The pre-MSA pass ranks length-stable, complete, prevalent loci, retains a 400-locus robust core, and greedily adds loci that improve the least-represented taxa; up to 150 further loci provide QC backfill. After MSAfix, the final pass reranks surviving loci using observed alignment occupancy and parsimony-informative sites, then selects at most 500 loci with the same core-plus-taxon-rescue strategy. Sparse samples are retained as placement candidates whenever the selected alignment provides the configured placement/minimum-NT anchor; only samples without such an anchor are removed. Decisions are written to `phylo/taxon_aware_locus_candidates.tsv`, `phylo/taxon_aware_sample_candidates.tsv`, `phylo/taxon_aware_locus_selection.tsv`, and `phylo/taxon_aware_sample_selection.tsv`.
+
+`strain_within.pl` 0.76 keeps the selector opt-in through its own `-taxonAwareLocusSelection 1` argument. Its default legacy thresholds are now `-GeneLengthMin 0.3`, `-GenesPerSpecies 0.05`, and `-relativeNTFraction 0.02`; these are passed to `buildTree5.pl` as `-NTfiltPerGene`, `-GenesPerSpecies`, and `-NTfilt` respectively.

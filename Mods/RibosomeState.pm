@@ -21,6 +21,16 @@ sub _result_present {
 	return (-e $path || -e "$path.gz") ? 1 : 0;
 }
 
+sub _profile_outputs_present {
+	my ($root, $tag) = @_;
+	for my $suffix ('r1.fq.gz', 'r2.fq.gz', 'fq.gz') {
+		return 0 unless -s File::Spec->catfile(
+			$root, "reads_$tag.$suffix",
+		);
+	}
+	return 1;
+}
+
 sub ribosome_completion_evidence {
 	my (%args) = @_;
 	my $requested = $args{requested} ? 1 : 0;
@@ -40,6 +50,8 @@ sub ribosome_completion_evidence {
 		assembly_requested => $assembly_requested,
 		ssu_profile_complete => -e File::Spec->catfile($ribo_root, 'SSU_pull.sto') ? 1 : 0,
 		lsu_profile_complete => -e File::Spec->catfile($ribo_root, 'LSU_pull.sto') ? 1 : 0,
+		ssu_profile_outputs_complete => _profile_outputs_present($ribo_root, 'SSU'),
+		lsu_profile_outputs_complete => _profile_outputs_present($ribo_root, 'LSU'),
 		assembly_complete => (!$assembly_requested
 			|| -e File::Spec->catfile($ribo_root, 'Ass', 'allAss.sto')) ? 1 : 0,
 		assignment_complete_stone => -e File::Spec->catfile($lca_root, 'Assigned.sto') ? 1 : 0,
@@ -53,7 +65,10 @@ sub ribosome_completion_evidence {
 		),
 	);
 	$evidence{profile_complete} = $evidence{ssu_profile_complete}
-		&& $evidence{lsu_profile_complete} && $evidence{assembly_complete} ? 1 : 0;
+		&& $evidence{lsu_profile_complete}
+		&& $evidence{ssu_profile_outputs_complete}
+		&& $evidence{lsu_profile_outputs_complete}
+		&& $evidence{assembly_complete} ? 1 : 0;
 	$evidence{taxonomy_complete} = $evidence{assignment_complete_stone}
 		&& $evidence{ssu_assignment_complete} && $evidence{lsu_assignment_complete}
 		&& $evidence{ssu_hierarchy_complete} && $evidence{lsu_hierarchy_complete} ? 1 : 0;

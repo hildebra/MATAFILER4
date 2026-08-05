@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.28;/,
-	'shared tree-method checkpoint state increments the workflow version');
+like($source, qr/my \$version = 5\.29;/,
+	'taxon-aware locus selection increments the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
@@ -51,7 +51,7 @@ like($source,
 	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?between_species_enabled => 0.*?within_species_enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 8\.0.*?my \$postAlignmentLocusQC;/s,
 	'broad trees retain all loci by default while within-species trees retain structural QC');
 like($source,
-	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=3".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"minimum_gene_fraction_per_species=\$GeneFracPSpec".*?\$legacyWithinSpeciesQCAudit = \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
+	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=4".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"minimum_gene_fraction_per_species=\$GeneFracPSpec".*?"taxon_aware=\$taxonAwareLocusSelection".*?\$legacyWithinSpeciesQCAudit = !\$taxonAwareLocusSelection && \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
 	'changed locus-retention policies rebuild stale checkpoints while legacy within-species audits remain compatible');
 like($source,
 	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?rename \$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
@@ -65,6 +65,26 @@ like($source,
 like($source,
 	qr/\@MSAs = grep \{ \$keepPath\{\$_\} \} \@MSAs.*?\@MSAsSyn = grep \{ \$keepStem\{alignmentFileStem\(\$_\)\} \} \@MSAsSyn/s,
 	'primary, synonymous, and nonsynonymous alignment sets stay locus-consistent');
+like($source,
+	qr/my %TAXON_AWARE_DEFAULT = \(.*?enabled => 0.*?maximum_loci => 500.*?core_loci => 400.*?candidate_extra => 150.*?target_loci_per_sample => 25.*?target_nt_per_sample => 7500.*?"taxonAwareLocusSelection=i"/s,
+	'taxon-aware locus selection is explicitly activated and has bounded candidate/core defaults');
+like($source,
+	qr/if \(\$taxonAwareLocusSelection\) \{.*?selectTaxonAwareCandidateLoci\(.*?candidate_limit => \$taxonAwareMaxLoci \+ \$taxonAwareCandidateExtra.*?\@linesCats3 = \@\{\$candidateSelection->\{categories\}\}/s,
+	'the opt-in pre-MSA pass chooses robust, rescue, and QC-backfill candidates in buildTree5');
+like($source,
+	qr/sub chooseTaxonAwareLoci.*?robust_core.*?\$coverageGain.*?qc_backfill.*?taxon_rescue/s,
+	'locus choice combines a robust core with rarity-weighted taxon rescue and backfill');
+like($source,
+	qr/runPostAlignmentLocusQC\(.*?if \(\$taxonAwareLocusSelection && \$cogCats ne ""\).*?selectTaxonAwareFinalLoci\(.*?taxonAwareAlignmentMetrics.*?parsimony_informative_sites/s,
+	'the final selector runs after MSAfix QC and scores actual occupancy and informative sites');
+like($source,
+	qr/sub classifyTaxonAwareSamples.*?below_minimum_anchor_nt.*?backbone_candidate.*?placement_candidate/s,
+	'sparse but anchored taxa are retained for placement and final sample decisions are audited');
+like($source, qr/taxon_aware_locus_selection\.tsv.*?taxon_aware_sample_selection\.tsv/s,
+	'taxon-aware final locus and sample decisions have persistent audit tables');
+like($source,
+	qr/if \(\$taxonAwareLocusSelection && \$multAliF eq \$multAli\).*?\(\$num1 \* \$factor\) < \$minimumAnchorNT.*?else \{.*?\$qtl90NTcnts \* \$ntFrac/s,
+	'the final primary merge honors the absolute taxon-aware anchor instead of rerunning relative sample filtering');
 like($source,
 	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => \\\$iqLegacy/s,
 	'buildTree exposes memory-capped pathogen and legacy IQ-TREE modes');

@@ -196,7 +196,8 @@ END {
 #.73: persist, merge, and summarize sample statistics across extraction workers
 #.74: print key:value summaries, use assembly-group terminology, and aggregate retained-locus histograms
 #.75: balance Step 1 workers by assembly-group count and samples per group
-my $version = 0.75;
+#.76: relax strain-tree defaults and expose buildTree5 taxon-aware locus selection
+my $version = 0.76;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -259,8 +260,10 @@ my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
 my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
 my $legacyMGTK = 0; #restore the exact pre-0.47 IQ-TREE tree-building command
-my $GenesPerSpecies = 0.2; #was previously 0.1.. maybe too low?
-my $GeneLengthMin = 0.5;
+my $GenesPerSpecies = 0.05;
+my $GeneLengthMin = 0.3;
+my $relativeNTFraction = 0.02;
+my $taxonAwareLocusSelection = 0;
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
@@ -375,6 +378,8 @@ GetOptions(
 	#transferred to buildTRee script..
 	"GenesPerSpecies=f" => \$GenesPerSpecies,
 	"GeneLengthMin=f" => \$GeneLengthMin,
+	"relativeNTFraction=f" => \$relativeNTFraction,
+	"taxonAwareLocusSelection=i" => \$taxonAwareLocusSelection,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
@@ -418,7 +423,10 @@ die "-MGSminGenesPSmpl and -presortGenes must be positive\n"
 	unless $MGStoolowGsThr > 0 && $presortGenes > 0;
 die "-flushEvery must be positive\n" unless $appendWriteTrigger > 0;
 die "Fractional filtering options must be between 0 and 1\n"
-	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax, $GenesPerSpecies, $GeneLengthMin);
+	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax,
+		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction);
+die "-taxonAwareLocusSelection must be 0 or 1\n"
+	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
 die "SNP depth, quality, adaptive filtering, and indel-range settings must be non-negative\n"
 	if $minSNPDepth < 0 || $minSNPCallQual < 0 || $useAdaptiveQual < 0
 		|| $depthFilterScale < 0 || $indelRange < 0;
@@ -1075,7 +1083,9 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	if ($phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}if ($phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
 	my $tree_sample_separator = quotemeta($SaSe);
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
-	$Tcmd .= "-withinSpecies 1 -strainWithinPreset 1 -NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies ";
+	$Tcmd .= "-withinSpecies 1 -strainWithinPreset 1 -NTfilt $relativeNTFraction "
+		."-NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies ";
+	$Tcmd .= "-taxonAwareLocusSelection 1 " if $taxonAwareLocusSelection;
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
 	if ($phyloProg == 1){
 		if ($legacyMGTK){
@@ -2138,7 +2148,9 @@ sub prepRun{
 		print "familyVar=$familyVar\n" unless ($familyVar eq "");
 		
 		print "groupStabilityVars=$groupStabilityVars\n" unless ($groupStabilityVars eq "");
-		print "MSAaligner: $MSAprog, GenesPerSpecies: $GenesPerSpecies, GeneLengthMin: $GeneLengthMin\n";
+		print "MSAaligner: $MSAprog, GenesPerSpecies: $GenesPerSpecies, "
+			."GeneLengthMin: $GeneLengthMin, relativeNTFraction: $relativeNTFraction, "
+			."taxonAwareLocusSelection: $taxonAwareLocusSelection\n";
 		
 		
 		if ($noGeneLimit){print "No per-sample gene limit; biological QC remains "
@@ -3973,5 +3985,16 @@ Gene selection and biological QC:
 Questionable sample-locus observations are masked first. Samples with excessive
 ambiguity among the remaining observations are retained for post-tree placement
 instead of being used to infer the strict backbone.
+
+Tree locus filtering:
+  -GeneLengthMin FLOAT          Minimum fraction of a locus length-Q90 retained
+                                 [default 0.3]
+  -GenesPerSpecies FLOAT        Legacy minimum relative locus coverage per sample
+                                 [default 0.05]
+  -relativeNTFraction FLOAT     Legacy minimum relative informative-NT coverage
+                                 [default 0.02]
+  -taxonAwareLocusSelection 0|1 Align a robust-plus-backfill candidate set, then
+                                 select robust/core and taxon-rescue loci after MSA QC
+                                 [default 0]
 USAGE
 }
