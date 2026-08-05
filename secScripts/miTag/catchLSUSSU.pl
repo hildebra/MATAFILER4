@@ -3,6 +3,7 @@
 use strict;
 use warnings;
 
+use Errno qw(ENOENT);
 use File::Copy qw(copy);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
@@ -350,7 +351,8 @@ sub touchFile {
 sub unlinkChecked {
 	my ($path) = @_;
 	return unless -e $path || -l $path;
-	unlink $path or die "Cannot remove stale RiboFind result $path: $!\n";
+	return if unlink $path;
+	die "Cannot remove stale RiboFind result $path: $!\n" unless $! == ENOENT;
 }
 
 
