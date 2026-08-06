@@ -74,6 +74,14 @@ my $cmd = "";
 #--scratch_dir $tmpD 
 #$cmd .= "export GTDBTK_DATA_PATH=$GTDBtkDB\n";
 
+# getProgPaths() places environment setup on the lines before the executable.
+# Run that setup before asking mash for its version: mash is installed only in
+# the GTDB-Tk environment on standard installations.
+my $GTDBtkSetup = "";
+if ($GTDBtkBin =~ /\A(.*\n)([^\n]+)\z/s) {
+	($GTDBtkSetup, $GTDBtkBin) = ($1, $2);
+}
+
 my $mashArg="" ;my $hook = "";
 if ($GTDBtkMash ne "" && $GTDBver >= 2.1){ #for newer GTDBtk versions not supported
 	$mashArg = "--mash_db $GTDBtkMash/\$MVERSION/";
@@ -81,6 +89,7 @@ if ($GTDBtkMash ne "" && $GTDBver >= 2.1){ #for newer GTDBtk versions not suppor
 	$hook .= "test -n \"\$MVERSION\"\n";
 }
 
+$cmd .= $GTDBtkSetup;
 $cmd .= $hook;
 $cmd .= "$GTDBtkBin classify_wf -x fna $mashArg --cpus $ncore --pplacer_cpus $pplacer_cores --genome_dir $refMGd --out_dir $oDir"; #--scratch_dir $tmpD/GTtmp/ --genes
 
