@@ -16,6 +16,7 @@ our @EXPORT_OK = qw(
 	catalog_identity
 	catalog_identity_file
 	catalog_map_manifest
+	catalog_map_specs_match
 	resolve_catalog_maps
 	write_catalog_maps
 );
@@ -97,6 +98,32 @@ sub _normalise_map_paths {
 		}
 	}
 	die "Catalog map manifest contains no mapping files\n" unless @maps;
+	return @maps;
+}
+
+sub catalog_map_specs_match {
+	my ($left_spec, $right_spec) = @_;
+	return 0 unless defined($left_spec) && defined($right_spec);
+
+	my @left = _canonical_map_spec($left_spec);
+	my @right = _canonical_map_spec($right_spec);
+	return 0 unless @left && @right;
+	return 0 unless @left == @right;
+	for my $index (0 .. $#left) {
+		return 0 unless $left[$index] eq $right[$index];
+	}
+	return 1;
+}
+
+sub _canonical_map_spec {
+	my ($spec) = @_;
+	my @maps;
+	for my $map (split /,/, $spec, -1) {
+		$map =~ s/^\s+|\s+$//g;
+		return () if $map eq '';
+		my $absolute = abs_path($map);
+		push @maps, defined($absolute) ? $absolute : File::Spec->rel2abs($map);
+	}
 	return @maps;
 }
 

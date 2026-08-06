@@ -10,7 +10,8 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::CatalogPaths qw(
-	catalog_identity catalog_map_manifest resolve_catalog_maps write_catalog_maps
+	catalog_identity catalog_map_manifest catalog_map_specs_match
+	resolve_catalog_maps write_catalog_maps
 );
 
 my $tmp = tempdir(CLEANUP => 1);
@@ -32,6 +33,14 @@ is($resolved, join(',', map { abs_path($_) } @maps),
 	'map manifest retains every catalog-local map in order');
 is(resolve_catalog_maps($catalog), $resolved,
 	'multi-map inmap.txt resolves to the complete map set');
+ok(catalog_map_specs_match(join(',', @maps), $resolved),
+	'comma-separated map lists match after canonicalizing every entry');
+ok(catalog_map_specs_match("$logs/./map.0.txt,$logs/./map.1.txt", $resolved),
+	'comma-separated map lists tolerate equivalent path spellings');
+ok(!catalog_map_specs_match($maps[0], $resolved),
+	'map-list comparison rejects a missing map entry');
+ok(!catalog_map_specs_match('', ''),
+	'empty map specifications never match');
 
 open my $manifest_fh, '<', catalog_map_manifest($catalog)
 	or die "Cannot read map manifest: $!";

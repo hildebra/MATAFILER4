@@ -33,7 +33,7 @@ use Mods::FuncTools qw(assignFuncPerGene calc_modules);
 use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins  attachProteins3 );
 use Mods::Binning qw(getBinSubdirName);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
-use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps write_catalog_maps);
+use Mods::CatalogPaths qw(catalog_identity catalog_map_specs_match resolve_catalog_maps write_catalog_maps);
 
 sub geneCatFlow;
 sub addingSmpls;
@@ -672,7 +672,8 @@ if ($mapF =~ m/^\??$/){
 } elsif (-e "$qsubDir/inmap.txt" && -e "$qsubDir/GCmaps.ori"){
 	my $mapFInf = resolve_catalog_maps($GCdir);$mapFInf =~ s/\/\//\//g;
 	my $mapFOri = _read_single_line_file("$qsubDir/GCmaps.ori");$mapFOri =~ s/\/\//\//g;
-	if ($mapFOri eq $mapF || $mapFInf eq $mapF ){ #same as in input arg.. great, replace with local copies!
+	if (catalog_map_specs_match($mapFOri, $mapF)
+		|| catalog_map_specs_match($mapFInf, $mapF)) { #same as in input arg.. great, replace with local copies!
 		$mapF = $mapFInf;
 	} else {
 		die "input maps seems to have changed, neither\n$mapFInf\nnor\n$mapFOri\nAborting run..\n";
