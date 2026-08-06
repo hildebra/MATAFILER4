@@ -163,8 +163,8 @@ my $fracMaxGenes90pct = 0.25; #gene cats to keep, e.g. 25% of 90th percentile
 
 
 my $ntCntTotal =0; my $bootStrap=0; my $subsetSmpls = -1;
-my ($fnFna, $aaFna,$cogCats,$outD,$ncore,$Ete, $filt,$smplDef,$smplSep,$calcSyn,$calcNonSyn,
-			$useAA4tree,$calcDNAdiff,$tmpD ) = ("","","","",1,0,0.8,1,"_",0,0,0,0,"");
+my ($fnFna, $aaFna,$cogCats,$outD,$ncore,$Ete)= ("","","","",1,0);
+my ($smplDef,$smplSep,$calcSyn,$calcNonSyn,$useAA4tree,$calcDNAdiff,$tmpD ) = (1,"_",0,0,0,0,"");
 my ($stagedInputDir, $tmpSubdir, $completionMarker) = ("", "", "");
 my $withinSpecies = 0;
 my $strainWithinPreset = 0;
@@ -294,7 +294,7 @@ GetOptions(
 	"superCheck=i" => \$doSuperCheck,
 	"fixHeaders=i" => \$fixHeaders, ## fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
 	"useEte=i"      => \$Ete,
-	"NTfilt=f"      => sub { $filt = $_[1]; $ntFiltExplicit = 1; },
+	#"NTfilt=f"      => sub { $filt = $_[1]; $ntFiltExplicit = 1; },
 	"NTfiltPerGene=f"      => \$ntFracGene,
 	"GenesPerSpecies=f" => \$GeneFracPSpec,
 	"fracMaxGenes90pct=f" => \$fracMaxGenes90pct,
@@ -384,32 +384,7 @@ die "-strainWithinPreset must be 0 or 1\n"
 	unless $strainWithinPreset == 0 || $strainWithinPreset == 1;
 die "-AutoModel must be 0 or 1\n"
 	unless $treeAutoModel == 0 || $treeAutoModel == 1;
-if ($strainWithinPreset) {
-	$withinSpecies = 1;
-	$useAA4tree = 0;
-	$bootStrap = 0;
-	$ntCntTotal = 400;
-	$filt = 0.02 unless $ntFiltExplicit;
-	$doRAXMLng = 0;
-	$minOverlapMSA = 2;
-	$strictBackbone = 1;
-	$subsetSmpls = -1;
-	$fracMaxGenes90pct = 0.7;
-	$gzipInput = 1;
-	$calcSyn = 0;
-	$calcNonSyn = 0;
-	$continue = 1;
-	# ModelFinder partition merging is prohibitive for hundreds of strain
-	# loci. The fixed GTR+F+G2 model remains the fast production default;
-	# callers can explicitly request AutoModel for a diagnostic comparison.
-	$treeAutoModel = 0 unless $treeAutoModelExplicit;
-	$iqLegacy = 1 unless $iqLegacyExplicit || $iqPathogen;
-	$rateMergePartitions = 1 unless $rateMergePartitionsExplicit;
-	$iqFast = 1;
-	$doSuperTree = 0;
-	$doDNDS = 0;
-	$doTheta = 0;
-}
+
 $minOverlapMSA = $withinSpecies ? 2 : 0 unless defined $minOverlapMSA;
 $postAlignmentLocusQC = $withinSpecies
 	? $POST_ALIGNMENT_QC_DEFAULT{within_species_enabled}
@@ -484,7 +459,7 @@ if (length($tmpSubdir)) {
 die "-smplSep must not be empty\n" if $smplSep eq "";
 eval { qr/$smplSep/ } or die "Invalid -smplSep regular expression '$smplSep': $@";
 for my $fraction_name_value (
-	["NTfilt", $filt], ["NTfiltPerGene", $ntFracGene],
+	["NTfiltPerGene", $ntFracGene],
 	["GenesPerSpecies", $GeneFracPSpec], ["fracMaxGenes90pct", $fracMaxGenes90pct],
 	["maxGapPerCol", $maxGapPerCol],
 ) {
@@ -568,9 +543,6 @@ warn "MSAprobs may emit non-fatal trimming warnings\n" if $MSAprog == 0;
 if ($doCFML && !$doRAXML){die "Need RaxML alignment, if Clonal fram is to be run..\n";}
 
 if ($aaFna eq "" || $useAA4tree){	$calcSyn=0;$calcNonSyn=0;}
-if ($filt <1){$ntFrac=$filt;}
-#if (($calcDistMat || $calcDistMatExt) && $isAligned || !$MSAprog){die"Can't calc distance mat, unless clustalO is being used for MSA\n";}
-#else {$ntCntTotal = $filt;}
 
 $MSAreq = 0 if (!$doFastTree && !$doVeryFastTree && !$doRAXML && !$doRAXMLng && !$doCFML && !$doGubbins && !$doIQTree);
 

@@ -34,6 +34,7 @@ checkm2DB	[DBDir]/checkm2/CheckM2_database/uniref100.KO.1.dmnd
 GTDBtk_DB	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb/release226/	#Updated by get_gtdb.py
 #GTDBtk_mash	[DBDir]//MarkerG/GTDB_r207v2_MF/gtdb/mashD	#Updated by get_gtdb.py #Updated by get_gtdb.py
 #this is used for GTDB python script from Joachim and MAG->GTDB marker gene tasks.. independent of GTDBtk version
+GTDBtk_skani	[DBDir]/GTDBtk/Skani/
 GTDBPath	[DBDir]//MarkerG/GTDB_r226_MGTK/markerGenes	#Updated by get_gtdb.py
 GTDB_GTDB	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb_r226_lineageGTDB.tab	#Updated by get_gtdb.py
 GTDB_lnks	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb_r226_clustering.tab	#Updated by get_gtdb.py

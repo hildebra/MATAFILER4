@@ -15,9 +15,9 @@ use File::Temp qw(tempdir);
 #my $py3activate = getProgPaths("py3activate"); #source conda.. 
 my $GTDBtkBin = getProgPaths("GTDBtk");
 my $GTDBtkDB = getProgPaths("GTDBtk_DB");
-my $GTDBtkMash = getProgPaths("GTDBtk_mash",0);
+my $GTDBtkMash = "";# getProgPaths("GTDBtk_mash",0);  #deactivated, since GTDBtk uses skani and no longer mash
+my $GTDBtkskani = getProgPaths("GTDBtk_skani",0);
 
-#die "$GTDBtkDB\n$GTDBtkMash\n";
 die "Usage: $0 genome-dir cores temporary-root output-dir\n" unless @ARGV == 4;
 my $refMGd = $ARGV[0];
 my $ncore = $ARGV[1];
@@ -82,18 +82,20 @@ if ($GTDBtkBin =~ /\A(.*\n)([^\n]+)\z/s) {
 	($GTDBtkSetup, $GTDBtkBin) = ($1, $2);
 }
 
-my $mashArg="" ;my $hook = "";
-if ($GTDBtkMash ne "" && $GTDBver >= 2.1){ #for newer GTDBtk versions not supported
-	$mashArg = "--mash_db $GTDBtkMash/\$MVERSION/";
+my $DBsaveArg="" ;my $hook = "";
+if ($GTDBtkMash ne "" && $GTDBver >= 2.1 && $GTDBver < 2.5){ #for newer GTDBtk versions not supported
+	$DBsaveArg = "--mash_db $GTDBtkMash/\$MVERSION/";
 	$hook = "MVERSION=\$(mash --version | grep -oE '[0-9]+(\\.[0-9]+)+' | head -n1)\n";
 	$hook .= "test -n \"\$MVERSION\"\n";
+} elsif ($GTDBtkskani ne "" && $GTDBver >= 2.5){
+	$DBsaveArg  = "--skani_sketch_dir $GTDBtkskani/GTDB_${GTDBver}/ ";
 }
 
 $cmd .= $GTDBtkSetup;
 $cmd .= $hook;
-$cmd .= "$GTDBtkBin classify_wf -x fna $mashArg --cpus $ncore --pplacer_cpus $pplacer_cores --genome_dir $refMGd --out_dir $oDir"; #--scratch_dir $tmpD/GTtmp/ --genes
+$cmd .= "$GTDBtkBin classify_wf -x fna $DBsaveArg --cpus $ncore --pplacer_cpus $pplacer_cores --genome_dir $refMGd --out_dir $oDir"; #--scratch_dir $tmpD/GTtmp/ --genes
 
-print "\n\n".$cmd."\n\n";
+print "\n".$cmd."\n";
 #die;
 systemW $cmd;
 

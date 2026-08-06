@@ -431,7 +431,8 @@ sub runQItree{
 		}
 		#also consider -b >=100 for std bootstrap
 	} else {
-		$cmd .= "--alrt 1000 ";
+		#$cmd .= "--alrt 1000 ";
+		$cmd .= ""; #no bootstrap at all..
 	}
 	#TODO: include booster for better bootstrap values
 	#booster -a tbe -i 40MG.IQtree.treefile -b 40MG.IQtree.boottrees -@ 8 -o 40MG.IQtree_booster.tre
@@ -455,6 +456,7 @@ sub runQItree{
 		$attempt .= " -safe " if $safe;
 		systemW($attempt);
 	};
+	print $cmd;
 	my $ok = eval {
 		$execute->($runSafe);
 		1;

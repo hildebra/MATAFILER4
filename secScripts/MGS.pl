@@ -680,8 +680,8 @@ my $GTDBtaxF = "$annoDir/GTDBTK.tax";
 if (!-e $GTDBtaxF || !-e"$annoDir/gtdbtk.summary.tsv" || !_checkpoint_valid($GTDBtaxSto)){
 	my $GTDBtax = getProgPaths("taxPerMGSgtdb_scr");
 	my $memGTDB = 230; 
-	$memGTDB = 300;#high mem situation..
-	my $cmd = "$GTDBtax $binD $numCore $nodeTmpD/GTDBmgs/ $outD\n";
+	#$memGTDB = 300;#high mem situation..
+	my $cmd = "$GTDBtax $binD $canCore $nodeTmpD/GTDBmgs/ $outD\n";
 	$cmd .= "test -s $outD/GTDBTK.tax\ntest -s $outD/gtdbtk.summary.tsv\n";
 	$cmd .= "mv $outD/GTDBTK.tax $outD/gtdbtk.summary.tsv $annoDir\n";
 	$cmd .= "test -s $GTDBtaxF\ntest -s $annoDir/gtdbtk.summary.tsv\n";
@@ -691,7 +691,7 @@ if (!-e $GTDBtaxF || !-e"$annoDir/gtdbtk.summary.tsv" || !_checkpoint_valid($GTD
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "150G"; 
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/GTDB.sh",
 		$cmd,
-		$numCore,int($memGTDB)."G","GTDB_MGS","","",1,[],\%QSBopt);
+		$canCore,int($memGTDB)."G","GTDB_MGS","","",1,[],\%QSBopt);
 	$QSBopt{tmpSpace} =$tmpSHDD;
 	push(@jobs2wait,$jobName2);
 }
