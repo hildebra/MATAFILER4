@@ -1496,9 +1496,24 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 					append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredDeps);
 					$AsGrps{$cAssGrp}{PostAssemblCmd} = "";
 				}
+				my $binningJobDep = '';
+				if ($MFopt{DoMetaBat2} && !$doPreAssmFlag && !$ePreAssmblPck
+						&& !$binningComplete) {
+					# Binning consumes the assembly and all group mappings. The empty
+					# release member supplies neither reads nor coverage, but must not
+					# prevent the group binner from being chained to those producers.
+					append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps},
+						$AsGrps{$cAssGrp}{AssemblJobName}, $AsGrps{$cAssGrp}{prodRun});
+					my $binnerTmp = $nodeSpTmpD;
+					$binnerTmp = $smplTmpDir if ($MFopt{useBinnerScratch});
+					print "Submitting deferred assembly-group binner\n";
+					$binningJobDep = submitGenomeBinner(
+						$binnerTmp, $finAssLoc, $BinningOut, $cAssGrp, $smplIDs[-1],
+					);
+				}
 				add2SampleDeps(\@sampleDeps, [
 					$AsGrps{$cAssGrp}{AssemblJobName}, $AsGrps{$cAssGrp}{prodRun},
-					$AsGrps{$cAssGrp}{MapDeps},
+					$AsGrps{$cAssGrp}{MapDeps}, $binningJobDep,
 				]);
 			} else {
 				print "Shared assembly group $cAssGrp has no eligible assembly job yet; "

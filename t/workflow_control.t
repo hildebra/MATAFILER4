@@ -623,6 +623,9 @@ like($mataf4,
 	qr/my \$terminalEmptySample.*?my \$releaseSharedAssembly = \$terminalEmptySample.*?AssemblSmplDirs\} =~ s\/.*?metagAssemblyRun\(.*?genePredictions\(.*?PostAssemblCmd.*?input_dependency => '', advance_loop => 0/s,
 	'a terminally empty final member releases the earlier assembly-group inputs without joining its reads');
 like($mataf4,
+	qr/terminally empty.*?Submitting deferred assembly-group mapping jobs.*?append_job_dependencies\(\\\$AsGrps\{\$cAssGrp\}\{BinDeps\}.*?Submitting deferred assembly-group binner.*?submitGenomeBinner\(.*?\$binningJobDep/s,
+	'a terminally empty final member also submits the shared assembly-group binner after its producer dependencies');
+like($mataf4,
 	qr{my \$sharedAssemblyMissing = \$AssemblyGo.*?\$closedSample->\{outcome\}\{status\} =~ /\^skipped_/.*?shared assembly group has not been released}s,
 	'an existing terminal sentinel reopens once to release a missing shared assembly');
 like($mataf4,
