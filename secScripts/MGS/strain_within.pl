@@ -200,7 +200,9 @@ END {
 #.76: relax strain-tree defaults and expose buildTree5 taxon-aware locus selection
 #.77: enable taxon-aware selection and scale its hierarchy to the strain gene budget
 #.78: use deterministic rate/GC partition merging for strain trees by default
-my $version = 0.78;
+#.79: target deterministic rate/GC partitions by effective called sites
+#.80: restore legacy IQ-TREE strain inference by default and gate sparse placements
+my $version = 0.80;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -262,13 +264,15 @@ my @subsetMGS=(); my $subsMGSstr="";
 my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
 my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
-my $legacyMGTK = 0; #restore the exact pre-0.47 IQ-TREE tree-building command
+my $legacyMGTK = 1; #historical strain IQ-TREE command; pathogen mode opts out unless explicitly overridden
+my $legacyMGTKExplicit = 0;
 my $GenesPerSpecies = 0.05;
 my $GeneLengthMin = 0.3;
 my $relativeNTFraction = 0.02;
 my $taxonAwareLocusSelection = 1;
 my $rateMergePartitions = 1;
 my $rateMergeMaxBins = 8;
+my $rateMergeTargetSites = 30_000;
 my $rateMergeMinLoci = 20;
 my $rateMergeMinSites = 20_000;
 my $presortGenes = 1200;
@@ -389,12 +393,16 @@ GetOptions(
 	"taxonAwareLocusSelection=i" => \$taxonAwareLocusSelection,
 	"rateMergePartitions=i" => \$rateMergePartitions,
 	"rateMergeMaxBins=i" => \$rateMergeMaxBins,
+	"rateMergeTargetSites=i" => \$rateMergeTargetSites,
 	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
 	"rateMergeMinSites=i" => \$rateMergeMinSites,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
-	"legacyMGTK=i"   => \$legacyMGTK,
+	"legacyMGTK=i"   => sub {
+		$legacyMGTK = $_[1];
+		$legacyMGTKExplicit = 1;
+	},
 	"rmMSA=i"        => \$rmMSA, #remove MSA, to save diskspace
 	"phyloMemMulti=f" => \$memMulti, #mem used for buildtree. Default: 1.0
 	
@@ -438,10 +446,11 @@ die "Fractional filtering options must be between 0 and 1\n"
 		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction);
 die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
+$legacyMGTK = 0 if $iqPathogen && !$legacyMGTKExplicit;
 die "-rateMergePartitions must be 0 or 1\n"
 	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
-die "-rateMergeMaxBins, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
-	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeMinLoci, $rateMergeMinSites);
+die "-rateMergeMaxBins, -rateMergeTargetSites, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
+	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeTargetSites, $rateMergeMinLoci, $rateMergeMinSites);
 my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
 	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
 if ($taxonAwareLocusSelection) {
@@ -787,6 +796,7 @@ if ($runPartI){
 			'-flushEvery', $appendWriteTrigger,
 			'-rateMergePartitions', $rateMergePartitions,
 			'-rateMergeMaxBins', $rateMergeMaxBins,
+			'-rateMergeTargetSites', $rateMergeTargetSites,
 			'-rateMergeMinLoci', $rateMergeMinLoci,
 			'-rateMergeMinSites', $rateMergeMinSites,
 			'-iqPathogen', $iqPathogen,
@@ -1121,6 +1131,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	}
 	$Tcmd .= "-rateMergePartitions $rateMergePartitions "
 		."-rateMergeMaxBins $rateMergeMaxBins "
+		."-rateMergeTargetSites $rateMergeTargetSites "
 		."-rateMergeMinLoci $rateMergeMinLoci "
 		."-rateMergeMinSites $rateMergeMinSites ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
@@ -2189,7 +2200,8 @@ sub prepRun{
 			."GeneLengthMin: $GeneLengthMin, relativeNTFraction: $relativeNTFraction, "
 			."taxonAwareLocusSelection: $taxonAwareLocusSelection\n";
 		print "Rate/GC partition merging: enabled=$rateMergePartitions, "
-			."maximumBins=$rateMergeMaxBins, minimumBin=$rateMergeMinLoci loci/"
+			."maximumBins=$rateMergeMaxBins, targetBin=$rateMergeTargetSites effective sites, "
+			."minimumBin=$rateMergeMinLoci loci/"
 			."$rateMergeMinSites sites\n";
 		print "Taxon-aware locus hierarchy: geneBudget=$taxonAwareGeneBudget, "
 			."robustCore=$taxonAwareCoreLoci, taxonRescue="
@@ -4044,10 +4056,14 @@ Tree locus filtering:
   -rateMergePartitions 0|1      Merge final loci into deterministic rate/GC bins
                                  before IQ-TREE [default 1]
   -rateMergeMaxBins INT         Maximum deterministic partition bins [default 8]
+  -rateMergeTargetSites INT     Target effective called sites per initial bin
+                                 [default 30000]
   -rateMergeMinLoci INT         Minimum loci per bin before nearest-bin merging
                                  [default 20]
   -rateMergeMinSites INT        Minimum alignment sites per bin before merging
                                  [default 20000]
+  -legacyMGTK 0|1               Use the historical IQ-TREE strain command
+                                 [default 1; -iqPathogen 1 selects modern mode]
 USAGE
 }
 

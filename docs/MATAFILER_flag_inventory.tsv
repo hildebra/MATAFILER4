@@ -219,73 +219,74 @@ MGS.pl	0.32	General options	-binSpeciesMG	integer	binSpeciesMG	2	stable	0=no, 1=
 MGS.pl	0.32	General options	-ignoreIncompleteMAGs	integer	ignoIncomplMAGs	1	stable	1: assemblies without MAG calculations are ignored. Default: 1
 MGS.pl	0.32	General options	-legacy	integer	legacyV	0	deprecated/legacy	1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0
 MGS.pl	0.32	General options	-genomesPerFamily	integer	doBinCtgsPerFam	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-genoInD	string	genoindir		stable	provide a dir with complete genomes, will extract FGMs and build tree between genomes (NT/AA flag)
-buildTree5.pl	5.34	General options	-wildcardflag	string	wildcardflag		stable	See source/help for details.
-buildTree5.pl	5.34	General options	-fna	string	fnFna		stable	See source/help for details.
-buildTree5.pl	5.34	General options	-aa	string	aaFna		stable	Amino-acid FASTA input. Note: source flag is -aa, not -faa.
-buildTree5.pl	5.34	General options	-cats	string	cogCats		stable	See source/help for details.
-buildTree5.pl	5.34	General options	-outD	string	outD		stable	See source/help for details.
-buildTree5.pl	5.34	General options	-tmpD	string	tmpD		stable	See source/help for details.
-buildTree5.pl	5.34	General options	-cores	integer	ncore	1	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-superTree	integer	doSuperTree	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-superCheck	integer	doSuperCheck	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-fixHeaders	integer	fixHeaders	0	stable	# fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
-buildTree5.pl	5.34	General options	-useEte	integer	Ete	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-NTfilt	float	filt	0.8	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-NTfiltPerGene	float	ntFracGene	0.1	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-GenesPerSpecies	float	GeneFracPSpec	0.1	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-fracMaxGenes90pct	float	fracMaxGenes90pct	0.25	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-NTfiltCount	integer	ntCntTotal	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-smplDef	integer	smplDef	1	stable	is the genome somehow quantified with a delimiter (_) ?
-buildTree5.pl	5.34	General options	-smplSep	string	smplSep	_	stable	set the delimiter
-buildTree5.pl	5.34	General options	-outgroup	string	outgroup		stable	Anchor for filtering and downstream rooting; not passed to IQ-TREE as -o.
-buildTree5.pl	5.34	General options	-AAtree	integer	useAA4tree	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-MSAprogram	integer	MSAprog	2	stable	(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA)
-buildTree5.pl	5.34	General options	-minOverlapMSA	integer	minOverlapMSA	0	stable	min overlap in MSA columns, in order to retain column
-buildTree5.pl	5.34	General options	-maxGapPerCol	float	maxGapPerCol	1	stable	same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column
-buildTree5.pl	5.34	General options	-calcDistMat	integer	calcDistMat	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-calcDistMatExt	integer	calcDistMatExt	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-calcDiffDNA	integer	calcDNAdiff	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-minPcId	float	minPcId	0	stable	sequence is filtered from data, unless the average minPcId is >= $minPcId
-buildTree5.pl	5.34	General options	-SynTree	integer	calcSyn	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-NonSynTree	integer	calcNonSyn	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-continue	integer	continue	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-bootstrap	integer	bootStrap	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-subsetSmpls	integer	subsetSmpls	-1	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-postFilter	string	postFilter		stable	""","" sep list of zorro,guidance2,macse"
-buildTree5.pl	5.34	General options	-rmMSA	integer	removeMSA	0	stable	to save diskspace
-buildTree5.pl	5.34	General options	-gzInput	integer	gzipInput	0	stable	to save diskspace
-buildTree5.pl	5.34	General options	-isAligned	integer	isAligned	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-runRAxML	integer	doRAXML	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-runRaxMLng	integer	doRAXMLng	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-runFastTree	integer	doFastTree	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-runVeryFastTree	integer	doVeryFastTree	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-treeShrink	integer	useTreeShrink	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-runIQtree	integer	doIQTree	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-AutoModel	integer	treeAutoModel	1	stable	Strain presets use fixed GTR+F+G2 by default; set to 1 there to opt into slower MFP+MERGE.
-buildTree5.pl	5.34	General options	-iqFast	integer	iqFast	0	stable	fast qiTree mode
-buildTree5.pl	5.34	General options	-runClonalFrameML	integer	doCFML	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-runGubbins	integer	doGubbins	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-runLengthCheck	integer	doLengthCheck	1	stable	check that sequence length can be divided by 3
-buildTree5.pl	5.34	General options	-runDNDS	integer	doDNDS	0	stable	run dNdS analysis
-buildTree5.pl	5.34	General options	-runTheta	integer	doTheta	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-genesForDNDS	string	genesExtra		stable	list with selected genes just for dnds
-buildTree5.pl	5.34	General options	-DNDSonSubset	integer	selGene	0	stable	run dnds just on subset (given by genesForDNDS) of genes
-buildTree5.pl	5.34	General options	-codemlRepeats	integer	repeatCounts	2	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-outDCodeml	string	codemlOutD		stable	See source/help for details.
-buildTree5.pl	5.34	General options	-genesToPhylip	integer	doGenesToPh	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-runFastgear	integer	doFastGear	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-runFastGearPostProcessing	integer	doFastGearSummary	0	stable	See source/help for details.
-buildTree5.pl	5.34	General options	-map	string	mapF		stable	See source/help for details.
-buildTree5.pl	5.34	General options	-clustername	string	clusterName		stable	See source/help for details.
-buildTree5.pl	5.34	Advanced partitioning	-rateMergePartitions	integer	rateMergePartitions	0 (direct); 1 (strain preset)	stable	Deterministically merge final nucleotide loci into divergence/GC partition bins.
-buildTree5.pl	5.34	Advanced partitioning	-rateMergeMaxBins	integer	rateMergeMaxBins	8	advanced	Maximum bins; the automatic target is 4/6/8 for <=100/<=250/>250 retained loci.
-buildTree5.pl	5.34	Advanced partitioning	-rateMergeMinLoci	integer	rateMergeMinLoci	20	advanced	Merge undersized bins into their nearest normalized divergence/GC neighbour.
-buildTree5.pl	5.34	Advanced partitioning	-rateMergeMinSites	integer	rateMergeMinSites	20000	advanced	Minimum effective called sites per bin; missing data reduce each locus's contribution.
-buildTree5.pl	5.34	Advanced locus selection	-taxonAwareLocusSelection	integer	taxonAwareLocusSelection	1	stable	Enable the in-process two-stage robust/core-plus-taxon-rescue selector; set to 0 for legacy filtering.
-buildTree5.pl	5.34	Advanced locus selection	-taxonAwareMaxLoci	integer	taxonAwareMaxLoci	500	advanced	Maximum final loci.
-buildTree5.pl	5.34	Advanced locus selection	-taxonAwareCoreLoci	integer	taxonAwareCoreLoci	400	advanced	Robust core loci selected before taxon rescue.
-buildTree5.pl	5.34	Advanced locus selection	-taxonAwareCandidateExtra	integer	taxonAwareCandidateExtra	150	advanced	Pre-MSA QC-backfill loci.
-buildTree5.pl	5.34	Advanced locus selection	-taxonAwareMinSequenceNT	integer	taxonAwareMinSequenceNT	60	advanced	Minimum unambiguous nucleotide-equivalent occurrence length.
-buildTree5.pl	5.34	Advanced locus selection	-taxonAwareTargetLoci	integer	taxonAwareTargetLoci	25	advanced	Per-sample locus target for greedy rescue.
-buildTree5.pl	5.34	Advanced locus selection	-taxonAwareTargetNT	integer	taxonAwareTargetNT	7500	advanced	Per-sample informative-NT target for greedy rescue.
+buildTree5.pl	5.36	General options	-genoInD	string	genoindir		stable	provide a dir with complete genomes, will extract FGMs and build tree between genomes (NT/AA flag)
+buildTree5.pl	5.36	General options	-wildcardflag	string	wildcardflag		stable	See source/help for details.
+buildTree5.pl	5.36	General options	-fna	string	fnFna		stable	See source/help for details.
+buildTree5.pl	5.36	General options	-aa	string	aaFna		stable	Amino-acid FASTA input. Note: source flag is -aa, not -faa.
+buildTree5.pl	5.36	General options	-cats	string	cogCats		stable	See source/help for details.
+buildTree5.pl	5.36	General options	-outD	string	outD		stable	See source/help for details.
+buildTree5.pl	5.36	General options	-tmpD	string	tmpD		stable	See source/help for details.
+buildTree5.pl	5.36	General options	-cores	integer	ncore	1	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-superTree	integer	doSuperTree	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-superCheck	integer	doSuperCheck	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-fixHeaders	integer	fixHeaders	0	stable	# fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
+buildTree5.pl	5.36	General options	-useEte	integer	Ete	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-NTfilt	float	filt	0.8	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-NTfiltPerGene	float	ntFracGene	0.1	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-GenesPerSpecies	float	GeneFracPSpec	0.1	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-fracMaxGenes90pct	float	fracMaxGenes90pct	0.25	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-NTfiltCount	integer	ntCntTotal	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-smplDef	integer	smplDef	1	stable	is the genome somehow quantified with a delimiter (_) ?
+buildTree5.pl	5.36	General options	-smplSep	string	smplSep	_	stable	set the delimiter
+buildTree5.pl	5.36	General options	-outgroup	string	outgroup		stable	Anchor for filtering and downstream rooting; not passed to IQ-TREE as -o.
+buildTree5.pl	5.36	General options	-AAtree	integer	useAA4tree	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-MSAprogram	integer	MSAprog	2	stable	(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA)
+buildTree5.pl	5.36	General options	-minOverlapMSA	integer	minOverlapMSA	0	stable	min overlap in MSA columns, in order to retain column
+buildTree5.pl	5.36	General options	-maxGapPerCol	float	maxGapPerCol	1	stable	same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column
+buildTree5.pl	5.36	General options	-calcDistMat	integer	calcDistMat	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-calcDistMatExt	integer	calcDistMatExt	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-calcDiffDNA	integer	calcDNAdiff	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-minPcId	float	minPcId	0	stable	sequence is filtered from data, unless the average minPcId is >= $minPcId
+buildTree5.pl	5.36	General options	-SynTree	integer	calcSyn	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-NonSynTree	integer	calcNonSyn	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-continue	integer	continue	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-bootstrap	integer	bootStrap	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-subsetSmpls	integer	subsetSmpls	-1	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-postFilter	string	postFilter		stable	""","" sep list of zorro,guidance2,macse"
+buildTree5.pl	5.36	General options	-rmMSA	integer	removeMSA	0	stable	to save diskspace
+buildTree5.pl	5.36	General options	-gzInput	integer	gzipInput	0	stable	to save diskspace
+buildTree5.pl	5.36	General options	-isAligned	integer	isAligned	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-runRAxML	integer	doRAXML	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-runRaxMLng	integer	doRAXMLng	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-runFastTree	integer	doFastTree	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-runVeryFastTree	integer	doVeryFastTree	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-treeShrink	integer	useTreeShrink	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-runIQtree	integer	doIQTree	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-AutoModel	integer	treeAutoModel	1	stable	Strain presets use fixed GTR+F+G2 by default; set to 1 there to opt into slower MFP+MERGE.
+buildTree5.pl	5.36	General options	-iqFast	integer	iqFast	0	stable	fast qiTree mode
+buildTree5.pl	5.36	General options	-runClonalFrameML	integer	doCFML	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-runGubbins	integer	doGubbins	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-runLengthCheck	integer	doLengthCheck	1	stable	check that sequence length can be divided by 3
+buildTree5.pl	5.36	General options	-runDNDS	integer	doDNDS	0	stable	run dNdS analysis
+buildTree5.pl	5.36	General options	-runTheta	integer	doTheta	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-genesForDNDS	string	genesExtra		stable	list with selected genes just for dnds
+buildTree5.pl	5.36	General options	-DNDSonSubset	integer	selGene	0	stable	run dnds just on subset (given by genesForDNDS) of genes
+buildTree5.pl	5.36	General options	-codemlRepeats	integer	repeatCounts	2	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-outDCodeml	string	codemlOutD		stable	See source/help for details.
+buildTree5.pl	5.36	General options	-genesToPhylip	integer	doGenesToPh	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-runFastgear	integer	doFastGear	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-runFastGearPostProcessing	integer	doFastGearSummary	0	stable	See source/help for details.
+buildTree5.pl	5.36	General options	-map	string	mapF		stable	See source/help for details.
+buildTree5.pl	5.36	General options	-clustername	string	clusterName		stable	See source/help for details.
+buildTree5.pl	5.36	Advanced partitioning	-rateMergePartitions	integer	rateMergePartitions	0 (direct); 1 (strain preset)	stable	Deterministically merge final nucleotide loci into divergence/GC partition bins.
+buildTree5.pl	5.36	Advanced partitioning	-rateMergeMaxBins	integer	rateMergeMaxBins	8	advanced	Maximum deterministic rate/GC bins.
+buildTree5.pl	5.36	Advanced partitioning	-rateMergeTargetSites	integer	rateMergeTargetSites	30000	advanced	Initial target is ceil(total effective called sites / target), capped by rateMergeMaxBins.
+buildTree5.pl	5.36	Advanced partitioning	-rateMergeMinLoci	integer	rateMergeMinLoci	20	advanced	Merge undersized bins into their nearest normalized divergence/GC neighbour.
+buildTree5.pl	5.36	Advanced partitioning	-rateMergeMinSites	integer	rateMergeMinSites	20000	advanced	Minimum effective called sites per bin; missing data reduce each locus's contribution.
+buildTree5.pl	5.36	Advanced locus selection	-taxonAwareLocusSelection	integer	taxonAwareLocusSelection	1	stable	Enable the in-process two-stage robust/core-plus-taxon-rescue selector; set to 0 for legacy filtering.
+buildTree5.pl	5.36	Advanced locus selection	-taxonAwareMaxLoci	integer	taxonAwareMaxLoci	500	advanced	Maximum final loci.
+buildTree5.pl	5.36	Advanced locus selection	-taxonAwareCoreLoci	integer	taxonAwareCoreLoci	400	advanced	Robust core loci selected before taxon rescue.
+buildTree5.pl	5.36	Advanced locus selection	-taxonAwareCandidateExtra	integer	taxonAwareCandidateExtra	150	advanced	Pre-MSA QC-backfill loci.
+buildTree5.pl	5.36	Advanced locus selection	-taxonAwareMinSequenceNT	integer	taxonAwareMinSequenceNT	60	advanced	Minimum unambiguous nucleotide-equivalent occurrence length.
+buildTree5.pl	5.36	Advanced locus selection	-taxonAwareTargetLoci	integer	taxonAwareTargetLoci	25	advanced	Per-sample locus target for greedy rescue.
+buildTree5.pl	5.36	Advanced locus selection	-taxonAwareTargetNT	integer	taxonAwareTargetNT	7500	advanced	Per-sample informative-NT target for greedy rescue.

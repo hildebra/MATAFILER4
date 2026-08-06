@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.34;/,
-	'deterministic rate/GC partition merging increments the workflow version');
+like($source, qr/my \$version = 5\.36;/,
+	'placement eligibility and the legacy strain default increment the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
@@ -24,7 +24,7 @@ like($source,
 	qr/my \$treeAutoModel=1;.*?my \$treeAutoModelExplicit=0;.*?"AutoModel=i" => sub \{.*?\$treeAutoModel = \$_\[1\];.*?\$treeAutoModelExplicit = 1;.*?if \(\$strainWithinPreset\) \{.*?\$treeAutoModel = 0 unless \$treeAutoModelExplicit;/s,
 	'strain trees default to the fixed model while an explicit -AutoModel 1 remains an opt-in');
 like($source,
-	qr/my %RATE_MERGE_DEFAULT = \(.*?enabled => 0.*?maximum_bins => 8.*?minimum_loci_per_bin => 20.*?minimum_sites_per_bin => 20_000.*?"rateMergePartitions=i" => sub \{.*?\$rateMergePartitionsExplicit = 1.*?if \(\$strainWithinPreset\) \{.*?\$rateMergePartitions = 1 unless \$rateMergePartitionsExplicit;/s,
+	qr/my %RATE_MERGE_DEFAULT = \(.*?enabled => 0.*?maximum_bins => 8.*?target_sites_per_bin => 30_000.*?minimum_loci_per_bin => 20.*?minimum_sites_per_bin => 20_000.*?"rateMergePartitions=i" => sub \{.*?\$rateMergePartitionsExplicit = 1.*?if \(\$strainWithinPreset\) \{.*?\$rateMergePartitions = 1 unless \$rateMergePartitionsExplicit;/s,
 	'direct builds keep rate merging optional while strain presets enable it unless explicitly disabled');
 like($source,
 	qr/my \$withinSpecies = 0;.*?my \$minOverlapMSA;.*?"withinSpecies=i".*?\$minOverlapMSA = \$withinSpecies \? 2 : 0 unless defined \$minOverlapMSA;.*?\$postAlignmentLocusQC = \$withinSpecies.*?unless defined \$postAlignmentLocusQC;.*?\$postAlignmentDivergenceQC = \$withinSpecies \? 1 : 0/s,
@@ -57,7 +57,7 @@ like($source,
 	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?between_species_enabled => 0.*?within_species_enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 5\.0.*?my \$postAlignmentLocusQC;/s,
 	'broad trees retain all loci by default while within-species trees reject stronger divergence outliers');
 like($source,
-	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=6".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"minimum_gene_fraction_per_species=\$GeneFracPSpec".*?"iqtree_auto_model=\$treeAutoModel".*?"rate_partition_merge=\$rateMergePartitions".*?"rate_partition_maximum_bins=\$rateMergeMaxBins".*?"taxon_aware=\$taxonAwareLocusSelection".*?\$legacyWithinSpeciesQCAudit = !\$taxonAwareLocusSelection.*?!\$rateMergePartitions && \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
+	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=8".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"minimum_gene_fraction_per_species=\$GeneFracPSpec".*?"iqtree_auto_model=\$treeAutoModel".*?"iqtree_legacy=\$iqLegacy".*?"rate_partition_merge=\$rateMergePartitions".*?"rate_partition_maximum_bins=\$rateMergeMaxBins".*?"rate_partition_target_sites=\$rateMergeTargetSites".*?"taxon_aware=\$taxonAwareLocusSelection".*?\$legacyWithinSpeciesQCAudit = !\$taxonAwareLocusSelection.*?!\$rateMergePartitions && \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
 	'changed locus-retention policies rebuild stale checkpoints while legacy within-species audits remain compatible');
 like($source,
 	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?rename \$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
@@ -92,8 +92,11 @@ like($source,
 	qr/if \(\$taxonAwareLocusSelection && \$multAliF eq \$multAli\).*?\(\$num1 \* \$factor\) < \$minimumAnchorNT.*?else \{.*?\$qtl90NTcnts \* \$ntFrac/s,
 	'the final primary merge honors the absolute taxon-aware anchor instead of rerunning relative sample filtering');
 like($source,
-	qr/sub readPostAlignmentRateMetrics.*?p90_consensus_divergence.*?sub alignmentGCMetric.*?sub deterministicRatePartitions.*?\$locusCount <= 100 \? 4.*?\$locusCount <= 250 \? 6.*?: 8.*?\$summary\{\$_\}\{loci\} < \$rateMergeMinLoci.*?\$summary\{\$_\}\{sites\} < \$rateMergeMinSites.*?rate_merged_partitions\.tsv/s,
-	'rate merging reuses QC divergence, combines it with GC, scales to 4/6/8 bins, collapses undersized bins, and audits assignments');
+	qr/sub classifyTaxonAwarePlacementEligibility.*?gene_fraction.*?nt_fraction.*?\$minimumLoci = 2.*?below_placement_gene_fraction/s,
+	'coverage filters are restored for sparse placement only, with a two-locus minimum and audit');
+like($source,
+	qr/sub readPostAlignmentRateMetrics.*?p90_consensus_divergence.*?sub alignmentGCMetric.*?sub deterministicRatePartitions.*?\$totalEffectiveSites.*?\$rateMergeTargetSites.*?\$desiredBins = \$rateMergeMaxBins.*?\$splitMetric.*?'rate_proxy'.*?'gc_fraction'.*?\$summary\{\$_\}\{loci\} < \$rateMergeMinLoci.*?\$summary\{\$_\}\{sites\} < \$rateMergeMinSites.*?rate_merged_partitions\.tsv/s,
+	'rate merging is targeted by effective sites, refines P90 and GC splits, collapses undersized bins, and audits assignments');
 like($source,
 	qr/my \@rescueLoci = grep.*?eq 'taxon_rescue'.*?my \@binningLoci = grep.*?ne 'taxon_rescue'.*?for my \$locus \(\@rescueLoci\).*?\$locus->\{initial_bin\} = 'taxon_rescue_to_'/s,
 	'taxon-rescue loci join their nearest robust rate/GC bin instead of defining sparse partitions');
@@ -101,8 +104,8 @@ like($source,
 	qr/print O "\$TypeTag, \$partition->\{name\} = ".join\(", ", \@ranges\)/,
 	'grouped partitions use IQ-TREE-compatible comma-separated non-contiguous ranges');
 like($source,
-	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => \\\$iqLegacy/s,
-	'buildTree exposes memory-capped pathogen and legacy IQ-TREE modes');
+	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => sub \{.*?\$iqLegacyExplicit = 1.*?if \(\$strainWithinPreset\) \{.*?\$iqLegacy = 1 unless \$iqLegacyExplicit \|\| \$iqPathogen/s,
+	'buildTree exposes memory-capped pathogen mode and defaults strain presets to legacy IQ-TREE');
 like($source, qr/-iqPathogen and -iqLegacy are mutually exclusive/,
 	'buildTree rejects conflicting modern and legacy IQ-TREE modes');
 like($source,

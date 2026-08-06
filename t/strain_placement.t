@@ -49,6 +49,26 @@ is_deeply($split->{placement}, [qw(F)],
 is($split->{reason}{E}, 'retained_after_locus_qc_masking',
 	'locus-QC status alone does not remove a well-covered sample after masking');
 
+my $eligible_backbone = File::Spec->catfile($tmp, 'eligible-backbone.fna');
+my $eligible_queries = File::Spec->catfile($tmp, 'eligible-placement.fna');
+my $eligible_split = split_strict_backbone(
+	$full, $eligible_backbone, $eligible_queries, {E => 'placement'},
+	{
+		coverage_fraction => 0.35,
+		minimum_backbone => 3,
+		placement_eligible => {F => 0},
+		placement_ineligible_reason => {F => 'below_placement_gene_fraction'},
+	},
+);
+is_deeply($eligible_split->{backbone}, [qw(A B C D E)],
+	'coverage-adequate samples still define the broad initial backbone');
+is_deeply($eligible_split->{placement}, [],
+	'an ineligible sparse sample is not appended as a placement');
+is_deeply($eligible_split->{excluded}, [qw(F)],
+	'a low-coverage sample failing the restored gene threshold is explicitly excluded');
+like($eligible_split->{reason}{F}, qr/below_placement_gene_fraction/,
+	'placement exclusion preserves the threshold reason for audit');
+
 my $fallback_backbone = File::Spec->catfile($tmp, 'fallback-backbone.fna');
 my $fallback_queries = File::Spec->catfile($tmp, 'fallback-placement.fna');
 my $fallback = split_strict_backbone(

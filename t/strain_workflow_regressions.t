@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.78;/,
-	'default deterministic partition merging increments the workflow version');
+like($strain, qr/my \$version = 0\.80;/,
+	'legacy strain inference and placement gating increment the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -218,8 +218,8 @@ like($strain,
 	qr/my \$iqPathogen = 0.*?"iqPathogen=i"\s+=> \\\$iqPathogen.*?-iqPathogen', \$iqPathogen/s,
 	'within-strain pathogen mode defaults off and is propagated explicitly to split workers');
 like($strain,
-	qr/"legacyMGTK=i"\s+=> \\\$legacyMGTK.*?-iqPathogen and -legacyMGTK are mutually exclusive.*?-legacyMGTK', \$legacyMGTK/s,
-	'within-strain legacy IQ-TREE selection remains exclusive and is propagated to split workers');
+	qr/my \$legacyMGTK = 1;.*?"legacyMGTK=i"\s+=> sub \{.*?\$legacyMGTKExplicit = 1.*?\$legacyMGTK = 0 if \$iqPathogen && !\$legacyMGTKExplicit.*?-iqPathogen and -legacyMGTK are mutually exclusive.*?-legacyMGTK', \$legacyMGTK/s,
+	'within-strain legacy IQ-TREE is default, pathogen mode opts out automatically, and explicit conflicts remain rejected');
 like($strain,
 	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(\$legacyMGTK\).*?"-iqLegacy 1 ".*?"-iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
 	'within-strain IQ-TREE defaults to bounded standard mode and enables CMAPLE only by explicit request');
@@ -305,7 +305,7 @@ like($strain,
 	qr/my \$GenesPerSpecies = 0\.05;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.02;.*?my \$taxonAwareLocusSelection = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
 	'strainWithin uses the relaxed defaults, enables taxon-aware selection, and forwards explicit disablement');
 like($strain,
-	qr/my \$rateMergePartitions = 1;.*?my \$rateMergeMaxBins = 8;.*?my \$rateMergeMinLoci = 20;.*?my \$rateMergeMinSites = 20_000;.*?"rateMergePartitions=i" => \\\$rateMergePartitions.*?-rateMergePartitions \$rateMergePartitions.*?-rateMergeMaxBins \$rateMergeMaxBins.*?-rateMergeMinLoci \$rateMergeMinLoci.*?-rateMergeMinSites \$rateMergeMinSites/s,
+	qr/my \$rateMergePartitions = 1;.*?my \$rateMergeMaxBins = 8;.*?my \$rateMergeTargetSites = 30_000;.*?my \$rateMergeMinLoci = 20;.*?my \$rateMergeMinSites = 20_000;.*?"rateMergePartitions=i" => \\\$rateMergePartitions.*?-rateMergePartitions \$rateMergePartitions.*?-rateMergeMaxBins \$rateMergeMaxBins.*?-rateMergeTargetSites \$rateMergeTargetSites.*?-rateMergeMinLoci \$rateMergeMinLoci.*?-rateMergeMinSites \$rateMergeMinSites/s,
 	'strainWithin enables deterministic rate merging and forwards all bin controls');
 like($strain,
 	qr/if \(\$taxonAwareLocusSelection\) \{.*?\$taxonAwareGeneBudget = \$noGeneLimit.*?\$presortGenes.*?\$maxNGenes < \$presortGenes.*?taxonAwareLocusBudgets\(\$taxonAwareGeneBudget\).*?-taxonAwareMaxLoci \$taxonAwareMaxLoci.*?-taxonAwareCoreLoci \$taxonAwareCoreLoci.*?-taxonAwareCandidateExtra \$taxonAwareCandidateExtra.*?sub taxonAwareLocusBudgets.*?\$maximumLoci \* 0\.8.*?\$maximumLoci \* 0\.3/s,

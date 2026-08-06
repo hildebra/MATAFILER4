@@ -88,12 +88,14 @@ sub split_strict_backbone {
 	my $minimum_backbone = $options->{minimum_backbone} // 3;
 	my $coverage_fraction = $options->{coverage_fraction} // 0.35;
 	my $outgroup = $options->{outgroup} // '';
+	my $placement_eligible = $options->{placement_eligible} || {};
+	my $placement_ineligible_reason = $options->{placement_ineligible_reason} || {};
 	my $seq = _read_fasta($full_fasta);
 	my @ids = sort keys %{$seq};
 	die "Strict-backbone input $full_fasta contains no sequences\n" unless @ids;
 	my %informative = map { $_ => _informative_count($seq->{$_}, $is_aa) } @ids;
 	my $q90 = _quantile(0.90, values %informative);
-	my (%classification_reason, %requested_reason, @backbone, @placement);
+	my (%classification_reason, %requested_reason, @backbone, @placement, @excluded);
 	for my $id (@ids) {
 		my $sampleLocusQC = ($status->{$id} // '') eq 'placement';
 		my $lowCoverage = $q90 > 0
@@ -102,7 +104,13 @@ sub split_strict_backbone {
 		if ($lowCoverage) {
 			my @reason = ('low_validated_coverage');
 			push @reason, 'sample_locus_qc' if $sampleLocusQC;
-			push @placement, $id;
+			if (exists($placement_eligible->{$id}) && !$placement_eligible->{$id}) {
+				push @reason, ($placement_ineligible_reason->{$id}
+					// 'placement_coverage_not_met');
+				push @excluded, $id;
+			} else {
+				push @placement, $id;
+			}
 			$classification_reason{$id} = join(',', @reason);
 			$requested_reason{$id} = $classification_reason{$id};
 		} else {
@@ -114,7 +122,9 @@ sub split_strict_backbone {
 	my $fallback = 0;
 	if (@backbone < $minimum_backbone) {
 		$fallback = 1;
-		@backbone = @ids;
+		# Placement-eligible samples can still support an underpowered inference,
+		# but samples that failed the restored coverage gate stay excluded.
+		@backbone = sort (@backbone, @placement);
 		@placement = ();
 	}
 	_write_fasta($backbone_fasta, $seq, \@backbone);
@@ -122,6 +132,7 @@ sub split_strict_backbone {
 	return {
 		backbone => \@backbone,
 		placement => \@placement,
+		excluded => \@excluded,
 		reason => \%classification_reason,
 		informative => \%informative,
 		q90_informative => $q90,

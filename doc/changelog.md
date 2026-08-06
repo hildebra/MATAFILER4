@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-08-06 — Legacy strain inference and placement eligibility
+
+- Updated `buildTree5.pl` to 5.36 and `strain_within.pl` to 0.80. The historical IQ-TREE command is again the strain default; `-legacyMGTK 0` selects the standard modern command, while `-iqPathogen 1` selects pathogen mode and disables the default automatically.
+- The relaxed 35%-of-Q90 backbone continues to maximise samples used for initial inference. A sample deferred for low coverage is now grafted only if it passes the existing `GenesPerSpecies` and relative-NT thresholds calculated from the final selected alignment, the configured NT/overlap floors, and an absolute minimum of two loci. This prevents single-locus re-additions.
+- Added `phylo/taxon_aware_placement_eligibility.tsv`; `strict_backbone.samples.tsv` now records samples excluded from placement and their reason. The continuation fingerprint records the legacy-IQ-TREE choice.
+
+## 2026-08-06 — Site-driven strain partition merging
+
+- Updated `buildTree5.pl` to 5.35 and `strain_within.pl` to 0.79. Initial deterministic rate/GC partition count is now driven by effective called sites rather than retained locus count: `ceil(total effective sites / 30000)`, capped at eight bins by default.
+- The splitter repeatedly refines the largest current bin at an effective-site-balanced boundary using the more heterogeneous local signal of post-alignment P90 divergence or GC fraction. Existing 20-locus and 20,000-effective-site minimums still merge weak bins into their nearest rate/GC neighbour.
+- Added `-rateMergeTargetSites INT` (default `30000`) to both `buildTree5.pl` and `strain_within.pl`; it is recorded in the continuation-policy fingerprint.
+
 ## 2026-08-05 — Deterministic strain partition merging
 
 - Updated `buildTree5.pl` to 5.34 and `strain_within.pl` to 0.78. Strain trees now deterministically pool final nucleotide loci into bounded rate/GC partitions while retaining fixed `GTR+F+G2`; direct `buildTree5.pl` calls can opt in with `-rateMergePartitions 1`.

@@ -38,6 +38,8 @@
 #5.32: reject stronger locus-level divergence outliers and enable partition merging by default for strain trees
 #5.33: restore the fast fixed IQ-TREE model as the strain-tree default; retain AutoModel as an opt-in
 #5.34: deterministically merge strain loci into rate/GC partition bins before IQ-TREE
+#5.35: size deterministic rate/GC partitions by effective called sites, not locus count
+#5.36: retain broad backbones while applying coverage criteria to sparse-sample placement
 
 use warnings;
 use strict;
@@ -101,6 +103,7 @@ sub selectTaxonAwareCandidateLoci;
 sub selectTaxonAwareFinalLoci;
 sub chooseTaxonAwareLoci;
 sub classifyTaxonAwareSamples;
+sub classifyTaxonAwarePlacementEligibility;
 sub taxonAwareAlignmentMetrics;
 sub informativeSequenceLength;
 sub writeTaxonAwareLocusAudit;
@@ -115,7 +118,7 @@ sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 
 my $doPhym= 0;
-my $version = 5.34;
+my $version = 5.36;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -186,6 +189,7 @@ my $iqFast=0;
 my $iqMemMB=0;
 my $iqPathogen=0;
 my $iqLegacy=0;
+my $iqLegacyExplicit=0;
 my $minOverlapMSA;
 my $maxGapPerCol = 1 ;
 my $minPcId = 0;
@@ -222,12 +226,14 @@ my $postAlignmentDivergenceQC;
 my %RATE_MERGE_DEFAULT = (
 	enabled => 0,
 	maximum_bins => 8,
+	target_sites_per_bin => 30_000,
 	minimum_loci_per_bin => 20,
 	minimum_sites_per_bin => 20_000,
 );
 my $rateMergePartitions = $RATE_MERGE_DEFAULT{enabled};
 my $rateMergePartitionsExplicit = 0;
 my $rateMergeMaxBins = $RATE_MERGE_DEFAULT{maximum_bins};
+my $rateMergeTargetSites = $RATE_MERGE_DEFAULT{target_sites_per_bin};
 my $rateMergeMinLoci = $RATE_MERGE_DEFAULT{minimum_loci_per_bin};
 my $rateMergeMinSites = $RATE_MERGE_DEFAULT{minimum_sites_per_bin};
 my %TAXON_AWARE_DEFAULT = (
@@ -334,6 +340,7 @@ GetOptions(
 		$rateMergePartitionsExplicit = 1;
 	},
 	"rateMergeMaxBins=i" => \$rateMergeMaxBins,
+	"rateMergeTargetSites=i" => \$rateMergeTargetSites,
 	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
 	"rateMergeMinSites=i" => \$rateMergeMinSites,
 	"taxonAwareLocusSelection=i" => \$taxonAwareLocusSelection,
@@ -351,7 +358,10 @@ GetOptions(
 	"iqFast=i" => \$iqFast, #fast qiTree mode
 	"iqMemMB=i" => \$iqMemMB, #IQ-TREE RAM cap in MB; 0 leaves IQ-TREE uncapped
 	"iqPathogen=i" => \$iqPathogen, #IQ-TREE 3 CMAPLE/native low-divergence selection
-	"iqLegacy=i" => \$iqLegacy, #restore the pre-5.14 IQ-TREE command
+	"iqLegacy=i" => sub {
+		$iqLegacy = $_[1];
+		$iqLegacyExplicit = 1;
+	}, #restore the pre-5.14 IQ-TREE command
 	"runClonalFrameML=i" => \$doCFML,
 	"runGubbins=i" => \$doGubbins,
 	"runLengthCheck=i" => \$doLengthCheck,		#check that sequence length can be divided by 3
@@ -393,6 +403,7 @@ if ($strainWithinPreset) {
 	# loci. The fixed GTR+F+G2 model remains the fast production default;
 	# callers can explicitly request AutoModel for a diagnostic comparison.
 	$treeAutoModel = 0 unless $treeAutoModelExplicit;
+	$iqLegacy = 1 unless $iqLegacyExplicit || $iqPathogen;
 	$rateMergePartitions = 1 unless $rateMergePartitionsExplicit;
 	$iqFast = 1;
 	$doSuperTree = 0;
@@ -447,8 +458,8 @@ die "-postAlignmentMinLociRelative must be positive "
 	if $postAlignmentMinLociRelative < 1;
 die "-rateMergePartitions must be 0 or 1\n"
 	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
-die "-rateMergeMaxBins, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
-	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeMinLoci, $rateMergeMinSites);
+die "-rateMergeMaxBins, -rateMergeTargetSites, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
+	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeTargetSites, $rateMergeMinLoci, $rateMergeMinSites);
 die "-rateMergePartitions requires nucleotide trees (-AAtree 0)\n"
 	if $rateMergePartitions && $useAA4tree;
 die "-rateMergePartitions requires -postAlignmentLocusQC 1 or "
@@ -608,6 +619,7 @@ print "Post-alignment locus QC: enabled="
 	. "; minimum loci for relative QC=$postAlignmentMinLociRelative\n";
 print "Partition merging: enabled=" . ($rateMergePartitions ? "yes" : "no")
 	. "; maximum bins=$rateMergeMaxBins"
+	. "; target size=$rateMergeTargetSites effective sites/bin"
 	. "; minimum bin size=$rateMergeMinLoci loci/$rateMergeMinSites sites\n";
 print "Taxon-aware locus selection: enabled="
 	. ($taxonAwareLocusSelection ? "yes" : "no")
@@ -707,12 +719,13 @@ my @MSrm;
 my %FAA ; my %FNA ; my @geneList; my @geneListF;
 my (%primaryAlignmentGene, %taxonAwarePreMetrics, %taxonAwareUniverseSamples);
 my (%partitionRateProxy, %partitionSelectionPhase, %taxonAwareFinalMetricByPath);
+my (%taxonAwarePlacementEligibility, %taxonAwarePlacementIneligibleReason);
 my $strictSplit;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=6",
+	"schema=8",
 	"enabled=$postAlignmentLocusQC",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
@@ -730,8 +743,10 @@ my $postAlignmentQCPolicy = join("\t",
 		? $postAlignmentRelativeZ : "disabled"),
 	"minimum_loci_relative=$postAlignmentMinLociRelative",
 	"iqtree_auto_model=$treeAutoModel",
+	"iqtree_legacy=$iqLegacy",
 	"rate_partition_merge=$rateMergePartitions",
 	"rate_partition_maximum_bins=$rateMergeMaxBins",
+	"rate_partition_target_sites=$rateMergeTargetSites",
 	"rate_partition_minimum_loci=$rateMergeMinLoci",
 	"rate_partition_minimum_sites=$rateMergeMinSites",
 	"taxon_aware=$taxonAwareLocusSelection",
@@ -1369,11 +1384,44 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 		} grep {
 			$finalSelection->{locus_metrics}{$_}{selected}
 		} keys %{$finalSelection->{locus_metrics}};
+		my $placementEligibility = classifyTaxonAwarePlacementEligibility(
+			sample_metrics => $finalSelection->{sample_metrics},
+			gene_fraction => $GeneFracPSpec,
+			nt_fraction => $ntFrac,
+			minimum_nt => $ntCntTotal,
+			minimum_overlap => $placementMinOverlap,
+			outgroup => $outgroup,
+		);
+		%taxonAwarePlacementEligibility = map {
+			$_ => $placementEligibility->{samples}{$_}{eligible}
+		} keys %{$placementEligibility->{samples}};
+		%taxonAwarePlacementIneligibleReason = map {
+			$_ => $placementEligibility->{samples}{$_}{reason}
+		} grep { !$placementEligibility->{samples}{$_}{eligible} }
+			keys %{$placementEligibility->{samples}};
+		my $placementAudit = "$treeD/taxon_aware_placement_eligibility.tsv";
+		open my $placementOutput, '>', $placementAudit
+			or die "Cannot write taxon-aware placement eligibility $placementAudit: $!\n";
+		print {$placementOutput} join("\t", qw(
+			sample selected_loci selected_nt placement_eligible reason
+			minimum_loci minimum_nt
+		)), "\n";
+		for my $sample (sort keys %{$placementEligibility->{samples}}) {
+			my $entry = $placementEligibility->{samples}{$sample};
+			print {$placementOutput} join("\t",
+				$sample, $entry->{selected_loci}, $entry->{selected_nt},
+				$entry->{eligible} ? 1 : 0, $entry->{reason},
+				$placementEligibility->{minimum_loci},
+				$placementEligibility->{minimum_nt},
+			), "\n";
+		}
+		close $placementOutput
+			or die "Cannot close taxon-aware placement eligibility $placementAudit: $!\n";
 		print "Taxon-aware final selection retained "
 			. scalar(@{$finalSelection->{alignments}}) . "/"
 			. $postQCAlignmentCount
 			. " post-QC loci; reports: $treeD/taxon_aware_locus_selection.tsv, "
-			. "$treeD/taxon_aware_sample_selection.tsv\n";
+			. "$treeD/taxon_aware_sample_selection.tsv, $placementAudit\n";
 	}
 }
 
@@ -1431,6 +1479,8 @@ if ($strictBackbone) {
 			is_aa => $useAA4tree,
 			coverage_fraction => $strictBackboneFraction,
 			minimum_backbone => $strictBackboneMinSamples,
+			placement_eligible => \%taxonAwarePlacementEligibility,
+			placement_ineligible_reason => \%taxonAwarePlacementIneligibleReason,
 			outgroup => $outgroup,
 		},
 	);
@@ -1440,8 +1490,9 @@ if ($strictBackbone) {
 	print {$classification} join("\t",
 		qw(sample tree_role reason informative_positions q90_informative)), "\n";
 	my %isPlacement = map { $_ => 1 } @{$strictSplit->{placement}};
+	my %isExcluded = map { $_ => 1 } @{$strictSplit->{excluded} // []};
 	for my $sample (sort(
-		@{$strictSplit->{backbone}}, @{$strictSplit->{placement}}
+		@{$strictSplit->{backbone}}, @{$strictSplit->{placement}}, @{$strictSplit->{excluded} // []}
 	)) {
 		my $reason = $strictSplit->{reason}{$sample} // 'validated_backbone';
 		$reason = "backbone_fallback:".$strictSplit->{requested_reason}{$sample}
@@ -1449,7 +1500,7 @@ if ($strictBackbone) {
 				&& exists($strictSplit->{requested_reason}{$sample});
 		print {$classification} join("\t",
 			$sample,
-			$isPlacement{$sample} ? 'placement' : 'backbone',
+			$isExcluded{$sample} ? 'excluded' : $isPlacement{$sample} ? 'placement' : 'backbone',
 			$reason,
 			$strictSplit->{informative}{$sample},
 			sprintf('%.2f', $strictSplit->{q90_informative}),
@@ -1458,7 +1509,8 @@ if ($strictBackbone) {
 	close $classification or die "Cannot close $classificationFile: $!\n";
 	print "Strict-backbone split: ".scalar(@{$strictSplit->{backbone}})
 		." backbone and ".scalar(@{$strictSplit->{placement}})
-		." placement sample(s); full alignment retained at $fullAlignment\n";
+		." placement sample(s), ".scalar(@{$strictSplit->{excluded} // []})
+		." excluded from placement; full alignment retained at $fullAlignment\n";
 	warn "Strict-backbone fallback: fewer than $strictBackboneMinSamples validated "
 		."backbone samples remained, so all samples were used for inference; "
 		."see $classificationFile\n"
@@ -2471,45 +2523,6 @@ sub alignmentGCMetric {
 sub deterministicRatePartitions {
 	my ($loci) = @_;
 	die "Deterministic partition merging received no loci\n" unless @{$loci};
-	my $locusCount = scalar @{$loci};
-	my $desiredBins = $locusCount <= 100 ? 4 : $locusCount <= 250 ? 6 : 8;
-	$desiredBins = $rateMergeMaxBins if $desiredBins > $rateMergeMaxBins;
-	my $gcBands = $desiredBins >= 4 ? 2 : 1;
-	my $rateBands = int($desiredBins / $gcBands);
-	$rateBands = 1 if $rateBands < 1;
-
-	my $quantileCutoffs = sub {
-		my ($values, $bands) = @_;
-		return [] if $bands <= 1 || @{$values} <= 1;
-		my @sorted = sort { $a <=> $b } @{$values};
-		my (@cutoffs, %seenCutoff);
-		for my $boundary (1 .. $bands - 1) {
-			my $right = int(@sorted * $boundary / $bands);
-			$right = 1 if $right < 1;
-			$right = $#sorted if $right > $#sorted;
-			my $left = $right - 1;
-			if ($sorted[$left] == $sorted[$right]) {
-				my $differentRight = $right;
-				$differentRight++ while $differentRight <= $#sorted
-					&& $sorted[$differentRight] == $sorted[$left];
-				if ($differentRight <= $#sorted) {
-					$right = $differentRight;
-				} else {
-					my $differentLeft = $left;
-					$differentLeft-- while $differentLeft >= 0
-						&& $sorted[$differentLeft] == $sorted[$right];
-					$left = $differentLeft;
-				}
-			}
-			next if $left < 0 || $right > $#sorted
-				|| $sorted[$left] == $sorted[$right];
-			my $cutoff = ($sorted[$left] + $sorted[$right]) / 2;
-			next if $seenCutoff{$cutoff}++;
-			push @cutoffs, $cutoff;
-		}
-		@cutoffs = sort { $a <=> $b } @cutoffs;
-		return \@cutoffs;
-	};
 	my @rescueLoci = grep { ($_->{selection_phase} // '') eq 'taxon_rescue' } @{$loci};
 	my @binningLoci = grep { ($_->{selection_phase} // '') ne 'taxon_rescue' } @{$loci};
 	unless (@binningLoci) {
@@ -2518,25 +2531,6 @@ sub deterministicRatePartitions {
 	}
 	my @rates = map { $_->{rate_proxy} } @{$loci};
 	my @gcFractions = map { $_->{gc_fraction} } @{$loci};
-	my @binningRates = map { $_->{rate_proxy} } @binningLoci;
-	my @binningGC = map { $_->{gc_fraction} } @binningLoci;
-	my $rateCutoffs = $quantileCutoffs->(\@binningRates, $rateBands);
-	my $gcCutoffs = $quantileCutoffs->(\@binningGC, $gcBands);
-	my $metricBand = sub {
-		my ($value, $cutoffs) = @_;
-		my $band = 1;
-		$band++ for grep { $value > $_ } @{$cutoffs};
-		return $band;
-	};
-
-	my %bins;
-	for my $locus (@binningLoci) {
-		my $rateBand = $metricBand->($locus->{rate_proxy}, $rateCutoffs);
-		my $gcBand = $metricBand->($locus->{gc_fraction}, $gcCutoffs);
-		my $initialBin = sprintf('rate%02d_gc%02d', $rateBand, $gcBand);
-		$locus->{initial_bin} = $initialBin;
-		push @{$bins{$initialBin}}, $locus;
-	}
 
 	my $summarize = sub {
 		my ($members) = @_;
@@ -2560,6 +2554,85 @@ sub deterministicRatePartitions {
 	my ($minimumGC, $maximumGC) = (sort { $a <=> $b } @gcFractions)[0, -1];
 	my $rateRange = $maximumRate - $minimumRate;
 	my $gcRange = $maximumGC - $minimumGC;
+	my $totalEffectiveSites = 0;
+	$totalEffectiveSites += $_->{effective_sites} for @{$loci};
+	my $desiredBins = int(($totalEffectiveSites + $rateMergeTargetSites - 1)
+		/ $rateMergeTargetSites);
+	$desiredBins = 1 if $desiredBins < 1;
+	$desiredBins = $rateMergeMaxBins if $desiredBins > $rateMergeMaxBins;
+	$desiredBins = scalar(@binningLoci) if $desiredBins > @binningLoci;
+
+	# Refine the largest current bin until the site-driven target is met.  Each
+	# split is placed near its effective-site median and uses whichever of P90
+	# divergence or GC still has the stronger local normalized spread.
+	my $splitMetric = sub {
+		my ($members, $field, $range) = @_;
+		return undef if @{$members} < 2 || !$range;
+		my @ordered = sort {
+			$a->{$field} <=> $b->{$field}
+				|| $a->{start} <=> $b->{start}
+		} @{$members};
+		my $total = 0;
+		$total += $_->{effective_sites} for @ordered;
+		my ($leftSites, $bestIndex, $bestBalance);
+		for my $index (0 .. $#ordered - 1) {
+			$leftSites += $ordered[$index]{effective_sites};
+			next if $ordered[$index]{$field} == $ordered[$index + 1]{$field};
+			my $balance = abs($total - 2 * $leftSites);
+			if (!defined($bestBalance) || $balance < $bestBalance) {
+				($bestIndex, $bestBalance) = ($index, $balance);
+			}
+		}
+		return undef unless defined $bestIndex;
+		my @left = @ordered[0 .. $bestIndex];
+		my @right = @ordered[$bestIndex + 1 .. $#ordered];
+		my ($minimum, $maximum) = ($ordered[0]{$field}, $ordered[-1]{$field});
+		return {
+			field => $field,
+			left => \@left,
+			right => \@right,
+			balance => $bestBalance,
+			span => ($maximum - $minimum) / $range,
+		};
+	};
+	my $bestSplit = sub {
+		my ($members) = @_;
+		my @candidates = grep { defined } (
+			$splitMetric->($members, 'rate_proxy', $rateRange),
+			$splitMetric->($members, 'gc_fraction', $gcRange),
+		);
+		return undef unless @candidates;
+		return (sort {
+			$b->{span} <=> $a->{span}
+				|| $a->{balance} <=> $b->{balance}
+				|| $a->{field} cmp $b->{field}
+		} @candidates)[0];
+	};
+	my %bins = (root => \@binningLoci);
+	my $splitSerial = 0;
+	while (keys(%bins) < $desiredBins) {
+		my @splitCandidates;
+		for my $key (keys %bins) {
+			my $split = $bestSplit->($bins{$key});
+			push @splitCandidates, { key => $key, split => $split,
+				summary => $summarize->($bins{$key}) } if $split;
+		}
+		last unless @splitCandidates;
+		my $candidate = (sort {
+			$b->{summary}{sites} <=> $a->{summary}{sites}
+				|| $b->{split}{span} <=> $a->{split}{span}
+				|| $a->{key} cmp $b->{key}
+		} @splitCandidates)[0];
+		my $axis = $candidate->{split}{field} eq 'rate_proxy' ? 'p90' : 'gc';
+		my $leftKey = $candidate->{key}."_${axis}".(++$splitSerial).'L';
+		my $rightKey = $candidate->{key}."_${axis}".$splitSerial.'H';
+		$_->{initial_bin} = $leftKey for @{$candidate->{split}{left}};
+		$_->{initial_bin} = $rightKey for @{$candidate->{split}{right}};
+		delete $bins{$candidate->{key}};
+		$bins{$leftKey} = $candidate->{split}{left};
+		$bins{$rightKey} = $candidate->{split}{right};
+	}
+	$_->{initial_bin} //= 'root' for @binningLoci;
 	for my $locus (@rescueLoci) {
 		my %summary = map { $_ => $summarize->($bins{$_}) } keys %bins;
 		my ($target) = sort {
@@ -3796,6 +3869,51 @@ sub classifyTaxonAwareSamples {
 			."'$args{outgroup}'\n";
 	}
 	return \%result;
+}
+
+sub classifyTaxonAwarePlacementEligibility {
+	my %args = @_;
+	my $metrics = $args{sample_metrics};
+	die "Placement eligibility requires final taxon-aware sample metrics\n"
+		unless ref($metrics) eq 'HASH' && keys %{$metrics};
+	my @selectedLoci = map { $_->{selected_loci} // 0 } values %{$metrics};
+	my @selectedNT = map { $_->{selected_nt} // 0 } values %{$metrics};
+	my $minimumLoci = int(quantile(0.9, @selectedLoci)
+		* ($args{gene_fraction} // 0) + 0.999999);
+	# A single locus cannot provide a defensible post-hoc placement, even when
+	# a small analysis makes the relative coverage threshold round down to one.
+	$minimumLoci = 2 if $minimumLoci < 2;
+	my $relativeNT = int(quantile(0.9, @selectedNT)
+		* ($args{nt_fraction} // 0) + 0.999999);
+	my $minimumNT = $args{minimum_nt} // 0;
+	$minimumNT = $relativeNT if $relativeNT > $minimumNT;
+	$minimumNT = $args{minimum_overlap}
+		if ($args{minimum_overlap} // 0) > $minimumNT;
+	my %result;
+	for my $sample (sort keys %{$metrics}) {
+		my $metric = $metrics->{$sample};
+		my ($eligible, $reason) = (1, 'placement_coverage_met');
+		if (($args{outgroup} // '') ne '' && $sample eq $args{outgroup}) {
+			($eligible, $reason) = (1, 'outgroup_retained');
+		} elsif (($metric->{role} // 'remove') eq 'remove') {
+			($eligible, $reason) = (0, 'not_retained_after_locus_selection');
+		} elsif (($metric->{selected_loci} // 0) < $minimumLoci) {
+			($eligible, $reason) = (0, 'below_placement_gene_fraction');
+		} elsif (($metric->{selected_nt} // 0) < $minimumNT) {
+			($eligible, $reason) = (0, 'below_placement_nt_fraction');
+		}
+		$result{$sample} = {
+			eligible => $eligible,
+			reason => $reason,
+			selected_loci => $metric->{selected_loci} // 0,
+			selected_nt => $metric->{selected_nt} // 0,
+		};
+	}
+	return {
+		minimum_loci => $minimumLoci,
+		minimum_nt => $minimumNT,
+		samples => \%result,
+	};
 }
 
 sub selectTaxonAwareFinalLoci {

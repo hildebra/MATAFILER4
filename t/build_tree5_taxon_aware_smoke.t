@@ -108,7 +108,7 @@ my @command = (
 	'-taxonAwareCoreLoci', 2, '-taxonAwareCandidateExtra', 1,
 	'-taxonAwareMinSequenceNT', 9, '-taxonAwareTargetLoci', 2,
 	'-taxonAwareTargetNT', 30, '-placementMinOverlap', 6,
-	'-rateMergePartitions', 1, '-rateMergeMaxBins', 4,
+	'-rateMergePartitions', 1, '-rateMergeMaxBins', 4, '-rateMergeTargetSites', 1,
 	'-rateMergeMinLoci', 1, '-rateMergeMinSites', 1,
 );
 is(system(@command), 0, 'taxon-aware buildTree smoke workflow completes');
@@ -170,7 +170,7 @@ like($rateAuditText, qr/\tvariable_site_fraction\t/,
 	'taxon-aware variability supplies the documented fallback rate proxy when locus QC is disabled');
 is(scalar(() = $rateAuditText =~ /^g[123]\t/gm), 3,
 	'every selected locus has exactly one audited partition assignment');
-like($rateAuditText, qr/^g3\t[^\t]+\ttaxon_rescue\t[^\n]+\ttaxon_rescue_to_rate/m,
+like($rateAuditText, qr/^g3\t[^\t]+\ttaxon_rescue\t[^\n]+\ttaxon_rescue_to_/m,
 	'taxon-rescue locus is attached to a robust bin and cannot seed its own partition');
 
 my $collapsedOutput = File::Spec->catdir($temporary, 'collapsed-output');

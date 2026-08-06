@@ -412,7 +412,7 @@ sub runQItree{
 		if ($autoModel){
 			$cmd .= $usePartitionModel ? "-m MFP+MERGE " : "-m TEST ";
 		} else {
-			$cmd .= $iqLegacy ? "-m GTR+F+I+G4 " : "-m GTR+F+I+G4 "; #GTR+F+G2
+			$cmd .= $iqLegacy ? "-m GTR+F+I+G4 " : "-m GTR+F+G2 ";
 			#$cmd .= "-m HKY+F+G ";
 		}
 	}
