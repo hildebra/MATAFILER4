@@ -51,6 +51,7 @@ sub mergeConspecificLogs;
 sub timeNice;
 #sub combineMGSgenes;
 sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
+sub persistentMGSInputState; sub scratchMGSInputState;
 sub stagedMGSInputsReady; sub evalFileStatus;
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
@@ -727,7 +728,7 @@ my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $P
 			= evalFileStatus();
 stepComplete("existing-output and resume audit", $stepStarted,
 	"prepared_trees=$doneDirs", "missing_trees=$treeAbsent",
-	"missing_categories=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped");
+	"incomplete_tree_inputs=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped");
 #DEBUG:getInputSize();
 
 
@@ -973,13 +974,19 @@ die "Tree for outgroup specified, but file not found:$treeFile\nAborting..\n" if
 
 #sort by largest dir first..
 $stepStarted = time;
-my @sizeOfDirs = getInputSize();
+my ($sizeOfDirsRef, $treeInputAudit) = getInputSize();
+my @sizeOfDirs = @{$sizeOfDirsRef};
 my $nonemptyTreeInputs = scalar(grep { $_ > 0 } @sizeOfDirs);
 my $treeInputMB = 0;
 $treeInputMB += $_ for @sizeOfDirs;
 stepComplete("tree-input sizing", $stepStarted,
 	"selected_MGS=".scalar(@specis), "nonempty_inputs=$nonemptyTreeInputs",
-	"estimated_uncompressed_MB=".int($treeInputMB + 0.5));
+	"estimated_uncompressed_MB=".int($treeInputMB + 0.5),
+	"tooFewSamples=$treeInputAudit->{too_few_samples}",
+	"incomplete_published=$treeInputAudit->{incomplete_published}",
+	"incomplete_scratch=$treeInputAudit->{incomplete_scratch}",
+	"empty_extraction=$treeInputAudit->{empty_extraction}",
+	"audit=$treeInputAudit->{audit_file}");
 my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 @specis=@specis[@idx];@sizeOfDirs=@sizeOfDirs[@idx];
 #print "SIZE2:: $sizeOfDirs[0] $sizeOfDirs[1] $specis[0] $specis[1]\n"; die;
@@ -1025,9 +1032,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
 	my $publishedInputsReady = !exists($legacyLocusMGS{$MGS})
-		&& fileGZe("$outD2/$FNAstdof")
-		&& fileGZe("$outD2/$FAAstdof")
-		&& fileGZe("$outD2/$CATstdof");
+		&& persistentMGSInputState($MGS) eq 'complete';
 	my $scratchInputsReady = 0;
 	if ($recalcTrees) {
 		# The sizing pass already recognizes staged inputs. Recover and combine
@@ -1121,7 +1126,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	if ($phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}if ($phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
 	my $tree_sample_separator = quotemeta($SaSe);
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
-	$Tcmd .= "-withinSpecies 1 -NTfilt $relativeNTFraction "
+	$Tcmd .= "-withinSpecies 1 -relativeNTFraction $relativeNTFraction "
 		."-NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies ";
 	$Tcmd .= "-taxonAwareLocusSelection $taxonAwareLocusSelection ";
 	if ($taxonAwareLocusSelection) {
@@ -2457,36 +2462,85 @@ sub histoMGS{#specifically for MGS..
 	#print @cnts." : @cnts\n";
 }
 
+sub persistentMGSInputState {
+	my ($MGS) = @_;
+	my $mgsDir = $SIdirs{$MGS} // "$outD/$MGS";
+	my @required = ($FNAstdof, $FAAstdof, $CATstdof);
+	my @present = grep { fileGZe("$mgsDir/$_") } @required;
+	return 'complete' if @present == @required;
+	return 'incomplete' if @present;
+	return 'missing';
+}
+
+sub scratchMGSInputState {
+	my ($MGS) = @_;
+	return 'complete' if stagedMGSInputsReady($MGS);
+	my $mgsDir = "$scratchD/outs/$MGS";
+	my @required = ($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp");
+	my $hasAny = grep {
+		fileGZe("$mgsDir/$_") || bsd_glob("$mgsDir/$_.*")
+	} @required;
+	return $hasAny ? 'incomplete' : 'missing';
+}
+
 sub getInputSize{
-	# fileGZs($FNAtf) / (1024 * 1024)
-	my @out; my @missedMGS;
+	my (@out, %counts);
+	my $auditFile = "$LOGDIR/tree_input_sizing.tsv";
+	my $auditTemporary = "$auditFile.tmp.$$";
+	make_path($LOGDIR) unless -d $LOGDIR;
+	unlink $auditTemporary or die "Cannot remove stale tree-input audit $auditTemporary: $!\n"
+		if -e $auditTemporary;
+	open my $audit, '>', $auditTemporary
+		or die "Cannot create tree-input audit $auditTemporary: $!\n";
+	print {$audit} join("\t", qw(
+		MGS selected_state source estimated_uncompressed_MB persistent_state scratch_state
+	)), "\n";
 	foreach my $MGS (@specis){
-		my $tmpD  = "$scratchD/outs/$MGS/";
-		my $FNAtf = "$tmpD/$FNAstdof";
-		my $inputFNAsize=0;
-		my @multiM = glob("$FNAtf*");
-		if (@multiM){
-			foreach(@multiM){
-			$inputFNAsize += fileGZs($_) / (1024 * 1024) ;
+		my $tmpD = "$scratchD/outs/$MGS";
+		my $publishedState = persistentMGSInputState($MGS);
+		my $scratchState = scratchMGSInputState($MGS);
+		my $tooFew = -s "$SIdirs{$MGS}/tooFewSamples.sto" ? 1 : 0;
+		my ($state, $source, $inputFNAsize) = ('empty_extraction', 'none', 0);
+		if ($tooFew) {
+			($state, $source) = ('too_few_samples', 'marker');
+			$counts{too_few_samples}++;
+		} elsif ($scratchState eq 'complete') {
+			($state, $source) = ('ready', 'scratch');
+			for my $path (bsd_glob("$tmpD/$FNAstdof*")) {
+				$inputFNAsize += fileGZs($path) / (1024 * 1024);
 			}
-		} elsif (fileGZe( "$SIdirs{$MGS}/$FNAstdof")) {
-			#$FNAtf = "$SIdirs{$MGS}/$FNAstdof";
-			#fileGZs
-			if (-e "$SIdirs{$MGS}/$FNAstdof"){
-				$inputFNAsize = fileGZs("$SIdirs{$MGS}/$FNAstdof") / (1024 * 1024) ;
-			} elsif (-e "$SIdirs{$MGS}/$FNAstdof.gz"){
-				$inputFNAsize = fileGZs("$SIdirs{$MGS}/$FNAstdof.gz") / (1024 * 1024)*40 ;
+		} elsif ($publishedState eq 'complete') {
+			($state, $source) = ('ready', 'published');
+			my $fna = "$SIdirs{$MGS}/$FNAstdof";
+			if (-e $fna) {
+				$inputFNAsize = fileGZs($fna) / (1024 * 1024);
+			} elsif (-e "$fna.gz") {
+				$inputFNAsize = fileGZs("$fna.gz") / (1024 * 1024) * 40;
 			}
+		} elsif ($scratchState eq 'incomplete' || $publishedState eq 'incomplete') {
+			$state = $scratchState eq 'incomplete' && $publishedState eq 'incomplete'
+				? 'incomplete_scratch_and_published'
+				: $scratchState eq 'incomplete' ? 'incomplete_scratch' : 'incomplete_published';
+			$source = 'none';
+			$counts{incomplete_scratch}++ if $scratchState eq 'incomplete';
+			$counts{incomplete_published}++ if $publishedState eq 'incomplete';
 		} else {
-			push(@missedMGS,$MGS);
-			$inputFNAsize = 0;
+			$counts{empty_extraction}++;
 		}
-		push(@out, $inputFNAsize); 
+		print {$audit} join("\t", $MGS, $state, $source,
+			sprintf('%.6f', $inputFNAsize), $publishedState, $scratchState), "\n";
+		push @out, $inputFNAsize;
 	}
-	if (@missedMGS){print "\ngetInputSize:: could not find FNA for: @missedMGS\n";}
-	#print "SIZE: @out\n";
-	#die;
-	return @out;
+	close $audit or die "Cannot close tree-input audit $auditTemporary: $!\n";
+	rename $auditTemporary, $auditFile
+		or die "Cannot publish tree-input audit $auditTemporary as $auditFile: $!\n";
+	return (\@out, {
+		too_few_samples => $counts{too_few_samples} // 0,
+		incomplete_published => $counts{incomplete_published} // 0,
+		incomplete_scratch => $counts{incomplete_scratch} // 0,
+		empty_extraction => $counts{empty_extraction} // 0,
+		audit_file => $auditFile,
+	});
 }
 
 
@@ -2571,13 +2625,16 @@ sub evalFileStatus{
 				next;
 			}
 		}
-		if (!fileGZe("$SIdirs{$MGS}/$CATstdof")){
+		my $publishedInputState = persistentMGSInputState($MGS);
+		if ($publishedInputState ne 'complete') {
 			$CatFileMiss ++ ;
 			if (stagedMGSInputsReady($MGS)) {
-				$CatNotPrepped ++; #complete staged input exists and only needs Part II
+				# Preserve a complete Stage-I staging set. A later run can combine
+				# and publish it in Part II, even when its published copy is partial.
+				$CatNotPrepped ++;
 			} else {
 				$MGSneedsExtraction{$MGS} = 1;
-				$dirsNOTPrepped ++; #missing or incomplete input requires Part I
+				$dirsNOTPrepped ++; #missing or incomplete triplet requires Part I
 			}
 			#print "$SIdirs{$MGS}\n";
 			#system "rm $SIdirs{$MGS}\n";
@@ -2591,7 +2648,7 @@ sub evalFileStatus{
 	}
 	$PhylosExist = 0 if ($CatFileMiss/scalar(@specis) > 0.1); #only activate if more than 10% missing..
 
-	print "Output dirs status: \nCatFileFinalMiss: $CatFileMiss, CatFileConvert: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent, Dir done: $doneDirs, too few samples: $tooFewDirs, Phylo complete: $PhylosExist \n";
+	print "Output dirs status: \nIncomplete tree inputs: $CatFileMiss, complete staged inputs: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent, Dir done: $doneDirs, too few samples: $tooFewDirs, Phylo complete: $PhylosExist \n";
 	#die;
 	return($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist);
 }

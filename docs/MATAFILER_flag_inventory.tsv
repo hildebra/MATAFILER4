@@ -231,7 +231,7 @@ buildTree5.pl	5.36	General options	-superTree	integer	doSuperTree	0	stable	See s
 buildTree5.pl	5.36	General options	-superCheck	integer	doSuperCheck	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-fixHeaders	integer	fixHeaders	0	stable	# fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
 buildTree5.pl	5.36	General options	-useEte	integer	Ete	0	stable	See source/help for details.
-buildTree5.pl	5.36	General options	-NTfilt	float	filt	0.8	stable	See source/help for details.
+buildTree5.pl	5.37	General options	-relativeNTFraction	float	ntFrac	0.2	stable	Explicit relative informative-NT fraction; replaces retired ambiguous -NTfilt.
 buildTree5.pl	5.36	General options	-NTfiltPerGene	float	ntFracGene	0.1	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-GenesPerSpecies	float	GeneFracPSpec	0.1	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-fracMaxGenes90pct	float	fracMaxGenes90pct	0.25	stable	See source/help for details.

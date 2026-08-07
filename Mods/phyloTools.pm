@@ -6,6 +6,7 @@ use strict;
 
 
 use Exporter qw(import);
+use File::Copy qw(copy);
 our @EXPORT_OK = qw(convertMSA2NXS runRaxMLng runRaxML readFMGdir prep40MGgenomes prepNOGSETgenomes
 			getE100 getGenoGenes getFMG renameFMGs readNCBItax
 			runFasttree runVeryFasttree runQItree iqtreeOutputComplete cleanupIQTreeTransients
@@ -778,7 +779,12 @@ sub runRaxMLng{
 	my $contS = ""; $contS = "--redo " unless ($cont);
 	my $outgrS = ""; $outgrS = "--outgroup $outgroup" if ($outgroup ne "");
 	$cmd = "$raxmlBin --msa $mAli --force --model $model --prefix $outTree $contS $outgrS --threads $ncore --site-repeats on \n"; #--seed 52352
-	$cmd .= "mv $outTree.raxml.bestTree $outTree; mv $outTree.raxml.log $outTreeBasic.log\nrm $outTree.raxml*";
+	# EPA-ng accepts RAxML-NG's bestModel file, which preserves the fitted
+	# frequencies/rates used for the backbone.  Keep it beside the published
+	# tree rather than deleting it with the other transient RAxML-NG outputs.
+	$cmd .= "mv $outTree.raxml.bestTree $outTree; mv $outTree.raxml.log $outTreeBasic.log; "
+		."if [ -s $outTree.raxml.bestModel ]; then mv $outTree.raxml.bestModel $outTreeBasic.bestModel; fi\n"
+		."rm -f $outTree.raxml*";
 	systemW "$cmd\n";
 	return $cmd;
 }
@@ -962,6 +968,17 @@ sub runRaxML{
 #	system "mv $raxD/RAxML_distances.all $outDist";
 
 	
+	# Keep the fitted RAxML v8 information file for EPA-ng strict-backbone
+	# placement.  EPA-ng can parse this report and therefore use the exact
+	# rates/frequencies selected for the backbone rather than a generic model.
+	my $raxmlInfo = $outTree;
+	$raxmlInfo =~ s/\.[^\.]+$/\.raxml.info/;
+	my $sourceInfo = "$raxD/RAxML_info.$raTmpF";
+	if (-s $sourceInfo) {
+		copy($sourceInfo, $raxmlInfo)
+			or die "Cannot retain RAxML fitted-model report $sourceInfo as $raxmlInfo: $!\n";
+	}
+
 	#clean up
 	system "rm -rf $raxD";
 }

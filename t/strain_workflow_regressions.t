@@ -88,7 +88,7 @@ like($strain, qr/ConspecificMGS\.\$subJob\.log.*?sub mergeConspecificLogs/s,
 like($strain, qr/\$onlySubmit == 0 && !\$subJob/,
 	'split children cannot recursively clean shared MGS output directories');
 like($strain,
-	qr/\$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?fileGZe\("\$outD2\/\$FNAstdof"\).*?fileGZe\("\$outD2\/\$FAAstdof"\).*?fileGZe\("\$outD2\/\$CATstdof"\).*?if \(\$publishedInputsReady && !\$mustRegenerateInputs\).*?combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\)/s,
+	qr/\$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$publishedInputsReady && !\$mustRegenerateInputs\).*?combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\)/s,
 	'complete published inputs bypass missing scratch aggregates during tree recovery');
 like($strain, qr/has neither complete published inputs nor complete combined worker input/,
 	'incomplete worker input is reported only when published recovery inputs are also incomplete');
@@ -239,13 +239,22 @@ like($strain,
 	qr/sub stagedMGSInputsReady .*?aggregateComplete.*?hasFreshParts.*?split_generation_complete.*?return 0 if grep.*?stagedMGSInputsReady\(\$MGS\)/s,
 	'the resume audit accepts only a complete staged FNA/FAA/category set');
 like($strain,
+	qr/sub persistentMGSInputState .*?\$FNAstdof, \$FAAstdof, \$CATstdof.*?return 'complete'.*?return 'incomplete'.*?sub scratchMGSInputState .*?return 'complete' if stagedMGSInputsReady/s,
+	'published reuse requires the complete FNA/FAA/category triplet while complete Stage-I staging remains reusable');
+like($strain,
+	qr/my \$publishedInputState = persistentMGSInputState\(\$MGS\).*?if \(\$publishedInputState ne 'complete'\).*?stagedMGSInputsReady\(\$MGS\).*?\$MGSneedsExtraction\{\$MGS\} = 1/s,
+	'incomplete published or scratch triplets are marked for extraction without discarding a complete staged recovery set');
+like($strain,
+	qr/tree_input_sizing\.tsv.*?too_few_samples.*?incomplete_published.*?incomplete_scratch.*?empty_extraction/s,
+	'tree-input sizing separates too-few, incomplete published, incomplete scratch, and empty extraction inputs');
+like($strain,
 	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
 	'split extraction workers inherit the missing-input MGS subset');
 like($strain,
 	qr/my \$treeTmpGb = int\(.*?\$QSBoptHR->\{tmpSpace\} = \$nodeTmpConfigured \? \$treeTmpGb : 0.*?\? "-tmpSubdir ".*?strain_within\/\$MGS.*?: "-tmpD "/s,
 	'tree jobs request and use node-local scratch when it is configured');
 like($strain,
-	qr/my \$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
+	qr/my \$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
 	'tree outputs are reset only after complete published or recoverable staged per-MGS inputs are verified');
 like($strain,
 	qr/\$scratchInputsReady \|\|= combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?using complete staged FNA\/FAA\/category files.*?tree job will publish them to the MGS directory/s,
@@ -299,8 +308,10 @@ like($strain,
 	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,
 	'split-worker sparsity is summarized instead of reported as missing catalogue data');
 like($strain,
-	qr/-withinSpecies 1 -strainWithinPreset 1 -NTfilt \$relativeNTFraction .*?-NTfiltPerGene \$GeneLengthMin -GenesPerSpecies \$GenesPerSpecies/s,
-	'unfinished trees explicitly pass the relaxed strain coverage filters to buildTree');
+	qr/-withinSpecies 1 -relativeNTFraction \$relativeNTFraction .*?-NTfiltPerGene \$GeneLengthMin -GenesPerSpecies \$GenesPerSpecies/s,
+	'unfinished trees explicitly pass the named strain coverage filters to buildTree');
+unlike($strain, qr/-NTfilt \$relativeNTFraction/,
+	'strain workflow does not emit the retired ambiguous NTfilt option');
 like($strain,
 	qr/my \$GenesPerSpecies = 0\.05;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.02;.*?my \$taxonAwareLocusSelection = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
 	'strainWithin uses the relaxed defaults, enables taxon-aware selection, and forwards explicit disablement');

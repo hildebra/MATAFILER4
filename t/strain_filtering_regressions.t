@@ -87,10 +87,14 @@ like($strain,
 like($tree, qr/use Mods::StrainPlacement.*?split_strict_backbone/s,
 	'buildTree5 uses the tested strict-backbone splitter');
 like($tree,
-	qr/treeAtHeart\(\$tOhr\).*?nearest_backbone_placements.*?write_placed_tree/s,
-	'buildTree5 places deferred samples only after backbone inference');
-like($tree, qr/strict_backbone\.placements\.tsv/,
-	'buildTree5 emits auditable overlap and distance placements');
+	qr/treeAtHeart\(\$tOhr\).*?runEpaNgPlacement\(.*?write_epa_placed_tree/s,
+	'buildTree5 uses EPA-ng ML placement only after backbone inference');
+like($tree, qr/sub runEpaNgPlacement.*?getProgPaths\("epa-ng", 0\)/s,
+	'buildTree5 resolves EPA-ng from the configured program path');
+like($tree, qr/strict_backbone\.epa_placements\.tsv/,
+	'buildTree5 retains an auditable EPA-ng placement table');
+like($tree, qr/epa_result\.jplace/,
+	'buildTree5 retains raw EPA-ng jplace output');
 
 like($strain, qr/minimum_mgs_genes_per_sample => 8,/,
 	"the default per-sample MGS minimum is eight retained loci");

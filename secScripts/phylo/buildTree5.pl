@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 
-#ARGS: ./buildTree.pl -fna [FNA] -faa [FAA] -cat [categoryFile] -outD [outDir] -cores [CPUs] -useEte [1=ETE,0=this script] -NTfilt [filter]
+#ARGS: ./buildTree.pl -fna [FNA] -faa [FAA] -cat [categoryFile] -outD [outDir] -cores [CPUs] -useEte [1=ETE,0=this script] -relativeNTFraction [filter]
 #versions: ver 2 makes a link to nexus file formats, to be used in MrBayes and BEAST etc
 #8.12.17: added mod3 from Mechthild
 #2.1.20: rewrite of workflow to extend superTrees to superCheck
@@ -40,6 +40,7 @@
 #5.34: deterministically merge strain loci into rate/GC partition bins before IQ-TREE
 #5.35: size deterministic rate/GC partitions by effective called sites, not locus count
 #5.36: retain broad backbones while applying coverage criteria to sparse-sample placement
+#5.37: use EPA-ng maximum-likelihood placement for sparse strict-backbone samples
 
 use warnings;
 use strict;
@@ -52,11 +53,11 @@ use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 ru
 use Mods::PhyloAlignment qw(filter_alignment_by_overlap);
 use Mods::StrainPlacement qw(
 	read_sample_qc split_strict_backbone
-	nearest_backbone_placements write_placed_tree
+	read_epa_jplace write_epa_placed_tree
 );
 			
 			
-use Getopt::Long qw( GetOptions );
+use Getopt::Long qw( GetOptions Configure );
 #use Mods::ext::TreeIO;
 #use Mods::IO::MaybeXS qw(encode_json decode_json);
 use Mods::IO::PP qw (decode_json);
@@ -116,9 +117,11 @@ sub deterministicRatePartitions;
 sub writeRatePartitionAudit;
 sub publishStagedTreeInputs;
 sub writeCompletionMarker;
+sub epaModelArtifact;
+sub runEpaNgPlacement;
 
 my $doPhym= 0;
-my $version = 5.36;
+my $version = 5.37;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -150,7 +153,7 @@ my $partiExt=".partition.RAXML";
 #trimal -in /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/T2/tesssst/MSA/COG0185.faa -out /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/T2/tesssst/MSA/tst.fna -backtrans /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/T2/tesssst/inMSA0.fna -keepheader -keepseqs -noallgaps -automated1 -ignorestopcodon
 #some runtim options...
 #my $ncore = 20;#RAXML cores
-my $ntFrac =0.2; my $ntFracGene = 0.1; 
+my $ntFrac =0.2; my $ntFracGene = 0.1;
 my $GeneFracPSpec = 0.1; #replacement for ntFracGene, as works also with supertrees
 my $MSAprog = 2; #do MSA with clustal (1) or msaprobs (0), mafft(2), guidance2(3), MUSCLE5 (4)
 my $calcDistMat = 0; #distmat of either AA or NT (depending on MSA)
@@ -276,6 +279,9 @@ my $MSAsubsD =""; #only needed to create subsets of MSAs for hyphy etc calcs
 die "no input args!\n" if (@ARGV == 0 );
 
 
+# Do not accept abbreviated switches: in particular, the retired -NTfilt
+# spelling must not ambiguously match -NTfiltCount/-NTfiltPerGene.
+Configure('no_auto_abbrev');
 GetOptions(
 	"genoInD=s" => \$genoindir, #provide a dir with complete genomes, will extract FGMs and build tree between genomes (NT/AA flag)
 	"wildcardflag=s" => \$wildcardflag,
@@ -294,7 +300,7 @@ GetOptions(
 	"superCheck=i" => \$doSuperCheck,
 	"fixHeaders=i" => \$fixHeaders, ## fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
 	"useEte=i"      => \$Ete,
-	#"NTfilt=f"      => sub { $filt = $_[1]; $ntFiltExplicit = 1; },
+	"relativeNTFraction=f" => \$ntFrac,
 	"NTfiltPerGene=f"      => \$ntFracGene,
 	"GenesPerSpecies=f" => \$GeneFracPSpec,
 	"fracMaxGenes90pct=f" => \$fracMaxGenes90pct,
@@ -459,6 +465,7 @@ if (length($tmpSubdir)) {
 die "-smplSep must not be empty\n" if $smplSep eq "";
 eval { qr/$smplSep/ } or die "Invalid -smplSep regular expression '$smplSep': $@";
 for my $fraction_name_value (
+	["relativeNTFraction", $ntFrac],
 	["NTfiltPerGene", $ntFracGene],
 	["GenesPerSpecies", $GeneFracPSpec], ["fracMaxGenes90pct", $fracMaxGenes90pct],
 	["maxGapPerCol", $maxGapPerCol],
@@ -697,7 +704,7 @@ my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=8",
+	"schema=9",
 	"enabled=$postAlignmentLocusQC",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
@@ -748,8 +755,10 @@ my $doMSA = 1;
 my $treesDone = treePresent($tOhr)
 	&& (!$calcNonSyn || treePresent($tOhrNSun))
 	&& (!$calcSyn || treePresent($tOhrSyn));
-if ($strictBackbone && $treesDone && !-s "$treeD/strict_backbone.samples.tsv") {
-	print "Recovery state: existing tree predates strict-backbone classification; "
+if ($strictBackbone && $treesDone
+		&& (!-s "$treeD/strict_backbone.samples.tsv"
+			|| !-s "$treeD/strict_backbone.epa_placements.tsv")) {
+	print "Recovery state: existing tree predates strict-backbone EPA-ng placement; "
 		."rebuilding tree outputs from the retained alignment\n";
 	safeRemoveTree($treeD, $outD);
 	make_path($treeD);
@@ -1643,20 +1652,23 @@ if ($strictSplit) {
 	if ($backboneTree ne "" && -s $backboneTree) {
 		my $primaryTree = $backboneTree;
 		my $dedicatedBackbone = $primaryTree =~ s/\.backbone\.treefile$/.treefile/;
+		my $report = "$treeD/strict_backbone.epa_placements.tsv";
 		if (@{$strictSplit->{placement}}) {
-			my $placements = nearest_backbone_placements(
-				$multAli, $placementAlignment, $placementMinOverlap, $useAA4tree,
+			my ($epaResult, $modelArtifact, $jplaceFile) = runEpaNgPlacement(
+				$tOhr, $backboneTree, $multAli, $placementAlignment,
+				$strictSplit->{placement}, $treeD,
 			);
-			my $report = "$treeD/strict_backbone.placements.tsv";
+			my $placements = $epaResult->{placements};
 			open my $reportFh, '>', $report or die "Cannot write $report: $!\n";
 			print {$reportFh} join("\t",
-				qw(sample status nearest_backbone p_distance validated_overlap reason)), "\n";
+				qw(sample status edge likelihood likelihood_weight_ratio distal_length pendant_length reason)), "\n";
 			for my $sample (sort keys %{$placements}) {
 				my $entry = $placements->{$sample};
 				print {$reportFh} join("\t",
-					$sample, $entry->{status}, $entry->{anchor},
-					defined($entry->{distance}) ? sprintf('%.8g', $entry->{distance}) : 'NA',
-					$entry->{overlap}, $strictSplit->{reason}{$sample} // '',
+					$sample, $entry->{status},
+					map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
+						qw(edge likelihood likelihood_weight_ratio distal_length pendant_length)),
+					$strictSplit->{reason}{$sample} // '',
 				), "\n";
 			}
 			close $reportFh or die "Cannot close $report: $!\n";
@@ -1664,19 +1676,25 @@ if ($strictSplit) {
 				$primaryTree =~ s/\.treefile$/.placed.treefile/;
 				$primaryTree .= ".placed.treefile" if $primaryTree eq $backboneTree;
 			}
-			write_placed_tree($backboneTree, $primaryTree, $placements);
-			print "Sparse-sample distance placements: $report; primary tree: $primaryTree; "
-				."backbone tree: $backboneTree\n";
-		} elsif ($dedicatedBackbone) {
-			my $temporaryPrimary = "$primaryTree.tmp.$$";
-			unlink $temporaryPrimary
-				or die "Cannot remove stale primary-tree temporary $temporaryPrimary: $!\n"
-				if -e $temporaryPrimary;
-			copy($backboneTree, $temporaryPrimary)
-				or die "Cannot copy backbone tree $backboneTree to $temporaryPrimary: $!\n";
-			rename $temporaryPrimary, $primaryTree
-				or die "Cannot publish primary tree $primaryTree: $!\n";
-			print "No samples required placement; primary tree: $primaryTree; "
+			write_epa_placed_tree($epaResult->{tree}, $primaryTree, $placements);
+			print "EPA-ng ML placements: $report; jplace: $jplaceFile; model: $modelArtifact; "
+				."primary tree: $primaryTree; backbone tree: $backboneTree\n";
+		} else {
+			open my $reportFh, '>', $report or die "Cannot write $report: $!\n";
+			print {$reportFh} join("\t",
+				qw(sample status edge likelihood likelihood_weight_ratio distal_length pendant_length reason)), "\n";
+			close $reportFh or die "Cannot close $report: $!\n";
+			if ($dedicatedBackbone) {
+				my $temporaryPrimary = "$primaryTree.tmp.$$";
+				unlink $temporaryPrimary
+					or die "Cannot remove stale primary-tree temporary $temporaryPrimary: $!\n"
+					if -e $temporaryPrimary;
+				copy($backboneTree, $temporaryPrimary)
+					or die "Cannot copy backbone tree $backboneTree to $temporaryPrimary: $!\n";
+				rename $temporaryPrimary, $primaryTree
+					or die "Cannot publish primary tree $primaryTree: $!\n";
+			}
+			print "No samples required EPA-ng placement; primary tree: $primaryTree; "
 				."backbone tree: $backboneTree\n";
 		}
 		if ($primaryTree ne $backboneTree) {
@@ -1850,6 +1868,68 @@ sub createTreeOpt{
 					runSafe => 0,
 					);
 	return \%treeOpts;
+}
+
+sub epaModelArtifact {
+	my ($treeOpts, $backboneTree) = @_;
+	my $iqtree = "$treeOpts->{IQtreeout}.treefile";
+	if ($backboneTree eq $iqtree) {
+		my $report = "$treeOpts->{IQtreeout}.iqtree";
+		return $report if -s $report;
+		die "EPA-ng placement requires the completed IQ-TREE report $report to reuse "
+			."its fitted model parameters\n";
+	}
+	my $raxmlng = $treeOpts->{RAXNGtreeout};
+	if ($backboneTree eq $raxmlng) {
+		my $model = $raxmlng;
+		$model =~ s/\.[^.]+$//;
+		$model .= '.bestModel';
+		return $model if -s $model;
+		die "EPA-ng placement requires the completed RAxML-NG model file $model to "
+			."reuse its fitted model parameters\n";
+	}
+	my $raxml = $treeOpts->{RAXtreeout};
+	if ($backboneTree eq $raxml) {
+		my $report = $raxml;
+		$report =~ s/\.[^.]+$/.raxml.info/;
+		return $report if -s $report;
+		die "EPA-ng placement requires the completed RAxML fitted-model report $report "
+			."to reuse its fitted model parameters\n";
+	}
+	die "EPA-ng strict-backbone placement supports a matching IQ-TREE, RAxML-NG, or RAxML "
+		."backbone model; no reusable model artifact is available for $backboneTree\n";
+}
+
+sub runEpaNgPlacement {
+	my ($treeOpts, $backboneTree, $backboneAlignment, $queryAlignment,
+		$queries, $treeDirectory) = @_;
+	die "EPA-ng placement requires a non-empty backbone alignment: $backboneAlignment\n"
+		unless -s $backboneAlignment;
+	die "EPA-ng placement requires a non-empty query alignment: $queryAlignment\n"
+		unless -s $queryAlignment;
+	my $epaNg = getProgPaths("epa-ng", 0);
+	die "Strict-backbone placement requested, but epa-ng is not configured. "
+		."Set epa-ng in the selected MATAFILER configuration.\n"
+		unless defined($epaNg) && length($epaNg);
+	my $modelArtifact = epaModelArtifact($treeOpts, $backboneTree);
+	my $epaDirectory = "$treeDirectory/epa-ng";
+	safeRemoveTree($epaDirectory, $treeDirectory) if -d $epaDirectory || -l $epaDirectory;
+	make_path($epaDirectory);
+	my $command = join(' ',
+		shellQuote($epaNg),
+		'--ref-msa', shellQuote($backboneAlignment),
+		'--tree', shellQuote($backboneTree),
+		'--query', shellQuote($queryAlignment),
+		'--outdir', shellQuote($epaDirectory),
+		'--model', shellQuote($modelArtifact),
+		'--threads', $ncore,
+	) . "\n";
+	print "Running EPA-ng ML placement with fitted model artifact $modelArtifact\n";
+	systemW($command);
+	my $jplace = "$epaDirectory/epa_result.jplace";
+	die "EPA-ng completed without its expected placement file $jplace\n" unless -s $jplace;
+	my $result = read_epa_jplace($jplace, $queries);
+	return ($result, $modelArtifact, $jplace);
 }
 
 #core routine to calculte (start) phylo reconstruction

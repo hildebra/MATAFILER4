@@ -9,7 +9,7 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::StrainPlacement qw(
 	read_sample_qc split_strict_backbone
-	nearest_backbone_placements write_placed_tree
+	read_epa_jplace write_epa_placed_tree
 );
 
 sub write_file {
@@ -80,33 +80,28 @@ ok($fallback->{fallback}, 'underpowered strict backbones fall back explicitly');
 ok(exists($fallback->{requested_reason}{F}),
 	'fallback retains the QC reason for audit rather than silently relabelling the sample');
 
-my $placement_backbone = File::Spec->catfile($tmp, 'placement-backbone.fna');
-my $placement_queries = File::Spec->catfile($tmp, 'placement-queries.fna');
-write_file($placement_backbone, join('',
-	">A\nAACCGGTTAACC\n",
-	">B\nAACCGGTTAACA\n",
-	">C\nAACCGGTTAAGG\n",
-));
-write_file($placement_queries, join('',
-	">D\nAACCGG------\n",
-	">E\nAACCGGTTAACC\n",
-));
-my $placements = nearest_backbone_placements(
-	$placement_backbone, $placement_queries, 5,
-);
-is($placements->{D}{anchor}, 'A',
-	'lower-coverage sample is placed using only its validated overlap');
-is($placements->{D}{overlap}, 6, 'placement reports the validated overlap');
-is($placements->{E}{anchor}, 'A', 'QC-marked complete sample has an exact anchor');
-
-my $tree = File::Spec->catfile($tmp, 'backbone.treefile');
+my $jplace = File::Spec->catfile($tmp, 'epa_result.jplace');
 my $placed_tree = File::Spec->catfile($tmp, 'placed.treefile');
-write_file($tree, "(A:0.1,(B:0.1,C:0.1):0.1);\n");
-write_placed_tree($tree, $placed_tree, $placements);
+write_file($jplace, <<'JPLACE');
+{"tree":"(A:0.1{1},(B:0.1{2},C:0.1{3}):0.2{4});","placements":[
+ {"p":[[1,-10.0,0.90,0.04,0.01],[2,-12.0,0.10,0.03,0.02]],"n":["D"]},
+ {"p":[[1,-11.0,0.80,0.06,0.02]],"n":["E"]}
+]}
+JPLACE
+my $epa = read_epa_jplace($jplace, [qw(D E F)]);
+is($epa->{placements}{D}{edge}, 1,
+	'EPA-ng parser selects the highest-likelihood-weight edge');
+is($epa->{placements}{D}{likelihood_weight_ratio}, 0.90,
+	'EPA-ng parser retains likelihood-weight support');
+is($epa->{placements}{F}{status}, 'not_reported',
+	'queries absent from jplace remain explicit in the audit report');
+write_epa_placed_tree($epa->{tree}, $placed_tree, $epa->{placements});
 my $placed_text = slurp($placed_tree);
-like($placed_text, qr/D:/, 'display tree contains the low-coverage placement');
-like($placed_text, qr/E:/, 'display tree contains the QC-deferred placement');
+like($placed_text, qr/D:0\.01/, 'display tree contains the EPA-ng pendant branch');
+like($placed_text, qr/E:0\.02/, 'multiple EPA-ng placements on one edge are retained');
+like($placed_text, qr/A:0\.04/, 'EPA-ng distal branch length is applied from the edge child');
 like($placed_text, qr/B:0\.1/, 'unaffected backbone topology is retained');
+unlike($placed_text, qr/\{\d+\}/, 'EPA-ng edge labels are not leaked into the published tree');
 
 my $qc = File::Spec->catfile($tmp, 'sampleQC.tsv');
 write_file($qc, join('',

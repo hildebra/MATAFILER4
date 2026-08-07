@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.36;/,
-	'placement eligibility and the legacy strain default increment the workflow version');
+like($source, qr/my \$version = 5\.37;/,
+	'EPA-ng ML placement increments the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
@@ -57,7 +57,7 @@ like($source,
 	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?between_species_enabled => 0.*?within_species_enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 5\.0.*?my \$postAlignmentLocusQC;/s,
 	'broad trees retain all loci by default while within-species trees reject stronger divergence outliers');
 like($source,
-	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=8".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"minimum_gene_fraction_per_species=\$GeneFracPSpec".*?"iqtree_auto_model=\$treeAutoModel".*?"iqtree_legacy=\$iqLegacy".*?"rate_partition_merge=\$rateMergePartitions".*?"rate_partition_maximum_bins=\$rateMergeMaxBins".*?"rate_partition_target_sites=\$rateMergeTargetSites".*?"taxon_aware=\$taxonAwareLocusSelection".*?\$legacyWithinSpeciesQCAudit = !\$taxonAwareLocusSelection.*?!\$rateMergePartitions && \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
+	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=9".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"minimum_gene_fraction_per_species=\$GeneFracPSpec".*?"iqtree_auto_model=\$treeAutoModel".*?"iqtree_legacy=\$iqLegacy".*?"rate_partition_merge=\$rateMergePartitions".*?"rate_partition_maximum_bins=\$rateMergeMaxBins".*?"rate_partition_target_sites=\$rateMergeTargetSites".*?"taxon_aware=\$taxonAwareLocusSelection".*?\$legacyWithinSpeciesQCAudit = !\$taxonAwareLocusSelection.*?!\$rateMergePartitions && \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
 	'changed locus-retention policies rebuild stale checkpoints while legacy within-species audits remain compatible');
 like($source,
 	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?rename \$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
@@ -209,8 +209,8 @@ like($source,
 	qr/\$tOhr->\{IQtreeout\} \.= "\.backbone" if \$strictBackbone && \$doIQTree/,
 	'strict IQ-TREE inference uses a dedicated backbone output prefix');
 like($source,
-	qr/my \$dedicatedBackbone = \$primaryTree =~ s\/\\\.backbone\\\.treefile\$\/\.treefile\/.*?write_placed_tree\(\$backboneTree, \$primaryTree, \$placements\).*?\$\{\$trRetH\}\{backbone_nwk\} = \$backboneTree;.*?\$\{\$trRetH\}\{nwk\} = \$primaryTree;/s,
-	'the placed tree becomes the primary .treefile while the ML tree remains .backbone.treefile');
+	qr/my \$dedicatedBackbone = \$primaryTree =~ s\/\\\.backbone\\\.treefile\$\/\.treefile\/.*?runEpaNgPlacement\(.*?write_epa_placed_tree\(\$epaResult->\{tree\}, \$primaryTree, \$placements\).*?\$\{\$trRetH\}\{backbone_nwk\} = \$backboneTree;.*?\$\{\$trRetH\}\{nwk\} = \$primaryTree;/s,
+	'the EPA-ng placed tree becomes the primary .treefile while the ML tree remains .backbone.treefile');
 like($source, qr/unlink \$treeOpts\{RAXtreeout\}.*?if -e \$treeOpts\{RAXtreeout\} && !-s \$treeOpts\{RAXtreeout\}/s,
 	'an empty legacy RAxML tree cannot suppress continuation recovery');
 like($source,
