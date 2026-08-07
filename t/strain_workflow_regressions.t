@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.81;/,
-	'legacy strain inference and default-active backbone placement increment the workflow version');
+like($strain, qr/my \$version = 0\.83;/,
+	'automatic split-worker sizing increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -179,6 +179,9 @@ like($strain,
 	qr/Mosaic outgroup \$source -> \$PreferredOutgroup\{\$source\}.*?Mosaic outgroup proposals loaded:.*?unique MGS-to-MGS connection.*?gene-to-gene link/s,
 	'strain workflow reports loaded outgroup connections and proposed gene links');
 like($strain,
+	qr/Loading confirmed Mosaic catalogue for split worker.*?Using Mosaic catalogue:.*?next if \$subJob/s,
+	'split workers load and summarize Mosaic data without connection-by-connection previews');
+like($strain,
 	qr/sub stepComplete .*?STEP COMPLETE: \$step/s,
 	'step completion messages use one consistent formatter');
 like($strain,
@@ -215,11 +218,11 @@ like($strain,
 	qr/\$completionMessage = "strain_within\.pl completed normally;.*?exit\(0\)/s,
 	'the regular main-process exit records an explicit FINISH message');
 like($strain,
-	qr/my \$iqPathogen = 0.*?"iqPathogen=i"\s+=> \\\$iqPathogen.*?-iqPathogen', \$iqPathogen/s,
-	'within-strain pathogen mode defaults off and is propagated explicitly to split workers');
+	qr/my \$iqPathogen = 0.*?"iqPathogen=i"\s+=> \\\$iqPathogen.*?\$Tcmd .= "-iqPathogen 1 " if \$iqPathogen/s,
+	'within-strain pathogen mode defaults off and is applied only by the parent tree command');
 like($strain,
-	qr/my \$legacyMGTK = 1;.*?"legacyMGTK=i"\s+=> sub \{.*?\$legacyMGTKExplicit = 1.*?\$legacyMGTK = 0 if \$iqPathogen && !\$legacyMGTKExplicit.*?-iqPathogen and -legacyMGTK are mutually exclusive.*?-legacyMGTK', \$legacyMGTK/s,
-	'within-strain legacy IQ-TREE is default, pathogen mode opts out automatically, and explicit conflicts remain rejected');
+	qr/my \$legacyMGTK = 1;.*?"legacyMGTK=i"\s+=> sub \{.*?\$legacyMGTKExplicit = 1.*?\$legacyMGTK = 0 if \$iqPathogen && !\$legacyMGTKExplicit.*?-iqPathogen and -legacyMGTK are mutually exclusive.*?\$Tcmd .= "-iqLegacy 1 "/s,
+	'within-strain legacy IQ-TREE is default, pathogen mode opts out automatically, and tree mode remains parent-only');
 like($strain,
 	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(\$legacyMGTK\).*?"-iqLegacy 1 ".*?"-iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
 	'within-strain IQ-TREE defaults to bounded standard mode and enables CMAPLE only by explicit request');
@@ -250,6 +253,18 @@ like($strain,
 like($strain,
 	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
 	'split extraction workers inherit the missing-input MGS subset');
+like($strain,
+	qr/Stage-I extraction scope: \$stageIScope.*?target_MGS=.*?Workers are balanced by assembly group/s,
+	'split Stage I reports whether its MGS scope is explicit or recovery-driven');
+like($strain,
+	qr/my \$maxSubJob = -1;.*?choose_auto_worker_count\(.*?Automatic Stage-I splitting:.*?target \$\{targetGroupsPerWorker\} groups\/worker/s,
+	'automatic Stage-I splitting is the default and reports its selected granularity');
+like($strain,
+	qr/'-submit', 0, '-onlySubmit', 1.*?'-MGSphylo', \$treeFile.*?'-flushEvery'.*?'-MGset', \$useGTDBmg/s,
+	'extraction workers receive only extraction and outgroup inputs, not tree-submission behavior');
+unlike($strain,
+	qr/'-rateMergePartitions', \$rateMergePartitions.*?'-iqPathogen', \$iqPathogen.*?'-rmMSA', 0/s,
+	'extraction-worker commands do not forward buildTree5-only model and MSA options');
 like($strain,
 	qr/my \$treeTmpGb = int\(.*?\$QSBoptHR->\{tmpSpace\} = \$nodeTmpConfigured \? \$treeTmpGb : 0.*?\? "-tmpSubdir ".*?strain_within\/\$MGS.*?: "-tmpD "/s,
 	'tree jobs request and use node-local scratch when it is configured');

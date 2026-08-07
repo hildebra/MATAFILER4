@@ -28,7 +28,7 @@ use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate protein_kmer_sim
 use Mods::MosaicLoci qw(read_mosaic_catalogue);
 use Mods::StrainQC qw(breakpoint_gene_mask abundance_pattern_mask);
 use Mods::StrainParts qw(
-	balance_assembly_groups exact_worker_parts write_split_generation write_worker_completion
+	balance_assembly_groups choose_auto_worker_count exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation resolve_fasta_artifact
 	append_fasta_records_atomic sort_fasta_by_locus
 );
@@ -204,7 +204,9 @@ END {
 #.79: target deterministic rate/GC partitions by effective called sites
 #.80: restore legacy IQ-TREE strain inference by default and gate sparse placements
 #.81: enable EPA-ng strict-backbone placement by default and expose its controls
-my $version = 0.81;
+#.82: make split Stage-I scope explicit and keep extraction workers tree-option free
+#.83: choose split-worker count automatically from assembly-group and sample load
+my $version = 0.83;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -217,7 +219,7 @@ my $clusterID = 95;
 my $geneSelFile = "";
 my $numCores = 4;#$ARGV[2];
 my $subJob=0;#if 0, is main submitting job..
-my $maxSubJob = 0;#into how many subjobs to split??
+my $maxSubJob = -1;#-1 auto; 0 disables splitting; positive values are explicit worker counts
 my $outDpre = "";
 my $locTmpDir = ""; my $locTmpDir1 = "";
 my $maxCores = -1;
@@ -451,7 +453,8 @@ die "Either -MGS or -outD is required\n" unless length($MGSfile) || length($outD
 die "MGS file missing or empty: $MGSfile\n" if length($MGSfile) && !-s $MGSfile;
 die "-MGset must be GTDB or FMG\n" unless $useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG";
 die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterID <= 100;
-die "Invalid subjob settings\n" if $maxSubJob < 0 || $subJob < 0 || ($maxSubJob && $subJob >= $maxSubJob);
+die "Invalid subjob settings: -maxSubJob must be -1 (auto), 0 (disabled), or positive\n"
+	if $maxSubJob < -1 || $subJob < 0 || ($maxSubJob > 0 && $subJob >= $maxSubJob);
 die "Core, memory, and precompute settings must be non-negative\n"
 	if $maxCores == 0 || $selfMemGb <= 0 || $mosaicMemGb <= 0 || $preCompCons < 0;
 die "-minBadLociPSmpl must be positive\n" unless $minBadLociForSampleSkip > 0;
@@ -560,7 +563,9 @@ if (length($MGSfile)) {
 		);
 	}
 	if (length($mosaicLociFile) && -s $mosaicLociFile) {
-		print "Reusing existing confirmed Mosaic catalogue: $mosaicLociFile\n";
+		print($subJob
+			? "Loading confirmed Mosaic catalogue for split worker: $mosaicLociFile\n"
+			: "Reusing existing confirmed Mosaic catalogue: $mosaicLociFile\n");
 	}
 	if (length($mosaicLociFile) && !-s $mosaicLociFile) {
 		if (!$prepareMosaicLoci) {
@@ -640,14 +645,21 @@ if (length $mosaicLociFile) {
 	%ConfirmedMosaicPairs = %{$pairs};
 	%PreferredOutgroup = %{$outgroups};
 	%PreferredOutgroupGene = %{$outgroup_genes};
-	print "Loaded ".scalar(keys %ConfirmedMosaicPairs)." confirmed mosaic pair(s) and "
-		.scalar(keys %PreferredOutgroup)." consolidated outgroup choice(s) from $mosaicLociFile\n";
+	if ($subJob) {
+		print "Using Mosaic catalogue: ".scalar(keys %ConfirmedMosaicPairs)
+			." confirmed pair(s), ".scalar(keys %PreferredOutgroup)
+			." outgroup choice(s)\n";
+	} else {
+		print "Loaded ".scalar(keys %ConfirmedMosaicPairs)." confirmed mosaic pair(s) and "
+			.scalar(keys %PreferredOutgroup)." consolidated outgroup choice(s) from $mosaicLociFile\n";
+	}
 	my $connection_number = 0;
 	my $gene_link_number = 0;
 	for my $source (sort keys %PreferredOutgroup) {
 		my @queries = sort keys %{$PreferredOutgroupGene{$source} || {}};
 		$gene_link_number += scalar(@queries);
 		$connection_number++;
+		next if $subJob;
 		next if $connection_number > 10;
 		my @preview_queries = @queries
 			? @queries[0 .. ($#queries < 5 ? $#queries : 5)]
@@ -659,10 +671,12 @@ if (length $mosaicLociFile) {
 			.(@preview ? " (".join(', ', @preview)
 				.(scalar(@queries) > @preview ? ", ..." : "").")" : "")."\n";
 	}
-	print "Mosaic outgroup proposals loaded: ".scalar(keys %PreferredOutgroup)
-		." unique MGS-to-MGS connection(s), $gene_link_number gene-to-gene link(s)";
-	print "; detailed previews limited to 10 connections" if $connection_number > 10;
-	print "\n";
+	if (!$subJob) {
+		print "Mosaic outgroup proposals loaded: ".scalar(keys %PreferredOutgroup)
+			." unique MGS-to-MGS connection(s), $gene_link_number gene-to-gene link(s)";
+		print "; detailed previews limited to 10 connections" if $connection_number > 10;
+		print "\n";
+	}
 } else {
 	warn($prepareMosaicLoci
 		? "No confirmed mosaic catalogue supplied; same-COG catalogue clusters will remain separate\n"
@@ -683,6 +697,15 @@ $stepStarted = time;
 createAGlist();
 my $groupedSampleCount = 0;
 $groupedSampleCount += scalar(@{$AGlist{$_}}) for keys %AGlist;
+if ($maxSubJob == -1) {
+	my ($automaticWorkers, $targetGroupsPerWorker) = choose_auto_worker_count(
+		scalar(keys %AGlist), scalar(@samples),
+	);
+	$maxSubJob = $automaticWorkers;
+	print "Automatic Stage-I splitting: ".scalar(keys %AGlist)." assembly groups, "
+		.scalar(@samples)." samples, target ${targetGroupsPerWorker} groups/worker; "
+		.($maxSubJob ? "using $maxSubJob workers" : "using the main process only")."\n";
+}
 stepComplete("assembly-group expansion", $stepStarted,
 	"groups=".scalar(keys %AGlist), "grouped_samples=$groupedSampleCount",
 	"standalone_samples=".(scalar(@samples) - $groupedSampleCount));
@@ -784,6 +807,17 @@ if ($runPartI){
 	print "\n\n----------------------------------------------------\nPart I:: extracting relevant core MGS genes (SNP consensus called) from original assemblies". "Elapsed time : ", timeNice(time - $sttime) . "\n----------------------------------------------------\n\n";
 	
 	$stepStarted = time;
+	my @stageIExtractionMGS = $recalcTrees
+		? grep { $MGSneedsExtraction{$_} } @specis
+		: @specis;
+	my $stageIScope = $recalcTrees
+		? 'recalcTrees: incomplete input triplets only'
+		: length($subsMGSstr) ? 'explicit -MGSsubset'
+		: 'all selected MGS';
+	print "Stage-I extraction scope: $stageIScope; target_MGS="
+		.scalar(@stageIExtractionMGS)."; split_workers=$maxSubJob. "
+		."Workers are balanced by assembly group, so a worker with no locus for the target MGS writes no FASTA records.\n"
+		if $maxSubJob && !$subJob;
 	prepGene2MGS();
 	stepComplete("locus-model construction", $stepStarted,
 		"catalogue_drivers=".scalar(keys %cl2gene2),
@@ -806,31 +840,25 @@ if ($runPartI){
 		#here needs to submit itself maxSubJob times
 		my $strain1scr = getProgPaths("MGS_strain1_scr"); #self reference
 		my @selfArgs = (
+			# Stage-I workers exit after extraction.  Keep their command limited to
+			# extraction, consensus, outgroup, and selection options; tree-model and
+			# buildTree5 options belong solely to the parent tree-submission process.
 			'-GCd', $GCd, '-outD', $outD, '-MGS', $MGSfileOri,
-			'-clusterID', $clusterID, '-submit', $doSubmit, '-onlySubmit', 0,
-			'-reSubmit', 0, '-maxSubJob', $maxSubJob,
+			'-clusterID', $clusterID, '-submit', 0, '-onlySubmit', 1,
+			'-maxSubJob', $maxSubJob,
 			'-MGSminGenesPSmpl', $MGStoolowGsThr,
 			'-multiGeneSmplMax', $multiGeneSmplMax,
 			'-conspGeneSmplMax', $conspGeneSmplMax,
 			'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
 			'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
 			'-noGeneLimit', $noGeneLimit, '-disableQC', $disableQC,
-			'-prepareMosaicLoci', $prepareMosaicLoci,
 			'-breakpointGeneFlank', $breakpointGeneFlank,
 			'-abundanceMinLoci', $abundanceMinimumLoci,
 			'-abundanceMinFold', $abundanceMinimumFold,
 			'-abundanceMaxFold', $abundanceMaximumFold,
 			'-abundanceMaxModifiedZ', $abundanceMaximumModifiedZ,
 			'-flushEvery', $appendWriteTrigger,
-			'-rateMergePartitions', $rateMergePartitions,
-			'-rateMergeMaxBins', $rateMergeMaxBins,
-			'-rateMergeTargetSites', $rateMergeTargetSites,
-			'-rateMergeMinLoci', $rateMergeMinLoci,
-			'-rateMergeMinSites', $rateMergeMinSites,
-			'-iqPathogen', $iqPathogen,
-			'-legacyMGTK', $legacyMGTK,
-			'-MGset', $useGTDBmg, '-redoSubmissionData', 0, '-deepRepair', 0,
-			'-rmMSA', 0, '-minSNPDepth', $minSNPDepth,
+			'-MGset', $useGTDBmg, '-minSNPDepth', $minSNPDepth,
 			'-minSNPCallQual', $minSNPCallQual, '-forceSNPcalls', $forceVCF2FNA,
 			'-preCompConsSNP', $preCompCons, '-skipIndels', $noIndels,
 			'-SNPadaptiveQual', $useAdaptiveQual,
@@ -845,7 +873,6 @@ if ($runPartI){
 			? join(",", grep { $MGSneedsExtraction{$_} } @specis)
 			: $subsMGSstr;
 		push @selfArgs, ('-MGSsubset', $workerMGSSubset) if $workerMGSSubset ne "";
-		push @selfArgs, ('-submissionMode', $subMode) if $subMode ne "";
 		my $selfCmd = $strain1scr . " " . join(" ", map { shellQuote($_) } @selfArgs);
 		
 		my $tmpHDD=$QSBoptHR->{tmpSpace} ; $QSBoptHR->{tmpSpace} =15; #request some basic amount
@@ -2155,8 +2182,9 @@ sub prepRun{
 
 	$mode = "FMG" if ($MGSfile eq "");
 	if ($mode eq "FMG"){$takeAll = 0;}
-	die "FMG mode does not support -maxSubJob; run it as a single extraction job\n"
-		if $mode eq "FMG" && $maxSubJob;
+	$maxSubJob = 0 if $mode eq "FMG" && $maxSubJob == -1;
+	die "FMG mode does not support positive -maxSubJob; run it as a single extraction job\n"
+		if $mode eq "FMG" && $maxSubJob > 0;
 	$takeAll = $noGeneLimit;
 
 
@@ -3440,8 +3468,11 @@ sub extractFNAFAA2genes{
 			$Nsmpls += scalar (@{$AGlist{$sd}}); #@{$AGlist{$cAssGrp}}
 		}
 		print "total samples: $Nsmpls , total in map: $Ndirs\n";
+		my @preview = @srtdSmpls > 10 ? @srtdSmpls[0 .. 9] : @srtdSmpls;
 		print "\nSUBJOB ${subJob}/$maxSubJob: pre-restricted to " . scalar(@srtdSmpls)
-			. " samples: @srtdSmpls\n\n";
+			. " assembly group(s) with target loci"
+			. (@preview ? ": ".join(' ', @preview) : '')
+			. (scalar(@srtdSmpls) > @preview ? " ..." : "") . "\n\n";
 	}
 	
 	
@@ -4098,6 +4129,13 @@ sub usage {
 	my ($default) = @_;
 	return <<"USAGE";
 Usage: strain_within.pl -GCd DIR -MGS FILE [options]
+
+Workflow splitting:
+  -maxSubJob INT                Stage-I worker count: -1 selects automatically
+                                 (default; 50-150 assembly groups/worker), 0
+                                 disables splitting, positive values are explicit
+  -subjob INT                   Internal split-worker index; supplied only by
+                                 the parent process
 
 Gene selection and biological QC:
   -maxGenes INT                  Maximum validated loci per MGS/sample
