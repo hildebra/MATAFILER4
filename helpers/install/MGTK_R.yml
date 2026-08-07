@@ -5,6 +5,7 @@ channels:
 dependencies:
 
 #R dependencies
+  # R 4.4 is the newest ABI series with builds for the complete package set.
   - r-base=4.4
   - r-devtools>=2.4.5
   
@@ -15,9 +16,10 @@ dependencies:
   - r-ape >= 5.7
   - r-phytools >= 2.3_0
   - r-tidytree>=0.4
+  # Bioconductor 3.20 / R 4.4-compatible ggtree release.
+  - bioconda::bioconductor-ggtree=3.14
   - r-phangorn >= 2.11.1
   - r-ggplot2>=3.5
-  - r-devtools>=2.4.5
   - r-getopt>=1.20
   - conda-forge::r-cowplot>=1.2.0
   - r-readr>=2.1

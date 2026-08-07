@@ -26,6 +26,7 @@ MATAFILER4 creates many intermediate and final files. For most downstream analys
 ```text
 #OutPath/#RunID/metagStats.txt
 #OutPath/#RunID/metagStatsReport.html
+#OutPath/#RunID/<SmplID>/MF4.sentinel.<SmplID>.json
 #OutPath/#RunID/<SmplID>/assemblies/
 #OutPath/#RunID/<SmplID>/assemblies/metag/genePred/
 #OutPath/#RunID/<SmplID>/assemblies/metag/ContigStats/
@@ -112,6 +113,22 @@ mapping/
 
 The exact files depend on the run flags. A minimal completed assembly usually contains the assembly FASTA files, assembly statistics, contig statistics, gene predictions and mapping-derived coverage information.
 
+### Sample completion sentinel
+
+After every requested sample output and final cleanup check succeeds, or an empty, empty-after-cleaning, or too-small sample reaches its terminal cleanup, MATAFILER4 atomically publishes:
+
+```text
+#OutPath/#RunID/<SmplID>/MF4.sentinel.<SmplID>.json
+```
+
+This versioned JSON record is the authoritative closed-sample marker. It keeps only independently useful state: the sample identity, the requested-workflow signature, terminal outcome and input sizes, assembly presence, per-component output checks, compact statistics-family status, and the complete `DIR` plus named values needed for the sample row in `metagStats.txt`. Contract inventories, per-field availability copies, component status strings, and workflow-specific summary booleans are intentionally omitted because they are derivable from those records.
+
+Every matched file check records `size_bytes`; checks with alternative paths also record the matched path. If a valid sentinel for an already-complete sample lacks a recorded size, the next visit refreshes only the component evidence and rewrites the JSON while reusing its cached metagStats values. It does not rerun sample statistics collection. Later loop visits can therefore confirm completion with one small read, and run-level summary generation does not rescan sample outputs or large log files.
+
+MATAFILER4 removes the sentinel before proceeding when the workflow signature changes, a redo request is active, or the record is invalid. ContigStats, SNP, and binner entry points also remove it before modifying sample outputs; assembly-group binning invalidates every member sample. The sentinel is recreated only after the full completion and cleanup gate passes again. It should not be created or edited manually.
+
+If SDM quality/host filtering leaves no primary FASTQ records, MATAFILER4 writes `SMPL.empty` with the reason `cleaned_primary_reads_empty`, closes the sample as `skipped_cleaned_empty`, and omits it from assembly work. MEGAHIT also checks the actual cleaned FASTQ content at runtime, so a nonzero gzip header alone cannot produce an empty assembly.
+
 ### `assemblies/`
 
 The `assemblies/` directory contains the metagenomic assembly and assembly statistics. Common files include:
@@ -188,6 +205,19 @@ perl $MF4DIR/secScripts/geneCat.pl \
 The directory passed to `-GCd` stores the integrated gene catalog and its derived summaries.
 
 ### Core gene catalog files
+
+Every current catalog also stores two durable workflow descriptors under
+`LOGandSUB/`:
+
+| File | Meaning |
+| --- | --- |
+| `inmap.txt` | Map manifest. It contains one relocatable catalog-local `map.N.txt` path per line, so catalogs constructed from multiple mapping files retain the complete ordered set. Older single-map catalogs whose `inmap.txt` is itself a mapping table remain readable. |
+| `catalog.sha256` | Persistent catalog identity. The same SHA-256 value is reused by MGS and strain workflows, including after the complete catalog directory is moved. |
+
+`GCmaps.inf` is still emitted as a write-only, comma-separated compatibility and
+logging artifact, but current code does not read it. Existing catalogs that have
+`map.N.txt` copies but no `inmap.txt` are migrated automatically when their maps
+are next resolved.
 
 | File | Meaning |
 |---|---|
@@ -315,9 +345,21 @@ MGS.pl -outD <output_directory>
 | `GTDBTK.tax` | GTDB-Tk taxonomic assignment; generally the preferred modern taxonomy output when available. |
 | `kraken2.LCA` | Kraken2 lowest-common-ancestor taxonomic assignment. |
 | `between_phylo/phylo/IQtree_allsites.treefile` | De novo phylogeny of MGS. |
+| `between_phylo/phylo/IQtree_allsites.pdf` | Abundance-annotated rendering, generated after the MGS abundance matrix is available. |
 | `RhclClust/*.faa` | Proteins found in each MGS, stored separately per MGS. |
 | `MAG.MB2.assStat.summary` | Summary of MetaBAT2 bins found in each sample. |
-| `Bin_SB/LOGandSUB/MAGvsGC.txt.gz` | Links MAGs, MGS, marker genes and other gene-catalog genes. |
+| `Bin_SB/MAGvsGC.txt.gz` | Links MAGs, MGS, marker genes and other gene-catalog genes. |
+| `Bin_SB/Annotation/GTDBmg_MGS/` | MGS-specific SpecI annotation and abundance intermediates. These are kept inside the selected binner output so different MGS definitions cannot reuse one another's results. |
+
+Sparse runs can finish successfully without manufacturing cluster or tree data:
+
+- `Canopy_AC/SKIPPED.txt` (or `Canopy/SKIPPED.txt`) explains that Canopy was skipped because the abundance matrix had too few sample columns, or that Canopy completed without finding clusters.
+- `Bin_<binner>/NO_MGS.txt` explains why no usable MGS could be reconstructed (for example, no minimally usable MAGs or no retained core genes).
+- `Bin_<binner>/between_phylo/SKIPPED.txt` records that fewer than three marker-bearing MGS were available for a meaningful between-MGS phylogeny.
+
+These files represent completed, expected low-cardinality outcomes. Missing or partial paired outputs (for example, only one of the Canopy cluster and profile files) remain errors.
+
+The between-MGS tree starts immediately after Stage I publishes the MGS core set and runs concurrently with taxonomy and abundance. It is inferred from concatenated amino-acid FMG alignments with per-locus partitions, partition-aware ModelFinder, 1,000 ultrafast bootstrap replicates, and minimum marker/column occupancy filters. The topology is unrooted unless the standalone launcher is given suitable reference genomes and an explicit downstream rooting strategy.
 
 ### MGS abundance matrices
 
@@ -342,7 +384,7 @@ At MGS level, features ending in `?` are taxa inferred through marker-gene LCA a
 
 ### MAG/MGS gene content
 
-`Bin_SB/LOGandSUB/MAGvsGC.txt.gz` links MAGs and MGS to their gene content. Important columns include:
+`Bin_SB/MAGvsGC.txt.gz` links MAGs and MGS to their gene content. Important columns include:
 
 | Column | Meaning |
 |---|---|
@@ -374,7 +416,7 @@ These outputs are commonly summarized in or near:
 #OutPath/#RunID/pseudoGC/
 ```
 
-and related run-level folders. The precise file names depend on flags such as `-profileFunct`, `-diamondDBs`, `-profileRibosome`, `-profileMOTU2`, `-profileMetaphlan2` or `-profileKraken`.
+and related run-level folders. The precise file names depend on flags such as `-profileFunct`, `-DiaDBs`, `-profileRibosome`, `-profileMOTU2`, `-profileMetaphlan2` or `-profileKraken`.
 
 ## Recommended files for common downstream questions
 
@@ -385,7 +427,7 @@ and related run-level folders. The precise file names depend on flags such as `-
 | What functions are present? | `<gene_catalog>/Anno/Func/*L0.txt` and broader `L*.txt` summaries. |
 | What taxa are present? | Current MGS abundance matrices under `Bin_SB/Annotation/Abundance/`, or selected `Anno/Tax/` matrices. |
 | Which MGS are present? | `MGS.matL7.txt` and MGS taxonomy files such as `GTDBTK.tax`. |
-| Which genes belong to a MAG or MGS? | `Bin_SB/LOGandSUB/MAGvsGC.txt.gz` and `MB2.clusters.ext.can.Rhcl`. |
+| Which genes belong to a MAG or MGS? | `Bin_SB/MAGvsGC.txt.gz` and `MB2.clusters.ext.can.Rhcl`. |
 | What is the taxonomy of MGS? | `GTDBTK.tax`, `kraken2.LCA`, and MGS abundance feature names. |
 | What are the proteins in an MGS? | `Binning/RhclClust/*.faa` or equivalent `Bin_SB` MGS protein folders. |
 

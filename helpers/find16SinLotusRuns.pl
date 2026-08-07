@@ -3,14 +3,15 @@
 
 use warnings;
 use strict;
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 
-my $mkBldbBin = "/g/bork5/hildebra/dev/lotus//bin//ncbi-blast-2.2.29+/bin/makeblastdb";
-my $blastBin = "/g/bork5/hildebra/dev/lotus//bin//ncbi-blast-2.2.29+/bin/blastn";
+my $mkBldbBin = getProgPaths("makeblastdb");
+my $blastBin = getProgPaths("blastn");
 
-my $lotusD = "/g/bork3/home/hildebra/results/lotus/HMP_35_sw2//";#HMP_35_SLV//";
+my $lotusD = getProgPaths("legacyLotusRunsDir");
 my $otuTar = $lotusD."otus.fa";
-my $tar16sDB = "/g/bork5/hildebra/results/TEC2/v5/Genomes/T2/6666666.214148.fna.16S";
-my $taxblastf = "/g/bork5/hildebra/results/TEC2/v5/Genomes/T2/HMPhits.blast";
+my $tar16sDB = getProgPaths("legacyLotus16S_DB");
+my $taxblastf = getProgPaths("legacyLotusTaxBlast");
 #my $TECdir = "/g/scb/bork/hildebra/SNP/GNMass2_singl/alien-11-374-0/Binning/";
 #my $tar16sDB = $TECdir."TEC16.fa";
 #my $taxblastf = $TECdir."HMPHits.blast";

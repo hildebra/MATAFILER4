@@ -32,7 +32,7 @@ You can also delete **all** jobs where the dependency failed, saving you a lot o
 
 #### local tempdir on node not writable
 
-**Problem:** Sometimes you will encounter an error where a job starts for ~1 sec on a node and immediately aborts, the error log (.etxt) showing something about not being able to create/write to a local dir (e.g. `/nbi/local/tmp/12312421/MF4`). This is usually the local SSD space not being available (for various reasons not related to MATAFILER4). Such nodes act as kind of 'honeypots', accepting a lot of jobs and killing them immediately. This can seriously harm your performance in getting jobs done.
+**Problem:** Sometimes you will encounter an error where a job starts for ~1 sec on a node and immediately aborts, the error log (.etxt) showing something about not being able to create/write to a local dir (e.g. `/node-local/tmp/12312421/MF4`). This is usually the local SSD space not being available (for various reasons not related to MATAFILER4). Such nodes act as kind of 'honeypots', accepting a lot of jobs and killing them immediately. This can seriously harm your performance in getting jobs done.
 
 **Solution:**  Therefore it is important to a) let your local sysadmin know that the SSD is no longer available on said node (node name is always printed as first line in the MATAFILER4 .otxt logs for a job) and b) you can exclude this node from MATAFILER4 using the `-excludeNodes [nodename1,nodename2]` flag.
 

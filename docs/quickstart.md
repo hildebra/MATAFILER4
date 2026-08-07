@@ -62,11 +62,38 @@ perl $MF4DIR/MATAF4.pl   -map "$MAP"   -assembleMG 2   -assemblCores 12   -assem
 
 After submitted jobs finish, rerun the same command. MATAFILER4 uses completion marker files and should pick up unfinished or missing steps rather than restarting completed work.
 
-Normal runs automatically inspect and plan current state before submission,
-repair narrowly safe partial outputs, and save JSON audit files under
-`#OutPath/#RunID/LOGandSUB/workflow/`. No separate state or plan command is
-needed. With `-loopTillComplete`, this preflight repeats after the current
-pass's jobs finish and before the next pass begins.
+Normal runs use the sample completion markers directly and do not perform the
+additional full-workflow inspection. Add `-autoStatePlan 1` to inspect and plan
+current state, repair narrowly safe partial outputs, and save JSON audit files
+under `#OutPath/#RunID/LOGandSUB/workflow/`. With `-loopTillComplete`, an enabled
+preflight repeats after each wait and before the next pass.
+
+Input directories are checked lazily as unfinished samples reach input staging,
+so startup no longer scans every mapped sample. Use `-precheckInputDirs 1` only
+when an eager all-sample scan is desired; combine it with `-requireInput 1` to
+abort on missing or invalid inputs.
+
+Samples are revisited in a rolling window. Its start advances only across the
+contiguous prefix whose
+requested outputs are complete and whose temporary directories have been
+cleaned, keeping unfinished samples in rotation while admitting new ones.
+A sample that passes every requested output and cleanup check is closed with
+`<SmplID>/MF4.sentinel.<SmplID>.json`. Matching later visits read only that
+record and report the sample complete. A changed workflow request, redo option,
+or downstream ContigStats, SNP, or binner work removes the sentinel and restores
+full checking. The loop still performs one final full-range verification pass
+before publishing statistics from the sentinels. That first full-range pass
+starts immediately; another full-range pass cannot start until all pending and
+running jobs submitted by this invocation have finished. Each visit submits only the next ready producer wave, so a failed
+input filter is retried before assembly, mapping, binning, or consensus jobs are
+created. Scheduler state is collected once per pass for all sample locks,
+and `-maxConcurrentJobs` counts both pending and running user jobs. Accepted
+jobs are added to a conservative local counter; the exact scheduler count is
+refreshed every `-schedulerCapacityCheckJobs` submissions (10 by default), or
+sooner when the estimate reaches the cap. A full queue defers new submissions
+without skipping sample
+completion or cleanup checks; the same rolling range is retried after the
+configured scheduler polling interval.
 
 ## 6. Check completion
 
@@ -75,6 +102,7 @@ A successful assembly-dependent run should normally create:
 ```text
 #OutPath/#RunID/metagStats.txt
 #OutPath/#RunID/metagStatsReport.html
+#OutPath/#RunID/<SmplID>/MF4.sentinel.<SmplID>.json
 #OutPath/#RunID/<SmplID>/assemblies/
 #OutPath/#RunID/<SmplID>/assemblies/metag/genePred/
 #OutPath/#RunID/<SmplID>/assemblies/metag/ContigStats/

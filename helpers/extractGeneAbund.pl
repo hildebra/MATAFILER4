@@ -2,6 +2,7 @@
 #./extractGeneAbund.pl /g/scb/bork/hildebra/SNP/GNMass2_singl/GeneCatalog/betaLacta.lst /g/scb/bork/hildebra/SNP/GNMass2_singl/ /g/scb/bork/hildebra/SNP/GNMass2_singl/GeneCatalog/betalact/
 use warnings;
 use strict;
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 
 sub readGeneIdx;
 
@@ -31,7 +32,7 @@ my $idxF = "$GCd/Matrix.genes2rows.txt";
 #}
 #my $sedStr = join("p;",@list);
 #system "sed -n '1p;$sedStr"."p' $GCd/Matrix.mat > $outD/Abund.mat";
-system "/g/bork5/hildebra/dev/C++/rare/rare lineExtr $GCd/Matrix.mat $outD/Abund.mat $lstFile";
+system getProgPaths("rare")." lineExtr $GCd/Matrix.mat $outD/Abund.mat $lstFile";
 
 print "$outD/Abund.mat\n";
 

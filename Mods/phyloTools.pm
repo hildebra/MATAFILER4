@@ -6,9 +6,11 @@ use strict;
 
 
 use Exporter qw(import);
-our @EXPORT_OK = qw(convertMSA2NXS runRaxMLng runRaxML readFMGdir prep40MGgenomes prepNOGSETgenomes 
+use File::Copy qw(copy);
+our @EXPORT_OK = qw(convertMSA2NXS runRaxMLng runRaxML readFMGdir prep40MGgenomes prepNOGSETgenomes
 			getE100 getGenoGenes getFMG renameFMGs readNCBItax
-			runFasttree runVeryFasttree runQItree fixHDs4Phylo getGenoName calcDisPos2 getTreeLeafs filterMSA MSA);
+			runFasttree runVeryFasttree runQItree iqtreeOutputComplete cleanupIQTreeTransients
+			fixHDs4Phylo getGenoName calcDisPos2 getTreeLeafs filterMSA MSA);
 use Mods::GenoMetaAss qw(filsizeMB systemW readFasta renameFastHD gzipwrite gzipopen);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::FuncTools qw(assignFuncPerGene readGene2Func);
@@ -105,9 +107,9 @@ sub MSA{
 		$cmd = "$mafftBin --thread $ncore --quiet $tmpInMSA > $tmpOutMSA2;";
 	} elsif ($clustalUse == 3) {
 		die "guidance: rework phyloTools.pm\n";
-		my $guid2Path = "/g/bork3/home/hildebra/bin/guidance.v2.02/";
+		my $guid2Path = getProgPaths("guidance2");
 		#guidance has some strange results..
-		$cmd = " $guid2Path/www/Guidance/guidance.pl --seqFile $tmpInMSA --msaProgram MAFFT --seqType aa ;";
+		$cmd = " $guid2Path --seqFile $tmpInMSA --msaProgram MAFFT --seqType aa ;";
 		#$cmd .= " --dataset $spl2[1].$cnt --mafft $mafftBin --outDir $tmpD --proc_num $ncore\n";
 	} elsif ($clustalUse == 4) {
 		#my $nseqs = 0;
@@ -136,7 +138,7 @@ sub filterMSA{ #pretty useless atm.. not really used
 	my $cmd = "";
 	if ($postFilter eq "macse"){ #gives strange results..
 		#-out_NT output_NT.fasta -out_AA output_AA.fasta
-		my $macseBin = "java -jar /g/bork3/home/hildebra/bin/macse_v2.03.jar";
+		my $macseBin = getProgPaths("macse");
 		my $outTag = "-out_AA"; $outTag = "-out_NT" if ($useAA4tree);
 		$cmd = "$macseBin -prog refineAlignment -align $tmpOutMSA2 $outTag $tmpOutMSA2.2;";
 	} elsif ($postFilter eq "zorro"){
@@ -192,46 +194,228 @@ sub fixHDs4Phylo ($){
 	return $outF;
 }
 
+sub _fastaAlignmentLength{
+	my ($inMSA) = @_;
+	my ($in,$ok) = gzipopen($inMSA,"IQ-TREE alignment length check",1,0);
+	return undef unless $ok;
+	my ($seenHeader,$seqLen) = (0,0);
+	while (my $line = <$in>){
+		if ($line =~ /^>/){
+			last if $seenHeader;
+			$seenHeader = 1;
+			next;
+		}
+		next if $line =~ /^\s*$/;
+		unless ($seenHeader){
+			close $in;
+			return undef;
+		}
+		$line =~ s/\s+//g;
+		$seqLen += length($line);
+	}
+	close $in;
+	return $seenHeader ? $seqLen : undef;
+}
+
+sub _fastaIdentifiers {
+	my ($path) = @_;
+	return undef unless defined($path) && length($path)
+		&& (-s $path || -s "$path.gz");
+	my ($in,$ok) = gzipopen($path, "IQ-TREE alignment identifiers", 1, 0);
+	return undef unless $ok;
+	my (%identifier, @ordered);
+	while (my $line = <$in>) {
+		next unless $line =~ /^>(\S+)/;
+		my $id = $1;
+		die "Duplicate FASTA identifier '$id' in $path\n" if $identifier{$id}++;
+		push @ordered, $id;
+	}
+	close $in or die "Cannot close IQ-TREE alignment $path: $!\n";
+	return \@ordered;
+}
+
+sub _newickLeafIdentifiers {
+	my ($path) = @_;
+	open my $in, '<', $path or die "Cannot read IQ-TREE tree $path: $!\n";
+	local $/;
+	my $tree = <$in> // '';
+	close $in or die "Cannot close IQ-TREE tree $path: $!\n";
+	my (%identifier, @duplicate);
+	while ($tree =~ /(?:\A|[(,])\s*(?:'((?:[^']|'')*)'|([^'():,;\s]+))\s*(?=[:),;])/g) {
+		my $id = defined($1) ? $1 : $2;
+		$id =~ s/''/'/g if defined($1);
+		push @duplicate, $id if $identifier{$id}++;
+	}
+	return (\%identifier, \@duplicate);
+}
+
+sub iqtreeOutputComplete {
+	my ($prefix, $alignment, $reasonRef) = @_;
+	my $fail = sub {
+		my ($reason) = @_;
+		${$reasonRef} = $reason if ref($reasonRef) eq 'SCALAR';
+		return 0;
+	};
+	return $fail->("missing or empty tree") unless -s "$prefix.treefile";
+	return $fail->("missing or empty IQ-TREE log") unless -s "$prefix.log";
+
+	open my $logFh, '<', "$prefix.log"
+		or return $fail->("cannot read IQ-TREE log: $!");
+	my $log;
+	{
+		local $/;
+		$log = <$logFh> // '';
+	}
+	close $logFh or return $fail->("cannot close IQ-TREE log: $!");
+	my $successPosition = rindex($log, 'Analysis results written to:');
+	my $errorPosition = rindex($log, 'ERROR:');
+	return $fail->("IQ-TREE log has no successful completion signature")
+		if $successPosition < 0;
+	return $fail->("IQ-TREE log ends in an error after its last completion signature")
+		if $errorPosition > $successPosition;
+
+	my $expected = _fastaIdentifiers($alignment);
+	if (defined($expected)) {
+		my ($observed, $duplicates) = _newickLeafIdentifiers("$prefix.treefile");
+		return $fail->("final tree contains duplicate tip labels: ".join(',', @{$duplicates}))
+			if @{$duplicates};
+		my %expectedIdentifier = map { $_ => 1 } @{$expected};
+		my @missing = grep { !$observed->{$_} } @{$expected};
+		my @extra = grep { !$expectedIdentifier{$_} } keys %{$observed};
+		if (@missing || @extra) {
+			my @detail;
+			push @detail, scalar(@missing)." missing (".join(',', @missing[0 .. ($#missing < 4 ? $#missing : 4)]).")"
+				if @missing;
+			push @detail, scalar(@extra)." unexpected (".join(',', @extra[0 .. ($#extra < 4 ? $#extra : 4)]).")"
+				if @extra;
+			return $fail->("alignment/tree taxon mismatch: ".join('; ', @detail));
+		}
+	}
+	${$reasonRef} = '' if ref($reasonRef) eq 'SCALAR';
+	return 1;
+}
+
+sub cleanupIQTreeTransients {
+	my ($prefix) = @_;
+	for my $suffix (qw(
+		.bionj .ckp.gz .mldist .uniqueseq.phy .uniqueseq.phy.gz .varsites
+	)) {
+		my $path = $prefix.$suffix;
+		next unless -e $path;
+		unlink $path or warn "Cannot remove completed IQ-TREE temporary file $path: $!\n";
+	}
+}
+
+sub _iqtreeLogRequestsSafeKernel {
+	my ($prefix, $error) = @_;
+	my $diagnostic = $error // '';
+	if (-s "$prefix.log") {
+		open my $logFh, '<', "$prefix.log" or die "Cannot read failed IQ-TREE log $prefix.log: $!\n";
+		local $/;
+		$diagnostic .= "\n".(<$logFh> // '');
+		close $logFh or die "Cannot close failed IQ-TREE log $prefix.log: $!\n";
+	}
+	return $diagnostic =~ /Numerical underflow|safe likelihood kernel|run again with (?:the )?(?:--?safe)/i;
+}
+
+sub _archiveIQTreeLog {
+	my ($prefix, $tag) = @_;
+	return unless -e "$prefix.log";
+	my $archive = "$prefix.$tag.log";
+	unlink $archive or die "Cannot replace old IQ-TREE diagnostic $archive: $!\n" if -e $archive;
+	rename "$prefix.log", $archive
+		or die "Cannot preserve failed IQ-TREE log as $archive: $!\n";
+}
+
+sub _clearIQTreeAttempt {
+	my ($prefix) = @_;
+	for my $suffix (qw(
+		.treefile .iqtree .log .ckp.gz .bionj .mldist .uniqueseq.phy
+		.uniqueseq.phy.gz .varsites .model.gz .best_scheme.nex .boottrees
+		.contree .splits.nex
+	)) {
+		my $path = $prefix.$suffix;
+		next unless -e $path;
+		unlink $path or die "Cannot clear incomplete IQ-TREE output $path: $!\n";
+	}
+}
+
 sub runQItree{
 	my ($hr) = @_; my %treeOpts = %{$hr};
-	my ($inMSA,$treeOut,$ncore,$outgr,$bootStrap,$useAA,$fast,$autoModel,$partiF,$runSafe) = 
-		($treeOpts{inMSA},$treeOpts{IQtreeout},$treeOpts{ncore},$treeOpts{outgr},$treeOpts{bootStrap},$treeOpts{useAA},
+	my ($inMSA,$treeOut,$ncore,$bootStrap,$useAA,$fast,$autoModel,$partiF,$runSafe) =
+		($treeOpts{inMSA},$treeOpts{IQtreeout},$treeOpts{ncore},$treeOpts{bootStrap},$treeOpts{useAA},
 		$treeOpts{iqtreeFast},$treeOpts{autoModel},$treeOpts{partition},$treeOpts{runSafe});
-	
+	my $iqMemMB = $treeOpts{iqMemMB} // 0;
+	my $iqPathogen = $treeOpts{iqPathogen} // 0;
+	my $iqLegacy = $treeOpts{iqLegacy} // 0;
+	my $cmapleLengthLimit = 32767; # IQ-TREE 3 CMAPLE default: signed 16-bit LengthType
+	if ($iqPathogen){
+		my $alignmentLength = _fastaAlignmentLength($inMSA);
+		if (defined($alignmentLength) && $alignmentLength > $cmapleLengthLimit){
+			warn "WARNING: IQ-TREE --pathogen disabled for $inMSA: alignment length "
+				. "$alignmentLength exceeds the CMAPLE LengthType limit of "
+				. "$cmapleLengthLimit; falling back to standard IQ-TREE mode.\n";
+			$iqPathogen = 0;
+		}
+	}
+
 	#die "AA use $useAA\n";
 	my $inSize = filsizeMB($inMSA);
-	if ($inSize>700){$runSafe=1;} #greater input size than 700 Mb? needs to use safe likelihood kernel..
+	my $alignmentIdentifiers = _fastaIdentifiers($inMSA);
+	my $taxonCount = defined($alignmentIdentifiers) ? scalar(@{$alignmentIdentifiers}) : 0;
+	if ($inSize > 700 || $taxonCount >= 750) {
+		$runSafe = 1;
+		print "IQ-TREE safe likelihood kernel enabled pre-emptively: "
+			."taxa=$taxonCount, alignment size=${inSize}MB\n";
+	}
 	my $constraintTree = $treeOpts{constraintTree};
 	die ("Constraint tree $constraintTree does not exist") if ($constraintTree ne "" && !-e $constraintTree);
 	my $iqTree  = getProgPaths("iqtree");
 	my $vcheck = `$iqTree --version`;
-	unless ($vcheck =~ m/version [23]/){die "Needs iqtree version 2 or 3\n:$vcheck\n";}
+	$vcheck =~ m/version ([23])/
+		or die "Needs iqtree version 2 or 3\n:$vcheck\n";
+	my $iqVersion = $1;
+	die "IQ-TREE pathogen mode requires IQ-TREE version 3\n:$vcheck\n"
+		if $iqPathogen && $iqVersion != 3;
 	$treeOut =~ s/\.nwk$//;
 	my $treNM = "IQtree";
-	my $cmd = "$iqTree -s $inMSA -T $ncore -pre $treeOut -seed 678 "; #-nt AUTO -ntmax $ncore
+	my $threadOpts = "-T $ncore";
+	my $usePartitionModel = $partiF ne "" && !$iqPathogen;
+	my $cmd = "$iqTree -s $inMSA $threadOpts -pre $treeOut -seed 678 -quiet ";
+	if (!$iqLegacy && $iqMemMB > 0){
+		if ($usePartitionModel){
+			warn "WARNING: IQ-TREE -mem disabled because partition models do not support "
+				. "-mem; enforce the memory limit through the job scheduler instead.\n";
+		} else {
+			$cmd .= "-mem ${iqMemMB}M ";
+		}
+	}
+	$cmd .= "--pathogen " if $iqPathogen && !$iqLegacy;
 	#$cmd .= " -Q $partiF --merge " unless ($partiF eq "");
-	$cmd .= " -p $partiF --merge " unless ($partiF eq "");
-	$cmd .= "-o $outgr " unless ($outgr eq "" && $outgr !~ m/,/);
+	$cmd .= " -p $partiF " if $usePartitionModel;
+	# IQ-TREE's -o affects only presentation under our reversible models.  Root
+	# downstream output after inference instead: -o can assert when the anchor
+	# is absent from an internal reduced or partition-specific tree.
 	$cmd .= "-g $constraintTree " unless ($constraintTree eq "");
-	$cmd .= "--quiet " if (exists($treeOpts{silent}) && $treeOpts{silent});
-	unless ($fast == 0){$cmd .= "--fast "; print "IQtree - fast\n"; $treNM .= "_fast";}
+	unless ($fast == 0 || $iqPathogen){
+		$cmd .= "--fast ";
+		print "IQtree - fast\n";
+		$treNM .= "_fast";
+	}
 	if ($autoModel){$treNM .= "_autoMOD";}
 	if ($useAA){
 		if ($autoModel){
-			$cmd .= "-m TEST  "; 
+			$cmd .= $usePartitionModel ? "-m MFP+MERGE " : "-m TEST ";
 		} else{
 			$cmd .= "-m LG+F+G "; #needs to be HKY for nts
 		}
 	} else {
 		if ($autoModel){
-			$cmd .= "-m TEST ";#-mset HKY,HKY+F,HKY+F+I,HKY+F+I+G4,JC,F81,K2P,K3P,K81uf,GTR "; 
+			$cmd .= $usePartitionModel ? "-m MFP+MERGE " : "-m TEST ";
 		} else {
-			$cmd .= "-m GTR+F+I+G4 "; #default model, as spotted on 40 MG for phylo tree..
-			#$cmd .= "-m HKY+F+G "; 
+			$cmd .= $iqLegacy ? "-m GTR+F+I+G4 " : "-m GTR+F+G2 ";
+			#$cmd .= "-m HKY+F+G ";
 		}
-	}
-	if ($runSafe){
-		$cmd .= " --safe ";
 	}
 	if ($bootStrap >0){
 		if ($bootStrap < 1000){
@@ -249,12 +433,55 @@ sub runQItree{
 		#also consider -b >=100 for std bootstrap
 	} else {
 		$cmd .= "--alrt 1000 ";
+		$cmd .= ""; #no bootstrap at all..
 	}
 	#TODO: include booster for better bootstrap values
 	#booster -a tbe -i 40MG.IQtree.treefile -b 40MG.IQtree.boottrees -@ 8 -o 40MG.IQtree_booster.tre
 	$cmd .= "";
-	#die $cmd ;#if ($constraintTree ne "");
-	systemW $cmd;
+	# A previous interrupted invocation may have left a nonempty intermediate
+	# tree. Preserve resumable checkpoints, but never resume a numerical
+	# underflow with the unsafe kernel.
+	if (_iqtreeLogRequestsSafeKernel($treeOut, '')) {
+		$runSafe = 1;
+		_archiveIQTreeLog($treeOut, 'unsafe');
+		_clearIQTreeAttempt($treeOut);
+		print "Restarting prior numerically unstable IQ-TREE attempt with -safe\n";
+	} elsif (-s "$treeOut.treefile" && !-s "$treeOut.ckp.gz") {
+		_archiveIQTreeLog($treeOut, 'incomplete');
+		_clearIQTreeAttempt($treeOut);
+		print "Discarded incomplete, non-resumable IQ-TREE outputs for $treeOut\n";
+	}
+	my $execute = sub {
+		my ($safe) = @_;
+		my $attempt = $cmd;
+		$attempt .= " -safe " if $safe;
+		systemW($attempt);
+	};
+	print $cmd;
+	my $ok = eval {
+		$execute->($runSafe);
+		1;
+	};
+	my $unsafeError = $@;
+	if (!$runSafe && _iqtreeLogRequestsSafeKernel($treeOut, $unsafeError)) {
+		_archiveIQTreeLog($treeOut, 'unsafe');
+		_clearIQTreeAttempt($treeOut);
+		warn "IQ-TREE reported numerical underflow; restarting once with -safe\n";
+		$ok = eval {
+			$execute->(1);
+			1;
+		};
+		if (!$ok) {
+			die "IQ-TREE safe-kernel retry failed after an unsafe numerical underflow. "
+				."Initial failure: $unsafeError\nSafe retry: $@";
+		}
+	} elsif (!$ok) {
+		die $unsafeError;
+	}
+	my $validationReason = '';
+	die "IQ-TREE returned successfully but its output is incomplete: $validationReason\n"
+		unless iqtreeOutputComplete($treeOut, $inMSA, \$validationReason);
+	cleanupIQTreeTransients($treeOut);
 	#$treNM .= ".nwk";
 	#"mv $treeOut/IQtree_fast_allsites.treefile $treeOut/$treNM";
 }
@@ -552,7 +779,12 @@ sub runRaxMLng{
 	my $contS = ""; $contS = "--redo " unless ($cont);
 	my $outgrS = ""; $outgrS = "--outgroup $outgroup" if ($outgroup ne "");
 	$cmd = "$raxmlBin --msa $mAli --force --model $model --prefix $outTree $contS $outgrS --threads $ncore --site-repeats on \n"; #--seed 52352
-	$cmd .= "mv $outTree.raxml.bestTree $outTree; mv $outTree.raxml.log $outTreeBasic.log\nrm $outTree.raxml*";
+	# EPA-ng accepts RAxML-NG's bestModel file, which preserves the fitted
+	# frequencies/rates used for the backbone.  Keep it beside the published
+	# tree rather than deleting it with the other transient RAxML-NG outputs.
+	$cmd .= "mv $outTree.raxml.bestTree $outTree; mv $outTree.raxml.log $outTreeBasic.log; "
+		."if [ -s $outTree.raxml.bestModel ]; then mv $outTree.raxml.bestModel $outTreeBasic.bestModel; fi\n"
+		."rm -f $outTree.raxml*";
 	systemW "$cmd\n";
 	return $cmd;
 }
@@ -736,6 +968,17 @@ sub runRaxML{
 #	system "mv $raxD/RAxML_distances.all $outDist";
 
 	
+	# Keep the fitted RAxML v8 information file for EPA-ng strict-backbone
+	# placement.  EPA-ng can parse this report and therefore use the exact
+	# rates/frequencies selected for the backbone rather than a generic model.
+	my $raxmlInfo = $outTree;
+	$raxmlInfo =~ s/\.[^\.]+$/\.raxml.info/;
+	my $sourceInfo = "$raxD/RAxML_info.$raTmpF";
+	if (-s $sourceInfo) {
+		copy($sourceInfo, $raxmlInfo)
+			or die "Cannot retain RAxML fitted-model report $sourceInfo as $raxmlInfo: $!\n";
+	}
+
 	#clean up
 	system "rm -rf $raxD";
 }

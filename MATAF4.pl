@@ -9,37 +9,71 @@
 
 use warnings;
 use strict;
+use FindBin qw($RealBin);
+use lib $RealBin;
 use File::Basename;
+use File::Find ();
 use File::Path qw(make_path);
+use File::Spec;
 use Cwd 'abs_path';
 use POSIX;
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 use Getopt::Long qw( GetOptions );
-use List::Util qw(max);
+use List::Util qw(max sum);
+use Text::Wrap qw(wrap);
+use Text::ParseWords qw(shellwords);
 
 use vars qw($CONFIG_FILE);
 
 
 #load MF specific modules
 use Mods::GenoMetaAss qw(readMap readMapS getDirsPerAssmblGrp checkAssmblGrp lcp readFastHD prefixFAhd prefix_find 
-			gzipopen fileGZe fileGZs
+			gzipopen fileGZe fileGZs contig_stats_coverage_complete
 			readFasta writeFasta systemW getAssemblPath  filsizeMB resetAsGrps
 			iniCleanSeqSetHR checkSeqTech is3rdGenSeqTech hasSuppRds 
-			getRawSeqsAssmGrp getCleanSeqsAssmGrp addFileLocs2AssmGrp);
-use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpades inputFmtMegahit createGapFillopt  
+			addFileLocs2AssmGrp getRawLibrariesAssmGrp getCleanLibrariesAssmGrp
+			parseSupportReads discoverReadFiles);
+use Mods::ReadLibrary qw(
+	newReadLibrary cloneReadLibraries readLibrariesFromArrays
+	ensureSeqSetLibraries ensureCleanSeqSetLibraries
+	syncSeqSetLegacy syncCleanSeqSetLegacy replaceScopeLibraries
+	readLibrariesByScope libraryFiles libraryPairs libraryTechnology
+);
+use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpadesLibraries inputFmtMegahitRuntimeLibraries createGapFillopt
 			buildMapperIdx mapperDBbuilt decideMapper  checkMapsDoneSH greaterComputeSpace);
 use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
+use Mods::StatsLogReader qw(
+	read_stats_log_excerpt
+	reset_stats_log_sampling
+	stats_log_sampling_summary
+);
+use Mods::SampleCompletion qw(
+	sample_completion_path completion_request_signature
+	completion_component_evidence
+	completion_record_needs_refresh
+	read_sample_completion write_sample_completion
+	invalidate_sample_completion
+);
+use Mods::RibosomeState qw(
+	normalise_ribosome_request
+	prepare_ribosome_rerun
+	ribosome_completion_evidence
+);
 use Mods::phyloTools qw(fixHDs4Phylo);
-use Mods::Binning qw (getBinSubdirName );
-use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs);
+use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
+use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred handleSubmissionFailure);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
 use Mods::WorkflowControl qw(
-	advance_loop_window assembly_group_output_dirs parse_ignored_samples
-	hybrid_group_ready hybrid_package_complete missing_input_files source_input_files
+	advance_loop_window overlap_loop_window rolling_completed_frontier rolling_loop_transition parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs parse_ignored_samples
+	balanced_parallel_batches
+	hybrid_group_ready hybrid_package_complete hybrid_package_sample_id missing_input_files source_input_files
+	hybrid_local_scratch_gb
 	sample_base_output_dir sample_is_ignored workflow_members_match
-	normalise_job_dependencies append_job_dependencies augment_deferred_submission
+	normalise_job_dependencies append_job_dependencies deferred_command_dependencies augment_deferred_submission
+	commands_are_lightweight_filesystem input_terminal_status cleaned_primary_libraries_empty sample_empty_marker_reason reconcile_sample_empty_marker cleanup_stage_barrier
 );
 
 
@@ -53,6 +87,7 @@ use Mods::WorkflowControl qw(
 sub announce_MF4;
 sub smplStats; sub checkDrives; 
 sub isLastSampleInAssembly;
+sub cleanupCompletionRequirements; sub finishedCleanupArguments; sub runFinishedCleanup; sub submitFinishedCleanup;
 sub uploadRawFilePrep; sub unploadRawFilePostprocess;
 sub seedUnzip2tmp; sub cleanInput; #unzipping reads; removing these at later stages ; remove tmp dirs
 
@@ -60,6 +95,8 @@ sub sdmClean; sub sdmOptSet;  #qual filter reads
 sub mergeReads; #merge reads via flash
 sub removeHostSeqs; sub krakenTaxEst;sub prepKraken;
 sub loop2C_check;
+sub primeLoopSchedulerSnapshot;
+sub deferLoopProducerWave;
 
 sub metagAssemblyRun;
 sub buildAssemblyMapIdx;
@@ -67,7 +104,7 @@ sub createPsAssLongReads; #pseudo assembler
 sub prepPreAssmbl; #hybrid pacbio/ill assemblies
 sub genePredictions; sub run_prodigal; #gene prediction
 sub mapReadsToRef;  sub scndMap2Genos;
-sub runContigStats;#sub bam2cram;
+sub contigStatsOutputsComplete; sub runContigStats;#sub bam2cram;
 sub mocat_reorder; sub postSubmQsub; 
 sub detectRibo;  sub riboSummary;
 
@@ -79,50 +116,130 @@ sub nopareil; sub calcCoverage2nd;sub d2metaDist;
 sub metphlanMapping; sub mergeMP2Table;
 sub mOTU2Mapping; sub mergeMotu2Table; sub prepMOTU2;
 sub genoSize; sub check_map_done; sub check_depth_done;
+sub mapping_reference_matches;
 sub postprocess;
+sub reportSlurmJobFailures;
 sub setDefaultMFconfig;
 sub getCmdLineOptions;
 sub setupHPC;
 sub runStateInspection;
 sub runAutomaticWorkflowPreflight;
 sub workflowStateOptions;
+sub sampleReadSet;
+sub discoverSampleInputs; sub populateInputSizesFast; sub spaceInAssGrp;
+sub sampleCompletionRequestSignature; sub sampleCompletionForcedInvalidation;
+sub sampleCompletionComponents; sub sampleStatisticsEvidence;
+sub createSampleCompletionSentinel;
 
 sub createConsSNPandSVs;
 
 
-#------- version history MATAFILER / MG-TK --------
+#------- version history MATAFILER / MATAFILER --------
 #.75: 4.3.26: ini MATAFILER4 version
 #4.01: 13.3.26: removing bugs from hybrid assembly detection, switching to 4.x versioning
 #4.02: 15.4.26: updated internal logic for passing read paths, enabled hybrid mode in complex assembly groups
 #4.03: 18.4.26: further fixes to hybrid assembly logic. separateCongigs.pl tech hardened.
 #4.04: 24.4.26: hybrid assembly logic, adapting GC to different binners
 #4.10: 16.5.26: CahtGPT 5.6 sol: completely rewrite of calling logic, multiple bugs fixed across various scripts, better metagStats reporting, hybrid assemblies strengthned.
-my $MATFILER_ver = 4.10;
+#4.11: 21.7.26: loopTillComplete overlaps light passes and merges the next block on each final pass.
+#       Retained-lock windows get a bounded retry when at least one but fewer than
+#       1% of their samples or at most the configured number of jobs remain active.
+#       Loop specifications and incompatible rewrite modes fail early.
+#4.12: 22.7.26: reconcile aged Slurm dependencies through accounting after MinJobAge,
+#       omitting successfully completed jobs while reporting failed or unknown jobs.
+#       Track fresh submission times to avoid routine accounting queries, and remove
+#       unnecessary cross-sample ContigStats-to-ContigStats dependencies.
+#4.13: 24.7.26: loopTillComplete distinguishes executing jobs from queued
+#       dependencies and starts its next pass at a configurable active-job threshold.
+#4.14: 26.7.26: cache one validated input discovery per sample for sizing and staging.
+#4.15: 26.7.26: group run state and unify raw/clean read sets around library records.
+#4.16: 26.7.26: consolidate runtime options and checkpoint paths into named hashes.
+#4.17: 26.7.26: replace per-sample RMLOCK scheduler jobs with job-ID lock ledgers
+#       that MATAF4 safely releases after their recorded jobs leave the scheduler.
+#4.18: 26.7.26: summarize Slurm failures, including OOM and timeout outcomes,
+#       as an occurrence matrix grouped by MATAFILER job category.
+#4.19: 26.7.26: defer sample scratch and LOGandSUB creation until unfinished
+#       work is confirmed, keeping completed-sample passes free of staging churn.
+#4.20: 26.7.26: centralize completed-sample filesystem publication and cleanup
+#       policy in cleanup_finished_sample.pl.
+#4.21: 26.7.26: report primary and supplementary input sizes independently
+#       and reject physical input files assigned to both read scopes. Complete
+#       the user-facing transition from the former toolkit name to MATAFILER.
+#4.22: 28.7.26: complete assembly-independent workflows without assembly
+#       checkpoints, release their sample scratch safely, and reject assembly-only
+#       binning or variant options when assembly is disabled.
+#4.23: 30.7.26: use a rolling completed-sample frontier, a final full-range
+#       verification pass, shared batched Slurm lock/accounting snapshots, and
+#       running-plus-pending admission control. Repeated completed-sample visits
+#       use an ordered priority-output probe before deeper filesystem checks.
+#4.24: 30.7.26: prevent loopTillComplete from blocking indefinitely at the
+#       live-job cap; defer only submissions, retain sample cleanup checks, and
+#       continue past failed deferred dependency chains.
+#4.25: 30.7.26: submit loopTillComplete producers in readiness waves, so input
+#       staging, quality/host filtering, assembly, mapping, and contig statistics
+#       complete before their consumers are submitted.
+#4.26: 31.7.26: after the first final full-range verification, wait for every
+#       job submitted by this invocation to leave the scheduler before starting
+#       another full-range pass.
+#4.27: 2.8.26: discover input directories lazily during sample processing;
+#       retain the former all-sample startup scan only as an explicit precheck.
+#4.28: 3.8.26: force an exhausted rolling sample range into final full-range
+#       verification and audit every selected sample visit.
+#4.29: 3.8.26: close fully checked samples with an atomic, request-versioned
+#       sentinel containing their complete metagStats record; downstream work
+#       invalidates the sentinel before modifying sample outputs.
+#4.30: 4.8.26: make gene prediction and ContigStats explicit ConsSNP
+#       prerequisites; always provide vcf2fna with its required GFF.
+#4.31: 4.8.26: refresh exact Slurm capacity after a configurable batch of
+#       accepted submissions, while accounting for every intervening job.
+#4.32: 4.8.26: invalidate RiboFind outputs before assessing rerun completion.
+#       Remove stale per-sample links and merged profiles at the same time.
+#4.33: 4.8.26: make either RiboFind redo flag enable ribosomal profiling, so
+#       the reopened sample cannot immediately close through the no-work path.
+#4.34: 4.8.26: carry explicit RiboFind redo requirements through completion
+#       assessment instead of re-inferring them solely from filesystem stones.
+#4.35: 4.8.26: make RiboFind artifacts part of the sample-completion sentinel
+#       contract and record explicit terminal outcomes for skipped samples.
+#4.36: 4.8.26: keep map-resolved primary input paths authoritative through
+#       unzip staging and refresh audit scripts for lightweight local setup.
+#4.37: 4.8.26: reconcile stale SMPL.empty markers with authoritative input
+#       sizes before completion checks, so valid samples reach requested jobs.
+#4.38: 4.8.26: consolidate sample closure, scheduler snapshots and accounting
+#       batches, and primary/support consensus-SNP generation paths.
+#4.39: 5.8.26: harden RiboFind extraction and LCA recovery, require published
+#       profile outputs for completion, and raise extraction memory to 20 GiB.
+#4.40: 5.8.26: version sample sentinels as independent component/statistics
+#       contracts and persist lightweight evidence for every raw-read workflow.
+#4.41: 5.8.26: focus sentinel v3, record output byte sizes, and use
+#       sample-specific MF4.sentinel.<SampleID>.json filenames.
+#4.42: 5.8.26: mark primary cleaned-read sets with no FASTQ records as
+#       SMPL.empty and prevent empty MEGAHIT assemblies.
+my $MATFILER_ver = 4.42;
 
 #----------------- defaults ----------------- 
 
-#operation mode?
-my $ARGV0 = "";$ARGV0 = $ARGV[0] if (@ARGV > 0);
+# Runtime controls set directly by the command line.  Keeping these together
+# distinguishes invocation state from persistent pipeline configuration.
+my %runOptions = (
+	operationMode => @ARGV > 0 ? $ARGV[0] : "",
+	sharedTmpDir => "",
+	nodeTmpDir => "",
+	baseID => "",
+	from => 0,
+	to => 999999999999,
+	submit => 1,
+	loopCount => "0",
+	loopInitialCount => 0,
+	loopWindowSize => 0,
+);
 
-my %jmp=();
+#runtime paths
 my $logDir = ""; #this is the local logdir
-my $sharedTmpDirP = ""; #e.g. /scratch/MG-TK/
-my $nodeTmpDirBase = "";#/tmp/MG-TK/
-my $baseDir = ""; my $baseOut = "";
+my $baseOut = "";
 
 
-#control broad flow
-my $FROM1=0; my $TO1=999999999999;
 #counter on where MF is in map
 my $JNUM=0;
-my $doSubmit=1; 
-my $rewrite=0;
-my $baseID = "";
-
-
-my $loop2completion = "0" ; #
-my $loop2c_winsize=0;
-my $loop2completion_ini=0;
 
 #config is more overall configuration for MATAFILER
 my %MFconfig; 
@@ -130,11 +247,8 @@ my %MFconfig;
 #MFcontstants: object to store essential paths/file endings
 my %MFcontstants;
 
-#MFopt: global object with options for MG-TK. Added in MF v0.5, slowly rebuild MF around this system
+#MFopt: global object with options for MATAFILER. Added in MF v0.5, slowly rebuild MF around this system
 my %MFopt; 
-
-#MGstats: global trackers of variables that can change during excecution
-my %MFstats;
 
 # Keep machine-readable inspection and plan output clean. When either read-only
 # mode was requested, ordinary diagnostics use STDERR and JSON is written
@@ -171,18 +285,46 @@ my %locStats; #keeps statistics of samples in hash (from already finished sample
 #keeps globally used vars (mostly dirs/paths)
 my %MFglobal;
 
-#fixed stones
-my %stones = (preAsmDone => "preassmblDone.sto", asmDone => "ass.done.sto"); 
+#fixed checkpoint names
+my %checkpointNames = (
+	preAssemblyDone => "preassmblDone.sto",
+	assemblyDone => "ass.done.sto",
+);
 #preAssebmly (hybrid assemblies etc) is done, main assembly
 
 #fixed dirs for specific set of samples
 my %preDIRs = (dir_ContigStats => "/assemblies/metag/ContigStats/",dir2MePhl => "pseudoGC/Phylo/MP2/",dir2RiboF => "pseudoGC/Phylo/RiboFind/");
 
+# Show help before initialising defaults or checking the installation.  Apart
+# from keeping the output clean, this makes the option reference available on
+# systems that have not been configured for a pipeline run yet.
+my $helpRequested = grep { /^(?:--?help|-h|-\?)$/ } @ARGV;
+
 #say hello to user 
 announce_MF4();
+help() if ($helpRequested);
 setDefaultMFconfig();
 getCmdLineOptions;
+die "-loopTillCompleteActiveJobs requires a non-negative integer\n"
+	if ($MFconfig{loopTillCompleteActiveJobs} < 0);
+die "-schedulerPollSeconds requires a positive integer\n"
+	if ($MFconfig{schedulerPollSeconds} < 1);
+die "-schedulerCapacityCheckJobs requires a positive integer\n"
+	if ($MFconfig{schedulerCapacityCheckJobs} < 1);
+die "-assemblCores requires a non-negative integer (0 enables automatic scaling)\n"
+	if ($MFopt{AssemblyCores} < 0);
+die "-minBinnerAssemblyMB requires a non-negative number\n"
+	if ($MFopt{minBinnerAssemblyMB} < 0);
 $MFconfig{inspectState} = 1 if ($MFconfig{planState});
+if (!$MFconfig{inspectState} && $runOptions{loopCount} && (
+		$MFopt{redoAssMapping} || $MFopt{BinnerRedoAll} || $MFopt{redoAssembly}
+		|| $MFopt{redoSNPcons} || $MFopt{redoSNPgene}
+		|| $MFopt{rewriteAllIfAnyDiamond} || $MFopt{rewriteDiamond}
+		|| $MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign}
+	)) {
+	die "MATAFILER rewrite options cannot be combined with -loopTillComplete; " .
+		"disable rewrite options before starting a looped run.\n";
+}
 checkMF(1) unless ($MFconfig{inspectState});
 
 
@@ -191,7 +333,6 @@ checkMF(1) unless ($MFconfig{inspectState});
 my $smtBin = getProgPaths("samtools");#
 my $pigzBin  = getProgPaths("pigz");
 my $avx2Constr =  getProgPaths("avx2_constraint",0);
-my $mvCmd = "rsync -r --remove-source-files --force "; # "rsync -r  --remove-source-files " or "mv"
 
  
 #set up link to submission system on cluster. Inspection mode deliberately
@@ -211,6 +352,11 @@ my $workflowIteration = 0;
 my $ignoredSamplesHR = parse_ignored_samples($MFconfig{ignoreSmpl});
 prepareMap();
 my @samples = @{$map{opt}{smpl_order}}; 
+if ($MFconfig{precheckInputDirs}) {
+	print "Prechecking input directories for all mapped samples...\n"
+		unless $MFconfig{silent};
+	populateInputSizesFast($_) for @samples;
+}
 
 if ($MFconfig{inspectState}) {
 	runStateInspection();
@@ -219,36 +365,55 @@ if ($MFconfig{inspectState}) {
 runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
 
 
-# Central statistics store. Repeated workflow passes replace a sample's
+# Central reporting state. Repeated workflow passes replace a sample's
 # snapshot without losing samples collected in earlier loop windows.
-my %sampleStats;
-my @sampleStatsOrder;
-my %sampleStatsSeen;
+my %runReport = (
+	samples => {},
+	order => [],
+	seen => {},
+	context => {},
+	empty_samples => {},
+	present_assemblies => 0,
+);
 #the sample currently worked on, important to keep as a global variable
 my $curSmpl = "";
 #compare to previous dir
 my $baseoutPrev = "";
-#used in d2s intersample distance
-my $sdmjNamesAll = "";my @allSmplNames;my @allFilter1; my @allFilter2; 
-#keeps track of empty, finished samples, to be reported later..
-my @EmptySample; my $presentAssemblies = 0; my $totalCheckedSamples=0;
+# Inputs accumulated for cross-sample d2 distance calculation.
+my %d2Inputs = (
+	samples => {},
+	filtered_read1 => [],
+	filtered_read2 => [],
+	dependencies => "",
+);
 
 my @unzipjobs; 
 my @grandDeps; #used for loop2completion , collects dependencies 
 
 #profiler / human filtering preps
 my $krakDeps = prepKraken();
-my $mOTU2Deps = ""; prepMetaphlan();
+prepMetaphlan();
 
 
-if ($TO1 > @samples){
-	print "Reset range of samples to ". @samples."\n"; $TO1 = @samples;
+if ($runOptions{to} > @samples){
+	print "Reset range of samples to ". @samples."\n"; $runOptions{to} = @samples;
 }
-my $from = $FROM1; my $to = $TO1;
+my $from = $runOptions{from}; my $to = $runOptions{to};
+my ($selectedFrom, $selectedTo) = ($runOptions{from}, $runOptions{to});
 #die "\"@samples\"\n";
-if ($loop2c_winsize > 0){
-	$to = $from + $loop2c_winsize; $to = $TO1 if ($to > $TO1);
+if ($runOptions{loopWindowSize} > 0){
+	$to = $from + $runOptions{loopWindowSize}; $to = $runOptions{to} if ($to > $runOptions{to});
 }
+my $loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
+my $loopIterationExtended = 0;
+my $loopFinalLockRetryUsed = 0;
+my %loopSubmittedJobIds;
+my %loopSampleCompleted;
+my (%loopSampleVisited, %loopFinalSampleVisited);
+my $loopFinalVerification = 0;
+my $loopSawActiveLocks = 0;
+$QSBoptHR->{nonblockingMaxConcurrentJobs} = $runOptions{loopCount} ? 1 : 0;
+primeLoopSchedulerSnapshot($from, $to) if $runOptions{loopCount};
 
 
 #--------------------------------------------------------------------------------
@@ -262,9 +427,11 @@ if ($loop2c_winsize > 0){
 #die $to."\n";
 #for loop that goes over every single sample in the .map
 for ($JNUM=$from; $JNUM<$to;$JNUM++){
-	
-	qsubSystemWaitMaxJobs($MFconfig{checkMaxNumJobs}, $MFconfig{killDepNever});
 	$curSmpl = $samples[$JNUM];
+	if ($runOptions{loopInitialCount}) {
+		$loopSampleVisited{$JNUM} = 1;
+		$loopFinalSampleVisited{$JNUM} = 1 if $loopFinalVerification;
+	}
 	
 	
 	#set up initial local paths for a given sample
@@ -277,8 +444,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 
 	#local flow control
-	if (exists($jmp{$JNUM})){loop2C_check($cAssGrp,\@sampleDeps);next;}
-
 	#print "SMPL::$curSmpl\n";
 	$dir2rd = $map{$curSmpl}{dir};  $dir2rd = $map{$curSmpl}{prefix} if ($dir2rd eq "");
 	my $SmplName = $map{$curSmpl}{SmplID};
@@ -296,7 +461,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if (!-d $baseOut || $baseoutPrev ne $baseOut){
 		$MFglobal{globalLogDir} = $baseOut."LOGandSUB/"; #this is the gloabl logdir (across all samples in current run)
 		system("mkdir -p $MFglobal{globalLogDir}/sdm") unless (-d "$MFglobal{globalLogDir}/sdm");
-		open $QSBoptHR->{LOG},">",$MFglobal{globalLogDir}."qsub.log";# unless ($doSubmit == 0);
+		open $QSBoptHR->{LOG},">",$MFglobal{globalLogDir}."qsub.log";# unless ($runOptions{submit} == 0);
 		$MFglobal{collectFinished} = $baseOut."runFinished.log";
 		foreach (split /,/,$MFconfig{mapFile}) {system "cp $_ $MFglobal{globalLogDir}/";}
 		print $MFglobal{globalLogDir}."qsub.log\n";
@@ -304,7 +469,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 
 	$logDir = "$curOutDir/LOGandSUB/";
-	system("mkdir -p $logDir") unless (-d $logDir);
 
 	#ignore samples .. for various reasons ------------------------------------------------------------------------------------
 	if ($MFconfig{ignoreSmpl} ne ""){
@@ -314,30 +478,40 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $smplLockF = "$logDir/$MFcontstants{DefaultSampleLock}";
 	if (-e $smplLockF){
 		if ($MFconfig{rmSmplLocks}){ system "rm -f $smplLockF";
-		} else {print "\n    >>>>>>>>>> Sample $SmplName is locked! <<<<<<<<<<  \n";loop2C_check($cAssGrp,\@sampleDeps);next;}
+		} else {
+			my $activeLockJobs = sampleLockActiveJobs($smplLockF, $QSBoptHR);
+			if (defined($activeLockJobs) && $activeLockJobs == 0) {
+				unlink $smplLockF
+					or die "Cannot release completed sample lock $smplLockF: $!\n";
+				print "Released completed sample lock for $SmplName\n"
+					unless $MFconfig{silent};
+			} else {
+				$loopSawActiveLocks = 1
+					if defined($activeLockJobs) && $activeLockJobs > 0;
+				my $lockReason = defined($activeLockJobs)
+					? "$activeLockJobs recorded job(s) still queued or running"
+					: "legacy/unreadable lock has no verifiable job ledger";
+				print "\n    >>>>>>>>>> Sample $SmplName is locked: $lockReason <<<<<<<<<<  \n";
+				loop2C_check($cAssGrp,\@sampleDeps);next;
+			}
+		}
 	} 
 	$QSBoptHR->{LOCKfile} = $smplLockF; #set lockfile to be created if any job is submitted
 	
 
 	%locStats = ();
 	#$locStats{hasPaired} = 0;	$locStats{hasSingle} = 0; 
-	$totalCheckedSamples++;push (@allSmplNames,$SmplName);
+	$d2Inputs{samples}{$SmplName}=1;
 	
 	print "\n======= $SmplName - $JNUM - $dir2rd =======\n" unless($MFconfig{silent});
 	
 	#set up dirs ------------------------------------------------------------------------------------
 	my $smplTmpDir = "$MFglobal{runTmpDirGlobal}$SmplName/"; #curTmpDir
-	my $nodeSpTmpD = "$nodeTmpDirBase/$SmplName";
-	system "mkdir -p $smplTmpDir" unless (-d $smplTmpDir); #shared raw/cleaned-read staging
-	my @checkLocs = ($smplTmpDir);
-	push(@checkLocs,$curDir)  if ($curDir ne "");
-	$QSBoptHR->{LocationCheckStrg} = checkDrives(\@checkLocs);
+	my $nodeSpTmpD = "$runOptions{nodeTmpDir}/$SmplName";
 
 	my $finalCommAssDir = "$curOutDir/assemblies/metag/";
 	my $finalCommAssDirSingle = $finalCommAssDir; #this is only used for checking..
 	my $finalMapDir = "$curOutDir/mapping/";
-	my $mapOut = "$finalMapDir/.work/$SmplName/primary/";
-	my $mapOutSup = "$finalMapDir/.work/$SmplName/support/";
 	#$DBpath="$curOutDir/readDB/";
 	
 	
@@ -345,7 +519,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $AssemblyGo=0; my $MappingGo=0; #controls if assemblies / mappings are done in respective groups
 	
 	#complicated flow control for multi sample assemblies
-	die "cAssGrp eq  \"$cAssGrp\" ".$baseID."\n" if ($cAssGrp eq "");
+	die "cAssGrp eq  \"$cAssGrp\" ".$runOptions{baseID}."\n" if ($cAssGrp eq "");
 	my $assmGrpTag = "AssmblGrp_$cAssGrp";
 	#die "AssemblGrp exists already!!: \"$assmGrpTag\"\n" if (exists($assmblGrpLog{$assmGrpTag}));
 	#$assmblGrpLog{$assmGrpTag} = 1;
@@ -358,11 +532,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#assign job name (dependency) only ONCE
 	if ( !exists($AsGrps{$cAssGrp}{CntAss}) || $AsGrps{$cAssGrp}{CntAss} == 0){
 		$AsGrps{$cAssGrp}{AssemblJobName} = "";
-		$AsGrps{$cAssGrp}{CSfinJobName} = "";
 	}
 	
 	$AsGrps{$cAssGrp}{CntAss} ++;
-	print "AssmblyGrp: " . $AsGrps{$cAssGrp}{CntAss} .":".$AsGrps{$cAssGrp}{CntAimAss}. "; " if ($AsGrps{$cAssGrp}{CntAimAss} > 1 && !$MFconfig{silent});
+	print "AssmblGrp: " . $AsGrps{$cAssGrp}{CntAss} .":".$AsGrps{$cAssGrp}{CntAimAss}. ";\n"
+		if ($AsGrps{$cAssGrp}{CntAimAss} > 1 && !$MFconfig{silent});
 	if ($AsGrps{$cAssGrp}{CntAss}  >= $AsGrps{$cAssGrp}{CntAimAss} ){
 		#print "running assembluy\n";
 		$AssemblyGo = 1;
@@ -374,7 +548,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#my $hasPrimaryRds= 1;$hasPrimaryRds = 0 if ($map{$curSmpl}{prefix} eq "" && $map{$curSmpl}{dir} eq "");
 	
 
-	print "MapGroup: ".$AsGrps{$cMapGrp}{CntMap} .":".$AsGrps{$cMapGrp}{CntAimMap}.";\n"  unless ($MFconfig{silent});
+	print "MapGroup: ".$AsGrps{$cMapGrp}{CntMap} .":".$AsGrps{$cMapGrp}{CntAimMap}.";\n"
+		if ($AsGrps{$cMapGrp}{CntAimMap} > 1 && !$MFconfig{silent});
 	if (!exists($AsGrps{$cMapGrp}{CntMap})){ die "Can;t find CntMap for $cMapGrp";}
 	if ($AsGrps{$cMapGrp}{CntMap}  >= $AsGrps{$cMapGrp}{CntAimMap} 
 			&& $map{$curSmpl}{hasPrimaryRds} ) {  #ensure primary reads are present and registered
@@ -428,28 +603,203 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	
 	
-	#stones, local
-	my $STOcram = "$CRAMmap.sto";
-	my $STOsupCram = "$SupCRAMmap.sto";
-	my $STOmapFinal="$finalMapDir/done.sto";
-	my $STOsnpCons = "$contigsSNP.SNP.cons.stone"; $STOsnpCons =~ s/\.stone/\.norm\.stone/ if ($MFopt{normSNPindels});
-	my $STOsnpSuppCons = "$contigsSNP.SNP.supp.cons.stone";$STOsnpSuppCons =~ s/\.stone/\.norm\.stone/ if ($MFopt{normSNPindels});
-	
-	# collect stats on seq qual, assembly etc
-	if ($MFconfig{alwaysDoStats}){
-		push @sampleStatsOrder, $SmplName unless $sampleStatsSeen{$SmplName}++;
-		$sampleStats{$SmplName} = {
-			DIR => $dir2rd,
-			values => smplStats($curOutDir, $asmDir, $SmplName),
+	# Resolved checkpoints for the current sample.
+	my %sampleCheckpoints = (
+		primaryMapping => "$CRAMmap.sto",
+		supportMapping => "$SupCRAMmap.sto",
+		mappingComplete => "$finalMapDir/done.sto",
+		primaryConsensus => "$contigsSNP.SNP.cons.stone",
+		supportConsensus => "$contigsSNP.SNP.supp.cons.stone",
+	);
+	if ($MFopt{normSNPindels}) {
+		$sampleCheckpoints{primaryConsensus} =~ s/\.stone/\.norm\.stone/;
+		$sampleCheckpoints{supportConsensus} =~ s/\.stone/\.norm\.stone/;
+	}
+
+	my $completionComponentContext = {
+		sample_key => $curSmpl,
+		assembly_fasta => $finAssLoc,
+		assembly_dir => $finalCommAssDir,
+		mapping_dir => $finalMapDir,
+		contig_stats_dir => $ContigStatsDir,
+		binning_output => $BinningOut,
+		primary_mapping => $CRAMmap,
+		support_mapping => $SupCRAMmap,
+		primary_mapping_stone => $sampleCheckpoints{primaryMapping},
+		support_mapping_stone => $sampleCheckpoints{supportMapping},
+		primary_consensus_stone => $sampleCheckpoints{primaryConsensus},
+		support_consensus_stone => $sampleCheckpoints{supportConsensus},
+		consensus_contigs => $contigsSNP,
+		consensus_genes => [$genePredSNP, $genePredAASNP],
+		primary_vcf => $vcfSNP,
+		support_vcf => $vcfSNPsupp,
+		primary_sv => $vcfSV,
+		support_sv => $vscSVsupp,
+	};
+	# Register the sentinel path before the completion gate. Postprocessing reads
+	# only this cached record and never rescans sample outputs or logs.
+	my $completionSignature = sampleCompletionRequestSignature($curSmpl);
+	my $completionSentinel = sample_completion_path($curOutDir, $SmplName);
+	if ($MFconfig{alwaysDoStats}) {
+		push @{$runReport{order}}, $SmplName unless $runReport{seen}{$SmplName}++;
+		$runReport{context}{$SmplName} = {
+			sentinel => $completionSentinel,
+			request_signature => $completionSignature,
 		};
 	}
-	
-	$map{$curSmpl}{inputFilesEmpty} = 0; 
-	if (-e "$curOutDir/SMPL.empty"){$map{$curSmpl}{inputFilesEmpty} = 1;}
+	# Every terminal path publishes the same sample identity, workflow signature,
+	# and authoritative input sizes. Keep that bookkeeping in one closure so the
+	# normal, empty-input, and SDM-warning paths cannot drift apart.
+	my $closeSampleOutcome = sub {
+		my (%outcome) = @_;
+		my $message = delete($outcome{completion_message})
+			|| "Sample already complete; no jobs submitted\n";
+		my $closedPath = createSampleCompletionSentinel(
+			sample_root => $curOutDir,
+			sample_name => $SmplName,
+			input_label => $dir2rd,
+			input_dir => $curOutDir,
+			assembly_dir => $asmDir,
+			request_signature => $completionSignature,
+			component_context => $completionComponentContext,
+			primary_input_size_mb => $map{$curSmpl}{inputFileSizeMB},
+			supplementary_input_size_mb => $map{$curSmpl}{inputXFileSizeMB},
+			%outcome,
+		);
+		if ($closedPath) {
+			$loopSampleCompleted{$JNUM} = 1;
+			print $message unless $MFconfig{silent};
+		} else {
+			delete $loopSampleCompleted{$JNUM};
+		}
+		return $closedPath;
+	};
+
+	# A valid sentinel is the sole fast-completion authority. Rewrite requests,
+	# changed workflow parameters, or malformed sentinels reopen the sample.
+	my @forcedReopen = sampleCompletionForcedInvalidation();
+	my ($closedSample, $completionError, $expectedCompletionComponents);
+	unless (@forcedReopen) {
+		($closedSample, $completionError) = read_sample_completion(
+			path => $completionSentinel,
+			sample => $SmplName,
+			request_signature => $completionSignature,
+		);
+	}
+	if ($closedSample && $closedSample->{outcome}{status} =~ /^skipped_(?:too_small|empty_input)$/) {
+		populateInputSizesFast($curSmpl);
+		my $currentPrimaryMB = 0 + ($map{$curSmpl}{inputFileSizeMB} || 0);
+		my $currentSupplementaryMB = 0 + ($map{$curSmpl}{inputXFileSizeMB} || 0);
+		my $currentTerminalStatus = input_terminal_status(
+			input_size_mb => $currentPrimaryMB + $currentSupplementaryMB,
+			threshold_mb => $MFconfig{skipSmallSmplsMB},
+		);
+		my $storedSizes = $closedSample->{outcome}{input_size_mb} || {};
+		if ($currentPrimaryMB != ($storedSizes->{primary} || 0)
+				|| $currentSupplementaryMB != ($storedSizes->{supplementary} || 0)) {
+			$closedSample = undef;
+			$completionError = 'primary or supplementary input size changed after the sample was skipped';
+		} elsif ($currentTerminalStatus ne $closedSample->{outcome}{status}) {
+			$closedSample = undef;
+			$completionError = 'current input size no longer qualifies for the stored terminal outcome';
+		}
+	}
+	if ($closedSample && $closedSample->{outcome}{status} eq 'skipped_cleaned_empty'
+			&& sample_empty_marker_reason($curOutDir) ne 'cleaned_primary_reads_empty') {
+		$closedSample = undef;
+		$completionError = 'the cleaned-empty marker is absent';
+	}
+	# A terminal empty member cannot suppress the map-defined release of an
+	# incomplete shared assembly. Reopen it only to submit that group work; it
+	# will immediately receive the same terminal sentinel once submission is safe.
+	my $sharedAssemblyMissing = $AssemblyGo && $AsGrps{$cAssGrp}{CntAimAss} > 1
+		&& $MFopt{DoAssembly}
+		&& !(-s "$finalCommAssDir/scaffolds.fasta.filt"
+			&& -e "$finalCommAssDir/$checkpointNames{assemblyDone}");
+	if ($closedSample && $closedSample->{outcome}{status} =~ /^skipped_/
+			&& $sharedAssemblyMissing) {
+		$closedSample = undef;
+		$completionError = 'shared assembly group has not been released';
+	}
+	if ($closedSample && completion_record_needs_refresh($closedSample)) {
+		$expectedCompletionComponents = sampleCompletionComponents(
+			$curOutDir, $SmplName, $completionComponentContext,
+		);
+		($closedSample, $completionError) = read_sample_completion(
+			path => $completionSentinel,
+			sample => $SmplName,
+			request_signature => $completionSignature,
+			expected_components => $expectedCompletionComponents,
+		);
+		if ($closedSample) {
+			write_sample_completion(
+				root => $curOutDir,
+				sample => $SmplName,
+				request_signature => $completionSignature,
+				present_assembly => $closedSample->{present_assembly},
+				components => $expectedCompletionComponents,
+				outcome => $closedSample->{outcome},
+				metagstats => $closedSample->{metagstats},
+			);
+			($closedSample, $completionError) = read_sample_completion(
+				path => $completionSentinel,
+				sample => $SmplName,
+				request_signature => $completionSignature,
+			);
+			die "Cannot refresh completion sentinel for $SmplName: $completionError\n"
+				unless $closedSample;
+			print "Updated completion sentinel for $SmplName with current output file sizes\n"
+				unless $MFconfig{silent};
+		}
+	}
+	if ($closedSample) {
+		$loopSampleCompleted{$JNUM} = 1;
+		my $status = $closedSample->{outcome}{status};
+		my $riboEvidence = $closedSample->{components}{ribofind} || {};
+		$progStats{riboFindComplCnts}++
+			if $status eq 'completed' && $riboEvidence->{requested}
+				&& $riboEvidence->{complete};
+		my $completionMessage = $status eq 'completed'
+			? "Sample already complete; no jobs submitted\n"
+			: "Sample has terminal outcome $status; no jobs submitted\n";
+		print $completionMessage unless $MFconfig{silent};
+		MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+		loop2C_check($cAssGrp, \@sampleDeps);
+		next;
+	}
+	if (-e $completionSentinel) {
+		my $reason = @forcedReopen
+			? 'rewrite requested: '.join(', ', @forcedReopen)
+			: ($completionError || 'completion sentinel was not accepted');
+		invalidate_sample_completion($curOutDir, $SmplName);
+		print "Reopening sample $SmplName; removed completion sentinel ($reason)\n"
+			unless $MFconfig{silent};
+	}
+	delete $loopSampleCompleted{$JNUM};
+
+	$map{$curSmpl}{inputFilesEmpty} = 0;
+	my $sampleEmptyMarker = "$curOutDir/SMPL.empty";
+	if (-e $sampleEmptyMarker || -l $sampleEmptyMarker) {
+		# SMPL.empty is only a cached conclusion. Revalidate it against the
+		# authoritative map-resolved inputs before it can suppress any work.
+		populateInputSizesFast($curSmpl);
+		my $currentInputSizeMB = ($map{$curSmpl}{inputFileSizeMB} || 0)
+			+ ($map{$curSmpl}{inputXFileSizeMB} || 0);
+		$map{$curSmpl}{inputFilesEmpty} = reconcile_sample_empty_marker(
+			sample_root => $curOutDir,
+			input_size_mb => $currentInputSizeMB,
+			threshold_mb => $MFconfig{skipSmallSmplsMB},
+		);
+		print "Removed stale SMPL.empty for $SmplName after discovering "
+			.sprintf('%.1f', $currentInputSizeMB)." MB of input\n"
+			if !$map{$curSmpl}{inputFilesEmpty} && !$MFconfig{silent};
+	}
 
 	#detect what already exists..
-	my $efinAssLoc = 0; $efinAssLoc = 1  if (-s $finAssLoc && -e "$finalCommAssDir/$stones{asmDone}");
-	#die "$efinAssLoc\n$finalCommAssDir/$stones{asmDone}\n";
+	my $efinAssLoc = 0; $efinAssLoc = 1  if (-s $finAssLoc && -e "$finalCommAssDir/$checkpointNames{assemblyDone}");
+	#die "$efinAssLoc\n$finalCommAssDir/$checkpointNames{assemblyDone}\n";
+	# Only canonical MATAFILER4 outputs participate in workflow recovery. Scratch
+	# trees left by older releases are deliberately ignored.
 	#activate if two assemblies for single sample required, e.g. hybrid assemblies
 	#my $doPreAssmFlag = 0; my $postPreAssmblGo =0 ;
 	
@@ -458,7 +808,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				$ContigStatsDir, $cAssGrp, $finAssLoc,$finalCommAssDir);#moves files to new locations
 	
 	
-	#print "$ePreAssmbly,$doPreAssmFlag,$postPreAssmblGo,$ePreAssmblPck\n$finalCommAssDir/$stones{preAsmDone}\n$metaGpreAssmblDir/moved.sto\n";
+	#print "$ePreAssmbly,$doPreAssmFlag,$postPreAssmblGo,$ePreAssmblPck\n$finalCommAssDir/$checkpointNames{preAssemblyDone}\n$metaGpreAssmblDir/moved.sto\n";
 	
 	my $eCovAsssembly = 1; $eCovAsssembly = 0 if (!fileGZe($coveragePerCtg) );
 	$eCovAsssembly = 0 if (!fileGZe( $markerGenesPerCtg) && $AssemblyGo);
@@ -466,29 +816,19 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $eSuppCovAsssembly = 0; $eSuppCovAsssembly = 1 if (fileGZe($suppCoveragePerCtg));
 	#die "$eCovAsssembly  $eSuppCovAsssembly  $suppCoveragePerCtg\n";
 	#will be created in contigstats step (not related to bowtie & sortbam)
-	my $eFinMapCovGZ = 0; $eFinMapCovGZ = 1 if (-e $STOcram && -e "$finalMapDir/$SmplName-smd.bam.coverage.gz");#"$finalMapDir/$SmplName-smd.bam.coverage.gz"; 
+	my $eFinMapCovGZ = 0; $eFinMapCovGZ = 1 if (-e $sampleCheckpoints{primaryMapping} && -e "$finalMapDir/$SmplName-smd.bam.coverage.gz");#"$finalMapDir/$SmplName-smd.bam.coverage.gz";
 	#$MFopt{mapSupport2Assembly}
 	my $locMapSup2Assembly =0; $locMapSup2Assembly =1 if ($MFopt{mapSupport2Assembly} && $map{$curSmpl}{"SupportReads"} ne "");
-	my $eFinSupMapCovGZ = 0; $eFinSupMapCovGZ = 1 if ($locMapSup2Assembly && -e $STOsupCram && fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage"));
-	#die "$locMapSup2Assembly $eFinSupMapCovGZ  $MFopt{mapSupport2Assembly}  $finalMapDir\n$STOsupCram\n";
+	my $eFinSupMapCovGZ = 0; $eFinSupMapCovGZ = 1 if ($locMapSup2Assembly && -e $sampleCheckpoints{supportMapping} && fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage"));
+	#die "$locMapSup2Assembly $eFinSupMapCovGZ  $MFopt{mapSupport2Assembly}  $finalMapDir\n$sampleCheckpoints{supportMapping}\n";
 	my $dfinalCommAssDir = 0 ; $dfinalCommAssDir = 1 if (-d $finalCommAssDir);
-	my $eFinalMapDir = 0; $eFinalMapDir = 1 if (-s $STOmapFinal);
+	my $eFinalMapDir = 0; $eFinalMapDir = 1 if (-s $sampleCheckpoints{mappingComplete});
 	#upload2EBI 
 	my $DoUploadRawReads = 0; $DoUploadRawReads = 1 if ($MFconfig{uploadRawRds} ne ""); 
 
 	
 	
-	#die "$eFinMapCovGZ $STOcram && -e $finalMapDir/$SmplName-smd.bam.coverage.gz\n";
-	#first take care of moving finished assemblies..
-	if (!$efinAssLoc && -e $metaGassembly && (-e "$metagAssDir/$stones{asmDone}" || -e "$metagAssDir/$stones{preAsmDone}")){
-		my $tagS = "Assembly";
-		if (-e "$metagAssDir/$stones{preAsmDone}"){$tagS = "preAssembly";}
-		print "Migrating legacy scratch $tagS to final location\n";
-		#print "$metaGassembly\n";
-		systemW "mkdir -p $finalCommAssDir" unless ($dfinalCommAssDir);
-		systemW "$mvCmd $metagAssDir/* $finalCommAssDir/";
-		$efinAssLoc = 1; 
-	}
+	#die "$eFinMapCovGZ $sampleCheckpoints{primaryMapping} && -e $finalMapDir/$SmplName-smd.bam.coverage.gz\n";
 	#die "$metagAssDir\n";
 	
 
@@ -497,6 +837,28 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $locRedoSNPcalling =0; 
 	my $locRedoSVs = 0;
 	my $locRedoAssMapping = $MFopt{redoAssMapping};
+	# A hybrid preassembly and the final hybrid assembly intentionally use the
+	# same canonical mapping directory.  Stones and coverage files alone cannot
+	# tell which assembly an existing CRAM targets.  New mappings carry the size
+	# and mtime of their reference; once the final assembly exists, reject a
+	# missing (legacy) or non-matching stamp so preassembly CRAMs are remapped.
+	if ($MFopt{DoAssembly} == 5 && -s $finAssLoc
+			&& -e "$finalCommAssDir/$checkpointNames{assemblyDone}") {
+		my @mappingReferenceChecks;
+		push @mappingReferenceChecks, [
+			"$finalMapDir/$SmplName-smd.reference.stat", 'primary'
+		] if ($eFinMapCovGZ);
+		push @mappingReferenceChecks, [
+			"$finalMapDir/$SmplName.sup-smd.reference.stat", 'supplementary'
+		] if ($eFinSupMapCovGZ);
+		for my $referenceCheck (@mappingReferenceChecks) {
+			my ($stamp, $kind) = @{$referenceCheck};
+			next if mapping_reference_matches($stamp, $finAssLoc);
+			print "Hybrid $kind mapping does not identify the current final assembly; remapping $SmplName\n";
+			$locRedoAssMapping = 1;
+			last;
+		}
+	}
 
 	#check if current assembly group is the same as before!
 	my $locRewrite = 0; my $locRedoAssembl = 0;
@@ -532,17 +894,29 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$eCovAsssembly=0;$eFinMapCovGZ=0;$eFinalMapDir=0;$eFinSupMapCovGZ=0;$eSuppCovAsssembly=0;$eSuppCovAsssembly=0;
 	}
 	
-	if (defined($locStats{totRds}) && $locStats{totRds}==0 && !defined($locStats{uniqAlign}) && -e $inputRawFile && $eFinMapCovGZ){ #do a deeper look
-		my $line = getFileStr("$inputRawFile",0); #open I,"<$inputRawFile"; my $line = <I>; close I; chomp($line);
-		#my @spl = split /,/,$line; my $inFileSize = -s $spl[0];
-		print "weird empty: $locStats{totRds} $line \nredoing..\n";die;
-		$locRewrite = 1;$locRedoAssembl = 1;
-	}
-	if ( ($MFconfig{skipWrongPairedSmpls} || $MFconfig{OKtoRWassGrps}) && -e "$logDir/sdmReadCleaner.sh.etxt" && `tail -n 70 $logDir/sdmReadCleaner.sh.etxt | grep 'invalid paired read' ` ne ""){
-		print "$logDir/sdmReadCleaner.sh.etxt problems! Delete outdir\n";
+	# Full sample statistics are collected after the submission loop. They are
+	# reporting data and must not force every sample to open all historical logs
+	# before the fast completion path can run.
+	my $sdmWarningLog = "$logDir/sdmReadCleaner.sh.etxt";
+	my $sdmInvalidPairs = ($MFconfig{skipWrongPairedSmpls}
+		|| $MFconfig{OKtoRWassGrps}) && -e $sdmWarningLog
+		&& `tail -n 70 $sdmWarningLog | grep 'invalid paired read' ` ne "";
+	if ($sdmInvalidPairs){
+		print "$sdmWarningLog problems! Delete outdir\n";
 		if ($MFconfig{OKtoRWassGrps}){
 			$locRewrite=1 ;
 		}elsif ($MFconfig{skipWrongPairedSmpls}){
+			populateInputSizesFast($curSmpl)
+				unless exists($map{$curSmpl}{inputFileSizeMB})
+					&& exists($map{$curSmpl}{inputXFileSizeMB});
+			$closeSampleOutcome->(
+				present_assembly => $efinAssLoc,
+				terminal_status => 'skipped_sdm_warning',
+				sdm_warning_type => 'invalid_paired_read',
+				sdm_warning_log => $sdmWarningLog,
+				completion_message =>
+					"Sample skipped after SDM invalid-pair warning; outcome cached in completion sentinel\n",
+			);
 			loop2C_check($cAssGrp,\@sampleDeps);next;
 		}
 	}
@@ -558,7 +932,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		system "rm -rf $finalCommAssDir/ContigStats" if (-d "$finalCommAssDir/ContigStats");
 		system "rm -rf $ContigStatsDir/*pergene* $ContigStatsDir/GeneStats.tx* $ContigStatsDir/GTDBmg $ContigStatsDir/FMG";
 	}
-	if ($MFconfig{OKtoRWassGrps} && ($rewrite || $locRewrite)){
+	if ($MFconfig{OKtoRWassGrps} && $locRewrite){
 		print "Deleting previous results.. rerun MATAFILER for sample\n";
 		system ("rm -r -f $asmDir $finalCommAssDir");
 		system("rm -f -r $curOutDir $smplTmpDir $MFglobal{collectFinished} ");
@@ -577,9 +951,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#print "locRedoAssMapping : $locRedoAssMapping\n";
 	if ($MFopt{map2Assembly} ){
 		if ($eFinMapCovGZ && !$eFinalMapDir){$locRedoAssMapping = 1 ; print "R0 ";}
-		if (!$efinAssLoc && !$ePreAssmbly  ){$locRedoAssMapping = 1 ;}#print "R1";}
+		my $mappingArtifactsPresent = $eFinMapCovGZ || $eFinalMapDir || -e $sampleCheckpoints{primaryMapping}
+			|| -e $CRAMmap || fileGZe("$finalMapDir/$SmplName-smd.bam.coverage.gz");
+		if (!$efinAssLoc && !$ePreAssmbly && $mappingArtifactsPresent){$locRedoAssMapping = 1 ;}
 		if (!$MappingGo && $map{$curSmpl}{hasPrimaryRds} && $eFinalMapDir){$locRedoAssMapping = 1 ;print "R2 ";}
-		if (-e $STOcram && (!fileGZe( "$finalMapDir/$SmplName-smd.bam.coverage.gz") || !-e $CRAMmap) ){$locRedoAssMapping = 1 ;print "R3 ";}
+		if (-e $sampleCheckpoints{primaryMapping} && (!fileGZe( "$finalMapDir/$SmplName-smd.bam.coverage.gz") || !-e $CRAMmap) ){$locRedoAssMapping = 1 ;print "R3 ";}
 		#if ($eFinMapCovGZ && (exists($locStats{uniqAlign}) && $locStats{uniqAlign} > 20) && -s $CRAMmap <300){$locRedoAssMapping = 1 ;print "R4";}
 		#print "$CRAMmap :: $locRedoAssMapping\n";
 		if ($locRedoAssMapping){# && -e $CRAMmap){
@@ -587,7 +963,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			#die;
 		}
 		
-		#die "$STOcram && !-e $finalMapDir/$SmplName-smd.bam.coverage.gz";
+		#die "$sampleCheckpoints{primaryMapping} && !-e $finalMapDir/$SmplName-smd.bam.coverage.gz";
 		
 	}
 
@@ -599,18 +975,18 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			die "Refusing to rebuild shared assembly group $cAssGrp without -OKtoRWassGrps 1\n";
 		}
 		print "Removing assembly ... \n" if (-e $metaGassembly );
-		system "rm -fr $finalCommAssDir $mapOut $mapOutSup";
+		system "rm -fr $finalCommAssDir";
 		$efinAssLoc = 0;	
 		$locRedoAssMapping=1;
 	}
 	#delete mapping to assembly
 	if ($locRedoAssMapping){
 		#die "locDel\n";
-		my $fileSiz = "NA"; 
-		$fileSiz = (-s $CRAMmap) if (-s $CRAMmap);
+		my @cramStat = stat($CRAMmap);
+		my $fileSiz = @cramStat && $cramStat[7] > 0 ? $cramStat[7] : "NA";
 		print "Deleting previous assembly mapping, size map: ". $fileSiz . " ; $CRAMmap\n" if ($MappingGo && $eFinalMapDir);
 		#die "$finAssLoc && !-e $metaGassembly\n";
-		system "rm -fr $finalMapDir $mapOut $mapOutSup $ContigStatsDir/Coverage.* $ContigStatsDir/Cov.sup.*";
+		system "rm -fr $finalMapDir $ContigStatsDir/Coverage.* $ContigStatsDir/Cov.sup.*";
 		$eFinMapCovGZ = 0;	
 		$eCovAsssembly = 0; $eSuppCovAsssembly=0; $eFinSupMapCovGZ=0; $eFinalMapDir = 0;
 		#are there SNPs called? remove as well..
@@ -618,12 +994,17 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	#Case: primary assembly mapping was done, support reads were not yet mapped.. need to redo binning 
 	#print "$locMapSup2Assembly && !$eFinSupMapCovGZ) && ($MFopt{map2Assembly} && $eFinMapCovGZ \n";
-	if ( ($locMapSup2Assembly && !$eFinSupMapCovGZ) && ($MFopt{map2Assembly} && $eFinMapCovGZ ) ){
+	my @binningBaseStat = stat($BinningOut);
+	my $binningArtifactsPresent = @binningBaseStat || -e "$BinningOut.cm"
+		|| -e "$BinningOut.cm2" || -e "$BinningOut.assStat";
+	if ( ($locMapSup2Assembly && !$eFinSupMapCovGZ) && ($MFopt{map2Assembly} && $eFinMapCovGZ )
+			&& $binningArtifactsPresent ){
 		print "redoing binning due to support mapping not included..\n";
 		system("rm -rf  $binningDir/");
 	}
 	#debug case: binning was empty
-	if ($MFopt{DoMetaBat2} && ( $MFopt{BinnerRedoAll} || ($MFopt{BinnerRedoEmpty} && -e $BinningOut && !-s $BinningOut) ) ){
+	if ($MFopt{DoMetaBat2} && ( $MFopt{BinnerRedoAll}
+			|| ($MFopt{BinnerRedoEmpty} && @binningBaseStat && $binningBaseStat[7] == 0) ) ){
 		print "redoing binning due to empty bins (flag -redoEmptyBins 1) ..\n";
 		system "rm -rf $binningDir";
 	}
@@ -637,8 +1018,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	}
 	my $KrakenOD = $curOutDir."Tax/kraken/$MFopt{globalKraTaxkDB}/";
 	if ($MFopt{RedoKraken} && -d $KrakenOD) {system "rm -r $KrakenOD" ;}
-	if ($MFopt{RedoRiboFind}){system "rm -rf $curOutDir/ribos";}
-	if ($MFopt{RedoRiboAssign}){system "rm -rf $curOutDir/ribos//ltsLCA";}
 	if ($MFopt{DoRibofind} && -e "$curOutDir/LOGandSUB/RiboLCA.sh.etxt"){
 		#my $LCAetxt = `cat $curOutDir/LOGandSUB/RiboLCA.sh.etxt`;
 		#if ($LCAetxt =~ m/ParseError thrown: Unexpected character .\@. found/){system "rm -rf $curOutDir/ribos";}
@@ -649,20 +1028,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($MFopt{redoSNPcons}){		system "rm -rf $SNPdir $genePredSNP* $contigsSNP* $genePredAASNP* $logDir/SNP";
 	} elsif ($MFopt{redoSNPgene}){		system "rm -rf $genePredSNP* $genePredAASNP* ";
 	}
-	my $boolGenePredOK=0;
-	if ($MFopt{DoEukGenePred}){
-		$boolGenePredOK = 1 if ( fileGZe("$finalCommAssDir/genePred/proteins.bac.shrtHD.faa") || ($MFopt{pseudoAssembly} && fileGZe("$finalCommAssDir/genePred/proteins.bac.shrtHD.faa")));
-	} else {
-		$boolGenePredOK = 1 if (fileGZe("$finalCommAssDir/genePred/proteins.shrtHD.faa") || ($MFopt{pseudoAssembly} && fileGZe("$finalCommAssDir/genePred/proteins.shrtHD.faa")) );
-	}
-	#DEBUG to gzip outputs..
-	if ($MFopt{genePredGZenforce} && $boolGenePredOK && -e "$finalCommAssDir/genePred/genes.gff"){$boolGenePredOK =0;}
+	my $genePredMarker = $MFopt{DoEukGenePred} ? ".bac" : "";
+	my $genePredProtein = "$finalCommAssDir/genePred/proteins$genePredMarker.shrtHD.faa";
+	my $genePredGff = "$finalCommAssDir/genePred/genes$genePredMarker.gff";
+	my $boolGenePredOK = fileGZe($genePredProtein) && fileGZe($genePredGff);
+	# Force the canonical compressed representation when requested.
+	if ($MFopt{genePredGZenforce} && $boolGenePredOK && -e $genePredGff){$boolGenePredOK =0;}
 	#die "$boolGenePredOK\n$finalCommAssDir\n";
 
 	
 	#central flag that decides if an assembly is done
 	my $boolAssemblyOK=0;
 	$boolAssemblyOK=1 if ($boolGenePredOK && $efinAssLoc );#&& (!$MFopt{map2Assembly} || $eFinMapCovGZ ) );
+	my $assemblyOutputsRequired = $MFopt{DoAssembly} ? 1 : 0;
+	my $assemblyWorkflowComplete = !$assemblyOutputsRequired || $boolAssemblyOK;
 	#die "$boolGenePredOK && $efinAssLoc && (!$MFopt{map2Assembly} || $eFinMapCovGZ ) $locRedoAssMapping\n";
 			#&& (-s "$finalMapDir/$SmplName-smd.bam" || -s "$finalMapDir/$SmplName-smd.cram")
 	#die "$boolAssemblyOK\n$finalCommAssDir/genePred/proteins.shrtHD.faa\n$finalMapDir/$SmplName-smd.bam.coverage.gz\n";
@@ -673,9 +1052,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		system('rm', '-rf', '--', $curOutDir, $smplTmpDir, $MFglobal{collectFinished}) == 0
 			or die "Failed to remove unfinished results for $curSmpl\n";
 		loop2C_check($cAssGrp,\@sampleDeps);next;
-	} elsif ($boolAssemblyOK && $eCovAsssembly && !$map{$curSmpl}{inputFilesEmpty}) {
-		#check that assembly path fits..
-		getAssemblPath($curOutDir,$finalCommAssDir);
 	}
 
 	
@@ -716,7 +1092,14 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 #--------------------- other flags --------------------------
 	#contamination flag: redo/do contaminant removal to eg make sure human contamination is correctly logged
 	my $calcContamination = 0;
-	$calcContamination = 1 if ($locStats{contamination} eq "?\t" && $efinAssLoc && $MFopt{completeContaStats});
+	if ($efinAssLoc && $MFopt{completeContaStats}) {
+		my $contamination = getContamination(
+			"$curOutDir/LOGandSUB/KrakHS.sh.etxt",
+			"$curOutDir/LOGandSUB/KrakHS.sh.otxt", '',
+		);
+		$calcContamination = 1
+			if (($contamination->{FilteredContaRdsPerc} || '') eq "?\t");
+	}
 	#print "Conta: $calcContamination   \"$locStats{contamination}\"\n";
 
 	
@@ -725,9 +1108,28 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	
 	
 	#check on processes not dependent on assemblies
+	my $riboRedo = {removed => 0, profile => 0, assignment => 0};
+	if ($MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign}) {
+		$riboRedo = prepare_ribosome_rerun(
+			sample_root => $curOutDir,
+			central_root => $baseOut.$preDIRs{dir2RiboF},
+			sample => $SmplName,
+			redo_profile => $MFopt{RedoRiboFind},
+			redo_assignment => $MFopt{RedoRiboAssign},
+		);
+		print "Removed previous RiboFind results for $SmplName\n"
+			if $riboRedo->{removed} && !$MFconfig{silent};
+	}
+	if (($riboRedo->{profile} || $riboRedo->{assignment}) && !$MFconfig{silent}) {
+		my $scope = $riboRedo->{profile} ? 'extraction and assignment' : 'assignment';
+		print "RiboFind rerun required for $SmplName ($scope)\n";
+	}
+
 	prepareDiamondRerun($curOutDir);
 	my ($calcKraken,$calcDiamond,$calcDiaParse,$calcRibofind,$calcRiboAssign,$calcGenoSize,
-			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar) = checkRawProgsFin($curOutDir,$SmplName);
+			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar) = checkRawProgsFin(
+				$curOutDir, $SmplName, $riboRedo->{profile}, $riboRedo->{assignment},
+			);
 	publishKrakenResults($curOutDir,$SmplName) if ($MFopt{DoKraken} && !$calcKraken);
 	#not complete yet? Then delete..
 	if ($MFconfig{redoFails} && ($calcRibofind||$calcDiamond || $calcDiaParse ||$calcMOTU2 || $calcMetaPhlan || $calcTaxaTar)){
@@ -746,26 +1148,35 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 
 
+	# Support coverage belongs to the final hybrid assembly. During preassembly it
+	# is intentionally absent and must not keep resubmitting no-op ContigStats jobs.
+	my $supportCoverageRequired = $locMapSup2Assembly && $efinAssLoc
+		&& !$doPreAssmFlag && !$ePreAssmblPck;
 	my $allMapDone =0;#used for SNP calling and Binning - but binning requires info if all maps are finished from all samples
 	$allMapDone = 1 if ( 
 				(!$map{$curSmpl}{hasPrimaryRds} || ($eFinMapCovGZ && -e "$finalMapDir/$SmplName-smd.$bamcramMap" && $eCovAsssembly )) #primary
-				&& ($eSuppCovAsssembly || !$locMapSup2Assembly)  #secondary
+				&& ($eSuppCovAsssembly || !$supportCoverageRequired)  #secondary
 				&& $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ );
 	#die "$allMapDone\n-e $finalMapDir/$SmplName-smd.$bamcramMap && $eCovAsssembly && !$ePreAssmbly && ($eSuppCovAsssembly || !$locMapSup2Assembly) && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/\n";
 	
 	#coverage done?
 	#my $allCovDone = 0; $allCovDone = 1 if ( ($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$map{$curSmpl}{hasPrimaryRds}) );
-	my $calcCoverage = 0; $calcCoverage =1 if ((($map{$curSmpl}{hasPrimaryRds} && !$eCovAsssembly) || (!$eSuppCovAsssembly && $locMapSup2Assembly) ) && $MFopt{map2Assembly});
+	my $calcCoverage = 0; $calcCoverage =1 if ((($map{$curSmpl}{hasPrimaryRds} && !$eCovAsssembly) || (!$eSuppCovAsssembly && $supportCoverageRequired) ) && $MFopt{map2Assembly});
 	#print "$calcCoverage = 1 if (($eSuppCovAsssembly || !$locMapSup2Assembly) && ($eCovAsssembly || !$MappingGo) );\n";
 	
 	#binning done?
 	my $calcBinning = 0;
+	my $binningComplete = binningOutputsComplete(
+		$BinningOut, $MFopt{useCheckM1}, $MFopt{useCheckM2},
+	);
 	# A downstream job need not wait for its inputs to exist at submission time.
 	# For a normal (non-hybrid-preassembly) group, AssemblyGo means that this
 	# invocation will schedule the final assembly and all of its mappings.  The
 	# binner is submitted later with those scheduler dependencies.
+	my $supportMappingPublished = !$locMapSup2Assembly || $eFinSupMapCovGZ;
 	if ($MFopt{DoMetaBat2} && !$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo
-			&& (!-e "$BinningOut.cm" && !-s "$BinningOut.cm2") ) {
+			&& $supportMappingPublished
+			&& !$binningComplete) {
 		$calcBinning=$MFopt{DoMetaBat2};
 		#die "$MFopt{DoMetaBat2} && $boolAssemblyOK && $AssemblyGo && $AsGrps{$cAssGrp}{MapDeps} !~ m/[^;]/ &&  (!-e $BinningOut.cm || !-s $BinningOut.cm2\n";
 	}
@@ -781,9 +1192,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#die "$assemblyFlag = 1 if ( $MFopt{DoAssembly} && !$boolAssemblyOK && !$efinAssLoc && !-e $metaGassembly\n $doPreAssmFlag\n";
 	my $calcReadMerge = 0;
 	$calcReadMerge = 1 if ($MFopt{doReadMerge} && ($MFopt{calcOrthoPlacement} || $calcDiamond || $calcGenoSize));
-	my $mapAssFlag = 0; $mapAssFlag = 1 if ($MFopt{map2Assembly} && !$eFinMapCovGZ  );
+	my $mapAssFlag = 0; $mapAssFlag = 1 if ($map{$curSmpl}{hasPrimaryRds} && $MFopt{map2Assembly} && !$eFinMapCovGZ  );
 	#only for support reads (from hybrid assemblies)
-	my $mapSuppAssFlag =0;$mapSuppAssFlag = 1 if ($locMapSup2Assembly && !$eFinSupMapCovGZ && $efinAssLoc && !$doPreAssmFlag && !$ePreAssmblPck );#hasSuppRds(\%AsGrps,$cAssGrp,$curSmpl ) );
+	my $mapSuppAssFlag =0;$mapSuppAssFlag = 1 if ($supportCoverageRequired && !$eFinSupMapCovGZ);#hasSuppRds(\%AsGrps,$cAssGrp,$curSmpl ) );
 	my $calcSuppCoverage = 0; $calcSuppCoverage =1 if ($MFopt{mapSupport2Assembly} && !$eSuppCovAsssembly && $map{$curSmpl}{"SupportReads"} ne "" && $mapSuppAssFlag && !$doPreAssmFlag);
 	
 	#die "$calcCoverage\n$mapAssFlag , $mapSuppAssFlag :: $ePreAssmbly && $doPreAssmFlag XX $postPreAssmblGo,$ePreAssmblPck\n";
@@ -791,18 +1202,28 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#die "$mapSuppAssFlag = 1 if ($locMapSup2Assembly && !$eFinSupMapCovGZ && $efinAssLoc \n";
 
 	#requires only bam/cram && assembly
+	my $consensusFastasComplete = !$MFopt{saveConsFastas}
+		|| (fileGZe($contigsSNP) && fileGZe($genePredSNP) && fileGZe($genePredAASNP));
 	my $calcConsSNP=0; 
-	if ($MFopt{DoConsSNP} && !$doPreAssmFlag && !$ePreAssmblPck){
+	if ($MFopt{DoConsSNP} && $map{$curSmpl}{hasPrimaryRds} && !$doPreAssmFlag && !$ePreAssmblPck){
 		my $exSNPf= fileGZe($vcfSNP);
 		if ($exSNPf && fileGZs($vcfSNP) == 0){system "rm -f $vcfSNP*";$exSNPf=0;} #some old versions produced an empty vcf file..
-		$calcConsSNP=0; $calcConsSNP =1 if ( !-e $STOsnpCons || ($MFopt{saveConsFastas} &&  fileGZe($genePredSNP)==0  ) || ($MFopt{saveVCF} &&  !$exSNPf ) ) ;
+		my $primaryConsensusComplete = -e $sampleCheckpoints{primaryConsensus}
+			&& $consensusFastasComplete && (!$MFopt{saveVCF} || $exSNPf);
+		$calcConsSNP = 1 unless $primaryConsensusComplete;
 	}
-	my $calcSuppConsSNP=0; $calcSuppConsSNP =1 if (!$doPreAssmFlag && !$ePreAssmblPck && $locMapSup2Assembly && $MFopt{DoSuppConsSNP} && (!-e  $STOsnpSuppCons  ));
+	my $calcSuppConsSNP=0;
+	if (!$doPreAssmFlag && !$ePreAssmblPck && $locMapSup2Assembly && $MFopt{DoSuppConsSNP}) {
+		my $supportVcfComplete = !$MFopt{saveVCF} || fileGZe($vcfSNPsupp);
+		my $supportConsensusComplete = -e $sampleCheckpoints{supportConsensus}
+			&& $consensusFastasComplete && $supportVcfComplete;
+		$calcSuppConsSNP = 1 unless $supportConsensusComplete;
+	}
 	
 	
 	
 	#structural variants calcs
-	my $calcSVs = 0; $calcSVs = 1 if ( $MFopt{callSVs} && !-e $vcfSV && !$doPreAssmFlag && !$ePreAssmblPck);
+	my $calcSVs = 0; $calcSVs = 1 if ( $map{$curSmpl}{hasPrimaryRds} && $MFopt{callSVs} && !-e $vcfSV && !$doPreAssmFlag && !$ePreAssmblPck);
 	my $calcSVsSupp = 0; $calcSVsSupp = 1 if ($locMapSup2Assembly && !$doPreAssmFlag && !$ePreAssmblPck && $MFopt{callSVsSupp} && !-e $vscSVsupp );
 	if (!$mapAssFlag && ($calcConsSNP || $calcSVsSupp || $calcSVs || $calcSuppConsSNP) && $eFinMapCovGZ && !$allMapDone ){
 		#die $mapAssFlag;
@@ -822,7 +1243,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $requireRawReadsFlag = 0;#only list modules that really need raw reads
 	$requireRawReadsFlag = 1 if ( !$boolScndMappingOK || $calcContamination);
 	
-	my $seqCleanFlag = 0; $seqCleanFlag =1 if ($dowstreamAnalysisFlag && !-e "$smplTmpDir/seqClean/filterDone.stone" );
+	my $primaryCleanPending = !-e "$smplTmpDir/seqClean/filterDone.stone";
+	my $supportCleanPending = ($map{$curSmpl}{SupportReads} || '') ne ''
+		&& !-e "$smplTmpDir/seqClean/filterSupplDone.stone";
+	my $seqCleanFlag = $dowstreamAnalysisFlag && ($primaryCleanPending || $supportCleanPending) ? 1 : 0;
 	my $porechopFlag = 0;
 	$porechopFlag = 1 if ($MFopt{usePorechop} && $dowstreamAnalysisFlag && !-e "$smplTmpDir/rawRds/poreChopped.stone");
 	#die "$assemblyFlag\t$seqCleanFlag\t$boolScndMappingOK\n";
@@ -830,57 +1254,95 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	$calcUnzip=1 if ($calcDiamond || $porechopFlag || $seqCleanFlag  || $mapAssFlag || $mapSuppAssFlag || (!$MFopt{useUnmapped} && !$boolScndMappingOK) || $MFconfig{uploadRawRds} ne ""); 
 	#print "chk1 $mapSuppAssFlag $calcSuppCoverage $eSuppCovAsssembly\n" ;
 
+	# Cleanup is destructive to read-cleaning stones, mapping indexes and staged
+	# reads. A generic list of jobs submitted in this pass is not proof that the
+	# terminal assembly analyses are complete; track each producer and terminal
+	# analysis explicitly, including same-pass ConsSNP dependencies.
+	my $cleanupContigSubparts = $MFconfig{defaultContigSubs}."gFG";
+	$cleanupContigSubparts .= "m" if ($MFopt{DoBinning});
+	$cleanupContigSubparts .= "k" if ($MFopt{kmerAssembly});
+	$cleanupContigSubparts .= "4" if ($MFopt{kmerPerGene});
+	my $cleanupContigStatsComplete = contigStatsOutputsComplete(
+		$curOutDir, $finalCommAssDir, $cleanupContigSubparts, 1,
+		$curSmpl, $supportCoverageRequired,
+	);
+	my $cleanupPrimaryConsensusRequired = $MFopt{DoConsSNP} && $map{$curSmpl}{hasPrimaryRds};
+	my $cleanupSupportConsensusRequired = $MFopt{DoSuppConsSNP} && $locMapSup2Assembly;
+	my $cleanupConsensusRequired = $cleanupPrimaryConsensusRequired || $cleanupSupportConsensusRequired;
+	my $cleanupVariantRequired =
+		$cleanupConsensusRequired
+		|| ($MFopt{callSVs} && $map{$curSmpl}{hasPrimaryRds})
+		|| ($MFopt{callSVsSupp} && $locMapSup2Assembly);
+	my $cleanupVariantsComplete = !$cleanupVariantRequired
+		|| (!$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp);
+	my $terminalOutputsComplete = !$assemblyOutputsRequired || (
+		!$doPreAssmFlag && !$ePreAssmblPck
+		&& $efinAssLoc && $cleanupContigStatsComplete
+		&& (!$MFopt{DoMetaBat2} || $binningComplete)
+		&& $cleanupVariantsComplete
+	);
+	my $cleanupRequirements = cleanupCompletionRequirements(
+		contig_dir => $ContigStatsDir,
+		assembly_dir => $finalCommAssDir,
+		contig_subparts => $assemblyOutputsRequired ? $cleanupContigSubparts : '',
+		primary_coverage_required => $assemblyOutputsRequired && $map{$curSmpl}{hasPrimaryRds},
+		support_coverage_required => $assemblyOutputsRequired && $supportCoverageRequired,
+		binning_base => ($assemblyOutputsRequired && $MFopt{DoMetaBat2}) ? $BinningOut : '',
+		primary_snp_stone => ($assemblyOutputsRequired && $cleanupPrimaryConsensusRequired) ? $sampleCheckpoints{primaryConsensus} : '',
+		support_snp_stone => ($assemblyOutputsRequired && $cleanupSupportConsensusRequired) ? $sampleCheckpoints{supportConsensus} : '',
+		consensus_contigs => ($assemblyOutputsRequired && $cleanupConsensusRequired && $MFopt{saveConsFastas}) ? $contigsSNP : '',
+		consensus_genes => ($assemblyOutputsRequired && $cleanupConsensusRequired && $MFopt{saveConsFastas}) ? [$genePredSNP, $genePredAASNP] : [],
+		primary_vcf => ($assemblyOutputsRequired && $cleanupPrimaryConsensusRequired && $MFopt{saveVCF}) ? $vcfSNP : '',
+		support_vcf => ($assemblyOutputsRequired && $cleanupSupportConsensusRequired && $MFopt{saveVCF}) ? $vcfSNPsupp : '',
+		primary_sv => ($assemblyOutputsRequired && $MFopt{callSVs} && $map{$curSmpl}{hasPrimaryRds}) ? $vcfSV : '',
+		support_sv => ($assemblyOutputsRequired && $MFopt{callSVsSupp} && $locMapSup2Assembly) ? $vscSVsupp : '',
+	);
+
 	if ($scaffTarExternal ne "" &&  $map{$curSmpl}{"SupportReads"} !~ /mate/i && $scaffTarExtLibTar ne $curSmpl ){print"scNxt\n";loop2C_check($cAssGrp,\@sampleDeps);next;}
 	
 
 #	#-----------------------  END FLAGS  ------------------------  
 
 	#some more flow control..
-	if ( !$DoUploadRawReads && $boolScndMappingOK && !$MFopt{DoCalcD2s} &&
+	if ( !$DoUploadRawReads && !$nonPareilFlag
+		&& $boolScndMappingOK && !$MFopt{DoCalcD2s} &&
 		!$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp &&
-		!$calcBinning && !$calc2ndMapSNP && $boolAssemblyOK && $boolScndCoverageOK 
+		!$calcBinning && !$calc2ndMapSNP && $assemblyWorkflowComplete && $boolScndCoverageOK
 		 && !$calcCoverage && !$calcSuppCoverage && !$dowstreamAnalysisFlag
+		 && $terminalOutputsComplete
 		#&& !$calcRibofind && !$calcRiboAssign && !$MFopt{calcOrthoPlacement} && !$calcGenoSize && !$calcDiamond && !$calcDiaParse && 
 		#!$calcMetaPhlan && !$calcTaxaTar && !$calcMOTU2 && !$calcKraken && $scaffTarExternal eq ""
 	){
-		#free some scratch
-		system "rm -rf $smplTmpDir &" if ($MFconfig{rmScratchTmp} );
-		#system "rm -f $smplLockF" if (-e $smplLockF);
-		
-		if ( ($boolAssemblyOK || ($doPreAssmFlag && $ePreAssmbly && !$ePreAssmblPck)) && !$locRedoAssMapping ){ #causes a lot of overhead but mainly to avoid unpacking reads again..
-			print "present: $curOutDir \n"; $presentAssemblies ++;#= $AsGrps{$cAssGrp}{CntAimAss};
-			#base is present, but is the additions? 
-
-			if ($MFopt{map2Assembly} && $MFopt{doBam2Cram} && #.cram.sto to check that everything went well
-				$AssemblyGo && $MappingGo  && $allMapDone ){
-							#(-e "$finalCommAssDir/scaffolds.fasta.filt.$MFcontstants{mini2IdxFileSuffix}" || -e "$finalCommAssDir/scaffolds.fasta.filt${bwt2IdxFileSuffix}.1.bt2") &&
-				#delete bwt2 index to save some space..
-				#need to ensure that all mapping in mapping group are fine..
-				system "rm -f $finalCommAssDir/scaffolds.fasta.filt$MFcontstants{bwt2IdxFileSuffix}* $finalCommAssDir/scaffolds.fasta.filt.fai $finalCommAssDir/scaffolds.fasta.filt.$MFcontstants{mini2IdxFileSuffix} $finalCommAssDir/scaffolds.fasta.filt.$MFcontstants{kmaIdxFileSuffix}";
-				system "rm -f $finalMapDir/${SmplName}*smd.bam.bai $finalMapDir/${SmplName}*smd.bam.coverage.c* $finalMapDir/${SmplName}*smd.bam.coverage.gen* $finalMapDir/${SmplName}*smd.bam.coverage.m* $finalMapDir/${SmplName}*smd.bam.coverage.p*";
-				
-			}
-			if ($MFopt{map2Assembly} && !$MFopt{mapSaveCram} && -s $BinningOut && (-s "$BinningOut.cm2" || -e "$BinningOut.cm") &&
-				!$calcBinning && !$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp && $eFinMapCovGZ && $efinAssLoc && $eFinalMapDir && -s $CRAMmap){
-#				die;
-				print "deleting $CRAMmap to save space..\n";
-				print "due to flag -mapSaveCRAM 1\n";
-				system "rm -rf $CRAMmap";
-			}
+		my $presentAssembly =
+			($boolAssemblyOK || ($doPreAssmFlag && $ePreAssmbly && !$ePreAssmblPck))
+			&& !$locRedoAssMapping ? 1 : 0;
+		my $cleanupComplete = runFinishedCleanup(finishedCleanupArguments(
+			$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
+			$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
+			$assemblyOutputsRequired,
+		));
+		if ($cleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
+			$closeSampleOutcome->(
+				present_assembly => $presentAssembly,
+			);
+		} else {
+			delete $loopSampleCompleted{$JNUM};
+			print "Sample output checks passed, but cleanup is incomplete; sample remains open\n"
+				unless $MFconfig{silent};
 		}
-		print "next due to sample finished";
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
-		loop2C_check($cAssGrp,\@sampleDeps);next;
+		loop2C_check($cAssGrp,\@sampleDeps);
+		next;
 	}
+
+	# Scratch and submission directories are needed only beyond the completed
+	# sample shortcut. Do not create and immediately remove them on no-op passes.
+	make_path($logDir) unless -d $logDir;
+	make_path($smplTmpDir) unless -d $smplTmpDir;
+	my @checkLocs = ($smplTmpDir);
+	push(@checkLocs,$curDir) if ($curDir ne "");
+	$QSBoptHR->{LocationCheckStrg} = checkDrives(\@checkLocs);
 	
-
-
-	#report for debugging:
-	#print " !$DoUploadRawReads && $boolScndMappingOK && !$MFopt{DoCalcD2s} &&
-	#	!$calcConsSNP && !$calcSuppConsSNP && !$calcSVs && !$calcSVsSupp &&
-	#	!$calcBinning && !$calc2ndMapSNP && $boolAssemblyOK && $boolScndCoverageOK 
-	#	 && !$calcCoverage && !$calcSuppCoverage && !$dowstreamAnalysisFlag\n";
-	 #die;
 	
 
 
@@ -902,7 +1364,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#		totalInputSizeMB => $totalInputSizeMB,rawReads => $rawReads,mmpu => $mmpu, WT => $WT);
 	#unzip and change ifastap & cfp1/cfp2
 	my $curUnzipDep = ""; 
-	if (0 && $MFconfig{maxUnzpJobs} >0 && @unzipjobs > $MFconfig{maxUnzpJobs}){#only run X jobs in parallel, lest the cluster IO breaks down..
+	if ($MFconfig{maxUnzpJobs} > 0 && @unzipjobs >= $MFconfig{maxUnzpJobs}){#only run X jobs in parallel, lest the cluster IO breaks down..
 		$curUnzipDep = $unzipjobs[-($MFconfig{maxUnzpJobs})];#join(";",@last_n);
 	}
 	
@@ -920,32 +1382,166 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#print "$seqSet{pa1}   $seqSet{seqTech}   $seqSet{seqTechX}\n";
 	push (@unzipjobs,$jdep) unless ($jdep eq "");
 	
-	if ($map{$curSmpl}{inputFilesEmpty} && exists($map{$curSmpl}{inputFileSizeMB}) && $map{$curSmpl}{inputFileSizeMB} >= $MFconfig{skipSmallSmplsMB}){
-			system "rm -f $curOutDir/SMPL.empty"; $map{$curSmpl}{inputFilesEmpty} = 0;
-	}
-	if ( (-e "$curOutDir/SMPL.empty" || $jdep eq "EMPTY_DO_NEXT" || (($map{$curSmpl}{inputFileSizeMB} + + $map{$curSmpl}{inputXFileSizeMB}) < $MFconfig{skipSmallSmplsMB} )) && !$AssemblyGo){
-		
-		if ( ($map{$curSmpl}{inputFileSizeMB} + $map{$curSmpl}{inputXFileSizeMB}) < $MFconfig{skipSmallSmplsMB} ){
-			print "Skipping sample $curSmpl due to $map{$curSmpl}{inputFileSizeMB} < $MFconfig{skipSmallSmplsMB} MB\n";
-			#still create essentials
-			#	my $coveragePerCtg = "$ContigStatsDir/Coverage.percontig.gz";
-			#!$eFinMapCovGZ && $eCovAsssembly) || ($eSuppCovAsssembly && !$eFinSupMapCovGZ)
-			my $geneCovTmpFile = $coveragePerCtg; $geneCovTmpFile =~ s/percontig.gz$/count_pergene/;
-			my $geneCntTmpFile = $coveragePerCtg; $geneCntTmpFile =~ s/percontig.gz$/pergene/;
-			my $geneMedTmpFile = $coveragePerCtg; $geneMedTmpFile =~ s/percontig.gz$/median.pergene/;
-			my $tmpMapCovGZ = "$finalMapDir/$SmplName-smd.bam.coverage.gz";
-			system "mkdir -p $ContigStatsDir" unless (-d $ContigStatsDir);
-			system "mkdir -p $finalMapDir" unless (-d $finalMapDir);
-			system "mkdir -p $curOutDir" unless (-d $curOutDir); $coveragePerCtg =~ s/\.gz$//;
-			system "touch $tmpMapCovGZ $coveragePerCtg $geneCovTmpFile $geneCntTmpFile $geneMedTmpFile $curOutDir/SMPL.empty";
+	my $combinedInputSizeMB = ($map{$curSmpl}{inputFileSizeMB} || 0)
+		+ ($map{$curSmpl}{inputXFileSizeMB} || 0);
+	$map{$curSmpl}{inputFilesEmpty} = reconcile_sample_empty_marker(
+		sample_root => $curOutDir,
+		input_size_mb => $combinedInputSizeMB,
+		threshold_mb => $MFconfig{skipSmallSmplsMB},
+	);
+	my $cleanedEmpty = sample_empty_marker_reason($curOutDir) eq 'cleaned_primary_reads_empty';
+	# Use one terminal route for ordinary small inputs and inputs emptied by SDM.
+	# It is also called after an existing filterDone.stone is validated, before
+	# the sample can be included in an assembly group.
+	my $finalizeEmptySample = sub {
+		my (%args) = @_;
+		my $isCleanedEmpty = $args{cleaned_empty} ? 1 : 0;
+		my $emptyDependency = defined($args{input_dependency}) ? $args{input_dependency} : '';
+		my $emptyTerminalStatus = $isCleanedEmpty ? 'skipped_cleaned_empty' : input_terminal_status(
+			input_size_mb => $combinedInputSizeMB,
+			threshold_mb => $MFconfig{skipSmallSmplsMB},
+		);
+		die "Internal empty-sample classification error for $curSmpl: "
+			."$combinedInputSizeMB MB does not qualify as empty or too small\n"
+			if $emptyTerminalStatus eq '';
+		if ($isCleanedEmpty) {
+			print "Skipping sample $curSmpl because no primary FASTQ records remained after SDM filtering\n";
 		} else {
-			#print "Sample empty.. next\n";
+			printf "Skipping sample %s because combined primary + supplementary input is %.1f MB (%.1f + %.1f), below %.1f MB\n",
+				$curSmpl, $combinedInputSizeMB,
+				($map{$curSmpl}{inputFileSizeMB} || 0),
+				($map{$curSmpl}{inputXFileSizeMB} || 0),
+				$MFconfig{skipSmallSmplsMB};
 		}
-		push(@EmptySample,$curSmpl);
-		reduceProgStats(); #reduce counters for riboFind etc.. no find in this sample!
-		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
-		loop2C_check($cAssGrp,\@sampleDeps);next;
+		# Preserve the lightweight files expected by downstream summary handling.
+		my $geneCovTmpFile = $coveragePerCtg; $geneCovTmpFile =~ s/percontig.gz$/count_pergene/;
+		my $geneCntTmpFile = $coveragePerCtg; $geneCntTmpFile =~ s/percontig.gz$/pergene/;
+		my $geneMedTmpFile = $coveragePerCtg; $geneMedTmpFile =~ s/percontig.gz$/median.pergene/;
+		my $tmpMapCovGZ = "$finalMapDir/$SmplName-smd.bam.coverage.gz";
+		system "mkdir -p $ContigStatsDir" unless (-d $ContigStatsDir);
+		system "mkdir -p $finalMapDir" unless (-d $finalMapDir);
+		system "mkdir -p $curOutDir" unless (-d $curOutDir); $coveragePerCtg =~ s/\.gz$//;
+		system "touch $tmpMapCovGZ $coveragePerCtg $geneCovTmpFile $geneCntTmpFile $geneMedTmpFile $curOutDir/SMPL.empty";
+		$runReport{empty_samples}{$curSmpl} = $combinedInputSizeMB;
+		my $emptyWorkPending = $emptyDependency ne '' && $emptyDependency ne 'EMPTY_DO_NEXT';
+		if (!$emptyWorkPending) {
+			my $emptyCleanupComplete = runFinishedCleanup(finishedCleanupArguments(
+				$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
+				$smplTmpDir, $finAssLoc, $logDir, {}, 0,
+			));
+			if ($emptyCleanupComplete && (!$MFconfig{rmScratchTmp} || !-d $smplTmpDir)) {
+				$closeSampleOutcome->(
+					present_assembly => 0,
+					terminal_status => $emptyTerminalStatus,
+					cleaned_input_scope => $isCleanedEmpty ? 'primary' : '',
+				);
+			} else {
+				delete $loopSampleCompleted{$JNUM};
+			}
+		} else {
+			delete $loopSampleCompleted{$JNUM};
+		}
+		reduceProgStats();
+		return if exists($args{advance_loop}) && !$args{advance_loop};
+		MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+		loop2C_check($cAssGrp, \@sampleDeps);
+	};
+	#print "small skip: $MFconfig{skipSmallSmplsMB} $map{$curSmpl}{inputFileSizeMB} $map{$curSmpl}{inputXFileSizeMB} $AssemblyGo \n";
+	my $terminalEmptySample = -e "$curOutDir/SMPL.empty" || $jdep eq 'EMPTY_DO_NEXT'
+		|| $combinedInputSizeMB < $MFconfig{skipSmallSmplsMB};
+	# A terminal member may itself have no usable reads, but it can still be the
+	# map-defined release point for work accumulated from earlier members.  Do
+	# not add it to CleanSeqs/SeqClnDeps; submit only the pending shared assembly
+	# and mappings, each chained to the earlier members' producer jobs.
+	my $releaseSharedAssembly = $terminalEmptySample && $AssemblyGo
+		&& $AsGrps{$cAssGrp}{CntAimAss} > 1 && $MFopt{DoAssembly}
+		&& !$boolAssemblyOK && !$efinAssLoc;
+	if ($terminalEmptySample) {
+		if ($releaseSharedAssembly) {
+			# The terminal member was counted while traversing the map, but it must
+			# not appear in the published list of inputs used for this assembly.
+			$AsGrps{$cAssGrp}{AssemblSmplDirs} =~ s/\Q$curOutDir\n\E\z//;
+			if ($jdep ne '' && $jdep ne 'EMPTY_DO_NEXT') {
+				print "Deferring shared assembly release until terminal input staging for $curSmpl is finished\n";
+				add2SampleDeps(\@sampleDeps, [$jdep]);
+				delete $loopSampleCompleted{$JNUM};
+				MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+				loop2C_check($cAssGrp, \@sampleDeps);
+				next;
+			}
+			my $releaseName = $SmplName . "M" . $AsGrps{$cAssGrp}{CntAss};
+			print "Final assembly-group member $curSmpl is terminally empty; "
+				."releasing the shared assembly from earlier eligible members\n";
+			metagAssemblyRun(
+				$cAssGrp, "$nodeSpTmpD/ass", $metagAssDir, $geneDir, $releaseName,
+				0, $metaGscaffDir, $assemblyFlag, $AssemblyGo, $ePreAssmbly,
+				$doPreAssmFlag, $postPreAssmblGo, $finalCommAssDir,
+			);
+			my $assemblyReleased = $AsGrps{$cAssGrp}{AssemblJobName} =~ /\S/;
+			if ($assemblyReleased) {
+				my $producedAssemblyDir = ($MFopt{DoAssembly} == 5 && $doPreAssmFlag)
+					? $metagAssDir : $finalCommAssDir;
+				$AsGrps{$cAssGrp}{prodRun} = genePredictions(
+					"$producedAssemblyDir/scaffolds.fasta.filt",
+					"$producedAssemblyDir/genePred/", $AsGrps{$cAssGrp}{AssemblJobName},
+					$finalCommAssDir, "", "$nodeSpTmpD/genePred/", 1,
+				);
+				if (($AsGrps{$cAssGrp}{PostAssemblCmd} || '') =~ /\S/) {
+					print "Submitting deferred assembly-group mapping jobs\n";
+					my $deferredDeps = postSubmQsub(
+						"$logDir/MultiMapper.sh", $AsGrps{$cAssGrp}{PostAssemblCmd},
+						$AsGrps{$cAssGrp}{AssemblJobName},
+					);
+					append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $deferredDeps);
+					append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredDeps);
+					$AsGrps{$cAssGrp}{PostAssemblCmd} = "";
+				}
+				my $binningJobDep = '';
+				if ($MFopt{DoMetaBat2} && !$doPreAssmFlag && !$ePreAssmblPck
+						&& !$binningComplete) {
+					# Binning consumes the assembly and all group mappings. The empty
+					# release member supplies neither reads nor coverage, but must not
+					# prevent the group binner from being chained to those producers.
+					append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps},
+						$AsGrps{$cAssGrp}{AssemblJobName}, $AsGrps{$cAssGrp}{prodRun});
+					my $binnerTmp = $nodeSpTmpD;
+					$binnerTmp = $smplTmpDir if ($MFopt{useBinnerScratch});
+					print "Submitting deferred assembly-group binner\n";
+					$binningJobDep = submitGenomeBinner(
+						$binnerTmp, $finAssLoc, $BinningOut, $cAssGrp, $smplIDs[-1],
+					);
+				}
+				add2SampleDeps(\@sampleDeps, [
+					$AsGrps{$cAssGrp}{AssemblJobName}, $AsGrps{$cAssGrp}{prodRun},
+					$AsGrps{$cAssGrp}{MapDeps}, $binningJobDep,
+				]);
+			} else {
+				print "Shared assembly group $cAssGrp has no eligible assembly job yet; "
+					."leaving terminal sample $curSmpl open for a later release\n";
+				delete $loopSampleCompleted{$JNUM};
+				MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+				loop2C_check($cAssGrp, \@sampleDeps);
+				next;
+			}
+			$finalizeEmptySample->(
+				cleaned_empty => $cleanedEmpty,
+				# The small member's UZ work is irrelevant to the group release.
+				input_dependency => '', advance_loop => 0,
+			);
+			MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
+			loop2C_check($cAssGrp, \@sampleDeps);
+			next;
+		}
+		$finalizeEmptySample->(
+			cleaned_empty => $cleanedEmpty,
+			input_dependency => $jdep,
+		);
+		next;
 	}
+	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $jdep) if ($assemblyFlag);
+	if (deferLoopProducerWave(
+			'input staging', $jdep, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	
 	
 	#$mmpuOutTab .= $dir2rd."\t".$seqSet{"mmpu"}."\n";
@@ -958,9 +1554,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#empty links for assembler and nonpareil
 	#my($arp1,$arp2,$singAr,$matAr,$sdmjN) = ([],[],[],[],"");
 	my $sdmjN = ""; #job on main  reads
-	#my $cleanSeqSetHR = iniCleanSeqSetHR($map{$curSmpl}{seqSet});	
-	
-	
 	#upload2EBI?? -> this has to happen before sdm etc, ensuring raw reads are being processed, in the same files as initially used...
 	my $uplJob = uploadRawFilePrep($smplTmpDir."uploadPrep/",$curSmpl,$jdep,0);
 	my $uplJobX = uploadRawFilePrep($smplTmpDir."uploadPrep/",$curSmpl,$jdep,1);
@@ -973,15 +1566,27 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	# punsh the whole thing through sdm.. 
 	if ( (!$boolAssemblyOK||$calcContamination) && $MFopt{useSDM}!=0 ){#&& !$is3rdGen) {
 		$sdmjN  = sdmClean($curOutDir, $smplTmpDir."seqClean/",$jdep,$dowstreamAnalysisFlag,0) ;
+			if (sample_empty_marker_reason($curOutDir) eq 'cleaned_primary_reads_empty') {
+				$finalizeEmptySample->(cleaned_empty => 1);
+				next;
+			}
 		# check for support reads as well..
 		#job on support  reads
 		my $sdmjN2 = sdmClean($curOutDir, $smplTmpDir."seqClean/",$jdep,$dowstreamAnalysisFlag,1) ;
 		$sdmjN .= ";$sdmjN2" if ($sdmjN2 ne "");
 	}  
+	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $sdmjN) if ($assemblyFlag);
+	if (deferLoopProducerWave(
+			'quality filtering', $sdmjN, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	#adds raw and cleaned read file location to the whole assembly group
 	
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $assGrpHR = addFileLocs2AssmGrp(\%AsGrps, $cAssGrp,$SmplName, $cleanSeqSetHR, $map{$curSmpl}{seqSet});   %AsGrps = %{$assGrpHR};
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $assGrpHR = addFileLocs2AssmGrp(
+		\%AsGrps, $cAssGrp, $SmplName, $cleanSeqSetHR,
+		sampleReadSet($curSmpl, "raw"),
+	);
+	%AsGrps = %{$assGrpHR};
 	
 	
 	
@@ -1004,21 +1609,36 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	#filter human or other hosts..
 	$sdmjN = removeHostSeqs($nodeSpTmpD,$sdmjN,1) if ($dowstreamAnalysisFlag && (!$boolAssemblyOK || $calcContamination));
+	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $sdmjN) if ($assemblyFlag);
+	if (deferLoopProducerWave(
+			'host filtering', $sdmjN, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	#merge reads?
 	($mergJbN) = mergeReads($sdmjN,$smplTmpDir."merge_clean/",$calcReadMerge,$dowstreamAnalysisFlag);
+	if (deferLoopProducerWave(
+			'read merging', $mergJbN, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	
 	#raw files only required for mapping reads to assemblies, so delete o/w
 	#$cfp1ar,$cfp2ar,
-	if (!$MFopt{DoAssembly} && $MFconfig{importMocat}==0 && $MFconfig{removeInputAgain} && !$requireRawReadsFlag){ $sdmjN = cleanInput($sdmjN,$smplTmpDir);}
+	my $rawReadSetHR = sampleReadSet($curSmpl, "raw");
+	my $stagedReadsMaterialized = ref($rawReadSetHR) eq 'HASH'
+		&& $rawReadSetHR->{stagedReadsMaterialized};
+	if (!$MFopt{DoAssembly} && $MFconfig{importMocat}==0
+			&& $MFconfig{removeInputAgain} && !$requireRawReadsFlag
+			&& $stagedReadsMaterialized){
+		$sdmjN = cleanInput($sdmjN,$smplTmpDir);
+	}
 	append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $mergJbN);
 
 
 	#keeps track of all sdm jobs
-	$sdmjNamesAll .= ";".$sdmjN;
+	$d2Inputs{dependencies} .= ";".$sdmjN;
 	
 	#TODO
-	push(@allFilter1,@{${$cleanSeqSetHR}{arp1}});
-	push(@allFilter2,@{${$cleanSeqSetHR}{arp2}});
+	my $primaryCleanLibraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	push(@{$d2Inputs{filtered_read1}}, @{libraryFiles($primaryCleanLibraries, 'r1')});
+	push(@{$d2Inputs{filtered_read2}}, @{libraryFiles($primaryCleanLibraries, 'r2')});
 	#die;
 	if ($MFconfig{unpackZip}){
 		print "next due to onlyFilterZip 1\n";MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
@@ -1070,7 +1690,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#non pareil (estimate community size etc)
 	if ($nonPareilFlag){
 		my $globalNPD = $baseOut."NonPareil/";
-		nopareil(${$cleanSeqSetHR}{arp1},$nonParDir, $globalNPD, $SmplName,$primaryDep);
+		nopareil(libraryFiles($primaryCleanLibraries, 'r1'),$nonParDir, $globalNPD, $SmplName,$primaryDep);
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps);next;
 	}
@@ -1109,7 +1729,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#mOTU2  - taxa abundance estimates
 	if ($calcMOTU2){
 		my $dir_mOTU2 = $baseOut."pseudoGC/Phylo/mOTU2/"; #mOUT 2 dir
-		my $MP2jname = mOTU2Mapping($nodeSpTmpD."Motu2/",$dir_mOTU2,$SmplName,$MFopt{MapperCores},$primaryDep.";".$mOTU2Deps); #\@cfp1,\@cfp2
+		my $MP2jname = mOTU2Mapping($nodeSpTmpD."Motu2/",$dir_mOTU2,$SmplName,$MFopt{MapperCores},$primaryDep); #\@cfp1,\@cfp2
 		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $MP2jname);
 	}
 	
@@ -1132,19 +1752,33 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#------------------------ ASSEMBLY -------------------------------
 	#-----------------------------------------------------------------
 	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $sdmjN) if ($assemblyFlag);
+	if ($assemblyFlag && deferLoopProducerWave(
+			'input preparation', $sdmjN, $smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
+	if ($AssemblyGo && deferLoopProducerWave(
+			'assembly-group input preparation', $AsGrps{$cAssGrp}{SeqClnDeps},
+			$smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
+
 	if ( ($assemblyFlag || $scaffoldFlag || $scaffTarExternal ne "") && $AssemblyGo){ #assembly does not exist
 		die "Can't do assembly and pseudoassembly on the same sample!\n" if ($pseudAssFlag || $MFopt{pseudoAssembly});
 		#print "preAsmChk: $ePreAssmbly, $ePreAssmblPck, $doPreAssmFlag, $postPreAssmblGo\n";
 		#die;
 		metagAssemblyRun( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$geneDir,  $SmplNameX,$scaffoldFlag,$metaGscaffDir,
 					$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo,$finalCommAssDir);
+		if (deferLoopProducerWave(
+				'assembly', $AsGrps{$cAssGrp}{AssemblJobName},
+				$smplLockF, $cAssGrp, \@sampleDeps,
+		)) { next; }
 		my $producedAssemblyDir = ($MFopt{DoAssembly} == 5 && $doPreAssmFlag)
 			? $metagAssDir : $finalCommAssDir;
 		$metaGassembly = "$producedAssemblyDir/scaffolds.fasta.filt";
 		$geneDir = "$producedAssemblyDir/genePred/";
 		#call genes, depends on assembly
 		$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"","$nodeSpTmpD/genePred/",1);
-	} else {$presentAssemblies++;}
+	} elsif ($boolAssemblyOK && !$locRedoAssMapping) {
+		$runReport{present_assemblies}++;
+	}
 	
 	#die "$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) \n";
 	if (!$assemblyFlag || ($ePreAssmbly && $doPreAssmFlag) ){   # gene predictions on assembly, assemblies already do exist
@@ -1155,9 +1789,14 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$AsGrps{$cAssGrp}{prodRun} = genePredictions($metaGassembly,$geneDir,$AsGrps{$cAssGrp}{AssemblJobName},$finalCommAssDir,"","$nodeSpTmpD/genePred/",1);
 		}
 	}
+	if (deferLoopProducerWave(
+			'gene prediction', $AsGrps{$cAssGrp}{prodRun},
+			$smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	
 
 	
+	my $currentMappingDeps = '';
 	my $finalAssemblyScheduled = $efinAssLoc || $MFopt{DoAssembly} != 5 || $postPreAssmblGo;
 	if ($AssemblyGo && $finalAssemblyScheduled && $AsGrps{$cAssGrp}{PostAssemblCmd} ne "") {
 		print "Submitting deferred assembly-group mapping jobs\n";
@@ -1167,6 +1806,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $deferredDeps);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredDeps);
+		append_job_dependencies(\$currentMappingDeps, $deferredDeps);
 		add2SampleDeps(\@sampleDeps, [$deferredDeps]);
 		$AsGrps{$cAssGrp}{PostAssemblCmd} = "";
 	}
@@ -1194,24 +1834,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#need index for mapper?
 	my $doMapping = $MappingGo && !$eFinMapCovGZ && $MFopt{map2Assembly} && ($MFopt{DoAssembly} || $mapAssFlag);
 	
-	my $assemblyBuildIndexFlag=0; 	$assemblyBuildIndexFlag=1 if (-s $finAssLoc && ($doMapping || $mapSuppAssFlag) && ! mapperDBbuilt($finAssLoc,$MFopt{MapperProg}) ); 
+	my $assemblyBuildIndexFlag=0; 	$assemblyBuildIndexFlag=1 if (-s $finAssLoc && ($doMapping || $mapSuppAssFlag));
 	#die "$assemblyBuildIndexFlag  $MFopt{DoAssembly}  && -s $finAssLoc  && $MFopt{map2Assembly} && ($mapAssFlag || $mapSuppAssFlag ) \n". mapperDBbuilt($finAssLoc,$MFopt{MapperProg})  ."\n";
 	#print "build $assemblyBuildIndexFlag   $MFopt{DoAssembly} && !$assemblyFlag && $MFopt{map2Assembly} && $mapAssFlag && $MFopt{MapperProg}\n";
 	if ($assemblyBuildIndexFlag && $AsGrps{$cAssGrp}{AssemblJobName} eq ""){ #in this case asembly was done, but index was never built
 		buildAssemblyMapIdx($finAssLoc, $cAssGrp, $mapAssFlag,$mapSuppAssFlag,$SmplName);
+		if (deferLoopProducerWave(
+				'mapping index', $AsGrps{$cAssGrp}{AssemblJobName},
+				$smplLockF, $cAssGrp, \@sampleDeps,
+		)) { next; }
 	}
 
 	
 	my $mappingDeferred = 0;
 	if ($doMapping){ #mapping to the assembly (can be multi-sample assembly as well)
-		my $moveMappings = 0; $moveMappings =1 if (!$eFinMapCovGZ && -e "$mapOut/$SmplName-smd.bam.coverage.gz");
-		if ($moveMappings) {
-			# One-time migration for outputs created by releases that used a separate
-			# result-moving job. New mapping jobs never write completed products here.
-			print "Migrating legacy scratch mapping to finaldir\n";
-			systemW "mkdir -p $finalMapDir\n$mvCmd $mapOut/* $finalMapDir/";
-		}
-
 		my $mapNow =0;
 		$mapNow = 1 if ($AssemblyGo ||  $efinAssLoc || ($ePreAssmbly && $doPreAssmFlag) );#controls if several samples are assembled together and this needs to be waited for
 		#print "main map\n";
@@ -1219,7 +1855,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,mappingStarted =>1,
 						glbTmp => $nodeSpTmpD."_mapWork/",glbMapDir => $finalMapDir,mapSupport => 0,
-						readTec => ${$cleanSeqSetHR}{readTec}, submit => 1,submNow => $mapNow,
+						libraries => getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,0,$SmplName),
+						readTec => '', submit => 1,submNow => $mapNow,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam,
 						# Primary short- and long-read assemblies always receive a breakpoint report.
 						breakpointOutput => "$finalMapDir/$SmplName-smd.bam.breakpoints.tsv.gz",
@@ -1229,13 +1866,13 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my ($map2Ctgs_2,$delaySubmCmd_2,$mapStat)  = bamDepth(\%dirset,$map2Ctgs,$mapOptHr);
 		$delaySubmCmd .= "\n".$delaySubmCmd_2;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $map2Ctgs_2);
+		append_job_dependencies(\$currentMappingDeps, $map2Ctgs_2);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $map2Ctgs_2);
 		if (!${$mapOptHr}{immediateSubm} && $delaySubmCmd =~ /\S/ ){
 			$mappingDeferred = 1;
 			#store command for later..
 			$AsGrps{$cAssGrp}{PostAssemblCmd} .= $delaySubmCmd;
 		}
-		#die "$curOutDir/mapping\n" . "$mapOut/$SmplName-smd.bam.coverage.gz"
 	}
 	
 	
@@ -1247,6 +1884,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => "$finalMapDir/", unalDir => $unAlDir,
 						sbj => $metaGassembly, assGrp => $cAssGrp,  smplName => $SmplName,
 						glbTmp => $nodeSpTmpD."_mapWorkSupp/",glbMapDir => $finalMapDir, mapSupport => 1,
+						libraries => getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,1,$SmplName),
 						readTec => "", submit => 1,submNow => $mapNow,mappingStarted=>1,
 						sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores}, cramAlig => $cramthebam);
 		# primary mapping of support reads (onto de novo assembly)
@@ -1254,6 +1892,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		my ($mapSup2Ctgs_2,$delaySubmCmd_2,$mapStat)  = bamDepth(\%dirset,$mapSup2Ctgs,$mapOptHr);
 			$delaySubmCmd .= "\n".$delaySubmCmd_2;
 		append_job_dependencies(\$AsGrps{$cAssGrp}{MapDeps}, $mapSup2Ctgs_2);
+		append_job_dependencies(\$currentMappingDeps, $mapSup2Ctgs_2);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $mapSup2Ctgs_2);
 		if ($delaySubmCmd =~ /\S/ && !${$mapOptHr}{immediateSubm}) {
 			$mappingDeferred = 1;
@@ -1262,12 +1901,24 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 #		die;
 	}
 	
+	my $mappingWaveDeps = normalise_job_dependencies(
+		$currentMappingDeps, $AsGrps{$cAssGrp}{MapDeps},
+	);
+	if (deferLoopProducerWave(
+			'assembly mapping', $mappingWaveDeps,
+			$smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 #		die "$MappingGo && !$eFinMapCovGZ && $MFopt{map2Assembly} && ($MFopt{DoAssembly} || $mapAssFlag)";
 
 	
 	#-----------------------------------------------------------------
 	#---------------- producer barriers, downstream analysis ---------------
 	#-----------------------------------------------------------------
+	my ($fullContigStatsDep, $binningJobDep, $variantJobDep) = ("", "", "");
+	my $currentContigStatsDeps = '';
+	my $contigStatsSubmissionDeferred = 0;
+	my $consensusNeedsContigStats = ($calcConsSNP || $calcSuppConsSNP)
+		&& !$cleanupContigStatsComplete;
 	
 	
 	# Completed assemblies and mappings are published by their producer jobs.
@@ -1279,7 +1930,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	);
 	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $publicationDeps);
 	add2SampleDeps(\@sampleDeps, [$jdep , $AsGrps{$cAssGrp}{MapDeps} , $AsGrps{$cAssGrp}{scndMapping},$AsGrps{$cAssGrp}{prodRun} ]);
-	
+
 	#die;
 	
 	#this flag is essentially $allCovDone 
@@ -1297,14 +1948,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			print "GenomeFace requires FetchMG - adding it as a step in contigStats\n";
 		}
 
-		my ($contRun,$tmp33,$tmpCDd) = runContigStats($curOutDir ,normalise_job_dependencies($publicationDeps,$AsGrps{$cAssGrp}{prodRun}),$finalCommAssDir,$subprts,1, $nodeSpTmpD,1,6, $curSmpl) ;
+		my ($contRun, $tmpCDd) = (runContigStats(
+			$curOutDir, normalise_job_dependencies($publicationDeps,$AsGrps{$cAssGrp}{prodRun}),
+			$finalCommAssDir, $subprts, 1, $nodeSpTmpD, 1, 6, $curSmpl,
+			$supportCoverageRequired,
+		))[0, 2];
 
 		#run contig stats
 		my $deferredContigDeps = postSubmQsub(
 			"$logDir/MultiContigStats.sh", $AsGrps{$cAssGrp}{PostClnCmd}, $contRun,
 		);
-		$AsGrps{$cAssGrp}{PostClnCmd} = "";$AsGrps{$cAssGrp}{CSfinJobName} = $contRun;
+		$AsGrps{$cAssGrp}{PostClnCmd} = "";
 		$jdep = normalise_job_dependencies($contRun, $deferredContigDeps);
+		append_job_dependencies(\$currentContigStatsDeps, $jdep);
+		$fullContigStatsDep = $jdep if ($tmpCDd && $jdep ne "");
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredContigDeps);
 
 		if ($contRun ne "") {
@@ -1313,87 +1970,236 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 				if ($MFopt{DoMetaBat2} == 4);
 		}
 
-	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ ) || $calcCoverage) ) {
+	} elsif (((exists($AsGrps{$cAssGrp}{MapDeps}) && $AsGrps{$cAssGrp}{MapDeps} =~ m/[^;\s]/ )
+			|| $calcCoverage || $consensusNeedsContigStats) ) {
 		#die "test23  $AsGrps{$cAssGrp}{MapDeps}\n";
 		#calculate solely abundance / gene after producer publication and assembly contig stats
 		my $submitContigNow = $mappingDeferred ? 0 : 1;
-		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir ,$publicationDeps . ";".$AsGrps{$cAssGrp}{CSfinJobName},$finalCommAssDir,$MFconfig{defaultContigSubs},$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl);
+		my $contigSubparts = $consensusNeedsContigStats
+			? $cleanupContigSubparts : $MFconfig{defaultContigSubs};
+		my ($jn,$delaySubmCmd2,$tmpCDd) = runContigStats($curOutDir,$publicationDeps,$finalCommAssDir,$contigSubparts,$submitContigNow,$nodeSpTmpD,$AssemblyGo,1, $curSmpl,$supportCoverageRequired);
 		$AsGrps{$cAssGrp}{PostClnCmd} .= $delaySubmCmd2;
+		$contigStatsSubmissionDeferred = 1
+			if !$submitContigNow && $delaySubmCmd2 =~ /\S/;
 		$jdep = $jn;
+		append_job_dependencies(\$currentContigStatsDeps, $jdep);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $jdep) if ($jdep ne "");
 	}
 #	die;
 	add2SampleDeps(\@sampleDeps, [$publicationDeps,$jdep]);
-	my $deferredConsDeps = "";
-	if ($AssemblyGo) {
-		$deferredConsDeps = postSubmQsub(
-			"$logDir/MultiConsensus.sh", $AsGrps{$cAssGrp}{PostConsCmd},
-			normalise_job_dependencies($jdep, $publicationDeps),
-		);
-		$AsGrps{$cAssGrp}{PostConsCmd} = "" if ($deferredConsDeps ne "");
-	}
-	append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredConsDeps);
-	add2SampleDeps(\@sampleDeps, [$deferredConsDeps]);
-
+	my $contigStatsWaveDeps = normalise_job_dependencies(
+		$currentContigStatsDeps, $AsGrps{$cAssGrp}{BinDeps},
+	);
+	if (deferLoopProducerWave(
+			'contig statistics', $contigStatsWaveDeps,
+			$smplLockF, $cAssGrp, \@sampleDeps,
+	)) { next; }
 	#Binning, SNP calling: only after copying files from tmp and running contig stats
 	if ( $calcBinning && $AssemblyGo ){  #$allMapDone rm: this is checked now via $AsGrps{$cAssGrp}{MapDeps}
 		my $binnerTmp = $nodeSpTmpD;
 		$binnerTmp = $smplTmpDir if ($MFopt{useBinnerScratch});
-		my $binDep  = submitGenomeBinner($binnerTmp,$finAssLoc,$BinningOut, $cAssGrp,$smplIDs[-1]);
-		add2SampleDeps(\@sampleDeps, [$binDep]);
+		$binningJobDep = submitGenomeBinner($binnerTmp,$finAssLoc,$BinningOut, $cAssGrp,$smplIDs[-1]);
+		add2SampleDeps(\@sampleDeps, [$binningJobDep]);
 	}
-
 	
 	#die "AT CONS SNP\n$allMapDone\n";
+	my $primaryVariantRequested = $calcConsSNP || $calcSVs;
+	my $supportVariantRequested = $calcSuppConsSNP || $calcSVsSupp;
+	my $variantWorkRequested = $primaryVariantRequested || $supportVariantRequested;
+	my $consensusStatsRequested = $calcConsSNP || $calcSuppConsSNP;
+	# Assembly, annotation, mapping, and ContigStats outputs can all be valid
+	# future outputs of jobs submitted in this pass. SNP region planning now runs
+	# inside the Cons allocation, so scheduler dependencies can safely replace
+	# launch-time file-existence checks for those pending products.
 	my $assemblyDownstreamScheduled = $AssemblyGo && !$doPreAssmFlag && !$ePreAssmblPck
 		&& ($efinAssLoc || $MFopt{DoAssembly} != 5 || $postPreAssmblGo)
 		&& (!$map{$curSmpl}{hasPrimaryRds} || ($MFopt{map2Assembly} && $MappingGo));
-	my $assemblyDownstreamDeferred = $mappingDeferred && !$doPreAssmFlag && !$ePreAssmblPck;
-	if ( ($calcConsSNP || $calcSuppConsSNP || $calcSVs || $calcSVsSupp )
-			&& (($allMapDone && !$calcCoverage) || $assemblyDownstreamScheduled || $assemblyDownstreamDeferred)){
+	my $assemblyDownstreamDeferred = $mappingDeferred
+		&& !$doPreAssmFlag && !$ePreAssmblPck;
+	my $variantCommonInputsPublished = $efinAssLoc
+		&& (!$consensusStatsRequested || ($boolGenePredOK
+			&& fileGZe("$finalCommAssDir/genePred/genes.gff")));
+	my $primaryVariantMappingPublished = !$primaryVariantRequested || (
+		-s "$finalMapDir/$SmplName-smd.$bamcramMap"
+		&& (!$calcConsSNP || ($eFinMapCovGZ
+			&& fileGZe("$finalMapDir/$SmplName-smd.bam.coverage")))
+	);
+	my $supportVariantMappingPublished = !$supportVariantRequested || (
+		-s "$finalMapDir/$SmplName.sup-smd.$bamcramMap"
+		&& (!$calcSuppConsSNP || ($eFinSupMapCovGZ
+			&& fileGZe("$finalMapDir/$SmplName.sup-smd.bam.coverage")))
+	);
+	my $contigStatsForConsensusPending = $consensusStatsRequested
+		&& ($currentContigStatsDeps =~ /\S/ || $contigStatsSubmissionDeferred);
+	my $contigStatsForConsensusReady = !$consensusStatsRequested
+		|| $cleanupContigStatsComplete || $contigStatsForConsensusPending;
+	my $variantPrerequisiteDeps = normalise_job_dependencies(
+		$publicationDeps, $currentContigStatsDeps, $AsGrps{$cAssGrp}{BinDeps},
+	);
+	my $variantCommonInputsPending = !$variantCommonInputsPublished
+		&& ($AsGrps{$cAssGrp}{AssemblJobName} =~ /\S/
+			|| ($consensusStatsRequested && $AsGrps{$cAssGrp}{prodRun} =~ /\S/));
+	my $primaryVariantMappingPending = !$primaryVariantMappingPublished
+		&& $doMapping && ($currentMappingDeps =~ /\S/
+			|| $AsGrps{$cAssGrp}{MapDeps} =~ /\S/ || $mappingDeferred);
+	my $supportVariantMappingPending = !$supportVariantMappingPublished
+		&& $mapSuppAssFlag && ($currentMappingDeps =~ /\S/
+			|| $AsGrps{$cAssGrp}{MapDeps} =~ /\S/ || $mappingDeferred);
+	my $variantInputsMayBePending = $variantCommonInputsPending
+		|| $primaryVariantMappingPending || $supportVariantMappingPending
+		|| $contigStatsForConsensusPending;
+	my $variantCommonInputsReady = $variantCommonInputsPublished
+		|| $variantCommonInputsPending;
+	my $primaryVariantInputsReady = $primaryVariantMappingPublished
+		&& (!$calcConsSNP || $cleanupContigStatsComplete
+			|| $contigStatsForConsensusPending);
+	$primaryVariantInputsReady ||= $primaryVariantMappingPending;
+	my $supportVariantInputsReady = $supportVariantMappingPublished
+		&& (!$calcSuppConsSNP || $cleanupContigStatsComplete
+			|| $contigStatsForConsensusPending);
+	$supportVariantInputsReady ||= $supportVariantMappingPending;
+	my $variantSubmissionDeferred = $variantInputsMayBePending
+		&& ($assemblyDownstreamDeferred || $contigStatsSubmissionDeferred);
+	if ($variantWorkRequested && $contigStatsForConsensusReady
+			&& $variantCommonInputsReady
+			&& $primaryVariantInputsReady && $supportVariantInputsReady){
+		my $rawReadSet = sampleReadSet($curSmpl, "raw");
+		my $variantPrimaryTechnology = libraryTechnology(
+			readLibrariesByScope($rawReadSet, "primary", 0, $curSmpl),
+			"primary variant reads for $curSmpl", 0,
+		);
+		my $variantSupportTechnology = libraryTechnology(
+			readLibrariesByScope($rawReadSet, "support", 0, $curSmpl),
+			"support variant reads for $curSmpl", 0,
+		);
 		#die "conssnp:: $calcConsSNP $allMapDone $finalMapDir\n";
 		#my $ofas = "$curOutDir/SNP/genePred/genes.shrtHD.SNPc.fna";
 	
+		my $consensusGff = "$finalCommAssDir/genePred/genes.gff";
+		$consensusGff .= ".gz" if ($MFopt{GenePredGZ});
 		my %SNPinfo = (gff => "$finalCommAssDir/genePred/genes.gff",
+			sampleRoot => $curOutDir,
 						assembly => $finAssLoc,
 						mapD => "$finalMapDir",normIndels => $MFopt{normSNPindels},
 						SNPcaller => $MFopt{SNPcallerFlag},hasPrimaryRds => $map{$curSmpl}{hasPrimaryRds},
 						createFastas => $MFopt{saveConsFastas},
+						saveVCF => $MFopt{saveVCF},
 						ofas => $contigsSNP, #primary file of contigs
 						genefna => $genePredSNP,genefaa => $genePredAASNP,
-						vcfFile => $vcfSNP,vcfFileSupp => $vcfSNPsupp, gffFile => "$finalCommAssDir/genePred/genes.gff.gz",
+						vcfFile => $vcfSNP,vcfFileSupp => $vcfSNPsupp, gffFile => $consensusGff,
 						nodeTmpD => $nodeSpTmpD,scratch => "$nodeSpTmpD/SNP/",
 						smpl => $SmplName,bamcram => $bamcramMap,minDepth => $MFopt{consSNPminDepth},
 						depthF => $coveragePerCtg,firstInSample => 1, #($i == 0 ? 1 : 0)
-						bpSplit => 1e6,runLocal => 1,SeqTech => $map{$curSmpl}{SeqTech},SeqTechSuppl => "",
+						bpSplit => 1e6,runLocal => 1,
+						SeqTech => $variantPrimaryTechnology,
+						SeqTechSuppl => $variantSupportTechnology,
 						cmdFileTag => "ConsAssem",maxCores => $MFopt{maxSNPcores},#memReq => $MFopt{memSNPcall},
-						jdeps => $AsGrps{$cAssGrp}{BinDeps},split_jobs => $MFopt{SNPconsJobsPsmpl},
-						deferRegionPlanning => (!$allMapDone || $calcCoverage ? 1 : 0),
-						immediateSubm => ($assemblyDownstreamDeferred ? 0 : 1),
+						jdeps => $variantPrerequisiteDeps,split_jobs => $MFopt{SNPconsJobsPsmpl},
+						inputSizeMB => ($map{$curSmpl}{inputFileSizeMB} || 0)
+							+ ($map{$curSmpl}{inputXFileSizeMB} || 0),
+						allowPendingInputs => ($variantInputsMayBePending ? 1 : 0),
+						immediateSubm => ($variantSubmissionDeferred ? 0 : 1),
 						overwrite => $MFopt{redoSNPcons}, memPJob => $MFopt{memPJob},
-						STOconSNP => $STOsnpCons, STOconSNPsupp => "",
+						STOconSNP => $sampleCheckpoints{primaryConsensus}, STOconSNPsupp => "",
 						minCallQual => $MFopt{SNPminCallQual},
+						callConsSNP => $calcConsSNP, callConsSNPSupp => $calcSuppConsSNP,
 						#struct vars
 						callSVs => $MFopt{callSVs}, vcfSVfile => $vcfSV, vcfSVfileS => $vscSVsupp, callSVsSupp => $MFopt{callSVsSupp},
 					);
-		if (  $map{$curSmpl}{"SupportReads"} =~ m/PB:/){$SNPinfo{SeqTechSuppl} = "PB" ;
-		} elsif (  $map{$curSmpl}{"SupportReads"} =~ m/ONT:/) {$SNPinfo{SeqTechSuppl} = "ONT" ;
-		}
-		
 		if ($calcSuppConsSNP){
-			$SNPinfo{STOconSNPsupp} = $STOsnpSuppCons   ; #trigger for also looking at cons SNP for support reads
+			$SNPinfo{STOconSNPsupp} = $sampleCheckpoints{supportConsensus}; #trigger for also looking at cons SNP for support reads
 		}
 		
-		my ($consSNPdep,$consSNPcmd) = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
-		$AsGrps{$cAssGrp}{PostConsCmd} .= $consSNPcmd if ($assemblyDownstreamDeferred);
-		add2SampleDeps(\@sampleDeps, [$consSNPdep]);
+		my $variantSubmissionCommands;
+		($variantJobDep,$variantSubmissionCommands) = createConsSNPandSVs(\%SNPinfo); #SNP calls on assembly
+		$AsGrps{$cAssGrp}{PostConsCmd} .= $variantSubmissionCommands
+			if ($variantSubmissionDeferred && defined($variantSubmissionCommands));
+		add2SampleDeps(\@sampleDeps, [$variantJobDep]);
 		#push(@sampleDeps, $consSNPdep) if (defined $consSNPdep && $consSNPdep ne "");
 	}
-	MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
+	my $deferredVariantDeps = "";
+	if ($AssemblyGo && ($AsGrps{$cAssGrp}{PostConsCmd} || "") =~ /\S/) {
+		print "Submitting deferred assembly-group Cons jobs\n";
+		$deferredVariantDeps = postSubmQsub(
+			"$logDir/MultiConsensus.sh", $AsGrps{$cAssGrp}{PostConsCmd},
+			normalise_job_dependencies($variantPrerequisiteDeps, $jdep),
+		);
+		$AsGrps{$cAssGrp}{PostConsCmd} = "" if ($runOptions{submit});
+		$variantJobDep = normalise_job_dependencies($variantJobDep, $deferredVariantDeps);
+		add2SampleDeps(\@sampleDeps, [$deferredVariantDeps]);
+	}
+	my $cleanupBarrier = cleanup_stage_barrier(
+		{
+			name => 'final assembly publication', required => $assemblyOutputsRequired,
+			complete => (!$doPreAssmFlag && !$ePreAssmblPck && $efinAssLoc),
+			dependencies => (!$doPreAssmFlag && !$ePreAssmblPck && $AssemblyGo)
+				? $publicationDeps : '',
+		},
+		{
+			name => 'contig stats', required => $assemblyOutputsRequired,
+			complete => $cleanupContigStatsComplete,
+			dependencies => $fullContigStatsDep,
+		},
+		{
+			name => 'binning', required => ($assemblyOutputsRequired && $MFopt{DoMetaBat2}) ? 1 : 0,
+			complete => $binningComplete,
+			dependencies => $binningJobDep,
+		},
+		{
+			name => 'consSNP/variant analysis', required => ($assemblyOutputsRequired && $cleanupVariantRequired) ? 1 : 0,
+			complete => $cleanupVariantsComplete,
+			dependencies => $variantJobDep,
+		},
+	);
+	if ($MFconfig{rmScratchTmp} && !$MFopt{DoCalcD2s} && @sampleDeps) {
+		if ($cleanupBarrier->{ready}) {
+			my @cleanupDependencies = split /;/, normalise_job_dependencies(
+				\@sampleDeps, $cleanupBarrier->{dependencies},
+			);
+			my $cleanupJob = submitFinishedCleanup(
+				"$logDir/FinishedCleanup.sh", "CLN$JNUM", \@cleanupDependencies,
+				finishedCleanupArguments(
+					$curSmpl, $SmplName, $finalCommAssDir, $finalMapDir,
+					$smplTmpDir, $finAssLoc, $logDir, $cleanupRequirements,
+					$assemblyOutputsRequired,
+				),
+			);
+			add2SampleDeps(\@sampleDeps, [$cleanupJob]) if $cleanupJob ne '';
+		} else {
+			print "Deferring finished cleanup for $SmplName; waiting for "
+				.join(', ', @{$cleanupBarrier->{blocked}})."\n";
+		}
+	}
+	# Persist every sample owner, including cleanup. A later MATAF4 pass releases
+	# the lock only after all recorded scheduler jobs have terminated.
+	MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR);
 	### loop2complete functionality
 	loop2C_check($cAssGrp,\@sampleDeps);
 
 	#print "END2\n@sampleDeps\n".@sampleDeps."\n";
+}
+
+if ($runOptions{loopInitialCount}) {
+	my @selectedIndices = $selectedFrom < $selectedTo ? ($selectedFrom .. $selectedTo - 1) : ();
+	my @missingVisits = grep { !$loopSampleVisited{$_} } @selectedIndices;
+	my @missingFinalVisits = grep { !$loopFinalSampleVisited{$_} } @selectedIndices;
+	my @coverageProblems;
+	for my $failure (
+		['never visited', \@missingVisits],
+		['not final-verified', \@missingFinalVisits],
+	) {
+		my ($label, $indices) = @{$failure};
+		next unless @{$indices};
+		my @previewIndices = @{$indices};
+		splice @previewIndices, 10 if @previewIndices > 10;
+		my $preview = join(', ',
+			map { "$_=$samples[$_]" } @previewIndices,
+		);
+		push @coverageProblems, "$label ".scalar(@{$indices})
+			." sample(s) (first: $preview)";
+	}
+	die "loopTillComplete range audit failed: ".join('; ', @coverageProblems)."\n"
+		if @coverageProblems;
 }
 
 
@@ -1401,7 +2207,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 
 
-print "\n\n###################################\n".$baseOut."\nFINISHED MG-TK submission loop\n";
+print "\n\n###################################\n".$baseOut."\nFINISHED MATAFILER submission loop\n";
 
 postprocess();
 
@@ -1467,50 +2273,946 @@ exit(0);
 #
 #####################################################
 
+sub sampleCompletionRequestSignature {
+	my ($sampleKey) = @_;
+	my @memberKeys = exists($map{$sampleKey}{AG_members})
+		? @{$map{$sampleKey}{AG_members}} : ($sampleKey);
+	my @mapFields = qw(
+		SmplID dir rddir prefix AssGroup MapGroup ExcludeAssem hasPrimaryRds SupportReads
+		SeqTech SeqTechSingl
+	);
+	my %sampleDefinition = map {
+		my $key = $_;
+		($key => (defined($map{$sampleKey}{$key}) ? $map{$sampleKey}{$key} : ''))
+	} @mapFields;
+	$sampleDefinition{assembly_members} = [
+		map { defined($map{$_}{SmplID}) ? $map{$_}{SmplID} : $_ } @memberKeys
+	];
+
+	my @optionKeys = qw(
+		DoAssembly pseudoAssembly map2Assembly mapSupport2Assembly
+		mapModeActive mapModeCovDo mapModeTogether DoMapModeDecoy
+		refDBall bwt2NameAll Do2ndMapSNP
+		DoMetaBat2 useCheckM1 useCheckM2 minBinnerAssemblyMB
+		kmerAssembly kmerPerGene
+		DoConsSNP DoSuppConsSNP saveVCF saveConsFastas normSNPindels
+		SNPcallerFlag callSVs callSVsSupp SVcallerFlag
+		DoNonPareil calcOrthoPlacement DoCalcD2s DoGenoSizeEst
+		DoDiamond reqDiaDB DoKraken DoRibofind doRiboAssembl checkRiboNonEmpty
+		DoMOTU2 DoMetaPhlan DoTaxaTarget humanFilter
+		doReadMerge usePorechop
+	);
+	my @configKeys = qw(
+		unpackZip uploadRawRds defaultContigSubs remove_reads_tmpDir
+		rmScratchTmp skipSmallSmplsMB skipWrongPairedSmpls
+	);
+	my %requested = map {
+		my $key = $_;
+		($key => (defined($MFopt{$key}) ? $MFopt{$key} : ''))
+	} @optionKeys;
+	my %configuration = map {
+		my $key = $_;
+		($key => (defined($MFconfig{$key}) ? $MFconfig{$key} : ''))
+	} @configKeys;
+
+	return completion_request_signature({
+		completion_contract => 3,
+		metagstats_schema => [_smpl_stats_columns()],
+		operation_mode => $runOptions{operationMode},
+		sample => \%sampleDefinition,
+		requested => \%requested,
+		configuration => \%configuration,
+	});
+}
+
+sub sampleCompletionForcedInvalidation {
+	my @requested;
+	for my $key (qw(redoFails redoCS unfiniRew rmBinFailAssmbly)) {
+		push @requested, $key if $MFconfig{$key};
+	}
+	for my $key (qw(
+		redoAssembly redoAssMapping BinnerRedoAll BinnerRedoEmpty
+		redoSNPcons redoSNPgene rewriteGenePred rewriteDiamond
+		redoDiamondParse rewriteAllIfAnyDiamond RedoKraken
+		RedoRiboFind RedoRiboAssign MapRewrite2nd redoMapping
+	)) {
+		push @requested, $key if $MFopt{$key};
+	}
+	return @requested;
+}
+
+sub sampleCompletionComponents {
+	my ($sampleRoot, $sampleName, $context) = @_;
+	$context ||= {};
+	my $sampleKey = $context->{sample_key} || $sampleName;
+	die "sampleCompletionComponents requires sample root and name\n"
+		unless defined($sampleRoot) && $sampleRoot ne ''
+			&& defined($sampleName) && $sampleName ne '';
+
+	my @krakenChecks = ({
+		id => 'completion_stone', kind => 'exists',
+		path => "$sampleRoot/Tax/kraken/$MFopt{globalKraTaxkDB}/krakDone.sto",
+	});
+	for my $threshold (qw(0.01 0.02 0.04 0.06 0.1 0.2 0.3)) {
+		push @krakenChecks, {
+			id => "threshold_$threshold", kind => 'nonempty',
+			path => "$sampleRoot/Tax/kraken/$MFopt{globalKraTaxkDB}/krak.$threshold.cnt.tax",
+		};
+	}
+
+	my @diamondChecks;
+	for my $database (grep { $_ ne '' } split /,/, ($MFopt{reqDiaDB} || '')) {
+		my $prefix = "$sampleRoot/diamond/dia.$database.blast";
+		push @diamondChecks,
+			{id => $database."_parse_stone", kind => 'exists',
+				path => "$prefix.srt.gz.stone"},
+			{id => $database."_search_output", kind => 'nonempty_any',
+				paths => ["$prefix.gz", "$prefix.srt.gz"], required => 0};
+	}
+
+	my @secondaryMappingChecks;
+	for (my $i = 0; $i < @bwt2outD; $i++) {
+		my $prefix = "$bwt2outD[$i]/$bwt2ndMapNmds[$i]_".$sampleName."-0-smd.bam";
+		push @secondaryMappingChecks,
+			{id => "reference_".$i."_bam", kind => 'nonempty', path => $prefix},
+			{id => "reference_".$i."_coverage", kind => 'nonempty',
+				path => "$prefix.coverage.gz"};
+		if ($MFopt{mapModeCovDo}) {
+			for my $suffix (qw(median.percontig percontig pergene)) {
+				push @secondaryMappingChecks, {
+					id => "reference_".$i."_".$suffix, kind => 'nonempty',
+					path => "$prefix.coverage.gz.$suffix",
+				};
+			}
+		}
+	}
+	my $candidateFiles = sub {
+		my ($path) = @_;
+		return [] unless defined($path) && $path ne '';
+		if ($path =~ /\.gz$/) {
+			(my $plain = $path) =~ s/\.gz$//;
+			return [$path, $plain];
+		}
+		return [$path, "$path.gz"];
+	};
+	my $primaryAssemblyMapping = $MFopt{DoAssembly} && $MFopt{map2Assembly}
+		&& $map{$sampleKey}{hasPrimaryRds};
+	my $supportAssemblyMapping = $MFopt{DoAssembly} && $MFopt{mapSupport2Assembly}
+		&& ($map{$sampleKey}{SupportReads} || '') ne '';
+	if ($MFopt{DoAssembly}) {
+		for my $required (qw(
+			assembly_fasta assembly_dir mapping_dir contig_stats_dir
+			primary_consensus_stone support_consensus_stone
+		)) {
+			die "sample completion assembly context '$required' is missing\n"
+				unless defined($context->{$required}) && $context->{$required} ne '';
+		}
+	}
+	my $geneMarker = $MFopt{DoEukGenePred} ? '.bac' : '';
+	my @assemblyChecks = (
+		{id => 'fasta', kind => 'nonempty', path => $context->{assembly_fasta}},
+		{id => 'completion_stone', kind => 'exists',
+			path => ($context->{assembly_dir} || '').$checkpointNames{assemblyDone}},
+		{id => 'statistics', kind => 'nonempty',
+			path => ($context->{assembly_dir} || '').'AssemblyStats.txt'},
+		{id => 'predicted_proteins', kind => 'nonempty_any', paths =>
+			$candidateFiles->(($context->{assembly_dir} || '')
+				."genePred/proteins$geneMarker.shrtHD.faa")},
+		{id => 'predicted_genes', kind => 'nonempty_any', paths =>
+			$candidateFiles->(($context->{assembly_dir} || '')
+				."genePred/genes$geneMarker.gff")},
+	);
+	my @primaryMappingChecks = (
+		{id => 'completion_stone', kind => 'exists',
+			path => $context->{primary_mapping_stone}},
+		{id => 'coverage', kind => 'nonempty',
+			path => ($context->{mapping_dir} || '')."$sampleName-smd.bam.coverage.gz"},
+		{id => 'alignment', kind => 'nonempty',
+			path => $context->{primary_mapping}, required => 0},
+	);
+	my @supportMappingChecks = (
+		{id => 'completion_stone', kind => 'exists',
+			path => $context->{support_mapping_stone}},
+		{id => 'coverage', kind => 'nonempty',
+			path => ($context->{mapping_dir} || '')."$sampleName.sup-smd.bam.coverage.gz"},
+		{id => 'alignment', kind => 'nonempty',
+			path => $context->{support_mapping}, required => 0},
+	);
+	my @contigStatsChecks;
+	my $contigRoot = $context->{contig_stats_dir} || '';
+	for my $scope (
+		[$primaryAssemblyMapping, 'Coverage', 'primary'],
+		[$supportAssemblyMapping, 'Cov.sup', 'support'],
+	) {
+		my ($required, $prefix, $idPrefix) = @{$scope};
+		next unless $required;
+		push @contigStatsChecks, {
+			id => $idPrefix.'_stone', kind => 'exists',
+			path => "$contigRoot/$prefix.stone",
+		};
+		for my $suffix (qw(percontig median.percontig pergene count_pergene)) {
+			push @contigStatsChecks, {
+				id => $idPrefix.'_'.$suffix, kind => 'nonempty_any',
+				paths => $candidateFiles->("$contigRoot/$prefix.$suffix"),
+			};
+		}
+	}
+	push @contigStatsChecks,
+		{id => 'fetchmg', kind => 'nonempty_any', paths => $candidateFiles->(
+			($context->{assembly_dir} || '').'ContigStats/FMG/FMGids.txt')},
+		{id => 'gtdb_markers', kind => 'nonempty_any', paths => $candidateFiles->(
+			($context->{assembly_dir} || '').'ContigStats/GTDBmg/marker_genes_meta.tsv')},
+		{id => 'gene_statistics', kind => 'nonempty',
+			path => "$contigRoot/GeneStats.txt", required => 0};
+	if ($MFopt{kmerPerGene}) {
+		push @contigStatsChecks, {
+			id => 'gene_kmers', kind => 'nonempty_any',
+			paths => $candidateFiles->("$contigRoot/scaff.pergene.4kmer.pm5"),
+		};
+	}
+	my @binningChecks = (
+		{id => 'assignment', kind => 'exists', path => $context->{binning_output}},
+		{id => 'assembly_statistics', kind => 'nonempty',
+			path => ($context->{binning_output} || '').'.assStat'},
+	);
+	push @binningChecks, {
+		id => 'checkm1', kind => 'exists',
+		path => ($context->{binning_output} || '').'.cm',
+	} if $MFopt{useCheckM1};
+	push @binningChecks, {
+		id => 'checkm2', kind => 'nonempty',
+		path => ($context->{binning_output} || '').'.cm2',
+	} if $MFopt{useCheckM2};
+	my $primaryConsensusRequested = $MFopt{DoAssembly} && $MFopt{DoConsSNP}
+		&& $map{$sampleKey}{hasPrimaryRds};
+	my $supportConsensusRequested = $MFopt{DoAssembly}
+		&& $MFopt{mapSupport2Assembly} && $MFopt{DoSuppConsSNP}
+		&& ($map{$sampleKey}{SupportReads} || '') ne '';
+	my $consensusChecks = sub {
+		my ($scope) = @_;
+		my @checks = ({
+			id => 'completion_stone', kind => 'exists',
+			path => $context->{$scope.'_consensus_stone'},
+		});
+		if ($MFopt{saveConsFastas}) {
+			push @checks, {
+				id => 'consensus_contigs', kind => 'nonempty_any',
+				paths => $candidateFiles->($context->{consensus_contigs}),
+			};
+			my $index = 0;
+			for my $gene (@{$context->{consensus_genes} || []}) {
+				push @checks, {
+					id => 'consensus_gene_'.$index++, kind => 'nonempty_any',
+					paths => $candidateFiles->($gene),
+				};
+			}
+		}
+		if ($MFopt{saveVCF}) {
+			push @checks, {
+				id => 'vcf', kind => 'nonempty_any',
+				paths => $candidateFiles->($context->{$scope.'_vcf'}),
+			};
+		}
+		return \@checks;
+	};
+
+	my $readProcessingRequested = $MFopt{DoAssembly}
+		|| $MFopt{DoDiamond} || $MFopt{DoKraken} || $MFopt{DoRibofind}
+		|| $MFopt{DoMOTU2} || $MFopt{DoMetaPhlan} || $MFopt{DoTaxaTarget}
+		|| $MFopt{DoNonPareil} || $MFopt{DoGenoSizeEst}
+		|| $MFopt{calcOrthoPlacement} || $MFopt{DoCalcD2s}
+		|| @bwt2outD || $MFconfig{uploadRawRds} ne '';
+	my $transient = sub {
+		my ($requested, $reason) = @_;
+		return completion_component_evidence(
+			requested => $requested,
+			applicable => 0,
+			reason => $reason,
+		);
+	};
+
+	return {
+		assembly => completion_component_evidence(
+			requested => $MFopt{DoAssembly},
+			checks => \@assemblyChecks,
+		),
+		primary_assembly_mapping => completion_component_evidence(
+			requested => $primaryAssemblyMapping,
+			checks => \@primaryMappingChecks,
+		),
+		support_assembly_mapping => completion_component_evidence(
+			requested => $supportAssemblyMapping,
+			checks => \@supportMappingChecks,
+		),
+		contig_stats => completion_component_evidence(
+			requested => $MFopt{DoAssembly},
+			checks => \@contigStatsChecks,
+		),
+		binning => completion_component_evidence(
+			requested => $MFopt{DoAssembly} && $MFopt{DoMetaBat2},
+			checks => \@binningChecks,
+		),
+		primary_consensus_snp => completion_component_evidence(
+			requested => $primaryConsensusRequested,
+			checks => $consensusChecks->('primary'),
+		),
+		support_consensus_snp => completion_component_evidence(
+			requested => $supportConsensusRequested,
+			checks => $consensusChecks->('support'),
+		),
+		primary_structural_variants => completion_component_evidence(
+			requested => $MFopt{DoAssembly} && $MFopt{callSVs}
+				&& $map{$sampleKey}{hasPrimaryRds},
+			checks => [{
+				id => 'variant_file', kind => 'nonempty',
+				path => $context->{primary_sv},
+			}],
+		),
+		support_structural_variants => completion_component_evidence(
+			requested => $MFopt{DoAssembly} && $MFopt{mapSupport2Assembly}
+				&& $MFopt{callSVsSupp}
+				&& ($map{$sampleKey}{SupportReads} || '') ne '',
+			checks => [{
+				id => 'variant_file', kind => 'nonempty',
+				path => $context->{support_sv},
+			}],
+		),
+		input_staging => $transient->(
+			$readProcessingRequested || $MFconfig{unpackZip},
+			'transient scratch inputs are removed after their persistent consumers pass',
+		),
+		read_cleaning => $transient->(
+			$readProcessingRequested && $MFopt{useSDM},
+			'clean-read scratch products are removed after terminal consumers pass',
+		),
+		host_filtering => $transient->(
+			$readProcessingRequested && $MFopt{humanFilter},
+			'host-filter intermediates are transient; persistent consumer outputs are checked',
+		),
+		read_merge => $transient->(
+			$MFopt{doReadMerge},
+			'merged-read intermediates are transient; persistent consumer outputs are checked',
+		),
+		long_read_trimming => $transient->(
+			$readProcessingRequested && $MFopt{usePorechop},
+			'adapter-trimmed long reads are transient scratch inputs',
+		),
+		raw_upload => $transient->(
+			$MFconfig{uploadRawRds} ne '',
+			'raw-read export is finalized by invocation-level checksum jobs rather than a sample-local artifact',
+		),
+		d2_distance => $transient->(
+			$MFopt{DoCalcD2s},
+			'D2 distance is a cross-sample output and is not a per-sample artifact',
+		),
+		ortholog_placement => $transient->(
+			$MFopt{calcOrthoPlacement},
+			'ortholog placement is not an active MATAFILER4 workflow',
+		),
+		secondary_mapping => completion_component_evidence(
+			requested => scalar(@bwt2outD) ? 1 : 0,
+			checks => \@secondaryMappingChecks,
+		),
+		secondary_mapping_consensus => $transient->(
+			$MFopt{Do2ndMapSNP},
+			'the legacy secondary-reference consensus route has no durable per-sample completion artifact',
+		),
+		nonpareil => completion_component_evidence(
+			requested => $MFopt{DoNonPareil},
+			checks => [{
+				id => 'profile', kind => 'nonempty',
+				path => "$sampleRoot/nonpareil/$sampleName.npo",
+			}],
+		),
+		genome_size => completion_component_evidence(
+			requested => $MFopt{DoGenoSizeEst},
+			checks => [{
+				id => 'microbecensus_result', kind => 'nonempty',
+				path => "$sampleRoot/MicroCens/MC.0.result",
+			}],
+		),
+		diamond => completion_component_evidence(
+			requested => $MFopt{DoDiamond},
+			checks => \@diamondChecks,
+		),
+		kraken => completion_component_evidence(
+			requested => $MFopt{DoKraken},
+			checks => \@krakenChecks,
+		),
+		ribofind => ribosome_completion_evidence(
+			sample_root => $sampleRoot,
+			requested => $MFopt{DoRibofind},
+			assembly_requested => $MFopt{doRiboAssembl},
+		),
+		metaphlan => completion_component_evidence(
+			requested => $MFopt{DoMetaPhlan},
+			checks => [
+				{id => 'completion_stone', kind => 'exists',
+					path => $baseOut.$preDIRs{dir2MePhl}."$sampleName.MP2.sto"},
+				{id => 'profile', kind => 'nonempty',
+					path => $baseOut.$preDIRs{dir2MePhl}."$sampleName.MP2.txt"},
+			],
+		),
+		motus => completion_component_evidence(
+			requested => $MFopt{DoMOTU2},
+			checks => [
+				{id => 'completion_stone', kind => 'exists',
+					path => $baseOut."pseudoGC/Phylo/mOTU2/$sampleName.Motu2.sto"},
+				{id => 'profile', kind => 'nonempty',
+					path => $baseOut."pseudoGC/Phylo/mOTU2/$sampleName.motu2.tab.gz"},
+			],
+		),
+		taxa_target => completion_component_evidence(
+			requested => $MFopt{DoTaxaTarget},
+			checks => [{
+				id => 'library_manifest', kind => 'nonempty',
+				path => $baseOut."pseudoGC/Phylo/TaxaTarget/$sampleName.TaxTar.sto",
+			}],
+		),
+	};
+}
+
+sub sampleStatisticsEvidence {
+	my ($values, $sampleKey) = @_;
+	die "sampleStatisticsEvidence requires a value hash\n"
+		unless ref($values) eq 'HASH';
+	my %available = map {
+		my $value = $values->{$_};
+		($_ => defined($value) && $value ne '' && $value ne '-1' ? 1 : 0)
+	} _smpl_stats_columns();
+
+	my $supportRequested = 0 + ($map{$sampleKey}{inputXFileSizeMB} || 0) > 0;
+	my %families;
+	my $addFamily = sub {
+		my ($name, $requested, $fields, $required) = @_;
+		my %fieldState = map { $_ => ($available{$_} || 0) } @{$fields};
+		my $present = scalar grep { $fieldState{$_} } keys %fieldState;
+		my $requiredOk = !grep { !$fieldState{$_} } @{$required};
+		my $status = !$requested ? 'not_applicable'
+			: !$present ? 'missing'
+			: $requiredOk ? 'complete' : 'partial';
+		$families{$name} = $status;
+	};
+
+	$addFamily->('input', 1,
+		[qw(RawInputSize RawInputSizeSub InputIsPaired InputIsSingle)],
+		[qw(RawInputSize RawInputSizeSub InputIsPaired InputIsSingle)]);
+	$addFamily->('raw_upload_filter', $MFconfig{uploadRawRds} ne '',
+		[qw(FilteredContaRdsPerc_EBI FilteredContaRds_EBI FilteredNonContaRds_EBI)],
+		[qw(FilteredContaRdsPerc_EBI)]);
+	$addFamily->('quality_filter_primary', $MFopt{useSDM} ? 1 : 0,
+		[qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2
+			AvgSeqLen MaxSeqLength AvgSeqQual accErr SDMAcceptedPercent)],
+		[qw(totRds)]);
+	$addFamily->('quality_filter_support', $MFopt{useSDM} && $supportRequested,
+		[qw(totRds_Sup Rejected1_Sup Rejected2_Sup Accepted1_Sup Accepted2_Sup
+			Singl1_Sup Singl2_Sup AvgSeqLen_Sup MaxSeqLength_Sup AvgSeqQual_Sup
+			accErr_Sup SDMAcceptedPercent_Sup)],
+		[qw(totRds_Sup)]);
+	$addFamily->('host_filter', $MFopt{humanFilter} ? 1 : 0,
+		[qw(FilteredContaRdsPerc FilteredContaRds FilteredNonContaRds)],
+		[qw(FilteredContaRdsPerc)]);
+	$addFamily->('read_merge', $MFopt{doReadMerge} ? 1 : 0,
+		[qw(Merged NotMerged)], [qw(Merged NotMerged)]);
+	$addFamily->('genome_size', $MFopt{DoGenoSizeEst} ? 1 : 0,
+		[qw(AvgGenomeSizeEst TotalGenomesEst)],
+		[qw(AvgGenomeSizeEst TotalGenomesEst)]);
+	$addFamily->('assembly', $MFopt{DoAssembly} ? 1 : 0,
+		[qw(ContigN50 NScaff400 NScaffG1k NScaffG10k NScaffG100k NScaffG1M
+			ScaffN50 ScaffMaxSize ScaffSize CircCtgs CircCtgG1M)],
+		[qw(ScaffN50 ScaffSize)]);
+	$addFamily->('hybrid_assembly', $MFopt{DoAssembly} == 5 ? 1 : 0,
+		[qw(HybridPreassemblyCount
+			HybridPreassemblyContigs HybridFinalContigs HybridContigsDelta HybridFinalToPreContigsRatio
+			HybridPreassemblyBases HybridFinalBases HybridBasesDelta HybridFinalToPreBasesRatio
+			HybridPreassemblyN50 HybridFinalN50 HybridN50Delta HybridFinalToPreN50Ratio
+			HybridPreassemblyN90 HybridFinalN90 HybridN90Delta HybridFinalToPreN90Ratio
+			HybridPreassemblyLongest HybridFinalLongest HybridLongestDelta HybridFinalToPreLongestRatio
+			HybridPreassemblyGCPercent HybridFinalGCPercent HybridGCPercentDelta HybridFinalToPreGCPercentRatio)],
+		[qw(HybridPreassemblyCount HybridFinalBases)]);
+	$addFamily->('assembly_mapping', $MFopt{DoAssembly} && $MFopt{map2Assembly},
+		[qw(ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign
+			DisconcAlign SingleUniqAlign SingleMultiAlign)],
+		[qw(OverallAlignment)]);
+	$addFamily->('duplicate_marking', $MFopt{DoAssembly} && $MFopt{map2Assembly},
+		[qw(OpticalDuplicates PCRduplicates PassedMD EstLibSize)],
+		[qw(PassedMD)]);
+	$addFamily->('breakpoints', $MFopt{DoAssembly} && $MFopt{map2Assembly},
+		[qw(BreakpointCount BreakpointContigs BreakpointBases
+			BreakpointMeanLength BreakpointMaxLength AssemblyBreakpointPercent)],
+		[qw(BreakpointCount)]);
+	$addFamily->('gene_prediction', $MFopt{DoAssembly} ? 1 : 0,
+		[qw(GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes
+			GeneCodingPercent Gcomplete G5pComplete G3pComplete Gincomplete)],
+		[qw(GeneNumber BpGenes)]);
+	my $binMode = $MFopt{DoMetaBat2} ? getBinSubdirName($MFopt{DoMetaBat2}) : '';
+	$addFamily->('binning', $MFopt{DoMetaBat2} ? 1 : 0,
+		$binMode eq '' ? [] : [
+			"HQ_bins_".$binMode, "MQ_bins_".$binMode,
+			$binMode."_other_bins", $binMode."_total_bins",
+		],
+		$binMode eq '' ? [] : [$binMode."_total_bins"]);
+	$addFamily->('consensus_snp',
+		$MFopt{DoAssembly} && ($MFopt{DoConsSNP} || $MFopt{DoSuppConsSNP}) ? 1 : 0,
+		[qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved
+			SNPsPerMbp INDEL_Num INDEL_Passed INDELsPerMbp)],
+		[qw(SNP_Num INDEL_Num)]);
+
+	return \%families;
+}
+
+sub createSampleCompletionSentinel {
+	my (%args) = @_;
+	for my $required (qw(
+		sample_root sample_name input_label input_dir assembly_dir
+		request_signature
+	)) {
+		die "sample completion argument '$required' is required\n"
+			unless defined($args{$required});
+	}
+
+	my $components = sampleCompletionComponents($args{sample_root}, $args{sample_name}, $args{component_context});
+	my $terminalStatus = $args{terminal_status} || 'completed';
+	my @incompleteComponents = sort grep {
+		$components->{$_}{requested} && $components->{$_}{applicable}
+			&& !$components->{$_}{complete}
+	} keys %{$components};
+	if ($terminalStatus eq 'completed' && @incompleteComponents) {
+		warn "Cannot close sample $args{sample_name}: requested output checks are incomplete for "
+			.join(', ', @incompleteComponents)."\n";
+		return;
+	}
+	my $primaryInputMB = 0 + ($args{primary_input_size_mb} || 0);
+	my $supplementaryInputMB = 0 + ($args{supplementary_input_size_mb} || 0);
+	my $outcome = {
+		status => $terminalStatus,
+		input_size_mb => {
+			primary => $primaryInputMB,
+			supplementary => $supplementaryInputMB,
+			total => $primaryInputMB + $supplementaryInputMB,
+		},
+	};
+	$outcome->{small_sample_threshold_mb} = 0 + ($MFconfig{skipSmallSmplsMB} || 0)
+		if $terminalStatus eq 'skipped_too_small';
+	$outcome->{sdm_warning} = {
+		type => $args{sdm_warning_type} || '',
+		log => $args{sdm_warning_log} || '',
+	} if $terminalStatus eq 'skipped_sdm_warning';
+	$outcome->{cleaned_input_scope} = $args{cleaned_input_scope} || 'primary'
+		if $terminalStatus eq 'skipped_cleaned_empty';
+
+	my $started = clock_gettime(CLOCK_MONOTONIC);
+	reset_stats_log_sampling();
+	%locStats = ();
+	my $sampleKey = $args{component_context}{sample_key} || $args{sample_name};
+	my $statValues = smplStats(
+		$args{input_dir}, $args{assembly_dir}, $args{sample_name}, $sampleKey,
+	);
+	my $statFamilies = sampleStatisticsEvidence($statValues, $sampleKey);
+	my $metagstats = {
+		DIR => $args{input_label},
+		values => $statValues,
+		families => $statFamilies,
+	};
+	my $path = write_sample_completion(
+		root => $args{sample_root},
+		sample => $args{sample_name},
+		request_signature => $args{request_signature},
+		present_assembly => $args{present_assembly},
+		components => $components,
+		outcome => $outcome,
+		metagstats => $metagstats,
+	);
+	printf "Closed sample %s in %.2f s; cached metagStats in %s\n",
+		$args{sample_name}, clock_gettime(CLOCK_MONOTONIC) - $started, $path
+		unless $MFconfig{silent};
+
+	my $sampling = stats_log_sampling_summary();
+	if ($sampling->{large_files}) {
+		my $compressedNote = $sampling->{compressed_files}
+			? sprintf(", including %d compressed stream(s) scanned in bounded memory",
+				$sampling->{compressed_files}) : '';
+		printf "Statistics log safeguard sampled %d log(s) over 5 MiB: retained %.2f of %.2f MiB%s.\n",
+			$sampling->{large_files}, $sampling->{retained_bytes} / 1048576,
+			$sampling->{source_bytes} / 1048576, $compressedNote;
+	}
+	return $path;
+}
+
+sub cleanupCompletionRequirements {
+	my (%args) = @_;
+	my (@exists, @nonempty, @files, @nonemptyFiles);
+	my $contigDir = $args{contig_dir};
+	$contigDir =~ s{/+$}{};
+	if ($args{primary_coverage_required}) {
+		push @exists, "$contigDir/Coverage.stone";
+		push @files, map { "$contigDir/Coverage.$_" }
+			qw(percontig median.percontig pergene count_pergene);
+	}
+	if ($args{support_coverage_required}) {
+		push @exists, "$contigDir/Cov.sup.stone";
+		push @files, map { "$contigDir/Cov.sup.$_" }
+			qw(percontig median.percontig pergene count_pergene);
+	}
+	my $subparts = $args{contig_subparts} || '';
+	push @nonemptyFiles, "$args{assembly_dir}/ContigStats/FMG/FMGids.txt"
+		if $subparts =~ /F/;
+	push @nonemptyFiles, "$args{assembly_dir}/ContigStats/GTDBmg/marker_genes_meta.tsv"
+		if $subparts =~ /G/;
+	push @nonemptyFiles, "$contigDir/scaff.pergene.4kmer.pm5"
+		if $MFopt{kmerPerGene} && $subparts =~ /4/;
+
+	if ($args{binning_base}) {
+		push @exists, $args{binning_base};
+		push @nonempty, "$args{binning_base}.assStat";
+		push @exists, "$args{binning_base}.cm" if $MFopt{useCheckM1};
+		push @nonempty, "$args{binning_base}.cm2" if $MFopt{useCheckM2};
+	}
+	push @exists, grep { defined($_) && $_ ne '' }
+		@args{qw(primary_snp_stone support_snp_stone)};
+	push @nonemptyFiles, grep { defined($_) && $_ ne '' }
+		@args{qw(consensus_contigs primary_vcf support_vcf)};
+	push @nonemptyFiles, @{$args{consensus_genes} || []};
+	push @nonempty, grep { defined($_) && $_ ne '' }
+		@args{qw(primary_sv support_sv)};
+	return {
+		exists => \@exists,
+		nonempty => \@nonempty,
+		files => \@files,
+		nonempty_files => \@nonemptyFiles,
+	};
+}
+
+sub finishedCleanupArguments {
+	my ($sampleKey, $sampleName, $assemblyDir, $mappingDir,
+		$sampleTemp, $assembly, $sampleLogDir, $requirements,
+		$assemblyRequired) = @_;
+	my @memberKeys = exists($map{$sampleKey}{AG_members})
+		? @{$map{$sampleKey}{AG_members}} : ($sampleKey);
+	my @memberArgs = map { ('--member', $map{$_}{SmplID}) } @memberKeys;
+	my @memberLockArgs = map {
+		('--member-lock', "$map{$_}{wrdir}/LOGandSUB/$MFcontstants{DefaultSampleLock}")
+	} @memberKeys;
+	my @arguments = (
+		'--sample', $sampleName, @memberArgs, @memberLockArgs,
+		'--state-dir', "$assemblyDir/.cleanup-indexes",
+		'--allowed-root', $baseOut,
+		'--mapping-dir', $mappingDir,
+		'--sample-temp', $sampleTemp,
+		'--scratch-root', $MFglobal{runTmpDirGlobal},
+		($MFconfig{rmScratchTmp} ? '--remove-temporary' : '--no-remove-temporary'),
+		'--snp-log-dir', "$sampleLogDir/SNP",
+	);
+	push @arguments,
+		'--assembly', $assembly,
+		'--assembly-path-file', "$map{$sampleKey}{wrdir}/assemblies/metag/assembly.txt",
+		'--assembly-dir', $assemblyDir
+		if $assemblyRequired;
+	push @arguments, ('--remove-alignment', "$mappingDir/$sampleName-smd.cram")
+		if $MFopt{map2Assembly} && !$MFopt{mapSaveCram} && $MFopt{DoMetaBat2};
+	$requirements ||= {};
+	my %requirementFlags = (
+		exists => '--require-exists',
+		nonempty => '--require-nonempty',
+		files => '--require-file',
+		nonempty_files => '--require-nonempty-file',
+	);
+	for my $kind (qw(exists nonempty files nonempty_files)) {
+		push @arguments, map { ($requirementFlags{$kind}, $_) }
+			@{$requirements->{$kind} || []};
+	}
+	return @arguments;
+}
+
+sub runFinishedCleanup {
+	my @arguments = @_;
+	my @cleaner = shellwords(getProgPaths("finished_sample_cleanup"));
+	if (!@cleaner) {
+		warn "Finished-sample cleanup command is not configured\n";
+		return 0;
+	}
+	my $status = system(@cleaner, @arguments);
+	if ($status != 0) {
+		my $exitCode = $status == -1 ? -1 : $status >> 8;
+		warn "Finished-sample cleanup failed with exit code $exitCode; retained temporary files\n";
+		return 0;
+	}
+	return 1;
+}
+
+sub submitFinishedCleanup {
+	my ($scriptFile, $jobName, $dependencies, @arguments) = @_;
+	return '' unless ref($dependencies) eq 'ARRAY' && @{$dependencies};
+	my @cleaner = shellwords(getProgPaths("finished_sample_cleanup"));
+	if (!@cleaner) {
+		warn "Finished-sample cleanup command is not configured\n";
+		return '';
+	}
+	my $command = _shell_command(@cleaner, @arguments)."\n";
+	my $dependencyString = normalise_job_dependencies($dependencies);
+	return '' if $dependencyString eq '';
+
+	my ($oldTmp, $oldShort, $oldAfterAny, $oldSubmissionConfig) =
+		@{$QSBoptHR}{qw(tmpSpace useShortQueue afterAny submissionConfig)};
+	$QSBoptHR->{tmpSpace} = 0;
+	$QSBoptHR->{useShortQueue} = 1;
+	$QSBoptHR->{afterAny} = 0;
+	if (($QSBoptHR->{qmode} || '') eq 'slurm'
+			&& ($QSBoptHR->{submissionConfig} || '') !~ /(?:^|;)--kill-on-invalid-dep=yes(?:;|$)/) {
+		$QSBoptHR->{submissionConfig} = join(';',
+			grep { defined($_) && $_ ne '' }
+				($QSBoptHR->{submissionConfig}, '--kill-on-invalid-dep=yes'));
+	}
+	my ($cleanupJob, $submissionError);
+	eval {
+		($cleanupJob) = qsubSystem(
+			$scriptFile, $command, 1, "1G", $jobName,
+			$dependencyString, "", 1, [], $QSBoptHR,
+		);
+		1;
+	} or $submissionError = $@ || 'unknown cleanup submission failure';
+	@{$QSBoptHR}{qw(tmpSpace useShortQueue afterAny submissionConfig)} =
+		($oldTmp, $oldShort, $oldAfterAny, $oldSubmissionConfig);
+	die $submissionError if defined $submissionError;
+	return $cleanupJob;
+}
+
+sub primeLoopSchedulerSnapshot {
+	my ($start, $stop) = @_;
+	return unless $runOptions{loopCount};
+	$start = $selectedFrom if !defined($start) || $start < $selectedFrom;
+	$stop = $selectedTo if !defined($stop) || $stop > $selectedTo;
+	return if $start >= $stop;
+	my @lockFiles = map {
+		my $sampleKey = $samples[$_];
+		"$map{$sampleKey}{wrdir}/LOGandSUB/$MFcontstants{DefaultSampleLock}";
+	} $start .. $stop - 1;
+	primeSampleLockJobSnapshot(\@lockFiles, $QSBoptHR);
+}
+
+sub deferLoopProducerWave {
+	my ($reason, $dependencies, $lockFile, $assemblyGroup, $sampleDeps) = @_;
+	return 0 unless $runOptions{loopCount};
+	my $barrier = normalise_job_dependencies($dependencies);
+	return 0 if $barrier eq '';
+	add2SampleDeps($sampleDeps, [$barrier]);
+	print "Producer wave '$reason' is pending for $curSmpl; "
+		."deferring downstream jobs until a later loop pass.\n"
+		unless $MFconfig{silent};
+	MFnext($lockFile, $sampleDeps, $JNUM, $QSBoptHR);
+	loop2C_check($assemblyGroup, $sampleDeps);
+	return 1;
+}
+
+
 sub loop2C_check(){
 	my ($cAssGrp,$sampleDeps_AR) = @_;
-	if ($loop2completion ){
+	if ($runOptions{loopCount} ){
 		push (@grandDeps, @{$sampleDeps_AR});
 		if ($JNUM == ($to-1)){
-			
-			#$totalChecked -= ($JNUM - $from);
-			$JNUM=($from-1);$loop2completion--;
-			print "\n\n-------------------------------------------\n-------------------------------------------\n";
-			print "Repeating samples loop: going into iteration  - $loop2completion: \n";
+			my $submittedThisIteration =
+				($QSBoptHR->{submittedJobs} || 0) - $loopIterationSubmissionStart;
+			my $capacityDeferred = delete($QSBoptHR->{capacityDeferred}) ? 1 : 0;
+			delete $QSBoptHR->{capacityDeferralAnnounced};
 
-			#print "L2C:: $loop2completion  @{$sampleDeps_AR}\n";
-			qsubSystemJobAlive( \@grandDeps,$QSBoptHR ,1 );
-			# Reinspect after every completed submission pass. This lets hybrid
-			# preassembly packages and assembly-group outputs become dependencies
-			# for the next pass without requiring a separate user command.
-			$workflowIteration++;
-			runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
-			#reset some key params...
+			my $activeJobs = 0;
+			my $rerunLockedWindow = 0;
+			# A pass that submitted work already reruns after its dependency wait.
+			# Check the scheduler only for a no-op pass that may have skipped locks.
+			if (!$loopFinalVerification && !$capacityDeferred && $runOptions{submit}
+					&& !$MFconfig{rmSmplLocks} && $submittedThisIteration == 0) {
+				$activeJobs = numActiveUserJobs(
+					$QSBoptHR, 1, [keys %loopSubmittedJobIds],
+				);
+				$rerunLockedWindow = should_rerun_locked_window(
+					active_jobs => $activeJobs,
+					sample_count => $to - $from,
+					active_job_threshold => $MFconfig{loopTillCompleteActiveJobs},
+					remove_locks => $MFconfig{rmSmplLocks},
+				);
+			}
+			if ($rerunLockedWindow
+					&& ($runOptions{loopCount} > 1 || !$loopFinalLockRetryUsed)) {
+				if ($runOptions{loopCount} > 1) {
+					$runOptions{loopCount}--;
+				} else {
+					# Grant one final extra scan, but never spin indefinitely while a
+					# small set of unrelated or long-running jobs remains active.
+					$loopFinalLockRetryUsed = 1;
+				}
+				print "Retained sample locks with $activeJobs active job(s); " .
+					"rerunning samples $from till $to before advancing the window.\n";
+				@grandDeps = ();
+				resetAsGrps(\%AsGrps);
+				$loopIterationExtended = 0;
+				$JNUM = $from - 1;
+				primeLoopSchedulerSnapshot($from, $to);
+				return;
+			}
+			my $lastWindowPass = $runOptions{loopCount} == 1 ? 1 : 0;
+			my $overlapWindow = !$capacityDeferred && $runOptions{loopWindowSize} > 0
+				? overlap_loop_window(
+					to => $to, upper => $runOptions{to}, window_size => $runOptions{loopWindowSize},
+					submitted_jobs => $submittedThisIteration,
+					already_extended => $loopIterationExtended,
+					last_pass => $lastWindowPass,
+				)
+				: { extended => 0 };
+			if ($overlapWindow->{extended}) {
+				my $previousTo = $to;
+				$to = $overlapWindow->{to};
+				$loopIterationExtended = 1;
+				$loopFinalLockRetryUsed = 0;
+				# The newly admitted block must receive a full retry allowance. The
+				# current pass counts as its first iteration at the extended boundary.
+				# Keep this pass's dependency list and submission snapshot open so the
+				# eventual wait covers jobs from both blocks.
+				$runOptions{loopCount} = $runOptions{loopInitialCount};
+				my $overlapReason = $lastWindowPass
+					? "Final loop pass"
+					: "Light loop pass ($submittedThisIteration submitted job(s), threshold " .
+						"$overlapWindow->{job_limit})";
+				print "$overlapReason; extending sample window from " .
+					"$from -> $previousTo to $from -> $to before waiting.\n";
+				primeLoopSchedulerSnapshot($from, $to);
+				return;
+			}
+			$loopIterationSubmissionStart = $QSBoptHR->{submittedJobs} || 0;
+			$loopIterationExtended = 0;
+			$loopFinalLockRetryUsed = 0;
+			my $continueCurrentWindow = $submittedThisIteration > 0 || $capacityDeferred;
+			if ($capacityDeferred) {
+				# Capacity is temporary scheduler state, not a consumed workflow pass.
+				$runOptions{loopCount} = $runOptions{loopInitialCount};
+			} else {
+				$runOptions{loopCount} = 0 unless $continueCurrentWindow;
+				$runOptions{loopCount}-- if $continueCurrentWindow;
+			}
+			print "\n\n-------------------------------------------\n-------------------------------------------\n";
+			if ($continueCurrentWindow) {
+				if ($capacityDeferred) {
+					print "Loop pass reached the Slurm job limit; the same range will be revisited.\n";
+				} else {
+					print "Completed loop iteration with $submittedThisIteration submitted job(s); " .
+						($runOptions{loopCount} ? "repeating with $runOptions{loopCount} iteration(s) remaining.\n"
+						                  : "iteration limit reached.\n");
+				}
+			} else {
+				print "No jobs were submitted in the current iteration; ending this loop early.\n";
+			}
+
+			#print "L2C:: $runOptions{loopCount}  @{$sampleDeps_AR}\n";
+			if ($continueCurrentWindow) {
+				my $loopJobTag = $QSBoptHR->{rTag} || '';
+				for my $loopJobId (
+					split /;/, normalise_job_dependencies(\@grandDeps)
+				) {
+					$loopJobId =~ s/^\Q$loopJobTag\E//;
+					$loopSubmittedJobIds{$loopJobId} = 1
+						if ($loopJobId =~ /^\d+$/);
+				}
+				qsubSystemJobAlive(
+					\@grandDeps, $QSBoptHR, 1,
+					$MFconfig{loopTillCompleteActiveJobs},
+				);
+				if ($capacityDeferred) {
+					sleep($MFconfig{schedulerPollSeconds});
+				}
+				# Reinspect after every completed submission pass. This lets hybrid
+				# preassembly packages and assembly-group outputs become dependencies
+				# for the next pass without requiring a separate user command.
+				unless ($loopFinalVerification) {
+					$workflowIteration++;
+					runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
+				}
+			}
+			# Reset pass-local state before either another iteration or a new window.
 			@grandDeps = ();
 			resetAsGrps(\%AsGrps);
 
-			print "Reanalyzing samples $from till $to\n";
-			if ($loop2c_winsize > 0 && !$loop2completion){
-				my $tmpStr = "Changing sample window from $from -> $to to ";
-				my $nextWindow = advance_loop_window(
-					from => $from, to => $to, upper => $TO1,
-					window_size => $loop2c_winsize,
-					initial_loops => $loop2completion_ini,
+			my $hadActiveLocks = $loopSawActiveLocks;
+			$loopSawActiveLocks = 0;
+			unless ($loopFinalVerification) {
+				my $frontier = rolling_completed_frontier(
+					from => $from, upper => $selectedTo,
+					window_size => $runOptions{loopWindowSize},
+					completed => \%loopSampleCompleted,
 				);
-				$from = $nextWindow->{from};
-				$to = $nextWindow->{to};
-				$loop2completion = $nextWindow->{loop_count};
-				$JNUM = $nextWindow->{reset_index};
-				print "Last loop, breaking..\n" unless ($nextWindow->{has_window});
-				print "$tmpStr$from -> $to \n";#" . ($JNUM + $loop2c_winsize) . "\n";
+				if ($frontier->{advanced}) {
+					my $oldFrom = $from;
+					$from = $frontier->{from};
+					if ($runOptions{loopWindowSize} > 0) {
+						$to += $frontier->{advanced};
+						$to = $selectedTo if $to > $selectedTo;
+					}
+					print "Advanced completed-sample frontier from $oldFrom to $from; "
+						."active scan is $from -> $to.\n";
+				}
 			}
+			my $rollingTransition = $loopFinalVerification ? undef
+				: rolling_loop_transition(
+					from => $from, to => $to, upper => $selectedTo,
+					loop_count => $runOptions{loopCount},
+					window_size => $runOptions{loopWindowSize},
+				);
+
+			if ($loopFinalVerification) {
+				my @invocationJobIds = sort { $a <=> $b }
+					grep { /^\d+$/ }
+					keys %{$QSBoptHR->{submittedJobRecords} || {}};
+				my $liveInvocationJobs = @invocationJobIds
+					? numLiveUserJobs($QSBoptHR, 1, \@invocationJobIds) : 0;
+				if ($continueCurrentWindow || $hadActiveLocks || $liveInvocationJobs > 0) {
+					my $reason = $continueCurrentWindow
+						? 'newly submitted work'
+						: $hadActiveLocks ? 'active sample locks'
+						: "$liveInvocationJobs pending or running invocation job(s)";
+					print "Final verification found $reason; waiting for "
+						."$liveInvocationJobs active job(s) submitted by this invocation "
+						."before another full-range pass.\n";
+					if (@invocationJobIds) {
+						# No active-job threshold here: pending and running jobs from this
+						# invocation must all leave the scheduler before the next full scan.
+						qsubSystemJobAlive(\@invocationJobIds, $QSBoptHR, 1);
+					} elsif ($hadActiveLocks) {
+						# Locks can predate this invocation. Avoid a tight rescan when no
+						# locally submitted job ID is available to wait on.
+						sleep($MFconfig{schedulerPollSeconds});
+					}
+					$workflowIteration++;
+					runAutomaticWorkflowPreflight($workflowIteration)
+						if ($MFconfig{autoStatePlan});
+					$from = $selectedFrom;
+					$to = $selectedTo;
+					$runOptions{loopCount} = 1;
+					$JNUM = $from - 1;
+					print "Submitted jobs have finished; starting another full-range verification pass "
+						."$from -> $to.\n";
+				} else {
+					$runOptions{loopCount} = 0;
+					print "Final full-range verification completed; sample statistics may now be collected.\n";
+				}
+			} elsif ($rollingTransition->{action} eq 'repeat') {
+				$JNUM = $from - 1;
+				print "Reanalyzing rolling sample range $from till $to\n";
+			} elsif ($rollingTransition->{action} eq 'expand') {
+				my $previousTo = $to;
+				$to = $rollingTransition->{to};
+				$runOptions{loopCount} = $runOptions{loopInitialCount};
+				$JNUM = $from - 1;
+				%loopSubmittedJobIds = ();
+				print "Expanded rolling sample range $from -> $previousTo to $from -> $to.\n";
+			} else {
+				$loopFinalVerification = 1;
+				$from = $selectedFrom;
+				$to = $selectedTo;
+				$runOptions{loopCount} = 1;
+				$JNUM = $from - 1;
+				%loopSubmittedJobIds = ();
+				print "Starting final full-range verification pass $from -> $to before statistics.\n";
+			}
+			primeLoopSchedulerSnapshot($from, $to) if $runOptions{loopCount};
 			print "-------------------------------------------\n-------------------------------------------\n";
-			
-			if ($MFopt{redoAssMapping} || $MFopt{BinnerRedoAll} || $MFopt{redoAssembly} || $MFopt{redoSNPcons} || $MFopt{redoSNPgene} ||
-					$MFopt{rewriteAllIfAnyDiamond} || $MFopt{rewriteDiamond} || $MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign} ) {
-				print STDERR "MG-TK rewriting option are active (any of mapping, binning, snp calling, ribo find, func annotations) while looping and might therefore remove newly generated results..\n Deactivate rewriting to use -loopTillComplete option\n";
-				die;
-			}
 			
 		}
 	}
@@ -1522,6 +3224,33 @@ sub postprocess{
 	#print "\n\n###################################\nMain Loop done\n######################################\n";
 	#global clean up cmds (like DB removals from scratch)
 	print "Postprocessing:\n";
+	my $statsStarted = clock_gettime(CLOCK_MONOTONIC);
+	if ($MFconfig{alwaysDoStats}) {
+		$runReport{samples} = {};
+		$runReport{present_assemblies} = 0;
+		$runReport{empty_samples} = {};
+		for my $sampleName (@{$runReport{order}}) {
+			my $context = $runReport{context}{$sampleName} || next;
+			my ($closedSample, $error) = read_sample_completion(
+				path => $context->{sentinel},
+				sample => $sampleName,
+				request_signature => $context->{request_signature},
+			);
+			if (!$closedSample) {
+				warn "Skipping metagStats for open sample $sampleName ($error)\n"
+					unless $error eq 'missing';
+				next;
+			}
+			$runReport{samples}{$sampleName} = $closedSample->{metagstats};
+			$runReport{present_assemblies}++ if $closedSample->{present_assembly};
+			my $outcomeStatus = $closedSample->{outcome}{status} || '';
+			if ($outcomeStatus =~ /^skipped_(?:too_small|empty_input|cleaned_empty)$/) {
+				$runReport{empty_samples}{$sampleName} =
+					0 + ($closedSample->{outcome}{input_size_mb}{total} || 0);
+			}
+		}
+	}
+	my $statsCollectionSeconds = clock_gettime(CLOCK_MONOTONIC) - $statsStarted;
 	if (@{$QSBoptHR->{submissionErrors} || []}) {
 		print STDERR "MATAFILER continued after ".scalar(@{$QSBoptHR->{submissionErrors}})
 			." scheduler submission problem(s). Existing sample locks were retained; failed work can be retried on a later run.\n";
@@ -1531,18 +3260,19 @@ sub postprocess{
 	##transfer first..
 	my %inputRawFQs;
 	foreach my $cS (@samples){
-		if (exists($map{$cS}{seqSet}->{"rawReads"})){
-			$inputRawFQs{$cS} = $map{$cS}{seqSet}->{"rawReads"};
+		my $rawReadSet = sampleReadSet($cS, "raw");
+		if (ref($rawReadSet) eq "HASH" && exists($rawReadSet->{rawReads})){
+			$inputRawFQs{$cS} = $rawReadSet->{rawReads};
 		} else {
 			$inputRawFQs{$cS} = "";
 		}
 	}
 
-	if (scalar(keys(%inputRawFQs)) == @allSmplNames){
+	if (scalar(keys(%inputRawFQs)) == scalar(keys %{$d2Inputs{samples}})){
 		open O,">$baseOut/Input_raw.txt";
-		for (my $i=0;$i<@allSmplNames; $i++){
-			my $cS = $allSmplNames[$i];
-			print O "$cS\t$inputRawFQs{$cS}\n";
+		foreach my $sampleName (keys %{$d2Inputs{samples}}){
+			print O "$sampleName\t$inputRawFQs{$sampleName}\n"
+				if (exists($inputRawFQs{$sampleName}));
 		}
 		close O;
 	}
@@ -1556,16 +3286,21 @@ sub postprocess{
 		$prevRep-- if $prevRep;
 	}
 
-	if (%sampleStats) {
-		my $statsText = _metag_stats_text(\%sampleStats, \@sampleStatsOrder);
+	if (%{$runReport{samples}}) {
+		my $statsWriteStarted = clock_gettime(CLOCK_MONOTONIC);
+		my $statsText = _metag_stats_text($runReport{samples}, $runReport{order});
 		my $temporary = "$MGSfile.tmp.$$";
 		open my $statsFH, '>', $temporary or die "Cannot write temporary metagStats '$temporary': $!\n";
 		print {$statsFH} $statsText or die "Cannot write metagStats data: $!\n";
 		close $statsFH or die "Cannot close temporary metagStats '$temporary': $!\n";
 		rename $temporary, $MGSfile or die "Cannot promote metagStats '$temporary' to '$MGSfile': $!\n";
+		my $statsSeconds = $statsCollectionSeconds
+			+ clock_gettime(CLOCK_MONOTONIC) - $statsWriteStarted;
+		printf "Created sample summary table for %d sample(s) in %.2f s.\n",
+			scalar(keys %{$runReport{samples}}), $statsSeconds;
 	}
 	print "Stats in $MGSfile \n";
-	if ($MFopt{writeStats} && (@sampleStatsOrder > $prevRep || !-e $MGShtml ) && -s $MGSfile ){
+	if ($MFopt{writeStats} && (@{$runReport{order}} > $prevRep || !-e $MGShtml ) && -s $MGSfile ){
 		my $qcMakeHTMLReport = getProgPaths("qcMakeHTMLReport");
 		my $Rpath = getProgPaths("Rpath");
 		my $call = "$qcMakeHTMLReport $Rpath $MGSfile $MGShtml 1> /dev/null 2>&1;\n";
@@ -1588,7 +3323,10 @@ sub postprocess{
 	mergeMotu2Table($dir_mOTU2);
 	unploadRawFilePostprocess();
 	DiaPostProcess("",$baseOut);
-	d2metaDist(\@allSmplNames,\@allFilter1,\@allFilter2,$sdmjNamesAll,$baseOut."/d2StarComp/");
+	d2metaDist(
+		$d2Inputs{samples}, $d2Inputs{filtered_read1}, $d2Inputs{filtered_read2},
+		$d2Inputs{dependencies}, $baseOut."/d2StarComp/",
+	);
 
 	if ($MFopt{DoKraken} ){
 		if( $progStats{KrakTaxFailCnts}){
@@ -1611,10 +3349,10 @@ sub postprocess{
 	#final message with instructions on how to build a gene cat..
 	if ($MFopt{DoAssembly}){
 		my $warnMsg = "";
-		$warnMsg = "(may be inaccurate due to loop2complete)" if ($loop2completion_ini);
-		print "Found ". ($presentAssemblies + scalar(@EmptySample))." of ". $totalCheckedSamples ." samples assembled (or ignored) and all tasks done.\n";
+		$warnMsg = "(may be inaccurate due to loop2complete)" if ($runOptions{loopInitialCount});
+		print "Found ". ($runReport{present_assemblies} + scalar(keys %{$runReport{empty_samples}}))." of ".
+			(scalar keys %{$d2Inputs{samples}}) ." samples assembled (or ignored) and all tasks done.\n";
 		print "$warnMsg\n" if ($warnMsg ne "");
-		
 	}
 	my $totalScratchUse=0;
 	foreach my $smpl (@samples){
@@ -1623,26 +3361,30 @@ sub postprocess{
 		$totalScratchUse += ($map{$smpl}{inputXFileSizeMB}) *3 if (exists($map{$smpl}{inputXFileSizeMB}));
 	}
 	print "Estimated scratch use: " . int($totalScratchUse/1024)."G\n";
-	if (@EmptySample>0){
-		print "Found Empty/too small (<". $MFconfig{skipSmallSmplsMB} ."MB) samples (N=". scalar(@EmptySample) . "):\n".join(",",@EmptySample) ."\n\n";
+	if (keys %{$runReport{empty_samples}} > 0){
+		print "Found empty-after-cleaning or too-small (<". $MFconfig{skipSmallSmplsMB} ."MB) samples (N=".
+			scalar(keys %{$runReport{empty_samples}}) . "):\n".
+			join(",", keys %{$runReport{empty_samples}}) ."\n\n";
 	}
 
 
-	if ($presentAssemblies >0 && ($presentAssemblies + scalar(@EmptySample)) == $totalCheckedSamples){
+	if ($MFopt{DoAssembly} && $runReport{present_assemblies} > 0
+		&& ($runReport{present_assemblies} + scalar(keys %{$runReport{empty_samples}}))
+			== scalar(keys %{$d2Inputs{samples}})){
 		my $gcScr = getProgPaths("geneCat_scr");
 		my $GCsub = $baseOut."/GeneCat_pre.sh";
 		my $gcmd = "";
 		$gcmd .= "#creates gene catalog in the specified outdir with specified cores, attempting to reuse existing dirs (in case catalog creation failed):\n";
 		my $sugGCmem = 100; 
-		$sugGCmem = 200 if ($presentAssemblies > 100);
-		$sugGCmem = 700 if ($presentAssemblies > 500);
-		$sugGCmem = 1200 if ($presentAssemblies > 1000);
-		$sugGCmem = 2500 if ($presentAssemblies > 5000);
+		$sugGCmem = 200 if ($runReport{present_assemblies} > 100);
+		$sugGCmem = 700 if ($runReport{present_assemblies} > 500);
+		$sugGCmem = 1200 if ($runReport{present_assemblies} > 1000);
+		$sugGCmem = 2500 if ($runReport{present_assemblies} > 5000);
 		my $sugGCcores = 12;
-		$sugGCcores = 24 if ($presentAssemblies > 100);
-		$sugGCcores = 32 if ($presentAssemblies > 500);
-		$sugGCcores = 48 if ($presentAssemblies > 1000);
-		$sugGCcores = 72 if ($presentAssemblies > 5000);
+		$sugGCcores = 24 if ($runReport{present_assemblies} > 100);
+		$sugGCcores = 32 if ($runReport{present_assemblies} > 500);
+		$sugGCcores = 48 if ($runReport{present_assemblies} > 1000);
+		$sugGCcores = 72 if ($runReport{present_assemblies} > 5000);
 
 		$gcmd .= "$gcScr -map $MFconfig{mapFile} -GCd [insert outdir] -mem $sugGCmem -cores $sugGCcores -clusterID 95 -doStrains $MFopt{DoConsSNP} -continue 1 -binSpeciesMG $MFopt{DoMetaBat2} -useCheckM2 $MFopt{useCheckM2} -useCheckM1 $MFopt{useCheckM1} -MGset GTDB \n";
 		print "\n\nNext step, create a genecatalog with call to (but modify .sh first!): \nsbatch $GCsub\n";
@@ -1652,17 +3394,252 @@ sub postprocess{
 		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 		$QSBoptHR->{doSubmit} = 1;
 	}
+	reportSlurmJobFailures();
 
+}
+
+sub reportSlurmJobFailures {
+	return unless (($QSBoptHR->{qmode} || '') eq 'slurm');
+	my %jobs = %{$QSBoptHR->{submittedJobRecords} || {}};
+	for my $job_id (keys %{$QSBoptHR->{accountingJobIds} || {}}) {
+		$jobs{$job_id} ||= { requested_name => '' };
+	}
+	return unless %jobs;
+
+	my $summary = slurmJobFailureSummary(\%jobs, $QSBoptHR);
+	if (!defined $summary) {
+		warn "Could not query Slurm accounting for the end-of-run failure summary\n";
+		return;
+	}
+	return unless $summary->{failed};
+
+	my %observedFailure;
+	for my $entry (values %{$summary->{categories}}) {
+		$observedFailure{$_} = 1 for keys %{$entry->{failures}};
+	}
+	my @failureColumns = grep { $observedFailure{$_} }
+		qw(OOM TIMEOUT DEPENDENCY NODE_FAIL PREEMPTED CANCELLED FAILED);
+
+	print STDERR "\nSlurm terminal failures by MATAFILER job category "
+		."(N=$summary->{failed}):\n";
+	print STDERR join("\t", "Job_category", "Total", @failureColumns), "\n";
+	for my $category (sort keys %{$summary->{categories}}) {
+		my $entry = $summary->{categories}{$category};
+		print STDERR join("\t",
+			$category,
+			$entry->{total},
+			map { $entry->{failures}{$_} || 0 } @failureColumns,
+		), "\n";
+	}
 }
 
 
 
 
 
+sub sampleReadSet {
+	my ($sample, $phase, $replacement) = @_;
+	die "Unknown read-set phase '$phase'\n"
+		unless ($phase eq "raw" || $phase eq "clean");
+	if (@_ >= 3) {
+		$map{$sample}{reads} ||= {};
+		$map{$sample}{reads}{$phase} = $replacement;
+	}
+	return undef unless ref($map{$sample}{reads}) eq "HASH";
+	return $map{$sample}{reads}{$phase};
+}
+
+sub discoverSampleInputs {
+	my ($sample, $primaryDir) = @_;
+	$primaryDir = $map{$sample}{rddir} || "" unless defined($primaryDir);
+	my $prefix = $map{$sample}{prefix} || "";
+	my $supportSpec = $map{$sample}{SupportReads} || "";
+	my $cached = $map{$sample}{inputDiscovery};
+	return $cached
+		if (ref($cached) eq "HASH"
+			&& $cached->{primary_dir} eq $primaryDir
+			&& $cached->{support_spec} eq $supportSpec);
+
+	my $result = {
+		primary_dir => $primaryDir,
+		support_spec => $supportSpec,
+		support_technology => "",
+		primary => { read1 => [], read2 => [], single => [], bam => [], file_sizes => {} },
+		support => { read1 => [], read2 => [], single => [], bam => [], file_sizes => {} },
+		primary_bytes => 0,
+		support_bytes => 0,
+		primary_error => "",
+		primary_missing_dir => 0,
+		support_error => "",
+	};
+
+	if ($primaryDir ne "") {
+		if (!-d $primaryDir) {
+			$result->{primary_error} = "Infile dir not existing: $primaryDir\n";
+			$result->{primary_missing_dir} = 1;
+		} else {
+			my $found = eval {
+				discoverReadFiles($primaryDir, $prefix, {
+					read1 => $MFconfig{readsRpairs} != 0 ? $MFconfig{rawFileSrchStr1} : "",
+					read2 => $MFconfig{readsRpairs} != 0 ? $MFconfig{rawFileSrchStr2} : "",
+					single => $MFconfig{rawFileSrchStrSingl},
+					bam => $MFconfig{rawFileBamSrchSing},
+					prefer_single => $MFconfig{prefSinglFQgreps},
+				});
+			};
+			if (!$found) {
+				$result->{primary_error} = $@ || "Could not discover primary inputs in $primaryDir\n";
+			} else {
+				$result->{primary} = $found;
+				if ($MFconfig{doDateFileCheck}) {
+					my (@datedRead1, @datedRead2);
+					for (my $i = 0; $i < @{$found->{read1}}; $i++) {
+						my @fileStat = stat("$primaryDir/$found->{read1}[$i]");
+						next unless @fileStat;
+						my $month = POSIX::strftime("%m", localtime($fileStat[9]));
+						if ($month < 3) {
+							push @datedRead1, $found->{read1}[$i];
+							push @datedRead2, $found->{read2}[$i];
+						}
+					}
+					$found->{read1} = \@datedRead1;
+					$found->{read2} = \@datedRead2;
+					$result->{primary_error} =
+						"still too many file: $primaryDir\n @datedRead1\n@datedRead2\n"
+						if (@datedRead1 != 1);
+				}
+				my %selected = map { $_ => 1 }
+					(@{$found->{read1}}, @{$found->{read2}},
+					 @{$found->{single}}, @{$found->{bam}});
+				$result->{primary_bytes} =
+					sum(0, map { $found->{file_sizes}{$_} || 0 } keys %selected);
+			}
+		}
+	}
+
+	if ($supportSpec ne "") {
+		my ($technology, $supportPaths) = parseSupportReads($supportSpec);
+		$result->{support_technology} = $technology;
+		if (grep { -d $_ } @{$supportPaths}) {
+			if (@{$supportPaths} != 1 || !-d $supportPaths->[0]) {
+				$result->{support_error} =
+					"SupportReads may specify one directory or a list of files, not a mixture: @{$supportPaths}\n";
+			} else {
+				my $supportDir = $supportPaths->[0];
+				my $found = eval {
+					discoverReadFiles($supportDir, "", {
+						read1 => $MFconfig{rawFileSrchStrXtra1},
+						read2 => $MFconfig{rawFileSrchStrXtra2},
+						single => '\\.(?:f(?:ast)?q|f(?:ast)?a)(?:\\.(?:gz|bz2))?$',
+						bam => '\\.bam$', prefer_single => 0,
+					});
+				};
+				if (!$found) {
+					$result->{support_error} =
+						$@ || "Could not discover support inputs in $supportDir\n";
+				} else {
+					foreach my $type (qw(read1 read2 single bam)) {
+						$result->{support}{$type} =
+							[map { "$supportDir/$_" } @{$found->{$type}}];
+					}
+					$result->{support}{file_sizes} = {
+						map { ("$supportDir/$_" => ($found->{file_sizes}{$_} || 0)) }
+							(@{$found->{read1}}, @{$found->{read2}},
+							 @{$found->{single}}, @{$found->{bam}})
+					};
+					$result->{support_error} =
+						"Can't find supported FASTQ, FASTA, or BAM inputs in support directory $supportDir\n"
+						if (!@{$found->{read1}} && !@{$found->{single}} && !@{$found->{bam}});
+				}
+			}
+		} else {
+			foreach my $supportFile (@{$supportPaths}) {
+				if (!-f $supportFile) {
+					$result->{support_error} = "Can't find support-read file $supportFile\n";
+					last;
+				}
+				if ($supportFile !~ /\.(?:bam|f(?:ast)?q|f(?:ast)?a)(?:\.(?:gz|bz2))?$/i) {
+					$result->{support_error} =
+						"Unsupported SupportReads format for $supportFile; expected BAM, FASTQ, or FASTA, optionally gz/bz2 compressed.\n";
+					last;
+				}
+				my $type = $supportFile =~ /\.bam$/i ? "bam" : "single";
+				push @{$result->{support}{$type}}, $supportFile;
+				my @fileStat = stat($supportFile);
+				$result->{support}{file_sizes}{$supportFile} = $fileStat[7];
+			}
+		}
+
+		if ($result->{support_error} eq "") {
+			my %supportBasenames;
+			foreach my $supportFile (
+				@{$result->{support}{read1}}, @{$result->{support}{read2}},
+				@{$result->{support}{single}}, @{$result->{support}{bam}}
+			) {
+				my $name = basename($supportFile);
+				if ($supportBasenames{$name}++) {
+					$result->{support_error} =
+						"SupportReads contains more than one source named '$name'; staged filenames must be unique.\n";
+					last;
+				}
+			}
+		}
+		my %selected = map { $_ => 1 }
+			(@{$result->{support}{read1}}, @{$result->{support}{read2}},
+			 @{$result->{support}{single}}, @{$result->{support}{bam}});
+		$result->{support_bytes} =
+			sum(0, map { $result->{support}{file_sizes}{$_} || 0 } keys %selected);
+	}
+
+	# Primary discovery stores names relative to its input directory, whereas
+	# supplementary discovery stores resolved source paths. Compare canonical
+	# identities so a symlink or repeated path cannot be counted in both scopes.
+	if ($result->{primary_error} eq "" && $result->{support_error} eq "") {
+		my %primaryIdentity;
+		for my $file (
+			@{$result->{primary}{read1}}, @{$result->{primary}{read2}},
+			@{$result->{primary}{single}}, @{$result->{primary}{bam}}
+		) {
+			my $path = File::Spec->file_name_is_absolute($file)
+				? $file : "$primaryDir/$file";
+			my $identity = abs_path($path) || File::Spec->canonpath($path);
+			$primaryIdentity{$identity} = $path;
+		}
+		my @overlap;
+		for my $file (
+			@{$result->{support}{read1}}, @{$result->{support}{read2}},
+			@{$result->{support}{single}}, @{$result->{support}{bam}}
+		) {
+			my $identity = abs_path($file) || File::Spec->canonpath($file);
+			push @overlap, $file if exists $primaryIdentity{$identity};
+		}
+		$result->{support_error} =
+			"Primary and supplementary inputs resolve to the same file(s): "
+			.join(", ", @overlap)."\n"
+			if @overlap;
+	}
+
+	$map{$sample}{inputDiscovery} = $result;
+	return $result;
+}
+
+sub populateInputSizesFast {
+	my ($sample) = @_;
+	my $inputs = discoverSampleInputs($sample);
+	if ($MFconfig{abortOnEmptyInput}) {
+		die $inputs->{primary_error} if $inputs->{primary_error} ne "";
+		die $inputs->{support_error} if $inputs->{support_error} ne "";
+	}
+	$map{$sample}{inputFileSizeMB} = $inputs->{primary_bytes} / (1024 * 1024);
+	$map{$sample}{inputXFileSizeMB} = $inputs->{support_bytes} / (1024 * 1024);
+}
+
 sub spaceInAssGrp{
 #determine how much space is used in total assembly group..
-	my ($curSmplX) = @_;
-	my $inputSizeloc = 0;
+	my ($curSmplX,$includeSupport) = @_;
+	$includeSupport ||= 0;
+	my $primaryInputSize = 0;
+	my $supportInputSize = 0;
 	#print "map: $map{$curSmplX}";
 	my @curMems = (); 
 	@curMems = @{$map{$curSmplX}{AG_members}} if (defined $map{$curSmplX}{AG_members});
@@ -1670,16 +3647,45 @@ sub spaceInAssGrp{
 	foreach my $memsSmpls (@curMems){
 		#print "$memsSmpls $map{$curSmpl}{inputFileSizeMB}{$memsSmpls}\n";
 		if (exists($map{$memsSmpls}{inputFileSizeMB})){
-			$inputSizeloc += $map{$memsSmpls}{inputFileSizeMB} ;
+			$primaryInputSize += $map{$memsSmpls}{inputFileSizeMB} ;
 		} else {
 			#print "Warning: file size estimation not registered for $memsSmpls\n";
 			$missedSmpls++;
 		}
+		$supportInputSize += $map{$memsSmpls}{inputXFileSizeMB}
+			if ($includeSupport && exists($map{$memsSmpls}{inputXFileSizeMB}));
 	}
-	$inputSizeloc += $map{$curSmplX}{inputFileSizeMB} if (!@curMems);
+	if (!@curMems){
+		$primaryInputSize += $map{$curSmplX}{inputFileSizeMB};
+		$supportInputSize += $map{$curSmplX}{inputXFileSizeMB}
+			if ($includeSupport && exists($map{$curSmplX}{inputXFileSizeMB}));
+	}
 	#estimate to account for missed samples..
-	if ($missedSmpls){$inputSizeloc *= (($totalSmpls-$missedSmpls)/$totalSmpls);} 
-	return $inputSizeloc;
+	if ($missedSmpls){
+		my $knownSmpls = $totalSmpls - $missedSmpls;
+		die "Cannot estimate assembly-group input size: no member has a registered input size\n"
+			if ($knownSmpls == 0);
+		$primaryInputSize *= $totalSmpls / $knownSmpls;
+	}
+	return $primaryInputSize + $supportInputSize;
+}
+
+sub mapping_reference_matches {
+	my ($stamp, $reference) = @_;
+	my @stampStat = stat($stamp);
+	my @referenceStat = stat($reference);
+	return 0 unless (@stampStat && $stampStat[7] > 0
+		&& @referenceStat && $referenceStat[7] > 0);
+	open my $stampFH, '<', $stamp or return 0;
+	my $line = <$stampFH>;
+	close $stampFH;
+	# GNU stat does not interpret \t in --format consistently across deployed
+	# versions.  Accept the short-lived literal "\\t" format as well as normal
+	# whitespace so mappings produced by the affected release remain usable.
+	return 0 unless defined($line) && $line =~ /^(\d+)(?:\s+|\\t)(\d+)\s*$/;
+	my ($recordedSize, $recordedMtime) = ($1, $2);
+	return $recordedSize == $referenceStat[7]
+		&& $recordedMtime == $referenceStat[9];
 }
 
 sub rmEmptySmpls{
@@ -1710,18 +3716,19 @@ sub submitGenomeBinner{
 	#if ($MFconfig{rmBinFailAssmbly}){print"Warning submitGenomeBinner::\n\nremoving $finalCommAssDir\n\n";system"rm -r $finalCommAssDir";return;}
 	my @paths = @{$DOs{$cAssGrp}{wrdir}};#split /,/,$allPaths;
 	@paths = rmEmptySmpls(@paths);
+	die "No non-empty sample directories are available for binning assembly group $cAssGrp\n"
+		unless @paths;
 	my $smplIncl = scalar(@paths);
 	
 	my $CM1done = 0; my $CM2done = 0; my $eBinAssStat=0;
 	$CM1done = 1 if (-e "$MetaBat2out.cm" );
 	$eBinAssStat =1 if (-e "$MetaBat2out.assStat");
-	my $eStone = 0;$eStone = 1 if (-e "$BinDir/Binning.stone");
 	$CM2done = 1 if (-s "$MetaBat2out.cm2" );
 	
-	#die "($CM2done && $MFopt{useCheckM2})";
-	if ($eBinAssStat && (( $MFopt{useCheckM1} && $CM1done) || ($CM2done && $MFopt{useCheckM2}) ) ){
+	if (binningOutputsComplete($MetaBat2out, $MFopt{useCheckM1}, $MFopt{useCheckM2})){
 		return;
 	}
+	invalidate_sample_completion($_) for @paths;
 	#die "$MetaBat2out\n";
 	my $totMem = 80;#80;
 	$totMem = 90 if ($CM1done || !$MFopt{useCheckM1});
@@ -1745,42 +3752,47 @@ sub submitGenomeBinner{
 	$MBcmd .= "\n\n#checking that all required mappings are done\n". checkMapsDoneSH(\@paths) ."#checks done\n\n";
 	#die "$MBcmd\n\n binner\n";
 	
+	my @binLibraries = (
+		@{getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,0)},
+		@{getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,1)},
+	);
+	my @longLibraries = grep { $_->{is_long} } @binLibraries;
+	my @shortLibraries = grep { !$_->{is_long} } @binLibraries;
+	my %longTechnologies = map { ($_->{technology} || '') => 1 } @longLibraries;
+	delete $longTechnologies{''};
 	my $seqTec = "hiSeq";
-	if (exists($map{$curSmpl}{SeqTech})){$seqTec = $map{$curSmpl}{SeqTech};}
-	if ($MFopt{DoAssembly} == 5){$seqTec = "hybrid";}
+	if (@longLibraries) {
+		$seqTec = @shortLibraries || keys(%longTechnologies) != 1
+			? "hybrid"
+			: (keys %longTechnologies)[0];
+	}
+	$seqTec = "hybrid" if ($MFopt{DoAssembly} == 5);
 	#die "$seqTec\n";
 	
 
 	#execute calcs later in perl script..
 	my $BinnerScr = getProgPaths("Binner_scr");
 	$MBcmd .= "$BinnerScr -binner $MFopt{DoMetaBat2} -binD $BinDir -smplID \"$smplIDs1\" -tmpD \"$nodeSpTmpD2\" -assmbl $metaGassembly -assmblGrp $cAssGrp -cores $MB2coresL -smplDirs " . join(",",@paths) . " -seqTec \"$seqTec\" -logDir \"$paths[-1]LOGandSUB\" ";
+	$MBcmd .= "-minAssemblySizeMB $MFopt{minBinnerAssemblyMB} ";
 	$MBcmd .= "-SB_env $MFopt{SB_env} " if ($MFopt{SB_env} ne "");
 	$MBcmd .= ";\n";
 
 
 	my $BinnerName = getBinSubdirName($MFopt{DoMetaBat2});
 
-	system "rm $MetaBat2out*" if (-e $MetaBat2out && -s $MetaBat2out == 0 && !$CM1done && !$CM2done); #hard flag to just redo calculations..
-	$MBcmd = "" if (-s $MetaBat2out);
+	# An empty assignment is a valid "no bins found" result.  Reuse any
+	# published assignment for quality/statistics repair; -redoEmptyBins is the
+	# explicit opt-in path that removes and recomputes an empty result.
+	$MBcmd = "" if (-e $MetaBat2out);
 	
 	#die $MBcmd;
 	
 	#my $MetaBat2out = "$finalCommAssDir/Binning/MB2/$smplIDs[-1]";
 	my $postCmd = "";
-	my $numCoreCHKM = 3; #fixed --pplacer_threads in routine already..
 	if ( ( $MFopt{useCheckM1} && !$CM1done) || (!$CM2done && $MFopt{useCheckM2})  || !$eBinAssStat){
 		my $mb2Qual = getProgPaths("mb2qualCheck_scr");
 		$postCmd = "\n\nrm -rf $nodeSpTmpD2; mkdir -p $nodeSpTmpD2;\n";
 		$postCmd .= "$mb2Qual -asm $metaGassembly -binF $MetaBat2out -tmpD $nodeSpTmpD2 -ncore $MB2coresL -checkM2 $MFopt{useCheckM2} -checkM1 $MFopt{useCheckM1} -binner $MFopt{DoMetaBat2} " ;
-		#only needed for pilea.. deactivate if not needed..
-		
-		my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$cAssGrp,0);
-		# These inputs are optional (and currently only reserved for PileA).
-		# Never emit a bare option: Getopt::Long treats the following option or
-		# newline as its missing value and aborts the complete Bin job.
-		$postCmd .= " -read1 ".join(",",@$par1) if (@$par1);
-		$postCmd .= " -read2 ".join(",",@$par2) if (@$par2);
-		$postCmd .= " -readS ".join(",",@$parS) if (@$parS);
 		$postCmd .= "\n";
 	} 
 	$postCmd .= "\nrm -rf $nodeSpTmpD2\n";
@@ -1816,7 +3828,6 @@ sub createConsSNPandSVs{
 
 	# $SNPinfo{jdeps} not used
 	#system "rm -f $SNPinfo{mapD}/multi.vcf*" if ($SNPinfo{overwrite});
-	my $overwrite = 0;
 	unless (exists($SNPinfo{MAR})){
 		my @mapping = ($SNPinfo{mapD}."/".$SNPinfo{smpl}."-smd.".$SNPinfo{bamcram});
 		$SNPinfo{MAR} = \@mapping;
@@ -1831,7 +3842,11 @@ sub createConsSNPandSVs{
 		
 	} 
 #	my ($ovcf,$jdep) = SNPconsensus_vcf2(\%SNPinfo);
-	my ($jdep,$submissionCommands) = SNPconsensus_vcf(\%SNPinfo);
+	my ($jdep,$submissionCommands) = ("", "");
+	my $runConsensus = exists($SNPinfo{callConsSNP}) || exists($SNPinfo{callConsSNPSupp})
+		? (($SNPinfo{callConsSNP} || 0) || ($SNPinfo{callConsSNPSupp} || 0))
+		: 1;
+	($jdep,$submissionCommands) = SNPconsensus_vcf(\%SNPinfo) if $runConsensus;
 
 	${$QSBoptHR}{tmpSpace} = $preHDDspace;
 	#SNPconsensus_fasta($ovcf,\%SNPinfo,$jdep,$QSBoptHR);
@@ -1839,7 +3854,7 @@ sub createConsSNPandSVs{
 	
 	
 	#2nd part: call SVs
-	if ($SNPinfo{callSVs}){
+	if (($SNPinfo{callSVs} || 0) || ($SNPinfo{callSVsSupp} || 0)){
 		my ($jdep2,$qcmd2) = SVcall_vcf(\%SNPinfo);
 		$jdep .= ";$jdep2" if ($jdep2 ne "");
 		$submissionCommands .= $qcmd2 if (defined($qcmd2) && $qcmd2 ne "");
@@ -1904,11 +3919,9 @@ sub mergeMotu2Table($){
 
 #calculates the hmm based freq estimates and divergence from these -> used for dist matrix
 sub d2metaDist{
-	my ($arSmpls,$arPaths1,$arPaths2,$deps,$outPath) = @_;
-
-	
-	my @paths = @{$arPaths1}; my @Smpls = @{$arSmpls};
+	my ($hrSmpls,$arPaths1,undef,$deps,$outPath) = @_;
 	if(!$MFopt{DoCalcD2s}){return;}
+	my @paths = @{$arPaths1}; my @Smpls = keys (%{$hrSmpls});
 	if (@paths < 1){print "Not enough samples for d2s!\n";return;}
 	my $d2metaBin = getProgPaths("d2meta");#"/g/bork3/home/hildebra/bin/d2Meta/d2Meta/d2Meta.out";
 	print "Calculating kmer distances for ".@paths." samples\n";
@@ -1934,8 +3947,11 @@ sub d2metaDist{
 
 
 sub postSubmQsub {
-	my ($outf, $commands, $dependencies) = @_;
-	return "" if ($commands eq "" || !$doSubmit);
+	my ($outf, $commands, $dependencies, $options) = @_;
+	return "" if ($commands eq "" || !$runOptions{submit});
+	$options ||= {};
+	die 'postSubmQsub options must be a hash reference'
+		unless ref($options) eq 'HASH';
 	my @submitted;
 	my @augmented_commands;
 	for my $command (grep { /\S/ } split /\r?\n/, $commands) {
@@ -1946,11 +3962,16 @@ sub postSubmQsub {
 			or die "Cannot read deferred job script $script_path: $!\n";
 		my $script = do { local $/; <$script_fh> };
 		close $script_fh;
-		# Deferred commands are emitted in dependency order (for example MAP then
-		# sort/depth).  Preserve that order now that real scheduler ids exist.
-		my $command_dependencies = normalise_job_dependencies(
-			$dependencies, @submitted ? $submitted[-1] : "",
+		# Deferred batches are independent by default and share only their producer
+		# barrier. A genuinely multi-stage batch must request predecessor chaining.
+		my $command_dependencies = deferred_command_dependencies(
+			dependencies => $dependencies, submitted => \@submitted,
+			chain_previous => $options->{chain_previous},
 		);
+		if (submissionDependencyDeferred($command_dependencies)) {
+			push @submitted, deferredSubmissionDependency();
+			last;
+		}
 		my $augmented = augment_deferred_submission(
 			qmode => $QSBoptHR->{qmode}, command => $command, script => $script,
 			dependencies => $command_dependencies, run_tag => $QSBoptHR->{rTag},
@@ -1963,21 +3984,62 @@ sub postSubmQsub {
 		}
 		push @augmented_commands, $augmented->{command};
 		my $submitted_before = scalar @submitted;
-		my $output = `$augmented->{command} 2>&1`;
-		my $status = $?;
-		die "Deferred job submission failed: $augmented->{command}\n$output"
-			if ($status != 0);
-		if ($QSBoptHR->{qmode} eq 'slurm') {
-			push @submitted, $QSBoptHR->{rTag}.$1
-				if ($output =~ /^Submitted batch job (\d+)\s*$/m);
-		} elsif ($QSBoptHR->{qmode} eq 'sge') {
-			push @submitted, $QSBoptHR->{rTag}.$1
-				if ($output =~ /\bYour job(?:-array)?\s+(\d+)\b/);
-		} elsif ($QSBoptHR->{qmode} eq 'lsf') {
-			push @submitted, $QSBoptHR->{rTag}.$1 if ($output =~ /\bJob <(\d+)>/);
+		my $scheduler_job_id = "";
+		my $capacityAvailable = qsubSystemWaitMaxJobs(
+			$MFconfig{checkMaxNumJobs}, $MFconfig{killDepNever}, $QSBoptHR,
+		);
+		unless ($capacityAvailable) {
+			push @submitted, deferredSubmissionDependency();
+			last;
 		}
-		die "Could not parse deferred scheduler job id: $output\n"
-			if ($QSBoptHR->{qmode} ne 'bash' && @submitted == $submitted_before);
+		my ($output, $status) = $QSBoptHR->{qmode} eq 'slurm'
+			? submitSlurmWithDependencyRecovery(
+				$augmented->{command}, $script_path, $QSBoptHR,
+			)
+			: do {
+				my $scheduler_output = `$augmented->{command} 2>&1`;
+				($scheduler_output, $?);
+			};
+		if ($status != 0) {
+			delete $QSBoptHR->{liveJobThrottleState};
+			my $message = "Deferred job submission failed: "
+				."$augmented->{command}\n$output";
+			push @submitted, handleSubmissionFailure($QSBoptHR, $message);
+			last;
+		}
+		if ($QSBoptHR->{qmode} eq 'slurm') {
+			if ($output =~ /^Submitted batch job (\d+)\s*$/m) {
+				$scheduler_job_id = $1;
+				push @submitted, $QSBoptHR->{rTag}.$scheduler_job_id;
+			}
+		} elsif ($QSBoptHR->{qmode} eq 'sge') {
+			if ($output =~ /\bYour job(?:-array)?\s+(\d+)\b/) {
+				$scheduler_job_id = $1;
+				push @submitted, $QSBoptHR->{rTag}.$scheduler_job_id;
+			}
+		} elsif ($QSBoptHR->{qmode} eq 'lsf') {
+			if ($output =~ /\bJob <(\d+)>/) {
+				$scheduler_job_id = $1;
+				push @submitted, $QSBoptHR->{rTag}.$scheduler_job_id;
+			}
+		}
+		if ($QSBoptHR->{qmode} ne 'bash' && @submitted == $submitted_before) {
+			delete $QSBoptHR->{liveJobThrottleState};
+			die "Could not parse deferred scheduler job id: $output\n";
+		}
+		$QSBoptHR->{submittedJobs} = 0 unless defined $QSBoptHR->{submittedJobs};
+		$QSBoptHR->{submittedJobs}++;
+		if ($QSBoptHR->{qmode} eq 'slurm' && $scheduler_job_id ne "") {
+			$QSBoptHR->{slurmDependencySubmittedAt} ||= {};
+			$QSBoptHR->{slurmDependencySubmittedAt}{$scheduler_job_id} = time;
+			my ($slurmJobName) = $augmented->{script} =~ /^#SBATCH\s+-J\s+(\S+)/m;
+			$QSBoptHR->{submittedJobRecords}{$scheduler_job_id} = {
+				requested_name => $slurmJobName || '',
+			};
+		}
+		recordSampleLockJobs(
+			$QSBoptHR->{LOCKfile}, [$scheduler_job_id], $QSBoptHR,
+		) if $scheduler_job_id ne "";
 	}
 	open my $audit_fh, '>', $outf or die "Cannot write deferred submission audit $outf: $!\n";
 	print {$audit_fh} join("\n", @augmented_commands), "\n";
@@ -2004,6 +4066,10 @@ sub RiboMeta($ $ $ $){
 		foreach my $RFtag (@RFtags){
 			system "mkdir -p $dir_RibFind/$RFtag/" unless (-d "$dir_RibFind/$RFtag/"); #system "mkdir -p $dir_RibFind/SSU/" unless (-d "$dir_RibFind/SSU/"); system "mkdir -p $dir_RibFind/LSU/" unless (-d "$dir_RibFind/LSU/");
 			my $fromCp = "$curOutDir/ribos/ltsLCA/${RFtag}riboRun_bl.hiera.txt"; my $toCpy = "$dir_RibFind/$RFtag/$SmplName.$RFtag.hiera.txt";
+			my @sourceStat = stat($fromCp);
+			my @sourceGzipStat = stat("$fromCp.gz");
+			my @destinationStat = stat($toCpy);
+			my @destinationGzipStat = stat("$toCpy.gz");
 			if ($MFopt{checkRiboNonEmpty}){
 				#pretty hard check
 				my $numLines=0;
@@ -2014,14 +4080,19 @@ sub RiboMeta($ $ $ $){
 					system "rm -r $curOutDir/ribos//ltsLCA $curOutDir/ribos/*.sto ";last;
 				}
 			}
-			if (!-e $toCpy  || ( (-e $toCpy  || -e "$toCpy.gz" ) && -e $fromCp && -s $fromCp != -s $toCpy)){
-				unlink "$toCpy" if -e ($toCpy);
-				if (-e "$fromCp.gz"  ){
+			my $sourceSize = @sourceStat ? $sourceStat[7]
+				: (@sourceGzipStat ? $sourceGzipStat[7] : undef);
+			my $destinationSize = @destinationStat ? $destinationStat[7]
+				: (@destinationGzipStat ? $destinationGzipStat[7] : undef);
+			if (!defined($destinationSize)
+					|| (defined($sourceSize) && $sourceSize != $destinationSize)){
+				unlink "$toCpy" if @destinationStat;
+				if (@sourceGzipStat){
 					#system "zcat $fromCp.gz > $toCpy" ;
-					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz" if (!-e "$toCpy.gz");
-				} elsif (-e $fromCp) {
+					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz";
+				} elsif (@sourceStat) {
 					system "gzip $fromCp";
-					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz" if (!-e "$toCpy.gz");
+					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz";
 				} elsif($RFtag eq "SSU") {#just redo.. SSU is only essential thing
 					system "rm -rf $curOutDir/ribos\n"; 
 					$calcRibofind = 1; $calcRiboAssign=1;
@@ -2119,7 +4190,7 @@ sub reduceProgStats{
 
 #check if programes have finished, that rely only on raw reads
 sub checkRawProgsFin{
-	my ($curOutDir,$SmplName) = @_;
+	my ($curOutDir,$SmplName,$forcedRiboProfile,$forcedRiboAssignment) = @_;
 	my ($calcDiamond,$calcDiaParse) = IsDiaRunFinished($curOutDir);
 	
 	my $calcRibofind = 0; my $calcRiboAssign = 0;my $calcGenoSize=0; 
@@ -2135,8 +4206,15 @@ sub checkRawProgsFin{
 
 	
 	$calcGenoSize=1 if ($MFopt{DoGenoSizeEst} && 	!-e "$curOutDir/MicroCens/MC.0.result");
-	$calcRibofind = 1 if ($MFopt{DoRibofind} && (!-e "$curOutDir/ribos//SSU_pull.sto"|| !-e "$curOutDir/ribos//LSU_pull.sto" || ($MFopt{doRiboAssembl} && !-e "$curOutDir/ribos/Ass/allAss.sto" ))); #!-e "$curOutDir/ribos//ITS_pull.sto"|| 
-	$calcRiboAssign = 1 if ($MFopt{DoRibofind} && ( !-e "$curOutDir/ribos//ltsLCA/Assigned.sto"  || !-e "$curOutDir/ribos//ltsLCA/SSU_ass.sto") );		#!-e "$curOutDir/ribos//ltsLCA/ITS_ass.sto"||  #ITS no longer required.. unreliable imo
+	my $riboEvidence = ribosome_completion_evidence(
+		sample_root => $curOutDir,
+		requested => $MFopt{DoRibofind},
+		assembly_requested => $MFopt{doRiboAssembl},
+	);
+	$calcRibofind = 1 if ($MFopt{DoRibofind} && !$riboEvidence->{profile_complete});
+	$calcRiboAssign = 1 if ($MFopt{DoRibofind} && !$riboEvidence->{taxonomy_complete});
+	$calcRibofind = 1 if $forcedRiboProfile;
+	$calcRiboAssign = 1 if $forcedRiboAssignment;
 	RiboMeta($calcRibofind,$calcRiboAssign,$curOutDir,$SmplName);
 
 	#die $dir_MP2."$SmplName.MP2.sto";
@@ -2171,7 +4249,11 @@ sub riboSummary{
 	if( $progStats{riboFindFailCnts}>0){
 		print "$progStats{riboFindFailCnts} / $progStats{riboFindComplCnts} samples with incomplete RiboFind\n";
 		return;
-	} 
+	}
+	if (($progStats{riboFindComplCnts} || 0) <= 0) {
+		print "No completed RiboFind samples; skipping SSU/LSU merge jobs\n";
+		return;
+	}
 	my $dir_RibFind = $baseOut.$preDIRs{dir2RiboF};#"pseudoGC/Phylo/RiboFind/"; #ribofinder dir
 	my $prevItems = 0;
 	if ( -e "$dir_RibFind/SSU.cnt.stone"){
@@ -2211,18 +4293,24 @@ sub riboSummary{
 # add it back in. 
 sub detectRibo(){
 	my ( $tmpP,$outP,$jobd,$SMPN,$glbTmpDDB) = @_;
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $ar1 = ${$cleanSeqSetHR}{arp1}; my $ar2 = ${$cleanSeqSetHR}{arp2}; my $sa1 = ${$cleanSeqSetHR}{singAr}; 
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
 	#print "DEP: $jobd\n";
 	my $numCore = 12;
 	my $numCore2 = 12;
 	my $cLSUSSUscript = getProgPaths("cLSUSSU_scr");#"perl /g/bork3/home/hildebra/dev/Perl/16Stools/catchLSUSSU.pl";
+	my $cLSUSSUconfig = $MFconfig{configFile} ne ""
+		? " -config "._shell_quote($MFconfig{configFile})
+		: "";
 	#my $lambdaIdxBin = getProgPaths("lambdaIdx");
 	my $lambdaBin = getProgPaths("lambda");#"/g/bork3/home/hildebra/dev/lotus//bin//lambda/lambda";
 	
 	
 	
-	my @re1 = @{$ar1}; my @re2 = @{$ar2}; my @singl = @{$sa1};
+	my $pairs = libraryPairs($libraries);
+	my @re1 = map { $_->{files}{r1} } @{$pairs};
+	my @re2 = map { $_->{files}{r2} } @{$pairs};
+	my @singl = @{libraryFiles($libraries, 'single')};
 	#print "ri"; 
 	if (@re1 > 1 || @re2 > 1){
 		#print"\nWARNING::\nOnly the first read file will be searched for ribosomes\n";
@@ -2342,9 +4430,8 @@ sub detectRibo(){
 	my $cmd = "";
 	#die "$MFconfig{readsRpairs}\n";
 	my $readConfig = 1;
-	my $numCoreL = int($numCore / 2); 
 	if (@re1 > 0){
-		$cmd .= "\n$cLSUSSUscript -R1 '".join(",",@re1)."' -R2 '". join(",",@re2)."' ";
+		$cmd .= "\n$cLSUSSUscript$cLSUSSUconfig -R1 '".join(",",@re1)."' -R2 '". join(",",@re2)."' ";
 		if (@singl>0){
 			$cmd .= " -RS '".join(",",@singl) . "' "; #tmpP < scratch too slow
 		} else {
@@ -2353,9 +4440,9 @@ sub detectRibo(){
 		$cmd .= "-tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n";#"$tmpDY $outP $numCore $SMPN $MFopt{doRiboAssembl} $DBrna\n\n";
 	} else {
 		$readConfig = 0; 
-		$cmd .= "\n$cLSUSSUscript -R1 '-1' -R2 '-1' -RS '".join(",",@singl)."' -tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n\n"; #tmpP < scratch too slow
+		$cmd .= "\n$cLSUSSUscript$cLSUSSUconfig -R1 '-1' -R2 '-1' -RS '".join(",",@singl)."' -tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n\n"; #tmpP < scratch too slow
 	}
-	my $sto1 = "$outP/RibFnd.sto";my $stoLCAL = "$outP//ltsLCA/LSU_ass.sto";	my $stoLCAS = "$outP//ltsLCA/SSU_ass.sto";
+	my $sto1 = "$outP/RibFnd.sto";
 	$cmd .= "touch $sto1\n" unless ($cmd eq "");
 	#this part assigns tax
 	my $tmpDX = "$tmpP/LCA/"; 
@@ -2376,26 +4463,30 @@ sub detectRibo(){
 	#die $cmd2."\n";
 	my $jobName="";
 	my $Scmd = "";
-	my $allLCAstones = 0; 
-	$allLCAstones = 1 if ( -e $stoLCAL && -e $stoLCAS );#&& -e "$outP//ltsLCA/ITS_ass.sto");
+	my $riboEvidence = ribosome_completion_evidence(
+		ribo_root => $outP,
+		requested => 1,
+		assembly_requested => $MFopt{doRiboAssembl},
+	);
 
-	if (-d $outP  && -e "$outP/SSU_pull.sto" && -e "$outP/LSU_pull.sto" &&  #&& -e "$outP/ITS_pull.sto"
-		-s "$outP//ltsLCA/LSUriboRun_bl.hiera.txt" && $allLCAstones &&
-		($MFopt{doRiboAssembl} && -e $outP."/Ass/allAss.sto" ) ){
-		#really everything done
+	if ($riboEvidence->{complete}) {
 		$jobName = $jobd;
 	} else {
 		$jobd.=";".$MFopt{globalRiboDependence}->{DBcp} unless ($MFopt{globalRiboDependence}->{DBcp} eq "alreadyCopied");
-		my $tmpCmd; my $mem = "3G";
-		#better to double check calcRiboFind
-		my $calcRiboFind=0;$calcRiboFind = 1 if( !-e "$outP/SSU_pull.sto"|| !-e "$outP/LSU_pull.sto" || ($MFopt{doRiboAssembl} && !-e $outP."/Ass/allAss.sto"));
-		if (  $calcRiboFind ){ #!-e "$outP/ITS_pull.sto"||
+		my $tmpCmd; my $mem = "20G";
+		# Re-evaluate extraction and assignment from the same evidence contract
+		# used by the sample sentinel.
+		my $calcRiboFind = $riboEvidence->{profile_complete} ? 0 : 1;
+		if ($calcRiboFind) {
 			$jobName = "_RF$JNUM"; 
 			#die "RIBOFIND\n$outP/SSU_pull.sto\n"; 
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};
-			my $curSHFF = int($map{$SMPN}{inputFileSizeMB}/1024*17)+5  ;
+			my $curSHFF = int($map{$SMPN}{inputFileSizeMB}/1024*17)+5;
 			my $predefSHDD = $HDDspace{Ribos}; $predefSHDD =~ s/G$//;
-			if ($QSBoptHR->{tmpSpace} < $predefSHDD){ $QSBoptHR->{tmpSpace} = $HDDspace{Ribos};}#overwrite with larger val
+			# catchLSUSSU writes extracted reads and SortMeRNA work files below
+			# the node-local directory. Preserve the configured floor for small
+			# samples and scale above it for large inputs.
+			$curSHFF = $predefSHDD if ($curSHFF < $predefSHDD);
 			$QSBoptHR->{tmpSpace}= $curSHFF . "G";
 			
 			($jobName, $tmpCmd) = qsubSystem($logDir."RiboFinder.sh",$cmd,$numCore,$mem,$jobName,$jobd,"",1,[],$QSBoptHR);
@@ -2403,7 +4494,7 @@ sub detectRibo(){
 		} else {
 			$jobName = $jobd;
 		}
-		if (!-e "$outP//ltsLCA/LSUriboRun_bl.hiera.txt" || !-e "$outP//ltsLCA/SSUriboRun_bl.hiera.txt" || !$allLCAstones ){ #|| !-e "$outP//ltsLCA/ITSriboRun_bl.hiera.txt" 
+		if ($calcRiboFind || !$riboEvidence->{taxonomy_complete}) {
 			$jobd=$jobName; $mem="4G";
 			$jobd .= ";".$MFopt{globalRiboDependence}->{DBcp} unless ($MFopt{globalRiboDependence}->{DBcp} eq "alreadyCopied");
 			$QSBoptHR->{useLongQueue} = 0;
@@ -2502,7 +4593,7 @@ sub prepDiamondDB($ $ $ $){#takes care of copying the respective DB over to scra
 		}
 		if ($curDB eq "PAB" && !-s "$CLrefDBD/all_species_data.txt"){
 			#copy NOG taxonomy
-			my ($DBpathN ,$refDBN ,$shrtDBN) = getSpecificDBpaths("NOG",0);
+			my ($DBpathN) = getSpecificDBpaths("NOG",0);
 			$DBcmd .= "cp $DBpathN/all_species_data.txt $CLrefDBD\n" unless (-e "$CLrefDBD/all_species_data.txt");
 		}
 		if ($curDB eq "TCDB" && !-s "$CLrefDBD/hir.txt"){ 
@@ -2527,29 +4618,21 @@ sub prepDiamondDB($ $ $ $){#takes care of copying the respective DB over to scra
 }
 
 
-sub getRdLibs($ $ $ $){
-	my ($ar1,$ar2,$sa1,$mrgHshHR) = @_;
-	my @reads1 = @{$ar1}; my @reads2 = @{$ar2}; my @singlRds = @{$sa1};
-	my %mrgHsh = %{$mrgHshHR};
-	my $mrgMode = 0;
-	$mrgMode =1 if (exists ($mrgHsh{mrg}) && $mrgHsh{mrg} ne "");
-	my $useLibArrays = 3;
-	if ($mrgMode) {$useLibArrays=4;}
-	my %ret;
-	#print "mrgMode : : $mrgMode $useLibArrays \n@reads1\nYTY\n";
-	for (my $kk=0;$kk<$useLibArrays;$kk++){
-		my @rds = @singlRds;
-		if ($mrgMode){
-			if ($kk==1){@rds = $mrgHsh{pair2};}
-			if ($kk==2){@rds = $mrgHsh{pair1};}
-		} else {
-			if ($kk==1){@rds = @reads2;}
-			if ($kk==2){@rds = @reads1;}
-		}
-		if ($kk==3){@rds = $mrgHsh{mrg};}
-		$ret{$kk} = \@rds;
-	}
-	return %ret;
+sub getRdLibraries {
+	my ($libraries, $mergedLibrary) = @_;
+	my $pairs = libraryPairs($libraries);
+	my @reads1 = map { $_->{files}{r1} } @{$pairs};
+	my @reads2 = map { $_->{files}{r2} } @{$pairs};
+	my @single = @{libraryFiles($libraries, 'single')};
+	my $mergeMode = ref($mergedLibrary) eq 'HASH' && ($mergedLibrary->{files}{single} || '') ne '';
+	my %result;
+	$result{0} = \@single if @single;
+	my $usedRead2 = $mergeMode ? [$mergedLibrary->{files}{r2}] : \@reads2;
+	my $usedRead1 = $mergeMode ? [$mergedLibrary->{files}{r1}] : \@reads1;
+	$result{1} = $usedRead2 if grep { defined($_) && $_ ne '' } @{$usedRead2};
+	$result{2} = $usedRead1 if grep { defined($_) && $_ ne '' } @{$usedRead1};
+	$result{3} = [$mergedLibrary->{files}{single}] if ($mergeMode);
+	return %result;
 }
 
 sub isLastSampleInAssembly{
@@ -2632,7 +4715,7 @@ sub runStateInspection {
 
 sub runAutomaticWorkflowPreflight {
 	my ($iteration) = @_;
-	my $applyRepairs = $doSubmit && $MFconfig{autoRepairState};
+	my $applyRepairs = $runOptions{submit} && $MFconfig{autoRepairState};
 	my $result = run_workflow_preflight(
 		map => \%map,
 		groups => \%AsGrps,
@@ -2679,7 +4762,7 @@ sub prepareMap{
 
 	%AsGrps = %{$hr2}; %map = %{$hr};
 	if ($MFopt{DoMetaBat2}){ #do any binning?
-		my ($hrD,$hrM) = getDirsPerAssmblGrp(\%map,\%AsGrps);
+		my ($hrD) = getDirsPerAssmblGrp(\%map,\%AsGrps);
 		%DOs = %{$hrD};
 	}
 
@@ -2687,33 +4770,32 @@ sub prepareMap{
 
 	#dirs from config file--------------------------
 	#can be overwritten by $map{opt}{GlbTmpD} $map{opt}{NodeTmpD}
-	$sharedTmpDirP = getProgPaths("globalTmpDir",0) unless ($sharedTmpDirP ne "");
-	$nodeTmpDirBase = getProgPaths("nodeTmpDir",0) unless ($nodeTmpDirBase ne "");
-	#$baseDir = $map{inDir} if (exists($map{inDir} ));
+	$runOptions{sharedTmpDir} = getProgPaths("globalTmpDir",0) unless ($runOptions{sharedTmpDir} ne "");
+	$runOptions{nodeTmpDir} = getProgPaths("nodeTmpDir",0) unless ($runOptions{nodeTmpDir} ne "");
 	#useless, because baseout can change..
 	$baseOut = $map{opt}{outDir} if (exists($map{opt}{outDir} ) && $map{opt}{outDir}  ne "" && $map{opt}{outDir} !~ m/,/);
-	$baseID = $map{opt}{baseID} if (exists($map{opt}{baseID} ) && $map{opt}{baseID}  ne "");
+	$runOptions{baseID} = $map{opt}{baseID} if (exists($map{opt}{baseID} ) && $map{opt}{baseID}  ne "");
 	#die "baseout dir has \",\": $baseOut\nDid you supply multiple maps? (not supported)\n";
 	#overwrite tmp dirs??
-	if ($map{opt}{GlbTmpD} ne ""){print "Taking Global temp dir from map: $map{opt}{GlbTmpD} \n";$sharedTmpDirP = $map{opt}{GlbTmpD} ;}
-	if ($map{opt}{NodeTmpD} ne ""){print "Taking Node temp dir from map: $map{opt}{NodeTmpD} \n";$nodeTmpDirBase = $map{opt}{NodeTmpD} ;}
+	if ($map{opt}{GlbTmpD} ne ""){print "Taking Global temp dir from map: $map{opt}{GlbTmpD} \n";$runOptions{sharedTmpDir} = $map{opt}{GlbTmpD} ;}
+	if ($map{opt}{NodeTmpD} ne ""){print "Taking Node temp dir from map: $map{opt}{NodeTmpD} \n";$runOptions{nodeTmpDir} = $map{opt}{NodeTmpD} ;}
 
 
 
 
-	$MFglobal{runTmpDirGlobal} = "$sharedTmpDirP/$baseID/";
+	$MFglobal{runTmpDirGlobal} = "$runOptions{sharedTmpDir}/$runOptions{baseID}/";
 	# Inspection is a read-only planning path: do not create scratch directories,
 	# prepare databases, or enqueue any prerequisite jobs.
 	return if ($MFconfig{inspectState});
 
 
 	
-	unless ($ARGV0 eq "scaffold" || $ARGV0 eq "map2tar" || $ARGV0 eq "map2DB" || $ARGV0 eq "map2GC"){
+	unless ($runOptions{operationMode} eq "scaffold" || $runOptions{operationMode} eq "map2tar" || $runOptions{operationMode} eq "map2DB" || $runOptions{operationMode} eq "map2GC"){
 		#not asked for 2nd map? ok, deactivate all related parameters
 		$MFopt{mapModeTogether} = 0; $MFopt{DoMapModeDecoy} = 0; $MFopt{mapModeActive} = 0;
 		return;
 	}
-	if ($ARGV0 eq "scaffold"){
+	if ($runOptions{operationMode} eq "scaffold"){
 		die"update scaffold\n";
 		$scaffTarExternal = $ARGV[1];
 		if (!-f $scaffTarExternal){
@@ -2729,7 +4811,7 @@ sub prepareMap{
 	}
 
 #in this case primary focus is on mapping and not on assemblies
-	if ($ARGV0 eq "map2DB" || $ARGV0 eq "map2GC"){
+	if ($runOptions{operationMode} eq "map2DB" || $runOptions{operationMode} eq "map2GC"){
 		$MFopt{mapModeCovDo}=0;$MFopt{DoMapModeDecoy}=0;$MFopt{mapModeTogether}=0;$map2ndMpde=2;
 	}
 	if ($MFopt{map2Assembly} || $MFopt{DoAssembly}){
@@ -2748,9 +4830,9 @@ sub prepareMap{
 	my @bwt2Name1;
 	if (defined $MFopt{bwt2NameAll} && $MFopt{bwt2NameAll} ne "" ){
 		@bwt2Name1 = split(/,/,$MFopt{bwt2NameAll}) ;
-	} elsif ($ARGV0 eq "map2DB"  ){
+	} elsif ($runOptions{operationMode} eq "map2DB"  ){
 		@bwt2Name1 = ("refDB");
-	} elsif ($ARGV0 eq "map2GC"){
+	} elsif ($runOptions{operationMode} eq "map2GC"){
 		@bwt2Name1 = ("GC");
 		$map2ndMpde=3;
 	} else {
@@ -2762,7 +4844,7 @@ sub prepareMap{
 	
 	for (my $i=0;$i<@refDB1;$i++){
 		my @sfiles;
-		if ($ARGV0 eq "map2GC"){
+		if ($runOptions{operationMode} eq "map2GC"){
 			die "can only have one ref to GC: @refDB1\n" unless (@refDB1 == 1);
 			@sfiles = ($refDB1[0]."/compl.incompl.95.fna");
 			die "Could not find reference in GC dir. Expected: $sfiles[0]\n" unless (-e $sfiles[0]);
@@ -2816,7 +4898,7 @@ sub prepareMap{
 	$make2ndMapDecoy{Lib} = "";
 	#die "decoy mapping not ready for multi fastas\n" if (@refDB > 1);
 	if ($MFopt{DoMapModeDecoy} || $MFopt{mapModeTogether}){
-		if ($MFopt{mapModeTogether} && ($rewrite || $MFopt{MapRewrite2nd}) ){
+		if ($MFopt{mapModeTogether} && $MFopt{MapRewrite2nd} ){
 			#system("rm -r -f $map2ndTogRefDB{DB}*");#;mkdir -p $bwt2outDl
 		}
 		for (my $i=0;$i<@refDB; $i++){ #take care of ref DB decoy prep
@@ -2849,7 +4931,9 @@ sub prepareMap{
 		#system "mkdir -p $map2ndTogRefDB{DB}" unless (-d $map2ndTogRefDB{DB});
 		print "$map2ndTogRefDB{DB}\n";
 		#die;
-		writeFasta(\%FNrefDB2ndmap,"$map2ndTogRefDB{DB}") unless (-e $map2ndTogRefDB{DB} && -s $map2ndTogRefDB{DB});
+		my @combinedReferenceStat = stat($map2ndTogRefDB{DB});
+		writeFasta(\%FNrefDB2ndmap,"$map2ndTogRefDB{DB}")
+			unless (@combinedReferenceStat && $combinedReferenceStat[7] > 0);
 		if ($MFopt{mapModeTogether}==-1){
 			@refDB = ($map2ndTogRefDB{DB});
 			@bwt2Name = ($shrtMapNm);
@@ -2869,7 +4953,7 @@ sub prepareMap{
 	#die "@refDB\n";
 	
 	#build index for each fasta, and predict genes on these
-	die "MGTK map2nd check failed: @bwt2Name != @refDB" if (@bwt2Name != @refDB);
+	die "MATAFILER map2nd check failed: @bwt2Name != @refDB" if (@bwt2Name != @refDB);
 	#die "X:: @refDB  @bwt2Name\n";
 	for (my $i=0;$i<@refDB; $i++){
 		#$refDB[$i] =~ m/(.*\/)[^\/]+/;
@@ -2881,7 +4965,7 @@ sub prepareMap{
 		push @bwt2ndMapNmds , $bwt2Name[$i];
 		push(@bwt2outD,$bwt2outDl);
 		system "mkdir -p $bwt2outDl" unless (-d $bwt2outDl);
-		if ($MFopt{mapModeTogether} >= 0 && ($rewrite || $MFopt{MapRewrite2nd}) ){
+		if ($MFopt{mapModeTogether} >= 0 && $MFopt{MapRewrite2nd} ){
 			print "Rebuilding requested mapping DBs..\n" if ($i==0);
 		}
 		
@@ -2910,7 +4994,7 @@ sub prepareMap{
 		#$DBbtRefX = $DBbtRef;
 		#die "$DBbtRef\n";
 		push(@DBbtRefX,$DBbtRef);
-		if($MFopt{mapModeCovDo} && $map2ndMpde != 3){ #get the coverage per gene etc; for this I need a gene prediction
+		if(($MFopt{mapModeCovDo} || $MFopt{Do2ndMapSNP}) && $map2ndMpde != 3){ # coverage and vcf2fna require a reference GFF
 												#but not for GC mapping (these are genes already)
 			my $gDir = $bwt2outDl."";
 			my $nativeGFF = $refDB[$i];$nativeGFF =~ s/\.[^\.]+$/\.gff/;
@@ -2968,20 +5052,20 @@ sub prepareMap{
 sub runOrthoPlacement(){
 	my ($outD,$tmpP,$jdep) = @_;
 	die "runOrthoPlacement no longer active\n";
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $ar1 = ${$cleanSeqSetHR}{arp1}; my $ar2 = ${$cleanSeqSetHR}{arp2}; my $sa1 = ${$cleanSeqSetHR}{singAr}; 
-	my $mrgHshHR = ${$cleanSeqSetHR}{mrgHshHR};
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	my $mergedLibrary = $cleanSeqSetHR->{merged_library};
 	
 	my $sdmBin = getProgPaths("sdm");#"/g/bork3/home/hildebra/dev/C++/sdm/./sdm";
 	my $fna2faaBin = getProgPaths("fna2faa");
 	system "mkdir -p $outD $tmpP" unless (-d $outD && -d $tmpP);
-	my %RdLibs = getRdLibs($ar1,$ar2,$sa1,$mrgHshHR);
+	my %RdLibs = getRdLibraries($libraries,$mergedLibrary);
 	my $numCore=22;
 	my $scrP = "";my $cmd="";
 	$cmd .= "mkdir -p $tmpP\n";
 	#my $tmpF = ${$RdLibs{$kk}}[0];
 	system "rm -f $tmpP/6fr.fna";
-	for (my $kk=0;$kk<scalar(keys(%RdLibs));$kk++){
+	foreach my $kk (sort {$a <=> $b} keys %RdLibs){
 		my @rds = @{$RdLibs{$kk}};
 		$scrP = $rds[0] if ($scrP eq "");
 		foreach my $fnaI (@rds){
@@ -2990,12 +5074,10 @@ sub runOrthoPlacement(){
 	}
 	$scrP =~ s/\/[^\/]+$//;
 	#die $scrP."\n";
-	my $hmmscr = "python /g/bork3/home/hildebra/dev/Perl/SoilHelpers/extract_domains.py";
-	my $hmmD = "/g/bork3/home/hildebra/DB/HMMs/FungiAB/";
+	my $hmmscr = getProgPaths("ortho_extract_domains_scr");
+	my $hmmD = getProgPaths("ortho_hmm_DB");
 	my @hmmsDB=("Condensation.hmm","dmat.hmm","AMP-binding.hmm","PKS_KS.hmm","Terpene_synth_C.hmm");
 	my @hmmNms = ("Condensation","dmat","AMP","PKS","Terpene");
-	my @preMSAs = (); #ref alignments, big DB
-	my @refTrees = (); #ref trees, calc with fastree
 	my $onceExtr=0;
 	my $redo=0;
 	for (my $i=0; $i<@hmmsDB; $i++){	
@@ -3017,14 +5099,15 @@ sub runOrthoPlacement(){
 		my $hmmName = $hmmsDB[$i]; $hmmName=~s/\.hmm//;
 		my $hmmN2 = $hmmNms[$i];
 		my $tarFile = "$outD/$hmmName.fna";
-		if (-e $tarFile && -s "$tarFile" == 0){next;}
+		my @targetStat = stat($tarFile);
+		if (@targetStat && $targetStat[7] == 0){next;}
 		#$tarFile = fixHDs4Phylo($tarFile);
 		#fix fasta headers
 #		$cmd .= "cat $tarFile | perl -p -e 's/[:|#+]/_/g' > $tarFile\n";
 
 		my $clustaloBin = getProgPaths("clustalo");
 		my $raxMLbin = getProgPaths("raxml");
-		my $treeDBdir = "/g/bork3/home/hildebra/data/SoilABdoms/Jaime/JaimeT2/";
+		my $treeDBdir = getProgPaths("ortho_tree_DB");
 #		my $refTREE = "$treeDBdir/$hmmN2/final_alg/phylo/FASTTREE_allsites.nwk";
 		my $refTREE = "$treeDBdir/$hmmN2/final_alg/phylo/IQtree_fast_allsites.treefile";
 		my $refMSA = "$treeDBdir/$hmmN2/final_alg/outMSA.faa";
@@ -3057,17 +5140,16 @@ sub runOrthoPlacement(){
 
 sub runDiamond(){
 	my ($outD,$CLrefDBD,$tmpP,$jdep,$curDB_o) = @_;
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $ar1 = ${$cleanSeqSetHR}{arp1}; my $ar2 = ${$cleanSeqSetHR}{arp2}; my $sa1 = ${$cleanSeqSetHR}{singAr}; my $mrgHshHR = ${$cleanSeqSetHR}{mrgHshHR};
-	
-	#die "runDiamond:: $mrgHshHR\n";
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	my $mergedLibrary = $cleanSeqSetHR->{merged_library};
 	
 	my $secCogBin = getProgPaths("secCogBin_scr");
 	my $diaBin = getProgPaths("diamond");
 	my $mmseqs2Bin = getProgPaths("mmseqs2");
 	my $searchMode = 1;
 	
-	my %RdLibs = getRdLibs($ar1,$ar2,$sa1,$mrgHshHR);
+	my %RdLibs = getRdLibraries($libraries,$mergedLibrary);
 	
 	die "No reads found for sample $outD in runDiamond sub\n" if (scalar(keys(%RdLibs)) == 0);
 	
@@ -3081,6 +5163,7 @@ sub runDiamond(){
 	my $mmsOfmt = "--format-output query,target,fident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"; #mmseqs
 	my $ncore = $MFopt{diaCores}; my $sensBlast = "";
 	$sensBlast = " --sensitive " if ($MFopt{diaRunSensitive});
+	$sensBlast .= " -F $MFopt{diaFrameshift} " if ($MFopt{diaFrameshift});
 	foreach my $curDB (split /,/,$curDB_o){
 		$progStats{$curDB}{DiaDBSearchCompl} = 0 unless (defined($progStats{$curDB}{DiaDBSearchCompl}));
 		$progStats{$curDB}{DiaDBSearchIncomplete} = 0 unless (defined($progStats{$curDB}{DiaDBSearchIncomplete}));
@@ -3096,8 +5179,7 @@ sub runDiamond(){
 		#run actual diamond
 		my @collect = (); my @collectSingl=();
 		my $cmd ="mkdir -p $tmpP\n";
-		for (my $kk=0;$kk<scalar(keys(%RdLibs));$kk++){
-			my $rdsUsed = 0;
+		foreach my $kk (sort {$a <=> $b} keys %RdLibs){
 			my @rds = @{$RdLibs{$kk}};
 			for (my $ii=0;$ii<@rds;$ii++){
 				my $query = $rds[$ii];	
@@ -3125,8 +5207,12 @@ sub runDiamond(){
 		my $outgz = "$out.srt.gz";
 		#die "$outgz\n";
 		#unzip, sort, zip
-		$cmd .= "zcat ".join( " ",@collect) ." | sort -t\$'\\t' -k1 -T $tmpP | $pigzBin --stdout -p $ncore > $outgz \n";
-		$cmd .= "rm -f ". join( " ",@collect) . "\n";
+		if (@collect) {
+			$cmd .= "zcat ".join( " ",@collect) ." | sort -t\$'\\t' -k1 -T $tmpP | $pigzBin --stdout -p $ncore > $outgz \n";
+			$cmd .= "rm -f ". join( " ",@collect) . "\n";
+		} else {
+			$cmd .= "$pigzBin -c </dev/null > $outgz\n";
+		}
 		if (@collectSingl >= 1){
 			#append on gzip, can be done with gzip
 			$cmd .= "cat ".join( " ",@collectSingl) ." >> $outgz\nrm -f " . join( " ",@collectSingl) ."\n"; #$out.srt
@@ -3206,26 +5292,37 @@ sub nopareil(){
 	}
 	return $jobName;
 }
-sub runContigStats{
-	my ($path,$jobd,$assD,$subprts,$immSubm,  $tmpD,$AssemblyGo,$Nthr,$smpl) = @_;
-	my $sepCtsScript = getProgPaths("sepCts_scr");#
+sub contigStatsOutputsComplete {
+	my ($path,$assD,$subprts,$AssemblyGo,$smpl,$requireSupportCoverage) = @_;
 	my $ContigStatsDir  = "$path/$preDIRs{dir_ContigStats}";
 	my $CSfilesComplete = 1;
-	my $readL =  $map{$curSmpl}{seqSet}->{samplReadLength};
-	my $readLX =  $map{$curSmpl}{seqSet}->{samplReadLengthX};
-	
-	#die;
-	$CSfilesComplete = 0 if ( !-e "$path/assemblies/metag/assembly.txt");
-	$CSfilesComplete = 0 if (! fileGZs("$ContigStatsDir/Coverage.count_pergene") && $map{$smpl}{hasPrimaryRds});
-	#print "CSfilesComplete $CSfilesComplete $subprts $ContigStatsDir\n!-s $ContigStatsDir/Coverage.count_pergene.gz || !-e $path/assemblies/metag/assembly.txt\n";
+	my $primaryCoverageComplete = contig_stats_coverage_complete($ContigStatsDir, "Coverage");
+	$CSfilesComplete = 0 if (!$primaryCoverageComplete && $map{$smpl}{hasPrimaryRds});
 	$CSfilesComplete = 0  if ($MFopt{kmerPerGene} && $AssemblyGo && ! fileGZs("$ContigStatsDir/scaff.pergene.4kmer.pm5" ));
-	$CSfilesComplete = 0  if ($MFopt{mapSupport2Assembly} && $map{$smpl}{"SupportReads"} ne "" &&  ! fileGZs("$ContigStatsDir/Cov.sup.count_pergene.gz" ));
+	my $supportCoverageComplete = contig_stats_coverage_complete($ContigStatsDir, "Cov.sup");
+	$CSfilesComplete = 0 if ($requireSupportCoverage && !$supportCoverageComplete);
 	$CSfilesComplete = 0  if ($subprts =~ m/F/ && ! fileGZs( "$assD/ContigStats//FMG/FMGids.txt" ));
 	$CSfilesComplete = 0  if ($subprts =~ m/G/ && ! fileGZs( "$assD/ContigStats/GTDBmg/marker_genes_meta.tsv" ));
+	return $CSfilesComplete;
+}
+
+sub runContigStats{
+	my ($path,$jobd,$assD,$subprts,$immSubm,  $tmpD,$AssemblyGo,$Nthr,$smpl,$requireSupportCoverage) = @_;
+	my $sepCtsScript = getProgPaths("sepCts_scr");#
+	my $CSfilesComplete = contigStatsOutputsComplete(
+		$path, $assD, $subprts, $AssemblyGo, $smpl, $requireSupportCoverage,
+	);
+	my $rawReadSet = sampleReadSet($curSmpl, "raw");
+	my $readL = $rawReadSet->{samplReadLength};
+	my $readLX = $rawReadSet->{samplReadLengthX};
+
+	#die;
 	#die "$CSfilesComplete";
 	return ("","",0) if ($CSfilesComplete);
+	invalidate_sample_completion($path);
 	
-	print "Running Contig Stats on assembly ($immSubm)\n";
+	print "Deferring Contig Stats until its assembly-group mapping is submitted\n"
+		unless ($immSubm);
 	$Nthr =1 unless ($subprts =~m/[FGEm]/);
 	
 	
@@ -3279,35 +5376,35 @@ sub checkDrives{
 }
 
 # $sdmjN = cleanInput($cfp1ar,$cfp2ar,$sdmjN,$smplTmpDir);
- sub cleanInput( $ $ $){
+sub cleanInput( $ $ $){
 	my ($sdmjN,$saveD) = @_;
-	my %seqSet = %{$map{$curSmpl}{seqSet}};
-	
-	my @c1 = @{$seqSet{"pa1"}}; my @c2 = @{$seqSet{"pa2"}};
+	my $libraries = ensureSeqSetLibraries(sampleReadSet($curSmpl, "raw"), $curSmpl);
 	my $cmd = "";
-	for (my $i=0;$i<@c1;$i++){
-		if ($c1[$i] =~ m/$saveD/){
-			$cmd .= "rm -f $c1[$i] $c2[$i]\n" if (-e $c1[$i] || -e $c2[$i]);
-		} else {
-			#die "$c1[$i] =~ m/$saveD/\n";
-		}
-	}
-	my @cs = @{$seqSet{"pas"}};
-	for (my $i=0;$i<@cs;$i++){
-		if ($c1[$i] =~ m/$saveD/){
-			$cmd .= "rm -f $cs[$i] \n" if (-e $cs[$i] );
-		} 
+	my $cleanupRoot = File::Spec->canonpath(File::Spec->rel2abs($saveD));
+	foreach my $library (@{$libraries}) {
+		my @files = grep { defined($_) && $_ ne '' } @{$library->{files}}{qw(r1 r2 single)};
+		my @temporary = grep {
+			my $candidate = File::Spec->canonpath(File::Spec->rel2abs($_));
+			my $relative = File::Spec->abs2rel($candidate, $cleanupRoot);
+			$candidate ne $cleanupRoot
+				&& $relative ne File::Spec->updir()
+				&& $relative !~ m{^\.\.(?:[\\/]|$)}
+				&& !File::Spec->file_name_is_absolute($relative);
+		} @files;
+		$cmd .= _shell_command('rm', '-f', '--', @temporary)."\n" if (@temporary);
 	}
 
 	#die $cmd."\n";
 	my $jobName = $sdmjN;
 	if ($cmd ne ""){
 		print "Removing raw input fastqs..\n";
-		system $cmd;
-		#$jobName = "_PC$JNUM"; my $tmpCmd;
-		#my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		#($jobName, $tmpCmd) = qsubSystem($logDir."ClnUnzip.sh",$cmd,1,"1G",$jobName,$sdmjN,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
-		#$QSBoptHR->{tmpSpace} =$tmpSHDD;
+		# Must wait for $sdmjN (the SDM job consuming these files) to finish before
+		# deleting them: SDM is submitted asynchronously, so an immediate `system`
+		# call here raced the queued job and deleted its inputs before it ran.
+		my $tmpCmd;
+		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0";
+		($jobName, $tmpCmd) = qsubSystem($logDir."ClnUnzip.sh",$cmd,1,"1G","_PC$JNUM",$sdmjN,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
+		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	}
 	return $jobName;
  }
@@ -3315,9 +5412,9 @@ sub checkDrives{
  
 #Gap Filler to refine scaffolds
 sub GapFillCtgs{
-	my($ar1,$ar2,$scaffolds,$GFdir_a,$dep,$xtrTag) = @_; #.= "_GFI1";
+	my($libraries,$scaffolds,$GFdir_a,$dep,$xtrTag) = @_; #.= "_GFI1";
 	my $GFbin = getProgPaths("gapfiller");#"perl /g/bork5/hildebra/bin/GapFiller/GapFiller_n.pl";
-	my @pa1 = @{$ar1}; my @pa2 = @{$ar2};
+	my $pairs = libraryPairs($libraries);
 	my @inserts;
 	my $prefi = "GF";
 	my $numCore = 16;
@@ -3326,9 +5423,10 @@ sub GapFillCtgs{
 	#system("mkdir -p $GFdir_a$prefi");
 	my $GFlib = ($GFdir_a."GFlib.opt");
 	my @libFiles;
-	for (my $i=0;$i<@pa1;$i++){
-		push(@libFiles, ($pa1[$i].",".$pa2[$i]));
-		push(@inserts,450);#default value for our hiSeq runs..
+	for (my $i=0;$i<@{$pairs};$i++){
+		push(@libFiles, ($pairs->[$i]{files}{r1}.",".$pairs->[$i]{files}{r2}));
+		my $metadata = $pairs->[$i]{metadata} || {};
+		push(@inserts, $metadata->{insert_size} || 450);
 	}
 	createGapFillopt($GFlib,\@libFiles,\@inserts);
 #GF round 1
@@ -3336,7 +5434,6 @@ sub GapFillCtgs{
 	$cmd .= "mkdir -p $GFdir_a$prefi\n";
 	$cmd .= $GFbin . " -l $GFlib -s $scaffolds -m 75 -o 2 -r 0.7 -d 70 -t 10 -g 1 -T $numCore -b ".$prefi." -D $GFdir_a > $log \n";
 	$cmd .= "rm -r $GFdir_a$prefi/alignoutput $GFdir_a$prefi/intermediate_results $GFdir_a$prefi/reads\n";
-	my $finalGFfile = $GFdir_a."$prefi/$prefi.gapfilled.final.fa";
 	#die $cmd."\n";
 	if ($cmd ne ""){
 		my $tmpCmd;
@@ -3349,13 +5446,13 @@ sub GapFillCtgs{
 
 #scaffolding via mate pairs
 sub scaffoldCtgs{
-	my ($AsgHR,$ASG, $xar1,$xar2, $refCtgs, $tmpD1,$outD,$dep,$Ncore,$smplName,$spadesRef,$xtraTag) = @_;
-	my ($ar1,$ar2,$ars,$liar,$rear) = getRawSeqsAssmGrp($AsgHR,$ASG,0);
+	my ($AsgHR,$ASG, $externalLibraries, $refCtgs, $tmpD1,$outD,$dep,$Ncore,$smplName,$spadesRef,$xtraTag) = @_;
+	my $libraries = getRawLibrariesAssmGrp($AsgHR,$ASG,0);
+	my $pairs = libraryPairs($libraries);
 	my $bwt2Bin = getProgPaths("bwt2");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
 	my $besstBin = getProgPaths("BESST");#"/g/bork3/home/hildebra/bin/BESST/./runBESST";
-	my @pa1 = @{$ar1}; my @pa2 = @{$ar2}; my @libs = @{$liar};
-	my @xpa1 = @{$xar1}; my @xpa2 = @{$xar2};
-	return ("",$dep) if (@pa1 ==0 );
+	my $externalPairs = libraryPairs($externalLibraries || []);
+	return ("",$dep) if (@{$pairs} == 0 );
 	my $tmpD = $tmpD1."/scaff/";
 	my $bwtIdx = $refCtgs.$MFcontstants{bwt2IdxFileSuffix}; my $cmdDB="";my $chkFile = "";
 	my $clnCmd = ""; my $spadesDir = ""; my $spadFakeDir = "";
@@ -3378,28 +5475,34 @@ sub scaffoldCtgs{
 	my $algCmd = "$clnCmd\n$cmdDB\n";
 	$algCmd .= "mkdir -p $tmpD\n";
 	my @bams; my $cnt=0; my @insSiz; my @orientations;
-	for (my $i=0;$i<@pa1;$i++){
-		next unless ($libs[$i] =~ m/mate/i);
+	for (my $i=0;$i<@{$pairs};$i++){
+		next unless (($pairs->[$i]{label} || '') =~ m/mate/i);
 		#push @rd1,$rds[$i];push @rd2,$rds[$i+1];
 		my $tmpOut = "$tmpD/tmpMateAlign$cnt.bam";
 		my $tmpBAM = "$tmpD/tmpMateAlign$cnt.srt.bam";
-		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx -X $MFconfig{mateInsertLength} -1 $pa1[$i] -2 $pa2[$i] | $smtBin view -b -F 4 - > $tmpOut\n";
+		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx -X $MFconfig{mateInsertLength} -1 $pairs->[$i]{files}{r1} -2 $pairs->[$i]{files}{r2} | $smtBin view -b -F 4 - > $tmpOut\n";
 		$algCmd .= "$smtBin sort -@ $Ncore -T kk -O bam -o $tmpBAM $tmpOut; $smtBin index $tmpBAM\n";
 		#$algCmd .= "$novosrtBin --ram 50G -o $tmpBAM -i $tmpOut \n";
 		$algCmd .= "rm $tmpOut\n\n";
-		push(@bams,$tmpBAM); push(@insSiz,10000);push(@orientations,"fr");
+		my $metadata = $pairs->[$i]{metadata} || {};
+		push(@bams,$tmpBAM);
+		push(@insSiz,$metadata->{insert_size} || 10000);
+		push(@orientations,$metadata->{orientation} || "fr");
 		$cnt++;
 		#print "sc  mat\n";
 	}
-	for (my $i=0;$i<@xpa1;$i++){#assumes paired end reads
+	for (my $i=0;$i<@{$externalPairs};$i++){
 		#push @rd1,$rds[$i];push @rd2,$rds[$i+1];
 		my $tmpOut = "$tmpD/tmpMateAlign$cnt.bam";
 		my $tmpBAM = "$tmpD/tmpMateAlign$cnt.srt.bam";
-		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx  -1 $xpa1[$i] -2 $xpa2[$i] | $smtBin view -b -F 4 - > $tmpOut\n";
+		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx  -1 $externalPairs->[$i]{files}{r1} -2 $externalPairs->[$i]{files}{r2} | $smtBin view -b -F 4 - > $tmpOut\n";
 		$algCmd .= "$smtBin sort -@ $Ncore -T kk -O bam -o $tmpBAM $tmpOut; $smtBin index $tmpBAM\n";
 		#$algCmd .= "$novosrtBin --ram 50G -o $tmpBAM -i $tmpOut \n";
 		$algCmd .= "rm $tmpOut\n\n";
-		push(@bams,$tmpBAM);push(@insSiz,500);push(@orientations,"fr");
+		my $metadata = $externalPairs->[$i]{metadata} || {};
+		push(@bams,$tmpBAM);
+		push(@insSiz,$metadata->{insert_size} || 500);
+		push(@orientations,$metadata->{orientation} || "fr");
 		$cnt++;
 		#print "sc  mat\n";
 	}
@@ -3429,7 +5532,7 @@ sub scaffoldCtgs{
 		$cmd .= "$assStatScr -scaff_size $MFopt{scaffoldMinSize} $spadFakeDir/scaffolds.fasta > $spadFakeDir/AssemblyStats.500.txt\n";
 		$cmd .= "$assStatScr $spadFakeDir/scaffolds.fasta > $spadFakeDir/AssemblyStats.ini.txt\n";
 		$cmd .= "$assStatScr $spadFakeDir/scaffolds.fasta.filt > $spadFakeDir/AssemblyStats.txt\n\n";
-		my ($cmdX,$bwtIdxX,$chkFileX) = buildMapperIdx("$spadFakeDir/scaffolds.fasta.filt",$Ncore,0,$MFopt{MapperProg});
+		my ($cmdX) = buildMapperIdx("$spadFakeDir/scaffolds.fasta.filt",$Ncore,0,$MFopt{MapperProg});
 		$cmd .= $cmdX."\n";
 
 	}
@@ -3458,13 +5561,13 @@ sub scaffoldCtgs{
 	foreach my $matp (@mat){
 		system "mkdir -p $mateD" unless (-d $mateD);
 		my @mateX = split /,/,$matp;
-		push(@sarPre,"$mateD/mate${mateC}.se.fastq.gz");
+		push(@sarPre,"$mateD/mate.${mateC}.se.fastq.gz");
 		push(@mates,"$mateD/mate.${mateC}_R1.unknown.fastq.gz","$mateD/mate.${mateC}_R2.unknown.fastq.gz","$mateD/mate.${mateC}_R1.mp.fastq.gz","$mateD/mate.${mateC}_R2.mp.fastq.gz");
 		next if ( -e "$mateD/matesDone.sto");
 		#--rf keeps reads in rf; --joinreads joins pe
 		$cmd .= "$nxtrimBin --ignorePF --separate -1 $mateX[0] -2 $mateX[1] -O $mateD/mate.$mateC\n";
 		#$nxtrimBin --stdout-mp -1 $rd1 -2 $rd2 | $bwaBin mem $refCtgs -p - > out.sam
-		$ifastasPre .= ";$mateD/mate.${mateC}_R1.pe.fastq.gz,$mateD/mate.${mateC}_R1.pe.fastq.gz";
+		$ifastasPre .= ";$mateD/mate.${mateC}_R1.pe.fastq.gz,$mateD/mate.${mateC}_R2.pe.fastq.gz";
 		$mateC++;
 	}
 	#die "@mates SDS\n";
@@ -3494,11 +5597,11 @@ sub scaffoldCtgs{
 	system "mkdir -p $mateD" unless (-d $mateD);
 	#my @mateX = split /,/,$matp;
 	#--rf keeps reads in rf; --joinreads joins pe
-	$cmd .= "$nxtrimBin --ignorePF --separate -1 $pa1 -2 $pa1 -O $mateD/mate.$mateC\n";
+	$cmd .= "$nxtrimBin --ignorePF --separate -1 $pa1 -2 $pa2 -O $mateD/mate.$mateC\n";
 	$cmd .= "rm -f $pa1 $pa2\n";
 	#$nxtrimBin --stdout-mp -1 $rd1 -2 $rd2 | $bwaBin mem $refCtgs -p - > out.sam
-	$ret{pe1} = "$mateD/mate.${mateC}_R1.pe.fastq.gz"; $ret{pe2} = "$mateD/mate.${mateC}_R1.pe.fastq.gz";
-	$ret{se} =  "$mateD/mate${mateC}.se.fastq.gz";
+	$ret{pe1} = "$mateD/mate.${mateC}_R1.pe.fastq.gz"; $ret{pe2} = "$mateD/mate.${mateC}_R2.pe.fastq.gz";
+	$ret{se} =  "$mateD/mate.${mateC}.se.fastq.gz";
 	$ret{un1} = "$mateD/mate.${mateC}_R1.unknown.fastq.gz"; $ret{un2} = "$mateD/mate.${mateC}_R2.unknown.fastq.gz";
 	$ret{mp1} = "$mateD/mate.${mateC}_R1.mp.fastq.gz"; $ret{mp2} = "$mateD/mate.${mateC}_R2.mp.fastq.gz";
 	$mateC++;
@@ -3561,55 +5664,26 @@ sub scaffoldCtgs{
 
 	return (\@ret1,\@ret2,\@sret);
 }
- sub check_sdm_loc(){
-	die "defunct functon  check_sdm_loc!\n";
-	my ($ar1,$ar2,$libInfoAr,$sdmO) = @_;
- 	my $ifastasPre = ${$ar1}[0].",".${$ar2}[0];
-	for (my $i=1;$i<@{$ar1};$i++){if ($i>0){$ifastasPre .= ";".${$ar1}[$i].",".${$ar2}[$i];}}
-	my ($ifastas, $mi_ifastas, $singlAddAr, $matAr, $jdep) = get_ifa_mifa($ifastasPre,"",$libInfoAr,"",0,"","???");
-	my ($ar1x,$ar2x,$sar) = get_sdm_outf($ifastas, $mi_ifastas,$sdmO,"???","",0);
-	my @ret1=@{$ar1x};my @ret2=@{$ar2x};my @sret=@{$sar};
-	my $presence=1;
-	foreach my $loc (@ret2,@ret1){	if (!-e $loc || -z $loc){$presence=0;}	}
-	#for (my $i=0;$i<;$i++){	if ( !-e $ret2[0]|| -z $ret1[0]){$presence=0;}	}
-	if (!-e $sret[0]){$presence=0;}
-	my $stone = "$sdmO/filterDone.stone";
-	if (!-e $stone){$presence=0;}
-	if (!$presence){return 0;}
-	my $assInputFlaw = 0;
-	if (-e $logDir."spaderun.sh.otxt"){open I,"<$logDir/spaderun.sh.otxt" or die "Can't open old assembly logfile $logDir\n"; my $str = join("", <I>); close I;
-		if ($str =~ /Assertion `seq_\.size\(\) == qual_\.size\(\)' failed\./){$assInputFlaw=1;}	
-		if ($str =~ /paired_readers\.hpp.*Unequal number of read-pairs detected in the following files:/){$assInputFlaw=1;}	
-	}
-
-	if ($presence==0 || $assInputFlaw==1){
-		return 0;
-	} else {
-		return 1;
-	}
-}
-
 #($mergRdsHsh,$mergJbN) = mergeReads($arp1,$arp2,$sdmjN,$smplTmpDir."merge_clean/");
 sub mergeReads(){
 	my ($jdep,$outdir,$doMerge,$runThis) = @_;
 
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $arp1 = ${$cleanSeqSetHR}{arp1}; my $arp2 = ${$cleanSeqSetHR}{arp2}; 
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $pairs = libraryPairs(readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl));
 
 	my $flashBin = getProgPaths("flash");
 	my $numCores = 8;
 	my $outT = "sdmCln";
 	my %ret = (mrg => "", pair1 => "", pair2 => "");
-	if (!exists(${$cleanSeqSetHR}{mrgHshHR} )) {${$cleanSeqSetHR}{mrgHshHR} = {};}
 	#print "XSADS\n!$doMerge || !$MFconfig{readsRpairs} || !$runThis\n";
-	if (!$doMerge || !$MFconfig{readsRpairs} || @{$arp2} == 0 || !$runThis){return ("");}
+	if (!$doMerge || !$MFconfig{readsRpairs} || @{$pairs} == 0 || !$runThis){return ("");}
 	#print "XSADS1\n";
 	#if (@{$arp1} > 1 ){die "Array with reads provided to merging routine is too large!\n@{$arp1}\n";}
 	my $mergCmd  = "";
-	for (my $i=0; $i<@{$arp1};$i++){
+	for (my $i=0; $i<@{$pairs};$i++){
 		my $outTL = $outT;
 		$outTL .= ".$i" if ($i > 0);
-		$mergCmd .= "$flashBin -M 250 -z -o $outT -d $outdir -t $numCores ${$arp1}[0] ${$arp2}[0]\n";
+		$mergCmd .= "$flashBin -M 250 -z -o $outTL -d $outdir -t $numCores $pairs->[$i]{files}{r1} $pairs->[$i]{files}{r2}\n";
 		if ($i > 0){
 			$mergCmd .= "cat $outTL.extendedFrags.fastq.gz >> $outT.extendedFrags.fastq.gz;cat $outTL.notCombined_2.fastq.gz >> $outT.notCombined_2.fastq.gz; ";
 			$mergCmd .= "cat $outTL.notCombined_1.fastq.gz >> $outT.notCombined_1.fastq.gz;\n";
@@ -3633,288 +5707,337 @@ sub mergeReads(){
 	$ret{pair1} = "$outdir/$outT.notCombined_1.fastq.gz";
 	$ret{pair2} = "$outdir/$outT.notCombined_2.fastq.gz";
 	
-	${$cleanSeqSetHR}{mrgHshHR} = \%ret;
-	$map{$curSmpl}{cleanSeqSet} = $cleanSeqSetHR;
+	$cleanSeqSetHR->{merged_library} = newReadLibrary(
+		id => "$curSmpl:primary:merged", sample => $curSmpl, scope => 'primary',
+		technology => libraryTechnology($pairs, "merged reads for $curSmpl", 1),
+		is_long => 0, label => 'merged', phase => 'merged',
+		files => {r1 => $ret{pair1}, r2 => $ret{pair2}, single => $ret{mrg}, bam => ''},
+	);
+	syncCleanSeqSetLegacy($cleanSeqSetHR);
 
 	
 	return ($jobName);
 }
  
+sub _shell_quote {
+	my ($value) = @_;
+	die "Cannot quote an undefined shell argument\n" unless defined $value;
+	die "Shell argument contains a NUL or newline\n" if $value =~ /[\0\r\n]/;
+	$value =~ s/'/'"'"'/g;
+	return "'$value'";
+}
+
+sub _shell_command {
+	return join(' ', map { _shell_quote($_) } @_);
+}
+
+sub _staged_read_files_present {
+	my ($root, @markers) = @_;
+	return 0 unless defined($root) && -d $root;
+	my %marker = map { $_ => 1 } grep { defined($_) && $_ ne '' } @markers;
+	my $present = 0;
+	File::Find::find({
+		no_chdir => 1,
+		wanted => sub {
+			return if $present || !-f $File::Find::name || $marker{$File::Find::name};
+			$present = 1;
+		},
+	}, $root);
+	return $present;
+}
+
+sub _validate_sdm_integer_setting {
+	my ($name, $value, $minimum) = @_;
+	$value = 0 unless defined $value;
+	die "sdmClean::Invalid integer for $name: '$value'\n"
+		unless $value =~ /^-?\d+$/ && $value >= $minimum;
+	return int($value);
+}
+
+sub _set_sdm_option {
+	my ($text, $name, $value) = @_;
+	my $displayName = defined($name) ? $name : '<undefined>';
+	die "Invalid SDM option name '$displayName'\n"
+		unless defined($name) && $name =~ /^[A-Za-z][A-Za-z0-9_]*$/;
+	die "Invalid value for SDM option '$name'\n"
+		unless defined($value) && $value !~ /[\0\r\n\t]/;
+	die "Cannot update '$name' in an undefined SDM option file\n" unless defined $text;
+	my $replacement = "$name\t$value\n";
+	my $matches = ($text =~ s/^\Q$name\E\t[^\r\n]*(?:\r?\n|\z)/$replacement/mg);
+	$matches ||= 0;
+	die "Expected one active '$name' entry in the SDM option file, found $matches\n"
+		unless $matches == 1;
+	return $text;
+}
+
 sub adaptSDMopt{
-#adaptSDMopt($baseSDMopt,$MFglobal{globalLogDir},$samplReadLength);
-	my ($baseSF,$oDir,$RL,$RT) = @_;
-	my $newSDMf = $oDir."/sdmo_${RL}_${RT}.txt";
-	my $nRL = $RL - 10 - int($RL/15);
-	open I,"<$baseSF" or die "Can't open sdm opt in:\n $baseSF\n"; my $str = join("", <I>); ;close I;
-	#print "\n\n$RT\n$baseSF\n";
-	if ($RT ne "proto" && $RT ne "PB" && $RT ne "ONT" && $RL != 0){
-		#$str =~ s/minSeqLength\t\d+/minSeqLength\t$nRL/;
-		if ($RL < 50){$str =~ s/maxAccumulatedError\t.*\n/maxAccumulatedError\t0.5\n/;
-		} elsif ($RL < 90){$str =~ s/maxAccumulatedError\t\d+\.\d+/maxAccumulatedError\t1.2/; #really shitty GAII platform
-		} elsif ($RL < 200){$str =~ s/maxAccumulatedError\t\d+\.\d+/maxAccumulatedError\t2.5/;} #really shitty GAII platform
-		if ($RL < 90){$str =~ s/TrimWindowWidth	\d+/TrimWindowWidth	8/;$str =~ s/TrimWindowThreshhold	\d+/TrimWindowThreshhold	16/;	
-		$str =~ s/maxAmbiguousNT	\d+/maxAmbiguousNT	1/;
-		} else {$str =~ s/TrimWindowWidth	\d+/TrimWindowWidth	18/;$str =~ s/TrimWindowThreshhold	\d+/TrimWindowThreshhold	20/;
-		}
-		$str =~ s/maxAmbiguousNT	\d+/maxAmbiguousNT	2/;
+	my ($baseSF, $oDir, $readLength, $technology, $variant) = @_;
+	$variant ||= '';
+	die "Invalid SDM read length '$readLength'\n"
+		unless defined($readLength) && $readLength =~ /^\d+$/;
+	die "Invalid SDM option-file tag '$technology'/'$variant'\n"
+		unless defined($technology) && "$technology$variant" =~ /^[A-Za-z0-9_.-]*$/;
+	my $tag = join('_', grep { $_ ne '' } ($readLength, $technology, $variant));
+	my $newSDMf = "$oDir/sdmo_$tag.txt";
+
+	open my $inputFH, '<', $baseSF or die "Can't open SDM options '$baseSF': $!\n";
+	my $str = do { local $/; <$inputFH> };
+	close $inputFH or die "Can't close SDM options '$baseSF': $!\n";
+
+	if ($technology ne 'proto' && $technology ne 'PB' && $technology ne 'ONT' && $readLength != 0){
+		my $maxError = $readLength < 50 ? '0.5' : $readLength < 90 ? '1.2' : $readLength < 200 ? '2.5' : undef;
+		$str = _set_sdm_option($str, 'maxAccumulatedError', $maxError) if defined $maxError;
+		my ($windowWidth, $windowThreshold, $maxAmbiguous) = $readLength < 90
+			? (8, 16, 1)
+			: (18, 20, 2);
+		$str = _set_sdm_option($str, 'TrimWindowWidth', $windowWidth);
+		$str = _set_sdm_option($str, 'TrimWindowThreshhold', $windowThreshold);
+		$str = _set_sdm_option($str, 'maxAmbiguousNT', $maxAmbiguous);
 	}
-	if ($MFopt{sdmProbabilisticFilter} ==0 ){
-		$str =~ s/BinErrorModelAlpha\t.*\n/BinErrorModelAlpha\t-1\n/;
+	$str = _set_sdm_option($str, 'BinErrorModelAlpha', -1)
+		unless $MFopt{sdmProbabilisticFilter};
+	foreach my $option (sort keys %{$MFopt{sdm_opt}}){
+		$str = _set_sdm_option($str, $option, $MFopt{sdm_opt}{$option});
 	}
-	foreach my $so (keys %{$MFopt{sdm_opt}}){$str =~ s/$so	[^\n]*\n/$so	$MFopt{sdm_opt}->{$so}\n/;}
-	#die $str."\n$baseSF\n";
-	open O,">$newSDMf" or die "Can't open new sdm opt out:\n $newSDMf\n"; print O $str; close O;
-	#print $newSDMf."\n";
+
+	my $temporary = "$newSDMf.$$";
+	open my $outputFH, '>', $temporary or die "Can't write SDM options '$temporary': $!\n";
+	print {$outputFH} $str or die "Can't write SDM options '$temporary': $!\n";
+	close $outputFH or die "Can't close SDM options '$temporary': $!\n";
+	rename $temporary, $newSDMf or die "Can't publish SDM options '$newSDMf': $!\n";
 	return $newSDMf;
 }
 
 
 
-sub sdmOptSet{ 
-	my ($curSmpl,$samplReadLength, $curReadTec, $curSTech) = @_;
-	
+sub sdmOptSet{
+	my ($samplReadLength, $technology) = @_;
+	die "Invalid SDM read length '$samplReadLength'\n"
+		unless defined($samplReadLength) && $samplReadLength =~ /^\d+$/;
+	die "Cannot select SDM options without a sequencing technology\n"
+		unless defined($technology) && $technology ne '';
 	if ($MFopt{sdmOpt} ne ""){
-		if (! -f $MFopt{sdmOpt}){die "-customSDMopt must point to file! (currently: $MFopt{sdmOpt})\n";}
-		if (! -s $MFopt{sdmOpt}){die "-customSDMopt must point to non-empty file! (currently: $MFopt{sdmOpt})\n";}
-		
+		die "-customSDMopt must point to a file (currently: $MFopt{sdmOpt})\n"
+			unless -f $MFopt{sdmOpt};
+		die "-customSDMopt must point to a non-empty file (currently: $MFopt{sdmOpt})\n"
+			unless -s $MFopt{sdmOpt};
 		return ($MFopt{sdmOpt},$MFopt{sdmOpt});
 	}
-	my $curSDMopt = $MFopt{baseSDMopt}; 
-	my $is3rdGen = is3rdGenSeqTech($curReadTec);
-	#my $iqualOff = 33; #62 for 1st illu
-	
-	#print "XXXXXXXXXXX $curReadTec XXXXXXXXXX\n";
-		
-	if ($is3rdGen){
-		if ($curReadTec eq "PB"){ $curSDMopt = getProgPaths("baseSDMoptPacBio"); 
-		} elsif ($curReadTec eq "ONT"){ $curSDMopt = getProgPaths("baseSDMoptONT"); 
-		} else {
-			print "Unknown 3rd generational seq tech: $curReadTec\n";
-		}
-	} elsif ($curReadTec eq "GAII_solexa" || $curReadTec eq "GAII"|| $curReadTec eq "hiSeq"){
-		#$iqualOff = 59; #really that old??
-	} elsif ($curReadTec eq "miSeq"){ $curSDMopt = $MFopt{baseSDMoptMiSeq}; 
-	} elsif ($curReadTec eq "AVITI"){ $curSDMopt = getProgPaths("baseSDMoptAVITI"); 
-	} elsif ($curReadTec eq "proto"){ $curSDMopt = getProgPaths("baseSDMoptProto"); 
-	} 
-	
-	if ($samplReadLength != 0 && !$is3rdGen){
-		$curSDMopt = adaptSDMopt($curSDMopt,$MFglobal{globalLogDir},$samplReadLength,$curReadTec);
+
+	my $pairOpt = $MFopt{baseSDMopt};
+	$pairOpt = getProgPaths('baseSDMoptPacBio') if $technology eq 'PB';
+	$pairOpt = getProgPaths('baseSDMoptONT') if $technology eq 'ONT';
+	$pairOpt = $MFopt{baseSDMoptMiSeq} if $technology eq 'miSeq';
+	$pairOpt = getProgPaths('baseSDMoptAVITI') if $technology eq 'AVITI';
+	$pairOpt = getProgPaths('baseSDMoptProto') if $technology eq 'proto';
+	my $singleOpt = $technology eq '454' ? getProgPaths('baseSDMopt454') : $pairOpt;
+
+	# Always materialise an adapted file: global overrides and probabilistic-filter
+	# settings also apply when read length is unknown or the library is long-read.
+	if ($singleOpt eq $pairOpt){
+		$pairOpt = adaptSDMopt($pairOpt, $MFglobal{globalLogDir}, $samplReadLength, $technology);
+		$singleOpt = $pairOpt;
+	} else {
+		$pairOpt = adaptSDMopt($pairOpt, $MFglobal{globalLogDir}, $samplReadLength, $technology, 'pair');
+		$singleOpt = adaptSDMopt($singleOpt, $MFglobal{globalLogDir}, $samplReadLength, $technology, 'single');
 	}
-	
-	
-	#singletons..
-	my $curSDMoptSingl = $MFopt{baseSDMopt};
-	
-	if ($curSTech eq ""){$curSDMoptSingl=$curSDMopt;
-	} elsif ($curSTech eq "454"){$curSDMoptSingl = getProgPaths("baseSDMopt454"); 
-	} elsif ($curSTech eq "miSeq"){ $curSDMoptSingl = $MFopt{baseSDMoptMiSeq}; 
-	} elsif ($curSTech eq "AVITI"){ $curSDMoptSingl = getProgPaths("baseSDMoptAVITI"); 
-	} elsif ($curSTech eq "proto"){ $curSDMoptSingl = getProgPaths("baseSDMoptProto"); 
-	} elsif ($curSTech eq "PB"){ $curSDMoptSingl = getProgPaths("baseSDMoptPacBio"); 
-	} elsif ($curReadTec eq "ONT"){ $curSDMopt = getProgPaths("baseSDMoptONT"); 
-	} elsif ($is3rdGen){print "Unknown 3rd generational seq tech: $curReadTec\n";}
-	
-	if ($samplReadLength != 0 && !$is3rdGen){
-		$curSDMoptSingl = adaptSDMopt($curSDMoptSingl,$MFglobal{globalLogDir},$samplReadLength,$curReadTec);	
-		if ($curSTech eq "PB" && $samplReadLength < 1000 && $samplReadLength != 0){
-			print "WARNING: it seems sequencing technology is PacBio (\"PB\"), but read length is very short: $samplReadLength\nConsider adjusting via \"-inputReadLength\" or  \"-inputReadLengthSuppl\"\n";
-		}
-		if ($curSTech eq "ONT" && $samplReadLength < 1000 && $samplReadLength != 0){
-			print "WARNING: it seems sequencing technology is Oxford Nanopore (\"ONT\"), but read length is very short: $samplReadLength\nConsider adjusting via \"-inputReadLength\" or  \"-inputReadLengthSuppl\"\n";
-		}
+	if (($technology eq 'PB' || $technology eq 'ONT') && $samplReadLength != 0 && $samplReadLength < 1000){
+		print "WARNING: $technology reads have an unusually short configured length ($samplReadLength). "
+			."Check -inputReadLength or -inputReadLengthSuppl.\n";
 	}
-	#print "$curSDMopt,$curSDMoptSingl\n";
-	return ($curSDMopt,$curSDMoptSingl);
+	return ($pairOpt, $singleOpt);
 }
 
 
 sub sdmClean(){
 	my ($curOutDir,$finD,$jobd,$runThis, $useXtras ) = @_;
-	#create ifasta path
-	#die "cllll\n";
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	#my $seqSetHR = $map{$curSmpl}{seqSet};
-	die "sdmClean::Could not find seqSet for $curSmpl \n" if (!exists($map{$curSmpl}{seqSet}));
-	my %seqSet = %{$map{$curSmpl}{seqSet}};	
-	my ($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"pa1"},$seqSet{"pa2"},$seqSet{"pas"},$seqSet{"libInfo"},$seqSet{"seqTech"});
+	my $seqSet = sampleReadSet($curSmpl, "raw");
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	die "sdmClean::Could not find raw read set for $curSmpl\n"
+		unless ref($seqSet) eq 'HASH';
+	die "sdmClean::Could not find clean read set for $curSmpl\n"
+		unless ref($cleanSeqSetHR) eq 'HASH';
+	my $scope = $useXtras ? 'support' : 'primary';
+	my $libraries = readLibrariesByScope($seqSet, $scope, 0, $curSmpl);
+	return '' unless @{$libraries};
+	$finD .= '/' unless $finD =~ m{/$};
+
+	my %integerSetting = (
+		sdmCores => _validate_sdm_integer_setting('sdmCores', $MFopt{sdmCores}, 1),
+		# -1 is the established disabled sentinel; zero also emits no SDM flag.
+		XfirstReads => _validate_sdm_integer_setting('XfirstReads', $MFconfig{XfirstReads}, -1),
+		cut5pR1 => _validate_sdm_integer_setting('cut5pR1', $map{$curSmpl}{cut5pR1}, 0),
+		cut5pR2 => _validate_sdm_integer_setting('cut5pR2', $map{$curSmpl}{cut5pR2}, 0),
+		firstXrdsRd => _validate_sdm_integer_setting('firstXrdsRd', $map{$curSmpl}{firstXrdsRd}, 0),
+		firstXrdsWr => _validate_sdm_integer_setting('firstXrdsWr', $map{$curSmpl}{firstXrdsWr}, 0),
+	);
+
 	my $samplReadLength = 0;
-	$samplReadLength = $seqSet{"samplReadLength"} if (defined($seqSet{"samplReadLength"}));
-	#my ($ar1X,$ar2X,$arsX,$libInfoArX) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"})
+	$samplReadLength = $seqSet->{samplReadLength} if (defined($seqSet->{samplReadLength}));
 	if ($useXtras){
-		#if useXtras flag set, only consider "xtra" defined input reads (eg scaffoling reads, 3rd gen in supplement of main reads etc)
-		($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"},$seqSet{"seqTechX"});
-		$samplReadLength = $seqSet{"samplReadLengthX"};
-		if (!@{$ar1} && !@{$ars}) { #nope, no additional reads are requested..
-			return ($jobd);
-		}
-		print "sdm'ing support reads..\n";
+		$samplReadLength = $seqSet->{samplReadLengthX} || 0;
 	}
+
 	my $sdmBin = getProgPaths("sdm");# sdm program from LotuS2 pipeline
-	my $comprCores=$MFopt{sdmCores};
-	if (@{$ar1} == 0 && @{$ars}==0){return ($jobd);}#die "Empty array to sdmClean given\n";}
-	my $ifastasPre="";my $ifastasPreS=""; my $singlReadMode=0; my $pairReadMode=0;
-	if (@{$ar1} != 0){
-		$ifastasPre = ${$ar1}[0].",".${$ar2}[0]; $pairReadMode=1;
-		for (my $i=1;$i<@{$ar1};$i++){if ($i>0){$ifastasPre .= ";".${$ar1}[$i].",".${$ar2}[$i];}}
-		#die "${$ar1}[0]\n";
-	} 
-	if (@{$ars} > 0)	{
-		$ifastasPreS = ${$ars}[0];
-		for (my $i=1;$i<@{$ars};$i++){if ($i>0){$ifastasPreS .= ";".${$ars}[$i];}}
-		$singlReadMode=1;
-		
-	}
-	
-	my $curReadTec = $map{$curSmpl}{SeqTech};#getReadTechInMap();
-	my $curSTech = $map{$curSmpl}{SeqTechSingl};#getReadTechInMapSingl($curReadTec);
-	if ($seqTec ne ""){#override defaults from map
-		$curReadTec = $seqTec; $curSTech = $seqTec;
-	} 
-	checkSeqTech($curReadTec, "MG-TK.pl::sdmClean");
-	my $is3rdGen = is3rdGenSeqTech($curReadTec);
+	my $fEnd = $MFopt{gzipSDMOut} ? 'fq.gz' : 'fq';
+	my $baseFname = $useXtras ? 'filtered.suppl' : 'filtered';
+	my $logStem = $useXtras ? 'filterSuppl' : 'filter';
+	my $stone = $finD.($useXtras ? 'filterSupplDone.stone' : 'filterDone.stone');
+	my $sdmLogDir = "$logDir/sdm";
+	my $cmd = _shell_command('mkdir', '-p', '--', $finD)."\n";
+	$cmd .= _shell_command('rm', '-f', '--', $stone)."\n";
+	$cmd .= _shell_command('mkdir', '-p', '--', $sdmLogDir)."\n";
+	my @sdmCommon = (
+		'-ignore_IO_errors', 1, '-i_qual_offset', 'auto',
+		'-binomialFilterBothPairs', 1, '-threads', $integerSetting{sdmCores},
+	);
+	push @sdmCommon, ('-XfirstReads', $integerSetting{XfirstReads})
+		if $integerSetting{XfirstReads} > 0;
+	my @sdmExtra = $MFopt{SDMlogQualvsLen} ? ('-logLvsQ', 1) : ();
+	my @sdmCut;
+	push @sdmCut, ('-5PR1cut', $integerSetting{cut5pR1}) if $integerSetting{cut5pR1} > 0;
+	push @sdmCut, ('-5PR2cut', $integerSetting{cut5pR2}) if $integerSetting{cut5pR2} > 0;
+	push @sdmCut, ('-XfirstReadsRead', $integerSetting{firstXrdsRd}) if $integerSetting{firstXrdsRd} > 0;
+	push @sdmCut, ('-XfirstReadsWritten', $integerSetting{firstXrdsWr}) if $integerSetting{firstXrdsWr} > 0;
 
-	
-	my ($sdmO,$sdmS) = sdmOptSet($curSmpl,$samplReadLength, $curReadTec, $curSTech );
-	#print "curReadTec :: $curReadTec $is3rdGen\n$sdmO $sdmS\n";
-	
-	if (!$singlReadMode && !$pairReadMode){
-		die "Couldn't find any valid input files (sdmClean)\n";
-	}
-	#die "$pairReadMode\n$singlReadMode\n";
-	my $stone = "$finD/filterDone.stone";
-	if (!-e "$curOutDir/input_fil.txt" ){
-		open O,">$curOutDir/input_fil.txt"; print O $ifastasPre; close O;
-	}
+	my @cleanLibraries;
+	my @requiredOutputs;
+	for (my $i = 0; $i < @{$libraries}; $i++) {
+		my $library = $libraries->[$i];
+		my $technology = $library->{technology} || "";
+		checkSeqTech($technology, "MATAF4.pl::sdmClean library $library->{id}");
+		die "MATAF4.pl::sdmClean library $library->{id} has no sequencing technology\n"
+			if $technology eq '';
+		my $isLong = $library->{is_long} || is3rdGenSeqTech($technology);
+		my ($sdmPairOpt, $sdmSingleOpt) = sdmOptSet($samplReadLength, $technology);
+		my @libraryArgs = @sdmCommon;
+		push @libraryArgs, ('-illuminaClip', 1) if ($MFopt{trimAdapters} && !$isLong);
+		my $suffix = $i == 0 ? '' : ".lib$i";
+		my $prefix = "$finD$baseFname$suffix";
+		my $hasPair = ($library->{files}{r1} || '') ne '';
+		my $hasSingle = ($library->{files}{single} || '') ne '';
+		my ($outR1, $outR2, $outSingle) = ('', '', '');
+		my $logSuffix = $i == 0 ? '' : ".$i";
 
-	#system("mkdir -p $finD");
-	my $cmd = "";
-	#$cmd .= "mkdir -p $tmpD\n" unless ($tmpD eq "");
-	my $mateD = $finD."/mateCln/";
-	my ($ifastas, $mi_ifastas, $singlIfas, $matAr, $jdep) = get_ifa_mifa($ifastasPre,$ifastasPreS,$libInfoAr,$mateD,0,$jobd,$singlReadMode);
-	$jobd = $jdep; #replaces old dep
-	#die "$ifastas\n";
-	my ($ar1x,$ar2x,$sar) = get_sdm_outf($ifastas, $mi_ifastas,$finD,$singlReadMode,$pairReadMode, $useXtras);
-	
-	#push(@{$sar},@{$singlAddAr});
-	my @ret1=@{$ar1x};my @ret2=@{$ar2x};my @sret=@{$sar};
-	$cmd .= "mkdir -p $finD\n" unless ($finD eq "");
-	$cmd .= "rm -f $stone  $sret[0]\n"; #sret needs to be removed, as I concat later onto it..
-	$cmd .= "rm -f $sret[1]\n" if (@sret > 1);
-	$cmd .= "mkdir -p $logDir/sdm/\n";
-	
-	
-	#die "$mi_ifastas\n$ifastas XX\n@ret1\n@sret\n";
-	my $ofiles = "";
-	my $mi_ofiles = "";
-	#system("mkdir -p $logDir/sdm/") unless (-d "$logDir/sdm/");
-	my $useLocalTmp = 1;
-	#if ($tmpD eq ""){$useLocalTmp = 0;$tmpD = $finD;}
-	#my $nsdmPair = 2;
-	my $sdm_def= " -ignore_IO_errors 1 -i_qual_offset auto -binomialFilterBothPairs 1 -threads $MFopt{sdmCores} ";
-	$sdm_def .= " -XfirstReads $MFconfig{XfirstReads} " if ($MFconfig{XfirstReads} > 0);
-	$sdm_def .= " -illuminaClip 1 " if ($MFopt{trimAdapters} && $curReadTec ne "PB" && $curReadTec ne "ONT" );
-	my $sdm_Extr = "";
-	$sdm_Extr .= "-logLvsQ 1 " if ($MFopt{SDMlogQualvsLen});
-	# $ret{$curSmp}{cut5pR2}
-	my $sdm_cut = "";
-	$sdm_cut .= "-5PR1cut $map{$curSmpl}{cut5pR1} " if ($map{$curSmpl}{cut5pR1} > 0); $sdm_cut .= "-5PR2cut $map{$curSmpl}{cut5pR2} " if ($map{$curSmpl}{cut5pR2} > 0);
-	$sdm_cut .= "-XfirstReadsRead $map{$curSmpl}{firstXrdsRd} " if ($map{$curSmpl}{firstXrdsRd} > 0);
-	$sdm_cut .= "-XfirstReadsWritten $map{$curSmpl}{firstXrdsWr} " if ($map{$curSmpl}{firstXrdsWr} > 0);
-	
-	my $catCmd = "cat ";
-	#$catCmd = "$pigzBin -p $comprCores -c " if ($MFopt{gzipSDMOut});
-	if ($pairReadMode){
-		$ofiles = $ret1[0].",".$ret2[0];# $finD."/filtered.1.fq,".$finD."/filtered.2.fq";
-		$cmd .= "$sdmBin -i \"$ifastas\" -o_fastq $ofiles -options $sdmO -paired 2 $sdm_Extr -log $logDir/sdm/filter.log $sdm_def $sdm_cut\n\n";
-		my $tmpTar = "$ret1[0]";
-		if ($MFopt{gzipSDMOut}){$tmpTar =~ s/\.\d\.fq\.gz/\.\*\.singl\.fq\.gz/g ;
-		} else {$tmpTar =~ s/\.\d\.fq/\.\*\.singl\.fq/g ;}
-		#ls /path/to/your/files* 1> /dev/null 2>&1; 
-		my $cmdSA = "if ls $tmpTar 1> /dev/null 2>&1; then $catCmd $tmpTar ";
-		$cmd .= $cmdSA . ">>  $sret[0]; \n" ;
-		$cmd .= "rm -f $tmpTar\nfi\n";
-	}
-	if ($singlReadMode){
-		my $tmpO = $sret[0];$tmpO =~ s/(.*)\//$1\/tmp\./;
-		#quick fix for sdm problems with single fq out
-		if (1){	$catCmd = "$pigzBin -f -p $comprCores -c "; $tmpO =~ s/\.fq\.gz/\.fq/ ;}
-		#die $tmpO."\n";
-		$cmd .= "$sdmBin -i \"$singlIfas\" -o_fastq $tmpO -options $sdmS $sdm_Extr -paired 1  -log $logDir/sdm/filterS.log $sdm_def $sdm_cut\n\n";
-		if ($pairReadMode){
-			$cmd .= "$catCmd $tmpO >>  $sret[0]\nrm $tmpO\n" ;
-		} else {
-			if ($tmpO =~ m/\.gz$/){
-			$cmd .= "mv $tmpO $sret[0]\n";
-			} else { 
-				$cmd .= "$catCmd $tmpO >>  $sret[0]\nrm $tmpO\n" ;
+		if ($hasPair) {
+			$outR1 = "$prefix.1.$fEnd";
+			$outR2 = "$prefix.2.$fEnd";
+			$outSingle = "$prefix.singl.$fEnd";
+			$cmd .= _shell_command('rm', '-f', '--', $outR1, $outR2, $outSingle)."\n";
+			$cmd .= _shell_command(
+				$sdmBin, '-i', "$library->{files}{r1},$library->{files}{r2}",
+				'-o_fastq', "$outR1,$outR2", '-options', $sdmPairOpt,
+				'-paired', 2, @sdmExtra, '-log', "$sdmLogDir/$logStem$logSuffix.log",
+				@libraryArgs, @sdmCut,
+			)."\n";
+			my $recoveredPattern = "$prefix.*.singl.$fEnd";
+			$cmd .= 'mapfile -t recovered < <(compgen -G '._shell_quote($recoveredPattern)." || true)\n";
+			$cmd .= 'if (( ${#recovered[@]} )); then cat -- "${recovered[@]}" > '
+				._shell_quote($outSingle).'; rm -f -- "${recovered[@]}"; else ';
+			$cmd .= $MFopt{gzipSDMOut}
+				? _shell_command($pigzBin, '-c').' </dev/null > '._shell_quote($outSingle)
+				: ': > '._shell_quote($outSingle);
+			$cmd .= "; fi\n";
+			push @requiredOutputs, $outR1, $outR2, $outSingle;
+		}
+
+		if ($hasSingle) {
+			$outSingle = "$prefix.s.$fEnd" unless $hasPair;
+			# SDM selects gzip output from the .gz suffix. Write singleton-only
+			# libraries directly to their final destination; when paired output
+			# already occupies that path, append a second gzip member instead of
+			# materialising and recompressing an uncompressed FASTQ.
+			my $singleOutput = $hasPair ? "$prefix.input-single.$fEnd" : $outSingle;
+			$cmd .= _shell_command('rm', '-f', '--', $singleOutput)."\n";
+			$cmd .= _shell_command(
+				$sdmBin, '-i', $library->{files}{single}, '-o_fastq', $singleOutput,
+				'-options', $sdmSingleOpt, @sdmExtra, '-paired', 1,
+				'-log', "$sdmLogDir/$logStem.S$logSuffix.log", @libraryArgs, @sdmCut,
+			)."\n";
+			if ($hasPair) {
+				$cmd .= _shell_command('cat', '--', $singleOutput)." >> "._shell_quote($outSingle)."\n";
+				$cmd .= _shell_command('rm', '-f', '--', $singleOutput)."\n";
 			}
-		}		
-	}
-	if ($mi_ifastas ne ""){ #miSeq specific filtering
-		$mi_ofiles =  $ret1[1].",".$ret2[1];
-		$cmd .= " $sdmBin -i \"$mi_ifastas\" -o_fastq $mi_ofiles $sdm_Extr -options $MFopt{baseSDMoptMiSeq} -paired 2  -log $logDir/sdm/filter_xtra.log $sdm_def $sdm_cut\n\n";
-		if (!$singlReadMode){
-			my $tmpTar = "$ret1[1]";
-			if ($MFopt{gzipSDMOut}){$tmpTar =~ s/\.\d\.fq\.gz/\.\*\.singl\.fq\.gz/g ;
-			} else {$tmpTar =~ s/\.\d\.fq/\.\*\.singl\.fq/g ;}
-			my $cmdSA = "if ls $tmpTar 1> /dev/null 2>&1; then $catCmd $tmpTar ";
-			$cmd .= $cmdSA . ">>  $sret[1]; rm -f $tmpTar; fi\n" ;
+			push @requiredOutputs, $outSingle unless $hasPair;
 		}
-	}
-	if (!$singlReadMode){
-		$sret[-1] =~ m/\/([^\/]+$)/; my $fname = $1;
-		#$cmd .= "$pigzBin -p $comprCores ".$sret[-1]." \n" ;
-	}
-	$cmd .= "touch $stone\n";
-	#die "$cmd\n";
-	my $jobName = "";
-	my $presence=1; my $gzPres=1;
-	if (!$MFconfig{unpackZip}){
-		foreach my $loc (@ret2,@ret1){	if (!-e $loc || -z $loc){$presence=0;} my $loc2 = $loc;$loc2 =~ s/\.gz$//;	if (!-e $loc2){$gzPres=0;}}
-		if (!-e $sret[0]){$presence=0;}
-	}
-	if (!-e $stone){$presence=0;}
-	
-	#recovery part, that uses previous sdm filtered data..
-	if (!$presence && $gzPres && -e $stone){
-		#exists, but not gzipped..
-		$cmd = "";
-		foreach my $loc (@ret2,@ret1,@sret){
-			my $loc2 = $loc;
-				$loc2 =~ s/\.gz$//;
-			$cmd .= "$pigzBin -f -p $comprCores $loc2\n";
-		}
-	}
-	#die "$presence\n";
-	
-	#common error: spade input failed
-	my $assInputFlaw = 0;
-	my $qsubFile = $logDir."sdmReadCleaner.sh";
-	if ($useXtras){
-		${$cleanSeqSetHR}{arpX1} = \@ret1;${$cleanSeqSetHR}{arpX2} = \@ret2;
-		${$cleanSeqSetHR}{singArX} = \@sret;${$cleanSeqSetHR}{matArX} = $matAr;
-		${$cleanSeqSetHR}{readTecX} = $curReadTec; ${$cleanSeqSetHR}{is3rdGenX} = $is3rdGen;
-		$qsubFile = $logDir."sdmReadCleanerSuppl.sh";
-	} else {#default..
-		${$cleanSeqSetHR}{arp1} = \@ret1;${$cleanSeqSetHR}{arp2} = \@ret2;
-		${$cleanSeqSetHR}{singAr} = \@sret;${$cleanSeqSetHR}{matAr} = $matAr;
-		${$cleanSeqSetHR}{readTec} = $curReadTec;  ${$cleanSeqSetHR}{is3rdGen} = $is3rdGen;
-	}
-				#print "@{${$cleanSeqSetHR}{arp1}} YY \n";
 
-	if ( ($presence==0 || $assInputFlaw==1 )&& $runThis){
-		#die "yes\n";
-		$jobName = "_SDM${useXtras}_$JNUM"; my $tmpCmd;
-		my $preHDDspace=$QSBoptHR->{tmpSpace};
-		$QSBoptHR->{tmpSpace} = 0;
-		($jobName, $tmpCmd) = qsubSystem($qsubFile,$cmd,$MFopt{sdmCores},$MFopt{sdmMem},$jobName,$jobd,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
-		$QSBoptHR->{tmpSpace} = $preHDDspace;
+		push @cleanLibraries, newReadLibrary(
+			id => $library->{id}, sample => $library->{sample} || $curSmpl,
+			scope => $scope, technology => $technology, is_long => $isLong,
+			label => $library->{label}, phase => 'clean',
+			files => {r1 => $outR1, r2 => $outR2, single => $outSingle, bam => ''},
+			source_files => $library->{files},
+			metadata => {source_library_id => $library->{id}},
+		);
 	}
-	#die "$presence presi\n@ret1\n";
-	#print $cmd."\n$jobName\n";;	
-	$map{$curSmpl}{cleanSeqSet} = $cleanSeqSetHR;
-	return ($jobName);
+
+	if (!-e "$curOutDir/input_fil.txt" && !$useXtras) {
+		open my $inputFH, '>', "$curOutDir/input_fil.txt" or die "Cannot write $curOutDir/input_fil.txt: $!\n";
+		print {$inputFH} join(';', map {
+			$_->{files}{r1} ? "$_->{files}{r1},$_->{files}{r2}" : $_->{files}{single}
+		} @{$libraries});
+		close $inputFH or die "Cannot close $curOutDir/input_fil.txt: $!\n";
+	}
+
+	if (!$useXtras) {
+		my $emptyMarker = "$curOutDir/SMPL.empty";
+		$cmd .= <<'SDM_EMPTY_GUARD';
+mf4_sdm_fastq_has_records() {
+    local mf4_fastq="$1"
+    [[ -s "$mf4_fastq" ]] || return 1
+    local mf4_first_line=""
+    if [[ "$mf4_fastq" == *.gz ]]; then
+        mf4_first_line=$(set +o pipefail; gzip -cd -- "$mf4_fastq" 2>/dev/null | head -n 1)
+    else
+        IFS= read -r mf4_first_line < "$mf4_fastq" || true
+    fi
+    [[ "$mf4_first_line" == @* ]]
+}
+mf4_primary_records=0
+SDM_EMPTY_GUARD
+		for my $library (@cleanLibraries) {
+			my $files = $library->{files} || {};
+			if (($files->{r1} || '') ne '') {
+				my $r1 = _shell_quote($files->{r1});
+				my $r2 = _shell_quote($files->{r2});
+				$cmd .= "if mf4_sdm_fastq_has_records $r1 && mf4_sdm_fastq_has_records $r2; then mf4_primary_records=1; fi\n";
+			}
+			if (($files->{single} || '') ne '') {
+				my $single = _shell_quote($files->{single});
+				$cmd .= "if mf4_sdm_fastq_has_records $single; then mf4_primary_records=1; fi\n";
+			}
+		}
+		my $markerQ = _shell_quote($emptyMarker);
+		my $messageQ = _shell_quote("SDM retained no primary FASTQ records for $curSmpl; marked SMPL.empty");
+		$cmd .= "if (( ! mf4_primary_records )); then printf '%s\\n' cleaned_primary_reads_empty > $markerQ; "
+			."printf '%s\\n' $messageQ >&2; "
+			."elif [[ -f $markerQ ]] && [[ \"\$(head -n 1 -- $markerQ)\" == cleaned_primary_reads_empty ]]; then rm -f -- $markerQ; fi\n";
+	}
+	$cmd .= _shell_command('touch', '--', $stone)."\n";
+	my $jobName = "";
+	my $presence = -e $stone ? 1 : 0;
+	$presence = 0 if grep { !-e $_ } @requiredOutputs;
+	my $qsubFile = $logDir."sdmReadCleaner.sh";
+	replaceScopeLibraries($cleanSeqSetHR, $scope, \@cleanLibraries, 1, $curSmpl);
+	if (!$useXtras && $presence && cleaned_primary_libraries_empty(\@cleanLibraries)) {
+		my $emptyMarker = "$curOutDir/SMPL.empty";
+		open my $emptyFH, '>', $emptyMarker
+			or die "Cannot write cleaned-empty marker $emptyMarker: $!\n";
+		print {$emptyFH} "cleaned_primary_reads_empty\n";
+		close $emptyFH
+			or die "Cannot close cleaned-empty marker $emptyMarker: $!\n";
+		print "Detected no primary FASTQ records in completed SDM output for $curSmpl; marked SMPL.empty\n"
+			unless $MFconfig{silent};
+	}
+	$qsubFile = $logDir."sdmReadCleanerSuppl.sh" if ($useXtras);
+
+	if (!$presence && $runThis){
+		print "sdm'ing support reads..\n" if ($useXtras);
+		$jobName = "_SDM${useXtras}_$JNUM"; my $tmpCmd;
+		local $QSBoptHR->{tmpSpace} = 0;
+		($jobName, $tmpCmd) = qsubSystem($qsubFile,$cmd,$integerSetting{sdmCores},$MFopt{sdmMem},$jobName,$jobd,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
+	}
+	return $jobName;
 }
 
 
@@ -3939,7 +6062,7 @@ sub SEEECER(){
 		system("cat ".join(" ",@p1)." > $tmpD/pair.1.fastq");	system("cat ".join(" ",@p2)." > $tmpD/pair.2.fastq");
 		@p1 = ("$tmpD/pair.1.fastq"); @p2 = ("$tmpD/pair.2.fastq");
 	}
-	my $SEEbin = "bash /g/bork5/hildebra/bin/SEECER-0.1.3/SEECER/bin/run_seecer.sh";
+	my $SEEbin = getProgPaths("seecer");
 	system("mkdir -p $tmpD/tmpS");
 	my $cmd = $SEEbin . " -t $tmpD/tmpS $p1[0] $p2[0]";
 	#qsubSystem($logDir."SEECERCleaner.sh",$cmd,1,"30G",1);
@@ -3973,23 +6096,14 @@ sub uploadRawFilePrep{
 	if ($MFconfig{uploadRawRds} eq ""){return "" ;}
 
 	my ($tmpD,$smplID, $jdep, $useXtras) = @_;
-	my $totalInputSizeMB = $map{$smplID}{inputFileSizeMB} ;
+	my $totalInputSizeMB = $useXtras
+		? ($map{$smplID}{inputXFileSizeMB} || 0)
+		: ($map{$smplID}{inputFileSizeMB} || 0);
 
-	my %seqSet = %{$map{$smplID}{seqSet}};
-	my ($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"pa1"},$seqSet{"pa2"},$seqSet{"pas"},$seqSet{"libInfo"},$seqSet{"seqTech"});
-	my $samplReadLength = $seqSet{"samplReadLength"};
-	my $gen3 = is3rdGenSeqTech($seqTec);
-
-	#print "XX $seqTec XX";
-	#my ($ar1X,$ar2X,$arsX,$libInfoArX) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"})
-	if ($useXtras){
-		#if useXtras flag set, only consider "xtra" defined input reads (eg scaffoling reads, 3rd gen in supplement of main reads etc)
-		($ar1,$ar2,$ars,$libInfoAr,$seqTec) = ($seqSet{"paX1"},$seqSet{"paX2"},$seqSet{"paXs"},$seqSet{"libInfoX"},$seqSet{"seqTechX"});
-		$samplReadLength = $seqSet{"samplReadLengthX"};
-		if (!@{$ar1} && !@{$ars}) { return ""; }#nope, no additional reads are requested..
-		$gen3 = is3rdGenSeqTech($seqTec);
-	}
-	my @libInfo = @{$libInfoAr};
+	my $seqSet = sampleReadSet($smplID, "raw");
+	my $scope = $useXtras ? 'support' : 'primary';
+	my $libraries = readLibrariesByScope($seqSet, $scope, 0, $smplID);
+	return "" unless @{$libraries};
 	my $tag = ""; $tag = "X." if ($useXtras);
 	if ($useXtras){
 		print "preparing xtra raw fastq upload for ENA/SRA (hostfilter $MFopt{humanFilter}).. ";
@@ -4014,66 +6128,58 @@ sub uploadRawFilePrep{
 	my $outD  ="$MFconfig{uploadRawRds}"; 
 	my $numThr = 4;
 	system "mkdir -p $outD/tmp/ " unless (-d "$outD/tmp");
-	my $rd;
 	$tmpD = "$tmpD/tmp$tag/";
 	my $cmd = "";#"rm -rf $outD/tmp/;mkdir -p $outD/tmp/\n";
-	for (my $i=0;$i<3;$i++){
-		next if ($i==1); #read2 will be dealt with read1
-		my @rds;
-		if ($i==0){
-			@rds=@{$ar1};$rd="1";
-		}
-		#if ($i==1){$rd="2";@rds=@pa2;}
-		my @rds2= @{$ar2};
-		if ($i==2){$rd="single";@rds=@{$ars};}
-		my $idx=0;
-		#print "$i : rd1: @rds\nrd2: @rds2\n". @libInfo . " : @libInfo\n";
-		foreach (my $idx=0;$idx<@rds;$idx++){
-			my $f =$rds[$idx];
-			my $rd2=$rds2[$idx];
-			my $xtra=$tag."$idx.";
-			if ( ($idx < @libInfo ) && $libInfo[$idx] =~ m/.*mate.*/i){$xtra = "mate.${xtra}";}
-			if ( (@libInfo > $idx) && $libInfo[$idx] =~ m/.*miseq.*/i){$xtra = "miSeq.${xtra}";}
-			if ($seqTec eq "PB"){$xtra = "PB.${xtra}";}
-			if ($seqTec eq "ONT"){$xtra = "ONT.${xtra}";}
-			#die "$seqTec\n$libInfo[0]\n";
-			my $of = "$tmpD/$smplID.${xtra}R$rd.fq";  
-			my $of2 = "$tmpD/$smplID.${xtra}R2.fq";  
-			my $tmpF = "$tmpD/$smplID.${xtra}R1R2.fq";  
-			my $ff = "$outD/$smplID.${xtra}R$rd.fq";  
-			my $ff2 = "$outD/$smplID.$xtra$idx.R2.fq";  
-			my $ofT = "$tmpD/tmp/$smplID.${xtra}TEMP.R$rd.fq";
-			my $ofT2 = "$tmpD/tmp/$smplID.${xtra}TEMP.R2.fq";
-			if ($f =~ m/\.gz$/){$of .= ".gz";$ff .= ".gz";$ofT .= ".gz";$of2 .= ".gz";$ff2 .= ".gz";$ofT2 .= ".gz";}
-			#$idx++;
-			#print "$ff\n";
-			next if (-e $ff);
-			$cmd .= "rm -fr $tmpD;\nmkdir -p $tmpD/tmp/ $outD\n";
-			#$cmd .= "rm -f $ofT;cp $inD$f $ofT\n" unless (-e $of);
-			$cmd .= "rm -f $ofT $of;ln -s $f $ofT\n";#unless (-e $of);
-			
-			
-			if ($i==2){ #single read pair... 
-				#$cmd .= krakHSapSingl("$ofT",$of,$numThr)."\n" unless (-e $of.".gz");
-				#	my ($r1,$r2,$hostRMVer,$seqGen,$numThr,$tmpD,$krRefDB) = @_;
+	for (my $idx = 0; $idx < @{$libraries}; $idx++) {
+		my $library = $libraries->[$idx];
+		# Uploads must use map-resolved sources: staged rawRds symlinks can
+		# legitimately disappear when scratch is cleaned or a run is resumed.
+		my $files = ref($library->{source_files}) eq 'HASH'
+			? $library->{source_files}
+			: $library->{files};
+		my $technology = $library->{technology} || '';
+		checkSeqTech($technology, "MATAF4.pl::uploadRawFilePrep library $library->{id}") if $technology ne '';
+		my $isLong = $library->{is_long} || is3rdGenSeqTech($technology);
+		my $xtra = $tag."$idx.";
+		$xtra = "mate.$xtra" if (($library->{label} || '') =~ /mate/i);
+		$xtra = "miSeq.$xtra" if (($library->{label} || '') =~ /miseq/i);
+		$xtra = "PB.$xtra" if ($technology eq 'PB');
+		$xtra = "ONT.$xtra" if ($technology eq 'ONT');
 
-				$cmd .= hostRmBase($ofT,"",$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[0]");
-				$cmd .= "$fastqhdsChk $ofT 3;\n";
-				#and move cleaned up file to final locations...
-				$cmd .= "rm -f $of; mv $ofT $of;\n";
-				$ofT2="";$of2="";
+		if ($files->{r1}) {
+			my ($r1, $r2) = @{$files}{qw(r1 r2)};
+			die "Upload library $library->{id} mixes compressed and uncompressed mates\n"
+				if (($r1 =~ /\.gz$/) != ($r2 =~ /\.gz$/));
+			my $gz = $r1 =~ /\.gz$/ ? '.gz' : '';
+			my $of1 = "$tmpD/$smplID.${xtra}R1.fq$gz";
+			my $of2 = "$tmpD/$smplID.${xtra}R2.fq$gz";
+			my $tmp1 = "$tmpD/tmp/$smplID.${xtra}TEMP.R1.fq$gz";
+			my $tmp2 = "$tmpD/tmp/$smplID.${xtra}TEMP.R2.fq$gz";
+			my $final1 = "$outD/".basename($of1);
+			my $final2 = "$outD/".basename($of2);
+			unless (-e $final1 && -e $final2) {
+				$cmd .= "rm -fr $tmpD;\nmkdir -p $tmpD/tmp/ $outD\n";
+				$cmd .= _shell_command('cp', '-L', '--reflink=auto', '--', $r1, $tmp1)."\n";
+				$cmd .= _shell_command('cp', '-L', '--reflink=auto', '--', $r2, $tmp2)."\n";
+				$cmd .= hostRmBase($tmp1,$tmp2,$MFopt{humanFilter},$isLong,$numThr,$tmpD,"$DBdir$DBname[0]");
+				$cmd .= "$fastqhdsChk $tmp1 1; $fastqhdsChk $tmp2 2;\n";
+				$cmd .= "mv $tmp1 $of1\nmv $tmp2 $of2\nmv $of1 $of2 $outD\n\n";
 			}
-			if ($i==0){
-				$cmd .= "rm -f $ofT2;ln -s $rd2 $ofT2\n" unless (-e $of);
-				my $tmpF1 = "$tmpD/krak.tmp_1.fq";my $tmpF2 = "$tmpD/krak.tmp_2.fq";
-				$cmd .= hostRmBase($ofT, $ofT2,$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[0]");
-				$cmd .= "$fastqhdsChk $ofT 1;     $fastqhdsChk $ofT2 2;\n";
-				$cmd .= "rm -f $of; mv $ofT $of;\n";
-				$cmd .= "rm -f $of2; mv $ofT2 $of2;\n";
-				#die "$cmd";
+		}
+
+		if ($files->{single}) {
+			my $single = $files->{single};
+			my $gz = $single =~ /\.gz$/ ? '.gz' : '';
+			my $of = "$tmpD/$smplID.${xtra}Rsingle.fq$gz";
+			my $tmp = "$tmpD/tmp/$smplID.${xtra}TEMP.Rsingle.fq$gz";
+			my $final = "$outD/".basename($of);
+			unless (-e $final) {
+				$cmd .= "rm -fr $tmpD;\nmkdir -p $tmpD/tmp/ $outD\n";
+				$cmd .= _shell_command('cp', '-L', '--reflink=auto', '--', $single, $tmp)."\n";
+				$cmd .= hostRmBase($tmp,"",$MFopt{humanFilter},$isLong,$numThr,$tmpD,"$DBdir$DBname[0]");
+				$cmd .= "$fastqhdsChk $tmp 3;\n";
+				$cmd .= "mv $tmp $of\nmv $of $outD\n\n";
 			}
-			$cmd .= "rm -f $ofT $ofT2\n";
-			$cmd .= "mv $of $of2 $outD\n\n";
 		}
 	}
 	$cmd .= "rm -rf $tmpD\n" if ($cmd ne "");
@@ -4139,11 +6245,11 @@ sub complexGunzCpMv($ $ $ $ $ $){
 	my $unzipcmd = "";
 	my $lowEffort=1;
 	
-	my $out = $in;
+	my $out = basename($in);
 	if (0&&$in =~ m/\.gz$/){ #deactivated.. takes too much space on file sys
 		$unzipcmd .= "$pigzBin  -f -p $ncore -d -c $fastap$in";
 		$out =~ s/\.gz$//;
-		$unzipcmd .= " > $finDest$in \n";
+		$unzipcmd .= " > $finDest$out \n";
 		$lowEffort=0;
 	}elsif ($in =~ m/\.bz2/){
 		my $bzip2B  = getProgPaths("bzip2");
@@ -4210,38 +6316,34 @@ sub valid_files{
 
 
 
-sub setupInput{
-	
-	
-	
-}
-
-
-
-
-
-
-
 sub seedUnzip2tmp{
 	my ($fastp,$curSmpl,$jDepe,$tmpPath,$finDest, 
 		$calcUnzp,$finalMapDir,$porechopFlag,$inputRawFile) = @_;
-	my $mocatImport = $MFconfig{importMocat};
+	# The map-resolved rddir is the authority for primary inputs. Do not let a
+	# caller reconstruct it from SmplPrefix/Path and silently drop #DirPath.
+	my $configuredPrimaryDir = $map{$curSmpl}{hasPrimaryRds}
+		? ($map{$curSmpl}{rddir} || "") : "";
+	if ($configuredPrimaryDir ne "") {
+		my $receivedPrimaryDir = defined($fastp) ? $fastp : "";
+		(my $configuredComparable = $configuredPrimaryDir) =~ s{/+$}{};
+		(my $receivedComparable = $receivedPrimaryDir) =~ s{/+$}{};
+		die "Internal input-directory mismatch for $curSmpl: map resolves to "
+			."$configuredPrimaryDir but unzip received $receivedPrimaryDir\n"
+			if ($receivedComparable ne "" && $receivedComparable ne $configuredComparable);
+		$fastp = $configuredPrimaryDir;
+	}
 	my $himipeSeqAd = getProgPaths("illuminaTS3pe"); #for trimomatic
-	my $himiseSeqAd = getProgPaths("illuminaTS3se");
 	my $trimJar = getProgPaths("trimomatic");
 
 	my $smplPrefix = $map{$curSmpl}{prefix};
-	$smplPrefix =~ s/\./\\\./g;   #make sure dots are recognized as such
-
-	my $xtrMapStr = $map{$curSmpl}{SupportReads};
 	my $doMateCln = 1; #nxtrim  mate pairs ?
 	my $numCore=$MFopt{unzipCores};
 	my $rawReads=""; my $mmpu = "";
-	my @fastp2 = (""); my $xtraRdsTech = "";
-	$xtrMapStr = "" if (!defined $xtrMapStr) ;
+	my $inputDiscovery = discoverSampleInputs($curSmpl, $fastp);
+	my $primarySourceDir = $inputDiscovery->{primary_dir};
+	my $xtraRdsTech = $inputDiscovery->{support_technology};
 	my $totalInputSizeMB=10000; #default to something sensible
 	my $totalXInputSizeMB=0; #normally no suppl present..
-	my $libNum = 0;
 
 	if ($fastp eq "") { print "No primary dir.. \n"; }
 	#main source for input files..
@@ -4259,24 +6361,19 @@ sub seedUnzip2tmp{
 	
 	
 		#die "Mapping $pa1 to ref\n";
-	if ( $xtrMapStr ne ""){
-		#die "XX$xtrMapStr\n";
-		my @spl = split(/:/,   $map{$samples[$JNUM]}{"SupportReads"}   );
-		if (@spl > 1){
-			$xtraRdsTech = $spl[0];#.$libNum;
-			@fastp2 = split(/,/,$spl[1]);
-			checkSeqTech($xtraRdsTech,"MATFILER.pl::Support Reads");
-			$seqTechX = $xtraRdsTech;
-		}
-		#die @fastp2."\n".$xtraRdsTech."\n";
+	if ($xtraRdsTech ne ""){
+		checkSeqTech($xtraRdsTech,"MATAF4.pl::SupportReads");
+		$seqTechX = $xtraRdsTech;
 	}
 	my $is3rdGen = is3rdGenSeqTech($seqTech);
 	my $is3rdGenX = is3rdGenSeqTech($seqTechX);
+	my $singleSeqTech = $map{$curSmpl}{SeqTechSingl} || $seqTech;
+	checkSeqTech($singleSeqTech,"MATAF4.pl::singleton reads");
 	
 	#die "$seqTech\n$is3rdGen\n";
 	
 	#create empty return object
-	my %seqSet = (pa1 => \@pa1, pa2 => \@pa2, pas => \@pas, seqTech => $seqTech, is3rdGen => $is3rdGen,
+	my %seqSet = (libraries => [], pa1 => \@pa1, pa2 => \@pa2, pas => \@pas, seqTech => $seqTech, is3rdGen => $is3rdGen,
 			paX1 => \@paX1, paX2 => \@paX2, paXs => \@paXs, seqTechX => $seqTechX, is3rdGenX =>  $is3rdGenX,
 			libInfo => \@libInfo, libInfoX => \@libInfoX,
 			totalInputSizeMB => -1, totalXInputSizeMB => -1,
@@ -4288,126 +6385,68 @@ sub seedUnzip2tmp{
 	#check if unmapped reads requested..
 	if ($MFopt{useUnmapped}){
 		die "useUnmapped needs checking before use.. Exiting\n";
-		$seqSet{pa1} = ("$finalMapDir/unaligned/unal.1.fq.gz");
-		$seqSet{pa2} = ("$finalMapDir/unaligned/unal.2.fq.gz");
-		$seqSet{pas} = ("$finalMapDir/unaligned/unal.fq.gz");
+		$seqSet{libraries} = [newReadLibrary(
+			id => "$curSmpl:primary:unmapped", sample => $curSmpl, scope => 'primary',
+			technology => $seqTech, is_long => $is3rdGen, label => 'unmapped', phase => 'staged',
+			files => {r1 => "$finalMapDir/unaligned/unal.1.fq.gz", r2 => "$finalMapDir/unaligned/unal.2.fq.gz",
+				single => "$finalMapDir/unaligned/unal.fq.gz", bam => ''},
+		)];
+		syncSeqSetLegacy(\%seqSet);
 		$seqSet{totalInputSizeMB} = filsizeMB((@pa1,@pa2,@pas));
-		$seqSet{libInfo} = ("unmapped");
 #		return ("",\@pa1,\@pa2, \@pas, 0, "", "",\@libInfo, "",$totalInputSizeMB);
 		return ("", \%seqSet);
 	}
 	
 
-	if ($fastp ne ""){
-		#die "here\n";
-		if ( !-d $fastp ){
-			my $msg = "Infile dir not existing: $fastp\n";
-			die $msg if ($MFconfig{abortOnEmptyInput});
-			print $msg; $seqSet{totalInputSizeMB}=0;
-			#return ("EMPTY_DO_NEXT",\@pa1,\@pa2, \@pas, 0, "", "",\@libInfo, "",$totalInputSizeMB);
+	if ($inputDiscovery->{primary_error} ne "") {
+		if ($inputDiscovery->{primary_missing_dir} && !$MFconfig{abortOnEmptyInput}) {
+			print $inputDiscovery->{primary_error};
+			$seqSet{totalInputSizeMB}=0;
 			return ("EMPTY_DO_NEXT", \%seqSet);
+		}
+		die $inputDiscovery->{primary_error};
+	}
 
-		}
-		#print "$fastp\n@pa1\n$smplPrefix\n";print "MOCA is $mocatImport $MFconfig{readsRpairs}\n";
-		#if ($mocatImport==0){
-		#print "$fastp\n";
-		#die "$smplPrefix$rawFileSrchStr2\n";
-		opendir(DIR, $fastp) or die "Infile dir not existing: $fastp\n";	
-		my @DIRf = readdir(DIR) ;
-		close(DIR);
-		if ($MFconfig{rawFileSrchStrSingl} ne ""){
-			@pas = sort ( grep { /$smplPrefix($MFconfig{rawFileSrchStrSingl})/  && -e "$fastp/$_"} @DIRf);	
-		}
-		if ($MFconfig{readsRpairs}!=0){
-			@pa2 = sort ( grep { /$smplPrefix($MFconfig{rawFileSrchStr2})/ && -e "$fastp/$_" } @DIRf );	
-			@pa1 = sort ( grep { /$smplPrefix($MFconfig{rawFileSrchStr1})/  && -e "$fastp/$_"  } @DIRf );	#rewinddir(DIR);
-			#die "readsRpairs::@pa1\n$smplPrefix$rawFileSrchStr1\n";
-		}
-		
-		#sort out multi assignments of read files (grep not uniquely defined)
-		if ($MFconfig{rawFileSrchStrSingl} ne ""){
-			my %h;
-			my $rdPairsBf=scalar @pa1;
-			if ($MFconfig{prefSinglFQgreps}){
-				@h{(@pas)} = undef;
-				@pa1 = grep {not exists $h{$_}} @pa1;
-				@pa2 = grep {not exists $h{$_}} @pa2;
-			} else {
-				@h{(@pa1,@pa2)} = undef;
-				@pas = grep {not exists $h{$_}} @pas;
-			}
-			my $rdPairsAft=scalar @pa1;
-			if ($rdPairsAft != $rdPairsBf){
-				print "corrected from $rdPairsBf read pairs to $rdPairsAft read pairs from input dir\n";
-				print "s: @pas\n1: @pa1\n2: @pa2\n";
-			}
-		}
-		
-		if ($MFconfig{rawFileBamSrchSing} ne "" ){
-			@paBam = sort ( grep { /$smplPrefix($MFconfig{rawFileBamSrchSing})/  && -e "$fastp/$_"  } @DIRf );	
-		}
-		
-	}
-	#die "1:@pa1\nS:@pas\n$MFconfig{rawFileSrchStrSingl}\n$MFconfig{readsRpairs}\n\n";
-	
-	#import xtra long rds
-	if (@pa1 != @pa2 && $MFconfig{readsRpairs}!=0){
-		print "For dir $fastp, unequal fastq files exist:\nP1\n".join("\n",@pa1)."\nP2:\n".join("\n",@pa2)."\n";@pa1=(); @pa2=();
-	}
-	#check for date of files (special filter)
-	if ($MFconfig{doDateFileCheck}){
-		my @pa1t = @pa1; my @pa2t = @pa2; undef @pa1; undef @pa2;
-		for (my $i=0; $i<@pa1t;$i++){
-			my $date = POSIX::strftime( "%m", localtime( ( stat "$fastp/$pa1t[$i]" )[9] ) );
-			#print $date;
-			if ($date < 3){push(@pa1, $pa1t[$i]);push(@pa2, $pa2t[$i]);}
-		}
-		if (@pa1 != 1){die "still too many file: $fastp\n @pa1\n@pa2\n";}
-	}
+	die $inputDiscovery->{support_error}
+		if ($inputDiscovery->{support_error} ne "");
+	@pa1 = @{$inputDiscovery->{primary}{read1}};
+	@pa2 = @{$inputDiscovery->{primary}{read2}};
+	@pas = @{$inputDiscovery->{primary}{single}};
+	@paBam = @{$inputDiscovery->{primary}{bam}};
+	@paX1 = @{$inputDiscovery->{support}{read1}};
+	@paX2 = @{$inputDiscovery->{support}{read2}};
+	@paXs = @{$inputDiscovery->{support}{single}};
+	@paBamX = @{$inputDiscovery->{support}{bam}};
+	# Preserve authoritative inputs before the arrays are rewritten to rawRds.
+	my @sourcePa1 = @{source_input_files($primarySourceDir, @pa1)};
+	my @sourcePa2 = @{source_input_files($primarySourceDir, @pa2)};
+	my @sourcePas = @{source_input_files($primarySourceDir, @pas)};
+	my @sourcePaBam = @{source_input_files($primarySourceDir, @paBam)};
+	my @sourcePaX1 = @{source_input_files('', @paX1)};
+	my @sourcePaX2 = @{source_input_files('', @paX2)};
+	my @sourcePaXs = @{source_input_files('', @paXs)};
 	
 	#create libinfo array 
-	#@libInfo = ("lib$libNum") x int @pa1;
 	for (my $i = 0; $i < max((scalar(@pas),scalar(@pa1))); $i++) {
 		$libInfo[$i] = "lib$i";
 	}
 	if(@paBam > 0){ #assumes as input a mix of fq's and bams
-		for (my $i = scalar(@libInfo); $i < scalar(@libInfo)+scalar(@paBam); $i++) {
+		my $firstBamLibrary = scalar(@libInfo);
+		my $lastBamLibrary = $firstBamLibrary + scalar(@paBam);
+		for (my $i = $firstBamLibrary; $i < $lastBamLibrary; $i++) {
 			$libInfo[$i] = "lib$i";
 		}
-		#@libInfo = (@libInfo, ("libS$libNum") x int @paBam);
 	}
 	#$locStats{hasPaired} = 1 if (@pa1 > 0);$locStats{hasSingle} = 1 if (@pas > 0);
-	if ($fastp2[0] ne ""){
-		#die "$fastp2\n\n";
-		if (-d $fastp2[0]){
-			opendir(DIR, $fastp2[0]) or die "Fasta indir not found $fastp2[0]\n";	
-			my @DIRf = readdir(DIR) ;
-			close(DIR);
-			@paX2 = sort ( grep { /$MFconfig{rawFileSrchStrXtra2}/ && -e "$fastp2[0]/$_" } @DIRf );	#rewinddir DIR;
-			@paX1 = sort ( grep { /$MFconfig{rawFileSrchStrXtra1}/  && -e "$fastp2[0]/$_"} @DIRf );	#close(DIR);
-			if (@paX2 != @paX1){die "For dir $fastp, unequal fastq files exist:P1\n".join("\n",@paX1)."\nP2:\n".join("\n",@paX2)."\n";}
-			if (@paX2 == 0){die "Can't find files with pattern $MFconfig{rawFileSrchStrXtra2} in $fastp2[0]\n";}
-			#die $paX1[0]."\n";
-			push @pa1 , @paX1; push @pa2 , @paX2; @libInfoX = $xtraRdsTech x @paX1; push @libInfo, @libInfoX;
-		} elsif (-e $fastp2[0] ){
-			if ($fastp2[0]=~ m/,/){die "MG-TK.pl::support reads have comma: $fastp2[0]!\nExiting..\n";}
-			if ($fastp2[0] !~ m/\.bam$/ && $fastp2[0] !~ m/\.fastq\.gz?$/ && $fastp2[0] !~ m/\.fq\.gz$/){die "MG-TK.pl::support reads not bam or fq.gz formatted: $fastp2[0]!\nExiting..\n";}
-			push @libInfoX, $xtraRdsTech;
-			if ($fastp2[0] =~ m/\.bam$/){
-				push @paBamX, @fastp2;
-			} else {
-				push @paXs, @fastp2;
-			}
-		} else {
-			die "MG-TK.pl:: Can't find support reads @fastp2!\nExiting..\n";
-		}
+	if ($xtraRdsTech ne ""){
+		@libInfoX = ($xtraRdsTech) x max(scalar(@paX1), scalar(@paXs) + scalar(@paBamX));
 	}
 
 
-	$totalInputSizeMB = filsizeMB($fastp,@pa1,@pa2,@pas,@paBam);
+	$totalInputSizeMB = $inputDiscovery->{primary_bytes} / (1024 * 1024);
 	$map{$curSmpl}{inputFileSizeMB} = $totalInputSizeMB;
 	#and file size for suppl files..
-	$totalXInputSizeMB= filsizeMB($fastp,@paX1,@paX2,@paXs,@paBamX);
+	$totalXInputSizeMB = $inputDiscovery->{support_bytes} / (1024 * 1024);
 	$map{$curSmpl}{inputXFileSizeMB} = $totalXInputSizeMB;
 
 
@@ -4416,21 +6455,18 @@ sub seedUnzip2tmp{
 	
 	#check if raw file is a symlink and if this is valid & create raw read link (HD times):
 	for (my $i = 0; $i<@pa1; $i++){
-		my $pp = $fastp;
-		#$pp = $fastp2 if ($libInfo[$i] eq $xtraRdsTech);
-		if (-l $pp.$pa1[$i]){
-			if (!-f abs_path($pp.$pa1[$i])){die "File $pa1[$i] is not file.\n";}
+		my $read1Path = $sourcePa1[$i];
+		my $read2Path = $sourcePa2[$i];
+		my $realP = $read1Path;
+		if (-l $read1Path){
+			$realP = abs_path($read1Path) || "";
+			if ($realP eq '' || !-f $realP){die "File $pa1[$i] is not file.\n";}
 		}
-		if (-l $pp.$pa2[$i]){
-			if (!-f abs_path($pp.$pa2[$i])){die "File $pa2[$i] does not exist.\n";}
-		}
-		if ($i==0){
-			$rawReads="$pp$pa1[$i],$pp$pa2[$i]";
-		} else {
-			$rawReads.=";".$pp.$pa1[$i].",".$pp.$pa2[$i];
+		if (-l $read2Path){
+			my $realMate = abs_path($read2Path) || "";
+			if ($realMate eq '' || !-f $realMate){die "File $pa2[$i] does not exist.\n";}
 		}
 #		print "$pp$pa1[$i]\n";
-		my $realP = `readlink -f $pp$pa1[$i]`;
 		if (defined $realP && $realP =~ m/\/(MMPU[^\/]+)\//){
 			$mmpu = $1;
 		}
@@ -4440,13 +6476,16 @@ sub seedUnzip2tmp{
 	#@fastap2 = ($fastap2[0]); @fastap1 = ($fastap1[0]);
 	
 	#could not find any files.. report this to user
-	if (@pa1 == 0 && @pas ==0 && @paBam == 0 && @paXs ==0 && @paBamX ==0 ){
+	if (@pa1 == 0 && @pas ==0 && @paBam == 0 && @paX1 == 0 && @paXs ==0 && @paBamX ==0 ){
 		my $msg = "Can;t find files in $fastp\nUsing search pattern: $smplPrefix$MFconfig{rawFileSrchStr1}  $smplPrefix$MFconfig{rawFileSrchStr2}\n$smplPrefix$MFconfig{rawFileSrchStrSingl}\n";
 		die $msg if ($MFconfig{abortOnEmptyInput});
-		print $msg;$totalInputSizeMB=0;$map{$curSmpl}{inputFileSizeMB} =0;$map{$curSmpl}{totalXInputSizeMB} =0;
+		print $msg;$totalInputSizeMB=0;$map{$curSmpl}{inputFileSizeMB} =0;$map{$curSmpl}{inputXFileSizeMB} =0;
 		#return ("EMPTY_DO_NEXT",\@pa1,\@pa2, \@pas, 0, "", "",\@libInfo, "",$totalInputSizeMB);
-		$seqSet{pa1} = \@pa1;$seqSet{pa2} = \@pa2;$seqSet{pas} = \@pas;
-		$seqSet{libInfo} = \@libInfo;
+		$seqSet{libraries} = readLibrariesFromArrays(
+			sample => $curSmpl, scope => 'primary', phase => 'raw', technology => $seqTech,
+			is_long => $is3rdGen, r1 => \@pa1, r2 => \@pa2, single => \@pas, labels => \@libInfo,
+		);
+		syncSeqSetLegacy(\%seqSet);
 		$map{$curSmpl}{inputFilesEmpty} = 1;
 		return ("EMPTY_DO_NEXT", \%seqSet);
 
@@ -4464,9 +6503,12 @@ sub seedUnzip2tmp{
 	}
 	
 	#report on what was found so far..
-	if ($map{$curSmpl}{inputFileSizeMB} > 0){
-		print "Input size raw (Mb): " . int($map{$curSmpl}{inputFileSizeMB}) ;
-		print "; Suppl: " . int($map{$curSmpl}{inputXFileSizeMB} );
+	if ($map{$curSmpl}{inputFileSizeMB} > 0 || $map{$curSmpl}{inputXFileSizeMB} > 0){
+		printf("Raw primary input size: %.1f Mb", $map{$curSmpl}{inputFileSizeMB});     
+		printf("    Suppl: %.1f Mb", $map{$curSmpl}{inputXFileSizeMB})
+			if (@paX1 || @paXs || @paBamX);
+		#print "Input size raw (Mb): " . int($map{$curSmpl}{inputFileSizeMB}) ;
+		#print "; Suppl: " . int($map{$curSmpl}{inputXFileSizeMB} );
 		if (@pa1 || @pas){
 			print " Fastq pairs: " . scalar(@pa1) if (@pa1);
 			print " Fastq Singls: " . scalar (@pas) if (@pas);
@@ -4499,68 +6541,74 @@ sub seedUnzip2tmp{
 	# Preserve the authoritative read locations before the arrays are rewritten
 	# to their generated rawRds destinations. A retry must validate the sources,
 	# because missing rawRds files are exactly what this stage recreates.
-	my @sourceInputs = @{source_input_files($fastp, @pa1, @pa2, @pas, @paBam)};
-	push @sourceInputs, @{source_input_files('', @paXs, @paBamX)};
+	my @sourceInputs = (@sourcePa1, @sourcePa2, @sourcePas, @sourcePaBam);
+	push @sourceInputs, @{source_input_files('', @paX1, @paX2, @paXs, @paBamX)};
+	$rawReads = join(";", @sourceInputs);
 	die "tmpPath empty: $tmpPath" if ($tmpPath eq "");
 	$tmpPath.="/rawRds/";
 	my $unzipcmd = "";
 	#$unzipcmd .= "set -e\n"; #sleep $WT\n
-	$unzipcmd .= "rm -rf $finishStone $trimoStone $porechStone $finDest/rawRds/\nmkdir -p $finDest/rawRds/;\nsleep 1;\n";
+	$unzipcmd .= "rm -rf $finishStone $trimoStone $porechStone $finDest/rawRds/\nmkdir -p $finDest/rawRds/;\n";
 	my $unzipcmdTMP = "rm -r -f $tmpPath;\nmkdir -p $tmpPath;\n";
 	#make sure input is unzipped <- deprecated, in newer MF versions input is .gz
 	my $testf1 = "";my $testf2 = "";
 	my $lowEffort =-1; my $allowLinks=0;
+	# FinishedCleanup eventually removes the complete sample scratch directory.
+	# ClnUnzip is useful only when staging consumed additional space by copying
+	# or generating reads; a rawRds directory containing only symlinks can wait
+	# for the terminal cleanup.
+	my $stagedReadsMaterialized = 0;
 	$allowLinks = 1 if (@pa1 == 1);
 	$allowLinks = 1 if (@pa1 == 0 && @pas == 1 && !$porechopFlag);
 	my $illCLip = $himipeSeqAd;
 	if ($map{$curSmpl}{clip} ne ""){$illCLip = $map{$curSmpl}{clip};}
 	#die "Can't find illumina trimming file: $illCLip\n" if ($useTrimomatic && !-e $illCLip);
 	
-	# check if only stone exists, but not the files any longer..
-	if (-d "$finDest/rawRds"){
-		opendir(my $dh, "$finDest/rawRds") or die "Could not open $finDest/rawRds for reading: $!\n";
-		my @files = grep { -f "$finDest/rawRds/$_" } readdir($dh);
-		closedir($dh);
-		if (scalar(@files) == 1 && -e $finishStone) {
-			system "rm -rf $finDest/rawRds" ;
-		}
+	# A support-only staging directory stores its reads below rawRds/Support.
+	# Inspect recursively and invalidate only stale markers; never delete valid
+	# staged inputs while another cleaner may be consuming them.
+	if (-d "$finDest/rawRds"
+		&& !_staged_read_files_present("$finDest/rawRds", $finishStone, $trimoStone, $porechStone)){
+		unlink grep { defined($_) && $_ ne '' && -e $_ } ($finishStone, $trimoStone, $porechStone);
 	}
 
 	
 	
 	#first conversion of bam to fastqs::
 	#this is currently only working with unpaired reads!
+	my $primarySingleSourceCount = scalar(@pas);
+	my $supportSingleSourceCount = scalar(@paXs);
 	for (my $i=0; $i<@paBam; $i++){
-		my $pp = $fastp;
 		my $smtBin = getProgPaths("samtools");
-		$pas[$i] = outfiles_Bam("$finDest/rawRds/",$paBam[$i]);
+		my $bamFastq = outfiles_Bam("$finDest/rawRds/",basename($paBam[$i]));
+		push @sourcePas, $bamFastq;
+		push @pas, $bamFastq;
 		$unzipcmd .= "\necho \"Converting bam $i to fastq\"\n";
-		$unzipcmd .= "$smtBin fastq -@ $numCore -t $pp/$paBam[$i] -0 $pas[$i];\n"; #| $pigzBin -p $numCore -c >
+		$unzipcmd .= "$smtBin fastq -@ $numCore -t $sourcePaBam[$i] -0 $bamFastq;\n"; #| $pigzBin -p $numCore -c >
 		$lowEffort = 0;
+		$stagedReadsMaterialized = 1;
 	}
 	#and also take care of support reads in bam format
 	for (my $i=0; $i<@paBamX; $i++){
-		my $pp = $fastp;
 		my $smtBin = getProgPaths("samtools");
-		my $BamF = $paBamX[$i]; $BamF =~ s/.*\//\//;
+		my $BamF = basename($paBamX[$i]);
 		my $supportDir = "$finDest/rawRds/Support/";
 		system "mkdir -p $supportDir" if ($i==0 && !-d $supportDir);
-		$paXs[$i] = outfiles_Bam($supportDir,$BamF);
+		my $bamFastq = outfiles_Bam($supportDir,$BamF);
+		push @sourcePaXs, $bamFastq;
+		push @paXs, $bamFastq;
 		$unzipcmd .= "echo \"Converting support bam $i to fastq\"\n";
 		$unzipcmd .= "mkdir -p $supportDir;\n" if ($i==0);
-		$unzipcmd .= "$smtBin fastq -@ $numCore -t $paBamX[$i] -0 $paXs[$i];\n"; # | $pigzBin -p $numCore -c > 
+		$unzipcmd .= "$smtBin fastq -@ $numCore -t $paBamX[$i] -0 $bamFastq;\n"; # | $pigzBin -p $numCore -c >
 		$lowEffort = 0;
+		$stagedReadsMaterialized = 1;
 	}
 	
 	for (my $i=0; $i<@pa1; $i++){
 		#print $pa1[$i]."\n";
-		my $pp = $fastp."/";
-		if (@paBam){
-			#do nothing, all done in paBam step
-			;
-		} elsif ($MFconfig{filterFromSource}){
+		if ($MFconfig{filterFromSource}){
 			$lowEffort =1 if ($lowEffort != 0);
-			$pa1[$i] = $pp.$pa1[$i]; $pa2[$i] = $pp.$pa2[$i];
+			$pa1[$i] = $sourcePa1[$i]; $pa2[$i] = $sourcePa2[$i];
 		} elsif ($porechopFlag){
 #			$unzipcmd .= "$porechBin \n";
 			die "porechop is not implemented for read pairs!\n";
@@ -4570,22 +6618,24 @@ sub seedUnzip2tmp{
 			#trimomatic instead of unzip
 			my ($OFp1,$OFu1) = outfiles_trimall("$finDest/rawRds/",$pa1[$i]);
 			my ($OFp2,$OFu2) = outfiles_trimall("$finDest/rawRds/",$pa2[$i]);
-			$unzipcmd .= "java -jar $trimJar PE -threads $numCore $pp/$pa1[$i] $pp/$pa2[$i] $OFp1 $OFu1 $OFp2 $OFu2 ILLUMINACLIP:$illCLip:2:30:10\n";
+			$unzipcmd .= "java -jar $trimJar PE -threads $numCore $sourcePa1[$i] $sourcePa2[$i] $OFp1 $OFu1 $OFp2 $OFu2 ILLUMINACLIP:$illCLip:2:30:10\n";
 			#for now: discard of singletons
 			$unzipcmd .= "rm -f $OFu1 $OFu2\n";
 			$pa1[$i] = $OFp1; $pa2[$i] = $OFp2;
 			$lowEffort=0;
 		} else {
 		#old style
-			my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv($pp,$pa1[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
+			my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$sourcePa1[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
 			$unzipcmd .= $tmpCmd."\n";
 			$pa1[$i] = $newF;
 			$lowEffort = 0 if ($LEloc==0);
-			($tmpCmd,$newF,$LEloc) = complexGunzCpMv($pp,$pa2[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
+			$stagedReadsMaterialized = 1 if ($LEloc==0);
+			($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$sourcePa2[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
 			$unzipcmd .= $tmpCmd."\n";
 			$pa2[$i] = $newF;
 			
 			$lowEffort = 0 if ($LEloc==0);
+			$stagedReadsMaterialized = 1 if ($LEloc==0);
 			#$lowEffort = 1 if ($allowLinks && $lowEffort == -1);
 		}
 	}
@@ -4596,27 +6646,29 @@ sub seedUnzip2tmp{
 	#die "$unzipcmd\n";
 	#for porechop this might be tons of files..
 	
-	for (my $i=0; $i<@pas; $i++){
+	for (my $i=0; $i<$primarySingleSourceCount; $i++){
 		#next if (scalar(@paBam));
 		my $porechopped = "$finDest/rawRds/$pas[$i]"; $porechopped .= ".gz" unless ($porechopped =~ m/\.gz$/);
-		my $pp = $fastp;
 		if ($i==0 && ($porechopFlag && $is3rdGen) && !$allowLinks){$unzipcmd .=  "\nrm -f $porechopped\ntouch $porechopped\n\n";}
 		#print "$libInfo[$i] eq $xtraRdsTech\n";
 		#$pp = $fastp2 if ($libInfo[$i] eq $xtraRdsTech);
 		if ($MFconfig{filterFromSource}){
-			$pas[$i] = $pp.$pas[$i]; 
+			$pas[$i] = $sourcePas[$i];
 		} elsif ($porechopFlag){
 			#porechop is running really slow and instable, probably better to get fast5 and use modern basecaller, that will do this automatically..
 			my $porechBin = getProgPaths("porechop");
-			$unzipcmd .= "$porechBin -i $pp/$pas[$i] -t $numCore  --adapter_threshold 90 |gzip -c >> $porechopped\n";
+			$unzipcmd .= "$porechBin -i $sourcePas[$i] -t $numCore  --adapter_threshold 90 |gzip -c >> $porechopped\n";
+			$stagedReadsMaterialized = 1;
 			if (@pa1 > 0 ){die "no paired end reads can be given together with porechopped long reads!\n";}
 		} else {
-			my ($tmpCmd,$newF) = complexGunzCpMv($pp,$pas[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
+			my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$sourcePas[$i],$tmpPath,$finDest."/rawRds/",$numCore,$allowLinks);
 			$unzipcmd .= $tmpCmd."\n";
 			$pas[$i] = $newF;
+			$stagedReadsMaterialized = 1 if ($LEloc==0);
 			if ($MFconfig{splitFastaInput} != 0){ #in case of input assemblies (MG-RAST.. arghh!!)
 				my $sizSplitScr = getProgPaths("sizSplit_scr");
 				$unzipcmd .= "\n$sizSplitScr $pas[$i] $MFconfig{splitFastaInput}\n";
+				$stagedReadsMaterialized = 1;
 			}
 			$lowEffort = 1 if ($allowLinks &&  $lowEffort != 0);
 		}
@@ -4624,6 +6676,28 @@ sub seedUnzip2tmp{
 			$unzipcmd .= "touch $porechStone\n" if ($porechopFlag);
 			$pas[$i] = ($porechopped);
 		}
+	}
+
+	# Supplementary reads have their own resolved source paths and destination.
+	# Keeping them separate prevents a support directory from being interpreted
+	# relative to the primary input directory.
+	my $supportDest = "$finDest/rawRds/Support/";
+	$unzipcmd .= "mkdir -p $supportDest;\n" if (@paX1 || $supportSingleSourceCount);
+	for (my $i=0; $i<@paX1; $i++) {
+		my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$paX1[$i],$tmpPath,$supportDest,$numCore,0);
+		$unzipcmd .= $tmpCmd."\n"; $paX1[$i] = $newF;
+		$lowEffort = 0 if ($LEloc==0);
+		$stagedReadsMaterialized = 1 if ($LEloc==0);
+		($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$paX2[$i],$tmpPath,$supportDest,$numCore,0);
+		$unzipcmd .= $tmpCmd."\n"; $paX2[$i] = $newF;
+		$lowEffort = 0 if ($LEloc==0);
+		$stagedReadsMaterialized = 1 if ($LEloc==0);
+	}
+	for (my $i=0; $i<$supportSingleSourceCount; $i++) {
+		my ($tmpCmd,$newF,$LEloc) = complexGunzCpMv("",$paXs[$i],$tmpPath,$supportDest,$numCore,0);
+		$unzipcmd .= $tmpCmd."\n"; $paXs[$i] = $newF;
+		$lowEffort = 0 if ($LEloc==0);
+		$stagedReadsMaterialized = 1 if ($LEloc==0);
 	}
 		#die "@pa1\n@pas\n";
 
@@ -4633,7 +6707,6 @@ sub seedUnzip2tmp{
 	$unzipcmd .= "touch $finishStone\n";
 	#if ($useTrimomatic && !$porechopFlag){$unzipcmd .= "touch $trimoStone\n" ;}
 	my $jobN = "";
-	my $jobNUZ = $jobN;
 	#die;
 	#die "unipss $unzipcmd\n";
 	#print "  HH ".-s $testf2 < -s $testf1." FF \n";
@@ -4644,10 +6717,22 @@ sub seedUnzip2tmp{
 		die "Missing or empty input files before unzip for $curSmpl:\n"
 			.join("\n", @missingInputs)."\n" if (@missingInputs);
 		if (!-e $finishStone){#|| ($useTrimomatic && !-e $trimoStone) ){
-			if ($lowEffort==1){
-				#die "$unzipcmd\n";
+			my $lightweightLocal = commands_are_lightweight_filesystem($unzipcmd)
+				&& normalise_job_dependencies($jDepe) eq '';
+			if ($lightweightLocal){
+				# Refresh the conventional audit script even when no scheduler job is
+				# submitted; otherwise an old UNZP.sh misleadingly describes this run.
+				my $localUnzipScript = $logDir."UNZP.sh";
+				open(my $localUnzipFH, '>', $localUnzipScript)
+					or die "Cannot write local unzip script $localUnzipScript: $!\n";
+				print {$localUnzipFH} "#!/bin/bash\nset -eo pipefail\n", $unzipcmd
+					or die "Cannot populate local unzip script $localUnzipScript: $!\n";
+				close($localUnzipFH)
+					or die "Cannot close local unzip script $localUnzipScript: $!\n";
+				chmod 0755, $localUnzipScript;
+				print "Executing lightweight UZ setup locally for $curSmpl; refreshed $localUnzipScript\n";
 				systemW $unzipcmd;
-			} elsif ($lowEffort==0) {
+			} else {
 				$jobN = "_UZ$JNUM"; 
 				$unzipcmd = $unzipcmdTMP . $unzipcmd ;
 
@@ -4656,8 +6741,6 @@ sub seedUnzip2tmp{
 				$QSBoptHR->{tmpSpace} = $HDDspace{kraken}; #set option how much tmp space is required, and reset afterwards
 				($jobN, $tmpCmd) = qsubSystem($logDir."UNZP.sh",$unzipcmd,$numCore,"20G",$jobN,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 				$QSBoptHR->{tmpSpace} = $tmpSHDD;
-			} else {
-				die "MG-TK.pl:: unzipcmd not excecutable due to \$lowEffort not correctly set ($lowEffort)!\n";
 			}
 			#print " FDFS ";
 		}
@@ -4669,34 +6752,34 @@ sub seedUnzip2tmp{
 	#die "$unzipcmd\n";
 	
 		#check already here for mate pair support reads, deactivate fastp2
-	my ($mateCmd,$mateSto) = ("","/sh");
+	my $mateCmd = "";
 #	print "@libInfo\n";
-	my $ii=0; my @matePrps=();
+	my $ii=0; my $mateLibraryIndex = 0; my @matePrps=();
 	while($ii<@libInfo){
 		#print $ii." \n";
 		#next;
 		unless ($libInfo[$ii] =~ m/.*mate.*/i){$ii++;next;} #remove from process
-		my $href;
-		($href,$mateCmd,$mateSto) = check_matesL($pa1[$ii],$pa2[$ii],$finDest."mateCln/",$doMateCln);
+		splice(@sourcePa1,$ii,1);splice(@sourcePa2,$ii,1);
+		my $sourceLabel = $libInfo[$ii];
+		my $mateDir = $finDest."mateCln/lib$mateLibraryIndex/";
+		my ($href,$libraryMateCmd,$mateSto) = check_matesL($pa1[$ii],$pa2[$ii],$mateDir,$doMateCln);
+		$mateCmd .= $libraryMateCmd unless -e $mateSto;
 		#remove this ori file from raw reads
 		splice(@pa1,$ii,1);splice(@pa2,$ii,1);splice(@libInfo,$ii,1);
-		push(@matePrps,$href);
+		push(@matePrps,{files => $href, label => $sourceLabel, index => $mateLibraryIndex});
+		$mateLibraryIndex++;
 	}
-	if ( ($mateSto ne "/sh" && !-e $mateSto) && $calcUnzp){
-		$mateCmd = "" if ( -e $mateSto);
+	if ($mateCmd ne "" && $calcUnzp){
+		$stagedReadsMaterialized = 1;
 		($jobN, $tmpCmd) = qsubSystem($logDir."MATE.sh",$mateCmd,1,"20G","_MT$JNUM",$jobN,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
-		#### 3 : if mate pairs, process these now (and remove corresponding raw fiiles
-		foreach my $hrr (@matePrps){
-			my %nateFiles = %{$hrr};
-			push(@pa1,$nateFiles{pe1});push(@pa2,$nateFiles{pe2});push(@pas,$nateFiles{se}); push(@libInfo,"pe4mt$ii");
-			push(@pa1,$nateFiles{mp1});push(@pa2,$nateFiles{mp2});push(@libInfo,"mate$ii");
-			push(@pa1,$nateFiles{un1});push(@pa2,$nateFiles{un2});push(@libInfo,"mate_unkn$ii");
-		}
 	}
 	
 	#principally done.. now catalog and save for later
-	if (!-e $inputRawFile || -s $inputRawFile == 0){
-		open O,">$inputRawFile"; print O $seqSet{"rawReads"}; close O;
+	my @inputRawStat = stat($inputRawFile);
+	if (!@inputRawStat || $inputRawStat[7] == 0){
+		open(my $rawInputFH, ">", $inputRawFile) or die "Cannot write $inputRawFile: $!\n";
+		print {$rawInputFH} $rawReads;
+		close($rawInputFH) or die "Cannot close $inputRawFile: $!\n";
 	}
 
 	
@@ -4706,15 +6789,72 @@ sub seedUnzip2tmp{
 	$map{$curSmpl}{inputFilesEmpty} = 0;
 
 	#die "HJASD:@pa1\n@pas\n";
-	%seqSet = (pa1 => \@pa1, pa2 => \@pa2, pas => \@pas, seqTech => $seqTech, is3rdGen =>$is3rdGen,
-			paX1 => \@paX1, paX2 => \@paX2, paXs => \@paXs, seqTechX => $seqTechX, is3rdGenX => $is3rdGenX,
-			libInfo => \@libInfo, libInfoX => \@libInfoX,
+	my $primaryLibraries = readLibrariesFromArrays(
+		sample => $curSmpl, scope => 'primary', phase => 'staged',
+		technology => $seqTech, pair_technology => $seqTech,
+		single_technology => $singleSeqTech, is_long => $is3rdGen, separate_roles => 1,
+		r1 => \@pa1, r2 => \@pa2, single => \@pas, labels => \@libInfo,
+	);
+	for (my $i = 0; $i < @pa1; $i++) {
+		$primaryLibraries->[$i]{source_files} = {
+			r1 => $sourcePa1[$i], r2 => $sourcePa2[$i], single => '', bam => '',
+		};
+	}
+	my $primaryPairCount = scalar(@pa1);
+	for (my $i = 0; $i < @pas; $i++) {
+		$primaryLibraries->[$primaryPairCount + $i]{source_files} = {
+			r1 => '', r2 => '', single => $sourcePas[$i], bam => '',
+		};
+	}
+	foreach my $mateLibrary (@matePrps) {
+		my $files = $mateLibrary->{files};
+		my $mateIndex = $mateLibrary->{index};
+		my $sourceLabel = $mateLibrary->{label} || "mate$mateIndex";
+		push @{$primaryLibraries}, newReadLibrary(
+			id => "$curSmpl:primary:mate:$mateIndex:pe", sample => $curSmpl,
+			scope => 'primary', technology => $seqTech, is_long => $is3rdGen,
+			label => "$sourceLabel.pe", phase => 'staged',
+			files => {r1 => $files->{pe1}, r2 => $files->{pe2}, single => $files->{se}, bam => ''},
+		);
+		push @{$primaryLibraries}, newReadLibrary(
+			id => "$curSmpl:primary:mate:$mateIndex:mp", sample => $curSmpl,
+			scope => 'primary', technology => $seqTech, is_long => $is3rdGen,
+			label => "$sourceLabel.mate", phase => 'staged',
+			files => {r1 => $files->{mp1}, r2 => $files->{mp2}, single => '', bam => ''},
+		);
+		push @{$primaryLibraries}, newReadLibrary(
+			id => "$curSmpl:primary:mate:$mateIndex:unknown", sample => $curSmpl,
+			scope => 'primary', technology => $seqTech, is_long => $is3rdGen,
+			label => "$sourceLabel.mate_unknown", phase => 'staged',
+			files => {r1 => $files->{un1}, r2 => $files->{un2}, single => '', bam => ''},
+		);
+	}
+	my $supportLibraries = readLibrariesFromArrays(
+		sample => $curSmpl, scope => 'support', phase => 'staged',
+		technology => $seqTechX, pair_technology => $seqTechX,
+		single_technology => $seqTechX, is_long => $is3rdGenX, separate_roles => 1,
+		r1 => \@paX1, r2 => \@paX2, single => \@paXs, labels => \@libInfoX,
+	);
+	for (my $i = 0; $i < @paX1; $i++) {
+		$supportLibraries->[$i]{source_files} = {
+			r1 => $sourcePaX1[$i], r2 => $sourcePaX2[$i], single => '', bam => '',
+		};
+	}
+	my $supportPairCount = scalar(@paX1);
+	for (my $i = 0; $i < @paXs; $i++) {
+		$supportLibraries->[$supportPairCount + $i]{source_files} = {
+			r1 => '', r2 => '', single => $sourcePaXs[$i], bam => '',
+		};
+	}
+	%seqSet = (libraries => [@{$primaryLibraries}, @{$supportLibraries}],
 			totalInputSizeMB => $totalInputSizeMB, inputXFileSizeMB => $totalXInputSizeMB,
+			stagedReadsMaterialized => $stagedReadsMaterialized ? 1 : 0,
 			rawReads => $rawReads,
 			mmpu => $mmpu, 
 			samplReadLength => $MFconfig{defaultReadLength}, #some default value for typically short paired reads..
 			samplReadLengthX => $MFconfig{defaultReadLengthX}, #for any supplementary reads (eg PacBio)
 			);
+	syncSeqSetLegacy(\%seqSet);
 	if (exists $map{$curSmpl}{readLength} && $map{$curSmpl}{readLength} != 0){
 		$seqSet{samplReadLength} = $map{$curSmpl}{readLength};
 	}
@@ -4726,8 +6866,8 @@ sub seedUnzip2tmp{
 	my $cleanSeqSetHR = iniCleanSeqSetHR(\%seqSet);
 	
 	#crucial step that attaches read info to map, to make globally accessible
-	$map{$curSmpl}{seqSet} = \%seqSet;	
-	$map{$curSmpl}{cleanSeqSet} = $cleanSeqSetHR;
+	sampleReadSet($curSmpl, "raw", \%seqSet);
+	sampleReadSet($curSmpl, "clean", $cleanSeqSetHR);
 	
 	#print "$seqSet{pa1}   $seqSet{seqTech}   $seqSet{seqTechX}\n";
 
@@ -4738,8 +6878,8 @@ sub seedUnzip2tmp{
 
 sub mOTU2Mapping{
 	my ($tmpD,$finOutD,$smp,$Ncore,$deps) = @_;
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $inF1a = ${$cleanSeqSetHR}{arp1}; my $inF2a = ${$cleanSeqSetHR}{arp2}; my $inFSa = ${$cleanSeqSetHR}{singAr}; #my $mergRdsHr = ${$cleanSeqSetHR}{mrgHshHR};
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
 
 	
 	
@@ -4750,7 +6890,10 @@ sub mOTU2Mapping{
 	my $stone = $finOutD."$smp.Motu2.sto";
 	my $DBstr = ""; $DBstr = "-db $DBdir " unless ($DBdir eq "");
 	if (!$MFopt{DoMOTU2} ||  -e $stone){return;}
-	my @car1 = @{$inF1a}; my @car2 = @{$inF2a}; my @sar = @{$inFSa};
+	my $pairs = libraryPairs($libraries);
+	my @car1 = map { $_->{files}{r1} } @{$pairs};
+	my @car2 = map { $_->{files}{r2} } @{$pairs};
+	my @sar = @{libraryFiles($libraries, 'single')};
 	my $inF1 = join(",",@car1); my $inF2 = join(",",@car2); my $inFS = join(",",@sar); 
 	system "mkdir -p $finOutD\n" unless (-d $finOutD);
 	my $cmd = "mkdir -p $tmpD\n";
@@ -4762,8 +6905,14 @@ sub mOTU2Mapping{
 	$cmd .= "if [ -s $finOutD/$smp.motu2.tab.gz ] ; then touch  $stone ; fi\n";
 	#$cmd .= "touch  $stone\n";
 	my $jobN = "mOT$JNUM";
-	#die $cmd."\n";
+	# mOTUs uses the job working directory for sizeable alignment intermediates.
+	# Scale the scheduler request with the compressed input instead of inheriting
+	# the generic per-job scratch default.
+	my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+	$QSBoptHR->{tmpSpace} =
+		int(($map{$curSmpl}{inputFileSizeMB} * 4) / 1024) + 15 ."G";
 	my ($jobN2,$tmpCmd) = qsubSystem($logDir."mOTU2_prof.sh",$cmd,$Ncore,"3G",$jobN,$deps,"",1,[],$QSBoptHR);
+	$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	$jobN  = $jobN2;
 	return $jobN;
 }
@@ -4861,25 +7010,18 @@ sub hostRmBase{
 
 sub removeHostSeqs($ $ $){
 	my ($tmpD,$jDep,$checkIfExists) = @_;
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
 
 	return $jDep unless ($MFopt{humanFilter});
-	my @pa1 = @{${$cleanSeqSetHR}{arp1}}; my @pa2 = @{${$cleanSeqSetHR}{arp2}}; my @pas = @{${$cleanSeqSetHR}{singAr}};
-	my @pa1X = @{${$cleanSeqSetHR}{arpX1}}; my @pa2X = @{${$cleanSeqSetHR}{arpX2}}; my @pasX = @{${$cleanSeqSetHR}{singArX}};
-	my $gen3 = ${$cleanSeqSetHR}{is3rdGen};
-	my $gen3X = ${$cleanSeqSetHR}{is3rdGenX};
+	my $libraries = ensureCleanSeqSetLibraries($cleanSeqSetHR, $curSmpl);
 	
 	my $outputExists=1;
 	my $fileDir = "";
 
 	if ($fileDir eq ""){
-		if (@pa1 > 0){
-			$pa1[0] =~ m/(.*\/)[^\/]+$/; $fileDir= $1 ;
-		} elsif (@pas) {#potentially in pas then
-			$pas[0] =~ m/(.*\/)[^\/]+$/; $fileDir= $1 ;
-		} elsif (@pasX) {#potentially in pas then
-			$pasX[0] =~ m/(.*\/)[^\/]+$/; $fileDir= $1 ;
-		}
+		my ($firstFile) = map { $_->{files}{r1} || $_->{files}{single} }
+			grep { $_->{files}{r1} || $_->{files}{single} } @{$libraries};
+		$firstFile =~ m/(.*\/)[^\/]+$/ and $fileDir = $1 if defined($firstFile);
 	}
 	#return $jDep if ($fileDir eq "");
 	if ($fileDir eq ""){
@@ -4910,19 +7052,11 @@ sub removeHostSeqs($ $ $){
 	#loop around different DBs..
 	
 	for (my $j=0;$j<@DBname ; $j++){
-		#primary reads..
-		for (my $i=0;$i<@pa1;$i++){
-			$cmd .= hostRmBase($pa1[$i],$pa2[$i],$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[$j]");
-		}
-		for (my $i=0;$i<@pas;$i++){
-			$cmd .= hostRmBase($pas[$i],"",$MFopt{humanFilter},$gen3,$numThr,$tmpD,"$DBdir$DBname[$j]");
-		}
-		#supplementray reads..
-		for (my $i=0;$i<@pa1X;$i++){
-			$cmd .= hostRmBase($pa1X[$i],$pa2X[$i],$MFopt{humanFilter},$gen3X,$numThr,$tmpD,"$DBdir$DBname[$j]");
-		}
-		for (my $i=0;$i<@pasX;$i++){
-			$cmd .= hostRmBase($pasX[$i],"",$MFopt{humanFilter},$gen3X,$numThr,$tmpD,"$DBdir$DBname[$j]");
+		foreach my $library (@{$libraries}) {
+			$cmd .= hostRmBase($library->{files}{r1},$library->{files}{r2},$MFopt{humanFilter},$library->{is_long},$numThr,$tmpD,"$DBdir$DBname[$j]")
+				if ($library->{files}{r1});
+			$cmd .= hostRmBase($library->{files}{single},"",$MFopt{humanFilter},$library->{is_long},$numThr,$tmpD,"$DBdir$DBname[$j]")
+				if ($library->{files}{single});
 		}
 	}
 	$cmd .= "\n\n";
@@ -4948,15 +7082,13 @@ sub removeHostSeqs($ $ $){
 
 sub genoSize(){
 	my ($oD,$jdep) = @_;
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
 
-	my $arp1 = ${$cleanSeqSetHR}{arp1}; my $arp2 = ${$cleanSeqSetHR}{arp2}; my $ars = ${$cleanSeqSetHR}{singAr}; my $mergRdsHr = ${$cleanSeqSetHR}{mrgHshHR};
-
-	my @pa1 = @{$arp1}; my @pa2 = @{$arp2}; my @pas = @{$ars};
+	my $pairs = libraryPairs(readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl));
 	my $cmd = "mkdir -p $oD\n";
 	my $microCensBin = getProgPaths("microCens");
-	for (my $i=0;$i<@pa1;$i++){
-		$cmd .= "$microCensBin -t 2 $pa1[$i],$pa2[$i] $oD/MC.$i.result\n";
+	for (my $i=0;$i<@{$pairs};$i++){
+		$cmd .= "$microCensBin -t 2 $pairs->[$i]{files}{r1},$pairs->[$i]{files}{r2} $oD/MC.$i.result\n";
 	}
 #	die $cmd;
 	my $jobName = "_GS$JNUM"; my $tmpCmd;
@@ -4967,10 +7099,10 @@ sub genoSize(){
 sub krakenTaxEst(){
 	my ($outD, $tmpD,$name,$jobd) = @_;
 
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $arp1 = ${$cleanSeqSetHR}{arp1}; my $arp2 = ${$cleanSeqSetHR}{arp2}; my $ars = ${$cleanSeqSetHR}{singAr}; 
-
-	my @pa1 = @{$arp1}; my @pa2 = @{$arp2}; my @pas = @{$ars};
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	my $pairs = libraryPairs($libraries);
+	my @pas = @{libraryFiles($libraries, 'single')};
 	#$outD.= "$MFopt{globalKraTaxkDB}/";
 	my $krakStone = "$outD/krakDone.sto";
 	return $jobd if (-d $outD && -e $krakStone);
@@ -4985,9 +7117,8 @@ sub krakenTaxEst(){
 
 	#die $curDB."\n";
 	#paired read tax assign
-	for (my $i=0;$i<@pa1;$i++){
-		my $r1 = $pa1[$i]; my $r2 = $pa2[$i];
-		$pa1[$i] =~ m/(.*\/)[^\/]+$/; 
+	for (my $i=0;$i<@{$pairs};$i++){
+		my $r1 = $pairs->[$i]{files}{r1}; my $r2 = $pairs->[$i]{files}{r2};
 		$cmd .= "$krkBin --paired --preload --threads $numCore --fastq-input  --db $curDB  $r1 $r2 >$tmpD/rawKrak.$it.out\n";
 		for (my $j=0;$j< @thrs;$j++){
 			$cmd .= "$krkBin-filter --db $curDB  --threshold $thrs[$j] $tmpD/rawKrak.$it.out | $krkBin-translate --mpa-format --db $curDB > $tmpD/krak_$thrs[$j]"."_$it.out\n";
@@ -5021,15 +7152,25 @@ sub krakenTaxEst(){
 
 	my $jobName = "_KT$JNUM"; my $tmpCmd;
 	if (!-d $outD || !-e $krakStone){
+		my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+		my $requestedTmpSpace = $HDDspace{kraken};
+		if ($map{$curSmpl}{inputFileSizeMB} > 10000) {
+			# raw classifications plus the translated threshold series coexist in
+			# $tmpD until the final count tables have been validated.
+			$requestedTmpSpace =
+				int(($map{$curSmpl}{inputFileSizeMB} * 6) / 1024) + 30 ."G";
+		}
+		$QSBoptHR->{tmpSpace} = $requestedTmpSpace;
 		($jobName,$tmpCmd) = qsubSystem($logDir."KrkTax.sh",$cmd,$numCore,"20G",$jobName,$jobd.";$krakDeps","",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
+		$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	}
 	return $jobName;
 }
 
 sub check_map_done{
-	my ($doCram, $finalD, $baseN, $_legacyMappingDir) = @_;
-	# Only canonical outputs count as complete.  Older scratch-only results are
-	# migrated before planning, rather than making every consumer probe two paths.
+	my ($doCram, $finalD, $baseN) = @_;
+	# Only canonical outputs count as complete. Older scratch-only results are
+	# ignored so partial outputs cannot cross MATAFILER version boundaries.
 	if ($doCram){
 		return 1 if (-s "$finalD/$baseN-smd.cram" && -e "$finalD/$baseN-smd.cram.sto");
 	} else {
@@ -5038,22 +7179,25 @@ sub check_map_done{
 	return 0;
 }
 sub check_depth_done{
-	my ($_doCram, $finalD, $baseN, $_legacyMappingDir) = @_;
+	my (undef, $finalD, $baseN) = @_;
 	return 1 if (fileGZs("$finalD/$baseN-smd.bam.coverage"));
 	return 0;
 }
 
 #create string for mapper to register libraries
 sub getRgStr{ 
-	my ($smpl,$libsOri,$libsOriX,$usePairs,$mapper) = @_;
+	my ($smpl,$libsOri,$libsOriX,$usePairs,$mapper,$readTechnology) = @_;
 	my $rgStr ="noReg";
+	my $platform = 'ILLUMINA';
+	$platform = 'PACBIO' if (($readTechnology || '') eq 'PB');
+	$platform = 'ONT' if (($readTechnology || '') eq 'ONT');
 	if ($mapper > 1 || $mapper == -2){ #bwa/minimap2 have same format..
-		$rgStr = '\'@RG\\tID:$smpl\\tSM:'.$smpl.'\\tPL:ILLUMINA';
+		$rgStr = '\'@RG\\tID:$smpl\\tSM:'.$smpl.'\\tPL:'.$platform;
 		$rgStr .= '\\tLB:'.$libsOri.'\'';
 	}
 	if ($mapper==1 || $mapper ==5){ #bowtie2 & strobealign
 		my $sep=" "; $sep = "=" if ($mapper ==5);
-		$rgStr = "--rg-id${sep}$smpl --rg${sep}SM:$smpl --rg${sep}PL:ILLUMINA "; #PU:lib1
+		$rgStr = "--rg-id${sep}$smpl --rg${sep}SM:$smpl --rg${sep}PL:$platform "; #PU:lib1
 		if ($usePairs){
 			$rgStr .= "--rg${sep}LB:$libsOri ";
 			$rgStr .= " -X $MFconfig{mateInsertLength} " if ($libsOri =~ m/mate/ && $mapper==1);
@@ -5204,7 +7348,7 @@ sub alignPostTreat{
 		$algCmd .= "$smtBin index $iTO\n";
 		for (my $k=0;$k<@{$postTreat{regsAR}};$k++){
 			#		print "$k\t$finalDS[$k]\n";
-			if(check_map_done(${$postTreat{doCram}}, ${$postTreat{finalDSar}}[$k], ${$postTreat{outNmsAR}}[$k], ${$postTreat{mappDirAR}}[$k])){$$subBamsAR[$k]="";next;}
+			if(check_map_done(${$postTreat{doCram}}, ${$postTreat{finalDSar}}[$k], ${$postTreat{outNmsAR}}[$k])){$$subBamsAR[$k]="";next;}
 			$algCmd .= "\n\nset +e \n" if ($k==0);
 			$algCmd .= "#  %%%%%%%%%%%%%%%% $k %%%%%%%%%%%%%%%% \n";
 			$algCmd .= "$bamHdFilt_scr $iTO ${$postTreat{reg_lcsAR}}[$k] 0 > $iTO.decoy.sam.$k\n";
@@ -5226,19 +7370,6 @@ sub alignPostTreat{
 }
 
 
-sub fastCovCalc{
-	my ($AsgHR,$ASG) = @_;
-	my $cmd = "";
-	#my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp($AsgHR,$ASG,0);
-
-	#$cmd .= getAlgnCmdBase(1,$NcoreL, $readTec,1);
-	#$algCmd .= "$algCmdBase -x $bwtIdxs[$kk] -1 ".join(",",@{$par1}) ." -2 ".join(",",@{$par2});
-
-}
-
-
-
-
 sub mapReadsToRef{
 	my ($dirsHr, $jDepe) = @_;
 	#my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp($AsgHR,$ASG,$supportRds);
@@ -5255,8 +7386,17 @@ sub mapReadsToRef{
 
 	my $REF = $dirsHr->{sbj}; #target to map onto, can by ","-spearated list
 	#print "$outName\n";
-	my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$ASG,$supportRds,$outName);
-	my @libsOri = @{$liar};
+	my $libraries = ref($dirsHr->{libraries}) eq 'ARRAY'
+		? $dirsHr->{libraries}
+		: getRawLibrariesAssmGrp(\%AsGrps,$ASG,$supportRds,$outName);
+	my $pairs = libraryPairs($libraries);
+	my @pa1 = map { $_->{files}{r1} } @{$pairs};
+	my @pa2 = map { $_->{files}{r2} } @{$pairs};
+	my @paS = @{libraryFiles($libraries, 'single')};
+	my @singleLibraries = grep { $_->{files}{single} } @{$libraries};
+	my @mappingLibraries = (@{$pairs}, @singleLibraries);
+	my @libsOri = map { $_->{label} || $_->{id} || 'library' } @mappingLibraries;
+	my $recordReadTechnology = libraryTechnology($libraries, "mapping sample $outName", 1);
 	#simple rule for mapper program: for now set to bowtie2
 
 	#die "$REF\n";
@@ -5271,11 +7411,17 @@ sub mapReadsToRef{
 	my $mappDirPre = ${$dirsHr}{glbMapDir};	my $nodeTmp = ${$dirsHr}{nodeTmp}; #m,s
 	$nodeTmp.="_map${supTag}/";
 	my $qdir = $logDir; $qdir = ${$dirsHr}{qsubDir} if (exists( ${$dirsHr}{qsubDir} ));
-	my $readTec = ${$dirsHr}{readTec};
-	if ($readTec eq "" && @libsOri){$readTec = $libsOri[0];}
+	my $declaredReadTechnology = ${$dirsHr}{readTec} || '';
+	die "Mapping technology '$declaredReadTechnology' disagrees with library records '$recordReadTechnology' for $outName\n"
+		if ($declaredReadTechnology ne '' && $recordReadTechnology ne ''
+			&& $declaredReadTechnology ne $recordReadTechnology);
+	my $readTec = $recordReadTechnology || $declaredReadTechnology;
 	my $tmpOut = ${$dirsHr}{glbTmp};	my $finalD = ${$dirsHr}{outDir}; #node-local work, final mapping
 	my $unaligned = $finalUnaligned eq "" ? "" : $tmpOut."/unaligned/";
 	my $mapperProgLoc = decideMapper($MFopt{MapperProg},$readTec);
+	my $mappingInputSizeMB = $supportRds
+		? ($map{$curSmpl}{inputXFileSizeMB} || 0)
+		: ($map{$curSmpl}{inputFileSizeMB} || 0);
 	#die "$finalD\n";
 	my @finalDS = split /,/,$finalD;
 	my @mappDir = split /,/,$mappDirPre;
@@ -5298,7 +7444,6 @@ sub mapReadsToRef{
 	my @tmpOutxtra = ($nodeTmp."/$baseN.iniAlignment.xtra");
 	#global value overwrites local value
 	if ($doCram){$doCram = $MFopt{doBam2Cram};}
-	my @pa1 = @{$par1}; my @pa2 = @{$par2}; my @paS = @{$parS};
 	#calculate total input size (to get handle on req disk space
 	
 
@@ -5320,6 +7465,23 @@ sub mapReadsToRef{
 			$bwtIdxs[$kk] .= $MFcontstants{bwt2IdxFileSuffix};
 		}
 	}
+	my $referencePreparationCommand = "";
+	if ($REF =~ /\.gz$/) {
+		my $compressedReference = $REF;
+		my $stagedReference = "$nodeTmp/".basename($compressedReference);
+		$stagedReference =~ s/\.gz$//;
+		$referencePreparationCommand .= "mkdir -p $nodeTmp\n";
+		$referencePreparationCommand .= "$pigzBin -dc $compressedReference > $stagedReference\n";
+		$referencePreparationCommand .= "test -s $stagedReference\n";
+		if ($mapperProgLoc == 2 || $mapperProgLoc == 4) {
+			$referencePreparationCommand .= "for f in $compressedReference.*; do [ -e \"\$f\" ] || continue; "
+				."suffix=\${f#$compressedReference}; cp \"\$f\" \"$stagedReference\$suffix\"; done\n";
+		}
+		$REF = $stagedReference;
+	}
+	$params{mappingReference} = $REF;
+	$params{referencePreparationCommand} = $referencePreparationCommand;
+	$params{mappingInputSizeMB} = $mappingInputSizeMB;
 	#die "$isSorted\n";
 	my $anyUsedPairs= 1; $anyUsedPairs = 0 if (scalar @pa1 == 0);
 	$params{sortedbam}=$isSorted; $params{bamIsNew} = $bamFresh; $params{is2ndMap} = $is2ndMap;
@@ -5332,12 +7494,16 @@ sub mapReadsToRef{
 		#print "$tmpOut22[$k]\n";
 	}
 	for (my $k=0;$k<@outNms;$k++){
-		if ($MFopt{MapRewrite2nd}){$outputExistsNEx++; system "rm -fr $tmpOut22[$k] $finalDS[$k]/$outNms[$k]-smd*"; next;}
-		my $outstat = check_map_done($doCram, $finalDS[$k], $outNms[$k], $mappDir[$k]);
+		if ($is2ndMap && $MFopt{MapRewrite2nd}){$outputExistsNEx++; system "rm -fr $tmpOut22[$k] $finalDS[$k]/$outNms[$k]-smd*"; next;}
+		my $outstat = check_map_done($doCram, $finalDS[$k], $outNms[$k]);
 		next if ($outstat);#-e "$finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz" );#|| -e "$mappDir[$k]/$outNms[$k]-smd.bam.coverage.gz");
 		#print "-e $finalDS[$k]/$outNms[$k]-smd.bam.coverage.gz || -e $mappDir/$outNms[$k]-smd.bam.coverage.gz";
-		if (-e $tmpOut22[$k] && -s $tmpOut22[$k] < 100){unlink $tmpOut22[$k];}
-		if (!-e $tmpOut22[$k]){ $outputExistsNEx++; }
+		my @temporaryOutputStat = stat($tmpOut22[$k]);
+		if (@temporaryOutputStat && $temporaryOutputStat[7] < 100){
+			unlink $tmpOut22[$k];
+			@temporaryOutputStat = stat($tmpOut22[$k]);
+		}
+		if (!@temporaryOutputStat){ $outputExistsNEx++; }
 	}
 	#die "@outNms \n$outputExistsNEx\n";
 	if ($outputExistsNEx == 0){
@@ -5360,8 +7526,6 @@ sub mapReadsToRef{
 	#move ref DB & unzip
 	#system("rm -r $tmpOut\n mkdir -p $tmpOut\n cp $REF $tmpOut");
 	#$REF = $tmpOut.basename($REF);
-	my $unzipcmd = "";
-	if ($REF =~ m/\.gz$/){$unzipcmd .= "gunzip $REF\n";$REF =~ s/\.gz$//;}
 	my $jobN = "";
 	my $tmpUna = $tmpOut."/unalTMP/";
 	#Error: No EOF block on /g/scb/bork/hildebra/SNP/MeHiAss/MH0411//tmp//mapping/Alignment.bam, possibly truncated file.
@@ -5373,10 +7537,10 @@ sub mapReadsToRef{
 	#depending on setup, mappDir == tmpOut
 	my $algCmd = "";
 	$algCmd .= "\nrm -rf $tmpOut $nodeTmp\nmkdir -p $tmpOut\nmkdir -p $nodeTmp\n"; 
+	$algCmd .= $referencePreparationCommand;
 	#die "$algCmd\n@mappDir\n";
 	#my $algCmd = "rm -rf ".join(" ",split(/,/,$mappDir))."\nmkdir -p ".join(" ",split(/,/,$mappDir))." $tmpOut $nodeTmp\n"; 
 	$algCmd .= "mkdir -p $qdir/mapStats/\n";
-	my $statsF = $qdir."mapStats/".$bashN."mapStats.txt";
 	
 	my @regs;#subset of DB seqs to filter for 
 	my @reg_lcs;
@@ -5431,11 +7595,11 @@ sub mapReadsToRef{
 			my $allDone=1;
 			for (my $k=0;$k<@outNms;$k++){
 				#print "$finalDS[$k] $outNms[$k] $mappDir[$k]\n";
-				$allDone =0 unless(check_map_done($doCram, $finalDS[$k], $outNms[$k], $mappDir[$kk]));
+				$allDone =0 unless(check_map_done($doCram, $finalDS[$k], $outNms[$k]));
 			}
 			#die;
 			last if ($allDone);
-		} elsif (-e $tmpOut22[$kk] || check_map_done($doCram, $finalDS[$kk], $outNms[$kk], $mappDir[$kk])){ #this check is for non-decoy mode
+		} elsif (-e $tmpOut22[$kk] || check_map_done($doCram, $finalDS[$kk], $outNms[$kk])){ #this check is for non-decoy mode
 			#(-e "$finalDS[$kk]/$outNms[$kk]-smd.bam" && -e "$finalDS[$kk]/$outNms[$kk]-smd.bam.coverage.gz") ){
 			next;
 		} #|| -e "$mappDir[$kk]/$outNms[$kk]-smd.bam.coverage.gz"
@@ -5473,7 +7637,7 @@ sub mapReadsToRef{
 			
 			#$pa1[$i] =~ m/\/([^\/]+)\.f.*q$/;
 			#my $rgID = "$outName";
-			my $rgStr = getRgStr($outName,$libsOri[$i],$libsOri[$i],$usePairs,$mapperProgLoc);
+			my $rgStr = getRgStr($outName,$libsOri[$i],$libsOri[$i],$usePairs,$mapperProgLoc,$readTec);
 			#die "$rgStr\n";
 			if ($mapperProgLoc==1){ #bowtie2
 				if ($usePairs){
@@ -5535,13 +7699,12 @@ sub mapReadsToRef{
 			my $tarBam = $tmpOut22[$kk];
 			$tarBam = $tmpOut22[$k] if ($decoyModeActive || $map2ndTogether>0);
 			next if ($subBams[$k] eq "");#case that decoy map has already created parts of the mappings..
-			if (1){   #always active #($numLib > 1){
+			my @bamParts = grep { $_ ne "" } split /\s+/, $subBams[$k];
+			if (@bamParts > 1){
 				$algCmd .= "\n$smtBin cat ".$subBams[$k]." $filterStep > $tarBam\n"; #$k here, because this refers to @regs
 				$algCmd .= "\nrm -f ".$subBams[$k]."\n";
-			} else { #nothing else, compression is now in the bowtie2 phase
-				#$algCmd .= "\n$smtBin view -bS -F 4 -@ $Ncore $subBams[0] > $tmpOut22\n";
-				
-				$algCmd .=  "\nmv $subBams[$k] $tarBam\n"; #kk here, because this is the alignment to each single bwtIdx
+			} elsif (@bamParts == 1) {
+				$algCmd .=  "\nmv $bamParts[0] $tarBam\n";
 			}
 		}
 	}
@@ -5567,7 +7730,7 @@ sub mapReadsToRef{
 	if ($bamFresh) {
 		# Mapping and post-processing must execute in one scheduler allocation so
 		# the intermediate alignment can remain on node-local storage.
-		$params{mappingCommand} = $unzipcmd.$algCmd;
+		$params{mappingCommand} = $algCmd;
 		$params{mappingDependencies} = $jDepe;
 		$params{mappingJobName} = "_MAP$JNUM$supTag.$outNms[0]";
 		$params{mappingScript} = $qdir.$bashN."map$supTag.sh";
@@ -5620,9 +7783,12 @@ sub bamDepth{
 	#readTec
 
 	my %params = %{$mapparhr};
+	$REF = $params{mappingReference} if (($params{mappingReference} || "") ne "");
 	my ($isSorted , $bamFresh,$is2ndMap, $usePairs) =($params{sortedbam},$params{bamIsNew},$params{is2ndMap},$params{usePairs});
 	my $mappingCommand = delete($mapparhr->{mappingCommand}) || "";
 	my $mappingDependencies = $params{mappingDependencies} || $jDep;
+	my $referencePreparationCommand = $params{referencePreparationCommand} || "";
+	my $mappingInputSizeMB = $params{mappingInputSizeMB} || 0;
 	#recreate base pars from map2tar sub
 	my $locDoRmDup = $MFopt{MapperRmDup};
 	$locDoRmDup = 0 if (!$usePairs);
@@ -5639,8 +7805,8 @@ sub bamDepth{
 	my $sortTMP2 = $nodeTmp."/$baseN.2.srt";
  
 	#check if already done
-	my $outstat = check_map_done($doCram, $finalD, $baseN, $mappDir);
-	my $outstat2 = check_depth_done($doCram, $finalD, $baseN, $mappDir);
+	my $outstat = check_map_done($doCram, $finalD, $baseN);
+	my $outstat2 = check_depth_done($doCram, $finalD, $baseN);
 	my $breakpointOut = $dirsHr->{breakpointOutput} || "";
 	my $breakpointDone = $breakpointOut eq "" || -s $breakpointOut;
 	my $breakpointWork = ($breakpointOut ne "" && !$breakpointDone)
@@ -5651,6 +7817,30 @@ sub bamDepth{
 	#die "$mappDir/$baseN-smd.bam.coverage.gz\n$finalD/$baseN-smd.bam.coverage.gz\n" ;#if (-e "$finalD/$baseN-smd.bam.coverage.gz");
 		
 	my $numCore = ${$dirsHr}{sortCores};#new functionality with sambamba
+	$numCore = 1 if (!$numCore || $numCore < 1);
+	my $locSrtMem = $MFopt{mapSortMemGb};
+	my $baseMem=20;
+	if ($locSrtMem < 0){
+		$locSrtMem = $baseMem + (2 * $mappingInputSizeMB/1024);
+		$locSrtMem += $baseMem if ($MFopt{largeMapperDB});
+	}
+	# Duplicate removal normally streams name-sort -> fixmate -> coordinate-sort.
+	# Both sorts are then alive at once and -m applies per thread.  For large
+	# inputs, materialize the name-sorted BAM so only one sort is resident at a
+	# time.  The mapping scratch request already budgets eight times compressed
+	# input size, which leaves room for this intermediate on local SSD.
+	my $largeSortInputMB = 4 * 1024;
+	my $serialiseDuplicateSorts = $locDoRmDup
+		&& $mappingInputSizeMB >= $largeSortInputMB;
+	my $sortProcessCount = ($locDoRmDup && !$serialiseDuplicateSorts) ? 2 : 1;
+	my $sortMemoryMB = int((($locSrtMem * 1024) - 2048)
+		/ ($numCore * $sortProcessCount));
+	$sortMemoryMB = 256 if ($sortMemoryMB < 256);
+	# Large sorts create substantial buffers outside the nominal -m arena.
+	# Keep their per-thread arena at samtools' conservative default even when an
+	# automatic or user-provided total budget would permit a much larger value.
+	my $sortMemoryCapMB = $serialiseDuplicateSorts ? 768 : 2048;
+	$sortMemoryMB = $sortMemoryCapMB if ($sortMemoryMB > $sortMemoryCapMB);
 	# A completed mapping may still predate breakpoint output.  Repair that
 	# single derivative from the canonical coverage without trying to sort a
 	# node-local alignment that no longer exists.
@@ -5663,6 +7853,7 @@ sub bamDepth{
 			? "$finalBam.coverage.gz" : "$finalBam.coverage";
 		my $breakpointCmd = "rm -rf $nodeTmp $breakpointStage\n"
 			."mkdir -p $nodeTmp $breakpointDir $breakpointStage\n"
+			.$referencePreparationCommand
 			."test -s $breakpointCoverage\n";
 		$breakpointCmd .= "$pigzBin -t $breakpointCoverage\n" if ($breakpointCoverage =~ /\.gz$/);
 		$breakpointCmd .= "$breakpointScr --assembly $REF --coverage $breakpointCoverage --output $breakpointWork "
@@ -5672,7 +7863,9 @@ sub bamDepth{
 			."test -s $breakpointWork\n"
 			."mv $breakpointWork $breakpointStage/$breakpointName\n"
 			."mv -f $breakpointStage/$breakpointName $breakpointOut\n"
-			."rmdir $breakpointStage\nrm -rf $nodeTmp\n";
+			."rmdir $breakpointStage\nrm -rf $nodeTmp";
+		$breakpointCmd .= " $params{mapperNodeDir}" if (($params{mapperNodeDir} || "") ne "");
+		$breakpointCmd .= "\n";
 		my ($breakpointJob, $breakpointSubmission) = ($jDep, "");
 		if (${$dirsHr}{submit}) {
 			($breakpointJob, $breakpointSubmission) = qsubSystem(
@@ -5684,6 +7877,60 @@ sub bamDepth{
 			$breakpointSubmission = $breakpointCmd;
 		}
 		return ($breakpointJob, $breakpointSubmission, $outstat);
+	}
+	# A complete canonical BAM/CRAM is authoritative. If only coverage (and
+	# possibly its breakpoint derivative) is missing, derive those files directly
+	# without sorting, duplicate removal, or CRAM conversion a second time.
+	if ($outstat && !$outstat2 && $mappingCommand eq "") {
+		my $canonicalAlignment = $doCram
+			? "$finalD/$baseN-smd.cram" : "$finalD/$baseN-smd.bam";
+		my $repairPrefix = "$nodeTmp/$baseN-smd.bam";
+		my $repairCoverage = "$repairPrefix.coverage.gz";
+		my $repairStage = "$finalD/.$baseN.coverage-stage";
+		my $sam2bed = getProgPaths("samcov2bed");
+		my $depthFilters = $dirsHr->{strictHybridCoverage}
+			? "-Q $MFopt{hybridMinMapQ} -q $MFopt{hybridMinBaseQ}" : "";
+		my $referenceOption = $doCram ? "--reference $REF " : "";
+		my $repairCmd = "rm -rf $nodeTmp $repairStage\nmkdir -p $nodeTmp $finalD $repairStage\n";
+		$repairCmd .= $referencePreparationCommand;
+		$repairCmd .= "test -s $canonicalAlignment\n$smtBin quickcheck $canonicalAlignment\n";
+		$repairCmd .= "$smtBin depth ${referenceOption}-aa $depthFilters -@ $numCore $canonicalAlignment "
+			."| $sam2bed | $pigzBin -p $numCore -c > $repairCoverage\n";
+		$repairCmd .= "test -s $repairCoverage\n$pigzBin -t $repairCoverage\n";
+		$repairCmd .= jgi_depth_cmd([$canonicalAlignment],$repairPrefix,95,$numCore,$REF)
+			if ($MFopt{DoJGIcoverage});
+		if (!$breakpointDone) {
+			my $breakpointScr = getProgPaths("breakpoints_scr");
+			my $breakpointDir = dirname($breakpointOut);
+			my $breakpointStage = "$breakpointOut.stage";
+			$repairCmd .= "mkdir -p $breakpointDir\n";
+			$repairCmd .= "$breakpointScr --assembly $REF --coverage $repairCoverage --output $breakpointWork "
+				."--breakpoint-depth $MFopt{breakpointDepth} --min-breakpoint-length $MFopt{breakpointMinLength} "
+				."--smooth-gap $MFopt{breakpointSmoothGap} --flank-length $MFopt{breakpointFlankLength} "
+				."--min-flank-depth $MFopt{breakpointMinFlankDepth} --max-flank-fraction $MFopt{breakpointMaxFlankFraction}\n";
+			$repairCmd .= "test -s $breakpointWork\nrm -f $breakpointStage\n"
+				."mv $breakpointWork $breakpointStage\nmv -f $breakpointStage $breakpointOut\n";
+		}
+		$repairCmd .= "for f in $repairPrefix*; do [ -e \"\$f\" ] || continue; mv \"\$f\" $repairStage/; done\n";
+		$repairCmd .= "test -s $repairStage/$baseN-smd.bam.coverage.gz\n"
+			."for f in $repairStage/*; do mv -f \"\$f\" $finalD/; done\nrmdir $repairStage\n";
+		$repairCmd .= "rm -rf $nodeTmp";
+		$repairCmd .= " $params{mapperNodeDir}" if (($params{mapperNodeDir} || "") ne "");
+		$repairCmd .= "\n";
+		my ($repairJob, $repairSubmission) = ($jDep, "");
+		if (${$dirsHr}{submit}) {
+			my $repairScratch = $QSBoptHR->{tmpSpace};
+			my $baseMapHDD = $HDDspace{mapping}; $baseMapHDD =~ s/G$//;
+			$QSBoptHR->{tmpSpace} = int((2.0 * $mappingInputSizeMB * $baseMapHDD) / 1024) + 10 ."G";
+			($repairJob,$repairSubmission) = qsubSystem(
+				$qdir.$bashN."coverageRepair$supTag.sh",$repairCmd,$numCore,
+				(int($locSrtMem)+1)."G","_COV$JNUM$supTag.$outName",
+				$mappingDependencies,"",$immediateSubm,$QSBoptHR->{General_Hosts},$QSBoptHR);
+			$QSBoptHR->{tmpSpace} = $repairScratch;
+		} else {
+			$repairSubmission = $repairCmd;
+		}
+		return ($repairJob,$repairSubmission,$outstat);
 	}
 	#my $biobambamBin = "bamsormadup";
 	#depth profile
@@ -5706,10 +7953,18 @@ sub bamDepth{
 	if ($locDoRmDup){
 	#bit complicated in samtools now: first sort by name, then fixmate (samtools 1.8)
 	#".int($MFopt{mapSortMemGb}/$numCore)."G
+		$cmd .= "echo \"samtools sort budget: ${sortMemoryMB}M x $numCore threads x $sortProcessCount concurrent sorts\"\n";
 		$cmd .= "echo \"Sorting .bam and fixing mates ...\"\n";
 		#$cmd .= "$smtBin sort -n -m 768M -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore - - | $smtBin sort -T $sortTMP2 -m 768M -@ $numCore - | $smtBin markdup -s -r -@ $numCore - $nxtBAM\n";
-		#split in two, as it requires too much mem..
-		$cmd .= "$smtBin sort -n -m 768M -u -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore -u - - | $smtBin sort -T $sortTMP2 -m 768M -@ $numCore -o $nxtBAM.nf;\n";
+		if ($serialiseDuplicateSorts) {
+			my $nameSortedBam = "$nodeTmp/$baseN.name-sorted.bam";
+			$cmd .= "echo \"Large mapping input: serializing name and coordinate sorts\"\n";
+			$cmd .= "$smtBin sort -n -m ${sortMemoryMB}M -u -T $sortTMP -@ $numCore -o $nameSortedBam $mappingRes;\n";
+			$cmd .= "$smtBin fixmate -m -@ $numCore -u $nameSortedBam - | $smtBin sort -T $sortTMP2 -m ${sortMemoryMB}M -@ $numCore -o $nxtBAM.nf;\n";
+			$cmd .= "rm -f $nameSortedBam;\n";
+		} else {
+			$cmd .= "$smtBin sort -n -m ${sortMemoryMB}M -u -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore -u - - | $smtBin sort -T $sortTMP2 -m ${sortMemoryMB}M -@ $numCore -o $nxtBAM.nf;\n";
+		}
 		$cmd .= "echo \"marking duplicates ...\"\n";
 		$cmd .= "$smtBin markdup --use-read-groups --no-multi-dup -d 1000 -T $sortTMP -s -r -O BAM -@ $numCore $nxtBAM.nf $nxtBAM;\n";
 		$cmd .= "rm -f $nxtBAM.nf;\n";
@@ -5718,7 +7973,7 @@ sub bamDepth{
 			$cmd .= "mv $mappingRes $nxtBAM\n";
 		} else {
 			$cmd .= "echo \"Sorting .bam ...\"\n";
-			$cmd .= "$smtBin sort -@ $numCore -m 768M -O BAM -T $sortTMP2 $mappingRes > $nxtBAM\n";
+			$cmd .= "$smtBin sort -@ $numCore -m ${sortMemoryMB}M -O BAM -T $sortTMP2 $mappingRes > $nxtBAM\n";
 		}
 	}
 	$cmd .= "echo \"Building .bam index...\"\n";
@@ -5790,6 +8045,16 @@ sub bamDepth{
 		$CRAMcmd .= "test -s $publishStage/$baseN-smd.bam\n$smtBin quickcheck $publishStage/$baseN-smd.bam\n";
 	}
 	$CRAMcmd .= "test -s $publishStage/$baseN-smd.bam.coverage.gz\n$pigzBin -t $publishStage/$baseN-smd.bam.coverage.gz\n";
+	# Record which concrete assembly file this alignment targets.  This is a
+	# cheap durable discriminator between a hybrid preassembly and the final
+	# assembly even though both occupy the same path at different workflow
+	# stages.  Secondary multi-reference mappings are not part of that state
+	# transition and may have comma-separated references.
+	if (!$is2ndMap && $REF !~ /,/) {
+		$CRAMcmd .= "test -s \"$REF\"\n";
+		$CRAMcmd .= "stat -c '%s %Y' \"$REF\" > $publishStage/$baseN-smd.reference.stat\n";
+		$CRAMcmd .= "test -s $publishStage/$baseN-smd.reference.stat\n";
+	}
 	$CRAMcmd .= "for f in $publishStage/*; do mv -f \"\$f\" $finalD/; done\nrmdir $publishStage\n";
 	if (($params{unalignedFinalDir} || "") ne "") {
 		my $unalignedStage = "$finalD/.$baseN.unaligned-stage";
@@ -5821,20 +8086,19 @@ sub bamDepth{
 		$nodeCln .= " $params{mapperNodeDir}" if (($params{mapperNodeDir} || "") ne "");
 	}
 	$nodeCln .= ";\necho \"DONE mapping\"\n";
-	my $locSrtMem = $MFopt{mapSortMemGb};
-	my $baseMem=20; 
-	if ($locSrtMem <0){
-		$locSrtMem = $baseMem+ (2 * $map{$curSmpl}{inputFileSizeMB}/1024); #default mme usage..
-		$locSrtMem += $baseMem if ($MFopt{largeMapperDB});
-	}
-	
 	#die "$cmd\n$covCmd\n$CRAMcmd\n";
 	if ( $mappingCommand ne "" || ($doCram && !-e $cramSTO) || (!fileGZs("$finalBam.coverage")) || !$breakpointDone ){#|| $bamFresh){
 		my $preHDDspace=$QSBoptHR->{tmpSpace};		my $baseMapHDD = $HDDspace{mapping} ;  $baseMapHDD =~ s/G$//;
-		$QSBoptHR->{tmpSpace} = int((2.0 * $map{$curSmpl}{inputFileSizeMB}*$baseMapHDD) /1024)+30  ."G";		if (${$dirsHr}{submit}){
+		$QSBoptHR->{tmpSpace} = int((2.0 * $mappingInputSizeMB*$baseMapHDD) /1024)+30  ."G";		if (${$dirsHr}{submit}){
 		#die "map2:: $qdir\n$cramSTO\n$nxtBAM.coverage\n";
 		my $combinedCores = $numCore > ($params{mappingCores} || 0) ? $numCore : ($params{mappingCores} || $numCore);
 		my $combinedMem = int($locSrtMem)+1;
+		my $controlledSortMB = $sortMemoryMB * $numCore * $sortProcessCount;
+		# -m is approximate and excludes compression threads, fixmate, pipes, Perl,
+		# libraries and allocator fragmentation.  Add 25% plus 4 GiB rather than
+		# requesting only the nominal samtools arenas.
+		my $sortRequiredMem = int((($controlledSortMB * 1.25) + 4096 + 1023) / 1024);
+		$combinedMem = $sortRequiredMem if ($sortRequiredMem > $combinedMem);
 		$combinedMem = $params{mappingMemoryGB} if (($params{mappingMemoryGB} || 0) > $combinedMem);
 		my $combinedScript = $params{mappingScript} || $qdir.$bashN."map$supTag.sh";
 		($jobN2,$retCmds) = qsubSystem($combinedScript,
@@ -5961,9 +8225,9 @@ sub prepMetaphlan{
 sub metphlanMapping{
 	my ($tmpD,$finOutD,$smp,$Ncore,$deps) = @_;
 	
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
 
-	my $inF1a = ${$cleanSeqSetHR}{arp1}; my $inF2a = ${$cleanSeqSetHR}{arp2}; my $inFSa = ${$cleanSeqSetHR}{singAr}; my $mergRdsHr = ${$cleanSeqSetHR}{mrgHshHR};
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
 
 	
 	my $bwt2Bin = getProgPaths("bwt2");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
@@ -5978,7 +8242,10 @@ sub metphlanMapping{
 	
 	my $stone = $finOutD."$smp.MP2.sto";
 	if (!$MFopt{DoMetaPhlan} ||  -e $stone){return;}
-	my @car1 = @{$inF1a}; my @car2 = @{$inF2a}; my @sar = @{$inFSa};
+	my $pairs = libraryPairs($libraries);
+	my @car1 = map { $_->{files}{r1} } @{$pairs};
+	my @car2 = map { $_->{files}{r2} } @{$pairs};
+	my @sar = @{libraryFiles($libraries, 'single')};
 	my $inF1 = join(",",@car1); my $inF2 = join(",",@car2); my $inFS = join(",",@sar); 
 	system "mkdir -p $finOutD\n" unless (-d $finOutD);
 	my $finOut = $finOutD."$smp.MP2.txt";
@@ -6013,9 +8280,16 @@ sub metphlanMapping{
 	$cmd .= "[ -s $finOut ] || exit 4\n";
 	$cmd .= "echo \' $mergeStr \' > $stone\n";
 	my $jobN = "MP$MFopt{DoMetaPhlan}$JNUM";
-	
+
+	# Bowtie2 materialises an uncompressed SAM in node-local storage. Its size
+	# can substantially exceed the compressed FASTQ inputs, so do not leave this
+	# submission on the generic per-job scratch default.
+	my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+	$QSBoptHR->{tmpSpace} =
+		int(($map{$curSmpl}{inputFileSizeMB} * 6) / 1024) + 15 ."G";
 	my ($jobN2,$tmpCmd) = qsubSystem($qsubFile,
 			$cmd,$Ncore,"3G",$jobN,$deps,"",1,[],$QSBoptHR);
+	$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	$jobN  = $jobN2;
 	return $jobN;
 }
@@ -6023,14 +8297,16 @@ sub metphlanMapping{
 sub TaxaTarget{
 	my ($tmpD,$finOutD,$smp,$Ncore,$deps) = @_;
 	
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $inF1a = ${$cleanSeqSetHR}{arp1}; my $inF2a = ${$cleanSeqSetHR}{arp2}; my $inFSa = ${$cleanSeqSetHR}{singAr}; #my $mergRdsHr = ${$cleanSeqSetHR}{mrgHshHR};
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
 
 	my $stone = $finOutD."$smp.TaxTar.sto";
 	if (!$MFopt{DoTaxaTarget} ||  -e $stone){return;}
 
-	my @car1 = @{$inF1a}; my @car2 = @{$inF2a}; my @sar = @{$inFSa};	
-	die "TaxaTarget requires equal paired-read arrays for sample $smp\n" if (@car1 != @car2);
+	my $pairs = libraryPairs($libraries);
+	my @car1 = map { $_->{files}{r1} } @{$pairs};
+	my @car2 = map { $_->{files}{r2} } @{$pairs};
+	my @sar = @{libraryFiles($libraries, 'single')};
 	die "TaxaTarget requires at least one paired-read library for sample $smp\n" if (!@car1);
 	die "TaxaTarget does not support singleton reads for sample $smp; disable it or provide paired reads only\n" if (@sar);
 	my $taxTBin = getProgPaths("TaxaTarget");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
@@ -6067,33 +8343,40 @@ sub remComma($){
 
 
 sub _smpl_stats_columns {
-	my @sdm = qw(SDMVersion totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
+	my @sdm = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
 	my @binners;
 	for my $mode (1 .. 5) {
 		my $name = getBinSubdirName($mode);
-		push @binners, "HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins";
+		push @binners, "HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins", "${name}_total_bins";
 	}
 	return (
-		qw(RawInputSize InputIsPaired InputIsSingle
-		FilteredContaRdsPerc FilteredContaRds FilteredNonContaRds
+		# Input discovery and raw-upload preparation.
+		qw(RawInputSize RawInputSizeSub InputIsPaired InputIsSingle
 		FilteredContaRdsPerc_EBI FilteredContaRds_EBI FilteredNonContaRds_EBI),
-		@sdm, (map { "${_}_Sup" } @sdm),
-		qw(Merged NotMerged AvgGenomeSizeEst TotalGenomesEst
-		ContigN50 NScaff400 NScaffG1k NScaffG10k NScaffG100k NScaffG1M
+		# SDM primary/support cleaning, followed by host filtering and FLASH.
+		@sdm, qw(SDMAcceptedPercent), (map { "${_}_Sup" } @sdm), qw(SDMAcceptedPercent_Sup),
+		qw(FilteredContaRdsPerc FilteredContaRds FilteredNonContaRds),
+		qw(Merged NotMerged AvgGenomeSizeEst TotalGenomesEst),
+		# Assembly and the optional hybrid comparison are produced together.
+		qw(ContigN50 NScaff400 NScaffG1k NScaffG10k NScaffG100k NScaffG1M
 		ScaffN50 ScaffMaxSize ScaffSize CircCtgs CircCtgG1M
-		BreakpointCount BreakpointContigs BreakpointBases BreakpointMeanLength BreakpointMaxLength
-		ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign DisconcAlign SingleUniqAlign SingleMultiAlign
-		OpticalDuplicates PCRduplicates PassedMD EstLibSize
-		GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes Gcomplete G5pComplete G3pComplete Gincomplete),
-		@binners,
-		qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved INDEL_Num INDEL_Passed),
-		qw(HybridPreassemblyCount
+		HybridPreassemblyCount
 		HybridPreassemblyContigs HybridFinalContigs HybridContigsDelta HybridFinalToPreContigsRatio
 		HybridPreassemblyBases HybridFinalBases HybridBasesDelta HybridFinalToPreBasesRatio
 		HybridPreassemblyN50 HybridFinalN50 HybridN50Delta HybridFinalToPreN50Ratio
 		HybridPreassemblyN90 HybridFinalN90 HybridN90Delta HybridFinalToPreN90Ratio
 		HybridPreassemblyLongest HybridFinalLongest HybridLongestDelta HybridFinalToPreLongestRatio
 		HybridPreassemblyGCPercent HybridFinalGCPercent HybridGCPercentDelta HybridFinalToPreGCPercentRatio),
+		# Assembly mapping, duplicate handling, and breakpoint detection.
+		qw(ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign DisconcAlign SingleUniqAlign SingleMultiAlign
+		OpticalDuplicates PCRduplicates PassedMD EstLibSize
+		BreakpointCount BreakpointContigs BreakpointBases BreakpointMeanLength BreakpointMaxLength AssemblyBreakpointPercent),
+		# ContigStats gene summary.
+		qw(GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes GeneCodingPercent Gcomplete G5pComplete G3pComplete Gincomplete),
+		# Binning is submitted after ContigStats.
+		@binners,
+		# Consensus SNP/INDEL calling follows binning submission.
+		qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved SNPsPerMbp INDEL_Num INDEL_Passed INDELsPerMbp),
 	);
 }
 
@@ -6121,7 +8404,9 @@ sub _metag_stats_text {
 	for my $sample (@$order) {
 		next unless exists $stats->{$sample};
 		my $values = $stats->{$sample}{values} || {};
-		my @row = ($sample, $stats->{$sample}{DIR});
+		my $directory = defined($stats->{$sample}{DIR}) ? $stats->{$sample}{DIR} : "";
+		$directory =~ s/[\t\r\n]+/ /g;
+		my @row = ($sample, $directory);
 		for my $name (@columns) {
 			my $value = defined($values->{$name}) ? $values->{$name} : '';
 			$value =~ s/[\t\r\n]+/ /g;
@@ -6244,24 +8529,56 @@ sub _parse_sdm_stats_text {
 		}
 	}
 	if ($MaxLengthHistBased > $MaxLength) {$MaxLength = $MaxLengthHistBased;}
-	my @names = qw(SDMVersion totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
-	my @values = ($sdmVersion,$totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr);
+	my @names = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2 AvgSeqLen MaxSeqLength AvgSeqQual accErr);
+	my @values = ($totRds,$Rejected1,$Rejected2,$Accepted1,$Accepted2,$Singl1,$Singl2,$AvgLen,$MaxLength,$AvgQual,$accErr);
 	my %result;
 	my @output_values = $parsed ? @values : map { '' } @names;
 	@result{map { "$_$suffix" } @names} = @output_values;
 	return \%result;
 }
 
+sub _sdm_histogram_max_length {
+	my ($inD) = @_;
+	my $lengthTail = read_stats_log_excerpt("$inD/LOGandSUB/sdm/filter_lenHist.txt",
+		mode => 'tail', tail_lines => 20);
+	my @lengths = ($lengthTail =~ /^(\d+)\s/mg);
+	return @lengths ? $lengths[-1] : 0;
+}
+
 sub sdmStats {
 	my ($inF,$inD,$suffix) = @_;
-	my $MaxLengthHistBased = 0;
-	my $length_histogram = getFileStr("$inD/LOGandSUB/sdm/filter_lenHist.txt",0);
-	if ($length_histogram ne '') {
-		my @lines = split(/\n/, $length_histogram);
-		$MaxLengthHistBased = $1 if @lines && $lines[-1] =~ m/^(\d+)\s/;
-	}
-	my $filStats = getFileStr($inF,0,70);
+	my $MaxLengthHistBased = _sdm_histogram_max_length($inD);
+	my $filStats = read_stats_log_excerpt($inF, mode => 'tail', tail_lines => 70);
 	return _parse_sdm_stats_text($filStats, $MaxLengthHistBased, $suffix);
+}
+
+sub sdmStatsMany {
+	my ($files, $inD, $suffix, $MaxLengthHistBased) = @_;
+	my @countFields = qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2);
+	my @averageFields = qw(AvgSeqLen AvgSeqQual accErr);
+	my %combined = map { $_ => 0 } (@countFields, @averageFields, 'MaxSeqLength');
+	my %averageWeights;
+	$MaxLengthHistBased = _sdm_histogram_max_length($inD)
+		unless defined $MaxLengthHistBased;
+	foreach my $file (@{$files || []}) {
+		next unless defined($file) && $file ne '';
+		my $filStats = read_stats_log_excerpt($file, mode => 'tail', tail_lines => 70);
+		next if $filStats eq '';
+		my $stats = _parse_sdm_stats_text($filStats, $MaxLengthHistBased, '');
+		my $weight = ($stats->{totRds} || 0) + 0;
+		$combined{$_} += ($stats->{$_} || 0) for @countFields;
+		foreach my $field (@averageFields) {
+			next unless defined($stats->{$field}) && $stats->{$field} ne '';
+			$combined{$field} += $stats->{$field} * $weight;
+			$averageWeights{$field} += $weight;
+		}
+		$combined{MaxSeqLength} = $stats->{MaxSeqLength}
+			if (($stats->{MaxSeqLength} || 0) > $combined{MaxSeqLength});
+	}
+	$combined{$_} = $averageWeights{$_}
+		? $combined{$_} / $averageWeights{$_} : '' for @averageFields;
+	return {map { ($_.$suffix) => $combined{$_} }
+		(@countFields, @averageFields, 'MaxSeqLength')};
 }
 
 
@@ -6307,8 +8624,8 @@ sub getMapStats{
 	$inFi = "$inP/bwtMap.sh.etxt" if (!-e $inFi && -e "$inP/bwtMap.sh.etxt"); #old MF file names..
 	#my $outStrDesc = "";
 	my @spl = ();
-	my $alignStats = getFileStr($inFi,0);
-	if (-s $inFi){
+	my $alignStats = read_stats_log_excerpt($inFi);
+	if ($alignStats ne ''){
 		@spl = split(/\n/,$alignStats);
 	}
 	#die "$alignStats\n";
@@ -6371,7 +8688,6 @@ sub getMapStats{
 		#die "minimap!!$sum\n";
 	} elsif ($dobwtStat == 3){ #strobealign
 		if ($incoming > 0){
-			my $frac2 = ($incoming-$removed)/$incoming;
 			#$locStats{totReadPairs} = -1 if (!exists($locStats{totReadPairs}));
 			my $frac = 0; $frac = $incoming/$locStats{totReadPairs} if( $locStats{totReadPairs}>0);
 			$locStats{AlignmRate}=$frac;
@@ -6388,7 +8704,7 @@ sub optiDups{
 	$inFi = "$inP/bwtMap2.sh.etxt" if (!-e $inFi); #old MF file names..
 	#my $outStrDesc = "";
 	$locStats{duplOptic}=0; $locStats{duplPCR}=0;$locStats{duplPass}=0; $locStats{EstLibSize} = 0;
-	my $doDup = 0;my $alignStats2 = getFileStr($inFi,0);
+	my $doDup = 0;my $alignStats2 = read_stats_log_excerpt($inFi);
 	if ($alignStats2 ne "" ){if (defined ($alignStats2)){$doDup=1;}}
 	if ($doDup){
 		
@@ -6426,7 +8742,7 @@ sub getContamination{
 		"FilteredContaRds$suffix" => '',
 		"FilteredNonContaRds$suffix" => '',
 	);
-	my $filStats = getFileStr($inFi,0);#`cat $inD/LOGandSUB/KrakHS.sh.etxt`; chomp $filStats;
+	my $filStats = read_stats_log_excerpt($inFi);
 	#if ($filStats eq "" ){$outStr .= "?\t?\t?\t";	return ($outStr,$outStrDesc);}
 	
 	my @matches = ($filStats =~ m/\d+ sequences classified \((\d+\.?\d*)%\)/g);
@@ -6434,7 +8750,7 @@ sub getContamination{
 	my @nonhits = ($filStats =~ m/(\d+) sequences unclassified \(\d+\.?\d*%\)/g);
 	
 	if (@nonhits == 0){#check if this was done via hostile..
-		$filStats = getFileStr($inFi2,0); #paired reads should be counted as two.. but are counted as one in hostile..
+		$filStats = read_stats_log_excerpt($inFi2); #paired reads should be counted as two.. but are counted as one in hostile..
 		@hits = ($filStats =~ m/"reads_removed": (\d*),/g); #"reads_removed": 202,
 		@nonhits = ($filStats =~ m/"reads_out": (\d*),/g); 
 		@matches = ($filStats =~ m/"reads_removed_proportion": (\d*),/g); 
@@ -6459,7 +8775,7 @@ sub getBinnerStats{
 	my %result;
 	for my $i (1 .. 5) {
 		my $name = getBinSubdirName($i);
-		@result{"HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins"} = ('', '', '');
+		@result{"HQ_bins_$name", "MQ_bins_$name", "${name}_other_bins", "${name}_total_bins"} = ('', '', '', '');
 	}
 	return \%result unless defined($tmpassD) && $tmpassD ne '' && -d $tmpassD;
 	#all binners..
@@ -6475,10 +8791,10 @@ sub getBinnerStats{
 				$totBins ++;
 			}
 			close $bin_fh or warn "Cannot close bin statistics '$SBbinCM2': $!\n";
-			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins"} =
-				($HQbinCnt, $MQbinCnt, $totBins-$HQbinCnt-$MQbinCnt);
+			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins", "${SCdir}_total_bins"} =
+				($HQbinCnt, $MQbinCnt, $totBins-$HQbinCnt-$MQbinCnt, $totBins);
 		} else {
-			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins"} = ('', '', '');
+			@result{"HQ_bins_$SCdir", "MQ_bins_$SCdir", "${SCdir}_other_bins", "${SCdir}_total_bins"} = ('', '', '', '');
 		}
 	}
 	return \%result;
@@ -6486,8 +8802,8 @@ sub getBinnerStats{
 
 sub getSNPStats{
 	my ($inFi) = @_;
-	my $geneStats = getFileStr("${inFi}.etxt",0);
-	my @columns = qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved INDEL_Num INDEL_Passed);
+	my $geneStats = read_stats_log_excerpt("${inFi}.etxt");
+	my @columns = qw(SNP_TotalResolvedBp SNP_fastaEntries SNP_Num SNP_Passed SNP_resolved SNPsPerMbp INDEL_Num INDEL_Passed INDELsPerMbp);
 	my %empty = map { $_ => '' } @columns;
 	my $has_stats = 0;
 	#Total bp written: 34950480 (0 not resolved) on 26727 entries
@@ -6503,7 +8819,7 @@ sub getSNPStats{
 		#$outStr = "$bps\t$entrs\t$confl\t$resol\t$snpNum\t";
 		
 	} else { #try in .otxt
-		$geneStats = getFileStr("${inFi}.otxt",0);
+		$geneStats = read_stats_log_excerpt("${inFi}.otxt");
 		if ($geneStats =~ m/Total bp that can be determined: (\d+) in (\d+) entries./){
 			$has_stats = 1;
 			$bps = $1; $entrs=$2;
@@ -6517,33 +8833,31 @@ sub getSNPStats{
 		}
 	}
 	return \%empty unless $has_stats;
+	my $per_mbp = $bps > 0 ? 1_000_000 / $bps : 0;
 	return { SNP_TotalResolvedBp=>$bps, SNP_fastaEntries=>$entrs, SNP_Num=>$snpNum,
-		SNP_Passed=>$SNPpassed, SNP_resolved=>$resol, INDEL_Num=>$indelNuml, INDEL_Passed=>$INDpassed };
+		SNP_Passed=>$SNPpassed, SNP_resolved=>$resol,
+		SNPsPerMbp=>sprintf('%.3f', $snpNum * $per_mbp), INDEL_Num=>$indelNuml,
+		INDEL_Passed=>$INDpassed, INDELsPerMbp=>sprintf('%.3f', $indelNuml * $per_mbp) };
 }
 
 sub getGeneStats{
 	my ($inFi) = @_;
 	my @columns = qw(GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes Gcomplete G5pComplete G3pComplete Gincomplete);
 	my %result = map { $_ => '' } @columns;
-	my $geneStats = getFileStr("$inFi",0);
-	my @spl1 = split("\n", $geneStats);
-
-	#if (!-e "$inFi" || -s "$inFi" == 0){	
-	#	return ($outStr, $outStrDesc);
-	#}
-	#open I,"<$inFi" or die $!; 
-	#GeneNumber	AvgGeneLength	AvgComplGeneLength	BpGenes	BpNotGenesGcomplete	G5pComplete	G3pComplete	Gincomplete
-	#my $tmp ="";$tmp = <I>;#if (defined($tmp)){chomp($tmp);$outStrDesc .= $tmp."\t";}$tmp = <I>;
-	#while (my $tmp = <I>){
-	foreach my $tmp (@spl1){
-		chomp($tmp);#$outStr = $tmp."\t"; $outStr5 .= $tmp."\t" if ($do500Stat); 
-		next if ($tmp =~ m/^GeneNumber/);
-		my @spl = split /\t/,$tmp; 
-		#print @spl . " @spl\n";
-		if (@spl >=9){
-			@result{@columns} = @spl[0..8];
+	return \%result unless -s $inFi;
+	open my $geneFH, '<', $inFi or do {
+		warn "Cannot read gene statistics '$inFi': $!\n";
+		return \%result;
+	};
+	while (my $line = <$geneFH>) {
+		$line =~ s/[\r\n]+$//;
+		next if $line eq '' || $line =~ /^GeneNumber/;
+		my @fields = split /\t/, $line;
+		if (@fields >= 9) {
+			@result{@columns} = @fields[0..8];
 		}
 	}
+	close $geneFH or warn "Cannot close gene statistics '$inFi': $!\n";
 	return \%result;
 }
 sub getASsemblyStats{
@@ -6579,10 +8893,17 @@ sub getASsemblyStats{
 	if ($assStats ne '') { $result{CircCtgs} = 0; $result{CircCtgG1M} = 0; }
 	if ($doCirc && -e "$tmpassD/scaffolds.fasta.circ"){
 		$result{CircCtgs} = 0; $result{CircCtgG1M} = 0;
-		$assStats = getFileStr("$tmpassD/scaffolds.fasta.circ",0);
-		$result{CircCtgs} = $assStats =~ tr/>//;
-		my @matchs = ($assStats =~ m/.*_L=(\d+)=/g);
-		foreach(@matchs){$result{CircCtgG1M}++ if ($_ > 1000000);}
+		my $circPath = "$tmpassD/scaffolds.fasta.circ";
+		if (open my $circFH, '<', $circPath) {
+			while (my $header = <$circFH>) {
+				next unless $header =~ /^>/;
+				$result{CircCtgs}++;
+				$result{CircCtgG1M}++ if $header =~ /_L=(\d+)=/ && $1 > 1000000;
+			}
+			close $circFH or warn "Cannot close circular-contig FASTA '$circPath': $!\n";
+		} else {
+			warn "Cannot read circular-contig FASTA '$circPath': $!\n";
+		}
 	}
 	return \%result;
 }
@@ -6644,40 +8965,62 @@ sub getHybridAssemblyStats {
 }
 
 sub smplStats {
-	my ($inD,$assDir,$SmplN) = @_;
+	my ($inD,$assDir,$SmplN,$sampleKey) = @_;
+	$sampleKey ||= $SmplN;
 	my %values;
 	my $merge = sub {
 		my ($named) = @_;
 		return unless ref($named) eq 'HASH';
 		@values{keys %$named} = values %$named;
 	};
-	my $seq_set = ref($map{$SmplN}{seqSet}) eq 'HASH' ? $map{$SmplN}{seqSet} : {};
-	my $paired = ref($seq_set->{pa1}) eq 'ARRAY' ? $seq_set->{pa1} : [];
-	my $single = ref($seq_set->{pas}) eq 'ARRAY' ? $seq_set->{pas} : [];
-	$values{InputIsPaired} = @$paired ? 1 : 0;
-	$values{InputIsSingle} = @$single ? 1 : 0;
-	$values{RawInputSize} = exists($map{$SmplN}{inputFileSizeMB})
-		? sprintf('%.3fG', $map{$SmplN}{inputFileSizeMB}/1024) : -1;
+	my $rawReadSet = sampleReadSet($sampleKey, "raw");
+	my $seq_set = ref($rawReadSet) eq 'HASH' ? $rawReadSet : {};
+	my $input_libraries = readLibrariesByScope($seq_set, 'primary', 0, $SmplN);
+	$values{InputIsPaired} = @{libraryPairs($input_libraries)} ? 1 : 0;
+	$values{InputIsSingle} = @{libraryFiles($input_libraries, 'single')} ? 1 : 0;
+	$values{RawInputSize} = exists($map{$sampleKey}{inputFileSizeMB})
+		? sprintf('%.3fG', $map{$sampleKey}{inputFileSizeMB}/1024) : -1;
+	$values{RawInputSizeSub} = exists($map{$sampleKey}{inputXFileSizeMB})
+		? sprintf('%.3fG', $map{$sampleKey}{inputXFileSizeMB}/1024) : -1;
+
+	# Raw-upload preparation is submitted before read cleaning.
+	$merge->(getContamination("$inD/LOGandSUB/prepEBI.sh.etxt", "$inD/LOGandSUB/prepEBI.sh.otxt", 'EBI'));
+
+	my @sdm_logs = glob("$inD/LOGandSUB/sdm/filter*.log");
+	my @primary_logs = grep { $_ !~ /filterSuppl/ } @sdm_logs;
+	my @support_logs = grep { $_ =~ /filterSuppl/ } @sdm_logs;
+	@primary_logs = ("$inD/LOGandSUB/sdmReadCleaner.sh.etxt")
+		if (!@primary_logs && -s "$inD/LOGandSUB/sdmReadCleaner.sh.etxt");
+	@support_logs = ("$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt")
+		if (!@support_logs && -s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt");
+	my $sdmHistogramMax = (@primary_logs || @support_logs)
+		? _sdm_histogram_max_length($inD) : 0;
+
+	if (@primary_logs) {
+		my $stats = sdmStatsMany(\@primary_logs, $inD, '', $sdmHistogramMax);
+		$merge->($stats);
+		my $accepted = ($stats->{Accepted1} || 0) + ($stats->{Accepted2} || 0);
+		$values{SDMAcceptedPercent} = sprintf('%.3f', 100 * $accepted / $stats->{totRds})
+			if (($stats->{totRds} || 0) > 0);
+		$locStats{$_} = $stats->{$_} for qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2);
+	}
+	if (@support_logs) {
+		my $stats = sdmStatsMany(\@support_logs, $inD, '_Sup', $sdmHistogramMax);
+		$merge->($stats);
+		my $accepted = ($stats->{Accepted1_Sup} || 0) + ($stats->{Accepted2_Sup} || 0);
+		$values{SDMAcceptedPercent_Sup} = sprintf('%.3f', 100 * $accepted / $stats->{totRds_Sup})
+			if (($stats->{totRds_Sup} || 0) > 0);
+	}
 
 	my $contamination = getContamination("$inD/LOGandSUB/KrakHS.sh.etxt", "$inD/LOGandSUB/KrakHS.sh.otxt", '');
 	$merge->($contamination);
 	$locStats{contamination} = $contamination->{FilteredContaRdsPerc};
-	$merge->(getContamination("$inD/LOGandSUB/prepEBI.sh.etxt", "$inD/LOGandSUB/prepEBI.sh.otxt", 'EBI'));
 
-	my $primary_log = -s "$inD/LOGandSUB/sdm/filter.log" ? "$inD/LOGandSUB/sdm/filter.log"
-		: (-s "$inD/LOGandSUB/sdmReadCleaner.sh.etxt" ? "$inD/LOGandSUB/sdmReadCleaner.sh.etxt" : '');
-	if ($primary_log ne '') {
-		my $stats = sdmStats($primary_log, $inD, '');
-		$merge->($stats);
-		$locStats{$_} = $stats->{$_} for qw(totRds Rejected1 Rejected2 Accepted1 Accepted2 Singl1 Singl2);
-	}
-	my $support_log = -s "$inD/LOGandSUB/sdm/filterS.log" ? "$inD/LOGandSUB/sdm/filterS.log"
-		: (-s "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt" ? "$inD/LOGandSUB/sdmReadCleanerSuppl.sh.etxt" : '');
-	$merge->(sdmStats($support_log, $inD, '_Sup')) if $support_log ne '';
-
-	my $text = getFileStr("$inD/LOGandSUB/flashMrg.sh.otxt",0);
-	$values{Merged} = $1 if $text =~ /\[FLASH\]\s+Combined pairs:\s+(\d+)/;
-	$values{NotMerged} = $1 if $text =~ /\[FLASH\]\s+Uncombined pairs:\s+(\d+)/;
+	my $text = read_stats_log_excerpt("$inD/LOGandSUB/flashMrg.sh.otxt");
+	my @mergedCounts = $text =~ /\[FLASH\]\s+Combined pairs:\s+(\d+)/g;
+	my @unmergedCounts = $text =~ /\[FLASH\]\s+Uncombined pairs:\s+(\d+)/g;
+	$values{Merged} = sum(@mergedCounts) if @mergedCounts;
+	$values{NotMerged} = sum(@unmergedCounts) if @unmergedCounts;
 	$text = getFileStr("$inD/MicroCens/MC.0.result",0);
 	$values{AvgGenomeSizeEst} = $1 if $text =~ /average_genome_size:\s*([\d.]+)/;
 	$values{TotalGenomesEst} = $1 if $text =~ /genome_equivalents:\s*([\d.]+)/;
@@ -6697,13 +9040,18 @@ sub smplStats {
 		$assembly_dir = '';
 	}
 	$merge->(getASsemblyStats($assembly_dir, 'AssemblyStats.txt', 1));
-	$merge->(getBreakpointStats("$inD/mapping/$SmplN-smd.bam.breakpoints.tsv.gz"));
+	$merge->(getHybridAssemblyStats("$assembly_dir/HybridAssemblyComparison.tsv")) if $assembly_dir ne '';
 	$merge->(getMapStats("$inD/LOGandSUB/"));
 	$merge->(optiDups("$inD/LOGandSUB/"));
+	$merge->(getBreakpointStats("$inD/mapping/$SmplN-smd.bam.breakpoints.tsv.gz"));
+	$values{AssemblyBreakpointPercent} = sprintf('%.6f', 100 * $values{BreakpointBases} / $values{ScaffSize})
+		if (($values{ScaffSize} || 0) > 0 && defined($values{BreakpointBases}) && $values{BreakpointBases} ne '');
 	$merge->(getGeneStats("$inD/$preDIRs{dir_ContigStats}/GeneStats.txt"));
+	my $annotated_bases = ($values{BpGenes} || 0) + ($values{BpNotGenes} || 0);
+	$values{GeneCodingPercent} = sprintf('%.3f', 100 * $values{BpGenes} / $annotated_bases)
+		if ($annotated_bases > 0);
 	$merge->(getBinnerStats($assembly_dir,$SmplN));
 	$merge->(getSNPStats("$inD/LOGandSUB/SNP/ConsAssem.oSNPc.sh"));
-	$merge->(getHybridAssemblyStats("$assembly_dir/HybridAssemblyComparison.tsv")) if $assembly_dir ne '';
 	return \%values;
 }
 
@@ -6765,8 +9113,8 @@ sub scndMap2Genos{
 			$sampleDepsAR,$calc2ndMapSNP,$boolScndCoverageOK) = @_;
 	my @mapOutXS;my @bamBaseNameS;
 	my @pendingSecondMapSNP;
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $samplReadLength = $map{$curSmpl}{seqSet}->{samplReadLength};
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $samplReadLength = sampleReadSet($curSmpl, "raw")->{samplReadLength};
 
 	for (my $i=0;$i<@bwt2outD; $i++){
 		push @mapOutXS, $bwt2outD[$i];
@@ -6778,6 +9126,10 @@ sub scndMap2Genos{
 
 	$make2ndMapDecoy{Lib} = $curOutDir if ($MFopt{DoMapModeDecoy});
 	my $cramthebam=0;
+	my $secondMapLibraries = getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,0,$SmplName);
+	my $secondMapTechnology = libraryTechnology(
+		$secondMapLibraries, "secondary mapping reads for $SmplName", 1,
+	);
 	#map to all refs at once		
 	my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => join(",",@bwt2outD),unalDir=>"",
 					sbj => join(",",@DBbtRefX),assGrp => $cAssGrp,
@@ -6785,13 +9137,15 @@ sub scndMap2Genos{
 					glbTmp => $nodeSpTmpD."_xtraMapWork/", is2ndMap => 1,
 					qsubDir => "$logDir/map2nd/",mapSupport => 0,
 					glbMapDir => join(",",@mapOutXS),mappingStarted =>1,
-					readTec => ${$cleanSeqSetHR}{readTec}, #$map{$curSmpl}{SeqTech}
+					libraries => $secondMapLibraries,
+					readTec => '',
 					submit => 1, submNow => 1, cramAlig => $cramthebam,
 					sortCores => $MFopt{bamSortCores}, mapCores => $MFopt{MapperCores},
 					deferMappingCleanup => 1);
 	#die "XX @DBbtRefX\n";
 	# ----------------- 2nd mapping (map to ref genomes supplied by user) ---------------------
-	my ($map2CtgsX,$delaySubmCmdX,$mapOptHr) = mapReadsToRef(\%dirset,$AsGrps{$cMapGrp}{SeqUnZDeps}.";".$bwt2ndMapDep );#$localAssembly);
+	my ($map2CtgsX, undef, $mapOptHr) =
+		mapReadsToRef(\%dirset,$AsGrps{$cMapGrp}{SeqUnZDeps}.";".$bwt2ndMapDep );#$localAssembly);
 	#------------  and calc coverage for each separate
 	#different strategy, a bit hacky: deactivate submissions and collect for one call
 	$dirset{submit} = 0; my $bigMap = "";my $bigCov = "";
@@ -6820,20 +9174,21 @@ sub scndMap2Genos{
 		
 		if ($calc2ndMapSNP){ #2nd mapping SNP calling (consensus) (not assembly!!)
 			my %SNPinfo = (
+			sampleRoot => $curOutDir,
 				assembly => "$bwt2outD[$i]/$bwt2ndMapNmds[$i].fa",#$DBbtRefX[$i],
 				MAR => ["$bwt2outD[$i]/$bamBaseNameS[$i]-smd.bam"],
 				SNPcaller => $MFopt{SNPcallerFlag},bamcram=>"bam",normIndels => $MFopt{normSNPindels},
+				gffFile => ($DBbtRefGFF[$i] // ""),
 				#doesn't work, if contig name and length is not given..
 				#depthF => "$bwt2outD[$i]/$bamBaseNameS[$i]-smd.bam.coverage.gz.percontig",
 				ofas => "$bwt2outD[$i]/$bamBaseNameS[$i].SNPc.$MFopt{SNPcallerFlag}.fna", #only output needed for this.. unless I later want to add also a gene calling.. (not needed for TEC2 reb)
 				#vcfFile => "$bwt2outD[$i]/$bamBaseNameS[$i].$MFopt{SNPcallerFlag}.vcf",
 				firstInSample => ($i == 0 ? 1 : 0), 
-				SeqTech => $map{$curSmpl}{SeqTech}, SeqTechSuppl => $map{$curSmpl}{seqTechX},
+				SeqTech => $secondMapTechnology, SeqTechSuppl => "",
 				nodeTmpD => $dirset{nodeTmp}, #$nodeSpTmpD,
 				scratch => $dirset{glbTmp},
 				qsubDir => $dirset{qsubDir}, jdeps => $map2CtgsY.";$bwt2ndMapDep",
 				cmdFileTag => $bwt2ndMapNmds[$i], minDepth => $MFopt{consSNPminDepth},
-				
 				callSVs => $MFopt{callSVs}, vcfSVfile => "$bwt2outD[$i]/$bamBaseNameS[$i]-smd.SV.vcf", vcfSVfileS => "", callSVsSupp => 0,
 				smpl => $bamBaseNameS[$i], maxCores => $MFopt{maxSNPcores}, #memReq => $MFopt{memSNPcall},
 				bpSplit => 4e5,	runLocal => 1, split_jobs => $MFopt{SNPconsJobsPsmpl}, overwrite => $MFopt{redoSNPcons},
@@ -6881,6 +9236,11 @@ sub scndMap2Genos{
 	append_job_dependencies(\$AsGrps{$cMapGrp}{MapDeps}, $sortJD);
 	append_job_dependencies(\$AsGrps{$cAssGrp}{scndMapping}, $sortJD);
 	for my $SNPinfo (@pendingSecondMapSNP) {
+		my $secondReference = $SNPinfo->{assembly};
+		my $secondMapping = $SNPinfo->{MAR}->[0];
+		# Do not construct a consensus workflow around future scheduler outputs.
+		# A later pipeline pass will return here after both files are published.
+		next unless -s $secondReference && -s $secondMapping;
 		$SNPinfo->{jdeps} = normalise_job_dependencies($SNPinfo->{jdeps}, $sortJD);
 		my $consSNPdep = createConsSNPandSVs($SNPinfo);
 		add2SampleDeps($sampleDepsAR, [$consSNPdep]);
@@ -6913,31 +9273,37 @@ sub ReadsFromMapping{
 }
 
 sub RayAssembly(){
- "mpiexec -n 1 /g/bork5/hildebra/bin/Ray-2.3.1/ray-build/Ray -o test -p test/test_1.fastq test/test_2.fastq -k 31"
+ return getProgPaths("ray")." -o test -p test/test_1.fastq test/test_2.fastq -k 31"
  }
  
  
 sub buildAssemblyMapIdx{
 	my ($finAssLoc,$cAssGrp, $mainRds, $suppRds, $smpl) = @_;
-	my $anybuilds=0;
-	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0;  
-	if ($suppRds){ #if support reads, build a second DB..
-		my ($par1,$par2,$parS,$liar,$rear) = getRawSeqsAssmGrp(\%AsGrps,$cAssGrp,$suppRds,$smpl);
-		my $MapperProgLoc = decideMapper($MFopt{MapperProg},${$liar}[0]);
-		my ($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$MapperProgLoc);#$nCores);
-		my ($jname,$tmpCmd) = qsubSystem($logDir."mapperIdxSupp.sh",$cmdDB,(int($MFopt{MapperCores})),(int($MFopt{bwtIdxAssMem})+1)."G","DBidx$JNUM","","",1,[],$QSBoptHR) ;
-		append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $jname);
-		$anybuilds =1 if ($cmdDB ne"");
+	my %requiredMappers;
+	for my $request ([$mainRds, 0], [$suppRds, 1]) {
+		next unless $request->[0];
+		my $libraries = getRawLibrariesAssmGrp(\%AsGrps,$cAssGrp,$request->[1],$smpl);
+		my $readTechnology = libraryTechnology($libraries,
+			"assembly-group $cAssGrp ".($request->[1] ? 'support' : 'primary')." mapper index", 1);
+		my $mapper = decideMapper($MFopt{MapperProg},$readTechnology);
+		# minimap2 and strobealign consume the FASTA directly in mapReadsToRef.
+		next if ($mapper == 3 || $mapper == 5);
+		$requiredMappers{$mapper} = 1;
 	}
-	if ($mainRds){
-		my ($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$MFopt{MapperProg});#$nCores);
-		my ($jname,$tmpCmd) = qsubSystem($logDir."mapperIdx.sh",$cmdDB,(int($MFopt{MapperCores})),1+(int($MFopt{bwtIdxAssMem}))."G","bwtIdx$JNUM","","",1,[],$QSBoptHR) ;
+	return unless keys %requiredMappers;
+	my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0;
+	my $submitted = 0;
+	for my $mapper (sort {$a <=> $b} keys %requiredMappers) {
+		my ($cmdDB) = buildMapperIdx($finAssLoc,$MFopt{MapperCores},$MFopt{largeMapperDB},$mapper);
+		next if ($cmdDB eq "");
+		my ($jname) = qsubSystem($logDir."mapperIdx.$mapper.sh",$cmdDB,
+			int($MFopt{MapperCores}),(int($MFopt{bwtIdxAssMem})+1)."G",
+			"mapIdx${mapper}_$JNUM","","",1,[],$QSBoptHR);
 		append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $jname);
-		$anybuilds =1 if ($cmdDB ne"");
+		$submitted++ if ($jname ne "");
 	}
-	$QSBoptHR->{tmpSpace} =$tmpSHDD;
-	
-	print "Building mapper index for assembly $finAssLoc\n ";
+	$QSBoptHR->{tmpSpace} = $tmpSHDD;
+	print "Building $submitted mapper index job(s) for assembly $finAssLoc\n" if $submitted;
 	
 }
 
@@ -6945,10 +9311,15 @@ sub buildAssemblyMapIdx{
  sub createPsAssLongReads(){
 	my ($jdep, $pseudoAssFile, $Fdir, $smplName) = @_;
 	
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
-	my $arp1 = ${$cleanSeqSetHR}{arp1}; my $arp2 = ${$cleanSeqSetHR}{arp2}; my $singAr = ${$cleanSeqSetHR}{singAr}; 
-	
-	my @allRds = (@{$arp1},@{$arp2},@{$singAr});
+	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+	die "Pseudoassembly for $curSmpl requires singleton long-read libraries\n"
+		if @{libraryPairs($libraries)};
+	my @nonLong = grep { !$_->{is_long} } @{$libraries};
+	die "Pseudoassembly for $curSmpl received non-long libraries: ".join(', ', map { $_->{id} } @nonLong)."\n"
+		if @nonLong;
+	my @allRds = @{libraryFiles($libraries, 'single')};
+	die "Pseudoassembly for $curSmpl has no singleton reads\n" unless @allRds;
 	$Fdir =~ s{/+$}{};
 	my $psFinal = "$Fdir/".basename($pseudoAssFile);
 	my $psStage = "$psFinal.stage";
@@ -6988,7 +9359,7 @@ sub spadesAssembly{
 
 	
 	#my $p1ar = $AsGrps{$cAsGrp}{FilterSeq1};my $p2ar = $AsGrps{$cAsGrp}{FilterSeq2};my $singlAr = $AsGrps{$cAsGrp}{FilterSeqS};my $cReadTecAr = $AsGrps{$cAsGrp}{ReadTec};
-	my ($p1ar,$p2ar,$singlAr,$cReadTecAr) = getCleanSeqsAssmGrp($asHr, $cAsGrp, 0);
+	my $libraries = getCleanLibrariesAssmGrp($asHr, $cAsGrp, 0);
 	my $jDepe = $AsGrps{$cAsGrp}{SeqClnDeps};
 	
 	
@@ -6996,7 +9367,7 @@ sub spadesAssembly{
 
 	my $spadesBin = getProgPaths("spades");
 	my $isCloudSpades = 0;
-	foreach my $lRT (@{$cReadTecAr}){if ($lRT =~ m/SLR/){$isCloudSpades = 1;}}
+	foreach my $library (@{$libraries}){if (($library->{technology} || '') =~ m/SLR/){$isCloudSpades = 1;}}
 	if ($isCloudSpades){
 		$spadesBin = getProgPaths("cloudspades") ;
 		print "Using CloudSpades\n";
@@ -7014,21 +9385,16 @@ sub spadesAssembly{
 	$cmd .= "echo \"Starting Spades assembly\"\n";
 	my $defTotMem = $MFopt{AssemblyMemory};#60;
 	if ($defTotMem == -1){ #auto set mem
-		$defTotMem = ($map{$curSmpl}{inputFileSizeMB}*4+1e5)/1024;
+		$defTotMem = (spaceInAssGrp($curSmpl)*4+1e5)/1024;
 	}
-
-	my $defMem = ($defTotMem/$nCores);
-	$defTotMem = $defMem * $nCores; #total really available mem (in GB)
 
 	$cmd .= $spadesBin;
 	my $K = $MFopt{AssemblyKmers} ;
 	#insert single reads
 	my $errStep = "";
 	$errStep = "--only-assembler " if ($doClean == 0);
-	my $numInLibs = scalar @{$p1ar};
-	my $sprds = inputFmtSpades($p1ar,$p2ar,$singlAr,$logDir,$cReadTecAr);
-	#$cmd .= " --meta " ;
-	if ($numInLibs <= 1) {$cmd .= " --meta " ;} else {$cmd .= " --sc " ;} #deactivated as never done with other T2 samples..
+	my $sprds = inputFmtSpadesLibraries($libraries,$logDir);
+	$cmd .= " --meta ";
 	$cmd .= " $K $sprds -t $nCores $errStep -m $defTotMem ";#--mismatch-correction "; # --meta  --sc "; #> $log #--meta :buggy in 3.6
 	$cmd .= " --mismatch-correction " if ($MFopt{spadesMisMatCor});
 	if ($helpAssembl ne ""){
@@ -7076,27 +9442,29 @@ sub spadesAssembly{
 	
 	if (-e $logDir."spaderun.sh.otxt"){	#check for out of mem
 		open I,"<$logDir/spaderun.sh.otxt" or die "Can't open old assembly logfile $logDir\n"; my $str = join("", <I>); close I;
-		if ($str =~ / Error in malloc(): out of memory/ ||$str =~ m/TERM_MEMLIMIT: job killed after reaching LSF memory usage limit/){ #memory error for real
+		if ($str =~ / Error in malloc\(\): out of memory/ ||$str =~ m/TERM_MEMLIMIT: job killed after reaching LSF memory usage limit/){ #memory error for real
 			my $replMem  = "";
-			if ($str =~ /\n    Max Memory :     (\d+) MB\n/){	$replMem = int($1*1000/$nCores*1.7);
-			} elsif ($str =~ /\nMAX MEM (\d+)G\n/){	$replMem = int($1/$nCores*1.7);}
+			if ($str =~ /\n    Max Memory :     (\d+) MB\n/){	$replMem = int(($1/1024)*1.7+0.5);
+			} elsif ($str =~ /\nMAX MEM ([\d.]+)G\n/){	$replMem = int($1*1.7+0.5);}
 			unless ($replMem eq ""){
-				if (($replMem *$nCores)< 50){$replMem = 12;} 
-				$defMem = $replMem;
-				print $defMem."G: new MEM\n"; #die $defMem."\n";
+				$replMem = 50 if ($replMem < 50);
+				$defTotMem = $replMem;
+				print $defTotMem."G: new total SPAdes memory\n";
 			}
 		}
 	}
+	# Keep SPAdes' own limit aligned with the scheduler request after an OOM retry.
+	$cmd =~ s/ -m [\d.]+ / -m $defTotMem /;
 	$cmd .= "echo \"MAX MEM ".$defTotMem."G\"\n";
-	$cmd .= "echo \"SPADES\" > $stageOut/$stones{asmDone}\n";
-	$cmd .= "test -s $stageOut/scaffolds.fasta.filt && test -s $stageOut/AssemblyStats.txt && test -s $stageOut/$stones{asmDone} || exit 37\n";
+	$cmd .= "echo \"SPADES\" > $stageOut/$checkpointNames{assemblyDone}\n";
+	$cmd .= "test -s $stageOut/scaffolds.fasta.filt && test -s $stageOut/AssemblyStats.txt && test -s $stageOut/$checkpointNames{assemblyDone} || exit 37\n";
 	$cmd .= "rm -rf $backupOut\nif [ -e $finalOut ]; then mv $finalOut $backupOut; fi\n";
 	$cmd .= "if ! mv $stageOut $finalOut; then if [ -e $backupOut ]; then mv $backupOut $finalOut; fi; exit 38; fi\n";
 	$cmd .= "rm -rf $backupOut\n";
 	#print "in Assembly\n$jDepe\n";
 	#print "$finalOut/scaffolds.fasta.filt\n";
 	my $locDiskSpace = $HDDspace{assembler};
-	if ($locDiskSpace eq "-1"){
+	if ($locDiskSpace eq "-1" || $locDiskSpace eq "-1G"){
 		$locDiskSpace = $HDDspace{spades};
 	}
 	#die "$locDiskSpace\n";
@@ -7105,17 +9473,20 @@ sub spadesAssembly{
 		my $tmpCmd="";
 		$jname = "_A$JNUM";#$givenJName;
 		#$QSBoptHR->{useLongQueue} = 1;
+		my $tmpSHDD = $QSBoptHR->{tmpSpace};
+		# Every SPAdes branch writes its complete work tree to $nodeTmp.
+		# Host selection must not decide whether the matching scratch request is
+		# attached to the submitted job.
+		$QSBoptHR->{tmpSpace} = $locDiskSpace;
 		if ($hostFilter || $MFopt{SpadesAlwaysHDDnode}){
-			my $tmpSHDD = $QSBoptHR->{tmpSpace};
 			$QSBoptHR->{useLongQueue} = $MFopt{SpadesLongtime};
-			$QSBoptHR->{tmpSpace} = $locDiskSpace;
 			#$QSBoptHR->{tmpSpace} = $HDDspace{spades}; #set option how much tmp space is required, and reset afterwards
-			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,(int($nCores/2)+1),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
-			$QSBoptHR->{tmpSpace} = $tmpSHDD;
+			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,int($nCores),int($defTotMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
 			$QSBoptHR->{useLongQueue} = 0;
 		} else {
-			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,(int($nCores/2)+1),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
+			($jname,$tmpCmd) = qsubSystem($logDir."spaderun.sh",$cmd,int($nCores),int($defTotMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 		}
+		$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		#$QSBoptHR->{useLongQueue} = 0;
 	} else {
 		print "Spades: Assembly already present in final location\n";
@@ -7143,7 +9514,7 @@ sub movePreAssmData{
 	#die;
 	die "movePreAssmData::Coverage does not exist in $CSdir .. can't move preAssembly\n" if (!fileGZe("$CSdir/Coverage.percontig"));
 	die "movePreAssmData::Coverage.median.percontig not in $CSdir .. aborting\n" if (!fileGZe("$CSdir/Coverage.median.percontig"));
-	die "movePreAssmData::Not a preassebmly?: $metagD\n" unless (-e "$metagD/$stones{preAsmDone}");
+	die "movePreAssmData::Not a preassebmly?: $metagD\n" unless (-e "$metagD/$checkpointNames{preAssemblyDone}");
 	die "movePreAssmData::Couldn't find ContigStats in $metagD\n" unless (-d $CSdir);
 	die "movePreAssmData::Couldn't find Assembly $metagD/scaffolds.fasta.filt\n" unless (-e "$metagD/scaffolds.fasta.filt");
 	my $mappingCov = "$mapD/$smplID-smd.bam.coverage.gz";
@@ -7155,7 +9526,7 @@ sub movePreAssmData{
 	my $packageTag = time().".$$";
 	my $stage = "$mvD.stage.$packageTag";
 	$cmd .= "rm -rf $stage; mkdir -p $stage;\n";
-	$cmd .= "cp -rf $metagD/scaffolds.fasta.filt $metagD/$stones{preAsmDone} $CSdir/Coverage* $stage;\n";
+	$cmd .= "cp -rf $metagD/scaffolds.fasta.filt $metagD/$checkpointNames{preAssemblyDone} $CSdir/Coverage* $stage;\n";
 	$cmd .= "cp $mappingCov $stage/mapping.coverage.gz; cp $breakpointTsv $stage/breakpoints.tsv.gz;\n";
 	$cmd .= "printf 'key\\tvalue\\nschema_version\\t2\\nsample_id\\t$smplID\\nassembly_group\\t$groupID\\nsimulator\\tcoverage_weighted_v2\\nmax_synthetic_depth\\t$MFopt{hybridSyntheticMaxDepth}\\n' > $stage/package.manifest.tsv;\n";
 	$cmd .= "test -s $stage/scaffolds.fasta.filt && test -s $stage/mapping.coverage.gz && test -s $stage/breakpoints.tsv.gz && test -s $stage/package.manifest.tsv || exit 35;\n";
@@ -7166,7 +9537,7 @@ sub movePreAssmData{
 	}
 	# Mapper indexes remain with the source assembly; packaging is non-destructive.
 	#if ($AssemblyGo){$cmd .= "rm -fr $metagD;\n" ; print "removed preASsmbl dir";}
-	#$cmd .= "cp $tmpD/$stones{preAsmDone} $metagD;\n";
+	#$cmd .= "cp $tmpD/$checkpointNames{preAssemblyDone} $metagD;\n";
 	#$cmd .= "cp -rf $tmpD/* $mvD/;\n";
 	#$cmd .= "rm -fr $tmpD\n";
 	$cmd .= "touch $stage/moved.sto\n";
@@ -7191,9 +9562,12 @@ sub prepPreAssmbl{
 	
 	#my $hasPrimaryRds= 1;$hasPrimaryRds = 0 if ($map{$curSmpl}{prefix} eq "" && $map{$curSmpl}{dir} eq "");
 	
-	print "precnt: $AsGrps{$cAssGrp}{CntPreAss}\n";
+	my $hybridAssemblyRequested = $MFopt{DoAssembly} == 5
+		&& ($map{$curSmpl}{SupportReads} || "") =~ m/(?:PB|ONT):/;
+	print "precnt: $AsGrps{$cAssGrp}{CntPreAss}\n"
+		if ($hybridAssemblyRequested && !$MFconfig{silent});
 
-	my $ePreAssmbly = 0; $ePreAssmbly = 1 if (-s $finAssLoc && -e "$finalCommAssDir/$stones{preAsmDone}");
+	my $ePreAssmbly = 0; $ePreAssmbly = 1 if (-s $finAssLoc && -e "$finalCommAssDir/$checkpointNames{preAssemblyDone}");
 	#die "$ePreAssmbly\n";
 	my $ePreAssmblPck = 0; 
 	if (hybrid_package_complete($mvD)) {
@@ -7201,9 +9575,11 @@ sub prepPreAssmbl{
 	}
 	my $doPreAssmFlag = 0;
 
-	if (-s $finAssLoc && -e "$finalCommAssDir/$stones{asmDone}"){ #indication that hybrid assembly is already done
+	if (-s $finAssLoc && -e "$finalCommAssDir/$checkpointNames{assemblyDone}"){ #indication that hybrid assembly is already done
 		#die;
-		return ($ePreAssmbly,$doPreAssmFlag,0,$ePreAssmblPck);
+		# The package remains on disk, but it must no longer gate mappings and
+		# downstream analyses of the final assembly.
+		return ($ePreAssmbly,$doPreAssmFlag,0,0);
 	}
 	
 	if (!$hasPrimary){#should not be included at all: nothing to assemble within preassembly..
@@ -7239,7 +9615,7 @@ sub prepPreAssmbl{
 	#my $eCOV = 0; $eCOV =1 if ( -e "$CSdir/Coverage.percontig");
 	
 	#this moves the contig stats (and removes in ori location)
-	if ((!$ePreAssmblPck || (($eCOV || !$hasPrimary) && ($eCOVmv || $map{$curSmpl}{"SupportReads"} eq "" ))) && -e "$metagD/$stones{preAsmDone}" ){
+	if ((!$ePreAssmblPck || (($eCOV || !$hasPrimary) && ($eCOVmv || $map{$curSmpl}{"SupportReads"} eq "" ))) && -e "$metagD/$checkpointNames{preAssemblyDone}" ){
 		#die "preAssmX: $PostAssemblyGo $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} >= $AsGrps{$cAssGrp}{CntAimAss}\n";
 		$doPreAssmFlag = 0 ;#no prep needed any longer.. files will/are saved already!
 		#all ready for second assembly step!
@@ -7264,7 +9640,7 @@ sub prepPreAssmbl{
 		."$AsGrps{$cAssGrp}{CntPreAssNoPrim} without-primary) >= $AsGrps{$cAssGrp}{CntAimAss}\n";
 	$PostAssemblyGo = 1 if (!$doPreAssmFlag && ( $finJobs >= $AsGrps{$cAssGrp}{CntAimAss}) ); #has already seen enough complete preAssmblies
 	$doPreAssmFlag = 1 if (!$PostAssemblyGo); 
-	#print "-e $CSdir/Coverage.percontig   $metagD/$stones{preAsmDone}\n" ;
+	#print "-e $CSdir/Coverage.percontig   $metagD/$checkpointNames{preAssemblyDone}\n" ;
 	#print "preAssm:  $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} +$AsGrps{$cAssGrp}{CntPreAssNoPrim} >= $AsGrps{$cAssGrp}{CntAimAss} :: $ePreAssmblPck $PostAssemblyGo\n";
 	#die "$doPreAssmFlag\n";
 	return ($ePreAssmbly,$doPreAssmFlag,$PostAssemblyGo,$ePreAssmblPck);
@@ -7280,10 +9656,13 @@ sub longRdAssembly{
 	# resubmits metaMDBG.  Canonicalise before constructing the atomic paths.
 	$finalOut =~ s{/+$}{};
 	
-	my ($p1ar,$p2ar,$singlAr,$cReadTecAr) = getCleanSeqsAssmGrp($asHr, $cAsGrp, $useSupportRds);
-	if (@{$p1ar} > 0 &&$p1ar->[0] ne ""){print "Paired reads defined (@{$p1ar}), but long read assemblies rely on singleton reads!\nAborting\n";die;}
+	my $libraries = getCleanLibrariesAssmGrp($asHr, $cAsGrp, $useSupportRds);
+	my $pairs = libraryPairs($libraries);
+	if (@{$pairs}){print "Paired reads are defined, but long-read assemblies rely on singleton reads!\nAborting\n";die;}
+	my $singlAr = libraryFiles($libraries, 'single');
 	my $numInLibs = scalar @{$singlAr};
-	my %long_read_tech = map { $_ => 1 } grep { defined($_) && /^(?:PB|ONT)$/ } @{$cReadTecAr};
+	my %long_read_tech = map { ($_->{technology} || '') => 1 }
+		grep { ($_->{technology} || '') =~ /^(?:PB|ONT)$/ } @{$libraries};
 	die "Assembly group $cAsGrp mixes ONT and PacBio reads; split these technologies into separate assembly groups\n"
 		if keys(%long_read_tech) > 1;
 	my ($long_read_tech) = keys %long_read_tech;
@@ -7291,10 +9670,10 @@ sub longRdAssembly{
 		
 	if ($LassP == 5){#hybrid mode.. check that all required files are present or stop here
 		#if (${$cReadTecAr}[0] ne "PB"){print"Expected PacBio (\"PB\") readTech for metaMDBG, found \"${$cReadTecAr}[0]\"\n";die;}
-		my $long_reads_detected=0; foreach (@{$cReadTecAr}){$long_reads_detected=1 if (m/(?:PB|ONT)/);}
+		my $long_reads_detected = keys(%long_read_tech) ? 1 : 0;
 		if (!$long_reads_detected){
 			print "Hybrid Assembly.. expected \"PB\" or \"ONT\" reads for support reads!";
-			print "(found \"@{$cReadTecAr}\" (size:". @{$cReadTecAr} ."))\nAborting..\n";
+			print "(found technologies \"".join(',', map { $_->{technology} || '' } @{$libraries})."\")\nAborting..\n";
 			die;
 		}
 		
@@ -7306,7 +9685,7 @@ sub longRdAssembly{
 	my $jDepe = $AsGrps{$cAsGrp}{SeqClnDeps};
 	
 	my $nameProg= "flye"; $nameProg="mMDBG"if($MFopt{DoAssembly}==4 || $MFopt{DoAssembly}==5);
-	if (${$cReadTecAr}[0] =~ m/SLR/i){die "Can't use synthetic long reads (SLR) with $nameProg\n";}
+	if (grep { ($_->{technology} || '') =~ m/SLR/i } @{$libraries}){die "Can't use synthetic long reads (SLR) with $nameProg\n";}
 	my $nCores = $MFopt{AssemblyCores};#6
 	
 	my $nodeTmp2 = "$nodeTmp/tmpRawRds/";
@@ -7326,16 +9705,13 @@ sub longRdAssembly{
 		#my $illPathS = ;
 		my @illDirs = @{$AsGrps{$cAsGrp}{preAsmblDir}}; #split /,/,$illPathS;
 		@hybridPreassemblies = map { "$_/scaffolds.fasta.filt" } @illDirs;
-		if ((@$singlAr - $AsGrps{$cAsGrp}{CntPreAssNoPrim}) > (@illDirs)){
-			die "hybrid assembly: Unexpected less preDirs (".@illDirs .") than indirs(" . @$singlAr .")illDs: @illDirs\nsingl: @$singlAr\n";
-		}
 
 		$cmdPre .= "echo \"presplitting helper assembly\"\n";
-		#die "preLib num (" .@illDirs . ") != read libs (" . @inRds . ")!" if (@illDirs != @inRds);
-		die "preLib num (" .@illDirs . ") < read libs (" . @inRds . ")!" if (@illDirs < @inRds);
-		my $cmdLater = "";
-		my $lengthTemplateArgs = join(" ", map { "--length-template $_" } grep { defined($_) && $_ ne "" } @{$singlAr});
-		#condition is not correct: there might be cases where there are less inRds (PB runs), but additional assmblGrp samples have illumina..
+		my @simulatorCommands;
+		my ($lengthTemplate) = grep { defined($_) && $_ ne "" } @{$singlAr};
+		my $lengthTemplateArg = defined($lengthTemplate) ? "--length-template $lengthTemplate" : "";
+		# Preassembly packages and long-read libraries are independent collections:
+		# generate one synthetic input per package, then append every PB/ONT input.
 		for (my $i=0;$i<@illDirs;$i++){
 			my $illD = $illDirs[$i];
 			die "longRdAssembly:: $illD is not a dir!" unless (-d $illD);
@@ -7343,17 +9719,15 @@ sub longRdAssembly{
 			die "Hybrid package $illD lacks mapping.coverage.gz\n" unless fileGZe($contigCov);
 			my $breakpointTsv = "$illD/breakpoints.tsv.gz";
 			die "Hybrid package $illD lacks breakpoints.tsv.gz\n" unless -s $breakpointTsv;
-			my $dupiAssmbl = "$nodeTmp2/assmbl.$i.pre.fastq.gz";
+			my $packageSample = hybrid_package_sample_id($illD);
+			die "Hybrid package $illD lacks a sample_id in package.manifest.tsv\n"
+				if ($packageSample eq "");
+			$packageSample =~ s/[^A-Za-z0-9_.-]+/_/g;
+			my $dupiAssmbl = "$nodeTmp2/$packageSample.synthetic.fastq.gz";
 			my $preAssmbl = "$illD/scaffolds.fasta.filt";
-			$cmdPre .= "( $spl4m --assembly $preAssmbl --coverage $contigCov --breakpoints $breakpointTsv --output $dupiAssmbl "
-				."--mean-read-length $MFconfig{defaultReadLengthX} $lengthTemplateArgs --max-synthetic-depth $MFopt{hybridSyntheticMaxDepth} ) &\n";
-			$cmdPre .= "sim_pid_$i=\$!\n";
-			#merge this split with single reads in tmp dir..
-			if (@{$singlAr} > $i && defined($singlAr->[$i]) &&  $singlAr->[$i] ne ""){
-				#print "\nXX $i\n";
-				#dont combine, not a good idea..
-				#$cmdLater .= "cat $singlAr->[$i] >> $dupiAssmbl;\n" ;
-			}
+			push @simulatorCommands,
+				"( $spl4m --assembly $preAssmbl --coverage $contigCov --breakpoints $breakpointTsv --output $dupiAssmbl "
+				."--mean-read-length $MFconfig{defaultReadLengthX} $lengthTemplateArg --max-synthetic-depth $MFopt{hybridSyntheticMaxDepth} )";
 			$inRds[$i] = $dupiAssmbl;
 		}
 		#instead of combining ill + PacBio fastas in $cmdLater, just add PB as extra libs (makes more sense in any case..)
@@ -7362,14 +9736,26 @@ sub longRdAssembly{
 		}
 		#transfer commands to main #cmd stream..
 		if ($runPar) {
-			$cmdPre .= "\nsim_failed=0\n";
-			for (my $i=0; $i<@illDirs; $i++) {
-				$cmdPre .= "if ! wait \$sim_pid_$i; then echo \"synthetic-read simulator $i failed\" >&2; sim_failed=1; fi\n";
+			my $batchSizes = balanced_parallel_batches(scalar(@simulatorCommands), 20);
+			my $simulatorIndex = 0;
+			for (my $batch = 0; $batch < @{$batchSizes}; $batch++) {
+				my $batchEnd = $simulatorIndex + $batchSizes->[$batch];
+				$cmdPre .= "\necho \"Starting synthetic-read simulator batch ".($batch + 1)
+					."/".scalar(@{$batchSizes})." (".$batchSizes->[$batch]." jobs)\"\n";
+				for (my $i = $simulatorIndex; $i < $batchEnd; $i++) {
+					$cmdPre .= $simulatorCommands[$i]." &\nsim_pid_$i=\$!\n";
+				}
+				$cmdPre .= "sim_failed=0\n";
+				for (my $i = $simulatorIndex; $i < $batchEnd; $i++) {
+					$cmdPre .= "if ! wait \$sim_pid_$i; then echo \"synthetic-read simulator $i failed\" >&2; sim_failed=1; fi\n";
+				}
+				$cmdPre .= "[ \$sim_failed -eq 0 ] || exit 33\n";
+				$simulatorIndex = $batchEnd;
 			}
-			$cmdPre .= "[ \$sim_failed -eq 0 ] || exit 33\n\n";
+			$cmdPre .= "\n";
 		}
 
-		$cmd .= $cmdPre.$cmdLater."\n\n";
+		$cmd .= $cmdPre."\n\n";
 		for (my $i=0;$i<@illDirs;$i++){
 			next if ($inRds[$i] eq "");
 			$cmd .= "if [ ! -s $inRds[$i] ]; then echo \"$inRds[$i] not present.. abort\"; exit 33; fi \n";
@@ -7388,10 +9774,11 @@ sub longRdAssembly{
 	
 	my $contigRecovery = "";
 	if ($MFopt{DoAssembly}==3){#FLYE
-		if (${$cReadTecAr}[0] ne "ONT"){print"Expected Oxford Nanopore (\"ONT\") readTech for flye, found \"${$cReadTecAr}[0]\"\n";die;}
+		my $technology = $long_read_tech || '';
+		if ($technology ne "ONT"){print"Expected Oxford Nanopore (\"ONT\") readTech for flye, found \"$technology\"\n";die;}
 		my $flyeBin = getProgPaths("flye");
 		$cmd .= $flyeBin;
-		$cmd .= " --nano-raw $inRds[0] -t $nCores --meta -g 3g ";
+		$cmd .= " --nano-raw ".join(" ", @inRds)." -t $nCores --meta -g 3g ";
 		if ($helpAssembl ne ""){
 			$cmd .= "--subassemblies $helpAssembl ";
 		}
@@ -7405,7 +9792,13 @@ sub longRdAssembly{
 		my $mMDBG = getProgPaths("metaMDBG");
 		$cmd .= "$mMDBG asm --threads $nCores --out-dir $nodeTmp $inFileFlag " . join(" ",@inRds) . "\n";
 		$cmd .= "rm -rf $nodeTmp/tmp/;\n";
-		$contigRecovery .= "zcat $nodeTmp/contigs.fasta.gz > $nodeTmp/scaffolds.fasta; rm $nodeTmp/contigs.fasta.gz\n\n";
+		# metaMDBG publishes gzip-compressed contigs, while the shared assembly
+		# cleanup below requires an uncompressed scaffolds.fasta. Convert once,
+		# validate it, then discard the redundant compressed copy.
+		$contigRecovery .= "test -s $nodeTmp/contigs.fasta.gz || exit 34\n";
+		$contigRecovery .= "$pigzBin -dc -p $nCores $nodeTmp/contigs.fasta.gz > $nodeTmp/scaffolds.fasta || exit 34\n";
+		$contigRecovery .= "test -s $nodeTmp/scaffolds.fasta || exit 34\n";
+		$contigRecovery .= "rm -f $nodeTmp/contigs.fasta.gz\n\n";
 		
 		#contigs.fasta.gz
 	} else {
@@ -7435,8 +9828,8 @@ sub longRdAssembly{
 	$cmd .= "$assStatScr $nodeTmp/scaffolds.fasta.filt > $nodeTmp/AssemblyStats.txt\n";
 	if (@hybridPreassemblies) {
 		my $compareScr = getProgPaths("compareHybridAssemblies_scr");
-		my $preArgs = join(" ", map { "--preassembly $_" } @hybridPreassemblies);
-		$cmd .= "$compareScr --final $nodeTmp/scaffolds.fasta.filt $preArgs --output $nodeTmp/HybridAssemblyComparison.tsv\n";
+		my $comparisonPreassembly = $hybridPreassemblies[0];
+		$cmd .= "$compareScr --final $nodeTmp/scaffolds.fasta.filt --preassembly $comparisonPreassembly --output $nodeTmp/HybridAssemblyComparison.tsv\n";
 		$cmd .= "[ -s $nodeTmp/HybridAssemblyComparison.tsv ] || exit 36\n";
 	}
 	
@@ -7452,14 +9845,14 @@ sub longRdAssembly{
 
 	my $defTotMem = $MFopt{AssemblyMemory};#60;
 	if ($defTotMem == -1){ #auto set mem
-		$defTotMem = ($map{$curSmpl}{inputFileSizeMB}*8+1e4)/1024;
+		$defTotMem = (spaceInAssGrp($curSmpl,$useSupportRds)*8+1e4)/1024;
 	}
 
 	my $defMem = ($defTotMem);
 
 	$cmd .= "echo \"MAX MEM ".$defTotMem."G\"\n";
-	$cmd .= "echo \"$nameProg\" > $stageOut/$stones{asmDone}\n";
-	$cmd .= "test -s $stageOut/scaffolds.fasta.filt && test -s $stageOut/AssemblyStats.txt && test -s $stageOut/$stones{asmDone} || exit 37\n";
+	$cmd .= "echo \"$nameProg\" > $stageOut/$checkpointNames{assemblyDone}\n";
+	$cmd .= "test -s $stageOut/scaffolds.fasta.filt && test -s $stageOut/AssemblyStats.txt && test -s $stageOut/$checkpointNames{assemblyDone} || exit 37\n";
 	$cmd .= "test -s $stageOut/HybridAssemblyComparison.tsv || exit 37\n" if @hybridPreassemblies;
 	$cmd .= "rm -rf $backupOut\n";
 	$cmd .= "if [ -e $finalOut ]; then mv $finalOut $backupOut; fi\n";
@@ -7471,14 +9864,33 @@ sub longRdAssembly{
 		my $tmpCmd="";
 		$jname = "$nameProg$JNUM";#$givenJName;
 		$QSBoptHR->{useLongQueue} = 0;#super fast, doesn't need long queue
+		my $tmpSHDD = $QSBoptHR->{tmpSpace};
+		my $assemblerScratchGB = $HDDspace{assembler};
+		$assemblerScratchGB =~ s/G$//;
+		if ($assemblerScratchGB < 0) {
+			$assemblerScratchGB = $nameProg eq "mMDBG"
+				? $HDDspace{metaMDBG}
+				: int(25 + (4 * spaceInAssGrp($curSmpl,$useSupportRds) / 1024));
+			$assemblerScratchGB =~ s/G$//;
+		}
+		if ($nameProg eq "mMDBG") {
+			my $preassemblyBytes = 0;
+			$preassemblyBytes += -s $_ for grep { defined($_) && -s $_ } @hybridPreassemblies;
+			$assemblerScratchGB = hybrid_local_scratch_gb(
+				assembler_gb => $assemblerScratchGB,
+				preassembly_bytes => $preassemblyBytes,
+				max_synthetic_depth => $MFopt{hybridSyntheticMaxDepth},
+			);
+		}
+		# Flye and metaMDBG both create their complete assembly work trees below
+		# $nodeTmp, so both require an explicit scheduler scratch request.
+		$QSBoptHR->{tmpSpace} = $assemblerScratchGB."G";
 		if ( $MFopt{SpadesAlwaysHDDnode}){
-			my $tmpSHDD = $QSBoptHR->{tmpSpace};
-			$QSBoptHR->{tmpSpace} = $HDDspace{metaMDBG};
 			($jname,$tmpCmd) = qsubSystem($logDir."$nameProg.sh",$cmd,(int($nCores)),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{Spades_Hosts},$QSBoptHR) ;
-			$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		} else {
 			($jname,$tmpCmd) = qsubSystem($logDir."$nameProg.sh",$cmd,(int($nCores)),int($defMem)."G",$jname,$jDepe,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 		}
+		$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		$QSBoptHR->{useLongQueue} = 0;
 	} else {
 		print "longReadAssm: Assembly already present in final location\n";
@@ -7495,14 +9907,14 @@ sub megahitAssembly{
 	my $stageOut = "$finalOut.assembly-stage";
 	my $backupOut = "$finalOut.previous";
 	my $megahitBin = getProgPaths("megahit");
-	my $stoneAssmbl = "$stones{asmDone}";
+	my $stoneAssmbl = "$checkpointNames{assemblyDone}";
 	
 #	my $p1ar = $AsGrps{$cAsGrp}{FilterSeq1};my $p2ar = $AsGrps{$cAsGrp}{FilterSeq2};my $singlAr = $AsGrps{$cAsGrp}{FilterSeqS};
 	my $jDepe = $AsGrps{$cAsGrp}{SeqClnDeps};
 #	my $cReadTec = $AsGrps{$cAsGrp}{ReadTec};
-	my ($p1ar,$p2ar,$singlAr,$cReadTec) = getCleanSeqsAssmGrp($asHr, $cAsGrp, 0);
+	my $libraries = getCleanLibrariesAssmGrp($asHr, $cAsGrp, 0);
 
-	if (${$cReadTec}[0] =~ m/SLR/i){die "Can't use synthetic long reads (SLR) with megahit\n";}
+	if (grep { ($_->{technology} || '') =~ m/SLR/i } @{$libraries}){die "Can't use synthetic long reads (SLR) with megahit\n";}
 	#print all samples used 
 	my $nCores = $MFopt{AssemblyCores};#6
 	my $noTmpOnNode = 0; #prevent usage of tmp space on node
@@ -7541,13 +9953,14 @@ sub megahitAssembly{
 	}
 	$K = join(",",@spl);
 	#insert single reads
-	my $numInLibs = scalar @{$p1ar};
-	my $sprds = inputFmtMegahit($p1ar,$p2ar,$singlAr,$logDir);
+	my $numInLibs = scalar @{$libraries};
+	my ($megahitInputSetup, $sprds) = inputFmtMegahitRuntimeLibraries($libraries, 'megahit_inputs');
+	$cmd .= $megahitInputSetup;
 	$cmd .= $megahitBin;
 	$cmd .= " --k-list $K $sprds -t $nCores -m ". int($defTotMem*1024*1024*1024*0.8) ." --out-prefix megaAss ";
 	if ($helpAssembl ne ""){
 		if ($helpAssembl eq "preAssmbl"){ #check for keywords
-			$stoneAssmbl = $stones{preAsmDone};
+			$stoneAssmbl = $checkpointNames{preAssemblyDone};
 			$helpAssembl = "";
 		} elsif (-f $helpAssembl) {
 			die "MEGAHIT does not support a file-valued helper assembly ('$helpAssembl'); use SPAdes or the hybrid preassembly workflow\n";
@@ -7634,23 +10047,27 @@ sub metagAssemblyRun{
 				$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postAssmblGo,$finalCommAssDir) = @_;
 				#metagAssembly( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$MFglobal{shortAssembly}, $SmplNameX,$scaffoldFlag,
 				#	$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo);
-	print "Assembly step";
-	my $cleanSeqSetHR = $map{$curSmpl}{cleanSeqSet};
+	my $assemblyInputMB = spaceInAssGrp($curSmpl, 1);
+	my $assemblyCores = assembly_cores_for_input(
+		input_mb => $assemblyInputMB,
+		configured_cores => $MFopt{AssemblyCores},
+	);
+	local $MFopt{AssemblyCores} = $assemblyCores;
+	printf "Assembly step using %d core(s) for %.1f MiB of assembly-group input. ",
+		$assemblyCores, $assemblyInputMB;
 	my $hostFilter = 0;$hostFilter = 1 if ($AsGrps{$cAssGrp}{CntAimAss} > 3);#reset required HDD space
 	my $tmpN ="";
 	my $LasseP = $MFopt{DoAssembly};
-	my ($p1ar,$p2ar,$singlAr,$cReadTecAr); #for hybrid assemblies, we need to know what reads are potentially available..
-	my ($p1arX,$p2arX,$singlArX,$cReadTecArX);
-	
-	if ($LasseP == 5){
-		($p1ar,$p2ar,$singlAr,$cReadTecAr) = getCleanSeqsAssmGrp(\%AsGrps, $cAssGrp, 0);
-		($p1arX,$p2arX,$singlArX,$cReadTecArX) = getCleanSeqsAssmGrp(\%AsGrps, $cAssGrp, 1);
-	}
-	if ($LasseP == 5 && $AsGrps{$cAssGrp}{SupportReads} !~ /(?:PB|ONT):/){#$map{$curSmpl}{"SupportReads"} eq ""){#! scalar(@{$singlArX}) ){#decide on single tech
+	# Assembly choice must reflect the group inputs, not the map-order member
+	# that happens to release the group (which can be terminally empty).
+	my $primaryLibraries = getCleanLibrariesAssmGrp(\%AsGrps, $cAssGrp, 0);
+	my $supportLibraries = getCleanLibrariesAssmGrp(\%AsGrps, $cAssGrp, 1);
+	if ($LasseP == 5 && $AsGrps{$cAssGrp}{SupportReads} !~ /(?:PB|ONT):/){
 		$LasseP = 2; #go for megahit by default..
-		$LasseP  = 4 if (${$cReadTecAr}[0] eq "PB");
-		$LasseP  = 3 if (${$cReadTecAr}[0] eq "ONT");
-		#die "${$cReadTecAr}[0]\nXXXZ\n$LasseP\n";
+		my $technology = libraryTechnology($primaryLibraries,
+			"assembly-group $cAssGrp primary assembly selection", 1);
+		$LasseP  = 4 if ($technology eq "PB");
+		$LasseP  = 3 if ($technology eq "ONT");
 	}
 	# Preassemblies remain package-local intermediates. Complete ordinary,
 	# long-read, and final hybrid assemblies publish to the canonical directory.
@@ -7681,11 +10098,11 @@ sub metagAssemblyRun{
 	}elsif($LasseP == 2){
 		$tmpN = megahitAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir ,
 			$MFglobal{shortAssembly}, $SmplNameX,$hostFilter,$scaffoldFlag) ;
-	} elsif( ($LasseP == 3 ||  $LasseP == 4) && ${$cleanSeqSetHR}{is3rdGen} ){
+	} elsif (($LasseP == 3 || $LasseP == 4)
+			&& grep { $_->{is_long} } @{$primaryLibraries}) {
 		$tmpN = longRdAssembly( \%AsGrps,$cAssGrp,"$nodeTmp",$assemblyOutDir,
-		$MFglobal{shortAssembly}, $SmplNameX,0,$LasseP) ;
+			$MFglobal{shortAssembly}, $SmplNameX,0,$LasseP);
 	}
-	#die ;
 	#if mates available, do them here
 	append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $tmpN); #always add in dep on read extraction
 	
@@ -7695,8 +10112,8 @@ sub metagAssemblyRun{
 	#$finalCommScaffDir "$finalCommScaffDir/scaffDone.sto" $finAssLoc $metaGassembly
 		#my $curAssLoc = $metaGassembly;
 		#$curAssLoc = $finAssLoc if ($efinAssLoc);
-		my ($newScaff,$sdep) = scaffoldCtgs(\%AsGrps,$cAssGrp, #$AsGrps{$cMapGrp}{RawSeq1},$AsGrps{$cMapGrp}{RawSeq2},$AsGrps{$cMapGrp}{Libs},
-				[],[],
+		my ($newScaff,$sdep) = scaffoldCtgs(\%AsGrps,$cAssGrp,
+				[],
 				$assemblyOutDir,$nodeTmp."/scaff/",$publishedScaffDir,$AsGrps{$cAssGrp}{AssemblJobName},$MFopt{MapperCores}, $SmplNameX,1,"");
 		unless ($sdep eq ""){
 			append_job_dependencies(\$AsGrps{$cAssGrp}{AssemblJobName}, $sdep);
@@ -7708,15 +10125,18 @@ sub metagAssemblyRun{
 	#die "inscaff\n";
 	#die "@scaffTarExternalOLib1\n";
 		my $metaGscaffDirExt = "$metaGscaffDir/$scaffTarExternalName/";
-		my ($newScaff,$sdep) = scaffoldCtgs(\%AsGrps,$cAssGrp, #$AsGrps{$cMapGrp}{RawSeq1},$AsGrps{$cMapGrp}{RawSeq2},$AsGrps{$cMapGrp}{Libs},
-				#\@scaffTarExternalOLib1,\@scaffTarExternalOLib2,
-				[],[],
+		my ($newScaff,$sdep) = scaffoldCtgs(\%AsGrps,$cAssGrp,
+				[],
 				$scaffTarExternal,$nodeTmp."/SCFEX$scaffTarExternalName/",$metaGscaffDirExt,$AsGrps{$cAssGrp}{AssemblJobName},$MFopt{MapperCores}, 
 				$SmplNameX,0,$scaffTarExternalName);
 	#my($ar1,$ar2,$scaffolds,$GFdir_a) = @_; #.= "_GFI1";
 		if (@scaffTarExternalOLib1 > 0 ){
 			#die "in gapfill\n$newScaff\n";
-			GapFillCtgs(\@scaffTarExternalOLib1,\@scaffTarExternalOLib2,$newScaff,$metaGscaffDirExt."GapFill/",$sdep,$scaffTarExternalName);
+			my $gapFillLibraries = readLibrariesFromArrays(
+				sample => $SmplNameX, scope => 'primary', phase => 'external',
+				technology => '', r1 => \@scaffTarExternalOLib1, r2 => \@scaffTarExternalOLib2,
+			);
+			GapFillCtgs($gapFillLibraries,$newScaff,$metaGscaffDirExt."GapFill/",$sdep,$scaffTarExternalName);
 		}
 
 		#last;
@@ -7755,9 +10175,10 @@ sub genePredictions($ $ $ $ $) {
 	#print "$outDir/proteins$bacmark.shrtHD.faa\n";
 #	if ( (-s "$expectedD/proteins$bacmark.shrtHD.faa" && -s "$expectedD/genes$bacmark.gff") ||
 #			(-s "$outDir/proteins$bacmark.shrtHD.faa" && -s "$outDir/genes$bacmark.gff") ){
-	if ( ( fileGZs("$expectedD/proteins$bacmark.shrtHD.faa") ) 
-			||(fileGZs("$outDir/proteins$bacmark.shrtHD.faa") ) 
-			){
+	if ( (fileGZs("$expectedD/proteins$bacmark.shrtHD.faa")
+			&& fileGZs("$expectedD/genes$bacmark.gff"))
+			|| (fileGZs("$outDir/proteins$bacmark.shrtHD.faa")
+				&& fileGZs("$outDir/genes$bacmark.gff")) ) {
 		#check if protein/genes were already gzip'd
 		if ( $MFopt{GenePredGZ} && -e "$expectedD/genes$bacmark.gff" ){
 			my $cmd = "";
@@ -7888,7 +10309,7 @@ sub genePredictions($ $ $ $ $) {
 
 
 sub setupHPC{
-	my $QSBoptHR1 = emptyQsubOpt($doSubmit,"",$MFconfig{submSytem});
+	my $QSBoptHR1 = emptyQsubOpt($runOptions{submit},"",$MFconfig{submSytem});
 	# Rejecting one job blocks its dependent chain without aborting unrelated
 	# samples in this invocation.
 	$QSBoptHR1->{continueOnSubmitError} = 1;
@@ -7904,6 +10325,18 @@ sub setupHPC{
 	$QSBoptHR1->{tmpSpace} = $MFconfig{nodeHDDspace};
 	$QSBoptHR1->{wcKeysForJob} = $MFconfig{wcKeysForJob};
 	$QSBoptHR1->{excludeNodes} = $MFconfig{excludeNodes};
+	$QSBoptHR1->{jobPollSeconds} = $MFconfig{schedulerPollSeconds};
+	$QSBoptHR1->{maxConcurrentJobs} = $MFconfig{checkMaxNumJobs};
+	$QSBoptHR1->{killDependencyNever} = $MFconfig{killDepNever};
+	$QSBoptHR1->{capacityCheckEverySubmissions} =
+		$MFconfig{schedulerCapacityCheckJobs};
+	# Reuse the startup scheduler count until the configured submission batch
+	# is reached; the throttle refreshes sooner when its upper bound hits the cap.
+	$QSBoptHR1->{liveJobThrottleState} = {
+		checkedAt => time,
+		liveJobs => $currentJobs,
+		submittedJobs => $QSBoptHR1->{submittedJobs} || 0,
+	};
 	$QSBoptHR1->{Spades_Hosts} = []; $QSBoptHR1->{General_Hosts} = [];
 	spadesHosts();
 	#my $LocationCheckStrg=""; #command that is put in front of every qsub, to check if drives are connected, sub checkDrives
@@ -7974,7 +10407,7 @@ sub setDefaultMFconfig{
 	$MFopt{useBinnerScratch} = 0;$MFopt{BinnerMem} = 0;$MFopt{useCheckM2} = 1;
 	$MFopt{DoBinning} = 0;$MFopt{useCheckM1} = 0;$MFopt{BinnerCores} = 9;
 	$MFopt{DoMetaBat2} = 0; $MFopt{BinnerRedoEmpty} = 0;  $MFopt{SB_env} = "";
-	$MFopt{BinnerRedoAll} =0;
+	$MFopt{BinnerRedoAll} =0; $MFopt{minBinnerAssemblyMB} = 2;
 
 	#read preprocessing
 	$MFopt{unzipCores} = 3; 
@@ -7991,10 +10424,8 @@ sub setDefaultMFconfig{
 	#which read filtering option to use in sdm?
 	$MFopt{useSDM} = 2;	
 	$MFopt{sdmOpt} = "";
-	$MFopt{baseSDMopt} = getProgPaths("baseSDMopt_rel"); 
-	if ($MFopt{useSDM} ==2 ){$MFopt{baseSDMopt} = getProgPaths("baseSDMopt");}
-	$MFopt{baseSDMoptMiSeq} = getProgPaths("baseSDMoptMiSeq_rel");
-	if ($MFopt{useSDM} ==2 ){$MFopt{baseSDMoptMiSeq} = getProgPaths("baseSDMoptMiSeq");}
+	$MFopt{baseSDMopt} = "";
+	$MFopt{baseSDMoptMiSeq} = "";
 
 
 	$MFopt{writeStats} = 0;
@@ -8006,7 +10437,7 @@ sub setDefaultMFconfig{
 	$MFopt{SpadesAlwaysHDDnode} = 1;$MFopt{spadesBayHam} = 0; 
 	$MFopt{spadesMisMatCor} = 0; $MFopt{redoAssembly} =0 ; $MFopt{SpadesLongtime} = 0;
 	$MFopt{pseudoAssembly} = 0; #in case no assembly is possible (soil single reads), just filter for reads X long 
-	$MFopt{AssemblyCores} = 8; $MFopt{AssemblyMemory} = -1; #in GB
+	$MFopt{AssemblyCores} = 0; $MFopt{AssemblyMemory} = -1; #0 auto-scales from 8 to 48; memory in GB
 	$MFopt{AssemblyKmers} = "27,43,67,87,101,127" ; #"27,33,55,71";
 	$MFopt{kmerPerGene} = 0; #calculate kmer frequencies for each gene instead of per scaffold
 	$MFopt{kmerAssembly} = 0; #calculate kmer frequencies for each scaffold
@@ -8064,7 +10495,7 @@ sub setDefaultMFconfig{
 
 
 	#SNPs
-	$MFopt{DoConsSNP}=0; $MFopt{DoSuppConsSNP}=0; $MFopt{redoSNPcons} = 0; $MFopt{redoSNPgene} =0; $MFopt{SNPconsJobsPsmpl} = 1; 
+	$MFopt{DoConsSNP}=0; $MFopt{DoSuppConsSNP}=0; $MFopt{redoSNPcons} = 0; $MFopt{redoSNPgene} =0; $MFopt{SNPconsJobsPsmpl} = 0;
 	$MFopt{SNPminCallQual} = 20; $MFopt{memPJob} = 0; #set to 0 to indicate default estimation
 	$MFopt{saveVCF} = 1; $MFopt{saveConsFastas} = 0;
     #$MFopt{memSNPcall} = 23; -> no longer used
@@ -8081,6 +10512,7 @@ sub setDefaultMFconfig{
 	$MFopt{maxReqDiaDB} = 6; #max number of databases supported by MATAFILER
 	$MFopt{reqDiaDB} = "";#,NOG,MOH,ABR,ABRc,ACL,KGM,PTV,PAB";#,ACL,KGM,ABRc,CZy";#"NOG,CZy"; #"NOG,MOH,CZy,ABR,ABRc,ACL,KGM"   #old KGE,KGB
 	$MFopt{diaEVal} = "1e-7"; $MFopt{diaCores} = 12; ; $MFopt{DiaRmRawHits} = 0; $MFopt{diaRunSensitive} = 0;
+	$MFopt{diaFrameshift} = 0; #diamond -F/--frameshift penalty; 0 disables frameshift alignment mode (recommended for long, error-prone reads e.g. ONT/PacBio)
 	$MFopt{diamondMem} = 7; #GB memory to request for diamond jobs (qsub --mem)
 	$MFopt{DiaMinAlignLen} = 20; $MFopt{DiaMinFracQueryCov} = 0.1; $MFopt{DiaPercID} =40;
 
@@ -8095,7 +10527,8 @@ sub setDefaultMFconfig{
 	$MFconfig{mapFile} = "";
 	$MFconfig{inspectState} = 0;
 	$MFconfig{planState} = 0;
-	$MFconfig{autoStatePlan} = 1;
+	$MFconfig{autoStatePlan} = 0;
+	$MFconfig{precheckInputDirs} = 0;
 	$MFconfig{autoRepairState} = 1;
 	$MFconfig{stateReport} = "";
 	$MFconfig{planReport} = "";
@@ -8124,6 +10557,9 @@ sub setDefaultMFconfig{
 	$MFconfig{silent} = 0;
 	$MFconfig{redoFails} = 0;$MFconfig{XfirstReads} = -1;
 	$MFconfig{killDepNever} = 0;  $MFconfig{checkMaxNumJobs} = 0;  #slurm related.. $killDepNever=1 kills jobs in state "DependencyNeverFinished" (happens a lot), while $checkMaxNumJobs=X halts the pipeline if more than X jobs are already queued up
+	$MFconfig{loopTillCompleteActiveJobs} = 3;
+	$MFconfig{schedulerPollSeconds} = 20;
+	$MFconfig{schedulerCapacityCheckJobs} = 10;
 	$MFconfig{excludeNodes} = ""; #excluding certain nodes..
 	$MFconfig{readsRpairs} =-1; #are reads given in pairs? default: -1 = no clue
 	#my $useTrimomatic=0; #trimmomatic step now replaced by sdm solution -> $MFopt{trimAdapters}
@@ -8149,7 +10585,6 @@ sub setDefaultMFconfig{
 
 
 #statistics collections etc, things that can count/change during run
-	$MFstats{EBIstatTrigger} = 0;
 
 	
 	print "Done. ";
@@ -8159,9 +10594,95 @@ sub setDefaultMFconfig{
 
 
 sub help {
-	print "Help for MG-TK version $MATFILER_ver\n";
-	print "TODO :( ref to README.md for now..\n\n";
+	my $scriptPath = abs_path(__FILE__) || __FILE__;
+	my $reference = dirname($scriptPath)."/docs/flag_reference.md";
+	my @sections;
+	my $currentSection;
+
+	if (open(my $referenceFH, '<', $reference)) {
+		my $inMataf4Reference = 0;
+		while (my $line = <$referenceFH>) {
+			if ($line =~ /^##\s+MATAF4\.pl\s*$/i) {
+				$inMataf4Reference = 1;
+				next;
+			}
+			last if ($inMataf4Reference
+				&& $line =~ /^##\s+Flag comparison against previous manual\.md\s*$/i);
+			next unless ($inMataf4Reference);
+
+			if ($line =~ /^##\s+(.+?)\s*$/) {
+				$currentSection = { title => $1, options => [] };
+				push @sections, $currentSection;
+				next;
+			}
+			next unless ($line =~ /^\|\s*`-/);
+
+			my @cells = split(/\|/, $line, -1);
+			next unless (@cells >= 7 && defined($currentSection));
+			my ($aliases, $type, $default, $status, $description)
+				= map { _plainHelpCell($_) } @cells[1..5];
+			push @{$currentSection->{options}}, {
+				aliases => $aliases,
+				type => $type,
+				default => $default,
+				status => $status,
+				description => $description,
+			};
+		}
+		close($referenceFH);
+	}
+
+	print "\nMATAFILER4 command-line help (version $MATFILER_ver)\n";
+	print "Usage: MATAF4.pl -map <mapping-file> [options]\n";
+	print "       MATAF4.pl -help | -h | -?\n\n";
+	print "Options may be written with one or two leading dashes.\n";
+
+	if (@sections && grep { @{$_->{options}} } @sections) {
+		print "The complete option list below is read from docs/flag_reference.md.\n";
+		foreach my $section (@sections) {
+			next unless (@{$section->{options}});
+			print "\n$section->{title}:\n";
+			foreach my $option (@{$section->{options}}) {
+				_printHelpOption($option);
+			}
+		}
+		print "\nFull reference: $reference\n";
+	} else {
+		print "\nUnable to read the MATAF4.pl option tables from:\n  $reference\n";
+		print "See that file for the complete flag reference.\n";
+	}
+	print "\n";
 	exit(0);
+}
+
+sub _plainHelpCell {
+	my ($text) = @_;
+	$text = "" unless (defined($text));
+	$text =~ s/^\s+|\s+$//g;
+	$text =~ s/`//g;
+	$text =~ s/\*\*//g;
+	$text =~ s/\[([^\]]+)\]\([^\)]+\)/$1/g;
+	return $text;
+}
+
+sub _printHelpOption {
+	my ($option) = @_;
+	my $signature = $option->{aliases};
+	$signature .= " <$option->{type}>"
+		if ($option->{type} ne "" && lc($option->{type}) ne "flag");
+
+	my $details = $option->{description};
+	my @metadata;
+	push @metadata, "default: $option->{default}" if ($option->{default} ne "");
+	push @metadata, "status: $option->{status}"
+		if ($option->{status} ne "" && lc($option->{status}) ne "stable");
+	$details .= " " if ($details ne "" && @metadata);
+	$details .= "(".join("; ", @metadata).")" if (@metadata);
+
+	local $Text::Wrap::columns = 100;
+	local $Text::Wrap::huge = 'overflow';
+	print "  $signature\n";
+	print wrap("      ", "      ", $details)."\n" if ($details ne "");
 }
 
 
@@ -8177,6 +10698,7 @@ sub getCmdLineOptions{
 		"checkInstall" => sub { checkMFFInstall("",1) },
 		"map=s"      => \$MFconfig{mapFile},
 		"config=s" => \$MFconfig{configFile},
+		"precheckInputDirs=i" => \$MFconfig{precheckInputDirs},
 		"inspectState=i" => \$MFconfig{inspectState},
 		"planState=i" => \$MFconfig{planState},
 		"stateReport=s" => \$MFconfig{stateReport},
@@ -8188,13 +10710,16 @@ sub getCmdLineOptions{
 		"redoFails=i" =>\$MFconfig{redoFails}, #if any step of requested analysis failed, just redo everything (extraction etc)
 		"redoContigStats=i" => \$MFconfig{redoCS}, #runContigStats (coverage per gene, kmers, GC content) will be deleted & started again
 		"submSystem=s" => \$MFconfig{submSytem},  #qsub,SGE,bsub,LSF.. by default will try to autodetect
-		"submit=i" => \$doSubmit,  #submit any jobs at all? (0= no submission, just for trying if everything is correctly set up)
-		"from=i" => \$FROM1,  #start at which samples from map file?
-		"to=i" => \$TO1,   #stop at which samples from map file?
-		"loopTillComplete=s" => \$loop2completion, #dangerous flag, script will loop over the assigned samples until all jobs are finished.
-		#use synatx "X:Y" where X is num loops, Y is the window size, eg "6:250" would run 6 loops of max 250 samples, then move on to next 250 samples
+		"submit=i" => \$runOptions{submit},  #submit any jobs at all? (0= no submission, just for trying if everything is correctly set up)
+		"from=i" => \$runOptions{from},  #start at which samples from map file?
+		"to=i" => \$runOptions{to},   #stop at which samples from map file?
+		"loopTillComplete=s" => \$runOptions{loopCount}, #rolling completion loop followed by one final full-range verification pass
+		#use syntax "X:Y" where X is the pass budget and Y is the active rolling window size
+		"loopTillCompleteActiveJobs=i" => \$MFconfig{loopTillCompleteActiveJobs}, #start the next pass once no more than this many submitted jobs are running
+		"schedulerPollSeconds=i" => \$MFconfig{schedulerPollSeconds}, #seconds between loopTillComplete scheduler queries
+		"schedulerCapacityCheckJobs=i" => \$MFconfig{schedulerCapacityCheckJobs}, #refresh exact live-job count after this many accepted submissions
 		"excludeNodes=s" => \$MFconfig{excludeNodes}, #exclude certain nodes?
-		"maxConcurrentJobs=i" => \$MFconfig{checkMaxNumJobs}, #max jobs in queue, useful for large samples sets, currently only works on slurm 
+		"maxConcurrentJobs=i" => \$MFconfig{checkMaxNumJobs}, #max running plus pending user jobs, enforced from cached conservative accounting
 		"killDepNever=i" => \$MFconfig{killDepNever}, #kill jobs in "Dependency never finished" state? 
 		"requireInput=i" => \$MFconfig{abortOnEmptyInput},  #in case input reads are no longer present, 0 will continue pipeline, 1 will abort
 		"ignoreSmpls=s" => \$MFconfig{ignoreSmpl},  #skip a certain sample (sample id)
@@ -8211,8 +10736,8 @@ sub getCmdLineOptions{
 		"rm_tmpdir_reads=i" => \$MFconfig{remove_reads_tmpDir}, #Default 1, remove tmpdir with reads
 		"rm_tmpInput=i" => \$MFconfig{removeInputAgain},#remove raw, human / adaptor filtered reads, if sdm clean created? (and not needed any longer)
 		"reduceScratchUse=i" => \$MFconfig{rmScratchTmp}, #should always be 1, unless debugging..
-		"globalTmpDir=s" => \$sharedTmpDirP,#absolute path to global shared tmp dir (like a scratch dir)
-		"nodeTmpDir=s" => \$nodeTmpDirBase,#absolute path to tmp dir on local HDD of each executing node
+		"globalTmpDir=s" => \$runOptions{sharedTmpDir},#absolute path to global shared tmp dir (like a scratch dir)
+		"nodeTmpDir=s" => \$runOptions{nodeTmpDir},#absolute path to tmp dir on local HDD of each executing node
 		"nodeHDDspace=s" => \$MFconfig{nodeHDDspace},#HDD tmp space to be requested for each node (in Gb). Some systems don't support this
 		"legacyFolders=i" => \$MFconfig{oldStylFolders}, #legacy option, controls if output folders will use the read dir as name (1) or the name in the mapping file (0). Default=0
 
@@ -8261,6 +10786,7 @@ sub getCmdLineOptions{
 		"Binner|MetaBat2|binSpeciesMG=i" => \$MFopt{DoMetaBat2}, #0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
 		"BinnerCores=i" => \$MFopt{BinnerCores}, #cores used for Binning process (and checkM)
 		"BinnerMem=i" => \$MFopt{BinnerMem}, # define binning memory, Gb, 0=auto
+		"minBinnerAssemblyMB=f" => \$MFopt{minBinnerAssemblyMB}, #skip binning assemblies below this many million sequence bases; 0 disables
 		"checkM2=i" => \$MFopt{useCheckM2},
 		"checkM1=i" => \$MFopt{useCheckM1},
 		"BinnerScratchTmp=i" => \$MFopt{useBinnerScratch}, #very specific (undocumented) use of scratch instead of nodetmp dir
@@ -8316,7 +10842,7 @@ sub getCmdLineOptions{
 		"redoAssmblConsSNP=i" => \$MFopt{redoSNPcons},
 		"SNPmem=i" => \$MFopt{memPJob}, #memory per assigned core, in GB
 		"redoGeneExtrSNP=i" => \$MFopt{redoSNPgene},
-		"SNPjobSsplit=i" => \$MFopt{SNPconsJobsPsmpl}, #how many parallel jobs are run on each 
+		"SNPjobSsplit=i" => \$MFopt{SNPconsJobsPsmpl}, #parallel jobs per sample; 0 estimates from alignment size
 		"SNPminCallQual=i" => \$MFopt{SNPminCallQual},
 		"SNPsaveVCF=i" => \$MFopt{saveVCF}, #save vcf of SNP calles? DEfault : 1
 		"SNPsaveConsFasta=i" => \$MFopt{saveConsFastas}, #Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated..
@@ -8332,15 +10858,16 @@ sub getCmdLineOptions{
 		"reParseFunct=i" => \$MFopt{redoDiamondParse},
 		"reProfileFunct=i" => \$MFopt{rewriteDiamond},
 		"reProfileFuncTogether=i" => \$MFopt{rewriteAllIfAnyDiamond}, #if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
-		"diamondCores=i" => \$MFopt{diaCores},
-		"diamondMem=i" => \$MFopt{diamondMem}, # memory in GB for diamond alignment jobs
+		"DiaCores=i" => \$MFopt{diaCores},
+		"DiaMem=i" => \$MFopt{diamondMem}, # memory in GB for diamond alignment jobs
 		"DiaParseEvals=s" => \$MFopt{diaEVal}, #evalues at which to accept hits to func database
 		"DiaSensitiveMode=i" => \$MFopt{diaRunSensitive},
+		"DiaFrameshift=i" => \$MFopt{diaFrameshift}, #diamond -F/--frameshift penalty (e.g. 15); enables frameshift-aware alignment for long, error-prone reads. 0 = off (default)
 		"rmRawDiamondHits=i" => \$MFopt{DiaRmRawHits},
 		"DiaMinAlignLen=i" => \$MFopt{DiaMinAlignLen},
 		"DiaMinFracQueryCov=f" =>  \$MFopt{DiaMinFracQueryCov},
 		"DiaPercID=i" => \$MFopt{DiaPercID},
-		"diamondDBs=s" => \$MFopt{reqDiaDB},#NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
+		"DiaDBs=s" => \$MFopt{reqDiaDB},#NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 	#functional profiling (Jaime tree)
 		"orthoExtract=i" => \$MFopt{calcOrthoPlacement},
 	#ribo profiling (miTag)
@@ -8352,8 +10879,7 @@ sub getCmdLineOptions{
 		"saveRiboRds=i" => \$MFopt{riboStoreRds},
 		"thoroughCheckRiboFinish=i" => \$MFopt{checkRiboNonEmpty},
 	#other tax profilers..
-		"profileMetaphlan=i"=> \$MFopt{DoMetaPhlan},
-		#"profileMetaphlan3=i"=> \$MFopt{DoMetaPhlan3},
+		"profileMetaphlan|profileMetaphlan3=i"=> \$MFopt{DoMetaPhlan},
 		"profileMOTU2=i" => \$MFopt{DoMOTU2},
 		"profileKraken=i"=> \$MFopt{DoKraken},
 		"profileTaxaTarget=i" => \$MFopt{DoTaxaTarget},
@@ -8373,7 +10899,13 @@ sub getCmdLineOptions{
 	
 	# ------------------------------------------ options post processing ------------------------------------------
 	setConfigFile($MFconfig{configFile});
+	# Resolve config-backed defaults only after -config has selected the user
+	# file. Resolving these in setDefaultMFconfig cached the default site config
+	# before command-line parsing and made custom values ineffective.
+	$MFopt{baseSDMopt} = getProgPaths($MFopt{useSDM} == 2 ? "baseSDMopt" : "baseSDMopt_rel");
+	$MFopt{baseSDMoptMiSeq} = getProgPaths($MFopt{useSDM} == 2 ? "baseSDMoptMiSeq" : "baseSDMoptMiSeq_rel");
 
+	normalise_ribosome_request(\%MFopt);
 	die "ERROR:: No mapping file provided (-map)\n" if ($MFconfig{mapFile} eq "");
 	if (!$MFopt{DoAssembly}){
 		$MFopt{mapSupport2Assembly}=0;$MFopt{map2Assembly}=0;
@@ -8381,7 +10913,18 @@ sub getCmdLineOptions{
 	die "ERROR:: \"-mappingMem\" argument contains characters: $MFopt{MapperMemory}" if ($MFopt{MapperMemory} !~ m/[\d-]+/);
 	die "ERROR:: \"-mapSortMem\" argument contains characters: $MFopt{mapSortMemGb}" if ($MFopt{mapSortMemGb} !~ m/[\d-]+/);
 	die "ERROR:: \"-assemblMemory\" argument contains characters: $MFopt{AssemblyMemory}" if ($MFopt{AssemblyMemory} !~ m/[\d-]+/);
-	die "ERROR:: \"-BinnerMem\" argument contains characters: $MFopt{BinnerMem}" if ($MFopt{BinnerMem}  !~ m/[\d-]+/);
+	die "ERROR:: -Binner must be one of 0..5\n"
+		unless $MFopt{DoMetaBat2} >= 0 && $MFopt{DoMetaBat2} <= 5;
+	die "ERROR:: binning requires -assembleMG to select an assembly mode\n"
+		if !$MFopt{DoAssembly} && $MFopt{DoMetaBat2};
+	die "ERROR:: -BinnerCores must be a positive integer\n"
+		unless $MFopt{BinnerCores} > 0;
+	die "ERROR:: -BinnerMem must be zero or a positive integer\n"
+		unless $MFopt{BinnerMem} >= 0;
+	die "ERROR:: binning requires -useCheckM1 1 and/or -useCheckM2 1\n"
+		if $MFopt{DoMetaBat2} && !$MFopt{useCheckM1} && !$MFopt{useCheckM2};
+	die "ERROR:: -SB_env is only valid with -Binner 2 (SemiBin)\n"
+		if $MFopt{SB_env} ne '' && $MFopt{DoMetaBat2} != 2;
 	#die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
 	die "ERROR:: \"-diamondMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
 	$MFopt{diamondMem} = 7 if ($MFopt{diamondMem} <= 0);
@@ -8401,6 +10944,8 @@ sub getCmdLineOptions{
 	
 	die "ERROR:: SNPcaller argument invalid, has to be \"MPI\" or \"FB\"\n" if ($MFopt{SNPcallerFlag} ne "MPI" && $MFopt{SNPcallerFlag} ne "FB");
 	if ($MFopt{DoConsSNP} && !$MFopt{saveConsFastas} && !$MFopt{saveVCF}){die "ERROR:: Can't use -SNPsaveVCF 0 and -SNPsaveConsFasta 0 -> SNP calling would not be saved in any way..\n";}
+	die "ERROR:: assembly consensus SNP calling requires -assembleMG to select an assembly mode\n"
+		if !$MFopt{DoAssembly} && ($MFopt{DoConsSNP} || $MFopt{DoSuppConsSNP});
 
 	
 	#structural variants..
@@ -8408,6 +10953,8 @@ sub getCmdLineOptions{
 	}elsif ($MFopt{callSVs} == 1){	$MFopt{SVcallerFlag} = "DL"; #delly
 	}elsif ($MFopt{callSVs} == 2){	$MFopt{SVcallerFlag} = "GY"; # gridss
 	}else {die"ERROR:: Invalid callSVs option: $MFopt{callSVs}\n";}
+	die "ERROR:: structural-variant calling requires -assembleMG to select an assembly mode\n"
+		if !$MFopt{DoAssembly} && $MFopt{callSVs};
 	
 	if ($MFopt{SB_env} ne ""){
 		if ($MFopt{SB_env} ne "human_gut" && $MFopt{SB_env} ne "dog_gut" && $MFopt{SB_env} ne "ocean" && $MFopt{SB_env} ne "soil" && 
@@ -8451,12 +10998,12 @@ sub getCmdLineOptions{
 	$MFopt{callSVsSupp} = $MFopt{callSVs}; #for now it just enforces doing both suppl and main SVs, if SVs requested at all..
 	
 	#set up further dependencies for MF
-	if ($loop2completion =~ m/(\d+):(\d+)/){
-		$loop2c_winsize = int($2);$loop2completion=$1;$loop2completion_ini=$1;
-		print "Loop2completion=$loop2completion; Window size=$loop2c_winsize\n";
-	} elsif ($loop2completion ne "0") {
-		$loop2completion = 6 ;$loop2completion_ini=6; #set to std number of iterations..
-	}
+	my $loopSpec = parse_loop_spec($runOptions{loopCount});
+	$runOptions{loopCount} = $loopSpec->{loop_count};
+	$runOptions{loopInitialCount} = $loopSpec->{loop_count};
+	$runOptions{loopWindowSize} = $loopSpec->{window_size};
+	print "Loop2completion=$runOptions{loopCount}; Window size=$runOptions{loopWindowSize}\n"
+		if ($runOptions{loopCount});
 	
 	print "Done. ";
 

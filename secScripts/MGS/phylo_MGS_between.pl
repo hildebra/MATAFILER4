@@ -1,12 +1,22 @@
 #!/usr/bin/perl
-#script to get a set of marker genes from each FMG (40 MG), extract them, and build phylo tree
+#script to get predefined FMG or GTDB marker genes from each MGS and build a phylogenetic tree
 #relatively simple, since can use genes directly from gene cat, no need to get SNP called genes
-#can also include reference genomes to include in tree
+#FMG trees can also include reference genomes
+# v0.2 (2026-07-22): handle sparse MGS sets and exclude ambiguous paralogs deterministically.
+# v0.3 (2026-07-27): decouple tree inference from abundance-dependent visualization and
+#                    harden the multi-phyla phylogeny defaults.
+# v0.4 (2026-07-28): normalize custom output paths.
+# v0.5 (2026-07-28): support predefined GTDB markers in addition to FMGs.
+# v0.6 (2026-08-04): retain all prepared marker loci in broad multi-phyla trees.
+# v0.7 (2026-08-04): retain rare lineage-specific loci and relax broad species filters.
 #perl /hpc-home/hildebra/dev/Perl/MATAF3//secScripts/MGS/phylo_MGS_between.pl -GCd /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1/ -MGS /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//MB2.clusters.ext.can.Rhcl.filt -c 10 -outD /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//customRefs/ -refGenos '/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta'
 
 use warnings;
 use strict;
 use Getopt::Long qw( GetOptions );
+use File::Path qw(make_path);
+use File::Spec;
+use Cwd qw(abs_path);
 
 use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
@@ -14,12 +24,8 @@ use Mods::IO_Tamoc_progs qw(getProgPaths );
 use Mods::phyloTools qw(calcDisPos2 getGenoGenes getFMG readFMGdir);
 use Mods::geneCat qw(calculate_spearman_correlation read_matrix correlation checkAntiOcc);
 
-my $bts = getProgPaths("buildTree_scr");
-my $vizTree = getProgPaths("vizBtwPhylo_R");
-
-
 if (@ARGV < 2){
-	die "Not enough input args: use \n./phylo_MGS.pl -GCd [path to GC] -MGS [MGS file]\n";
+	die "Not enough input args: use \n./phylo_MGS_between.pl -GCd [path to GC] -MGS [MGS file] -MGset GTDB|FMG\n";
 }
 
 my $wait4job = 0;#wait till tree is done? only neccessary in pipeline...
@@ -33,6 +39,8 @@ my $fastphylo = 0;
 my $MSAprog = 4; #4:MUSCLE5, 2:mafft
 my $xtraMessageInSH = "";
 my $mem = 120; #memory request in GB
+my $visualize = 1;
+my $markerSet = "FMG";
 #$btout = $ARGV[3] if (@ARGV > 3);
 #$wait4job = $ARGV[4] if (@ARGV > 4);
 
@@ -49,6 +57,8 @@ GetOptions(
 	"MSAprogram=i" => \$MSAprog,
 	"xtraMsg=s" => \$xtraMessageInSH,
 	"mem=i" => \$mem,
+	"visualize=i" => \$visualize,
+	"MGset=s" => \$markerSet,
 ) or die "Invalid phylo_MGS_between.pl options\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
@@ -57,12 +67,21 @@ die "Gene-catalog directory not found: $GCd\n" unless -d $GCd;
 die "MGS file missing or empty: $MGSfile\n" unless -s $MGSfile;
 die "Core and memory requests must be positive\n" unless $numCores > 0 && $mem > 0;
 die "Unsupported MSA program: $MSAprog\n" unless $MSAprog == 2 || $MSAprog == 4;
+die "-visualize must be 0 or 1\n" unless $visualize == 0 || $visualize == 1;
+die "-MGset option has to be \"GTDB\" or \"FMG\"\n"
+	unless $markerSet eq "GTDB" || $markerSet eq "FMG";
+die "-refGenos currently supports only -MGset FMG; GTDB trees use the predefined gene-catalog markers\n"
+	if $markerSet eq "GTDB" && $addRefGenos ne "";
+$GCd = abs_path($GCd);
+$MGSfile = abs_path($MGSfile);
 $btout = "$GCd/MGS/phylo/" if ($btout eq "");#main output dir
+$btout = File::Spec->rel2abs($btout);
+$btout .= "/" unless $btout =~ m{/$};
 
 
 #main objects to store dna/cats
 my %FAAfmg; my %FNAfmg;my %catT; 
-my %MGS; my %MGSFMG; my %dblList; my %totDbls;
+my %MGS; my %MGSFMG; my %dblList; my %totDbls; my %ambiguousMGSFMG;
 
 
 #is there any ref genomes to add?
@@ -95,11 +114,15 @@ if ($addRefGenos ne ""){
 	}
 }
 
-# Between-MGS phylogeny intentionally always uses the FMG marker set, independent
-# of the marker set used for MGS construction.
-#read FMG designation
+# Select the predefined marker designation and protein files created with the
+# gene catalog. GTDB is exposed as "GTDB" to users but stored under GTDBmg.
+my $markerTag = $markerSet eq "GTDB" ? "GTDBmg" : "FMG";
+my $markerSubset = "$GCd/$markerTag.subset.cats";
+my $markerProteinGlob = "$GCd/$markerTag/*.faa";
+
+#read marker designation
 my %FMG2COG;
-open I,"<$GCd/FMG.subset.cats" or die "Can't open $GCd/FMG.subset.cats\n";
+open I,"<$markerSubset" or die "Can't open $markerSubset\n";
 while (<I>){
 	chomp;
 	my @spl = split /\t/;
@@ -110,10 +133,10 @@ while (<I>){
 }
 close I;
 
-print "Found ". scalar(keys(%FMG2COG)) ." FMG genes in total gene cat\n";
+print "Found ". scalar(keys(%FMG2COG)) ." $markerSet marker genes in total gene cat\n";
 
 #read MGS genes
-my $mfcnt=0; my $mfdbl=0;
+my $mfdbl=0;
 open I,"<$MGSfile" or die "Can't open MGS input\n";
 while (<I>){
 	chomp; my @spl = split /\t/;
@@ -123,23 +146,47 @@ while (<I>){
 	#$MGS{$spl[0]} = \@genes;
 	foreach my $x (@genes){
 		if (exists($FMG2COG{$x})){
-			if (exists($MGSFMG{$spl[0]}{$FMG2COG{$x}})){
+			my $cog = $FMG2COG{$x};
+			if (exists($ambiguousMGSFMG{$spl[0]})
+					&& exists($ambiguousMGSFMG{$spl[0]}{$cog})){
 				$mfdbl++;
-				$dblList{$spl[0]}{$FMG2COG{$x}}{$x} = 1;
-				$dblList{$spl[0]}{$FMG2COG{$x}}{$MGSFMG{$spl[0]}{$FMG2COG{$x}}} = 1;
-				$totDbls{$x} = 1; $totDbls{$MGSFMG{$spl[0]}{$FMG2COG{$x}}} = 1;
+				$dblList{$spl[0]}{$cog}{$x} = 1;
+				$totDbls{$x} = 1;
+			} elsif (exists($MGSFMG{$spl[0]}{$cog})){
+				my $first = delete $MGSFMG{$spl[0]}{$cog};
+				$mfdbl++;
+				$dblList{$spl[0]}{$cog}{$x} = 1;
+				$dblList{$spl[0]}{$cog}{$first} = 1;
+				$totDbls{$x} = 1; $totDbls{$first} = 1;
+				$ambiguousMGSFMG{$spl[0]}{$cog} = 1;
 			} else {
-				$MGSFMG{$spl[0]}{$FMG2COG{$x}} = $x;
+				$MGSFMG{$spl[0]}{$cog} = $x;
 			}
-			$mfcnt ++;
 		}
 	}
 }
 close I;
-my $mgs_with_fmg = scalar keys %MGSFMG;
-die "No FMG genes from $GCd/FMG.subset.cats were assigned to any MGS in $MGSfile\n"
-	unless $mgs_with_fmg;
-print "Assigned $mfcnt genes to MGS in $mgs_with_fmg MGS (". int(10*$mfcnt/$mgs_with_fmg)/10 ." on average, $mfdbl double)\n";
+my @marker_bearing_mgs = grep { scalar keys %{$MGSFMG{$_}} } keys %MGSFMG;
+my $mgs_with_fmg = scalar @marker_bearing_mgs;
+my $usable_fmg = 0;
+$usable_fmg += scalar keys %{$MGSFMG{$_}} for @marker_bearing_mgs;
+my $ambiguous_cells = 0;
+$ambiguous_cells += scalar keys %{$ambiguousMGSFMG{$_}} for keys %ambiguousMGSFMG;
+if ($mgs_with_fmg < 3) {
+	make_path($btout) unless -d $btout;
+	my $skip_file = "$btout/SKIPPED.txt";
+	open my $skip_fh, '>', $skip_file or die "Cannot write $skip_file: $!\n";
+	print {$skip_fh} "Between-MGS phylogeny skipped: only $mgs_with_fmg marker-bearing MGS were available; at least 3 are required.\n"
+		or die "Cannot write $skip_file: $!\n";
+	close $skip_fh or die "Cannot close $skip_file: $!\n";
+	print "SKIPPED=too_few_marker_bearing_MGS:$mgs_with_fmg\n";
+	exit 0;
+}
+my $bts = getProgPaths("buildTree_scr");
+print "Retained $usable_fmg unambiguous $markerSet marker genes in $mgs_with_fmg MGS (".
+	int(10*$usable_fmg/$mgs_with_fmg)/10 ." on average); excluded $ambiguous_cells MGS-marker cells with $mfdbl extra copies\n";
+unlink "$btout/SKIPPED.txt" or die "Cannot remove stale $btout/SKIPPED.txt: $!\n"
+	if -e "$btout/SKIPPED.txt";
 
 
 #routine to do double checking etc and also find targets for merging gene clusters..
@@ -165,7 +212,7 @@ if (0){
 				print O2 ">$c.$x\n$FNAfmg{$x}\n";
 			}
 			close O2;
-			my $avgID = calcDisPos2("$sdir/$mg.$c.fna","",1,10,"/tmp/hildebra/test/");
+			my $avgID = calcDisPos2("$sdir/$mg.$c.fna","",1,10,$sdir);
 			$avgIDs[$j] = $avgID;
 			unlink("$sdir/$mg.$c.fna");
 		}
@@ -211,17 +258,17 @@ if (0){
 }
 
 
-print "reading FMG ref genes..";
-my $hr = readFasta("$GCd/FMG/COG*.faa"); %FAAfmg = (%FAAfmg,%{$hr});
+print "reading $markerSet marker genes..";
+my $hr = readFasta($markerProteinGlob); %FAAfmg = (%FAAfmg,%{$hr});
 print "done\n";
 
-system "mkdir -p $btout" unless (-d $btout);
+make_path($btout) unless -d $btout;
 
 #open ON,">$btout/all.fna"; 
 open OA,">$btout/all.faa"  or die "Can't open faa out file $btout/all.faa\n"; 
 my $SaSe = "|";
-foreach my $mg (keys %MGSFMG){
-	foreach my $cog (keys %{$MGSFMG{$mg}}){
+foreach my $mg (sort keys %MGSFMG){
+	foreach my $cog (sort keys %{$MGSFMG{$mg}}){
 		my $ng = "$mg$SaSe$cog";
 #		print ON ">$ng\n$FNAfmg{$MGSFMG{$mg}{$cog}}\n";
 		die "$MGSFMG{$mg}{$cog}\n" unless (exists( $FAAfmg{$MGSFMG{$mg}{$cog}} ));
@@ -232,40 +279,74 @@ foreach my $mg (keys %MGSFMG){
 close OA;
 
 open OC,">$btout/all.cats" or die "Can't open cat file $btout/all.cats\n";
-foreach my $cg (keys %catT){
+foreach my $cg (sort keys %catT){
 	print OC join("\t",@{$catT{$cg}})."\n";
 }
 close OC;
 my $QSBoptHR = emptyQsubOpt(1,"");
 $QSBoptHR->{useLongQueue} = 1;
 my $treeFile = "$btout/phylo/IQtree_allsites.treefile";
+my $locusPolicyFile = "$btout/phylo/post_alignment_locus_qc.policy.tsv";
+my $broadLocusRetentionCurrent = 0;
+if (-s $locusPolicyFile) {
+	open my $policyFH, "<", $locusPolicyFile
+		or die "Cannot read locus-retention policy $locusPolicyFile: $!\n";
+	my $policyLine = <$policyFH> // "";
+	close $policyFH
+		or die "Cannot close locus-retention policy $locusPolicyFile: $!\n";
+	chomp $policyLine;
+	my %policy = map { split /=/, $_, 2 } split /\t/, $policyLine;
+	$broadLocusRetentionCurrent = ($policy{schema} // "") eq "3"
+		&& ($policy{enabled} // "") eq "0"
+		&& ($policy{scope} // "") eq "between"
+		&& ($policy{per_gene_length_fraction} // "") eq "0.4"
+		&& ($policy{minimum_category_q90_fraction} // "") eq "0"
+		&& ($policy{species_nt_fraction} // "") eq "0.5"
+		&& ($policy{minimum_gene_fraction_per_species} // "") eq "0.3"
+		&& ($policy{minimum_nt} // "") eq "3000";
+}
 
 my $cmd = "";
-if (!-e $treeFile){
+if (!-s $treeFile || !$broadLocusRetentionCurrent){
 	print "Creating phylogeny for found specI's//\n";
-	$cmd .= "$bts  -aa  $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats -outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores  -AAtree 1 -bootstrap 5000 -NTfiltCount 300 -NTfilt 0.1 -NTfiltPerGene 0.5 -minOverlapMSA 2 -MSAprogram $MSAprog -AutoModel 0 -iqFast 0 \n";
+	$cmd .= "$bts -aa $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats "
+		. "-outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores "
+		. "-AAtree 1 -bootstrap 1000 -NTfiltCount 3000 -NTfilt 0.5 "
+		. "-NTfiltPerGene 0.4 -GenesPerSpecies 0.3 -fracMaxGenes90pct 0 "
+		. "-postAlignmentLocusQC 0 "
+		. "-MSAprogram $MSAprog "
+		. "-AutoModel 1 -iqFast 0 -continue 1\n";
 } else {
-	print "Found already existing tree, skipping tree building\n";
-	$cmd .= "#$bts  -aa  $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats -outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores  -AAtree 1 -bootstrap 5000 -NTfiltCount 300 -NTfilt 0.1 -NTfiltPerGene 0.5 -minOverlapMSA 2 -MSAprogram $MSAprog -AutoModel 0 -iqFast 0 \n";
+	print "Found existing tree with current broad-locus retention policy, skipping tree building\n";
 }
 $cmd .= "\n\n\n$xtraMessageInSH\n" if ($xtraMessageInSH ne "");
+$cmd .= "test -s $treeFile\n";
 
-#add script for phylo visualization
-$cmd .= "\n#visualize the newly created phylogeny\n";
-my $abundMatrix = $MGSfile;  $abundMatrix =~ s/\/[^\/]+$/\//; $abundMatrix .= "Annotation/Abundance/MGS.matL7.txt";
-$cmd .= "$vizTree $abundMatrix $treeFile $btout/phylo/IQtree_allsites.pdf \n";
+if ($visualize) {
+	# Standalone use retains the historical combined tree-and-visualization job.
+	# MGS.pl disables this and submits visualization only after abundance exists.
+	$cmd .= "\n#visualize the newly created phylogeny\n";
+	my $abundMatrix = $MGSfile;  $abundMatrix =~ s/\/[^\/]+$/\//; $abundMatrix .= "Annotation/Abundance/MGS.matL7.txt";
+	my $treePdf = "$btout/phylo/IQtree_allsites.pdf";
+	my $vizTree = getProgPaths("vizBtwPhylo_R");
+	$cmd .= "$vizTree $abundMatrix $treeFile $treePdf \n";
+	$cmd .= "test -s $treePdf\n";
+}
 
 #handle submission
-my $scrNm = "btwFMGtree";
+my $scrNm = "btw${markerSet}tree";
 $scrNm = "btwCusFMGTree" if ($addRefGenos ne "");
 my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
 my ($dep,$qcmd) = qsubSystem($btout.$scrNm.".sh",$cmd,$numCores,int($mem)."G",$scrNm,"","",1,[],$QSBoptHR);
-#$cmd= "$bts  -aa  $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats -outD ${btout}_ST -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores  -AAtree 1 -bootstrap 000 -NTfiltCount 300 -NTfilt 0.1 -NTfiltPerGene 0.5 -minOverlapMSA 2 -MSAprogram 2 -AutoModel 0 -iqFast 1 -superTree 1 \n";
-#($dep,$qcmd) = qsubSystem($btout."btweenTreeST.sh",$cmd,$numCores,"1G","FMGstStree","","",1,[],$QSBoptHR);
 
 if ($wait4job==1){
 	qsubSystemJobAlive( [$dep],$QSBoptHR );
 }
 if ($wait4job==2){
-	print "WAITID=$dep\n";
+	my $externalDep = $dep;
+	my $localTag = $QSBoptHR->{rTag} // '';
+	$externalDep =~ s/^\Q$localTag\E// if length $localTag;
+	die "Cannot export non-numeric between-tree dependency '$externalDep'\n"
+		unless $externalDep =~ /^\d+$/;
+	print "WAITID=$externalDep\n";
 }

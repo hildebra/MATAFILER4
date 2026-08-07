@@ -1,0 +1,140 @@
+use strict;
+use warnings;
+
+use File::Find ();
+use File::Spec;
+use File::Temp qw(tempdir);
+use FindBin qw($Bin);
+use Test::More;
+
+open my $sourceFH, '<', File::Spec->catfile($Bin, '..', 'MATAF4.pl')
+	or die "Cannot inspect MATAF4.pl: $!";
+my $mataf4 = do { local $/; <$sourceFH> };
+close $sourceFH;
+
+my ($optionHelpers) = $mataf4 =~ /(sub _shell_quote\s*\{.*?)(?=^sub sdmOptSet)/ms;
+ok(defined $optionHelpers, 'SDM option helpers can be isolated for testing');
+eval "package TestSDMCleaner; our \%MFopt; $optionHelpers";
+is($@, '', 'isolated SDM option helpers compile');
+
+is(TestSDMCleaner::_shell_quote("reads/a'b.fq"), q{'reads/a'"'"'b.fq'},
+	'shell quoting safely preserves an apostrophe');
+eval { TestSDMCleaner::_shell_quote("bad\nargument") };
+like($@, qr/NUL or newline/, 'shell arguments containing command separators are rejected');
+
+my $stagingDir = tempdir(CLEANUP => 1);
+my $supportDir = File::Spec->catdir($stagingDir, 'Support');
+mkdir $supportDir or die "Cannot create $supportDir: $!";
+my $doneMarker = File::Spec->catfile($stagingDir, 'done.sto');
+open my $markerFH, '>', $doneMarker or die "Cannot write $doneMarker: $!";
+close $markerFH;
+ok(!TestSDMCleaner::_staged_read_files_present($stagingDir, $doneMarker),
+	'a directory containing only staging markers has no reads');
+my $supportRead = File::Spec->catfile($supportDir, 'support.fq.gz');
+open my $supportFH, '>', $supportRead or die "Cannot write $supportRead: $!";
+print {$supportFH} "read data\n";
+close $supportFH;
+ok(TestSDMCleaner::_staged_read_files_present($stagingDir, $doneMarker),
+	'nested support reads prevent staging from being treated as empty');
+
+is(TestSDMCleaner::_validate_sdm_integer_setting('XfirstReads', -1, -1), -1,
+	'the established XfirstReads disabled sentinel is accepted');
+eval { TestSDMCleaner::_validate_sdm_integer_setting('XfirstReads', -2, -1) };
+like($@, qr/Invalid integer for XfirstReads/,
+	'values below the XfirstReads disabled sentinel are rejected');
+
+my $tmpdir = tempdir(CLEANUP => 1);
+my $baseOptions = File::Spec->catfile($tmpdir, 'base.txt');
+open my $baseFH, '>', $baseOptions or die "Cannot write $baseOptions: $!";
+print {$baseFH} <<'OPTIONS';
+minSeqLength	50
+maxAccumulatedError	1.0
+maxAmbiguousNT	2
+*maxAmbiguousNT	99
+TrimWindowWidth	15
+TrimWindowThreshhold	20
+BinErrorModelAlpha	0.01
+OPTIONS
+close $baseFH;
+
+$TestSDMCleaner::MFopt{sdmProbabilisticFilter} = 0;
+$TestSDMCleaner::MFopt{sdm_opt} = {minSeqLength => 42};
+my $adapted = TestSDMCleaner::adaptSDMopt($baseOptions, $tmpdir, 80, 'hiSeq');
+open my $adaptedFH, '<', $adapted or die "Cannot read $adapted: $!";
+my $adaptedText = do { local $/; <$adaptedFH> };
+close $adaptedFH;
+like($adaptedText, qr/^maxAccumulatedError\t1\.2$/m,
+	'short-read accumulated-error threshold is adapted');
+like($adaptedText, qr/^maxAmbiguousNT\t1$/m,
+	'reads shorter than 90 bases retain the stricter ambiguous-base limit');
+unlike($adaptedText, qr/^maxAmbiguousNT\t2$/m,
+	'the short-read ambiguous-base limit is not overwritten');
+like($adaptedText, qr/^\*maxAmbiguousNT\t99$/m,
+	'commented option examples are not rewritten');
+like($adaptedText, qr/^BinErrorModelAlpha\t-1$/m,
+	'probabilistic filtering can be disabled deterministically');
+like($adaptedText, qr/^minSeqLength\t42$/m,
+	'explicit SDM overrides are applied');
+
+my $longAdapted = TestSDMCleaner::adaptSDMopt($baseOptions, $tmpdir, 0, 'PB');
+open my $longFH, '<', $longAdapted or die "Cannot read $longAdapted: $!";
+my $longText = do { local $/; <$longFH> };
+close $longFH;
+like($longText, qr/^minSeqLength\t42$/m,
+	'explicit overrides also apply when read length is unknown or reads are long');
+like($longText, qr/^maxAccumulatedError\t1\.0$/m,
+	'long-read options do not receive short-read length heuristics');
+
+$TestSDMCleaner::MFopt{sdm_opt} = {missingOption => 1};
+eval { TestSDMCleaner::adaptSDMopt($baseOptions, $tmpdir, 81, 'hiSeq') };
+like($@, qr/Expected one active 'missingOption'/,
+	'unknown SDM overrides fail instead of being silently ignored');
+eval { TestSDMCleaner::_set_sdm_option("name\told\n", 'name', "bad\nvalue") };
+like($@, qr/Invalid value/, 'SDM override values cannot inject additional option lines');
+
+my ($optionSelector) = $mataf4 =~ /(sub sdmOptSet\s*\{.*?)(?=^sub sdmClean)/ms;
+like($optionSelector, qr/technology eq '454'.*?adaptSDMopt\([^\n]+?'pair'\).*?adaptSDMopt\([^\n]+?'single'\)/s,
+	'paired and singleton 454 option files use distinct output names');
+
+my ($cleaner) = $mataf4 =~ /(sub sdmClean\(\)\{.*?)(?=^sub mocat_reorder)/ms;
+like($cleaner, qr/return '' unless \@\{\$libraries\}/,
+	'an empty scope does not repeat an unrelated upstream dependency');
+like($cleaner, qr/filterSupplDone\.stone.*?filterDone\.stone|filterDone\.stone.*?filterSupplDone\.stone/s,
+	'primary and support cleaning use independent checkpoints');
+like($cleaner, qr/_shell_command\(\s*\$sdmBin,/s,
+	'SDM commands quote executable, input, output, and option arguments');
+my ($singleCleaner) = $cleaner =~ /(if \(\$hasSingle\) \{.*?)(?=\n\t\tpush \@cleanLibraries)/s;
+like($singleCleaner,
+	qr/my \$singleOutput = \$hasPair \? "\$prefix\.input-single\.\$fEnd" : \$outSingle;.*?'-o_fastq', \$singleOutput/s,
+	'SDM writes singleton reads directly to a gzip-suffixed output');
+unlike($singleCleaner, qr/_shell_command\(\$pigzBin/,
+	'SDM singleton filtering does not recompress an uncompressed intermediate with pigz');
+like($singleCleaner,
+	qr/if \(\$hasPair\).*?_shell_command\('cat', '--', \$singleOutput\).*?\$outSingle/s,
+	'paired-plus-single libraries append the SDM gzip member directly');
+like($mataf4, qr/my \$pigzBin\s*=\s*getProgPaths\("pigz"\)/,
+	'MATAF4 resolves pigz through the configured program path');
+like($cleaner, qr/local \$QSBoptHR->\{tmpSpace\} = 0/,
+	'scheduler scratch settings are restored even if submission fails');
+like($cleaner, qr/grep \{ !-e \$_ \} \@requiredOutputs/,
+	'a successful checkpoint accepts valid empty filtered outputs');
+unlike($cleaner, qr/requiredNonEmpty/,
+	'redundant size-based completion state has been removed');
+like($cleaner,
+	qr/if \(!\$useXtras\).*?SMPL\.empty.*?mf4_sdm_fastq_has_records.*?cleaned_primary_reads_empty/s,
+	'primary SDM cleaning marks a sample when no FASTQ records remain after filtering');
+like($cleaner,
+	qr/my \$presence = -e \$stone.*?replaceScopeLibraries\(\$cleanSeqSetHR.*?cleaned_primary_libraries_empty\(\\\@cleanLibraries\).*?cleaned_primary_reads_empty/s,
+	'a completed primary SDM checkpoint is checked locally before another assembly can be submitted');
+like($mataf4, qr/primaryCleanPending.*?filterDone\.stone.*?supportCleanPending.*?filterSupplDone\.stone.*?seqCleanFlag/s,
+	'a missing support-cleaning checkpoint forces raw-read restaging');
+unlike($mataf4, qr/scalar\(\@files\) == 1.*?rm -rf \$finDest\/rawRds/s,
+	'staging repair no longer deletes a directory containing nested support reads');
+
+my ($longAssembly) = $mataf4 =~ /(sub longRdAssembly\s*\{.*?)(?=^sub megahitAssembly)/ms;
+unlike($longAssembly, qr/Unexpected less preDirs|preLib num/,
+	'multiple support singleton libraries are not counted as preassembly packages');
+like($longAssembly, qr/for \(my \$i=0;\$i<\@illDirs;\$i\+\+\).*?for \(my \$i=0;\$i<\@\{\$singlAr\};\$i\+\+\).*?push\(\@inRds,\$singlAr->\[\$i\]\)/s,
+	'hybrid assembly independently adds one synthetic input per package and every support library');
+
+done_testing();

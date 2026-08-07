@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 
-#ARGS: ./buildTree.pl -fna [FNA] -faa [FAA] -cat [categoryFile] -outD [outDir] -cores [CPUs] -useEte [1=ETE,0=this script] -NTfilt [filter]
+#ARGS: ./buildTree.pl -fna [FNA] -faa [FAA] -cat [categoryFile] -outD [outDir] -cores [CPUs] -useEte [1=ETE,0=this script] -relativeNTFraction [filter]
 #versions: ver 2 makes a link to nexus file formats, to be used in MrBayes and BEAST etc
 #8.12.17: added mod3 from Mechthild
 #2.1.20: rewrite of workflow to extend superTrees to superCheck
@@ -11,6 +11,37 @@
 #2.3.26: 5.05: added veryFastTRee
 #5.06: 15.4.26: added famse
 #5.07: 16.7.26: validate paths/options and repair filtering, resume, optional-tree, and cleanup paths
+#5.08: 22.7.26: restore partitions, require nonempty resume outputs, and activate per-locus overlap filtering
+#5.09: run MSAfix through a validated temporary output before replacing an alignment
+#5.10: consolidate runtime configuration, progress, and repetitive diagnostics
+#5.11: recover to output-local work space when the requested temporary path is unusable
+#5.12: validate persistent continuation checkpoints and restart incomplete stages
+#5.13: isolate recoverable alignment failures to their individual loci
+#5.14: add bounded-memory/auto-thread IQ-TREE mode, pathogen support, and legacy compatibility
+#5.15: fall back from pathogen mode when alignments exceed CMAPLE's compiled length limit
+#5.16: omit IQ-TREE -mem for incompatible partition-model runs
+#5.17: sort allFNA/allFAA records by locus before buildTree compresses them
+#5.18: use the allocated IQ-TREE thread count directly; avoid costly per-tree AUTO benchmarking
+#5.19: infer a strict validated backbone and place sparse samples afterwards
+#5.20: filter anomalous per-locus alignments before concatenation
+#5.21: use native MSAfix locus QC and clean its temporary files on every exit
+#5.22: own staged-input publication, node-local temp selection, and completion markers
+#5.23: default to broad/inter-species locus filtering; make strain-level filtering explicit
+#5.24: retain all prepared loci by default for broad phylogenies; preserve opt-in locus QC
+#5.25: fingerprint input filters and allow rare nonempty categories in broad marker trees
+#5.26: validate complete IQ-TREE outputs, retry numerical underflow safely, and relax strain backbones
+#5.27: publish the placed strain tree by default and retain ML inference as .backbone.treefile
+#5.28: centralize reusable alignment and per-method tree checkpoint state
+#5.29: add opt-in taxon-aware two-stage locus selection around the existing MSA workflow
+#5.30: enable taxon-aware locus selection by default
+#5.31: keep IQ-TREE inference unrooted; root published output downstream
+#5.32: reject stronger locus-level divergence outliers and enable partition merging by default for strain trees
+#5.33: restore the fast fixed IQ-TREE model as the strain-tree default; retain AutoModel as an opt-in
+#5.34: deterministically merge strain loci into rate/GC partition bins before IQ-TREE
+#5.35: size deterministic rate/GC partitions by effective called sites, not locus count
+#5.36: retain broad backbones while applying coverage criteria to sparse-sample placement
+#5.37: use EPA-ng maximum-likelihood placement for sparse strict-backbone samples
+#5.38: separate backbone admission from placement eligibility and retain sparse taxa through MSA
 
 use warnings;
 use strict;
@@ -18,10 +49,16 @@ use strict;
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw( fileGZe fileGZs gzipopen systemW readFasta readFastHD writeFasta quantile);
 use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree 
-			runFasttree runVeryFasttree fixHDs4Phylo getGenoGenes getFMG readFMGdir );
+			runFasttree runVeryFasttree iqtreeOutputComplete cleanupIQTreeTransients
+			fixHDs4Phylo getGenoGenes getFMG readFMGdir );
+use Mods::PhyloAlignment qw(filter_alignment_by_overlap);
+use Mods::StrainPlacement qw(
+	read_sample_qc split_strict_backbone
+	read_epa_jplace write_epa_placed_tree
+);
 			
 			
-use Getopt::Long qw( GetOptions );
+use Getopt::Long qw( GetOptions Configure );
 #use Mods::ext::TreeIO;
 #use Mods::IO::MaybeXS qw(encode_json decode_json);
 use Mods::IO::PP qw (decode_json);
@@ -29,10 +66,12 @@ use Mods::IO::PP qw (decode_json);
 use Data::Dumper;
 use Mods::math qw (medianArray avgArray meanArray);
 use Cwd qw(abs_path);
-use File::Basename qw(basename);
+use File::Basename qw(basename dirname);
 use File::Copy qw(copy move);
+use File::Glob qw(bsd_glob);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
+use File::Temp qw(tempfile);
 
 
 sub convertMultAli2NT;
@@ -49,13 +88,55 @@ sub pruneTree;
 sub prepGenoDirs;
 sub createTreeOpt;
 sub treePresent;
+sub requestedTreeMethods;
+sub treeMethodState;
 sub parseSeqId;
+sub geneFileStem;
 sub safeRemoveTree;
 sub requireConfiguredTool;
 sub shellQuote;
+sub runMSAFix;
+sub limitedWarn;
+sub prepareTemporaryBase;
+sub sortFastaForCompression;
+sub fastaCompressionSortKey;
+sub runPostAlignmentLocusQC;
+sub selectTaxonAwareCandidateLoci;
+sub selectTaxonAwareFinalLoci;
+sub chooseTaxonAwareLoci;
+sub classifyTaxonAwareSamples;
+sub classifyTaxonAwareCoverageEligibility;
+sub taxonAwareAlignmentMetrics;
+sub informativeSequenceLength;
+sub writeTaxonAwareLocusAudit;
+sub writeTaxonAwareSampleAudit;
+sub writePostAlignmentQCPolicy;
+sub alignmentFileStem;
+sub readPostAlignmentRateMetrics;
+sub alignmentGCMetric;
+sub deterministicRatePartitions;
+sub writeRatePartitionAudit;
+sub publishStagedTreeInputs;
+sub writeCompletionMarker;
+sub epaModelArtifact;
+sub runEpaNgPlacement;
 
 my $doPhym= 0;
-my $version = 5.07;
+my $version = 5.38;
+my %limitedWarningCounts;
+my %limitedWarningLimits;
+my $synSummaryCount = 0;
+my $synSiteTotal = 0;
+my $nonSynSiteTotal = 0;
+
+END {
+	for my $category (sort keys %limitedWarningCounts) {
+		my $limit = $limitedWarningLimits{$category} // 5;
+		my $suppressed = $limitedWarningCounts{$category} - $limit;
+		warn "Suppressed $suppressed additional '$category' warning(s)\n"
+			if $suppressed > 0;
+	}
+}
 
 my $pigzBin  = getProgPaths("pigz");
 #my $trDist = getProgPaths("treeDistScr");
@@ -73,20 +154,24 @@ my $partiExt=".partition.RAXML";
 #trimal -in /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/T2/tesssst/MSA/COG0185.faa -out /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/T2/tesssst/MSA/tst.fna -backtrans /g/scb/bork/hildebra/SNP/GNMass3/TECtime/v5/T2/tesssst/inMSA0.fna -keepheader -keepseqs -noallgaps -automated1 -ignorestopcodon
 #some runtim options...
 #my $ncore = 20;#RAXML cores
-my $ntFrac =0.2; my $ntFracGene = 0.1; 
+my $ntFrac =0.2; my $ntFracGene = 0.1;
 my $GeneFracPSpec = 0.1; #replacement for ntFracGene, as works also with supertrees
 my $MSAprog = 2; #do MSA with clustal (1) or msaprobs (0), mafft(2), guidance2(3), MUSCLE5 (4)
 my $calcDistMat = 0; #distmat of either AA or NT (depending on MSA)
 my $calcDistMatExt = 0; #distmat of other AA or NT (depending on MSA), e.g. running two times an MSA
 my $calcDistMatExtGo = 0;
 my $treeAutoModel=1; #iqtree: choose model automatically (a bit slower)
+my $treeAutoModelExplicit=0;
 my $fracMaxGenesFilter = 0.2;
 my $fracMaxGenes90pct = 0.25; #gene cats to keep, e.g. 25% of 90th percentile
 
 
 my $ntCntTotal =0; my $bootStrap=0; my $subsetSmpls = -1;
-my ($fnFna, $aaFna,$cogCats,$outD,$ncore,$Ete, $filt,$smplDef,$smplSep,$calcSyn,$calcNonSyn,
-			$useAA4tree,$calcDNAdiff,$tmpD ) = ("","","","",1,0,0.8,1,"_",0,0,0,0,"");
+my ($fnFna, $aaFna,$cogCats,$outD,$ncore,$Ete)= ("","","","",1,0);
+my ($smplDef,$smplSep,$calcSyn,$calcNonSyn,$useAA4tree,$calcDNAdiff,$tmpD ) = (1,"_",0,0,0,0,"");
+my ($stagedInputDir, $tmpSubdir, $completionMarker) = ("", "", "");
+my $withinSpecies = 0;
+my $strainWithinPreset = 0;
 
 my ($continue,$isAligned) = (0,0);#overwrite already existing files?
 my $outgroup="";
@@ -105,13 +190,74 @@ my $postFilter = "";
 my $clusterName="";
 my $MSAreq = 1;
 my $iqFast=0;
-my $minOverlapMSA = 0;
+my $iqMemMB=0;
+my $iqPathogen=0;
+my $iqLegacy=0;
+my $iqLegacyExplicit=0;
+my $minOverlapMSA;
 my $maxGapPerCol = 1 ;
 my $minPcId = 0;
 my $doSuperTree =0;
 my $doSuperCheck=0;#check if tree's of single genes behave "strange"
 my $gzipInput =0; my $removeMSA = 0;
 my $useTreeShrink =0;
+my %BACKBONE_DEFAULT = (
+	enabled => 0,
+	coverage_fraction => 0.35,
+	minimum_overlap => 400,
+	minimum_samples => 3,
+);
+my $strictBackbone = $BACKBONE_DEFAULT{enabled};
+my $strictBackboneFraction = $BACKBONE_DEFAULT{coverage_fraction};
+my $placementMinOverlap = $BACKBONE_DEFAULT{minimum_overlap};
+my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
+my ($placementGeneFracPSpec, $placementNTFrac, $placementNTCntTotal);
+my $sampleQCFile = "";
+my %POST_ALIGNMENT_QC_DEFAULT = (
+	between_species_enabled => 0,
+	within_species_enabled => 1,
+	minimum_sequences => 3,
+	minimum_occupancy => 0.35,
+	relative_modified_z => 5.0,
+	minimum_loci_for_relative => 8,
+);
+my $postAlignmentLocusQC;
+my $postAlignmentMinSequences = $POST_ALIGNMENT_QC_DEFAULT{minimum_sequences};
+my $postAlignmentMinOccupancy = $POST_ALIGNMENT_QC_DEFAULT{minimum_occupancy};
+my $postAlignmentRelativeZ = $POST_ALIGNMENT_QC_DEFAULT{relative_modified_z};
+my $postAlignmentMinLociRelative =
+	$POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative};
+my $postAlignmentDivergenceQC;
+my %RATE_MERGE_DEFAULT = (
+	enabled => 0,
+	maximum_bins => 8,
+	target_sites_per_bin => 30_000,
+	minimum_loci_per_bin => 20,
+	minimum_sites_per_bin => 20_000,
+);
+my $rateMergePartitions = $RATE_MERGE_DEFAULT{enabled};
+my $rateMergePartitionsExplicit = 0;
+my $rateMergeMaxBins = $RATE_MERGE_DEFAULT{maximum_bins};
+my $rateMergeTargetSites = $RATE_MERGE_DEFAULT{target_sites_per_bin};
+my $rateMergeMinLoci = $RATE_MERGE_DEFAULT{minimum_loci_per_bin};
+my $rateMergeMinSites = $RATE_MERGE_DEFAULT{minimum_sites_per_bin};
+my %TAXON_AWARE_DEFAULT = (
+	enabled => 1,
+	maximum_loci => 500,
+	core_loci => 400,
+	candidate_extra => 150,
+	minimum_sequence_nt => 60,
+	target_loci_per_sample => 25,
+	target_nt_per_sample => 7500,
+);
+my $taxonAwareLocusSelection = $TAXON_AWARE_DEFAULT{enabled};
+my $taxonAwareMaxLoci = $TAXON_AWARE_DEFAULT{maximum_loci};
+my $taxonAwareCoreLoci = $TAXON_AWARE_DEFAULT{core_loci};
+my $taxonAwareCandidateExtra = $TAXON_AWARE_DEFAULT{candidate_extra};
+my $taxonAwareMinSequenceNT = $TAXON_AWARE_DEFAULT{minimum_sequence_nt};
+my $taxonAwareTargetLoci = $TAXON_AWARE_DEFAULT{target_loci_per_sample};
+my $taxonAwareTargetNT = $TAXON_AWARE_DEFAULT{target_nt_per_sample};
+my $ntFiltExplicit = 0;
 
 
 #EDBUGGIN
@@ -135,6 +281,9 @@ my $MSAsubsD =""; #only needed to create subsets of MSAs for hyphy etc calcs
 die "no input args!\n" if (@ARGV == 0 );
 
 
+# Do not accept abbreviated switches: in particular, the retired -NTfilt
+# spelling must not ambiguously match -NTfiltCount/-NTfiltPerGene.
+Configure('no_auto_abbrev');
 GetOptions(
 	"genoInD=s" => \$genoindir, #provide a dir with complete genomes, will extract FGMs and build tree between genomes (NT/AA flag)
 	"wildcardflag=s" => \$wildcardflag,
@@ -143,14 +292,22 @@ GetOptions(
 	"cats=s"      => \$cogCats,
 	"outD=s"      => \$outD,
 	"tmpD=s" => \$tmpD,
+	"stagedInputDir=s" => \$stagedInputDir,
+	"tmpSubdir=s" => \$tmpSubdir,
+	"completionMarker=s" => \$completionMarker,
+	"withinSpecies=i" => \$withinSpecies,
+	"strainWithinPreset=i" => \$strainWithinPreset,
 	"cores=i" => \$ncore,
 	"superTree=i" => \$doSuperTree,
 	"superCheck=i" => \$doSuperCheck,
 	"fixHeaders=i" => \$fixHeaders, ## fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
 	"useEte=i"      => \$Ete,
-	"NTfilt=f"      => \$filt,
+	"relativeNTFraction=f" => \$ntFrac,
 	"NTfiltPerGene=f"      => \$ntFracGene,
 	"GenesPerSpecies=f" => \$GeneFracPSpec,
+	"placementGenesPerSpecies=f" => \$placementGeneFracPSpec,
+	"placementRelativeNTFraction=f" => \$placementNTFrac,
+	"placementNTfiltCount=i" => \$placementNTCntTotal,
 	"fracMaxGenes90pct=f" => \$fracMaxGenes90pct,
 	"NTfiltCount=i" => \$ntCntTotal,
 	"smplDef=i"	=> \$smplDef, #is the genome somehow quantified with a delimiter (_) ?
@@ -178,9 +335,44 @@ GetOptions(
 	"runFastTree=i" => \$doFastTree,
 	"runVeryFastTree=i" => \$doVeryFastTree,
 	"treeShrink=i" => \$useTreeShrink,
+	"sampleQC=s" => \$sampleQCFile,
+	"strictBackbone=i" => \$strictBackbone,
+	"strictBackboneFraction=f" => \$strictBackboneFraction,
+	"placementMinOverlap=i" => \$placementMinOverlap,
+	"strictBackboneMinSamples=i" => \$strictBackboneMinSamples,
+	"postAlignmentLocusQC=i" => \$postAlignmentLocusQC,
+	"postAlignmentMinSequences=i" => \$postAlignmentMinSequences,
+	"postAlignmentMinOccupancy=f" => \$postAlignmentMinOccupancy,
+	"postAlignmentDivergenceQC=i" => \$postAlignmentDivergenceQC,
+	"postAlignmentRelativeZ=f" => \$postAlignmentRelativeZ,
+	"postAlignmentMinLociRelative=i" => \$postAlignmentMinLociRelative,
+	"rateMergePartitions=i" => sub {
+		$rateMergePartitions = $_[1];
+		$rateMergePartitionsExplicit = 1;
+	},
+	"rateMergeMaxBins=i" => \$rateMergeMaxBins,
+	"rateMergeTargetSites=i" => \$rateMergeTargetSites,
+	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
+	"rateMergeMinSites=i" => \$rateMergeMinSites,
+	"taxonAwareLocusSelection=i" => \$taxonAwareLocusSelection,
+	"taxonAwareMaxLoci=i" => \$taxonAwareMaxLoci,
+	"taxonAwareCoreLoci=i" => \$taxonAwareCoreLoci,
+	"taxonAwareCandidateExtra=i" => \$taxonAwareCandidateExtra,
+	"taxonAwareMinSequenceNT=i" => \$taxonAwareMinSequenceNT,
+	"taxonAwareTargetLoci=i" => \$taxonAwareTargetLoci,
+	"taxonAwareTargetNT=i" => \$taxonAwareTargetNT,
 	"runIQtree=i" => \$doIQTree,
-	"AutoModel=i" => \$treeAutoModel,
+	"AutoModel=i" => sub {
+		$treeAutoModel = $_[1];
+		$treeAutoModelExplicit = 1;
+	},
 	"iqFast=i" => \$iqFast, #fast qiTree mode
+	"iqMemMB=i" => \$iqMemMB, #IQ-TREE RAM cap in MB; 0 leaves IQ-TREE uncapped
+	"iqPathogen=i" => \$iqPathogen, #IQ-TREE 3 CMAPLE/native low-divergence selection
+	"iqLegacy=i" => sub {
+		$iqLegacy = $_[1];
+		$iqLegacyExplicit = 1;
+	}, #restore the pre-5.14 IQ-TREE command
 	"runClonalFrameML=i" => \$doCFML,
 	"runGubbins=i" => \$doGubbins,
 	"runLengthCheck=i" => \$doLengthCheck,		#check that sequence length can be divided by 3
@@ -197,16 +389,96 @@ GetOptions(
 	"map=s" =>\$mapF,
 	"clustername=s" => \$clusterName,
 ) or die("Error in command line arguments\n");
+die "-withinSpecies must be 0 or 1\n"
+	unless $withinSpecies == 0 || $withinSpecies == 1;
+die "-strainWithinPreset must be 0 or 1\n"
+	unless $strainWithinPreset == 0 || $strainWithinPreset == 1;
+die "-AutoModel must be 0 or 1\n"
+	unless $treeAutoModel == 0 || $treeAutoModel == 1;
+
+$minOverlapMSA = $withinSpecies ? 2 : 0 unless defined $minOverlapMSA;
+$postAlignmentLocusQC = $withinSpecies
+	? $POST_ALIGNMENT_QC_DEFAULT{within_species_enabled}
+	: $POST_ALIGNMENT_QC_DEFAULT{between_species_enabled}
+	unless defined $postAlignmentLocusQC;
+$postAlignmentDivergenceQC = $withinSpecies ? 1 : 0
+	unless defined $postAlignmentDivergenceQC;
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
 die "-cores must be a positive integer\n" if $ncore < 1;
 die "-bootstrap must be zero or greater\n" if $bootStrap < 0;
 die "-NTfiltCount must be zero or greater\n" if $ntCntTotal < 0;
+$placementGeneFracPSpec = $GeneFracPSpec unless defined $placementGeneFracPSpec;
+$placementNTFrac = $ntFrac unless defined $placementNTFrac;
+$placementNTCntTotal = $ntCntTotal unless defined $placementNTCntTotal;
+die "-placementNTfiltCount must be zero or greater\n" if $placementNTCntTotal < 0;
+die "-minOverlapMSA must be zero or greater\n" if $minOverlapMSA < 0;
+die "-iqMemMB must be zero or greater\n" if $iqMemMB < 0;
+die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
+die "-iqLegacy must be 0 or 1\n" unless $iqLegacy == 0 || $iqLegacy == 1;
+die "-iqPathogen and -iqLegacy are mutually exclusive\n" if $iqPathogen && $iqLegacy;
+die "-strictBackbone must be 0 or 1 (default $BACKBONE_DEFAULT{enabled})\n"
+	unless $strictBackbone == 0 || $strictBackbone == 1;
+die "-strictBackboneFraction must be between 0 and 1 "
+	."(default $BACKBONE_DEFAULT{coverage_fraction})\n"
+	if $strictBackboneFraction < 0 || $strictBackboneFraction > 1;
+die "-placementMinOverlap must be non-negative "
+	."(default $BACKBONE_DEFAULT{minimum_overlap})\n"
+	if $placementMinOverlap < 0;
+die "-strictBackboneMinSamples must be at least 3 "
+	."(default $BACKBONE_DEFAULT{minimum_samples})\n"
+	if $strictBackboneMinSamples < 3;
+die "-postAlignmentLocusQC must be 0 or 1 "
+	."(default: 0 between species, 1 within species)\n"
+	unless $postAlignmentLocusQC == 0 || $postAlignmentLocusQC == 1;
+die "-postAlignmentMinSequences must be at least 2 "
+	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_sequences})\n"
+	if $postAlignmentMinSequences < 2;
+die "-postAlignmentMinOccupancy must be between 0 and 1 "
+	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_occupancy})\n"
+	if $postAlignmentMinOccupancy < 0 || $postAlignmentMinOccupancy > 1;
+die "-postAlignmentDivergenceQC must be 0 or 1 "
+	."(default: 0 between species, 1 within species)\n"
+	unless $postAlignmentDivergenceQC == 0 || $postAlignmentDivergenceQC == 1;
+die "-postAlignmentRelativeZ must be non-negative "
+	."(default $POST_ALIGNMENT_QC_DEFAULT{relative_modified_z})\n"
+	if $postAlignmentRelativeZ < 0;
+die "-postAlignmentMinLociRelative must be positive "
+	."(default $POST_ALIGNMENT_QC_DEFAULT{minimum_loci_for_relative})\n"
+	if $postAlignmentMinLociRelative < 1;
+die "-rateMergePartitions must be 0 or 1\n"
+	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
+die "-rateMergeMaxBins, -rateMergeTargetSites, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
+	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeTargetSites, $rateMergeMinLoci, $rateMergeMinSites);
+die "-rateMergePartitions requires nucleotide trees (-AAtree 0)\n"
+	if $rateMergePartitions && $useAA4tree;
+die "-rateMergePartitions requires -postAlignmentLocusQC 1 or "
+	."-taxonAwareLocusSelection 1 to supply a rate proxy\n"
+	if $rateMergePartitions && !$postAlignmentLocusQC && !$taxonAwareLocusSelection;
+die "-taxonAwareLocusSelection must be 0 or 1\n"
+	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
+die "-taxonAwareMaxLoci, -taxonAwareCoreLoci, -taxonAwareMinSequenceNT, "
+	."-taxonAwareTargetLoci, and -taxonAwareTargetNT must be positive\n"
+	if grep { $_ < 1 } ($taxonAwareMaxLoci, $taxonAwareCoreLoci,
+		$taxonAwareMinSequenceNT, $taxonAwareTargetLoci, $taxonAwareTargetNT);
+die "-taxonAwareCandidateExtra must be zero or greater\n"
+	if $taxonAwareCandidateExtra < 0;
+die "-taxonAwareCoreLoci cannot exceed -taxonAwareMaxLoci\n"
+	if $taxonAwareCoreLoci > $taxonAwareMaxLoci;
+die "-tmpD and -tmpSubdir are mutually exclusive\n" if length($tmpD) && length($tmpSubdir);
+if (length($tmpSubdir)) {
+	die "-tmpSubdir must be a safe relative path\n"
+		if File::Spec->file_name_is_absolute($tmpSubdir)
+			|| grep { $_ eq File::Spec->updir } File::Spec->splitdir($tmpSubdir);
+}
 die "-smplSep must not be empty\n" if $smplSep eq "";
 eval { qr/$smplSep/ } or die "Invalid -smplSep regular expression '$smplSep': $@";
 for my $fraction_name_value (
-	["NTfilt", $filt], ["NTfiltPerGene", $ntFracGene],
-	["GenesPerSpecies", $GeneFracPSpec], ["fracMaxGenes90pct", $fracMaxGenes90pct],
+	["relativeNTFraction", $ntFrac],
+	["placementRelativeNTFraction", $placementNTFrac],
+	["NTfiltPerGene", $ntFracGene],
+	["GenesPerSpecies", $GeneFracPSpec],
+	["placementGenesPerSpecies", $placementGeneFracPSpec], ["fracMaxGenes90pct", $fracMaxGenes90pct],
 	["maxGapPerCol", $maxGapPerCol],
 ) {
 	my ($name, $value) = @{$fraction_name_value};
@@ -230,14 +502,41 @@ die "Refusing to use filesystem root '$outD' as -outD\n" if $outD eq $volumeRoot
 make_path($outD) unless -d $outD;
 die "Output path is not a directory: $outD\n" unless -d $outD;
 
-print "BuildTree 5 script v$version\nOutDir: $outD\n";
+if (length($stagedInputDir)) {
+	my @requiredInputs = grep { defined($_) && length($_) } ($fnFna, $aaFna, $cogCats);
+	publishStagedTreeInputs($stagedInputDir, $outD, $ncore, \@requiredInputs);
+}
+die "-sampleQC does not exist or is empty: $sampleQCFile\n"
+	if length($sampleQCFile) && !fileGZs($sampleQCFile);
 
 ##### setup dirs
 $codemlOutD = File::Spec->catdir($outD, "codeml") if ($codemlOutD eq "");
 
-my $tmpBase = $tmpD eq "" ? File::Spec->catdir($outD, "tmp") : File::Spec->canonpath(File::Spec->rel2abs($tmpD));
-make_path($tmpBase) unless -d $tmpBase;
-die "Temporary path is not a directory: $tmpBase\n" unless -d $tmpBase;
+my $requestedTmpBase;
+if (length($tmpSubdir)) {
+	my $environmentTmp = $ENV{TMPDIR} // "";
+	my $temporaryRoot = length($environmentTmp)
+		? $environmentTmp
+		: File::Spec->catdir($outD, "tmp");
+	$requestedTmpBase = File::Spec->canonpath(
+		File::Spec->catdir($temporaryRoot, File::Spec->splitdir($tmpSubdir))
+	);
+} else {
+	$requestedTmpBase = $tmpD eq ""
+		? File::Spec->catdir($outD, "tmp")
+		: File::Spec->canonpath(File::Spec->rel2abs($tmpD));
+}
+my $tmpBase = $requestedTmpBase;
+my ($tmpReady, $tmpError) = prepareTemporaryBase($tmpBase);
+if (!$tmpReady && (length($tmpD) || length($tmpSubdir))) {
+	my $fallbackTmpBase = File::Spec->catdir($outD, "tmp");
+	warn "Requested temporary path is unusable: $tmpBase ($tmpError); "
+		. "falling back to $fallbackTmpBase\n";
+	$tmpBase = $fallbackTmpBase;
+	($tmpReady, $tmpError) = prepareTemporaryBase($tmpBase);
+}
+die "No usable temporary path is available: $tmpBase ($tmpError)\n"
+	unless $tmpReady;
 my $tmpTag = $clusterName eq "" ? "default" : $clusterName;
 $tmpTag =~ s/[^A-Za-z0-9_.-]+/_/g;
 $tmpD = File::Spec->catdir($tmpBase, "buildTree5_${tmpTag}_$$");
@@ -258,20 +557,87 @@ if ($subsetSmpls >0){
 }
 ######
 
-if ($MSAprog == 0){print "Warning:  MSAprobs with trimal gives warnings (ignore them)\n";}
+warn "MSAprobs may emit non-fatal trimming warnings\n" if $MSAprog == 0;
 if ($doCFML && !$doRAXML){die "Need RaxML alignment, if Clonal fram is to be run..\n";}
 
 if ($aaFna eq "" || $useAA4tree){	$calcSyn=0;$calcNonSyn=0;}
-if ($filt <1){$ntFrac=$filt; print "Using filter with $ntFrac fraction of nts\n";}
-if ($outgroup ne ""){print "Using outgroup $outgroup\n";}
-if ($bootStrap>0){print "Using bootstrapping in tree building\n";}
-#if (($calcDistMat || $calcDistMatExt) && $isAligned || !$MSAprog){die"Can't calc distance mat, unless clustalO is being used for MSA\n";}
-#else {$ntCntTotal = $filt;}
 
 $MSAreq = 0 if (!$doFastTree && !$doVeryFastTree && !$doRAXML && !$doRAXMLng && !$doCFML && !$doGubbins && !$doIQTree);
 
 make_path($tmpD) unless -d $tmpD;
-my $cmd =""; my %usedGeneNms;
+my %msaProgramNames = (
+	0 => "MSAprobs",
+	1 => "Clustal Omega",
+	2 => "MAFFT",
+	4 => "MUSCLE5",
+	5 => "FAMSA2",
+);
+my @treeMethods;
+push @treeMethods, "IQ-TREE" if $doIQTree;
+push @treeMethods, "RAxML" if $doRAXML;
+push @treeMethods, "RAxML-NG" if $doRAXMLng;
+push @treeMethods, "FastTree" if $doFastTree;
+push @treeMethods, "VeryFastTree" if $doVeryFastTree;
+push @treeMethods, "ClonalFrameML" if $doCFML;
+push @treeMethods, "Gubbins" if $doGubbins;
+my @inputDescriptions;
+push @inputDescriptions, "NT=$fnFna" if $fnFna ne "";
+push @inputDescriptions, "AA=$aaFna" if $aaFna ne "";
+push @inputDescriptions, "categories=$cogCats" if $cogCats ne "";
+push @inputDescriptions, "genomes=$genoindir" if $genoindir ne "";
+print "=====================================================\n";
+print "BuildTree pipeline v$version\n";
+print "Inputs: " . join("; ", @inputDescriptions) . "\n";
+print "Paths: output=$outD; temporary=$tmpD; alignments=$MsaD; trees=$treeD\n";
+print "Mode: " . ($cogCats ne "" ? "multi-locus" : "single-locus")
+	. "; scope=" . ($withinSpecies ? "within-species" : "between-species/broad")
+	. "; sequence=" . ($useAA4tree ? "amino acid" : "nucleotide")
+	. "; input aligned=" . ($isAligned ? "yes" : "no")
+	. "; continue=" . ($continue ? "yes" : "no") . "\n";
+print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
+	. ($postFilter || "<none>") . "; remove MSA=" . ($removeMSA ? "yes" : "no") . "\n";
+print "Filtering: per-gene length fraction=$ntFracGene; category Q90 fraction=$fracMaxGenes90pct; "
+	. "backbone NT fraction=$ntFrac; backbone gene fraction=$GeneFracPSpec; "
+	. "backbone minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
+print "Post-alignment locus QC: enabled="
+	. ($postAlignmentLocusQC ? "yes" : "no")
+	. "; divergence QC=" . ($postAlignmentDivergenceQC ? "yes" : "no")
+	. "; minimum sequences=$postAlignmentMinSequences"
+	. "; minimum occupancy=$postAlignmentMinOccupancy"
+	. "; relative modified-Z="
+	. ($postAlignmentDivergenceQC ? $postAlignmentRelativeZ : "<disabled>")
+	. "; minimum loci for relative QC=$postAlignmentMinLociRelative\n";
+print "Partition merging: enabled=" . ($rateMergePartitions ? "yes" : "no")
+	. "; maximum bins=$rateMergeMaxBins"
+	. "; target size=$rateMergeTargetSites effective sites/bin"
+	. "; minimum bin size=$rateMergeMinLoci loci/$rateMergeMinSites sites\n";
+print "Taxon-aware locus selection: enabled="
+	. ($taxonAwareLocusSelection ? "yes" : "no")
+	. "; final loci=$taxonAwareMaxLoci; robust core=$taxonAwareCoreLoci"
+	. "; alignment backfill=$taxonAwareCandidateExtra"
+	. "; minimum sequence NT=$taxonAwareMinSequenceNT"
+	. "; sample target=$taxonAwareTargetLoci loci/$taxonAwareTargetNT NT\n";
+print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
+	. "; sample QC=" . ($sampleQCFile || "<none>")
+	. "; coverage fraction=$strictBackboneFraction"
+	. "; placement gene fraction=$placementGeneFracPSpec"
+	. "; placement NT fraction=$placementNTFrac"
+	. "; placement minimum NT=$placementNTCntTotal"
+	. "; minimum placement overlap=$placementMinOverlap"
+	. "; minimum backbone samples=$strictBackboneMinSamples\n";
+print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
+	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
+	. "; supertree=" . ($doSuperTree ? "yes" : "no")
+	. "; IQ-TREE mode=" . ($iqLegacy ? "legacy" : $iqPathogen ? "pathogen" : "standard")
+	. "; IQ-TREE model=" . ($treeAutoModel ? "AutoModel" : "fixed")
+	. "; IQ-TREE memory=" . ($iqMemMB ? "${iqMemMB}MB" : "auto") . "\n";
+print "Additional analyses: synonymous=" . ($calcSyn ? "yes" : "no")
+	. "; nonsynonymous=" . ($calcNonSyn ? "yes" : "no")
+	. "; distance matrix=" . ($calcDistMat ? "yes" : "no")
+	. "; dN/dS=" . ($doDNDS ? "yes" : "no")
+	. "; TreeShrink=" . ($useTreeShrink ? "yes" : "no") . "\n";
+print "=====================================================\n";
+my $cmd =""; my %usedGeneNms; my %excludedLoci;
 
 
 my $outD_clust = File::Spec->catdir($outD, "fastGear_work_$tmpTag");
@@ -284,10 +650,9 @@ if ($Ete){
 	make_path($eteOut);
 	$cmd = "$eteBin build -n $fnFna -a $aaFna -w clustalo_default-none-none-none  -m sptree_raxml_all --cpu $ncore -o $eteOut --clearall --nt-switch 0.0 --noimg";
 	$cmd .= " --cogs $cogCats" unless ($cogCats eq "");
-	print "Running tree analysis ..";
-	print $cmd."\n";
+	print "Running ETE tree analysis; detailed output: $eteOut/ETE.log\n";
 	systemW($cmd . " > $eteOut/ETE.log 2>&1");
-	print " Done.\n$eteOut\n";
+	print "ETE tree analysis completed; output: $eteOut\n";
 	exit(0);
 }
 
@@ -329,6 +694,7 @@ my $MSAcat = "$MsaD/MSAcat.fna";
 
 #prep tree Options
 my $tOhr = createTreeOpt($multAli,"allsites","",0,"");
+$tOhr->{IQtreeout} .= ".backbone" if $strictBackbone && $doIQTree;
 my %Tree1 = %{$tOhr};
 my $tOhrNSun = createTreeOpt($multAliNonSyn,"nonsyn","",0,$Tree1{nwk});
 my $tOhrSyn = createTreeOpt($multAliSyn,"syn","",0,$Tree1{nwk});
@@ -344,25 +710,119 @@ my $tOhrSyn = createTreeOpt($multAliSyn,"syn","",0,$Tree1{nwk});
 my @MSAs; my @MSA_AA; my @MSAsSyn; my @MSAsNonSyn;#full MSAs and MSAs with syn / nonsyn pos only
 my @MSrm; 
 my %FAA ; my %FNA ; my @geneList; my @geneListF;
+my (%primaryAlignmentGene, %taxonAwarePreMetrics, %taxonAwareUniverseSamples);
+my (%partitionRateProxy, %partitionSelectionPhase, %taxonAwareFinalMetricByPath);
+my (%taxonAwareBackboneEligibility, %taxonAwareBackboneIneligibleReason);
+my (%taxonAwarePlacementEligibility, %taxonAwarePlacementIneligibleReason);
+my $strictSplit;
+my $placementAlignment = "$MsaD/MSAli.placement.fna";
+my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
+my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
+my $postAlignmentQCPolicy = join("\t",
+	"schema=10",
+	"enabled=$postAlignmentLocusQC",
+	"scope=".($withinSpecies ? "within" : "between"),
+	"sequence=".($useAA4tree ? "aa" : "nt"),
+	"per_gene_length_fraction=$ntFracGene",
+	"minimum_category_q90_fraction=$fracMaxGenes90pct",
+	"backbone_nt_fraction=$ntFrac",
+	"backbone_gene_fraction=$GeneFracPSpec",
+	"backbone_minimum_nt=$ntCntTotal",
+	"placement_nt_fraction=$placementNTFrac",
+	"placement_gene_fraction=$placementGeneFracPSpec",
+	"placement_minimum_nt=$placementNTCntTotal",
+	"minimum_overlap=$minOverlapMSA",
+	"maximum_gap_fraction=$maxGapPerCol",
+	"minimum_sequences=$postAlignmentMinSequences",
+	"minimum_occupancy=$postAlignmentMinOccupancy",
+	"divergence_qc=$postAlignmentDivergenceQC",
+	"relative_modified_z=".($postAlignmentDivergenceQC
+		? $postAlignmentRelativeZ : "disabled"),
+	"minimum_loci_relative=$postAlignmentMinLociRelative",
+	"iqtree_auto_model=$treeAutoModel",
+	"iqtree_legacy=$iqLegacy",
+	"rate_partition_merge=$rateMergePartitions",
+	"rate_partition_maximum_bins=$rateMergeMaxBins",
+	"rate_partition_target_sites=$rateMergeTargetSites",
+	"rate_partition_minimum_loci=$rateMergeMinLoci",
+	"rate_partition_minimum_sites=$rateMergeMinSites",
+	"taxon_aware=$taxonAwareLocusSelection",
+	"taxon_aware_maximum_loci=$taxonAwareMaxLoci",
+	"taxon_aware_core_loci=$taxonAwareCoreLoci",
+	"taxon_aware_candidate_extra=$taxonAwareCandidateExtra",
+	"taxon_aware_minimum_sequence_nt=$taxonAwareMinSequenceNT",
+	"taxon_aware_target_loci=$taxonAwareTargetLoci",
+	"taxon_aware_target_nt=$taxonAwareTargetNT",
+)."\n";
+my $postAlignmentQCPolicyMatches = 0;
+if (-s $postAlignmentQCPolicyFile) {
+	open my $policyRead, "<", $postAlignmentQCPolicyFile
+		or die "Cannot read locus-QC policy $postAlignmentQCPolicyFile: $!\n";
+	my $existingPolicy = do { local $/; <$policyRead> };
+	close $policyRead
+		or die "Cannot close locus-QC policy $postAlignmentQCPolicyFile: $!\n";
+	$postAlignmentQCPolicyMatches = $existingPolicy eq $postAlignmentQCPolicy;
+}
+my $legacyWithinSpeciesQCAudit = !$taxonAwareLocusSelection
+	&& !$rateMergePartitions && $withinSpecies
+	&& -s $postAlignmentQCReport && !-e $postAlignmentQCPolicyFile;
+my $postAlignmentQCAuditCurrent = $postAlignmentQCPolicyMatches
+	&& (!$postAlignmentLocusQC || -s $postAlignmentQCReport);
+$postAlignmentQCAuditCurrent = 1 if $legacyWithinSpeciesQCAudit;
 my $doMSA = 1;
 my $treesDone = treePresent($tOhr)
 	&& (!$calcNonSyn || treePresent($tOhrNSun))
 	&& (!$calcSyn || treePresent($tOhrSyn));
-my $calcMSA = !$treesDone && !fileGZe($multAli);
-#if (!$treesDone){#cleanup, avoid checkpoints..
-#	system "rm -f $treeD/*";
-#}
-$doMSA =0 if ($isAligned || (
-			$continue && (fileGZe($multAli) || !$calcMSA) && (fileGZe($multAliSyn) ||!$calcSyn)&& (fileGZe($multAliNonSyn) ||!$calcNonSyn)) );  ## checks if MSA already exists
+if ($strictBackbone && $treesDone
+		&& (!-s "$treeD/strict_backbone.samples.tsv"
+			|| !-s "$treeD/strict_backbone.epa_placements.tsv")) {
+	print "Recovery state: existing tree predates strict-backbone EPA-ng placement; "
+		."rebuilding tree outputs from the retained alignment\n";
+	safeRemoveTree($treeD, $outD);
+	make_path($treeD);
+	$treesDone = 0;
+}
+if ($cogCats ne "" && $continue
+		&& ($treesDone || fileGZe($multAli))
+		&& !$postAlignmentQCAuditCurrent) {
+	print "Recovery state: existing multi-locus alignment predates the current "
+		."post-alignment locus-retention policy; rebuilding per-locus alignments and tree outputs\n";
+	safeRemoveTree($MsaD, $removeMSA ? $tmpD : $outD);
+	safeRemoveTree($treeD, $outD);
+	make_path($MsaD);
+	make_path($treeD);
+	$treesDone = 0;
+}
+my $primaryAlignmentReady = fileGZe($multAli);
+my $siteAlignmentsReady = (!$calcSyn || fileGZe($multAliSyn))
+	&& (!$calcNonSyn || fileGZe($multAliNonSyn));
+my $reusableAlignment = $isAligned
+	|| ($primaryAlignmentReady && $siteAlignmentsReady);
+if ($continue) {
+	if ($treesDone) {
+		print "Recovery state: complete nonempty tree output found; retaining completed tree stages\n";
+	} elsif ($reusableAlignment) {
+		print "Recovery state: reusable nonempty alignment checkpoint found; rebuilding missing tree stages\n";
+	} else {
+		print "Recovery state: no reusable alignment or complete tree checkpoint; "
+			. "restarting alignment and tree stages from input FASTA/category files\n";
+		safeRemoveTree($MsaD, $removeMSA ? $tmpD : $outD);
+		safeRemoveTree($treeD, $outD);
+		make_path($MsaD) unless -d $MsaD;
+		make_path($treeD) unless -d $treeD;
+	}
+}
+my $calcMSA = !$treesDone && !$primaryAlignmentReady;
+$doMSA = !(
+	$isAligned
+	|| ($continue && ($treesDone || $primaryAlignmentReady) && $siteAlignmentsReady)
+);
 			
 #test if MSA is gzed
 if (!-e $multAli && -e "${multAli}.gz"){
 	my $gunCmd = "$pigzBin -p $ncore -d ${multAli}.gz\n";
 	systemW($gunCmd);
 }
-#die "$doMSA $calcMSA $treesDone $continue $multAli\n";
-#die "$doDNDS\n";
-#my @xx = keys %FAA; die "$xx[0] $xx[1]\n$FAA{HM29_COG0185}\n";
 if ($isAligned){
 	my $alignedInput = $useAA4tree ? $aaFna : $fnFna;
 	die "-isAligned currently requires an uncompressed input file: $alignedInput\n" unless -f $alignedInput;
@@ -371,7 +831,7 @@ if ($isAligned){
 		my $source = abs_path($alignedInput) or die "Cannot resolve aligned input $alignedInput: $!\n";
 		symlink($source, $multAli) || copy($source, $multAli)
 			or die "Cannot link or copy aligned input $source to $multAli: $!\n";
-		print "Using ".($useAA4tree ? "AA" : "NT")." sequences to build tree..\n\n";
+		print "Pre-aligned input staged as $multAli\n";
 	}
 } elsif (!$doMSA && $cogCats ne ""){
 	fillGeneList($cogCats);
@@ -381,7 +841,8 @@ if ($isAligned){
 	if ($aaFna ne ""){
 		$hr = readFasta($aaFna,1); %FAA = %{$hr};
 	}
-	print "Read Fasta(s)\n";
+	print "Loaded sequence inputs: " . scalar(keys %FNA) . " nucleotide and "
+		. scalar(keys %FAA) . " protein records\n";
 
 	############# test length of fna sequences can be divided by 3 ##############################
 		
@@ -393,7 +854,12 @@ if ($isAligned){
 			$div = $length/3;
 			push(@notThrees, $FNAseq) if($div =~ /\D/);
 		}
-		print "FNA seq not divisible by 3 (N=". scalar(@notThrees) . "): @notThrees\n" if (@notThrees);
+		if (@notThrees) {
+			my @examples = @notThrees > 10 ? @notThrees[0 .. 9] : @notThrees;
+			warn "Nucleotide sequences not divisible by 3: " . scalar(@notThrees)
+				. "; examples: " . join(", ", @examples)
+				. (@notThrees > 10 ? " (+".(@notThrees - 10)." more)" : "") . "\n";
+		}
 	}
 
 	############# test if enough seq in Sample to add to tree (avoids confusion in MSA) ##############################
@@ -447,7 +913,10 @@ if ($isAligned){
 		foreach my $seq (@spl){
 			my ($sp) = parseSeqId($seq, "category line ".($cnt + 1));
 			#quantile(0.8,values(%{$charCnts{$sp}}));
-			if ( $charCnts{$sp}{$seq} >= ($qtl90NTcnt{$gene}  * $ntFracGene)){
+			my $ntEquivalentLength = $charCnts{$sp}{$seq} * ($useAA4tree ? 3 : 1);
+			if ( $charCnts{$sp}{$seq} >= ($qtl90NTcnt{$gene}  * $ntFracGene)
+					&& (!$taxonAwareLocusSelection
+						|| $ntEquivalentLength >= $taxonAwareMinSequenceNT)){
 				push(@spl2, $seq);
 				$geneTooLong++;
 			} else {
@@ -462,18 +931,46 @@ if ($isAligned){
 	#die;
 	my $GenesQtl90 = quantile(0.9,@genesPerCat);
 	my $GenesQtl50 = quantile(0.5,@genesPerCat);
-	$cnt=-1;
-	foreach my $aRef (@linesCats2){ #remove genes with just too few genes..
-		$cnt++; my @spl = @{$aRef};
-		if (@spl >= (($GenesQtl90 * $fracMaxGenes90pct) ) ){ #$GenesQtl50 || 
-			push(@linesCats3,\@spl);
+	my $minimumCategorySequences = $GenesQtl90 * $fracMaxGenes90pct;
+	$minimumCategorySequences = 1 if $minimumCategorySequences < 1;
+	if ($taxonAwareLocusSelection) {
+		my $candidateSelection = selectTaxonAwareCandidateLoci(
+			categories => \@linesCats2,
+			char_counts => \%charCnts,
+			candidate_limit => $taxonAwareMaxLoci + $taxonAwareCandidateExtra,
+			final_limit => $taxonAwareMaxLoci,
+			core_limit => $taxonAwareCoreLoci,
+			target_loci => $taxonAwareTargetLoci,
+			target_nt => $taxonAwareTargetNT,
+			use_aa => $useAA4tree,
+			report => "$treeD/taxon_aware_locus_candidates.tsv",
+		);
+		@linesCats3 = @{$candidateSelection->{categories}};
+		%taxonAwarePreMetrics = %{$candidateSelection->{metrics}};
+		%taxonAwareUniverseSamples = %{$candidateSelection->{samples}};
+		print "Taxon-aware gene-category prefilter: retained "
+			. scalar(@linesCats3) . "/" . scalar(@linesCats)
+			. " alignment candidates (up to $taxonAwareCandidateExtra are QC backfill); "
+			. "removed $geneTooShort of " . ($geneTooShort + $geneTooLong)
+			. " sequence(s) below the $ntFracGene gene-length Q90/minimum-NT rule\n";
+	} else {
+		$cnt=-1;
+		foreach my $aRef (@linesCats2){ #remove genes with just too few genes..
+			$cnt++; my @spl = @{$aRef};
+			if (@spl >= $minimumCategorySequences){ #$GenesQtl50 ||
+				push(@linesCats3,\@spl);
+			}
+			#print @spl . " ";
 		}
-		#print @spl . " ";
+		print "Gene-category prefilter: retained " . scalar(@linesCats3) . "/"
+			. scalar(@linesCats) . " categories; removed $geneTooShort of "
+			. ($geneTooShort + $geneTooLong) . " sequence(s) below $ntFracGene of their gene-length Q90; "
+			. "category-size Q90=$GenesQtl90, minimum category sequences=$minimumCategorySequences\n";
 	}
-	
-	print "\n\n-----------------  Prefilter  ------------------\n";
-	print "Remaining gene cats: ". scalar(@linesCats3) . "/" . scalar(@linesCats)."; Removed $geneTooShort/$geneTooLong genes < $ntFracGene qtl90 gene length\n";
-	print "Warning:: Size linesCats3:: " . @linesCats3 . " linesCats2:: " .@linesCats2 ."\n$GenesQtl50 || $GenesQtl90 * $fracMaxGenes90pct\n" if (@linesCats3 < 20);
+	warn "Only " . scalar(@linesCats3) . " gene categories remain after prefiltering "
+		. "(Q50=$GenesQtl50, Q90=$GenesQtl90, category threshold="
+		. "$minimumCategorySequences)\n"
+		if @linesCats3 < 20;
 	@linesCats2 = (); #make space..
 	$cnt=-1;
 	foreach my $aRef (@linesCats3){
@@ -505,6 +1002,10 @@ if ($isAligned){
 			$totalNTs{$sp} += $charCnts{$sp}{$seq};
 		}
 	}
+	if ($taxonAwareLocusSelection) {
+		$specList{$_} //= 0 for keys %taxonAwareUniverseSamples;
+		$totalNTs{$_} //= 0 for keys %taxonAwareUniverseSamples;
+	}
 	#die "@genesPerCat\n$GenesQtl90\n".$fracMaxGenes90pct*$GenesQtl90."\n" ;
 	my @specs = keys %specList;
 	#print "specs:: @specs\n";
@@ -525,23 +1026,47 @@ if ($isAligned){
 	my %smplsRmvd; my $tooFewGenes=0;my $tooFewNTs=0;my $tooFewNTs2=0; my $specsRemain = 0;
 	#print "Samples removed due to low gene presence:\n";
 	my $OGfnd=0;
-	foreach my $sp (@specs){
-		my $isOG=0;  if ($outgroup ne "" && $outgroup eq $sp){$isOG = 1;$OGfnd++;}
-		
-		my $NTfilter = 0; $NTfilter =1 if ( $totalNTs{$sp} < ($qtl90NTcntAll * $ntFrac));
-		my $lengthInNt = (!$useAA4tree && keys(%FNA)) ? $totalNTs{$sp} : $totalNTs{$sp} * 3;
-		my $NTfilter2 =  0;$NTfilter2 = 1 if ($lengthInNt < $ntCntTotal);
-		my $NTlengFilt = 0; $NTlengFilt =1 if ($specList{$sp} <  ($qtl90Genes * $GeneFracPSpec) );
-
-		if (!$isOG && ($NTlengFilt || $NTfilter || $NTfilter2) ){
-			$smplsRmvd{$sp}=1;
-			$tooFewNTs++ if ($NTfilter);
-			$tooFewNTs2++ if ($NTfilter2);
-			$tooFewGenes++ if ($NTlengFilt);
+	if ($taxonAwareLocusSelection) {
+		my $sampleSelection = classifyTaxonAwareSamples(
+			metrics => \%taxonAwarePreMetrics,
+			samples => \%taxonAwareUniverseSamples,
+			target_loci => $taxonAwareTargetLoci,
+			target_nt => $taxonAwareTargetNT,
+			minimum_anchor_nt => 1,
+			selected_only => 1,
+			outgroup => $outgroup,
+		);
+		writeTaxonAwareSampleAudit(
+			"$treeD/taxon_aware_sample_candidates.tsv", $sampleSelection);
+		for my $sp (@specs) {
+			$OGfnd++ if $outgroup ne "" && $outgroup eq $sp;
+			if (($sampleSelection->{$sp}{role} // "remove") eq "remove") {
+				$smplsRmvd{$sp} = 1;
+			} else {
+				$specsRemain++;
+			}
+		}
+		print "Taxon-aware species prefilter: retained $specsRemain/"
+			. scalar(keys %specList) . "; only samples without any usable NT "
+			. "in the selected candidates were removed before MSA; audit: "
+			. "$treeD/taxon_aware_sample_candidates.tsv\n";
+	} else {
+		foreach my $sp (@specs){
+			my $isOG=0;  if ($outgroup ne "" && $outgroup eq $sp){$isOG = 1;$OGfnd++;}
 			
-			#print " $sp:$specList{$sp}:$totalNTs{$sp}; ";
-		} else {
-			$specsRemain ++;
+			my $NTfilter = 0; $NTfilter =1 if ( $totalNTs{$sp} < ($qtl90NTcntAll * $ntFrac));
+			my $lengthInNt = (!$useAA4tree && keys(%FNA)) ? $totalNTs{$sp} : $totalNTs{$sp} * 3;
+			my $NTfilter2 =  0;$NTfilter2 = 1 if ($lengthInNt < $ntCntTotal);
+			my $NTlengFilt = 0; $NTlengFilt =1 if ($specList{$sp} <  ($qtl90Genes * $GeneFracPSpec) );
+
+			if (!$isOG && ($NTlengFilt || $NTfilter || $NTfilter2) ){
+				$smplsRmvd{$sp}=1;
+				$tooFewNTs++ if ($NTfilter);
+				$tooFewNTs2++ if ($NTfilter2);
+				$tooFewGenes++ if ($NTlengFilt);
+			} else {
+				$specsRemain ++;
+			}
 		}
 	}
 	
@@ -551,24 +1076,31 @@ if ($isAligned){
 	#############################################################################################
 
 	
-	print "------------------------------------------------\n";
-	print "Per species: MaxGenes: $maxGenes, Qtl90Genes: $qtl90Genes, MaxAA: $maxNtCntTotal, Qtl90 NTs: $qtl90NTcntAll\n";
-	print "Species/Smpls removed: <NTs($ntFrac,$ntCntTotal):$tooFewNTs,$tooFewNTs2 ; <genes/species($GeneFracPSpec):$tooFewGenes\n";
-	print "Remaining Smpls/Strains: $specsRemain/".scalar(keys%specList)."\n";
-	print "------------------------------------------------\n";
+	print "Species prefilter: retained $specsRemain/" . scalar(keys %specList)
+		. "; removed for relative NT=$tooFewNTs, minimum NT=$tooFewNTs2, minimum genes=$tooFewGenes\n"
+		unless $taxonAwareLocusSelection;
+	print "Species input statistics: maximum genes=$maxGenes; gene-count Q90=$qtl90Genes; "
+		. "maximum informative NT=$maxNtCntTotal; informative-NT Q90=$qtl90NTcntAll\n";
 	#die "$maxGenes\n";
 	@linesCats = (); #empty array
 
 
 	#die;
 	$cnt=-1; #line counter
+	my $alignedLoci = 0;
+	my $failedLoci = 0;
+	my $candidateLoci = scalar @linesCats3;
 	foreach my $aRef (@linesCats3){#go over each gene category, building MSA for each
 	#----------------- main MSA loop ----------------------
 		$cnt++; my @spl = @{$aRef};
-		if (@spl ==0){print "No categories in cat file line $cnt\n";next;}
+		if (@spl ==0){
+			limitedWarn("empty gene category", "Ignoring empty filtered gene-category entry at index $cnt\n");
+			next;
+		}
 		if ($spl[0] =~ m/^#/){shift @spl;}
 		my @spl2 = parseSeqId($spl[0], "category line ".($cnt + 1));
 		my $gene = $spl2[1];
+		my $gene_file_stem = geneFileStem($gene);
 		#die "@spl\n";		
 		my $ogrGenes = "";
 		if ($outgroup ne ""){
@@ -586,10 +1118,10 @@ if ($isAligned){
 		#die "@spl\n";
 		my $tmpInMSA = "$tmpD/inMSA$cnt.faa";
 		my $tmpInMSAnt = "$tmpD/inMSA$cnt.fna";
-		my $tmpOutMSAaa = "$tmpD/$spl2[1].$cnt.faa";
-		my $tmpOutMSA = "$tmpD/$spl2[1].$cnt.fna";
-		my $finOutMSAaa = "$MsaD/$spl2[1].$cnt.faa";
-		my $finOutMSA = "$MsaD/$spl2[1].$cnt.fna";
+		my $tmpOutMSAaa = "$tmpD/$gene_file_stem.$cnt.faa";
+		my $tmpOutMSA = "$tmpD/$gene_file_stem.$cnt.fna";
+		my $finOutMSAaa = "$MsaD/$gene_file_stem.$cnt.faa";
+		my $finOutMSA = "$MsaD/$gene_file_stem.$cnt.fna";
 		
 		my $endFileExists=0; $endFileExists =1 if (fileGZs($finOutMSAaa) && fileGZs($finOutMSA));
 		
@@ -603,7 +1135,10 @@ if ($isAligned){
 		foreach my $seq (@spl){### $seq = genomeX_NOGY
 			my ($sp) = parseSeqId($seq, "category line ".($cnt + 1));
 			next if (exists($smplsRmvd{$sp}));
-			if ($specList{$sp} <  ($qtl90Genes * $GeneFracPSpec) ){die "buildTree: GeneFracPSpec maxGenes shouldn't be here!\n";}
+			if (!$taxonAwareLocusSelection
+					&& $specList{$sp} < ($qtl90Genes * $GeneFracPSpec)) {
+				die "buildTree: GeneFracPSpec maxGenes shouldn't be here!\n";
+			}
 			my $seq2 = $seq;
 			#just for this singular case applying..
 			#next if ( $charCnts{$sp}{$seq} < ($qtl90NTcnt{$gene}  * $ntFracGene));  #maxNtCnt{$gene}
@@ -627,7 +1162,7 @@ if ($isAligned){
 		}
 		close O;close O2;
 		#done, samples are in O2
-		if ($numSeq <= 3){ #actually pretty useless, no tree can be built from this, so just rm this one...
+		if ($numSeq < 3){ #three tips are sufficient for the minimal resolved unrooted tree
 			#system "rm -f $tmpInMSA $tmpInMSAnt";#
 			unlink  $tmpInMSA; unlink $tmpInMSAnt;next;
 		}
@@ -646,8 +1181,24 @@ if ($isAligned){
 		#}
 		#$cmdGrand .= $cmd1."\n".$cmd2."\n";
 		#print "$cmd1\n$cmd2\n";
-		systemW($cmd1."\n".$cmd2."\n");
-		die "MSA command completed without producing $tmpOutMSAaa\n" unless -s $tmpOutMSAaa;
+		my $msaCommandOK = 1;
+		if (!$endFileExists) {
+			$msaCommandOK = eval {
+				systemW($cmd1."\n".$cmd2."\n");
+				1;
+			};
+		}
+		if (!$msaCommandOK || (!$endFileExists && !-s $tmpOutMSAaa)) {
+			my $error = $@ || "MSA command completed without producing a nonempty output";
+			$error =~ s/\s+$//;
+			$failedLoci++;
+			$excludedLoci{$gene} = 1;
+			limitedWarn("failed locus alignment",
+				"Warning: excluding locus $gene from future calculations: $error\n");
+			unlink $_ for grep { defined($_) && -e $_ }
+				($tmpInMSA, $tmpInMSAnt, $tmpOutMSAaa, $tmpOutMSA);
+			next;
+		}
 
 		
 		
@@ -658,12 +1209,25 @@ if ($isAligned){
 		my $inFastaOth = $tmpInMSAnt;
 		my $percIDhr; my $avgID; my $pIDsmplhr;
 		if ($calcDistMat){ #for dmat: calc each gene spearately and merge scores later
-			($avgID,$pIDsmplhr,$percIDhr)  = calcDisPos2($tmpInMSA,$tmpDMat,0,$ncore,$tmpD);
-		#			if ($calcDistMatExt && -e $inFastaOth){
-			if (-e $inFastaOth){ 
-				($avgID,$pIDsmplhr,$percIDhr) = calcDisPos2($inFastaOth,$tmpDMatOth,1,$ncore,$tmpD);
-				$calcDistMatExtGo = $avgID;
-			} else { $calcDistMatExtGo = 0;}
+			my $distanceOK = eval {
+				($avgID,$pIDsmplhr,$percIDhr) =
+					calcDisPos2($tmpInMSA,$tmpDMat,0,$ncore,$tmpD);
+				if (-e $inFastaOth){
+					($avgID,$pIDsmplhr,$percIDhr) =
+						calcDisPos2($inFastaOth,$tmpDMatOth,1,$ncore,$tmpD);
+					$calcDistMatExtGo = $avgID;
+				} else {
+					$calcDistMatExtGo = 0;
+				}
+				1;
+			};
+			if (!$distanceOK) {
+				my $error = $@ || "unknown distance-matrix failure";
+				$error =~ s/\s+$//;
+				limitedWarn("failed optional locus distance matrix",
+					"Warning: retaining locus $gene but omitting its distance matrix: $error\n");
+				unlink $_ for grep { -e $_ } ($tmpDMat, $tmpDMatOth);
+			}
 		}
 		
 		
@@ -675,30 +1239,55 @@ if ($isAligned){
 			$tmpOutMSAnonsyn =~ s/\.fna/\.nonsyn\.fna/;$tmpOutMSAsyn =~ s/\.fna/\.syn\.fna/;
 
 			if (!$endFileExists){
-				convertMultAli2NT($tmpOutMSAaa,$tmpInMSAnt,$tmpOutMSA);
-				($tmpOutMSAsyn,$tmpOutMSAnonsyn) = synPosOnly($tmpOutMSA,$tmpOutMSAaa,0,$ogrGenes,$calcSyn,$calcNonSyn);
-				#this will not affect 4-fold only etc..
-				my $msaFbin = getProgPaths("MSAfix");
-				$cmd = "$msaFbin -i $tmpOutMSA  -maskLowID -maskBorderGap -rmGapColsGreater ".$maxGapPerCol." -minGoodPosFrac 0.6\n";
-				systemW $cmd;
+				my $ntAlignmentOK = eval {
+					convertMultAli2NT($tmpOutMSAaa,$tmpInMSAnt,$tmpOutMSA);
+					die "AA-to-NT conversion completed without producing a nonempty output\n"
+						unless -s $tmpOutMSA;
+					# Validate/filter the primary nucleotide alignment before
+					# deriving any downstream site-class subsets from it.
+					runMSAFix($tmpOutMSA, $maxGapPerCol);
+					($tmpOutMSAsyn,$tmpOutMSAnonsyn) =
+						synPosOnly($tmpOutMSA,$tmpOutMSAaa,0,$ogrGenes,$calcSyn,$calcNonSyn);
+					1;
+				};
+				if (!$ntAlignmentOK) {
+					my $error = $@ || "unknown nucleotide-alignment failure";
+					$error =~ s/\s+$//;
+					$failedLoci++;
+					$excludedLoci{$gene} = 1;
+					limitedWarn("failed locus alignment",
+						"Warning: excluding locus $gene from future calculations: $error\n");
+					unlink $_ for grep { defined($_) && -e $_ }
+						($tmpInMSA, $tmpInMSAnt, $tmpOutMSAaa, $tmpOutMSA,
+							$tmpOutMSAsyn, $tmpOutMSAnonsyn, $finOutMSAaa, $finOutMSA,
+							$tmpDMat, $tmpDMatOth);
+					next;
+				}
 			}
 			push (@MSAs,$finOutMSA);
-			push (@MSAsSyn,$tmpOutMSAsyn) if ($tmpOutMSAsyn ne "");
-			push (@MSAsNonSyn,$tmpOutMSAnonsyn) if ($tmpOutMSAnonsyn ne "");
+			$primaryAlignmentGene{$finOutMSA} = $gene;
+			push (@MSAsSyn,$tmpOutMSAsyn) if ($tmpOutMSAsyn ne "" && fileGZs($tmpOutMSAsyn));
+			push (@MSAsNonSyn,$tmpOutMSAnonsyn)
+				if ($tmpOutMSAnonsyn ne "" && fileGZs($tmpOutMSAnonsyn));
 			#die "@MSAs\n";
 		} else {
 			push (@MSA_AA,$finOutMSAaa);
+			$primaryAlignmentGene{$finOutMSAaa} = $gene;
 		}
 		#system "rm -f $tmpInMSA $tmpInMSAnt";# $tmpOutMSAaa";
 		unlink  $tmpInMSA; unlink $tmpInMSAnt;
 		push (@MSrm,$finOutMSAaa,$finOutMSA);
 		#die "$MSrm[1]\n";
-		print "$cnt "; 
 		move($tmpOutMSAaa, $finOutMSAaa) or die "Cannot move $tmpOutMSAaa to $finOutMSAaa: $!\n"
 			if (!fileGZs($finOutMSAaa) && -e $tmpOutMSAaa);
 		move($tmpOutMSA, $finOutMSA) or die "Cannot move $tmpOutMSA to $finOutMSA: $!\n"
 			if (!fileGZs($finOutMSA) && -e $tmpOutMSA);
+		$alignedLoci++;
+		print "Prepared $alignedLoci/$candidateLoci locus alignments\n"
+			if $alignedLoci == 1 || $alignedLoci % 25 == 0;
 	}
+	print "Per-locus alignment summary: $alignedLoci/$candidateLoci candidate loci prepared"
+		. ($failedLoci ? "; $failedLoci failed and were excluded" : "") . "\n";
 	
 	my $mergPIDtag = "_merge";
 	mergePids("$MsaD/",$cnt, "AA",$mergPIDtag) if ($calcDistMat); #merge different percIDs
@@ -706,12 +1295,173 @@ if ($isAligned){
 	
 	#could be used to filter genes further, but not for now
 	#pogenStatsFilter();
-	if ($outgroup ne ""){print "Found $ogrpCnt of $cnt outgroup sequences\n";}
+	print "Outgroup coverage: $ogrpCnt/$candidateLoci candidate loci contained '$outgroup'\n"
+		if $outgroup ne "";
 } elsif ($doMSA) {#no marker way, single gene
 	my $r1; my $r2;
 	#,$r1,$r2)
 	$multAli = singleGeneMSAprocess($multAli)#;,\@MSAs,\@MSA_AA);
 	#@MSAs = @{$r1};	@MSA_AA = @{$r2};
+}
+if ($synSummaryCount) {
+	print "Synonymous-site classification summary: $synSummaryCount alignment(s), "
+		. "$synSiteTotal synonymous-variable and $nonSynSiteTotal nonsynonymous-variable codon(s)\n";
+}
+
+if ($postAlignmentLocusQC && $cogCats ne "") {
+	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
+	if (@{$primaryAlignments}) {
+		my $kept = runPostAlignmentLocusQC(
+			$primaryAlignments,
+			$useAA4tree ? 'aa' : 'nt',
+			$postAlignmentQCReport,
+			$postAlignmentQCPolicyFile,
+			$postAlignmentQCPolicy,
+		);
+		my %keepPath = map { $_ => 1 } @{$kept};
+		my %keepStem = map { alignmentFileStem($_) => 1 } @{$kept};
+		if ($useAA4tree) {
+			@MSA_AA = grep { $keepPath{$_} } @MSA_AA;
+		} else {
+			@MSAs = grep { $keepPath{$_} } @MSAs;
+			@MSAsSyn = grep { $keepStem{alignmentFileStem($_)} } @MSAsSyn;
+			@MSAsNonSyn = grep { $keepStem{alignmentFileStem($_)} } @MSAsNonSyn;
+		}
+	}
+} elsif ($cogCats ne "") {
+	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
+	my $candidateCount = scalar @{$primaryAlignments};
+	print "Post-alignment locus QC disabled; retaining all $candidateCount prepared loci\n"
+		if $candidateCount;
+	if (-e $postAlignmentQCReport) {
+		unlink $postAlignmentQCReport
+			or die "Cannot remove stale locus-QC report $postAlignmentQCReport: $!\n";
+	}
+	writePostAlignmentQCPolicy($postAlignmentQCPolicyFile, $postAlignmentQCPolicy);
+}
+
+if ($taxonAwareLocusSelection && $cogCats ne "") {
+	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
+	if (@{$primaryAlignments}) {
+		my $postQCAlignmentCount = scalar @{$primaryAlignments};
+		my $finalSelection = selectTaxonAwareFinalLoci(
+			alignments => $primaryAlignments,
+			path_gene => \%primaryAlignmentGene,
+			pre_metrics => \%taxonAwarePreMetrics,
+			samples => \%taxonAwareUniverseSamples,
+			maximum_loci => $taxonAwareMaxLoci,
+			core_loci => $taxonAwareCoreLoci,
+			target_loci => $taxonAwareTargetLoci,
+			target_nt => $taxonAwareTargetNT,
+			minimum_anchor_nt => 1,
+			use_aa => $useAA4tree,
+			outgroup => $outgroup,
+			locus_report => "$treeD/taxon_aware_locus_selection.tsv",
+			sample_report => "$treeD/taxon_aware_sample_selection.tsv",
+		);
+		my %keepPath = map { $_ => 1 } @{$finalSelection->{alignments}};
+		my %keepStem = map { alignmentFileStem($_) => 1 }
+			@{$finalSelection->{alignments}};
+		if ($useAA4tree) {
+			@MSA_AA = grep { $keepPath{$_} } @MSA_AA;
+		} else {
+			@MSAs = grep { $keepPath{$_} } @MSAs;
+			@MSAsSyn = grep { $keepStem{alignmentFileStem($_)} } @MSAsSyn;
+			@MSAsNonSyn = grep { $keepStem{alignmentFileStem($_)} } @MSAsNonSyn;
+		}
+		for my $sample (keys %samples) {
+			delete $samples{$sample}
+				if ($finalSelection->{sample_metrics}{$sample}{role} // "remove") eq "remove";
+		}
+		%taxonAwareFinalMetricByPath = map {
+			my $metric = $finalSelection->{locus_metrics}{$_};
+			$metric->{path} => $metric
+		} grep {
+			$finalSelection->{locus_metrics}{$_}{selected}
+		} keys %{$finalSelection->{locus_metrics}};
+		my $backboneEligibility = classifyTaxonAwareCoverageEligibility(
+			sample_metrics => $finalSelection->{sample_metrics},
+			gene_fraction => $GeneFracPSpec,
+			nt_fraction => $ntFrac,
+			minimum_nt => $ntCntTotal,
+			minimum_loci_floor => 1,
+			role => 'backbone', outgroup => $outgroup,
+		);
+		my $placementEligibility = classifyTaxonAwareCoverageEligibility(
+			sample_metrics => $finalSelection->{sample_metrics},
+			gene_fraction => $placementGeneFracPSpec,
+			nt_fraction => $placementNTFrac,
+			minimum_nt => $placementNTCntTotal,
+			minimum_overlap => $placementMinOverlap,
+			minimum_loci_floor => 2,
+			role => 'placement',
+			outgroup => $outgroup,
+		);
+		%taxonAwareBackboneEligibility = map {
+			$_ => $backboneEligibility->{samples}{$_}{eligible}
+		} keys %{$backboneEligibility->{samples}};
+		%taxonAwareBackboneIneligibleReason = map {
+			$_ => $backboneEligibility->{samples}{$_}{reason}
+		} grep { !$backboneEligibility->{samples}{$_}{eligible} }
+			keys %{$backboneEligibility->{samples}};
+		%taxonAwarePlacementEligibility = map {
+			$_ => $placementEligibility->{samples}{$_}{eligible}
+		} keys %{$placementEligibility->{samples}};
+		%taxonAwarePlacementIneligibleReason = map {
+			$_ => $placementEligibility->{samples}{$_}{reason}
+		} grep { !$placementEligibility->{samples}{$_}{eligible} }
+			keys %{$placementEligibility->{samples}};
+		my $backboneAudit = "$treeD/taxon_aware_backbone_eligibility.tsv";
+		open my $backboneOutput, '>', $backboneAudit
+			or die "Cannot write taxon-aware backbone eligibility $backboneAudit: $!\n";
+		print {$backboneOutput} "sample\tselected_loci\tselected_nt\tbackbone_eligible\treason\tminimum_loci\tminimum_nt\n";
+		for my $sample (sort keys %{$backboneEligibility->{samples}}) {
+			my $entry = $backboneEligibility->{samples}{$sample};
+			print {$backboneOutput} join("\t", $sample, $entry->{selected_loci},
+				$entry->{selected_nt}, $entry->{eligible} ? 1 : 0, $entry->{reason},
+				$backboneEligibility->{minimum_loci}, $backboneEligibility->{minimum_nt}), "\n";
+		}
+		close $backboneOutput
+			or die "Cannot close taxon-aware backbone eligibility $backboneAudit: $!\n";
+		my $placementAudit = "$treeD/taxon_aware_placement_eligibility.tsv";
+		open my $placementOutput, '>', $placementAudit
+			or die "Cannot write taxon-aware placement eligibility $placementAudit: $!\n";
+		print {$placementOutput} join("\t", qw(
+			sample selected_loci selected_nt placement_eligible reason
+			minimum_loci minimum_nt
+		)), "\n";
+		for my $sample (sort keys %{$placementEligibility->{samples}}) {
+			my $entry = $placementEligibility->{samples}{$sample};
+			print {$placementOutput} join("\t",
+				$sample, $entry->{selected_loci}, $entry->{selected_nt},
+				$entry->{eligible} ? 1 : 0, $entry->{reason},
+				$placementEligibility->{minimum_loci},
+				$placementEligibility->{minimum_nt},
+			), "\n";
+		}
+		close $placementOutput
+			or die "Cannot close taxon-aware placement eligibility $placementAudit: $!\n";
+		print "Taxon-aware final selection retained "
+			. scalar(@{$finalSelection->{alignments}}) . "/"
+			. $postQCAlignmentCount
+			. " post-QC loci; reports: $treeD/taxon_aware_locus_selection.tsv, "
+			. "$treeD/taxon_aware_sample_selection.tsv, $backboneAudit, $placementAudit\n";
+	}
+}
+
+if ($rateMergePartitions && $cogCats ne "") {
+	%partitionRateProxy = %{readPostAlignmentRateMetrics($postAlignmentQCReport)};
+	for my $alignment (keys %taxonAwareFinalMetricByPath) {
+		$partitionSelectionPhase{$alignment} =
+			$taxonAwareFinalMetricByPath{$alignment}{selection_phase} // '';
+		next if exists $partitionRateProxy{$alignment};
+		my $metric = $taxonAwareFinalMetricByPath{$alignment};
+		my $sites = $metric->{alignment_length_nt} // 0;
+		$partitionRateProxy{$alignment} = {
+			value => $sites ? ($metric->{variable_sites} // 0) / $sites : 0,
+			source => 'variable_site_fraction',
+		};
+	}
 }
 
 #die "@MSA_AA\n\n";
@@ -737,6 +1487,62 @@ if (!$useAA4tree) {
 	@theRealMSAs = @MSA_AA;
 }
 
+if ($strictBackbone) {
+	my $fullAlignment = "$MsaD/MSAli.full.fna";
+	if (!-s $fullAlignment && -s "$fullAlignment.gz") {
+		systemW("$pigzBin -p $ncore -d ".shellQuote("$fullAlignment.gz"));
+	}
+	if ($calcMSA || !-s $fullAlignment) {
+		copy($multAli, $fullAlignment)
+			or die "Cannot preserve full alignment as $fullAlignment: $!\n";
+	}
+	my $sampleStatus = read_sample_qc($sampleQCFile);
+	$strictSplit = split_strict_backbone(
+		$fullAlignment, $multAli, $placementAlignment, $sampleStatus,
+		{
+			is_aa => $useAA4tree,
+			coverage_fraction => $strictBackboneFraction,
+			minimum_backbone => $strictBackboneMinSamples,
+			backbone_eligible => \%taxonAwareBackboneEligibility,
+			backbone_ineligible_reason => \%taxonAwareBackboneIneligibleReason,
+			placement_eligible => \%taxonAwarePlacementEligibility,
+			placement_ineligible_reason => \%taxonAwarePlacementIneligibleReason,
+			outgroup => $outgroup,
+		},
+	);
+	my $classificationFile = "$treeD/strict_backbone.samples.tsv";
+	open my $classification, '>', $classificationFile
+		or die "Cannot write $classificationFile: $!\n";
+	print {$classification} join("\t",
+		qw(sample tree_role reason informative_positions q90_informative)), "\n";
+	my %isPlacement = map { $_ => 1 } @{$strictSplit->{placement}};
+	my %isExcluded = map { $_ => 1 } @{$strictSplit->{excluded} // []};
+	for my $sample (sort(
+		@{$strictSplit->{backbone}}, @{$strictSplit->{placement}}, @{$strictSplit->{excluded} // []}
+	)) {
+		my $reason = $strictSplit->{reason}{$sample} // 'validated_backbone';
+		$reason = "backbone_fallback:".$strictSplit->{requested_reason}{$sample}
+			if $strictSplit->{fallback}
+				&& exists($strictSplit->{requested_reason}{$sample});
+		print {$classification} join("\t",
+			$sample,
+			$isExcluded{$sample} ? 'excluded' : $isPlacement{$sample} ? 'placement' : 'backbone',
+			$reason,
+			$strictSplit->{informative}{$sample},
+			sprintf('%.2f', $strictSplit->{q90_informative}),
+		), "\n";
+	}
+	close $classification or die "Cannot close $classificationFile: $!\n";
+	print "Strict-backbone split: ".scalar(@{$strictSplit->{backbone}})
+		." backbone and ".scalar(@{$strictSplit->{placement}})
+		." placement sample(s), ".scalar(@{$strictSplit->{excluded} // []})
+		." excluded from placement; full alignment retained at $fullAlignment\n";
+	warn "Strict-backbone fallback: fewer than $strictBackboneMinSamples validated "
+		."backbone samples remained, so all samples were used for inference; "
+		."see $classificationFile\n"
+		if $strictSplit->{fallback};
+}
+
 #phylip conversion??
 if ( $doGenesToPh){ 
 	my $phylipD = File::Spec->catdir($outD, "phylip");
@@ -747,8 +1553,19 @@ if ( $doGenesToPh){
 		my $phylipOut = File::Spec->catfile($phylipD, basename($MSAfn).".ph");
 		unlink $_ or die "Cannot remove stale PHYLIP output $_: $!\n" for glob("$phylipOut*");
 		my $cmd2 = "$fasta2phylip -c 50 ".shellQuote($MSAfn)." > ".shellQuote($phylipOut)."\n";
-		systemW $cmd2;
-		die "PHYLIP conversion did not produce $phylipOut\n" unless -s $phylipOut;
+		my $phylipOK = eval {
+			systemW $cmd2;
+			die "conversion did not produce a nonempty output\n" unless -s $phylipOut;
+			1;
+		};
+		if (!$phylipOK) {
+			my $error = $@ || "unknown PHYLIP conversion failure";
+			$error =~ s/\s+$//;
+			limitedWarn("failed optional per-locus PHYLIP conversion",
+				"Warning: omitting PHYLIP output for $MSAfn: $error\n");
+			unlink $phylipOut if -e $phylipOut;
+			next;
+		}
 		push(@geneList, $phylipOut);
 	}
 }
@@ -771,16 +1588,32 @@ my $phyloTree = "";
 if ($doSuperTree || $doSuperCheck){#can be for 2 reasons: 1) build actual super tree 2) quality control
 	my @treeCol;
 	for (my $i=0;$i<@theRealMSAs;$i++){
-		print "===============>  Subtree $i  <===============\n";
+		print "Building subtree " . ($i + 1) . "/" . scalar(@theRealMSAs) . "\n"
+			if $i == 0 || ($i + 1) % 25 == 0;
 		my $tOhrST = createTreeOpt($theRealMSAs[$i],"allsites",$i,1,"");
-		my $trRetH = treeAtHeart($tOhrST);
-		push(@treeCol,${$trRetH}{IQtreeout}.".treefile");
+		my $subtreeFile;
+		my $subtreeOK = eval {
+			my $trRetH = treeAtHeart($tOhrST);
+			$subtreeFile = ${$trRetH}{nwk} // "";
+			die "subtree method produced no nonempty tree\n" unless -s $subtreeFile;
+			1;
+		};
+		if (!$subtreeOK) {
+			my $error = $@ || "unknown subtree failure";
+			$error =~ s/\s+$//;
+			limitedWarn("failed locus subtree",
+				"Warning: excluding subtree for $theRealMSAs[$i]: $error\n");
+			next;
+		}
+		push(@treeCol,$subtreeFile);
 		if ($calcSyn){
 		} 
 		if ($calcNonSyn){
 		}
 	}
+	print "Subtree construction summary: " . scalar(@treeCol) . " subtree(s) prepared\n";
 	if ($doSuperTree){
+		die "No usable locus subtrees remain; no supertree can be created\n" unless @treeCol;
 		my $outST = "$treeD/IQtree_allsites.treefile";
 		my $specFile = "$treeD/IQtree_allsites.species";
 		open OU,">$specFile" or die "Cannot write supertree species file $specFile: $!\n";
@@ -804,7 +1637,7 @@ if ($calcDNAdiff){
 
 
 if ($doGubbins){
-	$gubbinsBin = requireConfiguredTool("MF4_GUBBINS_BIN", "Gubbins") if $gubbinsBin eq "";
+	$gubbinsBin = requireConfiguredTool("gubbins", "Gubbins") if $gubbinsBin eq "";
 	my $gubbinsOutDir = File::Spec->catdir($outD, "gubbins");
 	make_path($gubbinsOutDir) unless -d $gubbinsOutDir;
 	my $outDG = File::Spec->catfile($gubbinsOutDir, "GD");
@@ -858,6 +1691,67 @@ if ($doSuperTree){
 		treeAtHeart($tOhrNSun);
 	}
 }
+
+if ($strictSplit) {
+	my $backboneTree = ${$trRetH}{nwk} // "";
+	if ($backboneTree ne "" && -s $backboneTree) {
+		my $primaryTree = $backboneTree;
+		my $dedicatedBackbone = $primaryTree =~ s/\.backbone\.treefile$/.treefile/;
+		my $report = "$treeD/strict_backbone.epa_placements.tsv";
+		if (@{$strictSplit->{placement}}) {
+			my ($epaResult, $modelArtifact, $jplaceFile) = runEpaNgPlacement(
+				$tOhr, $backboneTree, $multAli, $placementAlignment,
+				$strictSplit->{placement}, $treeD,
+			);
+			my $placements = $epaResult->{placements};
+			open my $reportFh, '>', $report or die "Cannot write $report: $!\n";
+			print {$reportFh} join("\t",
+				qw(sample status edge likelihood likelihood_weight_ratio distal_length pendant_length reason)), "\n";
+			for my $sample (sort keys %{$placements}) {
+				my $entry = $placements->{$sample};
+				print {$reportFh} join("\t",
+					$sample, $entry->{status},
+					map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
+						qw(edge likelihood likelihood_weight_ratio distal_length pendant_length)),
+					$strictSplit->{reason}{$sample} // '',
+				), "\n";
+			}
+			close $reportFh or die "Cannot close $report: $!\n";
+			if (!$dedicatedBackbone) {
+				$primaryTree =~ s/\.treefile$/.placed.treefile/;
+				$primaryTree .= ".placed.treefile" if $primaryTree eq $backboneTree;
+			}
+			write_epa_placed_tree($epaResult->{tree}, $primaryTree, $placements);
+			print "EPA-ng ML placements: $report; jplace: $jplaceFile; model: $modelArtifact; "
+				."primary tree: $primaryTree; backbone tree: $backboneTree\n";
+		} else {
+			open my $reportFh, '>', $report or die "Cannot write $report: $!\n";
+			print {$reportFh} join("\t",
+				qw(sample status edge likelihood likelihood_weight_ratio distal_length pendant_length reason)), "\n";
+			close $reportFh or die "Cannot close $report: $!\n";
+			if ($dedicatedBackbone) {
+				my $temporaryPrimary = "$primaryTree.tmp.$$";
+				unlink $temporaryPrimary
+					or die "Cannot remove stale primary-tree temporary $temporaryPrimary: $!\n"
+					if -e $temporaryPrimary;
+				copy($backboneTree, $temporaryPrimary)
+					or die "Cannot copy backbone tree $backboneTree to $temporaryPrimary: $!\n";
+				rename $temporaryPrimary, $primaryTree
+					or die "Cannot publish primary tree $primaryTree: $!\n";
+			}
+			print "No samples required EPA-ng placement; primary tree: $primaryTree; "
+				."backbone tree: $backboneTree\n";
+		}
+		if ($primaryTree ne $backboneTree) {
+			${$trRetH}{backbone_nwk} = $backboneTree;
+			${$trRetH}{nwk} = $primaryTree;
+			$phyloTree = $primaryTree;
+		}
+	} else {
+		warn "Strict-backbone samples were separated, but no completed backbone tree "
+			."was available for post-inference placement\n";
+	}
+}
 #system "rm -f $multAli.ph $multAliSyn.ph $multAliNonSyn.ph";
 
 if ($useTreeShrink){
@@ -865,7 +1759,7 @@ if ($useTreeShrink){
 	my $inputTree = ${$trRetH}{nwk} // "";
 	die "TreeShrink requested but no completed tree is available\n" unless $inputTree ne "" && -s $inputTree;
 	my $cmd = "$trShr -i $outD -t ".shellQuote($inputTree)." -q 0.05  -O TS. -f";
-	print $cmd."\n";
+	print "Running TreeShrink on $inputTree\n";
 	systemW($cmd);
 }
 
@@ -902,16 +1796,27 @@ if ($removeMSA){
 	}
 }
 if ($gzipInput){
+	# Release input caches before a compression-time ordered rewrite.  Only
+	# buildTree-owned plain-to-gzip conversions are sorted; existing .gz inputs
+	# and FASTA files with other names are left untouched.
+	%FNA = ();
+	%FAA = ();
 	for my $inputFile ($aaFna, $fnFna, $cogCats){
 		next if $inputFile eq "" || $inputFile =~ /\.gz$/ || !-f $inputFile;
+		my $inputBasename = basename($inputFile);
+		sortFastaForCompression($inputFile)
+			if $inputBasename eq "allFAAs.faa" || $inputBasename eq "allFNAs.fna";
 		systemW("$pigzBin -p $ncore ".shellQuote($inputFile));
 	}
 }
 
 safeRemoveTree($tmpD, $tmpBase);
+writeCompletionMarker($completionMarker, ${$trRetH}{nwk}, $outD)
+	if length($completionMarker);
 	###################### ETE ######################3
 
-print "All done: $outD \n\n";
+print "BuildTree completed successfully\n";
+print "Outputs: alignments=$MsaD; trees=$treeD; run directory=$outD\n";
 exit(0);
 
 
@@ -933,33 +1838,38 @@ exit(0);
 
 
 
+sub requestedTreeMethods{
+	return grep { $_->{enabled} } (
+		{name => "FastTree",     enabled => $doFastTree,     outputKey => "fastTrOut"},
+		{name => "VeryFastTree", enabled => $doVeryFastTree, outputKey => "VfastTrOut"},
+		{name => "IQ-TREE",      enabled => $doIQTree,       outputKey => "IQtreeout", iqtree => 1},
+		{name => "RAxML-NG",     enabled => $doRAXMLng,      outputKey => "RAXNGtreeout"},
+		{name => "RAxML",        enabled => $doRAXML,        outputKey => "RAXtreeout"},
+	);
+}
+
+sub treeMethodState{
+	my ($method, $hr) = @_;
+	my $output = $method->{iqtree}
+		? "$hr->{$method->{outputKey}}.treefile"
+		: $hr->{$method->{outputKey}};
+	my $validationReason = '';
+	my $outputComplete = $method->{iqtree}
+		? iqtreeOutputComplete($hr->{$method->{outputKey}}, $hr->{inMSA}, \$validationReason)
+		: (-s $output ? 1 : 0);
+	return {
+		%{$method},
+		output => $output,
+		outputComplete => $outputComplete,
+		checkpointComplete => ($continue && $outputComplete ? 1 : 0),
+		validationReason => $validationReason,
+	};
+}
+
 sub treePresent{
 	my ($hr) = @_;
-	my %treeOpts = %{$hr};
-	my $ret = 1;
-	my $checked = 0;
-	if ($doFastTree){
-		$checked = 1;
-		$ret=0 unless ($continue && -e $treeOpts{fastTrOut});
-	}
-	if ($doVeryFastTree){
-		$checked = 1;
-		$ret=0 unless ($continue && -e $treeOpts{VfastTrOut});
-	}
-	if ($doIQTree){
-		$checked = 1;
-		my $IQtree = "$treeOpts{IQtreeout}";
-		$ret=0 unless ($continue && -e "$IQtree.treefile");
-	}
-	if ($doRAXMLng){
-		$checked = 1;
-		$ret=0 unless ($continue && -e $treeOpts{RAXNGtreeout});
-	}
-	if ($doRAXML){
-		$checked = 1;
-		$ret=0 unless ($continue && -e $treeOpts{RAXtreeout});
-	}
-	return $checked ? $ret : 0;
+	my @states = map { treeMethodState($_, $hr) } requestedTreeMethods();
+	return @states && !grep { !$_->{checkpointComplete} } @states;
 }
 
 
@@ -973,7 +1883,9 @@ sub createTreeOpt{
 	$outgroupL = "" if ($isSubTree);
 	my $partiF=$multF.$partiExt;
 	if (-e "$partiF.gz"){systemW("$pigzBin -d ".shellQuote("$partiF.gz"));}
-	$partiF="" unless (-e $partiF);
+	# Keep the expected path even on a fresh run: mergeMSAs creates this file
+	# after the tree options are assembled.  Its existence is resolved only
+	# immediately before a tree program is invoked.
 	#object to transfer options to tree (and get them back..)
 	my $BStag = ""; if ($bootStrap>0){$BStag="_BS$bootStrap";}
 	my %treeOpts = (inMSA => $multF,
@@ -985,6 +1897,9 @@ sub createTreeOpt{
 					useAA => $useAA4tree,
 					iqtreeFast => $iqFast,
 					autoModel => $treeAutoModel,
+					iqMemMB => $iqMemMB,
+					iqPathogen => $iqPathogen,
+					iqLegacy => $iqLegacy,
 					cont => $continue,
 					silent => $silent,
 					partition => $partiF,
@@ -1000,12 +1915,76 @@ sub createTreeOpt{
 	return \%treeOpts;
 }
 
+sub epaModelArtifact {
+	my ($treeOpts, $backboneTree) = @_;
+	my $iqtree = "$treeOpts->{IQtreeout}.treefile";
+	if ($backboneTree eq $iqtree) {
+		my $report = "$treeOpts->{IQtreeout}.iqtree";
+		return $report if -s $report;
+		die "EPA-ng placement requires the completed IQ-TREE report $report to reuse "
+			."its fitted model parameters\n";
+	}
+	my $raxmlng = $treeOpts->{RAXNGtreeout};
+	if ($backboneTree eq $raxmlng) {
+		my $model = $raxmlng;
+		$model =~ s/\.[^.]+$//;
+		$model .= '.bestModel';
+		return $model if -s $model;
+		die "EPA-ng placement requires the completed RAxML-NG model file $model to "
+			."reuse its fitted model parameters\n";
+	}
+	my $raxml = $treeOpts->{RAXtreeout};
+	if ($backboneTree eq $raxml) {
+		my $report = $raxml;
+		$report =~ s/\.[^.]+$/.raxml.info/;
+		return $report if -s $report;
+		die "EPA-ng placement requires the completed RAxML fitted-model report $report "
+			."to reuse its fitted model parameters\n";
+	}
+	die "EPA-ng strict-backbone placement supports a matching IQ-TREE, RAxML-NG, or RAxML "
+		."backbone model; no reusable model artifact is available for $backboneTree\n";
+}
+
+sub runEpaNgPlacement {
+	my ($treeOpts, $backboneTree, $backboneAlignment, $queryAlignment,
+		$queries, $treeDirectory) = @_;
+	die "EPA-ng placement requires a non-empty backbone alignment: $backboneAlignment\n"
+		unless -s $backboneAlignment;
+	die "EPA-ng placement requires a non-empty query alignment: $queryAlignment\n"
+		unless -s $queryAlignment;
+	my $epaNg = getProgPaths("epa-ng", 0);
+	die "Strict-backbone placement requested, but epa-ng is not configured. "
+		."Set epa-ng in the selected MATAFILER configuration.\n"
+		unless defined($epaNg) && length($epaNg);
+	my $modelArtifact = epaModelArtifact($treeOpts, $backboneTree);
+	my $epaDirectory = "$treeDirectory/epa-ng";
+	safeRemoveTree($epaDirectory, $treeDirectory) if -d $epaDirectory || -l $epaDirectory;
+	make_path($epaDirectory);
+	my $command = join(' ',
+		shellQuote($epaNg),
+		'--ref-msa', shellQuote($backboneAlignment),
+		'--tree', shellQuote($backboneTree),
+		'--query', shellQuote($queryAlignment),
+		'--outdir', shellQuote($epaDirectory),
+		'--model', shellQuote($modelArtifact),
+		'--threads', $ncore,
+	) . "\n";
+	print "Running EPA-ng ML placement with fitted model artifact $modelArtifact\n";
+	systemW($command);
+	my $jplace = "$epaDirectory/epa_result.jplace";
+	die "EPA-ng completed without its expected placement file $jplace\n" unless -s $jplace;
+	my $result = read_epa_jplace($jplace, $queries);
+	return ($result, $modelArtifact, $jplace);
+}
+
 #core routine to calculte (start) phylo reconstruction
 sub treeAtHeart{
 	my ($hr) = @_;
 	my %treeOpts = %{$hr};
 	my $consTree = $treeOpts{constraintTree}; my $multF = $treeOpts{inMSA};
 	my $silent = $treeOpts{silent}; my $tcnt = $treeOpts{tcnt};
+	my $partition = $treeOpts{partition} // "";
+	$treeOpts{partition} = "" unless $partition ne "" && -s $partition;
 	
 	if ($consTree ne ""){
 		die "ref tree $consTree does not exist\n" unless (-e $consTree);
@@ -1051,51 +2030,68 @@ sub treeAtHeart{
 	#print "cons: $treeOpts{constraintTree}\n";
 	#convert MSA to NEXUS
 	#convertMSA2NXS($multAli,"$multAli.nxs");
-	#format conversion for raxml..
-	if ($doRAXML){
-		my $f = $treeOpts{inMSA};
-		my $fasta2phylip = getProgPaths("fasta2phylip_scr");
-		my $tcmd = "rm -f $f.ph*; $fasta2phylip -c 50 $f > $f.ph\n";
-		systemW $tcmd;#) {die "fasta2phylim failed:\n$tcmd\n";}
-	}
-
+	my @treeMethods = requestedTreeMethods();
+	my %treeState = map {
+		my $state = treeMethodState($_, \%treeOpts);
+		($state->{name} => $state);
+	} @treeMethods;
 
 	if ($doFastTree){
-		unless ($continue && -e $treeOpts{fastTrOut}){
+		unless ($treeState{"FastTree"}{checkpointComplete}){
 			runFasttree($treeOpts{inMSA},$treeOpts{fastTrOut},$treeOpts{useAA},$treeOpts{ncore});
 		}
-		$phyloTree = $treeOpts{fastTrOut};
+		$phyloTree = $treeState{"FastTree"}{output};
 	}
 	if ($doVeryFastTree){
-		unless ($continue && -e $treeOpts{VfastTrOut}){
+		unless ($treeState{"VeryFastTree"}{checkpointComplete}){
 			runVeryFasttree($treeOpts{inMSA},$treeOpts{VfastTrOut},$treeOpts{useAA},$treeOpts{ncore});
 		}
-		$phyloTree = $treeOpts{VfastTrOut};
+		$phyloTree = $treeState{"VeryFastTree"}{output};
 	}
 	if ($doIQTree){
-		my $IQtree = "$treeOpts{IQtreeout}";
-		unless ($continue && -e "$IQtree.treefile"){
+		my $state = $treeState{"IQ-TREE"};
+		my $IQtree = $treeOpts{IQtreeout};
+		unless ($state->{checkpointComplete}){
+			print "IQ-TREE checkpoint will be rebuilt/resumed: $state->{validationReason}\n"
+				if $continue && (-e "$IQtree.treefile" || -e "$IQtree.log");
 			runQItree(\%treeOpts);
+		} else {
+			cleanupIQTreeTransients($IQtree);
 		}
-		$phyloTree = "$IQtree.treefile";
+		my $postRunState = treeMethodState($state, \%treeOpts);
+		die "IQ-TREE output failed post-run validation: $postRunState->{validationReason}\n"
+			unless $postRunState->{outputComplete};
+		$phyloTree = $postRunState->{output};
 	}
 	if ($doRAXMLng){
-		unless ($continue && -e $treeOpts{RAXNGtreeout}){
+		unless ($treeState{"RAxML-NG"}{checkpointComplete}){
 			runRaxMLng(\%treeOpts);
 		}
-		$phyloTree = $treeOpts{RAXNGtreeout};
+		$phyloTree = $treeState{"RAxML-NG"}{output};
 	}
 	if ($doRAXML){
-		$treeOpts{inMSA} = "$multF.ph";
-		if (!-e $treeOpts{inMSA}){ die "Can't find expected *.ph file: $multF.ph";}
-		runRaxML(\%treeOpts);#"$multF.ph",$bootStrap,$outgroup,"$treeD/RXML_allsites$BStag.nwk",$ncore,$continue,!$useAA4tree);
-		$phyloTree = $treeOpts{RAXtreeout};#"$treeD/RXML_$siteTag$BStag.nwk";
+		unless ($treeState{"RAxML"}{checkpointComplete}){
+			my $f = $treeOpts{inMSA};
+			my $fasta2phylip = getProgPaths("fasta2phylip_scr");
+			my $tcmd = "rm -f $f.ph*; $fasta2phylip -c 50 $f > $f.ph\n";
+			systemW $tcmd;
+			$treeOpts{inMSA} = "$multF.ph";
+			die "Can't find nonempty expected *.ph file: $multF.ph"
+				unless -s $treeOpts{inMSA};
+			# runRaxML's continuation logic historically keys on path existence. Do
+			# not let a zero-byte published tree suppress recovery of partial work.
+			unlink $treeOpts{RAXtreeout}
+				or die "Cannot remove empty RAxML tree $treeOpts{RAXtreeout}: $!\n"
+				if -e $treeOpts{RAXtreeout} && !-s $treeOpts{RAXtreeout};
+			runRaxML(\%treeOpts);
+		}
+		$phyloTree = $treeState{"RAxML"}{output};
 	}
 	if ($doCFML && !$treeOpts{isSubTree}){
 		my $outDG = File::Spec->catdir($outD, "clonalFrameML");
 		make_path($outDG) unless -d $outDG;
 		$outDG = File::Spec->catfile($outDG, "CFML");
-		my $CFMLbin = requireConfiguredTool("MF4_CLONALFRAMEML_BIN", "ClonalFrameML");
+		my $CFMLbin = requireConfiguredTool("clonalframeml", "ClonalFrameML");
 		my $cmd = "$CFMLbin $phyloTree $multF $outDG\n";
 		systemW($cmd);
 		die "ClonalFrameML did not produce its expected labelled-tree output for $outDG\n"
@@ -1129,7 +2125,7 @@ sub singleGeneMSAprocess($){
 	my ($multAli) = @_;#,$MSAsar,$MSA_AAar) = @_;
 	#my @MSAs = @{$MSAsar};
 	#my @MSA_AA=@{$MSA_AAar};
-	print "No gene categories given, assumming 1 gene / species in input\n";
+	print "Single-locus mode: no gene-category file supplied\n";
 	my $tmpInMSA = $aaFna;
 	#my $tmpInMSAnt = $fnFna;
 	my $tmpOutMSAaa = "$tmpD/outMSA.faa";
@@ -1173,9 +2169,7 @@ sub singleGeneMSAprocess($){
 
 	if ($tmpInMSA ne "" && !$useAA4tree){
 		convertMultAli2NT($tmpOutMSAaa,$fnFna,$multAli);
-		my $msaFbin = getProgPaths("MSAfix");
-		$cmd = "$msaFbin -i $multAli  -maskLowID -maskBorderGap -rmGapColsGreater ".$maxGapPerCol." -minGoodPosFrac 0.6\n";
-		systemW $cmd;
+		runMSAFix($multAli, $maxGapPerCol);
 		($multAliSyn, $multAliNonSyn) = synPosOnly($multAli,$tmpOutMSAaa,0,"",$calcSyn,$calcNonSyn);
 
 		#system "rm $tmpInMSA $fnFna $tmpOutMSAaa";
@@ -1185,7 +2179,7 @@ sub singleGeneMSAprocess($){
 	}
 	#$multAli = $tmpOutMSA; $multAliSyn = $tmpOutMSAsyn;
 	
-	print "OUTPUT:: $multAli\n";
+	print "Single-locus alignment ready: $multAli\n";
 	
 	return $multAli;#,\@MSAs,\@MSA_AA);
 
@@ -1196,20 +2190,25 @@ sub singleGeneMSAprocess($){
 sub FastGear{
 	my ($fastgearSummaryBin, $fastgearReorderBin, $matlabBin);
 	if ($doFastGearSummary){
-		$fastgearSummaryBin = requireConfiguredTool("MF4_FASTGEAR_SUMMARY_BIN", "fastGEAR summary");
-		$fastgearReorderBin = requireConfiguredTool("MF4_FASTGEAR_REORDER_BIN", "fastGEAR reorder");
-		$matlabBin = requireConfiguredTool("MF4_FASTGEAR_MATLAB_BIN", "fastGEAR MATLAB runtime");
+		$fastgearSummaryBin = requireConfiguredTool("fastgearSummary", "fastGEAR summary");
+		$fastgearReorderBin = requireConfiguredTool("fastgearReorder", "fastGEAR reorder");
+		$matlabBin = requireConfiguredTool("fastgearMatlab", "fastGEAR MATLAB runtime");
 	}
 
 	if($doFastGear){
 #		open I,"<$cogCats" or die "Can't open cogcats $cogCats\n"; 
 		my ($xI,$ST)= gzipopen($cogCats,"CogCATs phylo");
 
+		my $cnt3 = 0;
 		while (<$xI>){
-			my $cnt3 =0;
 			chomp; my @splF = split /\t/;
 			@splF = grep !/^NA$/, @splF;#remove NAs
-			if (@splF ==0){print "No categories in cat file line $cnt3\n";next;}
+			if (@splF ==0){
+				limitedWarn("empty fastGEAR category",
+					"Ignoring empty fastGEAR category at line " . ($cnt3 + 1) . "\n");
+				$cnt3++;
+				next;
+			}
 			my @splF2 = parseSeqId($splF[0], "fastGEAR category line ".($cnt3 + 1));
 			#die "@spl\n";
 			push(@geneListF, $splF2[1]);
@@ -1223,14 +2222,55 @@ sub FastGear{
 		systemW("cp -r ".shellQuote($MsaDF1)." ".shellQuote($MsaDF2));
 		
 
+		my $fastgearDone = 0;
 		foreach my $geneF (@geneListF){
-			my $outFG = "$outD/fastGear/fastGear_Results/$geneF";
+			if ($excludedLoci{$geneF}) {
+				limitedWarn("excluded fastGEAR locus",
+					"Warning: skipping previously excluded locus $geneF in fastGEAR\n");
+				next;
+			}
+			my $gene_file_stem = geneFileStem($geneF);
+			my $outFG = "$outD/fastGear/fastGear_Results/$gene_file_stem";
 			make_path($outFG) unless -d $outFG;
-			my $outFileFG = "$outFG/${geneF}_res.mat";
-			systemW("cat $MsaDF2/$geneF.*.fna | sed 's/_.*\$//' > ".shellQuote("$MsaDF2/$geneF.fna"));
-			my $FGparFile = requireConfiguredTool("MF4_FASTGEAR_PARAM_FILE", "fastGEAR parameter file");
-			runFastgear($geneF, $outFileFG, $MsaDF2, $FGparFile);
+			my $outFileFG = "$outFG/${gene_file_stem}_res.mat";
+			my @gene_msas = sort glob("$MsaDF2/$gene_file_stem.*.fna");
+			unless (@gene_msas) {
+				limitedWarn("missing fastGEAR locus alignment",
+					"Warning: skipping fastGEAR locus $geneF because no MSA files were found in $MsaDF2\n");
+				next;
+			}
+			my $fastgear_input = "$MsaDF2/$gene_file_stem.fna";
+			open my $fg_out, '>', $fastgear_input
+				or die "Cannot create fastGEAR input $fastgear_input: $!\n";
+			for my $msa (@gene_msas) {
+				open my $fg_in, '<', $msa or die "Cannot read fastGEAR source MSA $msa: $!\n";
+				while (my $line = <$fg_in>) {
+					if ($line =~ /^>(\S+)/) {
+						my ($sample) = parseSeqId($1, "fastGEAR MSA header in $msa");
+						$line = ">$sample\n";
+					}
+					print {$fg_out} $line or die "Cannot write fastGEAR input $fastgear_input: $!\n";
+				}
+				close $fg_in or die "Cannot close fastGEAR source MSA $msa: $!\n";
+			}
+			close $fg_out or die "Cannot close fastGEAR input $fastgear_input: $!\n";
+			my $FGparFile = requireConfiguredTool("fastgearParam", "fastGEAR parameter file");
+			my $fastgearOK = eval {
+				runFastgear($gene_file_stem, $outFileFG, $MsaDF2, $FGparFile);
+				1;
+			};
+			if (!$fastgearOK) {
+				my $error = $@ || "unknown fastGEAR failure";
+				$error =~ s/\s+$//;
+				limitedWarn("failed fastGEAR locus",
+					"Warning: skipping failed fastGEAR locus $geneF: $error\n");
+				next;
+			}
+			$fastgearDone++;
+			print "fastGEAR progress: $fastgearDone/" . scalar(@geneListF) . " loci\n"
+				if $fastgearDone == 1 || $fastgearDone % 25 == 0;
 		}
+		print "fastGEAR summary: $fastgearDone/" . scalar(@geneListF) . " loci completed\n";
 		safeRemoveTree($outD_clust, $outD);
 		#die;
 	}
@@ -1276,7 +2316,7 @@ sub FastGear{
 
 		my $SRC_cmd = "$fastgearSummaryBin $matlabBin $FGDataD fastGear_";
 		systemW($SRC_cmd);
-		print "fastgear collect recombination statistics finished";
+		print "fastGEAR recombination summary completed: $summaryD\n";
 		my $FG_sumOut = "$summaryD/fastGear__recSummaries.txt";
 		if(-e $FG_sumOut){safeRemoveTree($resultD, $FGDataD);}
 		#die;
@@ -1446,7 +2486,7 @@ sub calcDiffDNA($ $){
 
 	}
 	close O;
-	print "Dont calculating Distance matrix\n";
+	print "Distance matrix written: $opID\n";
 	#die "done\n";
 }
 
@@ -1529,8 +2569,263 @@ sub calcDisPos($ $ $){
 		print O ">$k1\n$seq\n";
 	}
 	close O;
-	print "Dont calculating Distance matrix\n";
+	print "Distance matrix written: $opID\n";
 	#die "done\n";
+}
+
+sub readPostAlignmentRateMetrics {
+	my ($reportFile) = @_;
+	return {} unless defined($reportFile) && -s $reportFile;
+	open my $report, '<', $reportFile
+		or die "Cannot read post-alignment locus-QC report $reportFile: $!\n";
+	my $header = <$report>;
+	die "Post-alignment locus-QC report is empty: $reportFile\n"
+		unless defined $header;
+	$header =~ s/[\r\n]+$//;
+	my @columns = split /\t/, $header, -1;
+	my %columnIndex = map { $columns[$_] => $_ } 0 .. $#columns;
+	for my $required (qw(alignment status p90_consensus_divergence)) {
+		die "Post-alignment locus-QC report $reportFile lacks column '$required'\n"
+			unless exists $columnIndex{$required};
+	}
+	my %metrics;
+	while (my $line = <$report>) {
+		$line =~ s/[\r\n]+$//;
+		next unless length($line);
+		my @fields = split /\t/, $line, -1;
+		next unless ($fields[$columnIndex{status}] // '') eq 'PASS';
+		my $path = $fields[$columnIndex{alignment}] // '';
+		my $value = $fields[$columnIndex{p90_consensus_divergence}] // '';
+		next unless length($path) && $value =~ /\A(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?\z/;
+		$metrics{$path} = {
+			value => 0 + $value,
+			source => 'p90_consensus_divergence',
+		};
+	}
+	close $report
+		or die "Cannot close post-alignment locus-QC report $reportFile: $!\n";
+	return \%metrics;
+}
+
+sub alignmentGCMetric {
+	my ($alignment) = @_;
+	my ($gc, $called) = (0, 0);
+	for my $sequence (values %{$alignment}) {
+		$gc += $sequence =~ tr/GCgc/GCgc/;
+		$called += $sequence =~ tr/ACGTacgt/ACGTacgt/;
+	}
+	return ($called ? $gc / $called : 0, $called);
+}
+
+sub deterministicRatePartitions {
+	my ($loci) = @_;
+	die "Deterministic partition merging received no loci\n" unless @{$loci};
+	my @rescueLoci = grep { ($_->{selection_phase} // '') eq 'taxon_rescue' } @{$loci};
+	my @binningLoci = grep { ($_->{selection_phase} // '') ne 'taxon_rescue' } @{$loci};
+	unless (@binningLoci) {
+		@binningLoci = @{$loci};
+		@rescueLoci = ();
+	}
+	my @rates = map { $_->{rate_proxy} } @{$loci};
+	my @gcFractions = map { $_->{gc_fraction} } @{$loci};
+
+	my $summarize = sub {
+		my ($members) = @_;
+		my ($alignmentSites, $effectiveSites, $rate, $gc) = (0, 0, 0, 0);
+		for my $member (@{$members}) {
+			$alignmentSites += $member->{length};
+			$effectiveSites += $member->{effective_sites};
+			$rate += $member->{rate_proxy};
+			$gc += $member->{gc_fraction};
+		}
+		my $count = scalar @{$members};
+		return {
+			loci => $count,
+			sites => $effectiveSites,
+			alignment_sites => $alignmentSites,
+			mean_rate => $count ? $rate / $count : 0,
+			mean_gc => $count ? $gc / $count : 0,
+		};
+	};
+	my ($minimumRate, $maximumRate) = (sort { $a <=> $b } @rates)[0, -1];
+	my ($minimumGC, $maximumGC) = (sort { $a <=> $b } @gcFractions)[0, -1];
+	my $rateRange = $maximumRate - $minimumRate;
+	my $gcRange = $maximumGC - $minimumGC;
+	my $totalEffectiveSites = 0;
+	$totalEffectiveSites += $_->{effective_sites} for @{$loci};
+	my $desiredBins = int(($totalEffectiveSites + $rateMergeTargetSites - 1)
+		/ $rateMergeTargetSites);
+	$desiredBins = 1 if $desiredBins < 1;
+	$desiredBins = $rateMergeMaxBins if $desiredBins > $rateMergeMaxBins;
+	$desiredBins = scalar(@binningLoci) if $desiredBins > @binningLoci;
+
+	# Refine the largest current bin until the site-driven target is met.  Each
+	# split is placed near its effective-site median and uses whichever of P90
+	# divergence or GC still has the stronger local normalized spread.
+	my $splitMetric = sub {
+		my ($members, $field, $range) = @_;
+		return undef if @{$members} < 2 || !$range;
+		my @ordered = sort {
+			$a->{$field} <=> $b->{$field}
+				|| $a->{start} <=> $b->{start}
+		} @{$members};
+		my $total = 0;
+		$total += $_->{effective_sites} for @ordered;
+		my ($leftSites, $bestIndex, $bestBalance);
+		for my $index (0 .. $#ordered - 1) {
+			$leftSites += $ordered[$index]{effective_sites};
+			next if $ordered[$index]{$field} == $ordered[$index + 1]{$field};
+			my $balance = abs($total - 2 * $leftSites);
+			if (!defined($bestBalance) || $balance < $bestBalance) {
+				($bestIndex, $bestBalance) = ($index, $balance);
+			}
+		}
+		return undef unless defined $bestIndex;
+		my @left = @ordered[0 .. $bestIndex];
+		my @right = @ordered[$bestIndex + 1 .. $#ordered];
+		my ($minimum, $maximum) = ($ordered[0]{$field}, $ordered[-1]{$field});
+		return {
+			field => $field,
+			left => \@left,
+			right => \@right,
+			balance => $bestBalance,
+			span => ($maximum - $minimum) / $range,
+		};
+	};
+	my $bestSplit = sub {
+		my ($members) = @_;
+		my @candidates = grep { defined } (
+			$splitMetric->($members, 'rate_proxy', $rateRange),
+			$splitMetric->($members, 'gc_fraction', $gcRange),
+		);
+		return undef unless @candidates;
+		return (sort {
+			$b->{span} <=> $a->{span}
+				|| $a->{balance} <=> $b->{balance}
+				|| $a->{field} cmp $b->{field}
+		} @candidates)[0];
+	};
+	my %bins = (root => \@binningLoci);
+	my $splitSerial = 0;
+	while (keys(%bins) < $desiredBins) {
+		my @splitCandidates;
+		for my $key (keys %bins) {
+			my $split = $bestSplit->($bins{$key});
+			push @splitCandidates, { key => $key, split => $split,
+				summary => $summarize->($bins{$key}) } if $split;
+		}
+		last unless @splitCandidates;
+		my $candidate = (sort {
+			$b->{summary}{sites} <=> $a->{summary}{sites}
+				|| $b->{split}{span} <=> $a->{split}{span}
+				|| $a->{key} cmp $b->{key}
+		} @splitCandidates)[0];
+		my $axis = $candidate->{split}{field} eq 'rate_proxy' ? 'p90' : 'gc';
+		my $leftKey = $candidate->{key}."_${axis}".(++$splitSerial).'L';
+		my $rightKey = $candidate->{key}."_${axis}".$splitSerial.'H';
+		$_->{initial_bin} = $leftKey for @{$candidate->{split}{left}};
+		$_->{initial_bin} = $rightKey for @{$candidate->{split}{right}};
+		delete $bins{$candidate->{key}};
+		$bins{$leftKey} = $candidate->{split}{left};
+		$bins{$rightKey} = $candidate->{split}{right};
+	}
+	$_->{initial_bin} //= 'root' for @binningLoci;
+	for my $locus (@rescueLoci) {
+		my %summary = map { $_ => $summarize->($bins{$_}) } keys %bins;
+		my ($target) = sort {
+			my $distanceA = ($rateRange
+				? abs($locus->{rate_proxy} - $summary{$a}{mean_rate}) / $rateRange : 0)
+				+ ($gcRange
+					? abs($locus->{gc_fraction} - $summary{$a}{mean_gc}) / $gcRange : 0);
+			my $distanceB = ($rateRange
+				? abs($locus->{rate_proxy} - $summary{$b}{mean_rate}) / $rateRange : 0)
+				+ ($gcRange
+					? abs($locus->{gc_fraction} - $summary{$b}{mean_gc}) / $gcRange : 0);
+			$distanceA <=> $distanceB || $a cmp $b;
+		} keys %bins;
+		$locus->{initial_bin} = 'taxon_rescue_to_'.$target;
+		push @{$bins{$target}}, $locus;
+	}
+
+	while (keys(%bins) > 1) {
+		my %summary = map { $_ => $summarize->($bins{$_}) } keys %bins;
+		my @undersized = sort {
+			$summary{$a}{loci} <=> $summary{$b}{loci}
+				|| $summary{$a}{sites} <=> $summary{$b}{sites}
+				|| $a cmp $b
+		} grep {
+			$summary{$_}{loci} < $rateMergeMinLoci
+				|| $summary{$_}{sites} < $rateMergeMinSites
+		} keys %bins;
+		last unless @undersized;
+		my $source = $undersized[0];
+		my @targets = grep { $_ ne $source } keys %bins;
+		my ($target) = sort {
+			my $distanceA = ($rateRange
+				? abs($summary{$source}{mean_rate} - $summary{$a}{mean_rate}) / $rateRange : 0)
+				+ ($gcRange
+					? abs($summary{$source}{mean_gc} - $summary{$a}{mean_gc}) / $gcRange : 0);
+			my $distanceB = ($rateRange
+				? abs($summary{$source}{mean_rate} - $summary{$b}{mean_rate}) / $rateRange : 0)
+				+ ($gcRange
+					? abs($summary{$source}{mean_gc} - $summary{$b}{mean_gc}) / $gcRange : 0);
+			$distanceA <=> $distanceB || $a cmp $b;
+		} @targets;
+		push @{$bins{$target}}, @{$bins{$source}};
+		delete $bins{$source};
+	}
+
+	my %summary = map { $_ => $summarize->($bins{$_}) } keys %bins;
+	my @orderedKeys = sort {
+		$summary{$a}{mean_rate} <=> $summary{$b}{mean_rate}
+			|| $summary{$a}{mean_gc} <=> $summary{$b}{mean_gc}
+			|| $a cmp $b
+	} keys %bins;
+	my @partitions;
+	for my $index (0 .. $#orderedKeys) {
+		my $key = $orderedKeys[$index];
+		my $name = sprintf('rateGC%02d', $index + 1);
+		my @members = sort { $a->{start} <=> $b->{start} } @{$bins{$key}};
+		$_->{partition} = $name for @members;
+		push @partitions, {
+			name => $name,
+			members => \@members,
+			%{$summary{$key}},
+		};
+	}
+	return \@partitions;
+}
+
+sub writeRatePartitionAudit {
+	my ($path, $loci, $partitions) = @_;
+	make_path(dirname($path)) unless -d dirname($path);
+	my ($audit, $temporary) = tempfile(
+		'rate-merged-partitions-XXXXXX',
+		DIR => dirname($path),
+		UNLINK => 1,
+	);
+	print {$audit} join("\t", qw(
+		locus alignment selection_phase start end alignment_sites effective_called_sites
+		rate_proxy rate_proxy_source gc_fraction called_cells initial_bin partition
+		partition_loci partition_effective_sites partition_alignment_sites
+	)), "\n";
+	my %partitionByName = map { $_->{name} => $_ } @{$partitions};
+	for my $locus (sort { $a->{start} <=> $b->{start} } @{$loci}) {
+		my $partition = $partitionByName{$locus->{partition}};
+		print {$audit} join("\t",
+			$locus->{locus}, $locus->{alignment}, $locus->{selection_phase},
+			@{$locus}{qw(start end length)},
+			sprintf('%.8g', $locus->{effective_sites}),
+			sprintf('%.8g', $locus->{rate_proxy}), $locus->{rate_proxy_source},
+			sprintf('%.8g', $locus->{gc_fraction}), $locus->{called_cells},
+			$locus->{initial_bin}, $locus->{partition},
+			$partition->{loci}, sprintf('%.8g', $partition->{sites}),
+			$partition->{alignment_sites},
+		), "\n";
+	}
+	close $audit or die "Cannot close rate-partition audit $temporary: $!\n";
+	rename $temporary, $path
+		or die "Cannot publish rate-partition audit $path: $!\n";
 }
 
 sub mergeMSAs($ $ $ $){
@@ -1543,22 +2838,118 @@ sub mergeMSAs($ $ $ $){
 	}
 	my %bigMSAFAAnxs;my %bigMSAFAA;foreach my $sm (@smps){$bigMSAFAA{$sm} ="";$bigMSAFAAnxs{$sm}="";}
 	my @lengthsParts;
+	my @partitionLoci;
+	my $partitionCoordinate = 0;
+	my $applyRateMerging = $rateMergePartitions && !$isAA && $multAliF eq $multAli;
+	my $overlapFilteredLoci = 0;
+	my $overlapColumnsRemoved = 0;
 	foreach my $MSAf (@MSAs){
 		#print $MSAf."\n"; 
 		my $hit =0; my $miss =0;
-		my $hr = readFasta($MSAf,1); my %MFAA = %{$hr};
+		my $hr;
+		my $readOK = eval {
+			$hr = readFasta($MSAf,1);
+			1;
+		};
+		if (!$readOK) {
+			my $error = $@ || "unreadable alignment";
+			$error =~ s/\s+$//;
+			limitedWarn("invalid locus MSA",
+				"Warning: excluding alignment $MSAf during merge: $error\n");
+			next;
+		}
+		my %MFAA = %{$hr};
 		unlink $MSAf or die "Cannot remove merged MSA component $MSAf: $!\n" if $del && -e $MSAf;
 		my @Mkeys = sort keys %MFAA;
 		next if (@Mkeys == 0);
-		my ($firstMsaSample, $gcat, $separator) = parseSeqId($Mkeys[0], "MSA header in $MSAf");
+		my ($firstMsaSample, $gcat, $separator);
+		my $headerOK = eval {
+			($firstMsaSample, $gcat, $separator) =
+				parseSeqId($Mkeys[0], "MSA header in $MSAf");
+			1;
+		};
+		if (!$headerOK) {
+			my $error = $@ || "unparseable alignment header";
+			$error =~ s/\s+$//;
+			limitedWarn("invalid locus MSA",
+				"Warning: excluding alignment $MSAf during merge: $error\n");
+			next;
+		}
 		my $len = length($MFAA{$Mkeys[0]});
-		if ($len == 0){print STDERR "0 length sequence discovered in $MSAf\n";next ;}
+		if ($len == 0){
+			limitedWarn("zero-length MSA", "Ignoring zero-length alignment $MSAf\n");
+			$excludedLoci{$gcat} = 1;
+			next;
+		}
+		my $originalLen = $len;
+		my ($filtered, $retainedLen, $removedColumns);
+		my $overlapOK = eval {
+			($filtered, $retainedLen, $removedColumns) =
+				filter_alignment_by_overlap(\%MFAA, $isAA, $minOverlapMSA);
+			1;
+		};
+		if (!$overlapOK) {
+			my $error = $@ || "overlap filtering failed";
+			$error =~ s/\s+$//;
+			limitedWarn("invalid locus MSA",
+				"Warning: excluding alignment $MSAf during merge: $error\n");
+			$excludedLoci{$gcat} = 1;
+			next;
+		}
+		%MFAA = %{$filtered};
+		if ($retainedLen == 0) {
+			limitedWarn("empty overlap-filtered MSA",
+				"Overlap filtering removed every column from $MSAf; skipping this locus\n");
+			$excludedLoci{$gcat} = 1;
+			next;
+		}
+		$len = $retainedLen;
+		my @unequal = grep { length($MFAA{$_}) != $len } @Mkeys;
+		if (@unequal) {
+			limitedWarn("invalid locus MSA",
+				"Warning: excluding alignment $MSAf during merge because "
+				.scalar(@unequal)." sequence(s) have unequal lengths\n");
+			$excludedLoci{$gcat} = 1;
+			next;
+		}
+		if ($removedColumns) {
+			$overlapFilteredLoci++;
+			$overlapColumnsRemoved += $removedColumns;
+		}
 		push(@lengthsParts,$len);
+		if ($applyRateMerging) {
+			my %retainedAlignment;
+			for my $sm (@smps) {
+				my $sequenceId = $sm.$separator.$gcat;
+				$retainedAlignment{$sequenceId} = $MFAA{$sequenceId}
+					if exists $MFAA{$sequenceId};
+			}
+			my ($gcFraction, $calledCells) = alignmentGCMetric(\%retainedAlignment);
+			my $rateMetric = $partitionRateProxy{$MSAf};
+			unless ($rateMetric) {
+				limitedWarn('partition rate proxy unavailable',
+					"Warning: no post-alignment rate proxy for $MSAf; using zero\n");
+				$rateMetric = {value => 0, source => 'unavailable'};
+			}
+			push @partitionLoci, {
+				locus => $gcat,
+				alignment => $MSAf,
+				start => $partitionCoordinate + 1,
+				end => $partitionCoordinate + $len,
+				length => $len,
+				rate_proxy => $rateMetric->{value},
+				rate_proxy_source => $rateMetric->{source},
+				selection_phase => $partitionSelectionPhase{$MSAf} // '',
+				gc_fraction => $gcFraction,
+				called_cells => $calledCells,
+				effective_sites => @smps ? $calledCells / @smps : 0,
+			};
+		}
+		$partitionCoordinate += $len;
 		foreach my $sm (@smps){
 			my $curK = $sm.$separator.$gcat;
 			if ( exists($MFAA{$curK}) && defined($MFAA{$curK})  ) {
 				my $seq = $MFAA{$curK}; 
-				die "Sequence lengths within MSA unequal: $len != ".length($seq)."\n" if (length($seq) != $len);
 				$hit++;
 				$bigMSAFAA{$sm} .= $seq;
 				$seq =~ s/^(-+)/"?" x length($1)/e;
@@ -1578,9 +2969,9 @@ sub mergeMSAs($ $ $ $){
 	my $factor = 1; $factor = 3 if ($isAA);
 	my @ksMSAFAA = sort keys %bigMSAFAA;
 	my $iniSeqNum = @ksMSAFAA; my $remSeqNum = 0;
+	my @removedSeqExamples;
 	my %charCnts; my $maxNtCnt=0;
-	#my @usedPos; #is now implemented in C++ program..
-	#simply count gaps and N's
+		#simply count gaps and N's
 	foreach my $kk (@ksMSAFAA){
 		#my $strCpy = $bigMSAFAA{$kk};
 		my $num1 = 0;
@@ -1595,7 +2986,6 @@ sub mergeMSAs($ $ $ $){
 		if ( $charCnts{$kk} > $maxNtCnt){
 			$maxNtCnt = $charCnts{$kk};
 		}
-		next; #overlap implemented in C++
 	}
 	if ($maxNtCnt == 0){ #something really wrong
 		die "No usable MSA positions remain after concatenation and filtering\n";
@@ -1610,14 +3000,18 @@ sub mergeMSAs($ $ $ $){
 	foreach my $kk (@ksMSAFAA){
 		my $num1 = $charCnts{$kk};
 		#print "$num1\n";
-		if ( $maxNtCnt == 0 ||  ($num1 < ($qtl90NTcnts *$ntFrac) && $num1 < $qtl25NTcnts) || ($num1 < ($ntCntTotal/$factor) ) ){
-			print "($num1 / $qtl90NTcnts ) < $ntFrac) && $num1 < $qtl25NTcnts || ($num1 < ($ntCntTotal/$factor) )\n";
+		my $removeSample;
+		if ($taxonAwareLocusSelection && $multAliF eq $multAli) {
+			my $minimumAnchorNT = $ntCntTotal > $placementMinOverlap
+				? $ntCntTotal : $placementMinOverlap;
+			$removeSample = $maxNtCnt == 0 || ($num1 * $factor) < $minimumAnchorNT;
+		} else {
+			$removeSample = $maxNtCnt == 0; #|| ($num1 < ($qtl90NTcnts * $ntFrac) && $num1 < $qtl25NTcnts) || ($num1 < ($ntCntTotal / $factor));
+		}
+		if ($removeSample){
 			delete $bigMSAFAA{$kk}; delete $bigMSAFAAnxs{$kk}; $remSeqNum++; 
-			if ($maxNtCnt == 0){
-				print "$kk $num1  infinite $ntFrac \n";
-			} else {
-				print "$kk $num1  " . int($num1*1000 / ($maxNtCnt) )/1000 ." $ntFrac \n";
-			}
+			push @removedSeqExamples, "$kk($num1 informative positions)"
+				if @removedSeqExamples < 5;
 		}
 		#print "$num1  $kk \n";#$bigMSAFAA{$kk}\n\n"; last;
 	}
@@ -1626,26 +3020,10 @@ sub mergeMSAs($ $ $ $){
 	my @allKs = sort keys %bigMSAFAA;
 	if (@allKs == 0){die "no genes for nexus output format.\nAborting\n";}
 	print O2 "#NEXUS\nBegin data;\nDimensions ntax=".scalar(@allKs)." nchar=".length($bigMSAFAAnxs{$allKs[0]}).";\nFormat datatype=dna missing=? gap=-;\nMatrix\n";
-	my $scnt=0;
 	foreach my $kk (@allKs){
 		print O ">$kk\n"; my $s1 = $bigMSAFAA{$kk};
 		print O2 "\n$kk\t"; my $s2 = $bigMSAFAAnxs{$kk};
-		#if (length($s1) !=  @usedPos){die "s1 and usedPos are not same length: ".length($s1)." : ".@usedPos."\n";}
-		#if ($minOverlapMSA <=0){
 		print O "$s1\n"; print O2 "$s2\n";
-		#} else {
-		#	my $usedP=0;
-		#	for (my $i=0; $i<length($s1);$i++){
-		#		if ($usedPos[$i] >= $minOverlapMSA){
-		#			print O substr($s1,$i,1);
-		#			print O2 substr($s2,$i,1);
-		#			$usedP++;
-		#		}
-		#	}
-		#	print O "\n"; print O2 "\n";
-		#	print "Used $usedP positions of ". length($s1)  . " total positions.\n" if ($scnt==0);
-		#	$scnt++;			
-		#}
 	}
 	print O2 "\n;\nend;";
 
@@ -1658,14 +3036,35 @@ sub mergeMSAs($ $ $ $){
 	my $lastP=0;
 	my $TypeTag = "DNA";
 	$TypeTag = "LG" if ($isAA); #this is the model to be used...
-	for (my $i=0;$i<@lengthsParts;$i++){
-		#DNA, part1 = 1-100
-		print O "$TypeTag, part".($i+1) ." = ". ($lastP+1) ."-". ($lengthsParts[$i]+$lastP) ."\n";
-		$lastP+=$lengthsParts[$i];
+	if ($applyRateMerging) {
+		my $partitions = deterministicRatePartitions(\@partitionLoci);
+		for my $partition (@{$partitions}) {
+			my @ranges = map { $_->{start}."-".$_->{end} } @{$partition->{members}};
+			print O "$TypeTag, $partition->{name} = ".join(", ", @ranges)."\n";
+		}
+		my $auditPath = "$treeD/rate_merged_partitions.tsv";
+		writeRatePartitionAudit($auditPath, \@partitionLoci, $partitions);
+		print "Deterministic rate/GC partition merging: ".scalar(@partitionLoci)
+			." loci -> ".scalar(@{$partitions})." partition(s); audit=$auditPath\n";
+	} else {
+		for (my $i=0;$i<@lengthsParts;$i++){
+			#DNA, part1 = 1-100
+			print O "$TypeTag, part".($i+1) ." = ". ($lastP+1) ."-". ($lengthsParts[$i]+$lastP) ."\n";
+			$lastP+=$lengthsParts[$i];
+		}
+		my $auditPath = "$treeD/rate_merged_partitions.tsv";
+		unlink $auditPath
+			or die "Cannot remove stale rate-partition audit $auditPath: $!\n"
+			if $multAliF eq $multAli && -e $auditPath;
 	}
 	close O;
 	
-	print "Removed $remSeqNum of $iniSeqNum sequences\n";
+	print "Alignment merge summary: retained " . ($iniSeqNum - $remSeqNum) . "/$iniSeqNum sequences";
+	print "; removed examples: " . join(", ", @removedSeqExamples) if @removedSeqExamples;
+	print "\n";
+	print "Overlap filtering summary: $overlapFilteredLoci locus/loci changed; "
+		. "$overlapColumnsRemoved columns removed\n"
+		if $overlapFilteredLoci;
 }
 
 
@@ -1858,7 +3257,14 @@ sub synPosOnly{#now finished, version is cleaner
 	my ($reportedSample, $reportedGene) = parseSeqId($aSeq[0], "synonymous-site MSA header", 1);
 	$reportedGene = "alignment" if $reportedGene eq "";
 	#die "$outMSA\n";
-	print "$reportedGene ($syn / $nsyn) ".@aSeq." seqs \n";
+	$synSummaryCount++;
+	$synSiteTotal += $syn;
+	$nonSynSiteTotal += $nsyn;
+	print "Site classification example: $reportedGene; synonymous=$syn; nonsynonymous=$nsyn; "
+		. scalar(@aSeq) . " sequences\n"
+		if $synSummaryCount <= 5;
+	print "Further per-locus site-classification messages are suppressed; an aggregate follows alignment generation\n"
+		if $synSummaryCount == 6;
 	#print " only\n";
 	#print "\n";
 	return ($outMSA,$outMSAns);
@@ -1911,7 +3317,6 @@ sub codeml{
 			## run codeml  
 			$cmd = "$pamlBin $codemlOutDTmp/${gene}_${rep}_${modelName}.c\n";			
 			systemW $cmd; 
-			print "finished codeml Model $modelName run $rep on $gene\n";
 			#die;
 			
 			#get lnL and push to array
@@ -1934,6 +3339,7 @@ sub codeml{
 		#die "@repSel\n$repSelected\n";
 		copy("$codemlOutDTmp/codemlOut_${gene}_${repSelected}_${modelName}.txt", "$codemlOutDFile/out_M$modelName.txt")
 			or die "Cannot copy selected codeml result for $gene model $modelName: $!\n";
+		print "codeml summary: gene=$gene; model=$modelName; repeats=$repeatCounts; selected repeat=$repSelected\n";
 	}	
 }
 
@@ -1965,7 +3371,6 @@ sub hyphy{
 	$cmd .= "$hyphyBin CPU=$ncore fubar --alignment $MSAfile2 --tree $nwkFile_gene2 > $log\n";
 	$cmd .= "gzip -c $MSAfile2.FUBAR.json > $log.json.gz\n";
 	$cmd .= "rm -f $MSAfile2.FUBAR.*\n";
-	print $log."\n";
 	systemW $cmd ;#if (!-e $log);
 	#die $cmd ;#if (!-e $log);
 	return $log;
@@ -2017,7 +3422,7 @@ sub coreHyPhy{
 	my $runCodeML = 0;
 	my @genomeList;
 	opendir(DIR, $MSADir);
-	my @MSAfile = grep(/$gene.*$xtra\.fna/,readdir(DIR));
+	my @MSAfile = grep(/\A\Q$gene\E\.\d+.*$xtra\.fna\z/,readdir(DIR));
 	closedir(DIR);
 	if (@MSAfile == 0){
 		#die "$gene.*$xtra\.fna";
@@ -2038,6 +3443,7 @@ sub coreHyPhy{
 	#		print "$MSAfile2\n";
 
 	open O,">$MSAfile3" or die "can't open MSA out $MSAfile3\n";
+	my $maskedInternalStops = 0;
 	foreach my $genome (keys %FNA){
 		#print "$genome\n";
 		my ($genome2) = parseSeqId($genome, "selection-analysis MSA header");
@@ -2051,8 +3457,8 @@ sub coreHyPhy{
 				$x = index($seq,$sto,$x);
 				last if ($x < 0);
 				if ($x % 3 ==0){
-					print "HIT\n";
 					substr($seq,$x,3) = "NNN";
+					$maskedInternalStops++;
 				}
 				$x++;
 			}
@@ -2061,6 +3467,9 @@ sub coreHyPhy{
 		push (@genomeList, $genome2);
 	} 
 	close O;
+	limitedWarn("internal stop codons",
+		"Masked $maskedInternalStops in-frame stop codon(s) while preparing $gene selection analysis\n")
+		if $maskedInternalStops;
 	if ($cntMissTree>0){print "Removed from MSA $cntMissTree sequences due to not being present in tree\n";}
 	next if(scalar @genomeList <3);
 			
@@ -2093,12 +3502,12 @@ sub selecAnalysis($ $ $ $ $){
 	if (!-e $logF1 ){
 		my %logs;
 		foreach my $gene (@geneListFin){
-			my $logF =  "$codemlOutD/$gene.hyphy.fubar.log";
+			my $gene_file_stem = geneFileStem($gene);
+			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.fubar.log";
 			$logs{$gene} = "$logF";
-			coreHyPhy($MsaD,$gene,"",$nwkFile,$codemlOutDTmp,$logF);
+			coreHyPhy($MsaD,$gene_file_stem,"",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
-		print "reading jsons..";
 		foreach my $gene (keys %logs){
 			#my $summary = fubarXML("$logs{$gene}");
 			next unless (-e "$logs{$gene}.json.gz");
@@ -2107,20 +3516,20 @@ sub selecAnalysis($ $ $ $ $){
 			$sumTxt .= "$gene\t$summary";
 			#print "$sumTxt\n";
 		}
-		print "Done reading\n";
 		open O,">$logF1";		print O $sumTxt;		close O;
+		print "Selection summary written: $logF1\n";
 	}
 	#add by hand the unique seqs subset..
 	$logF1 =  "$codemlOutD/hyphy.fubar.unID.txt";
 	if (!-e $logF1 ){
 		my %logs;
 		foreach my $gene (@geneListFin){
-			my $logF =  "$codemlOutD/$gene.hyphy.fubar.unID.log";
+			my $gene_file_stem = geneFileStem($gene);
+			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.fubar.unID.log";
 			$logs{$gene} = $logF;
-			coreHyPhy($MSAsubsD,$gene,"\\.uInd",$nwkFile,$codemlOutDTmp,$logF);
+			coreHyPhy($MSAsubsD,$gene_file_stem,"\\.uInd",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
-		print "reading jsons unID..";
 		foreach my $gene (keys %logs){
 			#my $summary = fubarXML("$logs{$gene}");
 			next unless (-e "$logs{$gene}.json.gz");
@@ -2130,8 +3539,8 @@ sub selecAnalysis($ $ $ $ $){
 			$sumTxt .= "$gene\t$summary";
 			#system "rm -f $logs{$gene}*";
 		}
-		print "Done reading\n";
 		open O,">$logF1";		print O $sumTxt;		close O;
+		print "Selection summary written: $logF1\n";
 	}
 	#now go through subsets..
 	
@@ -2141,13 +3550,13 @@ sub selecAnalysis($ $ $ $ $){
 		my $logF1 =  "$codemlOutD/hyphy.fubar.s$subs.txt";
 		next if (-e $logF1 );
 		foreach my $gene (@geneListFin){
-			my $logF =  "$codemlOutD/$gene.hyphy.s$subs.fubar.log";
+			my $gene_file_stem = geneFileStem($gene);
+			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.s$subs.fubar.log";
 			$logs{$gene} = $logF;
 			#COG0008.0.uInd.s20.fna
-			coreHyPhy($MSAsubsD,$gene,"uInd\\.s$subs",$nwkFile,$codemlOutDTmp,$logF);
+			coreHyPhy($MSAsubsD,$gene_file_stem,"uInd\\.s$subs",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
-		print "reading jsons s$subs..";
 		foreach my $gene (keys %logs){
 			#my $summary = fubarXML("$logs{$gene}");next if ($summary eq "");
 			next unless (-e "$logs{$gene}.json.gz");
@@ -2156,8 +3565,8 @@ sub selecAnalysis($ $ $ $ $){
 			$sumTxt .= "$gene\t$summary";
 			#system "rm -f $logs{$gene}*";
 		}
-		print "Done reading\n";
 		open O,">$logF1";		print O $sumTxt;		close O;
+		print "Selection summary written: $logF1\n";
 	}
 	system "rm -fr $codemlOutDTmp" if (-e $codemlOutDTmp);
 	
@@ -2179,21 +3588,22 @@ sub WattTheta{
 	my $otxt = "Gene\tNseqs\tNsites\tSegSites\tWattTheta\n";
 	foreach my $gene (@geneListFin){
 		my $cnt = 0;
-		my $logF =  "$codemlOutD/$gene.hyphy.Theta.log";
+		my $gene_file_stem = geneFileStem($gene);
+		my $logF =  "$codemlOutD/$gene_file_stem.hyphy.Theta.log";
 #		print "$logF\n";
 		$logs{$gene} = $logF;
 		#next if (-e $logF);
 		my @genomeList;
 				
 		opendir(DIR, $MSADir);
-		my @MSAfile = grep(/$gene.*\.fna/,readdir(DIR));
+		my @MSAfile = grep(/\A\Q$gene_file_stem\E\.\d+.*\.fna\z/,readdir(DIR));
 		closedir(DIR);
 		#print "@MSAfile\t$gene\t$MSADir\n";
 		next if (@MSAfile == 0);
 		my $MSAfile2 = "$MSADir/$MSAfile[0]";
 		my $hyphyBin=getProgPaths("hyphy");
 		my $cmd = "";#"source activate hyphy\n";
-		$cmd .= "$hyphyBin CPU=$ncore /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/phylo/WattetrsonTheta.hyphy --alignment $MSAfile2 ";#> $logF\n";
+		$cmd .= "$hyphyBin CPU=$ncore ".getProgPaths("wattersonTheta_scr")." --alignment $MSAfile2 ";#> $logF\n";
 		my $txt = `$cmd`;
 #		print $txt."\n";
 		$txt =~ m/Sequences          = (\d+)\nSites              = (\d+)\nSegregating Sites  = (\d+)\n.*Watterson.s theta  = ([\d\.]+)/;
@@ -2224,7 +3634,7 @@ sub parseSeqId{
 	my ($seqId, $context, $allowUndelimited) = @_;
 	$context ||= "sequence identifier";
 	if (defined($seqId)
-		&& $seqId =~ /^(?<sample>.*)(?<separator>$smplSep)(?<gene>.*)$/
+		&& $seqId =~ /^(?<sample>.*?)(?<separator>$smplSep)(?<gene>.+)$/
 		&& $+{sample} ne "" && $+{gene} ne ""){
 		return ($+{sample}, $+{gene}, $+{separator});
 	}
@@ -2233,11 +3643,751 @@ sub parseSeqId{
 }
 
 
+sub geneFileStem{
+	my ($gene) = @_;
+	die "Cannot create a filename for an empty gene/locus identifier\n"
+		unless defined($gene) && length($gene);
+	my $stem = $gene;
+	$stem =~ s/_/__/g;
+	$stem =~ s/([^A-Za-z0-9.-])/sprintf("_%02X", ord($1))/ge;
+	return $stem;
+}
+
+sub fastaCompressionSortKey{
+	my ($header) = @_;
+	my ($identifier) = split /\s+/, $header, 2;
+	my ($sample,$gene) = parseSeqId($identifier, "compression-sort FASTA header",1);
+	return length($gene)
+		? join("\t", $gene, $sample, $identifier)
+		: $identifier;
+}
+
+sub sortFastaForCompression{
+	my ($inputFile) = @_;
+	my $records = readFasta($inputFile,0);
+	die "Cannot sort empty FASTA input before compression: $inputFile\n"
+		unless keys %{$records};
+	my %sortKeys = map { $_ => fastaCompressionSortKey($_) } keys %{$records};
+	my @headers = sort {
+		$sortKeys{$a} cmp $sortKeys{$b}
+			|| $a cmp $b
+	} keys %{$records};
+	my ($out,$tmpFile) = tempfile(
+		basename($inputFile).".sort.XXXXXX",
+		DIR => dirname($inputFile),
+		UNLINK => 0,
+	);
+	for my $header (@headers){
+		print {$out} ">$header\n$records->{$header}\n"
+			or die "Cannot write sorted FASTA temporary file $tmpFile: $!\n";
+	}
+	close $out or die "Cannot close sorted FASTA temporary file $tmpFile: $!\n";
+	rename $tmpFile, $inputFile
+		or die "Cannot replace $inputFile with locus-sorted FASTA: $!\n";
+	print "Sorted ".scalar(@headers)." records by gene/locus before compressing $inputFile\n";
+}
+
+
 sub shellQuote{
 	my ($value) = @_;
 	$value = "" unless defined $value;
 	$value =~ s/'/'"'"'/g;
 	return "'$value'";
+}
+
+sub informativeSequenceLength {
+	my ($sequence, $useAA) = @_;
+	$sequence = uc($sequence // "");
+	if ($useAA) {
+		$sequence =~ s/[^ACDEFGHIKLMNPQRSTVWY]//g;
+	} else {
+		$sequence =~ s/[^ACGTU]//g;
+	}
+	return length($sequence);
+}
+
+sub selectTaxonAwareCandidateLoci {
+	my %args = @_;
+	my $categories = $args{categories};
+	my $charCounts = $args{char_counts};
+	my (%metrics, %samples);
+	my $categoryIndex = -1;
+	for my $category (@{$categories}) {
+		$categoryIndex++;
+		next unless @{$category};
+		my (undef, $gene) = parseSeqId(
+			$category->[0], "taxon-aware category ".($categoryIndex + 1));
+		die "Duplicate locus '$gene' in taxon-aware category input\n"
+			if exists $metrics{$gene};
+		my (%bestSequence, %bestSites);
+		for my $sequenceId (@{$category}) {
+			my ($sample, $sequenceGene) = parseSeqId(
+				$sequenceId, "taxon-aware category ".($categoryIndex + 1));
+			die "Wrong gene in $sequenceId, expected $gene!\n"
+				if $sequenceGene ne $gene;
+			my $sites = $charCounts->{$sample}{$sequenceId} // 0;
+			$sites *= 3 if $args{use_aa};
+			if (!exists($bestSites{$sample}) || $sites > $bestSites{$sample}) {
+				$bestSites{$sample} = $sites;
+				$bestSequence{$sample} = $sequenceId;
+			}
+		}
+		next if keys(%bestSequence) < 3;
+		my @siteCounts = values %bestSites;
+		my $q90 = quantile(0.9, @siteCounts);
+		my $medianSites = quantile(0.5, @siteCounts);
+		my @absoluteDeviations = map { abs($_ - $medianSites) } @siteCounts;
+		my $mad = @absoluteDeviations ? quantile(0.5, @absoluteDeviations) : 0;
+		my @completeness = map { $q90 > 0 ? ($_ / $q90 > 1 ? 1 : $_ / $q90) : 0 }
+			@siteCounts;
+		my $medianCompleteness = @completeness ? quantile(0.5, @completeness) : 0;
+		my $lengthStability = $medianSites > 0
+			? 1 - ($mad / $medianSites > 1 ? 1 : $mad / $medianSites)
+			: 0;
+		my @sequenceIds = map { $bestSequence{$_} } sort keys %bestSequence;
+		$metrics{$gene} = {
+			gene => $gene,
+			category => \@sequenceIds,
+			sample_sites => \%bestSites,
+			sample_count => scalar(keys %bestSequence),
+			q90_nt => $q90,
+			median_completeness => $medianCompleteness,
+			length_stability => $lengthStability,
+			quality_score => 0,
+		};
+		for my $sample (keys %bestSites) {
+			$samples{$sample}{available_loci}++;
+			$samples{$sample}{available_nt} += $bestSites{$sample};
+		}
+	}
+	die "Taxon-aware selection found no category with at least three usable samples\n"
+		unless keys %metrics;
+	my $maximumSampleCount = 1;
+	for my $metric (values %metrics) {
+		$maximumSampleCount = $metric->{sample_count}
+			if $metric->{sample_count} > $maximumSampleCount;
+	}
+	for my $metric (values %metrics) {
+		my $prevalence = $metric->{sample_count} / $maximumSampleCount;
+		$metric->{robust_score} = 0.55 * $prevalence
+			+ 0.30 * $metric->{median_completeness}
+			+ 0.15 * $metric->{length_stability};
+		$metric->{quality_score} = $metric->{robust_score};
+	}
+	my $selectedGenes = chooseTaxonAwareLoci(
+		metrics => \%metrics,
+		limit => $args{candidate_limit},
+		core_limit => $args{core_limit},
+		final_limit => $args{final_limit},
+		target_loci => $args{target_loci},
+		target_nt => $args{target_nt},
+		stage => "candidate",
+	);
+	my @selectedCategories = map { $metrics{$_}{category} } @{$selectedGenes};
+	writeTaxonAwareLocusAudit($args{report}, "candidate", \%metrics);
+	return {
+		categories => \@selectedCategories,
+		metrics => \%metrics,
+		samples => \%samples,
+	};
+}
+
+sub chooseTaxonAwareLoci {
+	my %args = @_;
+	my $metrics = $args{metrics};
+	for my $metric (values %{$metrics}) {
+		delete @{$metric}{qw(selected selection_rank selection_phase selection_objective)};
+	}
+	my @eligible = sort {
+		($metrics->{$b}{quality_score} // 0) <=> ($metrics->{$a}{quality_score} // 0)
+			|| $a cmp $b
+	} grep { ($metrics->{$_}{sample_count} // 0) >= 3 } keys %{$metrics};
+	my $limit = $args{limit} < @eligible ? $args{limit} : scalar(@eligible);
+	my $coreLimit = $args{core_limit} < $limit ? $args{core_limit} : $limit;
+	my (%selected, %sampleLoci, %sampleSites, %availability);
+	for my $gene (@eligible) {
+		$availability{$_}++ for keys %{$metrics->{$gene}{sample_sites}};
+	}
+	my $maximumAvailability = 1;
+	for my $available (values %availability) {
+		$maximumAvailability = $available if $available > $maximumAvailability;
+	}
+	my @chosen;
+	for my $gene (@eligible[0 .. $coreLimit - 1]) {
+		push @chosen, $gene;
+		$selected{$gene} = 1;
+		$metrics->{$gene}{selection_phase} = "robust_core";
+		$metrics->{$gene}{selection_objective} = $metrics->{$gene}{quality_score};
+		for my $sample (keys %{$metrics->{$gene}{sample_sites}}) {
+			$sampleLoci{$sample}++;
+			$sampleSites{$sample} += $metrics->{$gene}{sample_sites}{$sample};
+		}
+	}
+	while (@chosen < $limit) {
+		my ($bestGene, $bestObjective);
+		for my $gene (@eligible) {
+			next if $selected{$gene};
+			my $coverageGain = 0;
+			for my $sample (keys %{$metrics->{$gene}{sample_sites}}) {
+				my $rarityWeight = sqrt(
+					$maximumAvailability / ($availability{$sample} || 1));
+				$rarityWeight = 6 if $rarityWeight > 6;
+				$coverageGain += $rarityWeight / $args{target_loci}
+					if ($sampleLoci{$sample} // 0) < $args{target_loci};
+				my $siteDeficit = $args{target_nt} - ($sampleSites{$sample} // 0);
+				if ($siteDeficit > 0) {
+					my $siteGain = $metrics->{$gene}{sample_sites}{$sample};
+					$siteGain = $siteDeficit if $siteGain > $siteDeficit;
+					$coverageGain += $rarityWeight * $siteGain / $args{target_nt};
+				}
+			}
+			my $objective = $coverageGain
+				+ 0.25 * ($metrics->{$gene}{quality_score} // 0);
+			if (!defined($bestObjective) || $objective > $bestObjective
+					|| ($objective == $bestObjective && $gene lt $bestGene)) {
+				($bestGene, $bestObjective) = ($gene, $objective);
+			}
+		}
+		last unless defined $bestGene;
+		push @chosen, $bestGene;
+		$selected{$bestGene} = 1;
+		my $nextRank = scalar(@chosen);
+		$metrics->{$bestGene}{selection_phase} =
+			$args{stage} eq "candidate"
+				&& $nextRank > ($args{final_limit} // $args{limit})
+			? "qc_backfill" : "taxon_rescue";
+		$metrics->{$bestGene}{selection_objective} = $bestObjective;
+		for my $sample (keys %{$metrics->{$bestGene}{sample_sites}}) {
+			$sampleLoci{$sample}++;
+			$sampleSites{$sample} += $metrics->{$bestGene}{sample_sites}{$sample};
+		}
+	}
+	for my $index (0 .. $#chosen) {
+		$metrics->{$chosen[$index]}{selected} = 1;
+		$metrics->{$chosen[$index]}{selection_rank} = $index + 1;
+	}
+	return \@chosen;
+}
+
+sub taxonAwareAlignmentMetrics {
+	my ($alignment, $useAA, $gene) = @_;
+	my $records = readFasta($alignment, 1);
+	die "Taxon-aware selector cannot read alignment $alignment\n"
+		unless ref($records) eq 'HASH' && keys %{$records};
+	my @sequenceIds = sort keys %{$records};
+	my $alignmentLength = 0;
+	for my $sequenceId (@sequenceIds) {
+		my $length = length($records->{$sequenceId} // "");
+		$alignmentLength = $length if $length > $alignmentLength;
+	}
+	my (%sampleSites, @sequences);
+	my $validCells = 0;
+	for my $sequenceId (@sequenceIds) {
+		my $sequence = uc($records->{$sequenceId} // "");
+		push @sequences, $sequence;
+		my ($sample) = parseSeqId($sequenceId, "taxon-aware alignment $gene");
+		my $sites = informativeSequenceLength($sequence, $useAA);
+		$sites *= 3 if $useAA;
+		$sampleSites{$sample} = $sites
+			if !exists($sampleSites{$sample}) || $sites > $sampleSites{$sample};
+		$validCells += $useAA ? int($sites / 3) : $sites;
+	}
+	my ($variableSites, $parsimonyInformativeSites) = (0, 0);
+	for my $position (0 .. $alignmentLength - 1) {
+		my %stateCount;
+		for my $sequence (@sequences) {
+			my $state = substr($sequence, $position, 1);
+			next unless $useAA
+				? $state =~ /^[ACDEFGHIKLMNPQRSTVWY]$/
+				: $state =~ /^[ACGTU]$/;
+			$stateCount{$state}++;
+		}
+		$variableSites++ if keys(%stateCount) >= 2;
+		my $repeatedStates = grep { $_ >= 2 } values %stateCount;
+		$parsimonyInformativeSites++ if $repeatedStates >= 2;
+	}
+	my $occupancyDenominator = scalar(@sequenceIds) * $alignmentLength;
+	return {
+		gene => $gene,
+		path => $alignment,
+		sample_sites => \%sampleSites,
+		sample_count => scalar(keys %sampleSites),
+		alignment_length_nt => $alignmentLength * ($useAA ? 3 : 1),
+		occupancy => $occupancyDenominator
+			? $validCells / $occupancyDenominator : 0,
+		variable_sites => $variableSites,
+		parsimony_informative_sites => $parsimonyInformativeSites,
+	};
+}
+
+sub classifyTaxonAwareSamples {
+	my %args = @_;
+	my $metrics = $args{metrics};
+	my %result;
+	for my $sample (sort keys %{$args{samples}}) {
+		my ($selectedLoci, $selectedNT) = (0, 0);
+		for my $metric (values %{$metrics}) {
+			next if $args{selected_only} && !$metric->{selected};
+			next unless ($metric->{sample_sites}{$sample} // 0) > 0;
+			$selectedLoci++;
+			$selectedNT += $metric->{sample_sites}{$sample};
+		}
+		my $available = $args{samples}{$sample};
+		my $availableLoci = ref($available) eq 'HASH'
+			? ($available->{available_loci} // 0) : 0;
+		my $availableNT = ref($available) eq 'HASH'
+			? ($available->{available_nt} // 0) : 0;
+		my ($role, $reason);
+		if ($selectedNT <= 0) {
+			($role, $reason) = ("remove", "no_selected_anchor");
+		} elsif ($selectedNT < $args{minimum_anchor_nt}) {
+			($role, $reason) = ("remove", "below_minimum_anchor_nt");
+		} elsif ($selectedLoci >= $args{target_loci}
+				&& $selectedNT >= $args{target_nt}) {
+			($role, $reason) = ("backbone_candidate", "coverage_target_met");
+		} else {
+			($role, $reason) = ("placement_candidate", "usable_sparse_anchor");
+		}
+		$result{$sample} = {
+			available_loci => $availableLoci,
+			available_nt => $availableNT,
+			selected_loci => $selectedLoci,
+			selected_nt => $selectedNT,
+			role => $role,
+			reason => $reason,
+		};
+	}
+	if (($args{outgroup} // "") ne ""
+			&& (!exists($result{$args{outgroup}})
+				|| $result{$args{outgroup}}{role} eq "remove")) {
+		die "Taxon-aware selection could not retain an aligned anchor for outgroup "
+			."'$args{outgroup}'\n";
+	}
+	return \%result;
+}
+
+sub classifyTaxonAwareCoverageEligibility {
+	my %args = @_;
+	my $metrics = $args{sample_metrics};
+	my $role = $args{role} // 'placement';
+	die ucfirst($role)." eligibility requires final taxon-aware sample metrics\n"
+		unless ref($metrics) eq 'HASH' && keys %{$metrics};
+	my @selectedLoci = map { $_->{selected_loci} // 0 } values %{$metrics};
+	my @selectedNT = map { $_->{selected_nt} // 0 } values %{$metrics};
+	my $minimumLoci = int(quantile(0.9, @selectedLoci)
+		* ($args{gene_fraction} // 0) + 0.999999);
+	my $minimumLociFloor = $args{minimum_loci_floor} // 1;
+	$minimumLoci = $minimumLociFloor if $minimumLoci < $minimumLociFloor;
+	my $relativeNT = int(quantile(0.9, @selectedNT)
+		* ($args{nt_fraction} // 0) + 0.999999);
+	my $minimumNT = $args{minimum_nt} // 0;
+	$minimumNT = $relativeNT if $relativeNT > $minimumNT;
+	$minimumNT = $args{minimum_overlap}
+		if ($args{minimum_overlap} // 0) > $minimumNT;
+	my %result;
+	for my $sample (sort keys %{$metrics}) {
+		my $metric = $metrics->{$sample};
+		my ($eligible, $reason) = (1, "${role}_coverage_met");
+		if (($args{outgroup} // '') ne '' && $sample eq $args{outgroup}) {
+			($eligible, $reason) = (1, 'outgroup_retained');
+		} elsif (($metric->{role} // 'remove') eq 'remove') {
+			($eligible, $reason) = (0, 'not_retained_after_locus_selection');
+		} elsif (($metric->{selected_loci} // 0) < $minimumLoci) {
+			($eligible, $reason) = (0, "below_${role}_gene_fraction");
+		} elsif (($metric->{selected_nt} // 0) < $minimumNT) {
+			($eligible, $reason) = (0, "below_${role}_nt_fraction");
+		}
+		$result{$sample} = {
+			eligible => $eligible,
+			reason => $reason,
+			selected_loci => $metric->{selected_loci} // 0,
+			selected_nt => $metric->{selected_nt} // 0,
+		};
+	}
+	return {
+		minimum_loci => $minimumLoci,
+		minimum_nt => $minimumNT,
+		samples => \%result,
+	};
+}
+
+sub selectTaxonAwareFinalLoci {
+	my %args = @_;
+	my (%metrics, %seenGene);
+	for my $alignment (@{$args{alignments}}) {
+		my $gene = $args{path_gene}{$alignment};
+		die "Taxon-aware selector has no locus mapping for alignment $alignment\n"
+			unless defined($gene) && length($gene);
+		die "Taxon-aware selector received duplicate alignment for locus $gene\n"
+			if $seenGene{$gene}++;
+		my $metric = taxonAwareAlignmentMetrics($alignment, $args{use_aa}, $gene);
+		my $preScore = $args{pre_metrics}{$gene}{robust_score} // 0;
+		my $informationScore = log(1 + $metric->{parsimony_informative_sites}) / log(21);
+		$informationScore = 1 if $informationScore > 1;
+		$metric->{robust_score} = $preScore;
+		$metric->{information_score} = $informationScore;
+		$metric->{quality_score} = 0.45 * $preScore
+			+ 0.35 * $metric->{occupancy} + 0.20 * $informationScore;
+		$metrics{$gene} = $metric;
+	}
+	my $selectedGenes = chooseTaxonAwareLoci(
+		metrics => \%metrics,
+		limit => $args{maximum_loci},
+		core_limit => $args{core_loci},
+		final_limit => $args{maximum_loci},
+		target_loci => $args{target_loci},
+		target_nt => $args{target_nt},
+		stage => "final",
+	);
+	die "Taxon-aware final selection found no usable locus\n"
+		unless @{$selectedGenes};
+	my @selectedAlignments = map { $metrics{$_}{path} } @{$selectedGenes};
+	my $sampleMetrics = classifyTaxonAwareSamples(
+		metrics => \%metrics,
+		samples => $args{samples},
+		target_loci => $args{target_loci},
+		target_nt => $args{target_nt},
+		minimum_anchor_nt => $args{minimum_anchor_nt},
+		selected_only => 1,
+		outgroup => $args{outgroup},
+	);
+	writeTaxonAwareLocusAudit($args{locus_report}, "final", \%metrics);
+	writeTaxonAwareSampleAudit($args{sample_report}, $sampleMetrics);
+	return {
+		alignments => \@selectedAlignments,
+		sample_metrics => $sampleMetrics,
+		locus_metrics => \%metrics,
+	};
+}
+
+sub writeTaxonAwareLocusAudit {
+	my ($path, $stage, $metrics) = @_;
+	make_path(dirname($path)) unless -d dirname($path);
+	open my $output, '>', $path
+		or die "Cannot write taxon-aware locus audit $path: $!\n";
+	print {$output} join("\t", qw(
+		stage gene selected rank phase quality_score robust_score occupancy
+		sample_count q90_nt alignment_length_nt variable_sites
+		parsimony_informative_sites median_completeness length_stability
+		selection_objective alignment
+	))."\n";
+	for my $gene (sort {
+		($metrics->{$a}{selected} ? 0 : 1) <=> ($metrics->{$b}{selected} ? 0 : 1)
+			|| ($metrics->{$a}{selection_rank} // 1_000_000)
+				<=> ($metrics->{$b}{selection_rank} // 1_000_000)
+			|| $a cmp $b
+	} keys %{$metrics}) {
+		my $metric = $metrics->{$gene};
+		my @values = (
+			$stage, $gene, $metric->{selected} ? 1 : 0,
+			$metric->{selection_rank} // "", $metric->{selection_phase} // "",
+			map({ defined($metric->{$_}) ? sprintf("%.6f", $metric->{$_}) : "" }
+				qw(quality_score robust_score occupancy)),
+			$metric->{sample_count} // "", $metric->{q90_nt} // "",
+			$metric->{alignment_length_nt} // "", $metric->{variable_sites} // "",
+			$metric->{parsimony_informative_sites} // "",
+			map({ defined($metric->{$_}) ? sprintf("%.6f", $metric->{$_}) : "" }
+				qw(median_completeness length_stability selection_objective)),
+			$metric->{path} // "",
+		);
+		print {$output} join("\t", @values)."\n";
+	}
+	close $output or die "Cannot close taxon-aware locus audit $path: $!\n";
+}
+
+sub writeTaxonAwareSampleAudit {
+	my ($path, $samples) = @_;
+	make_path(dirname($path)) unless -d dirname($path);
+	open my $output, '>', $path
+		or die "Cannot write taxon-aware sample audit $path: $!\n";
+	print {$output} "sample\tavailable_loci\tavailable_nt\tselected_loci\tselected_nt\trole\treason\n";
+	for my $sample (sort keys %{$samples}) {
+		my $metric = $samples->{$sample};
+		print {$output} join("\t", $sample,
+			map({ $metric->{$_} // "" } qw(
+				available_loci available_nt selected_loci selected_nt role reason
+			)))."\n";
+	}
+	close $output or die "Cannot close taxon-aware sample audit $path: $!\n";
+}
+
+sub writePostAlignmentQCPolicy {
+	my ($policyFile, $policyText) = @_;
+	make_path(dirname($policyFile)) unless -d dirname($policyFile);
+	my ($policyFH, $temporaryPolicy) = tempfile(
+		"post-alignment-policy-XXXXXX",
+		DIR => dirname($policyFile),
+		UNLINK => 1,
+	);
+	print {$policyFH} $policyText
+		or die "Cannot write locus-QC policy $temporaryPolicy: $!\n";
+	close $policyFH
+		or die "Cannot close locus-QC policy $temporaryPolicy: $!\n";
+	rename $temporaryPolicy, $policyFile
+		or die "Cannot publish locus-QC policy $policyFile: $!\n";
+}
+
+sub alignmentFileStem {
+	my ($path) = @_;
+	my $stem = basename($path);
+	$stem =~ s/\.gz$//;
+	$stem =~ s/\.(?:syn|nonsyn)\.fna$//;
+	$stem =~ s/\.(?:fna|faa)$//;
+	return $stem;
+}
+
+sub runPostAlignmentLocusQC {
+	my ($alignments, $sequenceType, $reportFile, $policyFile, $policyText) = @_;
+	die "Post-alignment locus QC requires at least one alignment\n"
+		unless @{$alignments};
+	make_path(dirname($reportFile)) unless -d dirname($reportFile);
+	my ($manifestFH, $manifestFile) = tempfile(
+		"post-alignment-loci-XXXXXX",
+		DIR => $tmpD,
+		UNLINK => 1,
+	);
+	print {$manifestFH} "$_\n" for @{$alignments};
+	close $manifestFH or die "Cannot close locus-QC manifest $manifestFile: $!\n";
+	my ($keepFH, $keepFile) = tempfile(
+		"post-alignment-keep-XXXXXX",
+		DIR => $tmpD,
+		UNLINK => 1,
+	);
+	close $keepFH or die "Cannot close locus-QC keep file $keepFile: $!\n";
+
+	my $msaFix = getProgPaths("MSAfix");
+	my @divergenceArguments = $postAlignmentDivergenceQC
+		? ("-relativeModifiedZ", $postAlignmentRelativeZ)
+		: (
+			"-maxMedianDivergence", 1,
+			"-maxP90Divergence", 1,
+			"-relativeModifiedZ", 1_000_001,
+		);
+	my $command = join(" ",
+		shellQuote($msaFix),
+		"-manifest", shellQuote($manifestFile),
+		"-report", shellQuote($reportFile),
+		"-keep", shellQuote($keepFile),
+		"-sequenceType", $sequenceType,
+		"-minSequences", $postAlignmentMinSequences,
+		"-minOccupancy", $postAlignmentMinOccupancy,
+		@divergenceArguments,
+		"-minLociForRelative", $postAlignmentMinLociRelative,
+	) . "\n";
+	my @kept;
+	my $ok = eval {
+		systemW($command);
+		die "Native MSAfix locus QC did not produce its report: $reportFile\n"
+			unless -s $reportFile;
+
+		open my $keepRead, '<', $keepFile
+			or die "Cannot open locus-QC keep file $keepFile: $!\n";
+		while (my $line = <$keepRead>) {
+			$line =~ s/[\r\n]+$//;
+			push @kept, $line if length($line);
+		}
+		close $keepRead or die "Cannot close locus-QC keep file $keepFile: $!\n";
+		writePostAlignmentQCPolicy($policyFile, $policyText);
+		1;
+	};
+	my $error = $@;
+	my @temporaryFiles = (
+		$manifestFile,
+		$keepFile,
+		bsd_glob(quotemeta($reportFile).".tmp.*"),
+		bsd_glob(quotemeta($keepFile).".tmp.*"),
+	);
+	my (%seenTemporary, @cleanupErrors);
+	for my $temporaryFile (@temporaryFiles) {
+		next unless defined($temporaryFile) && -e $temporaryFile;
+		next if $seenTemporary{$temporaryFile}++;
+		push @cleanupErrors, "$temporaryFile: $!"
+			unless unlink $temporaryFile;
+	}
+	if (@cleanupErrors) {
+		$error .= "Native MSAfix locus-QC temporary cleanup failed:\n"
+			.join("\n", @cleanupErrors)."\n";
+	}
+	if (!$ok || @cleanupErrors) {
+		$error ||= "Native MSAfix locus QC failed\n";
+		die $error;
+	}
+	die "Post-alignment locus QC rejected all ".scalar(@{$alignments})
+		." loci; see $reportFile\n" unless @kept;
+	print "Post-alignment locus QC retained ".scalar(@kept)."/"
+		.scalar(@{$alignments})." loci; report: $reportFile\n";
+	return \@kept;
+}
+
+sub prepareTemporaryBase {
+	my ($path) = @_;
+	my $created = eval {
+		make_path($path) unless -d $path;
+		1;
+	};
+	if (!$created || !-d $path) {
+		my $error = $@ || "path is not a directory";
+		$error =~ s/\s+$//;
+		return (0, $error);
+	}
+
+	my ($probeHandle, $probePath);
+	my $writeable = eval {
+		($probeHandle, $probePath) = tempfile(
+			".buildTree5-writecheck-XXXXXX",
+			DIR => $path,
+			UNLINK => 0,
+		);
+		print {$probeHandle} "buildTree5 temporary-path check\n"
+			or die "write failed: $!";
+		close $probeHandle or die "close failed: $!";
+		undef $probeHandle;
+		1;
+	};
+	if (!$writeable) {
+		my $error = $@ || "write test failed";
+		$error =~ s/\s+$//;
+		close $probeHandle if defined($probeHandle) && fileno($probeHandle);
+		unlink $probePath if defined($probePath) && -e $probePath;
+		return (0, $error);
+	}
+	unless (unlink $probePath) {
+		return (0, "cannot remove temporary-path write test $probePath: $!");
+	}
+	return (1, "");
+}
+
+sub limitedWarn {
+	my ($category, $message, $limit) = @_;
+	$limit = 5 unless defined $limit;
+	$limitedWarningLimits{$category} = $limit;
+	my $count = ++$limitedWarningCounts{$category};
+	warn $message if $count <= $limit;
+	warn "No more '$category' warning examples will be shown\n"
+		if $count == $limit + 1;
+}
+
+sub runMSAFix {
+	my ($alignment, $maxGapFraction) = @_;
+	die "MSAfix input is missing or empty: $alignment\n" unless -s $alignment;
+
+	my $msaFbin = getProgPaths("MSAfix");
+	my $tmpOutput = "$alignment.MSAfix.$$.fna";
+	unlink $tmpOutput or die "Cannot remove stale MSAfix output $tmpOutput: $!\n"
+		if -e $tmpOutput;
+
+	my $cmd = join(" ",
+		shellQuote($msaFbin),
+		"-i", shellQuote($alignment),
+		"-o", shellQuote($tmpOutput),
+		"-maskLowID",
+		"-maskBorderGap",
+		"-rmGapColsGreater", $maxGapFraction,
+		"-minGoodPosFrac", "0.6",
+	) . "\n";
+
+	my $ok = eval {
+		systemW($cmd);
+		1;
+	};
+	if (!$ok) {
+		my $error = $@ || "MSAfix failed for $alignment\n";
+		unlink $tmpOutput if -e $tmpOutput;
+		die $error;
+	}
+	if (!-s $tmpOutput) {
+		unlink $tmpOutput if -e $tmpOutput;
+		die "MSAfix completed without producing a nonempty output for $alignment\n";
+	}
+
+	rename $tmpOutput, $alignment
+		or die "Cannot replace $alignment with validated MSAfix output $tmpOutput: $!\n";
+}
+
+
+sub publishStagedTreeInputs {
+	my ($stagingDirectory, $outputDirectory, $cores, $requiredInputs) = @_;
+	my @missing = grep { !fileGZs($_) } @{$requiredInputs};
+	unless (@missing) {
+		print "Using existing persistent tree inputs\n";
+		return;
+	}
+
+	my $staging = File::Spec->canonpath(File::Spec->rel2abs($stagingDirectory));
+	my $output = File::Spec->canonpath(File::Spec->rel2abs($outputDirectory));
+	die "Staged tree-input directory does not exist: $staging\n" unless -d $staging;
+	die "Staged tree-input directory must differ from output directory: $staging\n"
+		if $staging eq $output;
+
+	opendir my $directoryHandle, $staging
+		or die "Cannot read staged tree-input directory $staging: $!\n";
+	my @stagedFiles = sort map { File::Spec->catfile($staging, $_) }
+		grep {
+			$_ ne File::Spec->curdir && $_ ne File::Spec->updir
+				&& -f File::Spec->catfile($staging, $_)
+				&& -s File::Spec->catfile($staging, $_)
+		} readdir $directoryHandle;
+	closedir $directoryHandle
+		or die "Cannot close staged tree-input directory $staging: $!\n";
+	die "No usable staged tree inputs found in $staging\n" unless @stagedFiles;
+	my %stagedBasename = map { basename($_) => 1 } @stagedFiles;
+	my @unavailable = grep {
+		my $requiredBasename = basename($_);
+		!$stagedBasename{$requiredBasename} && !$stagedBasename{"$requiredBasename.gz"};
+	} @missing;
+	die "Required tree inputs are absent from both persistent and staged storage: "
+		.join(", ", @unavailable)."\n" if @unavailable;
+
+	print "Publishing ".scalar(@stagedFiles)." staged tree-input file(s) to $output\n";
+	for my $source (@stagedFiles) {
+		if ($source !~ /\.gz$/) {
+			my $sourceBasename = basename($source);
+			sortFastaForCompression($source)
+				if $sourceBasename eq "allFAAs.faa" || $sourceBasename eq "allFNAs.fna";
+			my $compressionStatus = system {$pigzBin} $pigzBin, "-p", $cores, "--", $source;
+			die "Could not execute pigz for staged tree input $source: $!\n"
+				if $compressionStatus == -1;
+			die "pigz failed for staged tree input $source with status $compressionStatus\n"
+				if $compressionStatus != 0;
+			$source .= ".gz";
+			die "Compression did not produce staged tree input $source\n" unless -s $source;
+		}
+		my $destination = File::Spec->catfile($output, basename($source));
+		move($source, $destination)
+			or die "Cannot publish staged tree input $source as $destination: $!\n";
+	}
+
+	@missing = grep { !fileGZs($_) } @{$requiredInputs};
+	if (@missing) {
+		die "Tree inputs remain incomplete after staged publication; missing: "
+			.join(", ", map { $_ . "[.gz]" } @missing)."\n";
+	}
+	print "Tree inputs ready in persistent storage\n";
+}
+
+sub writeCompletionMarker {
+	my ($markerPath, $treePath, $outputDirectory) = @_;
+	die "Cannot create completion marker without a nonempty primary tree: $treePath\n"
+		unless defined($treePath) && length($treePath) && -s $treePath;
+
+	my $marker = File::Spec->canonpath(File::Spec->rel2abs($markerPath));
+	my $output = File::Spec->canonpath(File::Spec->rel2abs($outputDirectory));
+	my $relative = File::Spec->abs2rel($marker, $output);
+	my @relativeParts = File::Spec->splitdir($relative);
+	die "Completion marker must be inside the output directory: $marker\n"
+		if $relative eq File::Spec->curdir || grep { $_ eq File::Spec->updir } @relativeParts;
+
+	my $temporaryMarker = "$marker.tmp.$$";
+	unlink $temporaryMarker or die "Cannot remove stale completion marker $temporaryMarker: $!\n"
+		if -e $temporaryMarker;
+	open my $markerHandle, ">", $temporaryMarker
+		or die "Cannot create completion marker $temporaryMarker: $!\n";
+	print {$markerHandle} "buildTree5\t$version\t$treePath\n"
+		or die "Cannot write completion marker $temporaryMarker: $!\n";
+	close $markerHandle or die "Cannot close completion marker $temporaryMarker: $!\n";
+	rename $temporaryMarker, $marker
+		or die "Cannot publish completion marker $marker: $!\n";
+	print "Validated primary tree and published completion marker: $marker\n";
 }
 
 
@@ -2263,12 +4413,11 @@ sub safeRemoveTree{
 
 
 sub requireConfiguredTool{
-	my ($environmentName, $description) = @_;
-	my $path = $ENV{$environmentName} // "";
-	die "$description support is dormant and not configured. Set $environmentName to reactivate it.\n"
-		if $path eq "";
-	die "$description configured by $environmentName does not exist: $path\n" unless -e $path;
-	return shellQuote(File::Spec->canonpath(File::Spec->rel2abs($path)));
+	my ($configKey, $description) = @_;
+	my $configured = getProgPaths($configKey, 0);
+	die "$description support is dormant and not configured. Set $configKey in the selected MATAFILER config to reactivate it.\n"
+		if $configured eq "";
+	return $configured;
 }
 
 
@@ -2276,13 +4425,13 @@ sub requireConfiguredTool{
 ### Fastgear -> test for recombination 
 sub runFastgear($ $ $ $){
 	my ($geneFG, $outFile, $inD, $parFile) = @_;
-	my $fastgearBin = requireConfiguredTool("MF4_FASTGEAR_BIN", "fastGEAR");
-	my $matlabBin = requireConfiguredTool("MF4_FASTGEAR_MATLAB_BIN", "fastGEAR MATLAB runtime");
+	my $fastgearBin = requireConfiguredTool("fastgear", "fastGEAR");
+	my $matlabBin = requireConfiguredTool("fastgearMatlab", "fastGEAR MATLAB runtime");
 
-	$cmd = "$fastgearBin $matlabBin $inD/$geneFG.fna $outFile $parFile";
+	$cmd = "$fastgearBin $matlabBin ".shellQuote("$inD/$geneFG.fna")
+		." ".shellQuote($outFile)." $parFile";
 	systemW($cmd);
 	die "fastGEAR did not produce $outFile for $geneFG\n" unless -s $outFile;
-	print "fastgear on $geneFG finished";
 	#die;
 }
 
@@ -2302,7 +4451,7 @@ sub prepGenoDirs($){
 		if ($wildcardflag ne ""){
 			$genoindir .= $wildcardflag;#"/*\.fna";
 		} else {
-			print "Warning: please give wildcard for genoIndir.\nAssumming *.fna now..\n";
+			warn "No -wildcardflag supplied for -genoInD; defaulting to *.fna\n";
 			$genoindir .= "/*\.fna";
 		}
 	}
@@ -2311,7 +4460,7 @@ sub prepGenoDirs($){
 	if (scalar(@sfiles) == 0){die "$genoindir contains no files!\n";}
 	
 	#die "@sfiles\n";
-	print "External Genomes: $genoindir\nProcessing ".scalar(@sfiles)." genomes\n";
+	print "External-genome preparation: " . scalar(@sfiles) . " input genome(s) matching $genoindir\n";
 	my %FNAfmg; my %FAAfmg;my %MGSFMG;
 	
 	my $cnt=0;
@@ -2321,11 +4470,12 @@ sub prepGenoDirs($){
 		my $tag = $tarG;
 		$tag =~ s/.*\///;
 		$tag =~ s/\.[^\.]*$//;
-		print "$tarG\n";
 		my ($genes,$prots) = getGenoGenes($tarG,0,$ncore);
 		my $FMGdir = getFMG("",$prots,$genes,$ncore);
 		my ($hrN,$hrA,$hrC) = readFMGdir( "$FMGdir",$tag ,".");
 		$cnt++;
+		print "External-genome progress: $cnt/" . scalar(@sfiles) . " genomes\n"
+			if $cnt == 1 || $cnt % 25 == 0;
 		my %FAA=%{$hrA};
 		my %FNA=%{$hrN};
 		my %COGcat=%{$hrC};
@@ -2340,6 +4490,7 @@ sub prepGenoDirs($){
 		#die;
 		#last if ($cnt>5);#DEBUG
 	}
+	print "External-genome summary: $cnt genome(s) processed\n";
 	
 	
 	open OA,">$aaFna"  or die "Can't open faa out file $aaFna\n"; 

@@ -13,7 +13,7 @@ MATAFILER4 commonly runs in four script-level phases:
 
 1. **Sample-level processing with `MATAF4.pl`**: read detection, preprocessing, host filtering, assembly, read mapping, contig statistics, binning and optional read-based taxonomic/functional profiling.
 2. **Gene catalog construction with `secScripts/geneCat.pl`**: clustering predicted genes across samples, creating gene abundance matrices, assigning functions and preparing genome/species-resolved outputs.
-3. **MGS/MAG processing with `secScripts/MGS.pl`**: dereplication, MGS abundance/taxonomy and optional strain-oriented processing.
+3. **MGS/MAG processing with `secScripts/MGS.pl`**: dereplication, immediate between-MGS marker-protein tree inference, MGS abundance/taxonomy and optional strain-oriented processing.
 4. **Phylogenetic analysis with `secScripts/phylo/buildTree5.pl`**: MSA generation, tree inference and optional population-genetic analyses.
 
 ## Recommended reading order

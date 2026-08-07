@@ -4,10 +4,12 @@ use warnings;
 use strict;
 use Data::Dumper;
 use Getopt::Long qw( GetOptions );
+use File::Path qw(make_path);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(readMap readClstrRev readClstrRevContigSubset readClstrRevSmplCtgGenSubset getDirsPerAssmblGrp  getAssemblPath systemW gzipopen parse_duration);
 use Mods::Binning qw (getBinSubdirName runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns minQualFilter calcLCAcompl readCMquals);
 use Mods::geneCat qw(readMG_LCA);
+use Mods::CatalogPaths qw(resolve_catalog_maps);
 
 
 sub countUpBin;
@@ -24,8 +26,14 @@ sub MGuniqStats;
 #.18: switched to reading sample_contig_gene from idx
 #.20: switched to C++ implementation of clusterMAGs.. this is only a hull script now, mostly disused.
 #.21: validate wrapper inputs and honour the selected marker and quality-checker modes
+#.22: make fallback inputs reachable and clean wrapper logs and temporary outputs safely
+#.23: remove samples marked SMPL.empty from maps passed to the clustering binary
+#.24: require an explicit flag before entering the Perl compatibility algorithm
+#.25: use the compressed MAG report emitted directly by the clustering binary
+#.26: publish MAGvsGC.txt.gz consistently in the Bin_<binner> directory
+#.27: resolve all catalog maps from LOGandSUB/inmap.txt
 
-my $version = 0.21;
+my $version = 0.27;
 
 my $startTime = time ;
 
@@ -40,6 +48,8 @@ my $redo = 0;
 my $BinTerm = "MGS.";
 my $legacyV=0;
 my $camoIn = "";
+my $clusterID = 95;
+my $perlClusterMAGs = 0;
 
 my $ph1flag = 1; #sets up for using binnings..
 my %gen2Bin;#structure: {gene}{Bin}=cnt
@@ -54,12 +64,43 @@ my %MAGc; my %MAGq; #overall storage of qual and conta
 my %MAGlcaq; #overall LCA completeness
 my %MAgene; #store genes per MAG.. large hash!
 
+sub mapsWithoutEmptySamples {
+	my ($map_files, $map, $target_dir) = @_;
+	my %empty;
+	for my $sample (@{$map->{opt}{smpl_order} || []}) {
+		my $work_dir = $map->{$sample}{wrdir};
+		next unless defined($work_dir) && length($work_dir);
+		$empty{$sample} = 1 if -e "$work_dir/SMPL.empty";
+	}
+	return ($map_files, []) unless %empty;
+
+	make_path($target_dir);
+	my @filtered_maps;
+	my $map_index = 0;
+	for my $input_map (split /,/, $map_files) {
+		my $output_map = "$target_dir/map.$map_index.txt";
+		open my $input, '<', $input_map or die "Cannot open map $input_map: $!\n";
+		open my $output, '>', $output_map or die "Cannot write filtered map $output_map: $!\n";
+		while (my $line = <$input>) {
+			my ($sample) = split /\t/, $line, 2;
+			next if exists $empty{$sample};
+			print {$output} $line or die "Cannot write filtered map $output_map: $!\n";
+		}
+		close $input or die "Cannot close map $input_map: $!\n";
+		close $output or die "Cannot close filtered map $output_map: $!\n";
+		push @filtered_maps, $output_map;
+		$map_index++;
+	}
+	return (join(',', @filtered_maps), [sort keys %empty]);
+}
+
 
 
 #-GCd $inD -binSpeciesMG $binSpeciesMG -logDir $logDir -MGset $useGTDBmg -cores $numCore -useCheckM1 $useCheckM1 -useCheckM2 $useCheckM2 
 #options to pipeline..
 GetOptions(
 	"GCd=s"      => \$inD,
+	"clusterID=i" => \$clusterID,
 	"BinDir=s"   => \$outD,
 	"tmp=s" => \$tmpD,
 	#"submit=i" => \$doSubmit,
@@ -76,10 +117,12 @@ GetOptions(
 	"ignoreIncompleteMAGs=i" => \$ignoIncomplMAGs,
 	"redo=i" => \$redo,
 	"legacy=i" => \$legacyV,
+	"perlClusterMAGs!" => \$perlClusterMAGs,
 ) or die "Invalid clusterMAGs.pl options\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-GCd is required\n" unless length $inD;
 die "-cores must be a positive integer\n" unless $numCore > 0;
+die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterID <= 100;
 die "-MGset must be GTDB or FMG\n" unless $useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG";
 die "Select exactly one of -useCheckM1 and -useCheckM2\n"
 	unless ($useCheckM1 ? 1 : 0) + ($useCheckM2 ? 1 : 0) == 1;
@@ -91,6 +134,9 @@ my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2);
 my $BinnerShrt = getBinSubdirName($binSpeciesMG);
 if ($outD eq ""){$outD = $inD."/Bin_$BinnerShrt/";}
 $outD .= "/" unless ($outD =~ m/\/$/);
+if ($logDir eq ""){$logDir = $outD."LOGandSUB/";}
+$logDir .= "/" unless ($logDir =~ m/\/$/);
+make_path($outD, $logDir);
 my $ctg2gen = {};
 my $ctg2gen2 = {};
 
@@ -98,41 +144,40 @@ my $ctg2gen2 = {};
 my $COGdir = "FMG";
 if ($useGTDBmg eq "GTDB"){ 	$COGdir = "GTDBmg";}
 
-system "rm $outD/$BinnerShrt.clusters"  if ($redo);
+if ($redo && -e "$outD/$BinnerShrt.clusters") {
+	unlink "$outD/$BinnerShrt.clusters"
+		or die "Cannot remove $outD/$BinnerShrt.clusters: $!\n";
+}
 
 
 #read map to get assembly groups..
-my $mapF="";my $GCd = "";
-#die Dumper($hrm);	
-if (-e "$inD/LOGandSUB/GCmaps.inf"){
-	my $tmp = `cat $inD/LOGandSUB/GCmaps.inf`; chomp $tmp;
-	$mapF = $tmp;
-	$GCd = $inD;
-} else{
-	die "can't find indir $inD\n";
-	$mapF = $inD."LOGandSUB/inmap.txt";
-	#($hrm,$asGrpObj) = readMap($inD."LOGandSUB/inmap.txt");
-}
-die "Couldn't find map file in clusterMAGs.pl:: $mapF\n" unless (-e $mapF|| $mapF =~ m/,/);
+my $GCd = $inD;
+my $mapF = resolve_catalog_maps($GCd);
+my ($map_groups, $map_data) = getDirsPerAssmblGrp($mapF);
+my ($clusteringMapF, $emptySamples) =
+	mapsWithoutEmptySamples($mapF, $map_data, "$logDir/nonempty_maps");
+print "Excluded " . scalar(@{$emptySamples}) . " sample(s) marked SMPL.empty from MAG clustering: "
+	. join(", ", @{$emptySamples}) . "\n"
+	if @{$emptySamples};
 
 my $clMAGsBin = getProgPaths("clusterMAGs");
 
 my $cmd = "";
 my $canoFlag = ""; $canoFlag = "-canopyDir $camoIn " if ($camoIn ne "");
 #-FILEtag SBx -MGtag MM2 -geneCatIdx C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/compl.incompl.95.fna.clstr.idx -MGdir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/MGs/ -outDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/out/ -map C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.0.txt,C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/map.1.txt -canopyDir C:\Users\hildebra\OneDrive\science\data\test\clusterMAGsMock/Cano/
-$cmd .= "$clMAGsBin -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.95.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
-$cmd .= "-outDir $outD -map $mapF $canoFlag -MGfile $GCd/${COGdir}.subset.cats\n";
-$cmd .= "test -s $outD/MAGvsGC.txt\n";
-$cmd .= "gzip -c $outD/MAGvsGC.txt > $logDir/MAGvsGC.txt.gz\n";
-$cmd .= "test -s $logDir/MAGvsGC.txt.gz\nrm $outD/MAGvsGC.txt\n";
+$cmd .= "$clMAGsBin -CMsuffix $cmSuffix -path2Bins Binning/$BinnerShrt/ -FILEtag $BinnerShrt -MGStag MGS. -geneCatIdx $GCd/compl.incompl.$clusterID.fna.clstr.idx -LCAdir $GCd/${COGdir} ";
+$cmd .= "-outDir $outD -map $clusteringMapF $canoFlag -MGfile $GCd/${COGdir}.subset.cats\n";
+$cmd .= "test -s $outD/MAGvsGC.txt.gz\n";
 
-if (1){ #C++ path.. better unless for testing something
+if (!$perlClusterMAGs) {
 	print "$cmd\n";
 	systemW $cmd;
 	print "\n\nDone with binary-based MAG clustering.\n\n";
 	exit;
 }
 
+warn "Entering the explicitly requested Perl clusterMAGs compatibility algorithm; the clusterMAGs binary is the supported default\n";
+$mapF = $clusteringMapF;
 
 
 my ($hrD,$hrM) = getDirsPerAssmblGrp($mapF);
@@ -140,7 +185,7 @@ my %map = %{$hrM};
 my %DOs = %{$hrD};
 my @DoosD = sort keys %DOs; #dirs of assembly groups
 print "Found ".scalar(@DoosD) ." assembly groups\n";
-system "mkdir -p $logDir\n";
+make_path($logDir);
 
 
 
@@ -428,7 +473,7 @@ sub clusterMB2{
 	}
 #	$ctg2gen = readClstrRevContigSubset("$GCd/compl.incompl.95.fna.clstr.idx",\%contigsGlobal); $hr2 = {};
 	print parse_duration((time - $startTime)). " - ";
-	$ctg2gen2 = readClstrRevSmplCtgGenSubset("$GCd/compl.incompl.95.fna.clstr.idx",\%contigsGlobal); $hr2 = {};
+	$ctg2gen2 = readClstrRevSmplCtgGenSubset("$GCd/compl.incompl.$clusterID.fna.clstr.idx",\%contigsGlobal); $hr2 = {};
 
 	print parse_duration((time - $startTime)) . " - Converting Bins to gene cat MAGs..\n";
 	my $missed =0; my $incompleteCtgMatch=0; 
@@ -850,14 +895,14 @@ sub countStats{
 sub summarizeMAGcontent{
 	my ($hr) =  @_;
 
-	print "Writing detailed MAG->MGS and MAG->genecat report ($logDir/MAGvsGC.txt.gz)..\n";
+	print "Writing detailed MAG->MGS and MAG->genecat report ($outD/MAGvsGC.txt.gz)..\n";
 
 	my %MAG2Bin = %{$hr};
 	my $MAGreprep = "";
 	$MAGreprep .= "Name\tCompleteness\tContamination\tCheckMmodel\tOrigin\n";
 	my $MAG2MGScnt=0;
 	#create file that reports bin stats and genes (almost all bins)
-	open OX,">$logDir/MAGvsGC.txt";
+	open OX,">$outD/MAGvsGC.txt";
 	#HEADER
 	print OX "MAG\tMGS\tRepresentative4MGS\tCompleteness\tContamination\tLCAcompleteness\t";
 	foreach my $COG (keys %uniCOGs){ print OX $COG."\t";}
@@ -909,7 +954,13 @@ sub summarizeMAGcontent{
 		}
 	}
 	close OX;
-	system "rm -f $logDir/MAGvsGC.txt.gz; gzip $logDir/MAGvsGC.txt";
+	my $pigz = getProgPaths("pigz");
+	unlink "$outD/MAGvsGC.txt.gz"
+		or die "Cannot replace $outD/MAGvsGC.txt.gz: $!\n"
+		if -e "$outD/MAGvsGC.txt.gz";
+	systemW "$pigz -f $outD/MAGvsGC.txt\n";
+	die "MAG report compression did not produce $outD/MAGvsGC.txt.gz\n"
+		unless -s "$outD/MAGvsGC.txt.gz";
 	print "Found $MAG2MGScnt MAGs with MGS assignment\n";
 	return $MAGreprep;
 }

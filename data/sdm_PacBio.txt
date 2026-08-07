@@ -1,27 +1,26 @@
 #sequence length refers to sequence length AFTER removal of Primers, Barcodes and trimming. this ensures that downstream analyis tools will have appropiate sequence information
 minSeqLength	250
-maxSeqLength	100000
-minAvgQuality	25
+maxSeqLength	1000000
+minAvgQuality	18
 #truncate total Sequence length to X (length after Barcode, Adapter and Primer removals)
 TruncateSequenceLength	-1
 
 #Ambiguous bases in Sequence - uclust only supports 0 ambiguous nucleotides
 maxAmbiguousNT	500
-*maxAmbiguousNT	1
 
 #Homonucleotide Runs.. this should normally be filtered by sequencer software
 maxHomonucleotide	28
 
 #Filter whole sequence if one window of quality scores is below average
-QualWindowWidth	50
-QualWindowThreshhold	22
+QualWindowWidth	250
+QualWindowThreshhold	20
 
 #Trim the end of a sequence if a window falls below quality threshhold. Useful for removing low qulaity trailing ends of sequence
 TrimWindowWidth	20
 TrimWindowThreshhold	0
 
 #Max number of accumulated P for a mismatch. After this length, the rest of the sequence will be deleted. Complimentary to TrimWindowThreshhold. (-1) deactivates this option.
-maxAccumulatedError	20
+maxAccumulatedError	-1
 
 
 #Barcode Errors - currently this can only be 0; 
@@ -42,13 +41,11 @@ TechnicalAdapter
 #delete X NTs (e.g. if the first 5 bases are known to have strange biases)
 TrimStartNTs	0
 
-#correct PE header format (1/2) this is to accomodate the illumina miSeq paired end annotations 2="@XXX 1:0:4" insteand of 1="@XXX/1". Note that the format will be automatically detected
+#correct PE header format (1/2) this is to accomodate the illumina miSeq paired end annotations 2="@XXX 1:0:4" instead of 1="@XXX/1". Note that the format will be automatically detected
 PEheaderPairFmt	1
 
 #sets if sequences without match to reverse primer will be accepted (T=reject ; F=accept all); default=F
 RejectSeqWithoutRevPrim	F
-*RejectSeqWithoutRevPrim	F
 
 #sets if sequences without a forward (LinkerPrimerSequence) primer will be accepted (T=reject ; F=accept all); default=F
 RejectSeqWithoutFwdPrim	F
-*RejectSeqWithoutFwdPrim	F

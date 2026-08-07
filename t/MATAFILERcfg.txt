@@ -1,0 +1,9 @@
+MFLRDir	$MF4_TEST_ROOT
+BINDir	$MF4_TEST_ROOT/bin
+DBDir	$MF4_TEST_ROOT/t
+Rpath	R
+CONDcmd	true
+CONDA	shell hook
+CONDAbaseEnv	base
+Rscript	Rscript
+pigz	[MFLRDir]/t/bin/pigz

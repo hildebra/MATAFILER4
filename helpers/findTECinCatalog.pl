@@ -6,14 +6,15 @@
 #./findTECinCatalog.pl /g/scb/bork/hildebra/SNP/GNMass2_singl/alien-11-374-0/Binning/MaxBin/e100extr /g/scb/bork/hildebra/SNP/GNMass2_singl/
 use warnings;
 use strict;
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 sub combineClstr;
 sub readClstrRev;
 sub readMap;
 
 
-my $tabixBin = "/g/bork5/hildebra/bin/samtools-1.2/tabix-0.2.6/./tabix";
-my $bgzipBin = "/g/bork5/hildebra/bin/samtools-1.2/tabix-0.2.6/./bgzip";
-my $samBin = "/g/bork5/hildebra/bin/samtools-1.2/samtools";
+my $tabixBin = getProgPaths("tabix");
+my $bgzipBin = getProgPaths("bgzip");
+my $samBin = getProgPaths("samtools");
 
 my $rfilesD = $ARGV[0];
 my $inD = $ARGV[1];
@@ -87,7 +88,7 @@ foreach my $curTEC (@TECNOS){
 
 	push(@srIdx,1);
 	open O,">$outD/$curTEC.lines";print O join("\n",@srIdx);close O;
-	system "/g/bork5/hildebra/dev/C++/rare/rare lineExtr $GCd/Matrix.mat $outD/$curTEC.mat $outD/$curTEC.lines; rm $outD/$curTEC.lines";
+	system getProgPaths("rare")." lineExtr $GCd/Matrix.mat $outD/$curTEC.mat $outD/$curTEC.lines; rm $outD/$curTEC.lines";
 
 
 	#add +2 as 1 is head and 0 is line 1 in mat

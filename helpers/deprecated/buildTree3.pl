@@ -36,7 +36,7 @@ my $pigzBin  = getProgPaths("pigz");
 my $trDist = getProgPaths("treeDistScr");
 my $fsttreeBin  = getProgPaths("fasttree");
 
-my $gubbinsBin = "/g/bork3/home/hildebra/bin/gubbins/python/scripts/run_gubbins.py";
+my $gubbinsBin = getProgPaths("gubbins");
 
 
 #die "TODO $trimalBin\n";
@@ -329,7 +329,7 @@ if (!$Ete){
 		my $outDG = "$outD/clonalFrameML/";
 		system "mkdir -p $outDG" unless (-d $outDG);
 		$outDG .= "CFML";
-		my $CFMLbin = "/g/bork3/home/hildebra/bin/ClonalFrameML/src/./ClonalFrameML";
+		my $CFMLbin = getProgPaths("clonalframeml");
 		my $cmd = "$CFMLbin $phyloTree $multAli $outDG\n";
 		die $cmd;
 	}
@@ -354,7 +354,7 @@ if (!$Ete){
 	
 	###################### ETE ######################3
 } else {
-	$cmd = "ete3 build -n $fnFna -a $aaFna -w clustalo_default-none-none-none  -m sptree_raxml_all --cpu $ncore -o $outD/tree --clearall --nt-switch 0.0 --noimg  --tools-dir /g/bork3/home/hildebra/bin/ete/ext_apps-latest"; #--no-seq-checks
+	$cmd = "ete3 build -n $fnFna -a $aaFna -w clustalo_default-none-none-none  -m sptree_raxml_all --cpu $ncore -o $outD/tree --clearall --nt-switch 0.0 --noimg  --tools-dir ".getProgPaths("eteToolsDir").""; #--no-seq-checks
 	$cmd .= " --cogs $cogCats" unless ($cogCats eq "");
 	print "Running tree analysis ..";
 	print $cmd."\n";

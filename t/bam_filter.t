@@ -104,18 +104,30 @@ is($status, 0, 'deletion-containing record is evaluated successfully');
 is((split /\t/, $output)[1], 4, 'deletions contribute to edit rate using alignment columns');
 
 my $missing_nm = sam_record(name => 'missing-nm');
-($status, $output, $errors) = run_filter($missing_nm);
-isnt($status, 0, 'missing NM tag fails closed');
-like($errors, qr/missing a valid NM:i tag/, 'missing NM failure is actionable');
-
-($status, $output, $errors) = run_filter("broken\tSAM\n");
-isnt($status, 0, 'malformed SAM returns a failure status');
-like($errors, qr/expected at least 11 fields/, 'malformed SAM reports its field count problem');
-
 my $bad_cigar_length = sam_record(name => 'bad-length', cigar => '9M', nm => 0);
-($status, $output, $errors) = run_filter($bad_cigar_length);
-isnt($status, 0, 'CIGAR and SEQ length mismatch returns a failure status');
-like($errors, qr/CIGAR consumes 9 query bases/, 'CIGAR mismatch reports both data sources');
+my $empty_qname = sam_record(name => '', nm => 0);
+($status, $output, $errors) = run_filter(
+	$missing_nm . "broken\tSAM\n" . $bad_cigar_length . $empty_qname . $passing,
+);
+is($status, 0, 'malformed SAM records do not abort the mapping stream');
+is($output, $passing, 'only the valid record after malformed entries reaches the downstream SAM reader');
+like($errors, qr/missing a valid NM:i tag; skipping record/,
+	'a missing NM tag is reported and skipped');
+like($errors, qr/expected at least 11 fields.*?skipping record/,
+	'a short SAM line is reported and skipped');
+like($errors, qr/CIGAR consumes 9 query bases; skipping record/,
+	'a CIGAR and SEQ length mismatch is reported and skipped');
+like($errors, qr/invalid query name; skipping record/,
+	'an empty query name is reported and skipped before samtools receives it');
+like($errors, qr/Malformed SAM records skipped: 4/,
+	'the terminal summary reports the number of skipped malformed records');
+($status, $output, $errors) = run_filter(($empty_qname x 11) . $passing);
+is($status, 0, 'many malformed records still leave the stream successful');
+is($output, $passing, 'valid records remain available after a malformed-record burst');
+my $reported_malformed = () = $errors =~ /invalid query name; skipping record/g;
+is($reported_malformed, 10, 'malformed record details are capped at ten log messages');
+like($errors, qr/further malformed SAM record warnings are suppressed/,
+	'the filter announces that additional malformed-record messages were suppressed');
 
 ($status, $output, $errors) = run_filter('', 1.1);
 isnt($status, 0, 'invalid threshold returns a failure status');

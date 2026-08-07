@@ -398,7 +398,6 @@ Feature names are the GTDB lineage up to a given rank, separated by semicolons. 
 It can be useful to know which functional annotations a given gene has, or vice versa. This can be found in `Anno/Func/DIAass_{db}.srt.gzgeneAss.gz`, where `{db}` is the databse of interest (KEGG, CAZy etc.) This file gives the gene id in the gene catalogue as the first column, followed by it's annotation at the lowest level of the database. A gene can have more than one annotation in this file.
 
 ### MAG/MGS Gene Content
-The gene content of a MAG can be found in `Bin_SB/LOGandSUB/MAGvsGC.txt.gz`. The columns *MAG* and *MGS* give the MAG id and the MGS which it is part of. The column *Representative4MGS* contains a star when the MAG is the representative for this MGS. Each marker gene has a column giving the genes from the MAG which matched against that marker. 
+The gene content of a MAG can be found in `Bin_SB/MAGvsGC.txt.gz`. The columns *MAG* and *MGS* give the MAG id and the MGS which it is part of. The column *Representative4MGS* contains a star when the MAG is the representative for this MGS. Each marker gene has a column giving the genes from the MAG which matched against that marker.
 
 The final column, *other_genes*, gives a comma separated list of all the other genes which are part of this MAG. These are in the order they appear on the contig, with a double comma indicating the start of a new conting. Using this list and the gene function table explained above lets you link MAGs/MGS and function.
-

@@ -1,19 +1,42 @@
-if(!require("ape",quietly=TRUE,warn.conflicts =FALSE)){install.packages("ape",repos="https://cloud.r-project.org");require("ape")}
-args = commandArgs(trailingOnly=TRUE)
-if (length(args)==0) {
-	stop("At least one argument must be supplied (input file).n", call.=FALSE)
+if (!requireNamespace("ape", quietly = TRUE)) {
+  stop("The R package 'ape' is required.", call. = FALSE)
 }
 
-#inF= "C:/Users/falkh/OneDrive/science/data/test/tree/RXng_allsit.raxml.bestTree";tar="specI_v2_0150"
-inF = args[1]
-tar = args[2]
-tree=read.tree(inF)
-cop = cophenetic(tree)
-c1 = cop[tar,]
-sc1=sort(c1)
-res=sc1[sc1>=0.01]
-res=res[1:max(length(res),10)]
-cat(paste0(paste(names(res),collapse=" "),"\n"))
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 2L) {
+  stop("Usage: neighborTree.R <tree file> <target tip>", call. = FALSE)
+}
+
+inF <- args[[1L]]
+target <- args[[2L]]
+
+if (!file.exists(inF)) {
+  stop(sprintf("Tree file does not exist: %s", inF), call. = FALSE)
+}
+
+tree <- tryCatch(
+  ape::read.tree(inF),
+  error = function(e) stop(sprintf("Could not read tree '%s': %s", inF, conditionMessage(e)), call. = FALSE)
+)
+if (inherits(tree, "multiPhylo")) {
+  stop("The input must contain exactly one tree.", call. = FALSE)
+}
+if (is.null(tree) || !inherits(tree, "phylo")) {
+  stop(sprintf("No valid tree was found in: %s", inF), call. = FALSE)
+}
+if (anyDuplicated(tree$tip.label)) {
+  stop("Tree tip labels must be unique.", call. = FALSE)
+}
+if (!target %in% tree$tip.label) {
+  stop(sprintf("Target tip '%s' is not present in the tree.", target), call. = FALSE)
+}
+
+distances <- ape::cophenetic.phylo(tree)[target, ]
+neighbors <- sort(distances[is.finite(distances) & distances >= 0.01])
+
+# Do not index to an arbitrary minimum length: doing so pads short results with
+# NA values, which downstream Perl callers interpret as candidate tip names.
+cat(paste(names(neighbors), collapse = " "), "\n", sep = "")
 
 
 

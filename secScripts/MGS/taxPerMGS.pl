@@ -15,17 +15,24 @@ my $outF = $ARGV[2];
 
 my $LCAout="$outF.LCA";
 my $taxout = "$outF.tax";
+my $krakF = "$GCd/Anno/Tax/krak2.txt"; #krak_0.01.txt
 
 if (-s $LCAout && -s $taxout){exit(0);}
+unless (-s $krakF) {
+	warn "Optional Kraken input is missing or empty; skipping MGS Kraken taxonomy:\n$krakF\n";
+	exit(0);
+}
 
 my $hr = readMGSrev($refMGf);
 my %MGs = %{$hr};
 my %allMGS = map { $_ => 1 } values %MGs;
 my %tCnt;
-my $krakF = "$GCd/Anno/Tax/krak2.txt"; #krak_0.01.txt
 #my $krakF = "$GCd/Anno/Tax/krak_0.01.txt"; #
-open I,"<$krakF" or die "Can't open kraken input $krakF\n";
-while (<I>){
+open my $krakenIn, '<', $krakF or do {
+	warn "Optional Kraken input could not be read; skipping MGS Kraken taxonomy:\n$krakF: $!\n";
+	exit(0);
+};
+while (<$krakenIn>){
 	chomp;my @spl=split /\t/;
 	next unless (exists($MGs{$spl[0]}));
 	#my @s2 = split /;/,$spl[1];
@@ -38,7 +45,7 @@ while (<I>){
 		$i++;
 	}
 }
-close I;
+close $krakenIn;
 my %tStat;
 open OL,">$LCAout" or die "Cannot write $LCAout: $!\n";
 open OC,">$taxout" or die "Cannot write $taxout: $!\n";
@@ -85,4 +92,3 @@ foreach my $d (sort(keys%tStat)){
 	print "$d:$tStat{$d}\t";
 }
 print "\n";
-

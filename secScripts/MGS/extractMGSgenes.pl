@@ -9,6 +9,7 @@ use strict;
 use warnings;
 use Mods::GenoMetaAss qw(systemW readFasta);
 use Mods::Binning qw(runCheckM);
+use File::Path qw(make_path remove_tree);
 
 
 
@@ -28,22 +29,26 @@ sub readCluster{
 my $ncore = 20;
 
 
+die "Usage: $0 CLUSTERS OUT-DIR GC-DIR MIN-GENES [TMP-DIR] [CLUSTER-ID]\n"
+	unless @ARGV >= 4 && @ARGV <= 6;
 my $cluF = $ARGV[0];
 my $oDir = $ARGV[1];
 my $GCd = $ARGV[2];
 my $tmpD = "$oDir/tmp/";
-my $minGenes=200;
-$tmpD = $ARGV[4] if (@ARGV >= 4);
-$minGenes = $ARGV[3];
-system "rm -r $oDir" if (-e $oDir);
-system "mkdir -p $oDir" unless (-d $oDir);
-system "mkdir -p $tmpD" unless (-d $tmpD);
+my $minGenes = $ARGV[3];
+$tmpD = $ARGV[4] if @ARGV >= 5;
+my $clusterID = @ARGV >= 6 ? $ARGV[5] : 95;
+die "MIN-GENES must be a non-negative integer\n" unless $minGenes =~ /^\d+$/;
+die "CLUSTER-ID must be between 1 and 100\n"
+	unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
+remove_tree($oDir) if -d $oDir;
+make_path($oDir, $tmpD);
 
 my $hr = readCluster($cluF);
 my %clust = %{$hr};
 
 print "Reading ref FNA..\n";
-$hr = readFasta("$GCd/compl.incompl.95.fna",1);
+$hr = readFasta("$GCd/compl.incompl.$clusterID.fna",1);
 my %FNA = %{$hr};
 #my @test = keys %FNA; print "$test[0] $test[1] $test[123]\n"; print "$FNA{13220655}\n";
 foreach my $cl (sort keys %clust){
@@ -62,7 +67,7 @@ foreach my $cl (sort keys %clust){
 
 
 print "Reading ref FAA..\n";
-$hr = readFasta("$GCd/compl.incompl.95.prot.faa",1);
+$hr = readFasta("$GCd/compl.incompl.$clusterID.prot.faa",1);
 my %FAA = %{$hr};
 foreach my $cl (sort keys %clust){
 	my $oF = "$oDir/$cl.faa";
@@ -84,6 +89,5 @@ runCheckM($oDir,$outFile,$tmpD,$ncore) unless (-e $outFile);
 
 
 print "Done\n";
-
 
 

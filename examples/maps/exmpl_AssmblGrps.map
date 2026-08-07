@@ -23,7 +23,7 @@ MM1	alien-11-0-0/	1	1
 MM2	alien-11-2-0/	2	2	
 MM3	alien-11-374-0/	354	3	miSeq:/g/somewhere/solexa/2015-09-07-000000000-ABUYN/
 MM4	alien-11-376-0/	4	4	
-MM5	alien-11-377-0/	5	5	mate:/g/bork/solexa/2016-04-28-C8NHLACXX
+MM5	alien-11-377-0/	5	5	mate:$MATE_READ_DIR
 MM12X2	alien-11-600-1/	12	12	
 MM12	alien-11-600-0/	12	12	
 MM13	alien-11-630-0/	13	13	

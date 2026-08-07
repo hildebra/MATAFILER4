@@ -150,20 +150,25 @@ sub sortFNA{
 sub createGene2MGS{
 	my ($MGSfile,$GCd) = @_;
 	my $outF = "$MGSfile.gene2MGS";
-	return ($outF) if (-e $outF);
+	if (-s $outF) {
+		my $input_mtime = (stat($MGSfile))[9] // 0;
+		my $output_mtime = (stat($outF))[9] // 0;
+		return ($outF) if $output_mtime >= $input_mtime;
+	}
 	
 	#first read in COG assignments / gene
 	my $hr = readGene2Func("$GCd","NOG"); my %COG = %{$hr};
 	#keep some stats..
 	my $COGcnt=0;my %MGS; my $COGnot=0;
 	my %MGScnts;
-	open I,"<$MGSfile" or die "Can't open MGS guide file: $MGSfile\n";
-	open O,">$outF" or die "Can't open gen2MGS file: $outF\n";
-	while (my $lin = <I>){
+	open my $in, '<', $MGSfile or die "Can't open MGS guide file: $MGSfile\n";
+	my $tmpF = "$outF.tmp.$$";
+	open my $out, '>', $tmpF or die "Can't open temporary gen2MGS file $tmpF: $!\n";
+	while (my $lin = <$in>){
 		chomp $lin; my @spl = split (/\t/,$lin,-1);
 		if (@spl <2){die "incomplete entry in MGS guide file: @spl\n";}
-		next if ($spl[1] =~ m/\D/);# || $spl[1] =~ m/^\?$/); #only accept gene ids which are numbers
-		my @genes = split /,/,$spl[1];
+		my @genes = grep { /^\d+$/ } split /,/,$spl[1];
+		next unless @genes;
 		#not needed here..
 		#$MGS{$spl[0]} = \@genes;
 		my $cMGS =$spl[0];
@@ -178,10 +183,13 @@ sub createGene2MGS{
 				$curCOG = $COG{$x};
 				$MGScnts{$cMGS}++;
 			} else {$COGnot++;}
-			print O "$x\t$cMGS\t$curCOG\n";
+			print {$out} "$x\t$cMGS\t$curCOG\n"
+				or die "Can't write temporary gen2MGS file $tmpF: $!\n";
 		}
 	}
-	close I; close O;
+	close $in or die "Can't close MGS guide file $MGSfile: $!\n";
+	close $out or die "Can't close temporary gen2MGS file $tmpF: $!\n";
+	rename $tmpF, $outF or die "Can't replace gen2MGS file $outF: $!\n";
 	#report top lowest MGS
 	print "Lowest represented MGS::\n";
 	my @keys = sort { $MGScnts{$a} <=> $MGScnts{$b} } keys(%MGScnts); my $cntX=0;
@@ -212,6 +220,8 @@ sub readGene2tax{
 	my %uniqs; my $cogPrio= {};
 	#some stats
 	my %totalTax; my $totalGenes=0; my $inclGenes=0;
+	my %rowWarnings;
+	my $warningLimit = 5;
 	open I,"<$inF" or die "Can't open gene 2 tax (specI/MGS) file:\n$inF\n";
 	my $curTax = ""; my $curTcnt=0;
 	
@@ -220,6 +230,12 @@ sub readGene2tax{
 		chomp $line;
 		$totalGenes++;
 		my @spl = split (/\t/,$line,-1);
+		if (@spl < 3 || !defined($spl[0]) || $spl[0] eq "" || !defined($spl[1]) || $spl[1] eq "") {
+			$rowWarnings{malformed}++;
+			warn "Ignoring malformed gene-to-MGS row in $inF: $line\n"
+				if $rowWarnings{malformed} <= $warningLimit;
+			next;
+		}
 		#only read a limited number of genes.. used for MGS to only take first few genes
 		my $MGS = $spl[1];
 		if ($limit>0 && exists($totalTax{$MGS}) && $totalTax{$MGS}  >= $limit){
@@ -236,16 +252,35 @@ sub readGene2tax{
 			$OG="uniq$uniqs{$spl[1]}";
 			#die "$OG\n";
 		}
-		unless (exists($SIgenes->{$MGS}{$OG})){#only register gene if COG is not already reserved..
-			push(@{$cogPrio->{$MGS}},$OG); ;
-			$SIgenes->{$MGS}{$OG} = $spl[0];
-			$Gene2COG->{$spl[0]} = $OG;
-			$Gene2MGS->{$spl[0]} = $MGS;
-			$inclGenes++;
-			$totalTax{$MGS} ++;
+		# COG is a functional/orthology annotation, not a unique locus identifier.
+		# Preserve every ranked catalogue cluster and let the strain workflow merge
+		# compatible alternative seeds after checking sequence, co-occurrence and context.
+		my $gene = $spl[0];
+		my $locus = join('|', $MGS, $OG, $gene);
+		if (exists($Gene2MGS->{$gene})) {
+			$rowWarnings{duplicate}++;
+			warn "Ignoring duplicate catalogue gene $gene in $inF\n"
+				if $rowWarnings{duplicate} <= $warningLimit;
+			next;
 		}
+		push(@{$cogPrio->{$MGS}},$locus);
+		$SIgenes->{$MGS}{$locus} = $gene;
+		$Gene2COG->{$gene} = $OG;
+		$Gene2MGS->{$gene} = $MGS;
+		$inclGenes++;
+		$totalTax{$MGS} ++;
 	}
 	close I;
+	if (($rowWarnings{malformed} || 0) > $warningLimit) {
+		warn "Suppressed ".($rowWarnings{malformed} - $warningLimit)
+			." additional malformed gene-to-MGS row warnings in $inF "
+			."($rowWarnings{malformed} total)\n";
+	}
+	if (($rowWarnings{duplicate} || 0) > $warningLimit) {
+		warn "Suppressed ".($rowWarnings{duplicate} - $warningLimit)
+			." additional duplicate catalogue gene warnings in $inF "
+			."($rowWarnings{duplicate} total)\n";
+	}
 	print "Found ". scalar(keys %totalTax) ." MGS with $inclGenes/$totalGenes included genes\n";
 	
 	#double check on low represented MGS

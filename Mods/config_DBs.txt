@@ -1,11 +1,12 @@
 
-#sortmerna v 4.3.4
+# SortMeRNA v4.3.x. Override these keys in the user configuration when the
+# databases live outside DBDir.
 #ITSdbFAsrt	[DBDir]/ # no longer using ITS
-SSUdbFAsrt	/hpc-home/rel25vaz/my_files/sortmerna_database/ssu/smr_v4.3_default_db_ssu.fasta
-LSUdbFAsrt	/hpc-home/rel25vaz/my_files/sortmerna_database/lsu/smr_v4.3_default_db_lsu.fasta
+SSUdbFAsrt	[DBDir]/MarkerG/sortmerna_database/v4.3_sens_clean/ssu/smr_v4.3_sens_clean_db_ssu.fasta
+LSUdbFAsrt	[DBDir]/MarkerG/sortmerna_database/v4.3/lsu/smr_v4.3_default_db_lsu.fasta
 #ITSidx	[DBDir]/
-SSUidx	/hpc-home/rel25vaz/my_files/sortmerna_database/ssu/idx
-LSUidx	/hpc-home/rel25vaz/my_files/sortmerna_database/lsu/idx
+SSUidx	[DBDir]/MarkerG/sortmerna_database/v4.3_sens_clean/ssu/idx
+LSUidx	[DBDir]/MarkerG/sortmerna_database/v4.3/lsu/idx
 
 #for lambda and LCA
 LSUdbFA	[DBDir]/MarkerG/SILVA/138.1/SLV_138.1_LSU.fasta
@@ -33,6 +34,7 @@ checkm2DB	[DBDir]/checkm2/CheckM2_database/uniref100.KO.1.dmnd
 GTDBtk_DB	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb/release226/	#Updated by get_gtdb.py
 #GTDBtk_mash	[DBDir]//MarkerG/GTDB_r207v2_MF/gtdb/mashD	#Updated by get_gtdb.py #Updated by get_gtdb.py
 #this is used for GTDB python script from Joachim and MAG->GTDB marker gene tasks.. independent of GTDBtk version
+GTDBtk_skani	[DBDir]/GTDBtk/Skani/
 GTDBPath	[DBDir]//MarkerG/GTDB_r226_MGTK/markerGenes	#Updated by get_gtdb.py
 GTDB_GTDB	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb_r226_lineageGTDB.tab	#Updated by get_gtdb.py
 GTDB_lnks	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb_r226_clustering.tab	#Updated by get_gtdb.py
@@ -45,7 +47,7 @@ GTDB_cutoff	[MFLRDir]/data/GTDBcutoffs.txt
 ##most databases are only required for direct mapping and/or gene catalog assignments ##
 FOAMhmm_DB	[DBDir]/Funct/FOAM/FOAM-hmm_rel1.hmm
 eggNOG_DB	[DBDir]/Funct/eggNOG10/eggnog4.proteins.all.fa
-ABresHMM_DB	/g/bork/forslund/morehmms/Resfams.hmm
+ABresHMM_DB	[DBDir]/Funct/ABR_FORS/Resfams.hmm
 eggNOG40_path_DB	[DBDir]/Funct/eggNOG10/
 eggNOGm_path_DB	[DBDir]/Funct/eggNOGmapper/v2.12/
 Moh_path_DB	[DBDir]/Funct/MohFuncts/
@@ -60,7 +62,19 @@ PATRIC_VIR_path_DB	[DBDir]/Funct/PATRIC/VirFac_KF/
 ABprod_path_DB	[DBDir]/Funct/ABprod_v1/
 VirDB_path_DB	[DBDir]/Funct/VIRDB/
 Module_path_DB	[DBDir]/Funct//myModules/Feb16/
-URE_path_DB	/ei/projects/e/eb9f7bdf-6585-47cb-8e72-3371fda92c44/data/urease_testing/gtdb/
+URE_path_DB	[DBDir]/Funct/URE/
+
+# Optional database locations populated by site/user configuration.
+Kaiju_path_DB
+Kraken_path_DB
+GTDBtk_mash	[DBDir]/MarkerG/GTDB_r207v2_MF/gtdb/mashD
+
+transpeptidaseHMM_DB	[DBDir]/HMMs/Transpeptidase.hmm
+ortho_hmm_DB	[DBDir]/HMMs/FungiAB/
+ortho_tree_DB	[DBDir]/Phylo/JaimeT2/
+ABRlegacyArdb_DB	[DBDir]/Funct/ABR_FORS/ardb.tabs.parsed
+ABRlegacyMap_DB	[DBDir]/Funct/ABR_FORS/ardb_and_reforg_mapping
+ABRlegacyBestHit_DB	[DBDir]/Funct/ABR_FORS/ardb_vs_reforg9f.overlap90shortest_famthres_or_symbol.sorted.besthit
 
 Kraken2_path_DB	[DBDir]/kraken2/
 Kraken2_mini	minikraken2_v1_8GB/

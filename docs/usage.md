@@ -6,7 +6,7 @@
 # Running MATAFILER4
 
 
-## Stabilized state workflow
+## Optional state inspection workflow
 
 For a normal run, no extra planning command or manual approval cycle is needed:
 
@@ -14,7 +14,17 @@ For a normal run, no extra planning command or manual approval cycle is needed:
 perl MATAF4.pl -map project.map [normal workflow flags] -submit 1
 ```
 
-MATAFILER4 performs an internal preflight before the ordinary pipeline logic:
+Normal runs now enter the ordinary pipeline logic directly. This avoids a
+full-workflow metadata scan before the per-sample completion checks. To opt in
+to the state planner and automatic safe repairs, add `-autoStatePlan 1`.
+
+Raw-read directories are also discovered lazily, when an unfinished sample
+reaches input staging. Completed samples therefore do not cause raw-input IO at
+startup. Use `-precheckInputDirs 1` to restore the all-sample startup scan when
+an eager validation/cache warm-up is wanted; add `-requireInput 1` if a missing
+or invalid input should abort that precheck.
+
+When enabled, the preflight:
 
 1. Inspect files, completion markers, samples, and assembly groups.
 2. Build a dependency-aware repair/submission plan.
@@ -23,22 +33,74 @@ MATAFILER4 performs an internal preflight before the ordinary pipeline logic:
 4. Reinspect the repaired state, then let the existing submission engine pick
    up unfinished work.
 
-This preserves the established workflow: users can rerun the same command and
-MATAFILER4 resumes incomplete samples. `-submit 0` previews safe repairs without
-deleting their targets. Set `-autoRepairState 0` to keep automatic inspection
-and planning but disable its repairs, or `-autoStatePlan 0` to disable the
-preflight entirely.
+Users can still rerun the same command and MATAFILER4 resumes incomplete
+samples from its ordinary completion markers. With `-autoStatePlan 1`,
+`-submit 0` previews safe repairs without deleting their targets, and
+`-autoRepairState 0` keeps inspection and planning but disables repairs.
 
 Each preflight writes an audit snapshot beneath
 `#OutPath/#RunID/LOGandSUB/workflow/`. Files are numbered by iteration, for
 example `state.iteration-000.json` and `plan.iteration-000.json`.
 
-With `-loopTillComplete`, the first preflight runs before submission. At every
-loop boundary, MATAFILER4 waits for the jobs submitted by the current pass,
-reinspects completed hybrid packages and assembly-group outputs, applies safe
-repairs, and only then starts the next pass. Completed members of a hybrid
-assembly group are retained while missing members are resubmitted; final group
-assembly remains dependent on all required preassembly packages.
+When both `-loopTillComplete` and `-autoStatePlan 1` are enabled, the first
+preflight runs before submission. Normally, at each loop boundary MATAFILER4
+waits for the jobs submitted by the current pass, reinspects completed hybrid
+packages and assembly-group outputs, applies safe repairs, and only then starts
+the next pass. Producer work is submitted in readiness waves: input staging,
+quality filtering, host filtering, assembly, annotation/mapping, and contig
+statistics must publish their outputs before later consumers are submitted.
+This prevents one failed upstream job from leaving an entire assembly group in
+`DependencyNeverSatisfied`.
+A sparse pass is handled differently: when it submits between
+one and `floor(window-size/4)` jobs (with a minimum threshold of one), the next
+sample block is added before the wait. The next block is also always added on
+the final allowed pass of the current block, even when that pass is busy. Only
+one block can be added per pass. This overlaps long-running tail work with new
+work while retaining bounded admission. The expanded range gets a fresh pass
+budget.
+Completed members of a hybrid assembly group are retained while missing members
+are resubmitted; final group assembly remains dependent on all required
+preassembly packages.
+As fully complete samples have their temporary data removed, the range start
+advances across that continuous prefix and later samples replenish the rolling
+range. After all requested output checks (or a terminal empty, empty-after-cleaning,
+or too-small classification) and final cleanup pass, MATAFILER4
+atomically writes `<SmplID>/MF4.sentinel.<SmplID>.json`. A later visit with
+the same sample definition and requested workflow reads this one file, reports
+`Sample already complete; no jobs submitted`, and skips the deeper output and
+log checks. A changed request, an explicit redo option, or an invalid sentinel
+removes it before normal sample processing continues. ContigStats, SNP, and
+binner work also invalidate the affected sentinel before changing outputs.
+
+When rolling processing reaches its normal end, MATAFILER4 makes one final
+full-range verification pass. Statistics are published only after a full-range
+pass finds neither newly submitted work nor active sample locks, and the summary
+stage reads each closed sample metagStats record directly from its sentinel. The
+first full-range pass starts immediately. If it finds active locks or submits
+more work, MATAFILER4 waits until every pending or running job submitted by this
+invocation has left the scheduler before making another full-range pass.
+
+With the default `-rmSmplLocks 0`, a pass may submit nothing because active
+samples are still locked. MATAFILER4 checks the scheduler in that case and
+reruns the current expanded range when at least one job remains active and the
+count is either below 3 or strictly below 1% of the range's sample count. These
+rescans consume the configured pass allowance; one additional final rescan is
+permitted, after which normal overlap or window advancement resumes. This guard
+does not run for dry runs, lock-removal mode, or when no scheduler jobs remain.
+
+At the beginning of each loop pass, sample lock job IDs are collected first.
+MATAFILER4 uses one `squeue` snapshot and bounded, multi-job `sacct` calls for
+tracked IDs no longer present in `squeue`; all samples and dependency checks in
+that pass reuse the result. `-maxConcurrentJobs` counts both running and pending
+jobs. Each submission is admitted from a conservative cached count, so the
+submission path does not normally query Slurm for every job. The exact count is
+refreshed after every `-schedulerCapacityCheckJobs` accepted submissions (default
+10), or earlier when the cached count plus intervening submissions reaches the
+cap. During `-loopTillComplete`, reaching the cap defers submissions rather
+than blocking inside one sample: output and cleanup checks continue for the
+remaining samples,
+then the same rolling range is retried after `-schedulerPollSeconds`. Outside
+loop mode, the cap retains its blocking behaviour.
 
 Group-wide invalidation is intentionally not classified as an automatic safe
 repair. An exact assembly-group membership change remains blocked unless the
@@ -265,6 +327,9 @@ system $cmd;
 ```
 
 Explanation: $inD is an input dir with complete genomes, the script will extract FGMs and build tree between genomes. `-AAtree 1` tells the script to use AA MSAs to build the phylogeny via iqTree. `-wildcardflag '/*.f*a'` tells the script how to look for reference genomes in $inD. 
+
+Between-species/broad phylogeny is the default. For a within-species or strain phylogeny, add `-withinSpecies 1`; this enables the stricter overlap and divergence filters. Broad mode still performs structural and occupancy checks on each locus.
+
 
 2. run the script `phyloScript.pl`
 

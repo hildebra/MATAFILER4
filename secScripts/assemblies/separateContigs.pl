@@ -8,9 +8,10 @@ use strict;
 use Getopt::Long qw( GetOptions );
 use File::Path qw(make_path remove_tree);
 use File::Spec;
-use Mods::GenoMetaAss qw(systemW is_integer reverse_complement_IUPAC gzipopen fileGZs fileGZe);
+use Mods::GenoMetaAss qw(systemW is_integer reverse_complement_IUPAC gzipopen fileGZs fileGZe contig_stats_coverage_complete);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
 use Mods::phyloTools qw( getE100);
+use Mods::SampleCompletion qw(invalidate_sample_completion);
 
 
 sub readFasta;
@@ -42,7 +43,11 @@ die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-inD, -assD, -subparts and -smplID are required\n"
 	unless length($inD) && length($assD) && length($subparts) && length($SmplNm);
 die "-threads must be a positive integer\n" unless $Nthreads > 0;
-die "Read lengths must be positive integers\n" unless $readLength > 0 && $readLengthSup > 0;
+$inD =~ s{[\\/]+$}{};
+$assD =~ s{[\\/]+$}{};
+invalidate_sample_completion($inD);
+$inD .= "/";
+$assD .= "/";
 my $tmpRoot = length($tmpD) ? $tmpD : File::Spec->catdir($inD, 'tmp');
 die "Refusing unsafe temporary root '$tmpRoot'\n"
 	if $tmpRoot eq '/' || $tmpRoot =~ /^\s*\.\.?\s*$/;
@@ -119,6 +124,16 @@ die "Mapping is not done yet (or not copied)\n" if (!-e "$inD/mapping/done.sto")
 
 
 if ($subparts =~ m/a/){
+	my $primaryCoverage = $inD."mapping/$SmplNm-smd.bam.coverage";
+	my $supportCoverage = $inD."mapping/$SmplNm.sup-smd.bam.coverage";
+	my $anyCoverageAvailable =
+		fileGZe($primaryCoverage)
+		|| fileGZe($supportCoverage)
+		|| contig_stats_coverage_complete($outDab, "Coverage")
+		|| contig_stats_coverage_complete($outDab, "Cov.sup");
+	die "Could not find primary or supplementary coverage for $SmplNm in $inD/mapping\n"
+		unless $anyCoverageAvailable;
+
 	geneAbundance($inD,0,$readLength) ;
 	geneAbundance($inD,1,$readLengthSup);
 }
@@ -300,23 +315,17 @@ sub geneAbundance{
 		$inF = $inD."mapping/$SmplNm.sup-smd.bam.coverage";
 		$oPrefix = "Cov.sup";
 	}
-	
-	
-	#LS_change commented and replaced for the next SECTION
-	if (!fileGZe($inF)){
-		if ($isSupport){
-			print "No support-read coverage found for $SmplNm, skipping support coverage\n";
-			return;
-		} else {
-			die "Could not find required coverage file $inF\n";
-		}
-	}
-
-	
-	if (!fileGZe($inF)){
-		print "Could not find $inF ($isSupport)\n";
+	if (contig_stats_coverage_complete($outDab, $oPrefix)){
+		print "$oPrefix coverage was already calculated in $outDab\n";
 		return;
 	}
+	if (!fileGZe($inF)){
+		my $kind = $isSupport ? "supplementary" : "primary";
+		print "No $kind-read coverage found for $SmplNm, skipping $kind coverage\n";
+		return;
+	}
+	my $kind = $isSupport ? "supplementary" : "primary";
+	die "$kind read length must be a positive integer\n" unless $readL > 0;
 	print "prefi: $oPrefix $isSupport\n";
 	#die "$inF\n";
 	#my $hr = readGFF($inD."assemblies/metag/genePred/genes.gff");
@@ -332,20 +341,15 @@ sub geneAbundance{
 	my $stone = "$outDab/$oPrefix.stone";
 	#print $stone."\n\n";
 	my $inFG = $inF.".gz";
-	if ( fileGZe( $outF7fin)  && fileGZs($outFfin)  && -e $stone){
-		print "Coverage ($isSupport) was already calculated in $outDab\n";
-		#some cleanup operations.. good to run, if already here..
-		if (-s $inFG && -s $inF){system "rm -f $inF";}
-		if (-s $outFfin && !-s "$outFfin.gz"){
-			print "gzipping existing output..\n";
-			systemW "$pigzBin -p $Nthreads $outDab/${oPrefix}.*";
-		}
-		#print "$outFfin\n";
-		return;
+	my $assemblyPointer = "$inD/assemblies/metag/assembly.txt";
+	unless (-e $assemblyPointer){
+		open(my $assemblyFH, ">", $assemblyPointer)
+			or die "Could not write $assemblyPointer: $!\n";
+		print {$assemblyFH} "$assD\n";
+		close($assemblyFH)
+			or die "Could not close $assemblyPointer: $!\n";
 	}
-	system "echo \"$assD\" > $inD/assemblies/metag/assembly.txt" unless (-e "$inD/assemblies/metag/assembly.txt");
 	print "Calculating coverage of assemblies..\n";
-	if (-s $outFfin && -s $outF2fin&& -s $outF3fin&& -s $outF4fin && -s $outF5fin && -s $outF6fin){print "Gene abundance was already calculated\n";return;}
 	my $clnCmd = "";
 	if (!-e $inFG && -s $inF){systemW "$pigzBin -p $Nthreads $inF";}
 	if (-e $inFG && !-s $inF){system "rm -f $inF";}

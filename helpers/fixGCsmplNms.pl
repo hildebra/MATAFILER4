@@ -6,8 +6,8 @@ use Mods::GenoMetaAss qw( readMapS  systemW readFastHD);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 
 
-my $maps = "/g/scb/bork/hildebra/data2/refData/Soil/PNAS_refs/other_soil.map";#,/g/scb/bork/hildebra/data2/refData/Soil/howe2014/iowa.map,/g/scb/bork/hildebra/data2/Soil_finland/soil_map.txt";
-my $GCD = "/g/scb/bork/hildebra/SNP/GCs/SoilCatv2b2/";
+my $maps = getProgPaths("legacyFixGCMap");
+my $GCD = getProgPaths("legacyFixGCDir");
 my ($hr,$hr2) = readMapS($maps);
 my %map = %{$hr};
 my @samples = @{$map{opt}{smpl_order}};

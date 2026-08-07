@@ -4,6 +4,7 @@
 #./SNPcalls.pl /g/bork3/home/hildebra/data/AnnaPry/161013_M00758_0551_000000000-ATWLT/Bsubtillis168.fasta /g/scb/bork/hildebra/Tamoc/ANNA/GlbMap/BS168 BS168
 use warnings;
 use strict;
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(readMap median);
 use Mods::Subm qw(qsubSystem emptyQsubOpt);
 
@@ -12,12 +13,12 @@ sub createConsensus;
 
 my $QSBoptHR = emptyQsubOpt(1,"");
 
-my $vcfcnsScr = "perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/helpers/SNP/vcf2cons.pl ";
+my $vcfcnsScr = getProgPaths("vcfCons_FB_scr");
 
-my $frDir = "/g/bork3/home/hildebra/bin/freebayes/bin/";#required for some python scripts in that dir
-my $frbBin = "$frDir/freebayes";
-my $vtBin = "/g/bork3/home/hildebra/bin/vt/vt";
-my $bcBin = "/g/bork3/home/hildebra/bin/bcftools-1.3.1/./bcftools"; 
+my $regionScript = getProgPaths("genRegions_scr");
+my $frbBin = getProgPaths("freebayes");
+my $vtBin = getProgPaths("vt");
+my $bcBin = getProgPaths("bcftools");
 
 
 my $par =0; #trigger to start parallizing freebayes
@@ -56,8 +57,8 @@ sub getRegionsBam(){
 	my @curReg;
 	my $regionFile = "$odir/regions_par.txt";
 	system "samtools faidx $refFA" unless (-e "$refFA.fai");
-	if (system "python $frDir/fasta_generate_regions.py $refFA.fai $splitFAsize > $regionFile\n"){
-		print "python $frDir/fasta_generate_regions.py $refFA.fai $splitFAsize > $regionFile\n";
+	if (system "$regionScript $refFA.fai $splitFAsize > $regionFile\n"){
+		print "$regionScript $refFA.fai $splitFAsize > $regionFile\n";
 		die "Can't gemerate region file:\n";
 	}
 	open my $handle, '<', $regionFile;
@@ -122,8 +123,8 @@ sub createConsensus($ $ $ $ ){
 	my $postcmd ="";
 
 	if ($myPar && $overwrite ){
-		my $vcf1stHd = "/g/bork3/x86_64/bin/python /g/bork3/home/hildebra/bin/vcflib/bin/vcffirstheader";
-		my $vcfStrSrt = "/g/bork3/home/hildebra/bin/vcflib/bin/./vcfstreamsort";
+		my $vcf1stHd = getProgPaths("vcffirstheader");
+		my $vcfStrSrt = getProgPaths("vcfstreamsort");
 		$postcmd .= "cat $tmpOut.* | $vcf1stHd | $vcfStrSrt -a > $oVcfCons\n";
 		$postcmd .= "bgzip $oVcfCons; tabix -p vcf $oVcfCons.gz\n";
 		#| $vcfcnsScr  >$ofasCons 2> $ofasCons.depStat\n\n";

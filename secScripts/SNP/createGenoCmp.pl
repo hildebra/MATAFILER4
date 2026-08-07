@@ -9,10 +9,13 @@ use Mods::IO_Tamoc_progs qw(getProgPaths);
 
 #my $blatBin = getProgPaths("blat");
 my $pigzBin = getProgPaths("pigz");
-my $nucmP = "/g/bork3/home/hildebra/bin/MUMmer3.23/";# getProgPaths("nucmer");
-my $inD1 = "/g/bork3/home/hildebra/Collab/AlexSNP/RefHMPmock";
-my $inD2 = "/g/bork3/home/hildebra/Collab/AlexSNP/RefHMPwrongStrain";
-my $outD = "/g/bork3/home/hildebra/Collab/AlexSNP/RefHMPmock/refGdiff/";
+my $nucmerBin = getProgPaths("nucmer");
+my $showCoordsBin = getProgPaths("showCoords");
+my $showSnpsBin = getProgPaths("showSnps");
+my $showTilingBin = getProgPaths("showTiling");# getProgPaths("nucmer");
+my $inD1 = getProgPaths("legacyGenoCmpInput1");
+my $inD2 = getProgPaths("legacyGenoCmpInput2");
+my $outD = getProgPaths("legacyGenoCmpOutput");
 system "mkdir -p $outD" unless (-d $outD);
 
 my @inRefG = ("Msmithii35061/640427121.fna","ABaumannii17978/640069301.fna","Aodontolyticus17982/640963058.fna",
@@ -27,11 +30,11 @@ for (my $i=0;$i<@outNames;$i++){
 	my $query = "$inD2/$inQueG[$i]";
 	my $outF = $outNames[$i];
 	my $tmpDelta = "$outD/$outF.delta";
-	my $cmd = "$nucmP/nucmer -maxmatch -c 60 -p $outD/$outF $ref $query \n";
+	my $cmd = "$nucmerBin -maxmatch -c 60 -p $outD/$outF $ref $query \n";
 
-	$cmd .= "$nucmP/show-coords -T -r -c -l $tmpDelta > $outD/$outF.coords\n";
-	$cmd .= "$nucmP/show-snps -T -C $tmpDelta > $outD/$outF.snps\n";
-	$cmd .= "$nucmP/show-tiling $tmpDelta > $outD/$outF.tiling\n";
+	$cmd .= "$showCoordsBin -T -r -c -l $tmpDelta > $outD/$outF.coords\n";
+	$cmd .= "$showSnpsBin -T -C $tmpDelta > $outD/$outF.snps\n";
+	$cmd .= "$showTilingBin $tmpDelta > $outD/$outF.tiling\n";
 
 	system $cmd;
 }

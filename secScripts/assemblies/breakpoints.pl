@@ -98,7 +98,7 @@ for my $id (@$order) {
 	}
 }
 close $out or die "Cannot close breakpoint TSV '$output': $!\n";
-print "Breakpoint detection summary\n",
+print STDERR "Breakpoint detection summary\n",
 	"  Low-coverage candidates: $candidate_count\n",
 	"  Supported breakpoints:   $reported\n",
 	"  Breakpoint bases:         $reported_bases\n",

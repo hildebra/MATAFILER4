@@ -27,6 +27,26 @@ MATAFILER4 creates many large temporary files. A stable configuration should use
 
 Relevant flags include `-globalTmpDir`, `-nodeTmpDir`, `-nodeHDDspace`, `-reduceScratchUse`, `-rm_tmpdir_reads` and `-rm_tmpInput`.
 
+When a submitted job requests node-local scratch and `nodeTmpDir` is configured,
+the submission wrapper creates a job-specific directory below `nodeTmpDir`,
+exports it as `TMPDIR`, and runs the job from that directory. Generated submission
+scripts and scheduler logs remain in their persistent `LOGandSUB` locations.
+
+With `-reduceScratchUse 1`, cleanup is released only after final assembly
+publication, ContigStats, configured binning, and configured ConsSNP/variant
+work are either already complete or represented by successful terminal scheduler
+dependencies. The cleanup worker verifies their published outputs again before
+removing sample-owned BAM/CRAM indexes, stale SNP BED files, or the sample
+scratch directory. Mapper and FASTA indexes adjacent to a generated assembly
+are retained until every member of that assembly group is complete. Indexes
+adjacent to external references are never removed.
+
+For assembly-independent runs (`-assembleMG 0`), assembly and ContigStats
+barriers are not required. Cleanup waits for the configured profiling and
+reference-mapping jobs, then removes only sample-owned temporary files and
+indexes. Binning, assembly consensus SNP, and structural-variant options require
+an enabled assembly mode and are rejected during option validation.
+
 ## Scheduler settings
 
 MATAFILER4 can autodetect supported schedulers, but this can be overridden with:
@@ -39,10 +59,19 @@ Supported systems in the documentation and source are Slurm, SGE/qsub and LSF/bs
 
 ```bash
 -maxConcurrentJobs 600
+-schedulerCapacityCheckJobs 10
 -killDepNever 1
 ```
 
-`-killDepNever 1` can remove Slurm jobs stuck in dependency states, but use it only when this matches your local scheduler policy.
+`-maxConcurrentJobs` counts all of the user's running and pending Slurm jobs,
+not only dependency-pending work. MATAFILER4 adds each accepted submission to
+the cached count and refreshes the exact scheduler count after
+`-schedulerCapacityCheckJobs` submissions (default 10), or sooner when the
+conservative count reaches the cap. In `-loopTillComplete` mode, a full
+queue defers only new submissions; sample completion and cleanup inspection
+continues, followed by a bounded scheduler polling delay and a retry of the same
+range. `-killDepNever 1` can remove Slurm jobs
+stuck in dependency states, but use it only when this matches your local scheduler policy.
 
 Sites where compute nodes do not normally have outbound network access can set
 `netQueue` in `config.txt` to a network-enabled queue or Slurm partition. Code

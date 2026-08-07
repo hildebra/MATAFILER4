@@ -42,8 +42,7 @@ system "$cmd\n";
 
 
 #second use diamond mappings to COG to get idea where the rest is hitting best
-my $DBpath = "/g/bork3/home/hildebra/DB/FUNCT/eggNOG10/";	my $refDB = "eggnog4.proteins.all.fa"; 
-die "diamond DB \"$DiaDBdir$refDB.db.dmnd\" doesnt exist\n" unless (-e "$DiaDBdir$refDB.db.dmnd");
+my $refDB = "eggnog4.proteins.all.fa";die "diamond DB \"$DiaDBdir$refDB.db.dmnd\" doesnt exist\n" unless (-e "$DiaDBdir$refDB.db.dmnd");
 my $outF = "$tmpPath/diaCOG.tab";
 #$DBcmd .= "cp $DBpath/NOG.members.tsv $DBpath/NOG.annotations.tsv $DBpath/all_species_data.txt $CLrefDBD\n";
 $cmd = "";

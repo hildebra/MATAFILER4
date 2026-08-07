@@ -1,356 +1,340 @@
-# script to plot MGS phylogenies in MF and automatically color them
-#(c) Klara Cerk
+# Plot an MGS phylogeny and automatically annotate phylum-level clades.
 
-#-------
-#Import libraries needed:
-#-------
 suppressPackageStartupMessages({
-library("ape")
-library("ggplot2")
-library("ggtree")
-library("tidytree")
-library("phangorn")
-library("phytools")
-library("dplyr")
-library("tidyr")
-library("reshape2")
+  library("ape")
+  library("ggplot2")
+  library("ggtree")
+  library("phytools")
 })
 
-#-------
-#Read in and prepare tree and metadata:
-#-------
-args = commandArgs(trailingOnly=TRUE)
-if (length(args)==0) {
-  stop("At least two arguments must be supplied (.treefile, MGS.matL7.txt).n", call.=FALSE)
+stop_with_usage <- function() {
+  stop(
+    "Usage: MGSTree_visual.R <MGS.matL7.txt> <tree file> <output PDF>",
+    call. = FALSE
+  )
 }
 
-inMeta = args[1] #MGS.matL7.txt
-inTree = args[2] #IQtree_allsites.treefile
-outPDF = args[3] #phyloTree.pdf
+read_taxonomy <- function(path, tip_labels) {
+  raw <- tryCatch(
+    read.delim(
+      path,
+      header = TRUE,
+      row.names = 1L,
+      check.names = FALSE,
+      stringsAsFactors = FALSE,
+      quote = "",
+      comment.char = ""
+    ),
+    error = function(e) {
+      stop(sprintf("Could not read metadata '%s': %s", path, conditionMessage(e)), call. = FALSE)
+    }
+  )
 
-if(0){
-##for manual input:
-  inMeta = "IQtree_allsites.treefile"
-  inTree = "Abundance/MGS.matL7.txt"
-  outPDF = "myOut.pdf"
-}
-
-
-tree <- read.tree(inTree)
-metadata_raw <- read.table(inMeta, header=TRUE, row.names=1, sep="\t")
-
-
-#Prepare and filter metadata as needed for later:
-metadata <- colsplit(rownames(metadata_raw), ";", names=c("superkingdom", "phylum", "class", "order", "family", "genus", "species", "MGS")) %>% #reshape2
-  filter(grepl("MGS*", MGS)) %>% #filter only taxa for MGS labels
-  select("MGS", "superkingdom", "phylum", "class", "order", "family", "genus", "species") %>% #put it in correct order
-  as.data.frame() %>% #put it in correct format
-  mutate(species = ifelse(species == "?",paste(genus, "unclass") ,species)) #if there is ?, change it to genus unclass
-
-
-#Lets prepare tree and use ggtree to get info needed:
-gg_spTree <- ggtree(tree, layout = 'circular') 
-gg_spTree.ann <- gg_spTree %<+% metadata #ggtree
-
-
-#Re-rooting the tree:
-#Identify the Archaea edge: if it's present root the tree based on it, if not use midpoint rooting:
-if (length((gg_spTree.ann$data %>% filter(superkingdom == "Archaea"))$label)>0 ) {
-  edgeArch <- (gg_spTree.ann$data %>% filter(superkingdom == "Archaea"))$label # identify Archaea edge #tidytree
-  print(paste0("New root is based on Archea outgroup ", edgeArch))
-  spTree.NewRoot <- root(tree, edgeArch, resolve.root = TRUE, edgelabel=TRUE) # reroot tree at Archaea
-  print(paste0("Tree was re-rooted"))
-}else {
-  spTree.NewRoot <- midpoint.root(tree)# or re-root tree at midpoint
-  print(paste0("Tree was re-rooted based on midpoint rooting."))
-}
-
-
-#-------
-#All the custom functions needed: #phagorn
-#-------
-#######
-###get_unique_ancestors: returns the list of all unique ancestors of the MRCA nodes in the tree:
-#@cladedf - dataframe with 2 columns: clade and node (MRCA of the clade)
-#@spTree - phylo tree from which the cladedf was derived (in MFF is IQtree_allsites.treefile)
-
-get_unique_ancestors <- function(cladesdf, spTree) {
-  # Initialize an empty list to store the unlisted ancestors
-  all_ancestors_combined <- list()
-  
-  # Loop over each node in clades.df$node to get ancestors for the current node
-  for (node in cladesdf$node) {
-    ancestors <- Ancestors(spTree, node)
-    all_ancestors_combined <- c(all_ancestors_combined, unlist(ancestors))
+  taxonomy_names <- c(
+    "superkingdom", "phylum", "class", "order",
+    "family", "genus", "species", "MGS"
+  )
+  fields <- strsplit(rownames(raw), ";", fixed = TRUE)
+  valid <- lengths(fields) == length(taxonomy_names)
+  if (!all(valid)) {
+    warning(sprintf(
+      "Ignoring %d metadata row(s) that do not contain exactly eight semicolon-separated taxonomy fields.",
+      sum(!valid)
+    ), call. = FALSE)
+    fields <- fields[valid]
   }
-  
-  # Convert the combined list into a single list and make it unique
-  all_ancestors_unique <- unique(unlist(all_ancestors_combined))
-  # return the unique list of all ancestors
-  return(all_ancestors_unique)
-}
-
-######
-###get_overlaping_node: return the overlaping nodes between ancestors of MRCA tree nodes and all tree nodes, 
-#and overlaping clade names:
-#@cladedf - dataframe with 2 columns: clade and node (MRCA of the clade)
-#@spTree - phylo tree from which the cladedf was derived (in MFF is IQtree_allsites.treefile)
-
-get_overlaping_node <- function(cladesdf, spTree) {
-  # Initialize an empty list to store the overlaping nodes
-  anb_only <- list()
-  # Get ancestors for the current node, and check if they overlap with any other node's ancestors
-  for (node in cladesdf$node) {
-    anb <- Ancestors(spTree, node)[which(Ancestors(spTree, node) %in% cladesdf$node)]
-    anb_only <- c(anb_only, unlist(anb))
+  if (!length(fields)) {
+    stop("The metadata contains no valid eight-rank taxonomy rows.", call. = FALSE)
   }
-  
-  all_anb_unique <- unique(unlist(anb_only))  
-  # Initialize an empty list to store the overlaping node's clade names
-  name_only <- list()
-  for (i in all_anb_unique) {
-    clade_name <- cladesdf$clade[cladesdf$node == i]
-    name_only <- c(name_only, unlist(clade_name))
+
+  metadata <- as.data.frame(
+    do.call(rbind, fields),
+    stringsAsFactors = FALSE
+  )
+  names(metadata) <- taxonomy_names
+  metadata[] <- lapply(metadata, trimws)
+
+  metadata <- metadata[grepl("^MGS", metadata$MGS) & nzchar(metadata$phylum), , drop = FALSE]
+  if (!nrow(metadata)) {
+    stop("The metadata contains no MGS rows with a phylum assignment.", call. = FALSE)
   }
-  
-  all_clade_name <- unique(unlist(name_only))
-  #return the overlaping nodes and their clade names
-  return(list(overlaping_nodes=all_anb_unique,  clade_name=all_clade_name))
-}
 
-########
-###find_and_check_children: Finds  children of each ancestor of overlapping node and of each MRCA tree node, and checks
-#if any children are not in the unique ancestors and if any ancestors children are not in the children's tree:
-#@cladedf - dataframe with 2 columns: clade and node (MRCA of the clade)
-#@spTree - phylo tree from which the cladedf was derived (in MFF is IQtree_allsites.treefile)
-#@node - the overlaping nodes identified with get_overlaping_node function
-#@ancestors - all unique ancestors of the MRCA tree nodes identified with get_unique_ancestors
-
-find_and_check_children <- function(node, spTree, ancestors, clades_df) {
-  children <- list()
-  
-  # Find children of each ancestor of overlapping node (node)
-  for (ancestor in node) { 
-    ancestor_children <- Children(spTree, ancestor)
-    children[[ancestor]] <- ancestor_children
+  duplicated_mgs <- duplicated(metadata$MGS)
+  if (any(duplicated_mgs)) {
+    warning(sprintf(
+      "Ignoring %d duplicate MGS metadata row(s); the first assignment is used.",
+      sum(duplicated_mgs)
+    ), call. = FALSE)
+    metadata <- metadata[!duplicated_mgs, , drop = FALSE]
   }
-  
-  children <- unlist(children)
-  
-  # Find children of each MRCA tree node:
-  children_tree <- list()
-  for (nodet in ancestors) { 
-    ancestort_children <- Children(spTree, nodet)
-    children_tree[[nodet]] <- ancestort_children
+
+  metadata <- metadata[metadata$MGS %in% tip_labels, , drop = FALSE]
+  if (!nrow(metadata)) {
+    stop("None of the MGS identifiers in the metadata match a tree tip.", call. = FALSE)
   }
-  
-  
-  children_tree <- unlist(children_tree)
-  unmatched_tree1 <- setdiff(children_tree, ancestors)
-  unmatched_tree2 <- setdiff(unmatched_tree1, clades_df$node)
-  
-  # Check if any children are not in the ancestors
-  unmatched_children <- setdiff(children, ancestors) #ancestors
-  # Check if any ancestors children are not in the children's tree
-  unmatched_children_tree <- union(unmatched_tree2, unmatched_children)
-  rest_children <- setdiff(children, unmatched_children)
-  
-  return(list(children = children, unmatched_children = unmatched_children, rest_children = rest_children, unmatched_children_tree = unmatched_children_tree))
+
+  missing_metadata <- setdiff(tip_labels, metadata$MGS)
+  if (length(missing_metadata)) {
+    warning(sprintf(
+      "%d of %d tree tips have no matching MGS metadata and will remain unannotated.",
+      length(missing_metadata), length(tip_labels)
+    ), call. = FALSE)
+  }
+
+  metadata$species[metadata$species %in% c("", "?")] <- paste(
+    metadata$genus[metadata$species %in% c("", "?")],
+    "unclass"
+  )
+  # ggtree's `%<+%` joins metadata onto the tree by renaming the *first*
+  # column of this data frame to "label" and matching it against the tree's
+  # tip labels. The identifier column (MGS) must therefore come first; and
+  # since that rename creates a "label" column itself, we must not also keep
+  # a separately-named "label" column, or dplyr::rename() fails with
+  # "Names must be unique" (duplicate "label" columns).
+  metadata <- metadata[, c("MGS", setdiff(names(metadata), "MGS"))]
+  metadata
 }
 
-#######
-###unnest_dataframes: since the output can consist of several lists inside of lists, here is function to change those into dataframes: 
-unnest_dataframes <- function(x) {
-  y <- do.call(data.frame, x)
-  if("data.frame" %in% sapply(y, class)) unnest_dataframes(y)
-  y
-}
+root_tree <- function(tree, metadata) {
+  # Group tip labels by superkingdom (e.g. Archaea vs Bacteria) so we can try
+  # rooting the tree between whichever superkingdoms are actually present,
+  # rather than assuming a single fixed outgroup taxon.
+  by_superkingdom <- split(metadata$MGS, metadata$superkingdom)
+  by_superkingdom <- lapply(by_superkingdom, intersect, tree$tip.label)
+  by_superkingdom <- by_superkingdom[lengths(by_superkingdom) > 0L]
 
+  if (length(by_superkingdom) >= 2L) {
+    message(sprintf(
+      "Detected %d superkingdom(s) among the tips: %s.",
+      length(by_superkingdom), paste(names(by_superkingdom), collapse = ", ")
+    ))
 
-#-------
-#Analysis:
-#-------
+    # Try the smallest superkingdom group as the outgroup first (most likely
+    # to be genuinely monophyletic and gives the best-supported root
+    # placement between the represented superkingdoms); if it isn't
+    # monophyletic or rooting otherwise fails, fall through to the next
+    # smallest superkingdom.
+    ordered <- by_superkingdom[order(lengths(by_superkingdom))]
+    for (name in names(ordered)) {
+      outgroup <- ordered[[name]]
+      if (length(outgroup) >= length(tree$tip.label)) {
+        next
+      }
 
-#Detect clade nodes and their names, based on metadata (here we are using phylum):
-#Make dataframe for clade nodes
-clades.df <- data.frame(
-  clade=unique(metadata$phylum),
-  node=NA
-)
-#Find the most recent common ancestor for each clade
-for (i in 1:length(clades.df$clade)) {
-  
-  clades.df$node[i] <- MRCA(spTree.NewRoot, metadata$MGS[metadata$phylum == clades.df$clade[i]])
-  
-}
+      is_mono <- length(outgroup) == 1L || isTRUE(ape::is.monophyletic(tree, outgroup))
+      if (!is_mono) {
+        warning(sprintf(
+          "%s tips are not monophyletic; trying another superkingdom split.",
+          name
+        ), call. = FALSE)
+        next
+      }
 
-
-#Sometimes the clades.df loop can miss clades that are not monophyletic (Paraphyly/Polyphyly); 
-#therefore when you assign colour to them, the colour can overlap the whole tree: 
-#Main loop in order to identify overlaping nodes, their names and their new children (which don't overlap):
-
-# Iterate over each node
-ancestors <- get_unique_ancestors (clades.df, spTree.NewRoot)
-anb <- get_overlaping_node(clades.df, spTree.NewRoot)
-
-if(is.null(anb) == "FALSE"){
-  
-#Initialize data frame to collect old and new info:
-clades.df.old <- data.frame(
-  clade = NA,
-  node = anb$overlaping_nodes,
-  new_nodes = NA,
-  extra_nodes = NA)
-
-# Initialize the initial set of children
-for (i in 1:length(clades.df.old$node)) {
-  clades.df.old$clade[i] <- anb$clade_name[anb$overlaping_nodes == clades.df.old$node[i]]
-  rest_children <- clades.df.old$node[i] 
-  
-  # Initialize an empty list to store children lists
-  all_new_nodes <- list()
-  all_extra_node <- list()
-  
-  # Loop until both rest_children have exactly two elements
-  while (!(length(rest_children) == 2 && all(length(rest_children) == 2))) {
-    # Call the function to find and check children
-    newnodes_list <- list()
-    extranode_list <- list()
-    
-    result <- find_and_check_children(rest_children, spTree.NewRoot, ancestors, clades.df)
-    newnodes_list <- setdiff(c(newnodes_list, list(result$unmatched_children)), clades.df$node)
-    extranode_list <- setdiff(c(extranode_list, list(result$unmatched_children_tree)), newnodes_list)
-    
-    all_new_nodes <- append(all_new_nodes, newnodes_list)
-    all_extra_node <- append(all_extra_node, extranode_list)
-    # Retrieve the updated rest_children from the result
-    rest_children <- result$rest_children
-    
-    # If there are no more rest_children, break the loop
-    if (length(rest_children) == 0) {
-      break
-    }}
-  
-  # Add the current set of children to the list 
-  clades.df.old$new_nodes[i] <- list(setdiff(unlist(all_new_nodes), clades.df$node)) 
-  clades.df.old$extra_nodes[i] <- list(setdiff(unlist(all_extra_node), clades.df$node))
-  
-}
-
-clades.df.old$new_nodes <- as.data.frame(do.call(rbind,clades.df.old$new_nodes))
-
-
-#Reorganise the output, so you can combine it with previous clade.df data:
-output_df <- clades.df.old %>%
-  select(c(clade, node, new_nodes)) %>%
-  unnest_dataframes() %>%
-  pivot_longer(!c(clade, node), names_to = "nodes_name", values_to = "nodes") %>% #tidyverse
-  select(c(clade, nodes)) %>%
-  rename(node = nodes)
-
-
-#Capture extra nodes that are not part of ancestry(children) of one node - polyphyly:
-extra_nodes2 <- setdiff(unique(unlist(clades.df.old$extra_nodes)), unique(unlist(clades.df.old$new_nodes)))
-
-if (length(extra_nodes2)>0){
-  
-  clades.df.extra <- data.frame(
-    clade = NA,
-    node = extra_nodes2)
-  
-  for (node in extra_nodes2) {
-    ances.extra <- Ancestors(spTree.NewRoot, node)
-    for (i in 1:length(ances.extra)) {
-      overlap <- anb$overlaping_nodes == ances.extra[i]
-      if(any(overlap) == TRUE){
-        clades.df.extra$clade <- anb$clade_name[overlap]
+      rooted <- tryCatch(
+        ape::root(tree, outgroup = outgroup, resolve.root = TRUE),
+        error = function(e) {
+          warning(sprintf(
+            "Could not root between superkingdoms using %s as the outgroup (%s).",
+            name, conditionMessage(e)
+          ), call. = FALSE)
+          NULL
+        }
+      )
+      if (!is.null(rooted)) {
+        message(sprintf(
+          "Tree rooted between superkingdoms using %d %s tip(s) as the outgroup.",
+          length(outgroup), name
+        ))
+        return(rooted)
       }
     }
+
+    warning(
+      "Could not root between the represented superkingdoms; using midpoint rooting instead.",
+      call. = FALSE
+    )
   }
-  
-  output_df.all <- rbind(output_df, clades.df.extra)
-  
-} else {
-  output_df.all <- output_df #if there is no polyphyly in the tree
+
+  message("Tree rooted using midpoint rooting.")
+  phytools::midpoint.root(tree)
 }
 
+# Return maximal subtrees whose annotated descendant tips all have the same
+# phylum. This naturally splits paraphyletic/polyphyletic phyla and avoids the
+# overlapping-MRCA loops that previously failed on ordinary tree topologies.
+find_pure_clades <- function(tree, metadata) {
+  tip_count <- length(tree$tip.label)
+  node_count <- tip_count + tree$Nnode
+  purity <- rep(NA_character_, node_count)
+  purity[match(metadata$MGS, tree$tip.label)] <- metadata$phylum
 
-#Combine old clade.df with new info and update clade.df:
-clades.df.new <- rbind(clades.df, output_df.all) 
+  children <- split(tree$edge[, 2L], tree$edge[, 1L])
+  parent <- rep(NA_integer_, node_count)
+  parent[tree$edge[, 2L]] <- tree$edge[, 1L]
+  remaining <- integer(node_count)
+  parent_nodes <- as.integer(names(children))
+  remaining[parent_nodes] <- lengths(children)
 
-for (i in 1:length(anb$overlaping_nodes)){
-  clades.df.new <- filter(clades.df.new, !node == anb$overlaping_nodes[i])
+  # Process tips upward. An internal node is queued only after all of its
+  # children have been evaluated, so this works for binary and multifurcating trees.
+  queue <- integer(node_count)
+  queue[seq_len(tip_count)] <- seq_len(tip_count)
+  queue_length <- tip_count
+  cursor <- 1L
+  while (cursor <= queue_length) {
+    node <- queue[[cursor]]
+    cursor <- cursor + 1L
+    ancestor <- parent[[node]]
+    if (is.na(ancestor)) {
+      next
+    }
+
+    remaining[[ancestor]] <- remaining[[ancestor]] - 1L
+    if (remaining[[ancestor]] == 0L) {
+      child_values <- purity[children[[as.character(ancestor)]]]
+      if (all(!is.na(child_values)) && length(unique(child_values)) == 1L) {
+        purity[[ancestor]] <- child_values[[1L]]
+      }
+      queue_length <- queue_length + 1L
+      queue[[queue_length]] <- ancestor
+    }
+  }
+
+  pure_nodes <- which(!is.na(purity))
+  maximal <- vapply(
+    pure_nodes,
+    function(node) {
+      ancestor <- parent[[node]]
+      is.na(ancestor) || is.na(purity[[ancestor]]) || purity[[ancestor]] != purity[[node]]
+    },
+    logical(1L)
+  )
+
+  data.frame(
+    clade = unname(purity[pure_nodes[maximal]]),
+    node = pure_nodes[maximal],
+    stringsAsFactors = FALSE
+  )
 }
 
-}else {
-  clades.df.new <- clades.df
+main <- function(args) {
+  if (length(args) < 3L) {
+    stop_with_usage()
+  }
+
+  in_meta <- args[[1L]]
+  in_tree <- args[[2L]]
+  out_pdf <- args[[3L]]
+  if (!file.exists(in_meta)) {
+    stop(sprintf("Metadata file does not exist: %s", in_meta), call. = FALSE)
+  }
+  if (!file.exists(in_tree)) {
+    stop(sprintf("Tree file does not exist: %s", in_tree), call. = FALSE)
+  }
+
+  tree <- tryCatch(
+    ape::read.tree(in_tree),
+    error = function(e) stop(sprintf("Could not read tree '%s': %s", in_tree, conditionMessage(e)), call. = FALSE)
+  )
+  if (inherits(tree, "multiPhylo")) {
+    stop("The input must contain exactly one tree.", call. = FALSE)
+  }
+  if (is.null(tree) || !inherits(tree, "phylo") || length(tree$tip.label) < 2L) {
+    stop("The input does not contain a valid tree with at least two tips.", call. = FALSE)
+  }
+  if (anyDuplicated(tree$tip.label)) {
+    stop("Tree tip labels must be unique.", call. = FALSE)
+  }
+
+  metadata <- read_taxonomy(in_meta, tree$tip.label)
+  rooted_tree <- root_tree(tree, metadata)
+  clades <- find_pure_clades(rooted_tree, metadata)
+  if (!nrow(clades)) {
+    stop("No annotated clades could be identified in the tree.", call. = FALSE)
+  }
+
+  tree_plot <- ggtree(rooted_tree, layout = "circular")
+  tree_xmax <- suppressWarnings(max(tree_plot$data$x, na.rm = TRUE))
+  if (!is.finite(tree_xmax) || tree_xmax <= 0) {
+    tree_xmax <- 1
+  }
+
+  plot0 <- tree_plot %<+% metadata +
+    geom_tree(aes(color = phylum), linewidth = 0.8) +
+    geom_tiplab(aes(label = label), size = 1.4) +
+    xlim(NA, tree_xmax * 1.55) +
+    theme(
+      legend.position = "bottom",
+      legend.background = element_rect(),
+      legend.key = element_blank(),
+      legend.key.size = grid::unit(0.4, "cm"),
+      legend.text = element_text(size = 6),
+      title = element_text(size = 8)
+    )
+
+  plot1 <- tree_plot %<+% metadata +
+    geom_highlight(
+      data = clades,
+      aes(node = node, fill = clade),
+      show.legend = TRUE
+    ) +
+    geom_tiplab(aes(label = species), size = 1.8) +
+    xlim(NA, tree_xmax * 1.55) +
+    theme(
+      legend.position = "bottom",
+      legend.background = element_rect(),
+      legend.key = element_blank(),
+      legend.key.size = grid::unit(0.4, "cm"),
+      legend.text = element_text(size = 5),
+      title = element_text(size = 8)
+    )
+
+  clade_names <- sort(unique(clades$clade))
+  grey_values <- grDevices::gray.colors(
+    length(clade_names), start = 0.97, end = 0.72
+  )
+  names(grey_values) <- clade_names
+  label_offset <- tree_xmax * 0.08
+
+  plot2 <- tree_plot %<+% metadata +
+    geom_highlight(
+      data = clades,
+      aes(node = node, fill = clade),
+      alpha = 1,
+      align = "both",
+      extend = tree_xmax * 0.02,
+      show.legend = FALSE
+    ) +
+    geom_cladelab(
+      data = clades,
+      mapping = aes(node = node, label = clade),
+      fontsize = 3,
+      align = TRUE,
+      angle = "auto",
+      offset.text = label_offset
+    ) +
+    geom_tree(linewidth = 0.3) +
+    geom_tippoint() +
+    xlim(NA, tree_xmax * 2.1) +
+    scale_fill_manual(values = grey_values)
+
+  output_dir <- dirname(out_pdf)
+  if (!dir.exists(output_dir) && !dir.create(output_dir, recursive = TRUE)) {
+    stop(sprintf("Could not create output directory: %s", output_dir), call. = FALSE)
+  }
+
+  grDevices::pdf(out_pdf)
+  device_number <- grDevices::dev.cur()
+  on.exit({
+    if (device_number %in% grDevices::dev.list()) {
+      grDevices::dev.off(device_number)
+    }
+  }, add = TRUE)
+  print(plot0)
+  print(plot1)
+  print(plot2)
+  grDevices::dev.off(device_number)
+  message(sprintf("Wrote phylogeny plots to %s", out_pdf))
 }
 
-#-------
-#Figures
-#-------
-#With all the info, we can color the new tree:
-gg_spTree_new<-ggtree(spTree.NewRoot, layout = 'circular')
-
-#Figure0:
-gg.tree.new0 <- gg_spTree_new %<+% metadata + 
-  geom_tree(aes(color=phylum), size=0.8) +
-  geom_tiplab(aes(label=label), size=1.4) +
-  xlim(NA, 3.7) +
-  theme(legend.position = 'bottom',
-        legend.background = element_rect(),
-        legend.key = element_blank(), # removes the border
-        legend.key.size = unit(0.4, 'cm'), # sets overall area/size of the legend
-        legend.text = element_text(size = 6), # text size
-        title = element_text(size = 8))
-
-#Figure1:
-#Try to add highlights based on previous clade info
-gg.tree.new <- gg_spTree_new %<+% metadata +
-  geom_highlight(data=clades.df.new, aes(node=node, fill=clade),
-                 type = "roundrect",
-                 #align="right",
-                 #extend=0.1,
-                 show.legend=TRUE) +
-  xlim(NA, 2.4) +
-  geom_tiplab(aes(label=species), size=1.8) +
-  theme(legend.position = 'bottom',
-        legend.background = element_rect(),
-        legend.key = element_blank(), # removes the border
-        legend.key.size = unit(0.4, 'cm'), # sets overall area/size of the legend
-        legend.text = element_text(size = 5), # text size
-        title = element_text(size = 8))
-
-
-#Figure2:
-gg.tree.new2 <- gg_spTree_new %<+% metadata +
-  geom_highlight(data=clades.df.new, 
-                 aes(node=node, fill=as.factor(clade)),
-                 alpha=1,
-                 align="right",
-                 extend=0.04,
-                 show.legend=FALSE) +
-  geom_cladelab(data=clades.df.new,
-                mapping=aes(node=node, label=clade),
-                fontsize=3,
-                align="TRUE",
-                angle="auto",
-                #offset=0.04,
-                offset.text=0.28) +
-  geom_tree(linewidth=0.3) +
-  geom_tippoint() +
-  xlim(NA, 5) +
-  scale_fill_manual(values=c("#F5F5F5", "#ECECEC", "#C1C1C1", "#FFFFFF", "#F0F0F0", "#CCCCCC", "#c4c4c4", "#FAFAFA","#ebebeb", 
-                             "#d4d4d4", "#CECECE", "#EBEBEB" , "#e0e0e0","#c8c8c8",
-                             "#e5e5e5", "#DADADA", "#cecece", "#C1C1C1")) 
-
-
-#-------
-#Output
-#-------
-pdf(outPDF)
-plot(gg.tree.new0)
-plot(gg.tree.new)
-plot(gg.tree.new2)
-dev.off()
-
+main(commandArgs(trailingOnly = TRUE))

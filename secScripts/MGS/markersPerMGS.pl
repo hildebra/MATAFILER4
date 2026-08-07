@@ -1,5 +1,6 @@
 #!/usr/bin/env perl
 #script to extract all marker genes associated to single MGS. Used to later make sure each marker gene is only used once in abundance calculations
+# 2026-07-22: deduplicate marker links and exclude markers shared between MGS.
 use warnings;
 use strict;
 use Data::Dumper; 
@@ -7,6 +8,8 @@ use Getopt::Long qw( GetOptions );
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(systemW gzipopen);
 use Mods::Binning qw (readMGSrevRed);
+use Mods::GTDBTaxonomy qw(read_gtdb_taxonomy);
+use File::Path qw(make_path);
 
 
 my $MAGrep = ""; my $GCdir = "";
@@ -42,10 +45,10 @@ my $outFile2 = "$outDir/marker2MGS.LCA.txt";
 my $primaryClusF = "$GC_bin_dir/$Binner.clusters.core"; 
 my $matrOutDir = "$outDir/Abundance/";
 $MGStaxF = "$outDir/GTDBTK.tax" if ($MGStaxF eq "");
-system "mkdir -p $matrOutDir" unless (-d $matrOutDir);
+make_path($matrOutDir);
 
 
-if ($MAGrep eq ""){$MAGrep = "$GC_bin_dir/LOGandSUB/MAGvsGC.txt.gz"; print "Inferring MAGMGS file at $MAGrep\n";}
+if ($MAGrep eq ""){$MAGrep = "$GC_bin_dir/MAGvsGC.txt.gz"; print "Inferring MAGMGS file at $MAGrep\n";}
 #my $outFile = "$markerGdir/marker2MGS.txt";
 
 
@@ -114,7 +117,10 @@ foreach my $MGS (@MGSids){
 		foreach (@genes){ 
 			#needs to control for what is found in reference MGS clustering to attain clean profile..
 			if (exists($oriG2MGS{$_}{$MGS})){
-				push(@{$gene2MGS{$_}}, $MGS);  $geneAss2MGS++;
+				unless (exists($gene2MGS{$_}{$MGS})) {
+					$gene2MGS{$_}{$MGS} = 1;
+					$geneAss2MGS++;
+				}
 			} else {
 				$geneDirtyMGS{$_} = 1;
 				$geneNotAss2MGS++;
@@ -140,7 +146,7 @@ for (my $i=0; $i < (@MGcats); $i++){
 }
 close Ox;
 
-@cntPerCat = sort(@cntPerCat);
+@cntPerCat = sort { $a <=> $b } @cntPerCat;
 for (my $i=0; $i < (@MGcats); $i++){ 
 	print int(10*$cntPerCat[$i])/10 . " ";
 }
@@ -174,19 +180,11 @@ foreach my $GTcat (@MGcats){
 	close I;
 }
 
-#read MGS tax
-my %MGStax;
-open I,"<$MGStaxF" or die $!;
-while (<I>){
-	chomp; my @spl = split /\t/;
-	#$MGStax{$spl[0]} = $spl[1];
-	my $id = shift @spl;
-	$spl[0] = "?" if ($spl[0] =~ m/Unclassified Bacteria/);
-	@spl = split /;/,$spl[0];
-	while (@spl < 7){push(@spl,"?");}
-	$MGStax{$id} = join(";",@spl);
-}
-close I;
+# Read MGS taxonomy while excluding the canonical header (and duplicate
+# headers present in summaries produced by older bac120/ar53 concatenation).
+# Header-only and malformed files now fail here instead of introducing a
+# synthetic MGS named "user_genome" into downstream abundance tables.
+my %MGStax = %{read_gtdb_taxonomy($MGStaxF)};
 print "Read " . scalar(keys %MGStax) . " MGS tax annoations\n"; 
 
 
@@ -199,7 +197,10 @@ my @mgkeys = sort(keys %LCA);
 my %newMGStax;
 foreach my $mark (@mgkeys){
 	if (exists($gene2MGS{$mark})){
-		my @MGSs = @{$gene2MGS{$mark}};
+		my @MGSs = sort keys %{$gene2MGS{$mark}};
+		# Shared markers are neither independent abundance evidence nor safe
+		# evidence for replacing an unresolved MGS taxonomy.
+		next if @MGSs > 1;
 		foreach my $MGSl (@MGSs){
 			$newMGStax{$MGSl}{$LCA{$mark}}++;
 		}
@@ -252,8 +253,14 @@ print O2 "geneID\t$LCAhead;MGS\n";
 foreach my $mark (@mgkeys){
 	$wrLCA++;
 	if (exists($gene2MGS{$mark})){
-		my @MGSs = @{$gene2MGS{$mark}};
-		$ambGenes ++ if (@MGSs > 1);
+		my @MGSs = sort keys %{$gene2MGS{$mark}};
+		# A shared marker cannot provide independent abundance evidence for more
+		# than one MGS.  Excluding it avoids counting the same catalog profile in
+		# every candidate MGS while retaining it in marker2MGS.txt for diagnostics.
+		if (@MGSs > 1) {
+			$ambGenes++;
+			next;
+		}
 		foreach my $MGSl (@MGSs){
 			die "Couldn't find MGS tax for $MGSl!\n" unless (exists($MGStax{$MGSl}));
 			print O $mark."\t".$MGStax{$MGSl}.";$MGSl\n";

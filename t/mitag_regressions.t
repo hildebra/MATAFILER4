@@ -10,7 +10,10 @@ use IPC::Open3;
 use Symbol qw(gensym);
 use Test::More;
 
-my $root = File::Spec->catdir($Bin, '..');
+my $root = File::Spec->rel2abs(File::Spec->catdir($Bin, '..'));
+my $test_lib = File::Spec->catdir($root, 't', 'lib');
+local $ENV{PERL5OPT} = join ' ', grep { defined($_) && length($_) }
+	"-I$root", "-I$test_lib", '-MMFTestConfig', $ENV{PERL5OPT};
 my $scripts = File::Spec->catdir($root, 'secScripts', 'miTag');
 my $tmp = tempdir(CLEANUP => 1);
 
@@ -54,6 +57,7 @@ my $unrelated = "$outputPrefix.keep";
 write_file($unrelated, "preserve\n");
 my ($status, $output, $errors) = run_script('miTagTaxTable.pl', 'family', $outputPrefix, $hierarchyDir);
 is($status, 0, 'tax table supports a non-prefix subset of requested ranks');
+diag($errors) if $status;
 my $familyOutput = read_gzip("$outputPrefix.family.txt.gz");
 like($familyOutput, qr/^family\tsample$/m, 'gzip suffix is removed from the sample column name');
 like($familyOutput, qr/^Bacteria;Firmicutes;Bacilli;Bacillales;Bacillaceae\t1$/m,
@@ -79,4 +83,46 @@ like($errors, qr/same number of files/, 'paired-read mismatch has a clear diagno
 isnt($status, 0, 'out-of-range LCA length tolerance is rejected');
 like($errors, qr/lengthTolerance must be between 0 and 1/, 'length-tolerance validation is explicit');
 
+
+my $customConfig = File::Spec->catfile($tmp, 'matafiler.cfg');
+my $missingSsu = File::Spec->catfile($tmp, 'custom-ssu.fasta');
+my $existingLsu = File::Spec->catfile($tmp, 'custom-lsu.fasta');
+my $indexDir = File::Spec->catdir($tmp, 'sortmerna-index');
+mkdir $indexDir or die $!;
+write_file($existingLsu, ">lsu\nACGT\n");
+write_file($customConfig, join("\n",
+	"MFLRDir\t$root",
+	"BINDir\t$tmp",
+	"Rpath\tR",
+	"DBDir\t$tmp",
+	"CONDcmd\tconda",
+	"CONDA\tshell hook",
+	"Rscript\tRscript",
+	"sortmerna\t/bin/true",
+	"SSUdbFAsrt\t$missingSsu",
+	"LSUdbFAsrt\t$existingLsu",
+	"SSUidx\t$indexDir",
+	"LSUidx\t$indexDir",
+)."\n");
+
+($status, $output, $errors) = run_script('catchLSUSSU.pl',
+	'-R1', $r1, '-R2', $r2a, '-alignDir', File::Spec->catdir($tmp, 'align-config'),
+	'-tmpDir', File::Spec->catdir($tmp, 'scratch-config'), '-smplID', 'sample', '-cores', 1,
+	'-config', $customConfig);
+isnt($status, 0, 'catchLSUSSU accepts and loads the run-specific configuration');
+like($errors, qr/\Q$missingSsu\E/, 'user SortMeRNA database setting overrides the shipped default');
+unlike($errors, qr/rel25vaz/, 'SortMeRNA diagnostics contain no committed user-home path');
+
+open my $matafFH, '<', File::Spec->catfile($root, 'MATAF4.pl') or die $!;
+my $matafSource = do { local $/; <$matafFH> };
+close $matafFH;
+like($matafSource, qr/my \$cLSUSSUconfig = .*?\$MFconfig\{configFile\}/s,
+	'MATAF4 builds a catchLSUSSU config option from its selected config');
+like($matafSource, qr/\$cLSUSSUscript\$cLSUSSUconfig -R1/,
+	'MATAF4 forwards the selected config in paired and singleton RiboFinder commands');
+
+open my $dbConfigFH, '<', File::Spec->catfile($root, 'Mods', 'config_DBs.txt') or die $!;
+my $dbConfig = do { local $/; <$dbConfigFH> };
+close $dbConfigFH;
+unlike($dbConfig, qr{/hpc-home/[^/]+/}, 'shipped database defaults contain no user-home paths');
 done_testing();

@@ -1,339 +1,301 @@
-#!/usr/bin/bash
-#installer script for MG-TK
-#stay in helpers/install/ dir while executing
+#!/usr/bin/env bash
+# Install and update the environments used by MATAFILER4.
 
-#some basic housekeeping
-#set -e
-ulimit -c 0;
-#set
+set -Eeuo pipefail
+ulimit -c 0 || true
 
-echo "MATAFILER4 installer script"
-echo "This script will install several conda environments with most dependencies for MATAFILER4. It will use micromamba to run the installations, please ensure micromamba is installed natively for your account.";
-echo "You can (and probably should) rerun this script every time you pull a major MF update. Changes to dependencies will be automatically updated and rerunning the script will be significantly faster than running it the first time.";
+REMOVE_LEGACY_ENVS=0
+REFRESH_DATABASES=0
+INSTALL_MARKER=""
 
-if ! command -v micromamba &> /dev/null
-then
-    echo "micromamba could not be found"
-	echo "Make sure micromamba is in your \$PATH"
-	echo "Aborting"
-    exit
-fi
+usage() {
+	cat <<'EOF'
+Usage: installer.sh [options]
 
-if [ -z "${MAMBA_EXE}" ] ; then
-MAMBA_E=$MAMBA_EXE
-else
-MAMBA_E=micromamba
-fi
-#which micromamba
-
-
-eval "$($MAMBA_E shell hook --shell=bash)"
-
-find_in_mamba_env(){
-	$MAMBA_E env list | grep "${@}" >/dev/null 2>/dev/null
+Options:
+  --remove-legacy-envs  Remove obsolete MGTK-named micromamba environments.
+  --refresh-databases   Redownload the CheckM2 and MetaPhlAn databases.
+  -h, --help            Show this help message.
+EOF
 }
 
-find_in_bashrc(){
-	grep "${@}" ~/.bashrc >/dev/null 2>/dev/null
+die() {
+	echo "ERROR: $*" >&2
+	exit 1
 }
 
+retry_command() {
+	local description=$1
+	local max_attempts=$2
+	local delay_seconds=$3
+	shift 3
 
-echo "Using micromamba version:"
-$MAMBA_E --version
-#exit
+	local attempt status
+	for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+		if "$@"; then
+			return 0
+		else
+			status=$?
+		fi
 
+		if ((attempt == max_attempts)); then
+			echo "$description failed after $max_attempts attempts." >&2
+			return "$status"
+		fi
 
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-MFdir=$(realpath -s $SCRIPT_DIR/../..)
+		echo "$description failed (attempt $attempt/$max_attempts); retrying in $delay_seconds seconds." >&2
+		sleep "$delay_seconds"
+	done
+}
 
-#remove stone that declares programs are checked by MG-TK
-rm -f $MFdir/helpers/install/progsChecked.sto
-touch $MFdir/helpers/install/runningInstall.sto
+ensure_writable_directory() {
+	local directory=$1
 
-mkdir -p $MFdir/gits/ 
-INSTdir=$MFdir/helpers/install/
-DBdir=$MFdir/data/DBs/
+	mkdir -p -- "$directory" || return 1
+	if [[ -w "$directory" ]]; then
+		return 0
+	fi
 
+	# Repair missing owner write/search bits, but never change a directory owned by
+	# another account or attempt to override an HPC ACL.
+	if [[ -O "$directory" ]] && chmod u+rwx -- "$directory" && [[ -w "$directory" ]]; then
+		echo "Enabled owner write access for $directory"
+		return 0
+	fi
 
-#MFLRDir	$MF3DIR
-if [ ! -f $MFdir/config.txt ] ; then
-	cp -f $MFdir/Mods/config.old $MFdir/Mods/MATAFILERcfg.txt
-	#should be defaulted to $MF3DIR now
-	#sed -i "s+MFLRDir.*+$\t$MFdir+" $MFdir/Mods/MATAFILERcfg.txt
-	ln -s $MFdir/Mods/MATAFILERcfg.txt $MFdir/config.txt
-	echo "Rewrote config.txt. Please modify as needed to local paths"
-fi
+	return 1
+}
 
-
-if find_in_bashrc "##------------> MG-TK ADDED" ; then
-	echo "It seems your ~/.bashrc still contains an old MG-TK install (lines after "
-	echo "\"##------------> MG-TK ADDED\" )."
-	echo "Please delete all MG-TK added lines from your bashrc, as this is incompatible with MATAFILER"
-	echo "Rerun MATAFILER installer after this is done"
-	echo "      Exiting.."
-	exit 
-fi
-
-
-if ! find_in_bashrc "##------------> MF4 ADDED" ; then
-	printf "\n\n##------------> MF4 ADDED <----------##\nexport MF4DIR=$MFdir/\nexport PERL5LIB=\"\$PERL5LIB:$MFdir/\"\n##------------> MF4 ADDED <----------##\n\n" >> ~/.bashrc
-	echo "Added MATAFILER modules to .bashrc"
-fi
-
-
-
-#potential old MGTK versions .. uninstall environments
-
-envsToDEL='MGTK MGTK_R MGTKbinners MGTKcheckm2 MGTKgtdbtk MGTKphylo MGTKsemibin MGTKwhokar'
-for etd in $envsToDEL; do
-	if find_in_mamba_env $etd ; then
-		$MAMBA_E  env remove -y -n  $etd 
-	fi 
+while (($#)); do
+	case "$1" in
+		--remove-legacy-envs) REMOVE_LEGACY_ENVS=1 ;;
+		--refresh-databases) REFRESH_DATABASES=1 ;;
+		-h|--help) usage; exit 0 ;;
+		*) usage >&2; die "Unknown option: $1" ;;
+	esac
+	shift
 done
 
-
-#exit;
-
-
-# For all micromamba installs, we use --channel-priority 1. This sets to 
-# "flexible" priority - from conda docs "the solver may reach into lower 
-# priority channels to fulfill dependencies, rather than raising an 
-# unsatisfiable error". This should help avoid a lot of dependency problems
-# during install, as micromamba defaults to "strict".
-CHNLprio=1
-
-
-
-if ! find_in_mamba_env "MF4\s" ; then
-	echo "Creating base MATAFILER conda environment.. This might take awhile"
-	#first install spades that seems to require a lot of mem..
-	#$MAMBA_E create --channel-priority $CHNLprio -q -y -n MFF spades
-#just in case it crashes, this often recovers it..
-	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/MF4.yml #-q -y
-	$MAMBA_E activate MF4
-	#echo "Installing R packages in MGTK environment";	Rscript $INSTdir/reqPackages.R
-	#pip install biopython
-else 
-	echo "Updating base MATAFILER conda environment.. Please be patient"
-					#	$MAMBA_E activate MGTK
-	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/MF4.yml #-q -y
-	
-	#echo "Updating R packages in MGTK environment"
-	#{ Rscript $INSTdir/reqPackages.R
-	#} || { 		echo "Rscript install failed.. trying direct excecution";		$INSTdir/./reqPackages.R;	}
-fi
-
-#exit
-
-$MAMBA_E activate MF4
-
-#took prostT5 out for now.. not used by default
-#if command -v foldseek &> /dev/null ; then
-#	echo "Preparing prostT5 for foldseek.."
-#	#prepare foldseek search
-#	if [ ! -d $DBdir/PtostT5_W ];then
-#		foldseek databases ProstT5 $DBdir/PtostT5_W $DBdir/tmp;
-#	fi
-#fi
-
-if command -v hostile &> /dev/null ; then
-	echo "Installing hostile human reference database"
-	export HOSTILE_CACHE_DIR=$DBdir/hostile/
-	hostile index fetch --name human-t2t-hla
-	#run a second time in cases it crashes..
-	hostile index fetch --name human-t2t-hla
-	
-	
-fi
-echo ""
-echo "Installing/updating further dependencies in additional conda environments.."
-echo ""
-echo "" 
-
-
-#if ! find_in_mamba_env "checkm2" ; then
-#	#git clone https://github.com/chklovski/CheckM2.git $MFdir/gits/checkm2/
-#	echo "Installing checkm2"
-#	$MAMBA_E create -y -q -f $INSTdir/checkm2.yml -n checkm2
-#	$MAMBA_E activate checkm2
-#	pip3 install --upgrade pip
-
-#	pip install CheckM2 packaging
-#	$MAMBA_E activate MFF
-#	echo "checkm2 installed. you can verify this environment by running \"micromamba activate checkm2\" and \"checkm2\""
-#else
-#	$MAMBA_E activate checkm2
-#	if [ ! command -v checkm2 > /dev/null 2>&1 ]; then
-#		echo "Could not find checkm2. Please install via \"micromamba activate checkm2;pip install CheckM2 packaging\" and restart installer"
-#		exit 5
-#	fi
-#	$MAMBA_E activate MFF
-#fi
-
-if [ ! -f "$SCRIPT_DIR/../../gits/XGTDB/extract_gtdb_mg.py" ]; then
-	echo "Installing extractGTDB into $MFdir/gits/XGTDB/"
-	git clone https://github.com/4less/extract_gtdb_mg.git $MFdir/gits/XGTDB/
-fi
-
-#additional dependencies not in the main yml..
-if ! find_in_mamba_env "MF4gtdbtk" ; then
-	echo "Creating MF4gtdbtk environment"
-	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/GTDBTK.yml 
-else 
-	echo "Updating MF4gtdbtk environment"
-	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/GTDBTK.yml 
-fi
-
-if ! find_in_mamba_env "MF4semibin" ; then
-	echo "Creating MF4semibin environment"
-	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/SemiBin.yml 
-else 
-	echo "Updating MF4semibin environment"
-	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/SemiBin.yml 
-fi
-
-
-if ! find_in_mamba_env "MF4binners" ; then
-	echo "Creating MF4binners environment"
-	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/Binners.yml
-else 
-	echo "Updating MF4binners environment"
-	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/Binners.yml
-fi
-
-if ! find_in_mamba_env "MF4genomeface" ; then
-	echo "Creating MF4genomeface environment"
-	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/MF4genomeface.yml
-else 
-	echo "Updating MF4genomeface environment"
-	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/MF4genomeface.yml
-fi
-
-if ! find_in_mamba_env "MF4scgbinner" ; then
-	echo "Creating MF4scgbinner environment"
-	PIP_USER=false $MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/SCGBinner.yml
+if [[ -n "${MAMBA_EXE:-}" ]]; then
+	if [[ -x "$MAMBA_EXE" ]]; then
+		MAMBA_E="$MAMBA_EXE"
+	else
+		MAMBA_E="$(command -v -- "$MAMBA_EXE" || true)"
+	fi
 else
-	echo "Updating MF4scgbinner environment"
-	PIP_USER=false $MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/SCGBinner.yml
+	MAMBA_E="$(command -v micromamba || true)"
 fi
 
-CM2DB=$DBdir/CM2/
-MP4DB=$DBdir/MP4/
+[[ -n "$MAMBA_E" ]] || die "micromamba could not be found. Set MAMBA_EXE or add micromamba to PATH."
+command -v git >/dev/null 2>&1 || die "git could not be found in PATH."
 
-if ! find_in_mamba_env "MF4checkm2" ; then
-	echo "Creating MF4checkm2 environment"
-	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/checkm2.yml 
-	$MAMBA_E activate MF4checkm2
-	#install checkM2 DB
-	checkm2 database --download --path $CM2DB
-	#install metaphlan4 DB
-	#currently there is a bug: can't install into a given dir via conda
-	metaphlan --install --bowtie2db $MP4DB
-	$MAMBA_E deactivate
-else 
-	echo "Updating checkm2 environment"
-	$MAMBA_E install -y -q -f $INSTdir/checkm2.yml 
-	if [ ! -d $CM2DB ]; then
-		$MAMBA_E activate MF4checkm2
-		checkm2 database --download --path $CM2DB
-		$MAMBA_E deactivate
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+MFdir="$(realpath -s -- "$SCRIPT_DIR/../..")"
+INSTdir="$MFdir/helpers/install"
+DBdir="$MFdir/data/DBs"
+INSTALL_MARKER="$INSTdir/runningInstall.sto"
+
+# shellcheck disable=SC2329  # Invoked by the EXIT trap.
+cleanup() {
+	local status=$?
+	if [[ -n "$INSTALL_MARKER" && -e "$INSTALL_MARKER" ]]; then
+		if ((status == 0)); then
+			rm -f -- "$INSTALL_MARKER"
+		else
+			echo "Installation failed; leaving $INSTALL_MARKER in place." >&2
+		fi
 	fi
-	if [ ! -d $MP4DB ]; then
-		$MAMBA_E activate MF4checkm2
-		metaphlan --install --bowtie2db $MP4DB
-		$MAMBA_E deactivate
+}
+
+# shellcheck disable=SC2329  # Invoked by the ERR trap.
+report_error() {
+	local status=$?
+	echo "Installer command failed at line $1 with status $status." >&2
+	return "$status"
+}
+
+trap cleanup EXIT
+trap 'report_error "$LINENO"' ERR
+
+env_exists() {
+	local target=$1
+	local environment_list
+	environment_list="$("$MAMBA_E" env list)" || die "Unable to list micromamba environments."
+	awk -v target="$target" 'NR > 1 && $1 == target { found=1 } END { exit !found }' <<<"$environment_list"
+}
+
+find_in_bashrc() {
+	local marker=$1
+	[[ -f "$HOME/.bashrc" ]] && grep -Fq -- "$marker" "$HOME/.bashrc"
+}
+
+ensure_environment() {
+	local name=$1
+	local definition=$2
+	if env_exists "$name"; then
+		echo "Updating $name environment"
+		"$MAMBA_E" install --name "$name" --channel-priority flexible -q -y -f "$definition"
+	else
+		echo "Creating $name environment"
+		"$MAMBA_E" create --name "$name" --channel-priority flexible -q -y -f "$definition"
 	fi
-	
+}
+
+ensure_optional_environment() {
+	local name=$1
+	local definition=$2
+
+	if ensure_environment "$name" "$definition"; then
+		return 0
+	fi
+
+	echo "WARNING: Optional environment $name could not be installed or updated; continuing without it." >&2
+	return 0
+}
+
+database_current() {
+	local marker=$1
+	local expected=$2
+	((REFRESH_DATABASES == 0)) && [[ -f "$marker" ]] && [[ "$(<"$marker")" == "$expected" ]]
+}
+
+echo "MATAFILER4 installer script"
+echo "Using micromamba version: $("$MAMBA_E" --version)"
+
+rm -f -- "$INSTdir/progsChecked.sto"
+touch -- "$INSTALL_MARKER"
+mkdir -p -- "$MFdir/gits" "$DBdir"
+
+if [[ -L "$MFdir/config.txt" && ! -e "$MFdir/config.txt" ]]; then
+	die "$MFdir/config.txt is a broken symbolic link; repair or remove it before rerunning the installer."
 fi
 
-
-#if ! find_in_mamba_env "comeBin" ; then
-#	echo "Installing comeBin environment"
-#	$MAMBA_E create -y -q -f $INSTdir/comeBin.yml
-#else 
-#	echo "Updating gtdbtk environment"
-#	$MAMBA_E update -y -q -f $INSTdir/comeBin.yml 
-#fi
-
-#additional dependencies not in the main yml..
-#if ! find_in_mamba_env "MGTKmetaMDBG" ; then
-#	echo "Installing MGTKmetaMDBG environment"
-#	$MAMBA_E create --channel-priority 0 -q -y -f $INSTdir/metaMDBG.yml
-#else 
-#	echo "Updating MGTKmetaMDBG environment"
-#	$MAMBA_E activate MGTKmetaMDBG
-#	$MAMBA_E update --channel-priority 0 -q -y -f $INSTdir/metaMDBG.yml 
-#	$MAMBA_E deactivate 
-#fi
-
-#if ! find_in_mamba_env "motus" ; then
-#	echo "Installing motus environment"
-#	$MAMBA_E create -y -q -f $INSTdir/motus.yml
-#else 
-#	echo "Updating motus environment"
-#	$MAMBA_E update -y -q -f $INSTdir/motus.yml 
-#fi
-
-if ! find_in_mamba_env "MF4phylo" ; then
-	echo "Installing MF4phylo environment"
-	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/phylo.yml 
-else 
-	echo "Updating MF4phylo environment"
-	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/phylo.yml 
+if [[ ! -e "$MFdir/config.txt" ]]; then
+	if [[ ! -e "$MFdir/Mods/MATAFILERcfg.txt" ]]; then
+		cp -- "$MFdir/Mods/config.old" "$MFdir/Mods/MATAFILERcfg.txt"
+	fi
+	ln -s -- "$MFdir/Mods/MATAFILERcfg.txt" "$MFdir/config.txt"
+	echo "Created config.txt. Please review its local paths."
 fi
 
-#if ! find_in_mamba_env "MGTKwhokar" ; then
-#	echo "Installing MGTKwhokar environment"
-#	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/whokaryote.yml 
-#else 
-#	echo "Updating MGTKwhokar environment"
-#	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/whokaryote.yml 
-#fi
-
-if ! find_in_mamba_env "MF4_R" ; then
-	echo "Installing MF4_R environment"
-	$MAMBA_E create --channel-priority $CHNLprio -q -y -f $INSTdir/MGTK_R.yml 
-else 
-	echo "Updating MF4_R environment"
-	$MAMBA_E install --channel-priority $CHNLprio -q -y -f $INSTdir/MGTK_R.yml 
+if find_in_bashrc "##------------> MG-TK ADDED"; then
+	die "$HOME/.bashrc contains an obsolete pre-MATAFILER4 block. Remove that block and rerun the installer."
 fi
 
+if ! find_in_bashrc "##------------> MF4 ADDED"; then
+	touch -- "$HOME/.bashrc"
+	# shellcheck disable=SC2016  # These variables must remain literal in .bashrc.
+	printf '\n\n##------------> MF4 ADDED <----------##\nexport MF4DIR=%q\nexport PERL5LIB="${PERL5LIB:+${PERL5LIB}:}${MF4DIR}"\n##------------> MF4 ADDED <----------##\n\n' \
+		"$MFdir/" >> "$HOME/.bashrc"
+	echo "Added MATAFILER4 paths to ~/.bashrc"
+fi
 
+legacy_envs=(MGTK MGTK_R MGTKbinners MGTKcheckm2 MGTKgtdbtk MGTKphylo MGTKsemibin MGTKwhokar)
+if ((REMOVE_LEGACY_ENVS)); then
+	for legacy_env in "${legacy_envs[@]}"; do
+		if env_exists "$legacy_env"; then
+			echo "Removing obsolete environment $legacy_env"
+			"$MAMBA_E" env remove -y -n "$legacy_env"
+		fi
+	done
+else
+	for legacy_env in "${legacy_envs[@]}"; do
+		if env_exists "$legacy_env"; then
+			echo "Obsolete environment $legacy_env was left untouched; use --remove-legacy-envs to remove it."
+		fi
+	done
+fi
 
+export PIP_USER=false
+export PIP_NO_CACHE_DIR=1
 
-#if ! find_in_mamba_env "Rbase" ; then
-#	$MAMBA_E create -y -f $INSTdir/Rbase.yml
-#	$MAMBA_E activate Rbase
-#	Rscript reqPackages.R
-#else 
-#	$MAMBA_E update -y -f $INSTdir/Rbase.yml --prune --allow-uninstall
-#fi
+ensure_environment MF4 "$INSTdir/MF4.yml"
 
-#later toadd..
-#git clone https://github.com/GaetanBenoitDev/metaMDBG.git;mima create -y -f conda_env.yml;activate metaMDBG
+if "$MAMBA_E" run -n MF4 hostile --help >/dev/null 2>&1; then
+	echo "Installing/updating the Hostile human reference database"
+	if ! ensure_writable_directory "$DBdir/hostile" || ! retry_command "Hostile database download" 5 15 \
+		env HOSTILE_CACHE_DIR="$DBdir/hostile" \
+		"$MAMBA_E" run -n MF4 hostile index fetch --name human-t2t-hla; then
+		echo "WARNING: Hostile database installation failed; continuing without updating it." >&2
+	fi
+fi
 
-rm -f $MFdir/helpers/install/runningInstall.sto
+XGTDB_DIR="$MFdir/gits/XGTDB"
+XGTDB_REVISION="0e944a700b96bb7b31f12f03ece969d16bcd1a10"
+if [[ ! -e "$XGTDB_DIR" ]]; then
+	echo "Installing extract_gtdb_mg at revision $XGTDB_REVISION"
+	git clone --no-checkout https://github.com/4less/extract_gtdb_mg.git "$XGTDB_DIR"
+	git -C "$XGTDB_DIR" checkout --detach "$XGTDB_REVISION"
+elif [[ -d "$XGTDB_DIR/.git" ]]; then
+	installed_revision="$(git -C "$XGTDB_DIR" rev-parse HEAD)"
+	[[ "$installed_revision" == "$XGTDB_REVISION" ]] || \
+		die "$XGTDB_DIR is at $installed_revision, expected $XGTDB_REVISION. Preserve any local work, then replace or update this checkout."
+	git -C "$XGTDB_DIR" diff --quiet --ignore-submodules -- || \
+		die "$XGTDB_DIR contains local changes; restore or preserve them before rerunning the installer."
+	git -C "$XGTDB_DIR" diff --cached --quiet --ignore-submodules -- || \
+		die "$XGTDB_DIR contains staged local changes; restore or preserve them before rerunning the installer."
+else
+	die "$XGTDB_DIR exists but is not a Git checkout. Move it aside and rerun the installer."
+fi
 
+ensure_environment MF4gtdbtk "$INSTdir/GTDBTK.yml"
+ensure_environment MF4semibin "$INSTdir/SemiBin.yml"
+ensure_environment MF4binners "$INSTdir/Binners.yml"
+ensure_optional_environment MF4genomeface "$INSTdir/MF4genomeface.yml"
+ensure_environment MF4scgbinner "$INSTdir/SCGBinner.yml"
+ensure_environment MF4checkm2 "$INSTdir/checkm2.yml"
 
+CHECKM2_VERSION="1.0.2"
+METAPHLAN_VERSION="4.1"
+CM2DB="$DBdir/CM2"
+MP4DB="$DBdir/MP4"
+CM2_DIAMOND_DB="$CM2DB/CheckM2_database/uniref100.KO.1.dmnd"
+CM2_MARKER="$CM2DB/.mf4-checkm2-version"
+MP4_MARKER="$MP4DB/.mf4-metaphlan-version"
 
+if ! database_current "$CM2_MARKER" "$CHECKM2_VERSION"; then
+	if ((REFRESH_DATABASES == 0)) && [[ -f "$CM2_DIAMOND_DB" ]] && \
+		"$MAMBA_E" run -n MF4checkm2 checkm2 database --setdblocation "$CM2_DIAMOND_DB"; then
+		echo "Using existing CheckM2 database at $CM2_DIAMOND_DB"
+		printf '%s\n' "$CHECKM2_VERSION" > "$CM2_MARKER"
+	else
+		echo "Installing CheckM2 $CHECKM2_VERSION database"
+		if ensure_writable_directory "$CM2DB" && retry_command "CheckM2 database download" 5 15 \
+			"$MAMBA_E" run -n MF4checkm2 checkm2 database --download --path "$CM2DB"; then
+			printf '%s\n' "$CHECKM2_VERSION" > "$CM2_MARKER"
+		else
+			echo "WARNING: CheckM2 database installation failed; continuing without updating it." >&2
+		fi
+	fi
+fi
 
+if ! database_current "$MP4_MARKER" "$METAPHLAN_VERSION"; then
+	echo "Installing MetaPhlAn $METAPHLAN_VERSION database"
+	if ensure_writable_directory "$MP4DB" && retry_command "MetaPhlAn database download" 5 15 \
+		"$MAMBA_E" run -n MF4checkm2 metaphlan --install --bowtie2db "$MP4DB"; then
+		printf '%s\n' "$METAPHLAN_VERSION" > "$MP4_MARKER"
+	else
+		echo "WARNING: MetaPhlAn database installation failed; continuing without updating it." >&2
+		if [[ -e "$MP4DB" ]]; then
+			stat -c 'MetaPhlAn database directory: mode=%A owner=%U group=%G path=%n' -- "$MP4DB" >&2 || true
+		fi
+	fi
+fi
 
-echo ""
-echo ""
-echo "How to download GTDB & GTDBtk databases"
-echo ""
-echo "The database for GTDB and GTDBtk are needed for MAG classification."
-echo "These can be downloaded using the script 'helpers/install/get_gtdb.py' i.e."
-echo "    ./get_gtdb.py all -v 226 -t /path/to/download -d /path/to/extract/to --tk split"
-echo "will download and extract these databases, and configure MG-TK to use them."
-echo "See script help (./get_gtdb.py -h) for more information on usage."
-echo ""
-echo ""
+ensure_environment MF4phylo "$INSTdir/phylo.yml"
+ensure_environment MF4_R "$INSTdir/MGTK_R.yml"
+"$MAMBA_E" run -n MF4_R Rscript --vanilla -e \
+	'suppressPackageStartupMessages(library(ggtree))'
 
-echo "Finished MG-TK install"
-echo ""
-echo "To run MG-TK, make sure you are in the MGTK environment (micromamba activate MGTK)."
-echo "You can rerun the installer.sh anytime, to ensure package were installed or are being updated."
-echo "Run \"MG-TK.pl -checkInstall\" to ensure that the installation was successful."
+echo
+echo "How to download GTDB and GTDB-Tk databases"
+echo
+echo "These databases are required for MAG classification. For example:"
+echo "    helpers/install/get_gtdb.py all -v 226 -t /path/to/download -d /path/to/extract/to --tk split"
+echo "Run 'helpers/install/get_gtdb.py -h' for all options."
+echo
+echo "Finished MATAFILER4 installation."
+echo "Activate the main environment with: micromamba activate MF4"
+echo "Then verify the installation with: ./MATAF4.pl -checkInstall"
 
-exit 
+exit 0

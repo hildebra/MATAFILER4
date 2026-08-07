@@ -2,18 +2,20 @@ package Mods::IO_Tamoc_progs;
 use warnings;
 use Cwd 'abs_path';
 use strict;
+use Mods::ReadLibrary qw(legacyLibraryArrays);
 
-use vars qw($CONFIG_FILE @CONFIG_TEXT %CONFIG_HASH);
+use vars qw($CONFIG_FILE @CONFIG_TEXT %CONFIG_HASH $CONFIG_LOADED);
 $CONFIG_FILE="";
 @CONFIG_TEXT = ();
 %CONFIG_HASH = ();
+$CONFIG_LOADED = 0;
 sub setConfigFile;
 
 #TAMOC programs related to IO to other programs, program paths .. not real subroutines that do anything
 
 use Exporter qw(import);
 our @EXPORT_OK = qw(getProgPaths truePath
-					inputFmtSpades inputFmtMegahit jgi_depth_cmd createGapFillopt setConfigFile 
+					inputFmtSpades inputFmtSpadesLibraries inputFmtMegahit inputFmtMegahitLibraries inputFmtMegahitRuntimeLibraries jgi_depth_cmd createGapFillopt setConfigFile
 					buildMapperIdx mapperDBbuilt decideMapper checkMapsDoneSH greaterComputeSpace convert2Gb);
 
 
@@ -41,7 +43,8 @@ sub checkMapsDoneSH{
 	my @dirSS = @{$inAR};
 	my $ctrlStr = "";
 	foreach my $DDI (@dirSS){
-		if ( $DDI =~ m/\/$/  ){
+		if (-d $DDI || $DDI =~ m/\/$/){
+			$DDI =~ s{/$}{};
 			$ctrlStr .= "if [ ! -e $DDI/mapping/done.sto ] || ! find $DDI/mapping -maxdepth 1 -type f \\( -name '*-smd.bam' -o -name '*-smd.cram' \\) -size +0c -print -quit | grep -q .; then echo \"Can't find a completed mapping in $DDI/mapping !! Aborting .. \"; exit 1; fi \n";
 		} else {
 			$ctrlStr .= "if [ ! -s $DDI ]; then echo \"Can't find non-empty mapping file $DDI !! Aborting ..\"; exit 1; fi \n";
@@ -87,80 +90,100 @@ sub convert2Gb($){
 	return $tmpSpace;
 }
 
+sub _bundledConfigFile{
+	my ($fileName) = @_;
+	my $modDir = $INC{"Mods/IO_Tamoc_progs.pm"} || __FILE__;
+	$modDir =~ s{IO_Tamoc_progs\.pm$}{};
+	return $modDir.$fileName;
+}
+
 sub setConfigFile{
 	my @var = @_;
 	my $customCfg = 0;
+	my $newConfig;
 	if (@var == 1 && $var[0] eq "internal"){
-		my $modDir = $INC{"Mods/IO_Tamoc_progs.pm"};
-		$modDir =~ s/IO_Tamoc_progs.pm//;
-		$CONFIG_FILE = "$modDir/../Mods/config_internal.txt";
+		$newConfig = _bundledConfigFile("config_internal.txt");
 	} elsif (@var == 1 && $var[0] eq "DBconfig"){
-		my $modDir = $INC{"Mods/IO_Tamoc_progs.pm"};
-		$modDir =~ s/IO_Tamoc_progs.pm//;
-		$CONFIG_FILE = "$modDir/../Mods/config_DBs.txt";
+		$newConfig = _bundledConfigFile("config_DBs.txt");
 	} elsif (@var == 1 && $var[0] ne ""){
-		$CONFIG_FILE = $var[0];
+		$newConfig = $var[0];
 		$customCfg = 1;
 	} else {#default value
-		my $modDir = $INC{"Mods/IO_Tamoc_progs.pm"};
-		$modDir =~ s/IO_Tamoc_progs.pm//;
-		$CONFIG_FILE = "$modDir/MATAFILERcfg.txt";
+		$newConfig = _bundledConfigFile("MATAFILERcfg.txt");
 	}
+	$CONFIG_FILE = $newConfig;
 	die "Can't find MATAFILER config file: $CONFIG_FILE\nConsider changing path to config file via \"-config\" argument.\n Aborting..\n" unless (-e $CONFIG_FILE);
+	# An explicit selection starts a fresh configuration generation. This matters
+	# to test harnesses and long-lived callers that select another site config
+	# after an earlier lookup.
+	@CONFIG_TEXT = ();
+	%CONFIG_HASH = ();
+	$CONFIG_LOADED = 0;
 	print "Using config file : $CONFIG_FILE\n" if ($customCfg);
 }
 
 sub truePath{
-	my ($TMCpath) = $_[0];
-	my $enforce=0; $enforce = $_[1] if (@_ > 1);
-	
-	if ($enforce){
-		if ($TMCpath =~ m/\$([^\$^\/^\\]+)/){
-			my $envName = $1;
-			die "Environment variable \$$envName used in path '$TMCpath' is not set\n"
-				unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
-			my $envVar = $ENV{$envName};
-			$TMCpath =~ s/\$([^\$^\/^\\]+)/$envVar/;
-		}
-		#die "$TMCpath\n";
-	}
-	
-	if ($TMCpath =~ m/^\$/){
-		$TMCpath =~ s/^\$//; 
-		my ($envName, $suffix) = $TMCpath =~ m{^([^/\\]+)(.*)$};
-		die "Environment variable \$$envName used in path '\$$TMCpath' is not set\n"
-			unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
-		$TMCpath = $ENV{$envName} . $suffix;
-	}
-	return $TMCpath;
+	my ($TMCpath, $enforce) = @_;
+	$enforce = 0 unless defined $enforce;
+	return $TMCpath unless ($enforce || $TMCpath =~ /^\$/);
 
+	# Expand every $NAME or ${NAME} occurrence. Historically only the first
+	# occurrence was expanded and braced names were interpreted incorrectly.
+	$TMCpath =~ s{
+		\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))
+	}{
+		my $envName = defined($1) ? $1 : $2;
+		die "Environment variable \$$envName used in path '$TMCpath' is not set\n"
+			unless (exists($ENV{$envName}) && defined($ENV{$envName}) && $ENV{$envName} ne '');
+		$ENV{$envName};
+	}gex;
+	return $TMCpath;
 }
 
 sub loadConfigs{
 	#loads once in every program run the entire config file(s) into hash %CONFIG_HASH
-	if (scalar @CONFIG_TEXT == 0){
-		setConfigFile() if ($CONFIG_FILE eq "");
-		print "READING config files \"$CONFIG_FILE\" .. ";
-		if ($CONFIG_FILE eq "" ){die "IO_Tamoc_progs.pm::loadConfigs: CONFIG_FILE not set!\n";}
-		open I,"<$CONFIG_FILE" or die "Can't open $CONFIG_FILE\n";
-		chomp(@CONFIG_TEXT = <I>);
-		close I;
-		setConfigFile("internal") ;
-		if ($CONFIG_FILE eq "" ){die "IO_Tamoc_progs.pm::loadConfigs: CONFIG_FILE internal not set!\n";}
-		open I,"<$CONFIG_FILE" or die "Can't open internal $CONFIG_FILE\n";
-		my @INTtmp;
-		chomp(@INTtmp = <I>);
-		close I;
-		push(@CONFIG_TEXT,@INTtmp);
-		#DB config read..
-		setConfigFile("DBconfig") ;
-		if ($CONFIG_FILE eq "" ){die "IO_Tamoc_progs.pm::loadConfigs: CONFIG_FILE DB not set!\n";}
-		open I,"<$CONFIG_FILE" or die "Can't open DBconfig $CONFIG_FILE\n";
-		@INTtmp=();
-		chomp(@INTtmp = <I>);
-		close I;
-		push(@CONFIG_TEXT,@INTtmp);
+	return if $CONFIG_LOADED;
+	setConfigFile() if ($CONFIG_FILE eq "");
+	my $selectedConfig = $CONFIG_FILE;
+	print "READING config files \"$selectedConfig\" .. ";
+	@CONFIG_TEXT = ();
+	%CONFIG_HASH = ();
+	my @configFiles = (
+		[$selectedConfig, "selected"],
+		[_bundledConfigFile("config_internal.txt"), "internal"],
+		[_bundledConfigFile("config_DBs.txt"), "database"],
+	);
+	my %seenConfig;
+	for my $configSpec (@configFiles){
+		my ($configPath, $configKind) = @{$configSpec};
+		next if $seenConfig{$configPath}++;
+		open my $configFH, "<", $configPath
+			or die "Can\x27t open $configKind config $configPath: $!\n";
+		my @configLines = <$configFH>;
+		close $configFH or die "Can\x27t close $configKind config $configPath: $!\n";
+		chomp @configLines;
+		s/\r$// for @configLines;
+		push @CONFIG_TEXT, @configLines;
 	}
+	# Resolve foundational keys before ordinary entries. Source order is retained
+	# within each key, so selected-user values still precede bundled defaults,
+	# while placeholder expansion no longer depends on line order.
+	my @foundationOrder = qw(MFLRDir BINDir DBDir MGSTKDir SINGcmd CONDcmd CONDA CONDAbaseEnv PY3cmd Rscript Rpath);
+	my %foundationRank;
+	@foundationRank{@foundationOrder} = (0 .. $#foundationOrder);
+	my @foundationLines = map { [] } @foundationOrder;
+	my @ordinaryLines;
+	for my $line (@CONFIG_TEXT){
+		my ($key) = $line =~ /^([^\t]+)/;
+		if (defined($key) && exists($foundationRank{$key})){
+			push @{$foundationLines[$foundationRank{$key}]}, $line;
+		} else {
+			push @ordinaryLines, $line;
+		}
+	}
+	# Stable buckets keep this initialization linear in the number of config
+	# lines. It is paid once; subsequent getProgPaths calls are hash lookups.
+	@CONFIG_TEXT = ((map { @{$_} } @foundationLines), @ordinaryLines);
 	#my $condaA = getProgPaths("CONDA");
 	#die "@CONFIG_TEXT\n";
 	print "converting config files.. ";
@@ -178,7 +201,7 @@ sub loadConfigs{
 		} elsif (!$RpathSet && $l =~ m/^Rpath\t([^#]+)/){
 			my $prePath = $1;
 			if (!$Tset){die"Problem in configs: MFLRDir needs to be set before Rpath\n";}
-			$prePath =~s/\[MFLRDir\]/$TMCpath/;
+			$prePath =~s/\[MFLRDir\]/$TMCpath/g;
 			$Rpath= truePath($prePath);
 			$RpathSet=1;
 			#die "\n\n$prePath\n$Rpath\n";
@@ -202,7 +225,7 @@ sub loadConfigs{
 				my $Ctmp = $CONDA; $Ctmp =~ s/^[\.\s]+//g;
 				if (!-s $Ctmp){die "\n\nWARNING:\nCould not find conda config at $CONDA !\n please ensure \"micromamba.sh\" or \"mambda.sh\" exist at this location\n\n";}
 				if ($CONDA !~ m/^\./ || $CONDA !~ m/mamba.sh/){
-					die "Your \"CONDA\" seems to be wrongly setup. Ensure this is configured in \"[MG-TK-dir]/config.txt\" and has a form similar to:\"\nCONDA\t. \$MAMBA_ROOT_PREFIX/etc/profile.d/mamba.sh\n\"\n";
+					die "Your \"CONDA\" seems to be wrongly setup. Ensure this is configured in \"[MATAFILER-dir]/config.txt\" and has a form similar to:\"\nCONDA\t. \$MAMBA_ROOT_PREFIX/etc/profile.d/mamba.sh\n\"\n";
 				}
 			}
 			$CONDset2=1;
@@ -222,23 +245,26 @@ sub loadConfigs{
 			#print "$l\n";
 			my @spl = split (/\t/,$l);
 			$XVar = $spl[0];
-			if (@spl == 1) {$CONFIG_HASH{$XVar} = "";next;}
+			if (@spl == 1) {
+				$CONFIG_HASH{$XVar} = "" unless exists($CONFIG_HASH{$XVar});
+				next;
+			}
 			
 			if ($l !~ m/^$XVar\t([^#^\t]+)/){next;}
 			my $reV = $1;
 			
 			#die "$reV  $XVar  $l\n";
 			die "$reV\n" if (!defined($reV));
-			$reV =~ s/\[MFLRDir\]/$TMCpath/ if ($Tset);
+			$reV =~ s/\[MFLRDir\]/$TMCpath/g if ($Tset);
 			if ($MGSTKDirset){
-				$reV =~ s/\[MGSTKDir\]/$MGSTKDir/ ;
+				$reV =~ s/\[MGSTKDir\]/$MGSTKDir/g;
 			}
-			$reV =~ s/\[BINDir\]/$BINpath/ if ($Bset);
-			$reV =~ s/\[DBDir\]/$DBpath/ if ($DBset);
-			$reV =~ s/\[SINGcmd\]/$SINGcmd/ if ($SINGset);
-			$reV =~ s/\[PY3\]/$PY3cmd/ if ($PY3set);
-			$reV =~ s/\[Rscript\]/$Rscriptcmd/ if ($Rscriptset);
-			$reV =~ s/\[Rpath\]/$Rpath/ if ($RpathSet);
+			$reV =~ s/\[BINDir\]/$BINpath/g if ($Bset);
+			$reV =~ s/\[DBDir\]/$DBpath/g if ($DBset);
+			$reV =~ s/\[SINGcmd\]/$SINGcmd/g if ($SINGset);
+			$reV =~ s/\[PY3\]/$PY3cmd/g if ($PY3set);
+			$reV =~ s/\[Rscript\]/$Rscriptcmd/g if ($Rscriptset);
+			$reV =~ s/\[Rpath\]/$Rpath/g if ($RpathSet);
 			if ($l =~ m/env:([^#^\t]+)/){
 				my $tarEnv = $1;
 				#$reV = "$CONDA;$CONDcmd activate $1\n$reV";
@@ -246,7 +272,10 @@ sub loadConfigs{
 			}
 			
 			#return $reV;
-			$CONFIG_HASH{$XVar} = $reV;
+			# Configuration sources are loaded from most to least specific:
+			# the selected user config, internal defaults, then database defaults.
+			# Preserve the first definition so a user can override shipped values.
+			$CONFIG_HASH{$XVar} = $reV unless exists($CONFIG_HASH{$XVar});
 		}
 	}
 	#some check about basic params being set..
@@ -263,6 +292,7 @@ sub loadConfigs{
 	$CONFIG_HASH{"Rscript"} = $Rscriptcmd;
 	$CONFIG_HASH{"Rpath"} = $Rpath;
 	$CONFIG_HASH{"MGSTKDir"} = $MGSTKDir;
+	$CONFIG_LOADED = 1;
 	print "  Done. ";
 }
 
@@ -279,21 +309,20 @@ sub getProgPaths{
 		#print "ARRAY\n";
 		@multVars = @{$srchVar};
 	}
-	if (scalar(keys %CONFIG_HASH) == 0){
-		#read in config hash _once_
-		loadConfigs();
-	}
-	if (scalar(keys %CONFIG_HASH) == 0){
-		die "Something went wrong loading MATAFILER configs.. aborting\n";
-	}
+	# Parsing and placeholder expansion are paid once per selected config. The
+	# many pipeline lookups after this point are ordinary hash reads.
+	loadConfigs() unless $CONFIG_LOADED;
+	die "Something went wrong loading MATAFILER configs.. aborting\n" unless $CONFIG_LOADED;
 	
 	
 	if (@multVars > 0){
-		my @retA;
-		for (my$i=0;$i<scalar(@multVars);$i++){if (exists($CONFIG_HASH{$multVars[$i]})) { $retA[$i] = $CONFIG_HASH{$multVars[$i]};}} 
+		my @missing = grep { !exists($CONFIG_HASH{$_}) || ($required != 0 && $CONFIG_HASH{$_} eq "") } @multVars;
+		die "Can't find configuration for ".join(", ", @missing)." in MATAFILER config ($CONFIG_FILE)\n"
+			if $required != 0 && @missing;
+		my @retA = map { exists($CONFIG_HASH{$_}) ? $CONFIG_HASH{$_} : "" } @multVars;
 		return \@retA;
 	}
-	if (exists($CONFIG_HASH{$srchVar})){
+	if (exists($CONFIG_HASH{$srchVar}) && ($required == 0 || $CONFIG_HASH{$srchVar} ne "")){
 		return $CONFIG_HASH{$srchVar};
 	} else {
 		die "Can't find configuration for $srchVar in MATAFILER config ($CONFIG_FILE)\n" if ($required != 0);
@@ -313,6 +342,7 @@ sub activateBase{
 
 sub mapperDBbuilt( $ $){
 	my ($DBbtRef, $MapperProg2) = @_;
+	$MapperProg2 = decideMapper($MapperProg2, "");
 	my $bwt2IdxFileSuffix = ".bw2";my $mini2IdxFileSuffix = ".mmi";
 	my $kmaIdxFileSuffix = ".kma";
 	if ($MapperProg2 == 5){return 1;} #strobealign doesn't need index..
@@ -335,12 +365,12 @@ sub mapperDBbuilt( $ $){
 sub buildMapperIdx($ $ $ $){
 	my ($REF,$ncore,$lrgDB,$MapperProg) = @_;
 	#1=bowtie2, 2=bwa, 3=minimap2
+	$MapperProg = decideMapper($MapperProg,"");
 	if ($MapperProg == 5){return ("",$REF,$REF);} #strobealign doesn't need index..
 	my $bwt2IdxFileSuffix = ".bw2";my $mini2IdxFileSuffix = ".mmi";
 	my $kmaIdxFileSuffix = ".kma";
 	my $bwtIdx = $REF.$bwt2IdxFileSuffix;
 	my $chkFi = $bwtIdx;
-	$MapperProg = decideMapper($MapperProg,"");
 	my @required_index_files;
 	if ($MapperProg==1){
 		my $extension = $lrgDB ? 'bt2l' : 'bt2';
@@ -402,12 +432,17 @@ sub inputFmtSpades($ $ $ $ $){
 		for (my $i =0; $i<@p1;$i++){
 			next if ($p1[$i] eq "");
 			my $peTerm = "--pe";$peTerm = "--gemcode" if ($readTec[$i] =~ m/SLR/);
-			$sprds .= " ${peTerm}".($i+1) ."-1 $p1[$i] ${peTerm}".($i+1) ."-2 $p2[$i]";
+			# metaSPAdes accepts one paired-end short-read library. Repeated
+			# --pe1 arguments are multiple files belonging to that same library;
+			# do not turn coassembly samples into separate libraries.
+			my $library = $peTerm eq "--pe" ? 1 : $i + 1;
+			$sprds .= " ${peTerm}${library}-1 $p1[$i] ${peTerm}${library}-2 $p2[$i]";
 		}
 		for (my $i=0;$i<@singl;$i++){
 			next if ($singl[$i] eq "");
 			my $peTerm = "--pe";$peTerm = "--gemcode" if ($readTec[$i] =~ m/SLR/);
-			$sprds .= " ${peTerm}".($i+1) ."-s $singl[$i]";
+			my $library = $peTerm eq "--pe" ? 1 : $i + 1;
+			$sprds .= " ${peTerm}${library}-s $singl[$i]";
 		}
 	} else {
 		open O,">$logDir/spadesInput.yaml" or die "Can't write $logDir/spadesInput.yaml\n";
@@ -469,12 +504,13 @@ sub jgi_depth_cmd{
 
 	my @dirSS = @{$dirsAR};#split(',',$dirs);
 	#go through each dir and find sample name
-	my $comBAM = "";
+	my @mapping_files;
+	my %seen_mapping;
 	my $isCram=0;
 	foreach my $DDI (@dirSS){
 		if (-f $DDI && $DDI =~ /\.(?:bam|cram)$/i) {
-			$isCram=1 if ($DDI =~ /\.cram$/i);
-			$comBAM .= "$DDI ";
+			die "jgi_depth_cmd:::Empty mapping file $DDI\n" unless -s $DDI;
+			push @mapping_files, $DDI unless $seen_mapping{$DDI}++;
 		} else {
 			$DDI =~ s{/$}{};
 			my $marker = "$DDI/mapping/done.sto";
@@ -483,13 +519,30 @@ sub jgi_depth_cmd{
 			my $SmplNm = <$marker_fh>;
 			close $marker_fh;
 			chomp $SmplNm;
-			my $tbam = "$DDI/mapping/$SmplNm";
-			if (!-s $tbam && $tbam =~ /\.bam$/){(my $cram = $tbam) =~ s/\.bam$/.cram/; $tbam = $cram if (-s $cram);}
-			die "jgi_depth_cmd:::Can't find a non-empty BAM or CRAM at $DDI\n" unless (-s $tbam);
-			$isCram=1 if ($tbam =~ /\.cram$/i);
-			$comBAM .= "$tbam ";
+			my $named_mapping = "$DDI/mapping/$SmplNm";
+			my @candidates = ($named_mapping);
+			if ($SmplNm !~ /\.sup-smd\./i) {
+				(my $supplemental = $named_mapping) =~ s/-smd\./.sup-smd./i;
+				push @candidates, $supplemental if $supplemental ne $named_mapping;
+			}
+			my $mapping_found = 0;
+			for my $candidate (@candidates) {
+				if (!-s $candidate && $candidate =~ /\.bam$/i) {
+					(my $cram = $candidate) =~ s/\.bam$/.cram/i;
+					$candidate = $cram if -s $cram;
+				} elsif (!-s $candidate && $candidate =~ /\.cram$/i) {
+					(my $bam = $candidate) =~ s/\.cram$/.bam/i;
+					$candidate = $bam if -s $bam;
+				}
+				next unless -s $candidate;
+				$mapping_found = 1;
+				push @mapping_files, $candidate unless $seen_mapping{$candidate}++;
+			}
+			die "jgi_depth_cmd:::Can't find a non-empty BAM or CRAM named by $marker\n"
+				unless $mapping_found;
 		}
 	}
+	$isCram = scalar grep { /\.cram$/i } @mapping_files;
 	#my $comBAM = join("/mapping/Align_ment-smd.bam ",@dirSS);
 	# Split conda activation prefix from the binary name so the activation can be
 	# emitted before any pipe, keeping just the bare binary after the pipe.
@@ -498,26 +551,24 @@ sub jgi_depth_cmd{
 		($jgiActivate, $jgiBin) = ($jgiScr =~ /^(.*\n)(.+)$/s);
 	}
 
-	my $covCmd = "";
+	my $covCmd = "set -e\n";
 	my @temporary_bams;
 	$covCmd .= "rm -f $out.jgi.*\n";
 	if ($isCram){
 		die "jgi_depth_cmd:::No reference Fasta given for @dirSS\n" if ($refFA eq "");
 		# Convert all CRAMs to temp BAMs before activation (samtools is in the base env, not MF4binners)
-		my @splSS = split /\s/,$comBAM;
-		$comBAM="";
-		for (my $i=0;$i<@splSS;$i++){
-			next if ($splSS[$i] eq "");
+		for (my $i=0;$i<@mapping_files;$i++){
+			next unless $mapping_files[$i] =~ /\.cram$/i;
 			my $tmpBam = "$out.jgi.tmp.$i.bam";
-			$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $splSS[$i] > $tmpBam\n";
-			$comBAM .= "$tmpBam ";
+			$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $mapping_files[$i] > $tmpBam\n";
+			$mapping_files[$i] = $tmpBam;
 			push @temporary_bams, $tmpBam;
 		}
 	}
 	$covCmd .= $jgiActivate; # conda activation after samtools, before jgi
 	$covCmd .= $jgiBin;
 	#--pairedContigs $out.jgi.pairs.sparse
-	$covCmd .= " --outputDepth $out.jgi.depth.txt  --percentIdentity $perID  $comBAM\n";
+	$covCmd .= " --outputDepth $out.jgi.depth.txt  --percentIdentity $perID  ".join(' ', @mapping_files)."\n";
 	$covCmd .= "test -s $out.jgi.depth.txt\n";
 	$covCmd .= "rm -f ".join(" ", @temporary_bams)."\n" if (@temporary_bams);
 	#$covCmd .= "gzip $out.jgi*\n";
@@ -525,6 +576,119 @@ sub jgi_depth_cmd{
 
 	#$covCmd .= "gzip $nxtBAM.jgi*\n";
 	return $covCmd;
+}
+
+sub inputFmtSpadesLibraries {
+	my ($libraries, $logDir) = @_;
+	my ($r1, $r2, $single, $labels, $technologies) = legacyLibraryArrays($libraries, 1);
+	return inputFmtSpades($r1, $r2, $single, $logDir, $technologies);
+}
+
+sub inputFmtMegahitLibraries {
+	my ($libraries, $logDir) = @_;
+	my ($r1, $r2, $single) = legacyLibraryArrays($libraries, 1);
+	return inputFmtMegahit($r1, $r2, $single, $logDir);
+}
+
+sub _shell_quote_megahit_input {
+	my ($value) = @_;
+	die "Cannot quote an undefined MEGAHIT input\n" unless defined $value;
+	die "MEGAHIT input contains a NUL or newline\n" if $value =~ /[\0\r\n]/;
+	$value =~ s/'/'"'"'/g;
+	return "'$value'";
+}
+
+# Clean-read records describe outputs before their cleaning jobs run.  In
+# particular, SDM's paired-read orphan file is optional and may be absent in
+# older/stale clean directories.  Resolve those optional inputs in the
+# assembly job, after its cleaning dependencies have completed, instead of
+# baking every projected path into MEGAHIT's -r argument.
+sub inputFmtMegahitRuntimeLibraries {
+	my ($libraries, $arrayName) = @_;
+	$arrayName ||= 'megahit_inputs';
+	die "Invalid MEGAHIT shell-array name '$arrayName'\n"
+		unless $arrayName =~ /^[A-Za-z_][A-Za-z0-9_]*$/;
+	my @clean_libraries = @{$libraries || []};
+	die "No read inputs supplied to MEGAHIT\n" unless @clean_libraries;
+
+	my $command = <<'BASH';
+mf4_fastq_has_records() {
+    local mf4_fastq="$1"
+    [[ -s "$mf4_fastq" ]] || return 1
+    local mf4_first_line=""
+    if [[ "$mf4_fastq" == *.gz ]]; then
+        mf4_first_line=$(set +o pipefail; gzip -cd -- "$mf4_fastq" 2>/dev/null | head -n 1)
+    else
+        IFS= read -r mf4_first_line < "$mf4_fastq" || true
+    fi
+    [[ "$mf4_first_line" == @* ]]
+}
+BASH
+	my $leftArray = "${arrayName}_left";
+	my $rightArray = "${arrayName}_right";
+	my $singleArray = "${arrayName}_singletons";
+	my $leftCsv = "${leftArray}_csv";
+	my $rightCsv = "${rightArray}_csv";
+	my $singleCsv = "${singleArray}_csv";
+	$command .= "$arrayName=()\n$leftArray=()\n$rightArray=()\n$singleArray=()\n";
+	for (my $i = 0; $i < @clean_libraries; $i++) {
+		my $files = $clean_libraries[$i]{files} || {};
+		my $left = $files->{r1} || '';
+		my $right = $files->{r2} || '';
+		die "Read library index $i has only one mate for MEGAHIT\n"
+			if (($left eq '') != ($right eq ''));
+		if ($left ne '') {
+			die "MEGAHIT input paths cannot contain commas: $left / $right\n"
+				if $left =~ /,/ || $right =~ /,/;
+			my $leftQ = _shell_quote_megahit_input($left);
+			my $rightQ = _shell_quote_megahit_input($right);
+			my $missingQ = _shell_quote_megahit_input(
+				"Missing paired input for MEGAHIT: $left / $right"
+			);
+			my $skippedQ = _shell_quote_megahit_input(
+				"Skipping zero-record cleaned paired library for MEGAHIT: $left / $right"
+			);
+			my $mismatchQ = _shell_quote_megahit_input(
+				"Cleaner produced mismatched paired read content for MEGAHIT: $left / $right"
+			);
+			$command .= "if [[ ! -e $leftQ || ! -e $rightQ ]]; then printf '%s\\n' $missingQ >&2; exit 41; fi\n";
+			$command .= "mf4_left_has_$i=0; mf4_right_has_$i=0\n";
+			$command .= "if mf4_fastq_has_records $leftQ; then mf4_left_has_$i=1; fi\n";
+			$command .= "if mf4_fastq_has_records $rightQ; then mf4_right_has_$i=1; fi\n";
+			$command .= "if (( mf4_left_has_$i && mf4_right_has_$i )); then $leftArray+=( $leftQ ); $rightArray+=( $rightQ ); "
+				."elif (( ! mf4_left_has_$i && ! mf4_right_has_$i )); then printf '%s\\n' $skippedQ >&2; "
+				."else printf '%s\\n' $mismatchQ >&2; exit 43; fi\n";
+		}
+		my $orphan = $files->{single} || '';
+		if ($orphan ne '') {
+			die "MEGAHIT input paths cannot contain commas: $orphan\n" if $orphan =~ /,/;
+			my $orphanQ = _shell_quote_megahit_input($orphan);
+			my $missingQ = _shell_quote_megahit_input(
+				"Skipping missing optional MEGAHIT singleton: $orphan"
+			);
+			my $skippedQ = _shell_quote_megahit_input(
+				"Skipping zero-record cleaned MEGAHIT singleton: $orphan"
+			);
+			$command .= "if [[ ! -e $orphanQ ]]; then printf '%s\\n' $missingQ >&2; "
+				."elif mf4_fastq_has_records $orphanQ; then $singleArray+=( $orphanQ ); "
+				."else printf '%s\\n' $skippedQ >&2; fi\n";
+		}
+	}
+	my $leftLength = '${#'.$leftArray.'[@]}';
+	my $leftValues = '${'.$leftArray.'[@]}';
+	my $rightValues = '${'.$rightArray.'[@]}';
+	my $singleLength = '${#'.$singleArray.'[@]}';
+	my $singleValues = '${'.$singleArray.'[@]}';
+	$command .= "if (( $leftLength )); then printf -v $leftCsv '%s,' \"$leftValues\"; "
+		."printf -v $rightCsv '%s,' \"$rightValues\"; "
+		."$leftCsv=\${$leftCsv%,}; $rightCsv=\${$rightCsv%,}; "
+		."$arrayName+=( -1 \"\$$leftCsv\" -2 \"\$$rightCsv\" ); fi\n";
+	$command .= "if (( $singleLength )); then printf -v $singleCsv '%s,' \"$singleValues\"; "
+		."$singleCsv=\${$singleCsv%,}; $arrayName+=( -r \"\$$singleCsv\" ); fi\n";
+	my $argumentCount = '${#'.$arrayName.'[@]}';
+	$command .= "if (( $argumentCount == 0 )); then printf '%s\\n' "
+		."'No FASTQ records remain for MEGAHIT after cleaning; refusing an empty assembly' >&2; exit 42; fi\n";
+	return ($command, '"${'.$arrayName.'[@]}"');
 }
 
 #2nd: arrray of files, paired sep by ","

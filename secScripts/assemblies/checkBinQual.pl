@@ -111,7 +111,7 @@ if ($BinnerChoice == 2 && !-s $MB2){
 		system "touch $MB2";
 	}
 } elsif ($BinnerChoice) {#MetaBat2 processing..
-	print "Detected MetaBat2 output dir..\n";
+	print "Detected standardized binner assignment output..\n";
 } else {
 	print "Asssuming generic binner..\n";
 }
@@ -179,7 +179,7 @@ sub createBinFAA($$){ #old version, no longer used
 	system "mkdir -p $binD" unless (-d $binD);
 	my %FAS = %{$hr};
 
-	$emptyBin= 1 if (-e $MB2 && -s $MB2 == 0);
+	$emptyBin = 1 unless keys %MB;
 
 	foreach my $bin (keys %MB){
 		my @ctgs = @{$MB{$bin}};

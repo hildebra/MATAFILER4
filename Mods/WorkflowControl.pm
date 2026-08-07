@@ -2,17 +2,35 @@ package Mods::WorkflowControl;
 
 use warnings;
 use strict;
+use IO::Uncompress::Gunzip qw($GunzipError);
 
 use Exporter qw(import);
 
 our @EXPORT_OK = qw(
 	advance_loop_window
+	overlap_loop_window
+	rolling_completed_frontier
+	rolling_loop_transition
+	priority_outputs_complete
+	parse_loop_spec
+	should_rerun_locked_window
+	assembly_cores_for_input
 	assembly_group_output_dirs
+	balanced_parallel_batches
 	hybrid_group_ready
 	hybrid_package_complete
+	hybrid_package_sample_id
+	hybrid_local_scratch_gb
 	missing_input_files
 	normalise_job_dependencies
 	append_job_dependencies
+	deferred_command_dependencies
+	commands_are_lightweight_filesystem
+	input_terminal_status
+	cleaned_primary_libraries_empty
+	sample_empty_marker_reason
+	reconcile_sample_empty_marker
+	cleanup_stage_barrier
 	augment_deferred_submission
 	source_input_files
 	parse_ignored_samples
@@ -20,6 +38,50 @@ our @EXPORT_OK = qw(
 	sample_is_ignored
 	workflow_members_match
 );
+
+sub balanced_parallel_batches {
+	my ($total, $maximum) = @_;
+	die 'balanced_parallel_batches requires non-negative total and positive maximum'
+		unless (defined($total) && defined($maximum) && $total >= 0 && $maximum > 0
+			&& int($total) == $total && int($maximum) == $maximum);
+	return [] if ($total == 0);
+	my $batch_count = int(($total + $maximum - 1) / $maximum);
+	my $base_size = int($total / $batch_count);
+	my $remainder = $total % $batch_count;
+	return [map { $base_size + ($_ < $remainder ? 1 : 0) } 0 .. $batch_count - 1];
+}
+
+sub hybrid_package_sample_id {
+	my ($package_dir) = @_;
+	return '' unless defined($package_dir) && length($package_dir);
+	$package_dir =~ s{/$}{};
+	open my $manifest, '<', "$package_dir/package.manifest.tsv" or return '';
+	while (my $line = <$manifest>) {
+		$line =~ s/[\r\n]+$//;
+		if ($line =~ /^sample_id\t(.+)$/) {
+			my $sample_id = $1;
+			close $manifest;
+			return $sample_id;
+		}
+	}
+	close $manifest;
+	return '';
+}
+
+sub hybrid_local_scratch_gb {
+	my (%args) = @_;
+	my $assembler_gb = 0 + ($args{assembler_gb} || 0);
+	my $preassembly_bytes = 0 + ($args{preassembly_bytes} || 0);
+	my $max_depth = 0 + ($args{max_synthetic_depth} || 0);
+	die 'hybrid_local_scratch_gb requires non-negative inputs'
+		if ($assembler_gb < 0 || $preassembly_bytes < 0 || $max_depth < 0);
+	# Synthetic FASTQ is written compressed. Budget one byte per simulated base
+	# at the configured depth cap, rounded up, in addition to assembler scratch.
+	my $synthetic_gb = $preassembly_bytes * $max_depth / (1024 ** 3);
+	$synthetic_gb = int($synthetic_gb) == $synthetic_gb
+		? int($synthetic_gb) : int($synthetic_gb) + 1;
+	return int($assembler_gb + $synthetic_gb);
+}
 
 sub normalise_job_dependencies {
 	my (@values) = @_;
@@ -47,6 +109,145 @@ sub append_job_dependencies {
 		unless (ref($target) eq 'SCALAR');
 	${$target} = normalise_job_dependencies(${$target}, @values);
 	return ${$target};
+}
+
+sub deferred_command_dependencies {
+	my (%args) = @_;
+	my $submitted = $args{submitted} || [];
+	die 'deferred_command_dependencies submitted jobs must be an array reference'
+		unless ref($submitted) eq 'ARRAY';
+	my $previous = $args{chain_previous} && @{$submitted}
+		? $submitted->[-1] : '';
+	return normalise_job_dependencies($args{dependencies}, $previous);
+}
+
+sub commands_are_lightweight_filesystem {
+	my ($commands) = @_;
+	return 0 unless defined($commands) && $commands =~ /\S/;
+	for my $command (split /[;\r\n]+/, $commands) {
+		$command =~ s/^\s+|\s+$//g;
+		next if $command eq '' || $command =~ /^#/;
+		return 0 if $command =~ /(?:\|\||&&|[|<>`]|\$\()/;
+		my ($program) = $command =~ /^(\S+)/;
+		return 0 unless defined $program;
+		$program =~ s{.*/}{};
+		return 0 unless $program =~ /^(?:ln|mkdir|touch|rm|sleep|echo)$/;
+	}
+	return 1;
+}
+
+sub input_terminal_status {
+	my (%args) = @_;
+	my $input_size_mb = 0 + ($args{input_size_mb} || 0);
+	my $threshold_mb = 0 + ($args{threshold_mb} || 0);
+	die 'input_terminal_status requires non-negative input and threshold sizes'
+		if $input_size_mb < 0 || $threshold_mb < 0;
+	return 'skipped_empty_input' if $input_size_mb == 0;
+	return 'skipped_too_small' if $input_size_mb < $threshold_mb;
+	return '';
+}
+
+sub _fastq_file_has_records {
+	my ($path) = @_;
+	return undef unless defined($path) && -e $path && -s $path;
+	my $fh;
+	if ($path =~ /\.gz$/i) {
+		$fh = IO::Uncompress::Gunzip->new($path);
+		return undef unless $fh;
+	} else {
+		open $fh, '<', $path or return undef;
+	}
+	my $first_line = <$fh>;
+	close $fh;
+	return defined($first_line) && $first_line =~ /^\@/ ? 1 : 0;
+}
+
+sub cleaned_primary_libraries_empty {
+	my ($libraries) = @_;
+	die 'cleaned_primary_libraries_empty requires an array reference'
+		unless ref($libraries) eq 'ARRAY';
+	my $saw_input = 0;
+	for my $library (@{$libraries}) {
+		next unless ref($library) eq 'HASH';
+		my $files = $library->{files} || {};
+		my ($r1, $r2, $single) = @{$files}{qw(r1 r2 single)};
+		if (defined($r1) && $r1 ne '') {
+			return 0 unless defined($r2) && $r2 ne '' && -e $r1 && -e $r2;
+			my $r1_has_records = _fastq_file_has_records($r1);
+			my $r2_has_records = _fastq_file_has_records($r2);
+			return 0 unless defined($r1_has_records) && defined($r2_has_records);
+			return 0 if $r1_has_records != $r2_has_records;
+			return 0 if $r1_has_records;
+			$saw_input = 1;
+		}
+		if (defined($single) && $single ne '') {
+			return 0 unless -e $single;
+			my $single_has_records = _fastq_file_has_records($single);
+			return 0 unless defined($single_has_records);
+			return 0 if $single_has_records;
+			$saw_input = 1;
+		}
+	}
+	return $saw_input ? 1 : 0;
+}
+
+sub sample_empty_marker_reason {
+	my ($sample_root) = @_;
+	die 'sample_empty_marker_reason requires sample_root'
+		unless defined($sample_root) && length($sample_root);
+	my $marker = "$sample_root/SMPL.empty";
+	return '' unless -f $marker;
+	open my $fh, '<', $marker
+		or die "Cannot read sample empty marker $marker: $!\n";
+	my $reason = <$fh>;
+	close $fh or die "Cannot close sample empty marker $marker: $!\n";
+	return '' unless defined($reason);
+	$reason =~ s/[\r\n]+$//;
+	return $reason eq 'cleaned_primary_reads_empty' ? $reason : '';
+}
+
+sub reconcile_sample_empty_marker {
+	my (%args) = @_;
+	my $sample_root = $args{sample_root};
+	die 'reconcile_sample_empty_marker requires sample_root'
+		unless defined($sample_root) && length($sample_root);
+	my $status = input_terminal_status(
+		input_size_mb => $args{input_size_mb},
+		threshold_mb => $args{threshold_mb},
+	);
+	my $marker = "$sample_root/SMPL.empty";
+	# A marker written by the primary read cleaner means that the map-resolved
+	# source may be large but no assembly input survived filtering. It remains
+	# authoritative until a cleaner rerun replaces or clears it.
+	return 1 if sample_empty_marker_reason($sample_root) eq 'cleaned_primary_reads_empty';
+	if ($status eq '' && (-e $marker || -l $marker)) {
+		unlink $marker
+			or die "Cannot remove stale nonempty-sample marker $marker: $!\n";
+	}
+	return (-e $marker || -l $marker) ? 1 : 0;
+}
+
+sub cleanup_stage_barrier {
+	my (@stages) = @_;
+	@stages = @{$stages[0]} if @stages == 1 && ref($stages[0]) eq 'ARRAY';
+	my (@dependencies, @blocked);
+	for my $stage (@stages) {
+		die 'cleanup_stage_barrier stages must be hash references'
+			unless ref($stage) eq 'HASH';
+		next unless $stage->{required};
+		next if $stage->{complete};
+		my $stage_dependencies = normalise_job_dependencies($stage->{dependencies});
+		if ($stage_dependencies eq '') {
+			push @blocked, $stage->{name} || 'unnamed stage';
+			next;
+		}
+		push @dependencies, $stage_dependencies;
+	}
+	return {
+		ready => @blocked ? 0 : 1,
+		dependencies => normalise_job_dependencies(@dependencies),
+		blocked => \@blocked,
+	};
 }
 
 sub augment_deferred_submission {
@@ -196,7 +397,12 @@ sub hybrid_group_ready {
 
 sub missing_input_files {
 	my (@files) = @_;
-	return [grep { !defined($_) || $_ eq '' || !-e $_ || !-s $_ } @files];
+	return [grep {
+		!defined($_) || $_ eq '' || do {
+			my @fileStat = stat($_);
+			!@fileStat || $fileStat[7] <= 0;
+		}
+	} @files];
 }
 
 sub source_input_files {
@@ -230,6 +436,177 @@ sub advance_loop_window {
 		reset_index => $next_from - 1,
 		has_window => $has_window,
 	};
+}
+
+sub overlap_loop_window {
+	my (%args) = @_;
+	my $to = 0 + $args{to};
+	my $upper = 0 + $args{upper};
+	my $window = 0 + $args{window_size};
+	my $submitted = 0 + $args{submitted_jobs};
+	my $already_extended = $args{already_extended} ? 1 : 0;
+	my $last_pass = $args{last_pass} ? 1 : 0;
+	die 'overlap_loop_window requires a positive window size' unless ($window > 0);
+	die 'overlap_loop_window requires a non-negative submitted job count'
+		unless ($submitted >= 0);
+
+	# A pass using no more than one quarter of a normal sample window is treated
+	# as lightly loaded. Keep at least a one-job allowance for small windows.
+	my $job_limit = int($window / 4);
+	$job_limit = 1 if ($job_limit < 1);
+	my $can_extend = !$already_extended && $to < $upper;
+	my $light_pass = $submitted > 0 && $submitted <= $job_limit;
+	# Always merge the following block into the final allowed pass. This keeps
+	# work flowing even when that pass is too busy for the light-pass trigger.
+	my $should_extend = $can_extend && ($light_pass || $last_pass);
+	my $next_to = $to;
+	if ($should_extend) {
+		$next_to += $window;
+		$next_to = $upper if ($next_to > $upper);
+	}
+	return {
+		to => $next_to,
+		extended => $should_extend ? 1 : 0,
+		job_limit => $job_limit,
+	};
+}
+
+sub rolling_loop_transition {
+	my (%args) = @_;
+	my $from = 0 + $args{from};
+	my $to = 0 + $args{to};
+	my $upper = 0 + $args{upper};
+	my $loop_count = 0 + ($args{loop_count} || 0);
+	my $window = 0 + ($args{window_size} || 0);
+	die 'rolling_loop_transition requires a valid selected range'
+		if $from < 0 || $from > $to || $to > $upper;
+	die 'rolling_loop_transition requires non-negative loop and window values'
+		if $loop_count < 0 || $window < 0;
+
+	if ($loop_count > 0 && $from < $to) {
+		return {action => 'repeat', to => $to};
+	}
+	if ($window > 0 && $to < $upper) {
+		my $next_to = $to + $window;
+		$next_to = $upper if $next_to > $upper;
+		return {action => 'expand', to => $next_to};
+	}
+	return {action => 'verify', to => $upper};
+}
+
+sub assembly_cores_for_input {
+	my (%args) = @_;
+	my $input_mb = defined($args{input_mb}) ? 0 + $args{input_mb} : 0;
+	my $configured = defined($args{configured_cores})
+		? 0 + $args{configured_cores} : 0;
+	die 'assembly_cores_for_input requires a non-negative input size'
+		unless ($input_mb >= 0);
+	die 'assembly_cores_for_input requires non-negative configured cores'
+		unless ($configured >= 0);
+	return int($configured) if ($configured > 0);
+
+	my ($minimum_mb, $maximum_mb) = (500, 10 * 1024);
+	my ($minimum_cores, $maximum_cores) = (8, 48);
+	return $minimum_cores if ($input_mb <= $minimum_mb);
+	return $maximum_cores if ($input_mb >= $maximum_mb);
+	my $scaled = $minimum_cores
+		+ ($input_mb - $minimum_mb)
+			* ($maximum_cores - $minimum_cores)
+			/ ($maximum_mb - $minimum_mb);
+	return int($scaled + 0.5);
+}
+
+sub parse_loop_spec {
+	my ($value) = @_;
+	$value = '0' unless (defined $value);
+	return {loop_count => 0, window_size => 0} if ($value eq '0');
+	if ($value =~ /\A(\d+):(\d+)\z/) {
+		my ($loops, $window) = (0 + $1, 0 + $2);
+		die '-loopTillComplete requires positive X:Y values'
+			unless ($loops > 0 && $window > 0);
+		return {loop_count => $loops, window_size => $window};
+	}
+	# Preserve the historical boolean-style switch, which means six passes over
+	# the complete selected range and has no sample windowing.
+	return {loop_count => 6, window_size => 0} if ($value eq '1');
+	die "Invalid -loopTillComplete value '$value'; expected 0, 1, or X:Y";
+}
+
+sub should_rerun_locked_window {
+	my (%args) = @_;
+	my $active_jobs = 0 + $args{active_jobs};
+	my $sample_count = 0 + $args{sample_count};
+	my $active_job_threshold = exists $args{active_job_threshold}
+		? 0 + $args{active_job_threshold} : 3;
+	my $remove_locks = $args{remove_locks} ? 1 : 0;
+	die 'should_rerun_locked_window requires a non-negative active job count'
+		unless ($active_jobs >= 0);
+	die 'should_rerun_locked_window requires a positive sample count'
+		unless ($sample_count > 0);
+	die 'should_rerun_locked_window requires a non-negative active job threshold'
+		unless ($active_job_threshold >= 0);
+	return 0 if ($remove_locks || $active_jobs == 0);
+	# Use integer arithmetic for the strict one-percent comparison so boundary
+	# values such as 10 active jobs among 1,000 samples do not qualify.
+	return ($active_jobs <= $active_job_threshold
+		|| $active_jobs * 100 < $sample_count) ? 1 : 0;
+}
+
+sub rolling_completed_frontier {
+	my (%args) = @_;
+	my $from = 0 + $args{from};
+	my $upper = 0 + $args{upper};
+	my $window = 0 + ($args{window_size} || 0);
+	my $completed = $args{completed} || {};
+	die 'rolling_completed_frontier requires a valid selected range'
+		if $from < 0 || $upper < $from;
+	my $next_from = $from;
+	$next_from++ while $next_from < $upper && $completed->{$next_from};
+	my $next_to = $upper;
+	if ($window > 0) {
+		$next_to = $next_from + $window;
+		$next_to = $upper if $next_to > $upper;
+	}
+	return {
+		from => $next_from,
+		to => $next_to,
+		advanced => $next_from - $from,
+		finished => $next_from >= $upper ? 1 : 0,
+	};
+}
+
+sub priority_outputs_complete {
+	my ($stages, $checker) = @_;
+	$stages ||= [];
+	$checker ||= sub {
+		my ($path, $kind) = @_;
+		return $kind eq 'exists' ? -e $path : -s $path;
+	};
+	for my $stage (@{$stages}) {
+		next unless $stage->{required};
+		my $kind = $stage->{kind} || 'nonempty';
+		for my $path (@{$stage->{all} || []}) {
+			next if !defined($path) || $path eq '';
+			return { complete => 0, missing_stage => $stage->{name}, missing => $path }
+				unless $checker->($path, $kind, $stage);
+		}
+		my $alternatives = $stage->{any} || [];
+		if (@{$alternatives}) {
+			my $present;
+			for my $path (@{$alternatives}) {
+				next if !defined($path) || $path eq '';
+				if ($checker->($path, $kind, $stage)) {
+					$present = 1;
+					last;
+				}
+			}
+			return {
+				complete => 0, missing_stage => $stage->{name},
+				missing => join(' or ', @{$alternatives}),
+			} unless $present;
+		}
+	}
+	return { complete => 1 };
 }
 
 1;

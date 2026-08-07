@@ -81,6 +81,64 @@ like($errors, qr/Invalid FASTQ separator/, 'FASTQ validation explains the failur
 
 my $assembly = File::Spec->catfile($tmp, 'assembly.fa');
 write_file($assembly, ">a\nAAAA\n");
+my $fake_samtools = File::Spec->catfile($tmp, 'fake-samtools');
+write_file($fake_samtools, <<'FAKE_SAMTOOLS');
+#!/usr/bin/env perl
+use strict;
+use warnings;
+if ($ARGV[0] eq 'faidx') {
+	open my $fasta, '<', $ARGV[1] or die $!;
+	open my $fai, '>', "$ARGV[1].fai" or die $!;
+	my ($name, $length) = ('', 0);
+	while (my $line = <$fasta>) {
+		if ($line =~ /^>(\S+)/) {
+			print {$fai} "$name\t$length\t0\t0\t0\n" if length $name;
+			($name, $length) = ($1, 0);
+		} else {
+			$line =~ s/\s+//g;
+			$length += length $line;
+		}
+	}
+	print {$fai} "$name\t$length\t0\t0\t0\n" if length $name;
+	exit 0;
+}
+if ($ARGV[0] eq 'view' && $ARGV[1] eq '-H') {
+	open my $alignment, '<', $ARGV[2] or die $!;
+	print while <$alignment>;
+	exit 0;
+}
+die "unsupported fake samtools invocation: @ARGV\n";
+FAKE_SAMTOOLS
+chmod 0755, $fake_samtools or die $!;
+my $mapping_dir = File::Spec->catdir($tmp, 'mapping');
+mkdir $mapping_dir or die $!;
+write_file(File::Spec->catfile($mapping_dir, 'done.sto'), "sample-smd.cram\n");
+my $alignment = File::Spec->catfile($mapping_dir, 'sample-smd.cram');
+write_file($alignment, "\@HD\tVN:1.6\n\@SQ\tSN:a\tLN:4\n");
+($status, $output, $errors) = run_script('validate_mapping_references.pl',
+	'--assembly', $assembly, '--samtools', $fake_samtools,
+	'--sample-dirs', $tmp);
+is($status, 0, 'binning reference validator accepts a matching CRAM dictionary');
+like($output, qr/Validated 1 mapping file/, 'successful validation reports its alignment count');
+write_file($alignment, "\@HD\tVN:1.6\n\@SQ\tSN:preassembly_contig\tLN:4\n");
+($status, $output, $errors) = run_script('validate_mapping_references.pl',
+	'--assembly', $assembly, '--samtools', $fake_samtools,
+	'--sample-dirs', $tmp);
+isnt($status, 0, 'binning reference validator rejects a stale preassembly CRAM');
+like($errors, qr/mapping\/reference mismatch.*missing 'preassembly_contig'/is,
+	'reference mismatch failure identifies the stale contig and required remap');
+
+unlink $alignment or die $!;
+write_file(File::Spec->catfile($mapping_dir, 'done.sto'), "sample.sup-smd.cram\n");
+my $support_alignment = File::Spec->catfile($mapping_dir, 'sample.sup-smd.cram');
+write_file($support_alignment, "\@HD\tVN:1.6\n\@SQ\tSN:a\tLN:4\n");
+($status, $output, $errors) = run_script('validate_mapping_references.pl',
+	'--assembly', $assembly, '--samtools', $fake_samtools,
+	'--sample-dirs', $tmp);
+is($status, 0, 'binning reference validator accepts a support-only mapping');
+like($output, qr/Validated 1 mapping file/,
+	'support-only mapping is validated without inventing a primary mapping');
+
 my $bin_dir = File::Spec->catdir($tmp, 'bins');
 mkdir $bin_dir or die $!;
 my $sentinel = File::Spec->catfile($bin_dir, 'keep.txt');
@@ -91,5 +149,75 @@ write_file($sentinel, "keep\n");
 	'-cores', 1, '-smplDirs', $tmp);
 isnt($status, 0, 'unsupported binner fails before execution');
 ok(-e $sentinel, 'invalid binner does not erase an existing output directory');
+
+my $small_bin_dir = File::Spec->catdir($tmp, 'small-bins');
+my $small_bin_tmp = File::Spec->catdir($tmp, 'small-bin-tmp');
+my $sample_completion = File::Spec->catfile($tmp, "MF4.sentinel.small.json");
+write_file($sample_completion, "closed\n");
+($status, $output, $errors) = run_script('runBinners.pl',
+	'-binner', 1, '-binD', $small_bin_dir, '-tmpD', $small_bin_tmp,
+	'-smplID', 'small', '-assmbl', $assembly, '-assmblGrp', 1,
+	'-cores', 1, '-smplDirs', $tmp, '-minAssemblySizeMB', 0.000005);
+is($status, 0, 'undersized assembly completes without invoking a binner');
+ok(!-e $sample_completion,
+	"binner execution invalidates the sample completion sentinel before publishing output");
+like($output, qr/Assembly has 4 bp.*publishing an empty bin assignment/s,
+	'undersized assembly reports the measured sequence size and cutoff action');
+my $small_assignment = File::Spec->catfile($small_bin_dir, 'small');
+ok(-e $small_assignment && !-s $small_assignment,
+	'undersized assembly publishes the standard empty bin assignment');
+ok(-s File::Spec->catfile($small_bin_dir, 'Binning.stone'),
+	'undersized assembly publishes the normal binner completion stone');
+
+my $scg_small_bin_dir = File::Spec->catdir($tmp, 'scg-small-bins');
+my $scg_small_tmp = File::Spec->catdir($tmp, 'scg-small-tmp');
+($status, $output, $errors) = run_script('runBinners.pl',
+	'-binner', 5, '-binD', $scg_small_bin_dir, '-tmpD', $scg_small_tmp,
+	'-smplID', 'scg-small', '-assmbl', $assembly, '-assmblGrp', 1,
+	'-cores', 1, '-smplDirs', $tmp);
+is($status, 0,
+	'SCGBinner input with fewer than two eligible contigs completes as an empty result');
+like($output,
+	qr/SCGBinner preflight: 1 total contigs; 0 contigs >=1000 bp.*?requires at least 2 contigs >=1000 bp.*?publishing an empty bin assignment/s,
+	'SCGBinner reports the exact eligible-contig reason before skipping training');
+ok(-e File::Spec->catfile($scg_small_bin_dir, 'scg-small')
+		&& !-s File::Spec->catfile($scg_small_bin_dir, 'scg-small'),
+	'SCGBinner technical-minimum guard publishes the standard empty assignment');
+ok(-s File::Spec->catfile($scg_small_bin_dir, 'Binning.stone'),
+	'SCGBinner technical-minimum guard publishes the normal completion stone');
+
+($status, $output, $errors) = run_script('checkBinQual.pl',
+	'-asm', $assembly, '-binF', $small_assignment,
+	'-tmpD', File::Spec->catdir($tmp, 'small-quality-tmp'),
+	'-ncore', 1, '-checkM2', 1, '-checkM1', 0, '-binner', 1);
+is($status, 0, 'standard quality postprocessing accepts the undersized pseudo output');
+ok(-s "$small_assignment.cm2" && -s "$small_assignment.assStat",
+	'undersized assembly receives complete empty quality and assembly-stat outputs');
+
+my $separate_contigs = read_file(File::Spec->catfile($scripts, 'separateContigs.pl'));
+like($separate_contigs,
+	qr/my \$anyCoverageAvailable\s*=\s*.*?fileGZe\(\$primaryCoverage\).*?fileGZe\(\$supportCoverage\).*?unless \$anyCoverageAvailable/s,
+	'contig statistics accepts either primary or supplementary mapped-read coverage');
+unlike($separate_contigs,
+	qr/die "Could not find required coverage file \$inF/,
+	'missing primary coverage is not unconditionally fatal');
+like($separate_contigs,
+	qr/sub geneAbundance.*?contig_stats_coverage_complete\(\$outDab, \$oPrefix\).*?if \(!fileGZe\(\$inF\)\)/s,
+	'completed coverage derivatives are recognized before requiring their source coverage file');
+ok(index($separate_contigs, '$inD =~ s{[\\\\/]+$}{};') >= 0
+		&& index($separate_contigs, '$inD .= "/";') >= 0,
+	'input directories are normalized instead of requiring a caller-supplied trailing slash');
+like($separate_contigs,
+	qr/invalidate_sample_completion\(\$inD\).*?\$inD \.= "\/"/s,
+	"ContigStats workers invalidate the normalized sample root before output changes");
+unlike($separate_contigs,
+	qr/if \(-s \$outFfin.*?Gene abundance was already calculated/s,
+	'incomplete uncompressed output subsets cannot bypass the shared completion contract');
+unlike($separate_contigs,
+	qr/\$readLength > 0 && \$readLengthSup > 0/,
+	'a missing primary stream does not require an otherwise unused primary read length');
+like($separate_contigs,
+	qr/my \$kind = \$isSupport.*?read length must be a positive integer.*?unless \$readL > 0/s,
+	'each available coverage stream validates only its own read length');
 
 done_testing();

@@ -1,0 +1,269 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+use Cwd qw(abs_path);
+use Digest::SHA qw(sha1_hex);
+use File::Basename qw(basename dirname);
+use File::Glob qw(bsd_glob);
+use File::Path qw(make_path remove_tree);
+use File::Spec;
+use Getopt::Long qw(GetOptions);
+
+my %opt = (remove_temporary => 1);
+my @members;
+my @member_locks;
+my (@require_exists, @require_nonempty, @require_file, @require_nonempty_file);
+my $deleted_count = 0;
+GetOptions(
+	'sample=s'        => \$opt{sample},
+	'member=s@'       => \@members,
+	'member-lock=s@'  => \@member_locks,
+	'state-dir=s'     => \$opt{state_dir},
+	'allowed-root=s'  => \$opt{allowed_root},
+	'mapping-dir=s'   => \$opt{mapping_dir},
+	'sample-temp=s'   => \$opt{sample_temp},
+	'scratch-root=s'  => \$opt{scratch_root},
+	'assembly=s'      => \$opt{assembly},
+	'assembly-path-file=s' => \$opt{assembly_path_file},
+	'assembly-dir=s'       => \$opt{assembly_dir},
+	'remove-alignment=s'   => \$opt{remove_alignment},
+	'remove-temporary!'    => \$opt{remove_temporary},
+	'snp-log-dir=s'   => \$opt{snp_log_dir},
+	'require-exists=s@'       => \@require_exists,
+	'require-nonempty=s@'     => \@require_nonempty,
+	'require-file=s@'         => \@require_file,
+	'require-nonempty-file=s@' => \@require_nonempty_file,
+) or die "invalid cleanup arguments\n";
+
+for my $required (qw(sample state_dir allowed_root mapping_dir sample_temp scratch_root snp_log_dir)) {
+	(my $flag = $required) =~ s/_/-/g;
+	die "--$flag is required\n" unless defined($opt{$required}) && length($opt{$required});
+}
+
+sub existing_absolute {
+	my ($path, $label) = @_;
+	my $absolute = abs_path($path);
+	die "$label does not exist: $path\n" unless defined($absolute);
+	return File::Spec->canonpath($absolute);
+}
+
+sub prospective_absolute {
+	my ($path) = @_;
+	my $absolute = File::Spec->canonpath(File::Spec->rel2abs($path));
+	my @missing;
+	my $ancestor = $absolute;
+	while (!-e $ancestor) {
+		my $parent = dirname($ancestor);
+		die "cannot resolve a filesystem ancestor for $path\n" if $parent eq $ancestor;
+		unshift @missing, basename($ancestor);
+		$ancestor = $parent;
+	}
+	my $resolved = abs_path($ancestor);
+	die "cannot resolve filesystem path $ancestor\n" unless defined $resolved;
+	return File::Spec->canonpath(File::Spec->catfile($resolved, @missing));
+}
+
+sub is_below {
+	my ($path, $root) = @_;
+	my $relative = File::Spec->abs2rel($path, $root);
+	return $relative ne File::Spec->updir()
+		&& $relative !~ m{^\.\.(?:[\\/]|$)}
+		&& !File::Spec->file_name_is_absolute($relative);
+}
+
+sub require_below {
+	my ($path, $root, $label) = @_;
+	die "$label escapes its allowed root: $path (root $root)\n"
+		unless is_below($path, $root) && $path ne $root;
+}
+
+sub marker_for {
+	my ($state_dir, $sample) = @_;
+	return File::Spec->catfile($state_dir, sha1_hex($sample).'.complete');
+}
+
+sub marker_matches_assembly {
+	my ($marker_path, $signature) = @_;
+	return 0 unless -s $marker_path;
+	open my $fh, '<', $marker_path or return 0;
+	my $line = <$fh>;
+	close $fh;
+	return 0 unless defined($line);
+	chomp $line;
+	my (undef, $stored_signature) = split /\t/, $line, 2;
+	return defined($stored_signature) && $stored_signature eq $signature;
+}
+
+sub remove_files {
+	my (@files) = @_;
+	my %seen;
+	my $removed = 0;
+	for my $file (@files) {
+		next unless defined($file) && !$seen{$file}++ && -f $file;
+		unlink $file or die "can't remove $file: $!\n";
+		$removed++;
+		$deleted_count++;
+		print "Removed temporary file $file\n";
+	}
+	return $removed;
+}
+
+sub write_atomic {
+	my ($path, $content) = @_;
+	my $directory = dirname($path);
+	make_path($directory) unless -d $directory;
+	my $temporary = "$path.tmp.$$";
+	open my $fh, '>', $temporary or die "can't write $temporary: $!\n";
+	print {$fh} $content or die "can't write $temporary: $!\n";
+	close $fh or die "can't close $temporary: $!\n";
+	rename $temporary, $path or die "can't replace $path with $temporary: $!\n";
+}
+
+sub plain_or_gzip_stats {
+	my ($path) = @_;
+	my @candidates = $path =~ /\.gz$/ ? ($path, substr($path, 0, -3)) : ($path, "$path.gz");
+	for my $candidate (@candidates) {
+		my @stat = stat($candidate);
+		return ($candidate, \@stat) if @stat;
+	}
+	return;
+}
+
+my $allowed_root = existing_absolute($opt{allowed_root}, 'allowed root');
+my @missing_requirements;
+for my $path (@require_exists) {
+	push @missing_requirements, "$path (missing)" unless stat($path);
+}
+for my $path (@require_nonempty) {
+	my @stat = stat($path);
+	push @missing_requirements, "$path (missing or empty)" unless @stat && $stat[7] > 0;
+}
+for my $path (@require_file) {
+	my (undef, $stat) = plain_or_gzip_stats($path);
+	push @missing_requirements, "${path}[.gz] (missing)" unless $stat;
+}
+for my $path (@require_nonempty_file) {
+	my (undef, $stat) = plain_or_gzip_stats($path);
+	push @missing_requirements, "${path}[.gz] (missing or empty)"
+		unless $stat && $stat->[7] > 0;
+}
+die "cleanup prerequisites are incomplete; retained temporary files: "
+	.join('; ', @missing_requirements)."\n" if @missing_requirements;
+
+if (defined($opt{assembly_path_file}) || defined($opt{assembly_dir})) {
+	die "--assembly-path-file and --assembly-dir must be supplied together\n"
+		unless defined($opt{assembly_path_file}) && length($opt{assembly_path_file})
+			&& defined($opt{assembly_dir}) && length($opt{assembly_dir});
+	my $assembly_path_file = prospective_absolute($opt{assembly_path_file});
+	require_below($assembly_path_file, $allowed_root, 'assembly path file');
+	my $assembly_dir = existing_absolute($opt{assembly_dir}, 'assembly directory');
+	require_below($assembly_dir, $allowed_root, 'assembly directory');
+	my $current = '';
+	if (-e $assembly_path_file) {
+		open my $current_fh, '<', $assembly_path_file
+			or die "can't read $assembly_path_file: $!\n";
+		$current = <$current_fh> // '';
+		close $current_fh;
+		chomp $current;
+	}
+	if ($current ne $assembly_dir) {
+		write_atomic($assembly_path_file, "$assembly_dir\n");
+		print "Published assembly path $assembly_path_file\n";
+	}
+}
+
+if (defined($opt{remove_alignment}) && length($opt{remove_alignment})) {
+	my $alignment = prospective_absolute($opt{remove_alignment});
+	require_below($alignment, $allowed_root, 'removable alignment');
+	remove_files($alignment, "$alignment.crai", "$alignment.csi");
+}
+
+exit 0 unless $opt{remove_temporary};
+
+my $state_dir = prospective_absolute($opt{state_dir});
+require_below($state_dir, $allowed_root, 'cleanup state directory');
+my $marker = marker_for($state_dir, $opt{sample});
+@members = ($opt{sample}) unless @members;
+
+my $mapping_dir = prospective_absolute($opt{mapping_dir});
+require_below($mapping_dir, $allowed_root, 'mapping directory');
+my @alignment_indexes;
+for my $stem ("$opt{sample}-smd", "$opt{sample}.sup-smd") {
+	push @alignment_indexes,
+		File::Spec->catfile($mapping_dir, "$stem.bam.bai"),
+		File::Spec->catfile($mapping_dir, "$stem.bam.csi"),
+		File::Spec->catfile($mapping_dir, "$stem.cram.crai"),
+		File::Spec->catfile($mapping_dir, "$stem.cram.csi");
+}
+remove_files(@alignment_indexes);
+
+my $snp_log_dir = prospective_absolute($opt{snp_log_dir});
+require_below($snp_log_dir, $allowed_root, 'SNP log directory');
+remove_files(bsd_glob(File::Spec->catfile($snp_log_dir, '*.bed')));
+
+my $scratch_root = existing_absolute($opt{scratch_root}, 'scratch root');
+my $sample_temp = prospective_absolute($opt{sample_temp});
+require_below($sample_temp, $scratch_root, 'sample temporary directory');
+if (-d $sample_temp) {
+	my $removed = remove_tree($sample_temp, {error => \my $errors});
+	if (@{$errors}) {
+		my @messages;
+		for my $entry (@{$errors}) {
+			my ($path, $message) = %{$entry};
+			push @messages, "$path: $message";
+		}
+		die "failed to remove sample temporary directory: ".join('; ', @messages)."\n";
+	}
+	if ($removed) {
+		$deleted_count += $removed;
+		print "Removed sample temporary directory $sample_temp\n";
+	}
+}
+
+exit 0 unless defined($opt{assembly}) && length($opt{assembly});
+
+my $assembly = existing_absolute($opt{assembly}, 'assembly');
+my @assembly_stat = stat($assembly);
+my $assembly_signature = join(':', @assembly_stat[0, 1, 7, 9, 10]);
+make_path($state_dir) unless -d $state_dir;
+open my $marker_fh, '>', $marker or die "can't write $marker: $!\n";
+print {$marker_fh} "$opt{sample}\t$assembly_signature\n";
+close $marker_fh or die "can't close $marker: $!\n";
+
+my @missing_members = grep {
+	!marker_matches_assembly(marker_for($state_dir, $_), $assembly_signature)
+} @members;
+my @active_locks;
+for my $lock (@member_locks) {
+	my $absolute_lock = prospective_absolute($lock);
+	require_below($absolute_lock, $allowed_root, 'assembly-group sample lock');
+	push @active_locks, $absolute_lock if -e $absolute_lock;
+}
+if (@missing_members || @active_locks) {
+	if ($deleted_count) {
+		print "Retaining assembly indexes; waiting for ".scalar(@missing_members)
+			." group completion marker(s) and ".scalar(@active_locks)." active job lock(s)\n";
+	}
+	exit 0;
+}
+
+if (!is_below($assembly, $allowed_root)) {
+	print "Retaining mapper indexes for external assembly $assembly\n" if $deleted_count;
+	exit 0;
+}
+
+my @assembly_indexes = (
+	"$assembly.fai",
+	"$assembly.gzi",
+	"$assembly.mmi",
+	(map { "$assembly.$_" } qw(amb ann bwt pac sa 0123 bwt.2bit.64)),
+	bsd_glob("$assembly.bw2.*.bt2"),
+	bsd_glob("$assembly.bw2.*.bt2l"),
+	bsd_glob("$assembly.bw2.*.ebwt"),
+	bsd_glob("$assembly.bw2.*.ebwtl"),
+	bsd_glob("$assembly.kma*"),
+);
+my $assembly_indexes_removed = remove_files(@assembly_indexes);
+print "All assembly-group members complete; mapper and FASTA indexes are clean\n"
+	if $assembly_indexes_removed;

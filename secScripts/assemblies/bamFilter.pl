@@ -53,9 +53,11 @@ my %counts = (
 	mapq             => 0,
 	coverage         => 0,
 	edit_rate        => 0,
+	malformed        => 0,
 	end_clipped      => 0,
 );
 
+my $malformed_report_limit = 10;
 my $input_line_number = 0;
 while (my $line = <STDIN>) {
 	$input_line_number++;
@@ -68,106 +70,122 @@ while (my $line = <STDIN>) {
 	$line =~ s/\r\z//;
 	die "bamFilter: upstream process reported an error at input line $input_line_number: $line\n"
 		if $line =~ /^ERR:/;
+	$counts{records}++;
 
 	my @sam = split /\t/, $line, -1;
-	die "bamFilter: malformed SAM at input line $input_line_number: expected at least 11 fields, found "
-		. scalar(@sam) . "\n"
-		if @sam < 11;
+	my $output_record;
+	my $record_ok = eval {
+		die "bamFilter: malformed SAM at input line $input_line_number: expected at least 11 fields, found "
+			. scalar(@sam) . "\n"
+			if @sam < 11;
+		die "bamFilter: SAM line $input_line_number has an invalid query name\n"
+			unless defined($sam[0]) && $sam[0] =~ /\A[!-~]+\z/;
+		die "bamFilter: SAM line $input_line_number has invalid FLAG '$sam[1]'\n"
+			unless $sam[1] =~ /\A\d+\z/ && $sam[1] <= 65535;
+		my $flag = 0 + $sam[1];
 
-	$counts{records}++;
-	die "bamFilter: SAM line $input_line_number has invalid FLAG '$sam[1]'\n"
-		unless $sam[1] =~ /\A\d+\z/ && $sam[1] <= 65535;
-	my $flag = 0 + $sam[1];
+		# Records that were already unmapped do not contain enough alignment data to
+		# evaluate and must pass through unchanged after their basic SAM validation.
+		if ($flag & 0x4) {
+			$counts{already_unmapped}++;
+			$output_record = "$line\n";
+		} else {
+			die "bamFilter: mapped SAM line $input_line_number has no sequence\n"
+				if $sam[9] eq '*';
+			my $sequence_length = length($sam[9]);
+			die "bamFilter: mapped SAM line $input_line_number has an empty sequence\n"
+				if $sequence_length == 0;
+			if ($sam[10] ne '*' && length($sam[10]) != $sequence_length) {
+				die "bamFilter: SAM line $input_line_number has SEQ length $sequence_length but QUAL length "
+					. length($sam[10]) . "\n";
+			}
+			die "bamFilter: SAM line $input_line_number has invalid MAPQ '$sam[4]'\n"
+				unless $sam[4] =~ /\A\d+\z/ && $sam[4] <= 255;
 
-	# Records that were already unmapped do not contain enough alignment data to
-	# evaluate and must pass through unchanged.
-	if ($flag & 0x4) {
-		print "$line\n" or die "bamFilter: cannot write SAM record: $!\n";
-		$counts{already_unmapped}++;
+			my @cigar_operations = parse_cigar($sam[5], $input_line_number);
+			my ($cigar_query_length, $aligned_query_bases, $hard_clipped_bases, $deleted_bases) = (0, 0, 0, 0);
+			for my $operation (@cigar_operations) {
+				my ($length, $code) = @{$operation};
+				$cigar_query_length += $length if $code =~ /[MIS=X]/;
+				$aligned_query_bases += $length if $code =~ /[MI=X]/;
+				$hard_clipped_bases += $length if $code eq 'H';
+				$deleted_bases += $length if $code eq 'D';
+			}
+			die "bamFilter: SAM line $input_line_number has SEQ length $sequence_length but CIGAR consumes "
+				. "$cigar_query_length query bases\n"
+				if $cigar_query_length != $sequence_length;
+
+			my $nm;
+			for my $field (@sam[11 .. $#sam]) {
+				if ($field =~ /\ANM:i:(\d+)\z/) {
+					$nm = 0 + $1;
+					last;
+				}
+			}
+			die "bamFilter: mapped SAM line $input_line_number is missing a valid NM:i tag\n"
+				unless defined($nm);
+
+			# Hard-clipped bases are absent from SEQ but belong to the original query.
+			# Insertions consume query sequence and therefore count as covered.  Deletions
+			# add alignment columns for the NM edit-rate denominator; reference skips do not.
+			my $original_query_length = $sequence_length + $hard_clipped_bases;
+			my $query_coverage = $aligned_query_bases / $original_query_length;
+			my $alignment_columns = $aligned_query_bases + $deleted_bases;
+			die "bamFilter: mapped SAM line $input_line_number has no aligned query bases\n"
+				if $alignment_columns == 0;
+			my $edit_rate = $nm / $alignment_columns;
+			my ($left_clip, $right_clip) = (0, 0);
+			for my $operation (@cigar_operations) {
+				last unless $operation->[1] =~ /[HS]/;
+				$left_clip += $operation->[0];
+			}
+			for my $operation (reverse @cigar_operations) {
+				last unless $operation->[1] =~ /[HS]/;
+				$right_clip += $operation->[0];
+			}
+
+			my $failed = 0;
+			if ($min_end_clip > 0
+				&& $left_clip >= $min_end_clip
+				&& $right_clip >= $min_end_clip) {
+				$failed = 1;
+				$counts{end_clipped}++;
+			}
+			if ($query_coverage < $min_query_coverage) {
+				$failed = 1;
+				$counts{coverage}++;
+			}
+			if ($edit_rate > $max_edit_rate) {
+				$failed = 1;
+				$counts{edit_rate}++;
+			}
+			if ($sam[4] < $min_mapq) {
+				$failed = 1;
+				$counts{mapq}++;
+			}
+
+			if ($failed) {
+				$sam[1] = $flag | 0x4;
+				$counts{filtered}++;
+			} else {
+				$counts{retained}++;
+			}
+			$output_record = join("\t", @sam) . "\n";
+		}
+		1;
+	};
+	if (!$record_ok) {
+		my $reason = $@ || "bamFilter: SAM line $input_line_number could not be validated\n";
+		$reason =~ s/[\r\n]+\z//;
+		$counts{malformed}++;
+		if ($counts{malformed} <= $malformed_report_limit) {
+			print STDERR "$reason; skipping record\n";
+		} elsif ($counts{malformed} == $malformed_report_limit + 1) {
+			print STDERR "bamFilter: further malformed SAM record warnings are suppressed\n";
+		}
 		next;
 	}
-
-	die "bamFilter: mapped SAM line $input_line_number has no sequence\n"
-		if $sam[9] eq '*';
-	my $sequence_length = length($sam[9]);
-	die "bamFilter: mapped SAM line $input_line_number has an empty sequence\n"
-		if $sequence_length == 0;
-	if ($sam[10] ne '*' && length($sam[10]) != $sequence_length) {
-		die "bamFilter: SAM line $input_line_number has SEQ length $sequence_length but QUAL length "
-			. length($sam[10]) . "\n";
-	}
-	die "bamFilter: SAM line $input_line_number has invalid MAPQ '$sam[4]'\n"
-		unless $sam[4] =~ /\A\d+\z/ && $sam[4] <= 255;
-
-	my @cigar_operations = parse_cigar($sam[5], $input_line_number);
-	my ($cigar_query_length, $aligned_query_bases, $hard_clipped_bases, $deleted_bases) = (0, 0, 0, 0);
-	for my $operation (@cigar_operations) {
-		my ($length, $code) = @{$operation};
-		$cigar_query_length += $length if $code =~ /[MIS=X]/;
-		$aligned_query_bases += $length if $code =~ /[MI=X]/;
-		$hard_clipped_bases += $length if $code eq 'H';
-		$deleted_bases += $length if $code eq 'D';
-	}
-	die "bamFilter: SAM line $input_line_number has SEQ length $sequence_length but CIGAR consumes "
-		. "$cigar_query_length query bases\n"
-		if $cigar_query_length != $sequence_length;
-
-	my $nm;
-	for my $field (@sam[11 .. $#sam]) {
-		if ($field =~ /\ANM:i:(\d+)\z/) {
-			$nm = 0 + $1;
-			last;
-		}
-	}
-	die "bamFilter: mapped SAM line $input_line_number is missing a valid NM:i tag\n"
-		unless defined($nm);
-
-	# Hard-clipped bases are absent from SEQ but belong to the original query.
-	# Insertions consume query sequence and therefore count as covered.  Deletions
-	# add alignment columns for the NM edit-rate denominator; reference skips do not.
-	my $original_query_length = $sequence_length + $hard_clipped_bases;
-	my $query_coverage = $aligned_query_bases / $original_query_length;
-	my $alignment_columns = $aligned_query_bases + $deleted_bases;
-	die "bamFilter: mapped SAM line $input_line_number has no aligned query bases\n"
-		if $alignment_columns == 0;
-	my $edit_rate = $nm / $alignment_columns;
-	my ($left_clip, $right_clip) = (0, 0);
-	for my $operation (@cigar_operations) {
-		last unless $operation->[1] =~ /[HS]/;
-		$left_clip += $operation->[0];
-	}
-	for my $operation (reverse @cigar_operations) {
-		last unless $operation->[1] =~ /[HS]/;
-		$right_clip += $operation->[0];
-	}
-
-	my $failed = 0;
-	if ($min_end_clip > 0
-		&& $left_clip >= $min_end_clip
-		&& $right_clip >= $min_end_clip) {
-		$failed = 1;
-		$counts{end_clipped}++;
-	}
-	if ($query_coverage < $min_query_coverage) {
-		$failed = 1;
-		$counts{coverage}++;
-	}
-	if ($edit_rate > $max_edit_rate) {
-		$failed = 1;
-		$counts{edit_rate}++;
-	}
-	if ($sam[4] < $min_mapq) {
-		$failed = 1;
-		$counts{mapq}++;
-	}
-
-	if ($failed) {
-		$sam[1] = $flag | 0x4;
-		$counts{filtered}++;
-	} else {
-		$counts{retained}++;
-	}
-	print join("\t", @sam), "\n" or die "bamFilter: cannot write SAM record: $!\n";
+	print $output_record or die "bamFilter: cannot write SAM record: $!\n";
 }
 
 print STDERR "BamFilter\n"
@@ -176,6 +194,7 @@ print STDERR "BamFilter\n"
 	. "Newly filtered records: $counts{filtered}\n"
 	. "Already unmapped records: $counts{already_unmapped}\n"
 	. "Failure reasons (non-exclusive):\n"
+	. "Malformed SAM records skipped: $counts{malformed}\n"
 	. "  Mapping quality (<$min_mapq): $counts{mapq}\n"
 	. "  Query coverage (<$min_query_coverage): $counts{coverage}\n"
 	. "  Edit rate (>$max_edit_rate): $counts{edit_rate}\n"

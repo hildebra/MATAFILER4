@@ -12,7 +12,7 @@ nuc_data.info = alignments.ReadNucleotideDataSet ("nuc_data", null);
 /* 
     this previous line returns
     {
-     "file":"/Users/sergei/Development/hyphy-develop/tests/hbltests/data/CD2.nex",
+     "file":"",
      "name-mapping":null,
      "partitions":  {
         {"default", ""} 

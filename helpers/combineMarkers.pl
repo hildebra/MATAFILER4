@@ -2,6 +2,7 @@
 #combines ribosomal predictions from several TamoC runs
 use warnings;
 use strict;
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 use File::Basename;
 use List::MoreUtils 'first_index'; 
 
@@ -10,10 +11,10 @@ sub FQ_nameFmt;
 use Mods::GenoMetaAss qw(readMap);
 
 
-#my $baseOut = "/g/scb/bork/hildebra/SNP/GNMass/combinations/";my $mapF = "/g/bork5/hildebra/data/metaGgutEMBL/MM.txt";
+#my $baseOut = getProgPaths("legacyCombineMarkersOutput");my $mapF = getProgPaths("legacyCombineMarkersMap");
 #Soil samples
-my $mapF = "/g/scb/bork/hildebra/data2/Soil_finland/soil_map2.txt";
-my $baseOut = "/g/scb/bork/hildebra/FinSoilAll/";
+my $mapF = getProgPaths("legacyCombineMarkersMap");
+my $baseOut = getProgPaths("legacyCombineMarkersOutput");
 
 
 my $protOutD = $baseOut."FMD";

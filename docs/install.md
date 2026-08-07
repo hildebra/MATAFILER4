@@ -44,6 +44,19 @@ bash helpers/install/installer.sh
 
 The first installation can take a long time because several environments and databases are created or downloaded.
 
+Legacy `MGTK*` environments are reported but left untouched by default. Remove them
+explicitly only after reviewing their contents:
+
+```bash
+bash helpers/install/installer.sh --remove-legacy-envs
+```
+
+To force a fresh CheckM2 and MetaPhlAn database download:
+
+```bash
+bash helpers/install/installer.sh --refresh-databases
+```
+
 After the installer finishes, reload your shell configuration or start a new shell:
 
 ```bash
@@ -75,7 +88,8 @@ export MF4DIR=/path/to/MATAFILER4/
 export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 ```
 
-4. Removes old legacy `MGTK*` environments if present.
+4. Reports old legacy `MGTK*` environments. They are removed only when
+   `--remove-legacy-envs` is supplied.
 5. Creates or updates the MATAFILER4 conda environments, including:
 
 | Environment | Main purpose |
@@ -84,17 +98,29 @@ export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 | `MF4gtdbtk` | GTDB-Tk-related tools |
 | `MF4semibin` | SemiBin |
 | `MF4binners` | Additional binning tools |
-| `MF4genomeface` | GenomeFace-related functionality |
+| `MF4genomeface` | Optional GenomeFace functionality; uses an external NERSC package channel |
 | `MF4scgbinner` | SCG-based binning |
 | `MF4checkm2` | CheckM2 and MetaPhlAn dependencies |
 | `MF4phylo` | Phylogenetic tools |
 | `MF4_R` | R-based helper scripts |
 
-6. Clones `extract_gtdb_mg` into `gits/XGTDB/` if missing.
+`MF4genomeface` is best-effort because its package metadata is hosted outside
+conda-forge and Bioconda. If that external channel is unavailable, the installer
+prints a warning and continues; rerun it later to install or update GenomeFace.
+
+6. Clones a pinned `extract_gtdb_mg` revision into `gits/XGTDB/` if missing and
+   verifies existing checkouts before use.
 7. Downloads selected databases where possible, including:
    - the `hostile` human reference index `human-t2t-hla`, if `hostile` is available
    - the CheckM2 database
    - the MetaPhlAn database
+
+Successful CheckM2 and MetaPhlAn downloads receive tool-version marker files.
+Missing or mismatched markers cause the installer to try the database setup again;
+`--refresh-databases` forces a fresh download. Database downloads are best-effort:
+network or permission failures produce warnings but do not abort installation of the
+software environments. If a database directory belongs to the current user but is
+missing its owner write/search bits, the installer repairs those bits before retrying.
 
 ## Configuration after installation
 
@@ -151,9 +177,9 @@ This is expected usage and is usually much faster than the initial installation.
 
 Install micromamba and ensure it is available in your `PATH`, then rerun the installer.
 
-### Old `MG-TK` entries in `.bashrc`
+### Old pre-MATAFILER4 entries in `.bashrc`
 
-The installer checks for old `MG-TK` shell configuration blocks. If it finds them, remove the lines after the marker:
+The installer checks for obsolete shell configuration blocks from earlier MATAFILER releases. If it finds them, remove the lines after the legacy marker:
 
 ```text
 ##------------> MG-TK ADDED
@@ -166,6 +192,20 @@ Then rerun the installer.
 The installer already uses flexible channel priority for micromamba environment creation. If conflicts persist, update micromamba and rerun the installer. On managed HPC systems, it may be preferable to ask local support to inspect the failing environment YAML file in `helpers/install/`.
 
 ### CheckM2 or MetaPhlAn database download fails
+
+The database downloads are optional during software installation. A failure leaves
+the corresponding version marker absent and the installer continues, so rerunning it
+will try again. For a MetaPhlAn permission warning, inspect both Unix mode bits and
+any HPC filesystem ACL:
+
+```bash
+ls -ld /path/to/MATAFILER4/data/DBs/MP4
+getfacl /path/to/MATAFILER4/data/DBs/MP4  # if getfacl is available
+```
+
+If you own the directory, `chmod u+rwx /path/to/MATAFILER4/data/DBs/MP4` is normally
+sufficient. Otherwise use a database location you own or ask the directory owner or
+cluster administrator to grant access.
 
 Activate the relevant environment and retry manually:
 

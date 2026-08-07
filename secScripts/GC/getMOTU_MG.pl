@@ -3,18 +3,19 @@
 
 use warnings;
 use strict;
+use Mods::IO_Tamoc_progs qw(getProgPaths);
 #use Mods::Subm qw(qsubSystem emptyQsubOpt);
 #Cluster1088 = TEC6, test case
 
 my $test="Cluster1088";
 my $tarMotu = $test;
-my $oDir = "/g/bork3/home/hildebra/results/TEC2/Shini_motu_TS/MGs/";
+my $oDir = getProgPaths("legacyMotuMGOutput");
 system "mkdir -p $oDir" unless (-d $oDir);
 my $outF = "$oDir/$tarMotu.MG.fna";
 unlink $outF if (-e $outF);
-my $linkF = "/g/bork3/home/hildebra/results/TEC2/Shini_motu_TS/mOTU.v1.1.padded.motu.linkage.map";
-my $mapF = "/g/bork3/home/hildebra/results/TEC2/Shini_motu_TS/mOTU.v1.1.padded.motu.map";
-my $fastaRef = "/g/bork3/home/hildebra/results/TEC2/Shini_motu_TS/263MetaRef10.MGv9.cal.c2.nr";
+my $linkF = getProgPaths("legacyMotuLinkMap");
+my $mapF = getProgPaths("legacyMotuMap");
+my $fastaRef = getProgPaths("legacyMotuFasta");
 
 
 

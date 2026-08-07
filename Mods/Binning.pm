@@ -1,19 +1,20 @@
 package Mods::Binning;
+# 2026-07 sparse-MGS hardening: accept header-only bin assignments as an empty result.
 use Exporter qw(import);
 our @EXPORT_OK = qw(
 				runMetaBat runSemiBin  runMetaDecoder  runGenomeFace runSCGBinner
 				runCheckM runCheckM2 MB2N50
-				getBinSubdirName
+				getBinSubdirName binningOutputsComplete emptyBinnerAssignmentCommand
 				createBin2 createBinFAA createBinCtgs
 				readMGS readMGSrev deNovo16S readMGSrevRed minQualFilter 
-				filterMGS_CM MB2assigns calcLCAcompl readCMquals);
+				filterMGS_CM MB2assigns MB2assignedBinIds calcLCAcompl readCMquals);
 
 use warnings;
 use strict;
 use File::Basename;
 use File::Path qw(make_path);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
-use Mods::GenoMetaAss qw (systemW readFasta gzipopen getAssemblPath reverse_complement_IUPAC);
+use Mods::GenoMetaAss qw (systemW readFasta gzipopen gzipwrite getAssemblPath reverse_complement_IUPAC);
 use Mods::TamocFunc qw (cram2bsam);
 
 
@@ -33,6 +34,30 @@ sub getBinSubdirName{
 		$BinnerName = "SC";
 	}
 	return $BinnerName;
+}
+
+sub binningOutputsComplete {
+	my ($base, $useCheckM1, $useCheckM2) = @_;
+	return 0 unless defined($base);
+	my @baseStat = stat($base);
+	my @assemblyStat = stat("$base.assStat");
+	return 0 unless @baseStat && @assemblyStat && $assemblyStat[7] > 0;
+	if ($useCheckM1) {
+		my @checkM1Stat = stat("$base.cm");
+		return 0 unless @checkM1Stat;
+	}
+	if ($useCheckM2) {
+		my @checkM2Stat = stat("$base.cm2");
+		return 0 unless @checkM2Stat && $checkM2Stat[7] > 0;
+	}
+	return 1;
+}
+
+sub emptyBinnerAssignmentCommand {
+	my ($outDir, $name) = @_;
+	die "emptyBinnerAssignmentCommand requires an output directory and name\n"
+		unless defined($outDir) && length($outDir) && defined($name) && length($name);
+	return "mkdir -p $outDir\n: > $outDir/$name\n";
 }
 
 
@@ -94,6 +119,7 @@ sub MB2assigns($ $){
 		chomp; next if /^\s*$/;
 		my @spl  = split /\t/, $_, -1;
 		die "Malformed binner assignment in $inF at line $.\n" unless @spl >= 2 && length($spl[0]) && length($spl[1]);
+		next if $spl[0] eq 'Sequence ID';
 		next if ($spl[1] eq "0");
 		push(@{$ret{$spl[1]}}, $spl[0]);
 	}
@@ -106,6 +132,30 @@ sub MB2assigns($ $){
 	#print "$inF, $IQ ". scalar(keys %{$rQHR}) ."\n";
 
 	return (\%ret,$rQHR);
+}
+
+sub MB2assignedBinIds {
+	my ($inF, $IQ) = @_;
+	my %assigned;
+	open my $input, '<', $inF or die "Can't open Binner output $inF\n";
+	while (my $line = <$input>) {
+		chomp $line;
+		next if $line =~ /^\s*$/;
+		my @fields = split /\t/, $line, -1;
+		die "Malformed binner assignment in $inF at line $.\n"
+			unless @fields >= 2 && length($fields[0]) && length($fields[1]);
+		next if $fields[0] eq 'Sequence ID';
+		next if $fields[1] eq '0';
+		$assigned{$fields[1]} = 1;
+	}
+	close $input or die "Cannot close Binner output $inF: $!\n";
+
+	my $quality = readCMquals($IQ);
+	for my $bin (keys %assigned) {
+		die "No quality record for assigned bin '$bin' in $IQ\n"
+			unless exists $quality->{$bin};
+	}
+	return (\%assigned, $quality);
 }
 
 
@@ -354,7 +404,7 @@ sub getRepresentBinsPerFamily{ #needs some work
 	my %map = %{$hrMap};
 	
 	
-	my %conta; my %compl; my %fam; my %score; my %MGS2bin;
+	my %conta; my %compl; my %fam; my %score;
 	
 	
 	#read in family info for each sample
@@ -370,6 +420,29 @@ sub getRepresentBinsPerFamily{ #needs some work
 			$famSmpl{$smpl} = $smpl; $noGrpFnd++;
 		}
 	}
+
+	my $flushFamilyRepresentatives = sub {
+		return unless length($lastMGS);
+		foreach my $ff (sort keys %fam){
+			my @eligible;
+			foreach my $lBin (sort @{$fam{$ff}}){
+				if ($compl{$lBin} > 60 && $conta{$lBin} < 20){
+					push @eligible, $lBin;
+				} else {
+					$rejQuali++;
+				}
+			}
+			unless (@eligible){
+				warn "No eligible representative bin for family '$ff' in MGS '$lastMGS'; skipping\n";
+				next;
+			}
+			my ($bestBin) = sort {
+				$score{$b} <=> $score{$a} || $a cmp $b
+			} @eligible;
+			my $MGSfam = $ff . "." . $lastMGS;
+			$ret{$MGSfam} = $bestBin;
+		}
+	};
 
 	while (my $line = <$I>){
 		chomp $line; my @spl =  split /\t/,$line;
@@ -389,39 +462,28 @@ sub getRepresentBinsPerFamily{ #needs some work
 		
 		my $curMGS = $spl[1]; my $curBin = $spl[0];
 		if ($curMGS ne $lastMGS){
-			#eval last MGS for family reps
-			foreach my $ff (keys %fam){
-				my @curF = @{$fam{$ff}};
-				#select best MGS in each family
-				my $bestSc = 0; my $bestBin = "";
-				foreach my $lBin (@curF){
-					if ($score{$lBin} > $bestSc){
-						if ($compl{$lBin} > 60 && $conta{$lBin} < 20){
-							$bestSc = $score{$lBin}; $bestBin = $lBin;
-						} else {
-							$rejQuali++;
-						}
-					}
-				}
-				my $MGSfam = $ff . "." .$MGS2bin{$bestBin};
-				#print "$MGSfam     $bestBin  $bestSc $compl{$bestBin} $conta{$bestBin} \n";
-				$ret{$MGSfam} = $bestBin;
-			}
+			# Evaluate the preceding MGS before resetting its candidate state.
+			$flushFamilyRepresentatives->();
 			
 			#reset params
 			$lastMGS = $curMGS;
-			%conta = (); %compl = (); %fam=(); %score = (); %MGS2bin = ();
+			%conta = (); %compl = (); %fam=(); %score = ();
 		}
 		
 		if ($spl[0] !~ m/^Cano__/){
 			#$ret{$curMGS} = $spl[0] ;
 			$conta{$curBin} = $spl[$ContaIdx];$compl{$curBin} = $spl[$ComplIdx];
 			$score{$curBin} = $spl[$ComplIdx] - (2. * $spl[$ContaIdx]);
-			$spl[0] =~ m/^(.+)__(.+)$/;my $cFam = $famSmpl{$1};
+			unless ($spl[0] =~ m/^(.+)__(.+)$/ && defined($famSmpl{$1})){
+				warn "Cannot assign representative candidate '$curBin' in MGS '$curMGS' to a known sample family; skipping\n";
+				next;
+			}
+			my $cFam = $famSmpl{$1};
 			push(@{$fam{$cFam}}, $curBin);
-			$MGS2bin{$spl[0]} = $curMGS;
 		}	
 	}
+	# The loop transition flushes every group except the final MGS in the file.
+	$flushFamilyRepresentatives->();
 	close $I;
 	
 	print "Found representative for ". scalar(keys %ret). " MGS, $rejQuali rejected on Quali\n";
@@ -431,7 +493,7 @@ sub getRepresentBinsPerFamily{ #needs some work
 
 #extract 1 reference genome per MGS, choosing the default rep and extracting its contigs from original assembly file
 sub createBinCtgs{
-	#$binDctg,$hrM,"$logDir/MAGvsGC.txt.gz
+	#$binDctg,$hrM,"$binDir/MAGvsGC.txt.gz
 	my ($outD,$hrMap,$guideF,$perFam,$BinShrt) = @_;
 	die "Output directory is required\n" unless defined($outD) && length($outD);
 	die "Mapping data are required\n" unless ref($hrMap) eq 'HASH';
@@ -447,51 +509,80 @@ sub createBinCtgs{
 		$hr = getRepresentBins($guideF);
 	}
 	my %repBins = %{$hr};
-	
 	my %map = %{$hrMap};
-	my @allReps =  sort { $repBins{$a} cmp $repBins{$b} } keys %repBins; #@allReps = sort @allReps;
-	#die "@allReps\n";
-	my $hr2;my$hr1; my $lastSmpl = "";
-	foreach my $MGS (@allReps){
+	my %representatives_by_sample;
+
+	for my $MGS (sort keys %repBins) {
 		my $MAG = $repBins{$MGS};
-		if ($MAG =~ m/^Cano__/){
+		if ($MAG =~ m/^Cano__/) {
 			print STDERR "Could not retrieve MAG for $MGS : $MAG , because is Canopy\n";
 			next;
 		}
-		my $smpl = ""; my $bin= "";
-		if ($MAG =~ m/^(.+)__(.+)$/){  $smpl = $1;  $bin=$2;
-		} else { #skip this MAG completely.. but not good
+		unless ($MAG =~ m/^(.+)__(.+)$/) {
 			print STDERR "Could not match \"$MAG\" to sample and contig!\n";
 			next;
 		}
-			
-		
-		$smpl = $map{altNms}{$smpl} if ( defined($map{altNms}{$smpl}) );
-		if ($lastSmpl ne $smpl){
-			$lastSmpl = $smpl;
-			#print "Reading $smpl\n";
-			die "No assembly mapping for representative sample '$smpl'\n" unless exists($map{$smpl}) && defined($map{$smpl}{wrdir});
-			my $dirIn = $map{$smpl}{wrdir}; 
-			my $assDir = getAssemblPath($dirIn);
-			my $BinDir = "$assDir/Binning/$BinShrt/"; my $BinFile = "$BinDir/$smpl";
-			$hr1 = readBinSB($BinFile);
-			$hr2 = readFasta("$assDir/scaffolds.fasta.filt");
+		my ($smpl, $bin) = ($1, $2);
+		$smpl = $map{altNms}{$smpl} if defined($map{altNms}{$smpl});
+		die "No assembly mapping for representative sample '$smpl'\n"
+			unless exists($map{$smpl}) && defined($map{$smpl}{wrdir});
+		push @{$representatives_by_sample{$smpl}{$bin}}, {
+			mgs => $MGS,
+			mag => $MAG,
+		};
+	}
+
+	for my $smpl (sort keys %representatives_by_sample) {
+		my $dirIn = $map{$smpl}{wrdir};
+		my $assDir = getAssemblPath($dirIn);
+		my $BinFile = "$assDir/Binning/$BinShrt/$smpl";
+		my %wanted_bins = map { $_ => 1 } keys %{$representatives_by_sample{$smpl}};
+		my (%contigs_by_bin, %wanted_contigs);
+
+		open my $bin_input, '<', $BinFile or die "can't open bin file $BinFile\n";
+		while (my $line = <$bin_input>) {
+			chomp $line;
+			next if $line =~ /^\s*$/;
+			my @fields = split /\t/, $line, -1;
+			die "Malformed bin assignment in $BinFile at line $.\n"
+				unless @fields >= 2 && length($fields[0]) && length($fields[1]);
+			next if $fields[0] eq 'Sequence ID';
+			next unless $wanted_bins{$fields[1]};
+			push @{$contigs_by_bin{$fields[1]}}, $fields[0];
+			$wanted_contigs{$fields[0]} = 1;
 		}
-		
-		
-		die "Representative bin '$bin' was not found for sample '$smpl'\n" unless exists($hr1->{$bin}) && ref($hr1->{$bin}) eq 'ARRAY';
-		my @ctgs = @{$hr1->{$bin}};
-		#die "@ctgs\n". @ctgs . "\n";
-		
-		my $outF = "$outD/$MGS.ctgs.$MAG.fna";
-		#print "writing  $MGS.ctgs.$MAG.fna\n";
-		open O,">$outF" or die "Couldn't open $outF\n";
-		foreach my $ctg (@ctgs){
-			die "Contig '$ctg' from bin '$bin' is absent from the assembly for '$smpl'\n" unless exists($hr2->{$ctg});
-			print O ">$ctg\n$hr2->{$ctg}\n";
+		close $bin_input or die "Cannot close bin file $BinFile: $!\n";
+
+		for my $bin (keys %wanted_bins) {
+			die "Representative bin '$bin' was not found for sample '$smpl'\n"
+				unless exists($contigs_by_bin{$bin}) && @{$contigs_by_bin{$bin}};
 		}
-		close O;
-		#die "$MAG :: $smpl $bin\n$dirIn\n$assDir\n$BinFile\n";
+		my $sequences = readFasta(
+			"$assDir/scaffolds.fasta.filt", 1, "\\s", \%wanted_contigs,
+		);
+
+		for my $bin (sort keys %{$representatives_by_sample{$smpl}}) {
+			for my $representative (@{$representatives_by_sample{$smpl}{$bin}}) {
+				my $output_name = "$representative->{mgs}.ctgs.$representative->{mag}";
+				$output_name =~ s/\.gz\z//i;
+				$output_name .= ".fna"
+					unless $output_name =~ /\.(?:fa|fna|fasta)\z/i;
+				$output_name .= ".gz";
+				my $outF = "$outD/$output_name";
+				my $temporary = "$outF.tmp.$$.gz";
+				my $output = gzipwrite($temporary, "representative MGS contigs");
+				for my $ctg (@{$contigs_by_bin{$bin}}) {
+					die "Contig '$ctg' from bin '$bin' is absent from the assembly for '$smpl'\n"
+						unless exists($sequences->{$ctg});
+					print {$output} ">$ctg\n$sequences->{$ctg}\n"
+						or die "Cannot write $temporary: $!\n";
+				}
+				close $output or die "Cannot close $temporary: $!\n";
+				unlink $outF or die "Cannot replace existing output $outF: $!\n" if -e $outF;
+				rename $temporary, $outF
+					or die "Cannot publish representative contigs $outF: $!\n";
+			}
+		}
 	}
 
 	print "----------------------\nDone\nWrote representative MAGs (contigs) to $outD\n----------------------\n";
@@ -500,18 +591,50 @@ sub createBinCtgs{
 sub createBin2{
 	my ($binD,$cnopyF,$refFA) = @_;
 	my $hr = readMGSrevRed($cnopyF);
-	my %G2MGS = %{$hr};
 	my ($I,$OK) = gzipopen($refFA,"reference gene cat",1);
-	my $seq=""; my $hd=""; my %MGSfxa;
-	my $MGScnt=0; my $geneCnt=0;
+	my $seq=""; my $hd="";
+	my $geneCnt=0;
 	my $fileEnd = ".fna"; $fileEnd = ".faa" if ($refFA =~ m/\.faa$/);
+	my $max_open_outputs = 64;
+	my (%open_outputs, %last_used, %temporary_outputs, %mgs_written);
+	my $access_counter = 0;
+
+	make_path($binD);
+	my $output_handle = sub {
+		my ($MGS) = @_;
+		$access_counter++;
+		if (exists $open_outputs{$MGS}) {
+			$last_used{$MGS} = $access_counter;
+			return $open_outputs{$MGS};
+		}
+		if (keys(%open_outputs) >= $max_open_outputs) {
+			my ($oldest) = sort {
+				$last_used{$a} <=> $last_used{$b} || $a cmp $b
+			} keys %open_outputs;
+			close $open_outputs{$oldest}
+				or die "Cannot close temporary MGS output $temporary_outputs{$oldest}: $!\n";
+			delete $open_outputs{$oldest};
+			delete $last_used{$oldest};
+		}
+		my $temporary = $temporary_outputs{$MGS} ||= "$binD/$MGS$fileEnd.tmp.$$";
+		my $mode = $mgs_written{$MGS} ? '>>' : '>';
+		open my $output, $mode, $temporary
+			or die "Cannot open temporary MGS output $temporary: $!\n";
+		$open_outputs{$MGS} = $output;
+		$last_used{$MGS} = $access_counter;
+		return $output;
+	};
+
 	my $store_record = sub {
 		return unless $hd =~ m/^>(\d+)/;
 		my $gene_id = $1;
-		return unless exists($G2MGS{$gene_id});
+		return unless exists($hr->{$gene_id});
 		$geneCnt++;
-		for my $MGS (keys %{$G2MGS{$gene_id}}) {
-			$MGSfxa{$MGS}{$hd} = $seq;
+		for my $MGS (sort keys %{$hr->{$gene_id}}) {
+			my $output = $output_handle->($MGS);
+			print {$output} "$hd\n$seq\n"
+				or die "Cannot write temporary MGS output $temporary_outputs{$MGS}: $!\n";
+			$mgs_written{$MGS} = 1;
 		}
 	};
 	while (my $line = <$I>){
@@ -524,17 +647,19 @@ sub createBin2{
 		$seq .= $line;
 	}
 	$store_record->();
-	close $I;
-	my $mgs_count = scalar keys %MGSfxa;
+	close $I or die "Cannot close reference gene catalogue $refFA: $!\n";
+	for my $MGS (keys %open_outputs) {
+		close $open_outputs{$MGS}
+			or die "Cannot close temporary MGS output $temporary_outputs{$MGS}: $!\n";
+	}
+	my $mgs_count = scalar keys %mgs_written;
 	die "No genes from $cnopyF were found in $refFA\n" unless $mgs_count;
 	print "Found $geneCnt genes in $mgs_count MGS (avg " . int($geneCnt/$mgs_count*100)/100  . " per MGS). Writing to $binD\n";
-	make_path($binD);
-	foreach my $MGS (keys %MGSfxa){
-		open O,">$binD/$MGS$fileEnd" or die "Cannot write $binD/$MGS$fileEnd: $!\n";
-		foreach my $gen (keys %{$MGSfxa{$MGS}}){
-			print O "$gen\n$MGSfxa{$MGS}{$gen}\n";
-		}
-		close O;
+	for my $MGS (sort keys %mgs_written) {
+		my $output = "$binD/$MGS$fileEnd";
+		unlink $output or die "Cannot replace existing MGS output $output: $!\n" if -e $output;
+		rename $temporary_outputs{$MGS}, $output
+			or die "Cannot publish MGS output $output: $!\n";
 	}
 	print "----------------------\nDone\nWrote representative MAGs (genes) to $binD\n----------------------\n";
 	
@@ -592,9 +717,11 @@ sub MB2N50($){
 		my $totL=0; my $ctgs=0; my @lengs;
 		#die @mem;
 		foreach my $x (@mem){
-			$x =~ m/_L=(\d+)=/;
-			push(@lengs,$1);
-			$totL+=$1; $ctgs++;
+			die "Cannot determine contig length from bin member '$x'\n"
+				unless $x =~ m/_L=(\d+)=/;
+			my $length = $1;
+			push(@lengs,$length);
+			$totL += $length; $ctgs++;
 		}
 		my $meanL = $totL/$ctgs;
 		
@@ -607,7 +734,7 @@ sub MB2N50($){
 			}
 		}
 		#and find N50
-		@lengs = sort { $a <=> $b } @lengs;
+		@lengs = sort { $b <=> $a } @lengs;
 		my $N20 = int ($totL *0.2); my $N50 = int ($totL *0.5);my $N80 = int ($totL *0.8);
 		my $cumL=0;
 		foreach my $l (@lengs){
@@ -630,13 +757,14 @@ sub runCheckM{#runs checkM on *.faa files (each file one Bin)
 	my $gtag = "--genes"; $gtag = "" if ($ext eq "fna");
 	#system "rm -rf $tmpD/CM/";
 	#system "mkdir -p $tmpD/tmp/" unless(-d "$tmpD/tmp/");
-	my $cmC = "";
+	my $cmC = "set -e\n";
 	$cmC .= "rm -rf $tmpD/CM/;mkdir -p $tmpD/tmp/\n";
 	#my $p2a = getProgPaths("py2activate");
 	#my $pd = getProgPaths("pydeacti");
 	my $checkMBin = getProgPaths("checkm");
 	#$cmC .= "$p2a\n";
 	$cmC .= "$checkMBin lineage_wf $gtag -x $ext -t $ncore --tab_table -f $outFile -q --pplacer_threads 3 --tmpdir $tmpD/tmp/ $binD $tmpD/CM/\n";
+	$cmC .= "test -s $outFile\n";
 	#$cmC .= "$pd\n";
 	$cmC .= "rm -rf $tmpD/CM/ $tmpD/tmp/\n";
 	
@@ -646,13 +774,19 @@ sub runCheckM{#runs checkM on *.faa files (each file one Bin)
 		open I,"<$outFile2" or die "No input for runCheckM function:$outFile\n";
 		my %binsFnd;
 		while (my $l =<I>){
-			chomp $l; my @spl = split /\t/,$l;
+			chomp $l;
+			next if $l =~ /^\s*$/;
+			my @spl = split /\t/,$l, -1;
+			next if @spl >= 2 && $spl[0] eq 'Sequence ID';
+			die "Malformed bin assignment in $outFile2: $l\n"
+				unless @spl >= 2 && length($spl[1]);
+			next if $spl[1] eq '0';
 			$binsFnd{$spl[1]} = 1;
 		}
 		close I;
 		my @bins = keys %binsFnd;
-		print "Found ".(scalar( @bins) - 1)  . " metag Bins\n";
-		if (@bins <= 1){$cmC = "\ntouch $outFile\n";}
+		print "Found ".scalar(@bins)." metag Bins\n";
+		if (!@bins){$cmC = "set -e\ntouch $outFile\n";}
 	}
 	print "$cmC\n";
 	
@@ -668,7 +802,7 @@ sub runCheckM2{#runs checkM2 on *.faa files (each file one Bin)
 	my $gtag = "--genes"; $gtag = "" if ($ext eq "fna");
 	#system "rm -rf $tmpD/CM/";
 	#system "mkdir -p $tmpD/tmp/" unless(-d "$tmpD/tmp/");
-	my $cmC = "";
+	my $cmC = "set -e\n";
 	$cmC .= "rm -rf $tmpD/;  mkdir -p $tmpD/\n";
 	my $outD = $outFile; $outD =~ s/\/[^\/]+$/\//; $outD .= "/CHM2/";
 	#my $pd = getProgPaths("pydeacti");
@@ -687,7 +821,7 @@ sub runCheckM2{#runs checkM2 on *.faa files (each file one Bin)
 	#debugging only	
 #	$cmC .= "mkdir -p $outD;cp -r $tmpD $outD\n"; #replace with more targeted function later
 	$cmC .= "cp $tmpD/quality_report.tsv $outFile\n"; #replace with more targeted function later
-	$cmC .= "touch $outFile\n";
+	$cmC .= "test -s $outFile\n";
 	$cmC .= "rm -rf $tmpD\n";
 	
 	if ($runNow > 0){
@@ -727,10 +861,13 @@ sub createBams{
 			my $mapped_name = <$marker_fh>;
 			close $marker_fh;
 			chomp $mapped_name;
-			my $primary = "$DDI/mapping/$mapped_name";
-			my $supplemental = $primary;
-			$supplemental =~ s/-smd\./.sup-smd./;
-			for my $candidate ($primary, $supplemental) {
+			my $named_mapping = "$DDI/mapping/$mapped_name";
+			my @candidates = ($named_mapping);
+			if ($mapped_name !~ /\.sup-smd\./i) {
+				(my $supplemental = $named_mapping) =~ s/-smd\./.sup-smd./i;
+				push @candidates, $supplemental if $supplemental ne $named_mapping;
+			}
+			for my $candidate (@candidates) {
 				if (!-e $candidate && $candidate =~ /\.bam$/) {
 					(my $cram = $candidate) =~ s/\.bam$/.cram/;
 					$candidate = $cram if (-e $cram);
@@ -757,12 +894,8 @@ sub createBams{
 	}
 	#die "@dirSS\n@BAMS\n";
 	if (@BAMS == 0 && $fakeEmpty){
-		print "runSCGBinner::No bams found, creating fake output\n";
-		system "mkdir -p $outDir; touch $outDir/$nm; touch $outDir/$nm.assStat";
-		open O,">$outDir/$nm.cm2";
-		print O "Name\tCompleteness\tContamination\tCompleteness_Model_Used Translation_Table_Used\tAdditional_Notes\n";
-		close O;
-		return ("", []);
+		warn "No non-empty mapping files found for $nm; publishing an empty bin assignment\n";
+		return (emptyBinnerAssignmentCommand($outDir, $nm), []);
 	}
 	return ($uncramCmd,\@BAMS);
 }
@@ -776,19 +909,27 @@ sub runSemiBin{
 	#get list of bams/crams..
 
 #die;
-	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
+	# SemiBin2 can crash on very small alignment files.  Treat mappings of
+	# 15 MiB or less as unusable for this binner; the other binners do not share
+	# this restriction and keep their zero-byte-only cutoff below.
+	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
 	my @BAMS = @{$BAMSar};
-	return "" unless (@BAMS);
+	return $uncramCmd unless (@BAMS);
 	my $numBams = @BAMS;
 	
 	
 	# --environment human_gut, dog_gut, ocean, soil, cat_gut, human_oral, mouse_gut, pig_gut, built_environment, wastewater, chicken_caecum, global
+	# A curated environment is valid only for single-sample mode.  Multiple
+	# usable BAMs make this a multi-sample/coassembly run, for which SemiBin2
+	# must train from the supplied samples instead of loading a pretrained
+	# environment.  For one BAM, default to human_gut unless explicitly set.
+	my $selectedEnvironment = $giveSBenv ne "" ? $giveSBenv : "human_gut";
+	die "Invalid SemiBin2 environment '$selectedEnvironment'\n"
+		unless $selectedEnvironment =~ /^[A-Za-z0-9_-]+$/;
+	my $senv = $numBams == 1 ? "--environment $selectedEnvironment" : "";
 	my $SBbin = getProgPaths("SemiBin2");
 	my $smode = "single_easy_bin ";
-	my $senvDef = "--environment human_gut";my $senv = $senvDef; 
-	if ($numBams > 1){$senv = "";}#multisample doesn't accept env flag
-	if ($giveSBenv ne "") {$senv =  "--environment $giveSBenv" ; }
 	my $dflags = " --random-seed 555 --tmpdir $tmpDir -p $cores";
 	my $seqType = "--sequencing-type=short_read ";
 	$seqType = "--sequencing-type=long_read " if ($seqTec eq "PB" || $seqTec eq "ONT" || $seqTec eq "hybrid");#PAcBIo/ONT
@@ -818,10 +959,10 @@ sub runMetaDecoder{
 	my $MDbin = getProgPaths("MetaDecoder");
 	my $baseN = "$tmpDir/$nm";
 	#get list of bams/crams..
-	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
+	my $fakeEmpty=1;my $minBamSiz = 0;
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"sam");
 	my @SAMS = @{$BAMSar};
-	return "" unless (@SAMS);
+	return $uncramCmd unless (@SAMS);
 	
 
 	my $cmd = "###preparing SAMs..\n$uncramCmd\n\n";
@@ -839,18 +980,34 @@ sub runMetaDecoder{
 
 
 sub runSCGBinner{
-	my ($jgO,$outDir, $tmpDir, $nm, $fna, $cores, $dirsAR) = @_;
-	my $fakeEmpty=1;my $minBamSiz = 15*1024*1024;#less than 15 mb bam? skip..
+	my ($jgO,$outDir, $tmpDir, $nm, $fna, $cores, $dirsAR,
+		$batchSize, $eligibleContigs) = @_;
+	$batchSize //= 1024;
+	$eligibleContigs //= "unknown";
+	die "SCGBinner batch size must be a positive integer\n"
+		unless $batchSize =~ /^\d+$/ && $batchSize > 0;
+	my $fakeEmpty=1;my $minBamSiz = 0;
 	my ($uncramCmd,$BAMSar) = createBams($dirsAR,$tmpDir,$outDir,$nm,$fna,$cores,$fakeEmpty,$minBamSiz,"bam");
 	my @BAMS = @{$BAMSar};
-	return "" unless (@BAMS);
+	return $uncramCmd unless (@BAMS);
 	#die "runSCGBinner::@BAMS\n";
 	my $SCGbin = getProgPaths("SCGBinner");
 	my $cmd = "###preparing BAMs..\n$uncramCmd\n\n";
 	$cmd .= "###Running SCGBinner...\n";
 	$cmd .= "mkdir -p $outDir\n";
-	$cmd .= "$SCGbin -a $fna -o $tmpDir -b " . join(" ",@BAMS) . " -t $cores\n";
-	# move result TSV, then clean intermediate dirs (set -e ensures these only run on success)
+	$cmd .= "set +e\n";
+	$cmd .= "$SCGbin -a $fna -o $tmpDir -b \"" . join(" ",@BAMS)
+		. "\" -t $cores -p $batchSize\n";
+	$cmd .= "scgbinner_status=\$?\nset -e\n";
+	$cmd .= "if [[ \$scgbinner_status -ne 0 ]]; then\n";
+	$cmd .= "  echo \"ERROR: SCGBinner failed after preflight found $eligibleContigs "
+		. "contigs >=1000 bp and selected batch size $batchSize. "
+		. "Inspect the preceding SCGBinner marker and feature-generation messages.\" >&2\n";
+	$cmd .= "  exit \$scgbinner_status\nfi\n";
+	$cmd .= "if [[ ! -e $tmpDir/scgbinner_res/SCGBINNER_result.tsv ]]; then\n";
+	$cmd .= "  echo \"ERROR: SCGBinner exited successfully but did not create "
+		. "scgbinner_res/SCGBINNER_result.tsv\" >&2\n  exit 1\nfi\n";
+	# move result TSV, then clean intermediate dirs
 	$cmd .= "mv $tmpDir/scgbinner_res/SCGBINNER_result.tsv $outDir/$nm\n";
 	$cmd .= "rm -rf $tmpDir\n";##$outDir/scgbinner_res $outDir/data_augmentation\n";
 	return $cmd;

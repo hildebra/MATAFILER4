@@ -1,0 +1,24 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+# Test-only pigz stand-in for environments which have gzip but not pigz.
+# It removes pigz's thread option and delegates all gzip-compatible arguments.
+if (defined($ENV{MF4_TEST_PIGZ_LOG}) && length($ENV{MF4_TEST_PIGZ_LOG})) {
+	open my $log, '>>', $ENV{MF4_TEST_PIGZ_LOG}
+		or die "Cannot open fake-pigz log $ENV{MF4_TEST_PIGZ_LOG}: $!\n";
+	print {$log} join("\t", @ARGV), "\n";
+	close $log or die "Cannot close fake-pigz log: $!\n";
+}
+
+my @gzip_args;
+while (@ARGV) {
+	my $argument = shift @ARGV;
+	if ($argument eq '-p' || $argument eq '--processes') {
+		die "fake pigz is missing a thread count\n" unless @ARGV;
+		shift @ARGV;
+		next;
+	}
+	push @gzip_args, $argument;
+}
+exec 'gzip', @gzip_args or die "Cannot execute gzip: $!\n";

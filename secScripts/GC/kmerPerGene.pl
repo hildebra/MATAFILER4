@@ -7,11 +7,12 @@ use strict;
 use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta getAssemblPath gzipopen);
 use Mods::Subm qw(qsubSystem emptyQsubOpt);
 use Mods::math qw( roundF);
+use Mods::CatalogPaths qw(resolve_catalog_maps);
 
 sub readKmers_Smpl;
 
 my $GCd = $ARGV[0];
-my $mapF = `cat $GCd/LOGandSUB/GCmaps.inf`;
+my $mapF = resolve_catalog_maps($GCd);
 my ($hr1,$hr2) = readMapS($mapF,-1);
 my %map = %{$hr1}; my %AsGrps = %{$hr2};
 my $kmerOut = "$GCd/compl.incompl.95.fna.kmer";
@@ -194,7 +195,6 @@ sub readKmers_Smpl{
 	close $I;
 	return $geneCnt;
 }
-
 
 
 
