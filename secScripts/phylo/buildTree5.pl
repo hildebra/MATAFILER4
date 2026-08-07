@@ -41,6 +41,7 @@
 #5.35: size deterministic rate/GC partitions by effective called sites, not locus count
 #5.36: retain broad backbones while applying coverage criteria to sparse-sample placement
 #5.37: use EPA-ng maximum-likelihood placement for sparse strict-backbone samples
+#5.38: separate backbone admission from placement eligibility and retain sparse taxa through MSA
 
 use warnings;
 use strict;
@@ -104,7 +105,7 @@ sub selectTaxonAwareCandidateLoci;
 sub selectTaxonAwareFinalLoci;
 sub chooseTaxonAwareLoci;
 sub classifyTaxonAwareSamples;
-sub classifyTaxonAwarePlacementEligibility;
+sub classifyTaxonAwareCoverageEligibility;
 sub taxonAwareAlignmentMetrics;
 sub informativeSequenceLength;
 sub writeTaxonAwareLocusAudit;
@@ -121,7 +122,7 @@ sub epaModelArtifact;
 sub runEpaNgPlacement;
 
 my $doPhym= 0;
-my $version = 5.37;
+my $version = 5.38;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -210,6 +211,7 @@ my $strictBackbone = $BACKBONE_DEFAULT{enabled};
 my $strictBackboneFraction = $BACKBONE_DEFAULT{coverage_fraction};
 my $placementMinOverlap = $BACKBONE_DEFAULT{minimum_overlap};
 my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
+my ($placementGeneFracPSpec, $placementNTFrac, $placementNTCntTotal);
 my $sampleQCFile = "";
 my %POST_ALIGNMENT_QC_DEFAULT = (
 	between_species_enabled => 0,
@@ -303,6 +305,9 @@ GetOptions(
 	"relativeNTFraction=f" => \$ntFrac,
 	"NTfiltPerGene=f"      => \$ntFracGene,
 	"GenesPerSpecies=f" => \$GeneFracPSpec,
+	"placementGenesPerSpecies=f" => \$placementGeneFracPSpec,
+	"placementRelativeNTFraction=f" => \$placementNTFrac,
+	"placementNTfiltCount=i" => \$placementNTCntTotal,
 	"fracMaxGenes90pct=f" => \$fracMaxGenes90pct,
 	"NTfiltCount=i" => \$ntCntTotal,
 	"smplDef=i"	=> \$smplDef, #is the genome somehow quantified with a delimiter (_) ?
@@ -403,6 +408,10 @@ die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-cores must be a positive integer\n" if $ncore < 1;
 die "-bootstrap must be zero or greater\n" if $bootStrap < 0;
 die "-NTfiltCount must be zero or greater\n" if $ntCntTotal < 0;
+$placementGeneFracPSpec = $GeneFracPSpec unless defined $placementGeneFracPSpec;
+$placementNTFrac = $ntFrac unless defined $placementNTFrac;
+$placementNTCntTotal = $ntCntTotal unless defined $placementNTCntTotal;
+die "-placementNTfiltCount must be zero or greater\n" if $placementNTCntTotal < 0;
 die "-minOverlapMSA must be zero or greater\n" if $minOverlapMSA < 0;
 die "-iqMemMB must be zero or greater\n" if $iqMemMB < 0;
 die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
@@ -466,8 +475,10 @@ die "-smplSep must not be empty\n" if $smplSep eq "";
 eval { qr/$smplSep/ } or die "Invalid -smplSep regular expression '$smplSep': $@";
 for my $fraction_name_value (
 	["relativeNTFraction", $ntFrac],
+	["placementRelativeNTFraction", $placementNTFrac],
 	["NTfiltPerGene", $ntFracGene],
-	["GenesPerSpecies", $GeneFracPSpec], ["fracMaxGenes90pct", $fracMaxGenes90pct],
+	["GenesPerSpecies", $GeneFracPSpec],
+	["placementGenesPerSpecies", $placementGeneFracPSpec], ["fracMaxGenes90pct", $fracMaxGenes90pct],
 	["maxGapPerCol", $maxGapPerCol],
 ) {
 	my ($name, $value) = @{$fraction_name_value};
@@ -586,8 +597,8 @@ print "Mode: " . ($cogCats ne "" ? "multi-locus" : "single-locus")
 print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
 	. ($postFilter || "<none>") . "; remove MSA=" . ($removeMSA ? "yes" : "no") . "\n";
 print "Filtering: per-gene length fraction=$ntFracGene; category Q90 fraction=$fracMaxGenes90pct; "
-	. "species NT fraction=$ntFrac; species gene fraction=$GeneFracPSpec; "
-	. "minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
+	. "backbone NT fraction=$ntFrac; backbone gene fraction=$GeneFracPSpec; "
+	. "backbone minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
 print "Post-alignment locus QC: enabled="
 	. ($postAlignmentLocusQC ? "yes" : "no")
 	. "; divergence QC=" . ($postAlignmentDivergenceQC ? "yes" : "no")
@@ -609,6 +620,9 @@ print "Taxon-aware locus selection: enabled="
 print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
 	. "; sample QC=" . ($sampleQCFile || "<none>")
 	. "; coverage fraction=$strictBackboneFraction"
+	. "; placement gene fraction=$placementGeneFracPSpec"
+	. "; placement NT fraction=$placementNTFrac"
+	. "; placement minimum NT=$placementNTCntTotal"
 	. "; minimum placement overlap=$placementMinOverlap"
 	. "; minimum backbone samples=$strictBackboneMinSamples\n";
 print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
@@ -698,21 +712,25 @@ my @MSrm;
 my %FAA ; my %FNA ; my @geneList; my @geneListF;
 my (%primaryAlignmentGene, %taxonAwarePreMetrics, %taxonAwareUniverseSamples);
 my (%partitionRateProxy, %partitionSelectionPhase, %taxonAwareFinalMetricByPath);
+my (%taxonAwareBackboneEligibility, %taxonAwareBackboneIneligibleReason);
 my (%taxonAwarePlacementEligibility, %taxonAwarePlacementIneligibleReason);
 my $strictSplit;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=9",
+	"schema=10",
 	"enabled=$postAlignmentLocusQC",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
 	"per_gene_length_fraction=$ntFracGene",
 	"minimum_category_q90_fraction=$fracMaxGenes90pct",
-	"species_nt_fraction=$ntFrac",
-	"minimum_gene_fraction_per_species=$GeneFracPSpec",
-	"minimum_nt=$ntCntTotal",
+	"backbone_nt_fraction=$ntFrac",
+	"backbone_gene_fraction=$GeneFracPSpec",
+	"backbone_minimum_nt=$ntCntTotal",
+	"placement_nt_fraction=$placementNTFrac",
+	"placement_gene_fraction=$placementGeneFracPSpec",
+	"placement_minimum_nt=$placementNTCntTotal",
 	"minimum_overlap=$minOverlapMSA",
 	"maximum_gap_fraction=$maxGapPerCol",
 	"minimum_sequences=$postAlignmentMinSequences",
@@ -1009,14 +1027,12 @@ if ($isAligned){
 	#print "Samples removed due to low gene presence:\n";
 	my $OGfnd=0;
 	if ($taxonAwareLocusSelection) {
-		my $minimumAnchorNT = $ntCntTotal > $placementMinOverlap
-			? $ntCntTotal : $placementMinOverlap;
 		my $sampleSelection = classifyTaxonAwareSamples(
 			metrics => \%taxonAwarePreMetrics,
 			samples => \%taxonAwareUniverseSamples,
 			target_loci => $taxonAwareTargetLoci,
 			target_nt => $taxonAwareTargetNT,
-			minimum_anchor_nt => $minimumAnchorNT,
+			minimum_anchor_nt => 1,
 			selected_only => 1,
 			outgroup => $outgroup,
 		);
@@ -1031,8 +1047,8 @@ if ($isAligned){
 			}
 		}
 		print "Taxon-aware species prefilter: retained $specsRemain/"
-			. scalar(keys %specList) . "; only samples without $minimumAnchorNT usable NT "
-			. "in the selected candidates were removed; audit: "
+			. scalar(keys %specList) . "; only samples without any usable NT "
+			. "in the selected candidates were removed before MSA; audit: "
 			. "$treeD/taxon_aware_sample_candidates.tsv\n";
 	} else {
 		foreach my $sp (@specs){
@@ -1328,8 +1344,6 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
 	if (@{$primaryAlignments}) {
 		my $postQCAlignmentCount = scalar @{$primaryAlignments};
-		my $minimumAnchorNT = $ntCntTotal > $placementMinOverlap
-			? $ntCntTotal : $placementMinOverlap;
 		my $finalSelection = selectTaxonAwareFinalLoci(
 			alignments => $primaryAlignments,
 			path_gene => \%primaryAlignmentGene,
@@ -1339,7 +1353,7 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			core_loci => $taxonAwareCoreLoci,
 			target_loci => $taxonAwareTargetLoci,
 			target_nt => $taxonAwareTargetNT,
-			minimum_anchor_nt => $minimumAnchorNT,
+			minimum_anchor_nt => 1,
 			use_aa => $useAA4tree,
 			outgroup => $outgroup,
 			locus_report => "$treeD/taxon_aware_locus_selection.tsv",
@@ -1365,14 +1379,31 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 		} grep {
 			$finalSelection->{locus_metrics}{$_}{selected}
 		} keys %{$finalSelection->{locus_metrics}};
-		my $placementEligibility = classifyTaxonAwarePlacementEligibility(
+		my $backboneEligibility = classifyTaxonAwareCoverageEligibility(
 			sample_metrics => $finalSelection->{sample_metrics},
 			gene_fraction => $GeneFracPSpec,
 			nt_fraction => $ntFrac,
 			minimum_nt => $ntCntTotal,
+			minimum_loci_floor => 1,
+			role => 'backbone', outgroup => $outgroup,
+		);
+		my $placementEligibility = classifyTaxonAwareCoverageEligibility(
+			sample_metrics => $finalSelection->{sample_metrics},
+			gene_fraction => $placementGeneFracPSpec,
+			nt_fraction => $placementNTFrac,
+			minimum_nt => $placementNTCntTotal,
 			minimum_overlap => $placementMinOverlap,
+			minimum_loci_floor => 2,
+			role => 'placement',
 			outgroup => $outgroup,
 		);
+		%taxonAwareBackboneEligibility = map {
+			$_ => $backboneEligibility->{samples}{$_}{eligible}
+		} keys %{$backboneEligibility->{samples}};
+		%taxonAwareBackboneIneligibleReason = map {
+			$_ => $backboneEligibility->{samples}{$_}{reason}
+		} grep { !$backboneEligibility->{samples}{$_}{eligible} }
+			keys %{$backboneEligibility->{samples}};
 		%taxonAwarePlacementEligibility = map {
 			$_ => $placementEligibility->{samples}{$_}{eligible}
 		} keys %{$placementEligibility->{samples}};
@@ -1380,6 +1411,18 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			$_ => $placementEligibility->{samples}{$_}{reason}
 		} grep { !$placementEligibility->{samples}{$_}{eligible} }
 			keys %{$placementEligibility->{samples}};
+		my $backboneAudit = "$treeD/taxon_aware_backbone_eligibility.tsv";
+		open my $backboneOutput, '>', $backboneAudit
+			or die "Cannot write taxon-aware backbone eligibility $backboneAudit: $!\n";
+		print {$backboneOutput} "sample\tselected_loci\tselected_nt\tbackbone_eligible\treason\tminimum_loci\tminimum_nt\n";
+		for my $sample (sort keys %{$backboneEligibility->{samples}}) {
+			my $entry = $backboneEligibility->{samples}{$sample};
+			print {$backboneOutput} join("\t", $sample, $entry->{selected_loci},
+				$entry->{selected_nt}, $entry->{eligible} ? 1 : 0, $entry->{reason},
+				$backboneEligibility->{minimum_loci}, $backboneEligibility->{minimum_nt}), "\n";
+		}
+		close $backboneOutput
+			or die "Cannot close taxon-aware backbone eligibility $backboneAudit: $!\n";
 		my $placementAudit = "$treeD/taxon_aware_placement_eligibility.tsv";
 		open my $placementOutput, '>', $placementAudit
 			or die "Cannot write taxon-aware placement eligibility $placementAudit: $!\n";
@@ -1402,7 +1445,7 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			. scalar(@{$finalSelection->{alignments}}) . "/"
 			. $postQCAlignmentCount
 			. " post-QC loci; reports: $treeD/taxon_aware_locus_selection.tsv, "
-			. "$treeD/taxon_aware_sample_selection.tsv, $placementAudit\n";
+			. "$treeD/taxon_aware_sample_selection.tsv, $backboneAudit, $placementAudit\n";
 	}
 }
 
@@ -1460,6 +1503,8 @@ if ($strictBackbone) {
 			is_aa => $useAA4tree,
 			coverage_fraction => $strictBackboneFraction,
 			minimum_backbone => $strictBackboneMinSamples,
+			backbone_eligible => \%taxonAwareBackboneEligibility,
+			backbone_ineligible_reason => \%taxonAwareBackboneIneligibleReason,
 			placement_eligible => \%taxonAwarePlacementEligibility,
 			placement_ineligible_reason => \%taxonAwarePlacementIneligibleReason,
 			outgroup => $outgroup,
@@ -3921,18 +3966,18 @@ sub classifyTaxonAwareSamples {
 	return \%result;
 }
 
-sub classifyTaxonAwarePlacementEligibility {
+sub classifyTaxonAwareCoverageEligibility {
 	my %args = @_;
 	my $metrics = $args{sample_metrics};
-	die "Placement eligibility requires final taxon-aware sample metrics\n"
+	my $role = $args{role} // 'placement';
+	die ucfirst($role)." eligibility requires final taxon-aware sample metrics\n"
 		unless ref($metrics) eq 'HASH' && keys %{$metrics};
 	my @selectedLoci = map { $_->{selected_loci} // 0 } values %{$metrics};
 	my @selectedNT = map { $_->{selected_nt} // 0 } values %{$metrics};
 	my $minimumLoci = int(quantile(0.9, @selectedLoci)
 		* ($args{gene_fraction} // 0) + 0.999999);
-	# A single locus cannot provide a defensible post-hoc placement, even when
-	# a small analysis makes the relative coverage threshold round down to one.
-	$minimumLoci = 2 if $minimumLoci < 2;
+	my $minimumLociFloor = $args{minimum_loci_floor} // 1;
+	$minimumLoci = $minimumLociFloor if $minimumLoci < $minimumLociFloor;
 	my $relativeNT = int(quantile(0.9, @selectedNT)
 		* ($args{nt_fraction} // 0) + 0.999999);
 	my $minimumNT = $args{minimum_nt} // 0;
@@ -3942,15 +3987,15 @@ sub classifyTaxonAwarePlacementEligibility {
 	my %result;
 	for my $sample (sort keys %{$metrics}) {
 		my $metric = $metrics->{$sample};
-		my ($eligible, $reason) = (1, 'placement_coverage_met');
+		my ($eligible, $reason) = (1, "${role}_coverage_met");
 		if (($args{outgroup} // '') ne '' && $sample eq $args{outgroup}) {
 			($eligible, $reason) = (1, 'outgroup_retained');
 		} elsif (($metric->{role} // 'remove') eq 'remove') {
 			($eligible, $reason) = (0, 'not_retained_after_locus_selection');
 		} elsif (($metric->{selected_loci} // 0) < $minimumLoci) {
-			($eligible, $reason) = (0, 'below_placement_gene_fraction');
+			($eligible, $reason) = (0, "below_${role}_gene_fraction");
 		} elsif (($metric->{selected_nt} // 0) < $minimumNT) {
-			($eligible, $reason) = (0, 'below_placement_nt_fraction');
+			($eligible, $reason) = (0, "below_${role}_nt_fraction");
 		}
 		$result{$sample} = {
 			eligible => $eligible,

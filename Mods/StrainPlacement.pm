@@ -89,6 +89,8 @@ sub split_strict_backbone {
 	my $minimum_backbone = $options->{minimum_backbone} // 3;
 	my $coverage_fraction = $options->{coverage_fraction} // 0.35;
 	my $outgroup = $options->{outgroup} // '';
+	my $backbone_eligible = $options->{backbone_eligible} || {};
+	my $backbone_ineligible_reason = $options->{backbone_ineligible_reason} || {};
 	my $placement_eligible = $options->{placement_eligible} || {};
 	my $placement_ineligible_reason = $options->{placement_ineligible_reason} || {};
 	my $seq = _read_fasta($full_fasta);
@@ -102,8 +104,14 @@ sub split_strict_backbone {
 		my $lowCoverage = $q90 > 0
 			&& $informative{$id} < $coverage_fraction * $q90;
 		$lowCoverage = 0 if length($outgroup) && $id eq $outgroup;
-		if ($lowCoverage) {
-			my @reason = ('low_validated_coverage');
+		my $backboneRejected = exists($backbone_eligible->{$id})
+			&& !$backbone_eligible->{$id};
+		$backboneRejected = 0 if length($outgroup) && $id eq $outgroup;
+		if ($lowCoverage || $backboneRejected) {
+			my @reason;
+			push @reason, 'low_validated_coverage' if $lowCoverage;
+			push @reason, ($backbone_ineligible_reason->{$id}
+				// 'backbone_coverage_not_met') if $backboneRejected;
 			push @reason, 'sample_locus_qc' if $sampleLocusQC;
 			if (exists($placement_eligible->{$id}) && !$placement_eligible->{$id}) {
 				push @reason, ($placement_ineligible_reason->{$id}

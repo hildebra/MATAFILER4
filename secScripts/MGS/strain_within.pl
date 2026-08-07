@@ -203,7 +203,8 @@ END {
 #.78: use deterministic rate/GC partition merging for strain trees by default
 #.79: target deterministic rate/GC partitions by effective called sites
 #.80: restore legacy IQ-TREE strain inference by default and gate sparse placements
-my $version = 0.80;
+#.81: enable EPA-ng strict-backbone placement by default and expose its controls
+my $version = 0.81;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -270,12 +271,18 @@ my $legacyMGTKExplicit = 0;
 my $GenesPerSpecies = 0.05;
 my $GeneLengthMin = 0.3;
 my $relativeNTFraction = 0.02;
+my $NTfiltCount = 0;
+my ($placementGenesPerSpecies, $placementRelativeNTFraction, $placementNTfiltCount);
 my $taxonAwareLocusSelection = 1;
 my $rateMergePartitions = 1;
 my $rateMergeMaxBins = 8;
 my $rateMergeTargetSites = 30_000;
 my $rateMergeMinLoci = 20;
 my $rateMergeMinSites = 20_000;
+my $strictBackbone = 1;
+my $strictBackboneFraction = 0.35;
+my $strictBackboneMinSamples = 3;
+my $placementMinOverlap = 400;
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
@@ -391,12 +398,20 @@ GetOptions(
 	"GenesPerSpecies=f" => \$GenesPerSpecies,
 	"GeneLengthMin=f" => \$GeneLengthMin,
 	"relativeNTFraction=f" => \$relativeNTFraction,
+	"NTfiltCount=i" => \$NTfiltCount,
+	"placementGenesPerSpecies=f" => \$placementGenesPerSpecies,
+	"placementRelativeNTFraction=f" => \$placementRelativeNTFraction,
+	"placementNTfiltCount=i" => \$placementNTfiltCount,
 	"taxonAwareLocusSelection=i" => \$taxonAwareLocusSelection,
 	"rateMergePartitions=i" => \$rateMergePartitions,
 	"rateMergeMaxBins=i" => \$rateMergeMaxBins,
 	"rateMergeTargetSites=i" => \$rateMergeTargetSites,
 	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
 	"rateMergeMinSites=i" => \$rateMergeMinSites,
+	"strictBackbone=i" => \$strictBackbone,
+	"strictBackboneFraction=f" => \$strictBackboneFraction,
+	"strictBackboneMinSamples=i" => \$strictBackboneMinSamples,
+	"placementMinOverlap=i" => \$placementMinOverlap,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
@@ -444,7 +459,10 @@ die "-MGSminGenesPSmpl and -presortGenes must be positive\n"
 die "-flushEvery must be positive\n" unless $appendWriteTrigger > 0;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax,
-		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction);
+		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction,
+		grep { defined } ($placementGenesPerSpecies, $placementRelativeNTFraction));
+die "-NTfiltCount and -placementNTfiltCount must be non-negative\n"
+	if $NTfiltCount < 0 || (defined($placementNTfiltCount) && $placementNTfiltCount < 0);
 die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
 $legacyMGTK = 0 if $iqPathogen && !$legacyMGTKExplicit;
@@ -452,6 +470,14 @@ die "-rateMergePartitions must be 0 or 1\n"
 	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
 die "-rateMergeMaxBins, -rateMergeTargetSites, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
 	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeTargetSites, $rateMergeMinLoci, $rateMergeMinSites);
+die "-strictBackbone must be 0 or 1\n"
+	unless $strictBackbone == 0 || $strictBackbone == 1;
+die "-strictBackboneFraction must be between 0 and 1\n"
+	if $strictBackboneFraction < 0 || $strictBackboneFraction > 1;
+die "-strictBackboneMinSamples must be at least 3\n"
+	if $strictBackboneMinSamples < 3;
+die "-placementMinOverlap must be non-negative\n"
+	if $placementMinOverlap < 0;
 my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
 	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
 if ($taxonAwareLocusSelection) {
@@ -1127,7 +1153,14 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $tree_sample_separator = quotemeta($SaSe);
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
 	$Tcmd .= "-withinSpecies 1 -relativeNTFraction $relativeNTFraction "
-		."-NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies ";
+		."-NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies "
+		."-NTfiltCount $NTfiltCount ";
+	$Tcmd .= "-placementGenesPerSpecies $placementGenesPerSpecies "
+		if defined $placementGenesPerSpecies;
+	$Tcmd .= "-placementRelativeNTFraction $placementRelativeNTFraction "
+		if defined $placementRelativeNTFraction;
+	$Tcmd .= "-placementNTfiltCount $placementNTfiltCount "
+		if defined $placementNTfiltCount;
 	$Tcmd .= "-taxonAwareLocusSelection $taxonAwareLocusSelection ";
 	if ($taxonAwareLocusSelection) {
 		$Tcmd .= "-taxonAwareMaxLoci $taxonAwareMaxLoci "
@@ -1140,8 +1173,10 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		."-rateMergeMinLoci $rateMergeMinLoci "
 		."-rateMergeMinSites $rateMergeMinSites ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
-	$Tcmd .= "-strictBackbone 0 ";
-	$Tcmd .= "-rateMergeTargetSites 30000 ";
+	$Tcmd .= "-strictBackbone $strictBackbone "
+		."-strictBackboneFraction $strictBackboneFraction "
+		."-strictBackboneMinSamples $strictBackboneMinSamples "
+		."-placementMinOverlap $placementMinOverlap ";
 	if ($phyloProg == 1){
 		if ($legacyMGTK){
 			$Tcmd .= "-iqLegacy 1 ";
@@ -4109,6 +4144,14 @@ Tree locus filtering:
                                  [default 0.05]
   -relativeNTFraction FLOAT     Legacy minimum relative informative-NT coverage
                                  [default 0.02]
+  -NTfiltCount INT              Backbone minimum informative NT after final MSA
+                                 [default 0]
+  -placementGenesPerSpecies FLOAT  Placement gene fraction; defaults to
+                                 -GenesPerSpecies when omitted
+  -placementRelativeNTFraction FLOAT  Placement NT fraction; defaults to
+                                 -relativeNTFraction when omitted
+  -placementNTfiltCount INT     Placement minimum informative NT; defaults to
+                                 -NTfiltCount when omitted
   -taxonAwareLocusSelection 0|1 Align a robust-plus-backfill candidate set, then
                                  select robust/core and taxon-rescue loci after MSA QC
                                  [default 1]
@@ -4121,6 +4164,14 @@ Tree locus filtering:
                                  [default 20]
   -rateMergeMinSites INT        Minimum alignment sites per bin before merging
                                  [default 20000]
+  -strictBackbone 0|1           Infer a broad ML backbone and place only deferred
+                                 sparse samples with EPA-ng [default 1]
+  -strictBackboneFraction FLOAT Defer a sample only below this fraction of the
+                                 informative-site Q90 [default 0.35]
+  -strictBackboneMinSamples INT  Minimum retained backbone samples before using
+                                 the complete alignment as fallback [default 3]
+  -placementMinOverlap INT      Minimum informative alignment positions required
+                                 by the taxon-aware placement gate [default 400]
   -legacyMGTK 0|1               Use the historical IQ-TREE strain command
                                  [default 1; -iqPathogen 1 selects modern mode]
 USAGE

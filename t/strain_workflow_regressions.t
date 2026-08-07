@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.80;/,
-	'legacy strain inference and placement gating increment the workflow version');
+like($strain, qr/my \$version = 0\.81;/,
+	'legacy strain inference and default-active backbone placement increment the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -321,9 +321,12 @@ like($strain,
 like($strain,
 	qr/if \(\$taxonAwareLocusSelection\) \{.*?\$taxonAwareGeneBudget = \$noGeneLimit.*?\$presortGenes.*?\$maxNGenes < \$presortGenes.*?taxonAwareLocusBudgets\(\$taxonAwareGeneBudget\).*?-taxonAwareMaxLoci \$taxonAwareMaxLoci.*?-taxonAwareCoreLoci \$taxonAwareCoreLoci.*?-taxonAwareCandidateExtra \$taxonAwareCandidateExtra.*?sub taxonAwareLocusBudgets.*?\$maximumLoci \* 0\.8.*?\$maximumLoci \* 0\.3/s,
 	'strainWithin scales 80% core, 20% rescue capacity, and 30% QC backfill to its effective gene budget');
-unlike($strain,
-	qr/-AAtree 0|-bootstrap 0|-NTfiltCount 400|-strictBackbone 1|-continue |-gzInput 1|-runDNDS 0|-runTheta 0/,
-	"fixed buildTree strain settings are no longer serialized into the submitted command");
+like($strain,
+	qr/my \$strictBackbone = 1;.*?my \$strictBackboneFraction = 0\.35;.*?my \$strictBackboneMinSamples = 3;.*?my \$placementMinOverlap = 400;.*?"strictBackbone=i"\s+=> \\\$strictBackbone.*?"strictBackboneFraction=f"\s+=> \\\$strictBackboneFraction.*?"strictBackboneMinSamples=i"\s+=> \\\$strictBackboneMinSamples.*?"placementMinOverlap=i"\s+=> \\\$placementMinOverlap/s,
+	'strainWithin exposes default-active strict-backbone controls');
+like($strain,
+	qr/-strictBackbone \$strictBackbone .*?-strictBackboneFraction \$strictBackboneFraction .*?-strictBackboneMinSamples \$strictBackboneMinSamples .*?-placementMinOverlap \$placementMinOverlap/s,
+	'strainWithin forwards all backbone controls to buildTree5');
 like($strain,
 	qr/-tmpSubdir .*?strain_within\/\$MGS.*?-stagedInputDir .*?\$tmpD.*?-completionMarker .*?\$treeStone/s,
 	"tree jobs pass lifecycle paths to buildTree5 as ordinary options");

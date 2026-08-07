@@ -69,6 +69,23 @@ is_deeply($eligible_split->{excluded}, [qw(F)],
 like($eligible_split->{reason}{F}, qr/below_placement_gene_fraction/,
 	'placement exclusion preserves the threshold reason for audit');
 
+my $policy_backbone = File::Spec->catfile($tmp, 'policy-backbone.fna');
+my $policy_queries = File::Spec->catfile($tmp, 'policy-placement.fna');
+my $policy_split = split_strict_backbone(
+	$full, $policy_backbone, $policy_queries, {},
+	{
+		coverage_fraction => 0.35,
+		minimum_backbone => 3,
+		backbone_eligible => {D => 0},
+		backbone_ineligible_reason => {D => 'below_backbone_gene_fraction'},
+		placement_eligible => {D => 1},
+	},
+);
+is_deeply($policy_split->{placement}, [qw(D F)],
+	'backbone-specific coverage rejection defers an otherwise placeable sample');
+like($policy_split->{reason}{D}, qr/below_backbone_gene_fraction/,
+	'backbone deferral reason remains available for the final classification audit');
+
 my $fallback_backbone = File::Spec->catfile($tmp, 'fallback-backbone.fna');
 my $fallback_queries = File::Spec->catfile($tmp, 'fallback-placement.fna');
 my $fallback = split_strict_backbone(

@@ -231,11 +231,14 @@ buildTree5.pl	5.36	General options	-superTree	integer	doSuperTree	0	stable	See s
 buildTree5.pl	5.36	General options	-superCheck	integer	doSuperCheck	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-fixHeaders	integer	fixHeaders	0	stable	# fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
 buildTree5.pl	5.36	General options	-useEte	integer	Ete	0	stable	See source/help for details.
-buildTree5.pl	5.37	General options	-relativeNTFraction	float	ntFrac	0.2	stable	Explicit relative informative-NT fraction; replaces retired ambiguous -NTfilt.
+buildTree5.pl	5.38	General options	-relativeNTFraction	float	ntFrac	0.2	stable	Backbone relative informative-NT fraction; replaces retired ambiguous -NTfilt.
 buildTree5.pl	5.36	General options	-NTfiltPerGene	float	ntFracGene	0.1	stable	See source/help for details.
-buildTree5.pl	5.36	General options	-GenesPerSpecies	float	GeneFracPSpec	0.1	stable	See source/help for details.
+buildTree5.pl	5.38	General options	-GenesPerSpecies	float	GeneFracPSpec	0.1	stable	Backbone relative retained-locus threshold after final selection.
 buildTree5.pl	5.36	General options	-fracMaxGenes90pct	float	fracMaxGenes90pct	0.25	stable	See source/help for details.
-buildTree5.pl	5.36	General options	-NTfiltCount	integer	ntCntTotal	0	stable	See source/help for details.
+buildTree5.pl	5.38	General options	-NTfiltCount	integer	ntCntTotal	0	stable	Backbone absolute informative-NT threshold after final selection.
+buildTree5.pl	5.38	General options	-placementGenesPerSpecies	float	placementGeneFracPSpec	mirrors -GenesPerSpecies	advanced	Placement relative retained-locus threshold; defaults to backbone counterpart.
+buildTree5.pl	5.38	General options	-placementRelativeNTFraction	float	placementNTFrac	mirrors -relativeNTFraction	advanced	Placement relative informative-NT threshold; defaults to backbone counterpart.
+buildTree5.pl	5.38	General options	-placementNTfiltCount	integer	placementNTCntTotal	mirrors -NTfiltCount	advanced	Placement absolute informative-NT threshold; defaults to backbone counterpart.
 buildTree5.pl	5.36	General options	-smplDef	integer	smplDef	1	stable	is the genome somehow quantified with a delimiter (_) ?
 buildTree5.pl	5.36	General options	-smplSep	string	smplSep	_	stable	set the delimiter
 buildTree5.pl	5.36	General options	-outgroup	string	outgroup		stable	Anchor for filtering and downstream rooting; not passed to IQ-TREE as -o.
