@@ -68,9 +68,10 @@ sub balance_assembly_groups {
 			$worker_load[$a] <=> $worker_load[$b] || $a <=> $b
 		} 0 .. $worker_count - 1;
 		$worker_for_group{$group} = $worker;
-		# One unit represents the fixed group-level work; the sample count
-		# represents sample-specific VCF/depth consensus work.
-		$worker_load[$worker] += 1 + scalar(@{$samples_by_group->{$group}});
+		# A group is indivisible because its members share an assembly reference,
+		# but Phase I's expensive VCF/depth/consensus work is per sample.  Balance
+		# on that real work unit rather than on the number of MGS or groups.
+		$worker_load[$worker] += scalar(@{$samples_by_group->{$group}});
 	}
 	return (\%worker_for_group, \@worker_load);
 }

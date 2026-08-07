@@ -37,16 +37,15 @@ my %unbalanced_groups = (
 );
 my ($group_worker, $worker_load) =
 	balance_assembly_groups(\%unbalanced_groups, 2);
-is_deeply($worker_load, [13, 12],
-	'sample-aware balancing includes one fixed unit per group and one per sample');
+is_deeply($worker_load, [11, 10],
+	'sample-aware balancing uses sample count as the Phase-I work unit');
 is_deeply($group_worker,
 	{ A_big => 0, B_small => 1, C_big => 1, D_small => 0 },
 	'largest assembly groups are assigned first to the currently lightest worker');
 my @round_robin_load = (0, 0);
 my @sorted_groups = sort keys %unbalanced_groups;
 for my $index (0 .. $#sorted_groups) {
-	$round_robin_load[$index % 2] +=
-		1 + scalar(@{$unbalanced_groups{$sorted_groups[$index]}});
+	$round_robin_load[$index % 2] += scalar(@{$unbalanced_groups{$sorted_groups[$index]}});
 }
 cmp_ok(abs($worker_load->[0] - $worker_load->[1]), '<',
 	abs($round_robin_load[0] - $round_robin_load[1]),

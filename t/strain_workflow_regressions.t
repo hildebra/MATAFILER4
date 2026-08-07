@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.83;/,
-	'automatic split-worker sizing increments the workflow version');
+like($strain, qr/my \$version = 0\.84;/,
+	'sample-level assembly-group balancing increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -314,8 +314,11 @@ like($strain,
 	qr/Partition whole assembly groups.*?samplesByGroup.*?ownedGroup.*?\$mine\{\$alias\} = 1/s,
 	'split extraction assigns complete assembly groups and their catalogue aliases to one worker');
 like($strain,
-	qr/balance_assembly_groups\(\\%samplesByGroup, \$maxSubJob\).*?\$workerForGroup->\{\$group\} == \$subJob.*?estimated load \$workerLoads->\[\$subJob\]\/\$totalWorkerLoad/s,
-	'split extraction balances fixed group work plus sample-specific work and reports its estimate');
+	qr/balance_assembly_groups\(\\%samplesByGroup, \$maxSubJob\).*?\$workerForGroup->\{\$group\} == \$subJob.*?\$plannedSamples \+= scalar\(\@\{\$samplesByGroup\{\$_\}\}\).*?estimated sample load \$workerLoads->\[\$subJob\]\/\$totalWorkerLoad/s,
+	'split extraction keeps assembly groups intact while balancing and reporting sample-level work');
+like($strain,
+	qr/pre-restricted to .*?sample driver\(s\) with target loci/s,
+	'split-worker diagnostics distinguish post-index usable sample drivers from assembly groups');
 like($strain,
 	qr/readGenesSample_Singl\(\s*\$sm, \$writeLink, \$sttime, .*?\$appCnt, \$sampleStatsFH, .*?sampleStatsSeen.*?\$\{\$bufferedSamplesRef\}\+\+.*?appendWriteMGSgenes\(\$writeLink\)/s,
 	'expanded assembly-group output is accounted once and flushed by sample to retain the RAM bound');
@@ -328,8 +331,8 @@ like($strain,
 unlike($strain, qr/-NTfilt \$relativeNTFraction/,
 	'strain workflow does not emit the retired ambiguous NTfilt option');
 like($strain,
-	qr/my \$GenesPerSpecies = 0\.05;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.02;.*?my \$taxonAwareLocusSelection = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
-	'strainWithin uses the relaxed defaults, enables taxon-aware selection, and forwards explicit disablement');
+	qr/my \$GenesPerSpecies = 0\.2;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.1;.*?\$placementGenesPerSpecies = 0\.02; \$placementRelativeNTFraction = 0\.01;.*?my \$taxonAwareLocusSelection = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
+	'strainWithin uses stricter backbone defaults, lower explicit placement thresholds, and taxon-aware selection');
 like($strain,
 	qr/my \$rateMergePartitions = 1;.*?my \$rateMergeMaxBins = 8;.*?my \$rateMergeTargetSites = 30_000;.*?my \$rateMergeMinLoci = 20;.*?my \$rateMergeMinSites = 20_000;.*?"rateMergePartitions=i" => \\\$rateMergePartitions.*?-rateMergePartitions \$rateMergePartitions.*?-rateMergeMaxBins \$rateMergeMaxBins.*?-rateMergeTargetSites \$rateMergeTargetSites.*?-rateMergeMinLoci \$rateMergeMinLoci.*?-rateMergeMinSites \$rateMergeMinSites/s,
 	'strainWithin enables deterministic rate merging and forwards all bin controls');

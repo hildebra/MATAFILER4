@@ -206,7 +206,8 @@ END {
 #.81: enable EPA-ng strict-backbone placement by default and expose its controls
 #.82: make split Stage-I scope explicit and keep extraction workers tree-option free
 #.83: choose split-worker count automatically from assembly-group and sample load
-my $version = 0.83;
+#.84: balance indivisible assembly groups by their sample-level Phase-I workload
+my $version = 0.84;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -2044,10 +2045,13 @@ sub prepGene2MGS{
 		$mySamplesHR = \%mine;
 		my $totalWorkerLoad = 0;
 		$totalWorkerLoad += $_ for @{$workerLoads};
+		my $plannedSamples = 0;
+		$plannedSamples += scalar(@{$samplesByGroup{$_}}) for keys %ownedGroup;
 		print "Subjob ${subJob}/$maxSubJob: restricting locus-model construction to "
 			. scalar(keys %ownedGroup)." of ".scalar(@groups)
-			." assembly groups (".scalar(keys %mine)." sample/alias identifiers; "
-			."estimated load $workerLoads->[$subJob]/$totalWorkerLoad)\n";
+			." assembly groups ($plannedSamples planned sample(s), "
+			.scalar(keys %mine)." sample/alias identifiers; "
+			."estimated sample load $workerLoads->[$subJob]/$totalWorkerLoad)\n";
 	}
 
 	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,$Gene2COG,$mySamplesHR);
@@ -2267,8 +2271,10 @@ sub prepRun{
 		print "familyVar=$familyVar\n" unless ($familyVar eq "");
 		
 		print "groupStabilityVars=$groupStabilityVars\n" unless ($groupStabilityVars eq "");
-		print "MSAaligner: $MSAprog, GenesPerSpecies: $GenesPerSpecies, "
-			."GeneLengthMin: $GeneLengthMin, relativeNTFraction: $relativeNTFraction, "
+		print "MSAaligner: $MSAprog, backbone GenesPerSpecies: $GenesPerSpecies, "
+			."GeneLengthMin: $GeneLengthMin, backbone relativeNTFraction: $relativeNTFraction, "
+			."placement GenesPerSpecies: $placementGenesPerSpecies, "
+			."placement relativeNTFraction: $placementRelativeNTFraction, "
 			."taxonAwareLocusSelection: $taxonAwareLocusSelection\n";
 		print "Rate/GC partition merging: enabled=$rateMergePartitions, "
 			."maximumBins=$rateMergeMaxBins, targetBin=$rateMergeTargetSites effective sites, "
@@ -3470,7 +3476,7 @@ sub extractFNAFAA2genes{
 		print "total samples: $Nsmpls , total in map: $Ndirs\n";
 		my @preview = @srtdSmpls > 10 ? @srtdSmpls[0 .. 9] : @srtdSmpls;
 		print "\nSUBJOB ${subJob}/$maxSubJob: pre-restricted to " . scalar(@srtdSmpls)
-			. " assembly group(s) with target loci"
+			. " sample driver(s) with target loci"
 			. (@preview ? ": ".join(' ', @preview) : '')
 			. (scalar(@srtdSmpls) > @preview ? " ..." : "") . "\n\n";
 	}
@@ -4179,16 +4185,14 @@ instead of being used to infer the strict backbone.
 Tree locus filtering:
   -GeneLengthMin FLOAT          Minimum fraction of a locus length-Q90 retained
                                  [default 0.3]
-  -GenesPerSpecies FLOAT        Legacy minimum relative locus coverage per sample
-                                 [default 0.05]
-  -relativeNTFraction FLOAT     Legacy minimum relative informative-NT coverage
-                                 [default 0.02]
+  -GenesPerSpecies FLOAT        Backbone minimum relative locus coverage per sample
+                                 [default 0.2]
+  -relativeNTFraction FLOAT     Backbone minimum relative informative-NT coverage
+                                 [default 0.1]
   -NTfiltCount INT              Backbone minimum informative NT after final MSA
                                  [default 0]
-  -placementGenesPerSpecies FLOAT  Placement gene fraction; defaults to
-                                 -GenesPerSpecies when omitted
-  -placementRelativeNTFraction FLOAT  Placement NT fraction; defaults to
-                                 -relativeNTFraction when omitted
+  -placementGenesPerSpecies FLOAT  Placement gene fraction [default 0.02]
+  -placementRelativeNTFraction FLOAT  Placement NT fraction [default 0.01]
   -placementNTfiltCount INT     Placement minimum informative NT; defaults to
                                  -NTfiltCount when omitted
   -taxonAwareLocusSelection 0|1 Align a robust-plus-backfill candidate set, then
