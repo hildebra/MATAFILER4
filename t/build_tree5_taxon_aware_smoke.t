@@ -103,7 +103,7 @@ my @command = (
 	$^X, '-I'.$root, $wrapper, $config, $script,
 	'-fna', $fna, '-aa', $faa, '-cats', $categories,
 	'-outD', $output, '-smplSep', '\\|', '-AAtree', 0,
-	'-MSAprogram', 2, '-runLengthCheck', 0, '-postAlignmentLocusQC', 0,
+	'-MSAprogram', 2, '-runLengthCheck', 0, '-postAlignmentLocusQC', 1,
 	'-taxonAwareMaxLoci', 3,
 	'-taxonAwareCoreLoci', 2, '-taxonAwareCandidateExtra', 1,
 	'-taxonAwareMinSequenceNT', 9, '-taxonAwareTargetLoci', 2,
@@ -166,8 +166,8 @@ my $rateAuditText = do { local $/; <$rateAuditHandle> };
 close $rateAuditHandle;
 like($rateAuditText, qr/^locus\talignment\tselection_phase\tstart\tend\talignment_sites\teffective_called_sites\trate_proxy/m,
 	'rate-partition audit has stable coordinate and metric columns');
-like($rateAuditText, qr/\tvariable_site_fraction\t/,
-	'taxon-aware variability supplies the documented fallback rate proxy when locus QC is disabled');
+like($rateAuditText, qr/\tp90_consensus_divergence\t/,
+	'MSAfix post-alignment divergence supplies the rate proxy');
 is(scalar(() = $rateAuditText =~ /^g[123]\t/gm), 3,
 	'every selected locus has exactly one audited partition assignment');
 like($rateAuditText, qr/^g3\t[^\t]+\ttaxon_rescue\t[^\n]+\ttaxon_rescue_to_/m,

@@ -244,7 +244,7 @@ buildTree5.pl	5.36	General options	-smplSep	string	smplSep	_	stable	set the deli
 buildTree5.pl	5.36	General options	-outgroup	string	outgroup		stable	Anchor for filtering and downstream rooting; not passed to IQ-TREE as -o.
 buildTree5.pl	5.36	General options	-AAtree	integer	useAA4tree	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-MSAprogram	integer	MSAprog	2	stable	(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA)
-buildTree5.pl	5.36	General options	-minOverlapMSA	integer	minOverlapMSA	0	stable	min overlap in MSA columns, in order to retain column
+buildTree5.pl	5.39	General options	-minOverlapMSA	float	minOverlapMSA	0 between species; 0.35 within species	stable	Minimum called-sequence fraction required to retain an MSA column; passed to MSAfix v2.14+ and converted to its equivalent per-locus count for final concatenation.
 buildTree5.pl	5.36	General options	-maxGapPerCol	float	maxGapPerCol	1	stable	same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column
 buildTree5.pl	5.36	General options	-calcDistMat	integer	calcDistMat	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-calcDistMatExt	integer	calcDistMatExt	0	stable	See source/help for details.

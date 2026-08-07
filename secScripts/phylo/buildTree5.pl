@@ -42,6 +42,7 @@
 #5.36: retain broad backbones while applying coverage criteria to sparse-sample placement
 #5.37: use EPA-ng maximum-likelihood placement for sparse strict-backbone samples
 #5.38: separate backbone admission from placement eligibility and retain sparse taxa through MSA
+#5.39: consume overlap-filtered rate/GC metrics from MSAfix rather than rescanning loci in Perl
 
 use warnings;
 use strict;
@@ -113,7 +114,6 @@ sub writeTaxonAwareSampleAudit;
 sub writePostAlignmentQCPolicy;
 sub alignmentFileStem;
 sub readPostAlignmentRateMetrics;
-sub alignmentGCMetric;
 sub deterministicRatePartitions;
 sub writeRatePartitionAudit;
 sub publishStagedTreeInputs;
@@ -122,7 +122,7 @@ sub epaModelArtifact;
 sub runEpaNgPlacement;
 
 my $doPhym= 0;
-my $version = 5.38;
+my $version = 5.39;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -315,7 +315,7 @@ GetOptions(
 	"outgroup=s"	=> \$outgroup,
 	"AAtree=i" => \$useAA4tree,
 	"MSAprogram=i" => \$MSAprog, #(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA)
-	"minOverlapMSA=i" => \$minOverlapMSA, #min overlap in MSA columns, in order to retain column
+	"minOverlapMSA=f" => \$minOverlapMSA, #minimum called-sequence fraction per retained MSA column
 	"maxGapPerCol=f" =>\$maxGapPerCol, #same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column
 	"calcDistMat=i" => \$calcDistMat,
 	"calcDistMatExt=i" => \$calcDistMatExt,
@@ -396,7 +396,7 @@ die "-strainWithinPreset must be 0 or 1\n"
 die "-AutoModel must be 0 or 1\n"
 	unless $treeAutoModel == 0 || $treeAutoModel == 1;
 
-$minOverlapMSA = $withinSpecies ? 2 : 0 unless defined $minOverlapMSA;
+$minOverlapMSA = $withinSpecies ? 0.35 : 0 unless defined $minOverlapMSA;
 $postAlignmentLocusQC = $withinSpecies
 	? $POST_ALIGNMENT_QC_DEFAULT{within_species_enabled}
 	: $POST_ALIGNMENT_QC_DEFAULT{between_species_enabled}
@@ -412,7 +412,8 @@ $placementGeneFracPSpec = $GeneFracPSpec unless defined $placementGeneFracPSpec;
 $placementNTFrac = $ntFrac unless defined $placementNTFrac;
 $placementNTCntTotal = $ntCntTotal unless defined $placementNTCntTotal;
 die "-placementNTfiltCount must be zero or greater\n" if $placementNTCntTotal < 0;
-die "-minOverlapMSA must be zero or greater\n" if $minOverlapMSA < 0;
+die "-minOverlapMSA must be between zero and one\n"
+	if $minOverlapMSA < 0 || $minOverlapMSA > 1;
 die "-iqMemMB must be zero or greater\n" if $iqMemMB < 0;
 die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
 die "-iqLegacy must be 0 or 1\n" unless $iqLegacy == 0 || $iqLegacy == 1;
@@ -452,9 +453,9 @@ die "-rateMergeMaxBins, -rateMergeTargetSites, -rateMergeMinLoci, and -rateMerge
 	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeTargetSites, $rateMergeMinLoci, $rateMergeMinSites);
 die "-rateMergePartitions requires nucleotide trees (-AAtree 0)\n"
 	if $rateMergePartitions && $useAA4tree;
-die "-rateMergePartitions requires -postAlignmentLocusQC 1 or "
-	."-taxonAwareLocusSelection 1 to supply a rate proxy\n"
-	if $rateMergePartitions && !$postAlignmentLocusQC && !$taxonAwareLocusSelection;
+die "-rateMergePartitions requires -postAlignmentLocusQC 1 because MSAfix "
+	."supplies the overlap-filtered rate/GC metrics\n"
+	if $rateMergePartitions && !$postAlignmentLocusQC;
 die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
 die "-taxonAwareMaxLoci, -taxonAwareCoreLoci, -taxonAwareMinSequenceNT, "
@@ -1454,13 +1455,6 @@ if ($rateMergePartitions && $cogCats ne "") {
 	for my $alignment (keys %taxonAwareFinalMetricByPath) {
 		$partitionSelectionPhase{$alignment} =
 			$taxonAwareFinalMetricByPath{$alignment}{selection_phase} // '';
-		next if exists $partitionRateProxy{$alignment};
-		my $metric = $taxonAwareFinalMetricByPath{$alignment};
-		my $sites = $metric->{alignment_length_nt} // 0;
-		$partitionRateProxy{$alignment} = {
-			value => $sites ? ($metric->{variable_sites} // 0) / $sites : 0,
-			source => 'variable_site_fraction',
-		};
 	}
 }
 
@@ -2584,8 +2578,12 @@ sub readPostAlignmentRateMetrics {
 	$header =~ s/[\r\n]+$//;
 	my @columns = split /\t/, $header, -1;
 	my %columnIndex = map { $columns[$_] => $_ } 0 .. $#columns;
-	for my $required (qw(alignment status p90_consensus_divergence)) {
-		die "Post-alignment locus-QC report $reportFile lacks column '$required'\n"
+	for my $required (qw(
+		alignment status p90_consensus_divergence
+		called_cells gc_cells gc_fraction effective_sites
+	)) {
+		die "Post-alignment locus-QC report $reportFile lacks column '$required'; "
+			."deterministic rate/GC merging requires MSAfix v2.14 or later\n"
 			unless exists $columnIndex{$required};
 	}
 	my %metrics;
@@ -2595,26 +2593,26 @@ sub readPostAlignmentRateMetrics {
 		my @fields = split /\t/, $line, -1;
 		next unless ($fields[$columnIndex{status}] // '') eq 'PASS';
 		my $path = $fields[$columnIndex{alignment}] // '';
-		my $value = $fields[$columnIndex{p90_consensus_divergence}] // '';
-		next unless length($path) && $value =~ /\A(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?\z/;
+		my ($rate, $called, $gc, $effective) = @fields[@columnIndex{qw(
+			p90_consensus_divergence called_cells gc_fraction effective_sites
+		)}];
+		next unless length($path)
+			&& defined($rate) && defined($called) && defined($gc) && defined($effective)
+			&& $rate =~ /\A(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?\z/
+			&& $called =~ /\A\d+(?:\.\d*)?\z/
+			&& $gc =~ /\A(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?\z/
+			&& $effective =~ /\A(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?\z/;
 		$metrics{$path} = {
-			value => 0 + $value,
+			value => 0 + $rate,
 			source => 'p90_consensus_divergence',
+			called_cells => 0 + $called,
+			gc_fraction => 0 + $gc,
+			effective_sites => 0 + $effective,
 		};
 	}
 	close $report
 		or die "Cannot close post-alignment locus-QC report $reportFile: $!\n";
 	return \%metrics;
-}
-
-sub alignmentGCMetric {
-	my ($alignment) = @_;
-	my ($gc, $called) = (0, 0);
-	for my $sequence (values %{$alignment}) {
-		$gc += $sequence =~ tr/GCgc/GCgc/;
-		$called += $sequence =~ tr/ACGTacgt/ACGTacgt/;
-	}
-	return ($called ? $gc / $called : 0, $called);
 }
 
 sub deterministicRatePartitions {
@@ -2883,9 +2881,10 @@ sub mergeMSAs($ $ $ $){
 		}
 		my $originalLen = $len;
 		my ($filtered, $retainedLen, $removedColumns);
+		my $minimumOverlapCount = int(scalar(@Mkeys) * $minOverlapMSA + 0.999999);
 		my $overlapOK = eval {
 			($filtered, $retainedLen, $removedColumns) =
-				filter_alignment_by_overlap(\%MFAA, $isAA, $minOverlapMSA);
+				filter_alignment_by_overlap(\%MFAA, $isAA, $minimumOverlapCount);
 			1;
 		};
 		if (!$overlapOK) {
@@ -2918,19 +2917,9 @@ sub mergeMSAs($ $ $ $){
 		}
 		push(@lengthsParts,$len);
 		if ($applyRateMerging) {
-			my %retainedAlignment;
-			for my $sm (@smps) {
-				my $sequenceId = $sm.$separator.$gcat;
-				$retainedAlignment{$sequenceId} = $MFAA{$sequenceId}
-					if exists $MFAA{$sequenceId};
-			}
-			my ($gcFraction, $calledCells) = alignmentGCMetric(\%retainedAlignment);
 			my $rateMetric = $partitionRateProxy{$MSAf};
-			unless ($rateMetric) {
-				limitedWarn('partition rate proxy unavailable',
-					"Warning: no post-alignment rate proxy for $MSAf; using zero\n");
-				$rateMetric = {value => 0, source => 'unavailable'};
-			}
+			die "No MSAfix v2.14 rate/GC metrics for retained alignment $MSAf\n"
+				unless $rateMetric;
 			push @partitionLoci, {
 				locus => $gcat,
 				alignment => $MSAf,
@@ -2940,9 +2929,9 @@ sub mergeMSAs($ $ $ $){
 				rate_proxy => $rateMetric->{value},
 				rate_proxy_source => $rateMetric->{source},
 				selection_phase => $partitionSelectionPhase{$MSAf} // '',
-				gc_fraction => $gcFraction,
-				called_cells => $calledCells,
-				effective_sites => @smps ? $calledCells / @smps : 0,
+				gc_fraction => $rateMetric->{gc_fraction},
+				called_cells => $rateMetric->{called_cells},
+				effective_sites => $rateMetric->{effective_sites},
 			};
 		}
 		$partitionCoordinate += $len;
@@ -4171,6 +4160,7 @@ sub runPostAlignmentLocusQC {
 		"-sequenceType", $sequenceType,
 		"-minSequences", $postAlignmentMinSequences,
 		"-minOccupancy", $postAlignmentMinOccupancy,
+		"-minOverlapMSA", $minOverlapMSA,
 		@divergenceArguments,
 		"-minLociForRelative", $postAlignmentMinLociRelative,
 	) . "\n";

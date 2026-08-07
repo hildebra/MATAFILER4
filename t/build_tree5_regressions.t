@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.38;/,
-	'EPA-ng backbone/placement policy separation increments the workflow version');
+like($source, qr/my \$version = 5\.39;/,
+	'MSAfix report-metric integration increments the workflow version');
 like($source,
 	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
 	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
@@ -27,8 +27,8 @@ like($source,
 	qr/my %RATE_MERGE_DEFAULT = \(.*?enabled => 0.*?maximum_bins => 8.*?target_sites_per_bin => 30_000.*?minimum_loci_per_bin => 20.*?minimum_sites_per_bin => 20_000.*?"rateMergePartitions=i" => sub \{.*?\$rateMergePartitionsExplicit = 1.*?if \(\$strainWithinPreset\) \{.*?\$rateMergePartitions = 1 unless \$rateMergePartitionsExplicit;/s,
 	'direct builds keep rate merging optional while strain presets enable it unless explicitly disabled');
 like($source,
-	qr/my \$withinSpecies = 0;.*?my \$minOverlapMSA;.*?"withinSpecies=i".*?\$minOverlapMSA = \$withinSpecies \? 2 : 0 unless defined \$minOverlapMSA;.*?\$postAlignmentLocusQC = \$withinSpecies.*?unless defined \$postAlignmentLocusQC;.*?\$postAlignmentDivergenceQC = \$withinSpecies \? 1 : 0/s,
-	"between-species locus retention is the default and within-species filtering is explicit");
+	qr/my \$withinSpecies = 0;.*?my \$minOverlapMSA;.*?"minOverlapMSA=f".*?\$minOverlapMSA = \$withinSpecies \? 0\.35 : 0 unless defined \$minOverlapMSA;.*?\$postAlignmentLocusQC = \$withinSpecies.*?unless defined \$postAlignmentLocusQC;.*?\$postAlignmentDivergenceQC = \$withinSpecies \? 1 : 0.*?-minOverlapMSA must be between zero and one/s,
+	"between-species locus retention is the default and within-species overlap filtering uses MSAfix's fractional threshold");
 like($source,
 	qr/my \@divergenceArguments = \$postAlignmentDivergenceQC.*?"-maxMedianDivergence", 1,.*?"-maxP90Divergence", 1,.*?"-relativeModifiedZ", 1_000_001/s,
 	"explicit broad-tree QC disables strain-divergence rejection");
@@ -45,8 +45,8 @@ like($source,
 	qr/safeRemoveTree\(\$tmpD, \$tmpBase\).*?writeCompletionMarker\(\$completionMarker, \$\{\$trRetH\}\{nwk\}.*?sub writeCompletionMarker.*?nonempty primary tree.*?rename \$temporaryMarker, \$marker/s,
 	"buildTree5 atomically publishes a completion marker only after validating its primary tree");
 like($source,
-	qr/post_alignment_locus_qc\.tsv.*?sub runPostAlignmentLocusQC.*?getProgPaths\("MSAfix"\).*?-manifest.*?-report.*?-keep/s,
-	'buildTree invokes native MSAfix locus QC before concatenation and retains its report');
+	qr/post_alignment_locus_qc\.tsv.*?sub runPostAlignmentLocusQC.*?getProgPaths\("MSAfix"\).*?-manifest.*?-report.*?-keep.*?-minOverlapMSA", \$minOverlapMSA/s,
+	'buildTree invokes native MSAfix locus QC before concatenation, retaining its report and applying its overlap threshold');
 unlike($source, qr/postAlignmentLocusQC_scr/,
 	'buildTree no longer invokes the Perl locus-QC script');
 like($source, qr/post-alignment-loci-XXXXXX.*?UNLINK => 1.*?post-alignment-keep-XXXXXX.*?UNLINK => 1/s,
@@ -95,8 +95,10 @@ like($source,
 	qr/sub classifyTaxonAwareCoverageEligibility.*?minimumLociFloor.*?below_\$\{role\}_gene_fraction/s,
 	'backbone and placement coverage filters are separate, with a two-locus placement minimum and audits');
 like($source,
-	qr/sub readPostAlignmentRateMetrics.*?p90_consensus_divergence.*?sub alignmentGCMetric.*?sub deterministicRatePartitions.*?\$totalEffectiveSites.*?\$rateMergeTargetSites.*?\$desiredBins = \$rateMergeMaxBins.*?\$splitMetric.*?'rate_proxy'.*?'gc_fraction'.*?\$summary\{\$_\}\{loci\} < \$rateMergeMinLoci.*?\$summary\{\$_\}\{sites\} < \$rateMergeMinSites.*?rate_merged_partitions\.tsv/s,
-	'rate merging is targeted by effective sites, refines P90 and GC splits, collapses undersized bins, and audits assignments');
+	qr/sub readPostAlignmentRateMetrics.*?p90_consensus_divergence.*?called_cells gc_cells gc_fraction effective_sites.*?MSAfix v2\.14 or later.*?sub deterministicRatePartitions.*?\$totalEffectiveSites.*?\$rateMergeTargetSites.*?\$desiredBins = \$rateMergeMaxBins.*?\$splitMetric.*?'rate_proxy'.*?'gc_fraction'.*?\$summary\{\$_\}\{loci\} < \$rateMergeMinLoci.*?\$summary\{\$_\}\{sites\} < \$rateMergeMinSites.*?rate_merged_partitions\.tsv/s,
+	'rate merging consumes MSAfix v2.14 overlap-aware metrics, refines P90 and GC splits, collapses undersized bins, and audits assignments');
+unlike($source, qr/sub alignmentGCMetric|retainedAlignment/,
+	'BuildTree no longer rescans retained alignments or copies them solely to calculate GC metrics');
 like($source,
 	qr/my \@rescueLoci = grep.*?eq 'taxon_rescue'.*?my \@binningLoci = grep.*?ne 'taxon_rescue'.*?for my \$locus \(\@rescueLoci\).*?\$locus->\{initial_bin\} = 'taxon_rescue_to_'/s,
 	'taxon-rescue loci join their nearest robust rate/GC bin instead of defining sparse partitions');
@@ -214,8 +216,8 @@ like($source,
 like($source, qr/unlink \$treeOpts\{RAXtreeout\}.*?if -e \$treeOpts\{RAXtreeout\} && !-s \$treeOpts\{RAXtreeout\}/s,
 	'an empty legacy RAxML tree cannot suppress continuation recovery');
 like($source,
-	qr/filter_alignment_by_overlap\(\\%MFAA, \$isAA, \$minOverlapMSA\).*?push\(\@lengthsParts,\$len\)/s,
-	'minimum taxon overlap is applied per locus before partition lengths are recorded');
+	qr/my \$minimumOverlapCount = int\(scalar\(\@Mkeys\) \* \$minOverlapMSA \+ 0\.999999\);.*?filter_alignment_by_overlap\(\\%MFAA, \$isAA, \$minimumOverlapCount\).*?push\(\@lengthsParts,\$len\)/s,
+	'MSAfix fractional overlap is converted to an equivalent per-locus count before concatenation lengths are recorded');
 like($source, qr/for my \$disM \(\@subfls\)/, 'all discovered distance matrices are merged');
 like($source, qr/\$ffd\{\$k\} = 4/, 'fourfold degeneracy is classified by codon family');
 

@@ -479,7 +479,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-outgroup` | string |  | stable | Retained as the anchor for filtering, downstream backbone rooting, and placement; not passed to IQ-TREE, where `-o` is cosmetic under reversible models and can fail on an internal sparse tree. |
 | `-AAtree` | integer | `0` | stable | See source/help for details. |
 | `-MSAprogram` | integer | `2` | stable | (0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA) |
-| `-minOverlapMSA` | integer | `0` between species; `2` within species | stable | Minimum number of called sequences required to retain an MSA column. An explicit value overrides the `-withinSpecies` default. |
+| `-minOverlapMSA` | float | `0` between species; `0.35` within species | stable | Minimum called-sequence fraction required to retain an MSA column. This is passed to MSAfix v2.14+; BuildTree converts it with `ceil(sequences × fraction)` for its final concatenation, giving the same retained columns. An explicit value overrides the `-withinSpecies` default. |
 | `-maxGapPerCol` | float | `1` | stable | same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column |
 | `-calcDistMat` | integer | `0` | stable | See source/help for details. |
 | `-calcDistMatExt` | integer | `0` | stable | See source/help for details. |
