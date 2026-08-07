@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.86;/,
-	'completed-Phase-I resume optimization increments the workflow version');
+like($strain, qr/my \$version = 0\.87;/,
+	'completed split-Phase-I restart recovery increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -252,6 +252,9 @@ like($strain,
 like($strain,
 	qr/sub printSampleStatsSummary .*?STEP 1 SAMPLE SUMMARY \(all workers\).*?Used MGS retained-loci histogram/s,
 	'the same all-worker summary and retained-locus histogram are available after Phase I has completed');
+like($strain,
+	qr/sub recoverCompletedSplitPhaseI .*?split_generation_complete.*?incomplete recovery ledgers.*?incomplete sample-statistics ledgers.*?mergeConspecificLogs\(\).*?mergeRecoveryLogs\(\).*?mergeSampleStats\(\)/s,
+	'a restart after every split worker finished merges validated ledgers before Phase II uses their staged inputs');
 like($strain,
 	qr/next if \$recalcTrees && !\$MGSneedsExtraction\{\$MGS\}.*?\$MGSneedsExtraction\{\$MGS\} = 1/s,
 	'tree recalculation limits its extraction model to MGS with missing inputs');

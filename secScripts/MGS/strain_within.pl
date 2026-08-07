@@ -71,6 +71,7 @@ sub writeStrainSummary;
 sub mergeSampleStats;
 sub reportSavedSampleStats;
 sub printSampleStatsSummary;
+sub recoverCompletedSplitPhaseI;
 sub taxonAwareLocusBudgets;
 
 sub limitedWarn;sub limitedNotice;
@@ -213,7 +214,8 @@ END {
 #.84: balance indivisible assembly groups by their sample-level Phase-I workload
 #.85: queue prepared Phase-II tree jobs while scheduler capacity is full
 #.86: skip extraction-only consensus audits on Phase-I resume and report saved worker statistics
-my $version = 0.86;
+#.87: finish a completed split Phase-I ledger after a main-worker restart
+my $version = 0.87;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -950,7 +952,8 @@ if ($runPartI){
 
 } else {
 	print "Skipping Part I, all required per-MGS inputs are already prepared.\n";
-	reportSavedSampleStats();
+	my $mergedSampleStats = recoverCompletedSplitPhaseI();
+	reportSavedSampleStats() unless $mergedSampleStats;
 }
 loadRecoveryContributionIndex() unless $recoveryContributionIndexReady;
 
@@ -2937,6 +2940,37 @@ sub indexRecoveryRow {
 	$recoveryWorkerRecordsByMGS{$mgs}{$worker} += $retained_genes;
 	$recoveryWorkerRowsByMGS{$mgs}{$worker}++;
 	$recoverySamplesByMGS{$mgs}{$sample} = 1;
+}
+
+sub recoverCompletedSplitPhaseI {
+	# A previous main worker can end after every extraction worker has published
+	# its completion stone, but before it merges their ledgers.  The aggregate
+	# FNA/FAA/category files then look reusable to the resume audit while the
+	# contribution index required to validate their worker parts is absent.
+	# Recover only a proven-complete generation: never merge partial retries.
+	return 0 unless $maxSubJob && !$subJob;
+	return 0 unless split_generation_complete(
+		$splitManifest, $splitStonePrefix, $maxSubJob,
+	);
+
+	my @recoveryParts = map { "$LOGDIR/$recoveryLogName.$_" } 0 .. $maxSubJob - 1;
+	my @sampleStatsParts = map { "$LOGDIR/$sampleStatsLogName.$_" } 0 .. $maxSubJob - 1;
+	my $hasRecoveryParts = grep { -e $_ } @recoveryParts;
+	my $hasSampleStatsParts = grep { -e $_ } @sampleStatsParts;
+	return 0 unless $hasRecoveryParts || $hasSampleStatsParts;
+
+	my @missingRecovery = grep { !-s $_ } @recoveryParts;
+	my @missingStats = grep { !-s $_ } @sampleStatsParts;
+	die "Completed split Phase I has incomplete recovery ledgers: ".join(',', @missingRecovery)."\n"
+		if @missingRecovery;
+	die "Completed split Phase I has incomplete sample-statistics ledgers: ".join(',', @missingStats)."\n"
+		if @missingStats;
+
+	print "Recovering completed split Phase I: merging $maxSubJob worker ledgers before tree submission.\n";
+	mergeConspecificLogs();
+	mergeRecoveryLogs() unless $recoveryContributionIndexReady;
+	mergeSampleStats();
+	return 1;
 }
 
 sub mergeSampleStats {
