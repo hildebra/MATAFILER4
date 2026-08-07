@@ -94,7 +94,10 @@ sub _run_scheduler_query {
 		$status ||= 0;
 		return ($output, $status);
 	}
-	my $output = `$command`;
+	# Keep Slurm controller diagnostics with the failed query.  In particular,
+	# squeue otherwise writes transient slurm_load_jobs errors straight to STDERR,
+	# leaving callers with only a generic non-zero status.
+	my $output = `$command 2>&1`;
 	return ($output, $?);
 }
 
@@ -136,9 +139,41 @@ sub _scheduler_queue_snapshot {
 	}
 
 	my $command = _scheduler_queue_command($qmode);
-	my ($output, $status) = _run_scheduler_query($args{runner}, $command);
-	die($args{error} || "Failed to query scheduler jobs with: $command\n")
-		if $status != 0;
+	my $retry_seconds = defined($optHR->{slurmQueryRetrySeconds})
+		? 0 + $optHR->{slurmQueryRetrySeconds} : 300;
+	my $maximum_error_seconds = defined($optHR->{slurmQueryMaxErrorSeconds})
+		? 0 + $optHR->{slurmQueryMaxErrorSeconds} : 1_200;
+	$retry_seconds = 1 if $retry_seconds < 1;
+	$maximum_error_seconds = 0 if $maximum_error_seconds < 0;
+	my $sleeper = $optHR->{schedulerSleeper} || sub { sleep($_[0]); };
+	my $error_started_at;
+	my ($output, $status);
+	while (1) {
+		($output, $status) = _run_scheduler_query($args{runner}, $command);
+		last if $status == 0;
+		# Slurm occasionally returns controller/protocol errors such as
+		# "slurm_load_jobs error: Unexpected message received" while jobs continue
+		# normally.  A scheduler outage must not turn that into a workflow restart.
+		if ($qmode ne 'slurm') {
+			die($args{error} || "Failed to query scheduler jobs with: $command\n");
+		}
+		my $failure_now = $clock ? $clock->() : time;
+		$error_started_at = $failure_now unless defined $error_started_at;
+		my $elapsed = $failure_now - $error_started_at;
+		if ($elapsed >= $maximum_error_seconds) {
+			my $diagnostic = $output // '';
+			$diagnostic =~ s/\s+\z//;
+			die "Slurm scheduler query failed continuously for ${elapsed}s "
+				."(limit ${maximum_error_seconds}s): $command"
+				.($diagnostic ne '' ? "\n$diagnostic\n" : "\n");
+		}
+		my $diagnostic = $output // '';
+		$diagnostic =~ s/\s+\z//;
+		warn "Transient Slurm scheduler query failure after ${elapsed}s; "
+			."retrying in ${retry_seconds}s"
+			.($diagnostic ne '' ? ": $diagnostic" : '') . "\n";
+		$sleeper->($retry_seconds);
+	}
 	my (%jobs, %states);
 	for my $line (split /\n/, $output) {
 		$line =~ s/^\s+|\s+$//g;

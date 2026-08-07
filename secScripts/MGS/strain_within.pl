@@ -19,7 +19,8 @@ use Digest::SHA qw(sha256_hex);
 
 
 use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrRev systemW median mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs checkSeqTech);
-use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystem2 qsubSystemJobAlive qsubSystemWaitMaxJobs);
+use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystem2 qsubSystemJobAlive qsubSystemWaitMaxJobs
+	deferredSubmissionDependency);
 use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
 use Mods::TamocFunc qw(readTabbed getFileStr checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
@@ -59,6 +60,7 @@ sub readFastaIDs;
 sub resetMGSTreeOutputs;
 sub stepComplete;
 sub finalizeSampleQC;
+sub dispatchPendingTreeJobs;
 sub usage;
 sub writeRecoveryRow;
 sub mergeRecoveryLogs;
@@ -207,7 +209,8 @@ END {
 #.82: make split Stage-I scope explicit and keep extraction workers tree-option free
 #.83: choose split-worker count automatically from assembly-group and sample load
 #.84: balance indivisible assembly groups by their sample-level Phase-I workload
-my $version = 0.84;
+#.85: queue prepared Phase-II tree jobs while scheduler capacity is full
+my $version = 0.85;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1050,6 +1053,10 @@ my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
 #die;
 #go through every SpecI;
 $cnt=0; my $lcnt=-1; my @jobs; my @treeJobAccounting; my %expectedTreeOutputs; my $Nspecis = @specis;
+my @pendingTreeJobs;
+my $submittedTreeJobs = 0;
+my $nextQueuedTreeSubmissionProbe = 0;
+my $treeSubmissionProbeSeconds = 20;
 my %mosaicOutgroupsUsed;
 my $treeMGSVisited = 0;
 my %treeDisposition;
@@ -1226,7 +1233,6 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	#	next;
 	#}
 	
-	qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
 	#reformat .cat.tmp -> .cat and add outgroup fna seqs
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
 	($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady)=
@@ -1265,31 +1271,38 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	}
 	unlink "$outD2/tooFewSamples.sto" if -e "$outD2/tooFewSamples.sto";
 	
-	#PART II: qsub tree build command
-	
-	#die "$cmd\n" if ($cnt ==10);
-	if ($doSubmit) {
-		unlink $treeStone or die "Cannot remove stale tree checkpoint $treeStone: $!\n"
-			if -e $treeStone;
-		unlink $IQtreef or die "Cannot remove stale tree output $IQtreef: $!\n"
-			if -e $IQtreef;
-	}
+	# PART II: retain this completely prepared tree job even if the scheduler
+	# is full.  Submission is drained opportunistically below, rather than
+	# blocking further category conversion and outgroup preparation.
 	my $treeJobOrdinal = $cnt + 1;
-	my ($dep,$qcmd) = qsubSystem($outD2."treeCmd.sh",$Tcmd.$outgS."\n",$numCoreL,int($totMem) ."M","FT$treeJobOrdinal","","",1,[],$QSBoptHR);
+	push @pendingTreeJobs, {
+		mgs => $MGS,
+		script => $outD2."treeCmd.sh",
+		command => $Tcmd.$outgS."\n",
+		cores => $numCoreL,
+		memory => int($totMem)."M",
+		requested_mb => int($totMem),
+		job_name => "FT$treeJobOrdinal",
+		tree => $IQtreef,
+		stone => $treeStone,
+		tmp_space => $QSBoptHR->{tmpSpace},
+		use_long_queue => $QSBoptHR->{useLongQueue},
+	};
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	$QSBoptHR->{useLongQueue} = 0;
 	$cnt ++;
 	$treeDisposition{'eligible tree job'}++;
-	push (@jobs,$dep) if defined($dep) && length($dep);
-	if ($doSubmit && $QSBoptHR->{qmode} eq "slurm" && defined($dep)) {
-		my $schedulerJobID = $dep;
-		$schedulerJobID =~ s/^\Q$QSBoptHR->{rTag}\E//;
-		push @treeJobAccounting, {
-			job_id => $schedulerJobID, mgs => $MGS,
-			requested_mb => int($totMem),
-		} if $schedulerJobID =~ /^\d+$/;
-	}
 	$expectedTreeOutputs{$MGS} = [$IQtreef, $treeStone];
+	if (!$doSubmit || time >= $nextQueuedTreeSubmissionProbe) {
+		my $drain = dispatchPendingTreeJobs(
+			queue => \@pendingTreeJobs, options => $QSBoptHR,
+			jobs => \@jobs, accounting => \@treeJobAccounting,
+			blocking => 0,
+		);
+		$submittedTreeJobs += $drain->{submitted};
+		$nextQueuedTreeSubmissionProbe = time + $treeSubmissionProbeSeconds
+			if @pendingTreeJobs && $doSubmit;
+	}
 	#die $outD2."treeCmd.sh\n";
 
 }
@@ -1304,10 +1317,25 @@ writeStrainSummary(\%treeDisposition, \%mosaicOutgroupsUsed);
 print "  staged input sets recovered for -recalcTrees: $recalcScratchRecovered\n"
 	if $recalcTrees;
 if ($doSubmit) {
-	print "Tree submission pass complete: $cnt eligible tree job(s) submitted; "
+	print "Tree preparation pass complete: $cnt eligible tree job(s), "
+		."$submittedTreeJobs submitted so far, ".scalar(@pendingTreeJobs)
+		." awaiting scheduler capacity.\n";
+	my $drain = dispatchPendingTreeJobs(
+		queue => \@pendingTreeJobs, options => $QSBoptHR,
+		jobs => \@jobs, accounting => \@treeJobAccounting,
+		blocking => 1,
+	);
+	$submittedTreeJobs += $drain->{submitted};
+	die "Internal error: tree submission queue was not drained\n" if @pendingTreeJobs;
+	print "Tree submission pass complete: $submittedTreeJobs eligible tree job(s) submitted; "
 		.scalar(@jobs)." scheduler job ID(s) tracked. "
 		."The following wait count reports jobs still present, not jobs omitted.\n";
 } else {
+	my $drain = dispatchPendingTreeJobs(
+		queue => \@pendingTreeJobs, options => $QSBoptHR,
+		jobs => \@jobs, accounting => \@treeJobAccounting,
+		blocking => 1,
+	);
 	print "Tree submission pass complete: $cnt eligible tree script(s) generated; scheduler submission disabled.\n";
 }
 if ($maxSubJob
@@ -3295,6 +3323,67 @@ sub assertSafeWorkflowRemoval {
 	}
 	die "Refusing to remove unowned custom output directory $resolved; expected $owner\n"
 		unless $is_default || -f $owner;
+}
+
+sub dispatchPendingTreeJobs {
+	my %args = @_;
+	my $queue = $args{queue} || [];
+	my $options = $args{options} || {};
+	my $jobs = $args{jobs} || [];
+	my $accounting = $args{accounting} || [];
+	my $blocking = $args{blocking} ? 1 : 0;
+	my $submitted = 0;
+
+	return { submitted => 0, pending => 0 } unless @{$queue};
+	my $saved_nonblocking = $options->{nonblockingMaxConcurrentJobs};
+	my $saved_tmp_space = $options->{tmpSpace};
+	my $saved_long_queue = $options->{useLongQueue};
+	delete $options->{capacityDeferred};
+	delete $options->{capacityDeferralAnnounced};
+	$options->{nonblockingMaxConcurrentJobs} = 1 unless $blocking;
+
+	while (@{$queue}) {
+		my $record = $queue->[0];
+		for my $required (qw(mgs script command cores memory job_name tree stone)) {
+			die "Queued tree job is missing '$required'\n"
+				unless defined($record->{$required}) && length($record->{$required});
+		}
+		if ($options->{doSubmit}) {
+			unlink $record->{stone}
+				or die "Cannot remove stale tree checkpoint $record->{stone}: $!\n"
+				if -e $record->{stone};
+			unlink $record->{tree}
+				or die "Cannot remove stale tree output $record->{tree}: $!\n"
+				if -e $record->{tree};
+		}
+		$options->{tmpSpace} = $record->{tmp_space};
+		$options->{useLongQueue} = $record->{use_long_queue};
+		my ($dependency) = qsubSystem(
+			$record->{script}, $record->{command}, $record->{cores},
+			$record->{memory}, $record->{job_name}, "", "", 1, [], $options,
+		);
+		if (defined($dependency) && $dependency eq deferredSubmissionDependency()) {
+			print "Scheduler capacity is full; retaining ".scalar(@{$queue})
+				." prepared tree job(s) while Phase II continues converting inputs.\n";
+			last;
+		}
+		shift @{$queue};
+		$submitted++ if $options->{doSubmit};
+		push @{$jobs}, $dependency if defined($dependency) && length($dependency);
+		if ($options->{doSubmit} && ($options->{qmode} || '') eq 'slurm'
+				&& defined($dependency)) {
+			my $schedulerJobID = $dependency;
+			$schedulerJobID =~ s/^\Q$options->{rTag}\E//;
+			push @{$accounting}, {
+				job_id => $schedulerJobID, mgs => $record->{mgs},
+				requested_mb => $record->{requested_mb},
+			} if $schedulerJobID =~ /^\d+$/;
+		}
+	}
+	$options->{nonblockingMaxConcurrentJobs} = $saved_nonblocking;
+	$options->{tmpSpace} = $saved_tmp_space;
+	$options->{useLongQueue} = $saved_long_queue;
+	return { submitted => $submitted, pending => scalar(@{$queue}) };
 }
 
 sub resetMGSTreeOutputs {

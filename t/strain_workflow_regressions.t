@@ -79,8 +79,8 @@ unlike($strain, qr/test -s "?\.shellQuote\(\$IQtreef\).*?touch "?\.shellQuote\(\
 	"tree jobs no longer encode completion validation in shell");
 like($strain, qr/if \(\$doSubmit\) \{.*?unlink \$treeStone.*?if -e \$treeStone/s,
 	'a submitted tree retry cannot pass through a stale completion stone');
-like($strain, qr/unlink \$IQtreef.*?stale tree output/s,
-	'a submitted tree retry must publish a fresh nonempty tree');
+like($strain, qr/unlink \$record->\{tree\}.*?stale tree output/s,
+	'a delayed tree submission removes stale output before dispatching a fresh retry');
 like($strain, qr/clear_split_generation\(\$splitManifest.*?write_split_generation\(\$splitManifest.*?printf '%s\\\\n'/s,
 	'a new split generation clears stale state and tags each worker completion');
 like($strain, qr/ConspecificMGS\.\$subJob\.log.*?sub mergeConspecificLogs/s,
@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.84;/,
-	'sample-level assembly-group balancing increments the workflow version');
+like($strain, qr/my \$version = 0\.85;/,
+	'queued Phase-II submission increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -197,8 +197,16 @@ like($strain,
 	qr/my %treeDisposition.*?\$treeDisposition\{'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
 	'tree submission reports every eligible and skipped MGS disposition before waiting');
 like($strain,
-	qr/qsubSystem\(\$outD2\."treeCmd\.sh".*?\$cnt \+\+.*?push \(\@jobs,\$dep\).*?\$expectedTreeOutputs\{\$MGS\}.*?qsubSystemJobAlive\( \\\@jobs.*?Tree jobs completed without valid tree outputs/s,
-	'every eligible tree is submitted, tracked, awaited, and output-validated');
+	qr/my \@pendingTreeJobs;.*?push \@pendingTreeJobs, \{.*?command => \$Tcmd\.\$outgS.*?tmp_space => \$QSBoptHR->\{tmpSpace\}.*?dispatchPendingTreeJobs\(.*?blocking => 0.*?Tree preparation pass complete:.*?dispatchPendingTreeJobs\(.*?blocking => 1.*?qsubSystemJobAlive\( \\\@jobs.*?Tree jobs completed without valid tree outputs/s,
+	'eligible trees queue after conversion, drain opportunistically under capacity, then are tracked, awaited, and output-validated');
+like($strain, qr/nonblockingMaxConcurrentJobs\} = 1 unless \$blocking/,
+	'queued tree dispatch uses the non-blocking scheduler-capacity path');
+like($strain, qr/deferredSubmissionDependency\(\).*?Phase II continues converting inputs/s,
+	'queued tree dispatch retains deferred jobs while conversion continues');
+like($strain, qr/\$options->\{tmpSpace\} = \$record->\{tmp_space\}/,
+	'queued tree dispatch restores each job\'s stored temporary-space setting');
+like($strain, qr/\$options->\{useLongQueue\} = \$record->\{use_long_queue\}/,
+	'queued tree dispatch restores each job\'s stored queue setting');
 like($strain,
 	qr/\@treeJobAccounting.*?requested_mb => int\(\$totMem\).*?qsubSystemJobAlive.*?slurm_tree_memory_summary.*?format_slurm_tree_memory_summary/s,
 	'completed Slurm tree jobs report MaxRSS against their requested memory');

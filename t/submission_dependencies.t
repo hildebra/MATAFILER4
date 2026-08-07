@@ -478,6 +478,52 @@ is(numLiveUserJobs($options), 4, 'live-job accounting counts running and pending
 is(numLiveUserJobs($options, 0, [qw(11 13 99)]), 2,
 	'live-job accounting can be restricted to IDs submitted by this invocation');
 unlike($live_command, qr/-t\s+PENDING/, 'the maxConcurrentJobs query is not restricted to pending jobs');
+
+my ($slurm_retry_now, $slurm_retry_calls, $slurm_retry_sleeps) = (0, 0, 0);
+$options = slurm_options();
+$options->{schedulerClock} = sub { $slurm_retry_now };
+$options->{schedulerSleeper} = sub {
+	$slurm_retry_sleeps++;
+	$slurm_retry_now += $_[0];
+};
+$options->{slurmQueryRetrySeconds} = 300;
+$options->{slurmQueryMaxErrorSeconds} = 1_200;
+$options->{liveJobRunner} = sub {
+	$slurm_retry_calls++;
+	return $slurm_retry_calls <= 2
+		? ("slurm_load_jobs error: Unexpected message received\n", 1)
+		: ("501|RUNNING\n", 0);
+};
+my $slurm_retry_warning = '';
+{
+	local $SIG{__WARN__} = sub { $slurm_retry_warning .= shift };
+	is(numLiveUserJobs($options), 1,
+		'transient Slurm controller failures are retried without treating jobs as lost');
+}
+is($slurm_retry_sleeps, 2, 'transient Slurm failures wait one full retry interval each time');
+like($slurm_retry_warning, qr/Transient Slurm scheduler query failure.*retrying in 300s/s,
+	'transient Slurm diagnostics identify the retry delay');
+
+my ($slurm_timeout_now, $slurm_timeout_sleeps) = (0, 0);
+$options = slurm_options();
+$options->{schedulerClock} = sub { $slurm_timeout_now };
+$options->{schedulerSleeper} = sub {
+	$slurm_timeout_sleeps++;
+	$slurm_timeout_now += $_[0];
+};
+$options->{slurmQueryRetrySeconds} = 300;
+$options->{slurmQueryMaxErrorSeconds} = 1_200;
+$options->{liveJobRunner} = sub {
+	return ("slurm_load_jobs error: Unexpected message received\n", 1);
+};
+my $slurm_timeout_error = '';
+{
+	local $SIG{__WARN__} = sub { };
+	eval { numLiveUserJobs($options); 1 } or $slurm_timeout_error = $@;
+}
+like($slurm_timeout_error, qr/failed continuously for 1200s.*Unexpected message received/s,
+	'continuous Slurm controller failures stop only after the 20-minute error budget');
+is($slurm_timeout_sleeps, 4, 'the 20-minute error budget has four five-minute waits');
 my ($shared_queue_calls, $wait_queue_calls) = (0, 0);
 $options = slurm_options();
 $options->{schedulerClock} = sub { 1000 };
