@@ -236,7 +236,7 @@ mafft	mafft	env:MF4phylo
 MUSCLE5	muscle	env:MF4phylo
 FAMSA	famsa	env:MF4phylo
 raxml	raxmlHPC-PTHREADS-SSE3		env:MF4phylo
-epa-ng		env:MF4phylo
+epa-ng	epa-ng	env:MF4phylo
 fasttree	FastTreeMP	env:MF4phylo
 veryfasttree	VeryFastTree	env:MF4phylo
 freebayes	freebayes	env:MF4phylo

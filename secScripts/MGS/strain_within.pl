@@ -268,11 +268,12 @@ my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
 my $legacyMGTK = 1; #historical strain IQ-TREE command; pathogen mode opts out unless explicitly overridden
 my $legacyMGTKExplicit = 0;
-my $GenesPerSpecies = 0.05;
+my $GenesPerSpecies = 0.2;
 my $GeneLengthMin = 0.3;
-my $relativeNTFraction = 0.02;
+my $relativeNTFraction = 0.1;
 my $NTfiltCount = 0;
 my ($placementGenesPerSpecies, $placementRelativeNTFraction, $placementNTfiltCount);
+$placementGenesPerSpecies = 0.02; $placementRelativeNTFraction = 0.01;
 my $taxonAwareLocusSelection = 1;
 my $rateMergePartitions = 1;
 my $rateMergeMaxBins = 8;
