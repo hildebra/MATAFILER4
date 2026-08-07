@@ -2881,9 +2881,7 @@ sub mergeMSAs($ $ $ $){
 				? $ntCntTotal : $placementMinOverlap;
 			$removeSample = $maxNtCnt == 0 || ($num1 * $factor) < $minimumAnchorNT;
 		} else {
-			$removeSample = $maxNtCnt == 0
-				|| ($num1 < ($qtl90NTcnts * $ntFrac) && $num1 < $qtl25NTcnts)
-				|| ($num1 < ($ntCntTotal / $factor));
+			$removeSample = $maxNtCnt == 0; #|| ($num1 < ($qtl90NTcnts * $ntFrac) && $num1 < $qtl25NTcnts) || ($num1 < ($ntCntTotal / $factor));
 		}
 		if ($removeSample){
 			delete $bigMSAFAA{$kk}; delete $bigMSAFAAnxs{$kk}; $remSeqNum++; 

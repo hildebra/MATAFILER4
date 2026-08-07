@@ -222,7 +222,7 @@ whokaryote	whokaryote.py	env:MF4whokar
 
 
 
-## SNPs / tree building - not public currently ##
+## SNPs / phylogenies##
 #not required unless strain resolved metag is used. Most of this still not needed.. 
 iqtree	$(command -v iqtree3 || command -v iqtree2)	env:MF4phylo
 #vcfLib_dir	[BINDir]/vcflib/bin/
@@ -235,7 +235,8 @@ trimal	trimal	env:MF4phylo
 mafft	mafft	env:MF4phylo
 MUSCLE5	muscle	env:MF4phylo
 FAMSA	famsa	env:MF4phylo
-raxml	raxmlHPC-PTHREADS-SSE3
+raxml	raxmlHPC-PTHREADS-SSE3		env:MF4phylo
+epa-ng		env:MF4phylo
 fasttree	FastTreeMP	env:MF4phylo
 veryfasttree	VeryFastTree	env:MF4phylo
 freebayes	freebayes	env:MF4phylo

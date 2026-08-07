@@ -1105,7 +1105,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $treeTmpGb = int(($inputFNAsize * 4 + 1023) / 1024);
 	$treeTmpGb = 15 if $treeTmpGb < 15;
 	$QSBoptHR->{tmpSpace} = $nodeTmpConfigured ? $treeTmpGb : 0;
-	my $baseMemMult = 150; $baseMemMult = 50 if ($phyloProg ==3 || $phyloProg ==2);
+	my $baseMemMult = 150; $baseMemMult = 30 if ($phyloProg ==3 || $phyloProg ==2);
 	my $totMem = int($inputFNAsize *$baseMemMult * $memMulti);
 	$totMem = 10000*$memMulti if ($totMem < 10000);$totMem = 220000*$memMulti if ($totMem > 220000);
 	my $iqMemMB = int($totMem * 0.9); #reserve 10% for buildTree/Perl and runtime overhead
@@ -1121,7 +1121,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	if ($phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}if ($phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
 	my $tree_sample_separator = quotemeta($SaSe);
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
-	$Tcmd .= "-withinSpecies 1 -strainWithinPreset 1 -NTfilt $relativeNTFraction "
+	$Tcmd .= "-withinSpecies 1 -NTfilt $relativeNTFraction "
 		."-NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies ";
 	$Tcmd .= "-taxonAwareLocusSelection $taxonAwareLocusSelection ";
 	if ($taxonAwareLocusSelection) {
@@ -1135,6 +1135,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		."-rateMergeMinLoci $rateMergeMinLoci "
 		."-rateMergeMinSites $rateMergeMinSites ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
+	$Tcmd .= "-strictBackbone 0 ";
+	$Tcmd .= "-rateMergeTargetSites 30000 ";
 	if ($phyloProg == 1){
 		if ($legacyMGTK){
 			$Tcmd .= "-iqLegacy 1 ";
