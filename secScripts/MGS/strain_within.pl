@@ -1182,7 +1182,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
 	$Tcmd .= "-withinSpecies 1 -relativeNTFraction $relativeNTFraction "
 		."-NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies "
-		."-NTfiltCount $NTfiltCount ";
+		."-NTfiltCount $NTfiltCount -iqFast 1 ";
 	$Tcmd .= "-placementGenesPerSpecies $placementGenesPerSpecies "
 		if defined $placementGenesPerSpecies;
 	$Tcmd .= "-placementRelativeNTFraction $placementRelativeNTFraction "
