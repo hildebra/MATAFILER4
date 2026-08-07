@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.85;/,
-	'queued Phase-II submission increments the workflow version');
+like($strain, qr/my \$version = 0\.86;/,
+	'completed-Phase-I resume optimization increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -185,8 +185,8 @@ like($strain,
 	qr/sub stepComplete .*?STEP COMPLETE: \$step/s,
 	'step completion messages use one consistent formatter');
 like($strain,
-	qr/configuration and map initialization.*?assembly-group expansion.*?consensus-input audit.*?MGS and seed-locus selection.*?existing-output and resume audit/s,
-	'startup stages emit consistent completion messages with elapsed time and statistics');
+	qr/configuration and map initialization.*?assembly-group expansion.*?MGS and seed-locus selection.*?existing-output and resume audit.*?if \(\$runPartI\).*?consensus-input audit/s,
+	'startup stages emit consistent completion messages, with the consensus audit limited to Phase I');
 like($strain,
 	qr/locus-model construction.*?catalogue_drivers=.*?resolved_loci=.*?consensus-gene extraction and publication.*?tree-input sizing/s,
 	'major extraction and tree-preparation stages also report concise completion statistics');
@@ -243,6 +243,15 @@ like($strain,
 like($strain,
 	qr/my \$runPartI = \(.*?\|\| \(\$recalcTrees && \$dirsNOTPrepped\).*?if \(\$runPartI\).*?Part I:: extracting relevant core MGS genes/s,
 	'tree recalculation reruns extraction when required per-MGS inputs are absent');
+like($strain,
+	qr/my \$runPartI = .*?if \(\$runPartI\).*?preComputeConsSNP\(\).*?\} else \{.*?Skipping Part I.*?reportSavedSampleStats\(\)/s,
+	'completed Phase I skips the extraction-only consensus audit and reports saved statistics');
+like($strain,
+	qr/sub reportSavedSampleStats .*?\$sampleStatsSummaryLogName.*?scope\} .*?eq 'ALL'.*?printSampleStatsSummary\(\$allSummary\)/s,
+	'a Phase-I resume loads the persisted all-worker row before rendering its accounting');
+like($strain,
+	qr/sub printSampleStatsSummary .*?STEP 1 SAMPLE SUMMARY \(all workers\).*?Used MGS retained-loci histogram/s,
+	'the same all-worker summary and retained-locus histogram are available after Phase I has completed');
 like($strain,
 	qr/next if \$recalcTrees && !\$MGSneedsExtraction\{\$MGS\}.*?\$MGSneedsExtraction\{\$MGS\} = 1/s,
 	'tree recalculation limits its extraction model to MGS with missing inputs');

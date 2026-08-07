@@ -69,6 +69,8 @@ sub writeRecoveryContributionIndex;
 sub loadRecoveryContributionIndex;
 sub writeStrainSummary;
 sub mergeSampleStats;
+sub reportSavedSampleStats;
+sub printSampleStatsSummary;
 sub taxonAwareLocusBudgets;
 
 sub limitedWarn;sub limitedNotice;
@@ -210,7 +212,8 @@ END {
 #.83: choose split-worker count automatically from assembly-group and sample load
 #.84: balance indivisible assembly groups by their sample-level Phase-I workload
 #.85: queue prepared Phase-II tree jobs while scheduler capacity is full
-my $version = 0.85;
+#.86: skip extraction-only consensus audits on Phase-I resume and report saved worker statistics
+my $version = 0.86;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -717,12 +720,6 @@ stepComplete("assembly-group expansion", $stepStarted,
 
 my %preCompSNPs;
 my %unavailableSamples;
-$stepStarted = time;
-preComputeConsSNP();
-stepComplete("consensus-input audit", $stepStarted,
-	"usable_samples=".(scalar(@samples) - scalar(keys %unavailableSamples)),
-	"unavailable_samples=".scalar(keys %unavailableSamples),
-	"precomputed_consensus=".scalar(keys %preCompSNPs));
 
 
 my %replN; #my %genesWrite; #keep stats/track
@@ -809,6 +806,15 @@ if ($runPartI){
 	#$PhylosExist=0;
 	
 	print "\n\n----------------------------------------------------\nPart I:: extracting relevant core MGS genes (SNP consensus called) from original assemblies". "Elapsed time : ", timeNice(time - $sttime) . "\n----------------------------------------------------\n\n";
+	# Checking every sample's consensus/VCF inputs is extraction-only work.  In
+	# a tree-only resume it used to dominate startup despite no sample data being
+	# read afterwards, so keep it strictly within the Phase-I path.
+	$stepStarted = time;
+	preComputeConsSNP();
+	stepComplete("consensus-input audit", $stepStarted,
+		"usable_samples=".(scalar(@samples) - scalar(keys %unavailableSamples)),
+		"unavailable_samples=".scalar(keys %unavailableSamples),
+		"precomputed_consensus=".scalar(keys %preCompSNPs));
 	
 	$stepStarted = time;
 	my @stageIExtractionMGS = $recalcTrees
@@ -944,6 +950,7 @@ if ($runPartI){
 
 } else {
 	print "Skipping Part I, all required per-MGS inputs are already prepared.\n";
+	reportSavedSampleStats();
 }
 loadRecoveryContributionIndex() unless $recoveryContributionIndexReady;
 
@@ -3012,7 +3019,49 @@ sub mergeSampleStats {
 
 	warn "Per-sample statistics cover ".scalar(@allRows)." of ".scalar(@samples)
 		." configured samples\n" if @samples && @allRows != @samples;
-	my @humanColumns = grep { $_ ne "used_mgs_loci_histogram" } @summaryColumns;
+	printSampleStatsSummary($allSummary);
+	print "Merged per-sample statistics: $final\n";
+	print "Per-worker and all-worker summary: $summary\n";
+	return $allSummary;
+}
+
+sub reportSavedSampleStats {
+	my $summary = "$outD/$sampleStatsSummaryLogName";
+	unless (-s $summary) {
+		warn "Phase I statistics summary is unavailable at $summary; continuing without the saved sample histogram\n";
+		return 0;
+	}
+	my @summaryColumns = sample_summary_columns();
+	my $expectedHeader = join("\t", @summaryColumns);
+	open my $in, '<', $summary or die "Cannot read saved sample summary $summary: $!\n";
+	my $header = <$in> // '';
+	$header =~ s/[\r\n]+\z//;
+	die "Unexpected saved sample-summary header in $summary\n"
+		unless $header eq $expectedHeader;
+	my $allSummary;
+	while (my $line = <$in>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless length($line);
+		my @values = split /\t/, $line, -1;
+		die "Wrong saved sample-summary field count in $summary\n"
+			unless @values == @summaryColumns;
+		my %row;
+		@row{@summaryColumns} = @values;
+		next unless ($row{scope} // '') eq 'ALL';
+		die "Duplicate ALL row in saved sample summary $summary\n" if $allSummary;
+		$allSummary = \%row;
+	}
+	close $in or die "Cannot close saved sample summary $summary: $!\n";
+	die "Saved sample summary has no ALL row: $summary\n" unless $allSummary;
+	print "Reusing completed Phase I sample accounting: $summary\n";
+	printSampleStatsSummary($allSummary);
+	return 1;
+}
+
+sub printSampleStatsSummary {
+	my ($allSummary) = @_;
+	die "Sample summary must be a hash reference\n" unless ref($allSummary) eq 'HASH';
+	my @humanColumns = grep { $_ ne "used_mgs_loci_histogram" } sample_summary_columns();
 	my @summaryPairs = map {
 		my $value = defined($allSummary->{$_}) ? $allSummary->{$_} : "";
 		$value =~ s/\s+/_/g;
@@ -3036,9 +3085,6 @@ sub mergeSampleStats {
 		$barWidth = 1 if $count && !$barWidth;
 		printf "  %-10s %8d %6.2f%% %s\n", $label, $count, $fraction, "#" x $barWidth;
 	}
-	print "Merged per-sample statistics: $final\n";
-	print "Per-worker and all-worker summary: $summary\n";
-	return $allSummary;
 }
 
 sub writeRecoveryContributionIndex {
