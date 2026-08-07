@@ -12,11 +12,22 @@ use lib File::Spec->catdir($Bin, '..');
 use lib File::Spec->catdir($Bin, 'lib');
 use MFTestConfig;
 use Mods::StrainParts qw(
-	balance_assembly_groups exact_worker_parts write_split_generation write_worker_completion
+	balance_assembly_groups choose_auto_worker_count exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation
 	resolve_fasta_artifact append_fasta_records_atomic
 	sort_fasta_by_locus
 );
+
+is_deeply([choose_auto_worker_count(0, 0)], [0, 0],
+	'automatic splitting keeps an empty input in the main process');
+is_deeply([choose_auto_worker_count(50, 75)], [0, 100],
+	'automatic splitting avoids a separate worker for at most 50 assembly groups');
+is_deeply([choose_auto_worker_count(2_952, 5_313)], [30, 100],
+	'automatic splitting uses roughly 100 groups per worker for typical sparse metagenome groups');
+is_deeply([choose_auto_worker_count(600, 4_200)], [12, 50],
+	'automatic splitting uses smaller group slices when sample-specific work is dense');
+is_deeply([choose_auto_worker_count(600, 600)], [4, 150],
+	'automatic splitting amortizes catalogue loading across sparse groups');
 
 my %unbalanced_groups = (
 	A_big => [map { "A$_" } 1 .. 10],

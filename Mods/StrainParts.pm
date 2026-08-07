@@ -10,7 +10,7 @@ use File::Path qw(make_path);
 use Mods::GenoMetaAss qw(gzipopen gzipwrite);
 
 our @EXPORT_OK = qw(
-	balance_assembly_groups
+	balance_assembly_groups choose_auto_worker_count
 	exact_worker_parts
 	write_split_generation
 	write_worker_completion
@@ -20,6 +20,32 @@ our @EXPORT_OK = qw(
 	append_fasta_records_atomic
 	sort_fasta_by_locus
 );
+
+sub choose_auto_worker_count {
+	my ($group_count, $sample_count) = @_;
+	die "assembly-group count must be non-negative\n"
+		unless defined($group_count) && $group_count =~ /^\d+$/;
+	die "sample count must be non-negative\n"
+		unless defined($sample_count) && $sample_count =~ /^\d+$/;
+
+	# Every worker must reread the large catalogue index, so keep a useful
+	# amount of extraction work behind that fixed cost.  The target is adjusted
+	# by sample density because each assembly group has fixed work, while each
+	# sample additionally needs consensus/depth processing.
+	return (0, 0) unless $group_count;
+	my $samples_per_group = $sample_count / $group_count;
+	my $target_groups = $samples_per_group > 6 ? 50
+		: $samples_per_group > 3 ? 75
+		: $samples_per_group < 1.25 ? 150
+		: 100;
+	# A subjob requires at least 50 groups.  Smaller inputs run directly in the
+	# main process, avoiding generation bookkeeping and an unnecessary index read.
+	return (0, $target_groups) if $group_count <= 50;
+	my $worker_count = int(($group_count + $target_groups - 1) / $target_groups);
+	$worker_count = 2 if $worker_count < 2;
+	$worker_count = $group_count if $worker_count > $group_count;
+	return ($worker_count, $target_groups);
+}
 
 sub balance_assembly_groups {
 	my ($samples_by_group, $worker_count) = @_;
