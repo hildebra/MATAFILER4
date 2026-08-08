@@ -6,6 +6,34 @@ use Exporter qw(import);
 
 our @EXPORT_OK = qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
 
+
+sub _run_sacct {
+	my ($command, $options) = @_;
+	my $retrySeconds = defined($options->{retry_seconds}) ? $options->{retry_seconds} : 300;
+	my $maximumSeconds = defined($options->{maximum_error_seconds})
+		? $options->{maximum_error_seconds} : 1_200;
+	my $sleeper = $options->{sleeper} || sub { sleep($_[0]); };
+	my $clock = $options->{clock} || sub { time };
+	my $started;
+	while (1) {
+		my ($output, $status);
+		if (my $runner = $options->{runner}) {
+			($output, $status) = $runner->($command);
+			$status //= 0;
+		} else {
+			$output = `$command 2>/dev/null`;
+			$status = $?;
+		}
+		return ($output, 0) if $status == 0;
+		$started //= $clock->();
+		my $elapsed = $clock->() - $started;
+		return ($output, $status) if $elapsed >= $maximumSeconds;
+		my $diagnostic = $output // ''; $diagnostic =~ s/\s+\z//;
+		warn "Transient Slurm accounting failure after ${elapsed}s; retrying in ${retrySeconds}s"
+			.($diagnostic ne '' ? ": $diagnostic" : '')."\n";
+		$sleeper->($retrySeconds);
+	}
+}
 sub _memory_mb {
 	my ($value) = @_;
 	return unless defined $value;
@@ -39,14 +67,7 @@ sub slurm_tree_memory_summary {
 		my @batch = splice(@ids, 0, 1000);
 		my $command = "sacct -n -P -j ".join(',', @batch)
 			." --format=JobIDRaw,State,ExitCode,MaxRSS";
-		my ($output, $status);
-		if (my $runner = $options->{runner}) {
-			($output, $status) = $runner->($command);
-			$status //= 0;
-		} else {
-			$output = `$command 2>/dev/null`;
-			$status = $?;
-		}
+		my ($output, $status) = _run_sacct($command, $options);
 		return { available => 0, error => "sacct failed with status $status" }
 			if $status != 0;
 		for my $line (split /\n/, $output // '') {

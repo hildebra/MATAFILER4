@@ -15,7 +15,7 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.40;/,
+like($source, qr/my \$version = 5\.41;/,
 	'post-alignment reporting increments the workflow version');
 like($source,
 	qr/"withinSpecies=i".*?"strainWithinPreset=i".*?"strictBackbone=i"/s,
@@ -48,7 +48,7 @@ like($source,
 	qr/length\(\$tmpSubdir\).*?\$ENV\{TMPDIR\}.*?File::Spec->catdir\(\$temporaryRoot.*?prepareTemporaryBase/s,
 	"TMPDIR-relative work paths are resolved inside buildTree5");
 like($source,
-	qr/safeRemoveTree\(\$tmpD, \$tmpBase\).*?writeCompletionMarker\(\$completionMarker, \$\{\$trRetH\}\{nwk\}.*?sub writeCompletionMarker.*?nonempty primary tree.*?rename \$temporaryMarker, \$marker/s,
+	qr/safeRemoveTree\(\$tmpD, \$tmpBase\).*?writeCompletionMarker\(\$completionMarker, \$\{\$trRetH\}\{nwk\}.*?sub writeCompletionMarker.*?nonempty primary tree.*?retry_rename\(\$temporaryMarker, \$marker/s,
 	"buildTree5 atomically publishes a completion marker only after validating its primary tree");
 like($source,
 	qr/post_alignment_locus_qc\.tsv.*?sub runPostAlignmentLocusQC.*?getProgPaths\("MSAfix"\).*?-manifest.*?-report.*?-keep.*?-minOverlapMSA", \$minOverlapMSA/s,
@@ -66,7 +66,7 @@ like($source,
 	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=10".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"backbone_gene_fraction=\$GeneFracPSpec".*?"placement_gene_fraction=\$placementGeneFracPSpec".*?"iqtree_auto_model=\$treeAutoModel".*?"iqtree_legacy=\$iqLegacy".*?"rate_partition_merge=\$rateMergePartitions".*?"rate_partition_maximum_bins=\$rateMergeMaxBins".*?"rate_partition_target_sites=\$rateMergeTargetSites".*?"taxon_aware=\$taxonAwareLocusSelection".*?\$legacyWithinSpeciesQCAudit = !\$taxonAwareLocusSelection.*?!\$rateMergePartitions && \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
 	'changed locus-retention policies rebuild stale checkpoints while legacy within-species audits remain compatible');
 like($source,
-	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?rename \$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
+	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?retry_rename\(\$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
 	'the exact locus-retention policy is published atomically');
 like($source,
 	qr/elsif \(\$cogCats ne ""\).*?Post-alignment locus QC disabled; retaining all \$candidateCount prepared loci.*?unlink \$postAlignmentQCReport.*?writePostAlignmentQCPolicy\(\$postAlignmentQCPolicyFile, \$postAlignmentQCPolicy\)/s,
@@ -145,7 +145,7 @@ like($source,
 	qr/sub prepareTemporaryBase .*?tempfile\(.*?DIR => \$path.*?print \{\$probeHandle\}.*?unlink \$probePath/s,
 	'a temporary base must pass a create, write, close, and cleanup probe');
 like($source,
-	qr/my \$primaryAlignmentReady = fileGZe\(\$multAli\).*?my \$siteAlignmentsReady =.*?my \$reusableAlignment = \$isAligned.*?if \(\$continue\).*?\$treesDone.*?\$reusableAlignment.*?no reusable alignment or complete tree checkpoint.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD.*?my \$calcMSA = !\$treesDone && !\$primaryAlignmentReady.*?\$doMSA = !\(/s,
+	qr/my \$primaryAlignmentReady = fileGZe\(\$multAli\).*?my \$siteAlignmentsReady =.*?my \$reusableAlignment = \$isAligned.*?if \(\$continue\).*?\$treesDone.*?\$reusableAlignment.*?\$alignmentWorkPolicyMatches.*?retaining policy-matched completed per-locus alignments.*?no reusable alignment or policy-matched locus checkpoint.*?safeRemoveTree\(\$treeD.*?my \$calcMSA = !\$treesDone && !\$primaryAlignmentReady.*?\$doMSA = !\(/s,
 	'continue mode derives reporting and MSA recovery from one validated alignment state');
 like($source, qr/safeRemoveTree\(\$tmpD, \$tmpBase\)/, 'cleanup is limited to the owned temporary directory');
 
@@ -162,9 +162,9 @@ like($source, qr/runMSAFix\(\$tmpOutMSA, \$maxGapPerCol\)/,
 like($source, qr/runMSAFix\(\$multAli, \$maxGapPerCol\)/,
 	'single-gene nucleotide alignments use the guarded MSAfix path');
 like($source,
-	qr/sub runMSAFix.*?\$tmpOutput = "\$alignment\.MSAfix\.\$\$\.fna".*?"-o", shellQuote\(\$tmpOutput\).*?if \(!-s \$tmpOutput\).*?rename \$tmpOutput, \$alignment/s,
+	qr/sub runMSAFix.*?\$tmpOutput = "\$alignment\.MSAfix\.\$\$\.fna".*?"-o", shellQuote\(\$tmpOutput\).*?if \(!-s \$tmpOutput\).*?retry_rename\(\$tmpOutput, \$alignment/s,
 	'MSAfix writes a nonempty sibling temporary file before atomically replacing its input');
-like($source, qr/if \(!\$ok\).*?unlink \$tmpOutput if -e \$tmpOutput.*?die \$error/s,
+like($source, qr/if \(!\$ok\).*?retry_unlink\(\$tmpOutput, fatal => 0.*?die \$error/s,
 	'a failed MSAfix attempt removes its partial output and preserves the original alignment');
 like($source,
 	qr/my \$ntAlignmentOK = eval \{.*?runMSAFix\(\$tmpOutMSA, \$maxGapPerCol\).*?if \(!\$ntAlignmentOK\).*?excluding locus \$gene from future calculations.*?next;/s,
@@ -237,5 +237,18 @@ for my $config_key (qw(
 	like($source, qr/requireConfiguredTool\("\Q$config_key\E"/,
 		"$config_key documents config-backed dormant-tool reactivation");
 }
+
+like($source,
+	qr/terminalMarker=s.*?placementPendingMarker=s.*?writeOutcomeMarker\(\$terminalMarker, 'valid_no_tree'.*?exit\(0\)/s,
+	'no-usable-alignment outcomes are durable successful terminal states');
+like($source,
+	qr/my \$placementOK = eval.*?runEpaNgPlacement.*?placement_pending.*?my \$publicationOK = eval.*?write_epa_placed_tree.*?placement publication deferred/s,
+	'EPA calculation and placed-tree publication are independently resumable');
+like($source,
+	qr/alignment_work\.policy\.tsv.*?inputFingerprint\(\$fnFna\).*?\$alignmentWorkPolicyMatches.*?retaining policy-matched completed per-locus alignments/s,
+	'per-locus MSA checkpoints are reused only under the matching input and policy fingerprint');
+like($source,
+	qr/buildTree\.heartbeat\.tsv.*?buildTree\.failure\.tsv.*?sub writeWorkflowHeartbeat.*?sub writeWorkflowFailure/s,
+	'BuildTree persists stage heartbeats and fatal-stage diagnostics');
 
 done_testing();

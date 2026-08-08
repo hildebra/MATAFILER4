@@ -42,6 +42,66 @@ done
 exec /bin/cp "$input" "$output"
 SH
 chmod 0755, $trimal or die "Cannot make $trimal executable: $!";
+my $msaFixShim = File::Spec->catfile($temporary, 'MSAfix-v2.14-shim');
+write_file($msaFixShim, <<'PERL');
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+my (@forward, $report);
+while (@ARGV) {
+	my $argument = shift @ARGV;
+	if ($argument eq '-minOverlapMSA') {
+		shift @ARGV;
+		next;
+	}
+	$report = $ARGV[0] if $argument eq '-report' && @ARGV;
+	push @forward, $argument;
+}
+my $real = $ENV{MATAFILER_TEST_MSAFIX_REAL}
+	or die "MATAFILER_TEST_MSAFIX_REAL is unset\n";
+system($real, @forward);
+exit($? >> 8) if $?;
+exit 0 unless defined $report;
+die "MSAfix shim report is missing or empty\n" unless -s $report;
+open my $input, '<', $report or die "Cannot read $report: $!\n";
+my $header = <$input> // die "Empty MSAfix report\n";
+chomp $header;
+exit 0 if $header =~ /(?:^|\t)effective_sites(?:\t|$)/;
+my @columns = split /\t/, $header, -1;
+my %index = map { $columns[$_] => $_ } 0 .. $#columns;
+die "Legacy MSAfix report has no alignment column\n" unless exists $index{alignment};
+my @rows = <$input>;
+close $input or die "Cannot close $report: $!\n";
+open my $output, '>', $report or die "Cannot update $report: $!\n";
+print {$output} $header,
+	"\tcalled_cells\tgc_cells\tgc_fraction\teffective_sites\n";
+for my $row (@rows) {
+	chomp $row;
+	my @field = split /\t/, $row, -1;
+	my $alignment = $field[$index{alignment}];
+	open my $alignmentFH, '<', $alignment
+		or die "Cannot read alignment $alignment: $!\n";
+	my ($sequences, $called, $gc) = (0, 0, 0);
+	while (my $line = <$alignmentFH>) {
+		if ($line =~ /^>/) {
+			$sequences++;
+			next;
+		}
+		$line = uc($line);
+		$called += ($line =~ tr/ACGT//);
+		$gc += ($line =~ tr/GC//);
+	}
+	close $alignmentFH or die "Cannot close $alignment: $!\n";
+	my $gcFraction = $called ? $gc / $called : 0;
+	my $effective = $sequences ? $called / $sequences : 0;
+	print {$output} join("\t", @field, $called, $gc,
+		sprintf('%.8g', $gcFraction), sprintf('%.8g', $effective)), "\n";
+}
+close $output or die "Cannot close updated $report: $!\n";
+PERL
+chmod 0755, $msaFixShim or die "Cannot make $msaFixShim executable: $!";
+local $ENV{MATAFILER_TEST_MSAFIX_REAL} = File::Spec->catfile($root, 'bin', 'MSAfix');
 
 my $config = File::Spec->catfile($temporary, 'MATAFILERcfg.txt');
 write_file($config, join("\n",
@@ -58,6 +118,7 @@ write_file($config, join("\n",
 	"Rscript\tRscript",
 	"pigz\t$root/t/bin/pigz",
 	"mafft\t$mafft",
+	"MSAfix\t$msaFixShim",
 	"trimal\t$trimal",
 )."\n");
 

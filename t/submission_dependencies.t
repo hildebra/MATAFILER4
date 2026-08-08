@@ -158,6 +158,31 @@ is_deeply($failure_summary->{categories}{_GP}{failures},
 ok(!exists $failure_summary->{categories}{_MAP},
 	'pending dependency jobs are not reported as failures');
 
+my ($accounting_retry_now, $accounting_retry_calls, $accounting_retry_sleeps) = (0, 0, 0);
+my $accounting_retry_options = slurm_options();
+$accounting_retry_options->{schedulerClock} = sub { $accounting_retry_now };
+$accounting_retry_options->{schedulerSleeper} = sub {
+	$accounting_retry_sleeps++;
+	$accounting_retry_now += $_[0];
+};
+$accounting_retry_options->{slurmQueryRetrySeconds} = 300;
+$accounting_retry_options->{slurmQueryMaxErrorSeconds} = 1_200;
+$accounting_retry_options->{jobAccountingRunner} = sub {
+	$accounting_retry_calls++;
+	return $accounting_retry_calls <= 2
+		? ("slurm_load_jobs error: Unexpected message received\n", 1)
+		: ("806|abc_FT1|COMPLETED|0:0|None\n", 0);
+};
+my $accounting_retry_warning = '';
+my $retried_failure_summary;
+{
+	local $SIG{__WARN__} = sub { $accounting_retry_warning .= shift };
+	$retried_failure_summary = slurmJobFailureSummary({ 806 => 'FT1' }, $accounting_retry_options);
+}
+is($accounting_retry_calls, 3, 'Slurm failure accounting retries transient sacct errors');
+is($accounting_retry_sleeps, 2, 'Slurm failure accounting waits between transient errors');
+is($retried_failure_summary->{failed}, 0, 'successful accounting recovery preserves job results');
+
 my $large_accounting_calls = 0;
 my $large_accounting_options = slurm_options();
 $large_accounting_options->{jobAccountingRunner} = sub {

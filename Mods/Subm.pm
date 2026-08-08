@@ -100,6 +100,38 @@ sub _run_scheduler_query {
 	my $output = `$command 2>&1`;
 	return ($output, $?);
 }
+sub _run_slurm_accounting_query {
+	my ($runner, $command, $batch, $optHR) = @_;
+	$optHR ||= {};
+	my $retry_seconds = defined($optHR->{slurmQueryRetrySeconds})
+		? 0 + $optHR->{slurmQueryRetrySeconds} : 300;
+	my $maximum_error_seconds = defined($optHR->{slurmQueryMaxErrorSeconds})
+		? 0 + $optHR->{slurmQueryMaxErrorSeconds} : 1_200;
+	$retry_seconds = 1 if $retry_seconds < 1;
+	$maximum_error_seconds = 0 if $maximum_error_seconds < 0;
+	my $sleeper = $optHR->{schedulerSleeper} || sub { sleep($_[0]); };
+	my $clock = $optHR->{schedulerClock} || sub { time };
+	my $error_started_at;
+	while (1) {
+		my ($output, $status) = _run_scheduler_query($runner, $command, $batch);
+		return ($output, 0) if $status == 0;
+		my $now = $clock->();
+		$error_started_at = $now unless defined $error_started_at;
+		my $elapsed = $now - $error_started_at;
+		if ($elapsed >= $maximum_error_seconds) {
+			my $diagnostic = $output // '';
+			$diagnostic =~ s/\s+\z//;
+			warn "Slurm accounting query failed continuously for ${elapsed}s"
+				.($diagnostic ne '' ? ": $diagnostic" : '')."\n";
+			return ($output, $status);
+		}
+		my $diagnostic = $output // '';
+		$diagnostic =~ s/\s+\z//;
+		warn "Transient Slurm accounting failure after ${elapsed}s; retrying in ${retry_seconds}s"
+			.($diagnostic ne '' ? ": $diagnostic" : '')."\n";
+		$sleeper->($retry_seconds);
+	}
+}
 
 sub _scheduler_queue_command {
 	my ($qmode) = @_;
@@ -227,7 +259,8 @@ sub _batched_slurm_accounting_lookup {
 	for my $batch (_slurm_job_batches($job_ids)) {
 		my $command = "sacct -X -n -P -j ".join(',', @{$batch})
 			." --format=JobIDRaw,State,ExitCode";
-		my ($output, $status) = _run_scheduler_query($runner, $command, $batch);
+		my ($output, $status) =
+			_run_slurm_accounting_query($runner, $command, $batch, $optHR);
 		return undef if $status != 0;
 		for my $line (split /\n/, $output) {
 			my ($job_id, $state, $exit_code) = split /\|/, $line, 3;
@@ -389,14 +422,8 @@ sub slurmJobFailureSummary {
 	for my $batch (_slurm_job_batches(\@job_ids)) {
 		my $command = "sacct -X -n -P -j ".join(',', @{$batch})
 			." --format=JobIDRaw,JobName,State,ExitCode,Reason";
-		my ($output, $status);
-		if (my $runner = $optHR->{jobAccountingRunner}) {
-			($output, $status) = $runner->($command, $batch);
-			$status ||= 0;
-		} else {
-			$output = `$command 2>/dev/null`;
-			$status = $?;
-		}
+		my ($output, $status) = _run_slurm_accounting_query(
+			$optHR->{jobAccountingRunner}, $command, $batch, $optHR);
 		return undef if $status != 0;
 		for my $line (split /\n/, $output) {
 			my ($job_id, $job_name, $state, $exit_code, $reason) =

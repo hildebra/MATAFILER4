@@ -460,7 +460,7 @@ sub runQItree{
 		$attempt .= " -safe " if $safe;
 		systemW($attempt);
 	};
-	print $cmd;
+	print $cmd, ($cmd =~ /\n\z/ ? "" : "\n");
 	my $ok = eval {
 		$execute->($runSafe);
 		1;

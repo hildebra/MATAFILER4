@@ -472,7 +472,7 @@ like($strain_source, qr/'-forceSNPcalls', \$forceVCF2FNA/,
 	'parallel extraction workers inherit forced consensus regeneration');
 like($strain_source, qr/'-SNPadaptiveQual', \$useAdaptiveQual/,
 	'parallel extraction workers inherit adaptive SNP filtering');
-like($strain_source, qr/rename \$mergeFileByName\{\$name\}, \$outfile or die/,
+like($strain_source, qr/retry_rename\(\$mergeFileByName\{\$name\}, \$outfile/,
 	'part-file merging publishes completed output atomically');
 like($strain_source,
 	qr/!\$reSubmit && !\$repairCAT && !\$redoSubmissionData.*?&& -e \$treeStone/s,

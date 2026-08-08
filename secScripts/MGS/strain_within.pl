@@ -34,6 +34,10 @@ use Mods::StrainParts qw(
 	append_fasta_records_atomic sort_fasta_by_locus
 );
 use Mods::SlurmAccounting qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
+use Mods::WorkflowResilience qw(
+	retry_operation retry_unlink retry_rename retry_open retry_close
+	preflight_executable preflight_directory filesystem_capacity
+);
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 use Mods::StrainSampleStats qw(
 	sample_stat_columns sample_summary_columns aggregate_sample_rows
@@ -76,6 +80,14 @@ sub reportSavedSampleStats;
 sub printSampleStatsSummary;
 sub recoverCompletedSplitPhaseI;
 sub taxonAwareLocusBudgets;
+sub phase1WorkersNeedingRetry;
+sub phase1WorkerCommand;
+sub writePhase1RepairQueue;
+sub validatePhase1WorkerLedger;
+sub writeStrainWorkflowHeartbeat;
+sub writeStrainWorkflowFailure;
+sub writeTreeFailureAudit;
+sub preflightStrainWorkflow;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -83,6 +95,9 @@ sub limitedWarn;sub limitedNotice;
 my %limitedWarningStats;
 my %limitedNoticeStats;
 my $warningExampleLimit = 5;
+my ($workflowStage, $workflowHeartbeatPath, $workflowFailurePath) =
+	('startup', '', '');
+
 my $completionMessage = "";
 sub limitedWarn {
 	my ($category, $message) = @_;
@@ -111,6 +126,7 @@ sub limitedNotice {
 }
 
 END {
+	writeStrainWorkflowFailure($@ || 'non-zero process exit') if $? != 0;
 	my $fatalError = $? != 0 ? $@ : "";
 	my @suppressed = sort grep {
 		($limitedWarningStats{$_}{suppressed} || 0) > 0
@@ -219,7 +235,8 @@ END {
 #.86: skip extraction-only consensus audits on Phase-I resume and report saved worker statistics
 #.87: finish a completed split Phase-I ledger after a main-worker restart
 #.88: persist validated no-tree outcomes and reject unclassified tree inputs
-my $version = 0.88;
+#.89: retry Phase-I workers, quarantine terminal MGS outcomes, and harden filesystem publication
+my $version = 0.89;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -302,6 +319,7 @@ my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
 my $selfMemGb = 10;
 my $mosaicMemGb = 150;
+my $phase1WorkerRetries = 2;
 my $redoSubmissionData = 0;
 my $deepRepair = 0;
 my $rmMSA = 1; #argument passed to buildTree5.pl 
@@ -369,6 +387,7 @@ GetOptions(
 	"submit=i"       => \$doSubmit,
 	"selfMemGb=i"    => \$selfMemGb,
 	"mosaicMemGb=i"  => \$mosaicMemGb,
+	"phase1WorkerRetries=i" => \$phase1WorkerRetries,
 	"onlySubmit=i"   => \$onlySubmit, #submit only jobs, or also recreate input fna/faa files? (can take days)
 	"reSubmit=i"     => \$reSubmit, #for all MGS: resubmit tree phylo building
 	"recalcTrees=i"  => \$recalcTrees, #delete tree outputs and rebuild from existing per-MGS inputs
@@ -468,6 +487,8 @@ die "-minBadLociPSmpl must be positive\n" unless $minBadLociForSampleSkip > 0;
 die "-MGSminGenesPSmpl and -presortGenes must be positive\n"
 	unless $MGStoolowGsThr > 0 && $presortGenes > 0;
 die "-flushEvery must be positive\n" unless $appendWriteTrigger > 0;
+die "-phase1WorkerRetries must be between 0 and 10\n"
+	unless $phase1WorkerRetries >= 0 && $phase1WorkerRetries <= 10;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax,
 		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction,
@@ -693,6 +714,12 @@ my $sttime = time;
 
 my $stepStarted = time;
 prepRun();
+$workflowHeartbeatPath = File::Spec->catfile($outD,
+	$subJob ? "strain_within.worker.$subJob.heartbeat.tsv" : 'strain_within.heartbeat.tsv');
+$workflowFailurePath = File::Spec->catfile($outD,
+	$subJob ? "strain_within.worker.$subJob.failure.tsv" : 'strain_within.failure.tsv');
+writeStrainWorkflowHeartbeat('configuration');
+preflightStrainWorkflow() unless $subJob;
 stepComplete("configuration and map initialization", $stepStarted,
 	"samples=".scalar(@samples), "mode=$mode", "output=$outD");
 
@@ -840,6 +867,7 @@ if ($runPartI){
 	$SIgenes = {}; #replaced locus selection is represented by $COGprios
 	
 	my @jobsMain;
+	my $phase1SelfCmd = '';
 
 	if ($maxSubJob && !$subJob){
 		# A generation manifest prevents an isolated worker retry from being
@@ -848,48 +876,13 @@ if ($runPartI){
 		$splitGeneration = join('.', time, $$, int(rand(1_000_000_000)));
 		write_split_generation($splitManifest, $splitGeneration, $maxSubJob);
 		#here needs to submit itself maxSubJob times
-		my $strain1scr = getProgPaths("MGS_strain1_scr"); #self reference
-		my @selfArgs = (
-			# Stage-I workers exit after extraction.  Keep their command limited to
-			# extraction, consensus, outgroup, and selection options; tree-model and
-			# buildTree5 options belong solely to the parent tree-submission process.
-			'-GCd', $GCd, '-outD', $outD, '-MGS', $MGSfileOri,
-			'-clusterID', $clusterID, '-submit', 0, '-onlySubmit', 1,
-			'-maxSubJob', $maxSubJob,
-			'-MGSminGenesPSmpl', $MGStoolowGsThr,
-			'-multiGeneSmplMax', $multiGeneSmplMax,
-			'-conspGeneSmplMax', $conspGeneSmplMax,
-			'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
-			'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
-			'-noGeneLimit', $noGeneLimit, '-disableQC', $disableQC,
-			'-breakpointGeneFlank', $breakpointGeneFlank,
-			'-abundanceMinLoci', $abundanceMinimumLoci,
-			'-abundanceMinFold', $abundanceMinimumFold,
-			'-abundanceMaxFold', $abundanceMaximumFold,
-			'-abundanceMaxModifiedZ', $abundanceMaximumModifiedZ,
-			'-flushEvery', $appendWriteTrigger,
-			'-MGset', $useGTDBmg, '-minSNPDepth', $minSNPDepth,
-			'-minSNPCallQual', $minSNPCallQual, '-forceSNPcalls', $forceVCF2FNA,
-			'-preCompConsSNP', $preCompCons, '-skipIndels', $noIndels,
-			'-SNPadaptiveQual', $useAdaptiveQual,
-			'-SNPdepthFilterScale', $depthFilterScale,
-			'-SNPindelRangeFilt', $indelRange,
-		);
-		push @selfArgs, ('-tmpD', $locTmpDir1) if $locTmpDir1 ne "";
-		push @selfArgs, ('-mosaicLoci', $mosaicLociFile) if $mosaicLociFile ne "";
-		push @selfArgs, ('-MGSabundance', $MGSabundanceOverride)
-			if $MGSabundanceOverride ne "";
-		my $workerMGSSubset = $recalcTrees
-			? join(",", grep { $MGSneedsExtraction{$_} } @specis)
-			: $subsMGSstr;
-		push @selfArgs, ('-MGSsubset', $workerMGSSubset) if $workerMGSSubset ne "";
-		my $selfCmd = $strain1scr . " " . join(" ", map { shellQuote($_) } @selfArgs);
+		$phase1SelfCmd = phase1WorkerCommand();
 		
 		my $tmpHDD=$QSBoptHR->{tmpSpace} ; $QSBoptHR->{tmpSpace} =15; #request some basic amount
 		
 		#submission of self-subjobs..
 		for (my $sj = 1; $sj < $maxSubJob; $sj ++){
-			my $cmdX = "$selfCmd -subjob $sj &&\n";
+			my $cmdX = "$phase1SelfCmd -subjob $sj &&\n";
 			my $checkF = "$LOGDIR/mainExtr.${sj}.stone";
 			$cmdX .= "printf '%s\\n' ".shellQuote($splitGeneration)
 				." > ".shellQuote($checkF)."\n";
@@ -937,8 +930,50 @@ if ($runPartI){
 			exit(0);
 		}
 		qsubSystemJobAlive( \@jobsMain,$QSBoptHR ) if @jobsMain && $doSubmit;
-		die "Split extraction generation is incomplete; refusing to merge worker subsets\n"
-			unless split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob);
+		my $workerRetryRound = 0;
+		while (1) {
+			my @failedWorkers = phase1WorkersNeedingRetry($splitGeneration);
+			last unless @failedWorkers;
+			if ((grep { $_ == 0 } @failedWorkers)
+					|| $workerRetryRound >= $phase1WorkerRetries) {
+				my $queue = writePhase1RepairQueue($splitGeneration, \@failedWorkers,
+					'live Phase-I worker validation failed');
+				$completionMessage = "Phase I requires worker repair before Phase II; no tree jobs were submitted.";
+				print "Phase-I processing paused safely; repair queue: $queue. Invalid workers: "
+					.join(',', @failedWorkers)."\n";
+				exit(0);
+			}
+			$workerRetryRound++;
+			print "Retrying Phase-I worker(s) ".join(',', @failedWorkers)
+				." (round $workerRetryRound/$phase1WorkerRetries)\n";
+			my @retryJobs;
+			my $savedTmp = $QSBoptHR->{tmpSpace}; $QSBoptHR->{tmpSpace} = 15;
+			for my $sj (@failedWorkers) {
+				my $stone = "$splitStonePrefix.$sj.stone";
+				retry_unlink($stone, fatal => 0, label => "clear worker $sj completion");
+				my $cmdX = "$phase1SelfCmd -subjob $sj &&\n"
+					."printf '%s\\n' ".shellQuote($splitGeneration)
+					." > ".shellQuote($stone)."\n";
+				my ($dependency) = qsubSystem("$LOGDIR/Strain1_B${sj}.retry${workerRetryRound}.sh",
+					$cmdX,1,"${selfMemGb}G","Str1.$sj","","",1,[],$QSBoptHR);
+				push @retryJobs, $dependency;
+			}
+			$QSBoptHR->{tmpSpace} = $savedTmp;
+			qsubSystemJobAlive(\@retryJobs, $QSBoptHR);
+		}
+		my $generationComplete = retry_operation(
+			label => 'validate completed split-extraction generation', fatal => 0,
+			code => sub { split_generation_complete(
+				$splitManifest, $splitStonePrefix, $maxSubJob) },
+		);
+		unless ($generationComplete) {
+			my @workers = 0 .. $maxSubJob - 1;
+			my $queue = writePhase1RepairQueue($splitGeneration, \@workers,
+				'split generation remained incomplete after bounded filesystem retries');
+			$completionMessage = "Phase I generation validation is incomplete; no tree jobs were submitted.";
+			print "Phase-I processing paused safely; repair queue: $queue\n";
+			exit(0);
+		}
 		mergeConspecificLogs();
 		mergeRecoveryLogs();
 		mergeSampleStats();
@@ -1103,6 +1138,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $outD2 = $SIdirs{$MGS};
 	my $tmpD  = "$scratchD/outs/$MGS/";
 	my $treeStone = "$outD2/treeDone.sto";
+	my $terminalTreeMarker = "$outD2/noTree.sto";
+	my $placementPendingMarker = "$outD2/placementPending.sto";
 	my $IQtreef= "$outD2/phylo/IQtree_allsites.treefile";
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
@@ -1266,7 +1303,9 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
 		if fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof");
 	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if $needsCopy;
-	$Tcmd .= "-completionMarker ".shellQuote($treeStone)." ";
+	$Tcmd .= "-continue 1 -completionMarker ".shellQuote($treeStone)." "
+		."-terminalMarker ".shellQuote($terminalTreeMarker)." "
+		."-placementPendingMarker ".shellQuote($placementPendingMarker)." ";
 
 	if ($multiSmpl > 2 && $ngenes >= 10){
 		print "  Tree input: $multiSmpl samples, $ngenes potential genes; $numCoreL cores, $totMem memory\n";
@@ -1295,6 +1334,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		memory => int($totMem)."M",
 		requested_mb => int($totMem),
 		job_name => "FT$treeJobOrdinal",
+		terminal => $terminalTreeMarker,
+		placement_pending => $placementPendingMarker,
 		tree => $IQtreef,
 		stone => $treeStone,
 		tmp_space => $QSBoptHR->{tmpSpace},
@@ -1304,7 +1345,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$QSBoptHR->{useLongQueue} = 0;
 	$cnt ++;
 	$treeDisposition{'eligible tree job'}++;
-	$expectedTreeOutputs{$MGS} = [$IQtreef, $treeStone];
+	$expectedTreeOutputs{$MGS} = [$IQtreef, $treeStone,
+		$terminalTreeMarker, $placementPendingMarker];
 	if (!$doSubmit || time >= $nextQueuedTreeSubmissionProbe) {
 		my $drain = dispatchPendingTreeJobs(
 			queue => \@pendingTreeJobs, options => $QSBoptHR,
@@ -1361,15 +1403,27 @@ if (@treeJobAccounting) {
 	my $memorySummary = slurm_tree_memory_summary(\@treeJobAccounting);
 	print format_slurm_tree_memory_summary($memorySummary);
 }
+my $incompleteTreeOutcomes = 0;
 if ($doSubmit) {
-	my @failed = grep {
-		my ($tree, $stone) = @{$expectedTreeOutputs{$_}};
-		!-s $tree || !-e $stone;
-	} sort keys %expectedTreeOutputs;
-	die "Tree jobs completed without valid tree outputs for: ".join(",", @failed)."\n"
-		if @failed;
+	my ($failed, $pending, $terminal) =
+		writeTreeFailureAudit(\%expectedTreeOutputs);
+	$incompleteTreeOutcomes = @{$failed} + @{$pending};
+	warn "Tree jobs without a valid output were quarantined: ".join(',', @{$failed})."\n"
+		if @{$failed};
+	warn "Tree jobs with a retained backbone and pending placement: "
+		.join(',', @{$pending})."\n" if @{$pending};
+	print "Valid terminal no-tree outcomes: ".join(',', @{$terminal})."\n"
+		if @{$terminal};
 }
-validateTreeInputResolution();
+my $unresolvedInputs = validateTreeInputResolution();
+if ($incompleteTreeOutcomes || $unresolvedInputs) {
+	$completionMessage = "strain_within.pl preserved completed work but stopped before downstream "
+		."strain analysis; tree_outcomes_pending=$incompleteTreeOutcomes, "
+		."tree_inputs_pending=$unresolvedInputs.";
+	print "Workflow is partially complete; consult tree_job_outcomes.tsv and "
+		."tree_input_resolution.tsv. No automatic tree resubmission was attempted.\n";
+	exit(0);
+}
 print "\nAll done for $cnt Bins\nRun strain_within_2.pl for summary stats:\n";
 
 my $outDX =  $MGSfile;#"$GCd/$mode/intra_phylo/";
@@ -1398,6 +1452,9 @@ print "\n". $nxtCmd."\n";
 remove_tree($locTmpDir) if -d $locTmpDir;
 remove_tree($preConDir) if ($preCompCons && -d $preConDir);
 
+retry_unlink($workflowFailurePath, fatal => 0,
+	label => 'clear obsolete strain workflow failure');
+writeStrainWorkflowHeartbeat('complete');
 $completionMessage = "strain_within.pl completed normally; $cnt eligible tree job(s) were "
 	. ($doSubmit ? "submitted and validated." : "generated without scheduler submission.");
 exit(0);
@@ -1548,7 +1605,7 @@ sub combineMGSgenesDir{
 		}
 	}
 	if (@validationErrors) {
-		unlink $_ for values %mergeFileByName;
+		retry_unlink($_, fatal => 0, label => "clean rejected worker merge") for values %mergeFileByName;
 		limitedWarn('worker merge count mismatch',
 			"Rejecting merge for $MGS: ".join('; ', @validationErrors)."; retaining worker parts\n");
 		return $aggregateComplete;
@@ -1557,27 +1614,27 @@ sub combineMGSgenesDir{
 	# Invalidate the previous commit only after the complete retry has passed all
 	# contributor, cardinality, and identifier-order checks. A validation error or
 	# crash while constructing merge files therefore leaves the old aggregate usable.
-	unlink $mergeCheckpoint or die "Cannot invalidate stale merge checkpoint $mergeCheckpoint: $!\n"
-		if -e $mergeCheckpoint;
+	retry_unlink($mergeCheckpoint, label => "invalidate stale merge checkpoint");
 	for my $set (@filesets) {
 		my ($name, undef, $outfile) = @$set;
 		next unless exists $mergeFileByName{$name};
-		rename $mergeFileByName{$name}, $outfile or die "Cannot replace $outfile: $!\n";
+		retry_rename($mergeFileByName{$name}, $outfile,
+			label => "publish merged MGS input $outfile");
 	}
 	my $checkpointTemporary = "$mergeCheckpoint.write.$$";
-	open my $checkpointFH, '>', $checkpointTemporary
-		or die "Cannot create $checkpointTemporary: $!\n";
+	my $checkpointFH = retry_open('>', $checkpointTemporary,
+		label => 'create MGS merge checkpoint');
 	print {$checkpointFH} join("\t", "strain-merge-v1", $MGS,
 		$recoveryRowsByMGS{$MGS} // 0, $fnaRows, $identifierDigest{$FNAstdof} // ''), "\n"
 		or die "Cannot write $checkpointTemporary: $!\n";
-	close $checkpointFH or die "Cannot close $checkpointTemporary: $!\n";
-	rename $checkpointTemporary, $mergeCheckpoint
-		or die "Cannot publish $mergeCheckpoint: $!\n";
+	retry_close($checkpointFH, 'close MGS merge checkpoint');
+	retry_rename($checkpointTemporary, $mergeCheckpoint,
+		label => 'publish MGS merge checkpoint');
 	my $complete = !grep { !fileGZe($_) } @required;
 	$complete &&= -s $mergeCheckpoint;
 	if ($complete) {
 		for my $part (@consumedParts) {
-			unlink $part or warn "Cannot remove combined part $part: $!\n";
+			retry_unlink($part, fatal => 0, label => "clean combined worker part");
 		}
 		if ($recoveryContributionIndexReady) {
 			warn "Merged $MGS: workers=".join(',', @expectedWorkers)
@@ -1908,7 +1965,7 @@ sub addOutgroup2MGS{
 	#system "rm -f $CATtf.tmp*\n" if (fileGZe("$CATtf.tmp"));
 	#system "echo \"OG:$OG\" > $outD3/data.log";
 	for my $stale_cat (glob("$CATtf.tmp*")) {
-		unlink $stale_cat or die "Cannot remove $stale_cat: $!\n";
+		retry_unlink($stale_cat, fatal => 0, label => "clean stale category temporary");
 	}
 	open my $log, '>', "$outD3/data.log" or die "Cannot create $outD3/data.log: $!\n";
 	print $log "OG:$OG\n";
@@ -1962,7 +2019,7 @@ sub finalizeSampleQC {
 	close $out or die "Cannot close $write: $!\n";
 	rename $write, $final or die "Cannot install $final: $!\n";
 	for my $stale (glob("$directory/$QCstdof.tmp*")) {
-		unlink $stale or die "Cannot remove stale sample QC input $stale: $!\n";
+		retry_unlink($stale, fatal => 0, label => "clean stale sample-QC input");
 	}
 }
 
@@ -2081,10 +2138,10 @@ sub validateTreeInputResolution {
 	my $audit = "$LOGDIR/tree_input_resolution.tsv";
 	my $temporary = "$audit.write.$$";
 	make_path($LOGDIR) unless -d $LOGDIR;
-	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+	my $out = retry_open('>', $temporary, label => 'create tree-input resolution audit');
 	print {$out} join("\t", qw(MGS resolution persistent_state scratch_state)), "\n"
 		or die "Cannot write $temporary: $!\n";
-	my (@repairRequired, $ready, $terminal, $excluded);
+	my (@repairRequired, %repairState, $ready, $terminal, $excluded);
 	for my $MGS (@specis) {
 		my $persistent = persistentMGSInputState($MGS);
 		my $scratch = scratchMGSInputState($MGS);
@@ -2095,6 +2152,9 @@ sub validateTreeInputResolution {
 		} elsif (-s "$SIdirs{$MGS}/noRecoverableLoci.sto") {
 			$resolution = 'valid_no_tree_no_recoverable_loci';
 			$terminal++;
+		} elsif (-s "$SIdirs{$MGS}/noTree.sto") {
+			$resolution = 'valid_no_tree_buildtree';
+			$terminal++;
 		} elsif (exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ /multicopy/) {
 			$resolution = 'excluded_conspecific_or_multicopy';
 			$excluded++;
@@ -2104,16 +2164,32 @@ sub validateTreeInputResolution {
 		} else {
 			$resolution = 'repair_required';
 			push @repairRequired, $MGS;
+			$repairState{$MGS} = [$persistent, $scratch];
 		}
 		print {$out} join("\t", $MGS, $resolution, $persistent, $scratch), "\n"
 			or die "Cannot write $temporary: $!\n";
 	}
-	close $out or die "Cannot close $temporary: $!\n";
-	rename $temporary, $audit or die "Cannot publish $audit: $!\n";
+	retry_close($out, 'close tree-input resolution audit');
+	retry_rename($temporary, $audit, label => 'publish tree-input resolution audit');
 	print "Tree-input resolution audit: ready=$ready, valid_no_tree=$terminal, "
 		."excluded=$excluded, repair_required=".scalar(@repairRequired)."; $audit\n";
-	die "Tree-input resolution is incomplete; repair is required for: "
-		.join(',', @repairRequired)."\nSee $audit\n" if @repairRequired;
+	my $repairQueue = "$LOGDIR/tree_input_repair.queue.tsv";
+	if (@repairRequired) {
+		my $queueTemporary = "$repairQueue.write.$$";
+		my $queue = retry_open('>', $queueTemporary, label => 'create tree-input repair queue');
+		print {$queue} "MGS\tpersistent_state\tscratch_state\n";
+		for my $MGS (@repairRequired) {
+			print {$queue} join("\t", $MGS, @{$repairState{$MGS}}), "\n"
+				or die "Cannot write tree-input repair queue: $!\n";
+		}
+		retry_close($queue, 'close tree-input repair queue');
+		retry_rename($queueTemporary, $repairQueue,
+			label => 'publish tree-input repair queue');
+		warn "Tree-input repair remains queued for ".scalar(@repairRequired)
+			." MGS; completed trees were retained and no catalogue-wide abort was triggered\n";
+	} else {
+		retry_unlink($repairQueue, fatal => 0, label => 'clear obsolete tree-input repair queue');
+	}
 }
 
 
@@ -2669,8 +2745,7 @@ sub getInputSize{
 	my $auditFile = "$LOGDIR/tree_input_sizing.tsv";
 	my $auditTemporary = "$auditFile.tmp.$$";
 	make_path($LOGDIR) unless -d $LOGDIR;
-	unlink $auditTemporary or die "Cannot remove stale tree-input audit $auditTemporary: $!\n"
-		if -e $auditTemporary;
+	retry_unlink($auditTemporary, fatal => 0, label => "clean stale tree-input audit");
 	open my $audit, '>', $auditTemporary
 		or die "Cannot create tree-input audit $auditTemporary: $!\n";
 	print {$audit} join("\t", qw(
@@ -2777,6 +2852,7 @@ sub evalFileStatus{
 		make_path($outD2) unless -d $outD2;
 		my $tooFewMarker = "$outD2/tooFewSamples.sto";
 		my $noRecoverableLociMarker = "$outD2/noRecoverableLoci.sto";
+		my $buildTreeTerminalMarker = "$outD2/noTree.sto";
 		if (-s $tooFewMarker && !$deepRepair && !$redoSubmissionData && ($onlySubmit != 0 || $recalcTrees)) {
 			$MGSnoTree{$MGS} = 1;
 			$MGSnoTreeReason{$MGS} = 'insufficient_tree_input';
@@ -2790,11 +2866,16 @@ sub evalFileStatus{
 			$noRecoverableLociDirs++;
 			next;
 		}
-		unlink $tooFewMarker or die "Cannot remove stale $tooFewMarker: $!\n"
-			if -e $tooFewMarker;
-		unlink $noRecoverableLociMarker
-			or die "Cannot remove stale $noRecoverableLociMarker: $!\n"
-			if -e $noRecoverableLociMarker;
+		if (-s $buildTreeTerminalMarker && !$deepRepair && !$redoSubmissionData
+				&& ($onlySubmit != 0 || $recalcTrees)) {
+			$MGSnoTree{$MGS} = 1;
+			$MGSnoTreeReason{$MGS} = 'buildtree_no_usable_alignment';
+			$noRecoverableLociDirs++;
+			next;
+		}
+		retry_unlink($tooFewMarker, label => "clear stale too-few marker");
+		retry_unlink($noRecoverableLociMarker, label => "clear stale no-locus marker");
+		retry_unlink($buildTreeTerminalMarker, label => "clear stale BuildTree terminal marker");
 		
 	#	if ( !-d $outD2 ||){ # first phase only has "all.cat.tmp" file..
 	#		$dirsNOTPrepped ++;
@@ -3002,9 +3083,196 @@ sub timeNice($){
 
 sub stepComplete {
 	my ($step, $started, @statistics) = @_;
+	writeStrainWorkflowHeartbeat($step);
 	my $elapsed = timeNice(time - $started);
 	my $details = @statistics ? "; ".join(", ", @statistics) : "";
 	print "STEP COMPLETE: $step (${elapsed})$details\n";
+}
+sub writeStrainWorkflowHeartbeat {
+	my ($stage) = @_;
+	$workflowStage = $stage if defined($stage) && length($stage);
+	return unless length($workflowHeartbeatPath);
+	my $temporary = "$workflowHeartbeatPath.tmp.$$";
+	my $ok = eval {
+		my $handle = retry_open('>', $temporary, fatal => 0,
+			label => 'create strain workflow heartbeat');
+		return 0 unless $handle;
+		print {$handle} join("\t", qw(timestamp pid stage)), "\n",
+			join("\t", time, $$, $workflowStage), "\n" or return 0;
+		retry_close($handle, 'close strain workflow heartbeat', fatal => 0) or return 0;
+		retry_rename($temporary, $workflowHeartbeatPath, fatal => 0,
+			label => 'publish strain workflow heartbeat') or return 0;
+		1;
+	};
+	retry_unlink($temporary, fatal => 0, label => 'clear failed strain heartbeat temporary')
+		if !$ok && -e $temporary;
+}
+
+sub writeStrainWorkflowFailure {
+	my ($error) = @_;
+	return unless length($workflowFailurePath);
+	$error //= 'unknown failure';
+	$error =~ s/[\t\r\n]+/ /g;
+	my $temporary = "$workflowFailurePath.tmp.$$";
+	if (open my $handle, '>', $temporary) {
+		print {$handle} join("\t", qw(status stage timestamp pid reason)), "\n",
+			join("\t", 'failed', $workflowStage, time, $$, $error), "\n";
+		if (close $handle) {
+			rename $temporary, $workflowFailurePath
+				or warn "Cannot publish strain workflow failure marker $workflowFailurePath: $!\n";
+		}
+	}
+}
+
+sub preflightStrainWorkflow {
+	preflight_directory($outD, 'within-strain output directory');
+	preflight_directory($scratchD, 'within-strain scratch directory') if length($scratchD);
+	my @programs = (
+		['buildTree5', getProgPaths('buildTree_scr')],
+		['MSAfix', getProgPaths('MSAfix')],
+		[$MSAprog == 0 ? 'MSAprobs'
+			: $MSAprog == 1 ? 'Clustal Omega'
+			: $MSAprog == 2 ? 'MAFFT' : 'MUSCLE5',
+		 getProgPaths($MSAprog == 0 ? 'msaprobs'
+			: $MSAprog == 1 ? 'clustalo'
+			: $MSAprog == 2 ? 'mafft' : 'MUSCLE5')],
+		[$phyloProg == 1 ? 'IQ-TREE'
+			: $phyloProg == 2 ? 'VeryFastTree' : 'FastTree',
+		 getProgPaths($phyloProg == 1 ? 'iqtree'
+			: $phyloProg == 2 ? 'veryfasttree' : 'fasttree')],
+	);
+	push @programs, ['EPA-ng', getProgPaths('epa-ng', 0)] if $strictBackbone;
+	preflight_executable($_->[1], $_->[0]) for @programs;
+	for my $entry (['output', $outD], ['scratch', $scratchD]) {
+		next unless defined($entry->[1]) && -d $entry->[1];
+		my $capacity = filesystem_capacity($entry->[1]);
+		warn "Preflight warning: $entry->[0] filesystem has less than 2 GiB available\n"
+			if defined($capacity->{available_kb})
+				&& $capacity->{available_kb} < 2 * 1024 * 1024;
+		warn "Preflight warning: $entry->[0] filesystem has fewer than 10,000 inodes available\n"
+			if defined($capacity->{available_inodes})
+				&& $capacity->{available_inodes} < 10_000;
+	}
+	print "Preflight complete: required programs, writable paths, disk space, and inodes checked\n";
+}
+
+sub phase1WorkerCommand {
+	my $strain1scr = getProgPaths("MGS_strain1_scr");
+	my @selfArgs = (
+		# Stage-I workers receive extraction/consensus controls only; BuildTree
+		# model, alignment, submission, and placement flags stay in the parent.
+		'-GCd', $GCd, '-outD', $outD, '-MGS', $MGSfileOri,
+		'-clusterID', $clusterID, '-submit', 0, '-onlySubmit', 1,
+		'-maxSubJob', $maxSubJob,
+		'-MGSminGenesPSmpl', $MGStoolowGsThr,
+		'-multiGeneSmplMax', $multiGeneSmplMax,
+		'-conspGeneSmplMax', $conspGeneSmplMax,
+		'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
+		'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
+		'-noGeneLimit', $noGeneLimit, '-disableQC', $disableQC,
+		'-breakpointGeneFlank', $breakpointGeneFlank,
+		'-abundanceMinLoci', $abundanceMinimumLoci,
+		'-abundanceMinFold', $abundanceMinimumFold,
+		'-abundanceMaxFold', $abundanceMaximumFold,
+		'-abundanceMaxModifiedZ', $abundanceMaximumModifiedZ,
+		'-flushEvery', $appendWriteTrigger,
+		'-MGset', $useGTDBmg, '-minSNPDepth', $minSNPDepth,
+		'-minSNPCallQual', $minSNPCallQual, '-forceSNPcalls', $forceVCF2FNA,
+		'-preCompConsSNP', $preCompCons, '-skipIndels', $noIndels,
+		'-SNPadaptiveQual', $useAdaptiveQual,
+		'-SNPdepthFilterScale', $depthFilterScale,
+		'-SNPindelRangeFilt', $indelRange,
+	);
+	push @selfArgs, ('-tmpD', $locTmpDir1) if $locTmpDir1 ne "";
+	push @selfArgs, ('-mosaicLoci', $mosaicLociFile) if $mosaicLociFile ne "";
+	push @selfArgs, ('-MGSabundance', $MGSabundanceOverride)
+		if $MGSabundanceOverride ne "";
+	my $workerMGSSubset = $recalcTrees
+		? join(",", grep { $MGSneedsExtraction{$_} } @specis)
+		: $subsMGSstr;
+	push @selfArgs, ('-MGSsubset', $workerMGSSubset) if $workerMGSSubset ne "";
+	return $strain1scr . " " . join(" ", map { shellQuote($_) } @selfArgs);
+}
+
+sub writePhase1RepairQueue {
+	my ($generation, $workers, $reason) = @_;
+	my $path = "$LOGDIR/phase1_worker_repair.queue.tsv";
+	my $handle = retry_open('>', "$path.tmp.$$", label => 'create Phase-I repair queue');
+	print {$handle} join("\t", qw(generation worker reason)), "\n";
+	for my $worker (@{$workers || []}) {
+		my (undef, $workerReason) = validatePhase1WorkerLedger($worker, $generation);
+		$workerReason ||= $reason || 'validation failed';
+		$workerReason =~ s/[\t\r\n]+/ /g;
+		print {$handle} join("\t", $generation, $worker, $workerReason), "\n";
+	}
+	retry_close($handle, 'close Phase-I repair queue');
+	retry_rename("$path.tmp.$$", $path, label => 'publish Phase-I repair queue');
+	return $path;
+}
+
+sub validatePhase1WorkerLedger {
+	my ($worker, $generation) = @_;
+	my $stone = "$splitStonePrefix.$worker.stone";
+	my $stoneGeneration = '';
+	if (-s $stone && open(my $stoneFH, '<', $stone)) {
+		$stoneGeneration = <$stoneFH> // '';
+		close $stoneFH;
+		chomp $stoneGeneration;
+	}
+	return (0, 'missing or generation-mismatched completion stone')
+		unless $stoneGeneration eq $generation;
+	my @ledgers = (
+		["$LOGDIR/$recoveryLogName.$worker",
+		 join("\t", qw(MGS sample outcome reason retained_genes qc_status
+			ambiguous_failure conspecific_failure recovered_mosaic_loci)), 'recovery'],
+		["$LOGDIR/$sampleStatsLogName.$worker", join("\t", @sampleStatColumns), 'sample'],
+	);
+	for my $ledger (@ledgers) {
+		my ($path, $expectedHeader, $kind) = @{$ledger};
+		return (0, "missing $kind ledger $path") unless -s $path;
+		open my $input, '<', $path or return (0, "unreadable $kind ledger $path: $!");
+		my $header = <$input> // ''; chomp $header;
+		unless ($header eq $expectedHeader) {
+			close $input;
+			return (0, "unexpected $kind ledger header in $path");
+		}
+		my %seenSample;
+		while (my $line = <$input>) {
+			chomp $line;
+			next if $kind eq 'recovery' && !length($line);
+			my @field = split /\t/, $line, -1;
+			if ($kind eq 'recovery') {
+				unless (@field >= 9 && ($field[2] ne 'recovered' || $field[4] =~ /^\d+$/)) {
+					close $input;
+					return (0, "malformed recovery row in $path");
+				}
+			} else {
+				unless (length($line) && @field == @sampleStatColumns
+						&& length($field[0]) && $field[1] =~ /^\d+$/
+						&& $field[1] == $worker && !$seenSample{$field[0]}++) {
+					close $input;
+					return (0, "malformed or duplicate sample row in $path");
+				}
+			}
+		}
+		close $input or return (0, "cannot close $kind ledger $path: $!");
+	}
+	my $conspecific = "$LOGDIR/ConspecificMGS.$worker.log";
+	return (0, "missing conspecific ledger $conspecific") unless -e $conspecific;
+	return (1, '');
+}
+
+sub phase1WorkersNeedingRetry {
+	my ($generation) = @_;
+	my @failed;
+	for my $worker (0 .. $maxSubJob - 1) {
+		my ($valid, $reason) = validatePhase1WorkerLedger($worker, $generation);
+		next if $valid;
+		limitedWarn('invalid Phase-I worker output',
+			"Phase-I worker $worker requires retry: $reason\n");
+		push @failed, $worker;
+	}
+	return @failed;
 }
 
 sub writeRecoveryRow {
@@ -3044,6 +3312,49 @@ sub recoverCompletedSplitPhaseI {
 	return 0 unless split_generation_complete(
 		$splitManifest, $splitStonePrefix, $maxSubJob,
 	);
+	my $manifestHandle = retry_open('<', $splitManifest,
+		label => 'read completed Phase-I generation');
+	my $manifestLine = <$manifestHandle> // '';
+	retry_close($manifestHandle, 'close completed Phase-I generation');
+	chomp $manifestLine;
+	die "Malformed completed Phase-I generation manifest: $splitManifest\n"
+		unless $manifestLine =~ /^([A-Za-z0-9_.:-]+)\t\Q$maxSubJob\E$/;
+	my $generation = $1;
+	my @failedWorkers = phase1WorkersNeedingRetry($generation);
+	my $workerRetryRound = 0;
+	while (@failedWorkers) {
+		my $cannotRepair = grep { $_ == 0 } @failedWorkers;
+		$cannotRepair ||= !$doSubmit || $workerRetryRound >= $phase1WorkerRetries;
+		if ($cannotRepair) {
+			my $queue = writePhase1RepairQueue($generation, \@failedWorkers,
+				'resumed Phase-I worker validation failed');
+			$completionMessage = "Phase I requires worker repair before Phase II; no tree jobs were submitted.";
+			print "Phase-I recovery paused safely; repair queue: $queue. Invalid workers: ".join(',', @failedWorkers)."\n";
+			exit(0);
+		}
+		$workerRetryRound++;
+		print "Resubmitting invalid Phase-I worker(s) from completed generation: "
+			.join(',', @failedWorkers)." (round $workerRetryRound/$phase1WorkerRetries)\n";
+		my @retryJobs;
+		my $savedTmp = $QSBoptHR->{tmpSpace};
+		$QSBoptHR->{tmpSpace} = 15;
+		my $workerCommand = phase1WorkerCommand();
+		for my $worker (@failedWorkers) {
+			my $stone = "$splitStonePrefix.$worker.stone";
+			retry_unlink($stone, fatal => 0, label => "clear worker $worker completion");
+			my $cmdX = "$workerCommand -subjob $worker &&\n"
+				."printf '%s\\n' ".shellQuote($generation)." > ".shellQuote($stone)."\n";
+			my ($dependency) = qsubSystem("$LOGDIR/Strain1_B${worker}.resume${workerRetryRound}.sh",
+				$cmdX,1,"${selfMemGb}G","Str1.$worker","","",1,[],$QSBoptHR);
+			push @retryJobs, $dependency;
+		}
+		$QSBoptHR->{tmpSpace} = $savedTmp;
+		qsubSystemJobAlive(\@retryJobs, $QSBoptHR);
+		@failedWorkers = phase1WorkersNeedingRetry($generation);
+
+	}
+	retry_unlink("$LOGDIR/phase1_worker_repair.queue.tsv", fatal => 0,
+		label => 'clear obsolete Phase-I repair queue');
 
 	my @recoveryParts = map { "$LOGDIR/$recoveryLogName.$_" } 0 .. $maxSubJob - 1;
 	my @sampleStatsParts = map { "$LOGDIR/$sampleStatsLogName.$_" } 0 .. $maxSubJob - 1;
@@ -3076,7 +3387,8 @@ sub mergeSampleStats {
 	my $expectedHeader = join("\t", @sampleStatColumns);
 	my $final = "$outD/$sampleStatsLogName";
 	my $finalTemporary = "$final.write.$$";
-	open my $merged, '>', $finalTemporary or die "Cannot create $finalTemporary: $!\n";
+	my $merged = retry_open('>', $finalTemporary,
+		label => 'create merged sample statistics');
 	print {$merged} $expectedHeader, "\n"
 		or die "Cannot write $finalTemporary: $!\n";
 	my (@allRows, %rowsByWorker, %seenSample);
@@ -3113,7 +3425,7 @@ sub mergeSampleStats {
 		}
 		close $in or die "Cannot close $part: $!\n";
 	}
-	close $merged or die "Cannot close $finalTemporary: $!\n";
+	retry_close($merged, 'close merged sample statistics');
 	die "No sample-statistics rows were recovered from worker tables\n" unless @allRows;
 
 	my @summaryColumns = sample_summary_columns();
@@ -3126,8 +3438,8 @@ sub mergeSampleStats {
 	push @summaryRows, $allSummary;
 	my $summary = "$outD/$sampleStatsSummaryLogName";
 	my $summaryTemporary = "$summary.write.$$";
-	open my $summaryFH, '>', $summaryTemporary
-		or die "Cannot create $summaryTemporary: $!\n";
+	my $summaryFH = retry_open('>', $summaryTemporary,
+		label => 'create sample-statistics summary');
 	print {$summaryFH} join("\t", @summaryColumns), "\n"
 		or die "Cannot write $summaryTemporary: $!\n";
 	for my $row (@summaryRows) {
@@ -3139,9 +3451,9 @@ sub mergeSampleStats {
 		print {$summaryFH} join("\t", @values), "\n"
 			or die "Cannot write $summaryTemporary: $!\n";
 	}
-	close $summaryFH or die "Cannot close $summaryTemporary: $!\n";
-	rename $finalTemporary, $final or die "Cannot publish $final: $!\n";
-	rename $summaryTemporary, $summary or die "Cannot publish $summary: $!\n";
+	retry_close($summaryFH, 'close sample-statistics summary');
+	retry_rename($finalTemporary, $final, label => 'publish merged sample statistics');
+	retry_rename($summaryTemporary, $summary, label => 'publish sample-statistics summary');
 
 	warn "Per-sample statistics cover ".scalar(@allRows)." of ".scalar(@samples)
 		." configured samples\n" if @samples && @allRows != @samples;
@@ -3216,7 +3528,8 @@ sub printSampleStatsSummary {
 sub writeRecoveryContributionIndex {
 	my $path = "$LOGDIR/$recoveryLogName.contributors.tsv";
 	my $temporary = "$path.write.$$";
-	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+	my $out = retry_open('>', $temporary,
+		label => 'create recovery contribution index');
 	print {$out} join("\t", qw(MGS worker recovered_rows retained_records unique_samples)), "\n"
 		or die "Cannot write $temporary: $!\n";
 	for my $mgs (sort keys %recoveryWorkersByMGS) {
@@ -3231,8 +3544,8 @@ sub writeRecoveryContributionIndex {
 				or die "Cannot write $temporary: $!\n";
 		}
 	}
-	close $out or die "Cannot close $temporary: $!\n";
-	rename $temporary, $path or die "Cannot publish $path: $!\n";
+	retry_close($out, 'close recovery contribution index');
+	retry_rename($temporary, $path, label => 'publish recovery contribution index');
 }
 
 sub loadRecoveryContributionIndex {
@@ -3285,7 +3598,8 @@ sub mergeRecoveryLogs {
 	die "Missing MAG recovery worker log(s): ".join(',', @missing)."\n" if @missing;
 	my $final = "$outD/$recoveryLogName";
 	my $temporary = "$final.write.$$";
-	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+	my $out = retry_open('>', $temporary,
+		label => 'create merged MAG recovery ledger');
 	my $header_written = 0;
 	for my $worker (0 .. $#parts) {
 		my $part = $parts[$worker];
@@ -3296,10 +3610,10 @@ sub mergeRecoveryLogs {
 		while (my $line = <$in>) { indexRecoveryRow($worker, $line, $part); print {$out} $line or die "Cannot write $temporary: $!\n"; }
 		close $in or die "Cannot close $part: $!\n";
 	}
-	close $out or die "Cannot close $temporary: $!\n";
+	retry_close($out, 'close merged MAG recovery ledger');
 	writeRecoveryContributionIndex();
-	rename $temporary, $final or die "Cannot install $final: $!\n";
-	for my $part (@parts) { unlink $part or die "Cannot remove $part: $!\n"; }
+	retry_rename($temporary, $final, label => 'publish merged MAG recovery ledger');
+	retry_unlink($_, fatal => 0, label => "clean merged recovery ledger") for @parts;
 	$recoveryContributionIndexReady = 1;
 	print "MAG recovery accounting: $final\n";
 }
@@ -3497,6 +3811,46 @@ sub assertSafeWorkflowRemoval {
 		unless $is_default || -f $owner;
 }
 
+
+sub writeTreeFailureAudit {
+	my ($expected) = @_;
+	my $path = "$LOGDIR/tree_job_outcomes.tsv";
+	my $temporary = "$path.write.$$";
+	my $output = retry_open('>', $temporary, label => 'create tree-job outcome audit');
+	print {$output} "MGS\tstatus\ttree\tcompletion_marker\treason\n"
+		or die "Cannot write tree-job outcome audit $temporary: $!\n";
+	my (@failed, @pending, @terminal);
+	for my $mgs (sort keys %{$expected}) {
+		my ($tree, $stone, $terminalMarker, $pendingMarker) = @{$expected->{$mgs}};
+		my ($status, $reason) = ('failed_missing_output', '');
+		if (-s $tree && -s $stone) {
+			$status = 'complete';
+		} elsif (-s $terminalMarker) {
+			$status = 'valid_no_tree';
+			push @terminal, $mgs;
+		} elsif (-s $pendingMarker) {
+			$status = 'placement_pending';
+			push @pending, $mgs;
+		} else {
+			push @failed, $mgs;
+		}
+		my $marker = $status eq 'valid_no_tree' ? $terminalMarker
+			: $status eq 'placement_pending' ? $pendingMarker : '';
+		if ($marker && open(my $markerFH, '<', $marker)) {
+			while (my $line = <$markerFH>) {
+				if ($line =~ /^reason\t(.*)/) { $reason = $1; chomp $reason; last; }
+			}
+			close $markerFH;
+		}
+		$reason =~ s/[\t\r\n]+/ /g;
+		print {$output} join("\t", $mgs, $status, $tree, $stone, $reason), "\n"
+			or die "Cannot write tree-job outcome audit $temporary: $!\n";
+	}
+	retry_close($output, 'close tree-job outcome audit');
+	retry_rename($temporary, $path, label => 'publish tree-job outcome audit');
+	print "Tree-job outcome audit: $path\n";
+	return (\@failed, \@pending, \@terminal);
+}
 sub dispatchPendingTreeJobs {
 	my %args = @_;
 	my $queue = $args{queue} || [];
@@ -3516,17 +3870,13 @@ sub dispatchPendingTreeJobs {
 
 	while (@{$queue}) {
 		my $record = $queue->[0];
-		for my $required (qw(mgs script command cores memory job_name tree stone)) {
+		for my $required (qw(mgs script command cores memory job_name tree stone terminal placement_pending)) {
 			die "Queued tree job is missing '$required'\n"
 				unless defined($record->{$required}) && length($record->{$required});
 		}
 		if ($options->{doSubmit}) {
-			unlink $record->{stone}
-				or die "Cannot remove stale tree checkpoint $record->{stone}: $!\n"
-				if -e $record->{stone};
-			unlink $record->{tree}
-				or die "Cannot remove stale tree output $record->{tree}: $!\n"
-				if -e $record->{tree};
+			retry_unlink($record->{$_}, label => "clear stale tree-job $_")
+				for qw(stone tree terminal placement_pending);
 		}
 		$options->{tmpSpace} = $record->{tmp_space};
 		$options->{useLongQueue} = $record->{use_long_queue};
@@ -3572,13 +3922,16 @@ sub resetMGSTreeOutputs {
 
 	my $phyloDir = File::Spec->catdir($resolvedMGS, "phylo");
 	my $treeStone = File::Spec->catfile($resolvedMGS, "treeDone.sto");
+	my $terminalMarker = File::Spec->catfile($resolvedMGS, "noTree.sto");
+	my $placementMarker = File::Spec->catfile($resolvedMGS, "placementPending.sto");
 	if (-d $phyloDir) {
 		remove_tree($phyloDir, {safe => 1});
 		die "Cannot completely remove tree output directory $phyloDir\n" if -e $phyloDir;
 	}
-	unlink $treeStone or die "Cannot remove tree checkpoint $treeStone: $!\n"
-		if -e $treeStone;
+	retry_unlink($treeStone, label => "remove tree completion checkpoint");
 	print "  Reset tree outputs: removed $phyloDir and tree completion checkpoint\n";
+	retry_unlink($terminalMarker, label => "remove terminal no-tree marker");
+	retry_unlink($placementMarker, label => "remove placement-pending marker");
 }
 
 sub markStrainWorkflowDirectory {
@@ -3674,8 +4027,7 @@ sub extractFNAFAA2genes{
 		"$scratchD/outs/*/$QCstdof.tmp.$subJob",
 	) {
 		for my $part (bsd_glob($pattern)) {
-			unlink $part or die "Cannot remove stale worker part $part: $!\n"
-				if -f $part || -l $part;
+			retry_unlink($part, label => "remove stale worker part");
 		}
 	}
 	my %perMGScnts;

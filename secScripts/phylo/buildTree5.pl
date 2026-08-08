@@ -43,6 +43,8 @@
 #5.37: use EPA-ng maximum-likelihood placement for sparse strict-backbone samples
 #5.38: separate backbone admission from placement eligibility and retain sparse taxa through MSA
 #5.39: consume overlap-filtered rate/GC metrics from MSAfix rather than rescanning loci in Perl
+#5.40: add structured post-alignment reporting, fixed-model defaults, and resumable lifecycle outcomes
+#5.41: add bounded filesystem retries, preflight validation, durable locus checkpoints, and isolated EPA recovery
 
 use warnings;
 use strict;
@@ -73,6 +75,10 @@ use File::Glob qw(bsd_glob);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
 use File::Temp qw(tempfile);
+use Mods::WorkflowResilience qw(
+	retry_operation retry_unlink retry_rename retry_open retry_close
+	preflight_executable preflight_directory filesystem_capacity
+);
 
 
 sub convertMultAli2NT;
@@ -118,6 +124,10 @@ sub deterministicRatePartitions;
 sub writeRatePartitionAudit;
 sub publishStagedTreeInputs;
 sub writeCompletionMarker;
+sub writeOutcomeMarker;
+sub clearLifecycleMarker;
+sub preflightBuildTree;
+sub inputFingerprint;
 sub epaModelArtifact;
 sub runEpaNgPlacement;
 sub postAlignmentStep;
@@ -125,15 +135,20 @@ sub elapsedTimeText;
 sub alignmentCollectionStats;
 sub rawCoordinateInformation;
 
+sub writeWorkflowHeartbeat;
+sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.40;
+my $version = 5.41;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
 my $synSiteTotal = 0;
 my $nonSynSiteTotal = 0;
+my ($workflowStage, $workflowHeartbeat, $workflowFailure) =
+	('initialization', '', '');
 
 END {
+	writeWorkflowFailure($@ || 'non-zero process exit') if $? != 0;
 	for my $category (sort keys %limitedWarningCounts) {
 		my $limit = $limitedWarningLimits{$category} // 5;
 		my $suppressed = $limitedWarningCounts{$category} - $limit;
@@ -174,6 +189,7 @@ my $ntCntTotal =0; my $bootStrap=0; my $subsetSmpls = -1;
 my ($fnFna, $aaFna,$cogCats,$outD,$ncore,$Ete)= ("","","","",1,0);
 my ($smplDef,$smplSep,$calcSyn,$calcNonSyn,$useAA4tree,$calcDNAdiff,$tmpD ) = (1,"_",0,0,0,0,"");
 my ($stagedInputDir, $tmpSubdir, $completionMarker) = ("", "", "");
+my ($terminalMarker, $placementPendingMarker) = ("", "");
 my $withinSpecies = 0;
 my $strainWithinPreset = 0;
 
@@ -299,6 +315,8 @@ GetOptions(
 	"stagedInputDir=s" => \$stagedInputDir,
 	"tmpSubdir=s" => \$tmpSubdir,
 	"completionMarker=s" => \$completionMarker,
+	"terminalMarker=s" => \$terminalMarker,
+	"placementPendingMarker=s" => \$placementPendingMarker,
 	"withinSpecies=i" => \$withinSpecies,
 	"strainWithinPreset=i" => \$strainWithinPreset,
 	"cores=i" => \$ncore,
@@ -506,6 +524,11 @@ my $volumeRoot = File::Spec->canonpath(File::Spec->catpath($outVolume, File::Spe
 die "Refusing to use filesystem root '$outD' as -outD\n" if $outD eq $volumeRoot;
 make_path($outD) unless -d $outD;
 die "Output path is not a directory: $outD\n" unless -d $outD;
+$terminalMarker ||= File::Spec->catfile($outD, 'noTree.sto');
+$placementPendingMarker ||= File::Spec->catfile($outD, 'placementPending.sto');
+$workflowHeartbeat = File::Spec->catfile($outD, 'buildTree.heartbeat.tsv');
+$workflowFailure = File::Spec->catfile($outD, 'buildTree.failure.tsv');
+writeWorkflowHeartbeat('preflight');
 
 if (length($stagedInputDir)) {
 	my @requiredInputs = grep { defined($_) && length($_) } ($fnFna, $aaFna, $cogCats);
@@ -549,9 +572,7 @@ make_path($tmpD);
 my $treeD = File::Spec->catdir($outD, "phylo");#raxml, fasttree, phyml tree output dir
 
 my $MsaD = File::Spec->catdir($outD, "MSA");
-if ($removeMSA){
-	$MsaD = File::Spec->catdir($tmpD, "MSA_$tmpTag");
-}
+# Keep incomplete per-locus checkpoints persistent; -rmMSA removes them only after success.
 
 $MSAsubsD = "$MsaD/clnd/";
 
@@ -681,10 +702,11 @@ for my $input_spec (["fna", $fnFna], ["aa", $aaFna], ["cats", $cogCats]) {
 die "A sequence input (-aa or -fna) is required\n" if $aaFna eq "" && $fnFna eq "";
 die "Category-based alignments require -aa\n" if $cogCats ne "" && $aaFna eq "";
 die "Nucleotide trees require -fna\n" if !$useAA4tree && $fnFna eq "";
+preflightBuildTree($outD, $tmpD);
 
 if (!$continue){
 	safeRemoveTree($treeD, $outD);
-	safeRemoveTree($MsaD, $removeMSA ? $tmpD : $outD);
+	safeRemoveTree($MsaD, $outD);
 }
 make_path($MsaD) unless -d $MsaD;
 make_path($treeD) unless -d $treeD;
@@ -723,8 +745,13 @@ my $strictSplit;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
+my $alignmentWorkPolicyFile = "$MsaD/alignment_work.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
 	"schema=10",
+	"msa_program=$MSAprog",
+	"fna_input=".inputFingerprint($fnFna),
+	"faa_input=".inputFingerprint($aaFna),
+	"category_input=".inputFingerprint($cogCats),
 	"enabled=$postAlignmentLocusQC",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
@@ -773,6 +800,15 @@ my $legacyWithinSpeciesQCAudit = !$taxonAwareLocusSelection
 	&& -s $postAlignmentQCReport && !-e $postAlignmentQCPolicyFile;
 my $postAlignmentQCAuditCurrent = $postAlignmentQCPolicyMatches
 	&& (!$postAlignmentLocusQC || -s $postAlignmentQCReport);
+my $alignmentWorkPolicyMatches = 0;
+if (-s $alignmentWorkPolicyFile) {
+	my $workPolicy = retry_open('<', $alignmentWorkPolicyFile,
+		label => "read alignment-work policy");
+	my $existingWorkPolicy = do { local $/; <$workPolicy> };
+	retry_close($workPolicy, "close alignment-work policy");
+	$alignmentWorkPolicyMatches = $existingWorkPolicy eq $postAlignmentQCPolicy;
+}
+
 $postAlignmentQCAuditCurrent = 1 if $legacyWithinSpeciesQCAudit;
 my $doMSA = 1;
 my $treesDone = treePresent($tOhr)
@@ -781,18 +817,24 @@ my $treesDone = treePresent($tOhr)
 if ($strictBackbone && $treesDone
 		&& (!-s "$treeD/strict_backbone.samples.tsv"
 			|| !-s "$treeD/strict_backbone.epa_placements.tsv")) {
-	print "Recovery state: existing tree predates strict-backbone EPA-ng placement; "
-		."rebuilding tree outputs from the retained alignment\n";
-	safeRemoveTree($treeD, $outD);
-	make_path($treeD);
-	$treesDone = 0;
+	if (-s $placementPendingMarker && fileGZe($multAli)) {
+		print "Recovery state: validated backbone has pending EPA-ng placement; "
+			."retaining inference and retrying placement only\n";
+	} else {
+		print "Recovery state: existing tree predates strict-backbone EPA-ng placement; "
+			."rebuilding tree outputs from the retained alignment\n";
+		safeRemoveTree($treeD, $outD);
+		make_path($treeD);
+		$treesDone = 0;
+	}
 }
 if ($cogCats ne "" && $continue
-		&& ($treesDone || fileGZe($multAli))
-		&& !$postAlignmentQCAuditCurrent) {
+		&& ((($treesDone || fileGZe($multAli)) && !$postAlignmentQCAuditCurrent)
+			|| (!$treesDone && !fileGZe($multAli)
+				&& !$alignmentWorkPolicyMatches))) {
 	print "Recovery state: existing multi-locus alignment predates the current "
 		."post-alignment locus-retention policy; rebuilding per-locus alignments and tree outputs\n";
-	safeRemoveTree($MsaD, $removeMSA ? $tmpD : $outD);
+	safeRemoveTree($MsaD, $outD);
 	safeRemoveTree($treeD, $outD);
 	make_path($MsaD);
 	make_path($treeD);
@@ -809,14 +851,21 @@ if ($continue) {
 	} elsif ($reusableAlignment) {
 		print "Recovery state: reusable nonempty alignment checkpoint found; rebuilding missing tree stages\n";
 	} else {
-		print "Recovery state: no reusable alignment or complete tree checkpoint; "
-			. "restarting alignment and tree stages from input FASTA/category files\n";
-		safeRemoveTree($MsaD, $removeMSA ? $tmpD : $outD);
+		if ($cogCats ne '' && $alignmentWorkPolicyMatches) {
+			print "Recovery state: retaining policy-matched completed per-locus alignments; "
+				."rebuilding unfinished alignment and tree stages\n";
+		} else {
+			print "Recovery state: no reusable alignment or policy-matched locus checkpoint; "
+				."restarting alignment and tree stages from input FASTA/category files\n";
+			safeRemoveTree($MsaD, $outD);
+		}
 		safeRemoveTree($treeD, $outD);
 		make_path($MsaD) unless -d $MsaD;
 		make_path($treeD) unless -d $treeD;
 	}
 }
+writePostAlignmentQCPolicy($alignmentWorkPolicyFile, $postAlignmentQCPolicy)
+	if $cogCats ne '';
 my $calcMSA = !$treesDone && !$primaryAlignmentReady;
 $doMSA = !(
 	$isAligned
@@ -828,6 +877,7 @@ if (!-e $multAli && -e "${multAli}.gz"){
 	my $gunCmd = "$pigzBin -p $ncore -d ${multAli}.gz\n";
 	systemW($gunCmd);
 }
+my ($alignedLoci, $failedLoci, $candidateLoci) = (0, 0, 0);
 if ($isAligned){
 	my $alignedInput = $useAA4tree ? $aaFna : $fnFna;
 	die "-isAligned currently requires an uncompressed input file: $alignedInput\n" unless -f $alignedInput;
@@ -1077,7 +1127,9 @@ if ($isAligned){
 	}
 	
 	if ($OGfnd == 0 && $outgroup ne ""){
-		die "could not find outgroups in sequence set!\n$outgroup\n$fnFna\n";
+		warn "Configured outgroup '$outgroup' is absent from the retained sequence set; "
+			."continuing with an unrooted phylogeny\n";
+		$outgroup = "";
 	}
 	#############################################################################################
 
@@ -1093,9 +1145,9 @@ if ($isAligned){
 
 	#die;
 	$cnt=-1; #line counter
-	my $alignedLoci = 0;
-	my $failedLoci = 0;
-	my $candidateLoci = scalar @linesCats3;
+	$alignedLoci = 0;
+	$failedLoci = 0;
+	$candidateLoci = scalar @linesCats3;
 	foreach my $aRef (@linesCats3){#go over each gene category, building MSA for each
 	#----------------- main MSA loop ----------------------
 		$cnt++; my @spl = @{$aRef};
@@ -1493,11 +1545,18 @@ postAlignmentStep("rate/GC partition preparation", $postAlignmentStepStarted,
 $postAlignmentStepStarted = time;
 
 #die "@MSA_AA\n\n";
-if ($calcMSA && $cogCats ne "" && @MSAs == 0 && @MSA_AA == 0 && !fileGZs($multAli)){
-	die "No usable MSAs were generated; no tree was created\n";
-}
-if ($calcMSA && $cogCats eq "" && !fileGZs($multAli)){
-	die "Single-gene alignment was not generated: $multAli\n";
+if ($calcMSA && !fileGZs($multAli)
+		&& (($cogCats ne '' && @MSAs == 0 && @MSA_AA == 0) || $cogCats eq '')) {
+	my $reason = $cogCats ne '' ? 'no_usable_loci' : 'single_gene_alignment_failed';
+	clearLifecycleMarker($completionMarker, 'clear stale tree completion');
+	clearLifecycleMarker($placementPendingMarker, 'clear stale placement-pending marker');
+	writeOutcomeMarker($terminalMarker, 'valid_no_tree', $reason, {
+		candidate_loci => $candidateLoci, aligned_loci => $alignedLoci,
+		failed_loci => $failedLoci, samples => scalar(keys %samples),
+	}, $outD);
+	safeRemoveTree($tmpD, $tmpBase);
+	print "BuildTree completed with a valid terminal no-tree outcome: $reason\n";
+	exit(0);
 }
 
 #prep final MSA file that is correct NT or AA and is merged
@@ -1588,7 +1647,8 @@ if ( $doGenesToPh){
 
 	foreach my $MSAfn (@MSAs){
 		my $phylipOut = File::Spec->catfile($phylipD, basename($MSAfn).".ph");
-		unlink $_ or die "Cannot remove stale PHYLIP output $_: $!\n" for glob("$phylipOut*");
+		retry_unlink($_, fatal => 0, label => "clean optional PHYLIP output")
+			for glob("$phylipOut*");
 		my $cmd2 = "$fasta2phylip -c 50 ".shellQuote($MSAfn)." > ".shellQuote($phylipOut)."\n";
 		my $phylipOK = eval {
 			systemW $cmd2;
@@ -1742,12 +1802,29 @@ if ($strictSplit) {
 		my $dedicatedBackbone = $primaryTree =~ s/\.backbone\.treefile$/.treefile/;
 		my $report = "$treeD/strict_backbone.epa_placements.tsv";
 		if (@{$strictSplit->{placement}}) {
-			my ($epaResult, $modelArtifact, $jplaceFile) = runEpaNgPlacement(
-				$tOhr, $backboneTree, $multAli, $placementAlignment,
-				$strictSplit->{placement}, $treeD,
-			);
+			my ($epaResult, $modelArtifact, $jplaceFile);
+			my $placementOK = eval {
+				($epaResult, $modelArtifact, $jplaceFile) = runEpaNgPlacement(
+					$tOhr, $backboneTree, $multAli, $placementAlignment,
+					$strictSplit->{placement}, $treeD,
+				);
+				1;
+			};
+			if (!$placementOK) {
+				my $error = $@ || 'unknown EPA-ng placement failure';
+				$error =~ s/\s+\z//;
+				clearLifecycleMarker($completionMarker, 'clear stale tree completion');
+				writeOutcomeMarker($placementPendingMarker, 'placement_pending', $error, {
+					backbone_tree => $backboneTree,
+					query_samples => scalar(@{$strictSplit->{placement}}),
+				}, $outD);
+				warn "EPA-ng placement deferred; the validated backbone and MSA were retained: $error\n";
+				safeRemoveTree($tmpD, $tmpBase);
+				print "BuildTree completed with placement pending; rerun with -continue 1 to retry placement only\n";
+				exit(0);
+			}
 			my $placements = $epaResult->{placements};
-			open my $reportFh, '>', $report or die "Cannot write $report: $!\n";
+			my $reportFh = retry_open('>', $report, label => "write EPA-ng placement report");
 			print {$reportFh} join("\t",
 				qw(sample status edge likelihood likelihood_weight_ratio distal_length pendant_length reason)), "\n";
 			for my $sample (sort keys %{$placements}) {
@@ -1759,28 +1836,45 @@ if ($strictSplit) {
 					$strictSplit->{reason}{$sample} // '',
 				), "\n";
 			}
-			close $reportFh or die "Cannot close $report: $!\n";
+			retry_close($reportFh, "close EPA-ng placement report");
 			if (!$dedicatedBackbone) {
 				$primaryTree =~ s/\.treefile$/.placed.treefile/;
 				$primaryTree .= ".placed.treefile" if $primaryTree eq $backboneTree;
 			}
-			write_epa_placed_tree($epaResult->{tree}, $primaryTree, $placements);
+			my $publicationOK = eval {
+				write_epa_placed_tree($epaResult->{tree}, $primaryTree, $placements);
+				1;
+			};
+			if (!$publicationOK) {
+				my $error = $@ || 'unknown EPA-ng tree-publication failure';
+				$error =~ s/\s+\z//;
+				clearLifecycleMarker($completionMarker, 'clear stale tree completion');
+				writeOutcomeMarker($placementPendingMarker, 'placement_pending', $error, {
+					backbone_tree => $backboneTree,
+					query_samples => scalar(@{$strictSplit->{placement}}),
+					jplace => $jplaceFile,
+				}, $outD);
+				warn "EPA-ng placement publication deferred; the validated backbone, jplace, and MSA were retained: $error\n";
+				safeRemoveTree($tmpD, $tmpBase);
+				print "BuildTree completed with placement pending; rerun with -continue 1 to retry placement publication\n";
+				exit(0);
+			}
 			print "EPA-ng ML placements: $report; jplace: $jplaceFile; model: $modelArtifact; "
 				."primary tree: $primaryTree; backbone tree: $backboneTree\n";
 		} else {
-			open my $reportFh, '>', $report or die "Cannot write $report: $!\n";
+			my $reportFh = retry_open('>', $report, label => "write empty EPA-ng placement report");
 			print {$reportFh} join("\t",
 				qw(sample status edge likelihood likelihood_weight_ratio distal_length pendant_length reason)), "\n";
-			close $reportFh or die "Cannot close $report: $!\n";
+			retry_close($reportFh, "close empty EPA-ng placement report");
 			if ($dedicatedBackbone) {
 				my $temporaryPrimary = "$primaryTree.tmp.$$";
-				unlink $temporaryPrimary
-					or die "Cannot remove stale primary-tree temporary $temporaryPrimary: $!\n"
-					if -e $temporaryPrimary;
-				copy($backboneTree, $temporaryPrimary)
-					or die "Cannot copy backbone tree $backboneTree to $temporaryPrimary: $!\n";
-				rename $temporaryPrimary, $primaryTree
-					or die "Cannot publish primary tree $primaryTree: $!\n";
+				retry_unlink($temporaryPrimary, label => "clear primary-tree temporary");
+				retry_operation(
+					label => "copy backbone tree to primary-tree temporary",
+					code => sub { copy($backboneTree, $temporaryPrimary) && -s $temporaryPrimary },
+				);
+				retry_rename($temporaryPrimary, $primaryTree,
+					label => "publish primary tree $primaryTree");
 			}
 			print "No samples required EPA-ng placement; primary tree: $primaryTree; "
 				."backbone tree: $backboneTree\n";
@@ -1836,7 +1930,7 @@ if($doDNDS){
 
 FastGear();
 if ($removeMSA){
-	safeRemoveTree($MsaD, $tmpD);
+	safeRemoveTree($MsaD, $outD);
 } elsif ($gzipInput){
 	for my $msaFile (grep { -f $_ && $_ !~ /\.gz$/ } glob(File::Spec->catfile($MsaD, "*"))){
 		systemW("$pigzBin -p $ncore ".shellQuote($msaFile));
@@ -1858,8 +1952,12 @@ if ($gzipInput){
 }
 
 safeRemoveTree($tmpD, $tmpBase);
+clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
+clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
 writeCompletionMarker($completionMarker, ${$trRetH}{nwk}, $outD)
 	if length($completionMarker);
+clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
+writeWorkflowHeartbeat('complete');
 	###################### ETE ######################3
 
 print "BuildTree completed successfully\n";
@@ -4210,10 +4308,9 @@ sub writePostAlignmentQCPolicy {
 	);
 	print {$policyFH} $policyText
 		or die "Cannot write locus-QC policy $temporaryPolicy: $!\n";
-	close $policyFH
-		or die "Cannot close locus-QC policy $temporaryPolicy: $!\n";
-	rename $temporaryPolicy, $policyFile
-		or die "Cannot publish locus-QC policy $policyFile: $!\n";
+	retry_close($policyFH, "close locus-QC policy $temporaryPolicy");
+	retry_rename($temporaryPolicy, $policyFile,
+		label => "publish locus-QC policy $policyFile");
 }
 
 sub alignmentFileStem {
@@ -4309,6 +4406,49 @@ sub runPostAlignmentLocusQC {
 	return \@kept;
 }
 
+
+
+sub inputFingerprint {
+	my ($path) = @_;
+	return '' unless defined($path) && length($path);
+	my $actual = -e $path ? $path : -e "$path.gz" ? "$path.gz" : $path;
+	my @stat = stat($actual);
+	return "missing:$actual" unless @stat;
+	my $absolute = File::Spec->canonpath(File::Spec->rel2abs($actual));
+	return join(':', $absolute, $stat[7], $stat[9]);
+}
+
+
+sub preflightBuildTree {
+	my ($outputDirectory, $temporaryDirectory) = @_;
+	preflight_directory($outputDirectory, 'BuildTree output directory');
+	preflight_directory($temporaryDirectory, 'BuildTree temporary directory');
+	my @programs = (['pigz', $pigzBin]);
+	unless ($isAligned) {
+		my %msaKey = (0 => 'msaprobs', 1 => 'clustalo', 2 => 'mafft',
+			4 => 'MUSCLE5', 5 => 'FAMSA');
+		push @programs, ['alignment program', getProgPaths($msaKey{$MSAprog})];
+	}
+	push @programs, ['MSAfix', getProgPaths('MSAfix')]
+		if !$useAA4tree && ($cogCats ne '' || !$isAligned);
+	push @programs, ['IQ-TREE', getProgPaths('iqtree')] if $doIQTree;
+	push @programs, ['VeryFastTree', getProgPaths('veryfasttree')] if $doVeryFastTree;
+	push @programs, ['FastTree', getProgPaths('fasttree')] if $doFastTree;
+	push @programs, ['RAxML-NG', getProgPaths('raxmlng')] if $doRAXMLng;
+	push @programs, ['RAxML', getProgPaths('raxml')] if $doRAXML;
+	push @programs, ['EPA-ng', getProgPaths('epa-ng', 0)] if $strictBackbone;
+	preflight_executable($_->[1], $_->[0]) for @programs;
+	for my $entry (['output', $outputDirectory], ['temporary', $temporaryDirectory]) {
+		my $capacity = filesystem_capacity($entry->[1]);
+		warn "Preflight warning: $entry->[0] filesystem has less than 2 GiB available\n"
+			if defined($capacity->{available_kb})
+				&& $capacity->{available_kb} < 2 * 1024 * 1024;
+		warn "Preflight warning: $entry->[0] filesystem has fewer than 10,000 inodes available\n"
+			if defined($capacity->{available_inodes})
+				&& $capacity->{available_inodes} < 10_000;
+	}
+	print "Preflight complete: programs, writable paths, disk space, and inodes checked\n";
+}
 sub prepareTemporaryBase {
 	my ($path) = @_;
 	my $created = eval {
@@ -4361,12 +4501,48 @@ sub elapsedTimeText {
 
 sub postAlignmentStep {
 	my ($name, $started, @details) = @_;
+	writeWorkflowHeartbeat($name);
 	my $elapsed = elapsedTimeText(time - $started);
 	my @clean = grep { defined($_) && length($_) } @details;
 	print 'POST-ALIGNMENT STEP: '.$name.' ('.$elapsed.')'
 		.(@clean ? '; '.join(', ', @clean) : '')."\n";
 }
 
+sub writeWorkflowHeartbeat {
+	my ($stage) = @_;
+	$workflowStage = $stage if defined($stage) && length($stage);
+	return unless length($workflowHeartbeat) && length($outD) && -d $outD;
+	my $temporary = "$workflowHeartbeat.tmp.$$";
+	my $ok = eval {
+		my $handle = retry_open('>', $temporary, fatal => 0,
+			label => 'create BuildTree heartbeat');
+		return 0 unless $handle;
+		print {$handle} join("\t", qw(timestamp pid stage)), "\n",
+			join("\t", time, $$, $workflowStage), "\n" or return 0;
+		retry_close($handle, 'close BuildTree heartbeat', fatal => 0) or return 0;
+		retry_rename($temporary, $workflowHeartbeat, fatal => 0,
+			label => 'publish BuildTree heartbeat') or return 0;
+		1;
+	};
+	retry_unlink($temporary, fatal => 0, label => 'clear failed heartbeat temporary')
+		if !$ok && -e $temporary;
+}
+
+sub writeWorkflowFailure {
+	my ($error) = @_;
+	return unless length($workflowFailure) && length($outD) && -d $outD;
+	$error //= 'unknown failure';
+	$error =~ s/[\t\r\n]+/ /g;
+	my $temporary = "$workflowFailure.tmp.$$";
+	if (open my $handle, '>', $temporary) {
+		print {$handle} join("\t", qw(status stage timestamp pid reason)), "\n",
+			join("\t", 'failed', $workflowStage, time, $$, $error), "\n";
+		if (close $handle) {
+			rename $temporary, $workflowFailure
+				or warn "Cannot publish BuildTree failure marker $workflowFailure: $!\n";
+		}
+	}
+}
 sub alignmentCollectionStats {
 	my ($alignments) = @_;
 	die "Alignment collection must be an array reference\n"
@@ -4436,8 +4612,7 @@ sub runMSAFix {
 
 	my $msaFbin = getProgPaths("MSAfix");
 	my $tmpOutput = "$alignment.MSAfix.$$.fna";
-	unlink $tmpOutput or die "Cannot remove stale MSAfix output $tmpOutput: $!\n"
-		if -e $tmpOutput;
+	retry_unlink($tmpOutput, label => "clear stale MSAfix output");
 
 	my $cmd = join(" ",
 		shellQuote($msaFbin),
@@ -4455,16 +4630,15 @@ sub runMSAFix {
 	};
 	if (!$ok) {
 		my $error = $@ || "MSAfix failed for $alignment\n";
-		unlink $tmpOutput if -e $tmpOutput;
+		retry_unlink($tmpOutput, fatal => 0, label => "clean failed MSAfix output");
 		die $error;
 	}
 	if (!-s $tmpOutput) {
-		unlink $tmpOutput if -e $tmpOutput;
+		retry_unlink($tmpOutput, fatal => 0, label => "clean empty MSAfix output");
 		die "MSAfix completed without producing a nonempty output for $alignment\n";
 	}
 
-	rename $tmpOutput, $alignment
-		or die "Cannot replace $alignment with validated MSAfix output $tmpOutput: $!\n";
+	retry_rename($tmpOutput, $alignment, label => "publish validated MSAfix alignment");
 }
 
 
@@ -4516,8 +4690,10 @@ sub publishStagedTreeInputs {
 			die "Compression did not produce staged tree input $source\n" unless -s $source;
 		}
 		my $destination = File::Spec->catfile($output, basename($source));
-		move($source, $destination)
-			or die "Cannot publish staged tree input $source as $destination: $!\n";
+		retry_operation(
+			label => "publish staged tree input $destination",
+			code => sub { move($source, $destination) && -s $destination },
+		);
 	}
 
 	@missing = grep { !fileGZs($_) } @{$requiredInputs};
@@ -4541,19 +4717,48 @@ sub writeCompletionMarker {
 		if $relative eq File::Spec->curdir || grep { $_ eq File::Spec->updir } @relativeParts;
 
 	my $temporaryMarker = "$marker.tmp.$$";
-	unlink $temporaryMarker or die "Cannot remove stale completion marker $temporaryMarker: $!\n"
-		if -e $temporaryMarker;
-	open my $markerHandle, ">", $temporaryMarker
-		or die "Cannot create completion marker $temporaryMarker: $!\n";
+	retry_unlink($temporaryMarker, label => "clear stale completion marker");
+	my $markerHandle = retry_open('>', $temporaryMarker, label => "create completion marker");
 	print {$markerHandle} "buildTree5\t$version\t$treePath\n"
 		or die "Cannot write completion marker $temporaryMarker: $!\n";
-	close $markerHandle or die "Cannot close completion marker $temporaryMarker: $!\n";
-	rename $temporaryMarker, $marker
-		or die "Cannot publish completion marker $marker: $!\n";
+	retry_close($markerHandle, "close completion marker $temporaryMarker");
+	retry_rename($temporaryMarker, $marker, label => "publish completion marker $marker");
 	print "Validated primary tree and published completion marker: $marker\n";
 }
 
 
+
+sub writeOutcomeMarker {
+	my ($markerPath, $status, $reason, $details, $outputDirectory) = @_;
+	return unless defined($markerPath) && length($markerPath);
+	die "Unsafe lifecycle status '$status'\n" unless $status =~ /^[a-z0-9_]+$/;
+	my $marker = File::Spec->canonpath(File::Spec->rel2abs($markerPath));
+	my $output = File::Spec->canonpath(File::Spec->rel2abs($outputDirectory));
+	my $relative = File::Spec->abs2rel($marker, $output);
+	die "Lifecycle marker must be inside the output directory: $marker\n"
+		if $relative eq File::Spec->curdir || $relative =~ /^\.\.(?:[\\\/]|$)/;
+	my $temporary = "$marker.tmp.$$";
+	retry_unlink($temporary, label => "clear stale lifecycle marker");
+	my $handle = retry_open('>', $temporary, label => "create lifecycle marker");
+	$reason //= ''; $reason =~ s/[\t\r\n]+/ /g;
+	print {$handle} "status\t$status\nreason\t$reason\nversion\t$version\n"
+		or die "Cannot write lifecycle marker $temporary: $!\n";
+	for my $key (sort keys %{$details || {}}) {
+		my $value = defined($details->{$key}) ? $details->{$key} : '';
+		$value =~ s/[\t\r\n]+/ /g;
+		print {$handle} "$key\t$value\n"
+			or die "Cannot write lifecycle marker $temporary: $!\n";
+	}
+	retry_close($handle, "close lifecycle marker $temporary");
+	retry_rename($temporary, $marker, label => "publish lifecycle marker $marker");
+	print "Published lifecycle outcome: $status ($marker)\n";
+}
+
+sub clearLifecycleMarker {
+	my ($marker, $label) = @_;
+	return 1 unless defined($marker) && length($marker);
+	return retry_unlink($marker, fatal => 0, label => $label || "clear lifecycle marker");
+}
 sub safeRemoveTree{
 	my ($path, $parent) = @_;
 	return unless defined($path) && ($path ne "") && (-d $path || -l $path);
@@ -4562,16 +4767,18 @@ sub safeRemoveTree{
 	my $relative = File::Spec->abs2rel($absolutePath, $absoluteParent);
 	die "Refusing to remove $absolutePath outside $absoluteParent\n"
 		if $relative eq File::Spec->curdir || $relative =~ /^\.\.(?:[\\\/]|$)/;
-	my $errors;
-	remove_tree($absolutePath, {error => \$errors});
-	if ($errors && @{$errors}){
-		my @messages;
-		for my $entry (@{$errors}){
-			my ($failedPath, $message) = %{$entry};
-			push @messages, "$failedPath: $message";
-		}
-		die "Failed to remove directory tree $absolutePath: ".join("; ", @messages)."\n";
-	}
+	retry_operation(
+		label => "remove directory tree $absolutePath",
+		code => sub {
+			my $errors;
+			remove_tree($absolutePath, {error => \$errors});
+			if ($errors && @{$errors}) {
+				my @messages = map { my ($p, $m) = %{$_}; "$p: $m" } @{$errors};
+				die join('; ', @messages)."\n";
+			}
+			return !-e $absolutePath && !-l $absolutePath;
+		},
+	);
 }
 
 
