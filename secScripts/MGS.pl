@@ -64,7 +64,7 @@ use Mods::geneCat qw(readMG_LCA);
 use Mods::Binning qw (getBinSubdirName createBin2 createBinCtgs runMetaBat runCheckM runCheckM2 createBinFAA readMGS MB2assignedBinIds);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
 use Mods::WorkflowResilience qw(
-	retry_unlink retry_rename retry_open retry_close atomic_write_text
+	retry_unlink retry_rename atomic_write_text
 	write_workflow_record preflight_executable preflight_directory
 	preflight_capacity
 );
@@ -574,11 +574,12 @@ if (!$activeMGSCount && !$preservedMGSCount && $weightedMGSCount) {
 	$activatedOnlyWeighted = 1;
 }
 if ($useWeightedMGSscores && !$preservedMGSCount && !$activatedOnlyWeighted){
-	unlink "${finalClusters2}UW" or die "Cannot remove empty ${finalClusters2}UW: $!\n"
+	retry_unlink("${finalClusters2}UW", label => 'remove empty preserved MGS assignments')
 		if -e "${finalClusters2}UW";
 	if ($activeMGSCount && $weightedMGSCount) {
-		rename $finalClusters2, "${finalClusters2}UW" or die "Cannot preserve $finalClusters2: $!\n";
-		rename $finalClustersW, $finalClusters2 or die "Cannot activate weighted clusters $finalClustersW: $!\n";
+		retry_rename($finalClusters2, "${finalClusters2}UW", label => 'preserve unweighted MGS assignments');
+		retry_rename($finalClustersW, $finalClusters2,
+			label => 'activate preferred weighted MGS assignments');
 		$activeMGSCount = $weightedMGSCount;
 	} elsif ($activeMGSCount) {
 		warn "Weighted MGS assignments were not produced; retaining the valid unweighted assignments\n";
@@ -617,6 +618,7 @@ unlink $noMGSSto or die "Cannot remove stale $noMGSSto: $!\n" if -e $noMGSSto;
 #die;
 
 printL "---------------------------------------------------------------------\n";
+_mgs_workflow_stage('stage-2-phylogeny-and-annotation');
 printL "Stage I clustering done, MGS calculated.\nProgressing to Stage II: annotations, phylogenies and abundances\n";
 printL "Using $finalClustersFilt as MGS rep\n";
 printL "---------------------------------------------------------------------\n";
@@ -681,6 +683,7 @@ if ($coreMGSCount < 3) {
 my $binD = "$outD/Genomes/MGS_GC/";
 my $binDctg = "$outD/Genomes/MGS_ctg/";
 my $binDctgFam = "$outD/Genomes/MGS_ctg_fam/";
+_mgs_workflow_stage('representative-genome-extraction');
 make_path($binD, $binDctg, $binDctgFam);
 my $binExtractionValid = _checkpoint_valid($BinExtrSto);
 $binExtractionValid &&= _representative_contig_outputs_valid($binDctg);
@@ -722,6 +725,7 @@ my @jobs2wait=();
 my $GTDBtaxF = "$annoDir/GTDBTK.tax";
 if (!-e $GTDBtaxF || !-e"$annoDir/gtdbtk.summary.tsv" || !_checkpoint_valid($GTDBtaxSto)){
 	my $GTDBtax = getProgPaths("taxPerMGSgtdb_scr");
+_mgs_workflow_stage('taxonomy-and-abundance');
 	my $memGTDB = 230; 
 	#$memGTDB = 300;#high mem situation..
 	my $cmd = "$GTDBtax $binD $canCore $nodeTmpD/GTDBmgs/ $outD\n";
@@ -915,9 +919,11 @@ if (!$betweenTreeSkipped && !-s $treePdf) {
 #process ends here unless strains need to be calculated
 if ($doStrains == 0){
 	printL "\n\nCompound Binning script finished.. no strain analysis set\n";
+	_mgs_workflow_stage('controller-complete');
 	close LOG;
 	exit(0);
 }
+_mgs_workflow_stage('within-MGS-strain-submission');
 print "\n\n########################\nStarting strain delineation MGS\n########################\n";
 
 if ($wait4stone ne ""){
@@ -978,6 +984,7 @@ $QSBopt{tmpSpace} =$tmpSHDD;
 
 #get phylogenies intra-species.. this requires a lot of power and best called from big cluster..
 printL "Compound Binning script finished; within-MGS strain jobs were prepared in $logDir/strainMGS.sh\n";
+_mgs_workflow_stage('controller-complete');
 close LOG;
 exit(0);
 
@@ -1003,6 +1010,12 @@ exit(0);
 #####################################################################
 #####################################################################
 # Subroutines
+
+sub _mgs_workflow_stage {
+	$mgsWorkflowStage = $_[0] if defined($_[0]) && length($_[0]);
+	return unless $mgsWorkflowActive;
+	write_workflow_record($mgsHeartbeatPath, status => 'running', stage => $mgsWorkflowStage);
+}
 
 sub _read_one_line {
 	my ($file) = @_;
@@ -1228,12 +1241,12 @@ sub _write_single_mgs_observations {
 
 sub _finish_without_mgs {
 	my ($reason, $report_file, $checkpoint_file) = @_;
-	open my $fh, '>', $report_file or die "Cannot write $report_file: $!\n";
-	print {$fh} "MGS reconstruction completed without a usable MGS.\nReason: $reason\n"
-		or die "Cannot write $report_file: $!\n";
-	close $fh or die "Cannot close $report_file: $!\n";
+	atomic_write_text($report_file,
+		"MGS reconstruction completed without a usable MGS.\nReason: $reason\n",
+		label => 'publish no-usable-MGS report');
 	_touch_checkpoint($checkpoint_file, 'no-usable-mgs', $report_file);
 	printL "MGS reconstruction completed without a usable MGS: $reason\n";
+	_mgs_workflow_stage('valid-no-usable-MGS');
 	close LOG or die "Cannot close MGS pipeline log: $!\n";
 	exit 0;
 }

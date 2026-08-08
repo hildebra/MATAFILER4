@@ -66,6 +66,10 @@ use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsu
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
+use Mods::WorkflowResilience qw(
+	retry_unlink atomic_write_text write_workflow_record
+	preflight_executable preflight_directory preflight_capacity
+);
 use Mods::WorkflowControl qw(
 	advance_loop_window overlap_loop_window rolling_completed_frontier rolling_loop_transition parse_loop_spec should_rerun_locked_window assembly_cores_for_input assembly_group_output_dirs parse_ignored_samples
 	balanced_parallel_batches
@@ -214,7 +218,33 @@ sub createConsSNPandSVs;
 #       sample-specific MF4.sentinel.<SampleID>.json filenames.
 #4.42: 5.8.26: mark primary cleaned-read sets with no FASTQ records as
 #       SMPL.empty and prevent empty MEGAHIT assemblies.
-my $MATFILER_ver = 4.42;
+#4.43: 8.8.26: add lightweight HPC startup checks, durable controller-stage
+#       diagnostics, and bounded retries for recovery-critical publication
+#       without additional sample scans or scheduler polling.
+my $MATFILER_ver = 4.43;
+my $matafWorkflowActive = 0;
+my $matafWorkflowStage = 'startup';
+my $matafHeartbeatPath = '';
+my $matafFailurePath = '';
+
+
+END {
+	my $exitStatus = $?;
+	if ($matafWorkflowActive) {
+		if ($exitStatus == 0) {
+			write_workflow_record($matafHeartbeatPath,
+				status => 'completed', stage => $matafWorkflowStage);
+			retry_unlink($matafFailurePath, fatal => 0,
+				label => 'clear obsolete MATAFILER controller failure');
+		} else {
+			my $reason = $@ || "controller exit status $exitStatus";
+			write_workflow_record($matafFailurePath,
+				status => 'failed', stage => $matafWorkflowStage,
+				reason => $reason);
+		}
+	}
+	$? = $exitStatus;
+}
 
 #----------------- defaults ----------------- 
 
@@ -362,6 +392,27 @@ if ($MFconfig{inspectState}) {
 	runStateInspection();
 	exit(0);
 }
+die "No samples are available for MATAFILER execution\n" unless @samples;
+my $controllerBaseOut = sample_base_output_dir($map{$samples[0]}{wrdir}, $samples[0]);
+my $controllerAuditDir = "$controllerBaseOut/LOGandSUB/workflow";
+preflight_directory($controllerAuditDir, 'MATAFILER controller audit directory');
+$matafHeartbeatPath = "$controllerAuditDir/MATAF4.heartbeat.tsv";
+$matafFailurePath = "$controllerAuditDir/MATAF4.failure.tsv";
+$matafWorkflowActive = 1;
+$SIG{TERM} = sub { die "MATAFILER controller received SIGTERM\n" };
+$SIG{INT} = sub { die "MATAFILER controller received SIGINT\n" };
+$SIG{HUP} = sub { die "MATAFILER controller received SIGHUP\n" };
+_mataf_workflow_stage('preflight');
+retry_unlink($matafFailurePath, fatal => 0, label => 'clear stale MATAFILER failure record');
+preflight_capacity($controllerAuditDir, 'MATAFILER output filesystem');
+if (length($runOptions{sharedTmpDir})) {
+	preflight_directory($runOptions{sharedTmpDir}, 'MATAFILER shared temporary directory');
+	preflight_capacity($runOptions{sharedTmpDir}, 'MATAFILER shared temporary filesystem');
+}
+preflight_executable($pigzBin, 'pigz');
+preflight_executable($smtBin, 'samtools');
+_mataf_workflow_stage('submission-loop');
+
 runAutomaticWorkflowPreflight($workflowIteration) if ($MFconfig{autoStatePlan});
 
 
@@ -481,8 +532,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		} else {
 			my $activeLockJobs = sampleLockActiveJobs($smplLockF, $QSBoptHR);
 			if (defined($activeLockJobs) && $activeLockJobs == 0) {
-				unlink $smplLockF
-					or die "Cannot release completed sample lock $smplLockF: $!\n";
+				retry_unlink($smplLockF,
+					label => 'release completed MATAFILER sample lock');
 				print "Released completed sample lock for $SmplName\n"
 					unless $MFconfig{silent};
 			} else {
@@ -2219,6 +2270,7 @@ print "###################################\n\n";
 
 
 
+_mataf_workflow_stage('controller-complete');
 close $QSBoptHR->{LOG};
 exit(0);
 
@@ -3221,6 +3273,7 @@ sub loop2C_check(){
 
 
 sub postprocess{
+	_mataf_workflow_stage('postprocess');
 	#print "\n\n###################################\nMain Loop done\n######################################\n";
 	#global clean up cmds (like DB removals from scratch)
 	print "Postprocessing:\n";
@@ -3289,11 +3342,7 @@ sub postprocess{
 	if (%{$runReport{samples}}) {
 		my $statsWriteStarted = clock_gettime(CLOCK_MONOTONIC);
 		my $statsText = _metag_stats_text($runReport{samples}, $runReport{order});
-		my $temporary = "$MGSfile.tmp.$$";
-		open my $statsFH, '>', $temporary or die "Cannot write temporary metagStats '$temporary': $!\n";
-		print {$statsFH} $statsText or die "Cannot write metagStats data: $!\n";
-		close $statsFH or die "Cannot close temporary metagStats '$temporary': $!\n";
-		rename $temporary, $MGSfile or die "Cannot promote metagStats '$temporary' to '$MGSfile': $!\n";
+		atomic_write_text($MGSfile, $statsText, label => 'publish metagStats summary');
 		my $statsSeconds = $statsCollectionSeconds
 			+ clock_gettime(CLOCK_MONOTONIC) - $statsWriteStarted;
 		printf "Created sample summary table for %d sample(s) in %.2f s.\n",
@@ -4652,6 +4701,12 @@ sub isLastSampleInAssembly{
 }
 
 
+sub _mataf_workflow_stage {
+	$matafWorkflowStage = $_[0] if defined($_[0]) && length($_[0]);
+	return unless $matafWorkflowActive;
+	write_workflow_record($matafHeartbeatPath, status => 'running', stage => $matafWorkflowStage);
+}
+
 sub workflowStateOptions {
 	return {
 		assembly_mode => $MFopt{DoAssembly},
@@ -4688,10 +4743,7 @@ sub runStateInspection {
 	);
 	if ($MFconfig{stateReport} ne '') {
 		my $json = encode_state_report($report);
-		open my $fh, '>', $MFconfig{stateReport}
-			or die "Cannot write state report $MFconfig{stateReport}: $!\n";
-		print {$fh} $json;
-		close $fh;
+		atomic_write_text($MFconfig{stateReport}, $json, label => 'publish workflow state report');
 		print "Wrote read-only state report to $MFconfig{stateReport}\n";
 	}
 
@@ -4699,10 +4751,7 @@ sub runStateInspection {
 		my $plan = build_workflow_plan($report);
 		my $json = encode_workflow_plan($plan);
 		if ($MFconfig{planReport} ne '') {
-			open my $fh, '>', $MFconfig{planReport}
-				or die "Cannot write workflow plan $MFconfig{planReport}: $!\n";
-			print {$fh} $json;
-			close $fh;
+			atomic_write_text($MFconfig{planReport}, $json, label => 'publish workflow plan');
 			print "Wrote read-only repair/submission plan to $MFconfig{planReport}\n";
 		} else {
 			print STDOUT $json;
@@ -4725,20 +4774,14 @@ sub runAutomaticWorkflowPreflight {
 		iteration => $iteration,
 	);
 
-	my $auditDir = $baseOut ne '' ? "$baseOut/LOGandSUB/workflow" : '';
+	my $auditDir = $controllerAuditDir;
 	if ($auditDir ne '') {
 		make_path($auditDir) unless (-d $auditDir);
 		my $suffix = sprintf('%03d', $iteration);
 		my $statePath = "$auditDir/state.iteration-$suffix.json";
 		my $planPath = "$auditDir/plan.iteration-$suffix.json";
-		open my $stateFH, '>', $statePath
-			or die "Cannot write automatic state report $statePath: $!\n";
-		print {$stateFH} encode_state_report($result->{state});
-		close $stateFH;
-		open my $planFH, '>', $planPath
-			or die "Cannot write automatic workflow plan $planPath: $!\n";
-		print {$planFH} encode_workflow_plan($result->{plan});
-		close $planFH;
+		atomic_write_text($statePath, encode_state_report($result->{state}), label => 'publish automatic state report');
+		atomic_write_text($planPath, encode_workflow_plan($result->{plan}), label => 'publish automatic workflow plan');
 	}
 
 	my $repairSummary = $result->{repairs};

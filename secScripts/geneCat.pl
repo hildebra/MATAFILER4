@@ -33,6 +33,10 @@ use Mods::FuncTools qw(assignFuncPerGene calc_modules);
 use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins  attachProteins3 );
 use Mods::Binning qw(getBinSubdirName);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
+use Mods::WorkflowResilience qw(
+	retry_unlink retry_rename atomic_write_text write_workflow_record
+	preflight_executable preflight_directory preflight_capacity
+);
 use Mods::CatalogPaths qw(catalog_identity catalog_map_specs_match resolve_catalog_maps write_catalog_maps);
 
 sub geneCatFlow;
@@ -239,7 +243,7 @@ sub _sync_file {
 sub _new_gzip_output {
 	my ($final_file) = @_;
 	my $partial_file = "$final_file.part.gz";
-	unlink $partial_file or die "Cannot remove stale partial file $partial_file: $!\n"
+	retry_unlink($partial_file, label => 'remove stale gene-catalog gzip partial')
 		if -e $partial_file;
 	my $gzip = gzipwrite(
 		$partial_file,
@@ -254,18 +258,8 @@ sub _publish_gzip_output {
 	close $gzip or die "pigz failed while writing $partial_file (status $?)\n";
 	die "gzip produced an empty file: $partial_file\n" unless -s $partial_file;
 	_sync_file($partial_file);
-	unless (rename $partial_file, $final_file) {
-		my $rename_error = $!;
-		# POSIX rename replaces atomically. This fallback is only for platforms
-		# (notably Windows) that refuse to replace an existing destination.
-		if (-e $final_file) {
-			unlink $final_file or die "Cannot replace old batch file $final_file: $!\n";
-			rename $partial_file, $final_file
-				or die "Cannot publish completed gzip file $partial_file as $final_file: $!\n";
-		} else {
-			die "Cannot publish completed gzip file $partial_file as $final_file: $rename_error\n";
-		}
-	}
+	retry_rename($partial_file, $final_file,
+		label => 'publish completed gene-catalog gzip batch');
 }
 
 sub _append_file_locked {
@@ -300,9 +294,9 @@ sub _append_file_locked {
 		1;
 	};
 	my $error = $@;
-	unlink $lock_file or die "Cannot remove lock $lock_file: $!\n";
+	retry_unlink($lock_file, label => 'release gene-catalog append lock');
 	die $error unless $ok;
-	unlink $source or die "Cannot remove transferred file $source: $!\n";
+	retry_unlink($source, label => 'remove transferred gene-catalog batch');
 }
 
 sub _merge_missed_sample_files {
@@ -373,8 +367,33 @@ sub _safe_reset_dir {
 #.51: 26.3.25: small fix to ensure preprocessing takes the right start sample (could skip large numbers sometimes, due to rounding errors)
 #.52: streamed FASTA collation, durable gzip publication, checkpoint manifests, and cluster-ID propagation
 #.53: use matrix cardinality for sparse-stage skips, preserve dry-run commands, and accept empty Canopy/Kraken results
-my $version = 0.55;
+#.56: lightweight HPC preflight, stage/failure records, and bounded retries for
+#     recovery-critical catalogue publication
+my $version = 0.56;
 $| = 1;
+my $geneCatWorkflowActive = 0;
+my $geneCatWorkflowStage = 'startup';
+my $geneCatHeartbeatPath = '';
+my $geneCatFailurePath = '';
+
+
+END {
+	my $exitStatus = $?;
+	if ($geneCatWorkflowActive) {
+		if ($exitStatus == 0) {
+			write_workflow_record($geneCatHeartbeatPath,
+				status => 'completed', stage => $geneCatWorkflowStage);
+			retry_unlink($geneCatFailurePath, fatal => 0,
+				label => 'clear obsolete gene-catalog failure record');
+		} else {
+			my $reason = $@ || "controller exit status $exitStatus";
+			write_workflow_record($geneCatFailurePath,
+				status => 'failed', stage => $geneCatWorkflowStage,
+				reason => $reason);
+		}
+	}
+	$? = $exitStatus;
+}
 
 my $justCDhit = 1; #always set default to 0, to dangerous otherwise..
 my $doSubmit = 1; my $qsubNow = 1;
@@ -698,8 +717,29 @@ die "No samples were found in the mapping input: $mapF\n" unless $numSmpls;
 my $bucketCnt = 0; my $cnt = 0; my @bucketDirs = ();
 my $bdir = $GCdir."B$bucketCnt/";#dir where to write the output files..
 make_path($qsubDir) unless -d $qsubDir;
+my $geneCatRunTag = $mode eq 'geneCat' ? 'geneCat' : "geneCat.$mode";
+$geneCatRunTag .= ".batch-$SmplBatch" if $mode eq 'subprepSmpls' && $SmplBatch >= 0;
+$geneCatRunTag =~ s/[^A-Za-z0-9_.-]+/_/g;
+$geneCatHeartbeatPath = "$qsubDir/$geneCatRunTag.heartbeat.tsv";
+$geneCatFailurePath = "$qsubDir/$geneCatRunTag.failure.tsv";
+$geneCatWorkflowActive = 1;
+$SIG{TERM} = sub { die "geneCat controller received SIGTERM\n" };
+$SIG{INT} = sub { die "geneCat controller received SIGINT\n" };
+$SIG{HUP} = sub { die "geneCat controller received SIGHUP\n" };
+_gene_cat_workflow_stage('preflight');
+retry_unlink($geneCatFailurePath, fatal => 0, label => 'clear stale geneCat failure record');
 my $QSBoptHR = emptyQsubOpt($doSubmit,"",$submSys);#,"bash"
 $QSBoptHR->{qsubDir} = $qsubDir;
+if ($mode eq 'geneCat') {
+	preflight_directory($GCdir, 'gene-catalog output directory');
+	preflight_directory($tmpDir, 'gene-catalog temporary directory');
+	preflight_capacity($GCdir, 'gene-catalog output filesystem');
+	preflight_capacity($tmpDir, 'gene-catalog temporary filesystem');
+	preflight_executable($pigzBin, 'pigz');
+	preflight_executable($clustMMseq ? $mmseqs2Bin : $cdhitBin,
+		$clustMMseq ? 'MMseqs2' : 'CD-HIT');
+}
+_gene_cat_workflow_stage("mode-$mode");
 #my %QSBopt = %{$QSBoptHR};
 
 #$defaultsCDH = "-d 0 -c 0.$cdhID -g 0 -T $numCor -M ".int(($totMem+30)*1024) if (@ARGV>3);
@@ -769,9 +809,7 @@ if ($mode eq "mergeCLs"){#was previously mergeCls.pl
 #start logging big genecat run..
 make_path($qsubDir) unless -d $qsubDir;
 open LOG, ">", "$qsubDir/GeneCat.log" or die "Cannot open $qsubDir/GeneCat.log: $!\n";
-open my $version_fh, '>', "$GCdir/version.txt" or die "Cannot open $GCdir/version.txt: $!\n";
-print {$version_fh} "$version\n" or die "Cannot write $GCdir/version.txt: $!\n";
-close $version_fh or die "Cannot close $GCdir/version.txt: $!\n";
+atomic_write_text("$GCdir/version.txt", "$version\n", label => 'publish gene-catalog version');
 #autoset batchnum
 if ($batchNum <1){
 	$batchNum = int(scalar(@samples) / 200 )+1;
@@ -787,12 +825,15 @@ make_path($stoneDir) unless -d $stoneDir;
 
 
 #copying genes from dirs into prep files..
+_gene_cat_workflow_stage('collate-genes');
 collateGenes();
 
 #big main step
+_gene_cat_workflow_stage('cluster-and-annotate-catalogue');
 geneCatFlow($bdir,$bucketCnt,$GCdir,$map{opt}{outDir});#,$GCdir);
 
 print "FInished GC step\n";
+_gene_cat_workflow_stage('controller-complete');
 close LOG;
 exit(0);
 
@@ -807,6 +848,12 @@ exit(0);
 
 #####################################################################
 #####################################################################
+sub _gene_cat_workflow_stage {
+	$geneCatWorkflowStage = $_[0] if defined($_[0]) && length($_[0]);
+	return unless $geneCatWorkflowActive;
+	write_workflow_record($geneCatHeartbeatPath, status => 'running', stage => $geneCatWorkflowStage);
+}
+
 sub clusterMultiStep{
 	my ($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,$cmd,$dep1) = @_;
 	#cd-hit way

@@ -264,8 +264,14 @@ like($gene_cat, qr/sysopen\(\$lock_fh, \$lock_file, O_CREAT \| O_EXCL/,
      'parallel gene batches acquire their append lock atomically');
 unlike($gene_cat, qr/open \$OC,"\| gzip/,
        'batch compression avoids inline gzip shell pipelines');
-like($gene_cat, qr/sub _publish_gzip_output.*?close \$gzip.*?_sync_file\(\$partial_file\).*?rename \$partial_file, \$final_file/s,
-     'gzip publication closes, synchronizes, and atomically renames its partial file');
+like($gene_cat, qr/sub _publish_gzip_output.*?close \$gzip.*?_sync_file\(\$partial_file\).*?retry_rename\(\$partial_file, \$final_file/s,
+     'gzip publication closes, synchronizes, and atomically renames its partial file with bounded retries');
+like($gene_cat, qr/geneCatRunTag.*?batch-\$SmplBatch.*?geneCatHeartbeatPath.*?geneCatFailurePath/s,
+	'parallel gene-catalog workers use distinct compact lifecycle records');
+like($gene_cat, qr/if \(\$mode eq 'geneCat'\) \{.*?preflight_directory.*?preflight_capacity.*?preflight_executable/s,
+	'costlier gene-catalog startup checks run only in the main controller, not sample workers');
+like($gene_cat, qr/_gene_cat_workflow_stage\('collate-genes'\).*?_gene_cat_workflow_stage\('cluster-and-annotate-catalogue'\).*?sub _gene_cat_workflow_stage/s,
+	'geneCat records coarse controller stages without per-sample heartbeat writes');
 like($gene_cat, qr/sub _append_file_locked.*?_sync_file\(\$source\).*?->sync\(\)/s,
      'batch append synchronizes both its completed source and aggregate output');
 like($gene_cat, qr/sub _for_each_fasta_record.*?while \(my \$line = <\$fh>\)/s,

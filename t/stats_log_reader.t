@@ -94,7 +94,7 @@ close $mataf4_fh or die "Cannot close MATAF4.pl: $!";
 my ($postprocess_code) = $mataf4_stats =~ /(sub postprocess.*?)(?=\nsub spaceInAssGrp)/s;
 ok(defined($postprocess_code), 'postprocessing can be isolated for performance checks');
 like($postprocess_code,
-	qr/read_sample_completion\(.*?\$closedSample->\{metagstats\}.*?my \$statsCollectionSeconds.*?my \$statsWriteStarted.*?_metag_stats_text.*?rename \$temporary, \$MGSfile.*?Created sample summary table/s,
+	qr/read_sample_completion\(.*?\$closedSample->\{metagstats\}.*?my \$statsCollectionSeconds.*?my \$statsWriteStarted.*?_metag_stats_text.*?atomic_write_text\(\$MGSfile, \$statsText.*?Created sample summary table/s,
 	"summary timing covers sentinel reads plus table serialization and publication");
 my ($completion_stats_code) = $mataf4_stats =~ /(sub createSampleCompletionSentinel.*?)(?=\nsub cleanupCompletionRequirements)/s;
 ok(defined($completion_stats_code), "sample closure statistics can be isolated");

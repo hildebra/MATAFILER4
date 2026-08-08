@@ -9,7 +9,7 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename
-	preflight_executable preflight_directory filesystem_capacity
+	atomic_write_text write_workflow_record preflight_executable preflight_directory filesystem_capacity
 );
 
 my ($attempts, @sleeps);
@@ -60,4 +60,19 @@ ok(ref($capacity) eq 'HASH', 'filesystem_capacity returns structured capacity st
 ok(exists($capacity->{available_kb}) && exists($capacity->{available_inodes}),
 	'filesystem capacity reports blocks and inodes when df is available');
 
+
+my $atomic = File::Spec->catfile($directory, 'atomic.txt');
+ok(atomic_write_text($atomic, "complete\n"), 'atomic_write_text publishes a complete file');
+open my $atomic_fh, '<', $atomic or die "Cannot read $atomic: $!";
+is(do { local $/; <$atomic_fh> }, "complete\n", 'atomic publication preserves its content');
+close $atomic_fh;
+
+my $record = File::Spec->catfile($directory, 'workflow.tsv');
+ok(write_workflow_record($record, status => 'running', stage => 'test-stage', reason => "line\nbreak"),
+	'write_workflow_record publishes a compact stage record');
+open my $record_fh, '<', $record or die "Cannot read $record: $!";
+my $record_text = do { local $/; <$record_fh> };
+close $record_fh;
+like($record_text, qr/^status\tstage\ttimestamp\tpid\treason\nrunning\ttest-stage\t\d+\t\d+\tline break\n$/,
+	'workflow records are structured and single-line safe');
 done_testing();

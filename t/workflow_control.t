@@ -508,7 +508,7 @@ like($mataf4,
 	qr/sub postSubmQsub.*?recordSampleLockJobs\(\s*\$QSBoptHR->\{LOCKfile\}, \[\$scheduler_job_id\]/s,
 	'accepted deferred submissions record their scheduler ID in the sample lock ledger');
 like($mataf4,
-	qr/sampleLockActiveJobs\(\$smplLockF, \$QSBoptHR\).*?unlink \$smplLockF/s,
+	qr/sampleLockActiveJobs\(\$smplLockF, \$QSBoptHR\).*?retry_unlink\(\$smplLockF/s,
 	'MATAF4 releases a sample lock only after its recorded jobs leave the scheduler');
 like($mataf4,
 	qr/my \$lightweightLocal = commands_are_lightweight_filesystem\(\$unzipcmd\).*?open\(my \$localUnzipFH, '>', \$localUnzipScript\).*?systemW \$unzipcmd.*?qsubSystem\(\$logDir\."UNZP\.sh"/s,
@@ -578,8 +578,14 @@ my ($seed_unzip_source) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=\nsub \w)/s;
 ok(defined($seed_unzip_source), 'seedUnzip2tmp source can be isolated');
 unlike($seed_unzip_source || "", qr/\b(?:discoverReadFiles|parseSupportReads)\s*\(/,
 	'input staging contains no duplicate file-discovery implementation');
-like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?#4\.39:.*?#4\.40:.*?#4\.41:.*?#4\.42:.*?my \$MATFILER_ver = 4\.42;/s,
-	'MATAFILER history retains shared input discovery through version 4.42');
+like($mataf4, qr/#4\.14:.*?cache one validated input discovery.*?#4\.15:.*?#4\.16:.*?#4\.17:.*?#4\.18:.*?#4\.19:.*?#4\.20:.*?#4\.21:.*?#4\.22:.*?#4\.23:.*?#4\.24:.*?#4\.25:.*?#4\.26:.*?#4\.27:.*?#4\.28:.*?#4\.29:.*?#4\.30:.*?#4\.31:.*?#4\.32:.*?#4\.33:.*?#4\.34:.*?#4\.35:.*?#4\.36:.*?#4\.37:.*?#4\.38:.*?#4\.39:.*?#4\.40:.*?#4\.41:.*?#4\.42:.*?#4\.43:.*?my \$MATFILER_ver = 4\.43;/s,
+	'MATAFILER history retains shared input discovery through version 4.43');
+like($mataf4, qr/if \(\$MFconfig\{inspectState\}\).*?controllerAuditDir.*?_mataf_workflow_stage\('preflight'\).*?_mataf_workflow_stage\('submission-loop'\)/s,
+	'MATAFILER initializes its controller record only after read-only inspection routing');
+like($mataf4, qr/sub postprocess\{.*?_mataf_workflow_stage\('postprocess'\).*?atomic_write_text\(\$MGSfile/s,
+	'MATAFILER records postprocessing and atomically publishes its final sample summary');
+like($mataf4, qr/MATAF4\.heartbeat\.tsv.*?MATAF4\.failure\.tsv.*?sub _mataf_workflow_stage/s,
+	'MATAFILER persists coarse controller-stage and failure diagnostics');
 like($mataf4, qr/setConfigFile\(\$MFconfig\{configFile\}\);.*?normalise_ribosome_request\(\\%MFopt\);/s,
 	'RiboFind redo flags enable profiling during option post-processing');
 like($mataf4, qr/my \$riboRedo = \{.*?prepare_ribosome_rerun\(.*?checkRawProgsFin\(.*?\$riboRedo->\{profile\}.*?\$riboRedo->\{assignment\}/s,

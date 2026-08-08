@@ -270,8 +270,14 @@ my ($mgs_main, $mgs_subroutines) = split /# Subroutines\n/, $mgs_source, 2;
 ok(defined($mgs_subroutines), 'MGS has a distinct subroutine section after its main routing');
 unlike($mgs_main, qr/^sub \w+\s*\{/m,
 	'MGS keeps subroutine definitions below its main routing');
-like($mgs_source, qr/my \$MGSpipelineVersion = 0\.51;/,
-	'MGS version includes marker-set-aware between-MGS phylogeny');
+like($mgs_source, qr/my \$MGSpipelineVersion = 0\.52;/,
+	'MGS version includes lightweight HPC resilience');
+like($mgs_source, qr/MGS\.heartbeat\.tsv.*?MGS\.failure\.tsv.*?sub _mgs_workflow_stage/s,
+	'MGS records its current controller stage and fatal-stage diagnostics');
+like($mgs_source, qr/preflight_directory\(\$outD.*?preflight_directory\(\$tmpD.*?preflight_executable\(\$rareBin/s,
+	'MGS performs only constant-time output, temporary-directory, and core-program startup checks');
+like($mgs_source, qr/retry_rename\("\$\{finalClusters2\}UW".*?retry_rename\(\$finalClustersW/s,
+	'MGS retries the recovery-critical weighted assignment handoff');
 like($mgs_source,
 	qr/Starting MGS pipeline v\$MGSpipelineVersion.*?GetOptions\(.*?open LOG,.*?Configuration accepted; loading mapping and catalogue metadata.*?my \@checkpointInputs.*?getDirsPerAssmblGrp/s,
 	'MGS displays startup configuration before loading input metadata');
@@ -359,7 +365,7 @@ like($mgs_source, qr/binExtractionValid.*?remove_tree.*?geneBinFiles.*?contigBin
 like($mgs_source,
 	qr/binExtractionValid.*?_representative_contig_outputs_valid.*?sub _representative_contig_outputs_valid.*?fa\|fna\|fasta.*?\\.gz/s,
 	'bin extraction rejects stale uncompressed or malformed representative-contig outputs');
-like($mgs_source, qr/if \(\$rewrClusterMAGs \|\| \$stage1ProvenanceInvalid\).*?invalidate downstream checkpoint.*?between_phylo.*?within_phylo/s,
+like($mgs_source, qr/if \(\$rewrClusterMAGs \|\| \$stage1ProvenanceInvalid\).*?invalidate downstream .*checkpoint.*?between_phylo.*?within_phylo/s,
 	'reclustering invalidates dependent checkpoints and phylogenies');
 like($mgs_source, qr/"clusterID=i" => \\\$clusterID/,
 	'MGS accepts a gene-catalog cluster identity');
@@ -503,8 +509,8 @@ like($build_tree_source, qr/sub geneFileStem.*?sprintf\("_%02X", ord\(\$1\)\)/s,
 	'compound locus names are encoded safely and deterministically for downstream filenames');
 
 my $gene_cat_source = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'geneCat.pl'));
-like($gene_cat_source, qr/my \$version = 0\.55;/,
-	'geneCat output cleanup increments its workflow version');
+like($gene_cat_source, qr/my \$version = 0\.56;/,
+	'geneCat lightweight resilience increments its workflow version');
 like($gene_cat_source,
 	qr/GeneCat pipeline v\$version.*?Mode:.*?Inputs:.*?Paths:.*?Clustering:.*?Resources:.*?Batches:.*?Downstream:/s,
 	'geneCat starts with a structured runtime configuration header');
