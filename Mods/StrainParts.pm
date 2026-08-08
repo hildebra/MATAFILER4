@@ -175,9 +175,49 @@ sub resolve_fasta_artifact {
 	my $plain_exists = -e $nominal_path;
 	my $gzip_path = "$nominal_path.gz";
 	my $gzip_exists = -e $gzip_path;
-	die "Ambiguous FASTA sidecars exist at $nominal_path and $gzip_path; refusing to choose one\n"
-		if $plain_exists && $gzip_exists;
+	if ($plain_exists && $gzip_exists) {
+		my @candidates;
+		for my $path ($nominal_path, $gzip_path) {
+			my $records = fasta_record_count($path);
+			push @candidates, [$path, $records] if defined $records;
+		}
+		unless (@candidates) {
+			warn "Ambiguous FASTA sidecars at $nominal_path and $gzip_path became unreadable; "
+				."continuing as if neither artifact is present\n";
+			return '';
+		}
+		@candidates = sort {
+			$b->[1] <=> $a->[1]
+				|| $a->[0] cmp $b->[0]
+		} @candidates;
+		my ($chosen, $chosen_records) = @{$candidates[0]};
+		my $counts = join(', ', map { "$_->[0]=$_->[1] record(s)" } @candidates);
+		warn "Ambiguous FASTA sidecars at $nominal_path and $gzip_path; "
+			."using $chosen with the most FASTA records ($counts)\n";
+		return $chosen;
+	}
 	return $plain_exists ? $nominal_path : $gzip_exists ? $gzip_path : '';
+}
+
+sub fasta_record_count {
+	my ($path) = @_;
+	return undef unless defined($path) && -e $path;
+	my ($fh, $ok);
+	if ($path =~ /\.gz\z/) {
+		($fh, $ok) = eval { gzipopen($path, 'FASTA sidecar record count', 1, 0) };
+		return undef unless $ok && defined $fh;
+	} else {
+		return undef unless open($fh, '<', $path);
+	}
+	my $records = 0;
+	my $read_ok = eval {
+		while (my $line = <$fh>) {
+			$records++ if $line =~ /^>/;
+		}
+		close $fh;
+		1;
+	};
+	return $read_ok ? $records : undef;
 }
 
 sub append_fasta_records_atomic {

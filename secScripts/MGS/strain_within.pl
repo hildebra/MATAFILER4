@@ -1185,9 +1185,11 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $treeTmpGb = int(($inputFNAsize * 4 + 1023) / 1024);
 	$treeTmpGb = 15 if $treeTmpGb < 15;
 	$QSBoptHR->{tmpSpace} = $nodeTmpConfigured ? $treeTmpGb : 0;
-	my $baseMemMult = 150; $baseMemMult = 30 if ($phyloProg ==3 || $phyloProg ==2);
+	# Tree inputs are now streamed and IQ-TREE receives its own explicit cap, so
+	# retain approximately half of the historical scheduler allocation.
+	my $baseMemMult = 75; $baseMemMult = 15 if ($phyloProg ==3 || $phyloProg ==2);
 	my $totMem = int($inputFNAsize *$baseMemMult * $memMulti);
-	$totMem = 10000*$memMulti if ($totMem < 10000);$totMem = 220000*$memMulti if ($totMem > 220000);
+	$totMem = 5000*$memMulti if ($totMem < 5000);$totMem = 110000*$memMulti if ($totMem > 110000);
 	my $iqMemMB = int($totMem * 0.9); #reserve 10% for buildTree/Perl and runtime overhead
 	my $numCoreL = $numCores;	
 	if ($maxCores >0){ #scale cores according to used memory size

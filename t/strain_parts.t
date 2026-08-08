@@ -126,10 +126,18 @@ is($gzip_contents, ">sample\nMPEP\n>outgroup\nMTEST\n",
 
 my $ambiguous = File::Spec->catfile($tmp, 'ambiguous.fna');
 write_file($ambiguous, ">plain\nAAAA\n");
-gzip \">gzip\nCCCC\n" => "$ambiguous.gz"
+gzip \">gzip1\nCCCC\n>gzip2\nGGGG\n" => "$ambiguous.gz"
 	or die "Cannot create ambiguous gzip fixture: $GzipError";
-eval { append_fasta_records_atomic($ambiguous, ">new\nGGGG\n") };
-like($@, qr/Ambiguous FASTA sidecars/, 'ambiguous plain/gzip sidecars fail instead of corrupting either copy');
+my $sidecar_warning = '';
+{
+	local $SIG{__WARN__} = sub { $sidecar_warning .= shift };
+	is(resolve_fasta_artifact($ambiguous), "$ambiguous.gz",
+		'ambiguous FASTA sidecars choose the candidate with the most records');
+}
+like($sidecar_warning, qr/Ambiguous FASTA sidecars.*?using .*?\.gz with the most FASTA records/s,
+	'ambiguous FASTA selection emits a recovery warning');
+is(append_fasta_records_atomic($ambiguous, ">new\nTTTT\n"), "$ambiguous.gz",
+	'ambiguous sidecars continue by appending to the fuller FASTA candidate');
 
 my $unsorted_fasta = File::Spec->catfile($tmp, 'unsorted.fna');
 write_file($unsorted_fasta,
