@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.89;/,
-	'terminal no-tree resume validation increments the workflow version');
+like($strain, qr/my \$version = 0\.91;/,
+	'lightweight resume and exact scratch reuse increment the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -264,8 +264,29 @@ like($strain,
 	qr/sub stagedMGSInputsReady .*?aggregateComplete.*?hasFreshParts.*?split_generation_complete.*?return 0 if grep.*?stagedMGSInputsReady\(\$MGS\)/s,
 	'the resume audit accepts only a complete staged FNA/FAA/category set');
 like($strain,
-	qr/sub persistentMGSInputState .*?\$FNAstdof, \$FAAstdof, \$CATstdof.*?return 'complete'.*?return 'incomplete'.*?sub scratchMGSInputState .*?return 'complete' if stagedMGSInputsReady/s,
+	qr/sub persistentMGSInputState .*?persistentMGSInputStateCache.*?\$FNAstdof, \$FAAstdof, \$CATstdof.*?my \$state = .*?'complete'.*?'incomplete'.*?sub scratchMGSInputState .*?scratchMGSInputStateCache.*?stagedMGSInputsReady.*?'complete'/s,
 	'published reuse requires the complete FNA/FAA/category triplet while complete Stage-I staging remains reusable');
+like($strain,
+	qr/sub stagedMGSInputsReady .*?return 1 if \$aggregateComplete;.*?exact_worker_parts/s,
+	'a committed staged aggregate avoids repeated worker-part directory scans');
+like($strain,
+	qr/my \(%persistentMGSInputStateCache, %scratchMGSInputStateCache\).*?sub invalidateMGSInputState .*?delete \@persistentMGSInputStateCache.*?delete \@scratchMGSInputStateCache/s,
+	'published and scratch triplet states are cached and explicitly invalidated after mutations');
+like($strain,
+	qr/my \$completedTree = .*?treeDone\.sto.*?fileGZs\(\$completedTree\).*?Avoid opening and decompressing its category sidecar again.*?next;.*?fileGZe\("\$SIdirs\{\$MGS\}\/\$CATstdof"\)/s,
+	'a validated completed tree bypasses compressed category-sidecar inspection');
+my ($quickWorkerValidation) = $strain =~
+	/(sub validatePhase1WorkerLedger .*?)(?=sub phase1WorkersNeedingRetry)/s;
+ok(defined($quickWorkerValidation),
+	'Phase-I worker prevalidation is available for resume repair');
+unlike($quickWorkerValidation, qr/while\s*\(/,
+	'Phase-I worker prevalidation checks stones and headers without rescanning ledger rows');
+like($strain,
+	qr/sub mergeSampleStats .*?while \(my \$line = <\$in>\).*?Wrong sample-statistics field count.*?sub mergeRecoveryLogs .*?Unexpected MAG recovery header.*?while \(my \$line = <\$in>\) \{ indexRecoveryRow/s,
+	'deep row and cardinality checks remain in the single merge pass');
+like($strain,
+	qr/sub resolveScratchDirectory .*?Reusing recorded scratch directory.*?sub persistScratchDirectory .*?retry_rename\(\$temporary, \$manifest.*?\.strain_within\.scratch\.tsv.*?resolveScratchDirectory\(\$derivedScratch.*?if \(\$subJob\).*?return;.*?persistScratchDirectory\(\$scratchManifest/s,
+	'main and worker resumes restore an atomically persisted catalogue/output-bound scratch directory');
 like($strain,
 	qr/my \$publishedInputState = persistentMGSInputState\(\$MGS\).*?if \(\$publishedInputState ne 'complete'\).*?stagedMGSInputsReady\(\$MGS\).*?\$MGSneedsExtraction\{\$MGS\} = 1/s,
 	'incomplete published or scratch triplets are marked for extraction without discarding a complete staged recovery set');

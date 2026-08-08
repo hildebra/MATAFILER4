@@ -48,6 +48,8 @@ sub histoMGS;
 sub readGenesSample_Singl;
 sub reportingsMGS;
 sub prepRun;
+sub resolveScratchDirectory;
+sub persistScratchDirectory;
 sub printEarlyRunHeader;
 sub prepGene2MGS;
 sub createAGlist; sub preComputeConsSNP;
@@ -56,6 +58,7 @@ sub timeNice;
 #sub combineMGSgenes;
 sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
 sub persistentMGSInputState; sub scratchMGSInputState;
+sub invalidateMGSInputState;
 sub stagedMGSInputsReady; sub evalFileStatus;
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
@@ -234,7 +237,9 @@ END {
 #.87: finish a completed split Phase-I ledger after a main-worker restart
 #.88: persist validated no-tree outcomes and reject unclassified tree inputs
 #.89: retry Phase-I workers, quarantine terminal MGS outcomes, and harden filesystem publication
-my $version = 0.89;
+#.90: cache catalogue-wide input states and avoid duplicate full-ledger validation scans
+#.91: persist the exact shared scratch directory for reliable cross-run resume
+my $version = 0.91;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -763,6 +768,8 @@ my %LocusSeedProteins;
 my $SIgenes; my $Gene2COG; my $Gene2MGS; my $COGprios;
 my %SIdirs; #unified storage of dirs per SI (SI==MGS)
 my %MGSneedsExtraction; #selected MGS with neither published nor staged tree inputs
+my (%persistentMGSInputStateCache, %scratchMGSInputStateCache);
+
 
 
 
@@ -977,6 +984,7 @@ if ($runPartI){
 		
 		#combineMGSgenes();
 	}
+	invalidateMGSInputState(@stageIExtractionMGS);
 	my $emptyMGS = recordValidatedEmptyExtractions(\@stageIExtractionMGS);
 	print "Stage-I terminal-input classification: recorded $emptyMGS MGS with no recoverable loci.\n"
 		if $emptyMGS;
@@ -986,7 +994,11 @@ if ($runPartI){
 } else {
 	print "Skipping Part I, all required per-MGS inputs are already prepared.\n";
 	my $mergedSampleStats = recoverCompletedSplitPhaseI();
-	reportSavedSampleStats() unless $mergedSampleStats;
+	if ($mergedSampleStats) {
+		invalidateMGSInputState(@specis);
+	} else {
+		reportSavedSampleStats();
+	}
 }
 loadRecoveryContributionIndex() unless $recoveryContributionIndexReady;
 
@@ -1287,6 +1299,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	%outgroupGeneCache = ();
 	$mosaicOutgroupsUsed{$MGS} = 1 if $inputReady && exists($PreferredOutgroup{$MGS})
 		&& length($OG) && $OG eq $PreferredOutgroup{$MGS};
+	invalidateMGSInputState($MGS) if $inputReady;
 	unless ($inputReady) {
 		$treeDisposition{'input awaiting repair'}++;
 		$QSBoptHR->{tmpSpace} = $tmpSHDD;
@@ -2187,6 +2200,7 @@ sub validateTreeInputResolution {
 	} else {
 		retry_unlink($repairQueue, fatal => 0, label => 'clear obsolete tree-input repair queue');
 	}
+	return scalar(@repairRequired);
 }
 
 
@@ -2366,6 +2380,78 @@ sub prepGene2MGS{
 		.".\n";
 }
 
+sub resolveScratchDirectory {
+	my ($derived, $manifest, $catalogIdentity, $canonicalOutD, $outDname) = @_;
+	return $derived unless -s $manifest;
+
+	open my $input, '<', $manifest or do {
+		limitedWarn('scratch manifest',
+			"Cannot read scratch-directory manifest $manifest: $!; using $derived\n");
+		return $derived;
+	};
+	my $header = <$input> // '';
+	my $row = <$input> // '';
+	my $extra = '';
+	while (my $line = <$input>) {
+		$extra .= $line if $line =~ /\S/;
+	}
+	close $input;
+	$header =~ s/[\r\n]+\z//;
+	$row =~ s/[\r\n]+\z//;
+	my @fields = split /\t/, $row, -1;
+	my $valid = $header eq join("\t",
+		qw(version catalog_identity output_path scratch_directory))
+		&& @fields == 4 && $fields[0] eq '1'
+		&& $fields[1] eq $catalogIdentity
+		&& $fields[2] eq $canonicalOutD
+		&& !$extra && File::Spec->file_name_is_absolute($fields[3])
+		&& $fields[3] !~ /[\t\r\n]/;
+	if ($valid) {
+		my $normalized = File::Spec->canonpath($fields[3]);
+		my @parts = File::Spec->splitdir($normalized);
+		pop @parts while @parts && $parts[-1] eq '';
+		my $leaf = pop(@parts) // '';
+		my $catalogPart = pop(@parts) // '';
+		my $namespace = pop(@parts) // '';
+		$valid = $namespace eq 'strainsScr1'
+			&& $catalogPart eq $catalogIdentity
+			&& $leaf =~ /^\Q$outDname\E\.[0-9a-f]{16}\z/;
+		if ($valid) {
+			$normalized .= '/' unless $normalized =~ m{/\z};
+			print "Reusing recorded scratch directory: $normalized\n";
+			return $normalized;
+		}
+	}
+	limitedWarn('scratch manifest',
+		"Invalid or stale scratch-directory manifest $manifest; using $derived\n");
+	return $derived;
+}
+
+sub persistScratchDirectory {
+	my ($manifest, $catalogIdentity, $canonicalOutD, $directory) = @_;
+	die "Unsafe scratch-directory manifest fields\n"
+		if grep { !defined($_) || /[\t\r\n]/ }
+			($catalogIdentity, $canonicalOutD, $directory);
+	my $contents = join("\t",
+		qw(version catalog_identity output_path scratch_directory))."\n"
+		.join("\t", 1, $catalogIdentity, $canonicalOutD, $directory)."\n";
+	if (-s $manifest && open(my $existing, '<', $manifest)) {
+		local $/;
+		my $current = <$existing> // '';
+		close $existing;
+		return if $current eq $contents;
+	}
+	my $temporary = "$manifest.tmp.$$";
+	retry_unlink($temporary, fatal => 0, label => 'clean scratch manifest temporary');
+	my $output = retry_open('>', $temporary,
+		label => 'create scratch-directory manifest');
+	print {$output} $contents
+		or die "Cannot write scratch-directory manifest $temporary: $!\n";
+	retry_close($output, 'close scratch-directory manifest');
+	retry_rename($temporary, $manifest,
+		label => 'publish scratch-directory manifest');
+}
+
 sub prepRun{
 
 	$mode = "FMG" if ($MGSfile eq "");
@@ -2394,10 +2480,16 @@ sub prepRun{
 	die "Could not derive safe temporary-directory names\n" unless length($GCname) && length($outDname);
 	my $catalogIdentity = catalog_identity($GCd);
 	my $canonicalOutD = abs_path($outD) || File::Spec->rel2abs($outD);
+	my $manifestOutputPath = File::Spec->canonpath(File::Spec->rel2abs($outD));
 	my $outputIdentity = substr(sha256_hex($canonicalOutD), 0, 16);
-	$scratchD = getProgPaths("globalTmpDir",0);
-	$scratchD = "$outD/.scratch" if $scratchD eq "";
-	$scratchD .= "/strainsScr1/$catalogIdentity/$outDname.$outputIdentity/";
+	my $scratchRoot = getProgPaths("globalTmpDir",0);
+	$scratchRoot = "$outD/.scratch" if $scratchRoot eq "";
+	my $derivedScratch = "$scratchRoot/strainsScr1/$catalogIdentity/$outDname.$outputIdentity/";
+	$derivedScratch = File::Spec->canonpath(File::Spec->rel2abs($derivedScratch));
+	$derivedScratch .= '/' unless $derivedScratch =~ m{/\z};
+	my $scratchManifest = "$outD/.strain_within.scratch.tsv";
+	$scratchD = resolveScratchDirectory($derivedScratch, $scratchManifest,
+		$catalogIdentity, $manifestOutputPath, $outDname);
 	#die "$scratchD  :$GCname :$GCd\n";
 	if ($locTmpDir1 eq ""){
 		my $locTmpN = getProgPaths("nodeTmpDir",0) ;
@@ -2548,6 +2640,8 @@ sub prepRun{
 	make_path($locTmpDir, $scratchD, $outD, $LOGDIR);
 	my $outputBase = basename(File::Spec->canonpath($outD));
 	my $owner = File::Spec->catfile($outD, '.matafiler-strain-workdir');
+	persistScratchDirectory($scratchManifest, $catalogIdentity,
+		$manifestOutputPath, $scratchD);
 	markStrainWorkflowDirectory($outD)
 		if !$outputWasPresent || !$onlySubmit || $outputBase eq 'intra_phylo'
 			|| $outputBase eq 'within_phylo' || -e $owner;
@@ -2717,24 +2811,37 @@ sub histoMGS{#specifically for MGS..
 }
 
 sub persistentMGSInputState {
-	my ($MGS) = @_;
+	my ($MGS, $refresh) = @_;
+	return $persistentMGSInputStateCache{$MGS}
+		if !$refresh && exists $persistentMGSInputStateCache{$MGS};
 	my $mgsDir = $SIdirs{$MGS} // "$outD/$MGS";
 	my @required = ($FNAstdof, $FAAstdof, $CATstdof);
 	my @present = grep { fileGZe("$mgsDir/$_") } @required;
-	return 'complete' if @present == @required;
-	return 'incomplete' if @present;
-	return 'missing';
+	my $state = @present == @required ? 'complete'
+		: @present ? 'incomplete' : 'missing';
+	return $persistentMGSInputStateCache{$MGS} = $state;
 }
 
 sub scratchMGSInputState {
-	my ($MGS) = @_;
-	return 'complete' if stagedMGSInputsReady($MGS);
+	my ($MGS, $refresh) = @_;
+	return $scratchMGSInputStateCache{$MGS}
+		if !$refresh && exists $scratchMGSInputStateCache{$MGS};
+	if (stagedMGSInputsReady($MGS)) {
+		return $scratchMGSInputStateCache{$MGS} = 'complete';
+	}
 	my $mgsDir = "$scratchD/outs/$MGS";
 	my @required = ($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp");
 	my $hasAny = grep {
 		fileGZe("$mgsDir/$_") || bsd_glob("$mgsDir/$_.*")
 	} @required;
-	return $hasAny ? 'incomplete' : 'missing';
+	return $scratchMGSInputStateCache{$MGS} =
+		$hasAny ? 'incomplete' : 'missing';
+}
+
+sub invalidateMGSInputState {
+	my (@MGS) = @_;
+	delete @persistentMGSInputStateCache{@MGS};
+	delete @scratchMGSInputStateCache{@MGS};
 }
 
 sub getInputSize{
@@ -2811,6 +2918,10 @@ sub stagedMGSInputsReady {
 	my $mergeCheckpoint = "$mgsDir/merge.complete.tsv";
 	my $aggregateComplete = !grep { !fileGZe("$mgsDir/$_") } @requiredNames;
 	$aggregateComplete &&= -s $mergeCheckpoint;
+	# The checkpoint commits the complete aggregate. Fresh worker parts are
+	# considered by combineMGSgenesDir when a merge is requested; readiness and
+	# sizing do not need five directory globs for an already reusable aggregate.
+	return 1 if $aggregateComplete;
 	my $workerCount = $maxSubJob || 1;
 	my %parts = map {
 		$_ => [exact_worker_parts("$mgsDir/$_", $workerCount)]
@@ -2868,6 +2979,17 @@ sub evalFileStatus{
 			$MGSnoTree{$MGS} = 1;
 			$MGSnoTreeReason{$MGS} = 'buildtree_no_usable_alignment';
 			$noRecoverableLociDirs++;
+			next;
+		}
+		my $completedTree = "$outD2/phylo/$treeFile";
+		my $treeCompletion = "$outD2/treeDone.sto";
+		if (!$recalcTrees && !$reSubmit && !$repairCAT && !$deepRepair
+				&& !$redoSubmissionData && -s $treeCompletion
+				&& fileGZs($completedTree)) {
+			# The completion marker was written only after primary-tree validation.
+			# Avoid opening and decompressing its category sidecar again.
+			$doneDirs++;
+			remove_tree("$scratchD/outs/$MGS") if -d "$scratchD/outs/$MGS";
 			next;
 		}
 		retry_unlink($tooFewMarker, label => "clear stale too-few marker");
@@ -3201,25 +3323,9 @@ sub validatePhase1WorkerLedger {
 			close $input;
 			return (0, "unexpected $kind ledger header in $path");
 		}
-		my %seenSample;
-		while (my $line = <$input>) {
-			chomp $line;
-			next if $kind eq 'recovery' && !length($line);
-			my @field = split /\t/, $line, -1;
-			if ($kind eq 'recovery') {
-				unless (@field >= 9 && ($field[2] ne 'recovered' || $field[4] =~ /^\d+$/)) {
-					close $input;
-					return (0, "malformed recovery row in $path");
-				}
-			} else {
-				unless (length($line) && @field == @sampleStatColumns
-						&& length($field[0]) && $field[1] =~ /^\d+$/
-						&& $field[1] == $worker && !$seenSample{$field[0]}++) {
-					close $input;
-					return (0, "malformed or duplicate sample row in $path");
-				}
-			}
-		}
+		# The worker completion stone proves that its producer closed these ledgers.
+		# Full row/cardinality validation is performed while merging each ledger;
+		# rescanning every row here doubled Phase-I recovery I/O.
 		close $input or return (0, "cannot close $kind ledger $path: $!");
 	}
 	my $conspecific = "$LOGDIR/ConspecificMGS.$worker.log";
@@ -3571,6 +3677,12 @@ sub mergeRecoveryLogs {
 		open my $in, '<', $part or die "Cannot read $part: $!\n";
 		my $header = <$in>;
 		die "MAG recovery worker log has no header: $part\n" unless defined $header;
+		$header =~ s/[\r\n]+\z//;
+		my $expectedHeader = join("\t", qw(MGS sample outcome reason retained_genes
+			qc_status ambiguous_failure conspecific_failure recovered_mosaic_loci));
+		die "Unexpected MAG recovery header in $part\n"
+			unless $header eq $expectedHeader;
+		$header .= "\n";
 		print {$out} $header unless $header_written++;
 		while (my $line = <$in>) { indexRecoveryRow($worker, $line, $part); print {$out} $line or die "Cannot write $temporary: $!\n"; }
 		close $in or die "Cannot close $part: $!\n";

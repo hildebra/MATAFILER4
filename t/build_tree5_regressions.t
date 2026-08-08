@@ -15,8 +15,8 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.41;/,
-	'post-alignment reporting increments the workflow version');
+like($source, qr/my \$version = 5\.42;/,
+	'validation-reuse changes increment the workflow version');
 like($source,
 	qr/"withinSpecies=i".*?"strainWithinPreset=i".*?"strictBackbone=i"/s,
 	"buildTree exposes explicit strain, within-species, and strict-backbone controls");
@@ -24,11 +24,11 @@ like($source,
 	qr/my \$treeAutoModel=0;.*?my \$treeAutoModelExplicit=0;.*?"AutoModel=i" => sub \{.*?\$treeAutoModel = \$_\[1\];.*?\$treeAutoModelExplicit = 1;/s,
 	'all BuildTree5 nucleotide trees default to the fixed GTR+F+G2 model while -AutoModel 1 remains opt-in');
 like($source,
-	qr/POST-ALIGNMENT WORKFLOW.*?alignmentCollectionStats.*?postAlignmentStep\("alignment inventory".*?postAlignmentStep\("locus QC".*?postAlignmentStep\("taxon-aware locus selection".*?postAlignmentStep\("rate\/GC partition preparation".*?postAlignmentStep\("concatenation".*?postAlignmentStep\("strict-backbone preparation".*?postAlignmentStep\("phylogeny inference".*?postAlignmentStep\("EPA-ng placement and tree publication"/s,
-	'post-alignment processing reports elapsed steps from QC through inference and placement');
+	qr/POST-ALIGNMENT WORKFLOW.*?postAlignmentStep\("locus QC".*?alignmentCollectionStatsFromReport.*?postAlignmentStep\("alignment inventory".*?postAlignmentStep\("taxon-aware locus selection".*?postAlignmentStep\("rate\/GC partition preparation".*?postAlignmentStep\("concatenation".*?postAlignmentStep\("strict-backbone preparation".*?postAlignmentStep\("phylogeny inference".*?postAlignmentStep\("EPA-ng placement and tree publication"/s,
+	'post-alignment processing reuses the QC report for inventory before later timed stages');
 like($source,
-	qr/sub alignmentCollectionStats .*?mean_sequences.*?mean_length.*?total_sites.*?minimum_sequences.*?maximum_sequences.*?minimum_length.*?maximum_length/s,
-	'the post-alignment inventory reports locus, sequence-count, and alignment-length statistics without retaining sequence data');
+	qr/sub alignmentCollectionStatsFromReport .*?status sequences alignment_sites.*?next unless \$status eq 'PASS'.*?mean_sequences.*?mean_length.*?total_sites.*?sub alignmentCollectionStats /s,
+	'the post-alignment inventory reuses retained-locus MSAfix statistics and retains a scan fallback when QC is disabled');
 like($source,
 	qr/my %RATE_MERGE_DEFAULT = \(.*?enabled => 0.*?maximum_bins => 8.*?target_sites_per_bin => 30_000.*?minimum_loci_per_bin => 20.*?minimum_sites_per_bin => 20_000.*?"rateMergePartitions=i" => sub \{.*?\$rateMergePartitionsExplicit = 1/s,
 	'direct builds expose opt-in deterministic rate/GC partition merging');
@@ -50,6 +50,9 @@ like($source,
 like($source,
 	qr/safeRemoveTree\(\$tmpD, \$tmpBase\).*?writeCompletionMarker\(\$completionMarker, \$\{\$trRetH\}\{nwk\}.*?sub writeCompletionMarker.*?nonempty primary tree.*?retry_rename\(\$temporaryMarker, \$marker/s,
 	"buildTree5 atomically publishes a completion marker only after validating its primary tree");
+like($source,
+	qr/my \$durableCompletionTree = reusableCompletionTree.*?\$postAlignmentQCAuditCurrent.*?skipping alignment\/QC\/tree revalidation.*?sub reusableCompletionTree.*?\$markerVersion >= 5\.40.*?File::Spec->abs2rel\(\$tree, \$output\)/s,
+	'a durable current-policy completion marker bypasses duplicate alignment and tree validation');
 like($source,
 	qr/post_alignment_locus_qc\.tsv.*?sub runPostAlignmentLocusQC.*?getProgPaths\("MSAfix"\).*?-manifest.*?-report.*?-keep.*?-minOverlapMSA", \$minOverlapMSA/s,
 	'buildTree invokes native MSAfix locus QC before concatenation, retaining its report and applying its overlap threshold');
@@ -208,8 +211,8 @@ like($source, qr/my \$partition = \$treeOpts\{partition\} \/\/ "";.*?\$treeOpts\
 unlike($source, qr/\$continue && -e (?:\$treeOpts\{(?:fastTrOut|VfastTrOut|RAXNGtreeout|RAXtreeout)\}|"\$IQtree\.treefile")/,
 	'resume gates do not accept empty tree outputs');
 like($source,
-	qr/sub requestedTreeMethods.*?name => "IQ-TREE".*?iqtree => 1.*?sub treeMethodState.*?iqtreeOutputComplete\(\$hr->\{\$method->\{outputKey\}\}, \$hr->\{inMSA\}, \\\$validationReason\).*?checkpointComplete => \(\$continue && \$outputComplete/s,
-	'IQ-TREE resume uses the shared successful-log and exact-taxon-parity checkpoint state');
+	qr/sub cachedIQTreeOutputComplete.*?inputFingerprint\("\$prefix\.treefile"\).*?inputFingerprint\("\$prefix\.log"\).*?inputFingerprint\(\$alignment\).*?iqtreeOutputComplete\(\$prefix, \$alignment.*?sub treeMethodState.*?cachedIQTreeOutputComplete\(\$hr->\{\$method->\{outputKey\}\}, \$hr->\{inMSA\}, \\\$validationReason\).*?checkpointComplete => \(\$continue && \$outputComplete/s,
+	'IQ-TREE resume caches exact-taxon validation only while all output fingerprints remain unchanged');
 like($source,
 	qr/sub treePresent.*?treeMethodState\(\$_, \$hr\).*?sub treeAtHeart.*?my %treeState = map.*?treeMethodState\(\$_, \\%treeOpts\)/s,
 	'tree recovery and execution derive completion from the same method-state helper');

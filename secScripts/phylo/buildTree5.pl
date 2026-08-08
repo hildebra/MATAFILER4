@@ -45,6 +45,7 @@
 #5.39: consume overlap-filtered rate/GC metrics from MSAfix rather than rescanning loci in Perl
 #5.40: add structured post-alignment reporting, fixed-model defaults, and resumable lifecycle outcomes
 #5.41: add bounded filesystem retries, preflight validation, durable locus checkpoints, and isolated EPA recovery
+#5.42: reuse durable completion state and MSAfix statistics; cache unchanged IQ-TREE validation
 
 use warnings;
 use strict;
@@ -100,6 +101,7 @@ sub treeMethodState;
 sub parseSeqId;
 sub geneFileStem;
 sub safeRemoveTree;
+sub cachedIQTreeOutputComplete;
 sub requireConfiguredTool;
 sub shellQuote;
 sub runMSAFix;
@@ -124,6 +126,7 @@ sub deterministicRatePartitions;
 sub writeRatePartitionAudit;
 sub publishStagedTreeInputs;
 sub writeCompletionMarker;
+sub reusableCompletionTree;
 sub writeOutcomeMarker;
 sub clearLifecycleMarker;
 sub preflightBuildTree;
@@ -133,12 +136,14 @@ sub runEpaNgPlacement;
 sub postAlignmentStep;
 sub elapsedTimeText;
 sub alignmentCollectionStats;
+sub alignmentCollectionStatsFromReport;
 sub rawCoordinateInformation;
 
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.41;
+my $version = 5.42;
+my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -810,6 +815,37 @@ if (-s $alignmentWorkPolicyFile) {
 }
 
 $postAlignmentQCAuditCurrent = 1 if $legacyWithinSpeciesQCAudit;
+my $durableCompletionTree = reusableCompletionTree($completionMarker, $outD);
+my $requestedPrimaryMethods = $doIQTree + $doRAXML + $doRAXMLng
+	+ $doFastTree + $doVeryFastTree;
+my $completedTreeName = length($durableCompletionTree)
+	? basename($durableCompletionTree) : '';
+my $completionMatchesMethod = $requestedPrimaryMethods == 1 && (
+	($doIQTree && $completedTreeName =~ /^IQtree.*\.treefile\z/)
+	|| ($doRAXML && $completedTreeName =~ /^RXML.*\.nwk\z/)
+	|| ($doRAXMLng && $completedTreeName =~ /^RXng.*\.nwk\z/)
+	|| ($doFastTree && $completedTreeName =~ /^FASTTREE.*\.nwk\z/)
+	|| ($doVeryFastTree && $completedTreeName =~ /^VERYFASTTREE.*\.nwk\z/)
+);
+my $hasAdditionalAnalysis = $Ete || $calcDistMat || $calcDNAdiff
+	|| $doGenesToPh || $doSuperTree || $doSuperCheck || $doGubbins
+	|| $doCFML || $useTreeShrink || $doDNDS || $doTheta
+	|| $doFastGear || $doFastGearSummary || $removeMSA || $gzipInput;
+if (length($durableCompletionTree) && $completionMatchesMethod
+		&& !$hasAdditionalAnalysis
+		&& ($cogCats eq '' || $postAlignmentQCAuditCurrent)) {
+	# The marker is published only after tree validation and all requested standard
+	# stages finish. A matching policy therefore avoids reopening every locus and
+	# rescanning the concatenated alignment on a duplicate/resumed invocation.
+	safeRemoveTree($tmpD, $tmpBase);
+	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
+	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
+	clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
+	writeWorkflowHeartbeat('complete');
+	print "Recovery state: durable completion marker and current policy match; "
+		."skipping alignment/QC/tree revalidation ($durableCompletionTree)\n";
+	exit(0);
+}
 my $doMSA = 1;
 my $treesDone = treePresent($tOhr)
 	&& (!$calcNonSyn || treePresent($tOhrNSun))
@@ -1368,16 +1404,6 @@ if ($synSummaryCount) {
 
 print "\n---------------- POST-ALIGNMENT WORKFLOW ----------------\n";
 my $postAlignmentStepStarted = time;
-my $postAlignmentPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
-my $postAlignmentStats = alignmentCollectionStats($postAlignmentPrimary);
-postAlignmentStep("alignment inventory", $postAlignmentStepStarted,
-	"loci=$postAlignmentStats->{loci}",
-	"mean_sequences_per_locus=$postAlignmentStats->{mean_sequences}",
-	"mean_alignment_length=$postAlignmentStats->{mean_length}",
-	"total_alignment_sites=$postAlignmentStats->{total_sites}",
-	"sequence_range=$postAlignmentStats->{minimum_sequences}-$postAlignmentStats->{maximum_sequences}",
-	"length_range=$postAlignmentStats->{minimum_length}-$postAlignmentStats->{maximum_length}");
-$postAlignmentStepStarted = time;
 
 if ($postAlignmentLocusQC && $cogCats ne "") {
 	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
@@ -1415,6 +1441,19 @@ postAlignmentStep("locus QC", $postAlignmentStepStarted,
 	"enabled=".($postAlignmentLocusQC ? 1 : 0),
 	"retained_loci=".scalar(@{$postQCPrimary}),
 	"report=$postAlignmentQCReport");
+$postAlignmentStepStarted = time;
+
+my $postAlignmentStats = $postAlignmentLocusQC && $cogCats ne ""
+	&& -s $postAlignmentQCReport
+	? alignmentCollectionStatsFromReport($postAlignmentQCReport)
+	: alignmentCollectionStats($postQCPrimary);
+postAlignmentStep("alignment inventory", $postAlignmentStepStarted,
+	"loci=$postAlignmentStats->{loci}",
+	"mean_sequences_per_locus=$postAlignmentStats->{mean_sequences}",
+	"mean_alignment_length=$postAlignmentStats->{mean_length}",
+	"total_alignment_sites=$postAlignmentStats->{total_sites}",
+	"sequence_range=$postAlignmentStats->{minimum_sequences}-$postAlignmentStats->{maximum_sequences}",
+	"length_range=$postAlignmentStats->{minimum_length}-$postAlignmentStats->{maximum_length}");
 $postAlignmentStepStarted = time;
 
 if ($taxonAwareLocusSelection && $cogCats ne "") {
@@ -1993,6 +2032,23 @@ sub requestedTreeMethods{
 	);
 }
 
+sub cachedIQTreeOutputComplete {
+	my ($prefix, $alignment, $reasonRef) = @_;
+	my $fingerprint = join("\t", $prefix, $alignment,
+		inputFingerprint("$prefix.treefile"),
+		inputFingerprint("$prefix.log"), inputFingerprint($alignment));
+	if (exists $iqtreeValidationCache{$fingerprint}) {
+		my ($complete, $reason) = @{$iqtreeValidationCache{$fingerprint}};
+		${$reasonRef} = $reason if ref($reasonRef) eq 'SCALAR';
+		return $complete;
+	}
+	my $reason = '';
+	my $complete = iqtreeOutputComplete($prefix, $alignment, \$reason);
+	$iqtreeValidationCache{$fingerprint} = [$complete, $reason];
+	${$reasonRef} = $reason if ref($reasonRef) eq 'SCALAR';
+	return $complete;
+}
+
 sub treeMethodState{
 	my ($method, $hr) = @_;
 	my $output = $method->{iqtree}
@@ -2000,7 +2056,7 @@ sub treeMethodState{
 		: $hr->{$method->{outputKey}};
 	my $validationReason = '';
 	my $outputComplete = $method->{iqtree}
-		? iqtreeOutputComplete($hr->{$method->{outputKey}}, $hr->{inMSA}, \$validationReason)
+		? cachedIQTreeOutputComplete($hr->{$method->{outputKey}}, $hr->{inMSA}, \$validationReason)
 		: (-s $output ? 1 : 0);
 	return {
 		%{$method},
@@ -4543,6 +4599,54 @@ sub writeWorkflowFailure {
 		}
 	}
 }
+sub alignmentCollectionStatsFromReport {
+	my ($reportFile) = @_;
+	open my $report, '<', $reportFile
+		or die "Cannot read alignment-statistics report $reportFile: $!\n";
+	my $header = <$report> // '';
+	$header =~ s/[\r\n]+\z//;
+	my @columns = split /\t/, $header, -1;
+	my %columnIndex = map { $columns[$_] => $_ } 0 .. $#columns;
+	for my $required (qw(status sequences alignment_sites)) {
+		die "Alignment-statistics report $reportFile lacks column '$required'\n"
+			unless exists $columnIndex{$required};
+	}
+	my ($loci, $totalSequences, $totalSites) = (0, 0, 0);
+	my ($minimumSequences, $maximumSequences, $minimumLength, $maximumLength);
+	while (my $line = <$report>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless length($line);
+		my @fields = split /\t/, $line, -1;
+		my $status = $fields[$columnIndex{status}] // '';
+		next unless $status eq 'PASS';
+		my $sequenceCount = $fields[$columnIndex{sequences}] // '';
+		my $alignmentLength = $fields[$columnIndex{alignment_sites}] // '';
+		next unless $sequenceCount =~ /^\d+\z/ && $alignmentLength =~ /^\d+\z/;
+		$loci++;
+		$totalSequences += $sequenceCount;
+		$totalSites += $alignmentLength;
+		$minimumSequences = $sequenceCount
+			if !defined($minimumSequences) || $sequenceCount < $minimumSequences;
+		$maximumSequences = $sequenceCount
+			if !defined($maximumSequences) || $sequenceCount > $maximumSequences;
+		$minimumLength = $alignmentLength
+			if !defined($minimumLength) || $alignmentLength < $minimumLength;
+		$maximumLength = $alignmentLength
+			if !defined($maximumLength) || $alignmentLength > $maximumLength;
+	}
+	close $report or die "Cannot close alignment-statistics report $reportFile: $!\n";
+	return {
+		loci => $loci,
+		mean_sequences => $loci ? sprintf('%.1f', $totalSequences / $loci) : 0,
+		mean_length => $loci ? sprintf('%.1f', $totalSites / $loci) : 0,
+		total_sites => $totalSites,
+		minimum_sequences => $minimumSequences // 0,
+		maximum_sequences => $maximumSequences // 0,
+		minimum_length => $minimumLength // 0,
+		maximum_length => $maximumLength // 0,
+	};
+}
+
 sub alignmentCollectionStats {
 	my ($alignments) = @_;
 	die "Alignment collection must be an array reference\n"
@@ -4702,6 +4806,27 @@ sub publishStagedTreeInputs {
 			.join(", ", map { $_ . "[.gz]" } @missing)."\n";
 	}
 	print "Tree inputs ready in persistent storage\n";
+}
+
+sub reusableCompletionTree {
+	my ($markerPath, $outputDirectory) = @_;
+	return '' unless $continue && defined($markerPath) && -s $markerPath;
+	open my $marker, '<', $markerPath or return '';
+	my $line = <$marker> // '';
+	close $marker or return '';
+	$line =~ s/[\r\n]+\z//;
+	my ($producer, $markerVersion, $treePath) = split /\t/, $line, 3;
+	return '' unless defined($producer) && $producer eq 'buildTree5'
+		&& defined($markerVersion)
+		&& $markerVersion =~ /^\d+(?:\.\d+)?\z/ && $markerVersion >= 5.40
+		&& defined($treePath) && length($treePath);
+
+	my $output = File::Spec->canonpath(File::Spec->rel2abs($outputDirectory));
+	my $tree = File::Spec->canonpath(File::Spec->rel2abs($treePath, $output));
+	my $relative = File::Spec->abs2rel($tree, $output);
+	return '' if $relative eq File::Spec->curdir
+		|| $relative =~ /^\.\.(?:[\\\/]|$)/;
+	return -s $tree ? $tree : '';
 }
 
 sub writeCompletionMarker {
