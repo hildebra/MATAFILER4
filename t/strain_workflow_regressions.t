@@ -390,12 +390,9 @@ like($strain,
 like($strain,
 	qr/strain_within\.heartbeat\.tsv.*?strain_within\.failure\.tsv.*?sub writeStrainWorkflowHeartbeat.*?sub writeStrainWorkflowFailure/s,
 	'strain workflow persists stage heartbeats and fatal-stage diagnostics');
-like($strain,
-	qr/sub preflightStrainWorkflow.*?preflight_directory.*?preflight_executable.*?filesystem_capacity/s,
-	'strain workflow validates tools, writable directories, capacity, and inodes before expensive work');
 unlike($strain,
-	qr/sub preflightStrainWorkflow.*?\['buildTree5', getProgPaths\('buildTree_scr'\)\]/s,
-	'buildTree’s MATAFILER command wrapper is not treated as a standalone executable');
+	qr/preflightStrainWorkflow|preflight_executable|preflight_directory|filesystem_capacity/,
+	'strain workflow does not preflight environment-wrapped commands as local executables');
 
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,

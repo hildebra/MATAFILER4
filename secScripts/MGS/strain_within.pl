@@ -36,7 +36,6 @@ use Mods::StrainParts qw(
 use Mods::SlurmAccounting qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
-	preflight_executable preflight_directory filesystem_capacity
 );
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 use Mods::StrainSampleStats qw(
@@ -87,7 +86,6 @@ sub validatePhase1WorkerLedger;
 sub writeStrainWorkflowHeartbeat;
 sub writeStrainWorkflowFailure;
 sub writeTreeFailureAudit;
-sub preflightStrainWorkflow;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -719,7 +717,6 @@ $workflowHeartbeatPath = File::Spec->catfile($outD,
 $workflowFailurePath = File::Spec->catfile($outD,
 	$subJob ? "strain_within.worker.$subJob.failure.tsv" : 'strain_within.failure.tsv');
 writeStrainWorkflowHeartbeat('configuration');
-preflightStrainWorkflow() unless $subJob;
 stepComplete("configuration and map initialization", $stepStarted,
 	"samples=".scalar(@samples), "mode=$mode", "output=$outD");
 
@@ -3122,40 +3119,6 @@ sub writeStrainWorkflowFailure {
 				or warn "Cannot publish strain workflow failure marker $workflowFailurePath: $!\n";
 		}
 	}
-}
-
-sub preflightStrainWorkflow {
-	preflight_directory($outD, 'within-strain output directory');
-	preflight_directory($scratchD, 'within-strain scratch directory') if length($scratchD);
-	my @programs = (
-		# buildTree_scr is a MATAFILER command wrapper, commonly including
-		# micromamba activation followed by "perl .../buildTree5.pl".  It is
-		# executed as a shell command below, not as a single executable path.
-		['MSAfix', getProgPaths('MSAfix')],
-		[$MSAprog == 0 ? 'MSAprobs'
-			: $MSAprog == 1 ? 'Clustal Omega'
-			: $MSAprog == 2 ? 'MAFFT' : 'MUSCLE5',
-		 getProgPaths($MSAprog == 0 ? 'msaprobs'
-			: $MSAprog == 1 ? 'clustalo'
-			: $MSAprog == 2 ? 'mafft' : 'MUSCLE5')],
-		[$phyloProg == 1 ? 'IQ-TREE'
-			: $phyloProg == 2 ? 'VeryFastTree' : 'FastTree',
-		 getProgPaths($phyloProg == 1 ? 'iqtree'
-			: $phyloProg == 2 ? 'veryfasttree' : 'fasttree')],
-	);
-	push @programs, ['EPA-ng', getProgPaths('epa-ng', 0)] if $strictBackbone;
-	preflight_executable($_->[1], $_->[0]) for @programs;
-	for my $entry (['output', $outD], ['scratch', $scratchD]) {
-		next unless defined($entry->[1]) && -d $entry->[1];
-		my $capacity = filesystem_capacity($entry->[1]);
-		warn "Preflight warning: $entry->[0] filesystem has less than 2 GiB available\n"
-			if defined($capacity->{available_kb})
-				&& $capacity->{available_kb} < 2 * 1024 * 1024;
-		warn "Preflight warning: $entry->[0] filesystem has fewer than 10,000 inodes available\n"
-			if defined($capacity->{available_inodes})
-				&& $capacity->{available_inodes} < 10_000;
-	}
-	print "Preflight complete: required programs, writable paths, disk space, and inodes checked\n";
 }
 
 sub phase1WorkerCommand {

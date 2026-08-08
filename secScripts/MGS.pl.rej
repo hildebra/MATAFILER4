@@ -1,0 +1,19 @@
+--- secScripts/MGS.pl
++++ secScripts/MGS.pl
+@@ -564,14 +564,12 @@
+ if (!$activeMGSCount && $preservedMGSCount) {
+ 	warn "Restoring preserved unweighted MGS assignments after an incomplete weighted handoff\n";
+-	rename "${finalClusters2}UW", $finalClusters2
+-		or die "Cannot restore ${finalClusters2}UW as $finalClusters2: $!\n";
++	retry_rename("${finalClusters2}UW", $finalClusters2, label => 'restore unweighted MGS assignments');
+ 	$activeMGSCount = $preservedMGSCount;
+ }
+ if (!$activeMGSCount && !$preservedMGSCount && $weightedMGSCount) {
+ 	warn "Activating the only available weighted MGS assignments\n";
+-	rename $finalClustersW, $finalClusters2
+-		or die "Cannot activate $finalClustersW as $finalClusters2: $!\n";
++	retry_rename($finalClustersW, $finalClusters2, label => 'activate weighted MGS assignments');
+ 	$activeMGSCount = $weightedMGSCount;
+ 
+ 
+ 
