@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.87;/,
-	'completed split-Phase-I restart recovery increments the workflow version');
+like($strain, qr/my \$version = 0\.88;/,
+	'terminal no-tree resume validation increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -269,6 +269,12 @@ like($strain,
 like($strain,
 	qr/tree_input_sizing\.tsv.*?too_few_samples.*?incomplete_published.*?incomplete_scratch.*?empty_extraction/s,
 	'tree-input sizing separates too-few, incomplete published, incomplete scratch, and empty extraction inputs');
+like($strain,
+	qr/sub recordValidatedEmptyExtractions.*?persistentMGSInputState\(\$MGS\) eq 'missing'.*?scratchMGSInputState\(\$MGS\) ne 'missing'.*?writeNoRecoverableLociMarker\(\$SIdirs\{\$MGS\}, 'empty_extraction'\).*?\$MGSnoTreeReason\{\$MGS\} = 'no_recoverable_loci'/s,
+	'a completed Stage I persists validated no-recoverable-locus outcomes for future resumes');
+like($strain,
+	qr/\$multiSmpl > 2 && \$ngenes >= 10.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?Tree-input resolution is incomplete/s,
+	'insufficient tree inputs are terminally marked while incomplete triplets are reported and fail final resolution validation');
 like($strain,
 	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
 	'split extraction workers inherit the missing-input MGS subset');

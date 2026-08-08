@@ -56,6 +56,9 @@ sub persistentMGSInputState; sub scratchMGSInputState;
 sub stagedMGSInputsReady; sub evalFileStatus;
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
+sub writeNoRecoverableLociMarker;
+sub recordValidatedEmptyExtractions;
+sub validateTreeInputResolution;
 sub readFastaIDs;
 sub resetMGSTreeOutputs;
 sub stepComplete;
@@ -215,7 +218,8 @@ END {
 #.85: queue prepared Phase-II tree jobs while scheduler capacity is full
 #.86: skip extraction-only consensus audits on Phase-I resume and report saved worker statistics
 #.87: finish a completed split Phase-I ledger after a main-worker restart
-my $version = 0.87;
+#.88: persist validated no-tree outcomes and reject unclassified tree inputs
+my $version = 0.88;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -636,7 +640,8 @@ cleanupMosaicIntermediates($mosaicLociFile) if length($mosaicLociFile) && -s $mo
 my $bindir;my $outD;my $scratchD;my $preConDir;my $LOGDIR;my $mapF;
 my %map; my %AsGrps;my @samples;#map and assembly groups
 my %ConspecificMGS; #list of conspecific MGS
-my %MGSnoTree; #MGS known to have too few samples for a meaningful tree
+my %MGSnoTree; #MGS known to have a persistent valid no-tree outcome
+my %MGSnoTreeReason;
 my $legacyLocusOutputs = 0;
 my %legacyLocusMGS;
 my (%ConfirmedMosaicPairs, %PreferredOutgroup, %PreferredOutgroupGene);
@@ -768,11 +773,13 @@ my $cnt=0; my $SaSe = "|";
 
 
 $stepStarted = time;
-my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist)
+my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist,
+	$noRecoverableLociDirs)
 			= evalFileStatus();
 stepComplete("existing-output and resume audit", $stepStarted,
 	"prepared_trees=$doneDirs", "missing_trees=$treeAbsent",
-	"incomplete_tree_inputs=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped");
+	"incomplete_tree_inputs=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped",
+	"validated_no_locus=$noRecoverableLociDirs");
 #DEBUG:getInputSize();
 
 
@@ -938,6 +945,9 @@ if ($runPartI){
 		
 		#combineMGSgenes();
 	}
+	my $emptyMGS = recordValidatedEmptyExtractions(\@stageIExtractionMGS);
+	print "Stage-I terminal-input classification: recorded $emptyMGS MGS with no recoverable loci.\n"
+		if $emptyMGS;
 	
 	print "\nGene extraction & redistribution finished, ready to proceed to phylogeny jobs\n";
 
@@ -1042,6 +1052,7 @@ stepComplete("tree-input sizing", $stepStarted,
 	"selected_MGS=".scalar(@specis), "nonempty_inputs=$nonemptyTreeInputs",
 	"estimated_uncompressed_MB=".int($treeInputMB + 0.5),
 	"tooFewSamples=$treeInputAudit->{too_few_samples}",
+	"noRecoverableLoci=$treeInputAudit->{no_recoverable_loci}",
 	"incomplete_published=$treeInputAudit->{incomplete_published}",
 	"incomplete_scratch=$treeInputAudit->{incomplete_scratch}",
 	"empty_extraction=$treeInputAudit->{empty_extraction}",
@@ -1071,9 +1082,10 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	}
 	$treeMGSVisited++;
 	if (exists $MGSnoTree{$MGS}) {
-		$treeDisposition{'too few samples during extraction'}++;
-		limitedNotice('MGS skipped after too-few-samples extraction',
-			"Skipping $MGS: previous extraction found too few samples for a tree.\n");
+		my $reason = $MGSnoTreeReason{$MGS} // 'too_few_samples';
+		$treeDisposition{"valid no-tree: $reason"}++;
+		limitedNotice('MGS skipped after valid no-tree classification',
+			"Skipping $MGS: previous extraction recorded terminal no-tree state '$reason'.\n");
 		next;
 	}
 	# previous condition was too lax: ( ($CatNotPrepped/$#specis) < 0.1)  , just check if we can resubmit anything here..
@@ -1254,13 +1266,14 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if $needsCopy;
 	$Tcmd .= "-completionMarker ".shellQuote($treeStone)." ";
 
-	if ($multiSmpl>2){
+	if ($multiSmpl > 2 && $ngenes >= 10){
 		print "  Tree input: $multiSmpl samples, $ngenes potential genes; $numCoreL cores, $totMem memory\n";
 	} else {
-		$treeDisposition{'too few samples at tree preparation'}++;
-		limitedNotice('MGS with too few samples for tree statistics',
-			"$MGS: too few samples ($multiSmpl) for tree statistics\n");
-		writeTooFewMarker($outD2, $multiSmpl, $ngenes);
+		my $reason = $multiSmpl <= 2 ? 'too_few_samples' : 'too_few_usable_genes';
+		$treeDisposition{"valid no-tree: $reason"}++;
+		limitedNotice('MGS with insufficient tree input',
+			"$MGS: $reason (samples=$multiSmpl, usable_genes=$ngenes); skipping tree construction\n");
+		writeTooFewMarker($outD2, $multiSmpl, $ngenes, $reason);
 		remove_tree($tmpD) if $needsCopy && -d $tmpD;
 		$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		$QSBoptHR->{useLongQueue} = 0;
@@ -1354,6 +1367,7 @@ if ($doSubmit) {
 	die "Tree jobs completed without valid tree outputs for: ".join(",", @failed)."\n"
 		if @failed;
 }
+validateTreeInputResolution();
 print "\nAll done for $cnt Bins\nRun strain_within_2.pl for summary stats:\n";
 
 my $outDX =  $MGSfile;#"$GCd/$mode/intra_phylo/";
@@ -2021,13 +2035,83 @@ sub mergeConspecificLogs {
 }
 
 sub writeTooFewMarker{
-	my ($outD2, $sampleCount, $geneCount) = @_;
+	my ($outD2, $sampleCount, $geneCount, $reason) = @_;
 	make_path($outD2) unless -d $outD2;
 	my $marker = "$outD2/tooFewSamples.sto";
 	open my $out, '>', $marker or die "Cannot create $marker: $!\n";
-	print {$out} "samples\t$sampleCount\ngenes\t$geneCount\n"
+	print {$out} "reason\t".($reason // 'too_few_samples')."\nsamples\t$sampleCount\ngenes\t$geneCount\n"
 		or die "Cannot write $marker: $!\n";
 	close $out or die "Cannot close $marker: $!\n";
+}
+
+sub writeNoRecoverableLociMarker {
+	my ($outD2, $reason) = @_;
+	make_path($outD2) unless -d $outD2;
+	my $marker = "$outD2/noRecoverableLoci.sto";
+	my $temporary = "$marker.write.$$";
+	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+	print {$out} "reason\t".($reason // 'empty_extraction')."\n"
+		or die "Cannot write $temporary: $!\n";
+	close $out or die "Cannot close $temporary: $!\n";
+	rename $temporary, $marker or die "Cannot publish $marker: $!\n";
+}
+
+sub recordValidatedEmptyExtractions {
+	my ($targets) = @_;
+	return 0 unless ref($targets) eq 'ARRAY';
+	my $recorded = 0;
+	for my $MGS (@{$targets}) {
+		next if exists $MGSnoTree{$MGS};
+		next unless persistentMGSInputState($MGS) eq 'missing';
+		next if scratchMGSInputState($MGS) ne 'missing';
+		# This is called only after every worker in the current Stage-I generation
+		# has completed and its ledgers have been merged.  With no partial files
+		# and no aggregate triplet left, no sample supplied a recoverable locus.
+		writeNoRecoverableLociMarker($SIdirs{$MGS}, 'empty_extraction');
+		$MGSnoTree{$MGS} = 1;
+		$MGSnoTreeReason{$MGS} = 'no_recoverable_loci';
+		$recorded++;
+	}
+	return $recorded;
+}
+
+sub validateTreeInputResolution {
+	my $audit = "$LOGDIR/tree_input_resolution.tsv";
+	my $temporary = "$audit.write.$$";
+	make_path($LOGDIR) unless -d $LOGDIR;
+	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+	print {$out} join("\t", qw(MGS resolution persistent_state scratch_state)), "\n"
+		or die "Cannot write $temporary: $!\n";
+	my (@repairRequired, $ready, $terminal, $excluded);
+	for my $MGS (@specis) {
+		my $persistent = persistentMGSInputState($MGS);
+		my $scratch = scratchMGSInputState($MGS);
+		my $resolution;
+		if (-s "$SIdirs{$MGS}/tooFewSamples.sto") {
+			$resolution = 'valid_no_tree_too_few_samples';
+			$terminal++;
+		} elsif (-s "$SIdirs{$MGS}/noRecoverableLoci.sto") {
+			$resolution = 'valid_no_tree_no_recoverable_loci';
+			$terminal++;
+		} elsif (exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ /multicopy/) {
+			$resolution = 'excluded_conspecific_or_multicopy';
+			$excluded++;
+		} elsif ($persistent eq 'complete' || $scratch eq 'complete') {
+			$resolution = 'tree_input_ready';
+			$ready++;
+		} else {
+			$resolution = 'repair_required';
+			push @repairRequired, $MGS;
+		}
+		print {$out} join("\t", $MGS, $resolution, $persistent, $scratch), "\n"
+			or die "Cannot write $temporary: $!\n";
+	}
+	close $out or die "Cannot close $temporary: $!\n";
+	rename $temporary, $audit or die "Cannot publish $audit: $!\n";
+	print "Tree-input resolution audit: ready=$ready, valid_no_tree=$terminal, "
+		."excluded=$excluded, repair_required=".scalar(@repairRequired)."; $audit\n";
+	die "Tree-input resolution is incomplete; repair is required for: "
+		.join(',', @repairRequired)."\nSee $audit\n" if @repairRequired;
 }
 
 
@@ -2595,10 +2679,14 @@ sub getInputSize{
 		my $publishedState = persistentMGSInputState($MGS);
 		my $scratchState = scratchMGSInputState($MGS);
 		my $tooFew = -s "$SIdirs{$MGS}/tooFewSamples.sto" ? 1 : 0;
+		my $noRecoverableLoci = -s "$SIdirs{$MGS}/noRecoverableLoci.sto" ? 1 : 0;
 		my ($state, $source, $inputFNAsize) = ('empty_extraction', 'none', 0);
 		if ($tooFew) {
 			($state, $source) = ('too_few_samples', 'marker');
 			$counts{too_few_samples}++;
+		} elsif ($noRecoverableLoci) {
+			($state, $source) = ('no_recoverable_loci', 'marker');
+			$counts{no_recoverable_loci}++;
 		} elsif ($scratchState eq 'complete') {
 			($state, $source) = ('ready', 'scratch');
 			for my $path (bsd_glob("$tmpD/$FNAstdof*")) {
@@ -2631,6 +2719,7 @@ sub getInputSize{
 		or die "Cannot publish tree-input audit $auditTemporary as $auditFile: $!\n";
 	return (\@out, {
 		too_few_samples => $counts{too_few_samples} // 0,
+		no_recoverable_loci => $counts{no_recoverable_loci} // 0,
 		incomplete_published => $counts{incomplete_published} // 0,
 		incomplete_scratch => $counts{incomplete_scratch} // 0,
 		empty_extraction => $counts{empty_extraction} // 0,
@@ -2666,6 +2755,7 @@ sub evalFileStatus{
 	my $dirsNOTPrepped = 0; my $CatFileMiss = 0;my $CatNotPrepped = 0; my $treeAbsent=0;
 	my $doneDirs=0;
 	my $tooFewDirs=0;
+	my $noRecoverableLociDirs=0;
 	my $PhylosExist = 1;
 	
 	my $treeFile= "IQtree_allsites.treefile";
@@ -2684,13 +2774,25 @@ sub evalFileStatus{
 		}
 		make_path($outD2) unless -d $outD2;
 		my $tooFewMarker = "$outD2/tooFewSamples.sto";
+		my $noRecoverableLociMarker = "$outD2/noRecoverableLoci.sto";
 		if (-s $tooFewMarker && !$deepRepair && !$redoSubmissionData && ($onlySubmit != 0 || $recalcTrees)) {
 			$MGSnoTree{$MGS} = 1;
+			$MGSnoTreeReason{$MGS} = 'insufficient_tree_input';
 			$tooFewDirs++;
+			next;
+		}
+		if (-s $noRecoverableLociMarker && !$deepRepair && !$redoSubmissionData
+				&& ($onlySubmit != 0 || $recalcTrees)) {
+			$MGSnoTree{$MGS} = 1;
+			$MGSnoTreeReason{$MGS} = 'no_recoverable_loci';
+			$noRecoverableLociDirs++;
 			next;
 		}
 		unlink $tooFewMarker or die "Cannot remove stale $tooFewMarker: $!\n"
 			if -e $tooFewMarker;
+		unlink $noRecoverableLociMarker
+			or die "Cannot remove stale $noRecoverableLociMarker: $!\n"
+			if -e $noRecoverableLociMarker;
 		
 	#	if ( !-d $outD2 ||){ # first phase only has "all.cat.tmp" file..
 	#		$dirsNOTPrepped ++;
@@ -2743,9 +2845,10 @@ sub evalFileStatus{
 	}
 	$PhylosExist = 0 if ($CatFileMiss/scalar(@specis) > 0.1); #only activate if more than 10% missing..
 
-	print "Output dirs status: \nIncomplete tree inputs: $CatFileMiss, complete staged inputs: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent, Dir done: $doneDirs, too few samples: $tooFewDirs, Phylo complete: $PhylosExist \n";
+	print "Output dirs status: \nIncomplete tree inputs: $CatFileMiss, complete staged inputs: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent, Dir done: $doneDirs, too few samples: $tooFewDirs, no recoverable loci: $noRecoverableLociDirs, Phylo complete: $PhylosExist \n";
 	#die;
-	return($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist);
+	return($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist,
+		$noRecoverableLociDirs);
 }
 
 
