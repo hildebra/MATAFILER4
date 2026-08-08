@@ -9,8 +9,7 @@ use File::Path qw(make_path);
 
 our @EXPORT_OK = qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
-	atomic_write_text write_workflow_record
-	preflight_executable preflight_directory filesystem_capacity preflight_capacity
+	preflight_executable preflight_directory filesystem_capacity
 );
 
 sub retry_operation {
@@ -90,47 +89,6 @@ sub retry_close {
 	);
 }
 
-sub atomic_write_text {
-	my ($path, $content, %options) = @_;
-	die "atomic_write_text requires an output path\n"
-		unless defined($path) && length($path);
-	$content = '' unless defined $content;
-	my $temporary = "$path.tmp.$$";
-	my $result = retry_operation(
-		%options,
-		label => $options{label} || "atomically publish $path",
-		code => sub {
-			unlink $temporary if -e $temporary || -l $temporary;
-			open my $handle, '>', $temporary or return;
-			my $written = print {$handle} $content;
-			my $closed = close $handle;
-			return unless $written && $closed;
-			return unless rename $temporary, $path;
-			return -e $path ? 1 : 0;
-		},
-	);
-	unlink $temporary if !$result && (-e $temporary || -l $temporary);
-	return $result;
-}
-
-sub write_workflow_record {
-	my ($path, %fields) = @_;
-	my @columns = qw(status stage timestamp pid reason);
-	$fields{status} = 'running' unless defined $fields{status};
-	$fields{stage} = 'unknown' unless defined $fields{stage};
-	$fields{timestamp} = time unless defined $fields{timestamp};
-	$fields{pid} = $$ unless defined $fields{pid};
-	$fields{reason} = '' unless defined $fields{reason};
-	for my $column (@columns) {
-		$fields{$column} =~ s/[\t\r\n]+/ /g;
-	}
-	my $text = join("\t", @columns)."\n"
-		.join("\t", @fields{@columns})."\n";
-	return atomic_write_text($path, $text,
-		fatal => 0,
-		label => "publish workflow record $path");
-}
-
 sub preflight_executable {
 	my ($program, $label) = @_;
 	die "Missing configured program for $label\n" unless defined($program) && length($program);
@@ -182,23 +140,6 @@ sub filesystem_capacity {
 		available_kb => $available_kb,
 		available_inodes => $available_inodes,
 	};
-}
-
-sub preflight_capacity {
-	my ($directory, $label, %options) = @_;
-	$label ||= 'workflow filesystem';
-	my $minimum_kb = defined($options{minimum_kb})
-		? 0 + $options{minimum_kb} : 2 * 1024 * 1024;
-	my $minimum_inodes = defined($options{minimum_inodes})
-		? 0 + $options{minimum_inodes} : 10_000;
-	my $capacity = filesystem_capacity($directory);
-	warn "$label has less than ".int($minimum_kb / 1024)." MiB available\n"
-		if defined($capacity->{available_kb})
-			&& $capacity->{available_kb} < $minimum_kb;
-	warn "$label has fewer than $minimum_inodes inodes available\n"
-		if defined($capacity->{available_inodes})
-			&& $capacity->{available_inodes} < $minimum_inodes;
-	return $capacity;
 }
 
 1;

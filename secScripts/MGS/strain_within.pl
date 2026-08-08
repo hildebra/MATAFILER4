@@ -3128,7 +3128,9 @@ sub preflightStrainWorkflow {
 	preflight_directory($outD, 'within-strain output directory');
 	preflight_directory($scratchD, 'within-strain scratch directory') if length($scratchD);
 	my @programs = (
-		['buildTree5', getProgPaths('buildTree_scr')],
+		# buildTree_scr is a MATAFILER command wrapper, commonly including
+		# micromamba activation followed by "perl .../buildTree5.pl".  It is
+		# executed as a shell command below, not as a single executable path.
 		['MSAfix', getProgPaths('MSAfix')],
 		[$MSAprog == 0 ? 'MSAprobs'
 			: $MSAprog == 1 ? 'Clustal Omega'

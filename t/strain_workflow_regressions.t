@@ -393,6 +393,9 @@ like($strain,
 like($strain,
 	qr/sub preflightStrainWorkflow.*?preflight_directory.*?preflight_executable.*?filesystem_capacity/s,
 	'strain workflow validates tools, writable directories, capacity, and inodes before expensive work');
+unlike($strain,
+	qr/sub preflightStrainWorkflow.*?\['buildTree5', getProgPaths\('buildTree_scr'\)\]/s,
+	'buildTree’s MATAFILER command wrapper is not treated as a standalone executable');
 
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,
