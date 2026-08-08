@@ -120,9 +120,13 @@ sub publishStagedTreeInputs;
 sub writeCompletionMarker;
 sub epaModelArtifact;
 sub runEpaNgPlacement;
+sub postAlignmentStep;
+sub elapsedTimeText;
+sub alignmentCollectionStats;
+sub rawCoordinateInformation;
 
 my $doPhym= 0;
-my $version = 5.39;
+my $version = 5.40;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -160,7 +164,7 @@ my $MSAprog = 2; #do MSA with clustal (1) or msaprobs (0), mafft(2), guidance2(3
 my $calcDistMat = 0; #distmat of either AA or NT (depending on MSA)
 my $calcDistMatExt = 0; #distmat of other AA or NT (depending on MSA), e.g. running two times an MSA
 my $calcDistMatExtGo = 0;
-my $treeAutoModel=1; #iqtree: choose model automatically (a bit slower)
+my $treeAutoModel=0; #fixed GTR+F+G2 by default; automatic model selection is opt-in
 my $treeAutoModelExplicit=0;
 my $fracMaxGenesFilter = 0.2;
 my $fracMaxGenes90pct = 0.25; #gene cats to keep, e.g. 25% of 90th percentile
@@ -630,7 +634,7 @@ print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
 	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
 	. "; supertree=" . ($doSuperTree ? "yes" : "no")
 	. "; IQ-TREE mode=" . ($iqLegacy ? "legacy" : $iqPathogen ? "pathogen" : "standard")
-	. "; IQ-TREE model=" . ($treeAutoModel ? "AutoModel" : "fixed")
+	. "; IQ-TREE model=" . ($treeAutoModel ? "AutoModel" : $useAA4tree ? "LG+F+G" : "GTR+F+G2")
 	. "; IQ-TREE memory=" . ($iqMemMB ? "${iqMemMB}MB" : "auto") . "\n";
 print "Additional analyses: synonymous=" . ($calcSyn ? "yes" : "no")
 	. "; nonsynonymous=" . ($calcNonSyn ? "yes" : "no")
@@ -938,6 +942,7 @@ if ($isAligned){
 		my $candidateSelection = selectTaxonAwareCandidateLoci(
 			categories => \@linesCats2,
 			char_counts => \%charCnts,
+			sequences => $useAA4tree ? \%FAA : \%FNA,
 			candidate_limit => $taxonAwareMaxLoci + $taxonAwareCandidateExtra,
 			final_limit => $taxonAwareMaxLoci,
 			core_limit => $taxonAwareCoreLoci,
@@ -1309,6 +1314,19 @@ if ($synSummaryCount) {
 		. "$synSiteTotal synonymous-variable and $nonSynSiteTotal nonsynonymous-variable codon(s)\n";
 }
 
+print "\n---------------- POST-ALIGNMENT WORKFLOW ----------------\n";
+my $postAlignmentStepStarted = time;
+my $postAlignmentPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
+my $postAlignmentStats = alignmentCollectionStats($postAlignmentPrimary);
+postAlignmentStep("alignment inventory", $postAlignmentStepStarted,
+	"loci=$postAlignmentStats->{loci}",
+	"mean_sequences_per_locus=$postAlignmentStats->{mean_sequences}",
+	"mean_alignment_length=$postAlignmentStats->{mean_length}",
+	"total_alignment_sites=$postAlignmentStats->{total_sites}",
+	"sequence_range=$postAlignmentStats->{minimum_sequences}-$postAlignmentStats->{maximum_sequences}",
+	"length_range=$postAlignmentStats->{minimum_length}-$postAlignmentStats->{maximum_length}");
+$postAlignmentStepStarted = time;
+
 if ($postAlignmentLocusQC && $cogCats ne "") {
 	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
 	if (@{$primaryAlignments}) {
@@ -1340,6 +1358,12 @@ if ($postAlignmentLocusQC && $cogCats ne "") {
 	}
 	writePostAlignmentQCPolicy($postAlignmentQCPolicyFile, $postAlignmentQCPolicy);
 }
+my $postQCPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
+postAlignmentStep("locus QC", $postAlignmentStepStarted,
+	"enabled=".($postAlignmentLocusQC ? 1 : 0),
+	"retained_loci=".scalar(@{$postQCPrimary}),
+	"report=$postAlignmentQCReport");
+$postAlignmentStepStarted = time;
 
 if ($taxonAwareLocusSelection && $cogCats ne "") {
 	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
@@ -1449,6 +1473,12 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			. "$treeD/taxon_aware_sample_selection.tsv, $backboneAudit, $placementAudit\n";
 	}
 }
+my $postSelectionPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
+postAlignmentStep("taxon-aware locus selection", $postAlignmentStepStarted,
+	"enabled=".($taxonAwareLocusSelection ? 1 : 0),
+	"selected_loci=".scalar(@{$postSelectionPrimary}),
+	"samples=".scalar(keys %samples));
+$postAlignmentStepStarted = time;
 
 if ($rateMergePartitions && $cogCats ne "") {
 	%partitionRateProxy = %{readPostAlignmentRateMetrics($postAlignmentQCReport)};
@@ -1457,6 +1487,10 @@ if ($rateMergePartitions && $cogCats ne "") {
 			$taxonAwareFinalMetricByPath{$alignment}{selection_phase} // '';
 	}
 }
+postAlignmentStep("rate/GC partition preparation", $postAlignmentStepStarted,
+	"enabled=".($rateMergePartitions ? 1 : 0),
+	"locus_metrics=".scalar(keys %partitionRateProxy));
+$postAlignmentStepStarted = time;
 
 #die "@MSA_AA\n\n";
 if ($calcMSA && $cogCats ne "" && @MSAs == 0 && @MSA_AA == 0 && !fileGZs($multAli)){
@@ -1480,6 +1514,10 @@ if (!$useAA4tree) {
 	mergeMSAs(\@MSA_AA,\%samples,$multAli,0,1); #sames files as in @MSrm
 	@theRealMSAs = @MSA_AA;
 }
+postAlignmentStep("concatenation", $postAlignmentStepStarted,
+	"loci=".scalar(@theRealMSAs), "samples=".scalar(keys %samples),
+	"alignment=$multAli");
+$postAlignmentStepStarted = time;
 
 if ($strictBackbone) {
 	my $fullAlignment = "$MsaD/MSAli.full.fna";
@@ -1536,6 +1574,11 @@ if ($strictBackbone) {
 		."see $classificationFile\n"
 		if $strictSplit->{fallback};
 }
+postAlignmentStep("strict-backbone preparation", $postAlignmentStepStarted,
+	"enabled=".($strictBackbone ? 1 : 0),
+	"backbone_samples=".($strictSplit ? scalar(@{$strictSplit->{backbone}}) : scalar(keys %samples)),
+	"placement_samples=".($strictSplit ? scalar(@{$strictSplit->{placement}}) : 0));
+$postAlignmentStepStarted = time;
 
 #phylip conversion??
 if ( $doGenesToPh){ 
@@ -1673,6 +1716,7 @@ die "Expected a non-empty merged alignment before tree construction: $multAli\n"
 	if $MSAreq && !fileGZs($multAli);
 
 my $trRetH;
+my $inferenceStarted = time;
 if ($doSuperTree){
 	$Tree1{nwk} = $phyloTree;
 	$trRetH = \%Tree1;
@@ -1685,7 +1729,12 @@ if ($doSuperTree){
 		treeAtHeart($tOhrNSun);
 	}
 }
+postAlignmentStep("phylogeny inference", $inferenceStarted,
+	"methods=".(@treeMethods ? join('+', @treeMethods) : 'none'),
+	"model=".($treeAutoModel ? 'AutoModel' : $useAA4tree ? 'LG+F+G' : 'GTR+F+G2'),
+	"primary_tree=".(${$trRetH}{nwk} // '<none>'));
 
+my $placementStarted = time;
 if ($strictSplit) {
 	my $backboneTree = ${$trRetH}{nwk} // "";
 	if ($backboneTree ne "" && -s $backboneTree) {
@@ -1746,6 +1795,10 @@ if ($strictSplit) {
 			."was available for post-inference placement\n";
 	}
 }
+postAlignmentStep("EPA-ng placement and tree publication", $placementStarted,
+	"enabled=".($strictSplit ? 1 : 0),
+	"placement_samples=".($strictSplit ? scalar(@{$strictSplit->{placement}}) : 0),
+	"primary_tree=".(${$trRetH}{nwk} // '<none>'));
 #system "rm -f $multAli.ph $multAliSyn.ph $multAliNonSyn.ph";
 
 if ($useTreeShrink){
@@ -3734,6 +3787,9 @@ sub selectTaxonAwareCandidateLoci {
 			? 1 - ($mad / $medianSites > 1 ? 1 : $mad / $medianSites)
 			: 0;
 		my @sequenceIds = map { $bestSequence{$_} } sort keys %bestSequence;
+		my $potentialInformation = rawCoordinateInformation(
+			\@sequenceIds, $args{sequences}, $args{use_aa},
+		);
 		$metrics{$gene} = {
 			gene => $gene,
 			category => \@sequenceIds,
@@ -3742,6 +3798,10 @@ sub selectTaxonAwareCandidateLoci {
 			q90_nt => $q90,
 			median_completeness => $medianCompleteness,
 			length_stability => $lengthStability,
+			potential_variable_sites => $potentialInformation->{variable_sites},
+			potential_parsimony_informative_sites => $potentialInformation->{parsimony_informative_sites},
+			potential_informative_nt => $potentialInformation->{parsimony_informative_sites}
+				* ($args{use_aa} ? 3 : 1),
 			quality_score => 0,
 		};
 		for my $sample (keys %bestSites) {
@@ -3752,15 +3812,21 @@ sub selectTaxonAwareCandidateLoci {
 	die "Taxon-aware selection found no category with at least three usable samples\n"
 		unless keys %metrics;
 	my $maximumSampleCount = 1;
+	my $maximumPotentialInformation = 1;
 	for my $metric (values %metrics) {
 		$maximumSampleCount = $metric->{sample_count}
 			if $metric->{sample_count} > $maximumSampleCount;
+		$maximumPotentialInformation = $metric->{potential_parsimony_informative_sites}
+			if $metric->{potential_parsimony_informative_sites} > $maximumPotentialInformation;
 	}
 	for my $metric (values %metrics) {
 		my $prevalence = $metric->{sample_count} / $maximumSampleCount;
-		$metric->{robust_score} = 0.55 * $prevalence
-			+ 0.30 * $metric->{median_completeness}
-			+ 0.15 * $metric->{length_stability};
+		$metric->{potential_information_score} =
+			$metric->{potential_parsimony_informative_sites} / $maximumPotentialInformation;
+		$metric->{robust_score} = 0.50 * $prevalence
+			+ 0.25 * $metric->{median_completeness}
+			+ 0.15 * $metric->{length_stability}
+			+ 0.10 * $metric->{potential_information_score};
 		$metric->{quality_score} = $metric->{robust_score};
 	}
 	my $selectedGenes = chooseTaxonAwareLoci(
@@ -3779,6 +3845,32 @@ sub selectTaxonAwareCandidateLoci {
 		metrics => \%metrics,
 		samples => \%samples,
 	};
+}
+
+sub rawCoordinateInformation {
+	my ($sequenceIds, $sequences, $useAA) = @_;
+	return { variable_sites => 0, parsimony_informative_sites => 0 }
+		unless ref($sequenceIds) eq 'ARRAY' && ref($sequences) eq 'HASH';
+	my @sequence = map { uc($sequences->{$_} // '') } @{$sequenceIds};
+	my $maximumLength = 0;
+	for my $sequence (@sequence) {
+		$maximumLength = length($sequence) if length($sequence) > $maximumLength;
+	}
+	my ($variable, $informative) = (0, 0);
+	for my $position (0 .. $maximumLength - 1) {
+		my %states;
+		for my $sequence (@sequence) {
+			my $state = substr($sequence, $position, 1);
+			next unless $useAA
+				? $state =~ /^[ACDEFGHIKLMNPQRSTVWY]$/
+				: $state =~ /^[ACGTU]$/;
+			$states{$state}++;
+		}
+		$variable++ if keys(%states) >= 2;
+		my $repeatedStates = grep { $_ >= 2 } values(%states);
+		$informative++ if $repeatedStates >= 2;
+	}
+	return { variable_sites => $variable, parsimony_informative_sites => $informative };
 }
 
 sub chooseTaxonAwareLoci {
@@ -4057,7 +4149,10 @@ sub writeTaxonAwareLocusAudit {
 	print {$output} join("\t", qw(
 		stage gene selected rank phase quality_score robust_score occupancy
 		sample_count q90_nt alignment_length_nt variable_sites
-		parsimony_informative_sites median_completeness length_stability
+		parsimony_informative_sites potential_variable_sites
+		potential_parsimony_informative_sites potential_informative_nt
+		potential_information_score
+		median_completeness length_stability
 		selection_objective alignment
 	))."\n";
 	for my $gene (sort {
@@ -4075,6 +4170,11 @@ sub writeTaxonAwareLocusAudit {
 			$metric->{sample_count} // "", $metric->{q90_nt} // "",
 			$metric->{alignment_length_nt} // "", $metric->{variable_sites} // "",
 			$metric->{parsimony_informative_sites} // "",
+			$metric->{potential_variable_sites} // "",
+			$metric->{potential_parsimony_informative_sites} // "",
+			$metric->{potential_informative_nt} // "",
+			defined($metric->{potential_information_score})
+				? sprintf("%.6f", $metric->{potential_information_score}) : "",
 			map({ defined($metric->{$_}) ? sprintf("%.6f", $metric->{$_}) : "" }
 				qw(median_completeness length_stability selection_objective)),
 			$metric->{path} // "",
@@ -4245,6 +4345,79 @@ sub prepareTemporaryBase {
 		return (0, "cannot remove temporary-path write test $probePath: $!");
 	}
 	return (1, "");
+}
+
+sub elapsedTimeText {
+	my ($seconds) = @_;
+	$seconds = 0 unless defined($seconds) && $seconds >= 0;
+	return sprintf('%.1fs', $seconds) if $seconds < 60;
+	my $minutes = int($seconds / 60);
+	my $remaining = $seconds - $minutes * 60;
+	return sprintf('%dm%.1fs', $minutes, $remaining) if $minutes < 60;
+	my $hours = int($minutes / 60);
+	$minutes %= 60;
+	return sprintf('%dh%dm%.1fs', $hours, $minutes, $remaining);
+}
+
+sub postAlignmentStep {
+	my ($name, $started, @details) = @_;
+	my $elapsed = elapsedTimeText(time - $started);
+	my @clean = grep { defined($_) && length($_) } @details;
+	print 'POST-ALIGNMENT STEP: '.$name.' ('.$elapsed.')'
+		.(@clean ? '; '.join(', ', @clean) : '')."\n";
+}
+
+sub alignmentCollectionStats {
+	my ($alignments) = @_;
+	die "Alignment collection must be an array reference\n"
+		unless ref($alignments) eq 'ARRAY';
+	my ($loci, $totalSequences, $totalSites) = (0, 0, 0);
+	my ($minimumSequences, $maximumSequences, $minimumLength, $maximumLength);
+	for my $alignment (@{$alignments}) {
+		next unless defined($alignment) && fileGZs($alignment);
+		my ($input, $ok) = gzipopen($alignment, 'post-alignment statistics', 1);
+		die "Cannot read alignment $alignment for post-alignment statistics\n"
+			unless $ok && $input;
+		my ($sequenceCount, $alignmentLength, $currentLength) = (0, undef, 0);
+		while (my $line = <$input>) {
+			if ($line =~ /^>/) {
+				if ($sequenceCount) {
+					die "Unequal sequence lengths in alignment $alignment\n"
+						if defined($alignmentLength) && $currentLength != $alignmentLength;
+					$alignmentLength = $currentLength unless defined $alignmentLength;
+				}
+				$sequenceCount++;
+				$currentLength = 0;
+				next;
+			}
+			$line =~ s/\s+//g;
+			$currentLength += length($line);
+		}
+		if ($sequenceCount) {
+			die "Unequal sequence lengths in alignment $alignment\n"
+				if defined($alignmentLength) && $currentLength != $alignmentLength;
+			$alignmentLength = $currentLength unless defined $alignmentLength;
+		}
+		close $input or die "Cannot close alignment $alignment: $!\n";
+		next unless $sequenceCount && defined $alignmentLength;
+		$loci++;
+		$totalSequences += $sequenceCount;
+		$totalSites += $alignmentLength;
+		$minimumSequences = $sequenceCount if !defined($minimumSequences) || $sequenceCount < $minimumSequences;
+		$maximumSequences = $sequenceCount if !defined($maximumSequences) || $sequenceCount > $maximumSequences;
+		$minimumLength = $alignmentLength if !defined($minimumLength) || $alignmentLength < $minimumLength;
+		$maximumLength = $alignmentLength if !defined($maximumLength) || $alignmentLength > $maximumLength;
+	}
+	return {
+		loci => $loci,
+		mean_sequences => $loci ? sprintf('%.1f', $totalSequences / $loci) : 0,
+		mean_length => $loci ? sprintf('%.1f', $totalSites / $loci) : 0,
+		total_sites => $totalSites,
+		minimum_sequences => $minimumSequences // 0,
+		maximum_sequences => $maximumSequences // 0,
+		minimum_length => $minimumLength // 0,
+		maximum_length => $maximumLength // 0,
+	};
 }
 
 sub limitedWarn {

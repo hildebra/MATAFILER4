@@ -277,8 +277,6 @@ my @subsetMGS=(); my $subsMGSstr="";
 my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
 my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
-my $legacyMGTK = 1; #historical strain IQ-TREE command; pathogen mode opts out unless explicitly overridden
-my $legacyMGTKExplicit = 0;
 my $GenesPerSpecies = 0.2;
 my $GeneLengthMin = 0.3;
 my $relativeNTFraction = 0.1;
@@ -427,10 +425,6 @@ GetOptions(
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
-	"legacyMGTK=i"   => sub {
-		$legacyMGTK = $_[1];
-		$legacyMGTKExplicit = 1;
-	},
 	"rmMSA=i"        => \$rmMSA, #remove MSA, to save diskspace
 	"phyloMemMulti=f" => \$memMulti, #mem used for buildtree. Default: 1.0
 	
@@ -478,7 +472,6 @@ die "-NTfiltCount and -placementNTfiltCount must be non-negative\n"
 	if $NTfiltCount < 0 || (defined($placementNTfiltCount) && $placementNTfiltCount < 0);
 die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
-$legacyMGTK = 0 if $iqPathogen && !$legacyMGTKExplicit;
 die "-rateMergePartitions must be 0 or 1\n"
 	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
 die "-rateMergeMaxBins, -rateMergeTargetSites, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
@@ -507,8 +500,6 @@ die "-phyloMemMulti must be positive\n" unless $memMulti > 0;
 die "-phyloProg must be 1 (IQ-TREE), 2 (VeryFastTree), or 3 (FastTree)\n"
 	unless $phyloProg >= 1 && $phyloProg <= 3;
 die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
-die "-legacyMGTK must be 0 or 1\n" unless $legacyMGTK == 0 || $legacyMGTK == 1;
-die "-iqPathogen and -legacyMGTK are mutually exclusive\n" if $iqPathogen && $legacyMGTK;
 die "-iqPathogen requires -phyloProg 1\n" if $iqPathogen && $phyloProg != 1;
 die "-recalcTrees must be 0 or 1\n" unless $recalcTrees == 0 || $recalcTrees == 1;
 die "-noGeneLimit and -disableQC must each be 0 or 1\n"
@@ -1224,12 +1215,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		."-strictBackboneMinSamples $strictBackboneMinSamples "
 		."-placementMinOverlap $placementMinOverlap ";
 	if ($phyloProg == 1){
-		if ($legacyMGTK){
-			$Tcmd .= "-iqLegacy 1 ";
-		} else {
-			$Tcmd .= "-iqMemMB $iqMemMB ";
-			$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
-		}
+		$Tcmd .= "-iqMemMB $iqMemMB ";
+		$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
 	}
 	my $treeTmpOption = $nodeTmpConfigured
 		? "-tmpSubdir ".shellQuote("strain_within/$MGS")
@@ -4384,8 +4371,6 @@ Tree locus filtering:
                                  the complete alignment as fallback [default 3]
   -placementMinOverlap INT      Minimum informative alignment positions required
                                  by the taxon-aware placement gate [default 400]
-  -legacyMGTK 0|1               Use the historical IQ-TREE strain command
-                                 [default 1; -iqPathogen 1 selects modern mode]
 USAGE
 }
 

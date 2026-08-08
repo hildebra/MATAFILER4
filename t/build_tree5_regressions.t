@@ -15,17 +15,23 @@ close $fh;
 my $compile_status = system($^X, '-I'.$root, '-c', $script);
 is($compile_status, 0, 'buildTree5.pl compiles');
 
-like($source, qr/my \$version = 5\.39;/,
-	'MSAfix report-metric integration increments the workflow version');
+like($source, qr/my \$version = 5\.40;/,
+	'post-alignment reporting increments the workflow version');
 like($source,
-	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
-	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
+	qr/"withinSpecies=i".*?"strainWithinPreset=i".*?"strictBackbone=i"/s,
+	"buildTree exposes explicit strain, within-species, and strict-backbone controls");
 like($source,
-	qr/my \$treeAutoModel=1;.*?my \$treeAutoModelExplicit=0;.*?"AutoModel=i" => sub \{.*?\$treeAutoModel = \$_\[1\];.*?\$treeAutoModelExplicit = 1;.*?if \(\$strainWithinPreset\) \{.*?\$treeAutoModel = 0 unless \$treeAutoModelExplicit;/s,
-	'strain trees default to the fixed model while an explicit -AutoModel 1 remains an opt-in');
+	qr/my \$treeAutoModel=0;.*?my \$treeAutoModelExplicit=0;.*?"AutoModel=i" => sub \{.*?\$treeAutoModel = \$_\[1\];.*?\$treeAutoModelExplicit = 1;/s,
+	'all BuildTree5 nucleotide trees default to the fixed GTR+F+G2 model while -AutoModel 1 remains opt-in');
 like($source,
-	qr/my %RATE_MERGE_DEFAULT = \(.*?enabled => 0.*?maximum_bins => 8.*?target_sites_per_bin => 30_000.*?minimum_loci_per_bin => 20.*?minimum_sites_per_bin => 20_000.*?"rateMergePartitions=i" => sub \{.*?\$rateMergePartitionsExplicit = 1.*?if \(\$strainWithinPreset\) \{.*?\$rateMergePartitions = 1 unless \$rateMergePartitionsExplicit;/s,
-	'direct builds keep rate merging optional while strain presets enable it unless explicitly disabled');
+	qr/POST-ALIGNMENT WORKFLOW.*?alignmentCollectionStats.*?postAlignmentStep\("alignment inventory".*?postAlignmentStep\("locus QC".*?postAlignmentStep\("taxon-aware locus selection".*?postAlignmentStep\("rate\/GC partition preparation".*?postAlignmentStep\("concatenation".*?postAlignmentStep\("strict-backbone preparation".*?postAlignmentStep\("phylogeny inference".*?postAlignmentStep\("EPA-ng placement and tree publication"/s,
+	'post-alignment processing reports elapsed steps from QC through inference and placement');
+like($source,
+	qr/sub alignmentCollectionStats .*?mean_sequences.*?mean_length.*?total_sites.*?minimum_sequences.*?maximum_sequences.*?minimum_length.*?maximum_length/s,
+	'the post-alignment inventory reports locus, sequence-count, and alignment-length statistics without retaining sequence data');
+like($source,
+	qr/my %RATE_MERGE_DEFAULT = \(.*?enabled => 0.*?maximum_bins => 8.*?target_sites_per_bin => 30_000.*?minimum_loci_per_bin => 20.*?minimum_sites_per_bin => 20_000.*?"rateMergePartitions=i" => sub \{.*?\$rateMergePartitionsExplicit = 1/s,
+	'direct builds expose opt-in deterministic rate/GC partition merging');
 like($source,
 	qr/my \$withinSpecies = 0;.*?my \$minOverlapMSA;.*?"minOverlapMSA=f".*?\$minOverlapMSA = \$withinSpecies \? 0\.35 : 0 unless defined \$minOverlapMSA;.*?\$postAlignmentLocusQC = \$withinSpecies.*?unless defined \$postAlignmentLocusQC;.*?\$postAlignmentDivergenceQC = \$withinSpecies \? 1 : 0.*?-minOverlapMSA must be between zero and one/s,
 	"between-species locus retention is the default and within-species overlap filtering uses MSAfix's fractional threshold");
@@ -78,6 +84,9 @@ like($source,
 	qr/if \(\$taxonAwareLocusSelection\) \{.*?selectTaxonAwareCandidateLoci\(.*?candidate_limit => \$taxonAwareMaxLoci \+ \$taxonAwareCandidateExtra.*?\@linesCats3 = \@\{\$candidateSelection->\{categories\}\}/s,
 	'the taxon-aware pre-MSA pass chooses robust, rescue, and QC-backfill candidates in buildTree5');
 like($source,
+	qr/rawCoordinateInformation\(.*?potential_parsimony_informative_sites.*?potential_information_score.*?0\.10 \* \$metric->\{potential_information_score\}/s,
+	'pre-alignment potentially informative positions are audited and contribute modestly to candidate-locus ranking');
+like($source,
 	qr/sub chooseTaxonAwareLoci.*?robust_core.*?\$coverageGain.*?qc_backfill.*?taxon_rescue/s,
 	'locus choice combines a robust core with rarity-weighted taxon rescue and backfill');
 like($source,
@@ -106,8 +115,8 @@ like($source,
 	qr/print O "\$TypeTag, \$partition->\{name\} = ".join\(", ", \@ranges\)/,
 	'grouped partitions use IQ-TREE-compatible comma-separated non-contiguous ranges');
 like($source,
-	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => sub \{.*?\$iqLegacyExplicit = 1.*?if \(\$strainWithinPreset\) \{.*?\$iqLegacy = 1 unless \$iqLegacyExplicit \|\| \$iqPathogen/s,
-	'buildTree exposes memory-capped pathogen mode and defaults strain presets to legacy IQ-TREE');
+	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => sub \{.*?\$iqLegacyExplicit = 1/s,
+	'buildTree exposes memory-capped pathogen and legacy IQ-TREE controls');
 like($source, qr/-iqPathogen and -iqLegacy are mutually exclusive/,
 	'buildTree rejects conflicting modern and legacy IQ-TREE modes');
 like($source,

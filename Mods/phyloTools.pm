@@ -413,7 +413,10 @@ sub runQItree{
 		if ($autoModel){
 			$cmd .= $usePartitionModel ? "-m MFP+MERGE " : "-m TEST ";
 		} else {
-			$cmd .= $iqLegacy ? "-m GTR+F+I+G4 " : "-m GTR+F+G2 ";
+			# Keep the fixed nucleotide model consistent across the legacy and
+			# standard execution kernels.  -iqLegacy selects compatibility
+			# behaviour, not a different substitution model.
+			$cmd .= "-m GTR+F+G2 ";
 			#$cmd .= "-m HKY+F+G ";
 		}
 	}

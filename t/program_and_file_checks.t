@@ -94,8 +94,8 @@ like(
 );
 like(
 	$phylo_tools,
-	qr/\$cmd \.= \$iqLegacy \? "-m GTR\+F\+I\+G4 " : "-m GTR\+F\+G2 "/,
-	'modern nucleotide trees use GTR+F+G2 while legacy mode retains the previous model',
+	qr/\$cmd \.= "-m GTR\+F\+G2 ";/,
+	'fixed nucleotide trees use GTR+F+G2 in both standard and legacy execution modes',
 );
 like(
 	$phylo_tools,

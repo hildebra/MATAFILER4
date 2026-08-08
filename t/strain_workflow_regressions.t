@@ -229,11 +229,10 @@ like($strain,
 	qr/my \$iqPathogen = 0.*?"iqPathogen=i"\s+=> \\\$iqPathogen.*?\$Tcmd .= "-iqPathogen 1 " if \$iqPathogen/s,
 	'within-strain pathogen mode defaults off and is applied only by the parent tree command');
 like($strain,
-	qr/my \$legacyMGTK = 1;.*?"legacyMGTK=i"\s+=> sub \{.*?\$legacyMGTKExplicit = 1.*?\$legacyMGTK = 0 if \$iqPathogen && !\$legacyMGTKExplicit.*?-iqPathogen and -legacyMGTK are mutually exclusive.*?\$Tcmd .= "-iqLegacy 1 "/s,
-	'within-strain legacy IQ-TREE is default, pathogen mode opts out automatically, and tree mode remains parent-only');
-like($strain,
-	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(\$legacyMGTK\).*?"-iqLegacy 1 ".*?"-iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
-	'within-strain IQ-TREE defaults to bounded standard mode and enables CMAPLE only by explicit request');
+	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(\$phyloProg == 1\)\{.*?"-iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
+	'within-strain IQ-TREE always uses the standard resource-limited command and enables CMAPLE only by explicit request');
+unlike($strain, qr/-iqLegacy\s+1|legacyMGTK/,
+	'within-strain does not expose or submit the obsolete IQ-TREE legacy-kernel flag');
 like($strain,
 	qr/"recalcTrees=i"\s+=> \\\$recalcTrees.*?-recalcTrees must be 0 or 1.*?\$onlySubmit = 1 if \$recalcTrees/s,
 	'tree recalculation is validated and forced into input-recovery-only mode');
