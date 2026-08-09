@@ -95,6 +95,7 @@ sub printSampleStatsSummary;
 sub recoverCompletedSplitPhaseI;
 sub taxonAwareLocusBudgets;
 sub phase1WorkersNeedingRetry;
+sub phase1InputsAlreadyReusable;
 sub phase1WorkerCommand;
 sub writePhase1RepairQueue;
 sub validatePhase1WorkerLedger;
@@ -251,8 +252,8 @@ END {
 #.89: retry Phase-I workers, quarantine terminal MGS outcomes, and harden filesystem publication
 #.90: cache catalogue-wide input states and avoid duplicate full-ledger validation scans
 #.91: persist the exact shared scratch directory for reliable cross-run resume
-#.93: atomically commit and validate per-MGS outgroup preparation across resumes
-my $version = 0.93;
+#.94: allow fully staged legacy Phase-I resumes without obsolete worker ledgers
+my $version = 0.94;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -3438,6 +3439,17 @@ sub indexRecoveryRow {
 	$recoveryWorkerRowsByMGS{$mgs}{$worker}++;
 	$recoverySamplesByMGS{$mgs}{$sample} = 1;
 }
+sub phase1InputsAlreadyReusable {
+	for my $MGS (@specis) {
+		my $mgsDir = $SIdirs{$MGS} // "$outD/$MGS";
+		next if -s "$mgsDir/tooFewSamples.sto" || -s "$mgsDir/noRecoverableLoci.sto";
+		next if persistentMGSInputState($MGS) eq 'complete';
+		next if stagedMGSInputsReady($MGS);
+		return 0;
+	}
+	return 1;
+}
+
 
 sub recoverCompletedSplitPhaseI {
 	# A previous main worker can end after every extraction worker has published
@@ -3457,6 +3469,17 @@ sub recoverCompletedSplitPhaseI {
 	die "Malformed completed Phase-I generation manifest: $splitManifest\n"
 		unless $manifestLine =~ /^([A-Za-z0-9_.:-]+)\t\Q$maxSubJob\E$/;
 	my $generation = $1;
+	my @recoveryParts = map { "$LOGDIR/$recoveryLogName.$_" } 0 .. $maxSubJob - 1;
+	my @sampleStatsParts = map { "$LOGDIR/$sampleStatsLogName.$_" } 0 .. $maxSubJob - 1;
+	my $hasRecoveryParts = grep { -e $_ } @recoveryParts;
+	my $hasSampleStatsParts = grep { -e $_ } @sampleStatsParts;
+	if (!$hasRecoveryParts && !$hasSampleStatsParts && phase1InputsAlreadyReusable()) {
+		limitedNotice('legacy Phase-I ledgers unavailable',
+			"Phase-I worker ledgers are absent, but every MGS has complete staged or published tree inputs; continuing to Phase II without rebuilding historical recovery accounting.\n");
+		retry_unlink("$LOGDIR/phase1_worker_repair.queue.tsv", fatal => 0,
+			label => "clear obsolete legacy Phase-I repair queue");
+		return 0;
+	}
 	my @failedWorkers = phase1WorkersNeedingRetry($generation);
 	my $workerRetryRound = 0;
 	while (@failedWorkers) {
@@ -3492,11 +3515,9 @@ sub recoverCompletedSplitPhaseI {
 	}
 	retry_unlink("$LOGDIR/phase1_worker_repair.queue.tsv", fatal => 0,
 		label => 'clear obsolete Phase-I repair queue');
+	$hasRecoveryParts = grep { -e $_ } @recoveryParts;
+	$hasSampleStatsParts = grep { -e $_ } @sampleStatsParts;
 
-	my @recoveryParts = map { "$LOGDIR/$recoveryLogName.$_" } 0 .. $maxSubJob - 1;
-	my @sampleStatsParts = map { "$LOGDIR/$sampleStatsLogName.$_" } 0 .. $maxSubJob - 1;
-	my $hasRecoveryParts = grep { -e $_ } @recoveryParts;
-	my $hasSampleStatsParts = grep { -e $_ } @sampleStatsParts;
 	return 0 unless $hasRecoveryParts || $hasSampleStatsParts;
 
 	my @missingRecovery = grep { !-s $_ } @recoveryParts;
