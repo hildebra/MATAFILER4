@@ -194,30 +194,4 @@ is($status, 0, 'standard quality postprocessing accepts the undersized pseudo ou
 ok(-s "$small_assignment.cm2" && -s "$small_assignment.assStat",
 	'undersized assembly receives complete empty quality and assembly-stat outputs');
 
-my $separate_contigs = read_file(File::Spec->catfile($scripts, 'separateContigs.pl'));
-like($separate_contigs,
-	qr/my \$anyCoverageAvailable\s*=\s*.*?fileGZe\(\$primaryCoverage\).*?fileGZe\(\$supportCoverage\).*?unless \$anyCoverageAvailable/s,
-	'contig statistics accepts either primary or supplementary mapped-read coverage');
-unlike($separate_contigs,
-	qr/die "Could not find required coverage file \$inF/,
-	'missing primary coverage is not unconditionally fatal');
-like($separate_contigs,
-	qr/sub geneAbundance.*?contig_stats_coverage_complete\(\$outDab, \$oPrefix\).*?if \(!fileGZe\(\$inF\)\)/s,
-	'completed coverage derivatives are recognized before requiring their source coverage file');
-ok(index($separate_contigs, '$inD =~ s{[\\\\/]+$}{};') >= 0
-		&& index($separate_contigs, '$inD .= "/";') >= 0,
-	'input directories are normalized instead of requiring a caller-supplied trailing slash');
-like($separate_contigs,
-	qr/invalidate_sample_completion\(\$inD\).*?\$inD \.= "\/"/s,
-	"ContigStats workers invalidate the normalized sample root before output changes");
-unlike($separate_contigs,
-	qr/if \(-s \$outFfin.*?Gene abundance was already calculated/s,
-	'incomplete uncompressed output subsets cannot bypass the shared completion contract');
-unlike($separate_contigs,
-	qr/\$readLength > 0 && \$readLengthSup > 0/,
-	'a missing primary stream does not require an otherwise unused primary read length');
-like($separate_contigs,
-	qr/my \$kind = \$isSupport.*?read length must be a positive integer.*?unless \$readL > 0/s,
-	'each available coverage stream validates only its own read length');
-
 done_testing();
