@@ -51,6 +51,7 @@
 #5.45: execute configured EPA-ng environment wrappers as shell code rather than quoted paths
 #5.46: run every MSAfix alignment and locus-QC invocation with the configured MSA core count
 #5.47: apply MSAfix v2.15 coding-NT technical-offset repair after protein-guided alignment
+#5.48: treat uneven raw or partial alignment tails as missing in taxon-aware coordinate scoring
 
 use warnings;
 use strict;
@@ -149,7 +150,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.47;
+my $version = 5.48;
 my %iqtreeValidationCache;
 my %epaMaxMemSupport;
 my %limitedWarningCounts;
@@ -4094,6 +4095,8 @@ sub rawCoordinateInformation {
 	for my $position (0 .. $maximumLength - 1) {
 		my %states;
 		for my $sequence (@sequence) {
+			# Variable raw gene lengths are expected; an absent tail is missing data.
+			next if $position >= length($sequence);
 			my $state = substr($sequence, $position, 1);
 			next unless $useAA
 				? $state =~ /^[ACDEFGHIKLMNPQRSTVWY]$/
@@ -4211,6 +4214,8 @@ sub taxonAwareAlignmentMetrics {
 	for my $position (0 .. $alignmentLength - 1) {
 		my %stateCount;
 		for my $sequence (@sequences) {
+			# Retain robustness for a partial external alignment: absent tails are missing data.
+				next if $position >= length($sequence);
 			my $state = substr($sequence, $position, 1);
 			next unless $useAA
 				? $state =~ /^[ACDEFGHIKLMNPQRSTVWY]$/
