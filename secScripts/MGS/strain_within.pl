@@ -252,7 +252,8 @@ END {
 #.90: cache catalogue-wide input states and avoid duplicate full-ledger validation scans
 #.91: persist the exact shared scratch directory for reliable cross-run resume
 #.96: use the authoritative Phase-I input audit for legacy ledger-free resumes
-my $version = 0.96;
+#.97: bound EPA-ng placement memory and worker threads independently of tree inference
+my $version = 0.97;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -330,6 +331,8 @@ my $strictBackbone = 1;
 my $strictBackboneFraction = 0.35;
 my $strictBackboneMinSamples = 3;
 my $placementMinOverlap = 400;
+my $epaThreads = 12;
+my $epaMaxMemMB = -1; # derive from the per-tree IQ-TREE allowance in buildTree5
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
@@ -461,6 +464,8 @@ GetOptions(
 	"strictBackboneFraction=f" => \$strictBackboneFraction,
 	"strictBackboneMinSamples=i" => \$strictBackboneMinSamples,
 	"placementMinOverlap=i" => \$placementMinOverlap,
+	"epaThreads=i" => \$epaThreads,
+	"epaMaxMemMB=i" => \$epaMaxMemMB,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
@@ -525,6 +530,9 @@ die "-strictBackboneMinSamples must be at least 3\n"
 	if $strictBackboneMinSamples < 3;
 die "-placementMinOverlap must be non-negative\n"
 	if $placementMinOverlap < 0;
+die "-epaThreads must be positive\n" if $epaThreads < 1;
+die "-epaMaxMemMB must be -1 (derived), 0 (automatic), or positive\n"
+	if $epaMaxMemMB < -1;
 my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
 	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
 if ($taxonAwareLocusSelection) {
@@ -1286,7 +1294,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$Tcmd .= "-strictBackbone $strictBackbone "
 		."-strictBackboneFraction $strictBackboneFraction "
 		."-strictBackboneMinSamples $strictBackboneMinSamples "
-		."-placementMinOverlap $placementMinOverlap ";
+		."-placementMinOverlap $placementMinOverlap "
+		."-epaThreads $epaThreads -epaMaxMemMB $epaMaxMemMB ";
 	if ($phyloProg == 1){
 		$Tcmd .= "-iqMemMB $iqMemMB ";
 		$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
@@ -4979,6 +4988,11 @@ Tree locus filtering:
                                  the complete alignment as fallback [default 3]
   -placementMinOverlap INT      Minimum informative alignment positions required
                                  by the taxon-aware placement gate [default 400]
+  -epaThreads INT                EPA-ng placement threads, capped by BuildTree cores
+                                 [default 12]
+  -epaMaxMemMB INT               EPA-ng memory cap in MB; -1 derives 60% of each
+                                 IQ-TREE allowance, 0 uses EPA-ng automatic mode
+                                 [default -1]
 USAGE
 }
 

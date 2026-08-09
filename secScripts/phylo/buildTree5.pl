@@ -46,6 +46,8 @@
 #5.40: add structured post-alignment reporting, fixed-model defaults, and resumable lifecycle outcomes
 #5.41: add bounded filesystem retries, preflight validation, durable locus checkpoints, and isolated EPA recovery
 #5.42: reuse durable completion state and MSAfix statistics; cache unchanged IQ-TREE validation
+#5.43: summarize repetitive per-locus MSAfix cleaning diagnostics and remove temporary captured logs
+#5.44: bound EPA-ng placement memory and worker threads for strain-backbone placement
 
 use warnings;
 use strict;
@@ -105,6 +107,7 @@ sub cachedIQTreeOutputComplete;
 sub requireConfiguredTool;
 sub shellQuote;
 sub runMSAFix;
+sub summarizeMSAFixLog;
 sub limitedWarn;
 sub prepareTemporaryBase;
 sub sortFastaForCompression;
@@ -133,6 +136,7 @@ sub preflightBuildTree;
 sub inputFingerprint;
 sub epaModelArtifact;
 sub runEpaNgPlacement;
+sub epaSupportsMaxMem;
 sub postAlignmentStep;
 sub elapsedTimeText;
 sub alignmentCollectionStats;
@@ -142,12 +146,14 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.42;
+my $version = 5.44;
 my %iqtreeValidationCache;
+my %epaMaxMemSupport;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
 my $synSiteTotal = 0;
+my ($msaFixCleanedLoci, $msaFixBorderMasked, $msaFixLowIdMasked, $msaFixMinGoodRemoved) = (0, 0, 0, 0);
 my $nonSynSiteTotal = 0;
 my ($workflowStage, $workflowHeartbeat, $workflowFailure) =
 	('initialization', '', '');
@@ -159,6 +165,9 @@ END {
 		my $suppressed = $limitedWarningCounts{$category} - $limit;
 		warn "Suppressed $suppressed additional '$category' warning(s)\n"
 			if $suppressed > 0;
+	}
+	if ($msaFixCleanedLoci) {
+		warn "MSAfix cleaning summary: loci=$msaFixCleanedLoci, border-gap-masked=$msaFixBorderMasked, low-ID-masked=$msaFixLowIdMasked, below-minimum-good-positions=$msaFixMinGoodRemoved\n";
 	}
 }
 
@@ -237,6 +246,9 @@ my $strictBackboneFraction = $BACKBONE_DEFAULT{coverage_fraction};
 my $placementMinOverlap = $BACKBONE_DEFAULT{minimum_overlap};
 my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
 my ($placementGeneFracPSpec, $placementNTFrac, $placementNTCntTotal);
+my %EPA_NG_DEFAULT = (threads => 12, memory_fraction => 0.60);
+my $epaThreads = $EPA_NG_DEFAULT{threads};
+my $epaMaxMemMB = -1; # -1 derives 60% of -iqMemMB; 0 leaves EPA-ng automatic
 my $sampleQCFile = "";
 my %POST_ALIGNMENT_QC_DEFAULT = (
 	between_species_enabled => 0,
@@ -367,6 +379,8 @@ GetOptions(
 	"strictBackboneFraction=f" => \$strictBackboneFraction,
 	"placementMinOverlap=i" => \$placementMinOverlap,
 	"strictBackboneMinSamples=i" => \$strictBackboneMinSamples,
+	"epaThreads=i" => \$epaThreads,
+	"epaMaxMemMB=i" => \$epaMaxMemMB,
 	"postAlignmentLocusQC=i" => \$postAlignmentLocusQC,
 	"postAlignmentMinSequences=i" => \$postAlignmentMinSequences,
 	"postAlignmentMinOccupancy=f" => \$postAlignmentMinOccupancy,
@@ -456,6 +470,10 @@ die "-placementMinOverlap must be non-negative "
 die "-strictBackboneMinSamples must be at least 3 "
 	."(default $BACKBONE_DEFAULT{minimum_samples})\n"
 	if $strictBackboneMinSamples < 3;
+die "-epaThreads must be a positive integer (default $EPA_NG_DEFAULT{threads})\n"
+	if $epaThreads < 1;
+die "-epaMaxMemMB must be -1 (derived), 0 (automatic), or a positive MB value\n"
+	if $epaMaxMemMB < -1;
 die "-postAlignmentLocusQC must be 0 or 1 "
 	."(default: 0 between species, 1 within species)\n"
 	unless $postAlignmentLocusQC == 0 || $postAlignmentLocusQC == 1;
@@ -656,6 +674,12 @@ print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
 	. "; placement minimum NT=$placementNTCntTotal"
 	. "; minimum placement overlap=$placementMinOverlap"
 	. "; minimum backbone samples=$strictBackboneMinSamples\n";
+my $epaReportedMaxMemMB = $epaMaxMemMB < 0 && $iqMemMB > 0
+	? int($iqMemMB * $EPA_NG_DEFAULT{memory_fraction}) : $epaMaxMemMB;
+$epaReportedMaxMemMB = 0 if $epaReportedMaxMemMB < 0;
+print "EPA-ng placement resources: threads=".($epaThreads < $ncore ? $epaThreads : $ncore)
+	."; memory=".($epaReportedMaxMemMB ? "${epaReportedMaxMemMB}MB (when supported)" : "automatic")
+	."; memory source=".($epaMaxMemMB < 0 ? "60% of IQ-TREE allowance" : $epaMaxMemMB ? "explicit" : "EPA-ng automatic")."\n";
 print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
 	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
 	. "; supertree=" . ($doSuperTree ? "yes" : "no")
@@ -2146,6 +2170,15 @@ sub epaModelArtifact {
 		."backbone model; no reusable model artifact is available for $backboneTree\n";
 }
 
+sub epaSupportsMaxMem {
+	my ($epaNg) = @_;
+	return $epaMaxMemSupport{$epaNg} if exists $epaMaxMemSupport{$epaNg};
+	my $probe = shellQuote($epaNg)." --help 2>&1";
+	my $help = qx{$probe};
+	$epaMaxMemSupport{$epaNg} = $help =~ /(?:^|\s)--maxmem(?:\s|=|\[)/m ? 1 : 0;
+	return $epaMaxMemSupport{$epaNg};
+}
+
 sub runEpaNgPlacement {
 	my ($treeOpts, $backboneTree, $backboneAlignment, $queryAlignment,
 		$queries, $treeDirectory) = @_;
@@ -2161,16 +2194,34 @@ sub runEpaNgPlacement {
 	my $epaDirectory = "$treeDirectory/epa-ng";
 	safeRemoveTree($epaDirectory, $treeDirectory) if -d $epaDirectory || -l $epaDirectory;
 	make_path($epaDirectory);
-	my $command = join(' ',
+	my $placementThreads = $epaThreads < $ncore ? $epaThreads : $ncore;
+	my $placementMaxMemMB = $epaMaxMemMB;
+	$placementMaxMemMB = int($iqMemMB * $EPA_NG_DEFAULT{memory_fraction})
+		if $placementMaxMemMB < 0 && $iqMemMB > 0;
+	$placementMaxMemMB = 0 if $placementMaxMemMB < 0;
+	my @command = (
 		shellQuote($epaNg),
 		'--ref-msa', shellQuote($backboneAlignment),
 		'--tree', shellQuote($backboneTree),
 		'--query', shellQuote($queryAlignment),
 		'--outdir', shellQuote($epaDirectory),
 		'--model', shellQuote($modelArtifact),
-		'--threads', $ncore,
-	) . "\n";
-	print "Running EPA-ng ML placement with fitted model artifact $modelArtifact\n";
+		'--threads', $placementThreads,
+	);
+	my $usingMaxMem = 0;
+	if ($placementMaxMemMB > 0) {
+		if (epaSupportsMaxMem($epaNg)) {
+			push @command, '--maxmem', $placementMaxMemMB;
+			$usingMaxMem = 1;
+		} else {
+			warn "EPA-ng does not advertise --maxmem; using its automatic memory management instead\n";
+		}
+	}
+	my $command = join(' ', @command) . "\n";
+	print "Running EPA-ng ML placement with fitted model artifact $modelArtifact; "
+		."threads=$placementThreads; memory="
+		.($usingMaxMem ? "${placementMaxMemMB}MB" : $placementMaxMemMB ? "automatic (installed EPA-ng lacks --maxmem)" : "automatic")
+		."\n";
 	systemW($command);
 	my $jplace = "$epaDirectory/epa_result.jplace";
 	die "EPA-ng completed without its expected placement file $jplace\n" unless -s $jplace;
@@ -4685,6 +4736,45 @@ sub alignmentCollectionStats {
 	};
 }
 
+sub summarizeMSAFixLog {
+	my ($logFile, $alignment, $failed) = @_;
+	return '' unless -s $logFile;
+	open my $input, '<', $logFile
+		or return "Cannot read captured MSAfix output $logFile: $!\n";
+	my ($borderMasked, $lowIdMasked, $minGoodRemoved) = (0, 0, 0);
+	my @allLines;
+	while (my $line = <$input>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless length $line;
+		push @allLines, $line;
+		if ($line =~ /^Border gap check: Masked (\d+) sequences$/) {
+			$borderMasked += $1;
+		} elsif ($line =~ /^Low ID check: Masked (\d+) sequences$/) {
+			$lowIdMasked += $1;
+		} elsif ($line =~ /^Removed (\d+) sequences due to less than 0\.6 good positions$/) {
+			$minGoodRemoved += $1;
+		} else {
+			limitedWarn('MSAfix unrecognized diagnostic',
+				"MSAfix ".alignmentFileStem($alignment).": $line\n", 5);
+		}
+	}
+	close $input;
+	my $total = $borderMasked + $lowIdMasked + $minGoodRemoved;
+	if ($total) {
+		$msaFixCleanedLoci++;
+		$msaFixBorderMasked += $borderMasked;
+		$msaFixLowIdMasked += $lowIdMasked;
+		$msaFixMinGoodRemoved += $minGoodRemoved;
+		limitedWarn('MSAfix per-locus cleaning',
+			"MSAfix ".alignmentFileStem($alignment).": border-gap=$borderMasked; low-ID=$lowIdMasked; below-minimum-good-positions=$minGoodRemoved\n", 5);
+	}
+	return '' unless $failed;
+	splice @allLines, 20 if @allLines > 20;
+	return @allLines
+		? "Captured MSAfix output for $alignment (first ".scalar(@allLines)." line(s)):\n".join("\n", @allLines)."\n"
+		: '';
+}
+
 sub limitedWarn {
 	my ($category, $message, $limit) = @_;
 	$limit = 5 unless defined $limit;
@@ -4702,6 +4792,8 @@ sub runMSAFix {
 	my $msaFbin = getProgPaths("MSAfix");
 	my $tmpOutput = "$alignment.MSAfix.$$.fna";
 	retry_unlink($tmpOutput, label => "clear stale MSAfix output");
+	my $tmpLog = "$alignment.MSAfix.$$.log";
+	retry_unlink($tmpLog, fatal => 0, label => "clear stale MSAfix log");
 
 	my $cmd = join(" ",
 		shellQuote($msaFbin),
@@ -4711,20 +4803,23 @@ sub runMSAFix {
 		"-maskBorderGap",
 		"-rmGapColsGreater", $maxGapFraction,
 		"-minGoodPosFrac", "0.6",
-	) . "\n";
+	);
 
 	my $ok = eval {
-		systemW($cmd);
+		systemW($cmd." > ".shellQuote($tmpLog)." 2>&1");
 		1;
 	};
+	my $outputReady = -s $tmpOutput;
+	my $capturedOutput = summarizeMSAFixLog($tmpLog, $alignment, !$ok || !$outputReady);
+	retry_unlink($tmpLog, fatal => 0, label => "clean captured MSAfix log");
 	if (!$ok) {
 		my $error = $@ || "MSAfix failed for $alignment\n";
 		retry_unlink($tmpOutput, fatal => 0, label => "clean failed MSAfix output");
-		die $error;
+		die $error.$capturedOutput;
 	}
-	if (!-s $tmpOutput) {
+	if (!$outputReady) {
 		retry_unlink($tmpOutput, fatal => 0, label => "clean empty MSAfix output");
-		die "MSAfix completed without producing a nonempty output for $alignment\n";
+		die "MSAfix completed without producing a nonempty output for $alignment\n".$capturedOutput;
 	}
 
 	retry_rename($tmpOutput, $alignment, label => "publish validated MSAfix alignment");
