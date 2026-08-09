@@ -52,6 +52,7 @@
 #5.46: run every MSAfix alignment and locus-QC invocation with the configured MSA core count
 #5.47: apply MSAfix v2.15 coding-NT technical-offset repair after protein-guided alignment
 #5.48: treat uneven raw or partial alignment tails as missing in taxon-aware coordinate scoring
+#5.49: pass parsed IQ-TREE models to EPA-ng and enforce its memory cap with ulimit
 
 use warnings;
 use strict;
@@ -140,7 +141,8 @@ sub preflightBuildTree;
 sub inputFingerprint;
 sub epaModelArtifact;
 sub runEpaNgPlacement;
-sub epaSupportsMaxMem;
+sub epaMemoryPrefix;
+sub iqtreePlacementModel;
 sub postAlignmentStep;
 sub elapsedTimeText;
 sub alignmentCollectionStats;
@@ -150,9 +152,8 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.48;
+my $version = 5.49;
 my %iqtreeValidationCache;
-my %epaMaxMemSupport;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
 my $synSummaryCount = 0;
@@ -256,7 +257,7 @@ my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
 my ($placementGeneFracPSpec, $placementNTFrac, $placementNTCntTotal);
 my %EPA_NG_DEFAULT = (threads => 12, memory_fraction => 0.60);
 my $epaThreads = $EPA_NG_DEFAULT{threads};
-my $epaMaxMemMB = -1; # -1 derives 60% of -iqMemMB; 0 leaves EPA-ng automatic
+my $epaMaxMemMB = -1; # -1 derives 60% of -iqMemMB; 0 leaves only the job limit
 my $sampleQCFile = "";
 my %POST_ALIGNMENT_QC_DEFAULT = (
 	between_species_enabled => 0,
@@ -492,7 +493,7 @@ die "-strictBackboneMinSamples must be at least 3 "
 	if $strictBackboneMinSamples < 3;
 die "-epaThreads must be a positive integer (default $EPA_NG_DEFAULT{threads})\n"
 	if $epaThreads < 1;
-die "-epaMaxMemMB must be -1 (derived), 0 (automatic), or a positive MB value\n"
+die "-epaMaxMemMB must be -1 (derived), 0 (job limit only), or a positive MB value\n"
 	if $epaMaxMemMB < -1;
 die "-postAlignmentLocusQC must be 0 or 1 "
 	."(default: 0 between species, 1 within species)\n"
@@ -700,8 +701,8 @@ my $epaReportedMaxMemMB = $epaMaxMemMB < 0 && $iqMemMB > 0
 	? int($iqMemMB * $EPA_NG_DEFAULT{memory_fraction}) : $epaMaxMemMB;
 $epaReportedMaxMemMB = 0 if $epaReportedMaxMemMB < 0;
 print "EPA-ng placement resources: threads=".($epaThreads < $ncore ? $epaThreads : $ncore)
-	."; memory=".($epaReportedMaxMemMB ? "${epaReportedMaxMemMB}MB (when supported)" : "automatic")
-	."; memory source=".($epaMaxMemMB < 0 ? "60% of IQ-TREE allowance" : $epaMaxMemMB ? "explicit" : "EPA-ng automatic")."\n";
+	."; memory=".($epaReportedMaxMemMB ? "${epaReportedMaxMemMB}MB ulimit" : "scheduler/cgroup")
+	."; memory source=".($epaMaxMemMB < 0 ? "60% of IQ-TREE allowance" : $epaMaxMemMB ? "explicit" : "job allocation")."\n";
 print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
 	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
 	. "; supertree=" . ($doSuperTree ? "yes" : "no")
@@ -2166,14 +2167,41 @@ sub createTreeOpt{
 	return \%treeOpts;
 }
 
+sub epaMemoryPrefix {
+	my ($memoryMB) = @_;
+	return "" unless $memoryMB > 0;
+	return "ulimit -S -v ".($memoryMB * 1024).";\n";
+}
+
+sub iqtreePlacementModel {
+	my ($prefix) = @_;
+	for my $file ("$prefix.iqtree", "$prefix.log") {
+		next unless -s $file;
+		open my $handle, '<', $file
+			or die "Cannot read IQ-TREE model output $file: $!\n";
+		my $text = do { local $/; <$handle> };
+		close $handle or die "Cannot close IQ-TREE model output $file: $!\n";
+		for my $pattern (
+			qr/^\s*Model of substitution:\s*([^\s,;]+)/mi,
+			qr/^\s*Best-fit model(?: according to [^:]+)?:\s*([^\s,;]+)/mi,
+			qr/^\s*(?:Substitution model|Model):\s*([^\s,;]+)/mi,
+			qr/(?:^|\s)-m\s+['"]?([A-Za-z0-9_.+{}=-]+)['"]?/m,
+		) {
+			next unless $text =~ $pattern;
+			my $model = $1;
+			next if $model =~ /^(?:TEST|AUTO|MFP(?:\+MERGE)?)$/i;
+			return $model;
+		}
+	}
+	die "Cannot determine the fitted IQ-TREE model from $prefix.iqtree or "
+		."$prefix.log for EPA-ng placement\n";
+}
+
 sub epaModelArtifact {
 	my ($treeOpts, $backboneTree) = @_;
 	my $iqtree = "$treeOpts->{IQtreeout}.treefile";
 	if ($backboneTree eq $iqtree) {
-		my $report = "$treeOpts->{IQtreeout}.iqtree";
-		return $report if -s $report;
-		die "EPA-ng placement requires the completed IQ-TREE report $report to reuse "
-			."its fitted model parameters\n";
+		return iqtreePlacementModel($treeOpts->{IQtreeout});
 	}
 	my $raxmlng = $treeOpts->{RAXNGtreeout};
 	if ($backboneTree eq $raxmlng) {
@@ -2193,19 +2221,7 @@ sub epaModelArtifact {
 			."to reuse its fitted model parameters\n";
 	}
 	die "EPA-ng strict-backbone placement supports a matching IQ-TREE, RAxML-NG, or RAxML "
-		."backbone model; no reusable model artifact is available for $backboneTree\n";
-}
-
-sub epaSupportsMaxMem {
-	my ($epaNg) = @_;
-	return $epaMaxMemSupport{$epaNg} if exists $epaMaxMemSupport{$epaNg};
-	my $probe = $epaNg;
-	$probe =~ s/\s+\z//;
-	$probe .= " --help 2>&1";
-	my $probeCommand = "bash -o pipefail -c ".shellQuote($probe);
-	my $help = qx{$probeCommand};
-	$epaMaxMemSupport{$epaNg} = $help =~ /(?:^|\s)--maxmem(?:\s|=|\[)/m ? 1 : 0;
-	return $epaMaxMemSupport{$epaNg};
+		."backbone model; no reusable model input is available for $backboneTree\n";
 }
 
 sub runEpaNgPlacement {
@@ -2219,7 +2235,7 @@ sub runEpaNgPlacement {
 	die "Strict-backbone placement requested, but epa-ng is not configured. "
 		."Set epa-ng in the selected MATAFILER configuration.\n"
 		unless defined($epaNg) && length($epaNg);
-	my $modelArtifact = epaModelArtifact($treeOpts, $backboneTree);
+	my $placementModel = epaModelArtifact($treeOpts, $backboneTree);
 	my $epaDirectory = "$treeDirectory/epa-ng";
 	safeRemoveTree($epaDirectory, $treeDirectory) if -d $epaDirectory || -l $epaDirectory;
 	make_path($epaDirectory);
@@ -2233,30 +2249,21 @@ sub runEpaNgPlacement {
 		'--tree', shellQuote($backboneTree),
 		'--query', shellQuote($queryAlignment),
 		'--outdir', shellQuote($epaDirectory),
-		'--model', shellQuote($modelArtifact),
+		'-m', shellQuote($placementModel),
 		'--threads', $placementThreads,
 	);
-	my $usingMaxMem = 0;
-	if ($placementMaxMemMB > 0) {
-		if (epaSupportsMaxMem($epaNg)) {
-			push @command, '--maxmem', $placementMaxMemMB;
-			$usingMaxMem = 1;
-		} else {
-			warn "EPA-ng does not advertise --maxmem; using its automatic memory management instead\n";
-		}
-	}
-	my $command = $epaNg;
+	my $command = epaMemoryPrefix($placementMaxMemMB).$epaNg;
 	$command =~ s/\s+\z//;
 	$command .= " ".join(' ', @command) . "\n";
-	print "Running EPA-ng ML placement with fitted model artifact $modelArtifact; "
+	print "Running EPA-ng ML placement with model $placementModel; "
 		."threads=$placementThreads; memory="
-		.($usingMaxMem ? "${placementMaxMemMB}MB" : $placementMaxMemMB ? "automatic (installed EPA-ng lacks --maxmem)" : "automatic")
+		.($placementMaxMemMB ? "${placementMaxMemMB}MB ulimit" : "scheduler/cgroup")
 		."\n";
 	systemW($command);
 	my $jplace = "$epaDirectory/epa_result.jplace";
 	die "EPA-ng completed without its expected placement file $jplace\n" unless -s $jplace;
 	my $result = read_epa_jplace($jplace, $queries);
-	return ($result, $modelArtifact, $jplace);
+	return ($result, $placementModel, $jplace);
 }
 
 #core routine to calculte (start) phylo reconstruction

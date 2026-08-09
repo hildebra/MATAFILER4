@@ -531,7 +531,7 @@ die "-strictBackboneMinSamples must be at least 3\n"
 die "-placementMinOverlap must be non-negative\n"
 	if $placementMinOverlap < 0;
 die "-epaThreads must be positive\n" if $epaThreads < 1;
-die "-epaMaxMemMB must be -1 (derived), 0 (automatic), or positive\n"
+die "-epaMaxMemMB must be -1 (derived), 0 (job limit only), or positive\n"
 	if $epaMaxMemMB < -1;
 my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
 	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
@@ -4990,8 +4990,8 @@ Tree locus filtering:
                                  by the taxon-aware placement gate [default 400]
   -epaThreads INT                EPA-ng placement threads, capped by BuildTree cores
                                  [default 12]
-  -epaMaxMemMB INT               EPA-ng memory cap in MB; -1 derives 60% of each
-                                 IQ-TREE allowance, 0 uses EPA-ng automatic mode
+  -epaMaxMemMB INT               EPA-ng child-process ulimit in MB; -1 derives 60%
+                                 of each IQ-TREE allowance, 0 uses the job limit
                                  [default -1]
 USAGE
 }
