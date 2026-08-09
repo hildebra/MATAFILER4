@@ -331,7 +331,7 @@ my $strictBackbone = 1;
 my $strictBackboneFraction = 0.35;
 my $strictBackboneMinSamples = 3;
 my $placementMinOverlap = 400;
-my $epaThreads = 12;
+my $epaThreads = 4;
 my $epaMaxMemMB = -1; # derive from the per-tree IQ-TREE allowance in buildTree5
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
@@ -531,7 +531,7 @@ die "-strictBackboneMinSamples must be at least 3\n"
 die "-placementMinOverlap must be non-negative\n"
 	if $placementMinOverlap < 0;
 die "-epaThreads must be positive\n" if $epaThreads < 1;
-die "-epaMaxMemMB must be -1 (derived), 0 (job limit only), or positive\n"
+die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or positive\n"
 	if $epaMaxMemMB < -1;
 my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
 	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
@@ -4988,10 +4988,10 @@ Tree locus filtering:
                                  the complete alignment as fallback [default 3]
   -placementMinOverlap INT      Minimum informative alignment positions required
                                  by the taxon-aware placement gate [default 400]
-  -epaThreads INT                EPA-ng placement threads, capped by BuildTree cores
-                                 [default 12]
-  -epaMaxMemMB INT               EPA-ng child-process ulimit in MB; -1 derives 60%
-                                 of each IQ-TREE allowance, 0 uses the job limit
+  -epaThreads INT                Requested EPA-ng threads; BuildTree caps these by
+                                 cores and 1 thread/GB planning memory [default 4]
+  -epaMaxMemMB INT               EPA-ng thread-planning budget; -1 derives 60% of
+                                 each IQ-TREE allowance, 0 disables memory scaling
                                  [default -1]
 USAGE
 }

@@ -52,7 +52,8 @@
 #5.46: run every MSAfix alignment and locus-QC invocation with the configured MSA core count
 #5.47: apply MSAfix v2.15 coding-NT technical-offset repair after protein-guided alignment
 #5.48: treat uneven raw or partial alignment tails as missing in taxon-aware coordinate scoring
-#5.49: pass parsed IQ-TREE models to EPA-ng and enforce its memory cap with ulimit
+#5.49: pass parsed IQ-TREE models directly to EPA-ng
+#5.50: replace EPA ulimit with memory-aware threads and bounded query chunks
 
 use warnings;
 use strict;
@@ -141,7 +142,7 @@ sub preflightBuildTree;
 sub inputFingerprint;
 sub epaModelArtifact;
 sub runEpaNgPlacement;
-sub epaMemoryPrefix;
+sub epaResourcePlan;
 sub iqtreePlacementModel;
 sub postAlignmentStep;
 sub elapsedTimeText;
@@ -152,7 +153,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.49;
+my $version = 5.50;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -255,9 +256,10 @@ my $strictBackboneFraction = $BACKBONE_DEFAULT{coverage_fraction};
 my $placementMinOverlap = $BACKBONE_DEFAULT{minimum_overlap};
 my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
 my ($placementGeneFracPSpec, $placementNTFrac, $placementNTCntTotal);
-my %EPA_NG_DEFAULT = (threads => 12, memory_fraction => 0.60);
+my %EPA_NG_DEFAULT = (threads => 4, memory_fraction => 0.60,
+	memory_per_thread_mb => 1024, chunk_size => 16);
 my $epaThreads = $EPA_NG_DEFAULT{threads};
-my $epaMaxMemMB = -1; # -1 derives 60% of -iqMemMB; 0 leaves only the job limit
+my $epaMaxMemMB = -1; # -1 derives a thread-planning budget; 0 disables memory-based thread scaling
 my $sampleQCFile = "";
 my %POST_ALIGNMENT_QC_DEFAULT = (
 	between_species_enabled => 0,
@@ -493,7 +495,7 @@ die "-strictBackboneMinSamples must be at least 3 "
 	if $strictBackboneMinSamples < 3;
 die "-epaThreads must be a positive integer (default $EPA_NG_DEFAULT{threads})\n"
 	if $epaThreads < 1;
-die "-epaMaxMemMB must be -1 (derived), 0 (job limit only), or a positive MB value\n"
+die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or a positive MB value\n"
 	if $epaMaxMemMB < -1;
 die "-postAlignmentLocusQC must be 0 or 1 "
 	."(default: 0 between species, 1 within species)\n"
@@ -697,12 +699,12 @@ print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
 	. "; placement minimum NT=$placementNTCntTotal"
 	. "; minimum placement overlap=$placementMinOverlap"
 	. "; minimum backbone samples=$strictBackboneMinSamples\n";
-my $epaReportedMaxMemMB = $epaMaxMemMB < 0 && $iqMemMB > 0
-	? int($iqMemMB * $EPA_NG_DEFAULT{memory_fraction}) : $epaMaxMemMB;
-$epaReportedMaxMemMB = 0 if $epaReportedMaxMemMB < 0;
-print "EPA-ng placement resources: threads=".($epaThreads < $ncore ? $epaThreads : $ncore)
-	."; memory=".($epaReportedMaxMemMB ? "${epaReportedMaxMemMB}MB ulimit" : "scheduler/cgroup")
-	."; memory source=".($epaMaxMemMB < 0 ? "60% of IQ-TREE allowance" : $epaMaxMemMB ? "explicit" : "job allocation")."\n";
+my ($epaReportedThreads, $epaReportedMaxMemMB) =
+	epaResourcePlan($epaThreads, $ncore, $epaMaxMemMB, $iqMemMB);
+print "EPA-ng placement resources: threads=$epaReportedThreads"
+	." (requested=$epaThreads); planning memory="
+	.($epaReportedMaxMemMB ? "${epaReportedMaxMemMB}MB at $EPA_NG_DEFAULT{memory_per_thread_mb}MB/thread" : "disabled")
+	."; hard memory limit=scheduler/cgroup; query chunk=$EPA_NG_DEFAULT{chunk_size}\n";
 print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
 	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
 	. "; supertree=" . ($doSuperTree ? "yes" : "no")
@@ -2167,10 +2169,23 @@ sub createTreeOpt{
 	return \%treeOpts;
 }
 
-sub epaMemoryPrefix {
-	my ($memoryMB) = @_;
-	return "" unless $memoryMB > 0;
-	return "ulimit -S -v ".($memoryMB * 1024).";\n";
+sub epaResourcePlan {
+	my ($requestedThreads, $availableCores, $configuredMemoryMB, $treeMemoryMB,
+		$memoryFraction, $memoryPerThreadMB) = @_;
+	$memoryFraction = 0.60 unless defined $memoryFraction;
+	$memoryPerThreadMB = 1024 unless defined $memoryPerThreadMB;
+	my $threads = $requestedThreads < $availableCores
+		? $requestedThreads : $availableCores;
+	my $memoryMB = $configuredMemoryMB;
+	$memoryMB = int($treeMemoryMB * $memoryFraction)
+		if $memoryMB < 0 && $treeMemoryMB > 0;
+	$memoryMB = 0 if $memoryMB < 0;
+	if ($memoryMB > 0) {
+		my $memoryThreads = int($memoryMB / $memoryPerThreadMB);
+		$memoryThreads = 1 if $memoryThreads < 1;
+		$threads = $memoryThreads if $memoryThreads < $threads;
+	}
+	return ($threads, $memoryMB);
 }
 
 sub iqtreePlacementModel {
@@ -2239,11 +2254,9 @@ sub runEpaNgPlacement {
 	my $epaDirectory = "$treeDirectory/epa-ng";
 	safeRemoveTree($epaDirectory, $treeDirectory) if -d $epaDirectory || -l $epaDirectory;
 	make_path($epaDirectory);
-	my $placementThreads = $epaThreads < $ncore ? $epaThreads : $ncore;
-	my $placementMaxMemMB = $epaMaxMemMB;
-	$placementMaxMemMB = int($iqMemMB * $EPA_NG_DEFAULT{memory_fraction})
-		if $placementMaxMemMB < 0 && $iqMemMB > 0;
-	$placementMaxMemMB = 0 if $placementMaxMemMB < 0;
+	my ($placementThreads, $placementMemoryBudgetMB) =
+		epaResourcePlan($epaThreads, $ncore, $epaMaxMemMB, $iqMemMB,
+			$EPA_NG_DEFAULT{memory_fraction}, $EPA_NG_DEFAULT{memory_per_thread_mb});
 	my @command = (
 		'--ref-msa', shellQuote($backboneAlignment),
 		'--tree', shellQuote($backboneTree),
@@ -2251,14 +2264,15 @@ sub runEpaNgPlacement {
 		'--outdir', shellQuote($epaDirectory),
 		'-m', shellQuote($placementModel),
 		'--threads', $placementThreads,
+		'--chunk-size', $EPA_NG_DEFAULT{chunk_size},
 	);
-	my $command = epaMemoryPrefix($placementMaxMemMB).$epaNg;
+	my $command = $epaNg;
 	$command =~ s/\s+\z//;
 	$command .= " ".join(' ', @command) . "\n";
 	print "Running EPA-ng ML placement with model $placementModel; "
-		."threads=$placementThreads; memory="
-		.($placementMaxMemMB ? "${placementMaxMemMB}MB ulimit" : "scheduler/cgroup")
-		."\n";
+		."threads=$placementThreads; planning memory="
+		.($placementMemoryBudgetMB ? "${placementMemoryBudgetMB}MB" : "disabled")
+		."; hard limit=scheduler/cgroup; query chunk=$EPA_NG_DEFAULT{chunk_size}\n";
 	systemW($command);
 	my $jplace = "$epaDirectory/epa_result.jplace";
 	die "EPA-ng completed without its expected placement file $jplace\n" unless -s $jplace;

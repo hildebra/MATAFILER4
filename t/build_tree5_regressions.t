@@ -14,10 +14,10 @@ my $script_text = do { local $/; <$script_handle> };
 close $script_handle or die "Cannot close $script: $!";
 
 my ($epa_helpers) = $script_text =~
-	/(sub epaMemoryPrefix \{.*?\n\}\n\nsub iqtreePlacementModel \{.*?\n\})\n\nsub epaModelArtifact/s;
+	/(sub epaResourcePlan \{.*?\n\}\n\nsub iqtreePlacementModel \{.*?\n\})\n\nsub epaModelArtifact/s;
 BAIL_OUT('Cannot extract EPA-ng helper functions') unless defined $epa_helpers;
 my $helpers_loaded = eval "package TestBuildTreeEpaHelpers; $epa_helpers; 1;";
-ok($helpers_loaded, 'EPA-ng model and memory helpers load independently')
+ok($helpers_loaded, 'EPA-ng model and resource helpers load independently')
 	or diag($@);
 
 my $temporary = tempdir(CLEANUP => 1);
@@ -38,9 +38,14 @@ write_test_file("$iqtree_prefix.log",
 	"Command: iqtree3 -s alignment.fna -m HKY+F+G4 -T 12\n");
 is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix), 'HKY+F+G4',
 	'IQ-TREE command-line model is the final parser fallback');
-is(TestBuildTreeEpaHelpers::epaMemoryPrefix(2048),
-	"ulimit -S -v 2097152;\n",
-	'EPA memory MB are converted to a direct child-shell virtual-memory limit');
+is_deeply(
+	[TestBuildTreeEpaHelpers::epaResourcePlan(12, 12, -1, 4500)],
+	[2, 2700],
+	'EPA threads are capped to one per GB of the derived planning budget');
+is_deeply(
+	[TestBuildTreeEpaHelpers::epaResourcePlan(4, 12, 0, 4500)],
+	[4, 0],
+	'zero planning memory keeps the requested core-capped thread count');
 
 my $coordinate_bounds_checks = () = $script_text =~ /next if \$position >= length\(\$sequence\);/g;
 cmp_ok($coordinate_bounds_checks, '>=', 2,
