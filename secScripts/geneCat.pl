@@ -129,14 +129,26 @@ sub _read_single_line_file {
 
 sub _validate_map_files {
 	my ($map_spec) = @_;
-	my @files = split /,/, $map_spec, -1;
+	my @files = _map_spec_files($map_spec);
 	die "No mapping file was specified\n" unless @files;
 	for my $file (@files) {
+		$file =~ s/^\s+|\s+$//g;
 		die "Empty mapping-file entry in: $map_spec\n" unless length $file;
 		die "Could not find supplied map: $file\n" unless -f $file;
 	}
 	return @files;
 }
+sub _map_spec_files {
+	my ($map_spec) = @_;
+	my @files = split /,\s*|\r?\n/, $map_spec, -1;
+	die "No mapping file was specified\n" unless @files;
+	for my $file (@files) {
+		$file =~ s/^\s+|\s+$//g;
+		die "Empty mapping-file entry in: $map_spec\n" unless length $file;
+	}
+	return @files;
+}
+
 
 sub _count_lines {
 	my ($file) = @_;
@@ -676,6 +688,9 @@ my $primaryClusterCLS= "compl.incompl.$cdhID.fna.clstr";
 die "-MGset option has to be \"GTDB\" or \"FMG\"\n" unless ($useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG");
 my $speciesCutoff = "specI_cutoff";
 #my $speciesGTDB = "specI_GTDB"; my $speciesDir = "specIPath";my $speciesLink = "specI_lnks"; 
+if ($mapF !~ m/^\??$/) {
+	$mapF = join ',', _map_spec_files($mapF);
+}
 if ($useGTDBmg eq "GTDB"){ 
 	$path2FMGids = "ContigStats/GTDBmg/marker_genes_meta.tsv";
 	$COGdir = "GTDBmg";$speciesCutoff = "GTDB_cutoff";
@@ -696,13 +711,13 @@ if ($mapF =~ m/^\??$/){
 		|| catalog_map_specs_match($mapFInf, $mapF)) { #same as in input arg.. great, replace with local copies!
 		$mapF = $mapFInf;
 	} else {
-		die "input maps seems to have changed, neither\n$mapFInf\nnor\n$mapFOri\nAborting run..\n";
+		die "input maps changed. Catalog-local list:\n$mapFInf\nOriginal list:\n$mapFOri\nRequested list:\n$mapF\nAborting run..\n";
 		#die "Continuing run, but inmap does not seem to match!\nOriginal map: $mapFOri\n-map arg: $mapF\nExiting.. delete gene cat folder before proceeding (or use original map)\n";
 	}
 }
 
 my %map; my %AsGrps; my @samples; my $numSmpls=0;
-_validate_map_files($mapF);
+$mapF = join ',', _validate_map_files($mapF);
 my ($hr,$hr2) = readMapS($mapF,$oldNameFolders);
 %map = %{$hr};
 die "Mapping parser did not return assembly-group data\n" unless ref($hr2) eq 'HASH';

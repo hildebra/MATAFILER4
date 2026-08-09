@@ -2,6 +2,7 @@ use strict;
 use warnings;
 
 use Cwd qw(abs_path);
+use File::Copy qw(copy);
 use File::Path qw(make_path);
 use File::Spec;
 use File::Temp qw(tempdir);
@@ -37,6 +38,26 @@ ok(catalog_map_specs_match(join(',', @maps), $resolved),
 	'comma-separated map lists match after canonicalizing every entry');
 ok(catalog_map_specs_match("$logs/./map.0.txt,$logs/./map.1.txt", $resolved),
 	'comma-separated map lists tolerate equivalent path spellings');
+my $relocated_dir = File::Spec->catdir($tmp, 'relocated-maps');
+make_path($relocated_dir);
+my @relocated_maps;
+for my $source (@maps) {
+	my $target = File::Spec->catfile($relocated_dir, (File::Spec->splitpath($source))[2]);
+	copy($source, $target) or die "Cannot copy $source to $target: $!";
+	push @relocated_maps, $target;
+}
+
+ok(catalog_map_specs_match(join(',', @relocated_maps), $resolved),
+	'map lists with identical ordered contents match after a map relocation');
+open my $changed_fh, '>>', $relocated_maps[1]
+	or die "Cannot modify relocated map: $!";
+print {$changed_fh} "changed\n";
+close $changed_fh;
+ok(!catalog_map_specs_match(join(',', @relocated_maps), $resolved),
+	'map lists with changed contents still fail the resume guard');
+ok(catalog_map_specs_match(join(",\n", @maps), $resolved),
+	'comma/newline map lists preserve every map entry');
+
 ok(!catalog_map_specs_match($maps[0], $resolved),
 	'map-list comparison rejects a missing map entry');
 ok(!catalog_map_specs_match('', ''),

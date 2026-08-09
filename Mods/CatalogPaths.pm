@@ -110,15 +110,36 @@ sub catalog_map_specs_match {
 	return 0 unless @left && @right;
 	return 0 unless @left == @right;
 	for my $index (0 .. $#left) {
-		return 0 unless $left[$index] eq $right[$index];
+		return 0 unless _map_entries_match($left[$index], $right[$index]);
 	}
 	return 1;
+}
+
+sub _map_entries_match {
+	my ($left, $right) = @_;
+	return 1 if $left eq $right;
+	return 0 unless -f $left && -f $right;
+	return 0 unless -s $left == -s $right;
+	return _map_file_digest($left) eq _map_file_digest($right);
+}
+
+sub _map_file_digest {
+	my ($path) = @_;
+	open my $fh, "<:raw", $path
+		or die "Cannot read mapping file $path: $!\n";
+	my $digest = Digest::SHA->new(256);
+	my $buffer;
+	while (read($fh, $buffer, 1024 * 1024)) {
+		$digest->add($buffer);
+	}
+	close $fh or die "Cannot close mapping file $path: $!\n";
+	return $digest->hexdigest;
 }
 
 sub _canonical_map_spec {
 	my ($spec) = @_;
 	my @maps;
-	for my $map (split /,/, $spec, -1) {
+	for my $map (split /,\s*|\r?\n/, $spec, -1) {
 		$map =~ s/^\s+|\s+$//g;
 		return () if $map eq '';
 		my $absolute = abs_path($map);

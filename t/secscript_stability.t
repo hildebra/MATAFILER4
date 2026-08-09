@@ -240,7 +240,7 @@ unlike($gene_cat, qr/!\s*fileGZe\("\$metaGD\/scaffolds\.fasta\.filt"\) \|\| !-e 
 unlike($gene_cat, qr/my \$cmd \.= "\$kaijBin/, 'Kaiju command is initialized before concatenation');
 like($gene_cat, qr/"fastaSplit=s"/, 'geneCat accepts human-readable FASTA chunk sizes');
 like($gene_cat, qr/"FuncMinPercSbjCov=f"/, 'geneCat preserves fractional subject-coverage thresholds');
-like($gene_cat, qr/sub _validate_map_files.*?split \/,\/.*?unless -f \$file/s,
+like($gene_cat, qr/sub _validate_map_files.*?_map_spec_files\(\$map_spec\).*?unless -f \$file/s,
      'geneCat validates every file in a comma-separated map list');
 like($gene_cat, qr/_validate_map_files\(\$mapF\); #validate inputs before deleting/s,
      'geneCat validates a reset run map before removing prior output');
