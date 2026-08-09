@@ -78,7 +78,7 @@ use File::Spec;
 use File::Temp qw(tempfile);
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
-	preflight_executable preflight_directory filesystem_capacity
+	preflight_directory filesystem_capacity
 );
 
 
@@ -4479,21 +4479,6 @@ sub preflightBuildTree {
 	my ($outputDirectory, $temporaryDirectory) = @_;
 	preflight_directory($outputDirectory, 'BuildTree output directory');
 	preflight_directory($temporaryDirectory, 'BuildTree temporary directory');
-	my @programs = (['pigz', $pigzBin]);
-	unless ($isAligned) {
-		my %msaKey = (0 => 'msaprobs', 1 => 'clustalo', 2 => 'mafft',
-			4 => 'MUSCLE5', 5 => 'FAMSA');
-		push @programs, ['alignment program', getProgPaths($msaKey{$MSAprog})];
-	}
-	push @programs, ['MSAfix', getProgPaths('MSAfix')]
-		if !$useAA4tree && ($cogCats ne '' || !$isAligned);
-	push @programs, ['IQ-TREE', getProgPaths('iqtree')] if $doIQTree;
-	push @programs, ['VeryFastTree', getProgPaths('veryfasttree')] if $doVeryFastTree;
-	push @programs, ['FastTree', getProgPaths('fasttree')] if $doFastTree;
-	push @programs, ['RAxML-NG', getProgPaths('raxmlng')] if $doRAXMLng;
-	push @programs, ['RAxML', getProgPaths('raxml')] if $doRAXML;
-	push @programs, ['EPA-ng', getProgPaths('epa-ng', 0)] if $strictBackbone;
-	preflight_executable($_->[1], $_->[0]) for @programs;
 	for my $entry (['output', $outputDirectory], ['temporary', $temporaryDirectory]) {
 		my $capacity = filesystem_capacity($entry->[1]);
 		warn "Preflight warning: $entry->[0] filesystem has less than 2 GiB available\n"
@@ -4503,7 +4488,7 @@ sub preflightBuildTree {
 			if defined($capacity->{available_inodes})
 				&& $capacity->{available_inodes} < 10_000;
 	}
-	print "Preflight complete: programs, writable paths, disk space, and inodes checked\n";
+	print "Preflight complete: writable paths, disk space, and inodes checked\n";
 }
 sub prepareTemporaryBase {
 	my ($path) = @_;

@@ -253,5 +253,10 @@ like($source,
 like($source,
 	qr/buildTree\.heartbeat\.tsv.*?buildTree\.failure\.tsv.*?sub writeWorkflowHeartbeat.*?sub writeWorkflowFailure/s,
 	'BuildTree persists stage heartbeats and fatal-stage diagnostics');
+unlike($source, qr/preflight_executable|my \@programs = \(\['pigz'/,
+	'BuildTree does not preflight configured phylogeny binaries before the job environment is activated');
+like($source,
+	qr/Preflight complete: writable paths, disk space, and inodes checked/,
+	'BuildTree retains non-binary writable-path and capacity diagnostics');
 
 done_testing();

@@ -102,11 +102,11 @@ like($strain,
 	qr/records=\$fnaRows expected=\$expectedRecords.*?QC=.*?expected=\$expectedRows.*?if \(\@validationErrors\).*?retry_unlink\(\$_.*?values %mergeFileByName.*?return \$aggregateComplete.*?retry_unlink\(\$mergeCheckpoint.*?retry_rename\(\$mergeFileByName.*?retry_unlink\(\$part/s,
 	"merged record and sample cardinalities are validated before aggregate publication or part deletion");
 like($strain,
-	qr/my \@required = \(.*?\$LINKstdof.*?\$QCstdof\.tmp.*?my \@contributorNames = \(.*?\$LINKstdof.*?\$QCstdof\.tmp/s,
+	qr/my \@coreRequired = \(.*?\$LINKstdof.*?my \@filesets = \(.*?\$QCstdof\.tmp.*?my \@contributorNames = \(.*?\$LINKstdof.*?\$QCstdof\.tmp/s,
 	'link and QC files are mandatory members of every worker contribution set');
 like($strain,
-	qr/sub stagedMGSInputsReady .*?\$LINKstdof.*?\$QCstdof\.tmp.*?merge\.complete\.tsv.*?\$aggregateComplete &&= -s \$mergeCheckpoint/s,
-	'staged readiness requires every merge artifact and the last-written commit checkpoint');
+	qr/sub stagedMGSInputsReady .*?coreRequiredNames.*?CATstdof\.tmp.*?QCstdof\.tmp.*?\|\|.*?CATstdof.*?QCstdof.*?mergeCheckpoint/s,
+	'staged readiness requires core merge artifacts, a raw or final category/QC pair, and the last-written commit checkpoint');
 like($strain,
 	qr/unless \(\$recoveryContributionIndexReady\).*?Rejecting fresh merge.*?return \$aggregateComplete/s,
 	'fresh merges without persisted recovery provenance are rejected without discarding a committed aggregate');
@@ -131,8 +131,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.91;/,
-	'lightweight resume and exact scratch reuse increment the workflow version');
+like($strain, qr/my \$version = 0\.93;/,
+	'prepared Phase-II scratch reuse increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -269,6 +269,18 @@ like($strain,
 like($strain,
 	qr/sub stagedMGSInputsReady .*?return 1 if \$aggregateComplete;.*?exact_worker_parts/s,
 	'a committed staged aggregate avoids repeated worker-part directory scans');
+ok(index($strain, 'my $preparedScratchInput') >= 0
+	&& index($strain, 'merge.complete.tsv') >= 0
+	&& index($strain, 'Stage-I input: reusing prepared scratch tree inputs') >= 0
+	&& index($strain, 'return (scalar(keys %samples_seen), $genes_seen, $preparedOG, 1, 1);') >= 0,
+	'fully prepared Phase-II scratch inputs remain resumable without repeated outgroup, sorting, or category work');
+ok(index($strain, 'sub preparedOutgroupLog') >= 0
+	&& index($strain, 'fileGZe($log_path)') >= 0
+	&& index($strain, '$publishedPrepared') >= 0
+	&& index($strain, '$scratchPrepared') >= 0
+	&& index($strain, 'data.log.write.$$') >= 0
+	&& index($strain, 'remove stale prepared outgroup log') >= 0,
+	'outgroup preparation is committed atomically, reused only after that commit, and invalidated by fresh Stage-I input');
 like($strain,
 	qr/my \(%persistentMGSInputStateCache, %scratchMGSInputStateCache\).*?sub invalidateMGSInputState .*?delete \@persistentMGSInputStateCache.*?delete \@scratchMGSInputStateCache/s,
 	'published and scratch triplet states are cached and explicitly invalidated after mutations');
@@ -321,7 +333,7 @@ like($strain,
 	qr/my \$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
 	'tree outputs are reset only after complete published or recoverable staged per-MGS inputs are verified');
 like($strain,
-	qr/\$scratchInputsReady \|\|= combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?using complete staged FNA\/FAA\/category files.*?tree job will publish them to the MGS directory/s,
+	qr/\$scratchInputsReady \|\|= combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?Stage-I input: using complete scratch FNA\/FAA\/category files.*?tree job will publish them to the MGS directory/s,
 	'recalculated trees continue staged-input transformation and publication through the normal tree-job path');
 like($strain,
 	qr/staged input sets recovered for -recalcTrees: \$recalcScratchRecovered/,

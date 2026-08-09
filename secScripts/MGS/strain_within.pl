@@ -60,6 +60,18 @@ sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
 sub persistentMGSInputState; sub scratchMGSInputState;
 sub invalidateMGSInputState;
 sub stagedMGSInputsReady; sub evalFileStatus;
+sub preparedOutgroupLog {
+	my ($directory) = @_;
+	my $log_path = "$directory/data.log";
+	return (0, '') unless fileGZe($log_path);
+	my ($log) = gzipopen($log_path, "prepared outgroup log", 1);
+	my $line = <$log> // '';
+	close $log or return (0, '');
+	$line =~ s/[\r\n]+\z//;
+	return (0, '') unless $line =~ /^OG:(.*)\z/;
+	return (1, $1);
+}
+
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
 sub writeNoRecoverableLociMarker;
@@ -239,7 +251,8 @@ END {
 #.89: retry Phase-I workers, quarantine terminal MGS outcomes, and harden filesystem publication
 #.90: cache catalogue-wide input states and avoid duplicate full-ledger validation scans
 #.91: persist the exact shared scratch directory for reliable cross-run resume
-my $version = 0.91;
+#.93: atomically commit and validate per-MGS outgroup preparation across resumes
+my $version = 0.93;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1193,7 +1206,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $mustRegenerateInputs = $repairCAT || $deepRepair || $redoSubmissionData
 		|| exists($legacyLocusMGS{$MGS});
 	if ($publishedInputsReady && !$mustRegenerateInputs) {
-		print "  Recovery input: using complete published FNA/FAA/category files\n";
+		print "  Tree input: using complete published FNA/FAA/category files\n";
 	} else {
 		$scratchInputsReady ||= combineMGSgenesDir($MGS,$tmpD,$tmpD);
 		unless ($scratchInputsReady) {#$outD2); -> keep in tmpdir for now..
@@ -1202,7 +1215,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 				"$MGS has neither complete published inputs nor complete combined worker input; leaving it for an extraction repair run\n");
 			next;
 		}
-		print "  Recovery input: using complete staged FNA/FAA/category files; "
+		print "  Stage-I input: using complete scratch FNA/FAA/category files; "
 			."the tree job will publish them to the MGS directory\n";
 	}
 	
@@ -1478,11 +1491,16 @@ exit(0);
 #	combineMGSgenesDir($MGS,$outD2);
 sub combineMGSgenesDir{
 	my ($MGS,$tmpD,$outD2) = @_;
-	my @required = (
+	my @coreRequired = (
 		"$tmpD/$FNAstdof", "$tmpD/$FAAstdof", "$tmpD/$LINKstdof",
-		"$tmpD/$CATstdof.tmp", "$tmpD/$QCstdof.tmp",
 	);
 	my $mergeCheckpoint = "$tmpD/merge.complete.tsv";
+	my $aggregateComplete = !grep { !fileGZe($_) } @coreRequired;
+	$aggregateComplete &&= (
+		(fileGZe("$tmpD/$CATstdof.tmp") && fileGZe("$tmpD/$QCstdof.tmp"))
+		|| (fileGZe("$tmpD/$CATstdof") && fileGZe("$tmpD/$QCstdof"))
+	);
+	$aggregateComplete &&= -s $mergeCheckpoint;
 	my @filesets = (
 		[$FNAstdof,       "$tmpD/$FNAstdof",       "$tmpD/$FNAstdof"],
 		[$FAAstdof,       "$tmpD/$FAAstdof",       "$tmpD/$FAAstdof"],
@@ -1503,8 +1521,6 @@ sub combineMGSgenesDir{
 	}
 	my $hasFreshParts = grep { @{$partsByName{$_}} }
 		($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp");
-	my $aggregateComplete = !grep { !fileGZe($_) } @required;
-	$aggregateComplete &&= -s $mergeCheckpoint;
 	return $aggregateComplete unless $hasFreshParts;
 	if ($maxSubJob && !split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob)) {
 		limitedWarn('partial worker retries without a complete generation',
@@ -1625,6 +1641,16 @@ sub combineMGSgenesDir{
 	# contributor, cardinality, and identifier-order checks. A validation error or
 	# crash while constructing merge files therefore leaves the old aggregate usable.
 	retry_unlink($mergeCheckpoint, label => "invalidate stale merge checkpoint");
+	# A completed earlier Phase II may have finalised scratch category/QC sidecars.
+	# A fresh worker generation supersedes them, so do not reuse stale final inputs.
+	for my $preparedSidecar ("$tmpD/$CATstdof", "$tmpD/$QCstdof") {
+		retry_unlink($preparedSidecar, fatal => 0,
+			label => "remove stale prepared scratch sidecar");
+	}
+	retry_unlink("$tmpD/data.log", fatal => 0,
+		label => "remove stale prepared outgroup log");
+	retry_unlink("$tmpD/data.log.gz", fatal => 0,
+		label => "remove stale compressed prepared outgroup log");
 	for my $set (@filesets) {
 		my ($name, undef, $outfile) = @$set;
 		next unless exists $mergeFileByName{$name};
@@ -1640,7 +1666,11 @@ sub combineMGSgenesDir{
 	retry_close($checkpointFH, 'close MGS merge checkpoint');
 	retry_rename($checkpointTemporary, $mergeCheckpoint,
 		label => 'publish MGS merge checkpoint');
-	my $complete = !grep { !fileGZe($_) } @required;
+	my $complete = !grep { !fileGZe($_) } @coreRequired;
+	$complete &&= (
+		fileGZe("$tmpD/$CATstdof.tmp")
+		&& fileGZe("$tmpD/$QCstdof.tmp")
+	);
 	$complete &&= -s $mergeCheckpoint;
 	if ($complete) {
 		for my $part (@consumedParts) {
@@ -1739,7 +1769,8 @@ sub addOutgroup2MGS{
 	my $outD3 = $tmpD;
 	my $outputReady = fileGZe("$outD2/$FNAstdof")
 		&& fileGZe("$outD2/$FAAstdof") && fileGZe("$outD2/$CATstdof");
-	if ($outputReady && !$repairCAT && !$deepRepair && !$redoSubmissionData
+	my ($publishedPrepared, $publishedOG) = preparedOutgroupLog($outD2);
+	if ($outputReady && $publishedPrepared && !$repairCAT && !$deepRepair && !$redoSubmissionData
 			&& !exists($legacyLocusMGS{$MGS})){
 		my %samples_seen;
 		my $genes_seen = 0;
@@ -1754,7 +1785,34 @@ sub addOutgroup2MGS{
 			}
 		}
 		close $cat_fh or die "Cannot close existing category file for $MGS: $!\n";
-		return(scalar(keys %samples_seen),$genes_seen,$OG,0,1);
+		return(scalar(keys %samples_seen),$genes_seen,$publishedOG,0,1);
+	}
+	# Phase II may already have appended its outgroup and atomically converted
+	# the Stage-I category/QC sidecars to their final scratch names.  Preserve
+	# that expensive preparation across controller restarts and queue delays.
+	my $preparedScratchInput = fileGZe("$tmpD/$FNAstdof")
+		&& fileGZe("$tmpD/$FAAstdof") && fileGZe("$tmpD/$LINKstdof")
+		&& fileGZe("$tmpD/$CATstdof") && fileGZe("$tmpD/$QCstdof")
+		&& -s "$tmpD/merge.complete.tsv";
+	my ($scratchPrepared, $preparedOG) = preparedOutgroupLog($tmpD);
+	if ($preparedScratchInput && $scratchPrepared && !$repairCAT && !$deepRepair && !$redoSubmissionData
+			&& !exists($legacyLocusMGS{$MGS})) {
+		my %samples_seen;
+		my $genes_seen = 0;
+		my ($cat_fh) = gzipopen("$tmpD/$CATstdof",
+			"prepared scratch category file");
+		while (my $line = <$cat_fh>) {
+			chomp $line;
+			next unless length($line);
+			$genes_seen++;
+			for my $entry (split /\t/, $line) {
+				my ($sample) = split /\Q$SaSe\E/, $entry, 2;
+				$samples_seen{$sample} = 1 if defined($sample) && length($sample);
+			}
+		}
+		close $cat_fh or die "Cannot close prepared scratch category file for $MGS: $!\n";
+		print "  Stage-I input: reusing prepared scratch tree inputs\n";
+		return (scalar(keys %samples_seen), $genes_seen, $preparedOG, 1, 1);
 	}
 	my $temporaryInput = fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
 		&& (fileGZe("$tmpD/$CATstdof.tmp") || fileGZe("$tmpD/$CATstdof"));
@@ -1977,9 +2035,12 @@ sub addOutgroup2MGS{
 	for my $stale_cat (glob("$CATtf.tmp*")) {
 		retry_unlink($stale_cat, fatal => 0, label => "clean stale category temporary");
 	}
-	open my $log, '>', "$outD3/data.log" or die "Cannot create $outD3/data.log: $!\n";
+	my $logTemporary = "$outD3/data.log.write.$$";
+	open my $log, '>', $logTemporary or die "Cannot create $logTemporary: $!\n";
 	print $log "OG:$OG\n";
-	close $log or die "Cannot close $outD3/data.log: $!\n";
+	close $log or die "Cannot close $logTemporary: $!\n";
+	retry_rename($logTemporary, "$outD3/data.log",
+		label => "publish outgroup preparation log");
 
 	
 	
@@ -2830,7 +2891,7 @@ sub scratchMGSInputState {
 		return $scratchMGSInputStateCache{$MGS} = 'complete';
 	}
 	my $mgsDir = "$scratchD/outs/$MGS";
-	my @required = ($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp");
+	my @required = ($FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp", $CATstdof, $QCstdof);
 	my $hasAny = grep {
 		fileGZe("$mgsDir/$_") || bsd_glob("$mgsDir/$_.*")
 	} @required;
@@ -2912,17 +2973,22 @@ sub getInputSize{
 sub stagedMGSInputsReady {
 	my ($MGS) = @_;
 	my $mgsDir = "$scratchD/outs/$MGS";
-	my @requiredNames = (
-		$FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp",
-	);
+	my @coreRequiredNames = ($FNAstdof, $FAAstdof, $LINKstdof);
 	my $mergeCheckpoint = "$mgsDir/merge.complete.tsv";
-	my $aggregateComplete = !grep { !fileGZe("$mgsDir/$_") } @requiredNames;
+	my $aggregateComplete = !grep { !fileGZe("$mgsDir/$_") } @coreRequiredNames;
+	$aggregateComplete &&= (
+		(fileGZe("$mgsDir/$CATstdof.tmp") && fileGZe("$mgsDir/$QCstdof.tmp"))
+		|| (fileGZe("$mgsDir/$CATstdof") && fileGZe("$mgsDir/$QCstdof"))
+	);
 	$aggregateComplete &&= -s $mergeCheckpoint;
 	# The checkpoint commits the complete aggregate. Fresh worker parts are
 	# considered by combineMGSgenesDir when a merge is requested; readiness and
 	# sizing do not need five directory globs for an already reusable aggregate.
 	return 1 if $aggregateComplete;
 	my $workerCount = $maxSubJob || 1;
+	my @requiredNames = (
+		$FNAstdof, $FAAstdof, $LINKstdof, "$CATstdof.tmp", "$QCstdof.tmp",
+	);
 	my %parts = map {
 		$_ => [exact_worker_parts("$mgsDir/$_", $workerCount)]
 	} @requiredNames;
