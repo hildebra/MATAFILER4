@@ -331,7 +331,7 @@ my $strictBackbone = 1;
 my $strictBackboneFraction = 0.35;
 my $strictBackboneMinSamples = 3;
 my $placementMinOverlap = 400;
-my $epaThreads = 4;
+my $epaThreads = 2;
 my $epaMaxMemMB = -1; # derive from the per-tree IQ-TREE allowance in buildTree5
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
@@ -1252,11 +1252,20 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $treeTmpGb = int(($inputFNAsize * 4 + 1023) / 1024);
 	$treeTmpGb = 15 if $treeTmpGb < 15;
 	$QSBoptHR->{tmpSpace} = $nodeTmpConfigured ? $treeTmpGb : 0;
-	# Tree inputs are now streamed and IQ-TREE receives its own explicit cap, so
-	# retain approximately half of the historical scheduler allocation.
+	# Placement retains likelihood vectors across the reference tree and can use
+	# substantially more memory than tree inference for long concatenated MSAs.
+	# Reserve a distinct scheduler profile whenever EPA-ng placement is requested.
+	my $placementRequested = $strictBackbone ? 1 : 0;
 	my $baseMemMult = 75; $baseMemMult = 15 if ($phyloProg ==3 || $phyloProg ==2);
-	my $totMem = int($inputFNAsize *$baseMemMult * $memMulti);
-	$totMem = 5000*$memMulti if ($totMem < 5000);$totMem = 110000*$memMulti if ($totMem > 110000);
+	$baseMemMult = 150 if $placementRequested && $baseMemMult < 150;
+	my $memoryProfile = $placementRequested ? 'EPA-ng placement' : 'tree-only';
+	my $minimumMemMB = ($placementRequested ? 10240 : 5000) * $memMulti;
+	$minimumMemMB = 10240 if $placementRequested && $minimumMemMB < 10240;
+	my $maximumMemMB = 110000 * $memMulti;
+	$maximumMemMB = $minimumMemMB if $maximumMemMB < $minimumMemMB;
+	my $totMem = int($inputFNAsize * $baseMemMult * $memMulti);
+	$totMem = $minimumMemMB if $totMem < $minimumMemMB;
+	$totMem = $maximumMemMB if $totMem > $maximumMemMB;
 	my $iqMemMB = int($totMem * 0.9); #reserve 10% for buildTree/Perl and runtime overhead
 	my $numCoreL = $numCores;	
 	if ($maxCores >0){ #scale cores according to used memory size
@@ -1340,7 +1349,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		."-placementPendingMarker ".shellQuote($placementPendingMarker)." ";
 
 	if ($multiSmpl > 2 && $ngenes >= 10){
-		print "  Tree input: $multiSmpl samples, $ngenes potential genes; $numCoreL cores, $totMem memory\n";
+		print "  Tree input: $multiSmpl samples, $ngenes potential genes; $numCoreL cores, "
+			."$totMem MB memory ($memoryProfile profile)\n";
 	} else {
 		my $reason = $multiSmpl <= 2 ? 'too_few_samples' : 'too_few_usable_genes';
 		$treeDisposition{"valid no-tree: $reason"}++;
@@ -4989,7 +4999,7 @@ Tree locus filtering:
   -placementMinOverlap INT      Minimum informative alignment positions required
                                  by the taxon-aware placement gate [default 400]
   -epaThreads INT                Requested EPA-ng threads; BuildTree caps these by
-                                 cores and 1 thread/GB planning memory [default 4]
+                                 cores and 1 thread/GB planning memory [default 2]
   -epaMaxMemMB INT               EPA-ng thread-planning budget; -1 derives 60% of
                                  each IQ-TREE allowance, 0 disables memory scaling
                                  [default -1]

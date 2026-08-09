@@ -37,6 +37,7 @@ write_file($full, join('',
 	">D\nAACCGG------\n",
 	">E\nAACCGGTTAACC\n",
 	">F\nAAC---------\n",
+	">G\n------------\n",
 ));
 my $split = split_strict_backbone(
 	$full, $backbone, $queries, {E => 'placement'},
@@ -46,6 +47,10 @@ is_deeply($split->{backbone}, [qw(A B C D E)],
 	'strict backbone retains all but severe coverage outliers');
 is_deeply($split->{placement}, [qw(F)],
 	'only the severe low-coverage sample is deferred to placement');
+is_deeply($split->{excluded}, [qw(G)],
+	'all-gap samples are excluded before EPA-ng placement');
+is($split->{reason}{G}, 'no_informative_alignment_sites',
+	'all-gap placement exclusion records an actionable audit reason');
 is($split->{reason}{E}, 'retained_after_locus_qc_masking',
 	'locus-QC status alone does not remove a well-covered sample after masking');
 
@@ -64,7 +69,7 @@ is_deeply($eligible_split->{backbone}, [qw(A B C D E)],
 	'coverage-adequate samples still define the broad initial backbone');
 is_deeply($eligible_split->{placement}, [],
 	'an ineligible sparse sample is not appended as a placement');
-is_deeply($eligible_split->{excluded}, [qw(F)],
+is_deeply($eligible_split->{excluded}, [qw(F G)],
 	'a low-coverage sample failing the restored gene threshold is explicitly excluded');
 like($eligible_split->{reason}{F}, qr/below_placement_gene_fraction/,
 	'placement exclusion preserves the threshold reason for audit');
@@ -85,6 +90,47 @@ is_deeply($policy_split->{placement}, [qw(D F)],
 	'backbone-specific coverage rejection defers an otherwise placeable sample');
 like($policy_split->{reason}{D}, qr/below_backbone_gene_fraction/,
 	'backbone deferral reason remains available for the final classification audit');
+
+my $overlap_full = File::Spec->catfile($tmp, 'overlap-full.fna');
+my $overlap_backbone = File::Spec->catfile($tmp, 'overlap-backbone.fna');
+my $overlap_queries = File::Spec->catfile($tmp, 'overlap-placement.fna');
+my $overlap_partition = File::Spec->catfile($tmp, 'overlap.partition');
+write_file($overlap_full, join('',
+	">A\nAACCGGTTAACC\n",
+	">B\nAACCGGTTAACA\n",
+	">C\nAACCGGTTAAGG\n",
+	">Q\nAA----TG----\n",
+	">R\nAA----------\n",
+	">S\nAAAA--------\n",
+));
+write_file($overlap_partition, join('',
+	"DNA, locus_1 = 1-6\n",
+	"DNA, locus_2 = 7-12\n",
+));
+my $overlap_split = split_strict_backbone(
+	$overlap_full, $overlap_backbone, $overlap_queries, {},
+	{
+		coverage_fraction => 0.5,
+		minimum_backbone => 3,
+		partition_file => $overlap_partition,
+		minimum_backbone_overlap_nt => 4,
+		minimum_backbone_overlap_loci => 2,
+	},
+);
+is_deeply($overlap_split->{placement}, [qw(Q)],
+	'a sparse query is retained only when it overlaps the backbone in two loci');
+is_deeply($overlap_split->{excluded}, [qw(R S)],
+	'queries failing either actual backbone-overlap gate are excluded');
+like($overlap_split->{reason}{R}, qr/below_backbone_overlap_nt/,
+	'backbone-overlap NT failure is explicit in the audit');
+like($overlap_split->{reason}{S}, qr/below_backbone_overlap_loci/,
+	'backbone-overlap locus failure is explicit in the audit');
+is($overlap_split->{backbone_overlap}{Q}{backbone_overlap_nt}, 4,
+	'backbone overlap counts only jointly supported coordinates');
+is($overlap_split->{backbone_overlap}{Q}{backbone_overlap_loci}, 2,
+	'backbone overlap reports the number of intersecting loci');
+cmp_ok(abs($overlap_split->{backbone_overlap}{Q}{backbone_state_divergence} - 0.25),
+	'<', 1e-12, 'backbone-state divergence is recorded without filtering the query');
 
 my $fallback_backbone = File::Spec->catfile($tmp, 'fallback-backbone.fna');
 my $fallback_queries = File::Spec->catfile($tmp, 'fallback-placement.fna');
@@ -110,6 +156,12 @@ is($epa->{placements}{D}{edge}, 1,
 	'EPA-ng parser selects the highest-likelihood-weight edge');
 is($epa->{placements}{D}{likelihood_weight_ratio}, 0.90,
 	'EPA-ng parser retains likelihood-weight support');
+is($epa->{placements}{D}{candidate_placements}, 2,
+	'EPA-ng audit retains the number of candidate placements');
+cmp_ok(abs($epa->{placements}{D}{edpl} - 0.1188), '<', 1e-12,
+	'EDPL records spatial placement uncertainty on the reference tree');
+is($epa->{placements}{E}{edpl}, 0,
+	'a query with one candidate placement has zero EDPL');
 is($epa->{placements}{F}{status}, 'not_reported',
 	'queries absent from jplace remain explicit in the audit report');
 write_epa_placed_tree($epa->{tree}, $placed_tree, $epa->{placements});

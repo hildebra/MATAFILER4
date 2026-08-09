@@ -796,6 +796,8 @@ my (%partitionRateProxy, %partitionSelectionPhase, %taxonAwareFinalMetricByPath)
 my (%taxonAwareBackboneEligibility, %taxonAwareBackboneIneligibleReason);
 my (%taxonAwarePlacementEligibility, %taxonAwarePlacementIneligibleReason);
 my $strictSplit;
+my $strictPlacementMinimumNT = $placementMinOverlap;
+my $strictPlacementMinimumLoci = 2;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
@@ -1566,6 +1568,7 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			role => 'placement',
 			outgroup => $outgroup,
 		);
+		$strictPlacementMinimumNT = $placementEligibility->{minimum_nt};
 		%taxonAwareBackboneEligibility = map {
 			$_ => $backboneEligibility->{samples}{$_}{eligible}
 		} keys %{$backboneEligibility->{samples}};
@@ -1691,13 +1694,17 @@ if ($strictBackbone) {
 			placement_eligible => \%taxonAwarePlacementEligibility,
 			placement_ineligible_reason => \%taxonAwarePlacementIneligibleReason,
 			outgroup => $outgroup,
+			partition_file => $multAli.$partiExt,
+			minimum_backbone_overlap_nt => $strictPlacementMinimumNT,
+			minimum_backbone_overlap_loci => $strictPlacementMinimumLoci,
 		},
 	);
 	my $classificationFile = "$treeD/strict_backbone.samples.tsv";
 	open my $classification, '>', $classificationFile
 		or die "Cannot write $classificationFile: $!\n";
 	print {$classification} join("\t",
-		qw(sample tree_role reason informative_positions q90_informative)), "\n";
+		qw(sample tree_role reason informative_positions q90_informative
+			backbone_overlap_nt backbone_overlap_loci backbone_state_divergence)), "\n";
 	my %isPlacement = map { $_ => 1 } @{$strictSplit->{placement}};
 	my %isExcluded = map { $_ => 1 } @{$strictSplit->{excluded} // []};
 	for my $sample (sort(
@@ -1707,19 +1714,28 @@ if ($strictBackbone) {
 		$reason = "backbone_fallback:".$strictSplit->{requested_reason}{$sample}
 			if $strictSplit->{fallback}
 				&& exists($strictSplit->{requested_reason}{$sample});
+		my $overlapMetric = $strictSplit->{backbone_overlap}{$sample} || {};
 		print {$classification} join("\t",
 			$sample,
 			$isExcluded{$sample} ? 'excluded' : $isPlacement{$sample} ? 'placement' : 'backbone',
 			$reason,
 			$strictSplit->{informative}{$sample},
 			sprintf('%.2f', $strictSplit->{q90_informative}),
+			defined($overlapMetric->{backbone_overlap_nt})
+				? $overlapMetric->{backbone_overlap_nt} : 'NA',
+			defined($overlapMetric->{backbone_overlap_loci})
+				? $overlapMetric->{backbone_overlap_loci} : 'NA',
+			defined($overlapMetric->{backbone_state_divergence})
+				? sprintf('%.8g', $overlapMetric->{backbone_state_divergence}) : 'NA',
 		), "\n";
 	}
 	close $classification or die "Cannot close $classificationFile: $!\n";
 	print "Strict-backbone split: ".scalar(@{$strictSplit->{backbone}})
 		." backbone and ".scalar(@{$strictSplit->{placement}})
 		." placement sample(s), ".scalar(@{$strictSplit->{excluded} // []})
-		." excluded from placement; full alignment retained at $fullAlignment\n";
+		." excluded from placement; required backbone overlap="
+		."$strictPlacementMinimumNT NT across $strictPlacementMinimumLoci loci; "
+		."full alignment retained at $fullAlignment\n";
 	warn "Strict-backbone fallback: fewer than $strictBackboneMinSamples validated "
 		."backbone samples remained, so all samples were used for inference; "
 		."see $classificationFile\n"
@@ -1893,6 +1909,11 @@ if ($strictSplit) {
 		my $primaryTree = $backboneTree;
 		my $dedicatedBackbone = $primaryTree =~ s/\.backbone\.treefile$/.treefile/;
 		my $report = "$treeD/strict_backbone.epa_placements.tsv";
+		my @placementReportColumns = qw(
+			sample status backbone_overlap_nt backbone_overlap_loci
+			backbone_state_divergence edge likelihood likelihood_weight_ratio
+			edpl candidate_placements distal_length pendant_length reason
+		);
 		if (@{$strictSplit->{placement}}) {
 			my ($epaResult, $modelArtifact, $jplaceFile);
 			my $placementOK = eval {
@@ -1917,14 +1938,20 @@ if ($strictSplit) {
 			}
 			my $placements = $epaResult->{placements};
 			my $reportFh = retry_open('>', $report, label => "write EPA-ng placement report");
-			print {$reportFh} join("\t",
-				qw(sample status edge likelihood likelihood_weight_ratio distal_length pendant_length reason)), "\n";
+			print {$reportFh} join("\t", @placementReportColumns), "\n";
 			for my $sample (sort keys %{$placements}) {
 				my $entry = $placements->{$sample};
+				my $overlapMetric =
+					$strictSplit->{backbone_overlap}{$sample} || {};
+				my @overlapValues = map {
+					defined($overlapMetric->{$_})
+						? sprintf('%.12g', $overlapMetric->{$_}) : 'NA'
+				} qw(backbone_overlap_nt backbone_overlap_loci
+					backbone_state_divergence);
 				print {$reportFh} join("\t",
-					$sample, $entry->{status},
+					$sample, $entry->{status}, @overlapValues,
 					map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
-						qw(edge likelihood likelihood_weight_ratio distal_length pendant_length)),
+						qw(edge likelihood likelihood_weight_ratio edpl candidate_placements distal_length pendant_length)),
 					$strictSplit->{reason}{$sample} // '',
 				), "\n";
 			}
@@ -1955,8 +1982,7 @@ if ($strictSplit) {
 				."primary tree: $primaryTree; backbone tree: $backboneTree\n";
 		} else {
 			my $reportFh = retry_open('>', $report, label => "write empty EPA-ng placement report");
-			print {$reportFh} join("\t",
-				qw(sample status edge likelihood likelihood_weight_ratio distal_length pendant_length reason)), "\n";
+			print {$reportFh} join("\t", @placementReportColumns), "\n";
 			retry_close($reportFh, "close empty EPA-ng placement report");
 			if ($dedicatedBackbone) {
 				my $temporaryPrimary = "$primaryTree.tmp.$$";

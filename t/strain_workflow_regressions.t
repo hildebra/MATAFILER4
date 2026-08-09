@@ -232,8 +232,8 @@ like($strain,
 	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(\$phyloProg == 1\)\{.*?"-iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
 	'within-strain IQ-TREE always uses the standard resource-limited command and enables CMAPLE only by explicit request');
 like($strain,
-	qr/my \$baseMemMult = 75; \$baseMemMult = 15 if \(\$phyloProg ==3 \|\| \$phyloProg ==2\).*?\$totMem = 5000\*\$memMulti if \(\$totMem < 5000\);\$totMem = 110000\*\$memMulti if \(\$totMem > 110000\)/s,
-	'within-strain halves the historical BuildTree5 memory multiplier and allocation bounds');
+	qr/my \$placementRequested = \$strictBackbone \? 1 : 0;.*?\$baseMemMult = 150 if \$placementRequested.*?\$minimumMemMB = \(\$placementRequested \? 10240 : 5000\) \* \$memMulti;.*?\$minimumMemMB = 10240 if \$placementRequested.*?\$totMem = \$minimumMemMB if \$totMem < \$minimumMemMB/s,
+	'within-strain gives EPA-ng placement jobs a 10 GiB floor and larger input-size estimate');
 unlike($strain, qr/-iqLegacy\s+1|legacyMGTK/,
 	'within-strain does not expose or submit the obsolete IQ-TREE legacy-kernel flag');
 like($strain,

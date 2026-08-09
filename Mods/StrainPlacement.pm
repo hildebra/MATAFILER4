@@ -49,6 +49,102 @@ sub _informative_count {
 		? ($copy =~ tr/A-WYZa-wyz//)
 		: ($copy =~ tr/ACGTUacgtu//);
 }
+sub _valid_mask {
+	my ($sequence, $is_aa) = @_;
+	my $mask = uc($sequence // '');
+	if ($is_aa) {
+		$mask =~ tr/ACDEFGHIKLMNPQRSTVWY/\x01/;
+	} else {
+		$mask =~ tr/ACGTU/\x01/;
+	}
+	$mask =~ tr/\x01/\x00/c;
+	return $mask;
+}
+
+sub _dna_state_mask {
+	my ($sequence) = @_;
+	my $mask = uc($sequence // '');
+	$mask =~ tr/ACGTU/\x01\x02\x04\x08\x08/;
+	$mask =~ tr/\x01\x02\x04\x08/\x00/c;
+	return $mask;
+}
+
+sub _mask_count {
+	return $_[0] =~ tr/\x01/\x01/;
+}
+
+sub _alignment_locus_ranges {
+	my ($partition_file, $alignment_length) = @_;
+	return [[0, $alignment_length]]
+		unless defined($partition_file) && length($partition_file);
+	die "Strict-backbone overlap requires the alignment partition file $partition_file\n"
+		unless -s $partition_file;
+	open my $fh, '<', $partition_file
+		or die "Cannot read alignment partition file $partition_file: $!\n";
+	my @ranges;
+	while (my $line = <$fh>) {
+		while ($line =~ /(\d+)\s*-\s*(\d+)/g) {
+			my ($start, $end) = ($1 - 1, $2);
+			die "Invalid alignment range $1-$2 in $partition_file\n"
+				if $start < 0 || $end <= $start || $end > $alignment_length;
+			push @ranges, [$start, $end];
+		}
+	}
+	close $fh or die "Cannot close alignment partition file $partition_file: $!\n";
+	die "Alignment partition file $partition_file contains no locus ranges\n"
+		unless @ranges;
+	@ranges = sort { $a->[0] <=> $b->[0] || $a->[1] <=> $b->[1] } @ranges;
+	my $next = 0;
+	for my $range (@ranges) {
+		die "Alignment partition ranges in $partition_file do not cover the "
+			."concatenated alignment exactly at position ".($next + 1)."\n"
+			unless $range->[0] == $next;
+		$next = $range->[1];
+	}
+	die "Alignment partition ranges in $partition_file end at $next, expected "
+		."$alignment_length\n" unless $next == $alignment_length;
+	return \@ranges;
+}
+
+sub _backbone_overlap_metrics {
+	my ($seq, $backbone, $queries, $ranges, $is_aa, $alignment_length) = @_;
+	my $seen_once = "\x00" x $alignment_length;
+	my $supported = "\x00" x $alignment_length;
+	my $state_union = "\x00" x $alignment_length;
+	for my $id (@{$backbone}) {
+		my $valid = _valid_mask($seq->{$id}, $is_aa);
+		$supported |= ($seen_once & $valid);
+		$seen_once |= $valid;
+		$state_union |= _dna_state_mask($seq->{$id}) unless $is_aa;
+	}
+	my $nt_factor = $is_aa ? 3 : 1;
+	my %metrics;
+	for my $id (@{$queries}) {
+		my $valid = _valid_mask($seq->{$id}, $is_aa);
+		my $overlap_mask = $valid & $supported;
+		my $overlap_sites = _mask_count($overlap_mask);
+		my $overlap_loci = 0;
+		for my $range (@{$ranges}) {
+			my $locus_mask = substr(
+				$overlap_mask, $range->[0], $range->[1] - $range->[0]);
+			$overlap_loci++ if _mask_count($locus_mask);
+		}
+		my $state_divergence;
+		if (!$is_aa && $overlap_sites) {
+			my $matching = _dna_state_mask($seq->{$id}) & $state_union;
+			$matching =~ tr/\x01\x02\x04\x08/\x01/;
+			my $matching_supported = $matching & $supported;
+			my $matching_sites = _mask_count($matching_supported);
+			$state_divergence = ($overlap_sites - $matching_sites) / $overlap_sites;
+		}
+		$metrics{$id} = {
+			backbone_overlap_nt => $overlap_sites * $nt_factor,
+			backbone_overlap_loci => $overlap_loci,
+			backbone_state_divergence => $state_divergence,
+		};
+	}
+	return \%metrics;
+}
 
 sub _quantile {
 	my ($fraction, @values) = @_;
@@ -93,14 +189,32 @@ sub split_strict_backbone {
 	my $backbone_ineligible_reason = $options->{backbone_ineligible_reason} || {};
 	my $placement_eligible = $options->{placement_eligible} || {};
 	my $placement_ineligible_reason = $options->{placement_ineligible_reason} || {};
+	my $minimum_backbone_overlap_nt =
+		$options->{minimum_backbone_overlap_nt} // 0;
+	my $minimum_backbone_overlap_loci =
+		$options->{minimum_backbone_overlap_loci} // 1;
+	die "Minimum backbone overlap NT and loci must be non-negative integers\n"
+		unless $minimum_backbone_overlap_nt =~ /^\d+$/
+			&& $minimum_backbone_overlap_loci =~ /^\d+$/;
 	my $seq = _read_fasta($full_fasta);
 	my @ids = sort keys %{$seq};
 	die "Strict-backbone input $full_fasta contains no sequences\n" unless @ids;
+	my $alignment_length = length($seq->{$ids[0]});
+	my @unequal = grep { length($seq->{$_}) != $alignment_length } @ids;
+	die "Strict-backbone input $full_fasta contains unequal sequence lengths\n"
+		if @unequal;
 	my %informative = map { $_ => _informative_count($seq->{$_}, $is_aa) } @ids;
 	my $q90 = _quantile(0.90, values %informative);
 	my (%classification_reason, %requested_reason, @backbone, @placement, @excluded);
 	for my $id (@ids) {
 		my $sampleLocusQC = ($status->{$id} // '') eq 'placement';
+		if (($informative{$id} // 0) == 0) {
+			push @excluded, $id;
+			$classification_reason{$id} = 'no_informative_alignment_sites';
+			$requested_reason{$id} = $classification_reason{$id};
+			next;
+		}
+
 		my $lowCoverage = $q90 > 0
 			&& $informative{$id} < $coverage_fraction * $q90;
 		$lowCoverage = 0 if length($outgroup) && $id eq $outgroup;
@@ -129,12 +243,38 @@ sub split_strict_backbone {
 		}
 	}
 	my $fallback = 0;
+	my %backbone_overlap;
 	if (@backbone < $minimum_backbone) {
 		$fallback = 1;
 		# Placement-eligible samples can still support an underpowered inference,
 		# but samples that failed the restored coverage gate stay excluded.
 		@backbone = sort (@backbone, @placement);
 		@placement = ();
+	} elsif (@placement) {
+		my $ranges = _alignment_locus_ranges(
+			$options->{partition_file}, $alignment_length);
+		%backbone_overlap = %{_backbone_overlap_metrics(
+			$seq, \@backbone, \@placement, $ranges, $is_aa, $alignment_length)};
+		my @retained_placement;
+		for my $id (@placement) {
+			my $metric = $backbone_overlap{$id};
+			my $exclusion_reason;
+			$exclusion_reason = 'below_backbone_overlap_nt'
+				if $metric->{backbone_overlap_nt} < $minimum_backbone_overlap_nt;
+			$exclusion_reason = 'below_backbone_overlap_loci'
+				if !defined($exclusion_reason)
+					&& $metric->{backbone_overlap_loci} < $minimum_backbone_overlap_loci;
+			if (defined $exclusion_reason) {
+				$classification_reason{$id} .= ','
+					if length($classification_reason{$id} // '');
+				$classification_reason{$id} .= $exclusion_reason;
+				$requested_reason{$id} = $classification_reason{$id};
+				push @excluded, $id;
+			} else {
+				push @retained_placement, $id;
+			}
+		}
+		@placement = @retained_placement;
 	}
 	_write_fasta($backbone_fasta, $seq, \@backbone);
 	_write_fasta($placement_fasta, $seq, \@placement);
@@ -147,6 +287,7 @@ sub split_strict_backbone {
 		q90_informative => $q90,
 		fallback => $fallback,
 		requested_reason => \%requested_reason,
+		backbone_overlap => \%backbone_overlap,
 	};
 }
 
@@ -158,28 +299,57 @@ sub read_epa_jplace {
 	my $text = <$fh>;
 	close $fh or die "Cannot close EPA-ng placement file $jplace_file: $!\n";
 	my $jplace = eval { decode_json($text) };
-	die "Cannot parse EPA-ng placement file $jplace_file: $@\n" if $@ || ref($jplace) ne 'HASH';
+	die "Cannot parse EPA-ng placement file $jplace_file: $@\n"
+		if $@ || ref($jplace) ne 'HASH';
 	die "EPA-ng placement file $jplace_file has no edge-labelled reference tree\n"
 		unless defined($jplace->{tree}) && length($jplace->{tree});
-	my %placements = map { $_ => {status => 'not_reported'} } @{$expected_queries // []};
+	my @fields = ref($jplace->{fields}) eq 'ARRAY'
+		? @{$jplace->{fields}}
+		: qw(edge_num likelihood like_weight_ratio distal_length pendant_length);
+	my %field_index = map { $fields[$_] => $_ } 0 .. $#fields;
+	my $weight_field = exists($field_index{like_weight_ratio})
+		? 'like_weight_ratio' : 'likelihood_weight_ratio';
+	for my $required (qw(edge_num likelihood distal_length pendant_length), $weight_field) {
+		die "EPA-ng placement file $jplace_file lacks required field '$required'\n"
+			unless exists $field_index{$required};
+	}
+	my $root = _parse_epa_tree($jplace->{tree});
+	my %edges;
+	_index_epa_edges($root, undef, \%edges);
+	my $tree_length = _epa_total_tree_length($root);
+	my %placements = map { $_ => {status => 'not_reported'} }
+		@{$expected_queries // []};
 	for my $record (@{$jplace->{placements} // []}) {
-		next unless ref($record) eq 'HASH' && ref($record->{p}) eq 'ARRAY' && @{$record->{p}};
+		next unless ref($record) eq 'HASH'
+			&& ref($record->{p}) eq 'ARRAY' && @{$record->{p}};
 		my @names;
 		push @names, @{$record->{n}} if ref($record->{n}) eq 'ARRAY';
-		push @names, map { ref($_) eq 'ARRAY' ? $_->[0] : () } @{$record->{nm} // []};
+		push @names, map { ref($_) eq 'ARRAY' ? $_->[0] : () }
+			@{$record->{nm} // []};
 		next unless @names;
 		my @ranked = sort {
-			($b->[2] // -9e99) <=> ($a->[2] // -9e99)
-			|| ($b->[1] // -9e99) <=> ($a->[1] // -9e99)
-		} grep { ref($_) eq 'ARRAY' && defined($_->[0]) } @{$record->{p}};
+			($b->{likelihood_weight_ratio} // -9e99)
+				<=> ($a->{likelihood_weight_ratio} // -9e99)
+			|| ($b->{likelihood} // -9e99) <=> ($a->{likelihood} // -9e99)
+		} map {
+			{
+				edge => $_->[$field_index{edge_num}],
+				likelihood => $_->[$field_index{likelihood}],
+				likelihood_weight_ratio => $_->[$field_index{$weight_field}],
+				distal_length => $_->[$field_index{distal_length}],
+				pendant_length => $_->[$field_index{pendant_length}],
+			}
+		} grep {
+			ref($_) eq 'ARRAY' && defined($_->[$field_index{edge_num}])
+		} @{$record->{p}};
 		next unless @ranked;
 		my $best = $ranked[0];
+		my $edpl = _epa_edpl(\@ranked, \%edges, $tree_length);
 		for my $name (@names) {
 			next unless defined($name) && length($name);
 			$placements{$name} = {
-				status => 'placed', edge => $best->[0], likelihood => $best->[1],
-				likelihood_weight_ratio => $best->[2], distal_length => $best->[3],
-				pendant_length => $best->[4],
+				status => 'placed', %{$best}, edpl => $edpl,
+				candidate_placements => scalar(@ranked),
 			};
 		}
 	}
@@ -295,6 +465,99 @@ sub _index_epa_edges {
 	$edges->{$node->{edge}} = $node if defined $node->{edge};
 	_index_epa_edges($_, $node, $edges) for @{$node->{children}};
 }
+sub _epa_total_tree_length {
+	my ($node) = @_;
+	my $total = defined($node->{parent}) ? ($node->{length} // 0) : 0;
+	$total += _epa_total_tree_length($_) for @{$node->{children}};
+	return $total;
+}
+
+sub _epa_node_distance {
+	my ($left, $right) = @_;
+	my (%left_distance, $distance);
+	$distance = 0;
+	for (my $node = $left; defined($node); $node = $node->{parent}) {
+		$left_distance{$node} = $distance;
+		$distance += $node->{length} // 0 if defined $node->{parent};
+	}
+	$distance = 0;
+	for (my $node = $right; defined($node); $node = $node->{parent}) {
+		return $distance + $left_distance{$node}
+			if exists $left_distance{$node};
+		$distance += $node->{length} // 0 if defined $node->{parent};
+	}
+	die "EPA-ng placement tree contains disconnected nodes\n";
+}
+
+sub _epa_placement_distance {
+	my ($left, $right, $edges) = @_;
+	return undef unless defined($left->{edge}) && defined($right->{edge});
+	my $left_child = $edges->{$left->{edge}};
+	my $right_child = $edges->{$right->{edge}};
+	return undef unless $left_child && $right_child;
+	my $left_parent = $left_child->{parent};
+	my $right_parent = $right_child->{parent};
+	return undef unless $left_parent && $right_parent;
+	my $left_length = $left_child->{length};
+	my $right_length = $right_child->{length};
+	return undef unless defined($left_length) && defined($right_length);
+	my $left_distal = $left->{distal_length} // 0;
+	my $right_distal = $right->{distal_length} // 0;
+	$left_distal = 0 if $left_distal < 0;
+	$right_distal = 0 if $right_distal < 0;
+	$left_distal = $left_length if $left_distal > $left_length;
+	$right_distal = $right_length if $right_distal > $right_length;
+	return abs($left_distal - $right_distal)
+		if $left->{edge} == $right->{edge};
+	my @left_endpoint = (
+		[$left_child, $left_distal],
+		[$left_parent, $left_length - $left_distal],
+	);
+	my @right_endpoint = (
+		[$right_child, $right_distal],
+		[$right_parent, $right_length - $right_distal],
+	);
+	my $minimum;
+	for my $left_end (@left_endpoint) {
+		for my $right_end (@right_endpoint) {
+			my $distance = $left_end->[1] + $right_end->[1]
+				+ _epa_node_distance($left_end->[0], $right_end->[0]);
+			$minimum = $distance
+				if !defined($minimum) || $distance < $minimum;
+		}
+	}
+	return $minimum;
+}
+
+sub _epa_edpl {
+	my ($placements, $edges, $tree_length) = @_;
+	return 0 unless $tree_length > 0 && @{$placements} > 1;
+	my @usable = grep {
+		defined($_->{likelihood_weight_ratio})
+			&& $_->{likelihood_weight_ratio} > 0
+			&& defined($_->{edge}) && exists($edges->{$_->{edge}})
+	} @{$placements};
+	return 0 unless @usable > 1;
+	my $weight_sum = 0;
+	$weight_sum += $_->{likelihood_weight_ratio} for @usable;
+	return 0 unless $weight_sum > 0;
+	my $edpl = 0;
+	for my $left_index (0 .. $#usable - 1) {
+		for my $right_index ($left_index + 1 .. $#usable) {
+			my $distance = _epa_placement_distance(
+				$usable[$left_index], $usable[$right_index], $edges);
+			next unless defined $distance;
+			my $left_weight =
+				$usable[$left_index]{likelihood_weight_ratio} / $weight_sum;
+			my $right_weight =
+				$usable[$right_index]{likelihood_weight_ratio} / $weight_sum;
+			$edpl += 2 * $left_weight * $right_weight
+				* $distance / $tree_length;
+		}
+	}
+	return $edpl;
+}
+
 
 sub _replace_child {
 	my ($parent, $old, $new) = @_;
