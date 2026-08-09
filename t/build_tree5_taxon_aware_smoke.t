@@ -42,22 +42,45 @@ done
 exec /bin/cp "$input" "$output"
 SH
 chmod 0755, $trimal or die "Cannot make $trimal executable: $!";
-my $msaFixShim = File::Spec->catfile($temporary, 'MSAfix-v2.14-shim');
+my $msaFixShim = File::Spec->catfile($temporary, 'MSAfix-v2.15-shim');
 write_file($msaFixShim, <<'PERL');
 #!/usr/bin/env perl
 use strict;
 use warnings;
 
-my (@forward, $report);
+my (@forward, $report, $threads, $singleAlignmentMode, %recovery);
 while (@ARGV) {
-	my $argument = shift @ARGV;
-	if ($argument eq '-minOverlapMSA') {
-		shift @ARGV;
-		next;
-	}
-	$report = $ARGV[0] if $argument eq '-report' && @ARGV;
-	push @forward, $argument;
+    my $argument = shift @ARGV;
+    $singleAlignmentMode = 1 if $argument eq '-i';
+    if ($argument eq '-minOverlapMSA') {
+        shift @ARGV;
+        next;
+    }
+    if ($argument eq '-threads') {
+        $threads = shift @ARGV;
+        next;
+    }
+    if ($argument eq '-recoverTechnicalOffsets') {
+        $recovery{enabled} = 1;
+        next;
+    }
+    if ($argument =~ /^-(codingFrame|geneticCode|recoveryBand)$/) {
+        $recovery{$1} = shift @ARGV;
+        next;
+    }
+    $report = $ARGV[0] if $argument eq '-report' && @ARGV;
+    push @forward, $argument;
 }
+die "MSAfix shim requires a positive -threads value\n"
+    unless defined($threads) && $threads =~ /^\d+$/ && $threads > 0;
+if ($singleAlignmentMode) {
+    die "MSAfix shim requires coding-NT recovery\n" unless $recovery{enabled};
+    die "MSAfix shim requires frame 1, genetic code 11, and recovery band 3\n"
+        unless ($recovery{codingFrame} // '') eq '1'
+            && ($recovery{geneticCode} // '') eq '11'
+            && ($recovery{recoveryBand} // '') eq '3';
+}
+
 my $real = $ENV{MATAFILER_TEST_MSAFIX_REAL}
 	or die "MATAFILER_TEST_MSAFIX_REAL is unset\n";
 system($real, @forward);

@@ -49,10 +49,11 @@ use Cwd qw(abs_path);
 #.48: keep mosaic catalogues, diagnostics, and logs in the binner-local mosaic directory
 #.49: bulk-align only genes with mosaic or outgroup comparison potential
 #.50: allow strain analysis to run without mosaic preprocessing
-#.52: add HPC preflight checks, durable controller records, bounded filesystem
+#.52: add HPC filesystem checks, durable controller records, bounded filesystem
 #     retries, and atomic publication for recovery-critical files
+#.53: remove local executable checks that reject environment-wrapped tool commands
 
-my $MGSpipelineVersion = 0.52;
+my $MGSpipelineVersion = 0.53;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -65,8 +66,7 @@ use Mods::Binning qw (getBinSubdirName createBin2 createBinCtgs runMetaBat runCh
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
 use Mods::WorkflowResilience qw(
 	retry_unlink retry_rename atomic_write_text
-	write_workflow_record preflight_executable preflight_directory
-	preflight_capacity
+	write_workflow_record preflight_directory preflight_capacity
 );
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 
@@ -265,7 +265,6 @@ preflight_directory($outD, 'MGS output directory');
 preflight_directory($tmpD, 'MGS temporary directory');
 preflight_capacity($outD, 'MGS output filesystem');
 preflight_capacity($tmpD, 'MGS temporary filesystem');
-preflight_executable($rareBin, 'rare');
 die "Checkpoint writer is missing: $checkpointWriter\n" unless -f $checkpointWriter;
 retry_unlink($mgsFailurePath, fatal => 0, label => 'clear stale MGS failure record');
 

@@ -268,8 +268,10 @@ like($gene_cat, qr/sub _publish_gzip_output.*?close \$gzip.*?_sync_file\(\$parti
      'gzip publication closes, synchronizes, and atomically renames its partial file with bounded retries');
 like($gene_cat, qr/geneCatRunTag.*?batch-\$SmplBatch.*?geneCatHeartbeatPath.*?geneCatFailurePath/s,
 	'parallel gene-catalog workers use distinct compact lifecycle records');
-like($gene_cat, qr/if \(\$mode eq 'geneCat'\) \{.*?preflight_directory.*?preflight_capacity.*?preflight_executable/s,
-	'costlier gene-catalog startup checks run only in the main controller, not sample workers');
+like($gene_cat, qr/if \(\$mode eq 'geneCat'\) \{.*?preflight_directory.*?preflight_capacity/s,
+	'gene-catalog startup keeps writable-path and capacity checks in the main controller');
+unlike($gene_cat, qr/preflight_executable/,
+	'geneCat does not reject environment-wrapped configured commands as local executables');
 like($gene_cat, qr/_gene_cat_workflow_stage\('collate-genes'\).*?_gene_cat_workflow_stage\('cluster-and-annotate-catalogue'\).*?sub _gene_cat_workflow_stage/s,
 	'geneCat records coarse controller stages without per-sample heartbeat writes');
 like($gene_cat, qr/sub _append_file_locked.*?_sync_file\(\$source\).*?->sync\(\)/s,

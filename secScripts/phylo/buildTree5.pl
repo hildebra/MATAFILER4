@@ -48,6 +48,9 @@
 #5.42: reuse durable completion state and MSAfix statistics; cache unchanged IQ-TREE validation
 #5.43: summarize repetitive per-locus MSAfix cleaning diagnostics and remove temporary captured logs
 #5.44: bound EPA-ng placement memory and worker threads for strain-backbone placement
+#5.45: execute configured EPA-ng environment wrappers as shell code rather than quoted paths
+#5.46: run every MSAfix alignment and locus-QC invocation with the configured MSA core count
+#5.47: apply MSAfix v2.15 coding-NT technical-offset repair after protein-guided alignment
 
 use warnings;
 use strict;
@@ -146,7 +149,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.44;
+my $version = 5.47;
 my %iqtreeValidationCache;
 my %epaMaxMemSupport;
 my %limitedWarningCounts;
@@ -229,6 +232,10 @@ my $iqPathogen=0;
 my $iqLegacy=0;
 my $iqLegacyExplicit=0;
 my $minOverlapMSA;
+my $msaFixRecoverTechnicalOffsets = 1; #coding-NT repair; applies only to MSAfix single-alignment mode
+my $msaFixCodingFrame = 1;
+my $msaFixGeneticCode = 11; #bacterial/archaeal/plastid genetic code
+my $msaFixRecoveryBand = 3;
 my $maxGapPerCol = 1 ;
 my $minPcId = 0;
 my $doSuperTree =0;
@@ -354,6 +361,10 @@ GetOptions(
 	"outgroup=s"	=> \$outgroup,
 	"AAtree=i" => \$useAA4tree,
 	"MSAprogram=i" => \$MSAprog, #(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA)
+	"MSAfixRecoverTechnicalOffsets=i" => \$msaFixRecoverTechnicalOffsets, #repair coding-NT gap offsets after back-translation
+	"MSAfixCodingFrame=i" => \$msaFixCodingFrame,
+	"MSAfixGeneticCode=i" => \$msaFixGeneticCode,
+	"MSAfixRecoveryBand=i" => \$msaFixRecoveryBand,
 	"minOverlapMSA=f" => \$minOverlapMSA, #minimum called-sequence fraction per retained MSA column
 	"maxGapPerCol=f" =>\$maxGapPerCol, #same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column
 	"calcDistMat=i" => \$calcDistMat,
@@ -455,6 +466,14 @@ $placementNTCntTotal = $ntCntTotal unless defined $placementNTCntTotal;
 die "-placementNTfiltCount must be zero or greater\n" if $placementNTCntTotal < 0;
 die "-minOverlapMSA must be between zero and one\n"
 	if $minOverlapMSA < 0 || $minOverlapMSA > 1;
+die "-MSAfixRecoverTechnicalOffsets must be 0 or 1\n"
+	unless $msaFixRecoverTechnicalOffsets == 0 || $msaFixRecoverTechnicalOffsets == 1;
+die "-MSAfixCodingFrame must be 1, 2, or 3\n"
+	unless $msaFixCodingFrame >= 1 && $msaFixCodingFrame <= 3;
+die "-MSAfixGeneticCode must be a positive NCBI translation-table ID\n"
+	if $msaFixGeneticCode < 1;
+die "-MSAfixRecoveryBand must be zero or greater\n"
+	if $msaFixRecoveryBand < 0;
 die "-iqMemMB must be zero or greater\n" if $iqMemMB < 0;
 die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
 die "-iqLegacy must be 0 or 1\n" unless $iqLegacy == 0 || $iqLegacy == 1;
@@ -645,6 +664,8 @@ print "Mode: " . ($cogCats ne "" ? "multi-locus" : "single-locus")
 	. "; continue=" . ($continue ? "yes" : "no") . "\n";
 print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
 	. ($postFilter || "<none>") . "; remove MSA=" . ($removeMSA ? "yes" : "no") . "\n";
+print "MSAfix coding-NT repair: " . ($msaFixRecoverTechnicalOffsets ? "enabled; frame=$msaFixCodingFrame; genetic code=$msaFixGeneticCode; band=$msaFixRecoveryBand" : "disabled") . "\n"
+	unless $useAA4tree;
 print "Filtering: per-gene length fraction=$ntFracGene; category Q90 fraction=$fracMaxGenes90pct; "
 	. "backbone NT fraction=$ntFrac; backbone gene fraction=$GeneFracPSpec; "
 	. "backbone minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
@@ -776,7 +797,7 @@ my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $alignmentWorkPolicyFile = "$MsaD/alignment_work.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=10",
+	"schema=11",
 	"msa_program=$MSAprog",
 	"fna_input=".inputFingerprint($fnFna),
 	"faa_input=".inputFingerprint($aaFna),
@@ -794,6 +815,10 @@ my $postAlignmentQCPolicy = join("\t",
 	"placement_minimum_nt=$placementNTCntTotal",
 	"minimum_overlap=$minOverlapMSA",
 	"maximum_gap_fraction=$maxGapPerCol",
+	"msafix_recover_technical_offsets=$msaFixRecoverTechnicalOffsets",
+	"msafix_coding_frame=$msaFixCodingFrame",
+	"msafix_genetic_code=$msaFixGeneticCode",
+	"msafix_recovery_band=$msaFixRecoveryBand",
 	"minimum_sequences=$postAlignmentMinSequences",
 	"minimum_occupancy=$postAlignmentMinOccupancy",
 	"divergence_qc=$postAlignmentDivergenceQC",
@@ -2173,8 +2198,11 @@ sub epaModelArtifact {
 sub epaSupportsMaxMem {
 	my ($epaNg) = @_;
 	return $epaMaxMemSupport{$epaNg} if exists $epaMaxMemSupport{$epaNg};
-	my $probe = shellQuote($epaNg)." --help 2>&1";
-	my $help = qx{$probe};
+	my $probe = $epaNg;
+	$probe =~ s/\s+\z//;
+	$probe .= " --help 2>&1";
+	my $probeCommand = "bash -o pipefail -c ".shellQuote($probe);
+	my $help = qx{$probeCommand};
 	$epaMaxMemSupport{$epaNg} = $help =~ /(?:^|\s)--maxmem(?:\s|=|\[)/m ? 1 : 0;
 	return $epaMaxMemSupport{$epaNg};
 }
@@ -2200,7 +2228,6 @@ sub runEpaNgPlacement {
 		if $placementMaxMemMB < 0 && $iqMemMB > 0;
 	$placementMaxMemMB = 0 if $placementMaxMemMB < 0;
 	my @command = (
-		shellQuote($epaNg),
 		'--ref-msa', shellQuote($backboneAlignment),
 		'--tree', shellQuote($backboneTree),
 		'--query', shellQuote($queryAlignment),
@@ -2217,7 +2244,9 @@ sub runEpaNgPlacement {
 			warn "EPA-ng does not advertise --maxmem; using its automatic memory management instead\n";
 		}
 	}
-	my $command = join(' ', @command) . "\n";
+	my $command = $epaNg;
+	$command =~ s/\s+\z//;
+	$command .= " ".join(' ', @command) . "\n";
 	print "Running EPA-ng ML placement with fitted model artifact $modelArtifact; "
 		."threads=$placementThreads; memory="
 		.($usingMaxMem ? "${placementMaxMemMB}MB" : $placementMaxMemMB ? "automatic (installed EPA-ng lacks --maxmem)" : "automatic")
@@ -4461,6 +4490,7 @@ sub runPostAlignmentLocusQC {
 		"-manifest", shellQuote($manifestFile),
 		"-report", shellQuote($reportFile),
 		"-keep", shellQuote($keepFile),
+		"-threads", $ncore,
 		"-sequenceType", $sequenceType,
 		"-minSequences", $postAlignmentMinSequences,
 		"-minOccupancy", $postAlignmentMinOccupancy,
@@ -4790,6 +4820,10 @@ sub runMSAFix {
 	die "MSAfix input is missing or empty: $alignment\n" unless -s $alignment;
 
 	my $msaFbin = getProgPaths("MSAfix");
+	my @codingRecoveryArguments = $msaFixRecoverTechnicalOffsets
+		? ("-recoverTechnicalOffsets", "-codingFrame", $msaFixCodingFrame,
+			"-geneticCode", $msaFixGeneticCode, "-recoveryBand", $msaFixRecoveryBand)
+		: ();
 	my $tmpOutput = "$alignment.MSAfix.$$.fna";
 	retry_unlink($tmpOutput, label => "clear stale MSAfix output");
 	my $tmpLog = "$alignment.MSAfix.$$.log";
@@ -4800,6 +4834,8 @@ sub runMSAFix {
 		"-i", shellQuote($alignment),
 		"-o", shellQuote($tmpOutput),
 		"-maskLowID",
+		"-threads", $ncore,
+		@codingRecoveryArguments,
 		"-maskBorderGap",
 		"-rmGapColsGreater", $maxGapFraction,
 		"-minGoodPosFrac", "0.6",

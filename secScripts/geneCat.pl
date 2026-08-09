@@ -35,7 +35,7 @@ use Mods::Binning qw(getBinSubdirName);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
 use Mods::WorkflowResilience qw(
 	retry_unlink retry_rename atomic_write_text write_workflow_record
-	preflight_executable preflight_directory preflight_capacity
+	preflight_directory preflight_capacity
 );
 use Mods::CatalogPaths qw(catalog_identity catalog_map_specs_match resolve_catalog_maps write_catalog_maps);
 
@@ -367,9 +367,10 @@ sub _safe_reset_dir {
 #.51: 26.3.25: small fix to ensure preprocessing takes the right start sample (could skip large numbers sometimes, due to rounding errors)
 #.52: streamed FASTA collation, durable gzip publication, checkpoint manifests, and cluster-ID propagation
 #.53: use matrix cardinality for sparse-stage skips, preserve dry-run commands, and accept empty Canopy/Kraken results
-#.56: lightweight HPC preflight, stage/failure records, and bounded retries for
+#.56: lightweight HPC filesystem checks, stage/failure records, and bounded retries for
 #     recovery-critical catalogue publication
-my $version = 0.56;
+#.57: do not preflight environment-wrapped executables; allow configured commands to run
+my $version = 0.57;
 $| = 1;
 my $geneCatWorkflowActive = 0;
 my $geneCatWorkflowStage = 'startup';
@@ -735,9 +736,6 @@ if ($mode eq 'geneCat') {
 	preflight_directory($tmpDir, 'gene-catalog temporary directory');
 	preflight_capacity($GCdir, 'gene-catalog output filesystem');
 	preflight_capacity($tmpDir, 'gene-catalog temporary filesystem');
-	preflight_executable($pigzBin, 'pigz');
-	preflight_executable($clustMMseq ? $mmseqs2Bin : $cdhitBin,
-		$clustMMseq ? 'MMseqs2' : 'CD-HIT');
 }
 _gene_cat_workflow_stage("mode-$mode");
 #my %QSBopt = %{$QSBoptHR};
