@@ -251,8 +251,8 @@ END {
 #.89: retry Phase-I workers, quarantine terminal MGS outcomes, and harden filesystem publication
 #.90: cache catalogue-wide input states and avoid duplicate full-ledger validation scans
 #.91: persist the exact shared scratch directory for reliable cross-run resume
-#.95: use the authoritative Phase-I input audit for legacy ledger-free resumes
-my $version = 0.95;
+#.96: use the authoritative Phase-I input audit for legacy ledger-free resumes
+my $version = 0.96;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -3445,6 +3445,13 @@ sub recoverCompletedSplitPhaseI {
 	# contribution index required to validate their worker parts is absent.
 	# Recover only a proven-complete generation: never merge partial retries.
 	return 0 unless $maxSubJob && !$subJob;
+	if ($dirsNOTPrepped == 0) {
+		limitedNotice('tree-only resume skips obsolete Phase-I ledger validation',
+			"Tree-only resume: every MGS input passed the completed audit; skipping obsolete Phase-I worker-ledger validation and continuing to Phase II.\n");
+		retry_unlink("$LOGDIR/phase1_worker_repair.queue.tsv", fatal => 0,
+			label => "clear obsolete Phase-I repair queue for tree-only resume");
+		return 0;
+	}
 	return 0 unless split_generation_complete(
 		$splitManifest, $splitStonePrefix, $maxSubJob,
 	);
@@ -3460,13 +3467,6 @@ sub recoverCompletedSplitPhaseI {
 	my @sampleStatsParts = map { "$LOGDIR/$sampleStatsLogName.$_" } 0 .. $maxSubJob - 1;
 	my $hasRecoveryParts = grep { -e $_ } @recoveryParts;
 	my $hasSampleStatsParts = grep { -e $_ } @sampleStatsParts;
-	if (!$hasRecoveryParts && !$hasSampleStatsParts && $dirsNOTPrepped == 0) {
-		limitedNotice('legacy Phase-I ledgers unavailable',
-			"Phase-I worker ledgers are absent, but every MGS has complete staged or published tree inputs; continuing to Phase II without rebuilding historical recovery accounting.\n");
-		retry_unlink("$LOGDIR/phase1_worker_repair.queue.tsv", fatal => 0,
-			label => "clear obsolete legacy Phase-I repair queue");
-		return 0;
-	}
 	my @failedWorkers = phase1WorkersNeedingRetry($generation);
 	my $workerRetryRound = 0;
 	while (@failedWorkers) {

@@ -131,7 +131,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.95;/,
+like($strain, qr/my \$version = 0\.96;/,
 	'prepared Phase-II scratch reuse increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
@@ -258,9 +258,9 @@ like($strain,
 	qr/sub recoverCompletedSplitPhaseI .*?split_generation_complete.*?incomplete recovery ledgers.*?incomplete sample-statistics ledgers.*?mergeConspecificLogs\(\).*?mergeRecoveryLogs\(\).*?mergeSampleStats\(\)/s,
 	'a restart after every split worker finished merges validated ledgers before Phase II uses their staged inputs');
 ok(index($strain, '$dirsNOTPrepped == 0') >= 0
-	&& index($strain, 'legacy Phase-I ledgers unavailable') >= 0
-	&& index($strain, 'complete staged or published tree inputs') >= 0
-	&& index($strain, 'continuing to Phase II without rebuilding historical recovery accounting') >= 0,
+	&& index($strain, 'tree-only resume skips obsolete Phase-I ledger validation') >= 0
+	&& index($strain, 'every MGS input passed the completed audit') >= 0
+	&& index($strain, 'continuing to Phase II') >= 0,
 	'legacy runs with every MGS input already reusable do not rebuild Phase I solely because historical worker ledgers are absent');
 like($strain,
 	qr/next if \$recalcTrees && !\$MGSneedsExtraction\{\$MGS\}.*?\$MGSneedsExtraction\{\$MGS\} = 1/s,
