@@ -57,6 +57,7 @@
 #5.53: persist taxon-aware candidate exhaustion as a valid terminal no-tree outcome
 #5.54: exclude EPA placements with pendant branches far outside the backbone distribution
 #5.55: republish an existing EPA jplace result through placement filtering only
+#5.56: pass fitted IQ-TREE GTR parameters directly to EPA-ng
 
 use warnings;
 use strict;
@@ -151,6 +152,7 @@ sub runEpaOnlyPlacement;
 sub runEpaFilterOnly;
 sub epaResourcePlan;
 sub iqtreePlacementModel;
+sub iqtreeExplicitEpaModel;
 sub postAlignmentStep;
 sub elapsedTimeText;
 sub alignmentCollectionStats;
@@ -160,7 +162,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.55;
+my $version = 5.56;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -2598,6 +2600,55 @@ sub runEpaFilterOnly {
 	return 1;
 }
 
+sub iqtreeExplicitEpaModel {
+	my ($model, $text) = @_;
+	return '' unless defined($model) && defined($text) && $model =~ /^GTR(?:\+|\z)/i;
+	my $modifiers = uc($model);
+	$modifiers =~ s/^GTR//;
+	$modifiers =~ s/\+(?:FQ|FO|F)//g;
+	$modifiers =~ s/\+I//g;
+	$modifiers =~ s/\+G\d+//g;
+	return '' if length $modifiers;
+	my $number = qr/[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/;
+	my %rate;
+	while ($text =~ /^\s*([ACGT])\s*-\s*([ACGT])\s*:\s*($number)\s*$/mg) {
+		my ($left, $right, $value) = (uc($1), uc($2), 0 + $3);
+		my $pair = index('ACGT', $left) < index('ACGT', $right)
+			? "$left$right" : "$right$left";
+		$rate{$pair} = $value if $value > 0;
+	}
+	my @rateOrder = qw(AC AG AT CG CT GT);
+	return '' if grep { !exists $rate{$_} } @rateOrder;
+	my %frequency;
+	while ($text =~ /pi\s*\(\s*([ACGT])\s*\)\s*=\s*($number)/ig) {
+		my ($state, $value) = (uc($1), 0 + $2);
+		$frequency{$state} = $value if $value > 0;
+	}
+	my @stateOrder = qw(A C G T);
+	return '' if grep { !exists $frequency{$_} } @stateOrder;
+	my $frequencyTotal = 0;
+	$frequencyTotal += $frequency{$_} for @stateOrder;
+	return '' unless $frequencyTotal > 0;
+	my $descriptor = 'GTR{'
+		.join('/', map { sprintf('%.12g', $rate{$_}) } @rateOrder).'}+FU{'
+		.join('/', map { sprintf('%.12g', $frequency{$_} / $frequencyTotal) } @stateOrder).'}';
+	if ($model =~ /\+I(?:\+|\z)/i) {
+		return '' unless $text =~ /^\s*Proportion of invariable sites:\s*($number)\s*$/mi;
+		my $invariant = 0 + $1;
+		return '' unless $invariant >= 0 && $invariant < 1;
+		$descriptor .= '+I{'.sprintf('%.12g', $invariant).'}';
+	}
+	if ($model =~ /\+G(\d+)(?:\+|\z)/i) {
+		my $categories = 0 + $1;
+		return '' unless $categories > 0
+			&& $text =~ /^\s*Gamma shape alpha:\s*($number)\s*$/mi;
+		my $alpha = 0 + $1;
+		return '' unless $alpha > 0;
+		$descriptor .= '+G'.$categories.'{'.sprintf('%.12g', $alpha).'}';
+	}
+	return $descriptor;
+}
+
 sub iqtreePlacementModel {
 	my ($prefix) = @_;
 	for my $file ("$prefix.iqtree", "$prefix.log") {
@@ -2615,7 +2666,8 @@ sub iqtreePlacementModel {
 			next unless $text =~ $pattern;
 			my $model = $1;
 			next if $model =~ /^(?:TEST|AUTO|MFP(?:\+MERGE)?)$/i;
-			return $model;
+			my $explicit = iqtreeExplicitEpaModel($model, $text);
+			return length($explicit) ? $explicit : $model;
 		}
 	}
 	die "Cannot determine the fitted IQ-TREE model from $prefix.iqtree or "

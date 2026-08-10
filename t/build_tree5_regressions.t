@@ -15,11 +15,12 @@ close $script_handle or die "Cannot close $script: $!";
 
 my ($epa_resource_helper) = $script_text =~
 	/(sub epaResourcePlan \{.*?return \(\$threads, \$memoryMB\);\n\})/s;
-my ($iqtree_model_helper) = $script_text =~
-	/(sub iqtreePlacementModel \{.*?\n\})\n\nsub epaModelArtifact/s;
+my ($iqtree_explicit_helper, $iqtree_model_helper) = $script_text =~
+	/(sub iqtreeExplicitEpaModel \{.*?\n\})\n\n(sub iqtreePlacementModel \{.*?\n\})\n\nsub epaModelArtifact/s;
 BAIL_OUT('Cannot extract EPA-ng helper functions')
-	unless defined($epa_resource_helper) && defined($iqtree_model_helper);
-my $epa_helpers = "$epa_resource_helper\n$iqtree_model_helper";
+	unless defined($epa_resource_helper) && defined($iqtree_explicit_helper)
+		&& defined($iqtree_model_helper);
+my $epa_helpers = "$epa_resource_helper\n$iqtree_explicit_helper\n$iqtree_model_helper";
 my $helpers_loaded = eval "package TestBuildTreeEpaHelpers; $epa_helpers; 1;";
 ok($helpers_loaded, 'EPA-ng model and resource helpers load independently')
 	or diag($@);
@@ -41,10 +42,45 @@ sub write_test_file {
 	print {$handle} $contents;
 	close $handle or die "Cannot close $path: $!";
 }
-write_test_file("$iqtree_prefix.iqtree",
-	"Best-fit model according to BIC: GTR+F+G2\n");
-is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix), 'GTR+F+G2',
-	'IQ-TREE model is parsed without the legacy Model of substitution label');
+write_test_file("$iqtree_prefix.iqtree", <<'IQTREE');
+Best-fit model according to BIC: GTR+F+G2
+Rate parameter R:
+  A-C: 0.9
+  A-G: 3.1
+  A-T: 1.2
+  C-G: 0.8
+  C-T: 4.2
+  G-T: 1.0
+State frequencies: (empirical counts from alignment)
+  pi(A) = 0.29
+  pi(C) = 0.21
+  pi(G) = 0.23
+  pi(T) = 0.27
+Gamma shape alpha: 0.73
+IQTREE
+is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix),
+	'GTR{0.9/3.1/1.2/0.8/4.2/1}+FU{0.29/0.21/0.23/0.27}+G2{0.73}',
+	'IQ-TREE fitted GTR rates, base frequencies, and gamma shape are passed explicitly');
+
+my $invariantReport = <<'IQTREE';
+Rate parameter R:
+A-C: 1
+A-G: 2
+A-T: 3
+C-G: 4
+C-T: 5
+G-T: 1
+pi(A) = 0.1
+pi(C) = 0.2
+pi(G) = 0.3
+pi(T) = 0.4
+Proportion of invariable sites: 0.15
+Gamma shape alpha: 0.6
+IQTREE
+is(TestBuildTreeEpaHelpers::iqtreeExplicitEpaModel(
+	'GTR+F+I+G4', $invariantReport),
+	'GTR{1/2/3/4/5/1}+FU{0.1/0.2/0.3/0.4}+I{0.15}+G4{0.6}',
+	'invariant-site proportion and gamma categories are retained in the explicit descriptor');
 
 write_test_file("$iqtree_prefix.iqtree", "IQ-TREE report without a model label\n");
 write_test_file("$iqtree_prefix.log",
