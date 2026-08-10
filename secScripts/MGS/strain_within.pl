@@ -80,6 +80,7 @@ sub recordValidatedEmptyExtractions;
 sub validateTreeInputResolution;
 sub readFastaIDs;
 sub epaOnlyRetryReady;
+sub prepareEpaOnlyRetryState;
 sub resetMGSTreeOutputs;
 sub stepComplete;
 sub finalizeSampleQC;
@@ -837,13 +838,17 @@ my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $P
 	$noRecoverableLociDirs)
 			= evalFileStatus();
 my $epaOnlyRetryCount = scalar(keys %MGSepaOnlyRetry);
+my $legacyEpaRetryCount = scalar(grep {
+	($MGSepaOnlyRetry{$_} // '') eq 'legacy_missing_final'
+} keys %MGSepaOnlyRetry);
 my $fullTreeRetryCount = $treeAbsent - $epaOnlyRetryCount;
 $fullTreeRetryCount = 0 if $fullTreeRetryCount < 0;
 stepComplete("existing-output and resume audit", $stepStarted,
 	"prepared_trees=$doneDirs", "missing_trees=$treeAbsent",
 	"incomplete_tree_inputs=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped",
 	"validated_no_locus=$noRecoverableLociDirs",
-	"epa_only_retries=$epaOnlyRetryCount", "full_tree_retries=$fullTreeRetryCount");
+	"epa_only_retries=$epaOnlyRetryCount", "legacy_epa_retries=$legacyEpaRetryCount",
+	"full_tree_retries=$fullTreeRetryCount");
 #DEBUG:getInputSize();
 
 
@@ -1199,6 +1204,13 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
 	my $publishedInputsReady = !exists($legacyLocusMGS{$MGS})
 		&& persistentMGSInputState($MGS) eq 'complete';
+	if ($epaOnlyRetry && !prepareEpaOnlyRetryState(
+			$outD2, $MGSepaOnlyRetry{$MGS})) {
+		$treeDisposition{'placement completed during resume audit'}++;
+		limitedNotice('EPA retry no longer required',
+			"Skipping $MGS: the final non-backbone tree appeared during resume preparation.\n");
+		next;
+	}
 	my $scratchInputsReady = 0;
 	if ($recalcTrees) {
 		# The sizing pass already recognizes staged inputs. Recover and combine
@@ -3225,8 +3237,8 @@ sub evalFileStatus{
 			}
 			#print "$SIdirs{$MGS}\n";
 			#system "rm $SIdirs{$MGS}\n";
-		} elsif (epaOnlyRetryReady($SIdirs{$MGS})) {
-			$MGSepaOnlyRetry{$MGS} = 1;
+		} elsif (my $epaRetryState = epaOnlyRetryReady($SIdirs{$MGS})) {
+			$MGSepaOnlyRetry{$MGS} = $epaRetryState;
 			$treeAbsent++;
 			remove_tree("$scratchD/outs/$MGS") if -d "$scratchD/outs/$MGS";
 		}elsif(!fileGZs("$SIdirs{$MGS}/phylo/$treeFile")){
@@ -3247,24 +3259,18 @@ sub evalFileStatus{
 
 sub epaOnlyRetryReady {
 	my ($mgsDirectory) = @_;
-	return 0 unless $onlySubmit && !$recalcTrees && !$reSubmit
+	return '' unless $onlySubmit && !$recalcTrees && !$reSubmit
 		&& !$repairCAT && !$deepRepair && !$redoSubmissionData
 		&& $strictBackbone && $phyloProg == 1;
-	return 0 unless defined($mgsDirectory) && -d $mgsDirectory;
+	return '' unless defined($mgsDirectory) && -d $mgsDirectory;
 	my $pending = File::Spec->catfile($mgsDirectory, 'placementPending.sto');
-	my $complete = File::Spec->catfile($mgsDirectory, 'treeDone.sto');
 	my $terminal = File::Spec->catfile($mgsDirectory, 'noTree.sto');
-	return 0 unless -s $pending && !-s $complete && !-s $terminal;
-	open my $marker, '<', $pending or return 0;
-	my $placementPending = 0;
-	while (my $line = <$marker>) {
-		if ($line =~ /^status\tplacement_pending\s*$/) {
-			$placementPending = 1;
-			last;
-		}
-	}
-	close $marker or return 0;
-	return 0 unless $placementPending;
+	my $finalTree = File::Spec->catfile(
+		$mgsDirectory, 'phylo', 'IQtree_allsites.treefile');
+	# Older BuildTree releases could retain a completed .backbone.treefile
+	# without publishing placementPending.sto.  The final tree is the explicit
+	# authority: never restart placement when its non-backbone path exists.
+	return '' if -s $finalTree || -s $terminal;
 	my @required = (
 		File::Spec->catfile($mgsDirectory, 'MSA', 'MSAli.fna'),
 		File::Spec->catfile($mgsDirectory, 'MSA', 'MSAli.placement.fna'),
@@ -3272,7 +3278,48 @@ sub epaOnlyRetryReady {
 		File::Spec->catfile($mgsDirectory, 'phylo', 'IQtree_allsites.backbone.log'),
 		File::Spec->catfile($mgsDirectory, 'phylo', 'strict_backbone.samples.tsv'),
 	);
-	return !grep { !-s $_ } @required;
+	return '' if grep { !-s $_ } @required;
+	return 'legacy_missing_final' unless -s $pending;
+	open my $marker, '<', $pending or return 'legacy_missing_final';
+	my $placementPending = 0;
+	while (my $line = <$marker>) {
+		if ($line =~ /^status\tplacement_pending\s*$/) {
+			$placementPending = 1;
+			last;
+		}
+	}
+	close $marker or return 'legacy_missing_final';
+	return $placementPending ? 'explicit_pending' : 'legacy_missing_final';
+}
+
+sub prepareEpaOnlyRetryState {
+	my ($mgsDirectory, $state) = @_;
+	my $finalTree = File::Spec->catfile(
+		$mgsDirectory, 'phylo', 'IQtree_allsites.treefile');
+	return 0 if -s $finalTree;
+	my $completion = File::Spec->catfile($mgsDirectory, 'treeDone.sto');
+	# A completion stone without the final non-backbone tree is stale and would
+	# otherwise make BuildTree refuse the isolated recovery run.
+	retry_unlink($completion, label => 'clear stale completion missing final placed tree')
+		if -e $completion;
+	return 1 if ($state // '') eq 'explicit_pending';
+	my $pending = File::Spec->catfile($mgsDirectory, 'placementPending.sto');
+	my $temporary = "$pending.tmp.$$";
+	retry_unlink($temporary, fatal => 0,
+		label => 'clear legacy placement marker temporary');
+	my $marker = retry_open('>', $temporary,
+		label => 'create legacy placement-pending marker');
+	print {$marker} join("\n",
+		"status\tplacement_pending",
+		"reason\tlegacy run retained a strict backbone but has no final non-backbone tree",
+		"retry_mode\tepa_only",
+	), "\n" or die "Cannot write legacy placement marker $temporary: $!\n";
+	retry_close($marker, 'close legacy placement-pending marker');
+	retry_rename($temporary, $pending,
+		label => 'publish legacy placement-pending marker');
+	print "  Legacy placement recovery: final IQtree_allsites.treefile is absent; "
+		."prepared an isolated BuildTree EPA retry.\n";
+	return 1;
 }
 
 
@@ -5268,7 +5315,10 @@ On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a
 validated retained IQ-TREE backbone, MSA, query alignment, and sample
 classification is retried automatically in EPA-only mode. The retry uses one
 core and a doubled scheduler-memory request (minimum 20 GB), without rerunning
-alignment or tree inference.
+alignment or tree inference. Legacy runs are handled as well: when these
+retained placement inputs exist but phylo/IQtree_allsites.treefile does not,
+strain_within reconstructs the pending marker and restarts BuildTree in the
+same isolated EPA-only mode.
 USAGE
 }
 

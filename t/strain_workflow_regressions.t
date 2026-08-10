@@ -430,8 +430,11 @@ like($strain,
 	qr/\$totMem = int\(\$totMem \* 2\).*?\$numCoreL = 1.*?-epaOnly 1.*?\$outD2\/treeCmd\.epa_retry\.sh/s,
 	'an EPA-only retry gets a one-core doubled-memory job and explicit BuildTree mode');
 like($strain,
-	qr/sub epaOnlyRetryReady.*?\$onlySubmit.*?status\\tplacement_pending.*?IQtree_allsites\.backbone\.treefile.*?strict_backbone\.samples\.tsv/s,
-	'a tree-only resume recognizes only complete, explicitly pending placement state');
+	qr/sub epaOnlyRetryReady.*?\$onlySubmit.*?IQtree_allsites\.backbone\.treefile.*?strict_backbone\.samples\.tsv.*?status\\tplacement_pending.*?explicit_pending/s,
+	'a tree-only resume validates retained placement inputs and recognizes an explicit pending marker');
+like($strain,
+	qr/sub epaOnlyRetryReady.*?IQtree_allsites\.treefile.*?return '' if -s \$finalTree.*?legacy_missing_final.*?sub prepareEpaOnlyRetryState.*?clear stale completion missing final placed tree.*?create legacy placement-pending marker/s,
+	'a legacy retained backbone without the final non-backbone tree is prepared for isolated EPA recovery');
 like($strain,
 	qr/my \$epaOnlyRetry = exists\(\$MGSepaOnlyRetry\{\$MGS\}\).*?if \(!\$epaOnlyRetry && exists \$MGSnoTree\{\$MGS\}\).*?if \(!\$epaOnlyRetry && exists\(\$ConspecificMGS\{\$MGS\}\)/s,
 	'a validated EPA-only retry bypasses later historical no-tree and multicopy filters');
