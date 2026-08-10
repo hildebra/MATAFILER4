@@ -250,6 +250,11 @@ like($strain,
 	qr/sub reportSavedSampleStats .*?\$sampleStatsSummaryLogName.*?scope\} .*?eq 'ALL'.*?printSampleStatsSummary\(\$allSummary\)/s,
 	'a Phase-I resume loads the persisted all-worker row before rendering its accounting');
 like($strain,
+	qr/sub reportSavedSampleStats .*?unless \(\$header eq \$expectedHeader\).*?older schema.*?continuing tree recovery.*?return 0/s,
+	'an older reporting-only sample-summary schema cannot abort Phase-II tree recovery');
+unlike($strain, qr/die "Unexpected saved sample-summary header/,
+	'legacy saved sample-summary headers are no longer fatal');
+like($strain,
 	qr/sub printSampleStatsSummary .*?STEP 1 SAMPLE SUMMARY \(all workers\).*?Used MGS retained-loci histogram/s,
 	'the same all-worker summary and retained-locus histogram are available after Phase I has completed');
 like($strain,
@@ -463,6 +468,12 @@ like($strain,
 like($strain,
 	qr/sub writeSelectionAttritionSummary.*?selection_attrition\.tsv.*?strainSelectionAttrition\.tsv/s,
 	'strain summary aggregates completed BuildTree attrition reports');
+like($strain,
+	qr/sub writeMGSSampleHistograms.*?backbone_samples.*?placement_samples.*?strict_backbone\.samples\.tsv.*?strainMGSSampleCounts\.tsv.*?role\\tlower\\tupper\\tbin\\tMGS_count\\tfraction.*?qw\(backbone placement\)/s,
+	'across-MGS sample histograms report backbone and placement distributions separately');
+like($strain,
+	qr/writeMGSSampleHistograms\(\).*?MGS_sample_counts.*?MGS_sample_histogram.*?for my \$role \(qw\(backbone placement\)\).*?\$\{role\}_samples_per_MGS/s,
+	'the run summary links exact sample counts and both role-specific histograms');
 
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,

@@ -93,6 +93,7 @@ sub writeRecoveryContributionIndex;
 sub loadRecoveryContributionIndex;
 sub writeStrainSummary;
 sub writeSelectionAttritionSummary;
+sub writeMGSSampleHistograms;
 sub mergeSampleStats;
 sub reportSavedSampleStats;
 sub printSampleStatsSummary;
@@ -3825,8 +3826,12 @@ sub reportSavedSampleStats {
 	open my $in, '<', $summary or die "Cannot read saved sample summary $summary: $!\n";
 	my $header = <$in> // '';
 	$header =~ s/[\r\n]+\z//;
-	die "Unexpected saved sample-summary header in $summary\n"
-		unless $header eq $expectedHeader;
+	unless ($header eq $expectedHeader) {
+		close $in or warn "Cannot close incompatible saved sample summary $summary: $!\n";
+		warn "Saved Phase-I sample summary uses an older schema at $summary; "
+			."continuing tree recovery without replaying its optional histogram\n";
+		return 0;
+	}
 	my $allSummary;
 	while (my $line = <$in>) {
 		$line =~ s/[\r\n]+\z//;
@@ -4076,6 +4081,160 @@ sub writeSelectionAttritionSummary {
 	return $path;
 }
 
+sub writeMGSSampleHistograms {
+	my @records;
+	for my $mgs (@specis) {
+		next unless defined($SIdirs{$mgs}) && length($SIdirs{$mgs});
+		my ($backbone, $placement, $excluded, $source);
+		my $attrition = File::Spec->catfile(
+			$SIdirs{$mgs}, 'phylo', 'selection_attrition.tsv');
+		if (-s $attrition) {
+			open my $input, '<', $attrition
+				or die "Cannot read MGS sample attrition $attrition: $!\n";
+			my $header = <$input> // '';
+			$header =~ s/[\r\n]+\z//;
+			my %metric;
+			if ($header eq "metric\tvalue") {
+				while (my $line = <$input>) {
+					$line =~ s/[\r\n]+\z//;
+					my ($name, $value) = split /\t/, $line, 2;
+					next unless defined($name) && defined($value)
+						&& $value =~ /\A\d+\z/;
+					$metric{$name} = 0 + $value;
+				}
+			}
+			close $input or die "Cannot close MGS sample attrition $attrition: $!\n";
+			if (exists($metric{backbone_samples}) && exists($metric{placement_samples})) {
+				($backbone, $placement, $excluded, $source) = (
+					$metric{backbone_samples}, $metric{placement_samples},
+					$metric{excluded_samples} // 0, 'selection_attrition',
+				);
+			} elsif (exists($metric{final_samples})) {
+				($backbone, $placement, $excluded, $source) = (
+					$metric{final_samples}, 0, 0, 'selection_attrition.final_samples',
+				);
+			}
+		}
+		if (!defined($backbone) || !defined($placement)) {
+			my $classification = File::Spec->catfile(
+				$SIdirs{$mgs}, 'phylo', 'strict_backbone.samples.tsv');
+			if (-s $classification) {
+				open my $input, '<', $classification
+					or die "Cannot read MGS sample classification $classification: $!\n";
+				my $header = <$input> // '';
+				$header =~ s/[\r\n]+\z//;
+				my @columns = split /\t/, $header, -1;
+				my %column = map { $columns[$_] => $_ } 0 .. $#columns;
+				if (exists($column{sample}) && exists($column{tree_role})) {
+					my (%seen, %roleCount);
+					while (my $line = <$input>) {
+						$line =~ s/[\r\n]+\z//;
+						next unless length($line);
+						my @value = split /\t/, $line, -1;
+						my $sample = $value[$column{sample}] // '';
+						my $role = $value[$column{tree_role}] // '';
+						next unless length($sample) && !$seen{$sample}++;
+						$roleCount{$role}++ if $role =~ /\A(?:backbone|placement|excluded)\z/;
+					}
+					($backbone, $placement, $excluded, $source) = (
+						$roleCount{backbone} // 0, $roleCount{placement} // 0,
+						$roleCount{excluded} // 0, 'strict_backbone.samples.tsv',
+					);
+				}
+				close $input
+					or die "Cannot close MGS sample classification $classification: $!\n";
+			}
+		}
+		next unless defined($backbone) && defined($placement);
+		my $finalTree = File::Spec->catfile(
+			$SIdirs{$mgs}, 'phylo', 'IQtree_allsites.treefile');
+		my $treeStatus = -s $finalTree ? 'complete'
+			: -s File::Spec->catfile($SIdirs{$mgs}, 'placementPending.sto')
+				? 'placement_pending' : 'tree_missing';
+		push @records, {
+			mgs => $mgs, backbone => $backbone, placement => $placement,
+			excluded => $excluded // 0, included => $backbone + $placement,
+			source => $source, tree_status => $treeStatus,
+		};
+	}
+
+	my $detailPath = "$LOGDIR/strainMGSSampleCounts.tsv";
+	my $detailTemporary = "$detailPath.write.$$";
+	my $detail = retry_open('>', $detailTemporary,
+		label => 'create per-MGS included-sample counts');
+	print {$detail} join("\t", qw(
+		MGS backbone_samples placement_samples included_samples excluded_samples
+		tree_status source
+	)), "\n" or die "Cannot write $detailTemporary: $!\n";
+	for my $record (sort { $a->{mgs} cmp $b->{mgs} } @records) {
+		print {$detail} join("\t", @{$record}{qw(
+			mgs backbone placement included excluded tree_status source
+		)}), "\n" or die "Cannot write $detailTemporary: $!\n";
+	}
+	retry_close($detail, 'close per-MGS included-sample counts');
+	retry_rename($detailTemporary, $detailPath,
+		label => 'publish per-MGS included-sample counts');
+
+	my @bins = (
+		[0, 0, '0'], [1, 2, '1-2'], [3, 4, '3-4'], [5, 9, '5-9'],
+		[10, 19, '10-19'], [20, 49, '20-49'], [50, 99, '50-99'],
+		[100, 199, '100-199'], [200, 499, '200-499'],
+		[500, 999, '500-999'], [1000, 1999, '1000-1999'],
+		[2000, undef, '2000+'],
+	);
+	my $histogramPath = "$LOGDIR/strainMGSSampleHistogram.tsv";
+	my $histogramTemporary = "$histogramPath.write.$$";
+	my $histogram = retry_open('>', $histogramTemporary,
+		label => 'create across-MGS sample histogram');
+	print {$histogram} "role\tlower\tupper\tbin\tMGS_count\tfraction\n"
+		or die "Cannot write $histogramTemporary: $!\n";
+	my %statistics;
+	for my $role (qw(backbone placement)) {
+		my @values = map { $_->{$role} } @records;
+		my @counts = (0) x scalar(@bins);
+		for my $value (@values) {
+			for my $index (0 .. $#bins) {
+				my ($lower, $upper) = @{$bins[$index]};
+				next if $value < $lower;
+				next if defined($upper) && $value > $upper;
+				$counts[$index]++;
+				last;
+			}
+		}
+		my $maximumBin = @counts ? (sort { $b <=> $a } @counts)[0] : 0;
+		print ucfirst($role), " samples per MGS (", scalar(@values), " MGS):\n";
+		for my $index (0 .. $#bins) {
+			my ($lower, $upper, $label) = @{$bins[$index]};
+			my $fraction = @values ? $counts[$index] / @values : 0;
+			print {$histogram} join("\t", $role, $lower,
+				defined($upper) ? $upper : '', $label, $counts[$index],
+				sprintf('%.6f', $fraction)), "\n"
+				or die "Cannot write $histogramTemporary: $!\n";
+			next unless $counts[$index];
+			my $barWidth = $maximumBin
+				? int(30 * $counts[$index] / $maximumBin + 0.5) : 0;
+			$barWidth = 1 if !$barWidth;
+			printf "  %-10s %7d %6.2f%% %s\n", $label, $counts[$index],
+				100 * $fraction, '#' x $barWidth;
+		}
+		$statistics{$role} = {
+			minimum => @values ? (sort { $a <=> $b } @values)[0] : 0,
+			maximum => @values ? (sort { $b <=> $a } @values)[0] : 0,
+			median => @values ? median(@values) : 0,
+			mean => @values ? mean(@values) : 0,
+		};
+	}
+	retry_close($histogram, 'close across-MGS sample histogram');
+	retry_rename($histogramTemporary, $histogramPath,
+		label => 'publish across-MGS sample histogram');
+	print "Across-MGS sample histogram: $histogramPath\n";
+	print "Per-MGS sample counts: $detailPath\n";
+	return {
+		histogram => $histogramPath, details => $detailPath,
+		mgs_count => scalar(@records), statistics => \%statistics,
+	};
+}
+
 sub writeStrainSummary {
 	my ($tree_disposition, $mosaic_outgroups_used) = @_;
 	my %used_mosaic_outgroup = %{$mosaic_outgroups_used || {}};
@@ -4134,11 +4293,15 @@ sub writeStrainSummary {
 		median_loci_per_recovered_mag => $median_genes,
 		recovered_mosaic_loci => $mosaic_loci,
 	}, \%filter_reason);
+	my $sampleHistograms = writeMGSSampleHistograms();
 	my @lines = (
 		"Strain-within recovery summary (v$version)",
 		"output_directory\t$outD",
 		"recovery_accounting\t".(-s $recovery ? $recovery : 'not_available'),
 		"selection_attrition\t$selectionAttrition",
+		"MGS_sample_counts\t$sampleHistograms->{details}",
+		"MGS_sample_histogram\t$sampleHistograms->{histogram}",
+		"MGS_with_sample_counts\t$sampleHistograms->{mgs_count}",
 		"input_samples\t".scalar(@samples),
 		"usable_samples\t".(scalar(@samples) - scalar(keys %unavailableSamples)),
 		"unavailable_samples\t".scalar(keys %unavailableSamples),
@@ -4153,6 +4316,14 @@ sub writeStrainSummary {
 		"samples_with_evaluated_MAGs\t".scalar(keys %represented_samples),
 		"MGS_with_evaluated_samples\t".scalar(keys %represented_mgs),
 	);
+	for my $role (qw(backbone placement)) {
+		my $stats = $sampleHistograms->{statistics}{$role};
+		push @lines,
+			"${role}_samples_per_MGS.minimum\t$stats->{minimum}",
+			"${role}_samples_per_MGS.median\t$stats->{median}",
+			sprintf("${role}_samples_per_MGS.mean\t%.2f", $stats->{mean}),
+			"${role}_samples_per_MGS.maximum\t$stats->{maximum}";
+	}
 	push @lines, map { "recovered_MAGs.genes_gt_$_\t$above{$_}" } @thresholds;
 	push @lines, map { "recovered_status.$_\t$recovered_status{$_}" } sort keys %recovered_status;
 	push @lines, map { "filtered_reason.$_\t$filter_reason{$_}" } sort keys %filter_reason;
