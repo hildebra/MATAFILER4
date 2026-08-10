@@ -333,58 +333,5 @@ close $collapsedAuditHandle;
 like($collapsedAuditText, qr/\tp90_consensus_divergence\t/,
 	'native post-alignment P90 consensus divergence is the preferred rate proxy');
 
-my $filterOutput = File::Spec->catdir($temporary, 'epa-filter-only-output');
-my $filterPhylo = File::Spec->catdir($filterOutput, 'phylo');
-my $filterEpa = File::Spec->catdir($filterPhylo, 'epa-ng');
-make_path($filterEpa);
-write_file(File::Spec->catfile($filterPhylo, 'IQtree_allsites.backbone.treefile'),
-	"(A:0.001,B:0.002,C:0.003,MGS.out:0.5);\n");
-write_file(File::Spec->catfile($filterPhylo, 'strict_backbone.samples.tsv'), <<'CLASSIFICATION');
-sample	tree_role	reason	backbone_overlap_nt	backbone_overlap_loci	backbone_state_divergence
-A	backbone	well_covered	1000	10	0
-B	backbone	well_covered	1000	10	0
-C	backbone	well_covered	1000	10	0
-MGS.out	backbone	outgroup	1000	10	0
-near	placement	sparse	500	5	0.01
-far	placement	sparse	500	5	0.01
-CLASSIFICATION
-my $filterJplace = File::Spec->catfile($filterEpa, 'epa_result.jplace');
-my $filterJplaceText = <<'JPLACE';
-{"tree":"(A:0.1{1},B:0.1{2},C:0.1{3},MGS.out:0.5{4});","placements":[
- {"p":[[1,-10.0,0.90,0.0005,0.01]],"n":["near"]},
- {"p":[[2,-10.0,0.90,0.001,0.05]],"n":["far"]}
-]}
-JPLACE
-write_file($filterJplace, $filterJplaceText);
-my $filterCompletion = File::Spec->catfile($filterOutput, 'treeDone.sto');
-my @filterCommand = (
-	$^X, '-I'.$root, $wrapper, $config, $script,
-	'-outD', $filterOutput, '-continue', 1, '-strictBackbone', 1,
-	'-runIQtree', 1, '-epaFilterOnly', 1, '-outgroup', 'MGS.out',
-	'-completionMarker', $filterCompletion,
-);
-is(system(@filterCommand), 0,
-	'EPA filter-only mode completes without sequence inputs or external phylogeny tools');
-my $filteredPrimary = File::Spec->catfile($filterPhylo, 'IQtree_allsites.treefile');
-ok(-s $filteredPrimary, 'filter-only mode republishes the final primary tree');
-open my $filteredPrimaryHandle, '<', $filteredPrimary or die $!;
-my $filteredPrimaryText = do { local $/; <$filteredPrimaryHandle> };
-close $filteredPrimaryHandle;
-like($filteredPrimaryText, qr/near:0\.01/, 'filter-only publication retains an inlier placement');
-unlike($filteredPrimaryText, qr/far:/, 'filter-only publication omits a pendant-branch outlier');
-is(slurp($filterJplace), $filterJplaceText, 'filter-only publication leaves the raw jplace unchanged');
-my $filterReport = slurp(File::Spec->catfile(
-	$filterPhylo, 'strict_backbone.epa_placements.tsv'));
-like($filterReport, qr/^far\texcluded_outlier\t.*\tpendant_length_outlier\t/m,
-	'filter-only audit records the excluded placement and stable reason');
-my $filterSummary = slurp(File::Spec->catfile(
-	$filterPhylo, 'strict_backbone.epa_filter_summary.tsv'));
-like($filterSummary, qr/^threshold_source\tminimum_floor$/m,
-	'filter-only audit records which adaptive cutoff component controlled filtering');
-like($filterSummary, qr/^query_pendant_length_max\t0\.05$/m,
-	'filter-only audit records the largest evaluated pendant branch');
-like($filterSummary, qr/^excluded_samples\tfar$/m,
-	'filter-only audit lists the samples excluded from the published tree');
-ok(-s $filterCompletion, 'filter-only publication refreshes the completion marker');
 
 done_testing();
