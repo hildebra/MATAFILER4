@@ -9,7 +9,7 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::StrainPlacement qw(
 	read_sample_qc split_strict_backbone
-	read_epa_jplace write_epa_placed_tree
+	read_epa_jplace filter_epa_placement_outliers write_epa_placed_tree
 );
 
 sub write_file {
@@ -171,6 +171,31 @@ like($placed_text, qr/E:0\.02/, 'multiple EPA-ng placements on one edge are reta
 like($placed_text, qr/A:0\.04/, 'EPA-ng distal branch length is applied from the edge child');
 like($placed_text, qr/B:0\.1/, 'unaffected backbone topology is retained');
 unlike($placed_text, qr/\{\d+\}/, 'EPA-ng edge labels are not leaked into the published tree');
+
+my $outlier_tree = '(A:0.001{1},B:0.002{2},C:0.003{3},MGS.out:0.5{4});';
+my %outlier_placements = (
+	near => {status => 'placed', edge => 1, distal_length => 0.0005,
+		pendant_length => 0.01},
+	far => {status => 'placed', edge => 2, distal_length => 0.001,
+		pendant_length => 0.05},
+);
+my $outlier_qc = filter_epa_placement_outliers(
+	$outlier_tree, \%outlier_placements, {outgroup => 'MGS.out'});
+cmp_ok(abs($outlier_qc->{threshold} - 0.02), '<', 1e-12,
+	'the conservative absolute floor controls a very compact backbone cutoff');
+is_deeply($outlier_qc->{retained}, ['near'],
+	'a placement within the adaptive pendant cutoff is retained');
+is_deeply($outlier_qc->{excluded}, ['far'],
+	'a clearly separated pendant-branch outlier is excluded');
+is($outlier_placements{far}{status}, 'excluded_outlier',
+	'the excluded placement cannot be published into the final tree');
+is($outlier_placements{far}{placement_filter_reason}, 'pendant_length_outlier',
+	'the placement report receives a stable outlier reason');
+my $filtered_tree = File::Spec->catfile($tmp, 'outlier-filtered.treefile');
+write_epa_placed_tree($outlier_tree, $filtered_tree, \%outlier_placements);
+my $filtered_text = slurp($filtered_tree);
+like($filtered_text, qr/near:0\.01/, 'retained placement remains in the final tree');
+unlike($filtered_text, qr/far:/, 'pendant outlier is absent from the final tree');
 
 my $qc = File::Spec->catfile($tmp, 'sampleQC.tsv');
 write_file($qc, join('',

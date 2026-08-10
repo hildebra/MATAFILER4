@@ -91,6 +91,12 @@ like($script_text,
 like($script_text,
 	qr/unless \(keys %metrics\).*?terminal_reason => 'taxon_aware_no_category_with_three_usable_samples'/s,
 	'a taxon-aware candidate set with fewer than three usable samples returns a stable terminal reason');
+my $placement_outlier_calls = () = $script_text =~ /filter_epa_placement_outliers\(/g;
+cmp_ok($placement_outlier_calls, '>=', 2,
+	'fresh and EPA-only placement publication both apply pendant-branch outlier QC');
+like($script_text,
+	qr/pendant_outlier_limit placement_filter_reason reason/s,
+	'EPA placement reports expose the applied cutoff and exclusion reason');
 is(system($^X, q{-I}.$root, q{-c}, $script), 0, q{buildTree5.pl compiles});
 
 done_testing;

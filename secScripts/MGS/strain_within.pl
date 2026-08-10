@@ -263,7 +263,7 @@ END {
 #.91: persist the exact shared scratch directory for reliable cross-run resume
 #.96: use the authoritative Phase-I input audit for legacy ledger-free resumes
 #.97: bound EPA-ng placement memory and worker threads independently of tree inference
-my $version = 0.99;
+my $version = 1.00;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -345,6 +345,8 @@ my $strictBackboneMinSamples = 3;
 my $placementMinOverlap = 400;
 my $epaThreads = 2;
 my $epaMaxMemMB = -1; # derive from the per-tree IQ-TREE allowance in buildTree5
+my $epaPendantOutlierFactor = 5;
+my $epaPendantMinThreshold = 0.02;
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
@@ -482,6 +484,8 @@ GetOptions(
 	"placementMinOverlap=i" => \$placementMinOverlap,
 	"epaThreads=i" => \$epaThreads,
 	"epaMaxMemMB=i" => \$epaMaxMemMB,
+	"epaPendantOutlierFactor=f" => \$epaPendantOutlierFactor,
+	"epaPendantMinThreshold=f" => \$epaPendantMinThreshold,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
@@ -552,6 +556,8 @@ die "-placementMinOverlap must be non-negative\n"
 die "-epaThreads must be positive\n" if $epaThreads < 1;
 die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or positive\n"
 	if $epaMaxMemMB < -1;
+die "-epaPendantOutlierFactor and -epaPendantMinThreshold must be non-negative\n"
+	if $epaPendantOutlierFactor < 0 || $epaPendantMinThreshold < 0;
 my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
 	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
 if ($taxonAwareLocusSelection) {
@@ -1366,7 +1372,9 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		."-strictBackboneMinSamples $strictBackboneMinSamples "
 		."-placementMinOverlap $placementMinOverlap "
 		."-epaThreads ".($epaOnlyRetry ? 1 : $epaThreads)
-		." -epaMaxMemMB $epaMaxMemMB ";
+		." -epaMaxMemMB $epaMaxMemMB "
+		."-epaPendantOutlierFactor $epaPendantOutlierFactor "
+		."-epaPendantMinThreshold $epaPendantMinThreshold ";
 	if ($phyloProg == 1){
 		$Tcmd .= "-iqMemMB $iqMemMB ";
 		$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
@@ -5611,6 +5619,11 @@ Tree locus filtering:
   -epaMaxMemMB INT               EPA-ng thread-planning budget; -1 derives 60% of
                                  each IQ-TREE allowance, 0 disables memory scaling
                                  [default -1]
+  -epaPendantOutlierFactor FLOAT Exclude placements whose pendant branch exceeds
+                                 this multiple of backbone terminal-branch Q95;
+                                 zero disables the filter [default 5]
+  -epaPendantMinThreshold FLOAT  Minimum pendant-branch cutoff, substitutions/site
+                                 [default 0.02]
 
 On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a
 validated retained IQ-TREE backbone, MSA, query alignment, and sample

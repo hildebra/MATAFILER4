@@ -55,6 +55,7 @@
 #5.49: pass parsed IQ-TREE models directly to EPA-ng
 #5.50: replace EPA ulimit with memory-aware threads and bounded query chunks
 #5.53: persist taxon-aware candidate exhaustion as a valid terminal no-tree outcome
+#5.54: exclude EPA placements with pendant branches far outside the backbone distribution
 
 use warnings;
 use strict;
@@ -67,7 +68,7 @@ use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 ru
 use Mods::PhyloAlignment qw(filter_alignment_by_overlap);
 use Mods::StrainPlacement qw(
 	read_sample_qc split_strict_backbone
-	read_epa_jplace write_epa_placed_tree
+	read_epa_jplace filter_epa_placement_outliers write_epa_placed_tree
 );
 			
 			
@@ -157,7 +158,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.53;
+my $version = 5.54;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -262,9 +263,12 @@ my $placementMinOverlap = $BACKBONE_DEFAULT{minimum_overlap};
 my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
 my ($placementGeneFracPSpec, $placementNTFrac, $placementNTCntTotal);
 my %EPA_NG_DEFAULT = (threads => 4, memory_fraction => 0.60,
-	memory_per_thread_mb => 1024, chunk_size => 16);
+	memory_per_thread_mb => 1024, chunk_size => 16,
+	pendant_outlier_factor => 5, pendant_minimum_threshold => 0.02);
 my $epaThreads = $EPA_NG_DEFAULT{threads};
 my $epaMaxMemMB = -1; # -1 derives a thread-planning budget; 0 disables memory-based thread scaling
+my $epaPendantOutlierFactor = $EPA_NG_DEFAULT{pendant_outlier_factor};
+my $epaPendantMinThreshold = $EPA_NG_DEFAULT{pendant_minimum_threshold};
 my $sampleQCFile = "";
 my %POST_ALIGNMENT_QC_DEFAULT = (
 	between_species_enabled => 0,
@@ -402,6 +406,8 @@ GetOptions(
 	"strictBackboneMinSamples=i" => \$strictBackboneMinSamples,
 	"epaThreads=i" => \$epaThreads,
 	"epaMaxMemMB=i" => \$epaMaxMemMB,
+	"epaPendantOutlierFactor=f" => \$epaPendantOutlierFactor,
+	"epaPendantMinThreshold=f" => \$epaPendantMinThreshold,
 	"postAlignmentLocusQC=i" => \$postAlignmentLocusQC,
 	"postAlignmentMinSequences=i" => \$postAlignmentMinSequences,
 	"postAlignmentMinOccupancy=f" => \$postAlignmentMinOccupancy,
@@ -504,6 +510,8 @@ die "-epaThreads must be a positive integer (default $EPA_NG_DEFAULT{threads})\n
 	if $epaThreads < 1;
 die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or a positive MB value\n"
 	if $epaMaxMemMB < -1;
+die "-epaPendantOutlierFactor and -epaPendantMinThreshold must be non-negative\n"
+	if $epaPendantOutlierFactor < 0 || $epaPendantMinThreshold < 0;
 if ($epaOnly) {
 	die "-epaOnly requires -continue 1\n" unless $continue;
 	die "-epaOnly requires -strictBackbone 1\n" unless $strictBackbone;
@@ -721,6 +729,11 @@ print "EPA-ng placement resources: threads=$epaReportedThreads"
 	." (requested=$epaThreads); planning memory="
 	.($epaReportedMaxMemMB ? "${epaReportedMaxMemMB}MB at $EPA_NG_DEFAULT{memory_per_thread_mb}MB/thread" : "disabled")
 	."; hard memory limit=scheduler/cgroup; query chunk=$EPA_NG_DEFAULT{chunk_size}\n";
+print "EPA-ng placement outlier QC: "
+	.($epaPendantOutlierFactor > 0
+		? "maximum pendant branch=max($epaPendantMinThreshold, "
+			."$epaPendantOutlierFactor x backbone terminal-branch Q95)"
+		: "disabled") . "\n";
 print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
 	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
 	. "; supertree=" . ($doSuperTree ? "yes" : "no")
@@ -2008,7 +2021,8 @@ if ($strictSplit) {
 		my @placementReportColumns = qw(
 			sample status backbone_overlap_nt backbone_overlap_loci
 			backbone_state_divergence edge likelihood likelihood_weight_ratio
-			edpl candidate_placements distal_length pendant_length reason
+			edpl candidate_placements distal_length pendant_length
+			pendant_outlier_limit placement_filter_reason reason
 		);
 		if (@{$strictSplit->{placement}}) {
 			my ($epaResult, $modelArtifact, $jplaceFile);
@@ -2033,6 +2047,21 @@ if ($strictSplit) {
 				exit(0);
 			}
 			my $placements = $epaResult->{placements};
+			my $placementQC = filter_epa_placement_outliers(
+				$epaResult->{tree}, $placements,
+				{
+					pendant_outlier_factor => $epaPendantOutlierFactor,
+					pendant_minimum_threshold => $epaPendantMinThreshold,
+					outgroup => $outgroup,
+				},
+			);
+			if ($placementQC->{enabled}) {
+				print "EPA-ng pendant-branch QC: retained "
+					.scalar(@{$placementQC->{retained}}).", excluded "
+					.scalar(@{$placementQC->{excluded}})."; backbone Q95="
+					.sprintf('%.8g', $placementQC->{backbone_q95})
+					.", cutoff=".sprintf('%.8g', $placementQC->{threshold})."\n";
+			}
 			my $reportFh = retry_open('>', $report, label => "write EPA-ng placement report");
 			print {$reportFh} join("\t", @placementReportColumns), "\n";
 			for my $sample (sort keys %{$placements}) {
@@ -2048,6 +2077,9 @@ if ($strictSplit) {
 					$sample, $entry->{status}, @overlapValues,
 					map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
 						qw(edge likelihood likelihood_weight_ratio edpl candidate_placements distal_length pendant_length)),
+					defined($entry->{pendant_outlier_limit})
+						? sprintf('%.12g', $entry->{pendant_outlier_limit}) : 'NA',
+					$entry->{placement_filter_reason} // '',
 					$strictSplit->{reason}{$sample} // '',
 				), "\n";
 			}
@@ -2391,7 +2423,8 @@ sub runEpaOnlyPlacement {
 	my @reportColumns = qw(
 		sample status backbone_overlap_nt backbone_overlap_loci
 		backbone_state_divergence edge likelihood likelihood_weight_ratio
-		edpl candidate_placements distal_length pendant_length reason
+		edpl candidate_placements distal_length pendant_length
+		pendant_outlier_limit placement_filter_reason reason
 	);
 
 	writeWorkflowHeartbeat('EPA-only placement');
@@ -2418,6 +2451,21 @@ sub runEpaOnlyPlacement {
 	}
 
 	my $placements = $epaResult->{placements};
+	my $placementQC = filter_epa_placement_outliers(
+		$epaResult->{tree}, $placements,
+		{
+			pendant_outlier_factor => $epaPendantOutlierFactor,
+			pendant_minimum_threshold => $epaPendantMinThreshold,
+			outgroup => $outgroup,
+		},
+	);
+	if ($placementQC->{enabled}) {
+		print "EPA-ng pendant-branch QC: retained "
+			.scalar(@{$placementQC->{retained}}).", excluded "
+			.scalar(@{$placementQC->{excluded}})."; backbone Q95="
+			.sprintf('%.8g', $placementQC->{backbone_q95})
+			.", cutoff=".sprintf('%.8g', $placementQC->{threshold})."\n";
+	}
 	my $reportHandle = retry_open('>', $report,
 		label => 'write EPA-only placement report');
 	print {$reportHandle} join("\t", @reportColumns), "\n";
@@ -2431,6 +2479,9 @@ sub runEpaOnlyPlacement {
 			map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
 				qw(edge likelihood likelihood_weight_ratio edpl candidate_placements
 					distal_length pendant_length)),
+			defined($entry->{pendant_outlier_limit})
+				? sprintf('%.12g', $entry->{pendant_outlier_limit}) : 'NA',
+			$entry->{placement_filter_reason} // '',
 			$split->{reason}{$sample} // '',
 		), "\n";
 	}

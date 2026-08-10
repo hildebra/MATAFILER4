@@ -10,6 +10,7 @@ our @EXPORT_OK = qw(
 	read_sample_qc
 	split_strict_backbone
 	read_epa_jplace
+	filter_epa_placement_outliers
 	write_epa_placed_tree
 );
 
@@ -354,6 +355,59 @@ sub read_epa_jplace {
 		}
 	}
 	return {tree => $jplace->{tree}, placements => \%placements};
+}
+
+sub _epa_terminal_lengths {
+	my ($node, $outgroup, $lengths) = @_;
+	if (!@{$node->{children}}) {
+		push @{$lengths}, $node->{length}
+			if defined($node->{length}) && $node->{length} >= 0
+				&& (!defined($outgroup) || !length($outgroup)
+					|| ($node->{name} // '') ne $outgroup);
+		return;
+	}
+	_epa_terminal_lengths($_, $outgroup, $lengths) for @{$node->{children}};
+}
+
+sub filter_epa_placement_outliers {
+	my ($epa_tree, $placements, $options) = @_;
+	$options ||= {};
+	my $factor = $options->{pendant_outlier_factor} // 5;
+	my $minimum_threshold = $options->{pendant_minimum_threshold} // 0.02;
+	die "EPA pendant outlier factor and minimum threshold must be non-negative\n"
+		if $factor < 0 || $minimum_threshold < 0;
+	return {
+		enabled => 0, excluded => [], retained => [],
+		backbone_q95 => undef, threshold => undef,
+	} if $factor == 0;
+	die "EPA placement outlier filtering requires a placement hash\n"
+		unless ref($placements) eq 'HASH';
+	my $root = _parse_epa_tree($epa_tree);
+	my @terminal_lengths;
+	_epa_terminal_lengths($root, $options->{outgroup}, \@terminal_lengths);
+	die "EPA placement outlier filtering found no usable backbone terminal branches\n"
+		unless @terminal_lengths;
+	my $backbone_q95 = _quantile(0.95, @terminal_lengths);
+	my $threshold = $factor * $backbone_q95;
+	$threshold = $minimum_threshold if $threshold < $minimum_threshold;
+	my (@excluded, @retained);
+	for my $sample (sort keys %{$placements}) {
+		my $placement = $placements->{$sample};
+		next unless ($placement->{status} // '') eq 'placed';
+		$placement->{pendant_outlier_limit} = $threshold;
+		if (defined($placement->{pendant_length})
+				&& $placement->{pendant_length} > $threshold) {
+			$placement->{status} = 'excluded_outlier';
+			$placement->{placement_filter_reason} = 'pendant_length_outlier';
+			push @excluded, $sample;
+		} else {
+			push @retained, $sample;
+		}
+	}
+	return {
+		enabled => 1, excluded => \@excluded, retained => \@retained,
+		backbone_q95 => $backbone_q95, threshold => $threshold,
+	};
 }
 
 sub _skip_newick_space {
