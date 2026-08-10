@@ -836,11 +836,14 @@ $stepStarted = time;
 my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist,
 	$noRecoverableLociDirs)
 			= evalFileStatus();
+my $epaOnlyRetryCount = scalar(keys %MGSepaOnlyRetry);
+my $fullTreeRetryCount = $treeAbsent - $epaOnlyRetryCount;
+$fullTreeRetryCount = 0 if $fullTreeRetryCount < 0;
 stepComplete("existing-output and resume audit", $stepStarted,
 	"prepared_trees=$doneDirs", "missing_trees=$treeAbsent",
 	"incomplete_tree_inputs=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped",
 	"validated_no_locus=$noRecoverableLociDirs",
-	"epa_only_retries=".scalar(keys %MGSepaOnlyRetry));
+	"epa_only_retries=$epaOnlyRetryCount", "full_tree_retries=$fullTreeRetryCount");
 #DEBUG:getInputSize();
 
 
@@ -1073,7 +1076,7 @@ my %outgroupGeneCache;
 my $geneCatLoaded=0;
 #read in genecat to create outgroup fasta sequences..
 $stepStarted = time;
-my $nonEpaTreeAbsences = $treeAbsent - scalar(keys %MGSepaOnlyRetry);
+my $nonEpaTreeAbsences = $fullTreeRetryCount;
 $nonEpaTreeAbsences = 0 if $nonEpaTreeAbsences < 0;
 if ($recalcTrees || $CatNotPrepped || $nonEpaTreeAbsences || $repairCAT || $deepRepair || $dirsNOTPrepped || $onlySubmit == 0 || $redoSubmissionData == 1){
 	#also read reference gene seqs (for outgroup)
@@ -1133,8 +1136,17 @@ stepComplete("tree-input sizing", $stepStarted,
 	"incomplete_scratch=$treeInputAudit->{incomplete_scratch}",
 	"empty_extraction=$treeInputAudit->{empty_extraction}",
 	"audit=$treeInputAudit->{audit_file}");
-my @idx = sort { $sizeOfDirs[$b] <=> $sizeOfDirs[$a] } 0 .. $#sizeOfDirs;
+# Placement-only recovery has already paid for alignment and backbone inference.
+# Put these jobs first so unrelated full-tree preparation cannot delay them.
+my @idx = sort {
+	(exists($MGSepaOnlyRetry{$specis[$b]}) ? 1 : 0)
+		<=> (exists($MGSepaOnlyRetry{$specis[$a]}) ? 1 : 0)
+		|| $sizeOfDirs[$b] <=> $sizeOfDirs[$a]
+} 0 .. $#sizeOfDirs;
 @specis=@specis[@idx];@sizeOfDirs=@sizeOfDirs[@idx];
+print "Validated EPA-only recovery queue: $epaOnlyRetryCount MGS; "
+	."placement-only jobs are processed before full-tree retries.\n"
+	if $epaOnlyRetryCount;
 #print "SIZE2:: $sizeOfDirs[0] $sizeOfDirs[1] $specis[0] $specis[1]\n"; die;
 
 
@@ -1151,13 +1163,14 @@ my %treeDisposition;
 my $recalcScratchRecovered = 0;
 foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTreeScript on..
 	$lcnt++;
+	my $epaOnlyRetry = exists($MGSepaOnlyRetry{$MGS}) ? 1 : 0;
 	if (!$recalcTrees && !$reSubmit && !$repairCAT && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
 		$treeDisposition{'submission pass unnecessary'} += $Nspecis - $treeMGSVisited;
 		print "\nAll submission dirs prepared, nothing to do..\n";
 		last;
 	}
 	$treeMGSVisited++;
-	if (exists $MGSnoTree{$MGS}) {
+	if (!$epaOnlyRetry && exists $MGSnoTree{$MGS}) {
 		my $reason = $MGSnoTreeReason{$MGS} // 'too_few_samples';
 		$treeDisposition{"valid no-tree: $reason"}++;
 		limitedNotice('MGS skipped after valid no-tree classification',
@@ -1165,7 +1178,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		next;
 	}
 	# previous condition was too lax: ( ($CatNotPrepped/$#specis) < 0.1)  , just check if we can resubmit anything here..
-	if (exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ m/multicopy/){
+	if (!$epaOnlyRetry && exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ m/multicopy/){
 		$treeDisposition{'conspecific or multicopy'}++;
 		limitedNotice('MGS skipped as conspecific or multicopy',
 			"Skipping $MGS due to inclusion in conspecific MGS list.\n");next;
@@ -1181,7 +1194,6 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $treeStone = "$outD2/treeDone.sto";
 	my $terminalTreeMarker = "$outD2/noTree.sto";
 	my $placementPendingMarker = "$outD2/placementPending.sto";
-	my $epaOnlyRetry = exists($MGSepaOnlyRetry{$MGS}) ? 1 : 0;
 	my $IQtreef= "$outD2/phylo/IQtree_allsites.treefile";
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);

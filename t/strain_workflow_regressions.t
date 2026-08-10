@@ -433,6 +433,12 @@ like($strain,
 	qr/sub epaOnlyRetryReady.*?\$onlySubmit.*?status\\tplacement_pending.*?IQtree_allsites\.backbone\.treefile.*?strict_backbone\.samples\.tsv/s,
 	'a tree-only resume recognizes only complete, explicitly pending placement state');
 like($strain,
+	qr/my \$epaOnlyRetry = exists\(\$MGSepaOnlyRetry\{\$MGS\}\).*?if \(!\$epaOnlyRetry && exists \$MGSnoTree\{\$MGS\}\).*?if \(!\$epaOnlyRetry && exists\(\$ConspecificMGS\{\$MGS\}\)/s,
+	'a validated EPA-only retry bypasses later historical no-tree and multicopy filters');
+like($strain,
+	qr/Placement-only recovery has already paid.*?exists\(\$MGSepaOnlyRetry\{\$specis\[\$b\]\}\).*?\$sizeOfDirs\[\$b\].*?Validated EPA-only recovery queue/s,
+	'validated EPA-only retries are sorted ahead of ordinary full-tree retries');
+like($strain,
 	qr/strain_within\.heartbeat\.tsv.*?strain_within\.failure\.tsv.*?sub writeStrainWorkflowHeartbeat.*?sub writeStrainWorkflowFailure/s,
 	'strain workflow persists stage heartbeats and fatal-stage diagnostics');
 unlike($strain,
