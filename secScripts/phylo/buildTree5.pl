@@ -56,6 +56,7 @@
 #5.50: replace EPA ulimit with memory-aware threads and bounded query chunks
 #5.53: persist taxon-aware candidate exhaustion as a valid terminal no-tree outcome
 #5.54: exclude EPA placements with pendant branches far outside the backbone distribution
+#5.55: republish an existing EPA jplace result through placement filtering only
 
 use warnings;
 use strict;
@@ -147,6 +148,7 @@ sub epaModelArtifact;
 sub runEpaNgPlacement;
 sub readStrictBackboneClassification;
 sub runEpaOnlyPlacement;
+sub runEpaFilterOnly;
 sub epaResourcePlan;
 sub iqtreePlacementModel;
 sub postAlignmentStep;
@@ -158,7 +160,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.54;
+my $version = 5.55;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -220,6 +222,7 @@ my $strainWithinPreset = 0;
 
 my ($continue,$isAligned) = (0,0);#overwrite already existing files?
 my $epaOnly = 0;
+my $epaFilterOnly = 0;
 my $outgroup="";
 my $fixHeaders = 0;
 my ($doGubbins,$doCFML,$doRAXML,$doFastTree,$doVeryFastTree, $doIQTree,$doRAXMLng) = (0,0,0,0,0, 0, 0);#fastree as default tree builder
@@ -388,6 +391,7 @@ GetOptions(
 	"NonSynTree=i"	=> \$calcNonSyn,
 	"continue=i" => \$continue,
 	"epaOnly=i" => \$epaOnly,
+	"epaFilterOnly=i" => \$epaFilterOnly,
 	"bootstrap=i" => \$bootStrap,
 	"subsetSmpls=i" => \$subsetSmpls,
 	"postFilter=s" => \$postFilter, # "," sep list of zorro,guidance2,macse
@@ -512,14 +516,19 @@ die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or a positi
 	if $epaMaxMemMB < -1;
 die "-epaPendantOutlierFactor and -epaPendantMinThreshold must be non-negative\n"
 	if $epaPendantOutlierFactor < 0 || $epaPendantMinThreshold < 0;
-if ($epaOnly) {
-	die "-epaOnly requires -continue 1\n" unless $continue;
-	die "-epaOnly requires -strictBackbone 1\n" unless $strictBackbone;
-	die "-epaOnly currently requires exactly -runIQtree 1\n"
+die "-epaOnly and -epaFilterOnly are mutually exclusive\n"
+	if $epaOnly && $epaFilterOnly;
+if ($epaOnly || $epaFilterOnly) {
+	my $mode = $epaFilterOnly ? '-epaFilterOnly' : '-epaOnly';
+	die "$mode requires -continue 1\n" unless $continue;
+	die "$mode requires -strictBackbone 1\n" unless $strictBackbone;
+	die "$mode currently requires exactly -runIQtree 1\n"
 		unless $doIQTree && !$doRAXML && !$doRAXMLng
 			&& !$doFastTree && !$doVeryFastTree;
-	die "-epaOnly requires -completionMarker and -placementPendingMarker\n"
-		unless length($completionMarker) && length($placementPendingMarker);
+	if ($epaOnly) {
+		die "-epaOnly requires -completionMarker and -placementPendingMarker\n"
+			unless length($completionMarker) && length($placementPendingMarker);
+	}
 }
 die "-postAlignmentLocusQC must be 0 or 1 "
 	."(default: 0 between species, 1 within species)\n"
@@ -777,6 +786,12 @@ if ($fixHeaders){
 
 
 prepGenoDirs($genoindir);
+if ($epaFilterOnly) {
+	preflightBuildTree($outD, $tmpD);
+	runEpaFilterOnly(
+		$treeD, File::Spec->catfile($treeD, 'strict_backbone.samples.tsv'));
+	exit(0);
+}
 for my $input_spec (["fna", $fnFna], ["aa", $aaFna], ["cats", $cogCats]) {
 	my ($name, $path) = @{$input_spec};
 	next if $path eq "";
@@ -2498,6 +2513,88 @@ sub runEpaOnlyPlacement {
 	writeWorkflowHeartbeat('complete');
 	print "EPA-only recovery completed; primary tree=$primaryTree; "
 		."backbone retained=$backboneTree; jplace=$jplaceFile; model=$modelArtifact\n";
+	return 1;
+}
+
+sub runEpaFilterOnly {
+	my ($treeDirectory, $classificationFile) = @_;
+	my $backboneTree = File::Spec->catfile(
+		$treeDirectory, 'IQtree_allsites.backbone.treefile');
+	my $primaryTree = File::Spec->catfile(
+		$treeDirectory, 'IQtree_allsites.treefile');
+	my $jplaceFile = File::Spec->catfile(
+		$treeDirectory, 'epa-ng', 'epa_result.jplace');
+	my $report = File::Spec->catfile(
+		$treeDirectory, 'strict_backbone.epa_placements.tsv');
+	die "EPA filter-only mode requires retained backbone tree $backboneTree\n"
+		unless -s $backboneTree;
+	die "EPA filter-only mode requires retained jplace result $jplaceFile\n"
+		unless -s $jplaceFile;
+	my $split = readStrictBackboneClassification($classificationFile);
+	die "EPA filter-only mode found no placement samples in $classificationFile\n"
+		unless @{$split->{placement}};
+
+	writeWorkflowHeartbeat('EPA placement filtering only');
+	my $epaResult = read_epa_jplace($jplaceFile, $split->{placement});
+	my $placements = $epaResult->{placements};
+	my $placementQC = filter_epa_placement_outliers(
+		$epaResult->{tree}, $placements,
+		{
+			pendant_outlier_factor => $epaPendantOutlierFactor,
+			pendant_minimum_threshold => $epaPendantMinThreshold,
+			outgroup => $outgroup,
+		},
+	);
+	if ($placementQC->{enabled}) {
+		print "EPA-ng pendant-branch QC: retained "
+			.scalar(@{$placementQC->{retained}}).", excluded "
+			.scalar(@{$placementQC->{excluded}})."; backbone Q95="
+			.sprintf('%.8g', $placementQC->{backbone_q95})
+			.", cutoff=".sprintf('%.8g', $placementQC->{threshold})."\n";
+	}
+	my @reportColumns = qw(
+		sample status backbone_overlap_nt backbone_overlap_loci
+		backbone_state_divergence edge likelihood likelihood_weight_ratio
+		edpl candidate_placements distal_length pendant_length
+		pendant_outlier_limit placement_filter_reason reason
+	);
+	my $temporaryReport = "$report.tmp.$$";
+	retry_unlink($temporaryReport, fatal => 0,
+		label => 'clear EPA filter-only report temporary');
+	my $reportHandle = retry_open('>', $temporaryReport,
+		label => 'write EPA filter-only placement report');
+	print {$reportHandle} join("\t", @reportColumns), "\n";
+	for my $sample (sort keys %{$placements}) {
+		my $entry = $placements->{$sample};
+		my $overlap = $split->{backbone_overlap}{$sample} || {};
+		print {$reportHandle} join("\t",
+			$sample, $entry->{status},
+			map({ defined($overlap->{$_}) ? sprintf('%.12g', $overlap->{$_}) : 'NA' }
+				qw(backbone_overlap_nt backbone_overlap_loci backbone_state_divergence)),
+			map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
+				qw(edge likelihood likelihood_weight_ratio edpl candidate_placements
+					distal_length pendant_length)),
+			defined($entry->{pendant_outlier_limit})
+				? sprintf('%.12g', $entry->{pendant_outlier_limit}) : 'NA',
+			$entry->{placement_filter_reason} // '',
+			$split->{reason}{$sample} // '',
+		), "\n";
+	}
+	retry_close($reportHandle, 'close EPA filter-only placement report');
+	retry_rename($temporaryReport, $report,
+		label => 'publish EPA filter-only placement report');
+	write_epa_placed_tree($epaResult->{tree}, $primaryTree, $placements);
+	die "EPA filter-only mode did not publish its primary tree: $primaryTree\n"
+		unless -s $primaryTree;
+	writeCompletionMarker($completionMarker, $primaryTree, $outD)
+		if length($completionMarker);
+	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
+	clearLifecycleMarker($placementPendingMarker, 'clear obsolete placement-pending marker');
+	clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
+	safeRemoveTree($tmpD, $tmpBase);
+	writeWorkflowHeartbeat('complete');
+	print "EPA placement filtering-only recovery completed; primary tree=$primaryTree; "
+		."backbone retained=$backboneTree; jplace retained=$jplaceFile\n";
 	return 1;
 }
 

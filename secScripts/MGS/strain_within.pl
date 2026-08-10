@@ -83,6 +83,7 @@ sub recordValidatedEmptyExtractions;
 sub validateTreeInputResolution;
 sub readFastaIDs;
 sub epaOnlyRetryReady;
+sub epaFilterOnlyReady;
 sub prepareEpaOnlyRetryState;
 sub resetMGSTreeOutputs;
 sub stepComplete;
@@ -263,7 +264,8 @@ END {
 #.91: persist the exact shared scratch directory for reliable cross-run resume
 #.96: use the authoritative Phase-I input audit for legacy ledger-free resumes
 #.97: bound EPA-ng placement memory and worker threads independently of tree inference
-my $version = 1.00;
+#1.01: republish existing EPA placements through final outlier filtering only
+my $version = 1.01;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -347,6 +349,7 @@ my $epaThreads = 2;
 my $epaMaxMemMB = -1; # derive from the per-tree IQ-TREE allowance in buildTree5
 my $epaPendantOutlierFactor = 5;
 my $epaPendantMinThreshold = 0.02;
+my $epaFilterOnly = 0;
 my $presortGenes = 1200;
 my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
@@ -486,6 +489,7 @@ GetOptions(
 	"epaMaxMemMB=i" => \$epaMaxMemMB,
 	"epaPendantOutlierFactor=f" => \$epaPendantOutlierFactor,
 	"epaPendantMinThreshold=f" => \$epaPendantMinThreshold,
+	"epaFilterOnly=i" => \$epaFilterOnly,
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
@@ -558,6 +562,16 @@ die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or positive
 	if $epaMaxMemMB < -1;
 die "-epaPendantOutlierFactor and -epaPendantMinThreshold must be non-negative\n"
 	if $epaPendantOutlierFactor < 0 || $epaPendantMinThreshold < 0;
+die "-epaFilterOnly must be 0 or 1\n"
+	unless $epaFilterOnly == 0 || $epaFilterOnly == 1;
+if ($epaFilterOnly) {
+	die "-epaFilterOnly requires -strictBackbone 1 and -phyloProg 1\n"
+		unless $strictBackbone && $phyloProg == 1;
+	die "-epaFilterOnly cannot be combined with tree/input regeneration modes\n"
+		if $recalcTrees || $reSubmit || $repairCAT || $deepRepair || $redoSubmissionData;
+	die "-epaFilterOnly is a parent-only publication mode\n" if $subJob;
+	$onlySubmit = 1;
+}
 my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
 	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
 if ($taxonAwareLocusSelection) {
@@ -712,6 +726,7 @@ my %ConspecificMGS; #list of conspecific MGS
 my %MGSnoTree; #MGS known to have a persistent valid no-tree outcome
 my %MGSnoTreeReason;
 my %MGSepaOnlyRetry;
+my %MGSepaFilterOnly;
 my $legacyLocusOutputs = 0;
 my %legacyLocusMGS;
 my (%ConfirmedMosaicPairs, %PreferredOutgroup, %PreferredOutgroupGene);
@@ -854,15 +869,17 @@ my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $P
 	$noRecoverableLociDirs)
 			= evalFileStatus();
 my $epaOnlyRetryCount = scalar(keys %MGSepaOnlyRetry);
+my $epaFilterOnlyCount = scalar(keys %MGSepaFilterOnly);
 my $legacyEpaRetryCount = scalar(grep {
 	($MGSepaOnlyRetry{$_} // '') eq 'legacy_missing_final'
 } keys %MGSepaOnlyRetry);
-my $fullTreeRetryCount = $treeAbsent - $epaOnlyRetryCount;
+my $fullTreeRetryCount = $treeAbsent - $epaOnlyRetryCount - $epaFilterOnlyCount;
 $fullTreeRetryCount = 0 if $fullTreeRetryCount < 0;
 stepComplete("existing-output and resume audit", $stepStarted,
 	"prepared_trees=$doneDirs", "missing_trees=$treeAbsent",
 	"incomplete_tree_inputs=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped",
 	"validated_no_locus=$noRecoverableLociDirs",
+	"epa_filter_only=$epaFilterOnlyCount",
 	"epa_only_retries=$epaOnlyRetryCount", "legacy_epa_retries=$legacyEpaRetryCount",
 	"full_tree_retries=$fullTreeRetryCount");
 #DEBUG:getInputSize();
@@ -1160,8 +1177,10 @@ stepComplete("tree-input sizing", $stepStarted,
 # Placement-only recovery has already paid for alignment and backbone inference.
 # Put these jobs first so unrelated full-tree preparation cannot delay them.
 my @idx = sort {
-	(exists($MGSepaOnlyRetry{$specis[$b]}) ? 1 : 0)
-		<=> (exists($MGSepaOnlyRetry{$specis[$a]}) ? 1 : 0)
+	((exists($MGSepaFilterOnly{$specis[$b]}) ? 2 : 0)
+		+ (exists($MGSepaOnlyRetry{$specis[$b]}) ? 1 : 0))
+		<=> ((exists($MGSepaFilterOnly{$specis[$a]}) ? 2 : 0)
+			+ (exists($MGSepaOnlyRetry{$specis[$a]}) ? 1 : 0))
 		|| $sizeOfDirs[$b] <=> $sizeOfDirs[$a]
 } 0 .. $#sizeOfDirs;
 @specis=@specis[@idx];@sizeOfDirs=@sizeOfDirs[@idx];
@@ -1185,13 +1204,15 @@ my $recalcScratchRecovered = 0;
 foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTreeScript on..
 	$lcnt++;
 	my $epaOnlyRetry = exists($MGSepaOnlyRetry{$MGS}) ? 1 : 0;
+	my $epaFilterRetry = exists($MGSepaFilterOnly{$MGS}) ? 1 : 0;
+	my $epaRecovery = $epaOnlyRetry || $epaFilterRetry;
 	if (!$recalcTrees && !$reSubmit && !$repairCAT && !$redoSubmissionData && $CatFileMiss==0 && $CatNotPrepped==0 && $treeAbsent ==0){
 		$treeDisposition{'submission pass unnecessary'} += $Nspecis - $treeMGSVisited;
 		print "\nAll submission dirs prepared, nothing to do..\n";
 		last;
 	}
 	$treeMGSVisited++;
-	if (!$epaOnlyRetry && exists $MGSnoTree{$MGS}) {
+	if (!$epaRecovery && exists $MGSnoTree{$MGS}) {
 		my $reason = $MGSnoTreeReason{$MGS} // 'too_few_samples';
 		$treeDisposition{"valid no-tree: $reason"}++;
 		limitedNotice('MGS skipped after valid no-tree classification',
@@ -1199,7 +1220,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		next;
 	}
 	# previous condition was too lax: ( ($CatNotPrepped/$#specis) < 0.1)  , just check if we can resubmit anything here..
-	if (!$epaOnlyRetry && exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ m/multicopy/){
+	if (!$epaRecovery && exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ m/multicopy/){
 		$treeDisposition{'conspecific or multicopy'}++;
 		limitedNotice('MGS skipped as conspecific or multicopy',
 			"Skipping $MGS due to inclusion in conspecific MGS list.\n");next;
@@ -1247,7 +1268,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	}
 	
 	if (!$recalcTrees && !$reSubmit && !$repairCAT && !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
-			&& -e $treeStone && -s $IQtreef ){
+			&& !$epaFilterRetry && -e $treeStone && -s $IQtreef ){
 		$treeDisposition{'valid tree already present'}++;
 		limitedNotice('MGS skipped with existing trees',
 			"Skipping $MGS: a valid tree already exists.\n");
@@ -1256,19 +1277,21 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	print "Processing $MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)."\n";
 	my $inputFNAsize = $sizeOfDirs[$lcnt];
-	if ($epaOnlyRetry && !$inputFNAsize) {
+	if ($epaRecovery && !$inputFNAsize) {
 		$inputFNAsize = int((-s "$outD2/MSA/MSAli.fna") / 1024) || 1;
 	}
 	#PART I: create fasta files required by tree
 	make_path($outD2) unless -d $outD2;
-	if ($inputFNAsize ==0 && !$epaOnlyRetry){
+	if ($inputFNAsize ==0 && !$epaRecovery){
 		$treeDisposition{'empty input'}++;
 		limitedNotice('MGS skipped with empty input', "Skipping $MGS: input is empty.\n");
 		next;
 	} #empty input
 	my $mustRegenerateInputs = $repairCAT || $deepRepair || $redoSubmissionData
 		|| exists($legacyLocusMGS{$MGS});
-	if ($epaOnlyRetry) {
+	if ($epaFilterRetry) {
+		print "  Recovery state: reapplying final EPA placement filtering only\n";
+	} elsif ($epaOnlyRetry) {
 		print "  Recovery state: validated backbone has only EPA-ng placement pending\n";
 	} elsif ($publishedInputsReady && !$mustRegenerateInputs) {
 		print "  Tree input: using complete published FNA/FAA/category files\n";
@@ -1338,6 +1361,11 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		$numCoreL = 1;
 		$memoryProfile = 'EPA-ng placement-only retry';
 	}
+	if ($epaFilterRetry) {
+		$totMem = 5000;
+		$numCoreL = 1;
+		$memoryProfile = 'EPA placement filtering only';
+	}
 	my $iqMemMB = int($totMem * 0.9); #also supplies EPA planning-memory reporting
 	
 
@@ -1393,7 +1421,9 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	#reformat .cat.tmp -> .cat and add outgroup fna seqs
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
-	if ($epaOnlyRetry) {
+	if ($epaFilterRetry) {
+		$inputReady = 1;
+	} elsif ($epaOnlyRetry) {
 		$inputReady = 1;
 	} else {
 		($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady)=
@@ -1402,7 +1432,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	# Locus names are MGS-qualified, so cached outgroup choices have no reuse
 	# after this MGS and would otherwise accumulate for the entire submission.
 	%outgroupGeneCache = ();
-	$mosaicOutgroupsUsed{$MGS} = 1 if !$epaOnlyRetry && $inputReady && exists($PreferredOutgroup{$MGS})
+	$mosaicOutgroupsUsed{$MGS} = 1 if !$epaRecovery && $inputReady && exists($PreferredOutgroup{$MGS})
 		&& length($OG) && $OG eq $PreferredOutgroup{$MGS};
 	invalidateMGSInputState($MGS) if $inputReady;
 	unless ($inputReady) {
@@ -1416,14 +1446,18 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
-		if !$epaOnlyRetry && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof"));
-	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if !$epaOnlyRetry && $needsCopy;
+		if !$epaRecovery && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof"));
+	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if !$epaRecovery && $needsCopy;
 	$Tcmd .= "-epaOnly 1 " if $epaOnlyRetry;
+	$Tcmd .= "-epaFilterOnly 1 " if $epaFilterRetry;
 	$Tcmd .= "-continue 1 -completionMarker ".shellQuote($treeStone)." "
 		."-terminalMarker ".shellQuote($terminalTreeMarker)." "
 		."-placementPendingMarker ".shellQuote($placementPendingMarker)." ";
 
-	if ($epaOnlyRetry) {
+	if ($epaFilterRetry) {
+		print "  EPA filter-only job: 1 core, $totMem MB memory; retained jplace, "
+			."classification, and backbone are read-only inputs\n";
+	} elsif ($epaOnlyRetry) {
 		print "  EPA-only retry: 1 core, $totMem MB memory; retained MSA, model, "
 			."and backbone will be read-only inputs\n";
 	} elsif ($multiSmpl > 2 && $ngenes >= $MGStoolowGsThr){
@@ -1448,14 +1482,16 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $treeJobOrdinal = $cnt + 1;
 	push @pendingTreeJobs, {
 		mgs => $MGS,
-		script => $epaOnlyRetry
-			? "$outD2/treeCmd.epa_retry.sh" : "$outD2/treeCmd.sh",
+		script => $epaFilterRetry ? "$outD2/treeCmd.epa_filter.sh"
+			: $epaOnlyRetry ? "$outD2/treeCmd.epa_retry.sh" : "$outD2/treeCmd.sh",
 		command => $Tcmd.$outgS."\n",
 		cores => $numCoreL,
 		memory => int($totMem)."M",
 		requested_mb => int($totMem),
-		job_name => $epaOnlyRetry ? "EPA$treeJobOrdinal" : "FT$treeJobOrdinal",
+		job_name => $epaFilterRetry ? "EF$treeJobOrdinal"
+			: $epaOnlyRetry ? "EPA$treeJobOrdinal" : "FT$treeJobOrdinal",
 		epa_only => $epaOnlyRetry,
+		filter_only => $epaFilterRetry,
 		terminal => $terminalTreeMarker,
 		placement_pending => $placementPendingMarker,
 		tree => $IQtreef,
@@ -1466,7 +1502,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	$QSBoptHR->{useLongQueue} = 0;
 	$cnt ++;
-	$treeDisposition{$epaOnlyRetry ? 'EPA-only retry job' : 'eligible tree job'}++;
+	$treeDisposition{$epaFilterRetry ? 'EPA filter-only job'
+		: $epaOnlyRetry ? 'EPA-only retry job' : 'eligible tree job'}++;
 	$expectedTreeOutputs{$MGS} = [$IQtreef, $treeStone,
 		$terminalTreeMarker, $placementPendingMarker];
 	if (!$doSubmit || time >= $nextQueuedTreeSubmissionProbe) {
@@ -3208,6 +3245,23 @@ sub evalFileStatus{
 		}
 		my $completedTree = "$outD2/phylo/$treeFile";
 		my $treeCompletion = "$outD2/treeDone.sto";
+		if ($epaFilterOnly && epaFilterOnlyReady($outD2)) {
+			# The raw jplace and backbone are authoritative. Removing only the
+			# published placed tree makes both legacy and current completed runs
+			# enter the normal missing-tree submission queue without touching the
+			# expensive alignment, backbone, or EPA-ng results.
+			if ($doSubmit && -s $completedTree) {
+				retry_unlink($completedTree,
+					label => "trigger EPA placement refilter for $MGS");
+			} elsif (!$doSubmit && -s $completedTree) {
+				limitedNotice('EPA refilter dry-run trigger',
+					"Would remove $completedTree to trigger EPA placement refiltering.\n");
+			}
+			$MGSepaFilterOnly{$MGS} = 1;
+			$treeAbsent++;
+			remove_tree("$scratchD/outs/$MGS") if -d "$scratchD/outs/$MGS";
+			next;
+		}
 		if (!$recalcTrees && !$reSubmit && !$repairCAT && !$deepRepair
 				&& !$redoSubmissionData && -s $treeCompletion
 				&& fileGZs($completedTree)) {
@@ -3280,6 +3334,32 @@ sub evalFileStatus{
 	#die;
 	return($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist,
 		$noRecoverableLociDirs);
+}
+
+sub epaFilterOnlyReady {
+	my ($mgsDirectory) = @_;
+	return 0 unless $epaFilterOnly && $strictBackbone && $phyloProg == 1
+		&& defined($mgsDirectory) && -d $mgsDirectory;
+	return 0 if -s File::Spec->catfile($mgsDirectory, 'noTree.sto');
+	my @required = (
+		File::Spec->catfile($mgsDirectory, 'phylo', 'IQtree_allsites.backbone.treefile'),
+		File::Spec->catfile($mgsDirectory, 'phylo', 'strict_backbone.samples.tsv'),
+		File::Spec->catfile($mgsDirectory, 'phylo', 'epa-ng', 'epa_result.jplace'),
+	);
+	return 0 if grep { !-s $_ } @required;
+	open my $classIN, '<', $required[1] or return 0;
+	my $hasPlacement = 0;
+	while (my $line = <$classIN>) {
+		chomp $line;
+		next if $line eq '' || $line =~ /^sample\t/;
+		my @field = split /\t/, $line, -1;
+		if (@field > 1 && $field[1] eq 'placement') {
+			$hasPlacement = 1;
+			last;
+		}
+	}
+	close $classIN;
+	return $hasPlacement;
 }
 
 sub epaOnlyRetryReady {
@@ -5624,6 +5704,11 @@ Tree locus filtering:
                                  zero disables the filter [default 5]
   -epaPendantMinThreshold FLOAT  Minimum pendant-branch cutoff, substitutions/site
                                  [default 0.02]
+  -epaFilterOnly 0|1            For completed EPA placements, remove the published
+                                 IQtree_allsites.treefile as a resume trigger and
+                                 rebuild it from the retained jplace. Unfinished MGS
+                                 continue through EPA-only or full-tree recovery
+                                 with their normal resource profiles [default 0]
 
 On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a
 validated retained IQ-TREE backbone, MSA, query alignment, and sample

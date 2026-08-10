@@ -129,8 +129,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.00;/,
-	'prepared Phase-II scratch reuse increments the workflow version');
+like($strain, qr/my \$version = 1\.01;/,
+	'EPA filter-only publication increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -192,7 +192,7 @@ like($strain,
 	qr/historical exclusion loading.*?excluded_MGS=.*?outgroup-reference preparation.*?reference_NT=.*?MGS_with_outgroup_candidates=/s,
 	'historical exclusions and outgroup-reference preparation report their final counts');
 like($strain,
-	qr/my %treeDisposition.*?\$treeDisposition\{\$epaOnlyRetry \? 'EPA-only retry job' : 'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
+	qr/my %treeDisposition.*?\$treeDisposition\{\$epaFilterRetry \? 'EPA filter-only job'.*?: \$epaOnlyRetry \? 'EPA-only retry job' : 'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
 	'tree submission reports every eligible and skipped MGS disposition before waiting');
 like($strain,
 	qr/my \@pendingTreeJobs;.*?push \@pendingTreeJobs, \{.*?command => \$Tcmd\.\$outgS.*?tmp_space => \$QSBoptHR->\{tmpSpace\}.*?dispatchPendingTreeJobs\(.*?blocking => 0.*?Tree preparation pass complete:.*?dispatchPendingTreeJobs\(.*?blocking => 1.*?qsubSystemJobAlive\( \\\@jobs.*?writeTreeFailureAudit.*?without a valid output were quarantined/s,
@@ -462,7 +462,7 @@ like($strain,
 	qr/sub epaOnlyRetryReady.*?IQtree_allsites\.treefile.*?return '' if -s \$finalTree.*?legacy_missing_final.*?sub prepareEpaOnlyRetryState.*?clear stale completion missing final placed tree.*?create legacy placement-pending marker/s,
 	'a legacy retained backbone without the final non-backbone tree is prepared for isolated EPA recovery');
 like($strain,
-	qr/my \$epaOnlyRetry = exists\(\$MGSepaOnlyRetry\{\$MGS\}\).*?if \(!\$epaOnlyRetry && exists \$MGSnoTree\{\$MGS\}\).*?if \(!\$epaOnlyRetry && exists\(\$ConspecificMGS\{\$MGS\}\)/s,
+	qr/my \$epaOnlyRetry = exists\(\$MGSepaOnlyRetry\{\$MGS\}\).*?my \$epaRecovery = \$epaOnlyRetry \|\| \$epaFilterRetry.*?if \(!\$epaRecovery && exists \$MGSnoTree\{\$MGS\}\).*?if \(!\$epaRecovery && exists\(\$ConspecificMGS\{\$MGS\}\)/s,
 	'a validated EPA-only retry bypasses later historical no-tree and multicopy filters');
 like($strain,
 	qr/Placement-only recovery has already paid.*?exists\(\$MGSepaOnlyRetry\{\$specis\[\$b\]\}\).*?\$sizeOfDirs\[\$b\].*?Validated EPA-only recovery queue/s,
@@ -481,7 +481,7 @@ like($strain,
 	qr/\$workflowHeartbeatPath = File::Spec->catfile\(\$LOGDIR.*?\$SNPconsLOGs = "\$LOGDIR\/SNPconsCalls.*?my \$final = "\$LOGDIR\/\$sampleStatsLogName".*?my \$summary = "\$LOGDIR\/\$sampleStatsSummaryLogName".*?my \$final = "\$LOGDIR\/\$recoveryLogName".*?my \$summary = "\$LOGDIR\/\$summaryLogName"/s,
 	'worker heartbeats, SNP logs, sample statistics, recovery accounting, and summaries share LOGandSUB');
 like($strain,
-	qr/script => \$epaOnlyRetry.*?"\$outD2\/treeCmd\.epa_retry\.sh".*?"\$outD2\/treeCmd\.sh".*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
+	qr/script => \$epaFilterRetry.*?"\$outD2\/treeCmd\.epa_filter\.sh".*?: \$epaOnlyRetry \? "\$outD2\/treeCmd\.epa_retry\.sh".*?"\$outD2\/treeCmd\.sh".*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
 	'per-MGS tree scripts retain their compatibility paths while downstream strain-analysis scripts use LOGandSUB');
 like($strain,
 	qr/sub migrateLegacyOperationalLogs.*?strain_within.*?SNPconsCalls.*?strainSampleStats.*?strainRecovery.*?migrate legacy strain log.*?migrateLegacyOperationalLogs\(\)/s,
@@ -499,5 +499,14 @@ like($strain,
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,
 	'three-sample MGS accepted by the wrapper are retained for a minimal tree');
+like($strain,
+	qr/\$MGSepaFilterOnly\{\$MGS\}.*?-epaFilterOnly 1.*?treeCmd\.epa_filter\.sh.*?if \(\$epaFilterOnly && epaFilterOnlyReady\(\$outD2\)\).*?if \(\$doSubmit && -s \$completedTree\).*?retry_unlink\(\$completedTree.*?Would remove \$completedTree.*?epaOnlyRetryReady\(\$SIdirs\{\$MGS\}\).*?sub epaFilterOnlyReady.*?IQtree_allsites\.backbone\.treefile.*?strict_backbone\.samples\.tsv.*?epa_result\.jplace/s,
+	'strain removes completed EPA final trees as a trigger while unfinished jobs fall through to normal recovery');
+like($build_tree,
+	qr/if \(\$epaFilterOnly\).*?runEpaFilterOnly.*?for my \$input_spec/s,
+	'BuildTree dispatches filter-only publication before sequence-input validation');
+like($build_tree,
+	qr/sub runEpaFilterOnly.*?read_epa_jplace.*?filter_epa_placement_outliers.*?write_epa_placed_tree.*?sub iqtreePlacementModel/s,
+	'BuildTree filter-only mode reads the retained jplace and republishes the filtered final tree');
 
 done_testing();
