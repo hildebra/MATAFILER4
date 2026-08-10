@@ -129,7 +129,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.99;/,
+like($strain, qr/my \$version = 1\.00;/,
 	'prepared Phase-II scratch reuse increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
@@ -417,6 +417,9 @@ like($strain,
 like($strain,
 	qr/-strictBackbone \$strictBackbone .*?-strictBackboneFraction \$strictBackboneFraction .*?-strictBackboneMinSamples \$strictBackboneMinSamples .*?-placementMinOverlap \$placementMinOverlap/s,
 	'strainWithin forwards all backbone controls to buildTree5');
+like($strain,
+	qr/my \$epaPendantOutlierFactor = 5;.*?my \$epaPendantMinThreshold = 0\.02;.*?"epaPendantOutlierFactor=f" => \\\$epaPendantOutlierFactor.*?"epaPendantMinThreshold=f" => \\\$epaPendantMinThreshold.*?-epaPendantOutlierFactor \$epaPendantOutlierFactor.*?-epaPendantMinThreshold \$epaPendantMinThreshold/s,
+	'strainWithin enables and forwards adaptive EPA pendant-branch outlier QC');
 like($strain,
 	qr/-tmpSubdir .*?strain_within\/\$MGS.*?-stagedInputDir .*?\$tmpD.*?-completionMarker .*?\$treeStone/s,
 	"tree jobs pass lifecycle paths to buildTree5 as ordinary options");
