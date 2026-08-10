@@ -3,7 +3,17 @@ use warnings;
 use Test::More;
 use FindBin qw($Bin);
 use lib "$Bin/..";
-use Mods::SlurmAccounting qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
+use Mods::SlurmAccounting qw(
+	slurm_tree_memory_summary format_slurm_tree_memory_summary
+	next_oom_retry_memory_mb
+);
+
+is(next_oom_retry_memory_mb(10_240, 1_536_000), 20_480,
+	'OOM retry memory doubles the previous request');
+is(next_oom_retry_memory_mb(900_000, 1_536_000), 1_536_000,
+	'OOM retry memory is clamped to the configured ceiling');
+ok(!defined(next_oom_retry_memory_mb(1_536_000, 1_536_000)),
+	'an OOM job already at the ceiling is not retried');
 
 my @records = (
 	{ job_id => 101, mgs => 'MGS.1', requested_mb => 10000 },

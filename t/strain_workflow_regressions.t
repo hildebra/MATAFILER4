@@ -435,6 +435,15 @@ like($strain,
 	qr/\$totMem = int\(\$totMem \* 2\).*?\$numCoreL = 1.*?-epaOnly 1.*?\$outD2\/treeCmd\.epa_retry\.sh/s,
 	'an EPA-only retry gets a one-core doubled-memory job and explicit BuildTree mode');
 like($strain,
+	qr/my \$treeOOMMaxMemGB = 1500.*?treeOOMMaxMemGB=f.*?-treeOOMMaxMemGB must be positive.*?maximum_rounds => \$treeOOMRetryRounds/s,
+	'automatic tree OOM recovery has a configurable 1.5 TB default ceiling');
+like($strain,
+	qr/sub retryOOMTreeJobs.*?for my \$round \(1 \.\. \$maximumRounds\).*?oom_jobs.*?next_oom_retry_memory_mb.*?epaOnlyRetryReady\(\$mgsDirectory, 1\).*?-epaThreads\\s\+\\d\+\/\$1-epaThreads 1.*?treeCmd\.epa_retry\.sh.*?qsubSystemJobAlive/s,
+	'only accounting-confirmed OOM jobs are retried and EPA-stage retries use one thread');
+like($strain,
+	qr/sub dispatchPendingTreeJobs.*?submission_record => \{ %\{\$record\} \}.*?sub retryOOMTreeJobs/s,
+	'tree submission accounting retains the exact command record needed for bounded OOM retries');
+like($strain,
 	qr/sub epaOnlyRetryReady.*?\$onlySubmit.*?IQtree_allsites\.backbone\.treefile.*?strict_backbone\.samples\.tsv.*?status\\tplacement_pending.*?explicit_pending/s,
 	'a tree-only resume validates retained placement inputs and recognizes an explicit pending marker');
 like($strain,

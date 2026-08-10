@@ -4,7 +4,23 @@ use strict;
 use warnings;
 use Exporter qw(import);
 
-our @EXPORT_OK = qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
+our @EXPORT_OK = qw(
+	slurm_tree_memory_summary format_slurm_tree_memory_summary
+	next_oom_retry_memory_mb
+);
+
+sub next_oom_retry_memory_mb {
+	my ($current_mb, $maximum_mb) = @_;
+	die "Current and maximum OOM-retry memory must be positive numbers\n"
+		unless defined($current_mb) && defined($maximum_mb)
+			&& $current_mb =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/
+			&& $maximum_mb =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/
+			&& $current_mb > 0 && $maximum_mb > 0;
+	return undef if $current_mb >= $maximum_mb;
+	my $next_mb = int($current_mb * 2 + 0.5);
+	$next_mb = int($maximum_mb + 0.5) if $next_mb > $maximum_mb;
+	return $next_mb;
+}
 
 
 sub _run_sacct {

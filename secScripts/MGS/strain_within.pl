@@ -33,7 +33,10 @@ use Mods::StrainParts qw(
 	split_generation_complete clear_split_generation resolve_fasta_artifact
 	append_fasta_records_atomic sort_fasta_by_locus
 );
-use Mods::SlurmAccounting qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
+use Mods::SlurmAccounting qw(
+	slurm_tree_memory_summary format_slurm_tree_memory_summary
+	next_oom_retry_memory_mb
+);
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
 );
@@ -85,6 +88,7 @@ sub resetMGSTreeOutputs;
 sub stepComplete;
 sub finalizeSampleQC;
 sub dispatchPendingTreeJobs;
+sub retryOOMTreeJobs;
 sub usage;
 sub writeRecoveryRow;
 sub mergeRecoveryLogs;
@@ -346,6 +350,8 @@ my $useGTDBmg = "GTDB";
 my $selfMemGb = 10;
 my $mosaicMemGb = 150;
 my $phase1WorkerRetries = 2;
+my $treeOOMMaxMemGB = 1500;
+my $treeOOMRetryRounds = 3;
 my $redoSubmissionData = 0;
 my $deepRepair = 0;
 my $rmMSA = 1; #argument passed to buildTree5.pl 
@@ -414,6 +420,7 @@ GetOptions(
 	"selfMemGb=i"    => \$selfMemGb,
 	"mosaicMemGb=i"  => \$mosaicMemGb,
 	"phase1WorkerRetries=i" => \$phase1WorkerRetries,
+	"treeOOMMaxMemGB=f" => \$treeOOMMaxMemGB,
 	"onlySubmit=i"   => \$onlySubmit, #submit only jobs, or also recreate input fna/faa files? (can take days)
 	"reSubmit=i"     => \$reSubmit, #for all MGS: resubmit tree phylo building
 	"recalcTrees=i"  => \$recalcTrees, #delete tree outputs and rebuild from existing per-MGS inputs
@@ -520,6 +527,7 @@ die "-maxGenes and -treeLocusBudget must be positive\n"
 die "-flushEvery must be positive\n" unless $appendWriteTrigger > 0;
 die "-phase1WorkerRetries must be between 0 and 10\n"
 	unless $phase1WorkerRetries >= 0 && $phase1WorkerRetries <= 10;
+die "-treeOOMMaxMemGB must be positive\n" unless $treeOOMMaxMemGB > 0;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax,
 		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction,
@@ -1504,8 +1512,12 @@ if ($maxSubJob
 #too many jobs to use as job dependency..
 qsubSystemJobAlive( \@jobs,$QSBoptHR ) if @jobs && $doSubmit;
 if (@treeJobAccounting) {
-	my $memorySummary = slurm_tree_memory_summary(\@treeJobAccounting);
-	print format_slurm_tree_memory_summary($memorySummary);
+	retryOOMTreeJobs(
+		accounting => \@treeJobAccounting,
+		options => $QSBoptHR,
+		maximum_mb => int($treeOOMMaxMemGB * 1024 + 0.5),
+		maximum_rounds => $treeOOMRetryRounds,
+	);
 }
 my $incompleteTreeOutcomes = 0;
 if ($doSubmit) {
@@ -3259,9 +3271,12 @@ sub evalFileStatus{
 }
 
 sub epaOnlyRetryReady {
-	my ($mgsDirectory) = @_;
-	return '' unless $onlySubmit && !$recalcTrees && !$reSubmit
-		&& !$repairCAT && !$deepRepair && !$redoSubmissionData
+	my ($mgsDirectory, $activeOOMRetry) = @_;
+	my $retryModeAllowed = $activeOOMRetry || (
+		$onlySubmit && !$recalcTrees && !$reSubmit
+			&& !$repairCAT && !$deepRepair && !$redoSubmissionData
+	);
+	return '' unless $retryModeAllowed
 		&& $strictBackbone && $phyloProg == 1;
 	return '' unless defined($mgsDirectory) && -d $mgsDirectory;
 	my $pending = File::Spec->catfile($mgsDirectory, 'placementPending.sto');
@@ -4353,6 +4368,7 @@ sub printEarlyRunHeader {
 	print "Requested output: $requestedOutput\n";
 	print "Cores: $numCores (max: $maxCores); submit=$doSubmit; "
 		."onlySubmit=$onlySubmit; recalcTrees=$recalcTrees; redoSubmissionData=$redoSubmissionData\n";
+	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB\n";
 	print "Initializing paths, maps, and catalogues...\n";
 	print "==============================================\n";
 }
@@ -4542,6 +4558,8 @@ sub dispatchPendingTreeJobs {
 			push @{$accounting}, {
 				job_id => $schedulerJobID, mgs => $record->{mgs},
 				requested_mb => $record->{requested_mb},
+				retry_round => $record->{retry_round} // 0,
+				submission_record => { %{$record} },
 			} if $schedulerJobID =~ /^\d+$/;
 		}
 	}
@@ -4549,6 +4567,100 @@ sub dispatchPendingTreeJobs {
 	$options->{tmpSpace} = $saved_tmp_space;
 	$options->{useLongQueue} = $saved_long_queue;
 	return { submitted => $submitted, pending => scalar(@{$queue}) };
+}
+
+sub retryOOMTreeJobs {
+	my %args = @_;
+	my $accounting = $args{accounting} || [];
+	my $options = $args{options} || {};
+	my $maximumMB = $args{maximum_mb};
+	my $maximumRounds = $args{maximum_rounds} // 3;
+	return 0 unless @{$accounting};
+	return 0 unless $options->{doSubmit} && ($options->{qmode} || '') eq 'slurm';
+	die "OOM retry rounds must be between 0 and 3\n"
+		unless $maximumRounds >= 0 && $maximumRounds <= 3;
+
+	my @roundAccounting = @{$accounting};
+	my $summary = slurm_tree_memory_summary(\@roundAccounting);
+	print format_slurm_tree_memory_summary($summary);
+	my $retried = 0;
+	for my $round (1 .. $maximumRounds) {
+		last unless $summary->{available};
+		my @oom = @{$summary->{oom_jobs} || []};
+		last unless @oom;
+		my @retryQueue;
+		for my $oom (@oom) {
+			my $original = $oom->{submission_record};
+			unless (ref($original) eq 'HASH') {
+				warn "Cannot retry OOM tree job $oom->{job_id}: submission record is unavailable\n";
+				next;
+			}
+			my $nextMB = next_oom_retry_memory_mb(
+				$original->{requested_mb}, $maximumMB);
+			unless (defined($nextMB)) {
+				warn "OOM retry ceiling reached for $original->{mgs}: "
+					."$original->{requested_mb} MB already meets -treeOOMMaxMemGB "
+					."$treeOOMMaxMemGB\n";
+				next;
+			}
+			my %retry = %{$original};
+			my $mgsDirectory = dirname($retry{terminal});
+			my $epaState = epaOnlyRetryReady($mgsDirectory, 1);
+			my $epaStage = $retry{epa_only} || length($epaState);
+			if ($epaStage) {
+				unless (length($epaState)) {
+					warn "Cannot isolate EPA OOM retry for $retry{mgs}: retained placement state is incomplete\n";
+					next;
+				}
+				unless (prepareEpaOnlyRetryState($mgsDirectory, $epaState)) {
+					print "Skipping OOM retry for $retry{mgs}: final placed tree is now complete.\n";
+					next;
+				}
+				$retry{epa_only} = 1;
+				$retry{cores} = 1;
+				$retry{command} =~ s/(^|\s)-epaThreads\s+\d+/$1-epaThreads 1/;
+				$retry{command} =~ s/(^|\s)-cores\s+\d+/$1-cores 1/;
+				unless ($retry{command} =~ /(?:^|\s)-epaOnly\s+1(?:\s|$)/) {
+					$retry{command} =~ s/\s+\z//;
+					$retry{command} .= " -epaOnly 1\n";
+				}
+				$retry{script} = File::Spec->catfile(
+					$mgsDirectory, 'treeCmd.epa_retry.sh');
+			}
+			$retry{retry_round} = $round;
+			$retry{requested_mb} = $nextMB;
+			$retry{memory} = $nextMB.'M';
+			$retry{job_name} = 'OOM'.$round.'.'.$retry{mgs};
+			$retry{script} = File::Spec->catfile(
+				$mgsDirectory, "treeCmd.oom_retry.$round.sh") unless $epaStage;
+			push @retryQueue, \%retry;
+			print "OOM retry round $round/$maximumRounds for $retry{mgs}: "
+				."$original->{requested_mb} MB -> $nextMB MB; "
+				.($epaStage ? 'EPA-only with 1 thread' : "$retry{cores} core full-tree resume")
+				."\n";
+		}
+		last unless @retryQueue;
+		my (@retryJobs, @retryAccounting);
+		my $drain = dispatchPendingTreeJobs(
+			queue => \@retryQueue, options => $options,
+			jobs => \@retryJobs, accounting => \@retryAccounting,
+			blocking => 1,
+		);
+		die "Internal error: OOM retry queue was not drained\n" if @retryQueue;
+		last unless $drain->{submitted} && @retryAccounting;
+		qsubSystemJobAlive(\@retryJobs, $options) if @retryJobs;
+		push @{$accounting}, @retryAccounting;
+		$retried += scalar(@retryAccounting);
+		@roundAccounting = @retryAccounting;
+		$summary = slurm_tree_memory_summary(\@roundAccounting);
+		print "OOM retry round $round accounting:\n";
+		print format_slurm_tree_memory_summary($summary);
+	}
+	if ($summary->{available} && @{$summary->{oom_jobs} || []}) {
+		warn "Tree OOM recovery stopped after at most $maximumRounds retry round(s); "
+			."remaining OOM outcomes stay quarantined for inspection\n";
+	}
+	return $retried;
 }
 
 sub resetMGSTreeOutputs {
@@ -5399,6 +5511,9 @@ Workflow splitting:
                                  disables splitting, positive values are explicit
   -subjob INT                   Internal split-worker index; supplied only by
                                  the parent process
+  -treeOOMMaxMemGB FLOAT        Maximum memory for automatic tree OOM retries;
+                                 each OOM round doubles the previous request and
+                                 at most three rounds are attempted [default 1500]
 
 Gene selection and biological QC:
   -maxGenes INT                  Maximum validated loci per MGS/sample
