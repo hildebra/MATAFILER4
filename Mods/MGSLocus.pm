@@ -136,7 +136,7 @@ sub build_locus_groups {
 	}
 
 	my (@groups, %gene_to_locus, %locus_context, %locus_by_id);
-	my $merged_seeds = 0;
+	my ($merged_seeds, $incomplete_linkage_rejections) = (0, 0);
 	for my $mgs (sort keys %by_mgs_cog) {
 		for my $cog (sort keys %{$by_mgs_cog{$mgs}}) {
 			my @seeds = sort {
@@ -202,7 +202,10 @@ sub build_locus_groups {
 							}
 						}
 					}
-					next unless $all_compatible;
+					unless ($all_compatible) {
+						$incomplete_linkage_rejections++;
+						next;
+					}
 				}
 				$parent{$right_root} = $left_root;
 				$component_samples{$left_root}{$_} = 1 for keys %{$component_samples{$right_root}};
@@ -254,6 +257,7 @@ sub build_locus_groups {
 		member_context => \%member_context,
 		locus_context => \%locus_context,
 		merged_seeds => $merged_seeds,
+		incomplete_linkage_rejections => $incomplete_linkage_rejections,
 	};
 }
 

@@ -77,10 +77,8 @@ like($strain, qr/-completionMarker "?\.shellQuote\(\$treeStone\)/,
 	"tree jobs delegate validated completion markers to buildTree5");
 unlike($strain, qr/test -s "?\.shellQuote\(\$IQtreef\).*?touch "?\.shellQuote\(\$treeStone\)/s,
 	"tree jobs no longer encode completion validation in shell");
-like($strain, qr/if \(\$options->\{doSubmit\}\) \{.*?retry_unlink\(\$record->\{\$_\}.*?for qw\(stone tree terminal placement_pending\)/s,
-	'a submitted tree retry cannot pass through a stale completion stone');
-like($strain, qr/retry_unlink\(\$record->\{\$_\}, label => "clear stale tree-job \$_"\).*?for qw\(stone tree terminal placement_pending\)/s,
-	'a delayed tree submission removes stale output before dispatching a fresh retry');
+like($strain, qr/my \@staleOutputs = \$record->\{epa_only\}.*?qw\(stone terminal\).*?qw\(stone tree terminal placement_pending\).*?retry_unlink/s,
+	'an EPA-only submission retains its placement marker and backbone-derived primary path while ordinary retries clear stale outputs');
 like($strain, qr/clear_split_generation\(\$splitManifest.*?write_split_generation\(\$splitManifest.*?printf '%s\\\\n'/s,
 	'a new split generation clears stale state and tags each worker completion');
 like($strain, qr/ConspecificMGS\.\$subJob\.log.*?sub mergeConspecificLogs/s,
@@ -131,7 +129,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 0\.97;/,
+like($strain, qr/my \$version = 0\.99;/,
 	'prepared Phase-II scratch reuse increments the workflow version');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
@@ -194,7 +192,7 @@ like($strain,
 	qr/historical exclusion loading.*?excluded_MGS=.*?outgroup-reference preparation.*?reference_NT=.*?MGS_with_outgroup_candidates=/s,
 	'historical exclusions and outgroup-reference preparation report their final counts');
 like($strain,
-	qr/my %treeDisposition.*?\$treeDisposition\{'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
+	qr/my %treeDisposition.*?\$treeDisposition\{\$epaOnlyRetry \? 'EPA-only retry job' : 'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
 	'tree submission reports every eligible and skipped MGS disposition before waiting');
 like($strain,
 	qr/my \@pendingTreeJobs;.*?push \@pendingTreeJobs, \{.*?command => \$Tcmd\.\$outgS.*?tmp_space => \$QSBoptHR->\{tmpSpace\}.*?dispatchPendingTreeJobs\(.*?blocking => 0.*?Tree preparation pass complete:.*?dispatchPendingTreeJobs\(.*?blocking => 1.*?qsubSystemJobAlive\( \\\@jobs.*?writeTreeFailureAudit.*?without a valid output were quarantined/s,
@@ -314,8 +312,11 @@ like($strain,
 	qr/sub recordValidatedEmptyExtractions.*?persistentMGSInputState\(\$MGS\) eq 'missing'.*?scratchMGSInputState\(\$MGS\) ne 'missing'.*?writeNoRecoverableLociMarker\(\$SIdirs\{\$MGS\}, 'empty_extraction'\).*?\$MGSnoTreeReason\{\$MGS\} = 'no_recoverable_loci'/s,
 	'a completed Stage I persists validated no-recoverable-locus outcomes for future resumes');
 like($strain,
-	qr/\$multiSmpl > 2 && \$ngenes >= 10.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?tree_input_repair\.queue\.tsv.*?no catalogue-wide abort was triggered/s,
+	qr/\$multiSmpl > 2 && \$ngenes >= \$MGStoolowGsThr.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?tree_input_repair\.queue\.tsv.*?no catalogue-wide abort was triggered/s,
 	'insufficient tree inputs are terminally marked while incomplete triplets enter a persistent repair queue');
+like($strain,
+	qr/last if \$cntShrCogs >= \$MGStoolowGsThr.*?if \(\$cntShrCogs < \$MGStoolowGsThr\)/s,
+	'outgroup and tree eligibility share the configured eight-locus default');
 like($strain,
 	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
 	'split extraction workers inherit the missing-input MGS subset');
@@ -403,7 +404,7 @@ like($strain,
 	qr/my \$rateMergePartitions = 1;.*?my \$rateMergeMaxBins = 8;.*?my \$rateMergeTargetSites = 30_000;.*?my \$rateMergeMinLoci = 20;.*?my \$rateMergeMinSites = 20_000;.*?"rateMergePartitions=i" => \\\$rateMergePartitions.*?-rateMergePartitions \$rateMergePartitions.*?-rateMergeMaxBins \$rateMergeMaxBins.*?-rateMergeTargetSites \$rateMergeTargetSites.*?-rateMergeMinLoci \$rateMergeMinLoci.*?-rateMergeMinSites \$rateMergeMinSites/s,
 	'strainWithin enables deterministic rate merging and forwards all bin controls');
 like($strain,
-	qr/if \(\$taxonAwareLocusSelection\) \{.*?\$taxonAwareGeneBudget = \$noGeneLimit.*?\$presortGenes.*?\$maxNGenes < \$presortGenes.*?taxonAwareLocusBudgets\(\$taxonAwareGeneBudget\).*?-taxonAwareMaxLoci \$taxonAwareMaxLoci.*?-taxonAwareCoreLoci \$taxonAwareCoreLoci.*?-taxonAwareCandidateExtra \$taxonAwareCandidateExtra.*?sub taxonAwareLocusBudgets.*?\$maximumLoci \* 0\.8.*?\$maximumLoci \* 0\.3/s,
+	qr/maximum_genes_per_sample => 600.*?maximum_tree_loci => 400.*?\$taxonAwareGeneBudget = \$treeLocusBudget < \$presortGenes.*?taxonAwareLocusBudgets\(\$taxonAwareGeneBudget\).*?-taxonAwareMaxLoci \$taxonAwareMaxLoci.*?-taxonAwareCoreLoci \$taxonAwareCoreLoci.*?-taxonAwareCandidateExtra \$taxonAwareCandidateExtra.*?sub taxonAwareLocusBudgets.*?\$maximumLoci \* 0\.8.*?\$maximumLoci \* 0\.3/s,
 	'strainWithin scales 80% core, 20% rescue capacity, and 30% QC backfill to its effective gene budget');
 like($strain,
 	qr/my \$strictBackbone = 1;.*?my \$strictBackboneFraction = 0\.35;.*?my \$strictBackboneMinSamples = 3;.*?my \$placementMinOverlap = 400;.*?"strictBackbone=i"\s+=> \\\$strictBackbone.*?"strictBackboneFraction=f"\s+=> \\\$strictBackboneFraction.*?"strictBackboneMinSamples=i"\s+=> \\\$strictBackboneMinSamples.*?"placementMinOverlap=i"\s+=> \\\$placementMinOverlap/s,
@@ -423,14 +424,36 @@ like($strain,
 	qr/sub phase1WorkerCommand.*?Stage-I workers receive extraction\/consensus controls only.*?sub recoverCompletedSplitPhaseI.*?phase1WorkersNeedingRetry.*?Resubmitting invalid Phase-I worker.*?phase1_worker_repair\.queue\.tsv/s,
 	'live and resumed Phase I share extraction-only worker commands and durable targeted repair');
 like($strain,
-	qr/No automatic tree resubmission was attempted.*?sub writeTreeFailureAudit.*?failed_missing_output.*?valid_no_tree.*?placement_pending/s,
+	qr/No automatic full-tree resubmission was attempted.*?sub writeTreeFailureAudit.*?failed_missing_output.*?valid_no_tree.*?placement_pending/s,
 	'tree outcomes are classified and quarantined without automatic tree resubmission');
+like($strain,
+	qr/\$totMem = int\(\$totMem \* 2\).*?\$numCoreL = 1.*?-epaOnly 1.*?\$outD2\/treeCmd\.epa_retry\.sh/s,
+	'an EPA-only retry gets a one-core doubled-memory job and explicit BuildTree mode');
+like($strain,
+	qr/sub epaOnlyRetryReady.*?\$onlySubmit.*?status\\tplacement_pending.*?IQtree_allsites\.backbone\.treefile.*?strict_backbone\.samples\.tsv/s,
+	'a tree-only resume recognizes only complete, explicitly pending placement state');
 like($strain,
 	qr/strain_within\.heartbeat\.tsv.*?strain_within\.failure\.tsv.*?sub writeStrainWorkflowHeartbeat.*?sub writeStrainWorkflowFailure/s,
 	'strain workflow persists stage heartbeats and fatal-stage diagnostics');
 unlike($strain,
 	qr/preflightStrainWorkflow|preflight_executable|preflight_directory|filesystem_capacity/,
 	'strain workflow does not preflight environment-wrapped commands as local executables');
+
+like($strain,
+	qr/require_complete_linkage => 1.*?Mosaic complete-linkage protection rejected/s,
+	'strain extraction requires pairwise confirmation throughout multi-seed Mosaic loci');
+like($strain,
+	qr/\$workflowHeartbeatPath = File::Spec->catfile\(\$LOGDIR.*?\$SNPconsLOGs = "\$LOGDIR\/SNPconsCalls.*?my \$final = "\$LOGDIR\/\$sampleStatsLogName".*?my \$summary = "\$LOGDIR\/\$sampleStatsSummaryLogName".*?my \$final = "\$LOGDIR\/\$recoveryLogName".*?my \$summary = "\$LOGDIR\/\$summaryLogName"/s,
+	'worker heartbeats, SNP logs, sample statistics, recovery accounting, and summaries share LOGandSUB');
+like($strain,
+	qr/script => \$epaOnlyRetry.*?"\$outD2\/treeCmd\.epa_retry\.sh".*?"\$outD2\/treeCmd\.sh".*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
+	'per-MGS tree scripts retain their compatibility paths while downstream strain-analysis scripts use LOGandSUB');
+like($strain,
+	qr/sub migrateLegacyOperationalLogs.*?strain_within.*?SNPconsCalls.*?strainSampleStats.*?strainRecovery.*?migrate legacy strain log.*?migrateLegacyOperationalLogs\(\)/s,
+	'legacy top-level operational logs are safely migrated into LOGandSUB');
+like($strain,
+	qr/sub writeSelectionAttritionSummary.*?selection_attrition\.tsv.*?strainSelectionAttrition\.tsv/s,
+	'strain summary aggregates completed BuildTree attrition reports');
 
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,

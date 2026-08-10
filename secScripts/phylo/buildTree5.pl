@@ -128,6 +128,7 @@ sub taxonAwareAlignmentMetrics;
 sub informativeSequenceLength;
 sub writeTaxonAwareLocusAudit;
 sub writeTaxonAwareSampleAudit;
+sub writeSelectionAttritionAudit;
 sub writePostAlignmentQCPolicy;
 sub alignmentFileStem;
 sub readPostAlignmentRateMetrics;
@@ -142,6 +143,8 @@ sub preflightBuildTree;
 sub inputFingerprint;
 sub epaModelArtifact;
 sub runEpaNgPlacement;
+sub readStrictBackboneClassification;
+sub runEpaOnlyPlacement;
 sub epaResourcePlan;
 sub iqtreePlacementModel;
 sub postAlignmentStep;
@@ -153,7 +156,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.50;
+my $version = 5.52;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -214,6 +217,7 @@ my $withinSpecies = 0;
 my $strainWithinPreset = 0;
 
 my ($continue,$isAligned) = (0,0);#overwrite already existing files?
+my $epaOnly = 0;
 my $outgroup="";
 my $fixHeaders = 0;
 my ($doGubbins,$doCFML,$doRAXML,$doFastTree,$doVeryFastTree, $doIQTree,$doRAXMLng) = (0,0,0,0,0, 0, 0);#fastree as default tree builder
@@ -378,6 +382,7 @@ GetOptions(
 	"SynTree=i"	=> \$calcSyn,
 	"NonSynTree=i"	=> \$calcNonSyn,
 	"continue=i" => \$continue,
+	"epaOnly=i" => \$epaOnly,
 	"bootstrap=i" => \$bootStrap,
 	"subsetSmpls=i" => \$subsetSmpls,
 	"postFilter=s" => \$postFilter, # "," sep list of zorro,guidance2,macse
@@ -449,6 +454,7 @@ die "-withinSpecies must be 0 or 1\n"
 	unless $withinSpecies == 0 || $withinSpecies == 1;
 die "-strainWithinPreset must be 0 or 1\n"
 	unless $strainWithinPreset == 0 || $strainWithinPreset == 1;
+die "-epaOnly must be 0 or 1\n" unless $epaOnly == 0 || $epaOnly == 1;
 die "-AutoModel must be 0 or 1\n"
 	unless $treeAutoModel == 0 || $treeAutoModel == 1;
 
@@ -497,6 +503,15 @@ die "-epaThreads must be a positive integer (default $EPA_NG_DEFAULT{threads})\n
 	if $epaThreads < 1;
 die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or a positive MB value\n"
 	if $epaMaxMemMB < -1;
+if ($epaOnly) {
+	die "-epaOnly requires -continue 1\n" unless $continue;
+	die "-epaOnly requires -strictBackbone 1\n" unless $strictBackbone;
+	die "-epaOnly currently requires exactly -runIQtree 1\n"
+		unless $doIQTree && !$doRAXML && !$doRAXMLng
+			&& !$doFastTree && !$doVeryFastTree;
+	die "-epaOnly requires -completionMarker and -placementPendingMarker\n"
+		unless length($completionMarker) && length($placementPendingMarker);
+}
 die "-postAlignmentLocusQC must be 0 or 1 "
 	."(default: 0 between species, 1 within species)\n"
 	unless $postAlignmentLocusQC == 0 || $postAlignmentLocusQC == 1;
@@ -758,6 +773,18 @@ die "Category-based alignments require -aa\n" if $cogCats ne "" && $aaFna eq "";
 die "Nucleotide trees require -fna\n" if !$useAA4tree && $fnFna eq "";
 preflightBuildTree($outD, $tmpD);
 
+if ($epaOnly) {
+	my $retainedAlignment = File::Spec->catfile($MsaD, 'MSAli.fna');
+	my $retainedQueries = File::Spec->catfile($MsaD, 'MSAli.placement.fna');
+	my $epaTreeOptions = createTreeOpt($retainedAlignment, 'allsites', '', 0, '');
+	$epaTreeOptions->{IQtreeout} .= '.backbone';
+	runEpaOnlyPlacement(
+		$epaTreeOptions, $retainedAlignment, $retainedQueries, $treeD,
+		File::Spec->catfile($treeD, 'strict_backbone.samples.tsv'),
+	);
+	exit(0);
+}
+
 if (!$continue){
 	safeRemoveTree($treeD, $outD);
 	safeRemoveTree($MsaD, $outD);
@@ -800,10 +827,17 @@ my $strictPlacementMinimumNT = $placementMinOverlap;
 my $strictPlacementMinimumLoci = 2;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
+my $selectionAttritionReport = "$treeD/selection_attrition.tsv";
+my %selectionAttrition = map { $_ => 'NA' } qw(
+	input_loci input_sequences input_samples length_retained_sequences
+	length_filtered_sequences eligible_loci candidate_loci candidate_samples
+	aligned_loci alignment_failed_loci post_qc_loci final_loci final_samples
+	backbone_samples placement_samples excluded_samples
+);
 my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $alignmentWorkPolicyFile = "$MsaD/alignment_work.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=11",
+	"schema=12",
 	"msa_program=$MSAprog",
 	"fna_input=".inputFingerprint($fnFna),
 	"faa_input=".inputFingerprint($aaFna),
@@ -1027,6 +1061,8 @@ if ($isAligned){
 	close $xI;
 	#first cleanup of cat file..
 	my @linesCats2; my @linesCats3;
+	my %inputSamples;
+	my $inputSequences = 0;
 	foreach (@linesCats){ #check first some parameters..
 		$cnt++; my @spl = split /\t/;
 		if (@spl && $spl[0] =~ m/^#/){shift @spl;}
@@ -1038,6 +1074,8 @@ if ($isAligned){
 		my ($sp, $gene) = parseSeqId($spl[0], "category line ".($cnt + 1));
 		foreach my $seq (@spl){### $seq = genomeX_NOGY
 			($sp) = parseSeqId($seq, "category line ".($cnt + 1));
+			$inputSamples{$sp} = 1;
+			$inputSequences++;
 			die "can't find AA seq $seq\n" if ($aaFna ne "" && !exists ($FAA{$seq}));
 			die "can't find fna seq $seq\n" if (!exists ($FNA{$seq}) && !$useAA4tree);
 			#print "$MFAA{$curK}\n";			#my $ss = $FAA{$seq}; 			#filter per sequence 
@@ -1076,6 +1114,9 @@ if ($isAligned){
 	}
 	#die;
 	my $GenesQtl90 = quantile(0.9,@genesPerCat);
+	$selectionAttrition{input_loci} = scalar(@linesCats);
+	$selectionAttrition{input_sequences} = $inputSequences;
+	$selectionAttrition{input_samples} = scalar(keys %inputSamples);
 	my $GenesQtl50 = quantile(0.5,@genesPerCat);
 	my $minimumCategorySequences = $GenesQtl90 * $fracMaxGenes90pct;
 	$minimumCategorySequences = 1 if $minimumCategorySequences < 1;
@@ -1095,6 +1136,8 @@ if ($isAligned){
 		@linesCats3 = @{$candidateSelection->{categories}};
 		%taxonAwarePreMetrics = %{$candidateSelection->{metrics}};
 		%taxonAwareUniverseSamples = %{$candidateSelection->{samples}};
+		$selectionAttrition{eligible_loci} = scalar(keys %taxonAwarePreMetrics);
+		$selectionAttrition{candidate_samples} = scalar(keys %taxonAwareUniverseSamples);
 		print "Taxon-aware gene-category prefilter: retained "
 			. scalar(@linesCats3) . "/" . scalar(@linesCats)
 			. " alignment candidates (up to $taxonAwareCandidateExtra are QC backfill); "
@@ -1114,6 +1157,9 @@ if ($isAligned){
 			. ($geneTooShort + $geneTooLong) . " sequence(s) below $ntFracGene of their gene-length Q90; "
 			. "category-size Q90=$GenesQtl90, minimum category sequences=$minimumCategorySequences\n";
 	}
+	$selectionAttrition{candidate_loci} = scalar(@linesCats3);
+	$selectionAttrition{length_retained_sequences} = $geneTooLong;
+	$selectionAttrition{length_filtered_sequences} = $geneTooShort;
 	warn "Only " . scalar(@linesCats3) . " gene categories remain after prefiltering "
 		. "(Q50=$GenesQtl50, Q90=$GenesQtl90, category threshold="
 		. "$minimumCategorySequences)\n"
@@ -1437,6 +1483,8 @@ if ($isAligned){
 	}
 	print "Per-locus alignment summary: $alignedLoci/$candidateLoci candidate loci prepared"
 		. ($failedLoci ? "; $failedLoci failed and were excluded" : "") . "\n";
+	$selectionAttrition{aligned_loci} = $alignedLoci;
+	$selectionAttrition{alignment_failed_loci} = $failedLoci;
 	
 	my $mergPIDtag = "_merge";
 	mergePids("$MsaD/",$cnt, "AA",$mergPIDtag) if ($calcDistMat); #merge different percIDs
@@ -1492,6 +1540,7 @@ if ($postAlignmentLocusQC && $cogCats ne "") {
 	writePostAlignmentQCPolicy($postAlignmentQCPolicyFile, $postAlignmentQCPolicy);
 }
 my $postQCPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
+$selectionAttrition{post_qc_loci} = scalar(@{$postQCPrimary});
 postAlignmentStep("locus QC", $postAlignmentStepStarted,
 	"enabled=".($postAlignmentLocusQC ? 1 : 0),
 	"retained_loci=".scalar(@{$postQCPrimary}),
@@ -1621,6 +1670,8 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 	}
 }
 my $postSelectionPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
+$selectionAttrition{final_loci} = scalar(@{$postSelectionPrimary});
+$selectionAttrition{final_samples} = scalar(keys %samples);
 postAlignmentStep("taxon-aware locus selection", $postAlignmentStepStarted,
 	"enabled=".($taxonAwareLocusSelection ? 1 : 0),
 	"selected_loci=".scalar(@{$postSelectionPrimary}),
@@ -1645,6 +1696,10 @@ if ($calcMSA && !fileGZs($multAli)
 	my $reason = $cogCats ne '' ? 'no_usable_loci' : 'single_gene_alignment_failed';
 	clearLifecycleMarker($completionMarker, 'clear stale tree completion');
 	clearLifecycleMarker($placementPendingMarker, 'clear stale placement-pending marker');
+	$selectionAttrition{backbone_samples} = 0;
+	$selectionAttrition{placement_samples} = 0;
+	$selectionAttrition{excluded_samples} = $selectionAttrition{final_samples} eq 'NA' ? 0 : $selectionAttrition{final_samples};
+	writeSelectionAttritionAudit($selectionAttritionReport, \%selectionAttrition);
 	writeOutcomeMarker($terminalMarker, 'valid_no_tree', $reason, {
 		candidate_loci => $candidateLoci, aligned_loci => $alignedLoci,
 		failed_loci => $failedLoci, samples => scalar(keys %samples),
@@ -1741,6 +1796,14 @@ if ($strictBackbone) {
 		."see $classificationFile\n"
 		if $strictSplit->{fallback};
 }
+$selectionAttrition{backbone_samples} = $strictSplit
+	? scalar(@{$strictSplit->{backbone}}) : scalar(keys %samples);
+$selectionAttrition{placement_samples} = $strictSplit
+	? scalar(@{$strictSplit->{placement}}) : 0;
+$selectionAttrition{excluded_samples} = $strictSplit
+	? scalar(@{$strictSplit->{excluded} || []}) : 0;
+writeSelectionAttritionAudit($selectionAttritionReport, \%selectionAttrition);
+
 postAlignmentStep("strict-backbone preparation", $postAlignmentStepStarted,
 	"enabled=".($strictBackbone ? 1 : 0),
 	"backbone_samples=".($strictSplit ? scalar(@{$strictSplit->{backbone}}) : scalar(keys %samples)),
@@ -2212,6 +2275,146 @@ sub epaResourcePlan {
 		$threads = $memoryThreads if $memoryThreads < $threads;
 	}
 	return ($threads, $memoryMB);
+}
+
+sub readStrictBackboneClassification {
+	my ($path) = @_;
+	die "EPA-only recovery requires a non-empty strict-backbone classification: $path\n"
+		unless -s $path;
+	open my $input, '<', $path
+		or die "Cannot read strict-backbone classification $path: $!\n";
+	my $header = <$input> // '';
+	$header =~ s/[\r\n]+\z//;
+	my @columns = split /\t/, $header, -1;
+	my %column = map { $columns[$_] => $_ } 0 .. $#columns;
+	for my $required (qw(sample tree_role reason backbone_overlap_nt
+		backbone_overlap_loci backbone_state_divergence)) {
+		die "Strict-backbone classification $path lacks column '$required'\n"
+			unless exists $column{$required};
+	}
+	my $split = {
+		backbone => [], placement => [], excluded => [],
+		reason => {}, backbone_overlap => {},
+	};
+	my %seen;
+	while (my $line = <$input>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless length $line;
+		my @field = split /\t/, $line, -1;
+		my $sample = $field[$column{sample}] // '';
+		my $role = $field[$column{tree_role}] // '';
+		die "Malformed strict-backbone classification row in $path\n"
+			unless length($sample) && grep { $role eq $_ } qw(backbone placement excluded);
+		die "Duplicate sample '$sample' in strict-backbone classification $path\n"
+			if $seen{$sample}++;
+		push @{$split->{$role}}, $sample;
+		$split->{reason}{$sample} = $field[$column{reason}] // '';
+		for my $metric (qw(backbone_overlap_nt backbone_overlap_loci
+			backbone_state_divergence)) {
+			my $value = $field[$column{$metric}] // 'NA';
+			$split->{backbone_overlap}{$sample}{$metric} = 0 + $value
+				if $value ne 'NA' && $value =~ /\A-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z/;
+		}
+	}
+	close $input or die "Cannot close strict-backbone classification $path: $!\n";
+	return $split;
+}
+
+sub runEpaOnlyPlacement {
+	my ($treeOpts, $backboneAlignment, $queryAlignment, $treeDirectory,
+		$classificationFile) = @_;
+	die "EPA-only recovery refuses to run without placement-pending state: $placementPendingMarker\n"
+		unless -s $placementPendingMarker;
+	open my $marker, '<', $placementPendingMarker
+		or die "Cannot read placement-pending marker $placementPendingMarker: $!\n";
+	my %markerState;
+	while (my $line = <$marker>) {
+		$line =~ s/[\r\n]+\z//;
+		my ($key, $value) = split /\t/, $line, 2;
+		$markerState{$key} = $value if defined($key) && defined($value);
+	}
+	close $marker or die "Cannot close placement-pending marker $placementPendingMarker: $!\n";
+	die "EPA-only recovery requires status=placement_pending in $placementPendingMarker\n"
+		unless ($markerState{status} // '') eq 'placement_pending';
+	die "EPA-only recovery refuses to replace a completed result: $completionMarker\n"
+		if -s $completionMarker;
+	die "EPA-only recovery requires retained backbone alignment $backboneAlignment\n"
+		unless -s $backboneAlignment;
+	die "EPA-only recovery requires retained placement alignment $queryAlignment\n"
+		unless -s $queryAlignment;
+
+	my $backboneTree = "$treeOpts->{IQtreeout}.treefile";
+	my $validationReason = '';
+	die "EPA-only recovery requires a validated IQ-TREE backbone $backboneTree: $validationReason\n"
+		unless cachedIQTreeOutputComplete(
+			$treeOpts->{IQtreeout}, $backboneAlignment, \$validationReason);
+	my $split = readStrictBackboneClassification($classificationFile);
+	die "EPA-only recovery found no placement samples in $classificationFile\n"
+		unless @{$split->{placement}};
+	my $primaryTree = $backboneTree;
+	die "EPA-only recovery expected a dedicated .backbone.treefile: $backboneTree\n"
+		unless $primaryTree =~ s/\.backbone\.treefile\z/.treefile/;
+	my $report = "$treeDirectory/strict_backbone.epa_placements.tsv";
+	my @reportColumns = qw(
+		sample status backbone_overlap_nt backbone_overlap_loci
+		backbone_state_divergence edge likelihood likelihood_weight_ratio
+		edpl candidate_placements distal_length pendant_length reason
+	);
+
+	writeWorkflowHeartbeat('EPA-only placement');
+	my ($epaResult, $modelArtifact, $jplaceFile);
+	my $placementOK = eval {
+		($epaResult, $modelArtifact, $jplaceFile) = runEpaNgPlacement(
+			$treeOpts, $backboneTree, $backboneAlignment, $queryAlignment,
+			$split->{placement}, $treeDirectory,
+		);
+		1;
+	};
+	if (!$placementOK) {
+		my $error = $@ || 'unknown EPA-ng placement failure';
+		$error =~ s/\s+\z//;
+		writeOutcomeMarker($placementPendingMarker, 'placement_pending', $error, {
+			backbone_tree => $backboneTree,
+			query_samples => scalar(@{$split->{placement}}),
+			retry_mode => 'epa_only',
+		}, $outD);
+		warn "EPA-only placement remains pending; the backbone and MSA were not modified: $error\n";
+		safeRemoveTree($tmpD, $tmpBase);
+		writeWorkflowHeartbeat('placement_pending');
+		return 0;
+	}
+
+	my $placements = $epaResult->{placements};
+	my $reportHandle = retry_open('>', $report,
+		label => 'write EPA-only placement report');
+	print {$reportHandle} join("\t", @reportColumns), "\n";
+	for my $sample (sort keys %{$placements}) {
+		my $entry = $placements->{$sample};
+		my $overlap = $split->{backbone_overlap}{$sample} || {};
+		print {$reportHandle} join("\t",
+			$sample, $entry->{status},
+			map({ defined($overlap->{$_}) ? sprintf('%.12g', $overlap->{$_}) : 'NA' }
+				qw(backbone_overlap_nt backbone_overlap_loci backbone_state_divergence)),
+			map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
+				qw(edge likelihood likelihood_weight_ratio edpl candidate_placements
+					distal_length pendant_length)),
+			$split->{reason}{$sample} // '',
+		), "\n";
+	}
+	retry_close($reportHandle, 'close EPA-only placement report');
+	write_epa_placed_tree($epaResult->{tree}, $primaryTree, $placements);
+	die "EPA-only placement did not publish its primary tree: $primaryTree\n"
+		unless -s $primaryTree;
+
+	writeCompletionMarker($completionMarker, $primaryTree, $outD);
+	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
+	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
+	clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
+	safeRemoveTree($tmpD, $tmpBase);
+	writeWorkflowHeartbeat('complete');
+	print "EPA-only recovery completed; primary tree=$primaryTree; "
+		."backbone retained=$backboneTree; jplace=$jplaceFile; model=$modelArtifact\n";
+	return 1;
 }
 
 sub iqtreePlacementModel {
@@ -4069,9 +4272,9 @@ sub selectTaxonAwareCandidateLoci {
 			? 1 - ($mad / $medianSites > 1 ? 1 : $mad / $medianSites)
 			: 0;
 		my @sequenceIds = map { $bestSequence{$_} } sort keys %bestSequence;
-		my $potentialInformation = rawCoordinateInformation(
-			\@sequenceIds, $args{sequences}, $args{use_aa},
-		);
+		# Raw coordinates are not homologous when indels are present. Defer all
+		# information scoring until after alignment and avoid this extra scan.
+		my $potentialInformation = { variable_sites => 0, parsimony_informative_sites => 0 };
 		$metrics{$gene} = {
 			gene => $gene,
 			category => \@sequenceIds,
@@ -4093,22 +4296,14 @@ sub selectTaxonAwareCandidateLoci {
 	}
 	die "Taxon-aware selection found no category with at least three usable samples\n"
 		unless keys %metrics;
-	my $maximumSampleCount = 1;
-	my $maximumPotentialInformation = 1;
+	my $universeSampleCount = scalar(keys %samples) || 1;
 	for my $metric (values %metrics) {
-		$maximumSampleCount = $metric->{sample_count}
-			if $metric->{sample_count} > $maximumSampleCount;
-		$maximumPotentialInformation = $metric->{potential_parsimony_informative_sites}
-			if $metric->{potential_parsimony_informative_sites} > $maximumPotentialInformation;
-	}
-	for my $metric (values %metrics) {
-		my $prevalence = $metric->{sample_count} / $maximumSampleCount;
-		$metric->{potential_information_score} =
-			$metric->{potential_parsimony_informative_sites} / $maximumPotentialInformation;
-		$metric->{robust_score} = 0.50 * $prevalence
-			+ 0.25 * $metric->{median_completeness}
-			+ 0.15 * $metric->{length_stability}
-			+ 0.10 * $metric->{potential_information_score};
+		my $prevalence = $metric->{sample_count} / $universeSampleCount;
+		$metric->{prevalence} = $prevalence;
+		$metric->{potential_information_score} = 0;
+		$metric->{robust_score} = 0.55 * $prevalence
+			+ 0.30 * $metric->{median_completeness}
+			+ 0.15 * $metric->{length_stability};
 		$metric->{quality_score} = $metric->{robust_score};
 	}
 	my $selectedGenes = chooseTaxonAwareLoci(
@@ -4284,6 +4479,9 @@ sub taxonAwareAlignmentMetrics {
 			? $validCells / $occupancyDenominator : 0,
 		variable_sites => $variableSites,
 		parsimony_informative_sites => $parsimonyInformativeSites,
+		information_density => $alignmentLength ? $parsimonyInformativeSites / $alignmentLength : 0,
+		variable_density => $alignmentLength ? $variableSites / $alignmentLength : 0,
+		called_cells => $validCells,
 	};
 }
 
@@ -4381,6 +4579,7 @@ sub classifyTaxonAwareCoverageEligibility {
 sub selectTaxonAwareFinalLoci {
 	my %args = @_;
 	my (%metrics, %seenGene);
+	my $universeSampleCount = scalar(keys %{$args{samples} || {}}) || 1;
 	for my $alignment (@{$args{alignments}}) {
 		my $gene = $args{path_gene}{$alignment};
 		die "Taxon-aware selector has no locus mapping for alignment $alignment\n"
@@ -4389,12 +4588,25 @@ sub selectTaxonAwareFinalLoci {
 			if $seenGene{$gene}++;
 		my $metric = taxonAwareAlignmentMetrics($alignment, $args{use_aa}, $gene);
 		my $preScore = $args{pre_metrics}{$gene}{robust_score} // 0;
-		my $informationScore = log(1 + $metric->{parsimony_informative_sites}) / log(21);
+		my $prevalence = $metric->{sample_count} / $universeSampleCount;
+		my $informationDensity = $metric->{information_density} // 0;
+		my $informationSupport = ($metric->{parsimony_informative_sites} // 0) / 5;
+		$informationSupport = 1 if $informationSupport > 1;
+		my $informationScore = ($informationDensity / 0.02) * $informationSupport;
 		$informationScore = 1 if $informationScore > 1;
+		my $variableDensity = $metric->{variable_density} // 0;
+		my $excessVariationPenalty = $variableDensity > 0.20 ? ($variableDensity - 0.20) / 0.30 : 0;
+		$excessVariationPenalty = 1 if $excessVariationPenalty > 1;
 		$metric->{robust_score} = $preScore;
+		$metric->{prevalence} = $prevalence;
 		$metric->{information_score} = $informationScore;
-		$metric->{quality_score} = 0.45 * $preScore
-			+ 0.35 * $metric->{occupancy} + 0.20 * $informationScore;
+		$metric->{information_density} = $informationDensity;
+		$metric->{variable_density} = $variableDensity;
+		$metric->{excess_variation_penalty} = $excessVariationPenalty;
+		$metric->{quality_score} = 0.30 * $preScore
+			+ 0.25 * $metric->{occupancy} + 0.25 * $prevalence
+			+ 0.20 * $informationScore - 0.10 * $excessVariationPenalty;
+		$metric->{quality_score} = 0 if $metric->{quality_score} < 0;
 		$metrics{$gene} = $metric;
 	}
 	my $selectedGenes = chooseTaxonAwareLoci(
@@ -4427,13 +4639,62 @@ sub selectTaxonAwareFinalLoci {
 	};
 }
 
+sub writeSelectionAttritionAudit {
+	my ($path, $stats) = @_;
+	die "Selection attrition statistics must be a hash reference\n"
+		unless ref($stats) eq 'HASH';
+	my @order = qw(
+		input_loci input_sequences input_samples length_retained_sequences
+		length_filtered_sequences eligible_loci candidate_loci candidate_samples
+		aligned_loci alignment_failed_loci post_qc_loci final_loci final_samples
+		backbone_samples placement_samples excluded_samples
+	);
+	my %previous;
+	if (-s $path) {
+		open my $existing, '<', $path
+			or die "Cannot read existing selection attrition audit $path: $!\n";
+		my $header = <$existing> // '';
+		$header =~ s/[\r\n]+\z//;
+		if ($header eq "metric\tvalue") {
+			while (my $line = <$existing>) {
+				$line =~ s/[\r\n]+\z//;
+				my ($metric, $value) = split /\t/, $line, 2;
+				next unless defined($metric) && defined($value)
+					&& $metric ne 'schema' && $value ne 'NA';
+				$previous{$metric} = $value;
+			}
+		}
+		close $existing
+			or die "Cannot close existing selection attrition audit $path: $!\n";
+	}
+	make_path(dirname($path)) unless -d dirname($path);
+	my $temporary = "$path.tmp.$$";
+	open my $output, '>', $temporary
+		or die "Cannot write selection attrition audit $temporary: $!\n";
+	print {$output} "metric\tvalue\n"
+		or die "Cannot write selection attrition header $temporary: $!\n";
+	print {$output} "schema\t1\n"
+		or die "Cannot write selection attrition schema $temporary: $!\n";
+	for my $metric (@order) {
+		my $value = defined($stats->{$metric}) ? $stats->{$metric} : 'NA';
+		$value = $previous{$metric}
+			if $value eq 'NA' && exists($previous{$metric});
+		print {$output} "$metric\t$value\n"
+			or die "Cannot write selection attrition metric $metric: $!\n";
+	}
+	close $output or die "Cannot close selection attrition audit $temporary: $!\n";
+	rename $temporary, $path
+		or die "Cannot publish selection attrition audit $path: $!\n";
+}
+
 sub writeTaxonAwareLocusAudit {
 	my ($path, $stage, $metrics) = @_;
 	make_path(dirname($path)) unless -d dirname($path);
 	open my $output, '>', $path
 		or die "Cannot write taxon-aware locus audit $path: $!\n";
 	print {$output} join("\t", qw(
-		stage gene selected rank phase quality_score robust_score occupancy
+		stage gene selected rank phase quality_score robust_score occupancy prevalence
+		information_score information_density variable_density excess_variation_penalty
 		sample_count q90_nt alignment_length_nt variable_sites
 		parsimony_informative_sites potential_variable_sites
 		potential_parsimony_informative_sites potential_informative_nt
@@ -4452,7 +4713,8 @@ sub writeTaxonAwareLocusAudit {
 			$stage, $gene, $metric->{selected} ? 1 : 0,
 			$metric->{selection_rank} // "", $metric->{selection_phase} // "",
 			map({ defined($metric->{$_}) ? sprintf("%.6f", $metric->{$_}) : "" }
-				qw(quality_score robust_score occupancy)),
+				qw(quality_score robust_score occupancy prevalence information_score
+					information_density variable_density excess_variation_penalty)),
 			$metric->{sample_count} // "", $metric->{q90_nt} // "",
 			$metric->{alignment_length_nt} // "", $metric->{variable_sites} // "",
 			$metric->{parsimony_informative_sites} // "",

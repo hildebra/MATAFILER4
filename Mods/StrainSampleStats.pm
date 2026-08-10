@@ -16,7 +16,7 @@ our @EXPORT_OK = qw(
 my @SAMPLE_STAT_COLUMNS = qw(
 	sample worker assembly_group status selected_mgs candidate_mgs candidate_loci consensus_proteins
 	used_mgs skipped_mgs unaccounted_mgs used_fraction
-	min_genes_per_mgs presort_genes max_genes qc_enabled min_gene_depth min_bad_loci
+	min_genes_per_mgs presort_genes max_genes tree_locus_budget qc_enabled min_gene_depth min_bad_loci
 	multi_gene_fraction_max csp_gene_fraction_max csp_locus_score_max breakpoint_gene_flank
 	abundance_min_loci abundance_min_fold abundance_max_fold abundance_max_modified_z
 	capped_mgs capped_loci skipped_within_2_loci_of_min
@@ -29,7 +29,7 @@ my @SAMPLE_STAT_COLUMNS = qw(
 );
 
 my @CONTROL_COLUMNS = qw(
-	selected_mgs min_genes_per_mgs presort_genes max_genes qc_enabled
+	selected_mgs min_genes_per_mgs presort_genes max_genes tree_locus_budget qc_enabled
 	min_gene_depth min_bad_loci multi_gene_fraction_max csp_gene_fraction_max
 	csp_locus_score_max breakpoint_gene_flank abundance_min_loci
 	abundance_min_fold abundance_max_fold abundance_max_modified_z

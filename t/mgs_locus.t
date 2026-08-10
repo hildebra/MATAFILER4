@@ -128,6 +128,8 @@ my $complete_linkage = build_locus_groups(
 );
 is(scalar(@{$complete_linkage->{groups}}), 2,
 	'complete linkage prevents transitive mosaic chaining without a 20-22 confirmation');
+is($complete_linkage->{incomplete_linkage_rejections}, 1,
+	'complete-linkage protection reports the rejected transitive merge');
 my $transitive_mosaic = build_locus_groups(
 	\@chain_records, \%chain_members, \%chain_proteins,
 	{allowed_merge_pairs => \%chain_edges, require_complete_linkage => 0},

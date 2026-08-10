@@ -203,9 +203,12 @@ my $finalAudit = File::Spec->catfile(
 	$output, 'phylo', 'taxon_aware_locus_selection.tsv');
 my $sampleAudit = File::Spec->catfile(
 	$output, 'phylo', 'taxon_aware_sample_selection.tsv');
+my $attritionAudit = File::Spec->catfile(
+	$output, 'phylo', 'selection_attrition.tsv');
 ok(-s $candidateAudit, 'candidate locus audit is written');
 ok(-s $finalAudit, 'final locus audit is written');
 ok(-s $sampleAudit, 'final sample audit is written');
+ok(-s $attritionAudit, 'compact end-to-end selection attrition audit is written');
 
 open my $candidateHandle, '<', $candidateAudit or die $!;
 my $candidateText = do { local $/; <$candidateHandle> };
@@ -216,6 +219,9 @@ like($candidateText, qr/^candidate\tg4\t1\t4\tqc_backfill\t/m,
 open my $finalHandle, '<', $finalAudit or die $!;
 my $finalText = do { local $/; <$finalHandle> };
 close $finalHandle;
+like($finalText,
+	qr/^stage\tgene\tselected\trank\tphase\tquality_score\trobust_score\toccupancy\tprevalence\tinformation_score\tinformation_density\tvariable_density\texcess_variation_penalty/m,
+	'final locus audit exposes prevalence, bounded information, and excess-variation scoring');
 like($finalText, qr/^final\tg3\t1\t3\ttaxon_rescue\t/m,
 	'rare-sample locus is retained by the final taxon-rescue pass');
 like($finalText, qr/^final\tg4\t0\t/m,
@@ -226,6 +232,14 @@ my $sampleText = do { local $/; <$sampleHandle> };
 close $sampleHandle;
 like($sampleText, qr/^s5\t1\t30\t1\t30\tplacement_candidate\tusable_sparse_anchor$/m,
 	'rare but anchored sample is retained for placement');
+
+open my $attritionHandle, '<', $attritionAudit or die $!;
+my $attritionText = do { local $/; <$attritionHandle> };
+close $attritionHandle;
+like($attritionText, qr/^input_loci\t4$/m, 'attrition audit records all input loci');
+like($attritionText, qr/^candidate_loci\t4$/m, 'attrition audit records the bounded alignment candidates');
+like($attritionText, qr/^final_loci\t3$/m, 'attrition audit records the bounded final locus set');
+like($attritionText, qr/^backbone_samples\t5$/m, 'attrition audit records final tree samples');
 
 my $mergedAlignment = File::Spec->catfile($output, 'MSA', 'MSAli.fna');
 ok(-s $mergedAlignment, 'bounded final alignment is produced');

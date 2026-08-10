@@ -50,6 +50,7 @@ sub reportingsMGS;
 sub prepRun;
 sub resolveScratchDirectory;
 sub persistScratchDirectory;
+sub migrateLegacyOperationalLogs;
 sub printEarlyRunHeader;
 sub prepGene2MGS;
 sub createAGlist; sub preComputeConsSNP;
@@ -78,6 +79,7 @@ sub writeNoRecoverableLociMarker;
 sub recordValidatedEmptyExtractions;
 sub validateTreeInputResolution;
 sub readFastaIDs;
+sub epaOnlyRetryReady;
 sub resetMGSTreeOutputs;
 sub stepComplete;
 sub finalizeSampleQC;
@@ -89,6 +91,7 @@ sub indexRecoveryRow;
 sub writeRecoveryContributionIndex;
 sub loadRecoveryContributionIndex;
 sub writeStrainSummary;
+sub writeSelectionAttritionSummary;
 sub mergeSampleStats;
 sub reportSavedSampleStats;
 sub printSampleStatsSummary;
@@ -253,7 +256,7 @@ END {
 #.91: persist the exact shared scratch directory for reliable cross-run resume
 #.96: use the authoritative Phase-I input audit for legacy ledger-free resumes
 #.97: bound EPA-ng placement memory and worker threads independently of tree inference
-my $version = 0.97;
+my $version = 0.99;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -282,7 +285,8 @@ my %FILTER_DEFAULT = (
 	minimum_gene_depth => 1,
 	minimum_bad_loci_for_sample_skip => 3,
 	minimum_mgs_genes_per_sample => 8,
-	maximum_genes_per_sample => 400,
+	maximum_genes_per_sample => 600,
+	maximum_tree_loci => 400,
 	breakpoint_gene_flank => 50,
 	abundance_minimum_loci => 8,
 	abundance_minimum_fold => 1 / 3,
@@ -301,6 +305,7 @@ my $noIndels = 1;
 my $repairCAT=0;
 
 my $maxNGenes = $FILTER_DEFAULT{maximum_genes_per_sample};
+my $treeLocusBudget = $FILTER_DEFAULT{maximum_tree_loci};
 my $noGeneLimit = 0;
 my $disableQC = 0;
 my ($mosaicLociFile, $mosaicMGSFile) = ("", "");
@@ -421,6 +426,7 @@ GetOptions(
 	"maxCores=i"     => \$maxCores, #superseedes -cores, will dynamically allocate num cores based on input file size, if defined
 	"presortGenes=i" => \$presortGenes, #how many potential genes to include, of the original MGS (receovered will vary strongly  between samples)
 	"maxGenes=i"     => \$maxNGenes, #maximum validated genes retained for each MGS/sample
+	"treeLocusBudget=i" => \$treeLocusBudget, #bounded final loci passed to BuildTree selection
 	"noGeneLimit=i"  => \$noGeneLimit, #remove only the gene-count cap; QC remains enabled
 	"disableQC=i"    => \$disableQC, #expert/debug option: disable biological QC independently of the gene cap
 	"mosaicLoci=s"   => \$mosaicLociFile, #catalogue-wide confirmed mosaic/outgroup table
@@ -507,6 +513,8 @@ die "Core, memory, and precompute settings must be non-negative\n"
 die "-minBadLociPSmpl must be positive\n" unless $minBadLociForSampleSkip > 0;
 die "-MGSminGenesPSmpl and -presortGenes must be positive\n"
 	unless $MGStoolowGsThr > 0 && $presortGenes > 0;
+die "-maxGenes and -treeLocusBudget must be positive\n"
+	unless $maxNGenes > 0 && $treeLocusBudget > 0;
 die "-flushEvery must be positive\n" unless $appendWriteTrigger > 0;
 die "-phase1WorkerRetries must be between 0 and 10\n"
 	unless $phase1WorkerRetries >= 0 && $phase1WorkerRetries <= 10;
@@ -536,9 +544,8 @@ die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or positive
 my ($taxonAwareGeneBudget, $taxonAwareMaxLoci,
 	$taxonAwareCoreLoci, $taxonAwareCandidateExtra) = (0, 0, 0, 0);
 if ($taxonAwareLocusSelection) {
-	$taxonAwareGeneBudget = $noGeneLimit
-		? $presortGenes
-		: ($maxNGenes < $presortGenes ? $maxNGenes : $presortGenes);
+	$taxonAwareGeneBudget = $treeLocusBudget < $presortGenes
+		? $treeLocusBudget : $presortGenes;
 	($taxonAwareMaxLoci, $taxonAwareCoreLoci, $taxonAwareCandidateExtra) =
 		taxonAwareLocusBudgets($taxonAwareGeneBudget);
 }
@@ -687,6 +694,7 @@ my %map; my %AsGrps;my @samples;#map and assembly groups
 my %ConspecificMGS; #list of conspecific MGS
 my %MGSnoTree; #MGS known to have a persistent valid no-tree outcome
 my %MGSnoTreeReason;
+my %MGSepaOnlyRetry;
 my $legacyLocusOutputs = 0;
 my %legacyLocusMGS;
 my (%ConfirmedMosaicPairs, %PreferredOutgroup, %PreferredOutgroupGene);
@@ -738,9 +746,9 @@ my $sttime = time;
 
 my $stepStarted = time;
 prepRun();
-$workflowHeartbeatPath = File::Spec->catfile($outD,
+$workflowHeartbeatPath = File::Spec->catfile($LOGDIR,
 	$subJob ? "strain_within.worker.$subJob.heartbeat.tsv" : 'strain_within.heartbeat.tsv');
-$workflowFailurePath = File::Spec->catfile($outD,
+$workflowFailurePath = File::Spec->catfile($LOGDIR,
 	$subJob ? "strain_within.worker.$subJob.failure.tsv" : 'strain_within.failure.tsv');
 writeStrainWorkflowHeartbeat('configuration');
 stepComplete("configuration and map initialization", $stepStarted,
@@ -831,7 +839,8 @@ my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $P
 stepComplete("existing-output and resume audit", $stepStarted,
 	"prepared_trees=$doneDirs", "missing_trees=$treeAbsent",
 	"incomplete_tree_inputs=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped",
-	"validated_no_locus=$noRecoverableLociDirs");
+	"validated_no_locus=$noRecoverableLociDirs",
+	"epa_only_retries=".scalar(keys %MGSepaOnlyRetry));
 #DEBUG:getInputSize();
 
 
@@ -1064,7 +1073,9 @@ my %outgroupGeneCache;
 my $geneCatLoaded=0;
 #read in genecat to create outgroup fasta sequences..
 $stepStarted = time;
-if ($recalcTrees || $CatNotPrepped || $treeAbsent || $repairCAT || $deepRepair || $dirsNOTPrepped || $onlySubmit == 0 || $redoSubmissionData == 1){
+my $nonEpaTreeAbsences = $treeAbsent - scalar(keys %MGSepaOnlyRetry);
+$nonEpaTreeAbsences = 0 if $nonEpaTreeAbsences < 0;
+if ($recalcTrees || $CatNotPrepped || $nonEpaTreeAbsences || $repairCAT || $deepRepair || $dirsNOTPrepped || $onlySubmit == 0 || $redoSubmissionData == 1){
 	#also read reference gene seqs (for outgroup)
 	my $refFNA = ""; my $refFAA = ""; my $refNameL = "unknw";
 	if ($mode eq "MGS" || $mode eq "MGSall"){
@@ -1170,6 +1181,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $treeStone = "$outD2/treeDone.sto";
 	my $terminalTreeMarker = "$outD2/noTree.sto";
 	my $placementPendingMarker = "$outD2/placementPending.sto";
+	my $epaOnlyRetry = exists($MGSepaOnlyRetry{$MGS}) ? 1 : 0;
 	my $IQtreef= "$outD2/phylo/IQtree_allsites.treefile";
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
@@ -1204,16 +1216,21 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	print "Processing $MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)."\n";
 	my $inputFNAsize = $sizeOfDirs[$lcnt];
+	if ($epaOnlyRetry && !$inputFNAsize) {
+		$inputFNAsize = int((-s "$outD2/MSA/MSAli.fna") / 1024) || 1;
+	}
 	#PART I: create fasta files required by tree
 	make_path($outD2) unless -d $outD2;
-	if ($inputFNAsize ==0){
+	if ($inputFNAsize ==0 && !$epaOnlyRetry){
 		$treeDisposition{'empty input'}++;
 		limitedNotice('MGS skipped with empty input', "Skipping $MGS: input is empty.\n");
 		next;
 	} #empty input
 	my $mustRegenerateInputs = $repairCAT || $deepRepair || $redoSubmissionData
 		|| exists($legacyLocusMGS{$MGS});
-	if ($publishedInputsReady && !$mustRegenerateInputs) {
+	if ($epaOnlyRetry) {
+		print "  Recovery state: validated backbone has only EPA-ng placement pending\n";
+	} elsif ($publishedInputsReady && !$mustRegenerateInputs) {
 		print "  Tree input: using complete published FNA/FAA/category files\n";
 	} else {
 		$scratchInputsReady ||= combineMGSgenesDir($MGS,$tmpD,$tmpD);
@@ -1266,12 +1283,22 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $totMem = int($inputFNAsize * $baseMemMult * $memMulti);
 	$totMem = $minimumMemMB if $totMem < $minimumMemMB;
 	$totMem = $maximumMemMB if $totMem > $maximumMemMB;
-	my $iqMemMB = int($totMem * 0.9); #reserve 10% for buildTree/Perl and runtime overhead
 	my $numCoreL = $numCores;	
 	if ($maxCores >0){ #scale cores according to used memory size
 		$numCoreL = int($maxCores * sqrt($inputFNAsize/$sizeOfDirs[0]));
 		$numCoreL = 4 if ($numCoreL < 4);		$numCoreL = $maxCores if ($numCoreL > $maxCores);
 	}
+	if ($epaOnlyRetry) {
+		# EPA-ng retry is deliberately single-threaded. The doubled request is a
+		# scheduler/cgroup allowance, not an EPA-ng --maxmem argument.
+		$totMem = int($totMem * 2);
+		$totMem = 20480 if $totMem < 20480;
+		my $retryMaximumMemMB = int(220000 * $memMulti);
+		$totMem = $retryMaximumMemMB if $totMem > $retryMaximumMemMB;
+		$numCoreL = 1;
+		$memoryProfile = 'EPA-ng placement-only retry';
+	}
+	my $iqMemMB = int($totMem * 0.9); #also supplies EPA planning-memory reporting
 	
 
 	my $bts = getProgPaths("buildTree_scr");
@@ -1304,7 +1331,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		."-strictBackboneFraction $strictBackboneFraction "
 		."-strictBackboneMinSamples $strictBackboneMinSamples "
 		."-placementMinOverlap $placementMinOverlap "
-		."-epaThreads $epaThreads -epaMaxMemMB $epaMaxMemMB ";
+		."-epaThreads ".($epaOnlyRetry ? 1 : $epaThreads)
+		." -epaMaxMemMB $epaMaxMemMB ";
 	if ($phyloProg == 1){
 		$Tcmd .= "-iqMemMB $iqMemMB ";
 		$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
@@ -1323,12 +1351,16 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	#reformat .cat.tmp -> .cat and add outgroup fna seqs
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
-	($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady)=
-		addOutgroup2MGS($MGS,$OG,$tmpD); #$outD2 $tmpD
+	if ($epaOnlyRetry) {
+		$inputReady = 1;
+	} else {
+		($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady)=
+			addOutgroup2MGS($MGS,$OG,$tmpD); #$outD2 $tmpD
+	}
 	# Locus names are MGS-qualified, so cached outgroup choices have no reuse
 	# after this MGS and would otherwise accumulate for the entire submission.
 	%outgroupGeneCache = ();
-	$mosaicOutgroupsUsed{$MGS} = 1 if $inputReady && exists($PreferredOutgroup{$MGS})
+	$mosaicOutgroupsUsed{$MGS} = 1 if !$epaOnlyRetry && $inputReady && exists($PreferredOutgroup{$MGS})
 		&& length($OG) && $OG eq $PreferredOutgroup{$MGS};
 	invalidateMGSInputState($MGS) if $inputReady;
 	unless ($inputReady) {
@@ -1342,13 +1374,17 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
-		if fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof");
-	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if $needsCopy;
+		if !$epaOnlyRetry && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof"));
+	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if !$epaOnlyRetry && $needsCopy;
+	$Tcmd .= "-epaOnly 1 " if $epaOnlyRetry;
 	$Tcmd .= "-continue 1 -completionMarker ".shellQuote($treeStone)." "
 		."-terminalMarker ".shellQuote($terminalTreeMarker)." "
 		."-placementPendingMarker ".shellQuote($placementPendingMarker)." ";
 
-	if ($multiSmpl > 2 && $ngenes >= 10){
+	if ($epaOnlyRetry) {
+		print "  EPA-only retry: 1 core, $totMem MB memory; retained MSA, model, "
+			."and backbone will be read-only inputs\n";
+	} elsif ($multiSmpl > 2 && $ngenes >= $MGStoolowGsThr){
 		print "  Tree input: $multiSmpl samples, $ngenes potential genes; $numCoreL cores, "
 			."$totMem MB memory ($memoryProfile profile)\n";
 	} else {
@@ -1370,12 +1406,14 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	my $treeJobOrdinal = $cnt + 1;
 	push @pendingTreeJobs, {
 		mgs => $MGS,
-		script => $outD2."treeCmd.sh",
+		script => $epaOnlyRetry
+			? "$outD2/treeCmd.epa_retry.sh" : "$outD2/treeCmd.sh",
 		command => $Tcmd.$outgS."\n",
 		cores => $numCoreL,
 		memory => int($totMem)."M",
 		requested_mb => int($totMem),
-		job_name => "FT$treeJobOrdinal",
+		job_name => $epaOnlyRetry ? "EPA$treeJobOrdinal" : "FT$treeJobOrdinal",
+		epa_only => $epaOnlyRetry,
 		terminal => $terminalTreeMarker,
 		placement_pending => $placementPendingMarker,
 		tree => $IQtreef,
@@ -1386,7 +1424,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	$QSBoptHR->{useLongQueue} = 0;
 	$cnt ++;
-	$treeDisposition{'eligible tree job'}++;
+	$treeDisposition{$epaOnlyRetry ? 'EPA-only retry job' : 'eligible tree job'}++;
 	$expectedTreeOutputs{$MGS} = [$IQtreef, $treeStone,
 		$terminalTreeMarker, $placementPendingMarker];
 	if (!$doSubmit || time >= $nextQueuedTreeSubmissionProbe) {
@@ -1409,7 +1447,6 @@ print "\nTree submission accounting: $treeAccounted/$Nspecis selected MGS accoun
 for my $reason (sort keys %treeDisposition) {
 	print "  $reason: $treeDisposition{$reason}\n";
 }
-writeStrainSummary(\%treeDisposition, \%mosaicOutgroupsUsed);
 print "  staged input sets recovered for -recalcTrees: $recalcScratchRecovered\n"
 	if $recalcTrees;
 if ($doSubmit) {
@@ -1457,13 +1494,14 @@ if ($doSubmit) {
 	print "Valid terminal no-tree outcomes: ".join(',', @{$terminal})."\n"
 		if @{$terminal};
 }
+writeStrainSummary(\%treeDisposition, \%mosaicOutgroupsUsed);
 my $unresolvedInputs = validateTreeInputResolution();
 if ($incompleteTreeOutcomes || $unresolvedInputs) {
 	$completionMessage = "strain_within.pl preserved completed work but stopped before downstream "
 		."strain analysis; tree_outcomes_pending=$incompleteTreeOutcomes, "
 		."tree_inputs_pending=$unresolvedInputs.";
 	print "Workflow is partially complete; consult tree_job_outcomes.tsv and "
-		."tree_input_resolution.tsv. No automatic tree resubmission was attempted.\n";
+		."tree_input_resolution.tsv. No automatic full-tree resubmission was attempted.\n";
 	exit(0);
 }
 print "\nAll done for $cnt Bins\nRun strain_within_2.pl for summary stats:\n";
@@ -1486,7 +1524,7 @@ if ($mapF2 eq ""){$nxtCmd .= "-map ".shellQuote($mapF)." ";} else {$nxtCmd .= "-
 $nxtCmd .= "\n";
 
 #$GCd/MB2.clusters.ext.can.Rhcl.matL0.txt
-	my ($dep,$qcmd) = qsubSystem($outD."/strainAnalysis2.sh",$nxtCmd,1,"60G","2StrainSub","","",1,[],$QSBoptHR);
+	my ($dep,$qcmd) = qsubSystem($LOGDIR."strainAnalysis2.sh",$nxtCmd,1,"60G","2StrainSub","","",1,[],$QSBoptHR);
 print "\n". $nxtCmd."\n";
 
 
@@ -1909,7 +1947,7 @@ sub addOutgroup2MGS{
 	
 	#my @curCogs = sort keys %{$SIcat{$MGS}};
 	my @curCogs = sort keys %SIcatLoc;
-	if (scalar(@curCogs) < 10){
+	if (scalar(@curCogs) < $MGStoolowGsThr){
 		if (!@curCogs && $malformedCatEntries) {
 			limitedWarn('MGS with malformed category input',
 				"$MGS category input is malformed; leaving it unmarked for repair\n");
@@ -1966,9 +2004,9 @@ sub addOutgroup2MGS{
 				next unless length($outgroup_gene) && exists($FNAref->{$outgroup_gene});
 				$cntShrCogs ++;
 			}
-			last if $cntShrCogs >= 10;
+			last if $cntShrCogs >= $MGStoolowGsThr;
 		}
-		if ($cntShrCogs < 10){
+		if ($cntShrCogs < $MGStoolowGsThr){
 			my @locus_preview = @curCogs[0 .. ($#curCogs < 9 ? $#curCogs : 9)];
 			limitedWarn('MGS without a sufficiently represented outgroup',
 				"Could not find a sufficiently represented outgroup for $MGS; candidates: @sspl; loci: @locus_preview\n");
@@ -2165,10 +2203,13 @@ sub mergeConspecificLogs {
 		$_ => [sort keys %{$merged{$_}}]
 	} keys %merged;
 
-	my @snp_parts = grep { -e $_ }
-		map { "$outD/SNPconsCalls.$_.log" } 0 .. $maxSubJob - 1;
+	my @snp_parts = grep { -e $_ } map {
+		my $current = "$LOGDIR/SNPconsCalls.$_.log";
+		my $legacy = "$outD/SNPconsCalls.$_.log";
+		-e $current ? $current : $legacy;
+	} 0 .. $maxSubJob - 1;
 	if (@snp_parts) {
-		my $snp_log = "$outD/SNPconsCalls.log";
+		my $snp_log = "$LOGDIR/SNPconsCalls.log";
 		my $snp_tmp = "$snp_log.tmp.$$";
 		open my $snp_out, '>', $snp_tmp or die "Can't write merged SNP consensus log $snp_tmp: $!\n";
 		for my $part (@snp_parts) {
@@ -2363,14 +2404,17 @@ sub prepGene2MGS{
 			# parts of the cluster model and are not consumed by this workflow.
 			include_member_to_seed => 0,
 			include_gene_to_locus => 0,
-			# Catalogue-wide confirmed edges define connected components, allowing
-			# three or more alternative genes to represent the same homologue.
+			# Every member pair in a multi-seed Mosaic locus must be independently
+			# confirmed.  This prevents an A-B-C chain from silently merging A and C.
 			allowed_merge_pairs => \%ConfirmedMosaicPairs,
-			require_complete_linkage => 0,
+			require_complete_linkage => 1,
 			allow_confirmed_cooccurrence => 1,
 		},
 	);
 	my $ranked_record_count = scalar(@records);
+	my $linkage_rejections = $locus_model->{incomplete_linkage_rejections} || 0;
+	print "Mosaic complete-linkage protection rejected $linkage_rejections "
+		."transitive component merge(s)\n" if $linkage_rejections;
 	@records = ();
 	$LocusByID = $locus_model->{locus_by_id};
 	$MemberContext = $locus_model->{member_context};
@@ -2532,6 +2576,50 @@ sub persistScratchDirectory {
 		label => 'publish scratch-directory manifest');
 }
 
+sub migrateLegacyOperationalLogs {
+	return 0 unless -d $outD && -d $LOGDIR;
+	opendir my $directory, $outD
+		or die "Cannot inspect strain output directory $outD: $!\n";
+	my @legacy = grep {
+		/\A(?:
+			strain_within(?:\.worker\.\d+)?\.(?:heartbeat|failure)\.tsv
+			|SNPconsCalls(?:\.\d+)?\.log
+			|strainSampleStats(?:\.summary)?\.tsv(?:\.\d+)?
+			|strainRecovery\.tsv(?:\.\d+|\.contributors\.tsv)?
+			|strain_within\.summary\.log
+			|strainSelectionAttrition\.tsv
+			|strainCmd\.txt
+			|strainAnalysis2\.sh(?:\.(?:o|e)txt)?
+			|ConspecificMGS(?:\.\d+)?\.log
+		)\z/x
+	} readdir $directory;
+	closedir $directory
+		or die "Cannot close strain output directory $outD: $!\n";
+	my $migrated = 0;
+	for my $name (sort @legacy) {
+		my $source = File::Spec->catfile($outD, $name);
+		my $destination = File::Spec->catfile($LOGDIR, $name);
+		next unless -f $source;
+		if (-e $destination) {
+			my $suffix = 1;
+			my $legacyDestination;
+			do {
+				$legacyDestination = "$destination.legacy.$suffix";
+				$suffix++;
+			} while (-e $legacyDestination);
+			limitedNotice('legacy operational log migration collision',
+				"Preserving legacy $source as $legacyDestination\n");
+			$destination = $legacyDestination;
+		}
+		retry_rename($source, $destination,
+			label => "migrate legacy strain log $name");
+		$migrated++;
+	}
+	print "Migrated $migrated legacy strain workflow file(s) into $LOGDIR\n"
+		if $migrated;
+	return $migrated;
+}
+
 sub prepRun{
 
 	$mode = "FMG" if ($MGSfile eq "");
@@ -2553,7 +2641,7 @@ sub prepRun{
 	my $safeDefaultOutD = $outDpre eq "" ? $defaultOutD : "";
 	my $outputWasPresent = -d $outD ? 1 : 0;
 	$LOGDIR = "$outD/LOGandSUB/";
-	$SNPconsLOGs = "$outD/SNPconsCalls.$subJob.log" if ($SNPconsLOGs eq "");
+	$SNPconsLOGs = "$LOGDIR/SNPconsCalls.$subJob.log" if ($SNPconsLOGs eq "");
 
 	my $GCname = basename($GCd);
 	my $outDname = basename($outD);
@@ -2636,7 +2724,9 @@ sub prepRun{
 			."maximumBins=$rateMergeMaxBins, targetBin=$rateMergeTargetSites effective sites, "
 			."minimumBin=$rateMergeMinLoci loci/"
 			."$rateMergeMinSites sites\n";
-		print "Taxon-aware locus hierarchy: geneBudget=$taxonAwareGeneBudget, "
+		print "Taxon-aware locus hierarchy: extractionPool="
+			.($noGeneLimit ? 'unlimited' : $maxNGenes)
+			.", finalTreeBudget=$taxonAwareGeneBudget, "
 			."robustCore=$taxonAwareCoreLoci, taxonRescue="
 			.($taxonAwareMaxLoci - $taxonAwareCoreLoci)
 			.", qcBackfill=$taxonAwareCandidateExtra\n"
@@ -2718,6 +2808,7 @@ sub prepRun{
 	}
 
 	make_path($locTmpDir, $scratchD, $outD, $LOGDIR);
+	migrateLegacyOperationalLogs();
 	my $outputBase = basename(File::Spec->canonpath($outD));
 	my $owner = File::Spec->catfile($outD, '.matafiler-strain-workdir');
 	persistScratchDirectory($scratchManifest, $catalogIdentity,
@@ -3122,6 +3213,10 @@ sub evalFileStatus{
 			}
 			#print "$SIdirs{$MGS}\n";
 			#system "rm $SIdirs{$MGS}\n";
+		} elsif (epaOnlyRetryReady($SIdirs{$MGS})) {
+			$MGSepaOnlyRetry{$MGS} = 1;
+			$treeAbsent++;
+			remove_tree("$scratchD/outs/$MGS") if -d "$scratchD/outs/$MGS";
 		}elsif(!fileGZs("$SIdirs{$MGS}/phylo/$treeFile")){
 			$treeAbsent++;
 			remove_tree("$scratchD/outs/$MGS") if -d "$scratchD/outs/$MGS";
@@ -3136,6 +3231,36 @@ sub evalFileStatus{
 	#die;
 	return($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist,
 		$noRecoverableLociDirs);
+}
+
+sub epaOnlyRetryReady {
+	my ($mgsDirectory) = @_;
+	return 0 unless $onlySubmit && !$recalcTrees && !$reSubmit
+		&& !$repairCAT && !$deepRepair && !$redoSubmissionData
+		&& $strictBackbone && $phyloProg == 1;
+	return 0 unless defined($mgsDirectory) && -d $mgsDirectory;
+	my $pending = File::Spec->catfile($mgsDirectory, 'placementPending.sto');
+	my $complete = File::Spec->catfile($mgsDirectory, 'treeDone.sto');
+	my $terminal = File::Spec->catfile($mgsDirectory, 'noTree.sto');
+	return 0 unless -s $pending && !-s $complete && !-s $terminal;
+	open my $marker, '<', $pending or return 0;
+	my $placementPending = 0;
+	while (my $line = <$marker>) {
+		if ($line =~ /^status\tplacement_pending\s*$/) {
+			$placementPending = 1;
+			last;
+		}
+	}
+	close $marker or return 0;
+	return 0 unless $placementPending;
+	my @required = (
+		File::Spec->catfile($mgsDirectory, 'MSA', 'MSAli.fna'),
+		File::Spec->catfile($mgsDirectory, 'MSA', 'MSAli.placement.fna'),
+		File::Spec->catfile($mgsDirectory, 'phylo', 'IQtree_allsites.backbone.treefile'),
+		File::Spec->catfile($mgsDirectory, 'phylo', 'IQtree_allsites.backbone.log'),
+		File::Spec->catfile($mgsDirectory, 'phylo', 'strict_backbone.samples.tsv'),
+	);
+	return !grep { !-s $_ } @required;
 }
 
 
@@ -3341,6 +3466,7 @@ sub phase1WorkerCommand {
 		'-conspGeneSmplMax', $conspGeneSmplMax,
 		'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
 		'-presortGenes', $presortGenes, '-maxGenes', $maxNGenes,
+		'-treeLocusBudget', $treeLocusBudget,
 		'-noGeneLimit', $noGeneLimit, '-disableQC', $disableQC,
 		'-breakpointGeneFlank', $breakpointGeneFlank,
 		'-abundanceMinLoci', $abundanceMinimumLoci,
@@ -3549,7 +3675,7 @@ sub mergeSampleStats {
 	die "Missing per-worker sample statistics: ".join(',', @missing)."\n" if @missing;
 
 	my $expectedHeader = join("\t", @sampleStatColumns);
-	my $final = "$outD/$sampleStatsLogName";
+	my $final = "$LOGDIR/$sampleStatsLogName";
 	my $finalTemporary = "$final.write.$$";
 	my $merged = retry_open('>', $finalTemporary,
 		label => 'create merged sample statistics');
@@ -3600,7 +3726,7 @@ sub mergeSampleStats {
 	my $allSummary = aggregate_sample_rows(\@allRows, 'ALL');
 	$allSummary->{workers} = scalar(@parts);
 	push @summaryRows, $allSummary;
-	my $summary = "$outD/$sampleStatsSummaryLogName";
+	my $summary = "$LOGDIR/$sampleStatsSummaryLogName";
 	my $summaryTemporary = "$summary.write.$$";
 	my $summaryFH = retry_open('>', $summaryTemporary,
 		label => 'create sample-statistics summary');
@@ -3628,7 +3754,9 @@ sub mergeSampleStats {
 }
 
 sub reportSavedSampleStats {
-	my $summary = "$outD/$sampleStatsSummaryLogName";
+	my $summary = "$LOGDIR/$sampleStatsSummaryLogName";
+	my $legacySummary = "$outD/$sampleStatsSummaryLogName";
+	$summary = $legacySummary if !-s $summary && -s $legacySummary;
 	unless (-s $summary) {
 		warn "Phase I statistics summary is unavailable at $summary; continuing without the saved sample histogram\n";
 		return 0;
@@ -3760,7 +3888,7 @@ sub mergeRecoveryLogs {
 	return unless grep { -e $_ } @parts;
 	my @missing = grep { !-s $_ } @parts;
 	die "Missing MAG recovery worker log(s): ".join(',', @missing)."\n" if @missing;
-	my $final = "$outD/$recoveryLogName";
+	my $final = "$LOGDIR/$recoveryLogName";
 	my $temporary = "$final.write.$$";
 	my $out = retry_open('>', $temporary,
 		label => 'create merged MAG recovery ledger');
@@ -3788,6 +3916,107 @@ sub mergeRecoveryLogs {
 	print "MAG recovery accounting: $final\n";
 }
 
+sub writeSelectionAttritionSummary {
+	my ($recoveryMetrics, $filterReasons) = @_;
+	$recoveryMetrics ||= {};
+	$filterReasons ||= {};
+	my @rows;
+	push @rows, ['recovery', $_, $recoveryMetrics->{$_}]
+		for sort keys %{$recoveryMetrics};
+	push @rows, ['recovery', "filtered_reason.$_", $filterReasons->{$_}]
+		for sort keys %{$filterReasons};
+
+	my $sampleSummary = "$LOGDIR/$sampleStatsSummaryLogName";
+	my $legacySampleSummary = "$outD/$sampleStatsSummaryLogName";
+	$sampleSummary = $legacySampleSummary
+		if !-s $sampleSummary && -s $legacySampleSummary;
+	if (-s $sampleSummary) {
+		open my $sampleInput, '<', $sampleSummary
+			or die "Cannot read sample attrition summary $sampleSummary: $!\n";
+		my $header = <$sampleInput> // '';
+		$header =~ s/[\r\n]+\z//;
+		my @columns = split /\t/, $header, -1;
+		my $allRow;
+		while (my $line = <$sampleInput>) {
+			$line =~ s/[\r\n]+\z//;
+			next unless length $line;
+			my @values = split /\t/, $line, -1;
+			next unless @values == @columns;
+			my %row;
+			@row{@columns} = @values;
+			if (($row{scope} // '') eq 'ALL') {
+				$allRow = \%row;
+				last;
+			}
+		}
+		close $sampleInput
+			or die "Cannot close sample attrition summary $sampleSummary: $!\n";
+		if ($allRow) {
+			for my $metric (qw(
+				candidate_mgs candidate_loci pre_abundance_loci post_abundance_loci
+				missing_consensus_loci low_depth_loci breakpoint_loci csp_rejected_loci
+				ambiguous_loci abundance_filtered_loci invalid_protein_loci retained_loci
+				capped_mgs capped_loci skipped_within_2_loci_of_min
+				skip_no_selected_loci skip_no_usable_loci
+				skip_too_few_after_abundance skip_too_few_valid_sequences
+			)) {
+				push @rows, ['extraction', $metric, $allRow->{$metric}]
+					if exists $allRow->{$metric};
+			}
+		}
+	}
+
+	my (%treeTotals, %treeMetricReports);
+	my $treeReports = 0;
+	for my $mgs (@specis) {
+		next unless defined($SIdirs{$mgs}) && length($SIdirs{$mgs});
+		my $report = File::Spec->catfile(
+			$SIdirs{$mgs}, 'phylo', 'selection_attrition.tsv');
+		next unless -s $report;
+		open my $treeInput, '<', $report
+			or die "Cannot read tree selection attrition $report: $!\n";
+		my $header = <$treeInput> // '';
+		$header =~ s/[\r\n]+\z//;
+		die "Unexpected tree selection attrition header in $report\n"
+			unless $header eq "metric\tvalue";
+		$treeReports++;
+		while (my $line = <$treeInput>) {
+			$line =~ s/[\r\n]+\z//;
+			next unless length $line;
+			my ($metric, $value) = split /\t/, $line, 2;
+			next if !defined($metric) || $metric eq 'schema';
+			next unless defined($value)
+				&& $value =~ /\A-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z/;
+			$treeTotals{$metric} += 0 + $value;
+			$treeMetricReports{$metric}++;
+		}
+		close $treeInput
+			or die "Cannot close tree selection attrition $report: $!\n";
+	}
+	push @rows, ['tree', 'reports_expected', scalar(@specis)];
+	push @rows, ['tree', 'reports_available', $treeReports];
+	for my $metric (sort keys %treeTotals) {
+		push @rows, ['tree', $metric, $treeTotals{$metric}];
+		push @rows, ['tree', "$metric.reports", $treeMetricReports{$metric}];
+	}
+
+	my $path = "$LOGDIR/strainSelectionAttrition.tsv";
+	my $temporary = "$path.write.$$";
+	open my $output, '>', $temporary
+		or die "Cannot create strain selection attrition $temporary: $!\n";
+	print {$output} "scope\tmetric\tvalue\n"
+		or die "Cannot write strain selection attrition header: $!\n";
+	for my $row (@rows) {
+		my @value = map { defined($_) ? $_ : '' } @{$row};
+		print {$output} join("\t", @value), "\n"
+			or die "Cannot write strain selection attrition row: $!\n";
+	}
+	close $output or die "Cannot close strain selection attrition $temporary: $!\n";
+	rename $temporary, $path
+		or die "Cannot publish strain selection attrition $path: $!\n";
+	return $path;
+}
+
 sub writeStrainSummary {
 	my ($tree_disposition, $mosaic_outgroups_used) = @_;
 	my %used_mosaic_outgroup = %{$mosaic_outgroups_used || {}};
@@ -3804,7 +4033,9 @@ sub writeStrainSummary {
 			last if exists($used_mosaic_outgroup{$mgs});
 		}
 	}
-	my $recovery = "$outD/$recoveryLogName";
+	my $recovery = "$LOGDIR/$recoveryLogName";
+	my $legacyRecovery = "$outD/$recoveryLogName";
+	$recovery = $legacyRecovery if !-s $recovery && -s $legacyRecovery;
 	my ($evaluated, $recovered, $filtered, $gene_sum, $mosaic_loci) = (0, 0, 0, 0, 0);
 	my (@recovered_genes, %filter_reason, %recovered_status, %represented_samples, %represented_mgs);
 	if (-s $recovery) {
@@ -3835,10 +4066,20 @@ sub writeStrainSummary {
 	my @thresholds = (10, 50, 100, 200, 500, 1000, 2000);
 	my %above;
 	for my $threshold (@thresholds) { $above{$threshold} = scalar(grep { $_ > $threshold } @recovered_genes); }
+	my $selectionAttrition = writeSelectionAttritionSummary({
+		evaluated_sample_mgs => $evaluated,
+		recovered_mags => $recovered,
+		filtered_mags => $filtered,
+		recovered_loci => $gene_sum,
+		average_loci_per_recovered_mag => sprintf('%.6f', $average),
+		median_loci_per_recovered_mag => $median_genes,
+		recovered_mosaic_loci => $mosaic_loci,
+	}, \%filter_reason);
 	my @lines = (
 		"Strain-within recovery summary (v$version)",
 		"output_directory\t$outD",
 		"recovery_accounting\t".(-s $recovery ? $recovery : 'not_available'),
+		"selection_attrition\t$selectionAttrition",
 		"input_samples\t".scalar(@samples),
 		"usable_samples\t".(scalar(@samples) - scalar(keys %unavailableSamples)),
 		"unavailable_samples\t".scalar(keys %unavailableSamples),
@@ -3857,7 +4098,7 @@ sub writeStrainSummary {
 	push @lines, map { "recovered_status.$_\t$recovered_status{$_}" } sort keys %recovered_status;
 	push @lines, map { "filtered_reason.$_\t$filter_reason{$_}" } sort keys %filter_reason;
 	push @lines, map { "tree_disposition.$_\t$tree_disposition->{$_}" } sort keys %{$tree_disposition};
-	my $summary = "$outD/$summaryLogName";
+	my $summary = "$LOGDIR/$summaryLogName";
 	my $temporary = "$summary.write.$$";
 	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
 	print {$out} join("\n", @lines), "\n" or die "Cannot write $temporary: $!\n";
@@ -4045,8 +4286,10 @@ sub dispatchPendingTreeJobs {
 				unless defined($record->{$required}) && length($record->{$required});
 		}
 		if ($options->{doSubmit}) {
+			my @staleOutputs = $record->{epa_only}
+				? qw(stone terminal) : qw(stone tree terminal placement_pending);
 			retry_unlink($record->{$_}, label => "clear stale tree-job $_")
-				for qw(stone tree terminal placement_pending);
+				for @staleOutputs;
 		}
 		$options->{tmpSpace} = $record->{tmp_space};
 		$options->{useLongQueue} = $record->{use_long_queue};
@@ -4132,6 +4375,7 @@ sub newSampleStats {
 	$stats{min_genes_per_mgs} = $MGStoolowGsThr;
 	$stats{presort_genes} = $presortGenes;
 	$stats{max_genes} = $noGeneLimit ? q{unlimited} : $maxNGenes;
+	$stats{tree_locus_budget} = $treeLocusBudget;
 	$stats{qc_enabled} = $disableQC ? 0 : 1;
 	$stats{min_gene_depth} = $minDepthGene;
 	$stats{min_bad_loci} = $minBadLociForSampleSkip;
@@ -4930,6 +5174,10 @@ Gene selection and biological QC:
   -maxGenes INT                  Maximum validated loci per MGS/sample
                                  [default $default->{maximum_genes_per_sample}]
   -noGeneLimit 0|1              Remove the locus cap; QC remains active [default 0]
+  -treeLocusBudget INT           Maximum final loci selected for each tree;
+                                 candidate alignment remains bounded to this plus
+                                 the QC-backfill allowance
+                                 [default $default->{maximum_tree_loci}]
   -disableQC 0|1                Disable biological QC (expert/debug only) [default 0]
   -MGSminGenesPSmpl INT         Minimum validated loci retained per MGS/sample
                                  [default $default->{minimum_mgs_genes_per_sample}]
@@ -5003,6 +5251,12 @@ Tree locus filtering:
   -epaMaxMemMB INT               EPA-ng thread-planning budget; -1 derives 60% of
                                  each IQ-TREE allowance, 0 disables memory scaling
                                  [default -1]
+
+On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a
+validated retained IQ-TREE backbone, MSA, query alignment, and sample
+classification is retried automatically in EPA-only mode. The retry uses one
+core and a doubled scheduler-memory request (minimum 20 GB), without rerunning
+alignment or tree inference.
 USAGE
 }
 
