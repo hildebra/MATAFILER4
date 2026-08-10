@@ -32,6 +32,12 @@ the submission wrapper creates a job-specific directory below `nodeTmpDir`,
 exports it as `TMPDIR`, and runs the job from that directory. Generated submission
 scripts and scheduler logs remain in their persistent `LOGandSUB` locations.
 
+For Slurm, every job first starts in the persistent directory containing its generated
+`LOGandSUB` script and receives `TMPDIR=/tmp`. This prevents dependent jobs from
+inheriting a vanished parent-job node-scratch path. When node-local scratch is
+requested, the wrapper then creates and enters `nodeTmpDir/matafiler4.$SLURM_JOB_ID`
+before running the payload.
+
 With `-reduceScratchUse 1`, cleanup is released only after final assembly
 publication, ContigStats, configured binning, and configured ConsSNP/variant
 work are either already complete or represented by successful terminal scheduler

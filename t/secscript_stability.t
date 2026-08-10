@@ -14,6 +14,9 @@ my $test_lib = File::Spec->catdir($root, 't', 'lib');
 local $ENV{PERL5OPT} = join ' ', grep { defined($_) && length($_) }
 	"-I$root", "-I$test_lib", '-MMFTestConfig', $ENV{PERL5OPT};
 
+is(system($^X, "-I$root", '-c', File::Spec->catfile($root, 'secScripts', 'GC', 'extrAllE100GC.pl')), 0,
+   'marker-gene extraction script compiles');
+
 sub write_file {
     my ($path, $contents) = @_;
     open my $fh, '>', $path or die "Cannot open $path: $!";

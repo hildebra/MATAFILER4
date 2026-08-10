@@ -45,7 +45,7 @@ my $cntSkips=0;my $cnt=0;
 my $bonSplit = 5;
 my %genesE1h; 
 my $genesFMGfilesHR = {}; my %genesFMGstreams;
-my $genesGTDBfilesHR = {};
+my $genesGTDBfilesHR = {}; my %genesGTDBstreams;
 my %seenAssembls; 
 if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 	#$genesE1h{1}{gg} = "falk";
@@ -84,12 +84,17 @@ if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 		#read in FMG genes in assembly
 		my $FMGf = "$metaGD/ContigStats/FMG/FMGids.txt";
 		#print STDERR " Extracting FMG genes..\n";
-		$genesFMGfilesHR = MGintoCats($FMGf, $genesFMGfilesHR);
+		$genesFMGfilesHR = MGintoCats($FMGf, $genesFMGfilesHR, \%genesFMGstreams, "FMG");
 		#print STDERR " Extracting GTDB genes..\n";
 		my $GTDBf = "$metaGD/ContigStats/GTDBmg/marker_genes_meta.tsv";
-		$genesGTDBfilesHR = MGintoCats($GTDBf, $genesGTDBfilesHR);
+		$genesGTDBfilesHR = MGintoCats($GTDBf, $genesGTDBfilesHR, \%genesGTDBstreams, "GTDBmg");
 		
 	}
+	# Keep the per-marker files open while scanning assemblies.  This avoids many
+	# thousands of small append operations on the shared filesystem, but they must
+	# be closed before the downstream readers consume them.
+	close $_ for values %genesFMGstreams;
+	close $_ for values %genesGTDBstreams;
 	print "Read ref dataset\n";
 	print "skipped $cntSkips samples\n" if ($cntSkips > 0);
 }
@@ -134,7 +139,7 @@ exit(0);
 
 
 sub MGintoCats{
-	my ($FMGf, $genesFMGfilesL) = @_;
+	my ($FMGf, $genesFMGfilesL, $streamsL, $sourceTag) = @_;
 	#my %genesFMGfilesL = %{$hr};
 	if (-f $FMGf){
 		#open my $I,"<$FMGf" or die "Can't open FMG file $FMGf\n";
@@ -150,20 +155,22 @@ sub MGintoCats{
 		}	
 		close $I;
 		#print "N=$gCnt ";
-		#store between runs..
+		# Store between runs.  Retain one stream per category for the complete
+		# assembly scan; repeatedly reopening these files is a major bottleneck on
+		# shared storage for large catalogues.
 		foreach my $cat (keys %genesFMG){
 			if (!exists($genesFMGfilesL->{$cat})){
-				my $tmpF = "$tmpD/cat.$cat.idx";
-				#print STDERR "Deleting $tmpF\n";
-				system "rm -f $tmpF";
+				# FMG and GTDB marker names may overlap; keep their temporary
+				# collection files separate.
+				my $tmpF = "$tmpD/$sourceTag.cat.$cat.idx";
 				$genesFMGfilesL->{$cat} = $tmpF;
-				#open ($genesFMGstreams{$cat},">$tmpF") or die "can't open $tmpF\n";
+				open my $stream, ">", $tmpF or die "Can't open write tmp $tmpF\n";
+				$streamsL->{$cat} = $stream;
 			}
-			open OOX,">>",$genesFMGfilesL->{$cat} or die "Can't opebn write tmp $genesFMGfilesL->{$cat}\n";
+			my $stream = $streamsL->{$cat};
 			foreach my $ge (keys %{$genesFMG{$cat}}){
-				print OOX "$ge\n";
+				print {$stream} "$ge\n";
 			}
-			close OOX;
 		}
 	} else {print "Can't find FMG file $FMGf\n";}
 	return $genesFMGfilesL;
@@ -229,12 +236,11 @@ sub getGeneSeqsSubGenes(){
 
 sub getEgenes{
 	my ($ghr,$r1) = @_;
-	my %genesF = %{$ghr};
-	my @e1cat = keys %genesF;
+	my @e1cat = keys %{$ghr};
 
 	foreach my $e1c (@e1cat){
 		#my @spG = keys %{$genes{$e1c}};#my @spG;
-		open I,"<$genesF{$e1c}" or die "cant open tmp file $genesF{$e1c}\n";
+		open I,"<$ghr->{$e1c}" or die "cant open tmp file $ghr->{$e1c}\n";
 		while (<I>){chomp; ${$r1}{$_}=1;}
 		close I;
 	}
@@ -243,16 +249,15 @@ sub getEgenes{
 
 sub processSubGenes{
 	my ($ghr,$tag,$gene2cl) = @_;
-	my %genesF = %{$ghr};
 	#my %gene2cl = %{$hr1};
 	my $subF = "$GCd/$tag.subset.cats";
-	my @e1cat = keys %genesF;
+	my @e1cat = keys %{$ghr};
 	my %selC; open O ,">$subF" or die "Can't open $subF";
 	my $catCnt=0;my $geneCnt=0;my $fail_abort=0;
 	foreach my $e1c (@e1cat){
 		#my @spG = keys %{$genes{$e1c}};
 		my @spG;
-		open I,"<$genesF{$e1c}" or die "cant open tmp file $genesF{$e1c}\n";
+		open I,"<$ghr->{$e1c}" or die "cant open tmp file $ghr->{$e1c}\n";
 		while (<I>){chomp; push @spG,$_;}
 		close I;
 		#die "N=".@spG."  $spG[0]   $genesF{$e1c}\n";
@@ -274,7 +279,7 @@ sub processSubGenes{
 		#print $addD  ."    @keysHds\n";
 		print O $e1c."\t$size\t".$addD."\n";
 		$geneCnt += $size;
-		my %tmp = (%selC, %selD); %selC = %tmp;
+		$selC{$_} = 1 for keys %selD;
 		$catCnt++;
 	#die ( @spG."\n");
 	}

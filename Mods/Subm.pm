@@ -3,6 +3,8 @@ package Mods::Subm;
 use warnings;
 use strict;
 use Fcntl qw(:flock);
+use File::Basename qw(dirname);
+use File::Spec;
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths convert2Gb);
 use Mods::WorkflowControl qw(normalise_job_dependencies);
@@ -794,7 +796,20 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		}
 	}
 
-	if ($cwd ne "" && !-d $cwd){system "mkdir -p $cwd";}
+	# Slurm resolves --chdir and inherited TMPDIR before the shell body runs.
+	# A launcher can itself be in node-local scratch, which is gone by the time
+	# a dependent job starts.  Always begin Slurm jobs beside their globally
+	# visible generated script; node-local work is entered explicitly below.
+	my $slurmWorkdir = '';
+	if ($qmode eq 'slurm') {
+		$slurmWorkdir = File::Spec->canonpath(
+			dirname(File::Spec->rel2abs($tmpsh)));
+		if ($cwd ne '' && File::Spec->canonpath(File::Spec->rel2abs($cwd)) ne $slurmWorkdir) {
+			warn "Ignoring requested Slurm working directory $cwd; using stable script directory $slurmWorkdir\n";
+		}
+	} elsif ($cwd ne "" && !-d $cwd) {
+		system "mkdir -p $cwd";
+	}
 	#if ($memory > 250001){$queues = "\"scb\"";}
 	$tmpsh =~ m/^(.*\/)[^\/]+$/;
 	system "mkdir -p $1" unless (-d $1);
@@ -808,7 +823,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		print O "#!/bin/bash\n#SBATCH -N 1\n#SBATCH --cpus-per-task=$ncores\n#SBATCH -o $tmpsh.otxt\n"; #\n#SBATCH -n  $ncores
 		
 		if ($nthreads != $ncores ){print O "#SBATCH --threads-per-core=1\n#SBATCH --hint=compute_bound\n";} #  specifically for iqtree/raxml
-		print O "#SBATCH -e $tmpsh.etxt\n#SBATCH --mem=$memory\n#SBATCH --export=ALL\n";
+		print O "#SBATCH -e $tmpsh.etxt\n#SBATCH --mem=$memory\n#SBATCH --export=ALL,TMPDIR=/tmp\n";
 		#print O "#SBATCH --kill-on-invalid-dep=yes\n";
 		#print O "#SBATCH --tmp=$tmpSpace\n" if ($tmpSpace>0);#SBATCH --gres=ssd\n
 		foreach my $subTerm ( split /;/, $submissionConfig){
@@ -824,7 +839,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		print O "#SBATCH --time=$time\n" unless ($time eq "");
 		print O "#SBATCH --exclude=$exclNodes\n" unless ($exclNodes eq "");
 		#print O "#SBATCH --localscratch=ssd:50\n"; #for EI cluster
-		print O "#SBATCH --chdir=$cwd\n" if ($cwd ne "");
+		print O "#SBATCH --chdir=$slurmWorkdir\n";
 		print O "#SBATCH -J $rTag$jname\n" if ($jname ne "");
 		print O "#SBATCH --wc=". $optHR->{wcKeysForJob} . "\n" if ($optHR->{wcKeysForJob} ne "");
 		if (@constrains){

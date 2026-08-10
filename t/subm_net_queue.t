@@ -49,6 +49,10 @@ close $fh;
 
 like($contents, qr/^#SBATCH -p "network"$/m, 'uses the network queue');
 like($contents, qr/^#SBATCH --time=168:00:00$/m, 'uses the long wall time');
+like($contents, qr/^#SBATCH --export=ALL,TMPDIR=\/tmp$/m,
+	'Slurm jobs reset inherited TMPDIR before the shell starts');
+like($contents, qr/^#SBATCH --chdir=\Q$tmpdir\E$/m,
+	'Slurm jobs start beside their persistent generated script, not the submitter cwd');
 like($contents,
 	qr/^echo "SLURM job ID: \$SLURM_JOB_ID"\necho \$HOSTNAME;$/m,
 	'prints the allocated Slurm job ID before executing the job payload');
@@ -72,7 +76,21 @@ my $scratch_contents = do { local $/; <$scratch_fh> };
 close $scratch_fh;
 like($scratch_contents, qr/^node_tmp_root="\/node\/local\/tmp"$/m,
 	'requested node scratch uses the configured node-local root');
+like($scratch_contents, qr/^#SBATCH --chdir=\Q$tmpdir\E$/m,
+	'node-scratch jobs still start in the persistent script directory before changing locally');
 like($scratch_contents, qr/^export TMPDIR="\$node_tmp_workdir"\ncd "\$node_tmp_workdir"$/m,
 	'node-scratch jobs execute from their job-specific local directory');
+
+my $legacy_local = '/nbi/local/ssd/old-job/MF4/matafiler4.old-job';
+my $legacy_script = File::Spec->catfile($tmpdir, 'legacy-cwd.sh');
+$options->{tmpSpace} = 0;
+qsubSystem($legacy_script, 'pwd', 1, '1G', 'legacy', '', $legacy_local, 0, [], $options);
+open my $legacy_fh, '<', $legacy_script or die "Cannot read $legacy_script: $!";
+my $legacy_contents = do { local $/; <$legacy_fh> };
+close $legacy_fh;
+like($legacy_contents, qr/^#SBATCH --chdir=\Q$tmpdir\E$/m,
+	'a stale caller-provided node-local cwd cannot become Slurm\'s startup directory');
+unlike($legacy_contents, qr/\Q$legacy_local\E/,
+	'the stale node-local cwd is absent from the generated Slurm script');
 
 done_testing;
