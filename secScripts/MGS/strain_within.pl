@@ -110,6 +110,7 @@ sub validatePhase1WorkerLedger;
 sub writeStrainWorkflowHeartbeat;
 sub writeStrainWorkflowFailure;
 sub writeTreeFailureAudit;
+sub lifecycleMarkerReason;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -2307,13 +2308,13 @@ sub validateTreeInputResolution {
 	my $temporary = "$audit.write.$$";
 	make_path($LOGDIR) unless -d $LOGDIR;
 	my $out = retry_open('>', $temporary, label => 'create tree-input resolution audit');
-	print {$out} join("\t", qw(MGS resolution persistent_state scratch_state)), "\n"
+	print {$out} join("\t", qw(MGS resolution persistent_state scratch_state reason)), "\n"
 		or die "Cannot write $temporary: $!\n";
 	my (@repairRequired, %repairState, $ready, $terminal, $excluded);
 	for my $MGS (@specis) {
 		my $persistent = persistentMGSInputState($MGS);
 		my $scratch = scratchMGSInputState($MGS);
-		my $resolution;
+		my ($resolution, $reason) = ('', '');
 		if (-s "$SIdirs{$MGS}/tooFewSamples.sto") {
 			$resolution = 'valid_no_tree_too_few_samples';
 			$terminal++;
@@ -2322,6 +2323,8 @@ sub validateTreeInputResolution {
 			$terminal++;
 		} elsif (-s "$SIdirs{$MGS}/noTree.sto") {
 			$resolution = 'valid_no_tree_buildtree';
+			$reason = lifecycleMarkerReason("$SIdirs{$MGS}/noTree.sto",
+				'buildtree_no_usable_alignment');
 			$terminal++;
 		} elsif (exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ /multicopy/) {
 			$resolution = 'excluded_conspecific_or_multicopy';
@@ -2334,7 +2337,7 @@ sub validateTreeInputResolution {
 			push @repairRequired, $MGS;
 			$repairState{$MGS} = [$persistent, $scratch];
 		}
-		print {$out} join("\t", $MGS, $resolution, $persistent, $scratch), "\n"
+		print {$out} join("\t", $MGS, $resolution, $persistent, $scratch, $reason), "\n"
 			or die "Cannot write $temporary: $!\n";
 	}
 	retry_close($out, 'close tree-input resolution audit');
@@ -3190,7 +3193,8 @@ sub evalFileStatus{
 		if (-s $buildTreeTerminalMarker && !$deepRepair && !$redoSubmissionData
 				&& ($onlySubmit != 0 || $recalcTrees)) {
 			$MGSnoTree{$MGS} = 1;
-			$MGSnoTreeReason{$MGS} = 'buildtree_no_usable_alignment';
+			$MGSnoTreeReason{$MGS} = lifecycleMarkerReason($buildTreeTerminalMarker,
+				'buildtree_no_usable_alignment');
 			$noRecoverableLociDirs++;
 			next;
 		}
@@ -4469,6 +4473,23 @@ sub assertSafeWorkflowRemoval {
 }
 
 
+sub lifecycleMarkerReason {
+	my ($marker, $fallback) = @_;
+	my $reason = defined($fallback) ? $fallback : '';
+	return $reason unless defined($marker) && -s $marker;
+	if (open(my $markerFH, '<', $marker)) {
+		while (my $line = <$markerFH>) {
+			if ($line =~ /^reason\t(.*)/) {
+				$reason = $1;
+				last;
+			}
+		}
+		close $markerFH;
+	}
+	$reason =~ s/[\t\r\n]+/ /g;
+	return length($reason) ? $reason : (defined($fallback) ? $fallback : '');
+}
+
 sub writeTreeFailureAudit {
 	my ($expected) = @_;
 	my $path = "$LOGDIR/tree_job_outcomes.tsv";
@@ -4493,13 +4514,7 @@ sub writeTreeFailureAudit {
 		}
 		my $marker = $status eq 'valid_no_tree' ? $terminalMarker
 			: $status eq 'placement_pending' ? $pendingMarker : '';
-		if ($marker && open(my $markerFH, '<', $marker)) {
-			while (my $line = <$markerFH>) {
-				if ($line =~ /^reason\t(.*)/) { $reason = $1; chomp $reason; last; }
-			}
-			close $markerFH;
-		}
-		$reason =~ s/[\t\r\n]+/ /g;
+		$reason = lifecycleMarkerReason($marker, '') if $marker;
 		print {$output} join("\t", $mgs, $status, $tree, $stone, $reason), "\n"
 			or die "Cannot write tree-job outcome audit $temporary: $!\n";
 	}

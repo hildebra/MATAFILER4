@@ -85,6 +85,12 @@ like($script_text,
 my $coordinate_bounds_checks = () = $script_text =~ /next if \$position >= length\(\$sequence\);/g;
 cmp_ok($coordinate_bounds_checks, '>=', 2,
 	'taxon-aware raw and alignment coordinate scorers safely skip uneven sequence tails');
+like($script_text,
+	qr/if \(defined\(\$candidateSelection->\{terminal_reason\}\).*?writeOutcomeMarker\(\$terminalMarker, 'valid_no_tree', \$reason.*?exit\(0\)/s,
+	'the candidate-selection terminal result is published as a persistent valid no-tree outcome');
+like($script_text,
+	qr/unless \(keys %metrics\).*?terminal_reason => 'taxon_aware_no_category_with_three_usable_samples'/s,
+	'a taxon-aware candidate set with fewer than three usable samples returns a stable terminal reason');
 is(system($^X, q{-I}.$root, q{-c}, $script), 0, q{buildTree5.pl compiles});
 
 done_testing;

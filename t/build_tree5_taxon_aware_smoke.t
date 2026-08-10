@@ -197,6 +197,29 @@ my @command = (
 );
 is(system(@command), 0, 'taxon-aware buildTree smoke workflow completes');
 
+my $terminalOutput = File::Spec->catdir($temporary, 'terminal-output');
+my $terminalCategories = File::Spec->catfile($temporary, 'terminal.cat');
+write_file($terminalCategories, "s1|g1\ts2|g1\n");
+my @terminalCommand = @command;
+for my $index (0 .. $#terminalCommand - 1) {
+	$terminalCommand[$index + 1] = $terminalOutput
+		if $terminalCommand[$index] eq '-outD';
+	$terminalCommand[$index + 1] = $terminalCategories
+		if $terminalCommand[$index] eq '-cats';
+}
+is(system(@terminalCommand), 0,
+	'a category set without any three-sample locus exits as a successful terminal outcome');
+my $terminalMarker = File::Spec->catfile($terminalOutput, 'noTree.sto');
+ok(-s $terminalMarker, 'the taxon-aware terminal outcome is persisted');
+open my $terminalHandle, '<', $terminalMarker or die $!;
+my $terminalText = do { local $/; <$terminalHandle> };
+close $terminalHandle;
+like($terminalText,
+	qr/^status\tvalid_no_tree\nreason\ttaxon_aware_no_category_with_three_usable_samples\n/m,
+	'the terminal marker records the exact stable selection reason');
+ok(!-e File::Spec->catfile($terminalOutput, 'buildTree.failure.tsv'),
+	'the valid no-tree outcome leaves no stale workflow-failure marker');
+
 my $candidateAudit = File::Spec->catfile(
 	$output, 'phylo', 'taxon_aware_locus_candidates.tsv');
 my $finalAudit = File::Spec->catfile(

@@ -432,6 +432,15 @@ like($strain,
 	qr/No automatic full-tree resubmission was attempted.*?sub writeTreeFailureAudit.*?failed_missing_output.*?valid_no_tree.*?placement_pending/s,
 	'tree outcomes are classified and quarantined without automatic tree resubmission');
 like($strain,
+	qr/sub lifecycleMarkerReason.*?\^reason\\t/s,
+	'BuildTree lifecycle-marker reasons have one reusable parser');
+like($strain,
+	qr/\$MGSnoTreeReason\{\$MGS\} = lifecycleMarkerReason\(\$buildTreeTerminalMarker/s,
+	'future strain resumes retain the BuildTree terminal reason when skipping an MGS');
+like($strain,
+	qr/valid_no_tree_buildtree.*?lifecycleMarkerReason\("\$SIdirs\{\$MGS\}\/noTree\.sto"/s,
+	'tree-input resolution audits include the specific BuildTree terminal reason');
+like($strain,
 	qr/\$totMem = int\(\$totMem \* 2\).*?\$numCoreL = 1.*?-epaOnly 1.*?\$outD2\/treeCmd\.epa_retry\.sh/s,
 	'an EPA-only retry gets a one-core doubled-memory job and explicit BuildTree mode');
 like($strain,

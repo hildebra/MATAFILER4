@@ -54,6 +54,7 @@
 #5.48: treat uneven raw or partial alignment tails as missing in taxon-aware coordinate scoring
 #5.49: pass parsed IQ-TREE models directly to EPA-ng
 #5.50: replace EPA ulimit with memory-aware threads and bounded query chunks
+#5.53: persist taxon-aware candidate exhaustion as a valid terminal no-tree outcome
 
 use warnings;
 use strict;
@@ -156,7 +157,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.52;
+my $version = 5.53;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -1133,6 +1134,37 @@ if ($isAligned){
 			use_aa => $useAA4tree,
 			report => "$treeD/taxon_aware_locus_candidates.tsv",
 		);
+		if (defined($candidateSelection->{terminal_reason})
+				&& length($candidateSelection->{terminal_reason})) {
+			my $reason = $candidateSelection->{terminal_reason};
+			$selectionAttrition{eligible_loci} = 0;
+			$selectionAttrition{candidate_loci} = 0;
+			$selectionAttrition{candidate_samples} = 0;
+			$selectionAttrition{length_retained_sequences} = $geneTooLong;
+			$selectionAttrition{length_filtered_sequences} = $geneTooShort;
+			$selectionAttrition{aligned_loci} = 0;
+			$selectionAttrition{alignment_failed_loci} = 0;
+			$selectionAttrition{post_qc_loci} = 0;
+			$selectionAttrition{final_loci} = 0;
+			$selectionAttrition{final_samples} = 0;
+			$selectionAttrition{backbone_samples} = 0;
+			$selectionAttrition{placement_samples} = 0;
+			$selectionAttrition{excluded_samples} = scalar(keys %inputSamples);
+			clearLifecycleMarker($completionMarker, 'clear stale tree completion');
+			clearLifecycleMarker($placementPendingMarker,
+				'clear stale placement-pending marker');
+			clearLifecycleMarker($workflowFailure, 'clear stale workflow failure marker');
+			writeSelectionAttritionAudit($selectionAttritionReport, \%selectionAttrition);
+			writeOutcomeMarker($terminalMarker, 'valid_no_tree', $reason, {
+				input_loci => scalar(@linesCats), input_sequences => $inputSequences,
+				input_samples => scalar(keys %inputSamples),
+				length_retained_sequences => $geneTooLong,
+				length_filtered_sequences => $geneTooShort,
+			}, $outD);
+			safeRemoveTree($tmpD, $tmpBase);
+			print "BuildTree completed with a valid terminal no-tree outcome: $reason\n";
+			exit(0);
+		}
 		@linesCats3 = @{$candidateSelection->{categories}};
 		%taxonAwarePreMetrics = %{$candidateSelection->{metrics}};
 		%taxonAwareUniverseSamples = %{$candidateSelection->{samples}};
@@ -1696,6 +1728,7 @@ if ($calcMSA && !fileGZs($multAli)
 	my $reason = $cogCats ne '' ? 'no_usable_loci' : 'single_gene_alignment_failed';
 	clearLifecycleMarker($completionMarker, 'clear stale tree completion');
 	clearLifecycleMarker($placementPendingMarker, 'clear stale placement-pending marker');
+	clearLifecycleMarker($workflowFailure, 'clear stale workflow failure marker');
 	$selectionAttrition{backbone_samples} = 0;
 	$selectionAttrition{placement_samples} = 0;
 	$selectionAttrition{excluded_samples} = $selectionAttrition{final_samples} eq 'NA' ? 0 : $selectionAttrition{final_samples};
@@ -4294,8 +4327,13 @@ sub selectTaxonAwareCandidateLoci {
 			$samples{$sample}{available_nt} += $bestSites{$sample};
 		}
 	}
-	die "Taxon-aware selection found no category with at least three usable samples\n"
-		unless keys %metrics;
+	unless (keys %metrics) {
+		writeTaxonAwareLocusAudit($args{report}, "candidate", \%metrics);
+		return {
+			categories => [], metrics => {}, samples => {},
+			terminal_reason => 'taxon_aware_no_category_with_three_usable_samples',
+		};
+	}
 	my $universeSampleCount = scalar(keys %samples) || 1;
 	for my $metric (values %metrics) {
 		my $prevalence = $metric->{sample_count} / $universeSampleCount;
