@@ -350,7 +350,7 @@ far	placement	sparse	500	5	0.01
 CLASSIFICATION
 my $filterJplace = File::Spec->catfile($filterEpa, 'epa_result.jplace');
 my $filterJplaceText = <<'JPLACE';
-{"tree":"(A:0.001{1},B:0.002{2},C:0.003{3},MGS.out:0.5{4});","placements":[
+{"tree":"(A:0.1{1},B:0.1{2},C:0.1{3},MGS.out:0.5{4});","placements":[
  {"p":[[1,-10.0,0.90,0.0005,0.01]],"n":["near"]},
  {"p":[[2,-10.0,0.90,0.001,0.05]],"n":["far"]}
 ]}
@@ -377,6 +377,14 @@ my $filterReport = slurp(File::Spec->catfile(
 	$filterPhylo, 'strict_backbone.epa_placements.tsv'));
 like($filterReport, qr/^far\texcluded_outlier\t.*\tpendant_length_outlier\t/m,
 	'filter-only audit records the excluded placement and stable reason');
+my $filterSummary = slurp(File::Spec->catfile(
+	$filterPhylo, 'strict_backbone.epa_filter_summary.tsv'));
+like($filterSummary, qr/^threshold_source\tminimum_floor$/m,
+	'filter-only audit records which adaptive cutoff component controlled filtering');
+like($filterSummary, qr/^query_pendant_length_max\t0\.05$/m,
+	'filter-only audit records the largest evaluated pendant branch');
+like($filterSummary, qr/^excluded_samples\tfar$/m,
+	'filter-only audit lists the samples excluded from the published tree');
 ok(-s $filterCompletion, 'filter-only publication refreshes the completion marker');
 
 done_testing();

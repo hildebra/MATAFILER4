@@ -378,7 +378,11 @@ sub filter_epa_placement_outliers {
 		if $factor < 0 || $minimum_threshold < 0;
 	return {
 		enabled => 0, excluded => [], retained => [],
-		backbone_q95 => undef, threshold => undef,
+		backbone_q95 => undef, backbone_terminal_count => 0,
+		factor => $factor, minimum_threshold => $minimum_threshold,
+		scaled_threshold => undef, threshold => undef,
+		threshold_source => 'disabled', placed_query_count => 0,
+		query_pendant_count => 0, query_pendant_missing_count => 0,
 	} if $factor == 0;
 	die "EPA placement outlier filtering requires a placement hash\n"
 		unless ref($placements) eq 'HASH';
@@ -388,13 +392,25 @@ sub filter_epa_placement_outliers {
 	die "EPA placement outlier filtering found no usable backbone terminal branches\n"
 		unless @terminal_lengths;
 	my $backbone_q95 = _quantile(0.95, @terminal_lengths);
-	my $threshold = $factor * $backbone_q95;
-	$threshold = $minimum_threshold if $threshold < $minimum_threshold;
-	my (@excluded, @retained);
+	my $scaled_threshold = $factor * $backbone_q95;
+	my $threshold = $scaled_threshold;
+	my $threshold_source = 'scaled_backbone_q95';
+	if ($threshold < $minimum_threshold) {
+		$threshold = $minimum_threshold;
+		$threshold_source = 'minimum_floor';
+	}
+	my (@excluded, @retained, @query_pendant_lengths);
+	my ($placed_query_count, $query_pendant_missing_count) = (0, 0);
 	for my $sample (sort keys %{$placements}) {
 		my $placement = $placements->{$sample};
 		next unless ($placement->{status} // '') eq 'placed';
+		$placed_query_count++;
 		$placement->{pendant_outlier_limit} = $threshold;
+		if (defined($placement->{pendant_length})) {
+			push @query_pendant_lengths, $placement->{pendant_length};
+		} else {
+			$query_pendant_missing_count++;
+		}
 		if (defined($placement->{pendant_length})
 				&& $placement->{pendant_length} > $threshold) {
 			$placement->{status} = 'excluded_outlier';
@@ -404,9 +420,21 @@ sub filter_epa_placement_outliers {
 			push @retained, $sample;
 		}
 	}
+	my @sorted_pendant_lengths = sort { $a <=> $b } @query_pendant_lengths;
 	return {
 		enabled => 1, excluded => \@excluded, retained => \@retained,
-		backbone_q95 => $backbone_q95, threshold => $threshold,
+		backbone_q95 => $backbone_q95,
+		backbone_terminal_count => scalar(@terminal_lengths),
+		factor => $factor, minimum_threshold => $minimum_threshold,
+		scaled_threshold => $scaled_threshold, threshold => $threshold,
+		threshold_source => $threshold_source,
+		placed_query_count => $placed_query_count,
+		query_pendant_count => scalar(@sorted_pendant_lengths),
+		query_pendant_missing_count => $query_pendant_missing_count,
+		query_pendant_min => @sorted_pendant_lengths ? $sorted_pendant_lengths[0] : undef,
+		query_pendant_median => @sorted_pendant_lengths ? _quantile(0.5, @sorted_pendant_lengths) : undef,
+		query_pendant_q95 => @sorted_pendant_lengths ? _quantile(0.95, @sorted_pendant_lengths) : undef,
+		query_pendant_max => @sorted_pendant_lengths ? $sorted_pendant_lengths[-1] : undef,
 	};
 }
 

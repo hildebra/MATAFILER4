@@ -150,6 +150,10 @@ sub runEpaNgPlacement;
 sub readStrictBackboneClassification;
 sub runEpaOnlyPlacement;
 sub runEpaFilterOnly;
+sub writeEpaPlacementFilterSummary;
+sub printEpaPlacementFilterSummary;
+sub epaFilterMetricValue;
+sub readEpaFilterBackboneTree;
 sub epaResourcePlan;
 sub iqtreePlacementModel;
 sub iqtreeExplicitEpaModel;
@@ -2064,21 +2068,18 @@ if ($strictSplit) {
 				exit(0);
 			}
 			my $placements = $epaResult->{placements};
+			my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
 			my $placementQC = filter_epa_placement_outliers(
-				$epaResult->{tree}, $placements,
+				$backboneTreeText, $placements,
 				{
 					pendant_outlier_factor => $epaPendantOutlierFactor,
 					pendant_minimum_threshold => $epaPendantMinThreshold,
 					outgroup => $outgroup,
 				},
 			);
-			if ($placementQC->{enabled}) {
-				print "EPA-ng pendant-branch QC: retained "
-					.scalar(@{$placementQC->{retained}}).", excluded "
-					.scalar(@{$placementQC->{excluded}})."; backbone Q95="
-					.sprintf('%.8g', $placementQC->{backbone_q95})
-					.", cutoff=".sprintf('%.8g', $placementQC->{threshold})."\n";
-			}
+			my $filterSummary = "$treeD/strict_backbone.epa_filter_summary.tsv";
+			writeEpaPlacementFilterSummary($placementQC, $filterSummary);
+			printEpaPlacementFilterSummary($placementQC, $filterSummary, $report);
 			my $reportFh = retry_open('>', $report, label => "write EPA-ng placement report");
 			print {$reportFh} join("\t", @placementReportColumns), "\n";
 			for my $sample (sort keys %{$placements}) {
@@ -2468,21 +2469,18 @@ sub runEpaOnlyPlacement {
 	}
 
 	my $placements = $epaResult->{placements};
+	my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
 	my $placementQC = filter_epa_placement_outliers(
-		$epaResult->{tree}, $placements,
+		$backboneTreeText, $placements,
 		{
 			pendant_outlier_factor => $epaPendantOutlierFactor,
 			pendant_minimum_threshold => $epaPendantMinThreshold,
 			outgroup => $outgroup,
 		},
 	);
-	if ($placementQC->{enabled}) {
-		print "EPA-ng pendant-branch QC: retained "
-			.scalar(@{$placementQC->{retained}}).", excluded "
-			.scalar(@{$placementQC->{excluded}})."; backbone Q95="
-			.sprintf('%.8g', $placementQC->{backbone_q95})
-			.", cutoff=".sprintf('%.8g', $placementQC->{threshold})."\n";
-	}
+	my $filterSummary = "$treeDirectory/strict_backbone.epa_filter_summary.tsv";
+	writeEpaPlacementFilterSummary($placementQC, $filterSummary);
+	printEpaPlacementFilterSummary($placementQC, $filterSummary, $report);
 	my $reportHandle = retry_open('>', $report,
 		label => 'write EPA-only placement report');
 	print {$reportHandle} join("\t", @reportColumns), "\n";
@@ -2539,21 +2537,19 @@ sub runEpaFilterOnly {
 	writeWorkflowHeartbeat('EPA placement filtering only');
 	my $epaResult = read_epa_jplace($jplaceFile, $split->{placement});
 	my $placements = $epaResult->{placements};
+	my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
 	my $placementQC = filter_epa_placement_outliers(
-		$epaResult->{tree}, $placements,
+		$backboneTreeText, $placements,
 		{
 			pendant_outlier_factor => $epaPendantOutlierFactor,
 			pendant_minimum_threshold => $epaPendantMinThreshold,
 			outgroup => $outgroup,
 		},
 	);
-	if ($placementQC->{enabled}) {
-		print "EPA-ng pendant-branch QC: retained "
-			.scalar(@{$placementQC->{retained}}).", excluded "
-			.scalar(@{$placementQC->{excluded}})."; backbone Q95="
-			.sprintf('%.8g', $placementQC->{backbone_q95})
-			.", cutoff=".sprintf('%.8g', $placementQC->{threshold})."\n";
-	}
+	my $filterSummary = File::Spec->catfile(
+		$treeDirectory, 'strict_backbone.epa_filter_summary.tsv');
+	writeEpaPlacementFilterSummary($placementQC, $filterSummary);
+	printEpaPlacementFilterSummary($placementQC, $filterSummary, $report);
 	my @reportColumns = qw(
 		sample status backbone_overlap_nt backbone_overlap_loci
 		backbone_state_divergence edge likelihood likelihood_weight_ratio
@@ -2598,6 +2594,102 @@ sub runEpaFilterOnly {
 	print "EPA placement filtering-only recovery completed; primary tree=$primaryTree; "
 		."backbone retained=$backboneTree; jplace retained=$jplaceFile\n";
 	return 1;
+}
+
+sub readEpaFilterBackboneTree {
+	my ($backboneTree) = @_;
+	die "EPA placement filtering requires a persisted backbone tree\n"
+		unless defined($backboneTree) && -s $backboneTree;
+	my $backboneHandle = retry_open('<', $backboneTree,
+		label => 'read EPA placement-filter backbone tree');
+	local $/;
+	my $backboneText = <$backboneHandle>;
+	retry_close($backboneHandle, 'close EPA placement-filter backbone tree');
+	die "EPA placement-filter backbone tree is empty: $backboneTree\n"
+		unless defined($backboneText) && $backboneText =~ /\S/;
+	return $backboneText;
+}
+
+sub epaFilterMetricValue {
+	my ($value) = @_;
+	return 'NA' unless defined $value;
+	return sprintf('%.12g', $value)
+		if $value =~ /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$/;
+	return $value;
+}
+
+sub writeEpaPlacementFilterSummary {
+	my ($placementQC, $summaryFile) = @_;
+	die "EPA placement-filter summary requires filter metrics\n"
+		unless ref($placementQC) eq 'HASH';
+	die "EPA placement-filter summary requires an output path\n"
+		unless defined($summaryFile) && length($summaryFile);
+	my $temporary = "$summaryFile.tmp.$$";
+	retry_unlink($temporary, fatal => 0,
+		label => 'clear EPA placement-filter summary temporary');
+	my $summaryHandle = retry_open('>', $temporary,
+		label => 'write EPA placement-filter summary');
+	print {$summaryHandle} "metric\tvalue\n";
+	my @metrics = (
+		['filter_enabled', $placementQC->{enabled} ? 1 : 0],
+		['placed_queries_evaluated', $placementQC->{placed_query_count}],
+		['retained_queries', scalar(@{$placementQC->{retained} // []})],
+		['excluded_queries', scalar(@{$placementQC->{excluded} // []})],
+		['backbone_terminal_branch_count', $placementQC->{backbone_terminal_count}],
+		['backbone_terminal_branch_q95', $placementQC->{backbone_q95}],
+		['pendant_outlier_factor', $placementQC->{factor}],
+		['pendant_minimum_threshold', $placementQC->{minimum_threshold}],
+		['scaled_backbone_q95_threshold', $placementQC->{scaled_threshold}],
+		['applied_pendant_threshold', $placementQC->{threshold}],
+		['threshold_source', $placementQC->{threshold_source}],
+		['query_pendant_length_count', $placementQC->{query_pendant_count}],
+		['query_pendant_length_missing_count', $placementQC->{query_pendant_missing_count}],
+		['query_pendant_length_min', $placementQC->{query_pendant_min}],
+		['query_pendant_length_median', $placementQC->{query_pendant_median}],
+		['query_pendant_length_q95', $placementQC->{query_pendant_q95}],
+		['query_pendant_length_max', $placementQC->{query_pendant_max}],
+		['excluded_samples', join(',', @{$placementQC->{excluded} // []}) || 'none'],
+	);
+	for my $metric (@metrics) {
+		print {$summaryHandle} $metric->[0], "\t", epaFilterMetricValue($metric->[1]), "\n"
+			or die "Cannot write EPA placement-filter summary $temporary: $!\n";
+	}
+	retry_close($summaryHandle, 'close EPA placement-filter summary');
+	retry_rename($temporary, $summaryFile,
+		label => 'publish EPA placement-filter summary');
+	return $summaryFile;
+}
+
+sub printEpaPlacementFilterSummary {
+	my ($placementQC, $summaryFile, $detailReport) = @_;
+	if (!$placementQC->{enabled}) {
+		print "EPA-ng pendant-branch QC: disabled; summary=$summaryFile; details=$detailReport\n";
+		return;
+	}
+	print "EPA-ng pendant-branch QC: evaluated "
+		.epaFilterMetricValue($placementQC->{placed_query_count})
+		." placement queries; retained ".scalar(@{$placementQC->{retained}})
+		.", excluded ".scalar(@{$placementQC->{excluded}})
+		."; backbone terminals=".epaFilterMetricValue($placementQC->{backbone_terminal_count})
+		.", Q95=".epaFilterMetricValue($placementQC->{backbone_q95})
+		."; query pendant min/median/Q95/max="
+		.join('/', map { epaFilterMetricValue($placementQC->{$_}) }
+			qw(query_pendant_min query_pendant_median query_pendant_q95 query_pendant_max))
+		."; cutoff=max(floor ".epaFilterMetricValue($placementQC->{minimum_threshold})
+		.", factor ".epaFilterMetricValue($placementQC->{factor})
+		." x Q95=".epaFilterMetricValue($placementQC->{scaled_threshold})
+		.")=".epaFilterMetricValue($placementQC->{threshold})
+		." [".epaFilterMetricValue($placementQC->{threshold_source})."]"
+		."; summary=$summaryFile; details=$detailReport\n";
+	if (@{$placementQC->{excluded}}) {
+		my @excluded = @{$placementQC->{excluded}};
+		my $preview_count = @excluded > 20 ? 20 : scalar(@excluded);
+		my $preview = join(',', @excluded[0 .. $preview_count - 1]);
+		$preview .= " (+".(@excluded - $preview_count)." more)"
+			if @excluded > $preview_count;
+		print "EPA-ng pendant-branch QC excluded: "
+			.$preview."\n";
+	}
 }
 
 sub iqtreeExplicitEpaModel {

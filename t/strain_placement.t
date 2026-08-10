@@ -183,6 +183,14 @@ my $outlier_qc = filter_epa_placement_outliers(
 	$outlier_tree, \%outlier_placements, {outgroup => 'MGS.out'});
 cmp_ok(abs($outlier_qc->{threshold} - 0.02), '<', 1e-12,
 	'the conservative absolute floor controls a very compact backbone cutoff');
+is($outlier_qc->{threshold_source}, 'minimum_floor',
+	'the filter audit identifies when the conservative floor controls the cutoff');
+is($outlier_qc->{backbone_terminal_count}, 3,
+	'the filter audit records the terminal branches used for its backbone distribution');
+is($outlier_qc->{placed_query_count}, 2,
+	'the filter audit records every evaluated placement query');
+cmp_ok(abs($outlier_qc->{query_pendant_max} - 0.05), '<', 1e-12,
+	'the filter audit records the largest evaluated pendant branch');
 is_deeply($outlier_qc->{retained}, ['near'],
 	'a placement within the adaptive pendant cutoff is retained');
 is_deeply($outlier_qc->{excluded}, ['far'],
