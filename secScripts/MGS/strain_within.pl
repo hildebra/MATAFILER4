@@ -640,13 +640,12 @@ my $QSBoptHR = emptyQsubOpt($doSubmit,"",$queueMode);
 my $MGSfileOri = $MGSfile; #save for later..
 
 
-# An explicit resubmission is intentionally a scheduler-only operation.  The
-# saved per-MGS script already contains the complete BuildTree command,
-# resources, and outgroup choice, so do not wait for Mosaic/catalogue setup
-# before handing it back to the scheduler.  If any selected MGS cannot be
-# safely handled from its published input triplet, fall through to the normal
-# recovery path instead.
-if ($onlySubmit && $reSubmit && $doSubmit && !$subJob
+# A tree-only controller resume is a scheduler-only operation.  The saved
+# per-MGS script already contains the complete BuildTree command, resources,
+# and outgroup choice, so discover pending output directories before Mosaic,
+# map, or catalogue initialization.  The normal recovery path remains for
+# input-regeneration modes and anything that lacks a reusable saved command.
+if ($onlySubmit && $doSubmit && !$subJob
 		&& !$recalcTrees && !$repairCAT && !$deepRepair
 		&& !$redoSubmissionData && !$epaFilterOnly) {
 	my $resumeBindir = $MGSfile;
@@ -654,7 +653,7 @@ if ($onlySubmit && $reSubmit && $doSubmit && !$subJob
 	$resumeBindir = $GCd if $resumeBindir eq "";
 	my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
 	my ($handled, $submitted) = resubmitExistingTreeCommands(
-		outdir => $resumeOutD, guide => $MGSfile,
+		outdir => $resumeOutD, force => $reSubmit,
 		subset => \@subsetMGS, options => $QSBoptHR,
 	);
 	if ($handled) {
@@ -4822,7 +4821,7 @@ sub resetMGSTreeOutputs {
 sub resubmitExistingTreeCommands {
 	my %args = @_;
 	my $outdir = $args{outdir} // '';
-	my $guide = $args{guide} // '';
+	my $force = $args{force} ? 1 : 0;
 	my $subset = $args{subset} || [];
 	my $options = $args{options} || {};
 	return (0, 0) unless -d $outdir && $options->{doSubmit};
@@ -4832,19 +4831,6 @@ sub resubmitExistingTreeCommands {
 		return (0, 0) unless defined($mgs)
 			&& $mgs =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
 		$requested{$mgs} = 1;
-	}
-	if (!%requested && length($guide)) {
-		open my $input, '<', $guide or return (0, 0);
-		while (my $line = <$input>) {
-			chomp $line;
-			next unless length($line);
-			my ($mgs) = split /\t/, $line, 2;
-			next if !defined($mgs) || $mgs eq 'Bin' || $mgs eq 'MGS';
-			return (0, 0) unless $mgs =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
-			$requested{$mgs} = 1;
-		}
-		close $input or return (0, 0);
-		return (0, 0) unless %requested;
 	}
 	if (!%requested) {
 		for my $script (bsd_glob(File::Spec->catfile($outdir, '*', 'treeCmd.sh'))) {
@@ -4860,29 +4846,37 @@ sub resubmitExistingTreeCommands {
 		my $mgs_dir = File::Spec->catdir($outdir, $mgs);
 		return (0, 0) unless -d $mgs_dir;
 		next if -s File::Spec->catfile($mgs_dir, 'noTree.sto');
-		# EPA retries need a purpose-built saved retry command and retain their
-		# special placement validation.  Let the normal resume audit handle them.
-		return (0, 0) if -s File::Spec->catfile($mgs_dir, 'placementPending.sto');
-		for my $input_name ($FNAstdof, $FAAstdof, $CATstdof) {
-			return (0, 0) unless fileGZe(File::Spec->catfile($mgs_dir, $input_name));
+		next if !$force && -s File::Spec->catfile($mgs_dir, 'treeDone.sto');
+		my $pending = File::Spec->catfile($mgs_dir, 'placementPending.sto');
+		my ($script, $mode) = (File::Spec->catfile($mgs_dir, 'treeCmd.sh'), 'full');
+		if (!$force && -s $pending) {
+			my $retry_script = File::Spec->catfile($mgs_dir, 'treeCmd.epa_retry.sh');
+			$script = $retry_script if -s $retry_script;
+			$mode = 'epa_only';
+		} else {
+			for my $input_name ($FNAstdof, $FAAstdof, $CATstdof) {
+				return (0, 0) unless fileGZe(File::Spec->catfile($mgs_dir, $input_name));
+			}
 		}
-		my $script = File::Spec->catfile($mgs_dir, 'treeCmd.sh');
 		return (0, 0) unless -s $script;
-		push @scripts, [$mgs, $script];
+		push @scripts, [$mgs, $script, $mode];
 	}
 
 	print "Direct tree-command resume: ".scalar(@scripts)
 		." saved treeCmd.sh job(s); skipping Mosaic, map, and catalogue loading.\n";
 	for my $record (@scripts) {
-		# Preserve -reSubmit semantics: the saved command is reused, but its
-		# previous final-tree outcome must not make BuildTree exit immediately.
+		# Saved full-tree commands need stale final outputs cleared; EPA-only
+		# retries retain their pending marker as the BuildTree recovery contract.
 		my $mgs_dir = dirname($record->[1]);
-		for my $stale (
-			File::Spec->catfile($mgs_dir, 'treeDone.sto'),
-			File::Spec->catfile($mgs_dir, 'placementPending.sto'),
-			map { File::Spec->catfile($mgs_dir, 'phylo', $_) }
-				qw(IQtree_allsites.treefile VERYFASTTREE_allsites.nwk FASTTREE_allsites.nwk),
-		) {
+		my @stale = (File::Spec->catfile($mgs_dir, 'treeDone.sto'));
+		if ($record->[2] eq 'epa_only') {
+			push @stale, File::Spec->catfile($mgs_dir, 'noTree.sto');
+		} else {
+			push @stale, File::Spec->catfile($mgs_dir, 'placementPending.sto'),
+				map { File::Spec->catfile($mgs_dir, 'phylo', $_) }
+					qw(IQtree_allsites.treefile VERYFASTTREE_allsites.nwk FASTTREE_allsites.nwk);
+		}
+		for my $stale (@stale) {
 			retry_unlink($stale, label => 'clear stale direct-resume tree output') if -e $stale;
 		}
 		qsubSystemWaitMaxJobs(
@@ -5813,11 +5807,11 @@ Tree locus filtering:
                                  continue through EPA-only or full-tree recovery
                                  with their normal resource profiles [default 0]
 
-An explicit scheduler-only restart (-onlySubmit 1 -reSubmit 1 -submit 1) reuses
-each saved treeCmd.sh and exits after submitting it, without loading Mosaic,
-map, or gene-catalogue databases.  It requires the published FNA/FAA/category
-triplet for every selected MGS; incomplete inputs and EPA-pending recoveries
-fall back to the full guarded resume path.
+A scheduler-only tree resume (-onlySubmit 1 -submit 1) scans existing saved
+treeCmd.sh files, submits only unfinished jobs, and exits without loading
+Mosaic, map, or gene-catalogue databases.  Adding -reSubmit 1 forces the saved
+full-tree commands to run again.  Incomplete MGS without a saved command fall
+back to the guarded recovery path; saved EPA retry scripts are reused directly.
 
 On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a
 validated retained IQ-TREE backbone, MSA, query alignment, and sample

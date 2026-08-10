@@ -192,11 +192,20 @@ like($strain,
 	qr/historical exclusion loading.*?excluded_MGS=.*?outgroup-reference preparation.*?reference_NT=.*?MGS_with_outgroup_candidates=/s,
 	'historical exclusions and outgroup-reference preparation report their final counts');
 like($strain,
-	qr/if \(\$onlySubmit && \$reSubmit && \$doSubmit && !\$subJob.*?resubmitExistingTreeCommands\(.*?exit 0;.*?if \(length\(\$MGSfile\)\)/s,
-	'an explicit tree-only resubmission bypasses Mosaic and catalogue initialization before the normal workflow starts');
+	qr/if \(\$onlySubmit && \$doSubmit && !\$subJob.*?resubmitExistingTreeCommands\(.*?exit 0;.*?if \(length\(\$MGSfile\)\)/s,
+	'an ordinary tree-only resume bypasses Mosaic and catalogue initialization before the normal workflow starts');
 like($strain,
 	qr/sub resubmitExistingTreeCommands .*?treeCmd\.sh.*?placementPending\.sto.*?skipping Mosaic, map, and catalogue loading.*?qsubSystemWaitMaxJobs\(.*?qsubSystem2\(/s,
-	'direct tree-command resubmission reuses saved scripts with scheduler-capacity throttling and falls back for EPA recovery');
+	'direct tree-command resubmission reuses saved scripts with scheduler-capacity throttling, including EPA recovery');
+my ($directTreeResume) = $strain =~
+	/(sub resubmitExistingTreeCommands .*?)(?=sub markStrainWorkflowDirectory)/s;
+ok(defined($directTreeResume),
+	'direct tree-command resume helper is available for isolated inspection');
+unlike($directTreeResume, qr/\$guide|open my \$input/,
+	'direct tree-command resume scans saved output scripts instead of reading the MGS guide');
+like($directTreeResume,
+	qr/bsd_glob.*?next if !\$force && -s .*?treeDone\.sto.*?treeCmd\.epa_retry\.sh.*?epa_only/s,
+	'direct tree-command resume submits only unfinished trees and reuses saved EPA retry scripts');
 like($strain,
 	qr/my \$requiresOutgroupReference = \$runPartI \|\| \$CatNotPrepped \|\| \$repairCAT.*?if \(\$requiresOutgroupReference\).*?readFasta\(\$refFAA.*?readFasta\(\$refFNA/s,
 	'tree-only resumes load reference FASTA catalogues only for input regeneration or repair');
