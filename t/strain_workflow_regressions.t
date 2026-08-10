@@ -192,6 +192,17 @@ like($strain,
 	qr/historical exclusion loading.*?excluded_MGS=.*?outgroup-reference preparation.*?reference_NT=.*?MGS_with_outgroup_candidates=/s,
 	'historical exclusions and outgroup-reference preparation report their final counts');
 like($strain,
+	qr/if \(\$onlySubmit && \$reSubmit && \$doSubmit && !\$subJob.*?resubmitExistingTreeCommands\(.*?exit 0;.*?if \(length\(\$MGSfile\)\)/s,
+	'an explicit tree-only resubmission bypasses Mosaic and catalogue initialization before the normal workflow starts');
+like($strain,
+	qr/sub resubmitExistingTreeCommands .*?treeCmd\.sh.*?placementPending\.sto.*?skipping Mosaic, map, and catalogue loading.*?qsubSystemWaitMaxJobs\(.*?qsubSystem2\(/s,
+	'direct tree-command resubmission reuses saved scripts with scheduler-capacity throttling and falls back for EPA recovery');
+like($strain,
+	qr/my \$requiresOutgroupReference = \$runPartI \|\| \$CatNotPrepped \|\| \$repairCAT.*?if \(\$requiresOutgroupReference\).*?readFasta\(\$refFAA.*?readFasta\(\$refFNA/s,
+	'tree-only resumes load reference FASTA catalogues only for input regeneration or repair');
+unlike($strain, qr/nonEpaTreeAbsences/,
+	'a missing final tree no longer makes reference catalogue loading mandatory');
+like($strain,
 	qr/my %treeDisposition.*?\$treeDisposition\{\$epaFilterRetry \? 'EPA filter-only job'.*?: \$epaOnlyRetry \? 'EPA-only retry job' : 'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
 	'tree submission reports every eligible and skipped MGS disposition before waiting');
 like($strain,

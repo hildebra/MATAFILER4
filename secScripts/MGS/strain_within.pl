@@ -639,6 +639,29 @@ $queueMode = "bash" if !$doSubmit && $queueMode eq "";
 my $QSBoptHR = emptyQsubOpt($doSubmit,"",$queueMode);
 my $MGSfileOri = $MGSfile; #save for later..
 
+
+# An explicit resubmission is intentionally a scheduler-only operation.  The
+# saved per-MGS script already contains the complete BuildTree command,
+# resources, and outgroup choice, so do not wait for Mosaic/catalogue setup
+# before handing it back to the scheduler.  If any selected MGS cannot be
+# safely handled from its published input triplet, fall through to the normal
+# recovery path instead.
+if ($onlySubmit && $reSubmit && $doSubmit && !$subJob
+		&& !$recalcTrees && !$repairCAT && !$deepRepair
+		&& !$redoSubmissionData && !$epaFilterOnly) {
+	my $resumeBindir = $MGSfile;
+	$resumeBindir =~ s/[^\/]+$//;
+	$resumeBindir = $GCd if $resumeBindir eq "";
+	my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
+	my ($handled, $submitted) = resubmitExistingTreeCommands(
+		outdir => $resumeOutD, guide => $MGSfile,
+		subset => \@subsetMGS, options => $QSBoptHR,
+	);
+	if ($handled) {
+		$completionMessage = "direct tree-command resume submitted $submitted saved treeCmd.sh job(s) without loading catalogue databases.";
+		exit 0;
+	}
+}
 if (length($MGSfile)) {
 	my $explicitMosaicCatalogue = length($mosaicLociFile);
 	if (!$explicitMosaicCatalogue && $prepareMosaicLoci) {
@@ -1114,9 +1137,12 @@ my %outgroupGeneCache;
 my $geneCatLoaded=0;
 #read in genecat to create outgroup fasta sequences..
 $stepStarted = time;
-my $nonEpaTreeAbsences = $fullTreeRetryCount;
-$nonEpaTreeAbsences = 0 if $nonEpaTreeAbsences < 0;
-if ($recalcTrees || $CatNotPrepped || $nonEpaTreeAbsences || $repairCAT || $deepRepair || $dirsNOTPrepped || $onlySubmit == 0 || $redoSubmissionData == 1){
+# Complete published tree inputs already include their chosen outgroup.  A
+# tree-only resume reuses that triplet, so a missing final tree alone must not
+# trigger a catalogue-wide read of reference FNA/FAA records.
+my $requiresOutgroupReference = $runPartI || $CatNotPrepped || $repairCAT
+	|| $deepRepair || $redoSubmissionData;
+if ($requiresOutgroupReference){
 	#also read reference gene seqs (for outgroup)
 	my $refFNA = ""; my $refFAA = ""; my $refNameL = "unknw";
 	if ($mode eq "MGS" || $mode eq "MGSall"){
@@ -1147,6 +1173,7 @@ if ($recalcTrees || $CatNotPrepped || $nonEpaTreeAbsences || $repairCAT || $deep
 stepComplete("outgroup-reference preparation", $stepStarted,
 	"status=".(scalar(keys %{$FNAref}) || scalar(keys %{$FAAref}) ? "loaded" : "not_required"),
 	"reference_NT=".scalar(keys %{$FNAref}),
+	"required=".($requiresOutgroupReference ? 1 : 0),
 	"reference_AA=".scalar(keys %{$FAAref}),
 	"MGS_with_outgroup_candidates=".scalar(keys %OGgenesByCOG));
 
@@ -4792,6 +4819,82 @@ sub resetMGSTreeOutputs {
 	retry_unlink($placementMarker, label => "remove placement-pending marker");
 }
 
+sub resubmitExistingTreeCommands {
+	my %args = @_;
+	my $outdir = $args{outdir} // '';
+	my $guide = $args{guide} // '';
+	my $subset = $args{subset} || [];
+	my $options = $args{options} || {};
+	return (0, 0) unless -d $outdir && $options->{doSubmit};
+
+	my %requested;
+	for my $mgs (@{$subset}) {
+		return (0, 0) unless defined($mgs)
+			&& $mgs =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
+		$requested{$mgs} = 1;
+	}
+	if (!%requested && length($guide)) {
+		open my $input, '<', $guide or return (0, 0);
+		while (my $line = <$input>) {
+			chomp $line;
+			next unless length($line);
+			my ($mgs) = split /\t/, $line, 2;
+			next if !defined($mgs) || $mgs eq 'Bin' || $mgs eq 'MGS';
+			return (0, 0) unless $mgs =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
+			$requested{$mgs} = 1;
+		}
+		close $input or return (0, 0);
+		return (0, 0) unless %requested;
+	}
+	if (!%requested) {
+		for my $script (bsd_glob(File::Spec->catfile($outdir, '*', 'treeCmd.sh'))) {
+			my $mgs = basename(dirname($script));
+			next unless $mgs =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
+			$requested{$mgs} = 1;
+		}
+	}
+	return (0, 0) unless %requested;
+
+	my @scripts;
+	for my $mgs (sort keys %requested) {
+		my $mgs_dir = File::Spec->catdir($outdir, $mgs);
+		return (0, 0) unless -d $mgs_dir;
+		next if -s File::Spec->catfile($mgs_dir, 'noTree.sto');
+		# EPA retries need a purpose-built saved retry command and retain their
+		# special placement validation.  Let the normal resume audit handle them.
+		return (0, 0) if -s File::Spec->catfile($mgs_dir, 'placementPending.sto');
+		for my $input_name ($FNAstdof, $FAAstdof, $CATstdof) {
+			return (0, 0) unless fileGZe(File::Spec->catfile($mgs_dir, $input_name));
+		}
+		my $script = File::Spec->catfile($mgs_dir, 'treeCmd.sh');
+		return (0, 0) unless -s $script;
+		push @scripts, [$mgs, $script];
+	}
+
+	print "Direct tree-command resume: ".scalar(@scripts)
+		." saved treeCmd.sh job(s); skipping Mosaic, map, and catalogue loading.\n";
+	for my $record (@scripts) {
+		# Preserve -reSubmit semantics: the saved command is reused, but its
+		# previous final-tree outcome must not make BuildTree exit immediately.
+		my $mgs_dir = dirname($record->[1]);
+		for my $stale (
+			File::Spec->catfile($mgs_dir, 'treeDone.sto'),
+			File::Spec->catfile($mgs_dir, 'placementPending.sto'),
+			map { File::Spec->catfile($mgs_dir, 'phylo', $_) }
+				qw(IQtree_allsites.treefile VERYFASTTREE_allsites.nwk FASTTREE_allsites.nwk),
+		) {
+			retry_unlink($stale, label => 'clear stale direct-resume tree output') if -e $stale;
+		}
+		qsubSystemWaitMaxJobs(
+			$options->{maxConcurrentJobs} || 0,
+			$options->{killDependencyNever} || 0, $options,
+		);
+		my $submission = qsubSystem2($record->[1], $options);
+		print "  Resubmitted $record->[0] from $record->[1]: $submission";
+	}
+	return (1, scalar(@scripts));
+}
+
 sub markStrainWorkflowDirectory {
 	my ($target) = @_;
 	make_path($target) unless -d $target;
@@ -5709,6 +5812,12 @@ Tree locus filtering:
                                  rebuild it from the retained jplace. Unfinished MGS
                                  continue through EPA-only or full-tree recovery
                                  with their normal resource profiles [default 0]
+
+An explicit scheduler-only restart (-onlySubmit 1 -reSubmit 1 -submit 1) reuses
+each saved treeCmd.sh and exits after submitting it, without loading Mosaic,
+map, or gene-catalogue databases.  It requires the published FNA/FAA/category
+triplet for every selected MGS; incomplete inputs and EPA-pending recoveries
+fall back to the full guarded resume path.
 
 On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a
 validated retained IQ-TREE backbone, MSA, query alignment, and sample
