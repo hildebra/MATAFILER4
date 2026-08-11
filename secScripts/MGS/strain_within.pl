@@ -6,10 +6,8 @@ use warnings;
 use strict;
 
 use Getopt::Long qw( GetOptions );
-use List::Util qw/shuffle/;
 use File::Path qw(make_path remove_tree);
 use File::Glob qw(bsd_glob);
-use File::Copy qw(copy);
 use File::Basename qw(basename dirname);
 use File::Spec;
 use File::Temp qw(tempdir);
@@ -18,11 +16,11 @@ use Digest::SHA qw(sha256_hex);
 
 
 
-use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrRev systemW median mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs checkSeqTech);
+use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrRev systemW median mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystem2 qsubSystemJobAlive qsubSystemWaitMaxJobs
 	deferredSubmissionDependency);
 use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
-use Mods::TamocFunc qw(readTabbed getFileStr checkMF);
+use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::math qw(quantileArray);
 use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate protein_kmer_similarity robust_depth_mask);
@@ -53,6 +51,7 @@ sub reportingsMGS;
 sub prepRun;
 sub resolveScratchDirectory;
 sub persistScratchDirectory;
+sub recordedScratchDirectory;
 sub migrateLegacyOperationalLogs;
 sub printEarlyRunHeader;
 sub prepGene2MGS;
@@ -64,6 +63,8 @@ sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
 sub persistentMGSInputState; sub scratchMGSInputState;
 sub invalidateMGSInputState;
 sub stagedMGSInputsReady; sub evalFileStatus;
+sub directResumeStagedInputsReady;
+sub completionMarkerTree;
 sub preparedOutgroupLog {
 	my ($directory) = @_;
 	my $log_path = "$directory/data.log";
@@ -76,8 +77,10 @@ sub preparedOutgroupLog {
 	return (1, $1);
 }
 
+
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
+sub treeOutgroupCandidates;
 sub writeNoRecoverableLociMarker;
 sub recordValidatedEmptyExtractions;
 sub validateTreeInputResolution;
@@ -277,7 +280,6 @@ my $cmdCall = join(" ", $0, @ARGV) . "\n";
 my $GCd = "";#$ARGV[0];
 my $MGSfile = "";#$ARGV[1];
 my $clusterID = 95;
-my $geneSelFile = "";
 my $numCores = 4;#$ARGV[2];
 my $subJob=0;#if 0, is main submitting job..
 my $maxSubJob = -1;#-1 auto; 0 disables splitting; positive values are explicit worker counts
@@ -353,7 +355,6 @@ my $epaPendantOutlierFactor = 5;
 my $epaPendantMinThreshold = 0.02;
 my $redoEPAfilter = 0;
 my $presortGenes = 1200;
-my $checkMaxNumJobs = 400;
 my $useGTDBmg = "GTDB";
 my $selfMemGb = 10;
 my $mosaicMemGb = 150;
@@ -376,7 +377,6 @@ my $forceVCF2FNA = 0; #force the recalc of cons fasta from vcf..
 my $SNPconsLOGs = ""; #logs for recalculating cons SNPs
 my $preCompCons=0; #if >0, precompute in these blocks
 
-my $takeAll = 0;
 my $conspecificSpThr = 0.1; #higher fraction of genes being two copies in the same sample (abundance >0), and the whole MGS is removed from that sample
 my $MGStoolowGsThr = $FILTER_DEFAULT{minimum_mgs_genes_per_sample};
 my $mode = "MGS";
@@ -421,7 +421,6 @@ GetOptions(
 	"clusterID=i"    => \$clusterID,
 	"outD=s"         => \$outDpre,
 	"MGS=s"          => \$MGSfile,
-	#"geneSel=s"      => \$geneSelFile,
 	"map2=s"         => \$mapF2, #to be given to strain2 script
 	"nodeTmp|tmpD=s" => \$locTmpDir1, 
 	"submit=i"       => \$doSubmit,
@@ -535,8 +534,7 @@ die "Core, memory, and precompute settings must be non-negative\n"
 die "-minBadLociPSmpl must be positive\n" unless $minBadLociForSampleSkip > 0;
 die "-MGSminGenesPSmpl and -presortGenes must be positive\n"
 	unless $MGStoolowGsThr > 0 && $presortGenes > 0;
-die "-maxGenes and -treeLocusBudget must be positive\n"
-	unless $maxNGenes > 0 && $treeLocusBudget > 0;
+die "-treeLocusBudget must be positive\n" unless $treeLocusBudget > 0;
 die "-flushEvery must be positive\n" unless $appendWriteTrigger > 0;
 die "-phase1WorkerRetries must be between 0 and 10\n"
 	unless $phase1WorkerRetries >= 0 && $phase1WorkerRetries <= 10;
@@ -646,6 +644,7 @@ my $resumeBindir = $MGSfile;
 $resumeBindir =~ s/[^\/]+$//;
 $resumeBindir = $GCd if $resumeBindir eq "";
 my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
+my $resumeScratchD = recordedScratchDirectory($resumeOutD);
 
 # Redoing EPA filtering is ordinary continuation: invalidate the placed tree
 # and its lifecycle markers, then let the saved treeCmd.sh resume.  In
@@ -719,8 +718,8 @@ if ($onlySubmit && $doSubmit && !$subJob
 		&& !$recalcTrees && !$repairCAT && !$deepRepair
 		&& !$redoSubmissionData) {
 	my ($handled, $submitted) = resubmitExistingTreeCommands(
-		outdir => $resumeOutD, force => $reSubmit,
-		subset => \@subsetMGS, options => $QSBoptHR,
+		outdir => $resumeOutD, scratch_directory => $resumeScratchD,
+		force => $reSubmit, subset => \@subsetMGS, options => $QSBoptHR,
 		redo_epa => $redoEPAfilter,
 	);
 	if ($handled) {
@@ -998,11 +997,20 @@ if ($runPartI){
 	# a tree-only resume it used to dominate startup despite no sample data being
 	# read afterwards, so keep it strictly within the Phase-I path.
 	$stepStarted = time;
-	preComputeConsSNP();
-	stepComplete("consensus-input audit", $stepStarted,
-		"usable_samples=".(scalar(@samples) - scalar(keys %unavailableSamples)),
-		"unavailable_samples=".scalar(keys %unavailableSamples),
-		"precomputed_consensus=".scalar(keys %preCompSNPs));
+	if (!$subJob) {
+		preComputeConsSNP();
+		stepComplete("consensus-input audit", $stepStarted,
+			"usable_samples=".(scalar(@samples) - scalar(keys %unavailableSamples)),
+			"unavailable_samples=".scalar(keys %unavailableSamples),
+			"precomputed_consensus=".scalar(keys %preCompSNPs));
+	} else {
+		# The parent validates and, when requested, precomputes every sample before
+		# it submits workers. Repeating that full scan in every worker multiplied
+		# filesystem metadata traffic without changing extraction decisions.
+		print "Split worker $subJob: reusing parent consensus preflight; validating only owned samples during extraction.\n";
+		stepComplete("consensus-input audit", $stepStarted,
+			"scope=parent_preflight", "worker=$subJob");
+	}
 	
 	$stepStarted = time;
 	my @stageIExtractionMGS = $recalcTrees
@@ -1196,49 +1204,64 @@ stepComplete("historical exclusion loading", $stepStarted,
 my $FNAref = {}; my $FAAref = {};
 my $SIgenes_OG = {}; my %OGgenesByCOG;
 my %outgroupGeneCache;
+my %TreeOutgroupCandidates;
 
-my $geneCatLoaded=0;
-#read in genecat to create outgroup fasta sequences..
+# Read only the reference MGS that can actually be selected as an outgroup for
+# this run.  Loading every MGS here was a second catalogue-wide allocation even
+# when a narrow target subset was requested.
 $stepStarted = time;
 # Complete published tree inputs already include their chosen outgroup.  A
 # tree-only resume reuses that triplet, so a missing final tree alone must not
 # trigger a catalogue-wide read of reference FNA/FAA records.
 my $requiresOutgroupReference = $runPartI || $CatNotPrepped || $repairCAT
 	|| $deepRepair || $redoSubmissionData;
+my %outgroupCatalogueMGS;
 if ($requiresOutgroupReference){
-	#also read reference gene seqs (for outgroup)
-	my $refFNA = ""; my $refFAA = ""; my $refNameL = "unknw";
-	if ($mode eq "MGS" || $mode eq "MGSall"){
-		print "Reading reference genecat genes, to create outgroup sequences\n";
-		$refFNA = "$GCd/compl.incompl.$clusterID.fna"; $refFAA = "$GCd/compl.incompl.$clusterID.prot.faa";
-		$geneCatLoaded=1;$refNameL = "geneCat";
-	} elsif ($mode eq "FMG"){
-		print "reading FMG ref genes..";
-		$refFNA = "$GCd/FMG/COG*.fna"; $refFAA = "$GCd/FMG/COG*.faa";
-		$refNameL = "FMG ref";
-	}
-	
-	# Outgroups can lie outside an explicitly requested target subset.
-	my ($hr1,$Gene2COG_OG,$hr3,$hr4) = readGene2tax($gene2taxF,$presortGenes,[]);
-	$SIgenes_OG = $hr1;
-	for my $MGS (keys %{$hr4}) {
-		for my $locus (@{$hr4->{$MGS}}) {
-			my $gene = $hr1->{$MGS}{$locus};
-			next unless defined($gene) && defined($Gene2COG_OG->{$gene});
-			push @{$OGgenesByCOG{$MGS}{$Gene2COG_OG->{$gene}}}, $gene;
+	for my $MGS (@specis) {
+		$outgroupCatalogueMGS{$PreferredOutgroup{$MGS}} = 1
+			if exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS});
+		if (length($treeFile)) {
+			$outgroupCatalogueMGS{$_} = 1 for treeOutgroupCandidates($MGS);
 		}
 	}
-	#%SIgenes_OG=%{$hr1}; my %Gene2COG_OG=%{$hr2}; 
-	$FAAref = readFasta($refFAA,1,"\\s",$Gene2COG_OG);
-	$FNAref = readFasta($refFNA,1,"\\s",$Gene2COG_OG);
-	print "read ". scalar(keys %{$FNAref})." genes from $refNameL\n";
+	if (%outgroupCatalogueMGS) {
+		my $refFNA = ""; my $refFAA = ""; my $refNameL = "unknown";
+		if ($mode eq "MGS" || $mode eq "MGSall"){
+			print "Reading reference genecat genes for ".scalar(keys %outgroupCatalogueMGS)
+				." outgroup candidate MGS\n";
+			$refFNA = "$GCd/compl.incompl.$clusterID.fna";
+			$refFAA = "$GCd/compl.incompl.$clusterID.prot.faa";
+			$refNameL = "geneCat";
+		} elsif ($mode eq "FMG"){
+			print "Reading FMG reference genes for ".scalar(keys %outgroupCatalogueMGS)
+				." outgroup candidate MGS\n";
+			$refFNA = "$GCd/FMG/COG*.fna"; $refFAA = "$GCd/FMG/COG*.faa";
+			$refNameL = "FMG ref";
+		}
+		my @outgroupMGS = sort keys %outgroupCatalogueMGS;
+		my ($hr1,$Gene2COG_OG,$hr3,$hr4) =
+			readGene2tax($gene2taxF,$presortGenes,\@outgroupMGS);
+		$SIgenes_OG = $hr1;
+		for my $MGS (keys %{$hr4}) {
+			for my $locus (@{$hr4->{$MGS}}) {
+				my $gene = $hr1->{$MGS}{$locus};
+				next unless defined($gene) && defined($Gene2COG_OG->{$gene});
+				push @{$OGgenesByCOG{$MGS}{$Gene2COG_OG->{$gene}}}, $gene;
+			}
+		}
+		$FAAref = readFasta($refFAA,1,"\\s",$Gene2COG_OG);
+		$FNAref = readFasta($refFNA,1,"\\s",$Gene2COG_OG);
+		print "Read ".scalar(keys %{$FNAref})." reference genes from $refNameL\n";
+	} else {
+		print "No external outgroup candidates are available for the selected MGS; reference sequences were not loaded\n";
+	}
 }
 stepComplete("outgroup-reference preparation", $stepStarted,
 	"status=".(scalar(keys %{$FNAref}) || scalar(keys %{$FAAref}) ? "loaded" : "not_required"),
 	"reference_NT=".scalar(keys %{$FNAref}),
 	"required=".($requiresOutgroupReference ? 1 : 0),
 	"reference_AA=".scalar(keys %{$FAAref}),
-	"MGS_with_outgroup_candidates=".scalar(keys %OGgenesByCOG));
+	"MGS_with_outgroup_candidates=".scalar(keys %outgroupCatalogueMGS));
 
 
 
@@ -1342,7 +1365,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		# This also permits a complete new-format staging set to replace legacy
 		# published identifiers without rerunning consensus/extraction.
 		unless ($publishedInputsReady) {
-			$scratchInputsReady = combineMGSgenesDir($MGS,$tmpD,$tmpD);
+			$scratchInputsReady = combineMGSgenesDir($MGS,$tmpD);
 			$recalcScratchRecovered++ if $scratchInputsReady;
 		}
 		unless ($publishedInputsReady || $scratchInputsReady) {
@@ -1381,7 +1404,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	} elsif ($publishedInputsReady && !$mustRegenerateInputs) {
 		print "  Tree input: using complete published FNA/FAA/category files\n";
 	} else {
-		$scratchInputsReady ||= combineMGSgenesDir($MGS,$tmpD,$tmpD);
+		$scratchInputsReady ||= combineMGSgenesDir($MGS,$tmpD);
 		unless ($scratchInputsReady) {#$outD2); -> keep in tmpdir for now..
 			$treeDisposition{'incomplete published and worker inputs'}++;
 			limitedWarn('MGS with incomplete combined worker input',
@@ -1660,8 +1683,6 @@ if ($incompleteTreeOutcomes || $unresolvedInputs) {
 }
 print "\nAll done for $cnt Bins\nRun strain_within_2.pl for summary stats:\n";
 
-my $outDX =  $MGSfile;#"$GCd/$mode/intra_phylo/";
-$outDX =~ s/[^\/]+$//;
 my $MGSabundance = $MGSabundanceOverride ne ""
 	? $MGSabundanceOverride
 	: "$bindir/Annotation/Abundance/MGS.matL7.txt";
@@ -1699,9 +1720,8 @@ exit(0);
 #########################################################################################
 
 
-#	combineMGSgenesDir($MGS,$outD2);
 sub combineMGSgenesDir{
-	my ($MGS,$tmpD,$outD2) = @_;
+	my ($MGS,$tmpD) = @_;
 	my @coreRequired = (
 		"$tmpD/$FNAstdof", "$tmpD/$FAAstdof", "$tmpD/$LINKstdof",
 	);
@@ -1895,13 +1915,6 @@ sub combineMGSgenesDir{
 		limitedWarn('combined MGS inputs missing source parts',
 			"Incomplete combined input for $MGS; retaining all source parts for repair\n");
 	}
-	if ($outD2 ne $tmpD) {
-		make_path($outD2);
-		for my $source (grep { -f $_ } glob("$tmpD/*")) {
-			copy($source, "$outD2/" . basename($source))
-				or die "Cannot copy $source to $outD2: $!\n";
-		}
-	}
 	return $complete;
 }
 
@@ -1974,6 +1987,30 @@ sub outgroupGeneForLocus {
 	return $outgroupGeneCache{$cache_key} = $best_gene;
 }
 
+sub treeOutgroupCandidates {
+	my ($MGS) = @_;
+	return @{$TreeOutgroupCandidates{$MGS}}
+		if exists($TreeOutgroupCandidates{$MGS});
+	my @candidates;
+	if (defined($treeFile) && length($treeFile) && -e $treeFile) {
+		my $neiTree = getProgPaths("neighborTree");
+		my $call = "$neiTree ".shellQuote($treeFile)." ".shellQuote($MGS);
+		my $outgroup_text = `$call`;
+		if ($? != 0) {
+			limitedWarn('outgroup lookup command failures',
+				"Can't find outgroup from call $call; trying catalogue-derived candidates\n");
+		} else {
+			@candidates = split /\s+/, $outgroup_text;
+		}
+	}
+	my %seen;
+	@candidates = grep {
+		/\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/ && !$seen{$_}++
+	} @candidates;
+	$TreeOutgroupCandidates{$MGS} = \@candidates;
+	return @candidates;
+}
+
 sub addOutgroup2MGS{
 	my ($MGS,$OG,$tmpD) = @_;
 	my $outD2 = $SIdirs{$MGS};
@@ -2038,7 +2075,6 @@ sub addOutgroup2MGS{
 	#my $IQtreef= "$outD3/phylo/IQtree_allsites.treefile";
 	my $rmCatTmp=0;
 	my $MSAdir = "$outD3/MSA/";
-	die "Gene cat wasn't loaded, check program logic.\n!$deepRepair && $redoSubmissionData == 0 && $onlySubmit==1 && !$dirsNOTPrepped && !-e $CATtf.tmp \n" if (!$geneCatLoaded);
 	unless (fileGZe($FNAtf) && fileGZe($FAAtf)) {
 		limitedWarn('MGS missing NT or AA input', "Missing NT or AA input for $MGS in $outD3\n");
 		return(0, 0, $OG, 0, 0);
@@ -2123,19 +2159,7 @@ sub addOutgroup2MGS{
 		my @sspl;
 		push @sspl, $PreferredOutgroup{$MGS}
 			if exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS});
-		if ($treeFile ne "") {
-			my $neiTree = getProgPaths("neighborTree");
-			my $call = "$neiTree ".shellQuote($treeFile)." ".shellQuote($MGS);
-			#print "$call\n";
-			my $OG1 = `$call`;
-			if ($? != 0) {
-				limitedWarn('outgroup lookup command failures',
-					"Can't find outgroup from call $call; trying catalogue-derived candidates\n");
-				$OG1 = "";
-			}
-			chomp $OG1;
-			push @sspl, grep { length } split /\s+/,$OG1;
-		}
+		push @sspl, treeOutgroupCandidates($MGS) if $treeFile ne "";
 		my %seen_outgroup;
 		@sspl = grep { !$seen_outgroup{$_}++ } @sspl;
 		$OG = "";
@@ -2572,12 +2596,28 @@ sub prepGene2MGS{
 	print "Mosaic complete-linkage protection rejected $linkage_rejections "
 		."transitive component merge(s)\n" if $linkage_rejections;
 	@records = ();
-	$LocusByID = $locus_model->{locus_by_id};
+	my @selected_locus_groups = @{$locus_model->{groups}};
+	my $locus_budget_excluded = 0;
+	if (!$taxonAwareLocusSelection) {
+		my %selected_loci_by_mgs;
+		@selected_locus_groups = grep {
+			if (($selected_loci_by_mgs{$_->{mgs}} // 0) >= $treeLocusBudget) {
+				$locus_budget_excluded++;
+				0;
+			} else {
+				$selected_loci_by_mgs{$_->{mgs}}++;
+				1;
+			}
+		} @selected_locus_groups;
+	}
+	$LocusByID = {
+		map { $_->{locus_id} => $_ } @selected_locus_groups
+	};
 	$MemberContext = $locus_model->{member_context};
 	$LocusContext = $locus_model->{locus_context};
 
 	my ($new_si_genes, $new_priorities) = ({}, {});
-	for my $group (@{$locus_model->{groups}}) {
+	for my $group (@selected_locus_groups) {
 		$new_si_genes->{$group->{mgs}}{$group->{locus_id}} = $group->{primary_gene};
 		push @{$new_priorities->{$group->{mgs}}}, $group->{locus_id};
 	}
@@ -2587,7 +2627,7 @@ sub prepGene2MGS{
 	my ($gene_sample_combinations, $ambiguous_seed_samples, $missing_clusters) = (0, 0, 0);
 	my $unrepresentedWorkerLoci = 0;
 	my (%contextMembersNeeded, %contextLociNeeded);
-	for my $group (@{$locus_model->{groups}}) {
+	for my $group (@selected_locus_groups) {
 		my %per_sample;
 		for my $seed (@{$group->{genes}}) {
 			#delete (not just read) so the raw comma-joined membership string is freed the
@@ -2652,11 +2692,12 @@ sub prepGene2MGS{
 			if exists $LocusContext->{$locus};
 	}
 	$LocusContext = \%keptLocusContext;
-	print "Prepared ".scalar(@{$locus_model->{groups}})." loci from $ranked_record_count"
+	print "Prepared ".scalar(@selected_locus_groups)." loci from $ranked_record_count"
 		." ranked catalogue clusters; merged $locus_model->{merged_seeds} compatible same-COG seeds. "
 		."$gene_sample_combinations locus-sample combinations, $ambiguous_seed_samples with multiple candidates"
 		.($missing_clusters ? ", $missing_clusters missing cluster-index entries" : "")
 		.($unrepresentedWorkerLoci ? ", $unrepresentedWorkerLoci loci outside this worker's sample slice" : "")
+		.($locus_budget_excluded ? ", $locus_budget_excluded lower-ranked loci excluded by -treeLocusBudget" : "")
 		.".\n";
 }
 
@@ -2705,6 +2746,31 @@ sub resolveScratchDirectory {
 	limitedWarn('scratch manifest',
 		"Invalid or stale scratch-directory manifest $manifest; using $derived\n");
 	return $derived;
+}
+
+sub recordedScratchDirectory {
+	my ($output_directory) = @_;
+	return '' unless defined($output_directory) && -d $output_directory;
+	my $manifest = File::Spec->catfile($output_directory, '.strain_within.scratch.tsv');
+	return '' unless -s $manifest;
+	open my $input, '<', $manifest or return '';
+	my $header = <$input> // '';
+	my $row = <$input> // '';
+	my $extra = grep { /\S/ } <$input>;
+	close $input or return '';
+	$header =~ s/[\r\n]+\z//;
+	$row =~ s/[\r\n]+\z//;
+	my @field = split /\t/, $row, -1;
+	return '' unless $header eq join("\t",
+		qw(version catalog_identity output_path scratch_directory))
+		&& @field == 4 && $field[0] eq '1' && !$extra
+		&& File::Spec->file_name_is_absolute($field[3])
+		&& $field[3] !~ /[\t\r\n]/;
+	my $expected_output = File::Spec->canonpath(
+		File::Spec->rel2abs($output_directory));
+	return '' unless $field[2] eq $expected_output;
+	my $scratch = File::Spec->canonpath(File::Spec->rel2abs($field[3]));
+	return -d $scratch ? $scratch : '';
 }
 
 sub persistScratchDirectory {
@@ -2779,11 +2845,9 @@ sub migrateLegacyOperationalLogs {
 sub prepRun{
 
 	$mode = "FMG" if ($MGSfile eq "");
-	if ($mode eq "FMG"){$takeAll = 0;}
 	$maxSubJob = 0 if $mode eq "FMG" && $maxSubJob == -1;
 	die "FMG mode does not support positive -maxSubJob; run it as a single extraction job\n"
 		if $mode eq "FMG" && $maxSubJob > 0;
-	$takeAll = $noGeneLimit;
 
 
 	$bindir = $MGSfile;$bindir =~ s/[^\/]+$//; 
@@ -2999,8 +3063,7 @@ sub preComputeConsSNP{
 	my $inputChk = "$outD/stones/0.fileChk.sto";
 	my $fileAbsent = 0;
 	my @missing_samples;
-	my $submPreComp = 1;#DEBUG
-	$submPreComp = 0 if ($subJob);
+	my $submPreComp = 1;
 
 	
 	my @accumVCFcmds; my $BatchCnt=0;my @jobsPre;
@@ -3521,56 +3584,6 @@ sub appendWriteMGSgenes {
     }
 
     print "wrote for $wrMGS MGS data..\n";
-}
-
-
-sub appendWriteMGSgene_olds{
-	#write genes to respective MGS intra phyla..
-	my ($writeLink) = @_;
-	print "Flushing buffered MGS records\n";
-	my $wrMGS=0;
-	my @SpecSet = keys(%OFstrH);
-	my @specSetS = shuffle(@SpecSet); #shuffle to further reduce chance of multiple jobs writing consistently to the same files..
-	my $FileSuff = ""; 
-	$FileSuff = ".$subJob";# if ($subJob);
-	foreach my $MGS (@specSetS){
-		next if ($OFstrH{$MGS} eq "");#(!exists($OFstrH{$MGS}) || scalar(@{$OFstrH{$MGS}}) == 0 );
-		my $hasSlept=0;
-		#handle file paths..
-		my $outD2 = $SIdirs{$MGS};
-		$outD2 = "$scratchD/outs/$MGS/";
-		system "mkdir -p $outD2" unless (-d $outD2);
-		my $FNAtf = "$outD2/$FNAstdof$FileSuff"; my $FAAtf = "$outD2/$FAAstdof$FileSuff";my $Linkf = "$outD2/$LINKstdof$FileSuff";
-		my $CATtf = "$outD2/$CATstdof.tmp$FileSuff";
-		my $blockF = "$outD2/block.tmp";
-		
-		#block sample for other writes..
-		#while (-e $blockF){sleep(5);$hasSlept=1;}while ($hasSlept && -e $blockF){sleep(8);}#second security layer..
-		#system "touch $blockF";sleep(4) if ($hasSlept);#security that other process has finished writes completely
-		#deactivate, go for unique file instead..
-
-		#writing strings out..
-		open OF,">>$FNAtf" or die "Can't append NT file $FNAtf\n";print OF $OFstrH{$MGS}; close OF;
-		open OA,">>$FAAtf" or die "Can't append AA file $FAAtf\n";print OA $OAstrH{$MGS}; close OA;
-		if ($writeLink){open OL,">>$Linkf" or die "Can't append link file $Linkf\n" ; print OL $OLstrH{$MGS}; close OL;}
-		#this is only a temp file, that needs to be rewritten later..
-		open OC,">>$CATtf" or die "Can't append to CAT file $CATtf\n";print OC $OCstrH{$MGS} ; close OC;
-		
-		#open OF,">>$FNAtf" or die "Can't append NT file $FNAtf\n";foreach(@{$OFstrH{$MGS}}){print OF $_;} close OF;
-#		open OA,">>$FAAtf" or die "Can't append AA file $FAAtf\n";print OA join("",@{$OAstrH{$MGS}}); close OA;
-		#open OA,">>$FAAtf" or die "Can't append AA file $FAAtf\n";foreach(@{$OAstrH{$MGS}}){print OA $_;} close OA;#print OA join("",@{$OAstrH{$MGS}}); close OA;
-		#if ($writeLink){open OL,">>$Linkf" or die "Can't append link file $Linkf\n" ; foreach(@{$OLstrH{$MGS}}){print OL $_;}  close OL;}
-		#this is only a temp file, that needs to be rewritten later..
-		#open OC,">>$CATtf" or die "Can't append to CAT file $CATtf\n"; foreach(@{$OCstrH{$MGS}}){print OC $_;}   close OC;
-		
-		
-		#$OCstrH{$MGS} = []; $OFstrH{$MGS} = []; $OAstrH{$MGS} = []; $OLstrH{$MGS} = [];
-		$OCstrH{$MGS} = ""; $OFstrH{$MGS} = ""; $OAstrH{$MGS} = ""; $OLstrH{$MGS} = "";
-		$wrMGS++;
-		
-		system "rm -f $blockF";
-	}
-	print "wrote for $wrMGS MGS data..\n";
 }
 
 
@@ -4829,11 +4842,47 @@ sub resetMGSTreeOutputs {
 	retry_unlink($placementMarker, label => "remove placement-pending marker");
 }
 
+sub completionMarkerTree {
+	my ($marker, $output_directory) = @_;
+	return '' unless defined($marker) && -s $marker
+		&& defined($output_directory) && -d $output_directory;
+	open my $input, '<', $marker or return '';
+	my $line = <$input> // '';
+	close $input or return '';
+	$line =~ s/[\r\n]+\z//;
+	my ($producer, $marker_version, $tree_path) = split /\t/, $line, 3;
+	return '' unless defined($producer) && $producer eq 'buildTree5'
+		&& defined($marker_version) && $marker_version =~ /^\d+(?:\.\d+)?\z/
+		&& $marker_version >= 5.40
+		&& defined($tree_path) && length($tree_path);
+	my $output = File::Spec->canonpath(File::Spec->rel2abs($output_directory));
+	my $tree = File::Spec->canonpath(File::Spec->rel2abs($tree_path, $output));
+	my $relative = File::Spec->abs2rel($tree, $output);
+	return '' if $relative eq File::Spec->curdir
+		|| $relative =~ /^\.\.(?:[\\\/]|\z)/;
+	return -s $tree ? $tree : '';
+}
+
+sub directResumeStagedInputsReady {
+	my ($scratch_directory, $mgs, $script) = @_;
+	return 0 unless defined($scratch_directory) && length($scratch_directory)
+		&& defined($mgs) && length($mgs) && defined($script) && -s $script;
+	open my $input, '<', $script or return 0;
+	my $script_text = do { local $/; <$input> // '' };
+	close $input or return 0;
+	return 0 unless $script_text =~ /(?:^|\s)-stagedInputDir(?:\s|=)/;
+	my $staged_directory = File::Spec->catdir($scratch_directory, 'outs', $mgs);
+	return !grep {
+		!fileGZe(File::Spec->catfile($staged_directory, $_))
+	} ($FNAstdof, $FAAstdof, $CATstdof);
+}
+
 sub resubmitExistingTreeCommands {
 	my %args = @_;
 	my $outdir = $args{outdir} // '';
 	my $force = $args{force} ? 1 : 0;
 	my $redoEpa = $args{redo_epa} ? 1 : 0;
+	my $scratch_directory = $args{scratch_directory} // '';
 	my $subset = $args{subset} || [];
 	my $options = $args{options} || {};
 	return (0, 0) unless -d $outdir && $options->{doSubmit};
@@ -4865,7 +4914,18 @@ sub resubmitExistingTreeCommands {
 		my $finalTree = File::Spec->catfile(
 			$mgs_dir, 'phylo', 'IQtree_allsites.treefile');
 		my $treeDone = File::Spec->catfile($mgs_dir, 'treeDone.sto');
-		next if !$force && -s $treeDone && -s $finalTree;
+		my $completedTree = completionMarkerTree($treeDone, $mgs_dir);
+		if (!length($completedTree)) {
+			for my $candidate (map {
+				File::Spec->catfile($mgs_dir, 'phylo', $_)
+			} qw(IQtree_allsites.treefile VERYFASTTREE_allsites.nwk FASTTREE_allsites.nwk)) {
+				if (-s $candidate) {
+					$completedTree = $candidate;
+					last;
+				}
+			}
+		}
+		next if !$force && -s $treeDone && length($completedTree);
 		my $pending = File::Spec->catfile($mgs_dir, 'placementPending.sto');
 		my $publicationResume = !$force && !-s $finalTree
 			&& -s File::Spec->catfile(
@@ -4876,6 +4936,8 @@ sub resubmitExistingTreeCommands {
 			File::Spec->catfile($mgs_dir, 'treeCmd.sh'),
 			$redoEpa ? 'redo_epa' : 'full',
 		);
+		my $stagedInputsReady = directResumeStagedInputsReady(
+			$scratch_directory, $mgs, $script);
 		if ($redoEpa && !$publicationResume) {
 			limitedWarn('redo EPA filter missing retained publication state',
 				"Skipping $mgs: -redoEPAfilter requires its retained backbone and jplace\n");
@@ -4888,12 +4950,13 @@ sub resubmitExistingTreeCommands {
 			my @missing = grep {
 				!fileGZe(File::Spec->catfile($mgs_dir, $_))
 			} ($FNAstdof, $FAAstdof, $CATstdof);
-			if (@missing) {
+			if (@missing && !$stagedInputsReady) {
 				limitedWarn('direct resume missing tree input',
 					"Skipping $mgs: saved full-tree command lacks "
-					.join(', ', @missing)."\n");
+					.join(', ', @missing)." and has no complete staged-input triplet\n");
 				next;
 			}
+			print "Direct resume $mgs: reusing validated staged tree inputs\n" if @missing;
 		}
 		unless (-s $script) {
 			limitedWarn('direct resume missing saved command',
@@ -5368,7 +5431,17 @@ sub readGenesSample_Singl{
 			limitedWarn('incomplete precomputed consensus files',
 				"Ignoring incomplete precomputed consensus files for $sd3\n");
 			delete $preCompSNPs{$sd3};
-		}
+		} elsif ($preCompCons) {
+				# Split workers do not rebuild the parent's full precompute map. The
+				# persistent scratch paths are deterministic, so inspect only this
+				# sample's completed pair when it is actually extracted.
+				my $precomputedNT = "$preConDir/$sd3.cons.genes.fna.gz";
+				my $precomputedAA = "$preConDir/$sd3.cons.prots.faa.gz";
+				if (fileGZe($precomputedNT) && fileGZe($precomputedAA)) {
+					($fastaf, $fastafAA, $locForceVCF2FNA) =
+						($precomputedNT, $precomputedAA, 0);
+				}
+			}
 		
 		my $input_state = consensusInputState(
 			fileGZe($fastafVCF), fileGZe($fastaf), fileGZe($fastafAA), $locForceVCF2FNA
@@ -5408,7 +5481,6 @@ sub readGenesSample_Singl{
 		my $FAA2 = readFasta($fastafAA,0,"\\s",\%subG);# retain full headers for depth/CSP parsing
 		my %FAA ;#= {};
 		my %depths;
-		#my $abunHR = readTabbed($cD.$abundF);
 		#print "Time B: " . timeNice(time - $sttime)  . "\n";
 
 		#my %FAA = %{$hr};
