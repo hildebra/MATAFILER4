@@ -4727,7 +4727,6 @@ sub resetMGSTreeOutputs {
 	retry_unlink($placementMarker, label => "remove placement-pending marker");
 }
 
-<<<<<<< HEAD
 sub completionMarkerTree {
 	my ($marker, $output_directory) = @_;
 	return '' unless defined($marker) && -s $marker
@@ -4885,8 +4884,6 @@ sub resubmitExistingTreeCommands {
 	}
 	return (1, scalar(@scripts));
 }
-=======
->>>>>>> 28d95afe31d1ab7538a793d10f4f23b8f71a3bf0
 
 sub markStrainWorkflowDirectory {
 	my ($target) = @_;
