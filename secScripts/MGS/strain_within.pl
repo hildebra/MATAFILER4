@@ -265,7 +265,8 @@ END {
 #.97: bound EPA-ng placement memory and worker threads independently of tree inference
 #1.01: republish existing EPA placements through final outlier filtering only
 #1.02: invalidate EPA-derived completion state before ordinary saved-command resume
-my $version = 1.02;
+#1.03: accept bare and explicit numeric redo-EPA flags
+my $version = 1.03;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -489,7 +490,7 @@ GetOptions(
 	"epaMaxMemMB=i" => \$epaMaxMemMB,
 	"epaPendantOutlierFactor=f" => \$epaPendantOutlierFactor,
 	"epaPendantMinThreshold=f" => \$epaPendantMinThreshold,
-	"redoEPAfilter!" => \$redoEPAfilter,
+	"redoEPAfilter:i" => sub { $redoEPAfilter = $_[1] || 1; },
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
@@ -518,6 +519,8 @@ if ($help) {
 	exit 0;
 }
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
+die "-redoEPAfilter must be 0 or 1\n"
+	unless $redoEPAfilter == 0 || $redoEPAfilter == 1;
 checkMF();
 die "-GCd is required and must be a directory\n" unless length($GCd) && -d $GCd;
 die "Either -MGS or -outD is required\n" unless length($MGSfile) || length($outDpre);
@@ -1522,7 +1525,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
 		if !$epaRecovery && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof"));
 	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if !$epaRecovery && $needsCopy;
-		$Tcmd .= "-redoEPAfilter " if $redoEPAfilter;
+	$Tcmd .= "-redoEPAfilter 1 " if $redoEPAfilter;
 	$Tcmd .= "-epaOnly 1 " if $epaOnlyRetry;
 	$Tcmd .= "-continue 1 -completionMarker ".shellQuote($treeStone)." "
 		."-terminalMarker ".shellQuote($terminalTreeMarker)." "

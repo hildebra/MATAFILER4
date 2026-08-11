@@ -61,6 +61,7 @@
 #5.57: restore authoritative backbone branch lengths after EPA-ng placement
 #5.58: graft EPA placements directly onto the persisted backbone tree
 #5.59: force retained-jplace filtering through the ordinary continuation path
+#5.60: accept bare and explicit numeric redo-EPA flags
 
 use warnings;
 use strict;
@@ -170,7 +171,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.59;
+my $version = 5.60;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -401,7 +402,7 @@ GetOptions(
 	"NonSynTree=i"	=> \$calcNonSyn,
 	"continue=i" => \$continue,
 	"epaOnly=i" => \$epaOnly,
-	"redoEPAfilter!" => \$redoEPAfilter,
+	"redoEPAfilter:i" => sub { $redoEPAfilter = $_[1] || 1; },
 	"bootstrap=i" => \$bootStrap,
 	"subsetSmpls=i" => \$subsetSmpls,
 	"postFilter=s" => \$postFilter, # "," sep list of zorro,guidance2,macse
@@ -478,6 +479,8 @@ die "-strainWithinPreset must be 0 or 1\n"
 die "-epaOnly must be 0 or 1\n" unless $epaOnly == 0 || $epaOnly == 1;
 die "-AutoModel must be 0 or 1\n"
 	unless $treeAutoModel == 0 || $treeAutoModel == 1;
+die "-redoEPAfilter must be 0 or 1\n"
+	unless $redoEPAfilter == 0 || $redoEPAfilter == 1;
 
 $minOverlapMSA = $withinSpecies ? 0.35 : 0 unless defined $minOverlapMSA;
 $postAlignmentLocusQC = $withinSpecies
