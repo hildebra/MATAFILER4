@@ -264,7 +264,8 @@ END {
 #.96: use the authoritative Phase-I input audit for legacy ledger-free resumes
 #.97: bound EPA-ng placement memory and worker threads independently of tree inference
 #1.01: republish existing EPA placements through final outlier filtering only
-my $version = 1.01;
+#1.02: invalidate EPA-derived completion state before ordinary saved-command resume
+my $version = 1.02;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -642,13 +643,16 @@ $resumeBindir =~ s/[^\/]+$//;
 $resumeBindir = $GCd if $resumeBindir eq "";
 my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
 
-# Redoing EPA filtering is ordinary continuation: invalidate only the placed
-# tree derived from a retained jplace, then let the saved treeCmd.sh resume.
+# Redoing EPA filtering is ordinary continuation: invalidate the placed tree
+# and its lifecycle markers, then let the saved treeCmd.sh resume.  In
+# particular, do not leave or create placementPending.sto: that marker belongs
+# exclusively to the separate EPA-only recovery path.
 if ($redoEPAfilter) {
 	die "-redoEPAfilter output directory does not exist: $resumeOutD\n"
 		unless -d $resumeOutD;
 	my %subset = map { $_ => 1 } @subsetMGS;
-	my ($retained, $removed, $alreadyMissing) = (0, 0, 0);
+	my ($retained, $removed, $completionRemoved, $pendingRemoved,
+		$alreadyMissing) = (0, 0, 0, 0, 0);
 	for my $jplace (bsd_glob(File::Spec->catfile(
 			$resumeOutD, '*', 'phylo', 'epa-ng', 'epa_result.jplace'))) {
 		next unless -s $jplace;
@@ -670,9 +674,32 @@ if ($redoEPAfilter) {
 		} else {
 			$alreadyMissing++;
 		}
+		my $completion = File::Spec->catfile($mgsDir, 'treeDone.sto');
+		if (-e $completion) {
+			if ($doSubmit) {
+				retry_unlink($completion,
+					label => "invalidate EPA-filtered completion marker for $mgs");
+				$completionRemoved++;
+			} else {
+				print "Would remove EPA-filtered completion marker $completion\n";
+			}
+		}
+		my $pending = File::Spec->catfile($mgsDir, 'placementPending.sto');
+		if (-e $pending) {
+			if ($doSubmit) {
+				retry_unlink($pending,
+					label => "clear stale EPA-only marker for normal resume of $mgs");
+				$pendingRemoved++;
+			} else {
+				print "Would remove stale EPA-only marker $pending\n";
+			}
+		}
 	}
 	print "Redo EPA filter resume: retained_jplace=$retained, "
-		."placed_trees_removed=$removed, already_missing=$alreadyMissing. "
+		."placed_trees_removed=$removed, "
+		."completion_markers_removed=$completionRemoved, "
+		."pending_markers_removed=$pendingRemoved, "
+		."already_missing=$alreadyMissing. "
 		."Continuing through saved treeCmd.sh files.\n";
 	unless ($doSubmit) {
 		$completionMessage = "redo EPA filter dry run completed without loading catalogue databases.";
@@ -690,6 +717,7 @@ if ($onlySubmit && $doSubmit && !$subJob
 	my ($handled, $submitted) = resubmitExistingTreeCommands(
 		outdir => $resumeOutD, force => $reSubmit,
 		subset => \@subsetMGS, options => $QSBoptHR,
+		redo_epa => $redoEPAfilter,
 	);
 	if ($handled) {
 		$completionMessage = "direct tree-command resume submitted $submitted saved treeCmd.sh job(s) without loading catalogue databases.";
@@ -1494,6 +1522,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
 		if !$epaRecovery && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof"));
 	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if !$epaRecovery && $needsCopy;
+		$Tcmd .= "-redoEPAfilter " if $redoEPAfilter;
 	$Tcmd .= "-epaOnly 1 " if $epaOnlyRetry;
 	$Tcmd .= "-continue 1 -completionMarker ".shellQuote($treeStone)." "
 		."-terminalMarker ".shellQuote($terminalTreeMarker)." "
@@ -4800,6 +4829,7 @@ sub resubmitExistingTreeCommands {
 	my %args = @_;
 	my $outdir = $args{outdir} // '';
 	my $force = $args{force} ? 1 : 0;
+	my $redoEpa = $args{redo_epa} ? 1 : 0;
 	my $subset = $args{subset} || [];
 	my $options = $args{options} || {};
 	return (0, 0) unless -d $outdir && $options->{doSubmit};
@@ -4838,8 +4868,15 @@ sub resubmitExistingTreeCommands {
 				$mgs_dir, 'phylo', 'IQtree_allsites.backbone.treefile')
 			&& -s File::Spec->catfile(
 				$mgs_dir, 'phylo', 'epa-ng', 'epa_result.jplace');
-		my ($script, $mode) = (File::Spec->catfile($mgs_dir, 'treeCmd.sh'), 'full');
-		if (!$publicationResume && !$force && -s $pending) {
+		my ($script, $mode) = (
+			File::Spec->catfile($mgs_dir, 'treeCmd.sh'),
+			$redoEpa ? 'redo_epa' : 'full',
+		);
+		if ($redoEpa && !$publicationResume) {
+			limitedWarn('redo EPA filter missing retained publication state',
+				"Skipping $mgs: -redoEPAfilter requires its retained backbone and jplace\n");
+			next;
+		} elsif (!$publicationResume && !$force && -s $pending) {
 			my $retry_script = File::Spec->catfile($mgs_dir, 'treeCmd.epa_retry.sh');
 			$script = $retry_script if -s $retry_script;
 			$mode = 'epa_only';

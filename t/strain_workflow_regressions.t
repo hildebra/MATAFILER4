@@ -129,7 +129,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.01;/,
+like($strain, qr/my \$version = 1\.02;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
@@ -192,8 +192,8 @@ like($strain,
 	qr/historical exclusion loading.*?excluded_MGS=.*?outgroup-reference preparation.*?reference_NT=.*?MGS_with_outgroup_candidates=/s,
 	'historical exclusions and outgroup-reference preparation report their final counts');
 like($strain,
-	qr/"redoEPAfilter!" => \\\$redoEPAfilter.*?if \(\$redoEPAfilter\).*?epa_result\.jplace.*?IQtree_allsites\.treefile.*?retry_unlink\(\$placedTree.*?Continuing through saved treeCmd\.sh files.*?resubmitExistingTreeCommands\(.*?exit 0;.*?if \(length\(\$MGSfile\)\)/s,
-	'-redoEPAfilter removes only jplace-derived final trees before the ordinary pre-database resume');
+	qr/"redoEPAfilter!" => \\\$redoEPAfilter.*?if \(\$redoEPAfilter\).*?epa_result\.jplace.*?IQtree_allsites\.treefile.*?retry_unlink\(\$placedTree.*?treeDone\.sto.*?retry_unlink\(\$completion.*?placementPending\.sto.*?retry_unlink\(\$pending.*?Continuing through saved treeCmd\.sh files.*?resubmitExistingTreeCommands\(.*?redo_epa => \$redoEPAfilter.*?exit 0;.*?if \(length\(\$MGSfile\)\)/s,
+	'-redoEPAfilter clears the jplace-derived tree and lifecycle markers before the ordinary pre-database resume');
 unlike($strain, qr/epaFilterOnly|treeCmd\.epa_filter/,
 	'the retired filter-only controller and special command path are absent');
 like($strain,
@@ -211,6 +211,8 @@ unlike($directTreeResume, qr/\$guide|open my \$input/,
 like($directTreeResume,
 	qr/bsd_glob.*?my \$treeDone.*?next if !\$force && -s \$treeDone && -s \$finalTree.*?my \$publicationResume.*?epa_result\.jplace.*?treeCmd\.epa_retry\.sh.*?epa_only/s,
 	'direct tree-command resume notices a removed placed tree despite treeDone and reuses saved EPA retry scripts');
+like($directTreeResume, qr/\$redoEpa && !\$publicationResume.*?next;.*?elsif \(!\$publicationResume/s,
+	'forced EPA filtering selects only retained-jplace publication resumes and never EPA-only recovery');
 like($directTreeResume,
 	qr/\$publicationResume.*?elsif \(!\$publicationResume\).*?FNAstdof.*?FAAstdof.*?CATstdof/s,
 	'a retained-jplace publication resume skips unnecessary sequence-input checks');
@@ -528,8 +530,11 @@ my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'b
 like($build_tree, qr/if \(\$numSeq < 3\)/,
 	'three-sample MGS accepted by the wrapper are retained for a minimal tree');
 like($build_tree,
-	qr/my \$retainedJplace = File::Spec->catfile.*?if \(\$continue && \$dedicatedBackbone && !-s \$primaryTree.*?-s \$retainedJplace\).*?read_epa_jplace.*?reapplying placement filtering.*?else \{.*?runEpaNgPlacement.*?filter_epa_placement_outliers.*?write_epa_placed_tree/s,
-	'normal BuildTree continuation reuses a retained jplace only when the derived placed tree is missing');
+	qr/my \$retainedJplace = File::Spec->catfile.*?if \(\$continue && \$dedicatedBackbone.*?\(\$redoEPAfilter \|\| !-s \$primaryTree\).*?-s \$retainedJplace\).*?read_epa_jplace.*?reapplying placement filtering.*?else \{.*?runEpaNgPlacement.*?filter_epa_placement_outliers.*?write_epa_placed_tree/s,
+	'normal BuildTree continuation reuses a retained jplace when its placed tree is missing or filtering is forced');
+like($build_tree,
+	qr/"redoEPAfilter!" => \\\$redoEPAfilter.*?!\$redoEPAfilter.*?Forced EPA filter redo/s,
+	'BuildTree exposes redo-EPA as a force modifier on the normal continuation path');
 unlike($build_tree, qr/epaFilterOnly|runEpaFilterOnly/,
 	'BuildTree has no separate filter-only option or execution path');
 

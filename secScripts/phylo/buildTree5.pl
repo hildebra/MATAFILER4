@@ -60,6 +60,7 @@
 #5.56: pass fitted IQ-TREE GTR parameters directly to EPA-ng
 #5.57: restore authoritative backbone branch lengths after EPA-ng placement
 #5.58: graft EPA placements directly onto the persisted backbone tree
+#5.59: force retained-jplace filtering through the ordinary continuation path
 
 use warnings;
 use strict;
@@ -169,7 +170,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.58;
+my $version = 5.59;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -231,6 +232,7 @@ my $strainWithinPreset = 0;
 
 my ($continue,$isAligned) = (0,0);#overwrite already existing files?
 my $epaOnly = 0;
+my $redoEPAfilter = 0;
 my $outgroup="";
 my $fixHeaders = 0;
 my ($doGubbins,$doCFML,$doRAXML,$doFastTree,$doVeryFastTree, $doIQTree,$doRAXMLng) = (0,0,0,0,0, 0, 0);#fastree as default tree builder
@@ -399,6 +401,7 @@ GetOptions(
 	"NonSynTree=i"	=> \$calcNonSyn,
 	"continue=i" => \$continue,
 	"epaOnly=i" => \$epaOnly,
+	"redoEPAfilter!" => \$redoEPAfilter,
 	"bootstrap=i" => \$bootStrap,
 	"subsetSmpls=i" => \$subsetSmpls,
 	"postFilter=s" => \$postFilter, # "," sep list of zorro,guidance2,macse
@@ -531,6 +534,15 @@ if ($epaOnly) {
 			&& !$doFastTree && !$doVeryFastTree;
 	die "-epaOnly requires -completionMarker and -placementPendingMarker\n"
 		unless length($completionMarker) && length($placementPendingMarker);
+}
+if ($redoEPAfilter) {
+	die "-redoEPAfilter requires -continue 1\n" unless $continue;
+	die "-redoEPAfilter requires -strictBackbone 1\n" unless $strictBackbone;
+	die "-redoEPAfilter currently requires exactly -runIQtree 1\n"
+		unless $doIQTree && !$doRAXML && !$doRAXMLng
+			&& !$doFastTree && !$doVeryFastTree;
+	die "-redoEPAfilter cannot be combined with -epaOnly\n"
+		if $epaOnly;
 }
 die "-postAlignmentLocusQC must be 0 or 1 "
 	."(default: 0 between species, 1 within species)\n"
@@ -947,6 +959,7 @@ my $hasAdditionalAnalysis = $Ete || $calcDistMat || $calcDNAdiff
 	|| $doFastGear || $doFastGearSummary || $removeMSA || $gzipInput;
 if (length($durableCompletionTree) && $completionMatchesMethod
 		&& !$hasAdditionalAnalysis
+		&& !$redoEPAfilter
 		&& ($cogCats eq '' || $postAlignmentQCAuditCurrent)) {
 	# The marker is published only after tree validation and all requested standard
 	# stages finish. A matching policy therefore avoids reopening every locus and
@@ -2040,14 +2053,17 @@ if ($strictSplit) {
 			my $retainedJplace = File::Spec->catfile(
 				$treeD, 'epa-ng', 'epa_result.jplace');
 			my $placementOK = eval {
-				if ($continue && $dedicatedBackbone && !-s $primaryTree
+				if ($continue && $dedicatedBackbone
+						&& ($redoEPAfilter || !-s $primaryTree)
 						&& -s $retainedJplace) {
 					$jplaceFile = $retainedJplace;
 					$modelArtifact = 'retained EPA-ng result';
 					$epaResult = read_epa_jplace(
 						$jplaceFile, $strictSplit->{placement});
-					print "Recovery state: final EPA-placed tree is missing; "
-						."reusing $jplaceFile and reapplying placement filtering\n";
+					print($redoEPAfilter
+						? "Forced EPA filter redo: "
+						: "Recovery state: final EPA-placed tree is missing; ");
+					print "reusing $jplaceFile and reapplying placement filtering\n";
 				} else {
 					($epaResult, $modelArtifact, $jplaceFile) = runEpaNgPlacement(
 						$tOhr, $backboneTree, $multAli, $placementAlignment,
