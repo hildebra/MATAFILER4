@@ -130,6 +130,12 @@ like($script_text,
 my $placement_outlier_calls = () = $script_text =~ /filter_epa_placement_outliers\(/g;
 cmp_ok($placement_outlier_calls, '>=', 2,
 	'fresh and EPA-only placement publication both apply pendant-branch outlier QC');
+my $reference_reconciliation_calls =
+	() = $script_text =~ /reconcile_epa_reference_tree\(/g;
+cmp_ok($reference_reconciliation_calls, '>=', 2,
+	'normal and EPA-only publication both restore authoritative backbone lengths');
+like($script_text, qr/strict_backbone\.epa_reference_lengths\.tsv/,
+	'EPA branch reconciliation publishes a per-edge comparison report');
 like($script_text,
 	qr/pendant_outlier_limit placement_filter_reason reason/s,
 	'EPA placement reports expose the applied cutoff and exclusion reason');

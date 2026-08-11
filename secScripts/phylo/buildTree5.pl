@@ -58,6 +58,7 @@
 #5.54: exclude EPA placements with pendant branches far outside the backbone distribution
 #5.55: reuse a retained EPA jplace when normal continuation is missing only its placed tree
 #5.56: pass fitted IQ-TREE GTR parameters directly to EPA-ng
+#5.57: restore authoritative backbone branch lengths after EPA-ng placement
 
 use warnings;
 use strict;
@@ -70,7 +71,7 @@ use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 ru
 use Mods::PhyloAlignment qw(filter_alignment_by_overlap);
 use Mods::StrainPlacement qw(
 	read_sample_qc split_strict_backbone
-	read_epa_jplace filter_epa_placement_outliers write_epa_placed_tree
+	read_epa_jplace filter_epa_placement_outliers reconcile_epa_reference_tree write_epa_placed_tree
 );
 			
 			
@@ -149,6 +150,8 @@ sub epaModelArtifact;
 sub runEpaNgPlacement;
 sub readStrictBackboneClassification;
 sub runEpaOnlyPlacement;
+sub writeEpaReferenceLengthAudit;
+sub printEpaReferenceLengthSummary;
 sub writeEpaPlacementFilterSummary;
 sub printEpaPlacementFilterSummary;
 sub epaFilterMetricValue;
@@ -165,7 +168,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.56;
+my $version = 5.57;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -2067,6 +2070,13 @@ if ($strictSplit) {
 			}
 			my $placements = $epaResult->{placements};
 			my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
+			my $referenceLengthQC = reconcile_epa_reference_tree(
+				$epaResult->{tree}, $backboneTreeText, $placements);
+			$epaResult->{tree} = $referenceLengthQC->{tree};
+			my $referenceLengthReport =
+				"$treeD/strict_backbone.epa_reference_lengths.tsv";
+			writeEpaReferenceLengthAudit($referenceLengthQC, $referenceLengthReport);
+			printEpaReferenceLengthSummary($referenceLengthQC, $referenceLengthReport);
 			my $placementQC = filter_epa_placement_outliers(
 				$backboneTreeText, $placements,
 				{
@@ -2468,6 +2478,13 @@ sub runEpaOnlyPlacement {
 
 	my $placements = $epaResult->{placements};
 	my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
+	my $referenceLengthQC = reconcile_epa_reference_tree(
+		$epaResult->{tree}, $backboneTreeText, $placements);
+	$epaResult->{tree} = $referenceLengthQC->{tree};
+	my $referenceLengthReport =
+		"$treeDirectory/strict_backbone.epa_reference_lengths.tsv";
+	writeEpaReferenceLengthAudit($referenceLengthQC, $referenceLengthReport);
+	printEpaReferenceLengthSummary($referenceLengthQC, $referenceLengthReport);
 	my $placementQC = filter_epa_placement_outliers(
 		$backboneTreeText, $placements,
 		{
@@ -2526,6 +2543,58 @@ sub readEpaFilterBackboneTree {
 	die "EPA placement-filter backbone tree is empty: $backboneTree\n"
 		unless defined($backboneText) && $backboneText =~ /\S/;
 	return $backboneText;
+}
+
+sub writeEpaReferenceLengthAudit {
+	my ($referenceQC, $auditFile) = @_;
+	die "EPA reference-length audit requires reconciliation metrics\n"
+		unless ref($referenceQC) eq 'HASH'
+			&& ref($referenceQC->{rows}) eq 'ARRAY';
+	die "EPA reference-length audit requires an output path\n"
+		unless defined($auditFile) && length($auditFile);
+	my @columns = qw(
+		edge edge_type terminal descendant_count jplace_length backbone_length
+		difference changed placement_count adjusted_placement_count
+	);
+	my $temporary = "$auditFile.tmp.$$";
+	retry_unlink($temporary, fatal => 0,
+		label => 'clear EPA reference-length audit temporary');
+	my $auditHandle = retry_open('>', $temporary,
+		label => 'write EPA reference-length audit');
+	print {$auditHandle} join("\t", @columns), "\n";
+	for my $row (@{$referenceQC->{rows}}) {
+		print {$auditHandle} join("\t",
+			map {
+				my $value = $row->{$_};
+				$_ eq 'edge_type' || $_ eq 'terminal'
+					? (defined($value) ? $value : '')
+					: epaFilterMetricValue($value)
+			} @columns
+		), "\n" or die "Cannot write EPA reference-length audit $temporary: $!\n";
+	}
+	retry_close($auditHandle, 'close EPA reference-length audit');
+	retry_rename($temporary, $auditFile,
+		label => 'publish EPA reference-length audit');
+	return $auditFile;
+}
+
+sub printEpaReferenceLengthSummary {
+	my ($referenceQC, $auditFile) = @_;
+	print "EPA-ng reference-branch reconciliation: compared "
+		.epaFilterMetricValue($referenceQC->{compared_edge_count})
+		." edges; replaced "
+		.epaFilterMetricValue($referenceQC->{changed_edge_count})
+		.", unchanged "
+		.epaFilterMetricValue($referenceQC->{unchanged_edge_count})
+		."; restored zero-length branches="
+		.epaFilterMetricValue($referenceQC->{zero_length_restored_count})
+		."; adjusted placement coordinates="
+		.epaFilterMetricValue($referenceQC->{adjusted_placement_count})
+		.", clamped="
+		.epaFilterMetricValue($referenceQC->{clamped_placement_count})
+		."; max absolute difference="
+		.epaFilterMetricValue($referenceQC->{max_absolute_difference})
+		."; authoritative tree=backbone; details=$auditFile\n";
 }
 
 sub epaFilterMetricValue {

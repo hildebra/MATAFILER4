@@ -9,7 +9,7 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::StrainPlacement qw(
 	read_sample_qc split_strict_backbone
-	read_epa_jplace filter_epa_placement_outliers write_epa_placed_tree
+	read_epa_jplace filter_epa_placement_outliers reconcile_epa_reference_tree write_epa_placed_tree
 );
 
 sub write_file {
@@ -171,6 +171,63 @@ like($placed_text, qr/E:0\.02/, 'multiple EPA-ng placements on one edge are reta
 like($placed_text, qr/A:0\.04/, 'EPA-ng distal branch length is applied from the edge child');
 like($placed_text, qr/B:0\.1/, 'unaffected backbone topology is retained');
 unlike($placed_text, qr/\{\d+\}/, 'EPA-ng edge labels are not leaked into the published tree');
+my $changed_reference_tree =
+	'(A:0.1053605157{1},(B:0.4{2},C:0.1{3}):0.5{4});';
+my $authoritative_backbone =
+	'((C:0.1,B:0.2):0.3,A:0.0);';
+my %reconciled_placements = (
+	collapsed => {
+		status => 'placed', edge => 1, distal_length => 0.05268025785,
+		pendant_length => 0.01,
+	},
+	rescaled => {
+		status => 'placed', edge => 2, distal_length => 0.2,
+		pendant_length => 0.02,
+	},
+);
+my $reference_qc = reconcile_epa_reference_tree(
+	$changed_reference_tree, $authoritative_backbone,
+	\%reconciled_placements);
+is($reference_qc->{compared_edge_count}, 4,
+	'every jplace reference edge is compared with the authoritative backbone');
+is($reference_qc->{changed_edge_count}, 3,
+	'all differing reference branch lengths are identified');
+is($reference_qc->{zero_length_restored_count}, 1,
+	'a jplace-expanded zero branch is explicitly recorded');
+cmp_ok(abs($reference_qc->{max_absolute_difference} - 0.2), '<', 1e-12,
+	'the largest reference branch discrepancy is audited');
+like($reference_qc->{tree}, qr/A:0\{1\}/,
+	'the authoritative zero-length terminal replaces the jplace value');
+like($reference_qc->{tree}, qr/B:0\.2\{2\}/,
+	'the authoritative nonzero terminal also replaces the jplace value');
+like($reference_qc->{tree}, qr/\):0\.3\{4\}/,
+	'the authoritative internal branch replaces the jplace value');
+cmp_ok(abs($reconciled_placements{collapsed}{distal_length}), '<', 1e-12,
+	'a placement coordinate on a restored zero branch collapses to zero');
+cmp_ok(abs($reconciled_placements{rescaled}{distal_length} - 0.1), '<', 1e-12,
+	'a placement coordinate is rescaled to the authoritative edge length');
+is($reference_qc->{adjusted_placement_count}, 2,
+	'the reconciliation audit counts adjusted placement coordinates');
+my $reconciled_tree_file = File::Spec->catfile($tmp, 'reconciled.treefile');
+write_epa_placed_tree(
+	$reference_qc->{tree}, $reconciled_tree_file, \%reconciled_placements);
+my $reconciled_tree_text = slurp($reconciled_tree_file);
+unlike($reconciled_tree_text, qr/0\.1053605157/,
+	'the published tree cannot retain the altered EPA-ng reference length');
+like($reconciled_tree_text, qr/A:0(?:[,\)])/,
+	'the published tree retains the backbone zero branch');
+
+my $topology_error = '';
+eval {
+	reconcile_epa_reference_tree(
+		'(A:0.1{1},(B:0.1{2},(C:0.1{3},D:0.1{4}):0.1{5}):0.1{6});',
+		'((A:0.1,B:0.1):0.1,(C:0.1,D:0.1):0.1);',
+		{},
+	);
+};
+$topology_error = $@;
+like($topology_error, qr/rooted clade absent|rooted topologies differ/,
+	'a retained jplace with a different topology is rejected');
 
 my $outlier_tree = '(A:0.001{1},B:0.002{2},C:0.003{3},MGS.out:0.5{4});';
 my %outlier_placements = (
