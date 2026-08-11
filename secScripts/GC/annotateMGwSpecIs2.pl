@@ -15,7 +15,7 @@ use Mods::GenoMetaAss qw( readClstrRev systemW median mean readFasta);
 use Mods::Subm qw(qsubSystem emptyQsubOpt );
 use Mods::geneCat qw(calculate_spearman_correlation read_matrix correlation);
 use Mods::FuncTools qw(passBlast lambdaBl);
-use Mods::TamocFunc qw( readTabbed3 readTable);
+use Mods::TamocFunc qw( readTable);
 use Mods::math qw(nonZero);
 
 
@@ -109,7 +109,6 @@ if ($useGTDBmg eq "GTDB"){
 	$speciesLink = "GTDB_lnks"; $speciesCutoff = "GTDB_cutoff";
 	$speciesGTDB = "GTDB_GTDB"; $speciesDir = "GTDBPath";
 }
-my %FMGcutoffs = %{readTabbed3(getProgPaths($speciesCutoff,0),1)};
 my $MGdir = "$GCd/$MGterm/";
 if ($outD eq "") {
 	$outD = $MGSfile ne "" ? "$GCd/Anno/Tax/${MGterm}_MGS/" : "$GCd/Anno/Tax/$MGterm/";
@@ -144,8 +143,6 @@ if (0 ){ #not needed: there should be *.LCA file now!
 	system $cmd if (!-e $taxPerGene);
 }
 
-my ($hrID, $hrTAX) = readSpecIids($inSImap);
-my %specIid = %{$hrID};#my %specItax = %{$hrTAX};
 
 #specItax is essentially only used to register what key is present..
 #my $specIfullTaxHR = createAreadSpecItax(\%specItax,"$SpecID/specI.tax3",$GTDBspecI); #specI.tax3 doesn't need to exist any longer..
@@ -157,13 +154,11 @@ my $xtrLab= "";$xtrLab= ".rep" if ($freeze11);
 #assign each COG separately
 system "mkdir -p $MGdir" unless (-d $MGdir);
 
-my %specItaxname; my %SpecIgenes; 
-my %COGDBLass; my %COGass; my %gene2COG;
-my %gen2SIscore;
+my %SpecIgenes; my %gene2COG;
 
-my %Q2S; #assignment of GC genes to specI id (poss. several ids)
+my %Q2S; #per-gene assignment map, compacted to counts before correlation
 
-my %COG2gen; 
+my %COGs;
 #my %FMGlist;
 my $COGgenes=0;
 open IC,"<$GCd/${MGterm}.subset.cats" or die "Can't open $GCd/${MGterm}.subset.cats\n";
@@ -172,7 +167,7 @@ while (<IC>){
 	#$cats{$spl[0]} = $spl[2];
 	my @genes = split(/,/,$spl[2]);
 	my $curCOG = $spl[0];
-	$COG2gen{$curCOG} = \@genes;
+	$COGs{$curCOG} = 1;
 	foreach (@genes){$gene2COG{$_} = $curCOG; $COGgenes++;}
 }
 close IC;
@@ -184,7 +179,6 @@ print "Read $COGgenes COG 2 MGs genes\n";
 #MGS related containers
 my %Gene2MGS; my %speci2MGS; 
 my %MGSlist; #$MGSlist{$curMGS} = 1;
-my %speci2MGScnt; #counts how many different genes were used in total
 
 readMGS($MGSfile); #only used if in MGS mode..
 #undef %FMGlist; #no longer needed from here on
@@ -193,34 +187,25 @@ my $allOK=1;
 
 #new routine: will read .LCA to get links..
 print "Reading LCA's\n";
-foreach my $COG (keys %COG2gen){#(@catsPre){
-	my @genes = @{$COG2gen{$COG}};
-	#my $finiN=0;my %finiM=();
-	#print "Reading $MGdir/$COG.LCA\n";
-	$hr1 = readTable("$MGdir/$COG.LCA","\t",";",1);
-	my %tax = %{$hr1};
-	foreach my $gen (keys %tax){
-		my $speci = $tax{$gen}; #complete tax string.. well should be ok
-		#$gene2COG{$gen} = $COG;
+foreach my $COG (keys %COGs){
+	# Keep only one LCA table in memory at a time. Copying it into %tax
+	# temporarily doubled the largest per-COG allocation.
+	my $tax = readTable("$MGdir/$COG.LCA","\t",";",1);
+	foreach my $gen (keys %{$tax}){
+		my $speci = $tax->{$gen}; #complete tax string.. well should be ok
 		if (!exists($specIfullTax{$speci})){
 			my @tmp = split /;/,$speci;
 			$specIfullTax{$speci} = \@tmp;
 		}
-		
-		#from here old code..
-		#just link the specI to MGS..
+		# Just link the specI to MGS.
 		if (exists($Gene2MGS{$gen})){
 			my $curMGS = $Gene2MGS{$gen};
 			$speci2MGS{$curMGS}{$speci}++;
-			#if ($finiN == 0){$speci2MGScnt{$curMGS} ++ ; $finiN=1;} $finiM{$speci}=1;
 		}
-		#save all valid hits  (%id) to a given specI
-		if (!exists($Q2S{$gen}{$speci} )){
-			$Q2S{$gen}{$speci} = scalar(keys(%{$Q2S{$gen}})); #print "m";
+		# Preserve all initial assignments so getCorrs can exclude ambiguous genes.
+		if (!exists($Q2S{$gen}{$speci})){
+			$Q2S{$gen}{$speci} = scalar(keys(%{$Q2S{$gen}}));
 		}
-		if (exists($SpecIgenes{$speci}{$COG} )){
-			$COGDBLass{$COG}++;
-		} 
 		push(@{$SpecIgenes{$speci}{$COG}},$gen);
 	}
 }
@@ -229,26 +214,27 @@ foreach my $COG (keys %COG2gen){#(@catsPre){
 
 if ($allOK==0){die"One or more Blast files were not ok.. restart procedure\n";}
 
-#write out SpecI -> MGS assignments (and tax)
-my $SI2MGShr = MGSassign();
-#transfer gene assignments to MGS, transfer SI tax -> MGS tax
-transferSI2MGS($SI2MGShr);
-my %SI2MGS = %{$SI2MGShr};
+# Write out SpecI -> MGS assignments (and tax), then release the vote table.
+my $SI2MGS = MGSassign();
+# Transfer gene assignments to MGS, transfer SI tax -> MGS tax.
+transferSI2MGS($SI2MGS);
+undef %speci2MGS;
+# getCorrs only needs the number of distinct assignments per gene.
+# Replace each nested per-species hash before the large matrix is resident.
+for my $gene (keys %Q2S) {
+	$Q2S{$gene} = scalar(keys %{$Q2S{$gene}});
+}
 
-
-#die;
-#print "Done initial blast\n$MGdir\n";
-#foreach (sort {$COGass{$a} cmp $COGass{$b}} keys %COGass){print "$_ $FMGcutoffs{$_}:  $COGass{$_}($COGDBLass{$_})\n";}
 print "Reading MG marker gene matrix..\n";
-$hr1 = read_matrix("$GCd/Matrix.$MGterm.mat"); #here I need the coverage matrix..
-#my $hr1 = read_matrix("$GCd/Mat.cov.FMG.mat"); #here I need the coverage matrix..
-#my $hr1 = read_matrix("$GCd/Mat.med.FMG.mat"); #here I need the coverage matrix..
-my %FMGmatrix= %{$hr1};
+my $FMGmatrix = read_matrix("$GCd/Matrix.$MGterm.mat");
 
-my %gene2specI; my %specIprofiles; 
+my %gene2specI; my %specIprofiles;
 my %SpecIgenes2; #collects list of genes that could be associated to specI
-#sort out best multi hit by correlation analysis
-getCorrs();#\%FMGmatrix,\%SpecIgenes);
+# Sort out best multi hit by correlation analysis.
+getCorrs();
+# Subsequent passes use only the selected assignments in %gene2specI.
+undef %SpecIgenes;
+undef %Q2S;
 
 
 rebase0();#create first specIprofile..
@@ -264,45 +250,30 @@ disentangleMultiAssigns();
 
 print "resolving remainder genes..\n";
 
-undef %Q2S; my $xtraEntry=0;
-#add genes though correlations.. ??? actually uesless..
-foreach my $COG (keys %COG2gen){#(@catsPre){
-	#last;
-	my %specIcnt;
-	my @genes = @{$COG2gen{$COG}};
-	my $reqID = $FMGcutoffs{$COG};
-	#secondary scanning of assignments...
-#LCA based code..
-	#print "Reading $MGdir/$COG.LCA\n";
-	my %tax = %{readTable("$MGdir/$COG.LCA","\t",";",1)};
-	
-	foreach my $gid (keys %tax){
-		next if (exists($Gene2MGS{$gid}));
-		my $speci = $tax{$gid}; #complete tax string.. well should be ok
-		$speci = $SI2MGS{$speci} if (exists($SI2MGS{$speci}));
-		#3 this MG has already been assigned in the high confidence initial assignments
-		if (exists($SpecIgenes2{$speci}{$COG} ) ){next;} #|| exists($Gene2MGS{$gid})
-		
-		#4 correlate to species core, to make sure the gene kind of makes sense..
-		if (exists($specIprofiles{$speci})){
-			my $corr = correlation($specIprofiles{$speci},$FMGmatrix{ $gid }) ;
-			next if ($corr < $globalCorrThreshold);
-			#print $corr."\t";
-		} else { next;}
+# getCorrs no longer needs the raw LCA assignment index after it returns.
+my $xtraEntry=0;
+foreach my $COG (keys %COGs){
+	# Stream one LCA table at a time; do not create a duplicate hash.
+	my $tax = readTable("$MGdir/$COG.LCA","\t",";",1);
+	foreach my $gid (keys %{$tax}){
+		next if exists($Gene2MGS{$gid});
+		my $speci = $tax->{$gid}; #complete tax string.. well should be ok
+		$speci = $SI2MGS->{$speci} if exists($SI2MGS->{$speci});
+		# This MG has already been assigned in the high-confidence initial pass.
+		next if exists($SpecIgenes2{$speci}{$COG});
 
-		if (!exists($Q2S{$gid}{$speci} )){
-			$Q2S{$gid}{$speci} = scalar(keys(%{$Q2S{$gid}})); #print "m";
-		}
+		# Correlate to the species core before accepting the remainder assignment.
+		next unless exists($specIprofiles{$speci});
+		my $corr = correlation($specIprofiles{$speci},$FMGmatrix->{$gid});
+		next if $corr < $globalCorrThreshold;
 
-		$specIcnt{$speci}++;
 		$xtraEntry++;
-		#and block gene slot
-		add2geneList($speci,$COG,$gid); # == $gene2specI{$gid}{$speci} = undef;
-
+		# Block this COG slot for the species and record the final assignment.
+		add2geneList($speci,$COG,$gid);
 	}
-	#print "$COG: Found ".keys(%Q2S)." assignments (".@genes.")\n";
-	
 }
+undef $SI2MGS;
+undef %SpecIgenes2;
 
 #disentangleMultiAssigns();
 
@@ -392,7 +363,6 @@ sub readMGS{
 		my $curMGS = $owners[0];
 		$Gene2MGS{$gen} = $curMGS;
 		push(@{$SpecIgenes{$curMGS}{$gene2COG{$gen}}},$gen);
-		$gen2SIscore{$gen}{$curMGS}=200;
 	}
 	print "Excluded $ambiguousMarkers marker genes assigned to multiple MGS\n"
 		if $ambiguousMarkers;
@@ -500,10 +470,10 @@ sub MGSassign{
 
 sub transferSI2MGS{
 	my ($hr) = @_;
-	my %Si2MGS = %{$hr};
-	print "Comparing MGS to SpecIs..\n" if (scalar(keys %Si2MGS)>0);
-	foreach my $valSI (keys %Si2MGS){
-		my $MGS = $Si2MGS{$valSI};
+	my $Si2MGS = $hr;
+	print "Comparing MGS to SpecIs..\n" if scalar(keys %{$Si2MGS});
+	foreach my $valSI (keys %{$Si2MGS}){
+		my $MGS = $Si2MGS->{$valSI};
 		#print "$valSI  $MGS\n";
 		#get tax transferred..
 		$specIfullTax{$MGS} = $specIfullTax{$valSI} unless (exists( $specIfullTax{$MGS} ));
@@ -528,21 +498,21 @@ sub transferSI2MGS{
 
 sub rebase($){ #calculates the profile for each SI based on the 40 marker genes
 	my ($hr1)=@_; 
-	my %specIs = %{$hr1};
+	my $specIs = $hr1;
 	my $medianC=0; my $skippedSpecies=0;
-	foreach my $sp (keys %specIs){
+	foreach my $sp (keys %{$specIs}){
 	#last;
 		#print "$sp- ";
 		my @tar;my $MGn=0;
-		foreach my $gid (@{$specIs{$sp}}){
+		foreach my $gid (@{$specIs->{$sp}}){
 			$MGn++;
 			#now get genes from matrix
 			#print "$gid\n";
-			die "${MGterm} entry missing: $gid\n" unless (exists($FMGmatrix{ $gid }));
+			die "${MGterm} entry missing: $gid\n" unless (exists($FMGmatrix->{ $gid }));
 			if ($medianC){
-				for (my $j=0;$j<scalar(@{$FMGmatrix{ $gid }});$j++){push(@{$tar[$j]}, ${$FMGmatrix{ $gid }}[$j]);}
+				for (my $j=0;$j<scalar(@{$FMGmatrix->{ $gid }});$j++){push(@{$tar[$j]}, ${$FMGmatrix->{ $gid }}[$j]);}
 			} else {
-				for (my $j=0;$j<scalar(@{$FMGmatrix{ $gid }});$j++){$tar[$j] +=  ${$FMGmatrix{ $gid }}[$j];}
+				for (my $j=0;$j<scalar(@{$FMGmatrix->{ $gid }});$j++){$tar[$j] +=  ${$FMGmatrix->{ $gid }}[$j];}
 			}
 		}
 		#print "$sp: " . scalar(@tar) . " $MGn \n";
@@ -598,8 +568,8 @@ sub sanityCheckCorr(){
 			next unless ($specIcnts{$sI} > 2);
 			next unless (exists($specIprofiles{$sI}));
 			#if (nonZero($specIprofiles{$sI}) < 3){ next;}
-			#print "@{$FMGmatrix{ $k }}\n";
-			my $corr = correlation($specIprofiles{$sI},$FMGmatrix{ $k }) ;
+			#print "@{$FMGmatrix->{ $k }}\n";
+			my $corr = correlation($specIprofiles{$sI},$FMGmatrix->{ $k }) ;
 			#print $corr." ";
 			if ($corr < $globalCorrThreshold){
 				$wrongGene++;rm4geneList($sI,$k);$specIcnts{$sI}--;
@@ -671,7 +641,7 @@ sub readNCBI($){
 sub specImatrix($ $){
 	my ($oF,$hr) = @_;
 	print "Creating specI matrix..\n";
-	my %sTax = %{$hr};
+	my $sTax = $hr;
 	#print "@{$sTax{specI_v2_Cluster34}}\n";
 	
 	my %specIcnts; #just use for histgram
@@ -689,9 +659,9 @@ sub specImatrix($ $){
 	
 	#create background count of SpecI genes not assigned
 	my %bkgrnd; my @dblCh;
-	foreach my $gid (keys %FMGmatrix){
+	foreach my $gid (keys %{$FMGmatrix}){
 		next if ($gid eq "header");
-		for (my $j=0;$j<scalar(@{$FMGmatrix{ $gid }});$j++){       $dblCh[$j] +=  ${$FMGmatrix{ $gid }}[$j] ;} #TODO:40
+		for (my $j=0;$j<scalar(@{$FMGmatrix->{ $gid }});$j++){       $dblCh[$j] +=  ${$FMGmatrix->{ $gid }}[$j] ;} #TODO:40
 		if (exists ($gene2specI{$gid})  ){
 			if ( exists( $delSIs{  (keys %{$gene2specI{$gid}})[0] }  )    ){
 				delete $gene2specI{$gid};# if (exists($gene2specI{$gid}));
@@ -701,7 +671,7 @@ sub specImatrix($ $){
 			}
 		}
 		if (exists ($Gene2MGS{$gid}) ){next;}
-		for (my $j=0;$j<scalar(@{$FMGmatrix{ $gid }});$j++){      $bkgrnd{$gene2COG{$gid}}{$j} +=  ${$FMGmatrix{ $gid }}[$j] ;}
+		for (my $j=0;$j<scalar(@{$FMGmatrix->{ $gid }});$j++){      $bkgrnd{$gene2COG{$gid}}{$j} +=  ${$FMGmatrix->{ $gid }}[$j] ;}
 	}
 	#split up backgrnd by gene id/sample
 	my @bkgrnd1;
@@ -720,7 +690,7 @@ sub specImatrix($ $){
 	#print "@{$specIprofiles{specI_v2_Cluster34}}\n";
 	
 	open Ox,">$oF" or die "Can't open out mat $oF\n";
-	print Ox "SpecI\t".join ("\t",@{$FMGmatrix{ header }})."\n";
+	print Ox "SpecI\t".join ("\t",@{$FMGmatrix->{ header }})."\n";
 	#print O "SUM\t\t".join ("\t",@dblCh)."\n";
 	print Ox "?\t".join ("\t",@bkgrnd1)."\n";
 	foreach my $si (sort keys %specIprofiles){
@@ -735,11 +705,11 @@ sub specImatrix($ $){
 	#and print SI tax for later reference..
 	open Ot,">$oFx.tax" or die "Can;t open tax file $oFx.tax\n";
 	foreach my $si (sort keys %specIprofiles){
-		if (!exists($sTax{$si})){
+		if (!exists($sTax->{$si})){
 			if (exists($MGSlist{$si})){
 			} else {die "doesnt exist: $si\n";	}
 		}
-		print Ot "$si\t".join ("\t",@{$sTax{$si}})."\n";
+		print Ot "$si\t".join ("\t",@{$sTax->{$si}})."\n";
 	}
 	close Ot;
 	
@@ -753,14 +723,14 @@ sub specImatrix($ $){
 		my %thisMap;
 		foreach my $si (sort keys %specIprofiles){
 			
-			if (!exists($sTax{$si})){
+			if (!exists($sTax->{$si})){
 				if (exists($MGSlist{$si})){
 				} else {
 					die "doesnt exist: $si\n";
 				}
 			}
-			print "ERR: $si    @{$sTax{$si}}\n" if (@{$sTax{$si}} <= $t);
-			my $clvl = join (";",@{$sTax{$si}}[0 .. $t]);
+			print "ERR: $si    @{$sTax->{$si}}\n" if (@{$sTax->{$si}} <= $t);
+			my $clvl = join (";",@{$sTax->{$si}}[0 .. $t]);
 			
 			#if ($clvl eq "Bacteria;Proteobacteria;Gammaproteobacteria;Enterobacterales;Enterobacteriaceae;Escherichia;Escherichia albertii"){
 				#print "$si\n@{$specIprofiles{ $si }}\n";
@@ -775,7 +745,7 @@ sub specImatrix($ $){
 			}
 		}
 		open Ot,">$oFx.$taxLs[$t]" or die "Can't openn $oFx.$taxLs[$t]\n" ;
-		print Ot "$taxLs[$t]\t".join ("\t",@{$FMGmatrix{ header }})."\n";
+		print Ot "$taxLs[$t]\t".join ("\t",@{$FMGmatrix->{ header }})."\n";
 		print Ot "?\t".join ("\t",@bkgrnd1)."\n";
 		foreach my $kk (sort keys %thisMap){
 			chomp $kk;
@@ -881,13 +851,13 @@ sub getCorrs{
 			$selV{$cog} =0;
 			if (@{$SpecIgenes{$k}{$cog}}>1){next;}#multi copy, dont use this gene
 			my $gid = ${$SpecIgenes{$k}{$cog}}[0];
-			if (scalar (keys (%{$Q2S{$gid}})) > 1 ){$dblA++;next;}
+			if (($Q2S{$gid} // 0) > 1){$dblA++;next;}
 			$singlA++; 
 			#print " $gid ";
-			#if ($gcnt == 0){@tarGenes = @{$FMGmatrix{ $gid }};
+			#if ($gcnt == 0){@tarGenes = @{$FMGmatrix->{ $gid }};
 			#} else {
-			for (my $j=0;$j<scalar(@{$FMGmatrix{ $gid }});$j++){
-				$tarGenes[$j] += ${$FMGmatrix{ $gid }}[$j];
+			for (my $j=0;$j<scalar(@{$FMGmatrix->{ $gid }});$j++){
+				$tarGenes[$j] += ${$FMGmatrix->{ $gid }}[$j];
 			}
 			#} 
 			$gcnt++;				
@@ -905,10 +875,10 @@ sub getCorrs{
 				if (@spl > 1){next;}
 				my @subTarG; my $sgcnt=0;
 				foreach my $gid (@spl){#single copy, use this gene
-					if (scalar (keys (%{$Q2S{$gid}})) > 1){next;}#don't want multi species assignments
-					#if ($sgcnt == 0){@subTarG = @{$FMGmatrix{ $gid }}; 
+					if (($Q2S{$gid} // 0) > 1){next;}#don't want multi species assignments
+					#if ($sgcnt == 0){@subTarG = @{$FMGmatrix->{ $gid }};
 					#} else {
-						for (my $j=0;$j<scalar(@{$FMGmatrix{ $gid }});$j++){$subTarG[$j] += ${$FMGmatrix{ $gid }}[$j];}
+						for (my $j=0;$j<scalar(@{$FMGmatrix->{ $gid }});$j++){$subTarG[$j] += ${$FMGmatrix->{ $gid }}[$j];}
 					#}
 					$sgcnt++;
 				} 
@@ -933,10 +903,10 @@ sub getCorrs{
 				my @spl = @{$SpecIgenes{$k}{$c}};
 				my @subCors; my $max=0;
 				foreach my $sg (@spl){
-					die "$sg doesn't exist in gene list \n" if (!exists($FMGmatrix{ $sg }));
-					#my $corr = calculate_spearman_correlation(\@tarGenes,$FMGmatrix{ $sg }) ;
-					#print "@{$FMGmatrix{ $sg }}\n";
-					my $corr = correlation(\@tarGenes,$FMGmatrix{ $sg }) ;
+					die "$sg doesn't exist in gene list \n" if (!exists($FMGmatrix->{ $sg }));
+					#my $corr = calculate_spearman_correlation(\@tarGenes,$FMGmatrix->{ $sg }) ;
+					#print "@{$FMGmatrix->{ $sg }}\n";
+					my $corr = correlation(\@tarGenes,$FMGmatrix->{ $sg }) ;
 					if ($corr > $max){$max = $corr;}
 					push (@subCors,  $corr  );
 				}
@@ -947,7 +917,7 @@ sub getCorrs{
 					my $sg = $spl[$i];
 					#this assignment is what I need, now I know this gene is blocked for assignment to other SpecI's
 					$dblAssi++ if (add2geneList($k,$c,$sg));
-					for (my $j=0;$j<@tarGenes;$j++){$tarGenes[$j] += ${$FMGmatrix{ $sg }}[$j] ;}
+					for (my $j=0;$j<@tarGenes;$j++){$tarGenes[$j] += ${$FMGmatrix->{ $sg }}[$j] ;}
 					$gcnt++;
 				}
 			}
@@ -982,8 +952,8 @@ sub createProfileMGS{
 				my $sg = $spl[$i];
 				#this assignment is what I need, now I know this gene is blocked for assignment to other SpecI's
 				#$dblAssi++ if (add2geneList($k,$c,$sg));
-				#for (my $j=0;$j<@tarGenes;$j++){$tarGenes[$j] += ${$FMGmatrix{ $sg }}[$j] ;}
-				for (my $j=0;$j<scalar(@{$FMGmatrix{ $sg }});$j++){$tarGenes[$j] += ${$FMGmatrix{ $sg }}[$j];}
+				#for (my $j=0;$j<@tarGenes;$j++){$tarGenes[$j] += ${$FMGmatrix->{ $sg }}[$j] ;}
+				for (my $j=0;$j<scalar(@{$FMGmatrix->{ $sg }});$j++){$tarGenes[$j] += ${$FMGmatrix->{ $sg }}[$j];}
 			}
 		
 		}
@@ -1007,8 +977,8 @@ sub disentangleMultiAssigns(){
 		my $assign2MGS=0;
 		
 		
-		die "Can't find gene $k in FMG matrix!\n" unless (exists($FMGmatrix{ $k }));
-		my @refAB = @{$FMGmatrix{ $k }};
+		die "Can't find gene $k in FMG matrix!\n" unless (exists($FMGmatrix->{ $k }));
+		my @refAB = @{$FMGmatrix->{ $k }};
 		
 		my $max = 0;  my $maxID=0;
 		my @subCorr; #my @subIDs;
