@@ -17,7 +17,7 @@ use Digest::SHA qw(sha256_hex);
 
 
 use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrRev systemW median mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs);
-use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystem2 qsubSystemJobAlive qsubSystemWaitMaxJobs
+use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs
 	deferredSubmissionDependency);
 use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
 use Mods::TamocFunc qw(checkMF);
@@ -51,7 +51,6 @@ sub reportingsMGS;
 sub prepRun;
 sub resolveScratchDirectory;
 sub persistScratchDirectory;
-sub recordedScratchDirectory;
 sub migrateLegacyOperationalLogs;
 sub printEarlyRunHeader;
 sub prepGene2MGS;
@@ -63,8 +62,6 @@ sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
 sub persistentMGSInputState; sub scratchMGSInputState;
 sub invalidateMGSInputState;
 sub stagedMGSInputsReady; sub evalFileStatus;
-sub directResumeStagedInputsReady;
-sub completionMarkerTree;
 sub preparedOutgroupLog {
 	my ($directory) = @_;
 	my $log_path = "$directory/data.log";
@@ -270,7 +267,8 @@ END {
 #1.02: invalidate EPA-derived completion state before ordinary saved-command resume
 #1.03: accept bare and explicit numeric redo-EPA flags
 #1.04: propagate forced EPA redo into existing saved tree commands
-my $version = 1.04;
+#1.05: keep EPA redo in the normal controller path through downstream analysis
+my $version = 1.05;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -644,12 +642,10 @@ my $resumeBindir = $MGSfile;
 $resumeBindir =~ s/[^\/]+$//;
 $resumeBindir = $GCd if $resumeBindir eq "";
 my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
-my $resumeScratchD = recordedScratchDirectory($resumeOutD);
 
-# Redoing EPA filtering is ordinary continuation: invalidate the placed tree
-# and its lifecycle markers, then let the saved treeCmd.sh resume.  In
-# particular, do not leave or create placementPending.sto: that marker belongs
-# exclusively to the separate EPA-only recovery path.
+# Redoing EPA filtering is a local recovery step: invalidate only the
+# published EPA-derived artifacts, then rejoin the shared controller path.
+# placementPending.sto remains reserved for the separate EPA-only recovery path.
 if ($redoEPAfilter) {
 	die "-redoEPAfilter output directory does not exist: $resumeOutD\n"
 		unless -d $resumeOutD;
@@ -703,29 +699,7 @@ if ($redoEPAfilter) {
 		."completion_markers_removed=$completionRemoved, "
 		."pending_markers_removed=$pendingRemoved, "
 		."already_missing=$alreadyMissing. "
-		."Continuing through saved treeCmd.sh files.\n";
-	unless ($doSubmit) {
-		$completionMessage = "redo EPA filter dry run completed without loading catalogue databases.";
-		exit 0;
-	}
-}
-
-# A tree-only controller resume is a scheduler-only operation.  The saved
-# per-MGS script already contains the normal BuildTree continuation command and
-# resources, so discover pending output directories before Mosaic, map, or
-# catalogue initialization.
-if ($onlySubmit && $doSubmit && !$subJob
-		&& !$recalcTrees && !$repairCAT && !$deepRepair
-		&& !$redoSubmissionData) {
-	my ($handled, $submitted) = resubmitExistingTreeCommands(
-		outdir => $resumeOutD, scratch_directory => $resumeScratchD,
-		force => $reSubmit, subset => \@subsetMGS, options => $QSBoptHR,
-		redo_epa => $redoEPAfilter,
-	);
-	if ($handled) {
-		$completionMessage = "direct tree-command resume submitted $submitted saved treeCmd.sh job(s) without loading catalogue databases.";
-		exit 0;
-	}
+		."Continuing through the normal controller workflow.\n";
 }
 if (length($MGSfile)) {
 	my $explicitMosaicCatalogue = length($mosaicLociFile);
@@ -1549,7 +1523,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
 		if !$epaRecovery && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof"));
 	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if !$epaRecovery && $needsCopy;
-	$Tcmd .= "-redoEPAfilter 1 " if $redoEPAfilter;
+	$Tcmd .= "-redoEPAfilter 1 " if $redoEPAfilter
+		&& -s "$outD2/phylo/epa-ng/epa_result.jplace";
 	$Tcmd .= "-epaOnly 1 " if $epaOnlyRetry;
 	$Tcmd .= "-continue 1 -completionMarker ".shellQuote($treeStone)." "
 		."-terminalMarker ".shellQuote($terminalTreeMarker)." "
@@ -2746,31 +2721,6 @@ sub resolveScratchDirectory {
 	limitedWarn('scratch manifest',
 		"Invalid or stale scratch-directory manifest $manifest; using $derived\n");
 	return $derived;
-}
-
-sub recordedScratchDirectory {
-	my ($output_directory) = @_;
-	return '' unless defined($output_directory) && -d $output_directory;
-	my $manifest = File::Spec->catfile($output_directory, '.strain_within.scratch.tsv');
-	return '' unless -s $manifest;
-	open my $input, '<', $manifest or return '';
-	my $header = <$input> // '';
-	my $row = <$input> // '';
-	my $extra = grep { /\S/ } <$input>;
-	close $input or return '';
-	$header =~ s/[\r\n]+\z//;
-	$row =~ s/[\r\n]+\z//;
-	my @field = split /\t/, $row, -1;
-	return '' unless $header eq join("\t",
-		qw(version catalog_identity output_path scratch_directory))
-		&& @field == 4 && $field[0] eq '1' && !$extra
-		&& File::Spec->file_name_is_absolute($field[3])
-		&& $field[3] !~ /[\t\r\n]/;
-	my $expected_output = File::Spec->canonpath(
-		File::Spec->rel2abs($output_directory));
-	return '' unless $field[2] eq $expected_output;
-	my $scratch = File::Spec->canonpath(File::Spec->rel2abs($field[3]));
-	return -d $scratch ? $scratch : '';
 }
 
 sub persistScratchDirectory {
@@ -4505,13 +4455,7 @@ sub printEarlyRunHeader {
 		."onlySubmit=$onlySubmit; recalcTrees=$recalcTrees; redoSubmissionData=$redoSubmissionData; "
 		."redoEPAfilter=$redoEPAfilter\n";
 	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB\n";
-	if ($redoEPAfilter || ($onlySubmit && $doSubmit && !$subJob
-			&& !$recalcTrees && !$repairCAT && !$deepRepair
-			&& !$redoSubmissionData)) {
-		print "Checking saved tree commands before catalogue initialization...\n";
-	} else {
-		print "Initializing paths, maps, and catalogues...\n";
-	}
+	print "Initializing paths, maps, and catalogues...\n";
 	print "==============================================\n";
 }
 
@@ -4842,162 +4786,6 @@ sub resetMGSTreeOutputs {
 	retry_unlink($placementMarker, label => "remove placement-pending marker");
 }
 
-sub completionMarkerTree {
-	my ($marker, $output_directory) = @_;
-	return '' unless defined($marker) && -s $marker
-		&& defined($output_directory) && -d $output_directory;
-	open my $input, '<', $marker or return '';
-	my $line = <$input> // '';
-	close $input or return '';
-	$line =~ s/[\r\n]+\z//;
-	my ($producer, $marker_version, $tree_path) = split /\t/, $line, 3;
-	return '' unless defined($producer) && $producer eq 'buildTree5'
-		&& defined($marker_version) && $marker_version =~ /^\d+(?:\.\d+)?\z/
-		&& $marker_version >= 5.40
-		&& defined($tree_path) && length($tree_path);
-	my $output = File::Spec->canonpath(File::Spec->rel2abs($output_directory));
-	my $tree = File::Spec->canonpath(File::Spec->rel2abs($tree_path, $output));
-	my $relative = File::Spec->abs2rel($tree, $output);
-	return '' if $relative eq File::Spec->curdir
-		|| $relative =~ /^\.\.(?:[\\\/]|\z)/;
-	return -s $tree ? $tree : '';
-}
-
-sub directResumeStagedInputsReady {
-	my ($scratch_directory, $mgs, $script) = @_;
-	return 0 unless defined($scratch_directory) && length($scratch_directory)
-		&& defined($mgs) && length($mgs) && defined($script) && -s $script;
-	open my $input, '<', $script or return 0;
-	my $script_text = do { local $/; <$input> // '' };
-	close $input or return 0;
-	return 0 unless $script_text =~ /(?:^|\s)-stagedInputDir(?:\s|=)/;
-	my $staged_directory = File::Spec->catdir($scratch_directory, 'outs', $mgs);
-	return !grep {
-		!fileGZe(File::Spec->catfile($staged_directory, $_))
-	} ($FNAstdof, $FAAstdof, $CATstdof);
-}
-
-sub resubmitExistingTreeCommands {
-	my %args = @_;
-	my $outdir = $args{outdir} // '';
-	my $force = $args{force} ? 1 : 0;
-	my $redoEpa = $args{redo_epa} ? 1 : 0;
-	my $scratch_directory = $args{scratch_directory} // '';
-	my $subset = $args{subset} || [];
-	my $options = $args{options} || {};
-	return (0, 0) unless -d $outdir && $options->{doSubmit};
-
-	my %requested;
-	for my $mgs (@{$subset}) {
-		return (0, 0) unless defined($mgs)
-			&& $mgs =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
-		$requested{$mgs} = 1;
-	}
-	if (!%requested) {
-		for my $script (bsd_glob(File::Spec->catfile($outdir, '*', 'treeCmd.sh'))) {
-			my $mgs = basename(dirname($script));
-			next unless $mgs =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
-			$requested{$mgs} = 1;
-		}
-	}
-	return (0, 0) unless %requested;
-
-	my @scripts;
-	for my $mgs (sort keys %requested) {
-		my $mgs_dir = File::Spec->catdir($outdir, $mgs);
-		unless (-d $mgs_dir) {
-			limitedWarn('direct resume missing MGS directory',
-				"Skipping $mgs: saved-command output directory is absent: $mgs_dir\n");
-			next;
-		}
-		next if -s File::Spec->catfile($mgs_dir, 'noTree.sto');
-		my $finalTree = File::Spec->catfile(
-			$mgs_dir, 'phylo', 'IQtree_allsites.treefile');
-		my $treeDone = File::Spec->catfile($mgs_dir, 'treeDone.sto');
-		my $completedTree = completionMarkerTree($treeDone, $mgs_dir);
-		if (!length($completedTree)) {
-			for my $candidate (map {
-				File::Spec->catfile($mgs_dir, 'phylo', $_)
-			} qw(IQtree_allsites.treefile VERYFASTTREE_allsites.nwk FASTTREE_allsites.nwk)) {
-				if (-s $candidate) {
-					$completedTree = $candidate;
-					last;
-				}
-			}
-		}
-		next if !$force && -s $treeDone && length($completedTree);
-		my $pending = File::Spec->catfile($mgs_dir, 'placementPending.sto');
-		my $publicationResume = !$force && !-s $finalTree
-			&& -s File::Spec->catfile(
-				$mgs_dir, 'phylo', 'IQtree_allsites.backbone.treefile')
-			&& -s File::Spec->catfile(
-				$mgs_dir, 'phylo', 'epa-ng', 'epa_result.jplace');
-		my ($script, $mode) = (
-			File::Spec->catfile($mgs_dir, 'treeCmd.sh'),
-			$redoEpa ? 'redo_epa' : 'full',
-		);
-		my $stagedInputsReady = directResumeStagedInputsReady(
-			$scratch_directory, $mgs, $script);
-		if ($redoEpa && !$publicationResume) {
-			limitedWarn('redo EPA filter missing retained publication state',
-				"Skipping $mgs: -redoEPAfilter requires its retained backbone and jplace\n");
-			next;
-		} elsif (!$publicationResume && !$force && -s $pending) {
-			my $retry_script = File::Spec->catfile($mgs_dir, 'treeCmd.epa_retry.sh');
-			$script = $retry_script if -s $retry_script;
-			$mode = 'epa_only';
-		} elsif (!$publicationResume) {
-			my @missing = grep {
-				!fileGZe(File::Spec->catfile($mgs_dir, $_))
-			} ($FNAstdof, $FAAstdof, $CATstdof);
-			if (@missing && !$stagedInputsReady) {
-				limitedWarn('direct resume missing tree input',
-					"Skipping $mgs: saved full-tree command lacks "
-					.join(', ', @missing)." and has no complete staged-input triplet\n");
-				next;
-			}
-			print "Direct resume $mgs: reusing validated staged tree inputs\n" if @missing;
-		}
-		unless (-s $script) {
-			limitedWarn('direct resume missing saved command',
-				"Skipping $mgs: saved tree command is absent or empty: $script\n");
-			next;
-		}
-		push @scripts, [$mgs, $script, $mode];
-	}
-
-	print "Direct tree-command resume: ".scalar(@scripts)
-		." saved treeCmd.sh job(s); skipping Mosaic, map, and catalogue loading.\n";
-	for my $record (@scripts) {
-		# Saved full-tree commands need stale final outputs cleared; EPA-only
-		# retries retain their pending marker as the BuildTree recovery contract.
-		my $mgs_dir = dirname($record->[1]);
-		my @stale = (File::Spec->catfile($mgs_dir, 'treeDone.sto'));
-		if ($record->[2] eq 'epa_only') {
-			push @stale, File::Spec->catfile($mgs_dir, 'noTree.sto');
-		} else {
-			push @stale, File::Spec->catfile($mgs_dir, 'placementPending.sto'),
-				map { File::Spec->catfile($mgs_dir, 'phylo', $_) }
-					qw(IQtree_allsites.treefile VERYFASTTREE_allsites.nwk FASTTREE_allsites.nwk);
-		}
-		for my $stale (@stale) {
-			retry_unlink($stale, label => 'clear stale direct-resume tree output') if -e $stale;
-		}
-		qsubSystemWaitMaxJobs(
-			$options->{maxConcurrentJobs} || 0,
-			$options->{killDependencyNever} || 0, $options,
-		);
-		my $submission;
-		if ($record->[2] eq 'redo_epa') {
-			local $ENV{MATAFILER_REDO_EPA_FILTER} = 1;
-			$submission = qsubSystem2($record->[1], $options);
-		} else {
-			$submission = qsubSystem2($record->[1], $options);
-		}
-		print "  Resubmitted $record->[0] from $record->[1]: $submission";
-	}
-	return (1, scalar(@scripts));
-}
 
 sub markStrainWorkflowDirectory {
 	my ($target) = @_;
@@ -5920,15 +5708,13 @@ Tree locus filtering:
                                  zero disables the filter [default 5]
   -epaPendantMinThreshold FLOAT  Minimum pendant-branch cutoff, substitutions/site
                                  [default 0.02]
-  -redoEPAfilter                Remove each final EPA-placed tree backed by a
-                                 retained jplace, then execute the ordinary saved
-                                 treeCmd.sh resume without loading catalogue databases
+  -redoEPAfilter                Rebuild each final EPA-placed tree from its retained
+                                 jplace and backbone, then continue through the normal
+                                 controller validation and downstream strain analysis
 
-A scheduler-only tree resume (-onlySubmit 1 -submit 1) scans existing saved
-treeCmd.sh files, submits only unfinished jobs, and exits without loading
-Mosaic, map, or gene-catalogue databases.  Adding -reSubmit 1 forces the saved
-full-tree commands to run again.  Incomplete MGS without a saved command fall
-back to the guarded recovery path; saved EPA retry scripts are reused directly.
+A tree-only resume (-onlySubmit 1) follows the regular controller flow: it
+reuses complete published or staged inputs, submits unfinished tree jobs, waits
+for their outcomes, validates the result, and then submits strain_within_2.2.pl.
 
 On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a
 validated retained IQ-TREE backbone, MSA, query alignment, and sample
