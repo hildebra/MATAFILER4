@@ -55,7 +55,8 @@ growth_scr	perl [MFLRDir]/helpers/growthRate.pl
 consCntupVCF_scr	perl [MFLRDir]/secScripts/SNP/consFNA2vcf.pl
 mp3Prs	perl [MFLRDir]/secScripts/functions/parseMP3.pl
 unsplitKrak_scr	perl [MFLRDir]/secScripts/composition/unsplit_krak.pl
-specIGC_scr	perl [MFLRDir]/secScripts/GC/annotateMGwSpecIs2.pl
+specIGC_scr	perl [MFLRDir]/secScripts/GC/annotateMGwSpecIs3.pl
+specIGC_scr_v2	perl [MFLRDir]/secScripts/GC/annotateMGwSpecIs2.pl
 specIGC_scr_v0	perl [MFLRDir]/secScripts/GC/annotateMGwSpecIs.pl
 MG_LCA_scr	perl [MFLRDir]/secScripts/GC/MG_LCA.pl
 progenomes_prep_scr	perl [MFLRDir]/secScripts/MGS/reformatProGenomes.pl

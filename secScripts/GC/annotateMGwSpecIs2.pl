@@ -750,7 +750,10 @@ sub specImatrix($ $){
 			}
 		}
 		next if exists($Gene2MGS{$gid});
-		addMatrixRow($bkgrnd{$gene2COG{$gid}},$gid);
+		my $cog = $gene2COG{$gid};
+		next unless defined($cog) && length($cog);
+		$bkgrnd{$cog} ||= [];
+		addMatrixRow($bkgrnd{$cog},$gid);
 	}
 	#split up background by COG/sample; the former dblCh vector was never used.
 	my @bkgrnd1;
