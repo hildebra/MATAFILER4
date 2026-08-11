@@ -127,7 +127,7 @@ readMGS($MGSfile); #only used if in MGS mode..
 my $allOK=1;
 
 #new routine: will read .LCA to get links..
-print "Reading LCA's\n";
+print "Reading gene assignments (LCA files) from $MGdir\n";
 foreach my $COG (keys %COGs){
 	# Keep only one LCA table in memory at a time. Copying it into %tax
 	# temporarily doubled the largest per-COG allocation.
@@ -160,11 +160,11 @@ transferSI2MGS($SI2MGS);
 undef %speci2MGS;
 
 my $handoffPrefix = "$outD/speci_assign";
-my ($seedFile,$candidateFile,$seedCount,$candidateCount) = writeSpeciAssignHandoffs(
-	"$handoffPrefix.seed_members.tsv", "$handoffPrefix.candidate_edges.tsv");
-die "No high-confidence specI/MGS seed members were available for speci_assign.bin\n"
+my ($seedFile,$candidateFile,$geneCogFile,$seedCount,$candidateCount) = writeSpeciAssignHandoffs(
+	"$handoffPrefix.seed_members.tsv", "$handoffPrefix.candidate_edges.tsv", "$handoffPrefix.gene_cogs.tsv");
+die "No high-confidence specI/MGS seed members were available for cc.bin --speci-assign\n"
 	unless $seedCount;
-die "No specI/MGS candidate edges were available for speci_assign.bin\n"
+die "No specI/MGS candidate edges were available for cc.bin --speci-assign\n"
 	unless $candidateCount;
 
 # The C++ worker always uses compact CSR storage.  Keep accepting the v2
@@ -181,7 +181,7 @@ undef %gene2COG;
 my $matrixFile = "$GCd/Matrix.$MGterm.mat";
 die "Marker-gene matrix not found: $matrixFile\n" unless -e $matrixFile;
 my $speciAssignBin = getProgPaths("canopy");
-runSpeciAssign($speciAssignBin,$matrixFile,$seedFile,$candidateFile,$handoffPrefix);
+runSpeciAssign($speciAssignBin,$matrixFile,$seedFile,$candidateFile,$geneCogFile,$handoffPrefix);
 
 my $assignmentsFile = "$handoffPrefix.assignments.tsv";
 my $workerAudit = "$handoffPrefix.assignment_resolution.tsv";
@@ -375,36 +375,47 @@ sub transferSI2MGS{
 	print "Comparing MGS to SpecIs..\n" if scalar(keys %{$Si2MGS});
 	foreach my $valSI (keys %{$Si2MGS}){
 		my $MGS = $Si2MGS->{$valSI};
-		#print "$valSI  $MGS\n";
-		#get tax transferred..
-		$specIfullTax{$MGS} = $specIfullTax{$valSI} unless (exists( $specIfullTax{$MGS} ));
-		#actually replace SI with this MGS
+		# The selected specI recorded in MGS2speci.txt is authoritative over
+		# a conflicting input MGS taxonomy.
+		$specIfullTax{$MGS} = [ @{$specIfullTax{$valSI}} ]
+			if exists($specIfullTax{$valSI});
 		foreach my $COG (keys %{$SpecIgenes{$valSI}}){
-			#transfer Q2S, delete old entry for it...
 			foreach my $gen (@{$SpecIgenes{$valSI}{$COG}}){
 				$Q2S{$gen}{$MGS} = $Q2S{$gen}{$valSI};
 				delete $Q2S{$gen}{$valSI};
 			}
-			my @adds= @{$SpecIgenes{$valSI}{$COG}};
+			my @adds = @{$SpecIgenes{$valSI}{$COG}};
 			if (exists($SpecIgenes{$MGS}{$COG})){ 
 				push(@adds,@{$SpecIgenes{$MGS}{$COG}});
 				@{$SpecIgenes{$MGS}{$COG}} = do { my %seen; grep { !$seen{$_}++ } @adds };
-			} else { @{$SpecIgenes{$MGS}{$COG}} = @adds;}
+			} else {
+				@{$SpecIgenes{$MGS}{$COG}} = @adds;
+			}
 			delete $SpecIgenes{$valSI}{$COG};
 		}
 		delete $SpecIgenes{$valSI};
 	}
 }
 
-
 sub writeSpeciAssignHandoffs{
-	my ($seedFile,$candidateFile) = @_;
+	my ($seedFile,$candidateFile,$geneCogFile) = @_;
 	open my $seedFH, ">", $seedFile or die "Can't write seed handoff $seedFile: $!\n";
 	open my $candidateFH, ">", $candidateFile or die "Can't write candidate handoff $candidateFile: $!\n";
+	open my $geneCogFH, ">", $geneCogFile or die "Can't write gene-to-COG handoff $geneCogFile: $!\n";
 	print {$seedFH} "specI\tgene\tCOG\tsource\n";
 	print {$candidateFH} "gene\tspecI\tCOG\tsource\n";
+	print {$geneCogFH} "gene\tCOG\n";
 
-	my (%candidateSeen,%candidateGenes,%seedSeen);
+	my $geneCogCount = 0;
+	foreach my $gene (sort keys %gene2COG){
+		my $cog = $gene2COG{$gene};
+		next unless defined($cog) && length($cog);
+		print {$geneCogFH} "$gene\t$cog\n";
+		$geneCogCount++;
+	}
+	close $geneCogFH or die "Can't close gene-to-COG handoff $geneCogFile: $!\n";
+
+	my (%candidateSeen,%seedSeen);
 	my ($seedCount,$candidateCount) = (0,0);
 	foreach my $owner (sort keys %SpecIgenes){
 		foreach my $cog (sort keys %{$SpecIgenes{$owner}}){
@@ -416,15 +427,11 @@ sub writeSpeciAssignHandoffs{
 				next if $candidateSeen{$key}++;
 				my $source = exists($Gene2MGS{$gene}) && exists($MGSlist{$owner}) && $Gene2MGS{$gene} eq $owner ? "MGS" : "specI";
 				print {$candidateFH} "$gene\t$owner\t$cog\t$source\n";
-				$candidateGenes{$gene} = 1;
 				$candidateCount++;
 			}
 
 			# Match v2's high-confidence seed rule: exactly one copy in the
 			# owner/COG slot and no competing LCA owner for the marker gene.
-			# source=MGS has two worker meanings: it marks an owner for exact-score
-			# ties and removes that input MGS gene from the background.  It must
-			# therefore appear only on that gene's own MGS edge.
 			next unless @genes == 1;
 			my $gene = $genes[0];
 			my $ownerCount = exists($Q2S{$gene}) ? scalar(keys %{$Q2S{$gene}}) : 0;
@@ -438,17 +445,8 @@ sub writeSpeciAssignHandoffs{
 	}
 	close $seedFH or die "Can't close seed handoff $seedFile: $!\n";
 	close $candidateFH or die "Can't close candidate handoff $candidateFile: $!\n";
-
-	# The worker owns the '?' background, so it must know a COG for every
-	# marker-gene row that v2 could have added to that background.
-	my @uncovered = sort grep { !exists($candidateGenes{$_}) } keys %gene2COG;
-	if (@uncovered){
-		my @example = @uncovered > 5 ? @uncovered[0..4] : @uncovered;
-		die "Can't preserve specI background: ".scalar(@uncovered).
-			" marker genes have no LCA/MGS candidate edge (for example ".join(",",@example).")\n";
-	}
-	print "Wrote $seedCount seed members and $candidateCount constrained candidate edges\n";
-	return ($seedFile,$candidateFile,$seedCount,$candidateCount);
+	print "Wrote $seedCount seed members, $candidateCount constrained candidate edges, and $geneCogCount gene-to-COG background mappings\n";
+	return ($seedFile,$candidateFile,$geneCogFile,$seedCount,$candidateCount);
 }
 
 sub shellQuote{
@@ -458,12 +456,13 @@ sub shellQuote{
 }
 
 sub runSpeciAssign{
-	my ($binary,$matrixFile,$seedFile,$candidateFile,$outputPrefix) = @_;
+	my ($binary,$matrixFile,$seedFile,$candidateFile,$geneCogFile,$outputPrefix) = @_;
 	my @arguments = (
 		"--speci-assign",
 		"--matrix", $matrixFile,
 		"--seed-members", $seedFile,
 		"--candidate-edges", $candidateFile,
+		"--gene-cogs", $geneCogFile,
 		"--output-prefix", $outputPrefix,
 		"--num-threads", $BlastCores,
 		"--min-genes", $minGenes,
