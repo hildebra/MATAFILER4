@@ -62,6 +62,8 @@
 #5.58: graft EPA placements directly onto the persisted backbone tree
 #5.59: force retained-jplace filtering through the ordinary continuation path
 #5.60: accept bare and explicit numeric redo-EPA flags
+#5.61: redo retained EPA filtering before alignment and inference startup
+#5.62: inherit forced redo state when strain_within resubmits an older tree command
 
 use warnings;
 use strict;
@@ -153,6 +155,7 @@ sub epaModelArtifact;
 sub runEpaNgPlacement;
 sub readStrictBackboneClassification;
 sub runEpaOnlyPlacement;
+sub runRedoEpaFilter;
 sub writeEpaBackboneGraftAudit;
 sub printEpaBackboneGraftSummary;
 sub writeEpaPlacementFilterSummary;
@@ -171,7 +174,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.60;
+my $version = 5.62;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -233,7 +236,8 @@ my $strainWithinPreset = 0;
 
 my ($continue,$isAligned) = (0,0);#overwrite already existing files?
 my $epaOnly = 0;
-my $redoEPAfilter = 0;
+my $redoEPAfilter =
+	($ENV{MATAFILER_REDO_EPA_FILTER} // '') eq '1' ? 1 : 0;
 my $outgroup="";
 my $fixHeaders = 0;
 my ($doGubbins,$doCFML,$doRAXML,$doFastTree,$doVeryFastTree, $doIQTree,$doRAXMLng) = (0,0,0,0,0, 0, 0);#fastree as default tree builder
@@ -546,6 +550,8 @@ if ($redoEPAfilter) {
 			&& !$doFastTree && !$doVeryFastTree;
 	die "-redoEPAfilter cannot be combined with -epaOnly\n"
 		if $epaOnly;
+	die "-redoEPAfilter requires -completionMarker\n"
+		unless length($completionMarker);
 }
 die "-postAlignmentLocusQC must be 0 or 1 "
 	."(default: 0 between species, 1 within species)\n"
@@ -677,6 +683,12 @@ if ($subsetSmpls >0){
 	$MsaD =~ s/\/$/_S$subsetSmpls\//;
 	$treeD =~ s/\/$/_S$subsetSmpls\//;
 }
+if ($redoEPAfilter) {
+	runRedoEpaFilter(
+		$treeD, File::Spec->catfile($treeD, 'strict_backbone.samples.tsv'));
+	exit(0);
+}
+
 ######
 
 warn "MSAprobs may emit non-fatal trimming warnings\n" if $MSAprog == 0;
@@ -776,6 +788,7 @@ my $cmd =""; my %usedGeneNms; my %excludedLoci;
 
 
 my $outD_clust = File::Spec->catdir($outD, "fastGear_work_$tmpTag");
+
 
 #------------------------------------------
 #sorting by COG, MSA & syn position extraction
@@ -962,7 +975,6 @@ my $hasAdditionalAnalysis = $Ete || $calcDistMat || $calcDNAdiff
 	|| $doFastGear || $doFastGearSummary || $removeMSA || $gzipInput;
 if (length($durableCompletionTree) && $completionMatchesMethod
 		&& !$hasAdditionalAnalysis
-		&& !$redoEPAfilter
 		&& ($cogCats eq '' || $postAlignmentQCAuditCurrent)) {
 	# The marker is published only after tree validation and all requested standard
 	# stages finish. A matching policy therefore avoids reopening every locus and
@@ -2056,17 +2068,14 @@ if ($strictSplit) {
 			my $retainedJplace = File::Spec->catfile(
 				$treeD, 'epa-ng', 'epa_result.jplace');
 			my $placementOK = eval {
-				if ($continue && $dedicatedBackbone
-						&& ($redoEPAfilter || !-s $primaryTree)
+				if ($continue && $dedicatedBackbone && !-s $primaryTree
 						&& -s $retainedJplace) {
 					$jplaceFile = $retainedJplace;
 					$modelArtifact = 'retained EPA-ng result';
 					$epaResult = read_epa_jplace(
 						$jplaceFile, $strictSplit->{placement});
-					print($redoEPAfilter
-						? "Forced EPA filter redo: "
-						: "Recovery state: final EPA-placed tree is missing; ");
-					print "reusing $jplaceFile and reapplying placement filtering\n";
+					print "Recovery state: final EPA-placed tree is missing; "
+						."reusing $jplaceFile and reapplying placement filtering\n";
 				} else {
 					($epaResult, $modelArtifact, $jplaceFile) = runEpaNgPlacement(
 						$tOhr, $backboneTree, $multAli, $placementAlignment,
@@ -2389,7 +2398,7 @@ sub epaResourcePlan {
 
 sub readStrictBackboneClassification {
 	my ($path) = @_;
-	die "EPA-only recovery requires a non-empty strict-backbone classification: $path\n"
+	die "EPA recovery requires a non-empty strict-backbone classification: $path\n"
 		unless -s $path;
 	open my $input, '<', $path
 		or die "Cannot read strict-backbone classification $path: $!\n";
@@ -2546,6 +2555,102 @@ sub runEpaOnlyPlacement {
 	writeWorkflowHeartbeat('complete');
 	print "EPA-only recovery completed; primary tree=$primaryTree; "
 		."backbone retained=$backboneTree; jplace=$jplaceFile; model=$modelArtifact\n";
+	return 1;
+}
+
+sub runRedoEpaFilter {
+	my ($treeDirectory, $classificationFile) = @_;
+	die "Forced EPA filter redo requires an existing tree directory: $treeDirectory\n"
+		unless defined($treeDirectory) && -d $treeDirectory;
+	my $backboneTree = File::Spec->catfile(
+		$treeDirectory, 'IQtree_allsites.backbone.treefile');
+	my $primaryTree = File::Spec->catfile(
+		$treeDirectory, 'IQtree_allsites.treefile');
+	my $jplaceFile = File::Spec->catfile(
+		$treeDirectory, 'epa-ng', 'epa_result.jplace');
+	die "Forced EPA filter redo requires retained backbone $backboneTree\n"
+		unless -s $backboneTree;
+	die "Forced EPA filter redo requires retained jplace $jplaceFile\n"
+		unless -s $jplaceFile;
+
+	my $split = readStrictBackboneClassification($classificationFile);
+	die "Forced EPA filter redo found no placement samples in $classificationFile\n"
+		unless @{$split->{placement}};
+	writeWorkflowHeartbeat('redo EPA filtering');
+	clearLifecycleMarker($completionMarker,
+		'clear completion before forced EPA filter redo');
+	clearLifecycleMarker($placementPendingMarker,
+		'clear stale EPA-only state before forced EPA filter redo');
+
+	my $epaResult = read_epa_jplace($jplaceFile, $split->{placement});
+	my $placements = $epaResult->{placements};
+	my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
+	my $backboneGraftQC = map_epa_placements_to_backbone(
+		$epaResult->{tree}, $backboneTreeText, $placements);
+	my $backboneGraftReport =
+		"$treeDirectory/strict_backbone.epa_backbone_grafts.tsv";
+	writeEpaBackboneGraftAudit($backboneGraftQC, $backboneGraftReport);
+	printEpaBackboneGraftSummary($backboneGraftQC, $backboneGraftReport);
+
+	my $placementQC = filter_epa_placement_outliers(
+		$backboneTreeText, $placements,
+		{
+			pendant_outlier_factor => $epaPendantOutlierFactor,
+			pendant_minimum_threshold => $epaPendantMinThreshold,
+			outgroup => $outgroup,
+		},
+	);
+	my $report = "$treeDirectory/strict_backbone.epa_placements.tsv";
+	my $filterSummary =
+		"$treeDirectory/strict_backbone.epa_filter_summary.tsv";
+	writeEpaPlacementFilterSummary($placementQC, $filterSummary);
+	printEpaPlacementFilterSummary($placementQC, $filterSummary, $report);
+
+	my @reportColumns = qw(
+		sample status backbone_overlap_nt backbone_overlap_loci
+		backbone_state_divergence edge likelihood likelihood_weight_ratio
+		edpl candidate_placements distal_length backbone_distal_length pendant_length
+		pendant_outlier_limit placement_filter_reason reason
+	);
+	my $reportHandle = retry_open('>', $report,
+		label => 'write forced EPA placement report');
+	print {$reportHandle} join("\t", @reportColumns), "\n";
+	for my $sample (sort keys %{$placements}) {
+		my $entry = $placements->{$sample};
+		my $overlap = $split->{backbone_overlap}{$sample} || {};
+		print {$reportHandle} join("\t",
+			$sample, $entry->{status},
+			map({ defined($overlap->{$_})
+				? sprintf('%.12g', $overlap->{$_}) : 'NA' }
+				qw(backbone_overlap_nt backbone_overlap_loci
+					backbone_state_divergence)),
+			map({ defined($entry->{$_})
+				? sprintf('%.12g', $entry->{$_}) : 'NA' }
+				qw(edge likelihood likelihood_weight_ratio edpl
+					candidate_placements distal_length
+					backbone_distal_length pendant_length)),
+			defined($entry->{pendant_outlier_limit})
+				? sprintf('%.12g', $entry->{pendant_outlier_limit}) : 'NA',
+			$entry->{placement_filter_reason} // '',
+			$split->{reason}{$sample} // '',
+		), "\n";
+	}
+	retry_close($reportHandle, 'close forced EPA placement report');
+
+	retry_unlink($primaryTree,
+		label => 'remove superseded EPA-placed tree before publication')
+		if -e $primaryTree;
+	write_epa_placed_tree($backboneTreeText, $primaryTree, $placements);
+	die "Forced EPA filter redo did not publish its primary tree: $primaryTree\n"
+		unless -s $primaryTree;
+	writeCompletionMarker($completionMarker, $primaryTree, $outD);
+	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
+	clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
+	safeRemoveTree($tmpD, $tmpBase);
+	writeWorkflowHeartbeat('complete');
+	print "Forced EPA filter redo completed without alignment or inference; "
+		."primary tree=$primaryTree; backbone retained=$backboneTree; "
+		."jplace=$jplaceFile\n";
 	return 1;
 }
 

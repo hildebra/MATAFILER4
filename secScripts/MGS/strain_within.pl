@@ -266,7 +266,8 @@ END {
 #1.01: republish existing EPA placements through final outlier filtering only
 #1.02: invalidate EPA-derived completion state before ordinary saved-command resume
 #1.03: accept bare and explicit numeric redo-EPA flags
-my $version = 1.03;
+#1.04: propagate forced EPA redo into existing saved tree commands
+my $version = 1.04;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -4923,7 +4924,13 @@ sub resubmitExistingTreeCommands {
 			$options->{maxConcurrentJobs} || 0,
 			$options->{killDependencyNever} || 0, $options,
 		);
-		my $submission = qsubSystem2($record->[1], $options);
+		my $submission;
+		if ($record->[2] eq 'redo_epa') {
+			local $ENV{MATAFILER_REDO_EPA_FILTER} = 1;
+			$submission = qsubSystem2($record->[1], $options);
+		} else {
+			$submission = qsubSystem2($record->[1], $options);
+		}
 		print "  Resubmitted $record->[0] from $record->[1]: $submission";
 	}
 	return (1, scalar(@scripts));

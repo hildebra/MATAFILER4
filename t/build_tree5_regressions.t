@@ -117,6 +117,85 @@ like($script_text,
 like($script_text,
 	qr/sub runEpaOnlyPlacement.*?requires a validated IQ-TREE backbone.*?map_epa_placements_to_backbone\(.*?write_epa_placed_tree\(\$backboneTreeText, \$primaryTree.*?backbone retained=\$backboneTree/s,
 	'EPA-only mode maps jplace edges and grafts placements onto the retained backbone');
+like($script_text,
+	qr/if \(\$subsetSmpls >0\).*?if \(\$redoEPAfilter\).*?runRedoEpaFilter\(.*?exit\(0\).*?warn "MSAprobs.*?prepGenoDirs/s,
+	'forced EPA filtering exits before sequence inputs, alignment, and inference startup');
+like($script_text, qr/my \$redoEPAfilter =\s*\(\$ENV\{MATAFILER_REDO_EPA_FILTER\}/,
+	'BuildTree inherits forced filtering when an older saved command is resubmitted');
+my ($redo_epa_body) = $script_text =~
+	/(sub runRedoEpaFilter .*?)(?=sub readEpaFilterBackboneTree)/s;
+ok(defined($redo_epa_body), 'focused forced-EPA publication helper is available');
+like($redo_epa_body,
+	qr/readStrictBackboneClassification.*?read_epa_jplace.*?map_epa_placements_to_backbone.*?filter_epa_placement_outliers.*?write_epa_placed_tree.*?writeCompletionMarker/s,
+	'forced EPA filtering reads only retained publication artifacts and republishes lifecycle state');
+unlike($redo_epa_body, qr/runEpaNgPlacement|prepGenoDirs|mergeMSAs|treeAtHeart/,
+	'forced EPA filtering cannot start EPA-ng, alignment, or tree inference');
+my $redo_output = File::Spec->catdir($temporary, 'redo_output');
+my $redo_phylo = File::Spec->catdir($redo_output, 'phylo');
+my $redo_epa = File::Spec->catdir($redo_phylo, 'epa-ng');
+mkdir $redo_output or die "Cannot create $redo_output: $!";
+mkdir $redo_phylo or die "Cannot create $redo_phylo: $!";
+mkdir $redo_epa or die "Cannot create $redo_epa: $!";
+write_test_file(
+	File::Spec->catfile($redo_phylo, 'IQtree_allsites.backbone.treefile'),
+	"(A:0.1,B:0.1,C:0.1);\n",
+);
+write_test_file(
+	File::Spec->catfile($redo_phylo, 'strict_backbone.samples.tsv'),
+	join("\n",
+		join("\t", qw(sample tree_role reason informative_positions
+			q90_informative backbone_overlap_nt backbone_overlap_loci
+			backbone_state_divergence)),
+		(map { join("\t", $_, 'backbone', 'validated', 1000, 900, 1000, 8, 0) }
+			qw(A B C)),
+		join("\t", qw(query1 placement sparse 450 900 425 4 0.03)),
+	)."\n",
+);
+write_test_file(
+	File::Spec->catfile($redo_epa, 'epa_result.jplace'),
+	'{"tree":"(A:0.1{0},B:0.1{1},C:0.1{2});",'
+	.'"placements":[{"p":[[0,-10,1,0.05,0.01]],"n":["query1"]}],'
+	.'"metadata":{},"version":3,'
+	.'"fields":["edge_num","likelihood","like_weight_ratio",'
+	.'"distal_length","pendant_length"]}',
+);
+my $redo_completion = File::Spec->catfile($redo_output, 'treeDone.sto');
+my $redo_wrapper = File::Spec->catfile($temporary, 'run-redo-buildtree.pl');
+write_test_file($redo_wrapper, <<'PERL');
+use strict;
+use warnings;
+use Mods::IO_Tamoc_progs qw(setConfigFile);
+my $root = shift @ARGV;
+my $config = shift @ARGV;
+my $script = shift @ARGV;
+$ENV{MF4_TEST_ROOT} = $root;
+setConfigFile($config);
+my $result = do $script;
+die $@ if $@;
+die "Cannot execute $script: $!\n" unless defined $result;
+PERL
+is(system(
+	$^X, "-I$root", $redo_wrapper, $root,
+	File::Spec->catfile($Bin, 'MATAFILERcfg.txt'), $script,
+	'-fna', File::Spec->catfile($redo_output, 'deliberately_missing.fna'),
+	'-aa', File::Spec->catfile($redo_output, 'deliberately_missing.faa'),
+	'-cats', File::Spec->catfile($redo_output, 'deliberately_missing.cat'),
+	'-outD', $redo_output, '-runIQtree', 1, '-cores', 1,
+	'-withinSpecies', 1, '-strictBackbone', 1,
+	'-rateMergePartitions', 0, '-continue', 1, '-redoEPAfilter', 1,
+	'-completionMarker', $redo_completion,
+), 0, 'forced EPA filtering succeeds without opening missing sequence inputs');
+my $redo_primary =
+	File::Spec->catfile($redo_phylo, 'IQtree_allsites.treefile');
+ok(-s $redo_primary && -s $redo_completion,
+	'forced EPA filtering republishes the primary tree and completion marker');
+open my $redo_tree_handle, '<', $redo_primary
+	or die "Cannot read $redo_primary: $!";
+my $redo_tree_text = do { local $/; <$redo_tree_handle> };
+close $redo_tree_handle or die "Cannot close $redo_primary: $!";
+like($redo_tree_text, qr/query1/,
+	'forced EPA filtering grafts the retained query before exiting');
+
 
 my $coordinate_bounds_checks = () = $script_text =~ /next if \$position >= length\(\$sequence\);/g;
 cmp_ok($coordinate_bounds_checks, '>=', 2,
@@ -128,12 +207,12 @@ like($script_text,
 	qr/unless \(keys %metrics\).*?terminal_reason => 'taxon_aware_no_category_with_three_usable_samples'/s,
 	'a taxon-aware candidate set with fewer than three usable samples returns a stable terminal reason');
 my $placement_outlier_calls = () = $script_text =~ /filter_epa_placement_outliers\(/g;
-cmp_ok($placement_outlier_calls, '>=', 2,
-	'fresh and EPA-only placement publication both apply pendant-branch outlier QC');
+cmp_ok($placement_outlier_calls, '>=', 3,
+	'fresh, EPA-only, and forced-redo publication apply pendant-branch outlier QC');
 my $backbone_mapping_calls =
 	() = $script_text =~ /map_epa_placements_to_backbone\(/g;
-cmp_ok($backbone_mapping_calls, '>=', 2,
-	'normal and EPA-only publication both map jplace edges onto the backbone');
+cmp_ok($backbone_mapping_calls, '>=', 3,
+	'normal, EPA-only, and forced-redo publication map jplace edges onto the backbone');
 like($script_text, qr/strict_backbone\.epa_backbone_grafts\.tsv/,
 	'EPA backbone grafting publishes a per-edge mapping report');
 unlike($script_text, qr/write_epa_placed_tree\(\$epaResult->\{tree\}/,

@@ -129,7 +129,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.03;/,
+like($strain, qr/my \$version = 1\.04;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
@@ -215,6 +215,8 @@ like($directTreeResume,
 	'direct tree-command resume notices a removed placed tree despite treeDone and reuses saved EPA retry scripts');
 like($directTreeResume, qr/\$redoEpa && !\$publicationResume.*?next;.*?elsif \(!\$publicationResume/s,
 	'forced EPA filtering selects only retained-jplace publication resumes and never EPA-only recovery');
+like($directTreeResume, qr/local \$ENV\{MATAFILER_REDO_EPA_FILTER\} = 1.*?qsubSystem2/s,
+	'forced filtering propagates into older saved tree commands without rewriting them');
 like($directTreeResume,
 	qr/\$publicationResume.*?elsif \(!\$publicationResume\).*?FNAstdof.*?FAAstdof.*?CATstdof/s,
 	'a retained-jplace publication resume skips unnecessary sequence-input checks');
@@ -532,11 +534,11 @@ my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'b
 like($build_tree, qr/if \(\$numSeq < 3\)/,
 	'three-sample MGS accepted by the wrapper are retained for a minimal tree');
 like($build_tree,
-	qr/my \$retainedJplace = File::Spec->catfile.*?if \(\$continue && \$dedicatedBackbone.*?\(\$redoEPAfilter \|\| !-s \$primaryTree\).*?-s \$retainedJplace\).*?read_epa_jplace.*?reapplying placement filtering.*?else \{.*?runEpaNgPlacement.*?filter_epa_placement_outliers.*?write_epa_placed_tree/s,
-	'normal BuildTree continuation reuses a retained jplace when its placed tree is missing or filtering is forced');
+	qr/my \$retainedJplace = File::Spec->catfile.*?if \(\$continue && \$dedicatedBackbone && !-s \$primaryTree.*?-s \$retainedJplace\).*?read_epa_jplace.*?reapplying placement filtering.*?else \{.*?runEpaNgPlacement.*?filter_epa_placement_outliers.*?write_epa_placed_tree/s,
+	'normal BuildTree continuation reuses a retained jplace when its placed tree is missing');
 like($build_tree,
-	qr/"redoEPAfilter:i" => sub.*?!\$redoEPAfilter.*?Forced EPA filter redo/s,
-	'BuildTree exposes redo-EPA as a force modifier on the normal continuation path');
+	qr/"redoEPAfilter:i" => sub.*?if \(\$subsetSmpls >0\).*?if \(\$redoEPAfilter\).*?runRedoEpaFilter\(.*?exit\(0\).*?warn "MSAprobs.*?prepGenoDirs/s,
+	'BuildTree executes forced EPA filtering before normal workflow startup');
 unlike($build_tree, qr/epaFilterOnly|runEpaFilterOnly/,
 	'BuildTree has no separate filter-only option or execution path');
 
