@@ -368,8 +368,12 @@ sub runQItree{
 		print "IQ-TREE safe likelihood kernel enabled pre-emptively: "
 			."taxa=$taxonCount, alignment size=${inSize}MB\n";
 	}
-	my $constraintTree = $treeOpts{constraintTree};
+	my $constraintTree = $treeOpts{constraintTree} // "";
+	my $fixedTree = $treeOpts{fixedTree} // "";
 	die ("Constraint tree $constraintTree does not exist") if ($constraintTree ne "" && !-e $constraintTree);
+	die ("Fixed tree $fixedTree does not exist") if ($fixedTree ne "" && !-e $fixedTree);
+	die "IQ-TREE cannot use a constraint tree and a fixed tree in the same run\n"
+		if $constraintTree ne "" && $fixedTree ne "";
 	my $iqTree  = getProgPaths("iqtree");
 	my $vcheck = `$iqTree --version`;
 	$vcheck =~ m/version ([23])/
@@ -397,6 +401,9 @@ sub runQItree{
 	# downstream output after inference instead: -o can assert when the anchor
 	# is absent from an internal reduced or partition-specific tree.
 	$cmd .= "-g $constraintTree " unless ($constraintTree eq "");
+	# -te fixes the topology while allowing IQ-TREE to re-estimate branch lengths
+	# and model parameters (IQ-TREE treats it as a no-tree-search invocation).
+	$cmd .= "-te $fixedTree " unless ($fixedTree eq "");
 	unless ($fast == 0 || $iqPathogen){
 		$cmd .= "--fast ";
 		print "IQtree - fast\n";

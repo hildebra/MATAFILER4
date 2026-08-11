@@ -175,5 +175,39 @@ my @auto_model_calls = grep { length } split /\n/, slurp("$autoModelPrefix.calls
 like($auto_model_calls[0],
 	qr/(?:^|\s)-p \Q$partition\E(?=\s|$).*?(?:^|\s)-m MFP\+MERGE(?:\s|$)/,
 	'AutoModel uses MFP+MERGE for a partitioned alignment');
+my $fixedTree = File::Spec->catfile($tmp, 'fixed_backbone.treefile');
+write_file($fixedTree, "((A:0,B:0):0,C:0);\n");
+my $fixedModelPrefix = File::Spec->catfile($tmp, 'IQtree_fixed_model');
+{
+	no warnings 'redefine';
+	local *Mods::phyloTools::getProgPaths = sub { return $fakeIqtree };
+	runQItree({
+		inMSA => $alignment,
+		IQtreeout => $fixedModelPrefix,
+		ncore => 1,
+		outgr => '',
+		bootStrap => 0,
+		useAA => 0,
+		iqtreeFast => 0,
+		autoModel => 0,
+		partition => '',
+		runSafe => 1,
+		iqMemMB => 0,
+		iqPathogen => 0,
+		iqLegacy => 0,
+		constraintTree => '',
+		fixedTree => $fixedTree,
+	});
+}
+my @fixed_model_calls = grep { length } split /\n/, slurp("$fixedModelPrefix.calls");
+is(scalar(@fixed_model_calls), 1, 'a requested fixed-tree model refit runs once');
+like($fixed_model_calls[0], qr/(?:^|\s)-te \Q$fixedTree\E(?=\s|$)/,
+	'fixed-tree IQ-TREE runs receive their retained topology with -te');
+unlike($fixed_model_calls[0], qr/(?:^|\s)-g(?:\s|$)/,
+	'fixed-tree IQ-TREE runs do not also request constrained tree search');
+unlike($fixed_model_calls[0], qr/(?:^|\s)-p(?:\s|$)/,
+	'fixed-tree IQ-TREE model refits can be run without a partition file');
+like($fixed_model_calls[0], qr/(?:^|\s)-m GTR\+F\+G2(?:\s|$)/,
+	'fixed-tree nucleotide model refits retain the fixed GTR+F+G2 model');
 
 done_testing();

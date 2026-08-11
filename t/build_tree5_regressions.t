@@ -15,12 +15,12 @@ close $script_handle or die "Cannot close $script: $!";
 
 my ($epa_resource_helper) = $script_text =~
 	/(sub epaResourcePlan \{.*?return \(\$threads, \$memoryMB\);\n\})/s;
-my ($iqtree_explicit_helper, $iqtree_model_helper) = $script_text =~
-	/(sub iqtreeExplicitEpaModel \{.*?\n\})\n\n(sub iqtreePlacementModel \{.*?\n\})\n\nsub epaModelArtifact/s;
+my ($iqtree_explicit_helper, $iqtree_model_helper, $iqtree_partition_helper) = $script_text =~
+	/(sub iqtreeExplicitEpaModel \{.*?\n\})\n\n(sub iqtreePlacementModel \{.*?\n\})\n\n(sub iqtreeGtrPartitionCount \{.*?\n\})\n\nsub epaModelArtifact/s;
 BAIL_OUT('Cannot extract EPA-ng helper functions')
 	unless defined($epa_resource_helper) && defined($iqtree_explicit_helper)
-		&& defined($iqtree_model_helper);
-my $epa_helpers = "$epa_resource_helper\n$iqtree_explicit_helper\n$iqtree_model_helper";
+		&& defined($iqtree_model_helper) && defined($iqtree_partition_helper);
+my $epa_helpers = "$epa_resource_helper\n$iqtree_explicit_helper\n$iqtree_model_helper\n$iqtree_partition_helper";
 my $helpers_loaded = eval "package TestBuildTreeEpaHelpers; $epa_helpers; 1;";
 ok($helpers_loaded, 'EPA-ng model and resource helpers load independently')
 	or diag($@);
@@ -111,6 +111,47 @@ is(TestBuildTreeEpaHelpers::iqtreeExplicitEpaModel(
 	'GTR+F+G2', $compactReport),
 	'GTR{1/2/3/4/5/1}+FU{0.1/0.2/0.3/0.4}+G2{0.5}',
 	'compact IQ-TREE rate and frequency vectors are parsed in documented state order');
+my $iqtree3SinglePartition = <<'IQTREE3';
+SUBSTITUTION PROCESS
+--------------------
+  ID  Model           Speed  Parameters
+   1  GTR+F+G2       1.0000  GTR{1.65448,9.12038,1.58968,0.848991,17.5795}+F{0.259129,0.215778,0.267947,0.257146}+G2{0.0201622}
+IQTREE3
+write_test_file("$iqtree_prefix.iqtree", $iqtree3SinglePartition);
+write_test_file("$iqtree_prefix.log", '');
+is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix),
+	'GTR{1.65448/9.12038/1.58968/0.848991/17.5795/1}+FU{0.259129/0.215778/0.267947/0.257146}+G2{0.0201622}',
+	'IQ-TREE 3 compact single-partition GTR table is converted to an EPA-ng descriptor');
+is(TestBuildTreeEpaHelpers::iqtreeGtrPartitionCount($iqtree_prefix), 1,
+	'IQ-TREE 3 compact single-partition report is identified as one fitted GTR model');
+
+my @iqtree3PartitionRows = map {
+	sprintf(' %2d  GTR+F+G2       1.0000  GTR{1.65448,9.12038,1.58968,0.848991,17.5795}+F{0.259129,0.215778,0.267947,0.257146}+G2{0.0201622}', $_)
+} 1 .. 8;
+write_test_file("$iqtree_prefix.iqtree", join("\n",
+	'SUBSTITUTION PROCESS',
+	'  ID  Model           Speed  Parameters',
+	@iqtree3PartitionRows,
+	'',
+));
+write_test_file("$iqtree_prefix.log",
+	'Command: iqtree3 -s alignment.fna -m GTR+F+G2 -T 12');
+my $partitioned_model_warning = '';
+{
+	local $SIG{__WARN__} = sub { $partitioned_model_warning .= $_[0] };
+	is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix), 'GTR+F+G2',
+		'partitioned IQ-TREE 3 report retains the generic EPA-ng model rather than one parameter row');
+}
+like($partitioned_model_warning,
+	qr/reported 8 fitted GTR parameter sets for separate partitions/,
+	'partitioned IQ-TREE 3 fallback reports the actual number of fitted model rows');
+is(TestBuildTreeEpaHelpers::iqtreeGtrPartitionCount($iqtree_prefix), 8,
+	'IQ-TREE 3 compact partitioned report is identified for an unpartitioned EPA-ng refit');
+like($script_text,
+	qr/sub epaModelArtifact \{.*?return epaRefitIqtreeModel\(.*?\n\t\t\tif iqtreeGtrPartitionCount\(.*?\) > 1;.*?sub epaRefitIqtreeModel \{.*?\$refitOpts\{partition\} = '';.*?\$refitOpts\{fixedTree\} = \$backboneTree;.*?my \$model = iqtreePlacementModel\(\$refitPrefix\);/s,
+	'partitioned IQ-TREE GTR backbones are refit unpartitioned on their fixed topology before EPA-ng');
+like($partitioned_model_warning, qr/will not silently use one partition's rates/,
+	'partitioned IQ-TREE 3 fallback makes the EPA-ng single-model limitation explicit');
 
 write_test_file("$iqtree_prefix.iqtree",
 	"Model of substitution: GTR+F+G2\n");
@@ -123,7 +164,7 @@ my $incomplete_model_warning = '';
 		'an incomplete fitted GTR report falls back to the generic descriptor');
 }
 like($incomplete_model_warning,
-	qr/continuing with the generic descriptor and allowing EPA-ng to estimate them/,
+	qr/using the generic symbolic descriptor instead\. EPA-ng does not refit missing parameters/,
 	'GTR parsing failure is reported as a visible warning');
 
 write_test_file("$iqtree_prefix.iqtree", "IQ-TREE report without a model label\n");

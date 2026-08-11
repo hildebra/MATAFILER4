@@ -65,6 +65,9 @@
 #5.61: redo retained EPA filtering before alignment and inference startup
 #5.62: inherit forced redo state when strain_within resubmits an older tree command
 #5.63: forward fitted IQ-TREE parameters when available, warn on fallback, and report the EPA-ng command
+#5.64: parse IQ-TREE 3 compact model tables without silently collapsing partitioned EPA models
+#5.65: state that EPA-ng does not optimize missing symbolic-model parameters
+#5.66: refit one unpartitioned GTR model on fixed partitioned-backbone topology for EPA-ng
 
 use warnings;
 use strict;
@@ -153,6 +156,8 @@ sub clearLifecycleMarker;
 sub preflightBuildTree;
 sub inputFingerprint;
 sub epaModelArtifact;
+sub epaRefitIqtreeModel;
+sub iqtreeGtrPartitionCount;
 sub runEpaNgPlacement;
 sub readStrictBackboneClassification;
 sub runEpaOnlyPlacement;
@@ -175,7 +180,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.63;
+my $version = 5.66;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -2813,6 +2818,50 @@ sub iqtreeExplicitEpaModel {
 	$modifiers =~ s/\+G\d+//g;
 	return '' if length $modifiers;
 	my $number = qr/[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/;
+	my @iqtree3Compact;
+	while ($text =~ /^\s*\d+\s+(\S+)\s+\S+\s+GTR\{([^}]*)\}\+F\{([^}]*)\}(?:\+I\{([^}]*)\})?(?:\+G(\d+)\{([^}]*)\})?\s*$/mig) {
+		next unless uc($1) eq uc($model);
+		push @iqtree3Compact, {
+			rates => $2, frequencies => $3, invariant => $4,
+			gamma_categories => $5, gamma_alpha => $6,
+		};
+	}
+	# IQ-TREE 3 writes compact fitted parameters in its substitution-process
+	# table. EPA-ng has a single model partition, so never select one row from
+	# a multi-partition table here.
+	return '' if @iqtree3Compact > 1;
+	if (@iqtree3Compact) {
+		my $entry = $iqtree3Compact[0];
+		my @rates = $entry->{rates} =~ /($number)/g;
+		return '' unless @rates == 5 || @rates == 6;
+		push @rates, 1 if @rates == 5; # IQ-TREE omits its normalized G-T rate.
+		return '' if grep { $_ <= 0 } @rates;
+		my @frequencies = $entry->{frequencies} =~ /($number)/g;
+		return '' unless @frequencies == 4;
+		return '' if grep { $_ <= 0 } @frequencies;
+		my $frequencyTotal = 0;
+		$frequencyTotal += $_ for @frequencies;
+		return '' unless $frequencyTotal > 0;
+		my $descriptor = 'GTR{'.join('/', map { sprintf('%.12g', $_) } @rates)
+			.'}+FU{'.join('/', map { sprintf('%.12g', $_ / $frequencyTotal) } @frequencies).'}';
+		if ($model =~ /\+I(?:\+|\z)/i) {
+			return '' unless defined($entry->{invariant}) && $entry->{invariant} =~ /^$number\z/;
+			my $invariant = 0 + $entry->{invariant};
+			return '' unless $invariant >= 0 && $invariant < 1;
+			$descriptor .= '+I{'.sprintf('%.12g', $invariant).'}';
+		}
+		if ($model =~ /\+G(\d+)(?:\+|\z)/i) {
+			my $categories = 0 + $1;
+			return '' unless $categories > 0
+				&& defined($entry->{gamma_categories})
+				&& $entry->{gamma_categories} == $categories
+				&& defined($entry->{gamma_alpha}) && $entry->{gamma_alpha} =~ /^$number\z/;
+			my $alpha = 0 + $entry->{gamma_alpha};
+			return '' unless $alpha > 0;
+			$descriptor .= '+G'.$categories.'{'.sprintf('%.12g', $alpha).'}';
+		}
+		return $descriptor;
+	}
 	my %rate;
 	while ($text =~ /^\s*([ACGT])\s*-\s*([ACGT])\s*:\s*($number)\s*$/mg) {
 		my ($left, $right, $value) = (uc($1), uc($2), 0 + $3);
@@ -2885,6 +2934,7 @@ sub iqtreePlacementModel {
 		qr/^\s*Best-fit model(?: according to [^:]+)?:\s*([^\s,;]+)/mi,
 		qr/^\s*(?:Substitution model|Model):\s*([^\s,;]+)/mi,
 		qr/(?:^|\s)-m\s+['"]?([A-Za-z0-9_.+{}=-]+)['"]?/m,
+		qr/^\s*\d+\s+([A-Za-z][A-Za-z0-9]*(?:\+[A-Za-z0-9]+)*)\s+\S+\s+[A-Za-z][A-Za-z0-9]*\{/mi,
 	) {
 		for my $report (@reports) {
 			next unless $report->{text} =~ $pattern;
@@ -2892,14 +2942,22 @@ sub iqtreePlacementModel {
 			next if $model =~ /^(?:TEST|AUTO|MFP(?:\+MERGE)?)$/i;
 			my $explicit = iqtreeExplicitEpaModel($model, $combinedText);
 			return $explicit if length $explicit;
-			my $warning = $model =~ /^GTR(?:\+|\z)/i
+			my $partitionRows = () = $combinedText =~ /^\s*\d+\s+GTR(?:\+[A-Za-z0-9]+)*\s+\S+\s+GTR\{/mig;
+			my $warning = $model =~ /^GTR(?:\+|\z)/i && $partitionRows > 1
+				? "Warning: IQ-TREE selected $model and reported $partitionRows fitted GTR parameter sets "
+					."for separate partitions in $prefix.iqtree and $prefix.log. EPA-ng accepts "
+					."one model for a concatenated alignment, so BuildTree will not silently use "
+					."one partition's rates; using the generic symbolic descriptor instead. EPA-ng "
+					."does not refit its parameters (apart from empirical base frequencies for +F).\n"
+				: $model =~ /^GTR(?:\+|\z)/i
 				? "Warning: IQ-TREE selected $model, but BuildTree could not parse its "
 					."complete fitted GTR rates, base frequencies, and rate-heterogeneity "
-					."parameters from $prefix.iqtree and $prefix.log; continuing with the "
-					."generic descriptor and allowing EPA-ng to estimate them.\n"
+					."parameters from $prefix.iqtree and $prefix.log; using the generic symbolic "
+					."descriptor instead. EPA-ng does not refit missing parameters (apart from "
+					."empirical base frequencies for +F).\n"
 				: "Warning: BuildTree could not serialize fitted IQ-TREE parameters for "
-					."$model from $prefix.iqtree and $prefix.log; continuing with the "
-					."generic descriptor and allowing EPA-ng to estimate applicable parameters.\n";
+					."$model from $prefix.iqtree and $prefix.log; using the generic symbolic "
+					."descriptor instead. EPA-ng does not refit missing model parameters.\n";
 			warn $warning;
 			return $model;
 		}
@@ -2908,10 +2966,23 @@ sub iqtreePlacementModel {
 		."$prefix.log for EPA-ng placement\n";
 }
 
+sub iqtreeGtrPartitionCount {
+	my ($prefix) = @_;
+	my $report = "$prefix.iqtree";
+	return 0 unless -s $report;
+	open my $handle, '<', $report
+		or die "Cannot read IQ-TREE substitution-process report $report: $!\n";
+	my $text = do { local $/; <$handle> };
+	close $handle or die "Cannot close IQ-TREE substitution-process report $report: $!\n";
+	return () = $text =~ /^\s*\d+\s+GTR(?:\+[A-Za-z0-9]+)*\s+\S+\s+GTR\{/mig;
+}
+
 sub epaModelArtifact {
-	my ($treeOpts, $backboneTree) = @_;
+	my ($treeOpts, $backboneTree, $backboneAlignment) = @_;
 	my $iqtree = "$treeOpts->{IQtreeout}.treefile";
 	if ($backboneTree eq $iqtree) {
+		return epaRefitIqtreeModel($treeOpts, $backboneTree, $backboneAlignment)
+			if iqtreeGtrPartitionCount($treeOpts->{IQtreeout}) > 1;
 		return iqtreePlacementModel($treeOpts->{IQtreeout});
 	}
 	my $raxmlng = $treeOpts->{RAXNGtreeout};
@@ -2935,6 +3006,77 @@ sub epaModelArtifact {
 		."backbone model; no reusable model input is available for $backboneTree\n";
 }
 
+sub epaRefitIqtreeModel {
+	my ($treeOpts, $backboneTree, $backboneAlignment) = @_;
+	die "EPA-ng's one-model IQ-TREE refit requires a non-empty backbone alignment: "
+		."$backboneAlignment\n" unless -s $backboneAlignment;
+	die "EPA-ng's one-model IQ-TREE refit requires a non-empty backbone tree: "
+		."$backboneTree\n" unless -s $backboneTree;
+	die "EPA-ng's one-model IQ-TREE refit is only defined for nucleotide backbones\n"
+		if $treeOpts->{useAA};
+	my $refitPrefix = "$treeOpts->{IQtreeout}.epa_model";
+	my $marker = "$refitPrefix.inputs";
+	my $fingerprint = join("\t", 'epa-ng-iqtree-single-model-refit-v1', 'GTR+F+G2',
+		inputFingerprint($backboneAlignment), inputFingerprint($backboneTree));
+	my $savedFingerprint = '';
+	if (-s $marker) {
+		my $markerHandle = retry_open('<', $marker,
+			label => "read IQ-TREE EPA-ng model-refit marker");
+		$savedFingerprint = <$markerHandle> // '';
+		retry_close($markerHandle, "close IQ-TREE EPA-ng model-refit marker");
+		chomp $savedFingerprint;
+	}
+	my $validationReason = '';
+	my $reusable = $savedFingerprint eq $fingerprint && -s "$refitPrefix.iqtree"
+		&& cachedIQTreeOutputComplete($refitPrefix, $backboneAlignment, \$validationReason);
+	if ($reusable) {
+		my $model = eval { iqtreePlacementModel($refitPrefix) };
+		if (!$@ && $model =~ /^GTR\{/) {
+			cleanupIQTreeTransients($refitPrefix);
+			print "Reusing fixed-topology, unpartitioned IQ-TREE EPA-ng model refit: "
+				."$refitPrefix.iqtree\n";
+			return $model;
+		}
+		warn "Cached IQ-TREE EPA-ng model refit cannot provide a complete explicit GTR "
+			."descriptor; rebuilding it.\n";
+	}
+	print "IQ-TREE EPA-ng model refit: estimating one unpartitioned GTR+F+G2 model "
+		."on the fixed retained backbone topology\n";
+	my %refitOpts = %{$treeOpts};
+	$refitOpts{inMSA} = $backboneAlignment;
+	$refitOpts{IQtreeout} = $refitPrefix;
+	$refitOpts{partition} = '';
+	$refitOpts{constraintTree} = '';
+	$refitOpts{fixedTree} = $backboneTree;
+	$refitOpts{bootStrap} = 0;
+	$refitOpts{useAA} = 0;
+	$refitOpts{iqtreeFast} = 0;
+	$refitOpts{autoModel} = 0;
+	$refitOpts{iqPathogen} = 0;
+	$refitOpts{iqLegacy} = 0;
+	$refitOpts{runSafe} = 0;
+	runQItree(\%refitOpts);
+	$validationReason = '';
+	die "IQ-TREE completed the EPA-ng model refit, but its output is incomplete: "
+		."$validationReason\n"
+		unless -s "$refitPrefix.iqtree"
+			&& cachedIQTreeOutputComplete($refitPrefix, $backboneAlignment, \$validationReason);
+	my $model = iqtreePlacementModel($refitPrefix);
+	die "IQ-TREE EPA-ng model refit did not provide a complete explicit GTR descriptor\n"
+		unless $model =~ /^GTR\{/;
+	my $temporaryMarker = "$marker.tmp.$$";
+	my $markerHandle = retry_open('>', $temporaryMarker,
+		label => "write IQ-TREE EPA-ng model-refit marker");
+	print {$markerHandle} "$fingerprint\n"
+		or die "Cannot write IQ-TREE EPA-ng model-refit marker $temporaryMarker: $!\n";
+	retry_close($markerHandle, "close IQ-TREE EPA-ng model-refit marker");
+	retry_rename($temporaryMarker, $marker,
+		label => "publish IQ-TREE EPA-ng model-refit marker");
+	print "EPA-ng uses fixed-topology, unpartitioned IQ-TREE model refit: "
+		."$refitPrefix.iqtree\n";
+	return $model;
+}
+
 sub runEpaNgPlacement {
 	my ($treeOpts, $backboneTree, $backboneAlignment, $queryAlignment,
 		$queries, $treeDirectory) = @_;
@@ -2946,7 +3088,7 @@ sub runEpaNgPlacement {
 	die "Strict-backbone placement requested, but epa-ng is not configured. "
 		."Set epa-ng in the selected MATAFILER configuration.\n"
 		unless defined($epaNg) && length($epaNg);
-	my $placementModel = epaModelArtifact($treeOpts, $backboneTree);
+	my $placementModel = epaModelArtifact($treeOpts, $backboneTree, $backboneAlignment);
 	my $epaDirectory = "$treeDirectory/epa-ng";
 	safeRemoveTree($epaDirectory, $treeDirectory) if -d $epaDirectory || -l $epaDirectory;
 	make_path($epaDirectory);
