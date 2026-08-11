@@ -64,7 +64,7 @@
 #5.60: accept bare and explicit numeric redo-EPA flags
 #5.61: redo retained EPA filtering before alignment and inference startup
 #5.62: inherit forced redo state when strain_within resubmits an older tree command
-#5.63: require fitted IQ-TREE GTR parameters for EPA-ng and report its full command
+#5.63: forward fitted IQ-TREE parameters when available, warn on fallback, and report the EPA-ng command
 
 use warnings;
 use strict;
@@ -2892,11 +2892,15 @@ sub iqtreePlacementModel {
 			next if $model =~ /^(?:TEST|AUTO|MFP(?:\+MERGE)?)$/i;
 			my $explicit = iqtreeExplicitEpaModel($model, $combinedText);
 			return $explicit if length $explicit;
-			die "IQ-TREE selected $model, but BuildTree could not parse its complete "
-				."fitted GTR rates, base frequencies, and rate-heterogeneity parameters "
-				."from $prefix.iqtree and $prefix.log. Refusing to let EPA-ng refit a "
-				."generic GTR model.\n"
-				if $model =~ /^GTR(?:\+|\z)/i;
+			my $warning = $model =~ /^GTR(?:\+|\z)/i
+				? "Warning: IQ-TREE selected $model, but BuildTree could not parse its "
+					."complete fitted GTR rates, base frequencies, and rate-heterogeneity "
+					."parameters from $prefix.iqtree and $prefix.log; continuing with the "
+					."generic descriptor and allowing EPA-ng to estimate them.\n"
+				: "Warning: BuildTree could not serialize fitted IQ-TREE parameters for "
+					."$model from $prefix.iqtree and $prefix.log; continuing with the "
+					."generic descriptor and allowing EPA-ng to estimate applicable parameters.\n";
+			warn $warning;
 			return $model;
 		}
 	}

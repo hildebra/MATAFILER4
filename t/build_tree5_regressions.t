@@ -115,19 +115,28 @@ is(TestBuildTreeEpaHelpers::iqtreeExplicitEpaModel(
 write_test_file("$iqtree_prefix.iqtree",
 	"Model of substitution: GTR+F+G2\n");
 write_test_file("$iqtree_prefix.log", "IQ-TREE log without fitted parameters\n");
-my $incomplete_model_ok = eval {
-	TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix);
-	1;
-};
-ok(!$incomplete_model_ok, 'an incomplete fitted GTR report is rejected');
-like($@, qr/Refusing to let EPA-ng refit a generic GTR model/,
-	'GTR parsing failure explains why placement is stopped');
+my $incomplete_model_warning = '';
+{
+	local $SIG{__WARN__} = sub { $incomplete_model_warning .= $_[0] };
+	is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix),
+		'GTR+F+G2',
+		'an incomplete fitted GTR report falls back to the generic descriptor');
+}
+like($incomplete_model_warning,
+	qr/continuing with the generic descriptor and allowing EPA-ng to estimate them/,
+	'GTR parsing failure is reported as a visible warning');
 
 write_test_file("$iqtree_prefix.iqtree", "IQ-TREE report without a model label\n");
 write_test_file("$iqtree_prefix.log",
 	"Command: iqtree3 -s alignment.fna -m HKY+F+G4 -T 12\n");
-is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix), 'HKY+F+G4',
-	'IQ-TREE command-line model is the final parser fallback');
+my $generic_model_warning = '';
+{
+	local $SIG{__WARN__} = sub { $generic_model_warning .= $_[0] };
+	is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix), 'HKY+F+G4',
+		'IQ-TREE command-line model is the final parser fallback');
+}
+like($generic_model_warning, qr/could not serialize fitted IQ-TREE parameters/,
+	'non-GTR generic model fallback is also reported as a warning');
 is_deeply(
 	[TestBuildTreeEpaHelpers::epaResourcePlan(12, 12, -1, 4500)],
 	[2, 2700],
