@@ -115,8 +115,8 @@ like($script_text,
 	qr/"epaOnly=i" => \\\$epaOnly.*?if \(\$epaOnly\).*?runEpaOnlyPlacement\(.*?exit\(0\)/s,
 	'EPA-only mode exits through its dedicated placement path before ordinary MSA and inference work');
 like($script_text,
-	qr/sub runEpaOnlyPlacement.*?requires a validated IQ-TREE backbone.*?write_epa_placed_tree\(\$epaResult->\{tree\}, \$primaryTree.*?backbone retained=\$backboneTree/s,
-	'EPA-only mode validates and retains the backbone while publishing only the derived primary tree');
+	qr/sub runEpaOnlyPlacement.*?requires a validated IQ-TREE backbone.*?map_epa_placements_to_backbone\(.*?write_epa_placed_tree\(\$backboneTreeText, \$primaryTree.*?backbone retained=\$backboneTree/s,
+	'EPA-only mode maps jplace edges and grafts placements onto the retained backbone');
 
 my $coordinate_bounds_checks = () = $script_text =~ /next if \$position >= length\(\$sequence\);/g;
 cmp_ok($coordinate_bounds_checks, '>=', 2,
@@ -130,12 +130,14 @@ like($script_text,
 my $placement_outlier_calls = () = $script_text =~ /filter_epa_placement_outliers\(/g;
 cmp_ok($placement_outlier_calls, '>=', 2,
 	'fresh and EPA-only placement publication both apply pendant-branch outlier QC');
-my $reference_reconciliation_calls =
-	() = $script_text =~ /reconcile_epa_reference_tree\(/g;
-cmp_ok($reference_reconciliation_calls, '>=', 2,
-	'normal and EPA-only publication both restore authoritative backbone lengths');
-like($script_text, qr/strict_backbone\.epa_reference_lengths\.tsv/,
-	'EPA branch reconciliation publishes a per-edge comparison report');
+my $backbone_mapping_calls =
+	() = $script_text =~ /map_epa_placements_to_backbone\(/g;
+cmp_ok($backbone_mapping_calls, '>=', 2,
+	'normal and EPA-only publication both map jplace edges onto the backbone');
+like($script_text, qr/strict_backbone\.epa_backbone_grafts\.tsv/,
+	'EPA backbone grafting publishes a per-edge mapping report');
+unlike($script_text, qr/write_epa_placed_tree\(\$epaResult->\{tree\}/,
+	'the jplace Newick tree is never used as the publication template');
 like($script_text,
 	qr/pendant_outlier_limit placement_filter_reason reason/s,
 	'EPA placement reports expose the applied cutoff and exclusion reason');

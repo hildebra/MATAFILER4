@@ -9,7 +9,7 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::StrainPlacement qw(
 	read_sample_qc split_strict_backbone
-	read_epa_jplace filter_epa_placement_outliers reconcile_epa_reference_tree write_epa_placed_tree
+	read_epa_jplace filter_epa_placement_outliers map_epa_placements_to_backbone write_epa_placed_tree
 );
 
 sub write_file {
@@ -164,70 +164,76 @@ is($epa->{placements}{E}{edpl}, 0,
 	'a query with one candidate placement has zero EDPL');
 is($epa->{placements}{F}{status}, 'not_reported',
 	'queries absent from jplace remain explicit in the audit report');
-write_epa_placed_tree($epa->{tree}, $placed_tree, $epa->{placements});
+my $epa_backbone = '(A:0.1,(B:0.1,C:0.1):0.2);';
+my $initial_graft_qc = map_epa_placements_to_backbone(
+	$epa->{tree}, $epa_backbone, $epa->{placements});
+is($initial_graft_qc->{compared_edge_count}, 4,
+	'binary-root halves are mapped separately onto the original backbone');
+cmp_ok(abs($epa->{placements}{D}{backbone_distal_length} - 0.04),
+	'<', 1e-12, 'the selected placement coordinate maps to the backbone edge');
+write_epa_placed_tree($epa_backbone, $placed_tree, $epa->{placements});
 my $placed_text = slurp($placed_tree);
 like($placed_text, qr/D:0\.01/, 'display tree contains the EPA-ng pendant branch');
 like($placed_text, qr/E:0\.02/, 'multiple EPA-ng placements on one edge are retained');
 like($placed_text, qr/A:0\.04/, 'EPA-ng distal branch length is applied from the edge child');
 like($placed_text, qr/B:0\.1/, 'unaffected backbone topology is retained');
 unlike($placed_text, qr/\{\d+\}/, 'EPA-ng edge labels are not leaked into the published tree');
+
 my $changed_reference_tree =
 	'(A:0.1053605157{1},(B:0.4{2},C:0.1{3}):0.5{4});';
 my $authoritative_backbone =
 	'((C:0.1,B:0.2):0.3,A:0.0);';
-my %reconciled_placements = (
+my %grafted_placements = (
 	collapsed => {
 		status => 'placed', edge => 1, distal_length => 0.05268025785,
 		pendant_length => 0.01,
 	},
-	rescaled => {
+	direct => {
 		status => 'placed', edge => 2, distal_length => 0.2,
 		pendant_length => 0.02,
 	},
 );
-my $reference_qc = reconcile_epa_reference_tree(
+my $backbone_graft_qc = map_epa_placements_to_backbone(
 	$changed_reference_tree, $authoritative_backbone,
-	\%reconciled_placements);
-is($reference_qc->{compared_edge_count}, 4,
-	'every jplace reference edge is compared with the authoritative backbone');
-is($reference_qc->{changed_edge_count}, 3,
-	'all differing reference branch lengths are identified');
-is($reference_qc->{zero_length_restored_count}, 1,
-	'a jplace-expanded zero branch is explicitly recorded');
-cmp_ok(abs($reference_qc->{max_absolute_difference} - 0.2), '<', 1e-12,
-	'the largest reference branch discrepancy is audited');
-like($reference_qc->{tree}, qr/A:0\{1\}/,
-	'the authoritative zero-length terminal replaces the jplace value');
-like($reference_qc->{tree}, qr/B:0\.2\{2\}/,
-	'the authoritative nonzero terminal also replaces the jplace value');
-like($reference_qc->{tree}, qr/\):0\.3\{4\}/,
-	'the authoritative internal branch replaces the jplace value');
-cmp_ok(abs($reconciled_placements{collapsed}{distal_length}), '<', 1e-12,
-	'a placement coordinate on a restored zero branch collapses to zero');
-cmp_ok(abs($reconciled_placements{rescaled}{distal_length} - 0.1), '<', 1e-12,
-	'a placement coordinate is rescaled to the authoritative edge length');
-is($reference_qc->{adjusted_placement_count}, 2,
-	'the reconciliation audit counts adjusted placement coordinates');
-my $reconciled_tree_file = File::Spec->catfile($tmp, 'reconciled.treefile');
+	\%grafted_placements);
+is($backbone_graft_qc->{compared_edge_count}, 4,
+	'every numbered jplace reference edge is mapped to the backbone');
+is($backbone_graft_qc->{different_length_count}, 3,
+	'all jplace versus backbone branch-length differences are audited');
+is($backbone_graft_qc->{zero_backbone_edge_count}, 1,
+	'the audit identifies authoritative zero-length backbone edges');
+cmp_ok(abs($backbone_graft_qc->{max_absolute_difference} - 0.2), '<', 1e-12,
+	'the largest jplace versus backbone branch discrepancy is audited');
+cmp_ok(abs($grafted_placements{collapsed}{distal_length} - 0.05268025785),
+	'<', 1e-12, 'the raw jplace distal length remains available for audit');
+cmp_ok(abs($grafted_placements{collapsed}{backbone_distal_length}), '<', 1e-12,
+	'a placement on a zero-length backbone edge is attached at zero');
+cmp_ok(abs($grafted_placements{direct}{backbone_distal_length} - 0.2),
+	'<', 1e-12, 'an in-range jplace coordinate is used directly on the backbone');
+is($backbone_graft_qc->{clamped_placement_count}, 1,
+	'the graft audit counts the coordinate collapsed onto a zero edge');
+my $grafted_tree_file = File::Spec->catfile($tmp, 'backbone-grafted.treefile');
 write_epa_placed_tree(
-	$reference_qc->{tree}, $reconciled_tree_file, \%reconciled_placements);
-my $reconciled_tree_text = slurp($reconciled_tree_file);
-unlike($reconciled_tree_text, qr/0\.1053605157/,
-	'the published tree cannot retain the altered EPA-ng reference length');
-like($reconciled_tree_text, qr/A:0(?:[,\)])/,
+	$authoritative_backbone, $grafted_tree_file, \%grafted_placements);
+my $grafted_tree_text = slurp($grafted_tree_file);
+unlike($grafted_tree_text, qr/0\.1053605157/,
+	'the published tree cannot inherit an altered jplace reference length');
+like($grafted_tree_text, qr/A:0(?:[,\)])/,
 	'the published tree retains the backbone zero branch');
+like($grafted_tree_text, qr/C:0\.1/,
+	'the published tree retains an untouched original-backbone terminal');
 
 my $topology_error = '';
 eval {
-	reconcile_epa_reference_tree(
+	map_epa_placements_to_backbone(
 		'(A:0.1{1},(B:0.1{2},(C:0.1{3},D:0.1{4}):0.1{5}):0.1{6});',
 		'((A:0.1,B:0.1):0.1,(C:0.1,D:0.1):0.1);',
 		{},
 	);
 };
 $topology_error = $@;
-like($topology_error, qr/rooted clade absent|rooted topologies differ/,
-	'a retained jplace with a different topology is rejected');
+like($topology_error, qr/branch split absent|different number of times/,
+	'a retained jplace with a different unrooted topology is rejected');
 
 my $outlier_tree = '(A:0.001{1},B:0.002{2},C:0.003{3},MGS.out:0.5{4});';
 my %outlier_placements = (
@@ -257,7 +263,10 @@ is($outlier_placements{far}{status}, 'excluded_outlier',
 is($outlier_placements{far}{placement_filter_reason}, 'pendant_length_outlier',
 	'the placement report receives a stable outlier reason');
 my $filtered_tree = File::Spec->catfile($tmp, 'outlier-filtered.treefile');
-write_epa_placed_tree($outlier_tree, $filtered_tree, \%outlier_placements);
+my $outlier_backbone = '(A:0.001,B:0.002,C:0.003,MGS.out:0.5);';
+map_epa_placements_to_backbone(
+	$outlier_tree, $outlier_backbone, \%outlier_placements);
+write_epa_placed_tree($outlier_backbone, $filtered_tree, \%outlier_placements);
 my $filtered_text = slurp($filtered_tree);
 like($filtered_text, qr/near:0\.01/, 'retained placement remains in the final tree');
 unlike($filtered_text, qr/far:/, 'pendant outlier is absent from the final tree');

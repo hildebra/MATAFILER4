@@ -11,7 +11,7 @@ our @EXPORT_OK = qw(
 	split_strict_backbone
 	read_epa_jplace
 	filter_epa_placement_outliers
-	reconcile_epa_reference_tree
+	map_epa_placements_to_backbone
 	write_epa_placed_tree
 );
 
@@ -549,17 +549,17 @@ sub _index_epa_edges {
 	_index_epa_edges($_, $node, $edges) for @{$node->{children}};
 }
 
-sub _reference_clade_key {
+sub _reference_name_key {
 	return join('', map { length($_).':'.$_.';' } @_);
 }
 
-sub _index_reference_clades {
-	my ($node, $parent, $clades, $terminals, $label) = @_;
+sub _collect_reference_nodes {
+	my ($node, $parent, $nodes, $terminals, $label) = @_;
 	$node->{parent} = $parent if defined $parent;
 	my @descendants;
 	if (@{$node->{children}}) {
 		push @descendants,
-			@{_index_reference_clades($_, $node, $clades, $terminals, $label)}
+			@{_collect_reference_nodes($_, $node, $nodes, $terminals, $label)}
 			for @{$node->{children}};
 		@descendants = sort @descendants;
 	} else {
@@ -569,145 +569,190 @@ sub _index_reference_clades {
 			if $terminals->{$name}++;
 		@descendants = ($name);
 	}
-	if (defined $parent) {
-		my $key = _reference_clade_key(@descendants);
-		die "$label contains duplicate rooted clade for "
-			.join(',', @descendants)."\n" if exists $clades->{$key};
-		$clades->{$key} = {
-			node => $node,
-			descendants => \@descendants,
-		};
-	}
+	push @{$nodes}, {
+		node => $node,
+		rooted_key => _reference_name_key(@descendants),
+		rooted_taxa => \@descendants,
+	} if defined $parent;
 	return \@descendants;
 }
 
-sub _render_epa_newick {
-	my ($node) = @_;
-	my $text = @{$node->{children}}
-		? '('.join(',', map { _render_epa_newick($_) } @{$node->{children}}).')'
-		: '';
-	$text .= _newick_label($node->{name})
-		if defined($node->{name}) && length($node->{name});
-	$text .= ':'.sprintf('%.12g', $node->{length}) if defined $node->{length};
-	$text .= '{'.$node->{edge}.'}' if defined $node->{edge};
-	return $text;
+sub _canonical_reference_split {
+	my ($descendants, $all_taxa) = @_;
+	my %distal = map { $_ => 1 } @{$descendants};
+	my @proximal = grep { !$distal{$_} } @{$all_taxa};
+	my @distal = @{$descendants};
+	my $distal_key = _reference_name_key(@distal);
+	my $proximal_key = _reference_name_key(@proximal);
+	return @proximal < @distal
+		|| (@proximal == @distal && $proximal_key lt $distal_key)
+		? ($proximal_key, \@proximal)
+		: ($distal_key, \@distal);
 }
 
-sub reconcile_epa_reference_tree {
+sub _index_reference_splits {
+	my ($root, $label, $require_edge_labels) = @_;
+	my (@nodes, %terminals);
+	my $all_taxa = _collect_reference_nodes(
+		$root, undef, \@nodes, \%terminals, $label);
+	my (%by_split, %by_edge);
+	for my $entry (@nodes) {
+		my ($split_key, $split_taxa) = _canonical_reference_split(
+			$entry->{rooted_taxa}, $all_taxa);
+		$entry->{split_key} = $split_key;
+		$entry->{split_taxa} = $split_taxa;
+		push @{$by_split{$split_key}}, $entry;
+		next unless $require_edge_labels;
+		my $edge = $entry->{node}{edge};
+		die "$label branch has no EPA edge number\n" unless defined $edge;
+		die "$label contains duplicate EPA edge number $edge\n"
+			if exists $by_edge{$edge};
+		$entry->{edge} = $edge;
+		$by_edge{$edge} = $entry;
+	}
+	return {
+		all_taxa => $all_taxa,
+		terminals => \%terminals,
+		by_split => \%by_split,
+		by_edge => \%by_edge,
+	};
+}
+
+sub _match_epa_edges_to_backbone {
+	my ($epa_index, $backbone_index) = @_;
+	die "EPA-ng jplace and authoritative backbone terminal sets differ\n"
+		unless _reference_name_key(@{$epa_index->{all_taxa}}) eq
+			_reference_name_key(@{$backbone_index->{all_taxa}});
+	my %edge_map;
+	for my $split_key (keys %{$epa_index->{by_split}}) {
+		my $epa_entries = $epa_index->{by_split}{$split_key};
+		my $backbone_entries = $backbone_index->{by_split}{$split_key}
+			or die "EPA-ng jplace contains a branch split absent from the "
+				."authoritative backbone\n";
+		die "EPA-ng jplace and authoritative backbone represent split "
+			."$split_key a different number of times\n"
+			unless @{$epa_entries} == @{$backbone_entries};
+		for my $epa_entry (@{$epa_entries}) {
+			my @matches = @{$backbone_entries} == 1
+				? @{$backbone_entries}
+				: grep {
+					$_->{rooted_key} eq $epa_entry->{rooted_key}
+				} @{$backbone_entries};
+			die "Cannot disambiguate binary-root halves for EPA edge "
+				."$epa_entry->{edge} on the authoritative backbone\n"
+				unless @matches == 1;
+			$edge_map{$epa_entry->{edge}} = {
+				epa => $epa_entry,
+				backbone => $matches[0],
+			};
+		}
+	}
+	for my $split_key (keys %{$backbone_index->{by_split}}) {
+		die "Authoritative backbone contains a branch split absent from the "
+			."EPA-ng jplace tree\n"
+			unless exists $epa_index->{by_split}{$split_key};
+	}
+	return \%edge_map;
+}
+
+sub map_epa_placements_to_backbone {
 	my ($epa_tree, $backbone_tree, $placements) = @_;
-	die "EPA reference reconciliation requires a placement hash\n"
+	die "EPA backbone graft mapping requires a placement hash\n"
 		unless ref($placements) eq 'HASH';
 	my $epa_root = _parse_epa_tree($epa_tree);
 	my $backbone_root = _parse_epa_tree($backbone_tree);
-	my %epa_edges;
-	_index_epa_edges($epa_root, undef, \%epa_edges);
-	my (%epa_clades, %backbone_clades, %epa_terminals, %backbone_terminals);
-	my $epa_leaves = _index_reference_clades(
-		$epa_root, undef, \%epa_clades, \%epa_terminals, 'EPA-ng jplace tree');
-	my $backbone_leaves = _index_reference_clades(
-		$backbone_root, undef, \%backbone_clades, \%backbone_terminals,
-		'authoritative backbone tree');
-	die "EPA-ng jplace and authoritative backbone terminal sets differ\n"
-		unless _reference_clade_key(@{$epa_leaves}) eq
-			_reference_clade_key(@{$backbone_leaves});
-	die "EPA-ng jplace and authoritative backbone rooted topologies differ "
-		."(".scalar(keys %epa_clades)." versus "
-		.scalar(keys %backbone_clades)." branches)\n"
-		unless scalar(keys %epa_clades) == scalar(keys %backbone_clades);
+	my $epa_index = _index_reference_splits(
+		$epa_root, 'EPA-ng jplace tree', 1);
+	my $backbone_index = _index_reference_splits(
+		$backbone_root, 'authoritative backbone tree', 0);
+	my $edge_map = _match_epa_edges_to_backbone(
+		$epa_index, $backbone_index);
 
 	my %placement_count;
 	for my $sample (keys %{$placements}) {
 		my $edge = $placements->{$sample}{edge};
 		$placement_count{$edge}++ if defined $edge;
 	}
-	my (@rows, %edge_lengths);
-	my ($changed, $zero_restored, $max_difference) = (0, 0, 0);
-	for my $key (sort keys %epa_clades) {
-		my $epa_entry = $epa_clades{$key};
-		my $backbone_entry = $backbone_clades{$key}
-			or die "EPA-ng jplace contains a rooted clade absent from the "
-				."authoritative backbone: "
-				.join(',', @{$epa_entry->{descendants}})."\n";
-		my $epa_node = $epa_entry->{node};
-		my $backbone_node = $backbone_entry->{node};
-		die "EPA-ng jplace reference branch has no edge number for clade "
-			.join(',', @{$epa_entry->{descendants}})."\n"
-			unless defined $epa_node->{edge};
-		die "EPA-ng jplace reference edge $epa_node->{edge} has no branch length\n"
-			unless defined $epa_node->{length};
-		die "Authoritative backbone branch has no length for clade "
-			.join(',', @{$epa_entry->{descendants}})."\n"
-			unless defined $backbone_node->{length};
-		my $jplace_length = 0 + $epa_node->{length};
+	my (@rows, %row_by_edge);
+	my ($different_lengths, $jplace_lengths_missing, $zero_backbone_edges,
+		$max_difference) = (0, 0, 0, 0);
+	for my $edge (sort { $a <=> $b } keys %{$edge_map}) {
+		my $mapping = $edge_map->{$edge};
+		my $epa_node = $mapping->{epa}{node};
+		my $backbone_node = $mapping->{backbone}{node};
+		die "Authoritative backbone branch mapped from EPA edge $edge "
+			."has no non-negative length\n"
+			unless defined($backbone_node->{length})
+				&& $backbone_node->{length} >= 0;
+		my $jplace_length = defined($epa_node->{length})
+			? 0 + $epa_node->{length} : undef;
 		my $backbone_length = 0 + $backbone_node->{length};
-		my $difference = $jplace_length - $backbone_length;
-		my $absolute_difference = abs($difference);
-		my $is_changed = $jplace_length != $backbone_length ? 1 : 0;
-		$changed += $is_changed;
-		$zero_restored++ if $is_changed && $backbone_length == 0;
-		$max_difference = $absolute_difference
-			if $absolute_difference > $max_difference;
-		$edge_lengths{$epa_node->{edge}} = {
-			jplace => $jplace_length,
-			backbone => $backbone_length,
-		};
-		$epa_node->{length} = $backbone_length;
-		push @rows, {
-			edge => $epa_node->{edge},
-			edge_type => @{$epa_node->{children}} ? 'internal' : 'terminal',
-			terminal => @{$epa_node->{children}} ? '' : ($epa_node->{name} // ''),
-			descendant_count => scalar(@{$epa_entry->{descendants}}),
+		my $difference = defined($jplace_length)
+			? $jplace_length - $backbone_length : undef;
+		my $is_different = defined($difference)
+			&& $difference != 0 ? 1 : 0;
+		$different_lengths += $is_different;
+		$jplace_lengths_missing++ unless defined $jplace_length;
+		$zero_backbone_edges++ if $backbone_length == 0;
+		$max_difference = abs($difference)
+			if defined($difference) && abs($difference) > $max_difference;
+		my $split_taxa = $mapping->{backbone}{split_taxa};
+		my $row = {
+			edge => $edge,
+			edge_type => @{$split_taxa} == 1 ? 'terminal' : 'internal',
+			terminal => @{$split_taxa} == 1 ? $split_taxa->[0] : '',
+			split_size => scalar(@{$split_taxa}),
 			jplace_length => $jplace_length,
 			backbone_length => $backbone_length,
 			difference => $difference,
-			changed => $is_changed,
-			placement_count => $placement_count{$epa_node->{edge}} // 0,
-			adjusted_placement_count => 0,
+			changed => $is_different,
+			placement_count => $placement_count{$edge} // 0,
+			clamped_placement_count => 0,
 		};
-	}
-	for my $key (keys %backbone_clades) {
-		die "Authoritative backbone contains a rooted clade absent from the "
-			."EPA-ng jplace tree: "
-			.join(',', @{$backbone_clades{$key}{descendants}})."\n"
-			unless exists $epa_clades{$key};
+		push @rows, $row;
+		$row_by_edge{$edge} = $row;
 	}
 
-	my %row_by_edge = map { $_->{edge} => $_ } @rows;
-	my ($adjusted_placements, $clamped_placements) = (0, 0);
+	my ($mapped_placements, $clamped_placements) = (0, 0);
 	for my $sample (sort keys %{$placements}) {
 		my $placement = $placements->{$sample};
-		next unless defined($placement->{edge})
-			&& defined($placement->{distal_length});
-		my $lengths = $edge_lengths{$placement->{edge}}
-			or die "EPA-ng placement for $sample refers to absent reference edge "
-				."$placement->{edge}\n";
-		my $old_distance = 0 + $placement->{distal_length};
-		my $fraction = $lengths->{jplace} > 0
-			? $old_distance / $lengths->{jplace} : 0;
-		if ($fraction < 0) {
-			$fraction = 0;
-			$clamped_placements++;
-		} elsif ($fraction > 1) {
-			$fraction = 1;
-			$clamped_placements++;
+		next unless defined $placement->{edge};
+		my $mapping = $edge_map->{$placement->{edge}}
+			or die "EPA-ng placement for $sample refers to the root or an "
+				."unmapped edge $placement->{edge}\n";
+		die "EPA-ng placement for $sample has no numeric distal_length\n"
+			unless defined($placement->{distal_length})
+				&& $placement->{distal_length}
+					=~ /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?$/;
+		my $backbone_length = 0 + $mapping->{backbone}{node}{length};
+		my $applied_distance = 0 + $placement->{distal_length};
+		my $clamped = 0;
+		if ($applied_distance < 0) {
+			$applied_distance = 0;
+			$clamped = 1;
+		} elsif ($applied_distance > $backbone_length) {
+			$applied_distance = $backbone_length;
+			$clamped = 1;
 		}
-		my $new_distance = $fraction * $lengths->{backbone};
-		if ($new_distance != $old_distance) {
-			$adjusted_placements++;
-			$row_by_edge{$placement->{edge}}{adjusted_placement_count}++;
+		$placement->{backbone_split_key} =
+			$mapping->{backbone}{split_key};
+		$placement->{backbone_rooted_key} =
+			$mapping->{backbone}{rooted_key};
+		$placement->{backbone_distal_length} = $applied_distance;
+		$mapped_placements++;
+		if ($clamped) {
+			$clamped_placements++;
+			$row_by_edge{$placement->{edge}}{clamped_placement_count}++;
 		}
-		$placement->{distal_length} = $new_distance;
 	}
-	@rows = sort { $a->{edge} <=> $b->{edge} } @rows;
 	return {
-		tree => _render_epa_newick($epa_root).';',
 		rows => \@rows,
 		compared_edge_count => scalar(@rows),
-		changed_edge_count => $changed,
-		unchanged_edge_count => scalar(@rows) - $changed,
-		zero_length_restored_count => $zero_restored,
+		different_length_count => $different_lengths,
+		jplace_length_missing_count => $jplace_lengths_missing,
+		zero_backbone_edge_count => $zero_backbone_edges,
 		max_absolute_difference => $max_difference,
-		adjusted_placement_count => $adjusted_placements,
+		mapped_placement_count => $mapped_placements,
 		clamped_placement_count => $clamped_placements,
 	};
 }
@@ -833,58 +878,93 @@ sub _render_newick {
 	return $text;
 }
 
+sub _backbone_entry_for_placement {
+	my ($backbone_index, $placement, $query) = @_;
+	for my $field (qw(backbone_split_key backbone_rooted_key)) {
+		die "EPA-ng placement for $query has no mapped $field\n"
+			unless defined($placement->{$field})
+				&& length($placement->{$field});
+	}
+	my $entries =
+		$backbone_index->{by_split}{$placement->{backbone_split_key}}
+		or die "Mapped backbone split for EPA-ng placement $query is absent\n";
+	my @matches = @{$entries} == 1
+		? @{$entries}
+		: grep {
+			$_->{rooted_key} eq $placement->{backbone_rooted_key}
+		} @{$entries};
+	die "Mapped backbone branch for EPA-ng placement $query is ambiguous\n"
+		unless @matches == 1;
+	return $matches[0];
+}
+
 sub write_epa_placed_tree {
-	my ($epa_tree, $output_tree, $placements) = @_;
-	my $root = _parse_epa_tree($epa_tree);
-	my %edge;
-	_index_epa_edges($root, undef, \%edge);
-	my %on_edge;
+	my ($backbone_tree, $output_tree, $placements) = @_;
+	my $root = _parse_epa_tree($backbone_tree);
+	my $backbone_index = _index_reference_splits(
+		$root, 'authoritative backbone tree', 0);
+	my %on_branch;
 	for my $query (sort keys %{$placements}) {
 		my $placement = $placements->{$query};
 		next unless ($placement->{status} // '') eq 'placed';
-		for my $field (qw(edge distal_length pendant_length)) {
+		for my $field (qw(backbone_distal_length pendant_length)) {
 			die "EPA-ng placement for $query has no $field\n"
-				unless defined($placement->{$field}) && $placement->{$field} =~ /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?$/;
+				unless defined($placement->{$field})
+					&& $placement->{$field}
+						=~ /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?$/;
 		}
-		push @{$on_edge{$placement->{edge}}}, [$query, $placement];
+		my $entry = _backbone_entry_for_placement(
+			$backbone_index, $placement, $query);
+		my $branch_key = _reference_name_key(
+			$entry->{split_key}, $entry->{rooted_key});
+		$on_branch{$branch_key}{entry} = $entry;
+		push @{$on_branch{$branch_key}{placements}},
+			[$query, $placement, 0 + $placement->{backbone_distal_length}];
 	}
-	for my $edge_number (sort { $a <=> $b } keys %on_edge) {
-		my $child = $edge{$edge_number}
-			or die "EPA-ng placement refers to absent edge $edge_number\n";
+	for my $branch_key (sort keys %on_branch) {
+		my $group = $on_branch{$branch_key};
+		my $child = $group->{entry}{node};
 		my $parent = $child->{parent}
-			or die "EPA-ng placement refers to the root edge $edge_number\n";
+			or die "EPA-ng placement maps to the backbone root rather than a branch\n";
 		my $branch_length = $child->{length};
-		die "EPA-ng reference edge $edge_number has no branch length\n"
+		die "Authoritative backbone branch has no non-negative length\n"
 			unless defined($branch_length) && $branch_length >= 0;
 		my @points = sort {
-			$a->[1]{distal_length} <=> $b->[1]{distal_length}
-			|| $a->[0] cmp $b->[0]
-		} @{$on_edge{$edge_number}};
+			$a->[2] <=> $b->[2] || $a->[0] cmp $b->[0]
+		} @{$group->{placements}};
 		my $previous_distance = -1;
 		my $attachment = $child;
 		while (@points) {
-			my $distance = $points[0][1]{distal_length};
-			die "EPA-ng placement distance outside reference edge $edge_number\n"
-				if $distance < -1e-8 || $distance > $branch_length + 1e-8;
+			my $distance = $points[0][2];
+			die "Mapped EPA-ng placement distance outside authoritative "
+				."backbone branch\n"
+				if $distance < -1e-8
+					|| $distance > $branch_length + 1e-8;
 			$distance = 0 if $distance < 0;
 			$distance = $branch_length if $distance > $branch_length;
 			my @at_point;
-			while (@points && abs($points[0][1]{distal_length} - $distance) < 1e-10) {
+			while (@points && abs($points[0][2] - $distance) < 1e-10) {
 				push @at_point, shift @points;
 			}
 			my $node;
-			if ($previous_distance >= 0 && abs($distance - $previous_distance) < 1e-10) {
+			if ($previous_distance >= 0
+					&& abs($distance - $previous_distance) < 1e-10) {
 				$node = $attachment;
 			} else {
 				$node = {children => [$attachment]};
 				$attachment->{parent} = $node;
-				$attachment->{length} = $distance - ($previous_distance < 0 ? 0 : $previous_distance);
+				$attachment->{length} = $distance
+					- ($previous_distance < 0 ? 0 : $previous_distance);
 				$attachment = $node;
 			}
 			for my $entry (@at_point) {
 				my ($query, $placement) = @{$entry};
-				my $tip = {children => [], name => $query,
-					length => 0 + $placement->{pendant_length}, parent => $node};
+				my $tip = {
+					children => [],
+					name => $query,
+					length => 0 + $placement->{pendant_length},
+					parent => $node,
+				};
 				push @{$node->{children}}, $tip;
 			}
 			$previous_distance = $distance;

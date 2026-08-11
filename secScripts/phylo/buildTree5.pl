@@ -59,6 +59,7 @@
 #5.55: reuse a retained EPA jplace when normal continuation is missing only its placed tree
 #5.56: pass fitted IQ-TREE GTR parameters directly to EPA-ng
 #5.57: restore authoritative backbone branch lengths after EPA-ng placement
+#5.58: graft EPA placements directly onto the persisted backbone tree
 
 use warnings;
 use strict;
@@ -71,7 +72,7 @@ use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 ru
 use Mods::PhyloAlignment qw(filter_alignment_by_overlap);
 use Mods::StrainPlacement qw(
 	read_sample_qc split_strict_backbone
-	read_epa_jplace filter_epa_placement_outliers reconcile_epa_reference_tree write_epa_placed_tree
+	read_epa_jplace filter_epa_placement_outliers map_epa_placements_to_backbone write_epa_placed_tree
 );
 			
 			
@@ -150,8 +151,8 @@ sub epaModelArtifact;
 sub runEpaNgPlacement;
 sub readStrictBackboneClassification;
 sub runEpaOnlyPlacement;
-sub writeEpaReferenceLengthAudit;
-sub printEpaReferenceLengthSummary;
+sub writeEpaBackboneGraftAudit;
+sub printEpaBackboneGraftSummary;
 sub writeEpaPlacementFilterSummary;
 sub printEpaPlacementFilterSummary;
 sub epaFilterMetricValue;
@@ -168,7 +169,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.57;
+my $version = 5.58;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -2031,7 +2032,7 @@ if ($strictSplit) {
 		my @placementReportColumns = qw(
 			sample status backbone_overlap_nt backbone_overlap_loci
 			backbone_state_divergence edge likelihood likelihood_weight_ratio
-			edpl candidate_placements distal_length pendant_length
+			edpl candidate_placements distal_length backbone_distal_length pendant_length
 			pendant_outlier_limit placement_filter_reason reason
 		);
 		if (@{$strictSplit->{placement}}) {
@@ -2070,13 +2071,12 @@ if ($strictSplit) {
 			}
 			my $placements = $epaResult->{placements};
 			my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
-			my $referenceLengthQC = reconcile_epa_reference_tree(
+			my $backboneGraftQC = map_epa_placements_to_backbone(
 				$epaResult->{tree}, $backboneTreeText, $placements);
-			$epaResult->{tree} = $referenceLengthQC->{tree};
-			my $referenceLengthReport =
-				"$treeD/strict_backbone.epa_reference_lengths.tsv";
-			writeEpaReferenceLengthAudit($referenceLengthQC, $referenceLengthReport);
-			printEpaReferenceLengthSummary($referenceLengthQC, $referenceLengthReport);
+			my $backboneGraftReport =
+				"$treeD/strict_backbone.epa_backbone_grafts.tsv";
+			writeEpaBackboneGraftAudit($backboneGraftQC, $backboneGraftReport);
+			printEpaBackboneGraftSummary($backboneGraftQC, $backboneGraftReport);
 			my $placementQC = filter_epa_placement_outliers(
 				$backboneTreeText, $placements,
 				{
@@ -2102,7 +2102,7 @@ if ($strictSplit) {
 				print {$reportFh} join("\t",
 					$sample, $entry->{status}, @overlapValues,
 					map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
-						qw(edge likelihood likelihood_weight_ratio edpl candidate_placements distal_length pendant_length)),
+						qw(edge likelihood likelihood_weight_ratio edpl candidate_placements distal_length backbone_distal_length pendant_length)),
 					defined($entry->{pendant_outlier_limit})
 						? sprintf('%.12g', $entry->{pendant_outlier_limit}) : 'NA',
 					$entry->{placement_filter_reason} // '',
@@ -2115,7 +2115,7 @@ if ($strictSplit) {
 				$primaryTree .= ".placed.treefile" if $primaryTree eq $backboneTree;
 			}
 			my $publicationOK = eval {
-				write_epa_placed_tree($epaResult->{tree}, $primaryTree, $placements);
+				write_epa_placed_tree($backboneTreeText, $primaryTree, $placements);
 				1;
 			};
 			if (!$publicationOK) {
@@ -2449,7 +2449,7 @@ sub runEpaOnlyPlacement {
 	my @reportColumns = qw(
 		sample status backbone_overlap_nt backbone_overlap_loci
 		backbone_state_divergence edge likelihood likelihood_weight_ratio
-		edpl candidate_placements distal_length pendant_length
+		edpl candidate_placements distal_length backbone_distal_length pendant_length
 		pendant_outlier_limit placement_filter_reason reason
 	);
 
@@ -2478,13 +2478,12 @@ sub runEpaOnlyPlacement {
 
 	my $placements = $epaResult->{placements};
 	my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
-	my $referenceLengthQC = reconcile_epa_reference_tree(
+	my $backboneGraftQC = map_epa_placements_to_backbone(
 		$epaResult->{tree}, $backboneTreeText, $placements);
-	$epaResult->{tree} = $referenceLengthQC->{tree};
-	my $referenceLengthReport =
-		"$treeDirectory/strict_backbone.epa_reference_lengths.tsv";
-	writeEpaReferenceLengthAudit($referenceLengthQC, $referenceLengthReport);
-	printEpaReferenceLengthSummary($referenceLengthQC, $referenceLengthReport);
+	my $backboneGraftReport =
+		"$treeDirectory/strict_backbone.epa_backbone_grafts.tsv";
+	writeEpaBackboneGraftAudit($backboneGraftQC, $backboneGraftReport);
+	printEpaBackboneGraftSummary($backboneGraftQC, $backboneGraftReport);
 	my $placementQC = filter_epa_placement_outliers(
 		$backboneTreeText, $placements,
 		{
@@ -2508,7 +2507,7 @@ sub runEpaOnlyPlacement {
 				qw(backbone_overlap_nt backbone_overlap_loci backbone_state_divergence)),
 			map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
 				qw(edge likelihood likelihood_weight_ratio edpl candidate_placements
-					distal_length pendant_length)),
+					distal_length backbone_distal_length pendant_length)),
 			defined($entry->{pendant_outlier_limit})
 				? sprintf('%.12g', $entry->{pendant_outlier_limit}) : 'NA',
 			$entry->{placement_filter_reason} // '',
@@ -2516,7 +2515,7 @@ sub runEpaOnlyPlacement {
 		), "\n";
 	}
 	retry_close($reportHandle, 'close EPA-only placement report');
-	write_epa_placed_tree($epaResult->{tree}, $primaryTree, $placements);
+	write_epa_placed_tree($backboneTreeText, $primaryTree, $placements);
 	die "EPA-only placement did not publish its primary tree: $primaryTree\n"
 		unless -s $primaryTree;
 
@@ -2545,24 +2544,24 @@ sub readEpaFilterBackboneTree {
 	return $backboneText;
 }
 
-sub writeEpaReferenceLengthAudit {
-	my ($referenceQC, $auditFile) = @_;
-	die "EPA reference-length audit requires reconciliation metrics\n"
-		unless ref($referenceQC) eq 'HASH'
-			&& ref($referenceQC->{rows}) eq 'ARRAY';
-	die "EPA reference-length audit requires an output path\n"
+sub writeEpaBackboneGraftAudit {
+	my ($graftQC, $auditFile) = @_;
+	die "EPA backbone-graft audit requires mapping metrics\n"
+		unless ref($graftQC) eq 'HASH'
+			&& ref($graftQC->{rows}) eq 'ARRAY';
+	die "EPA backbone-graft audit requires an output path\n"
 		unless defined($auditFile) && length($auditFile);
 	my @columns = qw(
-		edge edge_type terminal descendant_count jplace_length backbone_length
-		difference changed placement_count adjusted_placement_count
+		edge edge_type terminal split_size jplace_length backbone_length
+		difference changed placement_count clamped_placement_count
 	);
 	my $temporary = "$auditFile.tmp.$$";
 	retry_unlink($temporary, fatal => 0,
-		label => 'clear EPA reference-length audit temporary');
+		label => 'clear EPA backbone-graft audit temporary');
 	my $auditHandle = retry_open('>', $temporary,
-		label => 'write EPA reference-length audit');
+		label => 'write EPA backbone-graft audit');
 	print {$auditHandle} join("\t", @columns), "\n";
-	for my $row (@{$referenceQC->{rows}}) {
+	for my $row (@{$graftQC->{rows}}) {
 		print {$auditHandle} join("\t",
 			map {
 				my $value = $row->{$_};
@@ -2570,31 +2569,31 @@ sub writeEpaReferenceLengthAudit {
 					? (defined($value) ? $value : '')
 					: epaFilterMetricValue($value)
 			} @columns
-		), "\n" or die "Cannot write EPA reference-length audit $temporary: $!\n";
+		), "\n" or die "Cannot write EPA backbone-graft audit $temporary: $!\n";
 	}
-	retry_close($auditHandle, 'close EPA reference-length audit');
+	retry_close($auditHandle, 'close EPA backbone-graft audit');
 	retry_rename($temporary, $auditFile,
-		label => 'publish EPA reference-length audit');
+		label => 'publish EPA backbone-graft audit');
 	return $auditFile;
 }
 
-sub printEpaReferenceLengthSummary {
-	my ($referenceQC, $auditFile) = @_;
-	print "EPA-ng reference-branch reconciliation: compared "
-		.epaFilterMetricValue($referenceQC->{compared_edge_count})
-		." edges; replaced "
-		.epaFilterMetricValue($referenceQC->{changed_edge_count})
-		.", unchanged "
-		.epaFilterMetricValue($referenceQC->{unchanged_edge_count})
-		."; restored zero-length branches="
-		.epaFilterMetricValue($referenceQC->{zero_length_restored_count})
-		."; adjusted placement coordinates="
-		.epaFilterMetricValue($referenceQC->{adjusted_placement_count})
-		.", clamped="
-		.epaFilterMetricValue($referenceQC->{clamped_placement_count})
+sub printEpaBackboneGraftSummary {
+	my ($graftQC, $auditFile) = @_;
+	print "EPA-ng backbone graft mapping: matched "
+		.epaFilterMetricValue($graftQC->{compared_edge_count})
+		." jplace edges to the original backbone; differing jplace lengths="
+		.epaFilterMetricValue($graftQC->{different_length_count})
+		.", missing jplace lengths="
+		.epaFilterMetricValue($graftQC->{jplace_length_missing_count})
+		.", zero-length backbone edges="
+		.epaFilterMetricValue($graftQC->{zero_backbone_edge_count})
+		."; mapped placements="
+		.epaFilterMetricValue($graftQC->{mapped_placement_count})
+		.", clamped attachment coordinates="
+		.epaFilterMetricValue($graftQC->{clamped_placement_count})
 		."; max absolute difference="
-		.epaFilterMetricValue($referenceQC->{max_absolute_difference})
-		."; authoritative tree=backbone; details=$auditFile\n";
+		.epaFilterMetricValue($graftQC->{max_absolute_difference})
+		."; publication template=original backbone; details=$auditFile\n";
 }
 
 sub epaFilterMetricValue {
