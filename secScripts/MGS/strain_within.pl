@@ -4827,6 +4827,7 @@ sub resubmitExistingTreeCommands {
 	my $subset = $args{subset} || [];
 	my $options = $args{options} || {};
 	return (0, 0) unless -d $outdir && $options->{doSubmit};
+	print "Resubmitting only phylogenies\n";
 
 	my %requested;
 	for my $mgs (@{$subset}) {
