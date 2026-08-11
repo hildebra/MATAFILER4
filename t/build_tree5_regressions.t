@@ -82,6 +82,47 @@ is(TestBuildTreeEpaHelpers::iqtreeExplicitEpaModel(
 	'GTR{1/2/3/4/5/1}+FU{0.1/0.2/0.3/0.4}+I{0.15}+G4{0.6}',
 	'invariant-site proportion and gamma categories are retained in the explicit descriptor');
 
+write_test_file("$iqtree_prefix.iqtree",
+	"Model of substitution: GTR+F+G2\n");
+write_test_file("$iqtree_prefix.log", <<'IQTREE_LOG');
+Rate parameter R:
+A-C: 0.7
+A-G: 2.8
+A-T: 1.1
+C-G: 0.6
+C-T: 3.9
+G-T: 1
+pi(A) = 0.22
+pi(C) = 0.28
+pi(G) = 0.31
+pi(T) = 0.19
+Gamma shape alpha: 0.44
+IQTREE_LOG
+is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix),
+	'GTR{0.7/2.8/1.1/0.6/3.9/1}+FU{0.22/0.28/0.31/0.19}+G2{0.44}',
+	'IQ-TREE model labels and fitted parameters can be combined across report artifacts');
+
+my $compactReport = <<'IQTREE_COMPACT';
+Substitution rates (ML): 1 2 3 4 5 1
+Base frequencies (empirical): 0.1 0.2 0.3 0.4
+Gamma shape alpha: 0.5
+IQTREE_COMPACT
+is(TestBuildTreeEpaHelpers::iqtreeExplicitEpaModel(
+	'GTR+F+G2', $compactReport),
+	'GTR{1/2/3/4/5/1}+FU{0.1/0.2/0.3/0.4}+G2{0.5}',
+	'compact IQ-TREE rate and frequency vectors are parsed in documented state order');
+
+write_test_file("$iqtree_prefix.iqtree",
+	"Model of substitution: GTR+F+G2\n");
+write_test_file("$iqtree_prefix.log", "IQ-TREE log without fitted parameters\n");
+my $incomplete_model_ok = eval {
+	TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix);
+	1;
+};
+ok(!$incomplete_model_ok, 'an incomplete fitted GTR report is rejected');
+like($@, qr/Refusing to let EPA-ng refit a generic GTR model/,
+	'GTR parsing failure explains why placement is stopped');
+
 write_test_file("$iqtree_prefix.iqtree", "IQ-TREE report without a model label\n");
 write_test_file("$iqtree_prefix.log",
 	"Command: iqtree3 -s alignment.fna -m HKY+F+G4 -T 12\n");
@@ -110,6 +151,9 @@ is_deeply($classification_state->{placement}, ['query1'],
 	'EPA-only recovery reuses exactly the samples classified for placement');
 is($classification_state->{backbone_overlap}{query1}{backbone_overlap_nt}, 425,
 	'EPA-only placement reporting retains the original backbone-overlap metric');
+like($script_text,
+	qr/print STDERR "EPA-ng command: \$command";.*?systemW\(\$command\)/s,
+	'the exact EPA-ng command is written to STDERR before execution');
 
 like($script_text,
 	qr/"epaOnly=i" => \\\$epaOnly.*?if \(\$epaOnly\).*?runEpaOnlyPlacement\(.*?exit\(0\)/s,

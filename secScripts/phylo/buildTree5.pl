@@ -64,6 +64,7 @@
 #5.60: accept bare and explicit numeric redo-EPA flags
 #5.61: redo retained EPA filtering before alignment and inference startup
 #5.62: inherit forced redo state when strain_within resubmits an older tree command
+#5.63: require fitted IQ-TREE GTR parameters for EPA-ng and report its full command
 
 use warnings;
 use strict;
@@ -174,7 +175,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.62;
+my $version = 5.63;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -2820,6 +2821,14 @@ sub iqtreeExplicitEpaModel {
 		$rate{$pair} = $value if $value > 0;
 	}
 	my @rateOrder = qw(AC AG AT CG CT GT);
+	if (grep { !exists $rate{$_} } @rateOrder) {
+		while ($text =~ /^\s*(?:Rate parameters?|Substitution rates?)(?:\s*\([^)]*\))?\s*:\s*([^\r\n]+)$/mig) {
+			my @values = $1 =~ /($number)/g;
+			next unless @values == @rateOrder;
+			@rate{@rateOrder} = map { 0 + $_ } @values;
+			last;
+		}
+	}
 	return '' if grep { !exists $rate{$_} } @rateOrder;
 	my %frequency;
 	while ($text =~ /pi\s*\(\s*([ACGT])\s*\)\s*=\s*($number)/ig) {
@@ -2827,6 +2836,14 @@ sub iqtreeExplicitEpaModel {
 		$frequency{$state} = $value if $value > 0;
 	}
 	my @stateOrder = qw(A C G T);
+	if (grep { !exists $frequency{$_} } @stateOrder) {
+		while ($text =~ /^\s*(?:Base|State) frequencies(?:\s*\([^)]*\))?\s*:\s*([^\r\n]+)$/mig) {
+			my @values = $1 =~ /($number)/g;
+			next unless @values == @stateOrder;
+			@frequency{@stateOrder} = map { 0 + $_ } @values;
+			last;
+		}
+	}
 	return '' if grep { !exists $frequency{$_} } @stateOrder;
 	my $frequencyTotal = 0;
 	$frequencyTotal += $frequency{$_} for @stateOrder;
@@ -2853,23 +2870,34 @@ sub iqtreeExplicitEpaModel {
 
 sub iqtreePlacementModel {
 	my ($prefix) = @_;
+	my @reports;
 	for my $file ("$prefix.iqtree", "$prefix.log") {
 		next unless -s $file;
 		open my $handle, '<', $file
 			or die "Cannot read IQ-TREE model output $file: $!\n";
 		my $text = do { local $/; <$handle> };
 		close $handle or die "Cannot close IQ-TREE model output $file: $!\n";
-		for my $pattern (
-			qr/^\s*Model of substitution:\s*([^\s,;]+)/mi,
-			qr/^\s*Best-fit model(?: according to [^:]+)?:\s*([^\s,;]+)/mi,
-			qr/^\s*(?:Substitution model|Model):\s*([^\s,;]+)/mi,
-			qr/(?:^|\s)-m\s+['"]?([A-Za-z0-9_.+{}=-]+)['"]?/m,
-		) {
-			next unless $text =~ $pattern;
+		push @reports, { file => $file, text => $text };
+	}
+	my $combinedText = join("\n", map { $_->{text} } @reports);
+	for my $pattern (
+		qr/^\s*Model of substitution:\s*([^\s,;]+)/mi,
+		qr/^\s*Best-fit model(?: according to [^:]+)?:\s*([^\s,;]+)/mi,
+		qr/^\s*(?:Substitution model|Model):\s*([^\s,;]+)/mi,
+		qr/(?:^|\s)-m\s+['"]?([A-Za-z0-9_.+{}=-]+)['"]?/m,
+	) {
+		for my $report (@reports) {
+			next unless $report->{text} =~ $pattern;
 			my $model = $1;
 			next if $model =~ /^(?:TEST|AUTO|MFP(?:\+MERGE)?)$/i;
-			my $explicit = iqtreeExplicitEpaModel($model, $text);
-			return length($explicit) ? $explicit : $model;
+			my $explicit = iqtreeExplicitEpaModel($model, $combinedText);
+			return $explicit if length $explicit;
+			die "IQ-TREE selected $model, but BuildTree could not parse its complete "
+				."fitted GTR rates, base frequencies, and rate-heterogeneity parameters "
+				."from $prefix.iqtree and $prefix.log. Refusing to let EPA-ng refit a "
+				."generic GTR model.\n"
+				if $model =~ /^GTR(?:\+|\z)/i;
+			return $model;
 		}
 	}
 	die "Cannot determine the fitted IQ-TREE model from $prefix.iqtree or "
@@ -2933,6 +2961,7 @@ sub runEpaNgPlacement {
 	my $command = $epaNg;
 	$command =~ s/\s+\z//;
 	$command .= " ".join(' ', @command) . "\n";
+	print STDERR "EPA-ng command: $command";
 	print "Running EPA-ng ML placement with model $placementModel; "
 		."threads=$placementThreads; planning memory="
 		.($placementMemoryBudgetMB ? "${placementMemoryBudgetMB}MB" : "disabled")
