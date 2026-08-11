@@ -816,12 +816,12 @@ if (0 && !-e "$finalClusters2.matL0.txt"){ #deprecated, use specI based annotati
 #annotate specI's with MAGs added..
 
 
-my $specIoutDir = "$annoDir/${COGdir}_MGS";
+my $specIoutDir = $legacyV ? "$GCd/Anno/Tax/SpecI_MGS" : "$GCd/Anno/Tax/${COGdir}_MGS";
 my $specIabundance = "$specIoutDir/specI.mat";
 my @annotation_jobs;
 unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/specI.tax"){
 	my $specIabu = getProgPaths("specIGC_scr");
-	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS $finalClustersFilt -MGStax $GTDBtaxF -MGset $useGTDBmg -outD $specIoutDir\n";
+	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS $finalClustersFilt -MGStax $GTDBtaxF -MGset $useGTDBmg\n";
 	if ($legacyV){
 		$specIabu = getProgPaths("specIGC_scr_v0");
 		$cmdSI = "$specIabu $GCd $canCore $finalClustersFilt $GTDBtaxF\n";
@@ -841,7 +841,7 @@ unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/spec
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0";
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS.sh",
 		$cmdSI,
-		1,int(200/1)."G","AB2_MGS","","",1,[],\%QSBopt) ;
+		1,"64G","AB2_MGS","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
 	push @annotation_jobs, $jobName2 if $jobName2;
 }
