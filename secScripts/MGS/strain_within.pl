@@ -122,65 +122,6 @@ my ($workflowStage, $workflowHeartbeatPath, $workflowFailurePath) =
 	('startup', '', '');
 
 my $completionMessage = "";
-sub limitedWarn {
-	my ($category, $message) = @_;
-	my $entry = $limitedWarningStats{$category} ||= { total => 0, suppressed => 0 };
-	$entry->{total}++;
-	if ($entry->{total} <= $warningExampleLimit) {
-		warn $message;
-	} else {
-		$entry->{suppressed}++;
-		warn "Further '$category' warnings are suppressed; a total will be reported at exit.\n"
-			if $entry->{total} == $warningExampleLimit + 1;
-	}
-}
-
-sub limitedNotice {
-	my ($category, $message) = @_;
-	my $entry = $limitedNoticeStats{$category} ||= { total => 0, suppressed => 0 };
-	$entry->{total}++;
-	if ($entry->{total} <= $warningExampleLimit) {
-		print $message;
-	} else {
-		$entry->{suppressed}++;
-		print "Further '$category' messages are suppressed; a total will be reported at exit.\n"
-			if $entry->{total} == $warningExampleLimit + 1;
-	}
-}
-
-END {
-	writeStrainWorkflowFailure($@ || 'non-zero process exit') if $? != 0;
-	my $fatalError = $? != 0 ? $@ : "";
-	my @suppressed = sort grep {
-		($limitedWarningStats{$_}{suppressed} || 0) > 0
-	} keys %limitedWarningStats;
-	if (@suppressed) {
-		warn "\nSuppressed warning summary:\n";
-		for my $category (@suppressed) {
-			my $entry = $limitedWarningStats{$category};
-			warn "  $category: $entry->{total} total; $entry->{suppressed} not shown\n";
-		}
-	}
-	my @noticeSuppressed = sort grep {
-		($limitedNoticeStats{$_}{suppressed} || 0) > 0
-	} keys %limitedNoticeStats;
-	if (@noticeSuppressed) {
-		print "\nRepeated status summary:\n";
-		for my $category (@noticeSuppressed) {
-			my $entry = $limitedNoticeStats{$category};
-			print "  $category: $entry->{total} total; $entry->{suppressed} not shown\n";
-		}
-	}
-	if (defined($fatalError) && length($fatalError)) {
-		$fatalError =~ s/\s+$//;
-		print STDERR "\nFATAL: strain_within.pl terminated: $fatalError\n";
-		# The explicit final diagnostic above follows every shutdown summary.
-		# Clear the active exception so Perl does not print it again out of order.
-		$@ = "";
-	} elsif (length($completionMessage)) {
-		print "\nFINISH: $completionMessage\n";
-	}
-}
 
 
 #v.14: reworked massively how many genes get included
@@ -5879,4 +5820,64 @@ sub taxonAwareLocusBudgets {
 	$coreLoci = $maximumLoci if $coreLoci > $maximumLoci;
 	my $candidateExtra = int($maximumLoci * 0.3 + 0.5);
 	return ($maximumLoci, $coreLoci, $candidateExtra);
+}
+
+sub limitedWarn {
+	my ($category, $message) = @_;
+	my $entry = $limitedWarningStats{$category} ||= { total => 0, suppressed => 0 };
+	$entry->{total}++;
+	if ($entry->{total} <= $warningExampleLimit) {
+		warn $message;
+	} else {
+		$entry->{suppressed}++;
+		warn "Further '$category' warnings are suppressed; a total will be reported at exit.\n"
+			if $entry->{total} == $warningExampleLimit + 1;
+	}
+}
+
+sub limitedNotice {
+	my ($category, $message) = @_;
+	my $entry = $limitedNoticeStats{$category} ||= { total => 0, suppressed => 0 };
+	$entry->{total}++;
+	if ($entry->{total} <= $warningExampleLimit) {
+		print $message;
+	} else {
+		$entry->{suppressed}++;
+		print "Further '$category' messages are suppressed; a total will be reported at exit.\n"
+			if $entry->{total} == $warningExampleLimit + 1;
+	}
+}
+
+END {
+	writeStrainWorkflowFailure($@ || 'non-zero process exit') if $? != 0;
+	my $fatalError = $? != 0 ? $@ : "";
+	my @suppressed = sort grep {
+		($limitedWarningStats{$_}{suppressed} || 0) > 0
+	} keys %limitedWarningStats;
+	if (@suppressed) {
+		warn "\nSuppressed warning summary:\n";
+		for my $category (@suppressed) {
+			my $entry = $limitedWarningStats{$category};
+			warn "  $category: $entry->{total} total; $entry->{suppressed} not shown\n";
+		}
+	}
+	my @noticeSuppressed = sort grep {
+		($limitedNoticeStats{$_}{suppressed} || 0) > 0
+	} keys %limitedNoticeStats;
+	if (@noticeSuppressed) {
+		print "\nRepeated status summary:\n";
+		for my $category (@noticeSuppressed) {
+			my $entry = $limitedNoticeStats{$category};
+			print "  $category: $entry->{total} total; $entry->{suppressed} not shown\n";
+		}
+	}
+	if (defined($fatalError) && length($fatalError)) {
+		$fatalError =~ s/\s+$//;
+		print STDERR "\nFATAL: strain_within.pl terminated: $fatalError\n";
+		# The explicit final diagnostic above follows every shutdown summary.
+		# Clear the active exception so Perl does not print it again out of order.
+		$@ = "";
+	} elsif (length($completionMessage)) {
+		print "\nFINISH: $completionMessage\n";
+	}
 }
