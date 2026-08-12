@@ -2097,7 +2097,7 @@ sub addOutgroup2MGS{
 	$writeOverlay->("$tmpD/.strain_tree_input.outgroup.cat.tsv", $overlayCategory,
 		'staged outgroup category overlay') if length($overlayCategory);
 	$writeOverlay->("$tmpD/.strain_tree_input.plan.tsv",
-		"strain-staged-input-v1\noutgroup\t$OG\n", 'staged tree-input plan');
+		"strain-staged-input-v1\noutgroup\t$OG\nmgs\t$MGS\n", 'staged tree-input plan');
 	print "  Tree input hand-off: raw FNA/FAA/category/QC remain staged; buildTree5 will finalize and publish them"
 		.($outgroupGenes ? " with $outgroupGenes outgroup loci" : '')."\n";
 	return (scalar(keys %sampleSeen), scalar(@curCogs), $OG, 1, 1);

@@ -397,8 +397,9 @@ like($strain,
 like($strain,
 	qr/my \$rawCategory = "\$tmpD\/\$CATstdof\.tmp".*?%locusSeen, %sampleSeen.*?gzipopen\(\$rawCategory.*?\.strain_tree_input\.outgroup\.cat\.tsv/s,
 	'within-strain outgroup handling scans only the raw category sidecar and emits a small tree-owned overlay');
-like($strain,
-	qr/\.strain_tree_input\.plan\.tsv.*?strain-staged-input-v1.*?Tree input hand-off: raw FNA\/FAA\/category\/QC remain staged/s,
+ok(index($strain, '.strain_tree_input.plan.tsv') >= 0
+	&& index($strain, 'strain-staged-input-v1\noutgroup\t$OG\nmgs\t$MGS\n') >= 0
+	&& index($strain, 'Tree input hand-off: raw FNA/FAA/category/QC remain staged') >= 0,
 	'within-strain records an explicit tree-owned finalization contract instead of publishing a category itself');
 like($strain,
 	qr/"flushEvery=i"\s+=> \\\$appendWriteTrigger.*?%outgroupGeneCache = \(\).*?'-flushEvery', \$appendWriteTrigger/s,

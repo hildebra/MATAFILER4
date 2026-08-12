@@ -101,15 +101,31 @@ $staged_helpers .= "$staged_category_helper\n$staged_qc_helper\n1;";
 my $staged_helpers_loaded = eval $staged_helpers;
 ok($staged_helpers_loaded, 'staged strain category/QC finalizers load independently')
 	or diag($@);
+my ($staged_files_helper) = $script_text =~
+	/(sub stagedTreeInputFiles \{.*?
+})
+
+sub publishStagedTreeInputs/s;
+BAIL_OUT('Cannot extract staged tree-file listing helper') unless defined $staged_files_helper;
+my $staged_files_helper_loaded = eval
+	"package TestBuildTreeStagedFiles; $staged_files_helper; 1;";
+ok($staged_files_helper_loaded, 'staged tree-file listing helper loads independently')
+	or diag($@);
 ok(index($script_text, q{use Mods::StrainParts qw(append_fasta_records_atomic);}) >= 0
 	&& index($script_text, 'sub prepareStagedStrainInputs {') >= 0
 	&& index($script_text, 'sub finalizeStagedStrainCategory {') >= 0
-	&& index($script_text, 'sub finalizeStagedSampleQC {') >= 0,
+	&& index($script_text, 'sub finalizeStagedSampleQC {') >= 0
+	&& index($script_text, q{my $plannedMGS = '';}) >= 0
+	&& index($script_text, 'my $mgsLine = <$planIn>;') >= 0
+	&& index($script_text, q{does not match MGS $plannedMGS}) >= 0,
 	'buildTree5 owns staged strain finalization using only lightweight input helpers');
 ok(index($script_text, q{my $stagedPlan =}) >= 0
 	&& index($script_text, q{my $stagedPrimaryInput =}) >= 0
-	&& index($script_text, q{unless (@missing || $stagedPrimaryInput)}) >= 0,
-	q{a fresh staged plan supersedes incomplete prior persistent publication});
+	&& index($script_text, q{my $stagedResidualInput = -s $stagedPlan && @stagedFiles;}) >= 0
+	&& index($script_text, q{unless (@missing || $stagedPrimaryInput || $stagedResidualInput)}) >= 0,
+	q{a staged plan resumes incomplete primary or auxiliary-file publication});
+ok(index($script_text, q{die "Staged sample QC input is missing: $rawSampleQC\n" unless fileGZs($rawSampleQC);}) >= 0,
+	'tree-side preparation will not mark a missing sample-QC sidecar complete');
 unlike($script_text, qr/use Mods::geneCat|readGene2tax|catalogProteins/,
 	'buildTree5 staged finalization does not load gene-catalogue indexes');
 
@@ -179,6 +195,21 @@ is(TestBuildTreeMSAFinalizer::restoreCompressedMSAArtifact($retained_alignment),
 	'EPA-only recovery restores a retained compressed concatenated alignment');
 ok(-s $retained_alignment && !-e "$retained_alignment.gz",
 	'EPA-only recovery leaves the restored plain alignment ready for EPA-ng');
+my $publication_staging = File::Spec->catdir($temporary, 'publication-resume');
+mkdir $publication_staging or die "Cannot create $publication_staging: $!";
+write_test_file(File::Spec->catfile($publication_staging, '.strain_tree_input.plan.tsv'),
+	"strain-staged-input-v1\noutgroup\tMGS.2643\n");
+write_test_file(File::Spec->catfile($publication_staging, 'data.log'), "OG:MGS.2643\n");
+write_test_file(File::Spec->catfile($publication_staging, 'sampleQC.tsv'), "MGS\tsample\n");
+write_test_file(File::Spec->catfile($publication_staging, 'sampleQC.tsv.tmp'), "incomplete\n");
+write_test_file(File::Spec->catfile($publication_staging, 'allFNAs.fna.rewrite.123'), "partial\n");
+write_test_file(File::Spec->catfile($publication_staging, 'allFAAs.faa.sort.124'), "partial\n");
+write_test_file(File::Spec->catfile($publication_staging, 'allGeneCats.cat.write.125'), "partial\n");
+is_deeply(
+	[map { (File::Spec->splitpath($_))[2] }
+		TestBuildTreeStagedFiles::stagedTreeInputFiles($publication_staging)],
+	['data.log', 'sampleQC.tsv'],
+	'publication resume detects auxiliary staged files while ignoring unfinished sidecars');
 my $staged_directory = File::Spec->catdir($temporary, 'staged-strain-inputs');
 mkdir $staged_directory or die "Cannot create $staged_directory: $!";
 my $raw_category = File::Spec->catfile($staged_directory, 'all.cat.tmp');
@@ -192,7 +223,7 @@ write_test_file($overlay_category,
 	"MGS.2|COG1|gene1\tMGS.2643\tMGS.2643|COG1|gene1\n");
 is_deeply(
 	[TestBuildTreeStagedInputs::finalizeStagedStrainCategory(
-		$raw_category, $overlay_category, $final_category)],
+		$raw_category, $overlay_category, $final_category, 'MGS.2')],
 	[2, 4],
 	'tree-side category finalization groups raw Stage-I rows and applies the compact outgroup overlay');
 open my $final_category_fh, '<', $final_category or die "Cannot read $final_category: $!";
@@ -202,13 +233,36 @@ is($final_category_text,
 	"MGS.2643|COG1|gene1\tsampleA|COG1|gene1\tsampleC|COG1|gene1\n"
 	. "sampleB|COG2|gene2\n",
 	'tree-side category finalization writes the deterministic locus/sample format consumed by buildTree5');
+my $mixed_category = File::Spec->catfile($staged_directory, 'mixed.cat.tmp');
+write_test_file($mixed_category,
+	"MGS.2\tMGS.2|COG1|gene1\tsampleA\tsampleA|COG1|gene1\n"
+	. "MGS.3\tMGS.3|COG1|gene1\tsampleB\tsampleB|COG1|gene1\n");
+my $mixed_category_ok = eval {
+	TestBuildTreeStagedInputs::finalizeStagedStrainCategory(
+		$mixed_category, $overlay_category, $final_category, 'MGS.2');
+	1;
+};
+ok(!$mixed_category_ok, 'tree-side category finalization rejects mixed-MGS staged input');
+like($@, qr/mixes MGS MGS\.2 and MGS\.3/,
+	'mixed-MGS category failure identifies both conflicting MGS values');
+my $wrong_category = File::Spec->catfile($staged_directory, 'wrong.cat.tmp');
+write_test_file($wrong_category,
+	"MGS.3\tMGS.3|COG1|gene1\tsampleB\tsampleB|COG1|gene1\n");
+my $wrong_category_ok = eval {
+	TestBuildTreeStagedInputs::finalizeStagedStrainCategory(
+		$wrong_category, $overlay_category, $final_category, 'MGS.2');
+	1;
+};
+ok(!$wrong_category_ok, 'tree-side category finalization rejects an MGS that differs from the plan');
+like($@, qr/belongs to MGS\.3, expected MGS\.2/,
+	'category MGS mismatch identifies the planned and observed MGS values');
 my $raw_qc = File::Spec->catfile($staged_directory, 'sampleQC.tsv.tmp');
 my $final_qc = File::Spec->catfile($staged_directory, 'sampleQC.tsv');
 write_test_file($raw_qc,
 	"MGS.2\tsampleA\tbackbone\t0.10\t0.20\t7\n"
 	. "MGS.2\tsampleA\tplacement\t0.30\t0.10\t9\n"
 	. "MGS.2\tsampleB\tbackbone\t0.01\t0.02\t8\n");
-is(TestBuildTreeStagedInputs::finalizeStagedSampleQC($raw_qc, $final_qc), 2,
+is(TestBuildTreeStagedInputs::finalizeStagedSampleQC($raw_qc, $final_qc, 'MGS.2'), 2,
 	'tree-side QC finalization deduplicates the raw Stage-I sample rows');
 open my $final_qc_fh, '<', $final_qc or die "Cannot read $final_qc: $!";
 my $final_qc_text = do { local $/; <$final_qc_fh> };
@@ -218,6 +272,27 @@ is($final_qc_text,
 	. "MGS.2\tsampleA\tplacement\t0.30\t0.2\t9\n"
 	. "MGS.2\tsampleB\tbackbone\t0.01\t0.02\t8\n",
 	'tree-side QC finalization preserves the controller aggregation policy without catalogue data');
+my $mixed_qc = File::Spec->catfile($staged_directory, 'mixed.sampleQC.tsv.tmp');
+write_test_file($mixed_qc,
+	"MGS.2\tsampleA\tbackbone\t0.1\t0.2\t7\n"
+	. "MGS.3\tsampleB\tbackbone\t0.1\t0.2\t7\n");
+my $mixed_qc_ok = eval {
+	TestBuildTreeStagedInputs::finalizeStagedSampleQC($mixed_qc, $final_qc, 'MGS.2');
+	1;
+};
+ok(!$mixed_qc_ok, 'tree-side QC finalization rejects mixed-MGS staged input');
+like($@, qr/mixes MGS MGS\.2 and MGS\.3/,
+	'mixed-MGS QC failure identifies both conflicting MGS values');
+my $wrong_qc = File::Spec->catfile($staged_directory, 'wrong.sampleQC.tsv.tmp');
+write_test_file($wrong_qc,
+	"MGS.3\tsampleB\tbackbone\t0.1\t0.2\t7\n");
+my $wrong_qc_ok = eval {
+	TestBuildTreeStagedInputs::finalizeStagedSampleQC($wrong_qc, $final_qc, 'MGS.2');
+	1;
+};
+ok(!$wrong_qc_ok, 'tree-side QC finalization rejects an MGS that differs from the plan');
+like($@, qr/belongs to MGS\.3, expected MGS\.2/,
+	'QC MGS mismatch identifies the planned and observed MGS values');
 write_test_file("$iqtree_prefix.iqtree", <<'IQTREE');
 Best-fit model according to BIC: GTR+F+G2
 Rate parameter R:

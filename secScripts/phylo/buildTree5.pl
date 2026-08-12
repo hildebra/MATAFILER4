@@ -152,6 +152,7 @@ sub readPostAlignmentRateMetrics;
 sub deterministicRatePartitions;
 sub writeRatePartitionAudit;
 sub publishStagedTreeInputs;
+sub stagedTreeInputFiles;
 sub prepareStagedStrainInputs;
 sub finalizeStagedStrainCategory;
 sub finalizeStagedSampleQC;
@@ -5819,12 +5820,28 @@ sub prepareStagedStrainInputs {
 	die "Unsupported staged strain input plan $plan\n"
 		unless $format eq 'strain-staged-input-v1';
 	my $outgroupLine = <$planIn> // '';
-	close $planIn or die "Cannot close staged strain input plan $plan: $!\n";
 	$outgroupLine =~ s/[\r\n]+\z//;
 	my ($field, $plannedOutgroup) = split /\t/, $outgroupLine, 2;
 	die "Malformed staged strain input plan $plan\n"
 		unless defined($field) && $field eq 'outgroup' && defined($plannedOutgroup)
 			&& $plannedOutgroup !~ /[\r\n]/;
+	my $plannedMGS = '';
+	my $mgsLine = <$planIn>;
+	if (defined($mgsLine)) {
+		$mgsLine =~ s/[\r\n]+\z//;
+		if (length($mgsLine)) {
+			my ($mgsField, $value) = split /\t/, $mgsLine, 2;
+			die "Malformed staged strain MGS plan row in $plan\n"
+				unless defined($mgsField) && $mgsField eq 'mgs'
+					&& defined($value) && length($value) && $value !~ /[\r\n]/;
+			$plannedMGS = $value;
+		}
+	}
+	while (my $extra = <$planIn>) {
+		die "Unexpected extra row in staged strain input plan $plan\n"
+			if $extra =~ /\S/;
+	}
+	close $planIn or die "Cannot close staged strain input plan $plan: $!\n";
 	my $requestedOutgroup = defined($configuredOutgroup) ? $configuredOutgroup : '';
 	die "Staged strain input outgroup '$plannedOutgroup' does not match buildTree outgroup '$requestedOutgroup'\n"
 		if $plannedOutgroup ne $requestedOutgroup;
@@ -5840,15 +5857,31 @@ sub prepareStagedStrainInputs {
 	my $finalSampleQC = length($sampleQCName)
 		? File::Spec->catfile($staging, $sampleQCName) : '';
 	my $prepared = File::Spec->catfile($staging, '.strain_tree_input.prepared.tsv');
-	return if -s $prepared && -s $finalCategory
-		&& (!length($sampleQCName) || -s $finalSampleQC);
+	if (-s $prepared && -s $finalCategory
+		&& (!length($sampleQCName) || -s $finalSampleQC)) {
+		open my $preparedIn, '<', $prepared
+			or die "Cannot read staged strain preparation marker $prepared: $!\n";
+		my $preparedLine = <$preparedIn> // '';
+		close $preparedIn
+			or die "Cannot close staged strain preparation marker $prepared: $!\n";
+		$preparedLine =~ s/[\r\n]+\z//;
+		my @preparedFields = split /\t/, $preparedLine, -1;
+		die "Malformed staged strain preparation marker $prepared\n"
+			unless @preparedFields >= 4 && $preparedFields[0] eq 'strain-staged-input-v1'
+				&& $preparedFields[1] eq $plannedOutgroup;
+		die "Staged strain preparation marker $prepared does not match MGS $plannedMGS\n"
+			if length($plannedMGS)
+				&& (!defined($preparedFields[4]) || $preparedFields[4] ne $plannedMGS);
+		return;
+	}
 	die "Staged strain category input is missing: $rawCategory\n" unless fileGZs($rawCategory);
 
 	my $overlayCategory = File::Spec->catfile($staging, '.strain_tree_input.outgroup.cat.tsv');
 	my ($loci, $samples) = finalizeStagedStrainCategory(
-		$rawCategory, $overlayCategory, $finalCategory);
-	if (length($sampleQCName) && fileGZs($rawSampleQC)) {
-		finalizeStagedSampleQC($rawSampleQC, $finalSampleQC);
+		$rawCategory, $overlayCategory, $finalCategory, $plannedMGS);
+	if (length($sampleQCName)) {
+		die "Staged sample QC input is missing: $rawSampleQC\n" unless fileGZs($rawSampleQC);
+		finalizeStagedSampleQC($rawSampleQC, $finalSampleQC, $plannedMGS);
 	}
 	my @sequenceInputs = @{$requiredInputs}[0, 1];
 	my @overlayNames = (
@@ -5867,7 +5900,7 @@ sub prepareStagedStrainInputs {
 	my $outgroupLog = File::Spec->catfile($staging, 'data.log');
 	writeStagedPreparationMarker($outgroupLog, "OG:$plannedOutgroup\n");
 	writeStagedPreparationMarker($prepared, join("\t",
-		'strain-staged-input-v1', $plannedOutgroup, $loci, $samples)."\n");
+		'strain-staged-input-v1', $plannedOutgroup, $loci, $samples, $plannedMGS)."\n");
 	for my $temporary ($rawCategory, $rawSampleQC, $overlayCategory,
 		map { File::Spec->catfile($staging, $_) } @overlayNames) {
 		next unless defined($temporary) && length($temporary);
@@ -5879,15 +5912,22 @@ sub prepareStagedStrainInputs {
 }
 
 sub finalizeStagedStrainCategory {
-	my ($rawCategory, $overlayCategory, $finalCategory) = @_;
+	my ($rawCategory, $overlayCategory, $finalCategory, $expectedMGS) = @_;
 	my (%loci, %samples);
+	my $observedMGS = '';
 	my ($input) = gzipopen($rawCategory, 'staged strain category input', 1);
 	while (my $line = <$input>) {
 		$line =~ s/[\r\n]+\z//;
 		next unless length($line);
 		my @fields = split /\t/, $line, -1;
 		die "Malformed staged strain category row in $rawCategory: $line\n"
-			unless @fields >= 4 && length($fields[1]) && length($fields[2]) && length($fields[3]);
+			unless @fields >= 4 && length($fields[0]) && length($fields[1])
+				&& length($fields[2]) && length($fields[3]);
+		$observedMGS = $fields[0] unless length($observedMGS);
+		die "Staged strain category input mixes MGS $observedMGS and $fields[0]\n"
+			unless $fields[0] eq $observedMGS;
+		die "Staged strain category input belongs to $fields[0], expected $expectedMGS\n"
+			if defined($expectedMGS) && length($expectedMGS) && $fields[0] ne $expectedMGS;
 		$loci{$fields[1]}{$fields[2]} = $fields[3];
 		$samples{$fields[2]} = 1;
 	}
@@ -5919,8 +5959,9 @@ sub finalizeStagedStrainCategory {
 }
 
 sub finalizeStagedSampleQC {
-	my ($rawSampleQC, $finalSampleQC) = @_;
+	my ($rawSampleQC, $finalSampleQC, $expectedMGS) = @_;
 	my %sample;
+	my $observedMGS = '';
 	my ($input) = gzipopen($rawSampleQC, 'staged strain sample QC', 1);
 	while (my $line = <$input>) {
 		$line =~ s/[\r\n]+\z//;
@@ -5929,6 +5970,11 @@ sub finalizeStagedSampleQC {
 		die "Malformed staged sample QC row in $rawSampleQC: $line\n"
 			unless @fields >= 6 && length($fields[0]) && length($fields[1]);
 		my ($mgs, $sampleId, $status, $ambiguous, $csp, $loci) = @fields[0 .. 5];
+		$observedMGS = $mgs unless length($observedMGS);
+		die "Staged sample QC input mixes MGS $observedMGS and $mgs\n"
+			unless $mgs eq $observedMGS;
+		die "Staged sample QC input belongs to $mgs, expected $expectedMGS\n"
+			if defined($expectedMGS) && length($expectedMGS) && $mgs ne $expectedMGS;
 		my $entry = $sample{$sampleId};
 		if (!$entry) {
 			$sample{$sampleId} = [$mgs, $status, 0 + $ambiguous, 0 + $csp, 0 + $loci];
@@ -6011,6 +6057,23 @@ sub writeStagedPreparationMarker {
 	retry_rename($temporary, $path, label => "publish staged preparation file $path");
 }
 
+sub stagedTreeInputFiles {
+	my ($staging) = @_;
+	return () unless -d $staging;
+	opendir my $directoryHandle, $staging
+		or die "Cannot read staged tree-input directory $staging: $!\n";
+	my @stagedFiles = sort map { File::Spec->catfile($staging, $_) }
+		grep {
+			$_ ne File::Spec->curdir && $_ ne File::Spec->updir
+				&& $_ !~ /^\./ && $_ !~ /\.(?:tmp|write|rewrite|sort|merge)(?:\.|\z)/ && $_ ne 'merge.complete.tsv'
+				&& -f File::Spec->catfile($staging, $_)
+				&& -s File::Spec->catfile($staging, $_)
+		} readdir $directoryHandle;
+	closedir $directoryHandle
+		or die "Cannot close staged tree-input directory $staging: $!\n";
+	return @stagedFiles;
+}
+
 sub publishStagedTreeInputs {
 	my ($stagingDirectory, $outputDirectory, $cores, $requiredInputs,
 		$sampleQCPath, $configuredOutgroup) = @_;
@@ -6021,7 +6084,9 @@ sub publishStagedTreeInputs {
 	my $stagedPrimaryInput = -s $stagedPlan && -d $staging && grep {
 		fileGZs(File::Spec->catfile($staging, basename($_)))
 	} @{$requiredInputs};
-	unless (@missing || $stagedPrimaryInput) {
+	my @stagedFiles = stagedTreeInputFiles($staging);
+	my $stagedResidualInput = -s $stagedPlan && @stagedFiles;
+	unless (@missing || $stagedPrimaryInput || $stagedResidualInput) {
 		print "Using existing persistent tree inputs\n";
 		return;
 	}
@@ -6032,17 +6097,7 @@ sub publishStagedTreeInputs {
 	prepareStagedStrainInputs($staging, $requiredInputs, $sampleQCPath, $configuredOutgroup);
 	@missing = grep { !fileGZs($_) } @{$requiredInputs};
 
-	opendir my $directoryHandle, $staging
-		or die "Cannot read staged tree-input directory $staging: $!\n";
-	my @stagedFiles = sort map { File::Spec->catfile($staging, $_) }
-		grep {
-			$_ ne File::Spec->curdir && $_ ne File::Spec->updir
-				&& $_ !~ /^\./ && $_ !~ /\.tmp(?:\.|\z)/ && $_ ne 'merge.complete.tsv'
-				&& -f File::Spec->catfile($staging, $_)
-				&& -s File::Spec->catfile($staging, $_)
-		} readdir $directoryHandle;
-	closedir $directoryHandle
-		or die "Cannot close staged tree-input directory $staging: $!\n";
+	@stagedFiles = stagedTreeInputFiles($staging);
 	die "No usable staged tree inputs found in $staging\n" unless @stagedFiles;
 	my %stagedBasename = map { basename($_) => 1 } @stagedFiles;
 	my @unavailable = grep {
