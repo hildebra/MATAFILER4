@@ -129,7 +129,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.04;/,
+like($strain, qr/my \$version = 1\.06;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
@@ -243,8 +243,10 @@ like($strain,
 	qr/\@treeJobAccounting.*?requested_mb => int\(\$totMem\).*?qsubSystemJobAlive.*?slurm_tree_memory_summary.*?format_slurm_tree_memory_summary/s,
 	'completed Slurm tree jobs report MaxRSS against their requested memory');
 like($strain,
-	qr/append_fasta_records_atomic\(\$FNAtf.*?append_fasta_records_atomic\(\$FAAtf.*?if \(\$temporaryInput\).*?sort_fasta_by_locus\(\$FNAtf, \$SaSe\).*?sort_fasta_by_locus\(\$FAAtf, \$SaSe\)/s,
-	'first-generation FNA and FAA inputs are locus-sorted after outgroup publication');
+	qr/This is deliberately a streaming scan.*?%locusSeen, %sampleSeen.*?\.strain_tree_input\.outgroup\.fna.*?\.strain_tree_input\.plan\.tsv/s,
+	'the controller keeps only the compact locus/sample/outgroup overlay while handing full input finalization to buildTree5');
+unlike($strain, qr/sort_fasta_by_locus|append_fasta_records_atomic|readFastaIDs/,
+	'the serial controller no longer rewrites, sorts, or fully scans staged FASTA inputs');
 like($strain,
 	qr/The following wait count reports jobs still present, not jobs omitted/,
 	'the scheduler wait count is explicitly distinguished from submission coverage');
@@ -313,16 +315,16 @@ like($strain,
 	'a committed staged aggregate avoids repeated worker-part directory scans');
 ok(index($strain, 'my $preparedScratchInput') >= 0
 	&& index($strain, 'merge.complete.tsv') >= 0
-	&& index($strain, 'Stage-I input: reusing prepared scratch tree inputs') >= 0
-	&& index($strain, 'return (scalar(keys %samples_seen), $genes_seen, $preparedOG, 1, 1);') >= 0,
-	'fully prepared Phase-II scratch inputs remain resumable without repeated outgroup, sorting, or category work');
+	&& index($strain, 'Stage-I input: reusing controller-prepared scratch tree inputs') >= 0
+	&& index($strain, 'return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, 1, 1);') >= 0,
+	'legacy fully prepared Phase-II scratch inputs remain resumable without redoing their controller-side work');
 ok(index($strain, 'sub preparedOutgroupLog') >= 0
 	&& index($strain, 'fileGZe($log_path)') >= 0
 	&& index($strain, '$publishedPrepared') >= 0
 	&& index($strain, '$scratchPrepared') >= 0
-	&& index($strain, 'data.log.write.$$') >= 0
-	&& index($strain, 'remove stale prepared outgroup log') >= 0,
-	'outgroup preparation is committed atomically, reused only after that commit, and invalidated by fresh Stage-I input');
+	&& index($strain, '.strain_tree_input.plan.tsv') >= 0
+	&& index($strain, 'Controller staged-overlay preparation') >= 0,
+	'new outgroup preparation writes a compact staged plan and reports the controller hand-off timing');
 like($strain,
 	qr/my \(%persistentMGSInputStateCache, %scratchMGSInputStateCache\).*?sub invalidateMGSInputState .*?delete \@persistentMGSInputStateCache.*?delete \@scratchMGSInputStateCache/s,
 	'published and scratch triplet states are cached and explicitly invalidated after mutations');
@@ -354,7 +356,7 @@ like($strain,
 	qr/\$multiSmpl > 2 && \$ngenes >= \$MGStoolowGsThr.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?tree_input_repair\.queue\.tsv.*?no catalogue-wide abort was triggered/s,
 	'insufficient tree inputs are terminally marked while incomplete triplets enter a persistent repair queue');
 like($strain,
-	qr/last if \$cntShrCogs >= \$MGStoolowGsThr.*?if \(\$cntShrCogs < \$MGStoolowGsThr\)/s,
+	qr/last if \$represented >= \$MGStoolowGsThr.*?if \(\$represented < \$MGStoolowGsThr\)/s,
 	'outgroup and tree eligibility share the configured eight-locus default');
 like($strain,
 	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
@@ -393,11 +395,11 @@ like($strain,
 	qr/include_member_to_seed => 0.*?include_gene_to_locus => 0/s,
 	'within-strain extraction omits unused locus indexes');
 like($strain,
-	qr/Only identifiers are needed.*?readFastaIDs\(\$resolvedFNA\).*?sub readFastaIDs/s,
-	'within-strain outgroup handling scans only existing FASTA identifiers');
+	qr/my \$rawCategory = "\$tmpD\/\$CATstdof\.tmp".*?%locusSeen, %sampleSeen.*?gzipopen\(\$rawCategory.*?\.strain_tree_input\.outgroup\.cat\.tsv/s,
+	'within-strain outgroup handling scans only the raw category sidecar and emits a small tree-owned overlay');
 like($strain,
-	qr/my \$cat_write = "\$CATtf\.write\.\$\$".*?print \{\$cat_out\}.*?rename \$cat_write, \$CATtf/s,
-	'within-strain category publication streams through an atomic temporary file');
+	qr/\.strain_tree_input\.plan\.tsv.*?strain-staged-input-v1.*?Tree input hand-off: raw FNA\/FAA\/category\/QC remain staged/s,
+	'within-strain records an explicit tree-owned finalization contract instead of publishing a category itself');
 like($strain,
 	qr/"flushEvery=i"\s+=> \\\$appendWriteTrigger.*?%outgroupGeneCache = \(\).*?'-flushEvery', \$appendWriteTrigger/s,
 	'within-strain extraction exposes its buffer bound to workers and releases per-MGS outgroup caches');

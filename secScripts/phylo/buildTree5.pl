@@ -68,7 +68,9 @@
 #5.64: parse IQ-TREE 3 compact model tables without silently collapsing partitioned EPA models
 #5.65: state that EPA-ng does not optimize missing symbolic-model parameters
 #5.66: refit one unpartitioned GTR model on fixed partitioned-backbone topology for EPA-ng
+#5.67: remove per-locus MSA artifacts and retain compressed concatenated alignments
 
+#5.68: finalize strain staged category/QC/outgroup overlays in the tree job
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -102,6 +104,7 @@ use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
 	preflight_directory filesystem_capacity
 );
+use Mods::StrainParts qw(append_fasta_records_atomic);
 
 
 sub convertMultAli2NT;
@@ -149,11 +152,19 @@ sub readPostAlignmentRateMetrics;
 sub deterministicRatePartitions;
 sub writeRatePartitionAudit;
 sub publishStagedTreeInputs;
+sub prepareStagedStrainInputs;
+sub finalizeStagedStrainCategory;
+sub finalizeStagedSampleQC;
+sub stagedOverlayRecordsPresent;
+sub stagedOverlayCompletion;
+sub writeStagedPreparationMarker;
 sub writeCompletionMarker;
 sub reusableCompletionTree;
 sub writeOutcomeMarker;
 sub clearLifecycleMarker;
 sub preflightBuildTree;
+sub restoreCompressedMSAArtifact;
+sub finalizeMSAArtifacts;
 sub inputFingerprint;
 sub epaModelArtifact;
 sub epaRefitIqtreeModel;
@@ -180,7 +191,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.66;
+my $version = 5.68;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -640,7 +651,8 @@ writeWorkflowHeartbeat('preflight');
 
 if (length($stagedInputDir)) {
 	my @requiredInputs = grep { defined($_) && length($_) } ($fnFna, $aaFna, $cogCats);
-	publishStagedTreeInputs($stagedInputDir, $outD, $ncore, \@requiredInputs);
+	publishStagedTreeInputs($stagedInputDir, $outD, $ncore, \@requiredInputs,
+		$sampleQCFile, $outgroup);
 }
 die "-sampleQC does not exist or is empty: $sampleQCFile\n"
 	if length($sampleQCFile) && !fileGZs($sampleQCFile);
@@ -680,7 +692,7 @@ make_path($tmpD);
 my $treeD = File::Spec->catdir($outD, "phylo");#raxml, fasttree, phyml tree output dir
 
 my $MsaD = File::Spec->catdir($outD, "MSA");
-# Keep incomplete per-locus checkpoints persistent; -rmMSA removes them only after success.
+# Per-locus checkpoints remain available until terminal workflow finalization.
 
 $MSAsubsD = "$MsaD/clnd/";
 
@@ -735,7 +747,8 @@ print "Mode: " . ($cogCats ne "" ? "multi-locus" : "single-locus")
 	. "; input aligned=" . ($isAligned ? "yes" : "no")
 	. "; continue=" . ($continue ? "yes" : "no") . "\n";
 print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
-	. ($postFilter || "<none>") . "; remove MSA=" . ($removeMSA ? "yes" : "no") . "\n";
+	. ($postFilter || "<none>") . "; per-locus MSA cleanup=always; MSAli compression=always"
+	. ($removeMSA ? "; legacy -rmMSA ignored" : "") . "\n";
 print "MSAfix coding-NT repair: " . ($msaFixRecoverTechnicalOffsets ? "enabled; frame=$msaFixCodingFrame; genetic code=$msaFixGeneticCode; band=$msaFixRecoveryBand" : "disabled") . "\n"
 	unless $useAA4tree;
 print "Filtering: per-gene length fraction=$ntFracGene; category Q90 fraction=$fracMaxGenes90pct; "
@@ -835,12 +848,15 @@ preflightBuildTree($outD, $tmpD);
 if ($epaOnly) {
 	my $retainedAlignment = File::Spec->catfile($MsaD, 'MSAli.fna');
 	my $retainedQueries = File::Spec->catfile($MsaD, 'MSAli.placement.fna');
+	restoreCompressedMSAArtifact($retainedAlignment);
+	restoreCompressedMSAArtifact($retainedQueries);
 	my $epaTreeOptions = createTreeOpt($retainedAlignment, 'allsites', '', 0, '');
 	$epaTreeOptions->{IQtreeout} .= '.backbone';
-	runEpaOnlyPlacement(
+	my $epaOnlyComplete = runEpaOnlyPlacement(
 		$epaTreeOptions, $retainedAlignment, $retainedQueries, $treeD,
 		File::Spec->catfile($treeD, 'strict_backbone.samples.tsv'),
 	);
+	finalizeMSAArtifacts($MsaD) unless $epaOnlyComplete;
 	exit(0);
 }
 
@@ -978,13 +994,14 @@ my $completionMatchesMethod = $requestedPrimaryMethods == 1 && (
 my $hasAdditionalAnalysis = $Ete || $calcDistMat || $calcDNAdiff
 	|| $doGenesToPh || $doSuperTree || $doSuperCheck || $doGubbins
 	|| $doCFML || $useTreeShrink || $doDNDS || $doTheta
-	|| $doFastGear || $doFastGearSummary || $removeMSA || $gzipInput;
+	|| $doFastGear || $doFastGearSummary || $gzipInput;
 if (length($durableCompletionTree) && $completionMatchesMethod
 		&& !$hasAdditionalAnalysis
 		&& ($cogCats eq '' || $postAlignmentQCAuditCurrent)) {
 	# The marker is published only after tree validation and all requested standard
 	# stages finish. A matching policy therefore avoids reopening every locus and
 	# rescanning the concatenated alignment on a duplicate/resumed invocation.
+	finalizeMSAArtifacts($MsaD);
 	safeRemoveTree($tmpD, $tmpBase);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
@@ -1056,11 +1073,12 @@ $doMSA = !(
 	|| ($continue && ($treesDone || $primaryAlignmentReady) && $siteAlignmentsReady)
 );
 			
-#test if MSA is gzed
-if (!-e $multAli && -e "${multAli}.gz"){
-	my $gunCmd = "$pigzBin -p $ncore -d ${multAli}.gz\n";
-	systemW($gunCmd);
-}
+# Reopen retained compressed alignments for an interrupted continuation.  They
+# are compressed again by finalizeMSAArtifacts once this invocation finishes.
+restoreCompressedMSAArtifact($multAli);
+restoreCompressedMSAArtifact($multAliSyn) if $calcSyn;
+restoreCompressedMSAArtifact($multAliNonSyn) if $calcNonSyn;
+restoreCompressedMSAArtifact($placementAlignment) if $strictBackbone;
 my ($alignedLoci, $failedLoci, $candidateLoci) = (0, 0, 0);
 if ($isAligned){
 	my $alignedInput = $useAA4tree ? $aaFna : $fnFna;
@@ -1219,6 +1237,7 @@ if ($isAligned){
 				length_retained_sequences => $geneTooLong,
 				length_filtered_sequences => $geneTooShort,
 			}, $outD);
+			finalizeMSAArtifacts($MsaD);
 			safeRemoveTree($tmpD, $tmpBase);
 			print "BuildTree completed with a valid terminal no-tree outcome: $reason\n";
 			exit(0);
@@ -1795,6 +1814,7 @@ if ($calcMSA && !fileGZs($multAli)
 		candidate_loci => $candidateLoci, aligned_loci => $alignedLoci,
 		failed_loci => $failedLoci, samples => scalar(keys %samples),
 	}, $outD);
+	finalizeMSAArtifacts($MsaD);
 	safeRemoveTree($tmpD, $tmpBase);
 	print "BuildTree completed with a valid terminal no-tree outcome: $reason\n";
 	exit(0);
@@ -2098,7 +2118,8 @@ if ($strictSplit) {
 					backbone_tree => $backboneTree,
 					query_samples => scalar(@{$strictSplit->{placement}}),
 				}, $outD);
-				warn "EPA-ng placement deferred; the validated backbone and MSA were retained: $error\n";
+				warn "EPA-ng placement deferred; the validated backbone and compressed MSA were retained: $error\n";
+				finalizeMSAArtifacts($MsaD);
 				safeRemoveTree($tmpD, $tmpBase);
 				print "BuildTree completed with placement pending; rerun with -continue 1 to retry placement only\n";
 				exit(0);
@@ -2161,7 +2182,8 @@ if ($strictSplit) {
 					query_samples => scalar(@{$strictSplit->{placement}}),
 					jplace => $jplaceFile,
 				}, $outD);
-				warn "EPA-ng placement publication deferred; the validated backbone, jplace, and MSA were retained: $error\n";
+				warn "EPA-ng placement publication deferred; the validated backbone, jplace, and compressed MSA were retained: $error\n";
+				finalizeMSAArtifacts($MsaD);
 				safeRemoveTree($tmpD, $tmpBase);
 				print "BuildTree completed with placement pending; rerun with -continue 1 to retry placement publication\n";
 				exit(0);
@@ -2235,13 +2257,7 @@ if($doDNDS){
 #}
 
 FastGear();
-if ($removeMSA){
-	safeRemoveTree($MsaD, $outD);
-} elsif ($gzipInput){
-	for my $msaFile (grep { -f $_ && $_ !~ /\.gz$/ } glob(File::Spec->catfile($MsaD, "*"))){
-		systemW("$pigzBin -p $ncore ".shellQuote($msaFile));
-	}
-}
+finalizeMSAArtifacts($MsaD);
 if ($gzipInput){
 	# Release input caches before a compression-time ordered rewrite.  Only
 	# buildTree-owned plain-to-gzip conversions are sorted; existing .gz inputs
@@ -2553,6 +2569,7 @@ sub runEpaOnlyPlacement {
 	die "EPA-only placement did not publish its primary tree: $primaryTree\n"
 		unless -s $primaryTree;
 
+	finalizeMSAArtifacts($MsaD);
 	writeCompletionMarker($completionMarker, $primaryTree, $outD);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
@@ -2649,6 +2666,7 @@ sub runRedoEpaFilter {
 	write_epa_placed_tree($backboneTreeText, $primaryTree, $placements);
 	die "Forced EPA filter redo did not publish its primary tree: $primaryTree\n"
 		unless -s $primaryTree;
+	finalizeMSAArtifacts($MsaD);
 	writeCompletionMarker($completionMarker, $primaryTree, $outD);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
@@ -5791,25 +5809,235 @@ sub runMSAFix {
 }
 
 
+sub prepareStagedStrainInputs {
+	my ($staging, $requiredInputs, $sampleQCPath, $configuredOutgroup) = @_;
+	my $plan = File::Spec->catfile($staging, '.strain_tree_input.plan.tsv');
+	return unless -s $plan;
+	open my $planIn, '<', $plan or die "Cannot read staged strain input plan $plan: $!\n";
+	my $format = <$planIn> // '';
+	$format =~ s/[\r\n]+\z//;
+	die "Unsupported staged strain input plan $plan\n"
+		unless $format eq 'strain-staged-input-v1';
+	my $outgroupLine = <$planIn> // '';
+	close $planIn or die "Cannot close staged strain input plan $plan: $!\n";
+	$outgroupLine =~ s/[\r\n]+\z//;
+	my ($field, $plannedOutgroup) = split /\t/, $outgroupLine, 2;
+	die "Malformed staged strain input plan $plan\n"
+		unless defined($field) && $field eq 'outgroup' && defined($plannedOutgroup)
+			&& $plannedOutgroup !~ /[\r\n]/;
+	my $requestedOutgroup = defined($configuredOutgroup) ? $configuredOutgroup : '';
+	die "Staged strain input outgroup '$plannedOutgroup' does not match buildTree outgroup '$requestedOutgroup'\n"
+		if $plannedOutgroup ne $requestedOutgroup;
+
+	my $categoryPath = $requiredInputs->[2] // '';
+	return unless length($categoryPath);
+	my $categoryName = basename($categoryPath);
+	my $rawCategory = File::Spec->catfile($staging, "$categoryName.tmp");
+	my $finalCategory = File::Spec->catfile($staging, $categoryName);
+	my $sampleQCName = length($sampleQCPath) ? basename($sampleQCPath) : '';
+	my $rawSampleQC = length($sampleQCName)
+		? File::Spec->catfile($staging, "$sampleQCName.tmp") : '';
+	my $finalSampleQC = length($sampleQCName)
+		? File::Spec->catfile($staging, $sampleQCName) : '';
+	my $prepared = File::Spec->catfile($staging, '.strain_tree_input.prepared.tsv');
+	return if -s $prepared && -s $finalCategory
+		&& (!length($sampleQCName) || -s $finalSampleQC);
+	die "Staged strain category input is missing: $rawCategory\n" unless fileGZs($rawCategory);
+
+	my $overlayCategory = File::Spec->catfile($staging, '.strain_tree_input.outgroup.cat.tsv');
+	my ($loci, $samples) = finalizeStagedStrainCategory(
+		$rawCategory, $overlayCategory, $finalCategory);
+	if (length($sampleQCName) && fileGZs($rawSampleQC)) {
+		finalizeStagedSampleQC($rawSampleQC, $finalSampleQC);
+	}
+	my @sequenceInputs = @{$requiredInputs}[0, 1];
+	my @overlayNames = (
+		'.strain_tree_input.outgroup.fna',
+		'.strain_tree_input.outgroup.faa',
+	);
+	for my $index (0 .. $#sequenceInputs) {
+		my $inputPath = $sequenceInputs[$index] // '';
+		next unless length($inputPath);
+		my $source = File::Spec->catfile($staging, basename($inputPath));
+		my $overlay = File::Spec->catfile($staging, $overlayNames[$index]);
+		stagedOverlayCompletion($source, $overlay,
+			File::Spec->catfile($staging, ".strain_tree_input.overlay.$index.attempt"),
+			File::Spec->catfile($staging, ".strain_tree_input.overlay.$index.done"));
+	}
+	my $outgroupLog = File::Spec->catfile($staging, 'data.log');
+	writeStagedPreparationMarker($outgroupLog, "OG:$plannedOutgroup\n");
+	writeStagedPreparationMarker($prepared, join("\t",
+		'strain-staged-input-v1', $plannedOutgroup, $loci, $samples)."\n");
+	for my $temporary ($rawCategory, $rawSampleQC, $overlayCategory,
+		map { File::Spec->catfile($staging, $_) } @overlayNames) {
+		next unless defined($temporary) && length($temporary);
+		retry_unlink($temporary, fatal => 0,
+			label => "clean finalized staged strain input $temporary");
+	}
+	print "Finalized staged strain input: $loci loci, $samples samples; outgroup="
+		.(length($plannedOutgroup) ? $plannedOutgroup : '<none>')."\n";
+}
+
+sub finalizeStagedStrainCategory {
+	my ($rawCategory, $overlayCategory, $finalCategory) = @_;
+	my (%loci, %samples);
+	my ($input) = gzipopen($rawCategory, 'staged strain category input', 1);
+	while (my $line = <$input>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless length($line);
+		my @fields = split /\t/, $line, -1;
+		die "Malformed staged strain category row in $rawCategory: $line\n"
+			unless @fields >= 4 && length($fields[1]) && length($fields[2]) && length($fields[3]);
+		$loci{$fields[1]}{$fields[2]} = $fields[3];
+		$samples{$fields[2]} = 1;
+	}
+	close $input or die "Cannot close staged strain category input $rawCategory: $!\n";
+	if (fileGZs($overlayCategory)) {
+		my ($overlay) = gzipopen($overlayCategory, 'staged outgroup category overlay', 1);
+		while (my $line = <$overlay>) {
+			$line =~ s/[\r\n]+\z//;
+			next unless length($line);
+			my @fields = split /\t/, $line, -1;
+			die "Malformed staged outgroup category overlay row in $overlayCategory: $line\n"
+				unless @fields == 3 && !grep { !length($_) } @fields;
+			$loci{$fields[0]}{$fields[1]} = $fields[2];
+			$samples{$fields[1]} = 1;
+		}
+		close $overlay or die "Cannot close staged outgroup category overlay $overlayCategory: $!\n";
+	}
+	my $temporary = "$finalCategory.write.$$";
+	open my $output, '>', $temporary
+		or die "Cannot create finalized staged category $temporary: $!\n";
+	for my $locus (sort keys %loci) {
+		print {$output} join("\t", map { $loci{$locus}{$_} } sort keys %{$loci{$locus}}), "\n"
+			or die "Cannot write finalized staged category $temporary: $!\n";
+	}
+	close $output or die "Cannot close finalized staged category $temporary: $!\n";
+	retry_rename($temporary, $finalCategory,
+		label => "publish finalized staged category $finalCategory");
+	return (scalar(keys %loci), scalar(keys %samples));
+}
+
+sub finalizeStagedSampleQC {
+	my ($rawSampleQC, $finalSampleQC) = @_;
+	my %sample;
+	my ($input) = gzipopen($rawSampleQC, 'staged strain sample QC', 1);
+	while (my $line = <$input>) {
+		$line =~ s/[\r\n]+\z//;
+		next if $line eq '' || $line =~ /^#/ || $line =~ /^MGS\t/;
+		my @fields = split /\t/, $line, -1;
+		die "Malformed staged sample QC row in $rawSampleQC: $line\n"
+			unless @fields >= 6 && length($fields[0]) && length($fields[1]);
+		my ($mgs, $sampleId, $status, $ambiguous, $csp, $loci) = @fields[0 .. 5];
+		my $entry = $sample{$sampleId};
+		if (!$entry) {
+			$sample{$sampleId} = [$mgs, $status, 0 + $ambiguous, 0 + $csp, 0 + $loci];
+		} else {
+			die "Staged sample QC sample '$sampleId' belongs to both $entry->[0] and $mgs\n"
+				unless $entry->[0] eq $mgs;
+			$entry->[1] = 'placement' if $status eq 'placement';
+			$entry->[2] = $ambiguous if $ambiguous > $entry->[2];
+			$entry->[3] = $csp if $csp > $entry->[3];
+			$entry->[4] = $loci if $loci > $entry->[4];
+		}
+	}
+	close $input or die "Cannot close staged sample QC $rawSampleQC: $!\n";
+	my $temporary = "$finalSampleQC.write.$$";
+	open my $output, '>', $temporary
+		or die "Cannot create finalized staged sample QC $temporary: $!\n";
+	print {$output} join("\t", qw(MGS sample status ambiguous_fraction csp_fraction validated_loci)), "\n";
+	for my $sampleId (sort keys %sample) {
+		print {$output} join("\t", $sample{$sampleId}[0], $sampleId, @{$sample{$sampleId}}[1 .. 4]), "\n"
+			or die "Cannot write finalized staged sample QC $temporary: $!\n";
+	}
+	close $output or die "Cannot close finalized staged sample QC $temporary: $!\n";
+	retry_rename($temporary, $finalSampleQC,
+		label => "publish finalized staged sample QC $finalSampleQC");
+	return scalar(keys %sample);
+}
+
+sub stagedOverlayRecordsPresent {
+	my ($source, $overlay) = @_;
+	return 1 unless fileGZs($overlay);
+	return 0 unless fileGZs($source);
+	my %needed;
+	my ($overlayIn) = gzipopen($overlay, 'staged outgroup FASTA overlay', 1);
+	while (my $line = <$overlayIn>) {
+		$needed{$1} = 1 if $line =~ /^>(\S+)/;
+	}
+	close $overlayIn or die "Cannot close staged outgroup FASTA overlay $overlay: $!\n";
+	return 1 unless keys %needed;
+	my ($sourceIn) = gzipopen($source, 'staged FASTA overlay recovery scan', 1);
+	while (my $line = <$sourceIn>) {
+		delete $needed{$1} if $line =~ /^>(\S+)/;
+		last unless keys %needed;
+	}
+	close $sourceIn or die "Cannot close staged FASTA overlay recovery scan $source: $!\n";
+	return !keys %needed;
+}
+
+sub stagedOverlayCompletion {
+	my ($source, $overlay, $attempt, $complete) = @_;
+	return unless fileGZs($overlay);
+	return if -s $complete;
+	die "Staged FASTA input is missing: $source\n" unless fileGZs($source);
+	if (-e $attempt) {
+		append_fasta_records_atomic($source, do {
+			open my $overlayIn, '<', $overlay
+				or die "Cannot read staged outgroup FASTA overlay $overlay: $!\n";
+			local $/;
+			my $records = <$overlayIn> // '';
+			close $overlayIn or die "Cannot close staged outgroup FASTA overlay $overlay: $!\n";
+			stagedOverlayRecordsPresent($source, $overlay) ? '' : $records;
+		});
+	} else {
+		writeStagedPreparationMarker($attempt, "attempt\n");
+		open my $overlayIn, '<', $overlay
+			or die "Cannot read staged outgroup FASTA overlay $overlay: $!\n";
+		local $/;
+		my $records = <$overlayIn> // '';
+		close $overlayIn or die "Cannot close staged outgroup FASTA overlay $overlay: $!\n";
+		append_fasta_records_atomic($source, $records);
+	}
+	writeStagedPreparationMarker($complete, "complete\n");
+}
+
+sub writeStagedPreparationMarker {
+	my ($path, $contents) = @_;
+	my $temporary = "$path.write.$$";
+	open my $output, '>', $temporary or die "Cannot create staged preparation file $temporary: $!\n";
+	print {$output} $contents or die "Cannot write staged preparation file $temporary: $!\n";
+	close $output or die "Cannot close staged preparation file $temporary: $!\n";
+	retry_rename($temporary, $path, label => "publish staged preparation file $path");
+}
+
 sub publishStagedTreeInputs {
-	my ($stagingDirectory, $outputDirectory, $cores, $requiredInputs) = @_;
+	my ($stagingDirectory, $outputDirectory, $cores, $requiredInputs,
+		$sampleQCPath, $configuredOutgroup) = @_;
 	my @missing = grep { !fileGZs($_) } @{$requiredInputs};
-	unless (@missing) {
+	my $staging = File::Spec->canonpath(File::Spec->rel2abs($stagingDirectory));
+	my $output = File::Spec->canonpath(File::Spec->rel2abs($outputDirectory));
+	my $stagedPlan = File::Spec->catfile($staging, ".strain_tree_input.plan.tsv");
+	my $stagedPrimaryInput = -s $stagedPlan && -d $staging && grep {
+		fileGZs(File::Spec->catfile($staging, basename($_)))
+	} @{$requiredInputs};
+	unless (@missing || $stagedPrimaryInput) {
 		print "Using existing persistent tree inputs\n";
 		return;
 	}
 
-	my $staging = File::Spec->canonpath(File::Spec->rel2abs($stagingDirectory));
-	my $output = File::Spec->canonpath(File::Spec->rel2abs($outputDirectory));
 	die "Staged tree-input directory does not exist: $staging\n" unless -d $staging;
 	die "Staged tree-input directory must differ from output directory: $staging\n"
 		if $staging eq $output;
+	prepareStagedStrainInputs($staging, $requiredInputs, $sampleQCPath, $configuredOutgroup);
+	@missing = grep { !fileGZs($_) } @{$requiredInputs};
 
 	opendir my $directoryHandle, $staging
 		or die "Cannot read staged tree-input directory $staging: $!\n";
 	my @stagedFiles = sort map { File::Spec->catfile($staging, $_) }
 		grep {
 			$_ ne File::Spec->curdir && $_ ne File::Spec->updir
+				&& $_ !~ /^\./ && $_ !~ /\.tmp(?:\.|\z)/ && $_ ne 'merge.complete.tsv'
 				&& -f File::Spec->catfile($staging, $_)
 				&& -s File::Spec->catfile($staging, $_)
 		} readdir $directoryHandle;
@@ -5949,6 +6177,68 @@ sub safeRemoveTree{
 			return !-e $absolutePath && !-l $absolutePath;
 		},
 	);
+}
+sub restoreCompressedMSAArtifact {
+	my ($path) = @_;
+	return $path if -s $path;
+	my $compressed = "$path.gz";
+	return $path unless -s $compressed;
+	systemW("$pigzBin -p $ncore -d ".shellQuote($compressed));
+	die "Could not restore retained MSA artifact $path from $compressed\n" unless -s $path;
+	return $path;
+}
+
+sub finalizeMSAArtifacts {
+	my ($directory) = @_;
+	return unless defined($directory) && -d $directory;
+	opendir my $directoryHandle, $directory
+		or die "Cannot inspect MSA directory $directory for finalization: $!\n";
+	my (@singleLocus, @retainedAlignment);
+	my $cleanedSubdirectory = '';
+	for my $name (readdir $directoryHandle) {
+		next if $name eq File::Spec->curdir || $name eq File::Spec->updir;
+		my $path = File::Spec->catfile($directory, $name);
+		if (-d $path) {
+			$cleanedSubdirectory = $path if $name eq 'clnd';
+			next;
+		}
+		next unless -f $path || -l $path;
+		if ($name =~ /^MSAli.*\.fna(?:\.gz)?\z/) {
+			push @retainedAlignment, $path unless $name =~ /\.gz\z/;
+			next;
+		}
+		push @singleLocus, $path if $name =~ /\.(?:fna|faa)(?:\.gz)?\z/;
+	}
+	closedir $directoryHandle
+		or die "Cannot close MSA directory $directory after finalization scan: $!\n";
+	for my $path (@singleLocus) {
+		retry_unlink($path, label => "remove completed single-locus MSA $path");
+	}
+	safeRemoveTree($cleanedSubdirectory, $directory) if $cleanedSubdirectory ne '';
+	my $compressedCount = 0;
+	for my $path (sort @retainedAlignment) {
+		if (-l $path) {
+			my $temporary = "$path.materialize.$$";
+			retry_unlink($temporary, label => "clear MSA materialization temporary $temporary");
+			retry_operation(
+				label => "materialize symlinked MSA artifact $path",
+				code => sub { copy($path, $temporary) && -s $temporary },
+			);
+			retry_unlink($path, label => "replace symlinked MSA artifact $path");
+			retry_rename($temporary, $path,
+				label => "publish materialized MSA artifact $path");
+		}
+		my $compressed = "$path.gz";
+		retry_unlink($compressed, label => "replace stale compressed MSA artifact $compressed")
+			if -e $compressed || -l $compressed;
+		systemW("$pigzBin -p $ncore ".shellQuote($path));
+		die "MSA finalization did not produce $compressed\n" unless -s $compressed && !-e $path;
+		$compressedCount++;
+	}
+	print "MSA finalization: removed ".scalar(@singleLocus)." single-locus alignment file(s)"
+		.($cleanedSubdirectory ne '' ? '; removed MSA/clnd' : '')
+		."; compressed $compressedCount retained MSAli alignment(s)\n";
+	return $compressedCount;
 }
 
 

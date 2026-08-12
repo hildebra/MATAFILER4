@@ -28,8 +28,7 @@ use Mods::MosaicLoci qw(read_mosaic_catalogue);
 use Mods::StrainQC qw(breakpoint_gene_mask abundance_pattern_mask);
 use Mods::StrainParts qw(
 	balance_assembly_groups choose_auto_worker_count exact_worker_parts write_split_generation write_worker_completion
-	split_generation_complete clear_split_generation resolve_fasta_artifact
-	append_fasta_records_atomic sort_fasta_by_locus
+	split_generation_complete clear_split_generation
 );
 use Mods::SlurmAccounting qw(
 	slurm_tree_memory_summary format_slurm_tree_memory_summary
@@ -81,12 +80,10 @@ sub treeOutgroupCandidates;
 sub writeNoRecoverableLociMarker;
 sub recordValidatedEmptyExtractions;
 sub validateTreeInputResolution;
-sub readFastaIDs;
 sub epaOnlyRetryReady;
 sub prepareEpaOnlyRetryState;
 sub resetMGSTreeOutputs;
 sub stepComplete;
-sub finalizeSampleQC;
 sub dispatchPendingTreeJobs;
 sub retryOOMTreeJobs;
 sub usage;
@@ -204,12 +201,13 @@ my $completionMessage = "";
 #.91: persist the exact shared scratch directory for reliable cross-run resume
 #.96: use the authoritative Phase-I input audit for legacy ledger-free resumes
 #.97: bound EPA-ng placement memory and worker threads independently of tree inference
+#1.06: make buildTree5 finalize staged category/QC/outgroup overlays and input sorting
 #1.01: republish existing EPA placements through final outlier filtering only
 #1.02: invalidate EPA-derived completion state before ordinary saved-command resume
 #1.03: accept bare and explicit numeric redo-EPA flags
 #1.04: propagate forced EPA redo into existing saved tree commands
 #1.05: keep EPA redo in the normal controller path through downstream analysis
-my $version = 1.05;
+my $version = 1.06;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1303,7 +1301,10 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	print "Processing $MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)."\n";
 	my $inputFNAsize = $sizeOfDirs[$lcnt];
 	if ($epaRecovery && !$inputFNAsize) {
-		$inputFNAsize = int((-s "$outD2/MSA/MSAli.fna") / 1024) || 1;
+		my $retainedMSA = "$outD2/MSA/MSAli.fna";
+		my $retainedMSASize = -s $retainedMSA;
+		$retainedMSASize ||= -s "$retainedMSA.gz";
+		$inputFNAsize = int($retainedMSASize / 1024) || 1;
 	}
 	#PART I: create fasta files required by tree
 	make_path($outD2) unless -d $outD2;
@@ -1437,13 +1438,18 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	#	next;
 	#}
 	
-	#reformat .cat.tmp -> .cat and add outgroup fna seqs
+	# Keep global catalogue-dependent outgroup selection in this controller, but
+	# hand all large FASTA rewrites, category regrouping, QC finalization, sorting,
+	# compression, and publication to the independently scheduled tree job.
+	my $treeInputPreparationStarted = time;
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
 	if ($epaOnlyRetry) {
 		$inputReady = 1;
 	} else {
 		($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady)=
-			addOutgroup2MGS($MGS,$OG,$tmpD); #$outD2 $tmpD
+			addOutgroup2MGS($MGS,$OG,$tmpD);
+		print "  Controller staged-overlay preparation: ".timeNice(time - $treeInputPreparationStarted)."\n"
+			if $inputReady;
 	}
 	# Locus names are MGS-qualified, so cached outgroup choices have no reuse
 	# after this MGS and would otherwise accumulate for the entire submission.
@@ -1462,7 +1468,8 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
-		if !$epaRecovery && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof"));
+		if !$epaRecovery && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof")
+			|| fileGZe("$tmpD/$QCstdof.tmp"));
 	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if !$epaRecovery && $needsCopy;
 	$Tcmd .= "-redoEPAfilter 1 " if $redoEPAfilter
 		&& -s "$outD2/phylo/epa-ng/epa_result.jplace";
@@ -1930,30 +1937,28 @@ sub treeOutgroupCandidates {
 sub addOutgroup2MGS{
 	my ($MGS,$OG,$tmpD) = @_;
 	my $outD2 = $SIdirs{$MGS};
-	my $outD3 = $tmpD;
 	my $outputReady = fileGZe("$outD2/$FNAstdof")
 		&& fileGZe("$outD2/$FAAstdof") && fileGZe("$outD2/$CATstdof");
 	my ($publishedPrepared, $publishedOG) = preparedOutgroupLog($outD2);
 	if ($outputReady && $publishedPrepared && !$repairCAT && !$deepRepair && !$redoSubmissionData
 			&& !exists($legacyLocusMGS{$MGS})){
-		my %samples_seen;
-		my $genes_seen = 0;
-		my ($cat_fh) = gzipopen("$outD2/$CATstdof", "existing category file");
-		while (my $line = <$cat_fh>) {
+		my (%samplesSeen, $genesSeen);
+		my ($catFh) = gzipopen("$outD2/$CATstdof", "existing category file");
+		while (my $line = <$catFh>) {
 			chomp $line;
-			my @entries = split /\t/, $line;
-			$genes_seen++;
-			for my $entry (@entries) {
+			next unless length($line);
+			$genesSeen++;
+			for my $entry (split /\t/, $line) {
 				my ($sample) = split /\Q$SaSe\E/, $entry, 2;
-				$samples_seen{$sample} = 1 if defined $sample && length $sample;
+				$samplesSeen{$sample} = 1 if defined($sample) && length($sample);
 			}
 		}
-		close $cat_fh or die "Cannot close existing category file for $MGS: $!\n";
-		return(scalar(keys %samples_seen),$genes_seen,$publishedOG,0,1);
+		close $catFh or die "Cannot close existing category file for $MGS: $!\n";
+		return (scalar(keys %samplesSeen), $genesSeen, $publishedOG, 0, 1);
 	}
-	# Phase II may already have appended its outgroup and atomically converted
-	# the Stage-I category/QC sidecars to their final scratch names.  Preserve
-	# that expensive preparation across controller restarts and queue delays.
+
+	# Compatibility for controller runs that had already completed the old
+	# controller-side Phase II before this version was installed.
 	my $preparedScratchInput = fileGZe("$tmpD/$FNAstdof")
 		&& fileGZe("$tmpD/$FAAstdof") && fileGZe("$tmpD/$LINKstdof")
 		&& fileGZe("$tmpD/$CATstdof") && fileGZe("$tmpD/$QCstdof")
@@ -1961,288 +1966,141 @@ sub addOutgroup2MGS{
 	my ($scratchPrepared, $preparedOG) = preparedOutgroupLog($tmpD);
 	if ($preparedScratchInput && $scratchPrepared && !$repairCAT && !$deepRepair && !$redoSubmissionData
 			&& !exists($legacyLocusMGS{$MGS})) {
-		my %samples_seen;
-		my $genes_seen = 0;
-		my ($cat_fh) = gzipopen("$tmpD/$CATstdof",
-			"prepared scratch category file");
-		while (my $line = <$cat_fh>) {
+		my (%samplesSeen, $genesSeen);
+		my ($catFh) = gzipopen("$tmpD/$CATstdof", "prepared scratch category file");
+		while (my $line = <$catFh>) {
 			chomp $line;
 			next unless length($line);
-			$genes_seen++;
+			$genesSeen++;
 			for my $entry (split /\t/, $line) {
 				my ($sample) = split /\Q$SaSe\E/, $entry, 2;
-				$samples_seen{$sample} = 1 if defined($sample) && length($sample);
+				$samplesSeen{$sample} = 1 if defined($sample) && length($sample);
 			}
 		}
-		close $cat_fh or die "Cannot close prepared scratch category file for $MGS: $!\n";
-		print "  Stage-I input: reusing prepared scratch tree inputs\n";
-		return (scalar(keys %samples_seen), $genes_seen, $preparedOG, 1, 1);
+		close $catFh or die "Cannot close prepared scratch category file for $MGS: $!\n";
+		print "  Stage-I input: reusing controller-prepared scratch tree inputs\n";
+		return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, 1, 1);
 	}
-	my $temporaryInput = fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
-		&& (fileGZe("$tmpD/$CATstdof.tmp") || fileGZe("$tmpD/$CATstdof"));
-	if (exists($legacyLocusMGS{$MGS}) && !$temporaryInput) {
-		limitedWarn('MGS with stale identifiers and no regenerated input',
-			"$MGS has stale sequence identifiers but no regenerated temporary input; skipping it until extraction can be rerun\n");
-		return(0, 0, $OG, 0, 0);
-	}
-	$outD3 = $outD2 if !$temporaryInput && $outputReady;
-	my $FNAtf = "$outD3/$FNAstdof"; my $FAAtf = "$outD3/$FAAstdof";
-	my $CATtf = "$outD3/$CATstdof"; #my $Linkf = "$outD3/$LINKstdof";
-	#my $IQtreef= "$outD3/phylo/IQtree_allsites.treefile";
-	my $rmCatTmp=0;
-	my $MSAdir = "$outD3/MSA/";
-	unless (fileGZe($FNAtf) && fileGZe($FAAtf)) {
-		limitedWarn('MGS missing NT or AA input', "Missing NT or AA input for $MGS in $outD3\n");
-		return(0, 0, $OG, 0, 0);
-	}
-	my %SIcatLoc;
-	my $malformedCatEntries = 0;
-	if (fileGZe( "$CATtf.tmp") && !fileGZe( "$CATtf")){
-		my ($ICT,$status) = gzipopen("$CATtf.tmp","Can't open cat file $CATtf.tmp\n",0);
-		#open ICT,"<$CATtf.tmp" or die "Can't open cat file $CATtf.tmp\n";
-		while (<$ICT>){
-			chomp; my @spl = split /\t/;
-			if (@spl < 4){
-				limitedWarn('malformed temporary category rows',
-					"Malformed category row in $CATtf: $_\n");
-				$malformedCatEntries++;
-				next;
-			}
-			die "$_\n$spl[0] not eq $MGS\n" unless ($spl[0] eq $MGS);
-			$SIcatLoc {$spl[1]} {$spl[2]} = $spl[3];
-		}
-		close $ICT;
-		$rmCatTmp = 1;
-	} elsif (fileGZe( $CATtf)) {
-		#print OC $SIcatLoc{$cog}{$smpl};				print OC "\t".$SIcatLoc{$cog}{$smpl};		my $ng = "$OG$SaSe$cog";
-		#print "Reconstructing tmp cat file.";
-		my ($ICT,$startus) = gzipopen($CATtf,"Can't open (precompiled) cat file $CATtf\nConsider deleting strain dir and rerunning strainMGS script\n",1);
-		#open ICT,"<$CATtf" or die "Can't open (precompiled) cat file $CATtf\nConsider deleting strain dir and rerunning strainMGS script\n";
-		my $catLines=0;my $cntItems=0;
-		#  $repairCAT .. auto implemented..
-		while (<$ICT>){
-			chomp; my @spl = split /\t/;
-			foreach my $tags (@spl){
-				#my @spl2 = split (/\\$SaSe/,$tags);
-				#$SIcatLoc {$spl2[1]}{$spl2[0]}  = $tags;print "$spl2[1] : $spl2[0]  = $tags\n";
-				my ($sample, $external_locus) = split /\Q$SaSe\E/, $tags, 2;
-				my $locus = defined($external_locus) ? internalLocusName($external_locus, $MGS) : '';
-				if (defined($sample) && length($sample) && length($locus)){
-					$SIcatLoc {$locus}{$sample}  = $tags;
-				} else {
-					$malformedCatEntries++;
-				}
-				$cntItems++;
-				#print "$2 $1  = $tags\n";
-			}
-			$catLines++;
-		}
-		close $ICT;
-		if ($catLines != keys (%SIcatLoc)){ #redo MSA
-			remove_tree($MSAdir) if -d $MSAdir;
-		}
-		print "  Category input: $catLines lines, ".scalar(keys %SIcatLoc)
-			." loci, $cntItems entries ($CATtf)\n";
-	} else {
-		limitedWarn('MGS missing category inputs',
-			"$MGS has neither .cat nor .cat.tmp input in $outD3\n");
-		return(0, 0, $OG, 0, 0);
 
+	my $rawCategory = "$tmpD/$CATstdof.tmp";
+	my $stageReady = fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
+		&& fileGZe($rawCategory) && fileGZe("$tmpD/$QCstdof.tmp")
+		&& -s "$tmpD/merge.complete.tsv";
+	if (!$stageReady) {
+		limitedWarn('MGS missing raw staged tree input',
+			"$MGS has no complete raw staged FNA/FAA/category/QC input in $tmpD; leaving it for repair\n");
+		return (0, 0, $OG, 0, 0);
 	}
-	
-	
-	#my @curCogs = sort keys %{$SIcat{$MGS}};
-	my @curCogs = sort keys %SIcatLoc;
-	if (scalar(@curCogs) < $MGStoolowGsThr){
-		if (!@curCogs && $malformedCatEntries) {
-			limitedWarn('MGS with malformed category input',
-				"$MGS category input is malformed; leaving it unmarked for repair\n");
-			return(0, 0, $OG, 0, 0);
-		}
-		my %fewSamples;
-		for my $cog (@curCogs) {
-			$fewSamples{$_} = 1 for keys %{$SIcatLoc{$cog}};
-		}
+
+	# This is deliberately a streaming scan: it retains only the (usually
+	# small) set of selected loci and sample names.  buildTree5 receives the raw
+	# sidecar and performs the expensive locus regrouping in its own job, without
+	# opening gene-catalogue or reference indexes.
+	my (%locusSeen, %sampleSeen);
+	my ($rawFh) = gzipopen($rawCategory, "raw staged category input", 1);
+	while (my $line = <$rawFh>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless length($line);
+		my @fields = split /\t/, $line, -1;
+		die "Malformed raw staged category row for $MGS: $line\n"
+			unless @fields >= 4 && $fields[0] eq $MGS
+				&& length($fields[1]) && length($fields[2]) && length($fields[3]);
+		$locusSeen{$fields[1]} = 1;
+		$sampleSeen{$fields[2]} = 1;
+	}
+	close $rawFh or die "Cannot close raw staged category input $rawCategory: $!\n";
+	my @curCogs = sort keys %locusSeen;
+	if (@curCogs < $MGStoolowGsThr) {
 		limitedWarn('MGS with too few usable genes for tree construction',
 			"$MGS has only ".scalar(@curCogs)." usable genes; skipping tree construction\n");
-		return(scalar(keys %fewSamples), scalar(@curCogs), $OG, $outD3 ne $outD2, 1);
+		return (scalar(keys %sampleSeen), scalar(@curCogs), $OG, 1, 1);
 	}
-	#print "COGs: $curCogs[0] $curCogs[1]\n";
-	
-	# --------------------------- OUTGROUP ----------------------------------------
-	#include outgroup?
-	if ($treeFile ne "" || exists($PreferredOutgroup{$MGS})){
-		my @sspl;
-		push @sspl, $PreferredOutgroup{$MGS}
+
+	if ($treeFile ne "" || exists($PreferredOutgroup{$MGS})) {
+		my @candidates;
+		push @candidates, $PreferredOutgroup{$MGS}
 			if exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS});
-		push @sspl, treeOutgroupCandidates($MGS) if $treeFile ne "";
-		my %seen_outgroup;
-		@sspl = grep { !$seen_outgroup{$_}++ } @sspl;
+		push @candidates, treeOutgroupCandidates($MGS) if $treeFile ne "";
+		my %seenCandidate;
+		@candidates = grep { !$seenCandidate{$_}++ } @candidates;
 		$OG = "";
 		limitedWarn('MGS without outgroup candidates',
 			"No outgroup candidates returned for $MGS; building an ingroup-only tree\n")
-			if @sspl == 0;
-		my $cntShrCogs=0;
-		for my $candidate (@sspl) {
-			$cntShrCogs = 0;
+			if @candidates == 0;
+		my $represented = 0;
+		for my $candidate (@candidates) {
+			$represented = 0;
 			$OG = $candidate;
-			if (!exists($SIgenes_OG->{$OG})){
-				next;
-			}
-			#$cntShrCogs=0;
-			#if (exists($SIgenes_OG{$OG})){
-			foreach my $cog (@curCogs){
-				my (undef, $annotation) = locusParts($cog, $MGS);
+			next unless exists($SIgenes_OG->{$OG});
+			for my $locus (@curCogs) {
+				my (undef, $annotation) = locusParts($locus, $MGS);
 				next if $annotation =~ m/^uniq\d+$/;
-				my $outgroup_gene = outgroupGeneForLocus($OG, $cog, $MGS);
-				next unless length($outgroup_gene) && exists($FNAref->{$outgroup_gene});
-				$cntShrCogs ++;
+				my $outgroupGene = outgroupGeneForLocus($OG, $locus, $MGS);
+				next unless length($outgroupGene) && exists($FNAref->{$outgroupGene});
+				$represented++;
 			}
-			last if $cntShrCogs >= $MGStoolowGsThr;
+			last if $represented >= $MGStoolowGsThr;
 		}
-		if ($cntShrCogs < $MGStoolowGsThr){
-			my @locus_preview = @curCogs[0 .. ($#curCogs < 9 ? $#curCogs : 9)];
+		if ($represented < $MGStoolowGsThr) {
+			my @preview = @curCogs[0 .. ($#curCogs < 9 ? $#curCogs : 9)];
 			limitedWarn('MGS without a sufficiently represented outgroup',
-				"Could not find a sufficiently represented outgroup for $MGS; candidates: @sspl; loci: @locus_preview\n");
+				"Could not find a sufficiently represented outgroup for $MGS; candidates: @candidates; loci: @preview\n");
 			$OG = "";
 		}
-		if ($OG ne "" && !exists($SIgenes_OG->{$OG})){
+		if ($OG ne "" && !exists($SIgenes_OG->{$OG})) {
 			limitedWarn('selected outgroups absent from gene catalogue',
 				"Selected outgroup $OG for $MGS is absent from the gene catalogue\n");
-			$OG="";
-		} 
-	print "  Using outgroup $OG\n" if $OG ne '';
-		#next;
+			$OG = "";
+		}
+		print "  Using outgroup $OG\n" if $OG ne '';
 	}
-	
-	#and fasta/faa/cat files..
-	#open OL,">$Linkf" or die "Can't open link file $Linkf\n";
-	#append to FNA/FAA ..for outgroups
-	
-	my %uniqSmpls;my $OGgenesUsed=0;
-	my $tmpFAAog = ""; my $tmpFNAog = "";
-	my $resolvedFNA = resolve_fasta_artifact($FNAtf);
-	my $resolvedFAA = resolve_fasta_artifact($FAAtf);
-	# Only identifiers are needed for duplicate detection.  Loading all
-	# sequences here used to duplicate both complete per-MGS FASTA files.
-	my $existingFNA = length($resolvedFNA) ? readFastaIDs($resolvedFNA) : {};
-	my $existingFAA = length($resolvedFAA) ? readFastaIDs($resolvedFAA) : {};
-	foreach my $cog (@curCogs){
-		if ($OG ne ""){
-			my (undef, $annotation) = locusParts($cog, $MGS);
-			my $geneKey = outgroupGeneForLocus($OG, $cog, $MGS);
 
-			next unless length($geneKey) && exists($FNAref->{$geneKey}) && exists($FAAref->{$geneKey});
-			next if ($annotation =~ m/^uniq\d+$/);
-			my $ng = "$OG$SaSe" . externalLocusName($cog, $MGS);
-			$tmpFNAog .= ">$ng\n$FNAref->{$geneKey}\n" unless exists $existingFNA->{$ng};
-			$tmpFAAog .= ">$ng\n$FAAref->{$geneKey}\n" unless exists $existingFAA->{$ng};
-			#$SIcat{$MGS}{$cog}{$OG} = $ng;
-			$SIcatLoc{$cog}{$OG} = $ng;
-			$OGgenesUsed++;
-			#if ($new){ print OC "$ng";$new=0;
-			#} else { print OC "\t$ng"; }
+	my ($overlayFNA, $overlayFAA, $overlayCategory, $outgroupGenes) = ('', '', '', 0);
+	if ($OG ne '') {
+		for my $locus (@curCogs) {
+			my (undef, $annotation) = locusParts($locus, $MGS);
+			next if $annotation =~ m/^uniq\d+$/;
+			my $gene = outgroupGeneForLocus($OG, $locus, $MGS);
+			next unless length($gene) && exists($FNAref->{$gene}) && exists($FAAref->{$gene});
+			my $identifier = "$OG$SaSe" . externalLocusName($locus, $MGS);
+			$overlayFNA .= ">$identifier\n$FNAref->{$gene}\n";
+			$overlayFAA .= ">$identifier\n$FAAref->{$gene}\n";
+			$overlayCategory .= join("\t", $locus, $OG, $identifier)."\n";
+			$outgroupGenes++;
+		}
+		if (!$outgroupGenes) {
+			limitedWarn('MGS with no usable outgroup genes',
+				"Couldn't stage any outgroup genes for $OG; building $MGS without an outgroup\n");
+			$OG = '';
 		}
 	}
-	append_fasta_records_atomic($FNAtf, $tmpFNAog);
-	append_fasta_records_atomic($FAAtf, $tmpFAAog);
-	if ($temporaryInput) {
-		my $nt_records = sort_fasta_by_locus($FNAtf, $SaSe);
-		my $aa_records = sort_fasta_by_locus($FAAtf, $SaSe);
-		die "Mismatched FNA/FAA record counts after locus sorting for $MGS: "
-			."$nt_records nucleotide versus $aa_records protein records\n"
-			unless $nt_records == $aa_records;
-		print "  Sorted $nt_records FNA/FAA records by eggNOG and primary gene-catalogue ID\n";
-	}
-	
-	#print "used $OGgenesUsed genes  ";
-	my $cat_write = "$CATtf.write.$$";
-	open my $cat_out, '>', $cat_write or die "Can't open temporary cat file $cat_write: $!\n";
-	foreach my $cog (@curCogs){
-		my $cntL=0;
-		foreach my $smpl (sort keys %{$SIcatLoc{$cog}}){
-			print {$cat_out} ($cntL ? "\t" : ""), $SIcatLoc{$cog}{$smpl}
-				or die "Can't write temporary cat file $cat_write: $!\n";
-			$cntL++;
-			$uniqSmpls{$smpl} = 1;
-		}
-		print {$cat_out} "\n" or die "Can't write temporary cat file $cat_write: $!\n";
-	}
-	close $cat_out or die "Can't close temporary cat file $cat_write: $!\n";
-	rename $cat_write, $CATtf or die "Can't replace cat file $CATtf: $!\n";
-	finalizeSampleQC($outD3, $MGS);
-	print "  Generated category file for $MGS\n";
-	if ($OGgenesUsed ==0 && $OG ne ""){
-		limitedWarn('MGS with no usable outgroup genes',
-			"Couldn't include any outgroup genes for $OG; building $MGS without an outgroup\n");
-		$OG = "";
-	}
+	$sampleSeen{$OG} = 1 if $OG ne '' && $outgroupGenes;
 
-	#note done somewhere how many genes these actually are..
-	my $multiSmpl=0;
-	$multiSmpl = scalar(keys %uniqSmpls);
-	#system "rm -f $CATtf.tmp*\n" if (fileGZe("$CATtf.tmp"));
-	#system "echo \"OG:$OG\" > $outD3/data.log";
-	for my $stale_cat (glob("$CATtf.tmp*")) {
-		retry_unlink($stale_cat, fatal => 0, label => "clean stale category temporary");
+	# The plan and small overlays are the only Phase-II outputs written by the
+	# controller.  They contain already selected reference sequences, so the tree
+	# job needs neither gene2tax nor any other large catalogue index.
+	for my $stale (bsd_glob("$tmpD/.strain_tree_input.*")) {
+		retry_unlink($stale, fatal => 0, label => "clear stale staged tree overlay $stale");
 	}
-	my $logTemporary = "$outD3/data.log.write.$$";
-	open my $log, '>', $logTemporary or die "Cannot create $logTemporary: $!\n";
-	print $log "OG:$OG\n";
-	close $log or die "Cannot close $logTemporary: $!\n";
-	retry_rename($logTemporary, "$outD3/data.log",
-		label => "publish outgroup preparation log");
-
-	
-	
-	#if ($outD3 ne $outD2){system "cp $outD3/* $outD2;";
-	#local? -> no, give to slurm job..
-	
-	my $needsCopy = $outD3 ne $outD2 ? 1 : 0;
-
-	return ($multiSmpl,scalar(@curCogs),$OG,$needsCopy,1);
-	
-# --------------------------- OUTGROUP DONE ----------------------------------------
-}
-
-sub finalizeSampleQC {
-	my ($directory, $MGS) = @_;
-	my $temporary_input = "$directory/$QCstdof.tmp";
-	my $final = "$directory/$QCstdof";
-	return unless fileGZe($temporary_input) || fileGZe($final);
-	my $source = fileGZe($temporary_input) ? $temporary_input : $final;
-	my %sample;
-	my ($fh) = gzipopen($source, "sample-locus QC", 1);
-	while (my $line = <$fh>) {
-		$line =~ s/[\r\n]+$//;
-		next if $line eq '' || $line =~ /^#/ || $line =~ /^MGS\t/;
-		my @fields = split /\t/, $line, -1;
-		die "Malformed sample QC row in $source: $line\n" unless @fields >= 6;
-		die "Sample QC row belongs to $fields[0], expected $MGS\n" unless $fields[0] eq $MGS;
-		my ($sample_id, $status, $ambiguous, $csp, $loci) = @fields[1 .. 5];
-		my $entry = $sample{$sample_id};
-		if (!$entry) {
-			$sample{$sample_id} = [$status, 0 + $ambiguous, 0 + $csp, 0 + $loci];
-		} else {
-			$entry->[0] = 'placement' if $status eq 'placement';
-			$entry->[1] = $ambiguous if $ambiguous > $entry->[1];
-			$entry->[2] = $csp if $csp > $entry->[2];
-			$entry->[3] = $loci if $loci > $entry->[3];
-		}
-	}
-	close $fh or die "Cannot close sample QC input $source: $!\n";
-	my $write = "$final.write.$$";
-	open my $out, '>', $write or die "Cannot create $write: $!\n";
-	print {$out} join("\t", qw(MGS sample status ambiguous_fraction csp_fraction validated_loci)), "\n";
-	for my $sample_id (sort keys %sample) {
-		my $entry = $sample{$sample_id};
-		print {$out} join("\t", $MGS, $sample_id, @{$entry}), "\n";
-	}
-	close $out or die "Cannot close $write: $!\n";
-	rename $write, $final or die "Cannot install $final: $!\n";
-	for my $stale (glob("$directory/$QCstdof.tmp*")) {
-		retry_unlink($stale, fatal => 0, label => "clean stale sample-QC input");
-	}
+	my $writeOverlay = sub {
+		my ($path, $contents, $label) = @_;
+		my $temporary = "$path.write.$$";
+		open my $output, '>', $temporary or die "Cannot create $label $temporary: $!\n";
+		print {$output} $contents or die "Cannot write $label $temporary: $!\n";
+		close $output or die "Cannot close $label $temporary: $!\n";
+		retry_rename($temporary, $path, label => "publish $label $path");
+	};
+	$writeOverlay->("$tmpD/.strain_tree_input.outgroup.fna", $overlayFNA,
+		'staged outgroup nucleotide overlay') if length($overlayFNA);
+	$writeOverlay->("$tmpD/.strain_tree_input.outgroup.faa", $overlayFAA,
+		'staged outgroup protein overlay') if length($overlayFAA);
+	$writeOverlay->("$tmpD/.strain_tree_input.outgroup.cat.tsv", $overlayCategory,
+		'staged outgroup category overlay') if length($overlayCategory);
+	$writeOverlay->("$tmpD/.strain_tree_input.plan.tsv",
+		"strain-staged-input-v1\noutgroup\t$OG\n", 'staged tree-input plan');
+	print "  Tree input hand-off: raw FNA/FAA/category/QC remain staged; buildTree5 will finalize and publish them"
+		.($outgroupGenes ? " with $outgroupGenes outgroup loci" : '')."\n";
+	return (scalar(keys %sampleSeen), scalar(@curCogs), $OG, 1, 1);
 }
 
 
@@ -3370,7 +3228,8 @@ sub epaOnlyRetryReady {
 		File::Spec->catfile($mgsDirectory, 'phylo', 'IQtree_allsites.backbone.log'),
 		File::Spec->catfile($mgsDirectory, 'phylo', 'strict_backbone.samples.tsv'),
 	);
-	return '' if grep { !-s $_ } @required;
+	return '' unless fileGZe($required[0]) && fileGZe($required[1]);
+	return '' if grep { !-s $_ } @required[2 .. $#required];
 	return 'legacy_missing_final' unless -s $pending;
 	open my $marker, '<', $pending or return 'legacy_missing_final';
 	my $placementPending = 0;
@@ -4435,18 +4294,6 @@ sub shellQuote {
 	$value = "" unless defined $value;
 	$value =~ s/'/'"'"'/g;
 	return "'$value'";
-}
-
-sub readFastaIDs {
-	my ($path) = @_;
-	my %ids;
-	return \%ids unless defined($path) && length($path) && fileGZe($path);
-	my ($fh) = gzipopen($path, "FASTA identifier scan", 0);
-	while (my $line = <$fh>) {
-		$ids{$1} = 1 if $line =~ /^>(\S+)/;
-	}
-	close $fh or die "Cannot close FASTA identifier input $path: $!\n";
-	return \%ids;
 }
 
 sub consensusInputState {

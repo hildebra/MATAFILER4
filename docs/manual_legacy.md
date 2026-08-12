@@ -332,8 +332,8 @@ Comment: usually ‘0’ means switching a mode off, and ‘1’ means switching
 
      #File operations
     -isAligned [0|1]				if input is already alligned (default 0)
-    -rmMSA [0|1]				remove MSA, to save diskspace (default 0)
-    -gzInput [0|1]				to save diskspace (default 0)
+    -rmMSA [0|1]				legacy compatibility; completed runs always remove single-locus MSA files and retain compressed MSAli aggregates
+    -gzInput [0|1]				compress buildTree-owned inputs; retained MSAli aggregates are always compressed
 
      #specific gene quality filters, useful for metagenomic data that is often incomplete
      -NTfilt [#]				fractions of nucleotides (NT) that need to be present in sequence to be included in final, combined MSA (default 0.8)

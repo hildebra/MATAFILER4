@@ -492,8 +492,8 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-bootstrap` | integer | `0` | stable | See source/help for details. |
 | `-subsetSmpls` | integer | `-1` | stable | See source/help for details. |
 | `-postFilter` | string |  | stable | "," sep list of zorro,guidance2,macse |
-| `-rmMSA` | integer | `0` | stable | to save diskspace |
-| `-gzInput` | integer | `0` | stable | to save diskspace |
+| `-rmMSA` | integer | `0` | stable | Legacy compatibility switch; completed runs always remove single-locus MSA files, retain `MSAli*.fna.gz`, and preserve EPA recovery inputs. |
+| `-gzInput` | integer | `0` | stable | Compress buildTree-owned input files after a successful run; retained `MSAli*.fna` output is always compressed. |
 | `-isAligned` | integer | `0` | stable | See source/help for details. |
 | `-runRAxML` | integer | `0` | stable | See source/help for details. |
 | `-runRaxMLng` | integer | `0` | stable | See source/help for details. |

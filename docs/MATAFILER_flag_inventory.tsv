@@ -256,8 +256,8 @@ buildTree5.pl	5.36	General options	-continue	integer	continue	0	stable	See sourc
 buildTree5.pl	5.36	General options	-bootstrap	integer	bootStrap	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-subsetSmpls	integer	subsetSmpls	-1	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-postFilter	string	postFilter		stable	""","" sep list of zorro,guidance2,macse"
-buildTree5.pl	5.36	General options	-rmMSA	integer	removeMSA	0	stable	to save diskspace
-buildTree5.pl	5.36	General options	-gzInput	integer	gzipInput	0	stable	to save diskspace
+buildTree5.pl	5.67	General options	-rmMSA	integer	removeMSA	0	stable	Legacy compatibility switch; completion always deletes per-locus MSA files and retains compressed MSAli aggregates.
+buildTree5.pl	5.67	General options	-gzInput	integer	gzipInput	0	stable	Compress buildTree-owned input files after completion; retained MSAli aggregates are always compressed.
 buildTree5.pl	5.36	General options	-isAligned	integer	isAligned	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-runRAxML	integer	doRAXML	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-runRaxMLng	integer	doRAXMLng	0	stable	See source/help for details.
