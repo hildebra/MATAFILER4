@@ -230,6 +230,9 @@ sub createGene2MGS{
 
 sub readGene2tax{
 	my $inF = $_[0];
+	my $progress = @_ > 3 ? $_[3] : undef;
+	die "readGene2tax progress callback must be a code reference\n"
+		if defined($progress) && ref($progress) ne "CODE";
 	my $limit = -1;  my %subset; my $doMGSsubset=0;
 	$limit = $_[1] if (@_ > 1);
 	if (@_ > 2){
@@ -253,6 +256,8 @@ sub readGene2tax{
 	while (my $line = <I>){
 		chomp $line;
 		$totalGenes++;
+		$progress->({ rows_scanned => $totalGenes, included_genes => $inclGenes })
+			if $progress && $totalGenes % 100_000 == 0;
 		my @spl = split (/\t/,$line,-1);
 		if (@spl < 3 || !defined($spl[0]) || $spl[0] eq "" || !defined($spl[1]) || $spl[1] eq "") {
 			$rowWarnings{malformed}++;
@@ -295,6 +300,8 @@ sub readGene2tax{
 		$totalTax{$MGS} ++;
 	}
 	close I;
+	$progress->({ rows_scanned => $totalGenes, included_genes => $inclGenes })
+		if $progress;
 	if (($rowWarnings{malformed} || 0) > $warningLimit) {
 		warn "Suppressed ".($rowWarnings{malformed} - $warningLimit)
 			." additional malformed gene-to-MGS row warnings in $inF "

@@ -85,8 +85,9 @@ like($strain, qr/ConspecificMGS\.\$subJob\.log.*?sub mergeConspecificLogs/s,
 	'split workers write isolated conspecific logs that are explicitly merged');
 like($strain, qr/\$onlySubmit == 0 && !\$subJob/,
 	'split children cannot recursively clean shared MGS output directories');
-like($strain,
-	qr/\$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$publishedInputsReady && !\$mustRegenerateInputs\).*?combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\)/s,
+ok(index($strain, 'my $publishedInputsReady = !$epaOnlyRetry') >= 0
+	&& index($strain, 'if (!$epaOnlyRetry && !($publishedInputsReady && !$mustRegenerateInputs))') >= 0
+	&& index($strain, '$scratchInputsReady ||= prepareMGSInputSet($MGS,$tmpD);') >= 0,
 	'complete published inputs bypass missing scratch aggregates during tree recovery');
 like($strain, qr/has neither complete published inputs nor complete combined worker input/,
 	'incomplete worker input is reported only when published recovery inputs are also incomplete');
@@ -129,7 +130,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.07;/,
+like($strain, qr/my \$version = 1\.08;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
@@ -140,7 +141,7 @@ like($strain,
 	qr/printEarlyRunHeader\(\);.*?read_mosaic_catalogue\(.*?prepRun\(\)/s,
 	'the autoflushed basic header is emitted before Mosaic, map, and catalogue loading');
 like($strain,
-	qr/sub printEarlyRunHeader \{.*?Strain_within v\$version.*?Started:.*?Requested output:.*?Checking saved tree commands before catalogue initialization.*?Initializing paths, maps, and catalogues/s,
+	qr/sub printEarlyRunHeader \{.*?Strain_within v\$version.*?Started:.*?Requested output:.*?Initializing paths, maps, and catalogues/s,
 	'the immediate header identifies the run before expensive initialization starts');
 like($strain,
 	qr/print \{\$sampleStatsFH\} \$sampleStatsHeader.*?my %sampleStatsSeen;.*?local \*STDOUT;.*?open STDOUT.*?STDERR.*?foreach my \$sm \(\@srtdSmpls\).*?readGenesSample_Singl/s,
@@ -186,21 +187,21 @@ like($strain,
 	qr/configuration and map initialization.*?assembly-group expansion.*?MGS and seed-locus selection.*?existing-output and resume audit.*?if \(\$runPartI\).*?consensus-input audit/s,
 	'startup stages emit consistent completion messages, with the consensus audit limited to Phase I');
 like($strain,
-	qr/locus-model construction.*?catalogue_drivers=.*?resolved_loci=.*?consensus-gene extraction and publication.*?tree-input sizing/s,
+	qr/locus-model construction.*?catalogue_drivers=.*?resolved_loci=.*?consensus-gene extraction and publication.*?full-tree input sizing/s,
 	'major extraction and tree-preparation stages also report concise completion statistics');
 like($strain,
 	qr/historical exclusion loading.*?excluded_MGS=.*?outgroup-reference preparation.*?reference_NT=.*?MGS_with_outgroup_candidates=/s,
 	'historical exclusions and outgroup-reference preparation report their final counts');
 like($strain,
-	qr/"redoEPAfilter:i" => sub.*?if \(\$redoEPAfilter\).*?epa_result\.jplace.*?IQtree_allsites\.treefile.*?retry_unlink\(\$placedTree.*?treeDone\.sto.*?retry_unlink\(\$completion.*?placementPending\.sto.*?retry_unlink\(\$pending.*?Continuing through saved treeCmd\.sh files.*?resubmitExistingTreeCommands\(.*?redo_epa => \$redoEPAfilter.*?exit 0;.*?if \(length\(\$MGSfile\)\)/s,
-	'-redoEPAfilter clears the jplace-derived tree and lifecycle markers before the ordinary pre-database resume');
+	qr/"redoEPAfilter:i" => sub.*?if \(\$redoEPAfilter\).*?epa_result\.jplace.*?IQtree_allsites\.treefile.*?retry_unlink\(\$placedTree.*?treeDone\.sto.*?retry_unlink\(\$completion.*?placementPending\.sto.*?retry_unlink\(\$pending.*?Continuing through the normal controller workflow.*?if \(length\(\$MGSfile\) && !\$preparedMainBranchFastPath\)/s,
+	'-redoEPAfilter clears derived lifecycle state and rejoins the normal controller workflow');
 like($strain, qr/\$Tcmd \.= "-redoEPAfilter 1 " if \$redoEPAfilter/,
 	'generated BuildTree commands pass an explicit numeric redo-EPA value');
 unlike($strain, qr/epaFilterOnly|treeCmd\.epa_filter/,
 	'the retired filter-only controller and special command path are absent');
 like($strain,
-	qr/if \(\$onlySubmit && \$doSubmit && !\$subJob.*?resubmitExistingTreeCommands\(.*?exit 0;.*?if \(length\(\$MGSfile\)\)/s,
-	'an ordinary tree-only resume bypasses Mosaic and catalogue initialization before the normal workflow starts');
+	qr/if \(\$onlySubmit && !\$subJob.*?preparedMainBranchInputSet\(.*?\$preparedMainBranchFastPath = 1.*?if \(length\(\$MGSfile\) && !\$preparedMainBranchFastPath\).*?prepRun\(\).*?strainAnalysis2\.sh.*?qsubSystem\(/s,
+	'a fully prepared tree-only resume skips Mosaic/catalogue loading but remains on the normal branch through strainwithin2');
 like($strain,
 	qr/sub resubmitExistingTreeCommands .*?treeCmd\.sh.*?placementPending\.sto.*?skipping Mosaic, map, and catalogue loading.*?qsubSystemWaitMaxJobs\(.*?qsubSystem2\(/s,
 	'direct tree-command resubmission reuses saved scripts with scheduler-capacity throttling, including EPA recovery');
@@ -211,7 +212,7 @@ ok(defined($directTreeResume),
 unlike($directTreeResume, qr/\$guide|open my \$input/,
 	'direct tree-command resume scans saved output scripts instead of reading the MGS guide');
 like($directTreeResume,
-	qr/bsd_glob.*?my \$treeDone.*?next if !\$force && -s \$treeDone && -s \$finalTree.*?my \$publicationResume.*?epa_result\.jplace.*?treeCmd\.epa_retry\.sh.*?epa_only/s,
+	qr/bsd_glob.*?my \$treeDone.*?completionMarkerTree\(\$treeDone.*?next if !\$force && -s \$treeDone && length\(\$completedTree\).*?my \$publicationResume.*?epa_result\.jplace.*?treeCmd\.epa_retry\.sh.*?epa_only/s,
 	'direct tree-command resume notices a removed placed tree despite treeDone and reuses saved EPA retry scripts');
 like($directTreeResume, qr/\$redoEpa && !\$publicationResume.*?next;.*?elsif \(!\$publicationResume/s,
 	'forced EPA filtering selects only retained-jplace publication resumes and never EPA-only recovery');
@@ -221,7 +222,7 @@ like($directTreeResume,
 	qr/\$publicationResume.*?elsif \(!\$publicationResume\).*?FNAstdof.*?FAAstdof.*?CATstdof/s,
 	'a retained-jplace publication resume skips unnecessary sequence-input checks');
 like($strain,
-	qr/my \$requiresOutgroupReference = \$runPartI \|\| \$CatNotPrepped \|\| \$repairCAT.*?if \(\$requiresOutgroupReference\).*?readFasta\(\$refFAA.*?readFasta\(\$refFNA/s,
+	qr/my \$requiresOutgroupReference = \$runPartI \|\| \$CatNotPrepped \|\| \$repairCAT.*?my \$initializeOutgroupReferences = sub.*?unless \(\$requiresOutgroupReference.*?readFasta\(\$refFAA.*?readFasta\(\$refFNA/s,
 	'tree-only resumes load reference FASTA catalogues only for input regeneration or repair');
 unlike($strain, qr/nonEpaTreeAbsences/,
 	'a missing final tree no longer makes reference catalogue loading mandatory');
@@ -381,7 +382,7 @@ like($strain,
 	qr/my \$treeTmpGb = int\(.*?\$QSBoptHR->\{tmpSpace\} = \$nodeTmpConfigured \? \$treeTmpGb : 0.*?\? "-tmpSubdir ".*?strain_within\/\$MGS.*?: "-tmpD "/s,
 	'tree jobs request and use node-local scratch when it is configured');
 like($strain,
-	qr/my \$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = prepareMGSInputSet\(\$MGS,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
+	qr/my \$publishedInputsReady = !\$epaOnlyRetry\s*&& !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = prepareMGSInputSet\(\$MGS,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
 	'tree outputs are reset only after complete published or recoverable staged per-MGS inputs are verified');
 ok(index($strain, 'sub prepareMGSInputSet') >= 0
 	&& index($strain, 'collectMGSShardHandoff($MGS, $tmpD)') >= 0
@@ -510,8 +511,8 @@ like($strain,
 	qr/my \$epaOnlyRetry = exists\(\$MGSepaOnlyRetry\{\$MGS\}\).*?my \$epaRecovery = \$epaOnlyRetry.*?if \(!\$epaRecovery && exists \$MGSnoTree\{\$MGS\}\).*?if \(!\$epaRecovery && exists\(\$ConspecificMGS\{\$MGS\}\)/s,
 	'a validated EPA-only retry bypasses later historical no-tree and multicopy filters');
 like($strain,
-	qr/Placement-only recovery has already paid.*?exists\(\$MGSepaOnlyRetry\{\$specis\[\$b\]\}\).*?\$sizeOfDirs\[\$b\].*?Validated EPA-only recovery queue/s,
-	'validated EPA-only retries are sorted ahead of ordinary full-tree retries');
+	qr/Placement-only recovery has already paid.*?my \@epaRecoveryMGS = grep.*?my \@fullTreeMGS = grep.*?\@specis = \(\@epaRecoveryMGS, \@fullTreeMGS\).*?my \$epaQueueBoundary = scalar\(\@epaRecoveryMGS\).*?Validated EPA-only recovery queue/s,
+	'validated EPA-only retries are queued ahead of ordinary full-tree retries');
 like($strain,
 	qr/strain_within\.heartbeat\.tsv.*?strain_within\.failure\.tsv.*?sub writeStrainWorkflowHeartbeat.*?sub writeStrainWorkflowFailure/s,
 	'strain workflow persists stage heartbeats and fatal-stage diagnostics');

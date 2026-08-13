@@ -495,6 +495,9 @@ sub readFasta{
 	my $cutHd=0;
 	my $sepChr= "\\s";
 	my $subs; my $doSubs=0;
+	my $progress = @_ > 4 ? $_[4] : undef;
+	die "readFasta progress callback must be a code reference\n"
+		if defined($progress) && ref($progress) ne "CODE";
 	$cutHd = $_[1] if (@_ > 1);
 	$sepChr = $_[2] if (@_ > 2);
 	if (@_ > 3){
@@ -503,6 +506,7 @@ sub readFasta{
 		$doSubs = 1;
 	}
 	my $Hseq = {};
+	my ($recordsScanned, $recordsRetained) = (0, 0);
 
 	my @files = glob $fils;
 	#if (-z $fil){ return \%Hseq;}
@@ -536,8 +540,16 @@ sub readFasta{
 		my ($trHe, $srcHe) = $prepare_header->($first_line);
 		my $temp = "";
 		my $store_record = sub {
-			return if $doSubs && !exists($subs->{$trHe}) && !exists($subs->{$srcHe});
-			$Hseq->{$trHe} = $temp;
+			$recordsScanned++;
+			my $selected = !$doSubs || exists($subs->{$trHe}) || exists($subs->{$srcHe});
+			if ($selected) {
+				$Hseq->{$trHe} = $temp;
+				$recordsRetained++;
+			}
+			$progress->({
+				file => $fil, records_scanned => $recordsScanned,
+				records_retained => $recordsRetained,
+			}) if $progress && $recordsScanned % 100_000 == 0;
 		};
 
 		while(my $line = <$FAS>){
@@ -552,6 +564,10 @@ sub readFasta{
 		}
 		$store_record->();
 		close ($FAS) or die "Cannot close FASTA file $fil: $!\n";
+		$progress->({
+			file => $fil, records_scanned => $recordsScanned,
+			records_retained => $recordsRetained,
+		}) if $progress;
 	}
 	return $Hseq;
 }

@@ -366,7 +366,9 @@ sub select_outgroup_panel {
 }
 
 sub read_mosaic_catalogue {
-	my ($path) = @_;
+	my ($path, $progress) = @_;
+	die "read_mosaic_catalogue progress callback must be a code reference\n"
+		if defined($progress) && ref($progress) ne "CODE";
 	my (%pairs, %outgroups, %outgroup_genes, %outgroup_gene_targets);
 	return (\%pairs, \%outgroups, \%outgroup_genes)
 		unless defined($path) && length($path) && -s $path;
@@ -397,8 +399,11 @@ sub read_mosaic_catalogue {
 		} else {
 			die "Unknown mosaic catalogue row type '$fields[0]' at $path line $line_number\n";
 		}
+		$progress->({ file => $path, rows_scanned => $line_number })
+			if $progress && $line_number % 100_000 == 0;
 	}
 	close $fh or die "Cannot close mosaic catalogue $path: $!\n";
+	$progress->({ file => $path, rows_scanned => $line_number }) if $progress;
 	for my $source (keys %outgroup_gene_targets) {
 		die "OUTGROUP_GENE rows exist without an OUTGROUP connection for $source in $path\n"
 			unless exists $outgroups{$source};
