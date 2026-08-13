@@ -672,7 +672,13 @@ sub createBinFAA{
 	print "Reading reference MGS $cnopyF\n";
 	my $clustHR = readMGS($cnopyF);#my %clust = %{$hr};
 	print "Reading ref FAA $refFA\n";
-	my $faaHR = readFasta($refFA,1);
+	my %wanted_catalogue_genes;
+	for my $genes (values %{$clustHR}) {
+		$wanted_catalogue_genes{$_} = 1 for @{$genes};
+	}
+	my $faaHR = readFasta(
+		$refFA, 1, "\\s", \%wanted_catalogue_genes, { fai => 1 },
+	);
 	#my %FAA = %{$faaHR};
 	
 	system "mkdir -p $binD" unless (-d $binD);

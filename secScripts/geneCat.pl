@@ -25,7 +25,7 @@ use IO::Handle;
 use Getopt::Long qw( GetOptions );
 
 use Cwd; use English;
-use Mods::GenoMetaAss qw( readFasta fileGZe gzipopen gzipwrite splitFastas readMapS systemW readGFF getAssemblPath resolve_path);
+use Mods::GenoMetaAss qw( readFasta ensureFastaIndex fileGZe gzipopen gzipwrite splitFastas readMapS systemW readGFF getAssemblPath resolve_path);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
@@ -2539,6 +2539,9 @@ sub protExtract{
 
 	#new cluster numbers and one new file, my format, with Idx
 	combineClstr("$inD/compl.incompl.$cdhID.fna","$inD/$countMatrixP.genes2rows.txt") ;
+	print "Creating reusable indexes for final nucleotide and protein gene catalogues\n";
+	ensureFastaIndex($catalog_fasta);
+	ensureFastaIndex($protF);
 
 }
 sub combineClstr(){

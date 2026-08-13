@@ -2,8 +2,10 @@ package Mods::GenoMetaAss;
 use warnings;
 #use Cwd 'abs_path';
 use strict;
-use Fcntl qw(S_ISDIR S_ISREG);
+use Fcntl qw(S_ISDIR S_ISREG :flock);
 use POSIX qw(_exit);
+use File::Spec;
+use File::Temp qw(tempfile);
 use Time::HiRes ();
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
@@ -37,7 +39,7 @@ our @EXPORT_OK = qw(
 		unzipFileARezip  is_integer 
 		readGFF reverse_complement reverse_complement_IUPAC
 		
-		readFasta
+		readFasta ensureFastaIndex
 		writeFasta readFastHD splitFastas  renameFastaCnts renameFastqCnts
 		
 		readTabByKey convertNT2AA runDiamond median mean quantile
@@ -490,14 +492,259 @@ sub splitFastas($ $ $){
 }
 
 
+
+sub _fasta_command_error {
+	my ($label, $status) = @_;
+	return "$label failed from signal ".($status & 127)."\n" if $status & 127;
+	return "$label failed with exit code ".($status >> 8)."\n";
+}
+
+sub _fasta_run_command {
+	my @command = @_;
+	my $status = system { $command[0] } @command;
+	die "Cannot execute $command[0]: $!\n" if $status == -1;
+	die _fasta_command_error(join(' ', @command), $status) if $status != 0;
+}
+
+sub _fasta_slurp {
+	my ($path) = @_;
+	open my $input, '<', $path or die "Cannot read FASTA-index metadata $path: $!\n";
+	local $/;
+	my $contents = <$input> // '';
+	close $input or die "Cannot close FASTA-index metadata $path: $!\n";
+	return $contents;
+}
+
+sub _fasta_write_atomic {
+	my ($path, $contents) = @_;
+	my $temporary = "$path.tmp.$$";
+	open my $output, '>', $temporary
+		or die "Cannot create FASTA-index metadata $temporary: $!\n";
+	print {$output} $contents
+		or die "Cannot write FASTA-index metadata $temporary: $!\n";
+	close $output or die "Cannot close FASTA-index metadata $temporary: $!\n";
+	rename $temporary, $path
+		or die "Cannot publish FASTA-index metadata $path: $!\n";
+}
+
+
+sub _plain_fasta_index_complete {
+	my ($source, $index) = @_;
+	return 0 if $source =~ /\.gz\z/i || !-s $source || !-s $index;
+	open my $index_fh, '<', $index or return 0;
+	my ($records, $previous_offset, $last_end) = (0, -1, 0);
+	while (my $line = <$index_fh>) {
+		$line =~ s/[\r\n]+\z//;
+		my ($name, $length, $offset, $line_bases, $line_width, @extra)
+			= split /\t/, $line, -1;
+		unless (defined($name) && length($name)
+				&& defined($length) && $length =~ /\A\d+\z/
+				&& defined($offset) && $offset =~ /\A\d+\z/
+				&& defined($line_bases) && $line_bases =~ /\A\d+\z/
+				&& defined($line_width) && $line_width =~ /\A\d+\z/
+				&& $offset > $previous_offset) {
+			close $index_fh;
+			return 0;
+		}
+		if ($length > 0) {
+			unless ($line_bases > 0 && $line_width >= $line_bases) {
+				close $index_fh;
+				return 0;
+			}
+			$last_end = $offset
+				+ int(($length - 1) / $line_bases) * $line_width
+				+ (($length - 1) % $line_bases) + 1;
+		} else {
+			$last_end = $offset;
+		}
+		$previous_offset = $offset;
+		$records++;
+	}
+	close $index_fh or return 0;
+	return 0 unless $records && $last_end <= -s $source;
+	open my $source_fh, '<', $source or return 0;
+	seek($source_fh, $last_end, 0) or do { close $source_fh; return 0; };
+	my $buffer;
+	while (1) {
+		my $read = read($source_fh, $buffer, 64 * 1024);
+		unless (defined $read) {
+			close $source_fh;
+			return 0;
+		}
+		last unless $read;
+		if ($buffer =~ /\S/) {
+			close $source_fh;
+			return 0;
+		}
+	}
+	close $source_fh or return 0;
+	return 1;
+}
+# Create or reuse a samtools FASTA index without ever publishing a partial .fai.
+# Options: samtools => executable, force => rebuild, quiet => suppress build notice.
+sub ensureFastaIndex {
+	my ($source, $options) = @_;
+	$options ||= {};
+	die "ensureFastaIndex options must be a hash reference\n"
+		unless ref($options) eq 'HASH';
+	die "Cannot index a missing or empty FASTA: ".($source // '')."\n"
+		unless defined($source) && length($source) && -s $source;
+	die "Cannot index a FASTA glob: $source\n" if $source =~ /[*?\[]/;
+
+	my $index = "$source.fai";
+	my $completed = "$index.complete";
+	open my $lock, '>>', "$index.lock"
+		or die "Cannot open FASTA-index lock $index.lock: $!\n";
+	flock($lock, LOCK_EX) or die "Cannot lock FASTA index $index: $!\n";
+	my @source_stat = stat($source);
+	my $fingerprint = join("\t", 'fai-v1', File::Spec->rel2abs($source),
+		$source_stat[7], $source_stat[9])."\n";
+	my $valid = !$options->{force} && -s $index && -s $completed
+		&& _fasta_slurp($completed) eq $fingerprint;
+	if (!$valid && !$options->{force} && -s $index && !-s $completed
+			&& (stat($index))[9] >= $source_stat[9]
+			&& _plain_fasta_index_complete($source, $index)) {
+		_fasta_write_atomic($completed, $fingerprint);
+		$valid = 1;
+	}
+	return $index if $valid;
+
+	unlink $completed if -e $completed;
+	my $suffix = $source =~ /\.gz\z/ ? '.gz' : '.fasta';
+	my $temporary_source = "$source.faidx-build.$$.$suffix";
+	my $samtools = $options->{samtools} // getProgPaths('samtools');
+	die "Configured samtools command must be one executable path, not shell syntax: $samtools\n"
+		unless defined($samtools) && length($samtools)
+			&& $samtools !~ /[\r\n;]/;
+	my $temporary_index = "$temporary_source.fai";
+	my $temporary_gzi = "$temporary_source.gzi";
+	unlink $_ for grep { -e $_ }
+		($temporary_source, $temporary_index, $temporary_gzi);
+	symlink(File::Spec->rel2abs($source), $temporary_source)
+		or die "Cannot create temporary FASTA-index link $temporary_source: $!\n";
+	print STDERR "Creating FASTA index $index\n"
+		unless $options->{quiet};
+	my $built = eval {
+		_fasta_run_command($samtools, 'faidx', $temporary_source);
+		die "samtools did not create a nonempty FASTA index: $temporary_index\n"
+			unless -s $temporary_index;
+		my @source_after = stat($source);
+		die "FASTA changed while its index was being built: $source\n"
+			unless @source_after && $source_after[7] == $source_stat[7]
+				&& $source_after[9] == $source_stat[9];
+		rename $temporary_index, $index
+			or die "Cannot atomically publish FASTA index $index: $!\n";
+		if (-s $temporary_gzi) {
+			rename $temporary_gzi, "$source.gzi"
+				or die "Cannot atomically publish BGZF index $source.gzi: $!\n";
+		}
+		1;
+	};
+	my $error = $@;
+	unlink $_ for grep { -e $_ }
+		($temporary_source, $temporary_index, $temporary_gzi);
+	die $error unless $built;
+	_fasta_write_atomic($completed, $fingerprint);
+	return $index;
+}
+
+sub _readFastaIndexed {
+	my ($source, $subset, $progress, $options) = @_;
+	my $index = ensureFastaIndex($source, $options);
+	my $maximum_fraction = exists($options->{fai_max_fraction})
+		? $options->{fai_max_fraction} : 0.25;
+	die "readFasta fai_max_fraction must be between 0 and 1\n"
+		unless defined($maximum_fraction) && $maximum_fraction =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/
+			&& $maximum_fraction >= 0 && $maximum_fraction <= 1;
+	my ($identifier_fh, $identifier_file) = tempfile(
+		'mf4-faidx-XXXXXX', TMPDIR => 1, UNLINK => 1,
+	);
+	open my $index_fh, '<', $index
+		or die "Cannot read FASTA index $index: $!\n";
+	my ($records_scanned, $requested_available) = (0, 0);
+	while (my $line = <$index_fh>) {
+		$records_scanned++;
+		my ($identifier) = split /\t/, $line, 2;
+		if (defined($identifier) && exists($subset->{$identifier})) {
+			print {$identifier_fh} "$identifier\n"
+				or die "Cannot write indexed FASTA identifier list: $!\n";
+			$requested_available++;
+		}
+		$progress->({
+			file => $source, records_scanned => $records_scanned,
+			records_retained => $requested_available,
+			mode => 'fai',
+		}) if $progress && $records_scanned % 100_000 == 0;
+	}
+	close $index_fh or die "Cannot close FASTA index $index: $!\n";
+	close $identifier_fh
+		or die "Cannot close indexed FASTA identifier list $identifier_file: $!\n";
+	if (!$options->{require_fai} && $records_scanned
+			&& $requested_available / $records_scanned > $maximum_fraction) {
+		$progress->({
+			file => $source, records_scanned => $records_scanned,
+			records_retained => $requested_available,
+			mode => 'fai_streaming_preferred',
+		}) if $progress;
+		return;
+	}
+	unless ($requested_available) {
+		$progress->({
+			file => $source, records_scanned => $records_scanned,
+			records_retained => 0, mode => 'fai',
+		}) if $progress;
+		return {};
+	}
+
+	my $samtools = $options->{samtools} // getProgPaths('samtools');
+	my $pid = open my $pipe, '-|', $samtools, 'faidx', '-r',
+		$identifier_file, $source;
+	die "Cannot start samtools faidx for $source: $!\n" unless defined $pid;
+	my $sequences = {};
+	my ($identifier, $sequence);
+	my $store = sub {
+		return unless defined $identifier;
+		die "samtools faidx returned unrequested identifier '$identifier' from $source\n"
+			unless exists($subset->{$identifier});
+		$sequences->{$identifier} = $sequence;
+	};
+	while (my $line = <$pipe>) {
+		$line =~ s/[\r\n]+\z//;
+		if ($line =~ /^>(\S+)/) {
+			$store->();
+			($identifier, $sequence) = ($1, '');
+		} else {
+			die "Malformed indexed FASTA output for $source: sequence before header\n"
+				unless defined $identifier;
+			$sequence .= $line;
+		}
+	}
+	$store->();
+	my $closed = close $pipe;
+	my $status = $?;
+	die _fasta_command_error("samtools faidx indexed read for $source", $status)
+		unless $closed && $status == 0;
+	$progress->({
+		file => $source, records_scanned => $records_scanned,
+		records_retained => scalar(keys %{$sequences}), mode => 'fai',
+	}) if $progress;
+	return $sequences;
+}
+# Pass { fai => 1 } as the fifth argument (or sixth after a progress callback)
+# to use indexed extraction for a canonical-header subset when that is cheaper.
 sub readFasta{
 	my $fils = $_[0];
 	my $cutHd=0;
 	my $sepChr= "\\s";
 	my $subs; my $doSubs=0;
-	my $progress = @_ > 4 ? $_[4] : undef;
-	die "readFasta progress callback must be a code reference\n"
-		if defined($progress) && ref($progress) ne "CODE";
+	my $fifth = @_ > 4 ? $_[4] : undef;
+	my $progress = defined($fifth) && ref($fifth) eq 'CODE' ? $fifth : undef;
+	my $options = @_ > 5 ? $_[5]
+		: defined($fifth) && ref($fifth) eq 'HASH' ? $fifth : {};
+	die "readFasta fifth argument must be a progress callback or options hash reference\n"
+		if defined($fifth) && ref($fifth) ne 'CODE' && ref($fifth) ne 'HASH';
+	die "readFasta options must be a hash reference\n"
+		unless ref($options) eq 'HASH';
 	$cutHd = $_[1] if (@_ > 1);
 	$sepChr = $_[2] if (@_ > 2);
 	if (@_ > 3){
@@ -506,6 +753,29 @@ sub readFasta{
 		$doSubs = 1;
 	}
 	my $Hseq = {};
+	return $Hseq if $doSubs && !keys %{$subs};
+	my $maximum_unindexed_ids = exists($options->{fai_max_ids_without_index})
+		? $options->{fai_max_ids_without_index} : 250_000;
+	die "readFasta fai_max_ids_without_index must be a non-negative integer\n"
+		unless defined($maximum_unindexed_ids)
+			&& $maximum_unindexed_ids =~ /\A\d+\z/;
+	if ($options->{fai} && $doSubs && $cutHd && $sepChr eq "\\s"
+			&& $fils !~ /[*?\[]/ && -s $fils
+			&& ($options->{require_fai} || -s "$fils.fai"
+				|| keys(%{$subs}) <= $maximum_unindexed_ids)) {
+		my $indexed;
+		my $indexed_ok = eval {
+			$indexed = _readFastaIndexed($fils, $subs, $progress, $options);
+			1;
+		};
+		return $indexed if $indexed_ok && defined($indexed);
+		unless ($indexed_ok) {
+			my $error = $@ || 'unknown indexed FASTA read failure';
+			die $error if $options->{require_fai};
+			$error =~ s/\s+\z//;
+			warn "Indexed FASTA read unavailable for $fils ($error); using streaming scan\n";
+		}
+	}
 	my ($recordsScanned, $recordsRetained) = (0, 0);
 
 	my @files = glob $fils;
@@ -1847,10 +2117,20 @@ sub readTabByKey{
 	return %ret;
 }
 
+# The legacy third argument remains the record limit.  { fai => 1 } may be the
+# third argument, or the fourth after that limit, to publish an index on close.
 sub writeFasta{
 	my ($hr,$of) = ($_[0],$_[1]);
 	my $maxFs = -1;
-	$maxFs = $_[2] if (@_ > 2);
+	my $options = {};
+	if (@_ > 2 && ref($_[2]) eq 'HASH') {
+		$options = $_[2];
+	} else {
+		$maxFs = $_[2] if @_ > 2;
+		$options = $_[3] if @_ > 3;
+	}
+	die "writeFasta options must be a hash reference\n"
+		unless ref($options) eq 'HASH';
 	my %FA = %{$hr};
 	
 	if ($maxFs <0){	$maxFs =  scalar(keys %FA); } #$maxFs+=1000;}
@@ -1866,7 +2146,12 @@ sub writeFasta{
 		}
 		last if ( $cnt > $maxFs);
 	}
-	close O;
+	close O or die "Cannot close output FASTA $of: $!\n";
+	if ($options->{fai}) {
+		my %index_options = (%{$options}, force => 1);
+		ensureFastaIndex($of, \%index_options);
+	}
+	return $of;
 	#die $of;
 }
 

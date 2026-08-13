@@ -46,9 +46,14 @@ make_path($oDir, $tmpD);
 
 my $hr = readCluster($cluF);
 my %clust = %{$hr};
+my %wantedCatalogueGenes;
+for my $cluster (keys %clust) {
+	next if @{$clust{$cluster}} < $minGenes;
+	$wantedCatalogueGenes{$_} = 1 for @{$clust{$cluster}};
+}
 
 print "Reading ref FNA..\n";
-$hr = readFasta("$GCd/compl.incompl.$clusterID.fna",1);
+$hr = readFasta("$GCd/compl.incompl.$clusterID.fna", 1, "\\s", \%wantedCatalogueGenes, { fai => 1 });
 my %FNA = %{$hr};
 #my @test = keys %FNA; print "$test[0] $test[1] $test[123]\n"; print "$FNA{13220655}\n";
 foreach my $cl (sort keys %clust){
@@ -67,7 +72,7 @@ foreach my $cl (sort keys %clust){
 
 
 print "Reading ref FAA..\n";
-$hr = readFasta("$GCd/compl.incompl.$clusterID.prot.faa",1);
+$hr = readFasta("$GCd/compl.incompl.$clusterID.prot.faa", 1, "\\s", \%wantedCatalogueGenes, { fai => 1 });
 my %FAA = %{$hr};
 foreach my $cl (sort keys %clust){
 	my $oF = "$oDir/$cl.faa";

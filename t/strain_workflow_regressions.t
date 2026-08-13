@@ -130,8 +130,18 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.08;/,
+like($strain, qr/my \$version = 1\.09;/,
 	'workflow behavior changes retain an explicit version marker');
+like($strain, qr/PreferredOutgroupGene.*?requiredNT.*?prepareSelectiveOutgroupReferenceCache/s,
+	'Mosaic direct mappings define a reduced exact outgroup-reference request set');
+like($strain, qr/sub outgroupRequirementLoci.*?preparedOutgroupLog.*?CATstdof\.tmp/s,
+	'only raw staged inputs without a finalized outgroup overlay contribute cache requirements');
+like($strain, qr/sub outgroupRequirementLoci.*?selected_gene_map.*?outgroup requirement category/s,
+	'resume uses already-selected loci before considering a raw category scan');
+like($strain, qr/if \(!\@subsetMGS \&\& keys\(%\{\$SIgenes\}\).*?readGene2tax/s,
+	'an emptied Phase-I gene map is reloaded selectively instead of being reused');
+like($strain, qr/outgroupReferenceCacheActive.*?writeTreeFailureAudit.*?validateTreeInputResolution.*?outgroup-reference cache cleanup/s,
+	'the selective cache survives until tree outcomes and input publication validate');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -244,8 +254,8 @@ like($strain,
 	qr/\@treeJobAccounting.*?requested_mb => int\(\$totMem\).*?qsubSystemJobAlive.*?slurm_tree_memory_summary.*?format_slurm_tree_memory_summary/s,
 	'completed Slurm tree jobs report MaxRSS against their requested memory');
 like($strain,
-	qr/This is deliberately a streaming scan.*?%locusSeen, %sampleSeen.*?\.strain_tree_input\.outgroup\.fna.*?\.strain_tree_input\.plan\.tsv/s,
-	'the controller keeps only the compact locus/sample/outgroup overlay while handing full input finalization to buildTree5');
+	qr/\$outgroupCategoryPreflight\{\$MGS\} = \{.*?if \(my \$preflight = delete \$outgroupCategoryPreflight\{\$MGS\}\).*?\.strain_tree_input\.outgroup\.fna.*?\.strain_tree_input\.plan\.tsv/s,
+	'the controller reuses the category preflight and keeps only the compact locus/sample/outgroup overlay while handing full input finalization to buildTree5');
 unlike($strain, qr/sort_fasta_by_locus|append_fasta_records_atomic|readFastaIDs/,
 	'the serial controller no longer rewrites, sorts, or fully scans staged FASTA inputs');
 like($strain,

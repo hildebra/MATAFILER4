@@ -119,7 +119,7 @@ print "Loaded ".scalar(@{$records})." raw MGS genes for comprehensive mosaic "
 my %selected = map { $_->{gene} => 1 } @{$records};
 my $catalogue_fasta = resolveExistingFile("$GCd/compl.incompl.$cluster_id.fna")
 	or die "Catalogue nucleotide FASTA is missing for identity $cluster_id\n";
-my $sequences = readFasta($catalogue_fasta, 1, "\\s", \%selected);
+my $sequences = readFasta($catalogue_fasta, 1, "\\s", \%selected, { fai => 1 });
 die "No raw MGS genes had catalogue sequences in $catalogue_fasta\n"
 	unless keys %{$sequences};
 

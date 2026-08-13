@@ -226,6 +226,11 @@ is($converter_errors, '', 'samtools-depth converter emits no warnings');
 is($converted, "ctg\t0\t2\t2\nctg\t3\t4\t2\nctg\t4\t5\t3\n",
    'bedGraph conversion preserves coordinate gaps and emits the final interval');
 
+my $binning_module = read_file(File::Spec->catfile($root, 'Mods', 'Binning.pm'));
+like($binning_module,
+     qr/sub createBinFAA.*?wanted_catalogue_genes.*?readFasta\(.*?\{ fai => 1 \}/s,
+     'Canopy protein-bin extraction requests only its canonical catalogue genes through the shared index');
+
 my $gene_cat = read_file(File::Spec->catfile($root, 'secScripts', 'geneCat.pl'));
 unlike($gene_cat, qr/rm -rf \$GCdir\/\* \$tmpDir\*/, 'geneCat has no wildcard clean-start deletion');
 unlike($gene_cat, qr/system "rm -r \$metaGD\/\$path2GPdir/, 'geneCat does not delete predictions while inspecting them');
@@ -251,6 +256,9 @@ unlike($gene_cat, qr/`wc -l \$\{inD\}/, 'protein preflight counts rows without s
 unlike($gene_cat, qr/`grep -c '\^>'/, 'protein preflight counts FASTA records without spawning grep');
 like($gene_cat, qr/my \$query = "\$GCd\/compl\.incompl\.\$cdhID\.prot\.faa"/,
      'annotation modes honor the requested cluster identity');
+like($gene_cat,
+     qr/Creating reusable indexes for final nucleotide and protein gene catalogues.*?ensureFastaIndex\(\$catalog_fasta\).*?ensureFastaIndex\(\$protF\)/s,
+     'final canonical nucleotide and protein catalogues receive reusable indexes');
 like($gene_cat, qr/-mode FuncAssign .*?-clusterID \$cdhID/s,
      'the main flow propagates cluster identity to functional annotation jobs');
 like($gene_cat, qr/my \$effectiveMem = \$totMem < 250 \? 250 : \$totMem/,

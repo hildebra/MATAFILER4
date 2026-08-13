@@ -176,61 +176,49 @@ sub MGintoCats{
 	return $genesFMGfilesL;
 }
 
-sub getGeneSeqsSubGenes(){
+sub getGeneSeqsSubGenes {
 	my ($tag) = @_;
 	my $subF = "$GCd/$tag.subset.cats";
 	my $fmgOD = "$GCd/$tag/";
-	#die "TODO getGeneSeqsSubGenes\n";
-	system "mkdir -p $fmgOD"; 
-	my $hr = readFasta("$GCd/compl.incompl.95.fna",1);
-	my %FNA = %{$hr};
-	
-	print "Read FNA \n";
-	
-	open I,"<$subF" or die "can't open $subF\n"; 
-	while (my $line=<I>){
-		chomp $line;
-		my @spl = split /\t/,$line;
-		my @spl2 = split /,/,$spl[2];
-		#die "\n@spl2\n";
-		my $ofile = $fmgOD."/$spl[0]";
-		if (0){
-			system "$smtBin faidx $GCd/compl.incompl.95.fna ". join (" ", @spl2) . " > $ofile.fna";
-		} else {
-			open O1,"> $ofile.fna" or die $!;
-			foreach my $k (@spl2){
-				print O1 ">".$k."\n$FNA{$k}\n";
-			}
-			close O1; 
-		}
-	} 
-	close I;
-	%FNA = ();
-	
-	#split to lessen mem burden
-	$hr = readFasta("$GCd/compl.incompl.95.prot.faa",1);
-	my %FAA = %{$hr};
-	print "Read FAA \n";
-	open I,"<$subF" or die "can't open $subF\n"; 
-	while (my $line=<I>){
-		chomp $line;
-		my @spl = split /\t/,$line;
-		my @spl2 = split /,/,$spl[2];
-		#die "\n@spl2\n";
-		my $ofile = $fmgOD."/$spl[0]";
-		if (0){
-			system "$smtBin faidx $GCd/compl.incompl.95.prot.faa ". join (" ", @spl2) . " > $ofile.faa";
-		} else {
-			open O2,"> $ofile.faa" or die $!;
-			foreach my $k (@spl2){
-				print O2 ">".$k."\n$FAA{$k}\n";
-			}
-			close O2;
-		}
-	} 
-	close I;
+	system "mkdir -p $fmgOD";
 
+	open my $subset_input, '<', $subF or die "can't open $subF\n";
+	my (@categories, %wanted);
+	while (my $line = <$subset_input>) {
+		chomp $line;
+		next unless length $line;
+		my @fields = split /\t/, $line, -1;
+		die "Malformed marker subset row in $subF: $line\n"
+			unless @fields >= 3 && length($fields[0]) && length($fields[2]);
+		my @genes = grep { length } split /,/, $fields[2];
+		push @categories, [$fields[0], \@genes];
+		$wanted{$_} = 1 for @genes;
+	}
+	close $subset_input or die "Cannot close marker subset $subF: $!\n";
 
+	for my $type (
+		['fna', "$GCd/compl.incompl.95.fna"],
+		['faa', "$GCd/compl.incompl.95.prot.faa"],
+	) {
+		my ($suffix, $catalogue) = @{$type};
+		my $sequences = readFasta(
+			$catalogue, 1, "\\s", \%wanted, { fai => 1 },
+		);
+		print "Read ".scalar(keys %{$sequences})." indexed $suffix marker sequences\n";
+		for my $category (@categories) {
+			my ($name, $genes) = @{$category};
+			my $output_path = "$fmgOD/$name.$suffix";
+			open my $output, '>', $output_path
+				or die "Cannot create marker FASTA $output_path: $!\n";
+			for my $gene (@{$genes}) {
+				die "Marker gene $gene is absent from $catalogue\n"
+					unless exists($sequences->{$gene});
+				print {$output} ">$gene\n$sequences->{$gene}\n"
+					or die "Cannot write marker FASTA $output_path: $!\n";
+			}
+			close $output or die "Cannot close marker FASTA $output_path: $!\n";
+		}
+	}
 }
 
 

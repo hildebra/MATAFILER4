@@ -11,7 +11,7 @@
 use warnings;
 use strict;
 
-use Mods::GenoMetaAss qw( readClstrRev systemW median readFasta);
+use Mods::GenoMetaAss qw(ensureFastaIndex readClstrRev systemW median readFasta);
 use Mods::Subm qw(qsubSystem emptyQsubOpt );
 use Mods::geneCat qw(calculate_spearman_correlation read_matrix correlation);
 
@@ -181,6 +181,8 @@ if ($MGSfile ne ""){
 undef %FMGlist;
 #die;
 #my @MGS = keys %Gene2MGS;die @MGS."\n$Gene2MGS{$MGS[0]}\n";
+ensureFastaIndex("$GCd/compl.incompl.95.fna", { samtools => $samBin });
+ensureFastaIndex("$GCd/compl.incompl.95.prot.faa", { samtools => $samBin });
 my $allOK=1;
 foreach my $COG (keys %COG2FMG){#(@catsPre){
 	my %specIcnt;
