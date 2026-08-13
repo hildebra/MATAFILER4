@@ -120,10 +120,15 @@ ok(index($script_text, q{use Mods::StrainParts qw(append_fasta_records_atomic);}
 	&& index($script_text, q{does not match MGS $plannedMGS}) >= 0,
 	'buildTree5 owns staged strain finalization using only lightweight input helpers');
 ok(index($script_text, q{my $stagedPlan =}) >= 0
+	&& index($script_text, q{my $shardManifest =}) >= 0
 	&& index($script_text, q{my $stagedPrimaryInput =}) >= 0
-	&& index($script_text, q{my $stagedResidualInput = -s $stagedPlan && @stagedFiles;}) >= 0
+	&& index($script_text, q{my $stagedResidualInput = -s $stagedPlan && (@stagedFiles || $hasShardHandoff);}) >= 0
+	&& index($script_text, q{runStagedStrainShardHelper(}) >= 0
+	&& index($script_text, q{'-publishedDir', $output}) >= 0
+	&& index($script_text, q{$hasShardHandoff = -s $shardManifest ? 1 : 0;}) >= 0
+	&& index($script_text, q{runStagedStrainShardHelper('cleanup'}) >= 0
 	&& index($script_text, q{unless (@missing || $stagedPrimaryInput || $stagedResidualInput)}) >= 0,
-	q{a staged plan resumes incomplete primary or auxiliary-file publication});
+	q{a staged plan resumes aggregate or worker-shard publication through the external helper});
 ok(index($script_text, q{die "Staged sample QC input is missing: $rawSampleQC\n" unless fileGZs($rawSampleQC);}) >= 0,
 	'tree-side preparation will not mark a missing sample-QC sidecar complete');
 unlike($script_text, qr/use Mods::geneCat|readGene2tax|catalogProteins/,
@@ -205,11 +210,13 @@ write_test_file(File::Spec->catfile($publication_staging, 'sampleQC.tsv.tmp'), "
 write_test_file(File::Spec->catfile($publication_staging, 'allFNAs.fna.rewrite.123'), "partial\n");
 write_test_file(File::Spec->catfile($publication_staging, 'allFAAs.faa.sort.124'), "partial\n");
 write_test_file(File::Spec->catfile($publication_staging, 'allGeneCats.cat.write.125'), "partial\n");
+write_test_file(File::Spec->catfile($publication_staging, 'allFNAs.fna.0'), "worker shard\n");
+write_test_file(File::Spec->catfile($publication_staging, 'all.cat.tmp.0'), "worker shard\n");
 is_deeply(
 	[map { (File::Spec->splitpath($_))[2] }
 		TestBuildTreeStagedFiles::stagedTreeInputFiles($publication_staging)],
 	['data.log', 'sampleQC.tsv'],
-	'publication resume detects auxiliary staged files while ignoring unfinished sidecars');
+	'publication resume detects auxiliary staged files while ignoring unfinished sidecars and worker shards');
 my $staged_directory = File::Spec->catdir($temporary, 'staged-strain-inputs');
 mkdir $staged_directory or die "Cannot create $staged_directory: $!";
 my $raw_category = File::Spec->catfile($staged_directory, 'all.cat.tmp');

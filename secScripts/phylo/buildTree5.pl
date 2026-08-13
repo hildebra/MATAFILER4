@@ -71,6 +71,7 @@
 #5.67: remove per-locus MSA artifacts and retain compressed concatenated alignments
 
 #5.68: finalize strain staged category/QC/outgroup overlays in the tree job
+#5.69: delegate fused strain worker-shard finalization to a standalone helper
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -100,6 +101,7 @@ use File::Glob qw(bsd_glob);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
 use File::Temp qw(tempfile);
+use FindBin qw($Bin);
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
 	preflight_directory filesystem_capacity
@@ -152,6 +154,7 @@ sub readPostAlignmentRateMetrics;
 sub deterministicRatePartitions;
 sub writeRatePartitionAudit;
 sub publishStagedTreeInputs;
+sub runStagedStrainShardHelper;
 sub stagedTreeInputFiles;
 sub prepareStagedStrainInputs;
 sub finalizeStagedStrainCategory;
@@ -192,7 +195,7 @@ sub rawCoordinateInformation;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.68;
+my $version = 5.69;
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -5810,6 +5813,27 @@ sub runMSAFix {
 }
 
 
+sub runStagedStrainShardHelper {
+	my ($mode, $staging, $manifest, $output, $cores) = @_;
+	my $helper = File::Spec->canonpath(File::Spec->catfile(
+		$Bin, File::Spec->updir, 'MGS', 'finalize_strain_tree_inputs.pl'));
+	die "Staged strain shard helper is missing or empty: $helper\n" unless -s $helper;
+	my @command = ($^X, $helper,
+		'-staging', $staging, '-manifest', $manifest, '-mode', $mode);
+	if ($mode eq 'prepare') {
+		push @command, ('-pigz', $pigzBin, '-cores', $cores,
+			'-publishedDir', $output);
+	} elsif ($mode eq 'cleanup') {
+		push @command, ('-publishedDir', $output);
+	} else {
+		die "Unsupported staged strain shard helper mode '$mode'\n";
+	}
+	my $status = system {$^X} @command;
+	die "Could not execute staged strain shard helper $helper: $!\n" if $status == -1;
+	die "Staged strain shard helper failed in $mode mode with status $status\n"
+		if $status != 0;
+}
+
 sub prepareStagedStrainInputs {
 	my ($staging, $requiredInputs, $sampleQCPath, $configuredOutgroup) = @_;
 	my $plan = File::Spec->catfile($staging, '.strain_tree_input.plan.tsv');
@@ -5857,8 +5881,8 @@ sub prepareStagedStrainInputs {
 	my $finalSampleQC = length($sampleQCName)
 		? File::Spec->catfile($staging, $sampleQCName) : '';
 	my $prepared = File::Spec->catfile($staging, '.strain_tree_input.prepared.tsv');
-	if (-s $prepared && -s $finalCategory
-		&& (!length($sampleQCName) || -s $finalSampleQC)) {
+	if (-s $prepared && fileGZs($finalCategory)
+		&& (!length($sampleQCName) || fileGZs($finalSampleQC))) {
 		open my $preparedIn, '<', $prepared
 			or die "Cannot read staged strain preparation marker $prepared: $!\n";
 		my $preparedLine = <$preparedIn> // '';
@@ -6065,7 +6089,8 @@ sub stagedTreeInputFiles {
 	my @stagedFiles = sort map { File::Spec->catfile($staging, $_) }
 		grep {
 			$_ ne File::Spec->curdir && $_ ne File::Spec->updir
-				&& $_ !~ /^\./ && $_ !~ /\.(?:tmp|write|rewrite|sort|merge)(?:\.|\z)/ && $_ ne 'merge.complete.tsv'
+				&& $_ !~ /^\./ && $_ !~ /\.(?:tmp|write|rewrite|sort|merge)(?:\.|\z)/
+				&& $_ !~ /\.\d+\z/ && $_ ne 'merge.complete.tsv'
 				&& -f File::Spec->catfile($staging, $_)
 				&& -s File::Spec->catfile($staging, $_)
 		} readdir $directoryHandle;
@@ -6081,11 +6106,13 @@ sub publishStagedTreeInputs {
 	my $staging = File::Spec->canonpath(File::Spec->rel2abs($stagingDirectory));
 	my $output = File::Spec->canonpath(File::Spec->rel2abs($outputDirectory));
 	my $stagedPlan = File::Spec->catfile($staging, ".strain_tree_input.plan.tsv");
+	my $shardManifest = File::Spec->catfile($staging, ".strain_tree_input.shards.tsv");
+	my $hasShardHandoff = -s $shardManifest ? 1 : 0;
 	my $stagedPrimaryInput = -s $stagedPlan && -d $staging && grep {
 		fileGZs(File::Spec->catfile($staging, basename($_)))
 	} @{$requiredInputs};
 	my @stagedFiles = stagedTreeInputFiles($staging);
-	my $stagedResidualInput = -s $stagedPlan && @stagedFiles;
+	my $stagedResidualInput = -s $stagedPlan && (@stagedFiles || $hasShardHandoff);
 	unless (@missing || $stagedPrimaryInput || $stagedResidualInput) {
 		print "Using existing persistent tree inputs\n";
 		return;
@@ -6094,11 +6121,22 @@ sub publishStagedTreeInputs {
 	die "Staged tree-input directory does not exist: $staging\n" unless -d $staging;
 	die "Staged tree-input directory must differ from output directory: $staging\n"
 		if $staging eq $output;
+	if ($hasShardHandoff) {
+		runStagedStrainShardHelper(
+			'prepare', $staging, $shardManifest, $output, $cores);
+		$hasShardHandoff = -s $shardManifest ? 1 : 0;
+	}
 	prepareStagedStrainInputs($staging, $requiredInputs, $sampleQCPath, $configuredOutgroup);
 	@missing = grep { !fileGZs($_) } @{$requiredInputs};
 
 	@stagedFiles = stagedTreeInputFiles($staging);
-	die "No usable staged tree inputs found in $staging\n" unless @stagedFiles;
+	if (!@stagedFiles) {
+		die "No usable staged tree inputs found in $staging\n" if @missing;
+		runStagedStrainShardHelper('cleanup', $staging, $shardManifest, $output, $cores)
+			if $hasShardHandoff;
+		print "Tree inputs ready in persistent storage\n";
+		return;
+	}
 	my %stagedBasename = map { basename($_) => 1 } @stagedFiles;
 	my @unavailable = grep {
 		my $requiredBasename = basename($_);
@@ -6133,6 +6171,8 @@ sub publishStagedTreeInputs {
 		die "Tree inputs remain incomplete after staged publication; missing: "
 			.join(", ", map { $_ . "[.gz]" } @missing)."\n";
 	}
+	runStagedStrainShardHelper('cleanup', $staging, $shardManifest, $output, $cores)
+		if $hasShardHandoff;
 	print "Tree inputs ready in persistent storage\n";
 }
 

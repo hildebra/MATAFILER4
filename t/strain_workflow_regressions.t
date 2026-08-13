@@ -129,7 +129,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.06;/,
+like($strain, qr/my \$version = 1\.07;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
@@ -315,7 +315,6 @@ like($strain,
 	'a committed staged aggregate avoids repeated worker-part directory scans');
 ok(index($strain, 'my $preparedScratchInput') >= 0
 	&& index($strain, 'merge.complete.tsv') >= 0
-	&& index($strain, 'Stage-I input: reusing controller-prepared scratch tree inputs') >= 0
 	&& index($strain, 'return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, 1, 1);') >= 0,
 	'legacy fully prepared Phase-II scratch inputs remain resumable without redoing their controller-side work');
 ok(index($strain, 'sub preparedOutgroupLog') >= 0
@@ -323,8 +322,13 @@ ok(index($strain, 'sub preparedOutgroupLog') >= 0
 	&& index($strain, '$publishedPrepared') >= 0
 	&& index($strain, '$scratchPrepared') >= 0
 	&& index($strain, '.strain_tree_input.plan.tsv') >= 0
-	&& index($strain, 'Controller staged-overlay preparation') >= 0,
-	'new outgroup preparation writes a compact staged plan and reports the controller hand-off timing');
+	&& index($strain, '.strain_tree_input.shards.tsv') >= 0
+	&& index($strain, 'writeMGSShardManifest') >= 0
+	&& index($strain, '; outgroup ') >= 0
+	&& index($strain, '; $multiSmpl samples; $ngenes genes; $numCoreL cores; $totMem MB; $memoryProfile') >= 0,
+	'new outgroup preparation writes a shard manifest and reports one compact per-MGS summary');
+unlike($strain, qr/Controller staged-overlay preparation|Tree input hand-off: raw FNA|Tree input: \$multiSmpl samples|Tree input: using complete published|Stage-I input: reusing controller-prepared|Recovery state: validated backbone/,
+	'per-MGS progress omits verbose staging and overlay lines');
 like($strain,
 	qr/my \(%persistentMGSInputStateCache, %scratchMGSInputStateCache\).*?sub invalidateMGSInputState .*?delete \@persistentMGSInputStateCache.*?delete \@scratchMGSInputStateCache/s,
 	'published and scratch triplet states are cached and explicitly invalidated after mutations');
@@ -377,11 +381,14 @@ like($strain,
 	qr/my \$treeTmpGb = int\(.*?\$QSBoptHR->\{tmpSpace\} = \$nodeTmpConfigured \? \$treeTmpGb : 0.*?\? "-tmpSubdir ".*?strain_within\/\$MGS.*?: "-tmpD "/s,
 	'tree jobs request and use node-local scratch when it is configured');
 like($strain,
-	qr/my \$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
+	qr/my \$publishedInputsReady = !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = prepareMGSInputSet\(\$MGS,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
 	'tree outputs are reset only after complete published or recoverable staged per-MGS inputs are verified');
-like($strain,
-	qr/\$scratchInputsReady \|\|= combineMGSgenesDir\(\$MGS,\$tmpD,\$tmpD\).*?Stage-I input: using complete scratch FNA\/FAA\/category files.*?tree job will publish them to the MGS directory/s,
-	'recalculated trees continue staged-input transformation and publication through the normal tree-job path');
+ok(index($strain, 'sub prepareMGSInputSet') >= 0
+	&& index($strain, 'collectMGSShardHandoff($MGS, $tmpD)') >= 0
+	&& index($strain, 'return combineMGSgenesDir($MGS, $tmpD);') >= 0
+	&& index($strain, '$scratchInputsReady ||= prepareMGSInputSet($MGS,$tmpD);') >= 0
+	&& index($strain, '"-stagedInputDir "') >= 0,
+	'normal tree submission prefers worker-shard handoff and retains aggregate merging as a compatibility fallback');
 like($strain,
 	qr/staged input sets recovered for -recalcTrees: \$recalcScratchRecovered/,
 	'tree submission accounting reports staged recalculation recovery separately from skipped dispositions');
@@ -395,12 +402,13 @@ like($strain,
 	qr/include_member_to_seed => 0.*?include_gene_to_locus => 0/s,
 	'within-strain extraction omits unused locus indexes');
 like($strain,
-	qr/my \$rawCategory = "\$tmpD\/\$CATstdof\.tmp".*?%locusSeen, %sampleSeen.*?gzipopen\(\$rawCategory.*?\.strain_tree_input\.outgroup\.cat\.tsv/s,
-	'within-strain outgroup handling scans only the raw category sidecar and emits a small tree-owned overlay');
+	qr/my \@rawCategorySources = \$shardHandoff.*?parts\}\{category\}\{path\}.*?for my \$categorySource \(\@rawCategorySources\).*?gzipopen\(\$categorySource.*?\.strain_tree_input\.outgroup\.cat\.tsv/s,
+	'within-strain outgroup handling scans category shards directly and emits only small overlays');
 ok(index($strain, '.strain_tree_input.plan.tsv') >= 0
 	&& index($strain, 'strain-staged-input-v1\noutgroup\t$OG\nmgs\t$MGS\n') >= 0
-	&& index($strain, 'Tree input hand-off: raw FNA/FAA/category/QC remain staged') >= 0,
-	'within-strain records an explicit tree-owned finalization contract instead of publishing a category itself');
+	&& index($strain, '.strain_tree_input.shards.tsv') >= 0
+	&& index($strain, q{my @line = ('strain-shard-input-v1');}) >= 0,
+	'within-strain records an explicit worker-shard finalization contract without publishing aggregates');
 like($strain,
 	qr/"flushEvery=i"\s+=> \\\$appendWriteTrigger.*?%outgroupGeneCache = \(\).*?'-flushEvery', \$appendWriteTrigger/s,
 	'within-strain extraction exposes its buffer bound to workers and releases per-MGS outgroup caches');

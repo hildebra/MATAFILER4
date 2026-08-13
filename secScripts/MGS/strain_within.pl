@@ -57,7 +57,9 @@ sub createAGlist; sub preComputeConsSNP;
 sub mergeConspecificLogs;
 sub timeNice;
 #sub combineMGSgenes;
-sub combineMGSgenesDir; sub splitWorkerPartsRemain; sub getInputSize;
+sub combineMGSgenesDir; sub prepareMGSInputSet; sub collectMGSShardHandoff;
+sub writeMGSShardManifest; sub readSplitGeneration;
+sub splitWorkerPartsRemain; sub getInputSize;
 sub persistentMGSInputState; sub scratchMGSInputState;
 sub invalidateMGSInputState;
 sub stagedMGSInputsReady; sub evalFileStatus;
@@ -202,12 +204,13 @@ my $completionMessage = "";
 #.96: use the authoritative Phase-I input audit for legacy ledger-free resumes
 #.97: bound EPA-ng placement memory and worker threads independently of tree inference
 #1.06: make buildTree5 finalize staged category/QC/outgroup overlays and input sorting
+#1.07: hand validated worker shards to buildTree5 and compact per-MGS submission output
 #1.01: republish existing EPA placements through final outlier filtering only
 #1.02: invalidate EPA-derived completion state before ordinary saved-command resume
 #1.03: accept bare and explicit numeric redo-EPA flags
 #1.04: propagate forced EPA redo into existing saved tree commands
 #1.05: keep EPA redo in the normal controller path through downstream analysis
-my $version = 1.06;
+my $version = 1.07;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -893,6 +896,7 @@ my $splitStonePrefix = "$LOGDIR/mainExtr";
 my (%recoveryWorkersByMGS, %recoveryRecordsByMGS, %recoveryRowsByMGS);
 my (%recoveryWorkerRecordsByMGS, %recoveryWorkerRowsByMGS);
 my (%recoverySamplesByMGS, %recoveryUniqueSamplesByMGS);
+my %stagedShardHandoff;
 my $recoveryContributionIndexReady = 0;
 
 
@@ -1278,7 +1282,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		# This also permits a complete new-format staging set to replace legacy
 		# published identifiers without rerunning consensus/extraction.
 		unless ($publishedInputsReady) {
-			$scratchInputsReady = combineMGSgenesDir($MGS,$tmpD);
+			$scratchInputsReady = prepareMGSInputSet($MGS,$tmpD);
 			$recalcScratchRecovered++ if $scratchInputsReady;
 		}
 		unless ($publishedInputsReady || $scratchInputsReady) {
@@ -1298,7 +1302,6 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		next;
 	}
 	
-	print "Processing $MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)."\n";
 	my $inputFNAsize = $sizeOfDirs[$lcnt];
 	if ($epaRecovery && !$inputFNAsize) {
 		my $retainedMSA = "$outD2/MSA/MSAli.fna";
@@ -1315,20 +1318,14 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	} #empty input
 	my $mustRegenerateInputs = $repairCAT || $deepRepair || $redoSubmissionData
 		|| exists($legacyLocusMGS{$MGS});
-	if ($epaOnlyRetry) {
-		print "  Recovery state: validated backbone has only EPA-ng placement pending\n";
-	} elsif ($publishedInputsReady && !$mustRegenerateInputs) {
-		print "  Tree input: using complete published FNA/FAA/category files\n";
-	} else {
-		$scratchInputsReady ||= combineMGSgenesDir($MGS,$tmpD);
+	if (!$epaOnlyRetry && !($publishedInputsReady && !$mustRegenerateInputs)) {
+		$scratchInputsReady ||= prepareMGSInputSet($MGS,$tmpD);
 		unless ($scratchInputsReady) {#$outD2); -> keep in tmpdir for now..
 			$treeDisposition{'incomplete published and worker inputs'}++;
 			limitedWarn('MGS with incomplete combined worker input',
 				"$MGS has neither complete published inputs nor complete combined worker input; leaving it for an extraction repair run\n");
 			next;
 		}
-		print "  Stage-I input: using complete scratch FNA/FAA/category files; "
-			."the tree job will publish them to the MGS directory\n";
 	}
 	
 	#final locations (after copying etc)
@@ -1441,15 +1438,12 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	# Keep global catalogue-dependent outgroup selection in this controller, but
 	# hand all large FASTA rewrites, category regrouping, QC finalization, sorting,
 	# compression, and publication to the independently scheduled tree job.
-	my $treeInputPreparationStarted = time;
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
 	if ($epaOnlyRetry) {
 		$inputReady = 1;
 	} else {
 		($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady)=
 			addOutgroup2MGS($MGS,$OG,$tmpD);
-		print "  Controller staged-overlay preparation: ".timeNice(time - $treeInputPreparationStarted)."\n"
-			if $inputReady;
 	}
 	# Locus names are MGS-qualified, so cached outgroup choices have no reuse
 	# after this MGS and would otherwise accumulate for the entire submission.
@@ -1469,7 +1463,7 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
 		if !$epaRecovery && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof")
-			|| fileGZe("$tmpD/$QCstdof.tmp"));
+			|| fileGZe("$tmpD/$QCstdof.tmp") || $stagedShardHandoff{$MGS});
 	$Tcmd .= "-stagedInputDir ".shellQuote($tmpD)." " if !$epaRecovery && $needsCopy;
 	$Tcmd .= "-redoEPAfilter 1 " if $redoEPAfilter
 		&& -s "$outD2/phylo/epa-ng/epa_result.jplace";
@@ -1479,11 +1473,13 @@ foreach my $MGS (@specis){ #loop creates per specI file structure to run buildTr
 		."-placementPendingMarker ".shellQuote($placementPendingMarker)." ";
 
 	if ($epaOnlyRetry) {
-		print "  EPA-only retry: 1 core, $totMem MB memory; retained MSA, model, "
-			."and backbone will be read-only inputs\n";
+		print "$MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)
+			."; outgroup ".(length($OG) ? $OG : 'none')
+			."; samples n/a; genes n/a; 1 core; $totMem MB; EPA-ng placement-only retry\n";
 	} elsif ($multiSmpl > 2 && $ngenes >= $MGStoolowGsThr){
-		print "  Tree input: $multiSmpl samples, $ngenes potential genes; $numCoreL cores, "
-			."$totMem MB memory ($memoryProfile profile)\n";
+		print "$MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)
+			."; outgroup ".(length($OG) ? $OG : 'none')
+			."; $multiSmpl samples; $ngenes genes; $numCoreL cores; $totMem MB; $memoryProfile\n";
 	} else {
 		my $reason = $multiSmpl <= 2 ? 'too_few_samples' : 'too_few_usable_genes';
 		$treeDisposition{"valid no-tree: $reason"}++;
@@ -1642,6 +1638,142 @@ exit(0);
 #########################################################################################
 #########################################################################################
 
+
+sub readSplitGeneration {
+	return 'unsplit' unless $maxSubJob;
+	open my $input, '<', $splitManifest
+		or die "Cannot read completed split generation $splitManifest: $!\n";
+	my $line = <$input> // '';
+	close $input or die "Cannot close completed split generation $splitManifest: $!\n";
+	$line =~ s/[\r\n]+\z//;
+	die "Malformed completed split generation $splitManifest\n"
+		unless $line =~ /^([A-Za-z0-9_.:-]+)\t(\d+)$/ && $2 == $maxSubJob;
+	my $generation = $1;
+	die "Split generation is no longer complete: $splitManifest\n"
+		unless split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob);
+	return $generation;
+}
+
+sub collectMGSShardHandoff {
+	my ($MGS, $tmpD) = @_;
+	my @types = (
+		['fna', $FNAstdof], ['faa', $FAAstdof], ['link', $LINKstdof],
+		['category', "$CATstdof.tmp"], ['qc', "$QCstdof.tmp"],
+	);
+	my $workerCount = $maxSubJob || 1;
+	my (%parts, %workerPart);
+	for my $type (@types) {
+		my ($label, $name) = @{$type};
+		my @found = exact_worker_parts("$tmpD/$name", $workerCount);
+		$parts{$label} = \@found;
+		for my $path (@found) {
+			die "Cannot determine worker suffix for $path\n" unless $path =~ /\.(\d+)\z/;
+			$workerPart{$1}{$label} = $path;
+		}
+	}
+	return unless grep { @{$parts{$_}} } map { $_->[0] } @types;
+	return unless !$maxSubJob
+		|| split_generation_complete($splitManifest, $splitStonePrefix, $maxSubJob);
+	return unless $recoveryContributionIndexReady;
+	my @expectedWorkers = sort { $a <=> $b }
+		keys %{$recoveryWorkersByMGS{$MGS} || {}};
+	return unless @expectedWorkers;
+	my %expected = map { $_ => 1 } @expectedWorkers;
+	for my $type (@types) {
+		my ($label) = @{$type};
+		my @actual = sort { $a <=> $b } map {
+			/\.(\d+)\z/ ? 0 + $1 : ()
+		} @{$parts{$label}};
+		my @missing = grep { !exists $workerPart{$_}{$label} } @expectedWorkers;
+		my @unexpected = grep { !$expected{$_} } @actual;
+		if (@missing || @unexpected) {
+			limitedWarn('incomplete worker shard handoff',
+				"Cannot hand $MGS/$label to buildTree5: missing="
+				.(@missing ? join(',', @missing) : 'none')." unexpected="
+				.(@unexpected ? join(',', @unexpected) : 'none')."\n");
+			return;
+		}
+	}
+	my @workers;
+	my ($workerRows, $workerRecords) = (0, 0);
+	for my $worker (@expectedWorkers) {
+		my %workerParts;
+		for my $type (@types) {
+			my ($label) = @{$type};
+			my $path = $workerPart{$worker}{$label};
+			my @stat = stat($path);
+			return unless @stat && $stat[7] > 0;
+			$workerParts{$label} = {
+				path => $path, basename => basename($path), bytes => $stat[7],
+			};
+		}
+		my $rows = $recoveryWorkerRowsByMGS{$MGS}{$worker} // 0;
+		my $records = $recoveryWorkerRecordsByMGS{$MGS}{$worker} // 0;
+		$workerRows += $rows;
+		$workerRecords += $records;
+		push @workers, {
+			id => $worker,
+			rows => $rows,
+			records => $records,
+			parts => \%workerParts,
+		};
+	}
+	my $expectedRecords = $recoveryRecordsByMGS{$MGS} // 0;
+	my $expectedSamples = $recoveryUniqueSamplesByMGS{$MGS}
+		// scalar(keys %{$recoverySamplesByMGS{$MGS} || {}});
+	die "Recovery contribution totals changed while preparing $MGS: "
+		."worker rows=$workerRows expected samples=$expectedSamples; "
+		."worker records=$workerRecords expected records=$expectedRecords\n"
+		unless $workerRows == $expectedSamples && $workerRecords == $expectedRecords;
+	return {
+		generation => readSplitGeneration(), workers => \@workers,
+		expected_records => $expectedRecords,
+		expected_ingroup_samples => $expectedSamples,
+	};
+}
+
+sub prepareMGSInputSet {
+	my ($MGS, $tmpD) = @_;
+	if (my $handoff = collectMGSShardHandoff($MGS, $tmpD)) {
+		$stagedShardHandoff{$MGS} = $handoff;
+		return 1;
+	}
+	delete $stagedShardHandoff{$MGS};
+	return combineMGSgenesDir($MGS, $tmpD);
+}
+
+sub writeMGSShardManifest {
+	my ($path, $handoff, $MGS, $OG, $loci, $ingroupSamples, $writer) = @_;
+	die "Cannot write a shard manifest without a validated handoff for $MGS\n"
+		unless $handoff && @{$handoff->{workers} || []};
+	die "Shard/category sample count mismatch for $MGS: category=$ingroupSamples manifest=$handoff->{expected_ingroup_samples}\n"
+		unless $ingroupSamples == $handoff->{expected_ingroup_samples};
+	my @line = ('strain-shard-input-v1');
+	push @line,
+		join("\t", 'value', 'mgs', $MGS),
+		join("\t", 'value', 'outgroup', $OG),
+		join("\t", 'value', 'generation', $handoff->{generation}),
+		join("\t", 'value', 'separator', $SaSe),
+		join("\t", 'value', 'expected_records', $handoff->{expected_records}),
+		join("\t", 'value', 'expected_ingroup_samples', $ingroupSamples),
+		join("\t", 'value', 'expected_loci', $loci),
+		join("\t", 'output', 'fna', $FNAstdof),
+		join("\t", 'output', 'faa', $FAAstdof),
+		join("\t", 'output', 'link', $LINKstdof),
+		join("\t", 'output', 'category', $CATstdof),
+		join("\t", 'output', 'qc', $QCstdof),
+		join("\t", 'output', 'data_log', 'data.log');
+	for my $worker (@{$handoff->{workers}}) {
+		push @line, join("\t", 'worker', $worker->{id},
+			$worker->{rows}, $worker->{records});
+		for my $type (qw(fna faa link category qc)) {
+			my $part = $worker->{parts}{$type};
+			push @line, join("\t", 'part', $worker->{id}, $type,
+				$part->{basename}, $part->{bytes});
+		}
+	}
+	$writer->($path, join("\n", @line)."\n", 'staged worker-shard manifest');
+}
 
 sub combineMGSgenesDir{
 	my ($MGS,$tmpD) = @_;
@@ -1937,6 +2069,7 @@ sub treeOutgroupCandidates {
 sub addOutgroup2MGS{
 	my ($MGS,$OG,$tmpD) = @_;
 	my $outD2 = $SIdirs{$MGS};
+	my $shardHandoff = $stagedShardHandoff{$MGS};
 	my $outputReady = fileGZe("$outD2/$FNAstdof")
 		&& fileGZe("$outD2/$FAAstdof") && fileGZe("$outD2/$CATstdof");
 	my ($publishedPrepared, $publishedOG) = preparedOutgroupLog($outD2);
@@ -1964,7 +2097,7 @@ sub addOutgroup2MGS{
 		&& fileGZe("$tmpD/$CATstdof") && fileGZe("$tmpD/$QCstdof")
 		&& -s "$tmpD/merge.complete.tsv";
 	my ($scratchPrepared, $preparedOG) = preparedOutgroupLog($tmpD);
-	if ($preparedScratchInput && $scratchPrepared && !$repairCAT && !$deepRepair && !$redoSubmissionData
+	if (!$shardHandoff && $preparedScratchInput && $scratchPrepared && !$repairCAT && !$deepRepair && !$redoSubmissionData
 			&& !exists($legacyLocusMGS{$MGS})) {
 		my (%samplesSeen, $genesSeen);
 		my ($catFh) = gzipopen("$tmpD/$CATstdof", "prepared scratch category file");
@@ -1978,14 +2111,17 @@ sub addOutgroup2MGS{
 			}
 		}
 		close $catFh or die "Cannot close prepared scratch category file for $MGS: $!\n";
-		print "  Stage-I input: reusing controller-prepared scratch tree inputs\n";
 		return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, 1, 1);
 	}
 
 	my $rawCategory = "$tmpD/$CATstdof.tmp";
-	my $stageReady = fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
-		&& fileGZe($rawCategory) && fileGZe("$tmpD/$QCstdof.tmp")
-		&& -s "$tmpD/merge.complete.tsv";
+	my @rawCategorySources = $shardHandoff
+		? map { $_->{parts}{category}{path} } @{$shardHandoff->{workers}}
+		: ($rawCategory);
+	my $stageReady = $shardHandoff ? scalar(@rawCategorySources)
+		: fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
+			&& fileGZe($rawCategory) && fileGZe("$tmpD/$QCstdof.tmp")
+			&& -s "$tmpD/merge.complete.tsv";
 	if (!$stageReady) {
 		limitedWarn('MGS missing raw staged tree input',
 			"$MGS has no complete raw staged FNA/FAA/category/QC input in $tmpD; leaving it for repair\n");
@@ -1997,18 +2133,20 @@ sub addOutgroup2MGS{
 	# sidecar and performs the expensive locus regrouping in its own job, without
 	# opening gene-catalogue or reference indexes.
 	my (%locusSeen, %sampleSeen);
-	my ($rawFh) = gzipopen($rawCategory, "raw staged category input", 1);
-	while (my $line = <$rawFh>) {
-		$line =~ s/[\r\n]+\z//;
-		next unless length($line);
-		my @fields = split /\t/, $line, -1;
-		die "Malformed raw staged category row for $MGS: $line\n"
-			unless @fields >= 4 && $fields[0] eq $MGS
-				&& length($fields[1]) && length($fields[2]) && length($fields[3]);
-		$locusSeen{$fields[1]} = 1;
-		$sampleSeen{$fields[2]} = 1;
+	for my $categorySource (@rawCategorySources) {
+		my ($rawFh) = gzipopen($categorySource, "raw staged category input", 1);
+		while (my $line = <$rawFh>) {
+			$line =~ s/[\r\n]+\z//;
+			next unless length($line);
+			my @fields = split /\t/, $line, -1;
+			die "Malformed raw staged category row for $MGS: $line\n"
+				unless @fields >= 4 && $fields[0] eq $MGS
+					&& length($fields[1]) && length($fields[2]) && length($fields[3]);
+			$locusSeen{$fields[1]} = 1;
+			$sampleSeen{$fields[2]} = 1;
+		}
+		close $rawFh or die "Cannot close raw staged category input $categorySource: $!\n";
 	}
-	close $rawFh or die "Cannot close raw staged category input $rawCategory: $!\n";
 	my @curCogs = sort keys %locusSeen;
 	if (@curCogs < $MGStoolowGsThr) {
 		limitedWarn('MGS with too few usable genes for tree construction',
@@ -2052,7 +2190,6 @@ sub addOutgroup2MGS{
 				"Selected outgroup $OG for $MGS is absent from the gene catalogue\n");
 			$OG = "";
 		}
-		print "  Using outgroup $OG\n" if $OG ne '';
 	}
 
 	my ($overlayFNA, $overlayFAA, $overlayCategory, $outgroupGenes) = ('', '', '', 0);
@@ -2074,6 +2211,7 @@ sub addOutgroup2MGS{
 			$OG = '';
 		}
 	}
+	my $ingroupSampleCount = scalar keys %sampleSeen;
 	$sampleSeen{$OG} = 1 if $OG ne '' && $outgroupGenes;
 
 	# The plan and small overlays are the only Phase-II outputs written by the
@@ -2098,8 +2236,9 @@ sub addOutgroup2MGS{
 		'staged outgroup category overlay') if length($overlayCategory);
 	$writeOverlay->("$tmpD/.strain_tree_input.plan.tsv",
 		"strain-staged-input-v1\noutgroup\t$OG\nmgs\t$MGS\n", 'staged tree-input plan');
-	print "  Tree input hand-off: raw FNA/FAA/category/QC remain staged; buildTree5 will finalize and publish them"
-		.($outgroupGenes ? " with $outgroupGenes outgroup loci" : '')."\n";
+	writeMGSShardManifest("$tmpD/.strain_tree_input.shards.tsv",
+		$shardHandoff, $MGS, $OG, scalar(@curCogs), $ingroupSampleCount, $writeOverlay)
+		if $shardHandoff;
 	return (scalar(keys %sampleSeen), scalar(@curCogs), $OG, 1, 1);
 }
 
@@ -3009,7 +3148,11 @@ sub getInputSize{
 			$counts{no_recoverable_loci}++;
 		} elsif ($scratchState eq 'complete') {
 			($state, $source) = ('ready', 'scratch');
-			for my $path (bsd_glob("$tmpD/$FNAstdof*")) {
+			my @workerFNA = exact_worker_parts("$tmpD/$FNAstdof", $maxSubJob || 1);
+			my @sizeSources = @workerFNA ? @workerFNA : grep {
+				$_ eq "$tmpD/$FNAstdof" || $_ eq "$tmpD/$FNAstdof.gz"
+			} bsd_glob("$tmpD/$FNAstdof*");
+			for my $path (@sizeSources) {
 				$inputFNAsize += fileGZs($path) / (1024 * 1024);
 			}
 		} elsif ($publishedState eq 'complete') {
