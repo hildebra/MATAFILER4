@@ -269,6 +269,78 @@ is($reconciled, '302',
 	'strict recovery removes a fulfilled aged-out dependency and retains a controller-known job');
 is($dependency_error, '', 'strict recovery accepts the verified dependency set');
 
+my $capture_script = File::Spec->catfile($root, 'slurm-stderr.pl');
+open my $capture_fh, '>', $capture_script or die $!;
+print {$capture_fh} "print STDERR qq{captured scheduler error\\n}; exit 7;\\n";
+close $capture_fh or die $!;
+my ($captured_error, $captured_status) = Mods::Subm::_run_slurm_submission(
+	"$^X $capture_script\n", {});
+is($captured_error, "captured scheduler error\n",
+	'a newline-terminated scheduler command still captures stderr');
+is($captured_status >> 8, 7,
+	'scheduler stderr capture preserves the real non-zero exit status');
+
+my ($transient_attempts, @transient_sleeps) = (0);
+my @transient_warnings;
+my ($transient_output, $transient_status, $transient_retried);
+{
+	local $SIG{__WARN__} = sub { push @transient_warnings, @_ };
+	($transient_output, $transient_status, $transient_retried) =
+		submitSlurmWithDependencyRecovery(
+			"sbatch transient.sh\n", $capture_script, {
+				slurmSubmitMaxAttempts => 3,
+				slurmSubmitRetrySeconds => 2,
+				slurmSubmitRetryMaxSeconds => 3,
+				schedulerSleeper => sub { push @transient_sleeps, $_[0] },
+				slurmSubmissionRunner => sub {
+					$transient_attempts++;
+					return $transient_attempts == 1
+						? ("sbatch: error: Batch job submission failed: Unexpected message received\n", 256)
+						: ("Submitted batch job 8111\n", 0);
+				},
+			},
+		);
+}
+is($transient_status, 0, 'a transient Slurm transport response is retried successfully');
+is($transient_output, "Submitted batch job 8111\n",
+	'transient recovery returns the accepted submission response');
+is($transient_retried, 1, 'transient submission recovery reports that it retried');
+is($transient_attempts, 2, 'the exact Unexpected-message failure causes one resubmission');
+is_deeply(\@transient_sleeps, [2], 'transient submission retry uses bounded backoff');
+like(join('', @transient_warnings), qr/Unexpected message received.*retrying in 2s/s,
+	'transient retry remains visible without terminating the controller');
+
+my $permanent_attempts = 0;
+my ($permanent_output, $permanent_status, $permanent_retried) =
+	submitSlurmWithDependencyRecovery(
+		'sbatch permanent.sh', $capture_script, {
+			slurmSubmitMaxAttempts => 8,
+			schedulerSleeper => sub { die 'permanent errors must not sleep' },
+			slurmSubmissionRunner => sub {
+				$permanent_attempts++;
+				return ("sbatch: error: Invalid account or account/partition combination specified\n", 256);
+			},
+		},
+	);
+is($permanent_status, 256, 'a permanent Slurm configuration error remains a failure');
+is($permanent_retried, 0, 'a permanent Slurm error is not retried');
+is($permanent_attempts, 1, 'permanent submission errors make exactly one attempt');
+like($permanent_output, qr/Invalid account/, 'permanent failure keeps its diagnostic');
+
+my $warning_script = File::Spec->catfile($root, 'warning-response.sh');
+my $warning_options = slurm_options();
+$warning_options->{doSubmit} = 1;
+$warning_options->{submittedJobs} = 0;
+$warning_options->{slurmSubmissionRunner} = sub {
+	return ("sbatch: warning: using default cluster\nSubmitted batch job 8123\n", 0);
+};
+my ($warning_job) = qsubSystem(
+	$warning_script, 'echo accepted', 1, '1G', 'warningParse',
+	'', '', 1, [], $warning_options,
+);
+is($warning_job, 'run8123',
+	'a valid Slurm job-ID line is parsed despite surrounding warning text');
+
 my $retry_script = File::Spec->catfile($root, 'retry-dependency.sh');
 open my $retry_fh, '>', $retry_script or die $!;
 print {$retry_fh} "#!/bin/bash\n#SBATCH --dependency=afterok:401:402\necho recovered\n";

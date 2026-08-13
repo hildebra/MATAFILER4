@@ -583,11 +583,58 @@ sub reconcileSlurmDependencies {
 
 sub _run_slurm_submission {
 	my ($command, $optHR) = @_;
+	$command =~ s/\s+\z//;
 	if (my $runner = $optHR->{slurmSubmissionRunner}) {
 		return $runner->($command);
 	}
 	my $output = `$command 2>&1`;
 	return ($output, $?);
+}
+
+sub _transient_slurm_submission_error {
+	my ($output, $status) = @_;
+	return 0 unless $status != 0;
+	return defined($output) && $output =~ /(?:
+		Unexpected[ ]message[ ]received |
+		Unable[ ]to[ ]contact[ ]Slurm[ ]controller |
+		(?:Socket|Connection)[ ]timed[ ]out |
+		Connection[ ]refused |
+		Communication[ ]connection[ ]failure |
+		slurm_(?:send|receive)_msg |
+		Resource[ ]temporarily[ ]unavailable |
+		Protocol[ ]error |
+		Interrupted[ ]system[ ]call
+	)/ix;
+}
+
+sub _run_slurm_submission_with_retries {
+	my ($command, $optHR) = @_;
+	my $maximum_attempts = defined($optHR->{slurmSubmitMaxAttempts})
+		? int($optHR->{slurmSubmitMaxAttempts}) : 8;
+	$maximum_attempts = 1 if $maximum_attempts < 1;
+	my $delay = defined($optHR->{slurmSubmitRetrySeconds})
+		? 0 + $optHR->{slurmSubmitRetrySeconds} : 2;
+	$delay = 0 if $delay < 0;
+	my $maximum_delay = defined($optHR->{slurmSubmitRetryMaxSeconds})
+		? 0 + $optHR->{slurmSubmitRetryMaxSeconds} : 30;
+	$maximum_delay = $delay if $maximum_delay < $delay;
+	my $sleeper = $optHR->{schedulerSleeper} || sub { sleep($_[0]); };
+
+	for my $attempt (1 .. $maximum_attempts) {
+		my ($output, $status) = _run_slurm_submission($command, $optHR);
+		return ($output, $status, $attempt > 1 ? 1 : 0)
+			unless _transient_slurm_submission_error($output, $status)
+				&& $attempt < $maximum_attempts;
+		my $diagnostic = defined($output) ? $output : '';
+		$diagnostic =~ s/[\r\n]+/ /g;
+		$diagnostic =~ s/^\s+|\s+\z//g;
+		warn "Transient Slurm submission failure (attempt $attempt/$maximum_attempts)"
+			.(length($diagnostic) ? ": $diagnostic" : '')."; retrying in ${delay}s\n";
+		$sleeper->($delay) if $delay > 0;
+		$delay *= 2;
+		$delay = $maximum_delay if $delay > $maximum_delay;
+	}
+	die "Internal error: exhausted Slurm retry loop without returning\n";
 }
 
 sub _slurm_script_dependency {
@@ -639,8 +686,9 @@ sub _rewrite_slurm_script_dependency {
 sub submitSlurmWithDependencyRecovery {
 	my ($command, $script_path, $optHR) = @_;
 	$optHR ||= {};
-	my ($output, $status) = _run_slurm_submission($command, $optHR);
-	return ($output, $status, 0)
+	my ($output, $status, $transient_retry) =
+		_run_slurm_submission_with_retries($command, $optHR);
+	return ($output, $status, $transient_retry)
 		unless $status != 0 && $output =~ /Job dependency problem/i;
 
 	my ($dependency_type, @dependencies) = _slurm_script_dependency($script_path);
@@ -664,7 +712,8 @@ sub submitSlurmWithDependencyRecovery {
 		. ", and retrying once with "
 		. (@reconciled ? join(',', @reconciled) : 'no dependency directive')."\n";
 
-	my ($retry_output, $retry_status) = _run_slurm_submission($command, $optHR);
+	my ($retry_output, $retry_status) =
+		_run_slurm_submission_with_retries($command, $optHR);
 	return ($retry_output, $retry_status, 1);
 }
 
@@ -987,8 +1036,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 			die $message;
 		}
 		if ($LSF == 2){#slurm get jobid
-			chomp $ret;
-			unless ($ret =~ /^Submitted batch job (\d+)\s*$/) {
+			unless ($ret =~ /^Submitted[ \t]+batch[ \t]+job[ \t]+(\d+)[ \t]*\r?$/m) {
 				delete $optHR->{liveJobThrottleState};
 				die "Could not parse Slurm job id from submission output: $ret\n";
 			}
