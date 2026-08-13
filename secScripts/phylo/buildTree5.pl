@@ -72,6 +72,8 @@
 
 #5.68: finalize strain staged category/QC/outgroup overlays in the tree job
 #5.69: delegate fused strain worker-shard finalization to a standalone helper
+#5.70: distinguish MSA-selection checkpoints from downstream tree-stage settings
+#5.71: consolidate internal workflow policy and lifecycle checkpoints into one state file
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -148,7 +150,7 @@ sub informativeSequenceLength;
 sub writeTaxonAwareLocusAudit;
 sub writeTaxonAwareSampleAudit;
 sub writeSelectionAttritionAudit;
-sub writePostAlignmentQCPolicy;
+sub legacyPolicyFileMatches;
 sub alignmentFileStem;
 sub readPostAlignmentRateMetrics;
 sub deterministicRatePartitions;
@@ -192,10 +194,14 @@ sub alignmentCollectionStats;
 sub alignmentCollectionStatsFromReport;
 sub rawCoordinateInformation;
 
+sub readBuildTreeState;
+sub buildTreeStatePolicyMatches;
+sub writeBuildTreeState;
+sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = 5.69;
+my $version = "5.71";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -203,8 +209,9 @@ my $synSummaryCount = 0;
 my $synSiteTotal = 0;
 my ($msaFixCleanedLoci, $msaFixBorderMasked, $msaFixLowIdMasked, $msaFixMinGoodRemoved) = (0, 0, 0, 0);
 my $nonSynSiteTotal = 0;
-my ($workflowStage, $workflowHeartbeat, $workflowFailure) =
-	('initialization', '', '');
+my ($workflowStage, $workflowStateFile, $workflowStatus, $workflowReason) =
+	(q{initialization}, q{}, q{running}, q{});
+my ($workflowMsaSelectionPolicy, $workflowTreeStagePolicy) = (q{}, q{});
 
 END {
 	writeWorkflowFailure($@ || 'non-zero process exit') if $? != 0;
@@ -649,8 +656,7 @@ make_path($outD) unless -d $outD;
 die "Output path is not a directory: $outD\n" unless -d $outD;
 $terminalMarker ||= File::Spec->catfile($outD, 'noTree.sto');
 $placementPendingMarker ||= File::Spec->catfile($outD, 'placementPending.sto');
-$workflowHeartbeat = File::Spec->catfile($outD, 'buildTree.heartbeat.tsv');
-$workflowFailure = File::Spec->catfile($outD, 'buildTree.failure.tsv');
+$workflowStateFile = File::Spec->catfile($outD, q{buildTree.state.tsv});
 writeWorkflowHeartbeat('preflight');
 
 if (length($stagedInputDir)) {
@@ -913,11 +919,18 @@ my %selectionAttrition = map { $_ => 'NA' } qw(
 	aligned_loci alignment_failed_loci post_qc_loci final_loci final_samples
 	backbone_samples placement_samples excluded_samples
 );
-my $postAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
-my $alignmentWorkPolicyFile = "$MsaD/alignment_work.policy.tsv";
+my $legacyPostAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
+my $legacyAlignmentWorkPolicyFile = "$MsaD/alignment_work.policy.tsv";
+my $legacyPostAlignmentPolicyFile = "$treeD/post_alignment.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=12",
+	"schema=13",
 	"msa_program=$MSAprog",
+	"post_filter=$postFilter",
+	"sample_definition=$smplDef",
+	"sample_separator=$smplSep",
+	"outgroup=$outgroup",
+	"synonymous_sites=$calcSyn",
+	"nonsynonymous_sites=$calcNonSyn",
 	"fna_input=".inputFingerprint($fnFna),
 	"faa_input=".inputFingerprint($aaFna),
 	"category_input=".inputFingerprint($cogCats),
@@ -944,8 +957,6 @@ my $postAlignmentQCPolicy = join("\t",
 	"relative_modified_z=".($postAlignmentDivergenceQC
 		? $postAlignmentRelativeZ : "disabled"),
 	"minimum_loci_relative=$postAlignmentMinLociRelative",
-	"iqtree_auto_model=$treeAutoModel",
-	"iqtree_legacy=$iqLegacy",
 	"rate_partition_merge=$rateMergePartitions",
 	"rate_partition_maximum_bins=$rateMergeMaxBins",
 	"rate_partition_target_sites=$rateMergeTargetSites",
@@ -959,29 +970,58 @@ my $postAlignmentQCPolicy = join("\t",
 	"taxon_aware_target_loci=$taxonAwareTargetLoci",
 	"taxon_aware_target_nt=$taxonAwareTargetNT",
 )."\n";
-my $postAlignmentQCPolicyMatches = 0;
-if (-s $postAlignmentQCPolicyFile) {
-	open my $policyRead, "<", $postAlignmentQCPolicyFile
-		or die "Cannot read locus-QC policy $postAlignmentQCPolicyFile: $!\n";
-	my $existingPolicy = do { local $/; <$policyRead> };
-	close $policyRead
-		or die "Cannot close locus-QC policy $postAlignmentQCPolicyFile: $!\n";
-	$postAlignmentQCPolicyMatches = $existingPolicy eq $postAlignmentQCPolicy;
-}
-my $legacyWithinSpeciesQCAudit = !$taxonAwareLocusSelection
-	&& !$rateMergePartitions && $withinSpecies
-	&& -s $postAlignmentQCReport && !-e $postAlignmentQCPolicyFile;
+my $postAlignmentPolicy = join("\t",
+	"schema=1",
+	"tree_methods=iqtree:$doIQTree,raxml:$doRAXML,raxmlng:$doRAXMLng,fasttree:$doFastTree,veryfasttree:$doVeryFastTree",
+	"bootstrap=$bootStrap",
+	"iqtree_auto_model=$treeAutoModel",
+	"iqtree_fast=$iqFast",
+	"iqtree_memory_mb=$iqMemMB",
+	"iqtree_pathogen=$iqPathogen",
+	"iqtree_legacy=$iqLegacy",
+	"epa_threads=$epaThreads",
+	"epa_memory_mb=$epaMaxMemMB",
+	"epa_pendant_outlier_factor=$epaPendantOutlierFactor",
+	"epa_pendant_minimum_threshold=$epaPendantMinThreshold",
+	"tree_shrink=$useTreeShrink",
+	"clonal_frame=$doCFML",
+	"gubbins=$doGubbins",
+	"dna_distance=$calcDNAdiff",
+	"strict_backbone=$strictBackbone",
+	"strict_backbone_fraction=$strictBackboneFraction",
+	"strict_backbone_minimum_samples=$strictBackboneMinSamples",
+	"placement_minimum_overlap=$placementMinOverlap",
+)."\n";
+$workflowMsaSelectionPolicy = $postAlignmentQCPolicy;
+$workflowTreeStagePolicy = $postAlignmentPolicy;
+my $buildTreeState = readBuildTreeState($workflowStateFile);
+my $stateHasPolicies = defined($buildTreeState->{msa_selection_policy})
+	&& length($buildTreeState->{msa_selection_policy})
+	&& defined($buildTreeState->{tree_stage_policy})
+	&& length($buildTreeState->{tree_stage_policy});
+my $legacyMsaSelectionPolicyMatches = legacyPolicyFileMatches(
+	$legacyAlignmentWorkPolicyFile, $postAlignmentQCPolicy,
+	"legacy alignment-work policy")
+	|| legacyPolicyFileMatches($legacyPostAlignmentQCPolicyFile,
+		$postAlignmentQCPolicy, "legacy locus-QC policy");
+my $legacyTreeStagePolicyMatches = legacyPolicyFileMatches(
+	$legacyPostAlignmentPolicyFile, $postAlignmentPolicy,
+	"legacy post-alignment tree-stage policy");
+my $postAlignmentQCPolicyMatches = $stateHasPolicies
+	? buildTreeStatePolicyMatches($buildTreeState,
+		'msa_selection_policy', $postAlignmentQCPolicy)
+	: $legacyMsaSelectionPolicyMatches;
+my $alignmentWorkPolicyMatches = $postAlignmentQCPolicyMatches;
+my $postAlignmentPolicyMatches = $stateHasPolicies
+	? buildTreeStatePolicyMatches($buildTreeState,
+		'tree_stage_policy', $postAlignmentPolicy)
+	: $legacyTreeStagePolicyMatches;
+my $legacyWithinSpeciesQCAudit = !$stateHasPolicies
+	&& !$taxonAwareLocusSelection && !$rateMergePartitions && $withinSpecies
+	&& -s $postAlignmentQCReport && !-e $legacyPostAlignmentQCPolicyFile
+	&& !-e $legacyAlignmentWorkPolicyFile;
 my $postAlignmentQCAuditCurrent = $postAlignmentQCPolicyMatches
 	&& (!$postAlignmentLocusQC || -s $postAlignmentQCReport);
-my $alignmentWorkPolicyMatches = 0;
-if (-s $alignmentWorkPolicyFile) {
-	my $workPolicy = retry_open('<', $alignmentWorkPolicyFile,
-		label => "read alignment-work policy");
-	my $existingWorkPolicy = do { local $/; <$workPolicy> };
-	retry_close($workPolicy, "close alignment-work policy");
-	$alignmentWorkPolicyMatches = $existingWorkPolicy eq $postAlignmentQCPolicy;
-}
-
 $postAlignmentQCAuditCurrent = 1 if $legacyWithinSpeciesQCAudit;
 my $durableCompletionTree = reusableCompletionTree($completionMarker, $outD);
 my $requestedPrimaryMethods = $doIQTree + $doRAXML + $doRAXMLng
@@ -1001,7 +1041,8 @@ my $hasAdditionalAnalysis = $Ete || $calcDistMat || $calcDNAdiff
 	|| $doFastGear || $doFastGearSummary || $gzipInput;
 if (length($durableCompletionTree) && $completionMatchesMethod
 		&& !$hasAdditionalAnalysis
-		&& ($cogCats eq '' || $postAlignmentQCAuditCurrent)) {
+		&& ($cogCats eq '' || ($alignmentWorkPolicyMatches
+		&& $postAlignmentQCAuditCurrent && $postAlignmentPolicyMatches))) {
 	# The marker is published only after tree validation and all requested standard
 	# stages finish. A matching policy therefore avoids reopening every locus and
 	# rescanning the concatenated alignment on a duplicate/resumed invocation.
@@ -1009,7 +1050,8 @@ if (length($durableCompletionTree) && $completionMatchesMethod
 	safeRemoveTree($tmpD, $tmpBase);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
-	clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
+	writeBuildTreeState();
+	cleanupLegacyBuildTreeStateFiles();
 	writeWorkflowHeartbeat('complete');
 	print "Recovery state: durable completion marker and current policy match; "
 		."skipping alignment/QC/tree revalidation ($durableCompletionTree)\n";
@@ -1033,16 +1075,40 @@ if ($strictBackbone && $treesDone
 		$treesDone = 0;
 	}
 }
-if ($cogCats ne "" && $continue
-		&& ((($treesDone || fileGZe($multAli)) && !$postAlignmentQCAuditCurrent)
-			|| (!$treesDone && !fileGZe($multAli)
-				&& !$alignmentWorkPolicyMatches))) {
-	print "Recovery state: existing multi-locus alignment predates the current "
-		."post-alignment locus-retention policy; rebuilding per-locus alignments and tree outputs\n";
+if ($cogCats ne "" && $continue && !$alignmentWorkPolicyMatches) {
+	print "Recovery state: MSA-selection policy changed; rebuilding per-locus alignments and tree outputs\n";
 	safeRemoveTree($MsaD, $outD);
 	safeRemoveTree($treeD, $outD);
 	make_path($MsaD);
 	make_path($treeD);
+	$treesDone = 0;
+} elsif ($cogCats ne "" && $continue && !$postAlignmentQCAuditCurrent) {
+	print "Recovery state: post-alignment QC checkpoint is unavailable; rebuilding per-locus alignments and tree outputs\n";
+	safeRemoveTree($MsaD, $outD);
+	safeRemoveTree($treeD, $outD);
+	make_path($MsaD);
+	make_path($treeD);
+	$treesDone = 0;
+} elsif ($cogCats ne "" && $continue && !$postAlignmentPolicyMatches
+		&& ($treesDone || fileGZe($multAli))) {
+	my $postAlignmentQCBackup = "";
+	if ($postAlignmentLocusQC && -s $postAlignmentQCReport) {
+		my ($backupHandle, $backupPath) = tempfile(
+			"post-alignment-locus-qc-XXXXXX", DIR => $tmpD, UNLINK => 1);
+		retry_close($backupHandle, "close post-alignment QC backup");
+		copy($postAlignmentQCReport, $backupPath)
+			or die "Cannot preserve post-alignment QC report $postAlignmentQCReport: $!\n";
+		$postAlignmentQCBackup = $backupPath;
+	}
+	print "Recovery state: downstream tree-stage policy changed; retaining the selected MSA and rebuilding tree outputs\n";
+	clearLifecycleMarker($completionMarker, "clear completion before tree-stage rebuild");
+	safeRemoveTree($treeD, $outD);
+	make_path($treeD);
+	if ($postAlignmentQCBackup ne "") {
+		copy($postAlignmentQCBackup, $postAlignmentQCReport)
+			or die "Cannot restore post-alignment QC report $postAlignmentQCReport: $!\n";
+		retry_unlink($postAlignmentQCBackup, label => "remove post-alignment QC backup");
+	}
 	$treesDone = 0;
 }
 my $primaryAlignmentReady = fileGZe($multAli);
@@ -1069,8 +1135,8 @@ if ($continue) {
 		make_path($treeD) unless -d $treeD;
 	}
 }
-writePostAlignmentQCPolicy($alignmentWorkPolicyFile, $postAlignmentQCPolicy)
-	if $cogCats ne '';
+writeBuildTreeState();
+cleanupLegacyBuildTreeStateFiles();
 my $calcMSA = !$treesDone && !$primaryAlignmentReady;
 $doMSA = !(
 	$isAligned
@@ -1233,7 +1299,7 @@ if ($isAligned){
 			clearLifecycleMarker($completionMarker, 'clear stale tree completion');
 			clearLifecycleMarker($placementPendingMarker,
 				'clear stale placement-pending marker');
-			clearLifecycleMarker($workflowFailure, 'clear stale workflow failure marker');
+			cleanupLegacyBuildTreeStateFiles();
 			writeSelectionAttritionAudit($selectionAttritionReport, \%selectionAttrition);
 			writeOutcomeMarker($terminalMarker, 'valid_no_tree', $reason, {
 				input_loci => scalar(@linesCats), input_sequences => $inputSequences,
@@ -1243,6 +1309,7 @@ if ($isAligned){
 			}, $outD);
 			finalizeMSAArtifacts($MsaD);
 			safeRemoveTree($tmpD, $tmpBase);
+			writeWorkflowHeartbeat('complete');
 			print "BuildTree completed with a valid terminal no-tree outcome: $reason\n";
 			exit(0);
 		}
@@ -1628,8 +1695,6 @@ if ($postAlignmentLocusQC && $cogCats ne "") {
 			$primaryAlignments,
 			$useAA4tree ? 'aa' : 'nt',
 			$postAlignmentQCReport,
-			$postAlignmentQCPolicyFile,
-			$postAlignmentQCPolicy,
 		);
 		my %keepPath = map { $_ => 1 } @{$kept};
 		my %keepStem = map { alignmentFileStem($_) => 1 } @{$kept};
@@ -1650,7 +1715,6 @@ if ($postAlignmentLocusQC && $cogCats ne "") {
 		unlink $postAlignmentQCReport
 			or die "Cannot remove stale locus-QC report $postAlignmentQCReport: $!\n";
 	}
-	writePostAlignmentQCPolicy($postAlignmentQCPolicyFile, $postAlignmentQCPolicy);
 }
 my $postQCPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
 $selectionAttrition{post_qc_loci} = scalar(@{$postQCPrimary});
@@ -1809,7 +1873,7 @@ if ($calcMSA && !fileGZs($multAli)
 	my $reason = $cogCats ne '' ? 'no_usable_loci' : 'single_gene_alignment_failed';
 	clearLifecycleMarker($completionMarker, 'clear stale tree completion');
 	clearLifecycleMarker($placementPendingMarker, 'clear stale placement-pending marker');
-	clearLifecycleMarker($workflowFailure, 'clear stale workflow failure marker');
+	cleanupLegacyBuildTreeStateFiles();
 	$selectionAttrition{backbone_samples} = 0;
 	$selectionAttrition{placement_samples} = 0;
 	$selectionAttrition{excluded_samples} = $selectionAttrition{final_samples} eq 'NA' ? 0 : $selectionAttrition{final_samples};
@@ -1820,6 +1884,7 @@ if ($calcMSA && !fileGZs($multAli)
 	}, $outD);
 	finalizeMSAArtifacts($MsaD);
 	safeRemoveTree($tmpD, $tmpBase);
+	writeWorkflowHeartbeat('complete');
 	print "BuildTree completed with a valid terminal no-tree outcome: $reason\n";
 	exit(0);
 }
@@ -2282,7 +2347,7 @@ clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
 writeCompletionMarker($completionMarker, ${$trRetH}{nwk}, $outD)
 	if length($completionMarker);
-clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
+cleanupLegacyBuildTreeStateFiles();
 writeWorkflowHeartbeat('complete');
 	###################### ETE ######################3
 
@@ -2577,7 +2642,7 @@ sub runEpaOnlyPlacement {
 	writeCompletionMarker($completionMarker, $primaryTree, $outD);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
-	clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
+	cleanupLegacyBuildTreeStateFiles();
 	safeRemoveTree($tmpD, $tmpBase);
 	writeWorkflowHeartbeat('complete');
 	print "EPA-only recovery completed; primary tree=$primaryTree; "
@@ -2673,7 +2738,7 @@ sub runRedoEpaFilter {
 	finalizeMSAArtifacts($MsaD);
 	writeCompletionMarker($completionMarker, $primaryTree, $outD);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
-	clearLifecycleMarker($workflowFailure, 'clear obsolete workflow failure marker');
+	cleanupLegacyBuildTreeStateFiles();
 	safeRemoveTree($tmpD, $tmpBase);
 	writeWorkflowHeartbeat('complete');
 	print "Forced EPA filter redo completed without alignment or inference; "
@@ -5385,19 +5450,14 @@ sub writeTaxonAwareSampleAudit {
 	close $output or die "Cannot close taxon-aware sample audit $path: $!\n";
 }
 
-sub writePostAlignmentQCPolicy {
-	my ($policyFile, $policyText) = @_;
-	make_path(dirname($policyFile)) unless -d dirname($policyFile);
-	my ($policyFH, $temporaryPolicy) = tempfile(
-		"post-alignment-policy-XXXXXX",
-		DIR => dirname($policyFile),
-		UNLINK => 1,
-	);
-	print {$policyFH} $policyText
-		or die "Cannot write locus-QC policy $temporaryPolicy: $!\n";
-	retry_close($policyFH, "close locus-QC policy $temporaryPolicy");
-	retry_rename($temporaryPolicy, $policyFile,
-		label => "publish locus-QC policy $policyFile");
+sub legacyPolicyFileMatches {
+	my ($policyFile, $policyText, $description) = @_;
+	return 0 unless -s $policyFile;
+	my $policyRead = retry_open(q{<}, $policyFile,
+		label => "read ".($description || "legacy workflow policy"));
+	my $existingPolicy = do { local $/; <$policyRead> };
+	retry_close($policyRead, "close ".($description || "legacy workflow policy"));
+	return $existingPolicy eq $policyText;
 }
 
 sub alignmentFileStem {
@@ -5410,7 +5470,7 @@ sub alignmentFileStem {
 }
 
 sub runPostAlignmentLocusQC {
-	my ($alignments, $sequenceType, $reportFile, $policyFile, $policyText) = @_;
+	my ($alignments, $sequenceType, $reportFile) = @_;
 	die "Post-alignment locus QC requires at least one alignment\n"
 		unless @{$alignments};
 	make_path(dirname($reportFile)) unless -d dirname($reportFile);
@@ -5462,7 +5522,6 @@ sub runPostAlignmentLocusQC {
 			push @kept, $line if length($line);
 		}
 		close $keepRead or die "Cannot close locus-QC keep file $keepFile: $!\n";
-		writePostAlignmentQCPolicy($policyFile, $policyText);
 		1;
 	};
 	my $error = $@;
@@ -5581,40 +5640,96 @@ sub postAlignmentStep {
 		.(@clean ? '; '.join(', ', @clean) : '')."\n";
 }
 
+sub readBuildTreeState {
+	my ($stateFile) = @_;
+	my %state;
+	return \%state unless defined($stateFile) && -s $stateFile;
+	my $stateHandle = retry_open('<', $stateFile,
+		label => 'read BuildTree state');
+	while (my $line = <$stateHandle>) {
+		$line =~ s/[\r\n]+\z//;
+		my ($key, $value) = split /\t/, $line, 2;
+		next unless defined($key) && length($key) && defined($value);
+		$state{$key} = $value;
+	}
+	retry_close($stateHandle, 'close BuildTree state');
+	return \%state;
+}
+
+sub buildTreeStatePolicyMatches {
+	my ($state, $key, $policyText) = @_;
+	return 0 unless ref($state) eq 'HASH' && exists($state->{$key});
+	$policyText //= '';
+	$policyText =~ s/[\r\n]+\z//;
+	return $state->{$key} eq $policyText;
+}
+
+sub writeBuildTreeState {
+	return 0 unless length($workflowStateFile) && length($outD) && -d $outD;
+	my $reason = $workflowReason // '';
+	$reason =~ s/[\t\r\n]+/ /g;
+	my $msaSelectionPolicy = $workflowMsaSelectionPolicy // '';
+	my $treeStagePolicy = $workflowTreeStagePolicy // '';
+	$msaSelectionPolicy =~ s/[\r\n]+\z//;
+	$treeStagePolicy =~ s/[\r\n]+\z//;
+	my $previousState = readBuildTreeState($workflowStateFile);
+	$msaSelectionPolicy = $previousState->{msa_selection_policy}
+		if !length($msaSelectionPolicy)
+			&& exists($previousState->{msa_selection_policy});
+	$treeStagePolicy = $previousState->{tree_stage_policy}
+		if !length($treeStagePolicy)
+			&& exists($previousState->{tree_stage_policy});
+	my ($stateHandle, $temporaryState) = tempfile(
+		'buildTree-state-XXXXXX', DIR => $outD, UNLINK => 1,
+	);
+	print {$stateHandle} join("\n",
+		join("\t", schema => 1),
+		join("\t", version => $version),
+		join("\t", status => ($workflowStatus || 'running')),
+		join("\t", stage => ($workflowStage || 'initialization')),
+		join("\t", timestamp => time),
+		join("\t", pid => $$),
+		join("\t", reason => $reason),
+		join("\t", msa_selection_policy => $msaSelectionPolicy),
+		join("\t", tree_stage_policy => $treeStagePolicy),
+	)."\n" or die "Cannot write BuildTree state $temporaryState: $!\n";
+	retry_close($stateHandle, "close BuildTree state $temporaryState");
+	retry_rename($temporaryState, $workflowStateFile,
+		label => "publish BuildTree state $workflowStateFile");
+	return 1;
+}
+
+sub cleanupLegacyBuildTreeStateFiles {
+	return unless length($workflowStateFile) && -s $workflowStateFile;
+	my @legacyFiles = (
+		File::Spec->catfile($outD, 'buildTree.heartbeat.tsv'),
+		File::Spec->catfile($outD, 'buildTree.failure.tsv'),
+		File::Spec->catfile($MsaD, 'alignment_work.policy.tsv'),
+		File::Spec->catfile($treeD, 'post_alignment.policy.tsv'),
+		File::Spec->catfile($treeD, 'post_alignment_locus_qc.policy.tsv'),
+	);
+	for my $legacyFile (@legacyFiles) {
+		next unless -e $legacyFile || -l $legacyFile;
+		retry_unlink($legacyFile, fatal => 0,
+			label => "remove legacy BuildTree state $legacyFile");
+	}
+}
+
 sub writeWorkflowHeartbeat {
 	my ($stage) = @_;
 	$workflowStage = $stage if defined($stage) && length($stage);
-	return unless length($workflowHeartbeat) && length($outD) && -d $outD;
-	my $temporary = "$workflowHeartbeat.tmp.$$";
-	my $ok = eval {
-		my $handle = retry_open('>', $temporary, fatal => 0,
-			label => 'create BuildTree heartbeat');
-		return 0 unless $handle;
-		print {$handle} join("\t", qw(timestamp pid stage)), "\n",
-			join("\t", time, $$, $workflowStage), "\n" or return 0;
-		retry_close($handle, 'close BuildTree heartbeat', fatal => 0) or return 0;
-		retry_rename($temporary, $workflowHeartbeat, fatal => 0,
-			label => 'publish BuildTree heartbeat') or return 0;
-		1;
-	};
-	retry_unlink($temporary, fatal => 0, label => 'clear failed heartbeat temporary')
-		if !$ok && -e $temporary;
+	$workflowStatus = $workflowStage eq 'complete' ? 'complete'
+		: $workflowStage eq 'placement_pending' ? 'placement_pending' : 'running';
+	$workflowReason = '' unless $workflowStatus eq 'placement_pending';
+	eval { writeBuildTreeState(); 1; };
 }
 
 sub writeWorkflowFailure {
 	my ($error) = @_;
-	return unless length($workflowFailure) && length($outD) && -d $outD;
 	$error //= 'unknown failure';
-	$error =~ s/[\t\r\n]+/ /g;
-	my $temporary = "$workflowFailure.tmp.$$";
-	if (open my $handle, '>', $temporary) {
-		print {$handle} join("\t", qw(status stage timestamp pid reason)), "\n",
-			join("\t", 'failed', $workflowStage, time, $$, $error), "\n";
-		if (close $handle) {
-			rename $temporary, $workflowFailure
-				or warn "Cannot publish BuildTree failure marker $workflowFailure: $!\n";
-		}
-	}
+	$workflowStatus = 'failed';
+	$workflowReason = $error;
+	eval { writeBuildTreeState(); 1; };
 }
 sub alignmentCollectionStatsFromReport {
 	my ($reportFile) = @_;

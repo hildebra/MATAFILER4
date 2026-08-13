@@ -29,6 +29,9 @@ sub slurp {
 my $mafft = File::Spec->catfile($temporary, 'mafft-pass-through');
 write_file($mafft, <<'SH');
 #!/bin/sh
+if [ -n "$MATAFILER_TEST_MAFFT_COUNT" ]; then
+	printf "%s\n" "$*" >> "$MATAFILER_TEST_MAFFT_COUNT"
+fi
 for argument do
 	input="$argument"
 done
@@ -190,6 +193,8 @@ die "Cannot execute $script: $!\n" unless defined $result;
 PERL
 
 my $script = File::Spec->catfile($root, 'secScripts', 'phylo', 'buildTree5.pl');
+my $mafftCount = File::Spec->catfile($temporary, 'mafft.calls');
+local $ENV{MATAFILER_TEST_MAFFT_COUNT} = $mafftCount;
 my @command = (
 	$^X, '-I'.$root, $wrapper, $config, $script,
 	'-fna', $fna, '-aa', $faa, '-cats', $categories,
@@ -224,8 +229,11 @@ close $terminalHandle;
 like($terminalText,
 	qr/^status\tvalid_no_tree\nreason\ttaxon_aware_no_category_with_three_usable_samples\n/m,
 	'the terminal marker records the exact stable selection reason');
-ok(!-e File::Spec->catfile($terminalOutput, 'buildTree.failure.tsv'),
-	'the valid no-tree outcome leaves no stale workflow-failure marker');
+my $terminalState = File::Spec->catfile($terminalOutput, 'buildTree.state.tsv');
+ok(-s $terminalState,
+	'the valid no-tree outcome retains the consolidated workflow state');
+unlike(slurp($terminalState), qr/^status\tfailed$/m,
+	'the valid no-tree outcome is not recorded as a workflow failure');
 
 my $candidateAudit = File::Spec->catfile(
 	$output, 'phylo', 'taxon_aware_locus_candidates.tsv');
@@ -272,8 +280,9 @@ like($attritionText, qr/^final_loci\t3$/m, 'attrition audit records the bounded 
 like($attritionText, qr/^backbone_samples\t5$/m, 'attrition audit records final tree samples');
 
 my $mergedAlignment = File::Spec->catfile($output, 'MSA', 'MSAli.fna');
-ok(-s $mergedAlignment, 'bounded final alignment is produced');
-open my $alignmentHandle, '<', $mergedAlignment or die $!;
+my $compressedMergedAlignment = "$mergedAlignment.gz";
+ok(-s $compressedMergedAlignment, 'bounded final alignment is retained in compressed form');
+open my $alignmentHandle, '-|', 'gzip', '-cd', $compressedMergedAlignment or die $!;
 my $alignmentText = do { local $/; <$alignmentHandle> };
 close $alignmentHandle;
 like($alignmentText, qr/^>s5$/m, 'rescued sparse sample remains in the merged alignment');
@@ -332,6 +341,33 @@ my $collapsedAuditText = do { local $/; <$collapsedAuditHandle> };
 close $collapsedAuditHandle;
 like($collapsedAuditText, qr/\tp90_consensus_divergence\t/,
 	'native post-alignment P90 consensus divergence is the preferred rate proxy');
+
+
+my $initialMafftRuns = (() = slurp($mafftCount) =~ /^/gm);
+cmp_ok($initialMafftRuns, q{>}, 0,
+	q{the initial workflow ran per-locus MSA jobs});
+my @downstreamResume = (@command, q{-continue}, 1, q{-iqLegacy}, 1);
+is(system(@downstreamResume), 0,
+	q{a downstream-only option change resumes from the retained selected MSA});
+is((() = slurp($mafftCount) =~ /^/gm), $initialMafftRuns,
+	q{a downstream-only option change does not run the per-locus MSAs again});
+my $workflowState = File::Spec->catfile($output, q{buildTree.state.tsv});
+ok(-s $workflowState,
+	q{one consolidated workflow state records checkpoint and lifecycle data});
+my $workflowStateText = slurp($workflowState);
+like($workflowStateText, qr/^msa_selection_policy\t.*minimum_overlap=/m,
+	q{the state records the MSA-selection policy});
+like($workflowStateText, qr/^tree_stage_policy\t.*iqtree_legacy=1/m,
+	q{the state records the downstream tree-stage policy});
+ok(!-e File::Spec->catfile($output, q{MSA}, q{alignment_work.policy.tsv})
+	&& !-e File::Spec->catfile($output, q{phylo}, q{post_alignment.policy.tsv})
+	&& !-e File::Spec->catfile($output, q{phylo}, q{post_alignment_locus_qc.policy.tsv}),
+	q{the consolidated state replaces the three legacy policy files});
+my @selectionResume = (@command, q{-continue}, 1, q{-minOverlapMSA}, 0.1);
+is(system(@selectionResume), 0,
+	q{an MSA-selection option change rebuilds the selected alignment});
+cmp_ok((() = slurp($mafftCount) =~ /^/gm), q{>}, $initialMafftRuns,
+	q{an MSA-selection option change runs the per-locus MSAs again});
 
 
 done_testing();

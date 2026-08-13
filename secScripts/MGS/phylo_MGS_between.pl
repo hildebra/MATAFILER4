@@ -286,24 +286,29 @@ close OC;
 my $QSBoptHR = emptyQsubOpt(1,"");
 $QSBoptHR->{useLongQueue} = 1;
 my $treeFile = "$btout/phylo/IQtree_allsites.treefile";
-my $locusPolicyFile = "$btout/phylo/post_alignment_locus_qc.policy.tsv";
+my $workflowStateFile = "$btout/buildTree.state.tsv";
 my $broadLocusRetentionCurrent = 0;
-if (-s $locusPolicyFile) {
-	open my $policyFH, "<", $locusPolicyFile
-		or die "Cannot read locus-retention policy $locusPolicyFile: $!\n";
-	my $policyLine = <$policyFH> // "";
-	close $policyFH
-		or die "Cannot close locus-retention policy $locusPolicyFile: $!\n";
-	chomp $policyLine;
-	my %policy = map { split /=/, $_, 2 } split /\t/, $policyLine;
-	$broadLocusRetentionCurrent = ($policy{schema} // "") eq "3"
+if (-s $workflowStateFile) {
+	open my $stateFH, "<", $workflowStateFile
+		or die "Cannot read BuildTree state $workflowStateFile: $!\n";
+	my %state;
+	while (my $line = <$stateFH>) {
+		chomp $line;
+		my ($key, $value) = split /\t/, $line, 2;
+		$state{$key} = $value if defined($key) && defined($value);
+	}
+	close $stateFH
+		or die "Cannot close BuildTree state $workflowStateFile: $!\n";
+	my %policy = map { split /=/, $_, 2 }
+		split /\t/, ($state{msa_selection_policy} // "");
+	$broadLocusRetentionCurrent = ($policy{schema} // "") eq "13"
 		&& ($policy{enabled} // "") eq "0"
 		&& ($policy{scope} // "") eq "between"
 		&& ($policy{per_gene_length_fraction} // "") eq "0.4"
 		&& ($policy{minimum_category_q90_fraction} // "") eq "0"
-		&& ($policy{species_nt_fraction} // "") eq "0.5"
-		&& ($policy{minimum_gene_fraction_per_species} // "") eq "0.3"
-		&& ($policy{minimum_nt} // "") eq "3000";
+		&& ($policy{backbone_nt_fraction} // "") eq "0.5"
+		&& ($policy{backbone_gene_fraction} // "") eq "0.3"
+		&& ($policy{backbone_minimum_nt} // "") eq "3000";
 }
 
 my $cmd = "";
