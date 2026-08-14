@@ -38,7 +38,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.32: preserve summary headers and require validated network and treeWAS outputs
 #.33: summarize per-tree progress and make runtime configuration explicit
 #.34: resolve catalog maps through LOGandSUB/inmap.txt
-my $version = 0.34;
+#.35: exclude MGS with terminal no-tree or retained placement-pending outcomes
+my $version = 0.35;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;
@@ -109,6 +110,10 @@ if (!$rewriteRanalysis && -s $RsummaryTab) {
 
 
 my %dirs;my %destDs; my %baseD;
+my @nonTreeOutcomeMarkers = qw(
+	tooFewSamples.sto noRecoverableLoci.sto noTree.sto placementPending.sto
+);
+my $terminalTreeMGS = 0;
 
 print "=====================================================\n";
 print "Strain postprocessing v$version\n";
@@ -149,6 +154,13 @@ while ( my $entry = readdir DIR ) {
     next if $entry eq '.' or $entry eq '..';
     next unless -d $FMGpD . '/' . $entry;
 	next unless (-d "$FMGpD/$entry/phylo/");
+	my @outcomeMarkers = grep {
+		-s "$FMGpD/$entry/$_"
+	} @nonTreeOutcomeMarkers;
+	if (@outcomeMarkers) {
+		$terminalTreeMGS++;
+		next;
+	}
 	#my $destD = "$FMGpD/$entry/within/";
 	#system "cp $destD/$entry.nwk $FMGpD/$entry/phylo/IQtree.treefile " if (-e "$destD/$entry.nwk");
 	my $sizTree = 0; my $x=0;
@@ -164,7 +176,10 @@ while ( my $entry = readdir DIR ) {
 }
 
 closedir DIR;
-print "Found ".scalar(keys %dirs)." MGS directories with a nonempty calculated tree\n";
+print "Found ".scalar(keys %dirs)." MGS directories with a nonempty calculated tree";
+print "; skipped $terminalTreeMGS MGS with valid no-tree or placement-pending markers"
+	if $terminalTreeMGS;
+print "\n";
 my $cnt=-1; my $curBatch=0; my $batchSize = 0; my $submitted=0;my @jobs;
 my $MGstats = "$GCd/metagStats.txt";
 $MGstats = "-1" unless (-e $MGstats);

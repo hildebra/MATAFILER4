@@ -69,6 +69,7 @@ is_deeply(
 );
 
 my $strain = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
+my $strain2 = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
 like($strain, qr/sub consensusInputState .*?\$nt_ready && \$aa_ready.*?return 'regenerate' if \$vcf_ready/s,
 	'consensus resume requires the paired NT and AA outputs and repairs from VCF');
 like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA,0,"\\\\s",\\%subG\)/s,
@@ -130,7 +131,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.09;/,
+like($strain, qr/my \$version = 1\.11;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain, qr/PreferredOutgroupGene.*?requiredNT.*?prepareSelectiveOutgroupReferenceCache/s,
 	'Mosaic direct mappings define a reduced exact outgroup-reference request set');
@@ -491,6 +492,12 @@ like($strain,
 	qr/No automatic full-tree resubmission was attempted.*?sub writeTreeFailureAudit.*?failed_missing_output.*?valid_no_tree.*?placement_pending/s,
 	'tree outcomes are classified and quarantined without automatic tree resubmission');
 like($strain,
+	qr/my \$unresolvedInputs = validateTreeInputResolution\(\);.*?if \(\$unresolvedInputs\).*?tree_outcomes_quarantined=\$incompleteTreeOutcomes.*?exit\(0\);.*?if \(\$incompleteTreeOutcomes\).*?proceeding with downstream strain analysis for completed trees.*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
+	'quarantined tree outcomes do not block step two once all tree inputs are resolved');
+like($strain2,
+	qr/my \@nonTreeOutcomeMarkers = qw\(.*?tooFewSamples\.sto.*?noRecoverableLoci\.sto.*?noTree\.sto.*?placementPending\.sto.*?\);.*?my \@outcomeMarkers = grep.*?if \(\@outcomeMarkers\).*?\$terminalTreeMGS\+\+;.*?next;/s,
+	'step two explicitly skips MGS with valid no-tree or placement-pending markers');
+like($strain,
 	qr/sub lifecycleMarkerReason.*?\^reason\\t/s,
 	'BuildTree lifecycle-marker reasons have one reusable parser');
 like($strain,
@@ -524,8 +531,8 @@ like($strain,
 	qr/Placement-only recovery has already paid.*?my \@epaRecoveryMGS = grep.*?my \@fullTreeMGS = grep.*?\@specis = \(\@epaRecoveryMGS, \@fullTreeMGS\).*?my \$epaQueueBoundary = scalar\(\@epaRecoveryMGS\).*?Validated EPA-only recovery queue/s,
 	'validated EPA-only retries are queued ahead of ordinary full-tree retries');
 like($strain,
-	qr/strain_within\.heartbeat\.tsv.*?strain_within\.failure\.tsv.*?sub writeStrainWorkflowHeartbeat.*?sub writeStrainWorkflowFailure/s,
-	'strain workflow persists stage heartbeats and fatal-stage diagnostics');
+	qr/strain_within\.state\.tsv.*?strain_within\.heartbeat\.tsv.*?strain_within\.failure\.tsv.*?sub writeStrainWorkflowState.*?sub writeStrainWorkflowHeartbeat.*?sub writeStrainWorkflowFailure/s,
+	'strain workflow stores running, completed, and failed status in one state record');
 unlike($strain,
 	qr/preflightStrainWorkflow|preflight_executable|preflight_directory|filesystem_capacity/,
 	'strain workflow does not preflight environment-wrapped commands as local executables');
@@ -534,8 +541,8 @@ like($strain,
 	qr/require_complete_linkage => 1.*?Mosaic complete-linkage protection rejected/s,
 	'strain extraction requires pairwise confirmation throughout multi-seed Mosaic loci');
 like($strain,
-	qr/\$workflowHeartbeatPath = File::Spec->catfile\(\$LOGDIR.*?\$SNPconsLOGs = "\$LOGDIR\/SNPconsCalls.*?my \$final = "\$LOGDIR\/\$sampleStatsLogName".*?my \$summary = "\$LOGDIR\/\$sampleStatsSummaryLogName".*?my \$final = "\$LOGDIR\/\$recoveryLogName".*?my \$summary = "\$LOGDIR\/\$summaryLogName"/s,
-	'worker heartbeats, SNP logs, sample statistics, recovery accounting, and summaries share LOGandSUB');
+	qr/\$workflowStatePath = File::Spec->catfile\(\$LOGDIR.*?\$SNPconsLOGs = "\$LOGDIR\/SNPconsCalls.*?my \$final = "\$LOGDIR\/\$sampleStatsLogName".*?my \$summary = "\$LOGDIR\/\$sampleStatsSummaryLogName".*?my \$final = "\$LOGDIR\/\$recoveryLogName".*?my \$summary = "\$LOGDIR\/\$summaryLogName"/s,
+	'worker state, SNP logs, sample statistics, recovery accounting, and summaries share LOGandSUB');
 like($strain,
 	qr/script => \$epaOnlyRetry \? "\$outD2\/treeCmd\.epa_retry\.sh" : "\$outD2\/treeCmd\.sh".*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
 	'per-MGS normal and EPA-retry scripts retain their compatibility paths while downstream strain-analysis scripts use LOGandSUB');

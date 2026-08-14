@@ -52,8 +52,9 @@ use Cwd qw(abs_path);
 #.52: add HPC filesystem checks, durable controller records, bounded filesystem
 #     retries, and atomic publication for recovery-critical files
 #.53: remove local executable checks that reject environment-wrapped tool commands
+#.54: consolidate controller lifecycle and no-usable-MGS state records
 
-my $MGSpipelineVersion = 0.53;
+my $MGSpipelineVersion = 0.54;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -79,23 +80,24 @@ sub _representative_contig_outputs_valid;
 $| = 1;
 my $mgsWorkflowActive = 0;
 my $mgsWorkflowStage = 'startup';
-my $mgsHeartbeatPath = '';
-my $mgsFailurePath = '';
+my $mgsWorkflowStatePath = '';
+my $mgsWorkflowStatus = 'running';
+my $mgsWorkflowReason = '';
+my $legacyMgsHeartbeatPath = '';
+my $legacyMgsFailurePath = '';
+my $legacyNoMGSStone = '';
 
 END {
 	my $exitStatus = $?;
 	if ($mgsWorkflowActive) {
 		if ($exitStatus == 0) {
-			write_workflow_record($mgsHeartbeatPath,
-				status => 'completed', stage => $mgsWorkflowStage);
-			retry_unlink($mgsFailurePath, fatal => 0,
-				label => 'clear obsolete MGS workflow failure');
+			$mgsWorkflowStatus = 'completed' if $mgsWorkflowStatus eq 'running';
+			$mgsWorkflowReason = '' if $mgsWorkflowStatus eq 'completed';
 		} else {
-			my $reason = $@ || "controller exit status $exitStatus";
-			write_workflow_record($mgsFailurePath,
-				status => 'failed', stage => $mgsWorkflowStage,
-				reason => $reason);
+			$mgsWorkflowStatus = 'failed';
+			$mgsWorkflowReason = $@ || "controller exit status $exitStatus";
 		}
+		_mgs_write_workflow_state();
 	}
 	$? = $exitStatus;
 }
@@ -238,7 +240,7 @@ my $st1ston = "$chkpDir/Stage1.stone";
 my $iniMB2sto = "$chkpDir/$BinnerShrt.cm.stone";
 my $GTDBtaxSto = "$chkpDir/GTDBTK.stone";
 my $BinExtrSto = "$chkpDir/BinExtr.stone";
-my $noMGSSto = "$chkpDir/no-usable-mgs.stone";
+$legacyNoMGSStone = "$chkpDir/no-usable-mgs.stone";
 my $noMGSReport = "$outD/NO_MGS.txt";
 
 #main guide files for MGS
@@ -254,8 +256,9 @@ if (-e "$inD/LOGandSUB/inmap.txt"){ #this is the outdir of a whole MATAFILER run
 
 make_path($tmpD, $outD, $logDir, $annoDir, $chkpDir);
 
-$mgsHeartbeatPath = "$logDir/MGS.heartbeat.tsv";
-$mgsFailurePath = "$logDir/MGS.failure.tsv";
+$mgsWorkflowStatePath = "$logDir/MGS.state.tsv";
+$legacyMgsHeartbeatPath = "$logDir/MGS.heartbeat.tsv";
+$legacyMgsFailurePath = "$logDir/MGS.failure.tsv";
 $mgsWorkflowActive = 1;
 $SIG{TERM} = sub { die "MGS controller received SIGTERM\n" };
 $SIG{INT} = sub { die "MGS controller received SIGINT\n" };
@@ -266,7 +269,6 @@ preflight_directory($tmpD, 'MGS temporary directory');
 preflight_capacity($outD, 'MGS output filesystem');
 preflight_capacity($tmpD, 'MGS temporary filesystem');
 die "Checkpoint writer is missing: $checkpointWriter\n" unless -f $checkpointWriter;
-retry_unlink($mgsFailurePath, fatal => 0, label => 'clear stale MGS failure record');
 
 
 my $GCd = $inD;
@@ -369,7 +371,7 @@ if ($rewrClusterMAGs || $stage1ProvenanceInvalid) {
 	for my $file (glob("$outD/$BinnerShrt.clusters*"), glob("$outD/$BinnerShrt.Wclusters*")) {
 		retry_unlink($file, label => 'invalidate stale MGS cluster product') if -f $file;
 	}
-	for my $checkpoint ($st1ston, $GTDBtaxSto, $BinExtrSto, $ABmgsSton, $ABmgsSton2, $noMGSSto) {
+	for my $checkpoint ($st1ston, $GTDBtaxSto, $BinExtrSto, $ABmgsSton, $ABmgsSton2) {
 		retry_unlink($checkpoint, label => 'invalidate downstream MGS checkpoint')
 			if -e $checkpoint;
 	}
@@ -387,7 +389,7 @@ my @marker_lca_files = glob("$GCd/$COGdir/*.LCA");
 die "No marker-gene LCA files found in $GCd/$COGdir\n" unless @marker_lca_files;
 my $FMGsubs = _count_lines_up_to(20, @marker_lca_files);
 if ($FMGsubs < 20) {
-	_finish_without_mgs("only $FMGsubs marker-gene LCA assignments were available for $profileSamples abundance profile(s)", $noMGSReport, $noMGSSto)
+	_finish_without_mgs("only $FMGsubs marker-gene LCA assignments were available for $profileSamples abundance profile(s)", $noMGSReport)
 		if $profileSamples < 10;
 	die "$GCd/$COGdir/*.LCA suspiciously small (N=$FMGsubs)\nPlease ensure correctness\n";
 } #$GCd/Matrix.$COGdir.mat
@@ -516,7 +518,7 @@ retry_unlink($iniMB2sto, label => 'invalidate stale MAG-quality checkpoint')
 	if @missedMAGs && -e $iniMB2sto;
 _touch_checkpoint($iniMB2sto, 'per-sample-mag-quality') unless _checkpoint_valid($iniMB2sto) || @missedMAGs;
 
-_finish_without_mgs("no assigned MAG passed the minimum 60% completeness/10% contamination screen and no usable Canopy MGS was available", $noMGSReport, $noMGSSto)
+_finish_without_mgs("no assigned MAG passed the minimum 60% completeness/10% contamination screen and no usable Canopy MGS was available", $noMGSReport)
 	unless $usableMAGcount || $usableCanopyCount;
 
 #if ($cnt){	print "Waiting for jobs to finish.. restart when done\n";	exit(0);}
@@ -586,7 +588,7 @@ if ($useWeightedMGSscores && !$preservedMGSCount && !$activatedOnlyWeighted){
 	#system "touch $finalClustersW.mov";
 }
 
-_finish_without_mgs("MAG/Canopy clustering produced no MGS assignments", $noMGSReport, $noMGSSto)
+_finish_without_mgs("MAG/Canopy clustering produced no MGS assignments", $noMGSReport)
 	unless $activeMGSCount;
 
 my $observation_file = "$outD/$BinnerShrt.clusters.obs";
@@ -609,10 +611,11 @@ my $postCmd = "$RfilterMB2 $finalClusters2\n" ; #creates $outD/MB2.clusters.core
 die "MGS cluster file is missing or empty: $finalClusters2\n" unless -s $finalClusters2;
 systemW $postCmd if !-s $finalClustersFilt;
 my $coreMGSCount = _mgs_count($finalClustersFilt);
-_finish_without_mgs("no MGS retained any core genes after post-filtering", $noMGSReport, $noMGSSto)
+_finish_without_mgs("no MGS retained any core genes after post-filtering", $noMGSReport)
 	unless $coreMGSCount;
 unlink $noMGSReport or die "Cannot remove stale $noMGSReport: $!\n" if -e $noMGSReport;
-unlink $noMGSSto or die "Cannot remove stale $noMGSSto: $!\n" if -e $noMGSSto;
+retry_unlink($legacyNoMGSStone, label => 'clear obsolete no-usable-MGS checkpoint')
+	if -e $legacyNoMGSStone;
 
 #die;
 
@@ -1010,10 +1013,28 @@ exit(0);
 #####################################################################
 # Subroutines
 
+sub _mgs_write_workflow_state {
+	return unless $mgsWorkflowActive && length($mgsWorkflowStatePath);
+	my $written = write_workflow_record($mgsWorkflowStatePath,
+		status => $mgsWorkflowStatus, stage => $mgsWorkflowStage,
+		reason => $mgsWorkflowReason);
+	if ($written) {
+		for my $legacy ($legacyMgsHeartbeatPath, $legacyMgsFailurePath,
+			$legacyNoMGSStone) {
+			next unless length($legacy) && (-e $legacy || -l $legacy);
+			retry_unlink($legacy, fatal => 0,
+				label => "remove legacy MGS state $legacy");
+		}
+	}
+	return $written;
+}
+
 sub _mgs_workflow_stage {
-	$mgsWorkflowStage = $_[0] if defined($_[0]) && length($_[0]);
-	return unless $mgsWorkflowActive;
-	write_workflow_record($mgsHeartbeatPath, status => 'running', stage => $mgsWorkflowStage);
+	my ($stage, %options) = @_;
+	$mgsWorkflowStage = $stage if defined($stage) && length($stage);
+	$mgsWorkflowStatus = $options{status} // 'running';
+	$mgsWorkflowReason = $options{reason} // '';
+	_mgs_write_workflow_state();
 }
 
 sub _read_one_line {
@@ -1239,13 +1260,13 @@ sub _write_single_mgs_observations {
 }
 
 sub _finish_without_mgs {
-	my ($reason, $report_file, $checkpoint_file) = @_;
+	my ($reason, $report_file) = @_;
 	atomic_write_text($report_file,
 		"MGS reconstruction completed without a usable MGS.\nReason: $reason\n",
 		label => 'publish no-usable-MGS report');
-	_touch_checkpoint($checkpoint_file, 'no-usable-mgs', $report_file);
 	printL "MGS reconstruction completed without a usable MGS: $reason\n";
-	_mgs_workflow_stage('valid-no-usable-MGS');
+	_mgs_workflow_stage('valid-no-usable-MGS',
+		status => 'valid_no_mgs', reason => $reason);
 	close LOG or die "Cannot close MGS pipeline log: $!\n";
 	exit 0;
 }

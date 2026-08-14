@@ -336,6 +336,9 @@ like($mgs, qr/Select exactly one quality checker/, 'MGS rejects ambiguous CheckM
 like($mgs, qr/runCheckM\(\$binCanDir,\$ChkMevalF/, 'MGS supports CheckM1 for canopy quality checks');
 like($mgs, qr/my \$finalClustersFilt = \$finalClusters2\."\.core"/,
      'MGS proceeds directly with the filtered core-cluster guide');
+like($mgs,
+     qr/MGS\.state\.tsv.*?MGS\.heartbeat\.tsv.*?MGS\.failure\.tsv.*?sub _mgs_write_workflow_state.*?status => 'valid_no_mgs'/s,
+     'MGS stores controller progress, failure, and valid no-MGS outcomes in one state record');
 unlike($mgs, qr/"(?:useRHClust|redoRhcl|redoDeepCan)=i"/,
        'deprecated hierarchical-clustering switches are not accepted');
 unlike($mgs, qr/\b(?:Rhclusts|submitRhcl|refine_Rhcl_MGS|createDeepCorrM|replaceLowQualMGS4MAG)\b/,

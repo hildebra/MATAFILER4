@@ -36,6 +36,7 @@ use Mods::SlurmAccounting qw(
 );
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
+	write_workflow_record
 );
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 use Mods::StrainSampleStats qw(
@@ -111,6 +112,8 @@ sub phase1WorkersNeedingRetry;
 sub phase1WorkerCommand;
 sub writePhase1RepairQueue;
 sub validatePhase1WorkerLedger;
+sub writeStrainWorkflowState;
+sub cleanupLegacyStrainWorkflowStateFiles;
 sub writeStrainWorkflowHeartbeat;
 sub writeStrainWorkflowFailure;
 sub writeTreeFailureAudit;
@@ -122,8 +125,9 @@ sub limitedWarn;sub limitedNotice;
 my %limitedWarningStats;
 my %limitedNoticeStats;
 my $warningExampleLimit = 5;
-my ($workflowStage, $workflowHeartbeatPath, $workflowFailurePath) =
-	('startup', '', '');
+my ($workflowStage, $workflowStatePath, $workflowStatus, $workflowReason) =
+	('startup', '', 'running', '');
+my ($legacyWorkflowHeartbeatPath, $legacyWorkflowFailurePath) = ('', '');
 
 my $completionMessage = "";
 
@@ -217,7 +221,9 @@ my $completionMessage = "";
 #1.03: accept bare and explicit numeric redo-EPA flags
 #1.04: propagate forced EPA redo into existing saved tree commands
 #1.05: keep EPA redo in the normal controller path through downstream analysis
-my $version = 1.09;
+#1.10: consolidate controller heartbeat and failure records into one state file
+#1.11: begin strain postprocessing from completed trees while retaining quarantined tree outcomes
+my $version = 1.11;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -819,9 +825,11 @@ my $gene2taxF; #where to find info what genes (gene cat)
 my $sttime = $^T;
 my $stepStarted = time;
 prepRun();
-$workflowHeartbeatPath = File::Spec->catfile($LOGDIR,
+$workflowStatePath = File::Spec->catfile($LOGDIR,
+	$subJob ? "strain_within.worker.$subJob.state.tsv" : 'strain_within.state.tsv');
+$legacyWorkflowHeartbeatPath = File::Spec->catfile($LOGDIR,
 	$subJob ? "strain_within.worker.$subJob.heartbeat.tsv" : 'strain_within.heartbeat.tsv');
-$workflowFailurePath = File::Spec->catfile($LOGDIR,
+$legacyWorkflowFailurePath = File::Spec->catfile($LOGDIR,
 	$subJob ? "strain_within.worker.$subJob.failure.tsv" : 'strain_within.failure.tsv');
 writeStrainWorkflowHeartbeat('configuration');
 stepComplete("configuration and map initialization", $stepStarted,
@@ -1854,15 +1862,19 @@ if ($doSubmit) {
 }
 writeStrainSummary(\%treeDisposition, \%mosaicOutgroupsUsed);
 my $unresolvedInputs = validateTreeInputResolution();
-if ($incompleteTreeOutcomes || $unresolvedInputs) {
+if ($unresolvedInputs) {
 	$completionMessage = "strain_within.pl preserved completed work but stopped before downstream "
-		."strain analysis; tree_outcomes_pending=$incompleteTreeOutcomes, "
+		."strain analysis; tree_outcomes_quarantined=$incompleteTreeOutcomes, "
 		."tree_inputs_pending=$unresolvedInputs.";
 	print "Workflow is partially complete; consult tree_job_outcomes.tsv and "
 		."tree_input_resolution.tsv. No automatic full-tree resubmission was attempted.\n";
 	exit(0);
 }
-if ($doSubmit && $outgroupReferenceCacheActive
+if ($incompleteTreeOutcomes) {
+	print "Tree-job outcomes remain quarantined in tree_job_outcomes.tsv, but all tree "
+		."inputs are resolved; proceeding with downstream strain analysis for completed trees.\n";
+}
+if ($doSubmit && !$incompleteTreeOutcomes && $outgroupReferenceCacheActive
 		&& length($outgroupReferenceCacheDir) && -d $outgroupReferenceCacheDir) {
 	my $cacheCleanupStarted = time;
 	remove_tree($outgroupReferenceCacheDir);
@@ -1898,11 +1910,14 @@ print "\n". $nxtCmd."\n";
 remove_tree($locTmpDir) if -d $locTmpDir;
 remove_tree($preConDir) if ($preCompCons && -d $preConDir);
 
-retry_unlink($workflowFailurePath, fatal => 0,
-	label => 'clear obsolete strain workflow failure');
 writeStrainWorkflowHeartbeat('complete');
-$completionMessage = "strain_within.pl completed normally; $cnt eligible tree job(s) were "
-	. ($doSubmit ? "submitted and validated." : "generated without scheduler submission.");
+if ($doSubmit && $incompleteTreeOutcomes) {
+	$completionMessage = "strain_within.pl started downstream strain analysis from completed trees; "
+		."$incompleteTreeOutcomes tree outcome(s) remain quarantined for inspection.";
+} else {
+	$completionMessage = "strain_within.pl completed normally; $cnt eligible tree job(s) were "
+		. ($doSubmit ? "submitted and validated." : "generated without scheduler submission.");
+}
 exit(0);
 
  
@@ -4084,40 +4099,37 @@ sub stepProgress {
 		.timeNice(time - $started)."; global elapsed ".timeNice(time - $^T)
 		.$details."\n";
 }
+sub writeStrainWorkflowState {
+	return 0 unless length($workflowStatePath);
+	my $written = write_workflow_record($workflowStatePath,
+		status => $workflowStatus, stage => $workflowStage,
+		reason => $workflowReason);
+	cleanupLegacyStrainWorkflowStateFiles() if $written;
+	return $written;
+}
+
+sub cleanupLegacyStrainWorkflowStateFiles {
+	for my $legacy ($legacyWorkflowHeartbeatPath, $legacyWorkflowFailurePath) {
+		next unless length($legacy) && (-e $legacy || -l $legacy);
+		retry_unlink($legacy, fatal => 0,
+			label => "remove legacy strain workflow state $legacy");
+	}
+}
+
 sub writeStrainWorkflowHeartbeat {
 	my ($stage) = @_;
 	$workflowStage = $stage if defined($stage) && length($stage);
-	return unless length($workflowHeartbeatPath);
-	my $temporary = "$workflowHeartbeatPath.tmp.$$";
-	my $ok = eval {
-		my $handle = retry_open('>', $temporary, fatal => 0,
-			label => 'create strain workflow heartbeat');
-		return 0 unless $handle;
-		print {$handle} join("\t", qw(timestamp pid stage)), "\n",
-			join("\t", time, $$, $workflowStage), "\n" or return 0;
-		retry_close($handle, 'close strain workflow heartbeat', fatal => 0) or return 0;
-		retry_rename($temporary, $workflowHeartbeatPath, fatal => 0,
-			label => 'publish strain workflow heartbeat') or return 0;
-		1;
-	};
-	retry_unlink($temporary, fatal => 0, label => 'clear failed strain heartbeat temporary')
-		if !$ok && -e $temporary;
+	$workflowStatus = $workflowStage eq 'complete' ? 'completed' : 'running';
+	$workflowReason = '';
+	writeStrainWorkflowState();
 }
 
 sub writeStrainWorkflowFailure {
 	my ($error) = @_;
-	return unless length($workflowFailurePath);
 	$error //= 'unknown failure';
-	$error =~ s/[\t\r\n]+/ /g;
-	my $temporary = "$workflowFailurePath.tmp.$$";
-	if (open my $handle, '>', $temporary) {
-		print {$handle} join("\t", qw(status stage timestamp pid reason)), "\n",
-			join("\t", 'failed', $workflowStage, time, $$, $error), "\n";
-		if (close $handle) {
-			rename $temporary, $workflowFailurePath
-				or warn "Cannot publish strain workflow failure marker $workflowFailurePath: $!\n";
-		}
-	}
+	$workflowStatus = 'failed';
+	$workflowReason = $error;
+	writeStrainWorkflowState();
 }
 
 sub phase1WorkerCommand {
@@ -6418,8 +6430,14 @@ sub limitedNotice {
 }
 
 END {
-	writeStrainWorkflowFailure($@ || 'non-zero process exit') if $? != 0;
-	my $fatalError = $? != 0 ? $@ : "";
+	my $exitStatus = $?;
+	if ($exitStatus != 0) {
+		writeStrainWorkflowFailure($@ || 'non-zero process exit');
+	} elsif (length($workflowStatePath) && $workflowStatus eq 'running') {
+		$workflowStatus = 'completed';
+		writeStrainWorkflowState();
+	}
+	my $fatalError = $exitStatus != 0 ? $@ : "";
 	my @suppressed = sort grep {
 		($limitedWarningStats{$_}{suppressed} || 0) > 0
 	} keys %limitedWarningStats;
@@ -6449,4 +6467,5 @@ END {
 	} elsif (length($completionMessage)) {
 		print "\nFINISH: $completionMessage\n";
 	}
+	$? = $exitStatus;
 }
