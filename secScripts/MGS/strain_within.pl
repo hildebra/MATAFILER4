@@ -223,7 +223,8 @@ my $completionMessage = "";
 #1.05: keep EPA redo in the normal controller path through downstream analysis
 #1.10: consolidate controller heartbeat and failure records into one state file
 #1.11: begin strain postprocessing from completed trees while retaining quarantined tree outcomes
-my $version = 1.11;
+#1.12: prioritize durable completed-tree evidence during tree-only resume audits
+my $version = 1.12;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -942,7 +943,7 @@ my $cnt=0; my $SaSe = "|";
 
 $stepStarted = time;
 my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist,
-	$noRecoverableLociDirs)
+	$noRecoverableLociDirs, $completedTreeFastPaths)
 			= evalFileStatus();
 my $epaOnlyRetryCount = scalar(keys %MGSepaOnlyRetry);
 my $legacyEpaRetryCount = scalar(grep {
@@ -951,8 +952,9 @@ my $legacyEpaRetryCount = scalar(grep {
 my $fullTreeRetryCount = $treeAbsent - $epaOnlyRetryCount;
 $fullTreeRetryCount = 0 if $fullTreeRetryCount < 0;
 stepComplete("existing-output and resume audit", $stepStarted,
-	"prepared_trees=$doneDirs", "missing_trees=$treeAbsent",
-	"incomplete_tree_inputs=$CatFileMiss", "directories_needing_extraction=$dirsNOTPrepped",
+	"prepared_trees=$doneDirs", "completion_marker_fast_paths=$completedTreeFastPaths",
+	"missing_trees=$treeAbsent", "incomplete_tree_inputs=$CatFileMiss",
+	"directories_needing_extraction=$dirsNOTPrepped",
 	"validated_no_locus=$noRecoverableLociDirs",
 	"epa_only_retries=$epaOnlyRetryCount", "legacy_epa_retries=$legacyEpaRetryCount",
 	"full_tree_retries=$fullTreeRetryCount");
@@ -3765,6 +3767,7 @@ sub stagedMGSInputsReady {
 sub evalFileStatus{
 	my $dirsNOTPrepped = 0; my $CatFileMiss = 0;my $CatNotPrepped = 0; my $treeAbsent=0;
 	my $doneDirs=0;
+	my $completedTreeFastPaths=0;
 	my $tooFewDirs=0;
 	my $noRecoverableLociDirs=0;
 	my $PhylosExist = 1;
@@ -3780,6 +3783,22 @@ sub evalFileStatus{
 		#PART I: create fasta files required by tree
 		my $outD2 = "$outD/$MGS/";
 		$SIdirs{$MGS} = $outD2;
+		my $completedTree = "$outD2/phylo/$treeFile";
+		my $treeCompletion = "$outD2/treeDone.sto";
+		if (!$recalcTrees && !$reSubmit && !$repairCAT && !$deepRepair
+				&& !$redoSubmissionData && ($onlySubmit != 0 || $subJob)
+				&& -s $treeCompletion && fileGZs($completedTree)) {
+			# BuildTree publishes treeDone.sto atomically only after validating the
+			# primary tree and clearing terminal lifecycle markers.  On a tree-only
+			# resume this pair is authoritative, so avoid per-MGS directory creation,
+			# terminal-marker checks, and input-sidecar probes.
+			$doneDirs++;
+			$completedTreeFastPaths++;
+			$MGSsubmissionComplete{$MGS} = 1;
+			$deferredScratchCleanup{"$scratchD/outs/$MGS"} = 1
+				if -d "$scratchD/outs/$MGS";
+			next;
+		}
 		#print "$outD2\n";
 		if (-d $outD2 && $onlySubmit == 0 && !$subJob && !$recalcTrees){#only the parent may clean shared folders
 			remove_tree($outD2);
@@ -3809,19 +3828,6 @@ sub evalFileStatus{
 			$MGSnoTreeReason{$MGS} = lifecycleMarkerReason($buildTreeTerminalMarker,
 				'buildtree_no_usable_alignment');
 			$noRecoverableLociDirs++;
-			next;
-		}
-		my $completedTree = "$outD2/phylo/$treeFile";
-		my $treeCompletion = "$outD2/treeDone.sto";
-		if (!$recalcTrees && !$reSubmit && !$repairCAT && !$deepRepair
-				&& !$redoSubmissionData && -s $treeCompletion
-				&& fileGZs($completedTree)) {
-			# The completion marker was written only after primary-tree validation.
-			# Avoid opening and decompressing its category sidecar again.
-			$doneDirs++;
-			$MGSsubmissionComplete{$MGS} = 1;
-			$deferredScratchCleanup{"$scratchD/outs/$MGS"} = 1
-				if -d "$scratchD/outs/$MGS";
 			next;
 		}
 		retry_unlink($tooFewMarker, label => "clear stale too-few marker");
@@ -3907,10 +3913,10 @@ sub evalFileStatus{
 	}
 	$PhylosExist = 0 if ($CatFileMiss/scalar(@specis) > 0.1); #only activate if more than 10% missing..
 
-	print "Output dirs status: \nIncomplete tree inputs: $CatFileMiss, complete staged inputs: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent, Dir done: $doneDirs, too few samples: $tooFewDirs, no recoverable loci: $noRecoverableLociDirs, Phylo complete: $PhylosExist \n";
+	print "Output dirs status: \nIncomplete tree inputs: $CatFileMiss, complete staged inputs: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent, Dir done: $doneDirs, completion-marker fast paths: $completedTreeFastPaths, too few samples: $tooFewDirs, no recoverable loci: $noRecoverableLociDirs, Phylo complete: $PhylosExist \n";
 	#die;
 	return($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist,
-		$noRecoverableLociDirs);
+		$noRecoverableLociDirs, $completedTreeFastPaths);
 }
 
 sub epaOnlyRetryReady {

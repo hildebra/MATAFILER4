@@ -131,7 +131,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.11;/,
+like($strain, qr/my \$version = 1\.12;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain, qr/PreferredOutgroupGene.*?requiredNT.*?prepareSelectiveOutgroupReferenceCache/s,
 	'Mosaic direct mappings define a reduced exact outgroup-reference request set');
@@ -345,8 +345,11 @@ like($strain,
 	qr/my \(%persistentMGSInputStateCache, %scratchMGSInputStateCache\).*?sub invalidateMGSInputState .*?delete \@persistentMGSInputStateCache.*?delete \@scratchMGSInputStateCache/s,
 	'published and scratch triplet states are cached and explicitly invalidated after mutations');
 like($strain,
-	qr/my \$completedTree = .*?treeDone\.sto.*?fileGZs\(\$completedTree\).*?Avoid opening and decompressing its category sidecar again.*?next;.*?fileGZe\("\$SIdirs\{\$MGS\}\/\$CATstdof"\)/s,
+	qr/my \$completedTree = .*?treeDone\.sto.*?fileGZs\(\$completedTree\).*?BuildTree publishes treeDone\.sto atomically.*?next;.*?fileGZe\("\$SIdirs\{\$MGS\}\/\$CATstdof"\)/s,
 	'a validated completed tree bypasses compressed category-sidecar inspection');
+like($strain,
+	qr/my \$completedTree = "\$outD2\/phylo\/\$treeFile";.*?my \$treeCompletion = "\$outD2\/treeDone\.sto";.*?\(\$onlySubmit != 0 \|\| \$subJob\).*?BuildTree publishes treeDone\.sto atomically.*?\$completedTreeFastPaths\+\+.*?next;.*?my \$tooFewMarker/s,
+	'tree-only audits prioritize the durable completion marker and primary tree before deeper MGS probes');
 my ($quickWorkerValidation) = $strain =~
 	/(sub validatePhase1WorkerLedger .*?)(?=sub phase1WorkersNeedingRetry)/s;
 ok(defined($quickWorkerValidation),
@@ -497,6 +500,9 @@ like($strain,
 like($strain2,
 	qr/my \@nonTreeOutcomeMarkers = qw\(.*?tooFewSamples\.sto.*?noRecoverableLoci\.sto.*?noTree\.sto.*?placementPending\.sto.*?\);.*?my \@outcomeMarkers = grep.*?if \(\@outcomeMarkers\).*?\$terminalTreeMGS\+\+;.*?next;/s,
 	'step two explicitly skips MGS with valid no-tree or placement-pending markers');
+like($strain2,
+	qr/my \$treeCompletion = "\$FMGpD\/\$entry\/treeDone\.sto";.*?if \(-s \$treeCompletion\).*?completedTreeSize.*?completionMarkerFastPaths\+\+.*?next;.*?my \@outcomeMarkers/s,
+	'step two uses the same durable completion-marker and primary-tree fast path as strain_within');
 like($strain,
 	qr/sub lifecycleMarkerReason.*?\^reason\\t/s,
 	'BuildTree lifecycle-marker reasons have one reusable parser');

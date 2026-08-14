@@ -39,7 +39,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.33: summarize per-tree progress and make runtime configuration explicit
 #.34: resolve catalog maps through LOGandSUB/inmap.txt
 #.35: exclude MGS with terminal no-tree or retained placement-pending outcomes
-my $version = 0.35;
+#.36: prioritize durable completed-tree evidence during postprocessing discovery
+my $version = 0.36;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;
@@ -114,6 +115,7 @@ my @nonTreeOutcomeMarkers = qw(
 	tooFewSamples.sto noRecoverableLoci.sto noTree.sto placementPending.sto
 );
 my $terminalTreeMGS = 0;
+my $completionMarkerFastPaths = 0;
 
 print "=====================================================\n";
 print "Strain postprocessing v$version\n";
@@ -153,7 +155,26 @@ my %sizTrees;
 while ( my $entry = readdir DIR ) {
     next if $entry eq '.' or $entry eq '..';
     next unless -d $FMGpD . '/' . $entry;
-	next unless (-d "$FMGpD/$entry/phylo/");
+	my $phyloDirectory = "$FMGpD/$entry/phylo/";
+	next unless -d $phyloDirectory;
+	my $treeCompletion = "$FMGpD/$entry/treeDone.sto";
+	if (-s $treeCompletion) {
+		my $completedTreeSize = 0;
+		my $completedTreeIndex = 0;
+		while ($completedTreeSize == 0 && $completedTreeIndex < @defTreeFiles) {
+			$completedTreeSize = -s "$phyloDirectory$defTreeFiles[$completedTreeIndex]";
+			$completedTreeIndex++;
+		}
+		if ($completedTreeSize) {
+			# Match strain_within.pl: this atomic BuildTree completion marker is
+			# written only after the final primary tree validates successfully.
+			$dirs{$entry} = $phyloDirectory;
+			$baseD{$entry} = "$FMGpD/$entry";
+			$sizTrees{$entry} = $completedTreeSize;
+			$completionMarkerFastPaths++;
+			next;
+		}
+	}
 	my @outcomeMarkers = grep {
 		-s "$FMGpD/$entry/$_"
 	} @nonTreeOutcomeMarkers;
@@ -165,18 +186,19 @@ while ( my $entry = readdir DIR ) {
 	#system "cp $destD/$entry.nwk $FMGpD/$entry/phylo/IQtree.treefile " if (-e "$destD/$entry.nwk");
 	my $sizTree = 0; my $x=0;
 	while ($sizTree == 0 && $x < @defTreeFiles){
-		$sizTree = -s "$FMGpD/$entry/phylo/$defTreeFiles[$x]" if (-e "$FMGpD/$entry/phylo/$defTreeFiles[$x]");
+		$sizTree = -s "$phyloDirectory$defTreeFiles[$x]";
 		$x++;
 	}
 	next unless ($sizTree);
-	#genuine MGS phylo dir-> store in %dirs %baseD
-	$dirs{$entry} = "$FMGpD/$entry/phylo/"; 
+	#genuine legacy MGS phylo dir without a current completion marker
+	$dirs{$entry} = $phyloDirectory;
 	$baseD{$entry} = "$FMGpD/$entry";
 	$sizTrees{$entry} = $sizTree;
 }
 
 closedir DIR;
 print "Found ".scalar(keys %dirs)." MGS directories with a nonempty calculated tree";
+print "; completion-marker fast paths=$completionMarkerFastPaths";
 print "; skipped $terminalTreeMGS MGS with valid no-tree or placement-pending markers"
 	if $terminalTreeMGS;
 print "\n";
