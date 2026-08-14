@@ -42,7 +42,7 @@ BAIL_OUT('Cannot extract MSA finalization helpers')
 my $msa_helpers = <<'PERL';
 package TestBuildTreeMSAFinalizer;
 use File::Copy qw(copy);
-our ($pigzBin, $ncore);
+our ($pigzBin, $ncore, $removeMSA);
 sub retry_unlink {
 	my ($path, %options) = @_;
 	return 1 unless -e $path || -l $path;
@@ -182,6 +182,7 @@ write_test_file($already_compressed, "retained compressed alignment\n");
 	no warnings 'once';
 	$TestBuildTreeMSAFinalizer::pigzBin = $fake_pigz;
 	$TestBuildTreeMSAFinalizer::ncore = 1;
+	$TestBuildTreeMSAFinalizer::removeMSA = 1;
 }
 is(TestBuildTreeMSAFinalizer::finalizeMSAArtifacts($msa_directory), 2,
 	'MSA finalization compresses each plain retained MSAli alignment');
@@ -200,6 +201,20 @@ is(TestBuildTreeMSAFinalizer::restoreCompressedMSAArtifact($retained_alignment),
 	'EPA-only recovery restores a retained compressed concatenated alignment');
 ok(-s $retained_alignment && !-e "$retained_alignment.gz",
 	'EPA-only recovery leaves the restored plain alignment ready for EPA-ng');
+
+my $retained_locus_directory = File::Spec->catdir($temporary, 'MSA-retained-loci');
+mkdir $retained_locus_directory or die "Cannot create $retained_locus_directory: $!";
+my $retained_locus = File::Spec->catfile($retained_locus_directory, 'COG0002.0.fna');
+my $discarded_protein = File::Spec->catfile($retained_locus_directory, 'COG0002.0.faa');
+my $retained_locus_alignment = File::Spec->catfile($retained_locus_directory, 'MSAli.fna');
+write_test_file($retained_locus, "nucleotide locus\n");
+write_test_file($discarded_protein, "protein locus\n");
+write_test_file($retained_locus_alignment, "concatenated alignment\n");
+$TestBuildTreeMSAFinalizer::removeMSA = 0;
+is(TestBuildTreeMSAFinalizer::finalizeMSAArtifacts($retained_locus_directory), 1,
+	'MSA finalization still compresses the retained concatenated alignment in retention mode');
+ok(-s $retained_locus && !-e $discarded_protein,
+	'-rmMSA 0 retains nucleotide sub-alignments for population genetics but removes unneeded protein alignments');
 my $publication_staging = File::Spec->catdir($temporary, 'publication-resume');
 mkdir $publication_staging or die "Cannot create $publication_staging: $!";
 write_test_file(File::Spec->catfile($publication_staging, '.strain_tree_input.plan.tsv'),

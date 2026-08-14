@@ -75,6 +75,9 @@
 #5.70: distinguish MSA-selection checkpoints from downstream tree-stage settings
 #5.71: consolidate internal workflow policy and lifecycle checkpoints into one state file
 #5.72: validate retained concatenated alignment checkpoints before resuming tree inference
+#5.73: require broadly prevalent loci for taxon rescue and QC backfill
+#5.74: retain per-locus nucleotide MSAs when -rmMSA 0 is requested
+#5.75: prefer universal-core guide loci and consolidate final taxon-aware diagnostics
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -150,6 +153,9 @@ sub taxonAwareAlignmentMetrics;
 sub informativeSequenceLength;
 sub writeTaxonAwareLocusAudit;
 sub writeTaxonAwareSampleAudit;
+sub preferredCoreGeneSet;
+sub catalogueGeneFromLocus;
+sub compactTaxonAwareDiagnostics;
 sub writeSelectionAttritionAudit;
 sub legacyPolicyFileMatches;
 sub alignmentFileStem;
@@ -168,6 +174,7 @@ sub writeStagedPreparationMarker;
 sub writeCompletionMarker;
 sub reusableCompletionTree;
 sub writeOutcomeMarker;
+sub completeTaxonAwareOutgroupAnchorTerminal;
 sub clearLifecycleMarker;
 sub preflightBuildTree;
 sub treeAlignmentCheckpointStatus;
@@ -203,7 +210,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.72";
+my $version = "5.75";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -297,7 +304,7 @@ my $maxGapPerCol = 1 ;
 my $minPcId = 0;
 my $doSuperTree =0;
 my $doSuperCheck=0;#check if tree's of single genes behave "strange"
-my $gzipInput =0; my $removeMSA = 0;
+my $gzipInput =0; my $removeMSA = 1; # retain per-locus nucleotide MSAs only when explicitly requested
 my $useTreeShrink =0;
 my %BACKBONE_DEFAULT = (
 	enabled => 0,
@@ -354,6 +361,7 @@ my %TAXON_AWARE_DEFAULT = (
 	minimum_sequence_nt => 60,
 	target_loci_per_sample => 25,
 	target_nt_per_sample => 7500,
+	rescue_minimum_prevalence => 0.8,
 );
 my $taxonAwareLocusSelection = $TAXON_AWARE_DEFAULT{enabled};
 my $taxonAwareMaxLoci = $TAXON_AWARE_DEFAULT{maximum_loci};
@@ -362,6 +370,11 @@ my $taxonAwareCandidateExtra = $TAXON_AWARE_DEFAULT{candidate_extra};
 my $taxonAwareMinSequenceNT = $TAXON_AWARE_DEFAULT{minimum_sequence_nt};
 my $taxonAwareTargetLoci = $TAXON_AWARE_DEFAULT{target_loci_per_sample};
 my $taxonAwareTargetNT = $TAXON_AWARE_DEFAULT{target_nt_per_sample};
+my $taxonAwareRescueMinPrevalence =
+	$TAXON_AWARE_DEFAULT{rescue_minimum_prevalence};
+my $preferredCoreGenes = "";
+my $compactTaxonAwareDiagnostics = 1;
+my $preferredCoreGeneSet = {};
 my $ntFiltExplicit = 0;
 
 
@@ -478,6 +491,9 @@ GetOptions(
 	"taxonAwareMinSequenceNT=i" => \$taxonAwareMinSequenceNT,
 	"taxonAwareTargetLoci=i" => \$taxonAwareTargetLoci,
 	"taxonAwareTargetNT=i" => \$taxonAwareTargetNT,
+	"preferredCoreGenes=s" => \$preferredCoreGenes,
+	"compactTaxonAwareDiagnostics=i" => \$compactTaxonAwareDiagnostics,
+	"taxonAwareRescueMinPrevalence=f" => \$taxonAwareRescueMinPrevalence,
 	"runIQtree=i" => \$doIQTree,
 	"AutoModel=i" => sub {
 		$treeAutoModel = $_[1];
@@ -526,6 +542,7 @@ $postAlignmentDivergenceQC = $withinSpecies ? 1 : 0
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
 die "-cores must be a positive integer\n" if $ncore < 1;
+die "-rmMSA must be 0 or 1\n" unless $removeMSA == 0 || $removeMSA == 1;
 die "-bootstrap must be zero or greater\n" if $bootStrap < 0;
 die "-NTfiltCount must be zero or greater\n" if $ntCntTotal < 0;
 $placementGeneFracPSpec = $GeneFracPSpec unless defined $placementGeneFracPSpec;
@@ -620,6 +637,19 @@ die "-taxonAwareCandidateExtra must be zero or greater\n"
 	if $taxonAwareCandidateExtra < 0;
 die "-taxonAwareCoreLoci cannot exceed -taxonAwareMaxLoci\n"
 	if $taxonAwareCoreLoci > $taxonAwareMaxLoci;
+die "-taxonAwareRescueMinPrevalence must be between 0 and 1 "
+	."(default $TAXON_AWARE_DEFAULT{rescue_minimum_prevalence})\n"
+	if $taxonAwareRescueMinPrevalence < 0
+		|| $taxonAwareRescueMinPrevalence > 1;
+die "-compactTaxonAwareDiagnostics must be 0 or 1\n"
+	unless $compactTaxonAwareDiagnostics == 0 || $compactTaxonAwareDiagnostics == 1;
+if (length($preferredCoreGenes)) {
+	$preferredCoreGenes = abs_path($preferredCoreGenes)
+		or die "Cannot resolve -preferredCoreGenes: $preferredCoreGenes\n";
+	die "-preferredCoreGenes is missing or empty: $preferredCoreGenes\n"
+		unless -s $preferredCoreGenes;
+	$preferredCoreGeneSet = preferredCoreGeneSet($preferredCoreGenes);
+}
 die "-tmpD and -tmpSubdir are mutually exclusive\n" if length($tmpD) && length($tmpSubdir);
 if (length($tmpSubdir)) {
 	die "-tmpSubdir must be a safe relative path\n"
@@ -749,6 +779,7 @@ push @inputDescriptions, "NT=$fnFna" if $fnFna ne "";
 push @inputDescriptions, "AA=$aaFna" if $aaFna ne "";
 push @inputDescriptions, "categories=$cogCats" if $cogCats ne "";
 push @inputDescriptions, "genomes=$genoindir" if $genoindir ne "";
+push @inputDescriptions, "preferred-core=$preferredCoreGenes" if $preferredCoreGenes ne "";
 print "=====================================================\n";
 print "BuildTree pipeline v$version\n";
 print "Inputs: " . join("; ", @inputDescriptions) . "\n";
@@ -759,8 +790,9 @@ print "Mode: " . ($cogCats ne "" ? "multi-locus" : "single-locus")
 	. "; input aligned=" . ($isAligned ? "yes" : "no")
 	. "; continue=" . ($continue ? "yes" : "no") . "\n";
 print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
-	. ($postFilter || "<none>") . "; per-locus MSA cleanup=always; MSAli compression=always"
-	. ($removeMSA ? "; legacy -rmMSA ignored" : "") . "\n";
+	. ($postFilter || "<none>")
+	. ($removeMSA ? "; per-locus MSA cleanup=enabled" : "; per-locus nucleotide MSAs retained")
+	. "; MSAli compression=always\n";
 print "MSAfix coding-NT repair: " . ($msaFixRecoverTechnicalOffsets ? "enabled; frame=$msaFixCodingFrame; genetic code=$msaFixGeneticCode; band=$msaFixRecoveryBand" : "disabled") . "\n"
 	unless $useAA4tree;
 print "Filtering: per-gene length fraction=$ntFracGene; category Q90 fraction=$fracMaxGenes90pct; "
@@ -783,6 +815,9 @@ print "Taxon-aware locus selection: enabled="
 	. "; final loci=$taxonAwareMaxLoci; robust core=$taxonAwareCoreLoci"
 	. "; alignment backfill=$taxonAwareCandidateExtra"
 	. "; minimum sequence NT=$taxonAwareMinSequenceNT"
+	. "; rescue minimum prevalence=$taxonAwareRescueMinPrevalence"
+	. "; preferred universal core="
+	. (keys(%{$preferredCoreGeneSet}) ? scalar(keys %{$preferredCoreGeneSet}) : "<none>")
 	. "; sample target=$taxonAwareTargetLoci loci/$taxonAwareTargetNT NT\n";
 print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
 	. "; sample QC=" . ($sampleQCFile || "<none>")
@@ -930,6 +965,7 @@ my $postAlignmentQCPolicy = join("\t",
 	"post_filter=$postFilter",
 	"sample_definition=$smplDef",
 	"sample_separator=$smplSep",
+	"preferred_core_input=".inputFingerprint($preferredCoreGenes),
 	"outgroup=$outgroup",
 	"synonymous_sites=$calcSyn",
 	"nonsynonymous_sites=$calcNonSyn",
@@ -971,6 +1007,7 @@ my $postAlignmentQCPolicy = join("\t",
 	"taxon_aware_minimum_sequence_nt=$taxonAwareMinSequenceNT",
 	"taxon_aware_target_loci=$taxonAwareTargetLoci",
 	"taxon_aware_target_nt=$taxonAwareTargetNT",
+	"taxon_aware_rescue_minimum_prevalence=$taxonAwareRescueMinPrevalence",
 )."\n";
 my $postAlignmentPolicy = join("\t",
 	"schema=1",
@@ -1054,6 +1091,7 @@ if (length($durableCompletionTree) && $completionMatchesMethod
 	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
 	writeBuildTreeState();
 	cleanupLegacyBuildTreeStateFiles();
+	compactTaxonAwareDiagnostics();
 	writeWorkflowHeartbeat('complete');
 	print "Recovery state: durable completion marker and current policy match; "
 		."skipping alignment/QC/tree revalidation ($durableCompletionTree)\n";
@@ -1284,6 +1322,8 @@ if ($isAligned){
 			core_limit => $taxonAwareCoreLoci,
 			target_loci => $taxonAwareTargetLoci,
 			target_nt => $taxonAwareTargetNT,
+			rescue_min_prevalence => $taxonAwareRescueMinPrevalence,
+			preferred_core_genes => $preferredCoreGeneSet,
 			use_aa => $useAA4tree,
 			report => "$treeD/taxon_aware_locus_candidates.tsv",
 		);
@@ -1316,6 +1356,7 @@ if ($isAligned){
 			}, $outD);
 			finalizeMSAArtifacts($MsaD);
 			safeRemoveTree($tmpD, $tmpBase);
+			compactTaxonAwareDiagnostics();
 			writeWorkflowHeartbeat('complete');
 			print "BuildTree completed with a valid terminal no-tree outcome: $reason\n";
 			exit(0);
@@ -1407,15 +1448,27 @@ if ($isAligned){
 	#print "Samples removed due to low gene presence:\n";
 	my $OGfnd=0;
 	if ($taxonAwareLocusSelection) {
-		my $sampleSelection = classifyTaxonAwareSamples(
-			metrics => \%taxonAwarePreMetrics,
-			samples => \%taxonAwareUniverseSamples,
-			target_loci => $taxonAwareTargetLoci,
-			target_nt => $taxonAwareTargetNT,
-			minimum_anchor_nt => 1,
-			selected_only => 1,
-			outgroup => $outgroup,
-		);
+		my ($sampleSelection, $selectionError);
+		{
+			local $@;
+			$sampleSelection = eval {
+				classifyTaxonAwareSamples(
+					metrics => \%taxonAwarePreMetrics,
+					samples => \%taxonAwareUniverseSamples,
+					target_loci => $taxonAwareTargetLoci,
+					target_nt => $taxonAwareTargetNT,
+					minimum_anchor_nt => 1,
+					selected_only => 1,
+					outgroup => $outgroup,
+				);
+			};
+			$selectionError = $@;
+		}
+		if (length($selectionError)) {
+			completeTaxonAwareOutgroupAnchorTerminal('candidate_selection', $selectionError)
+				if $selectionError =~ /^Taxon-aware selection could not retain an aligned anchor for outgroup /;
+			die $selectionError;
+		}
 		writeTaxonAwareSampleAudit(
 			"$treeD/taxon_aware_sample_candidates.tsv", $sampleSelection);
 		for my $sp (@specs) {
@@ -1748,21 +1801,35 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 	my $primaryAlignments = $useAA4tree ? \@MSA_AA : \@MSAs;
 	if (@{$primaryAlignments}) {
 		my $postQCAlignmentCount = scalar @{$primaryAlignments};
-		my $finalSelection = selectTaxonAwareFinalLoci(
-			alignments => $primaryAlignments,
-			path_gene => \%primaryAlignmentGene,
-			pre_metrics => \%taxonAwarePreMetrics,
-			samples => \%taxonAwareUniverseSamples,
-			maximum_loci => $taxonAwareMaxLoci,
-			core_loci => $taxonAwareCoreLoci,
-			target_loci => $taxonAwareTargetLoci,
-			target_nt => $taxonAwareTargetNT,
-			minimum_anchor_nt => 1,
-			use_aa => $useAA4tree,
-			outgroup => $outgroup,
-			locus_report => "$treeD/taxon_aware_locus_selection.tsv",
-			sample_report => "$treeD/taxon_aware_sample_selection.tsv",
-		);
+		my ($finalSelection, $selectionError);
+		{
+			local $@;
+			$finalSelection = eval {
+				selectTaxonAwareFinalLoci(
+					alignments => $primaryAlignments,
+					path_gene => \%primaryAlignmentGene,
+					pre_metrics => \%taxonAwarePreMetrics,
+					samples => \%taxonAwareUniverseSamples,
+					maximum_loci => $taxonAwareMaxLoci,
+					core_loci => $taxonAwareCoreLoci,
+					target_loci => $taxonAwareTargetLoci,
+					target_nt => $taxonAwareTargetNT,
+					rescue_min_prevalence => $taxonAwareRescueMinPrevalence,
+					preferred_core_genes => $preferredCoreGeneSet,
+					minimum_anchor_nt => 1,
+					use_aa => $useAA4tree,
+					outgroup => $outgroup,
+					locus_report => "$treeD/taxon_aware_locus_selection.tsv",
+					sample_report => "$treeD/taxon_aware_sample_selection.tsv",
+				);
+			};
+			$selectionError = $@;
+		}
+		if (length($selectionError)) {
+			completeTaxonAwareOutgroupAnchorTerminal('final_selection', $selectionError)
+				if $selectionError =~ /^Taxon-aware selection could not retain an aligned anchor for outgroup /;
+			die $selectionError;
+		}
 		my %keepPath = map { $_ => 1 } @{$finalSelection->{alignments}};
 		my %keepStem = map { alignmentFileStem($_) => 1 }
 			@{$finalSelection->{alignments}};
@@ -1889,9 +1956,10 @@ if ($calcMSA
 		candidate_loci => $candidateLoci, aligned_loci => $alignedLoci,
 		failed_loci => $failedLoci, samples => scalar(keys %samples),
 	}, $outD);
-	finalizeMSAArtifacts($MsaD);
-	safeRemoveTree($tmpD, $tmpBase);
-	writeWorkflowHeartbeat('complete');
+			finalizeMSAArtifacts($MsaD);
+			safeRemoveTree($tmpD, $tmpBase);
+			compactTaxonAwareDiagnostics();
+			writeWorkflowHeartbeat('complete');
 	print "BuildTree completed with a valid terminal no-tree outcome: $reason\n";
 	exit(0);
 }
@@ -2369,6 +2437,7 @@ clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending
 writeCompletionMarker($completionMarker, ${$trRetH}{nwk}, $outD)
 	if length($completionMarker);
 cleanupLegacyBuildTreeStateFiles();
+compactTaxonAwareDiagnostics();
 writeWorkflowHeartbeat('complete');
 	###################### ETE ######################3
 
@@ -2665,6 +2734,7 @@ sub runEpaOnlyPlacement {
 	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
 	cleanupLegacyBuildTreeStateFiles();
 	safeRemoveTree($tmpD, $tmpBase);
+	compactTaxonAwareDiagnostics();
 	writeWorkflowHeartbeat('complete');
 	print "EPA-only recovery completed; primary tree=$primaryTree; "
 		."backbone retained=$backboneTree; jplace=$jplaceFile; model=$modelArtifact\n";
@@ -2761,6 +2831,7 @@ sub runRedoEpaFilter {
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	cleanupLegacyBuildTreeStateFiles();
 	safeRemoveTree($tmpD, $tmpBase);
+	compactTaxonAwareDiagnostics();
 	writeWorkflowHeartbeat('complete');
 	print "Forced EPA filter redo completed without alignment or inference; "
 		."primary tree=$primaryTree; backbone retained=$backboneTree; "
@@ -4995,6 +5066,7 @@ sub selectTaxonAwareCandidateLoci {
 		my $potentialInformation = { variable_sites => 0, parsimony_informative_sites => 0 };
 		$metrics{$gene} = {
 			gene => $gene,
+			preferred_core => catalogueGeneFromLocus($gene, $args{preferred_core_genes}) ? 1 : 0,
 			category => \@sequenceIds,
 			sample_sites => \%bestSites,
 			sample_count => scalar(keys %bestSequence),
@@ -5036,6 +5108,7 @@ sub selectTaxonAwareCandidateLoci {
 		final_limit => $args{final_limit},
 		target_loci => $args{target_loci},
 		target_nt => $args{target_nt},
+		rescue_min_prevalence => $args{rescue_min_prevalence},
 		stage => "candidate",
 	);
 	my @selectedCategories = map { $metrics{$_}{category} } @{$selectedGenes};
@@ -5078,17 +5151,32 @@ sub rawCoordinateInformation {
 sub chooseTaxonAwareLoci {
 	my %args = @_;
 	my $metrics = $args{metrics};
+	my $rescueMinimumPrevalence = $args{rescue_min_prevalence}
+		// $TAXON_AWARE_DEFAULT{rescue_minimum_prevalence};
+	my $preferredCoreRescueBonus = 0.05; # secondary to actual coverage gain
 	for my $metric (values %{$metrics}) {
-		delete @{$metric}{qw(selected selection_rank selection_phase selection_objective)};
+		delete @{$metric}{qw(
+			selected selection_rank selection_phase selection_objective
+			coverage_rescue_eligible coverage_rescue_reason
+		)};
 	}
 	my @eligible = sort {
-		($metrics->{$b}{quality_score} // 0) <=> ($metrics->{$a}{quality_score} // 0)
+		($metrics->{$b}{preferred_core} // 0) <=> ($metrics->{$a}{preferred_core} // 0)
+			|| ($metrics->{$b}{quality_score} // 0) <=> ($metrics->{$a}{quality_score} // 0)
 			|| $a cmp $b
 	} grep { ($metrics->{$_}{sample_count} // 0) >= 3 } keys %{$metrics};
+	for my $gene (@eligible) {
+		my $prevalence = $metrics->{$gene}{prevalence} // 0;
+		my $broadlyAvailable = $prevalence + 1e-12 >= $rescueMinimumPrevalence;
+		$metrics->{$gene}{coverage_rescue_eligible} = $broadlyAvailable ? 1 : 0;
+		$metrics->{$gene}{coverage_rescue_reason} = $broadlyAvailable
+			? "broad_prevalence_met" : "below_rescue_minimum_prevalence";
+	}
 	my $limit = $args{limit} < @eligible ? $args{limit} : scalar(@eligible);
 	my $coreLimit = $args{core_limit} < $limit ? $args{core_limit} : $limit;
 	my (%selected, %sampleLoci, %sampleSites, %availability);
 	for my $gene (@eligible) {
+		next unless $metrics->{$gene}{coverage_rescue_eligible};
 		$availability{$_}++ for keys %{$metrics->{$gene}{sample_sites}};
 	}
 	my $maximumAvailability = 1;
@@ -5110,6 +5198,7 @@ sub chooseTaxonAwareLoci {
 		my ($bestGene, $bestObjective);
 		for my $gene (@eligible) {
 			next if $selected{$gene};
+			next unless $metrics->{$gene}{coverage_rescue_eligible};
 			my $coverageGain = 0;
 			for my $sample (keys %{$metrics->{$gene}{sample_sites}}) {
 				my $rarityWeight = sqrt(
@@ -5125,7 +5214,8 @@ sub chooseTaxonAwareLoci {
 				}
 			}
 			my $objective = $coverageGain
-				+ 0.25 * ($metrics->{$gene}{quality_score} // 0);
+				+ 0.25 * ($metrics->{$gene}{quality_score} // 0)
+				+ $preferredCoreRescueBonus * ($metrics->{$gene}{preferred_core} // 0);
 			if (!defined($bestObjective) || $objective > $bestObjective
 					|| ($objective == $bestObjective && $gene lt $bestGene)) {
 				($bestGene, $bestObjective) = ($gene, $objective);
@@ -5321,6 +5411,8 @@ sub selectTaxonAwareFinalLoci {
 		my $excessVariationPenalty = $variableDensity > 0.20 ? ($variableDensity - 0.20) / 0.30 : 0;
 		$excessVariationPenalty = 1 if $excessVariationPenalty > 1;
 		$metric->{robust_score} = $preScore;
+		$metric->{preferred_core} = ($args{pre_metrics}{$gene}{preferred_core}
+			// catalogueGeneFromLocus($gene, $args{preferred_core_genes})) ? 1 : 0;
 		$metric->{prevalence} = $prevalence;
 		$metric->{information_score} = $informationScore;
 		$metric->{information_density} = $informationDensity;
@@ -5339,6 +5431,7 @@ sub selectTaxonAwareFinalLoci {
 		final_limit => $args{maximum_loci},
 		target_loci => $args{target_loci},
 		target_nt => $args{target_nt},
+		rescue_min_prevalence => $args{rescue_min_prevalence},
 		stage => "final",
 	);
 	die "Taxon-aware final selection found no usable locus\n"
@@ -5418,12 +5511,12 @@ sub writeTaxonAwareLocusAudit {
 	print {$output} join("\t", qw(
 		stage gene selected rank phase quality_score robust_score occupancy prevalence
 		information_score information_density variable_density excess_variation_penalty
-		sample_count q90_nt alignment_length_nt variable_sites
+		preferred_core sample_count q90_nt alignment_length_nt variable_sites
 		parsimony_informative_sites potential_variable_sites
 		potential_parsimony_informative_sites potential_informative_nt
 		potential_information_score
 		median_completeness length_stability
-		selection_objective alignment
+		selection_objective coverage_rescue_eligible coverage_rescue_reason alignment
 	))."\n";
 	for my $gene (sort {
 		($metrics->{$a}{selected} ? 0 : 1) <=> ($metrics->{$b}{selected} ? 0 : 1)
@@ -5438,6 +5531,7 @@ sub writeTaxonAwareLocusAudit {
 			map({ defined($metric->{$_}) ? sprintf("%.6f", $metric->{$_}) : "" }
 				qw(quality_score robust_score occupancy prevalence information_score
 					information_density variable_density excess_variation_penalty)),
+			$metric->{preferred_core} ? 1 : 0,
 			$metric->{sample_count} // "", $metric->{q90_nt} // "",
 			$metric->{alignment_length_nt} // "", $metric->{variable_sites} // "",
 			$metric->{parsimony_informative_sites} // "",
@@ -5448,6 +5542,9 @@ sub writeTaxonAwareLocusAudit {
 				? sprintf("%.6f", $metric->{potential_information_score}) : "",
 			map({ defined($metric->{$_}) ? sprintf("%.6f", $metric->{$_}) : "" }
 				qw(median_completeness length_stability selection_objective)),
+			defined($metric->{coverage_rescue_eligible})
+				? $metric->{coverage_rescue_eligible} : "",
+			$metric->{coverage_rescue_reason} // "",
 			$metric->{path} // "",
 		);
 		print {$output} join("\t", @values)."\n";
@@ -5469,6 +5566,89 @@ sub writeTaxonAwareSampleAudit {
 			)))."\n";
 	}
 	close $output or die "Cannot close taxon-aware sample audit $path: $!\n";
+}
+
+sub preferredCoreGeneSet {
+	my ($path) = @_;
+	return {} unless defined($path) && length($path);
+	open my $input, '<', $path
+		or die "Cannot open preferred-core guide $path: $!\n";
+	my (%genes, $ignored);
+	while (my $line = <$input>) {
+		$line =~ s/[\r\n]+\z//;
+		next if $line eq '' || $line =~ /^\s*#/;
+		my @field = split /\t/, $line, -1;
+		if (@field < 2 || !length($field[1])) {
+			$ignored++;
+			next;
+		}
+		# Raw .core guides have one seed per row; sorter output uses the
+		# same second column for a comma-separated ranked seed list.
+		for my $gene (split /,/, $field[1]) {
+			$gene =~ s/^\s+|\s+$//g;
+			next unless length($gene);
+			next if $gene =~ /\A(?:gene|gene_id|seed)\z/i;
+			$genes{$gene} = 1;
+		}
+	}
+	close $input or die "Cannot close preferred-core guide $path: $!\n";
+	die "Preferred-core guide $path has no usable seed genes\n" unless keys %genes;
+	print "Loaded ".scalar(keys %genes)." preferred universal-core seed gene(s) from $path"
+		.($ignored ? "; ignored $ignored malformed row(s)" : '')."\n";
+	return \%genes;
+}
+
+sub catalogueGeneFromLocus {
+	my ($locus, $preferred) = @_;
+	return 0 unless defined($locus) && length($locus)
+		&& ref($preferred) eq 'HASH' && keys %{$preferred};
+	my @part = split /\|/, $locus, -1;
+	my $catalogueGene = pop @part;
+	return exists $preferred->{$catalogueGene} ? 1 : 0;
+}
+
+sub compactTaxonAwareDiagnostics {
+	return 0 unless $taxonAwareLocusSelection && $compactTaxonAwareDiagnostics;
+	my @names = qw(
+		taxon_aware_locus_candidates.tsv
+		taxon_aware_sample_candidates.tsv
+		taxon_aware_locus_selection.tsv
+		taxon_aware_sample_selection.tsv
+		taxon_aware_backbone_eligibility.tsv
+		taxon_aware_placement_eligibility.tsv
+		rate_merged_partitions.tsv
+	);
+	my @sources = map { File::Spec->catfile($treeD, $_) }
+		grep { -s File::Spec->catfile($treeD, $_) } @names;
+	return 0 unless @sources;
+	my $output = File::Spec->catfile($treeD, 'taxon_aware_diagnostics.tsv');
+	my $temporary = "$output.write.$$";
+	open my $merged, '>', $temporary
+		or die "Cannot create consolidated taxon-aware diagnostics $temporary: $!\n";
+	print {$merged} "# MATAFILER taxon-aware diagnostics v1\n"
+		or die "Cannot write consolidated taxon-aware diagnostics header: $!\n";
+	for my $source (@sources) {
+		open my $input, '<', $source
+			or die "Cannot read taxon-aware diagnostic $source: $!\n";
+		print {$merged} "## ".basename($source)."\n"
+			or die "Cannot write diagnostics section header: $!\n";
+		while (my $line = <$input>) {
+			print {$merged} $line
+				or die "Cannot write consolidated diagnostic from $source: $!\n";
+		}
+		close $input or die "Cannot close taxon-aware diagnostic $source: $!\n";
+		print {$merged} "\n" or die "Cannot separate consolidated diagnostics: $!\n";
+	}
+	close $merged or die "Cannot close consolidated taxon-aware diagnostics $temporary: $!\n";
+	retry_rename($temporary, $output,
+		label => "publish consolidated taxon-aware diagnostics $output");
+	for my $source (@sources) {
+		retry_unlink($source, fatal => 0,
+			label => "remove consolidated taxon-aware diagnostic $source");
+	}
+	print "Consolidated ".scalar(@sources)
+		." taxon-aware/rate diagnostic file(s) into $output\n";
+	return scalar(@sources);
 }
 
 sub legacyPolicyFileMatches {
@@ -6383,6 +6563,37 @@ sub writeOutcomeMarker {
 	print "Published lifecycle outcome: $status ($marker)\n";
 }
 
+sub completeTaxonAwareOutgroupAnchorTerminal {
+	my ($stage, $error) = @_;
+	my $reason = 'taxon_aware_outgroup_no_selected_anchor';
+	$error //= '';
+	$error =~ s/[\r\n]+\z//;
+	clearLifecycleMarker($completionMarker, 'clear stale tree completion');
+	clearLifecycleMarker($placementPendingMarker,
+		'clear stale placement-pending marker');
+	cleanupLegacyBuildTreeStateFiles();
+	$selectionAttrition{final_loci} = 0;
+	$selectionAttrition{final_samples} = 0;
+	$selectionAttrition{backbone_samples} = 0;
+	$selectionAttrition{placement_samples} = 0;
+	$selectionAttrition{excluded_samples} = scalar(keys %samples);
+	writeSelectionAttritionAudit($selectionAttritionReport, \%selectionAttrition);
+	writeOutcomeMarker($terminalMarker, 'valid_no_tree', $reason, {
+		stage => $stage,
+		outgroup => $outgroup,
+		candidate_loci => $selectionAttrition{candidate_loci} // 0,
+		aligned_loci => $selectionAttrition{aligned_loci} // 0,
+		post_qc_loci => $selectionAttrition{post_qc_loci} // 0,
+		error => $error,
+	}, $outD);
+	finalizeMSAArtifacts($MsaD);
+	safeRemoveTree($tmpD, $tmpBase);
+	compactTaxonAwareDiagnostics();
+	writeWorkflowHeartbeat('complete');
+	print "BuildTree completed with a valid terminal no-tree outcome: $reason\n";
+	exit(0);
+}
+
 sub clearLifecycleMarker {
 	my ($marker, $label) = @_;
 	return 1 unless defined($marker) && length($marker);
@@ -6482,7 +6693,7 @@ sub finalizeMSAArtifacts {
 	return unless defined($directory) && -d $directory;
 	opendir my $directoryHandle, $directory
 		or die "Cannot inspect MSA directory $directory for finalization: $!\n";
-	my (@singleLocus, @retainedAlignment);
+	my (@singleLocusNucleotide, @singleLocusProtein, @retainedAlignment);
 	my $cleanedSubdirectory = '';
 	for my $name (readdir $directoryHandle) {
 		next if $name eq File::Spec->curdir || $name eq File::Spec->updir;
@@ -6496,11 +6707,16 @@ sub finalizeMSAArtifacts {
 			push @retainedAlignment, $path unless $name =~ /\.gz\z/;
 			next;
 		}
-		push @singleLocus, $path if $name =~ /\.(?:fna|faa)(?:\.gz)?\z/;
+		push @singleLocusNucleotide, $path if $name =~ /\.fna(?:\.gz)?\z/;
+		push @singleLocusProtein, $path if $name =~ /\.faa(?:\.gz)?\z/;
 	}
 	closedir $directoryHandle
 		or die "Cannot close MSA directory $directory after finalization scan: $!\n";
-	for my $path (@singleLocus) {
+	my @singleLocusToRemove = (
+		@singleLocusProtein,
+		$removeMSA ? @singleLocusNucleotide : (),
+	);
+	for my $path (@singleLocusToRemove) {
 		retry_unlink($path, label => "remove completed single-locus MSA $path");
 	}
 	safeRemoveTree($cleanedSubdirectory, $directory) if $cleanedSubdirectory ne '';
@@ -6524,7 +6740,9 @@ sub finalizeMSAArtifacts {
 		die "MSA finalization did not produce $compressed\n" unless -s $compressed && !-e $path;
 		$compressedCount++;
 	}
-	print "MSA finalization: removed ".scalar(@singleLocus)." single-locus alignment file(s)"
+	my $retainedSingleLocus = scalar(@singleLocusNucleotide) - ($removeMSA ? scalar(@singleLocusNucleotide) : 0);
+	print "MSA finalization: removed ".scalar(@singleLocusToRemove)." single-locus alignment file(s)"
+		.($retainedSingleLocus ? "; retained $retainedSingleLocus single-locus nucleotide MSA(s)" : '')
 		.($cleanedSubdirectory ne '' ? '; removed MSA/clnd' : '')
 		."; compressed $compressedCount retained MSAli alignment(s)\n";
 	return $compressedCount;

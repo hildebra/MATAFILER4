@@ -138,7 +138,7 @@ unlike($strain2, qr/open my \$summary_fh.*?\$TXTreport/s,
 unlike($strain2, qr/test -s "\.shellQuote\(\$analysisReport\)/,
 	'the legacy text report is not required for RDS-based completion');
 like($strain2,
-	qr/"popGenStats=i".*?\$doPopGenStats.*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?test -s .*?\$popGenStore.*?touch .*?\$popGenStone/s,
+	qr/"popGenStats=i".*?\$doPopGenStats.*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?test -s .*?\$popGenStore/s,
 	'population genetics is scheduled with its current three-argument R interface and a durable RDS checkpoint');
 like($strain2,
 	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
@@ -154,6 +154,9 @@ like($strain2,
 like($strain2,
 	qr/my \@k2d = sort \{ \$treeNodes\{\$b\} <=> \$treeNodes\{\$a\}.*?\$batchNodeBudget = \$treeNodes\{\$k2d\[0\]\};.*?\$curBatchNodes \+ \$treeNodeCount > \$batchNodeBudget.*?\$curBatchNodes \+= \$treeNodeCount.*?\$curBatchNodes >= \$batchNodeBudget/s,
 	'largest phylogeny defines the R-job node budget and smaller phylogenies are packed without exceeding it');
+like($strain2,
+	qr/\$jobCores = ".*MATAFILER_R_ANALYSIS_CORES.*?my \$batchCores = \$curBatch > 1 \? \$nCoreHeavy : \$nCore;.*?export MATAFILER_R_ANALYSIS_CORES=\$batchCores.*?qsubSystem\([^\n]+,\$batchCmd,\$batchCores/s,
+	"combined R-analysis batches request and use the configured heavy core count, while standalone analyses retain standard cores");
 unlike($strain2, qr/\$batchSize/,
 	'R-job submission no longer uses a fixed phylogeny count per batch');
 unlike($strain2, qr/if \(\$doSubmit && -d \$destD\)/,
@@ -173,8 +176,11 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.13;/,
+like($strain, qr/my \$version = 1.16;/,
 	'workflow behavior changes retain an explicit version marker');
+like($strain,
+	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats/s,
+	'population genetics forces retention of per-locus MSAs and forwards its enabled state to strainwithin2');
 like($strain, qr/PreferredOutgroupGene.*?requiredNT.*?prepareSelectiveOutgroupReferenceCache/s,
 	'Mosaic direct mappings define a reduced exact outgroup-reference request set');
 like($strain, qr/sub outgroupRequirementLoci.*?preparedOutgroupLog.*?CATstdof\.tmp/s,
@@ -507,6 +513,9 @@ unlike($strain, qr/-NTfilt \$relativeNTFraction/,
 like($strain,
 	qr/my \$GenesPerSpecies = 0\.2;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.1;.*?\$placementGenesPerSpecies = 0\.02; \$placementRelativeNTFraction = 0\.01;.*?my \$taxonAwareLocusSelection = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
 	'strainWithin uses stricter backbone defaults, lower explicit placement thresholds, and taxon-aware selection');
+like($strain,
+	qr/my \$taxonAwareRescueMinPrevalence = 0\.8;.*?"taxonAwareRescueMinPrevalence=f" => \\\$taxonAwareRescueMinPrevalence.*?-taxonAwareRescueMinPrevalence \$taxonAwareRescueMinPrevalence/s,
+	'strainWithin exposes and forwards the broad-locus rescue prevalence guard');
 like($strain,
 	qr/my \$rateMergePartitions = 1;.*?my \$rateMergeMaxBins = 8;.*?my \$rateMergeTargetSites = 30_000;.*?my \$rateMergeMinLoci = 20;.*?my \$rateMergeMinSites = 20_000;.*?"rateMergePartitions=i" => \\\$rateMergePartitions.*?-rateMergePartitions \$rateMergePartitions.*?-rateMergeMaxBins \$rateMergeMaxBins.*?-rateMergeTargetSites \$rateMergeTargetSites.*?-rateMergeMinLoci \$rateMergeMinLoci.*?-rateMergeMinSites \$rateMergeMinSites/s,
 	'strainWithin enables deterministic rate merging and forwards all bin controls');

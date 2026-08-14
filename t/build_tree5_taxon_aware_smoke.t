@@ -26,6 +26,14 @@ sub slurp {
 	return <$handle>;
 }
 
+
+sub diagnostic_section {
+	my ($text, $name) = @_;
+	my ($section) = $text =~ /^## \Q$name\E\n(.*?)(?=^## |\z)/ms;
+	die "Missing diagnostics section $name\n" unless defined $section;
+	return $section;
+}
+
 my $mafft = File::Spec->catfile($temporary, 'mafft-pass-through');
 write_file($mafft, <<'SH');
 #!/bin/sh
@@ -167,6 +175,10 @@ for my $sample (qw(s1 s2 s5)) {
 	$aa{"$sample|g3"} = 'MKTAAAVVVQ';
 	$nt{"$sample|g3"} = $sample eq 's5' ? ('CTG'.('ATG' x 9)) : ('ATG' x 10);
 }
+for my $sample (qw(s1 s2 s3 s5)) {
+	$aa{"$sample|g5"} = 'MKTAAAVVVQ';
+	$nt{"$sample|g5"} = 'ATG' x 10;
+}
 my $faa = File::Spec->catfile($temporary, 'input.faa');
 my $fna = File::Spec->catfile($temporary, 'input.fna');
 write_file($faa, join('', map { ">$_\n$aa{$_}\n" } sort keys %aa));
@@ -176,8 +188,11 @@ write_file($categories, join('',
 	map {
 		my $gene = $_;
 		join("\t", sort grep { /\|\Q$gene\E\z/ } keys %aa)."\n"
-	} qw(g1 g2 g3 g4)
+	} qw(g1 g2 g3 g4 g5)
 ));
+my $preferredCore = File::Spec->catfile($temporary, 'SB.clusters.core');
+write_file($preferredCore,
+	"MGS1\tg4\t10\t0\t1\tunused\n");
 
 my $wrapper = File::Spec->catfile($temporary, 'run-buildtree.pl');
 write_file($wrapper, <<'PERL');
@@ -205,6 +220,7 @@ my @command = (
 	'-taxonAwareMinSequenceNT', 9, '-taxonAwareTargetLoci', 2,
 	'-taxonAwareTargetNT', 30, '-placementMinOverlap', 6,
 	'-rateMergePartitions', 1, '-rateMergeMaxBins', 4, '-rateMergeTargetSites', 1,
+	'-preferredCoreGenes', $preferredCore,
 	'-rateMergeMinLoci', 1, '-rateMergeMinSites', 1,
 );
 is(system(@command), 0, 'taxon-aware buildTree smoke workflow completes');
@@ -235,6 +251,29 @@ ok(-s $terminalState,
 unlike(slurp($terminalState), qr/^status\tfailed$/m,
 	'the valid no-tree outcome is not recorded as a workflow failure');
 
+my $outgroupAnchorOutput = File::Spec->catdir($temporary, 'outgroup-anchor-output');
+my @outgroupAnchorCommand = @command;
+for my $index (0 .. $#outgroupAnchorCommand - 1) {
+	$outgroupAnchorCommand[$index + 1] = $outgroupAnchorOutput
+		if $outgroupAnchorCommand[$index] eq '-outD';
+}
+push @outgroupAnchorCommand, ('-outgroup', 'missing_outgroup', '-compactTaxonAwareDiagnostics', 0);
+is(system(@outgroupAnchorCommand), 0,
+	'a taxon-aware outgroup without an anchor exits as a successful terminal outcome');
+my $outgroupAnchorMarker = File::Spec->catfile($outgroupAnchorOutput, 'noTree.sto');
+my $uncompactedOutgroupCandidate = File::Spec->catfile(
+	$outgroupAnchorOutput, 'phylo', 'taxon_aware_locus_candidates.tsv');
+ok(-s $uncompactedOutgroupCandidate,
+	'legacy individual diagnostics are retained when compaction is disabled');
+ok(-s $outgroupAnchorMarker,
+	'the missing-outgroup-anchor outcome is persisted for future resume runs');
+my $outgroupAnchorText = slurp($outgroupAnchorMarker);
+like($outgroupAnchorText,
+	qr/^status\tvalid_no_tree\nreason\ttaxon_aware_outgroup_no_selected_anchor\n/m,
+	'the outgroup-anchor marker carries a stable terminal reason');
+like($outgroupAnchorText, qr/^outgroup\tmissing_outgroup$/m,
+	'the terminal marker records the unavailable requested outgroup');
+
 my $candidateAudit = File::Spec->catfile(
 	$output, 'phylo', 'taxon_aware_locus_candidates.tsv');
 my $finalAudit = File::Spec->catfile(
@@ -243,38 +282,56 @@ my $sampleAudit = File::Spec->catfile(
 	$output, 'phylo', 'taxon_aware_sample_selection.tsv');
 my $attritionAudit = File::Spec->catfile(
 	$output, 'phylo', 'selection_attrition.tsv');
-ok(-s $candidateAudit, 'candidate locus audit is written');
-ok(-s $finalAudit, 'final locus audit is written');
-ok(-s $sampleAudit, 'final sample audit is written');
+
+my $diagnostics = File::Spec->catfile($output, 'phylo', 'taxon_aware_diagnostics.tsv');
+ok(!-e $finalAudit, 'final source audit is removed after consolidation');
+ok(!-e $sampleAudit, 'sample source audit is removed after consolidation');
+ok(-s $diagnostics, 'taxon-aware and rate diagnostics are consolidated');
+my $diagnosticText = slurp($diagnostics);
+ok(!-e $candidateAudit, 'candidate source audit is removed after consolidation');
 ok(-s $attritionAudit, 'compact end-to-end selection attrition audit is written');
 
-open my $candidateHandle, '<', $candidateAudit or die $!;
-my $candidateText = do { local $/; <$candidateHandle> };
-close $candidateHandle;
-like($candidateText, qr/^candidate\tg4\t1\t4\tqc_backfill\t/m,
-	'extra candidate is explicitly marked as QC backfill');
+my $candidateText = diagnostic_section($diagnosticText,
+	'taxon_aware_locus_candidates.tsv');
+like($candidateText, qr/^candidate\tg4\t1\t1\trobust_core\t/m,
+	'whitelisted universal-core locus is preferred in the robust selection tier');
+my @candidateHeader = split /\t/, (split /\n/, $candidateText)[0];
+my %candidateColumn = map { $candidateHeader[$_] => $_ } 0 .. $#candidateHeader;
+my ($preferredCandidateRow) = grep { /^candidate\tg4\t/ } split /\n/, $candidateText;
+my @preferredCandidate = split /\t/, $preferredCandidateRow, -1;
+is($preferredCandidate[$candidateColumn{preferred_core}], 1,
+	'the candidate audit records the universal-core whitelist match');
+my ($rareCandidateRow) = grep { /^candidate\tg3\t/ } split /\n/, $candidateText;
+my @rareCandidate = split /\t/, $rareCandidateRow, -1;
+is($rareCandidate[$candidateColumn{selected}], 0,
+	'the sparse locus is not selected merely to carry its rare sample');
+is($rareCandidate[$candidateColumn{coverage_rescue_eligible}], 0,
+	'a locus present in only three of five taxa is ineligible for taxon rescue');
+is($rareCandidate[$candidateColumn{coverage_rescue_reason}],
+	'below_rescue_minimum_prevalence',
+	'the candidate audit explains the hard prevalence rejection');
 
-open my $finalHandle, '<', $finalAudit or die $!;
-my $finalText = do { local $/; <$finalHandle> };
-close $finalHandle;
+my $finalText = diagnostic_section($diagnosticText,
+	'taxon_aware_locus_selection.tsv');
 like($finalText,
 	qr/^stage\tgene\tselected\trank\tphase\tquality_score\trobust_score\toccupancy\tprevalence\tinformation_score\tinformation_density\tvariable_density\texcess_variation_penalty/m,
 	'final locus audit exposes prevalence, bounded information, and excess-variation scoring');
-like($finalText, qr/^final\tg3\t1\t3\ttaxon_rescue\t/m,
-	'rare-sample locus is retained by the final taxon-rescue pass');
-like($finalText, qr/^final\tg4\t0\t/m,
-	'less complementary robust locus is left out of the bounded final set');
+like($finalText, qr/^final\tg5\t1\t3\ttaxon_rescue\t/m,
+	'a broadly available locus can retain the sparse sample during taxon rescue');
+like($finalText, qr/^final\tg2\t0\t/m,
+	'non-core robust locus is displaced by the preferred universal-core target');
+unlike($finalText, qr/^final\tg3\t/m,
+	'the sparse locus is not aligned or reconsidered during final selection');
 
-open my $sampleHandle, '<', $sampleAudit or die $!;
-my $sampleText = do { local $/; <$sampleHandle> };
-close $sampleHandle;
-like($sampleText, qr/^s5\t1\t30\t1\t30\tplacement_candidate\tusable_sparse_anchor$/m,
+my $sampleText = diagnostic_section($diagnosticText,
+	'taxon_aware_sample_selection.tsv');
+like($sampleText, qr/^s5\t2\t60\t1\t30\tplacement_candidate\tusable_sparse_anchor$/m,
 	'rare but anchored sample is retained for placement');
 
 open my $attritionHandle, '<', $attritionAudit or die $!;
 my $attritionText = do { local $/; <$attritionHandle> };
 close $attritionHandle;
-like($attritionText, qr/^input_loci\t4$/m, 'attrition audit records all input loci');
+like($attritionText, qr/^input_loci\t5$/m, 'attrition audit records all input loci');
 like($attritionText, qr/^candidate_loci\t4$/m, 'attrition audit records the bounded alignment candidates');
 like($attritionText, qr/^final_loci\t3$/m, 'attrition audit records the bounded final locus set');
 like($attritionText, qr/^backbone_samples\t5$/m, 'attrition audit records final tree samples');
@@ -290,7 +347,7 @@ like($alignmentText, qr/^>s5$/m, 'rescued sparse sample remains in the merged al
 my $partitionFile = $mergedAlignment.'.partition.RAXML';
 my $rateAudit = File::Spec->catfile($output, 'phylo', 'rate_merged_partitions.tsv');
 ok(-s $partitionFile, 'deterministically grouped partition file is produced');
-ok(-s $rateAudit, 'rate/GC partition assignments are audited');
+ok(!-e $rateAudit, 'rate/GC partition source audit is merged into the diagnostics file');
 open my $partitionHandle, '<', $partitionFile or die $!;
 my @partitionLines = grep { /\S/ } <$partitionHandle>;
 close $partitionHandle;
@@ -298,16 +355,15 @@ cmp_ok(scalar(@partitionLines), '>=', 2,
 	'divergence and GC differences produce more than one partition bin');
 cmp_ok(scalar(@partitionLines), '<=', 4,
 	'scaled bin count respects the configured maximum');
-open my $rateAuditHandle, '<', $rateAudit or die $!;
-my $rateAuditText = do { local $/; <$rateAuditHandle> };
-close $rateAuditHandle;
+my $rateAuditText = diagnostic_section($diagnosticText,
+	'rate_merged_partitions.tsv');
 like($rateAuditText, qr/^locus\talignment\tselection_phase\tstart\tend\talignment_sites\teffective_called_sites\trate_proxy/m,
 	'rate-partition audit has stable coordinate and metric columns');
 like($rateAuditText, qr/\tp90_consensus_divergence\t/,
 	'MSAfix post-alignment divergence supplies the rate proxy');
-is(scalar(() = $rateAuditText =~ /^g[123]\t/gm), 3,
+is(scalar(() = $rateAuditText =~ /^(?:g1|g4|g5)\t/gm), 3,
 	'every selected locus has exactly one audited partition assignment');
-like($rateAuditText, qr/^g3\t[^\t]+\ttaxon_rescue\t[^\n]+\ttaxon_rescue_to_/m,
+like($rateAuditText, qr/^g5\t[^\t]+\ttaxon_rescue\t[^\n]+\ttaxon_rescue_to_/m,
 	'taxon-rescue locus is attached to a robust bin and cannot seed its own partition');
 
 my $collapsedOutput = File::Spec->catdir($temporary, 'collapsed-output');
@@ -334,11 +390,10 @@ is(scalar(@collapsedLines), 1,
 	'undersized rate/GC bins collapse into a single pooled partition');
 like($collapsedLines[0], qr/= \d+-\d+(?:, \d+-\d+){2}$/,
 	'collapsed IQ-TREE partition retains all three non-contiguous locus ranges');
-my $collapsedAudit = File::Spec->catfile(
-	$collapsedOutput, 'phylo', 'rate_merged_partitions.tsv');
-open my $collapsedAuditHandle, '<', $collapsedAudit or die $!;
-my $collapsedAuditText = do { local $/; <$collapsedAuditHandle> };
-close $collapsedAuditHandle;
+my $collapsedDiagnostics = File::Spec->catfile(
+	$collapsedOutput, 'phylo', 'taxon_aware_diagnostics.tsv');
+my $collapsedAuditText = diagnostic_section(slurp($collapsedDiagnostics),
+	'rate_merged_partitions.tsv');
 like($collapsedAuditText, qr/\tp90_consensus_divergence\t/,
 	'native post-alignment P90 consensus divergence is the preferred rate proxy');
 

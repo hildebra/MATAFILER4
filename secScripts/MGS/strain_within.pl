@@ -225,7 +225,10 @@ my $completionMessage = "";
 #1.11: begin strain postprocessing from completed trees while retaining quarantined tree outcomes
 #1.12: prioritize durable completed-tree evidence during tree-only resume audits
 #1.13: pass the source MGS tree to postprocessing for outgroup recovery
-my $version = 1.13;
+#1.14: require broadly prevalent loci for taxon-aware rescue selection
+#1.15: retain per-locus nucleotide MSAs whenever population genetics is enabled
+#1.16: prefer universal-core guide loci and consolidate final taxon-aware diagnostics
+my $version = 1.16;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -295,6 +298,9 @@ my $NTfiltCount = 0;
 my ($placementGenesPerSpecies, $placementRelativeNTFraction, $placementNTfiltCount);
 $placementGenesPerSpecies = 0.02; $placementRelativeNTFraction = 0.01;
 my $taxonAwareLocusSelection = 1;
+my $taxonAwareRescueMinPrevalence = 0.8;
+my $preferredCoreGenes = "";
+my $compactTaxonAwareDiagnostics = 1;
 my $rateMergePartitions = 1;
 my $rateMergeMaxBins = 8;
 my $rateMergeTargetSites = 30_000;
@@ -318,7 +324,8 @@ my $treeOOMMaxMemGB = 1500;
 my $treeOOMRetryRounds = 3;
 my $redoSubmissionData = 0;
 my $deepRepair = 0;
-my $rmMSA = 1; #argument passed to buildTree5.pl 
+my $rmMSA = 1; #remove per-locus MSAs unless a downstream analysis requires them
+my $doPopGenStats = 1;
 my $contTests = ""; my $discTests = ""; #stat tests to be given to strain_within_2.2.pl
 my $familyVar = ""; my $groupStabilityVars = "";
 
@@ -431,7 +438,10 @@ GetOptions(
 	"placementGenesPerSpecies=f" => \$placementGenesPerSpecies,
 	"placementRelativeNTFraction=f" => \$placementRelativeNTFraction,
 	"placementNTfiltCount=i" => \$placementNTfiltCount,
+	"preferredCoreGenes=s" => \$preferredCoreGenes,
+	"compactTaxonAwareDiagnostics=i" => \$compactTaxonAwareDiagnostics,
 	"taxonAwareLocusSelection=i" => \$taxonAwareLocusSelection,
+	"taxonAwareRescueMinPrevalence=f" => \$taxonAwareRescueMinPrevalence,
 	"rateMergePartitions=i" => \$rateMergePartitions,
 	"rateMergeMaxBins=i" => \$rateMergeMaxBins,
 	"rateMergeTargetSites=i" => \$rateMergeTargetSites,
@@ -450,6 +460,7 @@ GetOptions(
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
 	"rmMSA=i"        => \$rmMSA, #remove MSA, to save diskspace
+	"popGenStats=i"  => \$doPopGenStats, #requires retained per-locus nucleotide MSAs
 	"phyloMemMulti=f" => \$memMulti, #mem used for buildtree. Default: 1.0
 	
 	"MGSphylo=s"     => \$treeFile,
@@ -497,9 +508,12 @@ die "-treeOOMMaxMemGB must be positive\n" unless $treeOOMMaxMemGB > 0;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax,
 		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction,
+		$taxonAwareRescueMinPrevalence,
 		grep { defined } ($placementGenesPerSpecies, $placementRelativeNTFraction));
 die "-NTfiltCount and -placementNTfiltCount must be non-negative\n"
 	if $NTfiltCount < 0 || (defined($placementNTfiltCount) && $placementNTfiltCount < 0);
+die "-compactTaxonAwareDiagnostics must be 0 or 1\n"
+	unless $compactTaxonAwareDiagnostics == 0 || $compactTaxonAwareDiagnostics == 1;
 die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
 die "-rateMergePartitions must be 0 or 1\n"
@@ -561,11 +575,30 @@ die "-recalcTrees must be launched by the main strainWithin process, not a split
 	if $recalcTrees && $subJob;
 die "-MSAprog must be 0, 1, 2, or 4\n"
 	unless grep { $MSAprog == $_ } (0, 1, 2, 4);
+die "-rmMSA must be 0 or 1\n" unless $rmMSA == 0 || $rmMSA == 1;
+die "-popGenStats must be 0 or 1\n"
+	unless $doPopGenStats == 0 || $doPopGenStats == 1;
+if ($doPopGenStats && $rmMSA) {
+	warn "Population genetics requires per-locus nucleotide MSAs; overriding -rmMSA 1 to -rmMSA 0\n";
+	$rmMSA = 0;
+}
 
 $GCd = abs_path($GCd);
 $GCd .= "/" unless $GCd =~ m{/$};
 $MGSfile = abs_path($MGSfile) if length $MGSfile;
 $mosaicMGSFile = File::Spec->rel2abs($mosaicMGSFile) if length $mosaicMGSFile;
+if (!length($preferredCoreGenes) && length($MGSfile)) {
+	my $companionCoreGuide = $MGSfile =~ /\.core\z/
+		? $MGSfile
+		: "$MGSfile.core";
+	$preferredCoreGenes = $companionCoreGuide if -s $companionCoreGuide;
+}
+if (length($preferredCoreGenes)) {
+	$preferredCoreGenes = abs_path($preferredCoreGenes)
+		or die "Cannot resolve -preferredCoreGenes: $preferredCoreGenes\n";
+	die "-preferredCoreGenes is missing or empty: $preferredCoreGenes\n"
+		unless -s $preferredCoreGenes;
+}
 $outDpre = File::Spec->rel2abs($outDpre) if length $outDpre;
 $mosaicLociFile = File::Spec->rel2abs($mosaicLociFile) if length $mosaicLociFile;
 $MGSabundanceOverride = File::Spec->rel2abs($MGSabundanceOverride)
@@ -1656,8 +1689,12 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	if ($taxonAwareLocusSelection) {
 		$Tcmd .= "-taxonAwareMaxLoci $taxonAwareMaxLoci "
 			."-taxonAwareCoreLoci $taxonAwareCoreLoci "
-			."-taxonAwareCandidateExtra $taxonAwareCandidateExtra ";
+			."-taxonAwareCandidateExtra $taxonAwareCandidateExtra "
+			."-taxonAwareRescueMinPrevalence $taxonAwareRescueMinPrevalence ";
+		$Tcmd .= "-preferredCoreGenes ".shellQuote($preferredCoreGenes)." "
+			if length($preferredCoreGenes) && !$epaOnlyRetry;
 	}
+	$Tcmd .= "-compactTaxonAwareDiagnostics $compactTaxonAwareDiagnostics ";
 	$Tcmd .= "-rateMergePartitions $rateMergePartitions "
 		."-rateMergeMaxBins $rateMergeMaxBins "
 		."-rateMergeTargetSites $rateMergeTargetSites "
@@ -1898,6 +1935,7 @@ my $strain2Scr = getProgPaths("MGS_strain2_scr");
 
 my $nxtCmd = "$strain2Scr -GCd ".shellQuote($GCd)." -FMGdir ".shellQuote($outD)." -MGSmatrix ".shellQuote($MGSabundance)." -cores 4 -reSubmit 0 -DiscTests ".shellQuote($discTests)." -ContTests ".shellQuote($contTests)." -familyVar ".shellQuote($familyVar)." -groupStabilityVars ".shellQuote($groupStabilityVars)." ";
 $nxtCmd .= "-MGSphylo ".shellQuote($treeFile)." " if $treeFile ne "";
+$nxtCmd .= "-popGenStats $doPopGenStats ";
 $nxtCmd .= "-submit $doSubmit ";
 $nxtCmd .= "-qsubSystem ".shellQuote($subMode)." " if $subMode ne "";
 $nxtCmd .= "-Hcores $maxCores " if $maxCores > 0;
@@ -3143,7 +3181,10 @@ sub prepRun{
 			.", finalTreeBudget=$taxonAwareGeneBudget, "
 			."robustCore=$taxonAwareCoreLoci, taxonRescue="
 			.($taxonAwareMaxLoci - $taxonAwareCoreLoci)
-			.", qcBackfill=$taxonAwareCandidateExtra\n"
+			.", qcBackfill=$taxonAwareCandidateExtra, rescueMinPrevalence="
+			."$taxonAwareRescueMinPrevalence, preferredCore="
+			.(length($preferredCoreGenes) ? $preferredCoreGenes : '<none>')
+			.", compactDiagnostics=$compactTaxonAwareDiagnostics\n"
 			if $taxonAwareLocusSelection;
 		
 		
@@ -6353,8 +6394,18 @@ Tree locus filtering:
   -taxonAwareLocusSelection 0|1 Align a robust-plus-backfill candidate set, then
                                  select robust/core and taxon-rescue loci after MSA QC
                                  [default 1]
+  -taxonAwareRescueMinPrevalence FLOAT  Minimum fraction of usable taxa carrying
+                                 a locus before taxon rescue/QC backfill may select it
+                                 [default 0.8]
   -rateMergePartitions 0|1      Merge final loci into deterministic rate/GC bins
                                  before IQ-TREE [default 1]
+  -preferredCoreGenes FILE       Prefer universal-core seed loci listed in this
+                                 raw .core guide. When omitted, use -MGS itself
+                                 if it ends in .core, otherwise a readable
+                                 sibling -MGS.core file [default auto]
+  -compactTaxonAwareDiagnostics 0|1  Merge final taxon-aware/rate audit TSVs
+                                 into phylo/taxon_aware_diagnostics.tsv
+                                 [default 1]
   -rateMergeMaxBins INT         Maximum deterministic partition bins [default 8]
   -rateMergeTargetSites INT     Target effective called sites per initial bin
                                  [default 30000]

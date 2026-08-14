@@ -49,7 +49,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.37: recover missing outgroups from saved tree metadata or the source MGS tree
 #.38: combine versioned strainStats result stores instead of concatenating reports
 #.39: run and combine versioned population-genetics stores alongside strain summaries
-my $version = 0.39;
+#.40: use durable RDS outputs directly as per-MGS completion evidence
+my $version = 0.40;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;
@@ -140,7 +141,7 @@ print "Mode: " . ($doSubmit ? "submit" : "dry run") . "; scheduler: $QSBoptHR->{
 print "Inputs: gene catalog=$GCd; phylogenies=$FMGpD; map=$refMap; abundance matrix=$abMatrix\n";
 print "Fallback outgroup tree: ".(length($MGSphylo) ? $MGSphylo : "<none>")."\n";
 print "Paths: strain summary=$RsummaryTab; population summary=$popGenSummaryTab; subsampled population summary=$popGenSubsampleSummaryTab; toolkit=$MGSTKdir\n";
-print "Resources: standard cores=$nCore; heavy-analysis cores=$nCoreHeavy; queue throttle=$checkMaxNumJobs jobs\n";
+print "Resources: standard cores=$nCore; heavy-analysis/combined-R-job cores=$nCoreHeavy; queue throttle=$checkMaxNumJobs jobs\n";
 print "Metadata: individual=" . ($individualVar || "<none>")
 	. "; family=" . ($familyVar || "<none>")
 	. "; stability groups=" . ($groupStabilityVars || "<none>") . "\n";
@@ -244,7 +245,7 @@ my $batchNodeBudget = $treeNodes{$k2d[0]};
 
 my $cmdPrelude = "ulimit -s 20000\n";
 my $cmd = $cmdPrelude;my $destD =""; my $wrHead=1;
-my %analysisAttempted; my $legacyCompleted = 0; my $reusedAnalysis = 0;
+my %analysisAttempted; my $reusedAnalysis = 0;
 my $strainStatsR = getProgPaths("treeSubGrpsR");
 my $popGenStatsR = $doPopGenStats ? getProgPaths("pogenStats") : "";
 my $combineResultsR = getProgPaths("combineResults_R");
@@ -274,18 +275,14 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		unlink $_ or die "Cannot remove $_: $!\n" for grep { -f $_ || -l $_ } glob("$destD/*");
 		remove_tree($_) for grep { -d $_ } glob("$destD/*");
 	}
-	# The versioned result store is the authoritative strainStats completion artifact.
-	# New jobs also write an explicit success stone below.
+	# The versioned RDS stores are the authoritative completion artifacts.
 	my $analysisLog = "$destD/$d.Ranalysis.log";
 	my $analysisReport = "$destD/$d.analysis.txt";
-	my $analysisStone = "$destD/$d.Ranalysis.sto";
 	my $analysisStore = "$destD/strainStats.output.Rds";
-	my $popGenStone = "$destD/$d.popGen.sto";
 	my $popGenStore = "$destD/popGenStats.output.Rds";
-	my $strainStatsReady = -s $analysisStore && (-e $analysisStone || -s $analysisLog);
+	my $strainStatsReady = -s $analysisStore;
 	my $popGenStatsReady = !$doPopGenStats || -s $popGenStore;
 	if (!$rewriteRanalysis && $strainStatsReady && $popGenStatsReady) {
-		$legacyCompleted++ if !-e $analysisStone;
 		$reusedAnalysis++;
 		next;
 	}
@@ -295,11 +292,16 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	#system "cp $dirs{$d}/$defTreeFile $destD/$d.nwk";
 	my $BinN = 1000;
 	if ($d =~ m/MB2bin(\d+)/){$BinN = $1;}
-	my $jobCores = $nCore;
+	# The final batch size is not known until submission. Keep this as a shell
+	# variable so every analysis in a combined job uses its requested core count,
+	# without over-subscribing a standalone analysis.
+	my $jobCores = "\${MATAFILER_R_ANALYSIS_CORES}";
 	my $treeNodeCount = $treeNodes{$d};
 	if ($curBatchNodes > 0 && $curBatchNodes + $treeNodeCount > $batchNodeBudget) {
 		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
-		my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$cmd,$nCore,"20G",$batchLabel,"","",1,[],$QSBoptHR);
+		my $batchCores = $curBatch > 1 ? $nCoreHeavy : $nCore;
+		my $batchCmd = "export MATAFILER_R_ANALYSIS_CORES=$batchCores\n".$cmd;
+		my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$batchCmd,$batchCores,"20G",$batchLabel,"","",1,[],$QSBoptHR);
 		push(@jobs,$dep);
 		$submitted++;
 		$curBatch = 0; $curBatchNodes = 0; $cmd=$cmdPrelude;
@@ -308,21 +310,19 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	$cmd .= "echo ".shellQuote("At tree $d")."\n";
 	my $OGstr = $OG ne "" ? "--outgroup ".shellQuote($OG)." " : "";
 	if (!$strainStatsReady || $rewriteRanalysis) {
-		$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStone, $analysisStore))."\n";
+		$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStore))."\n";
 		$cmd .= "$strainStatsR --path ".shellQuote($destD)." --tree ".shellQuote("../phylo/$defTree")." --taxN ".shellQuote($d)." $OGstr --map ".shellQuote($refMap)." --metagStats ".shellQuote($MGstats)." --abMat ".shellQuote($abMatrix)." --ncore $jobCores --siteMode 1 --MFDir ".shellQuote($MGSTKdir)." --wrColNms $wrHead --discPermTests ".shellQuote($DiscTests)." --contPermTests ".shellQuote($ContTests)." --familyCol ".shellQuote($familyVar)." --groupStabilityVars ".shellQuote($groupStabilityVars)." > ".shellQuote($analysisLog)."\n";
 		$cmd .= "test -s ".shellQuote($analysisStore)."\n";
-		$cmd .= "touch ".shellQuote($analysisStone)."\n";
-		$analysisAttempted{$d}{strainStats} = { store => $analysisStore, stone => $analysisStone };
+		$analysisAttempted{$d}{strainStats} = { store => $analysisStore };
 		$wrHead=0;
 	}
 	if ($doPopGenStats && (!$popGenStatsReady || $rewriteRanalysis)) {
-		$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($popGenStone, $popGenStore))."\n";
+		$cmd .= "rm -f ".shellQuote($popGenStore)."\n";
 		$cmd .= "$popGenStatsR ".join(" ", map { shellQuote($_) } ($destBaseD, $refMap, $destD));
 		$cmd .= " --subsample ".shellQuote($popGenSubsample) if length($popGenSubsample);
 		$cmd .= "\n";
 		$cmd .= "test -s ".shellQuote($popGenStore)."\n";
-		$cmd .= "touch ".shellQuote($popGenStone)."\n";
-		$analysisAttempted{$d}{popGenStats} = { store => $popGenStore, stone => $popGenStone };
+		$analysisAttempted{$d}{popGenStats} = { store => $popGenStore };
 	}
 	
 	#print $cmd;
@@ -334,7 +334,9 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	$batchDestD = $destD; $batchLabel = "R$cnt";
 	if ($curBatchNodes >= $batchNodeBudget){
 		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
-		my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$cmd,$nCore,"20G",$batchLabel,"","",1,[],$QSBoptHR);
+		my $batchCores = $curBatch > 1 ? $nCoreHeavy : $nCore;
+		my $batchCmd = "export MATAFILER_R_ANALYSIS_CORES=$batchCores\n".$cmd;
+		my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$batchCmd,$batchCores,"20G",$batchLabel,"","",1,[],$QSBoptHR);
 		push(@jobs,$dep);
 		$submitted++;
 		$curBatch = 0; $curBatchNodes = 0; $cmd=$cmdPrelude;
@@ -344,7 +346,9 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	#last if ($cnt > 5);
 }
 if ($curBatch > 0){
-	my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$cmd,$nCore,"20G",$batchLabel,"","",1,[],$QSBoptHR);
+	my $batchCores = $curBatch > 1 ? $nCoreHeavy : $nCore;
+	my $batchCmd = "export MATAFILER_R_ANALYSIS_CORES=$batchCores\n".$cmd;
+	my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$batchCmd,$batchCores,"20G",$batchLabel,"","",1,[],$QSBoptHR);
 	$curBatch = 0; $curBatchNodes = 0; $cmd=$cmdPrelude;
 	push(@jobs,$dep);
 	$submitted++;
@@ -372,13 +376,11 @@ if (@jobs){ #wait for all submitted R scripts, then continue in script
 
 }
 
-print "Accepted $legacyCompleted legacy R-analysis completions without success stones.\n"
-	if $legacyCompleted;
 my @failedAnalysis = grep {
 	my $artifacts = $analysisAttempted{$_};
-	grep { !-s $artifacts->{$_}{store} || !-e $artifacts->{$_}{stone} } keys %$artifacts;
+	grep { !-s $artifacts->{$_}{store} } keys %$artifacts;
 } sort keys %analysisAttempted;
-die "R analysis failed or produced incomplete output for: ".join(", ", @failedAnalysis)."\n"
+die "R analysis failed or produced incomplete RDS output for: ".join(", ", @failedAnalysis)."\n"
 	if @failedAnalysis;
 
 if (0){#get within strain nuc div
