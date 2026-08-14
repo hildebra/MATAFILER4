@@ -16,11 +16,16 @@ use Mods::CatalogPaths qw(resolve_catalog_maps);
 use File::Path qw(make_path remove_tree);
 use File::Copy qw(copy);
 use File::Basename qw(basename dirname);
+use Text::ParseWords qw(shellwords);
 
 sub sumSummaries;
 sub strainNetwork;
 sub treeWas;
 sub visualizeSignPhylos;
+sub resolveOutgroup;
+sub loggedOutgroup;
+sub savedCommandOutgroup;
+sub mgsTreeOutgroup;
 
 my $MGSTKdir = getProgPaths("MGSTKDir");
 
@@ -40,7 +45,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.34: resolve catalog maps through LOGandSUB/inmap.txt
 #.35: exclude MGS with terminal no-tree or retained placement-pending outcomes
 #.36: prioritize durable completed-tree evidence during postprocessing discovery
-my $version = 0.36;
+#.37: recover missing outgroups from saved tree metadata or the source MGS tree
+my $version = 0.37;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;
@@ -59,6 +65,7 @@ my $abMatrix = "";#$ARGV[2];
 my $individualVar = "AssmblGrps";
 my $qsubSystem = "";
 
+my $MGSphylo = "";
 GetOptions(
 	"GCd=s"          => \$GCd,
 	"map=s"          => \$refMap,
@@ -74,6 +81,7 @@ GetOptions(
 	"groupStabilityVars=s"      => \$groupStabilityVars, #column names of categories used for calculation of resilience and persistence
 	"individualVar=s"      => \$individualVar, #column name specifying individual IDs, AssmblGrps by default
 	"qsubSystem=s"    => \$qsubSystem, #optional queue backend override; dry runs default to bash
+	"MGSphylo=s"       => \$MGSphylo, #source MGS tree used by strain_within to choose fallback outgroups
 ) or die "Invalid strain_within_2.2.pl options\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-GCd, -map, -FMGdir and -MGSmatrix are required\n"
@@ -83,6 +91,8 @@ die "Map or MGS abundance matrix is missing\n" unless -s $refMap && -s $abMatrix
 die "Core requests must be positive\n" unless $nCore > 0 && $nCoreHeavy > 0;
 die "-submit and -reSubmit must be 0 or 1\n" unless $doSubmit =~ /^[01]$/ && $rewriteRanalysis =~ /^[01]$/;
 $FMGpD =~ s{/+$}{} unless $FMGpD eq "/";
+die "-MGSphylo does not exist or is empty: $MGSphylo\n"
+	if length($MGSphylo) && !-s $MGSphylo;
 
 
 my $cpDir = "";#$GCd/MGS/R_analysis/";
@@ -98,6 +108,7 @@ $queueMode = "bash" if !$doSubmit && $queueMode eq "";
 my $QSBoptHR = emptyQsubOpt($doSubmit,"",$queueMode);
 $QSBoptHR->{tmpSpace} = 0;
 my $bts = getProgPaths("buildTree_scr");
+my $neighborTree = length($MGSphylo) ? getProgPaths("neighborTree") : "";
 my $SaSe = "|";
 my $SaSe2 = "\|"; #for regex
 my $numCores = 40; #used for phylos..
@@ -122,6 +133,7 @@ print "Strain postprocessing v$version\n";
 print "Mode: " . ($doSubmit ? "submit" : "dry run") . "; scheduler: $QSBoptHR->{qmode}; "
 	. "rewrite existing results: " . ($rewriteRanalysis ? "yes" : "no") . "\n";
 print "Inputs: gene catalog=$GCd; phylogenies=$FMGpD; map=$refMap; abundance matrix=$abMatrix\n";
+print "Fallback outgroup tree: ".(length($MGSphylo) ? $MGSphylo : "<none>")."\n";
 print "Paths: summary=$RsummaryTab; toolkit=$MGSTKdir\n";
 print "Resources: standard cores=$nCore; heavy-analysis cores=$nCoreHeavy; queue throttle=$checkMaxNumJobs jobs\n";
 print "Metadata: individual=" . ($individualVar || "<none>")
@@ -162,7 +174,9 @@ while ( my $entry = readdir DIR ) {
 		my $completedTreeSize = 0;
 		my $completedTreeIndex = 0;
 		while ($completedTreeSize == 0 && $completedTreeIndex < @defTreeFiles) {
-			$completedTreeSize = -s "$phyloDirectory$defTreeFiles[$completedTreeIndex]";
+			# -s returns undef for a missing candidate; keep the numeric loop
+			# sentinel defined while trying the remaining tree formats.
+			$completedTreeSize = (-s "$phyloDirectory$defTreeFiles[$completedTreeIndex]") // 0;
 			$completedTreeIndex++;
 		}
 		if ($completedTreeSize) {
@@ -186,7 +200,8 @@ while ( my $entry = readdir DIR ) {
 	#system "cp $destD/$entry.nwk $FMGpD/$entry/phylo/IQtree.treefile " if (-e "$destD/$entry.nwk");
 	my $sizTree = 0; my $x=0;
 	while ($sizTree == 0 && $x < @defTreeFiles){
-		$sizTree = -s "$phyloDirectory$defTreeFiles[$x]";
+		# A missing file is not an error: try the next supported tree format.
+		$sizTree = (-s "$phyloDirectory$defTreeFiles[$x]") // 0;
 		$x++;
 	}
 	next unless ($sizTree);
@@ -196,7 +211,7 @@ while ( my $entry = readdir DIR ) {
 	$sizTrees{$entry} = $sizTree;
 }
 
-closedir DIR;
+closedir DIR or die "Cannot close $FMGpD: $!\n";
 print "Found ".scalar(keys %dirs)." MGS directories with a nonempty calculated tree";
 print "; completion-marker fast paths=$completionMarkerFastPaths";
 print "; skipped $terminalTreeMGS MGS with valid no-tree or placement-pending markers"
@@ -217,6 +232,7 @@ my $cmdPrelude = "ulimit -s 20000\n";
 my $cmd = $cmdPrelude;my $destD =""; my $wrHead=1; my $headerOwner='';
 my %analysisAttempted; my $legacyCompleted = 0; my $reusedAnalysis = 0;
 my $strainStatsR = getProgPaths("treeSubGrpsR");
+my %outgroupSources;
 
 foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	$cnt++;
@@ -256,14 +272,8 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		remove_tree($_) for grep { -d $_ } glob("$destD/*");
 	}
 	make_path($destD);
-	my $OG = "";
-	if (-e "$destBaseD/data.log" || -e "$destBaseD/data.log.gz") {
-		my ($log_fh) = gzipopen("$destBaseD/data.log", "strain outgroup log");
-		while (my $line = <$log_fh>) {
-			if ($line =~ /^OG:(.*)$/) { $OG = $1; chomp $OG; last; }
-		}
-		close $log_fh;
-	}
+	my (undef, $OG, $outgroupSource) = resolveOutgroup($d, $destBaseD);
+	$outgroupSources{$outgroupSource}++;
 	#system "cp $dirs{$d}/$defTreeFile $destD/$d.nwk";
 	my $BinN = 1000;
 	if ($d =~ m/MB2bin(\d+)/){$BinN = $1;}
@@ -313,6 +323,9 @@ print "R-analysis plan: " . scalar(keys %analysisAttempted) . " MGS analyses pre
 print ", $treeAbsent tree(s) became unavailable while planning" if $treeAbsent;
 print "\n";
 
+print "Outgroup recovery: ".join(", ", map {
+	"$_=$outgroupSources{$_}"
+} sort keys %outgroupSources)."\n" if %outgroupSources;
 if (!$doSubmit) {
 	print "Dry run: R-analysis submission scripts were prepared; summaries and downstream analyses were not run.\n";
 	exit 0;
@@ -658,6 +671,73 @@ sub visualizeSignPhylos{
 
 	print "Printing figures of most significant phylogenies\nThis might take several hours..\n";
 	systemW($cmdPic);
+}
+
+sub resolveOutgroup {
+	my ($mgs, $directory) = @_;
+	my ($logged, $outgroup) = loggedOutgroup($directory);
+	return (1, $outgroup, 'data.log') if $logged;
+
+	my ($saved, $savedOutgroup) = savedCommandOutgroup($directory);
+	return (1, $savedOutgroup, 'treeCmd.sh') if $saved;
+
+	$outgroup = mgsTreeOutgroup($mgs);
+	return (1, $outgroup, 'MGSphylo') if length($outgroup);
+	return (0, '', 'none');
+}
+
+sub loggedOutgroup {
+	my ($directory) = @_;
+	my $logPath = "$directory/data.log";
+	return (0, '') unless -e $logPath || -e "$logPath.gz";
+	my ($log_fh) = gzipopen($logPath, "strain outgroup log");
+	while (my $line = <$log_fh>) {
+		$line =~ s/[\r\n]+\z//;
+		if ($line =~ /^OG:(.*)\z/) {
+			close $log_fh or die "Cannot close strain outgroup log for $directory: $!\n";
+			return (1, $1);
+		}
+	}
+	close $log_fh or die "Cannot close strain outgroup log for $directory: $!\n";
+	return (0, '');
+}
+
+sub savedCommandOutgroup {
+	my ($directory) = @_;
+	my $commandPath = "$directory/treeCmd.sh";
+	return (0, '') unless -s $commandPath;
+	open my $command_fh, '<', $commandPath
+		or die "Cannot read saved tree command $commandPath: $!\n";
+	local $/;
+	my $command = <$command_fh> // '';
+	close $command_fh or die "Cannot close saved tree command $commandPath: $!\n";
+	my @tokens = eval { shellwords($command) };
+	return (0, '') if $@ || !@tokens;
+	return (0, '') unless grep { $_ eq '-withinSpecies' } @tokens;
+	for my $index (0 .. $#tokens - 1) {
+		next unless $tokens[$index] eq '-outgroup' || $tokens[$index] eq '--outgroup';
+		return (1, $tokens[$index + 1]);
+	}
+	# A saved within-species command without this option records an intentional
+	# ingroup-only tree, so do not replace it with a later heuristic.
+	return (1, '');
+}
+
+sub mgsTreeOutgroup {
+	my ($mgs) = @_;
+	return '' unless length($MGSphylo) && length($neighborTree);
+	my $call = "$neighborTree ".shellQuote($MGSphylo)." ".shellQuote($mgs);
+	my $candidates = `$call`;
+	if ($? != 0) {
+		warn "Cannot recover the outgroup for $mgs from $MGSphylo; command failed: $call\n";
+		return '';
+	}
+	for my $candidate (split /\s+/, $candidates) {
+		return $candidate
+			if $candidate =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
+	}
+	warn "No usable outgroup candidate for $mgs was returned from $MGSphylo\n";
+	return '';
 }
 
 sub shellQuote {

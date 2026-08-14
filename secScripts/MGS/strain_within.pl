@@ -224,7 +224,8 @@ my $completionMessage = "";
 #1.10: consolidate controller heartbeat and failure records into one state file
 #1.11: begin strain postprocessing from completed trees while retaining quarantined tree outcomes
 #1.12: prioritize durable completed-tree evidence during tree-only resume audits
-my $version = 1.12;
+#1.13: pass the source MGS tree to postprocessing for outgroup recovery
+my $version = 1.13;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1896,6 +1897,7 @@ die "MGS abundance matrix is missing or empty: $MGSabundance\n" unless -s $MGSab
 my $strain2Scr = getProgPaths("MGS_strain2_scr");
 
 my $nxtCmd = "$strain2Scr -GCd ".shellQuote($GCd)." -FMGdir ".shellQuote($outD)." -MGSmatrix ".shellQuote($MGSabundance)." -cores 4 -reSubmit 0 -DiscTests ".shellQuote($discTests)." -ContTests ".shellQuote($contTests)." -familyVar ".shellQuote($familyVar)." -groupStabilityVars ".shellQuote($groupStabilityVars)." ";
+$nxtCmd .= "-MGSphylo ".shellQuote($treeFile)." " if $treeFile ne "";
 $nxtCmd .= "-submit $doSubmit ";
 $nxtCmd .= "-qsubSystem ".shellQuote($subMode)." " if $subMode ne "";
 $nxtCmd .= "-Hcores $maxCores " if $maxCores > 0;

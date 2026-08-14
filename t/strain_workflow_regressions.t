@@ -123,6 +123,10 @@ like($strain, qr/qsubSystemJobAlive\([^\n]+QSBoptHR[^\n]+if [^\n]+doSubmit/,
 	'dry runs do not poll scheduler jobs that were never submitted');
 like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,
 	'postprocessing inherits submission state and the selected queue backend');
+like($strain, qr/\$nxtCmd \.= "-MGSphylo "\.shellQuote\(\$treeFile\).*?if \$treeFile ne ""/,
+	'postprocessing receives the source MGS tree for outgroup recovery');
+like($strain2, qr/"MGSphylo=s"\s*=>\s*\\\$MGSphylo.*?sub resolveOutgroup .*?data\.log.*?treeCmd\.sh.*?MGSphylo/s,
+	'postprocessing preserves logged or saved outgroups and falls back to the source MGS tree');
 like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,
 	'custom recursive output removal requires a workflow-owned directory');
 like($strain, qr/sub limitedWarn .*?warningExampleLimit.*?Further '\$category' warnings are suppressed/s,
@@ -131,7 +135,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.12;/,
+like($strain, qr/my \$version = 1\.13;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain, qr/PreferredOutgroupGene.*?requiredNT.*?prepareSelectiveOutgroupReferenceCache/s,
 	'Mosaic direct mappings define a reduced exact outgroup-reference request set');
