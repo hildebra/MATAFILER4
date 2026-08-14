@@ -78,6 +78,7 @@
 #5.73: require broadly prevalent loci for taxon rescue and QC backfill
 #5.74: retain per-locus nucleotide MSAs when -rmMSA 0 is requested
 #5.75: prefer universal-core guide loci and consolidate final taxon-aware diagnostics
+#5.76: require 10k shared backbone sites for sparse-sample placement by default
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -210,7 +211,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.75";
+my $version = "5.76";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -309,7 +310,7 @@ my $useTreeShrink =0;
 my %BACKBONE_DEFAULT = (
 	enabled => 0,
 	coverage_fraction => 0.35,
-	minimum_overlap => 400,
+	minimum_overlap => 10_000,
 	minimum_samples => 3,
 );
 my $strictBackbone = $BACKBONE_DEFAULT{enabled};

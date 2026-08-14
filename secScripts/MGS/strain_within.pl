@@ -228,7 +228,8 @@ my $completionMessage = "";
 #1.14: require broadly prevalent loci for taxon-aware rescue selection
 #1.15: retain per-locus nucleotide MSAs whenever population genetics is enabled
 #1.16: prefer universal-core guide loci and consolidate final taxon-aware diagnostics
-my $version = 1.16;
+#1.17: require stronger multi-locus/backbone overlap before sparse-sample placement
+my $version = 1.17;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -296,7 +297,7 @@ my $GeneLengthMin = 0.3;
 my $relativeNTFraction = 0.1;
 my $NTfiltCount = 0;
 my ($placementGenesPerSpecies, $placementRelativeNTFraction, $placementNTfiltCount);
-$placementGenesPerSpecies = 0.02; $placementRelativeNTFraction = 0.01;
+$placementGenesPerSpecies = 0.04; $placementRelativeNTFraction = 0.03;
 my $taxonAwareLocusSelection = 1;
 my $taxonAwareRescueMinPrevalence = 0.8;
 my $preferredCoreGenes = "";
@@ -309,7 +310,7 @@ my $rateMergeMinSites = 20_000;
 my $strictBackbone = 1;
 my $strictBackboneFraction = 0.35;
 my $strictBackboneMinSamples = 3;
-my $placementMinOverlap = 400;
+my $placementMinOverlap = 10_000;
 my $epaThreads = 2;
 my $epaMaxMemMB = -1; # derive from the per-tree IQ-TREE allowance in buildTree5
 my $epaPendantOutlierFactor = 5;
@@ -6387,8 +6388,8 @@ Tree locus filtering:
                                  [default 0.1]
   -NTfiltCount INT              Backbone minimum informative NT after final MSA
                                  [default 0]
-  -placementGenesPerSpecies FLOAT  Placement gene fraction [default 0.02]
-  -placementRelativeNTFraction FLOAT  Placement NT fraction [default 0.01]
+  -placementGenesPerSpecies FLOAT  Placement gene fraction [default 0.04]
+  -placementRelativeNTFraction FLOAT  Placement NT fraction [default 0.03]
   -placementNTfiltCount INT     Placement minimum informative NT; defaults to
                                  -NTfiltCount when omitted
   -taxonAwareLocusSelection 0|1 Align a robust-plus-backfill candidate set, then
@@ -6419,8 +6420,8 @@ Tree locus filtering:
                                  informative-site Q90 [default 0.35]
   -strictBackboneMinSamples INT  Minimum retained backbone samples before using
                                  the complete alignment as fallback [default 3]
-  -placementMinOverlap INT      Minimum informative alignment positions required
-                                 by the taxon-aware placement gate [default 400]
+  -placementMinOverlap INT      Minimum informative positions shared with the
+                                 inferred backbone [default 10000]
   -epaThreads INT                Requested EPA-ng threads; BuildTree caps these by
                                  cores and 1 thread/GB planning memory [default 2]
   -epaMaxMemMB INT               EPA-ng thread-planning budget; -1 derives 60% of

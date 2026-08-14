@@ -176,7 +176,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1.16;/,
+like($strain, qr/my \$version = 1.17;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats/s,
@@ -511,8 +511,8 @@ like($strain,
 unlike($strain, qr/-NTfilt \$relativeNTFraction/,
 	'strain workflow does not emit the retired ambiguous NTfilt option');
 like($strain,
-	qr/my \$GenesPerSpecies = 0\.2;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.1;.*?\$placementGenesPerSpecies = 0\.02; \$placementRelativeNTFraction = 0\.01;.*?my \$taxonAwareLocusSelection = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
-	'strainWithin uses stricter backbone defaults, lower explicit placement thresholds, and taxon-aware selection');
+	qr/my \$GenesPerSpecies = 0\.2;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.1;.*?\$placementGenesPerSpecies = 0.04; \$placementRelativeNTFraction = 0.03;.*?my \$taxonAwareLocusSelection = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
+	'strainWithin uses stricter backbone defaults, balanced explicit placement thresholds, and taxon-aware selection');
 like($strain,
 	qr/my \$taxonAwareRescueMinPrevalence = 0\.8;.*?"taxonAwareRescueMinPrevalence=f" => \\\$taxonAwareRescueMinPrevalence.*?-taxonAwareRescueMinPrevalence \$taxonAwareRescueMinPrevalence/s,
 	'strainWithin exposes and forwards the broad-locus rescue prevalence guard');
@@ -523,7 +523,7 @@ like($strain,
 	qr/maximum_genes_per_sample => 600.*?maximum_tree_loci => 400.*?\$taxonAwareGeneBudget = \$treeLocusBudget < \$presortGenes.*?taxonAwareLocusBudgets\(\$taxonAwareGeneBudget\).*?-taxonAwareMaxLoci \$taxonAwareMaxLoci.*?-taxonAwareCoreLoci \$taxonAwareCoreLoci.*?-taxonAwareCandidateExtra \$taxonAwareCandidateExtra.*?sub taxonAwareLocusBudgets.*?\$maximumLoci \* 0\.8.*?\$maximumLoci \* 0\.3/s,
 	'strainWithin scales 80% core, 20% rescue capacity, and 30% QC backfill to its effective gene budget');
 like($strain,
-	qr/my \$strictBackbone = 1;.*?my \$strictBackboneFraction = 0\.35;.*?my \$strictBackboneMinSamples = 3;.*?my \$placementMinOverlap = 400;.*?"strictBackbone=i"\s+=> \\\$strictBackbone.*?"strictBackboneFraction=f"\s+=> \\\$strictBackboneFraction.*?"strictBackboneMinSamples=i"\s+=> \\\$strictBackboneMinSamples.*?"placementMinOverlap=i"\s+=> \\\$placementMinOverlap/s,
+	qr/my \$strictBackbone = 1;.*?my \$strictBackboneFraction = 0\.35;.*?my \$strictBackboneMinSamples = 3;.*?my \$placementMinOverlap = 10_000;.*?"strictBackbone=i"\s+=> \\\$strictBackbone.*?"strictBackboneFraction=f"\s+=> \\\$strictBackboneFraction.*?"strictBackboneMinSamples=i"\s+=> \\\$strictBackboneMinSamples.*?"placementMinOverlap=i"\s+=> \\\$placementMinOverlap/s,
 	'strainWithin exposes default-active strict-backbone controls');
 like($strain,
 	qr/-strictBackbone \$strictBackbone .*?-strictBackboneFraction \$strictBackboneFraction .*?-strictBackboneMinSamples \$strictBackboneMinSamples .*?-placementMinOverlap \$placementMinOverlap/s,
