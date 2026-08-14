@@ -55,6 +55,8 @@ sub migrateLegacyOperationalLogs;
 sub printEarlyRunHeader;
 sub prepGene2MGS;
 sub createAGlist; sub preComputeConsSNP;
+sub phase1SamplesByGroup; sub phase1EstimatedInputBytes; sub phase1SampleWorkEstimate;
+sub phase1GroupWorkEstimates; sub writePhase1WorkerPlan;
 sub mergeConspecificLogs;
 sub timeNice;
 #sub combineMGSgenes;
@@ -229,7 +231,8 @@ my $completionMessage = "";
 #1.15: retain per-locus nucleotide MSAs whenever population genetics is enabled
 #1.16: prefer universal-core guide loci and consolidate final taxon-aware diagnostics
 #1.17: require stronger multi-locus/backbone overlap before sparse-sample placement
-my $version = 1.17;
+#1.18: balance Phase-I workers by consensus input size and regeneration cost
+my $version = 1.18;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -881,20 +884,24 @@ if ($preparedMainBranchFastPath) {
 		"samples=".scalar(@samples));
 } else {
 createAGlist();
+my ($phase1Groups) = phase1SamplesByGroup();
 my $groupedSampleCount = 0;
 $groupedSampleCount += scalar(@{$AGlist{$_}}) for keys %AGlist;
+my $effectiveGroupCount = scalar(keys %{$phase1Groups});
+my $standaloneSampleCount = scalar(@samples) - $groupedSampleCount;
 if ($maxSubJob == -1) {
 	my ($automaticWorkers, $targetGroupsPerWorker) = choose_auto_worker_count(
-		scalar(keys %AGlist), scalar(@samples),
+		$effectiveGroupCount, scalar(@samples),
 	);
 	$maxSubJob = $automaticWorkers;
-	print "Automatic Stage-I splitting: ".scalar(keys %AGlist)." assembly groups, "
+	print "Automatic Stage-I splitting: $effectiveGroupCount effective groups "
+		."(".scalar(keys %AGlist)." shared, $standaloneSampleCount standalone), "
 		.scalar(@samples)." samples, target ${targetGroupsPerWorker} groups/worker; "
 		.($maxSubJob ? "using $maxSubJob workers" : "using the main process only")."\n";
 }
 stepComplete("assembly-group expansion", $stepStarted,
-	"groups=".scalar(keys %AGlist), "grouped_samples=$groupedSampleCount",
-	"standalone_samples=".(scalar(@samples) - $groupedSampleCount));
+	"groups=".scalar(keys %AGlist), "effective_groups=$effectiveGroupCount",
+	"grouped_samples=$groupedSampleCount", "standalone_samples=$standaloneSampleCount");
 }
 #foreach (sort keys %AGlist) {   print "$_ : @{$AGlist{$_}}\n";}die;
 
@@ -2763,6 +2770,112 @@ sub validateTreeInputResolution {
 }
 
 
+sub phase1SamplesByGroup {
+	my (%samplesByGroup, %groupForSample);
+	for my $sample (@samples) {
+		die "Sample $sample has no assembly-group assignment\n"
+			unless exists($map{$sample}) && defined($map{$sample}{AssGroup});
+		my $group = $map{$sample}{AssGroup} ne '-1'
+			? $map{$sample}{AssGroup} : "__standalone__".$sample;
+		push @{$samplesByGroup{$group}}, $sample;
+		$groupForSample{$sample} = $group;
+	}
+	return (\%samplesByGroup, \%groupForSample);
+}
+
+sub phase1EstimatedInputBytes {
+	my ($path) = @_;
+	my $nominal = $path;
+	$nominal =~ s/\.gz\z//;
+	return fileGZs($nominal);
+}
+
+sub phase1SampleWorkEstimate {
+	my ($sample) = @_;
+	return (1, 'skipped')
+		unless exists($map{$sample}) && defined($map{$sample}{wrdir})
+			&& length($map{$sample}{wrdir});
+	my $cD = $map{$sample}{wrdir};
+	return (1, 'skipped') if -e "$cD/SMPL.empty";
+
+	my $localNT = "$cD/$lSNPdir/$lConsFNA";
+	my $localAA = "$cD/$lSNPdir/$lConsFAA";
+	my $vcf = "$cD/$lSNPdir/$lConsVCF";
+	my ($readyNT, $readyAA);
+	if (exists($preCompSNPs{$sample})
+			&& fileGZe($preCompSNPs{$sample}{NT})
+			&& fileGZe($preCompSNPs{$sample}{AA})) {
+		($readyNT, $readyAA) = @{$preCompSNPs{$sample}}{qw(NT AA)};
+	} elsif ($preCompCons && defined($preConDir) && length($preConDir)) {
+		my $precomputedNT = "$preConDir/$sample.cons.genes.fna.gz";
+		my $precomputedAA = "$preConDir/$sample.cons.prots.faa.gz";
+		($readyNT, $readyAA) = ($precomputedNT, $precomputedAA)
+			if fileGZe($precomputedNT) && fileGZe($precomputedAA);
+	}
+	if (!defined($readyNT) && !$forceVCF2FNA
+			&& fileGZe($localNT) && fileGZe($localAA)) {
+		($readyNT, $readyAA) = ($localNT, $localAA);
+	}
+	if (defined $readyNT) {
+		my $bytes = phase1EstimatedInputBytes($readyNT) + phase1EstimatedInputBytes($readyAA);
+		$bytes = 0 if $bytes < 0;
+		# The fixed component retains per-sample consensus/depth overhead; fileGZs
+		# estimates uncompressed bytes for gzip inputs, matching the FASTA scan cost.
+		return (16 + $bytes / (1024 * 1024), 'ready');
+	}
+	return (1, 'skipped') unless fileGZe($vcf);
+	my $vcfBytes = phase1EstimatedInputBytes($vcf);
+	$vcfBytes = 1024 * 1024 if $vcfBytes < 1024 * 1024;
+	# Regeneration also reads reference/depth/GFF inputs. A fixed penalty plus
+	# twice the estimated VCF input prevents these samples from clustering merely
+	# because their pre-existing consensus FASTAs are absent.
+	return (64 + 2 * $vcfBytes / (1024 * 1024), 'regenerate');
+}
+
+sub phase1GroupWorkEstimates {
+	my ($samplesByGroup) = @_;
+	my (%groupWork, %groupMeta);
+	for my $group (keys %{$samplesByGroup}) {
+		my $work = 8; # indivisible assembly-driver/locus-model overhead
+		my %counts = (ready => 0, regenerate => 0, skipped => 0);
+		for my $sample (@{$samplesByGroup->{$group}}) {
+			my ($sampleWork, $state) = phase1SampleWorkEstimate($sample);
+			$work += $sampleWork;
+			$counts{$state}++;
+		}
+		$groupWork{$group} = $work;
+		$groupMeta{$group} = {
+			samples => scalar(@{$samplesByGroup->{$group}}), %counts,
+		};
+	}
+	return (\%groupWork, \%groupMeta);
+}
+
+sub writePhase1WorkerPlan {
+	my ($path, $samplesByGroup, $workerForGroup, $groupWork,
+		$groupMeta, $workerLoads) = @_;
+	my $temporary = "$path.write.$$";
+	my $out = retry_open('>', $temporary, label => 'create Phase-I worker plan');
+	print {$out} "record\tworker\tassembly_group\tsamples\testimated_work\tready\tregenerate\tskipped\n";
+	for my $group (sort {
+		$workerForGroup->{$a} <=> $workerForGroup->{$b} || $a cmp $b
+	} keys %{$samplesByGroup}) {
+		my $safeGroup = $group;
+		$safeGroup =~ s/[\t\r\n]+/_/g;
+		my $meta = $groupMeta->{$group};
+		print {$out} join("\t", 'group', $workerForGroup->{$group}, $safeGroup,
+			$meta->{samples}, sprintf('%.2f', $groupWork->{$group}),
+			@{$meta}{qw(ready regenerate skipped)}), "\n";
+	}
+	for my $worker (0 .. $#{$workerLoads}) {
+		print {$out} join("\t", 'worker_total', $worker, '', '',
+			sprintf('%.2f', $workerLoads->[$worker]), '', '', ''), "\n";
+	}
+	retry_close($out, 'close Phase-I worker plan');
+	retry_rename($temporary, $path, label => 'publish Phase-I worker plan');
+}
+
+
 sub prepGene2MGS{
 	print "Preparing base strain alignments, per MGS\nThis might take a good while..\n";
 
@@ -2774,41 +2887,41 @@ sub prepGene2MGS{
 	#never materialized in this process at all.
 	my $mySamplesHR = undef;
 	if ($maxSubJob){
-		# Partition whole assembly groups, never individual samples.  The
+		# Partition whole assembly groups, never individual samples. The
 		# catalogue has one shared-reference driver, while every member still
-		# needs its sample-specific VCF/depth consensus below.
-		my (%samplesByGroup, %groupForSample);
-		for my $sample (@samples) {
-			my $group = defined($map{$sample}{AssGroup}) && $map{$sample}{AssGroup} ne '-1'
-				? $map{$sample}{AssGroup} : "__standalone__${sample}";
-			push @{$samplesByGroup{$group}}, $sample;
-			$groupForSample{$sample} = $group;
-		}
-		my @groups = sort keys %samplesByGroup;
+		# needs its sample-specific VCF/depth consensus below. Input size and
+		# regeneration make equal sample counts poor proxies for elapsed time.
+		my ($samplesByGroup, $groupForSample) = phase1SamplesByGroup();
+		my ($groupWork, $groupMeta) = phase1GroupWorkEstimates($samplesByGroup);
+		my @groups = sort keys %{$samplesByGroup};
 		my ($workerForGroup, $workerLoads) =
-			balance_assembly_groups(\%samplesByGroup, $maxSubJob);
+			balance_assembly_groups($samplesByGroup, $maxSubJob, $groupWork);
+		writePhase1WorkerPlan("$LOGDIR/phase1_worker_plan.tsv",
+			$samplesByGroup, $workerForGroup, $groupWork, $groupMeta, $workerLoads)
+			unless $subJob;
 		my (%mine, %ownedGroup);
 		for my $group (@groups) {
 			next unless $workerForGroup->{$group} == $subJob;
 			$ownedGroup{$group} = 1;
-			$mine{$_} = 1 for @{$samplesByGroup{$group}};
+			$mine{$_} = 1 for @{$samplesByGroup->{$group}};
 		}
 		# Assembly catalogues can use generated aliases such as sampleM2.
 		for my $alias (keys %{$map{altNms} || {}}) {
 			my $sample = $map{altNms}{$alias};
-			my $group = $groupForSample{$sample};
+			my $group = $groupForSample->{$sample};
 			$mine{$alias} = 1 if defined($group) && $ownedGroup{$group};
 		}
 		$mySamplesHR = \%mine;
 		my $totalWorkerLoad = 0;
 		$totalWorkerLoad += $_ for @{$workerLoads};
 		my $plannedSamples = 0;
-		$plannedSamples += scalar(@{$samplesByGroup{$_}}) for keys %ownedGroup;
+		$plannedSamples += scalar(@{$samplesByGroup->{$_}}) for keys %ownedGroup;
 		print "Subjob ${subJob}/$maxSubJob: restricting locus-model construction to "
 			. scalar(keys %ownedGroup)." of ".scalar(@groups)
 			." assembly groups ($plannedSamples planned sample(s), "
 			.scalar(keys %mine)." sample/alias identifiers; "
-			."estimated sample load $workerLoads->[$subJob]/$totalWorkerLoad)\n";
+			."estimated work ".sprintf('%.2f', $workerLoads->[$subJob])."/"
+			.sprintf('%.2f', $totalWorkerLoad)." units)\n";
 	}
 
 	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,$Gene2COG,$mySamplesHR);

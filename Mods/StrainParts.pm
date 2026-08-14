@@ -48,20 +48,32 @@ sub choose_auto_worker_count {
 }
 
 sub balance_assembly_groups {
-	my ($samples_by_group, $worker_count) = @_;
+	my ($samples_by_group, $worker_count, $work_by_group) = @_;
 	die "assembly-group sample map must be a hash reference\n"
 		unless ref($samples_by_group) eq 'HASH';
 	die "worker count must be positive\n"
 		unless defined($worker_count) && $worker_count =~ /^\d+$/ && $worker_count > 0;
+	die "assembly-group workload map must be a hash reference\n"
+		if defined($work_by_group) && ref($work_by_group) ne 'HASH';
 
 	for my $group (keys %{$samples_by_group}) {
 		die "assembly-group '$group' samples must be an array reference\n"
 			unless ref($samples_by_group->{$group}) eq 'ARRAY';
+		if (defined $work_by_group) {
+			die "assembly-group '$group' workload must be a positive number\n"
+				unless defined($work_by_group->{$group})
+					&& $work_by_group->{$group} =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/
+					&& $work_by_group->{$group} > 0;
+		}
 	}
 	my @worker_load = (0) x $worker_count;
 	my %worker_for_group;
 	for my $group (sort {
-		scalar(@{$samples_by_group->{$b}}) <=> scalar(@{$samples_by_group->{$a}})
+		my $work_a = defined($work_by_group)
+			? $work_by_group->{$a} : scalar(@{$samples_by_group->{$a}});
+		my $work_b = defined($work_by_group)
+			? $work_by_group->{$b} : scalar(@{$samples_by_group->{$b}});
+		$work_b <=> $work_a
 			|| $a cmp $b
 	} keys %{$samples_by_group}) {
 		my ($worker) = sort {
@@ -69,9 +81,11 @@ sub balance_assembly_groups {
 		} 0 .. $worker_count - 1;
 		$worker_for_group{$group} = $worker;
 		# A group is indivisible because its members share an assembly reference,
-		# but Phase I's expensive VCF/depth/consensus work is per sample.  Balance
-		# on that real work unit rather than on the number of MGS or groups.
-		$worker_load[$worker] += scalar(@{$samples_by_group->{$group}});
+		# but Phase I's expensive VCF/depth/consensus work varies per sample.  The
+		# optional workload map can therefore account for input size/regeneration;
+		# sample counts remain the backwards-compatible default.
+		$worker_load[$worker] += defined($work_by_group)
+			? $work_by_group->{$group} : scalar(@{$samples_by_group->{$group}});
 	}
 	return (\%worker_for_group, \@worker_load);
 }

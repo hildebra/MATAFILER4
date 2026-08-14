@@ -176,7 +176,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1.17;/,
+like($strain, qr/my \$version = 1.18;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats/s,
@@ -432,8 +432,8 @@ like($strain,
 	qr/Stage-I extraction scope: \$stageIScope.*?target_MGS=.*?Workers are balanced by assembly group/s,
 	'split Stage I reports whether its MGS scope is explicit or recovery-driven');
 like($strain,
-	qr/my \$maxSubJob = -1;.*?choose_auto_worker_count\(.*?Automatic Stage-I splitting:.*?target \$\{targetGroupsPerWorker\} groups\/worker/s,
-	'automatic Stage-I splitting is the default and reports its selected granularity');
+	qr/my \$maxSubJob = -1;.*?phase1SamplesByGroup\(\).*?effectiveGroupCount.*?choose_auto_worker_count\(.*?Automatic Stage-I splitting:.*?standalone.*?target \$\{targetGroupsPerWorker\} groups\/worker/s,
+	'automatic Stage-I splitting counts standalone samples as effective schedulable groups');
 like($strain,
 	qr/'-submit', 0, '-onlySubmit', 1.*?'-MGSphylo', \$treeFile.*?'-flushEvery'.*?'-MGset', \$useGTDBmg/s,
 	'extraction workers receive only extraction and outgroup inputs, not tree-submission behavior');
@@ -494,8 +494,11 @@ like($strain,
 	qr/Partition whole assembly groups.*?samplesByGroup.*?ownedGroup.*?\$mine\{\$alias\} = 1/s,
 	'split extraction assigns complete assembly groups and their catalogue aliases to one worker');
 like($strain,
-	qr/balance_assembly_groups\(\\%samplesByGroup, \$maxSubJob\).*?\$workerForGroup->\{\$group\} == \$subJob.*?\$plannedSamples \+= scalar\(\@\{\$samplesByGroup\{\$_\}\}\).*?estimated sample load \$workerLoads->\[\$subJob\]\/\$totalWorkerLoad/s,
-	'split extraction keeps assembly groups intact while balancing and reporting sample-level work');
+	qr/sub phase1EstimatedInputBytes.*?fileGZs\(\$nominal\).*?sub phase1SampleWorkEstimate.*?phase1EstimatedInputBytes\(\$readyNT\).*?phase1EstimatedInputBytes\(\$vcf\).*?'regenerate'.*?sub phase1GroupWorkEstimates/s,
+	'Phase I estimates FASTA scan size and penalizes consensus regeneration');
+like($strain,
+	qr/phase1GroupWorkEstimates\(\$samplesByGroup\).*?balance_assembly_groups\(\$samplesByGroup, \$maxSubJob, \$groupWork\).*?writePhase1WorkerPlan\("\$LOGDIR\/phase1_worker_plan\.tsv".*?\$workerForGroup->\{\$group\} == \$subJob.*?\$plannedSamples \+= scalar\(\@\{\$samplesByGroup->\{\$_\}\}\).*?estimated work/s,
+	'split extraction keeps assembly groups intact while balancing estimated work and auditing its plan');
 like($strain,
 	qr/pre-restricted to .*?sample driver\(s\) with target loci/s,
 	'split-worker diagnostics distinguish post-index usable sample drivers from assembly groups');

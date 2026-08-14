@@ -42,6 +42,24 @@ is_deeply($worker_load, [11, 10],
 is_deeply($group_worker,
 	{ A_big => 0, B_small => 1, C_big => 1, D_small => 0 },
 	'largest assembly groups are assigned first to the currently lightest worker');
+
+my %estimated_work = (
+	A_big => 5,
+	B_small => 12,
+	C_big => 4,
+	D_small => 11,
+);
+my ($weighted_worker, $weighted_load) =
+	balance_assembly_groups(\%unbalanced_groups, 2, \%estimated_work);
+is_deeply($weighted_load, [16, 16],
+	'explicit Phase-I work estimates are balanced independently of sample count');
+is_deeply($weighted_worker,
+	{ A_big => 1, B_small => 0, C_big => 0, D_small => 1 },
+	'largest estimated workloads are assigned first to the lightest worker');
+eval { balance_assembly_groups(\%unbalanced_groups, 2, { A_big => 1 }) };
+like($@, qr/workload must be a positive number/,
+	'missing assembly-group workload estimates fail clearly');
+
 my @round_robin_load = (0, 0);
 my @sorted_groups = sort keys %unbalanced_groups;
 for my $index (0 .. $#sorted_groups) {
