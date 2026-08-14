@@ -70,6 +70,7 @@ is_deeply(
 
 my $strain = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 my $strain2 = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
+my $internal_config = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config_internal.txt'));
 like($strain, qr/sub consensusInputState .*?\$nt_ready && \$aa_ready.*?return 'regenerate' if \$vcf_ready/s,
 	'consensus resume requires the paired NT and AA outputs and repairs from VCF');
 like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA,0,"\\\\s",\\%subG\)/s,
@@ -129,6 +130,27 @@ like($strain2, qr/"MGSphylo=s"\s*=>\s*\\\$MGSphylo.*?sub resolveOutgroup .*?data
 	'postprocessing preserves logged or saved outgroups and falls back to the source MGS tree');
 like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,
 	'custom recursive output removal requires a workflow-owned directory');
+like($strain2,
+	qr/my \$RsummaryTab = "\$FMGpD\/strainStats\.tsv";.*?my \$combineResultsR = getProgPaths\("combineResults_R"\).*?strainStats\.output\.Rds.*?test -s .*?\$analysisStore.*?combineResults\(\);.*?--path .*?\$FMGpD.*?--outDir .*?\$FMGpD.*?systemW\(\$command\).*?did not produce the overview table/s,
+	'postprocessing combines validated strainStats result stores into the named overview table');
+unlike($strain2, qr/open my \$summary_fh.*?\$TXTreport/s,
+	'postprocessing no longer concatenates per-MGS text reports into its overview');
+unlike($strain2, qr/test -s "\.shellQuote\(\$analysisReport\)/,
+	'the legacy text report is not required for RDS-based completion');
+like($strain2,
+	qr/"popGenStats=i".*?\$doPopGenStats.*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?test -s .*?\$popGenStore.*?touch .*?\$popGenStone/s,
+	'population genetics is scheduled with its current three-argument R interface and a durable RDS checkpoint');
+like($strain2,
+	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
+	'existing population RDS stores are reusable and enabled runs require the combined population overview');
+like($strain2,
+	qr/\$popGenSubsampleSummaryTab = "\$FMGpD\/popGenStats\.subsamples\.tsv".*?Combined subsampled population-genetics overview/s,
+	'subsampled population-genetics output is surfaced separately from the full population table');
+unlike($strain2, qr/if \(0\)\{#rerun popgen stats\?\?/,
+	'population genetics is no longer hidden behind a disabled legacy block');
+like($internal_config,
+	qr/^combineResults_R\t\[Rscript\] \[MGSTKDir\]\/combineResults\.R\tenv:MGSTK$/m,
+	'the combineResults command is configured through the MG-STK R environment');
 like($strain, qr/sub limitedWarn .*?warningExampleLimit.*?Further '\$category' warnings are suppressed/s,
 	'repetitive strain warnings retain examples and announce suppression');
 like($strain, qr/Suppressed warning summary:.*?sort grep/s,

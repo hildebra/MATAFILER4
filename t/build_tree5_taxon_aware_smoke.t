@@ -351,6 +351,32 @@ is(system(@downstreamResume), 0,
 	q{a downstream-only option change resumes from the retained selected MSA});
 is((() = slurp($mafftCount) =~ /^/gm), $initialMafftRuns,
 	q{a downstream-only option change does not run the per-locus MSAs again});
+my $validCheckpointMafftRuns = (() = slurp($mafftCount) =~ /^/gm);
+write_file($mergedAlignment, ">corrupt1\nACGT!\n>corrupt2\nACGT!\n");
+my @invalidCheckpointResume = (@command, q{-continue}, 1, q{-iqLegacy}, 1);
+is(system(@invalidCheckpointResume), 0,
+	q{an invalid retained alignment checkpoint is rebuilt before tree inference});
+cmp_ok((() = slurp($mafftCount) =~ /^/gm), q{>}, $validCheckpointMafftRuns,
+	q{an invalid retained alignment checkpoint reruns the per-locus MSAs});
+ok(!-e $mergedAlignment && -s $compressedMergedAlignment,
+	q{the rebuilt retained alignment replaces the corrupt plain checkpoint});
+my $fullAlignment = File::Spec->catfile($output, q{MSA}, q{MSAli.full.fna});
+my $compressedFullAlignment = "$fullAlignment.gz";
+write_file($fullAlignment, ">corrupt1\nACGT!\n>corrupt2\nACGT!\n");
+my $strictCheckpointMafftRuns = (() = slurp($mafftCount) =~ /^/gm);
+my @invalidFullCheckpointResume = (
+	@command, q{-continue}, 1, q{-iqLegacy}, 1, q{-strictBackbone}, 1);
+is(system(@invalidFullCheckpointResume), 0,
+	q{an invalid retained full alignment is replaced before strict-backbone inference});
+is((() = slurp($mafftCount) =~ /^/gm), $strictCheckpointMafftRuns,
+	q{replacing an invalid full alignment reuses the valid primary checkpoint});
+ok(!-e $fullAlignment && -s $compressedFullAlignment,
+	q{the corrected full alignment is retained in compressed form});
+open my $fullAlignmentHandle, q{-|}, q{gzip}, q{-cd}, $compressedFullAlignment or die $!;
+my $fullAlignmentText = do { local $/; <$fullAlignmentHandle> };
+close $fullAlignmentHandle;
+unlike($fullAlignmentText, qr/corrupt1/,
+	q{strict-backbone does not propagate the corrupt full alignment to inference});
 my $workflowState = File::Spec->catfile($output, q{buildTree.state.tsv});
 ok(-s $workflowState,
 	q{one consolidated workflow state records checkpoint and lifecycle data});

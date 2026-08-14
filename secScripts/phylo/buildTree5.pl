@@ -74,6 +74,7 @@
 #5.69: delegate fused strain worker-shard finalization to a standalone helper
 #5.70: distinguish MSA-selection checkpoints from downstream tree-stage settings
 #5.71: consolidate internal workflow policy and lifecycle checkpoints into one state file
+#5.72: validate retained concatenated alignment checkpoints before resuming tree inference
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -169,6 +170,7 @@ sub reusableCompletionTree;
 sub writeOutcomeMarker;
 sub clearLifecycleMarker;
 sub preflightBuildTree;
+sub treeAlignmentCheckpointStatus;
 sub restoreCompressedMSAArtifact;
 sub finalizeMSAArtifacts;
 sub inputFingerprint;
@@ -201,7 +203,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.71";
+my $version = "5.72";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -1111,7 +1113,12 @@ if ($cogCats ne "" && $continue && !$alignmentWorkPolicyMatches) {
 	}
 	$treesDone = 0;
 }
-my $primaryAlignmentReady = fileGZe($multAli);
+my ($primaryAlignmentReady, $primaryAlignmentReason) =
+	treeAlignmentCheckpointStatus($multAli, $useAA4tree);
+if ($continue && fileGZe($multAli) && !$primaryAlignmentReady) {
+	warn "Recovery state: ignoring unusable retained alignment checkpoint "
+		."$multAli ($primaryAlignmentReason); rebuilding it from the locus inputs\n";
+}
 my $siteAlignmentsReady = (!$calcSyn || fileGZe($multAliSyn))
 	&& (!$calcNonSyn || fileGZe($multAliNonSyn));
 my $reusableAlignment = $isAligned
@@ -1868,7 +1875,7 @@ postAlignmentStep("rate/GC partition preparation", $postAlignmentStepStarted,
 $postAlignmentStepStarted = time;
 
 #die "@MSA_AA\n\n";
-if ($calcMSA && !fileGZs($multAli)
+if ($calcMSA
 		&& (($cogCats ne '' && @MSAs == 0 && @MSA_AA == 0) || $cogCats eq '')) {
 	my $reason = $cogCats ne '' ? 'no_usable_loci' : 'single_gene_alignment_failed';
 	clearLifecycleMarker($completionMarker, 'clear stale tree completion');
@@ -1913,6 +1920,16 @@ if ($strictBackbone) {
 	if (!-s $fullAlignment && -s "$fullAlignment.gz") {
 		systemW("$pigzBin -p $ncore -d ".shellQuote("$fullAlignment.gz"));
 	}
+	if (!$calcMSA && -s $fullAlignment) {
+		my ($fullAlignmentReady, $fullAlignmentReason) =
+			treeAlignmentCheckpointStatus($fullAlignment, $useAA4tree);
+		if (!$fullAlignmentReady) {
+			warn "Strict-backbone: replacing unusable retained full alignment "
+				."$fullAlignment ($fullAlignmentReason) from $multAli\n";
+			copy($multAli, $fullAlignment)
+				or die "Cannot replace unusable full alignment $fullAlignment: $!\n";
+		}
+	}
 	if ($calcMSA || !-s $fullAlignment) {
 		copy($multAli, $fullAlignment)
 			or die "Cannot preserve full alignment as $fullAlignment: $!\n";
@@ -1934,6 +1951,10 @@ if ($strictBackbone) {
 			minimum_backbone_overlap_loci => $strictPlacementMinimumLoci,
 		},
 	);
+	my ($strictAlignmentReady, $strictAlignmentReason) =
+		treeAlignmentCheckpointStatus($multAli, $useAA4tree);
+	die "Strict-backbone produced an unusable inference alignment $multAli: "
+		."$strictAlignmentReason\n" unless $strictAlignmentReady;
 	my $classificationFile = "$treeD/strict_backbone.samples.tsv";
 	open my $classification, '>', $classificationFile
 		or die "Cannot write $classificationFile: $!\n";
@@ -6387,6 +6408,64 @@ sub safeRemoveTree{
 			return !-e $absolutePath && !-l $absolutePath;
 		},
 	);
+}
+sub treeAlignmentCheckpointStatus {
+	my ($path, $isAA) = @_;
+	return (0, 'file is missing or empty') unless fileGZe($path);
+	my ($input, $opened) = gzipopen($path, 'tree alignment checkpoint', 1);
+	return (0, 'file cannot be read') unless $opened && $input;
+	my (%seen, $identifier, $sequenceCount, $alignmentLength);
+	my $sequence = '';
+	my $finishRecord = sub {
+		return (1, '') unless defined $identifier;
+		return (0, "empty sequence for '$identifier'") unless length($sequence);
+		return (0, "unequal sequence length for '$identifier'")
+			if defined($alignmentLength) && length($sequence) != $alignmentLength;
+		$alignmentLength = length($sequence) unless defined $alignmentLength;
+		my $alphabet = $isAA
+			? qr/^[ACDEFGHIKLMNPQRSTVWYBXZJUO?*-]+$/i
+			: qr/^[ACGTURYSWKMBDHVN?-]+$/i;
+		return (0, "unsupported sequence character for '$identifier'")
+			unless $sequence =~ $alphabet;
+		my $informative = $sequence;
+		$informative =~ s/[^ACDEFGHIKLMNPQRSTVWY]//gi if $isAA;
+		$informative =~ s/[^ACGTU]//gi unless $isAA;
+		return (0, "no informative residues for '$identifier'") unless length($informative);
+		$sequenceCount++;
+		return (1, '');
+	};
+	while (my $line = <$input>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless length($line);
+		if ($line =~ /^>(\S+)/) {
+			my ($ok, $reason) = $finishRecord->();
+			if (!$ok) {
+				close $input;
+				return (0, $reason);
+			}
+			$identifier = $1;
+			if ($seen{$identifier}++) {
+				close $input;
+				return (0, "duplicate FASTA identifier '$identifier'");
+			}
+			$sequence = '';
+			next;
+		}
+		if (!defined $identifier) {
+			close $input;
+			return (0, 'sequence occurs before its first FASTA header');
+		}
+		$line =~ s/\s+//g;
+		$sequence .= $line;
+	}
+	my ($ok, $reason) = $finishRecord->();
+	my $closed = close $input;
+	return (0, 'compressed alignment cannot be read completely') unless $closed;
+	return (0, $reason) unless $ok;
+	return (0, 'no FASTA sequences') unless $sequenceCount;
+	return (0, 'fewer than two FASTA sequences') if $sequenceCount < 2;
+	return (0, 'zero alignment length') unless $alignmentLength;
+	return (1, '');
 }
 sub restoreCompressedMSAArtifact {
 	my ($path) = @_;
