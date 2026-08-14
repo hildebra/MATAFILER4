@@ -22,6 +22,7 @@ sub strainNetwork;
 sub treeWas;
 sub visualizeSignPhylos;
 sub combineResults;
+sub newickNodeCount;
 sub resolveOutgroup;
 sub loggedOutgroup;
 sub savedCommandOutgroup;
@@ -170,7 +171,7 @@ if ($rewriteRanalysis){ #faster to do once for all..
 print "Scanning for completed within-MGS phylogenies\n";
 opendir DIR, $FMGpD or die "Cannot open $FMGpD: $!\n";
 #loop over intra-phylo dir and check for file presence..
-my %sizTrees;
+my %treeNodes;
 while ( my $entry = readdir DIR ) {
     next if $entry eq '.' or $entry eq '..';
     next unless -d $FMGpD . '/' . $entry;
@@ -180,10 +181,12 @@ while ( my $entry = readdir DIR ) {
 	if (-s $treeCompletion) {
 		my $completedTreeSize = 0;
 		my $completedTreeIndex = 0;
+		my $completedTreePath = "";
 		while ($completedTreeSize == 0 && $completedTreeIndex < @defTreeFiles) {
 			# -s returns undef for a missing candidate; keep the numeric loop
 			# sentinel defined while trying the remaining tree formats.
-			$completedTreeSize = (-s "$phyloDirectory$defTreeFiles[$completedTreeIndex]") // 0;
+			$completedTreePath = "$phyloDirectory$defTreeFiles[$completedTreeIndex]";
+			$completedTreeSize = (-s $completedTreePath) // 0;
 			$completedTreeIndex++;
 		}
 		if ($completedTreeSize) {
@@ -191,7 +194,7 @@ while ( my $entry = readdir DIR ) {
 			# written only after the final primary tree validates successfully.
 			$dirs{$entry} = $phyloDirectory;
 			$baseD{$entry} = "$FMGpD/$entry";
-			$sizTrees{$entry} = $completedTreeSize;
+			$treeNodes{$entry} = newickNodeCount($completedTreePath);
 			$completionMarkerFastPaths++;
 			next;
 		}
@@ -205,17 +208,19 @@ while ( my $entry = readdir DIR ) {
 	}
 	#my $destD = "$FMGpD/$entry/within/";
 	#system "cp $destD/$entry.nwk $FMGpD/$entry/phylo/IQtree.treefile " if (-e "$destD/$entry.nwk");
-	my $sizTree = 0; my $x=0;
-	while ($sizTree == 0 && $x < @defTreeFiles){
+	my $legacyTreeSize = 0; my $x=0;
+	my $legacyTreePath = "";
+	while ($legacyTreeSize == 0 && $x < @defTreeFiles){
 		# A missing file is not an error: try the next supported tree format.
-		$sizTree = (-s "$phyloDirectory$defTreeFiles[$x]") // 0;
+		$legacyTreePath = "$phyloDirectory$defTreeFiles[$x]";
+		$legacyTreeSize = (-s $legacyTreePath) // 0;
 		$x++;
 	}
-	next unless ($sizTree);
+	next unless ($legacyTreeSize);
 	#genuine legacy MGS phylo dir without a current completion marker
 	$dirs{$entry} = $phyloDirectory;
 	$baseD{$entry} = "$FMGpD/$entry";
-	$sizTrees{$entry} = $sizTree;
+	$treeNodes{$entry} = newickNodeCount($legacyTreePath);
 }
 
 closedir DIR or die "Cannot close $FMGpD: $!\n";
@@ -224,16 +229,17 @@ print "; completion-marker fast paths=$completionMarkerFastPaths";
 print "; skipped $terminalTreeMGS MGS with valid no-tree or placement-pending markers"
 	if $terminalTreeMGS;
 print "\n";
-my $cnt=-1; my $curBatch=0; my $batchSize = 0; my $submitted=0;my @jobs;
+my $cnt=-1; my $curBatch=0; my $curBatchNodes=0; my $submitted=0;my @jobs;
 my $MGstats = "$GCd/metagStats.txt";
 $MGstats = "-1" unless (-e $MGstats);
 my $treeAbsent = 0;
 #my @k2d = sort keys %dirs;
-my @k2d = sort { $sizTrees{$b} <=> $sizTrees{$a} } keys(%sizTrees);
+my @k2d = sort { $treeNodes{$b} <=> $treeNodes{$a} || $a cmp $b } keys(%treeNodes);
 if (!@k2d) {
 	print "No nonempty phylogenies found; skipping strain postprocessing.\n";
 	exit 0;
 }
+my $batchNodeBudget = $treeNodes{$k2d[0]};
 
 my $cmdPrelude = "ulimit -s 20000\n";
 my $cmd = $cmdPrelude;my $destD =""; my $wrHead=1;
@@ -242,6 +248,7 @@ my $strainStatsR = getProgPaths("treeSubGrpsR");
 my $popGenStatsR = $doPopGenStats ? getProgPaths("pogenStats") : "";
 my $combineResultsR = getProgPaths("combineResults_R");
 my %outgroupSources;
+my $batchDestD = ""; my $batchLabel = "";
 
 foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	$cnt++;
@@ -292,7 +299,15 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	my $BinN = 1000;
 	if ($d =~ m/MB2bin(\d+)/){$BinN = $1;}
 	my $jobCores = $nCore;
-	
+	my $treeNodeCount = $treeNodes{$d};
+	if ($curBatchNodes > 0 && $curBatchNodes + $treeNodeCount > $batchNodeBudget) {
+		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
+		my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$cmd,$nCore,"20G",$batchLabel,"","",1,[],$QSBoptHR);
+		push(@jobs,$dep);
+		$submitted++;
+		$curBatch = 0; $curBatchNodes = 0; $cmd=$cmdPrelude;
+		$batchDestD = ""; $batchLabel = "";
+	}
 	$cmd .= "echo ".shellQuote("At tree $d")."\n";
 	my $OGstr = $OG ne "" ? "--outgroup ".shellQuote($OG)." " : "";
 	if (!$strainStatsReady || $rewriteRanalysis) {
@@ -318,28 +333,28 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	#system $cmd."\n";
 	#$QSBoptHR->{useLongQueue} = 1;
 	$curBatch++;
-	if ($curBatch > $batchSize){
-		
+	$curBatchNodes += $treeNodeCount;
+	$batchDestD = $destD; $batchLabel = "R$cnt";
+	if ($curBatchNodes >= $batchNodeBudget){
 		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
-
-		my ($dep,$qcmd) = qsubSystem($destD."Ranalysis.sh",$cmd,$jobCores,"20G","R$cnt","","",1,[],$QSBoptHR);
-		#die " $destD\n";
+		my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$cmd,$nCore,"20G",$batchLabel,"","",1,[],$QSBoptHR);
 		push(@jobs,$dep);
-		$curBatch = 0; $cmd=$cmdPrelude;
 		$submitted++;
+		$curBatch = 0; $curBatchNodes = 0; $cmd=$cmdPrelude;
+		$batchDestD = ""; $batchLabel = "";
 	}
 	#die;
 	#last if ($cnt > 5);
 }
 if ($curBatch > 0){
-	my ($dep,$qcmd) = qsubSystem($destD."Ranalysis.sh",$cmd,$nCore,"20G","R$cnt","","",1,[],$QSBoptHR);
-	$curBatch = 0; $cmd=$cmdPrelude;
+	my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$cmd,$nCore,"20G",$batchLabel,"","",1,[],$QSBoptHR);
+	$curBatch = 0; $curBatchNodes = 0; $cmd=$cmdPrelude;
 	push(@jobs,$dep);
 	$submitted++;
 }
 
 print "R-analysis plan: " . scalar(keys %analysisAttempted) . " MGS analyses prepared in "
-	. "$submitted job script(s), $reusedAnalysis existing result(s) reused";
+	. "$submitted job script(s), $reusedAnalysis existing result(s) reused; size budget=$batchNodeBudget nodes";
 print ", $treeAbsent tree(s) became unavailable while planning" if $treeAbsent;
 print "\n";
 
@@ -744,6 +759,22 @@ sub combineResults {
 			warn "No subsampled population-genetics rows were available for $popGenSubsampleSummaryTab\n";
 		}
 	}
+}
+
+sub newickNodeCount {
+	my ($treePath) = @_;
+	open my $tree_fh, '<', $treePath or die "Cannot read tree $treePath: $!\n";
+	local $/;
+	my $newick = <$tree_fh> // '';
+	close $tree_fh or die "Cannot close tree $treePath: $!\n";
+	$newick =~ s/\[[^\]]*\]//gs;
+	$newick =~ s/\s+//g;
+	return 1 unless length($newick);
+	my $internal = () = $newick =~ /\(/g;
+	my $commas = () = $newick =~ /,/g;
+	my $tips = $commas + 1;
+	my $nodes = $tips + $internal;
+	return $nodes > 0 ? $nodes : 1;
 }
 
 sub shellQuote {

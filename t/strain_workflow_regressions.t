@@ -148,6 +148,14 @@ like($strain2,
 	'subsampled population-genetics output is surfaced separately from the full population table');
 unlike($strain2, qr/if \(0\)\{#rerun popgen stats\?\?/,
 	'population genetics is no longer hidden behind a disabled legacy block');
+like($strain2,
+	qr/sub newickNodeCount .*?\$internal = \(\) = \$newick =~ \/\\\(\/g;.*?\$commas = \(\) = \$newick =~ \/,\/g;.*?\$tips = \$commas \+ 1;.*?\$nodes = \$tips \+ \$internal/s,
+	'R-job cost uses an estimated Newick node count rather than the serialized tree file size');
+like($strain2,
+	qr/my \@k2d = sort \{ \$treeNodes\{\$b\} <=> \$treeNodes\{\$a\}.*?\$batchNodeBudget = \$treeNodes\{\$k2d\[0\]\};.*?\$curBatchNodes \+ \$treeNodeCount > \$batchNodeBudget.*?\$curBatchNodes \+= \$treeNodeCount.*?\$curBatchNodes >= \$batchNodeBudget/s,
+	'largest phylogeny defines the R-job node budget and smaller phylogenies are packed without exceeding it');
+unlike($strain2, qr/\$batchSize/,
+	'R-job submission no longer uses a fixed phylogeny count per batch');
 like($internal_config,
 	qr/^combineResults_R\t\[Rscript\] \[MGSTKDir\]\/combineResults\.R\tenv:MGSTK$/m,
 	'the combineResults command is configured through the MG-STK R environment');
