@@ -156,6 +156,14 @@ like($strain2,
 	'largest phylogeny defines the R-job node budget and smaller phylogenies are packed without exceeding it');
 unlike($strain2, qr/\$batchSize/,
 	'R-job submission no longer uses a fixed phylogeny count per batch');
+unlike($strain2, qr/if \(\$doSubmit && -d \$destD\)/,
+	'partial result recovery does not erase an entire within directory outside an explicit rewrite');
+like($strain2,
+	qr/my \$networkDir = "\$FMGpD\/networks";.*?remove_tree\(\$networkDir\) if -d \$networkDir/s,
+	'explicit rewrites clear the workflow-owned network cache');
+like($strain2,
+	qr/\$networkGraph = "\$netDir\/strain_graph\.Rds".*?\$networkStone && !-s \$networkGraph.*?Ignoring incomplete network checkpoint.*?unlink \$networkStone.*?test -s .*?\$networkGraph.*?touch .*?\$networkStone/s,
+	'network completion requires a nonempty graph result as well as its checkpoint');
 like($internal_config,
 	qr/^combineResults_R\t\[Rscript\] \[MGSTKDir\]\/combineResults\.R\tenv:MGSTK$/m,
 	'the combineResults command is configured through the MG-STK R environment');

@@ -159,9 +159,10 @@ if ($rewriteRanalysis){ #faster to do once for all..
 		for my $summary ($RsummaryTab, $popGenSummaryTab, $popGenSubsampleSummaryTab, $legacyRsummaryTab) {
 			unlink $summary or die "Cannot remove $summary: $!\n" if -e $summary;
 		}
-		for my $checkpoint ("$FMGpD/networks/networks.sto", "$FMGpD/GeneEnrich/treeWAS.sto") {
-			unlink $checkpoint or die "Cannot remove stale checkpoint $checkpoint: $!\n" if -e $checkpoint;
-		}
+		my $networkDir = "$FMGpD/networks";
+		remove_tree($networkDir) if -d $networkDir;
+		my $treeWasCheckpoint = "$FMGpD/GeneEnrich/treeWAS.sto";
+		unlink $treeWasCheckpoint or die "Cannot remove stale checkpoint $treeWasCheckpoint: $!\n" if -e $treeWasCheckpoint;
 	} else {
 		print "Dry run: existing strain2 results and checkpoints will be preserved.\n";
 	}
@@ -287,10 +288,6 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		$legacyCompleted++ if !-e $analysisStone;
 		$reusedAnalysis++;
 		next;
-	}
-	if ($doSubmit && -d $destD) {
-		unlink $_ or die "Cannot remove $_: $!\n" for grep { -f $_ || -l $_ } glob("$destD/*");
-		remove_tree($_) for grep { -d $_ } glob("$destD/*");
 	}
 	make_path($destD);
 	my (undef, $OG, $outgroupSource) = resolveOutgroup($d, $destBaseD);
@@ -606,13 +603,19 @@ sub sumSummaries($ $){
 sub strainNetwork{ #submits Anthony's script to build a network
 	my $netDir = "$FMGpD/networks/";
 	my $networkStone = "$netDir/networks.sto";
+	my $networkGraph = "$netDir/strain_graph.Rds";
 	my $dep = "";
+	if (-e $networkStone && !-s $networkGraph) {
+		warn "Ignoring incomplete network checkpoint $networkStone\n";
+		unlink $networkStone or die "Cannot remove incomplete network checkpoint $networkStone: $!\n";
+	}
 	if (!-e $networkStone){
 		my $networkScr = getProgPaths("runNetworks_R");#"Rscript $MGSTKdir/runNetworks.R";
 		make_path($netDir);
 		my $edgeTresh = 4;
 		my $cmd = "$networkScr -i ".shellQuote($FMGpD)." -o ".shellQuote($netDir)." -m ".shellQuote($refMap)." -e $edgeTresh\n";
 		$cmd .= "#consider the following options to change: -c [Column for clustering samples] -e [num shared strains for edges]\n";
+		$cmd .= "test -s ".shellQuote($networkGraph)."\n";
 		$cmd .= "touch ".shellQuote($networkStone)."\n";
 		print "Submitting shared-strain network analysis; output: $netDir\n";
 		#system $cmd;
