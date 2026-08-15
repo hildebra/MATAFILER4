@@ -128,11 +128,26 @@ like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,
 like($strain, qr/\$nxtCmd \.= "-MGSphylo "\.shellQuote\(\$treeFile\).*?if \$treeFile ne ""/,
 	'postprocessing receives the source MGS tree for outgroup recovery');
 like($strain,
-	qr/loadTreeOutgroupCandidates\(\$targetMGS\).*?sub loadTreeOutgroupCandidates .*?\Q--all\E.*?open my \$bulk.*?\$TreeOutgroupCandidatesBulkLoaded = 1.*?sub treeOutgroupCandidates .*?A failed bulk call.*?my \$call = "\$neiTree ".shellQuote\(\$treeFile\).*?trying catalogue-derived candidates/s,
-	'Phase II imports all source-tree neighbour candidates in one call and retains the individual lookup only as a failed-bulk fallback');
+	qr{loadTreeOutgroupCandidates\(\$targetMGS\).*?sub loadTreeOutgroupCandidates .*?" --all".*?open my \$bulk.*?\$TreeOutgroupCandidatesBulkLoaded = 1.*?sub treeOutgroupCandidates .*?A failed bulk call.*?--preferred-tip}s,
+	'Phase II imports all source-tree neighbour candidates in one call and retains a Mosaic-aware individual fallback');
+like($strain,
+	qr{tempfile\(.*?strain_mosaic_outgroups.*?TMPDIR => 1, UNLINK => 1.*?print \{\$preferredFh\} "\$MGS\\t\$PreferredOutgroup\{\$MGS\}\\n".*?" --preferred "}s,
+	'the bulk R call receives all Mosaic preferences through one automatically removed temporary file');
+like($strain,
+	qr{my \(\$MGS, \$decision, \$preferred, \$preferredDistance, \$cutoff, \$candidateText\).*?split /\\t/, \$line, 6.*?Mosaic decisions:}s,
+	'Perl imports the authoritative R ordering and summarizes Mosaic plausibility decisions');
+like($strain,
+	qr{if \(length\(\$treeFile\)\).*?Do not reinsert a rejected preference.*?push \@candidates, treeOutgroupCandidates\(\$MGS\).*?elsif \(exists\(\$PreferredOutgroup}s,
+	'the reference preload follows R ordering when a phylogeny is present and uses Mosaic directly only without one');
+like($strain,
+	qr{if \(\$treeFile ne ""\).*?This order is authoritative.*?push \@candidates, treeOutgroupCandidates\(\$MGS\).*?elsif \(exists\(\$PreferredOutgroup}s,
+	'the final outgroup chooser cannot reinsert a Mosaic proposal rejected by R');
 like($neighbor_tree_r,
-	qr/identical\(target, "--all"\).*?ape::cophenetic\.phylo\(tree\).*?for \(tip in tree\$tip\.label\).*?cat\(tip, "\\t"/s,
-	'neighborTree bulk mode computes distances once and emits one tab-separated row per tree tip');
+	qr{identical\(target, "--all"\).*?ape::cophenetic\.phylo\(tree\).*?for \(tip in tree\$tip\.label\).*?ranked\$decision.*?paste\(ranked\$candidates}s,
+	'neighborTree bulk mode computes distances once and emits authoritative decision and candidate columns per tree tip');
+like($neighbor_tree_r,
+	qr{--preferred.*?--preferred-tip.*?ranked_neighbors <- function.*?stats::quantile.*?nearestDistance \* preferredNearestFactor.*?preferredDistance > cutoff.*?candidateNames\[candidateNames != preferred\].*?c\(preferred, candidateNames}s,
+	'a plausible Mosaic outgroup is promoted while an extreme-distance proposal is excluded from the R result');
 like($strain2, qr/"MGSphylo=s"\s*=>\s*\\\$MGSphylo.*?sub resolveOutgroup .*?data\.log.*?treeCmd\.sh.*?MGSphylo/s,
 	'postprocessing preserves logged or saved outgroups and falls back to the source MGS tree');
 like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,
@@ -183,7 +198,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1.21;/,
+like($strain, qr/my \$version = 1.22;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats/s,

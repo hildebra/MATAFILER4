@@ -10,7 +10,7 @@ use File::Path qw(make_path remove_tree);
 use File::Glob qw(bsd_glob);
 use File::Basename qw(basename dirname);
 use File::Spec;
-use File::Temp qw(tempdir);
+use File::Temp qw(tempdir tempfile);
 use Cwd qw(abs_path getcwd);
 use Digest::SHA qw(sha256_hex);
 
@@ -235,7 +235,8 @@ my $completionMessage = "";
 #1.18: balance Phase-I workers by consensus input size and regeneration cost
 #1.20: stream Phase-II outgroup references directly from the catalogue
 #1.21: load only core-first exact outgroup-reference demands during Phase II
-my $version = 1.21;
+#1.22: rank Mosaic outgroup proposals authoritatively against the source phylogeny
+my $version = 1.22;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1289,9 +1290,13 @@ my $initializeOutgroupReferences = sub {
 	my $nextCandidateProgress = time + 60;
 	for my $MGS (@{$targetMGS}) {
 		my @candidates;
-		push @candidates, $PreferredOutgroup{$MGS}
-			if exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS});
-		push @candidates, treeOutgroupCandidates($MGS) if length($treeFile);
+		if (length($treeFile)) {
+			# R has already accepted, rejected, and ranked the Mosaic proposal
+			# against the phylogeny. Do not reinsert a rejected preference here.
+			push @candidates, treeOutgroupCandidates($MGS);
+		} elsif (exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS})) {
+			push @candidates, $PreferredOutgroup{$MGS};
+		}
 		my %seenCandidate;
 		@candidates = grep {
 			defined($_) && /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/ && !$seenCandidate{$_}++
@@ -2490,20 +2495,58 @@ sub loadTreeOutgroupCandidates {
 	my $started = time;
 	my $neiTree = getProgPaths("neighborTree");
 	my $call = "$neiTree ".shellQuote($treeFile)." --all";
+
+	# Give the one bulk R process the consolidated Mosaic choices. File::Temp
+	# removes this transient run-level input; no per-MGS artefacts are created.
+	my ($preferredFh, $preferredPath);
+	my $preferredCount = 0;
+	for my $MGS (sort keys %wanted) {
+		next unless exists($PreferredOutgroup{$MGS})
+			&& length($PreferredOutgroup{$MGS});
+		unless ($MGS =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/
+			&& $PreferredOutgroup{$MGS} =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/) {
+			limitedWarn('invalid Mosaic outgroup identifiers',
+				"Skipping invalid Mosaic outgroup preference $MGS -> $PreferredOutgroup{$MGS}\n");
+			next;
+		}
+		if (!$preferredFh) {
+			($preferredFh, $preferredPath) = tempfile(
+				'strain_mosaic_outgroups.XXXXXX', TMPDIR => 1, UNLINK => 1);
+		}
+		print {$preferredFh} "$MGS\t$PreferredOutgroup{$MGS}\n"
+			or die "Cannot write temporary Mosaic outgroup preferences $preferredPath: $!\n";
+		$preferredCount++;
+	}
+	if ($preferredFh) {
+		close $preferredFh
+			or die "Cannot close temporary Mosaic outgroup preferences $preferredPath: $!\n";
+		$call .= " --preferred ".shellQuote($preferredPath);
+	}
+
 	print "Discovering tree-neighbour candidates for ".scalar(keys %wanted)
-		." actionable MGS in one R call; global elapsed ".timeNice(time - $^T)."\n";
+		." actionable MGS in one R call, with $preferredCount Mosaic preference(s); "
+		."global elapsed ".timeNice(time - $^T)."\n";
 	open my $bulk, "$call |"
 		or do {
 			limitedWarn('bulk outgroup lookup command failures',
 				"Can't start bulk tree-neighbour lookup $call; falling back to individual lookups\n");
 			return 0;
 		};
-	my ($lines, $loaded) = (0, 0);
+	my ($lines, $loaded, $malformed) = (0, 0, 0);
+	my %preferenceDecisionCount;
 	while (my $line = <$bulk>) {
 		$lines++;
 		$line =~ s/[\r\n]+\z//;
-		my ($MGS, $candidateText) = split /\t/, $line, 2;
+		my ($MGS, $decision, $preferred, $preferredDistance, $cutoff, $candidateText)
+			= split /\t/, $line, 6;
 		next unless defined($MGS) && exists($wanted{$MGS});
+		unless (defined($decision) && $decision =~ /\A(?:none|accepted|same_as_target|absent_from_tree|non_finite_distance|too_close|no_eligible_neighbors|too_distant)\z/) {
+			$malformed++;
+			limitedWarn('malformed bulk outgroup rows',
+				"Ignoring malformed tree-neighbour row for $MGS from $treeFile\n");
+			next;
+		}
+		$preferenceDecisionCount{$decision}++;
 		my %seen;
 		my @candidates = grep {
 			/\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/ && !$seen{$_}++
@@ -2512,18 +2555,22 @@ sub loadTreeOutgroupCandidates {
 		$loaded++;
 	}
 	my $bulkOk = close $bulk;
-	unless ($bulkOk) {
+	unless ($bulkOk && !$malformed) {
 		delete $TreeOutgroupCandidates{$_} for keys %wanted;
 		limitedWarn('bulk outgroup lookup command failures',
-			"Bulk tree-neighbour lookup failed for $treeFile; falling back to individual lookups\n");
+			"Bulk tree-neighbour lookup failed or returned incompatible rows for $treeFile; falling back to individual lookups\n");
 		return 0;
 	}
 	$TreeOutgroupCandidates{$_} = [] for grep {
 		!exists($TreeOutgroupCandidates{$_})
 	} keys %wanted;
 	$TreeOutgroupCandidatesBulkLoaded = 1;
+	my $decisionSummary = join(',', map {
+		$_.'='.$preferenceDecisionCount{$_}
+	} sort keys %preferenceDecisionCount);
 	print "Loaded bulk tree-neighbour candidates for $loaded/".scalar(keys %wanted)
-		." actionable MGS from $lines tree rows in ".timeNice(time - $started)."\n";
+		." actionable MGS from $lines tree rows in ".timeNice(time - $started)
+		."; Mosaic decisions: ".($decisionSummary || 'none')."\n";
 	return 1;
 }
 
@@ -2533,14 +2580,17 @@ sub treeOutgroupCandidates {
 		if exists($TreeOutgroupCandidates{$MGS});
 	my @candidates;
 	# A failed bulk call retains the previous single-MGS lookup as a resilience
-	# fallback. Successful bulk loading never starts one process per MGS.
+	# fallback. Successful bulk loading never starts one process per MGS. The
+	# same Mosaic plausibility decision remains authoritative in fallback mode.
 	if (defined($treeFile) && length($treeFile) && -e $treeFile) {
 		my $neiTree = getProgPaths("neighborTree");
 		my $call = "$neiTree ".shellQuote($treeFile)." ".shellQuote($MGS);
+		$call .= " --preferred-tip ".shellQuote($PreferredOutgroup{$MGS})
+			if exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS});
 		my $outgroup_text = `$call`;
 		if ($? != 0) {
 			limitedWarn('outgroup lookup command failures',
-				"Can't find outgroup from call $call; trying catalogue-derived candidates\n");
+				"Can't find an authoritative outgroup order from call $call; leaving its candidate list empty\n");
 		} else {
 			@candidates = split /\s+/, $outgroup_text;
 		}
@@ -2659,9 +2709,13 @@ sub addOutgroup2MGS{
 
 	if ($treeFile ne "" || exists($PreferredOutgroup{$MGS})) {
 		my @candidates;
-		push @candidates, $PreferredOutgroup{$MGS}
-			if exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS});
-		push @candidates, treeOutgroupCandidates($MGS) if $treeFile ne "";
+		if ($treeFile ne "") {
+			# This order is authoritative: R promotes a phylogenetically plausible
+			# Mosaic proposal and excludes one that fails its plausibility check.
+			push @candidates, treeOutgroupCandidates($MGS);
+		} elsif (exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS})) {
+			push @candidates, $PreferredOutgroup{$MGS};
+		}
 		my %seenCandidate;
 		@candidates = grep { !$seenCandidate{$_}++ } @candidates;
 		$OG = "";
