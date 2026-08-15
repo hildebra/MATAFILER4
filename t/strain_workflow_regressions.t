@@ -116,7 +116,7 @@ like($strain,
 	qr/Digest::SHA->new\(256\).*?\$digest->add.*?identifier order differs: \$FNAstdof vs \$name/s,
 	'FNA, FAA, category, and link streams must contain the same identifiers in the same order');
 like($strain,
-	qr/loadRecoveryContributionIndex\(\) unless \$recoveryContributionIndexReady.*?sub writeRecoveryContributionIndex.*?retry_rename\(\$temporary, \$path.*?sub loadRecoveryContributionIndex.*?\$recoveryContributionIndexReady = 1.*?sub mergeRecoveryLogs.*?writeRecoveryContributionIndex\(\);.*?retry_rename\(\$temporary, \$final.*?retry_unlink\(\$_.*?for \@parts/s,
+	qr/loadRecoveryContributionIndex\(\)\s+unless \$recoveryContributionIndexReady \|\| \$leanOnlySubmitResume.*?sub writeRecoveryContributionIndex.*?retry_rename\(\$temporary, \$path.*?sub loadRecoveryContributionIndex.*?\$recoveryContributionIndexReady = 1.*?sub mergeRecoveryLogs.*?writeRecoveryContributionIndex\(\);.*?retry_rename\(\$temporary, \$final.*?retry_unlink\(\$_.*?for \@parts/s,
 	'worker provenance is persisted before disposable recovery logs are removed and is reloadable after restart');
 like($strain,
 	qr/\$aggregateComplete &&= -s \$mergeCheckpoint.*?my \@expectedWorkers.*?if \(\@validationErrors\).*?return \$aggregateComplete.*?retry_unlink\(\$mergeCheckpoint.*?retry_rename\(\$checkpointTemporary, \$mergeCheckpoint.*?retry_unlink\(\$part/s,
@@ -198,7 +198,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1.22;/,
+like($strain, qr/my \$version = 1.23;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats/s,
@@ -291,8 +291,32 @@ like($strain, qr/\$Tcmd \.= "-redoEPAfilter 1 " if \$redoEPAfilter/,
 unlike($strain, qr/epaFilterOnly|treeCmd\.epa_filter/,
 	'the retired filter-only controller and special command path are absent');
 like($strain,
-	qr/if \(\$onlySubmit && !\$subJob.*?preparedMainBranchInputSet\(.*?\$preparedMainBranchFastPath = 1.*?if \(length\(\$MGSfile\) && !\$preparedMainBranchFastPath\).*?prepRun\(\).*?strainAnalysis2\.sh.*?qsubSystem\(/s,
-	'a fully prepared tree-only resume skips Mosaic/catalogue loading but remains on the normal branch through strainwithin2');
+	qr/my \$leanOnlySubmitResume = \$onlySubmit && !\$subJob && !\$recalcTrees.*?!\$redoSubmissionData.*?!\$repairCAT.*?!\$deepRepair.*?!\$redoEPAfilter.*?!\$reSubmit/s,
+	'lean dispatch is restricted to ordinary parent only-submit runs while repair and recalculation retain strict auditing');
+like($strain,
+	qr/if \(\$leanOnlySubmitResume\) \{.*?\$SIdirs\{\$_\} = "\$outD\/\$_\/" for \@specis.*?mode=deferred_per_MGS.*?global_metadata_scans=0.*?\} else \{.*?evalFileStatus\(\)/s,
+	'ordinary only-submit startup performs no all-MGS filesystem audit and strict modes keep the existing audit');
+like($strain,
+	qr/my \$fullTreeInputsInitialized = \$leanOnlySubmitResume \? 1 : 0.*?scheduling hint only.*?tree_input_sizing\.tsv.*?missing estimates will be read only when their MGS reaches submission/s,
+	'lean dispatch bypasses global input sizing and treats any old sizing table only as a resource hint');
+like($strain,
+	qr/sub prepareMGSInputSet \{.*?return 1 if \$leanOnlySubmitResume && -s "\$tmpD\/merge\.complete\.tsv".*?collectMGSShardHandoff/s,
+	'an atomic aggregate checkpoint prevents worker-shard globbing before each lean submission');
+like($strain,
+	qr/loadRecoveryContributionIndex\(\)\s+unless \$recoveryContributionIndexReady \|\| \$leanOnlySubmitResume.*?sub prepareMGSInputSet.*?merge\.complete\.tsv.*?loadRecoveryContributionIndex\(\)\s+if \$leanOnlySubmitResume && !\$recoveryContributionIndexReady/s,
+	'the recovery-contributor index is also loaded only if a just-in-time legacy shard fallback needs it');
+like($strain,
+	qr/\$leanOnlySubmitResume.*?merge\.complete\.tsv.*?fileGZe\(\$rawCategory\)/s,
+	'lean staged-input handling trusts the commit marker but still validates the category it immediately consumes');
+like($strain,
+	qr/sub outgroupRequirementLoci \{.*?\$leanOnlySubmitResume.*?selected_gene_map_deferred_validation.*?scratchMGSInputState/s,
+	'outgroup demand construction uses the retained locus map without probing every staged directory first');
+like($strain,
+	qr/MGS_SUBMISSION:.*?opendir\(my \$resumeDirectory, \$outD2\).*?treeDone\.sto.*?terminalMarkers.*?prepareMGSInputSet\(\$MGS,\$tmpD\).*?addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?dispatchPendingTreeJobs/s,
+	'useful completion, input, and category checks occur just in time in the same loop that submits each MGS');
+like($strain,
+	qr/if \(!\$leanOnlySubmitResume && \$onlySubmit && !\$subJob.*?preparedMainBranchInputSet\(.*?\$preparedMainBranchFastPath = 1/s,
+	'the exhaustive prepared-input preflight remains available only outside latency-sensitive lean dispatch');
 like($strain,
 	qr/sub resubmitExistingTreeCommands .*?treeCmd\.sh.*?placementPending\.sto.*?skipping Mosaic, map, and catalogue loading.*?qsubSystemWaitMaxJobs\(.*?qsubSystem2\(/s,
 	'direct tree-command resubmission reuses saved scripts with scheduler-capacity throttling, including EPA recovery');
@@ -316,8 +340,8 @@ like($strain,
 	qr/my \$requiresOutgroupReference = \$runPartI \|\| \$CatNotPrepped \|\| \$repairCAT.*?my \$initializeOutgroupReferences = sub.*?unless \(\$requiresOutgroupReference.*?readFasta\(\$refFAA.*?readFasta\(\$refFNA/s,
 	'tree-only resumes load reference FASTA catalogues only for input regeneration or repair');
 like($strain,
-	qr/my \$outgroupReferenceInitialized = 0;.*?Preparing core-first exact outgroup-reference demands.*?mode=core_first_streaming.*?\$initializeOutgroupReferences->\(\\\@fullTreeCandidates\).*?addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?push \@pendingTreeJobs/s,
-	'full-tree references stream once from the complete actionable set before normal individual overlay and job submission');
+	qr/sub addOutgroup2MGS\{.*?if \(\$outputReady.*?return \(.*?my \$preparedScratchInput.*?return \(.*?my \$stageReady.*?if \(\$requiresOutgroupReference && !\$outgroupReferenceInitialized\).*?\$initializeOutgroupReferences->\(\\\@fullTreeCandidates\).*?staged category scan for \$MGS/s,
+	'already-overlaid MGS bypass the catalogue, while the first raw MGS streams one shared reference set before its overlay');
 like($strain,
 	qr/outgroup candidate discovery.*?outgroup protein FASTA streaming.*?outgroup nucleotide FASTA streaming/s,
 	'direct outgroup lookup reports candidate and sequential FASTA-streaming progress');

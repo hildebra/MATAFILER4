@@ -236,7 +236,8 @@ my $completionMessage = "";
 #1.20: stream Phase-II outgroup references directly from the catalogue
 #1.21: load only core-first exact outgroup-reference demands during Phase II
 #1.22: rank Mosaic outgroup proposals authoritatively against the source phylogeny
-my $version = 1.22;
+#1.23: stream parent only-submit resumes without a controller-wide file audit
+my $version = 1.23;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -633,6 +634,11 @@ die "-maxGenes must be at least -MGSminGenesPSmpl unless -noGeneLimit 1 is used\
 $maxNGenes = -1 if $noGeneLimit;
 
 $onlySubmit = 1 if $recalcTrees; #tree-only recovery reuses published or complete staged inputs
+# Ordinary parent -onlySubmit runs are latency-sensitive cluster dispatchers.
+# Repair and explicit recalculation modes retain the strict global audit.
+my $leanOnlySubmitResume = $onlySubmit && !$subJob && !$recalcTrees
+	&& !$redoSubmissionData && !$repairCAT && !$deepRepair
+	&& !$redoEPAfilter && !$reSubmit;
 printEarlyRunHeader();
 
 @subsetMGS = split /,/,$subsMGSstr if ($subsMGSstr ne "");
@@ -653,7 +659,7 @@ my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
 
 my ($preparedMainBranchFastPath, @preparedMainBranchMGS) = (0);
 my %preparedMainBranchCategoryValidated;
-if ($onlySubmit && !$subJob && length($MGSfile)
+if (!$leanOnlySubmitResume && $onlySubmit && !$subJob && length($MGSfile)
 		&& !$redoSubmissionData && !$repairCAT && !$deepRepair) {
 	my ($ready, $mgs, $reason) = preparedMainBranchInputSet(
 		$MGSfile, $resumeOutD, \@subsetMGS,
@@ -998,22 +1004,46 @@ my $cnt=0; my $SaSe = "|";
 
 
 $stepStarted = time;
-my ($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist,
-	$noRecoverableLociDirs, $completedTreeFastPaths)
-			= evalFileStatus();
+my ($dirsNOTPrepped, $CatFileMiss, $CatNotPrepped, $treeAbsent, $doneDirs,
+	$PhylosExist, $noRecoverableLociDirs, $completedTreeFastPaths);
+if ($leanOnlySubmitResume) {
+	# -onlySubmit is an explicit request to dispatch trees from an existing Phase-I
+	# handoff. Populate paths in memory and defer the few useful checks to the MGS
+	# immediately being prepared, so cluster work can begin without an all-MGS
+	# metadata barrier.
+	$SIdirs{$_} = "$outD/$_/" for @specis;
+	($dirsNOTPrepped, $CatFileMiss, $CatNotPrepped, $treeAbsent, $doneDirs,
+		$PhylosExist, $noRecoverableLociDirs, $completedTreeFastPaths)
+		= (0, scalar(@specis), scalar(@specis), scalar(@specis), 0, 0, 0, 0);
+	stepComplete("existing-output and resume audit", $stepStarted,
+		"mode=deferred_per_MGS", "selected_MGS=".scalar(@specis),
+		"global_metadata_scans=0");
+	print "Lean only-submit resume: Phase-I input, terminal-marker, and tree checks "
+		."will run once for each MGS immediately before its submission decision.\n";
+} else {
+	($dirsNOTPrepped, $CatFileMiss, $CatNotPrepped, $treeAbsent, $doneDirs,
+		$PhylosExist, $noRecoverableLociDirs, $completedTreeFastPaths)
+		= evalFileStatus();
+	my $auditEpaOnly = scalar(keys %MGSepaOnlyRetry);
+	my $auditLegacyEpa = scalar(grep {
+		($MGSepaOnlyRetry{$_} // '') eq 'legacy_missing_final'
+	} keys %MGSepaOnlyRetry);
+	my $auditFullTree = $treeAbsent - $auditEpaOnly;
+	$auditFullTree = 0 if $auditFullTree < 0;
+	stepComplete("existing-output and resume audit", $stepStarted,
+		"prepared_trees=$doneDirs", "completion_marker_fast_paths=$completedTreeFastPaths",
+		"missing_trees=$treeAbsent", "incomplete_tree_inputs=$CatFileMiss",
+		"directories_needing_extraction=$dirsNOTPrepped",
+		"validated_no_locus=$noRecoverableLociDirs",
+		"epa_only_retries=$auditEpaOnly", "legacy_epa_retries=$auditLegacyEpa",
+		"full_tree_retries=$auditFullTree");
+}
 my $epaOnlyRetryCount = scalar(keys %MGSepaOnlyRetry);
 my $legacyEpaRetryCount = scalar(grep {
 	($MGSepaOnlyRetry{$_} // '') eq 'legacy_missing_final'
 } keys %MGSepaOnlyRetry);
 my $fullTreeRetryCount = $treeAbsent - $epaOnlyRetryCount;
 $fullTreeRetryCount = 0 if $fullTreeRetryCount < 0;
-stepComplete("existing-output and resume audit", $stepStarted,
-	"prepared_trees=$doneDirs", "completion_marker_fast_paths=$completedTreeFastPaths",
-	"missing_trees=$treeAbsent", "incomplete_tree_inputs=$CatFileMiss",
-	"directories_needing_extraction=$dirsNOTPrepped",
-	"validated_no_locus=$noRecoverableLociDirs",
-	"epa_only_retries=$epaOnlyRetryCount", "legacy_epa_retries=$legacyEpaRetryCount",
-	"full_tree_retries=$fullTreeRetryCount");
 #DEBUG:getInputSize();
 
 
@@ -1218,7 +1248,8 @@ if ($runPartI){
 		reportSavedSampleStats();
 	}
 }
-loadRecoveryContributionIndex() unless $recoveryContributionIndexReady;
+loadRecoveryContributionIndex()
+	unless $recoveryContributionIndexReady || $leanOnlySubmitResume;
 
 #die;
 
@@ -1573,8 +1604,34 @@ for my $MGS (@epaRecoveryMGS) {
 }
 @specis = (@epaRecoveryMGS, @fullTreeMGS);
 my $epaQueueBoundary = scalar(@epaRecoveryMGS);
-my $fullTreeInputsInitialized = 0;
+my $fullTreeInputsInitialized = $leanOnlySubmitResume ? 1 : 0;
 my $largestFullTreeInput = 1;
+if ($leanOnlySubmitResume) {
+	# A prior sizing table is a scheduling hint only. Reusing it avoids a fresh
+	# all-MGS metadata pass; missing entries are sized just in time below.
+	my $cachedSizingFile = "$LOGDIR/tree_input_sizing.tsv";
+	my %wantedSize = map { $_ => 1 } @fullTreeCandidates;
+	my $cachedSizes = 0;
+	if (-s $cachedSizingFile && open(my $cachedSizing, '<', $cachedSizingFile)) {
+		my $header = <$cachedSizing> // '';
+		if ($header =~ /^MGS\tselected_state\tsource\testimated_uncompressed_MB\b/) {
+			while (my $line = <$cachedSizing>) {
+				$line =~ s/[\r\n]+\z//;
+				my ($MGS, undef, undef, $megabytes) = split /\t/, $line, 5;
+				next unless defined($MGS) && $wantedSize{$MGS}
+					&& defined($megabytes) && $megabytes =~ /^\d+(?:\.\d+)?\z/
+					&& $megabytes > 0;
+				$inputSizeByMGS{$MGS} = 0 + $megabytes;
+				$largestFullTreeInput = $megabytes
+					if $megabytes > $largestFullTreeInput;
+				$cachedSizes++;
+			}
+		}
+		close $cachedSizing;
+	}
+	print "Lean only-submit sizing: reused $cachedSizes cached resource estimate(s); "
+		."missing estimates will be read only when their MGS reaches submission.\n";
+}
 print "Validated EPA-only recovery queue: $epaOnlyRetryCount MGS; "
 	."placement-only jobs will be submitted before full-tree input initialization; "
 	."global elapsed ".timeNice(time - $^T)."\n"
@@ -1592,6 +1649,7 @@ my %mosaicOutgroupsUsed;
 my $treeMGSVisited = 0;
 my %treeDisposition;
 my $recalcScratchRecovered = 0;
+MGS_SUBMISSION:
 for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	if (!$fullTreeInputsInitialized && $lcnt == $epaQueueBoundary) {
 		if ($epaQueueBoundary) {
@@ -1654,7 +1712,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		$treeDisposition{"valid no-tree: $reason"}++;
 		limitedNotice('MGS skipped after valid no-tree classification',
 			"Skipping $MGS: previous extraction recorded terminal no-tree state '$reason'.\n");
-		next;
+		next MGS_SUBMISSION;
 	}
 	# previous condition was too lax: ( ($CatNotPrepped/$#specis) < 0.1)  , just check if we can resubmit anything here..
 	if (!$epaRecovery && exists($ConspecificMGS{$MGS}) && $ConspecificMGS{$MGS}->[0] =~ m/multicopy/){
@@ -1676,8 +1734,46 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $IQtreef= "$outD2/phylo/IQtree_allsites.treefile";
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
+	my %resumeEntry;
+	if ($leanOnlySubmitResume) {
+		if (opendir(my $resumeDirectory, $outD2)) {
+			$resumeEntry{$_} = 1 for readdir($resumeDirectory);
+			closedir($resumeDirectory);
+		}
+		if ($resumeEntry{'treeDone.sto'} && -s $IQtreef) {
+			$treeDisposition{'valid tree already present'}++;
+			limitedNotice('MGS skipped with existing trees',
+				"Skipping $MGS: a completed tree is already present.\n");
+			next;
+		}
+		my @terminalMarkers = (
+			['tooFewSamples.sto', 'insufficient_tree_input'],
+			['noRecoverableLoci.sto', 'no_recoverable_loci'],
+			['noTree.sto', 'buildtree_no_usable_alignment'],
+		);
+		for my $terminal (@terminalMarkers) {
+			next unless $resumeEntry{$terminal->[0]};
+			my $marker = "$outD2/$terminal->[0]";
+			my $reason = lifecycleMarkerReason($marker, $terminal->[1]);
+			$treeDisposition{"valid no-tree: $reason"}++;
+			limitedNotice('MGS skipped after valid no-tree classification',
+				"Skipping $MGS: terminal no-tree state '$reason'.\n");
+			next MGS_SUBMISSION;
+		}
+		if ($resumeEntry{'placementPending.sto'}) {
+			my $epaState = epaOnlyRetryReady($outD2);
+			if (length($epaState)) {
+				$MGSepaOnlyRetry{$MGS} = $epaState;
+				$epaOnlyRetry = 1;
+				$epaRecovery = 1;
+				$epaOnlyRetryCount++;
+			}
+		}
+	}
 	my $publishedInputsReady = !$epaOnlyRetry
 		&& !exists($legacyLocusMGS{$MGS})
+		&& (!$leanOnlySubmitResume || $resumeEntry{'data.log'}
+			|| $resumeEntry{'data.log.gz'})
 		&& persistentMGSInputState($MGS) eq 'complete';
 	if ($epaOnlyRetry && !prepareEpaOnlyRetryState(
 			$outD2, $MGSepaOnlyRetry{$MGS})) {
@@ -1705,8 +1801,9 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		resetMGSTreeOutputs($outD2, $MGS);
 	}
 	
-	if (!$recalcTrees && !$reSubmit && !$repairCAT && !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
-			&& -e $treeStone && -s $IQtreef ){
+	if (!$leanOnlySubmitResume && !$recalcTrees && !$reSubmit && !$repairCAT
+			&& !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
+			&& -e $treeStone && -s $IQtreef) {
 		$treeDisposition{'valid tree already present'}++;
 		limitedNotice('MGS skipped with existing trees',
 			"Skipping $MGS: a valid tree already exists.\n");
@@ -1714,6 +1811,15 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	}
 	
 	my $inputFNAsize = $inputSizeByMGS{$MGS} // 0;
+	if ($leanOnlySubmitResume && !$epaRecovery
+			&& !exists($inputSizeByMGS{$MGS})) {
+		my $inputBytes = fileGZs("$outD2/$FNAstdof");
+		$inputBytes ||= fileGZs("$tmpD/$FNAstdof");
+		$inputFNAsize = $inputBytes > 0 ? $inputBytes / (1024 * 1024) : 1;
+		$inputSizeByMGS{$MGS} = $inputFNAsize;
+		$largestFullTreeInput = $inputFNAsize
+			if $inputFNAsize > $largestFullTreeInput;
+	}
 	if ($epaRecovery && !$inputFNAsize) {
 		my $retainedMSA = "$outD2/MSA/MSAli.fna";
 		my $retainedMSASize = -s $retainedMSA;
@@ -1845,14 +1951,6 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		: "-tmpD ".shellQuote("$scratchD/$MGS/");
 	$Tcmd .= "$treeTmpOption -map ".shellQuote($mapF)." ";
 
-	# The core-first demand manifest initializes once from the full actionable set,
-	# then every MGS immediately stages its overlay and enters the normal queue.
-	if (!$epaOnlyRetry && $requiresOutgroupReference
-			&& !$outgroupReferenceInitialized) {
-		$initializeOutgroupReferences->(\@fullTreeCandidates);
-		print "Completed core-first sequential outgroup-reference loading; resuming per-MGS outgroup addition and tree submission; global elapsed "
-			.timeNice(time - $^T)."\n";
-	}
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
 	if ($epaOnlyRetry) {
 		$inputReady = 1;
@@ -2178,6 +2276,14 @@ sub collectMGSShardHandoff {
 
 sub prepareMGSInputSet {
 	my ($MGS, $tmpD) = @_;
+	# merge.complete.tsv is published only after the complete aggregate passed
+	# contributor/cardinality/order validation. In lean dispatch mode, trust that
+	# commit and let the immediate category read detect any external corruption.
+	return 1 if $leanOnlySubmitResume && -s "$tmpD/merge.complete.tsv";
+	# Legacy shard-only runs need the compact contributor index, but load it only
+	# when the first checkpoint-less MGS actually reaches submission.
+	loadRecoveryContributionIndex()
+		if $leanOnlySubmitResume && !$recoveryContributionIndexReady;
 	if (my $handoff = collectMGSShardHandoff($MGS, $tmpD)) {
 		$stagedShardHandoff{$MGS} = $handoff;
 		return 1;
@@ -2607,11 +2713,12 @@ sub addOutgroup2MGS{
 	my ($MGS,$OG,$tmpD) = @_;
 	my $outD2 = $SIdirs{$MGS};
 	my $shardHandoff = $stagedShardHandoff{$MGS};
-	my $outputReady = fileGZe("$outD2/$FNAstdof")
-		&& fileGZe("$outD2/$FAAstdof") && fileGZe("$outD2/$CATstdof");
 	my ($publishedPrepared, $publishedOG) = preparedOutgroupLog($outD2);
-	if ($outputReady && $publishedPrepared && !$repairCAT && !$deepRepair && !$redoSubmissionData
-			&& !exists($legacyLocusMGS{$MGS})){
+	my $outputReady = $publishedPrepared
+		&& fileGZe("$outD2/$FNAstdof")
+		&& fileGZe("$outD2/$FAAstdof") && fileGZe("$outD2/$CATstdof");
+	if ($outputReady && !$repairCAT && !$deepRepair && !$redoSubmissionData
+			&& !exists($legacyLocusMGS{$MGS})) {
 		my (%samplesSeen, $genesSeen);
 		my ($catFh) = gzipopen("$outD2/$CATstdof", "existing category file");
 		while (my $line = <$catFh>) {
@@ -2629,13 +2736,16 @@ sub addOutgroup2MGS{
 
 	# Compatibility for controller runs that had already completed the old
 	# controller-side Phase II before this version was installed.
-	my $preparedScratchInput = fileGZe("$tmpD/$FNAstdof")
-		&& fileGZe("$tmpD/$FAAstdof") && fileGZe("$tmpD/$LINKstdof")
-		&& fileGZe("$tmpD/$CATstdof") && fileGZe("$tmpD/$QCstdof")
-		&& -s "$tmpD/merge.complete.tsv";
 	my ($scratchPrepared, $preparedOG) = preparedOutgroupLog($tmpD);
-	if (!$shardHandoff && $preparedScratchInput && $scratchPrepared && !$repairCAT && !$deepRepair && !$redoSubmissionData
-			&& !exists($legacyLocusMGS{$MGS})) {
+	my $preparedScratchInput = $scratchPrepared && (
+		$leanOnlySubmitResume
+			? (-s "$tmpD/merge.complete.tsv" && fileGZe("$tmpD/$CATstdof"))
+			: fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
+				&& fileGZe("$tmpD/$LINKstdof") && fileGZe("$tmpD/$CATstdof")
+				&& fileGZe("$tmpD/$QCstdof") && -s "$tmpD/merge.complete.tsv"
+	);
+	if (!$shardHandoff && $preparedScratchInput && !$repairCAT && !$deepRepair
+			&& !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})) {
 		my (%samplesSeen, $genesSeen);
 		my ($catFh) = gzipopen("$tmpD/$CATstdof", "prepared scratch category file");
 		while (my $line = <$catFh>) {
@@ -2656,13 +2766,24 @@ sub addOutgroup2MGS{
 		? map { $_->{parts}{category}{path} } @{$shardHandoff->{workers}}
 		: ($rawCategory);
 	my $stageReady = $shardHandoff ? scalar(@rawCategorySources)
-		: fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
-			&& fileGZe($rawCategory) && fileGZe("$tmpD/$QCstdof.tmp")
-			&& -s "$tmpD/merge.complete.tsv";
+		: $leanOnlySubmitResume
+			? (-s "$tmpD/merge.complete.tsv" && fileGZe($rawCategory))
+			: fileGZe("$tmpD/$FNAstdof") && fileGZe("$tmpD/$FAAstdof")
+				&& fileGZe($rawCategory) && fileGZe("$tmpD/$QCstdof.tmp")
+				&& -s "$tmpD/merge.complete.tsv";
 	if (!$stageReady) {
 		limitedWarn('MGS missing raw staged tree input',
 			"$MGS has no complete raw staged FNA/FAA/category/QC input in $tmpD; leaving it for repair\n");
 		return (0, 0, $OG, 0, 0);
+	}
+
+	# Published or already-overlaid scratch inputs returned above without touching
+	# the catalogue. The first genuinely raw MGS initializes the shared core-first
+	# reference set once; subsequent raw MGS reuse it.
+	if ($requiresOutgroupReference && !$outgroupReferenceInitialized) {
+		$initializeOutgroupReferences->(\@fullTreeCandidates);
+		print "Completed core-first sequential outgroup-reference loading; resuming per-MGS outgroup addition and tree submission; global elapsed "
+			.timeNice(time - $^T)."\n";
 	}
 
 	# Reuse a raw-category requirement prepass when one was necessary. Normal
@@ -2672,6 +2793,7 @@ sub addOutgroup2MGS{
 	my $ingroupSampleCount;
 	if (my $preflight = delete $outgroupCategoryPreflight{$MGS}) {
 		$locusSeen{$_} = 1 for @{$preflight->{loci} || []};
+
 		$ingroupSampleCount = $preflight->{sample_count} // 0;
 	} else {
 		my $categoryScanStarted = time;
@@ -3765,6 +3887,14 @@ sub histoMGS{#specifically for MGS..
 sub outgroupRequirementLoci {
 	my ($MGS) = @_;
 	my $published = $SIdirs{$MGS} // "$outD/$MGS/";
+	if ($leanOnlySubmitResume && exists($COGprios->{$MGS})
+			&& @{$COGprios->{$MGS}}) {
+		my %seen;
+		my @selected = grep { defined($_) && length($_) && !$seen{$_}++ }
+			@{$COGprios->{$MGS}};
+		return (\@selected, 'selected_gene_map_deferred_validation', undef)
+			if @selected;
+	}
 	my $scratch = "$scratchD/outs/$MGS";
 	my $stagedReady = scratchMGSInputState($MGS) eq 'complete';
 	my $reusePrepared = !$repairCAT && !$deepRepair && !$redoSubmissionData
@@ -4071,6 +4201,7 @@ sub stagedMGSInputsReady {
 	my $mgsDir = "$scratchD/outs/$MGS";
 	my @coreRequiredNames = ($FNAstdof, $FAAstdof, $LINKstdof);
 	my $mergeCheckpoint = "$mgsDir/merge.complete.tsv";
+	return 1 if $leanOnlySubmitResume && -s $mergeCheckpoint;
 	my $aggregateComplete = !grep { !fileGZe("$mgsDir/$_") } @coreRequiredNames;
 	$aggregateComplete &&= (
 		(fileGZe("$mgsDir/$CATstdof.tmp") && fileGZe("$mgsDir/$QCstdof.tmp"))
@@ -4620,8 +4751,10 @@ sub recoverCompletedSplitPhaseI {
 	# Recover only a proven-complete generation: never merge partial retries.
 	return 0 unless $maxSubJob && !$subJob;
 	if ($dirsNOTPrepped == 0) {
-		limitedNotice('tree-only resume skips obsolete Phase-I ledger validation',
-			"Tree-only resume: every MGS input passed the completed audit; skipping obsolete Phase-I worker-ledger validation and continuing to Phase II.\n");
+		my $message = $leanOnlySubmitResume
+			? "Lean tree-only resume: deferring Phase-I input checks to each MGS and skipping obsolete worker-ledger validation.\n"
+			: "Tree-only resume: every MGS input passed the completed audit; skipping obsolete Phase-I worker-ledger validation and continuing to Phase II.\n";
+		limitedNotice('tree-only resume skips obsolete Phase-I ledger validation', $message);
 		retry_unlink("$LOGDIR/phase1_worker_repair.queue.tsv", fatal => 0,
 			label => "clear obsolete Phase-I repair queue for tree-only resume");
 		return 0;
@@ -6728,9 +6861,17 @@ Tree locus filtering:
                                  jplace and backbone, then continue through the normal
                                  controller validation and downstream strain analysis
 
-A tree-only resume (-onlySubmit 1) follows the regular controller flow: it
-reuses complete published or staged inputs, submits unfinished tree jobs, waits
-for their outcomes, validates the result, and then submits strain_within_2.2.pl.
+An ordinary parent tree-only resume (-onlySubmit 1) uses lean, incremental
+submission: it trusts the atomic Phase-I merge checkpoint, checks completion,
+terminal state, tree input, and category data only when each MGS reaches the
+submission loop, and submits that job before moving on. It does not run a
+controller-wide resume audit, worker-shard scan, or input-sizing/sorting pass.
+Already-overlaid MGS also bypass reference-catalogue initialization; the shared
+reference stream starts only when the first raw MGS actually needs an overlay.
+An existing LOGandSUB/tree_input_sizing.tsv may be read only as an optional
+resource hint. Explicit recalculation, repair, redo, and resubmission modes keep
+the exhaustive audit. After dispatch, normal scheduler waiting, output
+validation, and strain_within_2.2.pl submission are unchanged.
 
 On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a
 validated retained IQ-TREE backbone, MSA, query alignment, and sample
