@@ -348,7 +348,6 @@ my @existingClusterProducts = grep { -e $_ } (
 );
 my $stage1ResumeValid =
 	!$rewrClusterMAGs
-	&& -s "$outD/$BinnerShrt.clusters.obs"
 	&& -s $finalClusters2
 	&& _checkpoint_valid_for_resume($st1ston);
 $loadInputMetadata->() unless $stage1ResumeValid;
@@ -392,8 +391,8 @@ if ($rewrClusterMAGs || $stage1ProvenanceInvalid) {
 	}
 }
 my $ph1flag =
-	(-s "$outD/$BinnerShrt.clusters.obs" && -s $finalClusters2
-		&& ($stage1ResumeValid || _checkpoint_valid($st1ston)))
+	($stage1ResumeValid || (-s "$outD/$BinnerShrt.clusters.obs" && -s $finalClusters2
+		&& _checkpoint_valid($st1ston)))
 	? 0 : 1;
 #my $FMGsubs = `wc -l $GCd/Matrix.$COGdir.mat | cut -f1 -d' '`; chomp $FMGsubs; $FMGsubs = int($FMGsubs);
 # a whole lot faster.. but imprecise!
