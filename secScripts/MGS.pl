@@ -346,10 +346,15 @@ my @existingClusterProducts = grep { -e $_ } (
 	glob("$outD/$BinnerShrt.clusters*"),
 	glob("$outD/$BinnerShrt.Wclusters*"),
 );
-my $stage1ResumeValid =
-	!$rewrClusterMAGs
-	&& -s $finalClusters2
-	&& _checkpoint_valid_for_resume($st1ston);
+my $stage1OutputsPresent = -s $finalClusters2 && -s $finalClustersFilt;
+my $stage1CheckpointValid = _checkpoint_valid_for_resume($st1ston);
+# Existing Stage I products are sufficient to continue later stages.  The
+# explicit -redoCluster option remains the way to discard them after an input
+# change; do not turn a checkpoint mismatch into an expensive MAG rescan.
+my $stage1ResumeValid = !$rewrClusterMAGs && $stage1OutputsPresent;
+if ($stage1ResumeValid && !$stage1CheckpointValid) {
+	printL "Stage I checkpoint differs from the current inputs; retaining existing MGS clusters for recovery. Use -redoCluster 1 to rebuild them.\n";
+}
 $loadInputMetadata->() unless $stage1ResumeValid;
 my $stage1ProvenanceInvalid =
 	@existingClusterProducts && !$stage1ResumeValid && !_checkpoint_valid($st1ston);
@@ -370,7 +375,7 @@ if ($inputMetadataLoaded) {
 	printL "Samples in map: $rawNumSamples; eligible non-empty samples: $numSamples; "
 		. "abundance profiles in matrix: $profileSamples\n";
 } else {
-	printL "Reusing validated $BinnerShrt MGS clusters; deferring assembly-group and MAG availability checks.\n";
+	printL "Reusing existing $BinnerShrt MGS clusters; deferring assembly-group and MAG availability checks.\n";
 }
 printL "=====================================================\n";
 _mgs_workflow_stage('stage-1-clustering');
@@ -390,10 +395,7 @@ if ($rewrClusterMAGs || $stage1ProvenanceInvalid) {
 		remove_tree($phyloDir) if -d $phyloDir;
 	}
 }
-my $ph1flag =
-	($stage1ResumeValid || (-s "$outD/$BinnerShrt.clusters.obs" && -s $finalClusters2
-		&& _checkpoint_valid($st1ston)))
-	? 0 : 1;
+my $ph1flag = $stage1ResumeValid ? 0 : 1;
 #my $FMGsubs = `wc -l $GCd/Matrix.$COGdir.mat | cut -f1 -d' '`; chomp $FMGsubs; $FMGsubs = int($FMGsubs);
 # a whole lot faster.. but imprecise!
 if ($ph1flag) {
