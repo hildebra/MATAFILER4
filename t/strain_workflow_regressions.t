@@ -216,16 +216,16 @@ like($strain,
 	qr/sub printEarlyRunHeader \{.*?Strain_within v\$version.*?Started:.*?Requested output:.*?Initializing paths, maps, and catalogues/s,
 	'the immediate header identifies the run before expensive initialization starts');
 like($strain,
-	qr/print \{\$sampleStatsFH\} \$sampleStatsHeader.*?my %sampleStatsSeen;.*?local \*STDOUT;.*?open STDOUT.*?STDERR.*?foreach my \$sm \(\@srtdSmpls\).*?readGenesSample_Singl/s,
+	qr/my %sampleStatsSeen;.*?my \$nextSampleProgress = \$extractionStarted \+ 60;.*?readGenesSample_Singl\(.*?stepProgress\("consensus-gene extraction"/s,
 	'STDOUT is redirected once around the complete sample loop while the duplicated handle carries only TSV records');
 like($strain,
 	qr/sub writeSampleStats \{.*?without a sample name.*?duplicate row.*?Refusing to emit an empty.*?for my \$target \(\$fh, \$sampleStatsPartFH\).*?print \{\$target\} \$row, "\\n"/s,
 	'every sample-statistics record has a sample name, is nonempty, and is emitted to stdout and its worker table at most once');
 like($strain,
-	qr/sub mergeSampleStats .*?Wrong sample-statistics field count.*?Duplicate sample-statistics row.*?aggregate_sample_rows.*?STEP 1 SAMPLE SUMMARY \(all workers\)/s,
+	qr/sub mergeSampleStats .*?Wrong sample-statistics field count.*?Duplicate sample-statistics row.*?aggregate_sample_rows.*?STAGE I SAMPLE SUMMARY \(all workers\)/s,
 	'all worker tables are validated, aggregated, saved, and reported at the end of Step 1');
 like($strain,
-	qr/STEP 1 SAMPLE SUMMARY \(all workers\).*?join\(" ", \@summaryPairs\).*?loci_histogram_rows.*?Used MGS retained-loci histogram/s,
+	qr/STAGE I SAMPLE SUMMARY \(all workers\).*?join\("; ", \@summaryPairs\).*?loci_histogram_rows.*?Used MGS retained-loci histogram/s,
 	'the all-worker stdout summary uses key:value pairs and includes a retained-locus histogram');
 like($strain,
 	qr/mergeRecoveryLogs\(\) unless \$maxSubJob.*?mergeSampleStats\(\) unless \$maxSubJob.*?if \(\$maxSubJob && !\$subJob\).*?mergeRecoveryLogs\(\);.*?mergeSampleStats\(\);/s,
@@ -356,7 +356,7 @@ like($strain,
 	qr/-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData.*?-recalcTrees must be launched by the main strainWithin process/s,
 	'tree recalculation rejects input-regeneration modes and split-worker execution');
 like($strain,
-	qr/my \$runPartI = \(.*?\|\| \(\$recalcTrees && \$dirsNOTPrepped\).*?if \(\$runPartI\).*?Part I:: extracting relevant core MGS genes/s,
+	qr/my \$runPartI = \(.*?\|\| \(\$recalcTrees && \$dirsNOTPrepped\).*?if \(\$runPartI\).*?Stage I: consensus-gene extraction/s,
 	'tree recalculation reruns extraction when required per-MGS inputs are absent');
 like($strain,
 	qr/my \$runPartI = .*?if \(\$runPartI\).*?preComputeConsSNP\(\).*?\} else \{.*?Skipping Part I.*?reportSavedSampleStats\(\)/s,
@@ -370,7 +370,7 @@ like($strain,
 unlike($strain, qr/die "Unexpected saved sample-summary header/,
 	'legacy saved sample-summary headers are no longer fatal');
 like($strain,
-	qr/sub printSampleStatsSummary .*?STEP 1 SAMPLE SUMMARY \(all workers\).*?Used MGS retained-loci histogram/s,
+	qr/sub printSampleStatsSummary .*?STAGE I SAMPLE SUMMARY \(all workers\).*?Used MGS retained-loci histogram/s,
 	'the same all-worker summary and retained-locus histogram are available after Phase I has completed');
 like($strain,
 	qr/sub recoverCompletedSplitPhaseI .*?split_generation_complete.*?incomplete recovery ledgers.*?incomplete sample-statistics ledgers.*?mergeConspecificLogs\(\).*?mergeRecoveryLogs\(\).*?mergeSampleStats\(\)/s,
@@ -522,7 +522,7 @@ like($strain,
 	qr/pre-restricted to .*?sample driver\(s\) with target loci/s,
 	'split-worker diagnostics distinguish post-index usable sample drivers from assembly groups');
 like($strain,
-	qr/readGenesSample_Singl\(\s*\$sm, \$writeLink, \$sttime, .*?\$appCnt, \$sampleStatsFH, .*?sampleStatsSeen.*?\$\{\$bufferedSamplesRef\}\+\+.*?appendWriteMGSgenes\(\$writeLink\)/s,
+	qr/readGenesSample_Singl\(\s*\$sm, \$writeLink, \$sttime, .*?\$appCnt, undef, .*?sampleStatsSeen.*?\$\{\$bufferedSamplesRef\}\+\+.*?appendWriteMGSgenes\(\$writeLink\)/s,
 	'expanded assembly-group output is accounted once and flushed by sample to retain the RAM bound');
 like($strain,
 	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,

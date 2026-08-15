@@ -59,6 +59,7 @@ sub phase1SamplesByGroup; sub phase1EstimatedInputBytes; sub phase1SampleWorkEst
 sub phase1GroupWorkEstimates; sub writePhase1WorkerPlan;
 sub mergeConspecificLogs;
 sub timeNice;
+sub stageStart;
 #sub combineMGSgenes;
 sub combineMGSgenesDir; sub prepareMGSInputSet; sub collectMGSShardHandoff;
 sub writeMGSShardManifest; sub readSplitGeneration;
@@ -1037,7 +1038,8 @@ my $runPartI = (($dirsNOTPrepped/@specis > 0.1) || $onlySubmit == 0
 if ($runPartI){
 	#$PhylosExist=0;
 	
-	print "\n\n----------------------------------------------------\nPart I:: extracting relevant core MGS genes (SNP consensus called) from original assemblies". "Elapsed time : ", timeNice(time - $sttime) . "\n----------------------------------------------------\n\n";
+	stageStart(q{Stage I: consensus-gene extraction},
+		q{Extracting relevant core MGS loci from SNP-consensus assemblies});
 	# Checking every sample's consensus/VCF inputs is extraction-only work.  In
 	# a tree-only resume it used to dominate startup despite no sample data being
 	# read afterwards, so keep it strictly within the Phase-I path.
@@ -1202,7 +1204,8 @@ if ($runPartI){
 	print "Stage-I terminal-input classification: recorded $emptyMGS MGS with no recoverable loci.\n"
 		if $emptyMGS;
 	
-	print "\nGene extraction & redistribution finished, ready to proceed to phylogeny jobs\n";
+	print "Stage I hand-off: consensus-gene inputs are published and ready for phylogeny preparation. "
+		."Global elapsed ".timeNice(time - $^T)."\n";
 
 } else {
 	print "Skipping Part I, all required per-MGS inputs are already prepared.\n";
@@ -1536,8 +1539,8 @@ my $initializeOutgroupReferences = sub {
 };
 
 
-print "\n\n----------------------------------------------------\n";
-print "Part II:: submit intraStrain phylogenies for " . scalar(@specis) . " MGS. ". "Elapsed time : ", timeNice(time - $sttime) ."\n----------------------------------------------------\n\n";
+stageStart(q{Stage II: phylogeny preparation and submission},
+	q{Preparing intra-strain phylogenies for }.scalar(@specis).q{ MGS});
 
 
 die "Tree for outgroup specified, but file not found:$treeFile\nAborting..\n" if  ($treeFile ne "" && !-e $treeFile);
@@ -4313,6 +4316,14 @@ sub timeNice($){
 	return $tIN . "s";
 }
 
+sub stageStart {
+	my ($stage, $description) = @_;
+	print "\n========== $stage ==========\n";
+	print "$description\n" if defined($description) && length($description);
+	print "Global elapsed: ".timeNice(time - $^T)."\n";
+	print "========================================\n";
+}
+
 sub stepComplete {
 	my ($step, $started, @statistics) = @_;
 	writeStrainWorkflowHeartbeat($step);
@@ -4708,14 +4719,17 @@ sub reportSavedSampleStats {
 sub printSampleStatsSummary {
 	my ($allSummary) = @_;
 	die "Sample summary must be a hash reference\n" unless ref($allSummary) eq 'HASH';
-	my @humanColumns = grep { $_ ne "used_mgs_loci_histogram" } sample_summary_columns();
-	my @summaryPairs = map {
-		my $value = defined($allSummary->{$_}) ? $allSummary->{$_} : "";
-		$value =~ s/\s+/_/g;
-		"$_:$value";
-	} @humanColumns;
-	print "STEP 1 SAMPLE SUMMARY (all workers)\n";
-	print join(" ", @summaryPairs), "\n";
+	my @summaryPairs = (
+		"samples=".($allSummary->{samples} // 0),
+		"processed=".($allSummary->{processed_samples} // 0),
+		"used_MGS=".($allSummary->{used_mgs} // 0)."/".($allSummary->{candidate_mgs} // 0),
+		"retained_loci=".($allSummary->{retained_loci} // 0),
+		"mean_loci_per_used_MGS=".($allSummary->{mean_loci_per_used_mgs} // 0),
+		"skipped_MGS=".($allSummary->{skipped_mgs} // 0),
+		"status=".($allSummary->{status_counts} // q{}),
+	);
+	print "STAGE I SAMPLE SUMMARY (all workers)\n";
+	print join("; ", @summaryPairs), "\n";
 	my @histogramRows = loci_histogram_rows(
 		$allSummary->{used_mgs_loci_histogram}, $allSummary->{min_genes_per_mgs}
 	);
@@ -5859,37 +5873,25 @@ sub extractFNAFAA2genes{
 		#DEBUG	@srtdSmpls = ("PDB3.F");
 	
 	
-	my $previousFH = select(STDOUT);
-	$| = 1;
-	select($previousFH);
-	open my $sampleStatsFH, q{>&}, \*STDOUT
-		or die "Cannot duplicate STDOUT for per-sample statistics: $!\n";
-	$previousFH = select($sampleStatsFH);
-	$| = 1;
-	select($previousFH);
-	print {$sampleStatsFH} $sampleStatsHeader, "\n"
-		or die "Cannot write per-sample statistics header: $!\n";
 	my %sampleStatsSeen;
-	{
-		# Redirect diagnostics once for the complete accumulation loop. Reopening
-		# STDOUT for every assembly group produced empty scheduler records on some
-		# systems. The duplicated handle above remains the TSV-only stream.
-		local *STDOUT;
-		open STDOUT, q{>&}, \*STDERR
-			or die "Cannot redirect sample diagnostics to STDERR: $!\n";
-		foreach my $sm (@srtdSmpls){
-			print STDERR "AT SMPL:: $smCnt/" . scalar(@srtdSmpls) ." $sm - ". "Elapsed time : ", timeNice(time - $sttime) . "\n";
-			readGenesSample_Singl(
-				$sm, $writeLink, $sttime, \$appCnt, $sampleStatsFH, \%sampleStatsSeen,
-			);
-			$smCnt++;
+	my $extractionStarted = time;
+	my $nextSampleProgress = $extractionStarted + 60;
+	for my $sm (@srtdSmpls) {
+		readGenesSample_Singl(
+			$sm, $writeLink, $sttime, \$appCnt, undef, \%sampleStatsSeen,
+		);
+		if (time >= $nextSampleProgress) {
+			stepProgress("consensus-gene extraction", $smCnt, scalar(@srtdSmpls),
+				$extractionStarted, "worker=$subJob",
+				"sample_rows=".scalar(keys %sampleStatsSeen));
+			$nextSampleProgress = time + 60;
 		}
+		$smCnt++;
 	}
-	close $sampleStatsFH or die "Cannot close per-sample statistics stream: $!\n";
 	close $sampleStatsPartFH
 		or die "Cannot close per-worker sample statistics $sample_stats_part: $!\n";
 	undef $sampleStatsPartFH;
-	warn "Per-sample statistics emitted: ".scalar(keys %sampleStatsSeen)." nonempty row(s)\n";
+	print "Stage I sample accounting: ".scalar(keys %sampleStatsSeen)." sample row(s) saved to $sample_stats_part.\n";
 	
 	
 	appendWriteMGSgenes($writeLink);
@@ -5997,11 +5999,8 @@ sub readGenesSample_Singl{
 			$locMGScnt{$MGS}++;
 		}
 	}
-	print scalar(keys(%subG))." genes, " . scalar(keys(%locMGScnt)). " MGS\n";
 	my $candidateLoci = 0;
 	$candidateLoci += $_ for values %locMGScnt;
-	my @histoMGScnts = values %locMGScnt;
-	histoMGS(\@histoMGScnts, "Possible Bins in sample");
 
 	
 	
@@ -6079,7 +6078,7 @@ sub readGenesSample_Singl{
 		my %locMGSgenes; #keep track of genes written for each MGS..
 		my $cD = $map{$sd3}{wrdir}."/";
 		if (-e "$cD/SMPL.empty"){
-			print ".. Empty->skip ";
+			limitedWarn(q{empty samples}, "Skipping $sd3: sample is marked empty\n");
 			$sampleStats->{status} = q{empty_sample};
 			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
 			writeSampleStats($sampleStatsFH, $sampleStats, $sampleStatsSeen);
@@ -6144,7 +6143,7 @@ sub readGenesSample_Singl{
 		# into sample-local scratch avoids appending a new sidecar beside a .gz cache.
 		if ($input_state eq 'regenerate'){
 			make_path($locSpace) unless -d $locSpace;
-			print "Recreating consensus fasta files on the fly.. ";
+			limitedNotice(q{on-the-fly consensus regeneration}, "Regenerating consensus FASTA for $sd3\n");
 			#store these in scratch, uncompressed (much faster)
 			$fastaf = "$locSpace/$sd3.cons.genes.fna";
 			$fastafAA = "$locSpace/$sd3.cons.prots.faa";
@@ -6152,7 +6151,7 @@ sub readGenesSample_Singl{
 		}
 		#print "$fastaf\n";
 		unless (fileGZe($fastaf) && fileGZe($fastafAA)){
-			print "\n=====================================\nIncomplete consensus pair $fastaf / $fastafAA -> skip sample\n=====================================\n";
+			limitedWarn(q{incomplete consensus pairs}, "Skipping $sd3: regenerated consensus FASTA pair is incomplete\n");
 			#die;
 			$sampleStats->{status} = q{consensus_incomplete};
 			$sampleStats->{skipped_mgs} = $sampleStats->{candidate_mgs};
