@@ -92,8 +92,6 @@ sub stepComplete;
 sub stepProgress;
 sub preparedMainBranchInputSet;
 sub outgroupRequirementLoci;
-sub writeSortedIdentifierSet;
-sub prepareSelectiveOutgroupReferenceCache;
 sub dispatchPendingTreeJobs;
 sub retryOOMTreeJobs;
 sub usage;
@@ -232,8 +230,8 @@ my $completionMessage = "";
 #1.16: prefer universal-core guide loci and consolidate final taxon-aware diagnostics
 #1.17: require stronger multi-locus/backbone overlap before sparse-sample placement
 #1.18: balance Phase-I workers by consensus input size and regeneration cost
-#1.19: prepare outgroup references in bounded batches and submit trees progressively
-my $version = 1.19;
+#1.20: stream Phase-II outgroup references directly from the catalogue
+my $version = 1.20;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1064,11 +1062,12 @@ if ($runPartI){
 		"catalogue_drivers=".scalar(keys %cl2gene2),
 		"resolved_loci=".scalar(keys %{$LocusByID}),
 		"selected_MGS=".scalar(keys %{$COGprios}));
-	$Gene2COG = {}; #delete, no longer needed..
+	# Retain the Phase-I locus map until Phase II has selected its outgroups.
+	# It avoids a second catalogue-wide gene2tax scan before tree submission.
 	
 	reportingsMGS();
 	%smplsPerMGS = (); #reporting-only sample/locus counts can be large
-	$SIgenes = {}; #replaced locus selection is represented by $COGprios
+	# $SIgenes and $COGprios are reused by direct Phase-II outgroup lookup.
 	
 	my @jobsMain;
 	my $phase1SelfCmd = '';
@@ -1109,10 +1108,9 @@ if ($runPartI){
 	$MemberContext = {};
 	$LocusContext = {};
 	%LocusSeedProteins = ();
-	$COGprios = {};
-	# Phase II loads only the reference sequences needed by its current
-	# submission batch; do not retain the large Phase-I protein subset as well.
-	$catalogProteins = {};
+		# Keep the selected locus/protein map until Phase II has staged all
+		# outgroup overlays. This prevents a second full gene2tax read and keeps
+		# same-COG outgroup matching sequence-aware.
 	#write logs to found genes etc.
 	writeLogsStep1();
 	mergeRecoveryLogs() unless $maxSubJob;
@@ -1246,36 +1244,18 @@ my %TreeOutgroupCandidates;
 my %outgroupCategoryPreflight;
 
 # Reference data is initialized lazily after EPA-only recovery jobs have been
-# submitted. Only MGS with raw staged input and no finalized outgroup overlay
-# need catalogue sequences; complete published inputs already contain them.
+# submitted. It reuses the Phase-I locus map and streams the catalogue FASTAs
+# once, with no .fai lookup or on-disk outgroup cache.
 my $requiresOutgroupReference = $runPartI || $CatNotPrepped || $repairCAT
 	|| $deepRepair || $redoSubmissionData;
 my %outgroupCatalogueMGS;
-my %outgroupReferenceReady;
-my $outgroupReferenceBatchCount = 0;
-my $firstOutgroupReferenceBatchSize = 32;
-my $laterOutgroupReferenceBatchSize = 256;
-my $outgroupReferenceCacheDir = "$scratchD/outgroup_reference_cache";
-my $outgroupReferenceCacheActive = -s "$outgroupReferenceCacheDir/complete.sto" ? 1 : 0;
+my $outgroupReferenceInitialized = 0;
 my $initializeOutgroupReferences = sub {
 	my ($targetMGS) = @_;
-	return unless @{$targetMGS || []};
-	$outgroupReferenceBatchCount++;
-	my $batchLabel = "outgroup-reference batch $outgroupReferenceBatchCount";
+	return if $outgroupReferenceInitialized;
+	$outgroupReferenceInitialized = 1;
 	my $referenceStarted = time;
-	# A completed batch has already embedded its references in per-MGS overlays
-	# before the next cache is built, so only retain one reference batch.
-	$FNAref = {};
-	$FAAref = {};
-	$SIgenes_OG = {};
-	%OGgenesByCOG = ();
-	%outgroupGeneCache = ();
-	%outgroupCatalogueMGS = ();
-	%outgroupCategoryPreflight = ();
-	print "Starting $batchLabel for ".scalar(@{$targetMGS})
-		." MGS; tree submission resumes immediately after this batch; global elapsed "
-		.timeNice(time - $^T)."\n";
-	unless ($requiresOutgroupReference && @{$targetMGS}) {
+	unless ($requiresOutgroupReference && @{$targetMGS || []}) {
 		stepComplete("outgroup-reference preparation", $referenceStarted,
 			"status=not_required", "reference_NT=0",
 			"required=".($requiresOutgroupReference ? 1 : 0),
@@ -1283,39 +1263,24 @@ my $initializeOutgroupReferences = sub {
 		return;
 	}
 
-	my (%targetLoci, %candidateOutgroupsByMGS);
 	my $candidateStarted = time;
 	my $candidateMGS = 0;
 	my $nextCandidateProgress = time + 60;
 	for my $MGS (@{$targetMGS}) {
-		my ($loci, $locusSource, $sampleCount) = outgroupRequirementLoci($MGS);
-		next unless @{$loci};
-		$targetLoci{$MGS} = $loci;
-		if (defined($sampleCount)) {
-			$outgroupCategoryPreflight{$MGS} = {
-				loci => $loci, sample_count => $sampleCount,
-			};
-		}
-		my @candidates;
-		push @candidates, $PreferredOutgroup{$MGS}
+		$outgroupCatalogueMGS{$PreferredOutgroup{$MGS}} = 1
 			if exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS});
-		push @candidates, treeOutgroupCandidates($MGS) if length($treeFile);
-		my %seen;
-		@candidates = grep {
-			defined($_) && /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/ && !$seen{$_}++
-		} @candidates;
-		$candidateOutgroupsByMGS{$MGS} = \@candidates;
-		$outgroupCatalogueMGS{$_} = 1 for @candidates;
+		if (length($treeFile)) {
+			$outgroupCatalogueMGS{$_} = 1 for treeOutgroupCandidates($MGS);
+		}
 		$candidateMGS++;
 		if (time >= $nextCandidateProgress) {
-			stepProgress("outgroup requirement discovery", $candidateMGS,
+			stepProgress("outgroup candidate discovery", $candidateMGS,
 				scalar(@{$targetMGS}), $candidateStarted,
-				"candidate_MGS=".scalar(keys %outgroupCatalogueMGS),
-				"current_source=$locusSource");
+				"candidate_MGS=".scalar(keys %outgroupCatalogueMGS));
 			$nextCandidateProgress = time + 60;
 		}
 	}
-	unless (%outgroupCatalogueMGS && %targetLoci) {
+	unless (%outgroupCatalogueMGS) {
 		stepComplete("outgroup-reference preparation", $referenceStarted,
 			"status=not_required", "reference_NT=0", "required=1",
 			"reference_AA=0", "MGS_with_outgroup_candidates=0");
@@ -1324,37 +1289,32 @@ my $initializeOutgroupReferences = sub {
 
 	my ($refFNA, $refFAA, $refNameL) = ("", "", "unknown");
 	if ($mode eq "MGS" || $mode eq "MGSall") {
-		$refFNA = "$GCd/compl.incompl.$clusterID.fna";
-		$refFAA = "$GCd/compl.incompl.$clusterID.prot.faa";
+		$refFNA = resolveExistingFile("$GCd/compl.incompl.$clusterID.fna")
+			// "$GCd/compl.incompl.$clusterID.fna";
+		$refFAA = resolveExistingFile("$GCd/compl.incompl.$clusterID.prot.faa")
+			// "$GCd/compl.incompl.$clusterID.prot.faa";
 		$refNameL = "geneCat";
-		$refFNA = resolveExistingFile($refFNA) // $refFNA;
-		$refFAA = resolveExistingFile($refFAA) // $refFAA;
 	} elsif ($mode eq "FMG") {
 		$refFNA = "$GCd/FMG/COG*.fna";
 		$refFAA = "$GCd/FMG/COG*.faa";
 		$refNameL = "FMG ref";
 	}
-	print "Resolving selective $refNameL outgroup references for "
-		.scalar(keys %targetLoci)." staged MGS and "
-		.scalar(keys %outgroupCatalogueMGS)." candidate outgroup MGS; global elapsed "
+	print "Streaming $refNameL outgroup references for "
+		.scalar(keys %outgroupCatalogueMGS)." candidate MGS; no FASTA index or outgroup cache; global elapsed "
 		.timeNice(time - $^T)."\n";
 
 	my @outgroupMGS = sort keys %outgroupCatalogueMGS;
-	my %mapMGS = map { $_ => 1 } (@outgroupMGS, keys %targetLoci);
-	my @mapMGS = sort keys %mapMGS;
 	my $mapStarted = time;
 	my $nextMapProgress = time + 60;
 	my ($hr1, $Gene2COG_OG, $hr4);
-	if (!@subsetMGS && keys(%{$SIgenes}) && keys(%{$Gene2COG}) && keys(%{$COGprios})) {
-		# The ordinary all-MGS run already loaded this presorted map. Reuse it;
-		# the sequence cache still retains only Mosaic/direct and same-COG references.
+	if (keys(%{$SIgenes}) && keys(%{$Gene2COG}) && keys(%{$COGprios})) {
 		($hr1, $Gene2COG_OG, $hr4) = ($SIgenes, $Gene2COG, $COGprios);
-		print "Reusing the selected-MGS gene map for selective outgroup lookup; global elapsed "
+		print "Reusing the Phase-I selected-MGS gene map for outgroup lookup; global elapsed "
 			.timeNice(time - $^T)."\n";
 	} else {
 		my $unusedGene2MGS;
 		($hr1, $Gene2COG_OG, $unusedGene2MGS, $hr4) = readGene2tax(
-			$gene2taxF, $presortGenes, \@mapMGS,
+			$gene2taxF, $presortGenes, \@outgroupMGS,
 			sub {
 				my ($status) = @_;
 				return if time < $nextMapProgress;
@@ -1364,9 +1324,6 @@ my $initializeOutgroupReferences = sub {
 			},
 		);
 	}
-	print "Loaded $batchLabel gene map for ".scalar(@mapMGS)
-		." target/candidate MGS; indexing candidate loci now; global elapsed "
-		.timeNice(time - $^T)."\n";
 	$SIgenes_OG = $hr1;
 	my @mappedMGS = grep { exists($outgroupCatalogueMGS{$_}) } keys %{$hr4};
 	my $mappedCount = 0;
@@ -1384,67 +1341,35 @@ my $initializeOutgroupReferences = sub {
 			$nextMappingProgress = time + 60;
 		}
 	}
-	print "Indexed candidate loci for $mappedCount MGS in $batchLabel; "
-		."resolving exact reference IDs; global elapsed ".timeNice(time - $^T)."\n";
 
-	# Mosaic gives an exact target gene for many loci. Only loci without such a
-	# mapping need the same-COG candidate panel and primary-gene protein used by
-	# the existing similarity tie-breaker.
-	my (%requiredNT, %requiredAA);
-	my ($directMosaicLoci, $fallbackLoci) = (0, 0);
-	for my $MGS (keys %targetLoci) {
-		for my $locus (@{$targetLoci{$MGS}}) {
-			my (undef, $cog, $primaryGene) = locusParts($locus, $MGS);
-			next unless length($cog) && length($primaryGene);
-			for my $outgroup (@{$candidateOutgroupsByMGS{$MGS} || []}) {
-				if (($PreferredOutgroup{$MGS} // '') eq $outgroup
-						&& exists($PreferredOutgroupGene{$MGS}{$primaryGene})) {
-					my $gene = $PreferredOutgroupGene{$MGS}{$primaryGene};
-					if (defined($gene) && length($gene)) {
-						$requiredNT{$gene} = 1;
-						$requiredAA{$gene} = 1;
-						$directMosaicLoci++;
-					}
-					next;
-				}
-				my @fallback = @{$OGgenesByCOG{$outgroup}{$cog} || []};
-				next unless @fallback;
-				$requiredNT{$_} = 1 for @fallback;
-				$requiredAA{$_} = 1 for @fallback;
-				$requiredAA{$primaryGene} = 1;
-				$fallbackLoci++;
-			}
-		}
-	}
-	unless (%requiredNT && %requiredAA) {
-		stepComplete("outgroup-reference preparation", $referenceStarted,
-			"status=no_resolvable_loci", "reference_NT=0", "required=1",
-			"reference_AA=0",
-			"MGS_with_outgroup_candidates=".scalar(keys %outgroupCatalogueMGS));
-		return;
-	}
-
-	my ($cacheFNA, $cacheFAA) = prepareSelectiveOutgroupReferenceCache(
-		$refFNA, $refFAA, \%requiredNT, \%requiredAA,
-	);
-	my $referenceMode = 'selective_indexed_cache';
-	if (length($cacheFNA) && length($cacheFAA)) {
-		$FNAref = readFasta($cacheFNA, 1, "\\s");
-		$FAAref = readFasta($cacheFAA, 1, "\\s");
-		$outgroupReferenceCacheActive = 1;
-	} else {
-		$referenceMode = 'shared_fasta_read_fallback';
-		warn "Selective outgroup-reference cache was unavailable; using the shared indexed subset reader with streaming fallback\n";
-		$FAAref = readFasta($refFAA, 1, "\\s", $Gene2COG_OG, { fai => 1 });
-		$FNAref = readFasta($refFNA, 1, "\\s", $Gene2COG_OG, { fai => 1 });
-	}
+	my $faaStarted = time;
+	my $nextFaaProgress = time + 60;
+	$FAAref = readFasta($refFAA, 1, "\\s", $Gene2COG_OG,
+		sub {
+			my ($status) = @_;
+			return if time < $nextFaaProgress;
+			stepProgress("outgroup protein FASTA streaming",
+				$status->{records_scanned}, undef, $faaStarted,
+				"retained=$status->{records_retained}",
+				"file=".basename($status->{file}));
+			$nextFaaProgress = time + 60;
+		});
+	my $fnaStarted = time;
+	my $nextFnaProgress = time + 60;
+	$FNAref = readFasta($refFNA, 1, "\\s", $Gene2COG_OG,
+		sub {
+			my ($status) = @_;
+			return if time < $nextFnaProgress;
+			stepProgress("outgroup nucleotide FASTA streaming",
+				$status->{records_scanned}, undef, $fnaStarted,
+				"retained=$status->{records_retained}",
+				"file=".basename($status->{file}));
+			$nextFnaProgress = time + 60;
+		});
 	print "Loaded ".scalar(keys %{$FNAref})." nucleotide and "
-		.scalar(keys %{$FAAref})." protein outgroup reference genes from $refNameL "
-		."($referenceMode; requested NT=".scalar(keys %requiredNT)
-		.", AA=".scalar(keys %requiredAA).", Mosaic-direct=$directMosaicLoci, "
-		."fallback-comparisons=$fallbackLoci)\n";
+		.scalar(keys %{$FAAref})." protein outgroup reference genes from $refNameL by sequential streaming\n";
 	stepComplete("outgroup-reference preparation", $referenceStarted,
-		"status=loaded", "mode=$referenceMode",
+		"status=loaded", "mode=streaming",
 		"reference_NT=".scalar(keys %{$FNAref}), "required=1",
 		"reference_AA=".scalar(keys %{$FAAref}),
 		"MGS_with_outgroup_candidates=".scalar(keys %outgroupCatalogueMGS));
@@ -1469,7 +1394,6 @@ my @fullTreeCandidates = grep {
 		&& !(exists($ConspecificMGS{$_})
 			&& ($ConspecificMGS{$_}->[0] // "") =~ m/multicopy/)
 } @fullTreeMGS;
-my %fullTreeCandidate = map { $_ => 1 } @fullTreeCandidates;
 my %inputSizeByMGS;
 for my $MGS (@epaRecoveryMGS) {
 	my $retainedMSA = "$SIdirs{$MGS}/MSA/MSAli.fna";
@@ -1758,27 +1682,12 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	#	next;
 	#}
 	
-	# Add each outgroup and queue its tree immediately; later reference batches
-	# are not prepared until every MGS in the current batch has been handled.
+	# The direct reader initializes once from the full actionable set, then every
+	# MGS immediately stages its overlay and enters the normal submission queue.
 	if (!$epaOnlyRetry && $requiresOutgroupReference
-			&& !$outgroupReferenceReady{$MGS}) {
-		my $batchLimit = $outgroupReferenceBatchCount
-			? $laterOutgroupReferenceBatchSize : $firstOutgroupReferenceBatchSize;
-		my @referenceBatch;
-		for (my $batchIndex = $lcnt;
-				$batchIndex < @specis && @referenceBatch < $batchLimit;
-				$batchIndex++) {
-			my $batchMGS = $specis[$batchIndex];
-			next if exists($MGSepaOnlyRetry{$batchMGS});
-			next unless $fullTreeCandidate{$batchMGS};
-			next if $outgroupReferenceReady{$batchMGS};
-			push @referenceBatch, $batchMGS;
-		}
-		@referenceBatch = ($MGS) unless @referenceBatch;
-		$initializeOutgroupReferences->(\@referenceBatch);
-		$outgroupReferenceReady{$_} = 1 for @referenceBatch;
-		print "Completed outgroup-reference batch $outgroupReferenceBatchCount; "
-			."resuming per-MGS outgroup addition and immediate tree submission; global elapsed "
+			&& !$outgroupReferenceInitialized) {
+		$initializeOutgroupReferences->(\@fullTreeCandidates);
+		print "Completed direct sequential outgroup-reference loading; resuming per-MGS outgroup addition and tree submission; global elapsed "
 			.timeNice(time - $^T)."\n";
 	}
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
@@ -1966,16 +1875,6 @@ if ($unresolvedInputs) {
 if ($incompleteTreeOutcomes) {
 	print "Tree-job outcomes remain quarantined in tree_job_outcomes.tsv, but all tree "
 		."inputs are resolved; proceeding with downstream strain analysis for completed trees.\n";
-}
-if ($doSubmit && !$incompleteTreeOutcomes && $outgroupReferenceCacheActive
-		&& length($outgroupReferenceCacheDir) && -d $outgroupReferenceCacheDir) {
-	my $cacheCleanupStarted = time;
-	remove_tree($outgroupReferenceCacheDir);
-	stepComplete("outgroup-reference cache cleanup", $cacheCleanupStarted,
-		"status=all_tree_outcomes_validated");
-} elsif ($outgroupReferenceCacheActive && length($outgroupReferenceCacheDir)) {
-	print "Retaining selective outgroup-reference cache until all submitted phylogenies "
-		."validate successfully: $outgroupReferenceCacheDir\n";
 }
 print "\nAll done for $cnt Bins\nRun strain_within_2.pl for summary stats:\n";
 
@@ -3661,64 +3560,6 @@ sub outgroupRequirementLoci {
 	}
 	return (\@loci, @sources > 1 ? 'worker_categories' : 'aggregate_category',
 		scalar(keys %samples));
-}
-
-sub writeSortedIdentifierSet {
-	my ($path, $identifiers) = @_;
-	my $temporary = "$path.tmp.$$";
-	my $output = retry_open('>', $temporary,
-		label => "create outgroup-reference identifier list");
-	for my $identifier (sort keys %{$identifiers}) {
-		die "Unsafe outgroup-reference identifier '$identifier'\n"
-			unless defined($identifier) && length($identifier)
-				&& $identifier !~ /[\s\x00-\x1f\x7f]/;
-		print {$output} "$identifier\n"
-			or die "Cannot write outgroup-reference identifier list $temporary: $!\n";
-	}
-	retry_close($output, 'close outgroup-reference identifier list');
-	retry_rename($temporary, $path,
-		label => "publish outgroup-reference identifier list");
-}
-
-sub prepareSelectiveOutgroupReferenceCache {
-	my ($sourceFNA, $sourceFAA, $requiredNT, $requiredAA) = @_;
-	return ('', '') if $mode eq 'FMG' || $sourceFNA =~ /[*?\[]/
-		|| $sourceFAA =~ /[*?\[]/;
-	$outgroupReferenceCacheDir = "$scratchD/outgroup_reference_cache";
-	make_path($outgroupReferenceCacheDir) unless -d $outgroupReferenceCacheDir;
-	my $ntIDs = "$outgroupReferenceCacheDir/required.nt.ids";
-	my $aaIDs = "$outgroupReferenceCacheDir/required.aa.ids";
-	writeSortedIdentifierSet($ntIDs, $requiredNT);
-	writeSortedIdentifierSet($aaIDs, $requiredAA);
-	my $helper = getProgPaths('MGS_outgroup_ref_scr');
-	my $command = join(' ', $helper,
-		'-nt', shellQuote($sourceFNA), '-aa', shellQuote($sourceFAA),
-		'-ntIDs', shellQuote($ntIDs), '-aaIDs', shellQuote($aaIDs),
-		'-outD', shellQuote($outgroupReferenceCacheDir),
-	);
-	$command .= ' -mosaic '.shellQuote($mosaicLociFile)
-		if length($mosaicLociFile) && -s $mosaicLociFile;
-	print "Preparing indexed selective outgroup-reference cache: NT="
-		.scalar(keys %{$requiredNT}).", AA=".scalar(keys %{$requiredAA})
-		."; cache=$outgroupReferenceCacheDir; global elapsed "
-		.timeNice(time - $^T)."\n";
-	my $status = system('bash', '-o', 'pipefail', '-c', $command);
-	if ($status != 0) {
-		my $detail = $status == -1 ? $! : 'exit '.($status >> 8);
-		limitedWarn('selective outgroup-reference cache failures',
-			"Selective outgroup-reference helper failed ($detail); retaining its cache workspace for diagnosis\n");
-		return ('', '');
-	}
-	my $cachedFNA = "$outgroupReferenceCacheDir/references.fna";
-	my $cachedFAA = "$outgroupReferenceCacheDir/references.faa";
-	unless (-s $cachedFNA && -s "$cachedFNA.fai"
-			&& -s $cachedFAA && -s "$cachedFAA.fai"
-			&& -s "$outgroupReferenceCacheDir/complete.sto") {
-		limitedWarn('incomplete selective outgroup-reference cache',
-			"Selective outgroup-reference helper returned success without a complete indexed cache\n");
-		return ('', '');
-	}
-	return ($cachedFNA, $cachedFAA);
 }
 
 sub preparedMainBranchInputSet {

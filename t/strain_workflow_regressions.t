@@ -126,6 +126,9 @@ like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,
 	'postprocessing inherits submission state and the selected queue backend');
 like($strain, qr/\$nxtCmd \.= "-MGSphylo "\.shellQuote\(\$treeFile\).*?if \$treeFile ne ""/,
 	'postprocessing receives the source MGS tree for outgroup recovery');
+like($strain,
+	qr/sub treeOutgroupCandidates .*?my \$call = "\$neiTree ".shellQuote\(\$treeFile\).*?\$outgroup_text = `\$call`.*?trying catalogue-derived candidates/s,
+	'outgroup lookup delegates source-tree neighbor selection directly and retains its failure fallback');
 like($strain2, qr/"MGSphylo=s"\s*=>\s*\\\$MGSphylo.*?sub resolveOutgroup .*?data\.log.*?treeCmd\.sh.*?MGSphylo/s,
 	'postprocessing preserves logged or saved outgroups and falls back to the source MGS tree');
 like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,
@@ -176,21 +179,21 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1.19;/,
+like($strain, qr/my \$version = 1.20;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats/s,
 	'population genetics forces retention of per-locus MSAs and forwards its enabled state to strainwithin2');
-like($strain, qr/PreferredOutgroupGene.*?requiredNT.*?prepareSelectiveOutgroupReferenceCache/s,
-	'Mosaic direct mappings define a reduced exact outgroup-reference request set');
+like($strain, qr/Retain the Phase-I locus map.*?second catalogue-wide gene2tax scan.*?\$SIgenes and \$COGprios are reused/s,
+	'Phase II reuses the Phase-I selected gene map rather than clearing and rebuilding it');
+like($strain, qr/Streaming \$refNameL outgroup references.*?no FASTA index or outgroup cache.*?readFasta\(\$refFAA, 1, "\\\\s", \$Gene2COG_OG,.*?readFasta\(\$refFNA, 1, "\\\\s", \$Gene2COG_OG,/s,
+	'outgroup references are selected with sequential FNA/FAA streaming rather than indexed cache extraction');
+unlike($strain, qr/prepareSelectiveOutgroupReferenceCache|outgroupReferenceCacheActive|outgroup_reference_cache/,
+	'the Phase II selective outgroup cache and its index lifecycle are absent');
 like($strain, qr/sub outgroupRequirementLoci.*?preparedOutgroupLog.*?CATstdof\.tmp/s,
-	'only raw staged inputs without a finalized outgroup overlay contribute cache requirements');
+	'only raw staged inputs without a finalized outgroup overlay contribute outgroup requirements');
 like($strain, qr/sub outgroupRequirementLoci.*?selected_gene_map.*?outgroup requirement category/s,
 	'resume uses already-selected loci before considering a raw category scan');
-like($strain, qr/if \(!\@subsetMGS \&\& keys\(%\{\$SIgenes\}\).*?readGene2tax/s,
-	'an emptied Phase-I gene map is reloaded selectively instead of being reused');
-like($strain, qr/outgroupReferenceCacheActive.*?writeTreeFailureAudit.*?validateTreeInputResolution.*?outgroup-reference cache cleanup/s,
-	'the selective cache survives until tree outcomes and input publication validate');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -284,14 +287,11 @@ like($strain,
 	qr/my \$requiresOutgroupReference = \$runPartI \|\| \$CatNotPrepped \|\| \$repairCAT.*?my \$initializeOutgroupReferences = sub.*?unless \(\$requiresOutgroupReference.*?readFasta\(\$refFAA.*?readFasta\(\$refFNA/s,
 	'tree-only resumes load reference FASTA catalogues only for input regeneration or repair');
 like($strain,
-	qr/my \$firstOutgroupReferenceBatchSize = 32;.*?my \$laterOutgroupReferenceBatchSize = 256;.*?splice \@specis.*?\$fullTreeInputsInitialized = 1;.*?if \(!\$epaOnlyRetry && \$requiresOutgroupReference.*?\$initializeOutgroupReferences->\(\\\@referenceBatch\).*?addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?push \@pendingTreeJobs/s,
-	'full-tree references are prepared in bounded batches immediately before progressive add-outgroup and submission');
-unlike($strain,
-	qr/\$initializeOutgroupReferences->\(\\\@fullTreeCandidates\)/,
-	'full-tree sizing no longer triggers a catalogue-wide outgroup barrier');
+	qr/my \$outgroupReferenceInitialized = 0;.*?Streaming \$refNameL outgroup references.*?mode=streaming.*?\$initializeOutgroupReferences->\(\\\@fullTreeCandidates\).*?addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?push \@pendingTreeJobs/s,
+	'full-tree references stream once from the complete actionable set before normal individual overlay and job submission');
 like($strain,
-	qr/Loaded \$batchLabel gene map.*?Indexed candidate loci.*?resolving exact reference IDs/s,
-	'outgroup reference map construction reports progress around its formerly silent stages');
+	qr/outgroup candidate discovery.*?outgroup protein FASTA streaming.*?outgroup nucleotide FASTA streaming/s,
+	'direct outgroup lookup reports candidate and sequential FASTA-streaming progress');
 unlike($strain, qr/nonEpaTreeAbsences/,
 	'a missing final tree no longer makes reference catalogue loading mandatory');
 like($strain,
@@ -312,8 +312,8 @@ like($strain,
 	qr/\@treeJobAccounting.*?requested_mb => int\(\$totMem\).*?qsubSystemJobAlive.*?slurm_tree_memory_summary.*?format_slurm_tree_memory_summary/s,
 	'completed Slurm tree jobs report MaxRSS against their requested memory');
 like($strain,
-	qr/\$outgroupCategoryPreflight\{\$MGS\} = \{.*?if \(my \$preflight = delete \$outgroupCategoryPreflight\{\$MGS\}\).*?\.strain_tree_input\.outgroup\.fna.*?\.strain_tree_input\.plan\.tsv/s,
-	'the controller reuses the category preflight and keeps only the compact locus/sample/outgroup overlay while handing full input finalization to buildTree5');
+	qr/sub addOutgroup2MGS.*?\.strain_tree_input\.outgroup\.fna.*?\.strain_tree_input\.plan\.tsv/s,
+	'the controller writes only compact outgroup overlays and a plan before handing final input construction to buildTree5');
 unlike($strain, qr/sort_fasta_by_locus|append_fasta_records_atomic|readFastaIDs/,
 	'the serial controller no longer rewrites, sorts, or fully scans staged FASTA inputs');
 like($strain,
