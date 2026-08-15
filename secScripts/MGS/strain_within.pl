@@ -232,7 +232,8 @@ my $completionMessage = "";
 #1.16: prefer universal-core guide loci and consolidate final taxon-aware diagnostics
 #1.17: require stronger multi-locus/backbone overlap before sparse-sample placement
 #1.18: balance Phase-I workers by consensus input size and regeneration cost
-my $version = 1.18;
+#1.19: prepare outgroup references in bounded batches and submit trees progressively
+my $version = 1.19;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1109,6 +1110,9 @@ if ($runPartI){
 	$LocusContext = {};
 	%LocusSeedProteins = ();
 	$COGprios = {};
+	# Phase II loads only the reference sequences needed by its current
+	# submission batch; do not retain the large Phase-I protein subset as well.
+	$catalogProteins = {};
 	#write logs to found genes etc.
 	writeLogsStep1();
 	mergeRecoveryLogs() unless $maxSubJob;
@@ -1247,14 +1251,30 @@ my %outgroupCategoryPreflight;
 my $requiresOutgroupReference = $runPartI || $CatNotPrepped || $repairCAT
 	|| $deepRepair || $redoSubmissionData;
 my %outgroupCatalogueMGS;
-my $outgroupReferenceInitialized = 0;
+my %outgroupReferenceReady;
+my $outgroupReferenceBatchCount = 0;
+my $firstOutgroupReferenceBatchSize = 32;
+my $laterOutgroupReferenceBatchSize = 256;
 my $outgroupReferenceCacheDir = "$scratchD/outgroup_reference_cache";
 my $outgroupReferenceCacheActive = -s "$outgroupReferenceCacheDir/complete.sto" ? 1 : 0;
 my $initializeOutgroupReferences = sub {
 	my ($targetMGS) = @_;
-	return if $outgroupReferenceInitialized;
-	$outgroupReferenceInitialized = 1;
+	return unless @{$targetMGS || []};
+	$outgroupReferenceBatchCount++;
+	my $batchLabel = "outgroup-reference batch $outgroupReferenceBatchCount";
 	my $referenceStarted = time;
+	# A completed batch has already embedded its references in per-MGS overlays
+	# before the next cache is built, so only retain one reference batch.
+	$FNAref = {};
+	$FAAref = {};
+	$SIgenes_OG = {};
+	%OGgenesByCOG = ();
+	%outgroupGeneCache = ();
+	%outgroupCatalogueMGS = ();
+	%outgroupCategoryPreflight = ();
+	print "Starting $batchLabel for ".scalar(@{$targetMGS})
+		." MGS; tree submission resumes immediately after this batch; global elapsed "
+		.timeNice(time - $^T)."\n";
 	unless ($requiresOutgroupReference && @{$targetMGS}) {
 		stepComplete("outgroup-reference preparation", $referenceStarted,
 			"status=not_required", "reference_NT=0",
@@ -1344,6 +1364,9 @@ my $initializeOutgroupReferences = sub {
 			},
 		);
 	}
+	print "Loaded $batchLabel gene map for ".scalar(@mapMGS)
+		." target/candidate MGS; indexing candidate loci now; global elapsed "
+		.timeNice(time - $^T)."\n";
 	$SIgenes_OG = $hr1;
 	my @mappedMGS = grep { exists($outgroupCatalogueMGS{$_}) } keys %{$hr4};
 	my $mappedCount = 0;
@@ -1361,6 +1384,8 @@ my $initializeOutgroupReferences = sub {
 			$nextMappingProgress = time + 60;
 		}
 	}
+	print "Indexed candidate loci for $mappedCount MGS in $batchLabel; "
+		."resolving exact reference IDs; global elapsed ".timeNice(time - $^T)."\n";
 
 	# Mosaic gives an exact target gene for many loci. Only loci without such a
 	# mapping need the same-COG candidate panel and primary-gene protein used by
@@ -1444,6 +1469,7 @@ my @fullTreeCandidates = grep {
 		&& !(exists($ConspecificMGS{$_})
 			&& ($ConspecificMGS{$_}->[0] // "") =~ m/multicopy/)
 } @fullTreeMGS;
+my %fullTreeCandidate = map { $_ => 1 } @fullTreeCandidates;
 my %inputSizeByMGS;
 for my $MGS (@epaRecoveryMGS) {
 	my $retainedMSA = "$SIdirs{$MGS}/MSA/MSAli.fna";
@@ -1518,7 +1544,6 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 			"incomplete_scratch=$treeInputAudit->{incomplete_scratch}",
 			"empty_extraction=$treeInputAudit->{empty_extraction}",
 			"audit=$treeInputAudit->{audit_file}");
-		$initializeOutgroupReferences->(\@fullTreeCandidates);
 		$fullTreeInputsInitialized = 1;
 	}
 	my $MGS = $specis[$lcnt]; # one per-MGS tree preparation/submission decision
@@ -1733,9 +1758,29 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	#	next;
 	#}
 	
-	# Keep global catalogue-dependent outgroup selection in this controller, but
-	# hand all large FASTA rewrites, category regrouping, QC finalization, sorting,
-	# compression, and publication to the independently scheduled tree job.
+	# Add each outgroup and queue its tree immediately; later reference batches
+	# are not prepared until every MGS in the current batch has been handled.
+	if (!$epaOnlyRetry && $requiresOutgroupReference
+			&& !$outgroupReferenceReady{$MGS}) {
+		my $batchLimit = $outgroupReferenceBatchCount
+			? $laterOutgroupReferenceBatchSize : $firstOutgroupReferenceBatchSize;
+		my @referenceBatch;
+		for (my $batchIndex = $lcnt;
+				$batchIndex < @specis && @referenceBatch < $batchLimit;
+				$batchIndex++) {
+			my $batchMGS = $specis[$batchIndex];
+			next if exists($MGSepaOnlyRetry{$batchMGS});
+			next unless $fullTreeCandidate{$batchMGS};
+			next if $outgroupReferenceReady{$batchMGS};
+			push @referenceBatch, $batchMGS;
+		}
+		@referenceBatch = ($MGS) unless @referenceBatch;
+		$initializeOutgroupReferences->(\@referenceBatch);
+		$outgroupReferenceReady{$_} = 1 for @referenceBatch;
+		print "Completed outgroup-reference batch $outgroupReferenceBatchCount; "
+			."resuming per-MGS outgroup addition and immediate tree submission; global elapsed "
+			.timeNice(time - $^T)."\n";
+	}
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
 	if ($epaOnlyRetry) {
 		$inputReady = 1;

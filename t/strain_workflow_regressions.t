@@ -176,7 +176,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1.18;/,
+like($strain, qr/my \$version = 1.19;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats/s,
@@ -283,6 +283,15 @@ like($directTreeResume,
 like($strain,
 	qr/my \$requiresOutgroupReference = \$runPartI \|\| \$CatNotPrepped \|\| \$repairCAT.*?my \$initializeOutgroupReferences = sub.*?unless \(\$requiresOutgroupReference.*?readFasta\(\$refFAA.*?readFasta\(\$refFNA/s,
 	'tree-only resumes load reference FASTA catalogues only for input regeneration or repair');
+like($strain,
+	qr/my \$firstOutgroupReferenceBatchSize = 32;.*?my \$laterOutgroupReferenceBatchSize = 256;.*?splice \@specis.*?\$fullTreeInputsInitialized = 1;.*?if \(!\$epaOnlyRetry && \$requiresOutgroupReference.*?\$initializeOutgroupReferences->\(\\\@referenceBatch\).*?addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?push \@pendingTreeJobs/s,
+	'full-tree references are prepared in bounded batches immediately before progressive add-outgroup and submission');
+unlike($strain,
+	qr/\$initializeOutgroupReferences->\(\\\@fullTreeCandidates\)/,
+	'full-tree sizing no longer triggers a catalogue-wide outgroup barrier');
+like($strain,
+	qr/Loaded \$batchLabel gene map.*?Indexed candidate loci.*?resolving exact reference IDs/s,
+	'outgroup reference map construction reports progress around its formerly silent stages');
 unlike($strain, qr/nonEpaTreeAbsences/,
 	'a missing final tree no longer makes reference catalogue loading mandatory');
 like($strain,
