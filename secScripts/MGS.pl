@@ -884,15 +884,15 @@ if ($doSubmit) {
 		&& -s "$outD/Annotation/Abundance/MGS.matL7.txt";
 }
 
-# Visualization needs the abundance matrix, unlike tree inference itself.
-# Submit it only now, and depend on a newly launched tree when necessary.
-if (!$betweenTreeSkipped && !-s $treePdf) {
+my $visualizationMissing = !-s $treePdf;
+if (!$betweenTreeSkipped && $visualizationMissing) {
 	my $treeAbundance = "$outD/Annotation/Abundance/MGS.matL7.txt";
 	if (!$doSubmit) {
-		print "Dry run: between-MGS tree visualization was not submitted.\n";
+		print "Dry run: between-MGS visualization was not submitted.\n";
 	} else {
 		die "Cannot visualize between-MGS tree without abundance matrix: $treeAbundance\n"
 			unless -s $treeAbundance;
+		printL "Between-MGS visualization is absent; submitting a replacement job.\n";
 		my $vizTree = getProgPaths("vizBtwPhylo_R");
 		my $vizCmd = "$vizTree $treeAbundance $iniTree $treePdf\n";
 		$vizCmd .= "test -s $treePdf\n";
@@ -905,6 +905,8 @@ if (!$betweenTreeSkipped && !-s $treePdf) {
 			. ($treedep ne "" ? " after tree job $treedep" : "") . "\n";
 	}
 }
+
+
 
 
 

@@ -316,7 +316,7 @@ if (!-s $treeFile || !$broadLocusRetentionCurrent){
 	print "Creating phylogeny for found specI's//\n";
 	$cmd .= "$bts -aa $btout/all.faa -smplSep '\\$SaSe' -cats $btout/all.cats "
 		. "-outD $btout -runIQtree 1 -runFastTree 0 -runRaxMLng 0 -cores $numCores "
-		. "-AAtree 1 -bootstrap 1000 -NTfiltCount 3000 -NTfilt 0.5 "
+		. "-AAtree 1 -bootstrap 1000 -NTfiltCount 3000 -relativeNTFraction 0.5 "
 		. "-NTfiltPerGene 0.4 -GenesPerSpecies 0.3 -fracMaxGenes90pct 0 "
 		. "-postAlignmentLocusQC 0 "
 		. "-MSAprogram $MSAprog "
