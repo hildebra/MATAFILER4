@@ -179,15 +179,25 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1.20;/,
+like($strain, qr/my \$version = 1.21;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats/s,
 	'population genetics forces retention of per-locus MSAs and forwards its enabled state to strainwithin2');
 like($strain, qr/Retain the Phase-I locus map.*?second catalogue-wide gene2tax scan.*?\$SIgenes and \$COGprios are reused/s,
 	'Phase II reuses the Phase-I selected gene map rather than clearing and rebuilding it');
-like($strain, qr/Streaming \$refNameL outgroup references.*?no FASTA index or outgroup cache.*?readFasta\(\$refFAA, 1, "\\\\s", \$Gene2COG_OG,.*?readFasta\(\$refFNA, 1, "\\\\s", \$Gene2COG_OG,/s,
-	'outgroup references are selected with sequential FNA/FAA streaming rather than indexed cache extraction');
+like($strain,
+	qr/Preparing core-first exact outgroup-reference demands.*?my %broadCOG = map.*?\$cogTaxa\{\$_\} >= \$broadMinimumTaxa.*?exists\(\$preferredCoreGeneSet->\{\$gene\}\).*?readFasta\(\$refFAA, 1, "\\\\s", \\%requiredAA,.*?readFasta\(\$refFNA, 1, "\\\\s", \\%requiredNT,/s,
+	'outgroup references use a core-first, broad-fallback demand manifest and stream only exact requested FNA/FAA records');
+like($strain,
+	qr/my \$outgroupCoreMinLoci = 0;.*?"outgroupCoreMinLoci=i".*?\$outgroupCoreMinLoci = int\(\$treeLocusBudget \* 0\.20 \+ 0\.999999\).*?if \$outgroupCoreMinLoci == 0;.*?\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$MGStoolowGsThr/s,
+	'the outgroup floor defaults to 20% of the final-tree locus budget and is enforced per MGS');
+like($strain,
+	qr/my \$outgroupReferenceGeneCap = 2500;.*?\(\$candidateSIgenes, \$candidateGene2COG.*?readGene2tax\(.*?\$outgroupReferenceGeneCap.*?my \$addCandidate = sub.*?return if \$retainedForMGS >= \$outgroupReferenceGeneCap/s,
+	'candidate reference maps use a generous 2,500-gene-per-outgroup-MGS cap while prioritizing the acceptance demand');
+like($strain,
+	qr/&& exists\(\$PreferredOutgroupGene.*?&& \(\$broadCOG/s,
+	'an exact Mosaic link is usable only for a broadly available or preferred-core locus');
 unlike($strain, qr/prepareSelectiveOutgroupReferenceCache|outgroupReferenceCacheActive|outgroup_reference_cache/,
 	'the Phase II selective outgroup cache and its index lifecycle are absent');
 like($strain, qr/sub outgroupRequirementLoci.*?preparedOutgroupLog.*?CATstdof\.tmp/s,
@@ -287,7 +297,7 @@ like($strain,
 	qr/my \$requiresOutgroupReference = \$runPartI \|\| \$CatNotPrepped \|\| \$repairCAT.*?my \$initializeOutgroupReferences = sub.*?unless \(\$requiresOutgroupReference.*?readFasta\(\$refFAA.*?readFasta\(\$refFNA/s,
 	'tree-only resumes load reference FASTA catalogues only for input regeneration or repair');
 like($strain,
-	qr/my \$outgroupReferenceInitialized = 0;.*?Streaming \$refNameL outgroup references.*?mode=streaming.*?\$initializeOutgroupReferences->\(\\\@fullTreeCandidates\).*?addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?push \@pendingTreeJobs/s,
+	qr/my \$outgroupReferenceInitialized = 0;.*?Preparing core-first exact outgroup-reference demands.*?mode=core_first_streaming.*?\$initializeOutgroupReferences->\(\\\@fullTreeCandidates\).*?addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?push \@pendingTreeJobs/s,
 	'full-tree references stream once from the complete actionable set before normal individual overlay and job submission');
 like($strain,
 	qr/outgroup candidate discovery.*?outgroup protein FASTA streaming.*?outgroup nucleotide FASTA streaming/s,
@@ -432,8 +442,8 @@ like($strain,
 	qr/\$multiSmpl > 2 && \$ngenes >= \$MGStoolowGsThr.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?tree_input_repair\.queue\.tsv.*?no catalogue-wide abort was triggered/s,
 	'insufficient tree inputs are terminally marked while incomplete triplets enter a persistent repair queue');
 like($strain,
-	qr/last if \$represented >= \$MGStoolowGsThr.*?if \(\$represented < \$MGStoolowGsThr\)/s,
-	'outgroup and tree eligibility share the configured eight-locus default');
+	qr/\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$MGStoolowGsThr.*?last if \$represented >= \$minimumOutgroupLoci.*?if \(\$represented < \$minimumOutgroupLoci\)/s,
+	'outgroup acceptance uses the per-MGS core/broad demand floor rather than the generic eight-locus minimum');
 like($strain,
 	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
 	'split extraction workers inherit the missing-input MGS subset');
