@@ -39,6 +39,25 @@ like(
 	qr/bioconda::bioconductor-ggtree=3\.14/,
 	'the active MF4 R environment installs the R 4.4-compatible ggtree release',
 );
+my $mf4_environment_path = File::Spec->catfile($Bin, '..', 'helpers', 'install', 'MF4.yml');
+open my $mf4_environment_fh, '<', $mf4_environment_path or die $!;
+my $mf4_environment = do { local $/; <$mf4_environment_fh> };
+close $mf4_environment_fh;
+like(
+	$mf4_environment,
+	qr/^\s*-\s+wget=1\.25\.0\s*$/m,
+	'the base MF4 environment installs wget for archive metadata and files',
+);
+like(
+	$mf4_environment,
+	qr/^\s*-\s+bioconda::sra-tools>=3\.2\s*$/m,
+	'the base MF4 environment installs the NCBI SRA Toolkit',
+);
+like(
+	$mf4_environment,
+	qr/^\s*-\s+pigz=2\.8\s*$/m,
+	'the base MF4 environment installs the preferred FASTQ compressor',
+);
 my $installer_path = File::Spec->catfile($Bin, '..', 'helpers', 'install', 'installer.sh');
 open my $installer_fh, '<', $installer_path or die $!;
 my $installer = do { local $/; <$installer_fh> };
@@ -47,6 +66,11 @@ like(
 	$installer,
 	qr/run -n MF4_R Rscript --vanilla -e.*?library\(ggtree\)/s,
 	'the installer verifies that ggtree loads in MF4_R',
+);
+like(
+	$installer,
+	qr/verify_environment_tools MF4.*?wget pigz prefetch fasterq-dump vdb-validate/s,
+	'the installer verifies every ENA/SRA downloader command in the base MF4 environment',
 );
 my $phylo_tools_path = File::Spec->catfile($Bin, '..', 'Mods', 'phyloTools.pm');
 open my $phylo_tools_fh, '<', $phylo_tools_path or die $!;

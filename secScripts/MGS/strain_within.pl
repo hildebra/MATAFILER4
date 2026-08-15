@@ -83,6 +83,7 @@ sub preparedOutgroupLog {
 sub addOutgroup2MGS;
 sub writeTooFewMarker;
 sub treeOutgroupCandidates;
+sub loadTreeOutgroupCandidates;
 sub writeNoRecoverableLociMarker;
 sub recordValidatedEmptyExtractions;
 sub validateTreeInputResolution;
@@ -1265,6 +1266,7 @@ my $requiresOutgroupReference = $runPartI || $CatNotPrepped || $repairCAT
 	|| $deepRepair || $redoSubmissionData;
 my %outgroupEligibleLoci;
 my %outgroupCatalogueMGS;
+my $TreeOutgroupCandidatesBulkLoaded = 0;
 my $outgroupReferenceInitialized = 0;
 my %outgroupDemandLoci;
 my %outgroupDemandMinimum;
@@ -1282,6 +1284,7 @@ my $initializeOutgroupReferences = sub {
 	}
 	my (%candidateOutgroupsByMGS, %demandCogsByOutgroup, %eligibleCogsByOutgroup);
 	my $candidateStarted = time;
+	loadTreeOutgroupCandidates($targetMGS) if length($treeFile);
 	my $candidateMGS = 0;
 	my $nextCandidateProgress = time + 60;
 	for my $MGS (@{$targetMGS}) {
@@ -2478,11 +2481,59 @@ sub outgroupGeneForLocus {
 	return $outgroupGeneCache{$cache_key} = $best_gene;
 }
 
+sub loadTreeOutgroupCandidates {
+	my ($targetMGS) = @_;
+	return 1 if $TreeOutgroupCandidatesBulkLoaded;
+	return 1 unless defined($treeFile) && length($treeFile) && -e $treeFile;
+	my %wanted = map { $_ => 1 } @{$targetMGS || []};
+	return 1 unless keys %wanted;
+	my $started = time;
+	my $neiTree = getProgPaths("neighborTree");
+	my $call = "$neiTree ".shellQuote($treeFile)." --all";
+	print "Discovering tree-neighbour candidates for ".scalar(keys %wanted)
+		." actionable MGS in one R call; global elapsed ".timeNice(time - $^T)."\n";
+	open my $bulk, "$call |"
+		or do {
+			limitedWarn('bulk outgroup lookup command failures',
+				"Can't start bulk tree-neighbour lookup $call; falling back to individual lookups\n");
+			return 0;
+		};
+	my ($lines, $loaded) = (0, 0);
+	while (my $line = <$bulk>) {
+		$lines++;
+		$line =~ s/[\r\n]+\z//;
+		my ($MGS, $candidateText) = split /\t/, $line, 2;
+		next unless defined($MGS) && exists($wanted{$MGS});
+		my %seen;
+		my @candidates = grep {
+			/\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/ && !$seen{$_}++
+		} split /\s+/, ($candidateText // '');
+		$TreeOutgroupCandidates{$MGS} = \@candidates;
+		$loaded++;
+	}
+	my $bulkOk = close $bulk;
+	unless ($bulkOk) {
+		delete $TreeOutgroupCandidates{$_} for keys %wanted;
+		limitedWarn('bulk outgroup lookup command failures',
+			"Bulk tree-neighbour lookup failed for $treeFile; falling back to individual lookups\n");
+		return 0;
+	}
+	$TreeOutgroupCandidates{$_} = [] for grep {
+		!exists($TreeOutgroupCandidates{$_})
+	} keys %wanted;
+	$TreeOutgroupCandidatesBulkLoaded = 1;
+	print "Loaded bulk tree-neighbour candidates for $loaded/".scalar(keys %wanted)
+		." actionable MGS from $lines tree rows in ".timeNice(time - $started)."\n";
+	return 1;
+}
+
 sub treeOutgroupCandidates {
 	my ($MGS) = @_;
 	return @{$TreeOutgroupCandidates{$MGS}}
 		if exists($TreeOutgroupCandidates{$MGS});
 	my @candidates;
+	# A failed bulk call retains the previous single-MGS lookup as a resilience
+	# fallback. Successful bulk loading never starts one process per MGS.
 	if (defined($treeFile) && length($treeFile) && -e $treeFile) {
 		my $neiTree = getProgPaths("neighborTree");
 		my $call = "$neiTree ".shellQuote($treeFile)." ".shellQuote($MGS);

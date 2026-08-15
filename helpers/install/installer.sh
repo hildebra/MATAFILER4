@@ -141,6 +141,27 @@ ensure_environment() {
 	fi
 }
 
+verify_environment_tools() {
+	local environment=$1
+	local definition=$2
+	local purpose=$3
+	shift 3
+
+	local tool
+	local -a missing=()
+	for tool in "$@"; do
+		if ! "$MAMBA_E" run -n "$environment" "$tool" --version >/dev/null 2>&1; then
+			missing+=("$tool")
+		fi
+	done
+
+	if ((${#missing[@]})); then
+		die "$purpose tools are missing from $environment after its Conda update: ${missing[*]}. Check $definition and rerun the installer."
+	fi
+
+	echo "Verified $purpose tools in $environment: $*"
+}
+
 ensure_optional_environment() {
 	local name=$1
 	local definition=$2
@@ -210,6 +231,8 @@ export PIP_USER=false
 export PIP_NO_CACHE_DIR=1
 
 ensure_environment MF4 "$INSTdir/MF4.yml"
+verify_environment_tools MF4 "$INSTdir/MF4.yml" "ENA/SRA archive downloads" \
+	wget pigz prefetch fasterq-dump vdb-validate
 
 if "$MAMBA_E" run -n MF4 hostile --help >/dev/null 2>&1; then
 	echo "Installing/updating the Hostile human reference database"

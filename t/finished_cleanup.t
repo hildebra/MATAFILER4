@@ -50,6 +50,8 @@ sub cleaner_command {
 		if $args{assembly_path_file};
 	push @command, ('--remove-alignment', $args{remove_alignment})
 		if $args{remove_alignment};
+	push @command, ('--download-temp', $args{download_temp})
+		if $args{download_temp};
 	push @command, @{$args{requirements} || []};
 	return @command;
 }
@@ -209,6 +211,28 @@ ok(!-e File::Spec->catfile($profile_mapping, "$profile_sample-smd.bam.bai"),
 	'assembly-independent cleanup removes sample-owned mapping indexes');
 ok(!-e File::Spec->catfile($profile_log, "$profile_sample.0.bed"),
 	'assembly-independent cleanup removes stale SNP region files');
+
+
+my $download_sample = 'download-retained';
+my $download_mapping = File::Spec->catdir($output, $download_sample, 'mapping');
+my $download_log = File::Spec->catdir($output, $download_sample, 'LOGandSUB', 'SNP');
+my $download_temp = File::Spec->catdir($scratch, $download_sample);
+my $download_dir = File::Spec->catdir($download_temp, 'accession_download');
+make_path($download_mapping, $download_log, $download_dir);
+write_file(File::Spec->catfile($download_dir, 'SRR1_1.fastq.gz'), 'archive reads');
+write_file(File::Spec->catfile($download_temp, 'filtered.1.fq.gz'), 'retained debug reads');
+is(run_cleaner(
+	sample => $download_sample, members => [$download_sample],
+	mapping_dir => $download_mapping,
+	snp_log_dir => $download_log,
+	sample_temp => $download_temp,
+	download_temp => $download_dir,
+	remove_temporary => 0,
+	no_assembly => 1,
+), 0, 'accession cleanup succeeds while general scratch retention is enabled');
+ok(!-d $download_dir, 'validated archive downloads are removed after sample completion');
+ok(-s File::Spec->catfile($download_temp, 'filtered.1.fq.gz'),
+	'non-download scratch remains available under --no-remove-temporary');
 
 my $scratch_alias = File::Spec->catdir($root, 'scratch-alias');
 symlink($scratch, $scratch_alias) or die "Cannot create scratch alias: $!";

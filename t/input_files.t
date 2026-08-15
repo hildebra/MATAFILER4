@@ -174,6 +174,55 @@ is_deeply(
 	'BAM-only primary input is discovered from its sample prefix',
 );
 
+
+my $accession_map_file = "$tmp/accession_only.map";
+open(my $accession_map_fh, '>', $accession_map_file)
+	or die "Cannot create map: $!";
+print {$accession_map_fh} join("\t", '#SmplID', qw(ENAdownload SeqTech)), "\n";
+print {$accession_map_fh} "#OutPath\t$out_dir\n#RunID\taccession_run\n";
+print {$accession_map_fh} join("\t", 'Public1', 'ERR123456', ''), "\n";
+close($accession_map_fh);
+my ($accession_map) = readMap($accession_map_file, -1, {}, {}, 0);
+is($accession_map->{Public1}{dir}, '', 'accession-only rows have no Path designation');
+is($accession_map->{Public1}{prefix}, '', 'accession-only rows have no SmplPrefix designation');
+is($accession_map->{Public1}{rddir}, '', 'archive scratch is not represented as a map input path');
+ok($accession_map->{Public1}{hasPrimaryRds}, 'an ENA accession registers primary reads');
+is($accession_map->{Public1}{SeqTech}, 'ill', 'empty archive SeqTech defaults to illumina');
+is($accession_map->{Public1}{SeqTechDeclared}, '', 'default technology remains distinguishable from a declaration');
+like($accession_map->{Public1}{wrdir}, qr{/Public1/$},
+	'accession output is keyed by SmplID even without a local input path');
+
+my $sra_map_file = "$tmp/sra_only.map";
+open(my $sra_map_fh, '>', $sra_map_file) or die "Cannot create map: $!";
+print {$sra_map_fh} join("\t", '#SmplID', qw(SRAdownload SeqTech)), "\n";
+print {$sra_map_fh} "#OutPath\t$out_dir\n#RunID\tsra_run\n";
+print {$sra_map_fh} join("\t", 'Public2', 'SRR123456', 'ONT'), "\n";
+close($sra_map_fh);
+my ($sra_map) = readMap($sra_map_file, -1, {}, {}, 0);
+is($sra_map->{Public2}{SeqTech}, 'ONT',
+	'an explicit sequencing technology is accepted for an accession-only row');
+ok($sra_map->{Public2}{hasPrimaryRds}, 'an SRA accession registers primary reads');
+
+my $mixed_source_map = "$tmp/mixed_source.map";
+open(my $mixed_source_fh, '>', $mixed_source_map) or die "Cannot create map: $!";
+print {$mixed_source_fh} join("\t", '#SmplID', qw(Path ENAdownload)), "\n";
+print {$mixed_source_fh} "#DirPath\t$tmp\n#OutPath\t$out_dir\n#RunID\tmixed_run\n";
+print {$mixed_source_fh} join("\t", 'InvalidRemote', 'reads', 'ERR123456'), "\n";
+close($mixed_source_fh);
+eval { readMap($mixed_source_map, -1, {}, {}, 0) };
+like($@, qr/archive download ID and a local Path\/SmplPrefix/,
+	'accession-backed rows cannot also select local primary input');
+
+my $double_archive_map = "$tmp/double_archive.map";
+open(my $double_archive_fh, '>', $double_archive_map) or die "Cannot create map: $!";
+print {$double_archive_fh} join("\t", '#SmplID', qw(ENAdownload SRAdownload)), "\n";
+print {$double_archive_fh} "#OutPath\t$out_dir\n#RunID\tdouble_run\n";
+print {$double_archive_fh} join("\t", 'InvalidProvider', 'ERR123456', 'SRR123456'), "\n";
+close($double_archive_fh);
+eval { readMap($double_archive_map, -1, {}, {}, 0) };
+like($@, qr/defines both ENAdownload and SRAdownload/,
+	'a sample must choose one archive provider');
+
 my %assembly_groups = (groupA => { CleanSeqs => {}, RawSeqs => {}, InputOrder => [] });
 my $raw_b = {
 	pa1 => ['B.1.fq.gz'], pa2 => ['B.2.fq.gz'], pas => [], libInfo => ['B'], seqTech => 'ill',

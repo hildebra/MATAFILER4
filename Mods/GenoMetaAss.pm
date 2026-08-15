@@ -1820,8 +1820,13 @@ sub readMap{
 			#die "MAP: $AssGroupCol\n";
 			#die "Only \"Path\" or \"SmplPrefix\" can be defined in mapping file. Both is not supported.\n" if ($dirCol != -1 && $SmplPrefixCol != -1);
 			die "Could not find \"#SmplID\" in input map\n" unless($smplCol> -1);
-			die "Expected to find at least \"SmplPrefix\" or \"Path\" as column headers in .map\n" if ($dirCol == -1 && $SmplPrefixCol == -1);
-			die "Either \"SmplPrefix\" or \"Path\" has to be second column in .map\n" unless ($dirCol == 1 || $SmplPrefixCol == 1);
+			die "Expected a primary-input column (\"SmplPrefix\", \"Path\", \"ENAdownload\", or \"SRAdownload\") in .map\n"
+				if ($dirCol == -1 && $SmplPrefixCol == -1
+					&& $ENA_DLcol == -1 && $SRA_DLcol == -1);
+			# Accession-only maps may omit both local-location columns.
+			die "Either \"SmplPrefix\" or \"Path\" has to be second column in .map\n"
+				if (($dirCol >= 0 || $SmplPrefixCol >= 0)
+					&& $dirCol != 1 && $SmplPrefixCol != 1);
 			next;
 		} #maybe later check for col labels etc
 		# Treat omitted trailing columns like explicitly empty tab-separated fields.
@@ -1832,12 +1837,17 @@ sub readMap{
 		$Scnt++;
 		#die "1 $GlbTmpD 2 $NodeTmpD map\n";
 		#die $spl[0]." ".$spl[1]."\n";
-		die "inPath has to be set in mapping file!\n" if ($dir2dirs eq "");
 		#die "$dir2out\n";
 		die "Provide tag \"#OutPath\" in map!\n" if ($dir2out eq "");
 		die "Provide tag \"#RunID\" in map!\n" if ($baseID eq "");
-		die "Provide tag \"#DirPath\" in map!\n" if ($dir2dirs eq "");
 		my $curSmp = $spl[$smplCol];
+		my $enaDownload = $ENA_DLcol >= 0 ? $spl[$ENA_DLcol] : "";
+		my $sraDownload = $SRA_DLcol >= 0 ? $spl[$SRA_DLcol] : "";
+		$enaDownload =~ s/^\s+|\s+$//g;
+		$sraDownload =~ s/^\s+|\s+$//g;
+		die "Sample $curSmp defines both ENAdownload and SRAdownload; select exactly one archive provider\n"
+			if ($enaDownload ne "" && $sraDownload ne "");
+		my $downloadUsed = ($enaDownload ne "" || $sraDownload ne "") ? 1 : 0;
 		
 		die"Error in .map, found empty sample id on line $cnt,: \"$line\"\n" if ($curSmp eq "");
 		my $altCurSmp = "";
@@ -1857,6 +1867,8 @@ sub readMap{
 		my $cdir = ""; 
 		#read in the path to sample
 		if ($dirCol >= 0 && @spl > $dirCol && $spl[$dirCol] ne ""){
+			die "Provide tag \"#DirPath\" for local Path input in sample $curSmp\n"
+				if ($dir2dirs eq "");
 			$cdir = resolve_path($spl[$dirCol]);
 			$samplePathUsed=1;
 			my $input_dir = _join_path($dir2dirs, $cdir);
@@ -1865,11 +1877,17 @@ sub readMap{
 		}
 		my $cdir2= $cdir;
 		$ret{$curSmp}{dir} = $cdir;#this one should stay without a tag
-		$ret{$curSmp}{rddir} = _join_path($dir2dirs, $cdir);
+		$ret{$curSmp}{rddir} = $cdir ne "" ? _join_path($dir2dirs, $cdir) : "";
 		$ret{$curSmp}{clip} = $illuminaClip;
-		$ret{$curSmp}{rddir} .="/" unless ($ret{$curSmp}{rddir} =~ m/\/$/);
+		$ret{$curSmp}{rddir} .="/"
+			if ($ret{$curSmp}{rddir} ne "" && $ret{$curSmp}{rddir} !~ m/\/$/);
 		#die "$ret{$curSmp}{rddir} $dirCol $cdir $curSmp\n $smplCol $dirCol\n";
 		if ($SmplPrefixCol>=0 && @spl > $SmplPrefixCol && $spl[$SmplPrefixCol] ne ""){
+			die "Provide tag \"#DirPath\" for local SmplPrefix input in sample $curSmp\n"
+				if ($dir2dirs eq "");
+			$ret{$curSmp}{rddir} = $dir2dirs;
+			$ret{$curSmp}{rddir} .= "/"
+				if ($ret{$curSmp}{rddir} ne "" && $ret{$curSmp}{rddir} !~ m/\/$/);
 			$cdir2 = $spl[$SmplPrefixCol];
 			$ret{$curSmp}{prefix} = $cdir2;
 			if ($DOWARN && exists($trackPrefixs{"$dir2dirs/$cdir2"}) ){ die "Warning: Found the sample path \"$cdir2\" more than once. This would lead to using reads twice, aborting.\n $warnDeactivateMsg";}
@@ -1878,14 +1896,20 @@ sub readMap{
 		} else {
 			$ret{$curSmp}{prefix} = "";
 		}
-		$cdir2.="/" unless ($cdir2 =~ m/\/$/);
+		$cdir2.="/" if ($cdir2 ne "" && $cdir2 !~ m/\/$/);
 		
 		#basic check that no twice usage..
 		if ($DOWARN && $smplPrefixUsed && $samplePathUsed){die"Warning: in mapping file both \"SmplPrefix\" and \"Path\" are set for sample $curSmp!\nThis is not supported\n$warnDeactivateMsg";}
 
 		
+		die "Sample $curSmp uses an archive download ID and a local Path/SmplPrefix; accession samples must leave local input locations empty\n"
+			if ($downloadUsed && ($smplPrefixUsed || $samplePathUsed));
 		#old MATAFILER versions, deprecated in MATAFILER
-		if ($folderStrClassical== -1){
+		if ($downloadUsed){
+			# Archive-backed samples have no local path from which a legacy output
+			# directory can be derived. Their durable output is always keyed by SmplID.
+			$ret{$curSmp}{wrdir} = $dir2out.$curSmp."/";
+		} elsif ($folderStrClassical== -1){
 			if (-d  $dir2out.$cdir2 && !-d $dir2out.$curSmp){
 				if ($infFoldClass==0){die "readMap: Inferring old/new folder structure failed, as both folders seem to be valid\n";}
 				$ret{$curSmp}{wrdir} = $dir2out.$cdir2;
@@ -1908,14 +1932,19 @@ sub readMap{
 		$ret{$curSmp}{assFinSmpl} = $curSmp;
 		#ONT,PB,proto,miSeq,GAII etc
 		if ($SeqTech >= 0) { 
-			my $RT=$spl[$SeqTech];checkSeqTech($RT);$ret{$curSmp}{SeqTech} = $RT; 
-			if ($RT ne "" && $ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq ""){
+			my $declaredRT=$spl[$SeqTech];
+			my $RT = ($downloadUsed && $declaredRT eq "") ? "ill" : $declaredRT;
+			checkSeqTech($RT);$ret{$curSmp}{SeqTech} = $RT;
+			$ret{$curSmp}{SeqTechDeclared} = $declaredRT;
+			if ($RT ne "" && $ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq "" && !$downloadUsed){
 				die "For sample $curSmp, found read tech, but no primary input file location given. This can lead to undescribed behaviour, please remove readTech entry (set to \"\"), before proceeding.\n";
 			}
-		} else {$ret{$curSmp}{SeqTech} = "ill";} #set by default to illumina
+		} else {$ret{$curSmp}{SeqTech} = "ill";$ret{$curSmp}{SeqTechDeclared} = "";} #set by default to illumina
 		if ($SeqTechS >= 0) { my $RT=$spl[$SeqTechS];checkSeqTech($RT);$ret{$curSmp}{SeqTechSingl} = $RT; } else {$ret{$curSmp}{SeqTechSingl} = "";}
 		
-		$ret{$curSmp}{hasPrimaryRds}= 1;$ret{$curSmp}{hasPrimaryRds} = 0 if ($ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq "");
+		$ret{$curSmp}{hasPrimaryRds}= 1;
+		$ret{$curSmp}{hasPrimaryRds} = 0
+			if ($ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq "" && !$downloadUsed);
 		
 		if ($rLenCol >= 0){$ret{$curSmp}{readLength} = $spl[$rLenCol];} else {$ret{$curSmp}{readLength} = 0;}
 		if ($ExcludeAssemble >= 0){$ret{$curSmp}{ExcludeAssem} = $spl[$ExcludeAssemble];} else {$ret{$curSmp}{ExcludeAssem} = 0;}
@@ -1955,8 +1984,8 @@ sub readMap{
 		if ($EstCovCol >= 0){$ret{$curSmp}{DoEstCoverage} = $spl[$EstCovCol];} else {$ret{$curSmp}{DoEstCoverage} = 0;}
 		
 		#download samples? this is the ENA/SRA ID
-		if ($ENA_DLcol >= 0){$ret{$curSmp}{ENA_download} = $spl[$ENA_DLcol];} else {$ret{$curSmp}{ENA_download} = "";}
-		if ($SRA_DLcol >= 0){$ret{$curSmp}{SRA_download} = $spl[$SRA_DLcol];} else {$ret{$curSmp}{SRA_download} = "";}
+		$ret{$curSmp}{ENA_download} = $enaDownload;
+		$ret{$curSmp}{SRA_download} = $sraDownload;
 
 		#create artifical assmblgrp based on counts..
 		my $curAG = $Scnt;

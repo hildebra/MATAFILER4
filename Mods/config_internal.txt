@@ -15,6 +15,7 @@ clusterMAGs	[MFLRDir]/bin/./clusterMAGs
 vcf2fna	[MFLRDir]/bin/./vcf2fna
 consVCF_region_planner	perl [MFLRDir]/secScripts/SNP/plan_consensus_regions.pl
 finished_sample_cleanup	perl [MFLRDir]/secScripts/cleanup_finished_sample.pl
+ena_sra_downloader	perl [MFLRDir]/secScripts/fileManage/ENASRAdl.pl
 
 
 #elevated MF3 scripts (main routines)

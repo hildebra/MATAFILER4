@@ -71,6 +71,7 @@ is_deeply(
 my $strain = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 my $strain2 = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
 my $internal_config = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config_internal.txt'));
+my $neighbor_tree_r = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'R_scripts', 'neighborTree.R'));
 like($strain, qr/sub consensusInputState .*?\$nt_ready && \$aa_ready.*?return 'regenerate' if \$vcf_ready/s,
 	'consensus resume requires the paired NT and AA outputs and repairs from VCF');
 like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA,0,"\\\\s",\\%subG\)/s,
@@ -127,8 +128,11 @@ like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,
 like($strain, qr/\$nxtCmd \.= "-MGSphylo "\.shellQuote\(\$treeFile\).*?if \$treeFile ne ""/,
 	'postprocessing receives the source MGS tree for outgroup recovery');
 like($strain,
-	qr/sub treeOutgroupCandidates .*?my \$call = "\$neiTree ".shellQuote\(\$treeFile\).*?\$outgroup_text = `\$call`.*?trying catalogue-derived candidates/s,
-	'outgroup lookup delegates source-tree neighbor selection directly and retains its failure fallback');
+	qr/loadTreeOutgroupCandidates\(\$targetMGS\).*?sub loadTreeOutgroupCandidates .*?\Q--all\E.*?open my \$bulk.*?\$TreeOutgroupCandidatesBulkLoaded = 1.*?sub treeOutgroupCandidates .*?A failed bulk call.*?my \$call = "\$neiTree ".shellQuote\(\$treeFile\).*?trying catalogue-derived candidates/s,
+	'Phase II imports all source-tree neighbour candidates in one call and retains the individual lookup only as a failed-bulk fallback');
+like($neighbor_tree_r,
+	qr/identical\(target, "--all"\).*?ape::cophenetic\.phylo\(tree\).*?for \(tip in tree\$tip\.label\).*?cat\(tip, "\\t"/s,
+	'neighborTree bulk mode computes distances once and emits one tab-separated row per tree tip');
 like($strain2, qr/"MGSphylo=s"\s*=>\s*\\\$MGSphylo.*?sub resolveOutgroup .*?data\.log.*?treeCmd\.sh.*?MGSphylo/s,
 	'postprocessing preserves logged or saved outgroups and falls back to the source MGS tree');
 like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,

@@ -11,7 +11,9 @@ Use Linux line endings where possible. The parser removes general newline charac
 
 ## Minimal valid map
 
-The first row must be the header and must contain `#SmplID`. The second column must be either `Path` or `SmplPrefix`. Other recognised columns can appear in any order.
+The first row must be the header and must contain `#SmplID`. For local inputs,
+the second column must be either `Path` or `SmplPrefix`. Accession-only maps
+can use `ENAdownload` or `SRAdownload` without either local-location column.
 
 ```text
 #SmplID	Path	AssmblGrps	SeqTech
@@ -44,8 +46,8 @@ Older MATAFILER folder layouts can still be inferred or forced by legacy options
 |---|---|
 | The first data row is interpreted as the header. | Do not put comments or metadata above the header. |
 | The header must contain `#SmplID`. | The parser stops if it cannot find this column. |
-| The header must contain at least one of `Path` or `SmplPrefix`. | The parser stops if neither is present. |
-| Either `Path` or `SmplPrefix` must be the second column. | The parser stops otherwise. |
+| The header must contain at least one of `Path`, `SmplPrefix`, `ENAdownload`, or `SRAdownload`. | The parser stops if no primary-input column is present. |
+| If `Path` or `SmplPrefix` is present, one of them must be the second column. | Accession-only headers do not need a local-location column. |
 | Other recognised columns can be elsewhere. | Their position is detected by column name. |
 
 Recommended header patterns are therefore:
@@ -70,7 +72,7 @@ The following tags are parsed from lines beginning with `#` after the header. Th
 |---|---:|---|
 | `#OutPath` | yes | Base output directory. MATAFILER4 appends `#RunID` unless it is already present. |
 | `#RunID` | yes | Run identifier and output subdirectory name below `#OutPath`. |
-| `#DirPath` | yes | Base input directory for following sample rows. Can be repeated; each occurrence applies to subsequent samples until the next `#DirPath`. |
+| `#DirPath` | local inputs only | Base input directory for following local sample rows. It may be omitted by accession-only maps. |
 
 Example with two input locations:
 
@@ -104,8 +106,8 @@ Sample04	Sample04_dir	Subject02
 | Column | Required | Meaning | Notes |
 |---|---:|---|---|
 | `#SmplID` | yes | Unique sample identifier used throughout output directories, sequence headers, and matrices. | Must not be empty or duplicated. |
-| `Path` | conditional | Relative sample directory under the current `#DirPath`. | Use when each sample has its own directory. |
-| `SmplPrefix` | conditional | File prefix under the current `#DirPath`. | Use when several samples share one directory. |
+| `Path` | conditional | Relative sample directory under the current `#DirPath`. | Required for local directory inputs; omit for accession-only maps. |
+| `SmplPrefix` | conditional | File prefix under the current `#DirPath`. | Required for local prefix inputs; omit for accession-only maps. |
 | `SeqTech` | no | Sequencing technology for primary reads. | Recognised values: `ONT`, `PB`, `ill`, `hiSeq`, `454`, `SLR`, `proto`, `miSeq`, `AVITI`, `GAII`, `GAII_solexa`, or empty. `AVITI` selects the AVITI-specific SDM filtering configuration. |
 | `SeqTechSingl` | no | Sequencing technology for single-read input. | Same recognised values as `SeqTech`. |
 | `ReadLength` | no | Expected read length. | Usually autodetected; set only if required. |
@@ -119,10 +121,37 @@ Sample04	Sample04_dir	Subject02
 | `cut5PR2` | no | Number of bases to trim from the 5′ end of read 2. | Defaults to `0`. |
 | `firstXreadsRd` | no | Read only the first X reads for this sample. | Defaults to `0`, meaning no per-sample limit. |
 | `firstXreadsWr` | no | Write only the first X reads for this sample after processing. | Defaults to `0`, meaning no per-sample limit. |
-| `ENAdownload` | no | ENA accession or download identifier. | Parsed into the map object; used by download-aware workflows. |
-| `SRAdownload` | no | SRA accession or download identifier. | Parsed into the map object; used by download-aware workflows. |
+| `ENAdownload` | conditional | ENA run, sample, study, or project accession. | Downloads archive FASTQs from EBI and validates ENA byte counts, MD5 checksums, gzip streams, and FASTQ records. |
+| `SRAdownload` | conditional | SRA run, sample, study, or project accession. | Downloads through NCBI SRA Toolkit, validates the SRA object, converts to gzip FASTQ, and validates FASTQ records. |
 
-`Path` and `SmplPrefix` are alternative ways to locate primary reads. At least one of these columns must exist in the header, but each sample row should fill only one of them.
+`Path`, `SmplPrefix`, `ENAdownload`, and `SRAdownload` are alternative primary-input
+sources. Each sample row must use at most one source. An accession-only map can omit
+`#DirPath`, `Path`, and `SmplPrefix` entirely:
+
+```text
+#SmplID	ENAdownload	SeqTech
+#OutPath	/path/to/results
+#RunID	public_ena
+PublicGut1	ERR1234567
+```
+
+or, for NCBI:
+
+```text
+#SmplID	SRAdownload
+#OutPath	/path/to/results
+#RunID	public_sra
+PublicGut2	SRR12345678
+```
+
+Comma-, semicolon-, or whitespace-separated accessions in one download cell are
+treated as libraries of the same MATAFILER sample. Do not set both archive columns.
+`SeqTech` may be supplied explicitly. When it is empty or absent, MATAFILER maps the
+archive platform to `ONT`, `PB`, `454`, or `ill`; unavailable or unknown platform
+metadata defaults to `ill`. Downloads and NCBI conversion intermediates live below
+the sample's shared scratch directory. A durable `input_accession.json` provenance
+record remains in the sample output, while downloaded reads are deleted only through
+the finished-sample cleanup barrier.
 
 ## Sample-ID rules
 

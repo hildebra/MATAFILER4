@@ -24,6 +24,7 @@ GetOptions(
 	'mapping-dir=s'   => \$opt{mapping_dir},
 	'sample-temp=s'   => \$opt{sample_temp},
 	'scratch-root=s'  => \$opt{scratch_root},
+	'download-temp=s' => \$opt{download_temp},
 	'assembly=s'      => \$opt{assembly},
 	'assembly-path-file=s' => \$opt{assembly_path_file},
 	'assembly-dir=s'       => \$opt{assembly_dir},
@@ -177,6 +178,34 @@ if (defined($opt{remove_alignment}) && length($opt{remove_alignment})) {
 	my $alignment = prospective_absolute($opt{remove_alignment});
 	require_below($alignment, $allowed_root, 'removable alignment');
 	remove_files($alignment, "$alignment.crai", "$alignment.csi");
+}
+# Archive inputs have a stricter lifecycle than general debugging scratch:
+# remove them after terminal prerequisites pass even when --no-remove-temporary
+# retains cleaned reads and other intermediates.
+if (defined($opt{download_temp}) && length($opt{download_temp})) {
+	my $download_scratch_root = existing_absolute($opt{scratch_root}, 'scratch root');
+	my $download_sample_temp = prospective_absolute($opt{sample_temp});
+	require_below($download_sample_temp, $download_scratch_root,
+		'sample temporary directory');
+	my $download_temp = prospective_absolute($opt{download_temp});
+	require_below($download_temp, $download_scratch_root,
+		'accession download directory');
+	require_below($download_temp, $download_sample_temp,
+		'accession download directory');
+	if (-d $download_temp) {
+		my $removed = remove_tree($download_temp, {error => \my $errors});
+		if (@{$errors}) {
+			my @messages;
+			for my $entry (@{$errors}) {
+				my ($path, $message) = %{$entry};
+				push @messages, "$path: $message";
+			}
+			die "failed to remove accession download directory: "
+				.join('; ', @messages)."\n";
+		}
+		$deleted_count += $removed;
+		print "Removed accession download directory $download_temp\n" if $removed;
+	}
 }
 
 exit 0 unless $opt{remove_temporary};

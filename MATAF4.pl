@@ -19,6 +19,7 @@ use Cwd 'abs_path';
 use POSIX;
 use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 use Getopt::Long qw( GetOptions );
+use JSON::PP qw(decode_json);
 use List::Util qw(max sum);
 use Text::Wrap qw(wrap);
 use Text::ParseWords qw(shellwords);
@@ -130,6 +131,8 @@ sub runStateInspection;
 sub runAutomaticWorkflowPreflight;
 sub workflowStateOptions;
 sub sampleReadSet;
+sub sampleAccessionSource; sub loadSampleAccessionMetadata;
+sub downloadSampleAccession;
 sub discoverSampleInputs; sub populateInputSizesFast; sub spaceInAssGrp;
 sub sampleCompletionRequestSignature; sub sampleCompletionForcedInvalidation;
 sub sampleCompletionComponents; sub sampleStatisticsEvidence;
@@ -221,7 +224,9 @@ sub createConsSNPandSVs;
 #4.43: 8.8.26: add lightweight HPC startup checks, durable controller-stage
 #       diagnostics, and bounded retries for recovery-critical publication
 #       without additional sample scans or scheduler polling.
-my $MATFILER_ver = 4.43;
+#4.44: 15.8.26: support validated ENA and NCBI SRA accession downloads as
+#       scratch-resident sample inputs with archive provenance and safe cleanup.
+my $MATFILER_ver = 4.44;
 my $matafWorkflowActive = 0;
 my $matafWorkflowStage = 'startup';
 my $matafHeartbeatPath = '';
@@ -385,7 +390,10 @@ my @samples = @{$map{opt}{smpl_order}};
 if ($MFconfig{precheckInputDirs}) {
 	print "Prechecking input directories for all mapped samples...\n"
 		unless $MFconfig{silent};
-	populateInputSizesFast($_) for @samples;
+	for my $sample (@samples) {
+		my ($archiveProvider) = sampleAccessionSource($sample);
+		populateInputSizesFast($sample) if $archiveProvider eq '';
+	}
 }
 
 if ($MFconfig{inspectState}) {
@@ -488,6 +496,16 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#set up initial local paths for a given sample
 	my $dir2rd=""; my $curDir = "";
 	my $curOutDir = $map{$curSmpl}{wrdir};	
+	my $SmplName = $map{$curSmpl}{SmplID};
+	my $smplTmpDir = "$MFglobal{runTmpDirGlobal}$SmplName/";
+	my ($accessionProvider, $accessionID) = sampleAccessionSource($curSmpl);
+	my $accessionDownloadDir = $accessionProvider ne ''
+		? "$smplTmpDir/accession_download/" : '';
+	my $accessionMetadataFile = $accessionProvider ne ''
+		? "$curOutDir/input_accession.json" : '';
+	loadSampleAccessionMetadata($curSmpl, $accessionMetadataFile, $accessionDownloadDir)
+		if $accessionProvider ne '' && -s $accessionMetadataFile;
+
 	#key IDs for sample
 	my $cAssGrp = $curSmpl;my $cMapGrp = $map{$curSmpl}{MapGroup};
 	if ($map{$curSmpl}{AssGroup} ne "-1"){ $cAssGrp = $map{$curSmpl}{AssGroup};}
@@ -496,16 +514,22 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	#local flow control
 	#print "SMPL::$curSmpl\n";
-	$dir2rd = $map{$curSmpl}{dir};  $dir2rd = $map{$curSmpl}{prefix} if ($dir2rd eq "");
-	my $SmplName = $map{$curSmpl}{SmplID};
-	if ($dir2rd eq "" ){#very specific read dir..
-		if ($map{$curSmpl}{SupportReads} ne ""){
-			$curDir = "";	#$curOutDir = $map{$curSmpl}{wrdir};	#$curOutDir = "$baseOut$SmplName/";	
-		} else { die "Can;t find valid path for $SmplName\n";
-		}
-		$dir2rd = $SmplName;
+	if ($accessionProvider ne '') {
+		$dir2rd = "$accessionProvider:$accessionID";
+		$curDir = $accessionDownloadDir;
+		$map{$curSmpl}{rddir} = $accessionDownloadDir;
 	} else {
-		$curDir = $map{$curSmpl}{rddir};	
+		$dir2rd = $map{$curSmpl}{dir};
+		$dir2rd = $map{$curSmpl}{prefix} if ($dir2rd eq "");
+		if ($dir2rd eq "" ){#very specific read dir..
+			if ($map{$curSmpl}{SupportReads} ne ""){
+				$curDir = "";
+			} else { die "Can;t find valid path for $SmplName\n";
+			}
+			$dir2rd = $SmplName;
+		} else {
+			$curDir = $map{$curSmpl}{rddir};
+		}
 	}
 	
 	$baseOut = sample_base_output_dir($curOutDir, $curSmpl);
@@ -557,7 +581,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	print "\n======= $SmplName - $JNUM - $dir2rd =======\n" unless($MFconfig{silent});
 	
 	#set up dirs ------------------------------------------------------------------------------------
-	my $smplTmpDir = "$MFglobal{runTmpDirGlobal}$SmplName/"; #curTmpDir
 	my $nodeSpTmpD = "$runOptions{nodeTmpDir}/$SmplName";
 
 	my $finalCommAssDir = "$curOutDir/assemblies/metag/";
@@ -1395,6 +1418,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	$QSBoptHR->{LocationCheckStrg} = checkDrives(\@checkLocs);
 	
 	
+	if ($accessionProvider ne '') {
+		downloadSampleAccession(
+			$curSmpl, $accessionProvider, $accessionID,
+			$accessionDownloadDir, $accessionMetadataFile,
+		);
+	}
 
 
 
@@ -1419,10 +1448,6 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		$curUnzipDep = $unzipjobs[-($MFconfig{maxUnzpJobs})];#join(";",@last_n);
 	}
 	
-	if ($map{$curSmpl}{SRA_download} ne "" || $map{$curSmpl}{ENA_download} ne "") {
-		 #-> do downloads to tmp dir
-		 #function that downloads to tmp dir
-	}
 
 	
 	my ($jdep) =  #,$hrefSeqSet
@@ -2202,7 +2227,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			dependencies => $variantJobDep,
 		},
 	);
-	if ($MFconfig{rmScratchTmp} && !$MFopt{DoCalcD2s} && @sampleDeps) {
+	my $accessionOnlyCleanup = $accessionProvider ne '' && !$MFconfig{rmScratchTmp};
+	if ((($MFconfig{rmScratchTmp} && !$MFopt{DoCalcD2s}) || $accessionOnlyCleanup)
+			&& @sampleDeps) {
 		if ($cleanupBarrier->{ready}) {
 			my @cleanupDependencies = split /;/, normalise_job_dependencies(
 				\@sampleDeps, $cleanupBarrier->{dependencies},
@@ -2331,7 +2358,7 @@ sub sampleCompletionRequestSignature {
 		? @{$map{$sampleKey}{AG_members}} : ($sampleKey);
 	my @mapFields = qw(
 		SmplID dir rddir prefix AssGroup MapGroup ExcludeAssem hasPrimaryRds SupportReads
-		SeqTech SeqTechSingl
+		SeqTechDeclared SeqTechSingl ENA_download SRA_download
 	);
 	my %sampleDefinition = map {
 		my $key = $_;
@@ -2955,6 +2982,9 @@ sub finishedCleanupArguments {
 		($MFconfig{rmScratchTmp} ? '--remove-temporary' : '--no-remove-temporary'),
 		'--snp-log-dir', "$sampleLogDir/SNP",
 	);
+	my ($accessionProvider) = sampleAccessionSource($sampleKey);
+	push @arguments, ('--download-temp', "$sampleTemp/accession_download")
+		if $accessionProvider ne '';
 	push @arguments,
 		'--assembly', $assembly,
 		'--assembly-path-file', "$map{$sampleKey}{wrdir}/assemblies/metag/assembly.txt",
@@ -3498,6 +3528,101 @@ sub sampleReadSet {
 	return $map{$sample}{reads}{$phase};
 }
 
+sub sampleAccessionSource {
+	my ($sample) = @_;
+	my $ena = $map{$sample}{ENA_download} || '';
+	my $sra = $map{$sample}{SRA_download} || '';
+	die "Sample $sample defines both ENAdownload and SRAdownload\n"
+		if $ena ne '' && $sra ne '';
+	my ($provider, $value) = $ena ne '' ? ('ena', $ena)
+		: $sra ne '' ? ('sra', $sra) : ('', '');
+	return ('', '') if $provider eq '';
+	my @accessions = grep { length } split /[\s,;]+/, $value;
+	my %seen;
+	@accessions = grep { !$seen{$_}++ } @accessions;
+	return ($provider, join(',', @accessions));
+}
+
+sub loadSampleAccessionMetadata {
+	my ($sample, $metadataFile, $downloadDir) = @_;
+	my ($provider, $accession) = sampleAccessionSource($sample);
+	return 0 if $provider eq '' || !-s $metadataFile;
+	open my $fh, '<', $metadataFile
+		or do { warn "Cannot read accession metadata $metadataFile: $!\n"; return 0; };
+	local $/;
+	my $text = <$fh>;
+	close $fh;
+	my $metadata = eval { decode_json($text) };
+	if (ref($metadata) ne 'HASH'
+			|| ($metadata->{schema} || 0) != 1
+			|| ($metadata->{provider} || '') ne $provider
+			|| ($metadata->{accession} || '') ne $accession
+			|| ref($metadata->{files}) ne 'ARRAY'
+			|| !@{$metadata->{files}}) {
+		warn "Ignoring stale or invalid accession metadata for $sample: $metadataFile\n";
+		return 0;
+	}
+	my $totalBytes = $metadata->{total_bytes} || 0;
+	if ($totalBytes !~ /^\d+(?:\.\d+)?$/) {
+		warn "Ignoring accession metadata with an invalid byte count for $sample\n";
+		return 0;
+	}
+	my $ready = -d $downloadDir ? 1 : 0;
+	for my $file (@{$metadata->{files}}) {
+		my $filename = ref($file) eq 'HASH' ? ($file->{filename} || '') : '';
+		if ($filename eq '' || basename($filename) ne $filename
+				|| !-s File::Spec->catfile($downloadDir, $filename)) {
+			$ready = 0;
+			last;
+		}
+	}
+	my $declared = $map{$sample}{SeqTechDeclared} || '';
+	if ($declared eq '') {
+		my $inferred = $metadata->{seqtech} || 'ill';
+		my $valid = eval { checkSeqTech($inferred, "Archive metadata for $sample"); 1 };
+		if (!$valid) {
+			warn "Archive platform for $sample cannot be mapped to a MATAFILER SeqTech; using illumina\n";
+			$inferred = 'ill';
+		}
+		$map{$sample}{SeqTech} = $inferred;
+	}
+	$map{$sample}{accessionMetadata} = $metadata;
+	$map{$sample}{accessionDownloadReady} = $ready;
+	$map{$sample}{inputFileSizeMB} = $totalBytes / (1024 * 1024);
+	$map{$sample}{inputXFileSizeMB} = 0
+		unless exists $map{$sample}{inputXFileSizeMB};
+	return 1;
+}
+
+sub downloadSampleAccession {
+	my ($sample, $provider, $accession, $downloadDir, $metadataFile) = @_;
+	my @downloader = shellwords(getProgPaths("ena_sra_downloader"));
+	die "ENA/SRA downloader is not configured\n" unless @downloader;
+	make_path($downloadDir) unless -d $downloadDir;
+	print "Downloading and validating $provider accession $accession for $sample\n"
+		unless $MFconfig{silent};
+	my $status = system(
+		@downloader,
+		'--provider', $provider,
+		'--accession', $accession,
+		'--output-dir', $downloadDir,
+		'--metadata-out', $metadataFile,
+		'--threads', $MFopt{unzipCores},
+	);
+	if ($status != 0) {
+		my $detail = $status == -1 ? "could not execute: $!"
+			: ($status & 127) ? "signal ".($status & 127)
+			: "exit code ".($status >> 8);
+		die "Archive download failed for $sample ($provider:$accession; $detail); incomplete scratch files were retained for diagnosis\n";
+	}
+	delete $map{$sample}{inputDiscovery};
+	$map{$sample}{rddir} = $downloadDir;
+	die "Downloader did not publish valid metadata for $sample\n"
+		unless loadSampleAccessionMetadata($sample, $metadataFile, $downloadDir);
+	die "Downloader did not leave a complete validated FASTQ set for $sample\n"
+		unless $map{$sample}{accessionDownloadReady};
+}
+
 sub discoverSampleInputs {
 	my ($sample, $primaryDir) = @_;
 	$primaryDir = $map{$sample}{rddir} || "" unless defined($primaryDir);
@@ -3522,7 +3647,47 @@ sub discoverSampleInputs {
 		support_error => "",
 	};
 
-	if ($primaryDir ne "") {
+	my $accessionMetadata = $map{$sample}{accessionMetadata};
+	if (ref($accessionMetadata) eq 'HASH') {
+		$result->{primary_bytes} = 0 + ($accessionMetadata->{total_bytes} || 0);
+		if ($map{$sample}{accessionDownloadReady}) {
+			if (!-d $primaryDir) {
+				$result->{primary_error} = "Validated accession directory is missing: $primaryDir\n";
+				$result->{primary_missing_dir} = 1;
+			} else {
+				my %roleKey = (r1 => 'read1', r2 => 'read2', single => 'single');
+				for my $file (@{$accessionMetadata->{files} || []}) {
+					my $filename = $file->{filename} || '';
+					my $role = $file->{role} || '';
+					if ($filename eq '' || basename($filename) ne $filename
+							|| !exists($roleKey{$role})) {
+						$result->{primary_error} =
+							"Invalid accession FASTQ manifest entry for $sample\n";
+						last;
+					}
+					my $path = File::Spec->catfile($primaryDir, $filename);
+					my @stat = stat($path);
+					if (!@stat || $stat[7] == 0) {
+						$result->{primary_error} =
+							"Validated accession FASTQ is missing or empty: $path\n";
+						last;
+					}
+					push @{$result->{primary}{$roleKey{$role}}}, $filename;
+					$result->{primary}{file_sizes}{$filename} = $stat[7];
+				}
+				if (@{$result->{primary}{read1}} != @{$result->{primary}{read2}}) {
+					$result->{primary_error} =
+						"Accession manifest has unequal paired-read file counts for $sample\n";
+				}
+				my %selected = map { $_ => 1 }
+					(@{$result->{primary}{read1}}, @{$result->{primary}{read2}},
+					 @{$result->{primary}{single}});
+				$result->{primary_bytes} =
+					sum(0, map { $result->{primary}{file_sizes}{$_} || 0 } keys %selected)
+					if keys %selected;
+			}
+		}
+	} elsif ($primaryDir ne "") {
 		if (!-d $primaryDir) {
 			$result->{primary_error} = "Infile dir not existing: $primaryDir\n";
 			$result->{primary_missing_dir} = 1;

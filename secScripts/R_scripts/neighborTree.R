@@ -3,8 +3,8 @@ if (!requireNamespace("ape", quietly = TRUE)) {
 }
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 2L) {
-  stop("Usage: neighborTree.R <tree file> <target tip>", call. = FALSE)
+if (length(args) < 2L || length(args) > 2L) {
+  stop("Usage: neighborTree.R <tree file> <target tip>|--all", call. = FALSE)
 }
 
 inF <- args[[1L]]
@@ -27,18 +27,28 @@ if (is.null(tree) || !inherits(tree, "phylo")) {
 if (anyDuplicated(tree$tip.label)) {
   stop("Tree tip labels must be unique.", call. = FALSE)
 }
+
+ordered_neighbors <- function(distances) {
+  neighbors <- sort(distances[is.finite(distances) & distances >= 0.01])
+  names(neighbors)
+}
+
+if (identical(target, "--all")) {
+  # Compute the tip-to-tip distances once.  Phase II consumes one row per MGS,
+  # avoiding a separate R startup, tree parse, and distance calculation per tip.
+  distances <- ape::cophenetic.phylo(tree)
+  for (tip in tree$tip.label) {
+    neighbors <- ordered_neighbors(distances[tip, ])
+    cat(tip, "\t", paste(neighbors, collapse = " "), "\n", sep = "")
+  }
+  quit(save = "no", status = 0)
+}
+
 if (!target %in% tree$tip.label) {
   stop(sprintf("Target tip '%s' is not present in the tree.", target), call. = FALSE)
 }
 
-distances <- ape::cophenetic.phylo(tree)[target, ]
-neighbors <- sort(distances[is.finite(distances) & distances >= 0.01])
-
+neighbors <- ordered_neighbors(ape::cophenetic.phylo(tree)[target, ])
 # Do not index to an arbitrary minimum length: doing so pads short results with
 # NA values, which downstream Perl callers interpret as candidate tip names.
-cat(paste(names(neighbors), collapse = " "), "\n", sep = "")
-
-
-
-
-
+cat(paste(neighbors, collapse = " "), "\n", sep = "")

@@ -94,7 +94,7 @@ export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 
 | Environment | Main purpose |
 |---|---|
-| `MF4` | Main MATAFILER4 environment |
+| `MF4` | Main MATAFILER4 environment, including ENA/SRA download tools |
 | `MF4gtdbtk` | GTDB-Tk-related tools |
 | `MF4semibin` | SemiBin |
 | `MF4binners` | Additional binning tools |
@@ -103,6 +103,11 @@ export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 | `MF4checkm2` | CheckM2 and MetaPhlAn dependencies |
 | `MF4phylo` | Phylogenetic tools |
 | `MF4_R` | R-based helper scripts |
+
+After updating `MF4` from `helpers/install/MF4.yml`, the installer verifies
+`wget`, `pigz`, `prefetch`, `fasterq-dump`, and `vdb-validate`. A missing
+command stops installation immediately, preventing archive-backed samples from
+failing later inside a workflow.
 
 `MF4genomeface` is best-effort because its package metadata is hosted outside
 conda-forge and Bioconda. If that external channel is unavailable, the installer
