@@ -295,7 +295,7 @@ printL "Optional analyses: strains=" . ($doStrains ? "yes" : "no")
 printL "Requested rebuilds: clustering=" . ($rewrClusterMAGs ? "yes" : "no")
 	. "; taxonomy=" . ($rewrTAX ? "yes" : "no") . "\n";
 printL "Requested Canopy assignments: $canopyF\n" if $canopyF ne "";
-printL "Configuration accepted; loading mapping and catalogue metadata...\n";
+printL "Configuration accepted; checking catalogue metadata...\n";
 
 # Fast provenance fingerprints for the primary biological inputs.  Size plus
 # mtime avoids hashing very large catalogues on every resume while detecting
@@ -316,24 +316,25 @@ for my $input (@checkpointInputs) {
 	$checkpointParameters{"${label}_mtime"} = 0 + $stat[9];
 }
 
-#die "$mapF\n";
-#figure out which compound assemblies there are..
-
-#infer Assembly dirs & corrsponding bams with several Samples (compound assemblies)
-my ($hrD,$hrM) = getDirsPerAssmblGrp($mapF);
-my %map = %{$hrM};
-my %DOs = %{$hrD};
-my $rawNumSamples = scalar(@{$map{opt}{smpl_order}});
-my @emptySamples = _exclude_empty_samples(\%DOs, \%map);
-$hrM = \%map;
-my @DoosD = sort keys %DOs; #dirs of assembly groups
-
-
-
-my $numSamples = scalar(  @{$map{opt}{smpl_order}}  );#@DoosD;
-die "No non-empty samples were found in the mapping input: $mapF\n" unless $numSamples;
-$checkpointParameters{empty_samples} = join(',', @emptySamples);
 my $profileSamples = _matrix_sample_count("$GCd/Matrix.mat.gz");
+my $numSamples = $profileSamples;
+my (%map, %DOs, @emptySamples, @DoosD);
+my ($hrM, $rawNumSamples, $inputMetadataLoaded) = (undef, 0, 0);
+my $loadInputMetadata = sub {
+	return if $inputMetadataLoaded;
+	printL "Loading mapping metadata required for unfinished MGS work...\n";
+	my ($hrD, $loadedMap) = getDirsPerAssmblGrp($mapF);
+	%map = %{$loadedMap};
+	%DOs = %{$hrD};
+	$rawNumSamples = scalar(@{$map{opt}{smpl_order}});
+	@emptySamples = _exclude_empty_samples(\%DOs, \%map);
+	$hrM = \%map;
+	@DoosD = sort keys %DOs;
+	$numSamples = scalar(@{$map{opt}{smpl_order}});
+	die "No non-empty samples were found in the mapping input: $mapF\n" unless $numSamples;
+	$checkpointParameters{empty_samples} = join(",", @emptySamples);
+	$inputMetadataLoaded = 1;
+};
 my $useCanopies=1;
 if ($profileSamples<10 || $canopyF eq ""){$useCanopies=0;}
 if ($useCanopies && !-s $canopyF) {
@@ -345,23 +346,33 @@ my @existingClusterProducts = grep { -e $_ } (
 	glob("$outD/$BinnerShrt.clusters*"),
 	glob("$outD/$BinnerShrt.Wclusters*"),
 );
+my $stage1ResumeValid =
+	!$rewrClusterMAGs
+	&& -s "$outD/$BinnerShrt.clusters.obs"
+	&& -s $finalClusters2
+	&& _checkpoint_valid_for_resume($st1ston);
+$loadInputMetadata->() unless $stage1ResumeValid;
 my $stage1ProvenanceInvalid =
-	@existingClusterProducts && !_checkpoint_valid($st1ston);
+	@existingClusterProducts && !$stage1ResumeValid && !_checkpoint_valid($st1ston);
 warn "Existing MGS clustering does not match the current inputs/options; invalidating it before reclustering\n"
 	if $stage1ProvenanceInvalid && !$rewrClusterMAGs;
 
-printL "Input metadata loaded successfully.\n";
-printL "Canopy assignments: $canopyF\n" if ($canopyF ne "" && $useCanopies);
-if (!$useCanopies){
-	my $reason = $profileSamples < 10 ? "N<10 matrix samples (N=$profileSamples)" : "no usable Canopy assignment file";
-	printL "No Canopies used: $reason\n";
+if ($inputMetadataLoaded) {
+	printL "Input metadata loaded successfully.\n";
+	printL "Canopy assignments: $canopyF\n" if ($canopyF ne "" && $useCanopies);
+	if (!$useCanopies){
+		my $reason = $profileSamples < 10 ? "N<10 matrix samples (N=$profileSamples)" : "no usable Canopy assignment file";
+		printL "No Canopies used: $reason\n";
+	}
+	if (@emptySamples) {
+		printL "Excluded " . scalar(@emptySamples)
+			. " sample(s) marked SMPL.empty: " . join(", ", @emptySamples) . "\n";
+	}
+	printL "Samples in map: $rawNumSamples; eligible non-empty samples: $numSamples; "
+		. "abundance profiles in matrix: $profileSamples\n";
+} else {
+	printL "Reusing validated $BinnerShrt MGS clusters; deferring assembly-group and MAG availability checks.\n";
 }
-if (@emptySamples) {
-	printL "Excluded " . scalar(@emptySamples)
-		. " sample(s) marked SMPL.empty: " . join(", ", @emptySamples) . "\n";
-}
-printL "Samples in map: $rawNumSamples; eligible non-empty samples: $numSamples; "
-	. "abundance profiles in matrix: $profileSamples\n";
 printL "=====================================================\n";
 _mgs_workflow_stage('stage-1-clustering');
 my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2); 
@@ -381,21 +392,24 @@ if ($rewrClusterMAGs || $stage1ProvenanceInvalid) {
 	}
 }
 my $ph1flag =
-	(-s "$outD/$BinnerShrt.clusters.obs" && -s $finalClusters2 && _checkpoint_valid($st1ston))
+	(-s "$outD/$BinnerShrt.clusters.obs" && -s $finalClusters2
+		&& ($stage1ResumeValid || _checkpoint_valid($st1ston)))
 	? 0 : 1;
 #my $FMGsubs = `wc -l $GCd/Matrix.$COGdir.mat | cut -f1 -d' '`; chomp $FMGsubs; $FMGsubs = int($FMGsubs);
 # a whole lot faster.. but imprecise!
-my @marker_lca_files = glob("$GCd/$COGdir/*.LCA");
-die "No marker-gene LCA files found in $GCd/$COGdir\n" unless @marker_lca_files;
-my $FMGsubs = _count_lines_up_to(20, @marker_lca_files);
-if ($FMGsubs < 20) {
-	_finish_without_mgs("only $FMGsubs marker-gene LCA assignments were available for $profileSamples abundance profile(s)", $noMGSReport)
-		if $profileSamples < 10;
-	die "$GCd/$COGdir/*.LCA suspiciously small (N=$FMGsubs)\nPlease ensure correctness\n";
+if ($ph1flag) {
+	my @marker_lca_files = glob("$GCd/$COGdir/*.LCA");
+	die "No marker-gene LCA files found in $GCd/$COGdir\n" unless @marker_lca_files;
+	my $FMGsubs = _count_lines_up_to(20, @marker_lca_files);
+	if ($FMGsubs < 20) {
+		_finish_without_mgs("only $FMGsubs marker-gene LCA assignments were available for $profileSamples abundance profile(s)", $noMGSReport)
+			if $profileSamples < 10;
+		die "$GCd/$COGdir/*.LCA suspiciously small (N=$FMGsubs)\nPlease ensure correctness\n";
+	}
 } #$GCd/Matrix.$COGdir.mat
 #die;
 my $usableCanopyCount = 0;
-if ($useCanopies) {
+if ($ph1flag && $useCanopies) {
 	my $CanoDir = $canopyF;$CanoDir=~s/\/[^\/]+$/\//; $CanoDir .= "Bins/";
 	#die "$CanoDir";
 	$usableCanopyCount = CanopyPrep($canopyF,$CanoDir);
@@ -409,13 +423,10 @@ if ($useCanopies) {
 
 #run metabat on each assembly group
 my $cnt=0; my @jobs;
-printL "Found ".scalar(@DoosD) ." assembly groups, ";
 if ($ph1flag){
-	printL "clustering available binnings\n";
-} else {
-	printL "reusing existing $BinnerShrt MGS clustering\n";
+	printL "Found ".scalar(@DoosD) ." assembly groups, clustering available binnings\n";
 }
-foreach my $Doo (@DoosD){ #this loops ensures Binner predictions exist for each assembly
+foreach my $Doo ($ph1flag ? @DoosD : ()){ #this loops ensures Binner predictions exist for each assembly
 	#print "$Doo\n";
 	last; #should be done in MATAFILER.. deactivate here..
 	last if (!$ph1flag && _checkpoint_valid($iniMB2sto));
@@ -482,8 +493,9 @@ qsubSystemJobAlive( \@jobs,\%QSBopt );
 
 #check that really all cm 's are there
 $cnt=0; my @missedMAGs=(); my $usableMAGcount=0;
-printL "Checking $BinnerShrt MAG availability across " . scalar(@DoosD) . " assembly groups\n";
-foreach my $Doo (@DoosD){
+if ($ph1flag) {
+	printL "Checking $BinnerShrt MAG availability across " . scalar(@DoosD) . " assembly groups\n";
+	foreach my $Doo (@DoosD){
 	my @paths = @{$DOs{$Doo}{wrdir}};#split /,/,$allPaths;
 	my @smplIDs = @{$DOs{$Doo}{SmplID}};#split /,/,$smplIDtmp;
 	my $metaGD = getAssemblPath($paths[-1]);
@@ -503,9 +515,9 @@ foreach my $Doo (@DoosD){
 		$usableMAGcount++
 			if $bin_quality->{$bin}{compl} >= 60 && $bin_quality->{$bin}{conta} <= 10;
 	}
-	$cnt++;
-}
-printL "MAG availability summary: $cnt usable assembly group(s), "
+		$cnt++;
+	}
+	printL "MAG availability summary: $cnt usable assembly group(s), "
 	. scalar(@missedMAGs) . " missing/empty, $usableMAGcount bin(s) passed the 60% completeness/10% contamination screen\n";
 if (@missedMAGs) {
 	my @examples = @missedMAGs > 5 ? @missedMAGs[0 .. 4] : @missedMAGs;
@@ -520,6 +532,7 @@ _touch_checkpoint($iniMB2sto, 'per-sample-mag-quality') unless _checkpoint_valid
 
 _finish_without_mgs("no assigned MAG passed the minimum 60% completeness/10% contamination screen and no usable Canopy MGS was available", $noMGSReport)
 	unless $usableMAGcount || $usableCanopyCount;
+}
 
 #if ($cnt){	print "Waiting for jobs to finish.. restart when done\n";	exit(0);}
 
@@ -691,6 +704,7 @@ my $binExtractionValid = _checkpoint_valid($BinExtrSto);
 $binExtractionValid &&= _representative_contig_outputs_valid($binDctg);
 $binExtractionValid &&= _representative_contig_outputs_valid($binDctgFam)
 	if $doBinCtgsPerFam;
+$loadInputMetadata->() unless $binExtractionValid;
 unless ($binExtractionValid) {
 	# Prevent removed/renamed MGS from surviving as stale genomes after a
 	# clustering or catalogue change.
@@ -1177,6 +1191,18 @@ sub _checkpoint_valid {
 	# Rebuild them in this workflow instead of silently accepting stale state.
 	return 0 unless defined($file) && -s $file;
 	return checkpoint_valid($file, parameters => \%checkpointParameters);
+}
+
+sub _checkpoint_valid_for_resume {
+	my ($file) = @_;
+	return 0 unless defined($file) && -s $file;
+	# Empty-sample membership is derived from a per-sample filesystem scan.  A
+	# completed cluster set remains reproducible from its recorded catalogue and
+	# map fingerprints, so do not perform that scan solely to resume later work.
+	# A requested cluster rebuild still uses the full parameter set above.
+	my %resumeParameters = %checkpointParameters;
+	delete $resumeParameters{empty_samples};
+	return checkpoint_valid($file, parameters => \%resumeParameters);
 }
 
 sub _representative_contig_outputs_valid {
