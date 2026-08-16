@@ -22,11 +22,13 @@ my $options = {
 	longTime => '168:00:00',
 	gpuQueue => 'gpu',
 	netQueue => 'network',
+	downloadQueue => 'nbi-download',
 	highMemQueue => 'highmem',
 	shortQueue => 'short',
 	useLongQueue => 0,
 	useGPUQueue => 0,
 	useNetQueue => 1,
+	useDownloadQueue => 0,
 	useShortQueue => 0,
 	useHiMemQueue => 0,
 	gpuCount => 0,
@@ -57,6 +59,41 @@ like($contents,
 	qr/^echo "SLURM job ID: \$SLURM_JOB_ID"\necho \$HOSTNAME;$/m,
 	'prints the allocated Slurm job ID before executing the job payload');
 is($options->{useNetQueue}, 0, 'network queue selection is one-shot');
+
+my $archive_script = File::Spec->catfile($tmpdir, 'archive-download.sh');
+$archive_script =~ s{\\}{/}g;
+$options->{useDownloadQueue} = 1;
+qsubSystem(
+	$archive_script, 'echo archive', 2, '16G', 'archive',
+	'', '', 0, [], $options,
+);
+open my $archive_fh, '<', $archive_script
+	or die "Cannot read $archive_script: $!";
+my $archive_contents = do { local $/; <$archive_fh> };
+close $archive_fh;
+like($archive_contents, qr/^#SBATCH -p "nbi-download"$/m,
+	'archive acquisition uses the dedicated download queue');
+like($archive_contents, qr/^#SBATCH --time=24:00:00$/m,
+	'download jobs retain the default queue wall time');
+
+{
+	no warnings 'redefine';
+	my %config = (
+		MFLRDir => $tmpdir,
+		mediumQueue => 'compute',
+		downloadQueue => '',
+		qsubPEenv => 'smp',
+	);
+	local *Mods::Subm::getProgPaths = sub {
+		my ($key) = @_;
+		return exists($config{$key}) ? $config{$key} : '';
+	};
+	my $fallback = Mods::Subm::emptyQsubOpt(0, '', 'slurm');
+	is($fallback->{downloadQueue}, 'compute',
+		'an empty downloadQueue falls back to mediumQueue');
+}
+is($options->{useDownloadQueue}, 0,
+	'download queue selection is one-shot');
 
 my $scratch_script = File::Spec->catfile($tmpdir, 'scratch.sh');
 $scratch_script =~ s{\\}{/}g;

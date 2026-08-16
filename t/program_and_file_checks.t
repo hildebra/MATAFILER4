@@ -30,6 +30,11 @@ like(
 	qr/^\Q$iqtree_selector\E$/m,
 	'IQ-TREE configuration prefers iqtree3 and falls back to iqtree2',
 );
+like(
+	$internal_config,
+	qr/^downloadQueue\tnbi-download$/m,
+	'the shipped archive-download partition is nbi-download',
+);
 my $r_environment_path = File::Spec->catfile($Bin, '..', 'helpers', 'install', 'MGTK_R.yml');
 open my $r_environment_fh, '<', $r_environment_path or die $!;
 my $r_environment = do { local $/; <$r_environment_fh> };

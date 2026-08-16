@@ -190,12 +190,7 @@ mreps	mreps
 #more essential programs are usually listed first in the lists
 
 ## general purpose/OS ##
-wget	wget
 pigz	pigz
-gzip	gzip
-prefetch	prefetch
-fasterq-dump	fasterq-dump
-vdb-validate	vdb-validate
 rsync	rsync
 trimomatic	[MFLRDir]/bin/trimmomatic-0.36.jar
 porechop	porechop

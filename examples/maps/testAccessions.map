@@ -1,0 +1,7 @@
+#SmplID	SmplPrefix	ENAdownload	SRAdownload	SeqTech	AssmblGrps	firstXreadsRd
+#RunID	3.testAccessions
+#OutPath	$MF4DIR/examples/output/
+#DirPath	$MF4DIR/examples/data
+LocalEx1	SRR8797712			hiSeq	LocalReads	200000
+ENApublic		ERR10009595			ENAreads	
+SRApublic			SRR10090860		SRAreads	

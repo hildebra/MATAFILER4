@@ -3644,11 +3644,8 @@ sub submitSampleAccessionDownload {
 	make_path($downloadDir) unless -d $downloadDir;
 	my $threads = int($MFopt{unzipCores} || 1);
 	$threads = 1 if $threads < 1;
-	my @configArguments = $MFconfig{configFile} ne ''
-		? ('--config', $MFconfig{configFile}) : ();
 	my $command = _shell_command(
 		@downloader,
-		@configArguments,
 		'--provider', $provider,
 		'--accession', $accession,
 		'--output-dir', $downloadDir,

@@ -16,18 +16,69 @@ After a run has completed, use [MATAFILER4 outputs](outputs.md) to identify the 
   
 ### MATAFILER4 example dataset
 
-We have prepared an example dataset that can be run directly after installing MATAFILER4 and configuring it (see above). This example will 1) download public short and long read metagenomes 2) assemble short reads and 3) assemble short+long reads (hybrid assembly).
+The `examples` directory contains three runnable MATAFILER workflows:
 
-Please go to the directory MATAFILER4/examples/
+| Script | Mapping file | Inputs demonstrated |
+|---|---|---|
+| `1.runMATAFILER_illumina.mfc` | `maps/testAG.map` | Local Illumina FASTQs |
+| `2.runMATAFILER_hybrid.mfc` | `maps/testPB.map` | Local Illumina plus PacBio reads |
+| `3.runMATAFILER_accessions.mfc` | `maps/testAccessions.map` | Local Illumina plus automatic ENA and NCBI SRA downloads |
 
-To download all required data, run first 
-```{sh}
+Start in the MATAFILER4 example directory and download the shared local input
+data used by all three workflows:
+
+```bash
+cd "$MF4DIR/examples"
 bash 0.getExmplData.sh
 ```
 
-After this is finished (check in the newly created MATAFILER4/examples/data/ dir for ~1.3Gb of data), you can either run `1.runMF4_illumina.mfc` (short read metagenomics) or `2.runMF4_hybrid.mfc` (short+long reads). Note that these are non-sensical examples, i.e. the short and long reads are from completely independent experiments, don't expect interpretable results, this is purely to check if the technical process can run to completion.
+When that finishes, check the newly created `examples/data` directory for about
+1.3 GB of data. Then run one of the scripts above with Bash. These are technical
+workflow tests, not biologically meaningful analyses: several reads are from
+independent experiments and should not be interpreted together.
 
-How do you know everything finished as it should? Wait until all submitted jobs have finished, run the 1. or 2. script again until it reports that nothing is left to do. (Note:kill eventual "DependencyNeverSatisified" jobs for 1-2 times, if persists there might be a problem with runnning certain programs, where you need to start checking error logs, see Q&A below). Once everything is finished, MATAFILER4's postprocessing should complete and you will be able to find metagStats.txt and metagStatsReport.html - browse these files to get an overview of the data. 
+### Example 3: mixed local, ENA, and SRA inputs
+
+Example 3 reuses the `SRR8797712` Illumina files downloaded by
+`0.getExmplData.sh`, then lets MATAF4 acquire one small public metagenome from
+each archive provider:
+
+| MATAFILER sample | Source | Accession | Archive description | Compressed FASTQ size |
+|---|---|---|---|---:|
+| `LocalEx1` | Local files | `SRR8797712` | Existing Example 1 Illumina input | already downloaded |
+| `ENApublic` | ENA/EBI | [`ERR10009595`](https://www.ebi.ac.uk/ena/browser/view/ERR10009595) | Paired Illumina MiSeq human-fecal WGS metagenome | about 57 MB |
+| `SRApublic` | SRA/NCBI | [`SRR10090860`](https://www.ncbi.nlm.nih.gov/sra/SRR10090860) | Paired Illumina NextSeq mud-microcosm shotgun WGS metagenome | about 19 MB |
+
+The public-run metadata and sizes were checked on 16 August 2026. Archive records
+can change, so treat a later provider-side withdrawal or file replacement as an
+external-data failure rather than silently changing the map to unrelated data.
+
+Activate the base `MF4` Conda environment so that `wget`, `prefetch`,
+`fasterq-dump`, and `vdb-validate` are available to submitted jobs, then run:
+
+```bash
+cd "$MF4DIR/examples"
+bash 3.runMATAFILER_accessions.mfc
+```
+
+On the first pass, MATAF4 submits the two archive acquisitions to
+`downloadQueue` (the shipped setting is `nbi-download`) and defers those
+samples. Wait for all submitted jobs to finish and rerun the script. Subsequent
+passes perform filtering, assembly, mapping, and cleanup. Repeat until MATAF4
+reports that no work remains.
+
+The map intentionally gives the archive samples a `SmplID` but leaves
+`SmplPrefix`, `Path`, and `SeqTech` unset. MATAF4 infers Illumina technology
+from provider metadata, keeps validated FASTQs in shared scratch, and writes
+`input_accession.json` to each permanent sample output. The archive reads are
+removed after that sample passes the finished-sample cleanup barrier. See
+[Downloading ENA and SRA samples from a mapping file](mapping_files.md#downloading-ena-and-sra-samples-from-a-mapping-file)
+for the complete mapping rules and failure/retry behavior.
+
+For Examples 1 and 2, follow the same wait-and-rerun pattern. If dependency
+failures persist, inspect the job error logs and see the [FAQ](FAQ.md). Once a
+workflow is complete, inspect `metagStats.txt` and `metagStatsReport.html` for
+an overview of the processed data.
 
 In the next section we will give examples on how to create your own MATAFILER4 runs.
   

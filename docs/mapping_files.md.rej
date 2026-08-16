@@ -1,0 +1,11 @@
+--- docs/mapping_files.md
++++ docs/mapping_files.md
+@@ -237,4 +237,7 @@
+ SRA conversion temporarily needs space for both the SRA object and uncompressed
+ FASTQs, so size the shared scratch location accordingly. A standard installation
+ puts `wget`, `pigz`, `prefetch`, `fasterq-dump`, and `vdb-validate` in the base
+-`MF4` Conda environment. Activate that environment before launching MATAF4.
++`MF4` Conda environment. `ENASRAdl.pl` resolves these commands through
++`getProgPaths()` using the `wget`, `pigz`, `gzip`, `prefetch`, `fasterq-dump`,
++and `vdb-validate` configuration keys; the active MATAFILER `-config` file is
++passed to the download job. Activate the MF4 environment before launching MATAF4.

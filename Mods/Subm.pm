@@ -808,6 +808,9 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		$queues = "\"".$optHR->{gpuQueue}."\"";#"\"medium_priority\"";
 		#$time = "23:00:00";
 		$optHR->{useGPUQueue}=0;
+	} elsif (defined $optHR->{useDownloadQueue} && $optHR->{useDownloadQueue} == 1){
+		$queues = "\"".$optHR->{downloadQueue}."\"";
+		$optHR->{useDownloadQueue}=0;
 	} elsif (defined $optHR->{useNetQueue} && $optHR->{useNetQueue} ==1){
 		$queues = "\"".$optHR->{netQueue}."\"";
 		$time = $optHR->{longTime};
@@ -1176,11 +1179,13 @@ sub emptyQsubOpt{
 	#die "$shortQ\n";
 	my $gpuQ = getProgPaths("gpuQueue",0);
 	my $netQ = getProgPaths("netQueue",0);
+	my $downloadQ = getProgPaths("downloadQueue",0);
 	my $himemQ = getProgPaths("highMemQueue",0);
 	if ($longQ eq ""){$longQ =  $medQ;}
 	if ($medQ eq "" ){die "FATAL: no medium queue defined!\n";};
 	if ($gpuQ eq "" ){$gpuQ = $medQ;};
 	if ($netQ eq "" ){$netQ = $medQ;};
+	if ($downloadQ eq "" ){$downloadQ = $medQ;};
 	if ($himemQ eq "" ){$himemQ = $medQ;};
 	if ($shortQ eq "" ){$shortQ = $medQ;};
 	my $xtraNodeCmds = getProgPaths("subXtraCmd",0);
@@ -1206,6 +1211,7 @@ sub emptyQsubOpt{
 		longQueue => $longQ,
 		gpuQueue => $gpuQ,
 		netQueue => $netQ,
+		downloadQueue => $downloadQ,
 		highMemQueue => $himemQ,
 		longTime => $longTime,#7days
 		medQueue => $medQ,
@@ -1215,6 +1221,7 @@ sub emptyQsubOpt{
 		useLongQueue => 0,
 		useGPUQueue => 0,
 		useNetQueue => 0,
+		useDownloadQueue => 0,
 		gpuCount => 0,
 		useShortQueue => 0,
 		useHiMemQueue => 0,

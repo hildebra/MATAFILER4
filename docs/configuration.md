@@ -79,11 +79,22 @@ continues, followed by a bounded scheduler polling delay and a retry of the same
 range. `-killDepNever 1` can remove Slurm jobs
 stuck in dependency states, but use it only when this matches your local scheduler policy.
 
-Sites where compute nodes do not normally have outbound network access can set
-`netQueue` in `config.txt` to a network-enabled queue or Slurm partition. Code
-that sets `useNetQueue` on its submission options will use that queue and the
-configured `longTime` wall time for the next job. If `netQueue` is empty or
-unset, MATAFILER4 falls back to `mediumQueue`.
+ENA and SRA acquisition jobs use the dedicated `downloadQueue` Slurm partition.
+Its shipped value in `Mods/config_internal.txt` is `nbi-download`. To override
+it, add a value to the selected site `config.txt`:
+
+```text
+downloadQueue	my-network-partition
+```
+
+An explicitly empty `downloadQueue` value falls back to `mediumQueue`. This
+lets installations without a separate network partition retain the ordinary
+default. The queue choice is one-shot and applies only to the archive acquisition
+job; dependent filtering, assembly, and mapping jobs use their normal queues.
+
+`netQueue` remains available for other code paths that explicitly request a
+general network-enabled queue. It likewise falls back to `mediumQueue` when
+empty and uses the configured `longTime` wall time.
 
 ## Database setup
 

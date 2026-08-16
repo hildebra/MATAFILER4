@@ -101,35 +101,18 @@ sub read_json {
 }
 
 sub executable {
-	my (@names) = grep { defined($_) && $_ ne '' } @_;
+	my ($override, @names) = @_;
+	if (defined($override) && $override ne '') {
+		die "Configured executable is not executable: $override\n" unless -x $override;
+		return $override;
+	}
 	for my $name (@names) {
-		if (File::Spec->file_name_is_absolute($name) || $name =~ m{[\\/]}) {
-			return $name if -f $name && -x $name;
-			next;
-		}
 		for my $dir (File::Spec->path()) {
 			my $candidate = File::Spec->catfile($dir, $name);
 			return $candidate if -f $candidate && -x $candidate;
 		}
 	}
 	return;
-}
-
-sub configured_executable {
-	my ($override, $config_key, $description) = @_;
-	my @configured;
-	if (defined($override) && $override ne '') {
-		@configured = ($override);
-	} elsif (ref($config_key) eq 'ARRAY') {
-		@configured = @{getProgPaths($config_key, 0)};
-	} else {
-		@configured = (getProgPaths($config_key));
-	}
-	my $resolved = executable(@configured);
-	die "Configured $description executable is unavailable: "
-		.join(', ', grep { defined($_) && $_ ne '' } @configured)."\n"
-		unless defined $resolved;
-	return $resolved;
 }
 
 sub run_checked {
@@ -229,7 +212,9 @@ for my $candidate ($internal_manifest, $opt{metadata_out}) {
 
 my $wget;
 sub wget_tool {
-	$wget ||= configured_executable($opt{wget}, 'wget', 'wget');
+	$wget ||= executable($opt{wget}, 'wget');
+	die "wget is required to query archive metadata and download ENA files\n"
+		unless defined $wget;
 	return $wget;
 }
 
@@ -471,18 +456,14 @@ sub sra_role {
 }
 
 sub download_sra {
-	my $prefetch = configured_executable(
-		$opt{prefetch}, 'prefetch', 'NCBI SRA prefetch',
-	);
-	my $fasterq = configured_executable(
-		$opt{fasterq_dump}, 'fasterq-dump', 'NCBI fasterq-dump',
-	);
-	my $validator = configured_executable(
-		$opt{vdb_validate}, 'vdb-validate', 'NCBI vdb-validate',
-	);
-	my $compressor = configured_executable(
-		$opt{compressor}, [qw(pigz gzip)], 'FASTQ compressor',
-	);
+	my $prefetch = executable($opt{prefetch}, 'prefetch')
+		or die "NCBI SRA downloads require the SRA Toolkit executable 'prefetch'\n";
+	my $fasterq = executable($opt{fasterq_dump}, 'fasterq-dump')
+		or die "NCBI SRA downloads require the SRA Toolkit executable 'fasterq-dump'\n";
+	my $validator = executable($opt{vdb_validate}, 'vdb-validate')
+		or die "NCBI SRA downloads require the SRA Toolkit executable 'vdb-validate'\n";
+	my $compressor = executable($opt{compressor}, 'pigz', 'gzip')
+		or die "SRA FASTQ conversion requires pigz or gzip\n";
 	my $runs = ncbi_run_info();
 	my $cache = File::Spec->catdir($opt{output_dir}, '.ncbi-cache');
 	my $conversion_root = File::Spec->catdir($opt{output_dir}, '.fasterq');
