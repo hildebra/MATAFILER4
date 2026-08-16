@@ -299,7 +299,7 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	my $treeNodeCount = $treeNodes{$d};
 	if ($curBatchNodes > 0 && $curBatchNodes + $treeNodeCount > $batchNodeBudget) {
 		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
-		my $batchCores = $curBatch > 1 ? $nCoreHeavy : $nCore;
+		my $batchCores = $nCore;
 		my $batchCmd = "export MATAFILER_R_ANALYSIS_CORES=$batchCores\n".$cmd;
 		my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$batchCmd,$batchCores,"20G",$batchLabel,"","",1,[],$QSBoptHR);
 		push(@jobs,$dep);
@@ -334,7 +334,7 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	$batchDestD = $destD; $batchLabel = "R$cnt";
 	if ($curBatchNodes >= $batchNodeBudget){
 		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
-		my $batchCores = $curBatch > 1 ? $nCoreHeavy : $nCore;
+		my $batchCores = $nCore;
 		my $batchCmd = "export MATAFILER_R_ANALYSIS_CORES=$batchCores\n".$cmd;
 		my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$batchCmd,$batchCores,"20G",$batchLabel,"","",1,[],$QSBoptHR);
 		push(@jobs,$dep);
@@ -346,7 +346,7 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	#last if ($cnt > 5);
 }
 if ($curBatch > 0){
-	my $batchCores = $curBatch > 1 ? $nCoreHeavy : $nCore;
+	my $batchCores = $nCore;
 	my $batchCmd = "export MATAFILER_R_ANALYSIS_CORES=$batchCores\n".$cmd;
 	my ($dep,$qcmd) = qsubSystem($batchDestD."Ranalysis.sh",$batchCmd,$batchCores,"20G",$batchLabel,"","",1,[],$QSBoptHR);
 	$curBatch = 0; $curBatchNodes = 0; $cmd=$cmdPrelude;
