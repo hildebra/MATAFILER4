@@ -160,8 +160,8 @@ unlike($strain2, qr/open my \$summary_fh.*?\$TXTreport/s,
 unlike($strain2, qr/test -s "\.shellQuote\(\$analysisReport\)/,
 	'the legacy text report is not required for RDS-based completion');
 like($strain2,
-	qr/"popGenStats=i".*?\$doPopGenStats.*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?test -s .*?\$popGenStore/s,
-	'population genetics is scheduled with its current three-argument R interface and a durable RDS checkpoint');
+	qr/"popGenStats=i".*?"popGenStrictOutgroup=i".*?"popGenGeneticCode=i".*?"popGenCodonStart=i".*?"popGenSeed=i".*?"popGenLegacyTextOutput=i".*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?--ncore \$jobCores.*?--genetic-code \$popGenGeneticCode.*?--codon-start \$popGenCodonStart.*?--seed \$popGenSeed.*?--individual-column .*?\$individualVar.*?--outgroup .*?\$OG.*?--strict-outgroup.*?--legacy-text-output.*?\$strainFile = "\$destD\/IQtree_allsites\.strains\.txt".*?--strain-file .*?\$strainFile.*?test -s .*?\$popGenStore/s,
+	'population genetics forwards parallel, outgroup, codon, seed, identity, and optional strain-file settings to its durable RDS workflow');
 like($strain2,
 	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
 	'existing population RDS stores are reusable and enabled runs require the combined population overview');
@@ -177,8 +177,22 @@ like($strain2,
 	qr/my \@k2d = sort \{ \$treeNodes\{\$b\} <=> \$treeNodes\{\$a\}.*?\$batchNodeBudget = \$treeNodes\{\$k2d\[0\]\};.*?\$curBatchNodes \+ \$treeNodeCount > \$batchNodeBudget.*?\$curBatchNodes \+= \$treeNodeCount.*?\$curBatchNodes >= \$batchNodeBudget/s,
 	'largest phylogeny defines the R-job node budget and smaller phylogenies are packed without exceeding it');
 like($strain2,
-	qr/\$jobCores = ".*MATAFILER_R_ANALYSIS_CORES.*?my \$batchCores = \$curBatch > 1 \? \$nCoreHeavy : \$nCore;.*?export MATAFILER_R_ANALYSIS_CORES=\$batchCores.*?qsubSystem\([^\n]+,\$batchCmd,\$batchCores/s,
-	"combined R-analysis batches request and use the configured heavy core count, while standalone analyses retain standard cores");
+	qr/\$jobCores = \$nCore;.*?my \$batchCores = \$nCore;.*?qsubSystem\([^\n]+,\$batchCmd,\$batchCores/s,
+	"combined serial R-analysis batches request and use the standard core count");
+like($strain2,
+	qr/my \$rAnalysisMemoryBaseGB = 24;.*?my \$rAnalysisMemoryCoreThreshold = 4;.*?my \$batchMemory = rAnalysisMemoryForCores\(\$batchCores\).*?qsubSystem\([^\n]+,\$batchCores,\$batchMemory/s,
+	'R-analysis requests start at 24 GiB and use a core-aware memory request');
+like($strain2,
+	qr/sub rAnalysisMemoryForCores \{.*?\$extraCores = \$cores - \$rAnalysisMemoryCoreThreshold;.*?\$memoryGB = \$rAnalysisMemoryBaseGB.*?return \$memoryGB\."G";/s,
+	'R-analysis memory grows beyond the four-core threshold');
+like($strain2,
+	qr/slurmJobFailureSummary.*?%submittedRAnalysisJobs.*?reportRAnalysisSchedulerFailures\(\\%submittedRAnalysisJobs, \$QSBoptHR\).*?Slurm reported failed strainStats R-analysis job\(s\).*?Ranalysis\.sh\.etxt.*?OOM jobs are now submitted with additional R-analysis memory/s,
+	'completed R-analysis submissions are checked against Slurm accounting and OOM failures receive an actionable diagnostic');
+like($strain2,
+	qr/my \$cmdPrelude = "set -euo pipefail\\nulimit -s 20000\\n";/s,
+	'generated R-analysis scripts explicitly preserve non-zero R exits, including Slurm OOM termination');
+unlike($strain2, qr/MATAFILER_R_ANALYSIS_CORES/,
+	'R and PopGenStats commands use the resolved allocated core count rather than an unexpanded shell variable');
 unlike($strain2, qr/\$batchSize/,
 	'R-job submission no longer uses a fixed phylogeny count per batch');
 unlike($strain2, qr/if \(\$doSubmit && -d \$destD\)/,
@@ -198,11 +212,11 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1.23;/,
+like($strain, qr/my \$version = 1\.24;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
-	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats/s,
-	'population genetics forces retention of per-locus MSAs and forwards its enabled state to strainwithin2');
+	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"individualVar=s".*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput/s,
+	'population genetics retains MSAs and forwards reproducible configuration through strainwithin2');
 like($strain, qr/Retain the Phase-I locus map.*?second catalogue-wide gene2tax scan.*?\$SIgenes and \$COGprios are reused/s,
 	'Phase II reuses the Phase-I selected gene map rather than clearing and rebuilding it');
 like($strain,

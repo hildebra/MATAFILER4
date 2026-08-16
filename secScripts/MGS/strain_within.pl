@@ -237,7 +237,8 @@ my $completionMessage = "";
 #1.21: load only core-first exact outgroup-reference demands during Phase II
 #1.22: rank Mosaic outgroup proposals authoritatively against the source phylogeny
 #1.23: stream parent only-submit resumes without a controller-wide file audit
-my $version = 1.23;
+#1.24: expose reproducible PopGenStats configuration to the postprocessing launcher
+my $version = 1.24;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -337,8 +338,14 @@ my $redoSubmissionData = 0;
 my $deepRepair = 0;
 my $rmMSA = 1; #remove per-locus MSAs unless a downstream analysis requires them
 my $doPopGenStats = 1;
+my $popGenStrictOutgroup = 0;
+my $popGenGeneticCode = 1;
+my $popGenCodonStart = 1;
+my $popGenSeed = 1;
+my $popGenLegacyTextOutput = 0;
 my $contTests = ""; my $discTests = ""; #stat tests to be given to strain_within_2.2.pl
 my $familyVar = ""; my $groupStabilityVars = "";
+my $individualVar = "AssmblGrps";
 
 #SNP calling
 my $minSNPDepth = 2; #changed to two: seems to give better results
@@ -474,6 +481,11 @@ GetOptions(
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
 	"rmMSA=i"        => \$rmMSA, #remove MSA, to save diskspace
 	"popGenStats=i"  => \$doPopGenStats, #requires retained per-locus nucleotide MSAs
+	"popGenStrictOutgroup=i" => \$popGenStrictOutgroup,
+	"popGenGeneticCode=i" => \$popGenGeneticCode,
+	"popGenCodonStart=i" => \$popGenCodonStart,
+	"popGenSeed=i" => \$popGenSeed,
+	"popGenLegacyTextOutput=i" => \$popGenLegacyTextOutput,
 	"phyloMemMulti=f" => \$memMulti, #mem used for buildtree. Default: 1.0
 	
 	"MGSphylo=s"     => \$treeFile,
@@ -482,6 +494,7 @@ GetOptions(
 	"DiscTests=s"      => \$discTests, #discrete stat tests to be handed to next step (just a passthrough)
 	"familyVar=s"      => \$familyVar, #column name in metadata containing family id
 	"groupStabilityVars=s"      => \$groupStabilityVars, #column names of categories used for calculation of resilience and persistence
+	"individualVar=s" => \$individualVar, #sample ID column used by population-genetics and treeWAS analyses
 	
 	#SNP calling
 	"minSNPDepth=i"  => \$minSNPDepth,
@@ -595,6 +608,13 @@ die "-MSAprog must be 0, 1, 2, or 4\n"
 die "-rmMSA must be 0 or 1\n" unless $rmMSA == 0 || $rmMSA == 1;
 die "-popGenStats must be 0 or 1\n"
 	unless $doPopGenStats == 0 || $doPopGenStats == 1;
+die "-popGenStrictOutgroup and -popGenLegacyTextOutput must be 0 or 1\n"
+	unless ($popGenStrictOutgroup == 0 || $popGenStrictOutgroup == 1)
+		&& ($popGenLegacyTextOutput == 0 || $popGenLegacyTextOutput == 1);
+die "-popGenGeneticCode must be positive, -popGenCodonStart must be 1, 2, or 3, and -popGenSeed must be non-negative\n"
+	unless $popGenGeneticCode > 0 && $popGenCodonStart >= 1 && $popGenCodonStart <= 3
+		&& $popGenSeed >= 0;
+die "-individualVar must not be empty\n" unless length($individualVar);
 if ($doPopGenStats && $rmMSA) {
 	warn "Population genetics requires per-locus nucleotide MSAs; overriding -rmMSA 1 to -rmMSA 0\n";
 	$rmMSA = 0;
@@ -2146,9 +2166,11 @@ die "MGS abundance matrix is missing or empty: $MGSabundance\n" unless -s $MGSab
 
 my $strain2Scr = getProgPaths("MGS_strain2_scr");
 
-my $nxtCmd = "$strain2Scr -GCd ".shellQuote($GCd)." -FMGdir ".shellQuote($outD)." -MGSmatrix ".shellQuote($MGSabundance)." -cores 4 -reSubmit 0 -DiscTests ".shellQuote($discTests)." -ContTests ".shellQuote($contTests)." -familyVar ".shellQuote($familyVar)." -groupStabilityVars ".shellQuote($groupStabilityVars)." ";
+my $nxtCmd = "$strain2Scr -GCd ".shellQuote($GCd)." -FMGdir ".shellQuote($outD)." -MGSmatrix ".shellQuote($MGSabundance)." -cores 4 -reSubmit 0 -DiscTests ".shellQuote($discTests)." -ContTests ".shellQuote($contTests)." -familyVar ".shellQuote($familyVar)." -groupStabilityVars ".shellQuote($groupStabilityVars)." -individualVar ".shellQuote($individualVar)." ";
 $nxtCmd .= "-MGSphylo ".shellQuote($treeFile)." " if $treeFile ne "";
-$nxtCmd .= "-popGenStats $doPopGenStats ";
+$nxtCmd .= "-popGenStats $doPopGenStats -popGenStrictOutgroup $popGenStrictOutgroup "
+	."-popGenGeneticCode $popGenGeneticCode -popGenCodonStart $popGenCodonStart "
+	."-popGenSeed $popGenSeed -popGenLegacyTextOutput $popGenLegacyTextOutput ";
 $nxtCmd .= "-submit $doSubmit ";
 $nxtCmd .= "-qsubSystem ".shellQuote($subMode)." " if $subMode ne "";
 $nxtCmd .= "-Hcores $maxCores " if $maxCores > 0;
