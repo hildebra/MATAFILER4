@@ -5,10 +5,14 @@ use warnings;
 use Digest::SHA;
 use File::Basename qw(basename);
 use File::Spec;
+use FindBin qw($Bin);
 use Getopt::Long qw(GetOptions Configure);
 
+use lib File::Spec->catdir($Bin, '..', '..');
+use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile);
+
 my $VERSION = '1.00';
-my ($staging, $manifest, $published_dir, $pigz, $mode, $help);
+my ($staging, $manifest, $published_dir, $pigz, $mode, $config, $help);
 my $cores = 1;
 
 Configure(qw(no_auto_abbrev no_ignore_case));
@@ -19,8 +23,10 @@ GetOptions(
 	'pigz=s' => \$pigz,
 	'cores=i' => \$cores,
 	'mode=s' => \$mode,
+	'config=s' => \$config,
 	'help|h' => \$help,
 ) or die usage();
+setConfigFile($config) if defined($config) && length($config);
 if ($help) { print usage(); exit 0; }
 die usage('unexpected positional arguments: '.join(' ', @ARGV)) if @ARGV;
 die usage('-staging, -manifest, and -mode are required')
@@ -40,7 +46,7 @@ if ($mode eq 'cleanup') {
 	cleanup_published_handoff($plan, $staging, $manifest, $published_dir);
 	exit 0;
 }
-die usage('-pigz is required in prepare mode') unless defined($pigz) && length($pigz);
+$pigz = getProgPaths('pigz') unless defined($pigz) && length($pigz);
 die "-cores must be positive\n" unless $cores =~ /^\d+$/ && $cores > 0;
 prepare_handoff($plan, $staging, $manifest, $pigz, $cores, $published_dir);
 exit 0;
@@ -642,7 +648,7 @@ sub usage {
 	my ($error) = @_;
 	my $text = <<'USAGE';
 Usage: finalize_strain_tree_inputs.pl -staging DIR -manifest FILE
-       -mode prepare -pigz FILE [-cores INT] [-publishedDir DIR]
+       -mode prepare [-pigz FILE] [-cores INT] [-publishedDir DIR] [-config FILE]
    or: finalize_strain_tree_inputs.pl -staging DIR -manifest FILE
        -mode cleanup -publishedDir DIR
 USAGE

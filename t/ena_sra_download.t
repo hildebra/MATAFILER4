@@ -18,6 +18,14 @@ make_path($fixtures, $tools);
 my $downloader = File::Spec->catfile(
 	$Bin, '..', 'secScripts', 'fileManage', 'ENASRAdl.pl',
 );
+my $mataf = File::Spec->catfile($Bin, '..', 'MATAF4.pl');
+open my $mataf_fh, '<', $mataf or die "Cannot read $mataf: $!";
+my $mataf_source = do { local $/; <$mataf_fh> };
+close $mataf_fh;
+like(
+	$mataf_source,
+	qr/my \$downloadConfig = \$MFconfig\{configFile\};.*?File::Spec->rel2abs\(\$downloadConfig\).*?\('--config', \$downloadConfig\).*?\@configArguments/s,
+	'the download job receives the selected config as a scheduler-safe absolute path');
 
 sub write_file {
 	my ($path, $content) = @_;
@@ -208,6 +216,26 @@ my $input = $ARGV[-1];
 gzip $input => "$input.gz" or die $GzipError;
 unlink $input or die $!;
 PERL
+my $tool_config = File::Spec->catfile($root, 'downloader-config.txt');
+write_file(
+	$tool_config,
+	join("\n",
+		"MFLRDir\t$root",
+		"BINDir\t$root/bin",
+		"DBDir\t$root/db",
+		"MGSTKDir\t$root/mgs",
+		"CONDcmd\tmicromamba",
+		'CONDA' . "\t" . 'eval "$(micromamba shell hook -s bash)"',
+		"CONDAbaseEnv\tMF4",
+		"Rscript\tRscript",
+		"Rpath\t[MFLRDir]/R",
+		"wget\t$fake_wget",
+		"prefetch\t$fake_prefetch",
+		"fasterq-dump\t$fake_fasterq",
+		"vdb-validate\t$fake_validator",
+		"pigz\t$fake_gzip",
+	), "\n",
+);
 
 my $sra_output = File::Spec->catdir($root, 'sra-download');
 my $sra_metadata = File::Spec->catfile($root, 'sra-metadata.json');
@@ -222,12 +250,8 @@ write_file(File::Spec->catfile($sra_resume_cache, '.partial'), 'resume');
 		$^X, $downloader,
 		'--provider', 'sra', '--accession', 'SRR900001',
 		'--output-dir', $sra_output, '--metadata-out', $sra_metadata,
-		'--wget', $fake_wget,
-		'--prefetch', $fake_prefetch,
-		'--vdb-validate', $fake_validator,
-		'--fasterq-dump', $fake_fasterq,
-		'--compressor', $fake_gzip,
-	), 0, 'NCBI SRA Toolkit download, validation, and conversion succeeds');
+		'--config', $tool_config,
+	), 0, 'SRA tools resolve through getProgPaths and the selected config');
 }
 my $sra = read_json($sra_metadata);
 is($sra->{seqtech}, 'ONT', 'NCBI OXFORD_NANOPORE platform maps to ONT');

@@ -228,7 +228,9 @@ sub createConsSNPandSVs;
 #       scratch-resident sample inputs with archive provenance and safe cleanup.
 #4.45: 16.8.26: submit accession acquisition as a dedicated scheduler job on
 #       downloadQueue and defer dependent sample processing until validation.
-my $MATFILER_ver = 4.45;
+#4.46: 16.8.26: resolve archive tools through getProgPaths and propagate the
+#       selected MATAFILER config into acquisition jobs.
+my $MATFILER_ver = 4.46;
 my $matafWorkflowActive = 0;
 my $matafWorkflowStage = 'startup';
 my $matafHeartbeatPath = '';
@@ -3644,8 +3646,11 @@ sub submitSampleAccessionDownload {
 	make_path($downloadDir) unless -d $downloadDir;
 	my $threads = int($MFopt{unzipCores} || 1);
 	$threads = 1 if $threads < 1;
-	my @configArguments = $MFconfig{configFile} ne ''
-		? ('--config', $MFconfig{configFile}) : ();
+	my $downloadConfig = $MFconfig{configFile};
+	$downloadConfig = File::Spec->rel2abs($downloadConfig)
+		if $downloadConfig ne '';
+	my @configArguments = $downloadConfig ne ''
+		? ('--config', $downloadConfig) : ();
 	my $command = _shell_command(
 		@downloader,
 		@configArguments,

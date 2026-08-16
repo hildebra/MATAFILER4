@@ -35,6 +35,45 @@ like(
 	qr/^downloadQueue\tnbi-download$/m,
 	'the shipped archive-download partition is nbi-download',
 );
+for my $archive_tool (qw(wget pigz gzip prefetch fasterq-dump vdb-validate)) {
+	like(
+		$internal_config, qr/^\Q$archive_tool\E\t\Q$archive_tool\E$/m,
+		"internal config exposes $archive_tool through getProgPaths",
+	);
+}
+my %recent_tool_defaults = (
+	'secScripts/MGS/finalize_strain_tree_inputs.pl' => [qw(pigz)],
+	'secScripts/SNP/plan_consensus_regions.pl' => [qw(samtools pigz)],
+	'secScripts/assemblies/validate_mapping_references.pl' => [qw(samtools)],
+);
+for my $relative (sort keys %recent_tool_defaults) {
+	my $path = File::Spec->catfile($Bin, '..', split m{/}, $relative);
+	open my $source_fh, '<', $path or die $!;
+	my $source = do { local $/; <$source_fh> };
+	close $source_fh;
+	like(
+		$source,
+		qr/use\s+Mods::IO_Tamoc_progs\s+qw\([^)]*\bgetProgPaths\b/,
+		"$relative imports getProgPaths",
+	);
+	for my $tool (@{$recent_tool_defaults{$relative}}) {
+		like(
+			$source,
+			qr/getProgPaths\(\Q'$tool'\E\)/,
+			"$relative resolves $tool from the shared config by default",
+		);
+	}
+}
+my $database_config_path = File::Spec->catfile($Bin, '..', 'Mods', 'config_DBs.txt');
+open my $database_config_fh, '<', $database_config_path or die $!;
+my $database_config = do { local $/; <$database_config_fh> };
+close $database_config_fh;
+for my $database_key (qw(GTDB_GTDB specI_GTDB)) {
+	like($database_config, qr/^\Q$database_key\E\t/m,
+		"recent annotation database $database_key is defined in config_DBs");
+	unlike($internal_config, qr/^\Q$database_key\E\t/m,
+		"database $database_key is not duplicated in config_internal");
+}
 my $r_environment_path = File::Spec->catfile($Bin, '..', 'helpers', 'install', 'MGTK_R.yml');
 open my $r_environment_fh, '<', $r_environment_path or die $!;
 my $r_environment = do { local $/; <$r_environment_fh> };
