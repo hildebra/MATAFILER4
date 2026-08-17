@@ -153,32 +153,38 @@ like($strain2, qr/"MGSphylo=s"\s*=>\s*\\\$MGSphylo.*?sub resolveOutgroup .*?data
 like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,
 	'custom recursive output removal requires a workflow-owned directory');
 like($strain2,
-	qr/my \$RsummaryTab = "\$FMGpD\/strainStats\.tsv";.*?my \$combineResultsR = getProgPaths\("combineResults_R"\).*?strainStats\.output\.Rds.*?test -s .*?\$analysisStore.*?combineResults\(\);.*?--path .*?\$FMGpD.*?--outDir .*?\$FMGpD.*?systemW\(\$command\).*?did not produce the overview table/s,
-	'postprocessing combines validated strainStats result stores into the named overview table');
+	qr/\$waitForAnalysis->\('strainStats'\);.*?my \$shouldCombineStrainStats = \$rewriteRanalysis \|\| \$strainTaskCount > 0 \|\| !-s \$RsummaryTab;.*?if \(\$shouldCombineStrainStats\) \{.*?combineResults\(0\);.*?\} else \{.*?Reusing existing combined strainStats overview/s,
+	'strainStats stores are combined only when missing or newly stale before the population phase is awaited');
+like($strain2,
+	qr/--include-popgen \$includePopGen/,
+	'combineResults forwards its explicit population-genetics inclusion flag');
+like($strain2,
+	qr/if \(\$includePopGen\).*?did not produce the population overview table/s,
+	'combineResults validates population outputs only for the population-inclusive pass');
 unlike($strain2, qr/open my \$summary_fh.*?\$TXTreport/s,
 	'postprocessing no longer concatenates per-MGS text reports into its overview');
 unlike($strain2, qr/test -s "\.shellQuote\(\$analysisReport\)/,
 	'the legacy text report is not required for RDS-based completion');
 like($strain2,
-	qr/"popGenStats=i".*?"popGenStrictOutgroup=i".*?"popGenGeneticCode=i".*?"popGenCodonStart=i".*?"popGenSeed=i".*?"popGenLegacyTextOutput=i".*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?--ncore \$jobCores.*?--genetic-code \$popGenGeneticCode.*?--codon-start \$popGenCodonStart.*?--seed \$popGenSeed.*?--individual-column .*?\$individualVar.*?--outgroup .*?\$OG.*?--strict-outgroup.*?--legacy-text-output.*?\$strainFile = "\$destD\/IQtree_allsites\.strains\.txt".*?--strain-file .*?\$strainFile.*?test -s .*?\$popGenStore/s,
-	'population genetics forwards parallel, outgroup, codon, seed, identity, and optional strain-file settings to its durable RDS workflow');
+	qr/"popGenStats=i".*?"popGenStrictOutgroup=i".*?"popGenGeneticCode=i".*?"popGenCodonStart=i".*?"popGenSeed=i".*?"popGenLegacyTextOutput=i".*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?--ncore \$jobCores.*?--genetic-code \$popGenGeneticCode.*?--codon-start \$popGenCodonStart.*?--seed \$popGenSeed.*?--individual-column .*?\$individualVar.*?--outgroup .*?\$OG.*?--strict-outgroup.*?--legacy-text-output.*?\$strainFile = "\$destD\/IQtree_allsites\.strains\.txt".*?PopGenStats owns validation and fallback behavior.*?\$popGenCommand --strain-file .*?\$strainFile.*?test -s .*?\$popGenStore/s,
+	'population genetics forwards parallel, outgroup, codon, seed, identity, and the strain-file path to its durable RDS workflow');
 like($strain2,
-	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
-	'existing population RDS stores are reusable and enabled runs require the combined population overview');
+	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?if \(\$doPopGenStats\) \{.*?\$waitForAnalysis->\('popGenStats'\);.*?my \$shouldCombinePopGenStats = \$rewriteRanalysis \|\| \$popGenTaskCount > 0 \|\| !-s \$popGenSummaryTab;.*?if \(\$shouldCombinePopGenStats\) \{.*?combineResults\(1\);.*?\} else \{.*?Reusing existing combined PopGenStats overview.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
+	'existing population RDS stores and aggregate tables are reused, while missing or newly stale tables are combined after the population phase');
 like($strain2,
 	qr/\$popGenSubsampleSummaryTab = "\$FMGpD\/popGenStats\.subsamples\.tsv".*?Combined subsampled population-genetics overview/s,
 	'subsampled population-genetics output is surfaced separately from the full population table');
 unlike($strain2, qr/if \(0\)\{#rerun popgen stats\?\?/,
 	'population genetics is no longer hidden behind a disabled legacy block');
 like($strain2,
-	qr/sub newickNodeCount .*?\$internal = \(\) = \$newick =~ \/\\\(\/g;.*?\$commas = \(\) = \$newick =~ \/,\/g;.*?\$tips = \$commas \+ 1;.*?\$nodes = \$tips \+ \$internal/s,
-	'R-job cost uses an estimated Newick node count rather than the serialized tree file size');
+	qr/sub newickSampleCount \{.*?\$commas = \(\) = \$newick =~ \/,\/g;.*?\$tips = \$commas \+ 1;.*?return \$tips > 0 \? \$tips : 1;/s,
+	'R-job batch cost uses an exact Newick tip/sample count rather than file size');
 like($strain2,
-	qr/my \@k2d = sort \{ \$treeNodes\{\$b\} <=> \$treeNodes\{\$a\}.*?\$batchNodeBudget = \$treeNodes\{\$k2d\[0\]\};.*?\$curBatchNodes \+ \$treeNodeCount > \$batchNodeBudget.*?\$curBatchNodes \+= \$treeNodeCount.*?\$curBatchNodes >= \$batchNodeBudget/s,
-	'largest phylogeny defines the R-job node budget and smaller phylogenies are packed without exceeding it');
+	qr/my \@k2d = sort \{ \$treeSamples\{\$b\} <=> \$treeSamples\{\$a\}.*?my \$largestMGS = \$k2d\[0\];.*?\$batchSampleBudget = \$treeSamples\{\$largestMGS\};.*?for my \$analysisKind \(qw\(strainStats popGenStats\)\).*?\$batchSampleCost = \$treeSampleCount < \$batchSampleBudget.*?3 \* \$treeSampleCount.*?\$curBatchSamples \+ \$batchSampleCost > \$batchSampleBudget.*?\$curBatchSamples \+= \$batchSampleCost.*?\$curBatchSamples >= \$batchSampleBudget/s,
+	'largest MGS defines the sample budget while each smaller MGS counts three times for batching overhead');
 like($strain2,
-	qr/\$jobCores = \$nCore;.*?my \$batchCores = \$nCore;.*?qsubSystem\([^\n]+,\$batchCmd,\$batchCores/s,
-	"combined serial R-analysis batches request and use the standard core count");
+	qr/for my \$analysisKind \(qw\(strainStats popGenStats\)\).*?\$jobCores = \$nCore;.*?my \$batchCores = \$nCore;.*?\$analysisKind\.Ranalysis\.sh.*?qsubSystem\([^\n]+,\$batchCmd,\$batchCores/s,
+	"separate R-analysis batches request and use the standard core count");
 like($strain2,
 	qr/my \$rAnalysisMemoryBaseGB = 24;.*?my \$rAnalysisMemoryCoreThreshold = 4;.*?my \$batchMemory = rAnalysisMemoryForCores\(\$batchCores\).*?qsubSystem\([^\n]+,\$batchCores,\$batchMemory/s,
 	'R-analysis requests start at 24 GiB and use a core-aware memory request');
@@ -186,8 +192,37 @@ like($strain2,
 	qr/sub rAnalysisMemoryForCores \{.*?\$extraCores = \$cores - \$rAnalysisMemoryCoreThreshold;.*?\$memoryGB = \$rAnalysisMemoryBaseGB.*?return \$memoryGB\."G";/s,
 	'R-analysis memory grows beyond the four-core threshold');
 like($strain2,
-	qr/slurmJobFailureSummary.*?%submittedRAnalysisJobs.*?reportRAnalysisSchedulerFailures\(\\%submittedRAnalysisJobs, \$QSBoptHR\).*?Slurm reported failed strainStats R-analysis job\(s\).*?Ranalysis\.sh\.etxt.*?OOM jobs are now submitted with additional R-analysis memory/s,
-	'completed R-analysis submissions are checked against Slurm accounting and OOM failures receive an actionable diagnostic');
+	qr/slurmJobFailureSummary.*?%submittedRAnalysisJobs.*?reportRAnalysisSchedulerFailures\(.*?\$submittedRAnalysisJobs\{\$analysisKind\}.*?\$QSBoptHR, \$analysisKind.*?my \(\$jobs, \$options, \$analysisKind\).*?Slurm reported failed \$analysisKind job\(s\).*?\$analysisKind\.Ranalysis\.sh\.etxt.*?OOM jobs are now submitted with additional R-analysis memory/s,
+	'completed strainStats and PopGenStats submissions are checked independently against Slurm accounting');
+like($strain2,
+	qr/if \(!\$rewriteRanalysis\) \{.*?\$analysisKind eq 'strainStats' && \$strainStatsReady.*?next;.*?\$analysisKind eq 'popGenStats' && \$popGenStatsReady.*?next;.*?\$analysisKind eq 'strainStats' && \(!\$strainStatsReady \|\| \$rewriteRanalysis\).*?rm -f .*?\$analysisStore.*?\$analysisKind eq 'popGenStats' && \(!\$popGenStatsReady \|\| \$rewriteRanalysis\).*?rm -f .*?\$popGenStore/s,
+	'-reSubmit 0 keeps each nonempty result store and emits only its missing analysis type');
+my @analysisPhaseMarkers = (
+	q{$waitForAnalysis->('strainStats');},
+	q{combineResults(0);},
+	q{my ($networkDep, $networkStone) = strainNetwork();},
+	q{my ($treeWasDep, $treeWasStone) = treeWas();},
+	q{my ($phyloFigureDep, $phyloFigureStone) = visualizeSignPhylos();},
+	q{$waitForAnalysis->('popGenStats');},
+	q{combineResults(1);},
+);
+my $previousPhaseMarker = -1;
+my $analysisPhasesInOrder = 1;
+for my $phaseMarker (@analysisPhaseMarkers) {
+	my $phaseMarkerPosition = index($strain2, $phaseMarker);
+	$analysisPhasesInOrder = 0
+		if $phaseMarkerPosition < 0 || $phaseMarkerPosition <= $previousPhaseMarker;
+	$previousPhaseMarker = $phaseMarkerPosition;
+}
+ok($analysisPhasesInOrder,
+	'strain summaries and submitted network/treeWAS/phylogeny work start before the independent population phase is awaited');
+like($strain2,
+	qr/sub visualizeSignPhylos\{.*?\$phyloFigureStone = "\$FMGpD\/phyloFigures\.sto";.*?\$cmdPic \.= "touch ".*?if \(!-e \$phyloFigureStone\).*?qsubSystem\(\s*"\$FMGpD\/phyloFigures\.sh", \$cmdPic, 1, "24G", "phyloFigures".*?return \(\$dep, \$phyloFigureStone\);/s,
+	'significant-phylogeny plotting is submitted with a durable checkpoint and adequate memory');
+like($strain2,
+	qr/\$phyloFigureCheckpoint = "\$FMGpD\/phyloFigures\.sto";.*?unlink \$phyloFigureCheckpoint.*?if -e \$phyloFigureCheckpoint/s,
+	'explicit rewrites invalidate the submitted phylogeny-figure checkpoint');
+
 like($strain2,
 	qr/my \$cmdPrelude = "set -euo pipefail\\nulimit -s 20000\\n";/s,
 	'generated R-analysis scripts explicitly preserve non-zero R exits, including Slurm OOM termination');
