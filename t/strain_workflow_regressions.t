@@ -157,8 +157,10 @@ like($strain2,
 	qr/\$waitForAnalysis->\('strainStats'\);.*?my \$shouldCombineStrainStats = \$rewriteRanalysis \|\| \$strainTaskCount > 0 \|\| !-s \$RsummaryTab;.*?if \(\$shouldCombineStrainStats\) \{.*?combineResults\(0\);.*?\} else \{.*?Reusing existing combined strainStats overview/s,
 	'strainStats stores are combined only when missing or newly stale before the population phase is awaited');
 like($strain2,
-	qr/--include-popgen \$includePopGen/,
-	'combineResults forwards its explicit population-genetics inclusion flag');
+	qr/\$combineResultsR --path .*?shellQuote\(\$FMGpD\).*?--outDir .*?shellQuote\(\$FMGpD\)/s,
+	'combineResults uses only supported path and output options; it auto-detects population-genetics stores');
+unlike($strain2, qr/--include-popgen/,
+	'combineResults is not passed the obsolete population-genetics inclusion option');
 like($strain2,
 	qr/if \(\$includePopGen\).*?did not produce the population overview table/s,
 	'combineResults validates population outputs only for the population-inclusive pass');

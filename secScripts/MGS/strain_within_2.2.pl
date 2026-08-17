@@ -988,7 +988,7 @@ sub combineResults {
 	my ($includePopGen) = @_;
 	$includePopGen = 0 unless defined($includePopGen);
 	my $command = "$combineResultsR --path ".shellQuote($FMGpD)
-		." --outDir ".shellQuote($FMGpD)." --include-popgen $includePopGen\n";
+		." --outDir ".shellQuote($FMGpD)."\n";
 	my $combinedKinds = $includePopGen ? 'strainStats and PopGenStats' : 'strainStats';
 	print "Combining per-MGS $combinedKinds result stores into $RsummaryTab\n";
 	systemW($command);
