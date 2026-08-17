@@ -34,3 +34,10 @@ gpuQueue	ei-gpu	#leave empty if no GPU queue available; queue specifically for g
 netQueue		#leave empty to use mediumQueue; queue/partition for jobs requiring outbound network access
 highMemQueue	ei-largemem
 shortQueue	ei-short	#45 min walltime
+
+# Maximum RAM (GiB) automatic strain/tree OOM retries may request.
+maxMF4mem	512
+
+# Slurm partition for archive acquisition. A selected config may override this;
+# an explicitly empty value falls back to mediumQueue.
+downloadQueue	nbi-download

@@ -332,7 +332,10 @@ my $useGTDBmg = "GTDB";
 my $selfMemGb = 10;
 my $mosaicMemGb = 150;
 my $phase1WorkerRetries = 2;
-my $treeOOMMaxMemGB = 1500;
+# Default is read from maxMF4mem in MATAFILERcfg.txt after option parsing.
+# Retain a built-in fallback for existing installations with an older config.
+my $treeOOMMaxMemGB = 512;
+my $treeOOMMaxMemGBSpecified = 0;
 my $treeOOMRetryRounds = 3;
 my $redoSubmissionData = 0;
 my $deepRepair = 0;
@@ -407,7 +410,10 @@ GetOptions(
 	"selfMemGb=i"    => \$selfMemGb,
 	"mosaicMemGb=i"  => \$mosaicMemGb,
 	"phase1WorkerRetries=i" => \$phase1WorkerRetries,
-	"treeOOMMaxMemGB=f" => \$treeOOMMaxMemGB,
+	"treeOOMMaxMemGB=f" => sub {
+		$treeOOMMaxMemGB = $_[1];
+		$treeOOMMaxMemGBSpecified = 1;
+	},
 	"onlySubmit=i"   => \$onlySubmit, #submit only jobs, or also recreate input fna/faa files? (can take days)
 	"reSubmit=i"     => \$reSubmit, #for all MGS: resubmit tree phylo building
 	"recalcTrees=i"  => \$recalcTrees, #delete tree outputs and rebuild from existing per-MGS inputs
@@ -509,6 +515,14 @@ GetOptions(
 if ($help) {
 	print usage(\%FILTER_DEFAULT);
 	exit 0;
+}
+if (!$treeOOMMaxMemGBSpecified) {
+	my $configuredMaxMF4mem = getProgPaths("maxMF4mem", 0);
+	if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]+)?)$/ && $1 > 0) {
+		$treeOOMMaxMemGB = $1 + 0;
+	} elsif (defined($configuredMaxMF4mem) && length($configuredMaxMF4mem)) {
+		warn "Ignoring invalid maxMF4mem setting '$configuredMaxMF4mem'; using 512 GiB\n";
+	}
 }
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-redoEPAfilter must be 0 or 1\n"
@@ -6777,7 +6791,8 @@ Workflow splitting:
                                  the parent process
   -treeOOMMaxMemGB FLOAT        Maximum memory for automatic tree OOM retries;
                                  each OOM round doubles the previous request and
-                                 at most three rounds are attempted [default 1500]
+                                 at most three rounds are attempted [default:
+                                 maxMF4mem from MATAFILERcfg.txt; 512]
 
 Gene selection and biological QC:
   -maxGenes INT                  Maximum validated loci per MGS/sample

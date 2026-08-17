@@ -80,8 +80,9 @@ range. `-killDepNever 1` can remove Slurm jobs
 stuck in dependency states, but use it only when this matches your local scheduler policy.
 
 ENA and SRA acquisition jobs use the dedicated `downloadQueue` Slurm partition.
-Its shipped value in `Mods/config_internal.txt` is `nbi-download`. To override
-it, add a value to the selected site `config.txt`:
+Its default is set in the local `Mods/MATAFILERcfg.txt`, which the installer
+creates from `Mods/config.old`; the supplied value is `nbi-download`. To
+override it, edit the selected site `config.txt`:
 
 ```text
 downloadQueue	my-network-partition
@@ -95,6 +96,10 @@ job; dependent filtering, assembly, and mapping jobs use their normal queues.
 `netQueue` remains available for other code paths that explicitly request a
 general network-enabled queue. It likewise falls back to `mediumQueue` when
 empty and uses the configured `longTime` wall time.
+
+`maxMF4mem` sets the maximum GiB requested by automatic OOM retries in the
+strain workflows. The supplied default is `512`; `-treeOOMMaxMemGB` remains an
+explicit per-run override for tree construction.
 
 ## Database setup
 

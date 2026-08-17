@@ -71,6 +71,7 @@ is_deeply(
 my $strain = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 my $strain2 = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
 my $internal_config = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config_internal.txt'));
+my $site_config_template = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config.old'));
 my $neighbor_tree_r = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'R_scripts', 'neighborTree.R'));
 like($strain, qr/sub consensusInputState .*?\$nt_ready && \$aa_ready.*?return 'regenerate' if \$vcf_ready/s,
 	'consensus resume requires the paired NT and AA outputs and repairs from VCF');
@@ -183,17 +184,22 @@ like($strain2,
 	qr/my \@k2d = sort \{ \$treeSamples\{\$b\} <=> \$treeSamples\{\$a\}.*?my \$largestMGS = \$k2d\[0\];.*?\$batchSampleBudget = \$treeSamples\{\$largestMGS\};.*?for my \$analysisKind \(qw\(strainStats popGenStats\)\).*?\$batchSampleCost = \$treeSampleCount < \$batchSampleBudget.*?3 \* \$treeSampleCount.*?\$curBatchSamples \+ \$batchSampleCost > \$batchSampleBudget.*?\$curBatchSamples \+= \$batchSampleCost.*?\$curBatchSamples >= \$batchSampleBudget/s,
 	'largest MGS defines the sample budget while each smaller MGS counts three times for batching overhead');
 like($strain2,
-	qr/for my \$analysisKind \(qw\(strainStats popGenStats\)\).*?\$jobCores = \$nCore;.*?my \$batchCores = \$nCore;.*?\$analysisKind\.Ranalysis\.sh.*?qsubSystem\([^\n]+,\$batchCmd,\$batchCores/s,
-	"separate R-analysis batches request and use the standard core count");
+	qr/my \$submitRAnalysisBatch = sub \{.*?qsubSystem\(.*?\$script, \$batchCmd, \$batchCores, \$batchMemory, \$batchLabel/s,
+	'R-analysis batch submissions retain the standard core count and memory request through one reusable helper');
 like($strain2,
-	qr/my \$rAnalysisMemoryBaseGB = 24;.*?my \$rAnalysisMemoryCoreThreshold = 4;.*?my \$batchMemory = rAnalysisMemoryForCores\(\$batchCores\).*?qsubSystem\([^\n]+,\$batchCores,\$batchMemory/s,
-	'R-analysis requests start at 24 GiB and use a core-aware memory request');
+	qr/for my \$analysisKind \(qw\(strainStats popGenStats\)\).*?\$jobCores = \$nCore;.*?\$submitRAnalysisBatch->\(.*?\$analysisKind, \$batchDestD\."\$analysisKind\.Ranalysis\.sh".*?\$batchCmd, \$batchCores, \$batchMemory, \$batchLabel, \$batchStores/s,
+	'separate strainStats and PopGenStats batches use the requested standard core count');
 like($strain2,
-	qr/sub rAnalysisMemoryForCores \{.*?\$extraCores = \$cores - \$rAnalysisMemoryCoreThreshold;.*?\$memoryGB = \$rAnalysisMemoryBaseGB.*?return \$memoryGB\."G";/s,
-	'R-analysis memory grows beyond the four-core threshold');
+	qr/getProgPaths\("maxMF4mem", 0\).*?my \$rAnalysisOOMMaxMemoryGB = 512;.*?\$rAnalysisOOMMaxMemoryGB = \$1 \+ 0;.*?my \$rAnalysisMemoryBaseGB = 24;.*?my \$rAnalysisMemoryCoreThreshold = 4;.*?my \$rAnalysisRetryRounds = 2;.*?sub rAnalysisMemoryForCores \{.*?\$extraCores = \$cores - \$rAnalysisMemoryCoreThreshold;.*?return \$memoryGB\."G";/s,
+	'R-analysis reads maxMF4mem, grows for extra cores, and has two OOM-aware retry rounds');
 like($strain2,
-	qr/slurmJobFailureSummary.*?%submittedRAnalysisJobs.*?reportRAnalysisSchedulerFailures\(.*?\$submittedRAnalysisJobs\{\$analysisKind\}.*?\$QSBoptHR, \$analysisKind.*?my \(\$jobs, \$options, \$analysisKind\).*?Slurm reported failed \$analysisKind job\(s\).*?\$analysisKind\.Ranalysis\.sh\.etxt.*?OOM jobs are now submitted with additional R-analysis memory/s,
-	'completed strainStats and PopGenStats submissions are checked independently against Slurm accounting');
+	qr/if \(\$analysisKind eq 'strainStats'.*?\$cmd \.= "if ! test -s ".*?rm -f .*?\$analysisStore.*?\$cmd \.= "fi\\n";.*?\$batchStores->\{\$d\} = \$analysisStore.*?if \(\$analysisKind eq 'popGenStats'.*?\$cmd \.= "if ! test -s ".*?rm -f .*?\$popGenStore.*?\$cmd \.= "fi\\n";.*?\$batchStores->\{\$d\} = \$popGenStore/s,
+	'replayed R-analysis batch scripts skip nonempty RDS outputs and retain the exact missing-output inventory');
+like($strain2,
+	qr/use Mods::SlurmAccounting qw\(slurm_tree_memory_summary next_oom_retry_memory_mb\);.*?my \$batchHasMissingStores = sub \{.*?my \$rAnalysisOOMBatches = sub \{.*?slurm_tree_memory_summary.*?while \(1\).*?last if \$round >= \$rAnalysisRetryRounds;.*?Retrying \$analysisKind round \$round\/\$rAnalysisRetryRounds.*?increaseRAnalysisMemory\(\$batch->\{memory\}\).*?\.retry\$round\.sh.*?sub increaseRAnalysisMemory \{.*?next_oom_retry_memory_mb.*?sub reportRAnalysisSchedulerFailures \{.*?warn "Slurm reported failed .*?incomplete result batches will be retried/s,
+	'incomplete R-analysis batches are retried twice, using Mods Slurm accounting to double only OOM memory requests');
+unlike($strain2, qr/die "Slurm reported failed \$analysisKind job\(s\)/,
+	'R-analysis failures do not abort before their bounded retry rounds complete');
 like($strain2,
 	qr/if \(!\$rewriteRanalysis\) \{.*?\$analysisKind eq 'strainStats' && \$strainStatsReady.*?next;.*?\$analysisKind eq 'popGenStats' && \$popGenStatsReady.*?next;.*?\$analysisKind eq 'strainStats' && \(!\$strainStatsReady \|\| \$rewriteRanalysis\).*?rm -f .*?\$analysisStore.*?\$analysisKind eq 'popGenStats' && \(!\$popGenStatsReady \|\| \$rewriteRanalysis\).*?rm -f .*?\$popGenStore/s,
 	'-reSubmit 0 keeps each nonempty result store and emits only its missing analysis type');
@@ -681,8 +687,12 @@ like($strain,
 	qr/\$totMem = int\(\$totMem \* 2\).*?\$numCoreL = 1.*?-epaOnly 1.*?\$outD2\/treeCmd\.epa_retry\.sh/s,
 	'an EPA-only retry gets a one-core doubled-memory job and explicit BuildTree mode');
 like($strain,
-	qr/my \$treeOOMMaxMemGB = 1500.*?treeOOMMaxMemGB=f.*?-treeOOMMaxMemGB must be positive.*?maximum_rounds => \$treeOOMRetryRounds/s,
-	'automatic tree OOM recovery has a configurable 1.5 TB default ceiling');
+	qr/my \$treeOOMMaxMemGB = 512;.*?my \$treeOOMMaxMemGBSpecified = 0;.*?"treeOOMMaxMemGB=f" => sub \{.*?\$treeOOMMaxMemGBSpecified = 1;.*?getProgPaths\("maxMF4mem", 0\).*?-treeOOMMaxMemGB must be positive.*?maximum_rounds => \$treeOOMRetryRounds/s,
+	'automatic tree OOM recovery uses maxMF4mem by default while retaining an explicit per-run override');
+like($site_config_template, qr/^maxMF4mem\t512$/m,
+	'the installed site-config template sets the shared strain OOM ceiling to 512 GiB');
+unlike($internal_config, qr/^downloadQueue\t/m,
+	'the internal program config leaves the archive queue to the site config');
 like($strain,
 	qr/sub retryOOMTreeJobs.*?for my \$round \(1 \.\. \$maximumRounds\).*?oom_jobs.*?next_oom_retry_memory_mb.*?epaOnlyRetryReady\(\$mgsDirectory, 1\).*?-epaThreads\\s\+\\d\+\/\$1-epaThreads 1.*?treeCmd\.epa_retry\.sh.*?qsubSystemJobAlive/s,
 	'only accounting-confirmed OOM jobs are retried and EPA-stage retries use one thread');

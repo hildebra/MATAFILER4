@@ -9,6 +9,7 @@ use Getopt::Long qw( GetOptions );
 
 use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta gzipopen);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs slurmJobFailureSummary);
+use Mods::SlurmAccounting qw(slurm_tree_memory_summary next_oom_retry_memory_mb);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::TamocFunc qw ( getFileStr );
@@ -25,6 +26,7 @@ sub combineResults;
 sub newickSampleCount;
 sub newickNodeCount;
 sub rAnalysisMemoryForCores;
+sub increaseRAnalysisMemory;
 sub reportRAnalysisSchedulerFailures;
 sub resolveOutgroup;
 sub loggedOutgroup;
@@ -32,7 +34,13 @@ sub savedCommandOutgroup;
 sub mgsTreeOutgroup;
 
 my $MGSTKdir = getProgPaths("MGSTKDir");
-
+my $configuredMaxMF4mem = getProgPaths("maxMF4mem", 0);
+my $rAnalysisOOMMaxMemoryGB = 512;
+if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]+)?)$/ && $1 > 0) {
+	$rAnalysisOOMMaxMemoryGB = $1 + 0;
+} elsif (defined($configuredMaxMF4mem) && length($configuredMaxMF4mem)) {
+	warn "Ignoring invalid maxMF4mem setting '$configuredMaxMF4mem'; using 512 GiB\n";
+}
 #.21: added $DiscTests $ContTests
 #.22: R interface updated
 #.23: Perl interface updated
@@ -57,7 +65,8 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.42: forward reproducible population-genetics settings and retain strict shell failures
 #.43: phase strainStats and PopGenStats independently and weight small-MGS R batches
 #.44: submit significant-phylogeny figures with the strain-only postprocessing phase
-my $version = 0.44;
+#.45: retry incomplete R-analysis batches twice and double memory after Slurm OOMs
+my $version = 0.45;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $checkMaxNumJobs = 400;
@@ -79,6 +88,9 @@ my $nCoreHeavy = 12;
 my $rAnalysisMemoryBaseGB = 24;
 my $rAnalysisMemoryCoreThreshold = 4;
 my $rAnalysisMemoryPerExtraCoreGB = 1;
+# Failed R-analysis batches are retried twice; an accounting-confirmed OOM
+# doubles that batch's Slurm memory request for its next attempt.
+my $rAnalysisRetryRounds = 2;
 my $refMap = "";#$ARGV[3];#"/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/maps/drama4.map";
 #my $FMGpD = "$GCd/MGS/phylo";
 my $FMGpD = "";#$ARGV[1];# if (@ARGV > 1);
@@ -118,7 +130,8 @@ die "-GCd, -map, -FMGdir and -MGSmatrix are required\n"
 	unless length($GCd) && length($refMap) && length($FMGpD) && length($abMatrix);
 die "Gene-catalog and phylogeny directories must exist\n" unless -d $GCd && -d $FMGpD;
 die "Map or MGS abundance matrix is missing\n" unless -s $refMap && -s $abMatrix;
-die "Core requests must be positive\n" unless $nCore > 0 && $nCoreHeavy > 0;
+die "Core requests must be positive and R-analysis retry rounds must be at least two\n"
+	unless $nCore > 0 && $nCoreHeavy > 0 && $rAnalysisRetryRounds >= 2;
 die "-submit and -reSubmit must be 0 or 1\n" unless $doSubmit =~ /^[01]$/ && $rewriteRanalysis =~ /^[01]$/;
 die "-popGenStats must be 0 or 1\n" unless $doPopGenStats =~ /^[01]$/;
 die "-popGenStrictOutgroup and -popGenLegacyTextOutput must be 0 or 1\n"
@@ -170,7 +183,7 @@ print "Fallback outgroup tree: ".(length($MGSphylo) ? $MGSphylo : "<none>")."\n"
 print "Paths: strain summary=$RsummaryTab; population summary=$popGenSummaryTab; subsampled population summary=$popGenSubsampleSummaryTab; toolkit=$MGSTKdir\n";
 print "Resources: standard cores=$nCore; heavy-analysis cores=$nCoreHeavy; R-analysis memory="
 	."${rAnalysisMemoryBaseGB}G + ${rAnalysisMemoryPerExtraCoreGB}G per core above $rAnalysisMemoryCoreThreshold; "
-	."queue throttle=$checkMaxNumJobs jobs\n";
+	."retry rounds=$rAnalysisRetryRounds; OOM ceiling=${rAnalysisOOMMaxMemoryGB}G; queue throttle=$checkMaxNumJobs jobs\n";
 print "Metadata: individual=" . ($individualVar || "<none>")
 	. "; family=" . ($familyVar || "<none>")
 	. "; stability groups=" . ($groupStabilityVars || "<none>") . "\n";
@@ -290,20 +303,42 @@ my %outgroupSources;
 my %jobsByAnalysis;
 my %submittedRAnalysisJobs;
 my %submittedByAnalysis;
+my %rAnalysisBatches;
 my $wrHead=1;
 my $recordRAnalysisJob = sub {
-	my ($analysisKind, $dependency, $label, $cores, $memory) = @_;
-	return unless $doSubmit && ($QSBoptHR->{qmode} || '') eq 'slurm';
-	return unless defined($dependency) && length($dependency);
+	my ($analysisKind, $dependency, $label, $cores, $memory, $jobRecords) = @_;
+	return '' unless $doSubmit && ($QSBoptHR->{qmode} || '') eq 'slurm';
+	return '' unless defined($dependency) && length($dependency);
 	my $jobID = $dependency;
 	my $runTag = $QSBoptHR->{rTag} || '';
 	$jobID =~ s/^\Q$runTag\E// if length($runTag);
-	return unless $jobID =~ /^\d+$/;
-	$submittedRAnalysisJobs{$analysisKind}{$jobID} = {
+	return '' unless $jobID =~ /^\d+$/;
+	$jobRecords ||= ($submittedRAnalysisJobs{$analysisKind} ||= {});
+	$jobRecords->{$jobID} = {
 		requested_name => "$analysisKind.$label",
 		cores => $cores,
 		memory => $memory,
 	};
+	return $jobID;
+};
+my $submitRAnalysisBatch = sub {
+	my ($analysisKind, $script, $batchCmd, $batchCores, $batchMemory, $batchLabel, $stores) = @_;
+	my ($dep, $qcmd) = qsubSystem(
+		$script, $batchCmd, $batchCores, $batchMemory, $batchLabel, "", "", 1, [], $QSBoptHR);
+	my $jobID = $recordRAnalysisJob->(
+		$analysisKind, $dep, $batchLabel, $batchCores, $batchMemory);
+	push(@{$jobsByAnalysis{$analysisKind}}, $dep);
+	push(@{$rAnalysisBatches{$analysisKind}}, {
+		script => $script,
+		command => $batchCmd,
+		cores => $batchCores,
+		memory => $batchMemory,
+		label => $batchLabel,
+		stores => { %{$stores} },
+		dependency => $dep,
+		job_id => $jobID,
+	});
+	return $dep;
 };
 
 for my $analysisKind (qw(strainStats popGenStats)) {
@@ -312,6 +347,7 @@ for my $analysisKind (qw(strainStats popGenStats)) {
 	my $cmd = $cmdPrelude; my $destD = "";
 	my $batchDestD = ""; my $batchLabel = "";
 	my $phaseSubmitted = 0;
+	my $batchStores = {};
 foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	$cnt++;
 	$destD = $dirs{$d};
@@ -369,25 +405,30 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		my $batchCores = $nCore;
 		my $batchMemory = rAnalysisMemoryForCores($batchCores);
 		my $batchCmd = $cmd;
-		my ($dep,$qcmd) = qsubSystem($batchDestD."$analysisKind.Ranalysis.sh",$batchCmd,$batchCores,$batchMemory,$batchLabel,"","",1,[],$QSBoptHR);
-		$recordRAnalysisJob->($analysisKind, $dep, $batchLabel, $batchCores, $batchMemory);
-		push(@{$jobsByAnalysis{$analysisKind}},$dep);
+		$submitRAnalysisBatch->(
+			$analysisKind, $batchDestD."$analysisKind.Ranalysis.sh",
+			$batchCmd, $batchCores, $batchMemory, $batchLabel, $batchStores);
 		$phaseSubmitted++;
 		$curBatch = 0; $curBatchSamples = 0; $cmd=$cmdPrelude;
+		$batchStores = {};
 		$batchDestD = ""; $batchLabel = "";
 	}
 	$cmd .= "echo ".shellQuote("At tree $d")."\n";
 	my $OGstr = $OG ne "" ? "--outgroup ".shellQuote($OG)." " : "";
 	if ($analysisKind eq 'strainStats' && (!$strainStatsReady || $rewriteRanalysis)) {
+		$cmd .= "if ! test -s ".shellQuote($analysisStore)."; then\n";
 		$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStore))."\n";
 		$cmd .= "echo ".shellQuote("Starting strainStats for $d with $jobCores core(s)")."\n";
 		$cmd .= "$strainStatsR --path ".shellQuote($destD)." --tree ".shellQuote("../phylo/$defTree")." --taxN ".shellQuote($d)." $OGstr --map ".shellQuote($refMap)." --metagStats ".shellQuote($MGstats)." --abMat ".shellQuote($abMatrix)." --ncore $jobCores --siteMode 1 --MFDir ".shellQuote($MGSTKdir)." --wrColNms $wrHead --discPermTests ".shellQuote($DiscTests)." --contPermTests ".shellQuote($ContTests)." --familyCol ".shellQuote($familyVar)." --groupStabilityVars ".shellQuote($groupStabilityVars)." > ".shellQuote($analysisLog)."\n";
 		$cmd .= "test -s ".shellQuote($analysisStore)."\n";
 		$cmd .= "echo ".shellQuote("Completed strainStats for $d")."\n";
+		$cmd .= "fi\n";
+		$batchStores->{$d} = $analysisStore;
 		$analysisAttempted{$d}{strainStats} = { store => $analysisStore };
 		$wrHead=0;
 	}
 	if ($analysisKind eq 'popGenStats' && (!$popGenStatsReady || $rewriteRanalysis)) {
+		$cmd .= "if ! test -s ".shellQuote($popGenStore)."; then\n";
 		$cmd .= "rm -f ".shellQuote($popGenStore)."\n";
 		$cmd .= "echo ".shellQuote("Starting popGenStats for $d")."\n";
 		my $popGenCommand = "$popGenStatsR ".join(" ", map { shellQuote($_) }
@@ -407,6 +448,8 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		$cmd .= "$popGenCommand --strain-file ".shellQuote($strainFile)."\n";
 		$cmd .= "test -s ".shellQuote($popGenStore)."\n";
 		$cmd .= "echo ".shellQuote("Completed popGenStats for $d")."\n";
+		$cmd .= "fi\n";
+		$batchStores->{$d} = $popGenStore;
 		$analysisAttempted{$d}{popGenStats} = { store => $popGenStore };
 	}
 	
@@ -422,11 +465,12 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		my $batchCores = $nCore;
 		my $batchMemory = rAnalysisMemoryForCores($batchCores);
 		my $batchCmd = $cmd;
-		my ($dep,$qcmd) = qsubSystem($batchDestD."$analysisKind.Ranalysis.sh",$batchCmd,$batchCores,$batchMemory,$batchLabel,"","",1,[],$QSBoptHR);
-		$recordRAnalysisJob->($analysisKind, $dep, $batchLabel, $batchCores, $batchMemory);
-		push(@{$jobsByAnalysis{$analysisKind}},$dep);
+		$submitRAnalysisBatch->(
+			$analysisKind, $batchDestD."$analysisKind.Ranalysis.sh",
+			$batchCmd, $batchCores, $batchMemory, $batchLabel, $batchStores);
 		$phaseSubmitted++;
 		$curBatch = 0; $curBatchSamples = 0; $cmd=$cmdPrelude;
+		$batchStores = {};
 		$batchDestD = ""; $batchLabel = "";
 	}
 	#die;
@@ -436,10 +480,11 @@ if ($curBatch > 0){
 	my $batchCores = $nCore;
 	my $batchMemory = rAnalysisMemoryForCores($batchCores);
 	my $batchCmd = $cmd;
-	my ($dep,$qcmd) = qsubSystem($batchDestD."$analysisKind.Ranalysis.sh",$batchCmd,$batchCores,$batchMemory,$batchLabel,"","",1,[],$QSBoptHR);
-	$recordRAnalysisJob->($analysisKind, $dep, $batchLabel, $batchCores, $batchMemory);
+	$submitRAnalysisBatch->(
+		$analysisKind, $batchDestD."$analysisKind.Ranalysis.sh",
+		$batchCmd, $batchCores, $batchMemory, $batchLabel, $batchStores);
 	$curBatch = 0; $curBatchSamples = 0; $cmd=$cmdPrelude;
-	push(@{$jobsByAnalysis{$analysisKind}},$dep);
+	$batchStores = {};
 	$phaseSubmitted++;
 }
 	$submittedByAnalysis{$analysisKind} = $phaseSubmitted;
@@ -473,15 +518,90 @@ my $verifyAnalysisStores = sub {
 	die "$analysisKind failed or produced incomplete RDS output for: ".join(", ", @failed)."\n"
 		if @failed;
 };
+my $batchHasMissingStores = sub {
+	my ($batch) = @_;
+	return scalar grep { !-s $batch->{stores}{$_} }
+		keys %{ $batch->{stores} || {} };
+};
+my $rAnalysisOOMBatches = sub {
+	my ($batches) = @_;
+	return {} unless $doSubmit && ($QSBoptHR->{qmode} || '') eq 'slurm';
+	my @records;
+	for my $batch (@{$batches}) {
+		next unless defined($batch->{job_id}) && $batch->{job_id} =~ /^\d+$/;
+		my $memory = $batch->{memory} || '';
+		my $requestedMB = 0;
+		$requestedMB = int($1 * 1024 + 0.5) if $memory =~ /^([\d.]+)G$/i;
+		$requestedMB = int($1 + 0.5) if $memory =~ /^([\d.]+)M$/i;
+		next unless $requestedMB > 0;
+		push @records, {
+			job_id => $batch->{job_id},
+			requested_mb => $requestedMB,
+			mgs => $batch->{label},
+		};
+	}
+	return {} unless @records;
+	my $summary = slurm_tree_memory_summary(\@records);
+	if (!$summary->{available}) {
+		warn "Could not query Slurm memory accounting for R-analysis OOM recovery: "
+			.($summary->{error} || 'unknown error')."\n";
+		return {};
+	}
+	return { map { $_->{job_id} => 1 } @{$summary->{oom_jobs} || []} };
+};
 my $waitForAnalysis = sub {
 	my ($analysisKind) = @_;
-	my $jobs = $jobsByAnalysis{$analysisKind} || [];
-	if (@$jobs) {
-		print "\n\nwaiting for $analysisKind jobs to finish\n";
-		qsubSystemJobAlive($jobs, $QSBoptHR);
+	my @allBatches = @{$rAnalysisBatches{$analysisKind} || []};
+	my @roundBatches = @allBatches;
+	my $roundJobRecords = $submittedRAnalysisJobs{$analysisKind} || {};
+	my $round = 0;
+	while (1) {
+		my @roundJobs = grep { defined($_) && length($_) }
+			map { $_->{dependency} } @roundBatches;
+		if (@roundJobs) {
+			print "\n\nwaiting for $analysisKind ".($round ? "retry round $round" : "jobs")." to finish\n";
+			qsubSystemJobAlive(\@roundJobs, $QSBoptHR);
+		}
+		reportRAnalysisSchedulerFailures($roundJobRecords, $QSBoptHR, $analysisKind);
+		my @retryBatches = grep { $batchHasMissingStores->($_) } @allBatches;
+		last unless @retryBatches;
+		last if $round >= $rAnalysisRetryRounds;
+		$round++;
+		my $oomBatches = $rAnalysisOOMBatches->(\@roundBatches);
+		my $oomCount = scalar grep { $oomBatches->{$_->{job_id}} } @retryBatches;
+		print "Retrying $analysisKind round $round/$rAnalysisRetryRounds for ".scalar(@retryBatches)
+			." incomplete batch(es)".($oomCount ? "; increasing memory for $oomCount OOM batch(es)" : '')."\n";
+		my %retryJobRecords;
+		my @nextRoundBatches;
+		for my $batch (@retryBatches) {
+			my $retryMemory = $batch->{memory};
+			if ($oomBatches->{$batch->{job_id}}) {
+				my $increasedMemory = increaseRAnalysisMemory($batch->{memory});
+				if (defined($increasedMemory)) {
+					$retryMemory = $increasedMemory;
+				} else {
+					warn "R-analysis OOM retry memory ceiling reached for $batch->{label}; retaining $retryMemory\n";
+				}
+			}
+			qsubSystemWaitMaxJobs($checkMaxNumJobs, 0, $QSBoptHR) if $doSubmit;
+			my $retryScript = $batch->{script};
+			$retryScript =~ s/\.sh\z/.retry$round.sh/;
+			$retryScript .= ".retry$round.sh" if $retryScript eq $batch->{script};
+			my $retryLabel = "$batch->{label}.retry$round";
+			my ($dep, $qcmd) = qsubSystem(
+				$retryScript, $batch->{command}, $batch->{cores}, $retryMemory,
+				$retryLabel, "", "", 1, [], $QSBoptHR);
+			my $jobID = $recordRAnalysisJob->(
+				$analysisKind, $dep, $retryLabel, $batch->{cores}, $retryMemory, \%retryJobRecords);
+			$batch->{dependency} = $dep;
+			$batch->{job_id} = $jobID;
+			$batch->{memory} = $retryMemory;
+			$batch->{label} = $retryLabel;
+			push @nextRoundBatches, $batch;
+		}
+		@roundBatches = @nextRoundBatches;
+		$roundJobRecords = \%retryJobRecords;
 	}
-	reportRAnalysisSchedulerFailures(
-		$submittedRAnalysisJobs{$analysisKind} || {}, $QSBoptHR, $analysisKind);
 	$verifyAnalysisStores->($analysisKind);
 };
 
@@ -927,17 +1047,30 @@ sub rAnalysisMemoryForCores {
 	return $memoryGB."G";
 }
 
+sub increaseRAnalysisMemory {
+	my ($memory) = @_;
+	return undef unless defined($memory);
+	my $currentMB;
+	$currentMB = int($1 * 1024 + 0.5) if $memory =~ /^([\d.]+)G$/i;
+	$currentMB = int($1 + 0.5) if $memory =~ /^([\d.]+)M$/i;
+	return undef unless defined($currentMB) && $currentMB > 0;
+	my $maximumMB = int($rAnalysisOOMMaxMemoryGB * 1024 + 0.5);
+	my $nextMB = next_oom_retry_memory_mb($currentMB, $maximumMB);
+	return defined($nextMB) ? $nextMB.'M' : undef;
+}
+
 sub reportRAnalysisSchedulerFailures {
 	my ($jobs, $options, $analysisKind) = @_;
 	$analysisKind ||= 'R-analysis';
-	return unless $options->{doSubmit} && ($options->{qmode} || '') eq 'slurm';
-	return unless scalar(keys %{$jobs});
+	my $emptySummary = { failed => 0, categories => {} };
+	return $emptySummary unless $options->{doSubmit} && ($options->{qmode} || '') eq 'slurm';
+	return $emptySummary unless scalar(keys %{$jobs});
 	my $summary = slurmJobFailureSummary($jobs, $options);
 	if (!defined($summary)) {
 		warn "Could not query Slurm accounting for $analysisKind jobs\n";
-		return;
+		return $emptySummary;
 	}
-	return unless $summary->{failed};
+	return $summary unless $summary->{failed};
 	my @failures;
 	for my $category (sort keys %{$summary->{categories}}) {
 		my $counts = $summary->{categories}{$category}{failures} || {};
@@ -945,9 +1078,10 @@ sub reportRAnalysisSchedulerFailures {
 			"$_=$counts->{$_}"
 		} sort keys %{$counts});
 	}
-	die "Slurm reported failed $analysisKind job(s): ".join("; ", @failures)
+	warn "Slurm reported failed $analysisKind job(s): ".join("; ", @failures)
 		.". Inspect the matching $analysisKind.Ranalysis.sh.etxt and *.Ranalysis.log files; "
-		."OOM jobs are now submitted with additional R-analysis memory.\n";
+		."incomplete result batches will be retried and OOM batches receive additional memory.\n";
+	return $summary;
 }
 
 sub shellQuote {

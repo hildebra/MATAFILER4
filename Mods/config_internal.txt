@@ -17,10 +17,6 @@ consVCF_region_planner	perl [MFLRDir]/secScripts/SNP/plan_consensus_regions.pl
 finished_sample_cleanup	perl [MFLRDir]/secScripts/cleanup_finished_sample.pl
 ena_sra_downloader	perl [MFLRDir]/secScripts/fileManage/ENASRAdl.pl
 
-# Slurm partition for archive acquisition. A selected config may override this;
-# an explicitly empty value falls back to mediumQueue.
-downloadQueue	nbi-download
-
 
 #elevated MF3 scripts (main routines)
 geneCat_scr	perl [MFLRDir]/secScripts/geneCat.pl

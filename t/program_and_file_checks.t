@@ -23,6 +23,10 @@ my $internal_config_path = File::Spec->catfile($Bin, '..', 'Mods', 'config_inter
 open my $internal_config_fh, '<', $internal_config_path or die $!;
 my $internal_config = do { local $/; <$internal_config_fh> };
 close $internal_config_fh;
+my $site_config_template_path = File::Spec->catfile($Bin, '..', 'Mods', 'config.old');
+open my $site_config_template_fh, '<', $site_config_template_path or die $!;
+my $site_config_template = do { local $/; <$site_config_template_fh> };
+close $site_config_template_fh;
 my $iqtree_selector = 'iqtree' . "\t" .
 	'$(command -v iqtree3 || command -v iqtree2)' . "\t" . 'env:MF4phylo';
 like(
@@ -30,11 +34,12 @@ like(
 	qr/^\Q$iqtree_selector\E$/m,
 	'IQ-TREE configuration prefers iqtree3 and falls back to iqtree2',
 );
-like(
-	$internal_config,
-	qr/^downloadQueue\tnbi-download$/m,
-	'the shipped archive-download partition is nbi-download',
-);
+like($site_config_template, qr/^downloadQueue\tnbi-download$/m,
+	'the site-config template supplies the nbi-download archive partition');
+unlike($internal_config, qr/^downloadQueue\t/m,
+	'the internal config does not override the site archive-download partition');
+like($site_config_template, qr/^maxMF4mem\t512$/m,
+	'the site-config template caps automatic strain OOM retries at 512 GiB');
 for my $archive_tool (qw(wget pigz gzip prefetch fasterq-dump vdb-validate)) {
 	like(
 		$internal_config, qr/^\Q$archive_tool\E\t\Q$archive_tool\E$/m,
