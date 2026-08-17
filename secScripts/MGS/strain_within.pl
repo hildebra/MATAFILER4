@@ -202,7 +202,7 @@ my $completionMessage = "";
 #.78: use deterministic rate/GC partition merging for strain trees by default
 #.79: target deterministic rate/GC partitions by effective called sites
 #.80: restore legacy IQ-TREE strain inference by default and gate sparse placements
-#.81: enable EPA-ng strict-backbone placement by default and expose its controls
+#.81: expose EPA-ng strict-backbone placement controls
 #.82: make split Stage-I scope explicit and keep extraction workers tree-option free
 #.83: choose split-worker count automatically from assembly-group and sample load
 #.84: balance indivisible assembly groups by their sample-level Phase-I workload
@@ -215,6 +215,7 @@ my $completionMessage = "";
 #.91: persist the exact shared scratch directory for reliable cross-run resume
 #.96: use the authoritative Phase-I input audit for legacy ledger-free resumes
 #.97: bound EPA-ng placement memory and worker threads independently of tree inference
+#.98: disable EPA-ng strain placement by default; retain explicit opt-in
 #1.06: make buildTree5 finalize staged category/QC/outgroup overlays and input sorting
 #1.07: hand validated worker shards to buildTree5 and compact per-MGS submission output
 #1.08: skip catalogue and Mosaic initialization when every final tree input is published
@@ -318,7 +319,7 @@ my $rateMergeMaxBins = 8;
 my $rateMergeTargetSites = 30_000;
 my $rateMergeMinLoci = 20;
 my $rateMergeMinSites = 20_000;
-my $strictBackbone = 1;
+my $strictBackbone = 0;
 my $strictBackboneFraction = 0.35;
 my $strictBackboneMinSamples = 3;
 my $placementMinOverlap = 10_000;
@@ -6877,7 +6878,7 @@ Tree locus filtering:
   -rateMergeMinSites INT        Minimum alignment sites per bin before merging
                                  [default 20000]
   -strictBackbone 0|1           Infer a broad ML backbone and place only deferred
-                                 sparse samples with EPA-ng [default 1]
+                                 sparse samples with EPA-ng [default 0]
   -strictBackboneFraction FLOAT Defer a sample only below this fraction of the
                                  informative-site Q90 [default 0.35]
   -strictBackboneMinSamples INT  Minimum retained backbone samples before using

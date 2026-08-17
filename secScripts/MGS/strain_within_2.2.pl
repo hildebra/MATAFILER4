@@ -66,9 +66,12 @@ if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]
 #.43: phase strainStats and PopGenStats independently and weight small-MGS R batches
 #.44: submit significant-phylogeny figures with the strain-only postprocessing phase
 #.45: retry incomplete R-analysis batches twice and double memory after Slurm OOMs
-my $version = 0.45;
+#.46: independently redo strainStats or PopGenStats without resetting all postprocessing
+my $version = 0.46;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
+my $redoStrainStats = 0;
+my $redoPopGenStats = 0;
 my $checkMaxNumJobs = 400;
 my $doPopGenStats = 1;
 my $popGenSubsample = "10,20,30,100,200,500";
@@ -106,6 +109,8 @@ GetOptions(
 	"map=s"          => \$refMap,
 	"submit=i"       => \$doSubmit,
 	"reSubmit=i"     => \$rewriteRanalysis,
+	"redoStrainStats=i" => \$redoStrainStats,
+	"redoPopGenStats=i" => \$redoPopGenStats,
 	"popGenStats=i"  => \$doPopGenStats,
 	"popGenSubsample=s" => \$popGenSubsample,
 	"popGenStrictOutgroup=i" => \$popGenStrictOutgroup,
@@ -132,8 +137,11 @@ die "Gene-catalog and phylogeny directories must exist\n" unless -d $GCd && -d $
 die "Map or MGS abundance matrix is missing\n" unless -s $refMap && -s $abMatrix;
 die "Core requests must be positive and R-analysis retry rounds must be at least two\n"
 	unless $nCore > 0 && $nCoreHeavy > 0 && $rAnalysisRetryRounds >= 2;
-die "-submit and -reSubmit must be 0 or 1\n" unless $doSubmit =~ /^[01]$/ && $rewriteRanalysis =~ /^[01]$/;
+die "-submit, -reSubmit, -redoStrainStats, and -redoPopGenStats must be 0 or 1\n"
+	unless $doSubmit =~ /^[01]$/ && $rewriteRanalysis =~ /^[01]$/
+		&& $redoStrainStats =~ /^[01]$/ && $redoPopGenStats =~ /^[01]$/;
 die "-popGenStats must be 0 or 1\n" unless $doPopGenStats =~ /^[01]$/;
+die "-redoPopGenStats requires -popGenStats 1\n" if $redoPopGenStats && !$doPopGenStats;
 die "-popGenStrictOutgroup and -popGenLegacyTextOutput must be 0 or 1\n"
 	unless $popGenStrictOutgroup =~ /^[01]$/ && $popGenLegacyTextOutput =~ /^[01]$/;
 die "-popGenGeneticCode must be positive, -popGenCodonStart must be 1, 2, or 3, and -popGenSeed must be non-negative\n"
@@ -177,7 +185,9 @@ my $completionMarkerFastPaths = 0;
 print "=====================================================\n";
 print "Strain postprocessing v$version\n";
 print "Mode: " . ($doSubmit ? "submit" : "dry run") . "; scheduler: $QSBoptHR->{qmode}; "
-	. "rewrite existing results: " . ($rewriteRanalysis ? "yes" : "no") . "\n";
+	. "rewrite all existing results: " . ($rewriteRanalysis ? "yes" : "no")
+	. "; redo strainStats: " . ($redoStrainStats ? "yes" : "no")
+	. "; redo PopGenStats: " . ($redoPopGenStats ? "yes" : "no") . "\n";
 print "Inputs: gene catalog=$GCd; phylogenies=$FMGpD; map=$refMap; abundance matrix=$abMatrix\n";
 print "Fallback outgroup tree: ".(length($MGSphylo) ? $MGSphylo : "<none>")."\n";
 print "Paths: strain summary=$RsummaryTab; population summary=$popGenSummaryTab; subsampled population summary=$popGenSubsampleSummaryTab; toolkit=$MGSTKdir\n";
@@ -213,8 +223,31 @@ if ($rewriteRanalysis){ #faster to do once for all..
 	} else {
 		print "Dry run: existing strain2 results and checkpoints will be preserved.\n";
 	}
+} elsif ($doSubmit) {
+	if ($redoStrainStats) {
+		warn "Redoing strainStats and dependent strain postprocessing because -redoStrainStats 1 was requested\n";
+		for my $summary ($RsummaryTab, $legacyRsummaryTab) {
+			unlink $summary or die "Cannot remove $summary: $!\n" if -e $summary;
+		}
+		my $networkDir = "$FMGpD/networks";
+		remove_tree($networkDir) if -d $networkDir;
+		my $treeWasCheckpoint = "$FMGpD/GeneEnrich/treeWAS.sto";
+		unlink $treeWasCheckpoint or die "Cannot remove stale checkpoint $treeWasCheckpoint: $!\n" if -e $treeWasCheckpoint;
+		my $phyloFigureCheckpoint = "$FMGpD/phyloFigures.sto";
+		unlink $phyloFigureCheckpoint or die "Cannot remove stale checkpoint $phyloFigureCheckpoint: $!\n" if -e $phyloFigureCheckpoint;
+	}
+	if ($redoPopGenStats) {
+		warn "Redoing PopGenStats because -redoPopGenStats 1 was requested\n";
+		for my $summary ($popGenSummaryTab, $popGenSubsampleSummaryTab) {
+			unlink $summary or die "Cannot remove $summary: $!\n" if -e $summary;
+		}
+	}
+} elsif ($redoStrainStats || $redoPopGenStats) {
+	print "Dry run: requested targeted statistic redo will not remove existing results or checkpoints.\n";
 }
 
+my $forceStrainStats = $rewriteRanalysis || $redoStrainStats;
+my $forcePopGenStats = $rewriteRanalysis || $redoPopGenStats;
 
 print "Scanning for completed within-MGS phylogenies\n";
 opendir DIR, $FMGpD or die "Cannot open $FMGpD: $!\n";
@@ -378,7 +411,8 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	my $popGenStore = "$destD/popGenStats.output.Rds";
 	my $strainStatsReady = -s $analysisStore;
 	my $popGenStatsReady = !$doPopGenStats || -s $popGenStore;
-	if (!$rewriteRanalysis) {
+	if (!(($analysisKind eq 'strainStats' && $forceStrainStats)
+		|| ($analysisKind eq 'popGenStats' && $forcePopGenStats))) {
 		if ($analysisKind eq 'strainStats' && $strainStatsReady) {
 			$reusedStrainStats++;
 			next;
@@ -415,7 +449,10 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	}
 	$cmd .= "echo ".shellQuote("At tree $d")."\n";
 	my $OGstr = $OG ne "" ? "--outgroup ".shellQuote($OG)." " : "";
-	if ($analysisKind eq 'strainStats' && (!$strainStatsReady || $rewriteRanalysis)) {
+	if ($analysisKind eq 'strainStats' && (!$strainStatsReady || $forceStrainStats)) {
+		if ($forceStrainStats) {
+			$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStore))."\n";
+		}
 		$cmd .= "if ! test -s ".shellQuote($analysisStore)."; then\n";
 		$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStore))."\n";
 		$cmd .= "echo ".shellQuote("Starting strainStats for $d with $jobCores core(s)")."\n";
@@ -427,7 +464,8 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		$analysisAttempted{$d}{strainStats} = { store => $analysisStore };
 		$wrHead=0;
 	}
-	if ($analysisKind eq 'popGenStats' && (!$popGenStatsReady || $rewriteRanalysis)) {
+	if ($analysisKind eq 'popGenStats' && (!$popGenStatsReady || $forcePopGenStats)) {
+		$cmd .= "rm -f ".shellQuote($popGenStore)."\n" if $forcePopGenStats;
 		$cmd .= "if ! test -s ".shellQuote($popGenStore)."; then\n";
 		$cmd .= "rm -f ".shellQuote($popGenStore)."\n";
 		$cmd .= "echo ".shellQuote("Starting popGenStats for $d")."\n";
@@ -606,7 +644,7 @@ my $waitForAnalysis = sub {
 };
 
 $waitForAnalysis->('strainStats');
-my $shouldCombineStrainStats = $rewriteRanalysis || $strainTaskCount > 0 || !-s $RsummaryTab;
+my $shouldCombineStrainStats = $forceStrainStats || $strainTaskCount > 0 || !-s $RsummaryTab;
 if ($shouldCombineStrainStats) {
 	combineResults(0);
 } else {
@@ -620,7 +658,7 @@ my ($phyloFigureDep, $phyloFigureStone) = visualizeSignPhylos();
 
 if ($doPopGenStats) {
 	$waitForAnalysis->('popGenStats');
-	my $shouldCombinePopGenStats = $rewriteRanalysis || $popGenTaskCount > 0 || !-s $popGenSummaryTab;
+	my $shouldCombinePopGenStats = $forcePopGenStats || $popGenTaskCount > 0 || !-s $popGenSummaryTab;
 	if ($shouldCombinePopGenStats) {
 		combineResults(1);
 	} else {

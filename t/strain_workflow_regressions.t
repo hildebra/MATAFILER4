@@ -154,7 +154,7 @@ like($strain2, qr/"MGSphylo=s"\s*=>\s*\\\$MGSphylo.*?sub resolveOutgroup .*?data
 like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,
 	'custom recursive output removal requires a workflow-owned directory');
 like($strain2,
-	qr/\$waitForAnalysis->\('strainStats'\);.*?my \$shouldCombineStrainStats = \$rewriteRanalysis \|\| \$strainTaskCount > 0 \|\| !-s \$RsummaryTab;.*?if \(\$shouldCombineStrainStats\) \{.*?combineResults\(0\);.*?\} else \{.*?Reusing existing combined strainStats overview/s,
+	qr/\$waitForAnalysis->\('strainStats'\);.*?my \$shouldCombineStrainStats = \$forceStrainStats \|\| \$strainTaskCount > 0 \|\| !-s \$RsummaryTab;.*?if \(\$shouldCombineStrainStats\) \{.*?combineResults\(0\);.*?\} else \{.*?Reusing existing combined strainStats overview/s,
 	'strainStats stores are combined only when missing or newly stale before the population phase is awaited');
 like($strain2,
 	qr/\$combineResultsR --path .*?shellQuote\(\$FMGpD\).*?--outDir .*?shellQuote\(\$FMGpD\)/s,
@@ -172,7 +172,7 @@ like($strain2,
 	qr/"popGenStats=i".*?"popGenStrictOutgroup=i".*?"popGenGeneticCode=i".*?"popGenCodonStart=i".*?"popGenSeed=i".*?"popGenLegacyTextOutput=i".*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?--ncore \$jobCores.*?--genetic-code \$popGenGeneticCode.*?--codon-start \$popGenCodonStart.*?--seed \$popGenSeed.*?--individual-column .*?\$individualVar.*?--outgroup .*?\$OG.*?--strict-outgroup.*?--legacy-text-output.*?\$strainFile = "\$destD\/IQtree_allsites\.strains\.txt".*?PopGenStats owns validation and fallback behavior.*?\$popGenCommand --strain-file .*?\$strainFile.*?test -s .*?\$popGenStore/s,
 	'population genetics forwards parallel, outgroup, codon, seed, identity, and the strain-file path to its durable RDS workflow');
 like($strain2,
-	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?if \(\$doPopGenStats\) \{.*?\$waitForAnalysis->\('popGenStats'\);.*?my \$shouldCombinePopGenStats = \$rewriteRanalysis \|\| \$popGenTaskCount > 0 \|\| !-s \$popGenSummaryTab;.*?if \(\$shouldCombinePopGenStats\) \{.*?combineResults\(1\);.*?\} else \{.*?Reusing existing combined PopGenStats overview.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
+	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?if \(\$doPopGenStats\) \{.*?\$waitForAnalysis->\('popGenStats'\);.*?my \$shouldCombinePopGenStats = \$forcePopGenStats \|\| \$popGenTaskCount > 0 \|\| !-s \$popGenSummaryTab;.*?if \(\$shouldCombinePopGenStats\) \{.*?combineResults\(1\);.*?\} else \{.*?Reusing existing combined PopGenStats overview.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
 	'existing population RDS stores and aggregate tables are reused, while missing or newly stale tables are combined after the population phase');
 like($strain2,
 	qr/\$popGenSubsampleSummaryTab = "\$FMGpD\/popGenStats\.subsamples\.tsv".*?Combined subsampled population-genetics overview/s,
@@ -203,8 +203,8 @@ like($strain2,
 unlike($strain2, qr/die "Slurm reported failed \$analysisKind job\(s\)/,
 	'R-analysis failures do not abort before their bounded retry rounds complete');
 like($strain2,
-	qr/if \(!\$rewriteRanalysis\) \{.*?\$analysisKind eq 'strainStats' && \$strainStatsReady.*?next;.*?\$analysisKind eq 'popGenStats' && \$popGenStatsReady.*?next;.*?\$analysisKind eq 'strainStats' && \(!\$strainStatsReady \|\| \$rewriteRanalysis\).*?rm -f .*?\$analysisStore.*?\$analysisKind eq 'popGenStats' && \(!\$popGenStatsReady \|\| \$rewriteRanalysis\).*?rm -f .*?\$popGenStore/s,
-	'-reSubmit 0 keeps each nonempty result store and emits only its missing analysis type');
+qr/"redoStrainStats=i".*?"redoPopGenStats=i".*?my \$forceStrainStats = \$rewriteRanalysis \|\| \$redoStrainStats;.*?my \$forcePopGenStats = \$rewriteRanalysis \|\| \$redoPopGenStats;.*?\$analysisKind eq \x27strainStats\x27 && \$forceStrainStats.*?\$analysisKind eq \x27popGenStats\x27 && \$forcePopGenStats.*?rm -f .*?\$analysisStore.*?rm -f .*?\$popGenStore/s,
+	'targeted statistic flags force only their selected result stores and combined overview');
 my @analysisPhaseMarkers = (
 	q{$waitForAnalysis->('strainStats');},
 	q{combineResults(0);},
@@ -645,8 +645,8 @@ like($strain,
 	qr/maximum_genes_per_sample => 600.*?maximum_tree_loci => 400.*?\$taxonAwareGeneBudget = \$treeLocusBudget < \$presortGenes.*?taxonAwareLocusBudgets\(\$taxonAwareGeneBudget\).*?-taxonAwareMaxLoci \$taxonAwareMaxLoci.*?-taxonAwareCoreLoci \$taxonAwareCoreLoci.*?-taxonAwareCandidateExtra \$taxonAwareCandidateExtra.*?sub taxonAwareLocusBudgets.*?\$maximumLoci \* 0\.8.*?\$maximumLoci \* 0\.3/s,
 	'strainWithin scales 80% core, 20% rescue capacity, and 30% QC backfill to its effective gene budget');
 like($strain,
-	qr/my \$strictBackbone = 1;.*?my \$strictBackboneFraction = 0\.35;.*?my \$strictBackboneMinSamples = 3;.*?my \$placementMinOverlap = 10_000;.*?"strictBackbone=i"\s+=> \\\$strictBackbone.*?"strictBackboneFraction=f"\s+=> \\\$strictBackboneFraction.*?"strictBackboneMinSamples=i"\s+=> \\\$strictBackboneMinSamples.*?"placementMinOverlap=i"\s+=> \\\$placementMinOverlap/s,
-	'strainWithin exposes default-active strict-backbone controls');
+	qr/my \$strictBackbone = 0;.*?my \$strictBackboneFraction = 0\.35;.*?my \$strictBackboneMinSamples = 3;.*?my \$placementMinOverlap = 10_000;.*?"strictBackbone=i"\s+=> \\\$strictBackbone.*?"strictBackboneFraction=f"\s+=> \\\$strictBackboneFraction.*?"strictBackboneMinSamples=i"\s+=> \\\$strictBackboneMinSamples.*?"placementMinOverlap=i"\s+=> \\\$placementMinOverlap/s,
+	'strainWithin exposes opt-in strict-backbone placement controls');
 like($strain,
 	qr/-strictBackbone \$strictBackbone .*?-strictBackboneFraction \$strictBackboneFraction .*?-strictBackboneMinSamples \$strictBackboneMinSamples .*?-placementMinOverlap \$placementMinOverlap/s,
 	'strainWithin forwards all backbone controls to buildTree5');
