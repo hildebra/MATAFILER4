@@ -11,8 +11,8 @@ LSUidx	[DBDir]/MarkerG/sortmerna_database/v4.3/lsu/idx
 #for lambda and LCA
 LSUdbFA	[DBDir]/MarkerG/SILVA/138.1/SLV_138.1_LSU.fasta
 LSUtax	[DBDir]/MarkerG/SILVA/138.1/SLV_138.1_LSU.tax
-SSUdbFA	[DBDir]/MarkerG/SILVA/138.1/SLV_138.1_SSU.fasta
-SSUtax	[DBDir]/MarkerG/SILVA/138.1/SLV_138.1_SSU.tax
+SSUdbFA	[DBDir]/MarkerG/KSGP/v4.0/KSGPv4.0.fasta
+SSUtax	[DBDir]/MarkerG/KSGP/v4.0/KSGP_plus2.tax
 ITSdbFA	[DBDir]/MarkerG/ITS_combi/ITS_comb.fa
 ITStax	[DBDir]/MarkerG/ITS_combi/ITS_comb.tax
 
