@@ -587,7 +587,9 @@ sub _run_slurm_submission {
 	if (my $runner = $optHR->{slurmSubmissionRunner}) {
 		return $runner->($command);
 	}
-	my $output = `$command 2>&1`;
+	# Strip trailing whitespace so "2>&1" binds to the actual command.
+	(my $trimmed_command = $command) =~ s/\s+\z//;
+	my $output = `$trimmed_command 2>&1`;
 	return ($output, $?);
 }
 

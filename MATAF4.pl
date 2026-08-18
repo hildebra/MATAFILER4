@@ -4773,7 +4773,7 @@ sub detectRibo(){
 			$jobName = $jobd;
 		}
 		if ($calcRiboFind || !$riboEvidence->{taxonomy_complete}) {
-			$jobd=$jobName; $mem="4G";
+			$jobd=$jobName; $mem="16G";
 			$jobd .= ";".$MFopt{globalRiboDependence}->{DBcp} unless ($MFopt{globalRiboDependence}->{DBcp} eq "alreadyCopied");
 			$QSBoptHR->{useLongQueue} = 0;
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = $HDDspace{Ribos};
