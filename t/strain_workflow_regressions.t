@@ -257,7 +257,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.27;/,
+like($strain, qr/my \$version = 1\.28;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"individualVar=s".*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput/s,
@@ -350,8 +350,8 @@ like($strain, qr/\$Tcmd \.= "-redoEPAfilter 1 " if \$redoEPAfilter/,
 unlike($strain, qr/epaFilterOnly|treeCmd\.epa_filter/,
 	'the retired filter-only controller and special command path are absent');
 like($strain,
-	qr/my \$leanOnlySubmitResume = \$onlySubmit && !\$subJob && !\$recalcTrees.*?!\$redoSubmissionData.*?!\$repairCAT.*?!\$deepRepair.*?!\$redoEPAfilter.*?!\$reSubmit/s,
-	'lean dispatch is restricted to ordinary parent only-submit runs while repair and recalculation retain strict auditing');
+	qr/my \$leanOnlySubmitRequested = \$onlySubmit && !\$subJob && !\$recalcTrees.*?!\$redoSubmissionData.*?!\$repairCAT.*?!\$deepRepair.*?!\$redoEPAfilter.*?!\$reSubmit.*?my \$resumePhaseISummary = File::Spec->catfile.*?my \$leanOnlySubmitResume = \$leanOnlySubmitRequested && -s \$resumePhaseISummary.*?running extraction where required/s,
+	'lean dispatch requires durable Phase-I evidence while new outputs and strict modes retain full auditing');
 like($strain,
 	qr/if \(\$leanOnlySubmitResume\) \{.*?\$SIdirs\{\$_\} = "\$outD\/\$_\/" for \@specis.*?mode=deferred_per_MGS.*?global_metadata_scans=0.*?\} else \{.*?evalFileStatus\(\)/s,
 	'ordinary only-submit startup performs no all-MGS filesystem audit and strict modes keep the existing audit');
@@ -461,8 +461,8 @@ like($strain,
 	qr/-redo cannot be combined with deprecated redo\/repair flags.*?-redo tree must be launched by the main strainWithin process/s,
 	'redo modes reject mixed legacy input and split-worker tree execution');
 like($mgs,
-	qr/"redo=s"\s+=> \\\$strainRedo.*?-redo must be one of: none, tree, input, all.*?\$strain1scr .*?-onlySubmit 1 -redo \$strainRedo/s,
-	'MGS.pl validates and forwards the canonical strain redo mode');
+	qr/"redo=s"\s+=> \\\$strainRedo.*?-redo must be one of: none, tree, input, all.*?strainSampleStats\.summary\.tsv.*?my \$strainOnlySubmit = -s \$strainPhaseISummary \? 1 : 0.*?\$strain1scr .*?-onlySubmit \$strainOnlySubmit -redo \$strainRedo/s,
+	'MGS.pl forwards redo and uses tree-only mode only after durable Phase-I completion');
 unlike($mgs,
 	qr/\$strain1scr .*?-(?:reSubmit|redoSubmissionData|rmMSA)\b/s,
 	'MGS.pl no longer supplies redundant or deprecated strain defaults');
@@ -690,6 +690,9 @@ like($strain,
 like($strain,
 	qr/my \$unresolvedInputs = validateTreeInputResolution\(\);.*?if \(\$unresolvedInputs\).*?tree_outcomes_quarantined=\$incompleteTreeOutcomes.*?exit\(0\);.*?if \(\$incompleteTreeOutcomes\).*?proceeding with downstream strain analysis for completed trees.*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
 	'quarantined tree outcomes do not block step two once all tree inputs are resolved');
+like($strain,
+	qr/sub validateTreeInputResolution.*?my \(\$ready, \$terminal, \$excluded\) = \(0, 0, 0\).*?Tree-input resolution audit: ready=\$ready/s,
+	'tree-input resolution summaries initialize zero-valued counters');
 like($strain2,
 	qr/my \@nonTreeOutcomeMarkers = qw\(.*?tooFewSamples\.sto.*?noRecoverableLoci\.sto.*?noTree\.sto.*?placementPending\.sto.*?\);.*?my \@outcomeMarkers = grep.*?if \(\@outcomeMarkers\).*?\$terminalTreeMGS\+\+;.*?next;/s,
 	'step two explicitly skips MGS with valid no-tree or placement-pending markers');

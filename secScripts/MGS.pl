@@ -53,8 +53,9 @@ use Cwd qw(abs_path);
 #     retries, and atomic publication for recovery-critical files
 #.53: remove local executable checks that reject environment-wrapped tool commands
 #.54: consolidate controller lifecycle and no-usable-MGS state records
+#.55: enter tree-only strain resume only after durable Phase-I completion
 
-my $MGSpipelineVersion = 0.54;
+my $MGSpipelineVersion = 0.55;
 my $clusterID = 95;
 my %checkpointParameters;
 
@@ -982,8 +983,11 @@ if ($numSamples > 1500){#scale with the number of assembly groups
 #my $ph2Cmd = "$strain1scr $GCd $finalClustersFilt.mgs $canCore $iniTree 0 1\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
 my $mosaicDir = "$outD/mosaic/";
 my $mosaicCatalogue = "$mosaicDir/$BinnerShrt.clusters.mosaic_loci.$clusterID.confirmed.tsv";
-my $ph2Cmd = "mkdir -p "._shell_quote("$outD/within_phylo/")." || exit 65\n";
-$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -mosaicMGS $finalClusters2 -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -preCompConsSNP $preCompCons -selfMemGb $memUsage -mosaicMemGb $memG -onlySubmit 1 -redo $strainRedo -submit $doSubmit -maxSubJob $NsubJobs -outD $outD/within_phylo/ -prepareMosaicLoci $prepareMosaicLoci ";
+my $strainOutD = "$outD/within_phylo/";
+my $strainPhaseISummary = "$strainOutD/LOGandSUB/strainSampleStats.summary.tsv";
+my $strainOnlySubmit = -s $strainPhaseISummary ? 1 : 0;
+my $ph2Cmd = "mkdir -p "._shell_quote($strainOutD)." || exit 65\n";
+$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -mosaicMGS $finalClusters2 -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -preCompConsSNP $preCompCons -selfMemGb $memUsage -mosaicMemGb $memG -onlySubmit $strainOnlySubmit -redo $strainRedo -submit $doSubmit -maxSubJob $NsubJobs -outD $strainOutD -prepareMosaicLoci $prepareMosaicLoci ";
 $ph2Cmd .= "-mosaicLoci $mosaicCatalogue " if $prepareMosaicLoci;
 $ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree || $treedep ne "";
 $ph2Cmd .= "\n";

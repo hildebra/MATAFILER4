@@ -243,7 +243,8 @@ my $completionMessage = "";
 #1.25: recover partial loci after high-threshold sample QC and report both length gates
 #1.26: consolidate destructive recovery under -redo and deprecate redundant flags
 #1.27: expose EPA placement as -placeOnBackbone and fully gate placement-only filters
-my $version = 1.27;
+#1.28: prevent new outputs from entering lean tree-only resume without Phase-I evidence
+my $version = 1.28;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -715,9 +716,9 @@ die "-maxGenes must be at least -MGSminGenesPSmpl, or <=0 to remove the cap\n"
 $maxNGenes = -1 if $noGeneLimit;
 
 $onlySubmit = 1 if $recalcTrees; #tree-only recovery reuses published or complete staged inputs
-# Ordinary parent -onlySubmit runs are latency-sensitive cluster dispatchers.
-# Repair and explicit recalculation modes retain the strict global audit.
-my $leanOnlySubmitResume = $onlySubmit && !$subJob && !$recalcTrees
+# Ordinary parent -onlySubmit runs are latency-sensitive cluster dispatchers,
+# but only after a durable Phase-I summary proves this is an actual resume.
+my $leanOnlySubmitRequested = $onlySubmit && !$subJob && !$recalcTrees
 	&& !$redoSubmissionData && !$repairCAT && !$deepRepair
 	&& !$redoEPAfilter && !$reSubmit;
 printEarlyRunHeader();
@@ -737,6 +738,14 @@ my $resumeBindir = $MGSfile;
 $resumeBindir =~ s/[^\/]+$//;
 $resumeBindir = $GCd if $resumeBindir eq "";
 my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
+my $resumePhaseISummary = File::Spec->catfile(
+	$resumeOutD, 'LOGandSUB', $sampleStatsSummaryLogName);
+my $leanOnlySubmitResume = $leanOnlySubmitRequested && -s $resumePhaseISummary;
+if ($leanOnlySubmitRequested && !$leanOnlySubmitResume) {
+	print STDERR "Lean only-submit resume unavailable: no durable Phase-I "
+		."completion summary at $resumePhaseISummary; auditing inputs and "
+		."running extraction where required.\n";
+}
 
 my ($preparedMainBranchFastPath, @preparedMainBranchMGS) = (0);
 my %preparedMainBranchCategoryValidated;
@@ -3131,7 +3140,8 @@ sub validateTreeInputResolution {
 	my $out = retry_open('>', $temporary, label => 'create tree-input resolution audit');
 	print {$out} join("\t", qw(MGS resolution persistent_state scratch_state reason)), "\n"
 		or die "Cannot write $temporary: $!\n";
-	my (@repairRequired, %repairState, $ready, $terminal, $excluded);
+	my (@repairRequired, %repairState);
+	my ($ready, $terminal, $excluded) = (0, 0, 0);
 	for my $MGS (@specis) {
 		my $persistent = persistentMGSInputState($MGS);
 		my $scratch = scratchMGSInputState($MGS);
