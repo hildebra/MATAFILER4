@@ -214,7 +214,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.77";
+my $version = "5.78";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -318,6 +318,7 @@ my %BACKBONE_DEFAULT = (
 	minimum_samples => 3,
 );
 my $strictBackbone = $BACKBONE_DEFAULT{enabled};
+my ($placeOnBackboneSpecified, $legacyStrictBackboneSpecified) = (0, 0);
 my $strictBackboneFraction = $BACKBONE_DEFAULT{coverage_fraction};
 my $placementMinOverlap = $BACKBONE_DEFAULT{minimum_overlap};
 my $strictBackboneMinSamples = $BACKBONE_DEFAULT{minimum_samples};
@@ -468,7 +469,8 @@ GetOptions(
 	"runVeryFastTree=i" => \$doVeryFastTree,
 	"treeShrink=i" => \$useTreeShrink,
 	"sampleQC=s" => \$sampleQCFile,
-	"strictBackbone=i" => \$strictBackbone,
+	"placeOnBackbone=i" => sub { $strictBackbone = $_[1]; $placeOnBackboneSpecified = 1; },
+	"strictBackbone=i" => sub { $strictBackbone = $_[1]; $legacyStrictBackboneSpecified = 1; },
 	"strictBackboneFraction=f" => \$strictBackboneFraction,
 	"placementMinOverlap=i" => \$placementMinOverlap,
 	"strictBackboneMinSamples=i" => \$strictBackboneMinSamples,
@@ -528,6 +530,11 @@ GetOptions(
 	"map=s" =>\$mapF,
 	"clustername=s" => \$clusterName,
 ) or die("Error in command line arguments\n");
+die "-placeOnBackbone cannot be combined with deprecated -strictBackbone\n"
+	if $placeOnBackboneSpecified && $legacyStrictBackboneSpecified;
+warn "Option -strictBackbone is deprecated; use -placeOnBackbone instead. "
+	."Compatibility support will be removed in a future release.\n"
+	if $legacyStrictBackboneSpecified;
 die "-withinSpecies must be 0 or 1\n"
 	unless $withinSpecies == 0 || $withinSpecies == 1;
 die "-strainWithinPreset must be 0 or 1\n"
@@ -554,7 +561,8 @@ die "-NTfiltCount must be zero or greater\n" if $ntCntTotal < 0;
 $placementGeneFracPSpec = $GeneFracPSpec unless defined $placementGeneFracPSpec;
 $placementNTFrac = $ntFrac unless defined $placementNTFrac;
 $placementNTCntTotal = $ntCntTotal unless defined $placementNTCntTotal;
-die "-placementNTfiltCount must be zero or greater\n" if $placementNTCntTotal < 0;
+die "-placementNTfiltCount must be zero or greater\n"
+	if $strictBackbone && $placementNTCntTotal < 0;
 die "-minOverlapMSA must be between zero and one\n"
 	if $minOverlapMSA < 0 || $minOverlapMSA > 1;
 die "-MSAfixRecoverTechnicalOffsets must be 0 or 1\n"
@@ -569,26 +577,28 @@ die "-iqMemMB must be zero or greater\n" if $iqMemMB < 0;
 die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
 die "-iqLegacy must be 0 or 1\n" unless $iqLegacy == 0 || $iqLegacy == 1;
 die "-iqPathogen and -iqLegacy are mutually exclusive\n" if $iqPathogen && $iqLegacy;
-die "-strictBackbone must be 0 or 1 (default $BACKBONE_DEFAULT{enabled})\n"
+die "-placeOnBackbone must be 0 or 1 (default $BACKBONE_DEFAULT{enabled})\n"
 	unless $strictBackbone == 0 || $strictBackbone == 1;
-die "-strictBackboneFraction must be between 0 and 1 "
-	."(default $BACKBONE_DEFAULT{coverage_fraction})\n"
-	if $strictBackboneFraction < 0 || $strictBackboneFraction > 1;
-die "-placementMinOverlap must be non-negative "
-	."(default $BACKBONE_DEFAULT{minimum_overlap})\n"
-	if $placementMinOverlap < 0;
-die "-strictBackboneMinSamples must be at least 3 "
-	."(default $BACKBONE_DEFAULT{minimum_samples})\n"
-	if $strictBackboneMinSamples < 3;
-die "-epaThreads must be a positive integer (default $EPA_NG_DEFAULT{threads})\n"
-	if $epaThreads < 1;
-die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or a positive MB value\n"
-	if $epaMaxMemMB < -1;
-die "-epaPendantOutlierFactor and -epaPendantMinThreshold must be non-negative\n"
-	if $epaPendantOutlierFactor < 0 || $epaPendantMinThreshold < 0;
+if ($strictBackbone) {
+	die "-strictBackboneFraction must be between 0 and 1 "
+		."(default $BACKBONE_DEFAULT{coverage_fraction})\n"
+		if $strictBackboneFraction < 0 || $strictBackboneFraction > 1;
+	die "-placementMinOverlap must be non-negative "
+		."(default $BACKBONE_DEFAULT{minimum_overlap})\n"
+		if $placementMinOverlap < 0;
+	die "-strictBackboneMinSamples must be at least 3 "
+		."(default $BACKBONE_DEFAULT{minimum_samples})\n"
+		if $strictBackboneMinSamples < 3;
+	die "-epaThreads must be a positive integer (default $EPA_NG_DEFAULT{threads})\n"
+		if $epaThreads < 1;
+	die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or a positive MB value\n"
+		if $epaMaxMemMB < -1;
+	die "-epaPendantOutlierFactor and -epaPendantMinThreshold must be non-negative\n"
+		if $epaPendantOutlierFactor < 0 || $epaPendantMinThreshold < 0;
+}
 if ($epaOnly) {
 	die "-epaOnly requires -continue 1\n" unless $continue;
-	die "-epaOnly requires -strictBackbone 1\n" unless $strictBackbone;
+	die "-epaOnly requires -placeOnBackbone 1\n" unless $strictBackbone;
 	die "-epaOnly currently requires exactly -runIQtree 1\n"
 		unless $doIQTree && !$doRAXML && !$doRAXMLng
 			&& !$doFastTree && !$doVeryFastTree;
@@ -597,7 +607,7 @@ if ($epaOnly) {
 }
 if ($redoEPAfilter) {
 	die "-redoEPAfilter requires -continue 1\n" unless $continue;
-	die "-redoEPAfilter requires -strictBackbone 1\n" unless $strictBackbone;
+	die "-redoEPAfilter requires -placeOnBackbone 1\n" unless $strictBackbone;
 	die "-redoEPAfilter currently requires exactly -runIQtree 1\n"
 		unless $doIQTree && !$doRAXML && !$doRAXMLng
 			&& !$doFastTree && !$doVeryFastTree;
@@ -664,15 +674,19 @@ if (length($tmpSubdir)) {
 }
 die "-smplSep must not be empty\n" if $smplSep eq "";
 eval { qr/$smplSep/ } or die "Invalid -smplSep regular expression '$smplSep': $@";
-for my $fraction_name_value (
+my @fractionNameValues = (
 	["relativeNTFraction", $ntFrac],
-	["placementRelativeNTFraction", $placementNTFrac],
 	["NTfiltPerGene", $ntFracGene],
 	["GeneLengthIncludeMin", $ntFracGeneInclude],
 	["GenesPerSpecies", $GeneFracPSpec],
-	["placementGenesPerSpecies", $placementGeneFracPSpec], ["fracMaxGenes90pct", $fracMaxGenes90pct],
+	["fracMaxGenes90pct", $fracMaxGenes90pct],
 	["maxGapPerCol", $maxGapPerCol],
-) {
+);
+push @fractionNameValues,
+	["placementRelativeNTFraction", $placementNTFrac],
+	["placementGenesPerSpecies", $placementGeneFracPSpec]
+	if $strictBackbone;
+for my $fraction_name_value (@fractionNameValues) {
 	my ($name, $value) = @{$fraction_name_value};
 	die "-$name must be between 0 and 1\n" if $value < 0 || $value > 1;
 }
@@ -829,25 +843,28 @@ print "Taxon-aware locus selection: enabled="
 	. "; preferred universal core="
 	. (keys(%{$preferredCoreGeneSet}) ? scalar(keys %{$preferredCoreGeneSet}) : "<none>")
 	. "; sample target=$taxonAwareTargetLoci loci/$taxonAwareTargetNT NT\n";
-print "Backbone/placement: enabled=" . ($strictBackbone ? "yes" : "no")
-	. "; sample QC=" . ($sampleQCFile || "<none>")
-	. "; coverage fraction=$strictBackboneFraction"
-	. "; placement gene fraction=$placementGeneFracPSpec"
-	. "; placement NT fraction=$placementNTFrac"
-	. "; placement minimum NT=$placementNTCntTotal"
-	. "; minimum placement overlap=$placementMinOverlap"
-	. "; minimum backbone samples=$strictBackboneMinSamples\n";
-my ($epaReportedThreads, $epaReportedMaxMemMB) =
-	epaResourcePlan($epaThreads, $ncore, $epaMaxMemMB, $iqMemMB);
-print "EPA-ng placement resources: threads=$epaReportedThreads"
-	." (requested=$epaThreads); planning memory="
-	.($epaReportedMaxMemMB ? "${epaReportedMaxMemMB}MB at $EPA_NG_DEFAULT{memory_per_thread_mb}MB/thread" : "disabled")
-	."; hard memory limit=scheduler/cgroup; query chunk=$EPA_NG_DEFAULT{chunk_size}\n";
-print "EPA-ng placement outlier QC: "
-	.($epaPendantOutlierFactor > 0
-		? "maximum pendant branch=max($epaPendantMinThreshold, "
-			."$epaPendantOutlierFactor x backbone terminal-branch Q95)"
-		: "disabled") . "\n";
+if ($strictBackbone) {
+	print "Backbone placement: enabled; sample QC=" . ($sampleQCFile || "<none>")
+		. "; coverage fraction=$strictBackboneFraction"
+		. "; placement gene fraction=$placementGeneFracPSpec"
+		. "; placement NT fraction=$placementNTFrac"
+		. "; placement minimum NT=$placementNTCntTotal"
+		. "; minimum placement overlap=$placementMinOverlap"
+		. "; minimum backbone samples=$strictBackboneMinSamples\n";
+	my ($epaReportedThreads, $epaReportedMaxMemMB) =
+		epaResourcePlan($epaThreads, $ncore, $epaMaxMemMB, $iqMemMB);
+	print "EPA-ng placement resources: threads=$epaReportedThreads"
+		." (requested=$epaThreads); planning memory="
+		.($epaReportedMaxMemMB ? "${epaReportedMaxMemMB}MB at $EPA_NG_DEFAULT{memory_per_thread_mb}MB/thread" : "disabled")
+		."; hard memory limit=scheduler/cgroup; query chunk=$EPA_NG_DEFAULT{chunk_size}\n";
+	print "EPA-ng placement outlier QC: "
+		.($epaPendantOutlierFactor > 0
+			? "maximum pendant branch=max($epaPendantMinThreshold, "
+				."$epaPendantOutlierFactor x backbone terminal-branch Q95)"
+			: "disabled") . "\n";
+} else {
+	print "Backbone placement: disabled; backbone- and placement-only filters are inactive\n";
+}
 print "Trees: " . (@treeMethods ? join(", ", @treeMethods) : "<none>")
 	. "; bootstrap=$bootStrap; outgroup=" . ($outgroup || "<none>")
 	. "; supertree=" . ($doSuperTree ? "yes" : "no")
@@ -998,9 +1015,6 @@ my $postAlignmentQCPolicy = join("\t",
 	"backbone_nt_fraction=$ntFrac",
 	"backbone_gene_fraction=$GeneFracPSpec",
 	"backbone_minimum_nt=$ntCntTotal",
-	"placement_nt_fraction=$placementNTFrac",
-	"placement_gene_fraction=$placementGeneFracPSpec",
-	"placement_minimum_nt=$placementNTCntTotal",
 	"minimum_overlap=$minOverlapMSA",
 	"maximum_gap_fraction=$maxGapPerCol",
 	"msafix_recover_technical_offsets=$msaFixRecoverTechnicalOffsets",
@@ -1036,18 +1050,21 @@ my $postAlignmentPolicy = join("\t",
 	"iqtree_memory_mb=$iqMemMB",
 	"iqtree_pathogen=$iqPathogen",
 	"iqtree_legacy=$iqLegacy",
-	"epa_threads=$epaThreads",
-	"epa_memory_mb=$epaMaxMemMB",
-	"epa_pendant_outlier_factor=$epaPendantOutlierFactor",
-	"epa_pendant_minimum_threshold=$epaPendantMinThreshold",
+	"epa_threads=".($strictBackbone ? $epaThreads : "disabled"),
+	"epa_memory_mb=".($strictBackbone ? $epaMaxMemMB : "disabled"),
+	"epa_pendant_outlier_factor=".($strictBackbone ? $epaPendantOutlierFactor : "disabled"),
+	"epa_pendant_minimum_threshold=".($strictBackbone ? $epaPendantMinThreshold : "disabled"),
 	"tree_shrink=$useTreeShrink",
 	"clonal_frame=$doCFML",
 	"gubbins=$doGubbins",
 	"dna_distance=$calcDNAdiff",
 	"strict_backbone=$strictBackbone",
-	"strict_backbone_fraction=$strictBackboneFraction",
-	"strict_backbone_minimum_samples=$strictBackboneMinSamples",
-	"placement_minimum_overlap=$placementMinOverlap",
+	"strict_backbone_fraction=".($strictBackbone ? $strictBackboneFraction : "disabled"),
+	"strict_backbone_minimum_samples=".($strictBackbone ? $strictBackboneMinSamples : "disabled"),
+	"placement_nt_fraction=".($strictBackbone ? $placementNTFrac : "disabled"),
+	"placement_gene_fraction=".($strictBackbone ? $placementGeneFracPSpec : "disabled"),
+	"placement_minimum_nt=".($strictBackbone ? $placementNTCntTotal : "disabled"),
+	"placement_minimum_overlap=".($strictBackbone ? $placementMinOverlap : "disabled"),
 )."\n";
 $workflowMsaSelectionPolicy = $postAlignmentQCPolicy;
 $workflowTreeStagePolicy = $postAlignmentPolicy;
@@ -1951,6 +1968,7 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 		} grep {
 			$finalSelection->{locus_metrics}{$_}{selected}
 		} keys %{$finalSelection->{locus_metrics}};
+		if ($strictBackbone) {
 		my $backboneEligibility = classifyTaxonAwareCoverageEligibility(
 			sample_metrics => $finalSelection->{sample_metrics},
 			gene_fraction => $GeneFracPSpec,
@@ -2019,6 +2037,16 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			. $postQCAlignmentCount
 			. " post-QC loci; reports: $treeD/taxon_aware_locus_selection.tsv, "
 			. "$treeD/taxon_aware_sample_selection.tsv, $backboneAudit, $placementAudit\n";
+		} else {
+			retry_unlink("$treeD/taxon_aware_backbone_eligibility.tsv");
+			retry_unlink("$treeD/taxon_aware_placement_eligibility.tsv");
+			print "Taxon-aware final selection retained "
+				. scalar(@{$finalSelection->{alignments}}) . "/"
+				. $postQCAlignmentCount
+				. " post-QC loci; placement disabled, reports: "
+				. "$treeD/taxon_aware_locus_selection.tsv, "
+				. "$treeD/taxon_aware_sample_selection.tsv\n";
+		}
 	}
 }
 my $postSelectionPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;

@@ -5,7 +5,7 @@
 - Updated `buildTree5.pl` to 5.77 and `strain_within.pl` to 1.25. `-GeneLengthMin` remains the high-confidence per-sample locus gate used for candidate selection and backbone/placement eligibility; the new `-GeneLengthIncludeMin` (default `0.03`) recovers lower-coverage observations only after that QC gate.
 - Recovered observations enter both the complete/backbone MSA and, when strict placement is explicitly enabled, the placement-query MSA. Final taxon-aware sample coverage metrics ignore recovered-only observations, while MSAfix masking and post-alignment occupancy/divergence QC evaluate the expanded alignments.
 - Added per-MGS `phylo/gene_length_filter.samples.tsv`, run-wide `LOGandSUB/strainGeneLengthFilter.samples.tsv`, and separate selection-attrition totals for observations dropped by either threshold or recovered into MSA input.
-- Strict-backbone EPA placement remains disabled by default in both scripts (`-strictBackbone 0`) and is still enabled only by an explicit user flag.
+- Backbone EPA placement remains disabled by default in both scripts and is enabled only with `-placeOnBackbone 1` (the historical `-strictBackbone` spelling is now a deprecated compatibility alias).
 
 ## 2026-08-06 — Legacy strain inference and placement eligibility
 

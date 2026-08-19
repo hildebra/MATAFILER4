@@ -70,6 +70,8 @@ is_deeply(
 
 my $strain = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 my $strain2 = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
+my $mgs = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
+my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 my $internal_config = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config_internal.txt'));
 my $site_config_template = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config.old'));
 my $neighbor_tree_r = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'R_scripts', 'neighborTree.R'));
@@ -255,7 +257,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.25;/,
+like($strain, qr/my \$version = 1\.27;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"individualVar=s".*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput/s,
@@ -450,11 +452,20 @@ like($strain,
 unlike($strain, qr/-iqLegacy\s+1|legacyMGTK/,
 	'within-strain does not expose or submit the obsolete IQ-TREE legacy-kernel flag');
 like($strain,
-	qr/"recalcTrees=i"\s+=> \\\$recalcTrees.*?-recalcTrees must be 0 or 1.*?\$onlySubmit = 1 if \$recalcTrees/s,
-	'tree recalculation is validated and forced into input-recovery-only mode');
+	qr/"redo=s"\s+=> \\\$redoMode.*?qw\(none tree input all\).*?if \(\$redoMode eq 'tree'\) \{ \$recalcTrees = 1; \$onlySubmit = 1; \}.*?elsif \(\$redoMode eq 'input'\) \{ \$repairCAT = 1; \$deepRepair = 1; \$onlySubmit = 1; \}.*?elsif \(\$redoMode eq 'all'\) \{ \$redoSubmissionData = 1; \$onlySubmit = 0; \}/s,
+	'canonical redo modes resolve to the established tree, input, and full-rebuild paths');
 like($strain,
-	qr/-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData.*?-recalcTrees must be launched by the main strainWithin process/s,
-	'tree recalculation rejects input-regeneration modes and split-worker execution');
+	qr/"recalcTrees=i"\s+=> sub.*?'-redo tree'.*?"repairCAT=i"\s+=> sub.*?'-redo input'.*?"redoSubmissionData=i"\s+=> sub.*?'-redo all'.*?deprecated redo\/repair flags/s,
+	'legacy recovery options remain temporary, warning compatibility aliases');
+like($strain,
+	qr/-redo cannot be combined with deprecated redo\/repair flags.*?-redo tree must be launched by the main strainWithin process/s,
+	'redo modes reject mixed legacy input and split-worker tree execution');
+like($mgs,
+	qr/"redo=s"\s+=> \\\$strainRedo.*?-redo must be one of: none, tree, input, all.*?\$strain1scr .*?-onlySubmit 1 -redo \$strainRedo/s,
+	'MGS.pl validates and forwards the canonical strain redo mode');
+unlike($mgs,
+	qr/\$strain1scr .*?-(?:reSubmit|redoSubmissionData|rmMSA)\b/s,
+	'MGS.pl no longer supplies redundant or deprecated strain defaults');
 like($strain,
 	qr/my \$runPartI = \(.*?\|\| \(\$recalcTrees && \$dirsNOTPrepped\).*?if \(\$runPartI\).*?Stage I: consensus-gene extraction/s,
 	'tree recalculation reruns extraction when required per-MGS inputs are absent');
@@ -572,8 +583,8 @@ ok(index($strain, 'sub prepareMGSInputSet') >= 0
 	&& index($strain, '"-stagedInputDir "') >= 0,
 	'normal tree submission prefers worker-shard handoff and retains aggregate merging as a compatibility fallback');
 like($strain,
-	qr/staged input sets recovered for -recalcTrees: \$recalcScratchRecovered/,
-	'tree submission accounting reports staged recalculation recovery separately from skipped dispositions');
+	qr/staged input sets recovered for -redo tree: \$recalcScratchRecovered/,
+	'tree submission accounting reports staged redo recovery separately from skipped dispositions');
 like($strain,
 	qr/sub resetMGSTreeOutputs .*?dirname\(\$resolvedMGS\) eq \$resolvedRoot.*?basename\(\$resolvedMGS\) eq \$MGS.*?remove_tree\(\$phyloDir, \{safe => 1\}\).*?retry_unlink\(\$treeStone/s,
 	'tree-only reset is confined to the selected MGS phylo directory and completion checkpoint');
@@ -645,11 +656,17 @@ like($strain,
 	qr/maximum_genes_per_sample => 600.*?maximum_tree_loci => 400.*?\$taxonAwareGeneBudget = \$treeLocusBudget < \$presortGenes.*?taxonAwareLocusBudgets\(\$taxonAwareGeneBudget\).*?-taxonAwareMaxLoci \$taxonAwareMaxLoci.*?-taxonAwareCoreLoci \$taxonAwareCoreLoci.*?-taxonAwareCandidateExtra \$taxonAwareCandidateExtra.*?sub taxonAwareLocusBudgets.*?\$maximumLoci \* 0\.8.*?\$maximumLoci \* 0\.3/s,
 	'strainWithin scales 80% core, 20% rescue capacity, and 30% QC backfill to its effective gene budget');
 like($strain,
-	qr/my \$strictBackbone = 0;.*?my \$strictBackboneFraction = 0\.35;.*?my \$strictBackboneMinSamples = 3;.*?my \$placementMinOverlap = 10_000;.*?"strictBackbone=i"\s+=> \\\$strictBackbone.*?"strictBackboneFraction=f"\s+=> \\\$strictBackboneFraction.*?"strictBackboneMinSamples=i"\s+=> \\\$strictBackboneMinSamples.*?"placementMinOverlap=i"\s+=> \\\$placementMinOverlap/s,
-	'strainWithin keeps strict-backbone placement opt-in and exposes its controls');
+	qr/my \$strictBackbone = 0;.*?my \$strictBackboneFraction = 0\.35;.*?my \$strictBackboneMinSamples = 3;.*?my \$placementMinOverlap = 10_000;.*?"placeOnBackbone=i"\s+=> sub.*?\$placeOnBackboneSpecified = 1.*?"strictBackbone=i"\s+=> sub.*?'-placeOnBackbone'.*?"strictBackboneFraction=f"\s+=> \\\$strictBackboneFraction.*?"placementMinOverlap=i"\s+=> \\\$placementMinOverlap.*?-placeOnBackbone cannot be combined/s,
+	'strainWithin exposes opt-in backbone placement and retains a deprecated switch alias');
 like($strain,
-	qr/-strictBackbone \$strictBackbone .*?-strictBackboneFraction \$strictBackboneFraction .*?-strictBackboneMinSamples \$strictBackboneMinSamples .*?-placementMinOverlap \$placementMinOverlap/s,
-	'strainWithin forwards all backbone controls to buildTree5');
+	qr/-placeOnBackbone \$strictBackbone .*?if \(\$strictBackbone\) \{.*?-placementGenesPerSpecies.*?-strictBackboneFraction \$strictBackboneFraction .*?-placementMinOverlap \$placementMinOverlap/s,
+	'strainWithin forwards placement-only controls only when backbone placement is enabled');
+like($build_tree,
+	qr/"placeOnBackbone=i" => sub.*?"strictBackbone=i" => sub.*?-placeOnBackbone cannot be combined.*?Option -strictBackbone is deprecated/s,
+	'buildTree exposes the canonical placement switch with a guarded compatibility alias');
+like($build_tree,
+	qr/if \(\$strictBackbone\) \{\s*my \$backboneEligibility = classifyTaxonAwareCoverageEligibility.*?my \$placementEligibility = classifyTaxonAwareCoverageEligibility.*?\} else \{.*?placement disabled/s,
+	'BuildTree skips backbone and placement eligibility filtering when placement is disabled');
 like($strain,
 	qr/sub writeGeneLengthSampleSummary .*?gene_length_filter\.samples\.tsv.*?"\$\{mgs\}:\$_".*?strainGeneLengthFilter\.samples\.tsv.*?gene_length_sample_audit\\t\$geneLengthSampleSummary/s,
 	'strainWithin consolidates per-MGS length-gate decisions into a sample-wise run report');
@@ -745,7 +762,6 @@ like($strain,
 	qr/writeMGSSampleHistograms\(\).*?MGS_sample_counts.*?MGS_sample_histogram.*?for my \$role \(qw\(backbone placement\)\).*?\$\{role\}_samples_per_MGS/s,
 	'the run summary links exact sample counts and both role-specific histograms');
 
-my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,
 	'three-sample MGS accepted by the wrapper are retained for a minimal tree');
 like($build_tree,

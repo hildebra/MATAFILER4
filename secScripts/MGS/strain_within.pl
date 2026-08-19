@@ -241,7 +241,9 @@ my $completionMessage = "";
 #1.23: stream parent only-submit resumes without a controller-wide file audit
 #1.24: expose reproducible PopGenStats configuration to the postprocessing launcher
 #1.25: recover partial loci after high-threshold sample QC and report both length gates
-my $version = 1.25;
+#1.26: consolidate destructive recovery under -redo and deprecate redundant flags
+#1.27: expose EPA placement as -placeOnBackbone and fully gate placement-only filters
+my $version = 1.27;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -260,6 +262,8 @@ my $maxCores = -1;
 my $onlySubmit =0;#extract genes anew?
 my $reSubmit=0;
 my $recalcTrees=0; #remove tree-stage outputs and rebuild from published or complete staged per-MGS inputs
+my $redoMode = "none";
+my %deprecatedOptionSeen;
 my $treeFile = "";
 my $doSubmit=0;
 my $subMode="";
@@ -323,6 +327,7 @@ my $rateMergeTargetSites = 30_000;
 my $rateMergeMinLoci = 20;
 my $rateMergeMinSites = 20_000;
 my $strictBackbone = 0;
+my ($placeOnBackboneSpecified, $legacyStrictBackboneSpecified) = (0, 0);
 my $strictBackboneFraction = 0.35;
 my $strictBackboneMinSamples = 3;
 my $placementMinOverlap = 10_000;
@@ -409,7 +414,8 @@ GetOptions(
 	"outD=s"         => \$outDpre,
 	"MGS=s"          => \$MGSfile,
 	"map2=s"         => \$mapF2, #to be given to strain2 script
-	"nodeTmp|tmpD=s" => \$locTmpDir1, 
+	"tmpD=s"         => \$locTmpDir1,
+	"nodeTmp=s"      => sub { $locTmpDir1 = $_[1]; $deprecatedOptionSeen{nodeTmp} = '-tmpD'; },
 	"submit=i"       => \$doSubmit,
 	"selfMemGb=i"    => \$selfMemGb,
 	"mosaicMemGb=i"  => \$mosaicMemGb,
@@ -419,21 +425,22 @@ GetOptions(
 		$treeOOMMaxMemGBSpecified = 1;
 	},
 	"onlySubmit=i"   => \$onlySubmit, #submit only jobs, or also recreate input fna/faa files? (can take days)
-	"reSubmit=i"     => \$reSubmit, #for all MGS: resubmit tree phylo building
-	"recalcTrees=i"  => \$recalcTrees, #delete tree outputs and rebuild from existing per-MGS inputs
-	"repairCAT=i"    => \$repairCAT,
-	"deepRepair=i"   => \$deepRepair, #for missing MGS phylos: will resubmit phylo and rebuild fna/faa 
-	"redoSubmissionData=i" => \$redoSubmissionData,  #for all MGS: will resubmit phylo and rebuild the fna/faa files..
+	"redo=s"         => \$redoMode,
+	"reSubmit=i"     => sub { $reSubmit = $_[1]; $deprecatedOptionSeen{reSubmit} = '-redo tree'; },
+	"recalcTrees=i"  => sub { $recalcTrees = $_[1]; $deprecatedOptionSeen{recalcTrees} = '-redo tree'; },
+	"repairCAT=i"    => sub { $repairCAT = $_[1]; $deprecatedOptionSeen{repairCAT} = '-redo input'; },
+	"deepRepair=i"   => sub { $deepRepair = $_[1]; $deprecatedOptionSeen{deepRepair} = '-redo input'; },
+	"redoSubmissionData=i" => sub { $redoSubmissionData = $_[1]; $deprecatedOptionSeen{redoSubmissionData} = '-redo all'; },
 	#workflow HPC usage
 	"subjob=i"       => \$subJob,
 	"maxSubJob=i"    => \$maxSubJob,
-	"treeSubFromMGS=s" => \$startSubFromMGS, #debug option..
+	"treeSubFromMGS=s" => sub { $startSubFromMGS = $_[1]; $deprecatedOptionSeen{treeSubFromMGS} = '-MGSsubset'; },
 	#"cores=i"        => \$numCores, #not used any longer..
 	"maxCores=i"     => \$maxCores, #superseedes -cores, will dynamically allocate num cores based on input file size, if defined
 	"presortGenes=i" => \$presortGenes, #how many potential genes to include, of the original MGS (receovered will vary strongly  between samples)
 	"maxGenes=i"     => \$maxNGenes, #maximum validated genes retained for each MGS/sample
 	"treeLocusBudget=i" => \$treeLocusBudget, #bounded final loci passed to BuildTree selection
-	"noGeneLimit=i"  => \$noGeneLimit, #remove only the gene-count cap; QC remains enabled
+	"noGeneLimit=i"  => sub { $noGeneLimit = $_[1]; $deprecatedOptionSeen{noGeneLimit} = '-maxGenes 0'; },
 	"disableQC=i"    => \$disableQC, #expert/debug option: disable biological QC independently of the gene cap
 	"mosaicLoci=s"   => \$mosaicLociFile, #catalogue-wide confirmed mosaic/outgroup table
 	"mosaicMGS=s"    => \$mosaicMGSFile, #raw SB.clusters used for comprehensive Mosaic discovery
@@ -478,7 +485,12 @@ GetOptions(
 	"rateMergeTargetSites=i" => \$rateMergeTargetSites,
 	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
 	"rateMergeMinSites=i" => \$rateMergeMinSites,
-	"strictBackbone=i" => \$strictBackbone,
+	"placeOnBackbone=i" => sub { $strictBackbone = $_[1]; $placeOnBackboneSpecified = 1; },
+	"strictBackbone=i" => sub {
+		$strictBackbone = $_[1];
+		$legacyStrictBackboneSpecified = 1;
+		$deprecatedOptionSeen{strictBackbone} = '-placeOnBackbone';
+	},
 	"strictBackboneFraction=f" => \$strictBackboneFraction,
 	"strictBackboneMinSamples=i" => \$strictBackboneMinSamples,
 	"placementMinOverlap=i" => \$placementMinOverlap,
@@ -521,6 +533,31 @@ if ($help) {
 	print usage(\%FILTER_DEFAULT);
 	exit 0;
 }
+die "-placeOnBackbone cannot be combined with deprecated -strictBackbone\n"
+	if $placeOnBackboneSpecified && $legacyStrictBackboneSpecified;
+for my $name (sort keys %deprecatedOptionSeen) {
+	warn "Option -$name is deprecated; use $deprecatedOptionSeen{$name} instead. "
+		."Compatibility support will be removed in a future release.\n";
+}
+
+my %validRedoMode = map { $_ => 1 } qw(none tree input all);
+die "-redo must be one of: none, tree, input, all\n"
+	unless $validRedoMode{$redoMode};
+my %legacyRedoModes;
+$legacyRedoModes{tree} = 1 if $reSubmit || $recalcTrees;
+$legacyRedoModes{input} = 1 if $repairCAT || $deepRepair;
+$legacyRedoModes{all} = 1 if $redoSubmissionData;
+my @legacyRedoModes = sort keys %legacyRedoModes;
+die "-redo cannot be combined with deprecated redo/repair flags\n"
+	if $redoMode ne 'none' && @legacyRedoModes;
+die "Deprecated redo/repair flags request conflicting modes: @legacyRedoModes\n"
+	if @legacyRedoModes > 1;
+$redoMode = $legacyRedoModes[0] if $redoMode eq 'none' && @legacyRedoModes;
+$reSubmit = $recalcTrees = $repairCAT = $deepRepair = $redoSubmissionData = 0;
+if ($redoMode eq 'tree') { $recalcTrees = 1; $onlySubmit = 1; }
+elsif ($redoMode eq 'input') { $repairCAT = 1; $deepRepair = 1; $onlySubmit = 1; }
+elsif ($redoMode eq 'all') { $redoSubmissionData = 1; $onlySubmit = 0; }
+
 if (!$treeOOMMaxMemGBSpecified) {
 	my $configuredMaxMF4mem = getProgPaths("maxMF4mem", 0);
 	if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]+)?)$/ && $1 > 0) {
@@ -559,12 +596,15 @@ die "Fractional filtering options must be between 0 and 1\n"
 		$GenesPerSpecies, $GeneLengthMin, $GeneLengthIncludeMin,
 		$relativeNTFraction,
 		$taxonAwareRescueMinPrevalence,
-		grep { defined } ($placementGenesPerSpecies, $placementRelativeNTFraction));
+		$strictBackbone
+			? grep { defined } ($placementGenesPerSpecies, $placementRelativeNTFraction)
+			: ());
 die "-GeneLengthIncludeMin cannot exceed -GeneLengthMin because the inclusion "
 	."threshold must not be stricter than the QC threshold\n"
 	if $GeneLengthIncludeMin > $GeneLengthMin;
-die "-NTfiltCount and -placementNTfiltCount must be non-negative\n"
-	if $NTfiltCount < 0 || (defined($placementNTfiltCount) && $placementNTfiltCount < 0);
+die "-NTfiltCount must be non-negative\n" if $NTfiltCount < 0;
+die "-placementNTfiltCount must be non-negative\n"
+	if $strictBackbone && defined($placementNTfiltCount) && $placementNTfiltCount < 0;
 die "-compactTaxonAwareDiagnostics must be 0 or 1\n"
 	unless $compactTaxonAwareDiagnostics == 0 || $compactTaxonAwareDiagnostics == 1;
 die "-taxonAwareLocusSelection must be 0 or 1\n"
@@ -573,21 +613,22 @@ die "-rateMergePartitions must be 0 or 1\n"
 	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
 die "-rateMergeMaxBins, -rateMergeTargetSites, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
 	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeTargetSites, $rateMergeMinLoci, $rateMergeMinSites);
-die "-strictBackbone must be 0 or 1\n"
+die "-placeOnBackbone must be 0 or 1\n"
 	unless $strictBackbone == 0 || $strictBackbone == 1;
-die "-strictBackboneFraction must be between 0 and 1\n"
-	if $strictBackboneFraction < 0 || $strictBackboneFraction > 1;
-die "-strictBackboneMinSamples must be at least 3\n"
-	if $strictBackboneMinSamples < 3;
-die "-placementMinOverlap must be non-negative\n"
-	if $placementMinOverlap < 0;
-die "-epaThreads must be positive\n" if $epaThreads < 1;
-die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or positive\n"
-	if $epaMaxMemMB < -1;
-die "-epaPendantOutlierFactor and -epaPendantMinThreshold must be non-negative\n"
-	if $epaPendantOutlierFactor < 0 || $epaPendantMinThreshold < 0;
+if ($strictBackbone) {
+	die "-strictBackboneFraction must be between 0 and 1\n"
+		if $strictBackboneFraction < 0 || $strictBackboneFraction > 1;
+	die "-strictBackboneMinSamples must be at least 3\n"
+		if $strictBackboneMinSamples < 3;
+	die "-placementMinOverlap must be non-negative\n" if $placementMinOverlap < 0;
+	die "-epaThreads must be positive\n" if $epaThreads < 1;
+	die "-epaMaxMemMB must be -1 (derived), 0 (no memory-based scaling), or positive\n"
+		if $epaMaxMemMB < -1;
+	die "-epaPendantOutlierFactor and -epaPendantMinThreshold must be non-negative\n"
+		if $epaPendantOutlierFactor < 0 || $epaPendantMinThreshold < 0;
+}
 if ($redoEPAfilter) {
-	die "-redoEPAfilter requires -strictBackbone 1 and -phyloProg 1\n"
+	die "-redoEPAfilter requires -placeOnBackbone 1 and -phyloProg 1\n"
 		unless $strictBackbone && $phyloProg == 1;
 	die "-redoEPAfilter cannot be combined with tree/input regeneration modes\n"
 		if $recalcTrees || $reSubmit || $repairCAT || $deepRepair || $redoSubmissionData;
@@ -610,7 +651,6 @@ die "-phyloProg must be 1 (IQ-TREE), 2 (VeryFastTree), or 3 (FastTree)\n"
 	unless $phyloProg >= 1 && $phyloProg <= 3;
 die "-iqPathogen must be 0 or 1\n" unless $iqPathogen == 0 || $iqPathogen == 1;
 die "-iqPathogen requires -phyloProg 1\n" if $iqPathogen && $phyloProg != 1;
-die "-recalcTrees must be 0 or 1\n" unless $recalcTrees == 0 || $recalcTrees == 1;
 die "-noGeneLimit and -disableQC must each be 0 or 1\n"
 	unless ($noGeneLimit == 0 || $noGeneLimit == 1)
 		&& ($disableQC == 0 || $disableQC == 1);
@@ -622,9 +662,7 @@ die "Abundance-pattern settings are invalid\n"
 	unless $abundanceMinimumLoci > 0 && $abundanceMinimumFold > 0
 		&& $abundanceMaximumFold >= $abundanceMinimumFold
 		&& $abundanceMaximumModifiedZ >= 0;
-die "-recalcTrees cannot be combined with -repairCAT, -deepRepair, or -redoSubmissionData\n"
-	if $recalcTrees && ($repairCAT || $deepRepair || $redoSubmissionData);
-die "-recalcTrees must be launched by the main strainWithin process, not a split worker\n"
+die "-redo tree must be launched by the main strainWithin process, not a split worker\n"
 	if $recalcTrees && $subJob;
 die "-MSAprog must be 0, 1, 2, or 4\n"
 	unless grep { $MSAprog == $_ } (0, 1, 2, 4);
@@ -672,7 +710,7 @@ if (!length($mosaicMGSFile) && length($MGSfile)) {
 }
 
 $noGeneLimit = 1 if $maxNGenes <= 0; #backward-compatible no-cap spelling; QC is unchanged
-die "-maxGenes must be at least -MGSminGenesPSmpl unless -noGeneLimit 1 is used\n"
+die "-maxGenes must be at least -MGSminGenesPSmpl, or <=0 to remove the cap\n"
 	if !$noGeneLimit && $maxNGenes < $MGStoolowGsThr;
 $maxNGenes = -1 if $noGeneLimit;
 
@@ -1838,7 +1876,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		unless ($publishedInputsReady || $scratchInputsReady) {
 			$treeDisposition{'no recoverable inputs for recalculation'}++;
 			limitedWarn('MGS missing recoverable inputs for tree recalculation',
-				"Skipping $MGS: -recalcTrees found neither complete published inputs nor a complete staged FNA/FAA/category set.\n");
+				"Skipping $MGS: -redo tree found neither complete published inputs nor a complete staged FNA/FAA/category set.\n");
 			next;
 		}
 		resetMGSTreeOutputs($outD2, $MGS);
@@ -1957,12 +1995,6 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		."-GeneLengthIncludeMin $GeneLengthIncludeMin "
 		."-GenesPerSpecies $GenesPerSpecies "
 		."-NTfiltCount $NTfiltCount -iqFast 1 ";
-	$Tcmd .= "-placementGenesPerSpecies $placementGenesPerSpecies "
-		if defined $placementGenesPerSpecies;
-	$Tcmd .= "-placementRelativeNTFraction $placementRelativeNTFraction "
-		if defined $placementRelativeNTFraction;
-	$Tcmd .= "-placementNTfiltCount $placementNTfiltCount "
-		if defined $placementNTfiltCount;
 	$Tcmd .= "-taxonAwareLocusSelection $taxonAwareLocusSelection ";
 	if ($taxonAwareLocusSelection) {
 		$Tcmd .= "-taxonAwareMaxLoci $taxonAwareMaxLoci "
@@ -1979,14 +2011,22 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		."-rateMergeMinLoci $rateMergeMinLoci "
 		."-rateMergeMinSites $rateMergeMinSites ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
-	$Tcmd .= "-strictBackbone $strictBackbone "
-		."-strictBackboneFraction $strictBackboneFraction "
-		."-strictBackboneMinSamples $strictBackboneMinSamples "
-		."-placementMinOverlap $placementMinOverlap "
-		."-epaThreads ".($epaOnlyRetry ? 1 : $epaThreads)
-		." -epaMaxMemMB $epaMaxMemMB "
-		."-epaPendantOutlierFactor $epaPendantOutlierFactor "
-		."-epaPendantMinThreshold $epaPendantMinThreshold ";
+	$Tcmd .= "-placeOnBackbone $strictBackbone ";
+	if ($strictBackbone) {
+		$Tcmd .= "-placementGenesPerSpecies $placementGenesPerSpecies "
+			if defined $placementGenesPerSpecies;
+		$Tcmd .= "-placementRelativeNTFraction $placementRelativeNTFraction "
+			if defined $placementRelativeNTFraction;
+		$Tcmd .= "-placementNTfiltCount $placementNTfiltCount "
+			if defined $placementNTfiltCount;
+		$Tcmd .= "-strictBackboneFraction $strictBackboneFraction "
+			."-strictBackboneMinSamples $strictBackboneMinSamples "
+			."-placementMinOverlap $placementMinOverlap "
+			."-epaThreads ".($epaOnlyRetry ? 1 : $epaThreads)
+			." -epaMaxMemMB $epaMaxMemMB "
+			."-epaPendantOutlierFactor $epaPendantOutlierFactor "
+			."-epaPendantMinThreshold $epaPendantMinThreshold ";
+	}
 	if ($phyloProg == 1){
 		$Tcmd .= "-iqMemMB $iqMemMB ";
 		$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
@@ -2097,7 +2137,7 @@ print "\nTree submission accounting: $treeAccounted/$Nspecis selected MGS accoun
 for my $reason (sort keys %treeDisposition) {
 	print "  $reason: $treeDisposition{$reason}\n";
 }
-print "  staged input sets recovered for -recalcTrees: $recalcScratchRecovered\n"
+print "  staged input sets recovered for -redo tree: $recalcScratchRecovered\n"
 	if $recalcTrees;
 if ($doSubmit) {
 	print "Tree preparation pass complete: $cnt eligible tree job(s), "
@@ -2191,7 +2231,7 @@ die "MGS abundance matrix is missing or empty: $MGSabundance\n" unless -s $MGSab
 
 my $strain2Scr = getProgPaths("MGS_strain2_scr");
 
-my $nxtCmd = "$strain2Scr -GCd ".shellQuote($GCd)." -FMGdir ".shellQuote($outD)." -MGSmatrix ".shellQuote($MGSabundance)." -cores 4 -reSubmit 0 -DiscTests ".shellQuote($discTests)." -ContTests ".shellQuote($contTests)." -familyVar ".shellQuote($familyVar)." -groupStabilityVars ".shellQuote($groupStabilityVars)." -individualVar ".shellQuote($individualVar)." ";
+my $nxtCmd = "$strain2Scr -GCd ".shellQuote($GCd)." -FMGdir ".shellQuote($outD)." -MGSmatrix ".shellQuote($MGSabundance)." -cores 4 -DiscTests ".shellQuote($discTests)." -ContTests ".shellQuote($contTests)." -familyVar ".shellQuote($familyVar)." -groupStabilityVars ".shellQuote($groupStabilityVars)." -individualVar ".shellQuote($individualVar)." ";
 $nxtCmd .= "-MGSphylo ".shellQuote($treeFile)." " if $treeFile ne "";
 $nxtCmd .= "-popGenStats $doPopGenStats -popGenStrictOutgroup $popGenStrictOutgroup "
 	."-popGenGeneticCode $popGenGeneticCode -popGenCodonStart $popGenCodonStart "
@@ -3622,9 +3662,8 @@ sub prepRun{
 	$preConDir = "$scratchD/preComp/";
 
 
-	print "\n!! WARNING !!: RESUBMISSION mode selected (will resubmit MSA + phylos even for already completed MGS) !!\n" if ($reSubmit);
-	print "\n!! WARNING !!: RECALCTREES mode selected (will delete per-MGS tree outputs and rebuild from published or complete staged inputs) !!\n" if ($recalcTrees);
-	print "\n!! WARNING !!: REDOSUBMISSIONDATA mode selected (will redo and resubmit MSA + phylos even for already completed MGS) !!\n" if ($redoSubmissionData);
+	print "\n!! WARNING !!: REDO mode '$redoMode' selected; matching existing results may be invalidated and rebuilt. !!\n"
+		if $redoMode ne 'none';
 
 	$mapF = resolve_catalog_maps($GCd);
 	
@@ -3647,7 +3686,7 @@ sub prepRun{
 		print "Using tree $treeFile to create automatically outgroups\n" if ($treeFile ne "");
 		print "MGs: $useGTDBmg\nGene2Tax: $gene2taxF\n";
 		print "Using $presortGenes genes from each MGS for location\n";
-		print "Deep repariing remaining submission files\n" if ($deepRepair);
+		print "Redoing incomplete strain inputs\n" if $redoMode eq 'input';
 		print "Pre-creating ConsSNPs in $preConDir in $preCompCons runs\n" if ($preCompCons);
 		print "-minSNPDepth $minSNPDepth, -minSNPCallQual $minSNPCallQual";
 		print ", -SNPadaptiveQual $useAdaptiveQual, -SNPindelRangeFilt: $indelRange";
@@ -3657,12 +3696,17 @@ sub prepRun{
 		print "familyVar=$familyVar\n" unless ($familyVar eq "");
 		
 		print "groupStabilityVars=$groupStabilityVars\n" unless ($groupStabilityVars eq "");
-		print "MSAaligner: $MSAprog, backbone GenesPerSpecies: $GenesPerSpecies, "
+		print "MSAaligner: $MSAprog, tree GenesPerSpecies: $GenesPerSpecies, "
 			."GeneLengthMin: $GeneLengthMin, GeneLengthIncludeMin: $GeneLengthIncludeMin, "
-			."backbone relativeNTFraction: $relativeNTFraction, "
-			."placement GenesPerSpecies: $placementGenesPerSpecies, "
-			."placement relativeNTFraction: $placementRelativeNTFraction, "
+			."tree relativeNTFraction: $relativeNTFraction, "
 			."taxonAwareLocusSelection: $taxonAwareLocusSelection\n";
+		if ($strictBackbone) {
+			print "Backbone placement enabled: GenesPerSpecies=$placementGenesPerSpecies, "
+				."relativeNTFraction=$placementRelativeNTFraction, "
+				."strictBackboneFraction=$strictBackboneFraction\n";
+		} else {
+			print "Backbone placement disabled; backbone- and placement-only filters are inactive\n";
+		}
 		print "Rate/GC partition merging: enabled=$rateMergePartitions, "
 			."maximumBins=$rateMergeMaxBins, targetBin=$rateMergeTargetSites effective sites, "
 			."minimumBin=$rateMergeMinLoci loci/"
@@ -3720,7 +3764,7 @@ sub prepRun{
 		if ($subJob) {
 			die "Sorted MGS guide is missing for subjob: $sortedMGS\n" unless -s $sortedMGS;
 		} elsif ($recalcTrees && !-s $sortedMGS) {
-			die "-recalcTrees requires the existing sorted MGS guide: $sortedMGS\n";
+			die "-redo tree requires the existing sorted MGS guide: $sortedMGS\n";
 		} elsif ($mode eq "MGSall" && !-e $sortedMGS) {
 			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
 			remove_tree($outD) if -d $outD;
@@ -5611,8 +5655,7 @@ sub printEarlyRunHeader {
 	print "MGS input: ".(length($MGSfile) ? $MGSfile : '(FMG mode)')."\n";
 	print "Requested output: $requestedOutput\n";
 	print "Cores: $numCores (max: $maxCores); submit=$doSubmit; "
-		."onlySubmit=$onlySubmit; recalcTrees=$recalcTrees; redoSubmissionData=$redoSubmissionData; "
-		."redoEPAfilter=$redoEPAfilter\n";
+		."onlySubmit=$onlySubmit; redo=$redoMode; redoEPAfilter=$redoEPAfilter\n";
 	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB\n";
 	print "Initializing paths, maps, and catalogues...\n";
 	print "==============================================\n";
@@ -6905,22 +6948,30 @@ Workflow splitting:
   -maxSubJob INT                Stage-I worker count: -1 selects automatically
                                  (default; 50-150 assembly groups/worker), 0
                                  disables splitting, positive values are explicit
-  -subjob INT                   Internal split-worker index; supplied only by
-                                 the parent process
   -treeOOMMaxMemGB FLOAT        Maximum memory for automatic tree OOM retries;
                                  each OOM round doubles the previous request and
                                  at most three rounds are attempted [default:
                                  maxMF4mem from MATAFILERcfg.txt; 512]
 
+Redo modes:
+  -redo none                    Reuse valid results and resume missing work
+                                 [default]
+  -redo tree                    Delete and rebuild tree-stage outputs while
+                                 reusing complete published or staged inputs
+  -redo input                   Rebuild missing or incomplete strain-tree inputs
+                                 and their dependent tree work
+  -redo all                     Delete and rebuild strain inputs and trees for
+                                 every selected MGS
+
+Use -MGSsubset to limit a redo to explicit MGS identifiers.
+
 Gene selection and biological QC:
   -maxGenes INT                  Maximum validated loci per MGS/sample
-                                 [default $default->{maximum_genes_per_sample}]
-  -noGeneLimit 0|1              Remove the locus cap; QC remains active [default 0]
+                                 [default $default->{maximum_genes_per_sample}; <=0 removes the cap]
   -treeLocusBudget INT           Maximum final loci selected for each tree;
                                  candidate alignment remains bounded to this plus
                                  the QC-backfill allowance
                                  [default $default->{maximum_tree_loci}]
-  -disableQC 0|1                Disable biological QC (expert/debug only) [default 0]
   -MGSminGenesPSmpl INT         Minimum validated loci retained per MGS/sample
                                  [default $default->{minimum_mgs_genes_per_sample}]
   -multiGeneSmplMax FLOAT       Maximum ambiguous-locus fraction
@@ -6997,7 +7048,7 @@ Tree locus filtering:
                                  [default 20]
   -rateMergeMinSites INT        Minimum alignment sites per bin before merging
                                  [default 20000]
-  -strictBackbone 0|1           Infer a broad ML backbone and place only deferred
+  -placeOnBackbone 0|1          Infer a broad ML backbone and place only deferred
                                  sparse samples with EPA-ng [default 0]
   -strictBackboneFraction FLOAT Defer a sample only below this fraction of the
                                  informative-site Q90 [default 0.35]
@@ -7027,8 +7078,8 @@ controller-wide resume audit, worker-shard scan, or input-sizing/sorting pass.
 Already-overlaid MGS also bypass reference-catalogue initialization; the shared
 reference stream starts only when the first raw MGS actually needs an overlay.
 An existing LOGandSUB/tree_input_sizing.tsv may be read only as an optional
-resource hint. Explicit recalculation, repair, redo, and resubmission modes keep
-the exhaustive audit. After dispatch, normal scheduler waiting, output
+resource hint. Explicit -redo modes keep the exhaustive audit. After dispatch,
+normal scheduler waiting, output
 validation, and strain_within_2.2.pl submission are unchanged.
 
 On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a

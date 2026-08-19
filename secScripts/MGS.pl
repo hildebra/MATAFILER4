@@ -123,6 +123,7 @@ my $perlClusterMAGs = 0; #compatibility/debug implementation; binary is the defa
 my $rewrTAX = 0;
 my $rewrClusterMAGs = 0; #redo clusterMAGs analysis
 my $doStrains = 0;
+my $strainRedo = "none";
 my $prepareMosaicLoci = 1;
 my $tmpD = ""; 
 my $canopyF = "";
@@ -157,6 +158,7 @@ GetOptions(
 	"wait4stoneTimeout=i" => \$wait4stoneTimeout, #maximum wait in seconds; 0 retains unlimited waiting
 	"mem=i" => \$memG,					#memory used for intensive jobs
 	"strains=i" => \$doStrains,			#1: calc instra species strain phylogenies. Default: 0
+	"redo=s" => \$strainRedo,			#strain workflow redo mode: none, tree, input, or all
 	"prepareMosaicLoci=i" => \$prepareMosaicLoci, #1: confirm mosaic loci/outgroups before strain analysis; 0: keep seed clusters separate
 	"useCheckM2=i" => \$useCheckM2,		#CheckM2 default qual checking of MAGs/MGS
 	"useCheckM1=i" => \$useCheckM1,		#CheckM default qual checking of MAGs/MGS
@@ -179,6 +181,8 @@ die "-binSpeciesMG must be one of 1..5\n" unless $binSpeciesMG >= 1 && $binSpeci
 die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterID <= 100;
 die "-prepareMosaicLoci must be 0 or 1\n"
 	unless $prepareMosaicLoci == 0 || $prepareMosaicLoci == 1;
+die "-redo must be one of: none, tree, input, all\n"
+	unless grep { $strainRedo eq $_ } qw(none tree input all);
 
 #die "$useCheckM2 $useCheckM1\n";
 
@@ -979,12 +983,12 @@ if ($numSamples > 1500){#scale with the number of assembly groups
 my $mosaicDir = "$outD/mosaic/";
 my $mosaicCatalogue = "$mosaicDir/$BinnerShrt.clusters.mosaic_loci.$clusterID.confirmed.tsv";
 my $ph2Cmd = "mkdir -p "._shell_quote("$outD/within_phylo/")." || exit 65\n";
-$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -mosaicMGS $finalClusters2 -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -rmMSA 1 -preCompConsSNP $preCompCons -selfMemGb $memUsage -mosaicMemGb $memG -onlySubmit 1 -submit $doSubmit -reSubmit 0 -maxSubJob $NsubJobs -redoSubmissionData 0 -outD $outD/within_phylo/ -prepareMosaicLoci $prepareMosaicLoci ";
+$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -mosaicMGS $finalClusters2 -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -preCompConsSNP $preCompCons -selfMemGb $memUsage -mosaicMemGb $memG -onlySubmit 1 -redo $strainRedo -submit $doSubmit -maxSubJob $NsubJobs -outD $outD/within_phylo/ -prepareMosaicLoci $prepareMosaicLoci ";
 $ph2Cmd .= "-mosaicLoci $mosaicCatalogue " if $prepareMosaicLoci;
 $ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree || $treedep ne "";
 $ph2Cmd .= "\n";
 
-$ph2Cmd .= "#consider adapting further options: \n#-rmMSA 0 -presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -nodeTmp [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
+$ph2Cmd .= "#consider adapting further options: \n#-presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -tmpD [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
 $ph2Cmd .= "#-minSNPCallQual 20 -GenesPerSpecies 0.1 -GeneLengthMin 0.5 -skipIndels 0 -minSNPDepth 2 -SNPdepthFilterScale 0.1 -SNPindelRangeFilt 5 -SNPadaptiveQual 0.0";
 #systemW $ph2Cmd;
 my $launcherCores = 1;

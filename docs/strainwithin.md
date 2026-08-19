@@ -38,7 +38,7 @@ perl "$MF4DIR/secScripts/MGS/strain_within.pl" \
 
 The wrapper extracts and QC-filters strain loci (Phase I), prepares each MGS tree (Phase II), waits for submitted jobs, and launches `strain_within_2.2.pl` for statistics. Use the same command with `-submit 1` to submit jobs.
 
-By default, the wrapper builds one tree from the complete retained alignment. EPA-ng placement is **disabled**. To infer a well-covered backbone and place eligible sparse strains afterward, explicitly add `-strictBackbone 1`.
+By default, the wrapper builds one tree from the complete retained alignment. EPA-ng placement is **disabled**. To infer a well-covered backbone and place eligible sparse strains afterward, explicitly add `-placeOnBackbone 1`.
 
 ### 2. Choose sample-inclusion stringency
 
@@ -60,7 +60,7 @@ Use this only when sparse sampling is expected and you will inspect the resultin
   -treeLocusBudget 400
 ```
 
-This lowers the per-sample locus and relative-NT gates but leaves locus QC active. It does not enable EPA-ng placement; add `-strictBackbone 1` only if sparse strains should be placed against a backbone.
+This lowers the per-sample locus and relative-NT gates but leaves locus QC active. It does not enable EPA-ng placement; add `-placeOnBackbone 1` only if sparse strains should be placed against a backbone.
 
 #### Conservative inclusion
 
@@ -83,7 +83,7 @@ These are example presets, not universal biological cutoffs. Inspect `phylo/taxo
 Placement is separate from basic sample inclusion. It requires an IQ-TREE backbone and enough overlap with that backbone.
 
 ```bash
-  -strictBackbone 1 \
+  -placeOnBackbone 1 \
   -strictBackboneFraction 0.35 \
   -placementGenesPerSpecies 0.04 \
   -placementRelativeNTFraction 0.03 \
@@ -91,7 +91,7 @@ Placement is separate from basic sample inclusion. It requires an IQ-TREE backbo
   -epaThreads 2
 ```
 
-`-strictBackbone 1` is opt-in. Eligible sparse strains are placed with EPA-ng; samples that fail the placement coverage or overlap checks stay excluded from the published tree. `-redoEPAfilter 1` is a resume-only operation for refreshing retained EPA placement filtering and requires `-strictBackbone 1`.
+`-placeOnBackbone 1` is opt-in. Eligible sparse strains are placed with EPA-ng; samples that fail the placement coverage or overlap checks stay excluded from the published tree. With `-placeOnBackbone 0` (the default), `-strictBackboneFraction`, `-strictBackboneMinSamples`, and every `-placement*`/EPA-specific filter are inactive; the ordinary tree-inclusion and locus-QC settings still apply. `-redoEPAfilter 1` is a resume-only operation for refreshing retained EPA placement filtering and requires `-placeOnBackbone 1`.
 
 ### 4. Redo statistics only
 
@@ -116,13 +116,15 @@ This is a task-oriented summary. See the [complete `strain_within.pl` flag refer
 | Group | Important flags | Purpose |
 |---|---|---|
 | Inputs and execution | `-GCd`, `-MGS`, `-outD`, `-map2`, `-MGSabundance`, `-submit`, `-submissionMode` | Define catalogue inputs, output location, metadata, abundance matrix, and submission mode. |
-| Resume and repair | `-onlySubmit`, `-reSubmit`, `-recalcTrees`, `-repairCAT`, `-deepRepair`, `-redoSubmissionData` | Resume completed work or rebuild only the affected tree/input stage. Use one explicit repair mode at a time. |
-| Extraction QC | `-maxGenes`, `-treeLocusBudget`, `-MGSminGenesPSmpl`, `-GeneLengthMin`, `-GeneLengthIncludeMin`, `-multiGeneSmplMax`, `-conspGeneSmplMax`, `-disableQC` | Use high-coverage loci for QC, optionally recover partial loci after sample admission, and control other strain/locus filters. `-noGeneLimit` removes only the cap; it does not disable QC. |
+| Resume and redo | `-onlySubmit`, `-redo` | Resume completed work normally or explicitly rebuild tree outputs, incomplete inputs, or all selected results. |
+| Extraction QC | `-maxGenes`, `-treeLocusBudget`, `-MGSminGenesPSmpl`, `-GeneLengthMin`, `-GeneLengthIncludeMin`, `-multiGeneSmplMax`, `-conspGeneSmplMax` | Use high-coverage loci for QC, optionally recover partial loci after sample admission, and control other strain/locus filters. Set `-maxGenes 0` to remove only the gene-count cap; QC remains active. |
 | Tree inclusion | `-GenesPerSpecies`, `-relativeNTFraction`, `-NTfiltCount`, `-taxonAwareLocusSelection`, `-taxonAwareRescueMinPrevalence` | Set backbone inclusion thresholds and taxon-aware locus selection. |
-| Sparse placement | `-strictBackbone`, `-strictBackboneFraction`, `-placementGenesPerSpecies`, `-placementRelativeNTFraction`, `-placementNTfiltCount`, `-placementMinOverlap`, `-epaThreads` | Optional EPA-ng placement controls. Off by default; enable with `-strictBackbone 1`. |
+| Sparse placement | `-placeOnBackbone`, `-strictBackboneFraction`, `-placementGenesPerSpecies`, `-placementRelativeNTFraction`, `-placementNTfiltCount`, `-placementMinOverlap`, `-epaThreads` | Optional EPA-ng placement controls. Off by default; enable with `-placeOnBackbone 1`. When disabled, all other options in this group are inactive. |
 | Mosaic/outgroups | `-mosaicLoci`, `-mosaicMGS`, `-prepareMosaicLoci`, `-outgroupCoreMinLoci`, `-preferredCoreGenes` | Manage Mosaic discovery and choose broadly supported outgroup loci. |
 | Tree resources | `-maxCores`, `-selfMemGb`, `-mosaicMemGb`, `-treeOOMMaxMemGB`, `-rateMergePartitions` | Set scheduler and tree-inference resources. |
 | Downstream analyses | `-popGenStats`, `-popGenStrictOutgroup`, `-popGenGeneticCode`, `-popGenCodonStart`, `-popGenSeed`, `-individualVar`, `-DiscTests`, `-ContTests` | Forward population-genetic and association-analysis configuration to postprocessing. |
+
+The `-redo` values are deliberately short: `-redo tree` deletes and rebuilds tree-stage outputs while reusing complete inputs, `-redo input` rebuilds missing or incomplete strain inputs and their dependent trees, and `-redo all` deletes and rebuilds all strain inputs and trees for the selected MGS. The default is `-redo none`. Combine a redo with `-MGSsubset` to restrict it to explicit MGS identifiers.
 
 ## `strain_within_2.2.pl` flags
 

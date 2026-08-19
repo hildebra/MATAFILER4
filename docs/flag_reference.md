@@ -13,10 +13,10 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 |---|---:|---|
 | `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
-| `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `strain_within.pl` | `1.24` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
+| `MGS.pl` | `0.54` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
+| `strain_within.pl` | `1.27` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
 | `strain_within_2.2.pl` | `0.46` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
-| `buildTree5.pl` | `5.38` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.78` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -420,7 +420,7 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 
 ## MGS.pl
 
-MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. The uploaded source reports version `0.32`.
+MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. The uploaded source reports version `0.54`.
 
 ### General options
 
@@ -441,6 +441,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; zero waits indefinitely |
 | `-mem` | integer | `150` | stable | memory used for intensive jobs |
 | `-strains` | integer | `0` | stable | 1: calc instra species strain phylogenies. Default: 0 |
+| `-redo` | string | `none` | stable | Forward the strain-workflow redo mode: `none`, `tree`, `input`, or `all`. |
 | `-prepareMosaicLoci` | integer | `1` | stable | 1: have strain_within submit, await, and validate Mosaic as a prerequisite before strain analysis; 0: skip Mosaic preprocessing and keep same-NOG seed clusters separate |
 | `-useCheckM2` | integer | `0` | stable | CheckM2 default qual checking of MAGs/MGS |
 | `-useCheckM1` | integer | `1` | stable | CheckM default qual checking of MAGs/MGS |
@@ -451,7 +452,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## strain_within.pl
 
-Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.25`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.27`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
 
 ### Inputs, execution and workflow control
 
@@ -465,26 +466,19 @@ Within-MGS locus extraction, quality control, tree orchestration and downstream 
 | `-clusterID` | integer | `95` | stable | Gene-catalogue clustering identity; must be 1–100. |
 | `-MGset` | string | `GTDB` | stable | Marker-gene set; accepted values are `GTDB` and `FMG`. |
 | `-MGSphylo` | string | `""` | stable | Source MGS tree forwarded for fallback outgroup selection. |
-| `-nodeTmp`, `-tmpD` | string | `""` | stable | Node-local temporary directory. |
+| `-tmpD` | string | `""` | stable | Node-local temporary directory. |
 | `-submit` | integer | `0` | stable | Submit generated work (`1`) or perform a dry run (`0`). |
 | `-submissionMode` | string | auto | stable | Scheduler/backend override; dry runs default to `bash`. |
 | `-maxSubJob` | integer | `-1` | advanced | Phase-I worker count: `-1` auto-selects, `0` disables splitting, and a positive value is explicit. |
-| `-subjob` | integer | `0` | internal | Zero-based split-worker index supplied by the parent process. |
-| `-treeSubFromMGS` | string | `""` | internal | Begin tree resubmission at this MGS identifier. |
 | `-MGSsubset` | string | `""` | advanced | Comma-separated MGS subset. |
-| `-flushEvery` | integer | `200` | advanced | Number of samples buffered before per-MGS records are flushed. |
 | `-help`, `-h` | flag | `0` | stable | Show the built-in usage text. |
 
-### Resume, repair and resources
+### Resume, redo and resources
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-onlySubmit` | integer | `0` | stable | Reuse completed Phase-I preparation and submit only missing tree work. |
-| `-reSubmit` | integer | `0` | advanced | Resubmit tree building for all MGS. |
-| `-recalcTrees` | integer | `0` | stable | Remove tree-stage outputs and rebuild from published or complete staged inputs. |
-| `-repairCAT` | integer | `0` | advanced | Repair missing or incomplete per-MGS category inputs. |
-| `-deepRepair` | integer | `0` | advanced | Rebuild FNA/FAA inputs and resubmit missing MGS phylogenies. |
-| `-redoSubmissionData` | integer | `0` | advanced | Rebuild submission inputs and phylogenies, including completed MGS. |
+| `-redo` | string | `none` | stable | Destructive recovery mode: `none` resumes normally; `tree` rebuilds tree-stage outputs while reusing complete inputs; `input` rebuilds missing/incomplete inputs and dependent trees; `all` deletes and rebuilds strain inputs and trees for every selected MGS. Use `-MGSsubset` to target explicit identifiers. |
 | `-redoEPAfilter` | optional integer | `0` | advanced | Republish EPA-placed trees from retained backbone/jplace artifacts; implies `1` when no value is supplied. |
 | `-maxCores` | integer | `-1` | stable | Maximum dynamically allocated cores; `-1` uses automatic planning. |
 | `-selfMemGb` | integer | `10` | stable | Memory in GiB for the wrapper/controller job. |
@@ -498,10 +492,8 @@ Within-MGS locus extraction, quality control, tree orchestration and downstream 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-presortGenes` | integer | `1200` | stable | Potential loci considered before final tree selection. |
-| `-maxGenes` | integer | `600` | stable | Maximum validated loci retained per MGS/sample. |
+| `-maxGenes` | integer | `600` | stable | Maximum validated loci retained per MGS/sample; values `<=0` remove this cap without disabling QC. |
 | `-treeLocusBudget` | integer | `400` | stable | Maximum final loci selected for each tree. |
-| `-noGeneLimit` | integer | `0` | advanced | Remove the gene-count cap without disabling QC. |
-| `-disableQC` | integer | `0` | internal | Disable biological QC independently of the gene cap. |
 | `-MGSminGenesPSmpl` | integer | `8` | stable | Minimum validated loci retained per MGS/sample. |
 | `-multiGeneSmplMax` | float | `0.25` | stable | Maximum ambiguous/multigene-locus fraction per sample. |
 | `-conspGeneSmplMax` | float | `0.05` | stable | Maximum conspecific-signal locus fraction per sample. |
@@ -519,6 +511,23 @@ Within-MGS locus extraction, quality control, tree orchestration and downstream 
 | `-SNPadaptiveQual` | float | `0` | advanced | Adaptive depth-based quality filtering; `0` disables it. |
 | `-SNPdepthFilterScale` | float | `0.15` | stable | Filter when depth is below mean contig depth multiplied by this value. |
 | `-SNPindelRangeFilt` | integer | `5` | stable | Exclude SNPs within this many bases of indels. |
+
+### Internal and deprecated compatibility options
+
+These options remain parsed so existing generated commands and worker scripts do not break, but they are not part of the normal user-facing interface.
+
+| Option | Status | Replacement or purpose |
+|---|---|---|
+| `-nodeTmp` | deprecated | Use `-tmpD`. |
+| `-reSubmit`, `-recalcTrees` | deprecated | Use `-redo tree`. |
+| `-repairCAT`, `-deepRepair` | deprecated | Use `-redo input`. |
+| `-redoSubmissionData` | deprecated | Use `-redo all`. |
+| `-strictBackbone` | deprecated | Use `-placeOnBackbone`. |
+| `-treeSubFromMGS` | deprecated | Use `-MGSsubset`. |
+| `-noGeneLimit` | deprecated | Use `-maxGenes 0`. |
+| `-subjob` | internal | Split-worker index supplied by the parent process. |
+| `-flushEvery` | internal | Parent-to-worker buffering control. |
+| `-disableQC` | internal | Developer override that disables biological QC. |
 
 ### Mosaic and outgroup preparation
 
@@ -551,7 +560,7 @@ Within-MGS locus extraction, quality control, tree orchestration and downstream 
 | `-rateMergeTargetSites` | integer | `30000` | advanced | Target effective called sites per initial bin. |
 | `-rateMergeMinLoci` | integer | `20` | advanced | Minimum loci per bin before nearest-bin merging. |
 | `-rateMergeMinSites` | integer | `20000` | advanced | Minimum effective sites per bin before merging. |
-| `-strictBackbone` | integer | `0` | advanced | Infer a well-covered backbone and place eligible sparse samples with EPA-ng. |
+| `-placeOnBackbone` | integer | `0` | advanced | Infer a well-covered backbone and place eligible sparse samples with EPA-ng. When `0`, every backbone- and placement-only filter is inactive. |
 | `-strictBackboneFraction` | float | `0.35` | advanced | Severe aligned-coverage deferral threshold relative to sample Q90. |
 | `-strictBackboneMinSamples` | integer | `3` | advanced | Minimum backbone samples before falling back to the complete alignment. |
 | `-placementMinOverlap` | integer | `10000` | advanced | Minimum informative positions shared with the inferred backbone. |
@@ -620,7 +629,7 @@ Within-MGS postprocessing, strain statistics and population-genetic analysis. Th
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.77`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.78`.
 
 ### General options
 
@@ -675,7 +684,8 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-runFastTree` | integer | `0` | stable | See source/help for details. |
 | `-runVeryFastTree` | integer | `0` | stable | See source/help for details. |
 | `-treeShrink` | integer | `0` | stable | See source/help for details. |
-| `-strictBackbone` | integer | `0` | advanced | Infer an ML backbone from well-covered samples and place severe coverage outliers with EPA-ng. `strain_within.pl` leaves this disabled by default; set it to `1` to opt in. |
+| `-placeOnBackbone` | integer | `0` | advanced | Infer an ML backbone from well-covered samples and place severe coverage outliers with EPA-ng. When `0`, all other backbone- and placement-only options are ignored. |
+| `-strictBackbone` | integer | `0` | deprecated | Compatibility alias for `-placeOnBackbone`. |
 | `-strictBackboneFraction` | float | `0.35` | advanced | Defer a sample only when its called alignment sites are below this fraction of the sample Q90. Locus-QC status alone does not defer a sample after questionable loci have been masked. |
 | `-strictBackboneMinSamples` | integer | `3` | advanced | Fall back to the complete alignment if coverage filtering would leave fewer backbone samples. |
 | `-placementMinOverlap` | integer | `10000` | advanced | Absolute minimum called alignment positions required both before placement and in actual overlap with the inferred backbone. This complements the relative locus/NT gates and is the primary sparse-placement reliability control. |
@@ -729,14 +739,14 @@ Broad or between-species phylogeny is the default. In this mode `buildTree5.pl` 
 
 Taxon-aware selection is enabled by default and stays inside `buildTree5.pl` so it can reuse the normal alignment and MSAfix stages. For direct calls, the pre-MSA pass ranks length-stable, complete, prevalent loci and retains a 400-locus robust core. If `-preferredCoreGenes` is supplied, a locus whose catalogue seed is listed in that GTDB/core guide is ranked ahead of other eligible loci and receives a modest secondary preference during greedy taxon rescue; it still must pass normal sequence and QC filters, and it does not relax the hard broad-availability gate for taxon rescue or QC backfill. Greedy taxon rescue and backfill remain restricted to loci found in at least 80% of taxa with any usable candidate locus, preventing a sparse accessory or mobile-element locus from entering only because it carries an underrepresented taxon. After MSAfix, the final pass recalculates prevalence and reapplies the same guard. Sparse samples remain available only when a broadly shared selected locus anchors them. Candidate and final rows expose `preferred_core`, `coverage_rescue_eligible`, and `coverage_rescue_reason`. By default, the final taxon-aware and rate-partition reports are sectioned into `phylo/taxon_aware_diagnostics.tsv`; `phylo/selection_attrition.tsv` remains separate because the strain controller aggregates it. Set `-compactTaxonAwareDiagnostics 0` for the individual files.
 
-`strain_within.pl` enables the selector but leaves strict-backbone placement disabled by default; set `-strictBackbone 1` to opt in. It forwards the 0.8 rescue-prevalence guard, and automatically uses the supplied `-MGS` guide when it ends in `.core` (otherwise an available sibling `-MGS.core`) as `-preferredCoreGenes`. Give `-preferredCoreGenes` explicitly to override that choice. It scales the hierarchy to its effective selected-gene budget: 80% robust core, 20% taxon-rescue capacity, and an additional 30% QC-backfill candidate pool. The final-tree budget is `min(treeLocusBudget, presortGenes)`; `maxGenes` separately limits how many validated loci are extracted per MGS/sample. Thus 500 selected genes produce 400 core + 100 rescue + 150 backfill, while the default 400-gene cap produces 320 + 80 + 120. Its filtering defaults are `-GeneLengthMin 0.3` for QC, `-GeneLengthIncludeMin 0.03` for post-QC MSA recovery, backbone `-GenesPerSpecies 0.2` and `-relativeNTFraction 0.1`, and explicit placement thresholds of `0.04` loci and `0.03` NT, plus a 10,000-site shared-backbone floor. Within-species locus QC rejects cross-locus consensus-divergence outliers above modified-Z 5.0. The strain preset now uses the legacy IQ-TREE command by default; pass `-legacyMGTK 0` to use the standard modern command, or `-iqPathogen 1` to select the IQ-TREE 3 pathogen path (which automatically disables the legacy default).
+`strain_within.pl` enables the selector but leaves backbone placement disabled by default; set `-placeOnBackbone 1` to opt in. It forwards the 0.8 rescue-prevalence guard, and automatically uses the supplied `-MGS` guide when it ends in `.core` (otherwise an available sibling `-MGS.core`) as `-preferredCoreGenes`. Give `-preferredCoreGenes` explicitly to override that choice. It scales the hierarchy to its effective selected-gene budget: 80% robust core, 20% taxon-rescue capacity, and an additional 30% QC-backfill candidate pool. The final-tree budget is `min(treeLocusBudget, presortGenes)`; `maxGenes` separately limits how many validated loci are extracted per MGS/sample. Thus 500 selected genes produce 400 core + 100 rescue + 150 backfill, while the default 400-gene cap produces 320 + 80 + 120. Its filtering defaults are `-GeneLengthMin 0.3` for QC, `-GeneLengthIncludeMin 0.03` for post-QC MSA recovery, ordinary-tree `-GenesPerSpecies 0.2` and `-relativeNTFraction 0.1`, and—only when placement is enabled—thresholds of `0.04` loci and `0.03` NT plus a 10,000-site shared-backbone floor. Within-species locus QC rejects cross-locus consensus-divergence outliers above modified-Z 5.0. The strain preset now uses the legacy IQ-TREE command by default; pass `-legacyMGTK 0` to use the standard modern command, or `-iqPathogen 1` to select the IQ-TREE 3 pathogen path (which automatically disables the legacy default).
 
 For split Phase I (`-maxSubJob > 0`), assembly groups remain indivisible, but assignment is now weighted by estimated work rather than raw sample count: each sample contributes a fixed extraction cost plus its estimated uncompressed consensus FNA/FAA size, while samples requiring consensus regeneration receive an additional VCF-size penalty. Automatic splitting (`-maxSubJob -1`) counts standalone samples as effective groups. The consolidated run-level audit `LOGandSUB/phase1_worker_plan.tsv` records every group assignment, input state, estimated work, and worker total; a dominant group visible there can still create an unavoidable straggler because it cannot safely be split across workers.
 
 Phase II first derives a per-MGS, core-first demand manifest, then streams only the requested candidate-outgroup FNA and FAA records with the normal sequential FASTA reader. When `-MGSphylo` is supplied, it writes the consolidated Mosaic target-to-outgroup proposals to one temporary file and asks `neighborTree.R --all --preferred` for all tree-tip decisions in a single process, rather than starting R and rereading the source tree for each MGS. R treats a Mosaic proposal preferentially: it moves the proposal to rank one when the tips are distinct, its patristic distance is at least 0.01, and that distance is no greater than the more generous of the median eligible tree distance and ten times the nearest-neighbour distance. A proposal that is absent, effectively identical, non-finite, or beyond that cutoff is excluded. The ordered R result is authoritative whenever a phylogeny is available; Perl does not reinsert a rejected Mosaic proposal, although it can proceed to the next R-ranked candidate when the preferred candidate cannot supply the required loci. Direct `neighborTree.R` calls can use `--preferred-tip TIP` for one target, or adjust the defaults with `--preferred-quantile` and `--preferred-nearest-factor`. The temporary preference file is automatically removed and creates no per-MGS output clutter. The manifest uses GTDB/core-guide seed loci first, optionally taking an exact Mosaic homolog only when that source locus is already seed-listed or broadly available; it fills any shortfall only from COGs present in at least `-taxonAwareRescueMinPrevalence` of actionable target MGS. Thus a rare Mosaic/mobile locus cannot satisfy the outgroup floor or enter the overlay on its own. The default floor is `ceil(0.20 * -treeLocusBudget)` (80 with the default budget of 400); set `-outgroupCoreMinLoci` to override it, or leave it at `0` to retain the derived default. A candidate that cannot supply this many demanded loci is not used as an outgroup. Separately, Phase II loads a generous, independently ranked candidate pool of up to 2,500 approved (preferred-core or broadly available) genes per outgroup MGS; `-outgroupReferenceGeneCap` changes this cap. The final outgroup overlay remains restricted to those approved loci, so the larger pool improves available homolog/copy choice without admitting rare accessory loci. The reader creates neither a selective-reference cache nor `.fai` files, avoiding random-access and cache-build delay. Once the single direct reference pass is complete, each MGS gets its selected outgroup overlay and is queued as an individual tree job in the normal order.
 
-The strain wrapper forwards the backbone controls and the adaptive EPA pendant-branch controls to `buildTree5.pl`. When `-strictBackbone 1` is enabled, well-covered samples infer the ML backbone; only severe coverage outliers or samples failing backbone admission are considered for EPA-ng placement, samples below the separate placement coverage/overlap gates remain excluded, and placements forming a clearly separated long-branch tail are omitted from the published tree. The default `-strictBackbone 0` infers one tree from the complete retained alignment; set it to `1` for backbone-plus-placement mode.
+The strain wrapper forwards backbone and EPA placement controls only when `-placeOnBackbone 1` is enabled. In that mode, well-covered samples infer the ML backbone; only severe coverage outliers or samples failing backbone admission are considered for EPA-ng placement, samples below the separate placement coverage/overlap gates remain excluded, and placements forming a clearly separated long-branch tail are omitted from the published tree. The default `-placeOnBackbone 0` infers one tree from the complete retained alignment and deactivates all backbone- and placement-only filters.
 
-An ordinary parent `-onlySubmit 1` run uses a lean streaming resume path. It trusts the atomic `merge.complete.tsv` Phase-I commit, avoids the controller-wide per-MGS state audit and input-size/sort pass, and checks each MGS's completion/terminal markers, required category input, and missing resource estimate only when that MGS reaches the submission loop. Already-overlaid published or scratch inputs also bypass reference-catalogue initialization; the one shared reference stream begins only at the first raw MGS. The resulting tree job is queued immediately before the controller advances to the next MGS. A prior `LOGandSUB/tree_input_sizing.tsv` is optional and is read only as a resource hint; a legacy worker-shard contributor index is likewise deferred unless a checkpoint-less MGS actually needs that fallback. Explicit `-recalcTrees`, `-repairCAT`, `-deepRepair`, `-redoSubmissionData`, `-redoEPAfilter`, and `-reSubmit` requests retain the exhaustive audit because those modes must classify or mutate existing state. In strict modes, published tree input is reusable only when its FNA, FAA, and category files are all present and nonempty; incomplete input is queued for recovery rather than treated as zero-size.
+An ordinary parent `-onlySubmit 1` run uses a lean streaming resume path. It trusts the atomic `merge.complete.tsv` Phase-I commit, avoids the controller-wide per-MGS state audit and input-size/sort pass, and checks each MGS's completion/terminal markers, required category input, and missing resource estimate only when that MGS reaches the submission loop. Already-overlaid published or scratch inputs also bypass reference-catalogue initialization; the one shared reference stream begins only at the first raw MGS. The resulting tree job is queued immediately before the controller advances to the next MGS. A prior `LOGandSUB/tree_input_sizing.tsv` is optional and is read only as a resource hint; a legacy worker-shard contributor index is likewise deferred unless a checkpoint-less MGS actually needs that fallback. Explicit `-redo tree`, `-redo input`, `-redo all`, and `-redoEPAfilter` requests retain the exhaustive audit because those modes must classify or mutate existing state. In strict modes, published tree input is reusable only when its FNA, FAA, and category files are all present and nonempty; incomplete input is queued for recovery rather than treated as zero-size.
 
 Deterministic merging runs after MSA QC and final taxon-aware locus selection, so it never changes the selected loci or taxa. Its initial partition count is `ceil(total effective called sites / -rateMergeTargetSites)` (30,000 by default), capped by `-rateMergeMaxBins`. It then repeatedly splits the largest current robust/backfill bin near its effective-site midpoint, using the locally more heterogeneous of the native QC report's P90 consensus divergence and final gap-free GC fraction. Thus additional partitions progressively resolve whichever P90 or GC signal remains, without allowing one very long locus to dominate a bin. Taxon-rescue loci join the nearest existing robust bin and cannot create sparse rescue-only partitions. If locus QC is disabled, the taxon-aware variable-site fraction supplies the rate proxy. Bins are collapsed into the nearest normalized rate/GC centroid until every remaining bin meets both minimum-size rules, or only one bin remains. The site rule uses effective called sites—the sum of each locus's mean called bases across retained taxa—so sparse missing-data loci contribute less. The resulting `MSA/MSAli.fna.partition.RAXML` uses comma-separated, non-contiguous locus ranges, and `phylo/rate_merged_partitions.tsv` records every locus, selection phase, coordinate, missing-data-aware site count, metric source, initial bin, and final partition. These settings are included in the continuation-policy fingerprint, so changing them rebuilds stale alignments and trees.
