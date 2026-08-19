@@ -14,9 +14,9 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 | `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `strain_within.pl` | `1.28` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
+| `strain_within.pl` | `1.29` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
 | `strain_within_2.2.pl` | `0.46` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
-| `buildTree5.pl` | `5.78` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.79` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -452,7 +452,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## strain_within.pl
 
-Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.28`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.29`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
 
 ### Inputs, execution and workflow control
 
@@ -478,6 +478,7 @@ Within-MGS locus extraction, quality control, tree orchestration and downstream 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-onlySubmit` | integer | `0` | stable | Reuse completed Phase-I preparation and submit only missing tree work. |
+| `-onlyMSA` | integer | `0` | stable | Build and post-QC each concatenated `MSA/MSAli.fna.gz`, then stop before phylogeny, EPA-ng placement, and `strain_within_2.2.pl`. Completion is recorded in `msaOnly.complete.tsv`; use `-onlySubmit 1` to resume and skip completed MGS. Incompatible with `-placeOnBackbone 1`, `-redo tree`, and `-redoEPAfilter`. |
 | `-redo` | string | `none` | stable | Destructive recovery mode: `none` resumes normally; `tree` rebuilds tree-stage outputs while reusing complete inputs; `input` rebuilds missing/incomplete inputs and dependent trees; `all` deletes and rebuilds strain inputs and trees for every selected MGS. Use `-MGSsubset` to target explicit identifiers. |
 | `-redoEPAfilter` | optional integer | `0` | advanced | Republish EPA-placed trees from retained backbone/jplace artifacts; implies `1` when no value is supplied. |
 | `-maxCores` | integer | `-1` | stable | Maximum dynamically allocated cores; `-1` uses automatic planning. |
@@ -629,7 +630,7 @@ Within-MGS postprocessing, strain statistics and population-genetic analysis. Th
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.78`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.79`.
 
 ### General options
 
@@ -672,6 +673,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-SynTree` | integer | `0` | stable | See source/help for details. |
 | `-NonSynTree` | integer | `0` | stable | See source/help for details. |
 | `-continue` | integer | `0` | stable | See source/help for details. |
+| `-onlyMSA` | integer | `0` | stable | Finish alignment, post-alignment locus/sample QC, selection, concatenation, partition output, and MSA finalization, then exit before every phylogeny and EPA-ng stage. Writes `msaOnly.complete.tsv` beside the output and retains `MSA/MSAli.fna.gz`. Incompatible with `-placeOnBackbone 1`. |
 | `-epaFilterOnly` | integer | `0` | advanced | In `strain_within.pl`, completed EPA-placement MGS with a retained classification, backbone, and jplace have only `IQtree_allsites.treefile` removed as a recoverable resume trigger, then receive a one-core filter/publication job. Already-unfinished MGS remain eligible for the existing EPA-only or full-tree recovery queues and retain those queues' memory/CPU profiles. Direct `buildTree5.pl` use with `-continue 1` reruns only placement filtering, its audit report, and final-tree publication from the retained artifacts. |
 | `-bootstrap` | integer | `0` | stable | See source/help for details. |
 | `-subsetSmpls` | integer | `-1` | stable | See source/help for details. |

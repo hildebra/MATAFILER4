@@ -77,14 +77,26 @@ my $site_config_template = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config
 my $neighbor_tree_r = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'R_scripts', 'neighborTree.R'));
 like($strain, qr/sub consensusInputState .*?\$nt_ready && \$aa_ready.*?return 'regenerate' if \$vcf_ready/s,
 	'consensus resume requires the paired NT and AA outputs and repairs from VCF');
+like($strain,
+	qr/my \$onlyMSA = 0;.*?"onlyMSA=i"\s+=> \\\$onlyMSA.*?-onlyMSA must be 0 or 1.*?-onlyMSA 1 cannot be combined with -placeOnBackbone 1/s,
+	'strainWithin exposes and validates alignment-only mode');
+like($strain,
+	qr/msaOnly\.complete\.tsv.*?MSA\/MSAli\.fna\.gz.*?-MSAprogram \$MSAprog -onlyMSA \$onlyMSA/s,
+	'strainWithin forwards MSA-only mode and audits its durable alignment outcome');
+like($strain,
+	qr/if \(\$onlyMSA\) \{.*?strain_within_2\.2\.pl were not launched.*?exit\(0\);.*?my \$MGSabundance/s,
+	'MSA-only controller runs stop before tree-dependent postprocessing');
+like($build_tree,
+	qr/"onlyMSA=i" => \\\$onlyMSA.*?if \(\$onlyMSA\) \{.*?finalizeMSAArtifacts.*?msa_complete.*?exit\(0\);.*?my \$trRetH/s,
+	'BuildTree finalizes and records the concatenated MSA before tree inference');
 like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA,0,"\\\\s",\\%subG\)/s,
 	'within-strain extraction reads only candidate consensus genes');
 like($strain, qr/-completionMarker "?\.shellQuote\(\$treeStone\)/,
 	"tree jobs delegate validated completion markers to buildTree5");
 unlike($strain, qr/test -s "?\.shellQuote\(\$IQtreef\).*?touch "?\.shellQuote\(\$treeStone\)/s,
 	"tree jobs no longer encode completion validation in shell");
-like($strain, qr/my \@staleOutputs = \$record->\{epa_only\}.*?qw\(stone terminal\).*?qw\(stone tree terminal placement_pending\).*?retry_unlink/s,
-	'an EPA-only submission retains its placement marker and backbone-derived primary path while ordinary retries clear stale outputs');
+like($strain, qr/my \@staleOutputs = \$record->\{epa_only\}.*?qw\(stone terminal\).*?\$record->\{msa_only\}.*?qw\(stone terminal placement_pending\).*?qw\(stone tree terminal placement_pending\).*?retry_unlink/s,
+	'EPA-only and MSA-only submissions retain their reusable primary outputs while ordinary retries clear stale trees');
 like($strain, qr/clear_split_generation\(\$splitManifest.*?write_split_generation\(\$splitManifest.*?printf '%s\\\\n'/s,
 	'a new split generation clears stale state and tags each worker completion');
 like($strain, qr/ConspecificMGS\.\$subJob\.log.*?sub mergeConspecificLogs/s,
@@ -257,7 +269,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.28;/,
+like($strain, qr/my \$version = 1\.29;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"individualVar=s".*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput/s,
@@ -407,7 +419,7 @@ like($strain,
 unlike($strain, qr/nonEpaTreeAbsences/,
 	'a missing final tree no longer makes reference catalogue loading mandatory');
 like($strain,
-	qr/my %treeDisposition.*?\$treeDisposition\{\$epaOnlyRetry \? 'EPA-only retry job' : 'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
+	qr/my %treeDisposition.*?\$treeDisposition\{\$epaOnlyRetry \? 'EPA-only retry job'.*?\$onlyMSA \? 'eligible MSA-only job' : 'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
 	'tree submission reports every eligible and skipped MGS disposition before waiting');
 like($strain,
 	qr/my \@pendingTreeJobs;.*?push \@pendingTreeJobs, \{.*?command => \$Tcmd\.\$outgS.*?tmp_space => \$QSBoptHR->\{tmpSpace\}.*?dispatchPendingTreeJobs\(.*?blocking => 0.*?Tree preparation pass complete:.*?dispatchPendingTreeJobs\(.*?blocking => 1.*?qsubSystemJobAlive\( \\\@jobs.*?writeTreeFailureAudit.*?without a valid output were quarantined/s,
@@ -444,7 +456,7 @@ like($strain,
 	qr/my \$iqPathogen = 0.*?"iqPathogen=i"\s+=> \\\$iqPathogen.*?\$Tcmd .= "-iqPathogen 1 " if \$iqPathogen/s,
 	'within-strain pathogen mode defaults off and is applied only by the parent tree command');
 like($strain,
-	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(\$phyloProg == 1\)\{.*?"-iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
+	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(!\$onlyMSA && \$phyloProg == 1\)\{.*?"-iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
 	'within-strain IQ-TREE always uses the standard resource-limited command and enables CMAPLE only by explicit request');
 like($strain,
 	qr/my \$placementRequested = \$strictBackbone \? 1 : 0;.*?\$baseMemMult = 150 if \$placementRequested.*?\$minimumMemMB = \(\$placementRequested \? 10240 : 5000\) \* \$memMulti;.*?\$minimumMemMB = 10240 if \$placementRequested.*?\$totMem = \$minimumMemMB if \$totMem < \$minimumMemMB/s,
@@ -750,8 +762,8 @@ like($strain,
 	qr/\$workflowStatePath = File::Spec->catfile\(\$LOGDIR.*?\$SNPconsLOGs = "\$LOGDIR\/SNPconsCalls.*?my \$final = "\$LOGDIR\/\$sampleStatsLogName".*?my \$summary = "\$LOGDIR\/\$sampleStatsSummaryLogName".*?my \$final = "\$LOGDIR\/\$recoveryLogName".*?my \$summary = "\$LOGDIR\/\$summaryLogName"/s,
 	'worker state, SNP logs, sample statistics, recovery accounting, and summaries share LOGandSUB');
 like($strain,
-	qr/script => \$epaOnlyRetry \? "\$outD2\/treeCmd\.epa_retry\.sh" : "\$outD2\/treeCmd\.sh".*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
-	'per-MGS normal and EPA-retry scripts retain their compatibility paths while downstream strain-analysis scripts use LOGandSUB');
+	qr/script => \$epaOnlyRetry \? "\$outD2\/treeCmd\.epa_retry\.sh".*?\$onlyMSA \? "\$outD2\/treeCmd\.msa_only\.sh" : "\$outD2\/treeCmd\.sh".*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
+	'per-MGS normal, MSA-only, and EPA-retry scripts use distinct paths while downstream strain-analysis scripts use LOGandSUB');
 like($strain,
 	qr/sub migrateLegacyOperationalLogs.*?strain_within.*?SNPconsCalls.*?strainSampleStats.*?strainRecovery.*?migrate legacy strain log.*?migrateLegacyOperationalLogs\(\)/s,
 	'legacy top-level operational logs are safely migrated into LOGandSUB');

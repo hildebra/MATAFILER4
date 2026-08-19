@@ -234,6 +234,34 @@ my @command = (
 );
 is(system(@command), 0, 'taxon-aware buildTree smoke workflow completes');
 
+my $msaOnlyOutput = File::Spec->catdir($temporary, 'msa-only-output');
+my @msaOnlyCommand = @command;
+for my $index (0 .. $#msaOnlyCommand - 1) {
+	$msaOnlyCommand[$index + 1] = $msaOnlyOutput
+		if $msaOnlyCommand[$index] eq '-outD';
+}
+push @msaOnlyCommand, ('-onlyMSA', 1, '-continue', 1);
+is(system(@msaOnlyCommand), 0,
+	'MSA-only BuildTree workflow completes before phylogeny');
+my $msaOnlyAlignment = File::Spec->catfile(
+	$msaOnlyOutput, 'MSA', 'MSAli.fna.gz');
+my $msaOnlyMarker = File::Spec->catfile(
+	$msaOnlyOutput, 'msaOnly.complete.tsv');
+ok(-s $msaOnlyAlignment,
+	'MSA-only workflow retains the compressed concatenated alignment');
+ok(-s $msaOnlyMarker,
+	'MSA-only workflow publishes its durable completion marker');
+like(slurp($msaOnlyMarker), qr/^status\tmsa_complete$/m,
+	'MSA-only completion marker records the explicit lifecycle status');
+ok(!-e File::Spec->catfile(
+	$msaOnlyOutput, 'phylo', 'IQtree_allsites.treefile'),
+	'MSA-only workflow does not publish a phylogeny');
+my $msaOnlyMafftRuns = (() = slurp($mafftCount) =~ /^/gm);
+is(system(@msaOnlyCommand), 0,
+	'a completed MSA-only workflow resumes successfully');
+is((() = slurp($mafftCount) =~ /^/gm), $msaOnlyMafftRuns,
+	'MSA-only continuation reuses its valid retained alignments');
+
 my $terminalOutput = File::Spec->catdir($temporary, 'terminal-output');
 my $terminalCategories = File::Spec->catfile($temporary, 'terminal.cat');
 write_file($terminalCategories, "s1|g1\ts2|g1\n");

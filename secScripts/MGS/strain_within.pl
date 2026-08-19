@@ -244,7 +244,8 @@ my $completionMessage = "";
 #1.26: consolidate destructive recovery under -redo and deprecate redundant flags
 #1.27: expose EPA placement as -placeOnBackbone and fully gate placement-only filters
 #1.28: prevent new outputs from entering lean tree-only resume without Phase-I evidence
-my $version = 1.28;
+#1.29: support alignment-only BuildTree runs without tree-dependent postprocessing
+my $version = 1.29;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -307,6 +308,7 @@ my $abundanceMaximumFold = $FILTER_DEFAULT{abundance_maximum_fold};
 my $abundanceMaximumModifiedZ = $FILTER_DEFAULT{abundance_maximum_modified_z};
 my @subsetMGS=(); my $subsMGSstr="";
 my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
+my $onlyMSA = 0; #finish after concatenated MSA/QC; do not infer phylogenies
 my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
 my $GenesPerSpecies = 0.2;
@@ -501,6 +503,7 @@ GetOptions(
 	"epaPendantMinThreshold=f" => \$epaPendantMinThreshold,
 	"redoEPAfilter:i" => sub { $redoEPAfilter = $_[1] || 1; },
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
+	"onlyMSA=i"      => \$onlyMSA,
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 	"iqPathogen=i"   => \$iqPathogen, #explicitly enable IQ-TREE 3 pathogen/CMAPLE mode
 	"rmMSA=i"        => \$rmMSA, #remove MSA, to save diskspace
@@ -570,6 +573,12 @@ if (!$treeOOMMaxMemGBSpecified) {
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-redoEPAfilter must be 0 or 1\n"
 	unless $redoEPAfilter == 0 || $redoEPAfilter == 1;
+die "-onlyMSA must be 0 or 1\n"
+	unless $onlyMSA == 0 || $onlyMSA == 1;
+die "-onlyMSA 1 cannot be combined with -placeOnBackbone 1\n"
+	if $onlyMSA && $strictBackbone;
+die "-onlyMSA 1 cannot be combined with -redo tree or -redoEPAfilter\n"
+	if $onlyMSA && ($redoMode eq 'tree' || $redoEPAfilter);
 checkMF();
 die "-GCd is required and must be a directory\n" unless length($GCd) && -d $GCd;
 die "Either -MGS or -outD is required\n" unless length($MGSfile) || length($outDpre);
@@ -1819,6 +1828,8 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $outD2 = $SIdirs{$MGS};
 	my $tmpD  = "$scratchD/outs/$MGS/";
 	my $treeStone = "$outD2/treeDone.sto";
+	my $msaOnlyStone = "$outD2/msaOnly.complete.tsv";
+	my $msaOnlyOutput = "$outD2/MSA/MSAli.fna.gz";
 	my $terminalTreeMarker = "$outD2/noTree.sto";
 	my $placementPendingMarker = "$outD2/placementPending.sto";
 	my $IQtreef= "$outD2/phylo/IQtree_allsites.treefile";
@@ -1830,7 +1841,14 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 			$resumeEntry{$_} = 1 for readdir($resumeDirectory);
 			closedir($resumeDirectory);
 		}
-		if ($resumeEntry{'treeDone.sto'} && -s $IQtreef) {
+		if ($onlyMSA && $resumeEntry{'msaOnly.complete.tsv'}
+				&& fileGZs($msaOnlyOutput)) {
+			$treeDisposition{'valid MSA already present'}++;
+			limitedNotice('MGS skipped with existing MSA-only result',
+				"Skipping $MGS: a completed MSA-only result is already present.\n");
+			next;
+		}
+		if (!$onlyMSA && $resumeEntry{'treeDone.sto'} && -s $IQtreef) {
 			$treeDisposition{'valid tree already present'}++;
 			limitedNotice('MGS skipped with existing trees',
 				"Skipping $MGS: a completed tree is already present.\n");
@@ -1893,10 +1911,13 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	
 	if (!$leanOnlySubmitResume && !$recalcTrees && !$reSubmit && !$repairCAT
 			&& !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
-			&& -e $treeStone && -s $IQtreef) {
-		$treeDisposition{'valid tree already present'}++;
-		limitedNotice('MGS skipped with existing trees',
-			"Skipping $MGS: a valid tree already exists.\n");
+			&& ($onlyMSA
+				? (-s $msaOnlyStone && fileGZs($msaOnlyOutput))
+				: (-e $treeStone && -s $IQtreef))) {
+		$treeDisposition{$onlyMSA ? 'valid MSA already present' : 'valid tree already present'}++;
+		limitedNotice($onlyMSA ? 'MGS skipped with existing MSA-only result'
+				: 'MGS skipped with existing trees',
+			"Skipping $MGS: a valid ".($onlyMSA ? 'MSA-only result' : 'tree')." already exists.\n");
 		next;
 	}
 	
@@ -1966,7 +1987,8 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $placementRequested = $strictBackbone ? 1 : 0;
 	my $baseMemMult = 75; $baseMemMult = 15 if ($phyloProg ==3 || $phyloProg ==2);
 	$baseMemMult = 150 if $placementRequested && $baseMemMult < 150;
-	my $memoryProfile = $placementRequested ? 'EPA-ng placement' : 'tree-only';
+	my $memoryProfile = $onlyMSA ? 'MSA-only'
+		: $placementRequested ? 'EPA-ng placement' : 'tree-only';
 	my $minimumMemMB = ($placementRequested ? 10240 : 5000) * $memMulti;
 	$minimumMemMB = 10240 if $placementRequested && $minimumMemMB < 10240;
 	my $maximumMemMB = 110000 * $memMulti;
@@ -1995,8 +2017,9 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	
 
 	my $bts = getProgPaths("buildTree_scr");
-	my $treeFlag = "-runIQtree 1 "; 
-	if ($phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}if ($phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
+	my $treeFlag = $onlyMSA ? "" : "-runIQtree 1 ";
+	if (!$onlyMSA && $phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}
+	if (!$onlyMSA && $phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
 	my $tree_sample_separator = quotemeta($SaSe);
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
 	$Tcmd .= "-withinSpecies 1 -relativeNTFraction $relativeNTFraction "
@@ -2019,7 +2042,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		."-rateMergeTargetSites $rateMergeTargetSites "
 		."-rateMergeMinLoci $rateMergeMinLoci "
 		."-rateMergeMinSites $rateMergeMinSites ";
-	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog ";
+	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog -onlyMSA $onlyMSA ";
 	$Tcmd .= "-placeOnBackbone $strictBackbone ";
 	if ($strictBackbone) {
 		$Tcmd .= "-placementGenesPerSpecies $placementGenesPerSpecies "
@@ -2036,7 +2059,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 			."-epaPendantOutlierFactor $epaPendantOutlierFactor "
 			."-epaPendantMinThreshold $epaPendantMinThreshold ";
 	}
-	if ($phyloProg == 1){
+	if (!$onlyMSA && $phyloProg == 1){
 		$Tcmd .= "-iqMemMB $iqMemMB ";
 		$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
 	}
@@ -2075,8 +2098,9 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	$Tcmd .= "-redoEPAfilter 1 " if $redoEPAfilter
 		&& -s "$outD2/phylo/epa-ng/epa_result.jplace";
 	$Tcmd .= "-epaOnly 1 " if $epaOnlyRetry;
-	$Tcmd .= "-continue 1 -completionMarker ".shellQuote($treeStone)." "
-		."-terminalMarker ".shellQuote($terminalTreeMarker)." "
+	$Tcmd .= "-continue 1 ";
+	$Tcmd .= "-completionMarker ".shellQuote($treeStone)." " unless $onlyMSA;
+	$Tcmd .= "-terminalMarker ".shellQuote($terminalTreeMarker)." "
 		."-placementPendingMarker ".shellQuote($placementPendingMarker)." ";
 
 	if ($epaOnlyRetry) {
@@ -2106,25 +2130,30 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $treeJobOrdinal = $cnt + 1;
 	push @pendingTreeJobs, {
 		mgs => $MGS,
-		script => $epaOnlyRetry ? "$outD2/treeCmd.epa_retry.sh" : "$outD2/treeCmd.sh",
+		script => $epaOnlyRetry ? "$outD2/treeCmd.epa_retry.sh"
+			: $onlyMSA ? "$outD2/treeCmd.msa_only.sh" : "$outD2/treeCmd.sh",
 		command => $Tcmd.$outgS."\n",
 		cores => $numCoreL,
 		memory => int($totMem)."M",
 		requested_mb => int($totMem),
-		job_name => $epaOnlyRetry ? "EPA$treeJobOrdinal" : "FT$treeJobOrdinal",
+		job_name => $epaOnlyRetry ? "EPA$treeJobOrdinal"
+			: $onlyMSA ? "MSA$treeJobOrdinal" : "FT$treeJobOrdinal",
 		epa_only => $epaOnlyRetry,
+		msa_only => $onlyMSA,
 		terminal => $terminalTreeMarker,
 		placement_pending => $placementPendingMarker,
-		tree => $IQtreef,
-		stone => $treeStone,
+		tree => $onlyMSA ? $msaOnlyOutput : $IQtreef,
+		stone => $onlyMSA ? $msaOnlyStone : $treeStone,
 		tmp_space => $QSBoptHR->{tmpSpace},
 		use_long_queue => $QSBoptHR->{useLongQueue},
 	};
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	$QSBoptHR->{useLongQueue} = 0;
 	$cnt ++;
-	$treeDisposition{$epaOnlyRetry ? 'EPA-only retry job' : 'eligible tree job'}++;
-	$expectedTreeOutputs{$MGS} = [$IQtreef, $treeStone,
+	$treeDisposition{$epaOnlyRetry ? 'EPA-only retry job'
+		: $onlyMSA ? 'eligible MSA-only job' : 'eligible tree job'}++;
+	$expectedTreeOutputs{$MGS} = [$onlyMSA ? $msaOnlyOutput : $IQtreef,
+		$onlyMSA ? $msaOnlyStone : $treeStone,
 		$terminalTreeMarker, $placementPendingMarker];
 	if (!$doSubmit || time >= $nextQueuedTreeSubmissionProbe) {
 		my $drain = dispatchPendingTreeJobs(
@@ -2225,6 +2254,14 @@ if ($unresolvedInputs) {
 		."tree_inputs_pending=$unresolvedInputs.";
 	print "Workflow is partially complete; consult tree_job_outcomes.tsv and "
 		."tree_input_resolution.tsv. No automatic full-tree resubmission was attempted.\n";
+	exit(0);
+}
+if ($onlyMSA) {
+	$completionMessage = "strain_within.pl completed MSA-only processing; "
+		."MSA_outcomes_quarantined=$incompleteTreeOutcomes. Tree inference and "
+		."tree-dependent strain postprocessing were intentionally skipped.";
+	print "MSA-only workflow complete. Tree inference, EPA-ng placement, and "
+		."strain_within_2.2.pl were not launched.\n";
 	exit(0);
 }
 if ($incompleteTreeOutcomes) {
@@ -4352,9 +4389,13 @@ sub evalFileStatus{
 		$SIdirs{$MGS} = $outD2;
 		my $completedTree = "$outD2/phylo/$treeFile";
 		my $treeCompletion = "$outD2/treeDone.sto";
+		my $completedMSA = "$outD2/MSA/MSAli.fna.gz";
+		my $msaCompletion = "$outD2/msaOnly.complete.tsv";
 		if (!$recalcTrees && !$reSubmit && !$repairCAT && !$deepRepair
 				&& !$redoSubmissionData && ($onlySubmit != 0 || $subJob)
-				&& -s $treeCompletion && fileGZs($completedTree)) {
+				&& ($onlyMSA
+					? (-s $msaCompletion && fileGZs($completedMSA))
+					: (-s $treeCompletion && fileGZs($completedTree)))) {
 			# BuildTree publishes treeDone.sto atomically only after validating the
 			# primary tree and clearing terminal lifecycle markers.  On a tree-only
 			# resume this pair is authoritative, so avoid per-MGS directory creation,
@@ -4459,11 +4500,15 @@ sub evalFileStatus{
 			}
 			#print "$SIdirs{$MGS}\n";
 			#system "rm $SIdirs{$MGS}\n";
-		} elsif(!fileGZs("$SIdirs{$MGS}/phylo/$treeFile")){
+		} elsif($onlyMSA
+				? !(-s $msaCompletion && fileGZs($completedMSA))
+				: !fileGZs("$SIdirs{$MGS}/phylo/$treeFile")){
 			$treeAbsent++;
 			$deferredScratchCleanup{"$scratchD/outs/$MGS"} = 1
 				if -d "$scratchD/outs/$MGS";
-		} elsif(fileGZe("$SIdirs{$MGS}/phylo/$treeFile")) {
+		} elsif($onlyMSA
+				? (-s $msaCompletion && fileGZs($completedMSA))
+				: fileGZe("$SIdirs{$MGS}/phylo/$treeFile")) {
 			$doneDirs++;
 			$deferredScratchCleanup{"$scratchD/outs/$MGS"} = 1
 				if -d "$scratchD/outs/$MGS";
@@ -5830,7 +5875,10 @@ sub dispatchPendingTreeJobs {
 		}
 		if ($options->{doSubmit}) {
 			my @staleOutputs = $record->{epa_only}
-				? qw(stone terminal) : qw(stone tree terminal placement_pending);
+				? qw(stone terminal)
+				: $record->{msa_only}
+					? qw(stone terminal placement_pending)
+					: qw(stone tree terminal placement_pending);
 			retry_unlink($record->{$_}, label => "clear stale tree-job $_")
 				for @staleOutputs;
 		}
@@ -7060,6 +7108,9 @@ Tree locus filtering:
                                  [default 20000]
   -placeOnBackbone 0|1          Infer a broad ML backbone and place only deferred
                                  sparse samples with EPA-ng [default 0]
+  -onlyMSA 0|1                  Build and QC the concatenated MSA, then stop before
+                                 phylogeny, placement, and strain postprocessing
+                                 [default 0]
   -strictBackboneFraction FLOAT Defer a sample only below this fraction of the
                                  informative-site Q90 [default 0.35]
   -strictBackboneMinSamples INT  Minimum retained backbone samples before using

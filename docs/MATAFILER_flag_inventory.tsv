@@ -253,6 +253,7 @@ buildTree5.pl	5.36	General options	-minPcId	float	minPcId	0	stable	sequence is f
 buildTree5.pl	5.36	General options	-SynTree	integer	calcSyn	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-NonSynTree	integer	calcNonSyn	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-continue	integer	continue	0	stable	See source/help for details.
+buildTree5.pl	5.79	General options	-onlyMSA	integer	onlyMSA	0	stable	Finish and retain the post-QC concatenated MSA, then skip phylogeny and placement.
 buildTree5.pl	5.36	General options	-bootstrap	integer	bootStrap	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-subsetSmpls	integer	subsetSmpls	-1	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-postFilter	string	postFilter		stable	""","" sep list of zorro,guidance2,macse"

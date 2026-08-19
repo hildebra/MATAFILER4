@@ -214,7 +214,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.78";
+my $version = "5.79";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -272,6 +272,7 @@ my $ntCntTotal =0; my $bootStrap=0; my $subsetSmpls = -1;
 my ($fnFna, $aaFna,$cogCats,$outD,$ncore,$Ete)= ("","","","",1,0);
 my ($smplDef,$smplSep,$calcSyn,$calcNonSyn,$useAA4tree,$calcDNAdiff,$tmpD ) = (1,"_",0,0,0,0,"");
 my ($stagedInputDir, $tmpSubdir, $completionMarker) = ("", "", "");
+my $onlyMSA = 0;
 my ($terminalMarker, $placementPendingMarker) = ("", "");
 my $withinSpecies = 0;
 my $strainWithinPreset = 0;
@@ -419,6 +420,7 @@ GetOptions(
 	"stagedInputDir=s" => \$stagedInputDir,
 	"tmpSubdir=s" => \$tmpSubdir,
 	"completionMarker=s" => \$completionMarker,
+	"onlyMSA=i" => \$onlyMSA,
 	"terminalMarker=s" => \$terminalMarker,
 	"placementPendingMarker=s" => \$placementPendingMarker,
 	"withinSpecies=i" => \$withinSpecies,
@@ -544,6 +546,9 @@ die "-AutoModel must be 0 or 1\n"
 	unless $treeAutoModel == 0 || $treeAutoModel == 1;
 die "-redoEPAfilter must be 0 or 1\n"
 	unless $redoEPAfilter == 0 || $redoEPAfilter == 1;
+die "-onlyMSA must be 0 or 1\n" unless $onlyMSA == 0 || $onlyMSA == 1;
+die "-onlyMSA 1 cannot be combined with -placeOnBackbone 1\n"
+	if $onlyMSA && $strictBackbone;
 
 $minOverlapMSA = $withinSpecies ? 0.35 : 0 unless defined $minOverlapMSA;
 $postAlignmentLocusQC = $withinSpecies
@@ -1043,6 +1048,7 @@ my $postAlignmentQCPolicy = join("\t",
 )."\n";
 my $postAlignmentPolicy = join("\t",
 	"schema=1",
+	"only_msa=$onlyMSA",
 	"tree_methods=iqtree:$doIQTree,raxml:$doRAXML,raxmlng:$doRAXMLng,fasttree:$doFastTree,veryfasttree:$doVeryFastTree",
 	"bootstrap=$bootStrap",
 	"iqtree_auto_model=$treeAutoModel",
@@ -2343,6 +2349,30 @@ if (0 && !$useAA4tree){ #this is outdated
 #-------------------------------------------
 die "Expected a non-empty merged alignment before tree construction: $multAli\n"
 	if $MSAreq && !fileGZs($multAli);
+
+my $msaOnlyCompletionMarker = File::Spec->catfile($outD, 'msaOnly.complete.tsv');
+if ($onlyMSA) {
+	finalizeMSAArtifacts($MsaD);
+	my $finalAlignment = -s "$multAli.gz" ? "$multAli.gz" : $multAli;
+	die "MSA-only mode did not produce a non-empty concatenated alignment\n"
+		unless fileGZs($finalAlignment);
+	clearLifecycleMarker($completionMarker, 'clear tree completion in MSA-only mode');
+	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
+	clearLifecycleMarker($placementPendingMarker,
+		'clear obsolete placement-pending marker');
+	writeOutcomeMarker($msaOnlyCompletionMarker, 'msa_complete',
+		'alignment and post-alignment QC completed; phylogeny intentionally skipped',
+		{ alignment => $finalAlignment }, $outD);
+	writeBuildTreeState();
+	cleanupLegacyBuildTreeStateFiles();
+	compactTaxonAwareDiagnostics();
+	writeWorkflowHeartbeat('complete');
+	safeRemoveTree($tmpD, $tmpBase);
+	print "BuildTree MSA-only mode completed successfully; alignment=$finalAlignment\n";
+	exit(0);
+}
+clearLifecycleMarker($msaOnlyCompletionMarker,
+	'clear obsolete MSA-only completion marker');
 
 my $trRetH;
 my $inferenceStarted = time;

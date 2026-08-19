@@ -40,6 +40,8 @@ The wrapper extracts and QC-filters strain loci (Phase I), prepares each MGS tre
 
 By default, the wrapper builds one tree from the complete retained alignment. EPA-ng placement is **disabled**. To infer a well-covered backbone and place eligible sparse strains afterward, explicitly add `-placeOnBackbone 1`.
 
+To generate only the post-QC concatenated alignments, add `-onlyMSA 1`. Each successful MGS retains `MSA/MSAli.fna.gz` and records `msaOnly.complete.tsv`; the wrapper skips phylogeny, EPA-ng placement, and `strain_within_2.2.pl`. Resume an interrupted alignment-only run with the same option plus `-onlySubmit 1`. Because no backbone exists in this mode, it cannot be combined with `-placeOnBackbone 1`.
+
 ### 2. Choose sample-inclusion stringency
 
 These values control inclusion after locus QC. `-GenesPerSpecies` is the relative retained-locus floor, `-relativeNTFraction` is the relative informative-nucleotide floor, and `-NTfiltCount` is an absolute informative-nucleotide floor. Larger values retain fewer, better-covered strains.
@@ -116,7 +118,7 @@ This is a task-oriented summary. See the [complete `strain_within.pl` flag refer
 | Group | Important flags | Purpose |
 |---|---|---|
 | Inputs and execution | `-GCd`, `-MGS`, `-outD`, `-map2`, `-MGSabundance`, `-submit`, `-submissionMode` | Define catalogue inputs, output location, metadata, abundance matrix, and submission mode. |
-| Resume and redo | `-onlySubmit`, `-redo` | Resume completed work normally or explicitly rebuild tree outputs, incomplete inputs, or all selected results. |
+| Resume and redo | `-onlySubmit`, `-onlyMSA`, `-redo` | Resume completed work normally, stop after post-QC concatenated MSAs, or explicitly rebuild tree outputs, incomplete inputs, or all selected results. |
 | Extraction QC | `-maxGenes`, `-treeLocusBudget`, `-MGSminGenesPSmpl`, `-GeneLengthMin`, `-GeneLengthIncludeMin`, `-multiGeneSmplMax`, `-conspGeneSmplMax` | Use high-coverage loci for QC, optionally recover partial loci after sample admission, and control other strain/locus filters. Set `-maxGenes 0` to remove only the gene-count cap; QC remains active. |
 | Tree inclusion | `-GenesPerSpecies`, `-relativeNTFraction`, `-NTfiltCount`, `-taxonAwareLocusSelection`, `-taxonAwareRescueMinPrevalence` | Set backbone inclusion thresholds and taxon-aware locus selection. |
 | Sparse placement | `-placeOnBackbone`, `-strictBackboneFraction`, `-placementGenesPerSpecies`, `-placementRelativeNTFraction`, `-placementNTfiltCount`, `-placementMinOverlap`, `-epaThreads` | Optional EPA-ng placement controls. Off by default; enable with `-placeOnBackbone 1`. When disabled, all other options in this group are inactive. |
