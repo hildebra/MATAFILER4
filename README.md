@@ -42,7 +42,7 @@ This documentation snapshot was updated against `MATAF4.pl` version `4.38`.
 
 | Use case | Recommended starting point |
 |---|---|
-| Gut or other host-associated shotgun metagenomes where assemblies are expected to recover substantial read content | [Assembly-dependent workflow](docs/common_workflows.md#assembly-dependent-metagenomic-assembly--gene-catalog) |
+| Gut or other host-associated shotgun metagenomes where assemblies are expected to recover substantial read content | [Assembly-dependent workflow](docs/common_workflows.md#assembly-dependent-metagenomic-assembly-gene-catalog) |
 | Highly complex communities where assemblies are unlikely to be informative | [Assembly-independent profiling](docs/common_workflows.md#assembly-independent-profiling) |
 | Short-read plus ONT/PacBio support data | [Hybrid assemblies](docs/common_workflows.md#hybrid-assemblies) |
 | Mapping reads to a defined reference FASTA or database | [map2tar / map2DB / map2GC](docs/common_workflows.md#map2tar-map2db-and-map2gc-reference-mapping) |

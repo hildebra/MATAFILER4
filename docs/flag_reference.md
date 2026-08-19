@@ -5,13 +5,17 @@
 
 # Flag reference
 
-This page is validated against the uploaded Perl source files for `MATAF4.pl`, `geneCat.pl`, `MGS.pl` and `buildTree5.pl`.
+Quick links: [`MATAF4.pl`](#mataf4pl) | [`geneCat.pl`](#genecatpl) | [`MGS.pl`](#mgspl) | [`strain_within.pl`](#strain_withinpl) | [`strain_within_2.2.pl`](#strain_within_22pl) | [`buildTree5.pl`](#buildtree5pl)
 
-| Script | Version in uploaded source | Role |
+This page is validated against the repository Perl source files for `MATAF4.pl`, `geneCat.pl`, `MGS.pl`, `strain_within.pl`, `strain_within_2.2.pl` and `buildTree5.pl`.
+
+| Script | Version in referenced source | Role |
 |---|---:|---|
 | `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.45` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
+| `strain_within.pl` | `1.24` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
+| `strain_within_2.2.pl` | `0.46` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
 | `buildTree5.pl` | `5.38` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
@@ -26,6 +30,7 @@ This page is validated against the uploaded Perl source files for `MATAF4.pl`, `
 - `geneCat.pl` does **not** accept `-Binner`; use `-binSpeciesMG` for gene-catalog/MGS binning selection.
 - `MATAF4.pl` accepts `-Binner`, `-MetaBat2` and `-binSpeciesMG` as aliases for the sample-level binning option.
 - `-profileMetaphlan3` remains a compatibility alias for `-profileMetaphlan`.
+- The strain workflow entry points are named `strain_within.pl` and `strain_within_2.2.pl` in the repository; spellings without underscores are not repository filenames.
 - `buildTree5.pl` accepts `-aa` for the amino-acid FASTA input; the older comment spelling `-faa` is not a parsed flag.
 - `geneCat.pl -MGset` and `MGS.pl -MGset` are constrained in source to `GTDB` or `FMG`.
 
@@ -444,9 +449,178 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-legacy` | integer | `0` | deprecated/legacy | 1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0 |
 | `-genomesPerFamily` | integer | `0` | stable | See source/help for details. |
 
+## strain_within.pl
+
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.25`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+
+### Inputs, execution and workflow control
+
+| Aliases | Type | Default | Status | Description |
+|---|---:|---|---|---|
+| `-GCd` | string | required | stable | Gene-catalogue directory. |
+| `-MGS` | string | required unless `-outD` is given | stable | Nonempty MGS guide. |
+| `-outD` | string | derived | stable | Output directory; also permits a targeted resume without `-MGS`. |
+| `-map2` | string | `""` | stable | Sample metadata map forwarded to `strain_within_2.2.pl`. |
+| `-MGSabundance` | string | auto | stable | Explicit MGS abundance matrix, recommended for a nonstandard guide location. |
+| `-clusterID` | integer | `95` | stable | Gene-catalogue clustering identity; must be 1–100. |
+| `-MGset` | string | `GTDB` | stable | Marker-gene set; accepted values are `GTDB` and `FMG`. |
+| `-MGSphylo` | string | `""` | stable | Source MGS tree forwarded for fallback outgroup selection. |
+| `-nodeTmp`, `-tmpD` | string | `""` | stable | Node-local temporary directory. |
+| `-submit` | integer | `0` | stable | Submit generated work (`1`) or perform a dry run (`0`). |
+| `-submissionMode` | string | auto | stable | Scheduler/backend override; dry runs default to `bash`. |
+| `-maxSubJob` | integer | `-1` | advanced | Phase-I worker count: `-1` auto-selects, `0` disables splitting, and a positive value is explicit. |
+| `-subjob` | integer | `0` | internal | Zero-based split-worker index supplied by the parent process. |
+| `-treeSubFromMGS` | string | `""` | internal | Begin tree resubmission at this MGS identifier. |
+| `-MGSsubset` | string | `""` | advanced | Comma-separated MGS subset. |
+| `-flushEvery` | integer | `200` | advanced | Number of samples buffered before per-MGS records are flushed. |
+| `-help`, `-h` | flag | `0` | stable | Show the built-in usage text. |
+
+### Resume, repair and resources
+
+| Aliases | Type | Default | Status | Description |
+|---|---:|---|---|---|
+| `-onlySubmit` | integer | `0` | stable | Reuse completed Phase-I preparation and submit only missing tree work. |
+| `-reSubmit` | integer | `0` | advanced | Resubmit tree building for all MGS. |
+| `-recalcTrees` | integer | `0` | stable | Remove tree-stage outputs and rebuild from published or complete staged inputs. |
+| `-repairCAT` | integer | `0` | advanced | Repair missing or incomplete per-MGS category inputs. |
+| `-deepRepair` | integer | `0` | advanced | Rebuild FNA/FAA inputs and resubmit missing MGS phylogenies. |
+| `-redoSubmissionData` | integer | `0` | advanced | Rebuild submission inputs and phylogenies, including completed MGS. |
+| `-redoEPAfilter` | optional integer | `0` | advanced | Republish EPA-placed trees from retained backbone/jplace artifacts; implies `1` when no value is supplied. |
+| `-maxCores` | integer | `-1` | stable | Maximum dynamically allocated cores; `-1` uses automatic planning. |
+| `-selfMemGb` | integer | `10` | stable | Memory in GiB for the wrapper/controller job. |
+| `-mosaicMemGb` | integer | `150` | stable | Total memory in GiB for the Mosaic prerequisite. |
+| `-phase1WorkerRetries` | integer | `2` | advanced | Retry count for Phase-I workers; accepted range is 0–10. |
+| `-treeOOMMaxMemGB` | float | configuration, fallback `512` | advanced | Memory ceiling for automatic tree OOM retries. |
+| `-phyloMemMulti` | float | `1` | advanced | Multiplier applied to BuildTree memory planning. |
+
+### Extraction and biological QC
+
+| Aliases | Type | Default | Status | Description |
+|---|---:|---|---|---|
+| `-presortGenes` | integer | `1200` | stable | Potential loci considered before final tree selection. |
+| `-maxGenes` | integer | `600` | stable | Maximum validated loci retained per MGS/sample. |
+| `-treeLocusBudget` | integer | `400` | stable | Maximum final loci selected for each tree. |
+| `-noGeneLimit` | integer | `0` | advanced | Remove the gene-count cap without disabling QC. |
+| `-disableQC` | integer | `0` | internal | Disable biological QC independently of the gene cap. |
+| `-MGSminGenesPSmpl` | integer | `8` | stable | Minimum validated loci retained per MGS/sample. |
+| `-multiGeneSmplMax` | float | `0.25` | stable | Maximum ambiguous/multigene-locus fraction per sample. |
+| `-conspGeneSmplMax` | float | `0.05` | stable | Maximum conspecific-signal locus fraction per sample. |
+| `-minBadLociPSmpl` | integer | `3` | stable | Minimum bad loci before a sample is deferred. |
+| `-breakpointGeneFlank` | integer | `50` | stable | Bases around mapping breakpoints in which genes are masked. |
+| `-abundanceMinLoci` | integer | `8` | stable | Minimum loci for robust abundance-pattern filtering. |
+| `-abundanceMinFold` | float | `0.333333…` | stable | Lowest accepted locus/median depth ratio. |
+| `-abundanceMaxFold` | float | `3` | stable | Highest accepted locus/median depth ratio. |
+| `-abundanceMaxModifiedZ` | float | `3.5` | stable | Modified-Z threshold for depth outliers. |
+| `-forceSNPcalls` | integer | `0` | advanced | Force regeneration of consensus FASTA from VCF. |
+| `-preCompConsSNP` | integer | `0` | advanced | Precompute consensus SNPs in this many blocks; `0` disables it. |
+| `-minSNPDepth` | integer | `2` | stable | Minimum SNP depth. |
+| `-minSNPCallQual` | integer | `20` | stable | Minimum SNP call quality. |
+| `-skipIndels` | integer | `1` | stable | Exclude indels from consensus processing. |
+| `-SNPadaptiveQual` | float | `0` | advanced | Adaptive depth-based quality filtering; `0` disables it. |
+| `-SNPdepthFilterScale` | float | `0.15` | stable | Filter when depth is below mean contig depth multiplied by this value. |
+| `-SNPindelRangeFilt` | integer | `5` | stable | Exclude SNPs within this many bases of indels. |
+
+### Mosaic and outgroup preparation
+
+| Aliases | Type | Default | Status | Description |
+|---|---:|---|---|---|
+| `-mosaicLoci` | string | auto | stable | Confirmed catalogue-wide mosaic/outgroup table. |
+| `-mosaicMGS` | string | derived from `-MGS` | stable | Raw cluster assignment used for comprehensive Mosaic discovery. |
+| `-prepareMosaicLoci` | integer | `1` | stable | Create, wait for and validate a missing Mosaic catalogue. |
+| `-outgroupCoreMinLoci` | integer | auto | advanced | Candidate outgroup overlap floor; `0` derives 20% of `-treeLocusBudget`, rounded up. |
+| `-outgroupReferenceGeneCap` | integer | `2500` | advanced | Candidate reference genes retained per outgroup MGS. |
+| `-preferredCoreGenes` | string | auto | advanced | Universal-core guide used to prioritise eligible loci. |
+
+### Tree selection and placement
+
+| Aliases | Type | Default | Status | Description |
+|---|---:|---|---|---|
+| `-GeneLengthMin` | float | `0.3` | stable | Minimum fraction of the locus length-Q90 used for sample/locus QC. |
+| `-GeneLengthIncludeMin` | float | `0.03` | stable | Lower post-QC fraction allowed into backbone and placement MSA input; it cannot exceed `-GeneLengthMin`. |
+| `-GenesPerSpecies` | float | `0.2` | stable | Backbone minimum relative locus coverage per sample. |
+| `-relativeNTFraction` | float | `0.1` | stable | Backbone minimum relative informative-NT coverage. |
+| `-NTfiltCount` | integer | `0` | stable | Backbone minimum informative-NT count after final MSA. |
+| `-placementGenesPerSpecies` | float | `0.04` | advanced | Placement minimum relative locus coverage. |
+| `-placementRelativeNTFraction` | float | `0.03` | advanced | Placement minimum relative informative-NT coverage. |
+| `-placementNTfiltCount` | integer | mirrors `-NTfiltCount` | advanced | Placement absolute informative-NT floor. |
+| `-taxonAwareLocusSelection` | integer | `1` | stable | Enable robust-core plus taxon-rescue locus selection after MSA QC. |
+| `-taxonAwareRescueMinPrevalence` | float | `0.8` | advanced | Minimum usable-taxon prevalence for rescue/backfill loci. |
+| `-compactTaxonAwareDiagnostics` | integer | `1` | stable | Merge final taxon-aware/rate audit tables into one diagnostic file. |
+| `-rateMergePartitions` | integer | `1` | stable | Merge loci into deterministic divergence/GC partition bins. |
+| `-rateMergeMaxBins` | integer | `8` | advanced | Maximum deterministic partition bins. |
+| `-rateMergeTargetSites` | integer | `30000` | advanced | Target effective called sites per initial bin. |
+| `-rateMergeMinLoci` | integer | `20` | advanced | Minimum loci per bin before nearest-bin merging. |
+| `-rateMergeMinSites` | integer | `20000` | advanced | Minimum effective sites per bin before merging. |
+| `-strictBackbone` | integer | `0` | advanced | Infer a well-covered backbone and place eligible sparse samples with EPA-ng. |
+| `-strictBackboneFraction` | float | `0.35` | advanced | Severe aligned-coverage deferral threshold relative to sample Q90. |
+| `-strictBackboneMinSamples` | integer | `3` | advanced | Minimum backbone samples before falling back to the complete alignment. |
+| `-placementMinOverlap` | integer | `10000` | advanced | Minimum informative positions shared with the inferred backbone. |
+| `-epaThreads` | integer | `2` | advanced | Requested EPA-ng threads, subject to core and memory caps. |
+| `-epaMaxMemMB` | integer | `-1` | advanced | EPA thread-planning memory; `-1` derives it and `0` disables memory scaling. |
+| `-epaPendantOutlierFactor` | float | `5` | advanced | Pendant-branch cutoff multiplier; `0` disables this filter. |
+| `-epaPendantMinThreshold` | float | `0.02` | advanced | Minimum pendant-branch cutoff in substitutions/site. |
+| `-MSAprog` | integer | `2` | stable | Alignment program: 0 MSAProbs, 1 Clustal Omega, 2 MAFFT, or 4 MUSCLE5. |
+| `-phyloProg` | integer | `1` | stable | Tree program: 1 IQ-TREE, 2 VeryFastTree, or 3 FastTree. |
+| `-iqPathogen` | integer | `0` | advanced | Opt in to the IQ-TREE 3 pathogen/CMAPLE path. |
+| `-rmMSA` | integer | `1` | stable | Remove per-locus MSAs unless downstream analysis requires them. |
+
+### Downstream analysis and metadata
+
+| Aliases | Type | Default | Status | Description |
+|---|---:|---|---|---|
+| `-popGenStats` | integer | `1` | stable | Enable population-genetic analysis and retain required nucleotide MSAs. |
+| `-popGenStrictOutgroup` | integer | `0` | stable | Require the requested outgroup for population-genetic analysis. |
+| `-popGenGeneticCode` | integer | `1` | stable | Genetic code forwarded to population-genetic analysis. |
+| `-popGenCodonStart` | integer | `1` | stable | Codon frame start (1, 2 or 3). |
+| `-popGenSeed` | integer | `1` | stable | Non-negative reproducibility seed. |
+| `-popGenLegacyTextOutput` | integer | `0` | deprecated/legacy | Also emit legacy population-genetics text output. |
+| `-ContTests` | string | `""` | stable | Comma-separated continuous metadata tests forwarded downstream. |
+| `-DiscTests` | string | `""` | stable | Comma-separated discrete metadata tests forwarded downstream. |
+| `-familyVar` | string | `""` | stable | Metadata column containing family identifiers. |
+| `-groupStabilityVars` | string | `""` | stable | Metadata columns used for resilience/persistence calculations. |
+| `-individualVar` | string | `AssmblGrps` | stable | Metadata column containing individual identifiers. |
+
+## strain_within_2.2.pl
+
+Within-MGS postprocessing, strain statistics and population-genetic analysis. The source reports version `0.46`. It is normally launched by `strain_within.pl`; direct use is primarily for targeted postprocessing restarts.
+
+### General options
+
+| Aliases | Type | Default | Status | Description |
+|---|---:|---|---|---|
+| `-GCd` | string | required | stable | Gene-catalogue directory. |
+| `-FMGdir` | string | required | stable | Within-phylogeny directory containing the per-MGS results. |
+| `-map` | string | required | stable | Nonempty sample metadata map. |
+| `-MGSmatrix` | string | required | stable | Nonempty MGS abundance matrix. |
+| `-MGSphylo` | string | `""` | stable | Source MGS tree used to recover fallback outgroups. |
+| `-submit` | integer | `1` | stable | Submit analyses (`1`) or generate a dry-run plan (`0`). |
+| `-qsubSystem` | string | auto | advanced | Queue backend override; dry runs default to `bash`. |
+| `-cores` | integer | `4` | stable | Cores for standard R analyses. |
+| `-Hcores` | integer | `12` | stable | Cores for heavier downstream analyses. |
+| `-reSubmit` | integer | `0` | advanced | Clear and redo all within-MGS postprocessing and both statistic types. |
+| `-redoStrainStats` | integer | `0` | stable | Redo only strain statistics and dependent postprocessing checkpoints. |
+| `-redoPopGenStats` | integer | `0` | stable | Redo only population-genetic stores and summaries; requires `-popGenStats 1`. |
+
+### Population genetics and metadata
+
+| Aliases | Type | Default | Status | Description |
+|---|---:|---|---|---|
+| `-popGenStats` | integer | `1` | stable | Enable per-MGS population-genetic analysis. |
+| `-popGenSubsample` | string | `10,20,30,100,200,500` | stable | Comma-separated population-genetic subsample sizes. |
+| `-popGenStrictOutgroup` | integer | `0` | stable | Require the requested outgroup. |
+| `-popGenGeneticCode` | integer | `1` | stable | Positive genetic-code identifier. |
+| `-popGenCodonStart` | integer | `1` | stable | Codon frame start (1, 2 or 3). |
+| `-popGenSeed` | integer | `1` | stable | Non-negative reproducibility seed. |
+| `-popGenLegacyTextOutput` | integer | `0` | deprecated/legacy | Also emit legacy population-genetics text output. |
+| `-DiscTests` | string | `""` | stable | Discrete metadata variables tested for phylogenetic signal. |
+| `-ContTests` | string | `""` | stable | Continuous metadata variables tested for phylogenetic signal. |
+| `-familyVar` | string | `""` | stable | Metadata column containing family identifiers. |
+| `-groupStabilityVars` | string | `""` | stable | Metadata columns used for resilience/persistence calculations. |
+| `-individualVar` | string | `AssmblGrps` | stable | Metadata column containing individual identifiers. |
+
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.38`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.77`.
 
 ### General options
 
@@ -468,6 +642,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-useEte` | integer | `0` | stable | See source/help for details. |
 | `-relativeNTFraction` | float | `0.2` direct; `0.1` strain workflow | stable | Backbone minimum informative nucleotide content as a fraction of the final selected-sample Q90. This explicit name replaces the retired ambiguous `-NTfilt` switch. |
 | `-NTfiltPerGene` | float | `0.1` | stable | See source/help for details. |
+| `-GeneLengthIncludeMin` | float | `0.03` | stable | Lower per-sample locus-length-Q90 fraction admitted to MSA only after QC at `-NTfiltPerGene`; recovered-only observations do not count toward backbone/placement eligibility. |
 | `-GenesPerSpecies` | float | `0.1` | stable | Backbone minimum retained-locus count as a fraction of the final selected-sample Q90. |
 | `-fracMaxGenes90pct` | float | `0.25` | stable | Minimum locus size as a fraction of the category-size Q90. Set to `0` to retain every category containing at least one length-filtered sequence. |
 | `-NTfiltCount` | integer | `0` | stable | Backbone absolute minimum informative nucleotide count after final locus selection. |
@@ -554,7 +729,7 @@ Broad or between-species phylogeny is the default. In this mode `buildTree5.pl` 
 
 Taxon-aware selection is enabled by default and stays inside `buildTree5.pl` so it can reuse the normal alignment and MSAfix stages. For direct calls, the pre-MSA pass ranks length-stable, complete, prevalent loci and retains a 400-locus robust core. If `-preferredCoreGenes` is supplied, a locus whose catalogue seed is listed in that GTDB/core guide is ranked ahead of other eligible loci and receives a modest secondary preference during greedy taxon rescue; it still must pass normal sequence and QC filters, and it does not relax the hard broad-availability gate for taxon rescue or QC backfill. Greedy taxon rescue and backfill remain restricted to loci found in at least 80% of taxa with any usable candidate locus, preventing a sparse accessory or mobile-element locus from entering only because it carries an underrepresented taxon. After MSAfix, the final pass recalculates prevalence and reapplies the same guard. Sparse samples remain available only when a broadly shared selected locus anchors them. Candidate and final rows expose `preferred_core`, `coverage_rescue_eligible`, and `coverage_rescue_reason`. By default, the final taxon-aware and rate-partition reports are sectioned into `phylo/taxon_aware_diagnostics.tsv`; `phylo/selection_attrition.tsv` remains separate because the strain controller aggregates it. Set `-compactTaxonAwareDiagnostics 0` for the individual files.
 
-`strain_within.pl` enables the selector but leaves strict-backbone placement disabled by default; set `-strictBackbone 1` to opt in. It forwards the 0.8 rescue-prevalence guard, and automatically uses the supplied `-MGS` guide when it ends in `.core` (otherwise an available sibling `-MGS.core`) as `-preferredCoreGenes`. Give `-preferredCoreGenes` explicitly to override that choice. It scales the hierarchy to its effective selected-gene budget: 80% robust core, 20% taxon-rescue capacity, and an additional 30% QC-backfill candidate pool. The final-tree budget is `min(treeLocusBudget, presortGenes)`; `maxGenes` separately limits how many validated loci are extracted per MGS/sample. Thus 500 selected genes produce 400 core + 100 rescue + 150 backfill, while the default 400-gene cap produces 320 + 80 + 120. Its filtering defaults are `-GeneLengthMin 0.3`, backbone `-GenesPerSpecies 0.2` and `-relativeNTFraction 0.1`, and explicit placement thresholds of `0.04` loci and `0.03` NT, plus a 10,000-site shared-backbone floor. Within-species locus QC rejects cross-locus consensus-divergence outliers above modified-Z 5.0. The strain preset now uses the legacy IQ-TREE command by default; pass `-legacyMGTK 0` to use the standard modern command, or `-iqPathogen 1` to select the IQ-TREE 3 pathogen path (which automatically disables the legacy default).
+`strain_within.pl` enables the selector but leaves strict-backbone placement disabled by default; set `-strictBackbone 1` to opt in. It forwards the 0.8 rescue-prevalence guard, and automatically uses the supplied `-MGS` guide when it ends in `.core` (otherwise an available sibling `-MGS.core`) as `-preferredCoreGenes`. Give `-preferredCoreGenes` explicitly to override that choice. It scales the hierarchy to its effective selected-gene budget: 80% robust core, 20% taxon-rescue capacity, and an additional 30% QC-backfill candidate pool. The final-tree budget is `min(treeLocusBudget, presortGenes)`; `maxGenes` separately limits how many validated loci are extracted per MGS/sample. Thus 500 selected genes produce 400 core + 100 rescue + 150 backfill, while the default 400-gene cap produces 320 + 80 + 120. Its filtering defaults are `-GeneLengthMin 0.3` for QC, `-GeneLengthIncludeMin 0.03` for post-QC MSA recovery, backbone `-GenesPerSpecies 0.2` and `-relativeNTFraction 0.1`, and explicit placement thresholds of `0.04` loci and `0.03` NT, plus a 10,000-site shared-backbone floor. Within-species locus QC rejects cross-locus consensus-divergence outliers above modified-Z 5.0. The strain preset now uses the legacy IQ-TREE command by default; pass `-legacyMGTK 0` to use the standard modern command, or `-iqPathogen 1` to select the IQ-TREE 3 pathogen path (which automatically disables the legacy default).
 
 For split Phase I (`-maxSubJob > 0`), assembly groups remain indivisible, but assignment is now weighted by estimated work rather than raw sample count: each sample contributes a fixed extraction cost plus its estimated uncompressed consensus FNA/FAA size, while samples requiring consensus regeneration receive an additional VCF-size penalty. Automatic splitting (`-maxSubJob -1`) counts standalone samples as effective groups. The consolidated run-level audit `LOGandSUB/phase1_worker_plan.tsv` records every group assignment, input state, estimated work, and worker total; a dominant group visible there can still create an unavoidable straggler because it cannot safely be split across workers.
 

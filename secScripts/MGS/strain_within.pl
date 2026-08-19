@@ -105,6 +105,7 @@ sub writeRecoveryContributionIndex;
 sub loadRecoveryContributionIndex;
 sub writeStrainSummary;
 sub writeSelectionAttritionSummary;
+sub writeGeneLengthSampleSummary;
 sub writeMGSSampleHistograms;
 sub mergeSampleStats;
 sub reportSavedSampleStats;
@@ -239,7 +240,8 @@ my $completionMessage = "";
 #1.22: rank Mosaic outgroup proposals authoritatively against the source phylogeny
 #1.23: stream parent only-submit resumes without a controller-wide file audit
 #1.24: expose reproducible PopGenStats configuration to the postprocessing launcher
-my $version = 1.24;
+#1.25: recover partial loci after high-threshold sample QC and report both length gates
+my $version = 1.25;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -304,6 +306,7 @@ my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
 my $GenesPerSpecies = 0.2;
 my $GeneLengthMin = 0.3;
+my $GeneLengthIncludeMin = 0.03;
 my $relativeNTFraction = 0.1;
 my $NTfiltCount = 0;
 my ($placementGenesPerSpecies, $placementRelativeNTFraction, $placementNTfiltCount);
@@ -458,6 +461,7 @@ GetOptions(
 	#transferred to buildTRee script..
 	"GenesPerSpecies=f" => \$GenesPerSpecies,
 	"GeneLengthMin=f" => \$GeneLengthMin,
+	"GeneLengthIncludeMin=f" => \$GeneLengthIncludeMin,
 	"relativeNTFraction=f" => \$relativeNTFraction,
 	"NTfiltCount=i" => \$NTfiltCount,
 	"placementGenesPerSpecies=f" => \$placementGenesPerSpecies,
@@ -552,9 +556,13 @@ die "-outgroupReferenceGeneCap must be positive\n" unless $outgroupReferenceGene
 die "-treeOOMMaxMemGB must be positive\n" unless $treeOOMMaxMemGB > 0;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax,
-		$GenesPerSpecies, $GeneLengthMin, $relativeNTFraction,
+		$GenesPerSpecies, $GeneLengthMin, $GeneLengthIncludeMin,
+		$relativeNTFraction,
 		$taxonAwareRescueMinPrevalence,
 		grep { defined } ($placementGenesPerSpecies, $placementRelativeNTFraction));
+die "-GeneLengthIncludeMin cannot exceed -GeneLengthMin because the inclusion "
+	."threshold must not be stricter than the QC threshold\n"
+	if $GeneLengthIncludeMin > $GeneLengthMin;
 die "-NTfiltCount and -placementNTfiltCount must be non-negative\n"
 	if $NTfiltCount < 0 || (defined($placementNTfiltCount) && $placementNTfiltCount < 0);
 die "-compactTaxonAwareDiagnostics must be 0 or 1\n"
@@ -1945,7 +1953,9 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $tree_sample_separator = quotemeta($SaSe);
 	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
 	$Tcmd .= "-withinSpecies 1 -relativeNTFraction $relativeNTFraction "
-		."-NTfiltPerGene $GeneLengthMin -GenesPerSpecies $GenesPerSpecies "
+		."-NTfiltPerGene $GeneLengthMin "
+		."-GeneLengthIncludeMin $GeneLengthIncludeMin "
+		."-GenesPerSpecies $GenesPerSpecies "
 		."-NTfiltCount $NTfiltCount -iqFast 1 ";
 	$Tcmd .= "-placementGenesPerSpecies $placementGenesPerSpecies "
 		if defined $placementGenesPerSpecies;
@@ -3648,7 +3658,8 @@ sub prepRun{
 		
 		print "groupStabilityVars=$groupStabilityVars\n" unless ($groupStabilityVars eq "");
 		print "MSAaligner: $MSAprog, backbone GenesPerSpecies: $GenesPerSpecies, "
-			."GeneLengthMin: $GeneLengthMin, backbone relativeNTFraction: $relativeNTFraction, "
+			."GeneLengthMin: $GeneLengthMin, GeneLengthIncludeMin: $GeneLengthIncludeMin, "
+			."backbone relativeNTFraction: $relativeNTFraction, "
 			."placement GenesPerSpecies: $placementGenesPerSpecies, "
 			."placement relativeNTFraction: $placementRelativeNTFraction, "
 			."taxonAwareLocusSelection: $taxonAwareLocusSelection\n";
@@ -5223,6 +5234,110 @@ sub writeSelectionAttritionSummary {
 	return $path;
 }
 
+sub writeGeneLengthSampleSummary {
+	my @sourceColumns = qw(
+		sample gene_length_min gene_length_include_min sample_prefilter_status
+		input_loci gene_length_min_pass_loci gene_length_min_dropped_loci
+		qc_pass_loci qc_dropped_loci gene_length_include_min_pass_loci
+		gene_length_include_min_dropped_loci recovery_candidate_loci
+		recovered_for_msa_loci gene_length_min_dropped_genes qc_dropped_genes
+		gene_length_include_min_dropped_genes recovery_candidate_genes
+		recovered_for_msa_genes
+	);
+	my $expectedHeader = join("\t", @sourceColumns);
+	my @countColumns = qw(
+		input_loci gene_length_min_pass_loci gene_length_min_dropped_loci
+		qc_pass_loci qc_dropped_loci gene_length_include_min_pass_loci
+		gene_length_include_min_dropped_loci recovery_candidate_loci
+		recovered_for_msa_loci
+	);
+	my @geneColumns = qw(
+		gene_length_min_dropped_genes qc_dropped_genes
+		gene_length_include_min_dropped_genes recovery_candidate_genes
+		recovered_for_msa_genes
+	);
+	my %sample;
+	my $reports = 0;
+	for my $mgs (@specis) {
+		next unless defined($SIdirs{$mgs}) && length($SIdirs{$mgs});
+		my $report = File::Spec->catfile(
+			$SIdirs{$mgs}, 'phylo', 'gene_length_filter.samples.tsv');
+		next unless -s $report;
+		open my $input, '<', $report
+			or die "Cannot read gene-length sample audit $report: $!\n";
+		my $header = <$input> // '';
+		$header =~ s/[\r\n]+\z//;
+		die "Unexpected gene-length sample-audit header in $report\n"
+			unless $header eq $expectedHeader;
+		$reports++;
+		while (my $line = <$input>) {
+			$line =~ s/[\r\n]+\z//;
+			next unless length $line;
+			my @values = split /\t/, $line, -1;
+			die "Wrong field count in gene-length sample audit $report\n"
+				unless @values == @sourceColumns;
+			my %row;
+			@row{@sourceColumns} = @values;
+			my $sampleId = $row{sample};
+			die "Gene-length sample audit has no sample in $report\n"
+				unless defined($sampleId) && length($sampleId);
+			my $aggregate = $sample{$sampleId} ||= {
+				gene_length_min => $row{gene_length_min},
+				gene_length_include_min => $row{gene_length_include_min},
+			};
+			die "Inconsistent gene-length thresholds for sample $sampleId\n"
+				unless $aggregate->{gene_length_min} eq $row{gene_length_min}
+					&& $aggregate->{gene_length_include_min}
+						eq $row{gene_length_include_min};
+			$aggregate->{mgs_reports}++;
+			if (($row{sample_prefilter_status} // '')
+					eq 'removed_by_high_threshold_qc') {
+				$aggregate->{mgs_removed_by_high_threshold_qc}++;
+			} else {
+				$aggregate->{mgs_retained_or_pending}++;
+			}
+			for my $column (@countColumns) {
+				die "Non-numeric $column for $sampleId in $report\n"
+					unless ($row{$column} // '') =~ /\A\d+\z/;
+				$aggregate->{$column} += $row{$column};
+			}
+			for my $column (@geneColumns) {
+				push @{$aggregate->{$column}}, map { "${mgs}:$_" }
+					grep { length } split /,/, ($row{$column} // '');
+			}
+		}
+		close $input or die "Cannot close gene-length sample audit $report: $!\n";
+	}
+	return 'not_available' unless $reports;
+
+	my @outputColumns = (
+		qw(sample gene_length_min gene_length_include_min mgs_reports
+			mgs_retained_or_pending mgs_removed_by_high_threshold_qc),
+		@countColumns, @geneColumns,
+	);
+	my $path = "$LOGDIR/strainGeneLengthFilter.samples.tsv";
+	my $temporary = "$path.write.$$";
+	my $output = retry_open('>', $temporary,
+		label => 'create strain gene-length sample summary');
+	print {$output} join("\t", @outputColumns), "\n"
+		or die "Cannot write strain gene-length sample-summary header: $!\n";
+	for my $sampleId (sort keys %sample) {
+		my $row = $sample{$sampleId};
+		$row->{sample} = $sampleId;
+		$row->{$_} //= 0 for qw(
+			mgs_reports mgs_retained_or_pending mgs_removed_by_high_threshold_qc
+		), @countColumns;
+		$row->{$_} = join(',', sort @{$row->{$_} || []}) for @geneColumns;
+		print {$output} join("\t", map { $row->{$_} // '' } @outputColumns), "\n"
+			or die "Cannot write strain gene-length summary for $sampleId: $!\n";
+	}
+	retry_close($output, 'close strain gene-length sample summary');
+	retry_rename($temporary, $path,
+		label => 'publish strain gene-length sample summary');
+	print "Strain-wide gene-length sample audit: $path ($reports MGS reports)\n";
+	return $path;
+}
+
 sub writeMGSSampleHistograms {
 	my @records;
 	for my $mgs (@specis) {
@@ -5435,12 +5550,14 @@ sub writeStrainSummary {
 		median_loci_per_recovered_mag => $median_genes,
 		recovered_mosaic_loci => $mosaic_loci,
 	}, \%filter_reason);
+	my $geneLengthSampleSummary = writeGeneLengthSampleSummary();
 	my $sampleHistograms = writeMGSSampleHistograms();
 	my @lines = (
 		"Strain-within recovery summary (v$version)",
 		"output_directory\t$outD",
 		"recovery_accounting\t".(-s $recovery ? $recovery : 'not_available'),
 		"selection_attrition\t$selectionAttrition",
+		"gene_length_sample_audit\t$geneLengthSampleSummary",
 		"MGS_sample_counts\t$sampleHistograms->{details}",
 		"MGS_sample_histogram\t$sampleHistograms->{histogram}",
 		"MGS_with_sample_counts\t$sampleHistograms->{mgs_count}",
@@ -6840,7 +6957,10 @@ instead of being used to infer the strict backbone.
 
 Tree locus filtering:
   -GeneLengthMin FLOAT          Minimum fraction of a locus length-Q90 retained
-                                 [default 0.3]
+                                 for sample QC [default 0.3]
+  -GeneLengthIncludeMin FLOAT   After sample QC, recover loci reaching this
+                                 fraction into backbone/placement MSA input
+                                 [default 0.03]
   -GenesPerSpecies FLOAT        Backbone minimum relative locus coverage per sample
                                  [default 0.2]
   -relativeNTFraction FLOAT     Backbone minimum relative informative-NT coverage

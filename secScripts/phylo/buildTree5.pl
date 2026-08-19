@@ -79,6 +79,7 @@
 #5.74: retain per-locus nucleotide MSAs when -rmMSA 0 is requested
 #5.75: prefer universal-core guide loci and consolidate final taxon-aware diagnostics
 #5.76: require 10k shared backbone sites for sparse-sample placement by default
+#5.77: recover partial sample loci after high-threshold QC and audit both length gates
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -152,12 +153,14 @@ sub classifyTaxonAwareSamples;
 sub classifyTaxonAwareCoverageEligibility;
 sub taxonAwareAlignmentMetrics;
 sub informativeSequenceLength;
+sub bestGeneSequencesBySample;
 sub writeTaxonAwareLocusAudit;
 sub writeTaxonAwareSampleAudit;
 sub preferredCoreGeneSet;
 sub catalogueGeneFromLocus;
 sub compactTaxonAwareDiagnostics;
 sub writeSelectionAttritionAudit;
+sub writeGeneLengthSampleAudit;
 sub legacyPolicyFileMatches;
 sub alignmentFileStem;
 sub readPostAlignmentRateMetrics;
@@ -211,7 +214,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.76";
+my $version = "5.77";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -253,6 +256,7 @@ my $partiExt=".partition.RAXML";
 #some runtim options...
 #my $ncore = 20;#RAXML cores
 my $ntFrac =0.2; my $ntFracGene = 0.1;
+my $ntFracGeneInclude = 0.03;
 my $GeneFracPSpec = 0.1; #replacement for ntFracGene, as works also with supertrees
 my $MSAprog = 2; #do MSA with clustal (1) or msaprobs (0), mafft(2), guidance2(3), MUSCLE5 (4)
 my $calcDistMat = 0; #distmat of either AA or NT (depending on MSA)
@@ -425,6 +429,7 @@ GetOptions(
 	"useEte=i"      => \$Ete,
 	"relativeNTFraction=f" => \$ntFrac,
 	"NTfiltPerGene=f"      => \$ntFracGene,
+	"GeneLengthIncludeMin=f" => \$ntFracGeneInclude,
 	"GenesPerSpecies=f" => \$GeneFracPSpec,
 	"placementGenesPerSpecies=f" => \$placementGeneFracPSpec,
 	"placementRelativeNTFraction=f" => \$placementNTFrac,
@@ -663,6 +668,7 @@ for my $fraction_name_value (
 	["relativeNTFraction", $ntFrac],
 	["placementRelativeNTFraction", $placementNTFrac],
 	["NTfiltPerGene", $ntFracGene],
+	["GeneLengthIncludeMin", $ntFracGeneInclude],
 	["GenesPerSpecies", $GeneFracPSpec],
 	["placementGenesPerSpecies", $placementGeneFracPSpec], ["fracMaxGenes90pct", $fracMaxGenes90pct],
 	["maxGapPerCol", $maxGapPerCol],
@@ -670,6 +676,9 @@ for my $fraction_name_value (
 	my ($name, $value) = @{$fraction_name_value};
 	die "-$name must be between 0 and 1\n" if $value < 0 || $value > 1;
 }
+die "-GeneLengthIncludeMin cannot exceed -NTfiltPerGene because the inclusion "
+	."threshold must not be stricter than the QC threshold\n"
+	if $ntFracGeneInclude > $ntFracGene;
 die "Unsupported -MSAprogram $MSAprog (expected 0, 1, 2, 4, or 5)\n"
 	unless grep { $MSAprog == $_ } (0, 1, 2, 4, 5);
 
@@ -796,7 +805,7 @@ print "Alignment: $msaProgramNames{$MSAprog}; cores=$ncore; post-filter="
 	. "; MSAli compression=always\n";
 print "MSAfix coding-NT repair: " . ($msaFixRecoverTechnicalOffsets ? "enabled; frame=$msaFixCodingFrame; genetic code=$msaFixGeneticCode; band=$msaFixRecoveryBand" : "disabled") . "\n"
 	unless $useAA4tree;
-print "Filtering: per-gene length fraction=$ntFracGene; category Q90 fraction=$fracMaxGenes90pct; "
+print "Filtering: per-gene QC length fraction=$ntFracGene; post-QC inclusion fraction=$ntFracGeneInclude; category Q90 fraction=$fracMaxGenes90pct; "
 	. "backbone NT fraction=$ntFrac; backbone gene fraction=$GeneFracPSpec; "
 	. "backbone minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
 print "Post-alignment locus QC: enabled="
@@ -951,9 +960,16 @@ my $strictPlacementMinimumLoci = 2;
 my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $selectionAttritionReport = "$treeD/selection_attrition.tsv";
+my $geneLengthSampleReport = "$treeD/gene_length_filter.samples.tsv";
+my (%geneLengthSampleAudit, %geneLengthQCSequence, %geneLengthIncludeByGene);
+my %geneLengthRecoveredForMSA;
 my %selectionAttrition = map { $_ => 'NA' } qw(
 	input_loci input_sequences input_samples length_retained_sequences
-	length_filtered_sequences eligible_loci candidate_loci candidate_samples
+	length_filtered_sequences length_include_retained_sequences
+	length_include_filtered_sequences length_recovery_candidate_sequences
+	length_recovered_msa_sequences gene_length_min_dropped_loci
+	gene_length_include_min_dropped_loci gene_length_recovery_candidate_loci
+	gene_length_recovered_msa_loci eligible_loci candidate_loci candidate_samples
 	aligned_loci alignment_failed_loci post_qc_loci final_loci final_samples
 	backbone_samples placement_samples excluded_samples
 );
@@ -961,7 +977,7 @@ my $legacyPostAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv
 my $legacyAlignmentWorkPolicyFile = "$MsaD/alignment_work.policy.tsv";
 my $legacyPostAlignmentPolicyFile = "$treeD/post_alignment.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=13",
+	"schema=14",
 	"msa_program=$MSAprog",
 	"post_filter=$postFilter",
 	"sample_definition=$smplDef",
@@ -977,6 +993,7 @@ my $postAlignmentQCPolicy = join("\t",
 	"scope=".($withinSpecies ? "within" : "between"),
 	"sequence=".($useAA4tree ? "aa" : "nt"),
 	"per_gene_length_fraction=$ntFracGene",
+	"per_gene_inclusion_fraction=$ntFracGeneInclude",
 	"minimum_category_q90_fraction=$fracMaxGenes90pct",
 	"backbone_nt_fraction=$ntFrac",
 	"backbone_gene_fraction=$GeneFracPSpec",
@@ -1247,6 +1264,9 @@ if ($isAligned){
 	my @genesPerCat;
 	my $geneTooShort = 0; #count genes with too little NTs in gene..
 	my $geneTooLong = 0;
+	my ($geneLengthMinDroppedSequences, $geneLengthIncludeRetainedSequences,
+		$geneLengthIncludeDroppedSequences, $geneLengthRecoveryCandidateSequences,
+		$geneLengthRecoveredMSASequences) = (0, 0, 0, 0, 0);
 	
 	my ($xI,$ST)= gzipopen($cogCats,"CogCATs phylo");
 	#open my $xI,"<$cogCats" or die "Can't open cogcats $cogCats\n";
@@ -1261,7 +1281,7 @@ if ($isAligned){
 		if (@spl && $spl[0] =~ m/^#/){shift @spl;}
 		@spl = grep !/^NA$/, @spl;#remove NAs
 		die "No sequence identifiers in category line ".($cnt + 1)."\n" unless @spl;
-		my @spl2;
+		my (@spl2, @splInclude);
 		#$genesPerCat[$cnt] = scalar(@spl) ;
 		my @geneLs;
 		my ($sp, $gene) = parseSeqId($spl[0], "category line ".($cnt + 1));
@@ -1269,6 +1289,7 @@ if ($isAligned){
 			($sp) = parseSeqId($seq, "category line ".($cnt + 1));
 			$inputSamples{$sp} = 1;
 			$inputSequences++;
+			$geneLengthSampleAudit{$sp}{$gene}{input} = 1;
 			die "can't find AA seq $seq\n" if ($aaFna ne "" && !exists ($FAA{$seq}));
 			die "can't find fna seq $seq\n" if (!exists ($FNA{$seq}) && !$useAA4tree);
 			#print "$MFAA{$curK}\n";			#my $ss = $FAA{$seq}; 			#filter per sequence 
@@ -1291,15 +1312,36 @@ if ($isAligned){
 			my ($sp) = parseSeqId($seq, "category line ".($cnt + 1));
 			#quantile(0.8,values(%{$charCnts{$sp}}));
 			my $ntEquivalentLength = $charCnts{$sp}{$seq} * ($useAA4tree ? 3 : 1);
-			if ( $charCnts{$sp}{$seq} >= ($qtl90NTcnt{$gene}  * $ntFracGene)
-					&& (!$taxonAwareLocusSelection
-						|| $ntEquivalentLength >= $taxonAwareMinSequenceNT)){
+			my $passesGeneLengthMin = $charCnts{$sp}{$seq}
+				>= ($qtl90NTcnt{$gene} * $ntFracGene);
+			my $passesAbsoluteMinimum = !$taxonAwareLocusSelection
+				|| $ntEquivalentLength >= $taxonAwareMinSequenceNT;
+			my $passesQC = $passesGeneLengthMin && $passesAbsoluteMinimum;
+			my $passesInclude = $charCnts{$sp}{$seq}
+				>= ($qtl90NTcnt{$gene} * $ntFracGeneInclude);
+			$geneLengthSampleAudit{$sp}{$gene}{gene_length_min} = 1
+				if $passesGeneLengthMin;
+			$geneLengthSampleAudit{$sp}{$gene}{absolute_minimum} = 1
+				if $passesAbsoluteMinimum;
+			$geneLengthSampleAudit{$sp}{$gene}{qc} = 1 if $passesQC;
+			$geneLengthSampleAudit{$sp}{$gene}{include} = 1 if $passesInclude;
+			if ($passesQC) {
 				push(@spl2, $seq);
+				$geneLengthQCSequence{$seq} = 1;
 				$geneTooLong++;
 			} else {
 				$geneTooShort++;
 			}
+			$geneLengthMinDroppedSequences++ unless $passesGeneLengthMin;
+			if ($passesInclude) {
+				push @splInclude, $seq;
+				$geneLengthIncludeRetainedSequences++;
+				$geneLengthRecoveryCandidateSequences++ unless $passesQC;
+			} else {
+				$geneLengthIncludeDroppedSequences++;
+			}
 		}
+		$geneLengthIncludeByGene{$gene} = \@splInclude;
 		push(@linesCats2,\@spl2);
 		#has to work with what is actually there, not what could have been..
 		$genesPerCat[$cnt] = scalar(@spl2);
@@ -1310,6 +1352,22 @@ if ($isAligned){
 	$selectionAttrition{input_loci} = scalar(@linesCats);
 	$selectionAttrition{input_sequences} = $inputSequences;
 	$selectionAttrition{input_samples} = scalar(keys %inputSamples);
+	$selectionAttrition{length_include_retained_sequences} =
+		$geneLengthIncludeRetainedSequences;
+	$selectionAttrition{length_include_filtered_sequences} =
+		$geneLengthIncludeDroppedSequences;
+	$selectionAttrition{length_recovery_candidate_sequences} =
+		$geneLengthRecoveryCandidateSequences;
+	my $initialGeneLengthAudit = writeGeneLengthSampleAudit(
+		$geneLengthSampleReport, \%geneLengthSampleAudit, {}, {},
+		$ntFracGene, $ntFracGeneInclude,
+	);
+	$selectionAttrition{gene_length_min_dropped_loci} =
+		$initialGeneLengthAudit->{gene_length_min_dropped_loci};
+	$selectionAttrition{gene_length_include_min_dropped_loci} =
+		$initialGeneLengthAudit->{gene_length_include_min_dropped_loci};
+	$selectionAttrition{gene_length_recovery_candidate_loci} =
+		$initialGeneLengthAudit->{recovery_candidate_loci};
 	my $GenesQtl50 = quantile(0.5,@genesPerCat);
 	my $minimumCategorySequences = $GenesQtl90 * $fracMaxGenes90pct;
 	$minimumCategorySequences = 1 if $minimumCategorySequences < 1;
@@ -1445,7 +1503,8 @@ if ($isAligned){
 	my $qtl95Genes = quantile(0.95,values(%specList));
 	my $qtl90Genes = quantile(0.9,values(%specList));
 
-	my %smplsRmvd; my $tooFewGenes=0;my $tooFewNTs=0;my $tooFewNTs2=0; my $specsRemain = 0;
+	my (%smplsRmvd, %samplesPassedHighThresholdQC);
+	my $tooFewGenes=0;my $tooFewNTs=0;my $tooFewNTs2=0; my $specsRemain = 0;
 	#print "Samples removed due to low gene presence:\n";
 	my $OGfnd=0;
 	if ($taxonAwareLocusSelection) {
@@ -1477,6 +1536,7 @@ if ($isAligned){
 			if (($sampleSelection->{$sp}{role} // "remove") eq "remove") {
 				$smplsRmvd{$sp} = 1;
 			} else {
+				$samplesPassedHighThresholdQC{$sp} = 1;
 				$specsRemain++;
 			}
 		}
@@ -1499,10 +1559,14 @@ if ($isAligned){
 				$tooFewNTs2++ if ($NTfilter2);
 				$tooFewGenes++ if ($NTlengFilt);
 			} else {
+				$samplesPassedHighThresholdQC{$sp} = 1;
 				$specsRemain ++;
 			}
 		}
 	}
+	$smplsRmvd{$_} = 1 for grep {
+		!$samplesPassedHighThresholdQC{$_}
+	} keys %inputSamples;
 	
 	if ($OGfnd == 0 && $outgroup ne ""){
 		warn "Configured outgroup '$outgroup' is absent from the retained sequence set; "
@@ -1536,6 +1600,17 @@ if ($isAligned){
 		if ($spl[0] =~ m/^#/){shift @spl;}
 		my @spl2 = parseSeqId($spl[0], "category line ".($cnt + 1));
 		my $gene = $spl2[1];
+		if (exists $geneLengthIncludeByGene{$gene}) {
+			if ($taxonAwareLocusSelection) {
+				my ($bestSequence) = bestGeneSequencesBySample(
+					$geneLengthIncludeByGene{$gene}, \%charCnts,
+					"recovery category ".($cnt + 1), $gene,
+				);
+				@spl = map { $bestSequence->{$_} } sort keys %{$bestSequence};
+			} else {
+				@spl = @{$geneLengthIncludeByGene{$gene}};
+			}
+		}
 		my $gene_file_stem = geneFileStem($gene);
 		#die "@spl\n";		
 		my $ogrGenes = "";
@@ -1565,12 +1640,18 @@ if ($isAligned){
 		open O2,">$tmpInMSAnt" or die "Can;t open tmp fna file for MSA: $tmpInMSAnt\n";
 		my $seqType = "AA";my $seqTypeOth = "NT";
 		my $seqLength = 0; my $numSeq =0;
+		my %currentRecoveredSampleGene;
+		my $currentRecoveredSequences = 0;
 		
 		#1st: collate sequences
 		#do here already per gene length check .. probably better for alignment
 		foreach my $seq (@spl){### $seq = genomeX_NOGY
 			my ($sp) = parseSeqId($seq, "category line ".($cnt + 1));
-			next if (exists($smplsRmvd{$sp}));
+			next unless $samplesPassedHighThresholdQC{$sp};
+			if (!$geneLengthSampleAudit{$sp}{$gene}{qc}) {
+				$currentRecoveredSampleGene{$sp}{$gene} = 1;
+				$currentRecoveredSequences++;
+			}
 			if (!$taxonAwareLocusSelection
 					&& $specList{$sp} < ($qtl90Genes * $GeneFracPSpec)) {
 				die "buildTree: GeneFracPSpec maxGenes shouldn't be here!\n";
@@ -1602,6 +1683,11 @@ if ($isAligned){
 			#system "rm -f $tmpInMSA $tmpInMSAnt";#
 			unlink  $tmpInMSA; unlink $tmpInMSAnt;next;
 		}
+		for my $sample (keys %currentRecoveredSampleGene) {
+			$geneLengthRecoveredForMSA{$sample}{$_} = 1
+				for keys %{$currentRecoveredSampleGene{$sample}};
+		}
+		$geneLengthRecoveredMSASequences += $currentRecoveredSequences;
 
 		$seqLength /= $numSeq;
 		#print "$tmpInMSA,$tmpOutMSA2\n";
@@ -1726,6 +1812,19 @@ if ($isAligned){
 		. ($failedLoci ? "; $failedLoci failed and were excluded" : "") . "\n";
 	$selectionAttrition{aligned_loci} = $alignedLoci;
 	$selectionAttrition{alignment_failed_loci} = $failedLoci;
+	$selectionAttrition{length_recovered_msa_sequences} =
+		$geneLengthRecoveredMSASequences;
+	my $finalGeneLengthAudit = writeGeneLengthSampleAudit(
+		$geneLengthSampleReport, \%geneLengthSampleAudit, \%smplsRmvd,
+		\%geneLengthRecoveredForMSA, $ntFracGene, $ntFracGeneInclude,
+	);
+	$selectionAttrition{gene_length_recovered_msa_loci} =
+		$finalGeneLengthAudit->{recovered_for_msa_loci};
+	print "Gene-length recovery summary: QC retained $geneTooLong sequence(s); "
+		."$geneLengthRecoveryCandidateSequences passed inclusion-only; "
+		."$geneLengthRecoveredMSASequences entered candidate MSA input; "
+		."$geneLengthIncludeDroppedSequences failed GeneLengthIncludeMin; "
+		."sample audit=$geneLengthSampleReport\n";
 	
 	my $mergPIDtag = "_merge";
 	mergePids("$MsaD/",$cnt, "AA",$mergPIDtag) if ($calcDistMat); #merge different percIDs
@@ -1819,6 +1918,7 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 					preferred_core_genes => $preferredCoreGeneSet,
 					minimum_anchor_nt => 1,
 					use_aa => $useAA4tree,
+					qualification_sequences => \%geneLengthQCSequence,
 					outgroup => $outgroup,
 					locus_report => "$treeD/taxon_aware_locus_selection.tsv",
 					sample_report => "$treeD/taxon_aware_sample_selection.tsv",
@@ -5023,6 +5123,27 @@ sub informativeSequenceLength {
 	return length($sequence);
 }
 
+sub bestGeneSequencesBySample {
+	my ($category, $charCounts, $context, $expectedGene) = @_;
+	die "Best-sequence selection requires a category array\n"
+		unless ref($category) eq 'ARRAY';
+	die "Best-sequence selection requires per-sample character counts\n"
+		unless ref($charCounts) eq 'HASH';
+	$context ||= 'gene category';
+	my (%bestSequence, %bestSites);
+	for my $sequenceId (@{$category}) {
+		my ($sample, $gene) = parseSeqId($sequenceId, $context);
+		die "Wrong gene in $sequenceId, expected $expectedGene!\n"
+			if defined($expectedGene) && length($expectedGene) && $gene ne $expectedGene;
+		my $sites = $charCounts->{$sample}{$sequenceId} // 0;
+		if (!exists($bestSites{$sample}) || $sites > $bestSites{$sample}) {
+			$bestSites{$sample} = $sites;
+			$bestSequence{$sample} = $sequenceId;
+		}
+	}
+	return (\%bestSequence, \%bestSites);
+}
+
 sub selectTaxonAwareCandidateLoci {
 	my %args = @_;
 	my $categories = $args{categories};
@@ -5036,21 +5157,15 @@ sub selectTaxonAwareCandidateLoci {
 			$category->[0], "taxon-aware category ".($categoryIndex + 1));
 		die "Duplicate locus '$gene' in taxon-aware category input\n"
 			if exists $metrics{$gene};
-		my (%bestSequence, %bestSites);
-		for my $sequenceId (@{$category}) {
-			my ($sample, $sequenceGene) = parseSeqId(
-				$sequenceId, "taxon-aware category ".($categoryIndex + 1));
-			die "Wrong gene in $sequenceId, expected $gene!\n"
-				if $sequenceGene ne $gene;
-			my $sites = $charCounts->{$sample}{$sequenceId} // 0;
-			$sites *= 3 if $args{use_aa};
-			if (!exists($bestSites{$sample}) || $sites > $bestSites{$sample}) {
-				$bestSites{$sample} = $sites;
-				$bestSequence{$sample} = $sequenceId;
-			}
+		my ($bestSequence, $bestSites) = bestGeneSequencesBySample(
+			$category, $charCounts,
+			"taxon-aware category ".($categoryIndex + 1), $gene,
+		);
+		if ($args{use_aa}) {
+			$_ *= 3 for values %{$bestSites};
 		}
-		next if keys(%bestSequence) < 3;
-		my @siteCounts = values %bestSites;
+		next if keys(%{$bestSequence}) < 3;
+		my @siteCounts = values %{$bestSites};
 		my $q90 = quantile(0.9, @siteCounts);
 		my $medianSites = quantile(0.5, @siteCounts);
 		my @absoluteDeviations = map { abs($_ - $medianSites) } @siteCounts;
@@ -5061,7 +5176,7 @@ sub selectTaxonAwareCandidateLoci {
 		my $lengthStability = $medianSites > 0
 			? 1 - ($mad / $medianSites > 1 ? 1 : $mad / $medianSites)
 			: 0;
-		my @sequenceIds = map { $bestSequence{$_} } sort keys %bestSequence;
+		my @sequenceIds = map { $bestSequence->{$_} } sort keys %{$bestSequence};
 		# Raw coordinates are not homologous when indels are present. Defer all
 		# information scoring until after alignment and avoid this extra scan.
 		my $potentialInformation = { variable_sites => 0, parsimony_informative_sites => 0 };
@@ -5069,8 +5184,8 @@ sub selectTaxonAwareCandidateLoci {
 			gene => $gene,
 			preferred_core => catalogueGeneFromLocus($gene, $args{preferred_core_genes}) ? 1 : 0,
 			category => \@sequenceIds,
-			sample_sites => \%bestSites,
-			sample_count => scalar(keys %bestSequence),
+			sample_sites => $bestSites,
+			sample_count => scalar(keys %{$bestSequence}),
 			q90_nt => $q90,
 			median_completeness => $medianCompleteness,
 			length_stability => $lengthStability,
@@ -5080,9 +5195,9 @@ sub selectTaxonAwareCandidateLoci {
 				* ($args{use_aa} ? 3 : 1),
 			quality_score => 0,
 		};
-		for my $sample (keys %bestSites) {
+		for my $sample (keys %{$bestSites}) {
 			$samples{$sample}{available_loci}++;
-			$samples{$sample}{available_nt} += $bestSites{$sample};
+			$samples{$sample}{available_nt} += $bestSites->{$sample};
 		}
 	}
 	unless (keys %metrics) {
@@ -5244,7 +5359,7 @@ sub chooseTaxonAwareLoci {
 }
 
 sub taxonAwareAlignmentMetrics {
-	my ($alignment, $useAA, $gene) = @_;
+	my ($alignment, $useAA, $gene, $qualificationSequences) = @_;
 	my $records = readFasta($alignment, 1);
 	die "Taxon-aware selector cannot read alignment $alignment\n"
 		unless ref($records) eq 'HASH' && keys %{$records};
@@ -5262,8 +5377,11 @@ sub taxonAwareAlignmentMetrics {
 		my ($sample) = parseSeqId($sequenceId, "taxon-aware alignment $gene");
 		my $sites = informativeSequenceLength($sequence, $useAA);
 		$sites *= 3 if $useAA;
+		my $qualifiesForSampleQC = !defined($qualificationSequences)
+			|| $qualificationSequences->{$sequenceId};
 		$sampleSites{$sample} = $sites
-			if !exists($sampleSites{$sample}) || $sites > $sampleSites{$sample};
+			if $qualifiesForSampleQC
+				&& (!exists($sampleSites{$sample}) || $sites > $sampleSites{$sample});
 		$validCells += $useAA ? int($sites / 3) : $sites;
 	}
 	my ($variableSites, $parsimonyInformativeSites) = (0, 0);
@@ -5400,7 +5518,8 @@ sub selectTaxonAwareFinalLoci {
 			unless defined($gene) && length($gene);
 		die "Taxon-aware selector received duplicate alignment for locus $gene\n"
 			if $seenGene{$gene}++;
-		my $metric = taxonAwareAlignmentMetrics($alignment, $args{use_aa}, $gene);
+		my $metric = taxonAwareAlignmentMetrics(
+			$alignment, $args{use_aa}, $gene, $args{qualification_sequences});
 		my $preScore = $args{pre_metrics}{$gene}{robust_score} // 0;
 		my $prevalence = $metric->{sample_count} / $universeSampleCount;
 		my $informationDensity = $metric->{information_density} // 0;
@@ -5462,7 +5581,11 @@ sub writeSelectionAttritionAudit {
 		unless ref($stats) eq 'HASH';
 	my @order = qw(
 		input_loci input_sequences input_samples length_retained_sequences
-		length_filtered_sequences eligible_loci candidate_loci candidate_samples
+		length_filtered_sequences length_include_retained_sequences
+		length_include_filtered_sequences length_recovery_candidate_sequences
+		length_recovered_msa_sequences gene_length_min_dropped_loci
+		gene_length_include_min_dropped_loci gene_length_recovery_candidate_loci
+		gene_length_recovered_msa_loci eligible_loci candidate_loci candidate_samples
 		aligned_loci alignment_failed_loci post_qc_loci final_loci final_samples
 		backbone_samples placement_samples excluded_samples
 	);
@@ -5490,7 +5613,7 @@ sub writeSelectionAttritionAudit {
 		or die "Cannot write selection attrition audit $temporary: $!\n";
 	print {$output} "metric\tvalue\n"
 		or die "Cannot write selection attrition header $temporary: $!\n";
-	print {$output} "schema\t1\n"
+	print {$output} "schema\t2\n"
 		or die "Cannot write selection attrition schema $temporary: $!\n";
 	for my $metric (@order) {
 		my $value = defined($stats->{$metric}) ? $stats->{$metric} : 'NA';
@@ -5502,6 +5625,84 @@ sub writeSelectionAttritionAudit {
 	close $output or die "Cannot close selection attrition audit $temporary: $!\n";
 	rename $temporary, $path
 		or die "Cannot publish selection attrition audit $path: $!\n";
+}
+
+sub writeGeneLengthSampleAudit {
+	my ($path, $audit, $removedSamples, $recoveredForMSA,
+		$qcThreshold, $includeThreshold) = @_;
+	die "Gene-length sample audit requires a sample hash\n"
+		unless ref($audit) eq 'HASH';
+	$removedSamples ||= {};
+	$recoveredForMSA ||= {};
+	my @columns = qw(
+		sample gene_length_min gene_length_include_min sample_prefilter_status
+		input_loci gene_length_min_pass_loci gene_length_min_dropped_loci
+		qc_pass_loci qc_dropped_loci gene_length_include_min_pass_loci
+		gene_length_include_min_dropped_loci recovery_candidate_loci
+		recovered_for_msa_loci gene_length_min_dropped_genes qc_dropped_genes
+		gene_length_include_min_dropped_genes recovery_candidate_genes
+		recovered_for_msa_genes
+	);
+	my %summary = map { $_ => 0 } qw(
+		input_loci gene_length_min_dropped_loci qc_dropped_loci
+		gene_length_include_min_dropped_loci recovery_candidate_loci
+		recovered_for_msa_loci
+	);
+	make_path(dirname($path)) unless -d dirname($path);
+	my $temporary = "$path.tmp.$$";
+	my $output = retry_open('>', $temporary,
+		label => 'write gene-length sample audit');
+	print {$output} join("\t", @columns), "\n"
+		or die "Cannot write gene-length sample-audit header $temporary: $!\n";
+	for my $sample (sort keys %{$audit}) {
+		my @genes = sort keys %{$audit->{$sample}};
+		my @lengthMinPass = grep {
+			$audit->{$sample}{$_}{gene_length_min}
+		} @genes;
+		my @lengthMinDropped = grep {
+			!$audit->{$sample}{$_}{gene_length_min}
+		} @genes;
+		my @qcPass = grep { $audit->{$sample}{$_}{qc} } @genes;
+		my @qcDropped = grep { !$audit->{$sample}{$_}{qc} } @genes;
+		my @includePass = grep { $audit->{$sample}{$_}{include} } @genes;
+		my @includeDropped = grep { !$audit->{$sample}{$_}{include} } @genes;
+		my @recoveryCandidate = grep {
+			!$audit->{$sample}{$_}{qc} && $audit->{$sample}{$_}{include}
+		} @genes;
+		my @recovered = sort keys %{$recoveredForMSA->{$sample} || {}};
+		my %row = (
+			sample => $sample,
+			gene_length_min => $qcThreshold,
+			gene_length_include_min => $includeThreshold,
+			sample_prefilter_status => $removedSamples->{$sample}
+				? 'removed_by_high_threshold_qc' : 'retained_or_pending',
+			input_loci => scalar(@genes),
+			gene_length_min_pass_loci => scalar(@lengthMinPass),
+			gene_length_min_dropped_loci => scalar(@lengthMinDropped),
+			qc_pass_loci => scalar(@qcPass),
+			qc_dropped_loci => scalar(@qcDropped),
+			gene_length_include_min_pass_loci => scalar(@includePass),
+			gene_length_include_min_dropped_loci => scalar(@includeDropped),
+			recovery_candidate_loci => scalar(@recoveryCandidate),
+			recovered_for_msa_loci => scalar(@recovered),
+			gene_length_min_dropped_genes => join(',', @lengthMinDropped),
+			qc_dropped_genes => join(',', @qcDropped),
+			gene_length_include_min_dropped_genes => join(',', @includeDropped),
+			recovery_candidate_genes => join(',', @recoveryCandidate),
+			recovered_for_msa_genes => join(',', @recovered),
+		);
+		$summary{input_loci} += scalar(@genes);
+		$summary{gene_length_min_dropped_loci} += scalar(@lengthMinDropped);
+		$summary{qc_dropped_loci} += scalar(@qcDropped);
+		$summary{gene_length_include_min_dropped_loci} += scalar(@includeDropped);
+		$summary{recovery_candidate_loci} += scalar(@recoveryCandidate);
+		$summary{recovered_for_msa_loci} += scalar(@recovered);
+		print {$output} join("\t", map { $row{$_} // '' } @columns), "\n"
+			or die "Cannot write gene-length sample-audit row for $sample: $!\n";
+	}
+	retry_close($output, 'close gene-length sample audit');
+	retry_rename($temporary, $path, label => 'publish gene-length sample audit');
+	return \%summary;
 }
 
 sub writeTaxonAwareLocusAudit {
@@ -6049,7 +6250,7 @@ sub summarizeMSAFixLog {
 			$borderMasked += $1;
 		} elsif ($line =~ /^Low ID check: Masked (\d+) sequences$/) {
 			$lowIdMasked += $1;
-		} elsif ($line =~ /^Removed (\d+) sequences due to less than 0\.6 good positions$/) {
+		} elsif ($line =~ /^Removed (\d+) sequences due to less than [0-9.eE+-]+ good positions$/) {
 			$minGoodRemoved += $1;
 		} else {
 			limitedWarn('MSAfix unrecognized diagnostic',
@@ -6106,7 +6307,7 @@ sub runMSAFix {
 		@codingRecoveryArguments,
 		"-maskBorderGap",
 		"-rmGapColsGreater", $maxGapFraction,
-		"-minGoodPosFrac", "0.6",
+		"-minGoodPosFrac", ($cogCats ne '' ? $ntFracGeneInclude : 0.6),
 	);
 
 	my $ok = eval {

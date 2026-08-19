@@ -255,7 +255,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.24;/,
+like($strain, qr/my \$version = 1\.25;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"individualVar=s".*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput/s,
@@ -628,13 +628,13 @@ like($strain,
 	qr/if \(\$mySamplesHR\).*?\$unrepresentedWorkerLoci\+\+.*?unless \$maxSubJob/s,
 	'split-worker sparsity is summarized instead of reported as missing catalogue data');
 like($strain,
-	qr/-withinSpecies 1 -relativeNTFraction \$relativeNTFraction .*?-NTfiltPerGene \$GeneLengthMin -GenesPerSpecies \$GenesPerSpecies/s,
+	qr/-withinSpecies 1 -relativeNTFraction \$relativeNTFraction .*?-NTfiltPerGene \$GeneLengthMin .*?-GeneLengthIncludeMin \$GeneLengthIncludeMin .*?-GenesPerSpecies \$GenesPerSpecies/s,
 	'unfinished trees explicitly pass the named strain coverage filters to buildTree');
 unlike($strain, qr/-NTfilt \$relativeNTFraction/,
 	'strain workflow does not emit the retired ambiguous NTfilt option');
 like($strain,
-	qr/my \$GenesPerSpecies = 0\.2;.*?my \$GeneLengthMin = 0\.3;.*?my \$relativeNTFraction = 0\.1;.*?\$placementGenesPerSpecies = 0.04; \$placementRelativeNTFraction = 0.03;.*?my \$taxonAwareLocusSelection = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
-	'strainWithin uses stricter backbone defaults, balanced explicit placement thresholds, and taxon-aware selection');
+	qr/my \$GenesPerSpecies = 0\.2;.*?my \$GeneLengthMin = 0\.3;.*?my \$GeneLengthIncludeMin = 0\.03;.*?my \$relativeNTFraction = 0\.1;.*?\$placementGenesPerSpecies = 0.04; \$placementRelativeNTFraction = 0.03;.*?my \$taxonAwareLocusSelection = 1;.*?"GeneLengthIncludeMin=f" => \\\$GeneLengthIncludeMin.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-GeneLengthIncludeMin \$GeneLengthIncludeMin.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
+	'strainWithin separates high-threshold QC from lower MSA inclusion while retaining balanced placement filters');
 like($strain,
 	qr/my \$taxonAwareRescueMinPrevalence = 0\.8;.*?"taxonAwareRescueMinPrevalence=f" => \\\$taxonAwareRescueMinPrevalence.*?-taxonAwareRescueMinPrevalence \$taxonAwareRescueMinPrevalence/s,
 	'strainWithin exposes and forwards the broad-locus rescue prevalence guard');
@@ -646,10 +646,13 @@ like($strain,
 	'strainWithin scales 80% core, 20% rescue capacity, and 30% QC backfill to its effective gene budget');
 like($strain,
 	qr/my \$strictBackbone = 0;.*?my \$strictBackboneFraction = 0\.35;.*?my \$strictBackboneMinSamples = 3;.*?my \$placementMinOverlap = 10_000;.*?"strictBackbone=i"\s+=> \\\$strictBackbone.*?"strictBackboneFraction=f"\s+=> \\\$strictBackboneFraction.*?"strictBackboneMinSamples=i"\s+=> \\\$strictBackboneMinSamples.*?"placementMinOverlap=i"\s+=> \\\$placementMinOverlap/s,
-	'strainWithin exposes opt-in strict-backbone placement controls');
+	'strainWithin keeps strict-backbone placement opt-in and exposes its controls');
 like($strain,
 	qr/-strictBackbone \$strictBackbone .*?-strictBackboneFraction \$strictBackboneFraction .*?-strictBackboneMinSamples \$strictBackboneMinSamples .*?-placementMinOverlap \$placementMinOverlap/s,
 	'strainWithin forwards all backbone controls to buildTree5');
+like($strain,
+	qr/sub writeGeneLengthSampleSummary .*?gene_length_filter\.samples\.tsv.*?"\$\{mgs\}:\$_".*?strainGeneLengthFilter\.samples\.tsv.*?gene_length_sample_audit\\t\$geneLengthSampleSummary/s,
+	'strainWithin consolidates per-MGS length-gate decisions into a sample-wise run report');
 like($strain,
 	qr/my \$epaPendantOutlierFactor = 5;.*?my \$epaPendantMinThreshold = 0\.02;.*?"epaPendantOutlierFactor=f" => \\\$epaPendantOutlierFactor.*?"epaPendantMinThreshold=f" => \\\$epaPendantMinThreshold.*?-epaPendantOutlierFactor \$epaPendantOutlierFactor.*?-epaPendantMinThreshold \$epaPendantMinThreshold/s,
 	'strainWithin enables and forwards adaptive EPA pendant-branch outlier QC');
@@ -745,6 +748,15 @@ like($strain,
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 like($build_tree, qr/if \(\$numSeq < 3\)/,
 	'three-sample MGS accepted by the wrapper are retained for a minimal tree');
+like($build_tree,
+	qr/enabled => 0,.*?my \$strictBackbone = \$BACKBONE_DEFAULT\{enabled\}/s,
+	'buildTree5 keeps strict-backbone EPA placement disabled by default');
+like($build_tree,
+	qr/"GeneLengthIncludeMin=f" => \\\$ntFracGeneInclude.*?geneLengthIncludeByGene.*?qualification_sequences => \\%geneLengthQCSequence/s,
+	'buildTree5 aligns lower-threshold recovery data while keeping final sample QC on high-threshold sequences');
+like($build_tree,
+	qr/-minGoodPosFrac", \(\$cogCats ne '' \? \$ntFracGeneInclude : 0\.6\)/,
+	'category-based MSA cleaning does not impose the obsolete 60% coverage floor on recovered fragments');
 like($build_tree,
 	qr/my \$retainedJplace = File::Spec->catfile.*?if \(\$continue && \$dedicatedBackbone && !-s \$primaryTree.*?-s \$retainedJplace\).*?read_epa_jplace.*?reapplying placement filtering.*?else \{.*?runEpaNgPlacement.*?filter_epa_placement_outliers.*?write_epa_placed_tree/s,
 	'normal BuildTree continuation reuses a retained jplace when its placed tree is missing');

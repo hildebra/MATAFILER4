@@ -179,6 +179,14 @@ for my $sample (qw(s1 s2 s3 s5)) {
 	$aa{"$sample|g5"} = 'MKTAAAVVVQ';
 	$nt{"$sample|g5"} = 'ATG' x 10;
 }
+for my $sample (qw(s1 s2 s3 s4)) {
+	$aa{"$sample|g4"} = 'K' x 100;
+	$nt{"$sample|g4"} = 'AAA' x 100;
+}
+$aa{'s5|g4'} = ('K' x 20).('X' x 80);
+$nt{'s5|g4'} = ('AAA' x 20).('NNN' x 80);
+$aa{'s6|g4'} = ('K' x 20).('X' x 80);
+$nt{'s6|g4'} = ('AAA' x 20).('NNN' x 80);
 my $faa = File::Spec->catfile($temporary, 'input.faa');
 my $fna = File::Spec->catfile($temporary, 'input.fna');
 write_file($faa, join('', map { ">$_\n$aa{$_}\n" } sort keys %aa));
@@ -215,6 +223,7 @@ my @command = (
 	'-fna', $fna, '-aa', $faa, '-cats', $categories,
 	'-outD', $output, '-smplSep', '\\|', '-AAtree', 0,
 	'-MSAprogram', 2, '-runLengthCheck', 0, '-postAlignmentLocusQC', 1,
+	'-NTfiltPerGene', 0.3, '-GeneLengthIncludeMin', 0.03,
 	'-taxonAwareMaxLoci', 3,
 	'-taxonAwareCoreLoci', 2, '-taxonAwareCandidateExtra', 1,
 	'-taxonAwareMinSequenceNT', 9, '-taxonAwareTargetLoci', 2,
@@ -282,6 +291,8 @@ my $sampleAudit = File::Spec->catfile(
 	$output, 'phylo', 'taxon_aware_sample_selection.tsv');
 my $attritionAudit = File::Spec->catfile(
 	$output, 'phylo', 'selection_attrition.tsv');
+my $geneLengthAudit = File::Spec->catfile(
+	$output, 'phylo', 'gene_length_filter.samples.tsv');
 
 my $diagnostics = File::Spec->catfile($output, 'phylo', 'taxon_aware_diagnostics.tsv');
 ok(!-e $finalAudit, 'final source audit is removed after consolidation');
@@ -290,6 +301,7 @@ ok(-s $diagnostics, 'taxon-aware and rate diagnostics are consolidated');
 my $diagnosticText = slurp($diagnostics);
 ok(!-e $candidateAudit, 'candidate source audit is removed after consolidation');
 ok(-s $attritionAudit, 'compact end-to-end selection attrition audit is written');
+ok(-s $geneLengthAudit, 'per-sample gene-length filtering audit is written');
 
 my $candidateText = diagnostic_section($diagnosticText,
 	'taxon_aware_locus_candidates.tsv');
@@ -326,7 +338,29 @@ unlike($finalText, qr/^final\tg3\t/m,
 my $sampleText = diagnostic_section($diagnosticText,
 	'taxon_aware_sample_selection.tsv');
 like($sampleText, qr/^s5\t2\t60\t1\t30\tplacement_candidate\tusable_sparse_anchor$/m,
-	'rare but anchored sample is retained for placement');
+	'recovered sequence does not inflate the high-threshold placement QC metrics');
+
+my @geneLengthLines = split /\n/, slurp($geneLengthAudit);
+my @geneLengthHeader = split /\t/, shift @geneLengthLines;
+my %geneLengthColumn = map { $geneLengthHeader[$_] => $_ } 0 .. $#geneLengthHeader;
+my ($s5GeneLengthLine) = grep { /^s5\t/ } @geneLengthLines;
+ok(defined $s5GeneLengthLine, 'partial-locus sample has a gene-length audit row');
+my @s5GeneLength = split /\t/, $s5GeneLengthLine, -1;
+is($s5GeneLength[$geneLengthColumn{gene_length_min_dropped_loci}], 1,
+	'sample audit counts the partial locus dropped by GeneLengthMin');
+is($s5GeneLength[$geneLengthColumn{gene_length_include_min_dropped_loci}], 0,
+	'the partial locus is not counted as dropped by GeneLengthIncludeMin');
+is($s5GeneLength[$geneLengthColumn{recovery_candidate_genes}], 'g4',
+	'sample audit identifies the partial recovery candidate by gene');
+is($s5GeneLength[$geneLengthColumn{recovered_for_msa_genes}], 'g4',
+	'sample audit identifies the partial gene admitted to MSA input');
+my ($s6GeneLengthLine) = grep { /^s6\t/ } @geneLengthLines;
+my @s6GeneLength = split /\t/, $s6GeneLengthLine, -1;
+is($s6GeneLength[$geneLengthColumn{sample_prefilter_status}],
+	'removed_by_high_threshold_qc',
+	'a sample carrying only lower-threshold data does not pass sample QC');
+is($s6GeneLength[$geneLengthColumn{recovered_for_msa_loci}], 0,
+	'lower-threshold data cannot bootstrap a sample into MSA recovery');
 
 open my $attritionHandle, '<', $attritionAudit or die $!;
 my $attritionText = do { local $/; <$attritionHandle> };
@@ -335,6 +369,14 @@ like($attritionText, qr/^input_loci\t5$/m, 'attrition audit records all input lo
 like($attritionText, qr/^candidate_loci\t4$/m, 'attrition audit records the bounded alignment candidates');
 like($attritionText, qr/^final_loci\t3$/m, 'attrition audit records the bounded final locus set');
 like($attritionText, qr/^backbone_samples\t5$/m, 'attrition audit records final tree samples');
+like($attritionText, qr/^gene_length_min_dropped_loci\t2$/m,
+	'attrition summary counts sample-loci dropped by GeneLengthMin');
+like($attritionText, qr/^gene_length_include_min_dropped_loci\t0$/m,
+	'attrition summary counts permanent GeneLengthIncludeMin losses separately');
+like($attritionText, qr/^gene_length_recovery_candidate_loci\t2$/m,
+	'attrition summary counts lower-threshold recovery candidates');
+like($attritionText, qr/^gene_length_recovered_msa_loci\t1$/m,
+	'attrition summary counts recovery candidates admitted to MSA input');
 
 my $mergedAlignment = File::Spec->catfile($output, 'MSA', 'MSAli.fna');
 my $compressedMergedAlignment = "$mergedAlignment.gz";
@@ -343,6 +385,13 @@ open my $alignmentHandle, '-|', 'gzip', '-cd', $compressedMergedAlignment or die
 my $alignmentText = do { local $/; <$alignmentHandle> };
 close $alignmentHandle;
 like($alignmentText, qr/^>s5$/m, 'rescued sparse sample remains in the merged alignment');
+unlike($alignmentText, qr/^>s6$/m,
+	'a lower-threshold-only sample is absent from the merged alignment');
+my ($s5Alignment) = $alignmentText =~ /^>s5\n([^>]*)/m;
+$s5Alignment =~ s/\s+//g if defined $s5Alignment;
+my $s5Called = defined($s5Alignment) ? ($s5Alignment =~ tr/ACGTacgt//) : 0;
+cmp_ok($s5Called, '>', 30,
+	'recovered g4 sequence contributes sites to the final merged phylogeny alignment');
 
 my $partitionFile = $mergedAlignment.'.partition.RAXML';
 my $rateAudit = File::Spec->catfile($output, 'phylo', 'rate_merged_partitions.tsv');

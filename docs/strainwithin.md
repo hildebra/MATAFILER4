@@ -5,6 +5,8 @@
 
 # Strain-within workflow guide
 
+Quick links: [Before starting](#before-starting) | [Tutorial](#tutorial) | [`strain_within.pl` flags](#strain_withinpl-flag-groups) | [`strain_within_2.2.pl` flags](#strain_within_22pl-flags) | [Outputs to review](#outputs-to-review)
+
 This guide covers the two strain workflow scripts (the wrapper is sometimes called `strainwithin.sh` in run notes; its repository entry point is `strain_within.pl`):
 
 - `secScripts/MGS/strain_within.pl` prepares strain-resolved MGS inputs, filters loci and samples, submits tree jobs, and then launches postprocessing.
@@ -42,6 +44,8 @@ By default, the wrapper builds one tree from the complete retained alignment. EP
 
 These values control inclusion after locus QC. `-GenesPerSpecies` is the relative retained-locus floor, `-relativeNTFraction` is the relative informative-nucleotide floor, and `-NTfiltCount` is an absolute informative-nucleotide floor. Larger values retain fewer, better-covered strains.
 
+Per-locus coverage now has two distinct gates. `-GeneLengthMin` (default `0.3`) supplies the high-confidence observations used to select loci and decide whether a sample passes the existing backbone or placement coverage filters. After that decision, `-GeneLengthIncludeMin` (default `0.03`) may recover partial observations into the MSA and phylogeny. Recovered-only observations do not increase the QC locus/NT totals that admitted the sample. They do remain subject to MSAfix masking, column-overlap filtering, and post-alignment locus occupancy/divergence QC.
+
 #### Lenient inclusion
 
 Use this only when sparse sampling is expected and you will inspect the resulting coverage/attrition reports carefully.
@@ -49,6 +53,7 @@ Use this only when sparse sampling is expected and you will inspect the resultin
 ```bash
   -MGSminGenesPSmpl 5 \
   -GeneLengthMin 0.20 \
+  -GeneLengthIncludeMin 0.03 \
   -GenesPerSpecies 0.10 \
   -relativeNTFraction 0.05 \
   -NTfiltCount 0 \
@@ -64,6 +69,7 @@ Use this when the primary tree should contain only well-supported strains.
 ```bash
   -MGSminGenesPSmpl 15 \
   -GeneLengthMin 0.50 \
+  -GeneLengthIncludeMin 0.03 \
   -GenesPerSpecies 0.35 \
   -relativeNTFraction 0.20 \
   -NTfiltCount 10000 \
@@ -105,18 +111,22 @@ Use `-redoPopGenStats 1` instead to redo only population-genetic statistics. It 
 
 ## `strain_within.pl` flag groups
 
+This is a task-oriented summary. See the [complete `strain_within.pl` flag reference](flag_reference.md#strain_withinpl) for every parsed option, type and source default.
+
 | Group | Important flags | Purpose |
 |---|---|---|
 | Inputs and execution | `-GCd`, `-MGS`, `-outD`, `-map2`, `-MGSabundance`, `-submit`, `-submissionMode` | Define catalogue inputs, output location, metadata, abundance matrix, and submission mode. |
 | Resume and repair | `-onlySubmit`, `-reSubmit`, `-recalcTrees`, `-repairCAT`, `-deepRepair`, `-redoSubmissionData` | Resume completed work or rebuild only the affected tree/input stage. Use one explicit repair mode at a time. |
-| Extraction QC | `-maxGenes`, `-treeLocusBudget`, `-MGSminGenesPSmpl`, `-GeneLengthMin`, `-multiGeneSmplMax`, `-conspGeneSmplMax`, `-disableQC` | Limit the retained data and control strain/locus QC. `-noGeneLimit` removes only the cap; it does not disable QC. |
+| Extraction QC | `-maxGenes`, `-treeLocusBudget`, `-MGSminGenesPSmpl`, `-GeneLengthMin`, `-GeneLengthIncludeMin`, `-multiGeneSmplMax`, `-conspGeneSmplMax`, `-disableQC` | Use high-coverage loci for QC, optionally recover partial loci after sample admission, and control other strain/locus filters. `-noGeneLimit` removes only the cap; it does not disable QC. |
 | Tree inclusion | `-GenesPerSpecies`, `-relativeNTFraction`, `-NTfiltCount`, `-taxonAwareLocusSelection`, `-taxonAwareRescueMinPrevalence` | Set backbone inclusion thresholds and taxon-aware locus selection. |
 | Sparse placement | `-strictBackbone`, `-strictBackboneFraction`, `-placementGenesPerSpecies`, `-placementRelativeNTFraction`, `-placementNTfiltCount`, `-placementMinOverlap`, `-epaThreads` | Optional EPA-ng placement controls. Off by default; enable with `-strictBackbone 1`. |
 | Mosaic/outgroups | `-mosaicLoci`, `-mosaicMGS`, `-prepareMosaicLoci`, `-outgroupCoreMinLoci`, `-preferredCoreGenes` | Manage Mosaic discovery and choose broadly supported outgroup loci. |
 | Tree resources | `-maxCores`, `-selfMemGb`, `-mosaicMemGb`, `-treeOOMMaxMemGB`, `-rateMergePartitions` | Set scheduler and tree-inference resources. |
-| Downstream analyses | `-popGenStats`, `-popGenSubsample`, `-popGenStrictOutgroup`, `-popGenGeneticCode`, `-popGenCodonStart`, `-popGenSeed`, `-individualVar`, `-DiscTests`, `-ContTests` | Forward population-genetic and association-analysis configuration to postprocessing. |
+| Downstream analyses | `-popGenStats`, `-popGenStrictOutgroup`, `-popGenGeneticCode`, `-popGenCodonStart`, `-popGenSeed`, `-individualVar`, `-DiscTests`, `-ContTests` | Forward population-genetic and association-analysis configuration to postprocessing. |
 
 ## `strain_within_2.2.pl` flags
+
+This table covers the options normally used for restarts and analysis. See the [complete `strain_within_2.2.pl` flag reference](flag_reference.md#strain_within_22pl) for every parsed option.
 
 | Flag | Default | Purpose |
 |---|---:|---|
@@ -137,7 +147,9 @@ Use `-redoPopGenStats 1` instead to redo only population-genetic statistics. It 
 - `<FMGdir>/strainStats.tsv`: combined strain-statistics overview.
 - `<FMGdir>/popGenStats.tsv` and `popGenStats.subsamples.tsv`: population-genetic overviews when enabled.
 - `<MGS>/within/strainStats.output.Rds` and `popGenStats.output.Rds`: durable per-MGS result stores.
-- `<MGS>/phylo/taxon_aware_diagnostics.tsv` and `selection_attrition.tsv`: retained-locus and sample-inclusion decisions.
+- `<MGS>/phylo/gene_length_filter.samples.tsv`: per-sample counts and gene lists for both length gates and MSA recovery.
+- `<MGS>/phylo/taxon_aware_diagnostics.tsv` and `selection_attrition.tsv`: retained-locus, sample-inclusion, and aggregate length-recovery decisions.
+- `<FMGdir>/LOGandSUB/strainGeneLengthFilter.samples.tsv`: run-wide sample report with MGS-qualified dropped/recovered gene lists.
 - `<FMGdir>/networks/`, `<FMGdir>/GeneEnrich/`, and `phyloFigures.sto`: downstream strain-only outputs/checkpoints.
 
 For the full tree-engine option reference, see [BuildTree5 flags](flag_reference.md#buildtree5pl). For generic output locations, see [Outputs](outputs.md).

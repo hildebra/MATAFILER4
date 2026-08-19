@@ -152,5 +152,5 @@ Explanation: $inD is an input dir with complete genomes, the script will extract
 
 - Run with `perl /path/to/phyloScript.pl` together with submission script on cluster.
 
-3. you can do many additional phylogeny / popgen related analysis with the `buildTree5.pl` script ([see flags](#buildtree5.pl-flags))
+3. you can do many additional phylogeny / popgen related analysis with the `buildTree5.pl` script ([see flags](../../docs/flag_reference.md#buildtree5pl))
 
