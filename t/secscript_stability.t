@@ -295,8 +295,8 @@ like($gene_cat, qr/if \(grep \{ \$_ eq '--help'.*?\@ARGV\).*?_print_help\(\)/s,
      '--help is handled before site-program configuration is loaded');
 like($gene_cat, qr/-clusterID \$cdhID -MGset \$useGTDBmg.*?-requireAllAssemblies \$requireAllAssemblies/,
      'sample collation subjobs inherit catalog identity and input policy');
-like($gene_cat, qr/-MGset \$useGTDBmg -clusterID \$cdhID -outD \$MGSoutD/,
-     'the MGS pipeline inherits gene-catalog identity');
+like($gene_cat, qr/-MGset \$useGTDBmg -clusterID \$cdhID -outD " \. _shell_quote\(\$MGSoutD\)/,
+     'the shell-quoted MGS pipeline inherits gene-catalog identity');
 like($gene_cat, qr/_checkpoint_command\(\$checkpointWriter, \$matrixSton, \$cdhID, 'gene-matrices'/,
      'gene-catalog stages write checkpoint manifests');
 unlike($gene_cat, qr/length\(\$fnas\{\$hd\}\) <= \$minGeneL/,
@@ -375,6 +375,21 @@ unlike($postprocess_code, qr/values\s*=>\s*smplStats\s*\(/,
 	"postprocessing does not rescan sample files for statistics");
 like($postprocess_code, qr/read_sample_completion\(.*?\$closedSample->\{metagstats\}/s,
 	"postprocessing reads each completed sample record only from its sentinel");
+like($postprocess_code,
+	qr/my \$completeCohortReport = \$allMappedSamplesVisited.*?scalar\(keys %\{\$runReport\{samples\}\}\) == scalar\(\@samples\).*?if \(%\{\$runReport\{samples\}\} && \$completeCohortReport\).*?atomic_write_text\(\$MGSfile/s,
+	"partial invocations cannot replace the canonical metagStats summary");
+like($postprocess_code,
+	qr/\$MFopt\{DoAssembly\} && \$completeCohortReport.*?my \$handoffDoMags = \$MFopt\{DoMetaBat2\} \? 1 : 0.*?my \$handoffDoStrains = \$handoffDoMags && \$MFopt\{DoConsSNP\} \? 1 : 0.*?-SNPcaller \$MFopt\{SNPcallerFlag\}.*?-doMags \$handoffDoMags/s,
+	"gene-catalog handoff requires a complete cohort and preserves binning/strain caller semantics");
+like($postprocess_code,
+	qr/my \$handoffCheckM2 = \$MFopt\{useCheckM2\} \? 1 : 0;.*?my \$handoffCheckM1 = \$handoffCheckM2 \? 0 : \(\$MFopt\{useCheckM1\} \? 1 : 0\);/s,
+	"MATAF4 translates its broader quality-check settings to MGS's exact-one contract");
+like($mataf4_stats,
+	qr/GetOptions\(.*?\) or die "Invalid MATAF4\.pl option\(s\)\\n";/s,
+	"unknown MATAF4 options fail instead of being ignored");
+like($mataf4_stats,
+	qr/Reset range of samples to .*?\$runOptions\{to\} = \@samples;.*?-from cannot exceed the available sample range/s,
+	"MATAF4 revalidates the lower range bound after clamping -to to the map size");
 like($mataf4_stats, qr/sub _smpl_stats_columns.*?sub _metag_stats_text/s,
      'sample statistics use one central ordered schema and final serializer');
 like($mataf4_stats, qr/return \{ SNP_TotalResolvedBp=>/,

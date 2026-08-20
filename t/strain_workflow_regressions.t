@@ -75,6 +75,37 @@ my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'b
 my $internal_config = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config_internal.txt'));
 my $site_config_template = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config.old'));
 my $neighbor_tree_r = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'R_scripts', 'neighborTree.R'));
+
+my ($durable_output_helper_source) = $strain =~
+	/(sub strainOutputHasDurablePhaseIState \{.*?\n\})\n\nsub phase1PathStatComponent/s;
+ok(defined($durable_output_helper_source),
+	'existing-output evidence helper is available for isolated testing');
+$durable_output_helper_source =~
+	s/\Asub strainOutputHasDurablePhaseIState/sub/;
+my $durable_output_helper = eval $durable_output_helper_source;
+die "Cannot compile existing-output evidence helper: $@" if $@;
+
+my $fresh_strain_output = File::Spec->catdir($tmp, 'fresh_strain_output');
+mkdir $fresh_strain_output or die "Cannot create $fresh_strain_output: $!";
+for my $operational (qw(LOGandSUB stones strainsScr1 .scratch)) {
+	my $directory = File::Spec->catdir($fresh_strain_output, $operational);
+	mkdir $directory or die "Cannot create $directory: $!";
+}
+ok(!$durable_output_helper->(
+		$fresh_strain_output,
+		File::Spec->catfile($fresh_strain_output, 'LOGandSUB', 'missing.summary'),
+	),
+	'a fresh output containing only operational directories permits a subset build');
+my $existing_mgs_directory = File::Spec->catdir($fresh_strain_output, 'MGS.1');
+mkdir $existing_mgs_directory
+	or die "Cannot create $existing_mgs_directory: $!";
+ok($durable_output_helper->($fresh_strain_output),
+	'an existing per-MGS directory blocks a destructive subset rebuild');
+my $summary_evidence = File::Spec->catfile($tmp, 'strainSampleStats.summary.tsv');
+write_file($summary_evidence, "durable\n");
+ok($durable_output_helper->(File::Spec->catdir($tmp, 'absent_output'), $summary_evidence),
+	'a durable Phase-I summary blocks a destructive subset rebuild without a directory scan');
+
 like($strain, qr/sub consensusInputState .*?\$nt_ready && \$aa_ready.*?return 'regenerate' if \$vcf_ready/s,
 	'consensus resume requires the paired NT and AA outputs and repairs from VCF');
 like($strain,
@@ -269,8 +300,36 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.29;/,
+like($strain, qr/my \$version = 1\.30;/,
 	'workflow behavior changes retain an explicit version marker');
+like($strain,
+	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
+	'strain Phase I selects MPI or FB caller-specific consensus and VCF filenames');
+like($strain,
+	qr/my \$legacyMPIContract = \$phase1ContractState eq 'missing' && \$SNPcaller eq 'MPI'.*?if \(\$onlySubmit && !\$subJob.*?'building_match'.*?Cannot reuse Phase-I outputs.*?if \(\$onlySubmit && \$subJob.*?'building_match'.*?!\$legacyMPIContract.*?Split worker caller contract/s,
+	'caller provenance resumes compatible builds and rejects missing FB or incompatible state');
+like($strain,
+	qr/sub phase1PathStatComponent.*?Omitting ctime prevents chmod alone.*?\@metadata\[0, 1, 7, 9\]/s,
+	'Phase-I provenance uses constant-cost file identity without chmod-only invalidation');
+like($strain,
+	qr/sub phase1GuideStatFingerprint.*?strain-phase1-guide-stat-v2.*?\$canonical\.srt.*?\$canonical\.srt\.gene2MGS.*?\$observation/s,
+	'Phase-I provenance includes the original, sorted, indexed, and observation guide inputs');
+like($strain,
+	qr/sub phase1CatalogStatFingerprint.*?subset\.cats.*?compl\.incompl\.\$identity\.fna.*?fna\.clstr\.idx.*?prot\.faa.*?eggNOGmapper_NOG\.geneAss.*?split\(\/,\/, \$mapSpec/s,
+	'Phase-I provenance includes each direct catalog, marker, annotation, and map input');
+like($strain,
+	qr/catalog_inputs_fingerprint.*?my \@values = \(2, \$status, \$phase1CatalogIdentity,\s*\$phase1CatalogInputFingerprint, \$phase1MGSGuideFingerprint,\s*\$useGTDBmg, \$clusterID/s,
+	'Phase-I contract persists the catalog and MGS-guide fingerprints');
+ok(index($strain, q{persistPhase1InputContract(File::Spec->catfile($LOGDIR, $phase1InputContractName), 'building')}) >= 0
+	&& index($strain, q{persistPhase1InputContract(File::Spec->catfile($LOGDIR, $phase1InputContractName))}) >= 0
+	&& index($strain, q{atomic_write_text($path, phase1InputContractContents($status)}) >= 0,
+	'Phase-I caller provenance is atomically marked building and completed only after handoff');
+like($strain,
+	qr/-redo all cannot be combined with -MGSsubset.*?if \$redoMode eq 'all' && length\(\$subsMGSstr\).*?Tree for outgroup specified, but file is missing or empty:.*?!-s \$treeFile/s,
+	'unsafe subset full-redo and empty outgroup-tree inputs fail before downstream work');
+like($strain,
+	qr/my \$unsafeSubsetRebuild = !\$onlySubmit && !\$subJob && length\(\$subsMGSstr\).*?strainOutputHasDurablePhaseIState.*?if \(\$unsafeSubsetRebuild\).*?shared non-subset results.*?would be cleared/s,
+	'existing output state refuses ordinary destructive subset rebuilds while fresh roots remain eligible');
 like($strain,
 	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"individualVar=s".*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput/s,
 	'population genetics retains MSAs and forwards reproducible configuration through strainwithin2');
@@ -473,8 +532,8 @@ like($strain,
 	qr/-redo cannot be combined with deprecated redo\/repair flags.*?-redo tree must be launched by the main strainWithin process/s,
 	'redo modes reject mixed legacy input and split-worker tree execution');
 like($mgs,
-	qr/"redo=s"\s+=> \\\$strainRedo.*?-redo must be one of: none, tree, input, all.*?strainSampleStats\.summary\.tsv.*?my \$strainOnlySubmit = -s \$strainPhaseISummary \? 1 : 0.*?\$strain1scr .*?-onlySubmit \$strainOnlySubmit -redo \$strainRedo/s,
-	'MGS.pl forwards redo and uses tree-only mode only after durable Phase-I completion');
+	qr/"redo=s"\s+=> \\\$strainRedo.*?-redo must be one of: none, tree, input, all.*?strainSampleStats\.summary\.tsv.*?my \$strainOnlySubmit = -s \$strainPhaseISummary \? 1 : 0.*?my \@strainArguments = \(.*?'-SNPcaller', \$SNPcaller.*?'-onlySubmit', \$strainOnlySubmit.*?'-redo', \$strainRedo.*?map \{ _shell_quote\(\$_\) \} \@strainArguments/s,
+	'MGS.pl forwards caller and redo through a quoted argument array and enters only-submit after durable Phase I');
 unlike($mgs,
 	qr/\$strain1scr .*?-(?:reSubmit|redoSubmissionData|rmMSA)\b/s,
 	'MGS.pl no longer supplies redundant or deprecated strain defaults');
@@ -576,6 +635,9 @@ like($strain,
 like($strain,
 	qr/my \$maxSubJob = -1;.*?phase1SamplesByGroup\(\).*?effectiveGroupCount.*?choose_auto_worker_count\(.*?Automatic Stage-I splitting:.*?standalone.*?target \$\{targetGroupsPerWorker\} groups\/worker/s,
 	'automatic Stage-I splitting counts standalone samples as effective schedulable groups');
+like($strain,
+	qr/sub phase1WorkerCommand.*?'-taxonAwareLocusSelection', \$taxonAwareLocusSelection.*?'-prepareMosaicLoci', \$prepareMosaicLoci.*?'-SNPcaller', \$SNPcaller/s,
+	'split extraction workers inherit caller, Mosaic preparation, and Phase-I locus-selection controls');
 like($strain,
 	qr/'-submit', 0, '-onlySubmit', 1.*?'-MGSphylo', \$treeFile.*?'-flushEvery'.*?'-MGset', \$useGTDBmg/s,
 	'extraction workers receive only extraction and outgroup inputs, not tree-submission behavior');
@@ -694,7 +756,7 @@ unlike($strain, qr/\$\{TMPDIR\}\/strain_within|my \$postCmd|touch "?\.shellQuote
 	"tree commands contain neither shell TMPDIR expansion nor shell checkpoints");
 
 like($strain,
-	qr/sub phase1WorkerCommand.*?Stage-I workers receive extraction\/consensus controls only.*?sub recoverCompletedSplitPhaseI.*?phase1WorkersNeedingRetry.*?Resubmitting invalid Phase-I worker.*?phase1_worker_repair\.queue\.tsv/s,
+	qr/sub phase1WorkerCommand.*?Stage-I workers receive extraction, consensus, and extraction-relevant.*?sub recoverCompletedSplitPhaseI.*?phase1WorkersNeedingRetry.*?Resubmitting invalid Phase-I worker.*?phase1_worker_repair\.queue\.tsv/s,
 	'live and resumed Phase I share extraction-only worker commands and durable targeted repair');
 like($strain,
 	qr/No automatic full-tree resubmission was attempted.*?sub writeTreeFailureAudit.*?failed_missing_output.*?valid_no_tree.*?placement_pending/s,

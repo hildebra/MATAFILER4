@@ -36,7 +36,7 @@ use Mods::SlurmAccounting qw(
 );
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
-	write_workflow_record
+	atomic_write_text write_workflow_record
 );
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 use Mods::StrainSampleStats qw(
@@ -114,6 +114,13 @@ sub recoverCompletedSplitPhaseI;
 sub taxonAwareLocusBudgets;
 sub phase1WorkersNeedingRetry;
 sub phase1WorkerCommand;
+sub strainOutputHasDurablePhaseIState;
+sub phase1PathStatComponent;
+sub phase1GuideStatFingerprint;
+sub phase1CatalogStatFingerprint;
+sub phase1InputContractContents;
+sub phase1InputContractState;
+sub persistPhase1InputContract;
 sub writePhase1RepairQueue;
 sub validatePhase1WorkerLedger;
 sub writeStrainWorkflowState;
@@ -245,7 +252,8 @@ my $completionMessage = "";
 #1.27: expose EPA placement as -placeOnBackbone and fully gate placement-only filters
 #1.28: prevent new outputs from entering lean tree-only resume without Phase-I evidence
 #1.29: support alignment-only BuildTree runs without tree-dependent postprocessing
-my $version = 1.29;
+#1.30: bind Phase-I outputs and split workers to the selected SNP caller
+my $version = 1.30;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -379,12 +387,10 @@ my $appendWriteTrigger = 200; #every Xth samples, genes are written (to manage m
 my $startSubFromMGS = ""; #debug option: only start resubmitting tree building from this MGS (e.g. "MGS.1382" )
 #define local files..
 my $lSNPdir="SNP"; my $lMAPdir = "mapping";
-my $lConsFNA = "genes.shrtHD.SNPc.MPI.fna.gz";
-my $lConsCTG = "contig.SNPc.MPI.fna.gz";
-my $lConsFAA = "proteins.shrtHD.SNPc.MPI.faa.gz";
 my $SNPcaller = "MPI";
-my $lConsVCF = "allSNP.${SNPcaller}.vcf.gz";
-my $lConsVCFsup = "allSNP.${SNPcaller}-sup.vcf.gz";
+my ($lConsFNA, $lConsCTG, $lConsFAA, $lConsVCF, $lConsVCFsup,
+	$phase1CatalogIdentity, $phase1CatalogInputFingerprint,
+	$phase1MGSGuideFingerprint, $phase1MapSpec) = ("") x 9;
 
 
 #set up some base paths specific to pipeline..
@@ -397,6 +403,7 @@ my $summaryLogName = "strain_within.summary.log";
 my $recoveryLogFH;
 my $sampleStatsLogName = "strainSampleStats.tsv";
 my $sampleStatsSummaryLogName = "strainSampleStats.summary.tsv";
+my $phase1InputContractName = "strainPhaseI.input.tsv";
 my $sampleStatsPartFH;
 my $bamDepthFsuffix = "-smd.bam.coverage.gz";
 my $bamDepthFsuffixSup = ".sup-smd.bam.coverage.gz";
@@ -524,6 +531,7 @@ GetOptions(
 	"individualVar=s" => \$individualVar, #sample ID column used by population-genetics and treeWAS analyses
 	
 	#SNP calling
+	"SNPcaller=s"    => \$SNPcaller,
 	"minSNPDepth=i"  => \$minSNPDepth,
 	"minSNPCallQual=i"  => \$minSNPCallQual,
 	"skipIndels=i"     => \$noIndels,
@@ -561,6 +569,10 @@ $reSubmit = $recalcTrees = $repairCAT = $deepRepair = $redoSubmissionData = 0;
 if ($redoMode eq 'tree') { $recalcTrees = 1; $onlySubmit = 1; }
 elsif ($redoMode eq 'input') { $repairCAT = 1; $deepRepair = 1; $onlySubmit = 1; }
 elsif ($redoMode eq 'all') { $redoSubmissionData = 1; $onlySubmit = 0; }
+die "-redo all cannot be combined with -MGSsubset because the shared output "
+	."would be cleared before only the subset was rebuilt; use -redo tree/input "
+	."for a subset, or omit -MGSsubset for a full rebuild\n"
+	if $redoMode eq 'all' && length($subsMGSstr);
 
 if (!$treeOOMMaxMemGBSpecified) {
 	my $configuredMaxMF4mem = getProgPaths("maxMF4mem", 0);
@@ -571,6 +583,15 @@ if (!$treeOOMMaxMemGBSpecified) {
 	}
 }
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
+die "-SNPcaller must be MPI or FB\n"
+	unless $SNPcaller eq 'MPI' || $SNPcaller eq 'FB';
+$lConsFNA = "genes.shrtHD.SNPc.${SNPcaller}.fna.gz";
+$lConsCTG = "contig.SNPc.${SNPcaller}.fna.gz";
+$lConsFAA = "proteins.shrtHD.SNPc.${SNPcaller}.faa.gz";
+$lConsVCF = "allSNP.${SNPcaller}.vcf.gz";
+$lConsVCFsup = "allSNP.${SNPcaller}-sup.vcf.gz";
+die "Tree for outgroup specified, but file is missing or empty: $treeFile\nAborting..\n"
+	if $treeFile ne "" && !-s $treeFile;
 die "-redoEPAfilter must be 0 or 1\n"
 	unless $redoEPAfilter == 0 || $redoEPAfilter == 1;
 die "-onlyMSA must be 0 or 1\n"
@@ -694,6 +715,11 @@ if ($doPopGenStats && $rmMSA) {
 $GCd = abs_path($GCd);
 $GCd .= "/" unless $GCd =~ m{/$};
 $MGSfile = abs_path($MGSfile) if length $MGSfile;
+$phase1CatalogIdentity = catalog_identity($GCd);
+$phase1MapSpec = resolve_catalog_maps($GCd);
+$phase1MGSGuideFingerprint = phase1GuideStatFingerprint($MGSfile);
+$phase1CatalogInputFingerprint = phase1CatalogStatFingerprint(
+	$GCd, $clusterID, $useGTDBmg, $phase1MapSpec);
 $mosaicMGSFile = File::Spec->rel2abs($mosaicMGSFile) if length $mosaicMGSFile;
 if (!length($preferredCoreGenes) && length($MGSfile)) {
 	my $companionCoreGuide = $MGSfile =~ /\.core\z/
@@ -749,6 +775,46 @@ $resumeBindir = $GCd if $resumeBindir eq "";
 my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
 my $resumePhaseISummary = File::Spec->catfile(
 	$resumeOutD, 'LOGandSUB', $sampleStatsSummaryLogName);
+my $resumePhaseIInputContract = File::Spec->catfile(
+	$resumeOutD, 'LOGandSUB', $phase1InputContractName);
+my $unsafeSubsetRebuild = !$onlySubmit && !$subJob && length($subsMGSstr)
+	&& strainOutputHasDurablePhaseIState(
+		$resumeOutD, $resumePhaseISummary, $resumePhaseIInputContract,
+		File::Spec->catfile($resumeOutD, $sampleStatsSummaryLogName),
+	);
+if ($unsafeSubsetRebuild) {
+	die "Refusing an input-rebuilding run (-onlySubmit 0) with -MGSsubset in "
+		."existing strain output $resumeOutD because shared non-subset results "
+		."would be cleared. Use a fresh -outD, a non-destructive resume mode, "
+		."or rebuild without -MGSsubset.\n";
+}
+my ($phase1ContractState, $phase1ContractReason) =
+	phase1InputContractState($resumePhaseIInputContract);
+my $legacyMPIContract = $phase1ContractState eq 'missing' && $SNPcaller eq 'MPI';
+if ($onlySubmit && !$subJob
+		&& $phase1ContractState ne 'match'
+		&& $phase1ContractState ne 'building_match'
+		&& !$legacyMPIContract) {
+	die "Cannot reuse Phase-I outputs with -SNPcaller $SNPcaller: "
+		."$phase1ContractReason. Run a complete rebuild with -redo all "
+		."(without -MGSsubset) before resuming.\n";
+}
+if ($onlySubmit && $subJob
+		&& $phase1ContractState ne 'match'
+		&& $phase1ContractState ne 'building_match'
+		&& !$legacyMPIContract) {
+	die "Split worker caller contract is incompatible with -SNPcaller $SNPcaller: "
+		."$phase1ContractReason\n";
+}
+if ($onlySubmit && !$subJob && $phase1ContractState eq 'building_match') {
+	print STDERR "Resuming compatible incomplete Phase-I state: "
+		."$phase1ContractReason\n";
+}
+if ($onlySubmit && !$subJob && $legacyMPIContract) {
+	print STDERR "No Phase-I SNP-input contract found at $resumePhaseIInputContract; "
+		."treating existing outputs as legacy MPI state. A successful resume will "
+		."record the explicit contract.\n";
+}
 my $leanOnlySubmitResume = $leanOnlySubmitRequested && -s $resumePhaseISummary;
 if ($leanOnlySubmitRequested && !$leanOnlySubmitResume) {
 	print STDERR "Lean only-submit resume unavailable: no durable Phase-I "
@@ -983,6 +1049,9 @@ my $gene2taxF; #where to find info what genes (gene cat)
 my $sttime = $^T;
 my $stepStarted = time;
 prepRun();
+$phase1MGSGuideFingerprint = phase1GuideStatFingerprint($MGSfileOri);
+persistPhase1InputContract(File::Spec->catfile($LOGDIR, $phase1InputContractName), 'building')
+	if !$onlySubmit && !$subJob;
 $workflowStatePath = File::Spec->catfile($LOGDIR,
 	$subJob ? "strain_within.worker.$subJob.state.tsv" : 'strain_within.state.tsv');
 $legacyWorkflowHeartbeatPath = File::Spec->catfile($LOGDIR,
@@ -1347,6 +1416,8 @@ if ($runPartI){
 		reportSavedSampleStats();
 	}
 }
+persistPhase1InputContract(File::Spec->catfile($LOGDIR, $phase1InputContractName))
+	unless $subJob;
 loadRecoveryContributionIndex()
 	unless $recoveryContributionIndexReady || $leanOnlySubmitResume;
 
@@ -1680,8 +1751,6 @@ my $initializeOutgroupReferences = sub {
 stageStart(q{Stage II: phylogeny preparation and submission},
 	q{Preparing intra-strain phylogenies for }.scalar(@specis).q{ MGS});
 
-
-die "Tree for outgroup specified, but file not found:$treeFile\nAborting..\n" if  ($treeFile ne "" && !-e $treeFile);
 
 # Placement-only recovery has already paid for alignment and backbone
 # inference. It is prepared and submitted before any catalogue-wide full-tree
@@ -3712,7 +3781,7 @@ sub prepRun{
 	print "\n!! WARNING !!: REDO mode '$redoMode' selected; matching existing results may be invalidated and rebuilt. !!\n"
 		if $redoMode ne 'none';
 
-	$mapF = resolve_catalog_maps($GCd);
+	$mapF = $phase1MapSpec;
 	
 	#read info gene <-> taxonomy from this file, depends on config..
 	$gene2taxF = "$GCd/FMG/gene2specI.txt";
@@ -3735,6 +3804,8 @@ sub prepRun{
 		print "Using $presortGenes genes from each MGS for location\n";
 		print "Redoing incomplete strain inputs\n" if $redoMode eq 'input';
 		print "Pre-creating ConsSNPs in $preConDir in $preCompCons runs\n" if ($preCompCons);
+		print "SNP caller: $SNPcaller; consensus NT=$lConsFNA; AA=$lConsFAA; "
+			."contig=$lConsCTG; VCF=$lConsVCF\n";
 		print "-minSNPDepth $minSNPDepth, -minSNPCallQual $minSNPCallQual";
 		print ", -SNPadaptiveQual $useAdaptiveQual, -SNPindelRangeFilt: $indelRange";
 		if ($depthFilterScale){print ", depthFiltScale $depthFilterScale\n";}else {print "\n";}
@@ -4758,11 +4829,172 @@ sub writeStrainWorkflowFailure {
 	writeStrainWorkflowState();
 }
 
+sub strainOutputHasDurablePhaseIState {
+	my ($outputDirectory, @durableFiles) = @_;
+	return 1 if grep {
+		defined($_) && length($_) && (-s $_ || -l $_)
+	} @durableFiles;
+	return 0 unless defined($outputDirectory) && -d $outputDirectory;
+	opendir my $directory, $outputDirectory
+		or die "Cannot inspect existing strain output $outputDirectory: $!\n";
+	my %operationalDirectory = map { $_ => 1 }
+		qw(LOGandSUB stones strainsScr1 .scratch);
+	while (defined(my $entry = readdir $directory)) {
+		next if $entry eq '.' || $entry eq '..'
+			|| $operationalDirectory{$entry};
+		my $candidate = File::Spec->catdir($outputDirectory, $entry);
+		next unless -d $candidate;
+		closedir $directory
+			or die "Cannot close existing strain output $outputDirectory: $!\n";
+		return 1;
+	}
+	closedir $directory
+		or die "Cannot close existing strain output $outputDirectory: $!\n";
+	return 0;
+}
+
+sub phase1PathStatComponent {
+	my ($path) = @_;
+	return join("\0", '<unspecified>', 'missing')
+		unless defined($path) && length($path);
+	my $resolved = resolveExistingFile($path);
+	return join("\0", $path, 'missing') unless defined($resolved);
+	my $canonical = abs_path($resolved);
+	die "Cannot resolve Phase-I input $resolved\n"
+		unless defined($canonical) && length($canonical);
+	my @metadata = stat($canonical);
+	die "Cannot stat Phase-I input $canonical: $!\n"
+		unless @metadata;
+	# Keep this constant-cost: path/device/inode catch replacement, while size and
+	# mtime catch ordinary in-place edits. Omitting ctime prevents chmod alone from
+	# forcing an expensive Phase-I rebuild.
+	return join("\0", $path, $canonical, @metadata[0, 1, 7, 9]);
+}
+
+sub phase1GuideStatFingerprint {
+	my ($path) = @_;
+	return sha256_hex(join("\0", 'strain-phase1-guide-stat-v2', 'FMG'))
+		unless defined($path) && length($path);
+	my $canonical = abs_path($path);
+	die "Cannot resolve Phase-I MGS/core guide $path\n"
+		unless defined($canonical) && length($canonical);
+	my $observation = $canonical;
+	$observation =~ s/\.core\z//;
+	$observation .= '.obs';
+	my @inputs = ($canonical, "$canonical.srt",
+		"$canonical.srt.gene2MGS", $observation);
+	return sha256_hex(join("\0",
+		'strain-phase1-guide-stat-v2',
+		map { phase1PathStatComponent($_) } @inputs,
+	));
+}
+
+sub phase1CatalogStatFingerprint {
+	my ($catalog, $identity, $markerSet, $mapSpec) = @_;
+	my $markerFile = $markerSet eq 'GTDB'
+		? "$catalog/GTDBmg.subset.cats" : "$catalog/FMG.subset.cats";
+	my @inputs = (
+		"$catalog/compl.incompl.$identity.fna",
+		"$catalog/compl.incompl.$identity.fna.clstr.idx",
+		"$catalog/compl.incompl.$identity.prot.faa",
+		$markerFile,
+		"$catalog/Anno/Func/emapper/eggNOGmapper_NOG.geneAss",
+		grep { length } split(/,/, $mapSpec // ''),
+	);
+	return sha256_hex(join("\0",
+		'strain-phase1-catalog-stat-v1',
+		map { phase1PathStatComponent($_) } @inputs,
+	));
+}
+
+sub phase1InputContractContents {
+	my ($status) = @_;
+	$status //= 'complete';
+	die "Internal error: invalid Phase-I SNP-input contract status '$status'\n"
+		unless $status eq 'building' || $status eq 'complete';
+	my @columns = qw(version status catalog_identity catalog_inputs_fingerprint
+		mgs_guide_fingerprint marker_set cluster_id snp_caller consensus_nt
+		consensus_aa consensus_contig vcf vcf_support);
+	my @values = (2, $status, $phase1CatalogIdentity,
+		$phase1CatalogInputFingerprint, $phase1MGSGuideFingerprint,
+		$useGTDBmg, $clusterID, $SNPcaller, $lConsFNA, $lConsFAA,
+		$lConsCTG, $lConsVCF, $lConsVCFsup);
+	return join("\t", @columns)."\n".join("\t", @values)."\n";
+}
+
+sub phase1InputContractState {
+	my ($path) = @_;
+	return ('missing', "no Phase-I SNP-input contract exists at $path")
+		unless -e $path || -l $path;
+	return ('invalid', "Phase-I SNP-input contract is not a nonempty file at $path")
+		unless -f $path && -s $path;
+	my $input = retry_open('<', $path, label => 'read Phase-I SNP-input contract');
+	local $/;
+	my $contents = <$input> // '';
+	retry_close($input, 'close Phase-I SNP-input contract');
+	my @lines = split /\n/, $contents, -1;
+	pop @lines while @lines && $lines[-1] eq '';
+	s/\r\z// for @lines;
+	my $expectedHeader = join("\t", qw(version status catalog_identity
+		catalog_inputs_fingerprint mgs_guide_fingerprint marker_set cluster_id
+		snp_caller consensus_nt consensus_aa consensus_contig vcf vcf_support));
+	return ('invalid', "Phase-I SNP-input contract has an invalid schema at $path")
+		unless @lines == 2 && $lines[0] eq $expectedHeader;
+	my @fields = split /\t/, $lines[1], -1;
+	return ('invalid', "Phase-I SNP-input contract has an invalid record at $path")
+		unless @fields == 13 && $fields[0] eq '2'
+			&& ($fields[1] eq 'building' || $fields[1] eq 'complete');
+	my @expectedInputs = ($phase1CatalogIdentity,
+		$phase1CatalogInputFingerprint, $phase1MGSGuideFingerprint,
+		$useGTDBmg, $clusterID, $SNPcaller, $lConsFNA, $lConsFAA,
+		$lConsCTG, $lConsVCF, $lConsVCFsup);
+	my $inputsMatch = join("\0", @fields[2 .. 12])
+		eq join("\0", @expectedInputs);
+	if ($inputsMatch && $fields[1] eq 'complete') {
+		return ('match', "Phase-I input contract matches the catalog, MGS/core guide, "
+			."and -SNPcaller $SNPcaller");
+	}
+	if ($inputsMatch) {
+		return ('building_match', "Phase I for -SNPcaller $SNPcaller is marked incomplete at $path");
+	}
+	my @mismatch;
+	push @mismatch, 'catalog identity'
+		if $fields[2] ne $phase1CatalogIdentity;
+	push @mismatch, 'catalog or map input identity'
+		if $fields[3] ne $phase1CatalogInputFingerprint;
+	push @mismatch, 'MGS/core guide identity'
+		if $fields[4] ne $phase1MGSGuideFingerprint;
+	push @mismatch, 'marker set or cluster identity'
+		if $fields[5] ne $useGTDBmg || $fields[6] ne "$clusterID";
+	push @mismatch, 'SNP caller or filenames'
+		if join("\0", @fields[7 .. 12])
+			ne join("\0", $SNPcaller, $lConsFNA, $lConsFAA,
+				$lConsCTG, $lConsVCF, $lConsVCFsup);
+	my $recordedCaller = $fields[7];
+	$recordedCaller =~ s/[^A-Za-z0-9_.:+-]/?/g;
+	return ('mismatch', "Phase-I SNP-input contract at $path records "
+		."$fields[1] caller '$recordedCaller' with incompatible "
+		.join(', ', @mismatch));
+}
+
+sub persistPhase1InputContract {
+	my ($path, $status) = @_;
+	$status //= 'complete';
+	my ($state) = phase1InputContractState($path);
+	return 1 if $status eq 'complete' && $state eq 'match';
+	return 1 if $status eq 'building' && $state eq 'building_match';
+	make_path(dirname($path)) unless -d dirname($path);
+	atomic_write_text($path, phase1InputContractContents($status),
+		label => 'publish Phase-I SNP-input contract');
+	print "Phase-I SNP-input contract: status=$status; caller=$SNPcaller; file=$path\n";
+	return 1;
+}
+
 sub phase1WorkerCommand {
 	my $strain1scr = getProgPaths("MGS_strain1_scr");
 	my @selfArgs = (
-		# Stage-I workers receive extraction/consensus controls only; BuildTree
-		# model, alignment, submission, and placement flags stay in the parent.
+		# Stage-I workers receive extraction, consensus, and extraction-relevant
+		# locus controls; BuildTree model/submission flags stay in the parent.
 		'-GCd', $GCd, '-outD', $outD, '-MGS', $MGSfileOri,
 		'-clusterID', $clusterID, '-submit', 0, '-onlySubmit', 1,
 		'-maxSubJob', $maxSubJob,
@@ -4774,14 +5006,17 @@ sub phase1WorkerCommand {
 		'-outgroupCoreMinLoci', $outgroupCoreMinLoci,
 		'-outgroupReferenceGeneCap', $outgroupReferenceGeneCap,
 		'-treeLocusBudget', $treeLocusBudget,
+		'-taxonAwareLocusSelection', $taxonAwareLocusSelection,
 		'-noGeneLimit', $noGeneLimit, '-disableQC', $disableQC,
 		'-breakpointGeneFlank', $breakpointGeneFlank,
 		'-abundanceMinLoci', $abundanceMinimumLoci,
 		'-abundanceMinFold', $abundanceMinimumFold,
 		'-abundanceMaxFold', $abundanceMaximumFold,
 		'-abundanceMaxModifiedZ', $abundanceMaximumModifiedZ,
+		'-prepareMosaicLoci', $prepareMosaicLoci,
 		'-flushEvery', $appendWriteTrigger,
-		'-MGset', $useGTDBmg, '-minSNPDepth', $minSNPDepth,
+		'-MGset', $useGTDBmg, '-SNPcaller', $SNPcaller,
+		'-minSNPDepth', $minSNPDepth,
 		'-minSNPCallQual', $minSNPCallQual, '-forceSNPcalls', $forceVCF2FNA,
 		'-preCompConsSNP', $preCompCons, '-skipIndels', $noIndels,
 		'-SNPadaptiveQual', $useAdaptiveQual,
@@ -5709,6 +5944,7 @@ sub printEarlyRunHeader {
 	print "GC dir: $GCd\n";
 	print "MGS input: ".(length($MGSfile) ? $MGSfile : '(FMG mode)')."\n";
 	print "Requested output: $requestedOutput\n";
+	print "SNP caller: $SNPcaller ($lConsFNA; $lConsFAA; $lConsVCF)\n";
 	print "Cores: $numCores (max: $maxCores); submit=$doSubmit; "
 		."onlySubmit=$onlySubmit; redo=$redoMode; redoEPAfilter=$redoEPAfilter\n";
 	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB\n";
@@ -7011,6 +7247,10 @@ Workflow splitting:
                                  at most three rounds are attempted [default:
                                  maxMF4mem from MATAFILERcfg.txt; 512]
 
+Consensus SNP inputs:
+  -SNPcaller MPI|FB             Select the caller-specific MATAF4 consensus FASTA
+                                 and VCF outputs used by Phase I [default MPI]
+
 Redo modes:
   -redo none                    Reuse valid results and resume missing work
                                  [default]
@@ -7019,9 +7259,10 @@ Redo modes:
   -redo input                   Rebuild missing or incomplete strain-tree inputs
                                  and their dependent tree work
   -redo all                     Delete and rebuild strain inputs and trees for
-                                 every selected MGS
+                                 the complete MGS selection
 
-Use -MGSsubset to limit a redo to explicit MGS identifiers.
+Use -MGSsubset to limit -redo tree or -redo input to explicit MGS identifiers.
+-redo all requires a complete rebuild without -MGSsubset.
 
 Gene selection and biological QC:
   -maxGenes INT                  Maximum validated loci per MGS/sample

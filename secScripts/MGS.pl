@@ -58,6 +58,11 @@ use Cwd qw(abs_path);
 my $MGSpipelineVersion = 0.55;
 my $clusterID = 95;
 my %checkpointParameters;
+my %stageCheckpointContract = (
+	'extract-bin-contigs' => 1,
+	'gtdb-taxonomy'       => 1,
+);
+my %stageCheckpointCompatibilityLogged;
 
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
 use Mods::GenoMetaAss qw(readMap getDirsPerAssmblGrp unzipFileARezip getAssemblPath systemW gzipopen);
@@ -65,7 +70,7 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
 use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readMG_LCA);
 use Mods::Binning qw (getBinSubdirName createBin2 createBinCtgs runMetaBat runCheckM runCheckM2 createBinFAA readMGS MB2assignedBinIds);
-use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
+use Mods::Checkpoint qw(write_checkpoint checkpoint_valid read_checkpoint);
 use Mods::WorkflowResilience qw(
 	retry_unlink retry_rename atomic_write_text
 	write_workflow_record preflight_directory preflight_capacity
@@ -126,6 +131,7 @@ my $rewrClusterMAGs = 0; #redo clusterMAGs analysis
 my $doStrains = 0;
 my $strainRedo = "none";
 my $prepareMosaicLoci = 1;
+my $SNPcaller = "MPI";
 my $tmpD = ""; 
 my $canopyF = "";
 my $nodeTmpD = getProgPaths("nodeTmpDir");
@@ -161,6 +167,7 @@ GetOptions(
 	"strains=i" => \$doStrains,			#1: calc instra species strain phylogenies. Default: 0
 	"redo=s" => \$strainRedo,			#strain workflow redo mode: none, tree, input, or all
 	"prepareMosaicLoci=i" => \$prepareMosaicLoci, #1: confirm mosaic loci/outgroups before strain analysis; 0: keep seed clusters separate
+	"SNPcaller=s" => \$SNPcaller,		#strain SNP caller: MPI or FB. Default: MPI
 	"useCheckM2=i" => \$useCheckM2,		#CheckM2 default qual checking of MAGs/MGS
 	"useCheckM1=i" => \$useCheckM1,		#CheckM default qual checking of MAGs/MGS
 	"binSpeciesMG=i" => \$binSpeciesMG,	#0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5
@@ -182,6 +189,8 @@ die "-binSpeciesMG must be one of 1..5\n" unless $binSpeciesMG >= 1 && $binSpeci
 die "-clusterID must be between 1 and 100\n" unless $clusterID >= 1 && $clusterID <= 100;
 die "-prepareMosaicLoci must be 0 or 1\n"
 	unless $prepareMosaicLoci == 0 || $prepareMosaicLoci == 1;
+die "-SNPcaller must be one of: MPI, FB\n"
+	unless $SNPcaller eq "MPI" || $SNPcaller eq "FB";
 die "-redo must be one of: none, tree, input, all\n"
 	unless grep { $strainRedo eq $_ } qw(none tree input all);
 
@@ -296,6 +305,7 @@ printL "Quality: " . ($useCheckM2 ? "CheckM2" : "CheckM1")
 printL "Resources: standard cores=$numCore; bottleneck cores=$canCore; binner memory=${memG}G\n";
 printL "Optional analyses: strains=" . ($doStrains ? "yes" : "no")
 	. "; mosaic checks=" . ($prepareMosaicLoci ? "yes" : "no")
+	. "; strain SNP caller=$SNPcaller"
 	. "; family genomes=" . ($doBinCtgsPerFam ? "yes" : "no") . "\n";
 printL "Requested rebuilds: clustering=" . ($rewrClusterMAGs ? "yes" : "no")
 	. "; taxonomy=" . ($rewrTAX ? "yes" : "no") . "\n";
@@ -351,14 +361,16 @@ my @existingClusterProducts = grep { -e $_ } (
 	glob("$outD/$BinnerShrt.clusters*"),
 	glob("$outD/$BinnerShrt.Wclusters*"),
 );
-my $stage1OutputsPresent = -s $finalClusters2 && -s $finalClustersFilt;
+my @stage1AssignmentFiles = ($finalClusters2, "${finalClusters2}UW", $finalClustersW);
+my $stage1AssignmentsPresent = grep { _mgs_count($_, 1) } @stage1AssignmentFiles;
 my $stage1CheckpointValid = _checkpoint_valid_for_resume($st1ston);
-# Existing Stage I products are sufficient to continue later stages.  The
-# explicit -redoCluster option remains the way to discard them after an input
-# change; do not turn a checkpoint mismatch into an expensive MAG rescan.
-my $stage1ResumeValid = !$rewrClusterMAGs && $stage1OutputsPresent;
+# The primary assignments are the expensive Stage I product; .core is a cheap
+# derivative regenerated below.  Weighted handoff files are also recoverable.
+# The explicit -redoCluster option remains the way to discard assignments after
+# an input change.
+my $stage1ResumeValid = !$rewrClusterMAGs && $stage1AssignmentsPresent;
 if ($stage1ResumeValid && !$stage1CheckpointValid) {
-	printL "Stage I checkpoint differs from the current inputs; retaining existing MGS clusters for recovery. Use -redoCluster 1 to rebuild them.\n";
+	printL "Stage I checkpoint is missing or differs from the current inputs/outputs; retaining existing MGS assignments for recovery. Use -redoCluster 1 to rebuild them.\n";
 }
 $loadInputMetadata->() unless $stage1ResumeValid;
 my $stage1ProvenanceInvalid =
@@ -386,21 +398,55 @@ printL "=====================================================\n";
 _mgs_workflow_stage('stage-1-clustering');
 my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2); 
 
-#clean up
-if ($rewrClusterMAGs || $stage1ProvenanceInvalid) {
-	for my $file (glob("$outD/$BinnerShrt.clusters*"), glob("$outD/$BinnerShrt.Wclusters*")) {
-		retry_unlink($file, label => 'invalidate stale MGS cluster product') if -f $file;
+my $invalidateMGSDerivatives = sub {
+	for my $derived ($finalClustersFilt, "${finalClustersFilt}.cnts", "${finalClusters2}.ext") {
+		retry_unlink($derived, label => 'invalidate MGS assignment derivative')
+			if -e $derived;
 	}
 	for my $checkpoint ($st1ston, $GTDBtaxSto, $BinExtrSto, $ABmgsSton, $ABmgsSton2) {
 		retry_unlink($checkpoint, label => 'invalidate downstream MGS checkpoint')
 			if -e $checkpoint;
 	}
-	retry_unlink($noMGSReport, label => 'remove stale no-MGS report') if -e $noMGSReport;
 	for my $phyloDir ("$outD/between_phylo", "$outD/within_phylo") {
 		remove_tree($phyloDir) if -d $phyloDir;
 	}
-}
+};
+
+my $activatedOnlyWeighted = 0;
+my $recoverMissingActiveMGS = sub {
+	return if _mgs_count($finalClusters2);
+	my $weightedCount = _mgs_count($finalClustersW);
+	my $preservedCount = _mgs_count("${finalClusters2}UW");
+	return unless $weightedCount || $preservedCount;
+
+	$invalidateMGSDerivatives->();
+	if ($useWeightedMGSscores && $preservedCount && $weightedCount) {
+		warn "Completing an interrupted weighted MGS handoff\n";
+		retry_rename($finalClustersW, $finalClusters2,
+			label => "complete weighted MGS assignment handoff");
+	} elsif ($preservedCount) {
+		warn "Restoring preserved unweighted MGS assignments after an incomplete weighted handoff\n";
+		retry_rename("${finalClusters2}UW", $finalClusters2,
+			label => "restore unweighted MGS assignments");
+	} else {
+		warn "Activating the only available weighted MGS assignments\n";
+		retry_rename($finalClustersW, $finalClusters2,
+			label => "activate weighted MGS assignments");
+		$activatedOnlyWeighted = 1;
+	}
+};
+
 my $ph1flag = $stage1ResumeValid ? 0 : 1;
+# Any Stage I rebuild starts without old derivatives, even when a legacy
+# checkpoint recorded only a surviving .core file and therefore looked valid.
+if ($ph1flag) {
+	for my $file (glob("$outD/$BinnerShrt.clusters*"), glob("$outD/$BinnerShrt.Wclusters*")) {
+		retry_unlink($file, label => 'invalidate stale MGS cluster product') if -f $file;
+	}
+	$invalidateMGSDerivatives->();
+	retry_unlink($noMGSReport, label => 'remove stale no-MGS report') if -e $noMGSReport;
+}
+$recoverMissingActiveMGS->() unless $ph1flag;
 #my $FMGsubs = `wc -l $GCd/Matrix.$COGdir.mat | cut -f1 -d' '`; chomp $FMGsubs; $FMGsubs = int($FMGsubs);
 # a whole lot faster.. but imprecise!
 if ($ph1flag) {
@@ -577,30 +623,20 @@ die if ($stopAfterCluster); #DEBUGing only!!
 qsubSystemJobAlive( \@jobs,\%QSBopt ) if (@jobs);
 
 #decide between weighted and unweighted scores for binning
+$recoverMissingActiveMGS->();
 my $activeMGSCount = _mgs_count($finalClusters2);
 my $weightedMGSCount = _mgs_count($finalClustersW);
 my $preservedMGSCount = _mgs_count("${finalClusters2}UW");
-my $activatedOnlyWeighted = 0;
-if (!$activeMGSCount && $preservedMGSCount) {
-	warn "Restoring preserved unweighted MGS assignments after an incomplete weighted handoff\n";
-	retry_rename("${finalClusters2}UW", $finalClusters2, label => 'restore unweighted MGS assignments');
-	$activeMGSCount = $preservedMGSCount;
-}
-if (!$activeMGSCount && !$preservedMGSCount && $weightedMGSCount) {
-	warn "Activating the only available weighted MGS assignments\n";
-	retry_rename($finalClustersW, $finalClusters2, label => 'activate weighted MGS assignments');
-	$activeMGSCount = $weightedMGSCount;
-	$weightedMGSCount = 0;
-	$activatedOnlyWeighted = 1;
-}
 if ($useWeightedMGSscores && !$preservedMGSCount && !$activatedOnlyWeighted){
 	retry_unlink("${finalClusters2}UW", label => 'remove empty preserved MGS assignments')
 		if -e "${finalClusters2}UW";
 	if ($activeMGSCount && $weightedMGSCount) {
+		$invalidateMGSDerivatives->();
 		retry_rename($finalClusters2, "${finalClusters2}UW", label => 'preserve unweighted MGS assignments');
 		retry_rename($finalClustersW, $finalClusters2,
 			label => 'activate preferred weighted MGS assignments');
 		$activeMGSCount = $weightedMGSCount;
+		$weightedMGSCount = 0;
 	} elsif ($activeMGSCount) {
 		warn "Weighted MGS assignments were not produced; retaining the valid unweighted assignments\n";
 	}
@@ -643,7 +679,10 @@ _mgs_workflow_stage('stage-2-phylogeny-and-annotation');
 printL "Stage I clustering done, MGS calculated.\nProgressing to Stage II: annotations, phylogenies and abundances\n";
 printL "Using $finalClustersFilt as MGS rep\n";
 printL "---------------------------------------------------------------------\n";
-_touch_checkpoint($st1ston, 'stage-1', $finalClustersFilt) unless _checkpoint_valid($st1ston);
+# Only a clustering performed in this invocation may establish current-input
+# provenance.  A recovered mismatched assignment must retain its warning stone.
+_touch_checkpoint($st1ston, 'stage-1', $finalClusters2, $finalClustersFilt)
+	if $ph1flag;
 
 # Start the between-MGS tree as soon as the newly published MGS core set exists.
 # Tree inference depends only on the selected marker proteins and MGS membership.  Its
@@ -706,7 +745,7 @@ my $binDctg = "$outD/Genomes/MGS_ctg/";
 my $binDctgFam = "$outD/Genomes/MGS_ctg_fam/";
 _mgs_workflow_stage('representative-genome-extraction');
 make_path($binD, $binDctg, $binDctgFam);
-my $binExtractionValid = _checkpoint_valid($BinExtrSto);
+my $binExtractionValid = _checkpoint_valid_for_stage($BinExtrSto, 'extract-bin-contigs');
 $binExtractionValid &&= _representative_contig_outputs_valid($binDctg);
 $binExtractionValid &&= _representative_contig_outputs_valid($binDctgFam)
 	if $doBinCtgsPerFam;
@@ -745,7 +784,10 @@ my @jobs2wait=();
 
 #GTDB tax & kraken2 tax
 my $GTDBtaxF = "$annoDir/GTDBTK.tax";
-if (!-e $GTDBtaxF || !-e"$annoDir/gtdbtk.summary.tsv" || !_checkpoint_valid($GTDBtaxSto)){
+my $gtdbTaxonomyValid = -s $GTDBtaxF
+	&& -s "$annoDir/gtdbtk.summary.tsv"
+	&& _checkpoint_valid_for_stage($GTDBtaxSto, 'gtdb-taxonomy');
+if (!$gtdbTaxonomyValid){
 	my $GTDBtax = getProgPaths("taxPerMGSgtdb_scr");
 _mgs_workflow_stage('taxonomy-and-abundance');
 	my $memGTDB = 230; 
@@ -775,7 +817,9 @@ if (!$binExtractionValid){
 	}
 
 	createBinCtgs($binDctg,$hrM,"$outD/MAGvsGC.txt.gz",0,$BinnerShrt);
-	my @geneBinFiles = grep { -f $_ } glob("$binD/*");
+	# GTDB-Tk writes GTDBtk.tar.gz into its input directory.  That archive is
+	# a downstream consumer artifact, not a bin-extraction output.
+	my @geneBinFiles = grep { -f $_ && /\.(?:fna|faa)\z/i } glob("$binD/*");
 	my @contigBinFiles = grep { -f $_ } glob("$binDctg/*");
 	my @familyBinFiles = $doBinCtgsPerFam ? grep { -f $_ } glob("$binDctgFam/*") : ();
 	die "Bin extraction produced no gene-based MGS genomes in $binD\n" unless @geneBinFiles;
@@ -788,7 +832,8 @@ if (!$binExtractionValid){
 qsubSystemJobAlive( \@jobs2wait,\%QSBopt ) if $doSubmit;
 if ($doSubmit) {
 	die "GTDB taxonomy stage incomplete\n$GTDBtaxF\n$annoDir/gtdbtk.summary.tsv\n$GTDBtaxSto\n"
-		unless -s $GTDBtaxF && -s "$annoDir/gtdbtk.summary.tsv" && _checkpoint_valid($GTDBtaxSto);
+		unless -s $GTDBtaxF && -s "$annoDir/gtdbtk.summary.tsv"
+		&& _checkpoint_valid_for_stage($GTDBtaxSto, 'gtdb-taxonomy');
 }
 #if (!-e "$finalClusters2$cmSuffix" && -e "$finalClusters3$cmSuffix"){system "mv $finalClusters3$cmSuffix $finalClusters2$cmSuffix";} #needs to be moved
 die "Bin-quality scores missing\n$finalClusters2$cmSuffix\n" if (!-e "$finalClusters2$cmSuffix" );
@@ -839,12 +884,12 @@ if (0 && !-e "$finalClusters2.matL0.txt"){ #deprecated, use specI based annotati
 #annotate specI's with MAGs added..
 
 
-my $specIoutDir = $legacyV ? "$GCd/Anno/Tax/SpecI_MGS" : "$GCd/Anno/Tax/${COGdir}_MGS";
+my $specIoutDir = $legacyV ? "$GCd/Anno/Tax/SpecI_MGS" : "$annoDir/${COGdir}_MGS";
 my $specIabundance = "$specIoutDir/specI.mat";
 my @annotation_jobs;
 unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/specI.tax"){
 	my $specIabu = getProgPaths("specIGC_scr");
-	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS $finalClustersFilt -MGStax $GTDBtaxF -MGset $useGTDBmg\n";
+	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS $finalClustersFilt -MGStax $GTDBtaxF -MGset $useGTDBmg -outD $specIoutDir\n";
 	if ($legacyV){
 		$specIabu = getProgPaths("specIGC_scr_v0");
 		$cmdSI = "$specIabu $GCd $canCore $finalClustersFilt $GTDBtaxF\n";
@@ -986,11 +1031,31 @@ my $mosaicCatalogue = "$mosaicDir/$BinnerShrt.clusters.mosaic_loci.$clusterID.co
 my $strainOutD = "$outD/within_phylo/";
 my $strainPhaseISummary = "$strainOutD/LOGandSUB/strainSampleStats.summary.tsv";
 my $strainOnlySubmit = -s $strainPhaseISummary ? 1 : 0;
+my @strainArguments = (
+	'-GCd', $GCd,
+	'-MGS', $finalClustersFilt,
+	'-mosaicMGS', $finalClusters2,
+	'-MGSabundance', "$outD/Annotation/Abundance/MGS.matL7.txt",
+	'-MGset', $useGTDBmg,
+	'-clusterID', $clusterID,
+	'-maxCores', $canCore,
+	'-preCompConsSNP', $preCompCons,
+	'-SNPcaller', $SNPcaller,
+	'-selfMemGb', $memUsage,
+	'-mosaicMemGb', $memG,
+	'-onlySubmit', $strainOnlySubmit,
+	'-redo', $strainRedo,
+	'-submit', $doSubmit,
+	'-maxSubJob', $NsubJobs,
+	'-outD', $strainOutD,
+	'-prepareMosaicLoci', $prepareMosaicLoci,
+);
+push @strainArguments, ('-mosaicLoci', $mosaicCatalogue) if $prepareMosaicLoci;
+push @strainArguments, ('-MGSphylo', $iniTree) if -s $iniTree || $treedep ne "";
 my $ph2Cmd = "mkdir -p "._shell_quote($strainOutD)." || exit 65\n";
-$ph2Cmd .= "$strain1scr -GCd $GCd -MGS $finalClustersFilt -mosaicMGS $finalClusters2 -MGSabundance $outD/Annotation/Abundance/MGS.matL7.txt -MGset $useGTDBmg -clusterID $clusterID -maxCores $canCore -preCompConsSNP $preCompCons -selfMemGb $memUsage -mosaicMemGb $memG -onlySubmit $strainOnlySubmit -redo $strainRedo -submit $doSubmit -maxSubJob $NsubJobs -outD $strainOutD -prepareMosaicLoci $prepareMosaicLoci ";
-$ph2Cmd .= "-mosaicLoci $mosaicCatalogue " if $prepareMosaicLoci;
-$ph2Cmd .= "-MGSphylo $iniTree " if -s $iniTree || $treedep ne "";
-$ph2Cmd .= "\n";
+# Keep the configured launcher command raw because it may include environment
+# setup, but quote each controlled argument as one shell word.
+$ph2Cmd .= join(" ", $strain1scr, map { _shell_quote($_) } @strainArguments)."\n";
 
 $ph2Cmd .= "#consider adapting further options: \n#-presortGenes 1700 -maxGenes 500 -MGSminGenesPSmpl 5 -multiGeneSmplMax 0.15 -conspGeneSmplMax 0.05 -tmpD [path]\n";#$outD/between_phylo/phylo/IQtree.treefile\n";
 $ph2Cmd .= "#-minSNPCallQual 20 -GenesPerSpecies 0.1 -GeneLengthMin 0.5 -skipIndels 0 -minSNPDepth 2 -SNPdepthFilterScale 0.1 -SNPindelRangeFilt 5 -SNPadaptiveQual 0.0";
@@ -1180,10 +1245,142 @@ sub _maps_without_empty_samples {
 	return join(',', @filtered_maps);
 }
 
+sub _checkpoint_parameters_for_stage {
+	my ($stage) = @_;
+	my %parameters;
+	if (exists $stageCheckpointContract{$stage}) {
+		my @keys;
+		if ($stage eq 'extract-bin-contigs') {
+			@keys = qw(
+				catalog_identity cluster_id binner genomes_per_family
+				catalog_fna_size catalog_fna_mtime
+				catalog_faa_size catalog_faa_mtime
+			);
+			push @keys, sort grep { /^map_\d+_(?:size|mtime)$/ } keys %checkpointParameters;
+		} elsif ($stage eq 'gtdb-taxonomy') {
+			# GTDB-Tk consumes the nucleotide MGS genomes. Protein, matrix,
+			# Canopy, strain, and scheduler settings do not change its result.
+			@keys = qw(
+				catalog_identity cluster_id binner
+				catalog_fna_size catalog_fna_mtime
+			);
+		}
+		for my $key (@keys) {
+			$parameters{$key} = $checkpointParameters{$key}
+				if exists $checkpointParameters{$key};
+		}
+		if ($stage eq 'extract-bin-contigs') {
+			# Representative contigs depend directly on the selected MAG report,
+			# even when the core MGS table itself is unchanged.
+			my @reportStat = stat("$outD/MAGvsGC.txt.gz");
+			$parameters{mag_report_size} = @reportStat ? 0 + $reportStat[7] : -1;
+			$parameters{mag_report_mtime} = @reportStat ? 0 + $reportStat[9] : -1;
+		}
+		$parameters{stage_contract} = $stageCheckpointContract{$stage};
+	} else {
+		%parameters = %checkpointParameters;
+	}
+	$parameters{stage} = $stage;
+	return \%parameters;
+}
+
+sub _legacy_bin_extraction_checkpoint_valid {
+	my ($manifest, $parameters) = @_;
+	return 0 unless ref($manifest) eq "HASH"
+		&& ref($manifest->{parameters}) eq "HASH"
+		&& ref($manifest->{outputs}) eq "ARRAY";
+	for my $key (keys %{$parameters}) {
+		my $expected = defined($parameters->{$key}) ? "$parameters->{$key}" : "";
+		return 0 unless exists($manifest->{parameters}{$key})
+			&& "$manifest->{parameters}{$key}" eq $expected;
+	}
+
+	my $corePath = File::Spec->canonpath($finalClustersFilt);
+	my $archivePath = File::Spec->canonpath("$binD/GTDBtk.tar.gz");
+	my $geneDir = File::Spec->canonpath($binD);
+	my $contigDir = File::Spec->canonpath($binDctg);
+	my $familyDir = File::Spec->canonpath($binDctgFam);
+	my ($coreSeen, $geneFnaSeen, $geneFaaSeen, $contigSeen, $familySeen) = (0, 0, 0, 0, 0);
+
+	for my $record (@{$manifest->{outputs}}) {
+		return 0 unless ref($record) eq "HASH" && defined($record->{path});
+		my $path = $record->{path};
+		my $canonicalPath = File::Spec->canonpath($path);
+		# Old MGS submitted GTDB-Tk before collecting BinExtr outputs, so a
+		# synchronous/fast taxonomy run could add its archive to this manifest.
+		# It is the sole known downstream artifact in the extraction directory.
+		next if $canonicalPath eq $archivePath;
+
+		my $parent = File::Spec->canonpath(dirname($canonicalPath));
+		if ($canonicalPath eq $corePath) {
+			$coreSeen = 1;
+		} elsif ($parent eq $geneDir && $canonicalPath =~ /\.fna\z/i) {
+			$geneFnaSeen = 1;
+		} elsif ($parent eq $geneDir && $canonicalPath =~ /\.faa\z/i) {
+			$geneFaaSeen = 1;
+		} elsif ($parent eq $contigDir && $canonicalPath =~ /\.(?:fa|fna|fasta)\.gz\z/i) {
+			$contigSeen = 1;
+		} elsif ($parent eq $familyDir && $canonicalPath =~ /\.(?:fa|fna|fasta)\.gz\z/i) {
+			$familySeen = 1;
+		} else {
+			return 0;
+		}
+
+		my @stat = stat($path);
+		return 0 unless @stat && $stat[7] == ($record->{size} // -1);
+		if (exists $record->{mtime}) {
+			return 0 unless defined($record->{mtime})
+				&& "$record->{mtime}" =~ /\A-?\d+\z/
+				&& $stat[9] == $record->{mtime};
+		}
+	}
+	return $coreSeen && $geneFnaSeen && $geneFaaSeen && $contigSeen
+		&& (!$doBinCtgsPerFam || $familySeen);
+}
+
+sub _checkpoint_valid_for_stage {
+	my ($file, $stage) = @_;
+	return 0 unless defined($file) && -s $file;
+	return 0 unless exists $stageCheckpointContract{$stage};
+	my $parameters = _checkpoint_parameters_for_stage($stage);
+	return 1 if checkpoint_valid($file, parameters => $parameters);
+
+	# MGS 0.55 changed only the downstream strain-resume launcher. JSON
+	# checkpoints written by 0.54/0.55 therefore remain valid for these two
+	# unchanged stages when every direct parameter and recorded output still
+	# matches. Empty/older stones are deliberately not adopted here.
+	my $manifest = read_checkpoint($file) or return 0;
+	my $recordedParameters = $manifest->{parameters};
+	return 0 unless ref($recordedParameters) eq 'HASH';
+	return 0 if exists $recordedParameters->{stage_contract};
+	return 0 unless "$MGSpipelineVersion" eq '0.55';
+	return 0 unless ($recordedParameters->{pipeline_version} // '') =~ /\A0\.(?:54|55)\z/;
+	return 0 unless ($recordedParameters->{stage} // '') eq $stage;
+
+	my %legacyParameters = %{$parameters};
+	delete $legacyParameters{stage_contract};
+	if ($stage eq 'extract-bin-contigs') {
+		my @reportStat = stat("$outD/MAGvsGC.txt.gz");
+		return 0 unless @reportStat && $reportStat[7] > 0;
+		return 0 unless ($manifest->{created_epoch} // '') =~ /\A\d+\z/
+			&& $reportStat[9] <= $manifest->{created_epoch};
+		delete @legacyParameters{qw(mag_report_size mag_report_mtime)};
+	}
+	my $legacyCheckpointValid = $stage eq "extract-bin-contigs"
+		? _legacy_bin_extraction_checkpoint_valid($manifest, \%legacyParameters)
+		: checkpoint_valid($file, parameters => \%legacyParameters);
+	return 0 unless $legacyCheckpointValid;
+	unless ($stageCheckpointCompatibilityLogged{$file}++) {
+		printL "Reusing $stage checkpoint from compatible MGS "
+			."$recordedParameters->{pipeline_version} stage outputs\n";
+	}
+	return 1;
+}
+
 sub _touch_checkpoint {
 	my ($file, $stage, @outputs) = @_;
 	write_checkpoint($file,
-		parameters => { %checkpointParameters, stage => $stage },
+		parameters => _checkpoint_parameters_for_stage($stage),
 		outputs => \@outputs,
 	);
 }
@@ -1194,24 +1391,48 @@ sub _touch_empty_file {
 	close $fh or die "Cannot close checkpoint $file: $!\n";
 }
 
-sub _checkpoint_valid {
-	my ($file) = @_;
+sub _checkpoint_valid_for_compatible_release {
+	my ($file, $parameters) = @_;
 	# Empty legacy stones cannot encode marker-set, binner, or QC provenance.
 	# Rebuild them in this workflow instead of silently accepting stale state.
 	return 0 unless defined($file) && -s $file;
-	return checkpoint_valid($file, parameters => \%checkpointParameters);
+	return 1 if checkpoint_valid($file, parameters => $parameters);
+
+	# Commit 458fc6a changed only the downstream strain launcher while bumping
+	# MGS 0.54 to 0.55.  Preserve JSON checkpoints across that one proven-safe
+	# transition when every biological parameter and recorded output still
+	# matches.  No older, future, or empty legacy checkpoint is accepted.
+	my $manifest = read_checkpoint($file) or return 0;
+	my $recordedParameters = $manifest->{parameters};
+	return 0 unless ref($recordedParameters) eq "HASH";
+	return 0 unless "$MGSpipelineVersion" eq "0.55";
+	return 0 unless ($recordedParameters->{pipeline_version} // "") eq "0.54";
+	return 0 unless length($recordedParameters->{stage} // "");
+
+	my %compatibleParameters = %{$parameters};
+	delete $compatibleParameters{pipeline_version};
+	return 0 unless checkpoint_valid($file, parameters => \%compatibleParameters);
+	unless ($stageCheckpointCompatibilityLogged{$file}++) {
+		printL "Reusing $recordedParameters->{stage} checkpoint from compatible "
+			."MGS 0.54 outputs\n";
+	}
+	return 1;
+}
+
+sub _checkpoint_valid {
+	my ($file) = @_;
+	return _checkpoint_valid_for_compatible_release($file, \%checkpointParameters);
 }
 
 sub _checkpoint_valid_for_resume {
 	my ($file) = @_;
-	return 0 unless defined($file) && -s $file;
 	# Empty-sample membership is derived from a per-sample filesystem scan.  A
 	# completed cluster set remains reproducible from its recorded catalogue and
 	# map fingerprints, so do not perform that scan solely to resume later work.
 	# A requested cluster rebuild still uses the full parameter set above.
 	my %resumeParameters = %checkpointParameters;
 	delete $resumeParameters{empty_samples};
-	return checkpoint_valid($file, parameters => \%resumeParameters);
+	return _checkpoint_valid_for_compatible_release($file, \%resumeParameters);
 }
 
 sub _representative_contig_outputs_valid {
@@ -1233,7 +1454,7 @@ sub _shell_quote {
 
 sub _checkpoint_command {
 	my ($writer, $stone, $stage, @outputs) = @_;
-	my %parameters = (%checkpointParameters, stage => $stage);
+	my %parameters = %{_checkpoint_parameters_for_stage($stage)};
 	my @args = ('perl', $writer, '--stone', $stone);
 	for my $key (sort keys %parameters) {
 		push @args, ('--param', "$key=$parameters{$key}");
@@ -1260,7 +1481,7 @@ sub _bin_assignments_are_empty {
 }
 
 sub _mgs_ids {
-	my ($file) = @_;
+	my ($file, $maximum_ids) = @_;
 	return () unless defined($file) && -f $file;
 	open my $fh, '<', $file or die "Cannot open MGS assignments $file: $!\n";
 	my %ids;
@@ -1273,14 +1494,17 @@ sub _mgs_ids {
 		die "Malformed MGS assignment in $file at line $.\n"
 			unless @fields >= 2 && length($fields[0]) && length($fields[1]);
 		$ids{$fields[0]} = 1;
+		last if defined($maximum_ids)
+			&& $maximum_ids > 0
+			&& scalar(keys %ids) >= $maximum_ids;
 	}
 	close $fh or die "Cannot close MGS assignments $file: $!\n";
 	return sort keys %ids;
 }
 
 sub _mgs_count {
-	my ($file) = @_;
-	my @ids = _mgs_ids($file);
+	my ($file, $maximum_ids) = @_;
+	my @ids = _mgs_ids($file, $maximum_ids);
 	return scalar @ids;
 }
 

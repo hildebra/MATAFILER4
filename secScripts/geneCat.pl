@@ -91,6 +91,7 @@ Common options:
   --tmp DIR                  Shared temporary directory
   --continue 0|1             Rebuild (0) or resume (1, default)
   --MGset GTDB|FMG           Marker-gene set
+  --SNPcaller MPI|FB         Consensus variant caller used by strain analysis
   --extraGenesNT FASTA       External nucleotide genes
   --extraGenesAA FASTA       Matching external proteins for protExtract
   --sampleBatches INT        Parallel sample-collation batches
@@ -234,6 +235,33 @@ sub _shell_quote {
 	$value = '' unless defined $value;
 	$value =~ s/'/'"'"'/g;
 	return "'$value'";
+}
+
+sub _command_option_value {
+	my ($command, $option) = @_;
+	return unless defined($command) && defined($option) && length($option);
+
+	if ($command =~ /(?:^|\s)\Q$option\E\s+(\x27(?:[^\x27\r\n]|\x27"\x27"\x27)*\x27)/) {
+		my $value = $1;
+		$value =~ s/^\x27|\x27$//g;
+		$value =~ s/\x27"\x27"\x27/\x27/g;
+		return $value;
+	}
+	if ($command =~ /(?:^|\s)\Q$option\E\s+(\S+)/) {
+		return $1 unless $1 =~ /^\x27/;
+	}
+	return;
+}
+
+sub _catalog_path_for_compare {
+	my ($path) = @_;
+	return unless defined($path) && length($path);
+
+	my $absolute = File::Spec->rel2abs($path);
+	my $resolved = -e $absolute ? Cwd::abs_path($absolute) : undef;
+	my $comparison = defined($resolved) ? $resolved : File::Spec->canonpath($absolute);
+	$comparison =~ s{/+$}{} unless $comparison eq File::Spec->rootdir();
+	return $comparison;
 }
 
 sub _checkpoint_command {
@@ -382,7 +410,8 @@ sub _safe_reset_dir {
 #.56: lightweight HPC filesystem checks, stage/failure records, and bounded retries for
 #     recovery-critical catalogue publication
 #.57: do not preflight environment-wrapped executables; allow configured commands to run
-my $version = 0.57;
+#.58: repair workflow dependency/recovery contracts and forward the selected strain SNP caller
+my $version = 0.58;
 $| = 1;
 my $geneCatWorkflowActive = 0;
 my $geneCatWorkflowStage = 'startup';
@@ -411,6 +440,7 @@ END {
 my $justCDhit = 1; #always set default to 0, to dangerous otherwise..
 my $doSubmit = 1; my $qsubNow = 1;
 my $doStrains = 0; #flag if SNP calling was done on metag (and should be processed here)
+my $SNPcaller = "MPI"; #consensus variant caller used by the downstream strain workflow
 my $doMags = 1; #flag whether to start canopy clustering, metabat2 & subsequent merging..
 my $allinClust = 1; #cluster 5P, 3P, inc and compl in the same step
 my $oldNameFolders= -1;
@@ -581,6 +611,7 @@ GetOptions(
 	"useCheckM2=i" => \$useCheckM2, #1: use checkM2 completeness predictions, Default: 1
 	"useCheckM1=i" => \$useCheckM1, #1: use checkM completeness predictions, Default: 0
 	"doStrains=i" => \$doStrains, #1: calculate intraSpecific phylogenies on each MGS
+	"SNPcaller=s" => \$SNPcaller, #MPI (mpileup) or FB (FreeBayes), matching MATAF4/strain_within
 	"doMags=i" => \$doMags, #1: start canopy clustering, metabat2 & subsequent merging into MGS
 	"canopyAutoCorr=f" => \$canopyAutoCorr, #canopy clustering parameter to filter autocorrelated genes prior to canopy clustering
 #Marker Genes/ taxonomy
@@ -616,6 +647,23 @@ die "-FuncMinPercSbjCov must be between 0 and 1\n"
 	unless $minPercSbjCov >= 0 && $minPercSbjCov <= 1;
 die "-fastaSplit must be a positive count or size such as 500M\n"
 	unless $fastaSplits =~ /^\d+(?:[KMG])?$/i && $fastaSplits !~ /^0+[KMG]?$/i;
+die "-SNPcaller must be either MPI or FB\n"
+	unless $SNPcaller eq "MPI" || $SNPcaller eq "FB";
+die "-doMags must be 0 or 1\n" unless $doMags == 0 || $doMags == 1;
+die "-doStrains must be 0 or 1\n" unless $doStrains == 0 || $doStrains == 1;
+die "-useCheckM1 and -useCheckM2 must each be 0 or 1\n"
+	unless ($useCheckM1 == 0 || $useCheckM1 == 1)
+		&& ($useCheckM2 == 0 || $useCheckM2 == 1);
+die "-binSpeciesMG must be one of 0..5\n"
+	unless $binSpeciesMG >= 0 && $binSpeciesMG <= 5;
+if ($mode eq 'geneCat' && $doMags) {
+	die "-doMags 1 requires -binSpeciesMG to select one of 1..5; use -doMags 0 when no binner was run\n"
+		unless $binSpeciesMG >= 1;
+	die "Select exactly one quality checker: -useCheckM1 1 -useCheckM2 0, or vice versa\n"
+		unless $useCheckM1 + $useCheckM2 == 1;
+}
+die "-doStrains 1 requires -doMags 1\n"
+	if $mode eq 'geneCat' && $doStrains && !$doMags;
 
 
 checkMF(2);
@@ -768,7 +816,12 @@ if ($mode eq "mergeCLs"){#was previously mergeCls.pl
 	my $numCor2 = $numCor;
 	#if (@ARGV > 2){$numCor2 = $ARGV[2];}
 	#die "$numCor2\n";
-	canopyCluster($GCdir,$tmpDir,$numCor2);
+	my $canopyDep = canopyCluster($GCdir,$tmpDir,$numCor2,$modeStone);
+	if (length $modeStone) {
+		qsubSystemJobAlive([$canopyDep], $QSBoptHR) if length $canopyDep;
+		die "Canopy completed without a valid checkpoint: $modeStone\n"
+			unless _stone_valid($modeStone, $cdhID);
+	}
 	exit(0);
 }elsif ($mode eq "specI" || $mode eq "kraken" || $mode eq "kaiju" ){ #tax assigns
 	my $numCor2 = $numCor;
@@ -793,14 +846,23 @@ if ($mode eq "mergeCLs"){#was previously mergeCls.pl
 	#die "$fastaSplits\n";
 	my @DBs = split /,/,$curDB_o;
 	my $clean=1;
+	my @funcDeps;
 	@DBs = do { my %seen; grep { !$seen{$_}++ } @DBs };
 	foreach my $curDB (@DBs){
 		my $numCor2 = $numCor;
 		if ($curDB eq "mp3"){$numCor2=1;}
-		geneCatFunc($GCdir,$tmpDir."/GCanno/",$curDB,$numCor2,$clean);
+		my $funcDep = geneCatFunc($GCdir,$tmpDir."/GCanno/",$curDB,$numCor2,$clean);
+		push @funcDeps, $funcDep if defined($funcDep) && length($funcDep);
 		$clean=0;
 	}
-	print "All function assigns done\n";
+	if (length $modeStone) {
+		my ($doneDep, $doneCmd) = qsubSystem(
+			"$qsubDir/Funct/FuncAssign.done.sh",
+			_checkpoint_command($checkpointWriter, $modeStone, $cdhID, 'functional-annotation'),
+			1, "1G", "funcDone", join(";", @funcDeps), "", 1, [], $QSBoptHR
+		);
+	}
+	print "All function-assignment jobs submitted\n";
 	exit(0);
 } elsif($mode eq "FuncEMAP"){ #eggNOG functional assignment
 	$QSBoptHR->{doSubmit} = 1;
@@ -1024,7 +1086,7 @@ sub clusterMultiStep{
 	#merge cluster track files (as they all match to same ref DB set)
 	#$cmd .= "rm -f $bwtIdx"."*\n"; #<- leave in
 	#if (!-s "$bdir/SAM/incompl.NAl.pre.$cdhID.fna" || !-s "$bdir/SAM/P35compl.NAl.pre.$cdhID.fna" ){
-	$cmd .= "perl $selfScript -mode mergeCLs -o $OutD -MGset $useGTDBmg -tmp $tmpDir -1stepClust $allinClust -clusterID $cdhID -c $numCor -map $mapF\n"; #1 was BIG before.. but kinda useless paramenter now
+	$cmd .= "perl $selfScript -mode mergeCLs -o $OutD -MGset $useGTDBmg -tmp $tmpDir -1stepClust $allinClust -mmseqC $clustMMseq -clusterID $cdhID -c $numCor -mem $totMem3 -map $mapF\n"; #1 was BIG before.. but kinda useless paramenter now
 	#}
 	#die $cmd."\n";
 	$cmd .= "\nsed '/^\$/d' $tmpDir/$primaryClusterFNA > $tmpDir/$primaryClusterFNA.tmp;rm $tmpDir/$primaryClusterFNA;mv $tmpDir/$primaryClusterFNA.tmp $tmpDir/$primaryClusterFNA\n";
@@ -1124,7 +1186,7 @@ sub clusterSingleStep{
 	} elsif ($dep1 ne "") {
 		qsubSystemJobAlive( [$dep1],$QSBoptHR ) ; 
 	}
-	die "clustering failed\n" unless _stone_valid($complStone, $cdhID);
+	die "clustering failed\n" if $submitLocal && !_stone_valid($complStone, $cdhID);
 	${$QSBoptHR}{tmpSpace} = $preHDDspace;
 	
 	$cmd .= "\n\nperl $selfScript -mode mergeCLs -MGset $useGTDBmg -1stepClust $allinClust -o $OutD -tmp $tmpDir -clusterID $cdhID -c $numCor0 -map $mapF\n"; #still need to add the COG genes..
@@ -1256,11 +1318,12 @@ sub geneCatFlow($ $ $ $ ){
 	
 	if (!_stone_valid($incomplStone, $cdhID)) { #map incompletes on complete clusters & merge sams to cdhit format
 		if ($allinClust){#default.. just cluster all genes (without marker genes) at 95% nt id
-			$cmd .= clusterSingleStep($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,$cmd,$COGdep);
+			$cmd .= clusterSingleStep($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,"",$COGdep);
 		} else {
-			$cmd .= clusterMultiStep($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,$cmd,$COGdep);
+			$cmd .= clusterMultiStep($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,"",$COGdep);
 		}
-	} elsif ($doDecluter && !_stone_valid($declStone, $cdhID)) { #restore files.. for post processing steps
+	} elsif (!-s "$OutD/$primaryClusterFNA" || !-s "$OutD/$primaryClusterCLS"
+			|| ($doDecluter && !_stone_valid($declStone, $cdhID))) { #restore files for publication/post-processing
 		$cmd .= "zcat $bdir/$primaryClusterFNA.gz > $tmpDir/$primaryClusterFNA;\n" unless (-e "$tmpDir/$primaryClusterFNA");
 		$cmd .= "zcat $bdir/$primaryClusterCLS.gz > $tmpDir/$primaryClusterCLS;\n" unless (-e "$tmpDir/$primaryClusterCLS");
 		if ($submitLocal){systemW $cmd;$cmd="";}
@@ -1276,18 +1339,22 @@ sub geneCatFlow($ $ $ $ ){
 #		$cmd .= "\nsed '/^\$/d' $tmpDir/compl.incompl.$cdhID.fna > $tmpDir/compl.incompl.$cdhID.fna.tmp;rm $tmpDir/compl.incompl.$cdhID.fna;mv $tmpDir/compl.incompl.$cdhID.fna.tmp $tmpDir/compl.incompl.$cdhID.fna\n";
 #	}
 
-	if (!-e "$GCdir/LOGandSUB/${COGdir}.clusN.log"){
+	if ($submitLocal && !-e "$GCdir/LOGandSUB/${COGdir}.clusN.log"){
 		die "Can;t find $GCdir/LOGandSUB/${COGdir}.clusN.log\nDid merge happen?";
 	}
 	
 		#move to final location
-	if (!_stone_valid($moveStone, $cdhID)){
+	if (!_stone_valid($moveStone, $cdhID)
+			|| !-s "$OutD/$primaryClusterFNA" || !-s "$OutD/$primaryClusterCLS"){
 		$cmd .= "#cp relevant files to outdir and zip the rest\n";
-		$cmd .= "mv $tmpDir/${primaryClusterFNA}* $OutD\n" unless (-e "$OutD/$primaryClusterFNA");
+		$cmd .= "mv $tmpDir/${primaryClusterFNA}* $OutD\n"
+			unless (-s "$OutD/$primaryClusterFNA" && -s "$OutD/$primaryClusterCLS");
 		$cmd .= "mkdir -p $qsubDir/${COGdir}\ncp $tmpDir/$COGdir/*.fna.c* $tmpDir/${COGdir}.clusN.log $qsubDir/${COGdir} 2>/dev/null || :\n" if (@COGlst > 0);
-		$cmd .= _checkpoint_command($checkpointWriter, $moveStone, $cdhID, 'publish-catalog', "$OutD/$primaryClusterFNA");
+		$cmd .= _checkpoint_command($checkpointWriter, $moveStone, $cdhID, 'publish-catalog',
+			"$OutD/$primaryClusterFNA", "$OutD/$primaryClusterCLS");
 		if ($submitLocal){systemW $cmd;		$cmd = "";}
-		die "Can't find valid $moveStone\n" if ($submitLocal && !_stone_valid($moveStone, $cdhID));
+		die "Can't find valid $moveStone\n"
+			if $submitLocal && !_stone_valid($moveStone, $cdhID);
 		my $cmdL = "$pigzBin -p $numCor $bdir/*\n";
 		if ($submitLocal){
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
@@ -1295,7 +1362,8 @@ sub geneCatFlow($ $ $ $ ){
 			$QSBoptHR->{tmpSpace} =$tmpSHDD;
 		} else {$cmd .= $cmdL;}
 	}
-	if (!_stone_valid($moveStone, $cdhID)){
+	if ($submitLocal && (!_stone_valid($moveStone, $cdhID)
+			|| !-s "$OutD/$primaryClusterFNA" || !-s "$OutD/$primaryClusterCLS")) {
 		die "GC Files not found at final location $OutD; missing $moveStone\n";
 	}
 	
@@ -1345,7 +1413,8 @@ sub geneCatFlow($ $ $ $ ){
 	die "Matrices were not created or validated, $matrixSton\n" if ($submitLocal && !_stone_valid($matrixSton, $cdhID));
 	#check matrix..
 	my $matrixFile = "$OutD/$countMatrixF.gz";
-	my $matrixSampleCountKnown = -s $matrixFile ? 1 : 0;
+	my $matrixSampleCountKnown =
+		_stone_valid($matrixSton, $cdhID) && -s $matrixFile ? 1 : 0;
 	my $matrixSampleCount;
 	if ($matrixSampleCountKnown) {
 		$matrixSampleCount = _matrix_sample_count($matrixFile);
@@ -1377,7 +1446,8 @@ sub geneCatFlow($ $ $ $ ){
 	}
 	print "Waiting for protein extraction..\n";
 	qsubSystemJobAlive( \@matDeps,$QSBoptHR ); 
-	die "Prot extraction unsuccessful\n" unless (_stone_valid($protStone, $cdhID) && -e "$OutD/compl.incompl.$cdhID.prot.faa");
+	die "Prot extraction unsuccessful\n"
+		if $submitLocal && !(_stone_valid($protStone, $cdhID) && -e "$OutD/compl.incompl.$cdhID.prot.faa");
 	#die;
 	
 	#now decluter based on proteins.
@@ -1407,15 +1477,16 @@ sub geneCatFlow($ $ $ $ ){
 	#get 100 marker genes
 	my $depExtr = "";
 	#single cores...
-	if ($submitLocal && !_stone_valid($FMGstone, $cdhID)){
+	if (!_stone_valid($FMGstone, $cdhID)){
 		$cmd .= "#get marker genes and create matrices for these\n";
 		$cmd .= "$extre100Scr $OutD $tmpDir/FMG1/\n";
 		$cmd .= _checkpoint_command($checkpointWriter, $FMGstone, $cdhID, 'extract-marker-genes');
-		#systemW $cmd;		$cmd = "";
-		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		my ($dep,$qcmd) = qsubSystem($qsubDir."GC_ExtrE100.sh",$cmd,1,int($totMem3*2)."G","GCe100","","",1,[],$QSBoptHR);
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;
-		$depExtr = $dep; $cmd = "";
+		if ($submitLocal) {
+			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0";
+			my ($dep,$qcmd) = qsubSystem($qsubDir."GC_ExtrE100.sh",$cmd,1,int($totMem3*2)."G","GCe100","","",1,[],$QSBoptHR);
+			$QSBoptHR->{tmpSpace} =$tmpSHDD;
+			$depExtr = $dep; $cmd = "";
+		}
 	}
 	
 	#start LCA for marker genes..
@@ -1493,8 +1564,7 @@ sub geneCatFlow($ $ $ $ ){
 	#functional annotations.. just run some by default
 	unless (_stone_valid($funcStone, $cdhID)) {
 		my $stageCmd = "#functional assignments of all genes via diamond\n";
-		$stageCmd .= "$selfScript -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner \n";
-		$stageCmd .= _checkpoint_command($checkpointWriter, $funcStone, $cdhID, 'functional-annotation');
+		$stageCmd .= "$selfScript -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -stone $funcStone\n";
 		if ($submitLocal) {
 			print "submitting diamond func abundance..\n";
 			my ($dep,$qcmd) = qsubSystem($qsubDir."func_GC.sh",$stageCmd,1,int($totMem3)."G","funcGC","","",1,[],$QSBoptHR);
@@ -1505,6 +1575,8 @@ sub geneCatFlow($ $ $ $ ){
 
 
 	unless (_stone_valid($emapStone, $cdhID)) {
+		retry_unlink($emapStone, label => 'invalidate stale eggNOG checkpoint')
+			if -e $emapStone;
 		my $stageCmd = "#functional assignments via eggNOGmapper\n";
 		#-c $numCor3 .. use max 6 cores for this due to single core emapper final step
 		$stageCmd .= "$selfScript -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID -stone $emapStone \n";
@@ -1526,7 +1598,8 @@ sub geneCatFlow($ $ $ $ ){
 	my $CANdep="";
 	if (!$doMags && !_stone_valid($canopyStone, $cdhID)) {
 		_touch_file($canopyStone, $cdhID, 'canopy-disabled');
-	} elsif ($matrixSampleCount < $minCanopySamples && !_stone_valid($canopyStone, $cdhID)) {
+	} elsif ($matrixSampleCountKnown && $matrixSampleCount < $minCanopySamples
+			&& !_stone_valid($canopyStone, $cdhID)) {
 		my $skip_dir = getCanopyDir($OutD);
 		make_path($skip_dir) unless -d $skip_dir;
 		my $skip_file = "$skip_dir/SKIPPED.txt";
@@ -1542,8 +1615,7 @@ sub geneCatFlow($ $ $ $ ){
 			$CANdep = canopyCluster($GCdir,"$tmpDir/cano/",$numCor,$canopyStone);
 		} else {
 			$cmd .= "#Canopy clustering\n";
-			$cmd .= "$GCscr -mode CANOPY -o $OutD -c $numCor -tmp $tmpDir/MGS -clusterID $cdhID\n";
-			$cmd .= _checkpoint_command($checkpointWriter, $canopyStone, $cdhID, 'canopy-clustering');
+			$cmd .= "$GCscr -mode CANOPY -o $OutD -c $numCor -tmp $tmpDir/MGS -clusterID $cdhID -canopyAutoCorr $canopyAutoCorr -stone $canopyStone\n";
 		}
 		#this needs to call the canopy function here, in order to get the correct dependency for the canopy call..
 		#my ($dep,$qcmd) = qsubSystem($qsubDir."canopy_GC.sh",$cmd,$numCor,int($totMem3/$numCor)."G","canGC","","",1,[],$QSBoptHR);
@@ -1567,15 +1639,40 @@ sub geneCatFlow($ $ $ $ ){
 	my $MGSoutD = "$OutD/Bin_${binnerShrt}/"; 
 	#if ($submitLocal){systemW $cmd;		$cmd = "";}
 	if (-e $qsubDir."MGS.sh"){
-		my $tmpS = `grep -v '^#' $qsubDir/MGS.sh`;
-		if ($tmpS =~ m/-outD\s+(\S+)/){
-			$MGSoutD = $1;
+		my $tmpS = "";
+		if (open my $old_mgs_fh, '<', $qsubDir."MGS.sh") {
+			$tmpS = join '', grep { !/^\s*#/ } <$old_mgs_fh>;
+			warn "Cannot close prior MGS submission script $qsubDir"."MGS.sh: $!\n"
+				unless close $old_mgs_fh;
+		} else {
+			warn "Cannot inspect prior MGS submission script $qsubDir"."MGS.sh: $!; using the current output directory\n";
+		}
+		my $oldOutD = _command_option_value($tmpS, '-outD');
+		if (defined $oldOutD) {
+			my $oldBinner = _command_option_value($tmpS, '-binSpeciesMG');
+			my $oldGCd = _command_option_value($tmpS, '-GCd');
+			my $oldClusterID = _command_option_value($tmpS, '-clusterID');
+			my $oldGCdIdentity = _catalog_path_for_compare($oldGCd);
+			my $currentGCdIdentity = _catalog_path_for_compare($OutD);
+			if (defined($oldBinner) && $oldBinner =~ /^\d+$/ && $oldBinner == $binSpeciesMG
+					&& defined($oldGCdIdentity) && defined($currentGCdIdentity)
+					&& $oldGCdIdentity eq $currentGCdIdentity
+					&& defined($oldClusterID) && $oldClusterID =~ /^\d+$/ && $oldClusterID == $cdhID) {
+				$MGSoutD = $oldOutD;
+			} else {
+				warn "Ignoring stale MGS output directory $oldOutD from a command with a different binner, catalogue, or cluster identity\n";
+			}
 		}
 	}
-	my $canoStr = "-canopies $canopyExpectedDir/clusters.txt ";
-	$canoStr = "" if ($matrixSampleCount < $minCanopySamples);
+	my $canoStr = "-canopies " . _shell_quote("$canopyExpectedDir/clusters.txt") . " ";
+	$canoStr = "" if ($matrixSampleCountKnown && $matrixSampleCount < $minCanopySamples);
 	#$cmd .= "#wait for eggnogmapper to finish\nuntil [ -f $emapStone ];do sleep 5; done\n" unless (-e $emapStone);
-	$cmd .= "$magPi -mem 150 -GCd $OutD -tmp $tmpDir/MAGs/ -bottleneckCores $numCor $canoStr -strains $doStrains -useCheckM2 $useCheckM2 -useCheckM1 $useCheckM1 -wait4stone $emapStone -binSpeciesMG $binSpeciesMG -ignoreIncompleteMAGs $ignoreIncompleteMAGs -MGset $useGTDBmg -clusterID $cdhID -outD $MGSoutD \n";
+	$cmd .= "$magPi -mem 150 -GCd " . _shell_quote($OutD)
+		. " -tmp " . _shell_quote("$tmpDir/MAGs/")
+		. " -bottleneckCores $numCor $canoStr-strains $doStrains -SNPcaller $SNPcaller"
+		. " -useCheckM2 $useCheckM2 -useCheckM1 $useCheckM1 -wait4stone " . _shell_quote($emapStone)
+		. " -binSpeciesMG $binSpeciesMG -ignoreIncompleteMAGs $ignoreIncompleteMAGs"
+		. " -MGset $useGTDBmg -clusterID $cdhID -outD " . _shell_quote($MGSoutD) . "\n";
 
 	if ($submitLocal && $cmd ne ""){
 		print "Submitting downstream MGS workflow\n";
@@ -2025,7 +2122,11 @@ sub collateGenes(){
 			if ($map{$smpl}{SupportReads} ne ""){
 				$dir2rd = "$GCdir$smpl/";	
 			} else {
-				die "Can;t find valid path for $smpl\n";
+				if (!$requireAllAssemblies) {
+					push @probSample, $smpl;
+					next;
+				}
+				die "Can't find valid path for $smpl\n";
 			}
 		} 
 		if (-e "$dir2rd/SMPL.empty"){print "Sample $smpl marked as emtpy\n";next;}
@@ -2265,6 +2366,7 @@ sub announceGeneCat{
 		. "; gene matrix=" . ($doGeneMatrix ? "yes" : "no") . "\n";
 	printL "Downstream: quality=" . ($useCheckM2 ? "CheckM2" : "CheckM1")
 		. "; strains=" . ($doStrains ? "yes" : "no")
+		. "; SNP caller=$SNPcaller"
 		. "; Canopy minimum samples=$minCanopySamples\n";
 	printL "===================================\n";
 	
@@ -3007,7 +3109,7 @@ sub geneCatFunc_emapper{
 			my $cmd = "";
 			$cmd .= "mkdir -p $tmpD/$i/\n";
 			$cmd .= "emapper.py -m diamond --dbmem --override --itype proteins --temp_dir $tmpD/$i/ --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f;\n"; 
-			my $outF = "$f.emapper";
+			my $outF = "$f.emapper.annotations";
 
 			if ($calcDia && (!-e $outF || !-s $outF) ){
 				#print "$cmd\n";
@@ -3130,17 +3232,19 @@ sub geneCatFunc{
 	}
 	#die "$modCmd\n";
 
+	my $matrixDep = "";
 	$cmd = "" if (-e "$outD/${curDB}L0.txt");
 	#die "$cmd.$modCmd\n";
 	if (0 && -e $tarAnno){ #already exists
 		systemW $cmd ;
 	} else {
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		($cmd,$jdep) = qsubSystem($qsubDir2."${curDB}_matrix.sh",$cmd.$modCmd,$matThr,"12G","${curDB}_mat",$jdep,"",1,[],$QSBoptHR);
+		my ($submittedDep,$submittedCmd) = qsubSystem($qsubDir2."${curDB}_matrix.sh",$cmd.$modCmd,$matThr,"12G","${curDB}_mat",$jdep,"",1,[],$QSBoptHR);
+		$matrixDep = $submittedDep;
 		$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	}
 
-
+	return $matrixDep;
 }
 
 sub readSam($$){
@@ -3249,8 +3353,8 @@ sub FOAMassign{
 		$cmd .= "rm -f -r $tmpOut* $subFls[$i]\n";
 		my $jobName = "$DB"."_$i";
 		#die $cmd."\n";
-		my ($cmdRaw,$jdep) = qsubSystem($qsubDir."$DB$i.sh",$cmd,$N,"1G",$jobName,"","",1,[],$QSBoptHR);
-		push(@jdeps,$jdep);
+		my ($jobDep,$jobCmd) = qsubSystem($qsubDir."$DB$i.sh",$cmd,$N,"1G",$jobName,"","",1,[],$QSBoptHR);
+		push(@jdeps,$jobDep);
 		push(@allFiles,$outF);
 		#if ($i==5){die;}
 	}
@@ -3262,7 +3366,7 @@ sub FOAMassign{
 	#tr [:blank:] \\t
 	$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $GCd/$DB.mat -t 1 -refD $assigns $rtkFunDelims \n";
 	$tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-	($cmd,$jdep) = qsubSystem($qsubDir."collect$DB.sh",$cmd,1,"40G","$DB"."Col",join(";",@jdeps),"",1,[],$QSBoptHR);
+	my ($collectDep,$collectCmd) = qsubSystem($qsubDir."collect$DB.sh",$cmd,1,"40G","$DB"."Col",join(";",@jdeps),"",1,[],$QSBoptHR);
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	#return $jdep,$outF;
 }

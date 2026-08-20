@@ -11,6 +11,7 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Binning ();
+use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
 
 sub write_file {
 	my ($path, $contents) = @_;
@@ -130,6 +131,172 @@ like(
 	$between_stdout,
 	qr/Found 2 GTDB marker genes.*?SKIPPED=too_few_marker_bearing_MGS:2/s,
 	'GTDB selection reaches the expected sparse-tree skip using GTDB marker-bearing MGS',
+);
+
+# MGS 0.55 changed only the strain launcher. A global release fingerprint used
+# to invalidate otherwise unchanged GTDB outputs written by 0.54.
+my $resume_core = File::Spec->catfile($tmp, 'resume.core');
+my $resume_tax = File::Spec->catfile($tmp, 'GTDBTK.tax');
+my $resume_summary = File::Spec->catfile($tmp, 'gtdbtk.summary.tsv');
+write_file($resume_core, "MGS1\tgene1\n");
+write_file($resume_tax, "MGS1\td__Bacteria\n");
+write_file($resume_summary, "user_genome\tclassification\nMGS1\td__Bacteria\n");
+my $legacy_gtdb_stone = File::Spec->catfile($tmp, 'GTDBTK.stone');
+my %legacy_gtdb_parameters = (
+	pipeline_version => '0.54',
+	stage => 'gtdb-taxonomy',
+	catalog_identity => 'catalog-A',
+	cluster_id => 95,
+	binner => 'SC',
+	catalog_fna_size => 123,
+	catalog_fna_mtime => 456,
+);
+write_checkpoint(
+	$legacy_gtdb_stone,
+	parameters => \%legacy_gtdb_parameters,
+	outputs => [$resume_tax, $resume_summary, $resume_core],
+);
+my %new_global_parameters = (%legacy_gtdb_parameters, pipeline_version => '0.55');
+ok(
+	!checkpoint_valid($legacy_gtdb_stone, parameters => \%new_global_parameters),
+	'a controller-only version bump invalidates the old whole-pipeline predicate',
+);
+my %gtdb_stage_parameters = map {
+	$_ => $legacy_gtdb_parameters{$_}
+} qw(stage catalog_identity cluster_id binner catalog_fna_size catalog_fna_mtime);
+ok(
+	checkpoint_valid($legacy_gtdb_stone, parameters => \%gtdb_stage_parameters),
+	'unchanged GTDB direct inputs and outputs remain resumable across that release bump',
+);
+
+# The same compatibility rule applies to downstream abundance checkpoints:
+# every current parameter except the release number must match, and the
+# checkpoint output records remain authoritative.
+my $legacy_ab_output = File::Spec->catfile($tmp, "MGS.matL7.txt");
+write_file($legacy_ab_output, "MGS1\t1\n");
+my $legacy_ab_stone = File::Spec->catfile($tmp, "abund.mgs_core.stone");
+my %legacy_ab_parameters = (
+	pipeline_version => "0.54",
+	stage => "marker-mgs-abundance",
+	catalog_identity => "catalog-A",
+	cluster_id => 95,
+	marker_set => "GTDB",
+	binner => "SC",
+	quality_checker => "checkm2",
+);
+write_checkpoint(
+	$legacy_ab_stone,
+	parameters => \%legacy_ab_parameters,
+	outputs => [$legacy_ab_output],
+);
+my %current_ab_parameters = (%legacy_ab_parameters, pipeline_version => "0.55");
+ok(
+	!checkpoint_valid($legacy_ab_stone, parameters => \%current_ab_parameters),
+	"the exact predicate rejects the otherwise compatible 0.54 abundance checkpoint",
+);
+delete $current_ab_parameters{pipeline_version};
+ok(
+	checkpoint_valid($legacy_ab_stone, parameters => \%current_ab_parameters),
+	"removing only the proven-compatible release field retains all abundance parameters",
+);
+write_file($legacy_ab_output, "MGS1\tchanged\n");
+ok(
+	!checkpoint_valid($legacy_ab_stone, parameters => \%current_ab_parameters),
+	"compatible-release reuse still rejects a changed recorded abundance output",
+);
+
+my $mgs_entrypoint = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
+like(
+	$mgs_entrypoint,
+	qr/my %stageCheckpointContract = \(.*?'extract-bin-contigs'\s*=>\s*1.*?'gtdb-taxonomy'\s*=>\s*1.*?sub _checkpoint_parameters_for_stage/s,
+	'MGS declares explicit contracts for bin extraction and GTDB taxonomy',
+);
+like(
+	$mgs_entrypoint,
+	qr/sub _checkpoint_parameters_for_stage .*?catalog_identity cluster_id binner genomes_per_family.*?catalog_fna_size catalog_fna_mtime.*?catalog_faa_size catalog_faa_mtime.*?mag_report_size.*?stage_contract/s,
+	'bin-extraction resume tracks its direct catalogue, map, MAG-report, and contract inputs',
+);
+like(
+	$mgs_entrypoint,
+	qr/sub _checkpoint_valid_for_stage .*?read_checkpoint\(\$file\).*?pipeline_version.*?0\\\.\(\?:54\|55\).*?created_epoch.*?checkpoint_valid\(\$file, parameters => \\%legacyParameters\)/s,
+	'legacy checkpoint adoption is limited to compatible JSON releases and stable recorded outputs',
+);
+like(
+	$mgs_entrypoint,
+	qr/my \$binExtractionValid = _checkpoint_valid_for_stage\(\$BinExtrSto, 'extract-bin-contigs'\).*?my \$gtdbTaxonomyValid = .*?_checkpoint_valid_for_stage\(\$GTDBtaxSto, 'gtdb-taxonomy'\)/s,
+	'bin extraction and GTDB resume use their stage-specific validators',
+);
+
+like(
+	$mgs_entrypoint,
+	qr/sub _checkpoint_valid_for_compatible_release .*?MGSpipelineVersion.*?0\.55.*?pipeline_version.*?0\.54.*?delete \$compatibleParameters\{pipeline_version\}.*?checkpoint_valid\(\$file, parameters => \\%compatibleParameters\).*?sub _checkpoint_valid .*?_checkpoint_valid_for_compatible_release.*?sub _checkpoint_valid_for_resume .*?_checkpoint_valid_for_compatible_release/s,
+	"global checkpoint reuse is restricted to the proven 0.54-to-0.55 transition",
+);
+like(
+	$mgs_entrypoint,
+	qr/my \@stage1AssignmentFiles = \(\$finalClusters2, "\$\{finalClusters2\}UW", \$finalClustersW\);.*?my \$stage1AssignmentsPresent = grep \{ _mgs_count\(\$_, 1\) \} \@stage1AssignmentFiles;.*?my \$stage1ResumeValid = !\$rewrClusterMAGs && \$stage1AssignmentsPresent/s,
+	"Stage I resumes from primary or recoverable weighted assignments without requiring core",
+);
+
+my ($mgs_assignment_helpers) = $mgs_entrypoint =~
+	/(sub _mgs_ids \{.*?\n\}\n\nsub _mgs_count \{.*?\n\})/s;
+ok(defined($mgs_assignment_helpers), 'MGS assignment helpers can be exercised independently');
+my $assignment_helpers_loaded = defined($mgs_assignment_helpers)
+	&& eval "package MGSResumeAssignmentProbe; use strict; use warnings; $mgs_assignment_helpers; 1;";
+ok($assignment_helpers_loaded, 'MGS assignment helpers compile for the resume regression')
+	or diag($@);
+if ($assignment_helpers_loaded) {
+	my $header_only_assignments = File::Spec->catfile($tmp, 'header-only.MGS');
+	write_file($header_only_assignments, "Bin\tGenes\n");
+	is(
+		MGSResumeAssignmentProbe::_mgs_count($header_only_assignments, 1),
+		0,
+		'a header-only assignment file cannot satisfy the Stage I resume gate',
+	);
+
+	my $early_stop_assignments = File::Spec->catfile($tmp, 'early-stop.MGS');
+	write_file($early_stop_assignments, "Bin\tGenes\nMGS1\tgene1\nmalformed\n");
+	is(
+		MGSResumeAssignmentProbe::_mgs_count($early_stop_assignments, 1),
+		1,
+		'the resume probe stops after the first assignment instead of rescanning the file',
+	);
+}
+like(
+	$mgs_entrypoint,
+	qr/my \$recoverMissingActiveMGS = sub .*?\$recoverMissingActiveMGS->\(\) unless \$ph1flag;/s,
+	"an interrupted weighted handoff is recovered before clustering can restart",
+);
+like(
+	$mgs_entrypoint,
+	qr/systemW \$postCmd if !-s \$finalClustersFilt;.*?_touch_checkpoint\(\$st1ston, .stage-1., \$finalClusters2, \$finalClustersFilt\)\s+if \$ph1flag;/s,
+	"the cheap core is regenerated but only newly clustered primary/core outputs receive provenance",
+);
+unlike(
+	$mgs_entrypoint,
+	qr/_touch_checkpoint\(\$st1ston, .stage-1., .*?unless _checkpoint_valid\(\$st1ston\)/s,
+	"a mismatched recovered Stage I product is not laundered into a current checkpoint",
+);
+like(
+	$mgs_entrypoint,
+	qr/my \@geneBinFiles = grep \{ -f \$_ && \/\\\.\(\?:fna\|faa\)\\z\/i \} glob\("\$binD\/\*"\);/,
+	"BinExtr records only its FASTA products, excluding downstream GTDB archives",
+);
+like(
+	$mgs_entrypoint,
+	qr/my \@strainArguments = \(.*?\x27-SNPcaller\x27, \$SNPcaller.*?map \{ _shell_quote\(\$_\) \} \@strainArguments/s,
+	"MGS forwards the selected SNP caller with shell-quoted strain arguments",
+);
+
+like(
+	$mgs_entrypoint,
+	qr/my \$ph1flag = \$stage1ResumeValid \? 0 : 1;.*?if \(\$ph1flag\) \{.*?glob\("\$outD\/\$BinnerShrt\.clusters\*"\).*?\$invalidateMGSDerivatives->\(\);.*?\$recoverMissingActiveMGS->\(\) unless \$ph1flag;/s,
+	"every Stage I rebuild removes stale core/downstream derivatives before clustering",
+);
+like(
+	$mgs_entrypoint,
+	qr/sub _legacy_bin_extraction_checkpoint_valid .*?GTDBtk\.tar\.gz.*?next if \$canonicalPath eq \$archivePath;.*?else \{\s*return 0;.*?my \@stat = stat\(\$path\);.*?return \$coreSeen && \$geneFnaSeen && \$geneFaaSeen && \$contigSeen.*?sub _checkpoint_valid_for_stage .*?_legacy_bin_extraction_checkpoint_valid\(\$manifest, \\%legacyParameters\)/s,
+	"legacy BinExtr reuse ignores only the downstream GTDB archive and validates all primary outputs",
 );
 
 done_testing;

@@ -344,6 +344,12 @@ announce_MF4();
 help() if ($helpRequested);
 setDefaultMFconfig();
 getCmdLineOptions;
+die "-from requires a non-negative sample index\n"
+	if ($runOptions{from} < 0);
+die "-to requires a non-negative sample index\n"
+	if ($runOptions{to} < 0);
+die "-from cannot be greater than -to\n"
+	if ($runOptions{from} > $runOptions{to});
 die "-loopTillCompleteActiveJobs requires a non-negative integer\n"
 	if ($MFconfig{loopTillCompleteActiveJobs} < 0);
 die "-schedulerPollSeconds requires a positive integer\n"
@@ -461,6 +467,8 @@ prepMetaphlan();
 if ($runOptions{to} > @samples){
 	print "Reset range of samples to ". @samples."\n"; $runOptions{to} = @samples;
 }
+die "-from cannot exceed the available sample range (N=".scalar(@samples).")\n"
+	if $runOptions{from} > $runOptions{to};
 my $from = $runOptions{from}; my $to = $runOptions{to};
 my ($selectedFrom, $selectedTo) = ($runOptions{from}, $runOptions{to});
 #die "\"@samples\"\n";
@@ -3412,8 +3420,13 @@ sub postprocess{
 		close $previous;
 		$prevRep-- if $prevRep;
 	}
+	my $allMappedSamplesVisited =
+		scalar(keys %{$d2Inputs{samples}}) == scalar(@samples);
+	my $completeCohortReport = $allMappedSamplesVisited
+		&& scalar(keys %{$runReport{samples}}) == scalar(@samples);
 
-	if (%{$runReport{samples}}) {
+
+	if (%{$runReport{samples}} && $completeCohortReport) {
 		my $statsWriteStarted = clock_gettime(CLOCK_MONOTONIC);
 		my $statsText = _metag_stats_text($runReport{samples}, $runReport{order});
 		atomic_write_text($MGSfile, $statsText, label => 'publish metagStats summary');
@@ -3422,7 +3435,12 @@ sub postprocess{
 		printf "Created sample summary table for %d sample(s) in %.2f s.\n",
 			scalar(keys %{$runReport{samples}}), $statsSeconds;
 	}
-	print "Stats in $MGSfile \n";
+	elsif (%{$runReport{samples}}) {
+		warn "Retaining any existing $MGSfile: only "
+			.scalar(keys %{$runReport{samples}})." of ".scalar(@samples)
+			." mapped samples have terminal records in this invocation.\n";
+	}
+	print "Stats in $MGSfile \n" if -s $MGSfile;
 	if ($MFopt{writeStats} && (@{$runReport{order}} > $prevRep || !-e $MGShtml ) && -s $MGSfile ){
 		my $qcMakeHTMLReport = getProgPaths("qcMakeHTMLReport");
 		my $Rpath = getProgPaths("Rpath");
@@ -3491,7 +3509,7 @@ sub postprocess{
 	}
 
 
-	if ($MFopt{DoAssembly} && $runReport{present_assemblies} > 0
+	if ($MFopt{DoAssembly} && $completeCohortReport && $runReport{present_assemblies} > 0
 		&& ($runReport{present_assemblies} + scalar(keys %{$runReport{empty_samples}}))
 			== scalar(keys %{$d2Inputs{samples}})){
 		my $gcScr = getProgPaths("geneCat_scr");
@@ -3509,7 +3527,14 @@ sub postprocess{
 		$sugGCcores = 48 if ($runReport{present_assemblies} > 1000);
 		$sugGCcores = 72 if ($runReport{present_assemblies} > 5000);
 
-		$gcmd .= "$gcScr -map $MFconfig{mapFile} -GCd [insert outdir] -mem $sugGCmem -cores $sugGCcores -clusterID 95 -doStrains $MFopt{DoConsSNP} -continue 1 -binSpeciesMG $MFopt{DoMetaBat2} -useCheckM2 $MFopt{useCheckM2} -useCheckM1 $MFopt{useCheckM1} -MGset GTDB \n";
+		# MGS requires a real binner and exactly one quality checker.  MATAFILER can
+		# legitimately run without binning or with both CheckM generations enabled,
+		# so translate those broader settings to the narrower downstream contract.
+		my $handoffDoMags = $MFopt{DoMetaBat2} ? 1 : 0;
+		my $handoffDoStrains = $handoffDoMags && $MFopt{DoConsSNP} ? 1 : 0;
+		my $handoffCheckM2 = $MFopt{useCheckM2} ? 1 : 0;
+		my $handoffCheckM1 = $handoffCheckM2 ? 0 : ($MFopt{useCheckM1} ? 1 : 0);
+		$gcmd .= "$gcScr -map $MFconfig{mapFile} -GCd [insert outdir] -mem $sugGCmem -cores $sugGCcores -clusterID 95 -doStrains $handoffDoStrains -SNPcaller $MFopt{SNPcallerFlag} -continue 1 -doMags $handoffDoMags -binSpeciesMG $MFopt{DoMetaBat2} -useCheckM2 $handoffCheckM2 -useCheckM1 $handoffCheckM1 -MGset GTDB \n";
 		print "\n\nNext step, create a genecatalog with call to (but modify .sh first!): \nsbatch $GCsub\n";
 		$QSBoptHR->{doSubmit} = 0;
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
@@ -11166,7 +11191,7 @@ sub getCmdLineOptions{
 		"wcKeyJobs=s" => \$MFconfig{wcKeysForJob},
 	#DEBUG
 		"OKtoRWassGrps=i" => \$MFconfig{OKtoRWassGrps}, # can delete assemblies, if suspects error in them
-	);
+	) or die "Invalid MATAF4.pl option(s)\n";
 	
 	
 	# ------------------------------------------ options post processing ------------------------------------------

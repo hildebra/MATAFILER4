@@ -326,7 +326,7 @@ These may be legacy prose artefacts, GeneCat/MGS options, flags for other script
 
 ## geneCat.pl
 
-Gene-catalog construction and downstream gene-catalog annotation/MGS orchestration. The uploaded source reports version `0.51`.
+Gene-catalog construction and downstream gene-catalog annotation/MGS orchestration. The source reports version `0.58`.
 
 ### Directories/files
 
@@ -386,6 +386,7 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 | `-useCheckM2` | integer | `1` | stable | 1: use checkM2 completeness predictions, Default: 1 |
 | `-useCheckM1` | integer | `0` | stable | 1: use checkM completeness predictions, Default: 0 |
 | `-doStrains` | integer | `0` | advanced/internal | 1: calculate intraSpecific phylogenies on each MGS |
+| `-SNPcaller` | string | `MPI` | stable | Consensus caller whose compressed MATAF4 outputs are used by the downstream strain workflow; accepted values are `MPI` and `FB`. |
 | `-doMags` | integer | `1` | stable | 1: start canopy clustering, metabat2 & subsequent merging into MGS |
 | `-canopyAutoCorr` | float | `0.15` | stable | canopy clustering parameter to filter autocorrelated genes prior to canopy clustering |
 
@@ -443,6 +444,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-strains` | integer | `0` | stable | 1: calc instra species strain phylogenies. Default: 0 |
 | `-redo` | string | `none` | stable | Forward the strain-workflow redo mode: `none`, `tree`, `input`, or `all`. |
 | `-prepareMosaicLoci` | integer | `1` | stable | 1: have strain_within submit, await, and validate Mosaic as a prerequisite before strain analysis; 0: skip Mosaic preprocessing and keep same-NOG seed clusters separate |
+| `-SNPcaller` | string | `MPI` | stable | Forward `MPI` or `FB` caller-specific consensus inputs to `strain_within.pl`. |
 | `-useCheckM2` | integer | `0` | stable | CheckM2 default qual checking of MAGs/MGS |
 | `-useCheckM1` | integer | `1` | stable | CheckM default qual checking of MAGs/MGS |
 | `-binSpeciesMG` | integer | `2` | stable | 0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5 |
@@ -452,7 +454,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## strain_within.pl
 
-Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.29`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.30`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
 
 ### Inputs, execution and workflow control
 
@@ -465,6 +467,7 @@ Within-MGS locus extraction, quality control, tree orchestration and downstream 
 | `-MGSabundance` | string | auto | stable | Explicit MGS abundance matrix, recommended for a nonstandard guide location. |
 | `-clusterID` | integer | `95` | stable | Gene-catalogue clustering identity; must be 1–100. |
 | `-MGset` | string | `GTDB` | stable | Marker-gene set; accepted values are `GTDB` and `FMG`. |
+| `-SNPcaller` | string | `MPI` | stable | Select caller-specific compressed consensus FASTA/VCF inputs; accepted values are `MPI` and `FB`. |
 | `-MGSphylo` | string | `""` | stable | Source MGS tree forwarded for fallback outgroup selection. |
 | `-tmpD` | string | `""` | stable | Node-local temporary directory. |
 | `-submit` | integer | `0` | stable | Submit generated work (`1`) or perform a dry run (`0`). |

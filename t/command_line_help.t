@@ -14,7 +14,8 @@ open(my $script_fh, '<', $script) or die "Cannot read $script: $!";
 my $source = do { local $/; <$script_fh> };
 close($script_fh);
 
-my ($get_options) = $source =~ /sub getCmdLineOptions\s*\{(.*?)\n\s*\);/s;
+my ($get_options) = $source =~
+	/sub getCmdLineOptions\s*\{(.*?)\n\s*\)(?:\s+or\s+die\s+[^;]+)?;/s;
 ok(defined($get_options), 'found the MATAF4.pl GetOptions block');
 
 my %accepted;
