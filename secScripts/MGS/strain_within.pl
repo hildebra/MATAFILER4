@@ -16,7 +16,10 @@ use Digest::SHA qw(sha256_hex);
 
 
 
-use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrRev systemW median mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs);
+use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrRev
+	writeClstrRevBinaryShards readClstrRevBinaryShard
+	writeSequenceBinaryCache readSequenceBinaryCache
+	systemW median mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs
 	deferredSubmissionDependency);
 use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
@@ -57,6 +60,11 @@ sub prepGene2MGS;
 sub createAGlist; sub preComputeConsSNP;
 sub phase1SamplesByGroup; sub phase1EstimatedInputBytes; sub phase1SampleWorkEstimate;
 sub phase1GroupWorkEstimates; sub writePhase1WorkerPlan;
+sub phase1SelectedGeneFingerprint;
+sub phase1IndexShardFingerprint; sub phase1IndexShardCacheState;
+sub publishPhase1IndexShards; sub loadPhase1ClusterIndex;
+sub phase1ProteinCacheFingerprint; sub phase1ProteinCacheState;
+sub publishPhase1ProteinCache; sub loadPhase1CatalogProteins;
 sub mergeConspecificLogs;
 sub timeNice;
 sub stageStart;
@@ -253,7 +261,11 @@ my $completionMessage = "";
 #1.28: prevent new outputs from entering lean tree-only resume without Phase-I evidence
 #1.29: support alignment-only BuildTree runs without tree-dependent postprocessing
 #1.30: bind Phase-I outputs and split workers to the selected SNP caller
-my $version = 1.30;
+#1.31: bound Stage-I output buffering and report durable shard publication
+#1.32: report locus-model scan, protein, grouping, and worker projection timings
+#1.33: fan the catalogue cluster index into atomic binary split-worker shards
+#1.34: publish one validated selected-catalogue protein cache for all Phase-I workers
+my $version = 1.34;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -291,6 +303,7 @@ my %FILTER_DEFAULT = (
 	abundance_maximum_fold => 3,
 	abundance_maximum_modified_z => 3.5,
 	prepare_mosaic_loci => 1,
+	phase1_flush_samples => 50,
 );
 my $multiGeneSmplMax = $FILTER_DEFAULT{multi_gene_sample_max};
 my $conspGeneSmplMax = $FILTER_DEFAULT{conspecific_gene_sample_max};
@@ -383,7 +396,10 @@ my $preCompCons=0; #if >0, precompute in these blocks
 my $conspecificSpThr = 0.1; #higher fraction of genes being two copies in the same sample (abundance >0), and the whole MGS is removed from that sample
 my $MGStoolowGsThr = $FILTER_DEFAULT{minimum_mgs_genes_per_sample};
 my $mode = "MGS";
-my $appendWriteTrigger = 200; #every Xth samples, genes are written (to manage memory); #limit this, perl seems to have some issues with too large strings..
+my $appendWriteTrigger = $FILTER_DEFAULT{phase1_flush_samples};
+# Publish Stage-I records often enough to bound Perl's large string buffers.
+# The worker shards themselves remain on durable shared scratch because the
+# parent consumes them after the worker's node-local storage has been removed.
 my $startSubFromMGS = ""; #debug option: only start resubmitting tree building from this MGS (e.g. "MGS.1382" )
 #define local files..
 my $lSNPdir="SNP"; my $lMAPdir = "mapping";
@@ -3407,6 +3423,241 @@ sub writePhase1WorkerPlan {
 	retry_rename($temporary, $path, label => 'publish Phase-I worker plan');
 }
 
+sub phase1SelectedGeneFingerprint {
+	my $digest = Digest::SHA->new(256);
+	$digest->add('strain-phase1-selected-genes-v1', "\0",
+		phase1PathStatComponent($gene2taxF), "\0", $presortGenes, "\0");
+	# The selected seed set is deterministic from the stat-bound gene2tax input,
+	# its rank limit, and these selected MGS identifiers. Binding those inputs
+	# avoids re-hashing millions of Gene2COG keys in every split worker.
+	for my $mgs (@specis) {
+		$digest->add('mgs', "\0", $mgs, "\0");
+	}
+	return $digest->hexdigest;
+}
+
+sub phase1IndexShardFingerprint {
+	my ($clusterIndex, $workerForSample) = @_;
+	return unless ref($workerForSample) eq 'HASH' && $maxSubJob > 0;
+	my $digest = Digest::SHA->new(256);
+	$digest->add('strain-phase1-cluster-index-shards-v1', "\0",
+		phase1PathStatComponent($clusterIndex), "\0",
+		phase1SelectedGeneFingerprint(), "\0", $maxSubJob, "\0");
+	for my $sample (sort keys %{$workerForSample}) {
+		$digest->add('sample', "\0", $sample, "\0",
+			$workerForSample->{$sample}, "\0");
+	}
+	return $digest->hexdigest;
+}
+
+sub phase1IndexShardCacheState {
+	my ($base, $fingerprint) = @_;
+	my $manifest = File::Spec->catfile($base, 'manifest.tsv');
+	return unless -s $manifest;
+	open my $input, '<', $manifest or return;
+	my @lines = <$input>;
+	return unless close $input;
+	s/\r?\n\z// for @lines;
+	return unless @lines == $maxSubJob + 2
+		&& $lines[0] eq join("\t", qw(version fingerprint worker_count))
+		&& $lines[1] eq join("\t", 1, $fingerprint, $maxSubJob);
+	my (@paths, @records);
+	for my $worker (0 .. $maxSubJob - 1) {
+		my @fields = split /\t/, $lines[$worker + 2], -1;
+		my $expectedName = "worker.$worker.bin";
+		return unless @fields == 5 && $fields[0] eq 'worker'
+			&& $fields[1] eq "$worker" && $fields[2] =~ /\A\d+\z/
+			&& $fields[3] =~ /\A\d+\z/ && $fields[4] eq $expectedName;
+		my $path = File::Spec->catfile($base, $expectedName);
+		my $bytes = -s $path;
+		return unless -f $path && defined($bytes) && $bytes == $fields[3];
+		push @paths, $path;
+		push @records, 0 + $fields[2];
+	}
+	return (\@paths, \@records, $manifest);
+}
+
+sub publishPhase1IndexShards {
+	my ($clusterIndex, $workerForSample, $base, $fingerprint) = @_;
+	make_path($base) unless -d $base;
+	my @final = map { File::Spec->catfile($base, "worker.$_.bin") }
+		0 .. $maxSubJob - 1;
+	my @temporary = map { "$_.tmp.$$" } @final;
+	my $metadata;
+	my $ok = eval {
+		$metadata = writeClstrRevBinaryShards($clusterIndex, $Gene2COG,
+			$workerForSample, \@temporary, $fingerprint);
+		for my $worker (0 .. $maxSubJob - 1) {
+			retry_rename($temporary[$worker], $final[$worker],
+				label => "publish Phase-I cluster-index shard $worker");
+		}
+		my @manifest = (
+			join("\t", qw(version fingerprint worker_count)),
+			join("\t", 1, $fingerprint, $maxSubJob),
+		);
+		for my $record (@{$metadata}) {
+			push @manifest, join("\t", 'worker', $record->{worker},
+				$record->{records}, $record->{bytes},
+				"worker.$record->{worker}.bin");
+		}
+		atomic_write_text(File::Spec->catfile($base, 'manifest.tsv'),
+			join("\n", @manifest)."\n",
+			label => 'publish Phase-I cluster-index shard manifest');
+		1;
+	};
+	my $error = $@;
+	for my $path (@temporary) {
+		retry_unlink($path, fatal => 0,
+			label => 'clean incomplete Phase-I cluster-index shard')
+			if -e $path || -l $path;
+	}
+	die $error unless $ok;
+	my $totalRecords = 0;
+	my $totalBytes = 0;
+	$totalRecords += $_->{records} for @{$metadata};
+	$totalBytes += $_->{bytes} for @{$metadata};
+	print "Published $maxSubJob atomic binary cluster-index shard(s): "
+		."$totalRecords worker-cluster records, $totalBytes bytes; cache=$base\n";
+	return 1;
+}
+
+sub loadPhase1ClusterIndex {
+	my ($clusterIndex, $workerForSample, $mySamples) = @_;
+	if ($maxSubJob > 0 && ref($workerForSample) eq 'HASH') {
+		my $fingerprint = phase1IndexShardFingerprint($clusterIndex, $workerForSample);
+		my $base = File::Spec->catdir($scratchD, 'phase1_cluster_index', $fingerprint);
+		my ($paths, $records) = phase1IndexShardCacheState($base, $fingerprint);
+		if (!$paths && !$subJob) {
+			my $published = eval {
+				publishPhase1IndexShards($clusterIndex, $workerForSample,
+					$base, $fingerprint);
+				1;
+			};
+			unless ($published) {
+				my $error = $@ || 'unknown publication error';
+				$error =~ s/\s+\z//;
+				limitedWarn('Phase-I cluster-index shard publication',
+					"Could not publish Phase-I cluster-index shards; using the full index as a compatibility fallback: $error\n");
+			}
+			($paths, $records) = phase1IndexShardCacheState($base, $fingerprint);
+		}
+		if ($paths) {
+			my $clusters = eval {
+				readClstrRevBinaryShard($paths->[$subJob], $fingerprint,
+					$subJob, $maxSubJob);
+			};
+			if ($clusters) {
+				print "Loaded Phase-I binary cluster-index shard $subJob/$maxSubJob: "
+					."$records->[$subJob] cluster record(s), source=$paths->[$subJob]\n";
+				return ($clusters, 'binary_worker_shard');
+			}
+			my $error = $@ || 'unknown shard validation error';
+			$error =~ s/\s+\z//;
+			limitedWarn('Phase-I cluster-index shard validation',
+				"Phase-I cluster-index shard $subJob is invalid; using the full index as a compatibility fallback: $error\n");
+		}
+	} elsif ($maxSubJob > 0) {
+		limitedWarn('Phase-I cluster-index shard assignment',
+			"Worker/sample aliases cannot be assigned uniquely; using the full cluster index for this split generation\n");
+	}
+	my (undef, $clusters) = readClstrRev($clusterIndex, 0, $Gene2COG, $mySamples);
+	return ($clusters, 'full_index_fallback');
+}
+
+sub phase1ProteinCacheFingerprint {
+	my ($proteinFile) = @_;
+	return sha256_hex(join("\0", 'strain-phase1-protein-cache-v1',
+		phase1PathStatComponent($proteinFile),
+		phase1SelectedGeneFingerprint()));
+}
+
+sub phase1ProteinCacheState {
+	my ($base, $fingerprint) = @_;
+	my $manifest = File::Spec->catfile($base, 'manifest.tsv');
+	return unless -s $manifest;
+	open my $input, '<', $manifest or return;
+	my @lines = <$input>;
+	return unless close $input;
+	s/\r?\n\z// for @lines;
+	return unless @lines == 2
+		&& $lines[0] eq join("\t", qw(version fingerprint records bytes file));
+	my @fields = split /\t/, $lines[1], -1;
+	return unless @fields == 5 && $fields[0] eq '1'
+		&& $fields[1] eq $fingerprint && $fields[2] =~ /\A\d+\z/
+		&& $fields[3] =~ /\A\d+\z/ && $fields[4] eq 'catalog.proteins.bin';
+	my $path = File::Spec->catfile($base, $fields[4]);
+	my $bytes = -s $path;
+	return unless -f $path && defined($bytes) && $bytes == $fields[3];
+	return ($path, 0 + $fields[2], $manifest);
+}
+
+sub publishPhase1ProteinCache {
+	my ($proteins, $base, $fingerprint) = @_;
+	make_path($base) unless -d $base;
+	my $final = File::Spec->catfile($base, 'catalog.proteins.bin');
+	my $temporary = "$final.tmp.$$";
+	my $metadata;
+	my $ok = eval {
+		$metadata = writeSequenceBinaryCache($proteins, $temporary, $fingerprint);
+		retry_rename($temporary, $final,
+			label => 'publish common Phase-I catalogue-protein cache');
+		my $contents = join("\t", qw(version fingerprint records bytes file))."\n"
+			.join("\t", 1, $fingerprint, $metadata->{records},
+				$metadata->{bytes}, 'catalog.proteins.bin')."\n";
+		atomic_write_text(File::Spec->catfile($base, 'manifest.tsv'), $contents,
+			label => 'publish common Phase-I catalogue-protein manifest');
+		1;
+	};
+	my $error = $@;
+	retry_unlink($temporary, fatal => 0,
+		label => 'clean incomplete Phase-I catalogue-protein cache')
+		if -e $temporary || -l $temporary;
+	die $error unless $ok;
+	print "Published common Phase-I catalogue-protein cache: "
+		."$metadata->{records} sequence(s), $metadata->{bytes} bytes; cache=$final\n";
+	return 1;
+}
+
+sub loadPhase1CatalogProteins {
+	my ($proteinFile) = @_;
+	my $available = fileGZe($proteinFile) ? 1 : 0;
+	return ({}, 0, 'unavailable') unless $available;
+	# A common cache only amortizes its publication when Phase I is split. Avoid
+	# adding a large scratch write to the ordinary single-process path.
+	unless ($maxSubJob > 1) {
+		return (readFasta($proteinFile, 1, "\\s", $Gene2COG, { fai => 1 }),
+			1, 'catalogue_fasta');
+	}
+	my $fingerprint = phase1ProteinCacheFingerprint($proteinFile);
+	my $base = File::Spec->catdir($scratchD, 'phase1_catalogue_proteins', $fingerprint);
+	my ($cachePath, $expectedRecords) = phase1ProteinCacheState($base, $fingerprint);
+	if ($cachePath) {
+		my $proteins = eval { readSequenceBinaryCache($cachePath, $fingerprint) };
+		if ($proteins && scalar(keys %{$proteins}) == $expectedRecords) {
+			print "Loaded common Phase-I catalogue-protein cache: $expectedRecords sequence(s), source=$cachePath\n";
+			return ($proteins, 1, 'binary_common_subset');
+		}
+		my $error = $@ || 'sequence count does not match the manifest';
+		$error =~ s/\s+\z//;
+		limitedWarn('Phase-I catalogue-protein cache validation',
+			"Common Phase-I catalogue-protein cache is invalid; using the source FASTA as a compatibility fallback: $error\n");
+	}
+	my $proteins = readFasta($proteinFile, 1, "\\s", $Gene2COG, { fai => 1 });
+	if (!$subJob) {
+		my $published = eval {
+			publishPhase1ProteinCache($proteins, $base, $fingerprint);
+			1;
+		};
+		unless ($published) {
+			my $error = $@ || 'unknown publication error';
+			$error =~ s/\s+\z//;
+			limitedWarn('Phase-I catalogue-protein cache publication',
+				"Could not publish the common Phase-I catalogue-protein cache; continuing with the source FASTA result: $error\n");
+		}
+	}
+	return ($proteins, 1, 'catalogue_fasta');
+}
+
 
 sub prepGene2MGS{
 	print "Preparing base strain alignments, per MGS\nThis might take a good while..\n";
@@ -3418,6 +3669,7 @@ sub prepGene2MGS{
 	#set up front lets us restrict the cluster-index parse itself, so the discarded data is
 	#never materialized in this process at all.
 	my $mySamplesHR = undef;
+	my $workerForSampleHR = undef;
 	if ($maxSubJob){
 		# Partition whole assembly groups, never individual samples. The
 		# catalogue has one shared-reference driver, while every member still
@@ -3431,9 +3683,12 @@ sub prepGene2MGS{
 		writePhase1WorkerPlan("$LOGDIR/phase1_worker_plan.tsv",
 			$samplesByGroup, $workerForGroup, $groupWork, $groupMeta, $workerLoads)
 			unless $subJob;
-		my (%mine, %ownedGroup);
+		my (%mine, %ownedGroup, %workerForSample);
+		my $ambiguousAliasAssignment = 0;
 		for my $group (@groups) {
-			next unless $workerForGroup->{$group} == $subJob;
+			my $worker = $workerForGroup->{$group};
+			$workerForSample{$_} = $worker for @{$samplesByGroup->{$group}};
+			next unless $worker == $subJob;
 			$ownedGroup{$group} = 1;
 			$mine{$_} = 1 for @{$samplesByGroup->{$group}};
 		}
@@ -3441,9 +3696,18 @@ sub prepGene2MGS{
 		for my $alias (keys %{$map{altNms} || {}}) {
 			my $sample = $map{altNms}{$alias};
 			my $group = $groupForSample->{$sample};
-			$mine{$alias} = 1 if defined($group) && $ownedGroup{$group};
+			next unless defined $group;
+			my $worker = $workerForGroup->{$group};
+			if (exists($workerForSample{$alias})
+					&& $workerForSample{$alias} != $worker) {
+				$ambiguousAliasAssignment = 1;
+			} else {
+				$workerForSample{$alias} = $worker;
+			}
+			$mine{$alias} = 1 if $ownedGroup{$group};
 		}
 		$mySamplesHR = \%mine;
+		$workerForSampleHR = \%workerForSample unless $ambiguousAliasAssignment;
 		my $totalWorkerLoad = 0;
 		$totalWorkerLoad += $_ for @{$workerLoads};
 		my $plannedSamples = 0;
@@ -3456,16 +3720,32 @@ sub prepGene2MGS{
 			.sprintf('%.2f', $totalWorkerLoad)." units)\n";
 	}
 
-	my ($hr1,$cl2gene) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,$Gene2COG,$mySamplesHR);
-	$hr1 = {};
+	my $modelSubstepStarted = time;
+	my $cluster_index = "$GCd/compl.incompl.$clusterID.fna.clstr.idx";
+	my ($cl2gene, $clusterIndexSource) = loadPhase1ClusterIndex(
+		$cluster_index, $workerForSampleHR, $mySamplesHR);
+	stepComplete("locus-model cluster-index scan", $modelSubstepStarted,
+		"worker=$subJob",
+		"sample_filter=".($mySamplesHR ? scalar(keys %{$mySamplesHR}) : 'all'),
+		"represented_seed_clusters=".scalar(keys %{$cl2gene}),
+		"source=$clusterIndexSource",
+		"index=$cluster_index");
 
+	$modelSubstepStarted = time;
 	my $protein_file = "$GCd/compl.incompl.$clusterID.prot.faa";
-	if (fileGZe($protein_file)) {
-		$catalogProteins = readFasta($protein_file,1,"\\s",$Gene2COG, { fai => 1 });
-	} else {
+	my ($loadedCatalogProteins, $protein_file_available, $proteinSource) =
+		loadPhase1CatalogProteins($protein_file);
+	$catalogProteins = $loadedCatalogProteins;
+	if (!$protein_file_available) {
 		warn "Catalogue protein file $protein_file is unavailable; keeping same-COG catalogue clusters separate\n";
 	}
+	stepComplete("locus-model catalogue-protein loading", $modelSubstepStarted,
+		"worker=$subJob", "source_available=$protein_file_available",
+		"loaded_proteins=".scalar(keys %{$catalogProteins}),
+		"load_mode=$proteinSource",
+		"catalogue=$protein_file");
 
+	$modelSubstepStarted = time;
 	my @records;
 	for my $MGS (keys %{$COGprios}) {
 		# In tree-recalculation mode, published or complete staged inputs are
@@ -3526,7 +3806,13 @@ sub prepGene2MGS{
 	}
 	$SIgenes = $new_si_genes;
 	$COGprios = $new_priorities;
+	stepComplete("locus-group construction", $modelSubstepStarted,
+		"worker=$subJob", "ranked_clusters=$ranked_record_count",
+		"resolved_loci=".scalar(@selected_locus_groups),
+		"merged_seeds=".($locus_model->{merged_seeds} || 0),
+		"linkage_rejections=$linkage_rejections");
 
+	$modelSubstepStarted = time;
 	my ($gene_sample_combinations, $ambiguous_seed_samples, $missing_clusters) = (0, 0, 0);
 	my $unrepresentedWorkerLoci = 0;
 	my (%contextMembersNeeded, %contextLociNeeded);
@@ -3595,6 +3881,11 @@ sub prepGene2MGS{
 			if exists $LocusContext->{$locus};
 	}
 	$LocusContext = \%keptLocusContext;
+	stepComplete("worker-member materialization", $modelSubstepStarted,
+		"worker=$subJob", "catalogue_drivers=".scalar(keys %cl2gene2),
+		"locus_sample_combinations=$gene_sample_combinations",
+		"ambiguous_combinations=$ambiguous_seed_samples",
+		"unrepresented_worker_loci=$unrepresentedWorkerLoci");
 	print "Prepared ".scalar(@selected_locus_groups)." loci from $ranked_record_count"
 		." ranked catalogue clusters; merged $locus_model->{merged_seeds} compatible same-COG seeds. "
 		."$gene_sample_combinations locus-sample combinations, $ambiguous_seed_samples with multiple candidates"
@@ -4676,13 +4967,19 @@ sub prepareEpaOnlyRetryState {
 
 sub appendWriteMGSgenes {
     my ($writeLink) = @_;
-	print "Flushing buffered MGS records\n";
 
     my $wrMGS = 0;
     my $suffix = ".$subJob";
     my $baseOut = "$scratchD/outs";
+	my @pendingMGS = grep {
+		defined($OFstrH{$_}) && length($OFstrH{$_})
+	} keys %OFstrH;
+	my $pendingCount = scalar(@pendingMGS);
+	my $flushStarted = time;
+	my $nextFlushProgress = $flushStarted + 60;
+	print "Flushing buffered MGS records: $pendingCount MGS to durable scratch $baseOut\n";
 
-    foreach my $MGS (keys %OFstrH) {
+    foreach my $MGS (@pendingMGS) {
 
         my $nt = $OFstrH{$MGS} or next;
 		next if ($nt eq "");
@@ -4731,6 +5028,11 @@ sub appendWriteMGSgenes {
         $OQstrH{$MGS} = "";
 
         $wrMGS++;
+		if (time >= $nextFlushProgress) {
+			stepProgress("buffered MGS publication", $wrMGS, $pendingCount,
+				$flushStarted, "worker=$subJob");
+			$nextFlushProgress = time + 60;
+		}
     }
 
     print "wrote for $wrMGS MGS data..\n";
@@ -7242,6 +7544,8 @@ Workflow splitting:
   -maxSubJob INT                Stage-I worker count: -1 selects automatically
                                  (default; 50-150 assembly groups/worker), 0
                                  disables splitting, positive values are explicit
+  -flushEvery INT               Publish buffered Stage-I records after this many
+                                 sample rows [default $default->{phase1_flush_samples}]
   -treeOOMMaxMemGB FLOAT        Maximum memory for automatic tree OOM retries;
                                  each OOM round doubles the previous request and
                                  at most three rounds are attempted [default:

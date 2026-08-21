@@ -454,7 +454,11 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## strain_within.pl
 
-Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.30`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.34`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+
+For split Phase I, the parent scans the catalogue cluster index once and atomically publishes a provenance-bound binary membership shard for each worker under shared strain scratch. The manifest is published only after every shard is complete. Workers validate the generation, size, header, record count and payload digest before use; an absent, stale or corrupt cache falls back to the original full-index parser.
+
+The parent also publishes one common binary subset of the selected catalogue proteins. All Phase-I workers use that subset for sequence-aware locus grouping and ambiguous-copy selection instead of independently scanning the full catalogue FAA. Catalogue nucleotide sequences are deliberately not copied at this point: Phase-I worker nucleotide records come from sample consensus FASTAs, while the parent determines and streams the exact catalogue FNA outgroup set only after Phase I. Creating an early catalogue FNA subset would add a large read and would still miss candidate genes when `-outgroupReferenceGeneCap` exceeds `-presortGenes`.
 
 ### Inputs, execution and workflow control
 
@@ -530,7 +534,7 @@ These options remain parsed so existing generated commands and worker scripts do
 | `-treeSubFromMGS` | deprecated | Use `-MGSsubset`. |
 | `-noGeneLimit` | deprecated | Use `-maxGenes 0`. |
 | `-subjob` | internal | Split-worker index supplied by the parent process. |
-| `-flushEvery` | internal | Parent-to-worker buffering control. |
+| `-flushEvery` | internal | Publish buffered Stage-I records after this many sample rows; default `50`. Lower values reduce peak Perl memory and spread shared-scratch writes, but reopen per-MGS shard files more often. |
 | `-disableQC` | internal | Developer override that disables biological QC. |
 
 ### Mosaic and outgroup preparation

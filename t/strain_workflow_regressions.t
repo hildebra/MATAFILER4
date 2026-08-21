@@ -7,7 +7,10 @@ use FindBin qw($Bin);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
-use Mods::GenoMetaAss qw(readClstrRev readFasta);
+use Mods::GenoMetaAss qw(
+	readClstrRev readFasta writeClstrRevBinaryShards readClstrRevBinaryShard
+	writeSequenceBinaryCache readSequenceBinaryCache
+);
 
 sub write_file {
 	my ($path, $contents) = @_;
@@ -67,6 +70,93 @@ is_deeply(
 	{},
 	'an explicitly empty cluster-member subset does not fall back to the complete catalogue',
 );
+
+write_file($cluster_index, join("\n",
+	"seed1\tsample1__gene1,sample2__gene2,alias1__gene3",
+	"seed2\tsample2__gene4,sample3__gene5",
+	"drop\tsample1__ignored",
+).'\n');
+my @binary_shards = map { File::Spec->catfile($tmp, "cluster.worker.$_.bin") }
+	0 .. 2;
+my $shard_fingerprint = 'a' x 64;
+my $shard_metadata = writeClstrRevBinaryShards(
+	$cluster_index,
+	{ seed1 => 1, seed2 => 1 },
+	{ sample1 => 0, alias1 => 0, sample2 => 1, sample3 => 1 },
+	\@binary_shards,
+	$shard_fingerprint,
+);
+is_deeply(
+	[map { $_->{records} } @{$shard_metadata}],
+	[1, 2, 0],
+	'binary cluster-index publication records only selected clusters in each worker partition',
+);
+is_deeply(
+	readClstrRevBinaryShard($binary_shards[0], $shard_fingerprint, 0, 3),
+	{ seed1 => 'sample1__gene1,alias1__gene3' },
+	'binary cluster-index shard preserves member order and catalogue aliases',
+);
+is_deeply(
+	readClstrRevBinaryShard($binary_shards[1], $shard_fingerprint, 1, 3),
+	{ seed1 => 'sample2__gene2', seed2 => 'sample2__gene4,sample3__gene5' },
+	'binary cluster-index shard contains only the assigned worker members',
+);
+is_deeply(
+	readClstrRevBinaryShard($binary_shards[2], $shard_fingerprint, 2, 3),
+	{},
+	'an empty worker receives a valid binary shard rather than falling back to the full index',
+);
+my $wrong_shard_provenance = eval {
+	readClstrRevBinaryShard($binary_shards[0], 'b' x 64, 0, 3);
+	1;
+};
+ok(!$wrong_shard_provenance && $@ =~ /Invalid binary cluster-index shard header/,
+	'binary cluster-index reader rejects a shard from another provenance generation');
+my $corrupt_shard = File::Spec->catfile($tmp, 'cluster.worker.corrupt.bin');
+my $corrupt_contents = slurp($binary_shards[0]);
+substr($corrupt_contents, -1, 1) = chr(ord(substr($corrupt_contents, -1, 1)) ^ 1);
+write_file($corrupt_shard, $corrupt_contents);
+my $corrupt_shard_accepted = eval {
+	readClstrRevBinaryShard($corrupt_shard, $shard_fingerprint, 0, 3);
+	1;
+};
+ok(!$corrupt_shard_accepted && $@ =~ /payload digest mismatch/,
+	'binary cluster-index reader rejects payload or trailer corruption');
+
+my $protein_cache = File::Spec->catfile($tmp, 'catalog.proteins.bin');
+my $protein_fingerprint = 'c' x 64;
+my $protein_metadata = writeSequenceBinaryCache(
+	{ seed1 => 'MPEPTIDE', seed2 => 'MSECOND', empty => '' },
+	$protein_cache,
+	$protein_fingerprint,
+);
+is_deeply(
+	$protein_metadata,
+	{ records => 2, bytes => -s $protein_cache },
+	'binary sequence cache records only nonempty reference proteins and reports its durable size',
+);
+is_deeply(
+	readSequenceBinaryCache($protein_cache, $protein_fingerprint),
+	{ seed1 => 'MPEPTIDE', seed2 => 'MSECOND' },
+	'binary sequence cache round-trips the common catalogue-protein subset exactly',
+);
+my $wrong_protein_provenance = eval {
+	readSequenceBinaryCache($protein_cache, 'd' x 64);
+	1;
+};
+ok(!$wrong_protein_provenance && $@ =~ /Invalid binary sequence-cache header/,
+	'binary sequence cache rejects a different selected-catalogue generation');
+my $corrupt_protein_cache = File::Spec->catfile($tmp, 'catalog.proteins.corrupt.bin');
+my $corrupt_protein_contents = slurp($protein_cache);
+substr($corrupt_protein_contents, -1, 1) =
+	chr(ord(substr($corrupt_protein_contents, -1, 1)) ^ 1);
+write_file($corrupt_protein_cache, $corrupt_protein_contents);
+my $corrupt_protein_accepted = eval {
+	readSequenceBinaryCache($corrupt_protein_cache, $protein_fingerprint);
+	1;
+};
+ok(!$corrupt_protein_accepted && $@ =~ /payload digest mismatch/,
+	'binary sequence cache rejects same-size protein-cache corruption');
 
 my $strain = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 my $strain2 = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
@@ -300,7 +390,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.30;/,
+like($strain, qr/my \$version = 1\.34;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -410,6 +500,18 @@ like($strain,
 like($strain,
 	qr/locus-model construction.*?catalogue_drivers=.*?resolved_loci=.*?consensus-gene extraction and publication.*?full-tree input sizing/s,
 	'major extraction and tree-preparation stages also report concise completion statistics');
+like($strain,
+	qr/locus-model cluster-index scan.*?represented_seed_clusters=.*?locus-model catalogue-protein loading.*?loaded_proteins=.*?locus-group construction.*?ranked_clusters=.*?resolved_loci=.*?worker-member materialization.*?locus_sample_combinations=/s,
+	'locus-model construction reports scan, protein, grouping, and worker-projection subphase timings');
+like($strain,
+	qr/sub phase1SelectedGeneFingerprint.*?phase1PathStatComponent\(\$gene2taxF\).*?\$presortGenes.*?for my \$mgs \(\@specis\).*?sub phase1IndexShardFingerprint.*?phase1PathStatComponent\(\$clusterIndex\).*?phase1SelectedGeneFingerprint.*?sort keys %\{\$workerForSample\}.*?sub publishPhase1IndexShards.*?writeClstrRevBinaryShards.*?retry_rename\(\$temporary\[\$worker\], \$final\[\$worker\].*?atomic_write_text\(File::Spec->catfile\(\$base, 'manifest\.tsv'\).*?sub loadPhase1ClusterIndex/s,
+	'parent publishes provenance-bound binary worker shards atomically before the cache manifest');
+like($strain,
+	qr/phase1IndexShardCacheState.*?readClstrRevBinaryShard.*?binary_worker_shard.*?readClstrRev\(\$clusterIndex, 0, \$Gene2COG, \$mySamples\).*?full_index_fallback/s,
+	'split workers validate their binary shard and retain the original full-index fallback');
+like($strain,
+	qr/sub phase1ProteinCacheFingerprint.*?phase1PathStatComponent\(\$proteinFile\).*?phase1SelectedGeneFingerprint.*?sub publishPhase1ProteinCache.*?writeSequenceBinaryCache.*?retry_rename\(\$temporary, \$final.*?atomic_write_text\(File::Spec->catfile\(\$base, 'manifest\.tsv'\).*?sub loadPhase1CatalogProteins.*?unless \(\$maxSubJob > 1\).*?catalogue_fasta.*?readSequenceBinaryCache.*?binary_common_subset.*?readFasta\(\$proteinFile, 1, "\\\\s", \$Gene2COG, \{ fai => 1 \}\).*?catalogue_fasta/s,
+	'parent publishes one provenance-bound binary protein subset and workers retain FASTA fallback');
 like($strain,
 	qr/historical exclusion loading.*?excluded_MGS=.*?outgroup-reference preparation.*?reference_NT=.*?MGS_with_outgroup_candidates=/s,
 	'historical exclusions and outgroup-reference preparation report their final counts');
@@ -680,6 +782,12 @@ like($strain,
 	qr/"flushEvery=i"\s+=> \\\$appendWriteTrigger.*?%outgroupGeneCache = \(\).*?'-flushEvery', \$appendWriteTrigger/s,
 	'within-strain extraction exposes its buffer bound to workers and releases per-MGS outgroup caches');
 like($strain,
+	qr/phase1_flush_samples => 50.*?my \$appendWriteTrigger = \$FILTER_DEFAULT\{phase1_flush_samples\}/s,
+	'within-strain bounds the default Stage-I buffer to fifty sample rows');
+like($strain,
+	qr/sub appendWriteMGSgenes.*?my \@pendingMGS = grep.*?Flushing buffered MGS records: \$pendingCount MGS to durable scratch.*?stepProgress\("buffered MGS publication"/s,
+	'within-strain reports progress while durable worker shards are published');
+like($strain,
 	qr/contextMembersNeeded.*?contextLociNeeded.*?my %keptMemberContext.*?\$MemberContext = \\%keptMemberContext.*?my %keptLocusContext.*?\$LocusContext = \\%keptLocusContext/s,
 	'within-strain extraction retains scoring contexts only for potentially ambiguous loci');
 unlike($strain,
@@ -701,7 +809,7 @@ like($strain,
 	qr/sub phase1EstimatedInputBytes.*?fileGZs\(\$nominal\).*?sub phase1SampleWorkEstimate.*?phase1EstimatedInputBytes\(\$readyNT\).*?phase1EstimatedInputBytes\(\$vcf\).*?'regenerate'.*?sub phase1GroupWorkEstimates/s,
 	'Phase I estimates FASTA scan size and penalizes consensus regeneration');
 like($strain,
-	qr/phase1GroupWorkEstimates\(\$samplesByGroup\).*?balance_assembly_groups\(\$samplesByGroup, \$maxSubJob, \$groupWork\).*?writePhase1WorkerPlan\("\$LOGDIR\/phase1_worker_plan\.tsv".*?\$workerForGroup->\{\$group\} == \$subJob.*?\$plannedSamples \+= scalar\(\@\{\$samplesByGroup->\{\$_\}\}\).*?estimated work/s,
+	qr/phase1GroupWorkEstimates\(\$samplesByGroup\).*?balance_assembly_groups\(\$samplesByGroup, \$maxSubJob, \$groupWork\).*?writePhase1WorkerPlan\("\$LOGDIR\/phase1_worker_plan\.tsv".*?my \$worker = \$workerForGroup->\{\$group\}.*?next unless \$worker == \$subJob.*?\$plannedSamples \+= scalar\(\@\{\$samplesByGroup->\{\$_\}\}\).*?estimated work/s,
 	'split extraction keeps assembly groups intact while balancing estimated work and auditing its plan');
 like($strain,
 	qr/pre-restricted to .*?sample driver\(s\) with target loci/s,

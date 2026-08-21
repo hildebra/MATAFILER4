@@ -7,6 +7,7 @@ use POSIX qw(_exit);
 use File::Spec;
 use File::Temp qw(tempfile);
 use Time::HiRes ();
+use Digest::SHA ();
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::ReadLibrary qw(
@@ -35,7 +36,9 @@ our @EXPORT_OK = qw(
 		renameFastHD  prefixFAhd parse_duration resolve_path
 		clenSplitFastas 
 		
-		readClstrRev  readClstrRevGenes readClstrRevContigSubset readClstrRevSmplCtgGenSubset
+		readClstrRev visitClstrRevRows writeClstrRevBinaryShards readClstrRevBinaryShard
+		writeSequenceBinaryCache readSequenceBinaryCache
+		readClstrRevGenes readClstrRevContigSubset readClstrRevSmplCtgGenSubset
 		unzipFileARezip  is_integer 
 		readGFF reverse_complement reverse_complement_IUPAC
 		
@@ -1188,6 +1191,23 @@ sub readClstrRevContigSubset{ #gets the exact assembled genes clustered in GC ge
 }
 
 
+sub visitClstrRevRows {
+	my ($inF, $visitor) = @_;
+	die "visitClstrRevRows requires an input file and callback\n"
+		unless defined($inF) && length($inF) && ref($visitor) eq 'CODE';
+	print "Reading clstr $inF  .. \n";
+	my ($I,$OK) = gzipopen($inF,"ClstrFile");
+	while (my $lin = <$I>){
+		chomp $lin;
+		next if ($lin =~ m/^#/ || length($lin) < 5);
+		my @arr = split /\t/,$lin,-1;
+		$visitor->($arr[0], $arr[1]);
+	}
+	close $I or die "Cannot close cluster index $inF: $!\n";
+	print "done reading ClStr\n";
+	return 1;
+}
+
 sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version for my shortened index file
 	my $inF = $_[0];
 	my $createR = 1;
@@ -1212,21 +1232,13 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 		}
 	}
 	my $retR={}; my %retF;
-	print "Reading clstr $inF  .. \n";
 	print "Restricting cluster members to a subset of " . scalar(keys %{$memberSubsHR}) . " samples\n"
 		if $memberSubsHR;
-	my ($I,$OK) = gzipopen($inF,"ClstrFile");
-	#open I,"<$inF" or die "Can't find rev clustering file $inF\n"; 
-	my $curCl=0;
-	while (my $lin = <$I>){
-		chomp $lin; 
-		next if ($lin =~ m/^#/ || length($lin) < 5);
-		my @arr = split /\t/,$lin,-1;
-		#my $pos = index($_, "\t");
-		$curCl = ($arr[0]);#substr($_,0,$pos);
+	visitClstrRevRows($inF, sub {
+		my ($curCl, $members) = @_;
 		
 		if ($doSubset == 1){
-			next unless (exists($$subsHR{$curCl}));
+			return unless (exists($$subsHR{$curCl}));
 		}
 		
 		#my $rem = $arr[1]; #substr($_,$pos+1);
@@ -1234,7 +1246,7 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 		#foreach (split /,/,$rem){$retR{$_} = $curCl;}
 		my @tmpArr; my $tmpArrSplit = 0;
 		if ($createR > 0){
-			@tmpArr = split /,/,$arr[1]; $tmpArrSplit = 1;
+			@tmpArr = split /,/,$members; $tmpArrSplit = 1;
 			if ($doSubset == 1){
 				my $gogo=0;
 				foreach (@tmpArr) {
@@ -1243,13 +1255,13 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 						 last;
 					 }
 				}
-				next unless ($gogo);
+				return unless ($gogo);
 			}
 			@{$retR}{@tmpArr} = ($curCl) x @tmpArr;
 		}
 		if ($createR != 2){
 			if ($memberSubsHR){
-				@tmpArr = split /,/,$arr[1] unless $tmpArrSplit;
+				@tmpArr = split /,/,$members unless $tmpArrSplit;
 				my @keep;
 				foreach my $mem (@tmpArr) {
 					my $m2 = $mem; $m2 =~ s/^>//;
@@ -1258,15 +1270,259 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 				}
 				$retF{$curCl} = join(",", @keep) if @keep;
 			} else {
-				$retF{$curCl} = $arr[1];
+				$retF{$curCl} = $members;
 			}
 		}
-		@arr = ();
-
-	}
-	close $I;
-	print "done reading ClStr\n";
+	});
 	return ($retR,\%retF);
+}
+
+my $clstrShardMagic = 'M4P1IXB1';
+my $sequenceCacheMagic = 'M4P1SQB1';
+
+sub _writeBinaryCacheBytes {
+	my ($handle, $bytes, $path, $kind) = @_;
+	print {$handle} $bytes
+		or die "Cannot write $kind $path: $!\n";
+}
+
+sub writeClstrRevBinaryShards {
+	my ($inF, $selectedClusters, $workerForSample, $paths, $fingerprint) = @_;
+	die "writeClstrRevBinaryShards requires selected-cluster and worker maps\n"
+		unless ref($selectedClusters) eq 'HASH' && ref($workerForSample) eq 'HASH';
+	die "writeClstrRevBinaryShards requires one or more output paths\n"
+		unless ref($paths) eq 'ARRAY' && @{$paths};
+	die "Invalid cluster-index shard fingerprint\n"
+		unless defined($fingerprint) && $fingerprint =~ /\A[0-9a-f]{64}\z/;
+	my $workerCount = scalar(@{$paths});
+	my (@handles, @digests, @recordCounts);
+	for my $worker (0 .. $workerCount - 1) {
+		my $path = $paths->[$worker];
+		open my $handle, '>', $path
+			or die "Cannot create binary cluster-index shard $path: $!\n";
+		binmode $handle
+			or die "Cannot set binary mode for cluster-index shard $path: $!\n";
+		my $header = $clstrShardMagic
+			.pack('NN', $worker, $workerCount).pack('H*', $fingerprint);
+		_writeBinaryCacheBytes($handle, $header, $path,
+			'binary cluster-index shard');
+		push @handles, $handle;
+		push @digests, Digest::SHA->new(256);
+		push @recordCounts, 0;
+	}
+
+	visitClstrRevRows($inF, sub {
+		my ($cluster, $memberString) = @_;
+		return unless exists($selectedClusters->{$cluster});
+		my (@byWorker, @workersWithMembers, %workerSeen);
+		for my $member (split /,/, $memberString) {
+			my $unadorned = $member;
+			$unadorned =~ s/^>//;
+			my ($sample) = split /__/, $unadorned, 2;
+			next unless defined($sample) && exists($workerForSample->{$sample});
+			my $worker = $workerForSample->{$sample};
+			die "Invalid worker '$worker' for catalogue member $member\n"
+				unless defined($worker) && $worker =~ /\A\d+\z/
+					&& $worker < $workerCount;
+			push @workersWithMembers, $worker unless $workerSeen{$worker}++;
+			push @{$byWorker[$worker]}, $member;
+		}
+		for my $worker (@workersWithMembers) {
+			my $members = join(',', @{$byWorker[$worker]});
+			die "Cluster-index shard record is too large to encode\n"
+				if length($cluster) > 0xffffffff || length($members) > 0xffffffff;
+			my $record = pack('NN', length($cluster), length($members))
+				.$cluster.$members;
+			_writeBinaryCacheBytes($handles[$worker], $record, $paths->[$worker],
+				'binary cluster-index shard');
+			$digests[$worker]->add($record);
+			$recordCounts[$worker]++;
+		}
+	});
+
+	my @metadata;
+	for my $worker (0 .. $workerCount - 1) {
+		my $trailer = pack('NNN', 0, 0, $recordCounts[$worker])
+			.$digests[$worker]->digest;
+		_writeBinaryCacheBytes($handles[$worker], $trailer, $paths->[$worker],
+			'binary cluster-index shard');
+		close $handles[$worker]
+			or die "Cannot close binary cluster-index shard $paths->[$worker]: $!\n";
+		my $bytes = -s $paths->[$worker];
+		die "Binary cluster-index shard is empty after publication: $paths->[$worker]\n"
+			unless defined($bytes) && $bytes > 0;
+		push @metadata, {
+			worker => $worker, records => $recordCounts[$worker], bytes => $bytes,
+		};
+	}
+	return \@metadata;
+}
+
+sub _readBinaryCacheBytes {
+	my ($handle, $length, $path, $label, $kind) = @_;
+	my $bytes = '';
+	while (length($bytes) < $length) {
+		my $read = read($handle, $bytes, $length - length($bytes), length($bytes));
+		die "Cannot read $label from $kind $path: $!\n"
+			unless defined $read;
+		die "Truncated $label in $kind $path\n" if $read == 0;
+	}
+	return $bytes;
+}
+
+sub readClstrRevBinaryShard {
+	my ($path, $fingerprint, $expectedWorker, $expectedWorkerCount) = @_;
+	die "Invalid expected cluster-index shard fingerprint\n"
+		unless defined($fingerprint) && $fingerprint =~ /\A[0-9a-f]{64}\z/;
+	die "Invalid expected cluster-index shard worker coordinates\n"
+		unless defined($expectedWorker) && defined($expectedWorkerCount)
+			&& $expectedWorker =~ /\A\d+\z/ && $expectedWorkerCount =~ /\A\d+\z/
+			&& $expectedWorkerCount > 0 && $expectedWorker < $expectedWorkerCount;
+	open my $handle, '<', $path
+		or die "Cannot open binary cluster-index shard $path: $!\n";
+	binmode $handle
+		or die "Cannot set binary mode for cluster-index shard $path: $!\n";
+	my $header = _readBinaryCacheBytes($handle, 48, $path, 'header',
+		'binary cluster-index shard');
+	my ($magic, $worker, $workerCount, $recordedFingerprint) =
+		unpack('a8NNH64', $header);
+	die "Invalid binary cluster-index shard header in $path\n"
+		unless $magic eq $clstrShardMagic && $worker == $expectedWorker
+			&& $workerCount == $expectedWorkerCount
+			&& $recordedFingerprint eq $fingerprint;
+	my $fileBytes = -s $path;
+	die "Cannot determine binary cluster-index shard size for $path\n"
+		unless defined($fileBytes) && $fileBytes >= 92;
+	my $digest = Digest::SHA->new(256);
+	my (%clusters, $recordCount);
+	$recordCount = 0;
+	while (1) {
+		my $lengths = _readBinaryCacheBytes($handle, 8, $path, 'record header',
+			'binary cluster-index shard');
+		my ($clusterLength, $memberLength) = unpack('NN', $lengths);
+		if ($clusterLength == 0 && $memberLength == 0) {
+			my $trailer = _readBinaryCacheBytes($handle, 36, $path, 'trailer',
+				'binary cluster-index shard');
+			my ($recordedCount, $recordedDigest) = unpack('NH64', $trailer);
+			die "Cluster-index shard record-count mismatch in $path\n"
+				unless $recordedCount == $recordCount;
+			die "Cluster-index shard payload digest mismatch in $path\n"
+				unless $recordedDigest eq $digest->hexdigest;
+			my $extra = '';
+			my $extraRead = read($handle, $extra, 1);
+			die "Cannot verify cluster-index shard terminator in $path: $!\n"
+				unless defined $extraRead;
+			die "Trailing data after cluster-index shard terminator in $path\n"
+				if $extraRead;
+			last;
+		}
+		die "Invalid binary cluster-index shard record length in $path\n"
+			if $clusterLength == 0 || $memberLength == 0
+				|| $clusterLength > 16 * 1024 * 1024
+				|| $clusterLength + $memberLength > $fileBytes;
+		my $cluster = _readBinaryCacheBytes($handle, $clusterLength, $path,
+			'cluster identifier', 'binary cluster-index shard');
+		my $members = _readBinaryCacheBytes($handle, $memberLength, $path,
+			'member list', 'binary cluster-index shard');
+		die "Duplicate cluster '$cluster' in binary cluster-index shard $path\n"
+			if exists($clusters{$cluster});
+		$clusters{$cluster} = $members;
+		$digest->add($lengths, $cluster, $members);
+		$recordCount++;
+	}
+	close $handle or die "Cannot close binary cluster-index shard $path: $!\n";
+	return \%clusters;
+}
+
+sub writeSequenceBinaryCache {
+	my ($sequences, $path, $fingerprint) = @_;
+	die "writeSequenceBinaryCache requires a sequence hash\n"
+		unless ref($sequences) eq 'HASH';
+	die "Invalid binary sequence-cache fingerprint\n"
+		unless defined($fingerprint) && $fingerprint =~ /\A[0-9a-f]{64}\z/;
+	open my $handle, '>', $path
+		or die "Cannot create binary sequence cache $path: $!\n";
+	binmode $handle or die "Cannot set binary mode for sequence cache $path: $!\n";
+	_writeBinaryCacheBytes($handle,
+		$sequenceCacheMagic.pack('H*', $fingerprint), $path,
+		'binary sequence cache');
+	my $digest = Digest::SHA->new(256);
+	my $recordCount = 0;
+	for my $identifier (keys %{$sequences}) {
+		my $sequence = $sequences->{$identifier};
+		next unless defined($identifier) && length($identifier)
+			&& defined($sequence) && length($sequence);
+		die "Binary sequence-cache record is too large to encode\n"
+			if length($identifier) > 0xffffffff || length($sequence) > 0xffffffff;
+		my $record = pack('NN', length($identifier), length($sequence))
+			.$identifier.$sequence;
+		_writeBinaryCacheBytes($handle, $record, $path, 'binary sequence cache');
+		$digest->add($record);
+		$recordCount++;
+	}
+	my $trailer = pack('NNN', 0, 0, $recordCount).$digest->digest;
+	_writeBinaryCacheBytes($handle, $trailer, $path, 'binary sequence cache');
+	close $handle or die "Cannot close binary sequence cache $path: $!\n";
+	my $bytes = -s $path;
+	die "Binary sequence cache is empty after publication: $path\n"
+		unless defined($bytes) && $bytes > 0;
+	return { records => $recordCount, bytes => $bytes };
+}
+
+sub readSequenceBinaryCache {
+	my ($path, $fingerprint) = @_;
+	die "Invalid expected binary sequence-cache fingerprint\n"
+		unless defined($fingerprint) && $fingerprint =~ /\A[0-9a-f]{64}\z/;
+	open my $handle, '<', $path
+		or die "Cannot open binary sequence cache $path: $!\n";
+	binmode $handle or die "Cannot set binary mode for sequence cache $path: $!\n";
+	my $header = _readBinaryCacheBytes($handle, 40, $path, 'header',
+		'binary sequence cache');
+	my ($magic, $recordedFingerprint) = unpack('a8H64', $header);
+	die "Invalid binary sequence-cache header in $path\n"
+		unless $magic eq $sequenceCacheMagic && $recordedFingerprint eq $fingerprint;
+	my $fileBytes = -s $path;
+	die "Cannot determine binary sequence-cache size for $path\n"
+		unless defined($fileBytes) && $fileBytes >= 84;
+	my $digest = Digest::SHA->new(256);
+	my (%sequences, $recordCount);
+	$recordCount = 0;
+	while (1) {
+		my $lengths = _readBinaryCacheBytes($handle, 8, $path, 'record header',
+			'binary sequence cache');
+		my ($identifierLength, $sequenceLength) = unpack('NN', $lengths);
+		if ($identifierLength == 0 && $sequenceLength == 0) {
+			my $trailer = _readBinaryCacheBytes($handle, 36, $path, 'trailer',
+				'binary sequence cache');
+			my ($recordedCount, $recordedDigest) = unpack('NH64', $trailer);
+			die "Binary sequence-cache record-count mismatch in $path\n"
+				unless $recordedCount == $recordCount;
+			die "Binary sequence-cache payload digest mismatch in $path\n"
+				unless $recordedDigest eq $digest->hexdigest;
+			my $extra = '';
+			my $extraRead = read($handle, $extra, 1);
+			die "Cannot verify binary sequence-cache terminator in $path: $!\n"
+				unless defined $extraRead;
+			die "Trailing data after binary sequence-cache terminator in $path\n"
+				if $extraRead;
+			last;
+		}
+		die "Invalid binary sequence-cache record length in $path\n"
+			if $identifierLength == 0 || $sequenceLength == 0
+				|| $identifierLength > 16 * 1024 * 1024
+				|| $identifierLength + $sequenceLength > $fileBytes;
+		my $identifier = _readBinaryCacheBytes($handle, $identifierLength, $path,
+			'sequence identifier', 'binary sequence cache');
+		my $sequence = _readBinaryCacheBytes($handle, $sequenceLength, $path,
+			'sequence', 'binary sequence cache');
+		die "Duplicate sequence '$identifier' in binary sequence cache $path\n"
+			if exists($sequences{$identifier});
+		$sequences{$identifier} = $sequence;
+		$digest->add($lengths, $identifier, $sequence);
+		$recordCount++;
+	}
+	close $handle or die "Cannot close binary sequence cache $path: $!\n";
+	return \%sequences;
 }
 
 
