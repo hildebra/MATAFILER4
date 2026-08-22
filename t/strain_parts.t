@@ -12,11 +12,25 @@ use lib File::Spec->catdir($Bin, '..');
 use lib File::Spec->catdir($Bin, 'lib');
 use MFTestConfig;
 use Mods::StrainParts qw(
-	balance_assembly_groups choose_auto_worker_count exact_worker_parts write_split_generation write_worker_completion
+	balance_assembly_groups choose_auto_worker_count choose_tree_core_count exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation
 	resolve_fasta_artifact append_fasta_records_atomic
 	sort_fasta_by_locus
 );
+
+is(choose_tree_core_count(3, 45), 4,
+	'small accepted strain trees retain the historical four-core floor');
+is(choose_tree_core_count(100, 45), 10,
+	'tree cores scale with the square root of submitted samples');
+is(choose_tree_core_count(401, 45), 21,
+	'non-square sample counts round core guidance upward');
+is(choose_tree_core_count(2_500, 45), 45,
+	'sample-guided tree cores are capped by maxCores');
+is(choose_tree_core_count(100, 2), 2,
+	'a maxCores setting below the normal floor remains authoritative');
+eval { choose_tree_core_count(-1, 45) };
+like($@, qr/sample count must be a non-negative integer/,
+	'invalid submitted-sample counts fail clearly');
 
 is_deeply([choose_auto_worker_count(0, 0)], [0, 0],
 	'automatic splitting keeps an empty input in the main process');

@@ -14,7 +14,7 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 | `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `strain_within.pl` | `1.37` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
+| `strain_within.pl` | `1.38` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
 | `strain_within_2.2.pl` | `0.46` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
 | `buildTree5.pl` | `5.81` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
@@ -454,7 +454,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## strain_within.pl
 
-Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.37`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.38`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
 
 For split Phase I, the parent scans the catalogue cluster index once and atomically publishes a provenance-bound binary membership shard for each worker under shared strain scratch. The manifest is published only after every shard is complete. Workers validate the generation, size, header, record count and payload digest before use; an absent, stale or corrupt cache falls back to the original full-index parser.
 
@@ -490,7 +490,7 @@ Phase-I input contracts use cross-node-stable file identity: canonical path, ino
 | `-onlyMSA` | integer | `0` | stable | Build and post-QC each concatenated `MSA/MSAli.fna.gz`, then stop before phylogeny, EPA-ng placement, and `strain_within_2.2.pl`. Completion is recorded in `msaOnly.complete.tsv`; use `-onlySubmit 1` to resume and skip completed MGS. Incompatible with `-placeOnBackbone 1`, `-redo tree`, and `-redoEPAfilter`. |
 | `-redo` | string | `none` | stable | Destructive recovery mode: `none` resumes normally; `tree` rebuilds tree-stage outputs while reusing complete inputs; `input` rebuilds missing/incomplete inputs and dependent trees; `all` deletes and rebuilds strain inputs and trees for every selected MGS. Use `-MGSsubset` to target explicit identifiers. |
 | `-redoEPAfilter` | optional integer | `0` | advanced | Republish EPA-placed trees from retained backbone/jplace artifacts; implies `1` when no value is supplied. |
-| `-maxCores` | integer | `-1` | stable | Maximum dynamically allocated cores; `-1` uses automatic planning. |
+| `-maxCores` | integer | `-1` | stable | When positive, cap full BuildTree jobs at this many cores; the request is `ceil(sqrt(submitted samples))`, with a four-core floor and this cap. `-1` retains the fixed `-cores` request. |
 | `-selfMemGb` | integer | `10` | stable | Initial memory in GiB for the wrapper/controller and split Phase-I workers; accounting-confirmed worker OOM retries double this request. |
 | `-mosaicMemGb` | integer | `150` | stable | Total memory in GiB for the Mosaic prerequisite. |
 | `-phase1WorkerRetries` | integer | `2` | advanced | Retry count for invalid Phase-I workers; accepted range is 0–10. On Slurm, accounting-confirmed OOM retries use an increased memory request. |

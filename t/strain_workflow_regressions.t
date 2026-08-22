@@ -390,7 +390,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.37;/,
+like($strain, qr/my \$version = 1\.38;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -783,6 +783,14 @@ like($strain,
 like($strain,
 	qr/my \$treeTmpGb = int\(\(\$inputFNAsize \* 5 \+ 1023\) \/ 1024\);.*?\$treeTmpGb = 20 if \$treeTmpGb < 20/s,
 	'strain BuildTree jobs reserve five times compressed input size with a 20 GiB scratch floor');
+like($strain,
+	qr/addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?choose_tree_core_count\(\$multiSmpl, \$maxCores\).*?\$Tcmd \.= "-cores \$numCoreL "/s,
+	'BuildTree core guidance reuses the exact submitted-sample count collected during input preparation');
+like($strain,
+	qr/my \$treeFlag = \$onlyMSA.*?my \$Tcmd=.*?\$treeFlag /s,
+	'BuildTree command retains the selected inference-engine flag while appending cores after input preparation');
+unlike($strain, qr/largestFullTreeInput|sqrt\(\$inputFNAsize/,
+	'BuildTree core planning no longer uses input byte size');
 like($strain,
 	qr/my \$publishedInputsReady = !\$epaOnlyRetry\s*&& !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = prepareMGSInputSet\(\$MGS,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
 	'tree outputs are reset only after complete published or recoverable staged per-MGS inputs are verified');

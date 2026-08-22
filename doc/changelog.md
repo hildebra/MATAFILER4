@@ -1,10 +1,11 @@
 # Changelog
 
-## 2026-08-22 — OOM-aware strain worker retries
+## 2026-08-22 — OOM-aware and sample-guided strain resources
 
-- Updated `strain_within.pl` to 1.37. Fresh and resumed Phase-I worker repair now use one retry routine backed by the shared Slurm accounting planner in `Mods/SlurmAccounting.pm`.
+- Updated `strain_within.pl` to 1.38. Fresh and resumed Phase-I worker repair now use one retry routine backed by the shared Slurm accounting planner in `Mods/SlurmAccounting.pm`.
 - An accounting-confirmed Phase-I OOM doubles only the affected worker's memory request on its next bounded retry, capped by `-treeOOMMaxMemGB`; unclassified and non-OOM failures retain their previous request.
 - Strain-submitted BuildTree jobs now request node-local scratch at five times compressed input size with a 20 GiB floor, increased from four times with a 15 GiB floor.
+- Full BuildTree core requests now reuse the exact submitted-sample count collected during input preparation: `ceil(sqrt(samples))`, retaining the four-core floor and `-maxCores` cap. EPA-only recovery remains single-threaded.
 
 ## 2026-08-19 — Post-QC recovery of partial strain loci
 

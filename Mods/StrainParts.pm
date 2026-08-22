@@ -10,7 +10,7 @@ use File::Path qw(make_path);
 use Mods::GenoMetaAss qw(gzipopen gzipwrite);
 
 our @EXPORT_OK = qw(
-	balance_assembly_groups choose_auto_worker_count
+	balance_assembly_groups choose_auto_worker_count choose_tree_core_count
 	exact_worker_parts
 	write_split_generation
 	write_worker_completion
@@ -20,6 +20,27 @@ our @EXPORT_OK = qw(
 	append_fasta_records_atomic
 	sort_fasta_by_locus
 );
+
+sub choose_tree_core_count {
+	my ($sample_count, $maximum_cores, $minimum_cores) = @_;
+	$minimum_cores //= 4;
+	die "tree sample count must be a non-negative integer\n"
+		unless defined($sample_count) && $sample_count =~ /^\d+$/;
+	die "maximum tree cores must be a positive integer\n"
+		unless defined($maximum_cores) && $maximum_cores =~ /^\d+$/
+			&& $maximum_cores > 0;
+	die "minimum tree cores must be a positive integer\n"
+		unless defined($minimum_cores) && $minimum_cores =~ /^\d+$/
+			&& $minimum_cores > 0;
+
+	# Likelihood work grows with the number of submitted taxa, but assigning one
+	# thread per sample rapidly over-allocates small and medium strain trees.
+	my $cores = int(sqrt($sample_count));
+	$cores++ if $cores * $cores < $sample_count;
+	$cores = $minimum_cores if $cores < $minimum_cores;
+	$cores = $maximum_cores if $cores > $maximum_cores;
+	return $cores;
+}
 
 sub choose_auto_worker_count {
 	my ($group_count, $sample_count) = @_;

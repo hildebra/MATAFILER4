@@ -30,7 +30,7 @@ use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate protein_kmer_sim
 use Mods::MosaicLoci qw(read_mosaic_catalogue);
 use Mods::StrainQC qw(breakpoint_gene_mask abundance_pattern_mask);
 use Mods::StrainParts qw(
-	balance_assembly_groups choose_auto_worker_count exact_worker_parts write_split_generation write_worker_completion
+	balance_assembly_groups choose_auto_worker_count choose_tree_core_count exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation
 );
 use Mods::SlurmAccounting qw(
@@ -269,7 +269,8 @@ my $completionMessage = "";
 #1.35: canonicalize unlimited split-worker extraction as -maxGenes 0
 #1.36: make Phase-I contracts portable across compute-node device namespaces
 #1.37: escalate accounting-confirmed Phase-I OOM retries and increase tree scratch headroom
-my $version = 1.37;
+#1.38: guide BuildTree core requests by the submitted sample count
+my $version = 1.38;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -467,7 +468,7 @@ GetOptions(
 	"maxSubJob=i"    => \$maxSubJob,
 	"treeSubFromMGS=s" => sub { $startSubFromMGS = $_[1]; $deprecatedOptionSeen{treeSubFromMGS} = '-MGSsubset'; },
 	#"cores=i"        => \$numCores, #not used any longer..
-	"maxCores=i"     => \$maxCores, #superseedes -cores, will dynamically allocate num cores based on input file size, if defined
+	"maxCores=i"     => \$maxCores, # supersedes -cores; when positive, scale tree cores from the submitted sample count
 	"presortGenes=i" => \$presortGenes, #how many potential genes to include, of the original MGS (receovered will vary strongly  between samples)
 	"maxGenes=i"     => \$maxNGenes, #maximum validated genes retained for each MGS/sample
 	"treeLocusBudget=i" => \$treeLocusBudget, #bounded final loci passed to BuildTree selection
@@ -1806,7 +1807,6 @@ for my $MGS (@epaRecoveryMGS) {
 @specis = (@epaRecoveryMGS, @fullTreeMGS);
 my $epaQueueBoundary = scalar(@epaRecoveryMGS);
 my $fullTreeInputsInitialized = $leanOnlySubmitResume ? 1 : 0;
-my $largestFullTreeInput = 1;
 if ($leanOnlySubmitResume) {
 	# A prior sizing table is a scheduling hint only. Reusing it avoids a fresh
 	# all-MGS metadata pass; missing entries are sized just in time below.
@@ -1823,8 +1823,6 @@ if ($leanOnlySubmitResume) {
 					&& defined($megabytes) && $megabytes =~ /^\d+(?:\.\d+)?\z/
 					&& $megabytes > 0;
 				$inputSizeByMGS{$MGS} = 0 + $megabytes;
-				$largestFullTreeInput = $megabytes
-					if $megabytes > $largestFullTreeInput;
 				$cachedSizes++;
 			}
 		}
@@ -1878,8 +1876,6 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		my $nonemptyTreeInputs = scalar(grep { $_ > 0 } @{$fullSizeRef});
 		my $treeInputMB = 0;
 		$treeInputMB += $_ for @{$fullSizeRef};
-		$largestFullTreeInput = $_ > $largestFullTreeInput
-			? $_ : $largestFullTreeInput for @{$fullSizeRef};
 		my %fullTreeOrder;
 		@fullTreeOrder{@fullTreeMGS} = 0 .. $#fullTreeMGS;
 		my @sortedFullTreeMGS = sort {
@@ -2030,8 +2026,6 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		$inputBytes ||= fileGZs("$tmpD/$FNAstdof");
 		$inputFNAsize = $inputBytes > 0 ? $inputBytes / (1024 * 1024) : 1;
 		$inputSizeByMGS{$MGS} = $inputFNAsize;
-		$largestFullTreeInput = $inputFNAsize
-			if $inputFNAsize > $largestFullTreeInput;
 	}
 	if ($epaRecovery && !$inputFNAsize) {
 		my $retainedMSA = "$outD2/MSA/MSAli.fna";
@@ -2099,13 +2093,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $totMem = int($inputFNAsize * $baseMemMult * $memMulti);
 	$totMem = $minimumMemMB if $totMem < $minimumMemMB;
 	$totMem = $maximumMemMB if $totMem > $maximumMemMB;
-	my $numCoreL = $numCores;	
-	if ($maxCores >0){ #scale cores according to used memory size
-		my $scaleReference = $epaRecovery
-			? ($inputFNAsize || 1) : $largestFullTreeInput;
-		$numCoreL = int($maxCores * sqrt($inputFNAsize/$scaleReference));
-		$numCoreL = 4 if ($numCoreL < 4);		$numCoreL = $maxCores if ($numCoreL > $maxCores);
-	}
+	my $numCoreL = $numCores;
 	if ($epaOnlyRetry) {
 		# EPA-ng retry is deliberately single-threaded. The doubled request is a
 		# scheduler/cgroup allowance, not an EPA-ng --maxmem argument.
@@ -2124,7 +2112,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	if (!$onlyMSA && $phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}
 	if (!$onlyMSA && $phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
 	my $tree_sample_separator = quotemeta($SaSe);
-	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag -cores $numCoreL  ";
+	my $Tcmd= "$bts -fna ".shellQuote($FNAtf)." -aa ".shellQuote($FAAtf)." -smplSep ".shellQuote($tree_sample_separator)." -cats ".shellQuote($CATtf)." -outD ".shellQuote($outD2)." $treeFlag ";
 	$Tcmd .= "-withinSpecies 1 -relativeNTFraction $relativeNTFraction "
 		."-NTfiltPerGene $GeneLengthMin "
 		."-GeneLengthIncludeMin $GeneLengthIncludeMin "
@@ -2193,6 +2181,11 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		next;
 	}
 	
+	if (!$epaOnlyRetry && $maxCores > 0) {
+		$numCoreL = choose_tree_core_count($multiSmpl, $maxCores);
+	}
+	$Tcmd .= "-cores $numCoreL ";
+
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
 		if !$epaRecovery && (fileGZe("$outD2/$QCstdof") || fileGZe("$tmpD/$QCstdof")
