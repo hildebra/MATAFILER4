@@ -390,7 +390,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.36;/,
+like($strain, qr/my \$version = 1\.37;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -603,7 +603,7 @@ like($strain, qr/\$options->\{tmpSpace\} = \$record->\{tmp_space\}/,
 like($strain, qr/\$options->\{useLongQueue\} = \$record->\{use_long_queue\}/,
 	'queued tree dispatch restores each job\'s stored queue setting');
 like($strain,
-	qr/\@treeJobAccounting.*?requested_mb => int\(\$totMem\).*?qsubSystemJobAlive.*?slurm_tree_memory_summary.*?format_slurm_tree_memory_summary/s,
+	qr/\@treeJobAccounting.*?requested_mb => int\(\$totMem\).*?qsubSystemJobAlive.*?slurm_oom_retry_plan.*?format_slurm_tree_memory_summary/s,
 	'completed Slurm tree jobs report MaxRSS against their requested memory');
 like($strain,
 	qr/sub addOutgroup2MGS.*?\.strain_tree_input\.outgroup\.fna.*?\.strain_tree_input\.plan\.tsv/s,
@@ -711,7 +711,7 @@ like($strain,
 	qr/my \$completedTree = "\$outD2\/phylo\/\$treeFile";.*?my \$treeCompletion = "\$outD2\/treeDone\.sto";.*?\(\$onlySubmit != 0 \|\| \$subJob\).*?BuildTree publishes treeDone\.sto atomically.*?\$completedTreeFastPaths\+\+.*?next;.*?my \$tooFewMarker/s,
 	'tree-only audits prioritize the durable completion marker and primary tree before deeper MGS probes');
 my ($quickWorkerValidation) = $strain =~
-	/(sub validatePhase1WorkerLedger .*?)(?=sub phase1WorkersNeedingRetry)/s;
+	/(sub validatePhase1WorkerLedger .*?)(?=sub retryPhase1Workers)/s;
 ok(defined($quickWorkerValidation),
 	'Phase-I worker prevalidation is available for resume repair');
 unlike($quickWorkerValidation, qr/while\s*\(/,
@@ -780,6 +780,9 @@ unlike($strain,
 like($strain,
 	qr/my \$treeTmpGb = int\(.*?\$QSBoptHR->\{tmpSpace\} = \$nodeTmpConfigured \? \$treeTmpGb : 0.*?\? "-tmpSubdir ".*?strain_within\/\$MGS.*?: "-tmpD "/s,
 	'tree jobs request and use node-local scratch when it is configured');
+like($strain,
+	qr/my \$treeTmpGb = int\(\(\$inputFNAsize \* 5 \+ 1023\) \/ 1024\);.*?\$treeTmpGb = 20 if \$treeTmpGb < 20/s,
+	'strain BuildTree jobs reserve five times compressed input size with a 20 GiB scratch floor');
 like($strain,
 	qr/my \$publishedInputsReady = !\$epaOnlyRetry\s*&& !exists\(\$legacyLocusMGS\{\$MGS\}\).*?persistentMGSInputState\(\$MGS\) eq 'complete'.*?if \(\$recalcTrees\).*?unless \(\$publishedInputsReady\).*?\$scratchInputsReady = prepareMGSInputSet\(\$MGS,\$tmpD\).*?unless \(\$publishedInputsReady \|\| \$scratchInputsReady\).*?no recoverable inputs for recalculation.*?resetMGSTreeOutputs\(\$outD2, \$MGS\)/s,
 	'tree outputs are reset only after complete published or recoverable staged per-MGS inputs are verified');
@@ -895,8 +898,14 @@ unlike($strain, qr/\$\{TMPDIR\}\/strain_within|my \$postCmd|touch "?\.shellQuote
 	"tree commands contain neither shell TMPDIR expansion nor shell checkpoints");
 
 like($strain,
-	qr/sub phase1WorkerCommand.*?Stage-I workers receive extraction, consensus, and extraction-relevant.*?sub recoverCompletedSplitPhaseI.*?phase1WorkersNeedingRetry.*?Resubmitting invalid Phase-I worker.*?phase1_worker_repair\.queue\.tsv/s,
-	'live and resumed Phase I share extraction-only worker commands and durable targeted repair');
+	qr/my \@failedWorkers = phase1WorkersNeedingRetry\(\$splitGeneration\).*?retryPhase1Workers\(.*?script_kind => "retry"/s,
+	'fresh Phase-I validation routes failed workers through the standard retry path');
+like($strain,
+	qr/sub recoverCompletedSplitPhaseI.*?phase1WorkersNeedingRetry\(\$generation\).*?retryPhase1Workers\(.*?script_kind => "resume"/s,
+	'resumed Phase-I repair routes failed workers through the same retry path');
+like($strain,
+	qr/sub retryPhase1Workers.*?slurm_oom_retry_plan.*?ceiling_reached.*?OOM escalation.*?\$retryMemoryMB\{\$worker\}\."M"/s,
+	'the shared Phase-I retry path escalates only accounting-confirmed OOM memory and honors the ceiling');
 like($strain,
 	qr/\$noGeneLimit = 1 if \$maxNGenes <= 0;.*?\$maxNGenes = 0 if \$noGeneLimit;.*?sub phase1WorkerCommand.*?'-presortGenes', \$presortGenes, '-maxGenes', \$maxNGenes,.*?'-disableQC', \$disableQC,/s,
 	'unlimited extraction is canonicalized to maxGenes zero before worker commands are built');
@@ -932,14 +941,14 @@ like($strain,
 	'an EPA-only retry gets a one-core doubled-memory job and explicit BuildTree mode');
 like($strain,
 	qr/my \$treeOOMMaxMemGB = 512;.*?my \$treeOOMMaxMemGBSpecified = 0;.*?"treeOOMMaxMemGB=f" => sub \{.*?\$treeOOMMaxMemGBSpecified = 1;.*?getProgPaths\("maxMF4mem", 0\).*?-treeOOMMaxMemGB must be positive.*?maximum_rounds => \$treeOOMRetryRounds/s,
-	'automatic tree OOM recovery uses maxMF4mem by default while retaining an explicit per-run override');
+	'automatic Phase-I and tree OOM recovery use maxMF4mem while retaining an explicit per-run override');
 like($site_config_template, qr/^maxMF4mem\t512$/m,
 	'the installed site-config template sets the shared strain OOM ceiling to 512 GiB');
 unlike($internal_config, qr/^downloadQueue\t/m,
 	'the internal program config leaves the archive queue to the site config');
 like($strain,
-	qr/sub retryOOMTreeJobs.*?for my \$round \(1 \.\. \$maximumRounds\).*?oom_jobs.*?next_oom_retry_memory_mb.*?epaOnlyRetryReady\(\$mgsDirectory, 1\).*?-epaThreads\\s\+\\d\+\/\$1-epaThreads 1.*?treeCmd\.epa_retry\.sh.*?qsubSystemJobAlive/s,
-	'only accounting-confirmed OOM jobs are retried and EPA-stage retries use one thread');
+	qr/sub retryOOMTreeJobs.*?slurm_oom_retry_plan.*?for my \$round \(1 \.\. \$maximumRounds\).*?by_job_id.*?next_mb.*?epaOnlyRetryReady\(\$mgsDirectory, 1\).*?-epaThreads.*?epaThreads 1.*?treeCmd\.epa_retry\.sh.*?qsubSystemJobAlive/s,
+	'tree retries use the shared accounting-confirmed OOM plan and EPA-stage retries use one thread');
 like($strain,
 	qr/sub dispatchPendingTreeJobs.*?submission_record => \{ %\{\$record\} \}.*?sub retryOOMTreeJobs/s,
 	'tree submission accounting retains the exact command record needed for bounded OOM retries');

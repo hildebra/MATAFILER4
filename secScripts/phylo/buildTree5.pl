@@ -81,6 +81,7 @@
 #5.76: require 10k shared backbone sites for sparse-sample placement by default
 #5.77: recover partial sample loci after high-threshold QC and audit both length gates
 #5.80: pass explicit IQ-TREE sequence types and report retained-MSA resume counts
+#5.81: keep plain MSAs and partitions on scratch and publish only compressed checkpoints
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -216,7 +217,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.80";
+my $version = "5.81";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -766,14 +767,22 @@ my $treeD = File::Spec->catdir($outD, "phylo");#raxml, fasttree, phyml tree outp
 
 my $MsaD = File::Spec->catdir($outD, "MSA");
 # Per-locus checkpoints remain available until terminal workflow finalization.
-
-$MSAsubsD = "$MsaD/clnd/";
-
-
 if ($subsetSmpls >0){
 	$MsaD =~ s/\/$/_S$subsetSmpls\//;
 	$treeD =~ s/\/$/_S$subsetSmpls\//;
 }
+my $MsaWorkD = File::Spec->catdir($tmpD, basename($MsaD));
+make_path($MsaWorkD) unless -d $MsaWorkD;
+$MSAsubsD = File::Spec->catdir($MsaWorkD, 'clnd');
+
+my $multAliArtifact = File::Spec->catfile($MsaD, 'MSAli.fna');
+my $multAli = File::Spec->catfile($MsaWorkD, 'MSAli.fna');
+my $multAliSynArtifact = $multAliArtifact.'.syn.fna';
+my $multAliSyn = $multAli.'.syn.fna';
+my $multAliNonSynArtifact = $multAliArtifact.'.nonsyn.fna';
+my $multAliNonSyn = $multAli.'.nonsyn.fna';
+my $placementAlignmentArtifact = File::Spec->catfile($MsaD, 'MSAli.placement.fna');
+my $placementAlignment = File::Spec->catfile($MsaWorkD, 'MSAli.placement.fna');
 if ($redoEPAfilter) {
 	runRedoEpaFilter(
 		$treeD, File::Spec->catfile($treeD, 'strict_backbone.samples.tsv'));
@@ -814,7 +823,7 @@ push @inputDescriptions, "preferred-core=$preferredCoreGenes" if $preferredCoreG
 print "=====================================================\n";
 print "BuildTree pipeline v$version\n";
 print "Inputs: " . join("; ", @inputDescriptions) . "\n";
-print "Paths: output=$outD; temporary=$tmpD; alignments=$MsaD; trees=$treeD\n";
+print "Paths: output=$outD; temporary=$tmpD; MSA work=$MsaWorkD; MSA checkpoints=$MsaD; trees=$treeD\n";
 print "Mode: " . ($cogCats ne "" ? "multi-locus" : "single-locus")
 	. "; scope=" . ($withinSpecies ? "within-species" : "between-species/broad")
 	. "; sequence=" . ($useAA4tree ? "amino acid" : "nucleotide")
@@ -887,7 +896,7 @@ print "=====================================================\n";
 my $cmd =""; my %usedGeneNms; my %excludedLoci;
 
 
-my $outD_clust = File::Spec->catdir($outD, "fastGear_work_$tmpTag");
+my $outD_clust = File::Spec->catdir($tmpD, "fastGear_work_$tmpTag");
 
 
 #------------------------------------------
@@ -927,17 +936,15 @@ die "Nucleotide trees require -fna\n" if !$useAA4tree && $fnFna eq "";
 preflightBuildTree($outD, $tmpD);
 
 if ($epaOnly) {
-	my $retainedAlignment = File::Spec->catfile($MsaD, 'MSAli.fna');
-	my $retainedQueries = File::Spec->catfile($MsaD, 'MSAli.placement.fna');
-	restoreCompressedMSAArtifact($retainedAlignment);
-	restoreCompressedMSAArtifact($retainedQueries);
-	my $epaTreeOptions = createTreeOpt($retainedAlignment, 'allsites', '', 0, '');
+	restoreCompressedMSAArtifact($multAliArtifact, $multAli);
+	restoreCompressedMSAArtifact($placementAlignmentArtifact, $placementAlignment);
+	my $epaTreeOptions = createTreeOpt($multAli, 'allsites', '', 0, '');
 	$epaTreeOptions->{IQtreeout} .= '.backbone';
 	my $epaOnlyComplete = runEpaOnlyPlacement(
-		$epaTreeOptions, $retainedAlignment, $retainedQueries, $treeD,
+		$epaTreeOptions, $multAli, $placementAlignment, $treeD,
 		File::Spec->catfile($treeD, 'strict_backbone.samples.tsv'),
 	);
-	finalizeMSAArtifacts($MsaD) unless $epaOnlyComplete;
+	finalizeMSAArtifacts($MsaD, $MsaWorkD) unless $epaOnlyComplete;
 	exit(0);
 }
 
@@ -946,15 +953,13 @@ if (!$continue){
 	safeRemoveTree($MsaD, $outD);
 }
 make_path($MsaD) unless -d $MsaD;
+make_path($MsaWorkD) unless -d $MsaWorkD;
 make_path($treeD) unless -d $treeD;
-my $multAli = "$MsaD/MSAli.fna";
-my $multAliSyn = $multAli.".syn.fna";
-my $multAliNonSyn = $multAli.".nonsyn.fna";
 my @theRealMSAs;
 my $partiFile="";#partitioning for multi gene MSAs
 my %specList; #list of species (without _COG00012 tag);
 my %samples; 
-my $MSAcat = "$MsaD/MSAcat.fna";
+my $MSAcat = File::Spec->catfile($MsaWorkD, 'MSAcat.fna');
 
 #prep tree Options
 my $tOhr = createTreeOpt($multAli,"allsites","",0,"");
@@ -981,7 +986,6 @@ my (%taxonAwarePlacementEligibility, %taxonAwarePlacementIneligibleReason);
 my $strictSplit;
 my $strictPlacementMinimumNT = $placementMinOverlap;
 my $strictPlacementMinimumLoci = 2;
-my $placementAlignment = "$MsaD/MSAli.placement.fna";
 my $postAlignmentQCReport = "$treeD/post_alignment_locus_qc.tsv";
 my $selectionAttritionReport = "$treeD/selection_attrition.tsv";
 my $geneLengthSampleReport = "$treeD/gene_length_filter.samples.tsv";
@@ -1128,7 +1132,7 @@ if (length($durableCompletionTree) && $completionMatchesMethod
 	# The marker is published only after tree validation and all requested standard
 	# stages finish. A matching policy therefore avoids reopening every locus and
 	# rescanning the concatenated alignment on a duplicate/resumed invocation.
-	finalizeMSAArtifacts($MsaD);
+	finalizeMSAArtifacts($MsaD, $MsaWorkD);
 	safeRemoveTree($tmpD, $tmpBase);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
@@ -1147,7 +1151,7 @@ my $treesDone = treePresent($tOhr)
 if ($strictBackbone && $treesDone
 		&& (!-s "$treeD/strict_backbone.samples.tsv"
 			|| !-s "$treeD/strict_backbone.epa_placements.tsv")) {
-	if (-s $placementPendingMarker && fileGZe($multAli)) {
+	if (-s $placementPendingMarker && fileGZe($multAliArtifact)) {
 		print "Recovery state: validated backbone has pending EPA-ng placement; "
 			."retaining inference and retrying placement only\n";
 	} else {
@@ -1173,7 +1177,7 @@ if ($cogCats ne "" && $continue && !$alignmentWorkPolicyMatches) {
 	make_path($treeD);
 	$treesDone = 0;
 } elsif ($cogCats ne "" && $continue && !$postAlignmentPolicyMatches
-		&& ($treesDone || fileGZe($multAli))) {
+		&& ($treesDone || fileGZe($multAliArtifact))) {
 	my $postAlignmentQCBackup = "";
 	if ($postAlignmentLocusQC && -s $postAlignmentQCReport) {
 		my ($backupHandle, $backupPath) = tempfile(
@@ -1195,13 +1199,13 @@ if ($cogCats ne "" && $continue && !$alignmentWorkPolicyMatches) {
 	$treesDone = 0;
 }
 my ($primaryAlignmentReady, $primaryAlignmentReason, $primaryAlignmentMetadata) =
-	treeAlignmentCheckpointStatus($multAli, $useAA4tree);
-if ($continue && fileGZe($multAli) && !$primaryAlignmentReady) {
+	treeAlignmentCheckpointStatus($multAliArtifact, $useAA4tree);
+if ($continue && fileGZe($multAliArtifact) && !$primaryAlignmentReady) {
 	warn "Recovery state: ignoring unusable retained alignment checkpoint "
-		."$multAli ($primaryAlignmentReason); rebuilding it from the locus inputs\n";
+		."$multAliArtifact ($primaryAlignmentReason); rebuilding it from the locus inputs\n";
 }
-my $siteAlignmentsReady = (!$calcSyn || fileGZe($multAliSyn))
-	&& (!$calcNonSyn || fileGZe($multAliNonSyn));
+my $siteAlignmentsReady = (!$calcSyn || fileGZe($multAliSynArtifact))
+	&& (!$calcNonSyn || fileGZe($multAliNonSynArtifact));
 my $reusableAlignment = $isAligned
 	|| ($primaryAlignmentReady && $siteAlignmentsReady);
 if ($continue) {
@@ -1231,18 +1235,17 @@ my $retainedConcatenatedCheckpoint = !$calcMSA && $primaryAlignmentReady
 my $retainedCheckpointSampleCount = $retainedConcatenatedCheckpoint
 	? ($primaryAlignmentMetadata->{sequences} // 0) : 0;
 my $retainedPartitionLocusCount = $retainedConcatenatedCheckpoint
-	? partitionLocusRangeCount($multAli.$partiExt) : 0;
+	? partitionLocusRangeCount($multAliArtifact.$partiExt) : 0;
 $doMSA = !(
 	$isAligned
 	|| ($continue && ($treesDone || $primaryAlignmentReady) && $siteAlignmentsReady)
 );
 			
-# Reopen retained compressed alignments for an interrupted continuation.  They
-# are compressed again by finalizeMSAArtifacts once this invocation finishes.
-restoreCompressedMSAArtifact($multAli);
-restoreCompressedMSAArtifact($multAliSyn) if $calcSyn;
-restoreCompressedMSAArtifact($multAliNonSyn) if $calcNonSyn;
-restoreCompressedMSAArtifact($placementAlignment) if $strictBackbone;
+# Reopen retained compressed alignments in scratch without consuming the durable checkpoints.
+restoreMSAArtifactSet($multAliArtifact, $multAli);
+restoreMSAArtifactSet($multAliSynArtifact, $multAliSyn) if $calcSyn;
+restoreMSAArtifactSet($multAliNonSynArtifact, $multAliNonSyn) if $calcNonSyn;
+restoreMSAArtifactSet($placementAlignmentArtifact, $placementAlignment) if $strictBackbone;
 my ($alignedLoci, $failedLoci, $candidateLoci) = (0, 0, 0);
 if ($isAligned){
 	my $alignedInput = $useAA4tree ? $aaFna : $fnFna;
@@ -1444,7 +1447,7 @@ if ($isAligned){
 				length_retained_sequences => $geneTooLong,
 				length_filtered_sequences => $geneTooShort,
 			}, $outD);
-			finalizeMSAArtifacts($MsaD);
+			finalizeMSAArtifacts($MsaD, $MsaWorkD);
 			safeRemoveTree($tmpD, $tmpBase);
 			compactTaxonAwareDiagnostics();
 			writeWorkflowHeartbeat('complete');
@@ -1662,10 +1665,18 @@ if ($isAligned){
 		my $tmpInMSAnt = "$tmpD/inMSA$cnt.fna";
 		my $tmpOutMSAaa = "$tmpD/$gene_file_stem.$cnt.faa";
 		my $tmpOutMSA = "$tmpD/$gene_file_stem.$cnt.fna";
-		my $finOutMSAaa = "$MsaD/$gene_file_stem.$cnt.faa";
-		my $finOutMSA = "$MsaD/$gene_file_stem.$cnt.fna";
-		
-		my $endFileExists=0; $endFileExists =1 if (fileGZs($finOutMSAaa) && fileGZs($finOutMSA));
+		my $finOutMSAaa = File::Spec->catfile($MsaWorkD, "$gene_file_stem.$cnt.faa");
+		my $finOutMSA = File::Spec->catfile($MsaWorkD, "$gene_file_stem.$cnt.fna");
+		my $publishedOutMSAaa = File::Spec->catfile($MsaD, "$gene_file_stem.$cnt.faa");
+		my $publishedOutMSA = File::Spec->catfile($MsaD, "$gene_file_stem.$cnt.fna");
+		my $endFileExists = $useAA4tree
+			? fileGZs($publishedOutMSAaa)
+			: fileGZs($publishedOutMSAaa) && fileGZs($publishedOutMSA);
+		if ($endFileExists) {
+			restoreCompressedMSAArtifact($publishedOutMSAaa, $finOutMSAaa);
+			restoreCompressedMSAArtifact($publishedOutMSA, $finOutMSA)
+				unless $useAA4tree;
+		}
 		
 		open O,">$tmpInMSA" or die "Can;t open tmp faa file for MSA: $tmpInMSA\n";
 		open O2,">$tmpInMSAnt" or die "Can;t open tmp fna file for MSA: $tmpInMSAnt\n";
@@ -1788,19 +1799,14 @@ if ($isAligned){
 		#die "@MSAs\n";
 		if (!$useAA4tree){
 			#this part now is all concerned about NT level things..
-			my ($tmpOutMSAsyn,$tmpOutMSAnonsyn) = ($tmpOutMSA, $tmpOutMSA);
-			$tmpOutMSAnonsyn =~ s/\.fna/\.nonsyn\.fna/;$tmpOutMSAsyn =~ s/\.fna/\.syn\.fna/;
 
 			if (!$endFileExists){
 				my $ntAlignmentOK = eval {
 					convertMultAli2NT($tmpOutMSAaa,$tmpInMSAnt,$tmpOutMSA);
 					die "AA-to-NT conversion completed without producing a nonempty output\n"
 						unless -s $tmpOutMSA;
-					# Validate/filter the primary nucleotide alignment before
-					# deriving any downstream site-class subsets from it.
+					# MSAfix remains immediately after creation and before publication.
 					runMSAFix($tmpOutMSA, $maxGapPerCol);
-					($tmpOutMSAsyn,$tmpOutMSAnonsyn) =
-						synPosOnly($tmpOutMSA,$tmpOutMSAaa,0,$ogrGenes,$calcSyn,$calcNonSyn);
 					1;
 				};
 				if (!$ntAlignmentOK) {
@@ -1812,29 +1818,51 @@ if ($isAligned){
 						"Warning: excluding locus $gene from future calculations: $error\n");
 					unlink $_ for grep { defined($_) && -e $_ }
 						($tmpInMSA, $tmpInMSAnt, $tmpOutMSAaa, $tmpOutMSA,
-							$tmpOutMSAsyn, $tmpOutMSAnonsyn, $finOutMSAaa, $finOutMSA,
+							$finOutMSAaa, $finOutMSA,
 							$tmpDMat, $tmpDMatOth);
 					next;
 				}
 			}
+		}
+		unlink $tmpInMSA; unlink $tmpInMSAnt;
+		if (!$endFileExists) {
+			move($tmpOutMSAaa, $finOutMSAaa)
+				or die "Cannot move $tmpOutMSAaa to scratch MSA $finOutMSAaa: $!\n";
+			move($tmpOutMSA, $finOutMSA)
+				or die "Cannot move $tmpOutMSA to scratch MSA $finOutMSA: $!\n"
+				unless $useAA4tree;
+			publishCompressedMSAArtifact($finOutMSAaa, $publishedOutMSAaa);
+			publishCompressedMSAArtifact($finOutMSA, $publishedOutMSA)
+				unless $useAA4tree;
+		}
+
+		if (!$useAA4tree) {
+			my ($scratchMSAsyn, $scratchMSAnonsyn);
+			my $siteSubsetOK = eval {
+				($scratchMSAsyn,$scratchMSAnonsyn) =
+					synPosOnly($finOutMSA,$finOutMSAaa,0,$ogrGenes,$calcSyn,$calcNonSyn);
+				1;
+			};
+			if (!$siteSubsetOK) {
+				my $error = $@ || "unknown synonymous-site derivation failure";
+				$error =~ s/\s+$//;
+				$failedLoci++;
+				$excludedLoci{$gene} = 1;
+				limitedWarn("failed locus site subsets",
+					"Warning: excluding locus $gene from future calculations: $error\n");
+				next;
+			}
 			push (@MSAs,$finOutMSA);
 			$primaryAlignmentGene{$finOutMSA} = $gene;
-			push (@MSAsSyn,$tmpOutMSAsyn) if ($tmpOutMSAsyn ne "" && fileGZs($tmpOutMSAsyn));
-			push (@MSAsNonSyn,$tmpOutMSAnonsyn)
-				if ($tmpOutMSAnonsyn ne "" && fileGZs($tmpOutMSAnonsyn));
-			#die "@MSAs\n";
+			push (@MSAsSyn,$scratchMSAsyn)
+				if defined($scratchMSAsyn) && $scratchMSAsyn ne "" && fileGZs($scratchMSAsyn);
+			push (@MSAsNonSyn,$scratchMSAnonsyn)
+				if defined($scratchMSAnonsyn) && $scratchMSAnonsyn ne "" && fileGZs($scratchMSAnonsyn);
 		} else {
 			push (@MSA_AA,$finOutMSAaa);
 			$primaryAlignmentGene{$finOutMSAaa} = $gene;
 		}
-		#system "rm -f $tmpInMSA $tmpInMSAnt";# $tmpOutMSAaa";
-		unlink  $tmpInMSA; unlink $tmpInMSAnt;
 		push (@MSrm,$finOutMSAaa,$finOutMSA);
-		#die "$MSrm[1]\n";
-		move($tmpOutMSAaa, $finOutMSAaa) or die "Cannot move $tmpOutMSAaa to $finOutMSAaa: $!\n"
-			if (!fileGZs($finOutMSAaa) && -e $tmpOutMSAaa);
-		move($tmpOutMSA, $finOutMSA) or die "Cannot move $tmpOutMSA to $finOutMSA: $!\n"
-			if (!fileGZs($finOutMSA) && -e $tmpOutMSA);
 		$alignedLoci++;
 		print "Prepared $alignedLoci/$candidateLoci locus alignments\n"
 			if $alignedLoci == 1 || $alignedLoci % 25 == 0;
@@ -2113,7 +2141,7 @@ if ($calcMSA
 		candidate_loci => $candidateLoci, aligned_loci => $alignedLoci,
 		failed_loci => $failedLoci, samples => scalar(keys %samples),
 	}, $outD);
-			finalizeMSAArtifacts($MsaD);
+			finalizeMSAArtifacts($MsaD, $MsaWorkD);
 			safeRemoveTree($tmpD, $tmpBase);
 			compactTaxonAwareDiagnostics();
 			writeWorkflowHeartbeat('complete');
@@ -2139,6 +2167,12 @@ if ($retainedConcatenatedCheckpoint) {
 	mergeMSAs(\@MSA_AA,\%samples,$multAli,0,1); #sames files as in @MSrm
 	@theRealMSAs = @MSA_AA;
 }
+unless ($retainedConcatenatedCheckpoint) {
+	publishMSAArtifactSet($multAli, $multAliArtifact);
+	publishMSAArtifactSet($multAliSyn, $multAliSynArtifact) if $calcSyn;
+	publishMSAArtifactSet($multAliNonSyn, $multAliNonSynArtifact) if $calcNonSyn;
+}
+
 postAlignmentStep("concatenation", $postAlignmentStepStarted,
 	"loci=$reportedSelectedLoci", "samples=$reportedSelectedSamples",
 	"source=".($retainedConcatenatedCheckpoint ? 'retained_checkpoint' : 'current_run'),
@@ -2146,10 +2180,10 @@ postAlignmentStep("concatenation", $postAlignmentStepStarted,
 $postAlignmentStepStarted = time;
 
 if ($strictBackbone) {
-	my $fullAlignment = "$MsaD/MSAli.full.fna";
-	if (!-s $fullAlignment && -s "$fullAlignment.gz") {
-		systemW("$pigzBin -p $ncore -d ".shellQuote("$fullAlignment.gz"));
-	}
+	my $fullAlignmentArtifact = File::Spec->catfile($MsaD, 'MSAli.full.fna');
+	my $fullAlignment = File::Spec->catfile($MsaWorkD, 'MSAli.full.fna');
+	restoreMSAArtifactSet($fullAlignmentArtifact, $fullAlignment)
+		unless $calcMSA;
 	if (!$calcMSA && -s $fullAlignment) {
 		my ($fullAlignmentReady, $fullAlignmentReason) =
 			treeAlignmentCheckpointStatus($fullAlignment, $useAA4tree);
@@ -2185,6 +2219,11 @@ if ($strictBackbone) {
 		treeAlignmentCheckpointStatus($multAli, $useAA4tree);
 	die "Strict-backbone produced an unusable inference alignment $multAli: "
 		."$strictAlignmentReason\n" unless $strictAlignmentReady;
+	publishMSAArtifactSet($fullAlignment, $fullAlignmentArtifact);
+	publishMSAArtifactSet($multAli, $multAliArtifact);
+	publishMSAArtifactSet($placementAlignment, $placementAlignmentArtifact)
+		if -s $placementAlignment;
+
 	my $classificationFile = "$treeD/strict_backbone.samples.tsv";
 	open my $classification, '>', $classificationFile
 		or die "Cannot write $classificationFile: $!\n";
@@ -2379,8 +2418,8 @@ die "Expected a non-empty merged alignment before tree construction: $multAli\n"
 
 my $msaOnlyCompletionMarker = File::Spec->catfile($outD, 'msaOnly.complete.tsv');
 if ($onlyMSA) {
-	finalizeMSAArtifacts($MsaD);
-	my $finalAlignment = -s "$multAli.gz" ? "$multAli.gz" : $multAli;
+	finalizeMSAArtifacts($MsaD, $MsaWorkD);
+	my $finalAlignment = "$multAliArtifact.gz";
 	die "MSA-only mode did not produce a non-empty concatenated alignment\n"
 		unless fileGZs($finalAlignment);
 	clearLifecycleMarker($completionMarker, 'clear tree completion in MSA-only mode');
@@ -2463,7 +2502,7 @@ if ($strictSplit) {
 					query_samples => scalar(@{$strictSplit->{placement}}),
 				}, $outD);
 				warn "EPA-ng placement deferred; the validated backbone and compressed MSA were retained: $error\n";
-				finalizeMSAArtifacts($MsaD);
+				finalizeMSAArtifacts($MsaD, $MsaWorkD);
 				safeRemoveTree($tmpD, $tmpBase);
 				print "BuildTree completed with placement pending; rerun with -continue 1 to retry placement only\n";
 				exit(0);
@@ -2527,7 +2566,7 @@ if ($strictSplit) {
 					jplace => $jplaceFile,
 				}, $outD);
 				warn "EPA-ng placement publication deferred; the validated backbone, jplace, and compressed MSA were retained: $error\n";
-				finalizeMSAArtifacts($MsaD);
+				finalizeMSAArtifacts($MsaD, $MsaWorkD);
 				safeRemoveTree($tmpD, $tmpBase);
 				print "BuildTree completed with placement pending; rerun with -continue 1 to retry placement publication\n";
 				exit(0);
@@ -2601,7 +2640,7 @@ if($doDNDS){
 #}
 
 FastGear();
-finalizeMSAArtifacts($MsaD);
+finalizeMSAArtifacts($MsaD, $MsaWorkD);
 if ($gzipInput){
 	# Release input caches before a compression-time ordered rewrite.  Only
 	# buildTree-owned plain-to-gzip conversions are sorted; existing .gz inputs
@@ -2711,10 +2750,8 @@ sub createTreeOpt{
 	$isSubTree = 1 if ($tcnt ne "");
 	$outgroupL = "" if ($isSubTree);
 	my $partiF=$multF.$partiExt;
-	if (-e "$partiF.gz"){systemW("$pigzBin -d ".shellQuote("$partiF.gz"));}
-	# Keep the expected path even on a fresh run: mergeMSAs creates this file
-	# after the tree options are assembled.  Its existence is resolved only
-	# immediately before a tree program is invoked.
+	# mergeMSAs creates the tree input and its partition sidecar on scratch.
+	# Its existence is resolved only immediately before a tree program is invoked.
 	#object to transfer options to tree (and get them back..)
 	my $BStag = ""; if ($bootStrap>0){$BStag="_BS$bootStrap";}
 	my %treeOpts = (inMSA => $multF,
@@ -2729,7 +2766,8 @@ sub createTreeOpt{
 					iqMemMB => $iqMemMB,
 					iqPathogen => $iqPathogen,
 					iqLegacy => $iqLegacy,
-					cont => $continue,
+					cont => 0,
+					restartIncomplete => $continue,
 					silent => $silent,
 					partition => $partiF,
 					constraintTree => $consTree,
@@ -2914,7 +2952,7 @@ sub runEpaOnlyPlacement {
 	die "EPA-only placement did not publish its primary tree: $primaryTree\n"
 		unless -s $primaryTree;
 
-	finalizeMSAArtifacts($MsaD);
+	finalizeMSAArtifacts($MsaD, $MsaWorkD);
 	writeCompletionMarker($completionMarker, $primaryTree, $outD);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	clearLifecycleMarker($placementPendingMarker, 'clear completed placement-pending marker');
@@ -3012,7 +3050,7 @@ sub runRedoEpaFilter {
 	write_epa_placed_tree($backboneTreeText, $primaryTree, $placements);
 	die "Forced EPA filter redo did not publish its primary tree: $primaryTree\n"
 		unless -s $primaryTree;
-	finalizeMSAArtifacts($MsaD);
+	finalizeMSAArtifacts($MsaD, $MsaWorkD);
 	writeCompletionMarker($completionMarker, $primaryTree, $outD);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	cleanupLegacyBuildTreeStateFiles();
@@ -3723,7 +3761,7 @@ sub FastGear{
 		}
 		close $xI;
 
-		my $MsaDF1 = "$outD/MSA";
+		my $MsaDF1 = $MsaWorkD;
 		my $MsaDF2 = "$outD_clust/MSA_FG";
 		make_path($outD_clust);
 		systemW("cp -r ".shellQuote($MsaDF1)." ".shellQuote($MsaDF2));
@@ -3778,7 +3816,7 @@ sub FastGear{
 				if $fastgearDone == 1 || $fastgearDone % 25 == 0;
 		}
 		print "fastGEAR summary: $fastgearDone/" . scalar(@geneListF) . " loci completed\n";
-		safeRemoveTree($outD_clust, $outD);
+		safeRemoveTree($outD_clust, $tmpD);
 		#die;
 	}
 		
@@ -4130,9 +4168,10 @@ sub readPostAlignmentRateMetrics {
 
 sub partitionLocusRangeCount {
 	my ($partitionFile) = @_;
-	return 0 unless defined($partitionFile) && -s $partitionFile;
-	open my $partition, '<', $partitionFile
-		or die "Cannot read retained alignment partition $partitionFile: $!\n";
+	return 0 unless defined($partitionFile) && length($partitionFile);
+	my ($partition, $opened) =
+		gzipopen($partitionFile, 'retained alignment partition', 0, 0);
+	return 0 unless $opened && $partition;
 	my $ranges = 0;
 	while (my $line = <$partition>) {
 		$line =~ s/[\r\n]+\z//;
@@ -5024,7 +5063,7 @@ sub selecAnalysis($ $ $ $ $){
 			my $gene_file_stem = geneFileStem($gene);
 			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.fubar.log";
 			$logs{$gene} = "$logF";
-			coreHyPhy($MsaD,$gene_file_stem,"",$nwkFile,$codemlOutDTmp,$logF);
+			coreHyPhy($MsaWorkD,$gene_file_stem,"",$nwkFile,$codemlOutDTmp,$logF);
 		}
 		my $sumTxt=$stdJSONheader;
 		foreach my $gene (keys %logs){
@@ -6890,7 +6929,7 @@ sub completeTaxonAwareOutgroupAnchorTerminal {
 		post_qc_loci => $selectionAttrition{post_qc_loci} // 0,
 		error => $error,
 	}, $outD);
-	finalizeMSAArtifacts($MsaD);
+	finalizeMSAArtifacts($MsaD, $MsaWorkD);
 	safeRemoveTree($tmpD, $tmpBase);
 	compactTaxonAwareDiagnostics();
 	writeWorkflowHeartbeat('complete');
@@ -6985,22 +7024,120 @@ sub treeAlignmentCheckpointStatus {
 		alignment_length => $alignmentLength,
 	});
 }
+sub copyStreamToPathAtomically {
+	my ($input, $destination, $description) = @_;
+	$description ||= "publish $destination";
+	make_path(dirname($destination)) unless -d dirname($destination);
+	my $temporary = "$destination.write.$$";
+	retry_unlink($temporary, label => "clear temporary $temporary");
+	my $output = retry_open('>', $temporary, label => "open temporary $temporary");
+	my $ok = eval {
+		my $buffer;
+		while (1) {
+			my $read = read($input, $buffer, 1024 * 1024);
+			die "Cannot read stream for $description: $!\n" unless defined $read;
+			last unless $read;
+			print {$output} $buffer
+				or die "Cannot write temporary $temporary: $!\n";
+		}
+		retry_close($output, "close temporary $temporary");
+		die "Input stream failed while attempting to $description\n"
+			unless close($input);
+		die "Temporary artifact is empty after attempting to $description: $temporary\n"
+			unless -s $temporary;
+		retry_rename($temporary, $destination, label => $description);
+		1;
+	};
+	if (!$ok) {
+		my $error = $@ || "Unknown stream-copy failure while attempting to $description\n";
+		close($output);
+		close($input);
+		retry_unlink($temporary, fatal => 0,
+			label => "remove failed temporary $temporary");
+		die $error;
+	}
+	return $destination;
+}
+
+
+sub publishCompressedMSAArtifact {
+	my ($working, $published) = @_;
+	die "Cannot publish missing or empty scratch MSA $working\n" unless -s $working;
+	make_path(dirname($published)) unless -d dirname($published);
+	my $compressed = "$published.gz";
+	open my $compressor, '-|', $pigzBin, '-p', $ncore, '-c', '--', $working
+		or die "Cannot start MSA compression for $working: $!\n";
+	copyStreamToPathAtomically(
+		$compressor, $compressed, "publish compressed MSA checkpoint $compressed");
+	retry_unlink($published, label => "remove persistent plain MSA $published")
+		if -e $published || -l $published;
+	return $compressed;
+}
+
+
 sub restoreCompressedMSAArtifact {
-	my ($path) = @_;
-	return $path if -s $path;
-	my $compressed = "$path.gz";
-	return $path unless -s $compressed;
-	systemW("$pigzBin -p $ncore -d ".shellQuote($compressed));
-	die "Could not restore retained MSA artifact $path from $compressed\n" unless -s $path;
-	return $path;
+	my ($published, $working) = @_;
+	die "restoreCompressedMSAArtifact requires persistent and scratch paths\n"
+		unless defined($published) && length($published)
+			&& defined($working) && length($working);
+	return $working if -s $working;
+	my $source = -s "$published.gz" ? "$published.gz" : $published;
+	my ($input, $opened, $resolved) =
+		gzipopen($source, 'retained MSA artifact', 0, 0);
+	return $working unless $opened && $input;
+	make_path(dirname($working)) unless -d dirname($working);
+	copyStreamToPathAtomically(
+		$input, $working, "publish restored scratch MSA $working");
+	if (defined($resolved) && File::Spec->canonpath($resolved)
+			eq File::Spec->canonpath($published)) {
+		# Migrate legacy uncompressed checkpoints only after the scratch copy is safe.
+		publishCompressedMSAArtifact($working, $published);
+	}
+	retry_unlink($published, label => "remove stale persistent plain MSA $published")
+		if -e $published || -l $published;
+	return $working;
+}
+
+sub publishMSAArtifactSet {
+	my ($working, $published) = @_;
+	return unless -s $working;
+	publishCompressedMSAArtifact($working, $published);
+	publishCompressedMSAArtifact("$working.nxs", "$published.nxs")
+		if -s "$working.nxs";
+	publishCompressedMSAArtifact($working.$partiExt, $published.$partiExt)
+		if -s $working.$partiExt;
+	return "$published.gz";
+}
+
+sub restoreMSAArtifactSet {
+	my ($published, $working) = @_;
+	restoreCompressedMSAArtifact($published, $working);
+	restoreCompressedMSAArtifact($published.$partiExt, $working.$partiExt);
+	return $working;
 }
 
 sub finalizeMSAArtifacts {
-	my ($directory) = @_;
+	my ($directory, $workingDirectory) = @_;
 	return unless defined($directory) && -d $directory;
+	my $publishedCount = 0;
+	if (defined($workingDirectory) && -d $workingDirectory) {
+		opendir my $workingHandle, $workingDirectory
+			or die "Cannot inspect scratch MSA directory $workingDirectory: $!\n";
+		for my $name (sort readdir $workingHandle) {
+			next unless $name =~ /^MSAli.*\.fna\z/;
+			my $working = File::Spec->catfile($workingDirectory, $name);
+			next unless -s $working;
+			my $published = File::Spec->catfile($directory, $name);
+			publishMSAArtifactSet($working, $published);
+			$publishedCount++;
+		}
+		closedir $workingHandle
+			or die "Cannot close scratch MSA directory $workingDirectory: $!\n";
+	}
+
 	opendir my $directoryHandle, $directory
 		or die "Cannot inspect MSA directory $directory for finalization: $!\n";
-	my (@singleLocusNucleotide, @singleLocusProtein, @retainedAlignment);
+	my (@singleLocusNucleotide, @singleLocusProtein, @retainedPlain);
 	my $cleanedSubdirectory = '';
 	for my $name (readdir $directoryHandle) {
 		next if $name eq File::Spec->curdir || $name eq File::Spec->updir;
@@ -7010,8 +7147,8 @@ sub finalizeMSAArtifacts {
 			next;
 		}
 		next unless -f $path || -l $path;
-		if ($name =~ /^MSAli.*\.fna(?:\.gz)?\z/) {
-			push @retainedAlignment, $path unless $name =~ /\.gz\z/;
+		if ($name =~ /^MSAli.*(?:\.fna(?:\.nxs)?|\Q$partiExt\E)(?:\.gz)?\z/) {
+			push @retainedPlain, $path unless $name =~ /\.gz\z/;
 			next;
 		}
 		push @singleLocusNucleotide, $path if $name =~ /\.fna(?:\.gz)?\z/;
@@ -7019,42 +7156,44 @@ sub finalizeMSAArtifacts {
 	}
 	closedir $directoryHandle
 		or die "Cannot close MSA directory $directory after finalization scan: $!\n";
-	my @singleLocusToRemove = (
-		@singleLocusProtein,
-		$removeMSA ? @singleLocusNucleotide : (),
-	);
-	for my $path (@singleLocusToRemove) {
-		retry_unlink($path, label => "remove completed single-locus MSA $path");
+
+	for my $path (sort @retainedPlain) {
+		if (-l $path || !-s $path) {
+			retry_unlink($path, label => "remove completed scratch MSA link $path");
+			next;
+		}
+		publishCompressedMSAArtifact($path, $path);
+		$publishedCount++;
+	}
+
+	my $removedSingleLocus = 0;
+	for my $path (@singleLocusProtein) {
+		retry_unlink($path, label => "remove completed protein MSA $path");
+		$removedSingleLocus++;
+	}
+	my $retainedSingleLocus = 0;
+	for my $path (@singleLocusNucleotide) {
+		if ($removeMSA) {
+			retry_unlink($path, label => "remove completed nucleotide MSA $path");
+			$removedSingleLocus++;
+			next;
+		}
+		if ($path =~ /\.gz\z/) {
+			$retainedSingleLocus++;
+		} elsif (-l $path || !-s $path) {
+			retry_unlink($path, label => "remove completed scratch locus-MSA link $path");
+		} else {
+			publishCompressedMSAArtifact($path, $path);
+			$retainedSingleLocus++;
+		}
 	}
 	safeRemoveTree($cleanedSubdirectory, $directory) if $cleanedSubdirectory ne '';
-	my $compressedCount = 0;
-	for my $path (sort @retainedAlignment) {
-		if (-l $path) {
-			my $temporary = "$path.materialize.$$";
-			retry_unlink($temporary, label => "clear MSA materialization temporary $temporary");
-			retry_operation(
-				label => "materialize symlinked MSA artifact $path",
-				code => sub { copy($path, $temporary) && -s $temporary },
-			);
-			retry_unlink($path, label => "replace symlinked MSA artifact $path");
-			retry_rename($temporary, $path,
-				label => "publish materialized MSA artifact $path");
-		}
-		my $compressed = "$path.gz";
-		retry_unlink($compressed, label => "replace stale compressed MSA artifact $compressed")
-			if -e $compressed || -l $compressed;
-		systemW("$pigzBin -p $ncore ".shellQuote($path));
-		die "MSA finalization did not produce $compressed\n" unless -s $compressed && !-e $path;
-		$compressedCount++;
-	}
-	my $retainedSingleLocus = scalar(@singleLocusNucleotide) - ($removeMSA ? scalar(@singleLocusNucleotide) : 0);
-	print "MSA finalization: removed ".scalar(@singleLocusToRemove)." single-locus alignment file(s)"
-		.($retainedSingleLocus ? "; retained $retainedSingleLocus single-locus nucleotide MSA(s)" : '')
-		.($cleanedSubdirectory ne '' ? '; removed MSA/clnd' : '')
-		."; compressed $compressedCount retained MSAli alignment(s)\n";
-	return $compressedCount;
+	print "MSA finalization: removed $removedSingleLocus single-locus alignment file(s)"
+		.($retainedSingleLocus ? "; retained $retainedSingleLocus compressed single-locus nucleotide MSA(s)" : '')
+		.($cleanedSubdirectory ne '' ? '; removed legacy MSA/clnd' : '')
+		."; published $publishedCount compressed MSAli checkpoint(s)\n";
+	return $publishedCount;
 }
-
 
 sub requireConfiguredTool{
 	my ($configKey, $description) = @_;

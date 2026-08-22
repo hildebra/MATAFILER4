@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-22 — OOM-aware strain worker retries
+
+- Updated `strain_within.pl` to 1.37. Fresh and resumed Phase-I worker repair now use one retry routine backed by the shared Slurm accounting planner in `Mods/SlurmAccounting.pm`.
+- An accounting-confirmed Phase-I OOM doubles only the affected worker's memory request on its next bounded retry, capped by `-treeOOMMaxMemGB`; unclassified and non-OOM failures retain their previous request.
+- Strain-submitted BuildTree jobs now request node-local scratch at five times compressed input size with a 20 GiB floor, increased from four times with a 15 GiB floor.
+
 ## 2026-08-19 — Post-QC recovery of partial strain loci
 
 - Updated `buildTree5.pl` to 5.77 and `strain_within.pl` to 1.25. `-GeneLengthMin` remains the high-confidence per-sample locus gate used for candidate selection and backbone/placement eligibility; the new `-GeneLengthIncludeMin` (default `0.03`) recovers lower-coverage observations only after that QC gate.

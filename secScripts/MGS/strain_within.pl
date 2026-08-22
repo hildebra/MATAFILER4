@@ -35,7 +35,7 @@ use Mods::StrainParts qw(
 );
 use Mods::SlurmAccounting qw(
 	slurm_tree_memory_summary format_slurm_tree_memory_summary
-	next_oom_retry_memory_mb
+	slurm_oom_retry_plan slurm_job_id_from_dependency
 );
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
@@ -122,6 +122,7 @@ sub recoverCompletedSplitPhaseI;
 sub taxonAwareLocusBudgets;
 sub phase1WorkersNeedingRetry;
 sub phase1WorkerCommand;
+sub retryPhase1Workers;
 sub strainOutputHasDurablePhaseIState;
 sub phase1PathStatComponent;
 sub phase1GuideStatFingerprint;
@@ -267,7 +268,8 @@ my $completionMessage = "";
 #1.34: publish one validated selected-catalogue protein cache for all Phase-I workers
 #1.35: canonicalize unlimited split-worker extraction as -maxGenes 0
 #1.36: make Phase-I contracts portable across compute-node device namespaces
-my $version = 1.36;
+#1.37: escalate accounting-confirmed Phase-I OOM retries and increase tree scratch headroom
+my $version = 1.37;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1322,6 +1324,8 @@ if ($runPartI){
 	# $SIgenes and $COGprios are reused by direct Phase-II outgroup lookup.
 	
 	my @jobsMain;
+	my (%phase1JobByWorker, %phase1MemoryByWorker);
+	my $phase1InitialMemoryMB = int($selfMemGb * 1024 + 0.5);
 	my $phase1SelfCmd = '';
 
 	if ($maxSubJob && !$subJob){
@@ -1345,6 +1349,9 @@ if ($runPartI){
 			print $LOGDIR."Strain1_B${sj}.sh\n";
 			my ($dep,$qcmd) = qsubSystem($LOGDIR."Strain1_B${sj}.sh",$cmdX,1,"${selfMemGb}G","Str1.$sj","","",1,[],$QSBoptHR);
 			push(@jobsMain,$dep);
+			my $jobID = slurm_job_id_from_dependency($dep, $QSBoptHR->{rTag});
+			$phase1JobByWorker{$sj} = $jobID if defined($jobID);
+			$phase1MemoryByWorker{$sj} = $phase1InitialMemoryMB;
 		}
 		$QSBoptHR->{tmpSpace} = $tmpHDD;
 	}
@@ -1387,36 +1394,24 @@ if ($runPartI){
 			exit(0);
 		}
 		qsubSystemJobAlive( \@jobsMain,$QSBoptHR ) if @jobsMain && $doSubmit;
-		my $workerRetryRound = 0;
-		while (1) {
-			my @failedWorkers = phase1WorkersNeedingRetry($splitGeneration);
-			last unless @failedWorkers;
-			if ((grep { $_ == 0 } @failedWorkers)
-					|| $workerRetryRound >= $phase1WorkerRetries) {
-				my $queue = writePhase1RepairQueue($splitGeneration, \@failedWorkers,
-					'live Phase-I worker validation failed');
+		my @failedWorkers = phase1WorkersNeedingRetry($splitGeneration);
+		if (@failedWorkers) {
+			my $remaining = retryPhase1Workers(
+				generation => $splitGeneration,
+				workers => \@failedWorkers,
+				worker_command => $phase1SelfCmd,
+				script_kind => "retry",
+				job_by_worker => \%phase1JobByWorker,
+				memory_by_worker => \%phase1MemoryByWorker,
+			);
+			if (@{$remaining}) {
+				my $queue = writePhase1RepairQueue($splitGeneration, $remaining,
+					"live Phase-I worker validation failed");
 				$completionMessage = "Phase I requires worker repair before Phase II; no tree jobs were submitted.";
 				print "Phase-I processing paused safely; repair queue: $queue. Invalid workers: "
-					.join(',', @failedWorkers)."\n";
+					.join(",", @{$remaining})."\n";
 				exit(0);
 			}
-			$workerRetryRound++;
-			print "Retrying Phase-I worker(s) ".join(',', @failedWorkers)
-				." (round $workerRetryRound/$phase1WorkerRetries)\n";
-			my @retryJobs;
-			my $savedTmp = $QSBoptHR->{tmpSpace}; $QSBoptHR->{tmpSpace} = 15;
-			for my $sj (@failedWorkers) {
-				my $stone = "$splitStonePrefix.$sj.stone";
-				retry_unlink($stone, fatal => 0, label => "clear worker $sj completion");
-				my $cmdX = "$phase1SelfCmd -subjob $sj &&\n"
-					."printf '%s\\n' ".shellQuote($splitGeneration)
-					." > ".shellQuote($stone)."\n";
-				my ($dependency) = qsubSystem("$LOGDIR/Strain1_B${sj}.retry${workerRetryRound}.sh",
-					$cmdX,1,"${selfMemGb}G","Str1.$sj","","",1,[],$QSBoptHR);
-				push @retryJobs, $dependency;
-			}
-			$QSBoptHR->{tmpSpace} = $savedTmp;
-			qsubSystemJobAlive(\@retryJobs, $QSBoptHR);
 		}
 		my $generationComplete = retry_operation(
 			label => 'validate completed split-extraction generation', fatal => 0,
@@ -2085,8 +2080,9 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	if ( 0&& ($MSAprog==4 && $inputFNAsize>700) ){ $QSBoptHR->{useLongQueue} = 1 ;	}
 	my $tmpSHDD = $QSBoptHR->{tmpSpace};
 	my $nodeTmpConfigured = getProgPaths("nodeTmpDir",0) ne "";
-	my $treeTmpGb = int(($inputFNAsize * 4 + 1023) / 1024);
-	$treeTmpGb = 15 if $treeTmpGb < 15;
+	# Allow headroom for decompressed alignments, engine temporaries, and atomic publication.
+	my $treeTmpGb = int(($inputFNAsize * 5 + 1023) / 1024);
+	$treeTmpGb = 20 if $treeTmpGb < 20;
 	$QSBoptHR->{tmpSpace} = $nodeTmpConfigured ? $treeTmpGb : 0;
 	# Placement retains likelihood vectors across the reference tree and can use
 	# substantially more memory than tree inference for long concatenated MSAs.
@@ -5446,6 +5442,108 @@ sub validatePhase1WorkerLedger {
 	return (1, '');
 }
 
+sub retryPhase1Workers {
+	my %args = @_;
+	my $generation = $args{generation};
+	my @failedWorkers = @{$args{workers} || []};
+	my $workerCommand = $args{worker_command};
+	my $scriptKind = $args{script_kind} || "retry";
+	my $jobByWorker = $args{job_by_worker} || {};
+	my $memoryByWorker = $args{memory_by_worker} || {};
+	die "Phase-I retry requires a generation and worker command\n"
+		unless defined($generation) && length($generation)
+			&& defined($workerCommand) && length($workerCommand);
+	my $defaultMemoryMB = int($selfMemGb * 1024 + 0.5);
+	my $maximumMemoryMB = int($treeOOMMaxMemGB * 1024 + 0.5);
+	my %terminalOOMWorker;
+	my $round = 0;
+
+	while (@failedWorkers) {
+		last if grep { $_ == 0 } @failedWorkers;
+		last unless $doSubmit;
+		last if $round >= $phase1WorkerRetries;
+		my @eligibleWorkers = grep { !$terminalOOMWorker{$_} } @failedWorkers;
+		last unless @eligibleWorkers;
+
+		my %oomByJob;
+		if (($QSBoptHR->{qmode} || "") eq "slurm") {
+			my @records;
+			for my $worker (@eligibleWorkers) {
+				my $jobID = $jobByWorker->{$worker};
+				next unless defined($jobID) && $jobID =~ /^\d+$/;
+				push @records, {
+					job_id => $jobID,
+					worker => $worker,
+					requested_mb => $memoryByWorker->{$worker} || $defaultMemoryMB,
+				};
+			}
+			if (@records) {
+				my $plan = slurm_oom_retry_plan(\@records, $maximumMemoryMB);
+				if (!$plan->{summary}{available}) {
+					warn "Phase-I Slurm OOM accounting unavailable; retrying with the previous memory request: "
+						.($plan->{summary}{error} || "unknown error")."\n";
+				} else {
+					%oomByJob = %{$plan->{by_job_id}};
+				}
+			}
+		}
+
+		my %retryMemoryMB;
+		for my $worker (@eligibleWorkers) {
+			my $currentMB = $memoryByWorker->{$worker} || $defaultMemoryMB;
+			my $jobID = $jobByWorker->{$worker};
+			my $oom = defined($jobID) ? $oomByJob{$jobID} : undef;
+			if ($oom) {
+				if ($oom->{ceiling_reached}) {
+					warn "Cannot retry OOM Phase-I worker $worker: $currentMB MB already meets "
+						."-treeOOMMaxMemGB $treeOOMMaxMemGB\n";
+					$terminalOOMWorker{$worker} = 1;
+					next;
+				}
+				$currentMB = $oom->{next_mb};
+				print "Phase-I worker $worker OOM escalation: $oom->{requested_mb} MB -> "
+					."$currentMB MB\n";
+			}
+			$retryMemoryMB{$worker} = $currentMB;
+		}
+		my @retryableWorkers = grep { exists($retryMemoryMB{$_}) } @eligibleWorkers;
+		last unless @retryableWorkers;
+
+		$round++;
+		print "Retrying Phase-I worker(s) ".join(",", @retryableWorkers)
+			." (round $round/$phase1WorkerRetries)\n";
+		my @retryJobs;
+		my $savedTmp = $QSBoptHR->{tmpSpace};
+		$QSBoptHR->{tmpSpace} = 15;
+		for my $worker (@retryableWorkers) {
+			my $stone = "$splitStonePrefix.$worker.stone";
+			retry_unlink($stone, fatal => 0,
+				label => "clear worker $worker completion");
+			my $cmdX = "$workerCommand -subjob $worker &&\n"
+				."printf '%s\\n' ".shellQuote($generation)
+				." > ".shellQuote($stone)."\n";
+			my ($dependency) = qsubSystem(
+				"$LOGDIR/Strain1_B${worker}.${scriptKind}${round}.sh",
+				$cmdX, 1, $retryMemoryMB{$worker}."M", "Str1.$worker",
+				"", "", 1, [], $QSBoptHR,
+			);
+			push @retryJobs, $dependency;
+			$memoryByWorker->{$worker} = $retryMemoryMB{$worker};
+			my $jobID = slurm_job_id_from_dependency(
+				$dependency, $QSBoptHR->{rTag});
+			if (defined($jobID)) {
+				$jobByWorker->{$worker} = $jobID;
+			} else {
+				delete $jobByWorker->{$worker};
+			}
+		}
+		$QSBoptHR->{tmpSpace} = $savedTmp;
+		qsubSystemJobAlive(\@retryJobs, $QSBoptHR);
+		@failedWorkers = phase1WorkersNeedingRetry($generation);
+	}
+	return \@failedWorkers;
+}
+
 sub phase1WorkersNeedingRetry {
 	my ($generation) = @_;
 	my @failed;
@@ -5517,37 +5615,21 @@ sub recoverCompletedSplitPhaseI {
 	my $hasRecoveryParts = grep { -e $_ } @recoveryParts;
 	my $hasSampleStatsParts = grep { -e $_ } @sampleStatsParts;
 	my @failedWorkers = phase1WorkersNeedingRetry($generation);
-	my $workerRetryRound = 0;
-	while (@failedWorkers) {
-		my $cannotRepair = grep { $_ == 0 } @failedWorkers;
-		$cannotRepair ||= !$doSubmit || $workerRetryRound >= $phase1WorkerRetries;
-		if ($cannotRepair) {
-			my $queue = writePhase1RepairQueue($generation, \@failedWorkers,
-				'resumed Phase-I worker validation failed');
+	if (@failedWorkers) {
+		my $remaining = retryPhase1Workers(
+			generation => $generation,
+			workers => \@failedWorkers,
+			worker_command => phase1WorkerCommand(),
+			script_kind => "resume",
+		);
+		if (@{$remaining}) {
+			my $queue = writePhase1RepairQueue($generation, $remaining,
+				"resumed Phase-I worker validation failed");
 			$completionMessage = "Phase I requires worker repair before Phase II; no tree jobs were submitted.";
-			print "Phase-I recovery paused safely; repair queue: $queue. Invalid workers: ".join(',', @failedWorkers)."\n";
+			print "Phase-I recovery paused safely; repair queue: $queue. Invalid workers: "
+				.join(",", @{$remaining})."\n";
 			exit(0);
 		}
-		$workerRetryRound++;
-		print "Resubmitting invalid Phase-I worker(s) from completed generation: "
-			.join(',', @failedWorkers)." (round $workerRetryRound/$phase1WorkerRetries)\n";
-		my @retryJobs;
-		my $savedTmp = $QSBoptHR->{tmpSpace};
-		$QSBoptHR->{tmpSpace} = 15;
-		my $workerCommand = phase1WorkerCommand();
-		for my $worker (@failedWorkers) {
-			my $stone = "$splitStonePrefix.$worker.stone";
-			retry_unlink($stone, fatal => 0, label => "clear worker $worker completion");
-			my $cmdX = "$workerCommand -subjob $worker &&\n"
-				."printf '%s\\n' ".shellQuote($generation)." > ".shellQuote($stone)."\n";
-			my ($dependency) = qsubSystem("$LOGDIR/Strain1_B${worker}.resume${workerRetryRound}.sh",
-				$cmdX,1,"${selfMemGb}G","Str1.$worker","","",1,[],$QSBoptHR);
-			push @retryJobs, $dependency;
-		}
-		$QSBoptHR->{tmpSpace} = $savedTmp;
-		qsubSystemJobAlive(\@retryJobs, $QSBoptHR);
-		@failedWorkers = phase1WorkersNeedingRetry($generation);
-
 	}
 	retry_unlink("$LOGDIR/phase1_worker_repair.queue.tsv", fatal => 0,
 		label => 'clear obsolete Phase-I repair queue');
@@ -6494,14 +6576,14 @@ sub dispatchPendingTreeJobs {
 		push @{$jobs}, $dependency if defined($dependency) && length($dependency);
 		if ($options->{doSubmit} && ($options->{qmode} || '') eq 'slurm'
 				&& defined($dependency)) {
-			my $schedulerJobID = $dependency;
-			$schedulerJobID =~ s/^\Q$options->{rTag}\E//;
+			my $schedulerJobID = slurm_job_id_from_dependency(
+				$dependency, $options->{rTag});
 			push @{$accounting}, {
 				job_id => $schedulerJobID, mgs => $record->{mgs},
 				requested_mb => $record->{requested_mb},
 				retry_round => $record->{retry_round} // 0,
 				submission_record => { %{$record} },
-			} if $schedulerJobID =~ /^\d+$/;
+			} if defined($schedulerJobID);
 		}
 	}
 	$options->{nonblockingMaxConcurrentJobs} = $saved_nonblocking;
@@ -6522,12 +6604,14 @@ sub retryOOMTreeJobs {
 		unless $maximumRounds >= 0 && $maximumRounds <= 3;
 
 	my @roundAccounting = @{$accounting};
-	my $summary = slurm_tree_memory_summary(\@roundAccounting);
+	my $oomPlan = slurm_oom_retry_plan(\@roundAccounting, $maximumMB);
+	my $summary = $oomPlan->{summary};
 	print format_slurm_tree_memory_summary($summary);
 	my $retried = 0;
 	for my $round (1 .. $maximumRounds) {
 		last unless $summary->{available};
-		my @oom = @{$summary->{oom_jobs} || []};
+		my @oom = map { $oomPlan->{by_job_id}{$_} }
+			sort { $a <=> $b } keys %{$oomPlan->{by_job_id}};
 		last unless @oom;
 		my @retryQueue;
 		for my $oom (@oom) {
@@ -6536,8 +6620,7 @@ sub retryOOMTreeJobs {
 				warn "Cannot retry OOM tree job $oom->{job_id}: submission record is unavailable\n";
 				next;
 			}
-			my $nextMB = next_oom_retry_memory_mb(
-				$original->{requested_mb}, $maximumMB);
+			my $nextMB = $oom->{next_mb};
 			unless (defined($nextMB)) {
 				warn "OOM retry ceiling reached for $original->{mgs}: "
 					."$original->{requested_mb} MB already meets -treeOOMMaxMemGB "
@@ -6593,7 +6676,8 @@ sub retryOOMTreeJobs {
 		push @{$accounting}, @retryAccounting;
 		$retried += scalar(@retryAccounting);
 		@roundAccounting = @retryAccounting;
-		$summary = slurm_tree_memory_summary(\@roundAccounting);
+		$oomPlan = slurm_oom_retry_plan(\@roundAccounting, $maximumMB);
+		$summary = $oomPlan->{summary};
 		print "OOM retry round $round accounting:\n";
 		print format_slurm_tree_memory_summary($summary);
 	}

@@ -35,14 +35,18 @@ my $classification_helper_loaded = eval
 ok($classification_helper_loaded,
 	'EPA-only strict-backbone classification reader loads independently')
 	or diag($@);
-my ($msa_restore_helper, $msa_finalizer_helper) = $script_text =~
-	/(sub restoreCompressedMSAArtifact \{.*?\n\})\n\n(sub finalizeMSAArtifacts \{.*?\n\})\n{2,}sub requireConfiguredTool/s;
+my ($msa_lifecycle_helpers) = $script_text =~
+	/(sub copyStreamToPathAtomically \{.*?\n\})\n\nsub requireConfiguredTool/s;
 BAIL_OUT('Cannot extract MSA finalization helpers')
-	unless defined($msa_restore_helper) && defined($msa_finalizer_helper);
+	unless defined($msa_lifecycle_helpers);
 my $msa_helpers = <<'PERL';
 package TestBuildTreeMSAFinalizer;
+use Cwd qw(abs_path);
+use File::Basename qw(dirname);
 use File::Copy qw(copy);
-our ($pigzBin, $ncore, $removeMSA);
+use File::Path qw(make_path remove_tree);
+use File::Spec;
+our ($pigzBin, $ncore, $removeMSA, $partiExt);
 sub retry_unlink {
 	my ($path, %options) = @_;
 	return 1 unless -e $path || -l $path;
@@ -58,23 +62,30 @@ sub retry_rename {
 	rename $from, $to or die "Cannot rename $from to $to: $!\n";
 	return 1;
 }
-sub safeRemoveTree {
-	my ($path, $parent) = @_;
-	File::Path::remove_tree($path);
+sub retry_open {
+	my ($mode, $path, %options) = @_;
+	open my $handle, $mode, $path or die "Cannot open $path: $!\n";
+	return $handle;
+}
+sub retry_close {
+	my ($handle, $label, %options) = @_;
+	close $handle or die "Cannot $label: $!\n";
 	return 1;
 }
-sub shellQuote {
-	my ($value) = @_;
-	$value =~ s/'/'"'"'/g;
-	return "'$value'";
+sub gzipopen {
+	my ($path) = @_;
+	my $resolved = -s $path ? $path : -s "$path.gz" ? "$path.gz" : '';
+	return (undef, 0, undef) unless length $resolved;
+	open my $handle, '<', $resolved or die "Cannot read $resolved: $!\n";
+	return ($handle, 1, $resolved);
 }
-sub systemW {
-	my ($command) = @_;
-	my $status = system($command);
-	die "Command failed ($status): $command\n" if $status != 0;
+sub safeRemoveTree {
+	my ($path, $parent) = @_;
+	remove_tree($path);
+	return 1;
 }
 PERL
-$msa_helpers .= "$msa_restore_helper\n$msa_finalizer_helper\n1;";
+$msa_helpers .= "$msa_lifecycle_helpers\n1;";
 my $msa_helpers_loaded = eval $msa_helpers;
 ok($msa_helpers_loaded, 'MSA finalization helpers load independently')
 	or diag($@);
@@ -146,36 +157,30 @@ sub write_test_file {
 my $fake_pigz = File::Spec->catfile($temporary, 'pigz');
 write_test_file($fake_pigz, <<'PIGZ');
 #!/bin/sh
-decompress=0
 input=''
 for argument in "$@"; do
-	if [ "$argument" = '-d' ]; then
-		decompress=1
-	fi
 	input="$argument"
 done
-if [ "$decompress" -eq 1 ]; then
-	target=${input%.gz}
-	cp "$input" "$target" && rm "$input"
-else
-	cp "$input" "$input.gz" && rm "$input"
-fi
+cat "$input"
 PIGZ
 chmod 0755, $fake_pigz or die "Cannot mark $fake_pigz executable: $!";
 my $msa_directory = File::Spec->catdir($temporary, 'MSA');
 my $msa_cleaned = File::Spec->catdir($msa_directory, 'clnd');
+my $msa_work_directory = File::Spec->catdir($temporary, 'MSA-work');
 mkdir $msa_directory or die "Cannot create $msa_directory: $!";
 mkdir $msa_cleaned or die "Cannot create $msa_cleaned: $!";
+mkdir $msa_work_directory or die "Cannot create $msa_work_directory: $!";
 write_test_file(File::Spec->catfile($msa_directory, 'COG0001.0.fna'), "gene locus\n");
 write_test_file(File::Spec->catfile($msa_directory, 'COG0001.0.faa.gz'), "gene locus\n");
 write_test_file(File::Spec->catfile($msa_cleaned, 'COG0001.fna'), "cleaned locus\n");
-my $external_placement = File::Spec->catfile($temporary, 'placement.source.fna');
-write_test_file($external_placement, "placement source\n");
+my $placement_work = File::Spec->catfile($msa_work_directory, 'MSAli.placement.fna');
+write_test_file($placement_work, "placement source\n");
 my $placement_link = File::Spec->catfile($msa_directory, 'MSAli.placement.fna');
-symlink $external_placement, $placement_link
-	or die "Cannot create $placement_link symlink: $!";
 my $retained_alignment = File::Spec->catfile($msa_directory, 'MSAli.fna');
-write_test_file($retained_alignment, "concatenated alignment\n");
+my $retained_work = File::Spec->catfile($msa_work_directory, 'MSAli.fna');
+write_test_file($retained_work, "concatenated alignment\n");
+write_test_file("$retained_work.nxs", "NEXUS alignment\n");
+write_test_file("$retained_work.partition.RAXML", "DNA, part1 = 1-10\n");
 my $already_compressed = File::Spec->catfile($msa_directory, 'MSAli.syn.fna.gz');
 write_test_file($already_compressed, "retained compressed alignment\n");
 {
@@ -183,24 +188,34 @@ write_test_file($already_compressed, "retained compressed alignment\n");
 	$TestBuildTreeMSAFinalizer::pigzBin = $fake_pigz;
 	$TestBuildTreeMSAFinalizer::ncore = 1;
 	$TestBuildTreeMSAFinalizer::removeMSA = 1;
+	$TestBuildTreeMSAFinalizer::partiExt = '.partition.RAXML';
 }
-is(TestBuildTreeMSAFinalizer::finalizeMSAArtifacts($msa_directory), 2,
-	'MSA finalization compresses each plain retained MSAli alignment');
+is(TestBuildTreeMSAFinalizer::finalizeMSAArtifacts(
+	$msa_directory, $msa_work_directory), 2,
+	'finalization publishes both scratch MSAli alignments as compressed checkpoints');
 ok(!-e File::Spec->catfile($msa_directory, 'COG0001.0.fna')
 		&& !-e File::Spec->catfile($msa_directory, 'COG0001.0.faa.gz'),
 	'finalization removes root-level single-locus nucleotide and amino-acid alignments');
-ok(!-d $msa_cleaned, 'finalization removes cleaned per-locus alignment artifacts');
+ok(!-d $msa_cleaned, 'finalization removes legacy persistent cleaned-locus artifacts');
 ok(!-e $retained_alignment && -s "$retained_alignment.gz"
 		&& !-e $placement_link && -s "$placement_link.gz"
 		&& -s $already_compressed,
-	'finalization retains only compressed MSAli FASTA artifacts');
-ok(-s $external_placement,
-	'finalization materializes a retained symlink before compression without deleting its source');
-is(TestBuildTreeMSAFinalizer::restoreCompressedMSAArtifact($retained_alignment),
-	$retained_alignment,
-	'EPA-only recovery restores a retained compressed concatenated alignment');
-ok(-s $retained_alignment && !-e "$retained_alignment.gz",
-	'EPA-only recovery leaves the restored plain alignment ready for EPA-ng');
+	'finalization leaves only durable compressed MSAli FASTA artifacts in persistent storage');
+ok(-s "$retained_alignment.nxs.gz"
+		&& !-e "$retained_alignment.partition.RAXML"
+		&& -s "$retained_alignment.partition.RAXML.gz",
+	'NEXUS data and the partition checkpoint are stored only in compressed form');
+ok(-s $retained_work && -s $placement_work,
+	'publishing and finalizing do not consume the active scratch alignments');
+my $restored_directory = File::Spec->catdir($temporary, 'MSA-restored');
+mkdir $restored_directory or die "Cannot create $restored_directory: $!";
+my $restored_alignment = File::Spec->catfile($restored_directory, 'MSAli.fna');
+is(TestBuildTreeMSAFinalizer::restoreCompressedMSAArtifact(
+	$retained_alignment, $restored_alignment), $restored_alignment,
+	'continuation restores the retained concatenated alignment into fresh scratch');
+ok(-s $restored_alignment && -s "$retained_alignment.gz"
+		&& !-e $retained_alignment && !-l $retained_alignment,
+	'restoration preserves the gzip checkpoint without exposing a persistent plain path');
 
 my $retained_locus_directory = File::Spec->catdir($temporary, 'MSA-retained-loci');
 mkdir $retained_locus_directory or die "Cannot create $retained_locus_directory: $!";
@@ -213,9 +228,24 @@ write_test_file($retained_locus_alignment, "concatenated alignment\n");
 $TestBuildTreeMSAFinalizer::removeMSA = 0;
 is(TestBuildTreeMSAFinalizer::finalizeMSAArtifacts($retained_locus_directory), 1,
 	'MSA finalization still compresses the retained concatenated alignment in retention mode');
-ok(-s $retained_locus && !-e $discarded_protein,
-	'-rmMSA 0 retains nucleotide sub-alignments for population genetics but removes unneeded protein alignments');
+ok(!-e $retained_locus && -s "$retained_locus.gz" && !-e $discarded_protein,
+	'-rmMSA 0 retains nucleotide sub-alignments as gzip checkpoints for later '
+		.'population-genetics work while removing unneeded protein alignments');
+like($script_text,
+	qr/my \$finOutMSA = File::Spec->catfile\(\$MsaWorkD.*?if \(\$endFileExists\).*?restoreCompressedMSAArtifact\(\$publishedOutMSA, \$finOutMSA\).*?if \(!\$endFileExists\).*?runMSAFix\(\$tmpOutMSA, \$maxGapPerCol\).*?publishCompressedMSAArtifact\(\$finOutMSA, \$publishedOutMSA\)/s,
+	'per-locus continuation restores gzip checkpoints to scratch, while fresh '
+		.'nucleotide MSAs run MSAfix before their first compressed publication');
+like($script_text,
+	qr/my \$multAli = File::Spec->catfile\(\$MsaWorkD, 'MSAli\.fna'\).*?publishMSAArtifactSet\(\$multAli, \$multAliArtifact\)/s,
+	'the concatenated plain MSA is created on scratch and published as a durable artifact');
+unlike($script_text, qr/\$pigzBin[^;\n]*\s-d(?:\s|["'])/,
+	'buildTree5 no longer decompresses retained MSA checkpoints in place');
+unlike($script_text, qr/msaArtifactByWork|exposeMSAWorkingArtifact|copyMSASidecarAtomically/,
+	'the scratch lifecycle does not retain path maps, persistent aliases, or a separate sidecar copier');
 my $publication_staging = File::Spec->catdir($temporary, 'publication-resume');
+like($script_text, qr/sub createTreeOpt\{.*?my \$partiF=\$multF\.\$partiExt;.*?inMSA => \$multF/s,
+	'tree programs receive the restored scratch alignment and scratch partition paths directly');
+
 mkdir $publication_staging or die "Cannot create $publication_staging: $!";
 write_test_file(File::Spec->catfile($publication_staging, '.strain_tree_input.plan.tsv'),
 	"strain-staged-input-v1\noutgroup\tMGS.2643\n");

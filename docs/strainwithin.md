@@ -40,7 +40,9 @@ The wrapper extracts and QC-filters strain loci (Phase I), prepares each MGS tre
 
 By default, the wrapper builds one tree from the complete retained alignment. EPA-ng placement is **disabled**. To infer a well-covered backbone and place eligible sparse strains afterward, explicitly add `-placeOnBackbone 1`.
 
-To generate only the post-QC concatenated alignments, add `-onlyMSA 1`. Each successful MGS retains `MSA/MSAli.fna.gz` and records `msaOnly.complete.tsv`; the wrapper skips phylogeny, EPA-ng placement, and `strain_within_2.2.pl`. Resume an interrupted alignment-only run with the same option plus `-onlySubmit 1`. Because no backbone exists in this mode, it cannot be combined with `-placeOnBackbone 1`.
+On Slurm, split Phase-I workers that fail validation use one shared bounded retry path. When scheduler accounting confirms `OUT_OF_MEMORY`, the affected worker's memory request doubles on its next retry, up to `-treeOOMMaxMemGB`; non-OOM failures retain the previous request. Strain BuildTree jobs request node-local scratch at five times the compressed input size, with a 20 GiB minimum, when node-local scratch is configured.
+
+To generate only the post-QC concatenated alignments, add `-onlyMSA 1`. Each successful MGS retains `MSA/MSAli.fna.gz` and records `msaOnly.complete.tsv`; mutable plain alignments are created and postprocessed in the tree job's scratch directory, and continuation expands the retained gzip checkpoint into fresh scratch without consuming it. The wrapper skips phylogeny, EPA-ng placement, and `strain_within_2.2.pl`. Resume an interrupted alignment-only run with the same option plus `-onlySubmit 1`. Because no backbone exists in this mode, it cannot be combined with `-placeOnBackbone 1`.
 
 ### 2. Choose sample-inclusion stringency
 

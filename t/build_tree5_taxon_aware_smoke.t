@@ -409,6 +409,8 @@ like($attritionText, qr/^gene_length_recovered_msa_loci\t1$/m,
 my $mergedAlignment = File::Spec->catfile($output, 'MSA', 'MSAli.fna');
 my $compressedMergedAlignment = "$mergedAlignment.gz";
 ok(-s $compressedMergedAlignment, 'bounded final alignment is retained in compressed form');
+ok(!-e $mergedAlignment,
+	'completed workflow leaves no persistent uncompressed MSAli alignment or active scratch link');
 open my $alignmentHandle, '-|', 'gzip', '-cd', $compressedMergedAlignment or die $!;
 my $alignmentText = do { local $/; <$alignmentHandle> };
 close $alignmentHandle;
@@ -422,10 +424,11 @@ cmp_ok($s5Called, '>', 30,
 	'recovered g4 sequence contributes sites to the final merged phylogeny alignment');
 
 my $partitionFile = $mergedAlignment.'.partition.RAXML';
+my $compressedPartitionFile = "$partitionFile.gz";
 my $rateAudit = File::Spec->catfile($output, 'phylo', 'rate_merged_partitions.tsv');
-ok(-s $partitionFile, 'deterministically grouped partition file is produced');
+ok(!-e $partitionFile && -s $compressedPartitionFile, 'the partition recovery file is retained only as gzip');
 ok(!-e $rateAudit, 'rate/GC partition source audit is merged into the diagnostics file');
-open my $partitionHandle, '<', $partitionFile or die $!;
+open my $partitionHandle, '-|', 'gzip', '-cd', $compressedPartitionFile or die $!;
 my @partitionLines = grep { /\S/ } <$partitionHandle>;
 close $partitionHandle;
 cmp_ok(scalar(@partitionLines), '>=', 2,
@@ -460,7 +463,10 @@ is(system(@collapsedCommand), 0,
 	'rate-merging smoke workflow completes with production small-bin thresholds');
 my $collapsedPartition = File::Spec->catfile(
 	$collapsedOutput, 'MSA', 'MSAli.fna.partition.RAXML');
-open my $collapsedHandle, '<', $collapsedPartition or die $!;
+my $compressedCollapsedPartition = "$collapsedPartition.gz";
+ok(!-e $collapsedPartition && -s $compressedCollapsedPartition,
+	'collapsed partition recovery is retained only as gzip');
+open my $collapsedHandle, '-|', 'gzip', '-cd', $compressedCollapsedPartition or die $!;
 my @collapsedLines = grep { /\S/ } <$collapsedHandle>;
 close $collapsedHandle;
 is(scalar(@collapsedLines), 1,

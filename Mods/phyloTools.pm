@@ -383,6 +383,13 @@ sub runQItree{
 		if $iqPathogen && $iqVersion != 3;
 	$treeOut =~ s/\.nwk$//;
 	my $treNM = "IQtree";
+	if (($treeOpts{restartIncomplete} // 0) && -s "$treeOut.ckp.gz") {
+		_archiveIQTreeLog($treeOut, 'prior_scratch') if -e "$treeOut.log";
+		_clearIQTreeAttempt($treeOut);
+		print "Restarting incomplete IQ-TREE search from the recovered scratch MSA; "
+			."the prior checkpoint referenced an earlier job's scratch path\n";
+	}
+
 	my $threadOpts = "-T $ncore";
 	my $usePartitionModel = $partiF ne "" && !$iqPathogen;
 	# BuildTree already knows the biological alphabet. Pass it explicitly so
