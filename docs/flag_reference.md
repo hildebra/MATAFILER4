@@ -16,7 +16,7 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
 | `strain_within.pl` | `1.29` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
 | `strain_within_2.2.pl` | `0.46` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
-| `buildTree5.pl` | `5.79` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.80` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -454,7 +454,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## strain_within.pl
 
-Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.34`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.35`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
 
 For split Phase I, the parent scans the catalogue cluster index once and atomically publishes a provenance-bound binary membership shard for each worker under shared strain scratch. The manifest is published only after every shard is complete. Workers validate the generation, size, header, record count and payload digest before use; an absent, stale or corrupt cache falls back to the original full-index parser.
 
@@ -536,6 +536,8 @@ These options remain parsed so existing generated commands and worker scripts do
 | `-subjob` | internal | Split-worker index supplied by the parent process. |
 | `-flushEvery` | internal | Publish buffered Stage-I records after this many sample rows; default `50`. Lower values reduce peak Perl memory and spread shared-scratch writes, but reopen per-MGS shard files more often. |
 | `-disableQC` | internal | Developer override that disables biological QC. |
+
+The parent canonicalizes all unlimited extraction spellings to `-maxGenes 0` when it creates split-worker commands. It does not forward the deprecated `-noGeneLimit` alias. Therefore the presence of `-maxGenes 0` in a worker script explicitly means that no per-sample locus-count cap is applied; biological QC and the separate `-presortGenes` and `-treeLocusBudget` bounds remain active.
 
 ### Mosaic and outgroup preparation
 
@@ -637,7 +639,7 @@ Within-MGS postprocessing, strain statistics and population-genetic analysis. Th
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.79`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.80`.
 
 ### General options
 

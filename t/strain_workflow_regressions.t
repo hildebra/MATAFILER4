@@ -390,7 +390,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.34;/,
+like($strain, qr/my \$version = 1\.35;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -866,6 +866,12 @@ unlike($strain, qr/\$\{TMPDIR\}\/strain_within|my \$postCmd|touch "?\.shellQuote
 like($strain,
 	qr/sub phase1WorkerCommand.*?Stage-I workers receive extraction, consensus, and extraction-relevant.*?sub recoverCompletedSplitPhaseI.*?phase1WorkersNeedingRetry.*?Resubmitting invalid Phase-I worker.*?phase1_worker_repair\.queue\.tsv/s,
 	'live and resumed Phase I share extraction-only worker commands and durable targeted repair');
+like($strain,
+	qr/\$noGeneLimit = 1 if \$maxNGenes <= 0;.*?\$maxNGenes = 0 if \$noGeneLimit;.*?sub phase1WorkerCommand.*?'-presortGenes', \$presortGenes, '-maxGenes', \$maxNGenes,.*?'-disableQC', \$disableQC,/s,
+	'unlimited extraction is canonicalized to maxGenes zero before worker commands are built');
+unlike($strain,
+	qr/sub phase1WorkerCommand \{.*?'-noGeneLimit'.*?^\}/ms,
+	'split-worker commands do not forward the deprecated noGeneLimit alias');
 like($strain,
 	qr/No automatic full-tree resubmission was attempted.*?sub writeTreeFailureAudit.*?failed_missing_output.*?valid_no_tree.*?placement_pending/s,
 	'tree outcomes are classified and quarantined without automatic tree resubmission');

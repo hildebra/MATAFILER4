@@ -479,10 +479,41 @@ my $initialMafftRuns = (() = slurp($mafftCount) =~ /^/gm);
 cmp_ok($initialMafftRuns, q{>}, 0,
 	q{the initial workflow ran per-locus MSA jobs});
 my @downstreamResume = (@command, q{-continue}, 1, q{-iqLegacy}, 1);
-is(system(@downstreamResume), 0,
+open my $downstreamResumePipe, q{-|}, @downstreamResume
+	or die "Cannot start downstream-only resume: $!";
+my $downstreamResumeText = do {
+	local $/;
+	<$downstreamResumePipe> // q{};
+};
+ok(close($downstreamResumePipe),
 	q{a downstream-only option change resumes from the retained selected MSA});
+like(
+	$downstreamResumeText,
+	qr/POST-ALIGNMENT STEP: locus QC .*retained_loci=4, source=retained_checkpoint/,
+	q{resume locus-QC log reports retained checkpoint loci},
+);
+like(
+	$downstreamResumeText,
+	qr/POST-ALIGNMENT STEP: taxon-aware locus selection .*selected_loci=3, samples=5, source=retained_checkpoint/,
+	q{resume selection log reports retained partition and alignment counts},
+);
+like(
+	$downstreamResumeText,
+	qr/POST-ALIGNMENT STEP: concatenation .*loci=3, samples=5, source=retained_checkpoint/,
+	q{resume concatenation log reports retained checkpoint counts},
+);
+unlike(
+	$downstreamResumeText,
+	qr/(?:retained_loci|selected_loci|loci)=0, samples=0/,
+	q{resume progress does not falsely report a zero-locus, zero-sample alignment},
+);
 is((() = slurp($mafftCount) =~ /^/gm), $initialMafftRuns,
 	q{a downstream-only option change does not run the per-locus MSAs again});
+my $resumeAttritionText = slurp($attritionAudit);
+like($resumeAttritionText, qr/^final_loci\t3$/m,
+	q{downstream resume preserves the final locus attrition count});
+like($resumeAttritionText, qr/^backbone_samples\t5$/m,
+	q{downstream resume preserves the backbone sample attrition count});
 my $validCheckpointMafftRuns = (() = slurp($mafftCount) =~ /^/gm);
 write_file($mergedAlignment, ">corrupt1\nACGT!\n>corrupt2\nACGT!\n");
 my @invalidCheckpointResume = (@command, q{-continue}, 1, q{-iqLegacy}, 1);

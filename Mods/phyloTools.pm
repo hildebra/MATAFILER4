@@ -385,7 +385,10 @@ sub runQItree{
 	my $treNM = "IQtree";
 	my $threadOpts = "-T $ncore";
 	my $usePartitionModel = $partiF ne "" && !$iqPathogen;
-	my $cmd = "$iqTree -s $inMSA $threadOpts -pre $treeOut -seed 678 -quiet ";
+	# BuildTree already knows the biological alphabet. Pass it explicitly so
+	# sparse/ambiguity-rich alignments do not depend on IQ-TREE 3 auto-detection.
+	my $sequenceType = $useAA ? 'AA' : 'DNA';
+	my $cmd = "$iqTree -s $inMSA -st $sequenceType $threadOpts -pre $treeOut -seed 678 -quiet ";
 	if (!$iqLegacy && $iqMemMB > 0){
 		if ($usePartitionModel){
 			warn "WARNING: IQ-TREE -mem disabled because partition models do not support "

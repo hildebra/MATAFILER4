@@ -127,8 +127,8 @@ my $phylo_tools = do { local $/; <$phylo_tools_fh> };
 close $phylo_tools_fh;
 like(
 	$phylo_tools,
-	qr/my \$cmd = "\$iqTree -s \$inMSA \$threadOpts -pre \$treeOut -seed 678 -quiet "/,
-	'IQ-TREE invocations use the selected bounded thread policy and quiet output',
+	qr/my \$cmd = "\$iqTree -s \$inMSA -st \$sequenceType \$threadOpts -pre \$treeOut -seed 678 -quiet "/,
+	'IQ-TREE invocations use an explicit sequence type, bounded threads, and quiet output',
 );
 unlike(
 	$phylo_tools,

@@ -140,6 +140,8 @@ unlike($calls[0], qr/(?:^|\s)-safe(?:\s|$)/,
 	'the small initial test attempt uses the normal likelihood kernel');
 like($calls[0], qr/(?:^|\s)-m GTR\+F\+G2(?:\s|$)/,
 	'the fixed nucleotide path uses the fast GTR+F+G2 model');
+like($calls[0], qr/(?:^|\s)-st DNA(?:\s|$)/,
+	'nucleotide IQ-TREE runs receive an explicit DNA sequence type');
 like($calls[1], qr/(?:^|\s)-safe(?:\s|$)/,
 	'the numerical-underflow retry uses the safe likelihood kernel');
 ok(-s "$retryPrefix.unsafe.log", 'the failed unsafe diagnostic is preserved');
@@ -209,5 +211,35 @@ unlike($fixed_model_calls[0], qr/(?:^|\s)-p(?:\s|$)/,
 	'fixed-tree IQ-TREE model refits can be run without a partition file');
 like($fixed_model_calls[0], qr/(?:^|\s)-m GTR\+F\+G2(?:\s|$)/,
 	'fixed-tree nucleotide model refits retain the fixed GTR+F+G2 model');
+
+my $proteinAlignment = File::Spec->catfile($tmp, 'alignment.faa');
+write_file($proteinAlignment, ">A\nACDE\n>B\nACDF\n>C\nACDG\n");
+my $proteinPrefix = File::Spec->catfile($tmp, 'IQtree_protein');
+{
+	no warnings 'redefine';
+	local *Mods::phyloTools::getProgPaths = sub { return $fakeIqtree };
+	runQItree({
+		inMSA => $proteinAlignment,
+		IQtreeout => $proteinPrefix,
+		ncore => 1,
+		outgr => '',
+		bootStrap => 0,
+		useAA => 1,
+		iqtreeFast => 0,
+		autoModel => 0,
+		partition => '',
+		runSafe => 1,
+		iqMemMB => 0,
+		iqPathogen => 0,
+		iqLegacy => 0,
+		constraintTree => '',
+	});
+}
+my @protein_calls = grep { length } split /\n/, slurp("$proteinPrefix.calls");
+is(scalar(@protein_calls), 1, 'protein safe-mode run invokes IQ-TREE once');
+like($protein_calls[0], qr/(?:^|\s)-st AA(?:\s|$)/,
+	'protein IQ-TREE runs receive an explicit AA sequence type');
+like($protein_calls[0], qr/(?:^|\s)-m LG\+F\+G(?:\s|$)/,
+	'protein IQ-TREE run retains the fixed amino-acid model');
 
 done_testing();

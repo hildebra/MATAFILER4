@@ -265,7 +265,8 @@ my $completionMessage = "";
 #1.32: report locus-model scan, protein, grouping, and worker projection timings
 #1.33: fan the catalogue cluster index into atomic binary split-worker shards
 #1.34: publish one validated selected-catalogue protein cache for all Phase-I workers
-my $version = 1.34;
+#1.35: canonicalize unlimited split-worker extraction as -maxGenes 0
+my $version = 1.35;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -764,7 +765,10 @@ if (!length($mosaicMGSFile) && length($MGSfile)) {
 $noGeneLimit = 1 if $maxNGenes <= 0; #backward-compatible no-cap spelling; QC is unchanged
 die "-maxGenes must be at least -MGSminGenesPSmpl, or <=0 to remove the cap\n"
 	if !$noGeneLimit && $maxNGenes < $MGStoolowGsThr;
-$maxNGenes = -1 if $noGeneLimit;
+# Keep one canonical unlimited value after parsing. In particular, split-worker
+# commands must not carry both the deprecated -noGeneLimit alias and a negative
+# -maxGenes value: -maxGenes 0 is the documented no-cap contract.
+$maxNGenes = 0 if $noGeneLimit;
 
 $onlySubmit = 1 if $recalcTrees; #tree-only recovery reuses published or complete staged inputs
 # Ordinary parent -onlySubmit runs are latency-sensitive cluster dispatchers,
@@ -5309,7 +5313,7 @@ sub phase1WorkerCommand {
 		'-outgroupReferenceGeneCap', $outgroupReferenceGeneCap,
 		'-treeLocusBudget', $treeLocusBudget,
 		'-taxonAwareLocusSelection', $taxonAwareLocusSelection,
-		'-noGeneLimit', $noGeneLimit, '-disableQC', $disableQC,
+		'-disableQC', $disableQC,
 		'-breakpointGeneFlank', $breakpointGeneFlank,
 		'-abundanceMinLoci', $abundanceMinimumLoci,
 		'-abundanceMinFold', $abundanceMinimumFold,

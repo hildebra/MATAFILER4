@@ -80,6 +80,7 @@
 #5.75: prefer universal-core guide loci and consolidate final taxon-aware diagnostics
 #5.76: require 10k shared backbone sites for sparse-sample placement by default
 #5.77: recover partial sample loci after high-threshold QC and audit both length gates
+#5.80: pass explicit IQ-TREE sequence types and report retained-MSA resume counts
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -205,6 +206,7 @@ sub postAlignmentStep;
 sub elapsedTimeText;
 sub alignmentCollectionStats;
 sub alignmentCollectionStatsFromReport;
+sub partitionLocusRangeCount;
 sub rawCoordinateInformation;
 
 sub readBuildTreeState;
@@ -214,7 +216,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.79";
+my $version = "5.80";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -1192,7 +1194,7 @@ if ($cogCats ne "" && $continue && !$alignmentWorkPolicyMatches) {
 	}
 	$treesDone = 0;
 }
-my ($primaryAlignmentReady, $primaryAlignmentReason) =
+my ($primaryAlignmentReady, $primaryAlignmentReason, $primaryAlignmentMetadata) =
 	treeAlignmentCheckpointStatus($multAli, $useAA4tree);
 if ($continue && fileGZe($multAli) && !$primaryAlignmentReady) {
 	warn "Recovery state: ignoring unusable retained alignment checkpoint "
@@ -1224,6 +1226,12 @@ if ($continue) {
 writeBuildTreeState();
 cleanupLegacyBuildTreeStateFiles();
 my $calcMSA = !$treesDone && !$primaryAlignmentReady;
+my $retainedConcatenatedCheckpoint = !$calcMSA && $primaryAlignmentReady
+	&& $cogCats ne '';
+my $retainedCheckpointSampleCount = $retainedConcatenatedCheckpoint
+	? ($primaryAlignmentMetadata->{sequences} // 0) : 0;
+my $retainedPartitionLocusCount = $retainedConcatenatedCheckpoint
+	? partitionLocusRangeCount($multAli.$partiExt) : 0;
 $doMSA = !(
 	$isAligned
 	|| ($continue && ($treesDone || $primaryAlignmentReady) && $siteAlignmentsReady)
@@ -1900,17 +1908,23 @@ if ($postAlignmentLocusQC && $cogCats ne "") {
 	}
 }
 my $postQCPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
-$selectionAttrition{post_qc_loci} = scalar(@{$postQCPrimary});
-postAlignmentStep("locus QC", $postAlignmentStepStarted,
-	"enabled=".($postAlignmentLocusQC ? 1 : 0),
-	"retained_loci=".scalar(@{$postQCPrimary}),
-	"report=$postAlignmentQCReport");
-$postAlignmentStepStarted = time;
-
 my $postAlignmentStats = $postAlignmentLocusQC && $cogCats ne ""
 	&& -s $postAlignmentQCReport
 	? alignmentCollectionStatsFromReport($postAlignmentQCReport)
 	: alignmentCollectionStats($postQCPrimary);
+if ($retainedConcatenatedCheckpoint && !$postAlignmentStats->{loci}) {
+	$postAlignmentStats->{loci} = $retainedPartitionLocusCount;
+}
+my $reportedPostQCLoci = $retainedConcatenatedCheckpoint
+	? $postAlignmentStats->{loci} : scalar(@{$postQCPrimary});
+$selectionAttrition{post_qc_loci} = $reportedPostQCLoci;
+postAlignmentStep("locus QC", $postAlignmentStepStarted,
+	"enabled=".($postAlignmentLocusQC ? 1 : 0),
+	"retained_loci=$reportedPostQCLoci",
+	"source=".($retainedConcatenatedCheckpoint ? 'retained_checkpoint' : 'current_run'),
+	"report=$postAlignmentQCReport");
+$postAlignmentStepStarted = time;
+
 postAlignmentStep("alignment inventory", $postAlignmentStepStarted,
 	"loci=$postAlignmentStats->{loci}",
 	"mean_sequences_per_locus=$postAlignmentStats->{mean_sequences}",
@@ -2056,12 +2070,20 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 	}
 }
 my $postSelectionPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
-$selectionAttrition{final_loci} = scalar(@{$postSelectionPrimary});
-$selectionAttrition{final_samples} = scalar(keys %samples);
+my $reportedSelectedLoci = scalar(@{$postSelectionPrimary});
+my $reportedSelectedSamples = scalar(keys %samples);
+if ($retainedConcatenatedCheckpoint) {
+	$reportedSelectedLoci = $retainedPartitionLocusCount;
+	$reportedSelectedLoci = $reportedPostQCLoci unless $reportedSelectedLoci;
+	$reportedSelectedSamples = $retainedCheckpointSampleCount;
+}
+$selectionAttrition{final_loci} = $reportedSelectedLoci;
+$selectionAttrition{final_samples} = $reportedSelectedSamples;
 postAlignmentStep("taxon-aware locus selection", $postAlignmentStepStarted,
 	"enabled=".($taxonAwareLocusSelection ? 1 : 0),
-	"selected_loci=".scalar(@{$postSelectionPrimary}),
-	"samples=".scalar(keys %samples));
+	"selected_loci=$reportedSelectedLoci",
+	"samples=$reportedSelectedSamples",
+	"source=".($retainedConcatenatedCheckpoint ? 'retained_checkpoint' : 'current_run'));
 $postAlignmentStepStarted = time;
 
 if ($rateMergePartitions && $cogCats ne "") {
@@ -2099,8 +2121,12 @@ if ($calcMSA
 	exit(0);
 }
 
-#prep final MSA file that is correct NT or AA and is merged
-if (!$useAA4tree) {
+#prep final MSA file that is correct NT or AA and is merged. A validated
+#concatenated checkpoint is already the selected/merged result, so do not call
+#mergeMSAs with intentionally empty per-locus arrays during a tree-only resume.
+if ($retainedConcatenatedCheckpoint) {
+	# Retain the existing alignment and partition pair without rewriting either.
+} elsif (!$useAA4tree) {
 	if ($cogCats eq ""){ #single gene case
 		my ($hr,$OK) = readFasta($multAli,1); writeFasta($hr,$multAli);#complicated way to shorted headers of infile
 	}
@@ -2114,7 +2140,8 @@ if (!$useAA4tree) {
 	@theRealMSAs = @MSA_AA;
 }
 postAlignmentStep("concatenation", $postAlignmentStepStarted,
-	"loci=".scalar(@theRealMSAs), "samples=".scalar(keys %samples),
+	"loci=$reportedSelectedLoci", "samples=$reportedSelectedSamples",
+	"source=".($retainedConcatenatedCheckpoint ? 'retained_checkpoint' : 'current_run'),
 	"alignment=$multAli");
 $postAlignmentStepStarted = time;
 
@@ -2201,7 +2228,7 @@ if ($strictBackbone) {
 		if $strictSplit->{fallback};
 }
 $selectionAttrition{backbone_samples} = $strictSplit
-	? scalar(@{$strictSplit->{backbone}}) : scalar(keys %samples);
+	? scalar(@{$strictSplit->{backbone}}) : $reportedSelectedSamples;
 $selectionAttrition{placement_samples} = $strictSplit
 	? scalar(@{$strictSplit->{placement}}) : 0;
 $selectionAttrition{excluded_samples} = $strictSplit
@@ -2210,7 +2237,7 @@ writeSelectionAttritionAudit($selectionAttritionReport, \%selectionAttrition);
 
 postAlignmentStep("strict-backbone preparation", $postAlignmentStepStarted,
 	"enabled=".($strictBackbone ? 1 : 0),
-	"backbone_samples=".($strictSplit ? scalar(@{$strictSplit->{backbone}}) : scalar(keys %samples)),
+	"backbone_samples=".($strictSplit ? scalar(@{$strictSplit->{backbone}}) : $reportedSelectedSamples),
 	"placement_samples=".($strictSplit ? scalar(@{$strictSplit->{placement}}) : 0));
 $postAlignmentStepStarted = time;
 
@@ -4099,6 +4126,23 @@ sub readPostAlignmentRateMetrics {
 	close $report
 		or die "Cannot close post-alignment locus-QC report $reportFile: $!\n";
 	return \%metrics;
+}
+
+sub partitionLocusRangeCount {
+	my ($partitionFile) = @_;
+	return 0 unless defined($partitionFile) && -s $partitionFile;
+	open my $partition, '<', $partitionFile
+		or die "Cannot read retained alignment partition $partitionFile: $!\n";
+	my $ranges = 0;
+	while (my $line = <$partition>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless $line =~ /=\s*(.+)\z/;
+		my $coordinates = $1;
+		$ranges++ while $coordinates =~ /(?:\A|,\s*)\d+\s*-\s*\d+(?=\s*(?:,|\z))/g;
+	}
+	close $partition
+		or die "Cannot close retained alignment partition $partitionFile: $!\n";
+	return $ranges;
 }
 
 sub deterministicRatePartitions {
@@ -6936,7 +6980,10 @@ sub treeAlignmentCheckpointStatus {
 	return (0, 'no FASTA sequences') unless $sequenceCount;
 	return (0, 'fewer than two FASTA sequences') if $sequenceCount < 2;
 	return (0, 'zero alignment length') unless $alignmentLength;
-	return (1, '');
+	return (1, '', {
+		sequences => $sequenceCount,
+		alignment_length => $alignmentLength,
+	});
 }
 sub restoreCompressedMSAArtifact {
 	my ($path) = @_;
