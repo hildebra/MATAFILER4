@@ -266,7 +266,8 @@ my $completionMessage = "";
 #1.33: fan the catalogue cluster index into atomic binary split-worker shards
 #1.34: publish one validated selected-catalogue protein cache for all Phase-I workers
 #1.35: canonicalize unlimited split-worker extraction as -maxGenes 0
-my $version = 1.35;
+#1.36: make Phase-I contracts portable across compute-node device namespaces
+my $version = 1.36;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -421,6 +422,7 @@ my $recoveryLogFH;
 my $sampleStatsLogName = "strainSampleStats.tsv";
 my $sampleStatsSummaryLogName = "strainSampleStats.summary.tsv";
 my $phase1InputContractName = "strainPhaseI.input.tsv";
+my $phase1InputContractVersion = 3;
 my $sampleStatsPartFH;
 my $bamDepthFsuffix = "-smd.bam.coverage.gz";
 my $bamDepthFsuffixSup = ".sup-smd.bam.coverage.gz";
@@ -724,7 +726,7 @@ die "-popGenGeneticCode must be positive, -popGenCodonStart must be 1, 2, or 3, 
 	unless $popGenGeneticCode > 0 && $popGenCodonStart >= 1 && $popGenCodonStart <= 3
 		&& $popGenSeed >= 0;
 die "-individualVar must not be empty\n" unless length($individualVar);
-if ($doPopGenStats && $rmMSA) {
+if (!$subJob && $doPopGenStats && $rmMSA) {
 	warn "Population genetics requires per-locus nucleotide MSAs; overriding -rmMSA 1 to -rmMSA 0\n";
 	$rmMSA = 0;
 }
@@ -808,7 +810,8 @@ if ($unsafeSubsetRebuild) {
 		."would be cleared. Use a fresh -outD, a non-destructive resume mode, "
 		."or rebuild without -MGSsubset.\n";
 }
-my ($phase1ContractState, $phase1ContractReason) =
+my ($phase1ContractState, $phase1ContractReason,
+	$recordedPhase1ContractVersion, $recordedPhase1ContractStatus) =
 	phase1InputContractState($resumePhaseIInputContract);
 my $legacyMPIContract = $phase1ContractState eq 'missing' && $SNPcaller eq 'MPI';
 if ($onlySubmit && !$subJob
@@ -1070,8 +1073,23 @@ my $sttime = $^T;
 my $stepStarted = time;
 prepRun();
 $phase1MGSGuideFingerprint = phase1GuideStatFingerprint($MGSfileOri);
-persistPhase1InputContract(File::Spec->catfile($LOGDIR, $phase1InputContractName), 'building')
-	if !$onlySubmit && !$subJob;
+my $activePhase1InputContract =
+	File::Spec->catfile($LOGDIR, $phase1InputContractName);
+if (!$subJob && !$onlySubmit) {
+	persistPhase1InputContract($activePhase1InputContract, 'building');
+} elsif (!$subJob && defined($recordedPhase1ContractVersion)
+		&& $recordedPhase1ContractVersion < $phase1InputContractVersion
+		&& ($phase1ContractState eq 'match'
+			|| $phase1ContractState eq 'building_match')) {
+	my ($preparedState, $preparedReason) =
+		phase1InputContractState($activePhase1InputContract);
+	die "Cannot upgrade legacy Phase-I input contract before worker dispatch: "
+		."$preparedReason\n"
+		unless $preparedState eq 'match'
+			|| $preparedState eq 'building_match';
+	persistPhase1InputContract(
+		$activePhase1InputContract, $recordedPhase1ContractStatus);
+}
 $workflowStatePath = File::Spec->catfile($LOGDIR,
 	$subJob ? "strain_within.worker.$subJob.state.tsv" : 'strain_within.state.tsv');
 $legacyWorkflowHeartbeatPath = File::Spec->catfile($LOGDIR,
@@ -5160,7 +5178,8 @@ sub strainOutputHasDurablePhaseIState {
 }
 
 sub phase1PathStatComponent {
-	my ($path) = @_;
+	my ($path, $contractVersion) = @_;
+	$contractVersion //= $phase1InputContractVersion;
 	return join("\0", '<unspecified>', 'missing')
 		unless defined($path) && length($path);
 	my $resolved = resolveExistingFile($path);
@@ -5171,15 +5190,23 @@ sub phase1PathStatComponent {
 	my @metadata = stat($canonical);
 	die "Cannot stat Phase-I input $canonical: $!\n"
 		unless @metadata;
-	# Keep this constant-cost: path/device/inode catch replacement, while size and
-	# mtime catch ordinary in-place edits. Omitting ctime prevents chmod alone from
-	# forcing an expensive Phase-I rebuild.
-	return join("\0", $path, $canonical, @metadata[0, 1, 7, 9]);
+	# Keep this constant-cost. Contract v2 included st_dev, but a shared file can
+	# have a different device number in different compute-node mount namespaces.
+	# V3 therefore uses canonical path/inode/size/mtime. Omitting ctime prevents a
+	# chmod alone from forcing an expensive Phase-I rebuild.
+	my @stableMetadata = $contractVersion <= 2
+		? @metadata[0, 1, 7, 9]
+		: @metadata[1, 7, 9];
+	return join("\0", $path, $canonical, @stableMetadata);
 }
 
 sub phase1GuideStatFingerprint {
-	my ($path) = @_;
-	return sha256_hex(join("\0", 'strain-phase1-guide-stat-v2', 'FMG'))
+	my ($path, $contractVersion) = @_;
+	$contractVersion //= $phase1InputContractVersion;
+	my $fingerprintSchema = $contractVersion <= 2
+		? 'strain-phase1-guide-stat-v2'
+		: 'strain-phase1-guide-stat-v3';
+	return sha256_hex(join("\0", $fingerprintSchema, 'FMG'))
 		unless defined($path) && length($path);
 	my $canonical = abs_path($path);
 	die "Cannot resolve Phase-I MGS/core guide $path\n"
@@ -5190,13 +5217,14 @@ sub phase1GuideStatFingerprint {
 	my @inputs = ($canonical, "$canonical.srt",
 		"$canonical.srt.gene2MGS", $observation);
 	return sha256_hex(join("\0",
-		'strain-phase1-guide-stat-v2',
-		map { phase1PathStatComponent($_) } @inputs,
+		$fingerprintSchema,
+		map { phase1PathStatComponent($_, $contractVersion) } @inputs,
 	));
 }
 
 sub phase1CatalogStatFingerprint {
-	my ($catalog, $identity, $markerSet, $mapSpec) = @_;
+	my ($catalog, $identity, $markerSet, $mapSpec, $contractVersion) = @_;
+	$contractVersion //= $phase1InputContractVersion;
 	my $markerFile = $markerSet eq 'GTDB'
 		? "$catalog/GTDBmg.subset.cats" : "$catalog/FMG.subset.cats";
 	my @inputs = (
@@ -5207,9 +5235,12 @@ sub phase1CatalogStatFingerprint {
 		"$catalog/Anno/Func/emapper/eggNOGmapper_NOG.geneAss",
 		grep { length } split(/,/, $mapSpec // ''),
 	);
+	my $fingerprintSchema = $contractVersion <= 2
+		? 'strain-phase1-catalog-stat-v1'
+		: 'strain-phase1-catalog-stat-v2';
 	return sha256_hex(join("\0",
-		'strain-phase1-catalog-stat-v1',
-		map { phase1PathStatComponent($_) } @inputs,
+		$fingerprintSchema,
+		map { phase1PathStatComponent($_, $contractVersion) } @inputs,
 	));
 }
 
@@ -5221,7 +5252,7 @@ sub phase1InputContractContents {
 	my @columns = qw(version status catalog_identity catalog_inputs_fingerprint
 		mgs_guide_fingerprint marker_set cluster_id snp_caller consensus_nt
 		consensus_aa consensus_contig vcf vcf_support);
-	my @values = (2, $status, $phase1CatalogIdentity,
+	my @values = ($phase1InputContractVersion, $status, $phase1CatalogIdentity,
 		$phase1CatalogInputFingerprint, $phase1MGSGuideFingerprint,
 		$useGTDBmg, $clusterID, $SNPcaller, $lConsFNA, $lConsFAA,
 		$lConsCTG, $lConsVCF, $lConsVCFsup);
@@ -5248,28 +5279,40 @@ sub phase1InputContractState {
 		unless @lines == 2 && $lines[0] eq $expectedHeader;
 	my @fields = split /\t/, $lines[1], -1;
 	return ('invalid', "Phase-I SNP-input contract has an invalid record at $path")
-		unless @fields == 13 && $fields[0] eq '2'
+		unless @fields == 13 && ($fields[0] eq '2'
+				|| $fields[0] eq "$phase1InputContractVersion")
 			&& ($fields[1] eq 'building' || $fields[1] eq 'complete');
+	my $recordedVersion = 0 + $fields[0];
+	my ($expectedCatalogFingerprint, $expectedGuideFingerprint) =
+		$recordedVersion == $phase1InputContractVersion
+		? ($phase1CatalogInputFingerprint, $phase1MGSGuideFingerprint)
+		: (
+			phase1CatalogStatFingerprint(
+				$GCd, $clusterID, $useGTDBmg, $phase1MapSpec,
+				$recordedVersion),
+			phase1GuideStatFingerprint($MGSfileOri, $recordedVersion),
+		);
 	my @expectedInputs = ($phase1CatalogIdentity,
-		$phase1CatalogInputFingerprint, $phase1MGSGuideFingerprint,
+		$expectedCatalogFingerprint, $expectedGuideFingerprint,
 		$useGTDBmg, $clusterID, $SNPcaller, $lConsFNA, $lConsFAA,
 		$lConsCTG, $lConsVCF, $lConsVCFsup);
 	my $inputsMatch = join("\0", @fields[2 .. 12])
 		eq join("\0", @expectedInputs);
 	if ($inputsMatch && $fields[1] eq 'complete') {
 		return ('match', "Phase-I input contract matches the catalog, MGS/core guide, "
-			."and -SNPcaller $SNPcaller");
+			."and -SNPcaller $SNPcaller", $recordedVersion, $fields[1]);
 	}
 	if ($inputsMatch) {
-		return ('building_match', "Phase I for -SNPcaller $SNPcaller is marked incomplete at $path");
+		return ('building_match', "Phase I for -SNPcaller $SNPcaller is marked incomplete at $path",
+			$recordedVersion, $fields[1]);
 	}
 	my @mismatch;
 	push @mismatch, 'catalog identity'
 		if $fields[2] ne $phase1CatalogIdentity;
 	push @mismatch, 'catalog or map input identity'
-		if $fields[3] ne $phase1CatalogInputFingerprint;
+		if $fields[3] ne $expectedCatalogFingerprint;
 	push @mismatch, 'MGS/core guide identity'
-		if $fields[4] ne $phase1MGSGuideFingerprint;
+		if $fields[4] ne $expectedGuideFingerprint;
 	push @mismatch, 'marker set or cluster identity'
 		if $fields[5] ne $useGTDBmg || $fields[6] ne "$clusterID";
 	push @mismatch, 'SNP caller or filenames'
@@ -5278,21 +5321,32 @@ sub phase1InputContractState {
 				$lConsCTG, $lConsVCF, $lConsVCFsup);
 	my $recordedCaller = $fields[7];
 	$recordedCaller =~ s/[^A-Za-z0-9_.:+-]/?/g;
+	my $legacyAdvice = $recordedVersion < $phase1InputContractVersion
+		? "; legacy contract v$recordedVersion includes a node-local filesystem "
+			."device identity; restart the main controller to upgrade it before "
+			."dispatching workers"
+		: "";
 	return ('mismatch', "Phase-I SNP-input contract at $path records "
-		."$fields[1] caller '$recordedCaller' with incompatible "
-		.join(', ', @mismatch));
+		."v$recordedVersion $fields[1] caller '$recordedCaller' with incompatible "
+		.join(', ', @mismatch).$legacyAdvice,
+		$recordedVersion, $fields[1]);
 }
 
 sub persistPhase1InputContract {
 	my ($path, $status) = @_;
 	$status //= 'complete';
-	my ($state) = phase1InputContractState($path);
-	return 1 if $status eq 'complete' && $state eq 'match';
-	return 1 if $status eq 'building' && $state eq 'building_match';
+	my ($state, undef, $recordedVersion) = phase1InputContractState($path);
+	return 1 if $recordedVersion
+		&& $recordedVersion == $phase1InputContractVersion
+		&& $status eq 'complete' && $state eq 'match';
+	return 1 if $recordedVersion
+		&& $recordedVersion == $phase1InputContractVersion
+		&& $status eq 'building' && $state eq 'building_match';
 	make_path(dirname($path)) unless -d dirname($path);
 	atomic_write_text($path, phase1InputContractContents($status),
 		label => 'publish Phase-I SNP-input contract');
-	print "Phase-I SNP-input contract: status=$status; caller=$SNPcaller; file=$path\n";
+	print "Phase-I SNP-input contract: version=$phase1InputContractVersion; "
+		."status=$status; caller=$SNPcaller; file=$path\n";
 	return 1;
 }
 

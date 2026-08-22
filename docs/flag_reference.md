@@ -14,7 +14,7 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 | `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `strain_within.pl` | `1.29` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
+| `strain_within.pl` | `1.36` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
 | `strain_within_2.2.pl` | `0.46` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
 | `buildTree5.pl` | `5.80` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
@@ -454,11 +454,13 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## strain_within.pl
 
-Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.35`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.36`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
 
 For split Phase I, the parent scans the catalogue cluster index once and atomically publishes a provenance-bound binary membership shard for each worker under shared strain scratch. The manifest is published only after every shard is complete. Workers validate the generation, size, header, record count and payload digest before use; an absent, stale or corrupt cache falls back to the original full-index parser.
 
 The parent also publishes one common binary subset of the selected catalogue proteins. All Phase-I workers use that subset for sequence-aware locus grouping and ambiguous-copy selection instead of independently scanning the full catalogue FAA. Catalogue nucleotide sequences are deliberately not copied at this point: Phase-I worker nucleotide records come from sample consensus FASTAs, while the parent determines and streams the exact catalogue FNA outgroup set only after Phase I. Creating an early catalogue FNA subset would add a large read and would still miss candidate genes when `-outgroupReferenceGeneCap` exceeds `-presortGenes`.
+
+Phase-I input contracts use cross-node-stable file identity: canonical path, inode, size and modification time, plus the persistent catalogue identity. Filesystem device numbers are excluded because shared files may have different device numbers in separate compute-node mount namespaces. Version-2 contracts remain readable and a resumed parent upgrades a compatible legacy contract before dispatching workers.
 
 ### Inputs, execution and workflow control
 

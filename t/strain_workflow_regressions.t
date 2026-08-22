@@ -390,7 +390,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.35;/,
+like($strain, qr/my \$version = 1\.36;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -399,18 +399,27 @@ like($strain,
 	qr/my \$legacyMPIContract = \$phase1ContractState eq 'missing' && \$SNPcaller eq 'MPI'.*?if \(\$onlySubmit && !\$subJob.*?'building_match'.*?Cannot reuse Phase-I outputs.*?if \(\$onlySubmit && \$subJob.*?'building_match'.*?!\$legacyMPIContract.*?Split worker caller contract/s,
 	'caller provenance resumes compatible builds and rejects missing FB or incompatible state');
 like($strain,
-	qr/sub phase1PathStatComponent.*?Omitting ctime prevents chmod alone.*?\@metadata\[0, 1, 7, 9\]/s,
-	'Phase-I provenance uses constant-cost file identity without chmod-only invalidation');
+	qr/my \$phase1InputContractVersion = 3;.*?sub phase1PathStatComponent.*?different device number.*?\$contractVersion <= 2.*?\@metadata\[0, 1, 7, 9\].*?\@metadata\[1, 7, 9\]/s,
+	'Phase-I provenance excludes node-local device identity from current cross-node contracts');
 like($strain,
-	qr/sub phase1GuideStatFingerprint.*?strain-phase1-guide-stat-v2.*?\$canonical\.srt.*?\$canonical\.srt\.gene2MGS.*?\$observation/s,
+	qr/sub phase1GuideStatFingerprint.*?strain-phase1-guide-stat-v2.*?strain-phase1-guide-stat-v3.*?\$canonical\.srt.*?\$canonical\.srt\.gene2MGS.*?\$observation/s,
 	'Phase-I provenance includes the original, sorted, indexed, and observation guide inputs');
 like($strain,
 	qr/sub phase1CatalogStatFingerprint.*?subset\.cats.*?compl\.incompl\.\$identity\.fna.*?fna\.clstr\.idx.*?prot\.faa.*?eggNOGmapper_NOG\.geneAss.*?split\(\/,\/, \$mapSpec/s,
 	'Phase-I provenance includes each direct catalog, marker, annotation, and map input');
 like($strain,
-	qr/catalog_inputs_fingerprint.*?my \@values = \(2, \$status, \$phase1CatalogIdentity,\s*\$phase1CatalogInputFingerprint, \$phase1MGSGuideFingerprint,\s*\$useGTDBmg, \$clusterID/s,
+	qr/catalog_inputs_fingerprint.*?my \@values = \(\$phase1InputContractVersion, \$status, \$phase1CatalogIdentity,\s*\$phase1CatalogInputFingerprint, \$phase1MGSGuideFingerprint,\s*\$useGTDBmg, \$clusterID/s,
 	'Phase-I contract persists the catalog and MGS-guide fingerprints');
-ok(index($strain, q{persistPhase1InputContract(File::Spec->catfile($LOGDIR, $phase1InputContractName), 'building')}) >= 0
+like($strain,
+	qr/\$recordedPhase1ContractVersion < \$phase1InputContractVersion.*?Cannot upgrade legacy Phase-I input contract.*?persistPhase1InputContract/s,
+	'a resumed parent upgrades compatible legacy provenance before dispatching repair workers');
+like($strain,
+	qr/phase1CatalogStatFingerprint\(.*?\$recordedVersion\).*?phase1GuideStatFingerprint\(\$MGSfileOri, \$recordedVersion\)/s,
+	'legacy provenance recalculation uses the preserved original guide rather than its sorted working path');
+like($strain,
+	qr/if \(!\$subJob && \$doPopGenStats && \$rmMSA\).*?Population genetics requires per-locus nucleotide MSAs/s,
+	'population-genetics MSA warnings and overrides are restricted to the parent process');
+ok(index($strain, q{persistPhase1InputContract($activePhase1InputContract, 'building')}) >= 0
 	&& index($strain, q{persistPhase1InputContract(File::Spec->catfile($LOGDIR, $phase1InputContractName))}) >= 0
 	&& index($strain, q{atomic_write_text($path, phase1InputContractContents($status)}) >= 0,
 	'Phase-I caller provenance is atomically marked building and completed only after handoff');
@@ -421,7 +430,7 @@ like($strain,
 	qr/my \$unsafeSubsetRebuild = !\$onlySubmit && !\$subJob && length\(\$subsMGSstr\).*?strainOutputHasDurablePhaseIState.*?if \(\$unsafeSubsetRebuild\).*?shared non-subset results.*?would be cleared/s,
 	'existing output state refuses ordinary destructive subset rebuilds while fresh roots remain eligible');
 like($strain,
-	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"individualVar=s".*?if \(\$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput/s,
+	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"individualVar=s".*?if \(!\$subJob && \$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput/s,
 	'population genetics retains MSAs and forwards reproducible configuration through strainwithin2');
 like($strain, qr/Retain the Phase-I locus map.*?second catalogue-wide gene2tax scan.*?\$SIgenes and \$COGprios are reused/s,
 	'Phase II reuses the Phase-I selected gene map rather than clearing and rebuilding it');
@@ -740,6 +749,28 @@ like($strain,
 like($strain,
 	qr/sub phase1WorkerCommand.*?'-taxonAwareLocusSelection', \$taxonAwareLocusSelection.*?'-prepareMosaicLoci', \$prepareMosaicLoci.*?'-SNPcaller', \$SNPcaller/s,
 	'split extraction workers inherit caller, Mosaic preparation, and Phase-I locus-selection controls');
+my ($phase1WorkerCommandSource) = $strain =~
+	/(sub phase1WorkerCommand \{.*?^\})/ms;
+ok(defined($phase1WorkerCommandSource),
+	'the Phase-I worker command builder is available for option-contract auditing');
+my %phase1WorkerFlag = map { $_ => 1 }
+	$phase1WorkerCommandSource =~ /'(-[A-Za-z][A-Za-z0-9]*)'/g;
+my @requiredPhase1WorkerFlags = qw(
+	-GCd -outD -MGS -clusterID -submit -onlySubmit -maxSubJob
+	-MGSminGenesPSmpl -multiGeneSmplMax -conspGeneSmplMax
+	-minBadLociPSmpl -presortGenes -maxGenes -treeLocusBudget
+	-taxonAwareLocusSelection -disableQC -breakpointGeneFlank
+	-abundanceMinLoci -abundanceMinFold -abundanceMaxFold
+	-abundanceMaxModifiedZ -prepareMosaicLoci -flushEvery -MGset
+	-SNPcaller -minSNPDepth -minSNPCallQual -forceSNPcalls
+	-preCompConsSNP -skipIndels -SNPadaptiveQual -SNPdepthFilterScale
+	-SNPindelRangeFilt -tmpD -mosaicLoci -MGSabundance -MGSsubset
+);
+is_deeply(
+	[grep { !$phase1WorkerFlag{$_} } @requiredPhase1WorkerFlags],
+	[],
+	'all mandatory and conditional Phase-I execution flags are propagated to workers',
+);
 like($strain,
 	qr/'-submit', 0, '-onlySubmit', 1.*?'-MGSphylo', \$treeFile.*?'-flushEvery'.*?'-MGset', \$useGTDBmg/s,
 	'extraction workers receive only extraction and outgroup inputs, not tree-submission behavior');
