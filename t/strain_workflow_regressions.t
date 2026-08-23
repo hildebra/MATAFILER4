@@ -395,7 +395,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.39;/,
+like($strain, qr/my \$version = 1\.40;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -598,7 +598,16 @@ like($strain,
 	'tree submission reports every eligible and skipped MGS disposition before waiting');
 like($strain,
 	qr/my \@pendingTreeJobs;.*?push \@pendingTreeJobs, \{.*?command => \$Tcmd\.\$outgS.*?tmp_space => \$QSBoptHR->\{tmpSpace\}.*?dispatchPendingTreeJobs\(.*?blocking => 0.*?Tree preparation pass complete:.*?dispatchPendingTreeJobs\(.*?blocking => 1.*?qsubSystemJobAlive\( \\\@jobs.*?writeTreeFailureAudit.*?without a valid output were quarantined/s,
-	'eligible trees queue after conversion, drain opportunistically under capacity, then are tracked, awaited, and output-validated');
+	'eligible trees queue after conversion, then are globally submitted, tracked, awaited, and output-validated');
+like($strain,
+	qr/if \(!\$doSubmit \|\| \(\$epaOnlyRetry && time >= \$nextQueuedTreeSubmissionProbe\)\).*?Tree preparation pass complete:.*?blocking => 1/s,
+	'ordinary Phase II jobs remain queued for global priority, while EPA-only recovery can still dispatch promptly');
+like($strain,
+	qr/\@\{\$queue\} = sort \{.*?epa_only.*?cores.*?workload_cells.*?sample_count.*?requested_mb.*?gene_count.*?priority_ordinal.*?\} \@\{\$queue\}/s,
+	'Phase II submission retains EPA recovery priority, then orders full jobs by cores and the shared approximate workload');
+like($strain,
+	qr/push \@pendingTreeJobs, \{.*?cores => \$numCoreL.*?sample_count =>.*?workload_cells => \$workloadCells.*?gene_count =>.*?requested_mb => int\(\$totMem\).*?priority_ordinal => \$treeJobOrdinal/s,
+	'each queued job retains the size signals used for cores, memory, and stable ordering');
 like($strain, qr/nonblockingMaxConcurrentJobs\} = 1 unless \$blocking/,
 	'queued tree dispatch uses the non-blocking scheduler-capacity path');
 like($strain, qr/deferredSubmissionDependency\(\).*?Phase II continues converting inputs/s,
@@ -791,6 +800,9 @@ like($strain,
 like($strain,
 	qr/addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?choose_tree_core_count\(\$multiSmpl, \$maxCores\).*?\$Tcmd \.= "-cores \$numCoreL "/s,
 	'BuildTree core guidance reuses the exact submitted-sample count collected during input preparation');
+like($strain,
+	qr/addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?\$workloadCells = \$multiSmpl \* \$ngenes.*?\$taxonLocusInputMB = \$workloadCells \/ 1024.*?\$memoryPlanningInputMB = \$taxonLocusInputMB > \$inputFNAsize.*?\$totMem = int\(\$memoryPlanningInputMB \* \$baseMemMult \* \$memMulti\)/s,
+	'Phase II memory mixes the already collected sample and usable-gene counts without a second sizing pass');
 like($strain,
 	qr/my \$treeFlag = \$onlyMSA.*?my \$Tcmd=.*?\$treeFlag /s,
 	'BuildTree command retains the selected inference-engine flag while appending cores after input preparation');

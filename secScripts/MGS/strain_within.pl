@@ -271,7 +271,8 @@ my $completionMessage = "";
 #1.37: escalate accounting-confirmed Phase-I OOM retries and increase tree scratch headroom
 #1.38: guide BuildTree core requests by the submitted sample count
 #1.39: preselect one viable outgroup per MGS before loading exact reference loci
-my $version = 1.39;
+#1.40: unify Phase-II core, memory, and submission priority around prepared job size
+my $version = 1.40;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -2125,6 +2126,9 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $totMem = int($inputFNAsize * $baseMemMult * $memMulti);
 	$totMem = $minimumMemMB if $totMem < $minimumMemMB;
 	$totMem = $maximumMemMB if $totMem > $maximumMemMB;
+	my $taxonLocusInputMB = 0;
+	my $workloadCells = 0;
+	my $memoryPlanningInputMB = $inputFNAsize;
 	my $numCoreL = $numCores;
 	if ($epaOnlyRetry) {
 		# EPA-ng retry is deliberately single-threaded. The doubled request is a
@@ -2136,7 +2140,6 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		$numCoreL = 1;
 		$memoryProfile = 'EPA-ng placement-only retry';
 	}
-	my $iqMemMB = int($totMem * 0.9); #also supplies EPA planning-memory reporting
 	
 
 	my $bts = getProgPaths("buildTree_scr");
@@ -2182,10 +2185,6 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 			."-epaPendantOutlierFactor $epaPendantOutlierFactor "
 			."-epaPendantMinThreshold $epaPendantMinThreshold ";
 	}
-	if (!$onlyMSA && $phyloProg == 1){
-		$Tcmd .= "-iqMemMB $iqMemMB ";
-		$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
-	}
 	my $treeTmpOption = $nodeTmpConfigured
 		? "-tmpSubdir ".shellQuote("strain_within/$MGS")
 		: "-tmpD ".shellQuote("$scratchD/$MGS/");
@@ -2216,7 +2215,24 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	if (!$epaOnlyRetry && $maxCores > 0) {
 		$numCoreL = choose_tree_core_count($multiSmpl, $maxCores);
 	}
+	unless ($epaOnlyRetry) {
+		# addOutgroup2MGS already counted both dimensions while finalizing this
+		# input. Treat each sample-by-gene cell as roughly one kilobase of
+		# likelihood-matrix work; no extra file scan or preparation pass is needed.
+		$workloadCells = $multiSmpl * $ngenes;
+		$taxonLocusInputMB = $workloadCells / 1024;
+		$memoryPlanningInputMB = $taxonLocusInputMB > $inputFNAsize
+			? $taxonLocusInputMB : $inputFNAsize;
+		$totMem = int($memoryPlanningInputMB * $baseMemMult * $memMulti);
+		$totMem = $minimumMemMB if $totMem < $minimumMemMB;
+		$totMem = $maximumMemMB if $totMem > $maximumMemMB;
+	}
+	my $iqMemMB = int($totMem * 0.9); #also supplies EPA planning-memory reporting
 	$Tcmd .= "-cores $numCoreL ";
+	if (!$onlyMSA && $phyloProg == 1){
+		$Tcmd .= "-iqMemMB $iqMemMB ";
+		$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
+	}
 
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
 	$Tcmd .= "-sampleQC ".shellQuote("$outD2/$QCstdof")." "
@@ -2252,9 +2268,9 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	}
 	unlink "$outD2/tooFewSamples.sto" if -e "$outD2/tooFewSamples.sto";
 	
-	# PART II: retain this completely prepared tree job even if the scheduler
-	# is full.  Submission is drained opportunistically below, rather than
-	# blocking further category conversion and outgroup preparation.
+	# PART II: retain each completely prepared job. Full trees are submitted
+	# together after preparation so the current core selector can define a global
+	# largest-first order; EPA-only recovery remains latency-prioritized.
 	my $treeJobOrdinal = $cnt + 1;
 	push @pendingTreeJobs, {
 		mgs => $MGS,
@@ -2262,8 +2278,13 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 			: $onlyMSA ? "$outD2/treeCmd.msa_only.sh" : "$outD2/treeCmd.sh",
 		command => $Tcmd.$outgS."\n",
 		cores => $numCoreL,
+		sample_count => defined($multiSmpl) ? $multiSmpl : 0,
+		workload_cells => $workloadCells,
+		gene_count => defined($ngenes) ? $ngenes : 0,
 		memory => int($totMem)."M",
 		requested_mb => int($totMem),
+		priority_ordinal => $treeJobOrdinal,
+		memory_planning_input_mb => $memoryPlanningInputMB,
 		job_name => $epaOnlyRetry ? "EPA$treeJobOrdinal"
 			: $onlyMSA ? "MSA$treeJobOrdinal" : "FT$treeJobOrdinal",
 		epa_only => $epaOnlyRetry,
@@ -2283,7 +2304,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	$expectedTreeOutputs{$MGS} = [$onlyMSA ? $msaOnlyOutput : $IQtreef,
 		$onlyMSA ? $msaOnlyStone : $treeStone,
 		$terminalTreeMarker, $placementPendingMarker];
-	if (!$doSubmit || time >= $nextQueuedTreeSubmissionProbe) {
+	if (!$doSubmit || ($epaOnlyRetry && time >= $nextQueuedTreeSubmissionProbe)) {
 		my $drain = dispatchPendingTreeJobs(
 			queue => \@pendingTreeJobs, options => $QSBoptHR,
 			jobs => \@jobs, accounting => \@treeJobAccounting,
@@ -6560,9 +6581,23 @@ sub dispatchPendingTreeJobs {
 	delete $options->{capacityDeferralAnnounced};
 	$options->{nonblockingMaxConcurrentJobs} = 1 unless $blocking;
 
+	# EPA recovery keeps its explicit first tier. Within each tier, submit jobs
+	# requesting the most cores first, then use the already collected sample
+	# count-by-gene workload proxy as a descending tie-breaker. These are the same
+	# values that selected cores and memory above, rather than a second sizing scan.
+	@{$queue} = sort {
+		($b->{epa_only} // 0) <=> ($a->{epa_only} // 0)
+			|| ($b->{cores} // 0) <=> ($a->{cores} // 0)
+			|| ($b->{workload_cells} // 0) <=> ($a->{workload_cells} // 0)
+			|| ($b->{sample_count} // 0) <=> ($a->{sample_count} // 0)
+			|| ($b->{requested_mb} // 0) <=> ($a->{requested_mb} // 0)
+			|| ($b->{gene_count} // 0) <=> ($a->{gene_count} // 0)
+			|| ($a->{priority_ordinal} // 0) <=> ($b->{priority_ordinal} // 0)
+			|| ($a->{mgs} // '') cmp ($b->{mgs} // '')
+	} @{$queue};
 	while (@{$queue}) {
 		my $record = $queue->[0];
-		for my $required (qw(mgs script command cores memory job_name tree stone terminal placement_pending)) {
+		for my $required (qw(mgs script command cores sample_count gene_count workload_cells memory requested_mb priority_ordinal job_name tree stone terminal placement_pending)) {
 			die "Queued tree job is missing '$required'\n"
 				unless defined($record->{$required}) && length($record->{$required});
 		}
@@ -7836,10 +7871,15 @@ Tree locus filtering:
 An ordinary parent tree-only resume (-onlySubmit 1) uses lean, incremental
 submission: it trusts the atomic Phase-I merge checkpoint, checks completion,
 terminal state, tree input, and category data only when each MGS reaches the
-submission loop, and submits that job before moving on. It does not run a
+submission loop. It does not run a
 controller-wide resume audit, worker-shard scan, or input-sizing/sorting pass.
 Already-overlaid MGS also bypass reference-catalogue initialization; the shared
 reference stream starts only when the first raw MGS actually needs an overlay.
+The required per-MGS input-finalization result also supplies sample and usable-
+gene counts without another scan. Those values select cores and approximate
+memory together. Ordinary full jobs remain queued until preparation finishes,
+then submit by descending core request and descending sample-by-gene workload;
+EPA-only recovery keeps its existing priority tier.
 An existing LOGandSUB/tree_input_sizing.tsv may be read only as an optional
 resource hint. Explicit -redo modes keep the exhaustive audit. After dispatch,
 normal scheduler waiting, output

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-23 — Unified Phase II job sizing and priority
+
+- Updated `strain_within.pl` to 1.40. Phase II continues to use `ceil(sqrt(samples))`, with the existing four-core floor and `-maxCores` cap, for each ordinary BuildTree core request.
+- The sample and usable-gene counts returned by the required per-MGS input-finalization call are reused directly; no additional sizing scan is introduced. Their product is an approximate workload signal for submission ordering and memory planning.
+- Ordinary jobs are retained until preparation completes, then submitted by descending core request and descending sample-by-gene workload. EPA-only recovery retains its existing priority tier.
+- Memory planning takes the larger of the existing measured-input estimate and `samples * usable_genes / 1024` MB before applying the existing inference-engine multiplier, `-phyloMemMulti`, and memory bounds.
+
 ## 2026-08-23 — Predetermined strain outgroups
 
 - Updated `strain_within.pl` to 1.39. The Mosaic-aware R lookup now returns one authoritative outgroup per MGS, and the controller no longer falls through across tree neighbours when that selection lacks locus coverage.
