@@ -270,7 +270,8 @@ my $completionMessage = "";
 #1.36: make Phase-I contracts portable across compute-node device namespaces
 #1.37: escalate accounting-confirmed Phase-I OOM retries and increase tree scratch headroom
 #1.38: guide BuildTree core requests by the submitted sample count
-my $version = 1.38;
+#1.39: preselect one viable outgroup per MGS before loading exact reference loci
+my $version = 1.39;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1490,9 +1491,10 @@ stepComplete("historical exclusion loading", $stepStarted,
 
 
 my $FNAref = {}; my $FAAref = {};
-my $SIgenes_OG = {}; my %OGgenesByCOG;
+my %OGgenesByCOG;
 my %outgroupGeneCache;
 my %TreeOutgroupCandidates;
+my %SelectedOutgroup;
 my %outgroupCategoryPreflight;
 
 # Reference data is initialized lazily after EPA-only recovery jobs have been
@@ -1518,7 +1520,7 @@ my $initializeOutgroupReferences = sub {
 			"reference_AA=0", "MGS_with_outgroup_candidates=0");
 		return;
 	}
-	my (%candidateOutgroupsByMGS, %demandCogsByOutgroup, %eligibleCogsByOutgroup);
+	my (%demandCogsByOutgroup, %eligibleCogsByOutgroup);
 	my $candidateStarted = time;
 	loadTreeOutgroupCandidates($targetMGS) if length($treeFile);
 	my $candidateMGS = 0;
@@ -1526,8 +1528,8 @@ my $initializeOutgroupReferences = sub {
 	for my $MGS (@{$targetMGS}) {
 		my @candidates;
 		if (length($treeFile)) {
-			# R has already accepted, rejected, and ranked the Mosaic proposal
-			# against the phylogeny. Do not reinsert a rejected preference here.
+			# R has already resolved the Mosaic proposal against the phylogeny
+			# and returned at most one authoritative outgroup.
 			push @candidates, treeOutgroupCandidates($MGS);
 		} elsif (exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS})) {
 			push @candidates, $PreferredOutgroup{$MGS};
@@ -1536,19 +1538,18 @@ my $initializeOutgroupReferences = sub {
 		@candidates = grep {
 			defined($_) && /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/ && !$seenCandidate{$_}++
 		} @candidates;
-		$candidateOutgroupsByMGS{$MGS} = \@candidates;
-		$outgroupCatalogueMGS{$_} = 1 for @candidates;
+		$SelectedOutgroup{$MGS} = $candidates[0] if @candidates;
 		$candidateMGS++;
 		if (time >= $nextCandidateProgress) {
 			stepProgress("outgroup candidate discovery", $candidateMGS,
 				scalar(@{$targetMGS}), $candidateStarted,
-				"candidate_MGS=".scalar(keys %outgroupCatalogueMGS));
+				"selected_outgroup_MGS=".scalar(keys %SelectedOutgroup));
 			$nextCandidateProgress = time + 60;
 		}
 	}
-	unless (%outgroupCatalogueMGS) {
+	unless (%SelectedOutgroup) {
 		stepComplete("outgroup-reference preparation", $referenceStarted,
-			"status=not_required", "reference_NT=0", "required=1",
+			"status=no_selected_outgroups", "reference_NT=0", "required=1",
 			"reference_AA=0", "MGS_with_outgroup_candidates=0");
 		return;
 	}
@@ -1565,11 +1566,7 @@ my $initializeOutgroupReferences = sub {
 		$refFAA = "$GCd/FMG/COG*.faa";
 		$refNameL = "FMG ref";
 	}
-	print "Preparing core-first exact outgroup-reference demands for "
-		.scalar(keys %outgroupCatalogueMGS)." candidate MGS; no FASTA index or outgroup cache; global elapsed "
-		.timeNice(time - $^T)."\n";
 
-	my @outgroupMGS = sort keys %outgroupCatalogueMGS;
 	my $mapStarted = time;
 	my $nextMapProgress = time + 60;
 	my ($hr1, $Gene2COG_OG, $hr4);
@@ -1590,21 +1587,6 @@ my $initializeOutgroupReferences = sub {
 			},
 		);
 	}
-	my ($candidateSIgenes, $candidateGene2COG, $candidateCOGprios);
-	my $candidateMapStarted = time;
-	my $nextCandidateMapProgress = time + 60;
-	my $unusedCandidateGene2MGS;
-	($candidateSIgenes, $candidateGene2COG, $unusedCandidateGene2MGS, $candidateCOGprios) = readGene2tax(
-		$gene2taxF, $outgroupReferenceGeneCap, \@outgroupMGS,
-		sub {
-			my ($status) = @_;
-			return if time < $nextCandidateMapProgress;
-			stepProgress("outgroup candidate gene-map loading", $status->{rows_scanned}, undef,
-				$candidateMapStarted, "included_genes=$status->{included_genes}");
-			$nextCandidateMapProgress = time + 60;
-		},
-	);
-	$SIgenes_OG = $candidateSIgenes;
 
 	my (%cogTaxa, $targetMapCount);
 	for my $MGS (@{$targetMGS}) {
@@ -1624,10 +1606,12 @@ my $initializeOutgroupReferences = sub {
 		$cogTaxa{$_} >= $broadMinimumTaxa
 	} keys %cogTaxa;
 
-	my (%requiredNT, %requiredAA);
-	my ($coreSatisfiedMGS, $broadFallbackMGS, $unmetDemandMGS, $demandLoci) = (0, 0, 0, 0);
+	my (%requiredNT, %requiredAA, %directReferenceByMGS);
+	my ($coreSatisfiedMGS, $broadFallbackMGS, $unmetDemandMGS, $demandLoci,
+		$noSelectedMGS) = (0, 0, 0, 0, 0);
 	for my $MGS (@{$targetMGS}) {
 		my @targetLoci = @{$hr4->{$MGS} || []};
+		my $selectedOutgroup = $SelectedOutgroup{$MGS} // '';
 		my (%demandCOG, %seenCoreCOG, %seenBroadCOG, %seenDemandLocus);
 		my @demand;
 		my $addDemand = sub {
@@ -1647,12 +1631,14 @@ my $initializeOutgroupReferences = sub {
 		for my $locus (@targetLoci) {
 			my (undef, $cog, $gene) = locusParts($locus, $MGS);
 			next unless length($cog) && length($gene)
+				&& length($selectedOutgroup)
+				&& $selectedOutgroup eq ($PreferredOutgroup{$MGS} // '')
 				&& exists($PreferredOutgroupGene{$MGS}{$gene})
 				&& ($broadCOG{$cog} || exists($preferredCoreGeneSet->{$gene}));
 			$addDemand->($locus);
 			my $directGene = $PreferredOutgroupGene{$MGS}{$gene};
-			$requiredNT{$directGene} = 1 if defined($directGene) && length($directGene);
-			$requiredAA{$directGene} = 1 if defined($directGene) && length($directGene);
+			$directReferenceByMGS{$MGS}{$directGene} = 1
+				if defined($directGene) && length($directGene);
 		}
 		my $coreAndDirectCount = scalar(@demand);
 		for my $locus (@targetLoci) {
@@ -1662,12 +1648,21 @@ my $initializeOutgroupReferences = sub {
 				&& !$seenBroadCOG{$cog}++;
 			$addDemand->($locus);
 		}
-		$coreSatisfiedMGS++ if $coreAndDirectCount >= $outgroupCoreMinLoci;
-		$broadFallbackMGS++ if $coreAndDirectCount < $outgroupCoreMinLoci && @demand >= $outgroupCoreMinLoci;
-		$unmetDemandMGS++ if @demand < $outgroupCoreMinLoci;
+		$coreSatisfiedMGS++ if length($selectedOutgroup)
+			&& $coreAndDirectCount >= $outgroupCoreMinLoci;
+		$broadFallbackMGS++ if length($selectedOutgroup)
+			&& $coreAndDirectCount < $outgroupCoreMinLoci
+			&& @demand >= $outgroupCoreMinLoci;
+		$unmetDemandMGS++ if length($selectedOutgroup)
+			&& @demand < $outgroupCoreMinLoci;
+		$noSelectedMGS++ unless length($selectedOutgroup);
 		$outgroupDemandLoci{$MGS}{$_} = 1 for @demand;
 		$outgroupDemandMinimum{$MGS} = $outgroupCoreMinLoci;
 		$demandLoci += scalar(@demand);
+		unless (length($selectedOutgroup) && @demand >= $outgroupCoreMinLoci) {
+			delete $SelectedOutgroup{$MGS};
+			next;
+		}
 		my %eligibleCOG = %demandCOG;
 		for my $locus (@targetLoci) {
 			my (undef, $cog, $gene) = locusParts($locus, $MGS);
@@ -1676,11 +1671,50 @@ my $initializeOutgroupReferences = sub {
 			$outgroupEligibleLoci{$MGS}{$locus} = 1;
 			$eligibleCOG{$cog} = 1;
 		}
-		for my $outgroup (@{$candidateOutgroupsByMGS{$MGS} || []}) {
-			$demandCogsByOutgroup{$outgroup}{$_} = 1 for keys %demandCOG;
-			$eligibleCogsByOutgroup{$outgroup}{$_} = 1 for keys %eligibleCOG;
-		}
+		$outgroupCatalogueMGS{$selectedOutgroup} = 1;
+		$demandCogsByOutgroup{$selectedOutgroup}{$_} = 1 for keys %demandCOG;
+		$eligibleCogsByOutgroup{$selectedOutgroup}{$_} = 1 for keys %eligibleCOG;
+		$requiredNT{$_} = 1 for keys %{$directReferenceByMGS{$MGS} || {}};
+		$requiredAA{$_} = 1 for keys %{$directReferenceByMGS{$MGS} || {}};
 	}
+
+	print "Outgroup core-demand manifest: target_MGS=".scalar(@{$targetMGS})
+		."; core_or_direct=$coreSatisfiedMGS; broad_fallback=$broadFallbackMGS"
+		."; below_minimum=$unmetDemandMGS; no_selection=$noSelectedMGS"
+		."; demanded_loci=$demandLoci; viable_selected_MGS="
+		.scalar(keys %SelectedOutgroup)
+		."; candidate_gene_cap=$outgroupReferenceGeneCap\n";
+	unless (%outgroupCatalogueMGS) {
+		my $status = $unmetDemandMGS && !$noSelectedMGS
+			? "all_below_minimum"
+			: "no_viable_outgroups";
+		stepComplete("outgroup-reference preparation", $referenceStarted,
+			"status=$status", "reference_NT=0", "required=1",
+			"reference_AA=0", "MGS_with_outgroup_candidates=0");
+		return;
+	}
+
+	print "Preparing core-first exact outgroup-reference demands for "
+		.scalar(keys %outgroupCatalogueMGS)
+		." selected MGS; no FASTA index or outgroup cache; global elapsed "
+		.timeNice(time - $^T)."\n";
+
+	my @outgroupMGS = sort keys %outgroupCatalogueMGS;
+	my ($candidateSIgenes, $candidateGene2COG, $candidateCOGprios);
+	my $candidateMapStarted = time;
+	my $nextCandidateMapProgress = time + 60;
+	my $unusedCandidateGene2MGS;
+	($candidateSIgenes, $candidateGene2COG, $unusedCandidateGene2MGS, $candidateCOGprios) = readGene2tax(
+		$gene2taxF, $outgroupReferenceGeneCap, \@outgroupMGS,
+		sub {
+			my ($status) = @_;
+			return if time < $nextCandidateMapProgress;
+			stepProgress("outgroup candidate gene-map loading", $status->{rows_scanned}, undef,
+				$candidateMapStarted, "included_genes=$status->{included_genes}");
+			$nextCandidateMapProgress = time + 60;
+		},
+		{ allowed_cogs_by_mgs => \%eligibleCogsByOutgroup },
+	);
 
 	my @mappedMGS = sort grep { exists($outgroupCatalogueMGS{$_}) } keys %{$candidateCOGprios};
 	my ($mappedCount, $mappedCandidateGenes) = (0, 0);
@@ -1738,10 +1772,8 @@ my $initializeOutgroupReferences = sub {
 			"reference_AA=0", "MGS_with_outgroup_candidates=".scalar(keys %outgroupCatalogueMGS));
 		return;
 	}
-	print "Outgroup core-demand manifest: target_MGS=".scalar(@{$targetMGS})
-		."; core_or_direct=$coreSatisfiedMGS; broad_fallback=$broadFallbackMGS"
-		."; below_minimum=$unmetDemandMGS; demanded_loci=$demandLoci"
-		."; candidate_gene_cap=$outgroupReferenceGeneCap"
+	print "Outgroup exact-reference request: viable_outgroup_MGS="
+		.scalar(keys %outgroupCatalogueMGS)."; candidate_genes=$mappedCandidateGenes"
 		."; requested_reference_genes=".scalar(keys %requiredNT)."\n";
 
 	my $faaStarted = time;
@@ -2829,7 +2861,7 @@ sub loadTreeOutgroupCandidates {
 	return 1 unless keys %wanted;
 	my $started = time;
 	my $neiTree = getProgPaths("neighborTree");
-	my $call = "$neiTree ".shellQuote($treeFile)." --all";
+	my $call = "$neiTree ".shellQuote($treeFile)." --all --max-candidates 1";
 
 	# Give the one bulk R process the consolidated Mosaic choices. File::Temp
 	# removes this transient run-level input; no per-MGS artefacts are created.
@@ -2886,6 +2918,7 @@ sub loadTreeOutgroupCandidates {
 		my @candidates = grep {
 			/\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/ && !$seen{$_}++
 		} split /\s+/, ($candidateText // '');
+		@candidates = ($candidates[0]) if @candidates > 1;
 		$TreeOutgroupCandidates{$MGS} = \@candidates;
 		$loaded++;
 	}
@@ -2922,6 +2955,7 @@ sub treeOutgroupCandidates {
 		my $call = "$neiTree ".shellQuote($treeFile)." ".shellQuote($MGS);
 		$call .= " --preferred-tip ".shellQuote($PreferredOutgroup{$MGS})
 			if exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS});
+		$call .= " --max-candidates 1";
 		my $outgroup_text = `$call`;
 		if ($? != 0) {
 			limitedWarn('outgroup lookup command failures',
@@ -2934,6 +2968,7 @@ sub treeOutgroupCandidates {
 	@candidates = grep {
 		/\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/ && !$seen{$_}++
 	} @candidates;
+	@candidates = ($candidates[0]) if @candidates > 1;
 	$TreeOutgroupCandidates{$MGS} = \@candidates;
 	return @candidates;
 }
@@ -3059,46 +3094,33 @@ sub addOutgroup2MGS{
 	}
 
 	if ($treeFile ne "" || exists($PreferredOutgroup{$MGS})) {
-		my @candidates;
-		if ($treeFile ne "") {
-			# This order is authoritative: R promotes a phylogenetically plausible
-			# Mosaic proposal and excludes one that fails its plausibility check.
-			push @candidates, treeOutgroupCandidates($MGS);
-		} elsif (exists($PreferredOutgroup{$MGS}) && length($PreferredOutgroup{$MGS})) {
-			push @candidates, $PreferredOutgroup{$MGS};
-		}
-		my %seenCandidate;
-		@candidates = grep { !$seenCandidate{$_}++ } @candidates;
-		$OG = "";
-		limitedWarn('MGS without outgroup candidates',
-			"No outgroup candidates returned for $MGS; building an ingroup-only tree\n")
-			if @candidates == 0;
 		my $minimumOutgroupLoci = $outgroupDemandMinimum{$MGS} // $MGStoolowGsThr;
-		my $represented = 0;
-		for my $candidate (@candidates) {
-			$represented = 0;
-			$OG = $candidate;
-			next unless exists($SIgenes_OG->{$OG});
-			for my $locus (@curCogs) {
-				next unless exists($outgroupDemandLoci{$MGS}{$locus});
+		my @requiredLoci = sort grep {
+			$locusSeen{$_}
+		} keys %{$outgroupDemandLoci{$MGS} || {}};
+		$OG = $SelectedOutgroup{$MGS} // '';
+		if (!length($OG)) {
+			limitedWarn('MGS without a selected outgroup',
+				"No viable predetermined outgroup remains for $MGS; building an ingroup-only tree\n");
+		} elsif (@requiredLoci < $minimumOutgroupLoci) {
+			limitedWarn('MGS with insufficient staged outgroup demand',
+				"$MGS retains only ".scalar(@requiredLoci)." of $minimumOutgroupLoci required outgroup loci; building an ingroup-only tree\n");
+			$OG = "";
+		} else {
+			my $represented = 0;
+			for my $locus (@requiredLoci) {
 				my (undef, $annotation) = locusParts($locus, $MGS);
 				next if $annotation =~ m/^uniq\d+$/;
 				my $outgroupGene = outgroupGeneForLocus($OG, $locus, $MGS);
 				next unless length($outgroupGene) && exists($FNAref->{$outgroupGene});
 				$represented++;
 			}
-			last if $represented >= $minimumOutgroupLoci;
-		}
-		if ($represented < $minimumOutgroupLoci) {
-			my @preview = @curCogs[0 .. ($#curCogs < 9 ? $#curCogs : 9)];
-			limitedWarn('MGS without a sufficiently represented outgroup',
-				"Could not find an outgroup with at least $minimumOutgroupLoci core/broadly-available loci for $MGS; candidates: @candidates; loci: @preview\n");
-			$OG = "";
-		}
-		if ($OG ne "" && !exists($SIgenes_OG->{$OG})) {
-			limitedWarn('selected outgroups absent from gene catalogue',
-				"Selected outgroup $OG for $MGS is absent from the gene catalogue\n");
-			$OG = "";
+			if ($represented < $minimumOutgroupLoci) {
+				my @preview = @requiredLoci[0 .. ($#requiredLoci < 9 ? $#requiredLoci : 9)];
+				limitedWarn('MGS without a sufficiently represented predetermined outgroup',
+					"Predetermined outgroup $OG supplies $represented/$minimumOutgroupLoci required loci for $MGS; loci: @preview\n");
+				$OG = "";
+			}
 		}
 	}
 

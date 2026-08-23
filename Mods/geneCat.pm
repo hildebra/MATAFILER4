@@ -231,8 +231,14 @@ sub createGene2MGS{
 sub readGene2tax{
 	my $inF = $_[0];
 	my $progress = @_ > 3 ? $_[3] : undef;
+	my $options = @_ > 4 ? $_[4] : {};
 	die "readGene2tax progress callback must be a code reference\n"
 		if defined($progress) && ref($progress) ne "CODE";
+	die "readGene2tax options must be a hash reference\n"
+		if ref($options) ne "HASH";
+	my $allowedCogsByMGS = $options->{allowed_cogs_by_mgs};
+	die "readGene2tax allowed_cogs_by_mgs must be a hash reference\n"
+		if defined($allowedCogsByMGS) && ref($allowedCogsByMGS) ne "HASH";
 	my $limit = -1;  my %subset; my $doMGSsubset=0;
 	$limit = $_[1] if (@_ > 1);
 	if (@_ > 2){
@@ -265,17 +271,25 @@ sub readGene2tax{
 				if $rowWarnings{malformed} <= $warningLimit;
 			next;
 		}
-		#only read a limited number of genes.. used for MGS to only take first few genes
 		my $MGS = $spl[1];
-		if ($limit>0 && exists($totalTax{$MGS}) && $totalTax{$MGS}  >= $limit){
-			next;
-		} 
 		if ($doMGSsubset && !exists($subset{$MGS})){
 			#print "N $MGS ";
 			next;
 		}
 	
 		my $OG = $spl[2];
+		# Apply a caller-supplied orthology demand before the per-MGS cap. This
+		# lets reference consumers retain requested loci even when unrelated
+		# catalogue rows occur first for the same MGS.
+		if (defined($allowedCogsByMGS)) {
+			my $allowed = $allowedCogsByMGS->{$MGS};
+			next unless defined($allowed) && ref($allowed) eq "HASH"
+				&& defined($OG) && length($OG) && $OG ne "-" && $allowed->{$OG};
+		}
+		# Only count retained rows towards the optional per-MGS limit.
+		if ($limit>0 && exists($totalTax{$MGS}) && $totalTax{$MGS} >= $limit){
+			next;
+		}
 		if ($OG eq "" || $OG eq "-"){ #make artificial OG
 			$uniqs{$spl[1]}++;
 			$OG="uniq$uniqs{$spl[1]}";

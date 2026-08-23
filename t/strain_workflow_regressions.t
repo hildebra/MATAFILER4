@@ -264,8 +264,8 @@ like($strain, qr/\$nxtCmd \.= "-submit \$doSubmit ";.*?-qsubSystem/s,
 like($strain, qr/\$nxtCmd \.= "-MGSphylo "\.shellQuote\(\$treeFile\).*?if \$treeFile ne ""/,
 	'postprocessing receives the source MGS tree for outgroup recovery');
 like($strain,
-	qr{loadTreeOutgroupCandidates\(\$targetMGS\).*?sub loadTreeOutgroupCandidates .*?" --all".*?open my \$bulk.*?\$TreeOutgroupCandidatesBulkLoaded = 1.*?sub treeOutgroupCandidates .*?A failed bulk call.*?--preferred-tip}s,
-	'Phase II imports all source-tree neighbour candidates in one call and retains a Mosaic-aware individual fallback');
+	qr{loadTreeOutgroupCandidates\(\$targetMGS\).*?sub loadTreeOutgroupCandidates .*?" --all --max-candidates 1".*?open my \$bulk.*?\$TreeOutgroupCandidatesBulkLoaded = 1.*?sub treeOutgroupCandidates .*?A failed bulk call.*?--preferred-tip .*?--max-candidates 1}s,
+	'Phase II asks one bulk R call, and its Mosaic-aware individual fallback, for exactly one outgroup');
 like($strain,
 	qr{tempfile\(.*?strain_mosaic_outgroups.*?TMPDIR => 1, UNLINK => 1.*?print \{\$preferredFh\} "\$MGS\\t\$PreferredOutgroup\{\$MGS\}\\n".*?" --preferred "}s,
 	'the bulk R call receives all Mosaic preferences through one automatically removed temporary file');
@@ -273,17 +273,22 @@ like($strain,
 	qr{my \(\$MGS, \$decision, \$preferred, \$preferredDistance, \$cutoff, \$candidateText\).*?split /\\t/, \$line, 6.*?Mosaic decisions:}s,
 	'Perl imports the authoritative R ordering and summarizes Mosaic plausibility decisions');
 like($strain,
-	qr{if \(length\(\$treeFile\)\).*?Do not reinsert a rejected preference.*?push \@candidates, treeOutgroupCandidates\(\$MGS\).*?elsif \(exists\(\$PreferredOutgroup}s,
-	'the reference preload follows R ordering when a phylogeny is present and uses Mosaic directly only without one');
+	qr{if \(length\(\$treeFile\)\).*?returned at most one authoritative outgroup.*?push \@candidates, treeOutgroupCandidates\(\$MGS\).*?\$SelectedOutgroup\{\$MGS\} = \$candidates\[0\]}s,
+	'the reference preload stores only the one authoritative R-selected outgroup');
 like($strain,
-	qr{if \(\$treeFile ne ""\).*?This order is authoritative.*?push \@candidates, treeOutgroupCandidates\(\$MGS\).*?elsif \(exists\(\$PreferredOutgroup}s,
-	'the final outgroup chooser cannot reinsert a Mosaic proposal rejected by R');
+	qr{my \@requiredLoci = sort grep.*?\$OG = \$SelectedOutgroup\{\$MGS\} // ''.*?for my \$locus \(\@requiredLoci\).*?Predetermined outgroup \$OG supplies}s,
+	'the final outgroup chooser validates only the controller-selected outgroup');
+unlike($strain, qr/sub addOutgroup2MGS\{.*?for my \$candidate \(\@candidates\).*?my \(\$overlayFNA/s,
+	'the per-MGS outgroup path has no candidate fallback loop');
 like($neighbor_tree_r,
 	qr{identical\(target, "--all"\).*?ape::cophenetic\.phylo\(tree\).*?for \(tip in tree\$tip\.label\).*?ranked\$decision.*?paste\(ranked\$candidates}s,
 	'neighborTree bulk mode computes distances once and emits authoritative decision and candidate columns per tree tip');
 like($neighbor_tree_r,
 	qr{--preferred.*?--preferred-tip.*?ranked_neighbors <- function.*?stats::quantile.*?nearestDistance \* preferredNearestFactor.*?preferredDistance > cutoff.*?candidateNames\[candidateNames != preferred\].*?c\(preferred, candidateNames}s,
 	'a plausible Mosaic outgroup is promoted while an extreme-distance proposal is excluded from the R result');
+like($neighbor_tree_r,
+	qr{--max-candidates.*?limit_candidates <- function.*?head\(candidates, maxCandidates\).*?candidates = limit_candidates\(candidateNames\)}s,
+	'neighborTree can cap both ordinary and preferred decisions to one selected outgroup');
 like($strain2, qr/"MGSphylo=s"\s*=>\s*\\\$MGSphylo.*?sub resolveOutgroup .*?data\.log.*?treeCmd\.sh.*?MGSphylo/s,
 	'postprocessing preserves logged or saved outgroups and falls back to the source MGS tree');
 like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to remove unowned custom output directory/s,
@@ -390,7 +395,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.38;/,
+like($strain, qr/my \$version = 1\.39;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -435,14 +440,14 @@ like($strain,
 like($strain, qr/Retain the Phase-I locus map.*?second catalogue-wide gene2tax scan.*?\$SIgenes and \$COGprios are reused/s,
 	'Phase II reuses the Phase-I selected gene map rather than clearing and rebuilding it');
 like($strain,
-	qr/Preparing core-first exact outgroup-reference demands.*?my %broadCOG = map.*?\$cogTaxa\{\$_\} >= \$broadMinimumTaxa.*?exists\(\$preferredCoreGeneSet->\{\$gene\}\).*?readFasta\(\$refFAA, 1, "\\\\s", \\%requiredAA,.*?readFasta\(\$refFNA, 1, "\\\\s", \\%requiredNT,/s,
-	'outgroup references use a core-first, broad-fallback demand manifest and stream only exact requested FNA/FAA records');
+	qr/my %broadCOG = map.*?\$cogTaxa\{\$_\} >= \$broadMinimumTaxa.*?exists\(\$preferredCoreGeneSet->\{\$gene\}\).*?unless \(%outgroupCatalogueMGS\).*?return;.*?Preparing core-first exact outgroup-reference demands.*?readFasta\(\$refFAA, 1, "\\\\s", \\%requiredAA,.*?readFasta\(\$refFNA, 1, "\\\\s", \\%requiredNT,/s,
+	'outgroup viability is decided before candidate-map and exact FNA/FAA reference loading');
 like($strain,
 	qr/my \$outgroupCoreMinLoci = 0;.*?"outgroupCoreMinLoci=i".*?\$outgroupCoreMinLoci = int\(\$treeLocusBudget \* 0\.20 \+ 0\.999999\).*?if \$outgroupCoreMinLoci == 0;.*?\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$MGStoolowGsThr/s,
 	'the outgroup floor defaults to 20% of the final-tree locus budget and is enforced per MGS');
 like($strain,
-	qr/my \$outgroupReferenceGeneCap = 2500;.*?\(\$candidateSIgenes, \$candidateGene2COG.*?readGene2tax\(.*?\$outgroupReferenceGeneCap.*?my \$addCandidate = sub.*?return if \$retainedForMGS >= \$outgroupReferenceGeneCap/s,
-	'candidate reference maps use a generous 2,500-gene-per-outgroup-MGS cap while prioritizing the acceptance demand');
+	qr/my \$outgroupReferenceGeneCap = 2500;.*?readGene2tax\(.*?\$outgroupReferenceGeneCap.*?allowed_cogs_by_mgs => \\%eligibleCogsByOutgroup.*?my \$addCandidate = sub.*?return if \$retainedForMGS >= \$outgroupReferenceGeneCap/s,
+	'candidate maps retain only eligible COGs for viable selected outgroups before applying the 2,500-gene cap');
 like($strain,
 	qr/&& exists\(\$PreferredOutgroupGene.*?&& \(\$broadCOG/s,
 	'an exact Mosaic link is usable only for a broadly available or preferred-core locus');
@@ -735,8 +740,8 @@ like($strain,
 	qr/\$multiSmpl > 2 && \$ngenes >= \$MGStoolowGsThr.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?tree_input_repair\.queue\.tsv.*?no catalogue-wide abort was triggered/s,
 	'insufficient tree inputs are terminally marked while incomplete triplets enter a persistent repair queue');
 like($strain,
-	qr/\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$MGStoolowGsThr.*?last if \$represented >= \$minimumOutgroupLoci.*?if \(\$represented < \$minimumOutgroupLoci\)/s,
-	'outgroup acceptance uses the per-MGS core/broad demand floor rather than the generic eight-locus minimum');
+	qr/\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$MGStoolowGsThr.*?my \@requiredLoci = sort grep.*?\$OG = \$SelectedOutgroup\{\$MGS\}.*?\@requiredLoci < \$minimumOutgroupLoci.*?\$represented < \$minimumOutgroupLoci/s,
+	'the predetermined outgroup is checked against the per-MGS core/broad demand floor');
 like($strain,
 	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
 	'split extraction workers inherit the missing-input MGS subset');

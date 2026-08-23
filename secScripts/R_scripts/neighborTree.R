@@ -7,7 +7,8 @@ if (length(args) < 2L) {
   stop(paste(
     "Usage: neighborTree.R <tree file> <target tip>|--all",
     "[--preferred FILE | --preferred-tip TIP]",
-    "[--preferred-quantile FLOAT] [--preferred-nearest-factor FLOAT]"
+    "[--preferred-quantile FLOAT] [--preferred-nearest-factor FLOAT]",
+    "[--max-candidates INT]"
   ), call. = FALSE)
 }
 
@@ -17,6 +18,7 @@ preferredFile <- ""
 preferredTip <- ""
 preferredQuantile <- 0.50
 preferredNearestFactor <- 10.0
+maxCandidates <- 0L
 
 optionArgs <- args[-seq_len(2L)]
 i <- 1L
@@ -24,7 +26,7 @@ while (i <= length(optionArgs)) {
   option <- optionArgs[[i]]
   if (!option %in% c(
     "--preferred", "--preferred-tip", "--preferred-quantile",
-    "--preferred-nearest-factor"
+    "--preferred-nearest-factor", "--max-candidates"
   )) {
     stop(sprintf("Unknown option: %s", option), call. = FALSE)
   }
@@ -40,6 +42,11 @@ while (i <= length(optionArgs)) {
     preferredQuantile <- suppressWarnings(as.numeric(value))
   } else if (identical(option, "--preferred-nearest-factor")) {
     preferredNearestFactor <- suppressWarnings(as.numeric(value))
+  } else if (identical(option, "--max-candidates")) {
+    if (!grepl("^[0-9]+$", value)) {
+      stop("--max-candidates must be a non-negative integer.", call. = FALSE)
+    }
+    maxCandidates <- suppressWarnings(as.integer(value))
   }
   i <- i + 2L
 }
@@ -52,6 +59,9 @@ if (!is.finite(preferredQuantile) || preferredQuantile <= 0 || preferredQuantile
 }
 if (!is.finite(preferredNearestFactor) || preferredNearestFactor < 1) {
   stop("--preferred-nearest-factor must be at least 1.", call. = FALSE)
+}
+if (is.na(maxCandidates) || maxCandidates < 0L) {
+  stop("--max-candidates must be a non-negative integer.", call. = FALSE)
 }
 if (!file.exists(inF)) {
   stop(sprintf("Tree file does not exist: %s", inF), call. = FALSE)
@@ -96,8 +106,11 @@ if (nzchar(preferredFile)) {
 ranked_neighbors <- function(distances, targetTip, preferred = "") {
   eligible <- sort(distances[is.finite(distances) & distances >= 0.01])
   candidateNames <- names(eligible)
+  limit_candidates <- function(candidates) {
+    if (maxCandidates > 0L) head(candidates, maxCandidates) else candidates
+  }
   result <- list(
-    candidates = candidateNames,
+    candidates = limit_candidates(candidateNames),
     decision = "none",
     preferred = preferred,
     preferredDistance = NA_real_,
@@ -136,11 +149,11 @@ ranked_neighbors <- function(distances, targetTip, preferred = "") {
   result$cutoff <- cutoff
   if (preferredDistance > cutoff) {
     result$decision <- "too_distant"
-    result$candidates <- candidateNames[candidateNames != preferred]
+    result$candidates <- limit_candidates(candidateNames[candidateNames != preferred])
     return(result)
   }
   result$decision <- "accepted"
-  result$candidates <- c(preferred, candidateNames[candidateNames != preferred])
+  result$candidates <- limit_candidates(c(preferred, candidateNames[candidateNames != preferred]))
   result
 }
 

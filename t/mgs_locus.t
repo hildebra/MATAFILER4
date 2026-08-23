@@ -28,6 +28,19 @@ is_deeply(
 );
 is($si->{'MGS.1'}{'MGS.1|COG1|11'}, 11, 'seed locus maps to its catalogue cluster');
 
+my $filtered_mapping = File::Spec->catfile($tmp, 'filtered-genes.gene2MGS');
+write_file($filtered_mapping, join('',
+	"30\tMGS.3\tCOG_OTHER\n",
+	"31\tMGS.3\tCOG_WANTED\n",
+	"32\tMGS.3\tCOG_WANTED\n",
+));
+my (undef, undef, undef, $filtered_priorities) = readGene2tax(
+	$filtered_mapping, 1, ['MGS.3'], undef,
+	{ allowed_cogs_by_mgs => { 'MGS.3' => { COG_WANTED => 1 } } },
+);
+is_deeply($filtered_priorities->{'MGS.3'}, ['MGS.3|COG_WANTED|31'],
+	'a COG demand is applied before the per-MGS gene cap');
+
 my $duplicates = File::Spec->catfile($tmp, 'duplicate-genes.gene2MGS');
 write_file($duplicates, join('',
 	"20\tMGS.2\tCOG1\n",

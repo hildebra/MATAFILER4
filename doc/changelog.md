@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-23 — Predetermined strain outgroups
+
+- Updated `strain_within.pl` to 1.39. The Mosaic-aware R lookup now returns one authoritative outgroup per MGS, and the controller no longer falls through across tree neighbours when that selection lacks locus coverage.
+- Outgroup demand viability is decided before candidate gene-map or reference-FASTA loading. A run in which every target is below `-outgroupCoreMinLoci` now exits reference preparation without opening those catalogues.
+- Candidate gene mappings are restricted to approved COGs for viable selected outgroups before the per-MGS cap is applied. Alternative homolog copies remain confined to the predetermined outgroup.
+- `buildTree5.pl` continues to receive the finalized outgroup overlay and performs no outgroup preselection.
+
 ## 2026-08-22 — OOM-aware and sample-guided strain resources
 
 - Updated `strain_within.pl` to 1.38. Fresh and resumed Phase-I worker repair now use one retry routine backed by the shared Slurm accounting planner in `Mods/SlurmAccounting.pm`.
