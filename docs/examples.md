@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Profiling tutorial](profiling_tutorial.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -250,7 +250,7 @@ perl $MF4DIR/MATAF4.pl -map $MAP -inputFQregex1 '.*_1\.f[^\.]*q\.gz$' -inputFQre
 
 #### 4. rerun MATAFILER4  
 
-- wait till all current jobs are finished, then rerun `sbatch run_independent.mfc`. This will check all jobs completed, and if so, create the feature abundance tables requested. In the above case these are KEGG, eggNOG and CAZy functional tables, as well as metaphlan3 and miTAG taxonomic tables.
+- wait till all current jobs are finished, then rerun `sbatch run_independent.mfc`. This will check all jobs completed, and if so, create the feature abundance tables requested. In the above case these are KEGG, eggNOG and CAZy functional tables, as well as MetaPhlAn 4 and miTAG taxonomic tables.
 
 
 ### Hybrid assemblies

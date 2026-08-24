@@ -142,6 +142,10 @@ ribo profiling (miTag)	riboMaxRds	integer	250000	stable	$MFopt{riboLCAmaxRds}	Ma
 ribo profiling (miTag)	saveRiboRds	integer	0	stable	$MFopt{riboStoreRds}	Retain reads used during ribosomal assignment.
 ribo profiling (miTag)	thoroughCheckRiboFinish	integer	0	stable	$MFopt{checkRiboNonEmpty}	Require non-empty RiboFind assignment output before accepting completion.
 other tax profilers..	profileMetaphlan,profileMetaphlan3	integer	0	stable	$MFopt{DoMetaPhlan}	Run MetaPhlAn taxonomic profiling.
+other tax profilers..	profileProtal	integer	0	stable	$MFopt{DoProtal}	Mode 1 profiles raw reads per sample and merges profiles; mode 2 runs one generated Protal map across the complete mapped cohort.
+other tax profilers..	ProtalCores	integer	4	stable	$MFopt{ProtalCores}	CPU cores requested for a singular or combined Protal job.
+other tax profilers..	ProtalMem	integer	100	stable	$MFopt{ProtalMem}	Total memory in GB requested for a singular or combined Protal job.
+other tax profilers..	protalIgnoreErrors	integer	1	stable	$MFopt{protalIgnoreErrors}	Use the first compatible raw short-read pair, ignore other pair/singleton/BAM streams, or skip an incompatible Protal sample; set to 0 for strict input validation.
 other tax profilers..	profileMOTU2	integer	0	stable	$MFopt{DoMOTU2}	Run mOTUs taxonomic profiling.
 other tax profilers..	profileKraken	integer	0	stable	$MFopt{DoKraken}	Run Kraken taxonomic profiling.
 other tax profilers..	profileTaxaTarget	integer	0	stable	$MFopt{DoTaxaTarget}	Run target-taxon profiling.

@@ -26,7 +26,7 @@ Replace the workflow filenames if your repository uses different names.
 
 <!-- Documentation navigation -->
 <p align="center">
-<a href="README.md">Home</a> | <a href="docs/quickstart.md">Quick start</a> | <a href="docs/install.md">Installation</a> | <a href="docs/configuration.md">Configuration</a> | <a href="docs/mapping_files.md">Mapping files</a> | <a href="docs/common_workflows.md">Workflows</a> | <a href="docs/strainwithin.md">Strain-within guide</a> | <a href="docs/outputs.md">Outputs</a> | <a href="docs/flag_reference.md">Flag reference</a> | <a href="docs/FAQ.md">FAQ</a> | <a href="docs/glossary.md">Glossary</a>
+<a href="README.md">Home</a> | <a href="docs/quickstart.md">Quick start</a> | <a href="docs/install.md">Installation</a> | <a href="docs/configuration.md">Configuration</a> | <a href="docs/mapping_files.md">Mapping files</a> | <a href="docs/common_workflows.md">Workflows</a> | <a href="docs/profiling_tutorial.md">Profiling tutorial</a> | <a href="docs/strainwithin.md">Strain-within guide</a> | <a href="docs/outputs.md">Outputs</a> | <a href="docs/flag_reference.md">Flag reference</a> | <a href="docs/FAQ.md">FAQ</a> | <a href="docs/glossary.md">Glossary</a>
 </p>
 
 
@@ -43,7 +43,7 @@ This documentation snapshot was updated against `MATAF4.pl` version `4.38`.
 | Use case | Recommended starting point |
 |---|---|
 | Gut or other host-associated shotgun metagenomes where assemblies are expected to recover substantial read content | [Assembly-dependent workflow](docs/common_workflows.md#assembly-dependent-metagenomic-assembly-gene-catalog) |
-| Highly complex communities where assemblies are unlikely to be informative | [Assembly-independent profiling](docs/common_workflows.md#assembly-independent-profiling) |
+| Highly complex communities where assemblies are unlikely to be informative | [Read-based profiling tutorial](docs/profiling_tutorial.md) |
 | Short-read plus ONT/PacBio support data | [Hybrid assemblies](docs/common_workflows.md#hybrid-assemblies) |
 | Mapping reads to a defined reference FASTA or database | [map2tar / map2DB / map2GC](docs/common_workflows.md#map2tar-map2db-and-map2gc-reference-mapping) |
 | You already have output and need to know what files matter | [Outputs](docs/outputs.md) |
@@ -84,11 +84,12 @@ For new analyses, `-requireInput 1` prevents missing or unmatched input reads fr
 3. [Configuration](docs/configuration.md) — `config.txt`, temporary directories and cluster settings.
 4. [Mapping files](docs/mapping_files.md) — required map structure and sample metadata fields.
 5. [Common workflows](docs/common_workflows.md) — assembly-dependent, assembly-independent, hybrid and reference mapping examples.
-6. [Strain-within guide](docs/strainwithin.md) — tree preparation, inclusion controls, optional placement, and statistics postprocessing.
-7. [Outputs](docs/outputs.md) — file-by-file description of final and intermediate results.
-8. [Flag reference](docs/flag_reference.md) — current options parsed from `MATAF4.pl`, `geneCat.pl`, `MGS.pl` and `buildTree5.pl`.
-9. [FAQ](docs/FAQ.md) — troubleshooting and common failure modes.
-10. [Glossary](docs/glossary.md) — terms used throughout the pipeline.
+6. [Profiling tutorial](docs/profiling_tutorial.md) — RiboFind, functional profiles, MetaPhlAn 4, mOTUs 4, Protal, and required database keys.
+7. [Strain-within guide](docs/strainwithin.md) — tree preparation, inclusion controls, optional placement, and statistics postprocessing.
+8. [Outputs](docs/outputs.md) — file-by-file description of final and intermediate results.
+9. [Flag reference](docs/flag_reference.md) — current options parsed from `MATAF4.pl`, `geneCat.pl`, `MGS.pl` and `buildTree5.pl`.
+10. [FAQ](docs/FAQ.md) — troubleshooting and common failure modes.
+11. [Glossary](docs/glossary.md) — terms used throughout the pipeline.
 
 
 ## Validated flag references

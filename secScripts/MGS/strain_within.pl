@@ -74,6 +74,7 @@ sub writeMGSShardManifest; sub readSplitGeneration;
 sub splitWorkerPartsRemain; sub getInputSize;
 sub persistentMGSInputState; sub scratchMGSInputState;
 sub invalidateMGSInputState;
+sub msaOnlyArtifactsReady;
 sub stagedMGSInputsReady; sub evalFileStatus;
 sub preparedOutgroupLog {
 	my ($directory) = @_;
@@ -272,7 +273,8 @@ my $completionMessage = "";
 #1.38: guide BuildTree core requests by the submitted sample count
 #1.39: preselect one viable outgroup per MGS before loading exact reference loci
 #1.40: unify Phase-II core, memory, and submission priority around prepared job size
-my $version = 1.40;
+#1.41: validate MSA-only completion from per-locus alignments instead of a concatenation
+my $version = 1.41;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -336,7 +338,7 @@ my $abundanceMaximumFold = $FILTER_DEFAULT{abundance_maximum_fold};
 my $abundanceMaximumModifiedZ = $FILTER_DEFAULT{abundance_maximum_modified_z};
 my @subsetMGS=(); my $subsMGSstr="";
 my $MSAprog = 2; ##(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5
-my $onlyMSA = 0; #finish after concatenated MSA/QC; do not infer phylogenies
+my $onlyMSA = 0; #retain localized per-locus alignments; skip combined-MSA work and trees
 my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
 my $GenesPerSpecies = 0.2;
@@ -1960,7 +1962,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $tmpD  = "$scratchD/outs/$MGS/";
 	my $treeStone = "$outD2/treeDone.sto";
 	my $msaOnlyStone = "$outD2/msaOnly.complete.tsv";
-	my $msaOnlyOutput = "$outD2/MSA/MSAli.fna.gz";
+	my $msaOnlyOutput = "$outD2/MSA";
 	my $terminalTreeMarker = "$outD2/noTree.sto";
 	my $placementPendingMarker = "$outD2/placementPending.sto";
 	my $IQtreef= "$outD2/phylo/IQtree_allsites.treefile";
@@ -1972,8 +1974,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 			$resumeEntry{$_} = 1 for readdir($resumeDirectory);
 			closedir($resumeDirectory);
 		}
-		if ($onlyMSA && $resumeEntry{'msaOnly.complete.tsv'}
-				&& fileGZs($msaOnlyOutput)) {
+		if ($onlyMSA && msaOnlyArtifactsReady($outD2)) {
 			$treeDisposition{'valid MSA already present'}++;
 			limitedNotice('MGS skipped with existing MSA-only result',
 				"Skipping $MGS: a completed MSA-only result is already present.\n");
@@ -2043,7 +2044,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	if (!$leanOnlySubmitResume && !$recalcTrees && !$reSubmit && !$repairCAT
 			&& !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
 			&& ($onlyMSA
-				? (-s $msaOnlyStone && fileGZs($msaOnlyOutput))
+				? msaOnlyArtifactsReady($outD2)
 				: (-e $treeStone && -s $IQtreef))) {
 		$treeDisposition{$onlyMSA ? 'valid MSA already present' : 'valid tree already present'}++;
 		limitedNotice($onlyMSA ? 'MGS skipped with existing MSA-only result'
@@ -2303,7 +2304,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		: $onlyMSA ? 'eligible MSA-only job' : 'eligible tree job'}++;
 	$expectedTreeOutputs{$MGS} = [$onlyMSA ? $msaOnlyOutput : $IQtreef,
 		$onlyMSA ? $msaOnlyStone : $treeStone,
-		$terminalTreeMarker, $placementPendingMarker];
+		$terminalTreeMarker, $placementPendingMarker, $onlyMSA];
 	if (!$doSubmit || ($epaOnlyRetry && time >= $nextQueuedTreeSubmissionProbe)) {
 		my $drain = dispatchPendingTreeJobs(
 			queue => \@pendingTreeJobs, options => $QSBoptHR,
@@ -4784,6 +4785,37 @@ sub stagedMGSInputsReady {
 	return 1;
 }
 
+sub msaOnlyArtifactsReady {
+	my ($outputDirectory) = @_;
+	return 0 unless defined($outputDirectory) && length($outputDirectory);
+	my $marker = File::Spec->catfile($outputDirectory, 'msaOnly.complete.tsv');
+	return 0 unless -s $marker;
+	open my $markerHandle, '<', $marker or return 0;
+	my $status = '';
+	while (my $line = <$markerHandle>) {
+		if ($line =~ /^status\t([^\r\n]+)/) {
+			$status = $1;
+			last;
+		}
+	}
+	close $markerHandle or return 0;
+	return 0 unless $status eq 'msa_complete';
+	my $msaDirectory = File::Spec->catdir($outputDirectory, 'MSA');
+	return 0 unless -d $msaDirectory;
+	opendir my $msaHandle, $msaDirectory or return 0;
+	my $ready = 0;
+	while (my $name = readdir $msaHandle) {
+		next if $name =~ /^MSAli/ || $name !~ /\.fna\.gz\z/;
+		my $path = File::Spec->catfile($msaDirectory, $name);
+		if (fileGZs($path)) {
+			$ready = 1;
+			last;
+		}
+	}
+	closedir $msaHandle or return 0;
+	return $ready;
+}
+
 sub evalFileStatus{
 	my $dirsNOTPrepped = 0; my $CatFileMiss = 0;my $CatNotPrepped = 0; my $treeAbsent=0;
 	my $doneDirs=0;
@@ -4805,12 +4837,10 @@ sub evalFileStatus{
 		$SIdirs{$MGS} = $outD2;
 		my $completedTree = "$outD2/phylo/$treeFile";
 		my $treeCompletion = "$outD2/treeDone.sto";
-		my $completedMSA = "$outD2/MSA/MSAli.fna.gz";
-		my $msaCompletion = "$outD2/msaOnly.complete.tsv";
 		if (!$recalcTrees && !$reSubmit && !$repairCAT && !$deepRepair
 				&& !$redoSubmissionData && ($onlySubmit != 0 || $subJob)
 				&& ($onlyMSA
-					? (-s $msaCompletion && fileGZs($completedMSA))
+					? msaOnlyArtifactsReady($outD2)
 					: (-s $treeCompletion && fileGZs($completedTree)))) {
 			# BuildTree publishes treeDone.sto atomically only after validating the
 			# primary tree and clearing terminal lifecycle markers.  On a tree-only
@@ -4917,13 +4947,13 @@ sub evalFileStatus{
 			#print "$SIdirs{$MGS}\n";
 			#system "rm $SIdirs{$MGS}\n";
 		} elsif($onlyMSA
-				? !(-s $msaCompletion && fileGZs($completedMSA))
+				? !msaOnlyArtifactsReady($outD2)
 				: !fileGZs("$SIdirs{$MGS}/phylo/$treeFile")){
 			$treeAbsent++;
 			$deferredScratchCleanup{"$scratchD/outs/$MGS"} = 1
 				if -d "$scratchD/outs/$MGS";
 		} elsif($onlyMSA
-				? (-s $msaCompletion && fileGZs($completedMSA))
+				? msaOnlyArtifactsReady($outD2)
 				: fileGZe("$SIdirs{$MGS}/phylo/$treeFile")) {
 			$doneDirs++;
 			$deferredScratchCleanup{"$scratchD/outs/$MGS"} = 1
@@ -6540,9 +6570,11 @@ sub writeTreeFailureAudit {
 		or die "Cannot write tree-job outcome audit $temporary: $!\n";
 	my (@failed, @pending, @terminal);
 	for my $mgs (sort keys %{$expected}) {
-		my ($tree, $stone, $terminalMarker, $pendingMarker) = @{$expected->{$mgs}};
+		my ($tree, $stone, $terminalMarker, $pendingMarker, $msaOnly) =
+			@{$expected->{$mgs}};
 		my ($status, $reason) = ('failed_missing_output', '');
-		if (-s $tree && -s $stone) {
+		my $outputReady = $msaOnly ? msaOnlyArtifactsReady(dirname($stone)) : -s $tree;
+		if ($outputReady && -s $stone) {
 			$status = 'complete';
 		} elsif (-s $terminalMarker) {
 			$status = 'valid_no_tree';
@@ -7845,8 +7877,9 @@ Tree locus filtering:
                                  [default 20000]
   -placeOnBackbone 0|1          Infer a broad ML backbone and place only deferred
                                  sparse samples with EPA-ng [default 0]
-  -onlyMSA 0|1                  Build and QC the concatenated MSA, then stop before
-                                 phylogeny, placement, and strain postprocessing
+  -onlyMSA 0|1                  Retain localized per-locus MSAs; skip combined-MSA
+                                 postprocessing, concatenation, phylogeny,
+                                 placement, and strain postprocessing
                                  [default 0]
   -strictBackboneFraction FLOAT Defer a sample only below this fraction of the
                                  informative-site Q90 [default 0.35]

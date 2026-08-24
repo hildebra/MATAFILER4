@@ -10,7 +10,7 @@ our @EXPORT_OK = qw(
 	ensureSeqSetLibraries ensureCleanSeqSetLibraries
 	syncSeqSetLegacy syncCleanSeqSetLegacy
 	readLibraries readLibrariesByScope libraryFiles libraryPairs
-	libraryTechnology legacyLibraryArrays replaceScopeLibraries
+	libraryTechnology singleShortReadPair legacyLibraryArrays replaceScopeLibraries
 );
 
 my @FILE_ROLES = qw(r1 r2 single bam);
@@ -279,6 +279,67 @@ sub libraryTechnology {
 	}
 	my ($technology) = keys %technologies;
 	return $technology || '';
+}
+
+sub singleShortReadPair {
+	my ($libraries, $context, $options) = @_;
+	$context = defined($context) && $context ne '' ? $context : 'this consumer';
+	$options ||= {};
+	die "singleShortReadPair options must be a hash reference\n"
+		unless ref($options) eq 'HASH';
+	validateReadLibraries($libraries);
+	my $pairs = libraryPairs($libraries);
+	my @singletons = @{libraryFiles($libraries, 'single')};
+	my @bams = @{libraryFiles($libraries, 'bam')};
+	my $ignoreIncompatible = $options->{ignore_incompatible} ? 1 : 0;
+	if (!$ignoreIncompatible
+			&& (@{$pairs} != 1 || @singletons || @bams || @{$libraries} != 1)) {
+		die "$context requires exactly one paired-end read library and no "
+			."singleton or BAM inputs (found ".scalar(@{$pairs})." pair(s), "
+			.scalar(@singletons)." singleton stream(s), ".scalar(@bams)
+			." BAM input(s), and ".scalar(@{$libraries})." library record(s))\n";
+	}
+	if (!$ignoreIncompatible) {
+		my $pair = $pairs->[0];
+		die "$context requires short paired-end reads; library '"
+			.($pair->{id} || '<unnamed>')."' is marked as long-read\n"
+			if $pair->{is_long};
+		return ($pair->{files}{r1}, $pair->{files}{r2});
+	}
+
+	# Select a linked record rather than independently choosing R1 and R2, so
+	# tolerant consumers cannot accidentally combine mates from different runs.
+	my @shortPairs = grep { !$_->{is_long} } @{$pairs};
+	my $longPairCount = scalar(@{$pairs}) - scalar(@shortPairs);
+	if (!@shortPairs) {
+		my $reason = "$context has no compatible short paired-end read library "
+			."(found ".scalar(@{$pairs})." pair(s), $longPairCount long-read pair(s), "
+			.scalar(@singletons)." singleton stream(s), and ".scalar(@bams)
+			." BAM input(s))";
+		return ('', '', {
+			skipped => 1, reason => $reason,
+			pair_count => scalar(@{$pairs}), long_pair_count => $longPairCount,
+			singleton_count => scalar(@singletons), bam_count => scalar(@bams),
+		});
+	}
+
+	my $pair = $shortPairs[0];
+	my $ignoredPairCount = scalar(@{$pairs}) - 1;
+	my @ignored;
+	push @ignored, "$ignoredPairCount additional paired library record(s)"
+		if $ignoredPairCount;
+	push @ignored, scalar(@singletons)." singleton stream(s)" if @singletons;
+	push @ignored, scalar(@bams)." BAM input(s)" if @bams;
+	my $selection = {
+		skipped => 0, selected_library => $pair->{id} || '<unnamed>',
+		ignored_pair_count => $ignoredPairCount,
+		ignored_singleton_count => scalar(@singletons),
+		ignored_bam_count => scalar(@bams),
+	};
+	$selection->{warning} = "$context selected short paired library '"
+		.$selection->{selected_library}."' and ignored ".join(', ', @ignored)
+		." because incompatible-input handling is enabled" if @ignored;
+	return ($pair->{files}{r1}, $pair->{files}{r2}, $selection);
 }
 
 sub legacyLibraryArrays {

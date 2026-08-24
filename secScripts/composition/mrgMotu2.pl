@@ -26,13 +26,15 @@ opendir(DIR, $inD) or die "Can't find motu dir: $inD\n";
 			next if ($l =~ m/^#/);
 			chomp $l;
 			my @spl = split /\t/,$l;
+			next if (@spl < 3);
+			next if ($spl[0] eq "mOTU" && $spl[1] eq "Taxonomy");
 			next if ($spl[2] eq "0");
 			$specCnt{$spl[0]} += $spl[2];
 			my $taxo = $spl[1];
 			$mat{$spl[0]}{$smpl} = $spl[2];
 			#only needs to be done once
 			$taxo =~ s/\|/;/g;
-			$taxo =~s/[kpcofgs]__//g;
+			$taxo =~s/[dkpcofgs]__//g;
 			next if (exists $tax{$spl[0]});
 			$tax{$spl[0]} = $taxo;
 			my @lphy = split /;/,$taxo;

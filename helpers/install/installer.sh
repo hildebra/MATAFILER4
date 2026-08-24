@@ -14,7 +14,7 @@ Usage: installer.sh [options]
 
 Options:
   --remove-legacy-envs  Remove obsolete MGTK-named micromamba environments.
-  --refresh-databases   Redownload the CheckM2 and MetaPhlAn databases.
+  --refresh-databases   Redownload the CheckM2, MetaPhlAn, and mOTUs databases.
   -h, --help            Show this help message.
 EOF
 }
@@ -150,7 +150,8 @@ verify_environment_tools() {
 	local tool
 	local -a missing=()
 	for tool in "$@"; do
-		if ! "$MAMBA_E" run -n "$environment" "$tool" --version >/dev/null 2>&1; then
+		if ! "$MAMBA_E" run -n "$environment" "$tool" --version >/dev/null 2>&1 \
+				&& ! "$MAMBA_E" run -n "$environment" "$tool" --help >/dev/null 2>&1; then
 			missing+=("$tool")
 		fi
 	done
@@ -233,6 +234,8 @@ export PIP_NO_CACHE_DIR=1
 ensure_environment MF4 "$INSTdir/MF4.yml"
 verify_environment_tools MF4 "$INSTdir/MF4.yml" "ENA/SRA archive downloads" \
 	wget pigz prefetch fasterq-dump vdb-validate
+verify_environment_tools MF4 "$INSTdir/MF4.yml" "Protal profiling" \
+	protal protal_profile_utils
 
 if "$MAMBA_E" run -n MF4 hostile --help >/dev/null 2>&1; then
 	echo "Installing/updating the Hostile human reference database"
@@ -267,14 +270,23 @@ ensure_environment MF4binners "$INSTdir/Binners.yml"
 ensure_optional_environment MF4genomeface "$INSTdir/MF4genomeface.yml"
 ensure_environment MF4scgbinner "$INSTdir/SCGBinner.yml"
 ensure_environment MF4checkm2 "$INSTdir/checkm2.yml"
+ensure_environment MF4motus "$INSTdir/motus.yml"
+verify_environment_tools MF4motus "$INSTdir/motus.yml" "mOTUs profiling" \
+	motus vsearch
 
 CHECKM2_VERSION="1.0.2"
-METAPHLAN_VERSION="4.1"
+METAPHLAN_VERSION="4.2.6"
+METAPHLAN_DB_INDEX="mpa_vJan25_CHOCOPhlAnSGB_202503"
+MOTUS_VERSION="4.1.0"
+MOTUS_DB_VERSION="4.1"
 CM2DB="$DBdir/CM2"
 MP4DB="$DBdir/MP4"
+MOTUSDB="$DBdir/mOTUs"
 CM2_DIAMOND_DB="$CM2DB/CheckM2_database/uniref100.KO.1.dmnd"
 CM2_MARKER="$CM2DB/.mf4-checkm2-version"
 MP4_MARKER="$MP4DB/.mf4-metaphlan-version"
+MOTUS_MARKER="$MOTUSDB/.mf4-motus-version"
+MOTUS_VERSION_FILE="$MOTUSDB/db_mOTU/mOTUsv${MOTUS_DB_VERSION}.versions"
 
 if ! database_current "$CM2_MARKER" "$CHECKM2_VERSION"; then
 	if ((REFRESH_DATABASES == 0)) && [[ -f "$CM2_DIAMOND_DB" ]] && \
@@ -292,11 +304,11 @@ if ! database_current "$CM2_MARKER" "$CHECKM2_VERSION"; then
 	fi
 fi
 
-if ! database_current "$MP4_MARKER" "$METAPHLAN_VERSION"; then
+if ! database_current "$MP4_MARKER" "$METAPHLAN_VERSION:$METAPHLAN_DB_INDEX"; then
 	echo "Installing MetaPhlAn $METAPHLAN_VERSION database"
 	if ensure_writable_directory "$MP4DB" && retry_command "MetaPhlAn database download" 5 15 \
-		"$MAMBA_E" run -n MF4checkm2 metaphlan --install --bowtie2db "$MP4DB"; then
-		printf '%s\n' "$METAPHLAN_VERSION" > "$MP4_MARKER"
+		"$MAMBA_E" run -n MF4checkm2 metaphlan --install --db_dir "$MP4DB" --index "$METAPHLAN_DB_INDEX"; then
+		printf '%s\n' "$METAPHLAN_VERSION:$METAPHLAN_DB_INDEX" > "$MP4_MARKER"
 	else
 		echo "WARNING: MetaPhlAn database installation failed; continuing without updating it." >&2
 		if [[ -e "$MP4DB" ]]; then
@@ -305,6 +317,25 @@ if ! database_current "$MP4_MARKER" "$METAPHLAN_VERSION"; then
 	fi
 fi
 
+
+if ! database_current "$MOTUS_MARKER" "$MOTUS_VERSION:$MOTUS_DB_VERSION"; then
+	if ((REFRESH_DATABASES == 0)) && [[ -f "$MOTUS_VERSION_FILE" ]]; then
+		echo "Using existing mOTUs $MOTUS_DB_VERSION database at $MOTUSDB"
+		printf '%s\n' "$MOTUS_VERSION:$MOTUS_DB_VERSION" > "$MOTUS_MARKER"
+	else
+		echo "Installing mOTUs $MOTUS_VERSION database $MOTUS_DB_VERSION"
+		motus_download=("$MAMBA_E" run -n MF4motus motus downloadMGDB -db "$MOTUSDB")
+		if [[ -d "$MOTUSDB/db_mOTU" ]]; then
+			motus_download+=(-f)
+		fi
+		if ensure_writable_directory "$MOTUSDB" && retry_command "mOTUs database download" 5 15 \
+			"${motus_download[@]}" && [[ -f "$MOTUS_VERSION_FILE" ]]; then
+			printf '%s\n' "$MOTUS_VERSION:$MOTUS_DB_VERSION" > "$MOTUS_MARKER"
+		else
+			echo "WARNING: mOTUs database installation failed; continuing without updating it." >&2
+		fi
+	fi
+fi
 ensure_environment MF4phylo "$INSTdir/phylo.yml"
 ensure_environment MF4_R "$INSTdir/MGTK_R.yml"
 "$MAMBA_E" run -n MF4_R Rscript --vanilla -e \

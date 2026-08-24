@@ -14,9 +14,9 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 | `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `strain_within.pl` | `1.40` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
+| `strain_within.pl` | `1.41` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
 | `strain_within_2.2.pl` | `0.46` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
-| `buildTree5.pl` | `5.81` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.82` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -30,6 +30,15 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 - `geneCat.pl` does **not** accept `-Binner`; use `-binSpeciesMG` for gene-catalog/MGS binning selection.
 - `MATAF4.pl` accepts `-Binner`, `-MetaBat2` and `-binSpeciesMG` as aliases for the sample-level binning option.
 - `-profileMetaphlan3` remains a compatibility alias for `-profileMetaphlan`.
+- Both `-profileProtal 1` and `2` use the first compatible primary short-read pair in
+  input order by default, ignore additional pairs plus singleton/BAM streams, and skip
+  a sample when no compatible short pair exists. Set `-protalIgnoreErrors 0` to require
+  exactly one primary paired-end short-read library with no singleton or BAM input.
+  Mode `1` runs per sample, disables strain analysis, and merges durable profiles under
+  `pseudoGC/protal_singular/`. Mode `2` makes one Protal map for the complete mapped
+  cohort, retains staged raw reads until that job succeeds, and publishes the merged
+  table plus signature-scoped strain MSAs under `pseudoGC/protal/` before cleaning
+  scratch.
 - The strain workflow entry points are named `strain_within.pl` and `strain_within_2.2.pl` in the repository; spellings without underscores are not repository filenames.
 - `buildTree5.pl` accepts `-aa` for the amino-acid FASTA input; the older comment spelling `-faa` is not a parsed flag.
 - `geneCat.pl -MGset` and `MGS.pl -MGset` are constrained in source to `GTDB` or `FMG`.
@@ -274,6 +283,10 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-profileMetaphlan`, `-profileMetaphlan3` | integer | `0` | stable | Run MetaPhlAn taxonomic profiling. |
+| `-profileProtal` | integer | `0` | stable | `1`: profile each sample's raw short-read pair and merge profiles. `2`: generate one map and run Protal across the complete mapped cohort. |
+| `-ProtalCores` | integer | `4` | stable | CPU cores requested for a singular or combined Protal job. |
+| `-ProtalMem` | integer | `100` | stable | Total memory in GB requested for a singular or combined Protal job. |
+| `-protalIgnoreErrors` | integer | `1` | stable | Continue past incompatible Protal inputs: select the first compatible raw short-read pair, ignore other pair/singleton/BAM streams, or skip the sample if no short pair exists. Set to `0` for strict validation. |
 | `-profileMOTU2` | integer | `0` | stable | Run mOTUs taxonomic profiling. |
 | `-profileKraken` | integer | `0` | stable | Run Kraken taxonomic profiling. |
 | `-profileTaxaTarget` | integer | `0` | stable | Run target-taxon profiling. |
@@ -454,7 +467,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 
 ## strain_within.pl
 
-Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.38`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.41`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
 
 For split Phase I, the parent scans the catalogue cluster index once and atomically publishes a provenance-bound binary membership shard for each worker under shared strain scratch. The manifest is published only after every shard is complete. Workers validate the generation, size, header, record count and payload digest before use; an absent, stale or corrupt cache falls back to the original full-index parser.
 
@@ -487,7 +500,7 @@ Phase-I input contracts use cross-node-stable file identity: canonical path, ino
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-onlySubmit` | integer | `0` | stable | Reuse completed Phase-I preparation and submit only missing tree work. |
-| `-onlyMSA` | integer | `0` | stable | Build and post-QC each concatenated `MSA/MSAli.fna.gz`, then stop before phylogeny, EPA-ng placement, and `strain_within_2.2.pl`. Completion is recorded in `msaOnly.complete.tsv`; use `-onlySubmit 1` to resume and skip completed MGS. Incompatible with `-placeOnBackbone 1`, `-redo tree`, and `-redoEPAfilter`. |
+| `-onlyMSA` | integer | `0` | stable | Build, backtranslate, locally MSAfix, and gzip the per-locus nucleotide alignments, then stop before combined-MSA postprocessing, concatenation, phylogeny, EPA-ng placement, and `strain_within_2.2.pl`. Completion is recorded in `msaOnly.complete.tsv`; use `-onlySubmit 1` to resume and skip completed MGS. Incompatible with `-placeOnBackbone 1`, `-redo tree`, and `-redoEPAfilter`. |
 | `-redo` | string | `none` | stable | Destructive recovery mode: `none` resumes normally; `tree` rebuilds tree-stage outputs while reusing complete inputs; `input` rebuilds missing/incomplete inputs and dependent trees; `all` deletes and rebuilds strain inputs and trees for every selected MGS. Use `-MGSsubset` to target explicit identifiers. |
 | `-redoEPAfilter` | optional integer | `0` | advanced | Republish EPA-placed trees from retained backbone/jplace artifacts; implies `1` when no value is supplied. |
 | `-maxCores` | integer | `-1` | stable | When positive, cap full BuildTree jobs at this many cores; the request is `ceil(sqrt(submitted samples))`, with a four-core floor and this cap. `-1` retains the fixed `-cores` request. |
@@ -641,7 +654,7 @@ Within-MGS postprocessing, strain statistics and population-genetic analysis. Th
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.80`.
+Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.82`.
 
 ### General options
 
@@ -684,12 +697,12 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-SynTree` | integer | `0` | stable | See source/help for details. |
 | `-NonSynTree` | integer | `0` | stable | See source/help for details. |
 | `-continue` | integer | `0` | stable | See source/help for details. |
-| `-onlyMSA` | integer | `0` | stable | Finish alignment, post-alignment locus/sample QC, selection, concatenation, partition output, and MSA finalization, then exit before every phylogeny and EPA-ng stage. Writes `msaOnly.complete.tsv` beside the output and retains `MSA/MSAli.fna.gz`. Incompatible with `-placeOnBackbone 1`. |
+| `-onlyMSA` | integer | `0` | stable | Finish the existing per-locus alignment pipeline, including filtering, NT backtranslation, localized MSAfix, and `.gz` checkpoint publication, then exit before combined-MSA postprocessing and `mergeMSAs`. Writes `msaOnly.complete.tsv`, retains non-merged per-locus `MSA/*.fna.gz` files, and skips partitions, phylogeny, and EPA-ng. Incompatible with `-placeOnBackbone 1`. |
 | `-epaFilterOnly` | integer | `0` | advanced | In `strain_within.pl`, completed EPA-placement MGS with a retained classification, backbone, and jplace have only `IQtree_allsites.treefile` removed as a recoverable resume trigger, then receive a one-core filter/publication job. Already-unfinished MGS remain eligible for the existing EPA-only or full-tree recovery queues and retain those queues' memory/CPU profiles. Direct `buildTree5.pl` use with `-continue 1` reruns only placement filtering, its audit report, and final-tree publication from the retained artifacts. |
 | `-bootstrap` | integer | `0` | stable | See source/help for details. |
 | `-subsetSmpls` | integer | `-1` | stable | See source/help for details. |
 | `-postFilter` | string |  | stable | "," sep list of zorro,guidance2,macse |
-| `-rmMSA` | integer | `1` | stable | Remove per-locus checkpoints at terminal completion. With `0`, retain per-locus nucleotide alignments as `.fna.gz`; protein checkpoints are still removed. Active plain MSAs are scratch files in either mode. |
+| `-rmMSA` | integer | `1` | stable | Remove per-locus checkpoints at normal terminal completion. With `0`, retain per-locus nucleotide alignments as `.fna.gz`; protein checkpoints are still removed. `-onlyMSA 1` exits before finalization and therefore retains its per-locus checkpoints regardless. Active plain MSAs are scratch files in either mode. |
 | `-gzInput` | integer | `0` | stable | Compress buildTree-owned input files after a successful run; retained `MSAli*.fna` output is always stored as `.gz`. |
 | `-isAligned` | integer | `0` | stable | See source/help for details. |
 | `-runRAxML` | integer | `0` | stable | See source/help for details. |

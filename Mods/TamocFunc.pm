@@ -148,6 +148,8 @@ sub checkMFFInstall{
 	#checkVersion("GTDBtk profiler MAGs","GTDBtk",1);
 	checkProg("MetaPhlan profiler","metPhl2",1);
 	checkProg("mOTUs profiler","motus2",0);
+	checkProg("Protal profiler","protal",0);
+	checkProg("Protal profile merger","protalProfileUtils",0);
 	
 	
 	

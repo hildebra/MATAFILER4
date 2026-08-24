@@ -82,6 +82,7 @@
 #5.77: recover partial sample loci after high-threshold QC and audit both length gates
 #5.80: pass explicit IQ-TREE sequence types and report retained-MSA resume counts
 #5.81: keep plain MSAs and partitions on scratch and publish only compressed checkpoints
+#5.82: exit -onlyMSA after localized per-locus processing and before combined-MSA work
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -186,6 +187,7 @@ sub preflightBuildTree;
 sub treeAlignmentCheckpointStatus;
 sub restoreCompressedMSAArtifact;
 sub finalizeMSAArtifacts;
+sub msaOnlyArtifacts;
 sub inputFingerprint;
 sub epaModelArtifact;
 sub epaRefitIqtreeModel;
@@ -217,7 +219,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.81";
+my $version = "5.82";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -1904,6 +1906,34 @@ if ($synSummaryCount) {
 		. "$synSiteTotal synonymous-variable and $nonSynSiteTotal nonsynonymous-variable codon(s)\n";
 }
 
+my $msaOnlyCompletionMarker = File::Spec->catfile($outD, 'msaOnly.complete.tsv');
+if ($onlyMSA) {
+	if ($cogCats eq '') {
+		my $extension = $useAA4tree ? 'faa' : 'fna';
+		my $singleAlignment = File::Spec->catfile($MsaD, "single_locus.$extension");
+		publishCompressedMSAArtifact($multAli, $singleAlignment);
+	}
+	my $artifacts = msaOnlyArtifacts($MsaD);
+	die "MSA-only mode did not produce a non-empty per-locus alignment artifact\n"
+		unless @{$artifacts};
+	clearLifecycleMarker($completionMarker, 'clear tree completion in MSA-only mode');
+	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
+	clearLifecycleMarker($placementPendingMarker,
+		'clear obsolete placement-pending marker');
+	writeOutcomeMarker($msaOnlyCompletionMarker, 'msa_complete',
+		'localized per-locus alignments completed; combined-MSA postprocessing, concatenation, and phylogeny intentionally skipped',
+		{ alignment_directory => $MsaD, artifacts => scalar(@{$artifacts}) }, $outD);
+	writeBuildTreeState();
+	cleanupLegacyBuildTreeStateFiles();
+	writeWorkflowHeartbeat('complete');
+	safeRemoveTree($tmpD, $tmpBase);
+	print "BuildTree MSA-only mode completed successfully; per-locus alignments="
+		.scalar(@{$artifacts})."; directory=$MsaD\n";
+	exit(0);
+}
+clearLifecycleMarker($msaOnlyCompletionMarker,
+	'clear obsolete MSA-only completion marker');
+
 print "\n---------------- POST-ALIGNMENT WORKFLOW ----------------\n";
 my $postAlignmentStepStarted = time;
 
@@ -2416,29 +2446,6 @@ if (0 && !$useAA4tree){ #this is outdated
 die "Expected a non-empty merged alignment before tree construction: $multAli\n"
 	if $MSAreq && !fileGZs($multAli);
 
-my $msaOnlyCompletionMarker = File::Spec->catfile($outD, 'msaOnly.complete.tsv');
-if ($onlyMSA) {
-	finalizeMSAArtifacts($MsaD, $MsaWorkD);
-	my $finalAlignment = "$multAliArtifact.gz";
-	die "MSA-only mode did not produce a non-empty concatenated alignment\n"
-		unless fileGZs($finalAlignment);
-	clearLifecycleMarker($completionMarker, 'clear tree completion in MSA-only mode');
-	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
-	clearLifecycleMarker($placementPendingMarker,
-		'clear obsolete placement-pending marker');
-	writeOutcomeMarker($msaOnlyCompletionMarker, 'msa_complete',
-		'alignment and post-alignment QC completed; phylogeny intentionally skipped',
-		{ alignment => $finalAlignment }, $outD);
-	writeBuildTreeState();
-	cleanupLegacyBuildTreeStateFiles();
-	compactTaxonAwareDiagnostics();
-	writeWorkflowHeartbeat('complete');
-	safeRemoveTree($tmpD, $tmpBase);
-	print "BuildTree MSA-only mode completed successfully; alignment=$finalAlignment\n";
-	exit(0);
-}
-clearLifecycleMarker($msaOnlyCompletionMarker,
-	'clear obsolete MSA-only completion marker');
 
 my $trRetH;
 my $inferenceStarted = time;
@@ -7193,6 +7200,22 @@ sub finalizeMSAArtifacts {
 		.($cleanedSubdirectory ne '' ? '; removed legacy MSA/clnd' : '')
 		."; published $publishedCount compressed MSAli checkpoint(s)\n";
 	return $publishedCount;
+}
+
+sub msaOnlyArtifacts {
+	my ($directory) = @_;
+	return [] unless defined($directory) && -d $directory;
+	opendir my $handle, $directory
+		or die "Cannot inspect MSA-only artifact directory $directory: $!\n";
+	my @artifacts = map { File::Spec->catfile($directory, $_) }
+		sort grep {
+			$_ !~ /^MSAli/ && /\.(?:faa|fna)\.gz\z/
+				&& -f File::Spec->catfile($directory, $_)
+				&& -s File::Spec->catfile($directory, $_)
+		} readdir $handle;
+	closedir $handle
+		or die "Cannot close MSA-only artifact directory $directory: $!\n";
+	return \@artifacts;
 }
 
 sub requireConfiguredTool{

@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Profiling tutorial](profiling_tutorial.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -101,6 +101,7 @@ export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 | `MF4genomeface` | Optional GenomeFace functionality; uses an external NERSC package channel |
 | `MF4scgbinner` | SCG-based binning |
 | `MF4checkm2` | CheckM2 and MetaPhlAn dependencies |
+| `MF4motus` | mOTUs 4 and its isolated Python/dependency stack |
 | `MF4phylo` | Phylogenetic tools |
 | `MF4_R` | R-based helper scripts |
 
@@ -119,8 +120,9 @@ prints a warning and continues; rerun it later to install or update GenomeFace.
    - the `hostile` human reference index `human-t2t-hla`, if `hostile` is available
    - the CheckM2 database
    - the MetaPhlAn database
+   - the mOTUs marker-gene database
 
-Successful CheckM2 and MetaPhlAn downloads receive tool-version marker files.
+Successful CheckM2, MetaPhlAn, and mOTUs downloads receive version marker files.
 Missing or mismatched markers cause the installer to try the database setup again;
 `--refresh-databases` forces a fresh download. Database downloads are best-effort:
 network or permission failures produce warnings but do not abort installation of the
@@ -196,7 +198,7 @@ Then rerun the installer.
 
 The installer already uses flexible channel priority for micromamba environment creation. If conflicts persist, update micromamba and rerun the installer. On managed HPC systems, it may be preferable to ask local support to inspect the failing environment YAML file in `helpers/install/`.
 
-### CheckM2 or MetaPhlAn database download fails
+### CheckM2, MetaPhlAn, or mOTUs database download fails
 
 The database downloads are optional during software installation. A failure leaves
 the corresponding version marker absent and the installer continues, so rerunning it
@@ -217,8 +219,14 @@ Activate the relevant environment and retry manually:
 ```bash
 micromamba activate MF4checkm2
 checkm2 database --download --path /path/to/MATAFILER4/data/DBs/CM2/
-metaphlan --install --bowtie2db /path/to/MATAFILER4/data/DBs/MP4/
+metaphlan --install --db_dir /path/to/MATAFILER4/data/DBs/MP4/ \
+  --index mpa_vJan25_CHOCOPhlAnSGB_202503
+
+micromamba activate MF4motus
+motus downloadMGDB -db /path/to/MATAFILER4/data/DBs/mOTUs/
 ```
+
+See the [profiling tutorial](profiling_tutorial.md) for the matching `config_DB` entries.
 
 ### Installation was interrupted
 

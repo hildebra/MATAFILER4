@@ -23,9 +23,12 @@ ITStax	[DBDir]/MarkerG/ITS_combi/ITS_comb.tax
 FMGdir	[MFLRDir]/bin/fetchMG/
 
 
-metPhl2_db	[DBDir]/MarkerG/metaphlan3.1/mpa_v31_CHOCOPhlAn_201901
-#leave empty to fallback to default install location for motus2
-motus2_DB	
+## Leave empty to use the PROTAL_DB_PATH environment variable.
+protal_db
+## Compatibility key names are retained for existing site/user configurations.
+metPhl2_db	[DBDir]/MP4/mpa_vJan25_CHOCOPhlAnSGB_202503
+## Parent directory containing db_mOTU/.
+motus2_DB	[DBDir]/mOTUs
 checkm2DB	[DBDir]/checkm2/CheckM2_database/uniref100.KO.1.dmnd
 
 

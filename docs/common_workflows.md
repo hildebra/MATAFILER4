@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Profiling tutorial](profiling_tutorial.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -92,6 +92,9 @@ Use `-outD` only if you do not want the default output directory below the gene 
 
 ## Assembly-independent profiling
 
+For database setup and individual RiboFind, functional, MetaPhlAn 4, mOTUs 4,
+and Protal commands, see the [read-based profiling tutorial](profiling_tutorial.md).
+
 This mode is useful for highly complex communities where assembly is not expected to be productive.
 
 ```bash
@@ -101,6 +104,53 @@ perl "$MF4DIR/MATAF4.pl"   -map "$MAP"   -inputFQregex1 '.*_1\.f[^\.]*q\.gz$'   
 ```
 
 Expected outputs are primarily in run-level profiling folders such as `pseudoGC/`, plus summary files such as `metagStats.txt` and `metagStatsReport.html`.
+
+### Protal profiling from raw reads
+
+For per-sample profiling followed by a profile merge:
+
+```bash
+perl "$MF4DIR/MATAF4.pl" \
+  -map "$MAP" \
+  -assembleMG 0 \
+  -profileProtal 1 \
+  -ProtalCores 4 \
+  -ProtalMem 100 \
+  -submit 1
+```
+
+Use combined-map mode when Protal should see the complete cohort at once:
+
+```bash
+perl "$MF4DIR/MATAF4.pl" \
+  -map "$MAP" \
+  -assembleMG 0 \
+  -profileProtal 2 \
+  -ProtalCores 4 \
+  -ProtalMem 100 \
+  -submit 1
+```
+
+Tolerant input handling is the default (`-protalIgnoreErrors 1`) in both modes. It
+uses the first compatible short pair in map/read-discovery order, warns while ignoring
+additional pairs and singleton/BAM streams, and skips samples with no compatible pair.
+Set `-protalIgnoreErrors 0` to require exactly one primary paired-end short-read
+library with no primary singleton or BAM stream. This flag does not hide a failed
+Protal process.
+
+Both modes use staged raw reads rather than SDM-cleaned reads. Mode `1` disables
+strain analysis, keeps only each sample profile, and merges the selected
+`-from`/`-to` range into `pseudoGC/protal_singular/`. A locked or otherwise
+uncovered eligible sample defers this merge, preventing a partial table.
+
+Mode `2` requires the full mapped cohort, so omit `-from` and `-to`; all samples
+from one or several supplied mapping files are placed in one generated Protal map.
+Per-sample scratch cleanup is held until the combined job has merged its profiles.
+SAM and miscellaneous products stay temporary, but strain MSAs are retained under
+`pseudoGC/protal/strains/<cohort_signature>/` with `strains/current` pointing at
+the active cohort. The job then runs its validated scratch-cleanup script and only
+after successful cleanup publishes the run-level completion marker. If Protal or
+cleanup fails, scratch and the incomplete state are retained for diagnosis.
 
 ## Hybrid assemblies
 

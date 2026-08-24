@@ -38,7 +38,7 @@ use Mods::ReadLibrary qw(
 	newReadLibrary cloneReadLibraries readLibrariesFromArrays
 	ensureSeqSetLibraries ensureCleanSeqSetLibraries
 	syncSeqSetLegacy syncCleanSeqSetLegacy replaceScopeLibraries
-	readLibrariesByScope libraryFiles libraryPairs libraryTechnology
+	readLibrariesByScope libraryFiles libraryPairs libraryTechnology singleShortReadPair
 );
 use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpadesLibraries inputFmtMegahitRuntimeLibraries createGapFillopt
 			buildMapperIdx mapperDBbuilt decideMapper  checkMapsDoneSH greaterComputeSpace);
@@ -118,6 +118,11 @@ sub checkRawProgsFin; sub prepareDiamondRerun; sub publishKrakenResults;
 sub runOrthoPlacement;
 sub runDiamond; sub DiaPostProcess;
 sub nopareil; sub calcCoverage2nd;sub d2metaDist; 
+sub protalMapping; sub mergeProtalProfiles; sub submitCombinedProtal;
+sub protalProfilePath; sub protalSkipPath; sub protalSkipMatches;
+sub protalRawPairSelection; sub registerCombinedProtalSample;
+sub protalCombinedOutputDir; sub protalCombinedRequestSignature;
+sub protalCombinedRunComplete; sub pathIsStrictChild;
 sub metphlanMapping; sub mergeMP2Table;
 sub mOTU2Mapping; sub mergeMotu2Table; sub prepMOTU2;
 sub genoSize; sub check_map_done; sub check_depth_done;
@@ -312,6 +317,10 @@ my @bwt2outD =(); my @DBbtRefX = (); my @DBbtRefGFF=(); my @bwt2ndMapNmds;
 my @scaffTarExternalOLib1; my @scaffTarExternalOLib2;
 
 my @EBIjobs = (); #keeps track of $MFconfig{uploadRawRds} jobs, submits postprocessing (md5)
+my %protalProfileJobs; #durable profile path -> per-sample scheduler dependency
+my %protalCombinedSamples; #sample key -> staged raw pair and lifecycle metadata
+my ($protalCombinedSignature, $protalCombinedStone, $protalCombinedCurrent,
+	$protalCombinedMerged, $protalCombinedStrains, $protalCombinedComplete) = ('', '', '', '', '', 0);
 #----------- map all reads to a specific reference - options ---------
 
 #progStats: object to track progress of programs/submissions
@@ -358,6 +367,14 @@ die "-schedulerCapacityCheckJobs requires a positive integer\n"
 	if ($MFconfig{schedulerCapacityCheckJobs} < 1);
 die "-assemblCores requires a non-negative integer (0 enables automatic scaling)\n"
 	if ($MFopt{AssemblyCores} < 0);
+die "-ProtalCores requires a positive integer\n"
+	if ($MFopt{ProtalCores} < 1);
+die "-ProtalMem requires a positive integer (GB)\n"
+	if ($MFopt{ProtalMem} < 1);
+die "-profileProtal must be 0 (off), 1 (per sample), or 2 (combined map)\n"
+	unless ($MFopt{DoProtal} >= 0 && $MFopt{DoProtal} <= 2);
+die "-protalIgnoreErrors must be 0 or 1\n"
+	unless ($MFopt{protalIgnoreErrors} == 0 || $MFopt{protalIgnoreErrors} == 1);
 die "-minBinnerAssemblyMB requires a non-negative number\n"
 	if ($MFopt{minBinnerAssemblyMB} < 0);
 $MFconfig{inspectState} = 1 if ($MFconfig{planState});
@@ -471,6 +488,20 @@ die "-from cannot exceed the available sample range (N=".scalar(@samples).")\n"
 	if $runOptions{from} > $runOptions{to};
 my $from = $runOptions{from}; my $to = $runOptions{to};
 my ($selectedFrom, $selectedTo) = ($runOptions{from}, $runOptions{to});
+if ($MFopt{DoProtal} == 2) {
+	die "-profileProtal 2 requires the complete mapped cohort; use -from 0 and "
+		."-to ".scalar(@samples)." (or omit both range options)\n"
+		unless $selectedFrom == 0 && $selectedTo == @samples;
+	$protalCombinedSignature = protalCombinedRequestSignature();
+	my $combinedOut = protalCombinedOutputDir();
+	$protalCombinedStone = File::Spec->catfile(
+		$combinedOut, "Protal.$protalCombinedSignature.sto");
+	$protalCombinedCurrent = File::Spec->catfile($combinedOut, 'Protal.current');
+	$protalCombinedMerged = File::Spec->catfile($combinedOut, 'Protal.abundance.tsv');
+	$protalCombinedStrains = File::Spec->catdir(
+		$combinedOut, 'strains', $protalCombinedSignature);
+	$protalCombinedComplete = protalCombinedRunComplete();
+}
 #die "\"@samples\"\n";
 if ($runOptions{loopWindowSize} > 0){
 	$to = $from + $runOptions{loopWindowSize}; $to = $runOptions{to} if ($to > $runOptions{to});
@@ -721,10 +752,15 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		support_vcf => $vcfSNPsupp,
 		primary_sv => $vcfSV,
 		support_sv => $vscSVsupp,
+		protal_combined_stone => $protalCombinedStone,
+		protal_combined_current => $protalCombinedCurrent,
+		protal_combined_merged => $protalCombinedMerged,
+		protal_combined_strains => $protalCombinedStrains,
 	};
 	# Register the sentinel path before the completion gate. Postprocessing reads
 	# only this cached record and never rescans sample outputs or logs.
 	my $completionSignature = sampleCompletionRequestSignature($curSmpl);
+	$completionComponentContext->{request_signature} = $completionSignature;
 	my $completionSentinel = sample_completion_path($curOutDir, $SmplName);
 	if ($MFconfig{alwaysDoStats}) {
 		push @{$runReport{order}}, $SmplName unless $runReport{seen}{$SmplName}++;
@@ -789,6 +825,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$closedSample = undef;
 			$completionError = 'current input size no longer qualifies for the stored terminal outcome';
 		}
+	}
+	if ($closedSample && $MFopt{DoProtal} == 2 && !protalCombinedRunComplete()) {
+		$closedSample = undef;
+		$completionError = 'the signature-scoped combined Protal run is incomplete '
+			.'or is not the currently published cohort';
 	}
 	if ($closedSample && $closedSample->{outcome}{status} eq 'skipped_cleaned_empty'
 			&& sample_empty_marker_reason($curOutDir) ne 'cleaned_primary_reads_empty') {
@@ -1261,12 +1302,13 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 
 	prepareDiamondRerun($curOutDir);
 	my ($calcKraken,$calcDiamond,$calcDiaParse,$calcRibofind,$calcRiboAssign,$calcGenoSize,
-			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar) = checkRawProgsFin(
-				$curOutDir, $SmplName, $riboRedo->{profile}, $riboRedo->{assignment},
+			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar,$calcProtal) = checkRawProgsFin(
+				$curOutDir, $SmplName, $riboRedo->{profile}, $riboRedo->{assignment}, $completionSignature,
 			);
 	publishKrakenResults($curOutDir,$SmplName) if ($MFopt{DoKraken} && !$calcKraken);
 	#not complete yet? Then delete..
-	if ($MFconfig{redoFails} && ($calcRibofind||$calcDiamond || $calcDiaParse ||$calcMOTU2 || $calcMetaPhlan || $calcTaxaTar)){
+	if ($MFconfig{redoFails} && ($calcRibofind||$calcDiamond || $calcDiaParse ||$calcMOTU2
+			|| $calcMetaPhlan || $calcTaxaTar || ($MFopt{DoProtal} == 1 && $calcProtal && !$MFopt{protalIgnoreErrors}))){
 		print "Removing failed results for $curSmpl; this sample will be rebuilt on the next pipeline pass.\n";
 		my @failedSampleTargets = ($curOutDir, $smplTmpDir, $MFglobal{collectFinished});
 		if ($AsGrps{$cAssGrp}{CntAimAss} <= 1){
@@ -1373,9 +1415,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#$unpackZip simulates dowstreamAnalysisFlag, just to get sdm running..
 	$dowstreamAnalysisFlag=1 if ( $MFconfig{unpackZip} || $calcContamination || $MFopt{calcOrthoPlacement} || $scaffTarExternal ne "" || $assemblyFlag  
 		|| $pseudAssFlag || $scaffoldFlag  || $nonPareilFlag || $calcGenoSize || $calcDiamond || $calcDiaParse
-		|| $MFopt{DoCalcD2s} || $calcKraken || $calcRibofind || $calcRiboAssign || $calcMOTU2 ||  $calcMetaPhlan || $calcTaxaTar );
+		|| $MFopt{DoCalcD2s} || $calcKraken || $calcRibofind || $calcRiboAssign || $calcMOTU2 ||  $calcMetaPhlan || $calcTaxaTar || $calcProtal );
 	my $requireRawReadsFlag = 0;#only list modules that really need raw reads
-	$requireRawReadsFlag = 1 if ( !$boolScndMappingOK || $calcContamination);
+	$requireRawReadsFlag = 1 if ( !$boolScndMappingOK || $calcContamination || $calcProtal);
 	
 	my $primaryCleanPending = !-e "$smplTmpDir/seqClean/filterDone.stone";
 	my $supportCleanPending = ($map{$curSmpl}{SupportReads} || '') ne ''
@@ -1385,7 +1427,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	$porechopFlag = 1 if ($MFopt{usePorechop} && $dowstreamAnalysisFlag && !-e "$smplTmpDir/rawRds/poreChopped.stone");
 	#die "$assemblyFlag\t$seqCleanFlag\t$boolScndMappingOK\n";
 	my $calcUnzip=0;
-	$calcUnzip=1 if ($calcDiamond || $porechopFlag || $seqCleanFlag  || $mapAssFlag || $mapSuppAssFlag || (!$MFopt{useUnmapped} && !$boolScndMappingOK) || $MFconfig{uploadRawRds} ne ""); 
+	$calcUnzip=1 if ($calcDiamond || $calcProtal || $porechopFlag || $seqCleanFlag  || $mapAssFlag || $mapSuppAssFlag || (!$MFopt{useUnmapped} && !$boolScndMappingOK) || $MFconfig{uploadRawRds} ne "");
 	#print "chk1 $mapSuppAssFlag $calcSuppCoverage $eSuppCovAsssembly\n" ;
 
 	# Cleanup is destructive to read-cleaning stones, mapping indexes and staged
@@ -1667,6 +1709,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		next;
 	}
 	append_job_dependencies(\$AsGrps{$cAssGrp}{SeqClnDeps}, $jdep) if ($assemblyFlag);
+	if ($calcProtal && $MFopt{DoProtal} == 2) {
+		registerCombinedProtalSample(
+			$curSmpl, $SmplName, $smplTmpDir, $smplLockF, $jdep);
+	}
 	if (deferLoopProducerWave(
 			'input staging', $jdep, $smplLockF, $cAssGrp, \@sampleDeps,
 	)) { next; }
@@ -1678,6 +1724,19 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	$AsGrps{$cAssGrp}{readDeps} = $AsGrps{$cAssGrp}{UnzpDeps};
 	my $UZdep = $jdep;
 	
+	# Protal deliberately consumes the staged raw pair. Its large alignment and
+	# diagnostic outputs stay in node-local scratch; only the durable profile is
+	# published below the sample output directory.
+	if ($calcProtal && $MFopt{DoProtal} == 1) {
+		my $profile = protalProfilePath($curOutDir, $SmplName);
+		my $protalJob = protalMapping(
+			$nodeSpTmpD."/Protal/", $curOutDir."Tax/Protal/",
+			$SmplName, $MFopt{ProtalCores}, $jdep, $completionSignature,
+		);
+		$protalProfileJobs{$profile} = $protalJob if $protalJob ne '';
+		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $protalJob);
+		add2SampleDeps(\@sampleDeps, [$protalJob]);
+	}
 	
 	#empty links for assembler and nonpareil
 	#my($arp1,$arp2,$singAr,$matAr,$sdmjN) = ([],[],[],[],"");
@@ -2280,8 +2339,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		},
 	);
 	my $accessionOnlyCleanup = $accessionProvider ne '' && !$MFconfig{rmScratchTmp};
+	my $combinedProtalHoldsScratch =
+		$MFopt{DoProtal} == 2 && !$protalCombinedComplete;
 	if ((($MFconfig{rmScratchTmp} && !$MFopt{DoCalcD2s}) || $accessionOnlyCleanup)
-			&& @sampleDeps) {
+			&& @sampleDeps && !$combinedProtalHoldsScratch) {
 		if ($cleanupBarrier->{ready}) {
 			my @cleanupDependencies = split /;/, normalise_job_dependencies(
 				\@sampleDeps, $cleanupBarrier->{dependencies},
@@ -2299,6 +2360,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			print "Deferring finished cleanup for $SmplName; waiting for "
 				.join(', ', @{$cleanupBarrier->{blocked}})."\n";
 		}
+	} elsif ($combinedProtalHoldsScratch && @sampleDeps && !$MFconfig{silent}) {
+		print "Deferring finished cleanup for $SmplName; the combined Protal "
+			."job still owns staged raw reads\n";
 	}
 	# Persist every sample owner, including cleanup. A later MATAF4 pass releases
 	# the lock only after all recorded scheduler jobs have terminated.
@@ -2430,7 +2494,7 @@ sub sampleCompletionRequestSignature {
 		SNPcallerFlag callSVs callSVsSupp SVcallerFlag
 		DoNonPareil calcOrthoPlacement DoCalcD2s DoGenoSizeEst
 		DoDiamond reqDiaDB DoKraken DoRibofind doRiboAssembl checkRiboNonEmpty
-		DoMOTU2 DoMetaPhlan DoTaxaTarget humanFilter
+		DoMOTU2 DoMetaPhlan DoProtal protalIgnoreErrors DoTaxaTarget humanFilter
 		doReadMerge usePorechop
 	);
 	my @configKeys = qw(
@@ -2445,6 +2509,11 @@ sub sampleCompletionRequestSignature {
 		my $key = $_;
 		($key => (defined($MFconfig{$key}) ? $MFconfig{$key} : ''))
 	} @configKeys;
+	if ($MFopt{DoProtal}) {
+		my $protalDB = getProgPaths('protal_db', 0);
+		$protalDB = $ENV{PROTAL_DB_PATH} || '' if $protalDB eq '';
+		$configuration{protal_database} = $protalDB;
+	}
 
 	return completion_request_signature({
 		completion_contract => 3,
@@ -2650,6 +2719,7 @@ sub sampleCompletionComponents {
 	my $readProcessingRequested = $MFopt{DoAssembly}
 		|| $MFopt{DoDiamond} || $MFopt{DoKraken} || $MFopt{DoRibofind}
 		|| $MFopt{DoMOTU2} || $MFopt{DoMetaPhlan} || $MFopt{DoTaxaTarget}
+		|| $MFopt{DoProtal}
 		|| $MFopt{DoNonPareil} || $MFopt{DoGenoSizeEst}
 		|| $MFopt{calcOrthoPlacement} || $MFopt{DoCalcD2s}
 		|| @bwt2outD || $MFconfig{uploadRawRds} ne '';
@@ -2661,6 +2731,32 @@ sub sampleCompletionComponents {
 			reason => $reason,
 		);
 	};
+
+	my @protalChecks;
+	if ($MFopt{DoProtal} == 2) {
+		@protalChecks = (
+			{id => 'combined_completion_stone', kind => 'exists',
+				path => $context->{protal_combined_stone}},
+			{id => 'combined_current_cohort', kind => 'nonempty',
+				path => $context->{protal_combined_current}},
+			{id => 'combined_abundance', kind => 'nonempty',
+				path => $context->{protal_combined_merged}},
+			{id => 'combined_strain_msa_directory', kind => 'directory',
+				path => $context->{protal_combined_strains}},
+		);
+	} else {
+		my $protalProfile = protalProfilePath($sampleRoot, $sampleName);
+		my $protalStone = File::Spec->catfile(
+			$sampleRoot, 'Tax', 'Protal', "$sampleName.Protal.sto");
+		my $protalSkip = protalSkipPath($sampleRoot, $sampleName);
+		my $useProtalSkip = $MFopt{protalIgnoreErrors}
+			&& !(-e $protalProfile && -e $protalStone)
+			&& protalSkipMatches($protalSkip, $context->{request_signature});
+		@protalChecks = $useProtalSkip
+			? ({id => 'incompatible_input_skip', kind => 'exists', path => $protalSkip})
+			: ({id => 'completion_stone', kind => 'exists', path => $protalStone},
+				{id => 'profile', kind => 'exists', path => $protalProfile});
+	}
 
 	return {
 		assembly => completion_component_evidence(
@@ -2774,6 +2870,10 @@ sub sampleCompletionComponents {
 			sample_root => $sampleRoot,
 			requested => $MFopt{DoRibofind},
 			assembly_requested => $MFopt{doRiboAssembl},
+		),
+		protal => completion_component_evidence(
+			requested => $MFopt{DoProtal},
+			checks => \@protalChecks,
 		),
 		metaphlan => completion_component_evidence(
 			requested => $MFopt{DoMetaPhlan},
@@ -3460,6 +3560,7 @@ sub postprocess{
 
 	#merging of per sample assignments..
 	riboSummary();
+	mergeProtalProfiles();
 	mergeMP2Table($dir_MP2);
 	mergeMotu2Table($dir_mOTU2);
 	unploadRawFilePostprocess();
@@ -4480,6 +4581,9 @@ sub reduceProgStats{
 	if ($MFopt{DoMetaPhlan}){
 		$progStats{metaPhl2FailCnts}--;
 	}
+	if ($MFopt{DoProtal}){
+		$progStats{protalFailCnts}--;
+	}
 	if ($MFopt{DoMOTU2}){
 		$progStats{mOTU2FailCnts}--;
 	}
@@ -4493,12 +4597,12 @@ sub reduceProgStats{
 
 #check if programes have finished, that rely only on raw reads
 sub checkRawProgsFin{
-	my ($curOutDir,$SmplName,$forcedRiboProfile,$forcedRiboAssignment) = @_;
+	my ($curOutDir,$SmplName,$forcedRiboProfile,$forcedRiboAssignment,$requestSignature) = @_;
 	my ($calcDiamond,$calcDiaParse) = IsDiaRunFinished($curOutDir);
 	
 	my $calcRibofind = 0; my $calcRiboAssign = 0;my $calcGenoSize=0; 
 	my $calcMetaPhlan=0;	my $calcMOTU2=0;	my $calcTaxaTar = 0;
-	my $calcKraken =0;
+	my $calcKraken =0; my $calcProtal=0;
 	
 	
 	#Kraken .. totally outdated way of doing things..
@@ -4522,6 +4626,27 @@ sub checkRawProgsFin{
 
 	#die $dir_MP2."$SmplName.MP2.sto";
 
+	if ($MFopt{DoProtal} == 2) {
+		if (!$protalCombinedComplete) {
+			$calcProtal = 1;
+			$progStats{protalFailCnts}++;
+		} else {
+			$progStats{protalComplCnts}++;
+		}
+	} elsif ($MFopt{DoProtal} == 1) {
+		my $profile = protalProfilePath($curOutDir, $SmplName);
+		my $stone = File::Spec->catfile(
+			$curOutDir, 'Tax', 'Protal', "$SmplName.Protal.sto");
+		my $skip = protalSkipPath($curOutDir, $SmplName);
+		my $intentionallySkipped = $MFopt{protalIgnoreErrors}
+			&& protalSkipMatches($skip, $requestSignature);
+		if ((!-e $profile || !-e $stone) && !$intentionallySkipped) {
+			$calcProtal = 1;
+			$progStats{protalFailCnts}++;
+		} else {
+			$progStats{protalComplCnts}++;
+		}
+	}
 	if ($MFopt{DoMetaPhlan}){
 		my $dir_MP2 = $baseOut.$preDIRs{dir2MePhl};#"pseudoGC/Phylo/MP2/"; #metaphlan 2 dir
 		if (!-e $dir_MP2."$SmplName.MP2.sto"){
@@ -4544,7 +4669,7 @@ sub checkRawProgsFin{
 		} else { $progStats{taxTarComplCnts}++;}
 	}
 	return ($calcKraken,$calcDiamond,$calcDiaParse,$calcRibofind,$calcRiboAssign,$calcGenoSize,
-			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar) ;
+			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar,$calcProtal) ;
 }
 
 sub riboSummary{
@@ -5677,17 +5802,9 @@ sub cleanInput( $ $ $){
 	my ($sdmjN,$saveD) = @_;
 	my $libraries = ensureSeqSetLibraries(sampleReadSet($curSmpl, "raw"), $curSmpl);
 	my $cmd = "";
-	my $cleanupRoot = File::Spec->canonpath(File::Spec->rel2abs($saveD));
 	foreach my $library (@{$libraries}) {
 		my @files = grep { defined($_) && $_ ne '' } @{$library->{files}}{qw(r1 r2 single)};
-		my @temporary = grep {
-			my $candidate = File::Spec->canonpath(File::Spec->rel2abs($_));
-			my $relative = File::Spec->abs2rel($candidate, $cleanupRoot);
-			$candidate ne $cleanupRoot
-				&& $relative ne File::Spec->updir()
-				&& $relative !~ m{^\.\.(?:[\\/]|$)}
-				&& !File::Spec->file_name_is_absolute($relative);
-		} @files;
+		my @temporary = grep { pathIsStrictChild($_, $saveD) } @files;
 		$cmd .= _shell_command('rm', '-f', '--', @temporary)."\n" if (@temporary);
 	}
 
@@ -7191,14 +7308,16 @@ sub mOTU2Mapping{
 	my @car1 = map { $_->{files}{r1} } @{$pairs};
 	my @car2 = map { $_->{files}{r2} } @{$pairs};
 	my @sar = @{libraryFiles($libraries, 'single')};
-	my $inF1 = join(",",@car1); my $inF2 = join(",",@car2); my $inFS = join(",",@sar); 
+	my $inF1 = join(" ",@car1); my $inF2 = join(" ",@car2); my $inFS = join(" ",@sar);
 	system "mkdir -p $finOutD\n" unless (-d $finOutD);
+	my $motuOut = "$tmpD/$smp.motus";
 	my $cmd = "mkdir -p $tmpD\n";
 	#$cmd .= "which bwa\n";
 	$cmd .= "$m2Bin profile ";
 	$cmd .= "-f $inF1 -r $inF2 " if (@car1 > 0 );
 	$cmd .= "-s $inFS " if (@sar > 0);
-	$cmd .= " -n $smp $DBstr -q -c -t $Ncore -q | gzip -c > $finOutD/$smp.motu2.tab.gz\n";
+	$cmd .= "-n $smp $DBstr-t $Ncore -o $motuOut\n";
+	$cmd .= "gzip -c $motuOut > $finOutD/$smp.motu2.tab.gz\n";
 	$cmd .= "if [ -s $finOutD/$smp.motu2.tab.gz ] ; then touch  $stone ; fi\n";
 	#$cmd .= "touch  $stone\n";
 	my $jobN = "mOT$JNUM";
@@ -8411,6 +8530,453 @@ sub bamDepth{
 	return($jobN2,$retCmds,$outstat);
 }
 
+sub protalProfilePath {
+	my ($sampleRoot, $sampleName) = @_;
+	die "protalProfilePath requires a sample root and name\n"
+		unless defined($sampleRoot) && $sampleRoot ne ''
+			&& defined($sampleName) && $sampleName ne '';
+	return File::Spec->catfile(
+		$sampleRoot, 'Tax', 'Protal', 'profiles', "$sampleName.profile");
+}
+
+sub protalSkipPath {
+	my ($sampleRoot, $sampleName) = @_;
+	die "protalSkipPath requires a sample root and name\n"
+		unless defined($sampleRoot) && $sampleRoot ne ''
+			&& defined($sampleName) && $sampleName ne '';
+	return File::Spec->catfile(
+		$sampleRoot, 'Tax', 'Protal', "$sampleName.Protal.skip");
+}
+
+sub protalSkipMatches {
+	my ($path, $requestSignature) = @_;
+	return 0 unless defined($path) && -f $path
+		&& defined($requestSignature) && $requestSignature ne '';
+	open my $skipFH, '<', $path or return 0;
+	my $storedSignature = <$skipFH>;
+	close $skipFH;
+	chomp $storedSignature if defined($storedSignature);
+	return defined($storedSignature) && $storedSignature eq $requestSignature;
+}
+
+sub protalCombinedOutputDir {
+	return File::Spec->catdir($controllerBaseOut, 'pseudoGC', 'protal');
+}
+
+sub protalCombinedRequestSignature {
+	my @cohort = map {
+		my $sampleKey = $_;
+		my $sampleName = defined($map{$sampleKey}{SmplID})
+			? $map{$sampleKey}{SmplID} : $sampleKey;
+		{
+			sample_key => $sampleKey,
+			sample_name => $sampleName,
+			ignored => sample_is_ignored($ignoredSamplesHR, $sampleName) ? 1 : 0,
+			request_signature => sampleCompletionRequestSignature($sampleKey),
+		}
+	} @samples;
+	return completion_request_signature({
+		completion_contract => 1,
+		protal_mode => 'combined_map',
+		cohort => \@cohort,
+	});
+}
+
+sub protalCombinedRunComplete {
+	return 0 unless $MFopt{DoProtal} == 2
+		&& $protalCombinedSignature ne ''
+		&& $protalCombinedStone ne ''
+		&& -e $protalCombinedStone
+		&& $protalCombinedCurrent ne '' && -s $protalCombinedCurrent
+		&& $protalCombinedMerged ne '' && -s $protalCombinedMerged
+		&& $protalCombinedStrains ne '' && -d $protalCombinedStrains;
+	open my $currentFH, '<', $protalCombinedCurrent or return 0;
+	my $storedSignature = <$currentFH>;
+	close $currentFH;
+	chomp $storedSignature if defined($storedSignature);
+	return defined($storedSignature)
+		&& $storedSignature eq $protalCombinedSignature;
+}
+
+sub pathIsStrictChild {
+	my ($path, $root) = @_;
+	return 0 unless defined($path) && $path ne ''
+		&& defined($root) && $root ne '';
+	my $candidate = File::Spec->canonpath(File::Spec->rel2abs($path));
+	my $allowedRoot = File::Spec->canonpath(File::Spec->rel2abs($root));
+	my $relative = File::Spec->abs2rel($candidate, $allowedRoot);
+	return $candidate ne $allowedRoot
+		&& $relative ne File::Spec->updir()
+		&& $relative !~ m{^\.\.(?:[\\/]|$)}
+		&& !File::Spec->file_name_is_absolute($relative);
+}
+
+sub protalRawPairSelection {
+	my ($sampleKey, $context) = @_;
+	my $rawReadSet = sampleReadSet($sampleKey, 'raw');
+	my $libraries = readLibrariesByScope(
+		$rawReadSet, 'primary', 0, $sampleKey);
+	return singleShortReadPair(
+		$libraries, $context,
+		{ignore_incompatible => $MFopt{protalIgnoreErrors}});
+}
+
+sub registerCombinedProtalSample {
+	my ($sampleKey, $sampleName, $sampleTemp, $lockFile, $dependency) = @_;
+	return unless $MFopt{DoProtal} == 2 && !$protalCombinedComplete;
+	my ($read1, $read2, $selection) = protalRawPairSelection(
+		$sampleKey, "Combined Protal for sample $sampleKey");
+	warn $selection->{warning}."\n"
+		if $selection && $selection->{warning};
+	my ($accessionProvider) = sampleAccessionSource($sampleKey);
+	my $entry = {
+		sample_key => $sampleKey,
+		sample_name => $sampleName,
+		read1 => $read1 || '',
+		read2 => $read2 || '',
+		sample_temp => $sampleTemp,
+		lock_file => $lockFile,
+		dependency => $dependency || '',
+		accession_download => $accessionProvider ne ''
+			? File::Spec->catdir($sampleTemp, 'accession_download') : '',
+		input_size_mb => 0 + ($map{$sampleKey}{inputFileSizeMB} || 0),
+	};
+	if ($selection && $selection->{skipped}) {
+		my $reason = $selection->{reason} || 'No compatible Protal input';
+		$reason =~ s/[\t\r\n]+/ /g;
+		$entry->{skipped} = 1;
+		$entry->{reason} = $reason;
+		warn "$reason; excluding this sample from the combined Protal map because "
+			."-protalIgnoreErrors 1 is enabled\n";
+	}
+	$protalCombinedSamples{$sampleKey} = $entry;
+	return $entry;
+}
+
+sub _protalMapField {
+	my ($value, $label) = @_;
+	$value = '' unless defined $value;
+	die "Protal map $label contains a tab or newline\n"
+		if $value =~ /[\t\r\n]/;
+	return $value;
+}
+
+sub submitCombinedProtal {
+	return unless $MFopt{DoProtal} == 2;
+	return if protalCombinedRunComplete();
+
+	my (@entries, @uncovered);
+	for my $sampleKey (@samples) {
+		my $sampleName = defined($map{$sampleKey}{SmplID})
+			? $map{$sampleKey}{SmplID} : $sampleKey;
+		next if sample_is_ignored($ignoredSamplesHR, $sampleName);
+		next if -e File::Spec->catfile($map{$sampleKey}{wrdir}, 'SMPL.empty');
+		if ($protalCombinedSamples{$sampleKey}) {
+			push @entries, $protalCombinedSamples{$sampleKey};
+		} else {
+			push @uncovered, $sampleName;
+		}
+	}
+	if (@uncovered) {
+		my @preview = @uncovered;
+		splice @preview, 10 if @preview > 10;
+		warn "Deferring combined Protal run: ".scalar(@uncovered)
+			." non-empty mapped sample(s) were not staged in this controller pass "
+			."(first: ".join(', ', @preview).")\n";
+		return;
+	}
+
+	my $outDir = protalCombinedOutputDir();
+	my $profileDir = File::Spec->catdir($outDir, 'profiles');
+	my $strainRoot = File::Spec->catdir($outDir, 'strains');
+	my $strainDir = $protalCombinedStrains;
+	my $logDir = File::Spec->catdir($outDir, 'LOGandSUB');
+	my $workDir = File::Spec->catdir(
+		$runOptions{nodeTmpDir}, "ProtalCombined-$protalCombinedSignature");
+	make_path($profileDir, $strainRoot, $logDir);
+
+	my $mapFile = File::Spec->catfile($outDir, 'Protal.map.tsv');
+	my $skipFile = File::Spec->catfile($outDir, 'Protal.skipped.tsv');
+	my @mapLines = (
+		"#OUTPUT_DIR\t"._protalMapField($workDir, 'output directory'),
+		"#SAM_OUTPUT_DIR\t"._protalMapField(
+			File::Spec->catdir($workDir, 'alignments'), 'SAM output directory'),
+		"#PROFILE_OUTPUT_DIR\t"._protalMapField($profileDir, 'profile output directory'),
+		"#STRAIN_OUTPUT_DIR\t"._protalMapField($strainDir, 'strain output directory'),
+		"#MISC_OUTPUT_DIR\t"._protalMapField(
+			File::Spec->catdir($workDir, 'misc'), 'misc output directory'),
+		"#INPUT_DIR\t/",
+		join("\t", '#SAMPLEID', qw(FIRST SECOND SAM PREFIX PROFILE)),
+	);
+	my @skipLines = (join("\t", qw(sample status reason)));
+	my (@profiles, @reads);
+	for my $entry (@entries) {
+		my $sampleName = _protalMapField($entry->{sample_name}, 'sample name');
+		if ($entry->{skipped}) {
+			push @skipLines, join("\t", $sampleName, 'incompatible', $entry->{reason});
+			next;
+		}
+		my $read1 = File::Spec->rel2abs($entry->{read1});
+		my $read2 = File::Spec->rel2abs($entry->{read2});
+		_protalMapField($read1, 'first-read path');
+		_protalMapField($read2, 'second-read path');
+		push @mapLines, join("\t",
+			$sampleName, $read1, $read2, "$sampleName.sam",
+			$sampleName, "$sampleName.profile");
+		push @profiles, File::Spec->catfile($profileDir, "$sampleName.profile");
+		push @reads, $read1, $read2;
+	}
+	atomic_write_text($mapFile, join("\n", @mapLines)."\n",
+		label => 'publish combined Protal mapping file');
+	atomic_write_text($skipFile, join("\n", @skipLines)."\n",
+		label => 'publish combined Protal skip manifest');
+
+	my @cleanupTargets;
+	for my $entry (@entries) {
+		my $target = $MFconfig{rmScratchTmp}
+			? $entry->{sample_temp} : $entry->{accession_download};
+		next unless defined($target) && $target ne '';
+		die "Unsafe combined Protal cleanup target '$target'\n"
+			unless pathIsStrictChild($target, $MFglobal{runTmpDirGlobal});
+		push @cleanupTargets, File::Spec->canonpath(File::Spec->rel2abs($target));
+	}
+	my %seenCleanup;
+	@cleanupTargets = grep { !$seenCleanup{$_}++ } @cleanupTargets;
+	my $cleanupScript = File::Spec->catfile($logDir, 'ProtalScratchCleanup.sh');
+	my $cleanupCommand = "#!/bin/bash\nset -euo pipefail\n";
+	$cleanupCommand .= @cleanupTargets
+		? _shell_command('rm', '-rf', '--', @cleanupTargets)."\n"
+		: "true\n";
+	atomic_write_text($cleanupScript, $cleanupCommand,
+		label => 'publish combined Protal scratch cleanup script');
+	chmod 0755, $cleanupScript
+		or die "Cannot make combined Protal cleanup script executable: $!\n";
+
+	my $protal = getProgPaths('protal');
+	my $profileUtils = getProgPaths('protalProfileUtils');
+	my $protalDB = getProgPaths('protal_db', 0);
+	my @protalArgs = ($protal);
+	push @protalArgs, ('--db', $protalDB) if $protalDB ne '';
+	push @protalArgs, (
+		'--map', $mapFile, '--profile_dir', $profileDir,
+		'--threads', $MFopt{ProtalCores}, '--force',
+	);
+	my @diagnostics = map {
+		my $profile = $_;
+		map { $profile.$_ } qw(.log .gene.log .genes.log .truth_annotated)
+	} @profiles;
+	my $mergedTemporary = "$protalCombinedMerged.$protalCombinedSignature.tmp";
+	my $currentTemporary = "$protalCombinedCurrent.$$.tmp";
+	my $stoneTemporary = "$protalCombinedStone.$$.tmp";
+	my $cmd = _shell_command('rm', '-rf', '--', $workDir, $strainDir)."\n";
+	$cmd .= _shell_command('mkdir', '-p', $workDir, $profileDir, $strainDir)."\n";
+	$cmd .= join('', map { _shell_command('test', '-s', $_)."\n" } @reads);
+	$cmd .= _shell_command('rm', '-f', '--',
+		$mergedTemporary, $currentTemporary, $stoneTemporary,
+		@profiles, @diagnostics, $protalCombinedStone)."\n";
+	if ($protalDB eq '' && @profiles) {
+		$cmd .= 'if [ -z "${PROTAL_DB_PATH:-}" ]; then '
+			.'echo "Set PROTAL_DB_PATH or configure protal_db" >&2; exit 2; fi'."\n";
+	}
+	if (@profiles) {
+		$cmd .= _shell_command(@protalArgs)."\n";
+		$cmd .= join('', map { _shell_command('test', '-e', $_)."\n" } @profiles);
+		$cmd .= _shell_command('rm', '-f', '--', @diagnostics)."\n" if @diagnostics;
+		$cmd .= _shell_command($profileUtils, 'merge', '--input', @profiles)
+			.' > '._shell_quote($mergedTemporary)."\n";
+		$cmd .= _shell_command('test', '-s', $mergedTemporary)."\n";
+	} else {
+		$cmd .= _shell_command(
+			'printf', '%s\n', '# No compatible Protal samples in this cohort')
+			.' > '._shell_quote($mergedTemporary)."\n";
+	}
+	$cmd .= _shell_command('mv', '-f', '--',
+		$mergedTemporary, $protalCombinedMerged)."\n";
+	my $strainCurrent = File::Spec->catfile($strainRoot, 'current');
+	$cmd .= _shell_command('rm', '-f', '--', $strainCurrent)."\n";
+	$cmd .= _shell_command(
+		'ln', '-s', $protalCombinedSignature, $strainCurrent)."\n";
+	$cmd .= _shell_command('rm', '-rf', '--', $workDir)."\n";
+	$cmd .= _shell_command('bash', $cleanupScript)."\n";
+	$cmd .= _shell_command('printf', '%s\n', $protalCombinedSignature)
+		.' > '._shell_quote($currentTemporary)."\n";
+	$cmd .= _shell_command('mv', '-f', '--',
+		$currentTemporary, $protalCombinedCurrent)."\n";
+	$cmd .= _shell_command('printf', '%s\n', $protalCombinedSignature)
+		.' > '._shell_quote($stoneTemporary)."\n";
+	$cmd .= _shell_command('mv', '-f', '--',
+		$stoneTemporary, $protalCombinedStone)."\n";
+
+	my @dependencies = (
+		map { $_->{dependency} || '' } @entries,
+		keys %{$QSBoptHR->{submittedJobRecords} || {}},
+	);
+	my $dependencyString = normalise_job_dependencies(\@dependencies);
+	my ($oldTmpSpace, $oldLockFile) =
+		@{$QSBoptHR}{qw(tmpSpace LOCKfile)};
+	my $totalInputMB = 0;
+	$totalInputMB += $_->{input_size_mb} || 0 for grep { !$_->{skipped} } @entries;
+	$QSBoptHR->{tmpSpace} = int(($totalInputMB * 6) / 1024) + 15 ."G";
+	$QSBoptHR->{LOCKfile} = '';
+	my ($job, $submissionError);
+	eval {
+		($job) = qsubSystem(
+			File::Spec->catfile($logDir, "ProtalCombined.$$.sh"),
+			$cmd, $MFopt{ProtalCores}, $MFopt{ProtalMem}."G",
+			'PTall', $dependencyString, '', 1, [], $QSBoptHR,
+		);
+		1;
+	} or $submissionError = $@ || 'unknown combined Protal submission failure';
+	@{$QSBoptHR}{qw(tmpSpace LOCKfile)} = ($oldTmpSpace, $oldLockFile);
+	die $submissionError if defined $submissionError;
+	if ($job ne '') {
+		for my $lockFile (map { $_->{lock_file} } @entries) {
+			recordSampleLockJobs($lockFile, [$job], $QSBoptHR);
+		}
+	}
+	print "Combined Protal map prepared for ".scalar(@profiles)
+		." compatible sample(s): $mapFile\n" unless $MFconfig{silent};
+	return $job;
+}
+
+sub protalMapping {
+	my ($tmpD, $finOutD, $smp, $Ncore, $deps, $requestSignature) = @_;
+	return '' unless $MFopt{DoProtal};
+	die "Unsafe Protal scratch directory '$tmpD'\n"
+		unless defined($tmpD) && $tmpD =~ m{(?:^|/)[^/]+/Protal/?$};
+
+	my $profileDir = File::Spec->catdir($finOutD, 'profiles');
+	my $profile = File::Spec->catfile($profileDir, "$smp.profile");
+	my $stone = File::Spec->catfile($finOutD, "$smp.Protal.sto");
+	return '' if -e $profile && -e $stone;
+	make_path($finOutD);
+
+	my ($read1, $read2, $selection) = protalRawPairSelection(
+		$curSmpl, "Protal for sample $curSmpl");
+	my $skip = File::Spec->catfile($finOutD, "$smp.Protal.skip");
+	if ($selection && $selection->{skipped}) {
+		die "Cannot record a Protal input skip without a completion request signature\n"
+			unless defined($requestSignature) && $requestSignature ne '';
+		my $reason = $selection->{reason} || 'No compatible Protal input';
+		$reason =~ s/[\r\n]+/ /g;
+		atomic_write_text($skip, "$requestSignature\n$reason\n",
+			label => "publish Protal incompatible-input marker for $smp");
+		warn "$reason; skipping Protal for this sample because "
+			."-protalIgnoreErrors 1 is enabled\n";
+		return '';
+	}
+	warn $selection->{warning}."\n"
+		if $selection && $selection->{warning};
+	retry_unlink($skip, fatal => 0,
+		label => "clear stale Protal incompatible-input marker for $smp") if -e $skip;
+	make_path($profileDir);
+	my $protal = getProgPaths('protal');
+	my $protalDB = getProgPaths('protal_db', 0);
+	my @protalArgs = ($protal);
+	push @protalArgs, ('--db', $protalDB) if $protalDB ne '';
+	push @protalArgs, (
+		'-1', $read1, '-2', $read2, '--prefix', $smp,
+		'--outdir', $tmpD, '--profile_dir', $profileDir,
+		'--threads', $Ncore, '--no_strains', '--force',
+	);
+	my @diagnostics = map { $profile.$_ } qw(.log .gene.log .genes.log .truth_annotated);
+	my $cmd = _shell_command('rm', '-rf', '--', $tmpD)."\n";
+	$cmd .= _shell_command('mkdir', '-p', $tmpD, $profileDir)."\n";
+	$cmd .= _shell_command('test', '-s', $read1)."\n";
+	$cmd .= _shell_command('test', '-s', $read2)."\n";
+	if ($protalDB eq '') {
+		$cmd .= 'if [ -z "${PROTAL_DB_PATH:-}" ]; then '
+			.'echo "Set PROTAL_DB_PATH or configure protal_db" >&2; exit 2; fi'."\n";
+	}
+	$cmd .= _shell_command('rm', '-f', '--', $profile, @diagnostics, $stone)."\n";
+	$cmd .= _shell_command(@protalArgs)."\n";
+	$cmd .= _shell_command('test', '-e', $profile)."\n";
+	$cmd .= _shell_command('rm', '-f', '--', @diagnostics)."\n";
+	$cmd .= _shell_command('rm', '-rf', '--', $tmpD)."\n";
+	$cmd .= _shell_command('touch', $stone)."\n";
+
+	# Protal writes and compresses a SAM before profiling. Reuse the conservative
+	# MetaPhlAn scratch estimate so that this transient never lands in sample output.
+	my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+	$QSBoptHR->{tmpSpace} =
+		int(((0 + ($map{$curSmpl}{inputFileSizeMB} || 0)) * 6) / 1024) + 15 ."G";
+	my ($job, $submission) = qsubSystem(
+		$logDir."protal.sh", $cmd, $Ncore, $MFopt{ProtalMem}."G",
+		"PT$JNUM", $deps, "", 1, [], $QSBoptHR,
+	);
+	$QSBoptHR->{tmpSpace} = $previousTmpSpace;
+	return $job;
+}
+
+sub mergeProtalProfiles {
+	return unless $MFopt{DoProtal};
+	return submitCombinedProtal() if $MFopt{DoProtal} == 2;
+	my @selectedIndices = $selectedFrom < $selectedTo
+		? ($selectedFrom .. $selectedTo - 1) : ();
+	my (@profiles, @dependencies, @uncovered);
+	for my $index (@selectedIndices) {
+		my $sampleKey = $samples[$index];
+		my $sampleName = defined($map{$sampleKey}{SmplID})
+			? $map{$sampleKey}{SmplID} : $sampleKey;
+		next if sample_is_ignored($ignoredSamplesHR, $sampleName);
+		my $sampleRoot = $map{$sampleKey}{wrdir};
+		next if -e File::Spec->catfile($sampleRoot, 'SMPL.empty');
+		my $profile = protalProfilePath($sampleRoot, $sampleName);
+		my $stone = File::Spec->catfile(
+			$sampleRoot, 'Tax', 'Protal', "$sampleName.Protal.sto");
+		my $job = $protalProfileJobs{$profile} || '';
+		my $requestSignature = sampleCompletionRequestSignature($sampleKey);
+		if ((-e $profile && -e $stone) || $job ne '') {
+			push @profiles, $profile;
+			push @dependencies, $job if $job ne '';
+		} elsif ($MFopt{protalIgnoreErrors} && protalSkipMatches(
+				protalSkipPath($sampleRoot, $sampleName), $requestSignature)) {
+			next;
+		} else {
+			push @uncovered, $sampleName;
+		}
+	}
+	if (@uncovered) {
+		my @preview = @uncovered;
+		splice @preview, 10 if @preview > 10;
+		warn "Deferring Protal profile merge: ".scalar(@uncovered)
+			." selected non-empty sample(s) have neither a complete profile nor a "
+			."submitted Protal job (first: ".join(', ', @preview).")\n";
+		return;
+	}
+	if (!@profiles) {
+		print "No eligible Protal profiles to merge for this sample range.\n";
+		return;
+	}
+
+	my $outDir = File::Spec->catdir(
+		$controllerBaseOut, 'pseudoGC', 'protal_singular');
+	my $mergeLogDir = File::Spec->catdir($outDir, 'LOGandSUB');
+	make_path($mergeLogDir);
+	my $merged = File::Spec->catfile($outDir, 'Protal.abundance.tsv');
+	my $stone = File::Spec->catfile($outDir, 'Protal.merge.sto');
+	my $temporary = $merged.".$$.tmp";
+	my $profileUtils = getProgPaths('protalProfileUtils');
+	my $cmd = join('', map { _shell_command('test', '-e', $_)."\n" } @profiles);
+	$cmd .= _shell_command('rm', '-f', '--', $temporary, $stone)."\n";
+	$cmd .= _shell_command($profileUtils, 'merge', '--input', @profiles)
+		.' > '._shell_quote($temporary)."\n";
+	$cmd .= _shell_command('test', '-s', $temporary)."\n";
+	$cmd .= _shell_command('mv', '-f', '--', $temporary, $merged)."\n";
+	$cmd .= _shell_command('touch', $stone)."\n";
+	my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+	$QSBoptHR->{tmpSpace} = 0;
+	my ($job, $submission) = qsubSystem(
+		File::Spec->catfile($mergeLogDir, "ProtalMerge.$$.sh"),
+		$cmd, 1, '4G', 'PTmrg', normalise_job_dependencies(\@dependencies),
+		'', 1, [], $QSBoptHR,
+	);
+	$QSBoptHR->{tmpSpace} = $previousTmpSpace;
+	print "Protal profile merge prepared for ".scalar(@profiles)
+		." sample(s): $merged\n" unless $MFconfig{silent};
+	return $job;
+}
+
 sub mergeMP2Table($){
 	my ($dir_MP2) = @_;
 	return if (!$MFopt{DoMetaPhlan});
@@ -8507,12 +9073,16 @@ sub prepMetaphlan{
 	print "Checking metaphlan version .. ";
 	my $vstr = "";
 	$vstr = `$metaPhlBin --version 2>/dev/null`;
-	$vstr =~ m/version ([\.\d]+)/;
-	#print "$1 ";
-	my $MPver = $1; my $MPverL = int(substr($MPver,0,1));
+	die "Could not determine the MetaPhlAn version from: $vstr\n"
+		unless ($vstr =~ m/version\s+([\.\d]+)/i);
+	my $MPver = $1;
+	my @MPverParts = split /\./, $MPver;
+	my $MPverL = int($MPverParts[0]);
+	$MFglobal{MetaPhlanModernCLI} = ($MPverL > 4
+		|| ($MPverL == 4 && ($MPverParts[1] || 0) >= 2)) ? 1 : 0;
 	if ($MFopt{DoMetaPhlan}){
 		$MFopt{DoMetaPhlan} = 1;
-		if ( $MPverL < 3.0){ print "Metaphlan version below 3, reinstall updated metaphlan3\n"; exit(33);}
+		if ( $MPverL < 3.0){ print "MetaPhlAn version below 3; install a current MetaPhlAn release\n"; exit(33);}
 		print "will use MetaPhlan version $MPver\n";
 		$MFopt{DoMetaPhlan} = $MPverL;
 	}
@@ -8552,7 +9122,13 @@ sub metphlanMapping{
 	my $sam = "$tmpD/metph2.sam";
 	my $vXparams = "";#my $v2params = ""; 
 	if ($MFopt{DoMetaPhlan} >=4){ #version 4+
-		$vXparams = " --sample_id $smp --nproc $Ncore --unclassified_estimation --add_viruses --nreads \$readN -o " ; #if ($MFopt{DoMetaPhlan3}); #--unknown_estimation -> requires --nreads
+		if ($MFglobal{MetaPhlanModernCLI}) {
+			# MetaPhlAn 4.2 estimates unclassified reads by default and removed
+			# --unclassified_estimation and --add_viruses.
+			$vXparams = " --sample_id $smp --nproc $Ncore --nreads \$readN -o ";
+		} else {
+			$vXparams = " --sample_id $smp --nproc $Ncore --unclassified_estimation --add_viruses --nreads \$readN -o ";
+		}
 	} elsif ($MFopt{DoMetaPhlan} >=3){ #version 3+
 		$vXparams = " --sample_id $smp --nproc $Ncore --unknown_estimation --nreads \$readN -o " ; #if ($MFopt{DoMetaPhlan3}); #--unknown_estimation -> requires --nreads
 	} else { #version 2
@@ -8560,6 +9136,7 @@ sub metphlanMapping{
 	}
 	my $taxinfo = "--mpa_pkl $mpDB.pkl ";
 	$taxinfo = "--bowtie2db $mpDB1 -x $mpDB2 " if ($MFopt{DoMetaPhlan} >=3);
+	$taxinfo = "--db_dir $mpDB1 --index $mpDB2 " if ($MFglobal{MetaPhlanModernCLI});
 	my $qsubFile = $logDir."metaPhl$MFopt{DoMetaPhlan}.sh";
 	
 	#$ bowtie2 --sam-no-hd --sam-no-sq --no-unal --very-sensitive -S metagenome.sam -x metaphlan_databases/mpa_vJan21_CHOCOPhlAnSGB_202103  -U metagenome.fastq
@@ -10656,6 +11233,7 @@ sub setDefaultMFconfig{
 	$progStats{taxTarFailCnts}=0;  $progStats{taxTarComplCnts}=0; 
 	$progStats{mOTU2FailCnts}=0;  $progStats{mOTU2ComplCnts}=0; 
 	$progStats{metaPhl2FailCnts}=0; $progStats{metaPhl2ComplCnts}=0;
+	$progStats{protalFailCnts}=0; $progStats{protalComplCnts}=0;
 	$progStats{KrakTaxFailCnts} =0;
 
 
@@ -10688,6 +11266,9 @@ sub setDefaultMFconfig{
 	#non-asembly based tax + functional assignments #DoMetaPhlan3 merges into $DoMetaPhlan , after version check
 	#my $DoMetaPhlan = 0;   my $DoMetaPhlan3 = 0; my $DoMOTU2 = 0; my $DoTaxaTarget = 0; 
 	$MFopt{DoMetaPhlan}=0;#$MFopt{DoMetaPhlan3}=0;
+	$MFopt{DoProtal}=0;
+	$MFopt{ProtalCores}=4; $MFopt{ProtalMem}=100;
+	$MFopt{protalIgnoreErrors}=1;
 	$MFopt{DoMOTU2}=0;$MFopt{DoTaxaTarget}=0;
 	$MFopt{PABtaxChk} =0;
 	$MFconfig{skipSmallSmplsMB} = 1; #skips samples with less MB in input  files
@@ -11177,6 +11758,10 @@ sub getCmdLineOptions{
 		"thoroughCheckRiboFinish=i" => \$MFopt{checkRiboNonEmpty},
 	#other tax profilers..
 		"profileMetaphlan|profileMetaphlan3=i"=> \$MFopt{DoMetaPhlan},
+		"profileProtal=i" => \$MFopt{DoProtal},
+		"ProtalCores=i" => \$MFopt{ProtalCores},
+		"ProtalMem=i" => \$MFopt{ProtalMem},
+		"protalIgnoreErrors=i" => \$MFopt{protalIgnoreErrors},
 		"profileMOTU2=i" => \$MFopt{DoMOTU2},
 		"profileKraken=i"=> \$MFopt{DoKraken},
 		"profileTaxaTarget=i" => \$MFopt{DoTaxaTarget},
@@ -11230,7 +11815,7 @@ sub getCmdLineOptions{
 		} else {$MFopt{MapperMemory} = 20 ;}	
 	}
 
-	if ($MFopt{DoDiamond} && $MFopt{reqDiaDB} eq ""){die "ERROR:: Functional profiling was requested (-profileFunct 1), but no DB to map against was defined (-diamondDBs)\n";}
+	if ($MFopt{DoDiamond} && $MFopt{reqDiaDB} eq ""){die "ERROR:: Functional profiling was requested (-profileFunct 1), but no DB to map against was defined (-DiaDBs)\n";}
 	$MFopt{AssemblyKmers} = "-k $MFopt{AssemblyKmers}" unless ($MFopt{AssemblyKmers} =~ m/^-k/);
 	$MFopt{sdm_opt}->{minSeqLength}=$MFopt{tmpSdmminSL} if ($MFopt{tmpSdmminSL} > 0);
 	$MFopt{sdm_opt}->{maxSeqLength}=$MFopt{tmpSdmmaxSL} if ($MFopt{tmpSdmmaxSL} > 0);

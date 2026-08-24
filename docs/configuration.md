@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Profiling tutorial](profiling_tutorial.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -116,6 +116,43 @@ Example:
 ```
 
 Delete the download directory only after confirming that the extracted database paths are configured correctly.
+
+The exact `config_DB` keys required for RiboFind, functional profiling,
+MetaPhlAn 4, mOTUs 4, and Protal are listed in the
+[read-based profiling tutorial](profiling_tutorial.md#2-link-the-databases-in-config_db).
+
+### Protal database
+
+The base `MF4` environment includes Protal 0.6.0a and `protal_profile_utils`.
+Download a compatible Protal database as described in the
+[official Protal documentation](https://protal.earlham.ac.uk/main.php?site=documentation#download-the-database),
+then use either of these configurations:
+
+```text
+protal_db	/path/to/protal_database
+```
+
+or export the database path into the controller and compute-job environment:
+
+```bash
+export PROTAL_DB_PATH=/path/to/protal_database
+```
+
+The bundled `protal_db` setting is intentionally empty, so Protal falls back to
+`PROTAL_DB_PATH` unless the selected site/user config overrides it. A missing value
+is checked again inside each submitted job. `-ProtalMem` defaults to 100 GB and can
+be adjusted for the selected full or mini database; `-ProtalCores` defaults to 4.
+These resources apply to either a singular sample job or the one combined job.
+`-protalIgnoreErrors` defaults to `1` in both modes, selecting the first compatible
+primary raw short-read pair or explicitly excluding the sample if none exists. Set it
+to `0` for strict input validation. It does not suppress Protal execution failures.
+
+Because Protal materializes alignments before profiling, configure node-local scratch
+with roughly the capacity of a read-to-SAM mapping job. In `-profileProtal 2`, staged
+raw-read directories remain live until the combined job finishes. That job removes its
+temporary SAM/miscellaneous workspace, runs the generated scratch-cleanup script, and
+then writes the cohort completion marker. The profile table and strain MSAs remain in
+the final `pseudoGC/protal/` results.
 
 ## Versioning
 

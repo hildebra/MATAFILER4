@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Profiling tutorial](profiling_tutorial.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -407,6 +407,7 @@ Depending on flags, MATAFILER can write outputs from:
 | Kraken2 | Read-based taxonomic profiling. |
 | mOTUs | Marker-gene-based taxonomic profiling. |
 | MetaPhlAn | Marker-gene-based taxonomic profiling. |
+| Protal | Raw paired-short-read taxonomic profiling with a final multi-sample abundance table. |
 | miTAG / ribosomal profiling | Ribosomal small- or large-subunit profiling. |
 | DIAMOND functional profiling | Read-based functional profiling against selected databases. |
 
@@ -416,7 +417,51 @@ These outputs are commonly summarized in or near:
 #OutPath/#RunID/pseudoGC/
 ```
 
-and related run-level folders. The precise file names depend on flags such as `-profileFunct`, `-DiaDBs`, `-profileRibosome`, `-profileMOTU2`, `-profileMetaphlan2` or `-profileKraken`.
+and related run-level folders. The precise file names depend on flags such as `-profileFunct`, `-DiaDBs`, `-profileRibosome`, `-profileMOTU2`, `-profileMetaphlan` or `-profileKraken`.
+
+With `-profileProtal 1`, the durable outputs are:
+
+| Output | Meaning |
+|---|---|
+| `<sample_output>/Tax/Protal/profiles/<sample>.profile` | Headerless per-sample species-abundance profile; it may legitimately be empty. |
+| `<sample_output>/Tax/Protal/<sample>.Protal.sto` | Successful per-sample completion evidence. |
+| `<sample_output>/Tax/Protal/<sample>.Protal.skip` | Request-scoped incompatible-input evidence written in tolerant mode. |
+| `<controller_base>/pseudoGC/protal_singular/Protal.abundance.tsv` | Merge of eligible profiles in the selected invocation range. |
+| `<controller_base>/pseudoGC/protal_singular/Protal.merge.sto` | Successful singular-merge evidence. |
+
+The mode-`1` merge waits for submitted Protal sample jobs and is deferred if an
+eligible sample has neither a profile, current skip evidence, nor a submitted job.
+Strain analysis is disabled; SAM, miscellaneous output, profile diagnostics, and
+sample Protal scratch are removed after success.
+
+With `-profileProtal 2`, run-level outputs are under
+`<controller_base>/pseudoGC/protal/`:
+
+| Output | Meaning |
+|---|---|
+| `Protal.map.tsv` | Generated Protal map for all compatible samples in the full mapped cohort. |
+| `Protal.skipped.tsv` | Samples excluded by tolerant input selection and the reason for each exclusion. |
+| `profiles/<sample>.profile` | Durable profiles used as explicit merge inputs. |
+| `Protal.abundance.tsv` | Combined table written by `protal_profile_utils merge`. |
+| `strains/<cohort_signature>/` | Durable strain-analysis output, including Protal's MSAs, for that cohort. |
+| `strains/current` | Symlink to the active cohort's retained strain/MSA directory. |
+| `Protal.current` | Signature identifying which cohort owns the shared combined table. |
+| `Protal.<cohort_signature>.sto` | Completion evidence written only after merge and scratch cleanup succeed. |
+| `LOGandSUB/ProtalScratchCleanup.sh` | Generated, path-validated cleanup script invoked by the combined job. |
+
+Mode `2` requires the complete mapped cohort and can include samples from several
+mapping files. MATAF4 holds each participating sample's staged `raw/` scratch until
+the combined job finishes. That job keeps profiles and strain MSAs in the result
+directory, removes temporary SAM/miscellaneous output, runs the cleanup script, and
+then publishes `Protal.current` and the completion stone. A failed Protal, merge, or
+cleanup therefore leaves scratch available and does not mark the cohort complete.
+
+This uses one signature-aware run-level checkpoint rather than a generic per-sample
+"raw files may be deleted" sentinel. Sample completion accepts mode `2` only when
+that checkpoint matches the current cohort and the merged table plus MSA directory
+exist. `<controller_base>` is the stable run root derived from the first mapped
+sample, not whichever sample happens to be processed last. Samples explicitly ignored
+or marked `SMPL.empty` are excluded in both modes.
 
 ## Recommended files for common downstream questions
 

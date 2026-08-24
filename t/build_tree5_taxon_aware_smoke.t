@@ -67,6 +67,12 @@ use strict;
 use warnings;
 
 my (@forward, $report, $threads, $singleAlignmentMode, %recovery);
+if (defined($ENV{MATAFILER_TEST_MSAFIX_COUNT})) {
+	open my $count, '>>', $ENV{MATAFILER_TEST_MSAFIX_COUNT}
+		or die "Cannot update MSAfix invocation counter: $!\n";
+	print {$count} "call\n";
+	close $count or die "Cannot close MSAfix invocation counter: $!\n";
+}
 while (@ARGV) {
     my $argument = shift @ARGV;
     $singleAlignmentMode = 1 if $argument eq '-i';
@@ -218,6 +224,8 @@ PERL
 my $script = File::Spec->catfile($root, 'secScripts', 'phylo', 'buildTree5.pl');
 my $mafftCount = File::Spec->catfile($temporary, 'mafft.calls');
 local $ENV{MATAFILER_TEST_MAFFT_COUNT} = $mafftCount;
+my $msaFixCount = File::Spec->catfile($temporary, 'msafix.calls');
+local $ENV{MATAFILER_TEST_MSAFIX_COUNT} = $msaFixCount;
 my @command = (
 	$^X, '-I'.$root, $wrapper, $config, $script,
 	'-fna', $fna, '-aa', $faa, '-cats', $categories,
@@ -233,6 +241,7 @@ my @command = (
 	'-rateMergeMinLoci', 1, '-rateMergeMinSites', 1,
 );
 is(system(@command), 0, 'taxon-aware buildTree smoke workflow completes');
+my $postprocessedMSAFixRuns = (() = slurp($msaFixCount) =~ /^/gm);
 
 my $msaOnlyOutput = File::Spec->catdir($temporary, 'msa-only-output');
 my @msaOnlyCommand = @command;
@@ -243,25 +252,29 @@ for my $index (0 .. $#msaOnlyCommand - 1) {
 push @msaOnlyCommand, ('-onlyMSA', 1, '-continue', 1);
 is(system(@msaOnlyCommand), 0,
 	'MSA-only BuildTree workflow completes before phylogeny');
-my $msaOnlyAlignment = File::Spec->catfile(
-	$msaOnlyOutput, 'MSA', 'MSAli.fna.gz');
+my @msaOnlyAlignments = glob(File::Spec->catfile(
+	$msaOnlyOutput, 'MSA', '*.fna.gz'));
 my $msaOnlyMarker = File::Spec->catfile(
 	$msaOnlyOutput, 'msaOnly.complete.tsv');
-ok(-s $msaOnlyAlignment,
-	'MSA-only workflow retains the compressed concatenated alignment');
+ok(@msaOnlyAlignments && !(grep { !-s $_ } @msaOnlyAlignments),
+	'MSA-only workflow retains nonempty compressed localized NT alignments');
+ok(!-e File::Spec->catfile($msaOnlyOutput, 'MSA', 'MSAli.fna')
+		&& !-e File::Spec->catfile($msaOnlyOutput, 'MSA', 'MSAli.fna.gz'),
+	'MSA-only workflow does not create a merged alignment');
 ok(-s $msaOnlyMarker,
 	'MSA-only workflow publishes its durable completion marker');
 like(slurp($msaOnlyMarker), qr/^status\tmsa_complete$/m,
 	'MSA-only completion marker records the explicit lifecycle status');
+like(slurp($msaOnlyMarker), qr/^reason\t.*combined-MSA postprocessing, concatenation.*skipped$/m,
+	'MSA-only completion marker records the skipped combined-alignment stages');
 ok(!-e File::Spec->catfile(
 	$msaOnlyOutput, 'phylo', 'IQtree_allsites.treefile'),
 	'MSA-only workflow does not publish a phylogeny');
-my $msaOnlyMafftRuns = (() = slurp($mafftCount) =~ /^/gm);
-is(system(@msaOnlyCommand), 0,
-	'a completed MSA-only workflow resumes successfully');
-is((() = slurp($mafftCount) =~ /^/gm), $msaOnlyMafftRuns,
-	'MSA-only continuation reuses its valid retained alignments');
-
+ok(!-e File::Spec->catfile(
+		$msaOnlyOutput, 'phylo', 'post_alignment_locus_qc.tsv'),
+	'MSA-only workflow does not run post-alignment locus QC');
+cmp_ok((() = slurp($msaFixCount) =~ /^/gm), '>', $postprocessedMSAFixRuns,
+	'MSA-only workflow runs localized MSAfix before exiting');
 my $terminalOutput = File::Spec->catdir($temporary, 'terminal-output');
 my $terminalCategories = File::Spec->catfile($temporary, 'terminal.cat');
 write_file($terminalCategories, "s1|g1\ts2|g1\n");

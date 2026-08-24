@@ -4,4 +4,4 @@ channels:
   - bioconda
 dependencies:
   - checkm2 = 1.0.2
-  - bioconda::metaphlan=4.1
+  - bioconda::metaphlan=4.2.6

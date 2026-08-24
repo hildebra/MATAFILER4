@@ -142,6 +142,10 @@ MATAF4.pl	4.38	Ribo profiling (miTag)	-riboMaxRds	integer	MFopt		stable	Maximum 
 MATAF4.pl	4.38	Ribo profiling (miTag)	-saveRiboRds	integer	MFopt		stable	Retain reads used during ribosomal assignment.
 MATAF4.pl	4.38	Ribo profiling (miTag)	-thoroughCheckRiboFinish	integer	MFopt		stable	Require non-empty RiboFind assignment output before accepting completion.
 MATAF4.pl	4.38	Other tax profilers..	-profileMetaphlan,-profileMetaphlan3	integer	MFopt		stable	Run MetaPhlAn taxonomic profiling.
+MATAF4.pl	4.38	Other tax profilers..	-profileProtal	integer	MFopt		stable	Mode 1 profiles raw reads per sample and merges profiles; mode 2 runs one generated Protal map across the complete mapped cohort.
+MATAF4.pl	4.38	Other tax profilers..	-ProtalCores	integer	MFopt		stable	CPU cores requested for a singular or combined Protal job.
+MATAF4.pl	4.38	Other tax profilers..	-ProtalMem	integer	MFopt		stable	Total memory in GB requested for a singular or combined Protal job.
+MATAF4.pl	4.38	Other tax profilers..	-protalIgnoreErrors	integer	MFopt		stable	Default 1: use the first compatible raw short-read pair, ignore other pair/singleton/BAM streams, or skip an incompatible Protal sample; set to 0 for strict validation.
 MATAF4.pl	4.38	Other tax profilers..	-profileMOTU2	integer	MFopt		stable	Run mOTUs taxonomic profiling.
 MATAF4.pl	4.38	Other tax profilers..	-profileKraken	integer	MFopt		stable	Run Kraken taxonomic profiling.
 MATAF4.pl	4.38	Other tax profilers..	-profileTaxaTarget	integer	MFopt		stable	Run target-taxon profiling.
@@ -253,11 +257,11 @@ buildTree5.pl	5.36	General options	-minPcId	float	minPcId	0	stable	sequence is f
 buildTree5.pl	5.36	General options	-SynTree	integer	calcSyn	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-NonSynTree	integer	calcNonSyn	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-continue	integer	continue	0	stable	See source/help for details.
-buildTree5.pl	5.79	General options	-onlyMSA	integer	onlyMSA	0	stable	Finish and retain the post-QC concatenated MSA, then skip phylogeny and placement.
+buildTree5.pl	5.82	General options	-onlyMSA	integer	onlyMSA	0	stable	Retain localized, backtranslated, MSAfix-processed per-locus .fna.gz alignments; skip combined-MSA postprocessing, concatenation, phylogeny, and placement.
 buildTree5.pl	5.36	General options	-bootstrap	integer	bootStrap	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-subsetSmpls	integer	subsetSmpls	-1	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-postFilter	string	postFilter		stable	""","" sep list of zorro,guidance2,macse"
-buildTree5.pl	5.67	General options	-rmMSA	integer	removeMSA	0	stable	Legacy compatibility switch; completion always deletes per-locus MSA files and retains compressed MSAli aggregates.
+buildTree5.pl	5.82	General options	-rmMSA	integer	removeMSA	0	stable	Normal completion deletes per-locus MSA files and retains compressed MSAli aggregates; -onlyMSA exits before finalization and retains per-locus checkpoints.
 buildTree5.pl	5.67	General options	-gzInput	integer	gzipInput	0	stable	Compress buildTree-owned input files after completion; retained MSAli aggregates are always compressed.
 buildTree5.pl	5.36	General options	-isAligned	integer	isAligned	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-runRAxML	integer	doRAXML	0	stable	See source/help for details.

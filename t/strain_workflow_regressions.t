@@ -202,14 +202,17 @@ like($strain,
 	qr/my \$onlyMSA = 0;.*?"onlyMSA=i"\s+=> \\\$onlyMSA.*?-onlyMSA must be 0 or 1.*?-onlyMSA 1 cannot be combined with -placeOnBackbone 1/s,
 	'strainWithin exposes and validates alignment-only mode');
 like($strain,
-	qr/msaOnly\.complete\.tsv.*?MSA\/MSAli\.fna\.gz.*?-MSAprogram \$MSAprog -onlyMSA \$onlyMSA/s,
+	qr/msaOnly\.complete\.tsv.*?my \$msaOnlyOutput = "\$outD2\/MSA".*?-MSAprogram \$MSAprog -onlyMSA \$onlyMSA/s,
 	'strainWithin forwards MSA-only mode and audits its durable alignment outcome');
+like($strain,
+	qr/sub msaOnlyArtifactsReady.*?status.*?msa_complete.*?\$name =~ \/\^MSAli\/.*?fna.*?fileGZs/s,
+	'strainWithin validates MSA-only completion from non-merged per-locus artifacts');
 like($strain,
 	qr/if \(\$onlyMSA\) \{.*?strain_within_2\.2\.pl were not launched.*?exit\(0\);.*?my \$MGSabundance/s,
 	'MSA-only controller runs stop before tree-dependent postprocessing');
 like($build_tree,
-	qr/"onlyMSA=i" => \\\$onlyMSA.*?if \(\$onlyMSA\) \{.*?finalizeMSAArtifacts.*?msa_complete.*?exit\(0\);.*?my \$trRetH/s,
-	'BuildTree finalizes and records the concatenated MSA before tree inference');
+	qr/"onlyMSA=i" => \\\$onlyMSA.*?filterMSA\(.*?runMSAFix\(\$tmpOutMSA.*?publishCompressedMSAArtifact\(\$finOutMSA.*?if \(\$onlyMSA\) \{.*?msa_complete.*?exit\(0\);.*?POST-ALIGNMENT WORKFLOW.*?mergeMSAs/s,
+	'BuildTree exits after localized per-locus processing and before combined-MSA postprocessing or concatenation');
 like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA,0,"\\\\s",\\%subG\)/s,
 	'within-strain extraction reads only candidate consensus genes');
 like($strain, qr/-completionMarker "?\.shellQuote\(\$treeStone\)/,
@@ -395,7 +398,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.40;/,
+like($strain, qr/my \$version = 1\.41;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
