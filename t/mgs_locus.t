@@ -8,7 +8,8 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::geneCat qw(readGene2tax);
-use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate member_context_map robust_depth_mask);
+use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate member_context_map
+	accumulate_locus_context merge_candidate_seeds robust_depth_mask);
 
 sub write_file {
 	my ($path, $contents) = @_;
@@ -256,4 +257,53 @@ is_deeply($worker_contexts, \%expected_worker_contexts,
 ok(scalar(keys %{$worker_contexts}),
 	'the worker shard actually produced member contexts to compare');
 
+
+# Streaming the catalogue in sample slices must be exactly equivalent to one
+# whole-catalogue scan: synteny context never crosses a sample, and both
+# seed-level summaries are additive over disjoint sample sets. This is what lets
+# the parent build the shared model without holding every sample's members.
+sub members_for_samples {
+	my ($members, @samples) = @_;
+	my %wanted = map { $_ => 1 } @samples;
+	my %slice;
+	for my $seed (keys %{$members}) {
+		my @keep = grep {
+			my ($sample) = split /__/, $_, 2;
+			$wanted{$sample};
+		} split /,/, $members->{$seed};
+		$slice{$seed} = join(',', @keep) if @keep;
+	}
+	return \%slice;
+}
+
+my $candidates = merge_candidate_seeds(\@slice_records, $slice_options{allowed_merge_pairs});
+is_deeply([sort keys %{$candidates}], ['g1', 'g2'],
+	'only seeds named in a confirmed same-COG pair need catalogue-wide summaries');
+is_deeply(merge_candidate_seeds(\@slice_records, {}), {},
+	'an empty merge allowlist leaves no seed needing a catalogue-wide scan');
+
+my %streamed;
+accumulate_locus_context(\%streamed, \@slice_records,
+	members_for_samples(\%catalogue_members, 'smplA'), { context_seeds => $candidates });
+accumulate_locus_context(\%streamed, \@slice_records,
+	members_for_samples(\%catalogue_members, 'smplB'), { context_seeds => $candidates });
+my $streamed_model = build_locus_groups(\@slice_records, {}, \%slice_proteins,
+	{%slice_options, precomputed_context => \%streamed});
+is_deeply(
+	[map { $_->{locus_id} } @{$streamed_model->{groups}}],
+	[map { $_->{locus_id} } @{$catalogue_model->{groups}}],
+	'streaming disjoint sample slices reproduces the whole-catalogue locus model',
+);
+is($streamed_model->{merged_seeds}, $catalogue_model->{merged_seeds},
+	'slice streaming merges exactly the same seeds');
+is_deeply([sort keys %{$streamed{gene_context}}], ['g1', 'g2'],
+	'restricting to merge candidates stores no context for seeds that cannot merge');
+
+my %unrestricted;
+accumulate_locus_context(\%unrestricted, \@slice_records, \%catalogue_members);
+is_deeply($streamed{gene_context}{g1}, $unrestricted{gene_context}{g1},
+	'a merge candidate keeps the same context whether or not the scan was restricted');
+cmp_ok(scalar(keys %{$unrestricted{gene_context}}), '>',
+	scalar(keys %{$streamed{gene_context}}),
+	'the unrestricted scan really does retain more than the restricted one');
 done_testing();

@@ -9,6 +9,8 @@ our @EXPORT_OK = qw(
 	build_locus_groups
 	choose_locus_candidate
 	member_context_map
+	accumulate_locus_context
+	merge_candidate_seeds
 	protein_kmer_similarity
 	robust_depth_mask
 );
@@ -81,8 +83,18 @@ sub _find {
 #are therefore identical whether they are derived from the complete catalogue or
 #from a shard holding every member of the requested samples.
 sub _scan_members {
-	my ($records, $cluster_members, $options) = @_;
+	my ($records, $cluster_members, $options, $accumulator) = @_;
 	$options ||= {};
+	# Seed-level summaries are only ever read for seeds that could merge. When the
+	# caller names that set, everything else is scanned for its neighbour tokens
+	# but never stored, which is what keeps a catalogue-wide scan affordable.
+	my $context_seeds = $options->{context_seeds};
+	# Sample-level summaries are additive over disjoint sample sets, because a
+	# contig belongs to exactly one sample and no context ever crosses samples.
+	# An accumulator therefore lets a caller stream the catalogue in slices.
+	$accumulator ||= {};
+	my $sample_set = $accumulator->{sample_set} ||= {};
+	my $gene_context = $accumulator->{gene_context} ||= {};
 	my $context_distance = $options->{context_distance} // 5;
 	my $include_member_to_seed = $options->{include_member_to_seed} ? 1 : 0;
 	my $include_member_context = $options->{include_member_context} ? 1 : 0;
@@ -94,41 +106,45 @@ sub _scan_members {
 	# seed at most once, so a consumed entry is never needed again.
 	my $consume = $options->{consume_cluster_members} ? 1 : 0;
 
-	my (%sample_set, %member_seed, %positions);
+	my (%member_seed, %positions);
 	for my $record (@{$records || []}) {
 		my $gene = $record->{gene};
 		next unless defined($gene) && length($gene);
+		my $wanted = !$context_seeds || $context_seeds->{$gene} ? 1 : 0;
 		for my $member (_members($consume
 				? delete($cluster_members->{$gene}) : $cluster_members->{$gene})) {
 			my ($sample, $contig, $position, $clean_member) = _member_parts($member);
 			next unless defined $sample;
-			$sample_set{$gene}{$sample} = 1;
+			$sample_set->{$gene}{$sample} = 1 if $wanted;
 			$member_seed{$clean_member} = $gene if $include_member_to_seed;
 			next unless $want_positions;
 			next unless defined($contig) && defined($position);
-			push @{$positions{$sample}{$contig}}, {
-				position => $position,
-				member   => $clean_member,
-				gene     => $gene,
-				mgs      => $record->{mgs},
-				cog      => $record->{cog},
-			};
+			# Entries are arrays rather than hashes: at catalogue scale this is the
+			# single largest transient structure, and a five-key hash per member
+			# costs several times what these four fields do.
+			push @{$positions{$sample}{$contig}}, [
+				$position, $gene, $record->{mgs}, $record->{cog},
+				$include_member_context ? $clean_member : undef,
+			];
 		}
 	}
 
-	my (%gene_context, %member_context);
+	my %member_context;
 	for my $sample (keys %positions) {
 		for my $contig (keys %{$positions{$sample}}) {
 			my @entries = sort {
-				$a->{position} <=> $b->{position} || $a->{gene} cmp $b->{gene}
+				$a->[0] <=> $b->[0] || $a->[1] cmp $b->[1]
 			} @{$positions{$sample}{$contig}};
 			for my $i (0 .. $#entries) {
+				my $recordGeneContext = $include_gene_context
+					&& (!$context_seeds || $context_seeds->{$entries[$i][1]});
+				next unless $recordGeneContext || $include_member_context;
 				for my $j (0 .. $#entries) {
 					next if $i == $j;
-					next if abs($entries[$i]{position} - $entries[$j]{position}) > $context_distance;
-					my $token = join('|', $entries[$j]{mgs}, $entries[$j]{cog});
-					$gene_context{$entries[$i]{gene}}{$token}++ if $include_gene_context;
-					$member_context{$entries[$i]{member}}{$token}++ if $include_member_context;
+					next if abs($entries[$i][0] - $entries[$j][0]) > $context_distance;
+					my $token = join('|', $entries[$j][2], $entries[$j][3]);
+					$gene_context->{$entries[$i][1]}{$token}++ if $recordGeneContext;
+					$member_context{$entries[$i][4]}{$token}++ if $include_member_context;
 				}
 			}
 		}
@@ -136,7 +152,59 @@ sub _scan_members {
 	# Position entries can dominate peak memory for large catalogues and are no
 	# longer needed after their compact context summaries have been built.
 	%positions = ();
-	return (\%sample_set, \%member_seed, \%gene_context, \%member_context);
+	return ($sample_set, \%member_seed, $gene_context, \%member_context);
+}
+
+#Merge into $accumulator the seed-level summaries for one slice of the catalogue.
+#Callers stream disjoint sample slices through this so the transient per-member
+#structures stay bounded by one slice instead of the whole catalogue.
+sub accumulate_locus_context {
+	my ($accumulator, $records, $cluster_members, $options) = @_;
+	die "Locus-context accumulator must be a hash reference\n"
+		unless ref($accumulator) eq 'HASH';
+	$options ||= {};
+	_scan_members($records, $cluster_members, {
+		context_distance => $options->{context_distance} // 5,
+		include_member_to_seed => 0,
+		include_member_context => 0,
+		include_gene_context => 1,
+		consume_cluster_members => $options->{consume_cluster_members} ? 1 : 0,
+		context_seeds => $options->{context_seeds},
+	}, $accumulator);
+	return $accumulator;
+}
+
+#Seeds whose catalogue-wide summaries can change a locus boundary: a seed alone
+#in its MGS/COG has nothing to merge with, and when a confirmed-pair allowlist is
+#given only seeds named in such a pair are ever compared. Everything else needs
+#no sample set and no gene context at all.
+sub merge_candidate_seeds {
+	my ($records, $allowed_merge_pairs) = @_;
+	my %byGroup;
+	for my $record (@{$records || []}) {
+		my $gene = $record->{gene};
+		next unless defined($gene) && length($gene);
+		push @{$byGroup{$record->{mgs}}{$record->{cog}}}, $gene;
+	}
+	my %candidates;
+	for my $mgs (keys %byGroup) {
+		for my $cog (keys %{$byGroup{$mgs}}) {
+			my @seeds = @{$byGroup{$mgs}{$cog}};
+			next if @seeds < 2;
+			unless (defined $allowed_merge_pairs) {
+				$candidates{$_} = 1 for @seeds;
+				next;
+			}
+			for my $i (0 .. $#seeds - 1) {
+				for my $j ($i + 1 .. $#seeds) {
+					next unless $allowed_merge_pairs->{_pair_key($seeds[$i], $seeds[$j])};
+					$candidates{$seeds[$i]} = 1;
+					$candidates{$seeds[$j]} = 1;
+				}
+			}
+		}
+	}
+	return \%candidates;
 }
 
 #Member contexts for one sample slice, without the catalogue-wide seed summaries
@@ -175,14 +243,27 @@ sub build_locus_groups {
 		$options->{allow_confirmed_cooccurrence} // 0;
 	my $consume_cluster_members = $options->{consume_cluster_members} ? 1 : 0;
 
-	my ($sample_set, $member_seed, $gene_context, $member_context) =
-		_scan_members($records, $cluster_members, {
-			context_distance => $context_distance,
-			include_member_to_seed => $include_member_to_seed,
-			include_member_context => $include_member_context,
-			include_gene_context => 1,
-			consume_cluster_members => $consume_cluster_members,
-		});
+	my ($sample_set, $member_seed, $gene_context, $member_context);
+	if (my $precomputed = $options->{precomputed_context}) {
+		# A caller that streamed the catalogue in slices has already derived the
+		# seed-level summaries; $cluster_members is then not consulted at all.
+		# Grouping releases each seed's entry as it publishes a locus, so take a
+		# shallow copy: the per-seed hashes are shared, but the caller's own index
+		# survives. Restricted to merge candidates this costs almost nothing.
+		$sample_set = { %{$precomputed->{sample_set} || {}} };
+		$gene_context = { %{$precomputed->{gene_context} || {}} };
+		($member_seed, $member_context) = ({}, {});
+	} else {
+		($sample_set, $member_seed, $gene_context, $member_context) =
+			_scan_members($records, $cluster_members, {
+				context_distance => $context_distance,
+				include_member_to_seed => $include_member_to_seed,
+				include_member_context => $include_member_context,
+				include_gene_context => 1,
+				consume_cluster_members => $consume_cluster_members,
+				context_seeds => $options->{context_seeds},
+			});
+	}
 
 	my %by_mgs_cog;
 	for my $record (@{$records || []}) {

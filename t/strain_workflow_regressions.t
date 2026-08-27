@@ -162,6 +162,7 @@ my $strain = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_
 my $strain2 = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
 my $mgs = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
+my $build_tree_locus_module = slurp(File::Spec->catfile($Bin, q{..}, q{Mods}, q{MGSLocus.pm}));
 my $internal_config = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config_internal.txt'));
 my $site_config_template = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'config.old'));
 my $neighbor_tree_r = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'R_scripts', 'neighborTree.R'));
@@ -418,7 +419,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.44;/,
+like($strain, qr/my \$version = 1\.45;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -541,8 +542,23 @@ like($strain,
 	qr/locus-model catalogue-protein loading.*?loaded_proteins=.*?locus-model cluster-index scan.*?represented_seed_clusters=.*?locus-group construction.*?ranked_clusters=.*?resolved_loci=.*?worker-member materialization.*?locus_sample_combinations=/s,
 	'locus-model construction reports protein, scan, grouping, and worker-projection subphase timings');
 like($strain,
-	qr/if \(\$maxSubJob > 1\).*?phase1LocusModelFingerprint.*?loadPhase1LocusModel.*?readClstrRev\(\$cluster_index, 0, \$Gene2COG\);.*?publishPhase1LocusModel/s,
-	'a split run reuses a published locus model and otherwise rebuilds it from the complete cluster index');
+	qr/if \(\$maxSubJob > 1\).*?phase1LocusModelFingerprint.*?loadPhase1LocusModel.*?merge_candidate_seeds.*?catalogueLocusContext.*?publishPhase1LocusModel/s,
+	'a split run reuses a published locus model and otherwise rebuilds it from a candidate-restricted catalogue scan');
+like($strain,
+	qr/sub catalogueLocusContext \{.*?readClstrRevBinaryShard\(\$phase1ShardPaths->\[\$worker\].*?accumulate_locus_context\(\$accumulator.*?\$clusters = \{\};.*?return "streamed_/s,
+	'the catalogue-wide scan streams one published shard at a time instead of holding every sample');
+like($strain,
+	qr/sub catalogueLocusContext \{.*?my \(undef, \$fullClusters\) = readClstrRev\(\$clusterIndex, 0, \$Gene2COG\);.*?return .whole_catalogue_read./s,
+	'a missing or unreadable shard set still falls back to one whole-catalogue read');
+like($strain,
+	qr/loadPhase1ClusterIndex\(\s*\$cluster_index, \$workerForSampleHR, \$mySamplesHR\);.*?if \(\$maxSubJob > 1\) \{\s*\$modelFingerprint/s,
+	'the worker slice is loaded before the model scan, so the published shards exist to stream');
+like($strain,
+	qr/buildSelectedLocusGroups\(\\\@records, \{\},\s*\{ member_context => 0, precomputed_context => \\%catalogueContext \}\)/s,
+	'grouping consumes the streamed summaries rather than a catalogue-wide member map');
+like($build_tree_locus_module,
+	qr/if \(my \$precomputed = \$options->\{precomputed_context\}\).*?\$sample_set = \{ %\{\$precomputed->\{sample_set\} \|\| \{\}\} \}/s,
+	'precomputed summaries are shallow-copied so grouping cannot consume the caller index');
 like($strain,
 	qr/member_context_map\(\\\@records, \$cl2gene\)/,
 	'split workers derive only their own member contexts around the shared locus model');

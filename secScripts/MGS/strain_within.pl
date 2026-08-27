@@ -26,7 +26,8 @@ use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
 use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::math qw(quantileArray);
-use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate member_context_map protein_kmer_similarity robust_depth_mask);
+use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate member_context_map
+	accumulate_locus_context merge_candidate_seeds protein_kmer_similarity robust_depth_mask);
 use Mods::MosaicLoci qw(read_mosaic_catalogue);
 use Mods::StrainQC qw(breakpoint_gene_mask abundance_pattern_mask);
 use Mods::StrainParts qw(
@@ -67,6 +68,7 @@ sub phase1ProteinCacheFingerprint; sub phase1ProteinCacheState;
 sub publishPhase1ProteinCache; sub loadPhase1CatalogProteins;
 sub phase1LocusModelFingerprint; sub phase1LocusModelState;
 sub publishPhase1LocusModel; sub loadPhase1LocusModel; sub buildSelectedLocusGroups;
+sub catalogueLocusContext;
 sub mergeConspecificLogs;
 sub timeNice;
 sub stageStart;
@@ -279,7 +281,8 @@ my $completionMessage = "";
 #1.42: build the Phase-I locus model once in the parent and publish it to split workers
 #1.43: exclude mixed-strain samples from the de novo tree, independent of placement
 #1.44: make the coverage thresholds the primary sample filter and split the per-MGS locus floor
-my $version = 1.44;
+#1.45: stream the catalogue-wide locus-model scan so the parent no longer holds every sample
+my $version = 1.45;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1188,6 +1191,9 @@ my %replN; #my %genesWrite; #keep stats/track
 my %cl2gene2;
 my $LocusByID = {}; my $MemberContext = {}; my $LocusContext = {};
 my $catalogProteins = {};
+#Published cluster-index shards, recorded so the catalogue-wide locus-model scan
+#can stream them one at a time instead of holding every sample at once.
+my $phase1ShardPaths; my $phase1ShardFingerprint = "";
 my %LocusSeedProteins;
 #my %SIcat;
 
@@ -3635,6 +3641,9 @@ sub loadPhase1ClusterIndex {
 			($paths, $records) = phase1IndexShardCacheState($base, $fingerprint);
 		}
 		if ($paths) {
+			# Retained so the catalogue-wide locus-model scan can stream every
+			# worker's slice instead of materializing the whole catalogue.
+			($phase1ShardPaths, $phase1ShardFingerprint) = ($paths, $fingerprint);
 			my $clusters = eval {
 				readClstrRevBinaryShard($paths->[$subJob], $fingerprint,
 					$subJob, $maxSubJob);
@@ -3883,6 +3892,46 @@ sub loadPhase1LocusModel {
 	return (\@groups, \%locusContext, $state);
 }
 
+#Derive the catalogue-wide seed summaries the merge decisions need, without ever
+#holding the whole catalogue's members. Synteny context never crosses a sample,
+#and both summaries are additive over disjoint sample sets, so the already
+#published per-worker shards can be streamed one at a time. Only when no shard
+#set exists does this fall back to a single whole-catalogue read.
+sub catalogueLocusContext {
+	my ($accumulator, $records, $mergeCandidates, $clusterIndex) = @_;
+	my %options = (context_seeds => $mergeCandidates, consume_cluster_members => 1);
+	if ($maxSubJob > 1 && ref($phase1ShardPaths) eq 'ARRAY'
+			&& @{$phase1ShardPaths} == $maxSubJob) {
+		my $scanned = 0;
+		for my $worker (0 .. $maxSubJob - 1) {
+			my $clusters = eval {
+				readClstrRevBinaryShard($phase1ShardPaths->[$worker],
+					$phase1ShardFingerprint, $worker, $maxSubJob);
+			};
+			unless ($clusters) {
+				my $error = $@ || 'unknown shard read failure';
+				$error =~ s/\s+\z//;
+				limitedWarn('Phase-I locus-model shard scan',
+					"Cannot stream cluster-index shard $worker; falling back to one "
+					."whole-catalogue read: $error\n");
+				$scanned = 0;
+				last;
+			}
+			accumulate_locus_context($accumulator, $records, $clusters, \%options);
+			$clusters = {};
+			$scanned++;
+			stepProgress("catalogue-wide locus-model scan", $scanned, $maxSubJob,
+				$^T, "context_seeds=".scalar(keys %{$accumulator->{gene_context} || {}}));
+		}
+		return "streamed_$scanned/${maxSubJob}_shards" if $scanned == $maxSubJob;
+		%{$accumulator} = ();
+	}
+	my (undef, $fullClusters) = readClstrRev($clusterIndex, 0, $Gene2COG);
+	accumulate_locus_context($accumulator, $records, $fullClusters, \%options);
+	$fullClusters = {};
+	return 'whole_catalogue_read';
+}
+
 #Group the ranked catalogue seeds into loci and apply the post-grouping budget.
 #Shared by the parent's catalogue-wide build and the compatibility fallback.
 sub buildSelectedLocusGroups {
@@ -4038,6 +4087,19 @@ sub prepGene2MGS{
 	my ($selectedGroupsRef, $modelLocusContext, $modelMemberContext, $modelCounters);
 	my $modelSource = 'local_build';
 	my ($modelBase, $modelFingerprint) = ('', '');
+	# The parent's own sample slice is loaded first so that the catalogue-wide
+	# scan below can stream the published shards one at a time. Holding the whole
+	# catalogue's members at once costs this process roughly maxSubJob times the
+	# memory of a worker and was enough to exhaust a 30 GB allocation.
+	my $sliceStarted = time;
+	my ($cl2gene, $clusterIndexSource) = loadPhase1ClusterIndex(
+		$cluster_index, $workerForSampleHR, $mySamplesHR);
+	stepComplete("locus-model cluster-index scan", $sliceStarted,
+		"worker=$subJob",
+		"sample_filter=".($mySamplesHR ? scalar(keys %{$mySamplesHR}) : 'all'),
+		"represented_seed_clusters=".scalar(keys %{$cl2gene}),
+		"source=$clusterIndexSource",
+		"index=$cluster_index");
 	if ($maxSubJob > 1) {
 		$modelFingerprint =
 			phase1LocusModelFingerprint($cluster_index, $protein_file, \@modelMGS);
@@ -4064,14 +4126,22 @@ sub prepGene2MGS{
 				."complete cluster index so this worker's locus identities still match "
 				."the other workers\n") if $subJob;
 			my $fullScanStarted = time;
-			my (undef, $fullClusters) = readClstrRev($cluster_index, 0, $Gene2COG);
-			print "Read the complete cluster index for locus-model construction: "
-				.scalar(keys %{$fullClusters})." represented seed cluster(s) in "
+			my %catalogueContext;
+			my $mergeCandidates =
+				merge_candidate_seeds(\@records, \%ConfirmedMosaicPairs);
+			my $scanScope = 'skipped_no_merge_candidates';
+			if (%{$mergeCandidates}) {
+				$scanScope = catalogueLocusContext(\%catalogueContext, \@records,
+					$mergeCandidates, $cluster_index);
+			}
+			print "Catalogue-wide locus-model scan: "
+				.scalar(keys %{$mergeCandidates})." merge-candidate seed(s), "
+				.scalar(keys %{$catalogueContext{gene_context} || {}})
+				." with synteny context; source=$scanScope; elapsed "
 				.timeNice(time - $fullScanStarted)."\n";
 			($selectedGroupsRef, $modelLocusContext, undef, $modelCounters) =
-				buildSelectedLocusGroups(\@records, $fullClusters,
-					{ member_context => 0, consume => 1 });
-			$fullClusters = {};
+				buildSelectedLocusGroups(\@records, {},
+					{ member_context => 0, precomputed_context => \%catalogueContext });
 			$modelSource = $subJob ? 'catalogue_wide_rebuild' : 'catalogue_wide_build';
 			if (!$subJob) {
 				# Publication must succeed before workers are submitted: without it
@@ -4093,16 +4163,6 @@ sub prepGene2MGS{
 			}
 		}
 	}
-
-	my $memberContextStarted = time;
-	my ($cl2gene, $clusterIndexSource) = loadPhase1ClusterIndex(
-		$cluster_index, $workerForSampleHR, $mySamplesHR);
-	stepComplete("locus-model cluster-index scan", $memberContextStarted,
-		"worker=$subJob",
-		"sample_filter=".($mySamplesHR ? scalar(keys %{$mySamplesHR}) : 'all'),
-		"represented_seed_clusters=".scalar(keys %{$cl2gene}),
-		"source=$clusterIndexSource",
-		"index=$cluster_index");
 
 	if ($selectedGroupsRef) {
 		$modelMemberContext = member_context_map(\@records, $cl2gene);
