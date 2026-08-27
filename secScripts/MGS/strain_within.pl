@@ -282,7 +282,8 @@ my $completionMessage = "";
 #1.43: exclude mixed-strain samples from the de novo tree, independent of placement
 #1.44: make the coverage thresholds the primary sample filter and split the per-MGS locus floor
 #1.45: stream the catalogue-wide locus-model scan so the parent no longer holds every sample
-my $version = 1.45;
+#1.46: scale tree memory with thread count and let the OOM ceiling, not the round count, stop retries
+my $version = 1.46;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -398,7 +399,15 @@ my $phase1WorkerRetries = 2;
 # Retain a built-in fallback for existing installations with an older config.
 my $treeOOMMaxMemGB = 512;
 my $treeOOMMaxMemGBSpecified = 0;
-my $treeOOMRetryRounds = 3;
+#Doubling from the initial request must be able to reach -treeOOMMaxMemGB:
+#with the 5 GB floor that is seven rounds to 512 GB. A lower bound made the
+#round count, rather than the configured ceiling, decide when to give up.
+my $treeOOMRetryRounds = 8;
+#IQ-TREE allocates per-thread likelihood buffers, so a 60-thread job needs far
+#more than the same alignment at 4 threads. The base multiplier is calibrated at
+#four cores; this divisor turns the requested core count into that factor. Raise
+#it to weaken the scaling, or set it above -maxCores to disable it.
+my $treeMemThreadDivisor = 4;
 my $redoSubmissionData = 0;
 my $deepRepair = 0;
 my $rmMSA = 1; #remove per-locus MSAs unless a downstream analysis requires them
@@ -489,6 +498,8 @@ GetOptions(
 		$treeOOMMaxMemGB = $_[1];
 		$treeOOMMaxMemGBSpecified = 1;
 	},
+	"treeOOMRetryRounds=i" => \$treeOOMRetryRounds,
+	"treeMemThreadDivisor=f" => \$treeMemThreadDivisor,
 	"onlySubmit=i"   => \$onlySubmit, #submit only jobs, or also recreate input fna/faa files? (can take days)
 	"redo=s"         => \$redoMode,
 	"reSubmit=i"     => sub { $reSubmit = $_[1]; $deprecatedOptionSeen{reSubmit} = '-redo tree'; },
@@ -681,6 +692,11 @@ die "-phase1WorkerRetries must be between 0 and 10\n"
 	unless $phase1WorkerRetries >= 0 && $phase1WorkerRetries <= 10;
 die "-outgroupReferenceGeneCap must be positive\n" unless $outgroupReferenceGeneCap > 0;
 die "-treeOOMMaxMemGB must be positive\n" unless $treeOOMMaxMemGB > 0;
+die "-treeOOMRetryRounds must be between 0 and 12
+"
+	unless $treeOOMRetryRounds >= 0 && $treeOOMRetryRounds <= 12;
+die "-treeMemThreadDivisor must be positive
+" unless $treeMemThreadDivisor > 0;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax,
 		$GenesPerSpecies, $GeneLengthMin, $GeneLengthIncludeMin,
@@ -2169,6 +2185,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	$totMem = $maximumMemMB if $totMem > $maximumMemMB;
 	my $taxonLocusInputMB = 0;
 	my $workloadCells = 0;
+	my $threadMemFactor = 1;
 	my $memoryPlanningInputMB = $inputFNAsize;
 	my $numCoreL = $numCores;
 	if ($epaOnlyRetry) {
@@ -2268,7 +2285,13 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		$taxonLocusInputMB = $workloadCells / 1024;
 		$memoryPlanningInputMB = $taxonLocusInputMB > $inputFNAsize
 			? $taxonLocusInputMB : $inputFNAsize;
-		$totMem = int($memoryPlanningInputMB * $baseMemMult * $memMulti);
+		# IQ-TREE keeps per-thread partial-likelihood buffers, so the same
+		# alignment costs far more at 60 threads than at the four the base
+		# multiplier is calibrated for. Ignoring this made wide, sample-rich MGS
+		# start an order of magnitude under what they need.
+		$threadMemFactor = $numCoreL / $treeMemThreadDivisor;
+		$threadMemFactor = 1 if $threadMemFactor < 1;
+		$totMem = int($memoryPlanningInputMB * $baseMemMult * $memMulti * $threadMemFactor);
 		$totMem = $minimumMemMB if $totMem < $minimumMemMB;
 		$totMem = $maximumMemMB if $totMem > $maximumMemMB;
 	}
@@ -6786,7 +6809,8 @@ sub printEarlyRunHeader {
 	print "SNP caller: $SNPcaller ($lConsFNA; $lConsFAA; $lConsVCF)\n";
 	print "Cores: $numCores (max: $maxCores); submit=$doSubmit; "
 		."onlySubmit=$onlySubmit; redo=$redoMode; redoEPAfilter=$redoEPAfilter\n";
-	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB\n";
+	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB; "
+		."per-thread memory scaling=cores/$treeMemThreadDivisor\n";
 	print "Initializing paths, maps, and catalogues...\n";
 	print "==============================================\n";
 }
@@ -7010,11 +7034,13 @@ sub retryOOMTreeJobs {
 	my $accounting = $args{accounting} || [];
 	my $options = $args{options} || {};
 	my $maximumMB = $args{maximum_mb};
-	my $maximumRounds = $args{maximum_rounds} // 3;
+	my $maximumRounds = $args{maximum_rounds} // 8;
 	return 0 unless @{$accounting};
 	return 0 unless $options->{doSubmit} && ($options->{qmode} || '') eq 'slurm';
-	die "OOM retry rounds must be between 0 and 3\n"
-		unless $maximumRounds >= 0 && $maximumRounds <= 3;
+	# The configured memory ceiling, not the round count, should decide when to
+	# stop: doubling out of the 5 GB floor needs seven rounds to reach 512 GB.
+	die "OOM retry rounds must be between 0 and 12\n"
+		unless $maximumRounds >= 0 && $maximumRounds <= 12;
 
 	my @roundAccounting = @{$accounting};
 	my $oomPlan = slurm_oom_retry_plan(\@roundAccounting, $maximumMB);
@@ -7067,6 +7093,10 @@ sub retryOOMTreeJobs {
 			$retry{retry_round} = $round;
 			$retry{requested_mb} = $nextMB;
 			$retry{memory} = $nextMB.'M';
+			# The saved command still carries the original allowance, which is what
+			# BuildTree reports and uses for EPA planning. Track the new request.
+			my $retryIqMemMB = int($nextMB * 0.9);
+			$retry{command} =~ s/(^|\s)-iqMemMB\s+\d+/$1-iqMemMB $retryIqMemMB/;
 			$retry{job_name} = 'OOM'.$round.'.'.$retry{mgs};
 			$retry{script} = File::Spec->catfile(
 				$mgsDirectory, "treeCmd.oom_retry.$round.sh") unless $epaStage;
@@ -8102,9 +8132,19 @@ Workflow splitting:
   -flushEvery INT               Publish buffered Stage-I records after this many
                                  sample rows [default $default->{phase1_flush_samples}]
   -treeOOMMaxMemGB FLOAT        Maximum memory for automatic tree OOM retries;
-                                 each OOM round doubles the previous request and
-                                 at most three rounds are attempted [default:
-                                 maxMF4mem from MATAFILERcfg.txt; 512]
+                                 each round doubles the previous request until
+                                 this ceiling is reached [default: maxMF4mem
+                                 from MATAFILERcfg.txt; 512]
+  -treeOOMRetryRounds INT       Maximum OOM retry rounds. The default is high
+                                 enough that -treeOOMMaxMemGB, not the round
+                                 count, decides when to stop [default 8]
+  -treeMemThreadDivisor FLOAT   IQ-TREE keeps per-thread likelihood buffers, so
+                                 the initial request is scaled by
+                                 cores/DIVISOR (never below 1). The base
+                                 estimate is calibrated at four cores. Raise
+                                 this to request less on wide jobs, or set it
+                                 above -maxCores to disable the scaling
+                                 [default 4]
 
 Consensus SNP inputs:
   -SNPcaller MPI|FB             Select the caller-specific MATAF4 consensus FASTA

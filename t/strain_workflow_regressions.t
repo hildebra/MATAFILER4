@@ -419,7 +419,22 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.45;/,
+like($strain,
+	qr/\$threadMemFactor = \$numCoreL \/ \$treeMemThreadDivisor;\s*\$threadMemFactor = 1 if \$threadMemFactor < 1;\s*\$totMem = int\(\$memoryPlanningInputMB \* \$baseMemMult \* \$memMulti \* \$threadMemFactor\)/s,
+	'the initial tree memory request scales with the thread count IQ-TREE will use');
+like($strain,
+	qr/my \$treeOOMRetryRounds = 8;/,
+	'the OOM retry round default is high enough to reach the configured memory ceiling');
+like($strain,
+	qr/die "OOM retry rounds must be between 0 and 12\\n"/,
+	'the retry-round guard no longer caps recovery far below the memory ceiling');
+like($strain,
+	qr/my \$retryIqMemMB = int\(\$nextMB \* 0\.9\);\s*\$retry\{command\} =~ s\/\(\^\|\\s\)-iqMemMB\\s\+\\d\+\/\$1-iqMemMB \$retryIqMemMB\//s,
+	'an escalated OOM retry updates the memory allowance carried in its saved command');
+like($strain,
+	qr/"treeOOMRetryRounds=i" => \\\$treeOOMRetryRounds,\s*"treeMemThreadDivisor=f" => \\\$treeMemThreadDivisor,/s,
+	'both tree-memory controls are tunable from the command line');
+like($strain, qr/my \$version = 1\.46;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -849,7 +864,7 @@ like($strain,
 	qr/addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?choose_tree_core_count\(\$multiSmpl, \$maxCores\).*?\$Tcmd \.= "-cores \$numCoreL "/s,
 	'BuildTree core guidance reuses the exact submitted-sample count collected during input preparation');
 like($strain,
-	qr/addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?\$workloadCells = \$multiSmpl \* \$ngenes.*?\$taxonLocusInputMB = \$workloadCells \/ 1024.*?\$memoryPlanningInputMB = \$taxonLocusInputMB > \$inputFNAsize.*?\$totMem = int\(\$memoryPlanningInputMB \* \$baseMemMult \* \$memMulti\)/s,
+	qr/addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?\$workloadCells = \$multiSmpl \* \$ngenes.*?\$taxonLocusInputMB = \$workloadCells \/ 1024.*?\$memoryPlanningInputMB = \$taxonLocusInputMB > \$inputFNAsize.*?\$totMem = int\(\$memoryPlanningInputMB \* \$baseMemMult \* \$memMulti \* \$threadMemFactor\)/s,
 	'Phase II memory mixes the already collected sample and usable-gene counts without a second sizing pass');
 like($strain,
 	qr/my \$treeFlag = \$onlyMSA.*?my \$Tcmd=.*?\$treeFlag /s,
