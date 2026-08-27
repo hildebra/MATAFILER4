@@ -26,7 +26,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
 use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::math qw(quantileArray);
-use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate protein_kmer_similarity robust_depth_mask);
+use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate member_context_map protein_kmer_similarity robust_depth_mask);
 use Mods::MosaicLoci qw(read_mosaic_catalogue);
 use Mods::StrainQC qw(breakpoint_gene_mask abundance_pattern_mask);
 use Mods::StrainParts qw(
@@ -65,6 +65,8 @@ sub phase1IndexShardFingerprint; sub phase1IndexShardCacheState;
 sub publishPhase1IndexShards; sub loadPhase1ClusterIndex;
 sub phase1ProteinCacheFingerprint; sub phase1ProteinCacheState;
 sub publishPhase1ProteinCache; sub loadPhase1CatalogProteins;
+sub phase1LocusModelFingerprint; sub phase1LocusModelState;
+sub publishPhase1LocusModel; sub loadPhase1LocusModel; sub buildSelectedLocusGroups;
 sub mergeConspecificLogs;
 sub timeNice;
 sub stageStart;
@@ -274,7 +276,10 @@ my $completionMessage = "";
 #1.39: preselect one viable outgroup per MGS before loading exact reference loci
 #1.40: unify Phase-II core, memory, and submission priority around prepared job size
 #1.41: validate MSA-only completion from per-locus alignments instead of a concatenation
-my $version = 1.41;
+#1.42: build the Phase-I locus model once in the parent and publish it to split workers
+#1.43: exclude mixed-strain samples from the de novo tree, independent of placement
+#1.44: make the coverage thresholds the primary sample filter and split the per-MGS locus floor
+my $version = 1.44;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -304,6 +309,7 @@ my %FILTER_DEFAULT = (
 	minimum_gene_depth => 1,
 	minimum_bad_loci_for_sample_skip => 3,
 	minimum_mgs_genes_per_sample => 8,
+	minimum_loci_per_mgs => 8,
 	maximum_genes_per_sample => 600,
 	maximum_tree_loci => 400,
 	breakpoint_gene_flank => 50,
@@ -360,6 +366,17 @@ my $rateMergeTargetSites = 30_000;
 my $rateMergeMinLoci = 20;
 my $rateMergeMinSites = 20_000;
 my $strictBackbone = 0;
+#Extraction QC flags a sample as mixed when too many of its loci hold
+#unresolvable same-COG paralogs (-multiGeneSmplMax) or conspecific consensus
+#calls (-conspGeneSmplMax). Those samples describe a strain mixture, not one
+#strain, so they are dropped from the tree. Sparse-but-clean samples are a
+#separate decision and stay governed by the tree-inclusion filters.
+my $excludeMixedStrainSamples = 1;
+#-GenesPerSpecies/-relativeNTFraction/-NTfiltCount are this workflow's primary
+#sample-inclusion policy. buildTree5 offers applying them as a removal only as a
+#generic, default-off mechanism, because it also builds trees for callers with
+#no such policy; the strain workflow is the caller that switches it on.
+my $enforceSampleCoverage = 1;
 my ($placeOnBackboneSpecified, $legacyStrictBackboneSpecified) = (0, 0);
 my $strictBackboneFraction = 0.35;
 my $strictBackboneMinSamples = 3;
@@ -403,7 +420,16 @@ my $SNPconsLOGs = ""; #logs for recalculating cons SNPs
 my $preCompCons=0; #if >0, precompute in these blocks
 
 my $conspecificSpThr = 0.1; #higher fraction of genes being two copies in the same sample (abundance >0), and the whole MGS is removed from that sample
+#Cheap extraction-time prefilter: a sample's loci for one MGS.  It is not the
+#sample-inclusion policy - that is -GenesPerSpecies/-relativeNTFraction/
+#-NTfiltCount at tree time, which measure selected, aligned, informative loci
+#relative to the cohort.  This floor only avoids writing and aligning records
+#that cannot clear any of them.
 my $MGStoolowGsThr = $FILTER_DEFAULT{minimum_mgs_genes_per_sample};
+#Distinct loci an MGS needs before a tree is worth building at all.  This is a
+#property of the MGS, not of any sample, and was previously conflated with the
+#per-sample floor above.
+my $minLociPerMGS = $FILTER_DEFAULT{minimum_loci_per_mgs};
 my $mode = "MGS";
 my $appendWriteTrigger = $FILTER_DEFAULT{phase1_flush_samples};
 # Publish Stage-I records often enough to bound Perl's large string buffers.
@@ -491,7 +517,8 @@ GetOptions(
 	"MGset=s"        => \$useGTDBmg,
 	
 	#used genes fine tuning..
-	"MGSminGenesPSmpl=i" => \$MGStoolowGsThr, #less genes than this in a single sample -> rm MGS from sample for strains. default 8
+	"MGSminGenesPSmpl=i" => \$MGStoolowGsThr, #extraction prefilter: loci a sample needs for one MGS
+	"minLociPerMGS=i" => \$minLociPerMGS, #distinct loci an MGS needs before a tree is attempted
 	"multiGeneSmplMax=f" => \$multiGeneSmplMax, #default 0.15
 	"conspGeneSmplMax=f" => \$conspGeneSmplMax, #default 0.05
 	"minBadLociPSmpl=i" => \$minBadLociForSampleSkip,
@@ -522,6 +549,8 @@ GetOptions(
 	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
 	"rateMergeMinSites=i" => \$rateMergeMinSites,
 	"placeOnBackbone=i" => sub { $strictBackbone = $_[1]; $placeOnBackboneSpecified = 1; },
+	"excludeMixedStrainSamples=i" => \$excludeMixedStrainSamples,
+	"enforceSampleCoverage=i" => \$enforceSampleCoverage,
 	"strictBackbone=i" => sub {
 		$strictBackbone = $_[1];
 		$legacyStrictBackboneSpecified = 1;
@@ -639,6 +668,7 @@ die "Core, memory, and precompute settings must be non-negative\n"
 die "-minBadLociPSmpl must be positive\n" unless $minBadLociForSampleSkip > 0;
 die "-MGSminGenesPSmpl and -presortGenes must be positive\n"
 	unless $MGStoolowGsThr > 0 && $presortGenes > 0;
+die "-minLociPerMGS must be positive\n" unless $minLociPerMGS > 0;
 die "-treeLocusBudget must be positive\n" unless $treeLocusBudget > 0;
 $outgroupCoreMinLoci = int($treeLocusBudget * 0.20 + 0.999999)
 	if $outgroupCoreMinLoci == 0;
@@ -724,6 +754,10 @@ die "-redo tree must be launched by the main strainWithin process, not a split w
 die "-MSAprog must be 0, 1, 2, or 4\n"
 	unless grep { $MSAprog == $_ } (0, 1, 2, 4);
 die "-rmMSA must be 0 or 1\n" unless $rmMSA == 0 || $rmMSA == 1;
+die "-excludeMixedStrainSamples must be 0 or 1\n"
+	unless $excludeMixedStrainSamples == 0 || $excludeMixedStrainSamples == 1;
+die "-enforceSampleCoverage must be 0 or 1\n"
+	unless $enforceSampleCoverage == 0 || $enforceSampleCoverage == 1;
 die "-popGenStats must be 0 or 1\n"
 	unless $doPopGenStats == 0 || $doPopGenStats == 1;
 die "-popGenStrictOutgroup and -popGenLegacyTextOutput must be 0 or 1\n"
@@ -2171,6 +2205,10 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		."-rateMergeMinSites $rateMergeMinSites ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog -onlyMSA $onlyMSA ";
 	$Tcmd .= "-placeOnBackbone $strictBackbone ";
+	# buildTree5 provides both as generic, default-off mechanisms; the strain
+	# workflow is the caller that sets a policy for them.
+	$Tcmd .= "-excludeFlaggedSamples $excludeMixedStrainSamples ";
+	$Tcmd .= "-enforceSampleCoverage $enforceSampleCoverage ";
 	if ($strictBackbone) {
 		$Tcmd .= "-placementGenesPerSpecies $placementGenesPerSpecies "
 			if defined $placementGenesPerSpecies;
@@ -2252,7 +2290,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		print "$MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)
 			."; outgroup ".(length($OG) ? $OG : 'none')
 			."; samples n/a; genes n/a; 1 core; $totMem MB; EPA-ng placement-only retry\n";
-	} elsif ($multiSmpl > 2 && $ngenes >= $MGStoolowGsThr){
+	} elsif ($multiSmpl > 2 && $ngenes >= $minLociPerMGS){
 		print "$MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)
 			."; outgroup ".(length($OG) ? $OG : 'none')
 			."; $multiSmpl samples; $ngenes genes; $numCoreL cores; $totMem MB; $memoryProfile\n";
@@ -3109,14 +3147,14 @@ sub addOutgroup2MGS{
 		$ingroupSampleCount = scalar keys %sampleSeen;
 	}
 	my @curCogs = sort keys %locusSeen;
-	if (@curCogs < $MGStoolowGsThr) {
+	if (@curCogs < $minLociPerMGS) {
 		limitedWarn('MGS with too few usable genes for tree construction',
 			"$MGS has only ".scalar(@curCogs)." usable genes; skipping tree construction\n");
 		return ($ingroupSampleCount, scalar(@curCogs), $OG, 1, 1);
 	}
 
 	if ($treeFile ne "" || exists($PreferredOutgroup{$MGS})) {
-		my $minimumOutgroupLoci = $outgroupDemandMinimum{$MGS} // $MGStoolowGsThr;
+		my $minimumOutgroupLoci = $outgroupDemandMinimum{$MGS} // $minLociPerMGS;
 		my @requiredLoci = sort grep {
 			$locusSeen{$_}
 		} keys %{$outgroupDemandLoci{$MGS} || {}};
@@ -3713,6 +3751,186 @@ sub loadPhase1CatalogProteins {
 	return ($proteins, 1, 'catalogue_fasta');
 }
 
+sub phase1LocusModelFingerprint {
+	my ($clusterIndex, $proteinFile, $modelMGS) = @_;
+	my $digest = Digest::SHA->new(256);
+	# Everything that can change a locus boundary: the ranked seed input, the
+	# cluster membership it is grouped over, the proteins compared during
+	# merging, the confirmed Mosaic allowlist, and the post-grouping budget.
+	$digest->add('strain-phase1-locus-model-v1', "\0",
+		phase1PathStatComponent($gene2taxF), "\0", $presortGenes, "\0",
+		phase1PathStatComponent($clusterIndex), "\0",
+		phase1PathStatComponent($proteinFile), "\0",
+		$taxonAwareLocusSelection, "\0", $treeLocusBudget, "\0");
+	$digest->add('mgs', "\0", $_, "\0") for @{$modelMGS};
+	$digest->add('mosaic', "\0", $_, "\0") for sort keys %ConfirmedMosaicPairs;
+	return $digest->hexdigest;
+}
+
+sub phase1LocusModelState {
+	my ($base, $fingerprint) = @_;
+	my $manifest = File::Spec->catfile($base, 'manifest.tsv');
+	return unless -s $manifest;
+	open my $input, '<', $manifest or return;
+	my @lines = <$input>;
+	return unless close $input;
+	s/\r?\n\z// for @lines;
+	my @columns = qw(version fingerprint groups group_bytes context_rows
+		context_bytes ranked_records merged_seeds linkage_rejections budget_excluded);
+	return unless @lines == 2 && $lines[0] eq join("\t", @columns);
+	my @fields = split /\t/, $lines[1], -1;
+	return unless @fields == @columns && $fields[0] eq '1'
+		&& $fields[1] eq $fingerprint;
+	return if grep { $fields[$_] !~ /\A\d+\z/ } 2 .. $#columns;
+	my %state;
+	@state{@columns[2 .. $#columns]} = map { 0 + $_ } @fields[2 .. $#columns];
+	for my $part (['groups', 'locus_groups.tsv', 'group_bytes'],
+			['context', 'locus_context.tsv', 'context_bytes']) {
+		my ($label, $name, $sizeKey) = @{$part};
+		my $path = File::Spec->catfile($base, $name);
+		my $bytes = -f $path ? -s $path : undef;
+		return unless defined($bytes) && $bytes == $state{$sizeKey};
+		$state{"${label}_path"} = $path;
+	}
+	return \%state;
+}
+
+sub publishPhase1LocusModel {
+	my ($groups, $locusContext, $base, $fingerprint, $counters) = @_;
+	make_path($base) unless -d $base;
+	my @groupRows = map {
+		join("\t", $_->{mgs}, $_->{cog}, $_->{primary_gene}, $_->{rank},
+			join(",", @{$_->{genes}}))
+	} @{$groups};
+	my @contextRows;
+	for my $group (@{$groups}) {
+		my $context = $locusContext->{$group->{locus_id}} || {};
+		for my $token (sort keys %{$context}) {
+			push @contextRows, join("\t", $group->{locus_id}, $token,
+				$context->{$token});
+		}
+	}
+	my $groupText = @groupRows ? join("\n", @groupRows)."\n" : '';
+	my $contextText = @contextRows ? join("\n", @contextRows)."\n" : '';
+	atomic_write_text(File::Spec->catfile($base, 'locus_groups.tsv'), $groupText,
+		label => 'publish common Phase-I locus groups');
+	atomic_write_text(File::Spec->catfile($base, 'locus_context.tsv'), $contextText,
+		label => 'publish common Phase-I locus contexts');
+	my @columns = qw(version fingerprint groups group_bytes context_rows
+		context_bytes ranked_records merged_seeds linkage_rejections budget_excluded);
+	atomic_write_text(File::Spec->catfile($base, 'manifest.tsv'),
+		join("\t", @columns)."\n"
+		.join("\t", 1, $fingerprint, scalar(@groupRows), length($groupText),
+			scalar(@contextRows), length($contextText),
+			$counters->{ranked_records}, $counters->{merged_seeds},
+			$counters->{linkage_rejections}, $counters->{budget_excluded})."\n",
+		label => 'publish common Phase-I locus-model manifest');
+	print "Published common Phase-I locus model: ".scalar(@groupRows)." locus/loci, "
+		.scalar(@contextRows)." context record(s); cache=$base\n";
+	return 1;
+}
+
+sub loadPhase1LocusModel {
+	my ($base, $fingerprint, $expectedRecords) = @_;
+	my $state = phase1LocusModelState($base, $fingerprint);
+	return unless $state;
+	# A model built for a different ranked-seed set cannot describe this
+	# process's loci, so reject it rather than silently mixing generations.
+	return if defined($expectedRecords) && $state->{ranked_records} != $expectedRecords;
+	open my $groupsIn, '<', $state->{groups_path} or return;
+	my (@groups, %seen);
+	while (my $line = <$groupsIn>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless length $line;
+		my @fields = split /\t/, $line, -1;
+		unless (@fields == 5 && length($fields[0]) && length($fields[1])
+				&& length($fields[2]) && $fields[3] =~ /\A\d+\z/ && length($fields[4])) {
+			close $groupsIn;
+			return;
+		}
+		my ($mgs, $cog, $primary, $rank, $geneList) = @fields;
+		my @genes = grep { length } split /,/, $geneList;
+		my $locus = join('|', $mgs, $cog, $primary);
+		if (!@genes || $genes[0] ne $primary || $seen{$locus}++) {
+			close $groupsIn;
+			return;
+		}
+		push @groups, {
+			mgs => $mgs, cog => $cog, primary_gene => $primary,
+			genes => \@genes, rank => 0 + $rank, locus_id => $locus,
+		};
+	}
+	return unless close $groupsIn;
+	return unless scalar(@groups) == $state->{groups};
+
+	open my $contextIn, '<', $state->{context_path} or return;
+	my (%locusContext, $contextRows);
+	$contextRows = 0;
+	while (my $line = <$contextIn>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless length $line;
+		my @fields = split /\t/, $line, -1;
+		unless (@fields == 3 && length($fields[0]) && length($fields[1])
+				&& $fields[2] =~ /\A\d+\z/ && exists($seen{$fields[0]})) {
+			close $contextIn;
+			return;
+		}
+		$locusContext{$fields[0]}{$fields[1]} = 0 + $fields[2];
+		$contextRows++;
+	}
+	return unless close $contextIn;
+	return unless $contextRows == $state->{context_rows};
+	return (\@groups, \%locusContext, $state);
+}
+
+#Group the ranked catalogue seeds into loci and apply the post-grouping budget.
+#Shared by the parent's catalogue-wide build and the compatibility fallback.
+sub buildSelectedLocusGroups {
+	my ($records, $clusterMembers, $options) = @_;
+	$options ||= {};
+	my $locus_model = build_locus_groups(
+		$records, $clusterMembers, $catalogProteins,
+		{
+			# These indexes are useful to general callers but duplicate large
+			# parts of the cluster model and are not consumed by this workflow.
+			include_member_to_seed => 0,
+			include_gene_to_locus => 0,
+			# The parent publishes member contexts per worker slice instead of
+			# retaining a catalogue-wide copy it would immediately discard.
+			include_member_context => $options->{member_context} ? 1 : 0,
+			# A catalogue-wide membership map is discarded straight after the
+			# build, so release its member strings as they are summarized.
+			consume_cluster_members => $options->{consume} ? 1 : 0,
+			# Every member pair in a multi-seed Mosaic locus must be independently
+			# confirmed.  This prevents an A-B-C chain from silently merging A and C.
+			allowed_merge_pairs => \%ConfirmedMosaicPairs,
+			require_complete_linkage => 1,
+			allow_confirmed_cooccurrence => 1,
+		},
+	);
+	my @groups = @{$locus_model->{groups}};
+	my $budgetExcluded = 0;
+	if (!$taxonAwareLocusSelection) {
+		my %selected_loci_by_mgs;
+		@groups = grep {
+			if (($selected_loci_by_mgs{$_->{mgs}} // 0) >= $treeLocusBudget) {
+				$budgetExcluded++;
+				0;
+			} else {
+				$selected_loci_by_mgs{$_->{mgs}}++;
+				1;
+			}
+		} @groups;
+	}
+	return (\@groups, $locus_model->{locus_context}, $locus_model->{member_context},
+		{
+			ranked_records => scalar(@{$records}),
+			merged_seeds => $locus_model->{merged_seeds} || 0,
+			linkage_rejections => $locus_model->{incomplete_linkage_rejections} || 0,
+			budget_excluded => $budgetExcluded,
+		});
+}
+
 
 sub prepGene2MGS{
 	print "Preparing base strain alignments, per MGS\nThis might take a good while..\n";
@@ -3775,18 +3993,8 @@ sub prepGene2MGS{
 			.sprintf('%.2f', $totalWorkerLoad)." units)\n";
 	}
 
-	my $modelSubstepStarted = time;
 	my $cluster_index = "$GCd/compl.incompl.$clusterID.fna.clstr.idx";
-	my ($cl2gene, $clusterIndexSource) = loadPhase1ClusterIndex(
-		$cluster_index, $workerForSampleHR, $mySamplesHR);
-	stepComplete("locus-model cluster-index scan", $modelSubstepStarted,
-		"worker=$subJob",
-		"sample_filter=".($mySamplesHR ? scalar(keys %{$mySamplesHR}) : 'all'),
-		"represented_seed_clusters=".scalar(keys %{$cl2gene}),
-		"source=$clusterIndexSource",
-		"index=$cluster_index");
-
-	$modelSubstepStarted = time;
+	my $modelSubstepStarted = time;
 	my $protein_file = "$GCd/compl.incompl.$clusterID.prot.faa";
 	my ($loadedCatalogProteins, $protein_file_available, $proteinSource) =
 		loadPhase1CatalogProteins($protein_file);
@@ -3815,44 +4023,105 @@ sub prepGene2MGS{
 			};
 		}
 	}
-	my $locus_model = build_locus_groups(
-		\@records, $cl2gene, $catalogProteins,
-		{
-			# These indexes are useful to general callers but duplicate large
-			# parts of the cluster model and are not consumed by this workflow.
-			include_member_to_seed => 0,
-			include_gene_to_locus => 0,
-			# Every member pair in a multi-seed Mosaic locus must be independently
-			# confirmed.  This prevents an A-B-C chain from silently merging A and C.
-			allowed_merge_pairs => \%ConfirmedMosaicPairs,
-			require_complete_linkage => 1,
-			allow_confirmed_cooccurrence => 1,
-		},
-	);
 	my $ranked_record_count = scalar(@records);
-	my $linkage_rejections = $locus_model->{incomplete_linkage_rejections} || 0;
+	my %modelMGSseen;
+	$modelMGSseen{$_->{mgs}} = 1 for @records;
+	my @modelMGS = sort keys %modelMGSseen;
+
+	# Same-COG seeds merge into one locus using catalogue-wide co-occurrence and
+	# synteny context.  A sample-restricted shard cannot reconstruct either, so
+	# workers that each build their own model can disagree about locus identity
+	# and emit one biological locus under two names.  The parent therefore builds
+	# the model once over the complete cluster index and publishes it; every
+	# worker reuses that model and only derives the member contexts of its own
+	# samples, which depend on one sample's contigs alone.
+	my ($selectedGroupsRef, $modelLocusContext, $modelMemberContext, $modelCounters);
+	my $modelSource = 'local_build';
+	my ($modelBase, $modelFingerprint) = ('', '');
+	if ($maxSubJob > 1) {
+		$modelFingerprint =
+			phase1LocusModelFingerprint($cluster_index, $protein_file, \@modelMGS);
+		$modelBase = File::Spec->catdir($scratchD, 'phase1_locus_model', $modelFingerprint);
+		my ($loadedGroups, $loadedContext, $loadedState) =
+			loadPhase1LocusModel($modelBase, $modelFingerprint, $ranked_record_count);
+		if ($loadedGroups) {
+			($selectedGroupsRef, $modelLocusContext) = ($loadedGroups, $loadedContext);
+			$modelCounters = {
+				ranked_records => $loadedState->{ranked_records},
+				merged_seeds => $loadedState->{merged_seeds},
+				linkage_rejections => $loadedState->{linkage_rejections},
+				budget_excluded => $loadedState->{budget_excluded},
+			};
+			$modelSource = 'published_common_model';
+			print "Loaded common Phase-I locus model: ".scalar(@{$selectedGroupsRef})
+				." locus/loci, source=$modelBase\n";
+		} else {
+			# Deriving the model from this process's own shard would give it locus
+			# identities the other workers do not share, so read the complete
+			# membership even when only the published copy is missing.
+			limitedWarn('Phase-I locus-model cache',
+				"No common Phase-I locus model at $modelBase; rebuilding it from the "
+				."complete cluster index so this worker's locus identities still match "
+				."the other workers\n") if $subJob;
+			my $fullScanStarted = time;
+			my (undef, $fullClusters) = readClstrRev($cluster_index, 0, $Gene2COG);
+			print "Read the complete cluster index for locus-model construction: "
+				.scalar(keys %{$fullClusters})." represented seed cluster(s) in "
+				.timeNice(time - $fullScanStarted)."\n";
+			($selectedGroupsRef, $modelLocusContext, undef, $modelCounters) =
+				buildSelectedLocusGroups(\@records, $fullClusters,
+					{ member_context => 0, consume => 1 });
+			$fullClusters = {};
+			$modelSource = $subJob ? 'catalogue_wide_rebuild' : 'catalogue_wide_build';
+			if (!$subJob) {
+				# Publication must succeed before workers are submitted: without it
+				# each of them would rebuild the model from the complete index, which
+				# is correct but costs one full index scan per worker.
+				my $published = eval {
+					publishPhase1LocusModel($selectedGroupsRef, $modelLocusContext,
+						$modelBase, $modelFingerprint, $modelCounters);
+					1;
+				};
+				unless ($published) {
+					my $error = $@ || 'unknown publication error';
+					$error =~ s/\s+\z//;
+					limitedWarn('Phase-I locus-model publication',
+						"Could not publish the common Phase-I locus model to $modelBase; "
+						."each split worker will rebuild it from the complete cluster "
+						."index instead: $error\n");
+				}
+			}
+		}
+	}
+
+	my $memberContextStarted = time;
+	my ($cl2gene, $clusterIndexSource) = loadPhase1ClusterIndex(
+		$cluster_index, $workerForSampleHR, $mySamplesHR);
+	stepComplete("locus-model cluster-index scan", $memberContextStarted,
+		"worker=$subJob",
+		"sample_filter=".($mySamplesHR ? scalar(keys %{$mySamplesHR}) : 'all'),
+		"represented_seed_clusters=".scalar(keys %{$cl2gene}),
+		"source=$clusterIndexSource",
+		"index=$cluster_index");
+
+	if ($selectedGroupsRef) {
+		$modelMemberContext = member_context_map(\@records, $cl2gene);
+	} else {
+		($selectedGroupsRef, $modelLocusContext, $modelMemberContext, $modelCounters) =
+			buildSelectedLocusGroups(\@records, $cl2gene,
+				{ member_context => 1, consume => 0 });
+	}
+	my $linkage_rejections = $modelCounters->{linkage_rejections};
 	print "Mosaic complete-linkage protection rejected $linkage_rejections "
 		."transitive component merge(s)\n" if $linkage_rejections;
 	@records = ();
-	my @selected_locus_groups = @{$locus_model->{groups}};
-	my $locus_budget_excluded = 0;
-	if (!$taxonAwareLocusSelection) {
-		my %selected_loci_by_mgs;
-		@selected_locus_groups = grep {
-			if (($selected_loci_by_mgs{$_->{mgs}} // 0) >= $treeLocusBudget) {
-				$locus_budget_excluded++;
-				0;
-			} else {
-				$selected_loci_by_mgs{$_->{mgs}}++;
-				1;
-			}
-		} @selected_locus_groups;
-	}
+	my @selected_locus_groups = @{$selectedGroupsRef};
+	my $locus_budget_excluded = $modelCounters->{budget_excluded};
 	$LocusByID = {
 		map { $_->{locus_id} => $_ } @selected_locus_groups
 	};
-	$MemberContext = $locus_model->{member_context};
-	$LocusContext = $locus_model->{locus_context};
+	$MemberContext = $modelMemberContext;
+	$LocusContext = $modelLocusContext;
 
 	my ($new_si_genes, $new_priorities) = ({}, {});
 	for my $group (@selected_locus_groups) {
@@ -3864,8 +4133,9 @@ sub prepGene2MGS{
 	stepComplete("locus-group construction", $modelSubstepStarted,
 		"worker=$subJob", "ranked_clusters=$ranked_record_count",
 		"resolved_loci=".scalar(@selected_locus_groups),
-		"merged_seeds=".($locus_model->{merged_seeds} || 0),
-		"linkage_rejections=$linkage_rejections");
+		"merged_seeds=$modelCounters->{merged_seeds}",
+		"linkage_rejections=$linkage_rejections",
+		"model_source=$modelSource");
 
 	$modelSubstepStarted = time;
 	my ($gene_sample_combinations, $ambiguous_seed_samples, $missing_clusters) = (0, 0, 0);
@@ -3942,7 +4212,7 @@ sub prepGene2MGS{
 		"ambiguous_combinations=$ambiguous_seed_samples",
 		"unrepresented_worker_loci=$unrepresentedWorkerLoci");
 	print "Prepared ".scalar(@selected_locus_groups)." loci from $ranked_record_count"
-		." ranked catalogue clusters; merged $locus_model->{merged_seeds} compatible same-COG seeds. "
+		." ranked catalogue clusters; merged $modelCounters->{merged_seeds} compatible same-COG seeds. "
 		."$gene_sample_combinations locus-sample combinations, $ambiguous_seed_samples with multiple candidates"
 		.($missing_clusters ? ", $missing_clusters missing cluster-index entries" : "")
 		.($unrepresentedWorkerLoci ? ", $unrepresentedWorkerLoci loci outside this worker's sample slice" : "")
@@ -4190,7 +4460,7 @@ sub prepRun{
 		if ($noGeneLimit){print "No per-sample gene limit; biological QC remains "
 			.($disableQC ? "disabled by explicit request\n" : "enabled\n");}
 		else {print "Using at most $maxNGenes genes per sample after QC\n";}
-		print "Filtering defaults: MGSminGenesPSmpl=$MGStoolowGsThr, "
+		print "Filtering defaults: MGSminGenesPSmpl=$MGStoolowGsThr, minLociPerMGS=$minLociPerMGS, "
 			."multiGeneSmplMax=$multiGeneSmplMax, conspGeneSmplMax=$conspGeneSmplMax, "
 			."breakpointGeneFlank=$breakpointGeneFlank, abundanceMinLoci=$abundanceMinimumLoci, "
 			."abundanceFold=$abundanceMinimumFold-$abundanceMaximumFold, "
@@ -5421,6 +5691,7 @@ sub phase1WorkerCommand {
 		'-clusterID', $clusterID, '-submit', 0, '-onlySubmit', 1,
 		'-maxSubJob', $maxSubJob,
 		'-MGSminGenesPSmpl', $MGStoolowGsThr,
+		'-minLociPerMGS', $minLociPerMGS,
 		'-multiGeneSmplMax', $multiGeneSmplMax,
 		'-conspGeneSmplMax', $conspGeneSmplMax,
 		'-minBadLociPSmpl', $minBadLociForSampleSkip, '-MGSphylo', $treeFile,
@@ -7077,14 +7348,14 @@ sub extractFNAFAA2genes{
 	foreach my $MGS (keys %perMGScnts){
 		my $perMGSgenes = $perMGScnts{$MGS};
 		push(@histoMGScnts,  $perMGSgenes);
-		if ($perMGSgenes < $MGStoolowGsThr){
+		if ($perMGSgenes < $minLociPerMGS){
 			$lowCandidateMGS++;
-			limitedWarn("MGS with fewer than $MGStoolowGsThr candidate loci",
+			limitedWarn("MGS with fewer than $minLociPerMGS candidate loci",
 				"Only $perMGSgenes genes/COGs for MGS $MGS; MGS genes might be multi-copy\n")
 				unless $maxSubJob;
 		}
 	}
-	print "$lowCandidateMGS MGS have fewer than $MGStoolowGsThr candidate loci in this worker's sample slice; "
+	print "$lowCandidateMGS MGS have fewer than $minLociPerMGS candidate loci in this worker's sample slice; "
 		."this is expected for sparse split-worker partitions\n"
 		if $maxSubJob && $lowCandidateMGS;
 	#DBUG
@@ -7799,14 +8070,28 @@ Gene selection and biological QC:
                                  candidate alignment remains bounded to this plus
                                  the QC-backfill allowance
                                  [default $default->{maximum_tree_loci}]
-  -MGSminGenesPSmpl INT         Minimum validated loci retained per MGS/sample
+  -MGSminGenesPSmpl INT         Extraction prefilter: minimum validated loci a
+                                 sample needs for one MGS before its records are
+                                 written and aligned. This is NOT the sample
+                                 inclusion policy; see -GenesPerSpecies below
                                  [default $default->{minimum_mgs_genes_per_sample}]
+  -minLociPerMGS INT            Distinct loci an MGS needs before a tree is
+                                 attempted at all. A property of the MGS, not of
+                                 any sample [default $default->{minimum_loci_per_mgs}]
   -multiGeneSmplMax FLOAT       Maximum ambiguous-locus fraction
                                  [default $default->{multi_gene_sample_max}]
   -conspGeneSmplMax FLOAT       Maximum conspecific-signal locus fraction
                                  [default $default->{conspecific_gene_sample_max}]
-  -minBadLociPSmpl INT          Minimum bad loci before deferring a sample
+  -minBadLociPSmpl INT          Minimum bad loci before flagging a sample as mixed
                                  [default $default->{minimum_bad_loci_for_sample_skip}]
+  -excludeMixedStrainSamples 0|1
+                                Drop samples that breach -multiGeneSmplMax or
+                                 -conspGeneSmplMax from their MGS tree. Applies
+                                 to the ordinary de novo tree and is independent
+                                 of -placeOnBackbone. Sparse samples are never
+                                 affected; they stay governed by
+                                 -MGSminGenesPSmpl, -GenesPerSpecies,
+                                 -relativeNTFraction and -NTfiltCount [default 1]
   -mosaicLoci FILE              Confirmed catalogue-wide mosaic/outgroup table
   -mosaicMGS FILE               Raw SB.clusters assignment table used to discover
                                  mosaics; inferred by removing .core from -MGS
@@ -7839,12 +8124,21 @@ Tree locus filtering:
   -GeneLengthIncludeMin FLOAT   After sample QC, recover loci reaching this
                                  fraction into backbone/placement MSA input
                                  [default 0.03]
-  -GenesPerSpecies FLOAT        Backbone minimum relative locus coverage per sample
-                                 [default 0.2]
-  -relativeNTFraction FLOAT     Backbone minimum relative informative-NT coverage
-                                 [default 0.1]
-  -NTfiltCount INT              Backbone minimum informative NT after final MSA
+  The next three are the primary sample-inclusion policy. They are measured on
+  selected, aligned, informative loci relative to the cohort, so unlike
+  -MGSminGenesPSmpl they can tell three well-covered loci from eight fragments.
+  With -placeOnBackbone 0 a sample failing them is removed; with 1 it is deferred
+  to EPA-ng placement instead.
+  -GenesPerSpecies FLOAT        Minimum locus coverage per sample, as a fraction
+                                 of the cohort Q90 selected-locus count [0.2]
+  -relativeNTFraction FLOAT     Minimum informative-NT coverage, as a fraction of
+                                 the cohort Q90 informative NT [default 0.1]
+  -NTfiltCount INT              Absolute minimum informative NT after final MSA
                                  [default 0]
+  -enforceSampleCoverage 0|1    Apply the three filters above as a removal when
+                                 -placeOnBackbone is 0. Setting this to 0 retains
+                                 every aligned sample regardless of how little of
+                                 the alignment it covers [default 1]
   -placementGenesPerSpecies FLOAT  Placement gene fraction [default 0.04]
   -placementRelativeNTFraction FLOAT  Placement NT fraction [default 0.03]
   -placementNTfiltCount INT     Placement minimum informative NT; defaults to

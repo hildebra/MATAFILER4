@@ -337,6 +337,23 @@ my $epaMaxMemMB = -1; # -1 derives a thread-planning budget; 0 disables memory-b
 my $epaPendantOutlierFactor = $EPA_NG_DEFAULT{pendant_outlier_factor};
 my $epaPendantMinThreshold = $EPA_NG_DEFAULT{pendant_minimum_threshold};
 my $sampleQCFile = "";
+#Two optional sample filters. Both are mechanisms only: what counts as a flagged
+#sample, and which coverage thresholds apply, are decided by the caller. Both
+#default to off so that callers which do not ask for them keep the behaviour
+#they had before, and only a caller that sets a deliberate policy - such as
+#strain_within.pl - turns them on.
+#
+#(1) Drop samples that -sampleQC marks unfit for the tree. Without -sampleQC
+#this is inert.
+my $excludeFlaggedSamples = 0;
+#(2) Apply -GenesPerSpecies/-relativeNTFraction/-NTfiltCount as a removal rather
+#than as backbone/placement routing. The taxon-aware selector otherwise keeps
+#every sample holding a single informative site, and with -placeOnBackbone 0
+#there is no later stage that would reconsider it. The non-taxon-aware prefilter
+#has always removed on these same thresholds, so this makes the two consistent.
+my $enforceSampleCoverage = 0;
+my %sampleQCStatus;
+my %flaggedExcluded;
 my %POST_ALIGNMENT_QC_DEFAULT = (
 	between_species_enabled => 0,
 	within_species_enabled => 1,
@@ -476,6 +493,8 @@ GetOptions(
 	"runVeryFastTree=i" => \$doVeryFastTree,
 	"treeShrink=i" => \$useTreeShrink,
 	"sampleQC=s" => \$sampleQCFile,
+	"excludeFlaggedSamples=i" => \$excludeFlaggedSamples,
+	"enforceSampleCoverage=i" => \$enforceSampleCoverage,
 	"placeOnBackbone=i" => sub { $strictBackbone = $_[1]; $placeOnBackboneSpecified = 1; },
 	"strictBackbone=i" => sub { $strictBackbone = $_[1]; $legacyStrictBackboneSpecified = 1; },
 	"strictBackboneFraction=f" => \$strictBackboneFraction,
@@ -732,6 +751,20 @@ if (length($stagedInputDir)) {
 }
 die "-sampleQC does not exist or is empty: $sampleQCFile\n"
 	if length($sampleQCFile) && !fileGZs($sampleQCFile);
+die "-excludeFlaggedSamples must be 0 or 1\n"
+	unless $excludeFlaggedSamples == 0 || $excludeFlaggedSamples == 1;
+die "-enforceSampleCoverage must be 0 or 1\n"
+	unless $enforceSampleCoverage == 0 || $enforceSampleCoverage == 1;
+if (length($sampleQCFile)) {
+	%sampleQCStatus = %{read_sample_qc($sampleQCFile)};
+	if ($excludeFlaggedSamples) {
+		# The outgroup is a catalogue reference rather than an extracted sample, so
+		# it carries no QC verdict; never let a stray one remove the root either.
+		%flaggedExcluded = map { $_ => 1 }
+			grep { !length($outgroup) || $_ ne $outgroup }
+			grep { ($sampleQCStatus{$_} // '') eq 'placement' } keys %sampleQCStatus;
+	}
+}
 
 ##### setup dirs
 $codemlOutD = File::Spec->catdir($outD, "codeml") if ($codemlOutD eq "");
@@ -840,6 +873,17 @@ print "MSAfix coding-NT repair: " . ($msaFixRecoverTechnicalOffsets ? "enabled; 
 print "Filtering: per-gene QC length fraction=$ntFracGene; post-QC inclusion fraction=$ntFracGeneInclude; category Q90 fraction=$fracMaxGenes90pct; "
 	. "backbone NT fraction=$ntFrac; backbone gene fraction=$GeneFracPSpec; "
 	. "backbone minimum NT=$ntCntTotal; minimum overlap=$minOverlapMSA; maximum gap fraction=$maxGapPerCol\n";
+print "Flagged-sample exclusion: "
+	. (!length($sampleQCFile) ? "inactive (no -sampleQC table supplied)"
+		: !$excludeFlaggedSamples ? "disabled by -excludeFlaggedSamples 0"
+		: "enabled; ".scalar(keys %flaggedExcluded)." of "
+			.scalar(keys %sampleQCStatus)." sample(s) marked unfit by the caller")
+	. "\n";
+print "Sample coverage filter: "
+	. ($enforceSampleCoverage
+		? "enabled; samples below the thresholds above are removed"
+		: "disabled by -enforceSampleCoverage 0; every aligned sample is retained")
+	. ($strictBackbone ? " (superseded by -placeOnBackbone routing)" : "") . "\n";
 print "Post-alignment locus QC: enabled="
 	. ($postAlignmentLocusQC ? "yes" : "no")
 	. "; divergence QC=" . ($postAlignmentDivergenceQC ? "yes" : "no")
@@ -994,7 +1038,9 @@ my $geneLengthSampleReport = "$treeD/gene_length_filter.samples.tsv";
 my (%geneLengthSampleAudit, %geneLengthQCSequence, %geneLengthIncludeByGene);
 my %geneLengthRecoveredForMSA;
 my %selectionAttrition = map { $_ => 'NA' } qw(
-	input_loci input_sequences input_samples length_retained_sequences
+	input_loci input_sequences input_samples
+	qc_excluded_samples qc_excluded_sequences
+	qc_emptied_loci coverage_excluded_samples length_retained_sequences
 	length_filtered_sequences length_include_retained_sequences
 	length_include_filtered_sequences length_recovery_candidate_sequences
 	length_recovered_msa_sequences gene_length_min_dropped_loci
@@ -1003,11 +1049,18 @@ my %selectionAttrition = map { $_ => 'NA' } qw(
 	aligned_loci alignment_failed_loci post_qc_loci final_loci final_samples
 	backbone_samples placement_samples excluded_samples
 );
+#A run that never reaches the coverage filter removed nothing through it, which
+#is a measurement rather than an absent one.
+$selectionAttrition{coverage_excluded_samples} = 0;
 my $legacyPostAlignmentQCPolicyFile = "$treeD/post_alignment_locus_qc.policy.tsv";
 my $legacyAlignmentWorkPolicyFile = "$MsaD/alignment_work.policy.tsv";
 my $legacyPostAlignmentPolicyFile = "$treeD/post_alignment.policy.tsv";
 my $postAlignmentQCPolicy = join("\t",
-	"schema=14",
+	"schema=15",
+	# Flagged-sample exclusion changes which sequences reach the alignment, so a
+	# flipped setting must invalidate cached per-locus alignments and QC.
+	"qc_sample_exclusion=".($excludeFlaggedSamples ? 1 : 0),
+	"qc_excluded=".scalar(keys %flaggedExcluded),
 	"msa_program=$MSAprog",
 	"post_filter=$postFilter",
 	"sample_definition=$smplDef",
@@ -1300,6 +1353,7 @@ if ($isAligned){
 	my @genesPerCat;
 	my $geneTooShort = 0; #count genes with too little NTs in gene..
 	my $geneTooLong = 0;
+	my ($qcExcludedSequences, $qcEmptiedLoci) = (0, 0);
 	my ($geneLengthMinDroppedSequences, $geneLengthIncludeRetainedSequences,
 		$geneLengthIncludeDroppedSequences, $geneLengthRecoveryCandidateSequences,
 		$geneLengthRecoveredMSASequences) = (0, 0, 0, 0, 0);
@@ -1317,6 +1371,24 @@ if ($isAligned){
 		if (@spl && $spl[0] =~ m/^#/){shift @spl;}
 		@spl = grep !/^NA$/, @spl;#remove NAs
 		die "No sequence identifiers in category line ".($cnt + 1)."\n" unless @spl;
+		if (%flaggedExcluded) {
+			# Drop flagged samples before any length or prevalence statistic is
+			# taken, so they cannot shift the per-locus Q90 length reference or the
+			# locus occupancy that the retained samples are then judged against.
+			my @retained = grep {
+				my ($sp) = parseSeqId($_, "category line ".($cnt + 1));
+				!$flaggedExcluded{$sp};
+			} @spl;
+			$qcExcludedSequences += scalar(@spl) - scalar(@retained);
+			@spl = @retained;
+			unless (@spl) {
+				# Every observation of this locus came from an excluded sample.
+				$qcEmptiedLoci++;
+				push(@linesCats2, []);
+				$genesPerCat[$cnt] = 0;
+				next;
+			}
+		}
 		my (@spl2, @splInclude);
 		#$genesPerCat[$cnt] = scalar(@spl) ;
 		my @geneLs;
@@ -1388,6 +1460,15 @@ if ($isAligned){
 	$selectionAttrition{input_loci} = scalar(@linesCats);
 	$selectionAttrition{input_sequences} = $inputSequences;
 	$selectionAttrition{input_samples} = scalar(keys %inputSamples);
+	$selectionAttrition{qc_excluded_samples} = scalar(keys %flaggedExcluded);
+	$selectionAttrition{qc_excluded_sequences} = $qcExcludedSequences;
+	$selectionAttrition{qc_emptied_loci} = $qcEmptiedLoci;
+	if (%flaggedExcluded) {
+		print "Flagged-sample exclusion: removed ".scalar(keys %flaggedExcluded)
+			." sample(s) and $qcExcludedSequences sequence(s) marked unfit by $sampleQCFile"
+			.($qcEmptiedLoci ? "; $qcEmptiedLoci locus/loci lost every observation" : "")
+			."; per-sample verdicts and fractions are in $sampleQCFile\n";
+	}
 	$selectionAttrition{length_include_retained_sequences} =
 		$geneLengthIncludeRetainedSequences;
 	$selectionAttrition{length_include_filtered_sequences} =
@@ -2046,7 +2127,10 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 		} grep {
 			$finalSelection->{locus_metrics}{$_}{selected}
 		} keys %{$finalSelection->{locus_metrics}};
-		if ($strictBackbone) {
+		# Backbone coverage is the primary sample filter. With -placeOnBackbone 1
+		# a sample failing it is deferred to placement; with placement off there is
+		# nothing behind it, so it is removed here instead of entering the tree on
+		# the strength of a single informative nucleotide.
 		my $backboneEligibility = classifyTaxonAwareCoverageEligibility(
 			sample_metrics => $finalSelection->{sample_metrics},
 			gene_fraction => $GeneFracPSpec,
@@ -2055,17 +2139,6 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			minimum_loci_floor => 1,
 			role => 'backbone', outgroup => $outgroup,
 		);
-		my $placementEligibility = classifyTaxonAwareCoverageEligibility(
-			sample_metrics => $finalSelection->{sample_metrics},
-			gene_fraction => $placementGeneFracPSpec,
-			nt_fraction => $placementNTFrac,
-			minimum_nt => $placementNTCntTotal,
-			minimum_overlap => $placementMinOverlap,
-			minimum_loci_floor => 2,
-			role => 'placement',
-			outgroup => $outgroup,
-		);
-		$strictPlacementMinimumNT = $placementEligibility->{minimum_nt};
 		%taxonAwareBackboneEligibility = map {
 			$_ => $backboneEligibility->{samples}{$_}{eligible}
 		} keys %{$backboneEligibility->{samples}};
@@ -2073,13 +2146,6 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			$_ => $backboneEligibility->{samples}{$_}{reason}
 		} grep { !$backboneEligibility->{samples}{$_}{eligible} }
 			keys %{$backboneEligibility->{samples}};
-		%taxonAwarePlacementEligibility = map {
-			$_ => $placementEligibility->{samples}{$_}{eligible}
-		} keys %{$placementEligibility->{samples}};
-		%taxonAwarePlacementIneligibleReason = map {
-			$_ => $placementEligibility->{samples}{$_}{reason}
-		} grep { !$placementEligibility->{samples}{$_}{eligible} }
-			keys %{$placementEligibility->{samples}};
 		my $backboneAudit = "$treeD/taxon_aware_backbone_eligibility.tsv";
 		open my $backboneOutput, '>', $backboneAudit
 			or die "Cannot write taxon-aware backbone eligibility $backboneAudit: $!\n";
@@ -2092,6 +2158,51 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 		}
 		close $backboneOutput
 			or die "Cannot close taxon-aware backbone eligibility $backboneAudit: $!\n";
+		if (!$strictBackbone && $enforceSampleCoverage) {
+			my @coverageRemoved = sort grep {
+				exists($samples{$_}) && !$taxonAwareBackboneEligibility{$_}
+			} keys %taxonAwareBackboneEligibility;
+			delete $samples{$_} for @coverageRemoved;
+			$selectionAttrition{coverage_excluded_samples} = scalar(@coverageRemoved);
+			my %removedReason;
+			$removedReason{$taxonAwareBackboneIneligibleReason{$_} // 'backbone_coverage_not_met'}++
+				for @coverageRemoved;
+			print "Sample coverage filter: removed ".scalar(@coverageRemoved)." of "
+				.scalar(keys %taxonAwareBackboneEligibility)." sample(s) below "
+				."$backboneEligibility->{minimum_loci} selected locus/loci or "
+				."$backboneEligibility->{minimum_nt} informative NT "
+				."(-GenesPerSpecies=$GeneFracPSpec, -relativeNTFraction=$ntFrac, "
+				."-NTfiltCount=$ntCntTotal)"
+				.(%removedReason ? "; reasons: ".join(", ",
+					map { "$_=$removedReason{$_}" } sort keys %removedReason) : "")
+				."; audit=$backboneAudit\n";
+		} else {
+			$selectionAttrition{coverage_excluded_samples} = 0;
+			print "Sample coverage filter: "
+				.($strictBackbone
+					? "samples below the gate are deferred to EPA-ng placement"
+					: "disabled by -enforceSampleCoverage 0; every aligned sample is retained")
+				."; audit=$backboneAudit\n";
+		}
+		if ($strictBackbone) {
+		my $placementEligibility = classifyTaxonAwareCoverageEligibility(
+			sample_metrics => $finalSelection->{sample_metrics},
+			gene_fraction => $placementGeneFracPSpec,
+			nt_fraction => $placementNTFrac,
+			minimum_nt => $placementNTCntTotal,
+			minimum_overlap => $placementMinOverlap,
+			minimum_loci_floor => 2,
+			role => 'placement',
+			outgroup => $outgroup,
+		);
+		$strictPlacementMinimumNT = $placementEligibility->{minimum_nt};
+		%taxonAwarePlacementEligibility = map {
+			$_ => $placementEligibility->{samples}{$_}{eligible}
+		} keys %{$placementEligibility->{samples}};
+		%taxonAwarePlacementIneligibleReason = map {
+			$_ => $placementEligibility->{samples}{$_}{reason}
+		} grep { !$placementEligibility->{samples}{$_}{eligible} }
+			keys %{$placementEligibility->{samples}};
 		my $placementAudit = "$treeD/taxon_aware_placement_eligibility.tsv";
 		open my $placementOutput, '>', $placementAudit
 			or die "Cannot write taxon-aware placement eligibility $placementAudit: $!\n";
@@ -2228,7 +2339,9 @@ if ($strictBackbone) {
 		copy($multAli, $fullAlignment)
 			or die "Cannot preserve full alignment as $fullAlignment: $!\n";
 	}
-	my $sampleStatus = read_sample_qc($sampleQCFile);
+	# Already read once during preflight; flagged samples were removed from
+	# the alignment before this point, so what remains here are coverage decisions.
+	my $sampleStatus = \%sampleQCStatus;
 	$strictSplit = split_strict_backbone(
 		$fullAlignment, $multAli, $placementAlignment, $sampleStatus,
 		{
@@ -5728,7 +5841,9 @@ sub writeSelectionAttritionAudit {
 	die "Selection attrition statistics must be a hash reference\n"
 		unless ref($stats) eq 'HASH';
 	my @order = qw(
-		input_loci input_sequences input_samples length_retained_sequences
+		input_loci input_sequences input_samples
+		qc_excluded_samples qc_excluded_sequences
+		qc_emptied_loci coverage_excluded_samples length_retained_sequences
 		length_filtered_sequences length_include_retained_sequences
 		length_include_filtered_sequences length_recovery_candidate_sequences
 		length_recovered_msa_sequences gene_length_min_dropped_loci
@@ -5761,7 +5876,7 @@ sub writeSelectionAttritionAudit {
 		or die "Cannot write selection attrition audit $temporary: $!\n";
 	print {$output} "metric\tvalue\n"
 		or die "Cannot write selection attrition header $temporary: $!\n";
-	print {$output} "schema\t2\n"
+	print {$output} "schema\t3\n"
 		or die "Cannot write selection attrition schema $temporary: $!\n";
 	for my $metric (@order) {
 		my $value = defined($stats->{$metric}) ? $stats->{$metric} : 'NA';

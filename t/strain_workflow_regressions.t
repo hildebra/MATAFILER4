@@ -398,7 +398,7 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 	'suppressed strain warnings receive a categorized exit summary');
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
-like($strain, qr/my \$version = 1\.41;/,
+like($strain, qr/my \$version = 1\.44;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -446,7 +446,7 @@ like($strain,
 	qr/my %broadCOG = map.*?\$cogTaxa\{\$_\} >= \$broadMinimumTaxa.*?exists\(\$preferredCoreGeneSet->\{\$gene\}\).*?unless \(%outgroupCatalogueMGS\).*?return;.*?Preparing core-first exact outgroup-reference demands.*?readFasta\(\$refFAA, 1, "\\\\s", \\%requiredAA,.*?readFasta\(\$refFNA, 1, "\\\\s", \\%requiredNT,/s,
 	'outgroup viability is decided before candidate-map and exact FNA/FAA reference loading');
 like($strain,
-	qr/my \$outgroupCoreMinLoci = 0;.*?"outgroupCoreMinLoci=i".*?\$outgroupCoreMinLoci = int\(\$treeLocusBudget \* 0\.20 \+ 0\.999999\).*?if \$outgroupCoreMinLoci == 0;.*?\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$MGStoolowGsThr/s,
+	qr/my \$outgroupCoreMinLoci = 0;.*?"outgroupCoreMinLoci=i".*?\$outgroupCoreMinLoci = int\(\$treeLocusBudget \* 0\.20 \+ 0\.999999\).*?if \$outgroupCoreMinLoci == 0;.*?\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$minLociPerMGS/s,
 	'the outgroup floor defaults to 20% of the final-tree locus budget and is enforced per MGS');
 like($strain,
 	qr/my \$outgroupReferenceGeneCap = 2500;.*?readGene2tax\(.*?\$outgroupReferenceGeneCap.*?allowed_cogs_by_mgs => \\%eligibleCogsByOutgroup.*?my \$addCandidate = sub.*?return if \$retainedForMGS >= \$outgroupReferenceGeneCap/s,
@@ -518,8 +518,17 @@ like($strain,
 	qr/locus-model construction.*?catalogue_drivers=.*?resolved_loci=.*?consensus-gene extraction and publication.*?full-tree input sizing/s,
 	'major extraction and tree-preparation stages also report concise completion statistics');
 like($strain,
-	qr/locus-model cluster-index scan.*?represented_seed_clusters=.*?locus-model catalogue-protein loading.*?loaded_proteins=.*?locus-group construction.*?ranked_clusters=.*?resolved_loci=.*?worker-member materialization.*?locus_sample_combinations=/s,
-	'locus-model construction reports scan, protein, grouping, and worker-projection subphase timings');
+	qr/locus-model catalogue-protein loading.*?loaded_proteins=.*?locus-model cluster-index scan.*?represented_seed_clusters=.*?locus-group construction.*?ranked_clusters=.*?resolved_loci=.*?worker-member materialization.*?locus_sample_combinations=/s,
+	'locus-model construction reports protein, scan, grouping, and worker-projection subphase timings');
+like($strain,
+	qr/if \(\$maxSubJob > 1\).*?phase1LocusModelFingerprint.*?loadPhase1LocusModel.*?readClstrRev\(\$cluster_index, 0, \$Gene2COG\);.*?publishPhase1LocusModel/s,
+	'a split run reuses a published locus model and otherwise rebuilds it from the complete cluster index');
+like($strain,
+	qr/member_context_map\(\\\@records, \$cl2gene\)/,
+	'split workers derive only their own member contexts around the shared locus model');
+like($strain,
+	qr/stepComplete\("locus-group construction".*?model_source=\$modelSource/s,
+	'the locus-model source is reported so divergent worker models are visible in the logs');
 like($strain,
 	qr/sub phase1SelectedGeneFingerprint.*?phase1PathStatComponent\(\$gene2taxF\).*?\$presortGenes.*?for my \$mgs \(\@specis\).*?sub phase1IndexShardFingerprint.*?phase1PathStatComponent\(\$clusterIndex\).*?phase1SelectedGeneFingerprint.*?sort keys %\{\$workerForSample\}.*?sub publishPhase1IndexShards.*?writeClstrRevBinaryShards.*?retry_rename\(\$temporary\[\$worker\], \$final\[\$worker\].*?atomic_write_text\(File::Spec->catfile\(\$base, 'manifest\.tsv'\).*?sub loadPhase1ClusterIndex/s,
 	'parent publishes provenance-bound binary worker shards atomically before the cache manifest');
@@ -749,10 +758,10 @@ like($strain,
 	qr/sub recordValidatedEmptyExtractions.*?persistentMGSInputState\(\$MGS\) eq 'missing'.*?scratchMGSInputState\(\$MGS\) ne 'missing'.*?writeNoRecoverableLociMarker\(\$SIdirs\{\$MGS\}, 'empty_extraction'\).*?\$MGSnoTreeReason\{\$MGS\} = 'no_recoverable_loci'/s,
 	'a completed Stage I persists validated no-recoverable-locus outcomes for future resumes');
 like($strain,
-	qr/\$multiSmpl > 2 && \$ngenes >= \$MGStoolowGsThr.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?tree_input_repair\.queue\.tsv.*?no catalogue-wide abort was triggered/s,
+	qr/\$multiSmpl > 2 && \$ngenes >= \$minLociPerMGS.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?tree_input_repair\.queue\.tsv.*?no catalogue-wide abort was triggered/s,
 	'insufficient tree inputs are terminally marked while incomplete triplets enter a persistent repair queue');
 like($strain,
-	qr/\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$MGStoolowGsThr.*?my \@requiredLoci = sort grep.*?\$OG = \$SelectedOutgroup\{\$MGS\}.*?\@requiredLoci < \$minimumOutgroupLoci.*?\$represented < \$minimumOutgroupLoci/s,
+	qr/\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$minLociPerMGS.*?my \@requiredLoci = sort grep.*?\$OG = \$SelectedOutgroup\{\$MGS\}.*?\@requiredLoci < \$minimumOutgroupLoci.*?\$represented < \$minimumOutgroupLoci/s,
 	'the predetermined outgroup is checked against the per-MGS core/broad demand floor');
 like($strain,
 	qr/my \$workerMGSSubset = \$recalcTrees.*?grep \{ \$MGSneedsExtraction\{\$_\} \} \@specis.*?'-MGSsubset', \$workerMGSSubset/s,
@@ -909,8 +918,17 @@ like($build_tree,
 	qr/"placeOnBackbone=i" => sub.*?"strictBackbone=i" => sub.*?-placeOnBackbone cannot be combined.*?Option -strictBackbone is deprecated/s,
 	'buildTree exposes the canonical placement switch with a guarded compatibility alias');
 like($build_tree,
-	qr/if \(\$strictBackbone\) \{\s*my \$backboneEligibility = classifyTaxonAwareCoverageEligibility.*?my \$placementEligibility = classifyTaxonAwareCoverageEligibility.*?\} else \{.*?placement disabled/s,
-	'BuildTree skips backbone and placement eligibility filtering when placement is disabled');
+	qr/my \$backboneEligibility = classifyTaxonAwareCoverageEligibility.*?if \(!\$strictBackbone && \$enforceSampleCoverage\) \{.*?delete \$samples\{\$_\} for \@coverageRemoved;.*?if \(\$strictBackbone\) \{\s*my \$placementEligibility = classifyTaxonAwareCoverageEligibility/s,
+	'BuildTree removes samples below the coverage thresholds when placement is disabled, and routes them to placement when it is not');
+like($build_tree,
+	qr/my \$excludeFlaggedSamples = 0;.*?my \$enforceSampleCoverage = 0;/s,
+	'both optional sample filters are generic mechanisms that stay off unless a caller sets a policy');
+like($strain,
+	qr/\$Tcmd \.= "-excludeFlaggedSamples \$excludeMixedStrainSamples ";\s*\$Tcmd \.= "-enforceSampleCoverage \$enforceSampleCoverage ";/s,
+	'the strain workflow is the caller that turns both BuildTree sample filters on');
+like($strain,
+	qr/my \$minLociPerMGS = \$FILTER_DEFAULT\{minimum_loci_per_mgs\};/,
+	'the per-MGS locus floor is separate from the per-sample extraction prefilter');
 like($strain,
 	qr/sub writeGeneLengthSampleSummary .*?gene_length_filter\.samples\.tsv.*?"\$\{mgs\}:\$_".*?strainGeneLengthFilter\.samples\.tsv.*?gene_length_sample_audit\\t\$geneLengthSampleSummary/s,
 	'strainWithin consolidates per-MGS length-gate decisions into a sample-wise run report');

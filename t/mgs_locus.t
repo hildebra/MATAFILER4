@@ -8,7 +8,7 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::geneCat qw(readGene2tax);
-use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate robust_depth_mask);
+use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate member_context_map robust_depth_mask);
 
 sub write_file {
 	my ($path, $contents) = @_;
@@ -175,5 +175,85 @@ is_deeply(
 	[1, 1, 1],
 	'small locus sets are not quantile-filtered',
 );
+
+
+# --- Phase-I split-worker locus-model determinism -----------------------------
+# Same-COG seeds merge using catalogue-wide co-occurrence and synteny context.
+# A split worker only holds the members of its own samples, so a model built
+# from that shard can disagree with the catalogue-wide one about locus identity.
+# strain_within.pl therefore builds the model once in the parent and publishes
+# it; these tests pin both halves of that contract.
+my $slice_protein = 'MKAILVVLLYTFATANADTLCIGYHANNSTDTVDTVLEKNVTVTHSVNLLEDKHNGKLCKL'
+	. 'RGVAPLHLGKCNIAGWILGNPECESLSTASSWSYIVETSSSDNGTCYPGDFIDYEELREQL'
+	. 'SSVSSFERFEIFPKESSWPNHNTNGVTAACSHEGKSSFYRNLLWLTEKEGSYPKLKNSYVN';
+my $slice_variant = $slice_protein;
+substr($slice_variant, $_ * 10, 1) = substr("ACDEFGHIKLMNPQRSTVWY", $_ % 20, 1)
+	for 1 .. 18;
+
+my @slice_records = (
+	{ mgs => 'MGS.9', cog => 'COG1', gene => 'g1', rank => 0 },
+	{ mgs => 'MGS.9', cog => 'COG1', gene => 'g2', rank => 1 },
+	{ mgs => 'MGS.9', cog => 'COG2', gene => 'n1', rank => 2 },
+	{ mgs => 'MGS.9', cog => 'COG3', gene => 'n2', rank => 3 },
+);
+my %slice_proteins = (
+	g1 => $slice_protein, g2 => $slice_variant,
+	n1 => $slice_protein, n2 => $slice_variant,
+);
+# smplA carries g1, smplB carries g2; both keep the same two neighbours.
+my %catalogue_members = (
+	g1 => 'smplA__ctgA_10',
+	g2 => 'smplB__ctgB_10',
+	n1 => 'smplA__ctgA_11,smplB__ctgB_11',
+	n2 => 'smplA__ctgA_12,smplB__ctgB_12',
+);
+my %worker_members = (
+	g1 => 'smplA__ctgA_10',
+	g2 => 'smplB__ctgB_10',
+	n1 => 'smplA__ctgA_11',
+	n2 => 'smplA__ctgA_12',
+);
+my %slice_options = (
+	allowed_merge_pairs => { "g1\tg2" => 1 },
+	require_complete_linkage => 1,
+	allow_confirmed_cooccurrence => 1,
+	include_member_to_seed => 0,
+	include_gene_to_locus => 0,
+);
+
+my $catalogue_model = build_locus_groups(
+	\@slice_records, \%catalogue_members, \%slice_proteins, {%slice_options});
+my $worker_model = build_locus_groups(
+	\@slice_records, \%worker_members, \%slice_proteins, {%slice_options});
+my @catalogue_loci = sort map { $_->{locus_id} }
+	grep { $_->{cog} eq 'COG1' } @{$catalogue_model->{groups}};
+my @worker_loci = sort map { $_->{locus_id} }
+	grep { $_->{cog} eq 'COG1' } @{$worker_model->{groups}};
+is_deeply(\@catalogue_loci, ['MGS.9|COG1|g1'],
+	'catalogue-wide synteny context merges a confirmed same-COG pair into one locus');
+is_deeply(\@worker_loci, ['MGS.9|COG1|g1', 'MGS.9|COG1|g2'],
+	'a sample-restricted shard splits one locus in two, so the parent must publish the model');
+
+my $context_only = build_locus_groups(
+	\@slice_records, \%catalogue_members, \%slice_proteins,
+	{%slice_options, include_member_context => 0});
+is_deeply(
+	[sort map { $_->{locus_id} } @{$context_only->{groups}}],
+	[sort map { $_->{locus_id} } @{$catalogue_model->{groups}}],
+	'omitting member contexts does not change the published locus model',
+);
+is_deeply($context_only->{member_context}, {},
+	'callers can skip the catalogue-wide member contexts they never consume');
+
+# Member contexts describe one member's own contig neighbourhood, so a worker
+# can rebuild exactly its own share around the published model.
+my $worker_contexts = member_context_map(\@slice_records, \%worker_members);
+my %expected_worker_contexts = map {
+	$_ => $catalogue_model->{member_context}{$_}
+} grep { /^smplA__/ } keys %{$catalogue_model->{member_context}};
+is_deeply($worker_contexts, \%expected_worker_contexts,
+	'member contexts derived from one worker shard match the catalogue-wide contexts');
+ok(scalar(keys %{$worker_contexts}),
+	'the worker shard actually produced member contexts to compare');
 
 done_testing();

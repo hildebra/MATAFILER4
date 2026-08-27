@@ -241,6 +241,112 @@ my @command = (
 	'-rateMergeMinLoci', 1, '-rateMergeMinSites', 1,
 );
 is(system(@command), 0, 'taxon-aware buildTree smoke workflow completes');
+
+# Mixed-strain exclusion must remove exactly the samples that extraction QC
+# flagged as ambiguous/conspecific, and must leave sparse samples alone: s3 is
+# well covered (four loci) so only the mixture rule can drop it, while s6 holds
+# a single mostly-N locus and may only ever be judged by the coverage filters.
+# Excluded samples are dropped before any length statistic is taken, so they
+# never receive a row in the per-sample gene-length audit.
+sub gene_length_audit_samples {
+	my ($directory) = @_;
+	my $path = File::Spec->catfile(
+		$directory, 'phylo', 'gene_length_filter.samples.tsv');
+	return {} unless -s $path;
+	my %samples;
+	for my $line (split /\n/, slurp($path)) {
+		next if $line =~ /^sample\t/ || $line !~ /\S/;
+		$samples{$1} = 1 if $line =~ /^([^\t]+)\t/;
+	}
+	return \%samples;
+}
+my $sampleQC = File::Spec->catfile($temporary, 'sampleQC.tsv');
+write_file($sampleQC, join("\n",
+	join("\t", qw(MGS sample status ambiguous_fraction csp_fraction validated_loci)),
+	join("\t", 'MGS1', 's3', 'placement', '0.400000', '0.000000', 4),
+	join("\t", 'MGS1', 's1', 'backbone', '0.000000', '0.000000', 5),
+	join("\t", 'MGS1', 's6', 'backbone', '0.000000', '0.000000', 1),
+)."\n");
+my $mixedOutput = File::Spec->catdir($temporary, 'mixed-strain-output');
+my @mixedCommand = (@command, '-sampleQC', $sampleQC, '-excludeFlaggedSamples', 1);
+for my $index (0 .. $#mixedCommand - 1) {
+	$mixedCommand[$index + 1] = $mixedOutput
+		if $mixedCommand[$index] eq '-outD';
+}
+is(system(@mixedCommand), 0,
+	'BuildTree completes with mixed-strain sample exclusion enabled');
+my $mixedSamples = gene_length_audit_samples($mixedOutput);
+ok(scalar(keys %{$mixedSamples}), 'the mixed-strain run published a per-sample audit');
+ok(!$mixedSamples->{s3},
+	'a well-covered sample flagged as mixed strain never reaches the alignment inputs');
+ok($mixedSamples->{s6},
+	'a sparse but unflagged sample is retained, so exclusion never uses locus counts');
+ok($mixedSamples->{s1} && $mixedSamples->{s2},
+	'unflagged samples are unaffected by mixed-strain exclusion');
+my $mixedAttrition = File::Spec->catfile(
+	$mixedOutput, 'phylo', 'selection_attrition.tsv');
+ok(-s $mixedAttrition, 'mixed-strain exclusion still publishes a selection attrition audit');
+like(slurp($mixedAttrition), qr/^qc_excluded_samples\t1$/m,
+	'the attrition audit counts the excluded mixed-strain sample');
+like(slurp($mixedAttrition), qr/^qc_excluded_sequences\t[1-9]\d*$/m,
+	'the attrition audit counts the sequences removed with it');
+
+my $keptOutput = File::Spec->catdir($temporary, 'mixed-strain-retained-output');
+my @keptCommand = (@mixedCommand, '-excludeFlaggedSamples', 0);
+for my $index (0 .. $#keptCommand - 1) {
+	$keptCommand[$index + 1] = $keptOutput
+		if $keptCommand[$index] eq '-outD';
+}
+is(system(@keptCommand), 0,
+	'BuildTree completes with mixed-strain sample exclusion disabled');
+ok(gene_length_audit_samples($keptOutput)->{s3},
+	'-excludeFlaggedSamples 0 restores the flagged sample');
+ok(!length($sampleQC) || slurp($mixedAttrition) =~ /^coverage_excluded_samples\t0$/m,
+	'flagged-sample exclusion does not imply coverage filtering');
+
+# The coverage filter is a separate, generic mechanism driven by the ordinary
+# -GenesPerSpecies/-relativeNTFraction/-NTfiltCount thresholds. It is off unless
+# a caller asks for it, so that BuildTree keeps its previous behaviour for the
+# broad marker-tree scenarios that set no such policy.
+sub attrition_metric {
+	my ($directory, $metric) = @_;
+	my $path = File::Spec->catfile($directory, 'phylo', 'selection_attrition.tsv');
+	return unless -s $path;
+	my ($value) = slurp($path) =~ /^\Q$metric\E\t(\S+)$/m;
+	return $value;
+}
+my $coverageOutput = File::Spec->catdir($temporary, 'coverage-filter-output');
+my @coverageCommand = (@command,
+	'-relativeNTFraction', 0.9, '-enforceSampleCoverage', 1);
+for my $index (0 .. $#coverageCommand - 1) {
+	$coverageCommand[$index + 1] = $coverageOutput
+		if $coverageCommand[$index] eq '-outD';
+}
+is(system(@coverageCommand), 0, 'BuildTree completes with the coverage filter enforced');
+SKIP: {
+	# The filter runs on post-alignment metrics, so it has nothing to act on
+	# where no locus could be aligned (for example without a runnable MSAfix).
+	my $alignedLoci = attrition_metric($coverageOutput, 'post_qc_loci') // 0;
+	skip 'no locus was aligned, so the coverage filter had no input', 2
+		unless $alignedLoci =~ /^\d+$/ && $alignedLoci > 0;
+	ok(-s File::Spec->catfile($coverageOutput, 'phylo',
+			'taxon_aware_backbone_eligibility.tsv'),
+		'the coverage audit is published whether or not placement is enabled');
+	cmp_ok(attrition_metric($coverageOutput, 'coverage_excluded_samples'), '>', 0,
+		'a demanding -relativeNTFraction removes low-coverage samples from the tree');
+}
+
+my $coverageOffOutput = File::Spec->catdir($temporary, 'coverage-default-output');
+my @coverageOffCommand = (@command, '-relativeNTFraction', 0.9);
+for my $index (0 .. $#coverageOffCommand - 1) {
+	$coverageOffCommand[$index + 1] = $coverageOffOutput
+		if $coverageOffCommand[$index] eq '-outD';
+}
+is(system(@coverageOffCommand), 0,
+	'BuildTree completes with the coverage filter left at its default');
+is(attrition_metric($coverageOffOutput, 'coverage_excluded_samples'), 0,
+	'the coverage filter removes nothing unless a caller enables it');
+
 my $postprocessedMSAFixRuns = (() = slurp($msaFixCount) =~ /^/gm);
 
 my $msaOnlyOutput = File::Spec->catdir($temporary, 'msa-only-output');

@@ -8,6 +8,7 @@ use Exporter qw(import);
 our @EXPORT_OK = qw(
 	build_locus_groups
 	choose_locus_candidate
+	member_context_map
 	protein_kmer_similarity
 	robust_depth_mask
 );
@@ -72,32 +73,38 @@ sub _find {
 	return $parent->{$node};
 }
 
-sub build_locus_groups {
-	my ($records, $cluster_members, $proteins, $options) = @_;
+#Scan the catalogue members of every ranked seed once and derive the three
+#summaries the grouping needs.  Seed-level summaries (sample_set, gene_context)
+#aggregate across every sample that carries the seed, so they are only correct
+#when $cluster_members covers the whole catalogue.  Member-level summaries
+#(member_seed, member_context) describe a member's own contig neighbourhood and
+#are therefore identical whether they are derived from the complete catalogue or
+#from a shard holding every member of the requested samples.
+sub _scan_members {
+	my ($records, $cluster_members, $options) = @_;
 	$options ||= {};
-	my $include_member_to_seed = exists($options->{include_member_to_seed})
-		? $options->{include_member_to_seed} : 1;
-	my $include_gene_to_locus = exists($options->{include_gene_to_locus})
-		? $options->{include_gene_to_locus} : 1;
 	my $context_distance = $options->{context_distance} // 5;
-	my $min_length_ratio = $options->{min_length_ratio} // 0.75;
-	my $min_sequence_with_context = $options->{min_sequence_with_context} // 0.55;
-	my $min_sequence_without_context = $options->{min_sequence_without_context} // 0.72;
-	my $min_context_similarity = $options->{min_context_similarity} // 0.25;
-	my $allowed_merge_pairs = $options->{allowed_merge_pairs};
-	my $require_complete_linkage = $options->{require_complete_linkage} // 0;
-	my $allow_confirmed_cooccurrence =
-		$options->{allow_confirmed_cooccurrence} // 0;
+	my $include_member_to_seed = $options->{include_member_to_seed} ? 1 : 0;
+	my $include_member_context = $options->{include_member_context} ? 1 : 0;
+	my $include_gene_context = $options->{include_gene_context} ? 1 : 0;
+	my $want_positions = $include_member_context || $include_gene_context;
+	# Callers that hold a throwaway catalogue-wide membership map can release each
+	# comma-joined member string as it is consumed instead of keeping the whole
+	# map resident beside the summaries built from it.  Ranked records name each
+	# seed at most once, so a consumed entry is never needed again.
+	my $consume = $options->{consume_cluster_members} ? 1 : 0;
 
 	my (%sample_set, %member_seed, %positions);
 	for my $record (@{$records || []}) {
 		my $gene = $record->{gene};
 		next unless defined($gene) && length($gene);
-		for my $member (_members($cluster_members->{$gene})) {
+		for my $member (_members($consume
+				? delete($cluster_members->{$gene}) : $cluster_members->{$gene})) {
 			my ($sample, $contig, $position, $clean_member) = _member_parts($member);
 			next unless defined $sample;
 			$sample_set{$gene}{$sample} = 1;
 			$member_seed{$clean_member} = $gene if $include_member_to_seed;
+			next unless $want_positions;
 			next unless defined($contig) && defined($position);
 			push @{$positions{$sample}{$contig}}, {
 				position => $position,
@@ -120,8 +127,8 @@ sub build_locus_groups {
 					next if $i == $j;
 					next if abs($entries[$i]{position} - $entries[$j]{position}) > $context_distance;
 					my $token = join('|', $entries[$j]{mgs}, $entries[$j]{cog});
-					$gene_context{$entries[$i]{gene}}{$token}++;
-					$member_context{$entries[$i]{member}}{$token}++;
+					$gene_context{$entries[$i]{gene}}{$token}++ if $include_gene_context;
+					$member_context{$entries[$i]{member}}{$token}++ if $include_member_context;
 				}
 			}
 		}
@@ -129,6 +136,53 @@ sub build_locus_groups {
 	# Position entries can dominate peak memory for large catalogues and are no
 	# longer needed after their compact context summaries have been built.
 	%positions = ();
+	return (\%sample_set, \%member_seed, \%gene_context, \%member_context);
+}
+
+#Member contexts for one sample slice, without the catalogue-wide seed summaries
+#that grouping needs.  Split extraction workers use this to rebuild the context
+#of their own members around a locus model published by the parent.
+sub member_context_map {
+	my ($records, $cluster_members, $options) = @_;
+	$options ||= {};
+	my (undef, undef, undef, $member_context) =
+		_scan_members($records, $cluster_members, {
+			context_distance => $options->{context_distance} // 5,
+			include_member_to_seed => 0,
+			include_member_context => 1,
+			include_gene_context => 0,
+		});
+	return $member_context;
+}
+
+sub build_locus_groups {
+	my ($records, $cluster_members, $proteins, $options) = @_;
+	$options ||= {};
+	my $include_member_context = exists($options->{include_member_context})
+		? $options->{include_member_context} : 1;
+	my $include_member_to_seed = exists($options->{include_member_to_seed})
+		? $options->{include_member_to_seed} : 1;
+	my $include_gene_to_locus = exists($options->{include_gene_to_locus})
+		? $options->{include_gene_to_locus} : 1;
+	my $context_distance = $options->{context_distance} // 5;
+	my $min_length_ratio = $options->{min_length_ratio} // 0.75;
+	my $min_sequence_with_context = $options->{min_sequence_with_context} // 0.55;
+	my $min_sequence_without_context = $options->{min_sequence_without_context} // 0.72;
+	my $min_context_similarity = $options->{min_context_similarity} // 0.25;
+	my $allowed_merge_pairs = $options->{allowed_merge_pairs};
+	my $require_complete_linkage = $options->{require_complete_linkage} // 0;
+	my $allow_confirmed_cooccurrence =
+		$options->{allow_confirmed_cooccurrence} // 0;
+	my $consume_cluster_members = $options->{consume_cluster_members} ? 1 : 0;
+
+	my ($sample_set, $member_seed, $gene_context, $member_context) =
+		_scan_members($records, $cluster_members, {
+			context_distance => $context_distance,
+			include_member_to_seed => $include_member_to_seed,
+			include_member_context => $include_member_context,
+			include_gene_context => 1,
+			consume_cluster_members => $consume_cluster_members,
+		});
 
 	my %by_mgs_cog;
 	for my $record (@{$records || []}) {
@@ -145,7 +199,7 @@ sub build_locus_groups {
 			my (%parent, %component_samples);
 			for my $seed (@seeds) {
 				$parent{$seed->{gene}} = $seed->{gene};
-				$component_samples{$seed->{gene}} = { %{$sample_set{$seed->{gene}} || {}} };
+				$component_samples{$seed->{gene}} = { %{$sample_set->{$seed->{gene}} || {}} };
 			}
 
 			my @edges;
@@ -158,7 +212,7 @@ sub build_locus_groups {
 						&& $allowed_merge_pairs->{$pair_key};
 					next if defined($allowed_merge_pairs)
 						&& !$pair_is_confirmed;
-					my $cooccurs = grep { exists $sample_set{$right}{$_} } keys %{$sample_set{$left} || {}};
+					my $cooccurs = grep { exists $sample_set->{$right}{$_} } keys %{$sample_set->{$left} || {}};
 					next if $cooccurs
 						&& !($allow_confirmed_cooccurrence && $pair_is_confirmed);
 					my ($left_seq, $right_seq) = ($proteins->{$left}, $proteins->{$right});
@@ -168,9 +222,9 @@ sub build_locus_groups {
 						: length($right_seq) / length($left_seq);
 					next if $length_ratio < $min_length_ratio;
 					my $sequence_score = protein_kmer_similarity($left_seq, $right_seq);
-					my $context_score = _set_similarity($gene_context{$left}, $gene_context{$right});
-					my $has_context = scalar(keys %{$gene_context{$left} || {}}) >= 2
-						&& scalar(keys %{$gene_context{$right} || {}}) >= 2;
+					my $context_score = _set_similarity($gene_context->{$left}, $gene_context->{$right});
+					my $has_context = scalar(keys %{$gene_context->{$left} || {}}) >= 2
+						&& scalar(keys %{$gene_context->{$right} || {}}) >= 2;
 					next if $has_context
 						? ($sequence_score < $min_sequence_with_context || $context_score < $min_context_similarity)
 						: ($sequence_score < $min_sequence_without_context);
@@ -226,7 +280,7 @@ sub build_locus_groups {
 				my %context;
 				for my $seed (@ordered) {
 					$gene_to_locus{$seed->{gene}} = $locus_id if $include_gene_to_locus;
-					$context{$_} += $gene_context{$seed->{gene}}{$_} for keys %{$gene_context{$seed->{gene}} || {}};
+					$context{$_} += $gene_context->{$seed->{gene}}{$_} for keys %{$gene_context->{$seed->{gene}} || {}};
 				}
 				$locus_context{$locus_id} = \%context;
 				my $group = {
@@ -240,8 +294,8 @@ sub build_locus_groups {
 			# All comparisons for this MGS/COG are complete.  Release the
 			# expanded per-seed inputs as the compact groups are published.
 			for my $seed (@seeds) {
-				delete $sample_set{$seed->{gene}};
-				delete $gene_context{$seed->{gene}};
+				delete $sample_set->{$seed->{gene}};
+				delete $gene_context->{$seed->{gene}};
 			}
 		}
 	}
@@ -253,8 +307,8 @@ sub build_locus_groups {
 		groups => \@groups,
 		gene_to_locus => \%gene_to_locus,
 		locus_by_id => \%locus_by_id,
-		member_to_seed => \%member_seed,
-		member_context => \%member_context,
+		member_to_seed => $member_seed,
+		member_context => $member_context,
 		locus_context => \%locus_context,
 		merged_seeds => $merged_seeds,
 		incomplete_linkage_rejections => $incomplete_linkage_rejections,

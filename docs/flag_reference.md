@@ -517,10 +517,13 @@ Phase-I input contracts use cross-node-stable file identity: canonical path, ino
 | `-presortGenes` | integer | `1200` | stable | Potential loci considered before final tree selection. |
 | `-maxGenes` | integer | `600` | stable | Maximum validated loci retained per MGS/sample; values `<=0` remove this cap without disabling QC. |
 | `-treeLocusBudget` | integer | `400` | stable | Maximum final loci selected for each tree. |
-| `-MGSminGenesPSmpl` | integer | `8` | stable | Minimum validated loci retained per MGS/sample. |
+| `-MGSminGenesPSmpl` | integer | `8` | stable | Extraction prefilter: minimum validated loci a sample needs for one MGS before its records are written and aligned. Not the inclusion policy, which is `-GenesPerSpecies`/`-relativeNTFraction`/`-NTfiltCount` at tree time. |
 | `-multiGeneSmplMax` | float | `0.25` | stable | Maximum ambiguous/multigene-locus fraction per sample. |
 | `-conspGeneSmplMax` | float | `0.05` | stable | Maximum conspecific-signal locus fraction per sample. |
-| `-minBadLociPSmpl` | integer | `3` | stable | Minimum bad loci before a sample is deferred. |
+| `-minBadLociPSmpl` | integer | `3` | stable | Minimum bad loci before a sample is flagged as mixed strain. |
+| `-excludeMixedStrainSamples` | integer | `1` | stable | Drop samples that breach `-multiGeneSmplMax` or `-conspGeneSmplMax` from their MGS tree, by passing `-excludeFlaggedSamples 1` to BuildTree. Independent of `-placeOnBackbone`, and never considers locus counts. |
+| `-enforceSampleCoverage` | integer | `1` | stable | Make `-GenesPerSpecies`, `-relativeNTFraction` and `-NTfiltCount` the primary sample-inclusion filter by passing `-enforceSampleCoverage 1` to BuildTree. Set to `0` to retain every aligned sample regardless of coverage. |
+| `-minLociPerMGS` | integer | `8` | stable | Distinct loci an MGS needs before a tree is attempted at all. A property of the MGS, previously conflated with the per-sample `-MGSminGenesPSmpl` floor. |
 | `-breakpointGeneFlank` | integer | `50` | stable | Bases around mapping breakpoints in which genes are masked. |
 | `-abundanceMinLoci` | integer | `8` | stable | Minimum loci for robust abundance-pattern filtering. |
 | `-abundanceMinFold` | float | `0.333333…` | stable | Lowest accepted locus/median depth ratio. |
@@ -717,7 +720,9 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-placementMinOverlap` | integer | `10000` | advanced | Absolute minimum called alignment positions required both before placement and in actual overlap with the inferred backbone. This complements the relative locus/NT gates and is the primary sparse-placement reliability control. |
 | `-epaPendantOutlierFactor` | float | `5` | advanced | Exclude EPA-ng placements whose pendant branch exceeds this multiple of the non-outgroup backbone terminal-branch Q95. Set to `0` to disable. |
 | `-epaPendantMinThreshold` | float | `0.02` | advanced | Minimum adaptive pendant-branch cutoff in substitutions/site, preventing over-filtering of very compact backbones. |
-| `-sampleQC` | string |  | advanced | Optional sample-QC audit table. A placement flag is retained for reporting but removes a sample only when it is also a severe coverage outlier. |
+| `-sampleQC` | string |  | advanced | Optional per-sample QC table. Rows marked `placement` name samples the caller judged unfit for the tree; `-excludeFlaggedSamples` decides whether they are dropped. Written by `strain_within.pl`; other callers can omit it. |
+| `-excludeFlaggedSamples` | integer | `0` | stable | Remove samples that the `-sampleQC` table marks unfit, before any length or prevalence statistic is taken, so they cannot shift the per-locus Q90 length reference or locus occupancy. A generic mechanism: what counts as unfit is decided by the caller that writes the table. No-op without `-sampleQC`. Never considers locus counts or coverage. |
+| `-enforceSampleCoverage` | integer | `0` | stable | Apply `-GenesPerSpecies`, `-relativeNTFraction` and `-NTfiltCount` as a sample removal in the taxon-aware branch, which otherwise retains every sample holding one informative site. Matches what the `-taxonAwareLocusSelection 0` prefilter has always done. Inactive under `-placeOnBackbone 1`, where those samples are routed to placement instead. Off by default so callers that set no inclusion policy keep their previous behaviour. |
 | `-postAlignmentLocusQC` | integer | `0` between species; `1` within species | stable | Run native MSAfix locus-comparability QC before multi-locus concatenation. Broad trees retain every prepared locus unless QC is explicitly enabled. |
 | `-postAlignmentMinSequences` | integer | `3` | stable | Minimum comparable sequences required for an aligned locus. |
 | `-postAlignmentMinOccupancy` | float | `0.35` | stable | Minimum fraction of unambiguous alignment cells; permissive for metagenomic loci. |
