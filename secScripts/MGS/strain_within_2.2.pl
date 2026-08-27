@@ -67,7 +67,8 @@ if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]
 #.44: submit significant-phylogeny figures with the strain-only postprocessing phase
 #.45: retry incomplete R-analysis batches twice and double memory after Slurm OOMs
 #.46: independently redo strainStats or PopGenStats without resetting all postprocessing
-my $version = 0.46;
+#.47: isolate each MGS analysis so one failure cannot abort its batch, and stop nounset from killing conda activation
+my $version = 0.47;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $redoStrainStats = 0;
@@ -326,7 +327,23 @@ my $batchSampleBudget = $treeSamples{$largestMGS};
 
 # qsubSystem also enables -e and pipefail, but repeat the complete strict mode
 # in every generated R-analysis script so a Slurm OOM exit is never ignored.
-my $cmdPrelude = "set -euo pipefail\nulimit -s 20000\n";
+# No `set -u`: every path in these generated scripts is a shell-quoted literal
+# produced here, so nounset protects nothing, while the conda/micromamba
+# activation that getProgPaths prepends to each R command sources environment
+# hooks that are not nounset-clean. One such hook referencing an unset variable
+# aborted whole batches before any analysis started.
+# The stack limit is an optimisation, not a precondition: a compute node whose
+# hard limit is lower must not fail the job.
+my $cmdPrelude = "set -eo pipefail\nulimit -s 20000 2>/dev/null || true\n"
+	."MF_ANALYSIS_FAILURES=0\n";
+# Every MGS in a batch is attempted, but the batch still reports failure so that
+# Slurm accounting keeps seeing a failed job and the OOM memory escalation below
+# can act on it. Retry selection itself is driven by missing stores, so a batch
+# that failed only partly is retried and skips the MGS that already succeeded.
+my $cmdEpilogue = "if [ \"\$MF_ANALYSIS_FAILURES\" -gt 0 ]; then\n"
+	."echo \"\$MF_ANALYSIS_FAILURES analysis/analyses failed in this batch\" >&2\n"
+	."exit 1\n"
+	."fi\n";
 my %analysisAttempted;
 my ($reusedStrainStats, $reusedPopGenStats) = (0, 0);
 my $strainStatsR = getProgPaths("treeSubGrpsR");
@@ -338,6 +355,25 @@ my %submittedRAnalysisJobs;
 my %submittedByAnalysis;
 my %rAnalysisBatches;
 my $wrHead=1;
+# One failing MGS must not end its batch. Running an analysis inside a subshell
+# whose exit status is tested suspends the batch-level `set -e` for everything
+# inside it, so the batch continues with the next MGS and the parent's per-store
+# audit then names exactly the MGS that failed, instead of every MGS that the
+# aborted batch never reached. The store remains the authoritative completion
+# artifact, so it is what the subshell's status is taken from.
+my $isolatedAnalysisBlock = sub {
+	my ($body, $store, $label, $logPath) = @_;
+	die "Isolated analysis body must end in a newline\n" unless $body =~ /\n\z/;
+	return "if (\n" . $body
+		. "test -s " . shellQuote($store) . "\n"
+		. "); then\n"
+		. "echo " . shellQuote("Completed $label") . "\n"
+		. "else\n"
+		. "echo " . shellQuote("FAILED $label; batch continues"
+			. (defined($logPath) && length($logPath) ? "; see $logPath" : "")) . " >&2\n"
+		. "MF_ANALYSIS_FAILURES=\$((MF_ANALYSIS_FAILURES + 1))\n"
+		. "fi\n";
+};
 my $recordRAnalysisJob = sub {
 	my ($analysisKind, $dependency, $label, $cores, $memory, $jobRecords) = @_;
 	return '' unless $doSubmit && ($QSBoptHR->{qmode} || '') eq 'slurm';
@@ -356,6 +392,7 @@ my $recordRAnalysisJob = sub {
 };
 my $submitRAnalysisBatch = sub {
 	my ($analysisKind, $script, $batchCmd, $batchCores, $batchMemory, $batchLabel, $stores) = @_;
+	$batchCmd .= $cmdEpilogue;
 	my ($dep, $qcmd) = qsubSystem(
 		$script, $batchCmd, $batchCores, $batchMemory, $batchLabel, "", "", 1, [], $QSBoptHR);
 	my $jobID = $recordRAnalysisJob->(
@@ -456,9 +493,9 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		$cmd .= "if ! test -s ".shellQuote($analysisStore)."; then\n";
 		$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStore))."\n";
 		$cmd .= "echo ".shellQuote("Starting strainStats for $d with $jobCores core(s)")."\n";
-		$cmd .= "$strainStatsR --path ".shellQuote($destD)." --tree ".shellQuote("../phylo/$defTree")." --taxN ".shellQuote($d)." $OGstr --map ".shellQuote($refMap)." --metagStats ".shellQuote($MGstats)." --abMat ".shellQuote($abMatrix)." --ncore $jobCores --siteMode 1 --MFDir ".shellQuote($MGSTKdir)." --wrColNms $wrHead --discPermTests ".shellQuote($DiscTests)." --contPermTests ".shellQuote($ContTests)." --familyCol ".shellQuote($familyVar)." --groupStabilityVars ".shellQuote($groupStabilityVars)." > ".shellQuote($analysisLog)."\n";
-		$cmd .= "test -s ".shellQuote($analysisStore)."\n";
-		$cmd .= "echo ".shellQuote("Completed strainStats for $d")."\n";
+		$cmd .= $isolatedAnalysisBlock->(
+			"$strainStatsR --path ".shellQuote($destD)." --tree ".shellQuote("../phylo/$defTree")." --taxN ".shellQuote($d)." $OGstr --map ".shellQuote($refMap)." --metagStats ".shellQuote($MGstats)." --abMat ".shellQuote($abMatrix)." --ncore $jobCores --siteMode 1 --MFDir ".shellQuote($MGSTKdir)." --wrColNms $wrHead --discPermTests ".shellQuote($DiscTests)." --contPermTests ".shellQuote($ContTests)." --familyCol ".shellQuote($familyVar)." --groupStabilityVars ".shellQuote($groupStabilityVars)." > ".shellQuote($analysisLog)."\n",
+			$analysisStore, "strainStats for $d", $analysisLog);
 		$cmd .= "fi\n";
 		$batchStores->{$d} = $analysisStore;
 		$analysisAttempted{$d}{strainStats} = { store => $analysisStore };
@@ -483,9 +520,9 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		$popGenCommand .= " --legacy-text-output" if $popGenLegacyTextOutput;
 		my $strainFile = "$destD/IQtree_allsites.strains.txt";
 		# PopGenStats owns validation and fallback behavior for this optional input.
-		$cmd .= "$popGenCommand --strain-file ".shellQuote($strainFile)."\n";
-		$cmd .= "test -s ".shellQuote($popGenStore)."\n";
-		$cmd .= "echo ".shellQuote("Completed popGenStats for $d")."\n";
+		$cmd .= $isolatedAnalysisBlock->(
+			"$popGenCommand --strain-file ".shellQuote($strainFile)."\n",
+			$popGenStore, "popGenStats for $d");
 		$cmd .= "fi\n";
 		$batchStores->{$d} = $popGenStore;
 		$analysisAttempted{$d}{popGenStats} = { store => $popGenStore };

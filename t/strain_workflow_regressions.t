@@ -312,7 +312,7 @@ unlike($strain2, qr/open my \$summary_fh.*?\$TXTreport/s,
 unlike($strain2, qr/test -s "\.shellQuote\(\$analysisReport\)/,
 	'the legacy text report is not required for RDS-based completion');
 like($strain2,
-	qr/"popGenStats=i".*?"popGenStrictOutgroup=i".*?"popGenGeneticCode=i".*?"popGenCodonStart=i".*?"popGenSeed=i".*?"popGenLegacyTextOutput=i".*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?--ncore \$jobCores.*?--genetic-code \$popGenGeneticCode.*?--codon-start \$popGenCodonStart.*?--seed \$popGenSeed.*?--individual-column .*?\$individualVar.*?--outgroup .*?\$OG.*?--strict-outgroup.*?--legacy-text-output.*?\$strainFile = "\$destD\/IQtree_allsites\.strains\.txt".*?PopGenStats owns validation and fallback behavior.*?\$popGenCommand --strain-file .*?\$strainFile.*?test -s .*?\$popGenStore/s,
+	qr/"popGenStats=i".*?"popGenStrictOutgroup=i".*?"popGenGeneticCode=i".*?"popGenCodonStart=i".*?"popGenSeed=i".*?"popGenLegacyTextOutput=i".*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?--ncore \$jobCores.*?--genetic-code \$popGenGeneticCode.*?--codon-start \$popGenCodonStart.*?--seed \$popGenSeed.*?--individual-column .*?\$individualVar.*?--outgroup .*?\$OG.*?--strict-outgroup.*?--legacy-text-output.*?\$strainFile = "\$destD\/IQtree_allsites\.strains\.txt".*?PopGenStats owns validation and fallback behavior.*?\$isolatedAnalysisBlock->\(\s*"\$popGenCommand --strain-file .*?\$strainFile.*?\$popGenStore/s,
 	'population genetics forwards parallel, outgroup, codon, seed, identity, and the strain-file path to its durable RDS workflow');
 like($strain2,
 	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?if \(\$doPopGenStats\) \{.*?\$waitForAnalysis->\('popGenStats'\);.*?my \$shouldCombinePopGenStats = \$forcePopGenStats \|\| \$popGenTaskCount > 0 \|\| !-s \$popGenSummaryTab;.*?if \(\$shouldCombinePopGenStats\) \{.*?combineResults\(1\);.*?\} else \{.*?Reusing existing combined PopGenStats overview.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
@@ -375,8 +375,28 @@ like($strain2,
 	'explicit rewrites invalidate the submitted phylogeny-figure checkpoint');
 
 like($strain2,
-	qr/my \$cmdPrelude = "set -euo pipefail\\nulimit -s 20000\\n";/s,
-	'generated R-analysis scripts explicitly preserve non-zero R exits, including Slurm OOM termination');
+	qr/my \$cmdPrelude = "set -eo pipefail\\nulimit -s 20000 2>\/dev\/null \|\| true\\n"\s*\."MF_ANALYSIS_FAILURES=0\\n";/s,
+	'generated R-analysis scripts keep errexit but drop nounset and treat the stack limit as advisory');
+unlike($strain2, qr/set -euo pipefail/,
+	'nounset never reaches the generated scripts, whose conda activation sources hooks that are not nounset-clean');
+like($strain2,
+	qr/my \$isolatedAnalysisBlock = sub \{.*?"if \(\\n" \. \$body.*?"test -s " \. shellQuote\(\$store\).*?"\); then\\n".*?MF_ANALYSIS_FAILURES=\\\$\(\(MF_ANALYSIS_FAILURES \+ 1\)\)/s,
+	'each MGS analysis runs in a tested subshell, so one failure cannot abort the rest of its batch');
+like($strain2,
+	qr/my \$cmdEpilogue = .*?MF_ANALYSIS_FAILURES.*?-gt 0.*?exit 1/s,
+	'a batch that attempted every MGS still reports failure so Slurm OOM escalation keeps working');
+like($strain2,
+	qr/\$batchCmd \.= \$cmdEpilogue;\s*my \(\$dep, \$qcmd\) = qsubSystem\(.*?command => \$batchCmd,/s,
+	'the retried command includes the same failure epilogue as the original submission');
+my %isolatedAnalysisCommand = (
+	strainStats => 'strainStatsR', popGenStats => 'popGenCommand',
+);
+for my $analysis (sort keys %isolatedAnalysisCommand) {
+	my $variable = $isolatedAnalysisCommand{$analysis};
+	like($strain2,
+		qr/\$cmd \.= \$isolatedAnalysisBlock->\(\s*"\$\Q$variable\E\b/,
+		"$analysis analyses are individually isolated within their batch");
+}
 unlike($strain2, qr/MATAFILER_R_ANALYSIS_CORES/,
 	'R and PopGenStats commands use the resolved allocated core count rather than an unexpanded shell variable');
 unlike($strain2, qr/\$batchSize/,
