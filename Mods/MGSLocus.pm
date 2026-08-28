@@ -29,9 +29,13 @@ sub _members {
 	my ($value) = @_;
 	return () unless defined $value;
 	my @members = ref($value) eq 'ARRAY' ? @{$value} : split(/,/, $value);
+	# Guarded rather than unconditional: this runs once per catalogue member, and
+	# at catalogue scale two substitutions per member is a measurable share of the
+	# whole scan. Both guards are exact - a substitution that would not match is
+	# simply skipped.
 	for (@members) {
-		s/^>//;
-		s/^\s+|\s+$//g;
+		s/^>// if substr($_, 0, 1) eq '>';
+		s/^\s+|\s+$//g if /\s/;
 	}
 	return grep { length } @members;
 }
@@ -106,6 +110,25 @@ sub _scan_members {
 	# seed at most once, so a consumed entry is never needed again.
 	my $consume = $options->{consume_cluster_members} ? 1 : 0;
 
+	# Only a contig that already carries a candidate member can contribute a
+	# neighbour token to one. When the caller names a small candidate set out of
+	# millions of seeds, collecting those contigs first turns the rest of the scan
+	# into one string test per member instead of a parse and an allocation. The
+	# candidate pass reads without consuming, so the main pass still sees them.
+	my (%relevantContigs, $prefilterContigs);
+	if ($context_seeds && $want_positions && !$include_member_context) {
+		for my $record (@{$records || []}) {
+			my $gene = $record->{gene};
+			next unless defined($gene) && length($gene) && $context_seeds->{$gene};
+			for my $member (_members($cluster_members->{$gene})) {
+				my $cut = rindex($member, '_');
+				next if $cut <= 0;
+				$relevantContigs{substr($member, 0, $cut)} = 1;
+			}
+		}
+		$prefilterContigs = 1;
+	}
+
 	my (%member_seed, %positions);
 	for my $record (@{$records || []}) {
 		my $gene = $record->{gene};
@@ -113,6 +136,13 @@ sub _scan_members {
 		my $wanted = !$context_seeds || $context_seeds->{$gene} ? 1 : 0;
 		for my $member (_members($consume
 				? delete($cluster_members->{$gene}) : $cluster_members->{$gene})) {
+			if ($prefilterContigs && !$wanted) {
+				# Nothing outside a candidate's contig is ever read, and a
+				# non-candidate contributes no seed-level summary of its own.
+				my $cut = rindex($member, '_');
+				next if $cut <= 0;
+				next unless $relevantContigs{substr($member, 0, $cut)};
+			}
 			my ($sample, $contig, $position, $clean_member) = _member_parts($member);
 			next unless defined $sample;
 			$sample_set->{$gene}{$sample} = 1 if $wanted;

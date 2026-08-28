@@ -306,4 +306,49 @@ is_deeply($streamed{gene_context}{g1}, $unrestricted{gene_context}{g1},
 cmp_ok(scalar(keys %{$unrestricted{gene_context}}), '>',
 	scalar(keys %{$streamed{gene_context}}),
 	'the unrestricted scan really does retain more than the restricted one');
+
+# The catalogue-wide scan visits every member of every seed, so its per-member
+# cost decides whether the parent finishes in minutes or hours. Restricting the
+# expensive work to contigs that actually carry a candidate must not change what
+# is produced: a neighbour on any other contig can never reach a candidate.
+my %prefilter_records = (
+	records => [
+		{ mgs => 'MGS.7', cog => 'COGA', gene => 'c1', rank => 0 },
+		{ mgs => 'MGS.7', cog => 'COGA', gene => 'c2', rank => 1 },
+		{ mgs => 'MGS.7', cog => 'COGB', gene => 'near1', rank => 2 },
+		{ mgs => 'MGS.7', cog => 'COGC', gene => 'near2', rank => 3 },
+		{ mgs => 'MGS.7', cog => 'COGD', gene => 'far1', rank => 4 },
+		{ mgs => 'MGS.7', cog => 'COGE', gene => 'far2', rank => 5 },
+	],
+	members => {
+		c1    => 'sX__hit_10',
+		c2    => 'sY__hit2_10',
+		near1 => 'sX__hit_11,sY__hit2_11',
+		near2 => 'sX__hit_12,sY__hit2_12',
+		# Same samples, different contigs: these can never neighbour a candidate.
+		far1  => 'sX__miss_11,sY__miss2_11',
+		far2  => 'sX__miss_12,sY__miss2_12',
+	},
+);
+my %prefiltered;
+accumulate_locus_context(\%prefiltered, $prefilter_records{records},
+	{ %{$prefilter_records{members}} }, { context_seeds => { c1 => 1, c2 => 1 } });
+my %unfiltered_scan;
+accumulate_locus_context(\%unfiltered_scan, $prefilter_records{records},
+	{ %{$prefilter_records{members}} }, {});
+is_deeply($prefiltered{gene_context}{c1}, $unfiltered_scan{gene_context}{c1},
+	'the contig prefilter yields the same context an unrestricted scan would');
+is_deeply($prefiltered{gene_context}{c2}, $unfiltered_scan{gene_context}{c2},
+	'every candidate keeps its full neighbour token set under the prefilter');
+is_deeply([sort keys %{$prefiltered{gene_context}}], ['c1', 'c2'],
+	'no context is retained for seeds that cannot merge');
+ok(exists($prefiltered{gene_context}{c1}{'MGS.7|COGB'})
+	&& exists($prefiltered{gene_context}{c1}{'MGS.7|COGC'}),
+	'neighbours sharing a candidate contig are still counted');
+ok(!exists($prefiltered{gene_context}{c1}{'MGS.7|COGD'}),
+	'a gene on another contig of the same sample is correctly not a neighbour');
+
+is_deeply([Mods::MGSLocus::_members('>a__c_1, b__c_2 ,,c__c_3')],
+	[qw(a__c_1 b__c_2 c__c_3)],
+	'guarded member cleaning still strips markers, trims padding and drops blanks');
 done_testing();

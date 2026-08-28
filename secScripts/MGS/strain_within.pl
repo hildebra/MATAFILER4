@@ -143,6 +143,9 @@ sub writeStrainWorkflowHeartbeat;
 sub writeStrainWorkflowFailure;
 sub writeTreeFailureAudit;
 sub lifecycleMarkerReason;
+sub fastRemoveTree;
+#Cached once: without a usable rm the recursive unlink must run in-process.
+my $systemRemoveAvailable;
 
 sub limitedWarn;sub limitedNotice;
 
@@ -283,7 +286,9 @@ my $completionMessage = "";
 #1.44: make the coverage thresholds the primary sample filter and split the per-MGS locus floor
 #1.45: stream the catalogue-wide locus-model scan so the parent no longer holds every sample
 #1.46: scale tree memory with thread count and let the OOM ceiling, not the round count, stop retries
-my $version = 1.46;
+#1.47: restrict the catalogue-wide locus-model scan to contigs that carry a merge candidate
+#1.48: park large trees with one rename and unlink them with a backgrounded rm
+my $version = 1.48;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1056,7 +1061,7 @@ if (length($MGSfile) && !$preparedMainBranchFastPath) {
 				."$mosaicLociFile. Inspect $mosaicLog and "
 				."$mosaicJobScript.etxt\n" unless -s $mosaicLociFile;
 			print "Prerequisite Mosaic catalogue is ready: $mosaicLociFile\n";
-			remove_tree($mosaicRunDirectory);
+			fastRemoveTree($mosaicRunDirectory);
 			print "Removed successful Mosaic job workspace $mosaicRunDirectory\n";
 		}
 	}
@@ -2425,7 +2430,7 @@ if (%deferredScratchCleanup) {
 		." completed/published scratch directories after tree submission; global elapsed "
 		.timeNice(time - $^T)."\n";
 	for my $path (@cleanupPaths) {
-		remove_tree($path) if -d $path;
+		fastRemoveTree($path);
 		$cleaned++;
 		if (time >= $nextCleanupProgress) {
 			stepProgress("deferred completed-tree scratch cleanup", $cleaned,
@@ -2512,8 +2517,8 @@ print "\n". $nxtCmd."\n";
 
 
 #cleanup
-remove_tree($locTmpDir) if -d $locTmpDir;
-remove_tree($preConDir) if ($preCompCons && -d $preConDir);
+fastRemoveTree($locTmpDir);
+fastRemoveTree($preConDir) if $preCompCons;
 
 writeStrainWorkflowHeartbeat('complete');
 if ($doSubmit && $incompleteTreeOutcomes) {
@@ -4584,8 +4589,8 @@ sub prepRun{
 			die "-redo tree requires the existing sorted MGS guide: $sortedMGS\n";
 		} elsif ($mode eq "MGSall" && !-e $sortedMGS) {
 			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
-			remove_tree($outD) if -d $outD;
-			remove_tree($scratchD) if -d $scratchD;
+			fastRemoveTree($outD);
+			fastRemoveTree($scratchD);
 			unlink $_ or die "Cannot remove stale $_: $!\n"
 				for grep { -f $_ || -l $_ } glob("$MGSfile.srt*");
 			symlink($MGSfile, $sortedMGS)
@@ -4593,8 +4598,8 @@ sub prepRun{
 		} elsif (!$onlySubmit || !-s $sortedMGS) {
 			print "base files missing.. preparing complete resubmission and recalc of data\n";
 			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
-			remove_tree($outD) if -d $outD;
-			remove_tree($scratchD) if -d $scratchD;
+			fastRemoveTree($outD);
+			fastRemoveTree($scratchD);
 			unlink $_ or die "Cannot remove stale $_: $!\n"
 				for grep { -f $_ || -l $_ } glob("$MGSfile.srt*");
 			my $sortMGSgenes = getProgPaths("sortMGSGeneImport_scr");
@@ -4635,7 +4640,7 @@ sub prepRun{
 	
 	#DEBUG
 	if ($preCompCons && !$subJob) {
-		remove_tree($preConDir) if -d $preConDir;
+		fastRemoveTree($preConDir);
 		make_path($preConDir);
 	}
 
@@ -5208,9 +5213,9 @@ sub evalFileStatus{
 		}
 		#print "$outD2\n";
 		if (-d $outD2 && $onlySubmit == 0 && !$subJob && !$recalcTrees){#only the parent may clean shared folders
-			remove_tree($outD2);
+			fastRemoveTree($outD2);
 			my $scratch_mgs = "$scratchD/outs/$MGS";
-			remove_tree($scratch_mgs) if -d $scratch_mgs;
+			fastRemoveTree($scratch_mgs);
 		}
 		make_path($outD2) unless -d $outD2;
 		my $tooFewMarker = "$outD2/tooFewSamples.sto";
@@ -6898,6 +6903,55 @@ sub assertSafeWorkflowRemoval {
 		unless $is_default || -f $owner;
 }
 
+
+#File::Path::remove_tree lstats every entry from Perl; coreutils rm walks the
+#same tree in C and is several times faster on the multi-GB scratch and output
+#trees this workflow produces. Renaming first also makes the removal atomic for
+#the caller: the old path is gone after one metadata operation, so a slow or
+#interrupted unlink can never leave a half-emptied directory that still looks
+#like usable state. Callers must have already run assertSafeWorkflowRemoval.
+sub fastRemoveTree {
+	my ($target, %options) = @_;
+	return 0 unless defined($target) && length($target) && -d $target;
+	my $parked = join('.', $target, 'deleting', time, $$, int(rand(1_000_000_000)));
+	# The parked name is a sibling, so the rename stays on one filesystem.
+	my $victim = rename($target, $parked) ? $parked : $target;
+	my @victims = ($victim);
+	# Sweep anything an interrupted earlier run parked but never finished. This is
+	# also what recovers the space if a backgrounded unlink is killed with its job.
+	push @victims, grep { -d $_ && $_ ne $victim }
+		bsd_glob("$target.deleting.*") unless $target =~ /[*?\[\]{}]/;
+	# Without a usable rm the unlink has to be done in-process, and then it must
+	# also be synchronous. Probe once rather than per call.
+	unless (defined $systemRemoveAvailable) {
+		$systemRemoveAvailable = $^O eq 'MSWin32' ? 0
+			: system('sh', '-c', 'command -v rm >/dev/null 2>&1') == 0 ? 1 : 0;
+	}
+	my $background = $systemRemoveAvailable && !$options{wait};
+	my $removed = 0;
+	for my $path (@victims) {
+		my $status = -1;
+		if ($systemRemoveAvailable) {
+			# The shell starts rm and exits, so system() returns immediately and
+			# the unlink is reparented instead of being left as a child to reap.
+			# Only reclaiming the space is deferred: the caller's path is already
+			# gone, so nothing downstream can observe the directory.
+			$status = $background
+				? system('sh', '-c', 'rm -rf -- "$1" &', 'sh', $path)
+				: system('rm', '-rf', '--', $path);
+		}
+		if ($status != 0) {
+			my $failed = !eval { remove_tree($path); 1 };
+			if ($failed || -d $path) {
+				warn "Could not remove $path: "
+					.($@ || 'directory still present')."\n";
+				next;
+			}
+		}
+		$removed++;
+	}
+	return $removed;
+}
 
 sub lifecycleMarkerReason {
 	my ($marker, $fallback) = @_;

@@ -68,7 +68,8 @@ if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]
 #.45: retry incomplete R-analysis batches twice and double memory after Slurm OOMs
 #.46: independently redo strainStats or PopGenStats without resetting all postprocessing
 #.47: isolate each MGS analysis so one failure cannot abort its batch, and stop nounset from killing conda activation
-my $version = 0.47;
+#.48: forward discrete strainStats categories to PopGenStats and raise its memory request
+my $version = 0.48;
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $redoStrainStats = 0;
@@ -92,6 +93,9 @@ my $nCoreHeavy = 12;
 my $rAnalysisMemoryBaseGB = 24;
 my $rAnalysisMemoryCoreThreshold = 4;
 my $rAnalysisMemoryPerExtraCoreGB = 1;
+# PopGenStats holds every MSA's codon matrices in its PSOCK workers, so it
+# needs more headroom than strainStats at the same core count.
+my $popGenMemoryFactor = 1.5;
 # Failed R-analysis batches are retried twice; an accounting-confirmed OOM
 # doubles that batch's Slurm memory request for its next attempt.
 my $rAnalysisRetryRounds = 2;
@@ -194,14 +198,14 @@ print "Fallback outgroup tree: ".(length($MGSphylo) ? $MGSphylo : "<none>")."\n"
 print "Paths: strain summary=$RsummaryTab; population summary=$popGenSummaryTab; subsampled population summary=$popGenSubsampleSummaryTab; toolkit=$MGSTKdir\n";
 print "Resources: standard cores=$nCore; heavy-analysis cores=$nCoreHeavy; R-analysis memory="
 	."${rAnalysisMemoryBaseGB}G + ${rAnalysisMemoryPerExtraCoreGB}G per core above $rAnalysisMemoryCoreThreshold; "
-	."retry rounds=$rAnalysisRetryRounds; OOM ceiling=${rAnalysisOOMMaxMemoryGB}G; queue throttle=$checkMaxNumJobs jobs\n";
+	."retry rounds=$rAnalysisRetryRounds; OOM ceiling=${rAnalysisOOMMaxMemoryGB}G; queue throttle=$checkMaxNumJobs jobs; PopGenStats memory factor=${popGenMemoryFactor}x\n";
 print "Metadata: individual=" . ($individualVar || "<none>")
 	. "; family=" . ($familyVar || "<none>")
 	. "; stability groups=" . ($groupStabilityVars || "<none>") . "\n";
 print "Association tests: discrete=" . ($DiscTests || "<none>")
 	. "; continuous=" . ($ContTests || "<none>") . "\n";
 print "Population genetics: " . ($doPopGenStats
-	? "enabled (subsamples: ".($popGenSubsample || "<none>")."; seed=$popGenSeed; genetic code=$popGenGeneticCode; codon start=$popGenCodonStart; strict outgroup=$popGenStrictOutgroup)"
+	? "enabled (subsamples: ".($popGenSubsample || "<none>")."; seed=$popGenSeed; genetic code=$popGenGeneticCode; codon start=$popGenCodonStart; strict outgroup=$popGenStrictOutgroup; categories: ".($DiscTests || "<none>").")"
 	: "disabled") . "\n";
 print "=====================================================\n";
 
@@ -474,7 +478,7 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	if ($curBatchSamples > 0 && $curBatchSamples + $batchSampleCost > $batchSampleBudget) {
 		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
 		my $batchCores = $nCore;
-		my $batchMemory = rAnalysisMemoryForCores($batchCores);
+		my $batchMemory = rAnalysisMemoryForCores($batchCores, $analysisKind);
 		my $batchCmd = $cmd;
 		$submitRAnalysisBatch->(
 			$analysisKind, $batchDestD."$analysisKind.Ranalysis.sh",
@@ -515,6 +519,9 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 			." --codon-start $popGenCodonStart"
 			." --seed $popGenSeed"
 			." --individual-column ".shellQuote($individualVar);
+		# Reuse the discrete strainStats categories so population statistics are
+		# reported for the same sample groupings.
+		$popGenCommand .= " --category ".shellQuote($DiscTests) if length($DiscTests);
 		$popGenCommand .= " --outgroup ".shellQuote($OG) if $OG ne "";
 		$popGenCommand .= " --strict-outgroup" if $popGenStrictOutgroup;
 		$popGenCommand .= " --legacy-text-output" if $popGenLegacyTextOutput;
@@ -538,7 +545,7 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	if ($curBatchSamples >= $batchSampleBudget){
 		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
 		my $batchCores = $nCore;
-		my $batchMemory = rAnalysisMemoryForCores($batchCores);
+		my $batchMemory = rAnalysisMemoryForCores($batchCores, $analysisKind);
 		my $batchCmd = $cmd;
 		$submitRAnalysisBatch->(
 			$analysisKind, $batchDestD."$analysisKind.Ranalysis.sh",
@@ -553,7 +560,7 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 }
 if ($curBatch > 0){
 	my $batchCores = $nCore;
-	my $batchMemory = rAnalysisMemoryForCores($batchCores);
+	my $batchMemory = rAnalysisMemoryForCores($batchCores, $analysisKind);
 	my $batchCmd = $cmd;
 	$submitRAnalysisBatch->(
 		$analysisKind, $batchDestD."$analysisKind.Ranalysis.sh",
@@ -1113,12 +1120,14 @@ sub newickNodeCount {
 }
 
 sub rAnalysisMemoryForCores {
-	my ($cores) = @_;
+	my ($cores, $analysisKind) = @_;
 	die "R-analysis core count must be positive\n" unless defined($cores) && $cores > 0;
 	my $extraCores = $cores - $rAnalysisMemoryCoreThreshold;
 	$extraCores = 0 if $extraCores < 0;
 	my $memoryGB = $rAnalysisMemoryBaseGB
 		+ $extraCores * $rAnalysisMemoryPerExtraCoreGB;
+	$memoryGB = int($memoryGB * $popGenMemoryFactor + 0.5)
+		if defined($analysisKind) && $analysisKind eq 'popGenStats';
 	return $memoryGB."G";
 }
 

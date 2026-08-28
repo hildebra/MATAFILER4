@@ -434,7 +434,30 @@ like($strain,
 like($strain,
 	qr/"treeOOMRetryRounds=i" => \\\$treeOOMRetryRounds,\s*"treeMemThreadDivisor=f" => \\\$treeMemThreadDivisor,/s,
 	'both tree-memory controls are tunable from the command line');
-like($strain, qr/my \$version = 1\.46;/,
+like($build_tree_locus_module,
+	qr/if \(\$context_seeds && \$want_positions && !\$include_member_context\).*?\$relevantContigs\{substr\(\$member, 0, \$cut\)\} = 1;.*?\$prefilterContigs = 1;/s,
+	'the catalogue-wide scan first collects only the contigs that carry a merge candidate');
+like($build_tree_locus_module,
+	qr/if \(\$prefilterContigs && !\$wanted\) \{.*?next unless \$relevantContigs\{substr\(\$member, 0, \$cut\)\};/s,
+	'members off those contigs are skipped before any parse or allocation');
+like($build_tree_locus_module,
+	qr/s\/\^>\/\/ if substr\(\$_, 0, 1\) eq '>';\s*s\/\^\\s\+\|\\s\+\$\/\/g if \/\\s\/;/s,
+	'per-member cleaning is guarded, since it runs once for every catalogue member');
+like($strain,
+	qr/sub fastRemoveTree \{.*?my \$victim = rename\(\$target, \$parked\) \? \$parked : \$target;.*?bsd_glob\("\$target\.deleting\.\*"\).*?system\('sh', '-c', 'rm -rf -- "\$1" &', 'sh', \$path\)/s,
+	'large trees are freed by one rename and unlinked by a backgrounded rm, with leftovers swept');
+like($strain,
+	qr/sub fastRemoveTree \{.*?\$systemRemoveAvailable = \$\^O eq 'MSWin32' \? 0.*?my \$failed = !eval \{ remove_tree\(\$path\); 1 \};/s,
+	'a platform without a usable rm still removes the tree in-process');
+for my $bigTree ('$outD', '$scratchD', '$preConDir', '$outD2', '$scratch_mgs') {
+	like($strain, qr/fastRemoveTree\(\Q$bigTree\E[,)]/,
+		"the $bigTree tree is removed through the fast path");
+}
+unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
+	'initialization no longer walks the output or scratch trees from Perl');
+like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
+	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
+like($strain, qr/my \$version = 1\.48;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
