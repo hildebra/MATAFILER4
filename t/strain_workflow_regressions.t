@@ -457,7 +457,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.48;/,
+like($strain, qr/my \$version = 1\.49;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -1132,5 +1132,28 @@ like($build_tree,
 	'BuildTree executes forced EPA filtering before normal workflow startup');
 unlike($build_tree, qr/epaFilterOnly|runEpaFilterOnly/,
 	'BuildTree has no separate filter-only option or execution path');
+
+
+# Stage-I worker memory. The output buffers hold one string per MGS the worker
+# has touched, so a sample count cannot bound them; and once the locus model is
+# built a worker consults neither the ranked seed index nor most catalogue
+# proteins again, because it exits before Phase II.
+like($strain,
+	qr/my \$flushOutputMB = 2048;\s*my \$flushOutputByteLimit = \$flushOutputMB \* 1024 \* 1024;\s*my \$bufferedOutputBytes = 0;/s,
+	'Stage-I output buffering has an explicit byte budget as well as a sample count');
+like($strain,
+	qr/\$bufferedOutputBytes \+= length\(\$aaChunk\) \+ length\(\$ntChunk\)\s*\+ length\(\$linkChunk\) \+ length\(\$catChunk\);/s,
+	'every buffered record is counted towards that budget');
+like($strain,
+	qr/if \(\$\{\$bufferedSamplesRef\} >= \$appendWriteTrigger\s*\|\| \$bufferedOutputBytes >= \$flushOutputByteLimit\)/s,
+	'reaching the byte budget flushes early, so peak memory does not scale with the MGS count');
+like($strain,
+	qr/sub appendWriteMGSgenes.*?\$bufferedOutputBytes = 0;/s,
+	'the byte budget is reset when the buffers are published');
+like($strain,
+	qr/if \(\$subJob\) \{.*?for my \$locus \(keys \%contextLociNeeded\).*?\$keptProteins\{\$seed\} = \$catalogProteins->\{\$seed\}.*?\$catalogProteins = \\%keptProteins;.*?\$SIgenes = \{\}; \$Gene2COG = \{\};/s,
+	'a worker keeps catalogue proteins only for loci that can be ambiguous, and drops the seed index');
+is(scalar(() = $strain =~ /\$catalogProteins = \\\%keptProteins;/g), 1,
+	'the protein release happens in exactly one place, the split-worker branch');
 
 done_testing();

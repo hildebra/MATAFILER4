@@ -288,7 +288,8 @@ my $completionMessage = "";
 #1.46: scale tree memory with thread count and let the OOM ceiling, not the round count, stop retries
 #1.47: restrict the catalogue-wide locus-model scan to contigs that carry a merge candidate
 #1.48: park large trees with one rename and unlink them with a backgrounded rm
-my $version = 1.48;
+#1.49: bound Stage-I output buffers by bytes and release post-model state in workers
+my $version = 1.49;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -449,6 +450,12 @@ my $MGStoolowGsThr = $FILTER_DEFAULT{minimum_mgs_genes_per_sample};
 my $minLociPerMGS = $FILTER_DEFAULT{minimum_loci_per_mgs};
 my $mode = "MGS";
 my $appendWriteTrigger = $FILTER_DEFAULT{phase1_flush_samples};
+#A sample count cannot bound the Stage-I output buffers, which hold one string
+#per MGS this worker has touched. Flush on accumulated bytes as well so peak
+#memory stays flat no matter how many MGS or loci a sample contributes.
+my $flushOutputMB = 2048;
+my $flushOutputByteLimit = $flushOutputMB * 1024 * 1024;
+my $bufferedOutputBytes = 0;
 # Publish Stage-I records often enough to bound Perl's large string buffers.
 # The worker shards themselves remain on durable shared scratch because the
 # parent consumes them after the worker's node-local storage has been removed.
@@ -528,6 +535,7 @@ GetOptions(
 	"MGSabundance=s" => \$MGSabundanceOverride, #explicit MGS abundance matrix for nonstandard guide locations
 	"prepareMosaicLoci=i" => \$prepareMosaicLoci, #create the default catalogue if absent
 	"flushEvery=i"   => \$appendWriteTrigger, #samples buffered before per-MGS records are flushed
+	"flushMemMB=i"   => \$flushOutputMB, #buffered Stage-I output before an early flush
 	
 	"forceSNPcalls=i"  => \$forceVCF2FNA,
 	"preCompConsSNP=i"   => \$preCompCons,
@@ -693,6 +701,8 @@ $outgroupCoreMinLoci = int($treeLocusBudget * 0.20 + 0.999999)
 	if $outgroupCoreMinLoci == 0;
 die "-outgroupCoreMinLoci must be positive\n" unless $outgroupCoreMinLoci > 0;
 die "-flushEvery must be positive\n" unless $appendWriteTrigger > 0;
+die "-flushMemMB must be positive\n" unless $flushOutputMB > 0;
+$flushOutputByteLimit = $flushOutputMB * 1024 * 1024;
 die "-phase1WorkerRetries must be between 0 and 10\n"
 	unless $phase1WorkerRetries >= 0 && $phase1WorkerRetries <= 10;
 die "-outgroupReferenceGeneCap must be positive\n" unless $outgroupReferenceGeneCap > 0;
@@ -4294,6 +4304,32 @@ sub prepGene2MGS{
 			if exists $LocusContext->{$locus};
 	}
 	$LocusContext = \%keptLocusContext;
+	if ($subJob) {
+		# A worker exits after extraction, so from here it only ever consults
+		# catalogue proteins through $LocusSeedProteins, and only for a locus that
+		# offered more than one candidate in some sample. Holding a protein for
+		# every selected gene costs gigabytes that nothing will read again.
+		my %keptProteins;
+		for my $locus (keys %contextLociNeeded) {
+			my $group = $LocusByID->{$locus} or next;
+			for my $seed (@{$group->{genes} || []}) {
+				$keptProteins{$seed} = $catalogProteins->{$seed}
+					if exists $catalogProteins->{$seed};
+			}
+		}
+		my $droppedProteins = scalar(keys %{$catalogProteins}) - scalar(keys %keptProteins);
+		$catalogProteins = \%keptProteins;
+		# The ranked seed index and the gene/COG map were inputs to the locus
+		# model; extraction reads neither, and Phase II never runs here.
+		my $droppedSeedLoci = 0;
+		$droppedSeedLoci += scalar(keys %{$SIgenes->{$_}}) for keys %{$SIgenes};
+		my $droppedGeneCOG = scalar(keys %{$Gene2COG});
+		$SIgenes = {}; $Gene2COG = {};
+		print "Worker $subJob released post-model state: $droppedProteins catalogue "
+			."protein(s), $droppedSeedLoci ranked seed locus/loci, $droppedGeneCOG "
+			."gene/COG entries; retained ".scalar(keys %keptProteins)
+			." protein(s) for ".scalar(keys %contextLociNeeded)." ambiguous locus/loci\n";
+	}
 	stepComplete("worker-member materialization", $modelSubstepStarted,
 		"worker=$subJob", "catalogue_drivers=".scalar(keys %cl2gene2),
 		"locus_sample_combinations=$gene_sample_combinations",
@@ -5477,6 +5513,7 @@ sub appendWriteMGSgenes {
 		}
     }
 
+    $bufferedOutputBytes = 0;
     print "wrote for $wrMGS MGS data..\n";
 }
 
@@ -5796,6 +5833,7 @@ sub phase1WorkerCommand {
 		'-abundanceMaxModifiedZ', $abundanceMaximumModifiedZ,
 		'-prepareMosaicLoci', $prepareMosaicLoci,
 		'-flushEvery', $appendWriteTrigger,
+		'-flushMemMB', $flushOutputMB,
 		'-MGset', $useGTDBmg, '-SNPcaller', $SNPcaller,
 		'-minSNPDepth', $minSNPDepth,
 		'-minSNPCallQual', $minSNPCallQual, '-forceSNPcalls', $forceVCF2FNA,
@@ -8104,7 +8142,11 @@ sub readGenesSample_Singl{
 			}
 			if ($locCnt>0){
 				#save in tmp hash (faster than opening bunch of files..
-				$OAstrH{$MGS} .= join("",@OAstr);$OFstrH{$MGS} .= join("",@OFstr);
+				my $aaChunk = join("",@OAstr); my $ntChunk = join("",@OFstr);
+				my $linkChunk = join("",@OLstr); my $catChunk = join("",@OCstr);
+				$bufferedOutputBytes += length($aaChunk) + length($ntChunk)
+					+ length($linkChunk) + length($catChunk);
+				$OAstrH{$MGS} .= $aaChunk; $OFstrH{$MGS} .= $ntChunk;
 				my $recovery_reason = $double_failure && $csp_failure
 					? 'placement_ambiguous_and_conspecific'
 					: $double_failure ? 'placement_ambiguous'
@@ -8112,7 +8154,7 @@ sub readGenesSample_Singl{
 				writeRecoveryRow($MGS, $sd3, 'recovered', $recovery_reason,
 					$locCnt, $sampleQCStatus, $double_failure, $csp_failure,
 					$locMosaicCnt);
-				$OLstrH{$MGS} .= join("",@OLstr);$OCstrH{$MGS} .= join("",@OCstr);
+				$OLstrH{$MGS} .= $linkChunk; $OCstrH{$MGS} .= $catChunk;
 				my $ambiguous_fraction = $evaluableLoci ? $doubleCntL / $evaluableLoci : 0;
 				my $csp_fraction = $evaluableLoci ? $locConSpecGen / $evaluableLoci : 0;
 				$OQstrH{$MGS} .= join("\t", $MGS, $sd3, $sampleQCStatus,
@@ -8166,7 +8208,13 @@ sub readGenesSample_Singl{
 		writeSampleStats($sampleStatsFH, $sampleStats, $sampleStatsSeen);
 		if ($bufferedSamplesRef) {
 			${$bufferedSamplesRef}++;
-			if (${$bufferedSamplesRef} >= $appendWriteTrigger) {
+			# A sample count alone does not bound these buffers: they hold every
+			# MGS this worker has touched, so their size depends on how many loci
+			# each sample contributes, not on how many samples have been seen.
+			# Flushing on accumulated bytes keeps peak memory flat instead of
+			# scaling with the number of MGS in the run.
+			if (${$bufferedSamplesRef} >= $appendWriteTrigger
+					|| $bufferedOutputBytes >= $flushOutputByteLimit) {
 				appendWriteMGSgenes($writeLink);
 				${$bufferedSamplesRef} = 0;
 			}
@@ -8185,6 +8233,11 @@ Workflow splitting:
                                  disables splitting, positive values are explicit
   -flushEvery INT               Publish buffered Stage-I records after this many
                                  sample rows [default $default->{phase1_flush_samples}]
+  -flushMemMB INT               Also publish once this much Stage-I output is
+                                 buffered. The buffers hold one record set per
+                                 MGS the worker has touched, so a sample count
+                                 alone cannot bound them; lower this if split
+                                 workers run out of memory [default 2048]
   -treeOOMMaxMemGB FLOAT        Maximum memory for automatic tree OOM retries;
                                  each round doubles the previous request until
                                  this ceiling is reached [default: maxMF4mem
