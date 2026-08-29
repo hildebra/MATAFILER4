@@ -8,12 +8,32 @@ use Mods::GenoMetaAss qw(fileGZe gzipopen);
 
 our @EXPORT_OK = qw(
 	read_sample_qc
+	canonical_sample_qc_status
 	split_strict_backbone
 	read_epa_jplace
 	filter_epa_placement_outliers
 	map_epa_placements_to_backbone
 	write_epa_placed_tree
 );
+
+#The sample QC verdict records what extraction found about a sample, not what a
+#later stage does with it: whether it is deleted, kept out of the strict
+#backbone, or retained depends on -excludeFlaggedSamples and -placeOnBackbone.
+#The pre-1.08 spellings named one such disposition ('placement') and so
+#described an action the default configuration does not take; they are still
+#accepted so existing sampleQC tables keep loading.
+our %SAMPLE_QC_STATUS_ALIAS = (
+	single_strain => 'single_strain',
+	mixed_strain  => 'mixed_strain',
+	backbone      => 'single_strain',
+	placement     => 'mixed_strain',
+);
+
+sub canonical_sample_qc_status {
+	my ($raw) = @_;
+	return '' unless defined($raw) && length($raw);
+	return $SAMPLE_QC_STATUS_ALIAS{$raw} // '';
+}
 
 sub _read_fasta {
 	my ($file) = @_;
@@ -170,11 +190,13 @@ sub read_sample_qc {
 		next if $line eq '' || $line =~ /^#/ || $line =~ /^MGS\t/;
 		my @field = split /\t/, $line, -1;
 		die "Malformed sample QC row in $file: $line\n" unless @field >= 6;
-		my ($sample, $sample_status) = @field[1, 2];
-		die "Invalid sample QC status '$sample_status' for $sample\n"
-			unless $sample_status eq 'backbone' || $sample_status eq 'placement';
+		my ($sample, $raw_status) = @field[1, 2];
+		my $sample_status = canonical_sample_qc_status($raw_status);
+		die "Invalid sample QC status '$raw_status' for $sample\n"
+			unless length $sample_status;
+		# A sample seen under several MGS keeps its worst verdict.
 		$status{$sample} = $sample_status
-			if !exists($status{$sample}) || $sample_status eq 'placement';
+			if !exists($status{$sample}) || $sample_status eq 'mixed_strain';
 	}
 	close $fh or die "Cannot close sample QC file $file: $!\n";
 	return \%status;
@@ -209,7 +231,7 @@ sub split_strict_backbone {
 	my $q90 = _quantile(0.90, values %informative);
 	my (%classification_reason, %requested_reason, @backbone, @placement, @excluded);
 	for my $id (@ids) {
-		my $sampleLocusQC = ($status->{$id} // '') eq 'placement';
+		my $sampleLocusQC = ($status->{$id} // '') eq 'mixed_strain';
 		if (($informative{$id} // 0) == 0) {
 			push @excluded, $id;
 			$classification_reason{$id} = 'no_informative_alignment_sites';

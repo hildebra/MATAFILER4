@@ -68,6 +68,14 @@ my $minInformativeNT = 150;	#reject loci with less usable sequence (0 disables)
 my $markerMinInformativeNT = 60;	#length floor applied to marker genes
 my $markerExemptPrevalence = 1;		#markers ignore the prevalence window
 
+#Cross-taxon sharing: geneOcc (samples the gene cluster was assembled in, across
+#all taxa) divided by the MGS's own prevalence. ~1 means the gene is private to
+#this species; well above 1 means it is also found where the species is absent,
+#which is what horizontal transfer, shared mobile elements and conserved domains
+#all look like. Such genes are demoted behind every clean gene rather than
+#rejected, so a sparse MGS with nothing better can still use them.
+my $maxSharingRatio = 2;	#demote above this ratio (0 disables the demotion)
+
 #The candidate pool handed downstream is budgeted in informative nucleotides
 #rather than in loci, so a set of short genes no longer yields a thin alignment
 #just because it filled the locus count. The locus floor keeps the pool safely
@@ -344,16 +352,17 @@ sub evalCurMGS{
 		}
 	}
 
-	#Expected catalogue-wide breadth, a separate scale: geneOcc counts every
-	#sample the gene cluster was assembled in, including samples without this MGS.
-	my @marker_occ = grep { $_ > 0 } map { $geneOcc{$_} // 0 } keys %markers;
-	my $expected_geneOcc;
-	if (@marker_occ >= 3){
-		$expected_geneOcc = medianArray(@marker_occ);
-	} else {
-		my @known_occ = grep { $_ > 0 } map { $geneOcc{$_} // 0 } @all_genes;
-		$expected_geneOcc = @known_occ ? medianArray(@known_occ) : 0;
-	}
+	#Cross-taxon sharing. geneOcc counts every sample the gene cluster was
+	#assembled in, including samples without this MGS, while $expected_occ is how
+	#many this species occupies. Their ratio is therefore ~1 for a gene private to
+	#this species and rises the more it is found where the species is absent: the
+	#signature of a conserved domain, a shared mobile element, or recent transfer.
+	#Needs no annotation, so it also works where eggNOG is missing or wrong.
+	my $sharingOf = sub {
+		my ($g) = @_;
+		return undef unless defined($geneOcc{$g}) && $expected_occ > 0;
+		return $geneOcc{$g} / $expected_occ;
+	};
 
 	#Usable sequence per gene. A gene the catalogue has no sequence for ranks
 	#neutrally on this axis rather than being punished for a catalogue gap.
@@ -366,7 +375,7 @@ sub evalCurMGS{
 
 	#One pass per gene: the comparator used to recompute all of this on every
 	#single comparison, which dominated the runtime for large MGS.
-	my %copyFrac; my %rankKey;
+	my %copyFrac; my %rankKey; my $sharedCnt = 0; my @sharingSeen;
 	for my $gene (@all_genes){
 		my $observations = $obsOf->($gene);
 		$copyFrac{$gene} = ($observations && $observations > 0)
@@ -374,6 +383,19 @@ sub evalCurMGS{
 		#a gene without catalogue occurrence carries no evidence at all, so it
 		#ranks behind every measured gene instead of tying with a typical one
 		my $unmeasured = defined($geneOcc{$gene}) ? 0 : 1;
+		#Demote genes that look shared across taxa behind every clean gene. This
+		#leads the ranking because a shared locus is wide for the wrong reason:
+		#it recruits reads from another species and yields false strain variation,
+		#so it must not ride high on the breadth term below. Demotion rather than
+		#rejection keeps it available to a sparse MGS that has nothing better.
+		#A small prevalence makes the ratio too noisy to act on, so the same
+		#guard as the prevalence window applies.
+		my $sharing = $sharingOf->($gene);
+		push @sharingSeen, $sharing if defined $sharing;
+		my $shared = ($maxSharingRatio > 0 && defined($sharing)
+			&& $expected_occ >= $minExpectedPrevalence
+			&& $sharing > $maxSharingRatio) ? 1 : 0;
+		$sharedCnt += $shared;
 		#Expected informative nucleotides this locus contributes to the alignment.
 		#A gene that is both widely distributed across the MGS and long is the
 		#most useful for tracking strains, so this leads the ranking. Copy
@@ -381,10 +403,11 @@ sub evalCurMGS{
 		#using them again as dominant sort keys would let a negligible paralogy
 		#difference outrank a far more informative locus, so they follow.
 		my $yield = ($observations || 0) * $ntOf->($gene);
-		$rankKey{$gene} = [ -$yield, $copyFrac{$gene}, -($observations || 0),
-			$multiBin{$gene} // 0, $unmeasured,
-			$unmeasured ? 0 : abs($geneOcc{$gene} - $expected_geneOcc) ];
+		$rankKey{$gene} = [ $shared, -$yield, $copyFrac{$gene},
+			-($observations || 0), $multiBin{$gene} // 0, $unmeasured,
+			$sharing // 0 ];	#unmeasured genes are already separated by key 5
 	}
+	my $medSharing = @sharingSeen ? medianArray(@sharingSeen) : 0;
 
 	my $reject_gene = sub {
 		my ($gene) = @_;
@@ -422,6 +445,7 @@ sub evalCurMGS{
 			|| $l->[3] <=> $r->[3]
 			|| $l->[4] <=> $r->[4]
 			|| $l->[5] <=> $r->[5]
+			|| $l->[6] <=> $r->[6]
 			|| $left cmp $right;
 	};
 
@@ -456,8 +480,8 @@ sub evalCurMGS{
 	print "${curMGS} (".scalar(keys %multiBin)."):: " ;
 	print scalar(@finalGs) ."/". scalar(@ranked) ." genes, $mrkCnt markerGs used"
 		. ", expected prevalence: " . int($expected_occ*100)/100
-		. ", catalogue breadth: " . int($expected_geneOcc*100)/100
-		. ", median informative NT: $median_nt"
+		. ", median sharing ratio: " . int($medSharing*100)/100
+		. " ($sharedCnt demoted), median informative NT: $median_nt"
 		. ", informative NT emitted/at cap $downstreamLocusCap: $budgetNT/$capNT"
 		. ", median/avg multiBin $medMBi/" . int($avgMBi*100)/100 ."\n";
 

@@ -108,9 +108,12 @@ sub stepProgress;
 sub preparedMainBranchInputSet;
 sub outgroupRequirementLoci;
 sub readPreferredCoreGeneSet;
+sub treePreferredCoreGuide;
 sub dispatchPendingTreeJobs;
 sub retryOOMTreeJobs;
 sub usage;
+sub phase1AutoMemoryMB;
+sub phase1DefaultWorkerMemoryMB;
 sub writeRecoveryRow;
 sub mergeRecoveryLogs;
 sub indexRecoveryRow;
@@ -289,7 +292,10 @@ my $completionMessage = "";
 #1.47: restrict the catalogue-wide locus-model scan to contigs that carry a merge candidate
 #1.48: park large trees with one rename and unlink them with a backgrounded rm
 #1.49: bound Stage-I output buffers by bytes and release post-model state in workers
-my $version = 1.49;
+#1.50: give sample retention an absolute informative-NT floor, hand buildTree5 the
+#	ranked extraction guide, and rename the sample QC verdict to name the finding
+#	(single_strain/mixed_strain) rather than a downstream disposition
+my $version = 1.50;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -322,6 +328,14 @@ my %FILTER_DEFAULT = (
 	minimum_loci_per_mgs => 8,
 	maximum_genes_per_sample => 600,
 	maximum_tree_loci => 400,
+	#Absolute floor under the -relativeNTFraction/-GenesPerSpecies gate, which
+	#is otherwise purely relative to the cohort's own 0.9 quantile: without it a
+	#uniformly shallow cohort keeps every sample while the same sample is dropped
+	#from a cohort that happens to contain a few deep ones. 5000 informative NT is
+	#roughly five well-covered loci, below -MGSminGenesPSmpl's 8-locus extraction
+	#minimum, so it only removes samples that carry too little sequence to place
+	#at all and never overrides the relative gate.
+	minimum_informative_nt_per_sample => 5000,
 	breakpoint_gene_flank => 50,
 	abundance_minimum_loci => 8,
 	abundance_minimum_fold => 1 / 3,
@@ -361,7 +375,7 @@ my $GenesPerSpecies = 0.2;
 my $GeneLengthMin = 0.3;
 my $GeneLengthIncludeMin = 0.03;
 my $relativeNTFraction = 0.1;
-my $NTfiltCount = 0;
+my $NTfiltCount = $FILTER_DEFAULT{minimum_informative_nt_per_sample};
 my ($placementGenesPerSpecies, $placementRelativeNTFraction, $placementNTfiltCount);
 $placementGenesPerSpecies = 0.04; $placementRelativeNTFraction = 0.03;
 my $taxonAwareLocusSelection = 1;
@@ -399,6 +413,19 @@ my $redoEPAfilter = 0;
 my $presortGenes = 1200;
 my $useGTDBmg = "GTDB";
 my $selfMemGb = 10;
+my $selfMemAuto = 0; #-selfMemGb auto (or -1): size Phase-I workers from the input
+#Phase-I worker memory model, consulted only in auto mode. A split worker holds
+#its own shard of the catalogue cluster index, the shared locus model published
+#by the parent, and a per-sample working set. The coefficients are deliberately
+#generous: an underestimate is recovered by the Slurm OOM escalation already in
+#retryPhase1Workers, but only after a wasted run, whereas an overestimate merely
+#queues a larger allocation. Tune these if the reported estimate is off.
+my $phase1MemBaseMB = 2048;	#interpreter, code and fixed structures
+my $phase1MemIndexFactor = 3.0;	#in-memory expansion over raw cluster-index bytes
+my $phase1MemLocusKB = 2;	#per resolved locus; every worker loads the whole model
+my $phase1MemSampleMB = 8;	#per owned assembly group
+my $phase1MemFloorMB = 4096;	#never request less than this per worker
+my $phase1AutoMemoryCacheMB = 0;
 my $mosaicMemGb = 150;
 my $phase1WorkerRetries = 2;
 # Default is read from maxMF4mem in MATAFILERcfg.txt after option parsing.
@@ -503,7 +530,18 @@ GetOptions(
 	"tmpD=s"         => \$locTmpDir1,
 	"nodeTmp=s"      => sub { $locTmpDir1 = $_[1]; $deprecatedOptionSeen{nodeTmp} = '-tmpD'; },
 	"submit=i"       => \$doSubmit,
-	"selfMemGb=i"    => \$selfMemGb,
+	"selfMemGb=s"    => sub {
+		my (undef, $value) = @_;
+		$value = '' unless defined $value;
+		if (lc($value) eq 'auto' || $value eq '-1') {
+			$selfMemAuto = 1;
+		} elsif ($value =~ /^\d+(?:\.\d+)?$/ && $value > 0) {
+			$selfMemAuto = 0;
+			$selfMemGb = $value;
+		} else {
+			die "-selfMemGb must be a positive number of GB, or \"auto\"\n";
+		}
+	},
 	"mosaicMemGb=i"  => \$mosaicMemGb,
 	"phase1WorkerRetries=i" => \$phase1WorkerRetries,
 	"treeOOMMaxMemGB=f" => sub {
@@ -842,6 +880,26 @@ if (!length($mosaicMGSFile) && length($MGSfile)) {
 $noGeneLimit = 1 if $maxNGenes <= 0; #backward-compatible no-cap spelling; QC is unchanged
 die "-maxGenes must be at least -MGSminGenesPSmpl, or <=0 to remove the cap\n"
 	if !$noGeneLimit && $maxNGenes < $MGStoolowGsThr;
+# Every sample walks the same shared priority order and is truncated at
+# -maxGenes, so a cap below -presortGenes is a prefix cut that bites only the
+# well-covered samples: they stop before the tail of the pool, while shallow
+# samples never reach the cap and keep sporadic low-priority loci. Loci ranked
+# beyond the cap therefore show artificially low prevalence among exactly the
+# samples that recovered the most, which is the opposite of what the tree-time
+# selector reads prevalence to mean.
+# The bias exists whenever the cap is below the pool, but it only reaches the
+# tree when the locus budget can select into the affected range. Keep the
+# always-true structural fact as a reported number (below, with the locus
+# hierarchy) and warn only about the configuration that actually breaks:
+# a budget no single sample can satisfy, which leaves every sample short of
+# full coverage and makes the Q90-relative retention gate unreachable.
+warn "-treeLocusBudget $treeLocusBudget exceeds -maxGenes $maxNGenes: no sample "
+	."can contribute more than $maxNGenes loci, so no sample can reach the "
+	."selected-locus count the tree budget implies, and loci ranked beyond "
+	."position $maxNGenes carry prevalence biased downward against exactly the "
+	."best-covered samples. Raise -maxGenes to at least -treeLocusBudget, or "
+	."lower -treeLocusBudget.\n"
+	if !$noGeneLimit && $maxNGenes > 0 && $treeLocusBudget > $maxNGenes;
 # Keep one canonical unlimited value after parsing. In particular, split-worker
 # commands must not carry both the deprecated -noGeneLimit alias and a negative
 # -maxGenes value: -maxGenes 0 is the documented no-cap contract.
@@ -1401,10 +1459,17 @@ if ($runPartI){
 	
 	my @jobsMain;
 	my (%phase1JobByWorker, %phase1MemoryByWorker);
-	my $phase1InitialMemoryMB = int($selfMemGb * 1024 + 0.5);
+	my $phase1InitialMemoryMB = 0;
 	my $phase1SelfCmd = '';
 
 	if ($maxSubJob && !$subJob){
+		# Sized here because this is the first point at which the locus model and
+		# the sample assignment are both known.
+		$phase1InitialMemoryMB = phase1DefaultWorkerMemoryMB(
+			workers => $maxSubJob,
+			loci => scalar(keys %{$LocusByID}),
+			samples => scalar(keys %cl2gene2),
+		);
 		# A generation manifest prevents an isolated worker retry from being
 		# mistaken for a complete replacement of previously merged inputs.
 		clear_split_generation($splitManifest, $splitStonePrefix);
@@ -1423,7 +1488,7 @@ if ($runPartI){
 				." > ".shellQuote($checkF)."\n";
 			#die "$cmdX\n\n";
 			print $LOGDIR."Strain1_B${sj}.sh\n";
-			my ($dep,$qcmd) = qsubSystem($LOGDIR."Strain1_B${sj}.sh",$cmdX,1,"${selfMemGb}G","Str1.$sj","","",1,[],$QSBoptHR);
+			my ($dep,$qcmd) = qsubSystem($LOGDIR."Strain1_B${sj}.sh",$cmdX,1,"${phase1InitialMemoryMB}M","Str1.$sj","","",1,[],$QSBoptHR);
 			push(@jobsMain,$dep);
 			my $jobID = slurm_job_id_from_dependency($dep, $QSBoptHR->{rTag});
 			$phase1JobByWorker{$sj} = $jobID if defined($jobID);
@@ -2232,8 +2297,15 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 			."-taxonAwareCoreLoci $taxonAwareCoreLoci "
 			."-taxonAwareCandidateExtra $taxonAwareCandidateExtra "
 			."-taxonAwareRescueMinPrevalence $taxonAwareRescueMinPrevalence ";
-		$Tcmd .= "-preferredCoreGenes ".shellQuote($preferredCoreGenes)." "
-			if length($preferredCoreGenes) && !$epaOnlyRetry;
+		# Hand buildTree5 the guide that actually drove extraction priority. Its
+		# row order is the presorter's importance ranking (markers first, then
+		# chimera/paralogy/prevalence-window evidence and expected informative
+		# yield), and buildTree5 now scores loci on that order. $preferredCoreGenes
+		# is resolved before sorting, so it still names the unranked .core table;
+		# using it here would feed filterMB2core's row order in as a ranking.
+		my $treeCoreGuide = treePreferredCoreGuide($preferredCoreGenes);
+		$Tcmd .= "-preferredCoreGenes ".shellQuote($treeCoreGuide)." "
+			if length($treeCoreGuide) && !$epaOnlyRetry;
 	}
 	$Tcmd .= "-compactTaxonAwareDiagnostics $compactTaxonAwareDiagnostics ";
 	$Tcmd .= "-rateMergePartitions $rateMergePartitions "
@@ -4569,8 +4641,11 @@ sub prepRun{
 			."maximumBins=$rateMergeMaxBins, targetBin=$rateMergeTargetSites effective sites, "
 			."minimumBin=$rateMergeMinLoci loci/"
 			."$rateMergeMinSites sites\n";
-		print "Taxon-aware locus hierarchy: extractionPool="
-			.($noGeneLimit ? 'unlimited' : $maxNGenes)
+		print "Taxon-aware locus hierarchy: candidatePool=$presortGenes"
+			.", perSampleCap=".($noGeneLimit ? 'unlimited' : $maxNGenes)
+			.((!$noGeneLimit && $maxNGenes > 0 && $maxNGenes < $presortGenes)
+				? " (loci ranked beyond $maxNGenes are reachable only by samples"
+					." that never fill the cap, so their prevalence reads low)" : "")
 			.", finalTreeBudget=$taxonAwareGeneBudget, "
 			."robustCore=$taxonAwareCoreLoci, taxonRescue="
 			.($taxonAwareMaxLoci - $taxonAwareCoreLoci)
@@ -4903,6 +4978,18 @@ sub outgroupRequirementLoci {
 	}
 	return (\@loci, @sources > 1 ? 'worker_categories' : 'aggregate_category',
 		scalar(keys %samples));
+}
+
+sub treePreferredCoreGuide {
+	# $MGSfile has been repointed at the sorted guide by the time trees are
+	# submitted, so it carries the extraction priority order: the presorter's
+	# ranking in MGS mode, and (via the symlink) the input's own order in MGSall
+	# mode, which is still exactly the order extraction prioritised. Prefer it
+	# over the pre-sort .core fallback, which is a membership table only.
+	my ($fallbackGuide) = @_;
+	$fallbackGuide = '' unless defined $fallbackGuide;
+	return $MGSfile if length($MGSfile) && $MGSfile =~ /\.srt\z/ && -s $MGSfile;
+	return $fallbackGuide;
 }
 
 sub readPreferredCoreGeneSet {
@@ -5905,6 +5992,67 @@ sub validatePhase1WorkerLedger {
 	return (1, '');
 }
 
+#Estimate what one Phase-I split worker needs, from the inputs it will actually
+#hold. Every term is measured or counted rather than assumed, so a small run no
+#longer queues the same fixed allocation as a catalogue-scale one, and a large
+#run no longer starts below its working set and pays for an OOM round trip.
+sub phase1AutoMemoryMB {
+	my (%args) = @_;
+	my $workers = $args{workers} || 1;
+	$workers = 1 if $workers < 1;
+	my $loci = $args{loci} || 0;
+	my $samples = $args{samples} || 0;
+
+	#the cluster index is the dominant per-worker structure; each worker loads
+	#only the shard covering its own samples
+	my $index = "$GCd/compl.incompl.$clusterID.fna.clstr.idx";
+	my $indexBytes = -s $index;
+	my $indexNote = "index";
+	if (!$indexBytes) {
+		my $compressed = -s "$index.gz";
+		if ($compressed) {
+			$indexBytes = $compressed * 4; #typical text ratio, decompressed size
+			$indexNote = "index.gz x4";
+		} else {
+			$indexBytes = 0;
+			$indexNote = "index unreadable";
+		}
+	}
+
+	my $shardMB = ($indexBytes / $workers) * $phase1MemIndexFactor / (1024 * 1024);
+	my $modelMB = $loci * $phase1MemLocusKB / 1024;
+	my $sampleMB = ($samples / $workers) * $phase1MemSampleMB;
+	my $estimate = $phase1MemBaseMB + $shardMB + $modelMB + $sampleMB;
+
+	my $ceilingMB = int($treeOOMMaxMemGB * 1024 + 0.5);
+	my $chosen = int($estimate + 0.999);
+	my $clamped = '';
+	if ($chosen < $phase1MemFloorMB) {
+		$chosen = $phase1MemFloorMB; $clamped = ", raised to floor";
+	} elsif ($chosen > $ceilingMB) {
+		$chosen = $ceilingMB; $clamped = ", capped at -treeOOMMaxMemGB";
+	}
+
+	printf "Phase-I auto memory: %d MB per worker%s\n"
+		."  base %d MB + index shard %.0f MB + locus model %.0f MB + samples %.0f MB\n"
+		."  from %.2f GB %s / %d workers, %d loci, %d assembly groups\n",
+		$chosen, $clamped, $phase1MemBaseMB, $shardMB, $modelMB, $sampleMB,
+		$indexBytes / (1024 ** 3), $indexNote, $workers, $loci, $samples;
+	warn "Phase-I auto memory could not read $index; the estimate excludes the "
+		."cluster-index shard and may be low\n" if $indexNote eq "index unreadable";
+	return $chosen;
+}
+
+#One place that answers "how much memory does a Phase-I worker start with",
+#for both the initial submission and any later retry or resume.
+sub phase1DefaultWorkerMemoryMB {
+	my (%args) = @_;
+	return int($selfMemGb * 1024 + 0.5) unless $selfMemAuto;
+	return $phase1AutoMemoryCacheMB if $phase1AutoMemoryCacheMB;
+	$phase1AutoMemoryCacheMB = phase1AutoMemoryMB(%args);
+	return $phase1AutoMemoryCacheMB;
+}
+
 sub retryPhase1Workers {
 	my %args = @_;
 	my $generation = $args{generation};
@@ -5916,7 +6064,9 @@ sub retryPhase1Workers {
 	die "Phase-I retry requires a generation and worker command\n"
 		unless defined($generation) && length($generation)
 			&& defined($workerCommand) && length($workerCommand);
-	my $defaultMemoryMB = int($selfMemGb * 1024 + 0.5);
+	#On the resume path no memory ledger survives, so auto mode re-derives the
+	#same baseline rather than silently dropping back to the fixed default.
+	my $defaultMemoryMB = phase1DefaultWorkerMemoryMB(workers => $maxSubJob);
 	my $maximumMemoryMB = int($treeOOMMaxMemGB * 1024 + 0.5);
 	my %terminalOOMWorker;
 	my $round = 0;
@@ -8038,7 +8188,11 @@ sub readGenesSample_Singl{
 				&& ($doubleCntL / $evaluableLoci) > $multiGeneSmplMax;
 			my $csp_failure = !$noFilter && $evaluableLoci > 0 && $locConSpecGen >= $minBadLociForSampleSkip
 				&& ($locConSpecGen / $evaluableLoci) > $conspGeneSmplMax;
-			my $sampleQCStatus = ($double_failure || $csp_failure) ? 'placement' : 'backbone';
+			# Name the finding, not a disposition: whether a mixed-strain sample is
+			# deleted, deferred to placement, or kept is decided downstream by
+			# -excludeFlaggedSamples and -placeOnBackbone.
+			my $sampleQCStatus = ($double_failure || $csp_failure)
+				? 'mixed_strain' : 'single_strain';
 			if ($double_failure || $csp_failure){
 				$placementFlaggedMGS++;
 				push(@{$ConspecificMGS{$MGS}}, "$sd3" ); 
@@ -8310,6 +8464,14 @@ Gene selection and biological QC:
                                  [default $default->{prepare_mosaic_loci}]
   -mosaicMemGb INT              Total memory requested for that prerequisite job
                                  [default 150]
+  -selfMemGb INT|auto           Memory per Phase-I split worker. "auto" (or -1)
+                                 sizes each worker from the catalogue cluster-index
+                                 shard it loads, the resolved locus model and its
+                                 assembly-group count, instead of one fixed
+                                 request; the chosen value and its terms are
+                                 printed. Underestimates are still recovered by
+                                 the OOM escalation bounded by -treeOOMMaxMemGB
+                                 [default 10]
   -breakpointGeneFlank INT      Mask genes this many bases around mapping breakpoints
                                  [default $default->{breakpoint_gene_flank}]
   -abundanceMinLoci INT         Loci required for robust abundance-pattern filtering
@@ -8340,8 +8502,11 @@ Tree locus filtering:
                                  of the cohort Q90 selected-locus count [0.2]
   -relativeNTFraction FLOAT     Minimum informative-NT coverage, as a fraction of
                                  the cohort Q90 informative NT [default 0.1]
-  -NTfiltCount INT              Absolute minimum informative NT after final MSA
-                                 [default 0]
+  -NTfiltCount INT              Absolute minimum informative NT after final MSA.
+                                 Floor under the two relative filters above, so
+                                 retention does not depend on how deep the rest
+                                 of the cohort happens to be; 0 disables it
+                                 [default $default->{minimum_informative_nt_per_sample}]
   -enforceSampleCoverage 0|1    Apply the three filters above as a removal when
                                  -placeOnBackbone is 0. Setting this to 0 retains
                                  every aligned sample regardless of how little of
