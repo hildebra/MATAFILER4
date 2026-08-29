@@ -661,6 +661,35 @@ like($threshold_output,
 	qr/1 active job\(s\) remain among 3 queued dependencies; loop threshold 3 reached/,
 	'dependency-pending jobs do not inflate the executing-job threshold');
 
+# A bounded wait lets the caller escalate accounting-confirmed OOM outcomes while
+# the rest of a submission wave is still queued, instead of blocking on its tail.
+$options = slurm_options();
+my $bounded_polls = 0;
+$options->{jobPollSeconds} = 1;
+$options->{jobStatusRunner} = sub {
+	$bounded_polls++;
+	return ("101|RUNNING\n102|PENDING\n", 0);
+};
+my ($bounded_remaining, $bounded_output);
+{
+	local *STDOUT;
+	open STDOUT, '>', \$bounded_output
+		or die "Cannot capture bounded-wait output: $!";
+	$bounded_remaining = qsubSystemJobAlive([qw(101 102 103)], $options, 0, -1, 0);
+}
+is_deeply([sort @{$bounded_remaining}], [qw(101 102)],
+	'a spent wait budget returns the dependencies that are still queued');
+is($bounded_polls, 1,
+	'the budget is checked after the poll, so one scheduler query is enough');
+like($bounded_output, qr/2\/3 job\(s\) still queued after \d+s; handing control back/,
+	'a bounded wait reports what it hands back to the caller');
+
+$options = slurm_options();
+$options->{jobPollSeconds} = 1;
+$options->{jobStatusRunner} = sub { return ("", 0); };
+is_deeply(qsubSystemJobAlive([qw(101 102)], $options, 0, -1, 3600), [],
+	'a wave that has fully drained returns an empty set well inside its budget');
+
 $options = slurm_options();
 $options->{activeJobRunner} = sub {
 	return ("101\n777\n", 0);

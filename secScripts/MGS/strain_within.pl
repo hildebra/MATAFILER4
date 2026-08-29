@@ -23,6 +23,7 @@ use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrR
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs
 	deferredSubmissionDependency);
 use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
+use Mods::FlagReference qw(printFlagHelp);
 use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::math qw(quantileArray);
@@ -111,7 +112,11 @@ sub readPreferredCoreGeneSet;
 sub treePreferredCoreGuide;
 sub dispatchPendingTreeJobs;
 sub retryOOMTreeJobs;
-sub usage;
+sub oomScanSeconds;
+sub phase1RetryBudget;
+sub submitPhase1Worker;
+sub escalatePhase1WorkerOOM;
+sub waitPhase1WorkersWithOOMScan;
 sub phase1AutoMemoryMB;
 sub phase1DefaultWorkerMemoryMB;
 sub writeRecoveryRow;
@@ -295,7 +300,10 @@ my $completionMessage = "";
 #1.50: give sample retention an absolute informative-NT floor, hand buildTree5 the
 #	ranked extraction guide, and rename the sample QC verdict to name the finding
 #	(single_strain/mixed_strain) rather than a downstream disposition
-my $version = 1.50;
+#1.51: rescan Slurm accounting on a fixed interval so OOM jobs are resubmitted
+#	while the rest of their wave still runs, with the retry budget counted per
+#	job instead of per wave
+my $version = 1.51;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -436,6 +444,17 @@ my $treeOOMMaxMemGBSpecified = 0;
 #with the 5 GB floor that is seven rounds to 512 GB. A lower bound made the
 #round count, rather than the configured ceiling, decide when to give up.
 my $treeOOMRetryRounds = 8;
+#Both phases submit their biggest, most OOM-prone jobs first and leave a long
+#tail of short ones behind them. Waiting for that whole wave before the first
+#accounting scan delayed every escalation until the tail had drained, so instead
+#poll Slurm accounting on this cadence and resubmit whatever already died while
+#the rest of the wave keeps running.
+my $oomScanMinutes = 60;
+#The retry budget is therefore counted per job, not per wave: a shared round
+#counter would let an early scan spend the retries a job that only fails much
+#later still needs. Every accounting-confirmed OOM job keeps at least this many
+#escalations of its own, whichever scan first sees it fail.
+my $oomMinRetries = 3;
 #IQ-TREE allocates per-thread likelihood buffers, so a 60-thread job needs far
 #more than the same alignment at 4 threads. The base multiplier is calibrated at
 #four cores; this divisor turns the requested core count into that factor. Raise
@@ -549,6 +568,8 @@ GetOptions(
 		$treeOOMMaxMemGBSpecified = 1;
 	},
 	"treeOOMRetryRounds=i" => \$treeOOMRetryRounds,
+	"oomScanMinutes=f" => \$oomScanMinutes,
+	"oomMinRetries=i" => \$oomMinRetries,
 	"treeMemThreadDivisor=f" => \$treeMemThreadDivisor,
 	"onlySubmit=i"   => \$onlySubmit, #submit only jobs, or also recreate input fna/faa files? (can take days)
 	"redo=s"         => \$redoMode,
@@ -662,8 +683,16 @@ GetOptions(
 
 ) or die "Invalid strain_within.pl options\n";
 if ($help) {
-	print usage(\%FILTER_DEFAULT);
-	exit 0;
+	#option tables and their defaults come from docs/flag_reference.md
+	printFlagHelp(
+		script  => "strain_within.pl",
+		version => $version,
+		usage   => ["strain_within.pl -GCd DIR -MGS FILE [options]",
+			"strain_within.pl -help | -h"],
+		summary => "Within-MGS locus extraction, quality control, tree preparation/submission "
+			."and hand-off to strain_within_2.2.pl. Normally launched by MGS.pl.",
+		exit    => 1,
+	);
 }
 die "-placeOnBackbone cannot be combined with deprecated -strictBackbone\n"
 	if $placeOnBackboneSpecified && $legacyStrictBackboneSpecified;
@@ -750,6 +779,11 @@ die "-treeOOMRetryRounds must be between 0 and 12
 	unless $treeOOMRetryRounds >= 0 && $treeOOMRetryRounds <= 12;
 die "-treeMemThreadDivisor must be positive
 " unless $treeMemThreadDivisor > 0;
+die "-oomScanMinutes must be positive
+" unless $oomScanMinutes > 0;
+die "-oomMinRetries must be between 0 and 12
+"
+	unless $oomMinRetries >= 0 && $oomMinRetries <= 12;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax,
 		$GenesPerSpecies, $GeneLengthMin, $GeneLengthIncludeMin,
@@ -1459,6 +1493,9 @@ if ($runPartI){
 	
 	my @jobsMain;
 	my (%phase1JobByWorker, %phase1MemoryByWorker);
+	#Retry bookkeeping is per worker and outlives a single wave, so the live OOM
+	#supervisor and the later ledger audit share one budget per worker.
+	my (%phase1RetriesByWorker, %phase1HandledJobs, %phase1TerminalWorkers);
 	my $phase1InitialMemoryMB = 0;
 	my $phase1SelfCmd = '';
 
@@ -1534,7 +1571,20 @@ if ($runPartI){
 			print "Split-worker scripts were generated but not submitted; stopping before incomplete outputs are combined.\n";
 			exit(0);
 		}
-		qsubSystemJobAlive( \@jobsMain,$QSBoptHR ) if @jobsMain && $doSubmit;
+		#Workers are balanced by assembly group, so a wave mixes one very large
+		#worker with many short ones. Rescan Slurm accounting on the -oomScanMinutes
+		#cadence and resubmit an OOM-killed worker at once, rather than letting the
+		#tail of the wave hold its escalation back for hours.
+		waitPhase1WorkersWithOOMScan(
+			jobs => \@jobsMain, generation => $splitGeneration,
+			worker_command => $phase1SelfCmd, script_kind => "retry",
+			job_by_worker => \%phase1JobByWorker,
+			memory_by_worker => \%phase1MemoryByWorker,
+			retries_by_worker => \%phase1RetriesByWorker,
+			handled_jobs => \%phase1HandledJobs,
+			terminal_workers => \%phase1TerminalWorkers,
+			default_mb => $phase1InitialMemoryMB,
+		) if @jobsMain && $doSubmit;
 		my @failedWorkers = phase1WorkersNeedingRetry($splitGeneration);
 		if (@failedWorkers) {
 			my $remaining = retryPhase1Workers(
@@ -1544,6 +1594,9 @@ if ($runPartI){
 				script_kind => "retry",
 				job_by_worker => \%phase1JobByWorker,
 				memory_by_worker => \%phase1MemoryByWorker,
+				retries_by_worker => \%phase1RetriesByWorker,
+				handled_jobs => \%phase1HandledJobs,
+				terminal_workers => \%phase1TerminalWorkers,
 			);
 			if (@{$remaining}) {
 				my $queue = writePhase1RepairQueue($splitGeneration, $remaining,
@@ -2529,15 +2582,17 @@ if ($maxSubJob
 	clear_split_generation($splitManifest, $splitStonePrefix);
 }
 #too many jobs to use as job dependency..
-qsubSystemJobAlive( \@jobs,$QSBoptHR ) if @jobs && $doSubmit;
-if (@treeJobAccounting) {
-	retryOOMTreeJobs(
-		accounting => \@treeJobAccounting,
-		options => $QSBoptHR,
-		maximum_mb => int($treeOOMMaxMemGB * 1024 + 0.5),
-		maximum_rounds => $treeOOMRetryRounds,
-	);
-}
+#The dispatch order puts the largest, most OOM-prone trees first and leaves a
+#long tail of short jobs behind them, so waiting for the whole wave before the
+#first accounting scan delayed every escalation until that tail had drained.
+#retryOOMTreeJobs owns the wait instead and rescans every -oomScanMinutes.
+retryOOMTreeJobs(
+	jobs => \@jobs,
+	accounting => \@treeJobAccounting,
+	options => $QSBoptHR,
+	maximum_mb => int($treeOOMMaxMemGB * 1024 + 0.5),
+	maximum_rounds => $treeOOMRetryRounds,
+);
 my $incompleteTreeOutcomes = 0;
 if ($doSubmit) {
 	my ($failed, $pending, $terminal) =
@@ -6053,6 +6108,154 @@ sub phase1DefaultWorkerMemoryMB {
 	return $phase1AutoMemoryCacheMB;
 }
 
+#Interval between accounting scans, expressed in seconds for the scheduler wait.
+sub oomScanSeconds {
+	return int($oomScanMinutes * 60 + 0.5);
+}
+
+#The OOM contract is per job: an accounting-confirmed OOM failure always keeps
+#at least -oomMinRetries escalations of its own, no matter how many scans have
+#already run or how many sibling jobs failed before it. Ordinary (non-OOM)
+#failures keep the smaller -phase1WorkerRetries budget.
+sub phase1RetryBudget {
+	my ($oomConfirmed) = @_;
+	return $oomConfirmed && $oomMinRetries > $phase1WorkerRetries
+		? $oomMinRetries : $phase1WorkerRetries;
+}
+
+#One place that resubmits a single Phase-I worker, shared by the live OOM
+#supervisor and by the ledger-driven retry loop so both keep the same job and
+#memory bookkeeping.
+sub submitPhase1Worker {
+	my %args = @_;
+	my $worker = $args{worker};
+	my $memoryMB = $args{memory_mb};
+	my $generation = $args{generation};
+	my $workerCommand = $args{worker_command};
+	my $label = $args{label};
+	my $jobByWorker = $args{job_by_worker} || {};
+	my $memoryByWorker = $args{memory_by_worker} || {};
+	my $stone = "$splitStonePrefix.$worker.stone";
+	retry_unlink($stone, fatal => 0,
+		label => "clear worker $worker completion");
+	my $cmdX = "$workerCommand -subjob $worker &&\n"
+		."printf '%s\\n' ".shellQuote($generation)
+		." > ".shellQuote($stone)."\n";
+	my $savedTmp = $QSBoptHR->{tmpSpace};
+	$QSBoptHR->{tmpSpace} = 15;
+	my ($dependency) = qsubSystem(
+		"$LOGDIR/Strain1_B${worker}.${label}.sh",
+		$cmdX, 1, $memoryMB."M", "Str1.$worker",
+		"", "", 1, [], $QSBoptHR,
+	);
+	$QSBoptHR->{tmpSpace} = $savedTmp;
+	$memoryByWorker->{$worker} = $memoryMB;
+	my $jobID = slurm_job_id_from_dependency($dependency, $QSBoptHR->{rTag});
+	if (defined($jobID)) {
+		$jobByWorker->{$worker} = $jobID;
+	} else {
+		delete $jobByWorker->{$worker};
+	}
+	return $dependency;
+}
+
+#One accounting pass over the tracked Phase-I worker jobs. A worker Slurm has
+#already killed for memory is resubmitted straight away with a doubled request,
+#instead of waiting for the siblings that still have hours of work left.
+#Returns the new dependencies, so the caller keeps waiting for them too.
+sub escalatePhase1WorkerOOM {
+	my %args = @_;
+	return () unless $doSubmit && ($QSBoptHR->{qmode} || "") eq "slurm";
+	my $jobByWorker = $args{job_by_worker} || {};
+	my $memoryByWorker = $args{memory_by_worker} || {};
+	my $retriesByWorker = $args{retries_by_worker} || {};
+	my $handledJobs = $args{handled_jobs} || {};
+	my $terminalOOMWorker = $args{terminal_workers} || {};
+	my $defaultMemoryMB = $args{default_mb}
+		|| phase1DefaultWorkerMemoryMB(workers => $maxSubJob);
+	my @records;
+	for my $worker (sort { $a <=> $b } keys %{$jobByWorker}) {
+		my $jobID = $jobByWorker->{$worker};
+		next unless defined($jobID) && $jobID =~ /^\d+$/;
+		next if $handledJobs->{$jobID};
+		push @records, {
+			job_id => $jobID,
+			worker => $worker,
+			requested_mb => $memoryByWorker->{$worker} || $defaultMemoryMB,
+		};
+	}
+	return () unless @records;
+	my $plan = slurm_oom_retry_plan(\@records,
+		int($treeOOMMaxMemGB * 1024 + 0.5));
+	unless ($plan->{summary}{available}) {
+		warn "Phase-I Slurm OOM accounting unavailable; deferring escalation to the "
+			."next scan: ".($plan->{summary}{error} || "unknown error")."\n";
+		return ();
+	}
+	my %workerByJob = map { $_->{job_id} => $_->{worker} } @records;
+	my @dependencies;
+	for my $jobID (sort { $a <=> $b } keys %{$plan->{by_job_id}}) {
+		my $oom = $plan->{by_job_id}{$jobID};
+		my $worker = $workerByJob{$jobID};
+		next unless defined $worker;
+		#Whatever the verdict, this outcome has now been ruled on: a later scan
+		#must not rediscover it and escalate or warn about it a second time.
+		$handledJobs->{$jobID} = 1;
+		if ($oom->{ceiling_reached}) {
+			warn "Cannot retry OOM Phase-I worker $worker: $oom->{requested_mb} MB "
+				."already meets -treeOOMMaxMemGB $treeOOMMaxMemGB\n";
+			$terminalOOMWorker->{$worker} = 1;
+			next;
+		}
+		my $budget = phase1RetryBudget(1);
+		my $spent = $retriesByWorker->{$worker} || 0;
+		if ($spent >= $budget) {
+			warn "Phase-I worker $worker exhausted its OOM retry budget "
+				."($spent of $budget escalation(s) spent); its outcome stays "
+				."quarantined for the ledger audit\n";
+			next;
+		}
+		my $round = ++$retriesByWorker->{$worker};
+		print "Phase-I worker $worker OOM escalation (attempt $round/$budget): "
+			."$oom->{requested_mb} MB -> $oom->{next_mb} MB\n";
+		push @dependencies, submitPhase1Worker(
+			worker => $worker, memory_mb => $oom->{next_mb},
+			generation => $args{generation},
+			worker_command => $args{worker_command},
+			label => ($args{script_kind} || "retry")."OOM${round}",
+			job_by_worker => $jobByWorker,
+			memory_by_worker => $memoryByWorker,
+		);
+	}
+	return @dependencies;
+}
+
+#Wait for a wave of Phase-I workers, returning to the accounting scan every
+#-oomScanMinutes so OOM failures are escalated while the wave is still running.
+sub waitPhase1WorkersWithOOMScan {
+	my %args = @_;
+	my @pendingJobs = grep { defined($_) && length($_) } @{$args{jobs} || []};
+	return unless @pendingJobs && $doSubmit;
+	unless (($QSBoptHR->{qmode} || "") eq "slurm") {
+		qsubSystemJobAlive(\@pendingJobs, $QSBoptHR);
+		return;
+	}
+	my $scanSeconds = oomScanSeconds();
+	my $scan = 0;
+	while (@pendingJobs) {
+		my $remaining = qsubSystemJobAlive(
+			\@pendingJobs, $QSBoptHR, 0, -1, $scanSeconds);
+		@pendingJobs = @{$remaining || []};
+		$scan++;
+		my @escalated = escalatePhase1WorkerOOM(%args);
+		next unless @escalated;
+		print "Phase-I OOM scan $scan resubmitted ".scalar(@escalated)
+			." worker(s); ".scalar(@pendingJobs)." earlier job(s) still queued.\n";
+		push @pendingJobs, @escalated;
+	}
+	return;
+}
+
 sub retryPhase1Workers {
 	my %args = @_;
 	my $generation = $args{generation};
@@ -6061,6 +6264,12 @@ sub retryPhase1Workers {
 	my $scriptKind = $args{script_kind} || "retry";
 	my $jobByWorker = $args{job_by_worker} || {};
 	my $memoryByWorker = $args{memory_by_worker} || {};
+	#Budgets, ruled-on outcomes and ceiling verdicts are shared with the live OOM
+	#supervisor: a worker escalated while its wave was still running must not get
+	#a second, independent allowance once the ledger audit reaches it.
+	my $retriesByWorker = $args{retries_by_worker} || {};
+	my $handledJobs = $args{handled_jobs} || {};
+	my $terminalOOMWorker = $args{terminal_workers} || {};
 	die "Phase-I retry requires a generation and worker command\n"
 		unless defined($generation) && length($generation)
 			&& defined($workerCommand) && length($workerCommand);
@@ -6068,14 +6277,11 @@ sub retryPhase1Workers {
 	#same baseline rather than silently dropping back to the fixed default.
 	my $defaultMemoryMB = phase1DefaultWorkerMemoryMB(workers => $maxSubJob);
 	my $maximumMemoryMB = int($treeOOMMaxMemGB * 1024 + 0.5);
-	my %terminalOOMWorker;
-	my $round = 0;
 
 	while (@failedWorkers) {
 		last if grep { $_ == 0 } @failedWorkers;
 		last unless $doSubmit;
-		last if $round >= $phase1WorkerRetries;
-		my @eligibleWorkers = grep { !$terminalOOMWorker{$_} } @failedWorkers;
+		my @eligibleWorkers = grep { !$terminalOOMWorker->{$_} } @failedWorkers;
 		last unless @eligibleWorkers;
 
 		my %oomByJob;
@@ -6084,6 +6290,7 @@ sub retryPhase1Workers {
 			for my $worker (@eligibleWorkers) {
 				my $jobID = $jobByWorker->{$worker};
 				next unless defined($jobID) && $jobID =~ /^\d+$/;
+				next if $handledJobs->{$jobID};
 				push @records, {
 					job_id => $jobID,
 					worker => $worker,
@@ -6101,57 +6308,57 @@ sub retryPhase1Workers {
 			}
 		}
 
-		my %retryMemoryMB;
+		my (%retryMemoryMB, %retryBudget);
 		for my $worker (@eligibleWorkers) {
 			my $currentMB = $memoryByWorker->{$worker} || $defaultMemoryMB;
 			my $jobID = $jobByWorker->{$worker};
 			my $oom = defined($jobID) ? $oomByJob{$jobID} : undef;
 			if ($oom) {
+				$handledJobs->{$jobID} = 1;
 				if ($oom->{ceiling_reached}) {
 					warn "Cannot retry OOM Phase-I worker $worker: $currentMB MB already meets "
 						."-treeOOMMaxMemGB $treeOOMMaxMemGB\n";
-					$terminalOOMWorker{$worker} = 1;
+					$terminalOOMWorker->{$worker} = 1;
 					next;
 				}
 				$currentMB = $oom->{next_mb};
 				print "Phase-I worker $worker OOM escalation: $oom->{requested_mb} MB -> "
 					."$currentMB MB\n";
 			}
+			my $budget = phase1RetryBudget($oom ? 1 : 0);
+			my $spent = $retriesByWorker->{$worker} || 0;
+			if ($spent >= $budget) {
+				warn "Phase-I worker $worker exhausted its retry budget "
+					."($spent attempt(s) spent, budget $budget)\n";
+				next;
+			}
+			$retryBudget{$worker} = $budget;
 			$retryMemoryMB{$worker} = $currentMB;
 		}
 		my @retryableWorkers = grep { exists($retryMemoryMB{$_}) } @eligibleWorkers;
 		last unless @retryableWorkers;
 
-		$round++;
-		print "Retrying Phase-I worker(s) ".join(",", @retryableWorkers)
-			." (round $round/$phase1WorkerRetries)\n";
 		my @retryJobs;
-		my $savedTmp = $QSBoptHR->{tmpSpace};
-		$QSBoptHR->{tmpSpace} = 15;
 		for my $worker (@retryableWorkers) {
-			my $stone = "$splitStonePrefix.$worker.stone";
-			retry_unlink($stone, fatal => 0,
-				label => "clear worker $worker completion");
-			my $cmdX = "$workerCommand -subjob $worker &&\n"
-				."printf '%s\\n' ".shellQuote($generation)
-				." > ".shellQuote($stone)."\n";
-			my ($dependency) = qsubSystem(
-				"$LOGDIR/Strain1_B${worker}.${scriptKind}${round}.sh",
-				$cmdX, 1, $retryMemoryMB{$worker}."M", "Str1.$worker",
-				"", "", 1, [], $QSBoptHR,
+			my $round = ++$retriesByWorker->{$worker};
+			print "Retrying Phase-I worker $worker "
+				."(attempt $round/$retryBudget{$worker})\n";
+			push @retryJobs, submitPhase1Worker(
+				worker => $worker, memory_mb => $retryMemoryMB{$worker},
+				generation => $generation, worker_command => $workerCommand,
+				label => "${scriptKind}${round}",
+				job_by_worker => $jobByWorker,
+				memory_by_worker => $memoryByWorker,
 			);
-			push @retryJobs, $dependency;
-			$memoryByWorker->{$worker} = $retryMemoryMB{$worker};
-			my $jobID = slurm_job_id_from_dependency(
-				$dependency, $QSBoptHR->{rTag});
-			if (defined($jobID)) {
-				$jobByWorker->{$worker} = $jobID;
-			} else {
-				delete $jobByWorker->{$worker};
-			}
 		}
-		$QSBoptHR->{tmpSpace} = $savedTmp;
-		qsubSystemJobAlive(\@retryJobs, $QSBoptHR);
+		waitPhase1WorkersWithOOMScan(
+			jobs => \@retryJobs, generation => $generation,
+			worker_command => $workerCommand, script_kind => $scriptKind,
+			job_by_worker => $jobByWorker, memory_by_worker => $memoryByWorker,
+			retries_by_worker => $retriesByWorker, handled_jobs => $handledJobs,
+			terminal_workers => $terminalOOMWorker,
+			default_mb => $defaultMemoryMB,
+		);
 		@failedWorkers = phase1WorkersNeedingRetry($generation);
 	}
 	return \@failedWorkers;
@@ -7004,6 +7211,8 @@ sub printEarlyRunHeader {
 		."onlySubmit=$onlySubmit; redo=$redoMode; redoEPAfilter=$redoEPAfilter\n";
 	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB; "
 		."per-thread memory scaling=cores/$treeMemThreadDivisor\n";
+	print "OOM rescan: every $oomScanMinutes min while jobs are still running; at "
+		."least $oomMinRetries escalation(s) per OOM job\n";
 	print "Initializing paths, maps, and catalogues...\n";
 	print "==============================================\n";
 }
@@ -7277,25 +7486,52 @@ sub retryOOMTreeJobs {
 	my $options = $args{options} || {};
 	my $maximumMB = $args{maximum_mb};
 	my $maximumRounds = $args{maximum_rounds} // 8;
-	return 0 unless @{$accounting};
-	return 0 unless $options->{doSubmit} && ($options->{qmode} || '') eq 'slurm';
+	my $minimumRounds = $args{minimum_rounds} // $oomMinRetries;
+	my $scanSeconds = $args{scan_seconds} // oomScanSeconds();
+	my @pendingJobs = grep { defined($_) && length($_) } @{$args{jobs} || []};
 	# The configured memory ceiling, not the round count, should decide when to
 	# stop: doubling out of the 5 GB floor needs seven rounds to reach 512 GB.
+	# The count is spent per MGS rather than per wave, because a periodic scan
+	# escalates whichever tree died since the last pass: a shared counter would
+	# let the first failures consume the retries a late failure still needs.
+	$maximumRounds = $minimumRounds if $maximumRounds < $minimumRounds;
 	die "OOM retry rounds must be between 0 and 12\n"
 		unless $maximumRounds >= 0 && $maximumRounds <= 12;
+	unless (@{$accounting} && $options->{doSubmit}
+			&& ($options->{qmode} || '') eq 'slurm') {
+		qsubSystemJobAlive(\@pendingJobs, $options)
+			if @pendingJobs && $options->{doSubmit};
+		return 0;
+	}
 
-	my @roundAccounting = @{$accounting};
-	my $oomPlan = slurm_oom_retry_plan(\@roundAccounting, $maximumMB);
-	my $summary = $oomPlan->{summary};
-	print format_slurm_tree_memory_summary($summary);
+	my (%retriesByMGS, %handledJob);
 	my $retried = 0;
-	for my $round (1 .. $maximumRounds) {
-		last unless $summary->{available};
-		my @oom = map { $oomPlan->{by_job_id}{$_} }
-			sort { $a <=> $b } keys %{$oomPlan->{by_job_id}};
-		last unless @oom;
+	my $scan = 0;
+	my $summary;
+	while (1) {
+		if (@pendingJobs) {
+			# Bounded wait: come back on the scan cadence to escalate what has
+			# already failed, instead of blocking until the last short job ends.
+			my $remaining = qsubSystemJobAlive(
+				\@pendingJobs, $options, 0, -1, $scanSeconds);
+			@pendingJobs = @{$remaining || []};
+		}
+		$scan++;
+		# Outcomes already ruled on are dropped from the query, so a retried or
+		# refused job is never rediscovered by a later scan.
+		my @candidates = grep { !$handledJob{$_->{job_id}} } @{$accounting};
+		my $oomPlan = slurm_oom_retry_plan(\@candidates, $maximumMB);
+		$summary = $oomPlan->{summary};
+		print "\nTree OOM scan $scan: ".scalar(@pendingJobs)." job(s) still queued; "
+			.scalar(@candidates)." outcome(s) inspected.\n";
+		print format_slurm_tree_memory_summary($summary);
+		my @oom = $summary->{available}
+			? map { $oomPlan->{by_job_id}{$_} }
+				sort { $a <=> $b } keys %{$oomPlan->{by_job_id}}
+			: ();
 		my @retryQueue;
 		for my $oom (@oom) {
+			$handledJob{$oom->{job_id}} = 1;
 			my $original = $oom->{submission_record};
 			unless (ref($original) eq 'HASH') {
 				warn "Cannot retry OOM tree job $oom->{job_id}: submission record is unavailable\n";
@@ -7306,6 +7542,12 @@ sub retryOOMTreeJobs {
 				warn "OOM retry ceiling reached for $original->{mgs}: "
 					."$original->{requested_mb} MB already meets -treeOOMMaxMemGB "
 					."$treeOOMMaxMemGB\n";
+				next;
+			}
+			my $round = ($retriesByMGS{$original->{mgs}} || 0) + 1;
+			if ($round > $maximumRounds) {
+				warn "OOM retry budget of $maximumRounds round(s) is exhausted for "
+					."$original->{mgs}; its outcome stays quarantined\n";
 				next;
 			}
 			my %retry = %{$original};
@@ -7332,6 +7574,7 @@ sub retryOOMTreeJobs {
 				$retry{script} = File::Spec->catfile(
 					$mgsDirectory, 'treeCmd.epa_retry.sh');
 			}
+			$retriesByMGS{$original->{mgs}} = $round;
 			$retry{retry_round} = $round;
 			$retry{requested_mb} = $nextMB;
 			$retry{memory} = $nextMB.'M';
@@ -7348,27 +7591,28 @@ sub retryOOMTreeJobs {
 				.($epaStage ? 'EPA-only with 1 thread' : "$retry{cores} core full-tree resume")
 				."\n";
 		}
-		last unless @retryQueue;
-		my (@retryJobs, @retryAccounting);
-		my $drain = dispatchPendingTreeJobs(
-			queue => \@retryQueue, options => $options,
-			jobs => \@retryJobs, accounting => \@retryAccounting,
-			blocking => 1,
-		);
-		die "Internal error: OOM retry queue was not drained\n" if @retryQueue;
-		last unless $drain->{submitted} && @retryAccounting;
-		qsubSystemJobAlive(\@retryJobs, $options) if @retryJobs;
-		push @{$accounting}, @retryAccounting;
-		$retried += scalar(@retryAccounting);
-		@roundAccounting = @retryAccounting;
-		$oomPlan = slurm_oom_retry_plan(\@roundAccounting, $maximumMB);
-		$summary = $oomPlan->{summary};
-		print "OOM retry round $round accounting:\n";
-		print format_slurm_tree_memory_summary($summary);
+		if (@retryQueue) {
+			my (@retryJobs, @retryAccounting);
+			dispatchPendingTreeJobs(
+				queue => \@retryQueue, options => $options,
+				jobs => \@retryJobs, accounting => \@retryAccounting,
+				blocking => 1,
+			);
+			die "Internal error: OOM retry queue was not drained\n" if @retryQueue;
+			push @{$accounting}, @retryAccounting;
+			$retried += scalar(@retryAccounting);
+			# The escalated jobs join the wait, so the next scan covers them too.
+			push @pendingJobs, grep { defined($_) && length($_) } @retryJobs;
+		}
+		last unless @pendingJobs;
 	}
+	print "Tree OOM recovery complete: $retried escalated retry job(s) across "
+		.scalar(keys %retriesByMGS)." MGS in $scan accounting scan(s); "
+		."budget was $maximumRounds round(s) per MGS.\n";
 	if ($summary->{available} && @{$summary->{oom_jobs} || []}) {
-		warn "Tree OOM recovery stopped after at most $maximumRounds retry round(s); "
-			."remaining OOM outcomes stay quarantined for inspection\n";
+		warn "Tree OOM recovery ended with ".scalar(@{$summary->{oom_jobs}})
+			." OOM outcome(s) it could not escalate further; they stay quarantined "
+			."for inspection\n";
 	}
 	return $retried;
 }
@@ -8374,225 +8618,6 @@ sub readGenesSample_Singl{
 			}
 		}
 	}
-}
-
-sub usage {
-	my ($default) = @_;
-	return <<"USAGE";
-Usage: strain_within.pl -GCd DIR -MGS FILE [options]
-
-Workflow splitting:
-  -maxSubJob INT                Stage-I worker count: -1 selects automatically
-                                 (default; 50-150 assembly groups/worker), 0
-                                 disables splitting, positive values are explicit
-  -flushEvery INT               Publish buffered Stage-I records after this many
-                                 sample rows [default $default->{phase1_flush_samples}]
-  -flushMemMB INT               Also publish once this much Stage-I output is
-                                 buffered. The buffers hold one record set per
-                                 MGS the worker has touched, so a sample count
-                                 alone cannot bound them; lower this if split
-                                 workers run out of memory [default 2048]
-  -treeOOMMaxMemGB FLOAT        Maximum memory for automatic tree OOM retries;
-                                 each round doubles the previous request until
-                                 this ceiling is reached [default: maxMF4mem
-                                 from MATAFILERcfg.txt; 512]
-  -treeOOMRetryRounds INT       Maximum OOM retry rounds. The default is high
-                                 enough that -treeOOMMaxMemGB, not the round
-                                 count, decides when to stop [default 8]
-  -treeMemThreadDivisor FLOAT   IQ-TREE keeps per-thread likelihood buffers, so
-                                 the initial request is scaled by
-                                 cores/DIVISOR (never below 1). The base
-                                 estimate is calibrated at four cores. Raise
-                                 this to request less on wide jobs, or set it
-                                 above -maxCores to disable the scaling
-                                 [default 4]
-
-Consensus SNP inputs:
-  -SNPcaller MPI|FB             Select the caller-specific MATAF4 consensus FASTA
-                                 and VCF outputs used by Phase I [default MPI]
-
-Redo modes:
-  -redo none                    Reuse valid results and resume missing work
-                                 [default]
-  -redo tree                    Delete and rebuild tree-stage outputs while
-                                 reusing complete published or staged inputs
-  -redo input                   Rebuild missing or incomplete strain-tree inputs
-                                 and their dependent tree work
-  -redo all                     Delete and rebuild strain inputs and trees for
-                                 the complete MGS selection
-
-Use -MGSsubset to limit -redo tree or -redo input to explicit MGS identifiers.
--redo all requires a complete rebuild without -MGSsubset.
-
-Gene selection and biological QC:
-  -maxGenes INT                  Maximum validated loci per MGS/sample
-                                 [default $default->{maximum_genes_per_sample}; <=0 removes the cap]
-  -treeLocusBudget INT           Maximum final loci selected for each tree;
-                                 candidate alignment remains bounded to this plus
-                                 the QC-backfill allowance
-                                 [default $default->{maximum_tree_loci}]
-  -MGSminGenesPSmpl INT         Extraction prefilter: minimum validated loci a
-                                 sample needs for one MGS before its records are
-                                 written and aligned. This is NOT the sample
-                                 inclusion policy; see -GenesPerSpecies below
-                                 [default $default->{minimum_mgs_genes_per_sample}]
-  -minLociPerMGS INT            Distinct loci an MGS needs before a tree is
-                                 attempted at all. A property of the MGS, not of
-                                 any sample [default $default->{minimum_loci_per_mgs}]
-  -multiGeneSmplMax FLOAT       Maximum ambiguous-locus fraction
-                                 [default $default->{multi_gene_sample_max}]
-  -conspGeneSmplMax FLOAT       Maximum conspecific-signal locus fraction
-                                 [default $default->{conspecific_gene_sample_max}]
-  -minBadLociPSmpl INT          Minimum bad loci before flagging a sample as mixed
-                                 [default $default->{minimum_bad_loci_for_sample_skip}]
-  -excludeMixedStrainSamples 0|1
-                                Drop samples that breach -multiGeneSmplMax or
-                                 -conspGeneSmplMax from their MGS tree. Applies
-                                 to the ordinary de novo tree and is independent
-                                 of -placeOnBackbone. Sparse samples are never
-                                 affected; they stay governed by
-                                 -MGSminGenesPSmpl, -GenesPerSpecies,
-                                 -relativeNTFraction and -NTfiltCount [default 1]
-  -mosaicLoci FILE              Confirmed catalogue-wide mosaic/outgroup table
-  -mosaicMGS FILE               Raw SB.clusters assignment table used to discover
-                                 mosaics; inferred by removing .core from -MGS
-  -MGSabundance FILE            Explicit MGS abundance matrix; recommended when
-                                 the MGS guide is outside its Bin_* directory
-  -prepareMosaicLoci 0|1        If the catalogue is absent, create it beside the
-                                 MGS file in a submitted prerequisite job, wait,
-                                 and validate it before extraction
-                                 [default $default->{prepare_mosaic_loci}]
-  -mosaicMemGb INT              Total memory requested for that prerequisite job
-                                 [default 150]
-  -selfMemGb INT|auto           Memory per Phase-I split worker. "auto" (or -1)
-                                 sizes each worker from the catalogue cluster-index
-                                 shard it loads, the resolved locus model and its
-                                 assembly-group count, instead of one fixed
-                                 request; the chosen value and its terms are
-                                 printed. Underestimates are still recovered by
-                                 the OOM escalation bounded by -treeOOMMaxMemGB
-                                 [default 10]
-  -breakpointGeneFlank INT      Mask genes this many bases around mapping breakpoints
-                                 [default $default->{breakpoint_gene_flank}]
-  -abundanceMinLoci INT         Loci required for robust abundance-pattern filtering
-                                 [default $default->{abundance_minimum_loci}]
-  -abundanceMinFold FLOAT       Lowest accepted locus/median depth ratio
-                                 [default $default->{abundance_minimum_fold}]
-  -abundanceMaxFold FLOAT       Highest accepted locus/median depth ratio
-                                 [default $default->{abundance_maximum_fold}]
-  -abundanceMaxModifiedZ FLOAT  Modified-Z threshold for depth outliers
-                                 [default $default->{abundance_maximum_modified_z}]
-
-Questionable sample-locus observations are masked first. Samples with excessive
-ambiguity among the remaining observations are retained for post-tree placement
-instead of being used to infer the strict backbone.
-
-Tree locus filtering:
-  -GeneLengthMin FLOAT          Minimum fraction of a locus length-Q90 retained
-                                 for sample QC [default 0.3]
-  -GeneLengthIncludeMin FLOAT   After sample QC, recover loci reaching this
-                                 fraction into backbone/placement MSA input
-                                 [default 0.03]
-  The next three are the primary sample-inclusion policy. They are measured on
-  selected, aligned, informative loci relative to the cohort, so unlike
-  -MGSminGenesPSmpl they can tell three well-covered loci from eight fragments.
-  With -placeOnBackbone 0 a sample failing them is removed; with 1 it is deferred
-  to EPA-ng placement instead.
-  -GenesPerSpecies FLOAT        Minimum locus coverage per sample, as a fraction
-                                 of the cohort Q90 selected-locus count [0.2]
-  -relativeNTFraction FLOAT     Minimum informative-NT coverage, as a fraction of
-                                 the cohort Q90 informative NT [default 0.1]
-  -NTfiltCount INT              Absolute minimum informative NT after final MSA.
-                                 Floor under the two relative filters above, so
-                                 retention does not depend on how deep the rest
-                                 of the cohort happens to be; 0 disables it
-                                 [default $default->{minimum_informative_nt_per_sample}]
-  -enforceSampleCoverage 0|1    Apply the three filters above as a removal when
-                                 -placeOnBackbone is 0. Setting this to 0 retains
-                                 every aligned sample regardless of how little of
-                                 the alignment it covers [default 1]
-  -placementGenesPerSpecies FLOAT  Placement gene fraction [default 0.04]
-  -placementRelativeNTFraction FLOAT  Placement NT fraction [default 0.03]
-  -placementNTfiltCount INT     Placement minimum informative NT; defaults to
-                                 -NTfiltCount when omitted
-  -taxonAwareLocusSelection 0|1 Align a robust-plus-backfill candidate set, then
-                                 select robust/core and taxon-rescue loci after MSA QC
-                                 [default 1]
-  -taxonAwareRescueMinPrevalence FLOAT  Minimum fraction of usable taxa carrying
-                                 a locus before taxon rescue/QC backfill may select it
-                                 [default 0.8]
-  -outgroupCoreMinLoci INT       Candidate outgroup overlap floor; 0 derives
-                                 ceil(20% of -treeLocusBudget) [default auto]
-  -outgroupReferenceGeneCap INT  Approved candidate-reference genes retained per
-                                 outgroup MGS [default 2500]
-  -rateMergePartitions 0|1      Merge final loci into deterministic rate/GC bins
-                                 before IQ-TREE [default 1]
-  -preferredCoreGenes FILE       Prefer universal-core seed loci listed in this
-                                 raw .core guide. When omitted, use -MGS itself
-                                 if it ends in .core, otherwise a readable
-                                 sibling -MGS.core file [default auto]
-  -compactTaxonAwareDiagnostics 0|1  Merge final taxon-aware/rate audit TSVs
-                                 into phylo/taxon_aware_diagnostics.tsv
-                                 [default 1]
-  -rateMergeMaxBins INT         Maximum deterministic partition bins [default 8]
-  -rateMergeTargetSites INT     Target effective called sites per initial bin
-                                 [default 30000]
-  -rateMergeMinLoci INT         Minimum loci per bin before nearest-bin merging
-                                 [default 20]
-  -rateMergeMinSites INT        Minimum alignment sites per bin before merging
-                                 [default 20000]
-  -placeOnBackbone 0|1          Infer a broad ML backbone and place only deferred
-                                 sparse samples with EPA-ng [default 0]
-  -onlyMSA 0|1                  Retain localized per-locus MSAs; skip combined-MSA
-                                 postprocessing, concatenation, phylogeny,
-                                 placement, and strain postprocessing
-                                 [default 0]
-  -strictBackboneFraction FLOAT Defer a sample only below this fraction of the
-                                 informative-site Q90 [default 0.35]
-  -strictBackboneMinSamples INT  Minimum retained backbone samples before using
-                                 the complete alignment as fallback [default 3]
-  -placementMinOverlap INT      Minimum informative positions shared with the
-                                 inferred backbone [default 10000]
-  -epaThreads INT                Requested EPA-ng threads; BuildTree caps these by
-                                 cores and 1 thread/GB planning memory [default 2]
-  -epaMaxMemMB INT               EPA-ng thread-planning budget; -1 derives 60% of
-                                 each IQ-TREE allowance, 0 disables memory scaling
-                                 [default -1]
-  -epaPendantOutlierFactor FLOAT Exclude placements whose pendant branch exceeds
-                                 this multiple of backbone terminal-branch Q95;
-                                 zero disables the filter [default 5]
-  -epaPendantMinThreshold FLOAT  Minimum pendant-branch cutoff, substitutions/site
-                                 [default 0.02]
-  -redoEPAfilter                Rebuild each final EPA-placed tree from its retained
-                                 jplace and backbone, then continue through the normal
-                                 controller validation and downstream strain analysis
-
-An ordinary parent tree-only resume (-onlySubmit 1) uses lean, incremental
-submission: it trusts the atomic Phase-I merge checkpoint, checks completion,
-terminal state, tree input, and category data only when each MGS reaches the
-submission loop. It does not run a
-controller-wide resume audit, worker-shard scan, or input-sizing/sorting pass.
-Already-overlaid MGS also bypass reference-catalogue initialization; the shared
-reference stream starts only when the first raw MGS actually needs an overlay.
-The required per-MGS input-finalization result also supplies sample and usable-
-gene counts without another scan. Those values select cores and approximate
-memory together. Ordinary full jobs remain queued until preparation finishes,
-then submit by descending core request and descending sample-by-gene workload;
-EPA-only recovery keeps its existing priority tier.
-An existing LOGandSUB/tree_input_sizing.tsv may be read only as an optional
-resource hint. Explicit -redo modes keep the exhaustive audit. After dispatch,
-normal scheduler waiting, output
-validation, and strain_within_2.2.pl submission are unchanged.
-
-On a tree-only resume (-onlySubmit 1), a placementPending.sto accompanied by a
-validated retained IQ-TREE backbone, MSA, query alignment, and sample
-classification is retried automatically in EPA-only mode. The retry uses one
-core and a doubled scheduler-memory request (minimum 20 GB), without rerunning
-alignment or tree inference. Legacy runs are handled as well: when these
-retained placement inputs exist but phylo/IQtree_allsites.treefile does not,
-strain_within reconstructs the pending marker and restarts BuildTree in the
-same isolated EPA-only mode.
-USAGE
 }
 
 sub taxonAwareLocusBudgets {

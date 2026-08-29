@@ -5,7 +5,7 @@
   <a href="docs/install.md"><img alt="Installation" src="https://img.shields.io/badge/install-micromamba%20%2B%20installer.sh-blue"></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%2F%20HPC-lightgrey">
   <img alt="Language" src="https://img.shields.io/badge/language-Perl-39457E?logo=perl">
-  <img alt="MATAFILER4 version" src="https://img.shields.io/badge/MATAFILER4-v4.38-brightgreen">
+  <img alt="MATAFILER4 version" src="https://img.shields.io/badge/MATAFILER4-v4.46-brightgreen">
   <a href="https://github.com/hildebra/MATAFILER4/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/hildebra/MATAFILER4"></a>
 </p>
 
@@ -36,7 +36,7 @@ Replace the workflow filenames if your repository uses different names.
 
 MATAFILER4 is a Linux/HPC-oriented metagenomic processing pipeline for raw shotgun metagenomic reads. It supports assembly-dependent workflows for communities that assemble well, such as many host-associated microbiomes, and assembly-independent profiling workflows for highly complex communities such as soil.
 
-This documentation snapshot was updated against `MATAF4.pl` version `4.38`.
+This documentation snapshot was updated against `MATAF4.pl` version `4.46`.
 
 ## Which mode should I use?
 
@@ -87,11 +87,11 @@ For new analyses, `-requireInput 1` prevents missing or unmatched input reads fr
 6. [Profiling tutorial](docs/profiling_tutorial.md) — RiboFind, functional profiles, MetaPhlAn 4, mOTUs 4, Protal, and required database keys.
 7. [Strain-within guide](docs/strainwithin.md) — tree preparation, inclusion controls, optional placement, and statistics postprocessing.
 8. [Outputs](docs/outputs.md) — file-by-file description of final and intermediate results.
-9. [Flag reference](docs/flag_reference.md) — current options parsed from `MATAF4.pl`, `geneCat.pl`, `MGS.pl` and `buildTree5.pl`.
+9. [Flag reference](docs/flag_reference.md) — current options parsed from `MATAF4.pl`, `geneCat.pl`, `MGS.pl`, `strain_within.pl`, `strain_within_2.2.pl` and `buildTree5.pl`.
 10. [FAQ](docs/FAQ.md) — troubleshooting and common failure modes.
 11. [Glossary](docs/glossary.md) — terms used throughout the pipeline.
 
 
 ## Validated flag references
 
-The command-line reference is generated from the uploaded Perl sources for `MATAF4.pl`, `geneCat.pl`, `MGS.pl` and `buildTree5.pl`. See [Flag reference](docs/flag_reference.md).
+The command-line reference is parsed from the repository Perl sources for `MATAF4.pl`, `geneCat.pl`, `MGS.pl`, `strain_within.pl`, `strain_within_2.2.pl` and `buildTree5.pl`. See [Flag reference](docs/flag_reference.md).

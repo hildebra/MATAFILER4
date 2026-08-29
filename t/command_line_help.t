@@ -2,87 +2,104 @@ use strict;
 use warnings;
 
 use Cwd qw(getcwd);
+use File::Spec;
 use File::Temp qw(tempdir);
 use FindBin qw($Bin);
 use Test::More;
 
+use lib File::Spec->catdir($Bin, '..');
+use Mods::FlagReference qw(readFlagReference scriptOptionNames helpRequested);
+
 my $root = "$Bin/..";
-my $script = "$root/MATAF4.pl";
 my $reference = "$root/docs/flag_reference.md";
 
-open(my $script_fh, '<', $script) or die "Cannot read $script: $!";
-my $source = do { local $/; <$script_fh> };
-close($script_fh);
+#Every entry point renders -help from docs/flag_reference.md via
+#Mods::FlagReference, so the option tables exist exactly once. These checks keep
+#the three views in step: the GetOptions block, the reference section, and the
+#help text a user actually sees.
+my @entryPoints = (
+	{ name => 'MATAF4.pl',            path => "$root/MATAF4.pl",
+		options_from => 'sub getCmdLineOptions' },
+	{ name => 'geneCat.pl',           path => "$root/secScripts/geneCat.pl" },
+	{ name => 'MGS.pl',               path => "$root/secScripts/MGS.pl" },
+	{ name => 'strain_within.pl',     path => "$root/secScripts/MGS/strain_within.pl" },
+	{ name => 'strain_within_2.2.pl', path => "$root/secScripts/MGS/strain_within_2.2.pl" },
+	{ name => 'buildTree5.pl',        path => "$root/secScripts/phylo/buildTree5.pl" },
+);
 
-my ($get_options) = $source =~
-	/sub getCmdLineOptions\s*\{(.*?)\n\s*\)(?:\s+or\s+die\s+[^;]+)?;/s;
-ok(defined($get_options), 'found the MATAF4.pl GetOptions block');
-
-my %accepted;
-while (defined($get_options) && $get_options =~ /^\s*"([^"]+)"\s*=>/mg) {
-	my $spec = $1;
-	$spec =~ s/=[sif]$//;
-	$accepted{$_} = 1 for split(/\|/, $spec);
+#Option names documented in this script's section of the reference.
+sub documentedOptions {
+	my ($script) = @_;
+	my %documented;
+	for my $section (readFlagReference($script, $reference)) {
+		for my $entry (@{$section->{options}}, @{$section->{legacy}}) {
+			while ($entry->{aliases} =~ /-([A-Za-z0-9_?]+)/g) {
+				$documented{$1} = 1;
+			}
+		}
+	}
+	return %documented;
 }
 
+for my $entry (@entryPoints) {
+	my $name = $entry->{name};
+	my %accepted = scriptOptionNames($entry->{path});
+	ok(scalar(keys %accepted), "found the $name GetOptions block");
+
+	my %documented = documentedOptions($name);
+	is_deeply([sort keys %documented], [sort keys %accepted],
+		"docs/flag_reference.md documents every $name option and alias");
+}
+
+#The shared help-request test must accept both dash spellings and nothing else.
+ok(helpRequested('-help'),  'helpRequested accepts -help');
+ok(helpRequested('--help'), 'helpRequested accepts --help');
+ok(helpRequested('-h'),     'helpRequested accepts -h');
+ok(helpRequested('-?'),     'helpRequested accepts -?');
+ok(!helpRequested('-GCd', '/tmp/x', '-onlyMSA', 1),
+	'helpRequested ignores ordinary options');
+ok(!helpRequested('-helper'), 'helpRequested does not match option prefixes');
+
+#The reference must not fall back to placeholders instead of real descriptions.
 open(my $reference_fh, '<', $reference) or die "Cannot read $reference: $!";
-my %documented;
-my $in_mataf4 = 0;
-while (my $line = <$reference_fh>) {
-	if ($line =~ /^##\s+MATAF4\.pl\s*$/i) {
-		$in_mataf4 = 1;
-		next;
-	}
-	last if ($in_mataf4
-		&& $line =~ /^##\s+Flag comparison against previous manual\.md\s*$/i);
-	next unless ($in_mataf4 && $line =~ /^\|\s*(`-[^|]+?)\s*\|/);
-	my $aliases = $1;
-	while ($aliases =~ /`-([A-Za-z0-9_?]+)`/g) {
-		$documented{$1} = 1;
-	}
-}
-close($reference_fh);
-
-open($reference_fh, '<', $reference) or die "Cannot read $reference: $!";
 my $reference_text = do { local $/; <$reference_fh> };
 close($reference_fh);
-unlike(
-	$reference_text,
+unlike($reference_text,
 	qr/Accepted by [A-Za-z0-9_.]+; (?:inspect|see) source\/help/i,
-	'flag descriptions omit repetitive acceptance boilerplate',
-);
-like(
-	$reference_text,
-	qr/`-reProfileRibosome`.*?Remove existing RiboFind extraction and assignment results/s,
-	'flag reference describes RiboFind profile invalidation',
-);
+	'flag descriptions omit repetitive acceptance boilerplate');
+unlike($reference_text, qr/See source\/help for details/i,
+	'flag descriptions are not placeholders');
+like($reference_text,
+	qr/`-reProfileRibosome`.*?delete RiboFind extraction, assignments and merged profiles/s,
+	'flag reference describes RiboFind profile invalidation');
 
-is_deeply(
-	[sort keys %documented],
-	[sort keys %accepted],
-	'docs/flag_reference.md documents every accepted MATAF4.pl option and alias',
-);
-
+#Each script must actually render its own section, with every option in it.
 my $outside = tempdir(CLEANUP => 1);
 my $original_dir = getcwd();
-chdir($outside) or die "Cannot enter $outside: $!";
-my ($help, $help_status);
-{
-	local $ENV{PERL5LIB};
-	delete $ENV{PERL5LIB};
-	$help = qx{"$^X" "$script" --help 2>&1};
-	$help_status = $? >> 8;
-}
-chdir($original_dir) or die "Cannot return to $original_dir: $!";
-is($help_status, 0, '--help loads checkout-local modules and exits successfully outside the repository');
-like($help, qr/Usage:\s+MATAF4\.pl -map <mapping-file> \[options\]/,
-	'help shows command syntax');
-like($help, qr/read from docs\/flag_reference\.md/,
-	'help identifies the flag reference as its source');
+for my $entry (@entryPoints) {
+	my $name = $entry->{name};
+	my %accepted = scriptOptionNames($entry->{path});
 
-my @missing_from_help = grep {
-	$help !~ /(?<![A-Za-z0-9_])-\Q$_\E(?![A-Za-z0-9_])/
-} sort keys %accepted;
-is_deeply(\@missing_from_help, [], '--help displays every accepted option and alias');
+	chdir($outside) or die "Cannot enter $outside: $!";
+	my ($help, $status);
+	{
+		#the scripts are always invoked with the checkout on the module path
+		local $ENV{PERL5LIB} = File::Spec->rel2abs($root, $original_dir);
+		$help = qx{"$^X" "$entry->{path}" -help 2>&1};
+		$status = $? >> 8;
+	}
+	chdir($original_dir) or die "Cannot return to $original_dir: $!";
+
+	is($status, 0, "$name -help exits successfully outside the repository");
+	like($help, qr/\Q$name\E command-line help/, "$name -help names itself");
+	like($help, qr/read from docs\/flag_reference\.md/,
+		"$name -help identifies the flag reference as its source");
+	like($help, qr/Usage:\s+\Q$name\E /, "$name -help shows command syntax");
+
+	my @missing = grep {
+		$help !~ /(?<![A-Za-z0-9_])-\Q$_\E(?![A-Za-z0-9_])/
+	} sort keys %accepted;
+	is_deeply(\@missing, [], "$name -help displays every accepted option and alias");
+}
 
 done_testing();

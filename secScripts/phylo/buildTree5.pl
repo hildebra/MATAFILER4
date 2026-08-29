@@ -90,6 +90,7 @@ use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
 use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::FlagReference qw(printFlagHelp helpRequested);
 use Mods::GenoMetaAss qw( fileGZe fileGZs gzipopen systemW readFasta readFastHD writeFasta quantile);
 use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree 
 			runFasttree runVeryFasttree iqtreeOutputComplete cleanupIQTreeTransients
@@ -248,6 +249,20 @@ END {
 	if ($msaFixCleanedLoci) {
 		warn "MSAfix cleaning summary: loci=$msaFixCleanedLoci, border-gap-masked=$msaFixBorderMasked, low-ID-masked=$msaFixLowIdMasked, below-minimum-good-positions=$msaFixMinGoodRemoved\n";
 	}
+}
+
+#answered before the first getProgPaths() call, so -help needs no site config
+if (helpRequested(@ARGV)) {
+	printFlagHelp(
+		script  => "buildTree5.pl",
+		version => $version,
+		usage   => ["buildTree5.pl -fna FILE -aa FILE -cats FILE -outD DIR [options]",
+			"buildTree5.pl -genoInD DIR -outD DIR [options]",
+			"buildTree5.pl -help | -h | -?"],
+		summary => "Phylogenetic tree construction and related MSA/population-genetic analyses. "
+			."Between-species trees are the default; use -withinSpecies 1 for strain trees.",
+		exit    => 1,
+	);
 }
 
 my $pigzBin  = getProgPaths("pigz");

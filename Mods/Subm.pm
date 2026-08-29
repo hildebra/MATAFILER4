@@ -1261,6 +1261,12 @@ sub qsubSystemJobAlive{
 	# historical behaviour of waiting for every queued dependency to disappear.
 	my $activeThreshold=-1;
 	$activeThreshold = $_[3] if (@_ > 3);
+	# A non-negative budget bounds a single wait: the call returns the
+	# dependencies still queued once that budget is spent, so a caller can act on
+	# the jobs that already finished - escalate accounting-confirmed OOM
+	# outcomes, for instance - and then resume waiting on the returned set.
+	my $maxWaitSeconds=-1;
+	$maxWaitSeconds = $_[4] if (@_ > 4 && defined $_[4]);
 	my @jobs = split /;/, normalise_job_dependencies($jAr);
 	@jobs = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY
 		&& $_ ne $DEFERRED_SUBMISSION_DEPENDENCY } @jobs;
@@ -1275,6 +1281,8 @@ sub qsubSystemJobAlive{
 	my %wanted = map { $_ => 1 } @jobs;
 	my $announced = 0;
 	my $first_poll = 1;
+	my $waitStarted = time;
+	my @remaining;
 	while (1) {
 		my $snapshot = _scheduler_queue_snapshot(
 			$optHR,
@@ -1283,7 +1291,7 @@ sub qsubSystemJobAlive{
 			error => "Failed to query active jobs\n",
 		);
 		$first_poll = 0;
-		my @remaining = grep { $snapshot->{jobs}{$_} } keys %wanted;
+		@remaining = grep { $snapshot->{jobs}{$_} } keys %wanted;
 		my @active = grep {
 			$snapshot->{jobs}{$_}
 				&& _scheduler_state_is_executing($qmode, $snapshot->{states}{$_})
@@ -1294,6 +1302,11 @@ sub qsubSystemJobAlive{
 			last;
 		}
 		last unless (@remaining);
+		if ($maxWaitSeconds >= 0 && time - $waitStarted >= $maxWaitSeconds) {
+			print scalar(@remaining)."/".scalar(@jobs)." job(s) still queued after "
+				.(time - $waitStarted)."s; handing control back for an intermediate check\n";
+			last;
+		}
 		my $waitDescription = $activeThreshold >= 0
 			? scalar(@active)." active job(s) among ".scalar(@remaining)."/".scalar(@jobs)." queued dependencies"
 			: scalar(@remaining)."/".scalar(@jobs)." jobs";
@@ -1306,11 +1319,16 @@ sub qsubSystemJobAlive{
 		my $pollSeconds = defined($optHR->{jobPollSeconds})
 			? 0 + $optHR->{jobPollSeconds} : 20;
 		$pollSeconds = 1 if ($pollSeconds < 1);
-		sleep($pollSeconds);
+		if ($maxWaitSeconds >= 0) {
+			my $budgetLeft = $maxWaitSeconds - (time - $waitStarted);
+			$budgetLeft = 0 if ($budgetLeft < 0);
+			$pollSeconds = $budgetLeft if ($budgetLeft < $pollSeconds);
+		}
+		sleep($pollSeconds) if ($pollSeconds > 0);
 	}
 	delete $optHR->{sampleLockActiveState};
 	delete $optHR->{schedulerQueueState};
-	return;
+	return [@remaining];
 }
 
 sub qsubDepNeverKill{

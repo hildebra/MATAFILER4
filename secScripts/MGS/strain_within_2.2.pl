@@ -11,6 +11,7 @@ use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta gzipopen);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs slurmJobFailureSummary);
 use Mods::SlurmAccounting qw(slurm_tree_memory_summary next_oom_retry_memory_mb);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
+use Mods::FlagReference qw(printFlagHelp helpRequested);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::TamocFunc qw ( getFileStr );
 use Mods::CatalogPaths qw(resolve_catalog_maps);
@@ -32,6 +33,24 @@ sub resolveOutgroup;
 sub loggedOutgroup;
 sub savedCommandOutgroup;
 sub mgsTreeOutgroup;
+
+#declared here (not next to the changelog) so -help can report it before the
+#first getProgPaths() below needs a site config; keep it in sync with that list
+our $version = 0.48;
+
+#-help is answered from docs/flag_reference.md, without a site config
+if (helpRequested(@ARGV)) {
+	printFlagHelp(
+		script  => "strain_within_2.2.pl",
+		version => $version,
+		usage   => ["strain_within_2.2.pl -GCd DIR -FMGdir DIR -map FILE -MGSmatrix FILE [options]",
+			"strain_within_2.2.pl -help | -h | -?"],
+		summary => "Within-MGS tree postprocessing, strain statistics and optional "
+			."population-genetic analysis. Normally launched by strain_within.pl; direct use "
+			."is mainly for targeted postprocessing restarts.",
+		exit    => 1,
+	);
+}
 
 my $MGSTKdir = getProgPaths("MGSTKDir");
 my $configuredMaxMF4mem = getProgPaths("maxMF4mem", 0);
@@ -69,7 +88,7 @@ if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]
 #.46: independently redo strainStats or PopGenStats without resetting all postprocessing
 #.47: isolate each MGS analysis so one failure cannot abort its batch, and stop nounset from killing conda activation
 #.48: forward discrete strainStats categories to PopGenStats and raise its memory request
-my $version = 0.48;
+#$version is declared near the top of this file so -help can print it
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $redoStrainStats = 0;

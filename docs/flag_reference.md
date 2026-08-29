@@ -11,15 +11,22 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 
 | Script | Version in referenced source | Role |
 |---|---:|---|
-| `MATAF4.pl` | `4.38` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
-| `geneCat.pl` | `0.51` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
+| `MATAF4.pl` | `4.46` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
+| `geneCat.pl` | `0.58` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `strain_within.pl` | `1.41` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
-| `strain_within_2.2.pl` | `0.46` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
-| `buildTree5.pl` | `5.82` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `strain_within.pl` | `1.51` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
+| `strain_within_2.2.pl` | `0.48` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
+| `buildTree5.pl` | `5.83` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
+This page is the single source of the option lists. Every entry point renders its own `-help`
+from the section below that carries its name, through `Mods::FlagReference`, so a table edited
+here changes the command-line help as well. Editing a table therefore needs no matching change
+in the scripts — but adding or renaming a flag in a script does need a matching row here, or it
+becomes invisible to users.
+
+- Each script accepts `-help`, `-h` or `-?` (one or two leading dashes), answered before any site configuration is loaded.
 - **Aliases** are equivalent command-line names. Use any listed alias with a leading dash.
 - **Type** is the argument type parsed by `Getopt::Long`: integer, float, string, string list or flag.
 - **Default** is inferred from source-code assignments where possible. Empty cells mean no simple default could be inferred automatically.
@@ -30,22 +37,14 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 - `geneCat.pl` does **not** accept `-Binner`; use `-binSpeciesMG` for gene-catalog/MGS binning selection.
 - `MATAF4.pl` accepts `-Binner`, `-MetaBat2` and `-binSpeciesMG` as aliases for the sample-level binning option.
 - `-profileMetaphlan3` remains a compatibility alias for `-profileMetaphlan`.
-- Both `-profileProtal 1` and `2` use the first compatible primary short-read pair in
-  input order by default, ignore additional pairs plus singleton/BAM streams, and skip
-  a sample when no compatible short pair exists. Set `-protalIgnoreErrors 0` to require
-  exactly one primary paired-end short-read library with no singleton or BAM input.
-  Mode `1` runs per sample, disables strain analysis, and merges durable profiles under
-  `pseudoGC/protal_singular/`. Mode `2` makes one Protal map for the complete mapped
-  cohort, retains staged raw reads until that job succeeds, and publishes the merged
-  table plus signature-scoped strain MSAs under `pseudoGC/protal/` before cleaning
-  scratch.
+- `-profileProtal 1` and `2` both take the first compatible short-read pair and skip samples without one; `-protalIgnoreErrors 0` instead requires exactly one paired-end library and no singleton/BAM input. Mode `1` merges per-sample profiles under `pseudoGC/protal_singular/` (no strain analysis); mode `2` runs one cohort-wide map and publishes the merged table plus strain MSAs under `pseudoGC/protal/`.
 - The strain workflow entry points are named `strain_within.pl` and `strain_within_2.2.pl` in the repository; spellings without underscores are not repository filenames.
 - `buildTree5.pl` accepts `-aa` for the amino-acid FASTA input; the older comment spelling `-faa` is not a parsed flag.
 - `geneCat.pl -MGset` and `MGS.pl -MGset` are constrained in source to `GTDB` or `FMG`.
 
 ## MATAF4.pl
 
-Main sample-level pipeline. This section preserves the more complete MATAF4.pl default annotations from the previous source-derived reference and updates the overall reference to include all uploaded Perl entry points.
+Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so keep every description to one or two short sentences.
 
 ## Base options
 
@@ -55,7 +54,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-checkInstall` | flag | `` | stable | Check that core MATAFILER4 programs/environments are installed. |
 | `-map` | string | `""` | stable | Mapping file describing samples and input/output paths. |
 | `-config` | string | `""` | stable | Alternative configuration file. |
-| `-precheckInputDirs` | integer | `0` | advanced | Pre-scan all mapped sample inputs and cache their sizes. Disabled by default; use `-requireInput 1` to fail on missing or invalid input. |
+| `-precheckInputDirs` | integer | `0` | advanced | Pre-scan all mapped sample inputs and cache their sizes. Use `-requireInput 1` to fail on missing input. |
 | `-inspectState` | integer | `0` | stable | Emit a read-only JSON snapshot of workflow artifacts and markers. |
 | `-planState` | integer | `0` | stable | Emit a read-only, dependency-ordered repair/submission plan from the inspection snapshot. |
 | `-stateReport` | string | `""` | stable | Write the inspection JSON to this explicit path. |
@@ -67,21 +66,21 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-redoFails` | integer | `0` | stable | Remove failed sample-local results and rebuild the sample on the next pass; shared assembly-group outputs are retained. |
+| `-redoFails` | integer | `0` | stable | Delete failed sample-local results and rebuild on the next pass; shared assembly-group output is kept. |
 | `-redoContigStats` | integer | `0` | stable | runContigStats (coverage per gene, kmers, GC content) will be deleted & started again |
 | `-submSystem` | string | `""` | stable | qsub,SGE,bsub,LSF.. by default will try to autodetect |
 | `-submit` | integer | `1` | stable | submit any jobs at all? (0= no submission, just for trying if everything is correctly set up) |
 | `-from` | integer | `0` | stable | start at which samples from map file? |
 | `-to` | integer | `999999999999` | stable | stop at which samples from map file? |
-| `-loopTillComplete` | string | `"0"` | advanced | Repeat selected samples in rolling windows until complete. Advance only across the continuously completed, cleaned prefix; each visit submits the next ready producer wave. After reaching the end, run one full verification pass, wait for this invocation's jobs if it finds locks or work, and repeat. Collect statistics only after a clean full pass. |
-| `-loopTillCompleteActiveJobs` | integer | `3` | advanced | Begin the next rolling pass when at most this many jobs from the current window are running; dependency-pending and unrelated jobs are excluded. |
+| `-loopTillComplete` | string | `"0"` | advanced | Repeat samples in rolling windows until complete, then run one full verification pass. Syntax `X:Y` sets the pass budget and window size; statistics are collected only after a clean full pass. |
+| `-loopTillCompleteActiveJobs` | integer | `3` | advanced | Start the next rolling pass once at most this many window jobs are still running. |
 | `-schedulerPollSeconds` | integer | `20` | advanced | Seconds between scheduler queries while `loopTillComplete` waits. Values must be positive. |
-| `-schedulerCapacityCheckJobs` | integer | `10` | advanced | Refresh the exact running-plus-pending Slurm count after this many submissions, or sooner when the cached count reaches `-maxConcurrentJobs`. |
+| `-schedulerCapacityCheckJobs` | integer | `10` | advanced | Refresh the exact Slurm job count after this many submissions, or sooner at `-maxConcurrentJobs`. |
 | `-excludeNodes` | string | `""` | stable | exclude certain nodes? |
-| `-maxConcurrentJobs` | integer | `0` | stable | Maximum running plus pending user jobs. Counts are cached between submission batches and refreshed at the cap. Loop runs defer and revisit when full; non-loop runs wait. |
+| `-maxConcurrentJobs` | integer | `0` | stable | Maximum running plus pending user jobs; 0 = unlimited. Loop runs defer when full, non-loop runs wait. |
 | `-killDepNever` | integer | `0` | stable | kill jobs in "Dependency never finished" state? |
 | `-requireInput` | integer | `0` | stable | in case input reads are no longer present, 0 will continue pipeline, 1 will abort |
-| `-ignoreSmpls` | string | `""` | stable | Comma-separated exact sample IDs to skip; values are not regular expressions or prefix matches. |
+| `-ignoreSmpls` | string | `""` | stable | Comma-separated exact sample IDs to skip (no regex, no prefix match). |
 | `-rmSmplLocks` | integer | `0` | stable | Remove existing sample lock files. |
 | `-silent` | flag | `0` | stable | Suppress routine progress messages. |
 | `-maxUnzpJobs` | integer | `20` | stable | how many unzip jobs to run in parallel (not to overload HPC IO). Default:20 |
@@ -94,7 +93,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 |---|---:|---|---|---|
 | `-rm_tmpdir_reads` | integer | `1` | stable | Default 1, remove tmpdir with reads |
 | `-rm_tmpInput` | integer | `1` | stable | remove raw, human / adaptor filtered reads, if sdm clean created? (and not needed any longer) |
-| `-reduceScratchUse` | integer | `1` | internal/advanced | remove sample scratch and rebuildable indexes only after ContigStats and configured binning/ConsSNP terminal outputs are published; set to 0 for debugging |
+| `-reduceScratchUse` | integer | `1` | internal/advanced | remove sample scratch and rebuildable indexes once terminal outputs are published; 0 for debugging |
 | `-globalTmpDir` | string | `""` | stable | absolute path to global shared tmp dir (like a scratch dir) |
 | `-nodeTmpDir` | string | `""` | stable | absolute path to tmp dir on local HDD of each executing node |
 | `-nodeHDDspace` | string | `30` | stable | HDD tmp space to be requested for each node (in Gb). Some systems don't support this |
@@ -109,7 +108,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-inputFQregex2` | string | `'.*2\.f[^\.]*q\.gz$'` | stable | regex for detecting read pair 2 in input fastq files |
 | `-inputFQregexSingle` | string | `""` | stable | regex for detecting single end reads in input fastq files |
 | `-inputFQregexTrustSingle` | integer | `0` | stable | if grep of files (rawSrchString) has multi assignments, which grep to trust more? |
-| `-inputBAMregex` | string | `""` | stable | Regex for detecting primary BAM read files under the location selected by the map's `Path` or `SmplPrefix`. Matching BAMs are treated as unpaired reads and converted with `samtools fastq`; for example, use `'.*\.bam$'`. Empty disables BAM discovery. |
+| `-inputBAMregex` | string | `""` | stable | regex for detecting BAM read files (e.g. `'.*\.bam$'`); matches are treated as unpaired and converted with `samtools fastq`. Empty disables BAM input |
 | `-splitFastaInput` | integer | `0` | stable | Enable FASTA input splitting during read staging. |
 | `-mergeReads` | integer | `0` | stable | merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances) |
 | `-ProbRdFilter` | integer | `1` | stable | Enable probabilistic SDM read filtering. |
@@ -141,7 +140,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-spadesCores`, `-assemblCores` | integer | `0` | stable | `0` automatically scales assembly jobs from 8 cores at up to 500 MiB of assembly-group input to 48 cores at 10 GiB or more. A positive value is an explicit override. |
+| `-spadesCores`, `-assemblCores` | integer | `0` | stable | 0 = autoscale with assembly-group input, 8 cores at <=500 MiB to 48 cores at >=10 GiB. Positive values override |
 | `-spadesMemory`, `-assemblMemory` | integer | `-1` | stable | in GB |
 | `-spadesKmers`, `-assemblyKmers` | string | `"27,43,67,87,101,127"` | stable | comma delimited list |
 | `-reAssembleMG` | integer | `0` | stable | Rebuild an assembly; shared assembly groups additionally require `-OKtoRWassGrps 1`. |
@@ -157,7 +156,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-Binner`, `-MetaBat2`, `-binSpeciesMG` | integer | `0` | stable | 0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner |
 | `-BinnerCores` | integer | `9` | stable | cores used for Binning process (and checkM) |
 | `-BinnerMem` | integer | `0` | stable | define binning memory, Gb, 0=auto |
-| `-minBinnerAssemblyMB` | float | `5` | stable | Do not run the binner when the assembly contains fewer than this many million sequence bases. Publish the standard empty binner outputs instead. Set to `0` to disable the cutoff. |
+| `-minBinnerAssemblyMB` | float | `2` | stable | Skip binning when the assembly holds fewer million sequence bases; empty binner outputs are published instead. `0` disables the cutoff. |
 | `-checkM2` | integer | `1` | stable | Assess recovered bins with CheckM2. |
 | `-checkM1` | integer | `0` | stable | Assess recovered bins with CheckM1. |
 | `-BinnerScratchTmp` | integer | `0` | internal/advanced | very specific (undocumented) use of scratch instead of nodetmp dir |
@@ -185,8 +184,8 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-mapSortMem` | integer | `-1` | stable | total mem for samtools sort in GB |
 | `-rmDuplicates` | integer | `1` | stable | Remove duplicate alignments before coverage calculation. |
 | `-mappingCores` | integer | `8` | stable | CPU cores requested for each mapping job. |
-| `-mapperFilterIll` | string | `"0.05 0.75 20 3"` | stable | Maximum NM edit rate, minimum query coverage, minimum mapping quality, and minimum clipping at both ends (0 disables clipping filter). |
-| `-mapperFilterHybridIll` | string | `"0.03 0.90 40 5"` | advanced | Stricter Illumina BAM filter used while deriving coverage for hybrid preassemblies: maximum edit rate, minimum query coverage, minimum mapping quality and minimum clipping at both ends. |
+| `-mapperFilterIll` | string | `"0.05 0.75 20 3"` | stable | max NM edit rate, min query coverage, min mapping quality, min clip at both ends (0 disables clipping) |
+| `-mapperFilterHybridIll` | string | `"0.03 0.90 40 5"` | advanced | as -mapperFilterIll, but for coverage of hybrid preassemblies (stricter) |
 | `-hybridMinMapQ` | integer | `40` | advanced | Minimum mapping quality passed to `samtools depth` for hybrid-preassembly coverage. |
 | `-hybridMinBaseQ` | integer | `20` | advanced | Minimum base quality passed to `samtools depth` for hybrid-preassembly coverage. |
 | `-breakpointDepth` | float | `0.10` | advanced | Relative coverage threshold used to identify low-depth assembly breakpoints for hybrid read simulation. |
@@ -231,7 +230,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-redoAssmblConsSNP` | integer | `0` | stable | Remove and rebuild assembly consensus SNP outputs. |
 | `-SNPmem` | integer | `0` | stable | memory per assigned core, in GB |
 | `-redoGeneExtrSNP` | integer | `0` | stable | Rebuild gene and protein sequences derived from consensus SNPs. |
-| `-SNPjobSsplit` | integer | `0` | stable | parallel jobs per sample; 0 uses tiered alignment-size estimates from 2 cores at 300 MB to 10 cores at 10 GB |
+| `-SNPjobSsplit` | integer | `0` | stable | parallel jobs per sample; 0 estimates 1-10 jobs from alignment size (capped by -SNPcores) |
 | `-SNPminCallQual` | integer | `20` | stable | Minimum variant quality used for consensus calls. |
 | `-SNPsaveVCF` | integer | `1` | stable | save vcf of SNP calles? DEfault : 1 |
 | `-SNPsaveConsFasta` | integer | `0` | stable | Save consensus fasta from vcf calls? Default: 0 -> too large, can be quickly recreated.. |
@@ -253,7 +252,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | `-DiaMem` | integer | `7` | stable | memory in GB for diamond alignment jobs |
 | `-DiaParseEvals` | string | `"1e-7"` | stable | evalues at which to accept hits to func database |
 | `-DiaSensitiveMode` | integer | `0` | stable | Enable DIAMOND sensitive mode. |
-| `-DiaFrameshift` | integer | `0` | stable | DIAMOND frameshift penalty for long, error-prone reads; `0` disables frameshift-aware alignment. |
+| `-DiaFrameshift` | integer | `0` | stable | diamond -F frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment |
 | `-rmRawDiamondHits` | integer | `0` | stable | Delete raw DIAMOND hits after successful parsing. |
 | `-DiaMinAlignLen` | integer | `20` | stable | Minimum accepted DIAMOND alignment length. |
 | `-DiaMinFracQueryCov` | float | `0.1` | stable | Minimum accepted fraction of the query aligned. |
@@ -272,8 +271,8 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 |---|---:|---|---|---|
 | `-profileRibosome` | integer | `0` | stable | Run SSU/LSU read extraction and taxonomic assignment. |
 | `-riobsomalAssembly` | integer | `0` | stable | Assemble extracted ribosomal reads. |
-| `-reProfileRibosome` | integer | `0` | stable | Remove existing RiboFind extraction and assignment results plus merged profiles, then rerun; implies `-profileRibosome 1`. |
-| `-reRibosomeLCA` | integer | `0` | stable | Remove existing RiboFind assignments and merged results, then rerun LCA; implies `-profileRibosome 1`. |
+| `-reProfileRibosome` | integer | `0` | stable | delete RiboFind extraction, assignments and merged profiles, then rerun; implies -profileRibosome 1 |
+| `-reRibosomeLCA` | integer | `0` | stable | delete RiboFind assignments and merged results, then rerun LCA; implies -profileRibosome 1 |
 | `-riboMaxRds` | integer | `250000` | stable | Maximum extracted reads assigned per ribosomal marker. |
 | `-saveRiboRds` | integer | `0` | stable | Retain reads used during ribosomal assignment. |
 | `-thoroughCheckRiboFinish` | integer | `0` | stable | Require non-empty RiboFind assignment output before accepting completion. |
@@ -283,10 +282,10 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-profileMetaphlan`, `-profileMetaphlan3` | integer | `0` | stable | Run MetaPhlAn taxonomic profiling. |
-| `-profileProtal` | integer | `0` | stable | `1`: profile each sample's raw short-read pair and merge profiles. `2`: generate one map and run Protal across the complete mapped cohort. |
+| `-profileProtal` | integer | `0` | stable | 1: profile each sample separately and merge; 2: one map, Protal across the complete cohort |
 | `-ProtalCores` | integer | `4` | stable | CPU cores requested for a singular or combined Protal job. |
 | `-ProtalMem` | integer | `100` | stable | Total memory in GB requested for a singular or combined Protal job. |
-| `-protalIgnoreErrors` | integer | `1` | stable | Continue past incompatible Protal inputs: select the first compatible raw short-read pair, ignore other pair/singleton/BAM streams, or skip the sample if no short pair exists. Set to `0` for strict validation. |
+| `-protalIgnoreErrors` | integer | `1` | stable | 1: use the first compatible short-read pair and skip samples without one; 0: strict input validation |
 | `-profileMOTU2` | integer | `0` | stable | Run mOTUs taxonomic profiling. |
 | `-profileKraken` | integer | `0` | stable | Run Kraken taxonomic profiling. |
 | `-profileTaxaTarget` | integer | `0` | stable | Run target-taxon profiling. |
@@ -310,7 +309,7 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-wcKeyJobs` | string | `""` | internal/advanced | Slurm work-category or accounting key added to submitted jobs. |
+| `-wcKeyJobs` | string | `""` | internal/advanced | EI specific: work-category/accounting key added to submitted jobs |
 
 ## Debug
 
@@ -318,49 +317,48 @@ Main sample-level pipeline. This section preserves the more complete MATAF4.pl d
 |---|---:|---|---|---|
 | `-OKtoRWassGrps` | integer | `0` | internal/advanced | can delete assemblies, if suspects error in them |
 
-## Flag comparison against previous manual.md
+## Legacy flag names
 
-This comparison was produced by matching dash-prefixed names from the previous long-form manual against the flags parsed from `MATAF4.pl`. It is intentionally conservative because prose can contain option-like strings.
+`MATAF4.pl` parses 171 options under 182 accepted names (aliases included); every one is listed above. Option-like strings found in [`manual_legacy.md`](manual_legacy.md) that `MATAF4.pl` does **not** accept belong to `geneCat.pl`, `MGS.pl`, `strain_within.pl` or `buildTree5.pl`, or have been removed. Look them up in the sections below before using them.
 
-- Flags accepted by `MATAF4.pl`: **155**
-- Option-like names previously seen in the legacy manual: **181**
-- Accepted by code but not previously documented: **26**
-- Mentioned in the legacy manual but not accepted directly by `MATAF4.pl`: **52**
-
-### Accepted by `MATAF4.pl` but not previously documented
-
-`-?`, `-BinnerScratchTmp`, `-MetaBat2`, `-SNPnormINDEL`, `-assemblyLongTime`, `-assemblyScaffMinSize`, `-binSpeciesMG`, `-checkInstall`, `-customSDMopt`, `-filterAdapters`, `-filterHumanRds`, `-getAssemblConsSNPsuppRds`, `-h`, `-help`, `-inputReadLengthSuppl`, `-logQualvsLen`, `-mapperFilterONT`, `-mapperFilterPB`, `-orthoExtract`, `-profileMetaphlan`, `-profileTaxaTarget`, `-reAssembleMG`, `-redoMap2assembly`, `-redoMapping`, `-rewriteGenePred`, `-spadesKmers`
-
-### Previously mentioned but not accepted as direct `MATAF4.pl` flags
-
-These may be legacy prose artefacts, GeneCat/MGS options, flags for other scripts, or removed options. Do not use them with `MATAF4.pl` unless they are documented elsewhere.
-
-`-AutoModel`, `-DNDSonSubset`, `-GCd`, `-GenesPerSpecies`, `-MGset`, `-MSAprogram`, `-NTfiltCount`, `-NTfiltPerGene`, `-NonSynTree`, `-SNPmemPerJob`, `-SynTree`, `-aa`, `-bootstrap`, `-calcDiffDNA`, `-calcDistMat`, `-calcDistMatExt`, `-cats`, `-clustername`, `-codemlRepeats`, `-fixHeaders`, `-fna`, `-fracMaxGenes90pct`, `-genesForDNDS`, `-genesToPhylip`, `-gzInput`, `-isAligned`, `-maxGapPerCol`, `-minOverlapMSA`, `-minPcId`, `-outDCodeml`, `-outgroup`, `-postFilter`, `-profileMetaphlan2`, `-quick`, `-rmMSA`, `-runClonalFrameML`, `-runDNDS`, `-runFastGearPostProcessing`, `-runFastTree`, `-runFastgear`, `-runGubbins`, `-runLengthCheck`, `-runRAxML`, `-runRaxMLng`, `-runTheta`, `-subsetSmpls`, `-superCheck`, `-superTree`, `-tmp`, `-useEte`, `-useTrimomatic`
+Removed with no replacement: `-useTrimomatic` (superseded by `-filterAdapters`), `-rmRawRds` (superseded by `-reduceScratchUse`), `-profileMetaphlan2` (use `-profileMetaphlan`), `-binSpeciesMG` as a separate binner switch (now an alias of `-Binner`).
 
 ## geneCat.pl
 
-Gene-catalog construction and downstream gene-catalog annotation/MGS orchestration. The source reports version `0.58`.
+Gene-catalog construction and downstream gene-catalog annotation/MGS orchestration.
 
 ### Directories/files
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-o`, `-GCd` | string |  | stable | main save location for gene catalog and supporting files |
-| `-tmp` | string | `$GLBtmp` | stable | tmp dir, global availalbe |
-| `-glbTmp` | string |  | stable | global tmp dir, same as -tmp usually |
-| `-map` | string | `?` | stable | mapping file, can be a combination of several .map files to combine different datasets (e.g. -map file1.map,f2.map) |
+| `-tmp` | string | `-glbTmp` value | stable | working tmp dir; defaults to `-glbTmp` |
+| `-glbTmp` | string | `<globalTmpDir>/GC/` | stable | global tmp dir, from config key `globalTmpDir` |
+| `-map` | string | `?` | stable | mapping file(s); comma-separate several .map files to combine datasets (e.g. `-map file1.map,f2.map`) |
 
 ### Run modes
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-m`, `-mode` | string | `geneCat` | stable | possible modes: mergeCLs CANOPY specI kraken kaiju FMG_extr FOAM ABR FuncAssign protExtract ntMatchGC geneCat subprepSmpls |
+| `-m`, `-mode` | string | `geneCat` | stable | Operation mode; see the list below. |
+
+- `geneCat` — build or resume the complete gene-catalog workflow (default).
+- `subprepSmpls` — internal per-batch sample collation, driven by `-SmplStart`/`-SmplStop`/`-SmplBatch`.
+- `mergeCLs` — merge the clustering stages into the final catalog.
+- `protExtract` — extract representative proteins; needs `-map` or a stored map.
+- `FuncAssign` — functional annotation via `-functDB` and `-functAligner`.
+- `FuncEMAP` — eggNOG-mapper annotation.
+- `FOAM`, `ABR` — HMM-based FOAM and antibiotic-resistance annotation.
+- `kraken`, `kaiju`, `specI` — taxonomic annotation of catalog genes.
+- `FMG_extr` — extract the marker genes into a separate folder.
+- `CANOPY` — canopy clustering of the gene abundance matrix.
+- `ntMatchGC` — map catalog genes onto `-refDB` and write `-out`.
 
 ### Cluster options
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-clusterID` | integer | `95` | stable | identity at which to cluster gene catalog, default: 0.95 |
+| `-clusterID` | integer | `95` | stable | percent identity at which the gene catalog is clustered |
 | `-minGeneL` | integer | `100` | stable | minimal gene length for gene to be included in gene catalog, default: 100 |
 | `-extraGenesNT` | string |  | stable | add genes (nt) from external sources, e.g. from complete genomes |
 | `-extraGenesAA` | string |  | stable | add genes (AA) from external sources, e.g. from complete genomes |
@@ -373,13 +371,13 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 |---|---:|---|---|---|
 | `-1stepClust` | integer | `1` | stable | cluster incomplete genes separate? |
 | `-submitLocal` | integer | `1` | stable | pretty important run mode switch, to submit jobs while geneCat is runnning single core |
-| `-submSystem` | string |  | stable | See source/help for details. |
+| `-submSystem` | string | `""` | stable | qsub,SGE,bsub,LSF..; empty autodetects |
 | `-continue`, `-justCDhit` | integer | `1` | stable | flow control, 1: continue with found files 0: delete existing (partial) gene cat, start again |
-| `-c`, `-cores` | integer | `20` | stable | See source/help for details. |
+| `-c`, `-cores` | integer | `20` | stable | cores for the main gene-catalog jobs |
 | `-c0`, `-cores0` | integer | `-1` | stable | specifcally cores only for the big main clustering job.. |
 | `-c3`, `-cores3` | integer | `-1` | stable | for small jobs that really don't require that much power.. |
 | `-mem` | integer | `200` | stable | max mem |
-| `-stone` | string |  | stable | See source/help for details. |
+| `-stone` | string | `""` | advanced/internal | checkpoint file to touch when the selected `-mode` finishes |
 | `-mem3` | integer | `-1` | stable | max mem for smaller jobs |
 
 ### Sample processing related
@@ -426,15 +424,15 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-FuncMinBitSc` | float | `45` | stable | See source/help for details. |
-| `-FuncMinAlLeng` | integer | `30` | stable | See source/help for details. |
+| `-FuncMinBitSc` | float | `45` | stable | minimum bit score for a functional assignment |
+| `-FuncMinAlLeng` | integer | `30` | stable | minimum alignment length (AA) for a functional assignment |
 | `-FuncMinPercSbjCov` | float | `0.5` | stable | Minimum fraction of subject coverage for functional assignment. |
-| `-FuncMinPerID` | float | `25` | stable | See source/help for details. |
-| `-FuncMinEVal` | float | `1e-8` | stable | See source/help for details. |
+| `-FuncMinPerID` | float | `25` | stable | minimum percent identity for a functional assignment |
+| `-FuncMinEVal` | float | `1e-8` | stable | maximum e-value for a functional assignment |
 
 ## MGS.pl
 
-MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. The uploaded source reports version `0.55`.
+MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration.
 
 ### General options
 
@@ -442,32 +440,33 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 |---|---:|---|---|---|
 | `-GCd` | string |  | stable | gene catalog dir |
 | `-clusterID` | integer | `95` | stable | gene-catalog clustering identity percentage |
-| `-outD` | string |  | stable | defaults to $inD/Bin_SB/ |
+| `-outD` | string | `<GCd>/Bin_SB/` | stable | output dir |
 | `-tmp` | string |  | stable | temp dir |
 | `-submit` | integer | `1` | stable | 1:submit jobs, 0: dry run. Default: 1 |
 | `-canopies` | string |  | stable | location of canopy clustering output file (clusters.txt) |
 | `-smallCores` | integer | `4` | stable | cores used for normal jobs (not intensive) |
 | `-bottleneckCores` | integer | `12` | stable | cores for compute intensive jobs |
-| `-redoCluster` | integer | `0` | stable | See source/help for details. |
+| `-redoCluster` | integer | `0` | stable | delete and redo the clusterMAGs dereplication |
 | `-redoTax` | integer | `0` | stable | rewrite tax annotations |
-| `-MGset` | string | `FMG` | stable | GTDB or FMG, which marker genes are used? Default: GTDB |
+| `-MGset` | string | `GTDB` | stable | marker genes used for MAG merging/abundance: `GTDB` or `FMG` |
 | `-wait4stone` | string |  | stable | wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later |
-| `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; zero waits indefinitely |
+| `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; `0` waits indefinitely |
 | `-mem` | integer | `150` | stable | memory used for intensive jobs |
 | `-strains` | integer | `0` | stable | 1: calc instra species strain phylogenies. Default: 0 |
-| `-redo` | string | `none` | stable | Forward the strain-workflow redo mode: `none`, `tree`, `input`, or `all`. |
-| `-prepareMosaicLoci` | integer | `1` | stable | 1: have strain_within submit, await, and validate Mosaic as a prerequisite before strain analysis; 0: skip Mosaic preprocessing and keep same-NOG seed clusters separate |
-| `-SNPcaller` | string | `MPI` | stable | Forward `MPI` or `FB` caller-specific consensus inputs to `strain_within.pl`. |
+| `-redo` | string | `none` | stable | strain-workflow redo mode forwarded downstream: `none`, `tree`, `input` or `all` |
+| `-prepareMosaicLoci` | integer | `1` | stable | 1: confirm Mosaic loci/outgroups before strain analysis; 0: keep same-NOG seed clusters separate |
+| `-SNPcaller` | string | `MPI` | stable | consensus caller whose inputs are forwarded to `strain_within.pl`: `MPI` or `FB` |
 | `-useCheckM2` | integer | `0` | stable | CheckM2 default qual checking of MAGs/MGS |
 | `-useCheckM1` | integer | `1` | stable | CheckM default qual checking of MAGs/MGS |
 | `-binSpeciesMG` | integer | `2` | stable | 0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4 ,5 |
 | `-ignoreIncompleteMAGs` | integer | `1` | stable | 1: assemblies without MAG calculations are ignored. Default: 1 |
-| `-legacy` | integer | `0` | deprecated/legacy | 1: use legacy code as pre Dec `22 (clustering is a bit more muddy, reported abundances slightly different, remember to use -MGset FMG). No longer supported. Default: 0 |
-| `-genomesPerFamily` | integer | `0` | stable | See source/help for details. |
+| `-legacy` | integer | `0` | deprecated/legacy | pre-Dec-2022 clustering; needs `-MGset FMG`. No longer supported |
+| `-perlClusterMAGs` | flag | off | advanced/internal | use the Perl clusterMAGs path instead of the clusterMAGs binary (compatibility/debug) |
+| `-genomesPerFamily` | integer | `0` | advanced | extract bins per family (or per assembly group/sample when the family is missing) |
 
 ## strain_within.pl
 
-Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. The source reports version `1.41`. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
+Within-MGS locus extraction, quality control, tree orchestration and downstream hand-off. Normally `MGS.pl` supplies the catalogue paths; see the [strain-within workflow guide](strainwithin.md) before invoking this script directly.
 
 For split Phase I, the parent scans the catalogue cluster index once and atomically publishes a provenance-bound binary membership shard for each worker under shared strain scratch. The manifest is published only after every shard is complete. Workers validate the generation, size, header, record count and payload digest before use; an absent, stale or corrupt cache falls back to the original full-index parser.
 
@@ -491,7 +490,7 @@ Phase-I input contracts use cross-node-stable file identity: canonical path, ino
 | `-tmpD` | string | `""` | stable | Node-local temporary directory. |
 | `-submit` | integer | `0` | stable | Submit generated work (`1`) or perform a dry run (`0`). |
 | `-submissionMode` | string | auto | stable | Scheduler/backend override; dry runs default to `bash`. |
-| `-maxSubJob` | integer | `-1` | advanced | Phase-I worker count: `-1` auto-selects, `0` disables splitting, and a positive value is explicit. |
+| `-maxSubJob` | integer | `-1` | advanced | Phase-I worker count: `-1` auto-selects (50-150 assembly groups per worker), `0` disables splitting, positive is explicit. |
 | `-MGSsubset` | string | `""` | advanced | Comma-separated MGS subset. |
 | `-help`, `-h` | flag | `0` | stable | Show the built-in usage text. |
 
@@ -500,30 +499,37 @@ Phase-I input contracts use cross-node-stable file identity: canonical path, ino
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-onlySubmit` | integer | `0` | stable | Reuse completed Phase-I preparation and submit only missing tree work. |
-| `-onlyMSA` | integer | `0` | stable | Build, backtranslate, locally MSAfix, and gzip the per-locus nucleotide alignments, then stop before combined-MSA postprocessing, concatenation, phylogeny, EPA-ng placement, and `strain_within_2.2.pl`. Completion is recorded in `msaOnly.complete.tsv`; use `-onlySubmit 1` to resume and skip completed MGS. Incompatible with `-placeOnBackbone 1`, `-redo tree`, and `-redoEPAfilter`. |
-| `-redo` | string | `none` | stable | Destructive recovery mode: `none` resumes normally; `tree` rebuilds tree-stage outputs while reusing complete inputs; `input` rebuilds missing/incomplete inputs and dependent trees; `all` deletes and rebuilds strain inputs and trees for every selected MGS. Use `-MGSsubset` to target explicit identifiers. |
-| `-redoEPAfilter` | optional integer | `0` | advanced | Republish EPA-placed trees from retained backbone/jplace artifacts; implies `1` when no value is supplied. |
-| `-maxCores` | integer | `-1` | stable | When positive, cap full BuildTree jobs at this many cores; the request is `ceil(sqrt(submitted samples))`, with a four-core floor and this cap. `-1` retains the fixed `-cores` request. |
-| `-selfMemGb` | integer | `10` | stable | Initial memory in GiB for the wrapper/controller and split Phase-I workers; accounting-confirmed worker OOM retries double this request. |
+| `-onlyMSA` | integer | `0` | stable | Stop after the per-locus nucleotide alignments, before concatenation, phylogeny, placement and `strain_within_2.2.pl`. Records `msaOnly.complete.tsv`; resume with `-onlySubmit 1`. Incompatible with `-placeOnBackbone 1`, `-redo tree` and `-redoEPAfilter`. |
+| `-redo` | string | `none` | stable | Destructive recovery: `none` resumes; `tree` rebuilds trees only; `input` rebuilds incomplete inputs and dependent trees; `all` rebuilds everything. Combine with `-MGSsubset` (not with `all`). |
+| `-redoEPAfilter` | optional integer | `0` | advanced | Rebuild each final EPA-placed tree from its retained jplace and backbone, then continue through normal controller validation and downstream strain analysis. Bare flag implies `1`. |
+| `-maxCores` | integer | `-1` | stable | Cap BuildTree jobs at this many cores; the request is `ceil(sqrt(samples))` with a four-core floor. `-1` keeps the fixed request. |
+| `-selfMemGb` | string | `10` | stable | Memory in GiB for the controller and Phase-I workers. `auto` (or `-1`) sizes each worker from the cluster-index shard it loads, the resolved locus model and its assembly-group count, and prints the chosen value and its terms. Confirmed worker OOM retries double the request. |
 | `-mosaicMemGb` | integer | `150` | stable | Total memory in GiB for the Mosaic prerequisite. |
-| `-phase1WorkerRetries` | integer | `2` | advanced | Retry count for invalid Phase-I workers; accepted range is 0–10. On Slurm, accounting-confirmed OOM retries use an increased memory request. |
-| `-treeOOMMaxMemGB` | float | configuration, fallback `512` | advanced | Shared memory ceiling for automatic Phase-I worker and tree OOM retries. |
+| `-phase1WorkerRetries` | integer | `2` | advanced | Retry count for invalid Phase-I workers, 0-10. Confirmed OOM retries request more memory and use the larger `-oomMinRetries` budget. |
+| `-treeOOMMaxMemGB` | float | config `maxMF4mem`, else `512` | advanced | Memory ceiling for automatic Phase-I worker and tree OOM retries. |
+| `-treeOOMRetryRounds` | integer | `8` | advanced | Maximum OOM retry rounds per MGS, 0-12. High enough that `-treeOOMMaxMemGB` decides when to stop. |
+| `-oomScanMinutes` | float | `60` | advanced | Rescan Slurm accounting this often while Phase-I workers or tree jobs still run, resubmitting whatever was killed for memory. Both phases submit their largest jobs first, so escalation no longer waits for the tail of short jobs. |
+| `-oomMinRetries` | integer | `3` | advanced | Minimum OOM escalations guaranteed per failed job, 0-12; `0` removes the floor. Budgets are counted per job, so an early rescan cannot spend the retries a later failure needs. |
+| `-treeMemThreadDivisor` | float | `4` | advanced | Scale the initial tree memory request by `cores/DIVISOR` (never below 1); raise it to request less on wide jobs. |
 | `-phyloMemMulti` | float | `1` | advanced | Multiplier applied to BuildTree memory planning. |
+| `-flushMemMB` | integer | `2048` | advanced | Also flush buffered Phase-I output once this much is held; lower it if split workers run out of memory. |
 
 ### Extraction and biological QC
+
+Questionable sample-locus observations are masked first. A sample still carrying excessive ambiguity among the remaining observations is kept for post-tree placement rather than used to infer the backbone.
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-presortGenes` | integer | `1200` | stable | Potential loci considered before final tree selection. |
 | `-maxGenes` | integer | `600` | stable | Maximum validated loci retained per MGS/sample; values `<=0` remove this cap without disabling QC. |
-| `-treeLocusBudget` | integer | `400` | stable | Maximum final loci selected for each tree. |
-| `-MGSminGenesPSmpl` | integer | `8` | stable | Extraction prefilter: minimum validated loci a sample needs for one MGS before its records are written and aligned. Not the inclusion policy, which is `-GenesPerSpecies`/`-relativeNTFraction`/`-NTfiltCount` at tree time. |
+| `-treeLocusBudget` | integer | `400` | stable | Maximum final loci selected for each tree; the candidate alignment stays bounded to this plus the QC-backfill allowance. |
+| `-MGSminGenesPSmpl` | integer | `8` | stable | Extraction prefilter: validated loci a sample needs for one MGS before it is written. Tree inclusion is decided later by `-GenesPerSpecies`/`-relativeNTFraction`/`-NTfiltCount`. |
 | `-multiGeneSmplMax` | float | `0.25` | stable | Maximum ambiguous/multigene-locus fraction per sample. |
 | `-conspGeneSmplMax` | float | `0.05` | stable | Maximum conspecific-signal locus fraction per sample. |
 | `-minBadLociPSmpl` | integer | `3` | stable | Minimum bad loci before a sample is flagged as mixed strain. |
-| `-excludeMixedStrainSamples` | integer | `1` | stable | Drop samples that breach `-multiGeneSmplMax` or `-conspGeneSmplMax` from their MGS tree, by passing `-excludeFlaggedSamples 1` to BuildTree. Independent of `-placeOnBackbone`, and never considers locus counts. |
-| `-enforceSampleCoverage` | integer | `1` | stable | Make `-GenesPerSpecies`, `-relativeNTFraction` and `-NTfiltCount` the primary sample-inclusion filter by passing `-enforceSampleCoverage 1` to BuildTree. Set to `0` to retain every aligned sample regardless of coverage. |
-| `-minLociPerMGS` | integer | `8` | stable | Distinct loci an MGS needs before a tree is attempted at all. A property of the MGS, previously conflated with the per-sample `-MGSminGenesPSmpl` floor. |
+| `-excludeMixedStrainSamples` | integer | `1` | stable | Drop samples breaching `-multiGeneSmplMax` or `-conspGeneSmplMax` from their MGS tree (passes `-excludeFlaggedSamples 1` to BuildTree). Never considers locus counts. |
+| `-enforceSampleCoverage` | integer | `1` | stable | Make `-GenesPerSpecies`/`-relativeNTFraction`/`-NTfiltCount` the sample-inclusion filter. `0` retains every aligned sample. |
+| `-minLociPerMGS` | integer | `8` | stable | Distinct loci an MGS needs before a tree is attempted; a property of the MGS, not of a sample. |
 | `-breakpointGeneFlank` | integer | `50` | stable | Bases around mapping breakpoints in which genes are masked. |
 | `-abundanceMinLoci` | integer | `8` | stable | Minimum loci for robust abundance-pattern filtering. |
 | `-abundanceMinFold` | float | `0.333333…` | stable | Lowest accepted locus/median depth ratio. |
@@ -552,7 +558,7 @@ These options remain parsed so existing generated commands and worker scripts do
 | `-treeSubFromMGS` | deprecated | Use `-MGSsubset`. |
 | `-noGeneLimit` | deprecated | Use `-maxGenes 0`. |
 | `-subjob` | internal | Split-worker index supplied by the parent process. |
-| `-flushEvery` | internal | Publish buffered Stage-I records after this many sample rows; default `50`. Lower values reduce peak Perl memory and spread shared-scratch writes, but reopen per-MGS shard files more often. |
+| `-flushEvery` | internal | Publish buffered Stage-I records after this many sample rows; default `50`. Lower values cut peak memory but reopen shard files more often. |
 | `-disableQC` | internal | Developer override that disables biological QC. |
 
 The parent canonicalizes all unlimited extraction spellings to `-maxGenes 0` when it creates split-worker commands. It does not forward the deprecated `-noGeneLimit` alias. Therefore the presence of `-maxGenes 0` in a worker script explicitly means that no per-sample locus-count cap is applied; biological QC and the separate `-presortGenes` and `-treeLocusBudget` bounds remain active.
@@ -562,9 +568,9 @@ The parent canonicalizes all unlimited extraction spellings to `-maxGenes 0` whe
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-mosaicLoci` | string | auto | stable | Confirmed catalogue-wide mosaic/outgroup table. |
-| `-mosaicMGS` | string | derived from `-MGS` | stable | Raw cluster assignment used for comprehensive Mosaic discovery. |
+| `-mosaicMGS` | string | derived from `-MGS` | stable | Raw `SB.clusters` assignment used for comprehensive Mosaic discovery; inferred by removing `.core` from `-MGS`. |
 | `-prepareMosaicLoci` | integer | `1` | stable | Create, wait for and validate a missing Mosaic catalogue. |
-| `-outgroupCoreMinLoci` | integer | auto | advanced | Candidate outgroup overlap floor; `0` derives 20% of `-treeLocusBudget`, rounded up. |
+| `-outgroupCoreMinLoci` | integer | auto | advanced | Candidate outgroup overlap floor; `0` derives 20% of `-treeLocusBudget`. |
 | `-outgroupReferenceGeneCap` | integer | `2500` | advanced | Candidate reference genes retained per outgroup MGS. |
 | `-preferredCoreGenes` | string | auto | advanced | Universal-core guide used to prioritise eligible loci. |
 
@@ -576,7 +582,7 @@ The parent canonicalizes all unlimited extraction spellings to `-maxGenes 0` whe
 | `-GeneLengthIncludeMin` | float | `0.03` | stable | Lower post-QC fraction allowed into backbone and placement MSA input; it cannot exceed `-GeneLengthMin`. |
 | `-GenesPerSpecies` | float | `0.2` | stable | Backbone minimum relative locus coverage per sample. |
 | `-relativeNTFraction` | float | `0.1` | stable | Backbone minimum relative informative-NT coverage. |
-| `-NTfiltCount` | integer | `0` | stable | Backbone minimum informative-NT count after final MSA. |
+| `-NTfiltCount` | integer | `5000` | stable | Absolute backbone floor on informative NT after final MSA; roughly five well-covered loci. `0` leaves only the relative gates. |
 | `-placementGenesPerSpecies` | float | `0.04` | advanced | Placement minimum relative locus coverage. |
 | `-placementRelativeNTFraction` | float | `0.03` | advanced | Placement minimum relative informative-NT coverage. |
 | `-placementNTfiltCount` | integer | mirrors `-NTfiltCount` | advanced | Placement absolute informative-NT floor. |
@@ -592,8 +598,8 @@ The parent canonicalizes all unlimited extraction spellings to `-maxGenes 0` whe
 | `-strictBackboneFraction` | float | `0.35` | advanced | Severe aligned-coverage deferral threshold relative to sample Q90. |
 | `-strictBackboneMinSamples` | integer | `3` | advanced | Minimum backbone samples before falling back to the complete alignment. |
 | `-placementMinOverlap` | integer | `10000` | advanced | Minimum informative positions shared with the inferred backbone. |
-| `-epaThreads` | integer | `2` | advanced | Requested EPA-ng threads, subject to core and memory caps. |
-| `-epaMaxMemMB` | integer | `-1` | advanced | EPA thread-planning memory; `-1` derives it and `0` disables memory scaling. |
+| `-epaThreads` | integer | `2` | advanced | Requested EPA-ng threads; BuildTree caps them by available cores and by one thread per GB of planning memory. |
+| `-epaMaxMemMB` | integer | `-1` | advanced | EPA-ng thread-planning budget; `-1` derives 60% of each IQ-TREE allowance, `0` disables memory-based scaling. |
 | `-epaPendantOutlierFactor` | float | `5` | advanced | Pendant-branch cutoff multiplier; `0` disables this filter. |
 | `-epaPendantMinThreshold` | float | `0.02` | advanced | Minimum pendant-branch cutoff in substitutions/site. |
 | `-MSAprog` | integer | `2` | stable | Alignment program: 0 MSAProbs, 1 Clustal Omega, 2 MAFFT, or 4 MUSCLE5. |
@@ -619,7 +625,7 @@ The parent canonicalizes all unlimited extraction spellings to `-maxGenes 0` whe
 
 ## strain_within_2.2.pl
 
-Within-MGS postprocessing, strain statistics and population-genetic analysis. The source reports version `0.46`. It is normally launched by `strain_within.pl`; direct use is primarily for targeted postprocessing restarts.
+Within-MGS postprocessing, strain statistics and population-genetic analysis. It is normally launched by `strain_within.pl`; direct use is primarily for targeted postprocessing restarts.
 
 ### General options
 
@@ -657,28 +663,33 @@ Within-MGS postprocessing, strain statistics and population-genetic analysis. Th
 
 ## buildTree5.pl
 
-Phylogenetic tree construction and related MSA/population-genetic analyses. The source reports version `5.82`.
+Phylogenetic tree construction and related MSA/population-genetic analyses.
 
 ### General options
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-genoInD` | string |  | stable | provide a dir with complete genomes, will extract FGMs and build tree between genomes (NT/AA flag) |
-| `-wildcardflag` | string |  | stable | See source/help for details. |
-| `-fna` | string |  | stable | See source/help for details. |
+| `-wildcardflag` | string |  | stable | Glob pattern selecting the per-locus input FASTAs when `-fna`/`-aa` are not given. |
+| `-fna` | string |  | stable | Nucleotide FASTA input. |
 | `-aa` | string |  | stable | Amino-acid FASTA input. Note: source flag is -aa, not -faa. |
-| `-cats` | string |  | stable | See source/help for details. |
-| `-outD` | string |  | stable | See source/help for details. |
-| `-tmpD` | string |  | stable | See source/help for details. |
+| `-cats` | string |  | stable | Gene-category (locus) assignment file linking sequences to loci. |
+| `-outD` | string |  | stable | Output directory. |
+| `-tmpD` | string |  | stable | Scratch directory holding all plain MSA, concatenated and tree files. |
+| `-stagedInputDir` | string | `""` | advanced/internal | Directory holding input already staged by the caller; set by `strain_within.pl`. |
+| `-tmpSubdir` | string | `""` | advanced/internal | Job-specific subdirectory created under `-tmpD`. |
+| `-completionMarker` | string | `""` | advanced/internal | File written once the run finishes successfully. |
+| `-terminalMarker` | string | `""` | advanced/internal | File written when the run ends in a valid terminal state that must not be retried. |
+| `-placementPendingMarker` | string | `""` | advanced/internal | File marking a backbone that still needs EPA-ng placement, so `-epaOnly` can resume it. |
 | `-withinSpecies` | integer | `0` | stable | Enable within-species filtering: require two called sequences per retained column by default and enable divergence-based locus QC. |
 | `-strainWithinPreset` | integer | `0` | advanced/internal | Apply the fixed MATAFILER strain-tree preset; implies `-withinSpecies 1`. |
-| `-cores` | integer | `1` | stable | See source/help for details. |
-| `-superTree` | integer | `0` | stable | See source/help for details. |
-| `-superCheck` | integer | `0` | stable | See source/help for details. |
+| `-cores` | integer | `1` | stable | CPU cores used by MSA and tree programs. |
+| `-superTree` | integer | `0` | stable | Build a supertree from the per-locus trees instead of one concatenated tree. |
+| `-superCheck` | integer | `0` | stable | Only check whether the supertree inputs are complete, then exit. |
 | `-fixHeaders` | integer | `0` | stable | # fix the fasta headers, if too long or containing not allowed symbols (nwk reserved) |
-| `-useEte` | integer | `0` | stable | See source/help for details. |
+| `-useEte` | integer | `0` | stable | Use the ete3 toolkit workflow instead of the internal MSA/tree steps. |
 | `-relativeNTFraction` | float | `0.2` direct; `0.1` strain workflow | stable | Backbone minimum informative nucleotide content as a fraction of the final selected-sample Q90. This explicit name replaces the retired ambiguous `-NTfilt` switch. |
-| `-NTfiltPerGene` | float | `0.1` | stable | See source/help for details. |
+| `-NTfiltPerGene` | float | `0.1` | stable | Per-locus minimum informative-NT fraction; sequences below it are dropped from that locus. |
 | `-GeneLengthIncludeMin` | float | `0.03` | stable | Lower per-sample locus-length-Q90 fraction admitted to MSA only after QC at `-NTfiltPerGene`; recovered-only observations do not count toward backbone/placement eligibility. |
 | `-GenesPerSpecies` | float | `0.1` | stable | Backbone minimum retained-locus count as a fraction of the final selected-sample Q90. |
 | `-fracMaxGenes90pct` | float | `0.25` | stable | Minimum locus size as a fraction of the category-size Q90. Set to `0` to retain every category containing at least one length-filtered sequence. |
@@ -689,30 +700,35 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-smplDef` | integer | `1` | stable | is the genome somehow quantified with a delimiter (_) ? |
 | `-smplSep` | string | `_` | stable | set the delimiter |
 | `-outgroup` | string |  | stable | Retained as the anchor for filtering, downstream backbone rooting, and placement; not passed to IQ-TREE, where `-o` is cosmetic under reversible models and can fail on an internal sparse tree. |
-| `-AAtree` | integer | `0` | stable | See source/help for details. |
+| `-AAtree` | integer | `0` | stable | Build the tree from amino acids instead of nucleotides. |
 | `-MSAprogram` | integer | `2` | stable | (0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA) |
+| `-MSAfixRecoverTechnicalOffsets` | integer | `1` | advanced | Repair coding-NT gap offsets after back-translation (MSAfix single-alignment mode only). |
+| `-MSAfixCodingFrame` | integer | `1` | advanced | Reading frame assumed when repairing coding nucleotide alignments. |
+| `-MSAfixGeneticCode` | integer | `11` | advanced | Genetic code used by MSAfix; `11` is bacterial/archaeal/plastid. |
+| `-MSAfixRecoveryBand` | integer | `3` | advanced | Codon window searched on each side when recovering a technical offset. |
 | `-minOverlapMSA` | float | `0` between species; `0.35` within species | stable | Minimum called-sequence fraction required to retain an MSA column. This is passed to MSAfix v2.14+; BuildTree converts it with `ceil(sequences × fraction)` for its final concatenation, giving the same retained columns. An explicit value overrides the `-withinSpecies` default. |
 | `-maxGapPerCol` | float | `1` | stable | same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column |
-| `-calcDistMat` | integer | `0` | stable | See source/help for details. |
-| `-calcDistMatExt` | integer | `0` | stable | See source/help for details. |
-| `-calcDiffDNA` | integer | `0` | stable | See source/help for details. |
+| `-calcDistMat` | integer | `0` | stable | Write a distance matrix for the alignment type used by the tree. |
+| `-calcDistMatExt` | integer | `0` | stable | Also write a distance matrix for the other alignment type (runs a second MSA). |
+| `-calcDiffDNA` | integer | `0` | stable | Report pairwise nucleotide differences between samples. |
 | `-minPcId` | float | `0` | stable | sequence is filtered from data, unless the average minPcId is >= $minPcId |
-| `-SynTree` | integer | `0` | stable | See source/help for details. |
-| `-NonSynTree` | integer | `0` | stable | See source/help for details. |
-| `-continue` | integer | `0` | stable | See source/help for details. |
+| `-SynTree` | integer | `0` | stable | Additionally build a tree from synonymous sites only. |
+| `-NonSynTree` | integer | `0` | stable | Additionally build a tree from non-synonymous sites only. |
+| `-continue` | integer | `0` | stable | Reuse existing intermediate files instead of overwriting them. |
 | `-onlyMSA` | integer | `0` | stable | Finish the existing per-locus alignment pipeline, including filtering, NT backtranslation, localized MSAfix, and `.gz` checkpoint publication, then exit before combined-MSA postprocessing and `mergeMSAs`. Writes `msaOnly.complete.tsv`, retains non-merged per-locus `MSA/*.fna.gz` files, and skips partitions, phylogeny, and EPA-ng. Incompatible with `-placeOnBackbone 1`. |
-| `-epaFilterOnly` | integer | `0` | advanced | In `strain_within.pl`, completed EPA-placement MGS with a retained classification, backbone, and jplace have only `IQtree_allsites.treefile` removed as a recoverable resume trigger, then receive a one-core filter/publication job. Already-unfinished MGS remain eligible for the existing EPA-only or full-tree recovery queues and retain those queues' memory/CPU profiles. Direct `buildTree5.pl` use with `-continue 1` reruns only placement filtering, its audit report, and final-tree publication from the retained artifacts. |
-| `-bootstrap` | integer | `0` | stable | See source/help for details. |
-| `-subsetSmpls` | integer | `-1` | stable | See source/help for details. |
+| `-epaOnly` | integer | `0` | advanced | Resume a placement-pending run: reuse the retained backbone and rerun only EPA-ng placement and publication. |
+| `-redoEPAfilter` | optional integer | `0` | advanced | With `-continue 1`, rerun only placement filtering, its audit report and final-tree publication from retained backbone/jplace artifacts. Bare flag implies `1`. |
+| `-bootstrap` | integer | `0` | stable | Bootstrap replicates; `0` disables bootstrapping. |
+| `-subsetSmpls` | integer | `-1` | stable | Randomly subsample to this many samples; `-1` keeps all. |
 | `-postFilter` | string |  | stable | "," sep list of zorro,guidance2,macse |
 | `-rmMSA` | integer | `1` | stable | Remove per-locus checkpoints at normal terminal completion. With `0`, retain per-locus nucleotide alignments as `.fna.gz`; protein checkpoints are still removed. `-onlyMSA 1` exits before finalization and therefore retains its per-locus checkpoints regardless. Active plain MSAs are scratch files in either mode. |
 | `-gzInput` | integer | `0` | stable | Compress buildTree-owned input files after a successful run; retained `MSAli*.fna` output is always stored as `.gz`. |
-| `-isAligned` | integer | `0` | stable | See source/help for details. |
-| `-runRAxML` | integer | `0` | stable | See source/help for details. |
-| `-runRaxMLng` | integer | `0` | stable | See source/help for details. |
-| `-runFastTree` | integer | `0` | stable | See source/help for details. |
-| `-runVeryFastTree` | integer | `0` | stable | See source/help for details. |
-| `-treeShrink` | integer | `0` | stable | See source/help for details. |
+| `-isAligned` | integer | `0` | stable | Treat the input as already aligned and skip the MSA step. |
+| `-runRAxML` | integer | `0` | stable | Build the tree with RAxML. |
+| `-runRaxMLng` | integer | `0` | stable | Build the tree with RAxML-NG. |
+| `-runFastTree` | integer | `0` | stable | Build the tree with FastTree. |
+| `-runVeryFastTree` | integer | `0` | stable | Build the tree with VeryFastTree. |
+| `-treeShrink` | integer | `0` | stable | Run TreeShrink to remove long-branch outlier tips. |
 | `-placeOnBackbone` | integer | `0` | advanced | Infer an ML backbone from well-covered samples and place severe coverage outliers with EPA-ng. When `0`, all other backbone- and placement-only options are ignored. |
 | `-strictBackbone` | integer | `0` | deprecated | Compatibility alias for `-placeOnBackbone`. |
 | `-strictBackboneFraction` | float | `0.35` | advanced | Defer a sample only when its called alignment sites are below this fraction of the sample Q90. Locus-QC status alone does not defer a sample after questionable loci have been masked. |
@@ -720,6 +736,8 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-placementMinOverlap` | integer | `10000` | advanced | Absolute minimum called alignment positions required both before placement and in actual overlap with the inferred backbone. This complements the relative locus/NT gates and is the primary sparse-placement reliability control. |
 | `-epaPendantOutlierFactor` | float | `5` | advanced | Exclude EPA-ng placements whose pendant branch exceeds this multiple of the non-outgroup backbone terminal-branch Q95. Set to `0` to disable. |
 | `-epaPendantMinThreshold` | float | `0.02` | advanced | Minimum adaptive pendant-branch cutoff in substitutions/site, preventing over-filtering of very compact backbones. |
+| `-epaThreads` | integer | `4` | advanced | Requested EPA-ng threads, capped by available cores and by one thread per GB of planning memory. |
+| `-epaMaxMemMB` | integer | `-1` | advanced | EPA-ng thread-planning budget; `-1` derives 60% of each IQ-TREE allowance, `0` disables memory-based scaling. |
 | `-sampleQC` | string |  | advanced | Optional per-sample QC table. Rows marked `placement` name samples the caller judged unfit for the tree; `-excludeFlaggedSamples` decides whether they are dropped. Written by `strain_within.pl`; other callers can omit it. |
 | `-excludeFlaggedSamples` | integer | `0` | stable | Remove samples that the `-sampleQC` table marks unfit, before any length or prevalence statistic is taken, so they cannot shift the per-locus Q90 length reference or locus occupancy. A generic mechanism: what counts as unfit is decided by the caller that writes the table. No-op without `-sampleQC`. Never considers locus counts or coverage. |
 | `-enforceSampleCoverage` | integer | `0` | stable | Apply `-GenesPerSpecies`, `-relativeNTFraction` and `-NTfiltCount` as a sample removal in the taxon-aware branch, which otherwise retains every sample holding one informative site. Matches what the `-taxonAwareLocusSelection 0` prefilter has always done. Inactive under `-placeOnBackbone 1`, where those samples are routed to placement instead. Off by default so callers that set no inclusion policy keep their previous behaviour. |
@@ -741,26 +759,35 @@ Phylogenetic tree construction and related MSA/population-genetic analyses. The 
 | `-taxonAwareMinSequenceNT` | integer | `60` | advanced | Minimum unambiguous nucleotide-equivalent sequence length for an occurrence in the taxon-aware candidate pass. |
 | `-taxonAwareTargetLoci` | integer | `25` | advanced | Per-sample locus target used by greedy coverage rescue and backbone-candidate reporting. |
 | `-taxonAwareTargetNT` | integer | `7500` | advanced | Per-sample informative-NT target used by greedy coverage rescue and backbone-candidate reporting. |
-| `-taxonAwareRescueMinPrevalence` | float | `0.8` | advanced | Require a locus to occur in at least this fraction of taxa with any usable candidate locus before greedy taxon rescue or QC backfill may select it. The robust-core ranking is unaffected. Set to `0` to recover the previous unrestricted rescue pool. |
-| `-preferredCoreGenes` | path | empty direct; auto companion `.core` in `strain_within.pl` | advanced | Prefer loci whose catalogue seed occurs in this universal-core guide. The guide may use raw `.core` rows or sorted `MGS<TAB>gene,gene` rows. It does not make a locus eligible when sequence/QC rules reject it. |
+| `-taxonAwareRescueMinPrevalence` | float | `0.8` | advanced | Minimum fraction of usable taxa a locus must occur in before taxon rescue or QC backfill may select it. `0` restores an unrestricted rescue pool; robust-core ranking is unaffected. |
+| `-taxonAwareRescuePrevalenceMode` | string | `relative` | advanced | Interpret `-taxonAwareRescueMinPrevalence` relative to taxa with any usable locus (`relative`) or to all taxa (`absolute`). |
+| `-taxonAwarePresortWeight` | float | `0.15` | advanced | Weight of the pre-MSA presort score in the final locus ranking. |
+| `-taxonAwareTargetsFromGate` | integer | `1` | advanced | Derive the per-sample locus/NT targets from the active inclusion gate instead of `-taxonAwareTargetLoci`/`-taxonAwareTargetNT`. |
+| `-taxonAwareInformationSaturation` | float | `0.005` within; `0.02` between | advanced | Variable-site fraction at which a locus is scored as fully informative. |
+| `-taxonAwareExcessVariationOnset` | float | `0.05` within; `0.20` between | advanced | Variable-site fraction above which a locus starts to be penalised as hypervariable. |
+| `-taxonAwareExcessVariationSpan` | float | `0.10` within; `0.30` between | advanced | Width of the penalty ramp above `-taxonAwareExcessVariationOnset`. |
+| `-preferredCoreGenes` | string | empty direct; auto companion `.core` in `strain_within.pl` | advanced | Prefer loci whose catalogue seed occurs in this universal-core guide. The guide may use raw `.core` rows or sorted `MGS<TAB>gene,gene` rows. It does not make a locus eligible when sequence/QC rules reject it. |
 | `-compactTaxonAwareDiagnostics` | integer | `1` | stable | After a successful or valid terminal run, merge taxon-aware and rate-partition audit TSVs into `phylo/taxon_aware_diagnostics.tsv`; set `0` to retain the individual source files. |
-| `-runIQtree` | integer | `0` | stable | See source/help for details. |
-| `-AutoModel` | integer | `1` | stable | Use IQ-TREE model selection; for partitioned alignments this runs `MFP+MERGE` to merge compatible loci. Strain presets keep this disabled and use legacy IQ-TREE inference by default; set this flag to `1` only for a deliberate model-selection run. |
-| `-iqFast` | integer | `0` | stable | fast qiTree mode |
-| `-runClonalFrameML` | integer | `0` | stable | See source/help for details. |
-| `-runGubbins` | integer | `0` | stable | See source/help for details. |
+| `-runIQtree` | integer | `0` | stable | Build the tree with IQ-TREE. |
+| `-AutoModel` | integer | `0` | stable | IQ-TREE model selection (`MFP+MERGE` for partitioned alignments). Off by default, which uses fixed `GTR+F+G2` / `LG+F+G`. |
+| `-iqFast` | integer | `1` | stable | fast IQ-TREE mode |
+| `-iqMemMB` | integer | `0` | advanced | IQ-TREE RAM cap in MB; `0` leaves IQ-TREE uncapped. |
+| `-iqPathogen` | integer | `0` | advanced | Use the IQ-TREE 3 pathogen/CMAPLE path for low-divergence alignments; disables `-iqLegacy`. |
+| `-iqLegacy` | integer | `0` | advanced | Restore the pre-5.14 IQ-TREE command. `strain_within.pl` enables this by default; pass `0` for the modern command. |
+| `-runClonalFrameML` | integer | `0` | stable | Run ClonalFrameML recombination detection on the finished tree. |
+| `-runGubbins` | integer | `0` | stable | Run Gubbins recombination detection (dormant; the binary is resolved lazily). |
 | `-runLengthCheck` | integer | `1` | stable | check that sequence length can be divided by 3 |
 | `-runDNDS` | integer | `0` | stable | run dNdS analysis |
-| `-runTheta` | integer | `0` | stable | See source/help for details. |
+| `-runTheta` | integer | `0` | stable | Calculate population-genetic theta estimates. |
 | `-genesForDNDS` | string |  | stable | list with selected genes just for dnds |
 | `-DNDSonSubset` | integer | `0` | stable | run dnds just on subset (given by genesForDNDS) of genes |
-| `-codemlRepeats` | integer | `2` | stable | See source/help for details. |
-| `-outDCodeml` | string |  | stable | See source/help for details. |
-| `-genesToPhylip` | integer | `0` | stable | See source/help for details. |
-| `-runFastgear` | integer | `0` | stable | See source/help for details. |
-| `-runFastGearPostProcessing` | integer | `0` | stable | See source/help for details. |
-| `-map` | string |  | stable | See source/help for details. |
-| `-clustername` | string |  | stable | See source/help for details. |
+| `-codemlRepeats` | integer | `2` | stable | Independent codeml restarts per dN/dS model fit. |
+| `-outDCodeml` | string |  | stable | Output directory for codeml/dN/dS results; empty writes under `-outD`. |
+| `-genesToPhylip` | integer | `0` | stable | Also write the per-locus alignments in PHYLIP format. |
+| `-runFastgear` | integer | `0` | stable | Run fastGEAR recombination analysis. |
+| `-runFastGearPostProcessing` | integer | `0` | stable | Summarise existing fastGEAR output. |
+| `-map` | string |  | stable | MATAFILER mapping file, used to relabel tips with sample metadata. |
+| `-clustername` | string |  | stable | Label used in output file names and reports. |
 
 Completed IQ-TREE runs are accepted only when the log contains its completion signature and the inferred backbone contains exactly the backbone-alignment taxa. IQ-TREE's standard identical-sequence handling is retained; `-keep-ident` is not used. The safe likelihood kernel is enabled pre-emptively for alignments with at least 750 taxa or over 700 MB; a numerical-underflow diagnostic also triggers one clean retry with `-safe`. Successful runs remove IQ-TREE transient files such as `.uniqueseq.phy`, while retaining the final tree, report, and log.
 
@@ -772,7 +799,7 @@ All plain per-locus, concatenated, synonymous/nonsynonymous, full-backbone, plac
 
 Taxon-aware selection is enabled by default and stays inside `buildTree5.pl` so it can reuse the normal alignment and MSAfix stages. For direct calls, the pre-MSA pass ranks length-stable, complete, prevalent loci and retains a 400-locus robust core. If `-preferredCoreGenes` is supplied, a locus whose catalogue seed is listed in that GTDB/core guide is ranked ahead of other eligible loci and receives a modest secondary preference during greedy taxon rescue; it still must pass normal sequence and QC filters, and it does not relax the hard broad-availability gate for taxon rescue or QC backfill. Greedy taxon rescue and backfill remain restricted to loci found in at least 80% of taxa with any usable candidate locus, preventing a sparse accessory or mobile-element locus from entering only because it carries an underrepresented taxon. After MSAfix, the final pass recalculates prevalence and reapplies the same guard. Sparse samples remain available only when a broadly shared selected locus anchors them. Candidate and final rows expose `preferred_core`, `coverage_rescue_eligible`, and `coverage_rescue_reason`. By default, the final taxon-aware and rate-partition reports are sectioned into `phylo/taxon_aware_diagnostics.tsv`; `phylo/selection_attrition.tsv` remains separate because the strain controller aggregates it. Set `-compactTaxonAwareDiagnostics 0` for the individual files.
 
-`strain_within.pl` enables the selector but leaves backbone placement disabled by default; set `-placeOnBackbone 1` to opt in. It forwards the 0.8 rescue-prevalence guard, and automatically uses the supplied `-MGS` guide when it ends in `.core` (otherwise an available sibling `-MGS.core`) as `-preferredCoreGenes`. Give `-preferredCoreGenes` explicitly to override that choice. It scales the hierarchy to its effective selected-gene budget: 80% robust core, 20% taxon-rescue capacity, and an additional 30% QC-backfill candidate pool. The final-tree budget is `min(treeLocusBudget, presortGenes)`; `maxGenes` separately limits how many validated loci are extracted per MGS/sample. Thus 500 selected genes produce 400 core + 100 rescue + 150 backfill, while the default 400-gene cap produces 320 + 80 + 120. Its filtering defaults are `-GeneLengthMin 0.3` for QC, `-GeneLengthIncludeMin 0.03` for post-QC MSA recovery, ordinary-tree `-GenesPerSpecies 0.2` and `-relativeNTFraction 0.1`, and—only when placement is enabled—thresholds of `0.04` loci and `0.03` NT plus a 10,000-site shared-backbone floor. Within-species locus QC rejects cross-locus consensus-divergence outliers above modified-Z 5.0. The strain preset now uses the legacy IQ-TREE command by default; pass `-legacyMGTK 0` to use the standard modern command, or `-iqPathogen 1` to select the IQ-TREE 3 pathogen path (which automatically disables the legacy default).
+`strain_within.pl` enables the selector but leaves backbone placement disabled by default; set `-placeOnBackbone 1` to opt in. It forwards the 0.8 rescue-prevalence guard, and automatically uses the supplied `-MGS` guide when it ends in `.core` (otherwise an available sibling `-MGS.core`) as `-preferredCoreGenes`. Give `-preferredCoreGenes` explicitly to override that choice. It scales the hierarchy to its effective selected-gene budget: 80% robust core, 20% taxon-rescue capacity, and an additional 30% QC-backfill candidate pool. The final-tree budget is `min(treeLocusBudget, presortGenes)`; `maxGenes` separately limits how many validated loci are extracted per MGS/sample. Thus 500 selected genes produce 400 core + 100 rescue + 150 backfill, while the default 400-gene cap produces 320 + 80 + 120. Its filtering defaults are `-GeneLengthMin 0.3` for QC, `-GeneLengthIncludeMin 0.03` for post-QC MSA recovery, ordinary-tree `-GenesPerSpecies 0.2` and `-relativeNTFraction 0.1`, and—only when placement is enabled—thresholds of `0.04` loci and `0.03` NT plus a 10,000-site shared-backbone floor. Within-species locus QC rejects cross-locus consensus-divergence outliers above modified-Z 5.0. The strain preset now uses the legacy IQ-TREE command by default; pass `-iqLegacy 0` to use the standard modern command, or `-iqPathogen 1` to select the IQ-TREE 3 pathogen path (which automatically disables the legacy default).
 
 For split Phase I (`-maxSubJob > 0`), assembly groups remain indivisible, but assignment is now weighted by estimated work rather than raw sample count: each sample contributes a fixed extraction cost plus its estimated uncompressed consensus FNA/FAA size, while samples requiring consensus regeneration receive an additional VCF-size penalty. Automatic splitting (`-maxSubJob -1`) counts standalone samples as effective groups. The consolidated run-level audit `LOGandSUB/phase1_worker_plan.tsv` records every group assignment, input state, estimated work, and worker total; a dominant group visible there can still create an unavoidable straggler because it cannot safely be split across workers.
 

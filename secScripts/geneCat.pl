@@ -25,6 +25,7 @@ use IO::Handle;
 use Getopt::Long qw( GetOptions );
 
 use Cwd; use English;
+use Mods::FlagReference qw(printFlagHelp helpRequested);
 use Mods::GenoMetaAss qw( readFasta ensureFastaIndex fileGZe gzipopen gzipwrite splitFastas readMapS systemW readGFF getAssemblPath resolve_path);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
@@ -59,48 +60,22 @@ sub specITax;
 sub writeMG_COGs; sub ntMatchGC;
 sub clusterSingleStep;sub clusterMultiStep;
 
+#declared here (not next to the changelog) so -help can report it without
+#running the main body; the changelog entry for it is further down this file
+our $version = 0.58;
+
 sub _print_help {
-	print <<'HELP';
-Usage:
-  geneCat.pl --mode geneCat --map FILE[,FILE...] --GCd DIR [options]
-  geneCat.pl --mode MODE --GCd DIR [mode options]
-
-Build or operate on a MATAFILER gene catalog. Existing catalogs are resumed by
-default; --continue 0 deletes and rebuilds the selected catalog after validating
-the mapping input.
-
-Main modes:
-  geneCat       Build/resume the complete gene-catalog workflow (default)
-  subprepSmpls  Internal sample-batch collation mode
-  mergeCLs      Merge clustering stages
-  protExtract   Extract representative proteins; needs --map or stored map
-  FuncAssign    Functional annotation (--functDB, --functAligner)
-  FuncEMAP      eggNOG-mapper annotation
-  kraken        Taxonomic annotation
-  CANOPY        Canopy clustering
-  ntMatchGC     Map catalog genes to --refDB and write --out
-
-Common options:
-  -o, --GCd DIR              Gene-catalog directory (required)
-  --map FILE[,FILE...]       One or more mapping files
-  -m, --mode MODE            Operation mode
-  --clusterID INT            Clustering identity percentage, 1..100 (default 95)
-  --minGeneL INT             Minimum nucleotide gene length (default 100)
-  -c, --cores INT            Worker cores
-  --mem INT                  Memory budget in GiB
-  --tmp DIR                  Shared temporary directory
-  --continue 0|1             Rebuild (0) or resume (1, default)
-  --MGset GTDB|FMG           Marker-gene set
-  --SNPcaller MPI|FB         Consensus variant caller used by strain analysis
-  --extraGenesNT FASTA       External nucleotide genes
-  --extraGenesAA FASTA       Matching external proteins for protExtract
-  --sampleBatches INT        Parallel sample-collation batches
-  --requireAllAssemblies 0|1 Fail on missing assemblies (default 1)
-  --help, -h                 Show this help without loading site configuration
-
-Mode-specific options include --out, --refDB, --functDB, --functAligner,
---fastaSplit, --stone, --SmplStart, --SmplStop and --SmplBatch.
-HELP
+	#option tables come from docs/flag_reference.md so this list cannot drift
+	printFlagHelp(
+		script  => "geneCat.pl",
+		version => $version,
+		usage   => ["geneCat.pl -mode geneCat -map FILE[,FILE...] -GCd DIR [options]",
+			"geneCat.pl -mode MODE -GCd DIR [mode options]",
+			"geneCat.pl -help | -h | -?"],
+		summary => "Build or operate on a MATAFILER gene catalog. Existing catalogs are resumed "
+			."by default; -continue 0 deletes and rebuilds the selected catalog after "
+			."validating the mapping input.",
+	);
 }
 
 sub _preview_list {
@@ -113,7 +88,7 @@ sub _preview_list {
 	return $text;
 }
 
-if (grep { $_ eq '--help' || $_ eq '-h' || $_ eq '-?' } @ARGV) {
+if (helpRequested(@ARGV)) {
 	_print_help();
 	exit 0;
 }
@@ -411,7 +386,8 @@ sub _safe_reset_dir {
 #     recovery-critical catalogue publication
 #.57: do not preflight environment-wrapped executables; allow configured commands to run
 #.58: repair workflow dependency/recovery contracts and forward the selected strain SNP caller
-my $version = 0.58;
+#$version is declared near the top of this file, so -help can print it before
+#the main body runs; keep it in sync with the changelog above.
 $| = 1;
 my $geneCatWorkflowActive = 0;
 my $geneCatWorkflowStage = 'startup';

@@ -64,6 +64,7 @@ my %stageCheckpointContract = (
 );
 my %stageCheckpointCompatibilityLogged;
 
+use Mods::FlagReference qw(printFlagHelp helpRequested);
 use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
 use Mods::GenoMetaAss qw(readMap getDirsPerAssmblGrp unzipFileARezip getAssemblPath systemW gzipopen);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
@@ -106,6 +107,19 @@ END {
 		_mgs_write_workflow_state();
 	}
 	$? = $exitStatus;
+}
+
+#answered before the first getProgPaths() below, so -help needs no site config
+if (helpRequested(@ARGV)) {
+	printFlagHelp(
+		script  => "MGS.pl",
+		version => $MGSpipelineVersion,
+		usage   => ["MGS.pl -GCd DIR [options]",
+			"MGS.pl -help | -h | -?"],
+		summary => "MGS/MAG dereplication, abundance and taxonomy on a finished gene catalog, "
+			."plus optional orchestration of the within-MGS strain workflow.",
+		exit    => 1,
+	);
 }
 
 print "Starting MGS pipeline v$MGSpipelineVersion; parsing configuration before loading inputs.\n";
