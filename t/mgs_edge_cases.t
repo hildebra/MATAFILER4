@@ -246,16 +246,69 @@ my $assignment_helpers_loaded = defined($mgs_assignment_helpers)
 ok($assignment_helpers_loaded, 'MGS assignment helpers compile for the resume regression')
 	or diag($@);
 if ($assignment_helpers_loaded) {
-	my $header_only_assignments = File::Spec->catfile($tmp, 'header-only.MGS');
-	write_file($header_only_assignments, "Bin\tGenes\n");
+	# Header emitted by bin/clusterMAGs (the default engine) for .clusters and
+	# .Wclusters, and by secScripts/MGS/clusterMAGs.pl for the -perlClusterMAGs
+	# compatibility path.  Both must be recognised: counting either as an MGS
+	# inflates every assignment count by one.
+	my $binary_header = "MGS\tGene\tOcc\tMultiCopy\tMultiBin\tisMarkerGene\n";
+	my $weighted_header = "MGS\tGene\tOcc\tW_MultiCopy\tW_MultiBin\tisMarkerGene\n";
+	my $compat_header = "Bin\tGene\tOcc\tMultiCopy\tMultiBin\tisMarkerGene\n";
+	my $assignment_row = sub {
+		my ($mgs, $gene) = @_;
+		return "$mgs\t$gene\t10\t0\t1\t0\n";
+	};
+
+	my %header_only = (
+		'clusterMAGs binary'      => $binary_header,
+		'weighted clusterMAGs'    => $weighted_header,
+		'Perl compatibility path' => $compat_header,
+	);
+	for my $engine (sort keys %header_only) {
+		my $header_only_assignments = File::Spec->catfile($tmp, "header-only.$engine.MGS");
+		write_file($header_only_assignments, $header_only{$engine});
+		is(
+			MGSResumeAssignmentProbe::_mgs_count($header_only_assignments, 1),
+			0,
+			"a header-only $engine assignment file cannot satisfy the Stage I resume gate",
+		);
+	}
+
+	# A genuine singleton must report exactly one MGS: MGS.pl synthesizes the
+	# missing observation table only for $activeMGSCount == 1, and
+	# _write_single_mgs_observations dies unless _mgs_ids returns one id.
+	my $singleton_assignments = File::Spec->catfile($tmp, 'singleton.MGS');
+	write_file($singleton_assignments, $binary_header.$assignment_row->('MGS.1', 'gene1'));
 	is(
-		MGSResumeAssignmentProbe::_mgs_count($header_only_assignments, 1),
-		0,
-		'a header-only assignment file cannot satisfy the Stage I resume gate',
+		MGSResumeAssignmentProbe::_mgs_count($singleton_assignments),
+		1,
+		'a single clustered MGS is counted once, not alongside its header',
+	);
+
+	my $multi_assignments = File::Spec->catfile($tmp, 'multi.MGS');
+	write_file($multi_assignments, $binary_header
+		.$assignment_row->('MGS.1', 'gene1')
+		.$assignment_row->('MGS.1', 'gene2')
+		.$assignment_row->('MGS.2', 'gene3'));
+	is(
+		MGSResumeAssignmentProbe::_mgs_count($multi_assignments),
+		2,
+		'distinct MGS are counted without the header contributing an extra id',
+	);
+
+	# The post-filtered .core table carries no header, so its leading row is a
+	# real assignment and must never be skipped.
+	my $core_assignments = File::Spec->catfile($tmp, 'core.MGS');
+	write_file($core_assignments, $assignment_row->('MGS.1', 'gene1')
+		.$assignment_row->('MGS.2', 'gene2'));
+	is(
+		MGSResumeAssignmentProbe::_mgs_count($core_assignments),
+		2,
+		'a headerless core table keeps its first assignment',
 	);
 
 	my $early_stop_assignments = File::Spec->catfile($tmp, 'early-stop.MGS');
-	write_file($early_stop_assignments, "Bin\tGenes\nMGS1\tgene1\nmalformed\n");
+	write_file($early_stop_assignments,
+		$binary_header.$assignment_row->('MGS.1', 'gene1')."malformed\n");
 	is(
 		MGSResumeAssignmentProbe::_mgs_count($early_stop_assignments, 1),
 		1,

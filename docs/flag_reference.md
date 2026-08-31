@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -114,7 +114,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-ProbRdFilter` | integer | `1` | stable | Enable probabilistic SDM read filtering. |
 | `-pairedReadInput` | integer | `-1` | stable | determines if read pairs are expected in each in dir |
 | `-inputReadLengthSuppl` | integer | `5000` | stable | Default supplementary-read length used for planning. |
-| `-filterHostRds`, `-filterHumanRds` | integer | `0` | stable | 0: no, 1:kraken2, 2: kraken1, 3:hostile |
+| `-filterHostRds`, `-filterHumanRds` | integer | `0` | stable | 0: no, 1: kraken2, 3: hostile. 2 (kraken1) is no longer supported and aborts. |
 | `-filterHostKrak2DB` | string | `""` | stable | customize host org to filter (e.g. human, chicken ..) |
 | `-filterHostKr2Conf` | string | `0.01` | stable | Kraken2 confidence threshold for host assignment. |
 | `-filterHostKr2Quick` | string | `` | stable | Kraken2 quick-mode option for host filtering. |
@@ -177,7 +177,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-mapper` | integer | `-1` | stable | #1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long) |
+| `-mapper` | integer | `-1` | stable | 1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long) |
 | `-mapUnmapped` | integer | `0` | stable | Pass reads left unmapped by one reference to the next mapping. |
 | `-mappingCoverage` | integer | `1` | stable | Calculate per-contig and per-gene coverage for reference mappings. |
 | `-mappingMem` | integer | `-1` | stable | total mem for mini2/kma/bwa/bwt2 in GB |
@@ -214,7 +214,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-decoyMapping` | integer | `1` | stable | 1: "Decoy mapping": map against reference genome AND against assembly of metagenome (drawing obvious better hits to metagenome, the "decoy") |
-| `-competitive2ndmap` | integer | `-1` | stable | 1: Competitive, 2: combined but report separately per input genome, -1: combined and report all together |
+| `-competitive2ndmap` | integer | `-1` | stable | -1: combined map, combined reporting; 0: a separate mapping run per reference; 1: competitive; 2: combined map, separate reporting per input genome |
 | `-ref` | string | `""` | stable | Comma-separated reference FASTA files for secondary mapping. |
 | `-mapperLargeRef` | integer | `0` | stable | use flags in mapper index built for large ref DBs? |
 | `-mapnms` | string | `""` | stable | name for this final files |
@@ -257,7 +257,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-DiaMinAlignLen` | integer | `20` | stable | Minimum accepted DIAMOND alignment length. |
 | `-DiaMinFracQueryCov` | float | `0.1` | stable | Minimum accepted fraction of the query aligned. |
 | `-DiaPercID` | integer | `40` | stable | Minimum accepted DIAMOND percent identity. |
-| `-DiaDBs` | string | `""` | stable | NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI |
+| `-DiaDBs` | string | `""` | stable | Comma-separated functional databases: NOG,MOH,MOH2,ABR,ABRc,ACL,KGM,KGB,KGE,CZy,PTV,PAB,URE,URacc,AMI. See the [profiling tutorial](profiling_tutorial.md) for the config key each one needs. |
 
 ## Functional profiling (jaime tree)
 
@@ -496,6 +496,12 @@ Phase-I input contracts use cross-node-stable file identity: canonical path, ino
 
 ### Resume, redo and resources
 
+On a tree-only resume (`-onlySubmit 1`), an MGS whose placement never finished is retried automatically in EPA-only mode:
+
+- A retained `placementPending.sto` plus a validated backbone, MSA, query alignment and sample classification is resubmitted with `-epaOnly 1`, reusing the existing tree instead of rerunning alignment or inference.
+- The retry runs on one core with `-epaThreads 1`, and doubles the ordinary memory estimate, then clamps it to a fixed 20 GB floor and a `-phyloMemMulti`-scaled 220 GB ceiling. The doubled figure is a scheduler/cgroup allowance, not an EPA-ng `--maxmem` argument.
+- Legacy runs are recovered too: when those placement inputs exist but `phylo/IQtree_allsites.treefile` does not, the pending marker is reconstructed and BuildTree restarts in the same isolated EPA-only mode.
+
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-onlySubmit` | integer | `0` | stable | Reuse completed Phase-I preparation and submit only missing tree work. |
@@ -510,6 +516,8 @@ Phase-I input contracts use cross-node-stable file identity: canonical path, ino
 | `-treeOOMRetryRounds` | integer | `8` | advanced | Maximum OOM retry rounds per MGS, 0-12. High enough that `-treeOOMMaxMemGB` decides when to stop. |
 | `-oomScanMinutes` | float | `60` | advanced | Rescan Slurm accounting this often while Phase-I workers or tree jobs still run, resubmitting whatever was killed for memory. Both phases submit their largest jobs first, so escalation no longer waits for the tail of short jobs. |
 | `-oomMinRetries` | integer | `3` | advanced | Minimum OOM escalations guaranteed per failed job, 0-12; `0` removes the floor. Budgets are counted per job, so an early rescan cannot spend the retries a later failure needs. |
+| `-jobNice` | integer | `5000` | advanced | Slurm `--nice` handicap on ordinary tree and Phase-I jobs; OOM retries always submit at `--nice=0` so they outrank a backlog this run already queued. Rescanning alone cannot reorder jobs Slurm has already accepted. `0` disables it. |
+| `-maxQueuedJobs` | integer | `0` | advanced | Ceiling on this user's live (running + pending) scheduler jobs, so the tree wave is submitted in batches and an OOM retry only has to overtake what is already queued. `0` submits the whole wave at once. |
 | `-treeMemThreadDivisor` | float | `4` | advanced | Scale the initial tree memory request by `cores/DIVISOR` (never below 1); raise it to request less on wide jobs. |
 | `-phyloMemMulti` | float | `1` | advanced | Multiplier applied to BuildTree memory planning. |
 | `-flushMemMB` | integer | `2048` | advanced | Also flush buffered Phase-I output once this much is held; lower it if split workers run out of memory. |
@@ -686,7 +694,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses.
 | `-cores` | integer | `1` | stable | CPU cores used by MSA and tree programs. |
 | `-superTree` | integer | `0` | stable | Build a supertree from the per-locus trees instead of one concatenated tree. |
 | `-superCheck` | integer | `0` | stable | Only check whether the supertree inputs are complete, then exit. |
-| `-fixHeaders` | integer | `0` | stable | # fix the fasta headers, if too long or containing not allowed symbols (nwk reserved) |
+| `-fixHeaders` | integer | `0` | stable | fix the fasta headers, if too long or containing not allowed symbols (nwk reserved) |
 | `-useEte` | integer | `0` | stable | Use the ete3 toolkit workflow instead of the internal MSA/tree steps. |
 | `-relativeNTFraction` | float | `0.2` direct; `0.1` strain workflow | stable | Backbone minimum informative nucleotide content as a fraction of the final selected-sample Q90. This explicit name replaces the retired ambiguous `-NTfilt` switch. |
 | `-NTfiltPerGene` | float | `0.1` | stable | Per-locus minimum informative-NT fraction; sequences below it are dropped from that locus. |
@@ -805,7 +813,7 @@ For split Phase I (`-maxSubJob > 0`), assembly groups remain indivisible, but as
 
 Phase II first resolves one authoritative outgroup per actionable MGS in `strain_within.pl`, then derives the core-first demand manifest before loading candidate mappings or reference FASTAs. When `-MGSphylo` is supplied, it writes the consolidated Mosaic target-to-outgroup proposals to one temporary file and asks `neighborTree.R --all --preferred --max-candidates 1` for all tree-tip decisions in a single process, rather than starting R and rereading the source tree for each MGS. R accepts a plausible Mosaic proposal as the selection; if that proposal is absent, effectively identical, non-finite, or beyond the configured distance cutoff, the nearest eligible tree neighbour becomes the single selection. Perl does not reinsert the rejected proposal or try another candidate when the selected outgroup lacks coverage. Direct `neighborTree.R` calls can use `--preferred-tip TIP`, adjust `--preferred-quantile` and `--preferred-nearest-factor`, and optionally set `--max-candidates INT`; its default of `0` preserves an unlimited result for other callers. The temporary preference file is automatically removed and creates no per-MGS output clutter. The demand manifest uses GTDB/core-guide seed loci first, permits an exact Mosaic homolog only when its source is the selected outgroup and the locus is seed-listed or broadly available, and fills any shortfall only from COGs present in at least `-taxonAwareRescueMinPrevalence` of actionable targets. The default floor is `ceil(0.20 * -treeLocusBudget)` (80 with the default budget of 400); set `-outgroupCoreMinLoci` to override it. Targets below this floor are removed before the outgroup gene map is loaded; if none remain, Phase II opens neither candidate reference mappings nor FNA/FAA catalogues. For viable targets, `readGene2tax` retains only approved COGs for the selected outgroup before applying the per-outgroup `-outgroupReferenceGeneCap` (2,500 by default), and the sequential FASTA reader retains only those exact requested genes. Alternative same-COG copies are considered only inside that predetermined outgroup. `buildTree5.pl` receives the already finalized overlay and selected `-outgroup`; it performs no outgroup preselection.
 
-Phase II resource planning adds no sample/gene pre-scan. The required `addOutgroup2MGS` input-finalization result already supplies submitted samples and usable genes. Ordinary core requests continue to use `ceil(sqrt(samples))` with the four-core floor and `-maxCores` cap. The controller uses `samples * usable_genes` as a cheap workload proxy: memory takes the larger of the existing input-size estimate and `samples * usable_genes / 1024` MB before applying the existing engine multiplier, `-phyloMemMulti`, and clamps. Once all ordinary jobs are prepared, submission is ordered by descending requested cores and then descending workload; EPA-only recovery retains its explicit priority tier.
+Phase II resource planning adds no sample/gene pre-scan. The required `addOutgroup2MGS` input-finalization result already supplies submitted samples and usable genes. Ordinary core requests continue to use `ceil(sqrt(samples))` with the four-core floor and `-maxCores` cap. The controller uses `samples * usable_genes` as a cheap workload proxy: memory takes the larger of the existing input-size estimate and `samples * usable_genes / 1024` MB before applying the existing engine multiplier, the `-treeMemThreadDivisor` thread factor, `-phyloMemMulti`, and clamps. Once all ordinary jobs are prepared, submission is ordered by descending requested cores and then descending workload; EPA-only recovery retains its explicit priority tier.
 
 The strain wrapper forwards backbone and EPA placement controls only when `-placeOnBackbone 1` is enabled. In that mode, well-covered samples infer the ML backbone; only severe coverage outliers or samples failing backbone admission are considered for EPA-ng placement, samples below the separate placement coverage/overlap gates remain excluded, and placements forming a clearly separated long-branch tail are omitted from the published tree. The default `-placeOnBackbone 0` infers one tree from the complete retained alignment and deactivates all backbone- and placement-only filters.
 

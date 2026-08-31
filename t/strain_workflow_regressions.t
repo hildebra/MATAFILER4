@@ -458,7 +458,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.51;/,
+like($strain, qr/my \$version = 1\.52;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -697,8 +697,8 @@ like($strain,
 	'each queued job retains the size signals used for cores, memory, and stable ordering');
 like($strain, qr/nonblockingMaxConcurrentJobs\} = 1 unless \$blocking/,
 	'queued tree dispatch uses the non-blocking scheduler-capacity path');
-like($strain, qr/deferredSubmissionDependency\(\).*?Phase II continues converting inputs/s,
-	'queued tree dispatch retains deferred jobs while conversion continues');
+like($strain, qr/deferredSubmissionDependency\(\).*?retaining "\.scalar\(\@\{\$queue\}\).*?until live jobs fall below/s,
+	'queued tree dispatch retains deferred jobs until scheduler capacity frees');
 like($strain, qr/\$options->\{tmpSpace\} = \$record->\{tmp_space\}/,
 	'queued tree dispatch restores each job\'s stored temporary-space setting');
 like($strain, qr/\$options->\{useLongQueue\} = \$record->\{use_long_queue\}/,
@@ -1071,8 +1071,23 @@ like($site_config_template, qr/^maxMF4mem\t512$/m,
 unlike($internal_config, qr/^downloadQueue\t/m,
 	'the internal program config leaves the archive queue to the site config');
 like($strain,
-	qr/sub retryOOMTreeJobs.*?qsubSystemJobAlive\(\s*\\\@pendingJobs, \$options, 0, -1, \$scanSeconds\).*?slurm_oom_retry_plan.*?by_job_id.*?next_mb.*?epaOnlyRetryReady\(\$mgsDirectory, 1\).*?-epaThreads.*?epaThreads 1.*?treeCmd\.epa_retry\.sh/s,
+	qr/sub retryOOMTreeJobs.*?qsubSystemJobAlive\(\s*\\\@pendingJobs, \$options, 0, -1, \$budget\).*?slurm_oom_retry_plan.*?by_job_id.*?next_mb.*?epaOnlyRetryReady\(\$mgsDirectory, 1\).*?-epaThreads.*?epaThreads 1.*?treeCmd\.epa_retry\.sh/s,
 	'tree retries rescan the shared accounting-confirmed OOM plan on a bounded wait, and EPA-stage retries use one thread');
+like($strain,
+	qr/\(\$b->\{oom_retry\} \/\/ 0\) <=> \(\$a->\{oom_retry\} \/\/ 0\)\s*\|\|\s*\(\$b->\{epa_only\} \/\/ 0\) <=> \(\$a->\{epa_only\} \/\/ 0\)/s,
+	'OOM retries take the leading dispatch tier, ahead of EPA recovery and bulk work');
+like($strain,
+	qr/\$retry\{oom_retry\} = 1;\s*\$retry\{job_nice\} = 0;/s,
+	'an escalated tree retry drops the bulk priority handicap');
+like($strain,
+	qr/unshift \@\{\$pendingQueue\}, \@retryQueue;/,
+	'escalations are injected ahead of the ordinary jobs still awaiting capacity');
+like($strain,
+	qr/my \$jobNice = 5000;.*?my \$maxQueuedJobs = 0;/s,
+	'bulk submissions carry a priority handicap and an optional queue ceiling');
+like($strain,
+	qr/\$QSBoptHR->\{jobNice\} = \$jobNice;\s*\$QSBoptHR->\{maxConcurrentJobs\} = \$maxQueuedJobs;/s,
+	'the scheduler options carry the run-wide priority and capacity settings');
 like($strain,
 	qr/my \$round = \(\$retriesByMGS\{\$original->\{mgs\}\} \|\| 0\) \+ 1;.*?if \(\$round > \$maximumRounds\).*?exhausted for/s,
 	'the tree OOM retry budget is spent per MGS, not per submission wave');

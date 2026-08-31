@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -297,7 +297,7 @@ BERGmock	BERGmock	BERGmock
 ```{sh}
 MAP="/path/to/mapping_file.map"
 perl $MF4DIR/MATAF4.pl map2tar \
-	-map $MAP  -ref '/path/to/reference/mock_community/*.fasta' -filterHumanRds 0 -mappingCores 12 -mapperFilterIll '0.02 0.75 00'  -redo2ndmap 0 -mappingMem 15 -submit 1 -competitive2ndmap -1 -decoyMapping 0
+	-map $MAP  -ref '/path/to/reference/mock_community/*.fasta' -filterHostRds 0 -mappingCores 12 -mapperFilterIll '0.02 0.75 0 0'  -redo2ndmap 0 -mappingMem 15 -submit 1 -competitive2ndmap -1 -decoyMapping 0
 ```
 
 - Explanation: ref are the .fasta formatted reference genomes you want to map your metagenomic reads to, metagenomic reads are defined in the map, as in other runs. -mapperFilterIll defines how the mapped reads will be quality filtered. -competitive2ndmap defines if reads will be mapped against all references at once (competitive) or separately against each single reference. -decoyMapping determines if an already created read assembly will be used to "decoy" map reads against (useful if you suspect that most reads aligning to your reference would be false positive hits).

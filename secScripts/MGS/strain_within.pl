@@ -303,7 +303,10 @@ my $completionMessage = "";
 #1.51: rescan Slurm accounting on a fixed interval so OOM jobs are resubmitted
 #	while the rest of their wave still runs, with the retry budget counted per
 #	job instead of per wave
-my $version = 1.51;
+#1.52: let OOM retries overtake the queued bulk wave, by handicapping ordinary
+#	submissions with --nice, dispatching retries from a leading tier, and
+#	optionally capping how much of the wave is queued at once
+my $version = 1.52;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -455,6 +458,21 @@ my $oomScanMinutes = 60;
 #later still needs. Every accounting-confirmed OOM job keeps at least this many
 #escalations of its own, whichever scan first sees it fail.
 my $oomMinRetries = 3;
+#Rescanning alone cannot help a retry that is queued behind thousands of jobs
+#the same run submitted earlier: Slurm orders pending jobs by priority, and an
+#OOM retry is always the youngest. Slurm subtracts --nice from priority and lets
+#any user raise it, so ordinary jobs carry this handicap while every OOM retry
+#submits at nice 0 and therefore outranks the whole backlog. Set 0 to disable.
+my $jobNice = 5000;
+#Optional ceiling on this user's live (running + pending) scheduler jobs. With a
+#cap the wave is submitted in batches, so an OOM retry only has to overtake the
+#jobs already queued, not every job the run will ever submit. 0 keeps the
+#historical behaviour of handing the whole wave to the scheduler at once.
+my $maxQueuedJobs = 0;
+#While a retained queue is still draining, top up scheduler capacity on this
+#cadence. The accounting rescan keeps its own, much slower -oomScanMinutes.
+my $treeQueueDrainProbeSeconds = 60;
+my $nextCapacityNotice = 0;
 #IQ-TREE allocates per-thread likelihood buffers, so a 60-thread job needs far
 #more than the same alignment at 4 threads. The base multiplier is calibrated at
 #four cores; this divisor turns the requested core count into that factor. Raise
@@ -570,6 +588,8 @@ GetOptions(
 	"treeOOMRetryRounds=i" => \$treeOOMRetryRounds,
 	"oomScanMinutes=f" => \$oomScanMinutes,
 	"oomMinRetries=i" => \$oomMinRetries,
+	"jobNice=i" => \$jobNice,
+	"maxQueuedJobs=i" => \$maxQueuedJobs,
 	"treeMemThreadDivisor=f" => \$treeMemThreadDivisor,
 	"onlySubmit=i"   => \$onlySubmit, #submit only jobs, or also recreate input fna/faa files? (can take days)
 	"redo=s"         => \$redoMode,
@@ -784,6 +804,10 @@ die "-oomScanMinutes must be positive
 die "-oomMinRetries must be between 0 and 12
 "
 	unless $oomMinRetries >= 0 && $oomMinRetries <= 12;
+die "-jobNice must not be negative; Slurm only lets an operator raise priority
+" unless $jobNice >= 0;
+die "-maxQueuedJobs must not be negative
+" unless $maxQueuedJobs >= 0;
 die "Fractional filtering options must be between 0 and 1\n"
 	if grep { $_ < 0 || $_ > 1 } ($multiGeneSmplMax, $conspGeneSmplMax,
 		$GenesPerSpecies, $GeneLengthMin, $GeneLengthIncludeMin,
@@ -955,6 +979,10 @@ printEarlyRunHeader();
 my $queueMode = $subMode;
 $queueMode = "bash" if !$doSubmit && $queueMode eq "";
 my $QSBoptHR = emptyQsubOpt($doSubmit,"",$queueMode);
+#Ordinary submissions carry the priority handicap and respect the queue ceiling;
+#OOM recovery overrides the handicap per job when it is dispatched.
+$QSBoptHR->{jobNice} = $jobNice;
+$QSBoptHR->{maxConcurrentJobs} = $maxQueuedJobs;
 my $MGSfileOri = $MGSfile; #save for later..
 
 
@@ -2503,6 +2531,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		stone => $onlyMSA ? $msaOnlyStone : $treeStone,
 		tmp_space => $QSBoptHR->{tmpSpace},
 		use_long_queue => $QSBoptHR->{useLongQueue},
+		job_nice => $jobNice,
 	};
 	$QSBoptHR->{tmpSpace} =$tmpSHDD;
 	$QSBoptHR->{useLongQueue} = 0;
@@ -2537,17 +2566,11 @@ print "  staged input sets recovered for -redo tree: $recalcScratchRecovered\n"
 if ($doSubmit) {
 	print "Tree preparation pass complete: $cnt eligible tree job(s), "
 		."$submittedTreeJobs submitted so far, ".scalar(@pendingTreeJobs)
-		." awaiting scheduler capacity.\n";
-	my $drain = dispatchPendingTreeJobs(
-		queue => \@pendingTreeJobs, options => $QSBoptHR,
-		jobs => \@jobs, accounting => \@treeJobAccounting,
-		blocking => 1,
-	);
-	$submittedTreeJobs += $drain->{submitted};
-	die "Internal error: tree submission queue was not drained\n" if @pendingTreeJobs;
-	print "Tree submission pass complete: $submittedTreeJobs eligible tree job(s) submitted; "
-		.scalar(@jobs)." scheduler job ID(s) tracked. "
+		." awaiting scheduler capacity. "
 		."The following wait count reports jobs still present, not jobs omitted.\n";
+	#The rest of the queue is drained by the OOM supervisor below. Draining it
+	#here would put every escalation behind the whole remaining wave, which is
+	#exactly the ordering problem the supervisor exists to avoid.
 } else {
 	my $drain = dispatchPendingTreeJobs(
 		queue => \@pendingTreeJobs, options => $QSBoptHR,
@@ -2588,11 +2611,17 @@ if ($maxSubJob
 #retryOOMTreeJobs owns the wait instead and rescans every -oomScanMinutes.
 retryOOMTreeJobs(
 	jobs => \@jobs,
+	pending_queue => \@pendingTreeJobs,
+	submitted_ref => \$submittedTreeJobs,
 	accounting => \@treeJobAccounting,
 	options => $QSBoptHR,
 	maximum_mb => int($treeOOMMaxMemGB * 1024 + 0.5),
 	maximum_rounds => $treeOOMRetryRounds,
 );
+die "Internal error: tree submission queue was not drained\n"
+	if @pendingTreeJobs && $doSubmit;
+print "Tree submission pass complete: $submittedTreeJobs eligible tree job(s) submitted; "
+	.scalar(@jobs)." scheduler job ID(s) tracked.\n" if $doSubmit;
 my $incompleteTreeOutcomes = 0;
 if ($doSubmit) {
 	my ($failed, $pending, $terminal) =
@@ -6133,6 +6162,9 @@ sub submitPhase1Worker {
 	my $generation = $args{generation};
 	my $workerCommand = $args{worker_command};
 	my $label = $args{label};
+	#Every Phase-I resubmission is recovery that the whole run waits on, so it
+	#drops the bulk priority handicap unless the caller asks otherwise.
+	my $nice = defined($args{job_nice}) ? $args{job_nice} : 0;
 	my $jobByWorker = $args{job_by_worker} || {};
 	my $memoryByWorker = $args{memory_by_worker} || {};
 	my $stone = "$splitStonePrefix.$worker.stone";
@@ -6142,13 +6174,16 @@ sub submitPhase1Worker {
 		."printf '%s\\n' ".shellQuote($generation)
 		." > ".shellQuote($stone)."\n";
 	my $savedTmp = $QSBoptHR->{tmpSpace};
+	my $savedNice = $QSBoptHR->{jobNice};
 	$QSBoptHR->{tmpSpace} = 15;
+	$QSBoptHR->{jobNice} = $nice;
 	my ($dependency) = qsubSystem(
 		"$LOGDIR/Strain1_B${worker}.${label}.sh",
 		$cmdX, 1, $memoryMB."M", "Str1.$worker",
 		"", "", 1, [], $QSBoptHR,
 	);
 	$QSBoptHR->{tmpSpace} = $savedTmp;
+	$QSBoptHR->{jobNice} = $savedNice;
 	$memoryByWorker->{$worker} = $memoryMB;
 	my $jobID = slurm_job_id_from_dependency($dependency, $QSBoptHR->{rTag});
 	if (defined($jobID)) {
@@ -7213,6 +7248,9 @@ sub printEarlyRunHeader {
 		."per-thread memory scaling=cores/$treeMemThreadDivisor\n";
 	print "OOM rescan: every $oomScanMinutes min while jobs are still running; at "
 		."least $oomMinRetries escalation(s) per OOM job\n";
+	print "Submission priority: ordinary jobs at --nice=$jobNice, OOM retries at "
+		."--nice=0; live-job ceiling="
+		.($maxQueuedJobs ? $maxQueuedJobs : 'none')."\n";
 	print "Initializing paths, maps, and catalogues...\n";
 	print "==============================================\n";
 }
@@ -7415,16 +7453,21 @@ sub dispatchPendingTreeJobs {
 	my $saved_nonblocking = $options->{nonblockingMaxConcurrentJobs};
 	my $saved_tmp_space = $options->{tmpSpace};
 	my $saved_long_queue = $options->{useLongQueue};
+	my $saved_nice = $options->{jobNice};
 	delete $options->{capacityDeferred};
 	delete $options->{capacityDeferralAnnounced};
 	$options->{nonblockingMaxConcurrentJobs} = 1 unless $blocking;
 
-	# EPA recovery keeps its explicit first tier. Within each tier, submit jobs
-	# requesting the most cores first, then use the already collected sample
-	# count-by-gene workload proxy as a descending tie-breaker. These are the same
-	# values that selected cores and memory above, rather than a second sizing scan.
+	# OOM recovery takes the first tier and EPA recovery the second: an escalation
+	# injected mid-wave must reach the scheduler before the ordinary jobs that are
+	# still waiting for capacity, or it inherits their whole backlog. Within each
+	# tier, submit jobs requesting the most cores first, then use the already
+	# collected sample count-by-gene workload proxy as a descending tie-breaker.
+	# These are the same values that selected cores and memory above, rather than
+	# a second sizing scan.
 	@{$queue} = sort {
-		($b->{epa_only} // 0) <=> ($a->{epa_only} // 0)
+		($b->{oom_retry} // 0) <=> ($a->{oom_retry} // 0)
+			|| ($b->{epa_only} // 0) <=> ($a->{epa_only} // 0)
 			|| ($b->{cores} // 0) <=> ($a->{cores} // 0)
 			|| ($b->{workload_cells} // 0) <=> ($a->{workload_cells} // 0)
 			|| ($b->{sample_count} // 0) <=> ($a->{sample_count} // 0)
@@ -7450,13 +7493,22 @@ sub dispatchPendingTreeJobs {
 		}
 		$options->{tmpSpace} = $record->{tmp_space};
 		$options->{useLongQueue} = $record->{use_long_queue};
+		#An OOM retry records nice 0, so it outranks the queued ordinary wave.
+		$options->{jobNice} = defined($record->{job_nice})
+			? $record->{job_nice} : $saved_nice;
 		my ($dependency) = qsubSystem(
 			$record->{script}, $record->{command}, $record->{cores},
 			$record->{memory}, $record->{job_name}, "", "", 1, [], $options,
 		);
 		if (defined($dependency) && $dependency eq deferredSubmissionDependency()) {
-			print "Scheduler capacity is full; retaining ".scalar(@{$queue})
-				." prepared tree job(s) while Phase II continues converting inputs.\n";
+			#The supervisor retries this every minute for as long as the wave
+			#lasts, so report it on a slow cadence instead of once per attempt.
+			if (time >= $nextCapacityNotice) {
+				print "Scheduler capacity is full; retaining ".scalar(@{$queue})
+					." prepared tree job(s) until live jobs fall below "
+					.($options->{maxConcurrentJobs} || 0)."\n";
+				$nextCapacityNotice = time + 600;
+			}
 			last;
 		}
 		shift @{$queue};
@@ -7477,6 +7529,7 @@ sub dispatchPendingTreeJobs {
 	$options->{nonblockingMaxConcurrentJobs} = $saved_nonblocking;
 	$options->{tmpSpace} = $saved_tmp_space;
 	$options->{useLongQueue} = $saved_long_queue;
+	$options->{jobNice} = $saved_nice;
 	return { submitted => $submitted, pending => scalar(@{$queue}) };
 }
 
@@ -7488,6 +7541,8 @@ sub retryOOMTreeJobs {
 	my $maximumRounds = $args{maximum_rounds} // 8;
 	my $minimumRounds = $args{minimum_rounds} // $oomMinRetries;
 	my $scanSeconds = $args{scan_seconds} // oomScanSeconds();
+	my $pendingQueue = $args{pending_queue} || [];
+	my $submittedRef = $args{submitted_ref};
 	my @pendingJobs = grep { defined($_) && length($_) } @{$args{jobs} || []};
 	# The configured memory ceiling, not the round count, should decide when to
 	# stop: doubling out of the 5 GB floor needs seven rounds to reach 512 GB.
@@ -7497,8 +7552,20 @@ sub retryOOMTreeJobs {
 	$maximumRounds = $minimumRounds if $maximumRounds < $minimumRounds;
 	die "OOM retry rounds must be between 0 and 12\n"
 		unless $maximumRounds >= 0 && $maximumRounds <= 12;
-	unless (@{$accounting} && $options->{doSubmit}
-			&& ($options->{qmode} || '') eq 'slurm') {
+	#Without Slurm accounting no escalation is possible, so fall back to the
+	#historical behaviour: drain the whole queue, then wait for it.
+	unless ($options->{doSubmit} && ($options->{qmode} || '') eq 'slurm') {
+		if (@{$pendingQueue}) {
+			my (@queuedJobs, @queuedAccounting);
+			my $drain = dispatchPendingTreeJobs(
+				queue => $pendingQueue, options => $options,
+				jobs => \@queuedJobs, accounting => \@queuedAccounting,
+				blocking => 1,
+			);
+			${$submittedRef} += $drain->{submitted} if ref($submittedRef) eq 'SCALAR';
+			push @pendingJobs, grep { defined($_) && length($_) } @queuedJobs;
+			push @{$accounting}, @queuedAccounting;
+		}
 		qsubSystemJobAlive(\@pendingJobs, $options)
 			if @pendingJobs && $options->{doSubmit};
 		return 0;
@@ -7507,22 +7574,48 @@ sub retryOOMTreeJobs {
 	my (%retriesByMGS, %handledJob);
 	my $retried = 0;
 	my $scan = 0;
-	my $summary;
+	my $summary = { available => 0, error => 'no accounting scan was reached' };
+	my $nextScan = 0;
 	while (1) {
-		if (@pendingJobs) {
-			# Bounded wait: come back on the scan cadence to escalate what has
-			# already failed, instead of blocking until the last short job ends.
-			my $remaining = qsubSystemJobAlive(
-				\@pendingJobs, $options, 0, -1, $scanSeconds);
-			@pendingJobs = @{$remaining || []};
+		# Top up scheduler capacity from the retained queue first. Escalations
+		# were unshifted onto its front and sort into their own leading tier, so
+		# they reach the scheduler before the ordinary jobs still waiting here.
+		if (@{$pendingQueue}) {
+			my (@queuedJobs, @queuedAccounting);
+			my $drain = dispatchPendingTreeJobs(
+				queue => $pendingQueue, options => $options,
+				jobs => \@queuedJobs, accounting => \@queuedAccounting,
+				blocking => 0,
+			);
+			${$submittedRef} += $drain->{submitted} if ref($submittedRef) eq 'SCALAR';
+			push @pendingJobs, grep { defined($_) && length($_) } @queuedJobs;
+			push @{$accounting}, @queuedAccounting;
 		}
+		unless (time >= $nextScan) {
+			last unless @pendingJobs || @{$pendingQueue};
+			# A queue that is still draining needs a much shorter wait than the
+			# accounting cadence, so freed capacity is refilled promptly.
+			my $budget = @{$pendingQueue}
+				? $treeQueueDrainProbeSeconds : ($nextScan - time);
+			$budget = 1 if $budget < 1;
+			if (@pendingJobs) {
+				my $remaining = qsubSystemJobAlive(
+					\@pendingJobs, $options, 0, -1, $budget);
+				@pendingJobs = @{$remaining || []};
+			} else {
+				sleep($budget);
+			}
+			next;
+		}
+		$nextScan = time + $scanSeconds;
 		$scan++;
 		# Outcomes already ruled on are dropped from the query, so a retried or
 		# refused job is never rediscovered by a later scan.
 		my @candidates = grep { !$handledJob{$_->{job_id}} } @{$accounting};
 		my $oomPlan = slurm_oom_retry_plan(\@candidates, $maximumMB);
 		$summary = $oomPlan->{summary};
-		print "\nTree OOM scan $scan: ".scalar(@pendingJobs)." job(s) still queued; "
+		print "\nTree OOM scan $scan: ".scalar(@pendingJobs)." job(s) with the "
+			."scheduler, ".scalar(@{$pendingQueue})." awaiting capacity; "
 			.scalar(@candidates)." outcome(s) inspected.\n";
 		print format_slurm_tree_memory_summary($summary);
 		my @oom = $summary->{available}
@@ -7575,6 +7668,10 @@ sub retryOOMTreeJobs {
 					$mgsDirectory, 'treeCmd.epa_retry.sh');
 			}
 			$retriesByMGS{$original->{mgs}} = $round;
+			#Recovery, not bulk work: take the leading dispatch tier locally and
+			#drop the nice handicap so Slurm ranks it above the queued wave too.
+			$retry{oom_retry} = 1;
+			$retry{job_nice} = 0;
 			$retry{retry_round} = $round;
 			$retry{requested_mb} = $nextMB;
 			$retry{memory} = $nextMB.'M';
@@ -7592,19 +7689,14 @@ sub retryOOMTreeJobs {
 				."\n";
 		}
 		if (@retryQueue) {
-			my (@retryJobs, @retryAccounting);
-			dispatchPendingTreeJobs(
-				queue => \@retryQueue, options => $options,
-				jobs => \@retryJobs, accounting => \@retryAccounting,
-				blocking => 1,
-			);
-			die "Internal error: OOM retry queue was not drained\n" if @retryQueue;
-			push @{$accounting}, @retryAccounting;
-			$retried += scalar(@retryAccounting);
-			# The escalated jobs join the wait, so the next scan covers them too.
-			push @pendingJobs, grep { defined($_) && length($_) } @retryJobs;
+			#Ahead of the ordinary jobs still waiting for capacity, not behind.
+			unshift @{$pendingQueue}, @retryQueue;
+			$retried += scalar(@retryQueue);
+			print "Injected ".scalar(@retryQueue)." OOM retry job(s) ahead of "
+				.(scalar(@{$pendingQueue}) - scalar(@retryQueue))
+				." queued ordinary tree job(s).\n";
 		}
-		last unless @pendingJobs;
+		last unless @pendingJobs || @{$pendingQueue};
 	}
 	print "Tree OOM recovery complete: $retried escalated retry job(s) across "
 		.scalar(keys %retriesByMGS)." MGS in $scan accounting scan(s); "

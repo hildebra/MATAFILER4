@@ -1,12 +1,12 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Profiling tutorial](profiling_tutorial.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
 # Examples
 
 
-The example commands below use the current canonical MATAF4.pl option names. Several legacy aliases are still accepted by the uploaded `MATAF4.pl`; see [Flag reference](flag_reference.md) for aliases and exact argument types.
+The example commands below use the current canonical MATAF4.pl option names. Several legacy aliases are still accepted by `MATAF4.pl`; see [Flag reference](flag_reference.md) for aliases and exact argument types.
 
 ## Examples
 
@@ -133,11 +133,11 @@ perl $MF4DIR/MATAF4.pl -map $MAP -assembleMG 2 -assemblCores 12 -assemblyKmers "
 
 #### 4. Running MATAFILER4
 
-- Run with `bash run_mf4_mhit.sh` --> this will submit a lot of different jobs to the HPC queue
+- Run with `bash run_mf4_mhit.mfc` --> this will submit a lot of different jobs to the HPC queue
 
  console output:
 ```
-        This is MATAFILER4 0.33
+        This is MATAFILER4 v4.46
         Using qsubsystem: slurm
         Using qsubsystem: slurm
         /projects/data/results/mf4_test1/LOGandSUB/qsub.log
@@ -153,20 +153,20 @@ perl $MF4DIR/MATAF4.pl -map $MAP -assembleMG 2 -assemblCores 12 -assemblyKmers "
         SUB:_CS1
 ```
 
-- more advanced usage: run `sbatch run_mf4_mhit.sh`. This will submit the job to the cluster queue, and from there the .mfc job will submit more jobs. The output from MATAFILER4 will be stored in `#SBATCH -o [currentDir]/run_mf4_mhit.mfc.otxt` and `#SBATCH -e [currentDir]/run_mf4_mhit.mfc.etxt` defined above.
+- more advanced usage: run `sbatch run_mf4_mhit.mfc`. This will submit the job to the cluster queue, and from there the .mfc job will submit more jobs. The output from MATAFILER4 will be stored in `#SBATCH -o [currentDir]/run_mf4_mhit.mfc.otxt` and `#SBATCH -e [currentDir]/run_mf4_mhit.mfc.etxt` defined above.
 
 
 #### 5. rerun MATAFILER4
 
 MATAFILER4 is conceptualized to detect automatically if certain steps need to be run again (e.g. because the job crashed or some files from other subjobs were not yet available). Therefore you will usually need to rerun the same MATAFILER4 command several times. **However, before restarting MATAFILER4 make sure that all job submissions from your previous run have completed (or don't start due to job dependecies)!**
 
-- Once MATAFILER4 detects no further jobs to be submitted, it will let you know (check the output of the RUN.mfc command). At this point you can advance to creating a gene catalog. MATAFILER4 will create a `GeneCat.sh` script (detailed in RUN.mfc output).
+- Once MATAFILER4 detects no further jobs to be submitted, it will let you know (check the output of the RUN.mfc command). At this point you can advance to creating a gene catalog. MATAFILER4 will create a `GeneCat_pre.sh` script (detailed in RUN.mfc output).
 
-#### 6. building a gene catalog by running the `GeneCat.sh` script
+#### 6. building a gene catalog by running the `GeneCat_pre.sh` script
 
 - After every sample has successfully passed through the pipeline, MATAFILER4 produces `GeneCat_pre.sh` script that needs to be adapted:
 
-- In the `GeneCat.sh` script you need to specify an output directory, max memory usage and the cores you want to use. After that the script can look like this:
+- In the `GeneCat_pre.sh` script you need to specify an output directory, max memory usage and the cores you want to use. After that the script can look like this:
 
 ```{sh}
 #!/bin/bash
@@ -185,9 +185,9 @@ perl $MF4DIR/secScripts/geneCat.pl \
 		-Binner 2 -useCheckM1 0 -useCheckM2 1 -MGset GTDB 
 ```
 
-- now you have to run the GeneCat.sh script with `sbatch GeneCat.sh`, which will submit a lot of different jobs to the cluster.
+- now you have to run the adapted script with `sbatch GeneCat_pre.sh`, which will submit a lot of different jobs to the cluster.
 
-- This step of the pipeline calls `GeneCat.pl` and does:
+- This step of the pipeline calls `geneCat.pl` and does:
 
     - creates a gene catalog (at 95% id) from predicted genes using mmSeqs2
     - extracts proteins corresponding to genes in gen catalog

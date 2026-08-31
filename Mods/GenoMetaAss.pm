@@ -1877,13 +1877,17 @@ sub getDirsPerAssmblGrp{
 	my @smpls = @{$map{opt}{smpl_order}};
 	my $cnt=0;
 	my %DOs;
+	my %mapGrpSeen;
 	foreach my $smpl (@smpls){
 		my $cntAim = $AsGrps{ $map{$smpl}{MapGroup} }{CntAimMap};
 		my $dir2rd = $map{$smpl}{wrdir};
 		my $cAssGrp = $map{$smpl}{AssGroup};
 		my $cMapGrp = $map{$smpl}{MapGroup};
-		$AsGrps{$cMapGrp}{CntMap} ++;
-		#next if ($AsGrps{$cMapGrp}{CntMap}  < $AsGrps{$cMapGrp}{CntAimMap} );
+		#Count map group members locally: %AsGrps is only a shallow copy of the
+		#caller object, so incrementing $AsGrps{..}{CntMap} here would advance the
+		#caller map group release counters as a side effect of listing directories.
+		$mapGrpSeen{$cMapGrp} ++;
+		#next if ($mapGrpSeen{$cMapGrp}  < $AsGrps{$cMapGrp}{CntAimMap} );
 
 		my $tar = "AssmblGrp_$cAssGrp";
 		if ($chkDirs && !-d "$dir2rd"){

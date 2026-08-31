@@ -697,6 +697,41 @@ $options->{activeJobRunner} = sub {
 is(numActiveUserJobs($options, 0, [qw(101 102)]), 1,
 	'active-job counting ignores unrelated user jobs not submitted by this loop');
 
+# Slurm orders pending jobs by priority, so a recovery job submitted after a
+# large wave is simply the youngest and starts last. Handicapping the wave with
+# --nice, and submitting recovery at nice 0, is the only user-level lever that
+# reorders jobs the scheduler has already accepted.
+my $niced_script = File::Spec->catfile($root, 'niced-submission.sh');
+$options = slurm_options();
+$options->{jobNice} = 5000;
+qsubSystem($niced_script, 'echo niced', 1, '1G', 'niced', '', '', 1, [], $options);
+print "\n"; # qsubSystem's progress prefix intentionally has no trailing newline
+open my $niced_fh, '<', $niced_script or die "Cannot read $niced_script: $!";
+my $niced_text = do { local $/; <$niced_fh> };
+close $niced_fh;
+like($niced_text, qr/^#SBATCH --nice=5000$/m,
+	'a bulk submission carries its configured priority handicap');
+
+my $recovery_script = File::Spec->catfile($root, 'recovery-submission.sh');
+$options->{jobNice} = 0;
+qsubSystem($recovery_script, 'echo recovery', 1, '1G', 'recovery', '', '', 1, [], $options);
+print "\n";
+open my $recovery_fh, '<', $recovery_script or die "Cannot read $recovery_script: $!";
+my $recovery_text = do { local $/; <$recovery_fh> };
+close $recovery_fh;
+unlike($recovery_text, qr/--nice=/,
+	'a recovery submission asks for no handicap at all, outranking the niced wave');
+
+my $negative_script = File::Spec->catfile($root, 'negative-nice-submission.sh');
+$options->{jobNice} = -100;
+qsubSystem($negative_script, 'echo negative', 1, '1G', 'negative', '', '', 1, [], $options);
+print "\n";
+open my $negative_fh, '<', $negative_script or die "Cannot read $negative_script: $!";
+my $negative_text = do { local $/; <$negative_fh> };
+close $negative_fh;
+unlike($negative_text, qr/--nice=/,
+	'a negative nice is dropped rather than submitted, since raising priority needs an operator');
+
 my $bash_script = File::Spec->catfile($root, 'counted-submission.sh');
 $options = bash_options();
 qsubSystem($bash_script, 'echo counted', 1, '1G', 'counted', '', '', 1, [], $options);

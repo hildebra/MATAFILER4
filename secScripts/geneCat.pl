@@ -1429,8 +1429,11 @@ sub geneCatFlow($ $ $ $ ){
 	#now decluter based on proteins.
 	if (!$matrixSampleCountKnown && !_stone_valid($declStone, $cdhID) && $doDecluter) {
 		my $localExe = 1;
-		$cmd .= 'matrix_sample_count=$(' . _shell_quote($pigzBin) . ' -dc -- ' . _shell_quote($matrixFile)
-			. q{ | awk -F '\t' 'NR == 1 { print NF - 1; exit }')} . "\n";
+		# awk stops after the header, so pigz is killed by SIGPIPE. That is not an
+		# input failure, but "set -eo pipefail" in the submitted script would treat
+		# it as one, so absorb pigz's status before the pipe.
+		$cmd .= 'matrix_sample_count=$( { ' . _shell_quote($pigzBin) . ' -dc -- ' . _shell_quote($matrixFile)
+			. q! || true; } | awk -F '\t' 'NR == 1 { print NF - 1; exit }' )! . "\n";
 		$cmd .= "case \"\$matrix_sample_count\" in ''|*[!0-9]*) echo 'Cannot determine gene-matrix sample count' >&2; exit 1;; esac\n";
 		$cmd .= "if [ \"\$matrix_sample_count\" -gt 2 ]; then\n";
 		$cmd .= "  $decluterGC $OutD $tmpDir $numCor $localExe $totMem3 $declStone\n";
@@ -1525,7 +1528,7 @@ sub geneCatFlow($ $ $ $ ){
 	#MAG related..
 	unless (_stone_valid($krakStone, $cdhID)) {
 		my $stageCmd = "#taxonomic assignments of all genes via kraken\n";
-		$stageCmd .= "$selfScript -mode kraken -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID\n";
+		$stageCmd .= "perl $selfScript -mode kraken -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID\n";
 		$stageCmd .= _checkpoint_command($checkpointWriter, $krakStone, $cdhID, 'kraken-annotation');
 		if ($submitLocal) {
 			print "submitting kraken tax abundance..\n";
@@ -1540,7 +1543,7 @@ sub geneCatFlow($ $ $ $ ){
 	#functional annotations.. just run some by default
 	unless (_stone_valid($funcStone, $cdhID)) {
 		my $stageCmd = "#functional assignments of all genes via diamond\n";
-		$stageCmd .= "$selfScript -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -stone $funcStone\n";
+		$stageCmd .= "perl $selfScript -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -stone $funcStone\n";
 		if ($submitLocal) {
 			print "submitting diamond func abundance..\n";
 			my ($dep,$qcmd) = qsubSystem($qsubDir."func_GC.sh",$stageCmd,1,int($totMem3)."G","funcGC","","",1,[],$QSBoptHR);
@@ -1555,7 +1558,7 @@ sub geneCatFlow($ $ $ $ ){
 			if -e $emapStone;
 		my $stageCmd = "#functional assignments via eggNOGmapper\n";
 		#-c $numCor3 .. use max 6 cores for this due to single core emapper final step
-		$stageCmd .= "$selfScript -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID -stone $emapStone \n";
+		$stageCmd .= "perl $selfScript -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID -stone $emapStone \n";
 		if ($submitLocal) {
 			print "submitting eggNOGmapper func abundance..\n";
 			my ($dep,$qcmd) = qsubSystem($qsubDir."emap_GC.sh",$stageCmd,1,int($totMem3)."G","emapGC","","",1,[],$QSBoptHR);
@@ -2175,7 +2178,7 @@ sub collateGenes(){
 			my $locFrom = int($maxSmpls/$batchNum*($batch));
 			#print "$locFrom,$locTo\n";
 			  
-			my $cmd = "$selfScript -mode subprepSmpls -GCd $GCdir -map $mapF -tmp $tmpDir -SmplStart $locFrom -SmplStop $locTo -SmplBatch $batch -minGeneL $minGeneL -clusterID $cdhID -MGset $useGTDBmg -oldStyleFolders $oldNameFolders -requireAllAssemblies $requireAllAssemblies";
+			my $cmd = "perl $selfScript -mode subprepSmpls -GCd $GCdir -map $mapF -tmp $tmpDir -SmplStart $locFrom -SmplStop $locTo -SmplBatch $batch -minGeneL $minGeneL -clusterID $cdhID -MGset $useGTDBmg -oldStyleFolders $oldNameFolders -requireAllAssemblies $requireAllAssemblies";
 			$cmd .= " -extraGenesNT \"$extraRdsFNA\"" if $batch == 0 && length $extraRdsFNA;
 			#die "$cmd\n$batchNum : $maxSmpls\n";
 			if ($batchNum == 1){
@@ -2862,7 +2865,11 @@ sub mergeClsSam(){
 		if ($tlW !~ m/>Cluster (\d+)/){
 			$tlW = `tail -n 25000 $outFcls| grep '^>' | tail -n 1`;chomp $tlW;
 		}
-		$tlW =~ m/>Cluster (\d+)/;
+		#without this check $1 stays undef and the marker gene clusters silently
+		#restart at 100, colliding with the gene cluster IDs already in $outFcls
+		die "Can't determine the last cluster number in $outFcls\n"
+				."Last cluster header found: \"$tlW\"\n"
+			unless ($tlW =~ m/>Cluster (\d+)/);
 		$inCclN = $1;
 		
 		#main step...
@@ -3290,8 +3297,11 @@ sub readSam($$){
 		#die if ($cnt == 10);
 	}
 	close I;
-	print LOG $add2cls." hits to clusters, $add2file added FNAs to be reclustered (of ".$totLines." lines) in $iF\n";
-	print $add2cls." hits to clusters, $add2file added FNAs to be reclustered (of ".$totLines." lines) in $iF\n";
+	#LOG belongs to the geneCat controller; readSam only runs under -mode mergeCLs,
+	#where LOGf is the open cluster log that is later moved to LOGandSUB/
+	my $samSummary = $add2cls." hits to clusters, $add2file added FNAs to be reclustered (of ".$totLines." lines) in $iF\n";
+	print LOGf $samSummary;
+	print $samSummary;
 	#die;
 	return (\%ret);
 }

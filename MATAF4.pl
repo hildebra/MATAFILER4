@@ -378,6 +378,13 @@ die "-protalIgnoreErrors must be 0 or 1\n"
 	unless ($MFopt{protalIgnoreErrors} == 0 || $MFopt{protalIgnoreErrors} == 1);
 die "-minBinnerAssemblyMB requires a non-negative number\n"
 	if ($MFopt{minBinnerAssemblyMB} < 0);
+if ($MFopt{DoCalcD2s}) {
+	#d2s distances are deactivated: d2metaDist pairs read files with sample names
+	#in hash order, so its output labels are unreliable. Turn the request off here
+	#so every dependent branch (scratch retention, downstream flags) stays consistent.
+	print STDERR "-calcInterMGdistance is deactivated in this MATAFILER version; continuing with d2s distances disabled.\n";
+	$MFopt{DoCalcD2s} = 0;
+}
 $MFconfig{inspectState} = 1 if ($MFconfig{planState});
 if (!$MFconfig{inspectState} && $runOptions{loopCount} && (
 		$MFopt{redoAssMapping} || $MFopt{BinnerRedoAll} || $MFopt{redoAssembly}
@@ -1236,10 +1243,15 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $boolScndCoverageOK = 1;
 	if ($MFopt{MapRewrite2nd}){ 
 		print "rewriting secondary map\n";
+		#Own index: $iix must still be 0 for the completeness loop below, and every
+		#output dir needs its own DB name (not always $bwt2ndMapNmds[0]).
+		my $rwIdx = 0;
 		foreach my $bwt2outDTT (@bwt2outD){
-			my $expectedMapCovGZ = "$bwt2outDTT/$bwt2ndMapNmds[$iix]"."_".$SmplName."-0-smd.bam.coverage.gz"; #$bamcramMap : 2nd map only has .bam output
+			my $expectedMapCovGZ = "$bwt2outDTT/$bwt2ndMapNmds[$rwIdx]"."_".$SmplName."-0-smd.bam.coverage.gz"; #$bamcramMap : 2nd map only has .bam output
+			$rwIdx++;
 			system "rm -f $expectedMapCovGZ*";
-			$eFinMapCovGZ = 0;	
+			#$eFinMapCovGZ belongs to the assembly mapping and must not be cleared
+			#here; the loop below resets the secondary-map flags on its own.
 		}
 	}
 	#die "eFinMapCovGZ $eFinMapCovGZ\n";
@@ -2415,7 +2427,9 @@ print "###################################\n\n";
 
 
 _mataf_workflow_stage('controller-complete');
-close $QSBoptHR->{LOG};
+#The qsub log is opened on the first visited sample. An empty selected range
+#(e.g. -from N -to N) never opens it, so closing it unconditionally would die.
+close $QSBoptHR->{LOG} if (defined($QSBoptHR->{LOG}));
 exit(0);
 
 
@@ -4325,6 +4339,11 @@ sub mergeMotu2Table($){
 #calculates the hmm based freq estimates and divergence from these -> used for dist matrix
 sub d2metaDist{
 	my ($hrSmpls,$arPaths1,undef,$deps,$outPath) = @_;
+	#Deactivated: the sample list below comes from hash key order while the read
+	#paths are in map order, so every row of mapd2s.txt could be labelled with the
+	#wrong sample. -calcInterMGdistance is forced to 0 at startup; keep this guard
+	#so the routine cannot run even if DoCalcD2s is set from somewhere else.
+	return;
 	if(!$MFopt{DoCalcD2s}){return;}
 	my @paths = @{$arPaths1}; my @Smpls = keys (%{$hrSmpls});
 	if (@paths < 1){print "Not enough samples for d2s!\n";return;}
@@ -4477,9 +4496,12 @@ sub RiboMeta($ $ $ $){
 			my @destinationGzipStat = stat("$toCpy.gz");
 			if ($MFopt{checkRiboNonEmpty}){
 				#pretty hard check
-				my $numLines=0;
-				if (-e "$fromCp.gz"){$numLines = `zcat $fromCp.gz | wc -l`;
-				} else {$numLines = `wc -l $fromCp`;} $numLines =~ /(\d+)/; $numLines=$1;
+				#A missing or unreadable file produces no count. Default to -1 so it
+				#forces a redo instead of inheriting a stale $1 from an earlier match.
+				my $numLines = -1;
+				my $lineCountOut = (-e "$fromCp.gz")
+					? `zcat $fromCp.gz | wc -l` : `wc -l $fromCp`;
+				$numLines = $1 if (defined($lineCountOut) && $lineCountOut =~ /(\d+)/);
 				#die $numLines."\n";
 				if ($numLines<=1){$calcRiboAssign=1;$calcRibofind=1;
 					system "rm -r $curOutDir/ribos//ltsLCA $curOutDir/ribos/*.sto ";last;
@@ -4507,8 +4529,14 @@ sub RiboMeta($ $ $ $){
 			#system "gzip $fromCp" unless (-e "$fromCp.gz");
 			system "rm -f $curOutDir/ribos/ltsLCA/inter${RFtag}riboRun_bl.fna" if (-e "$curOutDir/ribos/ltsLCA/inter${RFtag}riboRun_bl.fna");
 		}
-		$progStats{riboFindComplCnts} ++; #completed already
+		#The checks above can invalidate a sample that looked complete on entry.
+		if ($calcRibofind || $calcRiboAssign){
+			$progStats{riboFindFailCnts} ++ ; #outputs were just removed
+		} else {
+			$progStats{riboFindComplCnts} ++; #completed already
+		}
 	} 
+	return ($calcRibofind,$calcRiboAssign);
 }
 
 
@@ -4623,7 +4651,9 @@ sub checkRawProgsFin{
 	$calcRiboAssign = 1 if ($MFopt{DoRibofind} && !$riboEvidence->{taxonomy_complete});
 	$calcRibofind = 1 if $forcedRiboProfile;
 	$calcRiboAssign = 1 if $forcedRiboAssignment;
-	RiboMeta($calcRibofind,$calcRiboAssign,$curOutDir,$SmplName);
+	#RiboMeta can delete incomplete RiboFind outputs; adopt its rerun decision.
+	($calcRibofind,$calcRiboAssign) =
+		RiboMeta($calcRibofind,$calcRiboAssign,$curOutDir,$SmplName);
 
 	#die $dir_MP2."$SmplName.MP2.sto";
 

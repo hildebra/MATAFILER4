@@ -794,6 +794,12 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	#my $tmpSpace2 = $optHR->{tmpMinG};
 	#my $wcKeysForJob = $optHR->{wcKeysForJob};
 	my $exclNodes = $optHR->{excludeNodes};
+	#Slurm subtracts --nice from the job priority, and any user may raise it.
+	#Submitting a bulk wave with a positive nice and its recovery jobs with nice 0
+	#lets the recovery jobs overtake a backlog that is already queued, which no
+	#amount of submission throttling can achieve on its own.
+	my $jobNice = int($optHR->{jobNice} || 0);
+	$jobNice = 0 if ($jobNice < 0); #negative nice needs operator privileges
 	
 	
 	#die ($memory."\n");
@@ -893,6 +899,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		print O "#SBATCH --time=$time\n" unless ($time eq "");
 		print O "#SBATCH --exclude=$exclNodes\n" unless ($exclNodes eq "");
 		#print O "#SBATCH --localscratch=ssd:50\n"; #for EI cluster
+		print O "#SBATCH --nice=$jobNice\n" if ($jobNice > 0);
 		print O "#SBATCH --chdir=$slurmWorkdir\n";
 		print O "#SBATCH -J $rTag$jname\n" if ($jname ne "");
 		print O "#SBATCH --wc=". $optHR->{wcKeysForJob} . "\n" if ($optHR->{wcKeysForJob} ne "");
@@ -1240,6 +1247,9 @@ sub emptyQsubOpt{
 		submittedJobs => 0,
 		capacityCheckEverySubmissions => 10,
 		jobPollSeconds => 20,
+		#Priority handicap applied to ordinary bulk submissions; recovery jobs
+		#override it with 0 so they outrank a backlog that is already queued.
+		jobNice => 0,
 		#tmpMinG => 10,
 		afterAny => 0,
 		excludeNodes => "",

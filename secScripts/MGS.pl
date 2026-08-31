@@ -1499,15 +1499,23 @@ sub _mgs_ids {
 	return () unless defined($file) && -f $file;
 	open my $fh, '<', $file or die "Cannot open MGS assignments $file: $!\n";
 	my %ids;
+	my $sawAssignment = 0;
 	while (my $line = <$fh>) {
 		chomp $line;
 		next if $line =~ /^\s*$/;
 		next if $line =~ /^#/;
 		my @fields = split /\t/, $line, -1;
-		next if $fields[0] eq 'Bin';
+		# The clusterMAGs binary heads its assignment tables with "MGS", the Perl
+		# compatibility path with "Bin", and the post-filtered .core tables carry
+		# no header at all.  Neither token can be a real assignment: the binary
+		# tags MGS as "<MGStag><n>" and Canopy bins as "Cano__<n>".  Only the
+		# leading row is treated as a header, so a header written by a future
+		# engine cannot be mistaken for an MGS and inflate every count by one.
+		next if !$sawAssignment && ($fields[0] eq 'MGS' || $fields[0] eq 'Bin');
 		die "Malformed MGS assignment in $file at line $.\n"
 			unless @fields >= 2 && length($fields[0]) && length($fields[1]);
 		$ids{$fields[0]} = 1;
+		$sawAssignment = 1;
 		last if defined($maximum_ids)
 			&& $maximum_ids > 0
 			&& scalar(keys %ids) >= $maximum_ids;

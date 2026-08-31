@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Profiling tutorial](profiling_tutorial.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -139,7 +139,9 @@ The `assemblies/` directory contains the metagenomic assembly and assembly stati
 | `scaffolds.fasta.filt.gz` | Scaffold FASTA after length filtering. |
 | `AssemblyStats.txt` | Assembly statistics for the full assembly. |
 | `AssemblyStats.500.txt` | Assembly statistics after filtering to scaffolds above the configured length threshold, often 500 bp. |
-| `Ass.done.sto` | Stone/checkpoint file indicating that the assembly step finished. |
+| `AssemblyStats.ini.txt` | Assembly statistics before scaffold length filtering. |
+| `ass.done.sto` | Stone/checkpoint file indicating that the assembly step finished. |
+| `preassmblDone.sto` | Stone written after the pre-assembly stage of a hybrid (`-assembleMG 5`) run. |
 | `metag/` | Main assembly post-processing directory. |
 
 ### `assemblies/metag/ContigStats/`
@@ -267,21 +269,29 @@ NOG.L1.txt
 
 ### KEGG and module outputs
 
-Module-style outputs can be found under:
+Module-style outputs are written one directory per module database, each holding a
+file set named after that database:
 
 ```text
-<gene_catalog>/Anno/Func/modules/
+<gene_catalog>/Anno/Func/modules/   modKEEG.*   KEGG modules
+<gene_catalog>/Anno/Func/BSB/       modGMM.*    gut metabolic modules
+<gene_catalog>/Anno/Func/SEED/      modSEED.*   SEED subsystems
+<gene_catalog>/Anno/Func/GBM/       modGBM.*    gut brain modules
 ```
 
-Common files include:
+Taking `modules/` as the example, the files are:
 
 | File | Meaning |
 |---|---|
-| `KEGG.mat` | Module abundance matrix. |
-| `KEGG.descr` | Module hierarchy and descriptions. |
-| `KEGG.KOused` | KEGG orthologs used to infer each module in each sample. |
-| `KEGG.MODscore` | Module completeness score per sample. |
-| `KGML0.txt` | KEGG ortholog abundance matrix. |
+| `modKEEG.mat` | Module abundance matrix. |
+| `modKEEG.descr` | Module hierarchy and descriptions. |
+| `modKEEG.KOused` | KEGG orthologs used to infer each module in each sample. |
+| `modKEEG.MODscore` | Module completeness score per sample. |
+| `KGML0.txt` | KEGG ortholog abundance matrix (in `Anno/Func/`, not in `modules/`). |
+
+The metaCyc module set is currently skipped, so no `metaCyc/` directory is produced.
+`KEGG.descr`, a symlink to the KEGG ortholog descriptions, is placed next to the
+KEGG ortholog matrix rather than in a module directory.
 
 ### Gene-to-function assignments
 
