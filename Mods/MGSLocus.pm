@@ -89,10 +89,12 @@ sub _find {
 sub _scan_members {
 	my ($records, $cluster_members, $options, $accumulator) = @_;
 	$options ||= {};
-	# Seed-level summaries are only ever read for seeds that could merge. When the
-	# caller names that set, everything else is scanned for its neighbour tokens
-	# but never stored, which is what keeps a catalogue-wide scan affordable.
-	my $context_seeds = $options->{context_seeds};
+	# Only the sample sets are exclusive to merge decisions, so only they may be
+	# restricted to the seeds that can merge. Gene contexts are also summed into
+	# each locus_context, which choose_locus_candidate consults for EVERY locus
+	# when a sample offers more than one candidate, so they must be built for
+	# every seed or ambiguous paralogs lose their only tie-breaker.
+	my $sample_set_seeds = $options->{sample_set_seeds};
 	# Sample-level summaries are additive over disjoint sample sets, because a
 	# contig belongs to exactly one sample and no context ever crosses samples.
 	# An accumulator therefore lets a caller stream the catalogue in slices.
@@ -110,42 +112,16 @@ sub _scan_members {
 	# seed at most once, so a consumed entry is never needed again.
 	my $consume = $options->{consume_cluster_members} ? 1 : 0;
 
-	# Only a contig that already carries a candidate member can contribute a
-	# neighbour token to one. When the caller names a small candidate set out of
-	# millions of seeds, collecting those contigs first turns the rest of the scan
-	# into one string test per member instead of a parse and an allocation. The
-	# candidate pass reads without consuming, so the main pass still sees them.
-	my (%relevantContigs, $prefilterContigs);
-	if ($context_seeds && $want_positions && !$include_member_context) {
-		for my $record (@{$records || []}) {
-			my $gene = $record->{gene};
-			next unless defined($gene) && length($gene) && $context_seeds->{$gene};
-			for my $member (_members($cluster_members->{$gene})) {
-				my $cut = rindex($member, '_');
-				next if $cut <= 0;
-				$relevantContigs{substr($member, 0, $cut)} = 1;
-			}
-		}
-		$prefilterContigs = 1;
-	}
-
 	my (%member_seed, %positions);
 	for my $record (@{$records || []}) {
 		my $gene = $record->{gene};
 		next unless defined($gene) && length($gene);
-		my $wanted = !$context_seeds || $context_seeds->{$gene} ? 1 : 0;
+		my $wantSampleSet = !$sample_set_seeds || $sample_set_seeds->{$gene} ? 1 : 0;
 		for my $member (_members($consume
 				? delete($cluster_members->{$gene}) : $cluster_members->{$gene})) {
-			if ($prefilterContigs && !$wanted) {
-				# Nothing outside a candidate's contig is ever read, and a
-				# non-candidate contributes no seed-level summary of its own.
-				my $cut = rindex($member, '_');
-				next if $cut <= 0;
-				next unless $relevantContigs{substr($member, 0, $cut)};
-			}
 			my ($sample, $contig, $position, $clean_member) = _member_parts($member);
 			next unless defined $sample;
-			$sample_set->{$gene}{$sample} = 1 if $wanted;
+			$sample_set->{$gene}{$sample} = 1 if $wantSampleSet;
 			$member_seed{$clean_member} = $gene if $include_member_to_seed;
 			next unless $want_positions;
 			next unless defined($contig) && defined($position);
@@ -166,14 +142,11 @@ sub _scan_members {
 				$a->[0] <=> $b->[0] || $a->[1] cmp $b->[1]
 			} @{$positions{$sample}{$contig}};
 			for my $i (0 .. $#entries) {
-				my $recordGeneContext = $include_gene_context
-					&& (!$context_seeds || $context_seeds->{$entries[$i][1]});
-				next unless $recordGeneContext || $include_member_context;
 				for my $j (0 .. $#entries) {
 					next if $i == $j;
 					next if abs($entries[$i][0] - $entries[$j][0]) > $context_distance;
 					my $token = join('|', $entries[$j][2], $entries[$j][3]);
-					$gene_context->{$entries[$i][1]}{$token}++ if $recordGeneContext;
+					$gene_context->{$entries[$i][1]}{$token}++ if $include_gene_context;
 					$member_context{$entries[$i][4]}{$token}++ if $include_member_context;
 				}
 			}
@@ -199,15 +172,16 @@ sub accumulate_locus_context {
 		include_member_context => 0,
 		include_gene_context => 1,
 		consume_cluster_members => $options->{consume_cluster_members} ? 1 : 0,
-		context_seeds => $options->{context_seeds},
+		sample_set_seeds => $options->{sample_set_seeds},
 	}, $accumulator);
 	return $accumulator;
 }
 
 #Seeds whose catalogue-wide summaries can change a locus boundary: a seed alone
 #in its MGS/COG has nothing to merge with, and when a confirmed-pair allowlist is
-#given only seeds named in such a pair are ever compared. Everything else needs
-#no sample set and no gene context at all.
+#given only seeds named in such a pair are ever compared. Everything else still
+#needs its gene context, which every locus consults when resolving paralogs, but
+#not its sample set.
 sub merge_candidate_seeds {
 	my ($records, $allowed_merge_pairs) = @_;
 	my %byGroup;
@@ -291,7 +265,7 @@ sub build_locus_groups {
 				include_member_context => $include_member_context,
 				include_gene_context => 1,
 				consume_cluster_members => $consume_cluster_members,
-				context_seeds => $options->{context_seeds},
+				sample_set_seeds => $options->{sample_set_seeds},
 			});
 	}
 

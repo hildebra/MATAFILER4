@@ -284,9 +284,9 @@ is_deeply(merge_candidate_seeds(\@slice_records, {}), {},
 
 my %streamed;
 accumulate_locus_context(\%streamed, \@slice_records,
-	members_for_samples(\%catalogue_members, 'smplA'), { context_seeds => $candidates });
+	members_for_samples(\%catalogue_members, 'smplA'), { sample_set_seeds => $candidates });
 accumulate_locus_context(\%streamed, \@slice_records,
-	members_for_samples(\%catalogue_members, 'smplB'), { context_seeds => $candidates });
+	members_for_samples(\%catalogue_members, 'smplB'), { sample_set_seeds => $candidates });
 my $streamed_model = build_locus_groups(\@slice_records, {}, \%slice_proteins,
 	{%slice_options, precomputed_context => \%streamed});
 is_deeply(
@@ -296,16 +296,17 @@ is_deeply(
 );
 is($streamed_model->{merged_seeds}, $catalogue_model->{merged_seeds},
 	'slice streaming merges exactly the same seeds');
-is_deeply([sort keys %{$streamed{gene_context}}], ['g1', 'g2'],
-	'restricting to merge candidates stores no context for seeds that cannot merge');
+is_deeply([sort keys %{$streamed{sample_set}}], [q{g1}, q{g2}],
+	q{only the sample sets, which merge decisions alone consult, are restricted});
+cmp_ok(scalar(keys %{$streamed{gene_context}}), q{>}, scalar(keys %{$streamed{sample_set}}),
+	q{gene contexts are kept for every seed, because every locus consults them to resolve paralogs});
 
 my %unrestricted;
 accumulate_locus_context(\%unrestricted, \@slice_records, \%catalogue_members);
 is_deeply($streamed{gene_context}{g1}, $unrestricted{gene_context}{g1},
 	'a merge candidate keeps the same context whether or not the scan was restricted');
-cmp_ok(scalar(keys %{$unrestricted{gene_context}}), '>',
-	scalar(keys %{$streamed{gene_context}}),
-	'the unrestricted scan really does retain more than the restricted one');
+is_deeply($streamed{gene_context}, $unrestricted{gene_context},
+	q{a restricted scan yields exactly the gene contexts an unrestricted one does});
 
 # The catalogue-wide scan visits every member of every seed, so its per-member
 # cost decides whether the parent finishes in minutes or hours. Restricting the
@@ -332,7 +333,7 @@ my %prefilter_records = (
 );
 my %prefiltered;
 accumulate_locus_context(\%prefiltered, $prefilter_records{records},
-	{ %{$prefilter_records{members}} }, { context_seeds => { c1 => 1, c2 => 1 } });
+	{ %{$prefilter_records{members}} }, { sample_set_seeds => { c1 => 1, c2 => 1 } });
 my %unfiltered_scan;
 accumulate_locus_context(\%unfiltered_scan, $prefilter_records{records},
 	{ %{$prefilter_records{members}} }, {});
@@ -340,8 +341,8 @@ is_deeply($prefiltered{gene_context}{c1}, $unfiltered_scan{gene_context}{c1},
 	'the contig prefilter yields the same context an unrestricted scan would');
 is_deeply($prefiltered{gene_context}{c2}, $unfiltered_scan{gene_context}{c2},
 	'every candidate keeps its full neighbour token set under the prefilter');
-is_deeply([sort keys %{$prefiltered{gene_context}}], ['c1', 'c2'],
-	'no context is retained for seeds that cannot merge');
+is_deeply($prefiltered{gene_context}, $unfiltered_scan{gene_context},
+	q{restricting the sample sets leaves every seed context intact});
 ok(exists($prefiltered{gene_context}{c1}{'MGS.7|COGB'})
 	&& exists($prefiltered{gene_context}{c1}{'MGS.7|COGC'}),
 	'neighbours sharing a candidate contig are still counted');
@@ -351,4 +352,30 @@ ok(!exists($prefiltered{gene_context}{c1}{'MGS.7|COGD'}),
 is_deeply([Mods::MGSLocus::_members('>a__c_1, b__c_2 ,,c__c_3')],
 	[qw(a__c_1 b__c_2 c__c_3)],
 	'guarded member cleaning still strips markers, trims padding and drops blanks');
+
+# The regression this guards: locus_context is summed from gene_context, and
+# choose_locus_candidate consults it for EVERY locus whose sample offers more
+# than one candidate. Restricting gene_context to merge candidates emptied it for
+# almost every locus, so the context tie-breaker never fired and those loci were
+# dropped as ambiguous - costing retained loci per sample, and therefore tips.
+my $paralog_protein = 'M' . ('ACDEFGHIKLMNPQRSTVWY' x 8);
+my @paralog_candidates = (
+	{ id => 'trueCopy',  protein => $paralog_protein, depth => 10, seed => 's1',
+	  context => { 'MGS.9|COGX' => 1, 'MGS.9|COGY' => 1 } },
+	{ id => 'falseCopy', protein => $paralog_protein, depth => 10, seed => 's2',
+	  context => { 'MGS.9|COGZ' => 1 } },
+);
+my $with_context = choose_locus_candidate(\@paralog_candidates,
+	{ s1 => $paralog_protein, s2 => $paralog_protein },
+	{ 'MGS.9|COGX' => 4, 'MGS.9|COGY' => 3 });
+is($with_context->{status}, 'selected',
+	'a locus context resolves two otherwise equivalent paralogs');
+is($with_context->{reason}, 'context', 'and resolves them on synteny');
+is($with_context->{candidate}{id}, 'trueCopy',
+	'the candidate whose neighbours match the locus is the one retained');
+
+my $without_context = choose_locus_candidate(\@paralog_candidates,
+	{ s1 => $paralog_protein, s2 => $paralog_protein }, {});
+is($without_context->{status}, 'ambiguous',
+	'with an empty locus context the same locus is lost as ambiguous, which is the tip loss guarded against');
 done_testing();

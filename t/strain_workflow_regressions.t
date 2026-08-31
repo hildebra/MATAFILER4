@@ -436,11 +436,16 @@ like($strain,
 	qr/"treeOOMRetryRounds=i" => \\\$treeOOMRetryRounds,.*?"treeMemThreadDivisor=f" => \\\$treeMemThreadDivisor,/s,
 	'both tree-memory controls are tunable from the command line');
 like($build_tree_locus_module,
-	qr/if \(\$context_seeds && \$want_positions && !\$include_member_context\).*?\$relevantContigs\{substr\(\$member, 0, \$cut\)\} = 1;.*?\$prefilterContigs = 1;/s,
-	'the catalogue-wide scan first collects only the contigs that carry a merge candidate');
+	qr/my \$sample_set_seeds = \$options->\{sample_set_seeds\};/,
+	'only the sample sets may be restricted to the seeds that can merge');
 like($build_tree_locus_module,
-	qr/if \(\$prefilterContigs && !\$wanted\) \{.*?next unless \$relevantContigs\{substr\(\$member, 0, \$cut\)\};/s,
-	'members off those contigs are skipped before any parse or allocation');
+	qr/\$sample_set->\{\$gene\}\{\$sample\} = 1 if \$wantSampleSet;.*?\$gene_context->\{\$entries\[\$i\]\[1\]\}\{\$token\}\+\+ if \$include_gene_context;/s,
+	'gene contexts are built for every seed, because every locus consults them to resolve paralogs');
+unlike($build_tree_locus_module, qr/\$relevantContigs|\$prefilterContigs|context_seeds/,
+	'no contig prefilter survives: it could only skip work by dropping contexts that loci still need');
+like($strain,
+	qr/# The scan always runs, even with no mosaic pair to merge.*?my \$scanScope = catalogueLocusContext\(/s,
+	'the catalogue-wide scan is unconditional, since locus context is needed with or without a merge');
 like($build_tree_locus_module,
 	qr/s\/\^>\/\/ if substr\(\$_, 0, 1\) eq '>';\s*s\/\^\\s\+\|\\s\+\$\/\/g if \/\\s\/;/s,
 	'per-member cleaning is guarded, since it runs once for every catalogue member');
@@ -584,7 +589,10 @@ like($strain,
 	qr/if \(\$maxSubJob > 1\).*?phase1LocusModelFingerprint.*?loadPhase1LocusModel.*?merge_candidate_seeds.*?catalogueLocusContext.*?publishPhase1LocusModel/s,
 	'a split run reuses a published locus model and otherwise rebuilds it from a candidate-restricted catalogue scan');
 like($strain,
-	qr/sub catalogueLocusContext \{.*?readClstrRevBinaryShard\(\$phase1ShardPaths->\[\$worker\].*?accumulate_locus_context\(\$accumulator.*?\$clusters = \{\};.*?return "streamed_/s,
+	qr/\$digest->add\('strain-phase1-locus-model-v1', "\\0", \$version, "\\0",/,
+	'a published locus model is invalidated by a workflow version change, not only by its inputs');
+like($strain,
+	qr/sub catalogueLocusContext \{.*?sample_set_seeds => \$mergeCandidates.*?readClstrRevBinaryShard\(\$phase1ShardPaths->\[\$worker\].*?accumulate_locus_context\(\$accumulator.*?\$clusters = \{\};.*?return "streamed_/s,
 	'the catalogue-wide scan streams one published shard at a time instead of holding every sample');
 like($strain,
 	qr/sub catalogueLocusContext \{.*?my \(undef, \$fullClusters\) = readClstrRev\(\$clusterIndex, 0, \$Gene2COG\);.*?return .whole_catalogue_read./s,
@@ -788,7 +796,7 @@ like($strain,
 	'a committed staged aggregate avoids repeated worker-part directory scans');
 ok(index($strain, 'my $preparedScratchInput') >= 0
 	&& index($strain, 'merge.complete.tsv') >= 0
-	&& index($strain, 'return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, 1, 1);') >= 0,
+	&& index($strain, q{return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, 1, 1, $ingroupSeen);}) >= 0,
 	'legacy fully prepared Phase-II scratch inputs remain resumable without redoing their controller-side work');
 ok(index($strain, 'sub preparedOutgroupLog') >= 0
 	&& index($strain, 'fileGZe($log_path)') >= 0
@@ -798,7 +806,7 @@ ok(index($strain, 'sub preparedOutgroupLog') >= 0
 	&& index($strain, '.strain_tree_input.shards.tsv') >= 0
 	&& index($strain, 'writeMGSShardManifest') >= 0
 	&& index($strain, '; outgroup ') >= 0
-	&& index($strain, '; $multiSmpl samples; $ngenes genes; $numCoreL cores; $totMem MB; $memoryProfile') >= 0,
+	&& index($strain, q{; $ingroupSmpl ingroup samples ($multiSmpl tips); $ngenes genes; }) >= 0,
 	'new outgroup preparation writes a shard manifest and reports one compact per-MGS summary');
 unlike($strain, qr/Controller staged-overlay preparation|Tree input hand-off: raw FNA|Tree input: \$multiSmpl samples|Tree input: using complete published|Stage-I input: reusing controller-prepared|Recovery state: validated backbone/,
 	'per-MGS progress omits verbose staging and overlay lines');
@@ -833,7 +841,7 @@ like($strain,
 	qr/sub recordValidatedEmptyExtractions.*?persistentMGSInputState\(\$MGS\) eq 'missing'.*?scratchMGSInputState\(\$MGS\) ne 'missing'.*?writeNoRecoverableLociMarker\(\$SIdirs\{\$MGS\}, 'empty_extraction'\).*?\$MGSnoTreeReason\{\$MGS\} = 'no_recoverable_loci'/s,
 	'a completed Stage I persists validated no-recoverable-locus outcomes for future resumes');
 like($strain,
-	qr/\$multiSmpl > 2 && \$ngenes >= \$minLociPerMGS.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?tree_input_repair\.queue\.tsv.*?no catalogue-wide abort was triggered/s,
+	qr/\$ingroupSmpl > 2 && \$ngenes >= \$minLociPerMGS.*?too_few_usable_genes.*?writeTooFewMarker.*?sub validateTreeInputResolution.*?tree_input_resolution\.tsv.*?repair_required.*?tree_input_repair\.queue\.tsv.*?no catalogue-wide abort was triggered/s,
 	'insufficient tree inputs are terminally marked while incomplete triplets enter a persistent repair queue');
 like($strain,
 	qr/\$minimumOutgroupLoci = \$outgroupDemandMinimum\{\$MGS\} \/\/ \$minLociPerMGS.*?my \@requiredLoci = sort grep.*?\$OG = \$SelectedOutgroup\{\$MGS\}.*?\@requiredLoci < \$minimumOutgroupLoci.*?\$represented < \$minimumOutgroupLoci/s,

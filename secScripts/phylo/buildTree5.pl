@@ -1688,7 +1688,6 @@ if ($isAligned){
 		foreach my $seq (@spl){
 			my ($sp, $seqGene) = parseSeqId($seq, "filtered category line ".($cnt + 1));
 			die "Wrong gene in $seq, expected $gene!\n" if ($seqGene ne $gene);
-			$specList{$sp} ++;
 			#my $seq2 = $seq;
 			if (!exists($maxNtCnt{$gene})){
 				$maxNtCnt{$gene} = $charCnts{$sp}{$seq};
@@ -1703,11 +1702,20 @@ if ($isAligned){
 		#$qtl90NTcnt{$gene} = (sort { $a <=> $b }( @geneLgt)) [ int($#geneLgt*0.9) ];
 		#print "DEB: $gene $meanNTcnt{$gene} $qtl90NTcnt{$gene}\n";
 		#second round, do some prefiltering already, now that we have qtl and mean gene size
-		foreach my $seq (@spl){
+		#The MSA loop below feeds each retained category from the
+		#GeneLengthIncludeMin set, not from the NTfiltPerGene-passing subset, so
+		#the species prefilter has to score the same sequences the aligner will
+		#actually use. Scoring only the QC-passing subset removed samples whose
+		#sequences are mostly short before their own inclusion-based recovery
+		#could apply, leaving GeneLengthIncludeMin without effect for exactly the
+		#samples it exists to rescue.
+		my $contributing = $geneLengthIncludeByGene{$gene} // \@spl;
+		foreach my $seq (@{$contributing}){
 			my ($sp) = parseSeqId($seq, "filtered category line ".($cnt + 1));
 			#first check if gene gets removed
 			#next if ( ($charCnts{$sp}{$seq} < $maxNtCnt{$gene} ) * $ntFracGene);
 			#next if ( $charCnts{$sp}{$seq} < ($qtl90NTcnt{$gene} * $ntFracGene));
+			$specList{$sp} ++;
 			$totalNTs{$sp} += $charCnts{$sp}{$seq};
 		}
 	}
@@ -1809,7 +1817,8 @@ if ($isAligned){
 		. "; removed for relative NT=$tooFewNTs, minimum NT=$tooFewNTs2, minimum genes=$tooFewGenes\n"
 		unless $taxonAwareLocusSelection;
 	print "Species input statistics: maximum genes=$maxGenes; gene-count Q90=$qtl90Genes; "
-		. "maximum informative NT=$maxNtCntTotal; informative-NT Q90=$qtl90NTcntAll\n";
+		. "maximum informative NT=$maxNtCntTotal; informative-NT Q90=$qtl90NTcntAll; "
+		. "scored on the GeneLengthIncludeMin=$ntFracGeneInclude sequence set\n";
 	#die "$maxGenes\n";
 	@linesCats = (); #empty array
 

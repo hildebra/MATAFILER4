@@ -2426,10 +2426,14 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	$Tcmd .= "$treeTmpOption -map ".shellQuote($mapF)." ";
 
 	my $multiSmpl;my $ngenes; my $needsCopy = 0; my $inputReady = 0;
+	#$multiSmpl counts tree tips and therefore includes the staged outgroup; it
+	#stays the basis for core and memory planning. $ingroupSmpl excludes the
+	#outgroup and is what decides whether a tree can carry any signal at all.
+	my $ingroupSmpl;
 	if ($epaOnlyRetry) {
 		$inputReady = 1;
 	} else {
-		($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady)=
+		($multiSmpl,$ngenes,$OG,$needsCopy,$inputReady,$ingroupSmpl)=
 			addOutgroup2MGS($MGS,$OG,$tmpD);
 	}
 	# Locus names are MGS-qualified, so cached outgroup choices have no reuse
@@ -2492,16 +2496,21 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		print "$MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)
 			."; outgroup ".(length($OG) ? $OG : 'none')
 			."; samples n/a; genes n/a; 1 core; $totMem MB; EPA-ng placement-only retry\n";
-	} elsif ($multiSmpl > 2 && $ngenes >= $minLociPerMGS){
+	} elsif ($ingroupSmpl > 2 && $ngenes >= $minLociPerMGS){
 		print "$MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)
 			."; outgroup ".(length($OG) ? $OG : 'none')
-			."; $multiSmpl samples; $ngenes genes; $numCoreL cores; $totMem MB; $memoryProfile\n";
+			."; $ingroupSmpl ingroup samples ($multiSmpl tips); $ngenes genes; "
+			."$numCoreL cores; $totMem MB; $memoryProfile\n";
 	} else {
-		my $reason = $multiSmpl <= 2 ? 'too_few_samples' : 'too_few_usable_genes';
+		# Gate on the ingroup alone: with two ingroup samples the only unrooted
+		# topology over the resulting three tips is fixed in advance, so the tree
+		# job can spend a full allocation and still terminate in no_usable_loci.
+		my $reason = $ingroupSmpl <= 2 ? 'too_few_samples' : 'too_few_usable_genes';
 		$treeDisposition{"valid no-tree: $reason"}++;
 		limitedNotice('MGS with insufficient tree input',
-			"$MGS: $reason (samples=$multiSmpl, usable_genes=$ngenes); skipping tree construction\n");
-		writeTooFewMarker($outD2, $multiSmpl, $ngenes, $reason);
+			"$MGS: $reason (ingroup_samples=$ingroupSmpl, tree_tips=$multiSmpl, "
+			."usable_genes=$ngenes); skipping tree construction\n");
+		writeTooFewMarker($outD2, $ingroupSmpl, $ngenes, $reason);
 		remove_tree($tmpD) if $needsCopy && -d $tmpD;
 		$QSBoptHR->{tmpSpace} = $tmpSHDD;
 		$QSBoptHR->{useLongQueue} = 0;
@@ -3261,7 +3270,11 @@ sub addOutgroup2MGS{
 			}
 		}
 		close $catFh or die "Cannot close existing category file for $MGS: $!\n";
-		return (scalar(keys %samplesSeen), $genesSeen, $publishedOG, 0, 1);
+		#The published category already carries the outgroup overlay rows, so the
+		#sample count read back from it is one above the ingroup count.
+		my $ingroupSeen = scalar(keys %samplesSeen) - (defined($publishedOG)
+			&& length($publishedOG) && $samplesSeen{$publishedOG} ? 1 : 0);
+		return (scalar(keys %samplesSeen), $genesSeen, $publishedOG, 0, 1, $ingroupSeen);
 	}
 
 	# Compatibility for controller runs that had already completed the old
@@ -3288,7 +3301,9 @@ sub addOutgroup2MGS{
 			}
 		}
 		close $catFh or die "Cannot close prepared scratch category file for $MGS: $!\n";
-		return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, 1, 1);
+		my $ingroupSeen = scalar(keys %samplesSeen) - (defined($preparedOG)
+			&& length($preparedOG) && $samplesSeen{$preparedOG} ? 1 : 0);
+		return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, 1, 1, $ingroupSeen);
 	}
 
 	my $rawCategory = "$tmpD/$CATstdof.tmp";
@@ -3304,7 +3319,7 @@ sub addOutgroup2MGS{
 	if (!$stageReady) {
 		limitedWarn('MGS missing raw staged tree input',
 			"$MGS has no complete raw staged FNA/FAA/category/QC input in $tmpD; leaving it for repair\n");
-		return (0, 0, $OG, 0, 0);
+		return (0, 0, $OG, 0, 0, 0);
 	}
 
 	# Published or already-overlaid scratch inputs returned above without touching
@@ -3356,7 +3371,7 @@ sub addOutgroup2MGS{
 	if (@curCogs < $minLociPerMGS) {
 		limitedWarn('MGS with too few usable genes for tree construction',
 			"$MGS has only ".scalar(@curCogs)." usable genes; skipping tree construction\n");
-		return ($ingroupSampleCount, scalar(@curCogs), $OG, 1, 1);
+		return ($ingroupSampleCount, scalar(@curCogs), $OG, 1, 1, $ingroupSampleCount);
 	}
 
 	if ($treeFile ne "" || exists($PreferredOutgroup{$MGS})) {
@@ -3437,7 +3452,7 @@ sub addOutgroup2MGS{
 	writeMGSShardManifest("$tmpD/.strain_tree_input.shards.tsv",
 		$shardHandoff, $MGS, $OG, scalar(@curCogs), $ingroupSampleCount, $writeOverlay)
 		if $shardHandoff;
-	return ($treeSampleCount, scalar(@curCogs), $OG, 1, 1);
+	return ($treeSampleCount, scalar(@curCogs), $OG, 1, 1, $ingroupSampleCount);
 }
 
 
@@ -3966,7 +3981,10 @@ sub phase1LocusModelFingerprint {
 	# Everything that can change a locus boundary: the ranked seed input, the
 	# cluster membership it is grouped over, the proteins compared during
 	# merging, the confirmed Mosaic allowlist, and the post-grouping budget.
-	$digest->add('strain-phase1-locus-model-v1', "\0",
+	# The workflow version is part of the identity: the model's contents depend on
+	# how it was derived, not only on its inputs, so a model published by an
+	# earlier build must never be reused silently after that derivation changes.
+	$digest->add('strain-phase1-locus-model-v1', "\0", $version, "\0",
 		phase1PathStatComponent($gene2taxF), "\0", $presortGenes, "\0",
 		phase1PathStatComponent($clusterIndex), "\0",
 		phase1PathStatComponent($proteinFile), "\0",
@@ -4099,7 +4117,8 @@ sub loadPhase1LocusModel {
 #set exists does this fall back to a single whole-catalogue read.
 sub catalogueLocusContext {
 	my ($accumulator, $records, $mergeCandidates, $clusterIndex) = @_;
-	my %options = (context_seeds => $mergeCandidates, consume_cluster_members => 1);
+	# Only the sample sets may be restricted: gene contexts feed every locus.
+	my %options = (sample_set_seeds => $mergeCandidates, consume_cluster_members => 1);
 	if ($maxSubJob > 1 && ref($phase1ShardPaths) eq 'ARRAY'
 			&& @{$phase1ShardPaths} == $maxSubJob) {
 		my $scanned = 0;
@@ -4329,15 +4348,16 @@ sub prepGene2MGS{
 			my %catalogueContext;
 			my $mergeCandidates =
 				merge_candidate_seeds(\@records, \%ConfirmedMosaicPairs);
-			my $scanScope = 'skipped_no_merge_candidates';
-			if (%{$mergeCandidates}) {
-				$scanScope = catalogueLocusContext(\%catalogueContext, \@records,
-					$mergeCandidates, $cluster_index);
-			}
+			# The scan always runs, even with no mosaic pair to merge: every locus
+			# needs its synteny context so that a sample offering two candidates
+			# can still be resolved instead of losing the locus as ambiguous.
+			my $scanScope = catalogueLocusContext(\%catalogueContext, \@records,
+				$mergeCandidates, $cluster_index);
 			print "Catalogue-wide locus-model scan: "
-				.scalar(keys %{$mergeCandidates})." merge-candidate seed(s), "
 				.scalar(keys %{$catalogueContext{gene_context} || {}})
-				." with synteny context; source=$scanScope; elapsed "
+				." seed(s) with synteny context, "
+				.scalar(keys %{$mergeCandidates})." merge candidate(s) needing a "
+				."sample set; source=$scanScope; elapsed "
 				.timeNice(time - $fullScanStarted)."\n";
 			($selectedGroupsRef, $modelLocusContext, undef, $modelCounters) =
 				buildSelectedLocusGroups(\@records, {},
