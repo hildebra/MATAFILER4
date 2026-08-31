@@ -14,8 +14,8 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 | `MATAF4.pl` | `4.46` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.58` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `strain_within.pl` | `1.51` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
-| `strain_within_2.2.pl` | `0.48` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
+| `strain_within.pl` | `1.53` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
+| `strain_within_2.2.pl` | `0.49` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
 | `buildTree5.pl` | `5.83` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
@@ -619,7 +619,8 @@ The parent canonicalizes all unlimited extraction spellings to `-maxGenes 0` whe
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-popGenStats` | integer | `1` | stable | Enable population-genetic analysis and retain required nucleotide MSAs. |
+| `-popGenStats` | integer | `0` | stable | Enable population-genetic analysis and retain required nucleotide MSAs. Off by default because it is much slower than the strain statistics; setting it to `1` also forces `-rmMSA 0`. |
+| `-popGenCategory` | string | `""` | stable | Comma-separated metadata columns whose levels each receive their own population-genetic analysis; forwarded to `popGenStats.R --category`. Requires `-popGenStats 1`. |
 | `-popGenStrictOutgroup` | integer | `0` | stable | Require the requested outgroup for population-genetic analysis. |
 | `-popGenGeneticCode` | integer | `1` | stable | Genetic code forwarded to population-genetic analysis. |
 | `-popGenCodonStart` | integer | `1` | stable | Codon frame start (1, 2 or 3). |
@@ -656,8 +657,9 @@ Within-MGS postprocessing, strain statistics and population-genetic analysis. It
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-popGenStats` | integer | `1` | stable | Enable per-MGS population-genetic analysis. |
+| `-popGenStats` | integer | `0` | stable | Enable per-MGS population-genetic analysis. Off by default because it is much slower than the strain statistics. |
 | `-popGenSubsample` | string | `10,20,30,100,200,500` | stable | Comma-separated population-genetic subsample sizes. |
+| `-popGenCategory` | string | `""` | stable | Comma-separated metadata columns passed to `popGenStats.R --category`. Each level gets its own full analysis (dN/dS, Tajima's D, nucleotide diversity, …) over the samples in that level, alongside the ungrouped result. Join columns with `BLOCK` to analyse each combination of their values. Requires `-popGenStats 1`. Independent of `-DiscTests`, where `BLOCK` instead means a permutation-test blocking factor. |
 | `-popGenStrictOutgroup` | integer | `0` | stable | Require the requested outgroup. |
 | `-popGenGeneticCode` | integer | `1` | stable | Positive genetic-code identifier. |
 | `-popGenCodonStart` | integer | `1` | stable | Codon frame start (1, 2 or 3). |

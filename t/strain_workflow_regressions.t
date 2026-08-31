@@ -314,8 +314,8 @@ unlike($strain2, qr/open my \$summary_fh.*?\$TXTreport/s,
 unlike($strain2, qr/test -s "\.shellQuote\(\$analysisReport\)/,
 	'the legacy text report is not required for RDS-based completion');
 like($strain2,
-	qr/"popGenStats=i".*?"popGenStrictOutgroup=i".*?"popGenGeneticCode=i".*?"popGenCodonStart=i".*?"popGenSeed=i".*?"popGenLegacyTextOutput=i".*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?--ncore \$jobCores.*?--genetic-code \$popGenGeneticCode.*?--codon-start \$popGenCodonStart.*?--seed \$popGenSeed.*?--individual-column .*?\$individualVar.*?--outgroup .*?\$OG.*?--strict-outgroup.*?--legacy-text-output.*?\$strainFile = "\$destD\/IQtree_allsites\.strains\.txt".*?PopGenStats owns validation and fallback behavior.*?\$isolatedAnalysisBlock->\(\s*"\$popGenCommand --strain-file .*?\$strainFile.*?\$popGenStore/s,
-	'population genetics forwards parallel, outgroup, codon, seed, identity, and the strain-file path to its durable RDS workflow');
+	qr/"popGenStats=i".*?"popGenStrictOutgroup=i".*?"popGenGeneticCode=i".*?"popGenCodonStart=i".*?"popGenSeed=i".*?"popGenLegacyTextOutput=i".*?my \$popGenStatsR = \$doPopGenStats \? getProgPaths\("pogenStats"\).*?popGenStats\.output\.Rds.*?\$popGenStatsR .*?\$destBaseD, \$refMap, \$destD.*?--subsample .*?\$popGenSubsample.*?--ncore \$jobCores.*?--genetic-code \$popGenGeneticCode.*?--codon-start \$popGenCodonStart.*?--seed \$popGenSeed.*?--individual-column .*?\$individualVar.*?--category .*?shellQuote\(\$popGenCategory\) if length\(\$popGenCategory\).*?--outgroup .*?\$OG.*?--strict-outgroup.*?--legacy-text-output.*?\$strainFile = "\$destD\/IQtree_allsites\.strains\.txt".*?PopGenStats owns validation and fallback behavior.*?\$isolatedAnalysisBlock->\(\s*"\$popGenCommand --strain-file .*?\$strainFile.*?\$popGenStore/s,
+	'population genetics forwards parallel, outgroup, codon, seed, identity, categories, and the strain-file path to its durable RDS workflow');
 like($strain2,
 	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?if \(\$doPopGenStats\) \{.*?\$waitForAnalysis->\('popGenStats'\);.*?my \$shouldCombinePopGenStats = \$forcePopGenStats \|\| \$popGenTaskCount > 0 \|\| !-s \$popGenSummaryTab;.*?if \(\$shouldCombinePopGenStats\) \{.*?combineResults\(1\);.*?\} else \{.*?Reusing existing combined PopGenStats overview.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
 	'existing population RDS stores and aggregate tables are reused, while missing or newly stale tables are combined after the population phase');
@@ -458,7 +458,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.52;/,
+like($strain, qr/my \$version = 1\.53;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -498,8 +498,8 @@ like($strain,
 	qr/my \$unsafeSubsetRebuild = !\$onlySubmit && !\$subJob && length\(\$subsMGSstr\).*?strainOutputHasDurablePhaseIState.*?if \(\$unsafeSubsetRebuild\).*?shared non-subset results.*?would be cleared/s,
 	'existing output state refuses ordinary destructive subset rebuilds while fresh roots remain eligible');
 like($strain,
-	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 1;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"individualVar=s".*?if \(!\$subJob && \$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput/s,
-	'population genetics retains MSAs and forwards reproducible configuration through strainwithin2');
+	qr/my \$rmMSA = 1;.*?my \$doPopGenStats = 0;.*?my \$popGenStrictOutgroup = 0;.*?my \$popGenGeneticCode = 1;.*?my \$popGenCodonStart = 1;.*?my \$popGenSeed = 1;.*?"popGenStats=i"\s*=> \\\$doPopGenStats.*?"popGenStrictOutgroup=i".*?"popGenCategory=s"\s*=> \\\$popGenCategory.*?"individualVar=s".*?if \(!\$subJob && \$doPopGenStats && \$rmMSA\).*?\$rmMSA = 0;.*?-rmMSA \$rmMSA.*?-popGenStats \$doPopGenStats.*?-popGenStrictOutgroup \$popGenStrictOutgroup.*?-popGenGeneticCode \$popGenGeneticCode.*?-popGenCodonStart \$popGenCodonStart.*?-popGenSeed \$popGenSeed.*?-popGenLegacyTextOutput \$popGenLegacyTextOutput.*?-popGenCategory ".*?shellQuote\(\$popGenCategory\).*?if \$popGenCategory ne ""/s,
+	'population genetics is opt-in, retains MSAs when enabled, and forwards reproducible configuration and categories through strainwithin2');
 like($strain, qr/Retain the Phase-I locus map.*?second catalogue-wide gene2tax scan.*?\$SIgenes and \$COGprios are reused/s,
 	'Phase II reuses the Phase-I selected gene map rather than clearing and rebuilding it');
 like($strain,

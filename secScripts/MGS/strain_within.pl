@@ -306,7 +306,9 @@ my $completionMessage = "";
 #1.52: let OOM retries overtake the queued bulk wave, by handicapping ordinary
 #	submissions with --nice, dispatching retries from a leading tier, and
 #	optionally capping how much of the wave is queued at once
-my $version = 1.52;
+#1.53: make population genetics opt-in and forward -popGenCategory, the map
+#	columns that group its per-sample statistics
+my $version = 1.53;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -481,12 +483,13 @@ my $treeMemThreadDivisor = 4;
 my $redoSubmissionData = 0;
 my $deepRepair = 0;
 my $rmMSA = 1; #remove per-locus MSAs unless a downstream analysis requires them
-my $doPopGenStats = 1;
+my $doPopGenStats = 0; #opt-in: PopGenStats is much slower than strainStats
 my $popGenStrictOutgroup = 0;
 my $popGenGeneticCode = 1;
 my $popGenCodonStart = 1;
 my $popGenSeed = 1;
 my $popGenLegacyTextOutput = 0;
+my $popGenCategory = ""; #map columns grouping the population statistics
 my $contTests = ""; my $discTests = ""; #stat tests to be given to strain_within_2.2.pl
 my $familyVar = ""; my $groupStabilityVars = "";
 my $individualVar = "AssmblGrps";
@@ -681,6 +684,7 @@ GetOptions(
 	"popGenCodonStart=i" => \$popGenCodonStart,
 	"popGenSeed=i" => \$popGenSeed,
 	"popGenLegacyTextOutput=i" => \$popGenLegacyTextOutput,
+	"popGenCategory=s" => \$popGenCategory, #forwarded to popGenStats.R --category
 	"phyloMemMulti=f" => \$memMulti, #mem used for buildtree. Default: 1.0
 	
 	"MGSphylo=s"     => \$treeFile,
@@ -896,6 +900,7 @@ die "-popGenStrictOutgroup and -popGenLegacyTextOutput must be 0 or 1\n"
 die "-popGenGeneticCode must be positive, -popGenCodonStart must be 1, 2, or 3, and -popGenSeed must be non-negative\n"
 	unless $popGenGeneticCode > 0 && $popGenCodonStart >= 1 && $popGenCodonStart <= 3
 		&& $popGenSeed >= 0;
+die "-popGenCategory requires -popGenStats 1\n" if length($popGenCategory) && !$doPopGenStats;
 die "-individualVar must not be empty\n" unless length($individualVar);
 if (!$subJob && $doPopGenStats && $rmMSA) {
 	warn "Population genetics requires per-locus nucleotide MSAs; overriding -rmMSA 1 to -rmMSA 0\n";
@@ -2670,6 +2675,7 @@ $nxtCmd .= "-MGSphylo ".shellQuote($treeFile)." " if $treeFile ne "";
 $nxtCmd .= "-popGenStats $doPopGenStats -popGenStrictOutgroup $popGenStrictOutgroup "
 	."-popGenGeneticCode $popGenGeneticCode -popGenCodonStart $popGenCodonStart "
 	."-popGenSeed $popGenSeed -popGenLegacyTextOutput $popGenLegacyTextOutput ";
+$nxtCmd .= "-popGenCategory ".shellQuote($popGenCategory)." " if $popGenCategory ne "";
 $nxtCmd .= "-submit $doSubmit ";
 $nxtCmd .= "-qsubSystem ".shellQuote($subMode)." " if $subMode ne "";
 $nxtCmd .= "-Hcores $maxCores " if $maxCores > 0;

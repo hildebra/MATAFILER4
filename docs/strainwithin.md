@@ -152,7 +152,7 @@ This is a task-oriented summary. See the [complete `strain_within.pl` flag refer
 | Sparse placement | `-placeOnBackbone`, `-strictBackboneFraction`, `-placementGenesPerSpecies`, `-placementRelativeNTFraction`, `-placementNTfiltCount`, `-placementMinOverlap`, `-epaThreads` | Optional EPA-ng placement controls. Off by default; enable with `-placeOnBackbone 1`. When disabled, all other options in this group are inactive. |
 | Mosaic/outgroups | `-mosaicLoci`, `-mosaicMGS`, `-prepareMosaicLoci`, `-outgroupCoreMinLoci`, `-preferredCoreGenes` | Manage Mosaic discovery and choose broadly supported outgroup loci. |
 | Tree resources | `-maxCores`, `-selfMemGb`, `-mosaicMemGb`, `-treeOOMMaxMemGB`, `-rateMergePartitions` | Set scheduler and tree-inference resources. |
-| Downstream analyses | `-popGenStats`, `-popGenStrictOutgroup`, `-popGenGeneticCode`, `-popGenCodonStart`, `-popGenSeed`, `-individualVar`, `-DiscTests`, `-ContTests` | Forward population-genetic and association-analysis configuration to postprocessing. |
+| Downstream analyses | `-popGenStats`, `-popGenCategory`, `-popGenStrictOutgroup`, `-popGenGeneticCode`, `-popGenCodonStart`, `-popGenSeed`, `-individualVar`, `-DiscTests`, `-ContTests` | Forward population-genetic and association-analysis configuration to postprocessing. |
 
 The `-redo` values are deliberately short: `-redo tree` deletes and rebuilds tree-stage outputs while reusing complete inputs, `-redo input` rebuilds missing or incomplete strain inputs and their dependent trees, and `-redo all` deletes and rebuilds all strain inputs and trees for the selected MGS. The default is `-redo none`. Combine a redo with `-MGSsubset` to restrict it to explicit MGS identifiers.
 
@@ -165,8 +165,9 @@ This table covers the options normally used for restarts and analysis. See the [
 | `-GCd`, `-FMGdir`, `-map`, `-MGSmatrix` | required | Gene catalogue, within-phylogeny directory, sample map, and MGS abundance matrix. |
 | `-submit` | `1` | Submit analyses; use `0` to generate a dry-run plan. |
 | `-cores`, `-Hcores` | `4`, `12` | Standard R-analysis cores and heavy downstream-analysis cores. |
-| `-popGenStats` | `1` | Enable per-MGS population-genetic analysis. |
+| `-popGenStats` | `0` | Enable per-MGS population-genetic analysis. Off by default: PopGenStats is much slower than the strain statistics, so ordinary runs produce `strainStats` only. |
 | `-popGenSubsample` | `10,20,30,100,200,500` | Subsample sizes used by PopGenStats. |
+| `-popGenCategory` | empty | Metadata columns whose levels each receive their own population-genetic analysis (`popGenStats.R --category`). Requires `-popGenStats 1`. |
 | `-popGenStrictOutgroup` | `0` | Require the requested outgroup for population-genetic analysis. |
 | `-popGenGeneticCode`, `-popGenCodonStart`, `-popGenSeed` | `1`, `1`, `1` | Genetic-code, codon-start, and reproducibility settings. |
 | `-reSubmit` | `0` | Broadly clear and redo within-MGS postprocessing and both summary types. |

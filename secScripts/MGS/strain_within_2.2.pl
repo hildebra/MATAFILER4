@@ -36,7 +36,7 @@ sub mgsTreeOutgroup;
 
 #declared here (not next to the changelog) so -help can report it before the
 #first getProgPaths() below needs a site config; keep it in sync with that list
-our $version = 0.48;
+our $version = 0.49;
 
 #-help is answered from docs/flag_reference.md, without a site config
 if (helpRequested(@ARGV)) {
@@ -87,15 +87,18 @@ if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]
 #.45: retry incomplete R-analysis batches twice and double memory after Slurm OOMs
 #.46: independently redo strainStats or PopGenStats without resetting all postprocessing
 #.47: isolate each MGS analysis so one failure cannot abort its batch, and stop nounset from killing conda activation
-#.48: forward discrete strainStats categories to PopGenStats and raise its memory request
+#.48: raise the PopGenStats memory request and add -popGenCategory for its sample groupings
+#.49: make PopGenStats opt-in so ordinary runs only produce strainStats
 #$version is declared near the top of this file so -help can print it
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
 my $redoStrainStats = 0;
 my $redoPopGenStats = 0;
 my $checkMaxNumJobs = 400;
-my $doPopGenStats = 1;
+#PopGenStats is much slower than strainStats, so it is opt-in
+my $doPopGenStats = 0;
 my $popGenSubsample = "10,20,30,100,200,500";
+my $popGenCategory = "";
 my $popGenStrictOutgroup = 0;
 my $popGenGeneticCode = 1;
 my $popGenCodonStart = 1;
@@ -137,6 +140,7 @@ GetOptions(
 	"redoPopGenStats=i" => \$redoPopGenStats,
 	"popGenStats=i"  => \$doPopGenStats,
 	"popGenSubsample=s" => \$popGenSubsample,
+	"popGenCategory=s" => \$popGenCategory, #map columns passed to popGenStats.R --category
 	"popGenStrictOutgroup=i" => \$popGenStrictOutgroup,
 	"popGenGeneticCode=i" => \$popGenGeneticCode,
 	"popGenCodonStart=i" => \$popGenCodonStart,
@@ -166,6 +170,7 @@ die "-submit, -reSubmit, -redoStrainStats, and -redoPopGenStats must be 0 or 1\n
 		&& $redoStrainStats =~ /^[01]$/ && $redoPopGenStats =~ /^[01]$/;
 die "-popGenStats must be 0 or 1\n" unless $doPopGenStats =~ /^[01]$/;
 die "-redoPopGenStats requires -popGenStats 1\n" if $redoPopGenStats && !$doPopGenStats;
+die "-popGenCategory requires -popGenStats 1\n" if length($popGenCategory) && !$doPopGenStats;
 die "-popGenStrictOutgroup and -popGenLegacyTextOutput must be 0 or 1\n"
 	unless $popGenStrictOutgroup =~ /^[01]$/ && $popGenLegacyTextOutput =~ /^[01]$/;
 die "-popGenGeneticCode must be positive, -popGenCodonStart must be 1, 2, or 3, and -popGenSeed must be non-negative\n"
@@ -224,7 +229,7 @@ print "Metadata: individual=" . ($individualVar || "<none>")
 print "Association tests: discrete=" . ($DiscTests || "<none>")
 	. "; continuous=" . ($ContTests || "<none>") . "\n";
 print "Population genetics: " . ($doPopGenStats
-	? "enabled (subsamples: ".($popGenSubsample || "<none>")."; seed=$popGenSeed; genetic code=$popGenGeneticCode; codon start=$popGenCodonStart; strict outgroup=$popGenStrictOutgroup; categories: ".($DiscTests || "<none>").")"
+	? "enabled (subsamples: ".($popGenSubsample || "<none>")."; seed=$popGenSeed; genetic code=$popGenGeneticCode; codon start=$popGenCodonStart; strict outgroup=$popGenStrictOutgroup; categories: ".($popGenCategory || "<none>").")"
 	: "disabled") . "\n";
 print "=====================================================\n";
 
@@ -538,9 +543,11 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 			." --codon-start $popGenCodonStart"
 			." --seed $popGenSeed"
 			." --individual-column ".shellQuote($individualVar);
-		# Reuse the discrete strainStats categories so population statistics are
-		# reported for the same sample groupings.
-		$popGenCommand .= " --category ".shellQuote($DiscTests) if length($DiscTests);
+		# Optional sample groupings for the population statistics. Deliberately
+		# separate from -DiscTests: popGenStats.R runs one full analysis per
+		# category level, and its BLOCK keyword crosses columns rather than
+		# blocking on them as the strainStats permutation tests do.
+		$popGenCommand .= " --category ".shellQuote($popGenCategory) if length($popGenCategory);
 		$popGenCommand .= " --outgroup ".shellQuote($OG) if $OG ne "";
 		$popGenCommand .= " --strict-outgroup" if $popGenStrictOutgroup;
 		$popGenCommand .= " --legacy-text-output" if $popGenLegacyTextOutput;
