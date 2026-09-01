@@ -918,7 +918,6 @@ $GCd .= "/" unless $GCd =~ m{/$};
 $MGSfile = abs_path($MGSfile) if length $MGSfile;
 $phase1CatalogIdentity = catalog_identity($GCd);
 $phase1MapSpec = resolve_catalog_maps($GCd);
-$phase1MGSGuideFingerprint = phase1GuideStatFingerprint($MGSfile);
 $phase1CatalogInputFingerprint = phase1CatalogStatFingerprint(
 	$GCd, $clusterID, $useGTDBmg, $phase1MapSpec);
 $mosaicMGSFile = File::Spec->rel2abs($mosaicMGSFile) if length $mosaicMGSFile;
@@ -1001,6 +1000,12 @@ my $resumeBindir = $MGSfile;
 $resumeBindir =~ s/[^\/]+$//;
 $resumeBindir = $GCd if $resumeBindir eq "";
 my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
+# Contract validation happens before prepRun() assigns $outD. Fingerprint the
+# same run-local sorted guide that prepRun() and the parent use after staging;
+# otherwise workers compare the catalogue-side .srt against the parent's staged
+# .srt and reject an otherwise identical SNP-input contract.
+$phase1MGSGuideFingerprint =
+	phase1GuideStatFingerprint($MGSfileOri, undef, $resumeOutD);
 my $resumePhaseISummary = File::Spec->catfile(
 	$resumeOutD, 'LOGandSUB', $sampleStatsSummaryLogName);
 my $resumePhaseIInputContract = File::Spec->catfile(
@@ -1032,7 +1037,8 @@ if ($onlySubmit && $subJob
 		&& $phase1ContractState ne 'match'
 		&& $phase1ContractState ne 'building_match'
 		&& !$legacyMPIContract) {
-	die "Split worker caller contract is incompatible with -SNPcaller $SNPcaller: "
+	die "Split worker Phase-I input contract is incompatible with this run "
+		."(-SNPcaller $SNPcaller): "
 		."$phase1ContractReason\n";
 }
 if ($onlySubmit && !$subJob && $phase1ContractState eq 'building_match') {
@@ -5978,7 +5984,7 @@ sub phase1PathStatComponent {
 }
 
 sub phase1GuideStatFingerprint {
-	my ($path, $contractVersion) = @_;
+	my ($path, $contractVersion, $outputDirectory) = @_;
 	$contractVersion //= $phase1InputContractVersion;
 	my $fingerprintSchema = $contractVersion <= 2
 		? 'strain-phase1-guide-stat-v2'
@@ -5994,8 +6000,11 @@ sub phase1GuideStatFingerprint {
 	# The sorted guide and its gene-to-MGS index are per-run products in the output
 	# directory. Track them there, still accepting the pre-relocation layout beside
 	# the input so an older run's contract keeps describing the same files.
-	my $staged = defined($outD) && length($outD)
-		? File::Spec->catfile($outD, basename($canonical)) : q{};
+	$outputDirectory = $outD
+		if (!defined($outputDirectory) || !length($outputDirectory))
+			&& defined($outD) && length($outD);
+	my $staged = defined($outputDirectory) && length($outputDirectory)
+		? File::Spec->catfile($outputDirectory, basename($canonical)) : q{};
 	my $sorted = length($staged) && -s "$staged.srt" ? "$staged.srt" : "$canonical.srt";
 	my @inputs = ($canonical, $sorted, "$sorted.gene2MGS", $observation);
 	return sha256_hex(join("\0",

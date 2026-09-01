@@ -160,6 +160,62 @@ ok(!$corrupt_protein_accepted && $@ =~ /payload digest mismatch/,
 
 my $strain = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within.pl'));
 my $strain2 = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'strain_within_2.2.pl'));
+
+# Exercise the Phase-I guide identity independently of the full controller. A
+# split worker validates the contract before prepRun() assigns $outD, whereas
+# the parent records it afterwards. Both moments must select the run-local
+# sorted guide even when an older catalogue-side .srt also exists.
+my ($phase1_fingerprint_helpers) = $strain =~
+	/(sub phase1PathStatComponent \{.*?^\}\n\nsub phase1GuideStatFingerprint \{.*?^\})\n\nsub phase1CatalogStatFingerprint/ms;
+BAIL_OUT('Cannot extract Phase-I guide fingerprint helpers')
+	unless defined $phase1_fingerprint_helpers;
+my $phase1_helpers_loaded = eval <<"PERL";
+package TestPhase1GuideFingerprint;
+use strict;
+use warnings;
+use Cwd qw(abs_path);
+use Digest::SHA qw(sha256_hex);
+use File::Basename qw(basename);
+use File::Spec;
+our \$phase1InputContractVersion = 3;
+our \$outD = '';
+sub resolveExistingFile {
+	my (\$path) = \@_;
+	return -f \$path ? \$path : undef;
+}
+$phase1_fingerprint_helpers
+1;
+PERL
+ok($phase1_helpers_loaded, 'Phase-I guide fingerprint helpers load independently')
+	or diag($@);
+my $contract_catalogue = File::Spec->catdir($tmp, 'contract-catalogue');
+my $contract_output = File::Spec->catdir($tmp, 'contract-output');
+mkdir $contract_catalogue or die "Cannot create $contract_catalogue: $!";
+mkdir $contract_output or die "Cannot create $contract_output: $!";
+my $contract_guide = File::Spec->catfile(
+	$contract_catalogue, 'SB.clusters.core');
+write_file($contract_guide, "MGS.1\tgene1\n");
+write_file(File::Spec->catfile($contract_catalogue, 'SB.clusters.obs'),
+	"MGS.1\t1\n");
+write_file("$contract_guide.srt", "MGS.catalogue\tgene-old\n");
+write_file("$contract_guide.srt.gene2MGS", "gene-old\tMGS.catalogue\n");
+my $staged_sorted = File::Spec->catfile(
+	$contract_output, 'SB.clusters.core.srt');
+write_file($staged_sorted, "MGS.1\tgene1\n");
+write_file("$staged_sorted.gene2MGS", "gene1\tMGS.1\n");
+$TestPhase1GuideFingerprint::outD = $contract_output;
+my $parent_guide_fingerprint =
+	TestPhase1GuideFingerprint::phase1GuideStatFingerprint($contract_guide);
+$TestPhase1GuideFingerprint::outD = '';
+my $worker_guide_fingerprint =
+	TestPhase1GuideFingerprint::phase1GuideStatFingerprint(
+		$contract_guide, undef, $contract_output);
+is($worker_guide_fingerprint, $parent_guide_fingerprint,
+	'pre-initialization worker and initialized parent fingerprint the same run-local guide');
+isnt(
+	TestPhase1GuideFingerprint::phase1GuideStatFingerprint($contract_guide),
+	$parent_guide_fingerprint,
+	'a catalogue-side sorted guide has a distinct identity and cannot be selected accidentally');
 my $mgs = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
 my $build_tree = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'phylo', 'buildTree5.pl'));
 my $build_tree_locus_module = slurp(File::Spec->catfile($Bin, q{..}, q{Mods}, q{MGSLocus.pm}));
@@ -470,8 +526,11 @@ like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
 	'strain Phase I selects MPI or FB caller-specific consensus and VCF filenames');
 like($strain,
-	qr/my \$legacyMPIContract = \$phase1ContractState eq 'missing' && \$SNPcaller eq 'MPI'.*?if \(\$onlySubmit && !\$subJob.*?'building_match'.*?Cannot reuse Phase-I outputs.*?if \(\$onlySubmit && \$subJob.*?'building_match'.*?!\$legacyMPIContract.*?Split worker caller contract/s,
+	qr/my \$legacyMPIContract = \$phase1ContractState eq 'missing' && \$SNPcaller eq 'MPI'.*?if \(\$onlySubmit && !\$subJob.*?'building_match'.*?Cannot reuse Phase-I outputs.*?if \(\$onlySubmit && \$subJob.*?'building_match'.*?!\$legacyMPIContract.*?Split worker Phase-I input contract/s,
 	'caller provenance resumes compatible builds and rejects missing FB or incompatible state');
+like($strain,
+	qr/my \$resumeOutD = .*?\$phase1MGSGuideFingerprint =\s*phase1GuideStatFingerprint\(\$MGSfileOri, undef, \$resumeOutD\);.*?phase1InputContractState\(\$resumePhaseIInputContract\)/s,
+	'workers fingerprint the run-local guide before validating the parent contract');
 like($strain,
 	qr/my \$phase1InputContractVersion = 3;.*?sub phase1PathStatComponent.*?different device number.*?\$contractVersion <= 2.*?\@metadata\[0, 1, 7, 9\].*?\@metadata\[1, 7, 9\]/s,
 	'Phase-I provenance excludes node-local device identity from current cross-node contracts');
