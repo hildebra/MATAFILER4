@@ -62,6 +62,43 @@ is(
 	"MGS1\tmarkerZ,geneA\n",
 	'trimmed marker ID is prioritised and the final MGS is flushed at EOF',
 );
+like($sorter_stdout, qr/^MGS1 \(2\)::/m,
+	'sorter retains a per-MGS detail preview');
+like($sorter_stdout,
+	qr/MGS detail preview: 1\/1 shown.*?Sorting summary: MGS=1, input_rows=2.*?elapsed=\d+s/s,
+	'sorter follows its preview with aggregate totals and elapsed time');
+
+# Catalogue-scale runs used to print one long diagnostic row for every MGS.
+# Exercise more groups than the preview limit and pin both suppression and the
+# aggregate replacement so later workflow stages remain visible in stdout.
+my $preview_mgs = File::Spec->catfile($tmp, 'preview.core');
+write_file($preview_mgs, join('', map {
+	"MGS$_\tpreviewGene$_\t10\t0\t1\tunused\n"
+} 1 .. 7));
+write_file(File::Spec->catfile($tmp, 'preview.obs'), join('', map {
+	"MGS$_\t10\n"
+} 1 .. 7));
+my $preview_err = gensym;
+my $preview_pid = open3(
+	undef, my $preview_out, $preview_err,
+	$^X, '-I'.File::Spec->catdir($Bin, '..'),
+	$sorter, $gc, $preview_mgs, 'FMG', 'test', 95,
+);
+my $preview_stdout = do { local $/; <$preview_out> // '' };
+my $preview_stderr = do { local $/; <$preview_err> // '' };
+waitpid($preview_pid, 0);
+is($? >> 8, 0, 'gene-priority sorter completes a multi-MGS preview run')
+	or diag($preview_stdout, $preview_stderr);
+my @preview_details = $preview_stdout =~ /^(MGS\d+ \([^\n]+)$/mg;
+is(scalar(@preview_details), 5,
+	'sorter reports only the first five per-MGS detail rows');
+unlike($preview_stdout, qr/^MGS6 \(/m,
+	'sorter suppresses per-MGS detail after the preview');
+like($preview_stdout,
+	qr/MGS detail preview: 5\/7 shown; 2 omitted.*?Sorting summary: MGS=7, input_rows=7, unique_genes=7, ranked_genes=7, emitted_genes=7/s,
+	'sorter summarizes every MGS after the bounded preview');
+is(scalar(split /\n/, slurp("$preview_mgs.srt")), 7,
+	'output suppression does not remove any sorted guide records');
 
 # The per-family representative scan formerly flushed only at MGS transitions
 # and manufactured an undefined key/value when every candidate failed QC.

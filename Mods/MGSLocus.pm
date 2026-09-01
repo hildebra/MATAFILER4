@@ -11,6 +11,7 @@ our @EXPORT_OK = qw(
 	member_context_map
 	accumulate_locus_context
 	merge_candidate_seeds
+	preselect_locus_records
 	protein_kmer_similarity
 	robust_depth_mask
 );
@@ -89,11 +90,10 @@ sub _find {
 sub _scan_members {
 	my ($records, $cluster_members, $options, $accumulator) = @_;
 	$options ||= {};
-	# Only the sample sets are exclusive to merge decisions, so only they may be
-	# restricted to the seeds that can merge. Gene contexts are also summed into
-	# each locus_context, which choose_locus_candidate consults for EVERY locus
-	# when a sample offers more than one candidate, so they must be built for
-	# every seed or ambiguous paralogs lose their only tie-breaker.
+	# Only the sample sets are exclusive to merge decisions, so they may be
+	# restricted to seeds that can merge. Gene contexts feed ambiguous-candidate
+	# resolution too; context_seeds may restrict their focal loci only when every
+	# ranked record remains available below as a possible neighbour.
 	my $sample_set_seeds = $options->{sample_set_seeds};
 	# Sample-level summaries are additive over disjoint sample sets, because a
 	# contig belongs to exactly one sample and no context ever crosses samples.
@@ -106,17 +106,28 @@ sub _scan_members {
 	my $include_member_context = $options->{include_member_context} ? 1 : 0;
 	my $include_gene_context = $options->{include_gene_context} ? 1 : 0;
 	my $want_positions = $include_member_context || $include_gene_context;
+	my $context_seeds = $options->{context_seeds};
+	die "context_seeds must be a hash reference\n"
+		if defined($context_seeds) && ref($context_seeds) ne 'HASH';
 	# Callers that hold a throwaway catalogue-wide membership map can release each
 	# comma-joined member string as it is consumed instead of keeping the whole
 	# map resident beside the summaries built from it.  Ranked records name each
 	# seed at most once, so a consumed entry is never needed again.
 	my $consume = $options->{consume_cluster_members} ? 1 : 0;
 
+	# A final locus budget can make most ranked seeds ineligible as focal loci,
+	# while those lower-ranked seeds remain valuable neighbours of retained loci.
+	# Collect ranked neighbours once and mark focal contigs during that same pass;
+	# sorting and context construction can then skip irrelevant contigs without a
+	# second parse over the often very large membership strings.
+	my %relevant_contigs;
 	my (%member_seed, %positions);
 	for my $record (@{$records || []}) {
 		my $gene = $record->{gene};
 		next unless defined($gene) && length($gene);
 		my $wantSampleSet = !$sample_set_seeds || $sample_set_seeds->{$gene} ? 1 : 0;
+		my $neighbour_token = $want_positions
+			? join('|', $record->{mgs}, $record->{cog}) : undef;
 		for my $member (_members($consume
 				? delete($cluster_members->{$gene}) : $cluster_members->{$gene})) {
 			my ($sample, $contig, $position, $clean_member) = _member_parts($member);
@@ -125,12 +136,17 @@ sub _scan_members {
 			$member_seed{$clean_member} = $gene if $include_member_to_seed;
 			next unless $want_positions;
 			next unless defined($contig) && defined($position);
+			$relevant_contigs{$sample}{$contig} = 1
+				if defined($context_seeds) && $context_seeds->{$gene};
 			# Entries are arrays rather than hashes: at catalogue scale this is the
 			# single largest transient structure, and a five-key hash per member
-			# costs several times what these four fields do.
+			# costs several times what these four fields do. Precompute the neighbour
+			# token once per seed instead of rebuilding it for every member or pair.
 			push @{$positions{$sample}{$contig}}, [
-				$position, $gene, $record->{mgs}, $record->{cog},
-				$include_member_context ? $clean_member : undef,
+				$position, $gene, $neighbour_token,
+				$include_member_context
+					&& (!defined($context_seeds) || $context_seeds->{$gene})
+					? $clean_member : undef,
 			];
 		}
 	}
@@ -138,16 +154,29 @@ sub _scan_members {
 	my %member_context;
 	for my $sample (keys %positions) {
 		for my $contig (keys %{$positions{$sample}}) {
+			next if defined($context_seeds)
+				&& !$relevant_contigs{$sample}{$contig};
 			my @entries = sort {
 				$a->[0] <=> $b->[0] || $a->[1] cmp $b->[1]
 			} @{$positions{$sample}{$contig}};
 			for my $i (0 .. $#entries) {
-				for my $j (0 .. $#entries) {
-					next if $i == $j;
-					next if abs($entries[$i][0] - $entries[$j][0]) > $context_distance;
-					my $token = join('|', $entries[$j][2], $entries[$j][3]);
+				next if defined($context_seeds)
+					&& !$context_seeds->{$entries[$i][1]};
+				# Positions are sorted, so nothing beyond the first out-of-range entry
+				# on either side can contribute. This preserves the exact directed
+				# neighbour counts while replacing an all-pairs scan with a bounded
+				# window over only the locally relevant entries.
+				for (my $j = $i - 1; $j >= 0; $j--) {
+					last if $entries[$i][0] - $entries[$j][0] > $context_distance;
+					my $token = $entries[$j][2];
 					$gene_context->{$entries[$i][1]}{$token}++ if $include_gene_context;
-					$member_context{$entries[$i][4]}{$token}++ if $include_member_context;
+					$member_context{$entries[$i][3]}{$token}++ if $include_member_context;
+				}
+				for (my $j = $i + 1; $j <= $#entries; $j++) {
+					last if $entries[$j][0] - $entries[$i][0] > $context_distance;
+					my $token = $entries[$j][2];
+					$gene_context->{$entries[$i][1]}{$token}++ if $include_gene_context;
+					$member_context{$entries[$i][3]}{$token}++ if $include_member_context;
 				}
 			}
 		}
@@ -173,15 +202,15 @@ sub accumulate_locus_context {
 		include_gene_context => 1,
 		consume_cluster_members => $options->{consume_cluster_members} ? 1 : 0,
 		sample_set_seeds => $options->{sample_set_seeds},
+		context_seeds => $options->{context_seeds},
 	}, $accumulator);
 	return $accumulator;
 }
 
 #Seeds whose catalogue-wide summaries can change a locus boundary: a seed alone
 #in its MGS/COG has nothing to merge with, and when a confirmed-pair allowlist is
-#given only seeds named in such a pair are ever compared. Everything else still
-#needs its gene context, which every locus consults when resolving paralogs, but
-#not its sample set.
+#given only seeds named in such a pair are ever compared. Other budget-eligible
+#seeds still need gene context for resolving paralogs, but not a sample set.
 sub merge_candidate_seeds {
 	my ($records, $allowed_merge_pairs) = @_;
 	my %byGroup;
@@ -211,6 +240,41 @@ sub merge_candidate_seeds {
 	return \%candidates;
 }
 
+#Keep exactly enough ranked records to reproduce the first $budget resolved
+#loci per MGS under every possible allowed merge outcome. Every possible merge
+#seed is retained, including a partner below the prefix, and the prefix receives
+#one conservative backfill slot per candidate because each successful merge can
+#consume at most one output slot. Non-candidate records below that prefix cannot
+#merge upward and therefore cannot enter the final budget.
+sub preselect_locus_records {
+	my ($records, $budget, $allowed_merge_pairs) = @_;
+	die "Locus records must be an array reference\n" unless ref($records) eq 'ARRAY';
+	die "Locus budget must be a positive integer\n"
+		unless defined($budget) && $budget =~ /\A\d+\z/ && $budget > 0;
+
+	my $merge_candidates = merge_candidate_seeds($records, $allowed_merge_pairs);
+	my (%by_mgs, %candidate_count);
+	for my $record (@{$records}) {
+		push @{$by_mgs{$record->{mgs}}}, $record;
+		$candidate_count{$record->{mgs}}++
+			if $merge_candidates->{$record->{gene}};
+	}
+
+	my %keep_gene;
+	for my $mgs (keys %by_mgs) {
+		my @ranked = sort {
+			$a->{rank} <=> $b->{rank} || $a->{gene} cmp $b->{gene}
+		} @{$by_mgs{$mgs}};
+		my $prefix = $budget + ($candidate_count{$mgs} || 0);
+		$prefix = scalar(@ranked) if $prefix > @ranked;
+		$keep_gene{$ranked[$_]{gene}} = 1 for 0 .. $prefix - 1;
+	}
+	$keep_gene{$_} = 1 for keys %{$merge_candidates};
+
+	my @selected = grep { $keep_gene{$_->{gene}} } @{$records};
+	return (\@selected, scalar(@{$records}) - scalar(@selected), $merge_candidates);
+}
+
 #Member contexts for one sample slice, without the catalogue-wide seed summaries
 #that grouping needs.  Split extraction workers use this to rebuild the context
 #of their own members around a locus model published by the parent.
@@ -223,6 +287,7 @@ sub member_context_map {
 			include_member_to_seed => 0,
 			include_member_context => 1,
 			include_gene_context => 0,
+			context_seeds => $options->{context_seeds},
 		});
 	return $member_context;
 }

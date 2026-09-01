@@ -11,6 +11,7 @@ sub evalCurMGS;
 sub collectRequestedGenes;
 sub coreRowFields;
 sub readInformativeNT;
+sub elapsedText;
 
 
 #v0.1: adopt .core MGS files to get additional info for sorting genes by importance
@@ -25,7 +26,9 @@ sub readInformativeNT;
 #	prior and compare gene prevalence on MGS-restricted counts; rank genes
 #	without catalogue occurrence last instead of first; rank on expected
 #	informative nucleotides rather than on locus count alone
-my $version = 0.16;
+#v0.17: preview only the first few per-MGS detail rows, then report aggregate
+#	ranking totals and elapsed time instead of writing thousands of near-identical lines
+my $version = 0.17;
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Gene rejection thresholds.
@@ -115,6 +118,7 @@ if (-e $finout && -s $finout){
 }
 
 
+my $sortStarted = time;
 print "\n--------------------------------------------------\nResorting MGS genes for importance in strain phylo ver $version\n--------------------------------------------------\n";
 #my @FMG40 = ("COG0012","COG0016","COG0018","COG0048","COG0049","COG0052","COG0080","COG0081","COG0085","COG0087","COG0088","COG0090","COG0091","COG0092","COG0093","COG0094","COG0096","COG0097","COG0098","COG0099","COG0100","COG0102","COG0103","COG0124","COG0172","COG0184","COG0185","COG0186","COG0197","COG0200","COG0201","COG0202","COG0215","COG0256","COG0495","COG0522","COG0525","COG0533","COG0541","COG0552");
 #my %FMG40 = map { $_ => 1 } @FMG40;
@@ -209,6 +213,11 @@ open O,">$tmpout" or die "can't open outfile $tmpout\n";
 open I,"<$MGSfile" or die "cant open infil $MGSfile\n";
 my $cn=0; my $rowCnt=0; my $MGScnt = 0; my $geneCnt=0;
 my $dupGenes=0; my $dupWarnLimit=5;
+my $detailPreviewLimit = 5;
+my $detailLinesReported = 0;
+my ($summaryRankedGenes, $summaryMarkerGenes, $summarySharedDemotions,
+	$summaryInformativeNT, $summaryCapInformativeNT) = (0, 0, 0, 0, 0);
+my (@summaryEmittedLoci, @summaryMedianSharing, @summaryMedianInformativeNT);
 my $curMGS=""; my %doneMGS;
 my %occ; my %multiCp; my %markers; my %multiBin;
 #foreach my $mg (keys %gen2Bin){
@@ -252,8 +261,26 @@ rename $tmpout, $finout or die "Can't publish $finout: $!\n";
 $published = 1;
 warn "Suppressed ".($dupGenes - $dupWarnLimit)." further duplicate-gene warnings "
 	."($dupGenes total)\n" if ($dupGenes > $dupWarnLimit);
-#report that all went fine
-print  "Finished \nRead $rowCnt rows, kept $cn genes, used $geneCnt genes in $MGScnt MGS\nSaved in $finout\n";
+#Report a compact preview contract. The detailed values remain visible for the
+#first few MGS, while catalogue-scale runs end with totals rather than thousands
+#of lines that obscure the following workflow stages.
+my $detailLinesOmitted = $MGScnt - $detailLinesReported;
+print "MGS detail preview: $detailLinesReported/$MGScnt shown";
+print "; $detailLinesOmitted omitted" if $detailLinesOmitted > 0;
+print "\n";
+my $medianEmitted = @summaryEmittedLoci ? medianArray(@summaryEmittedLoci) : 0;
+my $medianSharing = @summaryMedianSharing ? medianArray(@summaryMedianSharing) : 0;
+my $medianInformativeNT = @summaryMedianInformativeNT
+	? medianArray(@summaryMedianInformativeNT) : 0;
+print "Sorting summary: MGS=$MGScnt, input_rows=$rowCnt, unique_genes=$cn, "
+	."ranked_genes=$summaryRankedGenes, emitted_genes=$geneCnt, "
+	."marker_genes=$summaryMarkerGenes, sharing_demotions=$summarySharedDemotions\n";
+print "Sorting summary: median_emitted_loci=$medianEmitted, "
+	."median_sharing_ratio=".sprintf('%.2f', $medianSharing)
+	.", median_informative_NT=$medianInformativeNT, informative_NT_emitted="
+	."$summaryInformativeNT, informative_NT_at_first_$downstreamLocusCap="
+	."$summaryCapInformativeNT, elapsed=".elapsedText(time - $sortStarted)."\n";
+print "Saved in $finout\n";
 
 
 exit(0);
@@ -477,13 +504,25 @@ sub evalCurMGS{
 
 	my $medMBi = @all_genes ? medianArray(map { $multiBin{$_} } @all_genes) : 0;
 	my $avgMBi = @all_genes ? meanArray([map { $multiBin{$_} } @all_genes]) : 0;
-	print "${curMGS} (".scalar(keys %multiBin)."):: " ;
-	print scalar(@finalGs) ."/". scalar(@ranked) ." genes, $mrkCnt markerGs used"
+	my $detailLine = "${curMGS} (".scalar(keys %multiBin)."):: "
+		.scalar(@finalGs) ."/". scalar(@ranked) ." genes, $mrkCnt markerGs used"
 		. ", expected prevalence: " . int($expected_occ*100)/100
 		. ", median sharing ratio: " . int($medSharing*100)/100
 		. " ($sharedCnt demoted), median informative NT: $median_nt"
 		. ", informative NT emitted/at cap $downstreamLocusCap: $budgetNT/$capNT"
-		. ", median/avg multiBin $medMBi/" . int($avgMBi*100)/100 ."\n";
+		. ", median/avg multiBin $medMBi/" . int($avgMBi*100)/100;
+	if ($detailLinesReported < $detailPreviewLimit) {
+		print "$detailLine\n";
+		$detailLinesReported++;
+	}
+	$summaryRankedGenes += scalar(@ranked);
+	$summaryMarkerGenes += $mrkCnt;
+	$summarySharedDemotions += $sharedCnt;
+	$summaryInformativeNT += $budgetNT;
+	$summaryCapInformativeNT += $capNT;
+	push @summaryEmittedLoci, scalar(@finalGs);
+	push @summaryMedianSharing, $medSharing;
+	push @summaryMedianInformativeNT, $median_nt;
 
 	$geneCnt+= scalar(@finalGs);
 
@@ -500,3 +539,12 @@ sub evalCurMGS{
 	return $retStr;
 }
 
+sub elapsedText {
+	my ($seconds) = @_;
+	$seconds = int($seconds || 0);
+	my $hours = int($seconds / 3600);
+	my $minutes = int(($seconds % 3600) / 60);
+	my $remaining = $seconds % 60;
+	return $hours ? "${hours}h${minutes}m${remaining}s"
+		: $minutes ? "${minutes}m${remaining}s" : "${remaining}s";
+}

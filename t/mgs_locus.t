@@ -9,7 +9,8 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::geneCat qw(readGene2tax);
 use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate member_context_map
-	accumulate_locus_context merge_candidate_seeds robust_depth_mask);
+	accumulate_locus_context merge_candidate_seeds preselect_locus_records
+	robust_depth_mask);
 
 sub write_file {
 	my ($path, $contents) = @_;
@@ -349,9 +350,97 @@ ok(exists($prefiltered{gene_context}{c1}{'MGS.7|COGB'})
 ok(!exists($prefiltered{gene_context}{c1}{'MGS.7|COGD'}),
 	'a gene on another contig of the same sample is correctly not a neighbour');
 
+my %focused_context;
+accumulate_locus_context(\%focused_context, $prefilter_records{records},
+	{ %{$prefilter_records{members}} }, {
+		sample_set_seeds => { c1 => 1, c2 => 1 },
+		context_seeds => { c1 => 1, c2 => 1 },
+	});
+is_deeply($focused_context{gene_context}{c1}, $unfiltered_scan{gene_context}{c1},
+	'a focal-only scan preserves every lower-ranked neighbour of a retained seed');
+is_deeply([sort keys %{$focused_context{gene_context}}], [qw(c1 c2)],
+	'a focal-only scan omits contexts for seeds that cannot survive the budget');
+is_deeply($focused_context{sample_set}, $prefiltered{sample_set},
+	'focal context filtering does not alter merge-candidate sample sets');
+
+# A merge can consume one of the first budget slots, and its confirmed partner
+# can sit far below the raw prefix. The conservative preselection retains both
+# the backfill records and every possible partner while dropping only records
+# that cannot enter the resolved prefix.
+my @budget_records = (
+	{ mgs => 'MGS.B', cog => 'COGA', gene => 'p0', rank => 0 },
+	{ mgs => 'MGS.B', cog => 'COGB', gene => 'p1', rank => 1 },
+	{ mgs => 'MGS.B', cog => 'COGC', gene => 'p2', rank => 2 },
+	{ mgs => 'MGS.B', cog => 'COGD', gene => 'p3', rank => 3 },
+	{ mgs => 'MGS.B', cog => 'COGE', gene => 'p4', rank => 4 },
+	{ mgs => 'MGS.B', cog => 'COGA', gene => 'p5', rank => 5 },
+	{ mgs => 'MGS.B', cog => 'COGF', gene => 'p6', rank => 6 },
+	{ mgs => 'MGS.B', cog => 'COGG', gene => 'p7', rank => 7 },
+);
+my %budget_pairs = ("p0\tp5" => 1);
+my ($budget_records, $prebudget_excluded, $budget_candidates) =
+	preselect_locus_records(\@budget_records, 3, \%budget_pairs);
+is_deeply([map { $_->{gene} } @{$budget_records}], [qw(p0 p1 p2 p3 p4 p5)],
+	'pre-budgeting retains a conservative backfill prefix and a late merge partner');
+is($prebudget_excluded, 2,
+	'pre-budgeting counts only records proven unable to enter the resolved budget');
+is_deeply([sort keys %{$budget_candidates}], [qw(p0 p5)],
+	'pre-budgeting reuses the confirmed merge-candidate set');
+my %budget_proteins = map { $_->{gene} => $protein } @budget_records;
+my $full_budget_model = build_locus_groups(\@budget_records, {}, \%budget_proteins, {
+	allowed_merge_pairs => \%budget_pairs,
+	require_complete_linkage => 1,
+	allow_confirmed_cooccurrence => 1,
+});
+my $reduced_budget_model = build_locus_groups($budget_records, {}, \%budget_proteins, {
+	allowed_merge_pairs => \%budget_pairs,
+	require_complete_linkage => 1,
+	allow_confirmed_cooccurrence => 1,
+});
+is_deeply(
+	[map { [$_->{locus_id}, @{$_->{genes}}] } @{$reduced_budget_model->{groups}}[0 .. 2]],
+	[map { [$_->{locus_id}, @{$_->{genes}}] } @{$full_budget_model->{groups}}[0 .. 2]],
+	'pre-budgeted grouping exactly reproduces the full model first resolved loci',
+);
+
 is_deeply([Mods::MGSLocus::_members('>a__c_1, b__c_2 ,,c__c_3')],
 	[qw(a__c_1 b__c_2 c__c_3)],
 	'guarded member cleaning still strips markers, trims padding and drops blanks');
+
+# The context scan is a position-sorted bounded window. Pin both directions,
+# duplicate positions, the inclusive distance boundary, and the first excluded
+# position so an optimization cannot silently change the synteny model.
+my @window_records = map {
+	{ mgs => 'MGS.W', cog => "COG$_", gene => "w$_", rank => $_ }
+} (6, 1, 4, 2, 7, 3, 5);
+my %window_members = (
+	w1 => 'sW__ctgW_1',  w2 => 'sW__ctgW_1',
+	w3 => 'sW__ctgW_2',  w4 => 'sW__ctgW_6',
+	w5 => 'sW__ctgW_7',  w6 => 'sW__ctgW_12',
+	w7 => 'sW__ctgW_20',
+);
+my %window_context;
+accumulate_locus_context(\%window_context, \@window_records,
+	{ %window_members }, { sample_set_seeds => {}, context_distance => 5 });
+is_deeply($window_context{gene_context}, {
+	w1 => { map { ("MGS.W|COG$_" => 1) } qw(2 3 4) },
+	w2 => { map { ("MGS.W|COG$_" => 1) } qw(1 3 4) },
+	w3 => { map { ("MGS.W|COG$_" => 1) } qw(1 2 4 5) },
+	w4 => { map { ("MGS.W|COG$_" => 1) } qw(1 2 3 5) },
+	w5 => { map { ("MGS.W|COG$_" => 1) } qw(3 4 6) },
+	w6 => { 'MGS.W|COG5' => 1 },
+}, 'bounded gene-context window preserves duplicate, inclusive and excluded distances');
+
+my $window_member_context = member_context_map(\@window_records,
+	{ %window_members }, { context_distance => 5 });
+is_deeply($window_member_context->{'sW__ctgW_7'}, {
+	map { ("MGS.W|COG$_" => 1) } qw(3 4 6)
+}, 'bounded member-context window uses the same bidirectional neighbours');
+my $focused_window_member_context = member_context_map(\@window_records,
+	{ %window_members }, { context_distance => 5, context_seeds => { w5 => 1 } });
+is_deeply($focused_window_member_context, {
+	'sW__ctgW_7' => { map { ("MGS.W|COG$_" => 1) } qw(3 4 6) },
+}, 'focal member contexts retain lower-ranked neighbours but omit unused members');
 
 # The regression this guards: locus_context is summed from gene_context, and
 # choose_locus_candidate consults it for EVERY locus whose sample offers more

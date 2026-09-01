@@ -9,6 +9,7 @@ use Getopt::Long qw( GetOptions );
 use File::Path qw(make_path remove_tree);
 use File::Glob qw(bsd_glob);
 use File::Basename qw(basename dirname);
+use File::Copy qw(copy);
 use File::Spec;
 use File::Temp qw(tempdir tempfile);
 use Cwd qw(abs_path getcwd);
@@ -28,7 +29,8 @@ use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::math qw(quantileArray);
 use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate member_context_map
-	accumulate_locus_context merge_candidate_seeds protein_kmer_similarity robust_depth_mask);
+	accumulate_locus_context merge_candidate_seeds preselect_locus_records
+	protein_kmer_similarity robust_depth_mask);
 use Mods::MosaicLoci qw(read_mosaic_catalogue);
 use Mods::StrainQC qw(breakpoint_gene_mask abundance_pattern_mask);
 use Mods::StrainParts qw(
@@ -308,7 +310,11 @@ my $completionMessage = "";
 #	optionally capping how much of the wave is queued at once
 #1.53: make population genetics opt-in and forward -popGenCategory, the map
 #	columns that group its per-sample statistics
-my $version = 1.53;
+#1.54: keep every run-derived MGS guide product inside the output directory, so
+#	concurrent runs over one catalogue cannot share or delete each other's files
+#1.55: publish the catalogue context actually computed by the parent, pre-budget
+#	its focal loci without dropping lower-ranked neighbours, and report true scan time
+my $version = 1.55;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -4025,35 +4031,63 @@ sub phase1LocusModelState {
 sub publishPhase1LocusModel {
 	my ($groups, $locusContext, $base, $fingerprint, $counters) = @_;
 	make_path($base) unless -d $base;
-	my @groupRows = map {
-		join("\t", $_->{mgs}, $_->{cog}, $_->{primary_gene}, $_->{rank},
-			join(",", @{$_->{genes}}))
-	} @{$groups};
-	my @contextRows;
-	for my $group (@{$groups}) {
-		my $context = $locusContext->{$group->{locus_id}} || {};
-		for my $token (sort keys %{$context}) {
-			push @contextRows, join("\t", $group->{locus_id}, $token,
-				$context->{$token});
+	my $groupPath = File::Spec->catfile($base, 'locus_groups.tsv');
+	my $contextPath = File::Spec->catfile($base, 'locus_context.tsv');
+	my $groupTemporary = "$groupPath.tmp.$$";
+	my $contextTemporary = "$contextPath.tmp.$$";
+	my ($groupRows, $contextRows) = (0, 0);
+	my $ok = eval {
+		my $groupOut = retry_open('>', $groupTemporary,
+			label => 'create common Phase-I locus groups');
+		for my $group (@{$groups}) {
+			print {$groupOut} join("\t", $group->{mgs}, $group->{cog},
+				$group->{primary_gene}, $group->{rank},
+				join(",", @{$group->{genes}})), "\n"
+				or die "Cannot write $groupTemporary: $!\n";
+			$groupRows++;
 		}
+		retry_close($groupOut, 'close common Phase-I locus groups');
+		retry_rename($groupTemporary, $groupPath,
+			label => 'publish common Phase-I locus groups');
+
+		my $contextOut = retry_open('>', $contextTemporary,
+			label => 'create common Phase-I locus contexts');
+		for my $group (@{$groups}) {
+			my $context = $locusContext->{$group->{locus_id}} || {};
+			for my $token (sort keys %{$context}) {
+				print {$contextOut} join("\t", $group->{locus_id}, $token,
+					$context->{$token}), "\n"
+					or die "Cannot write $contextTemporary: $!\n";
+				$contextRows++;
+			}
+		}
+		retry_close($contextOut, 'close common Phase-I locus contexts');
+		retry_rename($contextTemporary, $contextPath,
+			label => 'publish common Phase-I locus contexts');
+		1;
+	};
+	my $error = $@;
+	for my $temporary ($groupTemporary, $contextTemporary) {
+		retry_unlink($temporary, fatal => 0,
+			label => 'clean incomplete common Phase-I locus model')
+			if -e $temporary || -l $temporary;
 	}
-	my $groupText = @groupRows ? join("\n", @groupRows)."\n" : '';
-	my $contextText = @contextRows ? join("\n", @contextRows)."\n" : '';
-	atomic_write_text(File::Spec->catfile($base, 'locus_groups.tsv'), $groupText,
-		label => 'publish common Phase-I locus groups');
-	atomic_write_text(File::Spec->catfile($base, 'locus_context.tsv'), $contextText,
-		label => 'publish common Phase-I locus contexts');
+	die $error unless $ok;
+	my $groupBytes = -s $groupPath;
+	my $contextBytes = -s $contextPath;
+	die "Cannot size published common Phase-I locus model\n"
+		unless defined($groupBytes) && defined($contextBytes);
 	my @columns = qw(version fingerprint groups group_bytes context_rows
 		context_bytes ranked_records merged_seeds linkage_rejections budget_excluded);
 	atomic_write_text(File::Spec->catfile($base, 'manifest.tsv'),
 		join("\t", @columns)."\n"
-		.join("\t", 1, $fingerprint, scalar(@groupRows), length($groupText),
-			scalar(@contextRows), length($contextText),
+		.join("\t", 1, $fingerprint, $groupRows, $groupBytes,
+			$contextRows, $contextBytes,
 			$counters->{ranked_records}, $counters->{merged_seeds},
 			$counters->{linkage_rejections}, $counters->{budget_excluded})."\n",
 		label => 'publish common Phase-I locus-model manifest');
-	print "Published common Phase-I locus model: ".scalar(@groupRows)." locus/loci, "
-		.scalar(@contextRows)." context record(s); cache=$base\n";
+	print "Published common Phase-I locus model: $groupRows locus/loci, "
+		."$contextRows context record(s); cache=$base\n";
 	return 1;
 }
 
@@ -4116,9 +4150,17 @@ sub loadPhase1LocusModel {
 #published per-worker shards can be streamed one at a time. Only when no shard
 #set exists does this fall back to a single whole-catalogue read.
 sub catalogueLocusContext {
-	my ($accumulator, $records, $mergeCandidates, $clusterIndex) = @_;
-	# Only the sample sets may be restricted: gene contexts feed every locus.
-	my %options = (sample_set_seeds => $mergeCandidates, consume_cluster_members => 1);
+	my ($accumulator, $records, $mergeCandidates, $clusterIndex, $scanOptions) = @_;
+	$scanOptions ||= {};
+	my $scanStarted = $scanOptions->{started} // time;
+	# Sample sets are needed only for possible merges. Context is focal only for
+	# records that can survive the final budget, while every ranked record remains
+	# available as a neighbour on those focal contigs.
+	my %options = (
+		sample_set_seeds => $mergeCandidates,
+		context_seeds => $scanOptions->{context_seeds},
+		consume_cluster_members => 1,
+	);
 	if ($maxSubJob > 1 && ref($phase1ShardPaths) eq 'ARRAY'
 			&& @{$phase1ShardPaths} == $maxSubJob) {
 		my $scanned = 0;
@@ -4140,7 +4182,8 @@ sub catalogueLocusContext {
 			$clusters = {};
 			$scanned++;
 			stepProgress("catalogue-wide locus-model scan", $scanned, $maxSubJob,
-				$^T, "context_seeds=".scalar(keys %{$accumulator->{gene_context} || {}}));
+				$scanStarted,
+				"context_seeds=".scalar(keys %{$accumulator->{gene_context} || {}}));
 		}
 		return "streamed_$scanned/${maxSubJob}_shards" if $scanned == $maxSubJob;
 		%{$accumulator} = ();
@@ -4166,6 +4209,10 @@ sub buildSelectedLocusGroups {
 			# The parent publishes member contexts per worker slice instead of
 			# retaining a catalogue-wide copy it would immediately discard.
 			include_member_context => $options->{member_context} ? 1 : 0,
+			# A streamed catalogue scan already derived these seed summaries. Keep
+			# the handoff explicit: silently dropping it publishes an empty context
+			# model after spending hours computing the data.
+			precomputed_context => $options->{precomputed_context},
 			# A catalogue-wide membership map is discarded straight after the
 			# build, so release its member strings as they are summarized.
 			consume_cluster_members => $options->{consume} ? 1 : 0,
@@ -4176,8 +4223,21 @@ sub buildSelectedLocusGroups {
 			allow_confirmed_cooccurrence => 1,
 		},
 	);
+	if ($options->{precomputed_context}
+			&& keys %{$options->{precomputed_context}{gene_context} || {}}) {
+		my $hasContext = 0;
+		for my $context (values %{$locus_model->{locus_context} || {}}) {
+			if (keys %{$context}) {
+				$hasContext = 1;
+				last;
+			}
+		}
+		die "Catalogue-wide locus context was computed but grouping retained no context; "
+			."refusing to publish an empty Phase-I context model\n"
+			unless $hasContext;
+	}
 	my @groups = @{$locus_model->{groups}};
-	my $budgetExcluded = 0;
+	my $budgetExcluded = $options->{prebudget_excluded} || 0;
 	if (!$taxonAwareLocusSelection) {
 		my %selected_loci_by_mgs;
 		@groups = grep {
@@ -4192,7 +4252,7 @@ sub buildSelectedLocusGroups {
 	}
 	return (\@groups, $locus_model->{locus_context}, $locus_model->{member_context},
 		{
-			ranked_records => scalar(@{$records}),
+			ranked_records => $options->{ranked_records_total} // scalar(@{$records}),
 			merged_seeds => $locus_model->{merged_seeds} || 0,
 			linkage_rejections => $locus_model->{incomplete_linkage_rejections} || 0,
 			budget_excluded => $budgetExcluded,
@@ -4295,6 +4355,21 @@ sub prepGene2MGS{
 	my %modelMGSseen;
 	$modelMGSseen{$_->{mgs}} = 1 for @records;
 	my @modelMGS = sort keys %modelMGSseen;
+	my ($modelRecordsRef, $prebudgetExcluded, $prebudgetMergeCandidates) =
+		(\@records, 0, undef);
+	if ($maxSubJob > 1 && !$taxonAwareLocusSelection) {
+		($modelRecordsRef, $prebudgetExcluded, $prebudgetMergeCandidates) =
+			preselect_locus_records(\@records, $treeLocusBudget,
+				\%ConfirmedMosaicPairs);
+	}
+	my $model_record_count = scalar(@{$modelRecordsRef});
+	my %modelContextSeeds = map { $_->{gene} => 1 } @{$modelRecordsRef};
+	print "Phase-I context pre-budget: $model_record_count/$ranked_record_count "
+		."ranked seed(s) remain focal"
+		.($prebudgetExcluded
+			? "; $prebudgetExcluded lower-ranked seed(s) retained only as neighbours"
+			: q{})
+		."\n" if $maxSubJob > 1;
 
 	# Same-COG seeds merge into one locus using catalogue-wide co-occurrence and
 	# synteny context.  A sample-restricted shard cannot reconstruct either, so
@@ -4346,13 +4421,14 @@ sub prepGene2MGS{
 				."the other workers\n") if $subJob;
 			my $fullScanStarted = time;
 			my %catalogueContext;
-			my $mergeCandidates =
-				merge_candidate_seeds(\@records, \%ConfirmedMosaicPairs);
+			my $mergeCandidates = $prebudgetMergeCandidates
+				|| merge_candidate_seeds($modelRecordsRef, \%ConfirmedMosaicPairs);
 			# The scan always runs, even with no mosaic pair to merge: every locus
 			# needs its synteny context so that a sample offering two candidates
 			# can still be resolved instead of losing the locus as ambiguous.
 			my $scanScope = catalogueLocusContext(\%catalogueContext, \@records,
-				$mergeCandidates, $cluster_index);
+				$mergeCandidates, $cluster_index,
+				{ started => $fullScanStarted, context_seeds => \%modelContextSeeds });
 			print "Catalogue-wide locus-model scan: "
 				.scalar(keys %{$catalogueContext{gene_context} || {}})
 				." seed(s) with synteny context, "
@@ -4360,8 +4436,12 @@ sub prepGene2MGS{
 				."sample set; source=$scanScope; elapsed "
 				.timeNice(time - $fullScanStarted)."\n";
 			($selectedGroupsRef, $modelLocusContext, undef, $modelCounters) =
-				buildSelectedLocusGroups(\@records, {},
-					{ member_context => 0, precomputed_context => \%catalogueContext });
+				buildSelectedLocusGroups($modelRecordsRef, {}, {
+					member_context => 0,
+					precomputed_context => \%catalogueContext,
+					prebudget_excluded => $prebudgetExcluded,
+					ranked_records_total => $ranked_record_count,
+				});
 			$modelSource = $subJob ? 'catalogue_wide_rebuild' : 'catalogue_wide_build';
 			if (!$subJob) {
 				# Publication must succeed before workers are submitted: without it
@@ -4385,7 +4465,12 @@ sub prepGene2MGS{
 	}
 
 	if ($selectedGroupsRef) {
-		$modelMemberContext = member_context_map(\@records, $cl2gene);
+		my %selectedContextSeeds;
+		for my $group (@{$selectedGroupsRef}) {
+			$selectedContextSeeds{$_} = 1 for @{$group->{genes} || []};
+		}
+		$modelMemberContext = member_context_map(\@records, $cl2gene,
+			{ context_seeds => \%selectedContextSeeds });
 	} else {
 		($selectedGroupsRef, $modelLocusContext, $modelMemberContext, $modelCounters) =
 			buildSelectedLocusGroups(\@records, $cl2gene,
@@ -4412,6 +4497,8 @@ sub prepGene2MGS{
 	$COGprios = $new_priorities;
 	stepComplete("locus-group construction", $modelSubstepStarted,
 		"worker=$subJob", "ranked_clusters=$ranked_record_count",
+		"context_focal_clusters=$model_record_count",
+		"prebudget_excluded=$prebudgetExcluded",
 		"resolved_loci=".scalar(@selected_locus_groups),
 		"merged_seeds=$modelCounters->{merged_seeds}",
 		"linkage_rejections=$linkage_rejections",
@@ -4798,7 +4885,39 @@ sub prepRun{
 
 
 	if ($mode eq "MGS" || $mode eq "MGSall"){
-		my $sortedMGS = "$MGSfile.srt";
+		# Everything this run derives from the MGS guide belongs to the run, not to
+		# the shared catalogue directory. Two strain_within runs over one catalogue
+		# used to write - and delete - the same .srt/.gene2MGS pair beside the input.
+		# The sorter names its output after the guide it is given, so staging the
+		# guide inside the output directory keeps every derived file per-run without
+		# touching anything the other run may be reading.
+		my $stagedGuide = File::Spec->catfile($outD, basename($MGSfileOri));
+		# The sorter also reads an optional occurrence table beside the guide, using
+		# this exact derivation; stage it under the matching name or the prevalence
+		# estimate silently changes.
+		my $observedName = sub {
+			my ($path) = @_;
+			$path =~ s/\.core$//;
+			return "$path.obs";
+		};
+		my $stageGuideInput = sub {
+			my ($source, $target) = @_;
+			return 0 unless -e $source;
+			return 1 if -e $target || -l $target;
+			my $resolved = abs_path($source);
+			return 1 if defined($resolved) && symlink($resolved, $target);
+			# A filesystem without symlinks still gets an exact copy.
+			copy($source, $target)
+				or die "Cannot stage MGS input $source as $target: $!\n";
+			return 1;
+		};
+		my $stageGuide = sub {
+			make_path($outD) unless -d $outD;
+			$stageGuideInput->($MGSfileOri, $stagedGuide);
+			$stageGuideInput->($observedName->($MGSfileOri),
+				$observedName->($stagedGuide));
+		};
+		my $sortedMGS = "$stagedGuide.srt";
 		if ($preparedMainBranchFastPath) {
 			$MGSfile = -s $sortedMGS ? $sortedMGS : $MGSfile;
 			$gene2taxF = "";
@@ -4812,20 +4931,18 @@ sub prepRun{
 			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
 			fastRemoveTree($outD);
 			fastRemoveTree($scratchD);
-			unlink $_ or die "Cannot remove stale $_: $!\n"
-				for grep { -f $_ || -l $_ } glob("$MGSfile.srt*");
-			symlink($MGSfile, $sortedMGS)
-				or die "Cannot link $sortedMGS to $MGSfile: $!\n";
+			$stageGuide->();
+			symlink($stagedGuide, $sortedMGS)
+				or die "Cannot link $sortedMGS to $stagedGuide: $!\n";
 		} elsif (!$onlySubmit || !-s $sortedMGS) {
 			print "base files missing.. preparing complete resubmission and recalc of data\n";
 			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
 			fastRemoveTree($outD);
 			fastRemoveTree($scratchD);
-			unlink $_ or die "Cannot remove stale $_: $!\n"
-				for grep { -f $_ || -l $_ } glob("$MGSfile.srt*");
+			$stageGuide->();
 			my $sortMGSgenes = getProgPaths("sortMGSGeneImport_scr");
 			my $cmd = $sortMGSgenes . " "
-				. join(" ", map { shellQuote($_) } ($GCd, $MGSfile, $useGTDBmg, $mode, $clusterID)) . "\n";
+				. join(" ", map { shellQuote($_) } ($GCd, $stagedGuide, $useGTDBmg, $mode, $clusterID)) . "\n";
 			print "$cmd\n";
 			systemW $cmd;
 			die "MGS sorting did not create $sortedMGS\n" unless -s $sortedMGS;
@@ -5136,7 +5253,13 @@ sub preparedMainBranchInputSet {
 		unless defined($outputDirectory) && -d $outputDirectory;
 	return (0, [], "MGS guide is unspecified")
 		unless defined($guide) && length($guide);
-	my $sortedGuide = $guide =~ /\.srt\z/ ? $guide : "$guide.srt";
+	# The sorted guide is a per-run product and now lives in the output directory.
+	# Runs made before that still have it beside the input, so accept either.
+	my $sortedGuide = $guide;
+	unless ($guide =~ /\.srt\z/) {
+		$sortedGuide = File::Spec->catfile($outputDirectory, basename($guide).'.srt');
+		$sortedGuide = "$guide.srt" if !-s $sortedGuide && -s "$guide.srt";
+	}
 	$guide = $sortedGuide if -s $sortedGuide;
 	return (0, [], "MGS guide is absent") unless -s $guide;
 	open my $input, "<", $guide
@@ -5868,8 +5991,13 @@ sub phase1GuideStatFingerprint {
 	my $observation = $canonical;
 	$observation =~ s/\.core\z//;
 	$observation .= '.obs';
-	my @inputs = ($canonical, "$canonical.srt",
-		"$canonical.srt.gene2MGS", $observation);
+	# The sorted guide and its gene-to-MGS index are per-run products in the output
+	# directory. Track them there, still accepting the pre-relocation layout beside
+	# the input so an older run's contract keeps describing the same files.
+	my $staged = defined($outD) && length($outD)
+		? File::Spec->catfile($outD, basename($canonical)) : q{};
+	my $sorted = length($staged) && -s "$staged.srt" ? "$staged.srt" : "$canonical.srt";
+	my @inputs = ($canonical, $sorted, "$sorted.gene2MGS", $observation);
 	return sha256_hex(join("\0",
 		$fingerprintSchema,
 		map { phase1PathStatComponent($_, $contractVersion) } @inputs,

@@ -440,9 +440,10 @@ like($build_tree_locus_module,
 	'only the sample sets may be restricted to the seeds that can merge');
 like($build_tree_locus_module,
 	qr/\$sample_set->\{\$gene\}\{\$sample\} = 1 if \$wantSampleSet;.*?\$gene_context->\{\$entries\[\$i\]\[1\]\}\{\$token\}\+\+ if \$include_gene_context;/s,
-	'gene contexts are built for every seed, because every locus consults them to resolve paralogs');
-unlike($build_tree_locus_module, qr/\$relevantContigs|\$prefilterContigs|context_seeds/,
-	'no contig prefilter survives: it could only skip work by dropping contexts that loci still need');
+	'gene contexts retain the same directed neighbour counts for each focal seed');
+like($build_tree_locus_module,
+	qr/my \$context_seeds = \$options->\{context_seeds\}.*?my %relevant_contigs;.*?\$relevant_contigs\{\$sample\}\{\$contig\} = 1.*?next if defined\(\$context_seeds\).*?!\$context_seeds->\{\$entries\[\$i\]\[1\]\}/s,
+	'pre-budgeting restricts focal contexts while retaining every ranked neighbour on their contigs');
 like($strain,
 	qr/# The scan always runs, even with no mosaic pair to merge.*?my \$scanScope = catalogueLocusContext\(/s,
 	'the catalogue-wide scan is unconditional, since locus context is needed with or without a merge');
@@ -463,7 +464,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.53;/,
+like($strain, qr/my \$version = 1\.55;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
@@ -475,8 +476,8 @@ like($strain,
 	qr/my \$phase1InputContractVersion = 3;.*?sub phase1PathStatComponent.*?different device number.*?\$contractVersion <= 2.*?\@metadata\[0, 1, 7, 9\].*?\@metadata\[1, 7, 9\]/s,
 	'Phase-I provenance excludes node-local device identity from current cross-node contracts');
 like($strain,
-	qr/sub phase1GuideStatFingerprint.*?strain-phase1-guide-stat-v2.*?strain-phase1-guide-stat-v3.*?\$canonical\.srt.*?\$canonical\.srt\.gene2MGS.*?\$observation/s,
-	'Phase-I provenance includes the original, sorted, indexed, and observation guide inputs');
+	qr/sub phase1GuideStatFingerprint.*?strain-phase1-guide-stat-v2.*?strain-phase1-guide-stat-v3.*?\$staged\.srt.*?\$sorted\.gene2MGS.*?\$observation/s,
+	'Phase-I provenance tracks the original guide plus the run-local sorted, indexed and observation inputs');
 like($strain,
 	qr/sub phase1CatalogStatFingerprint.*?subset\.cats.*?compl\.incompl\.\$identity\.fna.*?fna\.clstr\.idx.*?prot\.faa.*?eggNOGmapper_NOG\.geneAss.*?split\(\/,\/, \$mapSpec/s,
 	'Phase-I provenance includes each direct catalog, marker, annotation, and map input');
@@ -595,20 +596,32 @@ like($strain,
 	qr/sub catalogueLocusContext \{.*?sample_set_seeds => \$mergeCandidates.*?readClstrRevBinaryShard\(\$phase1ShardPaths->\[\$worker\].*?accumulate_locus_context\(\$accumulator.*?\$clusters = \{\};.*?return "streamed_/s,
 	'the catalogue-wide scan streams one published shard at a time instead of holding every sample');
 like($strain,
+	qr/sub catalogueLocusContext \{.*?my \$scanStarted = \$scanOptions->\{started\} \/\/ time.*?stepProgress\("catalogue-wide locus-model scan".*?\$scanStarted/s,
+	'catalogue scan progress uses the scan start rather than global process start');
+unlike($strain,
+	qr/stepProgress\("catalogue-wide locus-model scan", \$scanned, \$maxSubJob,\s*\$\^T/,
+	'catalogue scan progress no longer labels global runtime as step elapsed');
+like($strain,
 	qr/sub catalogueLocusContext \{.*?my \(undef, \$fullClusters\) = readClstrRev\(\$clusterIndex, 0, \$Gene2COG\);.*?return .whole_catalogue_read./s,
 	'a missing or unreadable shard set still falls back to one whole-catalogue read');
 like($strain,
 	qr/loadPhase1ClusterIndex\(\s*\$cluster_index, \$workerForSampleHR, \$mySamplesHR\);.*?if \(\$maxSubJob > 1\) \{\s*\$modelFingerprint/s,
 	'the worker slice is loaded before the model scan, so the published shards exist to stream');
 like($strain,
-	qr/buildSelectedLocusGroups\(\\\@records, \{\},\s*\{ member_context => 0, precomputed_context => \\%catalogueContext \}\)/s,
-	'grouping consumes the streamed summaries rather than a catalogue-wide member map');
+	qr/preselect_locus_records\(\\\@records, \$treeLocusBudget.*?context_seeds => \\%modelContextSeeds.*?buildSelectedLocusGroups\(\$modelRecordsRef, \{\}, \{.*?precomputed_context => \\%catalogueContext.*?prebudget_excluded => \$prebudgetExcluded/s,
+	'non-taxon-aware grouping pre-budgets focal contexts but retains merge backfill and streamed summaries');
+like($strain,
+	qr/sub buildSelectedLocusGroups.*?precomputed_context => \$options->\{precomputed_context\}.*?Catalogue-wide locus context was computed but grouping retained no context/s,
+	'the workflow forwards precomputed context and refuses to publish a silently empty handoff');
 like($build_tree_locus_module,
 	qr/if \(my \$precomputed = \$options->\{precomputed_context\}\).*?\$sample_set = \{ %\{\$precomputed->\{sample_set\} \|\| \{\}\} \}/s,
 	'precomputed summaries are shallow-copied so grouping cannot consume the caller index');
 like($strain,
-	qr/member_context_map\(\\\@records, \$cl2gene\)/,
-	'split workers derive only their own member contexts around the shared locus model');
+	qr/my %selectedContextSeeds.*?member_context_map\(\\\@records, \$cl2gene,\s*\{ context_seeds => \\%selectedContextSeeds \}\)/s,
+	'split workers derive focal member contexts while retaining all ranked neighbours');
+like($strain,
+	qr/sub publishPhase1LocusModel.*?retry_open\('>', \$groupTemporary.*?print \{\$groupOut\}.*?retry_open\('>', \$contextTemporary.*?print \{\$contextOut\}.*?contextRows\+\+/s,
+	'the corrected nonempty common model is streamed instead of duplicated in row arrays and strings');
 like($strain,
 	qr/stepComplete\("locus-group construction".*?model_source=\$modelSource/s,
 	'the locus-model source is reported so divergent worker models are visible in the logs');
@@ -1200,5 +1213,28 @@ like($strain,
 	'a worker keeps catalogue proteins only for loci that can be ambiguous, and drops the seed index');
 is(scalar(() = $strain =~ /\$catalogProteins = \\\%keptProteins;/g), 1,
 	'the protein release happens in exactly one place, the split-worker branch');
+
+
+# Two strain_within runs over one gene catalogue must not share, overwrite or
+# delete each other's derived MGS guide. The sorter names its output after the
+# guide it is handed, so the guide is staged inside the output directory and
+# every product follows it there.
+like($strain,
+	qr/my \$stagedGuide = File::Spec->catfile\(\$outD, basename\(\$MGSfileOri\)\);/,
+	'the MGS guide is staged inside the run output directory');
+like($strain,
+	qr/my \$sortedGuide = \$guide;.*?File::Spec->catfile\(\$outputDirectory, basename\(\$guide\)\.'\.srt'\)/s,
+	'a resume looks for the sorted guide in its own output directory');
+like($strain,
+	qr/\$observedName->\(\$MGSfileOri\),\s*\$observedName->\(\$stagedGuide\)/s,
+	'the optional occurrence table is staged under the name the sorter derives, so prevalence is unchanged');
+like($strain,
+	qr/\$sortMGSgenes \. " "\s*\. join\(" ", map \{ shellQuote\(\$_\) \} \(\$GCd, \$stagedGuide,/s,
+	'the sorter is run on the staged guide, so it writes its output per-run');
+unlike($strain, qr/glob\("\$MGSfile\.srt\*"\)/,
+	'no run deletes the catalogue-level guide products another run may be reading');
+like($strain,
+	qr/symlink\(\$stagedGuide, \$sortedMGS\)/,
+	'MGSall mode links its sorted guide inside the output directory too');
 
 done_testing();
