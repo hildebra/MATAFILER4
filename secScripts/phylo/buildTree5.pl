@@ -2358,14 +2358,16 @@ if ($taxonAwareLocusSelection && $cogCats ne "") {
 			. " post-QC loci; reports: $treeD/taxon_aware_locus_selection.tsv, "
 			. "$treeD/taxon_aware_sample_selection.tsv, $backboneAudit, $placementAudit\n";
 		} else {
-			retry_unlink("$treeD/taxon_aware_backbone_eligibility.tsv");
+			# Backbone eligibility is also the generic sample-coverage audit when
+			# placement is disabled. Keep it for compactTaxonAwareDiagnostics() to
+			# publish instead of silently deleting the evidence behind removals.
 			retry_unlink("$treeD/taxon_aware_placement_eligibility.tsv");
 			print "Taxon-aware final selection retained "
 				. scalar(@{$finalSelection->{alignments}}) . "/"
 				. $postQCAlignmentCount
 				. " post-QC loci; placement disabled, reports: "
 				. "$treeD/taxon_aware_locus_selection.tsv, "
-				. "$treeD/taxon_aware_sample_selection.tsv\n";
+				. "$treeD/taxon_aware_sample_selection.tsv, $backboneAudit\n";
 		}
 	}
 }

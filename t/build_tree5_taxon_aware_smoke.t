@@ -329,9 +329,11 @@ SKIP: {
 	my $alignedLoci = attrition_metric($coverageOutput, 'post_qc_loci') // 0;
 	skip 'no locus was aligned, so the coverage filter had no input', 2
 		unless $alignedLoci =~ /^\d+$/ && $alignedLoci > 0;
-	ok(-s File::Spec->catfile($coverageOutput, 'phylo',
-			'taxon_aware_backbone_eligibility.tsv'),
-		'the coverage audit is published whether or not placement is enabled');
+	my $coverageDiagnostics = File::Spec->catfile(
+		$coverageOutput, 'phylo', 'taxon_aware_diagnostics.tsv');
+	like(slurp($coverageDiagnostics),
+		qr/^## taxon_aware_backbone_eligibility\.tsv\nsample\tselected_loci\tselected_nt\tbackbone_eligible\treason/m,
+		'the coverage audit is consolidated whether or not placement is enabled');
 	cmp_ok(attrition_metric($coverageOutput, 'coverage_excluded_samples'), '>', 0,
 		'a demanding -relativeNTFraction removes low-coverage samples from the tree');
 }

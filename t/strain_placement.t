@@ -277,7 +277,7 @@ write_file($qc, join('',
 	"MGS1\tA\tbackbone\t0\t0\t20\n",
 	"MGS1\tA\tplacement\t0.4\t0\t12\n",
 ));
-is(read_sample_qc($qc)->{A}, 'placement',
-	'placement status dominates duplicate QC rows');
+is(read_sample_qc($qc)->{A}, 'mixed_strain',
+	'the worst canonical QC verdict dominates duplicate legacy-status rows');
 
 done_testing();

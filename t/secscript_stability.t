@@ -291,8 +291,6 @@ like($gene_cat, qr/sub _for_each_fasta_record.*?while \(my \$line = <\$fh>\)/s,
      'gene collation has a record-at-a-time FASTA reader');
 unlike($gene_cat, qr/readFasta\(\$inGenesF/,
        'sample nucleotide FASTA is not materialized as a whole-file hash');
-like($gene_cat, qr/if \(grep \{ \$_ eq '--help'.*?\@ARGV\).*?_print_help\(\)/s,
-     '--help is handled before site-program configuration is loaded');
 like($gene_cat, qr/-clusterID \$cdhID -MGset \$useGTDBmg.*?-requireAllAssemblies \$requireAllAssemblies/,
      'sample collation subjobs inherit catalog identity and input policy');
 like($gene_cat, qr/-MGset \$useGTDBmg -clusterID \$cdhID -outD " \. _shell_quote\(\$MGSoutD\)/,

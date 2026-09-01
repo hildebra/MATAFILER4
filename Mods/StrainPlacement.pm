@@ -231,7 +231,12 @@ sub split_strict_backbone {
 	my $q90 = _quantile(0.90, values %informative);
 	my (%classification_reason, %requested_reason, @backbone, @placement, @excluded);
 	for my $id (@ids) {
-		my $sampleLocusQC = ($status->{$id} // '') eq 'mixed_strain';
+		# read_sample_qc() returns canonical verdicts, but this exported helper is
+		# also used directly by callers that may still carry the documented legacy
+		# backbone/placement spellings. Apply the same compatibility mapping here so
+		# the route does not depend on which public entry point supplied the hash.
+		my $sampleLocusQC =
+			canonical_sample_qc_status($status->{$id}) eq 'mixed_strain';
 		if (($informative{$id} // 0) == 0) {
 			push @excluded, $id;
 			$classification_reason{$id} = 'no_informative_alignment_sites';

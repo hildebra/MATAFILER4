@@ -102,6 +102,7 @@ BAIL_OUT('Cannot extract staged strain finalization helpers')
 my $staged_helpers = <<'PERL';
 package TestBuildTreeStagedInputs;
 use Mods::GenoMetaAss qw(fileGZs gzipopen);
+use Mods::StrainPlacement qw(canonical_sample_qc_status);
 sub retry_rename {
 	my ($from, $to, %options) = @_;
 	rename $from, $to or die "Cannot rename $from to $to: $!\n";
