@@ -74,7 +74,7 @@ use Mods::Binning qw (getBinSubdirName createBin2 createBinCtgs runMetaBat runCh
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid read_checkpoint);
 use Mods::WorkflowResilience qw(
 	retry_unlink retry_rename atomic_write_text
-	write_workflow_record preflight_directory preflight_capacity
+	write_workflow_record acquire_workflow_lock preflight_directory preflight_capacity
 );
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 
@@ -413,6 +413,23 @@ _mgs_workflow_stage('stage-1-clustering');
 my $cmSuffix = ".cm"; $cmSuffix = ".cm2" if ($useCheckM2); 
 
 my $invalidateMGSDerivatives = sub {
+	# strain_within keeps this sibling lock for its complete parent lifetime.
+	# Acquire the identical lock before invalidating anything, including when
+	# within_phylo is currently absent, so a clustering redo cannot partially
+	# delete an active strain generation or its upstream tree inputs.
+	my $strainOutput = "$outD/within_phylo/";
+	my $lockBase = File::Spec->canonpath(File::Spec->rel2abs($strainOutput));
+	$lockBase =~ s{[\\/]+\z}{};
+	my $strainLockPath = "$lockBase.strain_within.lock";
+	my $host = $ENV{HOSTNAME} // $ENV{HOST} // 'unknown';
+	my $job = $ENV{SLURM_JOB_ID} // $ENV{JOB_ID} // $ENV{LSB_JOBID} // 'none';
+	my $strainInvalidationLock = acquire_workflow_lock(
+		$strainLockPath,
+		label => "MGS derivative invalidation for $strainOutput",
+		owner => join(' ', "pid=$$", "host=$host", "job=$job",
+			'started='.time, "redoCluster=$rewrClusterMAGs"),
+	);
+
 	for my $derived ($finalClustersFilt, "${finalClustersFilt}.cnts", "${finalClusters2}.ext") {
 		retry_unlink($derived, label => 'invalidate MGS assignment derivative')
 			if -e $derived;

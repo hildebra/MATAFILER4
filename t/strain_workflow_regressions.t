@@ -520,8 +520,11 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.55;/,
+like($strain, qr/my \$version = 1\.56;/,
 	'workflow behavior changes retain an explicit version marker');
+like($strain,
+	qr/my \$resumeOutD = .*?my \$parentRunLock;.*?if \(!\$subJob\).*?\$parentRunLockPath = "\$lockBase\.strain_within\.lock".*?acquire_workflow_lock\(.*?prepRun\(\);/s,
+	'the parent acquires a stable sibling lock before prepRun can remove output or scratch state');
 like($strain,
 	qr/my \$SNPcaller = "MPI";.*?"SNPcaller=s"\s*=> .*?SNPcaller.*?-SNPcaller must be MPI or FB.*?genes\.shrtHD\.SNPc\.\$\{SNPcaller\}\.fna\.gz.*?allSNP\.\$\{SNPcaller\}\.vcf\.gz/s,
 	'strain Phase I selects MPI or FB caller-specific consensus and VCF filenames');

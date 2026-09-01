@@ -46,6 +46,9 @@ write_file(File::Spec->catfile($tmp, 'groups.obs'), "MGS1\t10\n");
 my $sorter = File::Spec->catfile(
 	$Bin, '..', 'secScripts', 'MGS', 'resortMGSgenes4importance.pl',
 );
+my $sorter_source = slurp($sorter);
+like($sorter_source, qr/Can't open temporary outfile \$tmpout: \$!\\n/,
+	'sorter open failures retain the operating-system reason');
 my $sorter_err = gensym;
 my $sorter_pid = open3(
 	undef, my $sorter_out, $sorter_err,
@@ -382,6 +385,11 @@ like(
 	$mgs_entrypoint,
 	qr/my \$ph1flag = \$stage1ResumeValid \? 0 : 1;.*?if \(\$ph1flag\) \{.*?glob\("\$outD\/\$BinnerShrt\.clusters\*"\).*?\$invalidateMGSDerivatives->\(\);.*?\$recoverMissingActiveMGS->\(\) unless \$ph1flag;/s,
 	"every Stage I rebuild removes stale core/downstream derivatives before clustering",
+);
+like(
+	$mgs_entrypoint,
+	qr/my \$invalidateMGSDerivatives = sub \{.*?\$strainLockPath = "\$lockBase\.strain_within\.lock";.*?acquire_workflow_lock\(.*?for my \$derived .*?for my \$phyloDir/s,
+	"MGS invalidation acquires the strain sibling lock before deleting any derivative",
 );
 like(
 	$mgs_entrypoint,

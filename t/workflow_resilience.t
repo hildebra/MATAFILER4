@@ -9,7 +9,8 @@ use Test::More;
 use lib File::Spec->catdir($Bin, '..');
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename
-	atomic_write_text write_workflow_record preflight_executable preflight_directory filesystem_capacity
+	atomic_write_text write_workflow_record acquire_workflow_lock
+	preflight_executable preflight_directory filesystem_capacity
 );
 
 my ($attempts, @sleeps);
@@ -75,4 +76,30 @@ my $record_text = do { local $/; <$record_fh> };
 close $record_fh;
 like($record_text, qr/^status\tstage\ttimestamp\tpid\treason\nrunning\ttest-stage\t\d+\t\d+\tline break\n$/,
 	'workflow records are structured and single-line safe');
+
+my $lock_path = File::Spec->catfile($directory, 'controller.lock');
+my $first_lock = acquire_workflow_lock(
+	$lock_path, label => 'test controller', owner => "pid=101\thost=test\n",
+);
+ok($first_lock, 'a workflow controller acquires an unowned lock');
+open my $lock_owner, '<', $lock_path or die "Cannot read $lock_path: $!";
+is(do { local $/; <$lock_owner> }, "pid=101 host=test\n",
+	'lock ownership is immediately visible and normalized to one line');
+close $lock_owner;
+my $second_lock_error = '';
+eval {
+	acquire_workflow_lock(
+		$lock_path, label => 'test controller', owner => 'pid=202 host=test',
+	);
+	1;
+} or $second_lock_error = $@;
+like($second_lock_error,
+	qr/test controller is already active.*owner: pid=101 host=test/,
+	'a concurrent controller is rejected with the active owner identity');
+close $first_lock or die "Cannot release $lock_path: $!";
+my $replacement_lock = acquire_workflow_lock(
+	$lock_path, label => 'test controller', owner => 'pid=303 host=test',
+);
+ok($replacement_lock, 'the persistent lock path can be reacquired after owner exit');
+close $replacement_lock or die "Cannot release replacement $lock_path: $!";
 done_testing();

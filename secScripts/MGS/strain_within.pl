@@ -43,7 +43,7 @@ use Mods::SlurmAccounting qw(
 );
 use Mods::WorkflowResilience qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
-	atomic_write_text write_workflow_record
+	atomic_write_text write_workflow_record acquire_workflow_lock
 );
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 use Mods::StrainSampleStats qw(
@@ -314,7 +314,9 @@ my $completionMessage = "";
 #	concurrent runs over one catalogue cannot share or delete each other's files
 #1.55: publish the catalogue context actually computed by the parent, pre-budget
 #	its focal loci without dropping lower-ranked neighbours, and report true scan time
-my $version = 1.55;
+#1.56: serialize parent controllers per output so an accidental concurrent redo
+#	cannot park/delete a live run's staged guide, worker scratch, or published state
+my $version = 1.56;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1000,6 +1002,26 @@ my $resumeBindir = $MGSfile;
 $resumeBindir =~ s/[^\/]+$//;
 $resumeBindir = $GCd if $resumeBindir eq "";
 my $resumeOutD = length($outDpre) ? $outDpre : "$resumeBindir/intra_phylo/";
+# The output itself is deliberately replaceable during a full rebuild, so its
+# lock cannot live underneath that tree: fastRemoveTree would rename it away and
+# a second controller could lock a new inode at the recreated path. Keep one
+# stable sibling lock open for the lifetime of every parent controller. Split
+# workers are part of that controller's generation and must not contend for it.
+my $parentRunLock;
+if (!$subJob) {
+	my $lockBase = File::Spec->canonpath(File::Spec->rel2abs($resumeOutD));
+	$lockBase =~ s{[\\/]+\z}{};
+	my $parentRunLockPath = "$lockBase.strain_within.lock";
+	my $host = $ENV{HOSTNAME} // $ENV{HOST} // 'unknown';
+	my $job = $ENV{SLURM_JOB_ID} // $ENV{JOB_ID} // $ENV{LSB_JOBID} // 'none';
+	$parentRunLock = acquire_workflow_lock(
+		$parentRunLockPath,
+		label => "strain_within parent for $resumeOutD",
+		owner => join(' ', "pid=$$", "host=$host", "job=$job",
+			'started='.time, "redo=$redoMode", "onlySubmit=$onlySubmit"),
+	);
+	print "Acquired exclusive strain parent lock: $parentRunLockPath\n";
+}
 # Contract validation happens before prepRun() assigns $outD. Fingerprint the
 # same run-local sorted guide that prepRun() and the parent use after staging;
 # otherwise workers compare the catalogue-side .srt against the parent's staged

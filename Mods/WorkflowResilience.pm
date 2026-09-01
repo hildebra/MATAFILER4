@@ -4,14 +4,58 @@ use strict;
 use warnings;
 
 use Exporter qw(import);
+use Fcntl qw(:flock SEEK_SET);
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
 
 our @EXPORT_OK = qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
 	atomic_write_text write_workflow_record
+	acquire_workflow_lock
 	preflight_executable preflight_directory filesystem_capacity preflight_capacity
 );
+
+sub acquire_workflow_lock {
+	my ($path, %options) = @_;
+	die "acquire_workflow_lock requires a lock path\n"
+		unless defined($path) && length($path);
+	my $label = $options{label} || 'workflow';
+	my $parent = dirname($path);
+	make_path($parent) unless -d $parent;
+
+	open my $lock, '+>>', $path
+		or die "Cannot open $label lock $path: $!\n";
+	unless (flock($lock, LOCK_EX | LOCK_NB)) {
+		seek($lock, 0, SEEK_SET);
+		local $/;
+		my $owner = <$lock> // '';
+		close $lock;
+		$owner =~ s/[\t\r\n]+/ /g;
+		$owner =~ s/^\s+|\s+$//g;
+		die "$label is already active; refusing concurrent mutation of shared "
+			."workflow state at $path"
+			.(length($owner) ? "; owner: $owner" : '')
+			."\n";
+	}
+
+	my $owner = defined($options{owner}) ? $options{owner}
+		: join(' ', "pid=$$", 'started='.time);
+	$owner =~ s/[\t\r\n]+/ /g;
+	$owner =~ s/^\s+|\s+$//g;
+	$owner .= "\n";
+	truncate($lock, 0)
+		or die "Cannot reset $label lock owner at $path: $!\n";
+	seek($lock, 0, SEEK_SET)
+		or die "Cannot position $label lock owner at $path: $!\n";
+	my $offset = 0;
+	while ($offset < length($owner)) {
+		my $written = syswrite($lock, $owner, length($owner) - $offset, $offset);
+		die "Cannot record $label lock owner at $path: $!\n"
+			unless defined($written) && $written > 0;
+		$offset += $written;
+	}
+	return $lock;
+}
 
 sub retry_operation {
 	my (%options) = @_;

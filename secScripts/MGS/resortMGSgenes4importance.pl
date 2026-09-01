@@ -209,7 +209,7 @@ $requested = {};
 
 
 #my $sortedOutFile = "$MGSfile.srt";
-open O,">$tmpout" or die "can't open outfile $tmpout\n";
+open O,">$tmpout" or die "Can't open temporary outfile $tmpout: $!\n";
 open I,"<$MGSfile" or die "cant open infil $MGSfile\n";
 my $cn=0; my $rowCnt=0; my $MGScnt = 0; my $geneCnt=0;
 my $dupGenes=0; my $dupWarnLimit=5;
