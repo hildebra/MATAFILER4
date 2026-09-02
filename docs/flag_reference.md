@@ -14,9 +14,9 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 | `MATAF4.pl` | `4.46` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.58` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
-| `strain_within.pl` | `1.53` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
+| `strain_within.pl` | `1.57` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
 | `strain_within_2.2.pl` | `0.49` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
-| `buildTree5.pl` | `5.83` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
+| `buildTree5.pl` | `5.85` | Phylogenetic tree construction and related MSA/population-genetic analyses. |
 
 ## How to read the tables
 
@@ -588,11 +588,11 @@ The parent canonicalizes all unlimited extraction spellings to `-maxGenes 0` whe
 |---|---:|---|---|---|
 | `-GeneLengthMin` | float | `0.3` | stable | Minimum fraction of the locus length-Q90 used for sample/locus QC. |
 | `-GeneLengthIncludeMin` | float | `0.03` | stable | Lower post-QC fraction allowed into backbone and placement MSA input; it cannot exceed `-GeneLengthMin`. |
-| `-GenesPerSpecies` | float | `0.2` | stable | Backbone minimum relative locus coverage per sample. |
-| `-relativeNTFraction` | float | `0.1` | stable | Backbone minimum relative informative-NT coverage. |
+| `-GenesPerSpecies` | float | `0.2`, or an explicitly supplied `-relativeNTFraction` | stable | Backbone minimum relative locus coverage per sample. If only one of this pair is supplied, the other inherits the same value; supplying both preserves distinct thresholds. |
+| `-relativeNTFraction` | float | `0.1`, or an explicitly supplied `-GenesPerSpecies` | stable | Backbone minimum relative informative-NT coverage. If neither paired option is supplied, the established `0.2` locus/`0.1` NT defaults remain unchanged. |
 | `-NTfiltCount` | integer | `5000` | stable | Absolute backbone floor on informative NT after final MSA; roughly five well-covered loci. `0` leaves only the relative gates. |
-| `-placementGenesPerSpecies` | float | `0.04` | advanced | Placement minimum relative locus coverage. |
-| `-placementRelativeNTFraction` | float | `0.03` | advanced | Placement minimum relative informative-NT coverage. |
+| `-placementGenesPerSpecies` | float | `0.04`, or its explicitly supplied NT pair | advanced | Placement minimum relative locus coverage. If only one placement fraction is supplied, its partner inherits the same value. |
+| `-placementRelativeNTFraction` | float | `0.03`, or its explicitly supplied locus pair | advanced | Placement minimum relative informative-NT coverage. If neither is supplied, the established `0.04` locus/`0.03` NT defaults remain unchanged. |
 | `-placementNTfiltCount` | integer | mirrors `-NTfiltCount` | advanced | Placement absolute informative-NT floor. |
 | `-taxonAwareLocusSelection` | integer | `1` | stable | Enable robust-core plus taxon-rescue locus selection after MSA QC. |
 | `-taxonAwareRescueMinPrevalence` | float | `0.8` | advanced | Minimum usable-taxon prevalence for rescue/backfill loci. |
@@ -698,14 +698,14 @@ Phylogenetic tree construction and related MSA/population-genetic analyses.
 | `-superCheck` | integer | `0` | stable | Only check whether the supertree inputs are complete, then exit. |
 | `-fixHeaders` | integer | `0` | stable | fix the fasta headers, if too long or containing not allowed symbols (nwk reserved) |
 | `-useEte` | integer | `0` | stable | Use the ete3 toolkit workflow instead of the internal MSA/tree steps. |
-| `-relativeNTFraction` | float | `0.2` direct; `0.1` strain workflow | stable | Backbone minimum informative nucleotide content as a fraction of the final selected-sample Q90. This explicit name replaces the retired ambiguous `-NTfilt` switch. |
+| `-relativeNTFraction` | float | `0.2` direct; `0.1` strain workflow; or explicit `-GenesPerSpecies` | stable | Backbone minimum informative nucleotide content as a fraction of the final selected-sample Q90. If only one of this option and `-GenesPerSpecies` is supplied, the other inherits it; supplying both preserves distinct thresholds. This explicit name replaces the retired ambiguous `-NTfilt` switch. |
 | `-NTfiltPerGene` | float | `0.1` | stable | Per-locus minimum informative-NT fraction; sequences below it are dropped from that locus. |
 | `-GeneLengthIncludeMin` | float | `0.03` | stable | Lower per-sample locus-length-Q90 fraction admitted to MSA only after QC at `-NTfiltPerGene`; recovered-only observations do not count toward backbone/placement eligibility. |
-| `-GenesPerSpecies` | float | `0.1` | stable | Backbone minimum retained-locus count as a fraction of the final selected-sample Q90. |
+| `-GenesPerSpecies` | float | `0.1` direct; `0.2` strain workflow; or explicit `-relativeNTFraction` | stable | Backbone minimum retained-locus count as a fraction of the final selected-sample Q90. If neither paired option is supplied, their established script-specific defaults remain unchanged. |
 | `-fracMaxGenes90pct` | float | `0.25` | stable | Minimum locus size as a fraction of the category-size Q90. Set to `0` to retain every category containing at least one length-filtered sequence. |
 | `-NTfiltCount` | integer | `0` | stable | Backbone absolute minimum informative nucleotide count after final locus selection. |
-| `-placementRelativeNTFraction` | float | mirrors direct; `0.03` strain workflow | advanced | Placement equivalent of the relative NT coverage filter. The strain default retains samples with at least 3% of the selected-sample NT Q90, subject to the absolute shared-backbone overlap floor. |
-| `-placementGenesPerSpecies` | float | mirrors direct; `0.04` strain workflow | advanced | Placement equivalent of the relative locus-count filter. The strain default requires 4% of the selected-sample locus Q90, and a minimum of two loci is always enforced. |
+| `-placementRelativeNTFraction` | float | mirrors direct; `0.03` strain workflow; or explicit placement-gene pair | advanced | Placement equivalent of the relative NT coverage filter. If exactly one placement fraction is supplied, its partner inherits it. With neither supplied, direct BuildTree mirrors each backbone counterpart while strain workflow retains its `0.04` locus/`0.03` NT defaults. |
+| `-placementGenesPerSpecies` | float | mirrors direct; `0.04` strain workflow; or explicit placement-NT pair | advanced | Placement equivalent of the relative locus-count filter. A minimum of two loci is always enforced. |
 | `-placementNTfiltCount` | integer | mirrors `-NTfiltCount` | advanced | Placement equivalent of the absolute informative-NT filter, before `-placementMinOverlap` is applied. |
 | `-smplDef` | integer | `1` | stable | is the genome somehow quantified with a delimiter (_) ? |
 | `-smplSep` | string | `_` | stable | set the delimiter |
@@ -762,7 +762,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses.
 | `-rateMergeTargetSites` | integer | `30000` | advanced | Target effective called sites per initial partition. The initial target is `ceil(total effective called sites / target)`, then capped by `-rateMergeMaxBins`. |
 | `-rateMergeMinLoci` | integer | `20` | advanced | Merge a bin with its nearest normalized divergence/GC neighbour while it contains fewer loci than this threshold. |
 | `-rateMergeMinSites` | integer | `20000` | advanced | Merge a bin with its nearest neighbour while its effective called sites are below this threshold. A locus contributes its mean number of called bases across retained taxa, so missing data reduce support. |
-| `-taxonAwareLocusSelection` | integer | `1` | stable | Enable two-stage locus selection. A permissive robust/core-plus-rescue candidate set is aligned first; the final set is chosen after MSA QC using occupancy and parsimony-informative sites. Set to `0` for the legacy filters. |
+| `-taxonAwareLocusSelection` | integer | `1` | stable | Enable two-stage locus selection. A permissive robust/core-plus-rescue candidate set is aligned first; final ranking uses robust support, high-confidence occupancy/prevalence and the optional presorter. Recovered-only observations remain in the MSA but do not drive selection. Set to `0` for the legacy filters. |
 | `-taxonAwareMaxLoci` | integer | `500` | advanced | Maximum loci retained in the final concatenated alignment. |
 | `-taxonAwareCoreLoci` | integer | `400` | advanced | Highest-scoring robust loci selected before greedy taxon-coverage rescue. Must not exceed `-taxonAwareMaxLoci`. |
 | `-taxonAwareCandidateExtra` | integer | `150` | advanced | Extra pre-MSA candidate loci available to backfill alignment failures and MSA-QC rejections. |
@@ -773,9 +773,10 @@ Phylogenetic tree construction and related MSA/population-genetic analyses.
 | `-taxonAwareRescuePrevalenceMode` | string | `relative` | advanced | Interpret `-taxonAwareRescueMinPrevalence` relative to taxa with any usable locus (`relative`) or to all taxa (`absolute`). |
 | `-taxonAwarePresortWeight` | float | `0.15` | advanced | Weight of the pre-MSA presort score in the final locus ranking. |
 | `-taxonAwareTargetsFromGate` | integer | `1` | advanced | Derive the per-sample locus/NT targets from the active inclusion gate instead of `-taxonAwareTargetLoci`/`-taxonAwareTargetNT`. |
-| `-taxonAwareInformationSaturation` | float | `0.005` within; `0.02` between | advanced | Variable-site fraction at which a locus is scored as fully informative. |
-| `-taxonAwareExcessVariationOnset` | float | `0.05` within; `0.20` between | advanced | Variable-site fraction above which a locus starts to be penalised as hypervariable. |
-| `-taxonAwareExcessVariationSpan` | float | `0.10` within; `0.30` between | advanced | Width of the penalty ramp above `-taxonAwareExcessVariationOnset`. |
+| `-taxonAwareHeterogeneityScoring` | integer | `0` | advanced | Include variable-site information credit and excess-variation penalties in final locus ranking. Off by default so heterogeneity diagnostics do not shape which loci enter the tree. |
+| `-taxonAwareInformationSaturation` | float | `0.005` within; `0.02` between | advanced | Variable-site fraction at which a locus receives full information credit when `-taxonAwareHeterogeneityScoring 1`; diagnostic metrics are still reported when scoring is off. |
+| `-taxonAwareExcessVariationOnset` | float | `0.05` within; `0.20` between | advanced | Variable-site fraction above which a locus starts to be penalised when `-taxonAwareHeterogeneityScoring 1`. |
+| `-taxonAwareExcessVariationSpan` | float | `0.10` within; `0.30` between | advanced | Width of the opt-in penalty ramp above `-taxonAwareExcessVariationOnset`. |
 | `-preferredCoreGenes` | string | empty direct; auto companion `.core` in `strain_within.pl` | advanced | Prefer loci whose catalogue seed occurs in this universal-core guide. The guide may use raw `.core` rows or sorted `MGS<TAB>gene,gene` rows. It does not make a locus eligible when sequence/QC rules reject it. |
 | `-compactTaxonAwareDiagnostics` | integer | `1` | stable | After a successful or valid terminal run, merge taxon-aware and rate-partition audit TSVs into `phylo/taxon_aware_diagnostics.tsv`; set `0` to retain the individual source files. |
 | `-runIQtree` | integer | `0` | stable | Build the tree with IQ-TREE. |

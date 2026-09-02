@@ -53,6 +53,30 @@ is($split->{reason}{G}, 'no_informative_alignment_sites',
 	'all-gap placement exclusion records an actionable audit reason');
 is($split->{reason}{E}, 'retained_after_locus_qc_masking',
 	'locus-QC status alone does not remove a well-covered sample after masking');
+my $outgroup_full = File::Spec->catfile($tmp, 'outgroup-q90-full.fna');
+my $outgroup_backbone =
+	File::Spec->catfile($tmp, 'outgroup-q90-backbone.fna');
+my $outgroup_queries =
+	File::Spec->catfile($tmp, 'outgroup-q90-placement.fna');
+write_file($outgroup_full, join('',
+	">A\n", ('A' x 20), ('-' x 80), "\n",
+	">B\n", ('A' x 20), ('-' x 80), "\n",
+	">C\n", ('A' x 20), ('-' x 80), "\n",
+	">out\n", ('A' x 100), "\n",
+));
+my $outgroup_split = split_strict_backbone(
+	$outgroup_full, $outgroup_backbone, $outgroup_queries, {},
+	{
+		coverage_fraction => 0.5,
+		minimum_backbone => 1,
+		outgroup => 'out',
+	},
+);
+is($outgroup_split->{q90_informative}, 20,
+	'the strict-backbone coverage baseline excludes the unusually complete outgroup');
+is_deeply($outgroup_split->{backbone}, [qw(A B C out)],
+	'the outgroup cannot spuriously defer ordinary ingroup tips to placement');
+
 
 my $eligible_backbone = File::Spec->catfile($tmp, 'eligible-backbone.fna');
 my $eligible_queries = File::Spec->catfile($tmp, 'eligible-placement.fna');

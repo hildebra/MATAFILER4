@@ -339,7 +339,8 @@ SKIP: {
 }
 
 my $coverageOffOutput = File::Spec->catdir($temporary, 'coverage-default-output');
-my @coverageOffCommand = (@command, '-relativeNTFraction', 0.9);
+my @coverageOffCommand = (@command, '-relativeNTFraction', 0.9,
+	'-placementMinOverlap', 10_000);
 for my $index (0 .. $#coverageOffCommand - 1) {
 	$coverageOffCommand[$index + 1] = $coverageOffOutput
 		if $coverageOffCommand[$index] eq '-outD';
@@ -348,6 +349,14 @@ is(system(@coverageOffCommand), 0,
 	'BuildTree completes with the coverage filter left at its default');
 is(attrition_metric($coverageOffOutput, 'coverage_excluded_samples'), 0,
 	'the coverage filter removes nothing unless a caller enables it');
+my $coverageOffAlignment = File::Spec->catfile(
+	$coverageOffOutput, 'MSA', 'MSAli.fna.gz');
+open my $coverageOffHandle, '-|', 'gzip', '-cd', $coverageOffAlignment
+	or die $!;
+my $coverageOffText = do { local $/; <$coverageOffHandle> };
+close $coverageOffHandle;
+like($coverageOffText, qr/^>s5$/m,
+	'placementMinOverlap is inactive when backbone placement is disabled');
 
 my $postprocessedMSAFixRuns = (() = slurp($msaFixCount) =~ /^/gm);
 
@@ -518,6 +527,10 @@ like($attritionText, qr/^input_loci\t5$/m, 'attrition audit records all input lo
 like($attritionText, qr/^candidate_loci\t4$/m, 'attrition audit records the bounded alignment candidates');
 like($attritionText, qr/^final_loci\t3$/m, 'attrition audit records the bounded final locus set');
 like($attritionText, qr/^backbone_samples\t5$/m, 'attrition audit records final tree samples');
+like($attritionText, qr/^final_samples\t5$/m,
+	'attrition audit records the post-concatenation tip count');
+like($attritionText, qr/^concatenation_excluded_samples\t0$/m,
+	'attrition audit separately records all-zero concatenation exclusions');
 like($attritionText, qr/^gene_length_min_dropped_loci\t2$/m,
 	'attrition summary counts sample-loci dropped by GeneLengthMin');
 like($attritionText, qr/^gene_length_include_min_dropped_loci\t0$/m,
@@ -535,6 +548,11 @@ ok(!-e $mergedAlignment,
 open my $alignmentHandle, '-|', 'gzip', '-cd', $compressedMergedAlignment or die $!;
 my $alignmentText = do { local $/; <$alignmentHandle> };
 close $alignmentHandle;
+my $mergedTipCount = () = $alignmentText =~ /^>/mg;
+is(attrition_metric($output, 'final_samples'), $mergedTipCount,
+	'final_samples exactly matches the merged alignment tips');
+is(attrition_metric($output, 'backbone_samples'), $mergedTipCount,
+	'backbone_samples exactly matches tips used without strict placement');
 like($alignmentText, qr/^>s5$/m, 'rescued sparse sample remains in the merged alignment');
 unlike($alignmentText, qr/^>s6$/m,
 	'a lower-threshold-only sample is absent from the merged alignment');

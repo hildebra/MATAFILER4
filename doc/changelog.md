@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-02 — Strain-tree filter-bias corrections
+
+- Added the buildTree5.pl 5.84 filter-correction set (retained in later versions). Ordinary taxon-aware concatenation no longer applies placementMinOverlap or another minimum-NT cutoff; placement-only options remain inactive unless backbone placement is enabled, and only an all-missing concatenated sequence is removed at that stage.
+- Outgroups no longer contribute to ingroup Q90 baselines for per-locus length QC, whole-sample gene/NT coverage, taxon-aware target projection, final coverage eligibility, or strict-backbone coverage deferral. A sole-sample fallback preserves defined behavior when no ingroup exists.
+- selection_attrition.tsv now derives final_samples from the concatenated alignment, reports concatenation_excluded_samples, and derives backbone_samples from the actual inference alignment/split.
+- Added -taxonAwareHeterogeneityScoring 0|1, default 0. With the default, variable/parsimony-information credit and excess-variation penalties are both absent from locus ranking; 1 restores the historical heterogeneity-dependent terms while leaving their diagnostics available in either mode.
+- Recovered-only lower-confidence observations remain present in the final alignment but no longer contribute to selector prevalence, occupancy, variable-site, or parsimony-informative-site metrics.
+
 ## 2026-08-23 — Unified Phase II job sizing and priority
 
 - Updated `strain_within.pl` to 1.40. Phase II continues to use `ceil(sqrt(samples))`, with the existing four-core floor and `-maxCores` cap, for each ordinary BuildTree core request.

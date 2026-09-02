@@ -298,3 +298,4 @@ buildTree5.pl	5.36	Advanced locus selection	-taxonAwareCandidateExtra	integer	ta
 buildTree5.pl	5.36	Advanced locus selection	-taxonAwareMinSequenceNT	integer	taxonAwareMinSequenceNT	60	advanced	Minimum unambiguous nucleotide-equivalent occurrence length.
 buildTree5.pl	5.36	Advanced locus selection	-taxonAwareTargetLoci	integer	taxonAwareTargetLoci	25	advanced	Per-sample locus target for greedy rescue.
 buildTree5.pl	5.36	Advanced locus selection	-taxonAwareTargetNT	integer	taxonAwareTargetNT	7500	advanced	Per-sample informative-NT target for greedy rescue.
+buildTree5.pl	5.84	Advanced locus selection	-taxonAwareHeterogeneityScoring	integer	taxonAwareHeterogeneityScoring	0	advanced	Opt in to variable-site information rewards and excess-variation penalties in final locus ranking; disabled by default.

@@ -228,7 +228,10 @@ sub split_strict_backbone {
 	die "Strict-backbone input $full_fasta contains unequal sequence lengths\n"
 		if @unequal;
 	my %informative = map { $_ => _informative_count($seq->{$_}, $is_aa) } @ids;
-	my $q90 = _quantile(0.90, values %informative);
+	my @coverage_baseline = grep { !length($outgroup) || $_ ne $outgroup } @ids;
+	@coverage_baseline = @ids unless @coverage_baseline;
+	my $q90 = _quantile(0.90,
+		map { $informative{$_} } @coverage_baseline);
 	my (%classification_reason, %requested_reason, @backbone, @placement, @excluded);
 	for my $id (@ids) {
 		# read_sample_qc() returns canonical verdicts, but this exported helper is

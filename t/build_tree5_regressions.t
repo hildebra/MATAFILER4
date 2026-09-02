@@ -595,6 +595,117 @@ like($redo_tree_text, qr/query1/,
 	'forced EPA filtering grafts the retained query before exiting');
 
 
+my ($coverage_eligibility_helper) = $script_text =~
+	/(sub classifyTaxonAwareCoverageEligibility \{.*?\n\})\n\nsub taxonAwareLocusQualityScore/s;
+BAIL_OUT('Cannot extract taxon-aware coverage eligibility helper')
+	unless defined $coverage_eligibility_helper;
+my $coverage_helpers = <<'PERL';
+package TestBuildTreeCoverageEligibility;
+use Mods::GenoMetaAss qw(quantile);
+PERL
+$coverage_helpers .= "$coverage_eligibility_helper\n1;";
+my $coverage_helpers_loaded = eval $coverage_helpers;
+ok($coverage_helpers_loaded,
+	'taxon-aware coverage eligibility helper loads independently')
+	or diag($@);
+my $outgroup_neutral_coverage =
+	TestBuildTreeCoverageEligibility::classifyTaxonAwareCoverageEligibility(
+		sample_metrics => {
+			out => { selected_loci => 80, selected_nt => 80_000,
+				role => 'backbone_candidate' },
+			A => { selected_loci => 8, selected_nt => 5_000,
+				role => 'backbone_candidate' },
+			B => { selected_loci => 8, selected_nt => 5_000,
+				role => 'backbone_candidate' },
+			C => { selected_loci => 8, selected_nt => 5_000,
+				role => 'backbone_candidate' },
+		},
+		gene_fraction => 0.2, nt_fraction => 0.1, minimum_nt => 0,
+		minimum_overlap => 0, minimum_loci_floor => 1,
+		role => 'backbone', outgroup => 'out',
+	);
+is($outgroup_neutral_coverage->{minimum_loci}, 2,
+	'an unusually complete outgroup does not inflate the ingroup locus Q90 gate');
+is($outgroup_neutral_coverage->{minimum_nt}, 500,
+	'an unusually complete outgroup does not inflate the ingroup NT Q90 gate');
+ok($outgroup_neutral_coverage->{samples}{A}{eligible},
+	'an ordinary ingroup remains eligible under the ingroup-derived baseline');
+
+my ($quality_score_helper) = $script_text =~
+	/(sub taxonAwareLocusQualityScore \{.*?\n\})\n\nsub selectTaxonAwareFinalLoci/s;
+BAIL_OUT('Cannot extract taxon-aware locus quality score helper')
+	unless defined $quality_score_helper;
+my $quality_score_loaded = eval
+	"package TestBuildTreeLocusScore; $quality_score_helper\n1;";
+ok($quality_score_loaded, 'taxon-aware locus score helper loads independently')
+	or diag($@);
+my %stable_metric = (
+	robust_score => 0.8, occupancy => 0.8, prevalence => 0.8,
+	presort_score => 0.5, information_score => 0,
+	excess_variation_penalty => 0,
+);
+my %heterogeneous_metric = (
+	%stable_metric, information_score => 1, excess_variation_penalty => 1,
+);
+is(
+	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
+		\%stable_metric, 0, 0),
+	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
+		\%heterogeneous_metric, 0, 0),
+	'default scoring ignores both heterogeneity rewards and penalties',
+);
+cmp_ok(
+	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
+		\%heterogeneous_metric, 0, 1),
+	'>',
+	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
+		\%stable_metric, 0, 1),
+	'the explicit opt-in restores heterogeneity-dependent scoring',
+);
+like($script_text, qr/my \$taxonAwareHeterogeneityScoring = 0;/,
+	'heterogeneity-dependent locus scoring is opt-in by default');
+
+my ($informative_length_helper) = $script_text =~
+	/(sub informativeSequenceLength \{.*?\n\})\n\nsub bestGeneSequencesBySample/s;
+my ($alignment_metric_helper) = $script_text =~
+	/(sub taxonAwareAlignmentMetrics \{.*?\n\})\n\nsub classifyTaxonAwareSamples/s;
+BAIL_OUT('Cannot extract taxon-aware alignment metric helpers')
+	unless defined($informative_length_helper) && defined($alignment_metric_helper);
+my $alignment_helpers = <<'PERL';
+package TestBuildTreeAlignmentMetrics;
+use Mods::GenoMetaAss qw(readFasta);
+sub parseSeqId {
+	my ($identifier) = @_;
+	my ($sample, $gene) = split /\|/, $identifier, 2;
+	return ($sample, $gene, '|');
+}
+PERL
+$alignment_helpers .=
+	"$informative_length_helper\n$alignment_metric_helper\n1;";
+my $alignment_helpers_loaded = eval $alignment_helpers;
+ok($alignment_helpers_loaded,
+	'taxon-aware alignment metric helpers load independently')
+	or diag($@);
+my $metric_alignment = File::Spec->catfile(
+	$temporary, 'qualification-only-metrics.fna');
+write_test_file($metric_alignment, join('',
+	">q1|g\nAAAAAA\n",
+	">q2|g\nAAAAAA\n",
+	">r1|g\nCC----\n",
+	">r2|g\nCC----\n",
+));
+my $qualified_metric =
+	TestBuildTreeAlignmentMetrics::taxonAwareAlignmentMetrics(
+		$metric_alignment, 0, 'g', {'q1|g' => 1, 'q2|g' => 1});
+is($qualified_metric->{sample_count}, 2,
+	'recovered-only calls do not contribute selector sample prevalence');
+is($qualified_metric->{called_cells}, 12,
+	'recovered-only calls do not contribute selector occupancy');
+is($qualified_metric->{variable_sites}, 0,
+	'recovered-only disagreements do not contribute variable-site scoring');
+is($qualified_metric->{parsimony_informative_sites}, 0,
+	'recovered-only disagreements do not contribute parsimony scoring');
+
 my $coordinate_bounds_checks = () = $script_text =~ /next if \$position >= length\(\$sequence\);/g;
 cmp_ok($coordinate_bounds_checks, '>=', 2,
 	'taxon-aware raw and alignment coordinate scorers safely skip uneven sequence tails');

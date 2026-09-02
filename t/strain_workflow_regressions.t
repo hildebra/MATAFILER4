@@ -520,7 +520,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.56;/,
+like($strain, qr/my \$version = 1\.57;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$resumeOutD = .*?my \$parentRunLock;.*?if \(!\$subJob\).*?\$parentRunLockPath = "\$lockBase\.strain_within\.lock".*?acquire_workflow_lock\(.*?prepRun\(\);/s,
@@ -1057,6 +1057,12 @@ unlike($strain, qr/-NTfilt \$relativeNTFraction/,
 like($strain,
 	qr/my \$GenesPerSpecies = 0\.2;.*?my \$GeneLengthMin = 0\.3;.*?my \$GeneLengthIncludeMin = 0\.03;.*?my \$relativeNTFraction = 0\.1;.*?\$placementGenesPerSpecies = 0.04; \$placementRelativeNTFraction = 0.03;.*?my \$taxonAwareLocusSelection = 1;.*?"GeneLengthIncludeMin=f" => \\\$GeneLengthIncludeMin.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-GeneLengthIncludeMin \$GeneLengthIncludeMin.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
 	'strainWithin separates high-threshold QC from lower MSA inclusion while retaining balanced placement filters');
+like($strain,
+	qr/"GenesPerSpecies=f" => sub.*?\$genesPerSpeciesSpecified = 1.*?"relativeNTFraction=f" => sub.*?\$relativeNTFractionSpecified = 1.*?"placementGenesPerSpecies=f" => sub.*?\$placementGenesPerSpeciesSpecified = 1.*?"placementRelativeNTFraction=f" => sub.*?\$placementRelativeNTFractionSpecified = 1.*?resolvePairedOptionDefault/s,
+	'strainWithin resolves each coverage pair only after recording explicit options');
+like($build_tree,
+	qr/"relativeNTFraction=f" => sub.*?\$ntFracSpecified = 1.*?"GenesPerSpecies=f" => sub.*?\$geneFracPSpecSpecified = 1.*?"placementGenesPerSpecies=f" => sub.*?\$placementGeneFracPSpecSpecified = 1.*?"placementRelativeNTFraction=f" => sub.*?\$placementNTFracSpecified = 1.*?resolvePairedOptionDefault/s,
+	'BuildTree applies the same explicit-option-aware coverage-pair defaults');
 like($strain,
 	qr/my \$taxonAwareRescueMinPrevalence = 0\.8;.*?"taxonAwareRescueMinPrevalence=f" => \\\$taxonAwareRescueMinPrevalence.*?-taxonAwareRescueMinPrevalence \$taxonAwareRescueMinPrevalence/s,
 	'strainWithin exposes and forwards the broad-locus rescue prevalence guard');
