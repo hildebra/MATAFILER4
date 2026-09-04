@@ -337,9 +337,10 @@ Comment: usually ‘0’ means switching a mode off, and ‘1’ means switching
 
      #specific gene quality filters, useful for metagenomic data that is often incomplete
      -NTfilt [#]				fractions of nucleotides (NT) that need to be present in sequence to be included in final, combined MSA (default 0.8)
-    -NTfiltPerGene [#]				if several genes represent a tree tip, the fraction of NTs that need to be present for the gene to be accepted in the final, combined MSA (default 0.1)
+    -NTfiltPerGene [#]				if several genes represent a tree tip, the fraction of NTs required for locus QC (default 0.4)
+    -GeneLengthIncludeMin [#]			fraction admitted to the MSA; inherits NTfiltPerGene unless explicitly supplied (default 0.4)
     -GenesPerSpecies [#]				min fraction of genes present after filtering, if below the species will be excluded from phylogeny (default 0.1)
-    -fracMaxGenes90pct [#]				gene cats to keep, e.g. 25% of 90th percentile (default 0.25)
+    -fracMaxGenes90pct [#]				hard locus prevalence cutoff when taxon-aware selection is off (default 0.3 of category-size Q90)
     -NTfiltCount [0|1]					total NT count (default 0)
     -runLengthCheck [0|1]				check that sequence length can be divided by 3
 

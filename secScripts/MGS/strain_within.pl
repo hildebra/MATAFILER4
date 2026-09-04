@@ -318,7 +318,10 @@ my $completionMessage = "";
 #	cannot park/delete a live run's staged guide, worker scratch, or published state
 #1.57: let either explicitly supplied gene-count/NT-fraction coverage threshold
 #	provide the otherwise implicit paired threshold, including the placement pair
-my $version = 1.57;
+#1.58: restore hard locus-prevalence selection and use one 40% locus-length
+#	threshold for both locus QC and MSA inclusion by default
+#1.59: lower the default unresolved multigene-locus fraction to 0.10
+my $version = 1.59;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -343,7 +346,7 @@ my $treeFile = "";
 my $doSubmit=0;
 my $subMode="";
 my %FILTER_DEFAULT = (
-	multi_gene_sample_max => 0.25,
+	multi_gene_sample_max => 0.10,
 	conspecific_gene_sample_max => 0.05,
 	minimum_gene_depth => 1,
 	minimum_bad_loci_for_sample_skip => 3,
@@ -395,8 +398,9 @@ my $onlyMSA = 0; #retain localized per-locus alignments; skip combined-MSA work 
 my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
 my $GenesPerSpecies = 0.2;
-my $GeneLengthMin = 0.3;
-my $GeneLengthIncludeMin = 0.03;
+my $GeneLengthMin = 0.4;
+my $GeneLengthIncludeMin = $GeneLengthMin;
+my $geneLengthIncludeMinSpecified = 0;
 my $relativeNTFraction = 0.1;
 my ($genesPerSpeciesSpecified, $relativeNTFractionSpecified) = (0, 0);
 my $NTfiltCount = $FILTER_DEFAULT{minimum_informative_nt_per_sample};
@@ -405,7 +409,7 @@ $placementGenesPerSpecies = 0.04; $placementRelativeNTFraction = 0.03;
 my ($placementGenesPerSpeciesSpecified,
 	$placementRelativeNTFractionSpecified) = (0, 0);
 my @pairedDefaultInheritances;
-my $taxonAwareLocusSelection = 1;
+my $taxonAwareLocusSelection = 0;
 my $taxonAwareRescueMinPrevalence = 0.8;
 my $outgroupCoreMinLoci = 0; # derive as 20% of -treeLocusBudget unless overridden
 my $preferredCoreGenes = "";
@@ -642,7 +646,7 @@ GetOptions(
 	#used genes fine tuning..
 	"MGSminGenesPSmpl=i" => \$MGStoolowGsThr, #extraction prefilter: loci a sample needs for one MGS
 	"minLociPerMGS=i" => \$minLociPerMGS, #distinct loci an MGS needs before a tree is attempted
-	"multiGeneSmplMax=f" => \$multiGeneSmplMax, #default 0.15
+	"multiGeneSmplMax=f" => \$multiGeneSmplMax, #default 0.10
 	"conspGeneSmplMax=f" => \$conspGeneSmplMax, #default 0.05
 	"minBadLociPSmpl=i" => \$minBadLociForSampleSkip,
 	"breakpointGeneFlank=i" => \$breakpointGeneFlank,
@@ -657,7 +661,10 @@ GetOptions(
 		$genesPerSpeciesSpecified = 1;
 	},
 	"GeneLengthMin=f" => \$GeneLengthMin,
-	"GeneLengthIncludeMin=f" => \$GeneLengthIncludeMin,
+	"GeneLengthIncludeMin=f" => sub {
+		$GeneLengthIncludeMin = $_[1];
+		$geneLengthIncludeMinSpecified = 1;
+	},
 	"relativeNTFraction=f" => sub {
 		$relativeNTFraction = $_[1];
 		$relativeNTFractionSpecified = 1;
@@ -744,6 +751,7 @@ if ($help) {
 		exit    => 1,
 	);
 }
+$GeneLengthIncludeMin = $GeneLengthMin unless $geneLengthIncludeMinSpecified;
 for my $pair (
 	[
 		{ name => 'GenesPerSpecies', value_ref => \$GenesPerSpecies,

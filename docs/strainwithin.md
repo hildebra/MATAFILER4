@@ -52,7 +52,7 @@ These are separate mechanisms and it is worth keeping them apart when reading th
 
 **Mixed strain** — extraction QC judges whether a sample describes *one* strain. A sample is flagged when at least `-minBadLociPSmpl` (3) of its loci are bad in one of two ways, and those exceed a fraction of its evaluable loci:
 
-- unresolvable same-COG paralogs, above `-multiGeneSmplMax` (0.25);
+- unresolvable same-COG paralogs, above `-multiGeneSmplMax` (0.10);
 - conspecific SNP-consensus calls, above `-conspGeneSmplMax` (0.05).
 
 With `-excludeMixedStrainSamples 1` (the default) such samples are dropped from that MGS's tree, before any length or prevalence statistic is taken, so they cannot shift the per-locus Q90 length reference or the locus occupancy that the retained samples are judged against. Set it to `0` to keep them. **This never looks at how many loci a sample has.** Per-sample verdicts and their exact fractions are in `<MGS>/sampleQC.tsv`; run-wide counts are in `LOGandSUB/strainRecovery.tsv` (`qc_status`, `ambiguous_failure`, `conspecific_failure`) and in `selection_attrition.tsv` (`qc_excluded_samples`, `qc_excluded_sequences`, `qc_emptied_loci`).
@@ -60,7 +60,7 @@ With `-excludeMixedStrainSamples 1` (the default) such samples are dropped from 
 **Too little data** — a clean but sparse sample is judged only by coverage, and it is never flagged as mixed strain. Two gates act in sequence, and it is worth knowing which one is the policy:
 
 - `-MGSminGenesPSmpl` (8) during extraction is a cheap absolute prefilter. It only avoids writing and aligning records that could not clear any inclusion threshold; it cannot tell three well-covered loci from eight fragments, because at that point nothing is aligned yet.
-- `-GenesPerSpecies`, `-relativeNTFraction` and `-NTfiltCount` at tree time are the **primary inclusion policy**. They are measured on selected, aligned, informative loci relative to the cohort Q90. With `-enforceSampleCoverage 1` (the default) a sample failing them is removed; with `-placeOnBackbone 1` it is deferred to EPA-ng placement instead.
+- `-GenesPerSpecies`, `-relativeNTFraction` and `-NTfiltCount` at tree time are the **primary inclusion policy**. A cheap candidate-stage screen avoids aligning samples that cannot possibly pass, then the policy is checked again on the final overlap-filtered concatenation after locus QC. With `-enforceSampleCoverage 1` (the default) a sample failing the exact final counts is removed; with `-placeOnBackbone 1` it is deferred to EPA-ng placement instead.
 
 `-minLociPerMGS` (8) is a third, unrelated threshold: the distinct loci an MGS needs before a tree is attempted at all. It used to share `-MGSminGenesPSmpl`'s value even though it asks about the MGS rather than about a sample.
 
@@ -72,9 +72,9 @@ awk -F'\t' '$4=="too_few_after_abundance"{n[$5]++} END{c=0; for(k=7;k>=1;k--){c+
 
 ### 3. Choose sample-inclusion stringency
 
-These values control inclusion after locus QC. `-GenesPerSpecies` is the relative retained-locus floor, `-relativeNTFraction` is the relative informative-nucleotide floor, and `-NTfiltCount` is an absolute informative-nucleotide floor. Larger values retain fewer, better-covered strains.
+These values control inclusion after locus QC. `-GenesPerSpecies` is the relative retained-locus floor, `-relativeNTFraction` is the relative informative-nucleotide floor, and `-NTfiltCount` is an absolute informative-nucleotide floor. Larger values retain fewer, better-covered strains. The exact final decision is reported in `<MGS>/phylo/final_alignment_sample_qc.tsv`; for nucleotide trees `informative_positions` and `informative_nt` are identical, while amino-acid positions are converted to nucleotide equivalents for the thresholds.
 
-Per-locus coverage now has two distinct gates. `-GeneLengthMin` (default `0.3`) supplies the high-confidence observations used to select loci and decide whether a sample passes the existing backbone or placement coverage filters. After that decision, `-GeneLengthIncludeMin` (default `0.03`) may recover partial observations into the MSA and phylogeny. Recovered-only observations do not increase the QC locus/NT totals that admitted the sample. They do remain subject to MSAfix masking, column-overlap filtering, and post-alignment locus occupancy/divergence QC.
+Per-locus QC and MSA inclusion now share a `0.4` default gate. Unless explicitly supplied, `-GeneLengthIncludeMin` inherits the final `-GeneLengthMin` value, including a custom value given on the command line. You can still set `-GeneLengthIncludeMin` lower to recover partial observations after QC, but that is an explicit opt-in; recovered-only observations do not increase the QC locus/NT totals that admitted the sample and remain subject to MSAfix and post-alignment QC.
 
 #### Lenient inclusion
 
@@ -83,7 +83,7 @@ Use this only when sparse sampling is expected and you will inspect the resultin
 ```bash
   -MGSminGenesPSmpl 5 \
   -GeneLengthMin 0.20 \
-  -GeneLengthIncludeMin 0.03 \
+  -GeneLengthIncludeMin 0.20 \
   -GenesPerSpecies 0.10 \
   -relativeNTFraction 0.05 \
   -NTfiltCount 0 \
@@ -99,14 +99,14 @@ Use this when the primary tree should contain only well-supported strains.
 ```bash
   -MGSminGenesPSmpl 15 \
   -GeneLengthMin 0.50 \
-  -GeneLengthIncludeMin 0.03 \
+  -GeneLengthIncludeMin 0.50 \
   -GenesPerSpecies 0.35 \
   -relativeNTFraction 0.20 \
   -NTfiltCount 10000 \
   -treeLocusBudget 400
 ```
 
-These are example presets, not universal biological cutoffs. Inspect `phylo/taxon_aware_diagnostics.tsv` and the sample-attrition reports before choosing a preset for a new cohort.
+These are example presets, not universal biological cutoffs. Inspect `phylo/selection_attrition.tsv`, `phylo/gene_length_filter.samples.tsv`, and the sample-attrition reports before choosing a preset for a new cohort. Taxon-aware diagnostics apply only when that optional selector is enabled (or when rate-partition auditing is active).
 
 ### 4. Enable optional sparse-strain placement
 
@@ -147,8 +147,8 @@ This is a task-oriented summary. See the [complete `strain_within.pl` flag refer
 |---|---|---|
 | Inputs and execution | `-GCd`, `-MGS`, `-outD`, `-map2`, `-MGSabundance`, `-submit`, `-submissionMode` | Define catalogue inputs, output location, metadata, abundance matrix, and submission mode. |
 | Resume and redo | `-onlySubmit`, `-onlyMSA`, `-redo` | Resume completed work normally, stop after localized per-locus MSAs, or explicitly rebuild tree outputs, incomplete inputs, or all selected results. |
-| Extraction QC | `-maxGenes`, `-treeLocusBudget`, `-MGSminGenesPSmpl`, `-GeneLengthMin`, `-GeneLengthIncludeMin`, `-multiGeneSmplMax`, `-conspGeneSmplMax`, `-excludeMixedStrainSamples`, `-minLociPerMGS` | Use high-coverage loci for QC, optionally recover partial loci after sample admission, and control other strain/locus filters. Set `-maxGenes 0` to remove only the gene-count cap; QC remains active. |
-| Tree inclusion | `-GenesPerSpecies`, `-relativeNTFraction`, `-NTfiltCount`, `-enforceSampleCoverage`, `-taxonAwareLocusSelection`, `-taxonAwareRescueMinPrevalence` | The primary sample-inclusion policy, plus taxon-aware locus selection. |
+| Extraction QC | `-maxGenes`, `-treeLocusBudget`, `-MGSminGenesPSmpl`, `-GeneLengthMin`, `-GeneLengthIncludeMin`, `-multiGeneSmplMax`, `-conspGeneSmplMax`, `-excludeMixedStrainSamples`, `-minLociPerMGS` | Use one 40% locus-length gate for QC and MSA inclusion by default; a lower explicit inclusion gate opts into partial-locus recovery. Set `-maxGenes 0` to remove only the gene-count cap; QC remains active. |
+| Tree inclusion | `-GenesPerSpecies`, `-relativeNTFraction`, `-NTfiltCount`, `-enforceSampleCoverage`, `-taxonAwareLocusSelection`, `-taxonAwareRescueMinPrevalence` | The primary sample-inclusion policy. Hard 30%-of-Q90 locus prevalence filtering is the default; taxon-aware locus selection is opt-in. |
 | Sparse placement | `-placeOnBackbone`, `-strictBackboneFraction`, `-placementGenesPerSpecies`, `-placementRelativeNTFraction`, `-placementNTfiltCount`, `-placementMinOverlap`, `-epaThreads` | Optional EPA-ng placement controls. Off by default; enable with `-placeOnBackbone 1`. When disabled, all other options in this group are inactive. |
 | Mosaic/outgroups | `-mosaicLoci`, `-mosaicMGS`, `-prepareMosaicLoci`, `-outgroupCoreMinLoci`, `-preferredCoreGenes` | Manage Mosaic discovery and choose broadly supported outgroup loci. |
 | Tree resources | `-maxCores`, `-selfMemGb`, `-mosaicMemGb`, `-treeOOMMaxMemGB`, `-rateMergePartitions` | Set scheduler and tree-inference resources. |
@@ -181,6 +181,7 @@ This table covers the options normally used for restarts and analysis. See the [
 - `<FMGdir>/popGenStats.tsv` and `popGenStats.subsamples.tsv`: population-genetic overviews when enabled.
 - `<MGS>/within/strainStats.output.Rds` and `popGenStats.output.Rds`: durable per-MGS result stores.
 - `<MGS>/phylo/gene_length_filter.samples.tsv`: per-sample counts and gene lists for both length gates and MSA recovery.
+- `<MGS>/phylo/final_alignment_sample_qc.tsv`: exact per-sample informative loci/positions after final locus and overlap QC, the applied relative/absolute thresholds, and whether the sample was retained, excluded, or deferred to backbone placement.
 - `<MGS>/phylo/taxon_aware_diagnostics.tsv` and `selection_attrition.tsv`: retained-locus and sample-inclusion decisions, including `qc_excluded_samples` (mixed strain) and `coverage_excluded_samples` (below the inclusion thresholds).
 - `<MGS>/phylo/taxon_aware_backbone_eligibility.tsv`: per-sample selected loci, informative NT, and the thresholds they were judged against.
 - `<MGS>/sampleQC.tsv`: per-sample mixed-strain verdict with its ambiguous and conspecific locus fractions.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-04 — Restore conservative strain-locus defaults
+
+- Updated `buildTree5.pl` to 5.87 and `strain_within.pl` to 1.59. `-GeneLengthMin`/`-NTfiltPerGene` now default to `0.4`, and `-GeneLengthIncludeMin` inherits that value unless it is explicitly overridden.
+- Taxon-aware locus selection now defaults off in both entry points. The ordinary path again applies the hard locus-prevalence filter, now at `-fracMaxGenes90pct 0.3` of the category-size Q90. Taxon-aware selection remains available with `-taxonAwareLocusSelection 1`.
+- Heterogeneity-dependent information rewards and excess-variation penalties are restored by default inside the optional taxon-aware selector; `-taxonAwareHeterogeneityScoring 0` explicitly disables them.
+- The default ambiguous/multigene-locus fraction allowed per sample is reduced from `0.25` to `0.10`; the independent three-bad-locus minimum is unchanged.
+- The strain workflow retains its 5,000-informative-nucleotide absolute per-sample floor and now checks all coverage thresholds again on the final overlap-filtered concatenation, after locus QC. `phylo/final_alignment_sample_qc.tsv` records the exact locus and position counts and each disposition. Backbone placement and its separate 10 kb overlap requirement remain opt-in.
+
+
 ## 2026-09-02 — Strain-tree filter-bias corrections
 
 - Added the buildTree5.pl 5.84 filter-correction set (retained in later versions). Ordinary taxon-aware concatenation no longer applies placementMinOverlap or another minimum-NT cutoff; placement-only options remain inactive unless backbone placement is enabled, and only an all-missing concatenated sequence is removed at that stage.

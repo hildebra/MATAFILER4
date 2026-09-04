@@ -652,7 +652,7 @@ is(
 		\%stable_metric, 0, 0),
 	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
 		\%heterogeneous_metric, 0, 0),
-	'default scoring ignores both heterogeneity rewards and penalties',
+	'explicit scoring opt-out ignores both heterogeneity rewards and penalties',
 );
 cmp_ok(
 	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
@@ -660,10 +660,10 @@ cmp_ok(
 	'>',
 	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
 		\%stable_metric, 0, 1),
-	'the explicit opt-in restores heterogeneity-dependent scoring',
+	'enabled scoring applies the heterogeneity-dependent terms',
 );
-like($script_text, qr/my \$taxonAwareHeterogeneityScoring = 0;/,
-	'heterogeneity-dependent locus scoring is opt-in by default');
+like($script_text, qr/my \$taxonAwareHeterogeneityScoring = 1;/,
+	'taxon-aware selection restores heterogeneity-dependent scoring by default');
 
 my ($informative_length_helper) = $script_text =~
 	/(sub informativeSequenceLength \{.*?\n\})\n\nsub bestGeneSequencesBySample/s;

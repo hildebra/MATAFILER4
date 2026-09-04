@@ -232,6 +232,7 @@ my @command = (
 	'-outD', $output, '-smplSep', '\\|', '-AAtree', 0,
 	'-MSAprogram', 2, '-runLengthCheck', 0, '-postAlignmentLocusQC', 1,
 	'-NTfiltPerGene', 0.3, '-GeneLengthIncludeMin', 0.03,
+	'-taxonAwareLocusSelection', 1,
 	'-taxonAwareMaxLoci', 3,
 	'-taxonAwareCoreLoci', 2, '-taxonAwareCandidateExtra', 1,
 	'-taxonAwareMinSequenceNT', 9, '-taxonAwareTargetLoci', 2,
@@ -357,6 +358,38 @@ my $coverageOffText = do { local $/; <$coverageOffHandle> };
 close $coverageOffHandle;
 like($coverageOffText, qr/^>s5$/m,
 	'placementMinOverlap is inactive when backbone placement is disabled');
+
+# The raw candidate totals include g4, but a deliberately strict locus-occupancy
+# check removes g4 after alignment. s4 and s5 therefore pass the cheap input
+# screen with >61 NT and fall to 60 NT in the actual final concatenation.
+my $finalCoverageOutput = File::Spec->catdir(
+	$temporary, 'final-alignment-coverage-output');
+my @finalCoverageCommand = (@command,
+	'-taxonAwareLocusSelection', 0,
+	'-fracMaxGenes90pct', 0,
+	'-postAlignmentMinOccupancy', 0.95,
+	'-NTfiltCount', 61,
+	'-enforceSampleCoverage', 1,
+);
+for my $index (0 .. $#finalCoverageCommand - 1) {
+	$finalCoverageCommand[$index + 1] = $finalCoverageOutput
+		if $finalCoverageCommand[$index] eq '-outD';
+}
+is(system(@finalCoverageCommand), 0,
+	'BuildTree completes when coverage drops only after final locus QC');
+my $finalCoverageAudit = File::Spec->catfile(
+	$finalCoverageOutput, 'phylo', 'final_alignment_sample_qc.tsv');
+ok(-s $finalCoverageAudit,
+	'final concatenation publishes its per-sample coverage audit');
+my $finalCoverageText = slurp($finalCoverageAudit);
+like($finalCoverageText,
+	qr/^s4\t2\t60\t60\t0\texcluded_coverage\tbelow_final_alignment_minimum_nt\t1\t61\t61$/m,
+	's4 is excluded from the exact final 60-NT count rather than its raw input total');
+like($finalCoverageText,
+	qr/^s5\t2\t60\t60\t0\texcluded_coverage\tbelow_final_alignment_minimum_nt\t1\t61\t61$/m,
+	's5 receives the same auditable final-alignment decision');
+is(attrition_metric($finalCoverageOutput, 'coverage_excluded_samples'), 2,
+	'final-only sample exclusions are included in coverage attrition');
 
 my $postprocessedMSAFixRuns = (() = slurp($msaFixCount) =~ /^/gm);
 
