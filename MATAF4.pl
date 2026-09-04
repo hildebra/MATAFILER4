@@ -3814,10 +3814,14 @@ sub submitSampleAccessionDownload {
 	$QSBoptHR->{tmpSpace} = 0;
 	$QSBoptHR->{$_} = 0 for @queueFlags;
 	$QSBoptHR->{useDownloadQueue} = 1;
+	#downloadMem is optional; 4G is ample for wget/prefetch and stays
+	#below the QOS memory ceiling that download partitions often carry
+	my $downloadMem = getProgPaths("downloadMem", 0);
+	$downloadMem = "4G" if (!defined($downloadMem) || $downloadMem eq "");
 	my ($downloadJob, $submissionError);
 	eval {
 		($downloadJob) = qsubSystem(
-			$scriptFile, $command, $threads, "16G", $jobName,
+			$scriptFile, $command, $threads, $downloadMem, $jobName,
 			"", "", 1, [], $QSBoptHR,
 		);
 		1;
