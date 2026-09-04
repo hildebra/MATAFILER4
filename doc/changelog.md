@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-09-04 — Publish strain postprocessing results consistently
+
+- Updated `strain_within_2.2.pl` to 0.50. Its aggregate-path checks now follow MG-STK's `<FMGdir>/Results/` contract, preventing a successful `combineResults.R` run from being misreported as missing `strainStats.tsv`.
+- Network, treeWAS, and significant-phylogeny plot outputs now also live under `<FMGdir>/Results/`; per-MGS trees and durable statistic stores remain in their existing MGS directories.
+
+## 2026-09-04 — Restore conservative strain-locus defaults
+
+- Updated `buildTree5.pl` to 5.88 and `strain_within.pl` to 1.60. `-GeneLengthMin`/`-NTfiltPerGene` now default to `0.4`, and `-GeneLengthIncludeMin` inherits that value unless it is explicitly overridden.
+- Taxon-aware locus selection now defaults off in both entry points. The ordinary path again applies the hard locus-prevalence filter, now at `-fracMaxGenes90pct 0.3` of the category-size Q90. Taxon-aware selection remains available with `-taxonAwareLocusSelection 1`.
+- Heterogeneity-dependent information rewards and excess-variation penalties are restored by default inside the optional taxon-aware selector; `-taxonAwareHeterogeneityScoring 0` explicitly disables them.
+- The default ambiguous/multigene-locus fraction allowed per sample is reduced from `0.25` to `0.10`; the independent three-bad-locus minimum is unchanged.
+- The strain workflow retains its 5,000-informative-nucleotide absolute per-sample floor and now checks all coverage thresholds again on the final overlap-filtered concatenation, after locus QC. `phylo/final_alignment_sample_qc.tsv` records the exact locus and position counts and each disposition. Backbone placement and its separate 10 kb overlap requirement remain opt-in.
+- MSAfix 2.16 now removes isolated, strongly divergent sequence records within a locus during the existing native post-alignment QC pass. This is on by default only for within-species trees and can be disabled with `-postAlignmentSequenceOutlierMask 0`; configured outgroup records are exempt. The conservative absolute-divergence, modified-Z, comparable-site, minimum-cohort, and 10%-maximum safeguards avoid treating supported subgroups as isolated errors. Decisions are recorded in `phylo/post_alignment_sequence_outliers.tsv`.
+
+
+## 2026-09-02 — Strain-tree filter-bias corrections
+
+- Added the buildTree5.pl 5.84 filter-correction set (retained in later versions). Ordinary taxon-aware concatenation no longer applies placementMinOverlap or another minimum-NT cutoff; placement-only options remain inactive unless backbone placement is enabled, and only an all-missing concatenated sequence is removed at that stage.
+- Outgroups no longer contribute to ingroup Q90 baselines for per-locus length QC, whole-sample gene/NT coverage, taxon-aware target projection, final coverage eligibility, or strict-backbone coverage deferral. A sole-sample fallback preserves defined behavior when no ingroup exists.
+- selection_attrition.tsv now derives final_samples from the concatenated alignment, reports concatenation_excluded_samples, and derives backbone_samples from the actual inference alignment/split.
+- Added -taxonAwareHeterogeneityScoring 0|1, default 0. With the default, variable/parsimony-information credit and excess-variation penalties are both absent from locus ranking; 1 restores the historical heterogeneity-dependent terms while leaving their diagnostics available in either mode.
+- Recovered-only lower-confidence observations remain present in the final alignment but no longer contribute to selector prevalence, occupancy, variable-site, or parsimony-informative-site metrics.
+
 ## 2026-08-23 — Unified Phase II job sizing and priority
 
 - Updated `strain_within.pl` to 1.40. Phase II continues to use `ceil(sqrt(samples))`, with the existing four-core floor and `-maxCores` cap, for each ordinary BuildTree core request.

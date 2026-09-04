@@ -60,13 +60,19 @@ done
 exec /bin/cp "$input" "$output"
 SH
 chmod 0755, $trimal or die "Cannot make $trimal executable: $!";
-my $msaFixShim = File::Spec->catfile($temporary, 'MSAfix-v2.15-shim');
+my $msaFixShim = File::Spec->catfile($temporary, 'MSAfix-v2.16-shim');
 write_file($msaFixShim, <<'PERL');
 #!/usr/bin/env perl
 use strict;
 use warnings;
 
 my (@forward, $report, $threads, $singleAlignmentMode, %recovery);
+if (defined($ENV{MATAFILER_TEST_MSAFIX_ARGS})) {
+	open my $arguments, '>>', $ENV{MATAFILER_TEST_MSAFIX_ARGS}
+		or die "Cannot update MSAfix argument log: $!\n";
+	print {$arguments} join("\t", @ARGV), "\n";
+	close $arguments or die "Cannot close MSAfix argument log: $!\n";
+}
 if (defined($ENV{MATAFILER_TEST_MSAFIX_COUNT})) {
 	open my $count, '>>', $ENV{MATAFILER_TEST_MSAFIX_COUNT}
 		or die "Cannot update MSAfix invocation counter: $!\n";
@@ -226,12 +232,16 @@ my $mafftCount = File::Spec->catfile($temporary, 'mafft.calls');
 local $ENV{MATAFILER_TEST_MAFFT_COUNT} = $mafftCount;
 my $msaFixCount = File::Spec->catfile($temporary, 'msafix.calls');
 local $ENV{MATAFILER_TEST_MSAFIX_COUNT} = $msaFixCount;
+my $msaFixArguments = File::Spec->catfile($temporary, 'msafix.arguments');
+local $ENV{MATAFILER_TEST_MSAFIX_ARGS} = $msaFixArguments;
 my @command = (
 	$^X, '-I'.$root, $wrapper, $config, $script,
 	'-fna', $fna, '-aa', $faa, '-cats', $categories,
 	'-outD', $output, '-smplSep', '\\|', '-AAtree', 0,
+	'-withinSpecies', 1,
 	'-MSAprogram', 2, '-runLengthCheck', 0, '-postAlignmentLocusQC', 1,
 	'-NTfiltPerGene', 0.3, '-GeneLengthIncludeMin', 0.03,
+	'-taxonAwareLocusSelection', 1,
 	'-taxonAwareMaxLoci', 3,
 	'-taxonAwareCoreLoci', 2, '-taxonAwareCandidateExtra', 1,
 	'-taxonAwareMinSequenceNT', 9, '-taxonAwareTargetLoci', 2,
@@ -241,6 +251,13 @@ my @command = (
 	'-rateMergeMinLoci', 1, '-rateMergeMinSites', 1,
 );
 is(system(@command), 0, 'taxon-aware buildTree smoke workflow completes');
+my $sequenceOutlierAudit = File::Spec->catfile(
+	$output, 'phylo', 'post_alignment_sequence_outliers.tsv');
+ok(-s $sequenceOutlierAudit,
+	'within-species BuildTree enables the native sequence-outlier audit by default');
+like(slurp($sequenceOutlierAudit),
+	qr/^alignment\tsequence\tstatus\treason\tcomparable_sites\tdifferences\tdivergence\tmedian_divergence\tmad_divergence\tmodified_z\tevaluable_sequences\tmaximum_outliers$/m,
+	'the delivered MSAfix 2.16 audit schema is retained');
 
 # Mixed-strain exclusion must remove exactly the samples that extraction QC
 # flagged as ambiguous/conspecific, and must leave sparse samples alone: s3 is
@@ -339,7 +356,8 @@ SKIP: {
 }
 
 my $coverageOffOutput = File::Spec->catdir($temporary, 'coverage-default-output');
-my @coverageOffCommand = (@command, '-relativeNTFraction', 0.9);
+my @coverageOffCommand = (@command, '-relativeNTFraction', 0.9,
+	'-placementMinOverlap', 10_000);
 for my $index (0 .. $#coverageOffCommand - 1) {
 	$coverageOffCommand[$index + 1] = $coverageOffOutput
 		if $coverageOffCommand[$index] eq '-outD';
@@ -348,6 +366,50 @@ is(system(@coverageOffCommand), 0,
 	'BuildTree completes with the coverage filter left at its default');
 is(attrition_metric($coverageOffOutput, 'coverage_excluded_samples'), 0,
 	'the coverage filter removes nothing unless a caller enables it');
+my $coverageOffAlignment = File::Spec->catfile(
+	$coverageOffOutput, 'MSA', 'MSAli.fna.gz');
+open my $coverageOffHandle, '-|', 'gzip', '-cd', $coverageOffAlignment
+	or die $!;
+my $coverageOffText = do { local $/; <$coverageOffHandle> };
+close $coverageOffHandle;
+like($coverageOffText, qr/^>s5$/m,
+	'placementMinOverlap is inactive when backbone placement is disabled');
+
+# The raw candidate totals include g4, but a deliberately strict locus-occupancy
+# check removes g4 after alignment. s4 and s5 therefore pass the cheap input
+# screen with >61 NT and fall to 60 NT in the actual final concatenation.
+my $finalCoverageOutput = File::Spec->catdir(
+	$temporary, 'final-alignment-coverage-output');
+my @finalCoverageCommand = (@command,
+	'-outgroup', 's1',
+	'-taxonAwareLocusSelection', 0,
+	'-fracMaxGenes90pct', 0,
+	'-postAlignmentMinOccupancy', 0.95,
+	'-NTfiltCount', 61,
+	'-enforceSampleCoverage', 1,
+);
+for my $index (0 .. $#finalCoverageCommand - 1) {
+	$finalCoverageCommand[$index + 1] = $finalCoverageOutput
+		if $finalCoverageCommand[$index] eq '-outD';
+}
+is(system(@finalCoverageCommand), 0,
+	'BuildTree completes when coverage drops only after final locus QC');
+my $finalCoverageAudit = File::Spec->catfile(
+	$finalCoverageOutput, 'phylo', 'final_alignment_sample_qc.tsv');
+ok(-s $finalCoverageAudit,
+	'final concatenation publishes its per-sample coverage audit');
+my $finalCoverageText = slurp($finalCoverageAudit);
+like($finalCoverageText,
+	qr/^s4\t2\t60\t60\t0\texcluded_coverage\tbelow_final_alignment_minimum_nt\t1\t61\t61$/m,
+	's4 is excluded from the exact final 60-NT count rather than its raw input total');
+like($finalCoverageText,
+	qr/^s5\t2\t60\t60\t0\texcluded_coverage\tbelow_final_alignment_minimum_nt\t1\t61\t61$/m,
+	's5 receives the same auditable final-alignment decision');
+is(attrition_metric($finalCoverageOutput, 'coverage_excluded_samples'), 2,
+	'final-only sample exclusions are included in coverage attrition');
+like(slurp($msaFixArguments),
+	qr/(?:^|\n).*?-maskSequenceOutliers\t-sequenceOutlierReport\t[^\n]+\t-sequenceOutlierExemptPrefix\ts1\|(?:\t|\n)/,
+	'BuildTree passes the exact parsed outgroup-plus-separator prefix to MSAfix');
 
 my $postprocessedMSAFixRuns = (() = slurp($msaFixCount) =~ /^/gm);
 
@@ -518,6 +580,10 @@ like($attritionText, qr/^input_loci\t5$/m, 'attrition audit records all input lo
 like($attritionText, qr/^candidate_loci\t4$/m, 'attrition audit records the bounded alignment candidates');
 like($attritionText, qr/^final_loci\t3$/m, 'attrition audit records the bounded final locus set');
 like($attritionText, qr/^backbone_samples\t5$/m, 'attrition audit records final tree samples');
+like($attritionText, qr/^final_samples\t5$/m,
+	'attrition audit records the post-concatenation tip count');
+like($attritionText, qr/^concatenation_excluded_samples\t0$/m,
+	'attrition audit separately records all-zero concatenation exclusions');
 like($attritionText, qr/^gene_length_min_dropped_loci\t2$/m,
 	'attrition summary counts sample-loci dropped by GeneLengthMin');
 like($attritionText, qr/^gene_length_include_min_dropped_loci\t0$/m,
@@ -535,6 +601,11 @@ ok(!-e $mergedAlignment,
 open my $alignmentHandle, '-|', 'gzip', '-cd', $compressedMergedAlignment or die $!;
 my $alignmentText = do { local $/; <$alignmentHandle> };
 close $alignmentHandle;
+my $mergedTipCount = () = $alignmentText =~ /^>/mg;
+is(attrition_metric($output, 'final_samples'), $mergedTipCount,
+	'final_samples exactly matches the merged alignment tips');
+is(attrition_metric($output, 'backbone_samples'), $mergedTipCount,
+	'backbone_samples exactly matches tips used without strict placement');
 like($alignmentText, qr/^>s5$/m, 'rescued sparse sample remains in the merged alignment');
 unlike($alignmentText, qr/^>s6$/m,
 	'a lower-threshold-only sample is absent from the merged alignment');

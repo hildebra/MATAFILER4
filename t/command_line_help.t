@@ -8,7 +8,8 @@ use FindBin qw($Bin);
 use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
-use Mods::FlagReference qw(readFlagReference scriptOptionNames helpRequested);
+use Mods::FlagReference qw(readFlagReference scriptOptionNames helpRequested
+	resolvePairedOptionDefault);
 
 my $root = "$Bin/..";
 my $reference = "$root/docs/flag_reference.md";
@@ -59,6 +60,30 @@ ok(helpRequested('-?'),     'helpRequested accepts -?');
 ok(!helpRequested('-GCd', '/tmp/x', '-onlyMSA', 1),
 	'helpRequested ignores ordinary options');
 ok(!helpRequested('-helper'), 'helpRequested does not match option prefixes');
+
+#Paired defaults change only an implicit partner. Established no-argument
+#defaults and deliberately distinct explicit pairs remain untouched.
+for my $case (
+	['neither explicit', 0, 0, 0.2, 0.1, 0.2, 0.1, undef, undef],
+	['first explicit',   1, 0, 0.3, 0.1, 0.3, 0.3, 'second', 'first'],
+	['second explicit',  0, 1, 0.2, 0.4, 0.4, 0.4, 'first', 'second'],
+	['both explicit',    1, 1, 0.3, 0.4, 0.3, 0.4, undef, undef],
+) {
+	my ($label, $firstSpecified, $secondSpecified, $first, $second,
+		$expectedFirst, $expectedSecond, $expectedTarget, $expectedSource) = @{$case};
+	my $inheritance = resolvePairedOptionDefault(
+		first => { name => 'first', value_ref => \$first,
+			specified => $firstSpecified },
+		second => { name => 'second', value_ref => \$second,
+			specified => $secondSpecified },
+	);
+	is($first, $expectedFirst, "$label preserves/resolves the first value");
+	is($second, $expectedSecond, "$label preserves/resolves the second value");
+	is($inheritance ? $inheritance->{target} : undef, $expectedTarget,
+		"$label reports only an inherited target");
+	is($inheritance ? $inheritance->{source} : undef, $expectedSource,
+		"$label reports only an explicit source");
+}
 
 #The reference must not fall back to placeholders instead of real descriptions.
 open(my $reference_fh, '<', $reference) or die "Cannot read $reference: $!";

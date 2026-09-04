@@ -24,7 +24,7 @@ use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrR
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs
 	deferredSubmissionDependency);
 use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
-use Mods::FlagReference qw(printFlagHelp);
+use Mods::FlagReference qw(printFlagHelp resolvePairedOptionDefault);
 use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::math qw(quantileArray);
@@ -316,7 +316,13 @@ my $completionMessage = "";
 #	its focal loci without dropping lower-ranked neighbours, and report true scan time
 #1.56: serialize parent controllers per output so an accidental concurrent redo
 #	cannot park/delete a live run's staged guide, worker scratch, or published state
-my $version = 1.56;
+#1.57: let either explicitly supplied gene-count/NT-fraction coverage threshold
+#	provide the otherwise implicit paired threshold, including the placement pair
+#1.58: restore hard locus-prevalence selection and use one 40% locus-length
+#	threshold for both locus QC and MSA inclusion by default
+#1.59: lower the default unresolved multigene-locus fraction to 0.10
+#1.60: enable MSAfix isolated within-locus sequence-outlier masking by default
+my $version = 1.60;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -341,7 +347,7 @@ my $treeFile = "";
 my $doSubmit=0;
 my $subMode="";
 my %FILTER_DEFAULT = (
-	multi_gene_sample_max => 0.25,
+	multi_gene_sample_max => 0.10,
 	conspecific_gene_sample_max => 0.05,
 	minimum_gene_depth => 1,
 	minimum_bad_loci_for_sample_skip => 3,
@@ -393,13 +399,18 @@ my $onlyMSA = 0; #retain localized per-locus alignments; skip combined-MSA work 
 my $phyloProg = 1; #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
 my $iqPathogen = 0; #opt in to IQ-TREE 3 pathogen/CMAPLE mode
 my $GenesPerSpecies = 0.2;
-my $GeneLengthMin = 0.3;
-my $GeneLengthIncludeMin = 0.03;
+my $GeneLengthMin = 0.4;
+my $GeneLengthIncludeMin = $GeneLengthMin;
+my $geneLengthIncludeMinSpecified = 0;
 my $relativeNTFraction = 0.1;
+my ($genesPerSpeciesSpecified, $relativeNTFractionSpecified) = (0, 0);
 my $NTfiltCount = $FILTER_DEFAULT{minimum_informative_nt_per_sample};
 my ($placementGenesPerSpecies, $placementRelativeNTFraction, $placementNTfiltCount);
 $placementGenesPerSpecies = 0.04; $placementRelativeNTFraction = 0.03;
-my $taxonAwareLocusSelection = 1;
+my ($placementGenesPerSpeciesSpecified,
+	$placementRelativeNTFractionSpecified) = (0, 0);
+my @pairedDefaultInheritances;
+my $taxonAwareLocusSelection = 0;
 my $taxonAwareRescueMinPrevalence = 0.8;
 my $outgroupCoreMinLoci = 0; # derive as 20% of -treeLocusBudget unless overridden
 my $preferredCoreGenes = "";
@@ -410,6 +421,7 @@ my $rateMergeMaxBins = 8;
 my $rateMergeTargetSites = 30_000;
 my $rateMergeMinLoci = 20;
 my $rateMergeMinSites = 20_000;
+my $postAlignmentSequenceOutlierMask = 1;
 my $strictBackbone = 0;
 #Extraction QC flags a sample as mixed when too many of its loci hold
 #unresolvable same-COG paralogs (-multiGeneSmplMax) or conspecific consensus
@@ -636,7 +648,7 @@ GetOptions(
 	#used genes fine tuning..
 	"MGSminGenesPSmpl=i" => \$MGStoolowGsThr, #extraction prefilter: loci a sample needs for one MGS
 	"minLociPerMGS=i" => \$minLociPerMGS, #distinct loci an MGS needs before a tree is attempted
-	"multiGeneSmplMax=f" => \$multiGeneSmplMax, #default 0.15
+	"multiGeneSmplMax=f" => \$multiGeneSmplMax, #default 0.10
 	"conspGeneSmplMax=f" => \$conspGeneSmplMax, #default 0.05
 	"minBadLociPSmpl=i" => \$minBadLociForSampleSkip,
 	"breakpointGeneFlank=i" => \$breakpointGeneFlank,
@@ -646,13 +658,28 @@ GetOptions(
 	"abundanceMaxModifiedZ=f" => \$abundanceMaximumModifiedZ,
 	
 	#transferred to buildTRee script..
-	"GenesPerSpecies=f" => \$GenesPerSpecies,
+	"GenesPerSpecies=f" => sub {
+		$GenesPerSpecies = $_[1];
+		$genesPerSpeciesSpecified = 1;
+	},
 	"GeneLengthMin=f" => \$GeneLengthMin,
-	"GeneLengthIncludeMin=f" => \$GeneLengthIncludeMin,
-	"relativeNTFraction=f" => \$relativeNTFraction,
+	"GeneLengthIncludeMin=f" => sub {
+		$GeneLengthIncludeMin = $_[1];
+		$geneLengthIncludeMinSpecified = 1;
+	},
+	"relativeNTFraction=f" => sub {
+		$relativeNTFraction = $_[1];
+		$relativeNTFractionSpecified = 1;
+	},
 	"NTfiltCount=i" => \$NTfiltCount,
-	"placementGenesPerSpecies=f" => \$placementGenesPerSpecies,
-	"placementRelativeNTFraction=f" => \$placementRelativeNTFraction,
+	"placementGenesPerSpecies=f" => sub {
+		$placementGenesPerSpecies = $_[1];
+		$placementGenesPerSpeciesSpecified = 1;
+	},
+	"placementRelativeNTFraction=f" => sub {
+		$placementRelativeNTFraction = $_[1];
+		$placementRelativeNTFractionSpecified = 1;
+	},
 	"placementNTfiltCount=i" => \$placementNTfiltCount,
 	"preferredCoreGenes=s" => \$preferredCoreGenes,
 	"compactTaxonAwareDiagnostics=i" => \$compactTaxonAwareDiagnostics,
@@ -665,6 +692,7 @@ GetOptions(
 	"rateMergeTargetSites=i" => \$rateMergeTargetSites,
 	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
 	"rateMergeMinSites=i" => \$rateMergeMinSites,
+	"postAlignmentSequenceOutlierMask=i" => \$postAlignmentSequenceOutlierMask,
 	"placeOnBackbone=i" => sub { $strictBackbone = $_[1]; $placeOnBackboneSpecified = 1; },
 	"excludeMixedStrainSamples=i" => \$excludeMixedStrainSamples,
 	"enforceSampleCoverage=i" => \$enforceSampleCoverage,
@@ -725,6 +753,26 @@ if ($help) {
 			."and hand-off to strain_within_2.2.pl. Normally launched by MGS.pl.",
 		exit    => 1,
 	);
+}
+$GeneLengthIncludeMin = $GeneLengthMin unless $geneLengthIncludeMinSpecified;
+for my $pair (
+	[
+		{ name => 'GenesPerSpecies', value_ref => \$GenesPerSpecies,
+			specified => $genesPerSpeciesSpecified },
+		{ name => 'relativeNTFraction', value_ref => \$relativeNTFraction,
+			specified => $relativeNTFractionSpecified },
+	],
+	[
+		{ name => 'placementGenesPerSpecies', value_ref => \$placementGenesPerSpecies,
+			specified => $placementGenesPerSpeciesSpecified },
+		{ name => 'placementRelativeNTFraction',
+			value_ref => \$placementRelativeNTFraction,
+			specified => $placementRelativeNTFractionSpecified },
+	],
+) {
+	my $inheritance = resolvePairedOptionDefault(
+		first => $pair->[0], second => $pair->[1]);
+	push @pairedDefaultInheritances, $inheritance if $inheritance;
 }
 die "-placeOnBackbone cannot be combined with deprecated -strictBackbone\n"
 	if $placeOnBackboneSpecified && $legacyStrictBackboneSpecified;
@@ -840,6 +888,9 @@ die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
 die "-rateMergePartitions must be 0 or 1\n"
 	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
+die "-postAlignmentSequenceOutlierMask must be 0 or 1\n"
+	unless $postAlignmentSequenceOutlierMask == 0
+		|| $postAlignmentSequenceOutlierMask == 1;
 die "-rateMergeMaxBins, -rateMergeTargetSites, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
 	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeTargetSites, $rateMergeMinLoci, $rateMergeMinSites);
 die "-placeOnBackbone must be 0 or 1\n"
@@ -2433,6 +2484,8 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		."-rateMergeTargetSites $rateMergeTargetSites "
 		."-rateMergeMinLoci $rateMergeMinLoci "
 		."-rateMergeMinSites $rateMergeMinSites ";
+	$Tcmd .= "-postAlignmentSequenceOutlierMask "
+		."$postAlignmentSequenceOutlierMask ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog -onlyMSA $onlyMSA ";
 	$Tcmd .= "-placeOnBackbone $strictBackbone ";
 	# buildTree5 provides both as generic, default-off mechanisms; the strain
@@ -7427,6 +7480,10 @@ sub printEarlyRunHeader {
 	print "MGS input: ".(length($MGSfile) ? $MGSfile : '(FMG mode)')."\n";
 	print "Requested output: $requestedOutput\n";
 	print "SNP caller: $SNPcaller ($lConsFNA; $lConsFAA; $lConsVCF)\n";
+	for my $inheritance (@pairedDefaultInheritances) {
+		print "Paired option default: -$inheritance->{target}=$inheritance->{value} "
+			."inherited from explicit -$inheritance->{source}\n";
+	}
 	print "Cores: $numCores (max: $maxCores); submit=$doSubmit; "
 		."onlySubmit=$onlySubmit; redo=$redoMode; redoEPAfilter=$redoEPAfilter\n";
 	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB; "

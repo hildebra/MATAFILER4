@@ -10,9 +10,34 @@ use File::Basename qw(dirname);
 use Cwd qw(abs_path);
 use Text::Wrap qw(wrap);
 
-our $VERSION = 0.11;
+our $VERSION = 0.12;
 our @EXPORT_OK = qw(printFlagHelp flagReferencePath readFlagReference
-	helpRequested scriptOptionSpecs scriptOptionNames);
+	helpRequested scriptOptionSpecs scriptOptionNames resolvePairedOptionDefault);
+
+#Two options can express the same policy in different measurements (for
+#example retained-gene and informative-NT fractions). Preserve their distinct
+#established defaults when neither was requested, and preserve an intentional
+#difference when both were requested. Only an otherwise implicit partner
+#inherits an explicitly supplied value.
+sub resolvePairedOptionDefault {
+	my (%args) = @_;
+	my ($first, $second) = @args{qw(first second)};
+	die "resolvePairedOptionDefault requires first and second option records\n"
+		unless ref($first) eq 'HASH' && ref($second) eq 'HASH';
+	for my $option ($first, $second) {
+		die "resolvePairedOptionDefault option records require name and value_ref\n"
+			unless defined($option->{name}) && length($option->{name})
+				&& ref($option->{value_ref}) eq 'SCALAR';
+	}
+	return undef if !!$first->{specified} == !!$second->{specified};
+	my ($source, $target) = $first->{specified}
+		? ($first, $second) : ($second, $first);
+	my ($source_ref, $target_ref) = map { $_->{value_ref} } ($source, $target);
+	$$target_ref = $$source_ref;
+	return {
+		source => $source->{name}, target => $target->{name}, value => $$target_ref,
+	};
+}
 
 #docs/ sits next to Mods/, so the reference is found from the module itself and
 #not from the calling script, which lives at three different depths.

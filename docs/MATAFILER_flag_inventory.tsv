@@ -236,10 +236,11 @@ buildTree5.pl	5.36	General options	-superCheck	integer	doSuperCheck	0	stable	See
 buildTree5.pl	5.36	General options	-fixHeaders	integer	fixHeaders	0	stable	# fix the fasta headers, if too long or containing not allowed symbols (nwk reserved)
 buildTree5.pl	5.36	General options	-useEte	integer	Ete	0	stable	See source/help for details.
 buildTree5.pl	5.38	General options	-relativeNTFraction	float	ntFrac	0.2	stable	Backbone relative informative-NT fraction; replaces retired ambiguous -NTfilt.
-buildTree5.pl	5.36	General options	-NTfiltPerGene	float	ntFracGene	0.1	stable	See source/help for details.
+buildTree5.pl	5.86	General options	-NTfiltPerGene	float	ntFracGene	0.4	stable	Per-locus minimum informative-NT fraction.
+buildTree5.pl	5.86	General options	-GeneLengthIncludeMin	float	ntFracGeneInclude	mirrors -NTfiltPerGene	stable	MSA inclusion threshold; an explicit lower value opts into partial-observation recovery.
 buildTree5.pl	5.38	General options	-GenesPerSpecies	float	GeneFracPSpec	0.1	stable	Backbone relative retained-locus threshold after final selection.
-buildTree5.pl	5.36	General options	-fracMaxGenes90pct	float	fracMaxGenes90pct	0.25	stable	See source/help for details.
-buildTree5.pl	5.38	General options	-NTfiltCount	integer	ntCntTotal	0	stable	Backbone absolute informative-NT threshold after final selection.
+buildTree5.pl	5.86	General options	-fracMaxGenes90pct	float	fracMaxGenes90pct	0.3	stable	Hard locus prevalence cutoff as a fraction of category-size Q90 when taxon-aware selection is off.
+buildTree5.pl	5.87	General options	-NTfiltCount	integer	ntCntTotal	0	stable	Backbone absolute informative-NT threshold in the final overlap-filtered concatenation after locus QC.
 buildTree5.pl	5.38	General options	-placementGenesPerSpecies	float	placementGeneFracPSpec	mirrors -GenesPerSpecies	advanced	Placement relative retained-locus threshold; defaults to backbone counterpart.
 buildTree5.pl	5.38	General options	-placementRelativeNTFraction	float	placementNTFrac	mirrors -relativeNTFraction	advanced	Placement relative informative-NT threshold; defaults to backbone counterpart.
 buildTree5.pl	5.38	General options	-placementNTfiltCount	integer	placementNTCntTotal	mirrors -NTfiltCount	advanced	Placement absolute informative-NT threshold; defaults to backbone counterpart.
@@ -249,6 +250,7 @@ buildTree5.pl	5.36	General options	-outgroup	string	outgroup		stable	Anchor for 
 buildTree5.pl	5.36	General options	-AAtree	integer	useAA4tree	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-MSAprogram	integer	MSAprog	2	stable	(0) MSAprobs, (1) clustalO, (2) mafft, (4) MUSCLE5, (5) FAMSA2 (only AA)
 buildTree5.pl	5.39	General options	-minOverlapMSA	float	minOverlapMSA	0 between species; 0.35 within species	stable	Minimum called-sequence fraction required to retain an MSA column; passed to MSAfix v2.14+ and converted to its equivalent per-locus count for final concatenation.
+buildTree5.pl	5.88	General options	-postAlignmentSequenceOutlierMask	integer	postAlignmentSequenceOutlierMask	0 between species; 1 within species	stable	Use MSAfix 2.16 locus QC to remove isolated divergent ingroup records; configured outgroups and divergent groups exceeding 10% are retained.
 buildTree5.pl	5.36	General options	-maxGapPerCol	float	maxGapPerCol	1	stable	same as minOverlapMSA, but for MSAfix and %of gaps allowed in a column
 buildTree5.pl	5.36	General options	-calcDistMat	integer	calcDistMat	0	stable	See source/help for details.
 buildTree5.pl	5.36	General options	-calcDistMatExt	integer	calcDistMatExt	0	stable	See source/help for details.
@@ -291,10 +293,11 @@ buildTree5.pl	5.36	Advanced partitioning	-rateMergeMaxBins	integer	rateMergeMaxB
 buildTree5.pl	5.36	Advanced partitioning	-rateMergeTargetSites	integer	rateMergeTargetSites	30000	advanced	Initial target is ceil(total effective called sites / target), capped by rateMergeMaxBins.
 buildTree5.pl	5.36	Advanced partitioning	-rateMergeMinLoci	integer	rateMergeMinLoci	20	advanced	Merge undersized bins into their nearest normalized divergence/GC neighbour.
 buildTree5.pl	5.36	Advanced partitioning	-rateMergeMinSites	integer	rateMergeMinSites	20000	advanced	Minimum effective called sites per bin; missing data reduce each locus's contribution.
-buildTree5.pl	5.36	Advanced locus selection	-taxonAwareLocusSelection	integer	taxonAwareLocusSelection	1	stable	Enable the in-process two-stage robust/core-plus-taxon-rescue selector; set to 0 for legacy filtering.
+buildTree5.pl	5.86	Advanced locus selection	-taxonAwareLocusSelection	integer	taxonAwareLocusSelection	0	stable	Opt in to the in-process robust/core-plus-taxon-rescue selector; the default uses hard prevalence filtering.
 buildTree5.pl	5.36	Advanced locus selection	-taxonAwareMaxLoci	integer	taxonAwareMaxLoci	500	advanced	Maximum final loci.
 buildTree5.pl	5.36	Advanced locus selection	-taxonAwareCoreLoci	integer	taxonAwareCoreLoci	400	advanced	Robust core loci selected before taxon rescue.
 buildTree5.pl	5.36	Advanced locus selection	-taxonAwareCandidateExtra	integer	taxonAwareCandidateExtra	150	advanced	Pre-MSA QC-backfill loci.
 buildTree5.pl	5.36	Advanced locus selection	-taxonAwareMinSequenceNT	integer	taxonAwareMinSequenceNT	60	advanced	Minimum unambiguous nucleotide-equivalent occurrence length.
 buildTree5.pl	5.36	Advanced locus selection	-taxonAwareTargetLoci	integer	taxonAwareTargetLoci	25	advanced	Per-sample locus target for greedy rescue.
 buildTree5.pl	5.36	Advanced locus selection	-taxonAwareTargetNT	integer	taxonAwareTargetNT	7500	advanced	Per-sample informative-NT target for greedy rescue.
+buildTree5.pl	5.86	Advanced locus selection	-taxonAwareHeterogeneityScoring	integer	taxonAwareHeterogeneityScoring	1	advanced	Apply variable-site information rewards and excess-variation penalties when taxon-aware selection is enabled; set to 0 to disable.

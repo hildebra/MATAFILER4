@@ -357,9 +357,16 @@ like($strain, qr/sub assertSafeWorkflowRemoval .*?resolved_default.*?Refusing to
 like($strain2,
 	qr/\$waitForAnalysis->\('strainStats'\);.*?my \$shouldCombineStrainStats = \$forceStrainStats \|\| \$strainTaskCount > 0 \|\| !-s \$RsummaryTab;.*?if \(\$shouldCombineStrainStats\) \{.*?combineResults\(0\);.*?\} else \{.*?Reusing existing combined strainStats overview/s,
 	'strainStats stores are combined only when missing or newly stale before the population phase is awaited');
+like($strain2, qr/our \$version = 0\.50;/,
+	'Results-directory behavior change has an explicit postprocessing version');
+like($strain2,
+	qr/my \$resultsDir = "\$FMGpD\/Results";.*?my \$RsummaryTab = "\$resultsDir\/strainStats\.tsv";.*?my \$popGenSummaryTab = "\$resultsDir\/popGenStats\.tsv";.*?my \$popGenSubsampleSummaryTab = "\$resultsDir\/popGenStats\.subsamples\.tsv";/s,
+	'combined overview validation follows the MG-STK Results subdirectory contract');
 like($strain2,
 	qr/\$combineResultsR --path .*?shellQuote\(\$FMGpD\).*?--outDir .*?shellQuote\(\$FMGpD\)/s,
 	'combineResults uses only supported path and output options; it auto-detects population-genetics stores');
+unlike($strain2, qr/--outDir .*?shellQuote\(\$resultsDir\)/s,
+	'the MG-STK output root is not changed to Results, which would create Results/Results');
 unlike($strain2, qr/--include-popgen/,
 	'combineResults is not passed the obsolete population-genetics inclusion option');
 like($strain2,
@@ -376,7 +383,7 @@ like($strain2,
 	qr/\$popGenStatsReady = !\$doPopGenStats \|\| -s \$popGenStore.*?if \(\$doPopGenStats\) \{.*?\$waitForAnalysis->\('popGenStats'\);.*?my \$shouldCombinePopGenStats = \$forcePopGenStats \|\| \$popGenTaskCount > 0 \|\| !-s \$popGenSummaryTab;.*?if \(\$shouldCombinePopGenStats\) \{.*?combineResults\(1\);.*?\} else \{.*?Reusing existing combined PopGenStats overview.*?combineResults\.R did not produce the population overview table \$popGenSummaryTab/s,
 	'existing population RDS stores and aggregate tables are reused, while missing or newly stale tables are combined after the population phase');
 like($strain2,
-	qr/\$popGenSubsampleSummaryTab = "\$FMGpD\/popGenStats\.subsamples\.tsv".*?Combined subsampled population-genetics overview/s,
+	qr/\$popGenSubsampleSummaryTab = "\$resultsDir\/popGenStats\.subsamples\.tsv".*?Combined subsampled population-genetics overview/s,
 	'subsampled population-genetics output is surfaced separately from the full population table');
 unlike($strain2, qr/if \(0\)\{#rerun popgen stats\?\?/,
 	'population genetics is no longer hidden behind a disabled legacy block');
@@ -426,10 +433,10 @@ for my $phaseMarker (@analysisPhaseMarkers) {
 ok($analysisPhasesInOrder,
 	'strain summaries and submitted network/treeWAS/phylogeny work start before the independent population phase is awaited');
 like($strain2,
-	qr/sub visualizeSignPhylos\{.*?\$phyloFigureStone = "\$FMGpD\/phyloFigures\.sto";.*?\$cmdPic \.= "touch ".*?if \(!-e \$phyloFigureStone\).*?qsubSystem\(\s*"\$FMGpD\/phyloFigures\.sh", \$cmdPic, 1, "24G", "phyloFigures".*?return \(\$dep, \$phyloFigureStone\);/s,
+	qr/sub visualizeSignPhylos\{.*?\$phyloFigureStone = "\$resultsDir\/phyloFigures\.sto";.*?\$cmdPic \.= "touch ".*?if \(!-e \$phyloFigureStone\).*?qsubSystem\(\s*"\$resultsDir\/phyloFigures\.sh", \$cmdPic, 1, "24G", "phyloFigures".*?return \(\$dep, \$phyloFigureStone\);/s,
 	'significant-phylogeny plotting is submitted with a durable checkpoint and adequate memory');
 like($strain2,
-	qr/\$phyloFigureCheckpoint = "\$FMGpD\/phyloFigures\.sto";.*?unlink \$phyloFigureCheckpoint.*?if -e \$phyloFigureCheckpoint/s,
+	qr/\$phyloFigureCheckpoint = "\$resultsDir\/phyloFigures\.sto";.*?unlink \$phyloFigureCheckpoint.*?if -e \$phyloFigureCheckpoint/s,
 	'explicit rewrites invalidate the submitted phylogeny-figure checkpoint');
 
 like($strain2,
@@ -462,8 +469,14 @@ unlike($strain2, qr/\$batchSize/,
 unlike($strain2, qr/if \(\$doSubmit && -d \$destD\)/,
 	'partial result recovery does not erase an entire within directory outside an explicit rewrite');
 like($strain2,
-	qr/my \$networkDir = "\$FMGpD\/networks";.*?remove_tree\(\$networkDir\) if -d \$networkDir/s,
+	qr/my \$networkDir = "\$resultsDir\/networks";.*?remove_tree\(\$networkDir\) if -d \$networkDir/s,
 	'explicit rewrites clear the workflow-owned network cache');
+like($strain2,
+	qr/sub strainNetwork.*?my \$netDir = "\$resultsDir\/networks\/";.*?-o .*?shellQuote\(\$netDir\)/s,
+	'network tables and PDFs are published below Results');
+like($strain2,
+	qr/sub treeWas.*?my \$treewasOut = "\$resultsDir\/GeneEnrich\/";.*?-o .*?shellQuote\(\$treewasOut\)/s,
+	'treeWAS tables are published below Results');
 like($strain2,
 	qr/\$networkGraph = "\$netDir\/strain_graph\.Rds".*?\$networkStone && !-s \$networkGraph.*?Ignoring incomplete network checkpoint.*?unlink \$networkStone.*?test -s .*?\$networkGraph.*?touch .*?\$networkStone/s,
 	'network completion requires a nonempty graph result as well as its checkpoint');
@@ -520,7 +533,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.56;/,
+like($strain, qr/my \$version = 1\.60;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$resumeOutD = .*?my \$parentRunLock;.*?if \(!\$subJob\).*?\$parentRunLockPath = "\$lockBase\.strain_within\.lock".*?acquire_workflow_lock\(.*?prepRun\(\);/s,
@@ -1055,8 +1068,35 @@ like($strain,
 unlike($strain, qr/-NTfilt \$relativeNTFraction/,
 	'strain workflow does not emit the retired ambiguous NTfilt option');
 like($strain,
-	qr/my \$GenesPerSpecies = 0\.2;.*?my \$GeneLengthMin = 0\.3;.*?my \$GeneLengthIncludeMin = 0\.03;.*?my \$relativeNTFraction = 0\.1;.*?\$placementGenesPerSpecies = 0.04; \$placementRelativeNTFraction = 0.03;.*?my \$taxonAwareLocusSelection = 1;.*?"GeneLengthIncludeMin=f" => \\\$GeneLengthIncludeMin.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?-GeneLengthIncludeMin \$GeneLengthIncludeMin.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
-	'strainWithin separates high-threshold QC from lower MSA inclusion while retaining balanced placement filters');
+	qr/my \$GenesPerSpecies = 0\.2;.*?my \$GeneLengthMin = 0\.4;.*?my \$GeneLengthIncludeMin = \$GeneLengthMin;.*?my \$geneLengthIncludeMinSpecified = 0;.*?my \$relativeNTFraction = 0\.1;.*?\$placementGenesPerSpecies = 0.04; \$placementRelativeNTFraction = 0.03;.*?my \$taxonAwareLocusSelection = 0;.*?"GeneLengthIncludeMin=f" => sub \{.*?\$GeneLengthIncludeMin = \$_\[1\];.*?\$geneLengthIncludeMinSpecified = 1;.*?"taxonAwareLocusSelection=i" => \\\$taxonAwareLocusSelection.*?\$GeneLengthIncludeMin = \$GeneLengthMin unless \$geneLengthIncludeMinSpecified;.*?-GeneLengthIncludeMin \$GeneLengthIncludeMin.*?-taxonAwareLocusSelection \$taxonAwareLocusSelection/s,
+	'strainWithin defaults to one 40% gene-length gate and hard locus filtering while retaining explicit overrides');
+like($strain,
+	qr/my \$postAlignmentSequenceOutlierMask = 1;.*?"postAlignmentSequenceOutlierMask=i" => \\\$postAlignmentSequenceOutlierMask.*?-postAlignmentSequenceOutlierMask ".*?\$postAlignmentSequenceOutlierMask/s,
+	'strainWithin enables and forwards the native within-locus sequence-outlier masker');
+like($strain,
+	qr/minimum_informative_nt_per_sample => 5000,.*?my \$NTfiltCount = \$FILTER_DEFAULT\{minimum_informative_nt_per_sample\};/s,
+	'strainWithin retains the 5 kb absolute informative-position floor');
+like($strain,
+	qr/multi_gene_sample_max => 0\.10,.*?my \$multiGeneSmplMax = \$FILTER_DEFAULT\{multi_gene_sample_max\};/s,
+	'strainWithin limits unresolved multigene loci to 10% by default');
+like($strain,
+	qr/"GenesPerSpecies=f" => sub.*?\$genesPerSpeciesSpecified = 1.*?"relativeNTFraction=f" => sub.*?\$relativeNTFractionSpecified = 1.*?"placementGenesPerSpecies=f" => sub.*?\$placementGenesPerSpeciesSpecified = 1.*?"placementRelativeNTFraction=f" => sub.*?\$placementRelativeNTFractionSpecified = 1.*?resolvePairedOptionDefault/s,
+	'strainWithin resolves each coverage pair only after recording explicit options');
+like($build_tree,
+	qr/"relativeNTFraction=f" => sub.*?\$ntFracSpecified = 1.*?"GenesPerSpecies=f" => sub.*?\$geneFracPSpecSpecified = 1.*?"placementGenesPerSpecies=f" => sub.*?\$placementGeneFracPSpecSpecified = 1.*?"placementRelativeNTFraction=f" => sub.*?\$placementNTFracSpecified = 1.*?resolvePairedOptionDefault/s,
+	'BuildTree applies the same explicit-option-aware coverage-pair defaults');
+like($build_tree,
+	qr/my \$ntFrac =0\.2; my \$ntFracGene = 0\.4;.*?my \$geneLengthIncludeMinSpecified = 0;.*?my \$ntFracGeneInclude = \$ntFracGene;.*?my \$fracMaxGenes90pct = 0\.3;.*?"GeneLengthIncludeMin=f" => sub \{.*?\$ntFracGeneInclude = \$_\[1\];.*?\$geneLengthIncludeMinSpecified = 1;.*?\$ntFracGeneInclude = \$ntFracGene unless \$geneLengthIncludeMinSpecified;/s,
+	'BuildTree uses one 40% gene-length gate by default and restores the 30%-of-Q90 hard locus filter');
+like($build_tree,
+	qr/my %TAXON_AWARE_DEFAULT = \(\s*enabled => 0,.*?my \$taxonAwareHeterogeneityScoring = 1;/s,
+	'BuildTree disables taxon-aware selection by default but restores its heterogeneity score when enabled');
+like($build_tree,
+	qr/between_species_sequence_outlier_mask => 0,.*?within_species_sequence_outlier_mask => 1,.*?"postAlignmentSequenceOutlierMask=i" => \\\$postAlignmentSequenceOutlierMask.*?-maskSequenceOutliers.*?-sequenceOutlierReport.*?-sequenceOutlierExemptPrefix/s,
+	'BuildTree mode defaults and MSAfix invocation keep masking strain-specific and exempt the outgroup');
+like($build_tree,
+	qr/sub mergeMSAs.*?informativeSequenceLength\(\$bigMSAFAA\{\$kk\}, \$isAA\).*?classifyTaxonAwareCoverageEligibility\(.*?minimum_nt => \$ntCntTotal/s,
+	'BuildTree rechecks sample coverage from the final overlap-filtered concatenation without another alignment scan');
 like($strain,
 	qr/my \$taxonAwareRescueMinPrevalence = 0\.8;.*?"taxonAwareRescueMinPrevalence=f" => \\\$taxonAwareRescueMinPrevalence.*?-taxonAwareRescueMinPrevalence \$taxonAwareRescueMinPrevalence/s,
 	'strainWithin exposes and forwards the broad-locus rescue prevalence guard');
@@ -1239,8 +1279,8 @@ like($build_tree,
 	qr/enabled => 0,.*?my \$strictBackbone = \$BACKBONE_DEFAULT\{enabled\}/s,
 	'buildTree5 keeps strict-backbone EPA placement disabled by default');
 like($build_tree,
-	qr/"GeneLengthIncludeMin=f" => \\\$ntFracGeneInclude.*?geneLengthIncludeByGene.*?qualification_sequences => \\%geneLengthQCSequence/s,
-	'buildTree5 aligns lower-threshold recovery data while keeping final sample QC on high-threshold sequences');
+	qr/"GeneLengthIncludeMin=f" => sub \{.*?\$geneLengthIncludeMinSpecified = 1;.*?geneLengthIncludeByGene.*?qualification_sequences => \\%geneLengthQCSequence/s,
+	'buildTree5 supports explicit lower-threshold recovery while keeping final sample QC on high-threshold sequences');
 like($build_tree,
 	qr/-minGoodPosFrac", \(\$cogCats ne '' \? \$ntFracGeneInclude : 0\.6\)/,
 	'category-based MSA cleaning does not impose the obsolete 60% coverage floor on recovered fragments');
