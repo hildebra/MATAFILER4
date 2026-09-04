@@ -36,7 +36,7 @@ sub mgsTreeOutgroup;
 
 #declared here (not next to the changelog) so -help can report it before the
 #first getProgPaths() below needs a site config; keep it in sync with that list
-our $version = 0.49;
+our $version = 0.50;
 
 #-help is answered from docs/flag_reference.md, without a site config
 if (helpRequested(@ARGV)) {
@@ -89,6 +89,7 @@ if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]
 #.47: isolate each MGS analysis so one failure cannot abort its batch, and stop nounset from killing conda activation
 #.48: raise the PopGenStats memory request and add -popGenCategory for its sample groupings
 #.49: make PopGenStats opt-in so ordinary runs only produce strainStats
+#.50: follow MG-STK's Results directory contract for combined and downstream outputs
 #$version is declared near the top of this file so -help can print it
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
@@ -198,10 +199,11 @@ my $neighborTree = length($MGSphylo) ? getProgPaths("neighborTree") : "";
 my $SaSe = "|";
 my $SaSe2 = "\|"; #for regex
 my $numCores = 40; #used for phylos..
-my $RsummaryTab = "$FMGpD/strainStats.tsv";
-my $popGenSummaryTab = "$FMGpD/popGenStats.tsv";
-my $popGenSubsampleSummaryTab = "$FMGpD/popGenStats.subsamples.tsv";
-my $legacyRsummaryTab = "$FMGpD/Rsummary.tab";
+my $resultsDir = "$FMGpD/Results";
+my $RsummaryTab = "$resultsDir/strainStats.tsv";
+my $popGenSummaryTab = "$resultsDir/popGenStats.tsv";
+my $popGenSubsampleSummaryTab = "$resultsDir/popGenStats.subsamples.tsv";
+my $legacyRsummaryTab = "$resultsDir/Rsummary.tab";
 
 
 my %dirs;my %destDs; my %baseD;
@@ -243,11 +245,11 @@ if ($rewriteRanalysis){ #faster to do once for all..
 		for my $summary ($RsummaryTab, $popGenSummaryTab, $popGenSubsampleSummaryTab, $legacyRsummaryTab) {
 			unlink $summary or die "Cannot remove $summary: $!\n" if -e $summary;
 		}
-		my $networkDir = "$FMGpD/networks";
+		my $networkDir = "$resultsDir/networks";
 		remove_tree($networkDir) if -d $networkDir;
-		my $treeWasCheckpoint = "$FMGpD/GeneEnrich/treeWAS.sto";
+		my $treeWasCheckpoint = "$resultsDir/GeneEnrich/treeWAS.sto";
 		unlink $treeWasCheckpoint or die "Cannot remove stale checkpoint $treeWasCheckpoint: $!\n" if -e $treeWasCheckpoint;
-		my $phyloFigureCheckpoint = "$FMGpD/phyloFigures.sto";
+		my $phyloFigureCheckpoint = "$resultsDir/phyloFigures.sto";
 		unlink $phyloFigureCheckpoint or die "Cannot remove stale checkpoint $phyloFigureCheckpoint: $!\n" if -e $phyloFigureCheckpoint;
 	} else {
 		print "Dry run: existing strain2 results and checkpoints will be preserved.\n";
@@ -258,11 +260,11 @@ if ($rewriteRanalysis){ #faster to do once for all..
 		for my $summary ($RsummaryTab, $legacyRsummaryTab) {
 			unlink $summary or die "Cannot remove $summary: $!\n" if -e $summary;
 		}
-		my $networkDir = "$FMGpD/networks";
+		my $networkDir = "$resultsDir/networks";
 		remove_tree($networkDir) if -d $networkDir;
-		my $treeWasCheckpoint = "$FMGpD/GeneEnrich/treeWAS.sto";
+		my $treeWasCheckpoint = "$resultsDir/GeneEnrich/treeWAS.sto";
 		unlink $treeWasCheckpoint or die "Cannot remove stale checkpoint $treeWasCheckpoint: $!\n" if -e $treeWasCheckpoint;
-		my $phyloFigureCheckpoint = "$FMGpD/phyloFigures.sto";
+		my $phyloFigureCheckpoint = "$resultsDir/phyloFigures.sto";
 		unlink $phyloFigureCheckpoint or die "Cannot remove stale checkpoint $phyloFigureCheckpoint: $!\n" if -e $phyloFigureCheckpoint;
 	}
 	if ($redoPopGenStats) {
@@ -750,7 +752,7 @@ die "Downstream strain analyses failed or did not publish checkpoints: "
 
 if (0){#get within strain nuc div
 	my $countStrains=0;
-	open O,">$FMGpD/withinStrain.tab";
+	open O,">$resultsDir/withinStrain.tab";
 	foreach my $d (@k2d){
 		my $destBaseD = $dirs{$d}; $destBaseD =~ s/(.*)\/phylo/$1\//; 
 		my $strainFile = "$destBaseD/within/IQtree_allsites.strains.txt";
@@ -778,24 +780,24 @@ my %TS;
 #summary of dnds
 if (0){
 	#fubar summaries
-	sumSummaries("hyphy.fubar.txt","$FMGpD/fubar.tab");
-	sumSummaries("hyphy.fubar.s10.txt","$FMGpD/fubar.s10.tab");
-	sumSummaries("hyphy.fubar.s20.txt","$FMGpD/fubar.s20.tab");
-	sumSummaries("hyphy.fubar.s30.txt","$FMGpD/fubar.s30.tab");
-	sumSummaries("hyphy.fubar.s100.txt","$FMGpD/fubar.s100.tab");
-	sumSummaries("hyphy.fubar.s200.txt","$FMGpD/fubar.s200.tab");
-	sumSummaries("hyphy.fubar.s500.txt","$FMGpD/fubar.s500.tab");
-	sumSummaries("hyphy.fubar.unID.txt","$FMGpD/fubar.unID.tab");
+	sumSummaries("hyphy.fubar.txt","$resultsDir/fubar.tab");
+	sumSummaries("hyphy.fubar.s10.txt","$resultsDir/fubar.s10.tab");
+	sumSummaries("hyphy.fubar.s20.txt","$resultsDir/fubar.s20.tab");
+	sumSummaries("hyphy.fubar.s30.txt","$resultsDir/fubar.s30.tab");
+	sumSummaries("hyphy.fubar.s100.txt","$resultsDir/fubar.s100.tab");
+	sumSummaries("hyphy.fubar.s200.txt","$resultsDir/fubar.s200.tab");
+	sumSummaries("hyphy.fubar.s500.txt","$resultsDir/fubar.s500.tab");
+	sumSummaries("hyphy.fubar.unID.txt","$resultsDir/fubar.unID.tab");
 	#popstats
-	sumSummaries("PopStats.txt","$FMGpD/PopStats.tab");
-	sumSummaries("PopStats.10.txt","$FMGpD/PopStats.10.tab");
-	sumSummaries("PopStats.20.txt","$FMGpD/PopStats.20.tab");
-	sumSummaries("PopStats.30.txt","$FMGpD/PopStats.30.tab");
-	sumSummaries("PopStats.100.txt","$FMGpD/PopStats.100.tab");
-	sumSummaries("PopStats.200.txt","$FMGpD/PopStats.200.tab");
-	sumSummaries("PopStats.500.txt","$FMGpD/PopStats.500.tab");
-	#sumSummaries("PopStats.500.txt","$FMGpD/PopStats.unID.tab");
-	sumSummaries("hyphy.Theta.log","$FMGpD/Theta.tab");
+	sumSummaries("PopStats.txt","$resultsDir/PopStats.tab");
+	sumSummaries("PopStats.10.txt","$resultsDir/PopStats.10.tab");
+	sumSummaries("PopStats.20.txt","$resultsDir/PopStats.20.tab");
+	sumSummaries("PopStats.30.txt","$resultsDir/PopStats.30.tab");
+	sumSummaries("PopStats.100.txt","$resultsDir/PopStats.100.tab");
+	sumSummaries("PopStats.200.txt","$resultsDir/PopStats.200.tab");
+	sumSummaries("PopStats.500.txt","$resultsDir/PopStats.500.tab");
+	#sumSummaries("PopStats.500.txt","$resultsDir/PopStats.unID.tab");
+	sumSummaries("hyphy.Theta.log","$resultsDir/Theta.tab");
 }
 
 
@@ -940,7 +942,7 @@ sub sumSummaries($ $){
 
 
 sub strainNetwork{ #submits Anthony's script to build a network
-	my $netDir = "$FMGpD/networks/";
+	my $netDir = "$resultsDir/networks/";
 	my $networkStone = "$netDir/networks.sto";
 	my $networkGraph = "$netDir/strain_graph.Rds";
 	my $dep = "";
@@ -974,10 +976,10 @@ sub treeWas{
 	my $funCmd = "";
 	my $treewasRun_R = getProgPaths("treewasRun_R");
 	my $processTreewas_R = getProgPaths("processTreewas_R");
-	my $treewasOut = "$FMGpD/GeneEnrich/";
+	my $treewasOut = "$resultsDir/GeneEnrich/";
 	my $treewasOutfile = "$treewasOut/treeWAS_results.csv";
 	my $summaryOutfile = "$treewasOut/treeWAS_results_functions.csv";
-	my $treeWasStone = "$FMGpD/GeneEnrich/treeWAS.sto";
+	my $treeWasStone = "$resultsDir/GeneEnrich/treeWAS.sto";
 	my $MGSd = dirname($FMGpD);
 	if (-e $treeWasStone && (!-s $treewasOutfile || !-s $summaryOutfile)) {
 		warn "Ignoring incomplete treeWAS checkpoint $treeWasStone\n";
@@ -1009,7 +1011,7 @@ sub visualizeSignPhylos{
 	#my $taxFile = "$GCd/Anno/Tax/GTDBmg_MGS/specI.tax";
 	my $vizPhylos = getProgPaths("vizPhylosSign_R");
 	my $taxFile = "$FMGpD/../Annotation/MGS.GTDB.LCA.tax";
-	my $phyloFigureStone = "$FMGpD/phyloFigures.sto";
+	my $phyloFigureStone = "$resultsDir/phyloFigures.sto";
 	my $cmdPic = "$vizPhylos ".join(" ", map { shellQuote($_) }
 		($RsummaryTab, $taxFile, $FMGpD, "phylo", $MGSTKdir, $refMap, "-1"))."\n";
 	$cmdPic .= "touch ".shellQuote($phyloFigureStone)."\n";
@@ -1018,7 +1020,7 @@ sub visualizeSignPhylos{
 	if (!-e $phyloFigureStone) {
 		print "Submitting figures of most significant phylogenies\nThis might take several hours..\n";
 		my ($submittedDep, $qcmd) = qsubSystem(
-			"$FMGpD/phyloFigures.sh", $cmdPic, 1, "24G", "phyloFigures", "", "", 1, [], $QSBoptHR);
+			"$resultsDir/phyloFigures.sh", $cmdPic, 1, "24G", "phyloFigures", "", "", 1, [], $QSBoptHR);
 		$dep = $submittedDep;
 	}
 	return ($dep, $phyloFigureStone);

@@ -321,7 +321,8 @@ my $completionMessage = "";
 #1.58: restore hard locus-prevalence selection and use one 40% locus-length
 #	threshold for both locus QC and MSA inclusion by default
 #1.59: lower the default unresolved multigene-locus fraction to 0.10
-my $version = 1.59;
+#1.60: enable MSAfix isolated within-locus sequence-outlier masking by default
+my $version = 1.60;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -420,6 +421,7 @@ my $rateMergeMaxBins = 8;
 my $rateMergeTargetSites = 30_000;
 my $rateMergeMinLoci = 20;
 my $rateMergeMinSites = 20_000;
+my $postAlignmentSequenceOutlierMask = 1;
 my $strictBackbone = 0;
 #Extraction QC flags a sample as mixed when too many of its loci hold
 #unresolvable same-COG paralogs (-multiGeneSmplMax) or conspecific consensus
@@ -690,6 +692,7 @@ GetOptions(
 	"rateMergeTargetSites=i" => \$rateMergeTargetSites,
 	"rateMergeMinLoci=i" => \$rateMergeMinLoci,
 	"rateMergeMinSites=i" => \$rateMergeMinSites,
+	"postAlignmentSequenceOutlierMask=i" => \$postAlignmentSequenceOutlierMask,
 	"placeOnBackbone=i" => sub { $strictBackbone = $_[1]; $placeOnBackboneSpecified = 1; },
 	"excludeMixedStrainSamples=i" => \$excludeMixedStrainSamples,
 	"enforceSampleCoverage=i" => \$enforceSampleCoverage,
@@ -885,6 +888,9 @@ die "-taxonAwareLocusSelection must be 0 or 1\n"
 	unless $taxonAwareLocusSelection == 0 || $taxonAwareLocusSelection == 1;
 die "-rateMergePartitions must be 0 or 1\n"
 	unless $rateMergePartitions == 0 || $rateMergePartitions == 1;
+die "-postAlignmentSequenceOutlierMask must be 0 or 1\n"
+	unless $postAlignmentSequenceOutlierMask == 0
+		|| $postAlignmentSequenceOutlierMask == 1;
 die "-rateMergeMaxBins, -rateMergeTargetSites, -rateMergeMinLoci, and -rateMergeMinSites must be positive\n"
 	if grep { $_ < 1 } ($rateMergeMaxBins, $rateMergeTargetSites, $rateMergeMinLoci, $rateMergeMinSites);
 die "-placeOnBackbone must be 0 or 1\n"
@@ -2478,6 +2484,8 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		."-rateMergeTargetSites $rateMergeTargetSites "
 		."-rateMergeMinLoci $rateMergeMinLoci "
 		."-rateMergeMinSites $rateMergeMinSites ";
+	$Tcmd .= "-postAlignmentSequenceOutlierMask "
+		."$postAlignmentSequenceOutlierMask ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog -onlyMSA $onlyMSA ";
 	$Tcmd .= "-placeOnBackbone $strictBackbone ";
 	# buildTree5 provides both as generic, default-off mechanisms; the strain

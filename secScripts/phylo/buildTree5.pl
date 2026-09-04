@@ -2295,6 +2295,12 @@ if ($postAlignmentLocusQC && $cogCats ne "") {
 			or die "Cannot remove stale locus-QC report $postAlignmentQCReport: $!\n";
 	}
 }
+if (!$postAlignmentSequenceOutlierMask && !$retainedConcatenatedCheckpoint
+		&& -e $postAlignmentSequenceOutlierReport) {
+	unlink $postAlignmentSequenceOutlierReport
+		or die "Cannot remove stale sequence-outlier report "
+			."$postAlignmentSequenceOutlierReport: $!\n";
+}
 my $postQCPrimary = $useAA4tree ? \@MSA_AA : \@MSAs;
 my $postAlignmentStats = $postAlignmentLocusQC && $cogCats ne ""
 	&& -s $postAlignmentQCReport
@@ -2308,9 +2314,12 @@ my $reportedPostQCLoci = $retainedConcatenatedCheckpoint
 $selectionAttrition{post_qc_loci} = $reportedPostQCLoci;
 postAlignmentStep("locus QC", $postAlignmentStepStarted,
 	"enabled=".($postAlignmentLocusQC ? 1 : 0),
+	"sequence_outlier_mask=".($postAlignmentSequenceOutlierMask ? 1 : 0),
 	"retained_loci=$reportedPostQCLoci",
 	"source=".($retainedConcatenatedCheckpoint ? 'retained_checkpoint' : 'current_run'),
-	"report=$postAlignmentQCReport");
+	"report=$postAlignmentQCReport",
+	"sequence_outlier_report=".($postAlignmentSequenceOutlierMask
+		? $postAlignmentSequenceOutlierReport : 'disabled'));
 $postAlignmentStepStarted = time;
 
 postAlignmentStep("alignment inventory", $postAlignmentStepStarted,
@@ -6744,6 +6753,30 @@ sub alignmentFileStem {
 	return $stem;
 }
 
+sub outgroupSequencePrefix {
+	my ($alignments, $sample) = @_;
+	return '' unless defined($sample) && length($sample);
+	for my $alignment (@{$alignments}) {
+		my ($input, $opened) = gzipopen(
+			$alignment, 'derive MSAfix outgroup-exemption prefix', 1);
+		next unless $opened && $input;
+		my $prefix = '';
+		while (my $line = <$input>) {
+			next unless $line =~ /^>(\S+)/;
+			my ($headerSample, undef, $separator) = parseSeqId(
+				$1, "aligned outgroup header in $alignment", 1);
+			if ($headerSample eq $sample && length($separator)) {
+				$prefix = $sample.$separator;
+				last;
+			}
+		}
+		close $input
+			or die "Cannot close alignment while deriving outgroup prefix: $alignment: $!\n";
+		return $prefix if length($prefix);
+	}
+	return '';
+}
+
 sub runPostAlignmentLocusQC {
 	my ($alignments, $sequenceType, $reportFile) = @_;
 	die "Post-alignment locus QC requires at least one alignment\n"
@@ -6771,6 +6804,26 @@ sub runPostAlignmentLocusQC {
 			"-maxP90Divergence", 1,
 			"-relativeModifiedZ", 1_000_001,
 		);
+	my @sequenceOutlierArguments;
+	if ($postAlignmentSequenceOutlierMask) {
+		unlink $postAlignmentSequenceOutlierReport
+			or die "Cannot remove stale sequence-outlier report "
+				."$postAlignmentSequenceOutlierReport: $!\n"
+			if -e $postAlignmentSequenceOutlierReport;
+		@sequenceOutlierArguments = (
+			"-maskSequenceOutliers",
+			"-sequenceOutlierReport",
+			shellQuote($postAlignmentSequenceOutlierReport),
+		);
+		my $outgroupPrefix = outgroupSequencePrefix($alignments, $outgroup);
+		if (length($outgroupPrefix)) {
+			push @sequenceOutlierArguments,
+				"-sequenceOutlierExemptPrefix", shellQuote($outgroupPrefix);
+		} elsif (length($outgroup)) {
+			warn "Configured outgroup '$outgroup' has no record in the prepared "
+				."alignments; no MSAfix sequence-mask exemption was required\n";
+		}
+	}
 	my $command = join(" ",
 		shellQuote($msaFix),
 		"-manifest", shellQuote($manifestFile),
@@ -6782,6 +6835,7 @@ sub runPostAlignmentLocusQC {
 		"-minOccupancy", $postAlignmentMinOccupancy,
 		"-minOverlapMSA", $minOverlapMSA,
 		@divergenceArguments,
+		@sequenceOutlierArguments,
 		"-minLociForRelative", $postAlignmentMinLociRelative,
 	) . "\n";
 	my @kept;
@@ -6789,6 +6843,10 @@ sub runPostAlignmentLocusQC {
 		systemW($command);
 		die "Native MSAfix locus QC did not produce its report: $reportFile\n"
 			unless -s $reportFile;
+		die "Native MSAfix sequence-outlier masking did not produce its audit: "
+			."$postAlignmentSequenceOutlierReport\n"
+			if $postAlignmentSequenceOutlierMask
+				&& !-s $postAlignmentSequenceOutlierReport;
 
 		open my $keepRead, '<', $keepFile
 			or die "Cannot open locus-QC keep file $keepFile: $!\n";
@@ -6805,6 +6863,7 @@ sub runPostAlignmentLocusQC {
 		$keepFile,
 		bsd_glob(quotemeta($reportFile).".tmp.*"),
 		bsd_glob(quotemeta($keepFile).".tmp.*"),
+		bsd_glob(quotemeta($postAlignmentSequenceOutlierReport).".tmp.*"),
 	);
 	my (%seenTemporary, @cleanupErrors);
 	for my $temporaryFile (@temporaryFiles) {
@@ -6825,6 +6884,9 @@ sub runPostAlignmentLocusQC {
 		." loci; see $reportFile\n" unless @kept;
 	print "Post-alignment locus QC retained ".scalar(@kept)."/"
 		.scalar(@{$alignments})." loci; report: $reportFile\n";
+	print "Within-locus sequence-outlier masking audit: "
+		."$postAlignmentSequenceOutlierReport\n"
+		if $postAlignmentSequenceOutlierMask;
 	return \@kept;
 }
 

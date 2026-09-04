@@ -76,6 +76,8 @@ These values control inclusion after locus QC. `-GenesPerSpecies` is the relativ
 
 Per-locus QC and MSA inclusion now share a `0.4` default gate. Unless explicitly supplied, `-GeneLengthIncludeMin` inherits the final `-GeneLengthMin` value, including a custom value given on the command line. You can still set `-GeneLengthIncludeMin` lower to recover partial observations after QC, but that is an explicit opt-in; recovered-only observations do not increase the QC locus/NT totals that admitted the sample and remain subject to MSAfix and post-alignment QC.
 
+Within-species post-alignment QC also enables MSAfix's isolated sequence-outlier masker. It removes a complete sample record from one locus only when that record has enough comparable sites, exceeds both an absolute divergence floor and a within-locus modified-Z threshold, and the candidate set covers no more than 10% of evaluable ingroup sequences. A larger divergent set is retained as a possible biological subgroup. The configured outgroup is excluded from the detection cohort and can never be removed. Use `-postAlignmentSequenceOutlierMask 0` to disable this step; `phylo/post_alignment_sequence_outliers.tsv` records masked candidates and divergent groups retained by the 10% safeguard.
+
 #### Lenient inclusion
 
 Use this only when sparse sampling is expected and you will inspect the resulting coverage/attrition reports carefully.
@@ -149,6 +151,7 @@ This is a task-oriented summary. See the [complete `strain_within.pl` flag refer
 | Resume and redo | `-onlySubmit`, `-onlyMSA`, `-redo` | Resume completed work normally, stop after localized per-locus MSAs, or explicitly rebuild tree outputs, incomplete inputs, or all selected results. |
 | Extraction QC | `-maxGenes`, `-treeLocusBudget`, `-MGSminGenesPSmpl`, `-GeneLengthMin`, `-GeneLengthIncludeMin`, `-multiGeneSmplMax`, `-conspGeneSmplMax`, `-excludeMixedStrainSamples`, `-minLociPerMGS` | Use one 40% locus-length gate for QC and MSA inclusion by default; a lower explicit inclusion gate opts into partial-locus recovery. Set `-maxGenes 0` to remove only the gene-count cap; QC remains active. |
 | Tree inclusion | `-GenesPerSpecies`, `-relativeNTFraction`, `-NTfiltCount`, `-enforceSampleCoverage`, `-taxonAwareLocusSelection`, `-taxonAwareRescueMinPrevalence` | The primary sample-inclusion policy. Hard 30%-of-Q90 locus prevalence filtering is the default; taxon-aware locus selection is opt-in. |
+| Post-alignment QC | `-postAlignmentSequenceOutlierMask` | Remove only isolated, strongly divergent ingroup records from individual loci during MSAfix QC. Enabled by default; set to `0` to disable. |
 | Sparse placement | `-placeOnBackbone`, `-strictBackboneFraction`, `-placementGenesPerSpecies`, `-placementRelativeNTFraction`, `-placementNTfiltCount`, `-placementMinOverlap`, `-epaThreads` | Optional EPA-ng placement controls. Off by default; enable with `-placeOnBackbone 1`. When disabled, all other options in this group are inactive. |
 | Mosaic/outgroups | `-mosaicLoci`, `-mosaicMGS`, `-prepareMosaicLoci`, `-outgroupCoreMinLoci`, `-preferredCoreGenes` | Manage Mosaic discovery and choose broadly supported outgroup loci. |
 | Tree resources | `-maxCores`, `-selfMemGb`, `-mosaicMemGb`, `-treeOOMMaxMemGB`, `-rateMergePartitions` | Set scheduler and tree-inference resources. |
@@ -177,15 +180,16 @@ This table covers the options normally used for restarts and analysis. See the [
 
 ## Outputs to review
 
-- `<FMGdir>/strainStats.tsv`: combined strain-statistics overview.
-- `<FMGdir>/popGenStats.tsv` and `popGenStats.subsamples.tsv`: population-genetic overviews when enabled.
+- `<FMGdir>/Results/strainStats.tsv`: combined strain-statistics overview.
+- `<FMGdir>/Results/popGenStats.tsv` and `popGenStats.subsamples.tsv`: population-genetic overviews when enabled.
 - `<MGS>/within/strainStats.output.Rds` and `popGenStats.output.Rds`: durable per-MGS result stores.
 - `<MGS>/phylo/gene_length_filter.samples.tsv`: per-sample counts and gene lists for both length gates and MSA recovery.
 - `<MGS>/phylo/final_alignment_sample_qc.tsv`: exact per-sample informative loci/positions after final locus and overlap QC, the applied relative/absolute thresholds, and whether the sample was retained, excluded, or deferred to backbone placement.
+- `<MGS>/phylo/post_alignment_sequence_outliers.tsv`: per-sample/per-locus MSAfix divergence decisions, including isolated records that were masked and larger divergent groups retained by the anti-clade safeguard.
 - `<MGS>/phylo/taxon_aware_diagnostics.tsv` and `selection_attrition.tsv`: retained-locus and sample-inclusion decisions, including `qc_excluded_samples` (mixed strain) and `coverage_excluded_samples` (below the inclusion thresholds).
 - `<MGS>/phylo/taxon_aware_backbone_eligibility.tsv`: per-sample selected loci, informative NT, and the thresholds they were judged against.
 - `<MGS>/sampleQC.tsv`: per-sample mixed-strain verdict with its ambiguous and conspecific locus fractions.
 - `<FMGdir>/LOGandSUB/strainGeneLengthFilter.samples.tsv`: run-wide sample report with MGS-qualified dropped/recovered gene lists.
-- `<FMGdir>/networks/`, `<FMGdir>/GeneEnrich/`, and `phyloFigures.sto`: downstream strain-only outputs/checkpoints.
+- `<FMGdir>/Results/networks/` and `<FMGdir>/Results/GeneEnrich/`: downstream network and treeWAS results. Significant-phylogeny PDFs and their `phyloFigures.sto` checkpoint are also published under `<FMGdir>/Results/`.
 
 For the full tree-engine option reference, see [BuildTree5 flags](flag_reference.md#buildtree5pl). For generic output locations, see [Outputs](outputs.md).

@@ -1,12 +1,18 @@
 # Changelog
 
+## 2026-09-04 — Publish strain postprocessing results consistently
+
+- Updated `strain_within_2.2.pl` to 0.50. Its aggregate-path checks now follow MG-STK's `<FMGdir>/Results/` contract, preventing a successful `combineResults.R` run from being misreported as missing `strainStats.tsv`.
+- Network, treeWAS, and significant-phylogeny plot outputs now also live under `<FMGdir>/Results/`; per-MGS trees and durable statistic stores remain in their existing MGS directories.
+
 ## 2026-09-04 — Restore conservative strain-locus defaults
 
-- Updated `buildTree5.pl` to 5.87 and `strain_within.pl` to 1.59. `-GeneLengthMin`/`-NTfiltPerGene` now default to `0.4`, and `-GeneLengthIncludeMin` inherits that value unless it is explicitly overridden.
+- Updated `buildTree5.pl` to 5.88 and `strain_within.pl` to 1.60. `-GeneLengthMin`/`-NTfiltPerGene` now default to `0.4`, and `-GeneLengthIncludeMin` inherits that value unless it is explicitly overridden.
 - Taxon-aware locus selection now defaults off in both entry points. The ordinary path again applies the hard locus-prevalence filter, now at `-fracMaxGenes90pct 0.3` of the category-size Q90. Taxon-aware selection remains available with `-taxonAwareLocusSelection 1`.
 - Heterogeneity-dependent information rewards and excess-variation penalties are restored by default inside the optional taxon-aware selector; `-taxonAwareHeterogeneityScoring 0` explicitly disables them.
 - The default ambiguous/multigene-locus fraction allowed per sample is reduced from `0.25` to `0.10`; the independent three-bad-locus minimum is unchanged.
 - The strain workflow retains its 5,000-informative-nucleotide absolute per-sample floor and now checks all coverage thresholds again on the final overlap-filtered concatenation, after locus QC. `phylo/final_alignment_sample_qc.tsv` records the exact locus and position counts and each disposition. Backbone placement and its separate 10 kb overlap requirement remain opt-in.
+- MSAfix 2.16 now removes isolated, strongly divergent sequence records within a locus during the existing native post-alignment QC pass. This is on by default only for within-species trees and can be disabled with `-postAlignmentSequenceOutlierMask 0`; configured outgroup records are exempt. The conservative absolute-divergence, modified-Z, comparable-site, minimum-cohort, and 10%-maximum safeguards avoid treating supported subgroups as isolated errors. Decisions are recorded in `phylo/post_alignment_sequence_outliers.tsv`.
 
 
 ## 2026-09-02 — Strain-tree filter-bias corrections

@@ -60,13 +60,19 @@ done
 exec /bin/cp "$input" "$output"
 SH
 chmod 0755, $trimal or die "Cannot make $trimal executable: $!";
-my $msaFixShim = File::Spec->catfile($temporary, 'MSAfix-v2.15-shim');
+my $msaFixShim = File::Spec->catfile($temporary, 'MSAfix-v2.16-shim');
 write_file($msaFixShim, <<'PERL');
 #!/usr/bin/env perl
 use strict;
 use warnings;
 
 my (@forward, $report, $threads, $singleAlignmentMode, %recovery);
+if (defined($ENV{MATAFILER_TEST_MSAFIX_ARGS})) {
+	open my $arguments, '>>', $ENV{MATAFILER_TEST_MSAFIX_ARGS}
+		or die "Cannot update MSAfix argument log: $!\n";
+	print {$arguments} join("\t", @ARGV), "\n";
+	close $arguments or die "Cannot close MSAfix argument log: $!\n";
+}
 if (defined($ENV{MATAFILER_TEST_MSAFIX_COUNT})) {
 	open my $count, '>>', $ENV{MATAFILER_TEST_MSAFIX_COUNT}
 		or die "Cannot update MSAfix invocation counter: $!\n";
@@ -226,10 +232,13 @@ my $mafftCount = File::Spec->catfile($temporary, 'mafft.calls');
 local $ENV{MATAFILER_TEST_MAFFT_COUNT} = $mafftCount;
 my $msaFixCount = File::Spec->catfile($temporary, 'msafix.calls');
 local $ENV{MATAFILER_TEST_MSAFIX_COUNT} = $msaFixCount;
+my $msaFixArguments = File::Spec->catfile($temporary, 'msafix.arguments');
+local $ENV{MATAFILER_TEST_MSAFIX_ARGS} = $msaFixArguments;
 my @command = (
 	$^X, '-I'.$root, $wrapper, $config, $script,
 	'-fna', $fna, '-aa', $faa, '-cats', $categories,
 	'-outD', $output, '-smplSep', '\\|', '-AAtree', 0,
+	'-withinSpecies', 1,
 	'-MSAprogram', 2, '-runLengthCheck', 0, '-postAlignmentLocusQC', 1,
 	'-NTfiltPerGene', 0.3, '-GeneLengthIncludeMin', 0.03,
 	'-taxonAwareLocusSelection', 1,
@@ -242,6 +251,13 @@ my @command = (
 	'-rateMergeMinLoci', 1, '-rateMergeMinSites', 1,
 );
 is(system(@command), 0, 'taxon-aware buildTree smoke workflow completes');
+my $sequenceOutlierAudit = File::Spec->catfile(
+	$output, 'phylo', 'post_alignment_sequence_outliers.tsv');
+ok(-s $sequenceOutlierAudit,
+	'within-species BuildTree enables the native sequence-outlier audit by default');
+like(slurp($sequenceOutlierAudit),
+	qr/^alignment\tsequence\tstatus\treason\tcomparable_sites\tdifferences\tdivergence\tmedian_divergence\tmad_divergence\tmodified_z\tevaluable_sequences\tmaximum_outliers$/m,
+	'the delivered MSAfix 2.16 audit schema is retained');
 
 # Mixed-strain exclusion must remove exactly the samples that extraction QC
 # flagged as ambiguous/conspecific, and must leave sparse samples alone: s3 is
@@ -365,6 +381,7 @@ like($coverageOffText, qr/^>s5$/m,
 my $finalCoverageOutput = File::Spec->catdir(
 	$temporary, 'final-alignment-coverage-output');
 my @finalCoverageCommand = (@command,
+	'-outgroup', 's1',
 	'-taxonAwareLocusSelection', 0,
 	'-fracMaxGenes90pct', 0,
 	'-postAlignmentMinOccupancy', 0.95,
@@ -390,6 +407,9 @@ like($finalCoverageText,
 	's5 receives the same auditable final-alignment decision');
 is(attrition_metric($finalCoverageOutput, 'coverage_excluded_samples'), 2,
 	'final-only sample exclusions are included in coverage attrition');
+like(slurp($msaFixArguments),
+	qr/(?:^|\n).*?-maskSequenceOutliers\t-sequenceOutlierReport\t[^\n]+\t-sequenceOutlierExemptPrefix\ts1\|(?:\t|\n)/,
+	'BuildTree passes the exact parsed outgroup-plus-separator prefix to MSAfix');
 
 my $postprocessedMSAFixRuns = (() = slurp($msaFixCount) =~ /^/gm);
 
