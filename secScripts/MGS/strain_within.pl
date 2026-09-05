@@ -324,7 +324,9 @@ my $completionMessage = "";
 #1.60: enable MSAfix isolated within-locus sequence-outlier masking by default
 #1.61: clear every BuildTree tree-stage directory asynchronously during -redo tree
 #1.62: use the shared moderate scheduler-priority default for ordinary strain jobs
-my $version = 1.62;
+#1.63: tolerate absent per-MGS BuildTree stage directories during tree redo
+#1.64: recover retained locus MSAs without rebuilding compatible trees
+my $version = 1.64;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -2277,6 +2279,14 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $IQtreef= "$outD2/phylo/IQtree_allsites.treefile";
 	$IQtreef = "$outD2/phylo/VERYFASTTREE_allsites.nwk" if ($phyloProg == 2);
 	$IQtreef = "$outD2/phylo/FASTTREE_allsites.nwk" if ($phyloProg == 3);
+	# A completed tree normally ends this MGS early. With -rmMSA 0, however,
+	# require BuildTree to verify and retain its per-locus checkpoints once.
+	# The job keeps normal tree flags so BuildTree can safely fall back to a full
+	# rebuild if its saved MSA-selection policy no longer matches.
+	my $ensureLocusMSAs = !$onlyMSA && !$rmMSA && !$epaRecovery
+		&& !$recalcTrees && !$reSubmit && !$repairCAT && !$deepRepair
+		&& !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
+		&& -s $treeStone && -s $IQtreef && !msaOnlyArtifactsReady($outD2);
 	my %resumeEntry;
 	if ($leanOnlySubmitResume) {
 		if (opendir(my $resumeDirectory, $outD2)) {
@@ -2289,7 +2299,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 				"Skipping $MGS: a completed MSA-only result is already present.\n");
 			next;
 		}
-		if (!$onlyMSA && $resumeEntry{'treeDone.sto'} && -s $IQtreef) {
+		if (!$onlyMSA && !$ensureLocusMSAs && $resumeEntry{'treeDone.sto'} && -s $IQtreef) {
 			$treeDisposition{'valid tree already present'}++;
 			limitedNotice('MGS skipped with existing trees',
 				"Skipping $MGS: a completed tree is already present.\n");
@@ -2354,7 +2364,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 			&& !$redoSubmissionData && !exists($legacyLocusMGS{$MGS})
 			&& ($onlyMSA
 				? msaOnlyArtifactsReady($outD2)
-				: (-e $treeStone && -s $IQtreef))) {
+				: (!$ensureLocusMSAs && -e $treeStone && -s $IQtreef))) {
 		$treeDisposition{$onlyMSA ? 'valid MSA already present' : 'valid tree already present'}++;
 		limitedNotice($onlyMSA ? 'MGS skipped with existing MSA-only result'
 				: 'MGS skipped with existing trees',
@@ -2428,6 +2438,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	my $baseMemMult = 75; $baseMemMult = 15 if ($phyloProg ==3 || $phyloProg ==2);
 	$baseMemMult = 150 if $placementRequested && $baseMemMult < 150;
 	my $memoryProfile = $onlyMSA ? 'MSA-only'
+	: $ensureLocusMSAs ? 'retained-MSA recovery'
 		: $placementRequested ? 'EPA-ng placement' : 'tree-only';
 	my $minimumMemMB = ($placementRequested ? 10240 : 5000) * $memMulti;
 	$minimumMemMB = 10240 if $placementRequested && $minimumMemMB < 10240;
@@ -2489,6 +2500,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	$Tcmd .= "-postAlignmentSequenceOutlierMask "
 		."$postAlignmentSequenceOutlierMask ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog -onlyMSA $onlyMSA ";
+	$Tcmd .= "-ensureLocusMSAs 1 " if $ensureLocusMSAs;
 	$Tcmd .= "-placeOnBackbone $strictBackbone ";
 	# buildTree5 provides both as generic, default-off mechanisms; the strain
 	# workflow is the caller that sets a policy for them.
@@ -2610,11 +2622,13 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	# PART II: retain each completely prepared job. Full trees are submitted
 	# together after preparation so the current core selector can define a global
 	# largest-first order; EPA-only recovery remains latency-prioritized.
+	my $msaOnlyJob = $onlyMSA || $ensureLocusMSAs;
 	my $treeJobOrdinal = $cnt + 1;
 	push @pendingTreeJobs, {
 		mgs => $MGS,
 		script => $epaOnlyRetry ? "$outD2/treeCmd.epa_retry.sh"
-			: $onlyMSA ? "$outD2/treeCmd.msa_only.sh" : "$outD2/treeCmd.sh",
+			: $onlyMSA ? "$outD2/treeCmd.msa_only.sh"
+			: $ensureLocusMSAs ? "$outD2/treeCmd.msa_retain.sh" : "$outD2/treeCmd.sh",
 		command => $Tcmd.$outgS."\n",
 		cores => $numCoreL,
 		sample_count => defined($multiSmpl) ? $multiSmpl : 0,
@@ -2625,13 +2639,14 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		priority_ordinal => $treeJobOrdinal,
 		memory_planning_input_mb => $memoryPlanningInputMB,
 		job_name => $epaOnlyRetry ? "EPA$treeJobOrdinal"
-			: $onlyMSA ? "MSA$treeJobOrdinal" : "FT$treeJobOrdinal",
+			: $onlyMSA ? "MSA$treeJobOrdinal"
+			: $ensureLocusMSAs ? "MSAR$treeJobOrdinal" : "FT$treeJobOrdinal",
 		epa_only => $epaOnlyRetry,
-		msa_only => $onlyMSA,
+		msa_only => $msaOnlyJob,
 		terminal => $terminalTreeMarker,
 		placement_pending => $placementPendingMarker,
-		tree => $onlyMSA ? $msaOnlyOutput : $IQtreef,
-		stone => $onlyMSA ? $msaOnlyStone : $treeStone,
+		tree => $msaOnlyJob ? $msaOnlyOutput : $IQtreef,
+		stone => $msaOnlyJob ? $msaOnlyStone : $treeStone,
 		tmp_space => $QSBoptHR->{tmpSpace},
 		use_long_queue => $QSBoptHR->{useLongQueue},
 		job_nice => $jobNice,
@@ -2640,10 +2655,11 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	$QSBoptHR->{useLongQueue} = 0;
 	$cnt ++;
 	$treeDisposition{$epaOnlyRetry ? 'EPA-only retry job'
+		: $ensureLocusMSAs ? 'eligible retained-MSA recovery job'
 		: $onlyMSA ? 'eligible MSA-only job' : 'eligible tree job'}++;
-	$expectedTreeOutputs{$MGS} = [$onlyMSA ? $msaOnlyOutput : $IQtreef,
-		$onlyMSA ? $msaOnlyStone : $treeStone,
-		$terminalTreeMarker, $placementPendingMarker, $onlyMSA];
+	$expectedTreeOutputs{$MGS} = [$msaOnlyJob ? $msaOnlyOutput : $IQtreef,
+		$msaOnlyJob ? $msaOnlyStone : $treeStone,
+		$terminalTreeMarker, $placementPendingMarker, $msaOnlyJob];
 	if (!$doSubmit || ($epaOnlyRetry && time >= $nextQueuedTreeSubmissionProbe)) {
 		my $drain = dispatchPendingTreeJobs(
 			queue => \@pendingTreeJobs, options => $QSBoptHR,
@@ -5634,8 +5650,12 @@ sub evalFileStatus{
 		$SIdirs{$MGS} = $outD2;
 		my $completedTree = "$outD2/phylo/$treeFile";
 		my $treeCompletion = "$outD2/treeDone.sto";
+		my $treePresent = -s $treeCompletion && fileGZs($completedTree);
+		my $retainedLocusMSAsPending = !$onlyMSA && !$rmMSA
+			&& $treePresent && !msaOnlyArtifactsReady($outD2);
 		if (!$recalcTrees && !$reSubmit && !$repairCAT && !$deepRepair
 				&& !$redoSubmissionData && ($onlySubmit != 0 || $subJob)
+				&& !$retainedLocusMSAsPending
 				&& ($onlyMSA
 					? msaOnlyArtifactsReady($outD2)
 					: (-s $treeCompletion && fileGZs($completedTree)))) {
@@ -5745,7 +5765,7 @@ sub evalFileStatus{
 			#system "rm $SIdirs{$MGS}\n";
 		} elsif($onlyMSA
 				? !msaOnlyArtifactsReady($outD2)
-				: !fileGZs("$SIdirs{$MGS}/phylo/$treeFile")){
+				: (!fileGZs("$SIdirs{$MGS}/phylo/$treeFile") || $retainedLocusMSAsPending)){
 			$treeAbsent++;
 			$deferredScratchCleanup{"$scratchD/outs/$MGS"} = 1
 				if -d "$scratchD/outs/$MGS";
@@ -7977,6 +7997,7 @@ sub resetMGSTreeOutputs {
 	# waiting on slow network filesystem deletion.
 	my $removedDirectories = 0;
 	for my $directory (@treeStageDirectories) {
+		next unless -d $directory;
 		$removedDirectories += fastRemoveTree($directory);
 		die "Cannot completely remove tree output directory $directory\n" if -e $directory;
 	}

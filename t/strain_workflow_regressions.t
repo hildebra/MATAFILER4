@@ -265,11 +265,24 @@ like($strain,
 	qr/sub msaOnlyArtifactsReady.*?status.*?msa_complete.*?\$name =~ \/\^MSAli\/.*?fna.*?fileGZs/s,
 	'strainWithin validates MSA-only completion from non-merged per-locus artifacts');
 like($strain,
-	qr/if \(\$onlyMSA\) \{.*?strain_within_2\.2\.pl were not launched.*?exit\(0\);.*?my \$MGSabundance/s,
+	qr/if \(\$onlyMSA.*?strain_within_2\.2\.pl were not launched.*?exit\(0\);.*?my \$MGSabundance/s,
 	'MSA-only controller runs stop before tree-dependent postprocessing');
 like($build_tree,
-	qr/"onlyMSA=i" => \\\$onlyMSA.*?filterMSA\(.*?runMSAFix\(\$tmpOutMSA.*?publishCompressedMSAArtifact\(\$finOutMSA.*?if \(\$onlyMSA\) \{.*?msa_complete.*?exit\(0\);.*?POST-ALIGNMENT WORKFLOW.*?mergeMSAs/s,
+	qr/"onlyMSA=i" => \\\$onlyMSA.*?filterMSA\(.*?runMSAFix\(\$tmpOutMSA.*?publishCompressedMSAArtifact\(\$finOutMSA.*?if \(\$onlyMSA.*?msa_complete.*?exit\(0\);.*?POST-ALIGNMENT WORKFLOW.*?mergeMSAs/s,
 	'BuildTree exits after localized per-locus processing and before combined-MSA postprocessing or concatenation');
+ok(index($strain, 'my $ensureLocusMSAs = !$onlyMSA && !$rmMSA') >= 0
+	&& index($strain, q{$Tcmd .= "-ensureLocusMSAs 1 " if $ensureLocusMSAs;}) >= 0
+	&& index($strain, 'msa_only => $msaOnlyJob') >= 0
+	&& index($strain, 'treeCmd.msa_retain.sh') >= 0,
+	'-rmMSA 0 queues a marker-backed retained-locus recovery without clearing the completed tree'
+);
+ok(index($build_tree, 'my $locusMSARecovery = $ensureLocusMSAs && $treesDone') >= 0
+	&& index($build_tree, 'my $calcMSA = $locusMSARecovery ||') >= 0
+	&& index($build_tree, 'unless $locusMSARecovery;') >= 0
+	&& index($build_tree, 'localized per-locus alignments retained after successful tree construction') >= 0,
+	'current BuildTree backfills only policy-matched locus MSAs, preserves tree completion, and records retained artifacts'
+);
+
 like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA,0,"\\\\s",\\%subG\)/s,
 	'within-strain extraction reads only candidate consensus genes');
 like($strain, qr/-completionMarker "?\.shellQuote\(\$treeStone\)/,
@@ -533,7 +546,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.62;/,
+like($strain, qr/my \$version = 1\.64;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$resumeOutD = .*?my \$parentRunLock;.*?if \(!\$subJob\).*?\$parentRunLockPath = "\$lockBase\.strain_within\.lock".*?acquire_workflow_lock\(.*?prepRun\(\);/s,
@@ -1004,8 +1017,8 @@ like($strain,
 	qr/staged input sets recovered for -redo tree: \$recalcScratchRecovered/,
 	'tree submission accounting reports staged redo recovery separately from skipped dispositions');
 like($strain,
-	qr/sub resetMGSTreeOutputs .*?dirname\(\$resolvedMGS\) eq \$resolvedRoot.*?basename\(\$resolvedMGS\) eq \$MGS.*?qw\(phylo MSA within\).*?fastRemoveTree\(\$directory\).*?retry_unlink\(\$treeStone/s,
-	'tree-only reset is confined to selected MGS tree-stage directories and clears them asynchronously');
+	qr/sub resetMGSTreeOutputs .*?dirname\(\$resolvedMGS\) eq \$resolvedRoot.*?basename\(\$resolvedMGS\) eq \$MGS.*?qw\(phylo MSA within\).*?next unless -d \$directory;.*?fastRemoveTree\(\$directory\).*?retry_unlink\(\$treeStone/s,
+	'tree-only reset is confined to selected existing MGS tree-stage directories and clears them asynchronously');
 like($strain,
 	qr/my \$locCl2G2 = \$cl2gene2\{\$sm\}.*?my \$COGprios1 = \$COGprios->\{\$MGS\}.*?\@candidates == 1.*?reason => 'unique'.*?\$LocusSeedProteins\{\$locus\} \|\|=.*?choose_locus_candidate/s,
 	'within-strain extraction avoids hot-loop container copies and scoring unique candidates');
@@ -1258,7 +1271,7 @@ like($strain,
 	qr/\$workflowStatePath = File::Spec->catfile\(\$LOGDIR.*?\$SNPconsLOGs = "\$LOGDIR\/SNPconsCalls.*?my \$final = "\$LOGDIR\/\$sampleStatsLogName".*?my \$summary = "\$LOGDIR\/\$sampleStatsSummaryLogName".*?my \$final = "\$LOGDIR\/\$recoveryLogName".*?my \$summary = "\$LOGDIR\/\$summaryLogName"/s,
 	'worker state, SNP logs, sample statistics, recovery accounting, and summaries share LOGandSUB');
 like($strain,
-	qr/script => \$epaOnlyRetry \? "\$outD2\/treeCmd\.epa_retry\.sh".*?\$onlyMSA \? "\$outD2\/treeCmd\.msa_only\.sh" : "\$outD2\/treeCmd\.sh".*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
+	qr/script => \$epaOnlyRetry \? "\$outD2\/treeCmd\.epa_retry\.sh".*?\$onlyMSA \? "\$outD2\/treeCmd\.msa_only\.sh".*?treeCmd\.msa_retain\.sh" : "\$outD2\/treeCmd\.sh".*?qsubSystem\(\$LOGDIR\."strainAnalysis2\.sh"/s,
 	'per-MGS normal, MSA-only, and EPA-retry scripts use distinct paths while downstream strain-analysis scripts use LOGandSUB');
 like($strain,
 	qr/sub migrateLegacyOperationalLogs.*?strain_within.*?SNPconsCalls.*?strainSampleStats.*?strainRecovery.*?migrate legacy strain log.*?migrateLegacyOperationalLogs\(\)/s,

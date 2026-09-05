@@ -98,6 +98,7 @@
 #      rather than trusting pre-alignment candidate totals
 #5.88: mask isolated within-locus sequence-divergence outliers through MSAfix
 #      while exempting the deliberately distant outgroup
+#5.89: retain missing locus MSAs without invalidating a compatible completed tree
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -241,7 +242,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.88";
+my $version = "5.89";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -319,6 +320,7 @@ my ($smplDef,$smplSep,$calcSyn,$calcNonSyn,$useAA4tree,$calcDNAdiff,$tmpD ) = (1
 my $sampleGeneRegex; #compiled once from $smplSep by compileSampleSeparator
 my ($stagedInputDir, $tmpSubdir, $completionMarker) = ("", "", "");
 my $onlyMSA = 0;
+my $ensureLocusMSAs = 0; #preserve a policy-matched completed tree while backfilling retained locus MSAs
 my ($terminalMarker, $placementPendingMarker) = ("", "");
 my $withinSpecies = 0;
 my $strainWithinPreset = 0;
@@ -525,6 +527,7 @@ GetOptions(
 	"tmpSubdir=s" => \$tmpSubdir,
 	"completionMarker=s" => \$completionMarker,
 	"onlyMSA=i" => \$onlyMSA,
+	"ensureLocusMSAs=i" => \$ensureLocusMSAs,
 	"terminalMarker=s" => \$terminalMarker,
 	"placementPendingMarker=s" => \$placementPendingMarker,
 	"withinSpecies=i" => \$withinSpecies,
@@ -697,6 +700,10 @@ die "-redoEPAfilter must be 0 or 1\n"
 die "-onlyMSA must be 0 or 1\n" unless $onlyMSA == 0 || $onlyMSA == 1;
 die "-onlyMSA 1 cannot be combined with -placeOnBackbone 1\n"
 	if $onlyMSA && $strictBackbone;
+die "-ensureLocusMSAs must be 0 or 1\n"
+	unless $ensureLocusMSAs == 0 || $ensureLocusMSAs == 1;
+die "-ensureLocusMSAs requires normal tree mode, not -onlyMSA 1\n"
+	if $ensureLocusMSAs && $onlyMSA;
 
 $minOverlapMSA = $withinSpecies ? 0.35 : 0 unless defined $minOverlapMSA;
 $postAlignmentLocusQC = $withinSpecies
@@ -1379,10 +1386,27 @@ my $hasAdditionalAnalysis = $Ete || $calcDistMat || $calcDNAdiff
 	|| $doGenesToPh || $doSuperTree || $doSuperCheck || $doGubbins
 	|| $doCFML || $useTreeShrink || $doDNDS || $doTheta
 	|| $doFastGear || $doFastGearSummary || $gzipInput;
+my $treesDone = treePresent($tOhr)
+	&& (!$calcNonSyn || treePresent($tOhrNSun))
+	&& (!$calcSyn || treePresent($tOhrSyn));
+# strain_within asks for this only when its durable MSA-retention marker is
+# absent. BuildTree owns the compatibility decision: a matching selection
+# policy can safely regenerate just the individual loci, whereas a changed
+# policy must retain the ordinary full-rebuild path below.
+my $locusMSARecovery = $ensureLocusMSAs && $treesDone
+	&& length($durableCompletionTree) && $completionMatchesMethod
+	&& !$hasAdditionalAnalysis && $alignmentWorkPolicyMatches
+	&& $postAlignmentPolicyMatches
+	&& $postAlignmentQCAuditCurrent;
+if ($ensureLocusMSAs && $locusMSARecovery) {
+	print "Recovery state: completed tree and BuildTree policies match; "
+		."backfilling retained per-locus MSAs without recomputing the tree\n";
+}
 if (length($durableCompletionTree) && $completionMatchesMethod
 		&& !$hasAdditionalAnalysis
 		&& ($cogCats eq '' || ($alignmentWorkPolicyMatches
-		&& $postAlignmentQCAuditCurrent && $postAlignmentPolicyMatches))) {
+		&& $postAlignmentQCAuditCurrent && $postAlignmentPolicyMatches))
+		&& !$locusMSARecovery) {
 	# The marker is published only after tree validation and all requested standard
 	# stages finish. A matching policy therefore avoids reopening every locus and
 	# rescanning the concatenated alignment on a duplicate/resumed invocation.
@@ -1399,9 +1423,6 @@ if (length($durableCompletionTree) && $completionMatchesMethod
 	exit(0);
 }
 my $doMSA = 1;
-my $treesDone = treePresent($tOhr)
-	&& (!$calcNonSyn || treePresent($tOhrNSun))
-	&& (!$calcSyn || treePresent($tOhrSyn));
 if ($strictBackbone && $treesDone
 		&& (!-s "$treeD/strict_backbone.samples.tsv"
 			|| !-s "$treeD/strict_backbone.epa_placements.tsv")) {
@@ -1512,7 +1533,7 @@ if ($continue) {
 }
 writeBuildTreeState();
 cleanupLegacyBuildTreeStateFiles();
-my $calcMSA = !$treesDone && !$primaryAlignmentReady;
+my $calcMSA = $locusMSARecovery || (!$treesDone && !$primaryAlignmentReady);
 my $retainedConcatenatedCheckpoint = !$calcMSA && $primaryAlignmentReady
 	&& $cogCats ne '';
 my $retainedCheckpointSampleCount = $retainedConcatenatedCheckpoint
@@ -2237,7 +2258,7 @@ if ($synSummaryCount) {
 }
 
 my $msaOnlyCompletionMarker = File::Spec->catfile($outD, 'msaOnly.complete.tsv');
-if ($onlyMSA) {
+if ($onlyMSA || $locusMSARecovery) {
 	if ($cogCats eq '') {
 		my $extension = $useAA4tree ? 'faa' : 'fna';
 		my $singleAlignment = File::Spec->catfile($MsaD, "single_locus.$extension");
@@ -2246,7 +2267,8 @@ if ($onlyMSA) {
 	my $artifacts = msaOnlyArtifacts($MsaD);
 	die "MSA-only mode did not produce a non-empty per-locus alignment artifact\n"
 		unless @{$artifacts};
-	clearLifecycleMarker($completionMarker, 'clear tree completion in MSA-only mode');
+	clearLifecycleMarker($completionMarker, 'clear tree completion in MSA-only mode')
+	unless $locusMSARecovery;
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	clearLifecycleMarker($placementPendingMarker,
 		'clear obsolete placement-pending marker');
@@ -3093,6 +3115,18 @@ if ($gzipInput){
 			if $inputBasename eq "allFAAs.faa" || $inputBasename eq "allFNAs.fna";
 		systemW("$pigzBin -p $ncore ".shellQuote($inputFile));
 	}
+}
+
+if (!$removeMSA) {
+	my $artifacts = msaOnlyArtifacts($MsaD);
+	die "Retained-MSA mode did not produce a non-empty per-locus alignment artifact\n"
+		unless @{$artifacts};
+	writeOutcomeMarker($msaOnlyCompletionMarker, 'msa_complete',
+		'localized per-locus alignments retained after successful tree construction',
+		{ alignment_directory => $MsaD, artifacts => scalar(@{$artifacts}) }, $outD);
+} else {
+	clearLifecycleMarker($msaOnlyCompletionMarker,
+		'clear obsolete retained-locus MSA completion marker');
 }
 
 safeRemoveTree($tmpD, $tmpBase);
