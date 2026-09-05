@@ -533,7 +533,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.60;/,
+like($strain, qr/my \$version = 1\.62;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$resumeOutD = .*?my \$parentRunLock;.*?if \(!\$subJob\).*?\$parentRunLockPath = "\$lockBase\.strain_within\.lock".*?acquire_workflow_lock\(.*?prepRun\(\);/s,
@@ -1004,8 +1004,8 @@ like($strain,
 	qr/staged input sets recovered for -redo tree: \$recalcScratchRecovered/,
 	'tree submission accounting reports staged redo recovery separately from skipped dispositions');
 like($strain,
-	qr/sub resetMGSTreeOutputs .*?dirname\(\$resolvedMGS\) eq \$resolvedRoot.*?basename\(\$resolvedMGS\) eq \$MGS.*?remove_tree\(\$phyloDir, \{safe => 1\}\).*?retry_unlink\(\$treeStone/s,
-	'tree-only reset is confined to the selected MGS phylo directory and completion checkpoint');
+	qr/sub resetMGSTreeOutputs .*?dirname\(\$resolvedMGS\) eq \$resolvedRoot.*?basename\(\$resolvedMGS\) eq \$MGS.*?qw\(phylo MSA within\).*?fastRemoveTree\(\$directory\).*?retry_unlink\(\$treeStone/s,
+	'tree-only reset is confined to selected MGS tree-stage directories and clears them asynchronously');
 like($strain,
 	qr/my \$locCl2G2 = \$cl2gene2\{\$sm\}.*?my \$COGprios1 = \$COGprios->\{\$MGS\}.*?\@candidates == 1.*?reason => 'unique'.*?\$LocusSeedProteins\{\$locus\} \|\|=.*?choose_locus_candidate/s,
 	'within-strain extraction avoids hot-loop container copies and scoring unique candidates');
@@ -1206,7 +1206,7 @@ like($strain,
 	qr/unshift \@\{\$pendingQueue\}, \@retryQueue;/,
 	'escalations are injected ahead of the ordinary jobs still awaiting capacity');
 like($strain,
-	qr/my \$jobNice = 5000;.*?my \$maxQueuedJobs = 0;/s,
+	qr/my \$jobNice = 2500;.*?my \$maxQueuedJobs = 0;/s,
 	'bulk submissions carry a priority handicap and an optional queue ceiling');
 like($strain,
 	qr/\$QSBoptHR->\{jobNice\} = \$jobNice;\s*\$QSBoptHR->\{maxConcurrentJobs\} = \$maxQueuedJobs;/s,

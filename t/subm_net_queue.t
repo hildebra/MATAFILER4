@@ -58,6 +58,8 @@ like($contents, qr/^#SBATCH --chdir=\Q$tmpdir\E$/m,
 like($contents,
 	qr/^echo "SLURM job ID: \$SLURM_JOB_ID"\necho \$HOSTNAME;$/m,
 	'prints the allocated Slurm job ID before executing the job payload');
+like($contents, qr/^#SBATCH --nice=2500$/m,
+	'a direct Slurm submission without a priority option uses the moderate default');
 is($options->{useNetQueue}, 0, 'network queue selection is one-shot');
 
 my $archive_script = File::Spec->catfile($tmpdir, 'archive-download.sh');
@@ -91,6 +93,8 @@ like($archive_contents, qr/^#SBATCH --time=24:00:00$/m,
 	my $fallback = Mods::Subm::emptyQsubOpt(0, '', 'slurm');
 	is($fallback->{downloadQueue}, 'compute',
 		'an empty downloadQueue falls back to mediumQueue');
+	is($fallback->{jobNice}, 2500,
+		'every new scheduler option set uses the moderate priority default');
 }
 is($options->{useDownloadQueue}, 0,
 	'download queue selection is one-shot');

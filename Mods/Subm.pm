@@ -20,6 +20,17 @@ our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJ
 my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
 my $DEFERRED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_DEFERRED__';
 
+# A moderate Slurm priority handicap keeps ordinary MATAFILER waves from
+# dominating the queue. Time-critical recovery callers explicitly use 0.
+my $DEFAULT_JOB_NICE = 2500;
+
+sub normaliseJobNice {
+	my ($value) = @_;
+	my $jobNice = defined($value) && $value ne ''
+		? int($value) : $DEFAULT_JOB_NICE;
+	return $jobNice < 0 ? 0 : $jobNice;
+}
+
 sub deferredSubmissionDependency { return $DEFERRED_SUBMISSION_DEPENDENCY; }
 sub submissionDependencyDeferred {
 	return scalar grep { $_ eq $DEFERRED_SUBMISSION_DEPENDENCY }
@@ -798,8 +809,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	#Submitting a bulk wave with a positive nice and its recovery jobs with nice 0
 	#lets the recovery jobs overtake a backlog that is already queued, which no
 	#amount of submission throttling can achieve on its own.
-	my $jobNice = int($optHR->{jobNice} || 0);
-	$jobNice = 0 if ($jobNice < 0); #negative nice needs operator privileges
+	my $jobNice = normaliseJobNice($optHR->{jobNice});
 	
 	
 	#die ($memory."\n");
@@ -1249,7 +1259,7 @@ sub emptyQsubOpt{
 		jobPollSeconds => 20,
 		#Priority handicap applied to ordinary bulk submissions; recovery jobs
 		#override it with 0 so they outrank a backlog that is already queued.
-		jobNice => 0,
+		jobNice => $DEFAULT_JOB_NICE,
 		#tmpMinG => 10,
 		afterAny => 0,
 		excludeNodes => "",
@@ -1426,7 +1436,11 @@ sub qsubSystem2{
 	if (exists($xtras{cores})){$ncores = $xtras{cores};}
 	my $nthreads= $ncores;
 	if ($ncores =~ m/,/){my @spl = split /,/,$ncores;$ncores = $spl[1]; $nthreads=$spl[0];}
-	if ($ncores != 0){#read in file, change it..
+	my $qmode = $optHR->{qmode};
+	my $jobNice = normaliseJobNice($optHR->{jobNice});
+	# Saved Slurm scripts from an earlier run can bypass qsubSystem. Add the
+	# default only when they do not already express an explicit priority.
+	if ($ncores != 0 || ($qmode eq 'slurm' && $jobNice > 0)){
 		open my $in,"<",$tmpsh or die "qsubSystem2: cant open $tmpsh\n";chomp(my @lines = <$in>); close $in;
 		for (my $i=0;$i<@lines;$i++){
 			if ($lines[$i] =~ m/--cpus-per-task/ || $lines[$i] =~ m/--mincpus/){
@@ -1435,13 +1449,19 @@ sub qsubSystem2{
 				$lines[$i] .= "\n#SBATCH --threads-per-core=1\n#SBATCH --hint=compute_bound" unless ($next_line =~ m/threads-per-core/);
 			}
 		}
+		if ($qmode eq 'slurm' && $jobNice > 0) {
+			my $hasNice = scalar grep { /^#SBATCH\s+--nice(?:=|\s)/ } @lines;
+			unless ($hasNice) {
+				my $insertAt = @lines && $lines[0] =~ /^#!/ ? 1 : 0;
+				splice @lines, $insertAt, 0, "#SBATCH --nice=$jobNice";
+			}
+		}
 		open my $out,">",$tmpsh or die "qsubSystem2: cant update $tmpsh\n";
 		print {$out} join("\n",@lines), "\n";
 		close $out or die "qsubSystem2: cant close updated $tmpsh\n";
 	}
 	my $xtra = "";
 	my $qbin = "qsub";
-	my $qmode = $optHR->{qmode};
 	if ($qmode eq "slurm"){$qbin="sbatch";
 	} elsif ($qmode eq "sge"){
 	} elsif ($qmode eq "bash"){$qbin="bash";

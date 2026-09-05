@@ -322,7 +322,9 @@ my $completionMessage = "";
 #	threshold for both locus QC and MSA inclusion by default
 #1.59: lower the default unresolved multigene-locus fraction to 0.10
 #1.60: enable MSAfix isolated within-locus sequence-outlier masking by default
-my $version = 1.60;
+#1.61: clear every BuildTree tree-stage directory asynchronously during -redo tree
+#1.62: use the shared moderate scheduler-priority default for ordinary strain jobs
+my $version = 1.62;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -485,7 +487,7 @@ my $oomMinRetries = 3;
 #OOM retry is always the youngest. Slurm subtracts --nice from priority and lets
 #any user raise it, so ordinary jobs carry this handicap while every OOM retry
 #submits at nice 0 and therefore outranks the whole backlog. Set 0 to disable.
-my $jobNice = 5000;
+my $jobNice = 2500;
 #Optional ceiling on this user's live (running + pending) scheduler jobs. With a
 #cap the wave is submitted in batches, so an OOM retry only has to overtake the
 #jobs already queued, not every job the run will ever submit. 0 keeps the
@@ -7963,16 +7965,25 @@ sub resetMGSTreeOutputs {
 		unless dirname($resolvedMGS) eq $resolvedRoot
 			&& basename($resolvedMGS) eq $MGS;
 
-	my $phyloDir = File::Spec->catdir($resolvedMGS, "phylo");
+	my @treeStageDirectories = map {
+		File::Spec->catdir($resolvedMGS, $_)
+	} qw(phylo MSA within);
 	my $treeStone = File::Spec->catfile($resolvedMGS, "treeDone.sto");
 	my $terminalMarker = File::Spec->catfile($resolvedMGS, "noTree.sto");
 	my $placementMarker = File::Spec->catfile($resolvedMGS, "placementPending.sto");
-	if (-d $phyloDir) {
-		remove_tree($phyloDir, {safe => 1});
-		die "Cannot completely remove tree output directory $phyloDir\n" if -e $phyloDir;
+	# Tree-only redo must not retain any BuildTree product.  fastRemoveTree
+	# atomically removes each live path through a sibling rename, then lets rm
+	# reclaim the space in the background; rebuilding may therefore start without
+	# waiting on slow network filesystem deletion.
+	my $removedDirectories = 0;
+	for my $directory (@treeStageDirectories) {
+		$removedDirectories += fastRemoveTree($directory);
+		die "Cannot completely remove tree output directory $directory\n" if -e $directory;
 	}
 	retry_unlink($treeStone, label => "remove tree completion checkpoint");
-	print "  Reset tree outputs: removed $phyloDir and tree completion checkpoint\n";
+	print "  Reset tree outputs: removed $removedDirectories tree-stage director"
+		.($removedDirectories == 1 ? 'y' : 'ies')
+		." and tree completion checkpoint\n";
 	retry_unlink($terminalMarker, label => "remove terminal no-tree marker");
 	retry_unlink($placementMarker, label => "remove placement-pending marker");
 }
