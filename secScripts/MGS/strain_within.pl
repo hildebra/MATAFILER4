@@ -326,7 +326,8 @@ my $completionMessage = "";
 #1.62: use the shared moderate scheduler-priority default for ordinary strain jobs
 #1.63: tolerate absent per-MGS BuildTree stage directories during tree redo
 #1.64: recover retained locus MSAs without rebuilding compatible trees
-my $version = 1.64;
+#1.65: report the effective per-locus MSA retention policy in the run header
+my $version = 1.65;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -7508,6 +7509,15 @@ sub printEarlyRunHeader {
 	}
 	print "Cores: $numCores (max: $maxCores); submit=$doSubmit; "
 		."onlySubmit=$onlySubmit; redo=$redoMode; redoEPAfilter=$redoEPAfilter\n";
+	# The per-locus MSAs are what popGenStats.R reads, and they are the one
+	# product a completed tree does not imply. State the effective policy here:
+	# an operator reading the log could otherwise not tell whether retained-MSA
+	# recovery was going to run at all.
+	print "Per-locus MSAs: rmMSA=$rmMSA; popGenStats=$doPopGenStats; "
+		.($rmMSA
+			? "discarded after each tree; population genetics unavailable"
+			: "retained; MGS whose completed tree has no retained locus MSAs are "
+				."queued as retained-MSA recovery jobs that keep the phylogeny")."\n";
 	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB; "
 		."per-thread memory scaling=cores/$treeMemThreadDivisor\n";
 	print "OOM rescan: every $oomScanMinutes min while jobs are still running; at "

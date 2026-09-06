@@ -99,6 +99,8 @@
 #5.88: mask isolated within-locus sequence-divergence outliers through MSAfix
 #      while exempting the deliberately distant outgroup
 #5.89: retain missing locus MSAs without invalidating a compatible completed tree
+#5.90: run the per-locus alignment loop during retained-MSA recovery and keep a
+#      validated tree when its locus MSAs cannot be rebuilt
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -242,7 +244,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.89";
+my $version = "5.90";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -1544,6 +1546,11 @@ $doMSA = !(
 	$isAligned
 	|| ($continue && ($treesDone || $primaryAlignmentReady) && $siteAlignmentsReady)
 );
+# The retained tree and concatenated checkpoint are exactly what make this
+# recovery cheap, and they are also what switches the per-locus alignment loop
+# off. That loop is the only producer of the retained locus MSAs, so a recovery
+# run has to enter it even though every tree stage stays untouched.
+$doMSA = 1 if $locusMSARecovery;
 			
 # Reopen retained compressed alignments in scratch without consuming the durable checkpoints.
 restoreMSAArtifactSet($multAliArtifact, $multAli);
@@ -1764,6 +1771,12 @@ if ($isAligned){
 		if (defined($candidateSelection->{terminal_reason})
 				&& length($candidateSelection->{terminal_reason})) {
 			my $reason = $candidateSelection->{terminal_reason};
+			# A recovery run exists to backfill locus MSAs beside a tree that is
+			# already validated. Publishing a terminal no-tree outcome here would
+			# retract that tree, so stop before any marker is touched.
+			die "Retained-MSA recovery selected no usable loci ($reason) although a "
+				."completed tree is present; leaving the tree and its completion marker "
+				."untouched for inspection\n" if $locusMSARecovery;
 			$selectionAttrition{eligible_loci} = 0;
 			$selectionAttrition{candidate_loci} = 0;
 			$selectionAttrition{candidate_samples} = 0;
@@ -3119,11 +3132,22 @@ if ($gzipInput){
 
 if (!$removeMSA) {
 	my $artifacts = msaOnlyArtifacts($MsaD);
-	die "Retained-MSA mode did not produce a non-empty per-locus alignment artifact\n"
-		unless @{$artifacts};
-	writeOutcomeMarker($msaOnlyCompletionMarker, 'msa_complete',
-		'localized per-locus alignments retained after successful tree construction',
-		{ alignment_directory => $MsaD, artifacts => scalar(@{$artifacts}) }, $outD);
+	if (@{$artifacts}) {
+		writeOutcomeMarker($msaOnlyCompletionMarker, 'msa_complete',
+			'localized per-locus alignments retained after successful tree construction',
+			{ alignment_directory => $MsaD, artifacts => scalar(@{$artifacts}) }, $outD);
+	} else {
+		# A resume that reuses the concatenated checkpoint never reopens the
+		# individual loci, so an otherwise complete tree run cannot honour
+		# -rmMSA 0 on its own. Withholding the marker is what makes the
+		# controller schedule one -ensureLocusMSAs recovery job for this MGS,
+		# which is preferable to failing a run whose tree is valid.
+		clearLifecycleMarker($msaOnlyCompletionMarker,
+			'withhold retained-locus MSA completion without retained loci');
+		warn "-rmMSA 0 was requested but this run reused retained alignment "
+			."checkpoints and produced no per-locus MSA in $MsaD; the completed "
+			."tree is kept and the locus MSAs stay pending recovery\n";
+	}
 } else {
 	clearLifecycleMarker($msaOnlyCompletionMarker,
 		'clear obsolete retained-locus MSA completion marker');

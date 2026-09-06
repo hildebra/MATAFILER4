@@ -614,7 +614,7 @@ The parent canonicalizes all unlimited extraction spellings to `-maxGenes 0` whe
 | `-MSAprog` | integer | `2` | stable | Alignment program: 0 MSAProbs, 1 Clustal Omega, 2 MAFFT, or 4 MUSCLE5. |
 | `-phyloProg` | integer | `1` | stable | Tree program: 1 IQ-TREE, 2 VeryFastTree, or 3 FastTree. |
 | `-iqPathogen` | integer | `0` | advanced | Opt in to the IQ-TREE 3 pathogen/CMAPLE path. |
-| `-rmMSA` | integer | `1` | stable | Remove per-locus MSAs unless downstream analysis requires them. |
+| `-rmMSA` | integer | `1` | stable | Remove per-locus MSAs unless downstream analysis requires them. With `0` (implied by `-popGenStats 1`), an MGS whose tree is complete but whose `MSA/` holds no retained per-locus alignments is queued as a retained-MSA recovery job (`treeCmd.msa_retain.sh`, `-ensureLocusMSAs 1`): the loci are realigned and the existing phylogeny is kept. |
 
 ### Downstream analysis and metadata
 
@@ -727,6 +727,7 @@ Phylogenetic tree construction and related MSA/population-genetic analyses.
 | `-NonSynTree` | integer | `0` | stable | Additionally build a tree from non-synonymous sites only. |
 | `-continue` | integer | `0` | stable | Reuse existing intermediate files instead of overwriting them. |
 | `-onlyMSA` | integer | `0` | stable | Finish the existing per-locus alignment pipeline, including filtering, NT backtranslation, localized MSAfix, and `.gz` checkpoint publication, then exit before combined-MSA postprocessing and `mergeMSAs`. Writes `msaOnly.complete.tsv`, retains non-merged per-locus `MSA/*.fna.gz` files, and skips partitions, phylogeny, and EPA-ng. Incompatible with `-placeOnBackbone 1`. |
+| `-ensureLocusMSAs` | integer | `0` | advanced | Backfill the per-locus `MSA/*.fna.gz` checkpoints beside an already completed tree. Only honoured when the durable completion marker, the tree method and the alignment/QC/tree-stage policies all still match; then the per-locus alignments are rebuilt, `msaOnly.complete.tsv` is written and the tree, its completion marker and the concatenated alignment are left untouched. On any mismatch the ordinary rebuild path applies instead. Set by `strain_within.pl` under `-rmMSA 0`; incompatible with `-onlyMSA 1`. |
 | `-epaOnly` | integer | `0` | advanced | Resume a placement-pending run: reuse the retained backbone and rerun only EPA-ng placement and publication. |
 | `-redoEPAfilter` | optional integer | `0` | advanced | With `-continue 1`, rerun only placement filtering, its audit report and final-tree publication from retained backbone/jplace artifacts. Bare flag implies `1`. |
 | `-bootstrap` | integer | `0` | stable | Bootstrap replicates; `0` disables bootstrapping. |

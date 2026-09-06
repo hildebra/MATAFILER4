@@ -282,6 +282,22 @@ ok(index($build_tree, 'my $locusMSARecovery = $ensureLocusMSAs && $treesDone') >
 	&& index($build_tree, 'localized per-locus alignments retained after successful tree construction') >= 0,
 	'current BuildTree backfills only policy-matched locus MSAs, preserves tree completion, and records retained artifacts'
 );
+ok(index($build_tree, '$doMSA = 1 if $locusMSARecovery;') >= 0,
+	'retained-MSA recovery enters the per-locus alignment loop the retained tree would otherwise switch off'
+);
+ok(index($build_tree,
+		'die "Retained-MSA recovery selected no usable loci ($reason) although a "') >= 0,
+	'a recovery run that finds no usable loci stops without retracting the validated tree'
+);
+ok(index($build_tree,
+		q{'withhold retained-locus MSA completion without retained loci'}) >= 0
+	&& index($build_tree,
+		'die "Retained-MSA mode did not produce a non-empty per-locus alignment artifact') < 0,
+	'a completed tree run that reused its alignment checkpoints withholds the retention marker instead of failing'
+);
+ok(index($strain, 'print "Per-locus MSAs: rmMSA=$rmMSA; popGenStats=$doPopGenStats; "') >= 0,
+	'the run header states whether locus MSAs are retained, so recovery activation is visible in the log'
+);
 
 like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA,0,"\\\\s",\\%subG\)/s,
 	'within-strain extraction reads only candidate consensus genes');
@@ -546,7 +562,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.64;/,
+like($strain, qr/my \$version = 1\.65;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$resumeOutD = .*?my \$parentRunLock;.*?if \(!\$subJob\).*?\$parentRunLockPath = "\$lockBase\.strain_within\.lock".*?acquire_workflow_lock\(.*?prepRun\(\);/s,
