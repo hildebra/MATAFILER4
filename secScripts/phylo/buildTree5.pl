@@ -101,6 +101,9 @@
 #5.89: retain missing locus MSAs without invalidating a compatible completed tree
 #5.90: run the per-locus alignment loop during retained-MSA recovery and keep a
 #      validated tree when its locus MSAs cannot be rebuilt
+#5.91: judge retained-MSA recovery only on the parameters that determine the
+#      per-locus alignments, never let such a job rebuild a phylogeny, and keep
+#      scheduler memory allowances out of every policy comparison
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -188,6 +191,8 @@ sub compactTaxonAwareDiagnostics;
 sub writeSelectionAttritionAudit;
 sub writeGeneLengthSampleAudit;
 sub legacyPolicyFileMatches;
+sub policyComparisonKey;
+sub locusAlignmentPolicyKey;
 sub alignmentFileStem;
 sub readPostAlignmentRateMetrics;
 sub deterministicRatePartitions;
@@ -244,7 +249,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.90";
+my $version = "5.91";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -1358,6 +1363,19 @@ my $postAlignmentQCPolicyMatches = $stateHasPolicies
 		'msa_selection_policy', $postAlignmentQCPolicy)
 	: $legacyMsaSelectionPolicyMatches;
 my $alignmentWorkPolicyMatches = $postAlignmentQCPolicyMatches;
+# The same policy compared on its alignment-determining fields only. A recovery
+# run writes per-locus alignments and stops, so this is the whole question it
+# has to answer; the strict comparison above still governs every run that goes
+# on to post-alignment QC, concatenation and inference.
+my $locusAlignmentPolicyMatches = $stateHasPolicies
+	? buildTreeStatePolicyMatches($buildTreeState, 'msa_selection_policy',
+		$postAlignmentQCPolicy, \&locusAlignmentPolicyKey)
+	: (legacyPolicyFileMatches($legacyAlignmentWorkPolicyFile,
+			$postAlignmentQCPolicy, "legacy alignment-work policy",
+			\&locusAlignmentPolicyKey)
+		|| legacyPolicyFileMatches($legacyPostAlignmentQCPolicyFile,
+			$postAlignmentQCPolicy, "legacy locus-QC policy",
+			\&locusAlignmentPolicyKey));
 my $postAlignmentPolicyMatches = $stateHasPolicies
 	? buildTreeStatePolicyMatches($buildTreeState,
 		'tree_stage_policy', $postAlignmentPolicy)
@@ -1392,18 +1410,40 @@ my $treesDone = treePresent($tOhr)
 	&& (!$calcNonSyn || treePresent($tOhrNSun))
 	&& (!$calcSyn || treePresent($tOhrSyn));
 # strain_within asks for this only when its durable MSA-retention marker is
-# absent. BuildTree owns the compatibility decision: a matching selection
-# policy can safely regenerate just the individual loci, whereas a changed
-# policy must retain the ordinary full-rebuild path below.
+# absent. A recovery run realigns the individual loci, publishes them and exits
+# before concatenation, post-alignment QC, the tree stage and every analysis
+# built on the tree. So the only question it has to answer is whether the loci
+# it would write are the ones the retained tree's run wrote: the parameters that
+# determine the per-locus alignments. Everything else - the tree method, the
+# downstream analyses, the concatenation partitioning, the post-alignment locus
+# thresholds, the scheduler allowances - describes work this job never performs,
+# and requiring any of it turned an ordinary resize into a phylogeny rebuild.
 my $locusMSARecovery = $ensureLocusMSAs && $treesDone
-	&& length($durableCompletionTree) && $completionMatchesMethod
-	&& !$hasAdditionalAnalysis && $alignmentWorkPolicyMatches
-	&& $postAlignmentPolicyMatches
-	&& $postAlignmentQCAuditCurrent;
-if ($ensureLocusMSAs && $locusMSARecovery) {
-	print "Recovery state: completed tree and BuildTree policies match; "
-		."backfilling retained per-locus MSAs without recomputing the tree\n";
+	&& length($durableCompletionTree) && $locusAlignmentPolicyMatches;
+if ($locusMSARecovery) {
+	print "Recovery state: completed tree present and per-locus alignment "
+		."parameters unchanged; backfilling retained per-locus MSAs without "
+		."recomputing the tree\n";
+} elsif ($ensureLocusMSAs) {
+	# This job was queued as an MSA-retention job. Rebuilding the phylogeny is
+	# never what it was asked to do, and every rebuild path below would first
+	# retract the validated tree, so stop before anything is modified.
+	my @blockers;
+	push @blockers, 'no complete tree output is present' unless $treesDone;
+	push @blockers, 'no durable completion marker is present'
+		unless length($durableCompletionTree);
+	push @blockers, 'a parameter that determines the per-locus alignments changed'
+		unless $locusAlignmentPolicyMatches;
+	die "-ensureLocusMSAs 1 asks for per-locus MSAs beside the existing tree, but "
+		."they cannot be produced without rebuilding tree stages ("
+		.join('; ', @blockers)."). Nothing was modified; resubmit this MGS as an "
+		."ordinary tree job if that rebuild is intended.\n";
 }
+# A recovery run leaves every tree stage exactly as it found it, so the stored
+# tree-stage policy has to keep describing the tree that is on disk instead of
+# this job's scheduler allowance. An empty value makes writeBuildTreeState carry
+# the recorded one forward unchanged.
+$workflowTreeStagePolicy = '' if $locusMSARecovery;
 if (length($durableCompletionTree) && $completionMatchesMethod
 		&& !$hasAdditionalAnalysis
 		&& ($cogCats eq '' || ($alignmentWorkPolicyMatches
@@ -1425,7 +1465,7 @@ if (length($durableCompletionTree) && $completionMatchesMethod
 	exit(0);
 }
 my $doMSA = 1;
-if ($strictBackbone && $treesDone
+if (!$locusMSARecovery && $strictBackbone && $treesDone
 		&& (!-s "$treeD/strict_backbone.samples.tsv"
 			|| !-s "$treeD/strict_backbone.epa_placements.tsv")) {
 	if (-s $placementPendingMarker && fileGZe($multAliArtifact)) {
@@ -1439,21 +1479,24 @@ if ($strictBackbone && $treesDone
 		$treesDone = 0;
 	}
 }
-if ($cogCats ne "" && $continue && !$alignmentWorkPolicyMatches) {
+if (!$locusMSARecovery && $cogCats ne "" && $continue
+		&& !$alignmentWorkPolicyMatches) {
 	print "Recovery state: MSA-selection policy changed; rebuilding per-locus alignments and tree outputs\n";
 	safeRemoveTree($MsaD, $outD);
 	safeRemoveTree($treeD, $outD);
 	make_path($MsaD);
 	make_path($treeD);
 	$treesDone = 0;
-} elsif ($cogCats ne "" && $continue && !$postAlignmentQCAuditCurrent) {
+} elsif (!$locusMSARecovery && $cogCats ne "" && $continue
+		&& !$postAlignmentQCAuditCurrent) {
 	print "Recovery state: post-alignment QC checkpoint is unavailable; rebuilding per-locus alignments and tree outputs\n";
 	safeRemoveTree($MsaD, $outD);
 	safeRemoveTree($treeD, $outD);
 	make_path($MsaD);
 	make_path($treeD);
 	$treesDone = 0;
-} elsif ($cogCats ne "" && $continue && !$postAlignmentPolicyMatches
+} elsif (!$locusMSARecovery && $cogCats ne "" && $continue
+		&& !$postAlignmentPolicyMatches
 		&& ($treesDone || fileGZe($multAliArtifact))) {
 	my ($postAlignmentQCBackup, $sequenceOutlierQCBackup,
 		$finalAlignmentQCBackup) = ('', '', '');
@@ -6792,14 +6835,57 @@ sub compactTaxonAwareDiagnostics {
 	return scalar(@sources);
 }
 
+# The tree-stage policy records the scheduler allowances for provenance, but they
+# do not describe the inference: the same alignment, model and method give the
+# same tree whether the job was granted 40GB or 110GB. Comparing them made an
+# ordinary resize - a different core count, an OOM escalation, a rerun through a
+# parent that sized the job afresh - read as a changed policy and discard a
+# validated tree. Normalizing them out keeps stored policy strings compatible,
+# because an old string normalizes exactly like a new one.
+sub policyComparisonKey {
+	my ($policyText) = @_;
+	return '' unless defined $policyText;
+	$policyText =~ s/[\r\n]+\z//;
+	$policyText =~ s/(?<=\biqtree_memory_mb=)[^\t\r\n]*/scheduler_allowance/;
+	$policyText =~ s/(?<=\bepa_memory_mb=)[^\t\r\n]*/scheduler_allowance/;
+	return $policyText;
+}
+
+# What a retained-MSA recovery has to reproduce is the set of published
+# per-locus alignment files, nothing else. These policy fields cannot change one:
+# they either drop whole loci from the concatenation after every locus file has
+# already been written, or they only describe how the concatenation is
+# partitioned. Requiring them made a recovery refuse over settings it never
+# reaches. The list is a deny-list on purpose, so a policy field added later
+# counts as alignment-determining until it is deliberately listed here.
+sub locusAlignmentPolicyKey {
+	my ($policyText) = @_;
+	my %ignored = map { $_ => 1 } qw(
+		final_alignment_coverage_scan
+		minimum_sequences
+		minimum_occupancy
+		minimum_loci_relative
+		rate_partition_merge
+		rate_partition_maximum_bins
+		rate_partition_target_sites
+		rate_partition_minimum_loci
+		rate_partition_minimum_sites
+	);
+	return join("\t", grep {
+		my ($field) = split /=/, $_, 2;
+		!$ignored{defined($field) ? $field : ''};
+	} split /\t/, policyComparisonKey($policyText), -1);
+}
+
 sub legacyPolicyFileMatches {
-	my ($policyFile, $policyText, $description) = @_;
+	my ($policyFile, $policyText, $description, $normalizer) = @_;
 	return 0 unless -s $policyFile;
+	$normalizer ||= \&policyComparisonKey;
 	my $policyRead = retry_open(q{<}, $policyFile,
 		label => "read ".($description || "legacy workflow policy"));
 	my $existingPolicy = do { local $/; <$policyRead> };
 	retry_close($policyRead, "close ".($description || "legacy workflow policy"));
-	return $existingPolicy eq $policyText;
+	return $normalizer->($existingPolicy) eq $normalizer->($policyText);
 }
 
 sub alignmentFileStem {
@@ -7052,11 +7138,10 @@ sub readBuildTreeState {
 }
 
 sub buildTreeStatePolicyMatches {
-	my ($state, $key, $policyText) = @_;
+	my ($state, $key, $policyText, $normalizer) = @_;
 	return 0 unless ref($state) eq 'HASH' && exists($state->{$key});
-	$policyText //= '';
-	$policyText =~ s/[\r\n]+\z//;
-	return $state->{$key} eq $policyText;
+	$normalizer ||= \&policyComparisonKey;
+	return $normalizer->($state->{$key}) eq $normalizer->($policyText);
 }
 
 sub writeBuildTreeState {
@@ -7764,6 +7849,11 @@ sub completeTaxonAwareOutgroupAnchorTerminal {
 	my $reason = 'taxon_aware_outgroup_no_selected_anchor';
 	$error //= '';
 	$error =~ s/[\r\n]+\z//;
+	# Same rule as every other terminal outcome: a retained-MSA recovery must
+	# never retract the validated tree it was queued to preserve.
+	die "Retained-MSA recovery hit a terminal outgroup-anchor failure at $stage "
+		."($error) although a completed tree is present; leaving the tree and its "
+		."completion marker untouched for inspection\n" if $locusMSARecovery;
 	clearLifecycleMarker($completionMarker, 'clear stale tree completion');
 	clearLifecycleMarker($placementPendingMarker,
 		'clear stale placement-pending marker');

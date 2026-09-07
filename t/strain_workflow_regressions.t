@@ -298,6 +298,69 @@ ok(index($build_tree,
 ok(index($strain, 'print "Per-locus MSAs: rmMSA=$rmMSA; popGenStats=$doPopGenStats; "') >= 0,
 	'the run header states whether locus MSAs are retained, so recovery activation is visible in the log'
 );
+ok(index($strain, 'my $msaOnlyJob = $onlyMSA || $ensureLocusMSAs; #stops after the per-locus MSAs') >= 0
+	&& index($strain, 'my $infersTree = !$msaOnlyJob;') >= 0,
+	'the tree command is built against an explicit statement of what the job will actually run'
+);
+ok(index($strain, '$Tcmd .= "-rateMergeMaxBins $rateMergeMaxBins "
+		."-rateMergeTargetSites $rateMergeTargetSites "
+		."-rateMergeMinLoci $rateMergeMinLoci "
+		."-rateMergeMinSites $rateMergeMinSites " if $rateMergePartitions;') >= 0,
+	'concatenation-partitioning tuning is withheld when partition merging is off'
+);
+ok(index($strain, '$Tcmd .= "-compactTaxonAwareDiagnostics $compactTaxonAwareDiagnostics ";
+	}') >= 0,
+	'taxon-aware diagnostics compaction is emitted only inside the taxon-aware group'
+);
+ok(index($strain, '$Tcmd .= "-placementPendingMarker ".shellQuote($placementPendingMarker)." "
+		if $strictBackbone || $epaOnlyRetry;') >= 0,
+	'placement state is not handed to a job that cannot place'
+);
+ok(index($build_tree, 'my $locusMSARecovery = $ensureLocusMSAs && $treesDone
+	&& length($durableCompletionTree) && $locusAlignmentPolicyMatches;') >= 0,
+	'recovery depends only on a tree being present and the alignment-determining parameters'
+);
+ok(index($build_tree, 'sub locusAlignmentPolicyKey {') >= 0
+	&& index($build_tree, 'rate_partition_target_sites
+		rate_partition_minimum_loci') >= 0
+	&& index($build_tree, 'minimum_occupancy
+		minimum_loci_relative') >= 0,
+	'concatenation partitioning and post-alignment locus thresholds are excluded from that comparison'
+);
+ok(index($build_tree, 'my $locusAlignmentPolicyMatches = $stateHasPolicies') >= 0
+	&& index($build_tree, '$postAlignmentQCPolicy, \&locusAlignmentPolicyKey)') >= 0
+	&& index($build_tree, '$normalizer ||= \&policyComparisonKey;') >= 0,
+	'the alignment-only comparison reads the same stored policy through its own normalizer'
+);
+ok(index($build_tree,
+		'die "-ensureLocusMSAs 1 asks for per-locus MSAs beside the existing tree, but "') >= 0,
+	'a recovery job refuses to run rather than rebuilding a phylogeny it was not asked for'
+);
+ok(index($build_tree, 'if (!$locusMSARecovery && $strictBackbone && $treesDone') >= 0
+	&& index($build_tree, 'if (!$locusMSARecovery && $cogCats ne "" && $continue
+		&& !$alignmentWorkPolicyMatches) {') >= 0
+	&& index($build_tree, '} elsif (!$locusMSARecovery && $cogCats ne "" && $continue
+		&& !$postAlignmentQCAuditCurrent) {') >= 0
+	&& index($build_tree, '} elsif (!$locusMSARecovery && $cogCats ne "" && $continue
+		&& !$postAlignmentPolicyMatches') >= 0,
+	'no recovery-state branch may remove tree outputs or clear completion during a recovery run'
+);
+ok(index($build_tree,
+		'die "Retained-MSA recovery hit a terminal outgroup-anchor failure at $stage "') >= 0,
+	'the terminal outgroup-anchor path also leaves a recovered MGS tree untouched'
+);
+ok(index($build_tree, q{$workflowTreeStagePolicy = '' if $locusMSARecovery;}) >= 0,
+	'a recovery run carries the recorded tree-stage policy forward instead of restamping it'
+);
+ok(index($build_tree, 'sub policyComparisonKey {') >= 0
+	&& index($build_tree,
+		'$policyText =~ s/(?<=\biqtree_memory_mb=)[^\t\r\n]*/scheduler_allowance/;') >= 0
+	&& index($build_tree,
+		'return $normalizer->($state->{$key}) eq $normalizer->($policyText);') >= 0
+	&& index($build_tree,
+		'return $normalizer->($existingPolicy) eq $normalizer->($policyText);') >= 0,
+	'a changed scheduler memory allowance is not a policy change and cannot discard a validated tree'
+);
 
 like($strain, qr/readFasta\(\$fastaf,1,"\\\\s",\\%subG\).*?readFasta\(\$fastafAA,0,"\\\\s",\\%subG\)/s,
 	'within-strain extraction reads only candidate consensus genes');
@@ -519,8 +582,8 @@ like($strain, qr/Suppressed warning summary:.*?sort grep/s,
 unlike($strain, qr/print "\$cD\\n"/,
 	'strain extraction no longer prints a raw working-directory path for every sample');
 like($strain,
-	qr/\$threadMemFactor = \$numCoreL \/ \$treeMemThreadDivisor;\s*\$threadMemFactor = 1 if \$threadMemFactor < 1;\s*\$totMem = int\(\$memoryPlanningInputMB \* \$baseMemMult \* \$memMulti \* \$threadMemFactor\)/s,
-	'the initial tree memory request scales with the thread count IQ-TREE will use');
+	qr/if \(\$infersTree\) \{\s*\$threadMemFactor = \$numCoreL \/ \$treeMemThreadDivisor;\s*\$threadMemFactor = 1 if \$threadMemFactor < 1;\s*\}\s*\$totMem = int\(\$memoryPlanningInputMB \* \$baseMemMult \* \$memMulti \* \$threadMemFactor\)/s,
+	'the tree memory request scales with the thread count IQ-TREE will use, and only for jobs that reach IQ-TREE');
 like($strain,
 	qr/my \$treeOOMRetryRounds = 8;/,
 	'the OOM retry round default is high enough to reach the configured memory ceiling');
@@ -562,7 +625,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.65;/,
+like($strain, qr/my \$version = 1\.67;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$resumeOutD = .*?my \$parentRunLock;.*?if \(!\$subJob\).*?\$parentRunLockPath = "\$lockBase\.strain_within\.lock".*?acquire_workflow_lock\(.*?prepRun\(\);/s,
@@ -852,8 +915,8 @@ like($strain,
 	qr/my \$iqPathogen = 0.*?"iqPathogen=i"\s+=> \\\$iqPathogen.*?\$Tcmd .= "-iqPathogen 1 " if \$iqPathogen/s,
 	'within-strain pathogen mode defaults off and is applied only by the parent tree command');
 like($strain,
-	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(!\$onlyMSA && \$phyloProg == 1\)\{.*?"-iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
-	'within-strain IQ-TREE always uses the standard resource-limited command and enables CMAPLE only by explicit request');
+	qr/my \$iqMemMB = int\(\$totMem \* 0\.9\).*?if \(\$infersTree && \$phyloProg == 1\)\{.*?"-iqFast 1 -iqMemMB \$iqMemMB ".*?"-iqPathogen 1 " if \$iqPathogen/s,
+	'within-strain IQ-TREE uses the standard resource-limited command, only for jobs that reach IQ-TREE, and enables CMAPLE only by explicit request');
 like($strain,
 	qr/my \$placementRequested = \$strictBackbone \? 1 : 0;.*?\$baseMemMult = 150 if \$placementRequested.*?\$minimumMemMB = \(\$placementRequested \? 10240 : 5000\) \* \$memMulti;.*?\$minimumMemMB = 10240 if \$placementRequested.*?\$totMem = \$minimumMemMB if \$totMem < \$minimumMemMB/s,
 	'within-strain gives EPA-ng placement jobs a 10 GiB floor and larger input-size estimate');

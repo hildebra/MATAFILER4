@@ -327,7 +327,9 @@ my $completionMessage = "";
 #1.63: tolerate absent per-MGS BuildTree stage directories during tree redo
 #1.64: recover retained locus MSAs without rebuilding compatible trees
 #1.65: report the effective per-locus MSA retention policy in the run header
-my $version = 1.65;
+#1.66: size retained-MSA recovery jobs on alignment work, not on tree inference
+#1.67: hand buildTree5 only the option groups the job it starts can act on
+my $version = 1.67;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -2466,6 +2468,12 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	
 
 	my $bts = getProgPaths("buildTree_scr");
+	# Every option group below is emitted only when the job it describes can act
+	# on it. Beyond the noise, an inert option is not free: several of them are
+	# recorded in BuildTree's policy strings, where a value the run never uses
+	# can still read back as a changed policy on the next resume.
+	my $msaOnlyJob = $onlyMSA || $ensureLocusMSAs; #stops after the per-locus MSAs
+	my $infersTree = !$msaOnlyJob;
 	my $treeFlag = $onlyMSA ? "" : "-runIQtree 1 ";
 	if (!$onlyMSA && $phyloProg == 2){$treeFlag = "-runVeryFastTree 1 ";}
 	if (!$onlyMSA && $phyloProg == 3){$treeFlag = "-runFastTree 1 ";}
@@ -2475,7 +2483,7 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		."-NTfiltPerGene $GeneLengthMin "
 		."-GeneLengthIncludeMin $GeneLengthIncludeMin "
 		."-GenesPerSpecies $GenesPerSpecies "
-		."-NTfiltCount $NTfiltCount -iqFast 1 ";
+		."-NTfiltCount $NTfiltCount ";
 	$Tcmd .= "-taxonAwareLocusSelection $taxonAwareLocusSelection ";
 	if ($taxonAwareLocusSelection) {
 		$Tcmd .= "-taxonAwareMaxLoci $taxonAwareMaxLoci "
@@ -2491,13 +2499,18 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		my $treeCoreGuide = treePreferredCoreGuide($preferredCoreGenes);
 		$Tcmd .= "-preferredCoreGenes ".shellQuote($treeCoreGuide)." "
 			if length($treeCoreGuide) && !$epaOnlyRetry;
+		# Diagnostics compaction only ever touches taxon-aware reports, so it is
+		# part of this group rather than a standing option.
+		$Tcmd .= "-compactTaxonAwareDiagnostics $compactTaxonAwareDiagnostics ";
 	}
-	$Tcmd .= "-compactTaxonAwareDiagnostics $compactTaxonAwareDiagnostics ";
-	$Tcmd .= "-rateMergePartitions $rateMergePartitions "
-		."-rateMergeMaxBins $rateMergeMaxBins "
+	# Rate/GC partitioning applies to the concatenated alignment. Its tuning is
+	# meaningless with the merge switched off, and BuildTree's defaults for the
+	# four are identical to these, so omitting them changes no recorded policy.
+	$Tcmd .= "-rateMergePartitions $rateMergePartitions ";
+	$Tcmd .= "-rateMergeMaxBins $rateMergeMaxBins "
 		."-rateMergeTargetSites $rateMergeTargetSites "
 		."-rateMergeMinLoci $rateMergeMinLoci "
-		."-rateMergeMinSites $rateMergeMinSites ";
+		."-rateMergeMinSites $rateMergeMinSites " if $rateMergePartitions;
 	$Tcmd .= "-postAlignmentSequenceOutlierMask "
 		."$postAlignmentSequenceOutlierMask ";
 	$Tcmd .= "-rmMSA $rmMSA -MSAprogram $MSAprog -onlyMSA $onlyMSA ";
@@ -2567,18 +2580,29 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 		# IQ-TREE keeps per-thread partial-likelihood buffers, so the same
 		# alignment costs far more at 60 threads than at the four the base
 		# multiplier is calibrated for. Ignoring this made wide, sample-rich MGS
-		# start an order of magnitude under what they need.
-		$threadMemFactor = $numCoreL / $treeMemThreadDivisor;
-		$threadMemFactor = 1 if $threadMemFactor < 1;
+		# start an order of magnitude under what they need. A job that stops
+		# after the per-locus alignments never allocates those buffers, so it is
+		# sized on the alignment work alone rather than on a tree it will not
+		# infer.
+		if ($infersTree) {
+			$threadMemFactor = $numCoreL / $treeMemThreadDivisor;
+			$threadMemFactor = 1 if $threadMemFactor < 1;
+		}
 		$totMem = int($memoryPlanningInputMB * $baseMemMult * $memMulti * $threadMemFactor);
 		$totMem = $minimumMemMB if $totMem < $minimumMemMB;
 		$totMem = $maximumMemMB if $totMem > $maximumMemMB;
 	}
 	my $iqMemMB = int($totMem * 0.9); #also supplies EPA planning-memory reporting
 	$Tcmd .= "-cores $numCoreL ";
-	if (!$onlyMSA && $phyloProg == 1){
-		$Tcmd .= "-iqMemMB $iqMemMB ";
+	# IQ-TREE tuning, including the memory allowance BuildTree records in its
+	# tree-stage policy. A job that stops after the per-locus alignments never
+	# starts IQ-TREE, so sending it a scheduler allowance only adds a value that
+	# can later read back as a changed policy.
+	if ($infersTree && $phyloProg == 1){
+		$Tcmd .= "-iqFast 1 -iqMemMB $iqMemMB ";
 		$Tcmd .= "-iqPathogen 1 " if $iqPathogen;
+	} elsif ($infersTree) {
+		$Tcmd .= "-iqFast 1 ";
 	}
 
 	$outgS = " -outgroup ".shellQuote($OG)." "  if ($OG ne "");
@@ -2591,8 +2615,12 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	$Tcmd .= "-epaOnly 1 " if $epaOnlyRetry;
 	$Tcmd .= "-continue 1 ";
 	$Tcmd .= "-completionMarker ".shellQuote($treeStone)." " unless $onlyMSA;
-	$Tcmd .= "-terminalMarker ".shellQuote($terminalTreeMarker)." "
-		."-placementPendingMarker ".shellQuote($placementPendingMarker)." ";
+	$Tcmd .= "-terminalMarker ".shellQuote($terminalTreeMarker)." ";
+	# Placement state. Without backbone placement no run can ever enter it, and
+	# BuildTree defaults this path to exactly the same file, so a stale marker
+	# from an earlier placement run is still cleaned up.
+	$Tcmd .= "-placementPendingMarker ".shellQuote($placementPendingMarker)." "
+		if $strictBackbone || $epaOnlyRetry;
 
 	if ($epaOnlyRetry) {
 		print "$MGS (".($lcnt + 1)."/$Nspecis); elapsed ".timeNice(time - $sttime)
@@ -2623,7 +2651,6 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	# PART II: retain each completely prepared job. Full trees are submitted
 	# together after preparation so the current core selector can define a global
 	# largest-first order; EPA-only recovery remains latency-prioritized.
-	my $msaOnlyJob = $onlyMSA || $ensureLocusMSAs;
 	my $treeJobOrdinal = $cnt + 1;
 	push @pendingTreeJobs, {
 		mgs => $MGS,
