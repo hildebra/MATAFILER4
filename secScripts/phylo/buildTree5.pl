@@ -104,6 +104,7 @@
 #5.91: judge retained-MSA recovery only on the parameters that determine the
 #      per-locus alignments, never let such a job rebuild a phylogeny, and keep
 #      scheduler memory allowances out of every policy comparison
+#5.92: name the policy fields that changed whenever a mismatch discards work
 use warnings;
 use strict;
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
@@ -193,6 +194,8 @@ sub writeGeneLengthSampleAudit;
 sub legacyPolicyFileMatches;
 sub policyComparisonKey;
 sub locusAlignmentPolicyKey;
+sub policyFieldDifferences;
+sub legacyPolicyFileText;
 sub alignmentFileStem;
 sub readPostAlignmentRateMetrics;
 sub deterministicRatePartitions;
@@ -249,7 +252,7 @@ sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
 my $doPhym= 0;
-my $version = "5.91";
+my $version = "5.92";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -1350,6 +1353,15 @@ my $stateHasPolicies = defined($buildTreeState->{msa_selection_policy})
 	&& length($buildTreeState->{msa_selection_policy})
 	&& defined($buildTreeState->{tree_stage_policy})
 	&& length($buildTreeState->{tree_stage_policy});
+# The recorded policies, kept as text so a mismatch can be reported field by
+# field instead of as a bare "changed".
+my $storedMsaSelectionPolicy = $stateHasPolicies
+	? $buildTreeState->{msa_selection_policy}
+	: (legacyPolicyFileText($legacyAlignmentWorkPolicyFile)
+		|| legacyPolicyFileText($legacyPostAlignmentQCPolicyFile));
+my $storedTreeStagePolicy = $stateHasPolicies
+	? $buildTreeState->{tree_stage_policy}
+	: legacyPolicyFileText($legacyPostAlignmentPolicyFile);
 my $legacyMsaSelectionPolicyMatches = legacyPolicyFileMatches(
 	$legacyAlignmentWorkPolicyFile, $postAlignmentQCPolicy,
 	"legacy alignment-work policy")
@@ -1432,7 +1444,9 @@ if ($locusMSARecovery) {
 	push @blockers, 'no complete tree output is present' unless $treesDone;
 	push @blockers, 'no durable completion marker is present'
 		unless length($durableCompletionTree);
-	push @blockers, 'a parameter that determines the per-locus alignments changed'
+	push @blockers, 'a parameter that determines the per-locus alignments changed - '
+		.policyFieldDifferences($storedMsaSelectionPolicy, $postAlignmentQCPolicy,
+			\&locusAlignmentPolicyKey)
 		unless $locusAlignmentPolicyMatches;
 	die "-ensureLocusMSAs 1 asks for per-locus MSAs beside the existing tree, but "
 		."they cannot be produced without rebuilding tree stages ("
@@ -1481,7 +1495,9 @@ if (!$locusMSARecovery && $strictBackbone && $treesDone
 }
 if (!$locusMSARecovery && $cogCats ne "" && $continue
 		&& !$alignmentWorkPolicyMatches) {
-	print "Recovery state: MSA-selection policy changed; rebuilding per-locus alignments and tree outputs\n";
+	print "Recovery state: MSA-selection policy changed; rebuilding per-locus alignments "
+		."and tree outputs ("
+		.policyFieldDifferences($storedMsaSelectionPolicy, $postAlignmentQCPolicy).")\n";
 	safeRemoveTree($MsaD, $outD);
 	safeRemoveTree($treeD, $outD);
 	make_path($MsaD);
@@ -1524,7 +1540,9 @@ if (!$locusMSARecovery && $cogCats ne "" && $continue
 			or die "Cannot preserve final-alignment sample QC $finalAlignmentSampleQCReport: $!\n";
 		$finalAlignmentQCBackup = $backupPath;
 	}
-	print "Recovery state: downstream tree-stage policy changed; retaining the selected MSA and rebuilding tree outputs\n";
+	print "Recovery state: downstream tree-stage policy changed; retaining the selected "
+		."MSA and rebuilding tree outputs ("
+		.policyFieldDifferences($storedTreeStagePolicy, $postAlignmentPolicy).")\n";
 	clearLifecycleMarker($completionMarker, "clear completion before tree-stage rebuild");
 	safeRemoveTree($treeD, $outD);
 	make_path($treeD);
@@ -6875,6 +6893,51 @@ sub locusAlignmentPolicyKey {
 		my ($field) = split /=/, $_, 2;
 		!$ignored{defined($field) ? $field : ''};
 	} split /\t/, policyComparisonKey($policyText), -1);
+}
+
+# Name the fields that actually differ. "policy changed" on its own sends an
+# operator reading a job log back into the source to guess which of forty
+# settings moved, and the answer decides whether a validated tree is about to be
+# discarded, so it belongs in the log next to the decision.
+sub policyFieldDifferences {
+	my ($storedText, $currentText, $normalizer) = @_;
+	$normalizer ||= \&policyComparisonKey;
+	my $fieldMap = sub {
+		my ($text) = @_;
+		my %fields;
+		for my $entry (split /\t/, $normalizer->($text), -1) {
+			next unless length $entry;
+			my ($field, $value) = split /=/, $entry, 2;
+			next unless defined($field) && length($field);
+			$fields{$field} = defined($value) ? $value : '';
+		}
+		return \%fields;
+	};
+	my $stored = $fieldMap->($storedText);
+	my $current = $fieldMap->($currentText);
+	my %seen = (%{$stored}, %{$current});
+	my @differences;
+	for my $field (sort keys %seen) {
+		my $before = exists($stored->{$field}) ? $stored->{$field} : '<absent>';
+		my $after = exists($current->{$field}) ? $current->{$field} : '<absent>';
+		next if $before eq $after;
+		push @differences, "$field: $before -> $after";
+	}
+	return 'no recorded policy to compare against' unless %{$stored};
+	return 'no field-level difference (schema or formatting change)'
+		unless @differences;
+	my $shown = @differences > 8 ? 8 : scalar(@differences);
+	return join('; ', @differences[0 .. $shown - 1])
+		.(@differences > $shown ? "; +".(@differences - $shown)." more" : '');
+}
+
+sub legacyPolicyFileText {
+	my ($policyFile) = @_;
+	return '' unless defined($policyFile) && length($policyFile) && -s $policyFile;
+	my $policyRead = retry_open(q{<}, $policyFile, label => 'read legacy workflow policy');
+	my $existingPolicy = do { local $/; <$policyRead> };
+	retry_close($policyRead, 'close legacy workflow policy');
+	return defined($existingPolicy) ? $existingPolicy : '';
 }
 
 sub legacyPolicyFileMatches {

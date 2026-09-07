@@ -316,6 +316,13 @@ ok(index($strain, '$Tcmd .= "-placementPendingMarker ".shellQuote($placementPend
 		if $strictBackbone || $epaOnlyRetry;') >= 0,
 	'placement state is not handed to a job that cannot place'
 );
+ok(index($build_tree, 'sub policyFieldDifferences {') >= 0
+	&& index($build_tree, 'push @blockers, \'a parameter that determines the per-locus alignments changed - \'
+		.policyFieldDifferences($storedMsaSelectionPolicy, $postAlignmentQCPolicy,') >= 0
+	&& index($build_tree, '.policyFieldDifferences($storedMsaSelectionPolicy, $postAlignmentQCPolicy).")\n";') >= 0
+	&& index($build_tree, '.policyFieldDifferences($storedTreeStagePolicy, $postAlignmentPolicy).")\n";') >= 0,
+	'every decision that discards work over a policy mismatch names the fields that differ'
+);
 ok(index($build_tree, 'my $locusMSARecovery = $ensureLocusMSAs && $treesDone
 	&& length($durableCompletionTree) && $locusAlignmentPolicyMatches;') >= 0,
 	'recovery depends only on a tree being present and the alignment-determining parameters'
