@@ -141,6 +141,38 @@ perl "$MF4DIR/secScripts/MGS/strain_within_2.2.pl" \
 
 Use `-redoPopGenStats 1` instead to redo only population-genetic statistics. It requires `-popGenStats 1`. `-reSubmit 1` remains the broad reset: it clears all within-MGS postprocessing state and both statistics types.
 
+## Reading the recovery and sample reports
+
+The unit of recovery is a **sample–MGS pair**: SNP-consensus gene sequences from one metagenomic sample assigned to one MGS. An MGS can have many such pairs, and one sample can contribute to many MGS. These observations are not assembled MAGs or SemiBin bins. A **locus** is a selected gene/locus group; counts across pairs are sample–locus observations, not unique catalogue genes.
+
+The summary separates three stages:
+
+| Stage | What is counted | Interpretation |
+|---|---|---|
+| Extraction | Recovered or filtered sample–MGS pairs | Recovered pairs pass the extraction locus minimum and have sequences written for alignment. Mixed-strain flags can still lead to later exclusion. Only evaluated pairs are counted; the denominator is not all samples × all selected MGS. |
+| Localized MSA (`-onlyMSA 1`) | Distinct ingroup samples with informative sequence in at least one retained primary locus alignment | A sample counts once per MGS, regardless of its number of loci. Outgroups, fully masked records, protein copies of nucleotide alignments, and synonymous/nonsynonymous subsets do not inflate the count. Combined-alignment filtering and tree inference have not run. |
+| Tree input | Samples selected for inference or optional placement | These are selection counts. Check `output_status` separately for completed trees, pending placement, or missing output. |
+
+In older summaries, `recovered_MAGs.genes_gt_2000` means **recovered sample–MGS pairs with strictly more than 2,000 retained loci at extraction**. Thus the supplied example's `70845` represents 70,845 pairs, not 70,845 assembled genomes or necessarily that many distinct samples. All `>N` thresholds are cumulative and overlap. The new machine-readable name is `recovered_pairs.loci_gt_2000`, under the `recovery` scope in `strainSelectionAttrition.tsv`. Mean and median locus counts also refer to the extraction stage.
+
+The `single_strain` and `mixed_strain` labels are extraction QC verdicts; they do not count unique strains or guarantee final inclusion. Likewise, `too_few_after_abundance` means that too few loci remain at the check after abundance filtering. It includes pairs that already had fewer than the minimum before this filter; it does not establish that abundance filtering alone caused their loss.
+
+`LOGandSUB/strain_within.summary.log` contains the concise run summary and paths to the detailed reports. STDOUT prints the same summary once, without replaying the histograms and paths from each report. Submission eligibility is saved separately from observed output completion. MSA-only completion messages distinguish missing/incomplete job outputs from successful processing and from `-submit 0` command generation.
+
+| Report in `LOGandSUB/` | Use |
+|---|---|
+| `strainRecovery.tsv` | Per-pair extraction outcome, reason, retained loci, and mixed-strain QC flags. Its existing columns and values remain compatible. |
+| `strainSampleStats.tsv` / `strainSampleStats.summary.tsv` | Per-sample and per-worker extraction counters, including the original encoded locus histogram. Saved sample-processing totals describe that Phase-I run; a subset resume's recovery summary is restricted to the selected MGS. |
+| `strainSelectionAttrition.tsv` | Exact recovery thresholds and QC totals, extraction filter totals, submission dispositions, and per-MGS alignment/tree attrition totals. Each aggregated metric retains its contributing-report count. |
+| `strainMGSSampleCounts.tsv` | One row for every selected MGS. Existing columns remain in place; appended fields identify `msa_samples`, `sample_count_stage`, `output_status`, and the completion-marker fingerprint used to reuse counts. |
+| `strainMGSSampleHistogram.tsv` | One applicable distribution (`msa` or ordinary `tree`), or separate `backbone` and `placement` distributions when placement is enabled. `counted_MGS` and `missing_MGS` make the denominator explicit. |
+| `strainGeneLengthFilter.samples.tsv` | Sample-level length-filter counts and MGS-qualified gene lists. These are filter-stage audits, not final MSA sample counts. |
+| `tree_job_outcomes.tsv` / `tree_input_resolution.tsv` | Job output checks versus input readiness. Filenames retain their historical `tree` prefix in MSA-only mode. Ready input or an eligible job does not establish completed output. |
+
+In the sample-count table, `NA` means unavailable or inapplicable. For MSA-only runs, backbone, placement, and excluded-sample counts are `NA`; `included_samples` equals the measured `msa_samples`. Terminal insufficient-data MGS contribute zero to the applicable histogram, while missing measurements are excluded from its denominator. Tree-mode `included_samples` is the sum of selected backbone and placement samples, not a verified count of tips in the final tree. The historical `backbone_samples` column also holds ordinary inference samples when placement is off; the histogram labels this role `tree`.
+
+New MSA-only jobs write their measured sample counts into `msaOnly.complete.tsv` and publish `phylo/selection_attrition.tsv` before exiting. Completed older outputs are supported: on the next normal `-onlyMSA 1 -onlySubmit 1` resume, the wrapper scans retained compressed nucleotide alignments and reads the outgroup identity from `data.log`. This first scan can take time for a large run. Later reporting passes reuse counts from `strainMGSSampleCounts.tsv` while the completion marker is unchanged. If the old outgroup metadata is missing, the ingroup count stays `NA`. A normal resume can also retry incomplete MGS jobs; it is not a statistics-only operation.
+
 ## `strain_within.pl` flag groups
 
 This is a task-oriented summary. See the [complete `strain_within.pl` flag reference](flag_reference.md#strain_withinpl) for every parsed option, type and source default.

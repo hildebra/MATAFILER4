@@ -435,6 +435,19 @@ ok(-s $msaOnlyMarker,
 	'MSA-only workflow publishes its durable completion marker');
 like(slurp($msaOnlyMarker), qr/^status\tmsa_complete$/m,
 	'MSA-only completion marker records the explicit lifecycle status');
+like(slurp($msaOnlyMarker), qr/^msa_samples\t[1-9][0-9]*$/m,
+	'MSA-only completion marker records measured ingroup sample counts');
+like(slurp($msaOnlyMarker), qr/^msa_outgroup_samples\t[01]$/m,
+	'MSA-only completion marker records outgroups separately');
+my $msaOnlyAttrition = slurp(File::Spec->catfile(
+	$msaOnlyOutput, 'phylo', 'selection_attrition.tsv'));
+like($msaOnlyAttrition, qr/^msa_samples\t[1-9][0-9]*$/m,
+	'MSA-only exit publishes alignment sample attrition');
+like($msaOnlyAttrition, qr/^final_samples\tNA$/m,
+	'MSA-only exit does not fabricate combined-alignment sample counts');
+like($msaOnlyAttrition, qr/^backbone_samples\tNA$/m,
+	'MSA-only exit does not fabricate a backbone');
+
 like(slurp($msaOnlyMarker), qr/^reason\t.*combined-MSA postprocessing, concatenation.*skipped$/m,
 	'MSA-only completion marker records the skipped combined-alignment stages');
 ok(!-e File::Spec->catfile(

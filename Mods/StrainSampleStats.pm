@@ -4,6 +4,8 @@ use strict;
 use warnings;
 
 use Exporter qw(import);
+use File::Basename qw(basename);
+use Mods::GenoMetaAss qw(gzipopen);
 
 our @EXPORT_OK = qw(
 	sample_stat_columns
@@ -11,7 +13,38 @@ our @EXPORT_OK = qw(
 	aggregate_sample_rows
 	encode_loci_histogram
 	loci_histogram_rows
+	count_msa_samples
 );
+
+# Count the union of samples with informative sequence in retained primary
+# loci. Protein checkpoints and synonymous-site subsets must not double count
+# nucleotide loci. This also supports pre-report MSA-only outputs on resume.
+sub count_msa_samples {
+	my ($artifacts, $outgroup) = @_;
+	$outgroup //= '';
+	my @primary = grep {
+		basename($_) !~ /^MSAli/ && !/\.(?:syn|nonsyn)\.fna(?:\.gz)?\z/
+	} @{$artifacts};
+	my @nucleotide = grep { /\.fna(?:\.gz)?\z/ } @primary;
+	my @paths = @nucleotide ? @nucleotide
+		: grep { /\.faa(?:\.gz)?\z/ } @primary;
+	my $informative = @nucleotide ? qr/[ACGTU]/i : qr/[ACDEFGHIKLMNPQRSTVWY]/i;
+	my %samples;
+	for my $path (@paths) {
+		my ($input) = gzipopen($path, 'retained locus sample counts');
+		my $sample;
+		while (my $line = <$input>) {
+			if ($line =~ /^>([^\s|]+)/) {
+				$sample = $1;
+			} elsif (defined($sample) && $line =~ $informative) {
+				$samples{$sample} = 1;
+			}
+		}
+		close $input or die "Cannot finish reading retained alignment $path: $!\n";
+	}
+	my $outgroups = length($outgroup) && delete($samples{$outgroup}) ? 1 : 0;
+	return { msa_samples => scalar(keys %samples), msa_outgroup_samples => $outgroups };
+}
 
 my @SAMPLE_STAT_COLUMNS = qw(
 	sample worker assembly_group status selected_mgs candidate_mgs candidate_loci consensus_proteins

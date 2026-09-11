@@ -265,7 +265,7 @@ like($strain,
 	qr/sub msaOnlyArtifactsReady.*?status.*?msa_complete.*?\$name =~ \/\^MSAli\/.*?fna.*?fileGZs/s,
 	'strainWithin validates MSA-only completion from non-merged per-locus artifacts');
 like($strain,
-	qr/if \(\$onlyMSA.*?strain_within_2\.2\.pl were not launched.*?exit\(0\);.*?my \$MGSabundance/s,
+	qr/if \(\$onlyMSA.*?MSA-only processing incomplete:.*?exit\(0\);.*?my \$MGSabundance/s,
 	'MSA-only controller runs stop before tree-dependent postprocessing');
 like($build_tree,
 	qr/"onlyMSA=i" => \\\$onlyMSA.*?filterMSA\(.*?runMSAFix\(\$tmpOutMSA.*?publishCompressedMSAArtifact\(\$finOutMSA.*?if \(\$onlyMSA.*?msa_complete.*?exit\(0\);.*?POST-ALIGNMENT WORKFLOW.*?mergeMSAs/s,
@@ -632,7 +632,7 @@ unlike($strain, qr/remove_tree\(\$outD\)|remove_tree\(\$scratchD\)/,
 	'initialization no longer walks the output or scratch trees from Perl');
 like($strain, qr/remove_tree\(\$locSpace\) if -d \$locSpace;/,
 	'small per-sample temporaries stay in-process, where forking rm would cost more than it saves');
-like($strain, qr/my \$version = 1\.67;/,
+like($strain, qr/my \$version = 1\.68;/,
 	'workflow behavior changes retain an explicit version marker');
 like($strain,
 	qr/my \$resumeOutD = .*?my \$parentRunLock;.*?if \(!\$subJob\).*?\$parentRunLockPath = "\$lockBase\.strain_within\.lock".*?acquire_workflow_lock\(.*?prepRun\(\);/s,
@@ -718,11 +718,11 @@ like($strain,
 	qr/sub writeSampleStats \{.*?without a sample name.*?duplicate row.*?Refusing to emit an empty.*?for my \$target \(\$fh, \$sampleStatsPartFH\).*?print \{\$target\} \$row, "\\n"/s,
 	'every sample-statistics record has a sample name, is nonempty, and is emitted to stdout and its worker table at most once');
 like($strain,
-	qr/sub mergeSampleStats .*?Wrong sample-statistics field count.*?Duplicate sample-statistics row.*?aggregate_sample_rows.*?STAGE I SAMPLE SUMMARY \(all workers\)/s,
+	qr/sub mergeSampleStats .*?Wrong sample-statistics field count.*?Duplicate sample-statistics row.*?aggregate_sample_rows.*?Phase I extraction:/s,
 	'all worker tables are validated, aggregated, saved, and reported at the end of Step 1');
 like($strain,
-	qr/STAGE I SAMPLE SUMMARY \(all workers\).*?join\("; ", \@summaryPairs\).*?loci_histogram_rows.*?Used MGS retained-loci histogram/s,
-	'the all-worker stdout summary uses key:value pairs and includes a retained-locus histogram');
+	qr/sub printSampleStatsSummary.*?\$phase1SampleSummary = \$allSummary.*?Phase I extraction:.*?sample-MGS pairs recovered/s,
+	'the all-worker summary identifies sample-MGS pairs and saves counts for the final report');
 like($strain,
 	qr/mergeRecoveryLogs\(\) unless \$maxSubJob.*?mergeSampleStats\(\) unless \$maxSubJob.*?if \(\$maxSubJob && !\$subJob\).*?mergeRecoveryLogs\(\);.*?mergeSampleStats\(\);/s,
 	'both single-worker and split-worker extraction produce the combined sample summary');
@@ -876,13 +876,13 @@ like($strain,
 unlike($strain, qr/nonEpaTreeAbsences/,
 	'a missing final tree no longer makes reference catalogue loading mandatory');
 like($strain,
-	qr/my %treeDisposition.*?\$treeDisposition\{\$epaOnlyRetry \? 'EPA-only retry job'.*?\$onlyMSA \? 'eligible MSA-only job' : 'eligible tree job'\}\+\+.*?Tree submission accounting:.*?Tree submission pass complete:/s,
-	'tree submission reports every eligible and skipped MGS disposition before waiting');
+	qr/my %treeDisposition.*?\$treeDisposition\{\$epaOnlyRetry \? 'EPA-only retry job'.*?\$onlyMSA \? 'eligible MSA-only job' : 'eligible tree job'\}\+\+.*?\$jobLabel preparation:.*?\$jobLabel submission pass complete:/s,
+	'submission reports accounted MGS and eligible jobs before waiting');
 like($strain,
-	qr/my \@pendingTreeJobs;.*?push \@pendingTreeJobs, \{.*?command => \$Tcmd\.\$outgS.*?tmp_space => \$QSBoptHR->\{tmpSpace\}.*?dispatchPendingTreeJobs\(.*?blocking => 0.*?Tree preparation pass complete:.*?dispatchPendingTreeJobs\(.*?blocking => 1.*?retryOOMTreeJobs\(\s*jobs => \\\@jobs,.*?writeTreeFailureAudit.*?without a valid output were quarantined/s,
+	qr/my \@pendingTreeJobs;.*?push \@pendingTreeJobs, \{.*?command => \$Tcmd\.\$outgS.*?tmp_space => \$QSBoptHR->\{tmpSpace\}.*?dispatchPendingTreeJobs\(.*?blocking => 0.*?\$jobLabel preparation pass complete:.*?dispatchPendingTreeJobs\(.*?blocking => 1.*?retryOOMTreeJobs\(\s*jobs => \\\@jobs,.*?writeTreeFailureAudit.*?with missing\/incomplete output:/s,
 	'eligible trees queue after conversion, then are globally submitted, tracked, awaited, and output-validated');
 like($strain,
-	qr/if \(!\$doSubmit \|\| \(\$epaOnlyRetry && time >= \$nextQueuedTreeSubmissionProbe\)\).*?Tree preparation pass complete:.*?blocking => 1/s,
+	qr/if \(!\$doSubmit \|\| \(\$epaOnlyRetry && time >= \$nextQueuedTreeSubmissionProbe\)\).*?\$jobLabel preparation pass complete:.*?blocking => 1/s,
 	'ordinary Phase II jobs remain queued for global priority, while EPA-only recovery can still dispatch promptly');
 like($strain,
 	qr/\@\{\$queue\} = sort \{.*?epa_only.*?cores.*?workload_cells.*?sample_count.*?requested_mb.*?gene_count.*?priority_ordinal.*?\} \@\{\$queue\}/s,
@@ -959,8 +959,8 @@ like($strain,
 unlike($strain, qr/die "Unexpected saved sample-summary header/,
 	'legacy saved sample-summary headers are no longer fatal');
 like($strain,
-	qr/sub printSampleStatsSummary .*?STAGE I SAMPLE SUMMARY \(all workers\).*?Used MGS retained-loci histogram/s,
-	'the same all-worker summary and retained-locus histogram are available after Phase I has completed');
+	qr/sub printSampleStatsSummary .*?\$phase1SampleSummary = \$allSummary.*?Phase I extraction:/s,
+	'the same concise extraction accounting is available after Phase I has completed');
 like($strain,
 	qr/sub recoverCompletedSplitPhaseI .*?split_generation_complete.*?incomplete recovery ledgers.*?incomplete sample-statistics ledgers.*?mergeConspecificLogs\(\).*?mergeRecoveryLogs\(\).*?mergeSampleStats\(\)/s,
 	'a restart after every split worker finished merges validated ledgers before Phase II uses their staged inputs');
@@ -1013,7 +1013,7 @@ ok(defined($quickWorkerValidation),
 unlike($quickWorkerValidation, qr/while\s*\(/,
 	'Phase-I worker prevalidation checks stones and headers without rescanning ledger rows');
 like($strain,
-	qr/sub mergeSampleStats .*?while \(my \$line = <\$in>\).*?Wrong sample-statistics field count.*?sub mergeRecoveryLogs .*?Unexpected MAG recovery header.*?while \(my \$line = <\$in>\) \{ indexRecoveryRow/s,
+	qr/sub mergeSampleStats .*?while \(my \$line = <\$in>\).*?Wrong sample-statistics field count.*?sub mergeRecoveryLogs .*?Unexpected Sample-MGS recovery header.*?while \(my \$line = <\$in>\) \{ indexRecoveryRow/s,
 	'deep row and cardinality checks remain in the single merge pass');
 like($strain,
 	qr/sub resolveScratchDirectory .*?Reusing recorded scratch directory.*?sub persistScratchDirectory .*?retry_rename\(\$temporary, \$manifest.*?\.strain_within\.scratch\.tsv.*?resolveScratchDirectory\(\$derivedScratch.*?if \(\$subJob\).*?return;.*?persistScratchDirectory\(\$scratchManifest/s,
@@ -1227,7 +1227,7 @@ like($strain,
 	qr/my \$minLociPerMGS = \$FILTER_DEFAULT\{minimum_loci_per_mgs\};/,
 	'the per-MGS locus floor is separate from the per-sample extraction prefilter');
 like($strain,
-	qr/sub writeGeneLengthSampleSummary .*?gene_length_filter\.samples\.tsv.*?"\$\{mgs\}:\$_".*?strainGeneLengthFilter\.samples\.tsv.*?gene_length_sample_audit\\t\$geneLengthSampleSummary/s,
+	qr/sub writeGeneLengthSampleSummary .*?gene_length_filter\.samples\.tsv.*?"\$\{mgs\}:\$_".*?strainGeneLengthFilter\.samples\.tsv.*?Gene-length sample audit', \$geneLengthSampleSummary/s,
 	'strainWithin consolidates per-MGS length-gate decisions into a sample-wise run report');
 like($strain,
 	qr/my \$epaPendantOutlierFactor = 5;.*?my \$epaPendantMinThreshold = 0\.02;.*?"epaPendantOutlierFactor=f" => \\\$epaPendantOutlierFactor.*?"epaPendantMinThreshold=f" => \\\$epaPendantMinThreshold.*?-epaPendantOutlierFactor \$epaPendantOutlierFactor.*?-epaPendantMinThreshold \$epaPendantMinThreshold/s,
@@ -1369,8 +1369,8 @@ like($strain,
 	qr/sub writeMGSSampleHistograms.*?backbone_samples.*?placement_samples.*?strict_backbone\.samples\.tsv.*?strainMGSSampleCounts\.tsv.*?role\\tlower\\tupper\\tbin\\tMGS_count\\tfraction.*?qw\(backbone placement\)/s,
 	'across-MGS sample histograms report backbone and placement distributions separately');
 like($strain,
-	qr/writeMGSSampleHistograms\(\).*?MGS_sample_counts.*?MGS_sample_histogram.*?for my \$role \(qw\(backbone placement\)\).*?\$\{role\}_samples_per_MGS/s,
-	'the run summary links exact sample counts and both role-specific histograms');
+	qr/writeMGSSampleHistograms\(\).*?for my \$role \(@\{\$sampleHistograms->\{roles\}\}\).*?MGS sample counts.*?MGS sample histogram/s,
+	'the run summary renders applicable sample roles and links detailed reports');
 
 like($build_tree, qr/if \(\$numSeq < 3\)/,
 	'three-sample MGS accepted by the wrapper are retained for a minimal tree');

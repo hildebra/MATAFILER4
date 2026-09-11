@@ -20,14 +20,14 @@ use Digest::SHA qw(sha256_hex);
 use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs resolveExistingFile readClstrRev
 	writeClstrRevBinaryShards readClstrRevBinaryShard
 	writeSequenceBinaryCache readSequenceBinaryCache
-	systemW median mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs);
+	systemW mean readMapS readFasta getAssemblPath getAssemblGFF getAssemblContigs);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs
 	deferredSubmissionDependency);
 use Mods::IO_Tamoc_progs qw(getProgPaths truePath);
 use Mods::FlagReference qw(printFlagHelp resolvePairedOptionDefault);
 use Mods::TamocFunc qw(checkMF);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
-use Mods::math qw(quantileArray);
+use Mods::math qw(quantileArray medianArray);
 use Mods::MGSLocus qw(build_locus_groups choose_locus_candidate member_context_map
 	accumulate_locus_context merge_candidate_seeds preselect_locus_records
 	protein_kmer_similarity robust_depth_mask);
@@ -48,7 +48,7 @@ use Mods::WorkflowResilience qw(
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
 use Mods::StrainSampleStats qw(
 	sample_stat_columns sample_summary_columns aggregate_sample_rows
-	encode_loci_histogram loci_histogram_rows
+	encode_loci_histogram loci_histogram_rows count_msa_samples
 );
 
 sub extractFNAFAA2genes;
@@ -329,7 +329,8 @@ my $completionMessage = "";
 #1.65: report the effective per-locus MSA retention policy in the run header
 #1.66: size retained-MSA recovery jobs on alignment work, not on tree inference
 #1.67: hand buildTree5 only the option groups the job it starts can act on
-my $version = 1.67;
+#1.68: distinguish extraction pairs, retained MSA samples, and completed outputs
+my $version = 1.68;
 
 
 my $cmdCall = join(" ", $0, @ARGV) . "\n";
@@ -1425,6 +1426,7 @@ stepComplete("assembly-group expansion", $stepStarted,
 
 my %preCompSNPs;
 my %unavailableSamples;
+my $phase1SampleSummary;
 
 
 my %replN; #my %genesWrite; #keep stats/track
@@ -2131,7 +2133,8 @@ my $initializeOutgroupReferences = sub {
 };
 
 
-stageStart(q{Stage II: phylogeny preparation and submission},
+stageStart($onlyMSA ? q{Stage II: MSA preparation and submission}
+	: q{Stage II: phylogeny preparation and submission},
 	q{Preparing intra-strain phylogenies for }.scalar(@specis).q{ MGS});
 
 
@@ -2701,17 +2704,14 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 	#die $outD2."treeCmd.sh\n";
 
 }
+my $jobLabel = $onlyMSA ? 'MSA' : 'Tree';
 my $treeAccounted = 0;
 $treeAccounted += $_ for values %treeDisposition;
-print "\nTree submission accounting: $treeAccounted/$Nspecis selected MGS accounted for; "
-	. "$treeMGSVisited visited by the submission loop.\n";
-for my $reason (sort keys %treeDisposition) {
-	print "  $reason: $treeDisposition{$reason}\n";
-}
+print "\n$jobLabel preparation: $treeAccounted/$Nspecis selected MGS accounted for; $cnt jobs eligible.\n";
 print "  staged input sets recovered for -redo tree: $recalcScratchRecovered\n"
 	if $recalcTrees;
 if ($doSubmit) {
-	print "Tree preparation pass complete: $cnt eligible tree job(s), "
+	print "$jobLabel preparation pass complete: $cnt eligible job(s), "
 		."$submittedTreeJobs submitted so far, ".scalar(@pendingTreeJobs)
 		." awaiting scheduler capacity. "
 		."The following wait count reports jobs still present, not jobs omitted.\n";
@@ -2724,7 +2724,7 @@ if ($doSubmit) {
 		jobs => \@jobs, accounting => \@treeJobAccounting,
 		blocking => 1,
 	);
-	print "Tree submission pass complete: $cnt eligible tree script(s) generated; scheduler submission disabled.\n";
+	print "$jobLabel submission pass complete: $cnt eligible script(s) generated; scheduler submission disabled.\n";
 }
 if (%deferredScratchCleanup) {
 	my $cleanupStarted = time;
@@ -2767,22 +2767,21 @@ retryOOMTreeJobs(
 );
 die "Internal error: tree submission queue was not drained\n"
 	if @pendingTreeJobs && $doSubmit;
-print "Tree submission pass complete: $submittedTreeJobs eligible tree job(s) submitted; "
-	.scalar(@jobs)." scheduler job ID(s) tracked.\n" if $doSubmit;
+print "$jobLabel jobs submitted: $submittedTreeJobs; scheduler wait finished.\n" if $doSubmit;
 my $incompleteTreeOutcomes = 0;
 if ($doSubmit) {
 	my ($failed, $pending, $terminal) =
 		writeTreeFailureAudit(\%expectedTreeOutputs);
 	$incompleteTreeOutcomes = @{$failed} + @{$pending};
-	warn "Tree jobs without a valid output were quarantined: ".join(',', @{$failed})."\n"
+	warn "$jobLabel jobs with missing/incomplete output: ".scalar(@{$failed})."; see $LOGDIR/tree_job_outcomes.tsv\n"
 		if @{$failed};
-	warn "Tree jobs with a retained backbone and pending placement: "
-		.join(',', @{$pending})."\n" if @{$pending};
-	print "Valid terminal no-tree outcomes: ".join(',', @{$terminal})."\n"
+	warn "Jobs with a retained backbone and pending placement: "
+		.scalar(@{$pending})."; see $LOGDIR/tree_job_outcomes.tsv\n" if @{$pending};
+	print "Jobs ending with insufficient data: ".scalar(@{$terminal})."\n"
 		if @{$terminal};
 }
-writeStrainSummary(\%treeDisposition, \%mosaicOutgroupsUsed);
 my $unresolvedInputs = validateTreeInputResolution();
+writeStrainSummary(\%treeDisposition, \%mosaicOutgroupsUsed);
 if ($unresolvedInputs) {
 	$completionMessage = "strain_within.pl preserved completed work but stopped before downstream "
 		."strain analysis; tree_outcomes_quarantined=$incompleteTreeOutcomes, "
@@ -2792,13 +2791,14 @@ if ($unresolvedInputs) {
 	exit(0);
 }
 if ($onlyMSA) {
-	$completionMessage = "strain_within.pl completed MSA-only processing; "
-		."MSA_outcomes_quarantined=$incompleteTreeOutcomes. Tree inference and "
-		."tree-dependent strain postprocessing were intentionally skipped.";
-	print "MSA-only workflow complete. Tree inference, EPA-ng placement, and "
-		."strain_within_2.2.pl were not launched.\n";
+	$completionMessage = !$doSubmit
+		? "MSA-only commands prepared; scheduler submission disabled."
+		: $incompleteTreeOutcomes
+			? "MSA-only processing incomplete: $incompleteTreeOutcomes MGS jobs have missing/incomplete output; see $LOGDIR/tree_job_outcomes.tsv."
+			: "MSA-only processing complete. See $LOGDIR/$summaryLogName.";
 	exit(0);
 }
+
 if ($incompleteTreeOutcomes) {
 	print "Tree-job outcomes remain quarantined in tree_job_outcomes.tsv, but all tree "
 		."inputs are resolved; proceeding with downstream strain analysis for completed trees.\n";
@@ -3743,7 +3743,8 @@ sub validateTreeInputResolution {
 	retry_close($out, 'close tree-input resolution audit');
 	retry_rename($temporary, $audit, label => 'publish tree-input resolution audit');
 	print "Tree-input resolution audit: ready=$ready, valid_no_tree=$terminal, "
-		."excluded=$excluded, repair_required=".scalar(@repairRequired)."; $audit\n";
+		."excluded=$excluded, repair_required=".scalar(@repairRequired)."; $audit\n"
+		if @repairRequired;
 	my $repairQueue = "$LOGDIR/tree_input_repair.queue.tsv";
 	if (@repairRequired) {
 		my $queueTemporary = "$repairQueue.write.$$";
@@ -5627,34 +5628,59 @@ sub stagedMGSInputsReady {
 }
 
 sub msaOnlyArtifactsReady {
-	my ($outputDirectory) = @_;
+	my ($outputDirectory, $counts, $cached) = @_;
 	return 0 unless defined($outputDirectory) && length($outputDirectory);
 	my $marker = File::Spec->catfile($outputDirectory, 'msaOnly.complete.tsv');
 	return 0 unless -s $marker;
 	open my $markerHandle, '<', $marker or return 0;
-	my $status = '';
+	my (%metadata, $markerText);
 	while (my $line = <$markerHandle>) {
-		if ($line =~ /^status\t([^\r\n]+)/) {
-			$status = $1;
-			last;
-		}
+		$markerText .= $line if defined($counts);
+		$line =~ s/[\r\n]+\z//;
+		my ($key, $value) = split /\t/, $line, 2;
+		$metadata{$key} = $value if defined($key) && defined($value);
 	}
 	close $markerHandle or return 0;
-	return 0 unless $status eq 'msa_complete';
+	return 0 unless ($metadata{status} // '') eq 'msa_complete';
+	my $fingerprint = defined($counts) ? sha256_hex($markerText // '') : '';
+	if ($cached && ($cached->{completion_marker_sha256} // '') eq $fingerprint
+			&& ($cached->{msa_samples} // '') =~ /^\d+\z/) {
+		$metadata{msa_samples} = $cached->{msa_samples};
+		$metadata{msa_outgroup_samples} //= 'NA';
+	}
 	my $msaDirectory = File::Spec->catdir($outputDirectory, 'MSA');
 	return 0 unless -d $msaDirectory;
 	opendir my $msaHandle, $msaDirectory or return 0;
-	my $ready = 0;
+	my ($ready, @artifacts);
+	my $savedCounts = defined($counts)
+		&& ($metadata{msa_samples} // '') =~ /^\d+\z/
+		&& ($metadata{msa_outgroup_samples} // '') =~ /^(?:\d+|NA)\z/;
 	while (my $name = readdir $msaHandle) {
 		next if $name =~ /^MSAli/ || $name !~ /\.fna\.gz\z/;
 		my $path = File::Spec->catfile($msaDirectory, $name);
 		if (fileGZs($path)) {
 			$ready = 1;
-			last;
+			push @artifacts, $path;
+			last if !defined($counts) || $savedCounts;
 		}
 	}
 	closedir $msaHandle or return 0;
-	return $ready;
+	if ($ready && defined($counts)) {
+		if ($savedCounts) {
+			@{$counts}{qw(msa_samples msa_outgroup_samples)} =
+				@metadata{qw(msa_samples msa_outgroup_samples)};
+		} else {
+			# Old markers predate sample counts. Use actual retained MSAs rather
+			# than candidate/input counts, which precede sequence masking.
+			limitedNotice('legacy MSA sample accounting',
+				"Counting samples in retained MSA files for $outputDirectory (legacy completion marker).\n");
+			my ($hasOutgroup, $outgroup) = preparedOutgroupLog($outputDirectory);
+			%{$counts} = $hasOutgroup ? %{count_msa_samples(\@artifacts, $outgroup)}
+				: (msa_samples => 'NA', msa_outgroup_samples => 'NA');
+		}
+	}
+	$counts->{completion_marker_sha256} = $fingerprint if $ready && defined($counts);
+	return $ready || 0;
 }
 
 sub evalFileStatus{
@@ -5816,7 +5842,7 @@ sub evalFileStatus{
 	}
 	$PhylosExist = 0 if ($CatFileMiss/scalar(@specis) > 0.1); #only activate if more than 10% missing..
 
-	print "Output dirs status: \nIncomplete tree inputs: $CatFileMiss, complete staged inputs: $CatNotPrepped, Dir not done: $dirsNOTPrepped, phylo absent: $treeAbsent, Dir done: $doneDirs, completion-marker fast paths: $completedTreeFastPaths, too few samples: $tooFewDirs, no recoverable loci: $noRecoverableLociDirs, Phylo complete: $PhylosExist \n";
+
 	#die;
 	return($dirsNOTPrepped , $CatFileMiss , $CatNotPrepped , $treeAbsent, $doneDirs, $PhylosExist,
 		$noRecoverableLociDirs, $completedTreeFastPaths);
@@ -6702,9 +6728,9 @@ sub phase1WorkersNeedingRetry {
 
 sub writeRecoveryRow {
 	my (@fields) = @_;
-	die "MAG recovery log is not open\n" unless $recoveryLogFH;
+	die "Sample-MGS recovery log is not open\n" unless $recoveryLogFH;
 	print {$recoveryLogFH} join("\t", @fields), "\n"
-		or die "Cannot write MAG recovery statistics: $!\n";
+		or die "Cannot write Sample-MGS recovery statistics: $!\n";
 }
 
 sub indexRecoveryRow {
@@ -6713,7 +6739,7 @@ sub indexRecoveryRow {
 	$copy =~ s/[\r\n]+\z//;
 	return unless length $copy;
 	my @field = split /\t/, $copy, -1;
-	die "Malformed MAG recovery row in $source: expected at least 9 tab-delimited fields\n"
+	die "Malformed Sample-MGS recovery row in $source: expected at least 9 tab-delimited fields\n"
 		unless @field >= 9;
 	my ($mgs, $sample, $outcome, undef, $retained_genes) = @field[0 .. 4];
 	return unless $outcome eq "recovered";
@@ -6924,33 +6950,10 @@ sub reportSavedSampleStats {
 sub printSampleStatsSummary {
 	my ($allSummary) = @_;
 	die "Sample summary must be a hash reference\n" unless ref($allSummary) eq 'HASH';
-	my @summaryPairs = (
-		"samples=".($allSummary->{samples} // 0),
-		"processed=".($allSummary->{processed_samples} // 0),
-		"used_MGS=".($allSummary->{used_mgs} // 0)."/".($allSummary->{candidate_mgs} // 0),
-		"retained_loci=".($allSummary->{retained_loci} // 0),
-		"mean_loci_per_used_MGS=".($allSummary->{mean_loci_per_used_mgs} // 0),
-		"skipped_MGS=".($allSummary->{skipped_mgs} // 0),
-		"status=".($allSummary->{status_counts} // q{}),
-	);
-	print "STAGE I SAMPLE SUMMARY (all workers)\n";
-	print join("; ", @summaryPairs), "\n";
-	my @histogramRows = loci_histogram_rows(
-		$allSummary->{used_mgs_loci_histogram}, $allSummary->{min_genes_per_mgs}
-	);
-	my $largestBin = 0;
-	for my $row (@histogramRows) {
-		$largestBin = $row->[1] if $row->[1] > $largestBin;
-	}
-	print "Used MGS retained-loci histogram (MGS-sample observations):\n";
-	for my $row (@histogramRows) {
-		my ($label, $count) = @$row;
-		my $fraction = $allSummary->{used_mgs}
-			? 100 * $count / $allSummary->{used_mgs} : 0;
-		my $barWidth = $largestBin ? int(30 * $count / $largestBin + 0.5) : 0;
-		$barWidth = 1 if $count && !$barWidth;
-		printf "  %-10s %8d %6.2f%% %s\n", $label, $count, $fraction, "#" x $barWidth;
-	}
+	$phase1SampleSummary = $allSummary;
+	printf "Phase I extraction: %d/%d samples processed; %d/%d sample-MGS pairs recovered; %d loci retained.\n",
+		map { $allSummary->{$_} // 0 }
+		qw(processed_samples samples used_mgs candidate_mgs retained_loci);
 }
 
 sub writeRecoveryContributionIndex {
@@ -7023,40 +7026,41 @@ sub mergeRecoveryLogs {
 		: ("$LOGDIR/$recoveryLogName.0");
 	return unless grep { -e $_ } @parts;
 	my @missing = grep { !-s $_ } @parts;
-	die "Missing MAG recovery worker log(s): ".join(',', @missing)."\n" if @missing;
+	die "Missing Sample-MGS recovery worker log(s): ".join(',', @missing)."\n" if @missing;
 	my $final = "$LOGDIR/$recoveryLogName";
 	my $temporary = "$final.write.$$";
 	my $out = retry_open('>', $temporary,
-		label => 'create merged MAG recovery ledger');
+		label => 'create merged Sample-MGS recovery ledger');
 	my $header_written = 0;
 	for my $worker (0 .. $#parts) {
 		my $part = $parts[$worker];
 		open my $in, '<', $part or die "Cannot read $part: $!\n";
 		my $header = <$in>;
-		die "MAG recovery worker log has no header: $part\n" unless defined $header;
+		die "Sample-MGS recovery worker log has no header: $part\n" unless defined $header;
 		$header =~ s/[\r\n]+\z//;
 		my $expectedHeader = join("\t", qw(MGS sample outcome reason retained_genes
 			qc_status ambiguous_failure conspecific_failure recovered_mosaic_loci));
-		die "Unexpected MAG recovery header in $part\n"
+		die "Unexpected Sample-MGS recovery header in $part\n"
 			unless $header eq $expectedHeader;
 		$header .= "\n";
 		print {$out} $header unless $header_written++;
 		while (my $line = <$in>) { indexRecoveryRow($worker, $line, $part); print {$out} $line or die "Cannot write $temporary: $!\n"; }
 		close $in or die "Cannot close $part: $!\n";
 	}
-	retry_close($out, 'close merged MAG recovery ledger');
+	retry_close($out, 'close merged Sample-MGS recovery ledger');
 	writeRecoveryContributionIndex();
-	retry_rename($temporary, $final, label => 'publish merged MAG recovery ledger');
+	retry_rename($temporary, $final, label => 'publish merged Sample-MGS recovery ledger');
 	retry_unlink($_, fatal => 0, label => "clean merged recovery ledger") for @parts;
 	$recoveryContributionIndexReady = 1;
-	print "MAG recovery accounting: $final\n";
+	print "Sample-MGS recovery accounting: $final\n";
 }
 
 sub writeSelectionAttritionSummary {
-	my ($recoveryMetrics, $filterReasons) = @_;
+	my ($recoveryMetrics, $filterReasons, $submission) = @_;
 	$recoveryMetrics ||= {};
 	$filterReasons ||= {};
 	my @rows;
+	push @rows, ['submission', $_, $submission->{$_}] for sort keys %{$submission || {}};
 	push @rows, ['recovery', $_, $recoveryMetrics->{$_}]
 		for sort keys %{$recoveryMetrics};
 	push @rows, ['recovery', "filtered_reason.$_", $filterReasons->{$_}]
@@ -7121,6 +7125,7 @@ sub writeSelectionAttritionSummary {
 			next unless length $line;
 			my ($metric, $value) = split /\t/, $line, 2;
 			next if !defined($metric) || $metric eq 'schema';
+			next if $onlyMSA && $metric =~ /^(?:post_qc_loci|final_loci|final_samples|concatenation_excluded_samples|backbone_samples|placement_samples|excluded_samples)$/;
 			next unless defined($value)
 				&& $value =~ /\A-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z/;
 			$treeTotals{$metric} += 0 + $value;
@@ -7129,11 +7134,11 @@ sub writeSelectionAttritionSummary {
 		close $treeInput
 			or die "Cannot close tree selection attrition $report: $!\n";
 	}
-	push @rows, ['tree', 'reports_expected', scalar(@specis)];
-	push @rows, ['tree', 'reports_available', $treeReports];
+	push @rows, [$onlyMSA ? 'alignment' : 'tree', 'reports_expected', scalar(@specis)];
+	push @rows, [$onlyMSA ? 'alignment' : 'tree', 'reports_available', $treeReports];
 	for my $metric (sort keys %treeTotals) {
-		push @rows, ['tree', $metric, $treeTotals{$metric}];
-		push @rows, ['tree', "$metric.reports", $treeMetricReports{$metric}];
+		push @rows, [$onlyMSA ? 'alignment' : 'tree', $metric, $treeTotals{$metric}];
+		push @rows, [$onlyMSA ? 'alignment' : 'tree', "$metric.reports", $treeMetricReports{$metric}];
 	}
 
 	my $path = "$LOGDIR/strainSelectionAttrition.tsv";
@@ -7253,99 +7258,167 @@ sub writeGeneLengthSampleSummary {
 	retry_close($output, 'close strain gene-length sample summary');
 	retry_rename($temporary, $path,
 		label => 'publish strain gene-length sample summary');
-	print "Strain-wide gene-length sample audit: $path ($reports MGS reports)\n";
 	return $path;
 }
 
 sub writeMGSSampleHistograms {
-	my @records;
-	for my $mgs (@specis) {
-		next unless defined($SIdirs{$mgs}) && length($SIdirs{$mgs});
-		my ($backbone, $placement, $excluded, $source);
-		my $attrition = File::Spec->catfile(
-			$SIdirs{$mgs}, 'phylo', 'selection_attrition.tsv');
-		if (-s $attrition) {
-			open my $input, '<', $attrition
-				or die "Cannot read MGS sample attrition $attrition: $!\n";
-			my $header = <$input> // '';
-			$header =~ s/[\r\n]+\z//;
-			my %metric;
-			if ($header eq "metric\tvalue") {
-				while (my $line = <$input>) {
-					$line =~ s/[\r\n]+\z//;
-					my ($name, $value) = split /\t/, $line, 2;
-					next unless defined($name) && defined($value)
-						&& $value =~ /\A\d+\z/;
-					$metric{$name} = 0 + $value;
-				}
-			}
-			close $input or die "Cannot close MGS sample attrition $attrition: $!\n";
-			if (exists($metric{backbone_samples}) && exists($metric{placement_samples})) {
-				($backbone, $placement, $excluded, $source) = (
-					$metric{backbone_samples}, $metric{placement_samples},
-					$metric{excluded_samples} // 0, 'selection_attrition',
-				);
-			} elsif (exists($metric{final_samples})) {
-				($backbone, $placement, $excluded, $source) = (
-					$metric{final_samples}, 0, 0, 'selection_attrition.final_samples',
-				);
-			}
+	# Reuse measured legacy counts only when the completion marker is unchanged.
+	# New BuildTree markers already contain the counts; older ones otherwise
+	# require a full scan of every retained locus on each controller resume.
+	my %cached;
+	my $previous = "$LOGDIR/strainMGSSampleCounts.tsv";
+	if ($onlyMSA && -s $previous) {
+		my $input = retry_open('<', $previous, label => 'read previous MGS sample counts');
+		my $header = <$input> // '';
+		$header =~ s/[\r\n]+\z//;
+		my @columns = split /\t/, $header, -1;
+		while (my $line = <$input>) {
+			$line =~ s/[\r\n]+\z//;
+			my @values = split /\t/, $line, -1;
+			next unless @values == @columns;
+			my %row; @row{@columns} = @values;
+			next unless ($row{output_status} // '') eq 'msa_complete'
+				&& ($row{sample_count_stage} // '') eq 'localized_msa';
+			$cached{$row{MGS}} = \%row;
 		}
-		if (!defined($backbone) || !defined($placement)) {
-			my $classification = File::Spec->catfile(
-				$SIdirs{$mgs}, 'phylo', 'strict_backbone.samples.tsv');
-			if (-s $classification) {
-				open my $input, '<', $classification
-					or die "Cannot read MGS sample classification $classification: $!\n";
+		retry_close($input, 'close previous MGS sample counts');
+	}
+	my @records;
+	my %outcomes;
+	my $started = time;
+	my $nextProgress = time + 60;
+	for my $mgs (@specis) {
+		my $directory = $SIdirs{$mgs} // '';
+		my ($backbone, $placement, $excluded, $source, $msa, $included);
+		my ($stage, $outputStatus) = ('not_available', 'output_missing');
+		my $markerFingerprint;
+		my $treeStatus = $onlyMSA ? 'not_requested' : 'tree_missing';
+		if ($onlyMSA) {
+			my %counts;
+			if (msaOnlyArtifactsReady($directory, \%counts, $cached{$mgs})) {
+				$msa = $counts{msa_samples};
+				$markerFingerprint = $counts{completion_marker_sha256};
+				$included = $msa;
+				$source = 'msaOnly.complete.tsv/retained_MSA';
+				$stage = 'localized_msa';
+				$outputStatus = 'msa_complete';
+			}
+		} elsif (length($directory)) {
+			my $attrition = File::Spec->catfile(
+				$SIdirs{$mgs}, 'phylo', 'selection_attrition.tsv');
+			if (-s $attrition) {
+				open my $input, '<', $attrition
+					or die "Cannot read MGS sample attrition $attrition: $!\n";
 				my $header = <$input> // '';
 				$header =~ s/[\r\n]+\z//;
-				my @columns = split /\t/, $header, -1;
-				my %column = map { $columns[$_] => $_ } 0 .. $#columns;
-				if (exists($column{sample}) && exists($column{tree_role})) {
-					my (%seen, %roleCount);
+				my %metric;
+				if ($header eq "metric\tvalue") {
 					while (my $line = <$input>) {
 						$line =~ s/[\r\n]+\z//;
-						next unless length($line);
-						my @value = split /\t/, $line, -1;
-						my $sample = $value[$column{sample}] // '';
-						my $role = $value[$column{tree_role}] // '';
-						next unless length($sample) && !$seen{$sample}++;
-						$roleCount{$role}++ if $role =~ /\A(?:backbone|placement|excluded)\z/;
+						my ($name, $value) = split /\t/, $line, 2;
+						next unless defined($name) && defined($value)
+							&& $value =~ /\A\d+\z/;
+						$metric{$name} = 0 + $value;
 					}
+				}
+				close $input or die "Cannot close MGS sample attrition $attrition: $!\n";
+				if (exists($metric{backbone_samples}) && exists($metric{placement_samples})) {
 					($backbone, $placement, $excluded, $source) = (
-						$roleCount{backbone} // 0, $roleCount{placement} // 0,
-						$roleCount{excluded} // 0, 'strict_backbone.samples.tsv',
+						$metric{backbone_samples}, $metric{placement_samples},
+						$metric{excluded_samples}, 'selection_attrition',
+					);
+				} elsif (exists($metric{final_samples})) {
+					($backbone, $placement, $excluded, $source) = (
+						$metric{final_samples}, 0, undef, 'selection_attrition.final_samples',
 					);
 				}
-				close $input
-					or die "Cannot close MGS sample classification $classification: $!\n";
+			}
+			if (!defined($backbone) || !defined($placement)) {
+				my $classification = File::Spec->catfile(
+					$SIdirs{$mgs}, 'phylo', 'strict_backbone.samples.tsv');
+				if (-s $classification) {
+					open my $input, '<', $classification
+						or die "Cannot read MGS sample classification $classification: $!\n";
+					my $header = <$input> // '';
+					$header =~ s/[\r\n]+\z//;
+					my @columns = split /\t/, $header, -1;
+					my %column = map { $columns[$_] => $_ } 0 .. $#columns;
+					if (exists($column{sample}) && exists($column{tree_role})) {
+						my (%seen, %roleCount);
+						while (my $line = <$input>) {
+							$line =~ s/[\r\n]+\z//;
+							next unless length($line);
+							my @value = split /\t/, $line, -1;
+							my $sample = $value[$column{sample}] // '';
+							my $role = $value[$column{tree_role}] // '';
+							next unless length($sample) && !$seen{$sample}++;
+							$roleCount{$role}++ if $role =~ /\A(?:backbone|placement|excluded)\z/;
+						}
+						($backbone, $placement, $excluded, $source) = (
+							$roleCount{backbone} // 0, $roleCount{placement} // 0,
+							$roleCount{excluded} // 0, 'strict_backbone.samples.tsv',
+						);
+					}
+					close $input
+						or die "Cannot close MGS sample classification $classification: $!\n";
+				}
+			}
+			if (defined($backbone) && defined($placement)) {
+				$included = $backbone + $placement;
+				$stage = 'tree_input';
+			}
+			my $treeName = $phyloProg == 2 ? 'VERYFASTTREE_allsites.nwk'
+				: $phyloProg == 3 ? 'FASTTREE_allsites.nwk' : 'IQtree_allsites.treefile';
+			if (-s File::Spec->catfile($directory, 'phylo', $treeName)
+					&& -s File::Spec->catfile($directory, 'treeDone.sto')) {
+				$treeStatus = 'complete';
+				$outputStatus = 'tree_complete';
+			} elsif (-s File::Spec->catfile($directory, 'placementPending.sto')) {
+				$treeStatus = $outputStatus = 'placement_pending';
 			}
 		}
-		next unless defined($backbone) && defined($placement);
-		my $finalTree = File::Spec->catfile(
-			$SIdirs{$mgs}, 'phylo', 'IQtree_allsites.treefile');
-		my $treeStatus = -s $finalTree ? 'complete'
-			: -s File::Spec->catfile($SIdirs{$mgs}, 'placementPending.sto')
-				? 'placement_pending' : 'tree_missing';
+		if ($outputStatus eq 'output_missing' && length($directory)) {
+			for my $terminal (qw(tooFewSamples.sto noRecoverableLoci.sto noTree.sto)) {
+				next unless -s File::Spec->catfile($directory, $terminal);
+				$outputStatus = 'no_usable_output';
+				$source = $terminal;
+				$stage = 'terminal';
+				$included = 0;
+				if ($onlyMSA) { $msa = 0; }
+				else { ($backbone, $placement) = (0, 0); }
+				last;
+			}
+			if ($outputStatus eq 'output_missing' && exists($ConspecificMGS{$mgs})
+					&& $ConspecificMGS{$mgs}[0] =~ /multicopy/) {
+				$outputStatus = 'excluded_mgs';
+			}
+		}
+		$outcomes{$outputStatus}++;
 		push @records, {
 			mgs => $mgs, backbone => $backbone, placement => $placement,
-			excluded => $excluded // 0, included => $backbone + $placement,
-			source => $source, tree_status => $treeStatus,
+			excluded => $excluded, included => $included, msa => $msa,
+			tree => $backbone, source => $source, tree_status => $treeStatus,
+			stage => $stage, output_status => $outputStatus, marker_fingerprint => $markerFingerprint,
 		};
+		if (time >= $nextProgress) {
+			stepProgress('sample report collection', scalar(@records), scalar(@specis), $started);
+			$nextProgress = time + 60;
+		}
 	}
 
 	my $detailPath = "$LOGDIR/strainMGSSampleCounts.tsv";
 	my $detailTemporary = "$detailPath.write.$$";
 	my $detail = retry_open('>', $detailTemporary,
 		label => 'create per-MGS included-sample counts');
+	# Keep the existing columns in place, adding explicit mode/stage/outcome.
 	print {$detail} join("\t", qw(
 		MGS backbone_samples placement_samples included_samples excluded_samples
-		tree_status source
+		tree_status source msa_samples sample_count_stage output_status completion_marker_sha256
 	)), "\n" or die "Cannot write $detailTemporary: $!\n";
 	for my $record (sort { $a->{mgs} cmp $b->{mgs} } @records) {
-		print {$detail} join("\t", @{$record}{qw(
-			mgs backbone placement included excluded tree_status source
-		)}), "\n" or die "Cannot write $detailTemporary: $!\n";
+		print {$detail} join("\t", map { defined($_) ? $_ : 'NA' }
+			@{$record}{qw(mgs backbone placement included excluded tree_status source
+				msa stage output_status marker_fingerprint)}), "\n" or die "Cannot write $detailTemporary: $!\n";
 	}
 	retry_close($detail, 'close per-MGS included-sample counts');
 	retry_rename($detailTemporary, $detailPath,
@@ -7362,52 +7435,46 @@ sub writeMGSSampleHistograms {
 	my $histogramTemporary = "$histogramPath.write.$$";
 	my $histogram = retry_open('>', $histogramTemporary,
 		label => 'create across-MGS sample histogram');
-	print {$histogram} "role\tlower\tupper\tbin\tMGS_count\tfraction\n"
+	print {$histogram} "role\tlower\tupper\tbin\tMGS_count\tfraction\tcounted_MGS\tmissing_MGS\n"
 		or die "Cannot write $histogramTemporary: $!\n";
 	my %statistics;
-	for my $role (qw(backbone placement)) {
-		my @values = map { $_->{$role} } @records;
+	my @roles = $onlyMSA ? ('msa') : $strictBackbone ? qw(backbone placement) : ('tree');
+	for my $role (@roles) {
+		my @values = sort { $a <=> $b } grep { defined($_) && /^\d+\z/ }
+			map { $_->{$role} } @records;
 		my @counts = (0) x scalar(@bins);
 		for my $value (@values) {
 			for my $index (0 .. $#bins) {
 				my ($lower, $upper) = @{$bins[$index]};
-				next if $value < $lower;
-				next if defined($upper) && $value > $upper;
+				next if $value < $lower || (defined($upper) && $value > $upper);
 				$counts[$index]++;
 				last;
 			}
 		}
-		my $maximumBin = @counts ? (sort { $b <=> $a } @counts)[0] : 0;
-		print ucfirst($role), " samples per MGS (", scalar(@values), " MGS):\n";
+		my $missing = @records - @values;
 		for my $index (0 .. $#bins) {
 			my ($lower, $upper, $label) = @{$bins[$index]};
-			my $fraction = @values ? $counts[$index] / @values : 0;
+			my $fraction = @values ? sprintf('%.6f', $counts[$index] / @values) : 'NA';
 			print {$histogram} join("\t", $role, $lower,
 				defined($upper) ? $upper : '', $label, $counts[$index],
-				sprintf('%.6f', $fraction)), "\n"
+				$fraction, scalar(@values), $missing), "\n"
 				or die "Cannot write $histogramTemporary: $!\n";
-			next unless $counts[$index];
-			my $barWidth = $maximumBin
-				? int(30 * $counts[$index] / $maximumBin + 0.5) : 0;
-			$barWidth = 1 if !$barWidth;
-			printf "  %-10s %7d %6.2f%% %s\n", $label, $counts[$index],
-				100 * $fraction, '#' x $barWidth;
 		}
 		$statistics{$role} = {
-			minimum => @values ? (sort { $a <=> $b } @values)[0] : 0,
-			maximum => @values ? (sort { $b <=> $a } @values)[0] : 0,
-			median => @values ? median(@values) : 0,
-			mean => @values ? mean(@values) : 0,
+			count => scalar(@values), missing => $missing,
+			minimum => @values ? $values[0] : 'NA',
+			maximum => @values ? $values[-1] : 'NA',
+			median => @values ? medianArray(@values) : 'NA',
+			mean => @values ? sprintf('%.2f', mean(@values)) : 'NA',
 		};
 	}
 	retry_close($histogram, 'close across-MGS sample histogram');
 	retry_rename($histogramTemporary, $histogramPath,
 		label => 'publish across-MGS sample histogram');
-	print "Across-MGS sample histogram: $histogramPath\n";
-	print "Per-MGS sample counts: $detailPath\n";
 	return {
 		histogram => $histogramPath, details => $detailPath,
-		mgs_count => scalar(@records), statistics => \%statistics,
+		mgs_count => $statistics{$roles[0]}{count}, statistics => \%statistics,
+		roles => \@roles, outcomes => \%outcomes,
 	};
 }
 
@@ -7431,6 +7498,7 @@ sub writeStrainSummary {
 	my $legacyRecovery = "$outD/$recoveryLogName";
 	$recovery = $legacyRecovery if !-s $recovery && -s $legacyRecovery;
 	my ($evaluated, $recovered, $filtered, $gene_sum, $mosaic_loci) = (0, 0, 0, 0, 0);
+	my %selectedMGS = map { $_ => 1 } @specis;
 	my (@recovered_genes, %filter_reason, %recovered_status, %represented_samples, %represented_mgs);
 	if (-s $recovery) {
 		open my $fh, '<', $recovery or die "Cannot read $recovery: $!\n";
@@ -7439,6 +7507,7 @@ sub writeStrainSummary {
 			chomp $line;
 			next unless length $line;
 			my ($mgs, $sample, $outcome, $reason, $genes, $status, $ambiguous, $conspecific, $row_mosaic_loci) = split /\t/, $line, -1;
+			next unless $selectedMGS{$mgs}; # a subset resume can reuse a full-run ledger
 			$evaluated++;
 			$represented_samples{$sample} = 1;
 			$represented_mgs{$mgs} = 1;
@@ -7455,64 +7524,114 @@ sub writeStrainSummary {
 		}
 		close $fh or die "Cannot close $recovery: $!\n";
 	}
-	my $average = $recovered ? $gene_sum / $recovered : 0;
-	my $median_genes = @recovered_genes ? median(@recovered_genes) : 0;
+	my $average = $recovered ? sprintf('%.2f', $gene_sum / $recovered) : 'NA';
+	my $median_genes = @recovered_genes ? medianArray(@recovered_genes) : 'NA';
 	my @thresholds = (10, 50, 100, 200, 500, 1000, 2000);
 	my %above;
 	for my $threshold (@thresholds) { $above{$threshold} = scalar(grep { $_ > $threshold } @recovered_genes); }
-	my $selectionAttrition = writeSelectionAttritionSummary({
-		evaluated_sample_mgs => $evaluated,
-		recovered_mags => $recovered,
-		filtered_mags => $filtered,
-		recovered_loci => $gene_sum,
-		average_loci_per_recovered_mag => sprintf('%.6f', $average),
-		median_loci_per_recovered_mag => $median_genes,
-		recovered_mosaic_loci => $mosaic_loci,
-	}, \%filter_reason);
+	my %recoveryMetrics = (
+		evaluated_sample_mgs_pairs => $evaluated,
+		recovered_sample_mgs_pairs => $recovered,
+		filtered_sample_mgs_pairs => $filtered,
+		recovered_sample_loci => $gene_sum,
+		mean_loci_per_recovered_pair => $average,
+		median_loci_per_recovered_pair => $median_genes,
+		recovered_mosaic_sample_loci => $mosaic_loci,
+	);
+	$recoveryMetrics{"recovered_pairs.loci_gt_$_"} = $above{$_} for @thresholds;
+	$recoveryMetrics{"recovered_qc_status.$_"} = $recovered_status{$_} for keys %recovered_status;
+	$recoveryMetrics{$_} = 'NA' for grep { !-s $recovery } keys %recoveryMetrics;
+	my $selectionAttrition = writeSelectionAttritionSummary(\%recoveryMetrics, \%filter_reason, $tree_disposition);
 	my $geneLengthSampleSummary = writeGeneLengthSampleSummary();
 	my $sampleHistograms = writeMGSSampleHistograms();
+	my $number = sub {
+		my ($value) = @_;
+		$value = 'NA' unless defined($value);
+		$value =~ s/\B(?=(\d{3})+(?!\d))/,/g if $value =~ /^\d+\z/;
+		return $value;
+	};
 	my @lines = (
-		"Strain-within recovery summary (v$version)",
-		"output_directory\t$outD",
-		"recovery_accounting\t".(-s $recovery ? $recovery : 'not_available'),
-		"selection_attrition\t$selectionAttrition",
-		"gene_length_sample_audit\t$geneLengthSampleSummary",
-		"MGS_sample_counts\t$sampleHistograms->{details}",
-		"MGS_sample_histogram\t$sampleHistograms->{histogram}",
-		"MGS_with_sample_counts\t$sampleHistograms->{mgs_count}",
-		"input_samples\t".scalar(@samples),
-		"usable_samples\t".(scalar(@samples) - scalar(keys %unavailableSamples)),
-		"unavailable_samples\t".scalar(keys %unavailableSamples),
-		"selected_MGS\t".scalar(@specis),
-		"evaluated_sample_MGS\t$evaluated",
-		"recovered_MAGs\t$recovered",
-		"filtered_MAGs\t$filtered",
-		sprintf("average_genes_per_recovered_MAG\t%.2f", $average),
-		"median_genes_per_recovered_MAG\t$median_genes",
-		"recovered_mosaic_loci\t$mosaic_loci",
-		"mosaic_outgroups_used\t".scalar(keys %used_mosaic_outgroup),
-		"samples_with_evaluated_MAGs\t".scalar(keys %represented_samples),
-		"MGS_with_evaluated_samples\t".scalar(keys %represented_mgs),
+		"Strain-within summary (v$version; ".($onlyMSA ? 'MSA only' : 'phylogeny').")",
+		"  Unit: one sample-MGS pair = consensus loci from one metagenomic sample assigned to one MGS; not an assembled MAG/bin.",
+		"  Scope: ".$number->(scalar(@samples))." input samples; ".$number->(scalar(@specis))." selected MGS.",
 	);
-	for my $role (qw(backbone placement)) {
-		my $stats = $sampleHistograms->{statistics}{$role};
-		push @lines,
-			"${role}_samples_per_MGS.minimum\t$stats->{minimum}",
-			"${role}_samples_per_MGS.median\t$stats->{median}",
-			sprintf("${role}_samples_per_MGS.mean\t%.2f", $stats->{mean}),
-			"${role}_samples_per_MGS.maximum\t$stats->{maximum}";
+	if ($phase1SampleSummary) {
+		my $processed = $phase1SampleSummary->{processed_samples} // 0;
+		my $logged = $phase1SampleSummary->{samples} // 0;
+		push @lines, "  Sample processing (saved Phase I run): ".$number->($processed)
+			." processed; ".$number->($logged - $processed)." skipped/unavailable; "
+			.$number->($logged)." logged.";
 	}
-	push @lines, map { "recovered_MAGs.genes_gt_$_\t$above{$_}" } @thresholds;
-	push @lines, map { "recovered_status.$_\t$recovered_status{$_}" } sort keys %recovered_status;
-	push @lines, map { "filtered_reason.$_\t$filter_reason{$_}" } sort keys %filter_reason;
-	push @lines, map { "tree_disposition.$_\t$tree_disposition->{$_}" } sort keys %{$tree_disposition};
+	if (-s $recovery) {
+		push @lines, "  Extraction: ".$number->($recovered)." recovered + "
+			.$number->($filtered)." filtered = ".$number->($evaluated)." evaluated pairs ("
+			.$number->(scalar(keys %represented_samples))." samples, "
+			.$number->(scalar(keys %represented_mgs))." MGS).",
+			"  Loci per recovered pair, before alignment filters: median $median_genes; mean $average.",
+			"  Recovered pairs with >N loci (cumulative): "
+				.join('; ', map { ">$_: ".$number->($above{$_}) } @thresholds).".";
+		push @lines, "  Extraction QC labels: ".join('; ', map {
+			my $label = $_; $label =~ tr/_/ /;
+			"$label ".$number->($recovered_status{$_})
+		} sort keys %recovered_status).". Later sample/sequence filters still apply."
+			if %recovered_status;
+		my %reasonLabel = (
+			no_selected_loci => 'no selected loci', no_usable_loci => 'no usable loci',
+			too_few_after_abundance => 'below locus minimum after abundance filtering',
+			too_few_valid_sequences => 'below locus minimum after sequence validation',
+		);
+		push @lines, "  Extraction losses: ".join('; ', map {
+			($reasonLabel{$_} // $_).' '.$number->($filter_reason{$_})
+		} sort { $filter_reason{$b} <=> $filter_reason{$a} || $a cmp $b } keys %filter_reason)."."
+			if %filter_reason;
+		push @lines, "  Mosaic recovery: ".$number->($mosaic_loci)
+			." sample-locus observations; ".$number->(scalar(keys %used_mosaic_outgroup))
+			." MGS with a mosaic-derived outgroup in prepared inputs."
+			if $mosaic_loci || %used_mosaic_outgroup;
+	} else {
+		push @lines, '  Extraction statistics: unavailable (recovery ledger missing).';
+	}
+	my %outcomeLabel = (
+		msa_complete => 'MSA complete', tree_complete => 'tree complete',
+		no_usable_output => 'insufficient data', output_missing => 'missing/incomplete output',
+		placement_pending => 'placement pending', excluded_mgs => 'excluded MGS',
+	);
+	my $outcomes = $sampleHistograms->{outcomes};
+	push @lines, '  MGS outputs: '.join('; ', map {
+		$outcomeLabel{$_}.' '.$number->($outcomes->{$_})
+	} sort keys %{$outcomes}).'.';
+	my %roleLabel = (msa => 'Samples in retained locus MSAs (ingroup)',
+		tree => 'Samples selected for tree inference', backbone => 'Backbone input samples',
+		placement => 'Samples selected for placement');
+	for my $role (@{$sampleHistograms->{roles}}) {
+		my $stats = $sampleHistograms->{statistics}{$role};
+		push @lines, "  $roleLabel{$role} per MGS: median $stats->{median}; mean $stats->{mean}; "
+			."range $stats->{minimum}-$stats->{maximum}; "
+			."$stats->{count}/".scalar(@specis)." MGS counted, $stats->{missing} unavailable.";
+	}
+	push @lines, '  Counts include terminal MGS as zero; unavailable counts are NA. See sample_count_stage and output_status in the per-MGS table.';
+	push @lines, '  MSA counts precede combined-alignment filters; tree inference and placement were not requested.' if $onlyMSA;
+	push @lines, '  Scheduler submission disabled: generated commands do not establish completed outputs.' unless $doSubmit;
 	my $summary = "$LOGDIR/$summaryLogName";
+	my @reports = (
+		['Recovery ledger', -s $recovery ? $recovery : 'not_available'],
+		['Extraction samples', "$LOGDIR/$sampleStatsLogName"],
+		['Extraction worker totals', "$LOGDIR/$sampleStatsSummaryLogName"],
+		['Filter totals', $selectionAttrition],
+		['Gene-length sample audit', $geneLengthSampleSummary],
+		['MGS sample counts', $sampleHistograms->{details}],
+		['MGS sample histogram', $sampleHistograms->{histogram}],
+		['Job outcomes', "$LOGDIR/tree_job_outcomes.tsv"],
+		['Input resolution', "$LOGDIR/tree_input_resolution.tsv"],
+	);
 	my $temporary = "$summary.write.$$";
 	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
-	print {$out} join("\n", @lines), "\n" or die "Cannot write $temporary: $!\n";
+	print {$out} join("\n", @lines), "\n\nReports:\n",
+		join("\n", map { "  $_->[0]: $_->[1]" } @reports), "\n"
+		or die "Cannot write $temporary: $!\n";
 	close $out or die "Cannot close $temporary: $!\n";
 	rename $temporary, $summary or die "Cannot install $summary: $!\n";
-	print "\n", join("\n", @lines), "\nStatistics log\t$summary\n";
+	print "\n", join("\n", @lines), "\n  Summary and report paths: $summary\n";
 }
 
 sub printEarlyRunHeader {
@@ -7525,7 +7644,7 @@ sub printEarlyRunHeader {
 	select($selected);
 	print "============= Strain_within v$version =============\n";
 	print "Started: ".scalar(localtime())."\n";
-	print "Mode: $earlyMode".($subJob ? "; split worker $subJob/$maxSubJob" : '')."\n";
+	print "Mode: $earlyMode; output=".($onlyMSA ? 'localized MSA only' : 'phylogeny').($subJob ? "; split worker $subJob/$maxSubJob" : '')."\n";
 	print "GC dir: $GCd\n";
 	print "MGS input: ".(length($MGSfile) ? $MGSfile : '(FMG mode)')."\n";
 	print "Requested output: $requestedOutput\n";
@@ -7541,12 +7660,12 @@ sub printEarlyRunHeader {
 	# an operator reading the log could otherwise not tell whether retained-MSA
 	# recovery was going to run at all.
 	print "Per-locus MSAs: rmMSA=$rmMSA; popGenStats=$doPopGenStats; "
-		.($rmMSA
+		.($onlyMSA ? "retained for MSA-only output" : $rmMSA
 			? "discarded after each tree; population genetics unavailable"
 			: "retained; MGS whose completed tree has no retained locus MSAs are "
 				."queued as retained-MSA recovery jobs that keep the phylogeny")."\n";
-	print "Tree OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB; "
-		."per-thread memory scaling=cores/$treeMemThreadDivisor\n";
+	print(($onlyMSA ? "MSA" : "Tree")." OOM recovery: rounds=$treeOOMRetryRounds; maximum memory=${treeOOMMaxMemGB}GB; "
+		."per-thread memory scaling=cores/$treeMemThreadDivisor\n");
 	print "OOM rescan: every $oomScanMinutes min while jobs are still running; at "
 		."least $oomMinRetries escalation(s) per OOM job\n";
 	print "Submission priority: ordinary jobs at --nice=$jobNice, OOM retries at "
@@ -7738,7 +7857,6 @@ sub writeTreeFailureAudit {
 	}
 	retry_close($output, 'close tree-job outcome audit');
 	retry_rename($temporary, $path, label => 'publish tree-job outcome audit');
-	print "Tree-job outcome audit: $path\n";
 	return (\@failed, \@pending, \@terminal);
 }
 sub dispatchPendingTreeJobs {
@@ -7915,10 +8033,9 @@ sub retryOOMTreeJobs {
 		my @candidates = grep { !$handledJob{$_->{job_id}} } @{$accounting};
 		my $oomPlan = slurm_oom_retry_plan(\@candidates, $maximumMB);
 		$summary = $oomPlan->{summary};
-		print "\nTree OOM scan $scan: ".scalar(@pendingJobs)." job(s) with the "
+		print "\n".($onlyMSA ? "MSA" : "Tree")." OOM scan $scan: ".scalar(@pendingJobs)." job(s) with the "
 			."scheduler, ".scalar(@{$pendingQueue})." awaiting capacity; "
 			.scalar(@candidates)." outcome(s) inspected.\n";
-		print format_slurm_tree_memory_summary($summary);
 		my @oom = $summary->{available}
 			? map { $oomPlan->{by_job_id}{$_} }
 				sort { $a <=> $b } keys %{$oomPlan->{by_job_id}}
@@ -7999,9 +8116,12 @@ sub retryOOMTreeJobs {
 		}
 		last unless @pendingJobs || @{$pendingQueue};
 	}
-	print "Tree OOM recovery complete: $retried escalated retry job(s) across "
+	my $memoryReport = format_slurm_tree_memory_summary($summary);
+	$memoryReport =~ s/SLURM tree/SLURM MSA/ if $onlyMSA;
+	print $memoryReport;
+	print(($onlyMSA ? "MSA" : "Tree")." OOM recovery complete: $retried escalated retry job(s) across "
 		.scalar(keys %retriesByMGS)." MGS in $scan accounting scan(s); "
-		."budget was $maximumRounds round(s) per MGS.\n";
+		."budget was $maximumRounds round(s) per MGS.\n");
 	if ($summary->{available} && @{$summary->{oom_jobs} || []}) {
 		warn "Tree OOM recovery ended with ".scalar(@{$summary->{oom_jobs}})
 			." OOM outcome(s) it could not escalate further; they stay quarantined "
@@ -8276,7 +8396,7 @@ sub extractFNAFAA2genes{
 		? "$LOGDIR/$recoveryLogName.$subJob"
 		: "$LOGDIR/$recoveryLogName.0";
 	open $recoveryLogFH, '>', $recovery_part
-		or die "Cannot create MAG recovery log $recovery_part: $!\n";
+		or die "Cannot create Sample-MGS recovery log $recovery_part: $!\n";
 	print {$recoveryLogFH} join("\t", qw(
 		MGS sample outcome reason retained_genes qc_status
 		ambiguous_failure conspecific_failure recovered_mosaic_loci
@@ -8400,7 +8520,7 @@ sub extractFNAFAA2genes{
 	
 	
 	appendWriteMGSgenes($writeLink);
-	close $recoveryLogFH or die "Cannot close MAG recovery log $recovery_part: $!\n";
+	close $recoveryLogFH or die "Cannot close Sample-MGS recovery log $recovery_part: $!\n";
 	undef $recoveryLogFH;
 	print "Done writing all genes to subdirs, elapsed time: " . timeNice(time - $sttime)  . "\n";
 	$appCnt=0;
@@ -8972,7 +9092,7 @@ sub readGenesSample_Singl{
 		remove_tree($locSpace) if -d $locSpace;
 
 		my @genesPmgs = sort { $a <=> $b } values %locMGSgenes;
-		histoMGS(\@genesPmgs,"Detected Bin Genes");
+		histoMGS(\@genesPmgs,"Recovered loci per sample-MGS pair");
 		my $unaccountedMGS = $MGScnt - $SInum - $MGStoolowGskip;
 		limitedWarn(q{unaccounted per-sample MGS},
 			"$sd3 has $unaccountedMGS candidate MGS without a terminal outcome\n")
@@ -8987,7 +9107,7 @@ sub readGenesSample_Singl{
 		$sampleStats->{capped_loci} = $cappedLoci;
 		$sampleStats->{skipped_within_2_loci_of_min} = $nearThresholdMGS;
 		$sampleStats->{retained_loci} = $foundGene;
-		$sampleStats->{median_loci_per_used_mgs} = @genesPmgs ? median(@genesPmgs) : 0;
+		$sampleStats->{median_loci_per_used_mgs} = @genesPmgs ? medianArray(@genesPmgs) : 0;
 		$sampleStats->{mean_loci_per_used_mgs} = @genesPmgs ? sprintf(q{%.3f}, mean(@genesPmgs)) : 0;
 		$sampleStats->{used_mgs_loci_histogram} = encode_loci_histogram(
 			\@genesPmgs, $MGStoolowGsThr

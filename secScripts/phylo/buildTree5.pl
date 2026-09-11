@@ -107,6 +107,7 @@
 #5.92: name the policy fields that changed whenever a mismatch discards work
 use warnings;
 use strict;
+use Mods::StrainSampleStats qw(count_msa_samples);
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::FlagReference qw(printFlagHelp helpRequested resolvePairedOptionDefault);
@@ -1248,7 +1249,8 @@ my %selectionAttrition = map { $_ => 'NA' } qw(
 	length_recovered_msa_sequences gene_length_min_dropped_loci
 	gene_length_include_min_dropped_loci gene_length_recovery_candidate_loci
 	gene_length_recovered_msa_loci eligible_loci candidate_loci candidate_samples
-	aligned_loci alignment_failed_loci post_qc_loci final_loci final_samples
+	aligned_loci alignment_failed_loci msa_samples msa_outgroup_samples
+	post_qc_loci final_loci final_samples
 	concatenation_excluded_samples backbone_samples placement_samples excluded_samples
 );
 #A run that never reaches the coverage filter removed nothing through it, which
@@ -2346,9 +2348,19 @@ if ($onlyMSA || $locusMSARecovery) {
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
 	clearLifecycleMarker($placementPendingMarker,
 		'clear obsolete placement-pending marker');
+	# Prefer the still-local primary alignments to avoid decompressing every
+	# published checkpoint again in a fresh run.
+	my $sampleAlignments = $cogCats eq '' ? $artifacts
+		: $useAA4tree ? \@MSA_AA : \@MSAs;
+	my $sampleCounts = count_msa_samples($sampleAlignments, $outgroup);
+	if ($onlyMSA) {
+		@selectionAttrition{keys %{$sampleCounts}} = values %{$sampleCounts};
+		writeSelectionAttritionAudit($selectionAttritionReport, \%selectionAttrition, 0);
+	}
 	writeOutcomeMarker($msaOnlyCompletionMarker, 'msa_complete',
 		'localized per-locus alignments completed; combined-MSA postprocessing, concatenation, and phylogeny intentionally skipped',
-		{ alignment_directory => $MsaD, artifacts => scalar(@{$artifacts}) }, $outD);
+		{ alignment_directory => $MsaD, artifacts => scalar(@{$artifacts}),
+			%{$sampleCounts} }, $outD);
 	writeBuildTreeState();
 	cleanupLegacyBuildTreeStateFiles();
 	writeWorkflowHeartbeat('complete');
@@ -6487,7 +6499,8 @@ sub selectTaxonAwareFinalLoci {
 }
 
 sub writeSelectionAttritionAudit {
-	my ($path, $stats) = @_;
+	my ($path, $stats, $preservePrevious) = @_;
+	$preservePrevious = 1 unless defined($preservePrevious);
 	die "Selection attrition statistics must be a hash reference\n"
 		unless ref($stats) eq 'HASH';
 	my @order = qw(
@@ -6499,11 +6512,12 @@ sub writeSelectionAttritionAudit {
 		length_recovered_msa_sequences gene_length_min_dropped_loci
 		gene_length_include_min_dropped_loci gene_length_recovery_candidate_loci
 		gene_length_recovered_msa_loci eligible_loci candidate_loci candidate_samples
-		aligned_loci alignment_failed_loci post_qc_loci final_loci final_samples
+		aligned_loci alignment_failed_loci msa_samples msa_outgroup_samples
+		post_qc_loci final_loci final_samples
 		concatenation_excluded_samples backbone_samples placement_samples excluded_samples
 	);
 	my %previous;
-	if (-s $path) {
+	if ($preservePrevious && -s $path) {
 		open my $existing, '<', $path
 			or die "Cannot read existing selection attrition audit $path: $!\n";
 		my $header = <$existing> // '';
