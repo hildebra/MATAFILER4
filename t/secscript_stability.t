@@ -331,7 +331,7 @@ ok(-e "$abr_blast.stone", 'ABR completion marker is written after successful out
 
 my $mgs = read_file(File::Spec->catfile($root, 'secScripts', 'MGS.pl'));
 like($mgs, qr/Select exactly one quality checker/, 'MGS rejects ambiguous CheckM/CheckM2 configuration');
-like($mgs, qr/runCheckM\(\$binCanDir,\$ChkMevalF/, 'MGS supports CheckM1 for canopy quality checks');
+like($mgs, qr/runCheckM\(\$binCanDir,\s*\$ChkMevalF/, 'MGS supports CheckM1 for canopy quality checks');
 like($mgs, qr/my \$finalClustersFilt = \$finalClusters2\."\.core"/,
      'MGS proceeds directly with the filtered core-cluster guide');
 like($mgs,

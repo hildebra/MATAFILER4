@@ -12,7 +12,7 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 | Script | Version in referenced source | Role |
 |---|---:|---|
 | `MATAF4.pl` | `4.46` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
-| `geneCat.pl` | `0.58` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
+| `geneCat.pl` | `0.59` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
 | `strain_within.pl` | `1.60` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
 | `strain_within_2.2.pl` | `0.50` | Within-MGS tree postprocessing, strain statistics and optional population-genetic analysis. |
@@ -255,7 +255,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-DiaFrameshift` | integer | `0` | stable | diamond -F frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment |
 | `-rmRawDiamondHits` | integer | `0` | stable | Delete raw DIAMOND hits after successful parsing. |
 | `-DiaMinAlignLen` | integer | `20` | stable | Minimum accepted DIAMOND alignment length. |
-| `-DiaMinFracQueryCov` | float | `0.1` | stable | Minimum accepted fraction of the query aligned. |
+| `-DiaMinFracQueryCov` | float | `0.1` | stable | Subject-coverage fraction threshold (legacy query-named flag). |
 | `-DiaPercID` | integer | `40` | stable | Minimum accepted DIAMOND percent identity. |
 | `-DiaDBs` | string | `""` | stable | Comma-separated functional databases: NOG,MOH,MOH2,ABR,ABRc,ACL,KGM,KGB,KGE,CZy,PTV,PAB,URE,URacc,AMI. See the [profiling tutorial](profiling_tutorial.md) for the config key each one needs. |
 
@@ -325,6 +325,8 @@ Removed with no replacement: `-useTrimomatic` (superseded by `-filterAdapters`),
 
 ## geneCat.pl
 
+Gene clustering uses the single-step workflow for complete and incomplete genes. The former `-1stepClust` switch and multi-step implementation have been removed; omit that switch from existing commands. Marker genes still use their marker-specific clustering thresholds before being added to the catalogue.
+
 Gene-catalog construction and downstream gene-catalog annotation/MGS orchestration.
 
 ### Directories/files
@@ -369,7 +371,6 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-1stepClust` | integer | `1` | stable | cluster incomplete genes separate? |
 | `-submitLocal` | integer | `1` | stable | pretty important run mode switch, to submit jobs while geneCat is runnning single core |
 | `-submSystem` | string | `""` | stable | qsub,SGE,bsub,LSF..; empty autodetects |
 | `-continue`, `-justCDhit` | integer | `1` | stable | flow control, 1: continue with found files 0: delete existing (partial) gene cat, start again |
@@ -384,7 +385,7 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-calcSupplCovSmpls` | integer | `1` | stable | if suppl reads were mapped, report gene abundances in these as separate samples (columns?) |
+| `-calcSupplCovSmpls` | integer | `1` | stable | Report gene abundances from supplementary sequencing inputs as separate sample columns. |
 | `-oldStyleFolders` | integer | `-1` | deprecated/legacy | deprecated. only used for results calculated with an older MATAFILER version |
 | `-requireAllAssemblies` | integer | `1` | advanced/internal | normally not exposed, continues even if some assemblies not present.. |
 | `-sampleBatches` | integer | `-1` | stable | how many batches to use for initial accumulation of genes? (200-500 samples per batch recommended) |
@@ -446,14 +447,12 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-canopies` | string |  | stable | location of canopy clustering output file (clusters.txt) |
 | `-smallCores` | integer | `4` | stable | cores used for normal jobs (not intensive) |
 | `-bottleneckCores` | integer | `12` | stable | cores for compute intensive jobs |
-| `-redoCluster` | integer | `0` | stable | delete and redo the clusterMAGs dereplication |
-| `-redoTax` | integer | `0` | stable | rewrite tax annotations |
 | `-MGset` | string | `GTDB` | stable | marker genes used for MAG merging/abundance: `GTDB` or `FMG` |
 | `-wait4stone` | string |  | stable | wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later |
 | `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; `0` waits indefinitely |
 | `-mem` | integer | `150` | stable | memory used for intensive jobs |
 | `-strains` | integer | `0` | stable | 1: calc instra species strain phylogenies. Default: 0 |
-| `-redo` | string | `none` | stable | strain-workflow redo mode forwarded downstream: `none`, `tree`, `input` or `all` |
+| `-redo` | string | `none` | stable | `none` resumes; `cluster` rebuilds clusters, Canopy and dependent products; `tax` rebuilds taxonomy/abundance; `tree`/`input` rebuild the enabled strain workflow at that stage; `all` rebuilds all enabled stages |
 | `-prepareMosaicLoci` | integer | `1` | stable | 1: confirm Mosaic loci/outgroups before strain analysis; 0: keep same-NOG seed clusters separate |
 | `-SNPcaller` | string | `MPI` | stable | consensus caller whose inputs are forwarded to `strain_within.pl`: `MPI` or `FB` |
 | `-useCheckM2` | integer | `0` | stable | CheckM2 default qual checking of MAGs/MGS |
@@ -463,6 +462,19 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-legacy` | integer | `0` | deprecated/legacy | pre-Dec-2022 clustering; needs `-MGset FMG`. No longer supported |
 | `-perlClusterMAGs` | flag | off | advanced/internal | use the Perl clusterMAGs path instead of the clusterMAGs binary (compatibility/debug) |
 | `-genomesPerFamily` | integer | `0` | advanced | extract bins per family (or per assembly group/sample when the family is missing) |
+
+Use one `-redo X` selection for MGS rebuilding. The former `-redoCluster` and `-redoTax` options have been removed.
+
+| Value | Rebuild scope |
+|---|---|
+| `none` | Resume existing work (default). |
+| `cluster` | Rebuild MGS clustering and its dependent products; rebuild Canopy filtering and QC when Canopies are enabled. |
+| `tax` | Rebuild GTDB/Kraken taxonomy and the dependent abundance annotations. |
+| `tree` | Forward a tree rebuild to the optional strain workflow (`-strains 1`). |
+| `input` | Forward an input rebuild to the optional strain workflow (`-strains 1`). |
+| `all` | Rebuild clustering, Canopy preparation, taxonomy/abundance, and the enabled strain workflow. |
+
+On an ordinary resume, MGS reuses an available between-MGS tree for outgroup finding, including a preliminary lower-resolution tree. The final phylogeny can take weeks to finish; reuse does not require final IQ-TREE completion. A clustering rebuild still invalidates the old tree along with the other products derived from those clusters.
 
 ## strain_within.pl
 

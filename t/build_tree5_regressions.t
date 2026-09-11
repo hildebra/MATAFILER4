@@ -513,7 +513,7 @@ like($script_text,
 	qr/"epaOnly=i" => \\\$epaOnly.*?if \(\$epaOnly\).*?runEpaOnlyPlacement\(.*?exit\(0\)/s,
 	'EPA-only mode exits through its dedicated placement path before ordinary MSA and inference work');
 like($script_text,
-	qr/sub runEpaOnlyPlacement.*?requires a validated IQ-TREE backbone.*?map_epa_placements_to_backbone\(.*?write_epa_placed_tree\(\$backboneTreeText, \$primaryTree.*?backbone retained=\$backboneTree/s,
+	qr/sub runEpaOnlyPlacement.*?requires a validated IQ-TREE backbone.*?publishEpaPlacement\(.*?backbone retained=\$backboneTree/s,
 	'EPA-only mode maps jplace edges and grafts placements onto the retained backbone');
 like($script_text,
 	qr/if \(\$subsetSmpls >0\).*?if \(\$redoEPAfilter\).*?runRedoEpaFilter\(.*?exit\(0\).*?warn "MSAprobs.*?prepGenoDirs/s,
@@ -524,7 +524,7 @@ my ($redo_epa_body) = $script_text =~
 	/(sub runRedoEpaFilter .*?)(?=sub readEpaFilterBackboneTree)/s;
 ok(defined($redo_epa_body), 'focused forced-EPA publication helper is available');
 like($redo_epa_body,
-	qr/readStrictBackboneClassification.*?read_epa_jplace.*?map_epa_placements_to_backbone.*?filter_epa_placement_outliers.*?write_epa_placed_tree.*?writeCompletionMarker/s,
+	qr/readStrictBackboneClassification.*?read_epa_jplace.*?publishEpaPlacement.*?writeCompletionMarker/s,
 	'forced EPA filtering reads only retained publication artifacts and republishes lifecycle state');
 unlike($redo_epa_body, qr/runEpaNgPlacement|prepGenoDirs|mergeMSAs|treeAtHeart/,
 	'forced EPA filtering cannot start EPA-ng, alignment, or tree inference');
@@ -716,12 +716,12 @@ like($script_text,
 	qr/unless \(keys %metrics\).*?terminal_reason => 'taxon_aware_no_category_with_three_usable_samples'/s,
 	'a taxon-aware candidate set with fewer than three usable samples returns a stable terminal reason');
 my $placement_outlier_calls = () = $script_text =~ /filter_epa_placement_outliers\(/g;
-cmp_ok($placement_outlier_calls, '>=', 3,
-	'fresh, EPA-only, and forced-redo publication apply pendant-branch outlier QC');
+is($placement_outlier_calls, 1,
+	'all publication paths share one pendant-branch outlier QC implementation');
 my $backbone_mapping_calls =
 	() = $script_text =~ /map_epa_placements_to_backbone\(/g;
-cmp_ok($backbone_mapping_calls, '>=', 3,
-	'normal, EPA-only, and forced-redo publication map jplace edges onto the backbone');
+is($backbone_mapping_calls, 1,
+	'all publication paths share one backbone mapping implementation');
 like($script_text, qr/strict_backbone\.epa_backbone_grafts\.tsv/,
 	'EPA backbone grafting publishes a per-edge mapping report');
 unlike($script_text, qr/write_epa_placed_tree\(\$epaResult->\{tree\}/,

@@ -1,74 +1,59 @@
 #!/usr/bin/perl
-#perl kmer_Ngenes.pl /g/scb/bork/hildebra/SNP/Drama1/AssmblGrp_16020939/metag/ContigStats/scaff.pergene.4kmer.gz 5
-#this script takes existing kmer stats per gene and calculates over a window of X genes the average kmer stats
-
-use Mods::GenoMetaAss qw(gzipopen);
+# Average each gene's k-mer features over +/- radius neighbouring genes.
+# Contig boundaries truncate the window; every input gene is emitted once.
+use strict;
+use warnings;
+use Mods::GenoMetaAss qw(gzipopen gzipwrite);
 use Mods::math qw(avgArray roundAr);
 
-use warnings;
-use strict;
-
-my $inK = $ARGV[0];
-my $numG = $ARGV[1];
-
-my $outF = $inK;
-$outF =~ s/4kmer\.gz/4kmer\.pm$numG\.gz/;
-system "rm -f $outF";
-open O,"| gzip -c > $outF" or die "Can't open $outF\n";
-my ($I,$ok) = gzipopen($inK,"K-mer per gene");
-die "can't open input kmer\n" if (!$ok);
-my $cctg= "";
-my @roll=();;my @roGenes=();;
-while (my $line = <$I>){
+my ($inK, $radius) = @ARGV;
+die "Usage: $0 input.4kmer.gz radius (nonnegative integer)\n"
+	unless defined($inK) && defined($radius) && $radius =~ /^\d+$/;
+(my $outF = $inK) =~ s/4kmer\.gz$/4kmer.pm$radius.gz/
+	or die "Input filename must end in 4kmer.gz\n";
+my ($input, $ok) = gzipopen($inK, "K-mer per gene", 1);
+my ($output) = gzipwrite($outF, "averaged gene k-mers");
+my (@rows, @genes);
+my $next = 0;
+my $contig = "";
+while (my $line = <$input>) {
 	chomp $line;
-	my @spl = split /\t/,$line;
-	my $gne = shift(@spl);
-	if ($gne eq "Contig"){
-		print O $line."\n";
+	next if $line eq "";
+	my ($gene, @features) = split /\t/, $line;
+	if ($gene eq "Contig") {
+		print {$output} "$line\n";
 		next;
 	}
-	unless ($gne =~ m/(^.*)_\d+$/){
-		die "can't find contig info $gne\n";
+	my ($current) = $gene =~ /^(.*)_\d+$/;
+	die "Cannot find contig info for $gene\n" unless defined $current;
+	if ($current ne $contig) {
+		emit_ready(1);
+		@rows = (); @genes = (); $next = 0;
+		$contig = $current;
 	}
-	my $ctg = $1;
-	if ($cctg ne $ctg){
-		$cctg = $ctg;
-		#release old stats
-		my $rSize = scalar @roll;
-		while ($rSize){ #roll back from the front
-			my $aar = avgArray(\@roll); $aar = roundAr($aar,2); my @aa = @{$aar};
-			my $idx = $rSize - $numG; $idx=0 if ($idx < 0);
-			print O $roGenes[$idx]."\t".join("\t",@aa)."\n";
-			shift @roll; shift @roGenes;
-			$rSize = scalar @roll;
+	push @rows, \@features;
+	push @genes, $gene;
+	emit_ready(0);
+}
+emit_ready(1);
+close $input or die "Cannot close $inK: $!\n";
+close $output or die "Cannot close $outF: $!\n";
+
+sub emit_ready {
+	my ($flush) = @_;
+	while ($next < @rows && ($flush || $next + $radius < @rows)) {
+		my $first = $next > $radius ? $next - $radius : 0;
+		my $last = $next + $radius;
+		$last = $#rows if $last > $#rows;
+		my $mean = roundAr(avgArray([@rows[$first .. $last]]), 2);
+		print {$output} join("\t", $genes[$next], @$mean), "\n";
+		$next++;
+		# Retain only the left context needed by the next output gene.
+		my $discard = $next - $radius;
+		if ($discard > 0) {
+			splice @rows, 0, $discard;
+			splice @genes, 0, $discard;
+			$next -= $discard;
 		}
 	}
-	#print "$ctg\n";
-	push(@roll,\@spl);
-	push (@roGenes,$gne);
-	my $rSize = scalar @roll;
-	if ($rSize >= $numG){
-		my $aar = avgArray(\@roll);  $aar = roundAr($aar,2);my @aa = @{$aar};
-		print O $roGenes[$rSize - $numG]."\t".join("\t",@aa)."\n";
-		#and check if it needs prunning..
-		if ($rSize > $numG*2){
-			shift @roll; shift @roGenes;
-		}
-	}
-	
 }
-
-close $I;
-my $rSize = scalar @roll;
-while ($rSize){ #roll back from the front
-	my $aar = avgArray(\@roll);  $aar = roundAr($aar,2); my @aa = @{$aar};
-	my $idx = $rSize - $numG; $idx=0 if ($idx < 0);
-	print O $roGenes[$idx]."\t".join("\t",@aa)."\n";
-	shift @roll; shift @roGenes;
-	$rSize = scalar @roll;
-}
-
-
-close O;
-
-#system "rm-f $outF.gz;gzip $outF;rm -f $outF";

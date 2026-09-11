@@ -1,0 +1,124 @@
+{
+  "wrong_subject_length": {
+    "actual": {
+      "cnt": "B\t1",
+      "GLN": "B\t0.5"
+    },
+    "expected_GLN": "B\t0.5",
+    "actual_with_subject_fraction_0_4": {
+      "cnt": "B\t1",
+      "GLN": "B\t0.5"
+    },
+    "expected_with_subject_fraction_0_4": "B retained (50 / 100 > 0.4)"
+  },
+  "mate_2_only": {
+    "mate_1_only": {
+      "cnt": "B\t1",
+      "GLN": "B\t0.5"
+    },
+    "mate_2_only": {
+      "cnt": "B\t1",
+      "GLN": "B\t0.5"
+    },
+    "expected": "Both orientations retain B with cnt=1 and GLN=0.5"
+  },
+  "unsuffixed_single_read": {
+    "actual": {
+      "cnt": "B\t1",
+      "GLN": "B\t0.5"
+    },
+    "expected_cnt": "B\t1 for a single-end read (no merged mate)"
+  },
+  "contained_pair_overlap": {
+    "actual": {
+      "length": 200,
+      "bitscore": 200
+    },
+    "expected_length": 200,
+    "correct_overlap": 51
+  },
+  "bam_filter_log_contract": {
+    "actual": {
+      "OverallAlignment": 50,
+      "ReadsPaired": 2,
+      "SingleUniqAlign": "",
+      "DisconcAlign": "",
+      "SingleMultiAlign": "",
+      "AlignedReads": 1,
+      "MultAlign": "",
+      "UniqueAlgned": ""
+    },
+    "expected": {
+      "AlignedReads": 1,
+      "OverallAlignment": 50
+    }
+  },
+  "empty_ribo_profile": {
+    "exit_code": 0,
+    "stderr": "",
+    "expected": "Successful table with populated=1 and empty=0"
+  },
+  "header_only_ribo_profile": {
+    "exit_code": 0,
+    "actual": "domain\tempty\tpopulated\nBacteria\t0\t1",
+    "expected": "Empty sample retained as an explicit zero column"
+  },
+  "rolling_gene_windows": {
+    "actual": [
+      "Contig\tAAAA",
+      "ctg_1\t3.5",
+      "ctg_2\t4",
+      "ctg_3\t4.5",
+      "ctg_4\t4.5",
+      "ctg_5\t4.5",
+      "ctg_6\t4.5",
+      "ctg_7\t5",
+      "ctg_8\t5.5"
+    ],
+    "expected": "Each of ctg_1 ... ctg_8 occurs once, in order"
+  },
+  "ambiguous_gc_row": {
+    "exit_code": 0,
+    "actual": "contig\tGC\nambiguous\t-1\nvalid\t100.000",
+    "expected": "Separate rows for ambiguous and valid records"
+  },
+  "ambiguous_final_kmer": {
+    "exit_code": 0,
+    "stderr": "",
+    "expected": "A zero-informative sequence does not cause division by zero"
+  },
+  "motus_repeated_taxon_across_samples": {
+    "motu_matrix": "A\tB\nmOTUv4.0_000001\t12\t3",
+    "kingdom_matrix": "kingdom\tA\tB\nBacteria\t12\t3",
+    "expected_kingdom": "Bacteria\t12\t3"
+  },
+  "secondary_coverage_output_names": {
+    "calculator_sha256": "c1b9c1e7c9c5a82738579fac28c6531a0c04f4edb7421108e22fa70dba7de681",
+    "actual_outputs": [
+      "sample-smd.bam.coverage.count_pergene",
+      "sample-smd.bam.coverage.geneStats",
+      "sample-smd.bam.coverage.median.percontig",
+      "sample-smd.bam.coverage.median.pergene",
+      "sample-smd.bam.coverage.percontig",
+      "sample-smd.bam.coverage.pergene",
+      "sample-smd.bam.coverage.window"
+    ],
+    "accepted_by_current_caller": {
+      "percontig": true,
+      "pergene": true,
+      "median.percontig": true
+    },
+    "mean_gene_depth": "sample__C1_L=1000=_1\t10.00",
+    "expected_mean_gene_depth": 10
+  },
+  "shared_median_after_refactor": {
+    "actual": [
+      2,
+      3
+    ],
+    "expected": [
+      2,
+      3
+    ]
+  }
+}

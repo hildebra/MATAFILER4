@@ -53,7 +53,8 @@ sub readMG_LCA{
 }
 
 sub attachProteins3{
-	my ($curSmpl,$prF,$protIn,$hrGI,$SEP) = @_;
+	my ($curSmpl,$prF,$protIn,$hrGI,$SEP,$options) = @_;
+	$options ||= {};
 	die "Protein file does not exist: $protIn\n" unless (fileGZe($protIn));
 
 	# Source protein files can be much larger than the representative set. Keep
@@ -70,6 +71,7 @@ sub attachProteins3{
 			$selected{$selected_id} = $sequence if defined $selected_id;
 			$header_seen = 1;
 			my $header = $1;
+			$header =~ s/[|\s].*//;
 			$selected_id = undef;
 			if (index($header,$prefix) == 0){
 				my $candidate = substr($header,length($prefix));
@@ -93,6 +95,7 @@ sub attachProteins3{
 		my $seq = "";
 		my $protHd = $curSmpl.$SEP.$pr;
 		if (!exists($selected{$pr})){
+			die "Cannot find required protein $protHd in $protIn\n" if $options->{require_all};
 			print "Can't find $protHd in $protIn\n";
 		} else {
 			$seq = $selected{$pr};

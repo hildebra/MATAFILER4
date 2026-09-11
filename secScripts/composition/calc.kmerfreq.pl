@@ -58,12 +58,7 @@ my $header;
 my $seq;
 my $prevheader;
 my $subseq;
-my $sequence = "AAA";
-my $count = -1;
-my $printreadcount = 0;
-my $seqcount = 0;
-my $seqcountgood = 0;
-my $totalkmers = 0;
+my $sequence = "";
 my $output = "Contig";
 my @probes;
 my @kmerheader;
@@ -164,71 +159,39 @@ foreach my $probe (@probes){
 }
 print OUT "$output\n";	
 
-while ( my $line = <IN> ) {
+# Use exactly the same emission rule at a header boundary and at EOF.
+$sequence = "";
+$header = undef;
+while (my $line = <IN>) {
 	chomp $line;
-	$totalkmers = 0;
-	$count++;	
-	foreach my $probe1 (@kmerheader){                                                              #reset kmers
-		$kmer{$probe1} = 0;		
-	}
-	if ($line =~ m/>/) { 	
-		if ($minlength <= length($sequence) and $count > 0) {
-			for (my $count2 = 0; $count2 < length($sequence); $count2++)  {
-				if (exists($kmer{substr($sequence,$count2,$kmerlength)})){                         #to escape N's in scaffolds
-					$kmer{substr($sequence,$count2,$kmerlength)}++;				
-					my $rc = reverse(substr($sequence,$count2,$kmerlength));                       #Add reverse complement to escape string bias
-					$rc =~ tr/ACGT/TGCA/;		
-					$kmer{$rc}++;
-					$totalkmers+= 2;
-				}
-			}
-			if ($totalkmers > 0){
-				foreach my $probe1 (@kmerheader){				
-					my $temp1 = $kmer{$probe1}/$totalkmers;				
-					$output = $output."\t".sprintf("%.5f",$temp1)*100;
-				}
-			print OUT "$output\n";
-			$seqcountgood++;
-			}
-		}
-		$sequence = "";	
-		$header = $line;
-		$header =~ s/>//;
-		$output = $header;									
-		#if ($printreadcount == 100) {
-		#	$printreadcount = 0;
-		#	print "$seqcount sequences $seqcountgood \>= $minlength bp\n";
-		#}	
-		$seqcount++;		
-		$printreadcount++;		
-	}	
-	else{		
-		$line = uc($line);
-		$sequence = $sequence.$line;
+	if ($line =~ /^>(.*)/) {
+		emit_kmers($header, $sequence);
+		$header = $1;
+		$sequence = "";
+	} else {
+		$sequence .= uc($line);
 	}
 }
+emit_kmers($header, $sequence);
 
-$count++;
-$totalkmers = 0;
-if ($minlength <= length($sequence)) {                                                             #Stupid solution to get the last sequence...
-	foreach my $probe1 (@kmerheader){                                                                                    
-		$kmer{$probe1} = 0;		
+sub emit_kmers {
+	my ($name, $dna) = @_;
+	return unless defined($name) && length($dna) >= $minlength;
+	$kmer{$_} = 0 for @kmerheader;
+	my $total = 0;
+	for (my $i = 0; $i + $kmerlength <= length($dna); $i++) {
+		my $probe = substr($dna, $i, $kmerlength);
+		next unless exists $kmer{$probe};
+		$kmer{$probe}++;
+		my $rc = reverse($probe);
+		$rc =~ tr/ACGT/TGCA/;
+		$kmer{$rc}++;
+		$total += 2;
 	}
-	for (my $count2 = 0; $count2 < length($sequence); $count2++)  {
-		if (exists($kmer{substr($sequence,$count2,$kmerlength)})){                                                    
-			$kmer{substr($sequence,$count2,$kmerlength)}++;				
-			my $rc = reverse(substr($sequence,$count2,$kmerlength));                                                 
-			$rc =~ tr/ACGT/TGCA/;		
-			$kmer{$rc}++;
-			$totalkmers+= 2;
-		}
-	}
-	$output = $header;
-	foreach my $probe1 (@kmerheader){
-		my $temp1 = $kmer{$probe1}/$totalkmers;
-		$output = $output."\t".sprintf("%.5f",$temp1)*100;
-	}
-	print OUT "$output\n";	
+	# Preserve the existing non-final-record policy: omit uninformative records.
+	return unless $total;
+	print OUT join("\t", $name,
+		map { sprintf("%.5f", $kmer{$_} / $total) * 100 } @kmerheader), "\n";
 }
 
 

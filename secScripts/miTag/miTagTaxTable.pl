@@ -43,7 +43,12 @@ for my $file (@files) {
 
 	my %column;
 	my $header = <$inputHandle>;
-	die "Empty taxonomy hierarchy input: $inputDir/$file\n" unless defined $header;
+	# A zero-byte hierarchy is the producer's completed-empty representation.
+	# Keep its sample tag even though there are no taxa or header to parse.
+	unless (defined $header) {
+		close $inputHandle or die "Cannot close taxonomy input $inputDir/$file: $!\n";
+		next;
+	}
 	chomp $header;
 	my @headerFields = split /\t/, $header, -1;
 	for my $level (@levels){
@@ -90,8 +95,8 @@ print "Read input files.\n";
 for my $level (@levels){
 	my @taxaKeys = sort {
 		$taxa{$level}{$b} <=> $taxa{$level}{$a} || $a cmp $b
-	} keys %{$taxa{$level}};
-	my @siteKeys = sort keys %{$sites{$level}};
+	} keys %{$taxa{$level} // {}};
+	my @siteKeys = sort keys %seenTag;
 	my $output = "$outPrefix.$level.txt";
 	open my $outputHandle, '>', $output or die "Cannot write $output: $!\n";
 	print {$outputHandle} $level, map { "\t$_" } @siteKeys;

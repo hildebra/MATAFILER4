@@ -55,7 +55,7 @@ is_deeply(count_msa_samples([$locus1], 'sampleA'),
 
 my $source = slurp("$Bin/../secScripts/MGS/strain_within.pl");
 my @helpers;
-for my $name (qw(preparedOutgroupLog msaOnlyArtifactsReady writeMGSSampleHistograms
+for my $name (qw(mgsTreePath mgsOutputComplete preparedOutgroupLog msaOnlyArtifactsReady writeMGSSampleHistograms
 	writeSelectionAttritionSummary writeGeneLengthSampleSummary writeStrainSummary printSampleStatsSummary)) {
 	my ($sub) = $source =~ /(sub \Q$name\E \{.*?^\})/ms;
 	BAIL_OUT("Cannot find $name") unless $sub;
@@ -68,7 +68,7 @@ use Digest::SHA qw(sha256_hex);
 use Mods::GenoMetaAss qw(gzipopen fileGZe fileGZs mean);
 use Mods::math qw(medianArray);
 use Mods::StrainSampleStats qw(count_msa_samples);
-use Mods::WorkflowResilience qw(retry_open retry_close retry_rename);
+use Mods::WorkflowResilience qw(retry_open retry_close retry_rename atomic_write_text);
 our ($onlyMSA, $strictBackbone, $phyloProg, $LOGDIR, $outD, $version,
 	$recoveryLogName, $summaryLogName, $sampleStatsLogName, $sampleStatsSummaryLogName,
 	$scratchD, $doSubmit, $phase1SampleSummary);
@@ -113,7 +113,7 @@ my $rows = read_table($report->{details});
 is(scalar(@$rows), 4, 'every selected MGS has a sample-count row');
 my %row = map { $_->{MGS} => $_ } @$rows;
 is($row{'MGS.cached'}{msa_samples}, 4, 'new completion markers supply cached MSA counts');
-is($row{'MGS.legacy'}{msa_samples}, 2, 'legacy markers fall back to actual retained alignment samples');
+is($row{'MGS.legacy'}{msa_samples}, 'NA', 'legacy outputs stay complete without an expensive alignment recount');
 is($row{'MGS.cached'}{backbone_samples}, 'NA', 'MSA mode ignores stale backbone counts');
 is($row{'MGS.cached'}{placement_samples}, 'NA', 'placement is inapplicable in MSA mode');
 is($row{'MGS.cached'}{tree_status}, 'not_requested', 'MSA output is not called a missing tree');
@@ -123,13 +123,13 @@ is($row{'MGS.missing'}{msa_samples}, 'NA', 'missing output is not counted as zer
 is($row{'MGS.missing'}{output_status}, 'output_missing', 'missing outputs remain visible');
 is_deeply($report->{roles}, ['msa'], 'MSA-only histogram has one applicable role');
 is_deeply($report->{statistics}{msa}, {
-	count => 3, missing => 1, minimum => 0, maximum => 4, median => 2, mean => '2.00',
+	count => 2, missing => 2, minimum => 0, maximum => 4, median => 2, mean => '2.00',
 }, 'histogram denominator includes measured zeros and excludes missing measurements');
-my $legacyCached = $row{'MGS.legacy'};
+my $legacyCached = { %{$row{'MGS.legacy'}}, msa_samples => 2 };
 my $hist = read_table($report->{histogram});
 is($hist->[0]{MGS_count}, 1, 'zero bin contains the terminal MGS');
-is($hist->[0]{fraction}, '0.333333', 'histogram fraction uses the number of measured MGS');
-is($hist->[0]{missing_MGS}, 1, 'histogram records its missing denominator');
+is($hist->[0]{fraction}, '0.500000', 'histogram fraction uses the number of measured MGS');
+is($hist->[0]{missing_MGS}, 2, 'histogram records its missing denominator');
 
 @StrainReportFixture::specis = ('MGS.missing');
 $report = StrainReportFixture::writeMGSSampleHistograms();
@@ -184,8 +184,9 @@ like(slurp("$tmp/LOGandSUB/strainSelectionAttrition.tsv"),
 		'unchanged legacy completion marker reuses previously measured counts');
 	is($reused{msa_samples}, 2, 'cached legacy ingroup count is preserved');
 	write_file("$tmp/MGS.legacy/msaOnly.complete.tsv", "status\tmsa_complete\nupdated\t1\n");
-	my $ok = eval { StrainReportFixture::msaOnlyArtifactsReady("$tmp/MGS.legacy", \%reused, $legacyCached); 1 };
-	ok(!$ok && $@ =~ /unexpected rescan/, 'changed completion marker invalidates cached counts');
+	ok(StrainReportFixture::msaOnlyArtifactsReady("$tmp/MGS.legacy", \%reused, $legacyCached),
+		'changed completion marker remains reusable without recounting alignments');
+	is($reused{msa_samples}, 'NA', 'changed completion marker invalidates cached counts');
 }
 
 # Older outputs may lack the outgroup identity: do not call an unknown total
@@ -194,6 +195,6 @@ unlink "$tmp/MGS.legacy/data.log" or die $!;
 my %unknown;
 ok(StrainReportFixture::msaOnlyArtifactsReady("$tmp/MGS.legacy", \%unknown),
 	'legacy output remains complete without optional outgroup metadata');
-is($unknown{msa_samples}, 'NA', 'unknown outgroup identity is not silently counted as an ingroup sample');
+is($unknown{msa_samples}, 'NA', 'absent historical counts are unavailable rather than inferred from extraction');
 
 done_testing();

@@ -10,6 +10,7 @@ use Time::HiRes ();
 use Digest::SHA ();
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::math qw(medianArray);
 use Mods::ReadLibrary qw(
 	cloneReadLibraries ensureSeqSetLibraries ensureCleanSeqSetLibraries
 	syncCleanSeqSetLegacy readLibrariesByScope legacyLibraryArrays
@@ -18,7 +19,7 @@ use Mods::ReadLibrary qw(
 use Exporter qw(import);
 our @EXPORT_OK = qw(
 		gzipwrite gzipopen lcp prefix_find
-		fileGZe fileGZs filsizeMB resolveExistingFile contig_stats_coverage_complete
+		fileGZe fileGZs filsizeMB resolveExistingFile contig_stats_coverage_complete coverage_derivative_paths coverage_derivatives_complete
 		
 		readMap 
 		systemW
@@ -308,6 +309,28 @@ sub fileGZs{
 	return 0;
 }
 
+# rdCover strips compression from its input name before adding a derivative
+# suffix. Accept the historical .gz.<suffix> spelling and compressed derivatives
+# when inspecting existing runs, but put the calculator's spelling first.
+sub coverage_derivative_paths {
+	my ($coverage, $suffix) = @_;
+	(my $stem = $coverage) =~ s/\.gz$//;
+	return [map { ("$_.${suffix}", "$_.${suffix}.gz") } ($stem, "$stem.gz")];
+}
+
+sub coverage_derivatives_complete {
+	my ($coverage, @suffixes) = @_;
+	@suffixes = qw(pergene percontig median.percontig) unless @suffixes;
+	for my $suffix (@suffixes) {
+		my $found = 0;
+		for my $path (@{coverage_derivative_paths($coverage, $suffix)}) {
+			if (-s $path) { $found = 1; last; }
+		}
+		return 0 unless $found;
+	}
+	return 1;
+}
+
 # Keep the workflow planner and separateContigs worker on one completion
 # contract. The stone alone is insufficient because older/interrupted jobs may
 # have published only a subset of the coverage derivatives.
@@ -316,10 +339,8 @@ sub contig_stats_coverage_complete{
 	return 0 unless defined($dir) && defined($prefix) && length($prefix);
 	$dir =~ s{/+$}{};
 	return 0 unless -e "$dir/$prefix.stone";
-	foreach my $suffix (qw(percontig median.percontig pergene count_pergene)){
-		return 0 unless fileGZe("$dir/$prefix.$suffix");
-	}
-	return 1;
+	return coverage_derivatives_complete("$dir/$prefix",
+		qw(percontig median.percontig pergene count_pergene));
 }
 
 sub prefixFAhd{
@@ -848,17 +869,8 @@ sub readFasta{
 
 sub median
 {
-    my @vals = sort {$a <=> $b} @_;
-	return 0 if (@vals == 0);
-    my $len = (scalar @vals)-1;
-    if($len%2) #odd?
-    {
-        return $vals[int($len/2)];
-    }
-    else #even
-    {
-        return ($vals[int($len/2)-1] + $vals[int($len/2)])/2;
-    }
+	# Preserve the legacy empty-input result while sharing the median algorithm.
+	return @_ ? medianArray(@_) : 0;
 }
 
 sub quantile #format: quantile(0.25,@values);

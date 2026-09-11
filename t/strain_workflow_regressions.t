@@ -344,11 +344,11 @@ ok(index($build_tree,
 	'a recovery job refuses to run rather than rebuilding a phylogeny it was not asked for'
 );
 ok(index($build_tree, 'if (!$locusMSARecovery && $strictBackbone && $treesDone') >= 0
-	&& index($build_tree, 'if (!$locusMSARecovery && $cogCats ne "" && $continue
+	&& index($build_tree, 'if (!$locusMSARecovery && $continue
 		&& !$alignmentWorkPolicyMatches) {') >= 0
 	&& index($build_tree, '} elsif (!$locusMSARecovery && $cogCats ne "" && $continue
 		&& !$postAlignmentQCAuditCurrent) {') >= 0
-	&& index($build_tree, '} elsif (!$locusMSARecovery && $cogCats ne "" && $continue
+	&& index($build_tree, '} elsif (!$locusMSARecovery && $continue
 		&& !$postAlignmentPolicyMatches') >= 0,
 	'no recovery-state branch may remove tree outputs or clear completion during a recovery run'
 );
@@ -696,10 +696,6 @@ like($strain,
 	'an exact Mosaic link is usable only for a broadly available or preferred-core locus');
 unlike($strain, qr/prepareSelectiveOutgroupReferenceCache|outgroupReferenceCacheActive|outgroup_reference_cache/,
 	'the Phase II selective outgroup cache and its index lifecycle are absent');
-like($strain, qr/sub outgroupRequirementLoci.*?preparedOutgroupLog.*?CATstdof\.tmp/s,
-	'only raw staged inputs without a finalized outgroup overlay contribute outgroup requirements');
-like($strain, qr/sub outgroupRequirementLoci.*?selected_gene_map.*?outgroup requirement category/s,
-	'resume uses already-selected loci before considering a raw category scan');
 like($strain,
 	qr/my \@sampleStatColumns = sample_stat_columns\(\);.*?GetOptions\(.*?printEarlyRunHeader\(\)/s,
 	'sample-statistics columns are initialized before the executable workflow begins');
@@ -837,38 +833,16 @@ like($strain,
 	qr/\$leanOnlySubmitResume.*?merge\.complete\.tsv.*?fileGZe\(\$rawCategory\)/s,
 	'lean staged-input handling trusts the commit marker but still validates the category it immediately consumes');
 like($strain,
-	qr/sub outgroupRequirementLoci \{.*?\$leanOnlySubmitResume.*?selected_gene_map_deferred_validation.*?scratchMGSInputState/s,
-	'outgroup demand construction uses the retained locus map without probing every staged directory first');
-like($strain,
-	qr/MGS_SUBMISSION:.*?opendir\(my \$resumeDirectory, \$outD2\).*?treeDone\.sto.*?terminalMarkers.*?prepareMGSInputSet\(\$MGS,\$tmpD\).*?addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?dispatchPendingTreeJobs/s,
+	qr/MGS_SUBMISSION:.*?opendir\(my \$resumeDirectory, \$outD2\).*?mgsOutputComplete.*?terminalMarkers.*?prepareMGSInputSet\(\$MGS,\$tmpD\).*?addOutgroup2MGS\(\$MGS,\$OG,\$tmpD\).*?dispatchPendingTreeJobs/s,
 	'useful completion, input, and category checks occur just in time in the same loop that submits each MGS');
 like($strain,
 	qr/if \(!\$leanOnlySubmitResume && \$onlySubmit && !\$subJob.*?preparedMainBranchInputSet\(.*?\$preparedMainBranchFastPath = 1/s,
 	'the exhaustive prepared-input preflight remains available only outside latency-sensitive lean dispatch');
 like($strain,
-	qr/sub resubmitExistingTreeCommands .*?treeCmd\.sh.*?placementPending\.sto.*?skipping Mosaic, map, and catalogue loading.*?qsubSystemWaitMaxJobs\(.*?qsubSystem2\(/s,
-	'direct tree-command resubmission reuses saved scripts with scheduler-capacity throttling, including EPA recovery');
-my ($directTreeResume) = $strain =~
-	/(sub resubmitExistingTreeCommands .*?)(?=sub markStrainWorkflowDirectory)/s;
-ok(defined($directTreeResume),
-	'direct tree-command resume helper is available for isolated inspection');
-unlike($directTreeResume, qr/\$guide|open my \$input/,
-	'direct tree-command resume scans saved output scripts instead of reading the MGS guide');
-like($directTreeResume,
-	qr/bsd_glob.*?my \$treeDone.*?completionMarkerTree\(\$treeDone.*?next if !\$force && -s \$treeDone && length\(\$completedTree\).*?my \$publicationResume.*?epa_result\.jplace.*?treeCmd\.epa_retry\.sh.*?epa_only/s,
-	'direct tree-command resume notices a removed placed tree despite treeDone and reuses saved EPA retry scripts');
-like($directTreeResume, qr/\$redoEpa && !\$publicationResume.*?next;.*?elsif \(!\$publicationResume/s,
-	'forced EPA filtering selects only retained-jplace publication resumes and never EPA-only recovery');
-like($directTreeResume, qr/local \$ENV\{MATAFILER_REDO_EPA_FILTER\} = 1.*?qsubSystem2/s,
-	'forced filtering propagates into older saved tree commands without rewriting them');
-like($directTreeResume,
-	qr/\$publicationResume.*?elsif \(!\$publicationResume\).*?FNAstdof.*?FAAstdof.*?CATstdof/s,
-	'a retained-jplace publication resume skips unnecessary sequence-input checks');
-like($strain,
 	qr/my \$requiresOutgroupReference = \$runPartI \|\| \$CatNotPrepped \|\| \$repairCAT.*?my \$initializeOutgroupReferences = sub.*?unless \(\$requiresOutgroupReference.*?readFasta\(\$refFAA.*?readFasta\(\$refFNA/s,
 	'tree-only resumes load reference FASTA catalogues only for input regeneration or repair');
 like($strain,
-	qr/sub addOutgroup2MGS\{.*?if \(\$outputReady.*?return \(.*?my \$preparedScratchInput.*?return \(.*?my \$stageReady.*?if \(\$requiresOutgroupReference && !\$outgroupReferenceInitialized\).*?\$initializeOutgroupReferences->\(\\\@fullTreeCandidates\).*?staged category scan for \$MGS/s,
+	qr/sub addOutgroup2MGS\{.*?for my \$candidate.*?my \$genesSeen = 0.*?return \(.*?my \$stageReady.*?if \(\$requiresOutgroupReference && !\$outgroupReferenceInitialized\).*?\$initializeOutgroupReferences->\(\\\@fullTreeCandidates\).*?staged category scan for \$MGS/s,
 	'already-overlaid MGS bypass the catalogue, while the first raw MGS streams one shared reference set before its overlay');
 like($strain,
 	qr/outgroup candidate discovery.*?outgroup protein FASTA streaming.*?outgroup nucleotide FASTA streaming/s,
@@ -939,7 +913,7 @@ like($strain,
 	qr/-redo cannot be combined with deprecated redo\/repair flags.*?-redo tree must be launched by the main strainWithin process/s,
 	'redo modes reject mixed legacy input and split-worker tree execution');
 like($mgs,
-	qr/"redo=s"\s+=> \\\$strainRedo.*?-redo must be one of: none, tree, input, all.*?strainSampleStats\.summary\.tsv.*?my \$strainOnlySubmit = -s \$strainPhaseISummary \? 1 : 0.*?my \@strainArguments = \(.*?'-SNPcaller', \$SNPcaller.*?'-onlySubmit', \$strainOnlySubmit.*?'-redo', \$strainRedo.*?map \{ _shell_quote\(\$_\) \} \@strainArguments/s,
+	qr/"redo=s"\s+=> \\\$redo.*?-redo must be one of: none, cluster, tax, tree, input, all.*?strainSampleStats\.summary\.tsv.*?my \$strainOnlySubmit = -s \$strainPhaseISummary \? 1 : 0.*?my \@strainArguments = \(.*?'-SNPcaller', \$SNPcaller.*?'-onlySubmit', \$strainOnlySubmit.*?'-redo', \$strainRedo.*?map \{ _shell_quote\(\$_\) \} \@strainArguments/s,
 	'MGS.pl forwards caller and redo through a quoted argument array and enters only-submit after durable Phase I');
 unlike($mgs,
 	qr/\$strain1scr .*?-(?:reSubmit|redoSubmissionData|rmMSA)\b/s,
@@ -981,14 +955,13 @@ like($strain,
 like($strain,
 	qr/sub stagedMGSInputsReady .*?return 1 if \$aggregateComplete;.*?exact_worker_parts/s,
 	'a committed staged aggregate avoids repeated worker-part directory scans');
-ok(index($strain, 'my $preparedScratchInput') >= 0
+ok(index($strain, 'for my $candidate ([$outD2, 0], [$tmpD, 1])') >= 0
 	&& index($strain, 'merge.complete.tsv') >= 0
-	&& index($strain, q{return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, 1, 1, $ingroupSeen);}) >= 0,
+	&& index($strain, q{return (scalar(keys %samplesSeen), $genesSeen, $preparedOG, $needsCopy, 1, $ingroupSeen);}) >= 0,
 	'legacy fully prepared Phase-II scratch inputs remain resumable without redoing their controller-side work');
 ok(index($strain, 'sub preparedOutgroupLog') >= 0
 	&& index($strain, 'fileGZe($log_path)') >= 0
-	&& index($strain, '$publishedPrepared') >= 0
-	&& index($strain, '$scratchPrepared') >= 0
+	&& index($strain, 'preparedOutgroupLog($directory)') >= 0
 	&& index($strain, '.strain_tree_input.plan.tsv') >= 0
 	&& index($strain, '.strain_tree_input.shards.tsv') >= 0
 	&& index($strain, 'writeMGSShardManifest') >= 0
@@ -1001,10 +974,10 @@ like($strain,
 	qr/my \(%persistentMGSInputStateCache, %scratchMGSInputStateCache\).*?sub invalidateMGSInputState .*?delete \@persistentMGSInputStateCache.*?delete \@scratchMGSInputStateCache/s,
 	'published and scratch triplet states are cached and explicitly invalidated after mutations');
 like($strain,
-	qr/my \$completedTree = .*?treeDone\.sto.*?fileGZs\(\$completedTree\).*?BuildTree publishes treeDone\.sto atomically.*?next;.*?fileGZe\("\$SIdirs\{\$MGS\}\/\$CATstdof"\)/s,
+	qr/my \$completedTree = .*?treeDone\.sto.*?fileGZe\(\$completedTree\).*?BuildTree publishes treeDone\.sto atomically.*?next;.*?fileGZe\("\$SIdirs\{\$MGS\}\/\$CATstdof"\)/s,
 	'a validated completed tree bypasses compressed category-sidecar inspection');
 like($strain,
-	qr/my \$completedTree = "\$outD2\/phylo\/\$treeFile";.*?my \$treeCompletion = "\$outD2\/treeDone\.sto";.*?\(\$onlySubmit != 0 \|\| \$subJob\).*?BuildTree publishes treeDone\.sto atomically.*?\$completedTreeFastPaths\+\+.*?next;.*?my \$tooFewMarker/s,
+	qr/my \$completedTree = mgsTreePath\(\$outD2\);.*?my \$treeCompletion = "\$outD2\/treeDone\.sto";.*?\(\$onlySubmit != 0 \|\| \$subJob\).*?BuildTree publishes treeDone\.sto atomically.*?\$completedTreeFastPaths\+\+.*?next;.*?my \$tooFewMarker/s,
 	'tree-only audits prioritize the durable completion marker and primary tree before deeper MGS probes');
 my ($quickWorkerValidation) = $strain =~
 	/(sub validatePhase1WorkerLedger .*?)(?=^sub )/ms;

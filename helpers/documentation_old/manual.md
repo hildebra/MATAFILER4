@@ -213,7 +213,6 @@ Comment: usually ‘0’ means switching a mode off, and ‘1’ means switching
 	"decluterMatrix=i" 		1: declutering of gene matrix. Can give an edge to canopy based MGS, but also introduce unwanted biases. Default: 0
 
 #flow control
-	"1stepClust=i" 			Cluster incomplete genes separately? Default: 0
 	"submitLocal=i"			Important run mode switch, to submit jobs while geneCat is runnning single core 
 	"submSystem=s"			SGE, slurm submission systems
 	"continue=i" 			Flow control, 1: continue with found files 0: delete existing (partial) gene cat, start again

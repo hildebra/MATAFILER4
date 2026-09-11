@@ -6,7 +6,7 @@ use strict;
 use FileHandle;
 use Data::Dumper;
 
-use Mods::FuncTools qw(readGene2COG);
+use Mods::FuncTools qw(readGene2COG mergeBlastPair);
 use Mods::TamocFunc qw(sortgzblast readTabbed readTabbed2 readTabbed3 uniq);
 use Mods::GenoMetaAss qw(gzipwrite gzipopen convertNT2AA);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
@@ -34,6 +34,7 @@ my $emBin = getProgPaths("emapper");
 my $blInf = "";#$ARGV[0];
 my $mode = 0;#ARGV[3]
 my $DBmode = "NOG";#$ARGV[1];
+my $queryType = "reads"; # reads, genes, or pre-merged pairs
 my $quCovFrac = 0; #how much of the subject (DB) needs to be covered?
 my $noHardCatCheck = 0; #select for the hit with KO assignment rather than the real best hit (w/o KO assignment)
 
@@ -61,6 +62,7 @@ GetOptions(
 	"help|?" => \&help,
 	"i=s"      => \$blInf,
 	"DB=s"      => \$DBmode,
+	"queryType=s" => \$queryType,
 	"mode=i"      => \$mode,#0=normal, 1=normal and print per gene anno, 2=print extended per gene annotation, no summary,3=file check 4=remove outputfile
 	"eval=s"      => \$minBLE,
 	"minBitScore=f" => \$minScore,
@@ -83,6 +85,8 @@ GetOptions(
 	"percID=i" => \$percID, #percent id similiarity, from 0 - 100
 ) or die("Error in command line arguments\n");
 
+die "queryType must be reads, genes, or merged\n" unless $queryType =~ /^(?:reads|genes|merged)$/;
+
 die "Database mode requires -tmp -minAlignLen -LF\n" if ( ($mode != 4 && $mode != 3) && ( $tmpD eq "" || $lengthF eq "" ) );
 #die "$writeSumTbls XX\n";
 $reportEggMapp=0 if ($DBmode ne "NOG" );
@@ -96,7 +100,7 @@ if ($lengthF ne "" ){#read the length of DB proteins
 		while (my $l = <I>){
 			chomp $l;
 			my @spl = split /\t/,$l;
-			$DBlen{$spl[0]} = int $spl[1];
+			$DBlen{$spl[0]} = $spl[1];
 		}
 		close I;
 	}
@@ -356,9 +360,20 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 		while (my $line = <$I>){
 			chomp $line; 
 			my @splX = split (/\t/,$line);
-			if (@splX != 12 ){ die "something wrong with blast string!: \n$line\n@splX\n";}
-			my $query = $splX [0];
-			$query =~ s/\/[12]$// if ($query =~ m/\/[12]/);
+			my $readCount = $queryType eq 'merged' ? 2 : 1;
+			# New MATAF4 searches append provenance from the actual input library.
+			if (@splX && $splX[-1] =~ /^MF4:read_count=([12])$/) {
+				$readCount = $1;
+				pop @splX;
+			}
+			die "Gene queries cannot represent merged read pairs\n" if $queryType eq 'genes' && $readCount != 1;
+			if (@splX != 12 + ($writeFastaOut ? 1 : 0)) {
+				die "Invalid BLAST field count: $line\n";
+			}
+			my $mate = $queryType eq 'reads' && $readCount == 1 && $splX[0] =~ /\/([12])$/ ? $1 : 0;
+			push @splX, {read_count => $readCount, mate => $mate};
+			my $query = $splX[0];
+			$query =~ s/\/[12]$// if $mate;
 			#print $query."\n";
 #			$lcnt++;
 			
@@ -370,7 +385,7 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 				last;
 			}
 			
-			if ( $splX[0] =~ m/\/2$/){push(@wordv2, [@splX]);
+			if ($mate == 2){push(@wordv2, [@splX]);
 			} else {push(@wordv1, [@splX]);}
 
 		}
@@ -394,8 +409,10 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 			main($whX,$aminBLE[$i],$aminPID[$i],$i,$reportEggMapp);
 		}
 		undef @wordv1;undef @wordv2; #undef @blRes; 
-		if ( $splNext[0] =~ m/\/2$/){push(@wordv2, \@splNext);
-		} else {push(@wordv1, \@splNext);}
+		if (@splNext) {
+			if ($splNext[-1]{mate} == 2) { push @wordv2, \@splNext; }
+			else { push @wordv1, \@splNext; }
+		}
 
 		
 		if ($stopInMiddle==0){last;}
@@ -687,8 +704,7 @@ sub main(){
 	@tmp = @{$blRes[0]};
 	#print "@tmp PP\n";
 	my $qold=$tmp[0];
-	die "Subject length not in length DB : $tmp[1]\n" unless (exists ($DBlen{$tmp[1]}));
-	my $SbjLen = $DBlen{$tmp[1]};
+	my $bestReadCount = 1;
 	my $COGfail=0; my $CATfail=0; my $totalCOG=0; my $CATexist=0;  my $ii=0;
 	
 	my $eggNOGmap =0;
@@ -711,7 +727,10 @@ sub main(){
 		#print "@{$blRes[$ii]}\n";
 		my $Qseq = "";
 		my ($Query,$Subject,$id,$AlLen,$mistmatches,$gapOpe,$qstart,$qend,$sstart,$send,$eval,$bitSc) = @{$blRes[$ii]};
-		$Qseq = @{$blRes[$ii]}[-1] if ($writeFastaOut);
+		$Qseq = $blRes[$ii][12] if ($writeFastaOut);
+		die "Missing or invalid subject length in length DB: $Subject\n"
+			unless defined($DBlen{$Subject}) && $DBlen{$Subject} =~ /^\d+$/ && $DBlen{$Subject} > 0;
+		my $SbjLen = $DBlen{$Subject};
 		#print "$Subject\n";
 		#print $Query."  $bitSc\n";
 		#sort by eval #changed from bestE -> bestScore
@@ -745,7 +764,8 @@ sub main(){
 					){   #convincing score
 						#print "ENTER! $id\n";
 						$fndCat =1 if (exists $c2CAT{$Subject}); 
-						$bestSbj =$Subject; 
+						$bestSbj =$Subject;
+						$bestReadCount = $blRes[$ii][-1]{read_count};
 						$bestAlLen=$AlLen;$bestE = $eval; $bestQuery = $Query;
 						$bestBitScpre=$bitSc;
 						$bestID = $id;
@@ -816,16 +836,10 @@ sub main(){
 	
 
 	##############################
-	# merged read pair? double the score!
-	my $lpCnt=0;
-	$score{"cnt"} = 0;
-	if ($bestQuery =~ m/\/[12]$/){
-		$noMerge++;
-		$score{"cnt"}=1;
-	} else {
-		$mergeDiaHit ++ ; $score{"cnt"}= 2 ;
-		#print "HIT";
-	}
+	# Multiplicity comes from the input library or from combining two mates.
+	my $lpCnt = 0;
+	$score{"cnt"} = $bestReadCount;
+	if ($bestReadCount == 2) { $mergeDiaHit++; } else { $noMerge++; }
 
 
 	
@@ -902,7 +916,7 @@ sub main(){
 
 	#all info parsed, now add up matrices
 	my $curCOG =  $curCOGs[0];
-	$score{"GLN"} = $bestAlLen / $SbjLen;# if ($normMethod eq "GLN"); #score for this hit, normed by prot length
+	$score{"GLN"} = $bestAlLen / $DBlen{$bestSbj};# if ($normMethod eq "GLN"); #score for this hit, normed by prot length
 	my $numCats = scalar @curCOGs;
 	foreach my $normMethod (@normMethods){
 		my $score2 = $score{$normMethod};
@@ -1220,68 +1234,29 @@ sub readCzySubs($){#cazy_substrate_info.txt
 }
 
 sub combineBlasts($ $){
-	my ($wh1,$wh2) = @_;
-	return $wh1 if (@{$wh2} == 0);
-	
-	my @Pbl1 = @{$wh1}; my @Pbl2 = @{$wh2};
-	#basic dereplication procedure to only take first hit per read
-	my %bl1; my %bl2;
-	foreach my $li (@Pbl1){
-		$bl1{${$li}[1]} = $li unless (exists($bl1{${$li}[1]})); #only take first hit
-	}
-	foreach my $li (@Pbl2){
-		$bl2{${$li}[1]} = $li unless (exists($bl2{${$li}[1]})); #only take first hit
-	}
-	
+	my ($wh1, $wh2) = @_;
+	return $wh1 unless @$wh2;
+	return $wh2 unless @$wh1;
+	my (%bl1, %bl2);
+	# Retain the first reported hit per subject, as before.
+	for my $hit (@$wh1) { $bl1{$hit->[1]} //= $hit; }
+	for my $hit (@$wh2) { $bl2{$hit->[1]} //= $hit; }
 	my @ret;
-	
-	my @allKs = uniq ( keys %bl1, keys %bl2); #
-	#print "@allKs\n";
-	foreach my $k (@allKs){
-		unless (exists ($bl1{$k}) && exists ($bl2{$k}) ){
+	for my $subject (sort { $a cmp $b } uniq(keys %bl1, keys %bl2)) {
+		# A subject found by only one mate competes as a singleton candidate.
+		unless (exists($bl1{$subject}) && exists($bl2{$subject})) {
+			push @ret, $bl1{$subject} // $bl2{$subject};
 			next;
-			if (exists ($bl1{$k})) {push (@ret,$bl1{$k});#$ret{$k} = $bl1{$k};
-			} else { push (@ret,$bl2{$k});}#$ret{$k} = $bl2{$k};}
 		}
-#		die "$k" unless (exists $bl2{$k});
-		my @hit1 = @{$bl1{$k}};
-		my @hit2 = @{$bl2{$k}};
-		die "Unequal blast string length: \n@hit2 (".@hit2.") \n@hit1(".@hit1.")\n" if (@hit1 != @hit2);
-		#pair
-		#print "pair";
-		#$k =~ s/\/\d$/\/12/;
-		my @cur = @hit1;
-		$cur[0] =~ s/\/[12]$//;
-		
-		my @sbss1 = sort{ $a <=> $b }(($hit1[8],$hit1[9])); my @sbss2 = sort{ $a <=> $b }($hit2[8],$hit2[9]); #sort start/stop
-		#sort 
-		#print "$sbss1[0] > $sbss2[0]\n";
-		if ($sbss1[0] > $sbss2[0]){ #sort reads: read1 should start earlier in query than read2
-			#print"X $sbss1[0] > $sbss2[0]\n";
-			my @tmp = @hit1; @hit1 = @hit2; @hit2 = @tmp;
-			@tmp = @sbss1; @sbss1 = @sbss2; @sbss2 = @tmp;
-		}
-		
-		
-				#push (@ret,\@hit1); next; #DEBUG
-
-		#query start/stop sorting..
-		my @quss1 = sort { $a <=> $b }($hit1[6],$hit1[7]);my @quss2 = sort { $a <=> $b }($hit2[6],$hit2[7]);
-		#overlap?
-		my $overlap = 0;
-		if ($sbss1[1] > $sbss2[0]){ $overlap= ( $sbss1[1] - $sbss2[0]);}# print "OVER $overlap\n";}#die "$cur[3] = $hit1[3] + $hit2[3] - ( $sbss1[1] - $sbss2[0])\n";}
-		$cur[3] = ($hit1[3] + $hit2[3]) - $overlap; #ALlength
-		if ($cur[3] <0){$cur[3]=$hit1[3];} #fatal.. recover with half useful value
-		
-		#print "$sbss1[1] > $sbss2[0] $sbss1[0]  $cur[3] $overlap\n";
-		$cur[2] = ($hit1[2] + $hit2[2] ) /2.0;#%id
-		$cur[11] = ($hit1[11] + $hit2[11]) * (1- $overlap/($hit1[3] + $hit2[3] ) );#bitscore
-		$cur[10] = ($hit1[10], $hit2[10])[$hit1[10] > $hit2[10]];  # min($hit1[10] + $hit2[10]); #eval
-		#die "@cur\n";
-		push (@ret,\@cur);
-		#print "$k \n@sbss1 @sbss2\n@hit1\n";
+		my $hit = mergeBlastPair($bl1{$subject}, $bl2{$subject});
+		$hit->[0] =~ s/\/[12]$//;
+		my $leftCount = ref($bl1{$subject}[-1]) eq 'HASH' ? $bl1{$subject}[-1]{read_count} : 1;
+		my $rightCount = ref($bl2{$subject}[-1]) eq 'HASH' ? $bl2{$subject}[-1]{read_count} : 1;
+		my $metadata = {read_count => $leftCount + $rightCount, mate => 0};
+		if (ref($hit->[-1]) eq 'HASH') { $hit->[-1] = $metadata; }
+		else { push @$hit, $metadata; }
+		push @ret, $hit;
 	}
-	#my @ret2 = values %ret;
 	return \@ret;
 }
 
@@ -1327,6 +1302,9 @@ sub bestBlHit($){
 sub help(){
 print "Routine to interpret diamond output files to specific datbases (CAZy, KEGG, eggNOG)\n";
 print "-i [diamond output]\n";
+print "-queryType reads|genes|merged (default reads; merged counts two reads per query)\n";
+print "Optional final input field MF4:read_count=1 or MF4:read_count=2 overrides the query multiplicity.\n";
+print "-minPercSbjCov [fraction of subject covered]; -minFractQueryCov is its legacy alias.\n";
 }
 
 

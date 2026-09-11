@@ -87,7 +87,7 @@ while (my $line = <$I>){
 	}
 	#die;
 }
-close $I;
+close $I or die "Cannot finish reading MAG report $MAGrep (reader status=$?): $!\n";
 
 my @MGSids = sort(keys(%MGinMGS));
 

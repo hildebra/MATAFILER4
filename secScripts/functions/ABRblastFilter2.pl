@@ -2,6 +2,7 @@
 #use warnings;
 use Mods::TamocFunc qw(sortgzblast uniq);
 use Mods::GenoMetaAss qw(gzipopen);
+use Mods::FuncTools qw(mergeBlastPair);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
@@ -142,33 +143,7 @@ sub combineBlasts($ $){
 			} else { $ret{$k} = $bl2{$k};}
 			next;
 		}
-		#pair
-		my $out_key = $k;
-		$out_key =~ s/\/\d$/\/12/;
-		$ret{$out_key} = [@{$bl1{$k}}];
-		my @hit1 = @{$bl1{$k}};
-		my @hit2 = @{$bl2{$k}};
-		
-		my @sbss1 = sort{ $a <=> $b }(($hit1[8],$hit1[9]));
-		my @sbss2 = sort{ $a <=> $b }($hit2[8],$hit2[9]);
-		#sort 
-		#print "$sbss1[0] > $sbss2[0]\n";
-		if ($sbss1[0] > $sbss2[0]){
-		#print"X";
-			my @tmp = @hit1; @hit1 = @hit2; @hit2 = @tmp;
-			@tmp = @sbss1; @sbss1 = @sbss2; @sbss2 = @tmp;
-		}
-		my @quss1 = sort { $a <=> $b }($hit1[6],$hit1[7]);my @quss2 = sort { $a <=> $b }($hit2[6],$hit2[7]);
-		#overlap?
-		my $overlap = 0;
-		if ($sbss1[1] > $sbss2[0]){ $overlap= ( $sbss1[1] - $sbss2[0]); }#die "${$ret{$k}}[3] = $hit1[3] + $hit2[3] - ( $sbss1[1] - $sbss2[0])\n";}
-		${$ret{$out_key}}[3] = $hit1[3] + $hit2[3] - $overlap; #ALlength
-		#print "$sbss1[1] > $sbss2[0] $sbss1[0]  ${$ret{$k}}[3] $overlap\n";
-		${$ret{$out_key}}[2] = ($hit1[2] + $hit2[2] ) /2;#%id
-		${$ret{$out_key}}[11] = ($hit1[11] + $hit2[11]) * (1- $overlap/($hit1[3] + $hit2[3] ) );#bitscore
-		${$ret{$out_key}}[10] = ($hit1[10], $hit2[10])[$hit1[10] > $hit2[10]];  # min($hit1[10] + $hit2[10]);
-		#die "@{$ret{$k}}\n";
-		#print "$k \n@sbss1 @sbss2\n@hit1\n";
+		$ret{$k} = mergeBlastPair($bl1{$k}, $bl2{$k});
 	}
 	
 	return \%ret;

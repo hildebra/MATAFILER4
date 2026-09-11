@@ -29,7 +29,7 @@ use vars qw($CONFIG_FILE);
 
 #load MF specific modules
 use Mods::GenoMetaAss qw(readMap readMapS getDirsPerAssmblGrp checkAssmblGrp lcp readFastHD prefixFAhd prefix_find 
-			gzipopen fileGZe fileGZs contig_stats_coverage_complete
+			gzipopen fileGZe fileGZs contig_stats_coverage_complete coverage_derivative_paths coverage_derivatives_complete
 			readFasta writeFasta systemW getAssemblPath  filsizeMB resetAsGrps
 			iniCleanSeqSetHR checkSeqTech is3rdGenSeqTech hasSuppRds 
 			addFileLocs2AssmGrp getRawLibrariesAssmGrp getCleanLibrariesAssmGrp
@@ -46,7 +46,7 @@ use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
 use Mods::FlagReference qw(printFlagHelp);
 use Mods::StatsLogReader qw(
-	read_stats_log_excerpt
+	read_stats_log_excerpt parse_bam_filter_counters
 	reset_stats_log_sampling
 	stats_log_sampling_summary
 );
@@ -64,7 +64,7 @@ use Mods::RibosomeState qw(
 );
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
-use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred handleSubmissionFailure);
+use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred submissionDependencyFailed handleSubmissionFailure);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
 use Mods::WorkflowRunner qw(run_workflow_preflight);
@@ -890,6 +890,13 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($closedSample) {
 		$loopSampleCompleted{$JNUM} = 1;
 		my $status = $closedSample->{outcome}{status};
+		# This member already advanced CntAss, but will skip prepPreAssmbl.
+		# Preserve its exclusion from preassembly even when it is not last.
+		if ($MFopt{DoAssembly} == 5
+				&& $status =~ /^skipped_(?:too_small|empty_input|cleaned_empty)$/) {
+			$AsGrps{$cAssGrp}{CntPreAssNoPrim} =
+				($AsGrps{$cAssGrp}{CntPreAssNoPrim} || 0) + 1;
+		}
 		my $riboEvidence = $closedSample->{components}{ribofind} || {};
 		$progStats{riboFindComplCnts}++
 			if $status eq 'completed' && $riboEvidence->{requested}
@@ -1249,7 +1256,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		foreach my $bwt2outDTT (@bwt2outD){
 			my $expectedMapCovGZ = "$bwt2outDTT/$bwt2ndMapNmds[$rwIdx]"."_".$SmplName."-0-smd.bam.coverage.gz"; #$bamcramMap : 2nd map only has .bam output
 			$rwIdx++;
-			system "rm -f $expectedMapCovGZ*";
+			(my $coverageStem = $expectedMapCovGZ) =~ s/\.gz$//;
+			system "rm -f $coverageStem*";
 			#$eFinMapCovGZ belongs to the assembly mapping and must not be cleared
 			#here; the loop below resets the secondary-map flags on its own.
 		}
@@ -1269,9 +1277,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			system "rm -f $expectedMapBam*";
 			last;
 		}
-		if ($MFopt{mapModeCovDo} && (!-e $expectedMapCovGZ.".median.percontig" || !-e $expectedMapCovGZ.".percontig"|| !-e $expectedMapCovGZ.".pergene")){
+		if ($MFopt{mapModeCovDo} && !coverage_derivatives_complete($expectedMapCovGZ)){
 			$boolScndCoverageOK=0;
-			system "rm -f $expectedMapCovGZ.*";
 		}
 	}
 	if (@bwt2outD == 0 ){$boolScndMappingOK = 1 ; $boolScndCoverageOK=1;}#|| !$MappingGo);	
@@ -1655,11 +1662,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			my $releaseName = $SmplName . "M" . $AsGrps{$cAssGrp}{CntAss};
 			print "Final assembly-group member $curSmpl is terminally empty; "
 				."releasing the shared assembly from earlier eligible members\n";
-			metagAssemblyRun(
+			my $externalScaffoldingDeps = metagAssemblyRun(
 				$cAssGrp, "$nodeSpTmpD/ass", $metagAssDir, $geneDir, $releaseName,
 				0, $metaGscaffDir, $assemblyFlag, $AssemblyGo, $ePreAssmbly,
 				$doPreAssmFlag, $postPreAssmblGo, $finalCommAssDir,
 			);
+			add2SampleDeps(\@sampleDeps, [$externalScaffoldingDeps]) if $externalScaffoldingDeps;
 			my $assemblyReleased = $AsGrps{$cAssGrp}{AssemblJobName} =~ /\S/;
 			if ($assemblyReleased) {
 				my $producedAssemblyDir = ($MFopt{DoAssembly} == 5 && $doPreAssmFlag)
@@ -1679,24 +1687,15 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 					append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps}, $deferredDeps);
 					$AsGrps{$cAssGrp}{PostAssemblCmd} = "";
 				}
-				my $binningJobDep = '';
-				if ($MFopt{DoMetaBat2} && !$doPreAssmFlag && !$ePreAssmblPck
-						&& !$binningComplete) {
-					# Binning consumes the assembly and all group mappings. The empty
-					# release member supplies neither reads nor coverage, but must not
-					# prevent the group binner from being chained to those producers.
-					append_job_dependencies(\$AsGrps{$cAssGrp}{BinDeps},
-						$AsGrps{$cAssGrp}{AssemblJobName}, $AsGrps{$cAssGrp}{prodRun});
-					my $binnerTmp = $nodeSpTmpD;
-					$binnerTmp = $smplTmpDir if ($MFopt{useBinnerScratch});
-					print "Submitting deferred assembly-group binner\n";
-					$binningJobDep = submitGenomeBinner(
-						$binnerTmp, $finAssLoc, $BinningOut, $cAssGrp, $smplIDs[-1],
-					);
-				}
+				# This empty member cannot supply the normal ContigStats context;
+				# final hybrid support mappings can also still be unpublished.
+				# Keep binning behind the normal mapping/statistics release path.
+				print "Not submitting assembly-group binning from terminally empty member $curSmpl; "
+					."the normal mapping and ContigStats prerequisites must be satisfied first\n"
+					if $MFopt{DoMetaBat2} && !$binningComplete;
 				add2SampleDeps(\@sampleDeps, [
 					$AsGrps{$cAssGrp}{AssemblJobName}, $AsGrps{$cAssGrp}{prodRun},
-					$AsGrps{$cAssGrp}{MapDeps}, $binningJobDep,
+					$AsGrps{$cAssGrp}{MapDeps},
 				]);
 			} else {
 				print "Shared assembly group $cAssGrp has no eligible assembly job yet; "
@@ -1708,8 +1707,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			}
 			$finalizeEmptySample->(
 				cleaned_empty => $cleanedEmpty,
-				# The small member's UZ work is irrelevant to the group release.
-				input_dependency => '', advance_loop => 0,
+				# Shared jobs can use this release member's scratch (e.g. binning).
+				input_dependency => normalise_job_dependencies(\@sampleDeps), advance_loop => 0,
 			);
 			MFnext($smplLockF, \@sampleDeps, $JNUM, $QSBoptHR);
 			loop2C_check($cAssGrp, \@sampleDeps);
@@ -1759,6 +1758,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $uplJobX = uploadRawFilePrep($smplTmpDir."uploadPrep/",$curSmpl,$jdep,1);
 	
 	push (@EBIjobs, $uplJob,$uplJobX);
+	# Both scopes use per-sample scratch and must finish before its cleanup.
+	add2SampleDeps(\@sampleDeps, [$uplJob, $uplJobX]);
 
 
 	#empty links and objects for merging of reads
@@ -1890,7 +1891,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	#non pareil (estimate community size etc)
 	if ($nonPareilFlag){
 		my $globalNPD = $baseOut."NonPareil/";
-		nopareil(libraryFiles($primaryCleanLibraries, 'r1'),$nonParDir, $globalNPD, $SmplName,$primaryDep);
+		my $nonPareilDep = nopareil(libraryFiles($primaryCleanLibraries, 'r1'),$nonParDir, $globalNPD, $SmplName,$primaryDep);
+		add2SampleDeps(\@sampleDeps, [$primaryDep, $mergJbN,
+			$AsGrps{$cAssGrp}{readDeps}, $nonPareilDep]);
 		MFnext($smplLockF,\@sampleDeps,$JNUM ,$QSBoptHR); 
 		loop2C_check($cAssGrp,\@sampleDeps);next;
 	}
@@ -1964,8 +1967,9 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		die "Can't do assembly and pseudoassembly on the same sample!\n" if ($pseudAssFlag || $MFopt{pseudoAssembly});
 		#print "preAsmChk: $ePreAssmbly, $ePreAssmblPck, $doPreAssmFlag, $postPreAssmblGo\n";
 		#die;
-		metagAssemblyRun( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$geneDir,  $SmplNameX,$scaffoldFlag,$metaGscaffDir,
+		my $externalScaffoldingDeps = metagAssemblyRun( $cAssGrp,"$nodeSpTmpD/ass",$metagAssDir ,$geneDir,  $SmplNameX,$scaffoldFlag,$metaGscaffDir,
 					$assemblyFlag,$AssemblyGo,$ePreAssmbly, $doPreAssmFlag, $postPreAssmblGo,$finalCommAssDir);
+		add2SampleDeps(\@sampleDeps, [$externalScaffoldingDeps]) if $externalScaffoldingDeps;
 		if (deferLoopProducerWave(
 				'assembly', $AsGrps{$cAssGrp}{AssemblJobName},
 				$smplLockF, $cAssGrp, \@sampleDeps,
@@ -2595,8 +2599,8 @@ sub sampleCompletionComponents {
 		if ($MFopt{mapModeCovDo}) {
 			for my $suffix (qw(median.percontig percontig pergene)) {
 				push @secondaryMappingChecks, {
-					id => "reference_".$i."_".$suffix, kind => 'nonempty',
-					path => "$prefix.coverage.gz.$suffix",
+					id => "reference_".$i."_".$suffix, kind => 'nonempty_any',
+					paths => coverage_derivative_paths("$prefix.coverage.gz", $suffix),
 				};
 			}
 		}
@@ -4396,6 +4400,11 @@ sub postSubmQsub {
 			push @submitted, deferredSubmissionDependency();
 			last;
 		}
+		if (submissionDependencyFailed($command_dependencies)) {
+			push @submitted, handleSubmissionFailure($QSBoptHR,
+				"Skipping deferred submission for $script_path because an upstream submission failed");
+			last;
+		}
 		my $augmented = augment_deferred_submission(
 			qmode => $QSBoptHR->{qmode}, command => $command, script => $script,
 			dependencies => $command_dependencies, run_tag => $QSBoptHR->{rTag},
@@ -4562,7 +4571,10 @@ sub prepareDiamondRerun($){
 	return unless ($MFopt{redoDiamondParse});
 	my $secCogBin = getProgPaths("secCogBin_scr");
 	foreach my $term (@alldbs){
-		unlink glob("$curOutDir/diamond/dia.$term.blast.*.stone");
+		for my $stone (glob("$curOutDir/diamond/dia.$term.blast.*.stone")) {
+			next if $stone =~ /\.read-counts-v1\.stone$/;
+			unlink $stone or die "Cannot remove Diamond parse marker $stone: $!\n";
+		}
 		# Preserve the legacy parser input until its XX layout is replaced by a
 		# declared stage artifact.
 		system("$secCogBin -i $curOutDir/diamond/XX -DB $term -eval $MFopt{diaEVal} -mode 4") == 0
@@ -5645,6 +5657,13 @@ sub runDiamond(){
 				$cmd .= "$mmseqs2Bin easy-search $query $CLrefDBD$refDB.db.mms2 $outF.gz $tmpP --threads $ncore --max-accept 500 --compressed 1 -s 4 $mmsOfmt \n";
 				}
 				
+				# The parser's reads mode already counts ordinary reads once. Only
+				# merged pairs need an override; avoid rewriting every hit file.
+				if ($curDB ne 'ABR' && $kk == 3) {
+					my $readCount = 2;
+					$cmd .= "zcat $outF.gz | awk '{print \$0 \"\\tMF4:read_count=$readCount\"}' | $pigzBin -c > $outF.counted.gz\n";
+					$cmd .= "mv $outF.counted.gz $outF.gz\n";
+				}
 				#$cmd .= "$diaBin view -a $outF.tmp -o $outF -f tab\nrm $outF.tmp.daa\n";
 				if ($kk==0 || $kk == 3){#single or ext fragments, doesn't need to be sorted
 					push(@collectSingl,$outF.".gz");
@@ -5658,6 +5677,9 @@ sub runDiamond(){
 		
 		my $out = $outD."dia.$shrtDB.blast";
 		my $outgz = "$out.srt.gz";
+		my $provenanceStone = "$outgz.read-counts-v1.stone";
+		# Old merged-library search files lack multiplicity; regenerate those hits.
+		my $needProvenance = $curDB ne 'ABR' && exists($RdLibs{3}) && !-e $provenanceStone;
 		#die "$outgz\n";
 		#unzip, sort, zip
 		if (@collect) {
@@ -5670,9 +5692,10 @@ sub runDiamond(){
 			#append on gzip, can be done with gzip
 			$cmd .= "cat ".join( " ",@collectSingl) ." >> $outgz\nrm -f " . join( " ",@collectSingl) ."\n"; #$out.srt
 		}
+		$cmd .= "touch $provenanceStone\n" if $curDB ne 'ABR';
 		$cmd.= "rm -r $tmpP\n";
 		#die $cmd."\n";
-		my $cmd2 = "$secCogBin -i $outgz -DB $shrtDB -eval $MFopt{diaEVal} -percID $MFopt{DiaPercID} -minAlignLen $MFopt{DiaMinAlignLen} -minFractQueryCov $MFopt{DiaMinFracQueryCov} -mode 0 -LF $CLrefDBD/$refDB.length -reportDomains $getQSeq -DButil $CLrefDBD -tmp $tmpP";
+		my $cmd2 = "$secCogBin -i $outgz -DB $shrtDB -eval $MFopt{diaEVal} -percID $MFopt{DiaPercID} -minAlignLen $MFopt{DiaMinAlignLen} -minPercSbjCov $MFopt{DiaMinFracQueryCov} -mode 0 -queryType reads -LF $CLrefDBD/$refDB.length -reportDomains $getQSeq -DButil $CLrefDBD -tmp $tmpP";
 		#$cmd2 .= " " if ($getQSeq);
 		if ($curDB eq "ABR"){
 			my $KrisABR = getProgPaths("KrisABR_scr");#"perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/ABRblastFilter.pl";
@@ -5694,7 +5717,7 @@ sub runDiamond(){
 		$globDep = "" if ($MFopt{globalDiamondDependence}->{$curDB} eq "$shrtDB-1");
 		
 		my $memu = $MFopt{diamondMem} . "G"; my $tmpCmd;
-		if (!-d $outD || !(-e "$out" || -e "$out.gz"|| -e "$out.srt.gz") ){ #diamond alignments
+		if ($needProvenance || !-d $outD || !(-e "$out" || -e "$out.gz"|| -e "$out.srt.gz") ){ #diamond alignments
 			$jobName = "_D$shrtDB$JNUM"; 
 			my @preConstr = @{$QSBoptHR->{constraint}};
 			push(@{$QSBoptHR->{constraint}}, $avx2Constr);
@@ -5737,8 +5760,9 @@ sub nopareil(){
 	#R part
 	#source('/g/bork5/hildebra/bin/nonpareil/utils/Nonpareil.R');
 	#Nonpareil.curve('$outD/$sumOut');
-	my $jobName = "_NP$JNUM"; my $tmpCmd;
+	my $jobName = $jobd; my $tmpCmd;
 	if (!-d $outD || !-e "$outD/$sumOut"){
+		$jobName = "_NP$JNUM";
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
 		($jobName,$tmpCmd) = qsubSystem($logDir."NonPar.sh",$cmd,1,"42G",$jobName,$jobd,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
 		$QSBoptHR->{tmpSpace} =$tmpSHDD;
@@ -5798,7 +5822,7 @@ sub calcCoverage2nd
 	my $jobName = ""; $QSBoptHR->{LocationCheckStrg}=""; my $tmpCmd="";
 	my $cmd = "$readCov_Bin $cov $gff $RL";
 	my $qdir = $logDir; $qdir = ${$dirsHr}{qsubDir} if (exists( ${$dirsHr}{qsubDir} ));
-	if (!-s $cov.".pergene" || !-s $cov.".percontig" || !-s $cov.".median.percontig" ){
+	if (!coverage_derivatives_complete($cov)){
 		$jobName = "_COV$JNUM";
 		$jobName = "$cstNme"."_$JNUM" if ($cstNme ne "");
 		#die "$cmd\n";
@@ -5863,7 +5887,7 @@ sub GapFillCtgs{
 	my @inserts;
 	my $prefi = "GF";
 	my $numCore = 16;
-	mkdir($GFdir_a.$prefi);
+	make_path($GFdir_a.$prefi) unless -d $GFdir_a.$prefi;
 	my $log = $GFdir_a.$prefi."/GapFiller.log";
 	#system("mkdir -p $GFdir_a$prefi");
 	my $GFlib = ($GFdir_a."GFlib.opt");
@@ -5892,6 +5916,9 @@ sub GapFillCtgs{
 #scaffolding via mate pairs
 sub scaffoldCtgs{
 	my ($AsgHR,$ASG, $externalLibraries, $refCtgs, $tmpD1,$outD,$dep,$Ncore,$smplName,$spadesRef,$xtraTag) = @_;
+	# Legacy scaffolding reads raw group libraries even when the assembly is
+	# already published and supplies no assembly-job dependency of its own.
+	$dep = normalise_job_dependencies($dep, $AsgHR->{$ASG}{UnzpDeps});
 	my $libraries = getRawLibrariesAssmGrp($AsgHR,$ASG,0);
 	my $pairs = libraryPairs($libraries);
 	my $bwt2Bin = getProgPaths("bwt2");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
@@ -9539,7 +9566,7 @@ sub getMapStats{
 		$dobwtStat=3;
 	}elsif($alignStats =~ m/\[M::worker_pipeline/){
 		$dobwtStat=2;
-	}elsif (@spl > 12 && $alignStats =~ m/reads; of these:/){
+	}elsif ($alignStats =~ m/reads; of these:/){
 		$dobwtStat=1;
 		for my $candidate (0 .. $#spl) {
 			if ($spl[$candidate] =~ m/\d+ reads; of these:/) { $idx = $candidate; last; }
@@ -9554,53 +9581,39 @@ sub getMapStats{
 	my @columns = qw(ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign DisconcAlign SingleUniqAlign SingleMultiAlign);
 	my %result = map { $_ => '' } @columns;
 	
-	my $incoming =0;my $retained =0;my $removed = 0;
-	if ($alignStats =~ m/^Inentries: (\d+)/m){
-		my @matc = $alignStats =~ m/^Inentries: (\d+)/mg;		foreach (@matc) {$incoming += int($_);}
-		 @matc =$alignStats =~ m/^TotalRetained: (\d+)/mg;	foreach (@matc) {$retained += int($_);}
-		 @matc = $alignStats =~ m/^TotalRm: (\d+)/mg;	foreach (@matc) {$removed += int($_);}
-		 $locStats{totReadPairs} = $incoming;
-		 $locStats{uniqAlign} = $retained;
-	} else {
-		$locStats{totReadPairs} = -1;
-		$locStats{uniqAlign} = -1;
-	}
-	
-	if (!$dobwtStat){
-		#$outStr .= "\t" x 7;
-		#die "X!\n";
-	} elsif ($dobwtStat == 1){#$alignStats =~ m/reads; of these:/){
-		my ($rhr) = bwtLogRd(\@spl,$idx,\%locStats);
-		%locStats = %{$rhr};
+	my $filter = parse_bam_filter_counters($alignStats);
+	if ($dobwtStat == 1) {
+		my $rhr = bwtLogRd(\@spl, $idx, \%locStats);
+		%locStats = %$rhr;
+		# Bowtie's input total counts pairs for paired libraries and reads for SE.
+		# Preserve that total and the aligner's category rates in their original units.
 		$result{ReadsPaired} = $locStats{totReadPairs};
-		$result{AlignedReads} = $retained;
-		$result{OverallAlignment} = $locStats{AlignmRate};
+		$result{OverallAlignment} = $locStats{AlignmRate} // '';
 		if (($locStats{totReadPairs} || 0) > 0) {
-			$result{UniqueAlgned} = $locStats{uniqAlign}/$locStats{totReadPairs}*100;
-			$result{MultAlign} = $locStats{multAlign}/$locStats{totReadPairs}*100;
-			$result{DisconcAlign} = $locStats{DisconcAlign}/$locStats{totReadPairs}*100;
-			$result{SingleUniqAlign} = $locStats{SinglAlign}/$locStats{totReadPairs}*100;
-			$result{SingleMultiAlign} = $locStats{SinglAlignMult}/$locStats{totReadPairs}*100;
+			my %categories = (UniqueAlgned => 'uniqAlign', MultAlign => 'multAlign',
+				DisconcAlign => 'DisconcAlign', SingleUniqAlign => 'SinglAlign',
+				SingleMultiAlign => 'SinglAlignMult');
+			for my $column (keys %categories) {
+				my $count = $locStats{$categories{$column}};
+				$result{$column} = 100 * $count / $locStats{totReadPairs}
+					if defined($count) && $count >= 0;
+			}
 		}
-	} elsif ($dobwtStat == 2){ #minimap2
-		my @matches = ($alignStats =~ m/\[M::worker_pipeline::.*\] mapped (\d+) sequences/g);
-		#print "@matches\n";
-		my $sum=0; $sum += $_ foreach (@matches);
-		if ($sum>0){
-			my $frac = (1 - ($removed/$sum)) * 100;
-			@result{qw(ReadsPaired AlignedReads OverallAlignment)} = ($sum, $retained, $frac);
-		}
-		#die "minimap!!$sum\n";
-	} elsif ($dobwtStat == 3){ #strobealign
-		if ($incoming > 0){
-			#$locStats{totReadPairs} = -1 if (!exists($locStats{totReadPairs}));
-			my $frac = 0; $frac = $incoming/$locStats{totReadPairs} if( $locStats{totReadPairs}>0);
-			$locStats{AlignmRate}=$frac;
-			@result{qw(ReadsPaired AlignedReads OverallAlignment UniqueAlgned)} =
-				($locStats{totReadPairs}, $retained, $frac,
-				 $locStats{uniqAlign}/$locStats{totReadPairs}*100);
-		}
+	} elsif ($dobwtStat == 2) {
+		my @matches = $alignStats =~ /\[M::worker_pipeline::.*\] mapped (\d+) sequences/g;
+		my $sum = 0; $sum += $_ for @matches;
+		$result{ReadsPaired} = $sum if @matches;
 	}
+	if ($filter) {
+		# These are SAM record counts, including already-unmapped and malformed
+		# records in the denominator. They do not establish unique-read counts.
+		# Retain the historical output column names for table compatibility.
+		$result{ReadsPaired} = $filter->{records} if $result{ReadsPaired} eq '';
+		$result{AlignedReads} = $filter->{retained};
+		$result{OverallAlignment} = $filter->{records}
+			? 100 * $filter->{retained} / $filter->{records} : 0;
+	}
+
 	return \%result;
 }
 sub optiDups{
@@ -10487,7 +10500,7 @@ sub prepPreAssmbl{
 		return ($ePreAssmbly,$doPreAssmFlag,0,0);
 	}
 	
-	if (!$hasPrimary){#should not be included at all: nothing to assemble within preassembly..
+	if (!$hasPrimary || $map{$curSmpl}{inputFilesEmpty}){#nothing to assemble within preassembly
 		$AsGrps{$cAssGrp}{CntPreAssNoPrim}++ ;
 		my $postAssemblyGo = hybrid_group_ready(
 			$AsGrps{$cAssGrp}{CntPreAss},
@@ -10503,12 +10516,9 @@ sub prepPreAssmbl{
 		#condition: right assembly mode and actually secondary support reads
 		$doPreAssmFlag = 1 ;
 		#print "XAS\n";
-		if ((!$eCOVmv && !$eCOV) || !$ePreAssmbly || $map{$curSmpl}{inputFilesEmpty}){
+		if ((!$eCOVmv && !$eCOV) || !$ePreAssmbly){
 			#print "preAssmbl: nothing done yet.. \n$mvD\n$metagD\n";
 			#die;
-			if ($map{$curSmpl}{inputFilesEmpty}){
-				$AsGrps{$cAssGrp}{CntPreAssNoPrim} ++ ; #needs to be counted as "existing"
-			}
 			return ($ePreAssmbly,$doPreAssmFlag, 0, $ePreAssmblPck );
 		}
 	} else {
@@ -10543,7 +10553,8 @@ sub prepPreAssmbl{
 	my $finJobs = ($AsGrps{$cAssGrp}{CntPreAss}+$AsGrps{$cAssGrp}{CntPreAssNoPrim} ); #+ $AsGrps{$cAssGrp}{CntPreAssMiss}
 	print "FIN: $finJobs ($AsGrps{$cAssGrp}{CntPreAss} packages + "
 		."$AsGrps{$cAssGrp}{CntPreAssNoPrim} without-primary) >= $AsGrps{$cAssGrp}{CntAimAss}\n";
-	$PostAssemblyGo = 1 if (!$doPreAssmFlag && ( $finJobs >= $AsGrps{$cAssGrp}{CntAimAss}) ); #has already seen enough complete preAssmblies
+	$PostAssemblyGo = hybrid_group_ready($AsGrps{$cAssGrp}{CntPreAss},
+		$AsGrps{$cAssGrp}{CntPreAssNoPrim}, $AsGrps{$cAssGrp}{CntAimAss}) unless $doPreAssmFlag;
 	$doPreAssmFlag = 1 if (!$PostAssemblyGo); 
 	#print "-e $CSdir/Coverage.percontig   $metagD/$checkpointNames{preAssemblyDone}\n" ;
 	#print "preAssm:  $doPreAssmFlag     $AsGrps{$cAssGrp}{CntPreAss} +$AsGrps{$cAssGrp}{CntPreAssNoPrim} >= $AsGrps{$cAssGrp}{CntAimAss} :: $ePreAssmblPck $PostAssemblyGo\n";
@@ -11025,7 +11036,9 @@ sub metagAssemblyRun{
 		}
 	}
 	
-	#external contigs to be scaffolded (e.g. TEC2 extracts)
+	# Retain external scaffolding for legacy workflows. Its consumers must
+	# protect sample scratch without delaying unrelated assembly mapping.
+	my $externalScaffoldingDeps = '';
 	if ($scaffTarExternal ne ""){
 	#die "inscaff\n";
 	#die "@scaffTarExternalOLib1\n";
@@ -11034,14 +11047,16 @@ sub metagAssemblyRun{
 				[],
 				$scaffTarExternal,$nodeTmp."/SCFEX$scaffTarExternalName/",$metaGscaffDirExt,$AsGrps{$cAssGrp}{AssemblJobName},$MFopt{MapperCores}, 
 				$SmplNameX,0,$scaffTarExternalName);
+		append_job_dependencies(\$externalScaffoldingDeps, $sdep);
 	#my($ar1,$ar2,$scaffolds,$GFdir_a) = @_; #.= "_GFI1";
-		if (@scaffTarExternalOLib1 > 0 ){
+		if ($newScaff ne '' && @scaffTarExternalOLib1 > 0 ){
 			#die "in gapfill\n$newScaff\n";
 			my $gapFillLibraries = readLibrariesFromArrays(
 				sample => $SmplNameX, scope => 'primary', phase => 'external',
 				technology => '', r1 => \@scaffTarExternalOLib1, r2 => \@scaffTarExternalOLib2,
 			);
-			GapFillCtgs($gapFillLibraries,$newScaff,$metaGscaffDirExt."GapFill/",$sdep,$scaffTarExternalName);
+			my $gapFillDep = GapFillCtgs($gapFillLibraries,$newScaff,$metaGscaffDirExt."GapFill/",$sdep,$scaffTarExternalName);
+			append_job_dependencies(\$externalScaffoldingDeps, $gapFillDep);
 		}
 
 		#last;
@@ -11049,7 +11064,7 @@ sub metagAssemblyRun{
 
 	
 	
-	return;
+	return $externalScaffoldingDeps;
 } 
 
 

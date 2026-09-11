@@ -19,7 +19,7 @@ ok(index($source, q{-canopies " . _shell_quote("$canopyExpectedDir/clusters.txt"
 ok(index($source, q{if ($mode eq 'geneCat' && $doMags)}) >= 0, 'MGS-only checker and binner constraints are conditional on doMags');
 ok(index($source, q{if $mode eq 'geneCat' && $doStrains && !$doMags}) >= 0, 'strain analysis cannot be silently requested while MGS is disabled');
 ok(index($source, q{clusterSingleStep($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,"",$COGdep)}) >= 0, 'single-step fire mode does not duplicate the accumulated command buffer');
-ok(index($source, q{clusterMultiStep($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,"",$COGdep)}) >= 0, 'multi-step fire mode does not duplicate the accumulated command buffer');
+unlike($source, qr/clusterMultiStep|sub readSam|1stepClust|allinClust/, 'obsolete multi-step option, implementation and SAM parser are removed');
 ok(index($source, q{die "clustering failed\n" if $submitLocal}) >= 0, 'deferred clustering is not checked before its generated commands run');
 ok(index($source, q{if (!_stone_valid($FMGstone, $cdhID))}) >= 0, 'fire mode includes marker extraction before marker LCA');
 ok(index($source, q{FuncAssign.done.sh}) >= 0, 'functional assignment has a convergence checkpoint job');

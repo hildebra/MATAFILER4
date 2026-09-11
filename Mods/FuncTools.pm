@@ -4,6 +4,7 @@ use Cwd 'abs_path';
 #use File::chdir;
 
 use strict;
+use List::Util qw(min max);
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::TamocFunc qw( getSpecificDBpaths);
@@ -13,8 +14,41 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt );
 
 
 use Exporter qw(import);
-our @EXPORT_OK = qw(passBlast lambdaBl assignFuncPerGene calc_modules readGene2Func readGene2COG);
+our @EXPORT_OK = qw(mergeBlastPair passBlast lambdaBl assignFuncPerGene calc_modules readGene2Func readGene2COG);
 
+
+# Combine BLAST tabular statistics for two hits to the same subject. Subject
+# coordinates are inclusive and may run in either direction. For ungapped hits
+# this removes the exact shared length. For gapped hits, interval bounds cannot
+# recover shared columns: estimate them using the smaller column density, capped
+# by each hit's length. Keep the existing mean-identity and scaled-score policy.
+sub mergeBlastPair {
+	my ($left, $right) = @_;
+	die "Cannot merge BLAST hits to different subjects\n" unless $left->[1] eq $right->[1];
+	for my $hit ($left, $right) {
+		die "Invalid BLAST alignment length\n" unless defined($hit->[3]) && $hit->[3] > 0;
+		for my $index (8, 9) {
+			die "Invalid BLAST subject coordinate\n"
+				unless defined($hit->[$index]) && $hit->[$index] =~ /^\d+$/ && $hit->[$index] > 0;
+		}
+	}
+	my ($lstart, $lend) = sort { $a <=> $b } @$left[8, 9];
+	my ($rstart, $rend) = sort { $a <=> $b } @$right[8, 9];
+	my $overlap = max(0, min($lend, $rend) - max($lstart, $rstart) + 1);
+	my $shared = min($left->[3], $right->[3],
+		$overlap * min($left->[3] / ($lend - $lstart + 1),
+		              $right->[3] / ($rend - $rstart + 1)));
+	$shared = int($shared + 0.5);
+	my @merged = @$left;
+	my $total = $left->[3] + $right->[3];
+	$merged[3] = $total - $shared;
+	$merged[2] = ($left->[2] + $right->[2]) / 2;
+	$merged[11] = ($left->[11] + $right->[11]) * $merged[3] / $total;
+	$merged[10] = min($left->[10], $right->[10]);
+	# Downstream consumers of this synthetic hit need its full subject envelope.
+	@merged[8, 9] = (min($lstart, $rstart), max($lend, $rend));
+	return \@merged;
+}
 
 sub passBlast($ $ $){
 	my $spl = shift;my $reqID = shift; my $inM8 = shift;
@@ -139,8 +173,6 @@ sub readGene2COG{
 	close I;
 	return (\%g2c,\%c2cat);
 }
-sub min ($$) { $_[$_[0] > $_[1]] }
-sub max ($$) { $_[$_[0] < $_[1]] }
 
 
 sub buildFSdb{
@@ -356,7 +388,7 @@ sub assignFuncPerGene{
 		$cmd .= "mv $allAss ${allAss}geneAss.gz\ntouch $allAss\n";
 	} else {
 		$cmd .= "$secCogBin -i $allAss -DB $shrtDB -singleSpecies 1  -bacNOG $otpsHR->{bacNOG} -KOfromNOG 0 -eggNOGmap 1 -calcGeneLengthNorm 0 -lenientCardAssignments 2 ";
-		$cmd .= "-mode 2 -CPU $ncore -percID $otpsHR->{percID} -LF $DBpath/$refDB.length -DButil $DBpath -tmp $tmpD2 -eggNOGmap 0 -minPercSbjCov $otpsHR->{minPercSbjCov} ";
+		$cmd .= "-mode 2 -queryType genes -CPU $ncore -percID $otpsHR->{percID} -LF $DBpath/$refDB.length -DButil $DBpath -tmp $tmpD2 -eggNOGmap 0 -minPercSbjCov $otpsHR->{minPercSbjCov} ";
 		$cmd .= "-minBitScore $otpsHR->{minBitScore} -minAlignLen $otpsHR->{minAlignLen} -eval $otpsHR->{eval}\n";
 	}
 

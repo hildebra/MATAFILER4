@@ -20,6 +20,7 @@ ena_sra_downloader	perl [MFLRDir]/secScripts/fileManage/ENASRAdl.pl
 
 #elevated MF3 scripts (main routines)
 geneCat_scr	perl [MFLRDir]/secScripts/geneCat.pl
+writeCheckpoint_scr	perl [MFLRDir]/helpers/writeCheckpoint.pl
 MAGpipe	perl [MFLRDir]/secScripts/MGS.pl
 
 
@@ -28,7 +29,7 @@ fastHdChkENA	perl [MFLRDir]/secScripts/composition/checkFQhds4ENA.pl
 cLSUSSU_scr	perl [MFLRDir]/secScripts/miTag/catchLSUSSU.pl
 lotusLCA_cLSU_scr	[MFLRDir]/secScripts/miTag/lotus_LCA_blast3.pl
 krakCnts_scr	[MFLRDir]/secScripts/GC/krak_count_tax.pl
-genelength_scr	[MFLRDir]/secScripts/assemblies/geneLengthFasta.pl
+genelength_scr	perl [MFLRDir]/secScripts/assemblies/geneLengthFasta.pl
 secCogBin_scr	[MFLRDir]/secScripts/functions/parseBlastFunct2.pl
 KrisABR_scr	perl [MFLRDir]/secScripts/functions/ABRblastFilter2.pl
 sepCts_scr	perl [MFLRDir]/secScripts/assemblies/separateContigs.pl
@@ -42,12 +43,13 @@ buildTree_scr	perl [MFLRDir]/secScripts/phylo/buildTree5.pl	env:MF4phylo
 sizSplit_scr	[MFLRDir]/secScripts/assemblies/splitFNAbyLength.pl
 contigKgdSplit_scr	[MFLRDir]/secScripts/assemblies/sortCtgKingdom.pl
 contigKgdSplit_scr2	[MFLRDir]/secScripts/assemblies/sortCtgKingdom2.pl
-calcGC_scr	[MFLRDir]/secScripts/composition/calcGC.pl
+calcGC_scr	perl [MFLRDir]/secScripts/composition/calcGC.pl
 sortSepReLen_scr	[MFLRDir]/secScripts/assemblies/sepReadLength.pl
-extre100_scr	[MFLRDir]/secScripts/GC/extrAllE100GC.pl
+extre100_scr	perl [MFLRDir]/secScripts/GC/extrAllE100GC.pl
 decoyDB_scr	[MFLRDir]/secScripts/assemblies/deployMapDB.pl
 bamHdFilt_scr	[MFLRDir]/secScripts/assemblies/correctBamHD.pl
-hmmBestHit_scr	[MFLRDir]/secScripts/functions/bmn-HMMerBestHit.py
+# Legacy HMM best-hit helper uses Python 2 syntax.
+hmmBestHit_scr	python2 [MFLRDir]/secScripts/functions/bmn-HMMerBestHit.py
 mrgDia_scr	[MFLRDir]/secScripts/functions/combine_DIA.pl
 mrgMiTag_scr	[MFLRDir]/secScripts/miTag/miTagTaxTable.pl
 mrgMOUT2_scr	perl [MFLRDir]/secScripts/composition/mrgMotu2.pl
@@ -188,6 +190,19 @@ mreps	mreps
 #more essential programs are usually listed first in the lists
 
 ## general purpose/OS ##
+cat	cat
+cp	cp
+mv	mv
+rm	rm
+mkdir	mkdir
+awk	awk
+sed	sed
+sort	sort
+head	head
+tail	tail
+cut	cut
+touch	touch
+envsubst	envsubst
 wget	wget
 pigz	pigz
 gzip	gzip
@@ -364,6 +379,8 @@ fastq2phylip_scr
 gapfiller
 growthP
 kaijuDir
+kaiju	kaiju
+kaiju_addTaxonNames	kaiju-addTaxonNames
 kraken	kraken
 lambdaIdx	lambda_indexer
 maxBin
@@ -404,6 +421,7 @@ metaMDBG	metaMDBG
 
 ## gene catalogue ##
 cdhit	cd-hit
+cdhit_est	cd-hit-est
 mmseqs2	mmseqs
 
 

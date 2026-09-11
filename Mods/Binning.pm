@@ -110,32 +110,20 @@ sub minQualFilter($ $ $ $ $){
 	return ($hr1, $hr2);
 }
 
-sub MB2assigns($ $){
-	my ($inF,$IQ) = @_;
-	my %ret;
-	#print "$inF\n";
-	open I,"<$inF" or die "Can't open Binner output $inF\n";
-	while (<I>){
-		chomp; next if /^\s*$/;
-		my @spl  = split /\t/, $_, -1;
-		die "Malformed binner assignment in $inF at line $.\n" unless @spl >= 2 && length($spl[0]) && length($spl[1]);
-		next if $spl[0] eq 'Sequence ID';
-		next if ($spl[1] eq "0");
-		push(@{$ret{$spl[1]}}, $spl[0]);
-	}
-	close I;
-	
-	my $rQHR = readCMquals($IQ);
-	foreach my $bin (keys %ret) {
-		die "No quality record for assigned bin '$bin' in $IQ\n" unless exists $rQHR->{$bin};
-	}
-	#print "$inF, $IQ ". scalar(keys %{$rQHR}) ."\n";
-
-	return (\%ret,$rQHR);
+# With a quality file, retain the historical (assignments, quality) return.
+# Without one, return assignments for callers preparing the quality analysis.
+sub MB2assigns($;$){
+	my ($inF, $IQ) = @_;
+	return _readBinAssignments($inF, $IQ, 0);
 }
 
 sub MB2assignedBinIds {
 	my ($inF, $IQ) = @_;
+	return _readBinAssignments($inF, $IQ, 1);
+}
+
+sub _readBinAssignments {
+	my ($inF, $IQ, $idsOnly) = @_;
 	my %assigned;
 	open my $input, '<', $inF or die "Can't open Binner output $inF\n";
 	while (my $line = <$input>) {
@@ -146,9 +134,14 @@ sub MB2assignedBinIds {
 			unless @fields >= 2 && length($fields[0]) && length($fields[1]);
 		next if $fields[0] eq 'Sequence ID';
 		next if $fields[1] eq '0';
-		$assigned{$fields[1]} = 1;
+		if ($idsOnly) {
+			$assigned{$fields[1]} = 1;
+		} else {
+			push @{$assigned{$fields[1]}}, $fields[0];
+		}
 	}
 	close $input or die "Cannot close Binner output $inF: $!\n";
+	return \%assigned unless defined $IQ;
 
 	my $quality = readCMquals($IQ);
 	for my $bin (keys %assigned) {
@@ -384,7 +377,7 @@ sub getRepresentBins{
 			#print "MGS $curMGS repr: $spl[0]\n";
 		}
 	}
-	close $I;
+	close $I or die "Cannot finish reading MAG report $guide (reader status=$?): $!\n";
 	
 	print "Found representative for ". scalar(keys %ret). " MGS\n";
 	return \%ret;
@@ -484,7 +477,7 @@ sub getRepresentBinsPerFamily{ #needs some work
 	}
 	# The loop transition flushes every group except the final MGS in the file.
 	$flushFamilyRepresentatives->();
-	close $I;
+	close $I or die "Cannot finish reading MAG report $guide (reader status=$?): $!\n";
 	
 	print "Found representative for ". scalar(keys %ret). " MGS, $rejQuali rejected on Quali\n";
 	print "Identified $famFnd families, $assmGrpFnd assembly groups, $noGrpFnd fallbacks\n";

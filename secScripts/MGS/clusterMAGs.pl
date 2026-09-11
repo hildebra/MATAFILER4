@@ -9,7 +9,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(readMap readClstrRev readClstrRevContigSubset readClstrRevSmplCtgGenSubset getDirsPerAssmblGrp  getAssemblPath systemW gzipopen parse_duration);
 use Mods::Binning qw (getBinSubdirName runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns minQualFilter calcLCAcompl readCMquals);
 use Mods::geneCat qw(readMG_LCA);
-use Mods::CatalogPaths qw(resolve_catalog_maps);
+use Mods::CatalogPaths qw(resolve_catalog_maps filter_catalog_maps);
 
 
 sub countUpBin;
@@ -72,26 +72,8 @@ sub mapsWithoutEmptySamples {
 		next unless defined($work_dir) && length($work_dir);
 		$empty{$sample} = 1 if -e "$work_dir/SMPL.empty";
 	}
-	return ($map_files, []) unless %empty;
-
-	make_path($target_dir);
-	my @filtered_maps;
-	my $map_index = 0;
-	for my $input_map (split /,/, $map_files) {
-		my $output_map = "$target_dir/map.$map_index.txt";
-		open my $input, '<', $input_map or die "Cannot open map $input_map: $!\n";
-		open my $output, '>', $output_map or die "Cannot write filtered map $output_map: $!\n";
-		while (my $line = <$input>) {
-			my ($sample) = split /\t/, $line, 2;
-			next if exists $empty{$sample};
-			print {$output} $line or die "Cannot write filtered map $output_map: $!\n";
-		}
-		close $input or die "Cannot close map $input_map: $!\n";
-		close $output or die "Cannot close filtered map $output_map: $!\n";
-		push @filtered_maps, $output_map;
-		$map_index++;
-	}
-	return (join(',', @filtered_maps), [sort keys %empty]);
+	my $empty_samples = [sort keys %empty];
+	return (filter_catalog_maps($map_files, $empty_samples, $target_dir), $empty_samples);
 }
 
 

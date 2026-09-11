@@ -35,10 +35,13 @@ opendir(DIR, $inD) or die "Can't find motu dir: $inD\n";
 			#only needs to be done once
 			$taxo =~ s/\|/;/g;
 			$taxo =~s/[dkpcofgs]__//g;
-			next if (exists $tax{$spl[0]});
-			$tax{$spl[0]} = $taxo;
-			my @lphy = split /;/,$taxo;
-			@lphy = ("?","?","?","?","?","?","?") if ($taxo eq "-1" || $taxo eq "unassigned");
+			unless (exists $tax{$spl[0]}) {
+				my @lineage = split /;/, $taxo, -1;
+				@lineage = ("?") x 7 if ($taxo eq "-1" || $taxo eq "unassigned");
+				$tax{$spl[0]} = \@lineage;
+			}
+			# The lineage is shared, but every sample contributes abundance.
+			my @lphy = @{$tax{$spl[0]}};
 			my $ntax = "";
 			die "mrgMotu2:: not enough tax levels for entry: @lphy , motu $spl[0]\n" if (@lphy != 7 );
 			for (my $lvl =0; $lvl < 7; $lvl ++){
