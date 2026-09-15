@@ -28,6 +28,8 @@ GetOptions(
 	'fasterq-dump=s' => \$opt{fasterq_dump},
 	'vdb-validate=s' => \$opt{vdb_validate},
 	'compressor=s' => \$opt{compressor}, 'help' => \$opt{help},
+	'exclude-strategy=s' => \$opt{exclude_strategy},
+	'library-strategy=s' => \$opt{library_strategy},
 ) or die "Invalid arguments; use --help for usage\n";
 
 setConfigFile($opt{config})
@@ -39,6 +41,18 @@ Usage:
   ENASRAdl.pl --provider ena|sra --accession ID[,ID...]
                --output-dir DIR --metadata-out FILE [--threads N]
                [--config MATAFILER_CONFIG]
+               [--exclude-strategy LIST] [--library-strategy LIST]
+
+A study or project accession resolves to every run it contains, which
+for many studies mixes 16S amplicon with shotgun libraries. Assembling
+amplicon reads does not fail, it produces nonsense, so the strategy
+breakdown is always reported and can be filtered:
+  --exclude-strategy AMPLICON   drop these ENA library_strategy values
+  --library-strategy WGS        keep only these values
+Both take a comma-separated list and are empty by default. Prefer
+excluding: library_strategy is submitter-declared and unreliable, so
+shotgun runs are sometimes labelled OTHER or WGA and a WGS-only filter
+would select nothing.
 
 ENA downloads use the ENA Portal API and verify archive-supplied byte counts
 and MD5 checksums. SRA downloads use NCBI prefetch, vdb-validate and
@@ -284,13 +298,18 @@ sub ena_role {
 sub download_ena {
 	my (@files, @platforms);
 	my (%runs, %filenames);
+	my (%strategy_seen, %strategy_dropped, @no_files);
+	my %drop_strategy = map { uc($_) => 1 }
+		grep { $_ ne '' } split /\s*,\s*/, ($opt{exclude_strategy} || '');
+	my %keep_strategy = map { uc($_) => 1 }
+		grep { $_ ne '' } split /\s*,\s*/, ($opt{library_strategy} || '');
 	for my $requested (@{$accessions}) {
 		my $report = File::Spec->catfile(
 			$opt{output_dir}, ".ena-report-$requested-$$.tsv",
 		);
 		my $url = 'https://www.ebi.ac.uk/ena/portal/api/filereport?'
 			.'accession='.url_encode($requested)
-			.'&result=read_run&fields=run_accession,instrument_platform,library_layout,fastq_ftp,fastq_md5,fastq_bytes'
+			.'&result=read_run&fields=run_accession,instrument_platform,library_layout,library_strategy,fastq_ftp,fastq_md5,fastq_bytes'
 			.'&format=tsv&download=true';
 		fetch_url($url, $report);
 		open my $fh, '<', $report or die "Cannot read ENA report $report: $!\n";
@@ -301,7 +320,7 @@ sub download_ena {
 		my @headers = split /\t/, $header, -1;
 		my %column;
 		@column{@headers} = (0 .. $#headers);
-		for my $required (qw(run_accession instrument_platform library_layout fastq_ftp fastq_md5 fastq_bytes)) {
+		for my $required (qw(run_accession instrument_platform library_layout library_strategy fastq_ftp fastq_md5 fastq_bytes)) {
 			die "ENA report for $requested lacks '$required'\n"
 				unless exists $column{$required};
 		}
@@ -317,11 +336,26 @@ sub download_ena {
 			next if $runs{$run}++;
 			my $platform = $values[$column{instrument_platform}] || '';
 			my $layout = $values[$column{library_layout}] || '';
+			my $strategy = uc($values[$column{library_strategy}] || 'UNKNOWN');
+			$strategy_seen{$strategy}++;
+			if (%keep_strategy && !$keep_strategy{$strategy}) {
+				$strategy_dropped{$strategy}++;
+				next;
+			}
+			if ($drop_strategy{$strategy}) {
+				$strategy_dropped{$strategy}++;
+				next;
+			}
 			my @uris = split /;/, ($values[$column{fastq_ftp}] || '');
 			my @md5s = split /;/, ($values[$column{fastq_md5}] || '');
 			my @bytes = split /;/, ($values[$column{fastq_bytes}] || '');
-			die "ENA exposes no public FASTQ files for run $run (requested as $requested)\n"
-				unless @uris && $uris[0] ne '';
+			#ENA accumulates runs that exist but expose nothing to download.
+			#Skip them loudly rather than aborting the whole study.
+			if (!@uris || $uris[0] eq '') {
+				warn "Skipping run $run (requested as $requested): ENA exposes no public FASTQ files\n";
+				push @no_files, $run;
+				next;
+			}
 			die "ENA metadata has inconsistent file/checksum/size counts for run $run\n"
 				unless @uris == @md5s && @uris == @bytes;
 			push @platforms, $platform if $platform ne '';
@@ -374,6 +408,29 @@ sub download_ena {
 		unlink $report;
 		die "ENA returned no read runs for accession $requested\n" unless $rows;
 	}
+	if (%strategy_seen) {
+		print 'ENA library_strategy: '
+			.join(', ', map { "$_: $strategy_seen{$_}" }
+				sort keys %strategy_seen)."\n";
+	}
+	if (%strategy_dropped) {
+		print 'Excluded by library_strategy: '
+			.join(', ', map { "$_: $strategy_dropped{$_}" }
+				sort keys %strategy_dropped)."\n";
+	} elsif (keys(%strategy_seen) > 1
+			&& !length($opt{exclude_strategy} || '')
+			&& !length($opt{library_strategy} || '')) {
+		#a mixed study with no selection is the case that silently
+		#assembles amplicon reads, so say so plainly
+		warn "This accession mixes several library strategies and no "
+			."selection was requested; every run above will be "
+			."downloaded. Use --exclude-strategy AMPLICON to drop "
+			."amplicon runs.\n";
+	}
+	warn 'Skipped '.scalar(@no_files)." run(s) with no downloadable "
+		."files: ".join(', ', @no_files)."\n" if @no_files;
+	die "No runs remain after selection; check the library_strategy "
+		."breakdown above\n" unless @files;
 	return (\@files, \@platforms);
 }
 
