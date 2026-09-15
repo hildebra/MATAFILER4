@@ -493,8 +493,8 @@ sub download_sra {
 		push @platforms, $record->{platform} if $record->{platform} ne '';
 		my $run_cache = File::Spec->catdir($cache, $run);
 		run_checked($prefetch, '--max-size', 'u', '--output-directory', $run_cache, $run);
-		find_sra_path($run_cache, $run);
-		my $validated = eval { run_checked($validator, $run_cache); 1 };
+		my $sra_path = find_sra_path($run_cache, $run);
+		my $validated = eval { run_checked($validator, $sra_path); 1 };
 		if (!$validated) {
 			my $validation_error = $@ || 'unknown validation failure';
 			remove_tree($run_cache);
@@ -506,7 +506,7 @@ sub download_sra {
 		make_path($conversion);
 		run_checked(
 			$fasterq, '--split-3', '-e', $opt{threads},
-			'--outdir', $conversion, '-t', $conversion, $run_cache,
+			'--outdir', $conversion, '-t', $conversion, $sra_path,
 		);
 		opendir my $dh, $conversion
 			or die "Cannot inspect fasterq-dump output $conversion: $!\n";
