@@ -65,23 +65,21 @@ my %stageCheckpointContract = (
 my %stageCheckpointCompatibilityLogged;
 
 use Mods::FlagReference qw(printFlagHelp helpRequested);
-use Mods::IO_Tamoc_progs qw(getProgPaths jgi_depth_cmd);
-use Mods::GenoMetaAss qw(readMap getDirsPerAssmblGrp unzipFileARezip getAssemblPath systemW gzipopen);
+use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::GenoMetaAss qw(getDirsPerAssmblGrp getAssemblPath systemW gzipopen);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
 use Mods::TamocFunc qw(checkMF);
-use Mods::geneCat qw(readMG_LCA);
-use Mods::Binning qw (getBinSubdirName createBin2 createBinCtgs runMetaBat runCheckM runCheckM2 createBinFAA readMGS MB2assignedBinIds);
+use Mods::Binning qw (getBinSubdirName createBin2 createBinCtgs runCheckM runCheckM2 createBinFAA MB2assignedBinIds);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid read_checkpoint);
 use Mods::WorkflowResilience qw(
 	retry_unlink retry_rename atomic_write_text
 	write_workflow_record acquire_workflow_lock preflight_directory preflight_capacity
 );
-use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps);
+use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps filter_catalog_maps);
 
 sub getGoodMBstats;
 sub printL;
 sub CanopyPrep;
-sub invertIndex;
 sub _representative_contig_outputs_valid;
 
 $| = 1;
@@ -126,7 +124,6 @@ print "Starting MGS pipeline v$MGSpipelineVersion; parsing configuration before 
 
 #my $metab2Bin = getProgPaths("metabat2");
 
-my $rareBin = getProgPaths("rare");
 
 
 #add this? https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4748697/figure/fig-1/
@@ -140,10 +137,8 @@ my $canCore = 12;
 my $memG = 150;#used only for binner
 my $legacyV = 0;#legacy (pre Dec `22) parameters
 my $perlClusterMAGs = 0; #compatibility/debug implementation; binary is the default
-my $rewrTAX = 0;
-my $rewrClusterMAGs = 0; #redo clusterMAGs analysis
 my $doStrains = 0;
-my $strainRedo = "none";
+my $redo = "none";
 my $prepareMosaicLoci = 1;
 my $SNPcaller = "MPI";
 my $tmpD = ""; 
@@ -172,14 +167,12 @@ GetOptions(
 	"canopies=s" => \$canopyF,			#location of canopy clustering output file (clusters.txt)
 	"smallCores=i" => \$numCore,		#cores used for normal jobs (not intensive)
 	"bottleneckCores=i" => \$canCore,	#cores for compute intensive jobs
-	"redoCluster=i" => \$rewrClusterMAGs,
-	"redoTax=i" => \$rewrTAX,			#rewrite tax annotations
 	"MGset=s" => \$useGTDBmg,			#GTDB or FMG, which marker genes are used? Default: GTDB
 	"wait4stone=s" => \$wait4stone,     #wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later
 	"wait4stoneTimeout=i" => \$wait4stoneTimeout, #maximum wait in seconds; 0 retains unlimited waiting
 	"mem=i" => \$memG,					#memory used for intensive jobs
 	"strains=i" => \$doStrains,			#1: calc instra species strain phylogenies. Default: 0
-	"redo=s" => \$strainRedo,			#strain workflow redo mode: none, tree, input, or all
+	"redo=s" => \$redo,				#rebuild mode: none, cluster, tax, tree, input, or all
 	"prepareMosaicLoci=i" => \$prepareMosaicLoci, #1: confirm mosaic loci/outgroups before strain analysis; 0: keep seed clusters separate
 	"SNPcaller=s" => \$SNPcaller,		#strain SNP caller: MPI or FB. Default: MPI
 	"useCheckM2=i" => \$useCheckM2,		#CheckM2 default qual checking of MAGs/MGS
@@ -205,8 +198,11 @@ die "-prepareMosaicLoci must be 0 or 1\n"
 	unless $prepareMosaicLoci == 0 || $prepareMosaicLoci == 1;
 die "-SNPcaller must be one of: MPI, FB\n"
 	unless $SNPcaller eq "MPI" || $SNPcaller eq "FB";
-die "-redo must be one of: none, tree, input, all\n"
-	unless grep { $strainRedo eq $_ } qw(none tree input all);
+die "-redo must be one of: none, cluster, tax, tree, input, all\n"
+	unless grep { $redo eq $_ } qw(none cluster tax tree input all);
+my $rewrClusterMAGs = $redo eq 'cluster' || $redo eq 'all';
+my $rewrTAX = $redo eq 'tax' || $redo eq 'all';
+my $strainRedo = $redo =~ /^(?:tree|input|all)$/ ? $redo : 'none';
 
 #die "$useCheckM2 $useCheckM1\n";
 
@@ -321,8 +317,8 @@ printL "Optional analyses: strains=" . ($doStrains ? "yes" : "no")
 	. "; mosaic checks=" . ($prepareMosaicLoci ? "yes" : "no")
 	. "; strain SNP caller=$SNPcaller"
 	. "; family genomes=" . ($doBinCtgsPerFam ? "yes" : "no") . "\n";
-printL "Requested rebuilds: clustering=" . ($rewrClusterMAGs ? "yes" : "no")
-	. "; taxonomy=" . ($rewrTAX ? "yes" : "no") . "\n";
+printL "Requested rebuilds: redo=$redo; clustering=" . ($rewrClusterMAGs ? "yes" : "no")
+	. "; taxonomy=" . ($rewrTAX ? "yes" : "no") . "; strains=$strainRedo\n";
 printL "Requested Canopy assignments: $canopyF\n" if $canopyF ne "";
 printL "Configuration accepted; checking catalogue metadata...\n";
 
@@ -380,11 +376,11 @@ my $stage1AssignmentsPresent = grep { _mgs_count($_, 1) } @stage1AssignmentFiles
 my $stage1CheckpointValid = _checkpoint_valid_for_resume($st1ston);
 # The primary assignments are the expensive Stage I product; .core is a cheap
 # derivative regenerated below.  Weighted handoff files are also recoverable.
-# The explicit -redoCluster option remains the way to discard assignments after
+# The explicit -redo cluster option remains the way to discard assignments after
 # an input change.
 my $stage1ResumeValid = !$rewrClusterMAGs && $stage1AssignmentsPresent;
 if ($stage1ResumeValid && !$stage1CheckpointValid) {
-	printL "Stage I checkpoint is missing or differs from the current inputs/outputs; retaining existing MGS assignments for recovery. Use -redoCluster 1 to rebuild them.\n";
+	printL "Stage I checkpoint is missing or differs from the current inputs/outputs; retaining existing MGS assignments for recovery. Use -redo cluster to rebuild them.\n";
 }
 $loadInputMetadata->() unless $stage1ResumeValid;
 my $stage1ProvenanceInvalid =
@@ -427,7 +423,7 @@ my $invalidateMGSDerivatives = sub {
 		$strainLockPath,
 		label => "MGS derivative invalidation for $strainOutput",
 		owner => join(' ', "pid=$$", "host=$host", "job=$job",
-			'started='.time, "redoCluster=$rewrClusterMAGs"),
+			'started='.time, "redo=$redo"),
 	);
 
 	for my $derived ($finalClustersFilt, "${finalClustersFilt}.cnts", "${finalClusters2}.ext") {
@@ -504,78 +500,8 @@ if ($ph1flag && $useCanopies) {
 	}
 }
 
-#run metabat on each assembly group
-my $cnt=0; my @jobs;
-if ($ph1flag){
-	printL "Found ".scalar(@DoosD) ." assembly groups, clustering available binnings\n";
-}
-foreach my $Doo ($ph1flag ? @DoosD : ()){ #this loops ensures Binner predictions exist for each assembly
-	#print "$Doo\n";
-	last; #should be done in MATAFILER.. deactivate here..
-	last if (!$ph1flag && _checkpoint_valid($iniMB2sto));
-	my $bef = "";
-	my $tmpD2 = "$tmpD$Doo/";
-	my $nodeTmpD2 = "$nodeTmpD/checkM/C$Doo/";
-	#print "$nodeTmpD2\n";
-	$bef .= "mkdir -p $tmpD2\n";# unless (-d $tmpD2);
-	#my $allPaths = $DOs{$Doo}{wrdir};
-	#my $smplIDtmp = $DOs{$Doo}{SmplID};
-	my @smplIDs = @{$DOs{$Doo}{SmplID}};#split /,/,$smplIDtmp;
-	my @paths = @{$DOs{$Doo}{wrdir}};#split /,/,$allPaths;
-	#next if (@paths <=1);
-	my $metaGD = getAssemblPath($paths[-1]);
-	my $refFA = $metaGD."/scaffolds.fasta.filt";
-	
-	
-	my $MBout = "$metaGD/Binning/$BinnerShrt/$smplIDs[-1]";
-	my $postCmd = "";
-
-	my $CM1done = 0; my $CM2done = 0; my $eBinAssStat=0;
-	$CM1done = 1 if (-e "$MBout.cm" );$CM2done = 1 if (-e "$MBout.cm2" );
-	$eBinAssStat =1 if (-e "$MBout.assStat");
-	#print $MBout." $useCheckM1 $CM1done $useCheckM2 $CM2done $eBinAssStat\n";
-	next if ($eBinAssStat && ( ( $useCheckM1 && $CM1done) || ($useCheckM2 && $CM2done ) ) );
-	next if ($ignoIncomplMAGs);
-
-	
-	#die "$refFA\n";
-	#my $refFA = "$inD/$Doo/metag/scaffolds.fasta.filt";
-	my $MBcmd = "";
-	if ($binSpeciesMG == 1){
-		$bef .= jgi_depth_cmd(\@paths,$tmpD2."/depth",95,$numCore,$refFA);# unless (-e );
-		$MBcmd = runMetaBat("$tmpD2/depth.jgi.depth.txt",$metaGD."/Binning/$BinnerShrt/",$smplIDs[-1],$refFA);
-	} elsif ($binSpeciesMG == 2){
-		die "MGS.pl::SemiBin not implemented\n";
-	} elsif ($binSpeciesMG == 3){
-		die "MGS.pl::MetaDecoder not implemented\n";
-	} else {
-		die "Binning option $binSpeciesMG not implemented!\n";
-	}
-	#print $bef.$MBcmd;
-	$bef = "" if ($MBcmd eq "");
-	my $jobName = "Bin$cnt";
-	my $mb2Qual = getProgPaths("mb2qualCheck_scr");
-	$postCmd = "\n\nrm -rf $nodeTmpD2; mkdir -p $nodeTmpD2;\n$mb2Qual $refFA $MBout $nodeTmpD2 $numCore $useCheckM2\n" unless (-e "$MBout$cmSuffix"  && -e "$MBout.assStat");
-	if ($MBcmd eq "" && $postCmd eq "") {next;}#print "next "; next;}
-	#next;
-	#die "$postCmd\n";
-	$postCmd .= "rm -rf $tmpD2\n";
-	#print "$MBout\n";
-	#die "$bef$MBcmd$postCmd";
-	my ($jobName2, $tmpCmd) = qsubSystem(
-		$paths[-1]."LOGandSUB/${BinnerShrt}_bin.sh",
-		$bef.$MBcmd.$postCmd,
-		$numCore,int($memG)."G",$jobName,"","",1,[],\%QSBopt,
-	);
-	$cnt++;
-	push (@jobs, $jobName2);
-	#die $paths[-1]."LOGandSUB/MB2_bin.sh";
-}
-qsubSystemJobAlive( \@jobs,\%QSBopt );
-
-
 #check that really all cm 's are there
-$cnt=0; my @missedMAGs=(); my $usableMAGcount=0;
+my $cnt=0; my @missedMAGs=(); my $usableMAGcount=0;
 if ($ph1flag) {
 	printL "Checking $BinnerShrt MAG availability across " . scalar(@DoosD) . " assembly groups\n";
 	foreach my $Doo (@DoosD){
@@ -627,7 +553,6 @@ getGoodMBstats() if (!-e $finalClusters2 );#die;
 
 
 #cluster MAGs based on shared genes between them
-@jobs = ();
 if ($ph1flag  || !-e "$outD/$BinnerShrt.clusters" ){
 	my $cmd;
 	if ($perlClusterMAGs) {
@@ -639,7 +564,7 @@ if ($ph1flag  || !-e "$outD/$BinnerShrt.clusters" ){
 		printL "Clustering MAGs into MGS with the Perl compatibility implementation; detailed output: $logDir/clusterMGS_scr.log\n";
 	} else {
 		my $clusterBinary = getProgPaths("clusterMAGs");
-		my $clusteringMapF = _maps_without_empty_samples(
+		my $clusteringMapF = filter_catalog_maps(
 			$mapF, \@emptySamples, "$logDir/nonempty_maps",
 		);
 		my $canoIncl = $useCanopies ? "-canopyDir $canopyF" : "";
@@ -651,7 +576,6 @@ if ($ph1flag  || !-e "$outD/$BinnerShrt.clusters" ){
 }
 
 die if ($stopAfterCluster); #DEBUGing only!!
-qsubSystemJobAlive( \@jobs,\%QSBopt ) if (@jobs);
 
 #decide between weighted and unweighted scores for binning
 $recoverMissingActiveMGS->();
@@ -897,20 +821,6 @@ if (!-s "$annoDir/kraken2.LCA" || !-s "$annoDir/kraken2.tax"){
 #redo tree and abundance:
 #system "rm -r $outD/between_phylo/ $GCd//Anno/Tax/SpecI_MGS/ $outD/specI.tax";
 
-#generate abundances per MGS
-if (0 && !-e "$finalClusters2.matL0.txt"){ #deprecated, use specI based annotations instead..
-	invertIndex($finalClusters2,"$finalClusters2.rev") unless (-e "$finalClusters2.rev");
-	my $cmd = "$rareBin sumMat -i $GCd/Matrix.mat.gz -o $finalClusters2.mat -refD $finalClusters2.rev -t $numCore\n";
-	$cmd .= "rm $finalClusters2.rev\n";
-#	systemW $cmd;
-	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0"; 
-	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/MGSabund.sh",
-		$cmd,
-		1,int(100)."G","AB1_MGS","","",1,[],\%QSBopt) ;
-	$QSBopt{tmpSpace} =$tmpSHDD;
-}
-
-#die;
 #once all tax annotations are done, infer consensus tax for MAGs
 #annotate specI's with MAGs added..
 
@@ -940,7 +850,7 @@ unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/spec
 	my $tmpSHDD = $QSBopt{tmpSpace};	$QSBopt{tmpSpace} = "0";
 	my ($jobName2, $tmpCmd) = qsubSystem($logDir."/abundMGS.sh",
 		$cmdSI,
-		1,"64G","AB2_MGS","","",1,[],\%QSBopt) ;
+		$canCore,"64G","AB2_MGS","","",1,[],\%QSBopt) ;
 	$QSBopt{tmpSpace} =$tmpSHDD;
 	push @annotation_jobs, $jobName2 if $jobName2;
 }
@@ -1008,12 +918,6 @@ if (!$betweenTreeSkipped && $visualizationMissing) {
 
 #die;
 
-
-
-#need to rewrite to new format, also check for passed MGS to include in intra-strain analysis
-#needs MGSselection.txt
-#from here on relies on files from R script, but this could be also auto generated (>80 compl, <5 cota) <- task done (may 20)
-#reformat_4phylo($finalClustersFilt) unless (-e "$finalClustersFilt.mgs");
 
 
 #process ends here unless strains need to be calculated
@@ -1240,40 +1144,6 @@ sub _exclude_empty_samples {
 		grep { !$empty{$_} } @{$map->{opt}{smpl_order} || []};
 	delete $map->{$_} for keys %empty;
 	return sort keys %empty;
-}
-
-sub _maps_without_empty_samples {
-	my ($map_files, $empty_samples, $target_dir) = @_;
-	die "Mapping files are required for MAG clustering\n"
-		unless defined($map_files) && length($map_files);
-	die "Empty-sample list must be an array reference\n"
-		unless ref($empty_samples) eq 'ARRAY';
-	return $map_files unless @{$empty_samples};
-
-	my %empty = map { $_ => 1 } @{$empty_samples};
-	make_path($target_dir);
-	my @filtered_maps;
-	my $map_index = 0;
-	for my $input_map (split /,/, $map_files) {
-		my $output_map = "$target_dir/map.$map_index.txt";
-		my $temporary = "$output_map.tmp.$$";
-		open my $input, '<', $input_map or die "Cannot open map $input_map: $!\n";
-		open my $output, '>', $temporary or die "Cannot write filtered map $temporary: $!\n";
-		while (my $line = <$input>) {
-			my ($sample) = split /\t/, $line, 2;
-			next if $empty{$sample};
-			print {$output} $line or die "Cannot write filtered map $temporary: $!\n";
-		}
-		close $input or die "Cannot close map $input_map: $!\n";
-		close $output or die "Cannot close filtered map $temporary: $!\n";
-		unlink $output_map or die "Cannot replace filtered map $output_map: $!\n"
-			if -e $output_map;
-		rename $temporary, $output_map
-			or die "Cannot publish filtered map $output_map: $!\n";
-		push @filtered_maps, $output_map;
-		$map_index++;
-	}
-	return join(',', @filtered_maps);
 }
 
 sub _checkpoint_parameters_for_stage {
@@ -1571,48 +1441,39 @@ sub _finish_without_mgs {
 	exit 0;
 }
 
-# Legacy helper retained below the main routing.
-sub reformat_4phylo{
-	my ($FCF) =@_; #, $clusSelHR
-	#my @allMGS=keys(%{$clusSelHR});
-	#open I,"<$outD/MGSselection.txt" or die "Can't open $outD/MGSselection.txt\n"; 
-	#while(<I>){chomp;push(@allMGS,$_);} close I;
-	my $hr = readMGS($FCF); my %MGS = %{$hr};
-	print "Selected ".scalar(keys %MGS) . " Bins for intrastrain phylo\n";
-	open O,">$FCF.mgs" or die $!;
-	my $MGcnt=0;
-	foreach my $MG (keys %MGS){
-		my $MG2 = $MG; $MG2 =~ s/_/:/;#for the MG2dram bins..
-		$MG2 = $MG unless (exists($MGS{$MG2}));
-		next unless (exists($MGS{$MG2}));
-		$MG =~ s/:/_/; #make sure stupid : is completely gone...
-		#print $MG."\n";
-		$MGcnt++;
-		print O $MG."\t".join(",",@{$MGS{$MG2}})."\n";
-	}
-	close O;
-	print "Found $MGcnt MGs for withinstrain analysis\n";
-}
-
-
-
-sub invertIndex{
-	my ($in,$out) = @_;
-	open I,"<$in" or die "can;t open $in\n";
-	open O,">$out" or die "can;t open $out\n";
-	while (<I>){
-		chomp; my @spl=split /\t/;
-		$spl[1] =~ s/:/_/g;
-		print O "$spl[1]\t$spl[0]\n";
-	}
-	close I; close O;
-}
 sub CanopyPrep{
 	my ($inFc,$binCanDir) = @_;
-	if ($canopyF eq ""){print"Canopy not requested, will skip step\n";return 0;}
-	#read genes in canopies..
+	return 0 unless defined($inFc) && length($inFc);
 	my $ChkMevalF = "$inFc.filt$cmSuffix";
-	return _mgs_count("$inFc.filt") if (-s $ChkMevalF);
+	my $canopyStone = "$inFc.filt.checkpoint";
+	my $proteinCatalog = "$GCd/compl.incompl.$clusterID.prot.faa";
+	my $minimumGenes = 700;
+	my %canopyParameters = (
+		stage => 'canopy-preparation', contract => 1,
+		canopy_file => File::Spec->rel2abs($inFc),
+		protein_catalog => File::Spec->rel2abs($proteinCatalog),
+		minimum_genes => $minimumGenes,
+		quality_checker => $useCheckM2 ? 'checkm2' : 'checkm',
+		quality_command => getProgPaths($useCheckM2 ? 'checkm2' : 'checkm'),
+		quality_database => $useCheckM2 ? getProgPaths('checkm2DB') : '',
+	);
+	# Unlike a legacy empty stone, this cache must have a manifest tying both
+	# direct inputs to its filtered assignments and (when nonempty) QC table.
+	if (!$rewrClusterMAGs && read_checkpoint($canopyStone)
+		&& checkpoint_valid($canopyStone, parameters => \%canopyParameters)) {
+		return _mgs_count("$inFc.filt");
+	}
+	for my $stale ($canopyStone, $ChkMevalF) {
+		retry_unlink($stale, label => 'invalidate Canopy preparation') if -e $stale;
+	}
+	# createBinFAA only writes current bins; remove previous protein bins so
+	# the quality checker cannot include Canopies dropped by this generation.
+	if (-d $binCanDir) {
+		opendir my $bins, $binCanDir or die "Cannot read Canopy bin directory $binCanDir: $!\n";
+		my @oldBins = grep { /\.faa\z/ && -f "$binCanDir/$_" } readdir $bins;
+		closedir $bins or die "Cannot close Canopy bin directory $binCanDir: $!\n";
+		retry_unlink("$binCanDir/$_", label => 'invalidate Canopy protein bin') for @oldBins;
+	}
 	my %canCnts;
 	printL "Prepping Canopy MGS (format, Bin quality)..\n";
 	printL "$inFc\n";
@@ -1626,7 +1487,7 @@ sub CanopyPrep{
 	}
 	close $canopy_input or die "Cannot close canopy file $inFc: $!\n";
 
-	my %kept_canopies = map { $_ => 1 } grep { $canCnts{$_} >= 700 } keys %canCnts;
+	my %kept_canopies = map { $_ => 1 } grep { $canCnts{$_} >= $minimumGenes } keys %canCnts;
 	my $canCNT = scalar keys %kept_canopies;
 	my $filtered_tmp = "$inFc.filt.tmp.$$";
 	open $canopy_input, '<', $inFc or die "can't reopen canopy file $inFc\n";
@@ -1642,35 +1503,27 @@ sub CanopyPrep{
 	close $canopy_input or die "Cannot close canopy file $inFc: $!\n";
 	close $filtered_output
 		or die "Cannot close filtered Canopy assignments $filtered_tmp: $!\n";
-	unlink "$inFc.filt" or die "Cannot replace $inFc.filt: $!\n" if -e "$inFc.filt";
-	rename $filtered_tmp, "$inFc.filt"
-		or die "Cannot publish filtered Canopy assignments $inFc.filt: $!\n";
+	retry_rename($filtered_tmp, "$inFc.filt",
+		label => 'publish filtered Canopy assignments');
 	printL "Kept $canCNT/". scalar(keys(%canCnts)) . " Canopy MGS\n";
-	return 0 unless $canCNT;
-	createBinFAA($binCanDir,"$inFc.filt","$GCd/compl.incompl.$clusterID.prot.faa","faa");
-	if ($useCheckM1 && !-s $ChkMevalF) {
-		printL "running checkM on new Canopy MGS..\n";
-		my $req_CMmem = 200;
-		my $cmC = runCheckM($binCanDir,$ChkMevalF,"$nodeTmpD/cmCANO/",$numCore,0);
-		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/checkM.cano0.sh",
-			$cmC,
-			$numCore,int($req_CMmem)."G","ChMcano","","",1,[],\%QSBopt);
-		push(@jobs2wait,$jobName2);
+	my @cacheFiles = ($inFc, $proteinCatalog, "$inFc.filt");
+	if ($canCNT) {
+		createBinFAA($binCanDir, "$inFc.filt", $proteinCatalog, "faa");
+		my $qualityCores = $useCheckM2 ? $canCore : $numCore;
+		my $qualityMemory = $useCheckM2 ? '50G' : '200G';
+		my $qualityCommand = $useCheckM2
+			? runCheckM2($binCanDir, $ChkMevalF, "$nodeTmpD/cmCANO/", $qualityCores, 0)
+			: runCheckM($binCanDir, $ChkMevalF, "$nodeTmpD/cmCANO/", $qualityCores, 0);
+		printL "Running $canopyParameters{quality_checker} on prepared Canopy MGS..\n";
+		my ($qualityJob) = qsubSystem($logDir."/checkM.cano0.sh",
+			$qualityCommand, $qualityCores, $qualityMemory, "ChMcano", "", "", 1, [], \%QSBopt);
+		my @qualityJobs = $qualityJob ? ($qualityJob) : ();
+		qsubSystemJobAlive(\@qualityJobs, \%QSBopt) if @qualityJobs;
+		die "Canopy quality checking completed without producing $ChkMevalF\n" unless -s $ChkMevalF;
+		push @cacheFiles, $ChkMevalF;
 	}
-	#checkM2
-	if ( $useCheckM2 && !-s $ChkMevalF ){
-		printL "running checkM2 on new Canopy MGS..\n";
-		my $req_CMmem = 50;	my $cmC = "";
-		$cmC .= runCheckM2($binCanDir,$ChkMevalF,"$nodeTmpD/cmCANO/",$canCore,0) ;	
-		my ($jobName2, $tmpCmd) = qsubSystem($logDir."/checkM2.cano0.sh",
-			$cmC,
-			$canCore,int($req_CMmem)."G","ChM2cano","","",1,[],\%QSBopt);
-		push(@jobs2wait,$jobName2);
-	}
+	write_checkpoint($canopyStone, parameters => \%canopyParameters, outputs => \@cacheFiles);
 
-	#wait for checkM & checkM2
-	qsubSystemJobAlive( \@jobs2wait,\%QSBopt );@jobs2wait = ();
-	die "Canopy quality checking completed without producing $ChkMevalF\n" unless -s $ChkMevalF;
 	return $canCNT;
 }
 

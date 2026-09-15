@@ -349,6 +349,8 @@ sub read_epa_jplace {
 	my %edges;
 	_index_epa_edges($root, undef, \%edges);
 	my $tree_length = _epa_total_tree_length($root);
+	my %expected = map { $_ => 1 } @{$expected_queries // []};
+	my %reported;
 	my %placements = map { $_ => {status => 'not_reported'} }
 		@{$expected_queries // []};
 	for my $record (@{$jplace->{placements} // []}) {
@@ -379,6 +381,9 @@ sub read_epa_jplace {
 		my $edpl = _epa_edpl(\@ranked, \%edges, $tree_length);
 		for my $name (@names) {
 			next unless defined($name) && length($name);
+			die "Unexpected EPA query '$name' in $jplace_file\n"
+				if defined($expected_queries) && !$expected{$name};
+			die "Duplicate EPA query '$name' in $jplace_file\n" if $reported{$name}++;
 			$placements{$name} = {
 				status => 'placed', %{$best}, edpl => $edpl,
 				candidate_placements => scalar(@ranked),
@@ -937,6 +942,9 @@ sub write_epa_placed_tree {
 	for my $query (sort keys %{$placements}) {
 		my $placement = $placements->{$query};
 		next unless ($placement->{status} // '') eq 'placed';
+		die "EPA query '$query' is already a backbone tip\n" if $backbone_index->{terminals}{$query};
+		die "EPA query '$query' has a negative pendant length\n"
+			if defined($placement->{pendant_length}) && $placement->{pendant_length} < 0;
 		for my $field (qw(backbone_distal_length pendant_length)) {
 			die "EPA-ng placement for $query has no $field\n"
 				unless defined($placement->{$field})
@@ -972,7 +980,9 @@ sub write_epa_placed_tree {
 					|| $distance > $branch_length + 1e-8;
 			$distance = 0 if $distance < 0;
 			$distance = $branch_length if $distance > $branch_length;
-			my @at_point;
+			# Consume the first point even when a tolerated boundary overshoot
+			# was clamped by more than the point-grouping tolerance.
+			my @at_point = (shift @points);
 			while (@points && abs($points[0][2] - $distance) < 1e-10) {
 				push @at_point, shift @points;
 			}

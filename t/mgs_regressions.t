@@ -97,6 +97,12 @@ is_deeply($empty_bin_quality, {}, 'an empty bin assignment does not require fabr
 my $id_assignments = File::Spec->catfile($tmp, 'id-assignments.tsv');
 write_file($id_assignments,
 	"Sequence ID\tBin\ncontig1\t1\ncontig2\t1\nunassigned\t0\n");
+my $unscored_assignments = MB2assigns($id_assignments);
+is_deeply($unscored_assignments, { 1 => ['contig1', 'contig2'] },
+	'quality preparation uses shared parsing without requiring a quality file');
+my ($scored_assignments) = MB2assigns($id_assignments, $cm2);
+is_deeply($scored_assignments, $unscored_assignments,
+	'quality preparation and quality consumers retain the same bin members');
 my ($assigned_ids, $assigned_quality) = MB2assignedBinIds($id_assignments, $cm2);
 is_deeply($assigned_ids, { 1 => 1 },
 	'ID-only bin parsing retains unique assigned bin IDs without contig arrays');

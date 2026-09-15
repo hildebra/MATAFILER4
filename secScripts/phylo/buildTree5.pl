@@ -105,6 +105,7 @@
 #      per-locus alignments, never let such a job rebuild a phylogeny, and keep
 #      scheduler memory allowances out of every policy comparison
 #5.92: name the policy fields that changed whenever a mismatch discards work
+#5.93: share EPA publication and selection reporting; repair single-locus resume and optional analyses
 use warnings;
 use strict;
 use Mods::StrainSampleStats qw(count_msa_samples);
@@ -112,7 +113,7 @@ use Mods::StrainSampleStats qw(count_msa_samples);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::FlagReference qw(printFlagHelp helpRequested resolvePairedOptionDefault);
 use Mods::GenoMetaAss qw( fileGZe fileGZs gzipopen systemW readFasta readFastHD writeFasta quantile);
-use Mods::phyloTools qw(convertMSA2NXS MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree 
+use Mods::phyloTools qw(MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree
 			runFasttree runVeryFasttree iqtreeOutputComplete cleanupIQTreeTransients
 			fixHDs4Phylo getGenoGenes getFMG readFMGdir );
 use Mods::PhyloAlignment qw(filter_alignment_by_overlap);
@@ -138,7 +139,7 @@ use File::Spec;
 use File::Temp qw(tempfile);
 use FindBin qw($Bin);
 use Mods::WorkflowResilience qw(
-	retry_operation retry_unlink retry_rename retry_open retry_close
+	retry_operation retry_unlink retry_rename retry_open retry_close atomic_write_text
 	preflight_directory filesystem_capacity
 );
 use Mods::StrainParts qw(append_fasta_records_atomic);
@@ -152,7 +153,7 @@ sub calcDisPos2;#de novo aligns pairwise via vsearch and calcs id (iddef 2)
 sub calcDiffDNA;
 sub selecAnalysis;
 sub runFastgear;
-sub mergePids; sub WattTheta;
+sub mergePids;
 sub singleGeneMSAprocess;
 sub pruneTree;
 sub prepGenoDirs;
@@ -252,8 +253,7 @@ sub writeBuildTreeState;
 sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
-my $doPhym= 0;
-my $version = "5.92";
+my $version = "5.93";
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -266,7 +266,8 @@ my ($workflowStage, $workflowStateFile, $workflowStatus, $workflowReason) =
 my ($workflowMsaSelectionPolicy, $workflowTreeStagePolicy) = (q{}, q{});
 
 END {
-	writeWorkflowFailure($@ || 'non-zero process exit') if $? != 0;
+	my $exitStatus = $?;
+	writeWorkflowFailure($@ || 'non-zero process exit') if $exitStatus != 0;
 	for my $category (sort keys %limitedWarningCounts) {
 		my $limit = $limitedWarningLimits{$category} // 5;
 		my $suppressed = $limitedWarningCounts{$category} - $limit;
@@ -276,6 +277,7 @@ END {
 	if ($msaFixCleanedLoci) {
 		warn "MSAfix cleaning summary: loci=$msaFixCleanedLoci, border-gap-masked=$msaFixBorderMasked, low-ID-masked=$msaFixLowIdMasked, below-minimum-good-positions=$msaFixMinGoodRemoved\n";
 	}
+	$? = $exitStatus;
 }
 
 #answered before the first getProgPaths() call, so -help needs no site config
@@ -1399,10 +1401,10 @@ my $legacyWithinSpeciesQCAudit = !$stateHasPolicies
 	&& -s $postAlignmentQCReport && !-e $legacyPostAlignmentQCPolicyFile
 	&& !-e $legacyAlignmentWorkPolicyFile;
 my $postAlignmentQCAuditCurrent = $postAlignmentQCPolicyMatches
-	&& (!$postAlignmentLocusQC || -s $postAlignmentQCReport)
+	&& ($cogCats eq '' || ((!$postAlignmentLocusQC || -s $postAlignmentQCReport)
 	&& (!$postAlignmentSequenceOutlierMask
 		|| -s $postAlignmentSequenceOutlierReport)
-	&& ($onlyMSA || $cogCats eq '' || -s $finalAlignmentSampleQCReport);
+	&& ($onlyMSA || -s $finalAlignmentSampleQCReport)));
 $postAlignmentQCAuditCurrent = 1 if $legacyWithinSpeciesQCAudit;
 my $durableCompletionTree = reusableCompletionTree($completionMarker, $outD);
 my $requestedPrimaryMethods = $doIQTree + $doRAXML + $doRAXMLng
@@ -1462,8 +1464,8 @@ if ($locusMSARecovery) {
 $workflowTreeStagePolicy = '' if $locusMSARecovery;
 if (length($durableCompletionTree) && $completionMatchesMethod
 		&& !$hasAdditionalAnalysis
-		&& ($cogCats eq '' || ($alignmentWorkPolicyMatches
-		&& $postAlignmentQCAuditCurrent && $postAlignmentPolicyMatches))
+		&& $alignmentWorkPolicyMatches
+		&& $postAlignmentQCAuditCurrent && $postAlignmentPolicyMatches
 		&& !$locusMSARecovery) {
 	# The marker is published only after tree validation and all requested standard
 	# stages finish. A matching policy therefore avoids reopening every locus and
@@ -1495,7 +1497,7 @@ if (!$locusMSARecovery && $strictBackbone && $treesDone
 		$treesDone = 0;
 	}
 }
-if (!$locusMSARecovery && $cogCats ne "" && $continue
+if (!$locusMSARecovery && $continue
 		&& !$alignmentWorkPolicyMatches) {
 	print "Recovery state: MSA-selection policy changed; rebuilding per-locus alignments "
 		."and tree outputs ("
@@ -1513,34 +1515,17 @@ if (!$locusMSARecovery && $cogCats ne "" && $continue
 	make_path($MsaD);
 	make_path($treeD);
 	$treesDone = 0;
-} elsif (!$locusMSARecovery && $cogCats ne "" && $continue
+} elsif (!$locusMSARecovery && $continue
 		&& !$postAlignmentPolicyMatches
 		&& ($treesDone || fileGZe($multAliArtifact))) {
-	my ($postAlignmentQCBackup, $sequenceOutlierQCBackup,
-		$finalAlignmentQCBackup) = ('', '', '');
-	if ($postAlignmentLocusQC && -s $postAlignmentQCReport) {
-		my ($backupHandle, $backupPath) = tempfile(
-			"post-alignment-locus-qc-XXXXXX", DIR => $tmpD, UNLINK => 1);
-		retry_close($backupHandle, "close post-alignment QC backup");
-		copy($postAlignmentQCReport, $backupPath)
-			or die "Cannot preserve post-alignment QC report $postAlignmentQCReport: $!\n";
-		$postAlignmentQCBackup = $backupPath;
-	}
-	if (-s $postAlignmentSequenceOutlierReport) {
-		my ($backupHandle, $backupPath) = tempfile(
-			"sequence-outlier-qc-XXXXXX", DIR => $tmpD, UNLINK => 1);
-		retry_close($backupHandle, "close sequence-outlier QC backup");
-		copy($postAlignmentSequenceOutlierReport, $backupPath)
-			or die "Cannot preserve sequence-outlier QC $postAlignmentSequenceOutlierReport: $!\n";
-		$sequenceOutlierQCBackup = $backupPath;
-	}
-	if (-s $finalAlignmentSampleQCReport) {
-		my ($backupHandle, $backupPath) = tempfile(
-			"final-alignment-sample-qc-XXXXXX", DIR => $tmpD, UNLINK => 1);
-		retry_close($backupHandle, "close final-alignment sample-QC backup");
-		copy($finalAlignmentSampleQCReport, $backupPath)
-			or die "Cannot preserve final-alignment sample QC $finalAlignmentSampleQCReport: $!\n";
-		$finalAlignmentQCBackup = $backupPath;
+	my %qcBackups;
+	for my $report ($postAlignmentQCReport, $postAlignmentSequenceOutlierReport,
+			$finalAlignmentSampleQCReport) {
+		next unless -s $report;
+		my ($handle, $backup) = tempfile('tree-stage-qc-XXXXXX', DIR => $tmpD, UNLINK => 1);
+		retry_close($handle, 'close tree-stage QC backup');
+		copy($report, $backup) or die "Cannot preserve QC report $report: $!\n";
+		$qcBackups{$report} = $backup;
 	}
 	print "Recovery state: downstream tree-stage policy changed; retaining the selected "
 		."MSA and rebuilding tree outputs ("
@@ -1548,22 +1533,9 @@ if (!$locusMSARecovery && $cogCats ne "" && $continue
 	clearLifecycleMarker($completionMarker, "clear completion before tree-stage rebuild");
 	safeRemoveTree($treeD, $outD);
 	make_path($treeD);
-	if ($postAlignmentQCBackup ne "") {
-		copy($postAlignmentQCBackup, $postAlignmentQCReport)
-			or die "Cannot restore post-alignment QC report $postAlignmentQCReport: $!\n";
-		retry_unlink($postAlignmentQCBackup, label => "remove post-alignment QC backup");
-	}
-	if ($sequenceOutlierQCBackup ne '') {
-		copy($sequenceOutlierQCBackup, $postAlignmentSequenceOutlierReport)
-			or die "Cannot restore sequence-outlier QC $postAlignmentSequenceOutlierReport: $!\n";
-		retry_unlink($sequenceOutlierQCBackup,
-			label => "remove sequence-outlier QC backup");
-	}
-	if ($finalAlignmentQCBackup ne '') {
-		copy($finalAlignmentQCBackup, $finalAlignmentSampleQCReport)
-			or die "Cannot restore final-alignment sample QC $finalAlignmentSampleQCReport: $!\n";
-		retry_unlink($finalAlignmentQCBackup,
-			label => "remove final-alignment sample-QC backup");
+	for my $report (sort keys %qcBackups) {
+		copy($qcBackups{$report}, $report) or die "Cannot restore QC report $report: $!\n";
+		retry_unlink($qcBackups{$report}, label => 'remove tree-stage QC backup');
 	}
 	$treesDone = 0;
 }
@@ -2372,6 +2344,23 @@ if ($onlyMSA || $locusMSARecovery) {
 clearLifecycleMarker($msaOnlyCompletionMarker,
 	'clear obsolete MSA-only completion marker');
 
+# Normalize in scratch without following the staged symlink into the input.
+# Reuse the existing normalization read for sample counts and validation.
+my $singleAlignmentSummary;
+if ($cogCats eq '') {
+	my $sequences = readFasta(quotemeta($multAli), 1);
+	my (undef, $length) = filter_alignment_by_overlap($sequences, $useAA4tree, 0);
+	die "Single-locus alignment requires at least two nonempty aligned sequences\n"
+		unless keys(%{$sequences}) >= 2 && $length;
+	my $normalized = "$multAli.normalized.$$";
+	writeFasta($sequences, $normalized);
+	retry_rename($normalized, $multAli, label => 'publish normalized single-locus alignment');
+	%samples = map { $_ => 1 } keys %{$sequences};
+	@{$useAA4tree ? \@MSA_AA : \@MSAs} = ($multAli);
+	$singleAlignmentSummary = { retained_samples => [sort keys %samples], removed_samples => [] };
+	@selectionAttrition{qw(candidate_loci aligned_loci alignment_failed_loci)} = (1, 1, 0);
+}
+
 print "\n---------------- POST-ALIGNMENT WORKFLOW ----------------\n";
 my $postAlignmentStepStarted = time;
 
@@ -2647,8 +2636,8 @@ $postAlignmentStepStarted = time;
 
 #die "@MSA_AA\n\n";
 if ($calcMSA
-		&& (($cogCats ne '' && @MSAs == 0 && @MSA_AA == 0) || $cogCats eq '')) {
-	my $reason = $cogCats ne '' ? 'no_usable_loci' : 'single_gene_alignment_failed';
+		&& $cogCats ne '' && @MSAs == 0 && @MSA_AA == 0) {
+	my $reason = 'no_usable_loci';
 	clearLifecycleMarker($completionMarker, 'clear stale tree completion');
 	clearLifecycleMarker($placementPendingMarker, 'clear stale placement-pending marker');
 	cleanupLegacyBuildTreeStateFiles();
@@ -2674,10 +2663,10 @@ if ($calcMSA
 my $primaryMergeSummary;
 if ($retainedConcatenatedCheckpoint) {
 	# Retain the existing alignment and partition pair without rewriting either.
+} elsif ($singleAlignmentSummary) {
+	$primaryMergeSummary = $singleAlignmentSummary;
+	@theRealMSAs = ($multAli);
 } elsif (!$useAA4tree) {
-	if ($cogCats eq ""){ #single gene case
-		my ($hr,$OK) = readFasta($multAli,1); writeFasta($hr,$multAli);#complicated way to shorted headers of infile
-	}
 	$primaryMergeSummary = mergeMSAs(\@MSAs,\%samples,$multAli,0,0);
 	delete $samples{$_} for @{$primaryMergeSummary->{removed_samples}};
 	mergeMSAs(\@MSAsSyn,\%samples,$multAliSyn,1,0) if ($calcSyn);
@@ -3013,12 +3002,7 @@ if ($strictSplit) {
 		my $primaryTree = $backboneTree;
 		my $dedicatedBackbone = $primaryTree =~ s/\.backbone\.treefile$/.treefile/;
 		my $report = "$treeD/strict_backbone.epa_placements.tsv";
-		my @placementReportColumns = qw(
-			sample status backbone_overlap_nt backbone_overlap_loci
-			backbone_state_divergence edge likelihood likelihood_weight_ratio
-			edpl candidate_placements distal_length backbone_distal_length pendant_length
-			pendant_outlier_limit placement_filter_reason reason
-		);
+
 		if (@{$strictSplit->{placement}}) {
 			my ($epaResult, $modelArtifact, $jplaceFile);
 			my $retainedJplace = File::Spec->catfile(
@@ -3051,56 +3035,18 @@ if ($strictSplit) {
 				warn "EPA-ng placement deferred; the validated backbone and compressed MSA were retained: $error\n";
 				finalizeMSAArtifacts($MsaD, $MsaWorkD);
 				safeRemoveTree($tmpD, $tmpBase);
+				$workflowReason = $error;
+				writeWorkflowHeartbeat('placement_pending');
 				print "BuildTree completed with placement pending; rerun with -continue 1 to retry placement only\n";
 				exit(0);
 			}
-			my $placements = $epaResult->{placements};
-			my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
-			my $backboneGraftQC = map_epa_placements_to_backbone(
-				$epaResult->{tree}, $backboneTreeText, $placements);
-			my $backboneGraftReport =
-				"$treeD/strict_backbone.epa_backbone_grafts.tsv";
-			writeEpaBackboneGraftAudit($backboneGraftQC, $backboneGraftReport);
-			printEpaBackboneGraftSummary($backboneGraftQC, $backboneGraftReport);
-			my $placementQC = filter_epa_placement_outliers(
-				$backboneTreeText, $placements,
-				{
-					pendant_outlier_factor => $epaPendantOutlierFactor,
-					pendant_minimum_threshold => $epaPendantMinThreshold,
-					outgroup => $outgroup,
-				},
-			);
-			my $filterSummary = "$treeD/strict_backbone.epa_filter_summary.tsv";
-			writeEpaPlacementFilterSummary($placementQC, $filterSummary);
-			printEpaPlacementFilterSummary($placementQC, $filterSummary, $report);
-			my $reportFh = retry_open('>', $report, label => "write EPA-ng placement report");
-			print {$reportFh} join("\t", @placementReportColumns), "\n";
-			for my $sample (sort keys %{$placements}) {
-				my $entry = $placements->{$sample};
-				my $overlapMetric =
-					$strictSplit->{backbone_overlap}{$sample} || {};
-				my @overlapValues = map {
-					defined($overlapMetric->{$_})
-						? sprintf('%.12g', $overlapMetric->{$_}) : 'NA'
-				} qw(backbone_overlap_nt backbone_overlap_loci
-					backbone_state_divergence);
-				print {$reportFh} join("\t",
-					$sample, $entry->{status}, @overlapValues,
-					map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
-						qw(edge likelihood likelihood_weight_ratio edpl candidate_placements distal_length backbone_distal_length pendant_length)),
-					defined($entry->{pendant_outlier_limit})
-						? sprintf('%.12g', $entry->{pendant_outlier_limit}) : 'NA',
-					$entry->{placement_filter_reason} // '',
-					$strictSplit->{reason}{$sample} // '',
-				), "\n";
-			}
-			retry_close($reportFh, "close EPA-ng placement report");
+
 			if (!$dedicatedBackbone) {
 				$primaryTree =~ s/\.treefile$/.placed.treefile/;
 				$primaryTree .= ".placed.treefile" if $primaryTree eq $backboneTree;
 			}
 			my $publicationOK = eval {
-				write_epa_placed_tree($backboneTreeText, $primaryTree, $placements);
+				publishEpaPlacement($epaResult, $backboneTree, $primaryTree, $strictSplit, $treeD);
 				1;
 			};
 			if (!$publicationOK) {
@@ -3115,15 +3061,15 @@ if ($strictSplit) {
 				warn "EPA-ng placement publication deferred; the validated backbone, jplace, and compressed MSA were retained: $error\n";
 				finalizeMSAArtifacts($MsaD, $MsaWorkD);
 				safeRemoveTree($tmpD, $tmpBase);
+				$workflowReason = $error;
+				writeWorkflowHeartbeat('placement_pending');
 				print "BuildTree completed with placement pending; rerun with -continue 1 to retry placement publication\n";
 				exit(0);
 			}
 			print "EPA-ng ML placements: $report; jplace: $jplaceFile; model: $modelArtifact; "
 				."primary tree: $primaryTree; backbone tree: $backboneTree\n";
 		} else {
-			my $reportFh = retry_open('>', $report, label => "write empty EPA-ng placement report");
-			print {$reportFh} join("\t", @placementReportColumns), "\n";
-			retry_close($reportFh, "close empty EPA-ng placement report");
+			writeEpaPlacementReport($report, {}, $strictSplit);
 			if ($dedicatedBackbone) {
 				my $temporaryPrimary = "$primaryTree.tmp.$$";
 				retry_unlink($temporaryPrimary, label => "clear primary-tree temporary");
@@ -3177,14 +3123,11 @@ if($doDNDS){
 	if($selGene){@geneList=@genesExtra;	}
 	#my $tmpDir = $codemlOutD."/tmp/";;
 	make_path($tmpD) unless -d $tmpD;
-	$treeFile = $Tree1{nwk} if ($treeFile eq "");
+	$treeFile = $trRetH->{nwk} // "" if $treeFile eq "";
+	die "Selection analysis requires a completed tree\n" unless -s $treeFile;
 	selecAnalysis(\@geneList, $treeFile, $codemlOutD, $tmpD);   
 
 }
-#if ($doTheta){ #Watterman estimator (Theta)
-#	if($selGene){@geneList=@genesExtra;	}
-#	WattTheta(\@geneList,$MsaD,$codemlOutD);
-#}
 
 FastGear();
 finalizeMSAArtifacts($MsaD, $MsaWorkD);
@@ -3448,13 +3391,6 @@ sub runEpaOnlyPlacement {
 	my $primaryTree = $backboneTree;
 	die "EPA-only recovery expected a dedicated .backbone.treefile: $backboneTree\n"
 		unless $primaryTree =~ s/\.backbone\.treefile\z/.treefile/;
-	my $report = "$treeDirectory/strict_backbone.epa_placements.tsv";
-	my @reportColumns = qw(
-		sample status backbone_overlap_nt backbone_overlap_loci
-		backbone_state_divergence edge likelihood likelihood_weight_ratio
-		edpl candidate_placements distal_length backbone_distal_length pendant_length
-		pendant_outlier_limit placement_filter_reason reason
-	);
 
 	writeWorkflowHeartbeat('EPA-only placement');
 	my ($epaResult, $modelArtifact, $jplaceFile);
@@ -3474,53 +3410,13 @@ sub runEpaOnlyPlacement {
 			retry_mode => 'epa_only',
 		}, $outD);
 		warn "EPA-only placement remains pending; the backbone and MSA were not modified: $error\n";
+		$workflowReason = $error;
 		safeRemoveTree($tmpD, $tmpBase);
 		writeWorkflowHeartbeat('placement_pending');
 		return 0;
 	}
 
-	my $placements = $epaResult->{placements};
-	my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
-	my $backboneGraftQC = map_epa_placements_to_backbone(
-		$epaResult->{tree}, $backboneTreeText, $placements);
-	my $backboneGraftReport =
-		"$treeDirectory/strict_backbone.epa_backbone_grafts.tsv";
-	writeEpaBackboneGraftAudit($backboneGraftQC, $backboneGraftReport);
-	printEpaBackboneGraftSummary($backboneGraftQC, $backboneGraftReport);
-	my $placementQC = filter_epa_placement_outliers(
-		$backboneTreeText, $placements,
-		{
-			pendant_outlier_factor => $epaPendantOutlierFactor,
-			pendant_minimum_threshold => $epaPendantMinThreshold,
-			outgroup => $outgroup,
-		},
-	);
-	my $filterSummary = "$treeDirectory/strict_backbone.epa_filter_summary.tsv";
-	writeEpaPlacementFilterSummary($placementQC, $filterSummary);
-	printEpaPlacementFilterSummary($placementQC, $filterSummary, $report);
-	my $reportHandle = retry_open('>', $report,
-		label => 'write EPA-only placement report');
-	print {$reportHandle} join("\t", @reportColumns), "\n";
-	for my $sample (sort keys %{$placements}) {
-		my $entry = $placements->{$sample};
-		my $overlap = $split->{backbone_overlap}{$sample} || {};
-		print {$reportHandle} join("\t",
-			$sample, $entry->{status},
-			map({ defined($overlap->{$_}) ? sprintf('%.12g', $overlap->{$_}) : 'NA' }
-				qw(backbone_overlap_nt backbone_overlap_loci backbone_state_divergence)),
-			map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
-				qw(edge likelihood likelihood_weight_ratio edpl candidate_placements
-					distal_length backbone_distal_length pendant_length)),
-			defined($entry->{pendant_outlier_limit})
-				? sprintf('%.12g', $entry->{pendant_outlier_limit}) : 'NA',
-			$entry->{placement_filter_reason} // '',
-			$split->{reason}{$sample} // '',
-		), "\n";
-	}
-	retry_close($reportHandle, 'close EPA-only placement report');
-	write_epa_placed_tree($backboneTreeText, $primaryTree, $placements);
-	die "EPA-only placement did not publish its primary tree: $primaryTree\n"
-		unless -s $primaryTree;
+	publishEpaPlacement($epaResult, $backboneTree, $primaryTree, $split, $treeDirectory);
 
 	finalizeMSAArtifacts($MsaD, $MsaWorkD);
 	writeCompletionMarker($completionMarker, $primaryTree, $outD);
@@ -3560,66 +3456,8 @@ sub runRedoEpaFilter {
 		'clear stale EPA-only state before forced EPA filter redo');
 
 	my $epaResult = read_epa_jplace($jplaceFile, $split->{placement});
-	my $placements = $epaResult->{placements};
-	my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
-	my $backboneGraftQC = map_epa_placements_to_backbone(
-		$epaResult->{tree}, $backboneTreeText, $placements);
-	my $backboneGraftReport =
-		"$treeDirectory/strict_backbone.epa_backbone_grafts.tsv";
-	writeEpaBackboneGraftAudit($backboneGraftQC, $backboneGraftReport);
-	printEpaBackboneGraftSummary($backboneGraftQC, $backboneGraftReport);
+	publishEpaPlacement($epaResult, $backboneTree, $primaryTree, $split, $treeDirectory);
 
-	my $placementQC = filter_epa_placement_outliers(
-		$backboneTreeText, $placements,
-		{
-			pendant_outlier_factor => $epaPendantOutlierFactor,
-			pendant_minimum_threshold => $epaPendantMinThreshold,
-			outgroup => $outgroup,
-		},
-	);
-	my $report = "$treeDirectory/strict_backbone.epa_placements.tsv";
-	my $filterSummary =
-		"$treeDirectory/strict_backbone.epa_filter_summary.tsv";
-	writeEpaPlacementFilterSummary($placementQC, $filterSummary);
-	printEpaPlacementFilterSummary($placementQC, $filterSummary, $report);
-
-	my @reportColumns = qw(
-		sample status backbone_overlap_nt backbone_overlap_loci
-		backbone_state_divergence edge likelihood likelihood_weight_ratio
-		edpl candidate_placements distal_length backbone_distal_length pendant_length
-		pendant_outlier_limit placement_filter_reason reason
-	);
-	my $reportHandle = retry_open('>', $report,
-		label => 'write forced EPA placement report');
-	print {$reportHandle} join("\t", @reportColumns), "\n";
-	for my $sample (sort keys %{$placements}) {
-		my $entry = $placements->{$sample};
-		my $overlap = $split->{backbone_overlap}{$sample} || {};
-		print {$reportHandle} join("\t",
-			$sample, $entry->{status},
-			map({ defined($overlap->{$_})
-				? sprintf('%.12g', $overlap->{$_}) : 'NA' }
-				qw(backbone_overlap_nt backbone_overlap_loci
-					backbone_state_divergence)),
-			map({ defined($entry->{$_})
-				? sprintf('%.12g', $entry->{$_}) : 'NA' }
-				qw(edge likelihood likelihood_weight_ratio edpl
-					candidate_placements distal_length
-					backbone_distal_length pendant_length)),
-			defined($entry->{pendant_outlier_limit})
-				? sprintf('%.12g', $entry->{pendant_outlier_limit}) : 'NA',
-			$entry->{placement_filter_reason} // '',
-			$split->{reason}{$sample} // '',
-		), "\n";
-	}
-	retry_close($reportHandle, 'close forced EPA placement report');
-
-	retry_unlink($primaryTree,
-		label => 'remove superseded EPA-placed tree before publication')
-		if -e $primaryTree;
-	write_epa_placed_tree($backboneTreeText, $primaryTree, $placements);
-	die "Forced EPA filter redo did not publish its primary tree: $primaryTree\n"
-		unless -s $primaryTree;
 	finalizeMSAArtifacts($MsaD, $MsaWorkD);
 	writeCompletionMarker($completionMarker, $primaryTree, $outD);
 	clearLifecycleMarker($terminalMarker, 'clear obsolete terminal no-tree marker');
@@ -3631,6 +3469,53 @@ sub runRedoEpaFilter {
 		."primary tree=$primaryTree; backbone retained=$backboneTree; "
 		."jplace=$jplaceFile\n";
 	return 1;
+}
+
+sub writeEpaPlacementReport {
+	my ($report, $placements, $split) = @_;
+	my @columns = qw(sample status backbone_overlap_nt backbone_overlap_loci
+		backbone_state_divergence edge likelihood likelihood_weight_ratio
+		edpl candidate_placements distal_length backbone_distal_length pendant_length
+		pendant_outlier_limit placement_filter_reason reason);
+	my $temporary = "$report.tmp.$$";
+	my $output = retry_open('>', $temporary, label => 'write EPA placement report');
+	print {$output} join("\t", @columns), "\n" or die "Cannot write $temporary: $!\n";
+	for my $sample (sort keys %{$placements}) {
+		my $entry = $placements->{$sample};
+		my $overlap = $split->{backbone_overlap}{$sample} || {};
+		print {$output} join("\t", $sample, $entry->{status},
+			map({ defined($overlap->{$_}) ? sprintf('%.12g', $overlap->{$_}) : 'NA' }
+				qw(backbone_overlap_nt backbone_overlap_loci backbone_state_divergence)),
+			map({ defined($entry->{$_}) ? sprintf('%.12g', $entry->{$_}) : 'NA' }
+				qw(edge likelihood likelihood_weight_ratio edpl candidate_placements
+					distal_length backbone_distal_length pendant_length pendant_outlier_limit)),
+			$entry->{placement_filter_reason} // '', $split->{reason}{$sample} // ''), "\n"
+			or die "Cannot write $temporary: $!\n";
+	}
+	retry_close($output, 'close EPA placement report');
+	retry_rename($temporary, $report, label => 'publish EPA placement report');
+}
+
+sub publishEpaPlacement {
+	my ($epaResult, $backboneTree, $primaryTree, $split, $directory) = @_;
+	my $placements = $epaResult->{placements};
+	my $backboneTreeText = readEpaFilterBackboneTree($backboneTree);
+	my $grafts = map_epa_placements_to_backbone($epaResult->{tree}, $backboneTreeText, $placements);
+	my $graftReport = "$directory/strict_backbone.epa_backbone_grafts.tsv";
+	writeEpaBackboneGraftAudit($grafts, $graftReport);
+	printEpaBackboneGraftSummary($grafts, $graftReport);
+	my $qc = filter_epa_placement_outliers($backboneTreeText, $placements, {
+		pendant_outlier_factor => $epaPendantOutlierFactor,
+		pendant_minimum_threshold => $epaPendantMinThreshold, outgroup => $outgroup,
+	});
+	my $report = "$directory/strict_backbone.epa_placements.tsv";
+	my $summary = "$directory/strict_backbone.epa_filter_summary.tsv";
+	writeEpaPlacementFilterSummary($qc, $summary);
+	printEpaPlacementFilterSummary($qc, $summary, $report);
+	writeEpaPlacementReport($report, $placements, $split);
+	# The existing writer publishes atomically; retain the prior tree if it fails.
+	write_epa_placed_tree($backboneTreeText, $primaryTree, $placements);
+	die "EPA placement did not publish its primary tree: $primaryTree\n" unless -s $primaryTree;
 }
 
 sub readEpaFilterBackboneTree {
@@ -4108,7 +3993,7 @@ sub treeAtHeart{
 		my %nwLfs= %{$hr};
 		
 		my $cntMissTree=0;
-		$hr = readFasta($multF,1,"input MSA to check for constraint tree");
+		$hr = readFasta($multF,1,"\\s");
 		my %FNA = %{$hr};
 		my $unpresent=0;
 		foreach my $ge (keys %FNA){
@@ -4188,8 +4073,9 @@ sub treeAtHeart{
 		unless ($treeState{"RAxML"}{checkpointComplete}){
 			my $f = $treeOpts{inMSA};
 			my $fasta2phylip = getProgPaths("fasta2phylip_scr");
-			my $tcmd = "rm -f $f.ph*; $fasta2phylip -c 50 $f > $f.ph\n";
-			systemW $tcmd;
+			my $temporaryPhylip = "$f.ph.tmp.$$";
+			systemW "$fasta2phylip -c 50 ".shellQuote($f)." > ".shellQuote($temporaryPhylip);
+			retry_rename($temporaryPhylip, "$f.ph", label => 'publish PHYLIP alignment');
 			$treeOpts{inMSA} = "$multF.ph";
 			die "Can't find nonempty expected *.ph file: $multF.ph"
 				unless -s $treeOpts{inMSA};
@@ -4213,22 +4099,7 @@ sub treeAtHeart{
 			unless glob("${outDG}*labelled_tree.newick");
 	}
 
-	#phyml
 
-	if ($doPhym){
-		die "Phym is outdated, check code to reactivate..\n";
-		my @thrs;
-		my $tcmd = "";
-		my $nwkFile = $treeOpts{PhymTree};#"$treeD/phyml${tcnt}_${siteTag}.nwk";
-		my $phymlBin = getProgPaths("phyml");
-
-		$tcmd = "$phymlBin --quiet -m GTR --no_memory_check -d nt -f m -v e -o tlr --nclasses 4 -b 2 -a e -i $multF.ph > $nwkFile\n";
-		push(@thrs, threads->create(sub{system $tcmd;}));
-		for (my $t=0;$t<@thrs;$t++){
-			my $state = $thrs[$t]->join();
-			if ($state){die "Thread $t exited with state $state\nSomething went wrong with RaxML\n";}
-		}
-	}
 	$treeOpts{nwk} = $phyloTree;
 	return (\%treeOpts);
 }
@@ -5270,22 +5141,6 @@ sub convertMultAli2NT($ $ $){
 	systemW($cmd);
 }
 
-sub synPosOnlyAA($ $){#only leaves "constant" AA positions in MSA file.. 
-#stupid, don't know if pal2nal can handle this.. prob not
-	my ($inMSA,$outMSA) = @_;
-	#print "Syn";
-	my $hr = readFasta($inMSA,1); my %FNA = %{$hr};
-	my @aSeq = keys %FNA;
-	my $len = length ($FNA{$aSeq[0]});
-	for (my $i=0; $i< $len; $i+=3){
-		my $cod = substr $FNA{$aSeq[0]},$i,3;
-		my $iniAA = "A";
-		for (my $j=1;$j<@aSeq;$j++){
-		}
-	}
-	#print " only\n";
-
-}
 
 sub synPosOnly{#now finished, version is cleaner
 	#$outgroupSample is a sample name, not a sequence identifier: the MSA headers
@@ -5466,78 +5321,6 @@ sub synPosOnly{#now finished, version is cleaner
 	return ($outMSA,$outMSAns);
 }
 
-sub codeml{
-	my ($MSAfile2,$codemlOutDTmp,$gene,$nwkFile_gene2,$repeatCounts) = @_;
-	$pamlBin = getProgPaths("codeml") if $pamlBin eq "";
-	my @omegaStart = @omegas;			
-	my $codemlOutDFile = "$codemlOutD/${gene}_run2";
-	system "mkdir -p  $codemlOutDFile" unless(-d $codemlOutDFile);
-
-	chdir $codemlOutDTmp;
-	my $modelName;
-	for (my $mod=0; $mod < scalar(@model); $mod++){		
-		$modelName = $model[$mod];
-		my @repSel;
-		for (my $rep=1; $rep <= $repeatCounts; $rep++) {
-
-			open M0,">$codemlOutDTmp/${gene}_${rep}_${modelName}.c" or die "Can't open control file for codeml: $gene\n";
-	
-			print M0 "seqfile = $MSAfile2\n";
-			print M0 "verbose = 2\n";
-			print M0 "treefile = $nwkFile_gene2\n";
-			print M0 "outfile = $codemlOutDTmp/codemlOut_${gene}_${rep}_${modelName}.txt\n";
-			print M0 "aaDist = 0\n";
-			print M0 "fix_blength = 0\n";
-			print M0 "runmode = 0\n";
-			print M0 "seqtype = 1\n";
-			print M0 "CodonFreq = 2\n";
-			print M0 "clock = 0\n";
-			print M0 "model = 0\n";
-			print M0 "NSsites = $modelName\n";
-			print M0 "fix_omega = 0\n";
-			print M0 "omega = $omegaStart[($rep-1)]\n";
-			print M0 "cleandata = 0\n";
-			print M0 "getSE = 0\n";	
-			print M0 "icode = 0\n";
-			print M0 "fix_kappa = 0\n";
-			print M0 "kappa = 2\n";
-			print M0 "Mgene = 0\n";
-			print M0 "ncatG = 8\n";
-			print M0 "RateAncestor = 0\n";
-			print M0 "Small_Diff = 1e-6\n";
-			print M0 "noisy = 0\n";
-			
-
-			close M0;
-
-			## run codeml  
-			$cmd = "$pamlBin $codemlOutDTmp/${gene}_${rep}_${modelName}.c\n";			
-			systemW $cmd; 
-			#die;
-			
-			#get lnL and push to array
-			open(CM, "<$codemlOutDTmp/codemlOut_${gene}_${rep}_${modelName}.txt" ) or die "could not find $!";
-			while (my $line = <CM>) {
-					if ($line =~ /^lnL*/) {
-							$line =~ m/^.*\):\s*([-+]?[0-9]*\.?[0-9]+)\s.*$/;
-					push @repSel, $1;
-					last;
-					}				
-			}
-			close CM;
-			#system "rm $codemlOutDTmp/rst1";
-
-		} 
-		
-		my $idxMax = 0;
-			$repSel[$idxMax] > $repSel[$_] or $idxMax = $_ for 1 .. $#repSel; 
-		my $repSelected = $idxMax+1;
-		#die "@repSel\n$repSelected\n";
-		copy("$codemlOutDTmp/codemlOut_${gene}_${repSelected}_${modelName}.txt", "$codemlOutDFile/out_M$modelName.txt")
-			or die "Cannot copy selected codeml result for $gene model $modelName: $!\n";
-		print "codeml summary: gene=$gene; model=$modelName; repeats=$repeatCounts; selected repeat=$repSelected\n";
-	}	
-}
 
 
 #starts my R script to calc popgenStats and filter out bad genes (in multi gene approach)
@@ -5563,12 +5346,12 @@ sub pogenStatsFilter{
 sub hyphy{
 	my ($MSAfile2,$codemlOutDTmp,$gene,$nwkFile_gene2,$log) = @_;
 	my $hyphyBin=getProgPaths("hyphy");
-	my $cmd = "";#"source activate hyphy\n";
-	$cmd .= "$hyphyBin CPU=$ncore fubar --alignment $MSAfile2 --tree $nwkFile_gene2 > $log\n";
-	$cmd .= "gzip -c $MSAfile2.FUBAR.json > $log.json.gz\n";
-	$cmd .= "rm -f $MSAfile2.FUBAR.*\n";
-	systemW $cmd ;#if (!-e $log);
-	#die $cmd ;#if (!-e $log);
+	my $cmd = "$hyphyBin CPU=$ncore fubar --alignment ".shellQuote($MSAfile2)
+		." --tree ".shellQuote($nwkFile_gene2)." > ".shellQuote($log)."\n";
+	$cmd .= "gzip -c ".shellQuote("$MSAfile2.FUBAR.json")." > ".shellQuote("$log.json.gz")."\n";
+	systemW($cmd);
+	retry_unlink($_, fatal => 0, label => 'clean HyPhy intermediate')
+		for bsd_glob("$MSAfile2.FUBAR.*");
 	return $log;
 }
 
@@ -5576,48 +5359,19 @@ sub pruneTree($ $ $){
 	my ($nwkFile,$aR,$nwkFile_gene) = @_;
 	my @genomeList = @{$aR};
 	my $eteBin = getProgPaths("ete3");
-	my $cmd_prune = "$eteBin mod -t $nwkFile --prune @genomeList --unroot -o $nwkFile_gene";
-	systemW $cmd_prune . " > $nwkFile_gene";
+	my $cmd_prune = "$eteBin mod -t ".shellQuote($nwkFile)
+		." --prune ".join(" ", map { shellQuote($_) } @genomeList)
+		." --unroot -o ".shellQuote($nwkFile_gene);
+	systemW($cmd_prune." > ".shellQuote($nwkFile_gene));
 }
 
-sub fubarXML($){
-	my $inp = $_[0];
-	return "" if (!-e $inp || (-e "$inp.json.gz" && !$reparseHyphyJson));
-	
-	if (0){#python
-		return "";
-	}
-	my $rDNm; my $rDSm;
-	my $txt = `zcat $inp.json.gz`;
-	my $str=decode_json($txt);
-	my %JS = %{$str};
-	my @XX = @{$JS{MLE}{"content"}{"0"}};
-	#print @XX."  BB  @XX\n";
-	my $negSel=0; my $posSel=0; 
-	my @ds = (); my @dn = ();
-	for (my $i=0;$i<@XX;$i++){
-		my @YY = @{$XX[$i]};
-		push @ds,$YY[0];
-		push @dn,$YY[1];
-		next if (@YY<4 || !defined($YY[4]));
-		$negSel++ if ($YY[3]>0.9);
-		$posSel++ if ($YY[4]>0.9);
-	}
-	my $dnX=$2;my $dsX = $1;
-	my $rDNmed = medianArray(@dn);my $rDSmed = medianArray(@ds);
-	$rDNm = meanArray(\@dn); $rDSm = meanArray(\@ds);
-#	$txt = `cat $inp`;
-#	$txt =~ m/\* synonymous rate =  ([\d\.]+)\n.*\* non-synonymous rate =  ([\d\.]+)/;
-	#print "hy report dnds: $dnX $dsX; $rDNm  $rDSm; $rDNmed $rDSmed\n"; #this is actually probably wrong
-	return $JS{input}{"number of sequences"} ."\t". $JS{input}{"number of sites"} . "\t$negSel\t$posSel\t$rDNm\t$rDSm";
-}
 
 sub coreHyPhy{
 	my ($MSADir,$gene,$xtra,$nwkFile,$codemlOutDTmp,$logF) = @_;
-	return if (-e $logF && -e "$logF.json.gz");
-	my $runCodeML = 0;
+	return if -s $logF && -s "$logF.json.gz";
+	return unless -d $MSADir;
 	my @genomeList;
-	opendir(DIR, $MSADir);
+	opendir(DIR, $MSADir) or die "Cannot read selection alignments $MSADir: $!\n";
 	my @MSAfile = grep(/\A\Q$gene\E\.\d+.*$xtra\.fna\z/,readdir(DIR));
 	closedir(DIR);
 	if (@MSAfile == 0){
@@ -5634,7 +5388,7 @@ sub coreHyPhy{
 	
 	#die "@nwLfs\n";
 	my $cntMissTree=0;
-	$hr = readFasta($MSAfile2,1,"input MSA for selection analysis");
+	$hr = readFasta($MSAfile2,1,"\\s");
 	my %FNA = %{$hr};
 	#		print "$MSAfile2\n";
 
@@ -5643,10 +5397,9 @@ sub coreHyPhy{
 	foreach my $genome (keys %FNA){
 		#print "$genome\n";
 		my ($genome2) = parseSeqId($genome, "selection-analysis MSA header");
-		next if ($genome2 =~ m/$outgroup/);
+		next if length($outgroup) && $genome2 eq $outgroup;
 		unless (exists($nwLfs{$genome2})){$cntMissTree++; next;}
 		my $seq = $FNA{$genome};
-		$seq =~ s/T[AG][GA]$//; #remove stop codon
 		my $x=0;
 		foreach my $sto (("TGA","TAG","TAA")){
 			while ( 1 ){
@@ -5667,149 +5420,51 @@ sub coreHyPhy{
 		"Masked $maskedInternalStops in-frame stop codon(s) while preparing $gene selection analysis\n")
 		if $maskedInternalStops;
 	if ($cntMissTree>0){print "Removed from MSA $cntMissTree sequences due to not being present in tree\n";}
-	next if(scalar @genomeList <3);
+	if (@genomeList < 3) { unlink $MSAfile3; return; }
 			
 	my $nwkFile_gene = "$codemlOutDTmp/subtree_$gene.nwk";
 
 	####################### Prepare tree ################################## 
 	pruneTree($nwkFile,\@genomeList,$nwkFile_gene);
 	#$thrs[$thrCnt]->join();
-	if ($runCodeML){
-		codeml($MSAfile3,$codemlOutDTmp,$gene,$nwkFile_gene,$repeatCounts) #$thrs[$thrCnt] = threads->create( );
-	} else {
-		hyphy($MSAfile3,$codemlOutDTmp,$gene,$nwkFile_gene,$logF);
-	}
-	system "rm -f $MSAfile3";
-	system "rm -f $nwkFile_gene";
+	hyphy($MSAfile3,$codemlOutDTmp,$gene,$nwkFile_gene,$logF);
+	retry_unlink($_, label => 'clean selection-analysis input') for ($MSAfile3, $nwkFile_gene);
 }
 
-sub selecAnalysis($ $ $ $ $){
-	my ($geneListRef, $nwkFile, $codemlOutD, $codemlOutDTmp) = @_;
-	my @geneListFin = @{$geneListRef};
-	#system "source activate hyphy" unless ($runCodeML);
-	my $jsonExrScr = getProgPaths("fubarJson_scr");
-	my $stdJSONheader = "Gene\tNseqs\tNsites\tnegSel\tposSel\tdn\tds\tdn2\tds2\n";
-	#my @thrs;my $thrCnt=0;
-	#for ($thrCnt=0;$thrCnt<$ncore;$thrCnt++){		$thrs[$thrCnt] = threads->create(sub{my $x=0;});	}
-	#$thrCnt=0;
-	#first go through $MsaD
-	system "rm -f $codemlOutD/hyphy.fubar*" if ($reparseHyphyJson);
-	my $logF1 =  "$codemlOutD/hyphy.fubar.txt";
-	if (!-e $logF1 ){
-		my %logs;
-		foreach my $gene (@geneListFin){
-			my $gene_file_stem = geneFileStem($gene);
-			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.fubar.log";
-			$logs{$gene} = "$logF";
-			coreHyPhy($MsaWorkD,$gene_file_stem,"",$nwkFile,$codemlOutDTmp,$logF);
+sub selecAnalysis {
+	my ($genes, $nwkFile, $directory, $temporaryRoot) = @_;
+	my $jsonExtractor = getProgPaths("fubarJson_scr");
+	my @sets = (['', $MsaWorkD, '', ''], ['.unID', $MSAsubsD, '\\.uInd', '.unID']);
+	push @sets, [".s$_", $MSAsubsD, "uInd\\.s$_", ".s$_"]
+		for grep { length($_) } split /,/, $subsetPopgenStats;
+	# Keep analysis temporaries separate from the alignment workspace.
+	my $work = File::Spec->catdir($temporaryRoot, 'hyphy');
+	make_path($work) unless -d $work;
+	for my $set (@sets) {
+		my ($suffix, $alignments, $pattern, $logSuffix) = @{$set};
+		my $report = "$directory/hyphy.fubar$suffix.txt";
+		next if -s $report && !$reparseHyphyJson;
+		my $text = "Gene\tNseqs\tNsites\tnegSel\tposSel\tdn\tds\tdn2\tds2\n";
+		for my $gene (@{$genes}) {
+			my $stem = geneFileStem($gene);
+			my $log = $suffix =~ /^\.s/
+				? "$directory/$stem.hyphy$logSuffix.fubar.log"
+				: "$directory/$stem.hyphy.fubar$logSuffix.log";
+			coreHyPhy($alignments, $stem, $pattern, $nwkFile, $work, $log);
+			next unless -s "$log.json.gz";
+			my $command = "$jsonExtractor ".shellQuote("$log.json.gz");
+			my $summary = `$command`;
+			die "FUBAR result parsing failed for $log.json.gz\n" if $?;
+			$summary =~ s/^\t//; # Accept older parsers with a leading empty field.
+			$text .= "$gene\t$summary" if length($summary);
 		}
-		my $sumTxt=$stdJSONheader;
-		foreach my $gene (keys %logs){
-			#my $summary = fubarXML("$logs{$gene}");
-			next unless (-e "$logs{$gene}.json.gz");
-			my $summary = `$jsonExrScr $logs{$gene}.json.gz`;
-			next if ($summary eq "");
-			$sumTxt .= "$gene\t$summary";
-			#print "$sumTxt\n";
-		}
-		open O,">$logF1";		print O $sumTxt;		close O;
-		print "Selection summary written: $logF1\n";
+		atomic_write_text($report, $text);
+		print "Selection summary written: $report\n";
 	}
-	#add by hand the unique seqs subset..
-	$logF1 =  "$codemlOutD/hyphy.fubar.unID.txt";
-	if (!-e $logF1 ){
-		my %logs;
-		foreach my $gene (@geneListFin){
-			my $gene_file_stem = geneFileStem($gene);
-			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.fubar.unID.log";
-			$logs{$gene} = $logF;
-			coreHyPhy($MSAsubsD,$gene_file_stem,"\\.uInd",$nwkFile,$codemlOutDTmp,$logF);
-		}
-		my $sumTxt=$stdJSONheader;
-		foreach my $gene (keys %logs){
-			#my $summary = fubarXML("$logs{$gene}");
-			next unless (-e "$logs{$gene}.json.gz");
-			my $summary = `$jsonExrScr $logs{$gene}.json.gz`;
-			next if ($summary eq "");
-
-			$sumTxt .= "$gene\t$summary";
-			#system "rm -f $logs{$gene}*";
-		}
-		open O,">$logF1";		print O $sumTxt;		close O;
-		print "Selection summary written: $logF1\n";
-	}
-	#now go through subsets..
-	
-	foreach my $subs (split /,/,$subsetPopgenStats){
-		my %logs;
-		#print "$subs\n";
-		my $logF1 =  "$codemlOutD/hyphy.fubar.s$subs.txt";
-		next if (-e $logF1 );
-		foreach my $gene (@geneListFin){
-			my $gene_file_stem = geneFileStem($gene);
-			my $logF =  "$codemlOutD/$gene_file_stem.hyphy.s$subs.fubar.log";
-			$logs{$gene} = $logF;
-			#COG0008.0.uInd.s20.fna
-			coreHyPhy($MSAsubsD,$gene_file_stem,"uInd\\.s$subs",$nwkFile,$codemlOutDTmp,$logF);
-		}
-		my $sumTxt=$stdJSONheader;
-		foreach my $gene (keys %logs){
-			#my $summary = fubarXML("$logs{$gene}");next if ($summary eq "");
-			next unless (-e "$logs{$gene}.json.gz");
-			my $summary = `$jsonExrScr $logs{$gene}.json.gz`;
-			next if ($summary eq "");
-			$sumTxt .= "$gene\t$summary";
-			#system "rm -f $logs{$gene}*";
-		}
-		open O,">$logF1";		print O $sumTxt;		close O;
-		print "Selection summary written: $logF1\n";
-	}
-	system "rm -fr $codemlOutDTmp" if (-e $codemlOutDTmp);
-	
+	safeRemoveTree($work, $temporaryRoot);
 }
 
 
-#\@geneList,$MsaD,$codemlOutD
-sub WattTheta{
-	#hyphy /path/to/WattetrsonTheta.txt --alignment /path/to/alignment
-	my ($geneListRef, $MSADir, $codemlOutD) = @_;
-	my @geneListFin = @{$geneListRef};
-	my $runCodeML = 0;
-	#system "source activate hyphy" unless ($runCodeML);
-	my $hyphyBin=getProgPaths("hyphy");
-	#die "XX\n";
-	my %logs ;
-	my $logF1 =  "$codemlOutD/hyphy.Theta.log";
-	return if (-e $logF1);
-	my $otxt = "Gene\tNseqs\tNsites\tSegSites\tWattTheta\n";
-	foreach my $gene (@geneListFin){
-		my $cnt = 0;
-		my $gene_file_stem = geneFileStem($gene);
-		my $logF =  "$codemlOutD/$gene_file_stem.hyphy.Theta.log";
-#		print "$logF\n";
-		$logs{$gene} = $logF;
-		#next if (-e $logF);
-		my @genomeList;
-				
-		opendir(DIR, $MSADir);
-		my @MSAfile = grep(/\A\Q$gene_file_stem\E\.\d+.*\.fna\z/,readdir(DIR));
-		closedir(DIR);
-		#print "@MSAfile\t$gene\t$MSADir\n";
-		next if (@MSAfile == 0);
-		my $MSAfile2 = "$MSADir/$MSAfile[0]";
-		my $hyphyBin=getProgPaths("hyphy");
-		my $cmd = "";#"source activate hyphy\n";
-		$cmd .= "$hyphyBin CPU=$ncore ".getProgPaths("wattersonTheta_scr")." --alignment $MSAfile2 ";#> $logF\n";
-		my $txt = `$cmd`;
-#		print $txt."\n";
-		$txt =~ m/Sequences          = (\d+)\nSites              = (\d+)\nSegregating Sites  = (\d+)\n.*Watterson.s theta  = ([\d\.]+)/;
-		$otxt.="$gene\t$1\t$2\t$3\t$4\n";
-	}
-	#foreach my $g (keys %logs){	my $txt = `cat $logs{$g}`;	}
-	open O,">$logF1" or die "Can't open log out $logF1\n";
-	print O $otxt;
-	close O;
-}
 sub fillGeneList{
 	my ($cogCats) = @_;
 #	open my $xI,"<$cogCats" or die "Can't open cogcats $cogCats\n";
@@ -7624,6 +7279,8 @@ sub finalizeStagedStrainCategory {
 			unless $fields[0] eq $observedMGS;
 		die "Staged strain category input belongs to $fields[0], expected $expectedMGS\n"
 			if defined($expectedMGS) && length($expectedMGS) && $fields[0] ne $expectedMGS;
+		die "Conflicting category identifiers for $fields[1]/$fields[2]\n"
+			if exists($loci{$fields[1]}{$fields[2]}) && $loci{$fields[1]}{$fields[2]} ne $fields[3];
 		$loci{$fields[1]}{$fields[2]} = $fields[3];
 		$samples{$fields[2]} = 1;
 	}
@@ -7636,6 +7293,9 @@ sub finalizeStagedStrainCategory {
 			my @fields = split /\t/, $line, -1;
 			die "Malformed staged outgroup category overlay row in $overlayCategory: $line\n"
 				unless @fields == 3 && !grep { !length($_) } @fields;
+			die "Outgroup overlay refers to absent locus '$fields[0]'\n" unless exists $loci{$fields[0]};
+			die "Duplicate outgroup category entry for locus '$fields[0]'\n"
+				if exists $loci{$fields[0]}{$fields[1]};
 			$loci{$fields[0]}{$fields[1]} = $fields[2];
 			$samples{$fields[1]} = 1;
 		}

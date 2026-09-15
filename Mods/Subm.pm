@@ -15,7 +15,7 @@ our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJ
 		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs reconcileSlurmDependencies
 		recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary
 		submitSlurmWithDependencyRecovery deferredSubmissionDependency
-		submissionDependencyDeferred handleSubmissionFailure);
+		submissionDependencyDeferred submissionDependencyFailed handleSubmissionFailure);
 
 my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
 my $DEFERRED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_DEFERRED__';
@@ -37,6 +37,10 @@ sub submissionDependencyDeferred {
 		split /;/, normalise_job_dependencies(@_);
 }
 
+sub submissionDependencyFailed {
+	return scalar grep { $_ eq $FAILED_SUBMISSION_DEPENDENCY }
+		split /;/, normalise_job_dependencies(@_);
+}
 
 sub recordSampleLockJobs {
 	my ($lock_file, $jobs, $optHR) = @_;
@@ -842,6 +846,14 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	my @jspl = split /;/, $waitJID;
 	my $has_failed_dependency = grep { $_ eq $FAILED_SUBMISSION_DEPENDENCY } @jspl;
 	my $has_deferred_dependency = grep { $_ eq $DEFERRED_SUBMISSION_DEPENDENCY } @jspl;
+	# A postponed command has no scheduler ID yet. Preserve a blocked producer
+	# in its returned dependency instead of exporting a runnable command with
+	# that prerequisite stripped. The next controller pass can rebuild it.
+	if (!$immSubm && ($has_failed_dependency || $has_deferred_dependency)) {
+		return ($DEFERRED_SUBMISSION_DEPENDENCY, '') if $has_deferred_dependency;
+		return (handleSubmissionFailure($optHR,
+			"Skipping deferred submission for $tmpsh because an upstream submission failed"), '');
+	}
 	@jspl = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY
 		&& $_ ne $DEFERRED_SUBMISSION_DEPENDENCY } @jspl;
 	$waitJID = join(';', @jspl);

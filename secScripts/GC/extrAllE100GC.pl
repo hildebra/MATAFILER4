@@ -2,6 +2,7 @@
 #extracts abundance of all essential marker genes, as well as FMGs
 #./extrAllE100GC.pl /g/scb/bork/hildebra/SNP/GCs/GNM3_ABR
 #./extrAllE100GC.pl /g/scb/bork/hildebra/SNP/GCs/
+use File::Path qw(make_path);
 use warnings;
 use strict;
 sub processSubGenes;sub getEgenes;
@@ -14,12 +15,16 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
 use Mods::CatalogPaths qw(resolve_catalog_maps);
 
 my $smtBin = getProgPaths("samtools");#/g/bork5/hildebra/bin/samtools-1.2/samtools";
-my $rarBin = getProgPaths("rare");#
+my $rarBin = getProgPaths("rare");
+my $rmBin = getProgPaths("rm");
 
 die "No input args \n" if (@ARGV < 1);
 
 my $GCd = $ARGV[0];
 my $tmpD = $ARGV[1];
+my $clusterID = @ARGV > 2 ? $ARGV[2] : 95;
+die "Cluster identity must be an integer between 1 and 100\n"
+	unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
 my $oldNameFolders = -1;#$ARGV[1];
 my $mapF = resolve_catalog_maps($GCd);
 print "Reading map(s): $mapF\n";
@@ -28,7 +33,7 @@ my %map = %{$hrm};
 my @samples = @{$map{opt}{smpl_order}};
 my $Nsmpls = scalar(@samples);
 $tmpD.="/FMGextras/";
-system "mkdir -p $tmpD";
+make_path($tmpD) unless -d $tmpD;
 $| = 1;
 
 my $doSubmit = 1;my $submSys = ""; my $qsubDir = "$GCd/LOGandSUB/";
@@ -110,7 +115,7 @@ if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 	print STDERR "Subset of gene cats to read: " . scalar(keys %{$allGs}) . "\n";
 	
 	print STDERR "Reading cluster index\n";
-	my ($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.95.fna.clstr.idx",2,$allGs);
+	my ($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",2,$allGs);
 	print STDERR "Done reading idx\n";
 
 	#print "@e1cat\n";
@@ -180,7 +185,7 @@ sub getGeneSeqsSubGenes {
 	my ($tag) = @_;
 	my $subF = "$GCd/$tag.subset.cats";
 	my $fmgOD = "$GCd/$tag/";
-	system "mkdir -p $fmgOD";
+	make_path($fmgOD) unless -d $fmgOD;
 
 	open my $subset_input, '<', $subF or die "can't open $subF\n";
 	my (@categories, %wanted);
@@ -197,8 +202,8 @@ sub getGeneSeqsSubGenes {
 	close $subset_input or die "Cannot close marker subset $subF: $!\n";
 
 	for my $type (
-		['fna', "$GCd/compl.incompl.95.fna"],
-		['faa', "$GCd/compl.incompl.95.prot.faa"],
+		['fna', "$GCd/compl.incompl.$clusterID.fna"],
+		['faa', "$GCd/compl.incompl.$clusterID.prot.faa"],
 	) {
 		my ($suffix, $catalogue) = @{$type};
 		my $sequences = readFasta(
@@ -288,7 +293,7 @@ sub processSubGenes{
 	$cmdX .= "$rarBin lineExtr -i $GCd/Mat.cov.mat.gz -o $GCd/Mat.cov.$tag.mat -reference $GCd/$tag.lines -t $cores -checkRowName2Idx\n ";
 	$cmdX .= "$rarBin lineExtr -i $GCd/Mat.med.mat.gz -o $GCd/Mat.med.$tag.mat  -reference $GCd/$tag.lines -t $cores -checkRowName2Idx\n ";
 	$cmdX .= "$pigzBin -p 6 $GCd/Mat.cov.$tag.mat $GCd/Mat.med.$tag.mat\n";
-	$cmdX .= "rm $GCd/$tag.lines\n";
+	$cmdX .= "$rmBin $GCd/$tag.lines\n";
 	print $cmdX."\n";
 	#die $cmdX."\n";
 	#systemW $cmdX;

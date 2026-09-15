@@ -20,37 +20,43 @@ $local = $ARGV[3] if (@ARGV > 3);
 $totMem = $ARGV[4] if (@ARGV > 4);
 my $finalStone = "";
 $finalStone = $ARGV[5] if (@ARGV > 5);
-my $cdhitBin = getProgPaths("cdhit");
+my $clusterID = @ARGV > 6 ? $ARGV[6] : 95;
+die "Invalid cluster identity\n" unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
+my $cdhitBin = getProgPaths("cdhit_est");
 my $rareBin = getProgPaths("rare");
 my $pigzBin = getProgPaths("pigz");
+my $mvBin = getProgPaths("mv");
+my $rmBin = getProgPaths("rm");
+my $mkdirBin = getProgPaths("mkdir");
+my $touchBin = getProgPaths("touch");
 my $mms2 = getProgPaths("mmseqs2");
 
 my $clMode = 2; #0=cdhit, 2=mmseqs2
 
 my $c90d = "$GCd/decluter/";
-system "mkdir -p $c90d" unless (-d $c90d);
+system "$mkdirBin -p $c90d" unless (-d $c90d);
 
-my $primFasta = "$GCd/compl.incompl.95.fna";
-my $primFastaAA = "$GCd/compl.incompl.95.prot.faa";
+my $primFasta = "$GCd/compl.incompl.$clusterID.fna";
+my $primFastaAA = "$GCd/compl.incompl.$clusterID.prot.faa";
 my $ofna = "$tmpD/tmp.fna";
 my $cltsv = "$tmpD/clust.txt";
-system "mkdir -p $tmpD" unless (-d $tmpD);
+system "$mkdirBin -p $tmpD" unless (-d $tmpD);
 print "=============================================\nDeclutering of gene catalog\n=============================================\n";
 print "Phase I: clustering of gene cat and estimation of co-exclusion\n";
 #choose very agressive parameters
 my $cmd = "";
 #DEBUG 
 my $stone = "$c90d/declut.stone";
-$cmd .= "mv $GCd/Matrix.mat.gz $c90d/Mat.predecl.mat.gz\n" if (-e "$GCd/Matrix.mat.gz");
+$cmd .= "$mvBin $GCd/Matrix.mat.gz $c90d/Mat.predecl.mat.gz\n" if (-e "$GCd/Matrix.mat.gz");
 #$cmd .= sortFNA($GCd,"compl.incompl.95",1,$tmpD,$numCor);
 if ($clMode == 0){
-	$cmd .= $cdhitBin."-est -i $primFasta -o $ofna -n 9 -G 1 -A 150 -r 0 -aS 0.4 -mask NX -aL 0.15 -d 0 -c 0.94 -g 1 -T $numCor -M ".int(($totMem+30)*1024)."\n";
-	$cmd .= "mv $ofna* $c90d\n";
+	$cmd .= $cdhitBin." -i $primFasta -o $ofna -n 9 -G 1 -A 150 -r 0 -aS 0.4 -mask NX -aL 0.15 -d 0 -c 0.94 -g 1 -T $numCor -M ".int(($totMem+30)*1024)."\n";
+	$cmd .= "$mvBin $ofna* $c90d\n";
 	$cmd .= "$rareBin decluter -i $GCd/Matrix.mat.gz -reference $ofna.clstr -o $tmpD -t $numCor -gz \n";
 }elsif ($clMode == 2){ #mmseqs2 clustering 
 	die "can't find input $primFastaAA" unless (-e $primFastaAA);
-	my $MMdb = "$tmpD/compl.incompl.95.prot.faa.mms2.db";
-	$cmd .= "touch $MMdb.stone\n";
+	my $MMdb = "$tmpD/compl.incompl.$clusterID.prot.faa.mms2.db";
+	$cmd .= "$touchBin $MMdb.stone\n";
 	$cmd .= "echo \"Starting protein clustering at 95%\"\n";
 	$cmd .= "$mms2 createdb  $primFastaAA $MMdb -v 1\n" unless (-e "$primFastaAA.mms2.db");
 #	$cmd .= "$mms2 linclust $primFastaAA.mms2.db  $ofna $tmpD --cov-mode 2 -c 0.4 --min-seq-id 0.95 --threads $numCor\n";
@@ -59,7 +65,7 @@ if ($clMode == 0){
 #	$cmd .= "sort $tmpD/clus.tsv > $cltsv\n";
 	$cmd .= "echo \"Starting gene matrix declutering\"\n";
 	$cmd .= "$rareBin decluter2 -i $c90d/Mat.predecl.mat.gz -reference $cltsv -o $tmpD -t $numCor  -gz -pval 1e-5 \n";
-	$cmd .= "rm -f $MMdb*\n";
+	$cmd .= "$rmBin -f $MMdb*\n";
 	$cmd .= "echo \"Finished declutering\"\n";
 
 } else {
@@ -67,12 +73,12 @@ if ($clMode == 0){
 	$cmd .= "$vsBin --cluster_fast $primFasta --iddef 0 --usersort --mincols 150 --maxseqlength 90000 --consout $ofna --id 0.9 --strand plus --threads $numCor --uc $ofna.uc\n";
 	die "$cmd\n";
 }
-$cmd .= "mv $tmpD/mat.decl.mat.gz $GCd/Matrix.mat.gz\n";
-$cmd .= "mv $tmpD/concat.list $c90d\n";
-$cmd .= "$pigzBin -p $numCor -c $GCd/compl.incompl.95.fna.clstr > $c90d/compl.incompl.95.fna.clstr.gz\n";
-$cmd .= "$pigzBin -p $numCor -c $GCd/compl.incompl.95.fna.clstr.idx > $c90d/compl.incompl.95.fna.clstr.idx.gz\n";
-$cmd .= "rm $GCd/compl.incompl.95.fna.clstr*\n";
-$cmd .="touch $stone";
+$cmd .= "$mvBin $tmpD/mat.decl.mat.gz $GCd/Matrix.mat.gz\n";
+$cmd .= "$mvBin $tmpD/concat.list $c90d\n";
+$cmd .= "$pigzBin -p $numCor -c $GCd/compl.incompl.$clusterID.fna.clstr > $c90d/compl.incompl.$clusterID.fna.clstr.gz\n";
+$cmd .= "$pigzBin -p $numCor -c $GCd/compl.incompl.$clusterID.fna.clstr.idx > $c90d/compl.incompl.$clusterID.fna.clstr.idx.gz\n";
+$cmd .= "$rmBin $GCd/compl.incompl.$clusterID.fna.clstr*\n";
+$cmd .="$touchBin $stone";
 
 	#die "$cmd\n";
 
@@ -108,13 +114,13 @@ $cmd = "";
 if (-e "$primFastaAA.mms2.stone"){
 	die "decluter didn't work!\n $c90d/decluter.sh";
 }
-system "rm -f $primFastaAA.mms2";
+system "$rmBin -f $primFastaAA.mms2";
 #print "$tmpD/mat.decl.mat.gz\n$c90d/concat.list\n";
 if (!-e $stone && (-e "$tmpD/mat.decl.mat.gz" || !-e "$c90d/concat.list")){
-	$cmd = "mv $tmpD/mat.decl.mat.gz $GCd/Matrix.mat.gz\n";
-	$cmd .= "mv $tmpD/concat.list $c90d\n";
-	$cmd .= "mv $GCd/compl.incompl.95.fna.clstr* $c90d\n$pigzBin -p $numCor $c90d/compl.incompl.95.fna.clstr\n";
-	$cmd .="touch $stone";
+	$cmd = "$mvBin $tmpD/mat.decl.mat.gz $GCd/Matrix.mat.gz\n";
+	$cmd .= "$mvBin $tmpD/concat.list $c90d\n";
+	$cmd .= "$mvBin $GCd/compl.incompl.$clusterID.fna.clstr* $c90d\n$pigzBin -p $numCor $c90d/compl.incompl.$clusterID.fna.clstr\n";
+	$cmd .="$touchBin $stone";
 	systemW $cmd;
 }
 if (!-e "$stone"){
@@ -125,7 +131,7 @@ if (!-e "$stone"){
 
 print "Phase I complete\nPhase II: Rewriting clstr.idx\n";
 #now comes just a bunch of rewriting..
-my ($hr1,$hr2) = readClstrRev("$c90d/compl.incompl.95.fna.clstr.idx",0);my %cl2gene = %{$hr2}; $hr1 = {};
+my ($hr1,$hr2) = readClstrRev("$c90d/compl.incompl.$clusterID.fna.clstr.idx",0);my %cl2gene = %{$hr2}; $hr1 = {};
 
 open I,"<$c90d/concat.list" or die $!;
 while (my $line = <I>){
@@ -149,19 +155,19 @@ while (my $line = <I>){
 }
 close I;
 my @genes= sort(keys %cl2gene);
-print "Rewriting into $GCd/compl.incompl.95.fna.clstr.idx\n";
-open O,">$GCd/compl.incompl.95.fna.clstr.idx" or die $!;
+print "Rewriting into $GCd/compl.incompl.$clusterID.fna.clstr.idx\n";
+open O,">$GCd/compl.incompl.$clusterID.fna.clstr.idx" or die $!;
 foreach my $gene (@genes){
 	print O "$gene\t$cl2gene{$gene}\n";
 }
 close O;
-#$cmd = "$pigzBin -p $numCor $c90d/compl.incompl.95.fna.clstr.idx\n" unless (-e "$c90d/compl.incompl.95.fna.clstr.idx.gz");
-$cmd = "gzip $c90d/compl.incompl.95.fna.clstr.idx\n" unless (-e "$c90d/compl.incompl.95.fna.clstr.idx.gz");
+#$cmd = "$pigzBin -p $numCor $c90d/compl.incompl.$clusterID.fna.clstr.idx\n" unless (-e "$c90d/compl.incompl.$clusterID.fna.clstr.idx.gz");
+$cmd = "$pigzBin $c90d/compl.incompl.$clusterID.fna.clstr.idx\n" unless (-e "$c90d/compl.incompl.$clusterID.fna.clstr.idx.gz");
 systemW $cmd;
 
 
-systemW "touch $finalStone" unless ($finalStone eq "");
-systemW "rm -r $tmpD\n";
+systemW "$touchBin $finalStone" unless ($finalStone eq "");
+systemW "$rmBin -r $tmpD\n";
 
 
 print "Phase II decluter completed\n";

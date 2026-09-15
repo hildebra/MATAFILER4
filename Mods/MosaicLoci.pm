@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use Exporter qw(import);
+use Mods::math qw(medianArray);
 use Mods::GenoMetaAss qw(gzipopen);
 
 our @EXPORT_OK = qw(
@@ -287,11 +288,7 @@ sub confirm_mosaic_candidates {
 }
 
 sub _median {
-	my @values = sort { $a <=> $b } @_;
-	return 0 unless @values;
-	my $middle = int(@values / 2);
-	return @values % 2 ? $values[$middle]
-		: ($values[$middle - 1] + $values[$middle]) / 2;
+	return @_ ? medianArray(@_) : 0;
 }
 
 sub select_outgroup_panel {

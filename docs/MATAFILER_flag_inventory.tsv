@@ -130,7 +130,7 @@ MATAF4.pl	4.38	Functional profiling (diamond)	-DiaSensitiveMode	integer	MFopt		s
 MATAF4.pl	4.38	Functional profiling (diamond)	-DiaFrameshift	integer	MFopt		stable	DIAMOND frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment.
 MATAF4.pl	4.38	Functional profiling (diamond)	-rmRawDiamondHits	integer	MFopt		stable	Delete raw DIAMOND hits after successful parsing.
 MATAF4.pl	4.38	Functional profiling (diamond)	-DiaMinAlignLen	integer	MFopt		stable	Minimum accepted DIAMOND alignment length.
-MATAF4.pl	4.38	Functional profiling (diamond)	-DiaMinFracQueryCov	float	MFopt		stable	Minimum accepted fraction of the query aligned.
+MATAF4.pl	4.38	Functional profiling (diamond)	-DiaMinFracQueryCov	float	MFopt		stable	Subject-coverage fraction threshold (legacy query-named flag).
 MATAF4.pl	4.38	Functional profiling (diamond)	-DiaPercID	integer	MFopt		stable	Minimum accepted DIAMOND percent identity.
 MATAF4.pl	4.38	Functional profiling (diamond)	-DiaDBs	string	MFopt		stable	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 MATAF4.pl	4.38	Functional profiling (Jaime tree)	-orthoExtract	integer	MFopt		stable	Run translated-read orthologue placement.
@@ -167,7 +167,6 @@ geneCat.pl	0.51	Cluster options	-extraGenesNT	string	extraRdsFNA		stable	add gen
 geneCat.pl	0.51	Cluster options	-extraGenesAA	string	extraRdsFAA		stable	add genes (AA) from external sources, e.g. from complete genomes
 geneCat.pl	0.51	Cluster options	-mmseqC	integer	clustMMseq	1	stable	1: use mmseqs2 instead of CD-HIT for gene clustering
 geneCat.pl	0.51	Cluster options	-decluterMatrix	integer	doDecluter	0	stable	declutering of gene matrix? by default deactivated, was more useful for canopy based MGS, can intro unwanted biases as long as gene/prots don't get removed
-geneCat.pl	0.51	Flow control	-1stepClust	integer	allinClust	1	stable	cluster incomplete genes separate?
 geneCat.pl	0.51	Flow control	-submitLocal	integer	submitLocal	1	stable	pretty important run mode switch, to submit jobs while geneCat is runnning single core
 geneCat.pl	0.51	Flow control	-submSystem	string	submSys		stable	See source/help for details.
 geneCat.pl	0.51	Flow control	-continue,-justCDhit	integer	justCDhit	1	stable	flow control, 1: continue with found files 0: delete existing (partial) gene cat, start again
@@ -209,13 +208,12 @@ MGS.pl	0.32	General options	-submit	integer	doSubmit	1	stable	1:submit jobs, 0: 
 MGS.pl	0.32	General options	-canopies	string	canopyF		stable	location of canopy clustering output file (clusters.txt)
 MGS.pl	0.32	General options	-smallCores	integer	numCore	4	stable	cores used for normal jobs (not intensive)
 MGS.pl	0.32	General options	-bottleneckCores	integer	canCore	12	stable	cores for compute intensive jobs
-MGS.pl	0.32	General options	-redoCluster	integer	rewrClusterMAGs	0	stable	See source/help for details.
-MGS.pl	0.32	General options	-redoTax	integer	rewrTAX	0	stable	rewrite tax annotations
 MGS.pl	0.32	General options	-MGset	string	useGTDBmg	FMG	stable	GTDB or FMG, which marker genes are used? Default: GTDB
 MGS.pl	0.32	General options	-wait4stone	string	wait4stone		stable	wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later
 MGS.pl	0.32	General options	-wait4stoneTimeout	integer	wait4stoneTimeout	86400	stable	maximum wait in seconds; zero waits indefinitely
 MGS.pl	0.32	General options	-mem	integer	memG	150	stable	memory used for intensive jobs
 MGS.pl	0.32	General options	-strains	integer	doStrains	0	stable	1: calc instra species strain phylogenies. Default: 0
+MGS.pl	0.55	General options	-redo	string	redo	none	stable	rebuild selection: none, cluster, tax, tree, input or all
 MGS.pl	0.51	General options	-prepareMosaicLoci	integer	prepareMosaicLoci	1	stable	1: have strain_within submit, await, and validate Mosaic as a prerequisite before strain analysis; 0: skip Mosaic preprocessing and keep same-NOG seed clusters separate
 MGS.pl	0.32	General options	-useCheckM2	integer	useCheckM2	0	stable	CheckM2 default qual checking of MAGs/MGS
 MGS.pl	0.32	General options	-useCheckM1	integer	useCheckM1	1	stable	CheckM default qual checking of MAGs/MGS

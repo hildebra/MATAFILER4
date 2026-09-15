@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use Exporter qw(import);
+use Mods::math qw(medianArray);
 
 our @EXPORT_OK = qw(
 	build_locus_groups
@@ -512,10 +513,7 @@ sub choose_locus_candidate {
 }
 
 sub _median {
-	my (@values) = sort { $a <=> $b } @_;
-	return 0 unless @values;
-	my $middle = int(@values / 2);
-	return @values % 2 ? $values[$middle] : ($values[$middle - 1] + $values[$middle]) / 2;
+	return @_ ? medianArray(@_) : 0;
 }
 
 sub robust_depth_mask {

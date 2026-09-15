@@ -130,7 +130,7 @@ functional profiling (diamond)	DiaSensitiveMode	integer	0	stable	$MFopt{diaRunSe
 functional profiling (diamond)	DiaFrameshift	integer	0	stable	$MFopt{diaFrameshift}	DIAMOND frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment.
 functional profiling (diamond)	rmRawDiamondHits	integer	0	stable	$MFopt{DiaRmRawHits}	Delete raw DIAMOND hits after successful parsing.
 functional profiling (diamond)	DiaMinAlignLen	integer	20	stable	$MFopt{DiaMinAlignLen}	Minimum accepted DIAMOND alignment length.
-functional profiling (diamond)	DiaMinFracQueryCov	float	0.1	stable	$MFopt{DiaMinFracQueryCov}	Minimum accepted fraction of the query aligned.
+functional profiling (diamond)	DiaMinFracQueryCov	float	0.1	stable	$MFopt{DiaMinFracQueryCov}	Subject-coverage fraction threshold (legacy query-named flag).
 functional profiling (diamond)	DiaPercID	integer	40	stable	$MFopt{DiaPercID}	Minimum accepted DIAMOND percent identity.
 functional profiling (diamond)	DiaDBs	string	""""""	stable	$MFopt{reqDiaDB}	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 functional profiling (Jaime tree)	orthoExtract	integer	0	stable	$MFopt{calcOrthoPlacement}	Run translated-read orthologue placement.

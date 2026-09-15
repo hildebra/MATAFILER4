@@ -12,14 +12,16 @@ use Mods::CatalogPaths qw(resolve_catalog_maps);
 sub readKmers_Smpl;
 
 my $GCd = $ARGV[0];
+my $clusterID = @ARGV > 2 ? $ARGV[2] : 95;
+die "Invalid cluster identity\n" unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
 my $mapF = resolve_catalog_maps($GCd);
 my ($hr1,$hr2) = readMapS($mapF,-1);
 my %map = %{$hr1}; my %AsGrps = %{$hr2};
-my $kmerOut = "$GCd/compl.incompl.95.fna.kmer";
-system "rm -f $kmerOut" if (-e $kmerOut);
+my $kmerOut = "$GCd/compl.incompl.$clusterID.fna.kmer";
+unlink $kmerOut or die "Cannot remove $kmerOut: $!\n" if -e $kmerOut;
 
 #read gene clusters jsut to get an idea of which genes are present
-($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.95.fna.clstr.idx",0); $hr1 = {};
+($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0); $hr1 = {};
 my @totGenes = sort  { $a <=> $b } keys %{$hr2};
 print @totGenes."\n";
 #empty mem
@@ -36,7 +38,7 @@ for (my $subs = 0; $subs < int(scalar(@totGenes)/$binSize)+1; $subs++){
 		$subHs{$totGenes[$i]} = 1;
 		last if ($i+1 >= $numGenesT);
 	}
-	($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.95.fna.clstr.idx",0,\%subHs);my %cl2gene = %{$hr2}; $hr1 = {}; undef %subHs;
+	($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,\%subHs);my %cl2gene = %{$hr2}; $hr1 = {}; undef %subHs;
 	print scalar(keys %cl2gene)."\n";
 	my %cl2gene2; my $numGenesRep = 0;my $numKmerReps=0;
 	foreach my $gene (keys %cl2gene){
