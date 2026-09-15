@@ -108,7 +108,9 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-inputFQregex2` | string | `'.*2\.f[^\.]*q\.gz$'` | stable | regex for detecting read pair 2 in input fastq files |
 | `-inputFQregexSingle` | string | `""` | stable | regex for detecting single end reads in input fastq files |
 | `-inputFQregexTrustSingle` | integer | `0` | stable | if grep of files (rawSrchString) has multi assignments, which grep to trust more? |
-| `-inputBAMregex` | string | `""` | stable | regex for detecting BAM read files (e.g. `'.*\.bam$'`); matches are treated as unpaired and converted with `samtools fastq`. Empty disables BAM input |
+| `-inputBAMregex` | string | `""` | stable | Regex selecting singleton SAM/BAM/CRAM inputs. SDM reads these directly; raw mapping streams or caches extraction as needed. Empty disables primary alignment discovery. |
+| `-inputCramReference` | string | `""` | stable | Indexed FASTA used to decode input CRAM, independently of the mapping target. Omit when HTSlib can resolve the reference itself. |
+| `-inputCramReferenceSuppl` | string | primary setting | stable | Decode reference for support CRAM; defaults to `-inputCramReference`. |
 | `-splitFastaInput` | integer | `0` | stable | Enable FASTA input splitting during read staging. |
 | `-mergeReads` | integer | `0` | stable | merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances) |
 | `-ProbRdFilter` | integer | `1` | stable | Enable probabilistic SDM read filtering. |

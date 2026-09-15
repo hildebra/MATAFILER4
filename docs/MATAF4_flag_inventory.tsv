@@ -39,7 +39,9 @@ preprocessing (cleaning reads etc)	inputFQregex1	string	'.*1\.f[^\.]*q\.gz$'	sta
 preprocessing (cleaning reads etc)	inputFQregex2	string	'.*2\.f[^\.]*q\.gz$'	stable	$MFconfig{rawFileSrchStr2}	regex for detecting read pair 2 in input fastq files
 preprocessing (cleaning reads etc)	inputFQregexSingle	string	""""""	stable	$MFconfig{rawFileSrchStrSingl}	regex for detecting single end reads in input fastq files
 preprocessing (cleaning reads etc)	inputFQregexTrustSingle	integer	0	stable	$MFconfig{prefSinglFQgreps}	if grep of files (rawSrchString) has multi assignments, which grep to trust more?
-preprocessing (cleaning reads etc)	inputBAMregex	string	""""""	stable	$MFconfig{rawFileBamSrchSing}	bams that will be converted to fastq
+preprocessing (cleaning reads etc)	inputBAMregex	string	""""""	stable	$MFconfig{rawFileBamSrchSing}	singleton SAM/BAM/CRAM inputs; direct SDM input with streaming or cached raw extraction
+preprocessing (cleaning reads etc)	inputCramReference	string	""""""	stable	$MFconfig{inputCramReference}	indexed FASTA used to decode input CRAM
+preprocessing (cleaning reads etc)	inputCramReferenceSuppl	string	""""""	stable	$MFconfig{inputCramReferenceSuppl}	support CRAM decode reference; defaults to primary
 preprocessing (cleaning reads etc)	splitFastaInput	integer	0	stable	$MFconfig{splitFastaInput}	Enable FASTA input splitting during read staging.
 preprocessing (cleaning reads etc)	mergeReads	integer	0	stable	$MFopt{doReadMerge}	merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances)
 preprocessing (cleaning reads etc)	ProbRdFilter	integer	1	stable	$MFopt{sdmProbabilisticFilter}	Enable probabilistic SDM read filtering.

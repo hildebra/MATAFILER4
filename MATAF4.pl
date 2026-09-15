@@ -1446,8 +1446,17 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $porechopFlag = 0;
 	$porechopFlag = 1 if ($MFopt{usePorechop} && $dowstreamAnalysisFlag && !-e "$smplTmpDir/rawRds/poreChopped.stone");
 	#die "$assemblyFlag\t$seqCleanFlag\t$boolScndMappingOK\n";
+	my $referencePasses = $boolScndMappingOK ? 0 : scalar(@bwt2outD);
+	$referencePasses = 1 if $referencePasses && ($MFopt{mapModeTogether} || $MFopt{DoMapModeDecoy});
+	my $alignmentPolicy = {
+		primary_passes => ($mapAssFlag ? 1 : 0) + $referencePasses
+			+ (($MFopt{DoAssembly} == 5 && !$boolAssemblyOK) ? 1 : 0),
+		support_passes => ($mapSuppAssFlag ? 1 : 0),
+		upload => ($MFconfig{uploadRawRds} ne '' ? 1 : 0),
+		unfiltered_files => ($dowstreamAnalysisFlag && (!$MFopt{useSDM} || ($boolAssemblyOK && !$calcContamination))) ? 1 : 0,
+	};
 	my $calcUnzip=0;
-	$calcUnzip=1 if ($calcDiamond || $calcProtal || $porechopFlag || $seqCleanFlag  || $mapAssFlag || $mapSuppAssFlag || (!$MFopt{useUnmapped} && !$boolScndMappingOK) || $MFconfig{uploadRawRds} ne "");
+	$calcUnzip=1 if ($calcDiamond || $calcProtal || $porechopFlag || $seqCleanFlag  || $mapAssFlag || $mapSuppAssFlag || (!$MFopt{useUnmapped} && !$boolScndMappingOK) || $MFconfig{uploadRawRds} ne "" || $alignmentPolicy->{unfiltered_files});
 	#print "chk1 $mapSuppAssFlag $calcSuppCoverage $eSuppCovAsssembly\n" ;
 
 	# Cleanup is destructive to read-cleaning stones, mapping indexes and staged
@@ -1567,7 +1576,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my ($jdep) =  #,$hrefSeqSet
 			seedUnzip2tmp($curDir,$curSmpl,$curUnzipDep,$nodeSpTmpD,
 			$smplTmpDir,$calcUnzip,$finalMapDir,
-			$porechopFlag,$inputRawFile);
+			$porechopFlag,$inputRawFile,$alignmentPolicy);
 	#my %seqSet = %{$hrefSeqSet};
 	#print "$seqSet{pa1}   $seqSet{seqTech}   $seqSet{seqTechX}\n";
 	push (@unzipjobs,$jdep) unless ($jdep eq "");
@@ -1827,8 +1836,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		&& $rawReadSetHR->{stagedReadsMaterialized};
 	if (!$MFopt{DoAssembly} && $MFconfig{importMocat}==0
 			&& $MFconfig{removeInputAgain} && !$requireRawReadsFlag
-			&& $stagedReadsMaterialized){
-		$sdmjN = cleanInput($sdmjN,$smplTmpDir);
+			&& $stagedReadsMaterialized && !$alignmentPolicy->{unfiltered_files}){
+		$sdmjN = cleanInput(normalise_job_dependencies($sdmjN,$uplJob,$uplJobX),$smplTmpDir);
 	}
 	append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $mergJbN);
 
@@ -2518,7 +2527,7 @@ sub sampleCompletionRequestSignature {
 	);
 	my @configKeys = qw(
 		unpackZip uploadRawRds defaultContigSubs remove_reads_tmpDir
-		rmScratchTmp skipSmallSmplsMB skipWrongPairedSmpls
+		rmScratchTmp skipSmallSmplsMB skipWrongPairedSmpls inputCramReference inputCramReferenceSuppl
 	);
 	my %requested = map {
 		my $key = $_;
@@ -3954,7 +3963,7 @@ sub discoverSampleInputs {
 						read1 => $MFconfig{rawFileSrchStrXtra1},
 						read2 => $MFconfig{rawFileSrchStrXtra2},
 						single => '\\.(?:f(?:ast)?q|f(?:ast)?a)(?:\\.(?:gz|bz2))?$',
-						bam => '\\.bam$', prefer_single => 0,
+						bam => '\\.(?:bam|sam|cram)$', prefer_single => 0,
 					});
 				};
 				if (!$found) {
@@ -3971,7 +3980,7 @@ sub discoverSampleInputs {
 							 @{$found->{single}}, @{$found->{bam}})
 					};
 					$result->{support_error} =
-						"Can't find supported FASTQ, FASTA, or BAM inputs in support directory $supportDir\n"
+						"Can't find supported FASTQ, FASTA, or SAM/BAM/CRAM inputs in support directory $supportDir\n"
 						if (!@{$found->{read1}} && !@{$found->{single}} && !@{$found->{bam}});
 				}
 			}
@@ -3981,12 +3990,12 @@ sub discoverSampleInputs {
 					$result->{support_error} = "Can't find support-read file $supportFile\n";
 					last;
 				}
-				if ($supportFile !~ /\.(?:bam|f(?:ast)?q|f(?:ast)?a)(?:\.(?:gz|bz2))?$/i) {
+				if ($supportFile !~ /\.(?:(?:bam|sam|cram)|(?:f(?:ast)?q|f(?:ast)?a)(?:\.(?:gz|bz2))?)$/i) {
 					$result->{support_error} =
-						"Unsupported SupportReads format for $supportFile; expected BAM, FASTQ, or FASTA, optionally gz/bz2 compressed.\n";
+						"Unsupported SupportReads format for $supportFile; expected SAM/BAM/CRAM or FASTQ/FASTA (optionally gz/bz2 compressed).\n";
 					last;
 				}
-				my $type = $supportFile =~ /\.bam$/i ? "bam" : "single";
+				my $type = $supportFile =~ /\.(?:bam|sam|cram)$/i ? "bam" : "single";
 				push @{$result->{support}{$type}}, $supportFile;
 				my @fileStat = stat($supportFile);
 				$result->{support}{file_sizes}{$supportFile} = $fileStat[7];
@@ -6387,7 +6396,10 @@ sub sdmClean(){
 		my $suffix = $i == 0 ? '' : ".lib$i";
 		my $prefix = "$finD$baseFname$suffix";
 		my $hasPair = ($library->{files}{r1} || '') ne '';
-		my $hasSingle = ($library->{files}{single} || '') ne '';
+		my $singleInput = $library->{files}{bam} || $library->{files}{single} || '';
+		my $hasSingle = $singleInput ne '';
+		push @libraryArgs, ('-cramRef', $library->{metadata}{cram_reference})
+			if $library->{files}{bam} && $library->{metadata}{cram_reference};
 		my ($outR1, $outR2, $outSingle) = ('', '', '');
 		my $logSuffix = $i == 0 ? '' : ".$i";
 
@@ -6422,7 +6434,7 @@ sub sdmClean(){
 			my $singleOutput = $hasPair ? "$prefix.input-single.$fEnd" : $outSingle;
 			$cmd .= _shell_command('rm', '-f', '--', $singleOutput)."\n";
 			$cmd .= _shell_command(
-				$sdmBin, '-i', $library->{files}{single}, '-o_fastq', $singleOutput,
+				$sdmBin, '-i', $singleInput, '-o_fastq', $singleOutput,
 				'-options', $sdmSingleOpt, @sdmExtra, '-paired', 1,
 				'-log', "$sdmLogDir/$logStem.S$logSuffix.log", @libraryArgs, @sdmCut,
 			)."\n";
@@ -6446,7 +6458,7 @@ sub sdmClean(){
 	if (!-e "$curOutDir/input_fil.txt" && !$useXtras) {
 		open my $inputFH, '>', "$curOutDir/input_fil.txt" or die "Cannot write $curOutDir/input_fil.txt: $!\n";
 		print {$inputFH} join(';', map {
-			$_->{files}{r1} ? "$_->{files}{r1},$_->{files}{r2}" : $_->{files}{single}
+			$_->{files}{r1} ? "$_->{files}{r1},$_->{files}{r2}" : ($_->{files}{bam} || $_->{files}{single})
 		} @{$libraries});
 		close $inputFH or die "Cannot close $curOutDir/input_fil.txt: $!\n";
 	}
@@ -6742,6 +6754,11 @@ sub complexGunzCpMv($ $ $ $ $ $){
 		die "$scrathD ne $finDest";
 	}
 	my $newRDf = $finDest."$out";
+	if (File::Spec->canonpath("$fastap$in") ne File::Spec->canonpath($newRDf)) {
+		$unzipcmd = _shell_command('rm', '-f', '--', $newRDf)."\n".$unzipcmd;
+	} else {
+		$unzipcmd = ""; $lowEffort = 1;
+	}
 	
 	return ($unzipcmd,$newRDf,$lowEffort);
 }
@@ -6763,8 +6780,9 @@ sub outfiles_trimall($ $){
 sub outfiles_Bam($ $){
 	my ($opath,$fil) = @_;
 	my $OFu1 = "$opath/$fil"; 
-	if ($OFu1 =~ m/\.bam$/){
-		$OFu1 =~ s/(\.bam)$/\.unbam\.fq\.gz/ ;
+	if ($OFu1 =~ m/\.(bam|sam|cram)$/i){
+		my $format = lc($1);
+		$OFu1 =~ s/\.(?:bam|sam|cram)$/\.un$format.fq.gz/i;
 	} else {
 		die "Unknown file ending: $fil\n";
 	}
@@ -6772,6 +6790,110 @@ sub outfiles_Bam($ $){
 	return $OFu1;
 }
 
+
+# Alignment inputs remain singleton libraries. The legacy single slot names a
+# possible raw FASTQ cache; bam always names the authoritative SAM/BAM/CRAM.
+sub alignmentCacheRequired {
+	my ($policy, $scope) = @_;
+	return 1 if $policy->{upload} || $policy->{unfiltered_files};
+	return ($policy->{$scope.'_passes'} || 0) > 1 ? 1 : 0;
+}
+
+sub alignmentFileStamp {
+	my ($path) = @_;
+	my @st = stat($path);
+	return '' unless @st && -f _;
+	return join(':', @st[1, 7, 9, 10]);
+}
+
+sub alignmentCacheIdentity {
+	my ($source, $reference, $samtools) = @_;
+	my @inputs = ($source);
+	push @inputs, $reference, "$reference.fai" if $reference ne '';
+	my %stamps;
+	for my $path (@inputs) {
+		$stamps{$path} = alignmentFileStamp($path);
+		die "Missing alignment input or indexed CRAM reference: $path\n" if $stamps{$path} eq '';
+	}
+	return (completion_request_signature({
+		protocol => 'singleton-fastq-v1', inputs => \%stamps,
+		samtools => $samtools, executable => alignmentFileStamp($samtools),
+	}), \%stamps);
+}
+
+sub alignmentCacheComplete {
+	my ($cache, $signature) = @_;
+	return 0 unless -s $cache;
+	open my $fh, '<', "$cache.source.stone" or return 0;
+	my $stored = do { local $/; <$fh> };
+	close $fh;
+	return $stored eq "$signature\n".alignmentFileStamp($cache)."\n";
+}
+
+sub alignmentFastqCommand {
+	my ($source, $reference, $samtools, $cores, $output) = @_;
+	return _shell_command($samtools, 'fastq', '-@', $cores, '-t',
+		'-0', $output, '-1', '/dev/null', '-2', '/dev/null',
+		($reference ne '' ? ('--reference', $reference) : ()), $source);
+}
+
+sub alignmentCacheCommand {
+	my ($source, $reference, $samtools, $cores, $cache) = @_;
+	my ($signature, $stamps) = alignmentCacheIdentity($source, $reference, $samtools);
+	my $guard = '';
+	for my $path (sort keys %{$stamps}) {
+		$guard .= '[ "$(stat -Lc '. _shell_quote('%i:%s:%Y:%Z').' -- '._shell_quote($path)
+			.')" = '._shell_quote($stamps->{$path}).' ] || { echo '
+			._shell_quote("Alignment source changed after job preparation: $path").' >&2; exit 1; }'."\n";
+	}
+	my $qcache = _shell_quote($cache);
+	my $qstone = _shell_quote("$cache.source.stone");
+	# Keep the .gz suffix: samtools uses it to select compressed output.
+	my $partial = "$cache.partial.gz";
+	my $markerPartial = "$cache.source.stone.partial";
+	my $cmd = "(\nset -eo pipefail\n".$guard;
+	$cmd .= 'if [ ! -s '.$qcache.' ] || [ ! -f '.$qstone.' ] || [ "$(cat -- '.$qstone
+		.')" != "$('._shell_command('printf', '%s\n', $signature)
+		.'; stat -Lc '._shell_quote('%i:%s:%Y:%Z').' -- '.$qcache.')" ]; then'."\n";
+	$cmd .= _shell_command('mkdir', '-p', '--', dirname($cache))."\n";
+	$cmd .= _shell_command('rm', '-f', '--', "$cache.source.stone")."\n";
+	$cmd .= 'trap '._shell_quote(_shell_command('rm', '-f', '--', $partial, $markerPartial))." EXIT\n";
+	$cmd .= alignmentFastqCommand($source, $reference, $samtools, $cores, $partial)."\n";
+	$cmd .= _shell_command('gzip', '-t', '--', $partial)."\n".$guard;
+	$cmd .= _shell_command('mv', '-f', '--', $partial, $cache)."\n";
+	$cmd .= '{ '._shell_command('printf', '%s\n', $signature).'; stat -Lc '
+		._shell_quote('%i:%s:%Y:%Z').' -- '.$qcache.'; } > '._shell_quote($markerPartial)."\n";
+	$cmd .= _shell_command('mv', '-f', '--', $markerPartial, "$cache.source.stone")."\nfi\n)\n";
+	return ($cmd, alignmentCacheComplete($cache, $signature));
+}
+
+# Wrap the existing mapping + post-treatment command, preserving pipe failures.
+# Minimap2 can reopen queries for each index part. Only a plain FASTA smaller
+# than an explicitly selected index batch is eligible for its stdin path.
+sub alignmentMappingCommand {
+	my ($library, $mapper, $reference, $samtools, $cache, $command) = @_;
+	my $source = $library->{files}{bam};
+	my $cramRef = $library->{metadata}{cram_reference} || '';
+	my $stdin = $mapper == 4 ? '--' : '-';
+	die "Alignment streaming is not supported for mapper $mapper\n"
+		unless $mapper == 1 || $mapper == 3 || $mapper == 4 || $mapper == 5;
+	my $stream = 'mf4_alignment_input='._shell_quote($stdin)."\n"
+		.alignmentFastqCommand($source, $cramRef, $samtools, 0, '-').' | '.$command;
+	my $cmd = "(\nset -eo pipefail\n";
+	if ($mapper == 3) {
+		my ($cacheCmd) = alignmentCacheCommand($source, $cramRef, $samtools, 0, $cache);
+		my $qref = _shell_quote($reference);
+		$cmd .= 'if [ -f '.$qref.' ] && [ "$(head -c 1 -- '.$qref.')" = ">" ]'
+			.' && [ "$(stat -Lc %s -- '.$qref.')" -le 1000000000 ]; then'."\n";
+		# The caller places this after the preset, so -I applies to this pass.
+		$cmd .= "mf4_alignment_index='-I 1G'\n".$stream."\nelse\n".$cacheCmd;
+		$cmd .= "mf4_alignment_index=''\nmf4_alignment_input="._shell_quote($cache)."\n".$command;
+		$cmd .= "\nfi\n";
+	} else {
+		$cmd .= $stream."\n";
+	}
+	return $cmd.")\n";
+}
 
 sub valid_files{
 	my ($path, $paIR) = @_;
@@ -6790,7 +6912,9 @@ sub valid_files{
 
 sub seedUnzip2tmp{
 	my ($fastp,$curSmpl,$jDepe,$tmpPath,$finDest, 
-		$calcUnzp,$finalMapDir,$porechopFlag,$inputRawFile) = @_;
+		$calcUnzp,$finalMapDir,$porechopFlag,$inputRawFile,$alignmentPolicy) = @_;
+	# Older callers conservatively retain extraction.
+	$alignmentPolicy ||= {unfiltered_files => 1};
 	# The map-resolved rddir is the authority for primary inputs. Do not let a
 	# caller reconstruct it from SmplPrefix/Path and silently drop #DirPath.
 	my $configuredPrimaryDir = $map{$curSmpl}{hasPrimaryRds}
@@ -7020,7 +7144,7 @@ sub seedUnzip2tmp{
 	$tmpPath.="/rawRds/";
 	my $unzipcmd = "";
 	#$unzipcmd .= "set -e\n"; #sleep $WT\n
-	$unzipcmd .= "rm -rf $finishStone $trimoStone $porechStone $finDest/rawRds/\nmkdir -p $finDest/rawRds/;\n";
+	$unzipcmd .= "rm -f $finishStone $trimoStone $porechStone\nmkdir -p $finDest/rawRds/;\n";
 	my $unzipcmdTMP = "rm -r -f $tmpPath;\nmkdir -p $tmpPath;\n";
 	#make sure input is unzipped <- deprecated, in newer MF versions input is .gz
 	my $testf1 = "";my $testf2 = "";
@@ -7036,46 +7160,40 @@ sub seedUnzip2tmp{
 	if ($map{$curSmpl}{clip} ne ""){$illCLip = $map{$curSmpl}{clip};}
 	#die "Can't find illumina trimming file: $illCLip\n" if ($useTrimomatic && !-e $illCLip);
 	
-	# A support-only staging directory stores its reads below rawRds/Support.
-	# Inspect recursively and invalidate only stale markers; never delete valid
-	# staged inputs while another cleaner may be consuming them.
-	if (-d "$finDest/rawRds"
-		&& !_staged_read_files_present("$finDest/rawRds", $finishStone, $trimoStone, $porechStone)){
-		unlink grep { defined($_) && $_ ne '' && -e $_ } ($finishStone, $trimoStone, $porechStone);
-	}
-
-	
-	
-	#first conversion of bam to fastqs::
-	#this is currently only working with unpaired reads!
 	my $primarySingleSourceCount = scalar(@pas);
 	my $supportSingleSourceCount = scalar(@paXs);
-	for (my $i=0; $i<@paBam; $i++){
-		my $smtBin = getProgPaths("samtools");
-		my $bamFastq = outfiles_Bam("$finDest/rawRds/",basename($paBam[$i]));
-		push @sourcePas, $bamFastq;
-		push @pas, $bamFastq;
-		$unzipcmd .= "\necho \"Converting bam $i to fastq\"\n";
-		$unzipcmd .= "$smtBin fastq -@ $numCore -t $sourcePaBam[$i] -0 $bamFastq;\n"; #| $pigzBin -p $numCore -c >
-		$lowEffort = 0;
-		$stagedReadsMaterialized = 1;
+	my (%alignmentReferences, %alignmentCacheUse);
+	my $alignmentCachesComplete = 1;
+	for my $scope ('primary', 'support') {
+		my $sources = $scope eq 'primary' ? \@sourcePaBam : \@paBamX;
+		my $singles = $scope eq 'primary' ? \@pas : \@paXs;
+		my $sourceSingles = $scope eq 'primary' ? \@sourcePas : \@sourcePaXs;
+		my $dir = "$finDest/rawRds/".($scope eq 'support' ? 'Support/' : '');
+		my $reference = ($scope eq 'support' ? $MFconfig{inputCramReferenceSuppl} : '')
+			|| $MFconfig{inputCramReference} || '';
+		if (@{$sources} && $reference ne '') {
+			$reference = abs_path($reference) || die "Cannot resolve CRAM reference $reference\n";
+			die "CRAM reference needs an indexed FASTA: $reference\n" unless -s $reference && -s "$reference.fai";
+		}
+		$alignmentReferences{$scope} = $reference;
+		for my $source (@{$sources}) {
+			my $cache = outfiles_Bam($dir, basename($source));
+			push @{$singles}, $cache;
+			push @{$sourceSingles}, $cache;
+			my $cacheRequired = alignmentCacheRequired($alignmentPolicy, $scope);
+			next unless $cacheRequired || -s "$cache.source.stone";
+			my ($cacheCmd, $complete) = alignmentCacheCommand($source, $reference, getProgPaths('samtools'), $numCore, $cache);
+			# Keep using a valid cache from an earlier workflow wave, even if
+			# only one mapping pass remains now.
+			next unless $cacheRequired || $complete;
+			$alignmentCacheUse{$scope}{$source} = 1;
+			$unzipcmd .= $cacheCmd;
+			$alignmentCachesComplete &&= $complete;
+			$lowEffort = 0;
+			$stagedReadsMaterialized = 1;
+		}
 	}
-	#and also take care of support reads in bam format
-	for (my $i=0; $i<@paBamX; $i++){
-		my $smtBin = getProgPaths("samtools");
-		my $BamF = basename($paBamX[$i]);
-		my $supportDir = "$finDest/rawRds/Support/";
-		system "mkdir -p $supportDir" if ($i==0 && !-d $supportDir);
-		my $bamFastq = outfiles_Bam($supportDir,$BamF);
-		push @sourcePaXs, $bamFastq;
-		push @paXs, $bamFastq;
-		$unzipcmd .= "echo \"Converting support bam $i to fastq\"\n";
-		$unzipcmd .= "mkdir -p $supportDir;\n" if ($i==0);
-		$unzipcmd .= "$smtBin fastq -@ $numCore -t $paBamX[$i] -0 $bamFastq;\n"; # | $pigzBin -p $numCore -c >
-		$lowEffort = 0;
-		$stagedReadsMaterialized = 1;
-	}
-	
+
 	for (my $i=0; $i<@pa1; $i++){
 		#print $pa1[$i]."\n";
 		if ($MFconfig{filterFromSource}){
@@ -7184,6 +7302,11 @@ sub seedUnzip2tmp{
 	#print "  HH ".-s $testf2 < -s $testf1." FF \n";
 	my $tmpCmd;
 	#die "$unzipcmd\n$calcUnzp\n";
+	my @requiredStagedFiles = (@pa1, @pa2, @paX1, @paX2,
+		@pas[0 .. $primarySingleSourceCount - 1], @paXs[0 .. $supportSingleSourceCount - 1]);
+	if (!$alignmentCachesComplete || grep { !-s $_ } @requiredStagedFiles) {
+		unlink $finishStone if -e $finishStone;
+	}
 	if ($calcUnzp && !-e $finishStone && !$MFconfig{filterFromSource}){ #submit & check for files
 		my @missingInputs = @{missing_input_files(@sourceInputs)};
 		die "Missing or empty input files before unzip for $curSmpl:\n"
@@ -7317,6 +7440,19 @@ sub seedUnzip2tmp{
 		$supportLibraries->[$supportPairCount + $i]{source_files} = {
 			r1 => '', r2 => '', single => $sourcePaXs[$i], bam => '',
 		};
+	}
+	for my $scope ('primary', 'support') {
+		my $libs = $scope eq 'primary' ? $primaryLibraries : $supportLibraries;
+		my $sources = $scope eq 'primary' ? \@sourcePaBam : \@paBamX;
+		my $offset = $scope eq 'primary' ? $primaryPairCount + $primarySingleSourceCount
+			: $supportPairCount + $supportSingleSourceCount;
+		for (my $i = 0; $i < @{$sources}; $i++) {
+			my $lib = $libs->[$offset + $i];
+			$lib->{files}{bam} = $sources->[$i];
+			$lib->{source_files}{bam} = $sources->[$i];
+			$lib->{metadata}{alignment_cache_required} = $alignmentCacheUse{$scope}{$sources->[$i]} ? 1 : 0;
+			$lib->{metadata}{cram_reference} = $alignmentReferences{$scope};
+		}
 	}
 	%seqSet = (libraries => [@{$primaryLibraries}, @{$supportLibraries}],
 			totalInputSizeMB => $totalInputSizeMB, inputXFileSizeMB => $totalXInputSizeMB,
@@ -8042,7 +8178,25 @@ sub mapReadsToRef{
 
 	
 	my $cntAli=0; my $totlRefs = scalar(@bwtIdxs);
-	my $numLib = scalar @pa1 + scalar @paS; 
+	my $numLib = scalar @pa1 + scalar @paS;
+	my @streamAlignment;
+	for (my $i = 0; $i < @singleLibraries; $i++) {
+		my $lib = $singleLibraries[$i];
+		next unless $lib->{files}{bam};
+		# Also enforce reuse here: callers outside the main staging path may
+		# request multiple references using a direct-input library record.
+		if ($lib->{metadata}{alignment_cache_required} || $totlRefs > 1) {
+			my $cache = $lib->{metadata}{alignment_cache_required}
+				? $paS[$i] : "$nodeTmp/alignment.$i.fq.gz";
+			my ($cacheCmd) = alignmentCacheCommand($lib->{files}{bam},
+				$lib->{metadata}{cram_reference} || '', $smtBin, 0, $cache);
+			$algCmd .= $cacheCmd;
+			$paS[$i] = $cache;
+		} else {
+			$streamAlignment[$i] = 1;
+		}
+	}
+
 	#if there's too many refgenomes, copy reads onto tmp dir
 	if ($totlRefs > 5){
 		$algCmd .= "\n\n#copying read files to local tmp\n";
@@ -8053,6 +8207,7 @@ sub mapReadsToRef{
 			$algCmd .= "cp $pa2[$ii] $nodeTmp\n";$pa2[$ii]=~ m/\/([^\/]+$)/;$pa2[$ii] = $nodeTmp."/$1";
 		}
 		for (my $ii=0;$ii<@paS;$ii++){
+			next if $singleLibraries[$ii]{files}{bam};
 			$algCmd .= "cp $paS[$ii] $nodeTmp\n";$paS[$ii]=~ m/\/([^\/]+$)/;$paS[$ii] = $nodeTmp."/$1";
 		}
 	}
@@ -8101,6 +8256,7 @@ sub mapReadsToRef{
 				if ($usePairs){ push(@accR1,$pa1[$i]); push(@accR2, $pa2[$i]); 
 				} else { push(@accRS,$paS[$iS]); }
 				if ( ($i+1) < $numLib && ((($i+1) >= scalar @pa1 && $usePairs==0) || (($i+1) < scalar(@pa1) && $usePairs==1))
+						&& !$mappingLibraries[$i]{files}{bam} && !$mappingLibraries[$i+1]{files}{bam}
 						&& $libsOri[$i] eq $libsOri[$i+1]){ #same reads, same lib in next round, all set!
 					next;
 				}
@@ -8109,34 +8265,39 @@ sub mapReadsToRef{
 				} else { @accRS  = ($paS[$iS]); }
 			}
 			
+			my $stream = !$usePairs && $streamAlignment[$iS];
+			if (!$usePairs && $singleLibraries[$iS]{files}{bam}) {
+				@accRS = ($stream ? '"$mf4_alignment_input"' : _shell_quote($paS[$iS]));
+			}
+			my $libraryCmd = '';
 			#$pa1[$i] =~ m/\/([^\/]+)\.f.*q$/;
 			#my $rgID = "$outName";
 			my $rgStr = getRgStr($outName,$libsOri[$i],$libsOri[$i],$usePairs,$mapperProgLoc,$readTec);
 			#die "$rgStr\n";
 			if ($mapperProgLoc==1){ #bowtie2
 				if ($usePairs){
-					$algCmd .= "$algCmdBase -x $bwtIdxs[$kk] -1 ".join(",",@accR1) ." -2 ".join(",",@accR2);
+					$libraryCmd .= "$algCmdBase -x $bwtIdxs[$kk] -1 ".join(",",@accR1) ." -2 ".join(",",@accR2);
 				} else {
-					$algCmd .="$algCmdBase -x $bwtIdxs[$kk] -U ".join(",",@accRS);#$paS[$iS];
+					$libraryCmd .="$algCmdBase -x $bwtIdxs[$kk] -U ".join(",",@accRS);#$paS[$iS];
 				}
-				$algCmd .= " $rgStr "; #--rg-id $rgID -> this is handled by getRgStr()
+				$libraryCmd .= " $rgStr "; #--rg-id $rgID -> this is handled by getRgStr()
 			} elsif ($mapperProgLoc==2){ #bwa
 				die "single end mapping not implemented for bwa\n" if (!$usePairs);
-				$algCmd .= $algCmdBase." -R $rgStr $REF " . join(",",@accR1). " " . join(",",@accR2); ##$pa1[$i]." ".$pa2[$i];
+				$libraryCmd .= $algCmdBase." -R $rgStr $REF " . join(",",@accR1). " " . join(",",@accR2); ##$pa1[$i]." ".$pa2[$i];
 			} elsif ($mapperProgLoc==3){ #minimap2
-				$algCmd .= $algCmdBase." -R $rgStr -a $REF ";#$MFcontstants{mini2IdxFileSuffix} ";
-				if ($usePairs){ $algCmd .= join(",",@accR1) . " " . join(",",@accR2); #$pa1[$i]." ".$pa2[$i]
-				} else { $algCmd .= join(" ",@accRS)
+				$libraryCmd .= $algCmdBase.($stream ? ' $mf4_alignment_index' : '')." -R $rgStr -a $REF ";#$MFcontstants{mini2IdxFileSuffix} ";
+				if ($usePairs){ $libraryCmd .= join(",",@accR1) . " " . join(",",@accR2); #$pa1[$i]." ".$pa2[$i]
+				} else { $libraryCmd .= join(" ",@accRS)
 				}
 			}elsif ($mapperProgLoc==4){ #kma
-				$algCmd .= "$algCmdBase -t_db $REF$MFcontstants{kmaIdxFileSuffix}  ";
-				if ($usePairs) {$algCmd .= " -ipe " . join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] " 
-				else {$algCmd .= " -i " . join(" ",@accRS) ;}
-				$algCmd .= " -o $tmpOutxtra[$i] ";
+				$libraryCmd .= "$algCmdBase -t_db $REF$MFcontstants{kmaIdxFileSuffix}  ";
+				if ($usePairs) {$libraryCmd .= " -ipe " . join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] "
+				else {$libraryCmd .= " -i " . join(" ",@accRS) ;}
+				$libraryCmd .= " -o $tmpOutxtra[$i] ";
 			}elsif ($mapperProgLoc==5){ #strobealign
-				$algCmd .= "$algCmdBase $rgStr $REF  ";
-				if ($usePairs) {$algCmd .=  join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] " 
-				else {$algCmd .= " " . join(" ",@accRS) ;}
+				$libraryCmd .= "$algCmdBase $rgStr $REF  ";
+				if ($usePairs) {$libraryCmd .=  join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] "
+				else {$libraryCmd .= " " . join(" ",@accRS) ;}
 			}
 			@accR1=(); @accR2=(); @accRS=(); #and empty what was already mapped
 
@@ -8149,7 +8310,11 @@ sub mapReadsToRef{
 										strictHybridCoverage => ($dirsHr->{strictHybridCoverage} || 0));
 			
 			my ($algCmdPost,$subBamAR) = alignPostTreat(\%postTreat, $i, $kk);
-			$algCmd .= $algCmdPost;
+			$libraryCmd .= $algCmdPost;
+			$algCmd .= $stream
+				? alignmentMappingCommand($singleLibraries[$iS], $mapperProgLoc, $REF,
+					$smtBin, "$nodeTmp/alignment.$iS.fq.gz", $libraryCmd)
+				: $libraryCmd;
 			@subBams = @{$subBamAR};
 			
 		}
@@ -11592,7 +11757,9 @@ sub getCmdLineOptions{
 		"inputFQregex2=s" => \$MFconfig{rawFileSrchStr2}, #regex for detecting read pair 2 in input fastq files
 		"inputFQregexSingle=s" => \$MFconfig{rawFileSrchStrSingl}, #regex for detecting single end reads in input fastq files
 		"inputFQregexTrustSingle=i" => \$MFconfig{prefSinglFQgreps} , #if grep of files (rawSrchString) has multi assignments, which grep to trust more?
-		"inputBAMregex=s" => \$MFconfig{rawFileBamSrchSing}, #bams that will be converted to fastq
+		"inputBAMregex=s" => \$MFconfig{rawFileBamSrchSing}, #singleton SAM/BAM/CRAM inputs
+		"inputCramReference=s" => \$MFconfig{inputCramReference}, #indexed decode reference, independent of mapping target
+		"inputCramReferenceSuppl=s" => \$MFconfig{inputCramReferenceSuppl}, #support decode reference; defaults to primary
 		"splitFastaInput=i" => \$MFconfig{splitFastaInput},
 		"mergeReads=i" => \$MFopt{doReadMerge},  #merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances)
 		"ProbRdFilter=i" => \$MFopt{sdmProbabilisticFilter},

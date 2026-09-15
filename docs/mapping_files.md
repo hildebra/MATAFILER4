@@ -338,15 +338,22 @@ perl "$MF4DIR/MATAF4.pl" \
 
 For the example above, MATAFILER4 searches `/data/pacbio/Sample01/` and `/data/pacbio/Sample02/` for matching BAM files. With `SmplPrefix`, it searches the shared `#DirPath` directory and requires the file name to match both the sample prefix and `-inputBAMregex`.
 
-Important limitations and behaviour:
+The same `-inputBAMregex` option accepts plain SAM and CRAM files. For all three formats, use `-inputBAMregex '.*\.(bam|sam|cram)$'`. Primary alignment discovery remains disabled when this option is empty. Support alignments can be listed in `SupportReads` or discovered in its directory alongside FASTQ/FASTA inputs.
 
-- BAM discovery is disabled by default because `-inputBAMregex` defaults to an empty string.
-- Primary BAM input is currently treated as unpaired/single-read data, for example PacBio reads.
-- Matching BAMs are converted to FASTQ with `samtools fastq` before normal read processing; they are not interpreted as read-to-reference alignments.
-- The regular expression applies to file names in the selected directory. Keep it anchored, for example `'.*\.bam$'`, to avoid unintended matches.
-- Set `SeqTech` to the technology represented by the reads, normally `PB` or `ONT` for long-read BAM input.
+Alignment inputs retain the existing **singleton/unpaired** contract, normally with `SeqTech` set to `PB` or `ONT`. Paired alignment input is not enabled by this change. SDM requires sequence and quality values in the retained primary records; secondary and supplementary alignments are skipped, and reverse-strand reads are restored to their original orientation.
 
-Use `SupportReads` instead when BAM reads supplement primary short-read data for a hybrid assembly.
+Processing now selects input independently for each library:
+
+- **SDM filtering:** the bundled HTS-enabled SDM reads the original alignment directly. Filtered FASTQ names and filtering checkpoints stay unchanged.
+- **Single-pass raw mapping:** the mapping helper pipes `samtools fastq` into Bowtie2, minimap2, KMA, or Strobealign. These commands remap the original reads to the requested reference. The existing BWA MEM helper still requires paired FASTQ input.
+- **Repeated raw mapping or upload preparation:** staging retains a compressed raw FASTQ cache. Workflows that bypass SDM but require read files also retain extraction.
+- **Minimap2 fallback:** stdin is used only for a plain reference FASTA at most 1 GB in size, with an explicit 1G index batch. Larger or binary references get a node-local FASTQ cache because minimap2 may reopen the query for multiple index parts. Reference checks run in the mapping job, after any assembly or reference preparation.
+
+Raw caches preserve the existing `.unbam.fq.gz` name; SAM and CRAM use `.unsam.fq.gz` and `.uncram.fq.gz`. A sidecar records the source/reference file metadata and completed output metadata. Missing or changed caches are rebuilt, and legacy caches without this sidecar are rebuilt once. Removing other staged files does not force re-extraction of a valid cache. Validation uses file metadata, not a full input content hash.
+
+For CRAM requiring an external reference, pass `-inputCramReference /path/to/original-reference.fa` and supply its `.fai` index. `-inputCramReferenceSuppl` overrides the reference for support reads and otherwise inherits the primary setting. This is the reference used to **decode the input CRAM**; it can differ from the new mapping target. Without an explicit setting, decoding uses HTSlib's normal reference resolution.
+
+Use `SupportReads` when alignment reads supplement primary short-read data for a hybrid assembly.
 
 ### Duplicate read-location checks
 

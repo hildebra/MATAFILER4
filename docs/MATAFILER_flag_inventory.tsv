@@ -38,7 +38,9 @@ MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputFQregex1	string	MFconfig
 MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputFQregex2	string	MFconfig		stable	regex for detecting read pair 2 in input fastq files
 MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputFQregexSingle	string	MFconfig		stable	regex for detecting single end reads in input fastq files
 MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputFQregexTrustSingle	integer	MFconfig		stable	if grep of files (rawSrchString) has multi assignments, which grep to trust more?
-MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputBAMregex	string	MFconfig		stable	bams that will be converted to fastq
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputBAMregex	string	MFconfig		stable	singleton SAM/BAM/CRAM inputs; direct SDM input with streaming or cached raw extraction
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputCramReference	string	MFconfig		stable	indexed FASTA used to decode input CRAM
+MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-inputCramReferenceSuppl	string	MFconfig		stable	support CRAM decode reference; defaults to primary
 MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-splitFastaInput	integer	MFconfig		stable	Enable FASTA input splitting during read staging.
 MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-mergeReads	integer	MFopt		stable	merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances)
 MATAF4.pl	4.38	Preprocessing (cleaning reads etc)	-ProbRdFilter	integer	MFopt		stable	Enable probabilistic SDM read filtering.
