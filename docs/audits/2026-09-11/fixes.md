@@ -1,6 +1,6 @@
 # Follow-up: all 11 local algorithm defects fixed
 
-All 11 findings in [the audit](report.md) have been corrected. The original numerical fixtures are retained in [results.json](results.json); the same reproducer now records the corrected behavior in [results.after-fixes.json](results.after-fixes.json).
+All 11 findings in [the audit](report.md) have been corrected. The original numerical fixtures are retained in [results.json](results.json); the corrected behavior was recorded in [results.after-fixes.json](results.after-fixes.json) and is now enforced by `t/local_algorithm_regressions.t`.
 
 ## Changes by finding
 

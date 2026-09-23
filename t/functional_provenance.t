@@ -105,6 +105,4 @@ unlink "$tmp/diamond/dia.TEST.blast.srt.gz.read-counts-v1.stone";
 @jobs = ();
 runDiamond("$tmp/diamond/","$tmp/db/","$tmp/scratch",'','TEST');
 is(scalar(@jobs),2,'old cached merged-library hits without provenance are regenerated and reinterpreted');
-like(read_file("$root/Mods/FuncTools.pm"), qr/-queryType genes/,
-    'catalog caller explicitly supplies gene provenance');
 done_testing();

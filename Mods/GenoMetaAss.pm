@@ -988,7 +988,7 @@ sub convertNT2AA($){
 	#        $main =~ s/(...)/"$convertor{uc $1}" || "?"/eg;
 	#        print "$scrap$main\n";
 	#        }
-	$text =~ s/(...)/"$convertor{uc $1}" || "?"/eg;
+	$text =~ s{(...)}{$convertor{uc $1} // "X"}eg;
 	$text =~ s/[^ACDEFGHIKLMNPQRSTVWY*]/X/g;
 	#die $text;
 	return $text;
@@ -1597,7 +1597,7 @@ sub reverse_complement_IUPAC ($) {
         my $revcomp = reverse($dna);
 
 	# complement the reversed DNA sequence
-        $revcomp =~ tr/ABCDGHMNRSTUVWXYabcdghmnrstuvwxy/TVGHCDKNYSAABWXRtvghcdknysaabwxr/;
+        $revcomp =~ tr/ABCDGHKMNRSTUVWXYabcdghkmnrstuvwxy/TVGHCDMKNYSAABWXRtvghcdmknysaabwxr/;
         return $revcomp;
 }
 
@@ -2438,14 +2438,15 @@ sub writeFasta{
 	#die "$maxFs\n";
 	my $cnt=0;
 	open O,">$of" or die "can't open out fasta $of\n";
-	foreach my $k (keys %FA){
-		$cnt++; 
+	# Sorted keys make the output reproducible between runs (hash order is random).
+	foreach my $k (sort keys %FA){
+		last if ($cnt >= $maxFs);
+		$cnt++;
 		if ($k =~ m/^>/){
 			print O $k."\n".$FA{$k}."\n";
 		} else {
 			print O ">".$k."\n".$FA{$k}."\n";
 		}
-		last if ( $cnt > $maxFs);
 	}
 	close O or die "Cannot close output FASTA $of: $!\n";
 	if ($options->{fai}) {

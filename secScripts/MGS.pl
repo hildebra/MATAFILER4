@@ -831,10 +831,6 @@ my @annotation_jobs;
 unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/specI.tax"){
 	my $specIabu = getProgPaths("specIGC_scr");
 	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS $finalClustersFilt -MGStax $GTDBtaxF -MGset $useGTDBmg -outD $specIoutDir\n";
-	if ($legacyV){
-		$specIabu = getProgPaths("specIGC_scr_v0");
-		$cmdSI = "$specIabu $GCd $canCore $finalClustersFilt $GTDBtaxF\n";
-	}
 	$cmdSI .= "cp $specIoutDir/MGS2speci.txt $annoDir/specI.tax\n";
 	$cmdSI .= "test -s $specIabundance\n";
 	$cmdSI .= "test -s $annoDir/specI.tax\n";

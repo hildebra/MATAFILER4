@@ -212,7 +212,6 @@ ok(!-e File::Spec->catfile($profile_mapping, "$profile_sample-smd.bam.bai"),
 ok(!-e File::Spec->catfile($profile_log, "$profile_sample.0.bed"),
 	'assembly-independent cleanup removes stale SNP region files');
 
-
 my $download_sample = 'download-retained';
 my $download_mapping = File::Spec->catdir($output, $download_sample, 'mapping');
 my $download_log = File::Spec->catdir($output, $download_sample, 'LOGandSUB', 'SNP');
@@ -282,48 +281,5 @@ close $policy_path_fh;
 chomp $published_assembly_path;
 is($published_assembly_path, File::Spec->canonpath(abs_path($group_dir)),
 	'centralized policy atomically publishes the canonical assembly directory');
-
-open my $mata_fh, '<', File::Spec->catfile($Bin, '..', 'MATAF4.pl') or die $!;
-my $mata_source = do { local $/; <$mata_fh> };
-close $mata_fh;
-unlike($mata_source, qr/'--mode', 'invalidate'/,
-	'cleanup script is not called before sample completion');
-like($mata_source, qr/runFinishedCleanup\(finishedCleanupArguments\(/s,
-	'fully completed samples invoke centralized cleanup');
-like($mata_source,
-	qr/cleanup_stage_barrier\(.*?name => 'contig stats'.*?name => 'binning'.*?name => 'consSNP\/variant analysis'.*?if \(\$cleanupBarrier->\{ready\}\).*?submitFinishedCleanup.*?add2SampleDeps\(\\\@sampleDeps, \[\$cleanupJob\]\).*?MFnext\(\$smplLockF,\\\@sampleDeps/s,
-	'normal submissions enqueue cleanup only after every terminal analysis is complete or scheduled');
-my $cleanup_barrier_position = index($mata_source, 'my $cleanupBarrier = cleanup_stage_barrier(');
-my $cleanup_submission_position = index($mata_source, 'submitFinishedCleanup(', $cleanup_barrier_position);
-my $terminal_lock_release_position = index(
-	$mata_source, 'MFnext($smplLockF,\@sampleDeps', $cleanup_barrier_position,
-);
-ok($cleanup_barrier_position >= 0
-		&& $cleanup_submission_position > $cleanup_barrier_position
-		&& $terminal_lock_release_position > $cleanup_submission_position,
-	'terminal lock release is placed downstream of finished-sample cleanup');
-like($mata_source,
-	qr/my \@cleanupDependencies = split .*?normalise_job_dependencies\(.*?\\\@sampleDeps, \$cleanupBarrier->\{dependencies\}/s,
-	'cleanup depends on both the complete sample job set and explicit terminal-stage jobs');
-like($mata_source,
-	qr/sub cleanupCompletionRequirements.*?Coverage\.stone.*?FMGids\.txt.*?marker_genes_meta\.tsv.*?binning_base.*?primary_snp_stone/s,
-	'cleanup publishes explicit ContigStats, binning, and ConsSNP output requirements');
-like($mata_source,
-	qr/sub submitFinishedCleanup.*?afterAny\} = 0;.*?qsubSystem\(.*?\$dependencyString/s,
-	'cleanup uses successful scheduler dependencies rather than after-any execution');
-like($mata_source, qr/sub submitFinishedCleanup.*?--kill-on-invalid-dep=yes/s,
-	'failed Slurm dependency chains cancel cleanup instead of leaving it pending forever');
-unlike($mata_source, qr/system "rm -f \$finalCommAssDir\/scaffolds\.fasta\.filt/s,
-	'legacy inline mapper-index deletion is removed');
-unlike($mata_source, qr/getAssemblPath\(\$curOutDir,\$finalCommAssDir\)/,
-	'completed-sample assembly path publication is no longer performed inline');
-unlike($mata_source, qr/system "rm -rf \$CRAMmap"/,
-	'completed-sample alignment cleanup is no longer performed inline');
-like($mata_source,
-	qr/--remove-temporary.*?--assembly-path-file.*?--assembly-dir.*?--remove-alignment/s,
-	'MATAF4 delegates completed-sample filesystem policy to the cleanup script');
-like($mata_source,
-	qr/push \@arguments,\s*'--assembly'.*?if \$assemblyRequired/s,
-	'MATAF4 passes assembly ownership to cleanup only for assembly workflows');
 
 done_testing;

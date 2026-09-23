@@ -363,6 +363,7 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-clusterID` | integer | `95` | stable | percent identity at which the gene catalog is clustered |
+| `-clusterCov` | float | `0.9` | stable | minimum fraction of the shorter gene that must be covered by its alignment to the cluster representative (mmseqs2 `--cov-mode 1`; CD-HIT `-aS`). Fragments contained in a longer gene still join it; genes that share only a local block do not. `0` disables the coverage filter (behaviour before geneCat 0.60). Must be 0–1. |
 | `-minGeneL` | integer | `100` | stable | minimal gene length for gene to be included in gene catalog, default: 100 |
 | `-extraGenesNT` | string |  | stable | add genes (nt) from external sources, e.g. from complete genomes |
 | `-extraGenesAA` | string |  | stable | add genes (AA) from external sources, e.g. from complete genomes |

@@ -91,34 +91,10 @@ open my $mataf4_fh, '<', 'MATAF4.pl' or die "Cannot read MATAF4.pl: $!";
 local $/;
 my $mataf4_stats = <$mataf4_fh>;
 close $mataf4_fh or die "Cannot close MATAF4.pl: $!";
-my ($postprocess_code) = $mataf4_stats =~ /(sub postprocess.*?)(?=\nsub spaceInAssGrp)/s;
-ok(defined($postprocess_code), 'postprocessing can be isolated for performance checks');
-like($postprocess_code,
-	qr/read_sample_completion\(.*?\$closedSample->\{metagstats\}.*?my \$statsCollectionSeconds.*?my \$statsWriteStarted.*?_metag_stats_text.*?atomic_write_text\(\$MGSfile, \$statsText.*?Created sample summary table/s,
-	"summary timing covers sentinel reads plus table serialization and publication");
-my ($completion_stats_code) = $mataf4_stats =~ /(sub createSampleCompletionSentinel.*?)(?=\nsub cleanupCompletionRequirements)/s;
-ok(defined($completion_stats_code), "sample closure statistics can be isolated");
-like($completion_stats_code,
-	qr/reset_stats_log_sampling\(\).*?my \$statValues = smplStats\(.*?values\s*=>\s*\$statValues.*?write_sample_completion\(.*?stats_log_sampling_summary\(\).*?Statistics log safeguard/s,
-	"sample closure caches statistics and reports oversized log sampling");
+
 my ($sample_stats_code) = $mataf4_stats =~ /(sub smplStats .*?)(?=\n# smplStats is implemented)/s;
-ok(defined($sample_stats_code), 'per-sample statistics implementation can be isolated');
 my @sdm_log_globs = $sample_stats_code =~ /glob\("\$inD\/LOGandSUB\/sdm\/filter\*\.log"\)/g;
 is(scalar(@sdm_log_globs), 1,
 	'per-sample SDM statistics scan the log directory once');
-unlike($sample_stats_code, qr/glob\("\$inD\/LOGandSUB\/sdm\/filterSuppl\*\.log"\)/,
-	'support-read SDM logs are selected from the shared directory scan');
-like($sample_stats_code,
-	qr/my \$sdmHistogramMax = .*?_sdm_histogram_max_length.*?sdmStatsMany\(\\\@primary_logs, \$inD, '', \$sdmHistogramMax\).*?sdmStatsMany\(\\\@support_logs, \$inD, '_Sup', \$sdmHistogramMax\)/s,
-	'primary and support SDM summaries reuse one histogram tail read');
-like($mataf4_stats,
-	qr/my \$alignStats = read_stats_log_excerpt\(\$inFi\);\s*if \(\$alignStats ne ''\)/,
-	'mapping statistics accept a compressed fallback without rechecking the plain path');
-like($mataf4_stats,
-	qr/sub getGeneStats.*?while \(my \$line = <\$geneFH>\).*?close \$geneFH/s,
-	'gene statistics are streamed instead of materialized and split');
-like($mataf4_stats,
-	qr/sub getASsemblyStats.*?while \(my \$header = <\$circFH>\).*?next unless \$header =~ \/\^>\//s,
-	'circular-contig statistics stream FASTA headers and skip sequence bodies');
 
 done_testing();

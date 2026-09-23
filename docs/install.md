@@ -178,6 +178,21 @@ bash helpers/install/installer.sh
 
 This is expected usage and is usually much faster than the initial installation.
 
+## Running the unit tests
+
+The Perl unit tests in `t/` check the pipeline code without submitting jobs or needing databases. Run them after installing or updating MATAFILER4, and before changing pipeline code:
+
+```bash
+cd /path/to/MATAFILER4
+perl helpers/runTests.pl            # all tests, 4 in parallel
+perl helpers/runTests.pl strain     # only test files whose name matches "strain"
+perl helpers/runTests.pl -jobs 1 -v sdm_cleaner   # one file, full output
+```
+
+The runner works from any directory and needs only Perl and the core module `TAP::Harness`. It prints a summary and exits with a non-zero status if any test fails. Tests that need a compiled helper from `bin/` (for example `MSAfix`) skip themselves when it is missing; the summary lists these. Tests marked `TODO` document known issues: they are reported but do not fail the run.
+
+New tests are plain Perl files named `t/<topic>.t` using `Test::More`. They should exercise behaviour (run a function or script on a small fixture and check the result) rather than match the source code text.
+
 ## Troubleshooting installation
 
 ### `micromamba could not be found`

@@ -60,6 +60,8 @@ micromamba activate MF4
 ./MATAF4.pl -checkInstall
 ```
 
+To check the pipeline code itself, run the unit tests with `perl helpers/runTests.pl` (see [Installation](docs/install.md#running-the-unit-tests)).
+
 ## Minimal test pattern
 
 Create or adapt a mapping file, then run a dry-run first:

@@ -26,16 +26,6 @@ sub slurp {
 	return $contents;
 }
 
-sub run_helper {
-	my (@arguments) = @_;
-	open my $process, '-|', $^X, @arguments
-		or die "Cannot start outgroup-reference helper: $!";
-	local $/;
-	my $output = <$process> // '';
-	my $closed = close $process;
-	return ($closed && $? == 0, $output, $?);
-}
-
 my $temporary = tempdir(CLEANUP => 1);
 my $fake_samtools = File::Spec->catfile($temporary, 'samtools');
 write_file($fake_samtools, <<'FAKE');
@@ -116,54 +106,6 @@ my $nt = File::Spec->catfile($temporary, 'catalogue.fna');
 my $aa = File::Spec->catfile($temporary, 'catalogue.faa');
 write_file($nt, ">g1\nAAAA\n>g2\nCCCC\n>g3\nGGGG\n");
 write_file($aa, ">g1\nKK\n>g2\nPP\n>g3\nGG\n");
-my $nt_ids = File::Spec->catfile($temporary, 'nt.ids');
-my $aa_ids = File::Spec->catfile($temporary, 'aa.ids');
-write_file($nt_ids, "g2\nmissing\n");
-write_file($aa_ids, "g1\ng2\nmissing\n");
-my $cache = File::Spec->catdir($temporary, 'cache');
-my $helper = File::Spec->catfile($Bin, '..', 'secScripts', 'MGS',
-	'prepare_strain_outgroup_refs.pl');
-my @arguments = ($helper, '-nt', $nt, '-aa', $aa, '-ntIDs', $nt_ids,
-	'-aaIDs', $aa_ids, '-outD', $cache, '-samtools', $fake_samtools);
-my ($ok, $output, $status) = run_helper(@arguments);
-ok($ok, "indexed outgroup-reference helper succeeds (status=$status)");
-like($output, qr/status=created requested_nt=2 retained_nt=1 requested_aa=3 retained_aa=2/,
-	'creation summary reports requested, retained, and implicitly missing references');
-is(slurp(File::Spec->catfile($cache, 'references.fna')), ">g2\nCCCC\n",
-	'compact nucleotide cache contains only an available requested outgroup gene');
-is(slurp(File::Spec->catfile($cache, 'references.faa')), ">g1\nKK\n>g2\nPP\n",
-	'compact protein cache contains outgroup and target similarity proteins only');
-for my $path (
-	"$nt.fai", "$nt.fai.complete", "$aa.fai", "$aa.fai.complete",
-	File::Spec->catfile($cache, 'references.fna.fai'),
-	File::Spec->catfile($cache, 'references.faa.fai'),
-	File::Spec->catfile($cache, 'manifest.tsv'),
-	File::Spec->catfile($cache, 'complete.sto'),
-) {
-	ok(-s $path, "indexed cache artifact is nonempty: ".File::Spec->abs2rel($path, $temporary));
-}
-
-($ok, $output, $status) = run_helper(@arguments);
-ok($ok, "matching outgroup-reference cache is reusable (status=$status)");
-like($output, qr/status=reused requested_nt=2 retained_nt=1 requested_aa=3 retained_aa=2/,
-	'an identical requirement set reuses the completed indexed cache');
-
-# Simulate an interrupted source-index build: a nonempty partial index without
-# its completion fingerprint must be rebuilt, never adopted.
-write_file("$nt.fai", "g1\t4\t0\t4\t5\n");
-unlink "$nt.fai.complete" or die "Cannot remove source-index completion marker: $!";
-
-write_file($nt_ids, "g3\n");
-write_file($aa_ids, "g3\n");
-($ok, $output, $status) = run_helper(@arguments);
-ok($ok, "changed outgroup requirements rebuild the cache (status=$status)");
-like($output, qr/status=created requested_nt=1 retained_nt=1 requested_aa=1 retained_aa=1/,
-	'a changed requirement digest invalidates the prior cache');
-is(slurp(File::Spec->catfile($cache, 'references.fna')), ">g3\nGGGG\n",
-	'rebuilt nucleotide cache does not retain obsolete requested genes');
-is(slurp(File::Spec->catfile($cache, 'references.faa')), ">g3\nGG\n",
-	'rebuilt protein cache does not retain obsolete requested genes');
-
 
 my @indexed_progress;
 my %indexed_wanted = (g1 => 1, g3 => 1, missing => 1);

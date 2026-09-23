@@ -66,13 +66,6 @@ is_deeply(\@split_ids,
 is($split_text, ">long_part1_1-4 description\nABCD\n>long_part2_5-8 description\nEFGH\n>long_part3_9-10 description\nIJ\n",
 	'split fragments preserve all sequence bases');
 
-my $lengths = File::Spec->catfile($tmp, 'lengths.fa');
-write_file($lengths, ">equal\nAAAAA\n>long\nCCCCCC\n");
-($status, $output, $errors) = run_script('sepReadLength.pl', 5, $lengths);
-is($status, 0, 'length separation succeeds');
-is(read_file($lengths), ">equal\nAAAAA\n", 'record equal to threshold remains in short input');
-is(read_file("$lengths.long"), ">long\nCCCCCC\n", 'only truly longer record enters long output');
-
 my $bad_fastq = File::Spec->catfile($tmp, 'bad.fastq');
 write_file($bad_fastq, "\@r\nAAAA\nnot-plus\nIIII\n");
 ($status, $output, $errors) = run_script('sizeFilterFas.pl', $bad_fastq, 1, 0);

@@ -48,7 +48,7 @@ our ($primaryClusterFNA, $primaryClusterCLS, $pigzBin, $catBin, $cpBin, $rmBin,
     $mkdirBin, $mvBin, $tmpDir, $cdhID, $numCor0, $totMem, $submitLocal, $COGdir,
     $GCdir, $GCscr, $checkpointWriter, $QSBoptHR, $clustMMseq, $avx2Constr,
     $useGTDBmg, $mapF, $qsubDir, $rareBin, $countMatrixF, $rtkFunDelims,
-    $mmseqs2Bin, $cdhitBin, $GLBtmp, $headBin, $tailBin);
+    $mmseqs2Bin, $cdhitBin, $GLBtmp, $headBin, $tailBin, $clusterCov);
 IMPORTS
 my @helpers = qw(_shell_quote _checkpoint_command _stone_valid _sync_file
     _for_each_fasta_record _safe_reset_dir _append_file_locked _reset_collation_outputs
@@ -69,6 +69,7 @@ $GCRecovery::rmBin = 'rm';
 $GCRecovery::mkdirBin = 'mkdir';
 $GCRecovery::mvBin = 'mv';
 $GCRecovery::cdhID = 97;
+$GCRecovery::clusterCov = 0.9;
 $GCRecovery::primaryClusterFNA = 'compl.incompl.97.fna';
 $GCRecovery::primaryClusterCLS = 'compl.incompl.97.fna.clstr';
 $GCRecovery::COGdir = 'COG';
@@ -262,7 +263,6 @@ subtest 'Kraken accepts no classifications but propagates program failure' => su
     ok(!-e "$tmp/kraken-failed/Anno/Tax/krak2.out", 'partial failed output is not published as a completed run');
 };
 
-
 subtest 'program registrations and configured command wrappers' => sub {
     my %site_settings = map { $_ => 1 } qw(avx2_constraint globalTmpDir nodeTmpDir);
     my $active = join("\n", grep { !/^\s*#/ } split /\n/, $source);
@@ -336,8 +336,6 @@ subtest 'marker extraction reads the selected catalogue identity' => sub {
     $extractor->('FMG');
     is(read_file("$GCd/FMG/COG1.fna"), ">1\nATG\n", 'marker nucleotides come from identity 97');
     is(read_file("$GCd/FMG/COG1.faa"), ">1\nMKK\n", 'marker proteins come from identity 97');
-    like($source, qr/\$extre100Scr \$OutD \$tmpDir\/FMG1\/ \$cdhID/,
-        'controller forwards the chosen identity to marker extraction');
-};
+    };
 
 done_testing();

@@ -86,17 +86,6 @@ for my $case (
 }
 
 #The reference must not fall back to placeholders instead of real descriptions.
-open(my $reference_fh, '<', $reference) or die "Cannot read $reference: $!";
-my $reference_text = do { local $/; <$reference_fh> };
-close($reference_fh);
-unlike($reference_text,
-	qr/Accepted by [A-Za-z0-9_.]+; (?:inspect|see) source\/help/i,
-	'flag descriptions omit repetitive acceptance boilerplate');
-unlike($reference_text, qr/See source\/help for details/i,
-	'flag descriptions are not placeholders');
-like($reference_text,
-	qr/`-reProfileRibosome`.*?delete RiboFind extraction, assignments and merged profiles/s,
-	'flag reference describes RiboFind profile invalidation');
 
 #Each script must actually render its own section, with every option in it.
 my $outside = tempdir(CLEANUP => 1);

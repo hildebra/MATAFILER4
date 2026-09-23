@@ -126,13 +126,7 @@ Other strain-controller and strain-documentation edits appeared concurrently in 
 
 ## Evidence and scope
 
-Run the fixtures with:
-
-```sh
-python3 docs/audits/2026-09-11/reproduce.py
-```
-
-The [reproducer](reproduce.py) writes only temporary fixture data and prints actual versus expected behavior. It uses the repository's lightweight test configuration, the actual Perl scripts, isolated existing subroutine bodies for pair merging and mapping-statistics interpretation, and the bundled `rdCover` executable. [Recorded results](results.json) include the numerical examples and calculator hash. This is an audit demonstrator, not a regression suite asserting that the unresolved defects are correct behavior. Python 3, Perl, gzip, and a compatible Linux environment for the bundled executable are required.
+The original Python demonstrator (`reproduce.py`) has been retired; the project keeps its tests in Perl only. The fixtures it contained are covered by regression tests in [`t/local_algorithm_regressions.t`](../../../t/local_algorithm_regressions.t), which runs with the rest of the suite (`perl helpers/runTests.pl`). [Recorded results](results.json) and [results after the fixes](results.after-fixes.json) keep the numerical examples and the calculator hash from the original run.
 
 Validation:
 

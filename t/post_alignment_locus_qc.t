@@ -6,6 +6,10 @@ use File::Temp qw(tempdir);
 use FindBin qw($Bin);
 use Test::More;
 
+# Requires the compiled MSAfix binary shipped in bin/ (not part of the Perl sources).
+plan skip_all => "bin/MSAfix is not installed or not executable"
+	unless -x File::Spec->catfile($FindBin::Bin, "..", "bin", "MSAfix");
+
 my $root = File::Spec->catdir($Bin, '..');
 my $binary = File::Spec->catfile($root, 'bin', 'MSAfix');
 my $tmp = tempdir(CLEANUP => 1);

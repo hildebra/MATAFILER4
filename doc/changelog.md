@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-09-23 — Gene-catalogue clustering requires shorter-gene coverage
+
+- Updated `geneCat.pl` to 0.60. The default mmseqs2 clustering previously ran with `-c 0 --cov-mode 0`, so any two genes sharing a ≥100 nt block at ≥95% identity could be merged and their abundances summed. It now uses `--cov-mode 1 -c 0.9`: the shorter gene (the cluster member) must be ≥90% covered by its alignment to the representative. Fragments from fragmented assemblies still join the complete gene they belong to; genes that share only a local block (domains, IS-element flanks, fusion genes) stay separate. This matches the IGC-style criterion (95% identity, 90% coverage of the shorter gene) and the implicit behaviour of the CD-HIT back-end (`-G 1`).
+- New option `-clusterCov FLOAT` (default `0.9`); `-clusterCov 0` restores the previous behaviour. The value is printed in the geneCat run header.
+- Marker-gene clustering (`easy-cluster`, species-level cut-offs) now actually applies its intended 90% shorter-gene coverage; previously `min(aS, aL)` silently reduced it to 0.
+- `--split-memory-limit` is never written as `0G` for very small `-mem` values.
+- Existing catalogues are not rebuilt automatically; rerun the clustering step (`-continue 0`) to apply the new criterion.
+- `t/genecat_cluster_coverage.t` checks the generated commands and, when mmseqs2 is installed, runs them on a synthetic fixture (fragment joins its gene, 97% variant joins, block-sharing gene stays separate).
+
+## 2026-09-23 — Test-suite and repository clean-up
+
+- Added `helpers/runTests.pl`, a Perl runner for the unit tests with filtering, parallel jobs, a summary of skipped/failed files and an optional per-file report. See [installation](../docs/install.md#running-the-unit-tests).
+- Removed about 700 test assertions that only matched the source code text, and the test file that consisted solely of them (`t/protal_workflow.t`). Behavioural tests are unchanged.
+- New behavioural tests: `math_utils.t`, `sequence_utils.t`, `table_readers.t`, `phylo_locus_helpers.t`, `config_integrity.t` (every configured repository path exists and every `getProgPaths` key resolves), `script_compile.t` (every Perl script and module compiles) and `sdm_option_files.t` (shipped sdm option files keep full-length reads; the AVITI and MiSeq files are marked as a known issue for 150 bp reads).
+- Test shims are Perl only: the Python fake `samtools`/mapper in `t/alignment_input.t` were rewritten in Perl, and the Python audit demonstrator `docs/audits/2026-09-11/reproduce.py` was retired (its cases are covered by `t/local_algorithm_regressions.t`).
+- MSAfix-dependent tests (`post_alignment_locus_qc.t`, `build_tree5_taxon_aware_smoke.t`) now skip cleanly when `bin/MSAfix` is unavailable.
+- Retired unreferenced, broken or legacy scripts (e.g. `buildTree4.pl`, `strain_within_3.pl`, the old SNP/vcf2cons chain, `annotateMGwSpecIs.pl`/`2.pl`, `parseBlastFunct.pl`, `secScripts/unused/`, `helpers/deprecated/`, `helpers/documentation_old/`), leftover `.rej` patch files and two unused bundled modules, together with their configuration keys.
+- Small fixes found by the new tests: `reverse_complement_IUPAC` now complements K/M; `convertNT2AA` no longer warns on ambiguous codons; `writeFasta` writes records in sorted order (reproducible output) and honours its record limit exactly; `read_matrix` keeps the header when a gene subset is requested; `fixHDs4Phylo` now detects reserved characters (the check was an empty regex), also replaces parentheses and renames paired inputs identically; `read_paf_stream` returns hits per query in sorted target order.
+
 ## 2026-09-04 — Publish strain postprocessing results consistently
 
 - Updated `strain_within_2.2.pl` to 0.50. Its aggregate-path checks now follow MG-STK's `<FMGdir>/Results/` contract, preventing a successful `combineResults.R` run from being misreported as missing `strainStats.tsv`.

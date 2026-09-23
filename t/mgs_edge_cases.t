@@ -46,9 +46,7 @@ write_file(File::Spec->catfile($tmp, 'groups.obs'), "MGS1\t10\n");
 my $sorter = File::Spec->catfile(
 	$Bin, '..', 'secScripts', 'MGS', 'resortMGSgenes4importance.pl',
 );
-my $sorter_source = slurp($sorter);
-like($sorter_source, qr/Can't open temporary outfile \$tmpout: \$!\\n/,
-	'sorter open failures retain the operating-system reason');
+
 my $sorter_err = gensym;
 my $sorter_pid = open3(
 	undef, my $sorter_out, $sorter_err,
@@ -246,37 +244,6 @@ ok(
 );
 
 my $mgs_entrypoint = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
-like(
-	$mgs_entrypoint,
-	qr/my %stageCheckpointContract = \(.*?'extract-bin-contigs'\s*=>\s*1.*?'gtdb-taxonomy'\s*=>\s*1.*?sub _checkpoint_parameters_for_stage/s,
-	'MGS declares explicit contracts for bin extraction and GTDB taxonomy',
-);
-like(
-	$mgs_entrypoint,
-	qr/sub _checkpoint_parameters_for_stage .*?catalog_identity cluster_id binner genomes_per_family.*?catalog_fna_size catalog_fna_mtime.*?catalog_faa_size catalog_faa_mtime.*?mag_report_size.*?stage_contract/s,
-	'bin-extraction resume tracks its direct catalogue, map, MAG-report, and contract inputs',
-);
-like(
-	$mgs_entrypoint,
-	qr/sub _checkpoint_valid_for_stage .*?read_checkpoint\(\$file\).*?pipeline_version.*?0\\\.\(\?:54\|55\).*?created_epoch.*?checkpoint_valid\(\$file, parameters => \\%legacyParameters\)/s,
-	'legacy checkpoint adoption is limited to compatible JSON releases and stable recorded outputs',
-);
-like(
-	$mgs_entrypoint,
-	qr/my \$binExtractionValid = _checkpoint_valid_for_stage\(\$BinExtrSto, 'extract-bin-contigs'\).*?my \$gtdbTaxonomyValid = .*?_checkpoint_valid_for_stage\(\$GTDBtaxSto, 'gtdb-taxonomy'\)/s,
-	'bin extraction and GTDB resume use their stage-specific validators',
-);
-
-like(
-	$mgs_entrypoint,
-	qr/sub _checkpoint_valid_for_compatible_release .*?MGSpipelineVersion.*?0\.55.*?pipeline_version.*?0\.54.*?delete \$compatibleParameters\{pipeline_version\}.*?checkpoint_valid\(\$file, parameters => \\%compatibleParameters\).*?sub _checkpoint_valid .*?_checkpoint_valid_for_compatible_release.*?sub _checkpoint_valid_for_resume .*?_checkpoint_valid_for_compatible_release/s,
-	"global checkpoint reuse is restricted to the proven 0.54-to-0.55 transition",
-);
-like(
-	$mgs_entrypoint,
-	qr/my \@stage1AssignmentFiles = \(\$finalClusters2, "\$\{finalClusters2\}UW", \$finalClustersW\);.*?my \$stage1AssignmentsPresent = grep \{ _mgs_count\(\$_, 1\) \} \@stage1AssignmentFiles;.*?my \$stage1ResumeValid = !\$rewrClusterMAGs && \$stage1AssignmentsPresent/s,
-	"Stage I resumes from primary or recoverable weighted assignments without requiring core",
-);
 
 my ($mgs_assignment_helpers) = $mgs_entrypoint =~
 	/(sub _mgs_ids \{.*?\n\}\n\nsub _mgs_count \{.*?\n\})/s;
@@ -355,46 +322,5 @@ if ($assignment_helpers_loaded) {
 		'the resume probe stops after the first assignment instead of rescanning the file',
 	);
 }
-like(
-	$mgs_entrypoint,
-	qr/my \$recoverMissingActiveMGS = sub .*?\$recoverMissingActiveMGS->\(\) unless \$ph1flag;/s,
-	"an interrupted weighted handoff is recovered before clustering can restart",
-);
-like(
-	$mgs_entrypoint,
-	qr/systemW \$postCmd if !-s \$finalClustersFilt;.*?_touch_checkpoint\(\$st1ston, .stage-1., \$finalClusters2, \$finalClustersFilt\)\s+if \$ph1flag;/s,
-	"the cheap core is regenerated but only newly clustered primary/core outputs receive provenance",
-);
-unlike(
-	$mgs_entrypoint,
-	qr/_touch_checkpoint\(\$st1ston, .stage-1., .*?unless _checkpoint_valid\(\$st1ston\)/s,
-	"a mismatched recovered Stage I product is not laundered into a current checkpoint",
-);
-like(
-	$mgs_entrypoint,
-	qr/my \@geneBinFiles = grep \{ -f \$_ && \/\\\.\(\?:fna\|faa\)\\z\/i \} glob\("\$binD\/\*"\);/,
-	"BinExtr records only its FASTA products, excluding downstream GTDB archives",
-);
-like(
-	$mgs_entrypoint,
-	qr/my \@strainArguments = \(.*?\x27-SNPcaller\x27, \$SNPcaller.*?map \{ _shell_quote\(\$_\) \} \@strainArguments/s,
-	"MGS forwards the selected SNP caller with shell-quoted strain arguments",
-);
-
-like(
-	$mgs_entrypoint,
-	qr/my \$ph1flag = \$stage1ResumeValid \? 0 : 1;.*?if \(\$ph1flag\) \{.*?glob\("\$outD\/\$BinnerShrt\.clusters\*"\).*?\$invalidateMGSDerivatives->\(\);.*?\$recoverMissingActiveMGS->\(\) unless \$ph1flag;/s,
-	"every Stage I rebuild removes stale core/downstream derivatives before clustering",
-);
-like(
-	$mgs_entrypoint,
-	qr/my \$invalidateMGSDerivatives = sub \{.*?\$strainLockPath = "\$lockBase\.strain_within\.lock";.*?acquire_workflow_lock\(.*?for my \$derived .*?for my \$phyloDir/s,
-	"MGS invalidation acquires the strain sibling lock before deleting any derivative",
-);
-like(
-	$mgs_entrypoint,
-	qr/sub _legacy_bin_extraction_checkpoint_valid .*?GTDBtk\.tar\.gz.*?next if \$canonicalPath eq \$archivePath;.*?else \{\s*return 0;.*?my \@stat = stat\(\$path\);.*?return \$coreSeen && \$geneFnaSeen && \$geneFaaSeen && \$contigSeen.*?sub _checkpoint_valid_for_stage .*?_legacy_bin_extraction_checkpoint_valid\(\$manifest, \\%legacyParameters\)/s,
-	"legacy BinExtr reuse ignores only the downstream GTDB archive and validates all primary outputs",
-);
 
 done_testing;

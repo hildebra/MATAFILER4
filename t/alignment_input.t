@@ -38,42 +38,48 @@ my $fastq = "\@read\nACGT\n+\nIIII\n";
 my $alignment = "$tmp/input 'quoted'.sam";
 write_file($alignment, $fastq);
 my $fakeSamtools = "$tmp/samtools";
-write_file($fakeSamtools, <<'PY');
-#!/usr/bin/env python3
-import sys, os, gzip
-args=sys.argv[1:]
-if args[0]=='cat':
-    for f in args[1:]: sys.stdout.buffer.write(open(f,'rb').read())
-    sys.exit(0)
-assert args[0]=='fastq'
-assert args[args.index('-1')+1]=='/dev/null'
-assert args[args.index('-2')+1]=='/dev/null'
-with open(os.environ['EXTRACTION_LOG'],'a') as f: f.write('extract\n')
-data=open(args[-1],'rb').read()
-out=args[args.index('-0')+1]
-if out=='-': sys.stdout.buffer.write(data)
-else:
-    with gzip.open(out,'wb') as f: f.write(data)
-if os.environ.get('EXTRACTION_FAIL'): sys.exit(17)
-PY
+write_file($fakeSamtools, <<'FAKE');
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use IO::Compress::Gzip qw(gzip $GzipError);
+my @args = @ARGV;
+sub slurp_raw { my ($path) = @_; open my $fh, '<:raw', $path or die "$path: $!"; local $/; return scalar <$fh>; }
+sub value_after { my ($flag) = @_; for my $i (0 .. $#args - 1) { return $args[$i + 1] if $args[$i] eq $flag; } die "missing $flag\n"; }
+binmode STDOUT;
+if ($args[0] eq 'cat') { print slurp_raw($_) for @args[1 .. $#args]; exit 0; }
+die "unexpected samtools mode $args[0]\n" unless $args[0] eq 'fastq';
+die "-1 must be /dev/null\n" unless value_after('-1') eq '/dev/null';
+die "-2 must be /dev/null\n" unless value_after('-2') eq '/dev/null';
+open my $log, '>>', $ENV{EXTRACTION_LOG} or die $!; print {$log} "extract\n"; close $log;
+my $data = slurp_raw($args[-1]);
+my $out = value_after('-0');
+if ($out eq '-') { print $data; }
+else { gzip(\$data => $out) or die "gzip failed: $GzipError\n"; }
+exit 17 if $ENV{EXTRACTION_FAIL};
+FAKE
 chmod 0755, $fakeSamtools;
 $ENV{EXTRACTION_LOG} = "$tmp/extractions";
 write_file($ENV{EXTRACTION_LOG}, '');
 my $fakeMapper = "$tmp/mapper";
-write_file($fakeMapper, <<'PY');
-#!/usr/bin/env python3
-import sys, gzip, os
-args=sys.argv[1:]
-if '-U' in args: query=args[args.index('-U')+1]
-elif '-i' in args: query=args[args.index('-i')+1]
-else: query=args[-1]
-if query in ['-','--']: data=sys.stdin.buffer.read()
-else:
-    with gzip.open(query,'rb') if query.endswith('.gz') else open(query,'rb') as f: data=f.read()
-with open(os.environ['MAPPING_LOG'],'a') as f: f.write(query+'\n')
-sys.stdout.buffer.write(data)
-if os.environ.get('MAPPING_FAIL'): sys.exit(18)
-PY
+write_file($fakeMapper, <<'FAKE');
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
+my @args = @ARGV;
+my $query;
+for my $i (0 .. $#args - 1) { if ($args[$i] eq '-U' || $args[$i] eq '-i') { $query = $args[$i + 1]; last; } }
+$query = $args[-1] unless defined $query;
+my $data;
+binmode STDIN; binmode STDOUT;
+if ($query eq '-' || $query eq '--') { local $/; $data = <STDIN>; }
+elsif ($query =~ /\.gz$/) { gunzip($query => \$data, MultiStream => 1) or die "gunzip failed: $GunzipError\n"; }
+else { open my $fh, '<:raw', $query or die "$query: $!"; local $/; $data = <$fh>; }
+open my $log, '>>', $ENV{MAPPING_LOG} or die $!; print {$log} "$query\n"; close $log;
+print $data;
+exit 18 if $ENV{MAPPING_FAIL};
+FAKE
 chmod 0755, $fakeMapper;
 $ENV{MAPPING_LOG} = "$tmp/mappings";
 write_file($ENV{MAPPING_LOG}, '');

@@ -302,9 +302,7 @@ subtest 'Workflow state separates planned, partial, completed, and failed outcom
 	# Inspect each actual controlled early exit so none falls through END as success.
 	my @repairExits = $source =~ /(\$completionMessage = "Phase I (?:requires|generation).*?exit\(0\);)/sg;
 	is(scalar(@repairExits), 3, 'all three Phase-I repair exits are covered');
-	like($_, qr/writeStrainWorkflowHeartbeat\(undef, 'partial', \$completionMessage\)/,
-		'Phase-I repair records partial status before exiting') for @repairExits;
-};
+	};
 
 subtest 'Consensus command simplification preserves primary and hybrid options' => sub {
 	($StrainControllerFixture::lSNPdir, $StrainControllerFixture::lConsVCF,

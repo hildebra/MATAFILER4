@@ -198,7 +198,8 @@ sub read_paf_stream {
 		}
 	}
 	my %hits = map {
-		$_ => [values %{$best_hits{$_}}]
+		# Targets in sorted order keep downstream choices reproducible.
+		$_ => [ @{ $best_hits{$_} }{ sort keys %{ $best_hits{$_} } } ]
 	} keys %best_hits;
 	if ($statistics) {
 		$statistics->{queries_with_retained_alignments} = scalar(keys %queries_seen);

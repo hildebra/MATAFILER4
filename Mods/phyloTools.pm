@@ -162,29 +162,29 @@ sub getTreeLeafs($){
 }
 
 sub fixHDs4Phylo ($){
-	#routine to check that headers of fastas don't contain ":", ",", ")", "(", ";", "]", "[", "'"
+	# Tree programs reject some characters in taxon names. If any header contains
+	# one of : , ( ) { } ; [ ] ' the file is rewritten to "<input>.fix" with these
+	# characters replaced by "|", names cut to 40 characters (RAxML limit) and a
+	# per-name counter appended to keep truncated names unique. Headers are
+	# processed in sorted order so paired NT and AA inputs are renamed identically.
 	my ($inF) = @_;
-	my $reqFix=0;
 	if ($inF eq ""){return "";}
 	my $hr = readFasta($inF,1); my %FAA = %{$hr};
-	foreach my $hd (keys %FAA){
-		if ($hd =~ m//){
-			$reqFix=1;last;
-		}
-	}
+	my $reqFix = grep { m/[:,(){};\[\]']/ } keys %FAA;
 	my $outF = $inF;
 	if ($reqFix){
 		$outF .= ".fix";
 		print "Fixing headers in input file (to $outF)\n";
 		my %newHDs;
-		open O,">$outF" or die "Can't write renamed phylogeny input $outF: $!\n";
-		foreach my $hd (keys %FAA){
+		open my $out, '>', $outF or die "Can't write renamed phylogeny input $outF: $!\n";
+		foreach my $hd (sort keys %FAA){
 			my $hd2 = substr $hd,0,40; #cut to raxml length
-			$hd2 =~ s/[:,\}\{;\]\[']/|/g;
+			$hd2 =~ s/[:,(){};\]\[']/|/g;
 			$newHDs{$hd2} ++;
 			$hd2 .= $newHDs{$hd2};
-			print O ">$hd2\n$FAA{$hd}\n";
+			print {$out} ">$hd2\n$FAA{$hd}\n";
 		}
+		close $out or die "Can't close renamed phylogeny input $outF: $!\n";
 	}
 	return $outF;
 }

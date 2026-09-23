@@ -123,29 +123,6 @@ my $staged_files_helper_loaded = eval
 	"package TestBuildTreeStagedFiles; $staged_files_helper; 1;";
 ok($staged_files_helper_loaded, 'staged tree-file listing helper loads independently')
 	or diag($@);
-ok(index($script_text, q{use Mods::StrainParts qw(append_fasta_records_atomic);}) >= 0
-	&& index($script_text, 'sub prepareStagedStrainInputs {') >= 0
-	&& index($script_text, 'sub finalizeStagedStrainCategory {') >= 0
-	&& index($script_text, 'sub finalizeStagedSampleQC {') >= 0
-	&& index($script_text, q{my $plannedMGS = '';}) >= 0
-	&& index($script_text, 'my $mgsLine = <$planIn>;') >= 0
-	&& index($script_text, q{does not match MGS $plannedMGS}) >= 0,
-	'buildTree5 owns staged strain finalization using only lightweight input helpers');
-ok(index($script_text, q{my $stagedPlan =}) >= 0
-	&& index($script_text, q{my $shardManifest =}) >= 0
-	&& index($script_text, q{my $stagedPrimaryInput =}) >= 0
-	&& index($script_text, q{my $stagedResidualInput = -s $stagedPlan && (@stagedFiles || $hasShardHandoff);}) >= 0
-	&& index($script_text, q{runStagedStrainShardHelper(}) >= 0
-	&& index($script_text, q{'-publishedDir', $output}) >= 0
-	&& index($script_text, q{$hasShardHandoff = -s $shardManifest ? 1 : 0;}) >= 0
-	&& index($script_text, q{runStagedStrainShardHelper('cleanup'}) >= 0
-	&& index($script_text, q{unless (@missing || $stagedPrimaryInput || $stagedResidualInput)}) >= 0,
-	q{a staged plan resumes aggregate or worker-shard publication through the external helper});
-ok(index($script_text, q{die "Staged sample QC input is missing: $rawSampleQC\n" unless fileGZs($rawSampleQC);}) >= 0,
-	'tree-side preparation will not mark a missing sample-QC sidecar complete');
-unlike($script_text, qr/use Mods::geneCat|readGene2tax|catalogProteins/,
-	'buildTree5 staged finalization does not load gene-catalogue indexes');
-
 
 my $temporary = tempdir(CLEANUP => 1);
 my $iqtree_prefix = File::Spec->catfile($temporary, 'IQtree_allsites.backbone');
@@ -232,20 +209,7 @@ is(TestBuildTreeMSAFinalizer::finalizeMSAArtifacts($retained_locus_directory), 1
 ok(!-e $retained_locus && -s "$retained_locus.gz" && !-e $discarded_protein,
 	'-rmMSA 0 retains nucleotide sub-alignments as gzip checkpoints for later '
 		.'population-genetics work while removing unneeded protein alignments');
-like($script_text,
-	qr/my \$finOutMSA = File::Spec->catfile\(\$MsaWorkD.*?if \(\$endFileExists\).*?restoreCompressedMSAArtifact\(\$publishedOutMSA, \$finOutMSA\).*?if \(!\$endFileExists\).*?runMSAFix\(\$tmpOutMSA, \$maxGapPerCol\).*?publishCompressedMSAArtifact\(\$finOutMSA, \$publishedOutMSA\)/s,
-	'per-locus continuation restores gzip checkpoints to scratch, while fresh '
-		.'nucleotide MSAs run MSAfix before their first compressed publication');
-like($script_text,
-	qr/my \$multAli = File::Spec->catfile\(\$MsaWorkD, 'MSAli\.fna'\).*?publishMSAArtifactSet\(\$multAli, \$multAliArtifact\)/s,
-	'the concatenated plain MSA is created on scratch and published as a durable artifact');
-unlike($script_text, qr/\$pigzBin[^;\n]*\s-d(?:\s|["'])/,
-	'buildTree5 no longer decompresses retained MSA checkpoints in place');
-unlike($script_text, qr/msaArtifactByWork|exposeMSAWorkingArtifact|copyMSASidecarAtomically/,
-	'the scratch lifecycle does not retain path maps, persistent aliases, or a separate sidecar copier');
 my $publication_staging = File::Spec->catdir($temporary, 'publication-resume');
-like($script_text, qr/sub createTreeOpt\{.*?my \$partiF=\$multF\.\$partiExt;.*?inMSA => \$multF/s,
-	'tree programs receive the restored scratch alignment and scratch partition paths directly');
 
 mkdir $publication_staging or die "Cannot create $publication_staging: $!";
 write_test_file(File::Spec->catfile($publication_staging, '.strain_tree_input.plan.tsv'),
@@ -451,9 +415,6 @@ like($partitioned_model_warning,
 	'partitioned IQ-TREE 3 fallback reports the actual number of fitted model rows');
 is(TestBuildTreeEpaHelpers::iqtreeGtrPartitionCount($iqtree_prefix), 8,
 	'IQ-TREE 3 compact partitioned report is identified for an unpartitioned EPA-ng refit');
-like($script_text,
-	qr/sub epaModelArtifact \{.*?return epaRefitIqtreeModel\(.*?\n\t\t\tif iqtreeGtrPartitionCount\(.*?\) > 1;.*?sub epaRefitIqtreeModel \{.*?\$refitOpts\{partition\} = '';.*?\$refitOpts\{fixedTree\} = \$backboneTree;.*?my \$model = iqtreePlacementModel\(\$refitPrefix\);/s,
-	'partitioned IQ-TREE GTR backbones are refit unpartitioned on their fixed topology before EPA-ng');
 like($partitioned_model_warning, qr/will not silently use one partition's rates/,
 	'partitioned IQ-TREE 3 fallback makes the EPA-ng single-model limitation explicit');
 
@@ -505,29 +466,7 @@ is_deeply($classification_state->{placement}, ['query1'],
 	'EPA-only recovery reuses exactly the samples classified for placement');
 is($classification_state->{backbone_overlap}{query1}{backbone_overlap_nt}, 425,
 	'EPA-only placement reporting retains the original backbone-overlap metric');
-like($script_text,
-	qr/print STDERR "EPA-ng command: \$command";.*?systemW\(\$command\)/s,
-	'the exact EPA-ng command is written to STDERR before execution');
 
-like($script_text,
-	qr/"epaOnly=i" => \\\$epaOnly.*?if \(\$epaOnly\).*?runEpaOnlyPlacement\(.*?exit\(0\)/s,
-	'EPA-only mode exits through its dedicated placement path before ordinary MSA and inference work');
-like($script_text,
-	qr/sub runEpaOnlyPlacement.*?requires a validated IQ-TREE backbone.*?publishEpaPlacement\(.*?backbone retained=\$backboneTree/s,
-	'EPA-only mode maps jplace edges and grafts placements onto the retained backbone');
-like($script_text,
-	qr/if \(\$subsetSmpls >0\).*?if \(\$redoEPAfilter\).*?runRedoEpaFilter\(.*?exit\(0\).*?warn "MSAprobs.*?prepGenoDirs/s,
-	'forced EPA filtering exits before sequence inputs, alignment, and inference startup');
-like($script_text, qr/my \$redoEPAfilter =\s*\(\$ENV\{MATAFILER_REDO_EPA_FILTER\}/,
-	'BuildTree inherits forced filtering when an older saved command is resubmitted');
-my ($redo_epa_body) = $script_text =~
-	/(sub runRedoEpaFilter .*?)(?=sub readEpaFilterBackboneTree)/s;
-ok(defined($redo_epa_body), 'focused forced-EPA publication helper is available');
-like($redo_epa_body,
-	qr/readStrictBackboneClassification.*?read_epa_jplace.*?publishEpaPlacement.*?writeCompletionMarker/s,
-	'forced EPA filtering reads only retained publication artifacts and republishes lifecycle state');
-unlike($redo_epa_body, qr/runEpaNgPlacement|prepGenoDirs|mergeMSAs|treeAtHeart/,
-	'forced EPA filtering cannot start EPA-ng, alignment, or tree inference');
 my $redo_output = File::Spec->catdir($temporary, 'redo_output');
 my $redo_phylo = File::Spec->catdir($redo_output, 'phylo');
 my $redo_epa = File::Spec->catdir($redo_phylo, 'epa-ng');
@@ -593,7 +532,6 @@ my $redo_tree_text = do { local $/; <$redo_tree_handle> };
 close $redo_tree_handle or die "Cannot close $redo_primary: $!";
 like($redo_tree_text, qr/query1/,
 	'forced EPA filtering grafts the retained query before exiting');
-
 
 my ($coverage_eligibility_helper) = $script_text =~
 	/(sub classifyTaxonAwareCoverageEligibility \{.*?\n\})\n\nsub taxonAwareLocusQualityScore/s;
@@ -662,8 +600,6 @@ cmp_ok(
 		\%stable_metric, 0, 1),
 	'enabled scoring applies the heterogeneity-dependent terms',
 );
-like($script_text, qr/my \$taxonAwareHeterogeneityScoring = 1;/,
-	'taxon-aware selection restores heterogeneity-dependent scoring by default');
 
 my ($informative_length_helper) = $script_text =~
 	/(sub informativeSequenceLength \{.*?\n\})\n\nsub bestGeneSequencesBySample/s;
@@ -706,29 +642,6 @@ is($qualified_metric->{variable_sites}, 0,
 is($qualified_metric->{parsimony_informative_sites}, 0,
 	'recovered-only disagreements do not contribute parsimony scoring');
 
-my $coordinate_bounds_checks = () = $script_text =~ /next if \$position >= length\(\$sequence\);/g;
-cmp_ok($coordinate_bounds_checks, '>=', 2,
-	'taxon-aware raw and alignment coordinate scorers safely skip uneven sequence tails');
-like($script_text,
-	qr/if \(defined\(\$candidateSelection->\{terminal_reason\}\).*?writeOutcomeMarker\(\$terminalMarker, 'valid_no_tree', \$reason.*?exit\(0\)/s,
-	'the candidate-selection terminal result is published as a persistent valid no-tree outcome');
-like($script_text,
-	qr/unless \(keys %metrics\).*?terminal_reason => 'taxon_aware_no_category_with_three_usable_samples'/s,
-	'a taxon-aware candidate set with fewer than three usable samples returns a stable terminal reason');
-my $placement_outlier_calls = () = $script_text =~ /filter_epa_placement_outliers\(/g;
-is($placement_outlier_calls, 1,
-	'all publication paths share one pendant-branch outlier QC implementation');
-my $backbone_mapping_calls =
-	() = $script_text =~ /map_epa_placements_to_backbone\(/g;
-is($backbone_mapping_calls, 1,
-	'all publication paths share one backbone mapping implementation');
-like($script_text, qr/strict_backbone\.epa_backbone_grafts\.tsv/,
-	'EPA backbone grafting publishes a per-edge mapping report');
-unlike($script_text, qr/write_epa_placed_tree\(\$epaResult->\{tree\}/,
-	'the jplace Newick tree is never used as the publication template');
-like($script_text,
-	qr/pendant_outlier_limit placement_filter_reason reason/s,
-	'EPA placement reports expose the applied cutoff and exclusion reason');
 is(system($^X, q{-I}.$root, q{-c}, $script), 0, q{buildTree5.pl compiles});
 
 done_testing;

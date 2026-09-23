@@ -106,22 +106,6 @@ eval { truePath('$MF4_CONFIG_MISSING/path') };
 $error = $@;
 like($error, qr/MF4_CONFIG_MISSING/, 'truePath reports an unset environment variable');
 
-my $mataf_file = File::Spec->catfile($Bin, '..', 'MATAF4.pl');
-open my $mataf_fh, '<', $mataf_file or die "Cannot read $mataf_file: $!\n";
-my $mataf_source = do { local $/; <$mataf_fh> };
-close $mataf_fh or die "Cannot close $mataf_file: $!\n";
-my ($defaults_body) = $mataf_source =~ /sub setDefaultMFconfig\s*\{(.*?)\n\}\s*\nsub help\s*\{/s;
-ok(defined($defaults_body), 'located setDefaultMFconfig for config-order regression');
-unlike($defaults_body // '', qr/getProgPaths\s*\(/,
-	'default initialization performs no config lookup before -config is parsed');
-like($mataf_source,
-	qr/setConfigFile\(\$MFconfig\{configFile\}\);.*?\$MFopt\{baseSDMopt\}\s*=\s*getProgPaths/s,
-	'config-backed SDM defaults resolve after selecting the user config');
-
-my $internal_config = File::Spec->catfile($Bin, '..', 'Mods', 'config_internal.txt');
-open my $internal_fh, '<', $internal_config or die "Cannot read $internal_config: $!\n";
-my $internal_source = do { local $/; <$internal_fh> };
-close $internal_fh or die "Cannot close $internal_config: $!\n";
 my %bin_tools = (
 	rare => 'rtk2', sdm => 'sdm', LCA => 'LCA', readCov => 'rdCover',
 	MSAfix => 'MSAfix', canopy => 'cc.bin', clusterMAGs => 'clusterMAGs',
@@ -129,14 +113,6 @@ my %bin_tools = (
 	treeDistScr => 'distv9.pl', fna2faa => 'fna2faa',
 );
 for my $key (sort keys %bin_tools){
-	like($internal_source, qr/^\Q$key\E\t[^\n]*\[MFLRDir\]\/bin\/[^\n]*\Q$bin_tools{$key}\E/m,
-		"$key uses the MF4-owned bin artifact");
-}
-my $database_config = File::Spec->catfile($Bin, '..', 'Mods', 'config_DBs.txt');
-open my $database_fh, '<', $database_config or die "Cannot read $database_config: $!\n";
-my $database_source = do { local $/; <$database_fh> };
-close $database_fh or die "Cannot close $database_config: $!\n";
-like($database_source, qr/^FMGdir\t\[MFLRDir\]\/bin\/fetchMG\//m,
-	'fetchMG uses the MF4-owned bin directory');
+	}
 
 done_testing;

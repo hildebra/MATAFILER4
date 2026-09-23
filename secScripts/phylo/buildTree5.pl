@@ -124,7 +124,6 @@ use Mods::StrainPlacement qw(
 			
 			
 use Getopt::Long qw( GetOptions Configure );
-#use Mods::ext::TreeIO;
 #use Mods::IO::MaybeXS qw(encode_json decode_json);
 use Mods::IO::PP qw (decode_json);
 #use JSON qw( decode_json ); 

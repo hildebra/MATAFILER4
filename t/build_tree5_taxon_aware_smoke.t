@@ -7,6 +7,10 @@ use File::Temp qw(tempdir);
 use FindBin qw($Bin);
 use Test::More;
 
+# Requires the compiled MSAfix binary shipped in bin/ (not part of the Perl sources).
+plan skip_all => "bin/MSAfix is not installed or not executable"
+	unless -x File::Spec->catfile($FindBin::Bin, "..", "bin", "MSAfix");
+
 my $root = File::Spec->rel2abs(File::Spec->catdir($Bin, '..'));
 my $temporary = tempdir('buildtree-taxon-aware-XXXXXX', TMPDIR => 1, CLEANUP => 1);
 my $output = File::Spec->catdir($temporary, 'output');

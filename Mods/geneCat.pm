@@ -450,7 +450,8 @@ sub read_matrix{
 		chomp; $cnt++;
 		my @row = split /$SEP/;
 		my $ID = shift @row;
-		next if ($doIncl && !exists($incl{$ID}));
+		# The header is always kept; the subset filter applies to data rows only.
+		next if ($cnt > 1 && $doIncl && !exists($incl{$ID}));
 		if ($cnt==1){
 			$oM{header} = \@row;
 		} else {

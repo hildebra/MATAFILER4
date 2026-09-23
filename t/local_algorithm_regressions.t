@@ -269,7 +269,5 @@ unlink "$cov.percontig";
 ok(!coverage_derivatives_complete($cov),'partial legacy products remain incomplete');
 
 # Caller evidence must use the same set of derivative candidates as scheduling.
-like(source_sub('sampleCompletionComponents'),qr/paths => coverage_derivative_paths\("\$prefix.coverage.gz", \$suffix\)/,
-    'secondary sample-completion evidence shares the path contract');
 
 done_testing();

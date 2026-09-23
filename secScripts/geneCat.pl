@@ -60,7 +60,7 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.59;
+our $version = 0.60;
 
 sub _print_help {
 	#option tables come from docs/flag_reference.md so this list cannot drift
@@ -521,6 +521,7 @@ my %FMGfileList;
 my $mapF = "?";#$ARGV[0];#"/g/bork5/hildebra/data/metaGgutEMBL/MM.txt";
 my $GCdir = "";
 my $cdhID = 95; my $minGeneL = 100;
+my $clusterCov = 0.9; #fraction of the shorter (member) gene that must be covered by its alignment to the representative
 my $extraRdsFNA = "";
 #only used in MGS.pl script:
 my $useCheckM1= 0; my $useCheckM2 =1;
@@ -562,6 +563,7 @@ GetOptions(
 	"m|mode=s" => \$mode, #possible modes: mergeCLs CANOPY specI kraken kaiju FMG_extr FOAM ABR FuncAssign protExtract ntMatchGC geneCat subprepSmpls
 #cluster options
 	"clusterID=i" => \$cdhID, #identity at which to cluster gene catalog, default: 0.95
+	"clusterCov=f" => \$clusterCov, #minimum fraction of the shorter gene that must be covered by its alignment to the cluster representative (mmseqs2 --cov-mode 1); fragments inside a longer gene still join it. 0 disables the coverage filter. Default: 0.9
 	"minGeneL=i" => \$minGeneL, #minimal gene length for gene to be included in gene catalog, default: 100
 	"extraGenesNT=s" => \$extraRdsFNA, #add genes (nt) from external sources, e.g. from complete genomes
 	"extraGenesAA=s" => \$extraRdsFAA, #add genes (AA) from external sources, e.g. from complete genomes
@@ -619,6 +621,7 @@ die "-cores3 must be -1 or a positive integer\n" unless $numCor3 == -1 || $numCo
 die "-mem must be positive\n" unless $totMem > 0;
 die "-mem3 must be -1 or positive\n" unless $totMem3 == -1 || $totMem3 > 0;
 die "-clusterID must be between 1 and 100\n" unless $cdhID >= 1 && $cdhID <= 100;
+die "-clusterCov must be between 0 and 1\n" unless $clusterCov >= 0 && $clusterCov <= 1;
 die "-minGeneL must not be negative\n" unless $minGeneL >= 0;
 die "-FuncMinPercSbjCov must be between 0 and 1\n"
 	unless $minPercSbjCov >= 0 && $minPercSbjCov <= 1;
@@ -976,7 +979,7 @@ sub clusterSingleStep{
 		systemW $cmd;$cmd="";
 	}
 
-	$cmd .= clusterFNA( "$DB", "$tmpDir/$primaryClusterFNA" ,0.0,0.0,"$cdhID",$numCor0,0,$tmpDir."/fullCL/",$clustMMseq,$totMem);
+	$cmd .= clusterFNA( "$DB", "$tmpDir/$primaryClusterFNA" ,$clusterCov,0.0,"$cdhID",$numCor0,0,$tmpDir."/fullCL/",$clustMMseq,$totMem);
 	
 	$cmd .= _catalog_backup_command($tmpDir, $bdir, 'unmerged.', $numCor0);
 	$cmd .= _checkpoint_command($checkpointWriter, $complStone, $cdhID, 'complete-clustering',
@@ -2196,7 +2199,7 @@ sub announceGeneCat{
 		. "; scheduler=$QSBoptHR->{qmode}\n";
 	printL "Inputs: map=$mapF; samples=$numSmpls; marker set=$useGTDBmg\n";
 	printL "Paths: output=$GCdir; temporary=$tmpDir; log=$qsubDir/GeneCat.log\n";
-	printL "Clustering: identity=$cdhID%; minimum gene length=$minGeneL nt; binner=$binnerShrt\n";
+	printL "Clustering: identity=$cdhID%; shorter-gene coverage=$clusterCov; minimum gene length=$minGeneL nt; binner=$binnerShrt\n";
 	printL "Resources: main cores=$numCor; clustering cores=$numCor0; small-job cores=$numCor3; "
 		. "main memory=${totMem}G; small-job memory=${totMem3}G\n";
 	printL "Batches: $batchNum; require all assemblies=" . ($requireAllAssemblies ? "yes" : "no")
@@ -2516,11 +2519,23 @@ sub clusterFNA($ $ $ $ $ $ $ $ $ $){
 	if ($useMMseqs){#mmseq2 clustering  #$clustMMseq
 		my $tmpD2 = "$tmpD/mmS/";
 		$cmd .= "$rmBin -rf $tmpD2\n$mkdirBin -p $tmpD2\n";
-		my $covMin = $aL; $covMin = $aS if ($aS < $aL);
+		# Coverage semantics follow CD-HIT: aS = fraction of the shorter sequence,
+		# aL = fraction of the longer sequence that must be aligned. mmseqs2 places
+		# the longer sequence as representative (query) and the shorter as member
+		# (target), so --cov-mode 1 (alnRes/member length) matches aS: a fragment
+		# contained in a longer gene still joins it, while genes that only share a
+		# local block do not. --cov-mode 0 (alnRes/longer length) matches aL.
+		my ($covMin, $covMode) = (0, 0);
+		if ($aL > 0) {
+			($covMin, $covMode) = ($aL, 0);
+			warn "clusterFNA: mmseqs2 cannot combine aS=$aS and aL=$aL; enforcing aL only\n" if ($aS > $aL);
+		} elsif ($aS > 0) {
+			($covMin, $covMode) = ($aS, 1);
+		}
 		if ($gfac){
-			$cmd .= "$mmseqs2Bin easy-cluster $inFNA $oFNA $tmpD2 -c $covMin --cov-mode 0  --min-seq-id $ID --alignment-mode 3 --threads $numCor --dbtype 2 --spaced-kmer-mode 1 --mask 0 --split-memory-limit ". int(${totMemCl}*0.85)."G --min-aln-len 100 --sort-results 1 --cluster-reassign 0 -v 3 \n";
+			$cmd .= "$mmseqs2Bin easy-cluster $inFNA $oFNA $tmpD2 -c $covMin --cov-mode $covMode  --min-seq-id $ID --alignment-mode 3 --threads $numCor --dbtype 2 --spaced-kmer-mode 1 --mask 0 --split-memory-limit ". (int(${totMemCl}*0.85) || 1)."G --min-aln-len 100 --sort-results 1 --cluster-reassign 0 -v 3 \n";
 		} else {
-			$cmd .= "$mmseqs2Bin easy-linclust $inFNA $oFNA $tmpD2 -c $covMin --cov-mode 0  --min-seq-id $ID --alignment-mode 3 --threads $numCor --dbtype 2 --spaced-kmer-mode 1 --mask 0 --split-memory-limit ". int(${totMemCl}*0.85)."G --min-aln-len 100 --sort-results 1 -v 3 \n"; #--cluster-reassign 1 
+			$cmd .= "$mmseqs2Bin easy-linclust $inFNA $oFNA $tmpD2 -c $covMin --cov-mode $covMode  --min-seq-id $ID --alignment-mode 3 --threads $numCor --dbtype 2 --spaced-kmer-mode 1 --mask 0 --split-memory-limit ". (int(${totMemCl}*0.85) || 1)."G --min-aln-len 100 --sort-results 1 -v 3 \n"; #--cluster-reassign 1 
 		}
 		$cmd .= "$mmS2clstr ${oFNA}_cluster.tsv $oFNA.clstr\n";
 		#die $cmd;

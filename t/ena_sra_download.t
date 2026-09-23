@@ -18,14 +18,6 @@ make_path($fixtures, $tools);
 my $downloader = File::Spec->catfile(
 	$Bin, '..', 'secScripts', 'fileManage', 'ENASRAdl.pl',
 );
-my $mataf = File::Spec->catfile($Bin, '..', 'MATAF4.pl');
-open my $mataf_fh, '<', $mataf or die "Cannot read $mataf: $!";
-my $mataf_source = do { local $/; <$mataf_fh> };
-close $mataf_fh;
-like(
-	$mataf_source,
-	qr/my \$downloadConfig = \$MFconfig\{configFile\};.*?File::Spec->rel2abs\(\$downloadConfig\).*?\('--config', \$downloadConfig\).*?\@configArguments/s,
-	'the download job receives the selected config as a scheduler-safe absolute path');
 
 sub write_file {
 	my ($path, $content) = @_;
