@@ -132,12 +132,26 @@ find_in_bashrc() {
 ensure_environment() {
 	local name=$1
 	local definition=$2
+	local log="$MFdir/.install_${name}.log"
+	local action
+
 	if env_exists "$name"; then
+		action=install
 		echo "Updating $name environment"
-		"$MAMBA_E" install --name "$name" --channel-priority flexible -q -y -f "$definition"
 	else
+		action=create
 		echo "Creating $name environment"
-		"$MAMBA_E" create --name "$name" --channel-priority flexible -q -y -f "$definition"
+	fi
+
+	if "$MAMBA_E" "$action" --name "$name" --channel-priority flexible -y -f "$definition" \
+			>"$log" 2>&1; then
+		rm -f -- "$log"
+	else
+		local status=$?
+		echo "ERROR: micromamba $action failed for $name (exit $status). Last lines of the log:" >&2
+		tail -n 15 -- "$log" >&2
+		echo "Full log: $log" >&2
+		return "$status"
 	fi
 }
 
