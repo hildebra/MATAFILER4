@@ -51,8 +51,14 @@ my $bonSplit = 5;
 my %genesE1h; 
 my $genesFMGfilesHR = {}; my %genesFMGstreams;
 my $genesGTDBfilesHR = {}; my %genesGTDBstreams;
-my %seenAssembls; 
-if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
+my %seenAssembls;
+# Everything the marker-matrix step publishes; reuse only a complete set
+# (the old test named a non-existent "Mattrix.FMG.mat" and so never skipped).
+my @markerMatrixOutputs = map { ("$GCd/$_.subset.cats", "$GCd/Matrix.$_.mat",
+		"$GCd/Mat.cov.$_.mat.gz", "$GCd/Mat.med.$_.mat.gz") } qw(FMG GTDBmg);
+my $markerMatricesDone = !grep { !-s $_ } @markerMatrixOutputs;
+print "Marker gene matrices already complete; only re-extracting marker sequences\n" if $markerMatricesDone;
+if (!$markerMatricesDone){
 	#$genesE1h{1}{gg} = "falk";
 	#die $genesE1h{1}{gg};
 	print "Reading reference FMG/GTDBs from assemblies..\n";
@@ -108,8 +114,8 @@ if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 #foreach my $cat (keys %genesFMGstreams){
 	#close $genesFMGstreams{$cat};
 #}
-if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
-	
+if (!$markerMatricesDone){
+
 	my $allGs = {};
 	$allGs = getEgenes($genesFMGfilesHR,$allGs);
 	$allGs = getEgenes($genesGTDBfilesHR,$allGs);
@@ -123,11 +129,18 @@ if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 	#print "@e1cat\n";
 	#Sort matrix genes into FMGs and extract matrix subset that contains these genes
 	print "Creating FMG gene matrix\n";
-	processSubGenes($genesFMGfilesHR,"FMG",$hr1);
+	my @matrixJobs;
+	push @matrixJobs, processSubGenes($genesFMGfilesHR,"FMG",$hr1);
 	#Sort matrix genes into FMGs and extract matrix subset that contains these genes
 	print "Creating GTDB gene matrix\n";
-	processSubGenes($genesGTDBfilesHR,"GTDBmg",$hr1);
+	push @matrixJobs, processSubGenes($genesGTDBfilesHR,"GTDBmg",$hr1);
 	undef $hr1 ;
+	# geneCat writes the marker stone as soon as this script exits, so the
+	# submitted matrix-subset jobs must have finished and published first.
+	@matrixJobs = grep { defined($_) && $_ ne '' } @matrixJobs;
+	qsubSystemJobAlive(\@matrixJobs, $QSBoptHR) if @matrixJobs;
+	my @missingMatrices = grep { !-s $_ } @markerMatrixOutputs;
+	die "Marker gene matrix jobs finished without publishing: @missingMatrices\n" if @missingMatrices;
 	#don't create for e100
 	#print "Creating e100 gene matrix\n";
 	#processSubGenes(\%genesE1h,"e100");
@@ -309,4 +322,5 @@ sub processSubGenes{
 	print "Submitted $tag\n";
 	print "Found $catCnt gene categories, with total of $geneCnt members\n";
 	#print "Done\n";
+	return $dep1;
 }

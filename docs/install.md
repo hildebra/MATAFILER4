@@ -149,17 +149,16 @@ GTDB and GTDB-Tk databases are required for MAG classification and GTDB marker-g
 Example:
 
 ```bash
-cd helpers/install
-./get_gtdb.py all -v 226 -t /path/to/download -d /path/to/extract/to --tk split
+helpers/install/get_gtdb.pl all -v 226 -t /path/to/download -d /path/to/extract/to --tk split
 ```
 
 The temporary download directory passed with `-t` can be removed after the database has been extracted and configured. See:
 
 ```bash
-./get_gtdb.py -h
+helpers/install/get_gtdb.pl -h
 ```
 
-for additional options, including workflows where download and extraction need to be run separately.
+for additional options, including workflows where download and extraction need to be run separately (`download` on a machine with internet access, `extract` where the database should live, then `configure`). `configure` (and `all` when run interactively) updates the GTDB keys in `Mods/config_DBs.txt` of the MATAFILER4 checkout named by `MF4DIR`, keeping a numbered backup (`Mods/config_DBs.bupN`). Keys set in your `config.txt` take precedence over `Mods/config_DBs.txt`, so remove or update GTDB entries there. The script needs GNU tar and wget (or curl for `--tk full`); it uses pigz when available.
 
 ## Updating MATAFILER4
 

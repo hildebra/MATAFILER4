@@ -1362,7 +1362,8 @@ sub geneCatFlow($ $ $ $ ){
 	#and calculate kmer per gene
 	if (!_stone_valid($geneStatsStone, $cdhID)){
 		my $cmd1="";my $cmd3="";my $cmd2="";
-		$cmd1 = "$kmerScr $OutD $numCor $cdhID\n$pigzBin $OutD/$primaryClusterFNA.kmer\n" unless (-e "$OutD/$primaryClusterFNA.kmer.gz");
+		# kmerPerGene.pl writes no table when MATAF4 did not compute per-gene k-mers
+		$cmd1 = "$kmerScr $OutD $numCor $cdhID\nif [ -e $OutD/$primaryClusterFNA.kmer ]; then $pigzBin $OutD/$primaryClusterFNA.kmer; fi\n" unless (-e "$OutD/$primaryClusterFNA.kmer.gz");
 		$cmd2 = "$GCcalc $OutD/$primaryClusterFNA $OutD/compl.incompl.$cdhID.fna.GC \n" unless (-e "$OutD/compl.incompl.$cdhID.fna.GC");
 		$cmd3 = "$genelengthScript $OutD/$primaryClusterFNA $OutD/$primaryClusterFNA.length \n" unless (-e "$OutD/$primaryClusterFNA.length");
 		if ($submitLocal){
@@ -2142,11 +2143,17 @@ sub krakenTax{
 			if grep { !/^\d+$/ } @tax_ids;
 		my @taxLvl = qw( d__ p__ c__ o__ f__ g__ s__);
 		my @allTs;
-		while (@tax_ids) {
-			my @batch = splice(@tax_ids, 0, 500);
-			$cmd = "$ete3taxid ".join(" ", @batch);
+		if (@tax_ids) {
+			# taxid2ranks.pl reads the lineages from the same Kraken2 database
+			# (taxo.k2d) that assigned the IDs; one call parses it once.
+			my $idFile = "$outD/krak2.taxids.tmp";
+			open my $idFH, '>', $idFile or die "Cannot write $idFile: $!\n";
+			print {$idFH} join("\n", sort { $a <=> $b } @tax_ids), "\n";
+			close $idFH or die "Cannot close $idFile: $!\n";
+			$cmd = "$ete3taxid -db " . _shell_quote($curDB) . " -in " . _shell_quote($idFile);
 			my $strings = `$cmd`;
 			die "Taxonomy expansion failed: $cmd\n" if $CHILD_ERROR != 0;
+			unlink $idFile;
 			push @allTs, split /\n/, $strings;
 		}
 		print "All kraken assignments are done\n";

@@ -20,6 +20,25 @@ my %map = %{$hr1}; my %AsGrps = %{$hr2};
 my $kmerOut = "$GCd/compl.incompl.$clusterID.fna.kmer";
 unlink $kmerOut or die "Cannot remove $kmerOut: $!\n" if -e $kmerOut;
 
+# Per-gene k-mers only exist when MATAF4 ran with -kmerPerGene 1. geneCat adds
+# this step unconditionally, so check every assembly first and skip cleanly
+# (no output, exit 0) instead of dying half-way through a large catalogue.
+{
+	my (%seenAssembly, @missingKmers);
+	for my $smpl (@{$map{opt}{smpl_order}}) {
+		next if -e "$map{$smpl}{wrdir}/SMPL.empty";
+		my $metaGD = getAssemblPath("$map{$smpl}{wrdir}/", "", 0);
+		next if $metaGD eq '' || $seenAssembly{$metaGD}++;
+		push @missingKmers, $metaGD unless -s "$metaGD/ContigStats/scaff.pergene.4kmer.pm5.gz";
+	}
+	if (@missingKmers) {
+		print "Per-gene k-mers are missing for ".scalar(@missingKmers)." assembl"
+			.(@missingKmers == 1 ? "y" : "ies")." (e.g. $missingKmers[0]); run MATAF4 with -kmerPerGene 1 to compute them. "
+			."Skipping the catalogue k-mer table.\n";
+		exit(0);
+	}
+}
+
 #read gene clusters jsut to get an idea of which genes are present
 ($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0); $hr1 = {};
 my @totGenes = sort  { $a <=> $b } keys %{$hr2};

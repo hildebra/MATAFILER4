@@ -830,7 +830,7 @@ if (!-s "$annoDir/kraken2.LCA" || !-s "$annoDir/kraken2.tax"){
 my $specIoutDir = $legacyV ? "$GCd/Anno/Tax/SpecI_MGS" : "$annoDir/${COGdir}_MGS";
 my $specIabundance = "$specIoutDir/specI.mat";
 my @annotation_jobs;
-unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/specI.tax"){
+unless (_checkpoint_valid_for_resume($ABmgsSton) && -s $specIabundance && -s "$annoDir/specI.tax"){
 	my $specIabu = getProgPaths("specIGC_scr");
 	my $cmdSI = "$specIabu -GCd $GCd -cores $canCore -MGS $finalClustersFilt -MGStax $GTDBtaxF -MGset $useGTDBmg -outD $specIoutDir\n";
 	$cmdSI .= "cp $specIoutDir/MGS2speci.txt $annoDir/specI.tax\n";
@@ -856,11 +856,11 @@ unless (_checkpoint_valid($ABmgsSton) && -s $specIabundance && -s "$annoDir/spec
 qsubSystemJobAlive( \@annotation_jobs,\%QSBopt ) if $doSubmit && @annotation_jobs;
 if ($doSubmit) {
 	die "MGS/specI annotation stage incomplete\n$specIabundance\n$annoDir/specI.tax\n$ABmgsSton\n"
-		unless -s $specIabundance && -s "$annoDir/specI.tax" && _checkpoint_valid($ABmgsSton);
+		unless -s $specIabundance && -s "$annoDir/specI.tax" && _checkpoint_valid_for_resume($ABmgsSton);
 }
 
 my @marker_jobs;
-unless (_checkpoint_valid($ABmgsSton2) && -s "$outD/Annotation/Abundance/MGS.matL0.txt" && -s "$outD/Annotation/Abundance/MGS.matL7.txt"){
+unless (_checkpoint_valid_for_resume($ABmgsSton2) && -s "$outD/Annotation/Abundance/MGS.matL0.txt" && -s "$outD/Annotation/Abundance/MGS.matL7.txt"){
 	my $MMLscr = getProgPaths("MAGMGSLCA_scr");
 	my $cmdSI2 = "$MMLscr -GCd $GCd -cores $numCore -MGset $useGTDBmg -Binner $BinnerShrt -binD $outD\n";
 	$cmdSI2 .= "test -s $outD/Annotation/Abundance/MGS.matL0.txt\n";
@@ -883,7 +883,7 @@ qsubSystemJobAlive( \@marker_jobs,\%QSBopt ) if $doSubmit && @marker_jobs;
 if ($doSubmit) {
 	warn "Optional Kraken MGS taxonomy stage incomplete; continuing without Kraken-derived MGS taxonomy\n"
 		unless $krakenSkipped || (-s "$annoDir/kraken2.LCA" && -s "$annoDir/kraken2.tax");
-	die "Marker-based MGS abundance stage incomplete\n" unless _checkpoint_valid($ABmgsSton2)
+	die "Marker-based MGS abundance stage incomplete\n" unless _checkpoint_valid_for_resume($ABmgsSton2)
 		&& -s "$outD/Annotation/Abundance/MGS.matL0.txt"
 		&& -s "$outD/Annotation/Abundance/MGS.matL7.txt";
 }
@@ -1178,6 +1178,11 @@ sub _checkpoint_parameters_for_stage {
 		$parameters{stage_contract} = $stageCheckpointContract{$stage};
 	} else {
 		%parameters = %checkpointParameters;
+		# Abundance stages are validated with _checkpoint_valid_for_resume: the
+		# empty-sample list is only known when sample metadata was loaded in this
+		# pass, and an emptiness change also changes the catalogue identity.
+		delete $parameters{empty_samples}
+			if $stage eq 'mgs-abundance' || $stage eq 'marker-mgs-abundance';
 	}
 	$parameters{stage} = $stage;
 	return \%parameters;

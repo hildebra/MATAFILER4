@@ -106,14 +106,16 @@ explicit per-run override for tree construction.
 GTDB and GTDB-Tk databases are used for MAG and MGS-related classification. The installer provides:
 
 ```bash
-helpers/install/get_gtdb.py
+helpers/install/get_gtdb.pl
 ```
 
 Example:
 
 ```bash
-./get_gtdb.py all -v 226 -t /path/to/download/to -d /path/to/extract/to --tk split
+helpers/install/get_gtdb.pl all -v 226 -t /path/to/download/to -d /path/to/extract/to --tk split
 ```
+
+`helpers/install/get_gtdb.pl configure -d /path/to/extract/to` points `GTDBPath`, `GTDB_GTDB`, `GTDB_lnks` and `GTDBtk_DB` in `Mods/config_DBs.txt` (of the checkout named by `MF4DIR`) at the extracted database, using `[DBDir]`-relative paths when it lies inside `DBDir`.
 
 Delete the download directory only after confirming that the extracted database paths are configured correctly.
 

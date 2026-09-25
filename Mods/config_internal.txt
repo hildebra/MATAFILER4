@@ -68,8 +68,8 @@ Binner_scr	perl [MFLRDir]/secScripts/assemblies/runBinners.pl
 
 samcov2bed	perl [MFLRDir]/helpers/samcovToBedGraph.pl
 
-#requries ete3...
-taxid2tax_scr	python [MFLRDir]/secScripts/phylo/get_ranks.py
+#taxid -> 7 ranks from the Kraken2 DB's own taxonomy (taxo.k2d); replaced get_ranks.py (ete3)
+taxid2tax_scr	perl [MFLRDir]/secScripts/phylo/taxid2ranks.pl
 
 #Python scripts
 FSTpy	fst_from_fasta.py
@@ -96,7 +96,7 @@ metPhl2Merge	merge_metaphlan_tables.py	env:MF4checkm2
 #kraken	kraken
 kraken2	kraken2
 hostile	hostile
-hostileDB	[MFLRDir]/data/DBs/hostile/
+hostileDB	[DBDir]/hostile/	#installer.sh downloads it to DBDir (default $MF4DIR/data/DBs/)
 TaxaTarget	python run_protist_pipeline_fda.py
 motus2	motus	env:MF4motus
 #kaijuDir	[BINDir]/kaiju/bin/

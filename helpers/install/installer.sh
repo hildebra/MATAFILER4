@@ -345,8 +345,8 @@ echo
 echo "How to download GTDB and GTDB-Tk databases"
 echo
 echo "These databases are required for MAG classification. For example:"
-echo "    helpers/install/get_gtdb.py all -v 226 -t /path/to/download -d /path/to/extract/to --tk split"
-echo "Run 'helpers/install/get_gtdb.py -h' for all options."
+echo "    helpers/install/get_gtdb.pl all -v 226 -t /path/to/download -d /path/to/extract/to --tk split"
+echo "Run 'helpers/install/get_gtdb.pl -h' for all options."
 echo
 echo "Finished MATAFILER4 installation."
 echo "Activate the main environment with: micromamba activate MF4"

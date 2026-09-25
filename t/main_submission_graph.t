@@ -182,6 +182,7 @@ my ($closed_body) = $source =~ /(^\tif \(\$closedSample\) \{.*?^\t\})/ms;
 my ($closedSample, %progStats);
 my $smplLockF = "$tmp/sample.lock";
 my %loopSampleCompleted;
+my $curOutDir = "$tmp/closed-member/";
 sub MFnext {}
 sub loop2C_check {}
 for my $case (
@@ -192,10 +193,15 @@ for my $case (
     my ($mode,$status,$count) = @$case;
     $MFopt{DoAssembly} = $mode;
     $AsGrps{group}{CntPreAssNoPrim} = 2;
+    $AsGrps{group}{CntAimAss} = 2;
+    $AsGrps{group}{ClosedCompleted} = [];
     $closedSample = {outcome=>{status=>$status},components=>{}};
     eval "for (1) { $closed_body }"; die $@ if $@;
     is($AsGrps{group}{CntPreAssNoPrim}, 2+$count,
         "assembly mode $mode, $status: completed-member accounting is scoped correctly");
+    # only completed members of a shared group registered no reads they should have
+    is_deeply($AsGrps{group}{ClosedCompleted}, $status eq 'completed' ? [$curOutDir] : [],
+        "assembly mode $mode, $status: fast-path member is recorded for the subset guard only when completed");
 }
 
 done_testing();

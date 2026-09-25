@@ -38,6 +38,7 @@ sub slurp {
 	sub checkMF {}
 	sub printL {}
 	sub _checkpoint_valid { return 0; }
+	sub _checkpoint_valid_for_resume { return 0; } # abundance stages use the resume validator
 	sub _checkpoint_command { return "CHECKPOINT\n"; }
 	sub runCheckM { @qualityArgs = @_; return 'checkm1'; }
 	sub runCheckM2 { @qualityArgs = @_; return 'checkm2'; }

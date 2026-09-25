@@ -1854,6 +1854,7 @@ sub resetAsGrps{
 		$AsGrps->{$cAssGrp}{CleanSeqs} = {};
 		$AsGrps->{$cAssGrp}{RawSeqs} = {};
 		$AsGrps->{$cAssGrp}{InputOrder} = [];
+		$AsGrps->{$cAssGrp}{ClosedCompleted} = []; #members closed via the completion fast path in this pass
 		$AsGrps->{$cAssGrp}{SeqClnDeps} = "";
 		$AsGrps->{$cAssGrp}{prodRun} = "";
 		$AsGrps->{$cAssGrp}{AssemblJobName} = "";

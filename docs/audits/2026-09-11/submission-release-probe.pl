@@ -42,6 +42,8 @@ sub postSubmQsub { push @events, {job=>'mapping',deps=>$_[2]}; return 'run202'; 
 sub submitGenomeBinner { push @events, {job=>'binning',deps=>$AsGrps{g}{BinDeps},scratch=>$_[0]}; return 'run203'; }
 sub MFnext {}
 sub loop2C_check {}
+# MATAF4 defers a shared assembly while fast-path-closed members registered no reads
+sub deferGroupAssemblyForClosedMembers { my ($g) = @_; return @{$AsGrps{$g}{ClosedCompleted} || []} ? 1 : 0; }
 my $finalizeEmptySample = sub { my %args=@_; push @events, {job=>'empty-finalizer',%args}; };
 my $messages = '';
 {

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-25 — Audit follow-up decisions
+
+- **Paired unaligned BAM/SAM/CRAM input.** The layout of each alignment input is detected; sdm cleans paired files as true pairs (`-paired 2`, name-sorting first when the header is not `SO:queryname`), giving the usual `filtered.1/.2/.singl` files. Raw-read mapping and the raw FASTQ cache now keep every mate (mapped as unpaired reads) instead of none; `-uploadRawRds` stops for paired alignment input. See [mapping files](../docs/mapping_files.md#using-bam-files-as-primary-input).
+- **Shared assemblies are never built from a subset of members.** A group rewrite reopens every member, and a group assembly waits one pass when members were closed as complete in the same pass.
+- **Database defaults follow the installer:** `checkm2DB` is `[DBDir]/CM2/…`; `hostileDB` and `PtostT5_Weights` are under `[DBDir]`. Sites with their own settings are unaffected.
+- **No more Python helpers in the workflow:** `get_ranks.py` (ete3) is replaced by `secScripts/phylo/taxid2ranks.pl`, which reads the lineages from the Kraken2 database that assigned the IDs; `helpers/install/get_gtdb.py` is replaced by `helpers/install/get_gtdb.pl`.
+- MGS abundance checkpoints no longer rerun both jobs after a resume; `extrAllE100GC.pl` waits for its matrix jobs before geneCat's marker stone; `kmerPerGene.pl` skips cleanly without MATAF4 k-mers; `-perlClusterMAGs` uses `sample__bin` MAG ids.
+- Removed five broken `refs/codex/…` checkpoint references (paths too long for Windows) that broke `git fetch` and automatic repacking.
+- Details: [second-pass report, "Decisions applied"](../docs/audits/2026-09-25/report.md#decisions-applied-follow-up-25-september).
+
 ## 2026-09-25 — Pipeline audit, second pass
 
 - Reviewed the 24 September fixes against their callers (no regression found) and re-audited the whole pipeline in eleven slices; see [the second-pass report](../docs/audits/2026-09-25/report.md) for every fix and the findings left open.

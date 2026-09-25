@@ -441,7 +441,7 @@ sub clusterMB2{
 		#%MB = %{$hr1}; %MBQ = %{$hr2};
 		#log overall stats for bins..
 		foreach my $bin (keys %{$hr1}){
-			$uniqMBid = "$smplIDs[-1].$bin";
+			$uniqMBid = "$smplIDs[-1]__$bin"; #sample__bin (and Cano__x), as Binning.pm readers and the native clusterMAGs expect
 			$MAGq{$uniqMBid} = ${$hr2}{$bin}{compl};$MAGc{$uniqMBid} = ${$hr2}{$bin}{conta};
 			$BinsGlobal{$uniqMBid} = ${$hr1}{$bin};
 			foreach my $kk (@{$BinsGlobal{$uniqMBid}}){
@@ -901,7 +901,7 @@ sub summarizeMAGcontent{
 		my ($hr1,$hr2) = MB2assigns ($MBf,$MBfQual);
 		my %MB = %{$hr1};my %MBQ = %{$hr2};
 		foreach my $bin (keys %MB){
-			my $uniqMBid = "$smplIDs[-1].$bin";
+			my $uniqMBid = "$smplIDs[-1]__$bin"; #sample__bin (and Cano__x), as Binning.pm readers and the native clusterMAGs expect
 			next unless (exists($MAGlcaq{$uniqMBid}));
 			my $MGSid = "?";
 			if (exists($binName2{$uniqMBid})){ #$MAG2Bin{$uniqMBid})){

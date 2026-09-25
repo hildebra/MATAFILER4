@@ -29,18 +29,18 @@ protal_db
 metPhl2_db	[DBDir]/MP4/mpa_vJan25_CHOCOPhlAnSGB_202503
 ## Parent directory containing db_mOTU/.
 motus2_DB	[DBDir]/mOTUs
-checkm2DB	[DBDir]/checkm2/CheckM2_database/uniref100.KO.1.dmnd
+checkm2DB	[DBDir]/CM2/CheckM2_database/uniref100.KO.1.dmnd	#where helpers/install/installer.sh downloads it
 
 
 #DBs for official GTDBtk scripts
 #GTDBtk_DB	[DBDir]/GTDBtk_ref/
-GTDBtk_DB	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb/release226/	#Updated by get_gtdb.py
-#GTDBtk_mash	[DBDir]//MarkerG/GTDB_r207v2_MF/gtdb/mashD	#Updated by get_gtdb.py #Updated by get_gtdb.py
+GTDBtk_DB	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb/release226/	#Updated by get_gtdb.pl
+#GTDBtk_mash	[DBDir]//MarkerG/GTDB_r207v2_MF/gtdb/mashD	#Updated by get_gtdb.pl #Updated by get_gtdb.pl
 #this is used for GTDB python script from Joachim and MAG->GTDB marker gene tasks.. independent of GTDBtk version
 GTDBtk_skani	[DBDir]/GTDBtk/Skani/
-GTDBPath	[DBDir]//MarkerG/GTDB_r226_MGTK/markerGenes	#Updated by get_gtdb.py
-GTDB_GTDB	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb_r226_lineageGTDB.tab	#Updated by get_gtdb.py
-GTDB_lnks	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb_r226_clustering.tab	#Updated by get_gtdb.py
+GTDBPath	[DBDir]//MarkerG/GTDB_r226_MGTK/markerGenes	#Updated by get_gtdb.pl
+GTDB_GTDB	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb_r226_lineageGTDB.tab	#Updated by get_gtdb.pl
+GTDB_lnks	[DBDir]//MarkerG/GTDB_r226_MGTK/gtdb_r226_clustering.tab	#Updated by get_gtdb.pl
 #GTDB_cutoff	[DBDir]/MarkerG/GTDB_r207v2_MF/markerGenes/cutoffs.txt
 GTDB_cutoff	[MFLRDir]/data/GTDBcutoffs.txt
 
@@ -93,4 +93,4 @@ specI_cutoff	[DBDir]/MarkerG/proGenomes3/markerGenes/cutoffs.txt
 
 
 #structural profiling via foldseek
-PtostT5_Weights	[MFLRDir]/data/DBs/PtostT5_W
+PtostT5_Weights	[DBDir]/PtostT5_W

@@ -893,6 +893,11 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($closedSample) {
 		$loopSampleCompleted{$JNUM} = 1;
 		my $status = $closedSample->{outcome}{status};
+		# A completed member of a shared assembly skips read registration. If the
+		# group assembly has to be (re)built in this pass, this sentinel is stale
+		# and the build must wait for it (deferGroupAssemblyForClosedMembers).
+		push @{$AsGrps{$cAssGrp}{ClosedCompleted}}, $curOutDir
+			if $status eq 'completed' && ($AsGrps{$cAssGrp}{CntAimAss} || 0) > 1;
 		# This member already advanced CntAss, but will skip prepPreAssmbl.
 		# Preserve its exclusion from preassembly even when it is not last.
 		if ($MFopt{DoAssembly} == 5
@@ -1139,6 +1144,15 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		print "Deleting previous results.. rerun MATAFILER for sample\n";
 		system ("rm -r -f $asmDir $finalCommAssDir");
 		system("rm -f -r $curOutDir $smplTmpDir $MFglobal{collectFinished} ");
+		if (($AsGrps{$cAssGrp}{CntAimAss} || 0) > 1) {
+			# The shared assembly is gone: every member has to be processed again
+			# so that the rebuild uses all of their reads.
+			my $reopened = 0;
+			$reopened += invalidate_sample_completion($_)
+				for grep { -d $_ } @{assembly_group_output_dirs(\%map, $cAssGrp)};
+			print "Reopened $reopened completed member(s) of assembly group $cAssGrp for the rebuild\n"
+				if $reopened;
+		}
 		#next; #too deep, needs a complete new round over dir..
 		#$efinAssLoc = 0;	$eFinMapCovGZ = 0;	
 		$efinAssLoc =0 ;  $dfinalCommAssDir =0;
@@ -1689,11 +1703,17 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			my $releaseName = $SmplName . "M" . $AsGrps{$cAssGrp}{CntAss};
 			print "Final assembly-group member $curSmpl is terminally empty; "
 				."releasing the shared assembly from earlier eligible members\n";
-			my $externalScaffoldingDeps = metagAssemblyRun(
-				$cAssGrp, "$nodeSpTmpD/ass", $metagAssDir, $geneDir, $releaseName,
-				0, $metaGscaffDir, $assemblyFlag, $AssemblyGo, $ePreAssmbly,
-				$doPreAssmFlag, $postPreAssmblGo, $finalCommAssDir,
-			);
+			my $externalScaffoldingDeps = "";
+			# same subset guard as the ordinary assembly start below; a deferred
+			# release leaves this terminal member open (no assembly job yet)
+			unless ($assemblyFlag && !($MFopt{DoAssembly} == 5 && $doPreAssmFlag)
+					&& deferGroupAssemblyForClosedMembers($cAssGrp)) {
+				$externalScaffoldingDeps = metagAssemblyRun(
+					$cAssGrp, "$nodeSpTmpD/ass", $metagAssDir, $geneDir, $releaseName,
+					0, $metaGscaffDir, $assemblyFlag, $AssemblyGo, $ePreAssmbly,
+					$doPreAssmFlag, $postPreAssmblGo, $finalCommAssDir,
+				);
+			}
 			add2SampleDeps(\@sampleDeps, [$externalScaffoldingDeps]) if $externalScaffoldingDeps;
 			my $assemblyReleased = $AsGrps{$cAssGrp}{AssemblJobName} =~ /\S/;
 			if ($assemblyReleased) {
@@ -1985,6 +2005,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($assemblyFlag && deferLoopProducerWave(
 			'input preparation', $sdmjN, $smplLockF, $cAssGrp, \@sampleDeps,
 	)) { next; }
+	# Never build a shared assembly from a subset of its members: members that
+	# took the completed fast path in this pass registered no reads.
+	if ($AssemblyGo && $assemblyFlag && !($MFopt{DoAssembly} == 5 && $doPreAssmFlag)
+			&& deferGroupAssemblyForClosedMembers($cAssGrp)) {
+		$AssemblyGo = 0;
+	}
 	if ($AssemblyGo && deferLoopProducerWave(
 			'assembly-group input preparation', $AsGrps{$cAssGrp}{SeqClnDeps},
 			$smplLockF, $cAssGrp, \@sampleDeps,
@@ -3500,6 +3526,20 @@ sub loop2C_check(){
 
 		}
 	}
+}
+
+sub deferGroupAssemblyForClosedMembers {
+	my ($grp) = @_;
+	my @closed = @{$AsGrps{$grp}{ClosedCompleted} || []};
+	return 0 unless @closed;
+	# Their sentinels claim completion against an assembly that no longer
+	# exists; reopen them so the next pass registers their reads.
+	invalidate_sample_completion($_) for grep { -d $_ } @closed;
+	$AsGrps{$grp}{ClosedCompleted} = [];
+	print "Assembly group $grp must be rebuilt, but ".scalar(@closed)." member(s) were closed as complete in this pass "
+		."and registered no reads. Reopened them; the group assembly starts on the next pass "
+		."(rerun MATAFILER, or use -loopTillComplete).\n";
+	return 1;
 }
 
 sub resetLoopPassProgStats {
@@ -6461,11 +6501,29 @@ sub sdmClean(){
 		push @libraryArgs, ('-illuminaClip', 1) if ($MFopt{trimAdapters} && !$isLong);
 		my $suffix = $i == 0 ? '' : ".lib$i";
 		my $prefix = "$finD$baseFname$suffix";
-		my $hasPair = ($library->{files}{r1} || '') ne '';
-		my $singleInput = $library->{files}{bam} || $library->{files}{single} || '';
+		# A paired SAM/BAM/CRAM is read by sdm as true pairs (-paired 2). sdm needs
+		# query-name order with adjacent mates; other orders are name-sorted first.
+		my $pairedAlignment = ($library->{files}{bam} || '') ne ''
+			&& ($library->{metadata}{alignment_layout} || '') eq 'paired';
+		my $hasPair = ($library->{files}{r1} || '') ne '' || $pairedAlignment;
+		my $pairInput = $pairedAlignment ? $library->{files}{bam}
+			: $hasPair ? "$library->{files}{r1},$library->{files}{r2}" : '';
+		my $singleInput = $pairedAlignment ? ''
+			: ($library->{files}{bam} || $library->{files}{single} || '');
 		my $hasSingle = $singleInput ne '';
+		my $byNameBam = '';
+		if ($pairedAlignment && !$library->{metadata}{alignment_name_sorted}) {
+			$byNameBam = "$prefix.byname.bam";
+			$cmd .= _shell_command('rm', '-f', '--', $byNameBam)."\n";
+			$cmd .= _shell_command(getProgPaths("samtools"), 'sort', '-n',
+				'-@', $integerSetting{sdmCores}, '-T', "$prefix.byname.tmp", '-o', $byNameBam,
+				($library->{metadata}{cram_reference} ? ('--reference', $library->{metadata}{cram_reference}) : ()),
+				$library->{files}{bam})."\n";
+			$pairInput = $byNameBam;
+		}
 		push @libraryArgs, ('-cramRef', $library->{metadata}{cram_reference})
-			if $library->{files}{bam} && $library->{metadata}{cram_reference};
+			if $library->{files}{bam} && $library->{metadata}{cram_reference}
+				&& $byNameBam eq ''; # the name-sorted copy is BAM and needs no decode reference
 		my ($outR1, $outR2, $outSingle) = ('', '', '');
 		my $logSuffix = $i == 0 ? '' : ".$i";
 
@@ -6475,11 +6533,12 @@ sub sdmClean(){
 			$outSingle = "$prefix.singl.$fEnd";
 			$cmd .= _shell_command('rm', '-f', '--', $outR1, $outR2, $outSingle)."\n";
 			$cmd .= _shell_command(
-				$sdmBin, '-i', "$library->{files}{r1},$library->{files}{r2}",
+				$sdmBin, '-i', $pairInput,
 				'-o_fastq', "$outR1,$outR2", '-options', $sdmPairOpt,
 				'-paired', 2, @sdmExtra, '-log', "$sdmLogDir/$logStem$logSuffix.log",
 				@libraryArgs, @sdmCut,
 			)."\n";
+			$cmd .= _shell_command('rm', '-f', '--', $byNameBam)."\n" if $byNameBam ne '';
 			# sdm writes one singleton file per mate ($prefix.1/.2.singl.*). A wider glob
 			# ($prefix.*.singl.*) also swallows the other libraries' and the support
 			# scope's final singleton files in the same directory (duplicated reads).
@@ -6878,7 +6937,7 @@ sub alignmentFileStamp {
 }
 
 sub alignmentCacheIdentity {
-	my ($source, $reference, $samtools) = @_;
+	my ($source, $reference, $samtools, $paired) = @_;
 	my @inputs = ($source);
 	push @inputs, $reference, "$reference.fai" if $reference ne '';
 	my %stamps;
@@ -6887,9 +6946,50 @@ sub alignmentCacheIdentity {
 		die "Missing alignment input or indexed CRAM reference: $path\n" if $stamps{$path} eq '';
 	}
 	return (completion_request_signature({
-		protocol => 'singleton-fastq-v1', inputs => \%stamps,
+		# a paired file's cache holds every mate; older (empty) caches are rebuilt
+		protocol => ($paired ? 'interleaved-fastq-v1' : 'singleton-fastq-v1'), inputs => \%stamps,
 		samtools => $samtools, executable => alignmentFileStamp($samtools),
 	}), \%stamps);
+}
+
+# Layout of an alignment input: paired (first primary record has FLAG 0x1) and
+# whether the header declares query-name order, which sdm needs for pairs.
+# SAM text is read directly; BAM/CRAM through `samtools view`. Cached per file state.
+sub alignmentInputLayout {
+	my ($source, $reference) = @_;
+	our %alignmentLayoutCache;
+	$reference //= '';
+	my $key = join("\0", $source, alignmentFileStamp($source), $reference);
+	return $alignmentLayoutCache{$key} if $alignmentLayoutCache{$key};
+	my ($header, $flag) = ('', undef);
+	if ($source =~ /\.sam$/i) {
+		open my $fh, '<', $source or die "Cannot read alignment input $source: $!\n";
+		while (my $line = <$fh>) {
+			if ($line =~ /^\@/) { $header .= $line; next; }
+			my @fields = split /\t/, $line;
+			next if @fields < 11 || $fields[1] !~ /^\d+$/ || ($fields[1] & 0x900);
+			$flag = $fields[1];
+			last;
+		}
+		close $fh;
+	} else {
+		my $samtools = getProgPaths("samtools");
+		my @ref = $reference ne '' ? ('--reference', $reference) : ();
+		open my $hfh, '-|', $samtools, 'view', '-H', @ref, $source
+			or die "Cannot run samtools on $source: $!\n";
+		$header = do { local $/; <$hfh> } // '';
+		close $hfh or die "samtools could not read the header of alignment input $source\n";
+		open my $rfh, '-|', $samtools, 'view', '-F', '0x900', @ref, $source
+			or die "Cannot run samtools on $source: $!\n";
+		my $line = <$rfh>;
+		close $rfh; # stopping after one record ends samtools with SIGPIPE
+		$flag = (split /\t/, $line)[1] if defined $line;
+		$flag = undef if defined($flag) && $flag !~ /^\d+$/;
+	}
+	return $alignmentLayoutCache{$key} = {
+		paired => (defined($flag) && ($flag & 1)) ? 1 : 0,
+		name_sorted => ($header =~ /^\@HD\t[^\n]*\bSO:queryname\b/m) ? 1 : 0,
+	};
 }
 
 sub alignmentCacheComplete {
@@ -6902,15 +7002,20 @@ sub alignmentCacheComplete {
 }
 
 sub alignmentFastqCommand {
-	my ($source, $reference, $samtools, $cores, $output) = @_;
-	return _shell_command($samtools, 'fastq', '-@', $cores, '-t',
-		'-0', $output, '-1', '/dev/null', '-2', '/dev/null',
+	my ($source, $reference, $samtools, $cores, $output, $paired) = @_;
+	# Paired input: all READ1/READ2 records go to one stream (names get /1 and /2;
+	# without -s no pairing check drops unmatched mates). Raw-read consumers map
+	# them as unpaired reads; quality filtering (sdmClean) reads true pairs.
+	my @outputs = $paired
+		? ('-o', $output, '-0', '/dev/null')
+		: ('-0', $output, '-1', '/dev/null', '-2', '/dev/null');
+	return _shell_command($samtools, 'fastq', '-@', $cores, '-t', @outputs,
 		($reference ne '' ? ('--reference', $reference) : ()), $source);
 }
 
 sub alignmentCacheCommand {
-	my ($source, $reference, $samtools, $cores, $cache) = @_;
-	my ($signature, $stamps) = alignmentCacheIdentity($source, $reference, $samtools);
+	my ($source, $reference, $samtools, $cores, $cache, $paired) = @_;
+	my ($signature, $stamps) = alignmentCacheIdentity($source, $reference, $samtools, $paired);
 	my $guard = '';
 	for my $path (sort keys %{$stamps}) {
 		$guard .= '[ "$(stat -Lc '. _shell_quote('%i:%s:%Y:%Z').' -- '._shell_quote($path)
@@ -6929,7 +7034,7 @@ sub alignmentCacheCommand {
 	$cmd .= _shell_command('mkdir', '-p', '--', dirname($cache))."\n";
 	$cmd .= _shell_command('rm', '-f', '--', "$cache.source.stone")."\n";
 	$cmd .= 'trap '._shell_quote(_shell_command('rm', '-f', '--', $partial, $markerPartial))." EXIT\n";
-	$cmd .= alignmentFastqCommand($source, $reference, $samtools, $cores, $partial)."\n";
+	$cmd .= alignmentFastqCommand($source, $reference, $samtools, $cores, $partial, $paired)."\n";
 	$cmd .= _shell_command('gzip', '-t', '--', $partial)."\n".$guard;
 	$cmd .= _shell_command('mv', '-f', '--', $partial, $cache)."\n";
 	$cmd .= '{ '._shell_command('printf', '%s\n', $signature).'; stat -Lc '
@@ -6945,14 +7050,15 @@ sub alignmentMappingCommand {
 	my ($library, $mapper, $reference, $samtools, $cache, $command) = @_;
 	my $source = $library->{files}{bam};
 	my $cramRef = $library->{metadata}{cram_reference} || '';
+	my $paired = ($library->{metadata}{alignment_layout} || '') eq 'paired';
 	my $stdin = $mapper == 4 ? '--' : '-';
 	die "Alignment streaming is not supported for mapper $mapper\n"
 		unless $mapper == 1 || $mapper == 3 || $mapper == 4 || $mapper == 5;
 	my $stream = 'mf4_alignment_input='._shell_quote($stdin)."\n"
-		.alignmentFastqCommand($source, $cramRef, $samtools, 0, '-').' | '.$command;
+		.alignmentFastqCommand($source, $cramRef, $samtools, 0, '-', $paired).' | '.$command;
 	my $cmd = "(\nset -eo pipefail\n";
 	if ($mapper == 3) {
-		my ($cacheCmd) = alignmentCacheCommand($source, $cramRef, $samtools, 0, $cache);
+		my ($cacheCmd) = alignmentCacheCommand($source, $cramRef, $samtools, 0, $cache, $paired);
 		my $qref = _shell_quote($reference);
 		$cmd .= 'if [ -f '.$qref.' ] && [ "$(head -c 1 -- '.$qref.')" = ">" ]'
 			.' && [ "$(stat -Lc %s -- '.$qref.')" -le 1000000000 ]; then'."\n";
@@ -7233,7 +7339,7 @@ sub seedUnzip2tmp{
 	
 	my $primarySingleSourceCount = scalar(@pas);
 	my $supportSingleSourceCount = scalar(@paXs);
-	my (%alignmentReferences, %alignmentCacheUse);
+	my (%alignmentReferences, %alignmentCacheUse, %alignmentLayouts);
 	my $alignmentCachesComplete = 1;
 	for my $scope ('primary', 'support') {
 		my $sources = $scope eq 'primary' ? \@sourcePaBam : \@paBamX;
@@ -7251,9 +7357,17 @@ sub seedUnzip2tmp{
 			my $cache = outfiles_Bam($dir, basename($source));
 			push @{$singles}, $cache;
 			push @{$sourceSingles}, $cache;
+			my $layout = alignmentInputLayout($source, $reference);
+			$alignmentLayouts{$scope}{$source} = $layout;
+			# Uploads need R1/R2 files; the raw cache of a paired alignment holds
+			# interleaved mates and would be uploaded as single-end reads.
+			die "Upload preparation (-uploadRawRds) does not support paired alignment input ($source); "
+				."convert it to paired FASTQ first\n"
+				if $layout->{paired} && $alignmentPolicy->{upload};
 			my $cacheRequired = alignmentCacheRequired($alignmentPolicy, $scope);
 			next unless $cacheRequired || -s "$cache.source.stone";
-			my ($cacheCmd, $complete) = alignmentCacheCommand($source, $reference, getProgPaths('samtools'), $numCore, $cache);
+			my ($cacheCmd, $complete) = alignmentCacheCommand($source, $reference, getProgPaths('samtools'), $numCore, $cache,
+				$layout->{paired});
 			# Keep using a valid cache from an earlier workflow wave, even if
 			# only one mapping pass remains now.
 			next unless $cacheRequired || $complete;
@@ -7524,6 +7638,9 @@ sub seedUnzip2tmp{
 			$lib->{source_files}{bam} = $sources->[$i];
 			$lib->{metadata}{alignment_cache_required} = $alignmentCacheUse{$scope}{$sources->[$i]} ? 1 : 0;
 			$lib->{metadata}{cram_reference} = $alignmentReferences{$scope};
+			my $layout = $alignmentLayouts{$scope}{$sources->[$i]} || {};
+			$lib->{metadata}{alignment_layout} = $layout->{paired} ? 'paired' : 'single';
+			$lib->{metadata}{alignment_name_sorted} = $layout->{name_sorted} ? 1 : 0;
 		}
 	}
 	%seqSet = (libraries => [@{$primaryLibraries}, @{$supportLibraries}],
@@ -8262,7 +8379,8 @@ sub mapReadsToRef{
 			my $cache = $lib->{metadata}{alignment_cache_required}
 				? $paS[$i] : "$nodeTmp/alignment.$i.fq.gz";
 			my ($cacheCmd) = alignmentCacheCommand($lib->{files}{bam},
-				$lib->{metadata}{cram_reference} || '', $smtBin, 0, $cache);
+				$lib->{metadata}{cram_reference} || '', $smtBin, 0, $cache,
+				($lib->{metadata}{alignment_layout} || '') eq 'paired');
 			$algCmd .= $cacheCmd;
 			$paS[$i] = $cache;
 		} else {
@@ -11849,7 +11967,7 @@ sub getCmdLineOptions{
 		"inputFQregex2=s" => \$MFconfig{rawFileSrchStr2}, #regex for detecting read pair 2 in input fastq files
 		"inputFQregexSingle=s" => \$MFconfig{rawFileSrchStrSingl}, #regex for detecting single end reads in input fastq files
 		"inputFQregexTrustSingle=i" => \$MFconfig{prefSinglFQgreps} , #if grep of files (rawSrchString) has multi assignments, which grep to trust more?
-		"inputBAMregex=s" => \$MFconfig{rawFileBamSrchSing}, #singleton SAM/BAM/CRAM inputs
+		"inputBAMregex=s" => \$MFconfig{rawFileBamSrchSing}, #singleton or paired SAM/BAM/CRAM inputs
 		"inputCramReference=s" => \$MFconfig{inputCramReference}, #indexed decode reference, independent of mapping target
 		"inputCramReferenceSuppl=s" => \$MFconfig{inputCramReferenceSuppl}, #support decode reference; defaults to primary
 		"splitFastaInput=i" => \$MFconfig{splitFastaInput},

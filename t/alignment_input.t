@@ -9,6 +9,7 @@ use File::Find ();
 use Cwd qw(abs_path);
 use FindBin qw($Bin);
 use List::Util qw(max sum);
+use IO::Uncompress::Gunzip ();
 use lib "$Bin/..", "$Bin/lib";
 use MFTestConfig;
 use Mods::SampleCompletion qw(completion_request_signature);
@@ -24,7 +25,7 @@ my $sourceText = read_file("$Bin/../MATAF4.pl");
 our (%MFconfig, %MFopt, %map, %AsGrps, %MFcontstants, %HDDspace, %make2ndMapDecoy, %map2ndTogRefDB);
 our ($curSmpl, $QSBoptHR, $logDir, $JNUM, $pigzBin, $smtBin);
 for my $name (qw(_shell_quote _shell_command _staged_read_files_present _validate_sdm_integer_setting
-    outfiles_Bam alignmentCacheRequired alignmentFileStamp alignmentCacheIdentity alignmentCacheComplete
+    outfiles_Bam alignmentCacheRequired alignmentFileStamp alignmentCacheIdentity alignmentCacheComplete alignmentInputLayout
     alignmentFastqCommand alignmentCacheCommand alignmentMappingCommand complexGunzCpMv
     discoverSampleInputs seedUnzip2tmp sdmClean getAlgnCmdBase mapReadsToRef)) {
     my ($body) = $sourceText =~ /(^sub \Q$name\E[^\n]*\{.*?^\})/ms;
@@ -48,12 +49,17 @@ sub slurp_raw { my ($path) = @_; open my $fh, '<:raw', $path or die "$path: $!";
 sub value_after { my ($flag) = @_; for my $i (0 .. $#args - 1) { return $args[$i + 1] if $args[$i] eq $flag; } die "missing $flag\n"; }
 binmode STDOUT;
 if ($args[0] eq 'cat') { print slurp_raw($_) for @args[1 .. $#args]; exit 0; }
+# layout probe on non-SAM fixtures: no header, no records (i.e. a singleton file)
+if ($args[0] eq 'view') { exit 0; }
 die "unexpected samtools mode $args[0]\n" unless $args[0] eq 'fastq';
-die "-1 must be /dev/null\n" unless value_after('-1') eq '/dev/null';
-die "-2 must be /dev/null\n" unless value_after('-2') eq '/dev/null';
+my $interleaved = grep { $_ eq '-o' } @args;
+unless ($interleaved) {
+    die "-1 must be /dev/null\n" unless value_after('-1') eq '/dev/null';
+    die "-2 must be /dev/null\n" unless value_after('-2') eq '/dev/null';
+}
 open my $log, '>>', $ENV{EXTRACTION_LOG} or die $!; print {$log} "extract\n"; close $log;
 my $data = slurp_raw($args[-1]);
-my $out = value_after('-0');
+my $out = value_after($interleaved ? '-o' : '-0');
 if ($out eq '-') { print $data; }
 else { gzip(\$data => $out) or die "gzip failed: $GzipError\n"; }
 exit 17 if $ENV{EXTRACTION_FAIL};
@@ -311,5 +317,69 @@ SKIP: {
     ok(-s "$tmp/real-clean/filtered.s.fq.gz",'real SDM produces expected filtered output');
     ok(-e "$tmp/real-clean/filterDone.stone",'real SDM publishes normal filtering checkpoint');
     ok(!-e "$tmp/never-created.fq.gz",'real SDM needs no extraction cache');
+}
+
+# Paired alignment input: layout detection, raw extraction keeps every mate,
+# and quality filtering reads true pairs with sdm -paired 2.
+{
+    my $seq='ACGTTGCAAGTC' x 34;
+    my $qual='I' x length($seq);
+    my $pairs = join('', map { "p$_\t77\t*\t0\t0\t*\t*\t0\t0\t$seq\t$qual\np$_\t141\t*\t0\t0\t*\t*\t0\t0\t$seq\t$qual\n" } 1..3);
+    my $sorted = "$tmp/pairs.byname.sam";
+    write_file($sorted, "\@HD\tVN:1.6\tSO:queryname\n$pairs");
+    my $unsorted = "$tmp/pairs.unsorted.sam";
+    write_file($unsorted, "\@HD\tVN:1.6\tSO:unsorted\n$pairs");
+    my $single = "$tmp/single.sam";
+    write_file($single, "\@HD\tVN:1.6\tSO:unknown\nr1\t4\t*\t0\t0\t*\t*\t0\t0\t$seq\t$qual\n");
+    is_deeply(alignmentInputLayout($sorted, ''), {paired=>1,name_sorted=>1}, 'name-sorted paired SAM is detected');
+    is_deeply(alignmentInputLayout($unsorted, ''), {paired=>1,name_sorted=>0}, 'unsorted paired SAM is detected');
+    is_deeply(alignmentInputLayout($single, ''), {paired=>0,name_sorted=>0}, 'singleton SAM stays single');
+    write_file("$tmp/secondary-first.sam", "\@HD\tVN:1.6\n".
+        "p0\t256\tref\t1\t0\t4M\t*\t0\t0\tACGT\tIIII\n$pairs");
+    is(alignmentInputLayout("$tmp/secondary-first.sam", '')->{paired}, 1, 'secondary records are ignored by the probe');
+
+    my $raw = alignmentFastqCommand($sorted, '', $fakeSamtools, 0, '-', 1);
+    like($raw, qr/'-o' '-' '-0' '\/dev\/null'/, 'raw extraction of a paired file writes every mate to one stream');
+    unlike($raw, qr/'-1' '\/dev\/null'/, 'paired mates are no longer discarded');
+    isnt((alignmentCacheIdentity($sorted, '', $fakeSamtools, 1))[0], (alignmentCacheIdentity($sorted, '', $fakeSamtools, 0))[0],
+        'caches made before paired support (without mates) are rebuilt');
+
+    my $pairedLib = sub {
+        my ($file, $isSorted) = @_;
+        return newReadLibrary(id=>'pairedbam',sample=>'sample',scope=>'primary',phase=>'staged',technology=>'hiSeq',label=>'pairedbam',
+            files=>{single=>"$tmp/never-created-paired.fq.gz",bam=>$file},
+            metadata=>{alignment_layout=>'paired', alignment_name_sorted=>$isSorted});
+    };
+    sampleReadSet('sample','raw',{libraries=>[$pairedLib->($unsorted, 0)],samplReadLength=>length($seq)});
+    sampleReadSet('sample','clean',iniCleanSeqSetHR(sampleReadSet('sample','raw')));
+    @submissions=();
+    sdmClean("$tmp/result","$tmp/unsorted-clean",'',1,0);
+    my $cmd = $submissions[0][1];
+    like($cmd, qr/'sort' '-n' .*'-o' '\Q$tmp\/unsorted-clean\/filtered.byname.bam\E'.* '\Q$unsorted\E'/,
+        'a paired file without query-name order is name-sorted first');
+    like($cmd, qr/'-i' '\Q$tmp\/unsorted-clean\/filtered.byname.bam\E' '-o_fastq' '[^']*filtered\.1\.fq\.gz,[^']*filtered\.2\.fq\.gz' .*'-paired' '2'/,
+        'sdm reads the name-sorted copy as pairs');
+    like($cmd, qr/'rm' '-f' '--' '\Q$tmp\/unsorted-clean\/filtered.byname.bam\E'/, 'the name-sorted copy is removed afterwards');
+    my $clean = sampleReadSet('sample','clean');
+    ok(grep({ ($_->{files}{r1}||'') =~ /filtered\.1\.fq/ && ($_->{files}{r2}||'') =~ /filtered\.2\.fq/ } @{$clean->{libraries}}),
+        'the cleaned library is a paired FASTQ library');
+
+    SKIP: {
+        skip 'bundled SDM executable unavailable', 4 unless -x $progs{sdm};
+        sampleReadSet('sample','raw',{libraries=>[$pairedLib->($sorted, 1)],samplReadLength=>length($seq)});
+        sampleReadSet('sample','clean',iniCleanSeqSetHR(sampleReadSet('sample','raw')));
+        @submissions=();
+        sdmClean("$tmp/result","$tmp/paired-clean",'',1,0);
+        unlike($submissions[0][1], qr/'sort'/, 'a query-name sorted file is passed to sdm unchanged');
+        is(run_command($submissions[0][1]),0,'real SDM cleans a paired SAM with the generated command');
+        my $count_records = sub {
+            my ($file) = @_;
+            my $text = '';
+            IO::Uncompress::Gunzip::gunzip($file => \$text, MultiStream => 1) or return -1;
+            return scalar(() = $text =~ /^\+$/mg);
+        };
+        is($count_records->("$tmp/paired-clean/filtered.1.fq.gz"), 3, 'all read-1 mates reach filtered.1');
+        is($count_records->("$tmp/paired-clean/filtered.2.fq.gz"), 3, 'all read-2 mates reach filtered.2');
+    }
 }
 done_testing();
