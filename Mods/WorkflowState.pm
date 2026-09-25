@@ -185,6 +185,10 @@ sub inspect_workflow_state {
 	my $map_support_to_assembly = exists($options->{map_support_to_assembly})
 		? ($options->{map_support_to_assembly} ? 1 : 0) : 1;
 	my $run_tmp_dir = _normalise_path($options->{run_tmp_dir} || '');
+	# With -mapSaveCRAM 0 and a binner, finished-sample cleanup removes the CRAM
+	# on purpose; the mapping stage is then judged by its coverage products only.
+	my $mapping_cram_kept = exists($options->{mapping_cram_kept})
+		? ($options->{mapping_cram_kept} ? 1 : 0) : 1;
 	my @sample_order = @{$map->{opt}{smpl_order} || []};
 
 	my %group_members;
@@ -270,28 +274,26 @@ sub inspect_workflow_state {
 		) : _not_applicable_state();
 		my $preassembly_package = _not_applicable_state();
 		if ($hybrid && $has_primary_reads) {
-			if ($run_tmp_dir ne '') {
-				my $package_dir = _join_path($run_tmp_dir, $sample_id, "preAssmblGrp_$group_id");
-				$preassembly_package = _stage_state(
-					artifacts => [
-						_join_path($package_dir, 'scaffolds.fasta.filt'),
-						_join_path($package_dir, 'mapping.coverage.gz'),
-						_join_path($package_dir, 'package.manifest.tsv'),
-					],
-					gzip_artifacts => [
-						_join_path($package_dir, 'Coverage.percontig'),
-						_join_path($package_dir, 'Coverage.median.percontig'),
-						_join_path($package_dir, 'breakpoints.tsv'),
-					],
-					markers => [_join_path($package_dir, 'moved.sto')],
-				);
-			} else {
-				$preassembly_package = _unknown_state('INSPECTION_PATH_UNAVAILABLE');
-			}
+			# MATAF4 keeps the per-sample hybrid handoff package under the sample
+			# output ("<wrdir>/assemblies/preAssmblGrp_<group>/"), not in run scratch.
+			my $package_dir = _join_path($output_dir, 'assemblies', "preAssmblGrp_$group_id");
+			$preassembly_package = _stage_state(
+				artifacts => [
+					_join_path($package_dir, 'scaffolds.fasta.filt'),
+					_join_path($package_dir, 'mapping.coverage.gz'),
+					_join_path($package_dir, 'package.manifest.tsv'),
+				],
+				gzip_artifacts => [
+					_join_path($package_dir, 'Coverage.percontig'),
+					_join_path($package_dir, 'Coverage.median.percontig'),
+					_join_path($package_dir, 'breakpoints.tsv'),
+				],
+				markers => [_join_path($package_dir, 'moved.sto')],
+			);
 		}
 		my $mapping = $map_to_assembly && $has_primary_reads ? _stage_state(
 			artifacts => [
-				_join_path($mapping_dir, "$sample_id-smd.cram"),
+				($mapping_cram_kept ? _join_path($mapping_dir, "$sample_id-smd.cram") : ()),
 				_join_path($mapping_dir, "$sample_id-smd.bam.coverage.gz"),
 				_join_path($mapping_dir, "$sample_id-smd.bam.breakpoints.tsv.gz"),
 			],
@@ -354,6 +356,7 @@ sub inspect_workflow_state {
 			assembly_requested => $assembly_requested,
 			map_to_assembly => $map_to_assembly,
 			map_support_to_assembly => $map_support_to_assembly,
+			mapping_cram_kept => $mapping_cram_kept,
 			run_tmp_dir => $run_tmp_dir,
 		},
 		summary => {

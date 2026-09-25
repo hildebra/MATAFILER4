@@ -280,7 +280,7 @@ Typical durable outputs are:
 
 | Function | Per-sample or source output | Run-level output |
 |---|---|---|
-| RiboFind | `<sample>/ribos/` | `pseudoGC/Phylo/RiboFind/SSU.miTag.<rank>.txt` and `LSU.miTag.<rank>.txt` |
+| RiboFind | `<sample>/ribos/` | `pseudoGC/Phylo/RiboFind/SSU.miTag.<rank>.txt.gz` and `LSU.miTag.<rank>.txt.gz` |
 | Functional | `<sample>/diamond/` | `pseudoGC/FUNCT/<DB_alias>/` |
 | MetaPhlAn | `pseudoGC/Phylo/MP2/<sample>.MP2.txt` | `pseudoGC/Phylo/MePh.all.<rank>.mat` |
 | mOTUs | `pseudoGC/Phylo/mOTU2/<sample>.motu2.tab.gz` | `pseudoGC/Phylo/m2.motu.txt` and `m2.<rank>.txt` |

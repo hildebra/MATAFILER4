@@ -46,7 +46,7 @@ our @EXPORT_OK = qw(
 		readFasta ensureFastaIndex
 		writeFasta readFastHD splitFastas  renameFastaCnts renameFastqCnts
 		
-		readTabByKey convertNT2AA runDiamond median mean quantile
+		readTabByKey convertNT2AA median mean quantile
 		 );#Binning Related
 
 my %readDirectoryCache;
@@ -483,14 +483,29 @@ sub splitFastas($ $ $){
 		symlink $inF, $nFiles[-1] or die "Can't link $nFiles[-1] to $inF: $!\n";
 		return \@nFiles;
 	}
-	if (-e $nFiles[-1] && -e "$path/$inF2.".($num-1).".$num" && !-e "$path/$inF2.$num.$num"){
-		print "seems to exist already\n";
-		for (my $i=1;$i<$num;$i++){
-			push(@nFiles,"$path/$inF2.$i.$num");
+	# Reuse an existing split only when its stone (written last) records this
+	# exact input and every listed chunk is still present: a split interrupted
+	# mid-way or made from an earlier catalogue must not be accepted as complete.
+	my $splitStone = "$path/$inF2.$num.split.sto";
+	my @inStat = stat($inF);
+	my $inSig = join(':', $inStat[7] // -1, $inStat[9] // -1);
+	if (-e $splitStone && open(my $sfh, '<', $splitStone)) {
+		my $sig = <$sfh>; chomp($sig //= '');
+		my @prev = map { chomp; [split /\t/, $_, 2] } grep { /\S/ } <$sfh>;
+		close $sfh;
+		my $intact = @prev && !grep { !defined($_->[1]) || !-s $_->[0] || -s $_->[0] != $_->[1] } @prev;
+		if ($sig eq $inSig && $intact) {
+			print "seems to exist already\n";
+			return [map { $_->[0] } @prev];
 		}
-		return \@nFiles;
 	}
-	unlink $nFiles[-1] or die "Can't remove old split $nFiles[-1]: $!\n" if (-e $nFiles[-1]);
+	unlink $splitStone if (-e $splitStone);
+	if (opendir(my $dh, $path)) { # stale chunks of an earlier split with the same name
+		for my $old (grep { /^\Q$inF2\E\.\d+\.\Q$num\E$/ } readdir($dh)) {
+			unlink "$path/$old" or die "Can't remove old split $path/$old: $!\n";
+		}
+		closedir $dh;
+	}
 	open my $count_fh, '<', $inF or die "Can't open FASTA $inF: $!\n";
 	my $protN = 0;
 	while (my $line = <$count_fh>) { $protN++ if ($line =~ /^>/); }
@@ -510,9 +525,12 @@ sub splitFastas($ $ $){
 		}
 		print $out $l;
 	}
-	close I; close $out;
+	close I; close $out or die "Can't close FASTA split $nFiles[-1]: $!\n";
+	open my $sout, '>', $splitStone or die "Can't write $splitStone: $!\n";
+	print $sout "$inSig\n", map { "$_\t".(-s $_)."\n" } @nFiles; #chunk sizes: a damaged chunk forces a re-split
+	close $sout or die "Can't close $splitStone: $!\n";
 	return \@nFiles;
-	
+
 }
 
 

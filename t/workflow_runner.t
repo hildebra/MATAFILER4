@@ -51,8 +51,8 @@ my %options = (
 
 # A represents an interrupted hybrid packaging job. B is already complete and
 # must be preserved across subsequent loop iterations.
-my $package_a = "$run_tmp/A/preAssmblGrp_hybrid";
-my $package_b = "$run_tmp/B/preAssmblGrp_hybrid";
+my $package_a = "${sample_a}assemblies/preAssmblGrp_hybrid"; # durable per-sample handoff (MATAF4 metaGpreAssmblDir)
+my $package_b = "${sample_b}assemblies/preAssmblGrp_hybrid";
 write_file("$package_a/scaffolds.fasta.filt", ">partial\nACGT\n");
 write_file("$package_a/moved.sto", "done\n");
 write_file("$package_b/scaffolds.fasta.filt", ">complete\nACGT\n");

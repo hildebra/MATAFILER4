@@ -147,7 +147,7 @@ ok(grep($_ eq 'group:hybrid:submit:assembly',
 	'support mapping waits for final hybrid assembly');
 is_deeply([validate_workflow_plan($hybrid_plan)], [], 'hybrid dependency graph is valid');
 
-my $package_a = "$root/tmp/hybrid-run/A/preAssmblGrp_hybrid";
+my $package_a = "${hybrid_a}assemblies/preAssmblGrp_hybrid"; # durable per-sample handoff (MATAF4 metaGpreAssmblDir)
 write_file("$package_a/scaffolds.fasta.filt", ">preassembly\nACGT\n");
 write_file("$package_a/Coverage.percontig.gz", "coverage\n");
 write_file("$package_a/Coverage.median.percontig.gz", "median\n");

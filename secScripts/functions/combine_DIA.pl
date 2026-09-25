@@ -166,8 +166,8 @@ foreach my $DB (@DBs){
 						#print "$DiaCOGf\n";
 						my ($I,$ok) = gzipopen($DiaCOGf,"Diamond $DB out",0);
 						$didreadCOG=1;
-						if ($ok == 0){ 
-							$failC{$smpl}=1;
+						if ($ok == 0){
+							$failCOG{$smpl}=1; #marks this sample in the COG matrix
 							#remove stone so TAMOC can redo..
 							print "$smpl fail\n" if ($dieOnMissing);
 							system "rm -f $dir2rd/diamond/dia.$DB.blast.gz.stone";
@@ -189,13 +189,13 @@ foreach my $DB (@DBs){
 					#die "$DiaCATf\n";
 					next if ($DiaCATf eq "");
 					my ($I,$ok) = gzipopen($DiaCATf,"Diamond cat",0);
-					if (!$ok){ $failCOG{$smpl}=1;
+					if (!$ok){ $failC{$smpl}=1; #marks this sample in the category matrix
 						print "$smpl fail\n";
 						system "rm -f $dir2rd/diamond/dia.$DB.blast.gz.stone";
 					} else {
 						while (my $l = <$I>){
 							chomp $l;
-							next if (length($l) < 4);
+							next unless ($l =~ /\t/); #"J\t5" is a valid 3-character row
 							my @spl = split /\t/,$l;
 							#die "$l\n" unless ($spl[1] =~ m/^[\d\.]+$/);
 							#print "@spl\n";		die $l;

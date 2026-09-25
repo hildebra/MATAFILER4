@@ -51,6 +51,12 @@ ok(commands_are_lightweight_filesystem(
 	."sleep 1\nln -s /reads/a.fq.gz /tmp/sample/rawRds/a.fq.gz\n"
 	."touch /tmp/sample/rawRds/done.sto\n"
 ), 'lightweight UZ filesystem setup is safe to execute locally');
+ok(commands_are_lightweight_filesystem(
+	"'rm' '-f' '--' '/tmp/sample/rawRds/a.fq.gz'\nln -s /reads/a.fq.gz /tmp/sample/rawRds/a.fq.gz;\n"
+), 'quoted commands from _shell_command stay lightweight');
+ok(!commands_are_lightweight_filesystem(
+	"'pigz' '-d' '/reads/a.fq.gz'\n"
+), 'quoting does not make other programs lightweight');
 ok(!commands_are_lightweight_filesystem(
 	"mkdir -p /tmp/sample/rawRds\npigz -d -c /reads/a.fq.gz > /tmp/sample/rawRds/a.fq\n"
 ), 'decompression and redirection keep UZ work on the scheduler');

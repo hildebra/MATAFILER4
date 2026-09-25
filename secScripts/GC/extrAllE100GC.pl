@@ -67,7 +67,9 @@ if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 		my $SmplName = $map{$smpl}{SmplID};
 		#skip samples where no assembly happened..
 		if (-e "$map{$smpl}{wrdir}/SMPL.empty"){$cntSkips++;next;}
-		my $metaGD = getAssemblPath($map{$smpl}{wrdir});
+		# geneCat's collation tolerates unassembled samples (-requireAllAssemblies 0); do the same here
+		my $metaGD = getAssemblPath($map{$smpl}{wrdir},"",0);
+		if ($metaGD eq ""){$cntSkips++;next;}
 		next if (exists($seenAssembls{$metaGD}));
 		$seenAssembls{$metaGD} = 1;
 

@@ -508,8 +508,10 @@ sub jgi_depth_cmd{
 	my %seen_mapping;
 	my $isCram=0;
 	foreach my $DDI (@dirSS){
-		if (-f $DDI && $DDI =~ /\.(?:bam|cram)$/i) {
-			die "jgi_depth_cmd:::Empty mapping file $DDI\n" unless -s $DDI;
+		# A BAM/CRAM path may be produced by the same job this command is part of
+		# (MATAF4 mapping), so only an existing empty file is an error here.
+		if ($DDI =~ /\.(?:bam|cram)$/i) {
+			die "jgi_depth_cmd:::Empty mapping file $DDI\n" if -e $DDI && !-s $DDI;
 			push @mapping_files, $DDI unless $seen_mapping{$DDI}++;
 		} else {
 			$DDI =~ s{/$}{};

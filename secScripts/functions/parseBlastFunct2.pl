@@ -82,7 +82,7 @@ GetOptions(
 	"bacNOG=i" => \$useBacNOG,
 	"reportDomains=i" => \$writeFastaOut,
 	"NOGtaxChk=s" => \$checkTaxNog, 
-	"percID=i" => \$percID, #percent id similiarity, from 0 - 100
+	"percID=f" => \$percID, #percent id similiarity, from 0 - 100 (geneCat -FuncMinPerID is a float)
 ) or die("Error in command line arguments\n");
 
 die "queryType must be reads, genes, or merged\n" unless $queryType =~ /^(?:reads|genes|merged)$/;

@@ -276,8 +276,10 @@ sub ena_role {
 	my $name = basename($uri);
 	return 'r1' if $name =~ /(?:^|[_.])1(?:[_.]|\.f(?:ast)?q)/i;
 	return 'r2' if $name =~ /(?:^|[_.])2(?:[_.]|\.f(?:ast)?q)/i;
-	return 'r1' if $index == 0 && $count >= 2;
-	return 'r2' if $index == 1 && $count >= 2;
+	# Positional fallback only for exactly two unnamed mates: ENA lists
+	# SRRx.fastq.gz;SRRx_1..;SRRx_2.. for runs with an extra unpaired file.
+	return 'r1' if $index == 0 && $count == 2;
+	return 'r2' if $index == 1 && $count == 2;
 	return 'single';
 }
 

@@ -488,7 +488,7 @@ sub clusterMB2{
 	#next: sort by qual
 	print "Loaded ". scalar(keys %MAgene) . "/" . scalar(keys %MAGc) . " unique high-qual MAGs. Sorting.. \n";
 	
-	my @order ; my %loggedBins; my $ocnt = 0; my @tierSw;
+	my @order ; my %loggedBins; my $ocnt = 0; my %tierOf;
 	#my @orderPre = sort { $MAGc{$a} <=> $MAGc{$b} } keys(%MAGc);
 	for (my $T=0;$T<$maxRounds;$T++){
 		#foreach my $bin (@orderPre ){
@@ -500,7 +500,9 @@ sub clusterMB2{
 		my %subH = %MAGc{@{$Tiers{$T}}};
 		#print " subhash size: " . scalar(keys %subH); #DEBUG
 		push(@order, sort { $subH{$a} <=> $subH{$b} } keys(%subH));
-		push (@tierSw,$order[-1]);
+		# Threshold arrays are indexed by the MAG's own tier, also when an
+		# earlier tier is empty or a tier's last MAG leaves the loop early.
+		$tierOf{$_} = $T for keys %subH;
 		print parse_duration((time - $startTime)) .  " - Sorted T$T " . scalar(keys %subH) . " MAGs\n";
 	}
 	%loggedBins = (); %Tiers = ();#@orderPre = ();
@@ -511,6 +513,10 @@ sub clusterMB2{
 	
 	my $locT = 0; #needs to increase with bins..
 	foreach my $bin (@order){
+		if ($tierOf{$bin} != $locT){
+			$locT = $tierOf{$bin};
+			print "\n". parse_duration((time - $startTime)) . "  ------------------------ At Tier $locT ------------------------\n";
+		}
 		my $isCanopy = 0;
 		my ($BinHR,$BinMGHR,$ar,$arMG, $totGenes,$assignedGenes,$nonMGgene) = countUpBin($MAgene{$bin},1);
 		my %BinCnt = %{$BinHR};my %BinMGcnt = %{$BinMGHR};
@@ -573,7 +579,8 @@ sub clusterMB2{
 		push(@{$Bin2MAG{$BinNumL}}, $bin);$BinObs{$BinNumL} ++;
 		#my $genesInseted=0;my $newGene=0;
 		my %genesInBin;
-		foreach my $curGene (@{$MAgene{$bin}}){
+		# Empty entries only separate contigs (see gene2GCg2); countUpBin skips them too.
+		foreach my $curGene (grep { length } @{$MAgene{$bin}}){
 			$gen2Bin{$curGene}{$BinNumL}++;$genesInBin{$curGene} ++;
 		}
 		#print "\n$genesInseted : $HiCnt : $newGene : $unknwnFrac\n" if ($unknwnFrac < 0.7);
@@ -581,11 +588,6 @@ sub clusterMB2{
 			if ($genesInBin{$k} > 1){
 				$GeneMultCopy{$k} ++;
 			}
-		}
-		#time to increase tier??
-		if ($bin eq $tierSw[$locT]){
-			 $locT ++;
-			 print "\n". parse_duration((time - $startTime)) . "  ------------------------ At Tier $locT ------------------------\n";
 		}
 	}
 	$scnt++;		
@@ -627,13 +629,14 @@ sub clusterMB2{
 	foreach my $MGS (keys %Bin2MAG){
 		my @listMAGs = @{$Bin2MAG{$MGS}}; my $hiScore=0; my $hiMAG="";
 		foreach my $uniqMBid (@listMAGs){
-			my @CCs = @{$MAgene{$uniqMBid}};
+			my @CCs = grep { length } @{$MAgene{$uniqMBid}};
 			my $N=0; my $sum=0;
 			foreach my $gen (@CCs){
 				my $fac=1;
 				$fac=2 if (exists($gene2COG{$gen}));#bit higher weight on marker genes..
 				$sum+=$gen2Bin{$gen}{$MGS}*$fac;$N++;
 			}
+			next unless $N;
 			my $sco = $sum/$N / $BinObs{$MGS};# if (exists($BinObs{$MGS}));
 			$sco += (.01 * ($MAGq{$uniqMBid} - 2*$MAGc{$uniqMBid}));
 			if ($sco > $hiScore){

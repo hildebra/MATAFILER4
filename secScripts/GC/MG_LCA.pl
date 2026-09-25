@@ -130,9 +130,11 @@ sub submitJobs{
 		$ifna = "$MGdir/$COG.fa";
 		#die $ifna." $SpecID/$COG${xtrLab}.fna $tmpD/$COG${xtrLab}.tmp.m8\n";
 		my $m8file = "$tmpD/$COG${xtrLab}.tmp.m8";
-		system "rm $m8file" if ($redo);
 		my $CogTaxF = $ifna; $CogTaxF =~ s/\.fn?a$/\.LCA/;
-		unless (-e $CogTaxF || -e $m8file){
+		# Without the LCA output a leftover .m8 is from an interrupted (possibly
+		# partial) job; it must not block the retry of this COG.
+		unlink $m8file if (-e $m8file && ($redo || !-e $CogTaxF));
+		unless (-e $CogTaxF){
 			#print "XX\n";
 			$cmd .= "\n\n#At $COG\n";
 			$cmd .= lambdaBl($ifna,"$SpecID/$COG${xtrLab}.fna",$m8file,$cores,!$subm)."\n" unless (-e $CogTaxF || -e $m8file); #.rep

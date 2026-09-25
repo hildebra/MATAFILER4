@@ -434,7 +434,9 @@ my $invalidateMGSDerivatives = sub {
 		retry_unlink($checkpoint, label => 'invalidate downstream MGS checkpoint')
 			if -e $checkpoint;
 	}
-	for my $phyloDir ("$outD/between_phylo", "$outD/within_phylo") {
+	# The Mosaic catalogue is derived from the invalidated MGS clusters and is
+	# otherwise reused verbatim by strain_within.pl.
+	for my $phyloDir ("$outD/between_phylo", "$outD/within_phylo", "$outD/mosaic") {
 		remove_tree($phyloDir) if -d $phyloDir;
 	}
 };

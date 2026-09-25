@@ -43,8 +43,15 @@ if (!$doRewrite){
 #something needs to be done, rewriting file..
 my ($IN2,$OK2) = gzipopen($inF,"fastq file 4 upload");
 if (!$OK2){die "something wrong when opening $inF\n";}
-my $tmpF = $inF.".tmp.gz";
-my $OUT = gzipwrite($tmpF,"temp fastq file 4 upload");
+# keep the input's compression: the rewrite replaces $inF under its own name
+my $tmpF = $inF.".tmp";
+my $OUT;
+if ($inF =~ /\.gz$/) {
+	$tmpF .= ".gz";
+	$OUT = gzipwrite($tmpF,"temp fastq file 4 upload");
+} else {
+	open($OUT, '>', $tmpF) or die "Cannot write $tmpF: $!\n";
+}
 
 
 $lcnt  = 0;

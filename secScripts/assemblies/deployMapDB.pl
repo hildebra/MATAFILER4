@@ -141,6 +141,8 @@ for my $reference (@references) {
 close $database or die "Cannot close $output_db: $!\n";
 print "Skipped $skipped_records FASTA entries ($skipped_bases bp); added ".scalar(@references)." reference FASTA(s).\n";
 
-my ($build_command) = buildMapperIdx($output_db, $cores, 0, 0);
-system($build_command) == 0 or die "Mapper index construction failed\n";
+# MATAF4 maps decoy databases with bowtie2 (it expects $output_db.bw2.*.bt2).
+my ($build_command) = buildMapperIdx($output_db, $cores, 0, 1);
+!length($build_command) or system($build_command) == 0
+	or die "Mapper index construction failed\n";
 exit 0;

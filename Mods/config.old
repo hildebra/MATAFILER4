@@ -4,12 +4,12 @@
 ## base path to pipeline & DB & temp dirs - ESSENTIAL ##
 CONDcmd	micromamba
 CONDA	eval "$([CONDcmd] shell hook -s bash)"
-CONDAbaseEnv	MGTK
+CONDAbaseEnv	MF4
 
-MFLRDir	$MGTKDIR
-MGSTKDir	$MGTKDIR
+MFLRDir	$MF4DIR
+MGSTKDir	$MF4DIR
 BINDir	empty
-DBDir	empty
+DBDir	$MF4DIR/data/DBs/
 
 ## tmp space config, for copying files locally and to global available tmp/scratch dirs
 nodeTmpDir	$SLURM_LOCAL_SCRATCH/MFTK/

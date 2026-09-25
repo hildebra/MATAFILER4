@@ -94,7 +94,8 @@ if (!-e "$stone"){
 	} else { #useful if only one core used in main routine..
 		my $QSBoptHR = emptyQsubOpt(1,"");
 		#$QSBoptHR->{useLongQueue} = 1;
-		push(@{$QSBoptHR->{constraint}}, "sse4");
+		my $nodeConstraint = getProgPaths("avx2_constraint",0); #site-configurable, like the other rtk2/mmseqs jobs
+		push(@{$QSBoptHR->{constraint}}, $nodeConstraint) if ($nodeConstraint ne "");
 		$QSBoptHR->{useLongQueue} = 1;
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
 		my ($dep,$qcmd) = qsubSystem($c90d."decluter.sh",$cmd,$numCor,int($totMem)."G","declut","","",1,[],$QSBoptHR);

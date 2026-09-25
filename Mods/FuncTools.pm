@@ -242,25 +242,34 @@ sub assignFuncPerGene{
 	#die "$DBpath\n";
 	if ($exe && $DBpath ne "" ){
 		my $DBcmd = "";
+		# The .length table is read by parseBlastFunct2.pl (-LF) for every aligner;
+		# it must be produced also when the aligner's own index already exists.
+		my $lengthCmd = "";
 		unless (-e "$DBpath/$refDB.length"){
 			my $genelengthScript = getProgPaths("genelength_scr");#= "/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/geneLengthFasta.pl";
-			$DBcmd .= "$genelengthScript $DBpath$refDB $DBpath$refDB.length\n";
+			$lengthCmd = "$genelengthScript $DBpath$refDB $DBpath$refDB.length\n";
 		}
+		my @dbDeps;
 		if($aligner eq "diamond" ){
 			$DBcmd .= "$diaBin makedb --in $DBpath$refDB -d $DBpath$refDB.db -p $ncore\n" ;
 			if (!-e "$DBpath$refDB.db.dmnd" && $doQsub){
-				my ($jN, $tmpCmd) = qsubSystem($qsubDir."DiamondDBprep.sh",$DBcmd,$ncore,"16G","diaDB","","",1,[],$QSBoptHR);
-				$globalDiamondDependence = $jN;
+				my ($jN, $tmpCmd) = qsubSystem($qsubDir."DiamondDBprep.sh",$lengthCmd.$DBcmd,$ncore,"16G","diaDB","","",1,[],$QSBoptHR);
+				push @dbDeps, $jN; $lengthCmd = "";
 			}
-		} elsif ($aligner eq "foldseek" ){ 
+		} elsif ($aligner eq "foldseek" ){
 			if (!-e "$DBpath$refDB.DB3di"){
 				my $jns = buildFSdb("$DBpath$refDB", "$DBpath$refDB.DB3di",$ncore,$QSBoptHR,$qsubDir);
-				$globalDiamondDependence = $jns;
+				push @dbDeps, $jns;
 			}
 		} else {die"FuncTools.pm::assignFuncPerGene: Unknown aligner: $aligner\n";}
+		if ($doQsub && $lengthCmd ne ""){
+			my ($jL, $tmpCmd) = qsubSystem($qsubDir."DBlength.sh",$lengthCmd,1,"4G","dbLen","","",1,[],$QSBoptHR);
+			push @dbDeps, $jL;
+		}
+		$globalDiamondDependence = join(";", grep { defined($_) && $_ ne "" } @dbDeps);
 
 		if (!$doQsub){
-			systemW $DBcmd;
+			systemW $lengthCmd.$DBcmd;
 		}
 		#die "$DBcmd\n";
 	}
@@ -325,7 +334,10 @@ sub assignFuncPerGene{
 					? "$outD/DiaAs.sub.$i.$shrtDB.gz"
 					: "$tmpD3/DiaAs.sub.$i.$shrtDB.gz";
 				my $raw_out = "$tmpD3/foldseek.$i.m8";
-				$cmd .= "$FSbin easy-search $subFls[$i] $DBpath$refDB.DB3di $raw_out $tmpD3 --threads $ncore --prostt5-model $prst5W\n";
+				# BLAST-like columns: the default 3rd column (fident) is a 0-1 fraction,
+				# but parseBlastFunct2.pl compares it with -percID as a percentage
+				$cmd .= "$FSbin easy-search $subFls[$i] $DBpath$refDB.DB3di $raw_out $tmpD3 --threads $ncore --prostt5-model $prst5W"
+					." --format-output query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits\n";
 				$cmd .= "gzip -c $raw_out > $outF\nrm -f $raw_out\n";
 			} else {
 				#my $outF = "$GCd/DiaAssignment.sub.$i";

@@ -212,8 +212,8 @@ sub readMGS{
 			next if ($spl[0] eq "domain" || $spl[0] eq "user_genome");
 			my $id = shift @spl;
 			if (@spl == 1){
-				my $tmp=$spl[0]; $tmp =~ s/;;/;\?;/;$tmp =~ s/;$/;\?/;
-				@spl = split /;/,$tmp;
+				# every empty rank becomes "?" (a novel family leaves ";;;" in the middle)
+				@spl = map { (defined($_) && $_ ne '') ? $_ : '?' } split(/;/, $spl[0], -1);
 				push(@spl,"?") while (@spl < 7);
 			}
 			#@spl = fixGTDBtax(@spl) if ($doGTDBtax);

@@ -391,6 +391,9 @@ if (!$MFconfig{inspectState} && $runOptions{loopCount} && (
 		|| $MFopt{redoSNPcons} || $MFopt{redoSNPgene}
 		|| $MFopt{rewriteAllIfAnyDiamond} || $MFopt{rewriteDiamond}
 		|| $MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign}
+		# these also delete outputs on every pass, so a loop can never converge
+		|| $MFopt{rewriteGenePred} || $MFopt{MapRewrite2nd} || $MFopt{redoDiamondParse}
+		|| $MFopt{RedoKraken} || $MFconfig{redoCS} || $MFconfig{redoFails}
 	)) {
 	die "MATAFILER rewrite options cannot be combined with -loopTillComplete; " .
 		"disable rewrite options before starting a looped run.\n";
@@ -897,10 +900,20 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$AsGrps{$cAssGrp}{CntPreAssNoPrim} =
 				($AsGrps{$cAssGrp}{CntPreAssNoPrim} || 0) + 1;
 		}
-		my $riboEvidence = $closedSample->{components}{ribofind} || {};
-		$progStats{riboFindComplCnts}++
-			if $status eq 'completed' && $riboEvidence->{requested}
-				&& $riboEvidence->{complete};
+		# Closed samples never reach checkRawProgsFin, but still belong in the
+		# cohort-level merges (their counts decide when a merge is redone).
+		my $closedComplete = sub {
+			my $evidence = $closedSample->{components}{$_[0]} || {};
+			return $status eq 'completed' && $evidence->{requested} && $evidence->{complete};
+		};
+		$progStats{riboFindComplCnts}++ if $closedComplete->('ribofind');
+		$progStats{mOTU2ComplCnts}++ if $closedComplete->('motus');
+		$progStats{metaPhl2ComplCnts}++ if $closedComplete->('metaphlan');
+		$progStats{taxTarComplCnts}++ if $closedComplete->('taxa_target');
+		$progStats{protalComplCnts}++ if $closedComplete->('protal');
+		if ($closedComplete->('diamond')) {
+			$progStats{$_}{DiaDBSearchCompl}++ for split /,/, $MFopt{reqDiaDB};
+		}
 		my $completionMessage = $status eq 'completed'
 			? "Sample already complete; no jobs submitted\n"
 			: "Sample has terminal outcome $status; no jobs submitted\n";
@@ -1145,7 +1158,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			|| -e $CRAMmap || fileGZe("$finalMapDir/$SmplName-smd.bam.coverage.gz");
 		if (!$efinAssLoc && !$ePreAssmbly && $mappingArtifactsPresent){$locRedoAssMapping = 1 ;}
 		if (!$MappingGo && $map{$curSmpl}{hasPrimaryRds} && $eFinalMapDir){$locRedoAssMapping = 1 ;print "R2 ";}
-		if (-e $sampleCheckpoints{primaryMapping} && (!fileGZe( "$finalMapDir/$SmplName-smd.bam.coverage.gz") || !-e $CRAMmap) ){$locRedoAssMapping = 1 ;print "R3 ";}
+		# Finished-sample cleanup removes the CRAM on purpose with -mapSaveCRAM 0 and binning;
+		# SNP/SV work that needs it again still remaps via $allMapDone below.
+		my $cramExpected = $MFopt{mapSaveCram} || !$MFopt{DoMetaBat2};
+		if (-e $sampleCheckpoints{primaryMapping} && (!fileGZe( "$finalMapDir/$SmplName-smd.bam.coverage.gz") || (!-e $CRAMmap && $cramExpected)) ){$locRedoAssMapping = 1 ;print "R3 ";}
 		#if ($eFinMapCovGZ && (exists($locStats{uniqAlign}) && $locStats{uniqAlign} > 20) && -s $CRAMmap <300){$locRedoAssMapping = 1 ;print "R4";}
 		#print "$CRAMmap :: $locRedoAssMapping\n";
 		if ($locRedoAssMapping){# && -e $CRAMmap){
@@ -1490,7 +1506,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		contig_dir => $ContigStatsDir,
 		assembly_dir => $finalCommAssDir,
 		contig_subparts => $assemblyOutputsRequired ? $cleanupContigSubparts : '',
-		primary_coverage_required => $assemblyOutputsRequired && $map{$curSmpl}{hasPrimaryRds},
+		primary_coverage_required => $assemblyOutputsRequired && $MFopt{map2Assembly} && $map{$curSmpl}{hasPrimaryRds},
 		support_coverage_required => $assemblyOutputsRequired && $supportCoverageRequired,
 		binning_base => ($assemblyOutputsRequired && $MFopt{DoMetaBat2}) ? $BinningOut : '',
 		primary_snp_stone => ($assemblyOutputsRequired && $cleanupPrimaryConsensusRequired) ? $sampleCheckpoints{primaryConsensus} : '',
@@ -1579,8 +1595,10 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			$porechopFlag,$inputRawFile,$alignmentPolicy);
 	#my %seqSet = %{$hrefSeqSet};
 	#print "$seqSet{pa1}   $seqSet{seqTech}   $seqSet{seqTechX}\n";
-	push (@unzipjobs,$jdep) unless ($jdep eq "");
-	
+	# Only real job IDs may throttle later staging jobs; sentinels are not scheduler dependencies.
+	push (@unzipjobs,$jdep) unless ($jdep eq "" || $jdep eq 'EMPTY_DO_NEXT'
+		|| submissionDependencyFailed($jdep) || submissionDependencyDeferred($jdep));
+
 	my $combinedInputSizeMB = ($map{$curSmpl}{inputFileSizeMB} || 0)
 		+ ($map{$curSmpl}{inputXFileSizeMB} || 0);
 	$map{$curSmpl}{inputFilesEmpty} = reconcile_sample_empty_marker(
@@ -2695,7 +2713,7 @@ sub sampleCompletionComponents {
 	if ($MFopt{kmerPerGene}) {
 		push @contigStatsChecks, {
 			id => 'gene_kmers', kind => 'nonempty_any',
-			paths => $candidateFiles->("$contigRoot/scaff.pergene.4kmer.pm5"),
+			paths => $candidateFiles->(($context->{assembly_dir} || '').'ContigStats/scaff.pergene.4kmer.pm5'),
 		};
 	}
 	my @binningChecks = (
@@ -3118,7 +3136,7 @@ sub cleanupCompletionRequirements {
 		if $subparts =~ /F/;
 	push @nonemptyFiles, "$args{assembly_dir}/ContigStats/GTDBmg/marker_genes_meta.tsv"
 		if $subparts =~ /G/;
-	push @nonemptyFiles, "$contigDir/scaff.pergene.4kmer.pm5"
+	push @nonemptyFiles, "$args{assembly_dir}/ContigStats/scaff.pergene.4kmer.pm5"
 		if $MFopt{kmerPerGene} && $subparts =~ /4/;
 
 	if ($args{binning_base}) {
@@ -3306,6 +3324,7 @@ sub loop2C_check(){
 					"rerunning samples $from till $to before advancing the window.\n";
 				@grandDeps = ();
 				resetAsGrps(\%AsGrps);
+				resetLoopPassProgStats();
 				$loopIterationExtended = 0;
 				$JNUM = $from - 1;
 				primeLoopSchedulerSnapshot($from, $to);
@@ -3473,9 +3492,22 @@ sub loop2C_check(){
 				%loopSubmittedJobIds = ();
 				print "Starting final full-range verification pass $from -> $to before statistics.\n";
 			}
+			# A new pass recounts its samples; the last (full-range) pass keeps its
+			# counts for postprocess(), which gates the cohort merges on them.
+			resetLoopPassProgStats() if $runOptions{loopCount};
 			primeLoopSchedulerSnapshot($from, $to) if $runOptions{loopCount};
 			print "-------------------------------------------\n-------------------------------------------\n";
-			
+
+		}
+	}
+}
+
+sub resetLoopPassProgStats {
+	for my $key (keys %progStats) {
+		if (ref($progStats{$key}) eq 'HASH') {
+			$_ = 0 for values %{$progStats{$key}};
+		} else {
+			$progStats{$key} = 0;
 		}
 	}
 }
@@ -3575,7 +3607,9 @@ sub postprocess{
 		my $call = "$qcMakeHTMLReport $Rpath $MGSfile $MGShtml 1> /dev/null 2>&1;\n";
 		#print $call."\n";
 		#my $QCRes = `$call`; chomp $QCRes;
-		system $call;
+		# env:-prefixed programs carry a bash-only activation prologue; /bin/sh may be dash
+		system('bash', '-c', $call) == 0
+			or warn "HTML report generation failed (status ".($? >> 8).")\n";
 		#print $QCRes
 		print "HTML Report in $MGShtml\n";
 	}
@@ -3610,7 +3644,10 @@ sub postprocess{
 				$mrgCmd .= "$mergeTblScript $dir_KrakFind/$kf/*.krak.txt > $dir_KrakFind/Krak.$kf.mat\n";
 			}
 			#die $mrgCmd."\n$dir_KrakFind\n";
-			system "$mrgCmd";
+			if ($mrgCmd ne "") {
+				system('bash', '-c', $mrgCmd) == 0
+					or warn "Kraken table merge failed (status ".($? >> 8).")\n";
+			}
 		}
 	}
 
@@ -4215,7 +4252,9 @@ sub submitGenomeBinner{
 	# An empty assignment is a valid "no bins found" result.  Reuse any
 	# published assignment for quality/statistics repair; -redoEmptyBins is the
 	# explicit opt-in path that removes and recomputes an empty result.
-	$MBcmd = "" if (-e $MetaBat2out);
+	# runBinners.pl writes Binning.stone as its last step; an assignment file
+	# without it was left by a binner job that failed after creating the file.
+	$MBcmd = "" if (-e $MetaBat2out && -s "$BinDir/Binning.stone");
 	
 	#die $MBcmd;
 	
@@ -4571,6 +4610,16 @@ sub prepareDiamondRerun($){
 		}
 		return;
 	}
+	if ($MFopt{rewriteDiamond}) {
+		# runDiamond only realigns when a database's hits are absent, so remove
+		# the requested databases' hits and parse markers (as before 579c34c).
+		foreach my $term (@alldbs){
+			for my $target (glob("$curOutDir/diamond/dia.$term.blast*")) {
+				unlink $target or die "Cannot remove Diamond output $target: $!\n";
+			}
+		}
+		return;
+	}
 	if ($MFopt{redoDiamondParse} && $all_requested) {
 		for my $target (glob("$curOutDir/diamond/CNT*")) {
 			system('rm', '-rf', '--', $target) == 0
@@ -4628,20 +4677,17 @@ sub IsDiaRunFinished($){
 
 #called in case sample "is empty", reduce some counters
 sub reduceProgStats{
-	if ($MFopt{DoMetaPhlan}){
-		$progStats{metaPhl2FailCnts}--;
-	}
-	if ($MFopt{DoProtal}){
-		$progStats{protalFailCnts}--;
-	}
-	if ($MFopt{DoMOTU2}){
-		$progStats{mOTU2FailCnts}--;
-	}
-	if ($MFopt{DoTaxaTarget}){
-		$progStats{taxTarFailCnts}--;
-	}
-	if ($MFopt{DoRibofind}){
-		$progStats{riboFindFailCnts} -- ;
+	# Undo the failure count of checkRawProgsFin for a sample that is finalized as
+	# empty. A profiler that had already finished counted as complete, not failed,
+	# so never push a counter below zero (a -1 is "true" for the merge gates).
+	my @undo = (
+		[DoMetaPhlan => 'metaPhl2FailCnts'], [DoProtal => 'protalFailCnts'],
+		[DoMOTU2 => 'mOTU2FailCnts'], [DoTaxaTarget => 'taxTarFailCnts'],
+		[DoRibofind => 'riboFindFailCnts'], [DoKraken => 'KrakTaxFailCnts'],
+	);
+	for my $pair (@undo) {
+		my ($opt, $key) = @{$pair};
+		$progStats{$key}-- if ($MFopt{$opt} && ($progStats{$key} || 0) > 0);
 	}
 }
 
@@ -4752,7 +4798,8 @@ sub riboSummary{
 	#die $mrgCmd."\n";
 	my $of_exist = 1;
 	foreach my $lvl (@lvls){ 
-		$of_exist=0 unless ((!$ITSpres || -e "$dir_RibFind/ITS.miTag.$lvl.txt") && -e "$dir_RibFind/LSU.miTag.$lvl.txt" && -e "$dir_RibFind/SSU.miTag.$lvl.txt"); 
+		#miTagTaxTable.pl gzips its tables (SSU.miTag.<lvl>.txt.gz); a plain-name test resubmitted both merges on every pass
+		$of_exist=0 unless ((!$ITSpres || fileGZe("$dir_RibFind/ITS.miTag.$lvl.txt")) && fileGZe("$dir_RibFind/LSU.miTag.$lvl.txt") && fileGZe("$dir_RibFind/SSU.miTag.$lvl.txt"));
 		#die "$dir_RibFind/ITS.miTag.$lvl.txt\n$dir_RibFind/LSU.miTag.$lvl.txt\n$dir_RibFind/SSU.miTag.$lvl.txt\n" if (!$of_exist);
 	}
 	if ($prevItems < $progStats{riboFindComplCnts}){
@@ -4868,7 +4915,7 @@ sub detectRibo(){
 			#first test if already copied to scratch..
 			$LCAdbs[$kk] =~ m/\/([^\/]+)$/;
 			my $SLVtestNme = $1;
-			if (!-e $DBrna2."/$SLVtestNme.lambda/index.lf.drp"|| !-e $DBrna2."/$SLVtestNme" ){
+			if (!-e $DBrna2."/$SLVtestNme.lba.gz"|| !-e $DBrna2."/$SLVtestNme" ){ #lambda3 index, copied with the DB below
 				$doCopyDBtoScratch = 1;
 			} else {next;}
 			#print "$DB\n";
@@ -5076,7 +5123,7 @@ sub prepDiamondDB($ $ $ $){#takes care of copying the respective DB over to scra
 			my ($DBpathN) = getSpecificDBpaths("NOG",0);
 			$DBcmd .= "cp $DBpathN/all_species_data.txt $CLrefDBD\n" unless (-e "$CLrefDBD/all_species_data.txt");
 		}
-		if ($curDB eq "TCDB" && !-s "$CLrefDBD/hir.txt"){ 
+		if ($curDB eq "TCDB" && !-s "$CLrefDBD/TCDBhir.txt"){
 			$DBcmd .= "cp $DBpath/TCDBhir.txt  $CLrefDBD\n";
 		}
 
@@ -5143,6 +5190,8 @@ sub workflowStateOptions {
 		assembly_mode => $MFopt{DoAssembly},
 		map_to_assembly => $MFopt{map2Assembly},
 		map_support_to_assembly => $MFopt{mapSupport2Assembly},
+		# same rule as finishedCleanupArguments' --remove-alignment and the R3 remap check
+		mapping_cram_kept => ($MFopt{mapSaveCram} || !$MFopt{DoMetaBat2}) ? 1 : 0,
 		run_tmp_dir => $MFglobal{runTmpDirGlobal},
 	};
 }
@@ -5445,6 +5494,13 @@ sub prepareMap{
 		
 		$refDB[$i] =~ m/.*\/([^\/]+)$/;
 		system "cp $refDB[$i] $bwt2outDl" if ($MFopt{mapModeCovDo}  && !-e "$bwt2outDl/$1");
+		# secondary-mapping SNP calling reads the reference as "<outDir>/<name>.fa"
+		# (scndMap2Genos, SNPinfo assembly); the copy above keeps the original basename
+		if ($MFopt{Do2ndMapSNP} && $map2ndMpde != 3 && !-e "$bwt2outDl/$bwt2Name[$i].fa"){
+			my $refAbs = abs_path($refDB[$i]) || $refDB[$i];
+			symlink($refAbs, "$bwt2outDl/$bwt2Name[$i].fa")
+				or die "Cannot link reference $refAbs to $bwt2outDl/$bwt2Name[$i].fa: $!\n";
+		}
 		#print "\n$refDB[$i]\n";
 		#die "$bwt2outDl/$1\n";
 		#system "mkdir -p $bwt2outDl/LOGandSUB" unless (-d "$bwt2outDl/LOGandSUB");
@@ -5482,9 +5538,16 @@ sub prepareMap{
 				system "mkdir -p $gDir";
 				$logDir = $gDir;
 				my $dEGP = $MFopt{DoEukGenePred}; $MFopt{DoEukGenePred} = 0;
-				my $tmpDep1 = genePredictions($refDB[$i],$gDir,"",$gDir,"iGP$i","",0);
+				# genePredictions starts with "rm -rf <outDir>": it must never get the
+				# secondary-mapping output dir itself (reference copy, per-sample BAMs
+				# and coverages live there). Predict in a private subdirectory instead.
+				my $gpDir = "$gDir/genePred/";
+				my $tmpDep1 = genePredictions($refDB[$i],$gpDir,"",$gDir,"iGP$i","",0);
 				$MFopt{DoEukGenePred} = $dEGP;
-				$cmdBIGgene .= "#====== $i =======\n".$tmpDep1."cp $gDir/genes.gff $nativeGFF; mv $gDir/genes.gff $gDir/$gffF\n\n\n";
+				#genePredictions gzips genes.gff (GenePredGZ); only empty input leaves it plain
+				$cmdBIGgene .= "#====== $i =======\n".$tmpDep1
+					."if [ -e $gpDir/genes.gff.gz ]; then $pigzBin -dc $gpDir/genes.gff.gz > $gDir/$gffF; else mv $gpDir/genes.gff $gDir/$gffF; fi\n"
+					."cp $gDir/$gffF $nativeGFF\n\n\n";
 				$GENEsubmCnt++;
 				#my ($tmpDep,$tmpCmd) = qsubSystem( $bwt2outDl."/LOGandSUB/cpGenes.sh",  "cp $gDir/genes.gff $nativeGFF; mv $gDir/genes.gff $gDir/$gffF\n",
 				#1,"1G","genecop".$i,$tmpDep1,"",1,[],$QSBoptHR);
@@ -5783,8 +5846,10 @@ sub contigStatsOutputsComplete {
 	my $ContigStatsDir  = "$path/$preDIRs{dir_ContigStats}";
 	my $CSfilesComplete = 1;
 	my $primaryCoverageComplete = contig_stats_coverage_complete($ContigStatsDir, "Coverage");
-	$CSfilesComplete = 0 if (!$primaryCoverageComplete && $map{$smpl}{hasPrimaryRds});
-	$CSfilesComplete = 0  if ($MFopt{kmerPerGene} && $AssemblyGo && ! fileGZs("$ContigStatsDir/scaff.pergene.4kmer.pm5" ));
+	#coverage only exists when reads are mapped back (as in sampleCompletionComponents)
+	$CSfilesComplete = 0 if (!$primaryCoverageComplete && $map{$smpl}{hasPrimaryRds} && $MFopt{map2Assembly});
+	#gene k-mers are per assembly: separateContigs.pl writes them to the assembly-group ContigStats
+	$CSfilesComplete = 0  if ($MFopt{kmerPerGene} && $AssemblyGo && ! fileGZs("$assD/ContigStats/scaff.pergene.4kmer.pm5" ));
 	my $supportCoverageComplete = contig_stats_coverage_complete($ContigStatsDir, "Cov.sup");
 	$CSfilesComplete = 0 if ($requireSupportCoverage && !$supportCoverageComplete);
 	$CSfilesComplete = 0  if ($subprts =~ m/F/ && ! fileGZs( "$assD/ContigStats//FMG/FMGids.txt" ));
@@ -6166,8 +6231,9 @@ sub mergeReads(){
 		$outTL .= ".$i" if ($i > 0);
 		$mergCmd .= "$flashBin -M 250 -z -o $outTL -d $outdir -t $numCores $pairs->[$i]{files}{r1} $pairs->[$i]{files}{r2}\n";
 		if ($i > 0){
-			$mergCmd .= "cat $outTL.extendedFrags.fastq.gz >> $outT.extendedFrags.fastq.gz;cat $outTL.notCombined_2.fastq.gz >> $outT.notCombined_2.fastq.gz; ";
-			$mergCmd .= "cat $outTL.notCombined_1.fastq.gz >> $outT.notCombined_1.fastq.gz;\n";
+			# flash writes below -d $outdir, not into the job's working directory
+			$mergCmd .= "cat $outdir/$outTL.extendedFrags.fastq.gz >> $outdir/$outT.extendedFrags.fastq.gz;cat $outdir/$outTL.notCombined_2.fastq.gz >> $outdir/$outT.notCombined_2.fastq.gz; ";
+			$mergCmd .= "cat $outdir/$outTL.notCombined_1.fastq.gz >> $outdir/$outT.notCombined_1.fastq.gz;\n";
 		}
 	}
 	my $stone = "$outdir/$outT.sto";
@@ -6414,7 +6480,10 @@ sub sdmClean(){
 				'-paired', 2, @sdmExtra, '-log', "$sdmLogDir/$logStem$logSuffix.log",
 				@libraryArgs, @sdmCut,
 			)."\n";
-			my $recoveredPattern = "$prefix.*.singl.$fEnd";
+			# sdm writes one singleton file per mate ($prefix.1/.2.singl.*). A wider glob
+			# ($prefix.*.singl.*) also swallows the other libraries' and the support
+			# scope's final singleton files in the same directory (duplicated reads).
+			my $recoveredPattern = "$prefix.[12].singl.$fEnd";
 			$cmd .= 'mapfile -t recovered < <(compgen -G '._shell_quote($recoveredPattern)." || true)\n";
 			$cmd .= 'if (( ${#recovered[@]} )); then cat -- "${recovered[@]}" > '
 				._shell_quote($outSingle).'; rm -f -- "${recovered[@]}"; else ';
@@ -6566,12 +6635,14 @@ sub unploadRawFilePostprocess{
 	
 	my $cmd = "md5sum $MFconfig{uploadRawRds}/*.R2.fq.gz > $MFconfig{uploadRawRds}/R2.md5 ";
 	$cmd .= "& \n md5sum $MFconfig{uploadRawRds}/*.R1.fq.gz > $MFconfig{uploadRawRds}/R1.md5 ";
-	unless (my @files = glob("\Q$MFconfig{uploadRawRds}\E/*.Rsingl.fq.gz")) {
-		$cmd .= "###\n### in case needed:\n### md5sum $MFconfig{uploadRawRds}/*.Rsingl.fq.gz > $MFconfig{uploadRawRds}/Rsingl.md5\n";
+	# uploadRawFilePrep names singleton files *.Rsingle.fq.gz
+	unless (my @files = glob("\Q$MFconfig{uploadRawRds}\E/*.Rsingle.fq.gz")) {
+		$cmd .= "###\n### in case needed:\n### md5sum $MFconfig{uploadRawRds}/*.Rsingle.fq.gz > $MFconfig{uploadRawRds}/Rsingl.md5\n";
 	} else {
-		$cmd .= "& \nmd5sum $MFconfig{uploadRawRds}/*.Rsingl.fq.gz > $MFconfig{uploadRawRds}/Rsingl.md5\n";
+		$cmd .= "& \nmd5sum $MFconfig{uploadRawRds}/*.Rsingle.fq.gz > $MFconfig{uploadRawRds}/Rsingl.md5\n";
 	}
-	
+	$cmd .= "\nwait\n"; #the md5sums above run in the background
+
 	my ($jobN, $tmpCmd) = qsubSystem("$MFglobal{globalLogDir}/postEBI.sh",$cmd,3,"20G","_PP",join(";",@EBIjobs),"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 }
 
@@ -7239,12 +7310,13 @@ sub seedUnzip2tmp{
 	for (my $i=0; $i<$primarySingleSourceCount; $i++){
 		#next if (scalar(@paBam));
 		my $porechopped = "$finDest/rawRds/$pas[$i]"; $porechopped .= ".gz" unless ($porechopped =~ m/\.gz$/);
-		if ($i==0 && ($porechopFlag && $is3rdGen) && !$allowLinks){$unzipcmd .=  "\nrm -f $porechopped\ntouch $porechopped\n\n";}
+		#each file gets its own output, appended below: truncate every one, rawRds/ is no longer wiped on rerun
+		if (($porechopFlag && $is3rdGen) && !$allowLinks){$unzipcmd .=  "\nrm -f $porechopped\ntouch $porechopped\n\n";}
 		#print "$libInfo[$i] eq $xtraRdsTech\n";
 		#$pp = $fastp2 if ($libInfo[$i] eq $xtraRdsTech);
 		if ($MFconfig{filterFromSource}){
 			$pas[$i] = $sourcePas[$i];
-		} elsif ($porechopFlag){
+		} elsif ($porechopFlag && $is3rdGen){ #same condition as the $pas[$i] update below
 			#porechop is running really slow and instable, probably better to get fast5 and use modern basecaller, that will do this automatically..
 			my $porechBin = getProgPaths("porechop");
 			$unzipcmd .= "$porechBin -i $sourcePas[$i] -t $numCore  --adapter_threshold 90 |gzip -c >> $porechopped\n";
@@ -7802,7 +7874,7 @@ sub getRgStr{
 	$platform = 'PACBIO' if (($readTechnology || '') eq 'PB');
 	$platform = 'ONT' if (($readTechnology || '') eq 'ONT');
 	if ($mapper > 1 || $mapper == -2){ #bwa/minimap2 have same format..
-		$rgStr = '\'@RG\\tID:$smpl\\tSM:'.$smpl.'\\tPL:'.$platform;
+		$rgStr = '\'@RG\\tID:'.$smpl.'\\tSM:'.$smpl.'\\tPL:'.$platform;
 		$rgStr .= '\\tLB:'.$libsOri.'\'';
 	}
 	if ($mapper==1 || $mapper ==5){ #bowtie2 & strobealign
@@ -7945,9 +8017,10 @@ sub alignPostTreat{
 		$algCmd .= " | $smtBin view -b1 -@ $NcoreL > $iTO.t\n";
 		$algCmd .= "$smtBin view -u -h $iTO.t | $xtraSamSteps1 $smtBin view -b1 -@ $NcoreL -F 4 -  > $iTO\n";
 		#sort out unaligned reads
-		$algCmd .= "$smtBin view -u -h -@ $NcoreL -f 4 $iTO.t | $smtBin fastq -1 $nodeTmp/$baseN.$i.1.fq.gz -2 $nodeTmp/$baseN.$i.2.fq.gz -s $nodeTmp/$baseN.$i.s.fq.gz - \n";
+		#-0 catches single-end reads (neither READ1 nor READ2 flag), which samtools otherwise writes to stdout
+		$algCmd .= "$smtBin view -u -h -@ $NcoreL -f 4 $iTO.t | $smtBin fastq -0 $nodeTmp/$baseN.$i.0.fq.gz -1 $nodeTmp/$baseN.$i.1.fq.gz -2 $nodeTmp/$baseN.$i.2.fq.gz -s $nodeTmp/$baseN.$i.s.fq.gz - \n";
 		#and copy them already to final destination.. no reason to keep them around..
-		$algCmd .= "cat $nodeTmp/$baseN.$i.1.fq.gz >> $unaligned/unal.1.fq.gz;\ncat $nodeTmp/$baseN.$i.2.fq.gz >> $unaligned/unal.2.fq.gz;\n cat $nodeTmp/$baseN.$i.s.fq.gz >> $unaligned/unal.fq.gz;\n";
+		$algCmd .= "cat $nodeTmp/$baseN.$i.1.fq.gz >> $unaligned/unal.1.fq.gz;\ncat $nodeTmp/$baseN.$i.2.fq.gz >> $unaligned/unal.2.fq.gz;\n cat $nodeTmp/$baseN.$i.s.fq.gz $nodeTmp/$baseN.$i.0.fq.gz >> $unaligned/unal.fq.gz;\n";
 		#and remove all the temp files..
 		$algCmd .= "rm -f $nodeTmp/$baseN.$i.*fq.gz $iTO.t\n";
 	} else {
@@ -7958,7 +8031,7 @@ sub alignPostTreat{
 		$algCmd .= "$smtBin index $iTO\n";
 		for (my $k=0;$k<@{$postTreat{regsAR}};$k++){
 			#		print "$k\t$finalDS[$k]\n";
-			if(check_map_done(${$postTreat{doCram}}, ${$postTreat{finalDSar}}[$k], ${$postTreat{outNmsAR}}[$k])){$$subBamsAR[$k]="";next;}
+			if(check_map_done($postTreat{doCram}, ${$postTreat{finalDSar}}[$k], ${$postTreat{outNmsAR}}[$k])){$$subBamsAR[$k]="";next;}
 			$algCmd .= "\n\nset +e \n" if ($k==0);
 			$algCmd .= "#  %%%%%%%%%%%%%%%% $k %%%%%%%%%%%%%%%% \n";
 			$algCmd .= "$bamHdFilt_scr $iTO ${$postTreat{reg_lcsAR}}[$k] 0 > $iTO.decoy.sam.$k\n";
@@ -8067,7 +8140,7 @@ sub mapReadsToRef{
 	my $decoyModeActive=0; #decoy mapping
 	my $map2ndTogether = $MFopt{mapModeTogether}; #map competetively among all reference genomes provided might change mapping result, if other genome set is used)
 	$decoyModeActive=1 if ( $MFopt{DoMapModeDecoy} && exists($make2ndMapDecoy{Lib}) && -e $make2ndMapDecoy{Lib});
-	my $isSorted = 0;		$isSorted=1 if (@pa1==1 && $MFopt{DoMapModeDecoy} && $decoyModeActive);
+	my $isSorted = 0;		$isSorted=1 if (@pa1==1 && @paS==0 && $MFopt{DoMapModeDecoy} && $decoyModeActive); #several libraries are joined with samtools cat (unsorted)
 #	die $REF;
 	if (!$decoyModeActive){
 		@bwtIdxs = split /,/,$REF;
@@ -8272,7 +8345,7 @@ sub mapReadsToRef{
 			my $libraryCmd = '';
 			#$pa1[$i] =~ m/\/([^\/]+)\.f.*q$/;
 			#my $rgID = "$outName";
-			my $rgStr = getRgStr($outName,$libsOri[$i],$libsOri[$i],$usePairs,$mapperProgLoc,$readTec);
+			my $rgStr = getRgStr($outNms[0],$libsOri[$i],$libsOri[$i],$usePairs,$mapperProgLoc,$readTec); #$outName can be a comma list (2nd mapping)
 			#die "$rgStr\n";
 			if ($mapperProgLoc==1){ #bowtie2
 				if ($usePairs){
@@ -8293,7 +8366,7 @@ sub mapReadsToRef{
 				$libraryCmd .= "$algCmdBase -t_db $REF$MFcontstants{kmaIdxFileSuffix}  ";
 				if ($usePairs) {$libraryCmd .= " -ipe " . join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] "
 				else {$libraryCmd .= " -i " . join(" ",@accRS) ;}
-				$libraryCmd .= " -o $tmpOutxtra[$i] ";
+				$libraryCmd .= " -o $tmpOutxtra[0].$kk.$i "; #one prefix per reference and library
 			}elsif ($mapperProgLoc==5){ #strobealign
 				$libraryCmd .= "$algCmdBase $rgStr $REF  ";
 				if ($usePairs) {$libraryCmd .=  join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] "
@@ -9635,8 +9708,10 @@ sub _parse_sdm_stats_text {
 }
 
 sub _sdm_histogram_max_length {
-	my ($inD) = @_;
-	my $lengthTail = read_stats_log_excerpt("$inD/LOGandSUB/sdm/filter_lenHist.txt",
+	my ($inD, $histogram) = @_;
+	$histogram = "$inD/LOGandSUB/sdm/filter_lenHist.txt"
+		unless defined($histogram) && $histogram ne '';
+	my $lengthTail = read_stats_log_excerpt($histogram,
 		mode => 'tail', tail_lines => 20);
 	my @lengths = ($lengthTail =~ /^(\d+)\s/mg);
 	return @lengths ? $lengths[-1] : 0;
@@ -9661,7 +9736,14 @@ sub sdmStatsMany {
 		next unless defined($file) && $file ne '';
 		my $filStats = read_stats_log_excerpt($file, mode => 'tail', tail_lines => 70);
 		next if $filStats eq '';
-		my $stats = _parse_sdm_stats_text($filStats, $MaxLengthHistBased, '');
+		# sdm names each histogram after its log (filter.S.log -> filter.S_lenHist.txt);
+		# the shared default only belongs to filter.log
+		my $logHistMax = $MaxLengthHistBased;
+		if ($file =~ /\.log$/) {
+			(my $histogram = $file) =~ s/\.log$/_lenHist.txt/;
+			$logHistMax = _sdm_histogram_max_length($inD, $histogram);
+		}
+		my $stats = _parse_sdm_stats_text($filStats, $logHistMax, '');
 		my $weight = ($stats->{totRds} || 0) + 0;
 		$combined{$_} += ($stats->{$_} || 0) for @countFields;
 		foreach my $field (@averageFields) {
@@ -9783,8 +9865,11 @@ sub getMapStats{
 }
 sub optiDups{
 	my ($inP) = @_;
-	my $inFi = "$inP/map2.sh.etxt"; 
-	$inFi = "$inP/bwtMap2.sh.etxt" if (!-e $inFi); #old MF file names..
+	# markdup now runs inside the combined map.sh job; map2.sh/bwtMap2.sh are
+	# older layouts. Use the first log that actually holds duplicate stats.
+	my @dupLogs = map { "$inP/$_" } qw(map.sh.etxt map2.sh.etxt bwtMap2.sh.etxt);
+	my ($inFi) = grep { read_stats_log_excerpt($_) =~ m/samtools markdup|Proper Pairs/ } @dupLogs;
+	$inFi = (grep { -e $_ } @dupLogs[1,2])[0] // $dupLogs[1] unless defined $inFi;
 	#my $outStrDesc = "";
 	$locStats{duplOptic}=0; $locStats{duplPCR}=0;$locStats{duplPass}=0; $locStats{EstLibSize} = 0;
 	my $doDup = 0;my $alignStats2 = read_stats_log_excerpt($inFi);
@@ -9836,7 +9921,8 @@ sub getContamination{
 		$filStats = read_stats_log_excerpt($inFi2); #paired reads should be counted as two.. but are counted as one in hostile..
 		@hits = ($filStats =~ m/"reads_removed": (\d*),/g); #"reads_removed": 202,
 		@nonhits = ($filStats =~ m/"reads_out": (\d*),/g); 
-		@matches = ($filStats =~ m/"reads_removed_proportion": (\d*),/g); 
+		#hostile reports a rounded fraction (e.g. 0.025); this column holds percentages, as for kraken
+		@matches = map { sprintf('%.3f', 100 * $_) } ($filStats =~ m/"reads_removed_proportion": ([0-9.eE+-]+)/g);
 	}
 	
 	
@@ -9910,7 +9996,9 @@ sub getSNPStats{
 			if ($geneStats =~ m/  - Found (\d+) SNPs and (\d+) INDELS./) {
 				$snpNum=$1; $indelNuml=$2;
 			}
-			if ($geneStats =~ m/  - Passed (\d+);(\d+) SNPs and INDELS. Conflicts resolved: 0/) {
+			#vcf2fna >=0.44: "  - Passing Filters: 4, 0; 1 entries (major, minor SNPs; INDELS)."
+			if ($geneStats =~ m/  - Passing Filters: (\d+), \d+; (\d+) entries/
+					|| $geneStats =~ m/  - Passed (\d+);(\d+) SNPs and INDELS\./) {
 				$SNPpassed=$1; $INDpassed=$2;
 			}
 		}
@@ -9927,11 +10015,13 @@ sub getGeneStats{
 	my ($inFi) = @_;
 	my @columns = qw(GeneNumber AvgGeneLength AvgComplGeneLength BpGenes BpNotGenes Gcomplete G5pComplete G3pComplete Gincomplete);
 	my %result = map { $_ => '' } @columns;
-	return \%result unless -s $inFi;
-	open my $geneFH, '<', $inFi or do {
+	# separateContigs.pl publishes this table gzipped as GeneStats.txt.gz
+	return \%result unless fileGZs($inFi);
+	my ($geneFH, $geneOK) = gzipopen($inFi, 'gene statistics', 0, 0);
+	if (!$geneOK) {
 		warn "Cannot read gene statistics '$inFi': $!\n";
 		return \%result;
-	};
+	}
 	while (my $line = <$geneFH>) {
 		$line =~ s/[\r\n]+$//;
 		next if $line eq '' || $line =~ /^GeneNumber/;
@@ -10216,7 +10306,9 @@ sub scndMap2Genos{
 	#map to all refs at once		
 	my %dirset = 	(nodeTmp=>$nodeSpTmpD,outDir => join(",",@bwt2outD),unalDir=>"",
 					sbj => join(",",@DBbtRefX),assGrp => $cAssGrp,
-					smplName => $SmplName,#join(",",@bamBaseNameS),
+					# one output name per reference: mapReadsToRef splits this into @outNms
+					# (parallel to outDir/sbj), bamDepth below reads each "<name>.iniAlignment.bam"
+					smplName => join(",",@bamBaseNameS),
 					glbTmp => $nodeSpTmpD."_xtraMapWork/", is2ndMap => 1,
 					qsubDir => "$logDir/map2nd/",mapSupport => 0,
 					glbMapDir => join(",",@mapOutXS),mappingStarted =>1,
@@ -10468,7 +10560,7 @@ sub spadesAssembly{
 	$cmd .= "echo \"Starting Spades assembly\"\n";
 	my $defTotMem = $MFopt{AssemblyMemory};#60;
 	if ($defTotMem == -1){ #auto set mem
-		$defTotMem = (spaceInAssGrp($curSmpl)*4+1e5)/1024;
+		$defTotMem = int((spaceInAssGrp($curSmpl)*4+1e5)/1024) + 1; #SPAdes -m only accepts integer Gb
 	}
 
 	$cmd .= $spadesBin;
@@ -11936,7 +12028,7 @@ sub getCmdLineOptions{
 		unless $MFopt{BinnerCores} > 0;
 	die "ERROR:: -BinnerMem must be zero or a positive integer\n"
 		unless $MFopt{BinnerMem} >= 0;
-	die "ERROR:: binning requires -useCheckM1 1 and/or -useCheckM2 1\n"
+	die "ERROR:: binning requires -checkM1 1 and/or -checkM2 1\n"
 		if $MFopt{DoMetaBat2} && !$MFopt{useCheckM1} && !$MFopt{useCheckM2};
 	die "ERROR:: -SB_env is only valid with -Binner 2 (SemiBin)\n"
 		if $MFopt{SB_env} ne '' && $MFopt{DoMetaBat2} != 2;

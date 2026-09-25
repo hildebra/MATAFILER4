@@ -715,7 +715,7 @@ GetOptions(
 	"epaMaxMemMB=i" => \$epaMaxMemMB,
 	"epaPendantOutlierFactor=f" => \$epaPendantOutlierFactor,
 	"epaPendantMinThreshold=f" => \$epaPendantMinThreshold,
-	"redoEPAfilter:i" => sub { $redoEPAfilter = $_[1] || 1; },
+	"redoEPAfilter:1" => \$redoEPAfilter, #bare flag implies 1; an explicit 0 stays 0
 	"MSAprog=i"      => \$MSAprog, #2=MAFFT, 4=muscle5
 	"onlyMSA=i"      => \$onlyMSA,
 	"phyloProg=i"    => \$phyloProg, #1=IQ-TREE, 2=VeryFastTree, 3=FastTree
@@ -2344,7 +2344,13 @@ for ($lcnt = 0; $lcnt < @specis; $lcnt++) {
 				"Skipping $MGS: -redo tree found neither complete published inputs nor a complete staged FNA/FAA/category set.\n");
 			next;
 		}
-		resetMGSTreeOutputs($outD2, $MGS);
+		# -submit 0 is a dry run (docs: review the planned commands first): never
+		# discard finished trees there, as the -redoEPAfilter path already does.
+		if ($doSubmit) {
+			resetMGSTreeOutputs($outD2, $MGS);
+		} else {
+			print "Would reset tree outputs of $MGS in $outD2 (-submit 0)\n";
+		}
 	}
 	
 	if (!$leanOnlySubmitResume && !$recalcTrees && !$reSubmit && !$repairCAT
@@ -4983,6 +4989,11 @@ sub prepRun{
 				$observedName->($stagedGuide));
 		};
 		my $sortedMGS = "$stagedGuide.srt";
+		# Outputs from before v1.54 keep the sorted guide beside the input guide;
+		# resuming them must not fall into the "base files missing" rebuild.
+		$sortedMGS = "$MGSfileOri.srt"
+			if ($onlySubmit || $subJob || $recalcTrees)
+				&& !-s $sortedMGS && -s "$MGSfileOri.srt";
 		if ($preparedMainBranchFastPath) {
 			$MGSfile = -s $sortedMGS ? $sortedMGS : $MGSfile;
 			$gene2taxF = "";
@@ -4994,16 +5005,24 @@ sub prepRun{
 			die "-redo tree requires the existing sorted MGS guide: $sortedMGS\n";
 		} elsif ($mode eq "MGSall" && !-e $sortedMGS) {
 			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
-			fastRemoveTree($outD);
-			fastRemoveTree($scratchD);
+			if ($doSubmit) {
+				fastRemoveTree($outD);
+				fastRemoveTree($scratchD);
+			} else {
+				print "Would remove $outD and $scratchD for a complete rebuild (-submit 0)\n";
+			}
 			$stageGuide->();
 			symlink($stagedGuide, $sortedMGS)
 				or die "Cannot link $sortedMGS to $stagedGuide: $!\n";
 		} elsif (!$onlySubmit || !-s $sortedMGS) {
 			print "base files missing.. preparing complete resubmission and recalc of data\n";
 			assertSafeWorkflowRemoval($outD, $safeDefaultOutD, $GCd, $MGSfileOri, $bindir, getcwd()) if -d $outD;
-			fastRemoveTree($outD);
-			fastRemoveTree($scratchD);
+			if ($doSubmit) {
+				fastRemoveTree($outD);
+				fastRemoveTree($scratchD);
+			} else {
+				print "Would remove $outD and $scratchD for a complete rebuild (-submit 0)\n";
+			}
 			$stageGuide->();
 			my $sortMGSgenes = getProgPaths("sortMGSGeneImport_scr");
 			my $cmd = $sortMGSgenes . " "
@@ -5602,9 +5621,13 @@ sub evalFileStatus{
 		}
 		#print "$outD2\n";
 		if (-d $outD2 && $onlySubmit == 0 && !$subJob && !$recalcTrees){#only the parent may clean shared folders
-			fastRemoveTree($outD2);
-			my $scratch_mgs = "$scratchD/outs/$MGS";
-			fastRemoveTree($scratch_mgs);
+			if ($doSubmit) {
+				fastRemoveTree($outD2);
+				my $scratch_mgs = "$scratchD/outs/$MGS";
+				fastRemoveTree($scratch_mgs);
+			} else {
+				print "Would remove $outD2 for a complete rebuild of $MGS (-submit 0)\n";
+			}
 		}
 		make_path($outD2) unless -d $outD2;
 		my $tooFewMarker = "$outD2/tooFewSamples.sto";
@@ -7868,7 +7891,9 @@ sub retryOOMTreeJobs {
 			push @{$accounting}, @queuedAccounting;
 		}
 		unless (time >= $nextScan) {
-			last unless @pendingJobs || @{$pendingQueue};
+			# Everything finished before the next scan: run one final accounting
+			# scan (it ends the loop unless it queues OOM retries).
+			if (!@pendingJobs && !@{$pendingQueue}) { $nextScan = 0; next; }
 			# A queue that is still draining needs a much shorter wait than the
 			# accounting cadence, so freed capacity is refilled promptly.
 			my $budget = @{$pendingQueue}

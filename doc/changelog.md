@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-09-25 — Pipeline audit, second pass
+
+- Reviewed the 24 September fixes against their callers (no regression found) and re-audited the whole pipeline in eleven slices; see [the second-pass report](../docs/audits/2026-09-25/report.md) for every fix and the findings left open.
+- Secondary reference mapping (map2tar/map2DB) works again end to end: gene prediction on the reference no longer wipes the `GlbMap/<name>/` output directory, the intermediate BAMs are named per reference so the sort/coverage step finds them, and `-mapRefSNP` finds the reference under `<name>.fa`.
+- Read cleaning: singleton recovery no longer swallows the other libraries' or the support scope's singleton files (duplicated reads on a requeued job); porechop only runs for long-read samples.
+- `-autoStatePlan`: the preflight no longer deletes finished mapping outputs when the CRAM was removed on purpose (`-mapSaveCRAM 0` with a binner), and it inspects hybrid preassembly packages where MATAF4 actually stores them.
+- `splitFastas` only reuses a split that finished (stone with input and chunk sizes); the functional-annotation `.length` table is produced also for foldseek and pre-built DIAMOND databases; the between-MGS tree launcher keeps buildTree5's finished per-locus alignments across relaunches; GTDB taxonomy padding, `-FuncMinPerID` floats, the `-requireAllAssemblies 0` contract in `extrAllE100GC.pl`, profiler failure counters and the `/bin/sh` postprocess calls are fixed.
+- The RiboFind SSU/LSU cohort merges are no longer resubmitted on every pass (the skip check now sees the gzipped tables); a binner assignment file is only reused together with `Binning.stone`; `strain_within.pl -submit 0` no longer deletes finished trees or the output directory under `-redo tree`/`-redo all`.
+- New tests: `t/audit_2026_09_25.t` (23 checks); `t/workflow_plan.t` and `t/workflow_runner.t` updated for the package location.
+
+## 2026-09-24 — Pipeline audit fixes
+
+- Fixed about 50 defects found in a whole-pipeline audit; see [the audit report](../docs/audits/2026-09-24/report.md) for each one and for the findings left open.
+- Notable: the shipped `config.old` template now matches the installer (`$MF4DIR`, env `MF4`); decoy/competitive secondary mapping no longer crashes (`alignPostTreat`, `deployMapDB.pl`); eggNOG-mapper category tables keep their annotations; geneCat no longer drops the last sample for some cohort sizes; `-reProfileFunct` re-aligns again; cohort merges count already-closed samples and are no longer blocked by counts from earlier `-loopTillComplete` passes; interrupted buildTree5 runs keep their finished per-locus alignments.
+- `-loopTillComplete` now also rejects `-rewriteGenePred`, `-redoContigStats`, `-redo2ndmap`, `-reParseFunct`, `-redoKraken` and `-redoFails`, which delete outputs on every pass.
+- New tests: `t/audit_2026_09_24.t`, and two checks in `t/workflow_control.t`.
+- Actually removed the scripts retired on 2026-09-23 (they were still tracked and caused all `config_integrity.t`/`script_compile.t` failures), plus the other scripts whose configuration keys were dropped then. The full test suite now passes.
+
 ## 2026-09-23 — Gene-catalogue clustering requires shorter-gene coverage
 
 - Updated `geneCat.pl` to 0.60. The default mmseqs2 clustering previously ran with `-c 0 --cov-mode 0`, so any two genes sharing a ≥100 nt block at ≥95% identity could be merged and their abundances summed. It now uses `--cov-mode 1 -c 0.9`: the shorter gene (the cluster member) must be ≥90% covered by its alignment to the representative. Fragments from fragmented assemblies still join the complete gene they belong to; genes that share only a local block (domains, IS-element flanks, fusion genes) stay separate. This matches the IGC-style criterion (95% identity, 90% coverage of the shorter gene) and the implicit behaviour of the CD-HIT back-end (`-G 1`).

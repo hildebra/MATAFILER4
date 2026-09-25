@@ -2029,8 +2029,10 @@ sub collateGenes(){
 		make_path("$qsubDir/preprocess/") unless -d "$qsubDir/preprocess/";
 		unlink "$prepStone.1" if -e "$prepStone.1";
 		for ( $batch = 0; $batch < $batchNum;$batch ++){
-			my $locTo = int($maxSmpls/$batchNum*(1+$batch));
-			my $locFrom = int($maxSmpls/$batchNum*($batch));
+			# Multiply before dividing: e.g. 2008/11*11 evaluates to 2007.99.. and
+			# int() then silently dropped the last sample.
+			my $locTo = int($maxSmpls*(1+$batch)/$batchNum);
+			my $locFrom = int($maxSmpls*$batch/$batchNum);
 			#print "$locFrom,$locTo\n";
 			  
 			my $cmd = "$GCscr -mode subprepSmpls -GCd $GCdir -map $mapF -tmp $tmpDir -SmplStart $locFrom -SmplStop $locTo -SmplBatch $batch -minGeneL $minGeneL -clusterID $cdhID -MGset $useGTDBmg -oldStyleFolders $oldNameFolders -requireAllAssemblies $requireAllAssemblies";
@@ -2746,7 +2748,9 @@ sub geneCatFunc{
 	$QSBoptHR->{qsubDir} = $qsubDir2;
 		
 	my %optsDia = (eval=>$minEVal,percID=>$minPerID,minPercSbjCov=>$minPercSbjCov,fastaSplits => $fastaSplits,ncore=>$ncore,align=>$funcAligner,
-			splitPath=>$GLBtmp,keepSplits=>!$doClean,redo=>$doClean, minAlignLen=>$minAlLeng, minBitScore=>$minBitSc);
+			# redo would delete this database's finished alignments at submission
+			# time; $doClean only marks the first database of the FuncAssign loop
+			splitPath=>$GLBtmp,keepSplits=>!$doClean,redo=>0, minAlignLen=>$minAlLeng, minBitScore=>$minBitSc);
 			
 			
 	my ($allAss,$jdep) = assignFuncPerGene($query,$outD,$tmpD,$curDB,\%optsDia,$QSBoptHR,(!-e "$outD/${curDB}L0.txt")) ;

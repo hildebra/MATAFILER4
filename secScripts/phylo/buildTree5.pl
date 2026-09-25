@@ -592,7 +592,7 @@ GetOptions(
 	"NonSynTree=i"	=> \$calcNonSyn,
 	"continue=i" => \$continue,
 	"epaOnly=i" => \$epaOnly,
-	"redoEPAfilter:i" => sub { $redoEPAfilter = $_[1] || 1; },
+	"redoEPAfilter:1" => \$redoEPAfilter, #bare flag implies 1; an explicit 0 stays 0
 	"bootstrap=i" => \$bootStrap,
 	"subsetSmpls=i" => \$subsetSmpls,
 	"postFilter=s" => \$postFilter, # "," sep list of zorro,guidance2,macse
@@ -1507,7 +1507,10 @@ if (!$locusMSARecovery && $continue
 	make_path($treeD);
 	$treesDone = 0;
 } elsif (!$locusMSARecovery && $cogCats ne "" && $continue
-		&& !$postAlignmentQCAuditCurrent) {
+		&& !$postAlignmentQCAuditCurrent
+		# the final QC reports only exist after the locus loop; an interrupted
+		# run keeps its policy-matched per-locus alignments (handled below)
+		&& ($treesDone || fileGZe($multAliArtifact))) {
 	print "Recovery state: post-alignment QC checkpoint is unavailable; rebuilding per-locus alignments and tree outputs\n";
 	safeRemoveTree($MsaD, $outD);
 	safeRemoveTree($treeD, $outD);
@@ -2093,7 +2096,8 @@ if ($isAligned){
 				$currentRecoveredSampleGene{$sp}{$gene} = 1;
 				$currentRecoveredSequences++;
 			}
-			if (!$taxonAwareLocusSelection
+			# the species prefilter deliberately keeps a sparse outgroup
+			if (!$taxonAwareLocusSelection && !($outgroup ne "" && $sp eq $outgroup)
 					&& $specList{$sp} < ($qtl90Genes * $GeneFracPSpec)) {
 				die "buildTree: GeneFracPSpec maxGenes shouldn't be here!\n";
 			}

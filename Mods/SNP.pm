@@ -244,7 +244,12 @@ sub pileupcall{
 		my $bedF = $qsubDirE."$smplNm.${tag}$i.bed";
 		my $chunkFile = "$tmpOut.$tag$i.vcf.gz";
 		push @chunkFiles, $chunkFile;
-		next if (-s $chunkFile && (-s "$chunkFile.csi" || -s "$chunkFile.tbi") && !$overwrite);
+		if (-s $chunkFile && (-s "$chunkFile.csi" || -s "$chunkFile.tbi") && !$overwrite) {
+			# The job-time region planner rewrites every chunk's BED; a finished
+			# chunk must still remove its own, or the final BED check exits 33.
+			if ($run2ctg && $myParL) { $cmdAll2 .= "rm -f $bedF\n"; $bedJobs++; }
+			next;
+		}
 		if ($myParL){
 			if (-s $chunkFile && !$overwrite) {
 				# A prior run may have completed the expensive call but failed before

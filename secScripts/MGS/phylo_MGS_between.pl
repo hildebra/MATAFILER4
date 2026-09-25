@@ -16,6 +16,7 @@ use strict;
 use Getopt::Long qw( GetOptions );
 use File::Path qw(make_path);
 use File::Spec;
+use File::Compare qw(compare);
 use Cwd qw(abs_path);
 
 use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta);
@@ -264,8 +265,19 @@ print "done\n";
 
 make_path($btout) unless -d $btout;
 
-#open ON,">$btout/all.fna"; 
-open OA,">$btout/all.faa"  or die "Can't open faa out file $btout/all.faa\n"; 
+#open ON,">$btout/all.fna";
+# buildTree5 -continue fingerprints its inputs by size and mtime: rewriting an
+# unchanged all.faa/all.cats would discard every finished per-locus alignment.
+# Write to temporaries and replace the published files only when they differ.
+my $publishIfChanged = sub {
+	my ($tmpF, $finalF) = @_;
+	if (-e $finalF && compare($tmpF, $finalF) == 0) {
+		unlink $tmpF or die "Cannot remove $tmpF: $!\n";
+		return;
+	}
+	rename($tmpF, $finalF) or die "Cannot publish $finalF: $!\n";
+};
+open OA,">$btout/all.faa.tmp"  or die "Can't open faa out file $btout/all.faa.tmp\n";
 my $SaSe = "|";
 foreach my $mg (sort keys %MGSFMG){
 	foreach my $cog (sort keys %{$MGSFMG{$mg}}){
@@ -276,13 +288,15 @@ foreach my $mg (sort keys %MGSFMG){
 		push(@{$catT{$cog}},"$ng");
 	}
 }
-close OA;
+close OA or die "Can't close $btout/all.faa.tmp: $!\n";
+$publishIfChanged->("$btout/all.faa.tmp", "$btout/all.faa");
 
-open OC,">$btout/all.cats" or die "Can't open cat file $btout/all.cats\n";
+open OC,">$btout/all.cats.tmp" or die "Can't open cat file $btout/all.cats.tmp\n";
 foreach my $cg (sort keys %catT){
 	print OC join("\t",@{$catT{$cg}})."\n";
 }
-close OC;
+close OC or die "Can't close $btout/all.cats.tmp: $!\n";
+$publishIfChanged->("$btout/all.cats.tmp", "$btout/all.cats");
 my $QSBoptHR = emptyQsubOpt(1,"");
 $QSBoptHR->{useLongQueue} = 1;
 my $treeFile = "$btout/phylo/IQtree_allsites.treefile";
@@ -301,7 +315,9 @@ if (-s $workflowStateFile) {
 		or die "Cannot close BuildTree state $workflowStateFile: $!\n";
 	my %policy = map { split /=/, $_, 2 }
 		split /\t/, ($state{msa_selection_policy} // "");
-	$broadLocusRetentionCurrent = ($policy{schema} // "") eq "13"
+	# compare the policy values, not the buildTree5 schema number (13 was one
+	# release; comparing it literally made this reuse check permanently false)
+	$broadLocusRetentionCurrent = ($policy{schema} // "") ne ""
 		&& ($policy{enabled} // "") eq "0"
 		&& ($policy{scope} // "") eq "between"
 		&& ($policy{per_gene_length_fraction} // "") eq "0.4"

@@ -950,7 +950,9 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		$qbin="bash";$LSF=3;
 		print O "#!/bin/bash\n";
 	} elsif ($qmode eq "sge"){
-		print O "#!/bin/bash\n#\$ -S /bin/bash\n#\$ -cwd\n#\$ -pe ".$optHR->{qsubPEenv}." $nthreads\n#\$ -o $tmpsh.otxt\n#\$ -e $tmpsh.etxt\n#\$ -l h_rss=$memory\n";#h_vmem=$mem\n";
+		# $memory is plain MB here; SGE reads a unitless value as bytes
+		my $sgeMemory = $memory =~ /^\d+$/ ? "${memory}M" : $memory;
+		print O "#!/bin/bash\n#\$ -S /bin/bash\n#\$ -cwd\n#\$ -pe ".$optHR->{qsubPEenv}." $nthreads\n#\$ -o $tmpsh.otxt\n#\$ -e $tmpsh.etxt\n#\$ -l h_rss=$sgeMemory\n";#h_vmem=$mem\n";
 		print O "#\$ -v LD_LIBRARY_PATH=".$optHR->{cpplib}."\n";#\$ -v TMPDIR=/dev/shm\n";
 #		print O "#\$ -v PERL5LIB=".$optHR->{perl5lib}."\n";
 		print O "#\$ -V\n";

@@ -72,7 +72,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-submit` | integer | `1` | stable | submit any jobs at all? (0= no submission, just for trying if everything is correctly set up) |
 | `-from` | integer | `0` | stable | start at which samples from map file? |
 | `-to` | integer | `999999999999` | stable | stop at which samples from map file? |
-| `-loopTillComplete` | string | `"0"` | advanced | Repeat samples in rolling windows until complete, then run one full verification pass. Syntax `X:Y` sets the pass budget and window size; statistics are collected only after a clean full pass. |
+| `-loopTillComplete` | string | `"0"` | advanced | Repeat samples in rolling windows until complete, then run one full verification pass. Syntax `X:Y` sets the pass budget and window size; statistics are collected only after a clean full pass. Options that delete outputs on every pass (e.g. `-reAssembleMG`, `-redoBinning`, `-reProfileFunct`, `-reParseFunct`, `-reProfileRibosome`, `-rewriteGenePred`, `-redoContigStats`, `-redo2ndmap`, `-redoFails`) are rejected in combination with it. |
 | `-loopTillCompleteActiveJobs` | integer | `3` | advanced | Start the next rolling pass once at most this many window jobs are still running. |
 | `-schedulerPollSeconds` | integer | `20` | advanced | Seconds between scheduler queries while `loopTillComplete` waits. Values must be positive. |
 | `-schedulerCapacityCheckJobs` | integer | `10` | advanced | Refresh the exact Slurm job count after this many submissions, or sooner at `-maxConcurrentJobs`. |
