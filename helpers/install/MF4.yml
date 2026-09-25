@@ -1,7 +1,7 @@
 name: MF4
 channels:
-- conda-forge
-- bioconda
+  - https://repo.prefix.dev/conda-forge
+  - https://repo.prefix.dev/bioconda
 dependencies:
 #MF specific programs
   - sdm>=3.27
