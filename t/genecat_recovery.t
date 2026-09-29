@@ -36,7 +36,7 @@ use warnings;
 use File::Path qw(make_path remove_tree);
 use File::Spec;
 use Fcntl qw(O_CREAT O_EXCL O_WRONLY);
-use Errno qw(EEXIST);
+use Errno qw(EEXIST ENOENT);
 use IO::Handle;
 use English;
 use Mods::GenoMetaAss qw(gzipopen systemW readFasta);
@@ -51,7 +51,9 @@ our ($primaryClusterFNA, $primaryClusterCLS, $pigzBin, $catBin, $cpBin, $rmBin,
     $mmseqs2Bin, $cdhitBin, $GLBtmp, $headBin, $tailBin, $clusterCov);
 IMPORTS
 my @helpers = qw(_shell_quote _checkpoint_command _stone_valid _sync_file
-    _for_each_fasta_record _safe_reset_dir _append_file_locked _reset_collation_outputs
+    _for_each_fasta_record _safe_reset_dir _lock_stale_seconds _lock_heartbeat_seconds _lock_holder_label
+    _read_append_lock _append_complete _break_stale_append_lock
+    _append_file_locked _reset_collation_outputs
     gzifelscat _catalog_backup_command _merged_catalog_backup_valid clusterFNA
     clusterSingleStep rewriteClusNumbers addCOGgenes mergeClsSam rewriteFastaHdIdx
     combineClstr krakenTax geneCatFunc_emapper);

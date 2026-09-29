@@ -19,7 +19,7 @@ use File::stat;
 use File::Path qw(make_path remove_tree);
 use File::Spec;
 use Fcntl qw(O_CREAT O_EXCL O_WRONLY);
-use Errno qw(EEXIST);
+use Errno qw(EEXIST ENOENT);
 use IO::Handle;
 
 use Getopt::Long qw( GetOptions );
@@ -27,7 +27,8 @@ use Getopt::Long qw( GetOptions );
 use Cwd; use English;
 use Mods::FlagReference qw(printFlagHelp helpRequested);
 use Mods::GenoMetaAss qw( readFasta ensureFastaIndex fileGZe gzipopen gzipwrite splitFastas readMapS systemW readGFF getAssemblPath resolve_path);
-use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
+use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive
+	submissionDependencyDeferred submissionDependencyFailed);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
 use Mods::FuncTools qw(assignFuncPerGene calc_modules);
@@ -35,7 +36,7 @@ use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins3 );
 use Mods::Binning qw(getBinSubdirName);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid read_checkpoint);
 use Mods::WorkflowResilience qw(
-	retry_unlink retry_rename atomic_write_text write_workflow_record
+	retry_unlink retry_rename atomic_write_text write_workflow_record read_workflow_record
 	preflight_directory preflight_capacity
 );
 use Mods::CatalogPaths qw(catalog_identity catalog_map_specs_match resolve_catalog_maps write_catalog_maps);
@@ -272,16 +273,109 @@ sub _publish_gzip_output {
 		label => 'publish completed gene-catalog gzip batch');
 }
 
+# Appends are serialised with an O_EXCL lock file. The holder refreshes the
+# lock's mtime while it copies, so a lock is only "stale" once nothing has
+# touched it for _lock_stale_seconds() - i.e. its job was killed. Waiting behind a
+# live holder is never an error (the destination grows to many GB, so a queue of
+# batches legitimately waits for hours); only a lock that stopped being
+# refreshed is broken, after undoing whatever partial append it left behind.
+# The lock records the destination size before the first byte was written.
+sub _lock_stale_seconds { return $ENV{GENECAT_LOCK_STALE_SECONDS} || 1800; }
+sub _lock_heartbeat_seconds { return 30; }
+
+sub _lock_holder_label {
+	my ($record) = @_;
+	return 'unknown holder' unless $record && %{$record};
+	return join(' ', map { defined $record->{$_} ? "$_=$record->{$_}" : () } qw(host pid job));
+}
+
+sub _read_append_lock {
+	my ($lock_file) = @_;
+	open my $in, '<', $lock_file or return {};
+	my %record;
+	while (my $line = <$in>) {
+		chomp $line;
+		$record{$1} = $2 if $line =~ /^(\w+)=(.*)$/;
+	}
+	close $in;
+	return \%record;
+}
+
+# An append is complete once its marker exists, or (markerless callers) once
+# the source it consumed is gone.
+sub _append_complete {
+	my ($record) = @_;
+	return 1 if length($record->{marker} // '') && -e $record->{marker};
+	return 0 if length($record->{source} // '') && -e $record->{source};
+	return 1;
+}
+
+# Returns true when the lock was removed (or vanished), false if another
+# waiter is already breaking it or the holder turned out to be alive.
+sub _break_stale_append_lock {
+	my ($lock_file, $stale_seconds) = @_;
+	my $guard = "$lock_file.break";
+	my $guard_mtime = (stat $guard)[9];
+	unlink $guard if defined($guard_mtime) && time - $guard_mtime > 300;
+	my $guard_fh;
+	return 0 unless sysopen($guard_fh, $guard, O_CREAT | O_EXCL | O_WRONLY);
+	close $guard_fh;
+	my $broke = eval {
+		my $mtime = (stat $lock_file)[9];
+		return 1 unless defined $mtime;
+		return 0 if time - $mtime < $stale_seconds; # refreshed, or a new holder took over
+		my $record = _read_append_lock($lock_file);
+		my $destination = $record->{dest} // '';
+		if (length($destination) && defined($record->{size}) && $record->{size} =~ /^\d+$/
+				&& -e $destination && !_append_complete($record)) {
+			my $size = (-s $destination) || 0;
+			if ($size > $record->{size}) {
+				truncate($destination, $record->{size})
+					or die "Cannot roll back interrupted append to $destination: $!\n";
+				warn "Rolled back interrupted append to $destination ("
+					. ($size - $record->{size}) . " bytes from "
+					. _lock_holder_label($record) . ")\n";
+			}
+		}
+		warn "Removing stale append lock $lock_file left by " . _lock_holder_label($record)
+			. " (untouched for " . (time - $mtime) . "s)\n";
+		unlink $lock_file or ($! == ENOENT) or die "Cannot remove stale lock $lock_file: $!\n";
+		1;
+	};
+	my $error = $@;
+	unlink $guard;
+	die $error if $error;
+	return $broke;
+}
+
 sub _append_file_locked {
-	my ($source, $destination, $lock_file) = @_;
-	my $deadline = time + 3600;
+	my ($source, $destination, $lock_file, $marker) = @_;
+	$marker = '' unless defined $marker;
+	my $started = time;
 	my $lock_fh;
+	my $announced = 0;
 	while (!sysopen($lock_fh, $lock_file, O_CREAT | O_EXCL | O_WRONLY)) {
 		die "Cannot create lock $lock_file: $!\n" unless $! == EEXIST;
-		die "Timed out waiting for lock $lock_file\n" if time >= $deadline;
-		sleep 2;
+		my $mtime = (stat $lock_file)[9];
+		if (defined($mtime) && time - $mtime >= _lock_stale_seconds()) {
+			next if _break_stale_append_lock($lock_file, _lock_stale_seconds());
+		}
+		if (time - $started >= 24 * 3600) {
+			my $holder = _lock_holder_label(_read_append_lock($lock_file));
+			die "Gave up after 24h waiting for lock $lock_file (held by $holder, still refreshed)\n";
+		}
+		if (!$announced++ || ($announced % 120) == 0) {
+			print "Waiting for append lock $lock_file held by "
+				. _lock_holder_label(_read_append_lock($lock_file)) . "\n";
+		}
+		sleep 5;
 	}
-	print {$lock_fh} "$PROCESS_ID\n" or die "Cannot write lock $lock_file: $!\n";
+	my $destination_size = (-e $destination ? -s $destination : 0) || 0;
+	my $host = $ENV{HOSTNAME} || $ENV{HOST} || 'unknown';
+	my $job = $ENV{SLURM_JOB_ID} || $ENV{JOB_ID} || $ENV{LSB_JOBID} || '';
+	print {$lock_fh} "host=$host\npid=$PROCESS_ID\njob=$job\nsize=$destination_size\n"
+		. "dest=$destination\nsource=$source\nmarker=$marker\n"
+		or die "Cannot write lock $lock_file: $!\n";
 	close $lock_fh or die "Cannot close lock $lock_file: $!\n";
 
 	my $ok = eval {
@@ -291,19 +385,37 @@ sub _append_file_locked {
 		binmode $in;
 		binmode $out;
 		my $buffer;
+		my $last_beat = time;
 		while (1) {
 			my $bytes = read($in, $buffer, 1024 * 1024);
 			die "Cannot read $source: $!\n" unless defined $bytes;
 			last unless $bytes;
 			print {$out} $buffer or die "Cannot append to $destination: $!\n";
+			if (time - $last_beat >= _lock_heartbeat_seconds()) {
+				utime(undef, undef, $lock_file);
+				$last_beat = time;
+			}
 		}
 		close $in or die "Cannot close $source: $!\n";
 		$out->flush() or die "Cannot flush $destination: $!\n";
+		utime(undef, undef, $lock_file);
 		$out->sync() or die "Cannot synchronize $destination to storage: $!\n";
 		close $out or die "Cannot close $destination: $!\n";
+		if (length $marker) {
+			open my $done, '>', $marker or die "Cannot write append marker $marker: $!\n";
+			print {$done} "appended\n";
+			close $done or die "Cannot close append marker $marker: $!\n";
+		}
 		1;
 	};
 	my $error = $@;
+	if (!$ok && ((-s $destination) || 0) > $destination_size
+			&& !(length($marker) && -e $marker)) {
+		# We are alive to see the failure: undo our partial append instead of
+		# leaving it for the next holder.
+		truncate($destination, $destination_size)
+			or warn "Cannot roll back failed append to $destination: $!\n";
+	}
 	retry_unlink($lock_file, label => 'release gene-catalog append lock');
 	die $error unless $ok;
 	retry_unlink($source, label => 'remove transferred gene-catalog batch');
@@ -1889,8 +2001,15 @@ sub addingSmpls{
 		my $dest = $destFiles[$i];
 		my $lockFile = $curTransfer.".lock";
 		my $source = "$curTransfer.$batch";
+		# A resubmitted batch must not append the same genes twice.
+		my $marker = "$source.appended";
+		if (-e $marker) {
+			print "$source was already appended to $dest by an earlier attempt\n";
+			retry_unlink($source, label => 'remove already-transferred gene-catalog batch');
+			next;
+		}
 		print "Appending $source to $dest\n";
-		_append_file_locked($source, $dest, $lockFile);
+		_append_file_locked($source, $dest, $lockFile, $marker);
 	}
 	return 0;
 }
@@ -1900,8 +2019,14 @@ sub _reset_collation_outputs {
 	_safe_reset_dir($bucket_dir, 'gene-catalog collation');
 	_safe_reset_dir(File::Spec->catdir($temporary_dir, $marker_dir), 'marker collation');
 	for my $kind (qw(compl incompl 5Pcompl 3Pcompl)) {
-		retry_unlink(File::Spec->catfile($temporary_dir, "$kind.fna.gz.lock"),
-			label => 'remove interrupted collation lock');
+		retry_unlink(File::Spec->catfile($temporary_dir, "$kind.fna.gz.$_"),
+			label => 'remove interrupted collation lock') for qw(lock lock.break);
+	}
+	if (opendir my $scratch, $temporary_dir) {
+		my @markers = grep { /^(?:compl|incompl|5Pcompl|3Pcompl)\.fna\.gz\.\d+\.appended$/ } readdir $scratch;
+		closedir $scratch;
+		retry_unlink(File::Spec->catfile($temporary_dir, $_), label => 'remove stale append marker')
+			for @markers;
 	}
 	opendir my $logs, $log_dir or die "Cannot open $log_dir: $!\n";
 	my @obsolete = grep { /^(?:GeneCompleteness\.txt\.\d+|Missed_samples\.txt(?:\.\d+)?)$/ } readdir $logs;
@@ -1909,8 +2034,212 @@ sub _reset_collation_outputs {
 	retry_unlink(File::Spec->catfile($log_dir, $_), label => 'remove interrupted batch report') for @obsolete;
 }
 
+# ---- supervision of the parallel sample-collation (subprepSmpls) batches ----
+# The controller itself watches every batch job instead of submitting a
+# dependent "check" job: a dependent job with afterok never starts when a single
+# batch fails, silently blocking the whole pipeline. Each batch job writes
+# geneCat.subprepSmpls.batch-N.heartbeat.tsv (status=completed on a clean exit,
+# see the END block) and .failure.tsv (with the die message) into $qsubDir, so
+# those records - not the scheduler's exit code - decide success. A job that
+# leaves the queue without a completed record was killed (OOM, time limit, node
+# failure) and is resubmitted, with more memory when it looks like an OOM kill.
+
+sub _prep_record_paths {
+	my ($batch) = @_;
+	my $tag = "geneCat.subprepSmpls.batch-$batch";
+	return ("$qsubDir/$tag.heartbeat.tsv", "$qsubDir/$tag.failure.tsv");
+}
+
+sub _prep_batch_range {
+	my ($batch, $total, $batches) = @_;
+	# Multiply before dividing: e.g. 2008/11*11 evaluates to 2007.99.. and
+	# int() then silently dropped the last sample.
+	return (int($total * $batch / $batches), int($total * (1 + $batch) / $batches));
+}
+
+sub _tail_lines {
+	my ($path, $count) = @_;
+	return () unless defined($path) && -s $path;
+	open my $in, '<', $path or return ();
+	my @ring;
+	while (my $line = <$in>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless $line =~ /\S/;
+		$line = substr($line, 0, 300) . ' [...]' if length($line) > 300;
+		push @ring, $line;
+		shift @ring if @ring > $count;
+	}
+	close $in;
+	return @ring;
+}
+
+sub _prep_job_accounting {
+	my ($job_id, $optHR) = @_;
+	return {} unless ($optHR->{qmode} // '') eq 'slurm' && defined($job_id) && $job_id =~ /^\d+$/;
+	my $command = "sacct -X -n -P -j $job_id --format=State,ExitCode,Elapsed";
+	my ($output, $status);
+	if ($optHR->{jobAccountingRunner}) {
+		($output, $status) = $optHR->{jobAccountingRunner}->($command);
+	} else {
+		$output = `$command 2>&1`;
+		$status = $?;
+	}
+	return {} if $status || !defined($output);
+	my ($line) = grep { /\S/ } split /\n/, $output;
+	return {} unless defined $line;
+	my ($state, $exit, $elapsed) = map { defined $_ ? $_ : '' } split /\|/, $line, 3;
+	$state =~ s/^\s+//; $state =~ s/[\s+].*$//;
+	$state = uc $state;
+	return {
+		state => $state, exit => $exit, elapsed => $elapsed,
+		summary => "scheduler state $state, exit code $exit, run time $elapsed",
+	};
+}
+
+# Decide whether a batch whose job left the queue succeeded. Returns a hash:
+# ok, or reason/retryable/oom/scheduler/output for the report.
+sub _prep_batch_outcome {
+	my ($batch, $job_id, $script, %o) = @_;
+	my ($heartbeat_file, $failure_file) = _prep_record_paths($batch);
+	my ($heartbeat, $failure);
+	my $tries = defined $o{settle_tries} ? $o{settle_tries} : 4;
+	for my $try (0 .. $tries) {
+		$heartbeat = read_workflow_record($heartbeat_file);
+		$failure = read_workflow_record($failure_file);
+		last if $failure || ($heartbeat && $heartbeat->{status} eq 'completed');
+		# Shared filesystems can show a finished job's records a few seconds late.
+		sleep(defined $o{settle_seconds} ? $o{settle_seconds} : 5) if $try < $tries;
+	}
+	return {ok => 1} if !$failure && $heartbeat && $heartbeat->{status} eq 'completed';
+
+	my %result = (ok => 0, retryable => 1, oom => 0);
+	if ($failure) {
+		$result{reason} = "batch reported failure in stage '" . ($failure->{stage} // '?') . "': "
+			. (length($failure->{reason} // '') ? $failure->{reason} : 'no reason recorded');
+		# Exit 33 = data problem found while collating (sample-name conflicts,
+		# marker-gene mismatches); another attempt would fail identically.
+		$result{retryable} = 0 if $result{reason} =~ /controller exit status 33\b/;
+	} elsif ($heartbeat) {
+		$result{reason} = "job left the queue while still in stage '" . ($heartbeat->{stage} // '?')
+			. "' with no completion record (last heartbeat "
+			. scalar(localtime($heartbeat->{timestamp} || 0))
+			. "); it was most likely killed by the scheduler (memory, time limit or node failure)";
+		$result{oom} = 1;
+	} else {
+		$result{reason} = "job left the queue without ever starting the batch (no heartbeat written)";
+	}
+	my $accounting = _prep_job_accounting($job_id, $o{opts});
+	if ($accounting->{state}) {
+		$result{scheduler} = $accounting->{summary};
+		$result{oom} = 1 if $accounting->{state} =~ /^OUT_OF_M/;
+		$result{oom} = 0 if $accounting->{state} =~ /^(?:COMPLETED|TIMEOUT|NODE_FAIL|CANCELLED)/;
+	}
+	my @output = _tail_lines("$script.etxt", 8);
+	@output = _tail_lines("$script.otxt", 5) unless @output;
+	$result{output} = \@output;
+	$result{output_file} = "$script.etxt";
+	return \%result;
+}
+
+sub _prep_failure_report {
+	my ($batch, $state, $describe) = @_;
+	my $last = $state->{failures}[-1];
+	my @lines = ("Sample preprocessing batch $batch failed"
+		. " after $state->{attempts} attempt(s)" . ($describe ? " ($describe)" : '') . ":");
+	push @lines, "  job(s): " . join(', ', @{$state->{jobs}});
+	push @lines, "  reason: $last->{reason}";
+	push @lines, "  scheduler: $last->{scheduler}" if $last->{scheduler};
+	if (@{$last->{output} || []}) {
+		push @lines, "  last lines of $last->{output_file}:";
+		push @lines, map { "    | $_" } @{$last->{output}};
+	}
+	push @lines, "  retrying was skipped: this is not a transient error" unless $last->{retryable};
+	return join("\n", @lines) . "\n";
+}
+
+# %o: count, memory (GB), max_attempts, rtag, describe(batch), submit(batch,
+# attempt, memory_gb) -> job id, cleanup(batch, attempt), outcome(batch, job,
+# attempt) -> hash, wait(\@jobs) -> \@still_queued, pause(seconds).
+sub _supervise_prep_batches {
+	my (%o) = @_;
+	my $max_attempts = $o{max_attempts} || 3;
+	my $rtag = defined $o{rtag} ? $o{rtag} : '';
+	my %state = map { $_ => {attempts => 0, memory => $o{memory}, jobs => [], failures => []} }
+		0 .. $o{count} - 1;
+	my (%pending, %running, %failed, %done, %retried);
+	$pending{$_} = 1 for keys %state;
+	my $announced_done = -1;
+	while (%pending || %running) {
+		for my $batch (sort { $a <=> $b } keys %pending) {
+			my $s = $state{$batch};
+			$o{cleanup}->($batch, $s->{attempts});
+			$s->{attempts}++;
+			my $job = $o{submit}->($batch, $s->{attempts}, $s->{memory});
+			if (defined($job) && $job ne '' && submissionDependencyDeferred($job)) {
+				$s->{attempts}--; # postponed by the concurrent-job limit, not an attempt
+				next;
+			}
+			delete $pending{$batch};
+			if (!defined($job) || $job eq '' || submissionDependencyFailed($job)) {
+				my $result = {ok => 0, retryable => 0, reason => 'the scheduler rejected the submission'};
+				push @{$s->{failures}}, $result;
+				$failed{$batch} = 1;
+				next;
+			}
+			push @{$s->{jobs}}, do { (my $bare = $job) =~ s/^\Q$rtag\E//; $bare };
+			$running{$batch} = $job;
+		}
+		unless (%running) {
+			$o{pause}->(30) if %pending; # only deferred submissions are left
+			next;
+		}
+		my $queued = $o{wait}->([values %running]) || [];
+		my %alive = map { $_ => 1 } @{$queued};
+		for my $batch (sort { $a <=> $b } keys %running) {
+			(my $bare = $running{$batch}) =~ s/^\Q$rtag\E//;
+			next if $alive{$bare};
+			my $job = delete $running{$batch};
+			my $s = $state{$batch};
+			my $result = $o{outcome}->($batch, $bare, $s->{attempts});
+			if ($result->{ok}) {
+				$done{$batch} = 1;
+				next;
+			}
+			push @{$s->{failures}}, $result;
+			warn "Preprocessing batch $batch (job $bare) failed on attempt $s->{attempts}/$max_attempts: $result->{reason}\n";
+			if ($result->{retryable} && $s->{attempts} < $max_attempts) {
+				if ($result->{oom}) {
+					my $more = int($s->{memory} * 1.5 + 0.5);
+					$more = $o{max_memory} if $o{max_memory} && $more > $o{max_memory};
+					warn "  raising the memory request for batch $batch from $s->{memory}G to ${more}G\n"
+						if $more != $s->{memory};
+					$s->{memory} = $more;
+				}
+				warn "  resubmitting batch $batch (attempt " . ($s->{attempts} + 1) . "/$max_attempts)\n";
+				$retried{$batch} = 1;
+				$pending{$batch} = 1;
+			} else {
+				$failed{$batch} = 1;
+			}
+		}
+		if (scalar(keys %done) != $announced_done) {
+			$announced_done = scalar keys %done;
+			print "Preprocessing progress: $announced_done/$o{count} batches finished, "
+				. scalar(keys %running) . " running/queued"
+				. (%pending ? ", " . scalar(keys %pending) . " awaiting resubmission" : '')
+				. (%failed ? ", " . scalar(keys %failed) . " failed" : '') . "\n";
+		}
+	}
+	return {
+		ok => !%failed,
+		failed => [sort { $a <=> $b } keys %failed],
+		retried => [sort { $a <=> $b } keys %retried],
+		state => \%state,
+	};
+}
+
 sub collateGenes(){
-	
+
 	
 	my $prepStone = "$stoneDir/GenesCollated.stone";
 	my $prep_valid = _stone_valid($prepStone, $cdhID);
@@ -2025,36 +2354,70 @@ sub collateGenes(){
 	
 		my $maxSmpls = scalar(@samples);
 		print "Preparing splitting preprocessing of $maxSmpls metagenomes in $batchNum batches.\n";
-		my $batch = 0; my @jobs;
+		my $batch = 0;
+		if (!$QSBoptHR->{doSubmit} && $batchNum > 1) {
+			die "Job submission is disabled, so the sample preprocessing batches cannot run.\n";
+		}
 		make_path("$tmpDir/$COGdir") unless -d "$tmpDir/$COGdir";
 		make_path("$qsubDir/preprocess/") unless -d "$qsubDir/preprocess/";
-		unlink "$prepStone.1" if -e "$prepStone.1";
-		for ( $batch = 0; $batch < $batchNum;$batch ++){
-			# Multiply before dividing: e.g. 2008/11*11 evaluates to 2007.99.. and
-			# int() then silently dropped the last sample.
-			my $locTo = int($maxSmpls*(1+$batch)/$batchNum);
-			my $locFrom = int($maxSmpls*$batch/$batchNum);
-			#print "$locFrom,$locTo\n";
-			  
-			my $cmd = "$GCscr -mode subprepSmpls -GCd $GCdir -map $mapF -tmp $tmpDir -SmplStart $locFrom -SmplStop $locTo -SmplBatch $batch -minGeneL $minGeneL -clusterID $cdhID -MGset $useGTDBmg -oldStyleFolders $oldNameFolders -requireAllAssemblies $requireAllAssemblies";
-			$cmd .= " -extraGenesNT \"$extraRdsFNA\"" if $batch == 0 && length $extraRdsFNA;
-			#die "$cmd\n$batchNum : $maxSmpls\n";
-			if ($batchNum == 1){
-				systemW $cmd."\n";
-			} else {
-				my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-				my $numCor = 3;
-				my ($jdep,$txtBSUB) = qsubSystem($qsubDir."/preprocess/Preprocess.$batch.sh",$cmd,$numCor,int(30)."G","PrPr$batch","","",1,[],$QSBoptHR);
-				push(@jobs,$jdep);
-				$QSBoptHR->{tmpSpace} =$tmpSHDD;
+		my $batchCommand = sub {
+			my ($b) = @_;
+			my ($locFrom, $locTo) = _prep_batch_range($b, $maxSmpls, $batchNum);
+			my $cmd = "$GCscr -mode subprepSmpls -GCd $GCdir -map $mapF -tmp $tmpDir -SmplStart $locFrom -SmplStop $locTo -SmplBatch $b -minGeneL $minGeneL -clusterID $cdhID -MGset $useGTDBmg -oldStyleFolders $oldNameFolders -requireAllAssemblies $requireAllAssemblies";
+			$cmd .= " -extraGenesNT \"$extraRdsFNA\"" if $b == 0 && length $extraRdsFNA;
+			return $cmd;
+		};
+		if ($batchNum == 1){
+			systemW $batchCommand->(0)."\n";
+		} else {
+			my $prepMemGB = 30;
+			my $prepAttempts = $ENV{GENECAT_PREP_ATTEMPTS} || 3;
+			my $scriptOf = sub { "$qsubDir/preprocess/Preprocess.$_[0].sh" };
+			my $supervision = _supervise_prep_batches(
+				count => $batchNum, memory => $prepMemGB, max_memory => 400,
+				max_attempts => $prepAttempts, rtag => $QSBoptHR->{rTag},
+				submit => sub {
+					my ($b, $attempt, $memGB) = @_;
+					my $tmpSHDD = $QSBoptHR->{tmpSpace}; $QSBoptHR->{tmpSpace} = "0";
+					my ($jdep) = qsubSystem($scriptOf->($b), $batchCommand->($b), 3,
+						int($memGB)."G", "PrPr$b", "", "", 1, [], $QSBoptHR);
+					$QSBoptHR->{tmpSpace} = $tmpSHDD;
+					return $jdep;
+				},
+				# Fresh records per attempt; keep the failed attempt's logs, which the
+				# scheduler script would otherwise delete on resubmission.
+				cleanup => sub {
+					my ($b, $attemptsSoFar) = @_;
+					retry_unlink($_, fatal => 0, label => 'clear preprocessing batch record')
+						for _prep_record_paths($b);
+					return unless $attemptsSoFar;
+					for my $ext (qw(etxt otxt)) {
+						my $log = $scriptOf->($b) . ".$ext";
+						rename $log, "$log.attempt$attemptsSoFar" if -e $log;
+					}
+				},
+				outcome => sub {
+					my ($b, $job) = @_;
+					return _prep_batch_outcome($b, $job, $scriptOf->($b), opts => $QSBoptHR);
+				},
+				wait => sub { qsubSystemJobAlive($_[0], $QSBoptHR, 0, -1, 300) },
+				pause => sub { sleep $_[0] },
+			);
+			if (@{$supervision->{failed}}) {
+				for my $b (@{$supervision->{failed}}) {
+					my ($locFrom, $locTo) = _prep_batch_range($b, $maxSmpls, $batchNum);
+					warn _prep_failure_report($b, $supervision->{state}{$b},
+						"samples " . ($locFrom + 1) . "-$locTo of $maxSmpls; script "
+						. $scriptOf->($b));
+				}
+				die "Sample preprocessing failed for " . scalar(@{$supervision->{failed}}) . " of $batchNum batch(es): "
+					. join(", ", @{$supervision->{failed}})
+					. ". Fix the reported cause and rerun geneCat; the collation restarts cleanly from the assemblies.\n";
 			}
-
-			# addingSmpls($locFrom,$locTo,$batch);  subprepSmpls
+			print "All $batchNum preprocessing batches finished"
+				. (@{$supervision->{retried}} ? " (batches needing a resubmission: "
+					. join(", ", @{$supervision->{retried}}) . ")" : "") . ".\n";
 		}
-		my $cmd2 = "$touchBin $prepStone.1";
-		my ($jdep,$txtBSUB) = qsubSystem($qsubDir."Preprocess.check.sh",$cmd2,1,"1G","CheckPrPr",join(";",@jobs),"",1,[],$QSBoptHR);
-		qsubSystemJobAlive( [@jobs,$jdep],$QSBoptHR ); 
-		die "Something went wrong in the sample prep..\nCheck $qsubDir/Preprocess.*.sh\n" unless (-e "$prepStone.1");
 		_merge_missed_sample_files($qsubDir);
 
 		#die;

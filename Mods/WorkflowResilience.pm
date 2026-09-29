@@ -10,7 +10,7 @@ use File::Path qw(make_path);
 
 our @EXPORT_OK = qw(
 	retry_operation retry_unlink retry_rename retry_open retry_close
-	atomic_write_text write_workflow_record
+	atomic_write_text write_workflow_record read_workflow_record
 	acquire_workflow_lock
 	preflight_executable preflight_directory filesystem_capacity preflight_capacity
 );
@@ -173,6 +173,26 @@ sub write_workflow_record {
 	return atomic_write_text($path, $text,
 		fatal => 0,
 		label => "publish workflow record $path");
+}
+
+# Inverse of write_workflow_record: returns a hash reference of the record's
+# columns, or undef when the file is absent, empty or malformed.
+sub read_workflow_record {
+	my ($path) = @_;
+	return undef unless defined($path) && -f $path && -s _;
+	open my $in, '<', $path or return undef;
+	my $header = <$in>;
+	my $values = <$in>;
+	close $in;
+	return undef unless defined($header) && defined($values);
+	$header =~ s/[\r\n]+\z//;
+	$values =~ s/[\r\n]+\z//;
+	my @columns = split /\t/, $header, -1;
+	my @fields = split /\t/, $values, -1;
+	return undef unless @columns && $columns[0] eq 'status';
+	my %record;
+	@record{@columns} = map { defined $_ ? $_ : '' } @fields[0 .. $#columns];
+	return \%record;
 }
 
 sub preflight_executable {
