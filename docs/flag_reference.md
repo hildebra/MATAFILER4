@@ -416,7 +416,7 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-out` | string |  | stable | output dir, only used in modes protExtract ntMatchGC |
-| `-functDB` | string | `KGM,TCDB,CZy,ABRc` | stable | for FuncAssign mode: functional DBs to annotate gene cat to |
+| `-functDB` | string | `KGM,TCDB,CZy,ABRc` | stable | for FuncAssign mode: functional DBs to annotate gene cat to. Optional VFDB sets: `VFA` (set A, core) and `VFB` (set B, full); `VDB` is a legacy alias for set B |
 | `-refDB` | string |  | stable | for ntMatchGC mode: reference fasta DB |
 | `-fastaSplit` | string | `500M` | stable | For FuncAssign mode: split gene catalog into chunks to parallelise jobs. Default: 500M. |
 | `-functAligner` | string | `diamond` | stable | either "diamond" or "foldseek" |
@@ -430,7 +430,9 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 |---|---:|---|---|---|
 | `-FuncMinBitSc` | float | `45` | stable | minimum bit score for a functional assignment |
 | `-FuncMinAlLeng` | integer | `30` | stable | minimum alignment length (AA) for a functional assignment |
-| `-FuncMinPercSbjCov` | float | `0.5` | stable | Minimum fraction of subject coverage for functional assignment. |
+| `-FuncMinPercSbjCov` | float | `0.5` | stable | Minimum fraction of subject coverage for functional assignment. A hit passes if this OR `-FuncMinPercQueryCov` is met. |
+| `-FuncMinPercQueryCov` | float | `0.8` | stable | Minimum fraction of the catalog protein (query) covered; alternative to subject coverage, keeps partial genes. `0` disables it. |
+| `-redoFunc` | integer | `0` | stable | FuncAssign: `1` deletes and recomputes existing alignments, per-gene assignments and matrices for the selected `-functDB` databases. |
 | `-FuncMinPerID` | float | `25` | stable | minimum percent identity for a functional assignment |
 | `-FuncMinEVal` | float | `1e-8` | stable | maximum e-value for a functional assignment |
 

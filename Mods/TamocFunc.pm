@@ -449,7 +449,9 @@ sub getSpecificDBpaths($ $){
 	elsif ($curDB eq "TCDB"){$DBpath = getProgPaths("TCDB_path_DB"); $refDB = "tcdb.faa";$shrtDB = $curDB; }
 	elsif ($curDB eq "PTV"){$DBpath = getProgPaths("PATRIC_VIR_path_DB"); $refDB = "PATRIC_VF.faa";$shrtDB = $curDB; }
 	elsif ($curDB eq "PAB"){$DBpath = getProgPaths("ABprod_path_DB"); $refDB = "dedup_best_prod_predictions.faa";$shrtDB = $curDB; }
-	elsif ($curDB eq "VDB"){$DBpath = getProgPaths("VirDB_path_DB"); $refDB = "VFDB_setB_pro.fas";$shrtDB = $curDB; }
+	elsif ($curDB eq "VDB"){$DBpath = getProgPaths("VirDB_path_DB"); $refDB = "VFDB_setB_pro.fas";$shrtDB = $curDB; } #legacy name, same as VFB
+	elsif ($curDB eq "VFA"){$DBpath = getProgPaths("VirDB_path_DB"); $refDB = "VFDB_setA_pro.fas";$shrtDB = $curDB; } #VFDB set A: core, experimentally verified VFs
+	elsif ($curDB eq "VFB"){$DBpath = getProgPaths("VirDB_path_DB"); $refDB = "VFDB_setB_pro.fas";$shrtDB = $curDB; } #VFDB set B: full dataset (verified + predicted)
 	elsif ($curDB eq "URE"){$DBpath = getProgPaths("URE_path_DB"); $refDB = "ualpha_gtdb_proteins.faa";$shrtDB = $curDB; }
 	elsif ($curDB eq "URacc"){$DBpath = getProgPaths("URE_path_DB"); $refDB = "urease_accessory_gtdb_proteins.faa";$shrtDB = $curDB; }
 	elsif ($curDB eq "AMI"){$DBpath = getProgPaths("URE_path_DB"); $refDB = "amidohydrolase_gtdb_proteins.faa";$shrtDB = $curDB; }

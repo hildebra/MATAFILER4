@@ -254,6 +254,7 @@ MATAFILER can summarize functional annotations from several databases. Common pr
 | `CZy` | CAZy carbohydrate-active enzymes |
 | `ABR` / `ABRc` | Antibiotic resistance annotations |
 | `TCDB` | Transporter Classification Database |
+| `VFA` / `VFB` | VFDB virulence factors: set A (core, experimentally verified) and set B (full dataset). Levels: L0 gene_VFID, L1 virulence factor, L2 VF category |
 | `PAB`, `PTV`, `ACL`, `MOH` | Other optional functional databases, depending on installation and flags |
 
 For hierarchical databases, MATAFILER writes one matrix per level, for example:
@@ -266,6 +267,21 @@ NOG.L1.txt
 ```
 
 `L0` is normally the most specific annotation level. Higher levels are broader summaries.
+
+### VFDB (virulence factor) outputs
+
+Add `VFA` and/or `VFB` to `geneCat.pl -functDB` (for example `-functDB KGM,TCDB,CZy,ABRc,VFA,VFB`). Each set writes its own tables to `<gene_catalog>/Anno/Func/`:
+
+| File | Meaning |
+|---|---|
+| `VFAL0.txt` / `VFBL0.txt` | Abundance per VFDB gene, named `gene_VFID` (e.g. `ssaQ_VF0036`). |
+| `VFAL1.txt` / `VFBL1.txt` | Abundance per virulence factor (e.g. `VF0036_TTSS_(SPI-2_encode)`). |
+| `VFAL2.txt` / `VFBL2.txt` | Abundance per VF category (e.g. `VFC0086_Effector_delivery_system`). |
+| `DIAass_VFA.srt.gzgeneAss.gz` / `DIAass_VFB.srt.gzgeneAss.gz` | Gene-to-VF assignments (`gene<TAB>L0<TAB>L1<TAB>L2`). |
+
+**Database setup:** put `VFDB_setA_pro.fas` and `VFDB_setB_pro.fas` from the [VFDB download page](http://www.mgc.ac.cn/VFs/download.htm) (unzipped) into `VirDB_path_DB` (default `[DBDir]/Funct/VIRDB/`). Both files are needed even if only one set is used. On first use MATAFILER builds the diamond index and the `.length` file. `secScripts/functions/prepVFDB.pl` builds `VF.tab`, the table mapping each VFDB protein to its gene, virulence factor and VF category.
+
+**Cutoffs:** set A is a subset of set B, so `VFA` is the conservative profile and `VFB` the more sensitive one. Both use the same, stricter cutoffs: identity ≥ 60 %, e-value ≤ 1e-10, bit score ≥ 60 and alignment ≥ 50 aa. The hit must also cover either ≥ 70 % of the VFDB protein or ≥ 80 % of the catalog protein. The cutoffs are set in `%funcDBcutoffs` in `secScripts/geneCat.pl`. A VFDB hit shows homology to a known virulence factor, not that the organism is pathogenic.
 
 ### KEGG and module outputs
 
@@ -302,6 +318,28 @@ Anno/Func/DIAass_<db>.srt.gzgeneAss.gz
 ```
 
 where `<db>` is the database of interest. These files list gene catalog IDs and their assigned lowest-level functional annotations. A single gene can have more than one annotation.
+
+### Assignment cutoffs (diamond / foldseek)
+
+A hit is accepted when e-value ≤ `-FuncMinEVal` (1e-8), identity ≥ `-FuncMinPerID` (25 %), bit score ≥ `-FuncMinBitSc` (45) and alignment length ≥ `-FuncMinAlLeng` (30 aa). It must also meet **either** coverage cutoff:
+
+- at least `-FuncMinPercSbjCov` (50 %) of the reference protein aligned, or
+- at least `-FuncMinPercQueryCov` (80 %) of the catalog protein aligned.
+
+The query-coverage alternative keeps partial (incomplete) genes. `-redoFunc 1` recomputes existing results after cutoffs or databases change. Changing `-functDB`, `-functAligner` or a cutoff invalidates `checkpoints/10.func.stone`.
+
+`Anno/Func/.<db>.matrix.done` marks a completed matrix. A database without this marker gets its matrix rebuilt on the next `FuncAssign` run.
+
+### KEGG from diamond and from eggNOG-mapper
+
+Both KEGG routes run by default and are kept separate:
+
+| Route | KO matrix | Modules |
+|---|---|---|
+| diamond against the KEGG database (`-functDB` containing `KGM`) | `Anno/Func/KGML0.txt` | `Anno/Func/modules/` |
+| eggNOG-mapper (`FuncEMAP`) | `Anno/Func/emapper/EM.KOL0.txt` | `Anno/Func/emapper/modules/` |
+
+The eggNOG-mapper tables `EM.KGM*` (KO;module) and `EM.KGP*` (KO;pathway) are still written. `eggNOGmapper_KO.geneAss.gz` holds the per-gene KOs from eggNOG-mapper.
 
 ## Taxonomic annotation outputs
 

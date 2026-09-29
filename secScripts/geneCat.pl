@@ -26,12 +26,13 @@ use Getopt::Long qw( GetOptions );
 
 use Cwd; use English;
 use Mods::FlagReference qw(printFlagHelp helpRequested);
-use Mods::GenoMetaAss qw( readFasta ensureFastaIndex fileGZe gzipopen gzipwrite splitFastas readMapS systemW readGFF getAssemblPath resolve_path);
+use Mods::GenoMetaAss qw( readFasta ensureFastaIndex fileGZe gzipopen gzipwrite splitFastas clenSplitFastas readMapS systemW readGFF getAssemblPath resolve_path);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive
 	submissionDependencyDeferred submissionDependencyFailed);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
 use Mods::FuncTools qw(assignFuncPerGene calc_modules);
+use Digest::MD5 ();
 use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins3 );
 use Mods::Binning qw(getBinSubdirName);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid read_checkpoint);
@@ -61,7 +62,7 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.60;
+our $version = 0.61; #0.61: functional annotation robustness, query-or-subject coverage, eggNOG-mapper KOs/modules, VFDB set A/B
 
 sub _print_help {
 	#option tables come from docs/flag_reference.md so this list cannot drift
@@ -547,7 +548,19 @@ my $rtkFunDelims = "-funcHieraSep \";\" -funcHAnnoAND \",\" -funcAnnoOR \"|\" ";
 #diamond func assigns:
 my $minBitSc = 45;
 my $minAlLeng=30;
-my $minPercSbjCov=0.5;
+my $minPercSbjCov=0.5; #fraction of the DB protein covered by the alignment
+my $minPercQueryCov=0.8; #fraction of the catalog protein covered. A hit passes if EITHER coverage cutoff is met,
+                         #so partial genes (incompl) that align over most of their length are kept
+my $redoFunc = 0; #FuncAssign: 1 = delete and recompute existing alignments, assignments and matrices
+#per-database overrides of the cutoffs above (keys as in -functDB; unlisted databases use the values above)
+#VFDB: many virulence factors are homologous to housekeeping proteins (flagella, pili, LPS, iron uptake, secretion),
+#so the permissive defaults would call "virulence factors" in most commensals. Set A and B use identical cutoffs,
+#so the two outputs differ only in the reference set.
+my %funcDBcutoffs = (
+	VFA => {percID => 60, minPercSbjCov => 0.7, minPercQueryCov => 0.8, eval => 1e-10, minBitScore => 60, minAlignLen => 50},
+	VFB => {percID => 60, minPercSbjCov => 0.7, minPercQueryCov => 0.8, eval => 1e-10, minBitScore => 60, minAlignLen => 50},
+);
+$funcDBcutoffs{VDB} = $funcDBcutoffs{VFB}; #legacy name for set B
 my $minPerID = 25;
 my $minEVal=1e-8;
 
@@ -653,7 +666,7 @@ my $tmpDirDef= $tmpDir;
 my $mode = "geneCat";
 my $fastaSplits="500M";
 my $funcAligner = "diamond"; #diamond or foldseek
-my $curDB_o = "KGM,TCDB,CZy,ABRc";#NOG,#,ACL"; #"mp3,PTV,KGM,TCDB,CZy,NOG,ABRc,ACL" #default databases to use in functional assignments
+my $curDB_o = "KGM,TCDB,CZy,ABRc";#NOG,#,ACL"; #"mp3,PTV,KGM,TCDB,CZy,NOG,ABRc,ACL,VFA,VFB" #default databases to use in functional assignments
 my $submitLocal = 1; #default mode now
 my $submSys = "";
 my $out = ""; my $refDB = ""; #for nt matches via minimap2
@@ -709,7 +722,7 @@ GetOptions(
 	"MGset=s" => \$useGTDBmg, #use either FMG or GTDB marker genes to compare and merge MAGs and calculate their abundance
 #flags for specific modes
 	"out=s" => \$out, #output dir, only used in modes protExtract ntMatchGC 
-	"functDB=s" => \$curDB_o, #for FuncAssign mode: functional DBs to annotate gene cat to 
+	"functDB=s" => \$curDB_o, #for FuncAssign mode: functional DBs to annotate gene cat to (e.g. KGM,TCDB,CZy,ABRc,VFA,VFB)
 	"refDB=s" => \$refDB, #for ntMatchGC mode: reference fasta DB 
 	"fastaSplit=s" => \$fastaSplits, #for FuncAssign mode: target FASTA chunk size (for example 500M)
 	"functAligner=s" => \$funcAligner, #either "diamond" or "foldseek"
@@ -720,6 +733,8 @@ GetOptions(
 	"FuncMinBitSc=f" => \$minBitSc,
 	"FuncMinAlLeng=i" => \$minAlLeng,
 	"FuncMinPercSbjCov=f" => \$minPercSbjCov,
+	"FuncMinPercQueryCov=f" => \$minPercQueryCov,
+	"redoFunc=i" => \$redoFunc,
 	"FuncMinPerID=f" => \$minPerID,
 	"FuncMinEVal=f" => \$minEVal,
 
@@ -737,6 +752,9 @@ die "-clusterCov must be between 0 and 1\n" unless $clusterCov >= 0 && $clusterC
 die "-minGeneL must not be negative\n" unless $minGeneL >= 0;
 die "-FuncMinPercSbjCov must be between 0 and 1\n"
 	unless $minPercSbjCov >= 0 && $minPercSbjCov <= 1;
+die "-FuncMinPercQueryCov must be between 0 and 1\n"
+	unless $minPercQueryCov >= 0 && $minPercQueryCov <= 1;
+die "-redoFunc must be 0 or 1\n" unless $redoFunc == 0 || $redoFunc == 1;
 die "-fastaSplit must be a positive count or size such as 500M\n"
 	unless $fastaSplits =~ /^\d+(?:[KMG])?$/i && $fastaSplits !~ /^0+[KMG]?$/i;
 die "-SNPcaller must be either MPI or FB\n"
@@ -933,36 +951,53 @@ if ($mode eq "mergeCLs"){
 	writeMG_COGs($GCdir);
 	exit(0);
 } elsif($mode eq "FOAM" || $mode eq "ABR"){ #FOAM functional assignment
-	FOAMassign($GCdir,$tmpDir,$mode);
+	FOAMassign($GCdir,"$tmpDir/FOAM_"._gcTmpTag()."/",$mode);
 	exit(0);
 } elsif($mode eq "FuncAssign"){ #eggNOG/KEGG/CAZy functional assignment
 	$QSBoptHR->{doSubmit} = 1;
-	#die "$fastaSplits\n";
 	my @DBs = split /,/,$curDB_o;
-	my $clean=1;
-	my @funcDeps;
 	@DBs = do { my %seen; grep { !$seen{$_}++ } @DBs };
+	print "NOTE: KGM is not in -functDB: no diamond KEGG KO/module tables (eggNOG-mapper KOs are produced by FuncEMAP)\n" unless (grep {$_ eq "KGM"} @DBs);
+	#check every database before submitting anything, so one missing database can't leave a partial run
+	my @missing;
+	foreach my $curDB (@DBs){ eval { getSpecificDBpaths($curDB,0); 1 } or push(@missing,"  $curDB: $@"); }
+	die "FuncAssign: missing/invalid functional databases, nothing submitted:\n".join("",@missing) if (@missing);
+	#all databases share one split of the catalog, in a catalog-specific directory; removed by the final job
+	my $query = "$GCdir/compl.incompl.$cdhID.prot.faa";
+	my $splitDir = _funcSplitDir();
+	my @oldSplits = glob("$splitDir/*");
+	if (@oldSplits && -e $query && (-M $oldSplits[0]) > (-M $query)){ #splits older than the catalog: stale
+		print "Removing stale catalog splits in $splitDir\n";
+		clenSplitFastas($query,$splitDir);
+	}
+	my @funcDeps; my @funcOuts;
 	foreach my $curDB (@DBs){
 		my $numCor2 = $numCor;
 		if ($curDB eq "mp3"){$numCor2=1;}
-		my $funcDep = geneCatFunc($GCdir,$tmpDir."/GCanno/",$curDB,$numCor2,$clean);
+		my ($funcDep,$geneAss) = geneCatFunc($GCdir,_funcTmpDir(),$curDB,$numCor2,$QSBoptHR);
 		push @funcDeps, $funcDep if defined($funcDep) && length($funcDep);
-		$clean=0;
+		push @funcOuts, $geneAss;
 	}
+	#final job: runs only after every annotation/matrix job succeeded; removes the shared split and writes the stone
+	my $doneCmd = "$rmBin -rf $splitDir\n";
 	if (length $modeStone) {
-		my ($doneDep, $doneCmd) = qsubSystem(
-			"$qsubDir/Funct/FuncAssign.done.sh",
-			_checkpoint_command($checkpointWriter, $modeStone, $cdhID, 'functional-annotation'),
-			1, "1G", "funcDone", join(";", @funcDeps), "", 1, [], $QSBoptHR
-		);
+		#checkpoint fails if a per-gene assignment file is missing; records databases, aligner and cutoffs
+		my $stoneCmd = _checkpoint_command($checkpointWriter, $modeStone, $cdhID, 'functional-annotation', @funcOuts);
+		my %fp = _funcStoneParams();
+		my $extra = join(' ', map { _shell_quote($_) } map { ('--param', "$_=$fp{$_}") } sort keys %fp);
+		$stoneCmd =~ s/\n$/ $extra\n/;
+		$doneCmd .= $stoneCmd;
 	}
+	make_path("$qsubDir/Funct/") unless -d "$qsubDir/Funct/";
+	my ($doneDep, $doneQcmd) = qsubSystem("$qsubDir/Funct/FuncAssign.done.sh", $doneCmd,
+		1, "1G", "funcDone", join(";", @funcDeps), "", 1, [], $QSBoptHR);
 	print "All function-assignment jobs submitted\n";
 	exit(0);
 } elsif($mode eq "FuncEMAP"){ #eggNOG functional assignment
 	$QSBoptHR->{doSubmit} = 1;
 	my $clean=1;
 	if ($fastaSplits eq "500M"){$fastaSplits="150M";}
-	geneCatFunc_emapper($GCdir,$NodeTmpDir."/GCannoEMAP/",$numCor,$clean,$fastaSplits,$modeStone);
+	geneCatFunc_emapper($GCdir,$NodeTmpDir."/GCannoEMAP_"._gcTmpTag()."/",$numCor,$clean,$fastaSplits,$modeStone);
 	exit(0);
 } elsif ($mode eq "protExtract"){#
 	protExtract($GCdir,$extraRdsFAA,$out); #GCdir
@@ -1511,9 +1546,10 @@ sub geneCatFlow($ $ $ $ ){
 	}
 	
 	#functional annotations.. just run some by default
-	unless (_stone_valid($funcStone, $cdhID)) {
+	#a changed database list, aligner or cutoff invalidates the functional stone
+	unless (checkpoint_valid($funcStone, parameters => { cluster_id => $cdhID, _funcStoneParams() })) {
 		my $stageCmd = "#functional assignments of all genes via diamond\n";
-		$stageCmd .= "$GCscr -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -stone $funcStone\n";
+		$stageCmd .= "$GCscr -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPercQueryCov $minPercQueryCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -stone $funcStone\n";
 		if ($submitLocal) {
 			print "submitting diamond func abundance..\n";
 			my ($dep,$qcmd) = qsubSystem($qsubDir."func_GC.sh",$stageCmd,1,int($totMem3)."G","funcGC","","",1,[],$QSBoptHR);
@@ -3011,90 +3047,86 @@ sub geneCatFunc_emapper{
 	my $shrtDB = "emap";
 	make_path($qsubDir2) unless -d $qsubDir2;
 	make_path($outD) unless -d $outD;
-	#use a different dir for qsub jobs to keep main qsub dir clean
-	$QSBoptHR->{qsubDir} = $qsubDir2;
-	my $doQsub = 1;my $calcDia = 1;my @jdeps;
+	#local copy of the submission options (use a different dir for qsub jobs to keep main qsub dir clean)
+	my $QSB = _qsbCopy($QSBoptHR);
+	$QSB->{qsubDir} = $qsubDir2;
+	my @jdeps;
 	my $jdep = "";
 	my $tarAnno3 = "$outD/MF.emapper.annotations";
-	my $splDir = "$GLBtmp/eggNOGmapper/";
-	if (!-e $tarAnno3 || !-s $tarAnno3){
+	my $splDir = _emapSplitDir(); #catalog-specific, so catalogues can't pick up each other's chunks
+	my $cmd = "";
+	#existing merged annotations: plain, or already compressed by a previous cleanup
+	my $annoIn = (-s $tarAnno3) ? $tarAnno3 : ((-s "$tarAnno3.gz") ? "$tarAnno3.gz" : "");
+	if ($annoIn eq ""){
 		#setup cluster for diamond focused job
-		my @preCons = @{$QSBoptHR->{constraint}};
-		push(@{$QSBoptHR->{constraint}}, $avx2Constr);#--constraint=sse4
-		my $preHDDspace=$QSBoptHR->{tmpSpace};
-		$QSBoptHR->{tmpSpace} = ($mem*1.4) . "G";
+		my $chunkQSB = _qsbCopy($QSB);
+		push(@{$chunkQSB->{constraint}}, $avx2Constr) if (defined($avx2Constr) && $avx2Constr ne "");#--constraint=sse4
+		$chunkQSB->{tmpSpace} = ($mem*1.4) . "G";
 		print "Splitting FASTAs into $fastaSplits chunks in $splDir\n";
 		my $ar = splitFastas($query,$fastaSplits,$splDir);
 		my @subFls = @{$ar};
 		die "FASTA splitting produced no inputs from $query\n" unless @subFls;
 		print "Done splitting, submitting ".scalar(@subFls)." jobs\n";
-		my $i=0;
+		my $i=0; my @chunkAnnos; my $nResumed = 0;
 		foreach my $f (@subFls){
-			#system "mkdir -p $tmpD/$i/" unless (-d "$tmpD/$i/");
-			#my $cmd = "$emapper -m diamond --override --temp_dir $tmpD/$i/ --data_dir $curDB --no_annot --no_file_comments --cpu $ncore -i $f -o $f;"; 			my $outF = "$f.emapper.seed_orthologs";
-
-			my $cmd = "";
-			$cmd .= "$mkdirBin -p $tmpD/$i/\n";
-			$cmd .= "$emapper -m diamond --dbmem --override --itype proteins --temp_dir $tmpD/$i/ --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f;\n";
-			my $outF = "$f.emapper.annotations";
-
-			if ($calcDia && (!-e $outF || !-s $outF) ){
-				#print "$cmd\n";
-				if ($doQsub){
-					my ($jobName,$mptCmd) = qsubSystem($qsubDir2."D$shrtDB.$i.sh",$cmd,$ncore,($mem)."G","eMAP$i","","",1,[],$QSBoptHR); #$jdep.";".
-					push(@jdeps,$jobName);
-					#die "$jobName\n";
-				} else {
-					systemW $cmd;
-				}
-				#print $qsubDir."Diamond.sh\n";
+			my $ccmd = "";
+			$ccmd .= "$mkdirBin -p $tmpD/$i/\n";
+			$ccmd .= "$emapper -m diamond --dbmem --override --itype proteins --temp_dir $tmpD/$i/ --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f;\n";
+			$ccmd .= "$rmBin -rf $tmpD/$i/\n";
+			my $outF = "$f.emapper.annotations"; #the file eggNOG-mapper writes
+			push(@chunkAnnos,$outF);
+			#resume: skip chunks whose annotations exist and are newer than the chunk FASTA
+			if (-s $outF && (-M $outF) <= (-M $f)){
+				$nResumed++;
+			} else {
+				my ($jobName,$mptCmd) = qsubSystem($qsubDir2."D$shrtDB.$i.sh",$ccmd,$ncore,($mem)."G","eMAP$i","","",1,[],$chunkQSB);
+				push(@jdeps,$jobName) if (defined($jobName) && $jobName ne "");
 			}
 			$i++;
 		}
-		my $ncore2 = 1;#$ncore;
-		@{$QSBoptHR->{constraint}} = @preCons;
-		$QSBoptHR->{tmpSpace} = $preHDDspace;
-		#my $tarAnno = "$outD/D$shrtDB.emapper.seed_orthologs";
-		#my $tarAnno2 = "$outD/D$shrtDB";
-		my $cmd = "";
-		#$cmd .= "#concatenating separate eggNOG-diamond output\n";
-		#$cmd .= "cat $GLBtmp/eggNOGmapper/*.emapper.seed_orthologs > $tarAnno\n";
-		#$cmd .=  "#emapper.py --data_dir $curDB --annotate_hits_table $tarAnno --no_file_comments -o $tarAnno2 --cpu $ncore2 --dbmem\n";
-		#$cmd .= "\nexit(1)\n";
-		#$cmd .= "cat $GLBtmp/eggNOGmapper/*.emapper.annotations > $tarAnno2\n ";
-		$cmd .= "$headBin -q -n 1 " . $subFls[0] . ".emapper.annotations > $tarAnno3\n";
-		$cmd .= "$tailBin -q -n +2 $GLBtmp/eggNOGmapper/*.emapper.annotations >> $tarAnno3\n";
-		my $eSpl = getProgPaths("eggNOGspl_scr");
-		$cmd .= "#splitting eggNOG annotations in multiple categories that can be summed up to matrices\n$eSpl $tarAnno3\n";
-		#run 
-		#$cmd = "" if (-e "$tarAnno3");
-		my ($jobName,$mptCmd) = qsubSystem($qsubDir2."CombineEMAP.sh",$cmd,$ncore2,(80)."G","${shrtDB}_comb",join(";",@jdeps),"",1,[],$QSBoptHR); 
-		#$jdep.";".
-		
-		$jdep = $jobName;
+		print "eggNOG-mapper: $nResumed of ".scalar(@subFls)." chunks already finished\n" if ($nResumed);
+		#merge only this run's chunks (explicit list, no glob), keep one "#query" header, write atomically
+		$cmd .= "#concatenating eggNOG-mapper chunks\n";
+		$cmd .= "{ grep -m 1 '^#query' $chunkAnnos[0] || true; grep -hv '^#' ".join(" ",@chunkAnnos)." || true; } > $tarAnno3.tmp\n";
+		$cmd .= "$mvBin $tarAnno3.tmp $tarAnno3\n";
+		$annoIn = $tarAnno3;
 	}
+	my $eSpl = getProgPaths("eggNOGspl_scr");
+	#always (re)split, so the per-category files match the merged annotations
+	$cmd .= "#splitting eggNOG annotations in multiple categories that can be summed up to matrices\n$eSpl $annoIn\n";
+	my ($jobName,$mptCmd) = qsubSystem($qsubDir2."CombineEMAP.sh",$cmd,1,(80)."G","${shrtDB}_comb",join(";",@jdeps),"",1,[],$QSB);
+	$jdep = $jobName;
+
 # create abundance tables now..
 	my $matThr = 4;
+	#KO: KO-only table, same layout as the diamond KGM table, used for KEGG modules
 	my @emapCats  = ("eggNOGmapper_CAZy","eggNOGmapper_EC","eggNOGmapper_GO","eggNOGmapper_NOG","eggNOGmapper_BIGG","eggNOGmapper_PFAM",
-	#"eggNOGmapper_KGP","eggNOGmapper_KGM"
-	"eggNOGmapper_KGM", "eggNOGmapper_KGP");
+	"eggNOGmapper_KGM", "eggNOGmapper_KGP", "eggNOGmapper_KO");
 	@jdeps = ();
 	foreach my $EMC (@emapCats){
-		#"$EMC.geneAss.gz";
 		$EMC =~ m/_(\S+)/; my $shrt = "EM.$1";
-		my $cmd = "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$shrt -t $matThr -refD $outD/$EMC.geneAss $rtkFunDelims -extHiera -hieraSrtDown\n";
-		$cmd .= "echo \"DONE matrix creation\"\n";
-		#my $jobName = "sum$shrt";
-		my ($jobName,$mptCmd) = qsubSystem($qsubDir2."$shrt.sh",$cmd,$matThr,(50)."G","${shrt}_mat",$jdep,"",1,[],$QSBoptHR); #$jdep.";".
-		push(@jdeps,$jobName);
+		my $mcmd = "";
+		if ($shrt eq "EM.KO"){
+			$mcmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$shrt -t $matThr -refD $outD/$EMC.geneAss $rtkFunDelims \n";
+			#KEGG modules from eggNOG-mapper KOs (diamond KGM modules are in Anno/Func/modules/)
+			$mcmd .= calc_modules("$outD/${shrt}L0.txt","$outD/modules/",0.5,0.5,0);
+		} else {
+			$mcmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$shrt -t $matThr -refD $outD/$EMC.geneAss $rtkFunDelims -extHiera -hieraSrtDown\n";
+		}
+		$mcmd .= "echo \"DONE matrix creation\"\n";
+		my ($jobNameM,$mptCmdM) = qsubSystem($qsubDir2."$shrt.sh",$mcmd,$matThr,(50)."G","${shrt}_mat",$jdep,"",1,[],$QSB);
+		push(@jdeps,$jobNameM);
 	}
 	#clean up and marking stone that all worked out fine..
 	my $clnCores = 4;
-	my $cmd = "";
-	$cmd .= "$pigzBin -p $clnCores $tarAnno3 $outD/*.geneAss;\n";
-	$cmd .= "$rmBin -f -r $GLBtmp/eggNOGmapper  $splDir;\n" ; #unless (-e $tarAnno && -s $tarAnno)
+	$cmd = "";
+	#compress the merged annotations (if uncompressed) and the per-category tables (-f: replace .gz copies from an earlier run)
+	my @toZip = map { "$outD/$_.geneAss" } @emapCats;
+	unshift(@toZip, $tarAnno3) if ($annoIn eq $tarAnno3);
+	$cmd .= "$pigzBin -f -p $clnCores ".join(" ",@toZip).";\n";
+	$cmd .= "$rmBin -f -r $splDir;\n";
 	$cmd .= _checkpoint_command($checkpointWriter, $stone, $cdhID, 'eggnog-annotation', "$tarAnno3.gz");
-	my ($jobName,$mptCmd) = qsubSystem($qsubDir2."CleanEMAP.sh",$cmd,$clnCores,(70)."G","${shrtDB}_CLN",join(";",@jdeps),"",1,[],$QSBoptHR); #$jdep.";".
+	($jobName,$mptCmd) = qsubSystem($qsubDir2."CleanEMAP.sh",$cmd,$clnCores,(70)."G","${shrtDB}_CLN",join(";",@jdeps),"",1,[],$QSB);
 
 	print "Done geneCat FuncEMAP sub, submitted all jobs\n";
 
@@ -3102,78 +3134,62 @@ sub geneCatFunc_emapper{
 }
 
 sub geneCatFunc{
-	my ($GCd,$tmpD, $DB, $ncore,$doClean) = @_;
+	#annotates the protein catalog against one database (diamond/foldseek) and submits the rtk matrix job
+	#returns (ID of the last submitted job, per-gene assignment file)
+	my ($GCd,$tmpD, $DB, $ncore,$QSBopt) = @_;
 	my $query = "$GCd/compl.incompl.$cdhID.prot.faa";
 	die "Cannot find protein catalog $query\n" unless -s $query;
 	my $outD = $GCd."/Anno/Func/";
 	die "-functAligner has to be \"diamond\" or \"foldseek\"!\n" if ($funcAligner ne "diamond" && $funcAligner ne "foldseek");
-	
-	#my $DB = "NOG";
-	#my $ncore = 40; 
-	
-	
 	my $curDB = $DB; #"NOG";#CZy,ABRc,KGM,NOG
 	my $qsubDir2 = "$qsubDir/Funct/";
 	make_path($qsubDir2) unless -d $qsubDir2;
-	$QSBoptHR->{qsubDir} = $qsubDir2;
+	#local copy of the submission options, so settings don't leak into other jobs
+	my $QSB = _qsbCopy($QSBopt);
+	$QSB->{qsubDir} = $qsubDir2;
 		
-	my %optsDia = (eval=>$minEVal,percID=>$minPerID,minPercSbjCov=>$minPercSbjCov,fastaSplits => $fastaSplits,ncore=>$ncore,align=>$funcAligner,
-			# redo would delete this database's finished alignments at submission
-			# time; $doClean only marks the first database of the FuncAssign loop
-			splitPath=>$GLBtmp,keepSplits=>!$doClean,redo=>0, minAlignLen=>$minAlLeng, minBitScore=>$minBitSc);
-			
-			
-	my ($allAss,$jdep) = assignFuncPerGene($query,$outD,$tmpD,$curDB,\%optsDia,$QSBoptHR,(!-e "$outD/${curDB}L0.txt")) ;
-	my $tarAnno = "${allAss}geneAss.gz";
-	my $tmpP2 = "$tmpD/CNT_1e-8_25//";
-	#create actual COG table
-	my $cmd = "";
-	$tarAnno =~ s/\.gz$//;
-	
-	#$cmd	.= "gunzip $tarAnno.gz\n";
-	if ($curDB eq "ABRc"){
-		$cmd .= "$pigzBin -dc $tarAnno.gz | $sedBin 's/,/\\|/g' |$sedBin 's/\\t/;/g' | $sedBin 's/;/\\t/' > $tarAnno\n";
-	} else {
-		$cmd .= "$pigzBin -dc $tarAnno.gz | $sedBin 's/\\t/;/g' | $sedBin 's/;/\\t/' > $tarAnno\n";
+	my %optsDia = (eval=>$minEVal,percID=>$minPerID,minPercSbjCov=>$minPercSbjCov,minPercQueryCov=>$minPercQueryCov,
+			fastaSplits => $fastaSplits,ncore=>$ncore,align=>$funcAligner,
+			#the catalog split is shared by all databases and removed by the final FuncAssign job
+			splitPath=>_funcSplitDir(),keepSplits=>1,redo=>$redoFunc, minAlignLen=>$minAlLeng, minBitScore=>$minBitSc);
+	if (exists $funcDBcutoffs{$curDB}){ #database specific cutoffs
+		my $cut = $funcDBcutoffs{$curDB};
+		$optsDia{$_} = $cut->{$_} foreach (keys %{$cut});
+		print "$curDB cutoffs: ".join(", ", map {"$_=$optsDia{$_}"} sort keys %{$cut})."\n";
 	}
-	
-	#$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF -o $outD/${shrtDB}L1.mat -refD $GCd/NOGparse.NOG.GENE2NOG; gzip $GCd/NOGparse.NOG.GENE2NOG.gz\n";
+	#matrix completion marker: written only by a successful matrix job (an existing L0 file alone can be partial)
+	my $matDone = "$outD/.${curDB}.matrix.done";
+	my $doMatrix = ($redoFunc || !-e $matDone) ? 1 : 0;
+	my ($allAss,$jdep) = assignFuncPerGene($query,$outD,$tmpD,$curDB,\%optsDia,$QSB,$doMatrix) ;
+	my $tarAnno = "${allAss}geneAss"; #per-gene assignments are "$tarAnno.gz"
 	my $matThr = 4;
-	$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$curDB -t $matThr -refD $tarAnno $rtkFunDelims \n";
-	$cmd .= "$rmBin $tarAnno\n" if (length($tarAnno) > 2);
-	#gzip $tarAnno\n";
-	#copy interesting files to final dir
-	#if ($curDB eq "ABRc"){
-#		$cmd.= "zcat $tmpP2/ABRcparse.ALL.cnt.CATcnts.gz > $outD/ABR_res.txt\n" ;
-#	}
-#	if ($curDB eq "CZy"){
-#		$cmd.= "zcat $tmpP2/CZyparse.ALL.cnt.CATcnts.gz > $outD/CZySubstrates.txt\n";
-#		$cmd.= "zcat $tmpP2/CZyparse.CZy.ALL.cnt.cat.cnts.gz > $outD/CZyEnzymes.txt\n";
-#	}
-#	if ($curDB eq "TCDB"){
-#		$cmd.= "zcat $tmpP2/TCDBparse.ALL.cnt.CATcnts.gz > $outD/TCDB.cats.txt\n";
-#	}
-#systemW $cmd."\n";
-#die "$outD/${curDB}L0.txt\n";
-	my $modCmd = "";
-	if ($curDB eq "KGM"){
-		$modCmd = calc_modules("$outD/${curDB}L0.txt","$outD/modules/",0.5,0.5,0);#$ModCompl,$EnzCompl);
+	$QSB->{tmpSpace} = "0";
+	my $matrixDep = $jdep;
+	if ($doMatrix){
+		my $tmpAnno = "$tarAnno.rtk.tmp"; #uncompressed, rtk-formatted copy
+		my $cmd = "$rmBin -f $matDone\n";
+		if ($curDB eq "ABRc"){
+			$cmd .= "$pigzBin -dc $tarAnno.gz | $sedBin 's/,/\\|/g' |$sedBin 's/\\t/;/g' | $sedBin 's/;/\\t/' > $tmpAnno\n";
+		} else {
+			$cmd .= "$pigzBin -dc $tarAnno.gz | $sedBin 's/\\t/;/g' | $sedBin 's/;/\\t/' > $tmpAnno\n";
+		}
+		$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$curDB -t $matThr -refD $tmpAnno $rtkFunDelims \n";
+		$cmd .= "$rmBin -f $tmpAnno\n";
+		if ($curDB eq "KGM"){ #KEGG modules from the diamond KO matrix
+			remove_tree("$outD/modules/") if ($redoFunc && -d "$outD/modules/");
+			$cmd .= calc_modules("$outD/${curDB}L0.txt","$outD/modules/",0.5,0.5,0);
+		}
+		$cmd .= "$touchBin $matDone\n";
+		my ($submittedDep,$submittedCmd) = qsubSystem($qsubDir2."${curDB}_matrix.sh",$cmd,$matThr,"12G","${curDB}_mat",$jdep,"",1,[],$QSB);
+		$matrixDep = $submittedDep if (defined($submittedDep) && $submittedDep ne "");
+	} elsif ($curDB eq "KGM"){ #matrix done, but module tables may be missing
+		my $modCmd = calc_modules("$outD/${curDB}L0.txt","$outD/modules/",0.5,0.5,0);
+		if ($modCmd ne ""){
+			my ($modDep,$modQcmd) = qsubSystem($qsubDir2."${curDB}_modules.sh",$modCmd,$matThr,"12G","${curDB}_mod",$jdep,"",1,[],$QSB);
+			$matrixDep = $modDep if (defined($modDep) && $modDep ne "");
+		}
 	}
-	#die "$modCmd\n";
-
-	my $matrixDep = "";
-	$cmd = "" if (-e "$outD/${curDB}L0.txt");
-	#die "$cmd.$modCmd\n";
-	if (0 && -e $tarAnno){ #already exists
-		systemW $cmd ;
-	} else {
-		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		my ($submittedDep,$submittedCmd) = qsubSystem($qsubDir2."${curDB}_matrix.sh",$cmd.$modCmd,$matThr,"12G","${curDB}_mat",$jdep,"",1,[],$QSBoptHR);
-		$matrixDep = $submittedDep;
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;
-	}
-
-	return $matrixDep;
+	return ($matrixDep, "$tarAnno.gz");
 }
 
 
@@ -3182,12 +3198,12 @@ sub FOAMassign{
 	my $query = "$GCd/compl.incompl.$cdhID.prot.faa";
 	die "Cannot find protein catalog $query\n" unless -s $query;
 	my $fastaSplits=10;
-	my $ar = splitFastas($query,$fastaSplits,$GLBtmp."DB/");
+	my $ar = splitFastas($query,$fastaSplits,"$GLBtmp/FOAMsplit_"._gcTmpTag()."/");
 	my @subFls = @{$ar};
 	my @jdeps; my @allFiles;
 	my $N = 20;my $jdep=""; my $colSel = 4;
-	my $tmpSHDD = $QSBoptHR->{tmpSpace};
-	$QSBoptHR->{tmpSpace} = "150G"; #set option how much tmp space is required, and reset afterwards
+	my $QSB = _qsbCopy($QSBoptHR); #local copy of the submission options
+	$QSB->{tmpSpace} = "150G"; #tmp space required by the hmmsearch jobs
 
 	for (my $i =0 ; $i< @subFls;$i++){
 		my $tmpOut = "$tmpD/$DB.hmm.dom.$i";
@@ -3206,25 +3222,23 @@ sub FOAMassign{
 		#$cmd .= "cp $tmpOut.sort $GCd\n";
 		
 		$cmd .= "$hmmBestHitScr $tmpOut.sort > $tmpOut.sort.BH\n";
-		$cmd .= "$awkBin '{printf (\"%s\\t%s\\n\", \$1,\$$colSel)}' $tmpOut.sort.BH |$sortBin > $outF\n";
+		$cmd .= "$awkBin '{printf (\"%s\\t%s\\n\", \$1,\$$colSel)}' $tmpOut.sort.BH |$sortBin > $outF.tmp\n$mvBin $outF.tmp $outF\n";
 		$cmd .= "$rmBin -f -r $tmpOut* $subFls[$i]\n";
 		my $jobName = "$DB"."_$i";
 		#die $cmd."\n";
-		my ($jobDep,$jobCmd) = qsubSystem($qsubDir."$DB$i.sh",$cmd,$N,"1G",$jobName,"","",1,[],$QSBoptHR);
+		my ($jobDep,$jobCmd) = qsubSystem($qsubDir."$DB$i.sh",$cmd,$N,"1G",$jobName,"","",1,[],$QSB);
 		push(@jdeps,$jobDep);
 		push(@allFiles,$outF);
 		#if ($i==5){die;}
 	}
-	$QSBoptHR->{tmpSpace} = $tmpSHDD; 
 	#last job that converges all
 	my $assigns = "$GCd/$DB.assign.txt";
-	my $cmd= "$catBin ".join(" ",@allFiles). " > $assigns\n";
+	my $cmd= "$catBin ".join(" ",@allFiles). " > $assigns.tmp\n$mvBin $assigns.tmp $assigns\n";
 	$cmd .= "$rmBin -f ".join(" ",@allFiles) . "\n";
 	#tr [:blank:] \\t
 	$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $GCd/$DB.mat -t 1 -refD $assigns $rtkFunDelims \n";
-	$tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-	my ($collectDep,$collectCmd) = qsubSystem($qsubDir."collect$DB.sh",$cmd,1,"40G","$DB"."Col",join(";",@jdeps),"",1,[],$QSBoptHR);
-	$QSBoptHR->{tmpSpace} =$tmpSHDD;
+	$QSB->{tmpSpace} = "0";
+	my ($collectDep,$collectCmd) = qsubSystem($qsubDir."collect$DB.sh",$cmd,1,"40G","$DB"."Col",join(";",@jdeps),"",1,[],$QSB);
 	#return $jdep,$outF;
 }
 
@@ -3236,3 +3250,33 @@ sub FOAMassign{
 
 
 # /g/bork3/home/hildebra/bin/bbmap/./dedupe.sh in=/g/scb/bork/hildebra/SNP/GCs/SimuB/B0/compl.fna out=/g/scb/bork/hildebra/SNP/GCs/SimuB/X0/ddtest.compl.fna exact=f threads=20 outd=/g/scb/bork/hildebra/SNP/GCs/SimuB/X0/drop.fna minidentity=95 storename=t renameclusters=t usejni=t cluster=t k=18 -Xmx50g
+
+
+#--------------------------- functional annotation helpers ---------------------------
+#catalog-specific tag for shared temp dirs, so two catalogues never share split files
+sub _gcTmpTag{
+	my $p = Cwd::abs_path($GCdir); $p = $GCdir unless (defined $p);
+	return substr(Digest::MD5::md5_hex("$p|$cdhID"),0,10);
+}
+#catalog split shared by all -functDB databases
+sub _funcSplitDir{
+	return "$GLBtmp/funcSplit_"._gcTmpTag()."/";
+}
+sub _funcTmpDir{
+	return "$tmpDir/GCanno_"._gcTmpTag()."/";
+}
+sub _emapSplitDir{
+	return "$GLBtmp/eggNOGmapper_"._gcTmpTag()."/";
+}
+#parameters recorded in (and required by) the functional-annotation checkpoint
+sub _funcStoneParams{
+	return (functDB => $curDB_o, functAligner => $funcAligner,
+		cutoffs => join(",", $minEVal, $minPerID, $minBitSc, $minAlLeng, $minPercSbjCov, $minPercQueryCov));
+}
+#copy of the qsub options hash: per-job settings (constraints, tmp space, qsubDir) don't leak into later jobs
+sub _qsbCopy{
+	my ($h) = @_;
+	my %c = %{$h};
+	$c{constraint} = [ @{ $h->{constraint} || [] } ];
+	return \%c;
+}

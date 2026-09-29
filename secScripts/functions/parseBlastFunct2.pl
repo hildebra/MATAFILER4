@@ -35,7 +35,9 @@ my $blInf = "";#$ARGV[0];
 my $mode = 0;#ARGV[3]
 my $DBmode = "NOG";#$ARGV[1];
 my $queryType = "reads"; # reads, genes, or pre-merged pairs
-my $quCovFrac = 0; #how much of the subject (DB) needs to be covered?
+my $quCovFrac = 0; #fraction of the subject (DB protein) that needs to be covered (0 = no requirement)
+my $qCovFrac = 0; #fraction of the query that needs to be covered (0 = off). A hit passes if EITHER coverage requirement is met.
+                  #needs 14-column input (qlen slen); with 12-column input only subject coverage is used
 my $noHardCatCheck = 0; #select for the hit with KO assignment rather than the real best hit (w/o KO assignment)
 
 #$DBmode = uc $DBmode;
@@ -68,7 +70,8 @@ GetOptions(
 	"minBitScore=f" => \$minScore,
 	"minAlignLen=i"      => \$minAlLen,
 	"minPercSbjCov=f"      => \$quCovFrac,
-	"minFractQueryCov=f"      => \$quCovFrac,
+	"minFractQueryCov=f"      => \$quCovFrac, #legacy name (MATAF4 read-based): historically applied to SUBJECT coverage, kept for identical results
+	"minPercQueryCov=f"      => \$qCovFrac,
 	"tmp=s"      => \$tmpD,
 	"DButil=s"	=> \$DButil,
 	"LF=s"	=> \$lengthF,
@@ -184,7 +187,7 @@ if ($mode == 3 || $mode == 4){ #scan for all reads finished
 	system "ln -s $DButil/NOG.descr $inP/NOG.descr" unless (-e "$inP/NOG.descr");
 
 
-} elsif ($DBmode eq "TCDB" || $DBmode eq "PTV"|| $DBmode eq "VDB" ){
+} elsif ($DBmode eq "TCDB" || $DBmode eq "PTV"|| $DBmode eq "VDB" || $DBmode eq "VFA" || $DBmode eq "VFB" ){
 	@kgdOpts = qw (3);
 	@kgdName = ("","","","ALL");
 	@kgdNameShrt = ("","","","ALL");
@@ -196,16 +199,18 @@ if ($mode == 3 || $mode == 4){ #scan for all reads finished
 		%TCdef = %{$hr};
 		print "transporter DB\n";
 	}
-	if ($DBmode eq "VDB"){
+	if ($DBmode eq "VDB" || $DBmode eq "VFA" || $DBmode eq "VFB"){
+		#VF.tab is written by prepVFDB.pl; per gene this reports L0 (gene_VFID) ; L1 (VF) ; L2 (VF category)
+		#via the PATRIC virulence (tabCats 8) code path: PTVgene = L0, PTVgene_def = L1, PTVcat = L2
 		$tabCats = 8;
-		print "VIRDB DB\n";
+		print "VFDB ($DBmode) DB\n";
 		my $hr = readTabbed3($VIRDBannp,4);
 		%PTVcat = %{$hr};
 		$hr = readTabbed3($VIRDBannp,1);
 		%PTVgene = %{$hr};
-		$hr = readTabbed3($VIRDBannp,2);
+		$hr = readTabbed3($VIRDBannp,3);
 		%PTVgene_def = %{$hr};
-		system "ln -s $VIRDBannp $inP/VirDB.anno" unless (-e "$inP/VirDB.anno");
+		system "ln -s $VIRDBannp $inP/$DBmode.anno" unless (-e "$inP/$DBmode.anno");
 
 	}
 	if ($DBmode eq "PTV"){
@@ -338,7 +343,9 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 	
 	my ($I,$OK) = gzipopen($blInf,"diamond output file [in]",1); 
 	my $OK2;
-	($O2,$OK2) = gzipwrite($blInf."geneAss","gene cat file [out]",1) if ($reportGeneCat);
+	#per-gene assignments are written under a temporary name and renamed once complete
+	my $geneAssTmp = $blInf."geneAss.tmp";
+	($O2,$OK2) = gzipwrite($geneAssTmp,"gene cat file [out]",1) if ($reportGeneCat);
 	if ($reportEggMapp){
 		system "mkdir -p $tmpD" unless (-d $tmpD);
 		foreach (my $j=0;$j<@kgdOpts;$j++){
@@ -367,11 +374,15 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 				pop @splX;
 			}
 			die "Gene queries cannot represent merged read pairs\n" if $queryType eq 'genes' && $readCount != 1;
-			if (@splX != 12 + ($writeFastaOut ? 1 : 0)) {
+			#12 columns (+ query sequence with -reportDomains), or 14 columns with qlen slen (gene catalog searches)
+			my ($qlenCol, $slenCol);
+			if (!$writeFastaOut && @splX == 14) {
+				($qlenCol, $slenCol) = splice(@splX, 12, 2);
+			} elsif (@splX != 12 + ($writeFastaOut ? 1 : 0)) {
 				die "Invalid BLAST field count: $line\n";
 			}
 			my $mate = $queryType eq 'reads' && $readCount == 1 && $splX[0] =~ /\/([12])$/ ? $1 : 0;
-			push @splX, {read_count => $readCount, mate => $mate};
+			push @splX, {read_count => $readCount, mate => $mate, qlen => $qlenCol, slen => $slenCol};
 			my $query = $splX[0];
 			$query =~ s/\/[12]$// if $mate;
 			#print $query."\n";
@@ -419,7 +430,10 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 		$lcnt=0;$stopInMiddle=0;
 	}
 	close $I;
-	close $O2 if ($reportGeneCat);
+	if ($reportGeneCat){
+		close $O2 or die "Can't close $geneAssTmp.gz\n";
+		rename("$geneAssTmp.gz", $blInf."geneAss.gz") or die "Can't rename $geneAssTmp.gz to ${blInf}geneAss.gz\n";
+	}
 	
 	if ($reportEggMapp){foreach my $kk (keys %OEM){	close $OEM{$kk}}}
 	
@@ -718,7 +732,7 @@ sub main(){
 	
 	#my $arBhit = bestBlHit($whX); 
 
-	my $bestSbj="";my $bestID=0; my $bestAlLen=0;my $bestQuery = ""; my $bestIDever=0; my $bestAlLenEver = 0;
+	my $bestSbj="";my $bestID=0; my $bestAlLen=0;my $bestQuery = ""; my $bestIDever=0; my $bestAlLenEver = 0; my $bestSbjLen = 0;
 	my $COGexists=0; 
 	my $bestScore = 0; my $CBMmode = 0; my $bestE=1000; my $bestBitScpre=0;
 	my $bestQseq = "";
@@ -728,9 +742,17 @@ sub main(){
 		my $Qseq = "";
 		my ($Query,$Subject,$id,$AlLen,$mistmatches,$gapOpe,$qstart,$qend,$sstart,$send,$eval,$bitSc) = @{$blRes[$ii]};
 		$Qseq = $blRes[$ii][12] if ($writeFastaOut);
-		die "Missing or invalid subject length in length DB: $Subject\n"
-			unless defined($DBlen{$Subject}) && $DBlen{$Subject} =~ /^\d+$/ && $DBlen{$Subject} > 0;
-		my $SbjLen = $DBlen{$Subject};
+		#per-hit lengths: qlen/slen from 14-column input if present, else subject length from the -LF file
+		my $hitMeta = ref($blRes[$ii][-1]) eq 'HASH' ? $blRes[$ii][-1] : {};
+		my $QryLen = (defined($hitMeta->{qlen}) && $hitMeta->{qlen} =~ /^\d+$/) ? $hitMeta->{qlen} : 0;
+		my $SbjLen;
+		if (defined($hitMeta->{slen}) && $hitMeta->{slen} =~ /^\d+$/ && $hitMeta->{slen} > 0) {
+			$SbjLen = $hitMeta->{slen};
+		} else {
+			die "Missing or invalid subject length in length DB: $Subject\n"
+				unless defined($DBlen{$Subject}) && $DBlen{$Subject} =~ /^\d+$/ && $DBlen{$Subject} > 0;
+			$SbjLen = $DBlen{$Subject};
+		}
 		#print "$Subject\n";
 		#print $Query."  $bitSc\n";
 		#sort by eval #changed from bestE -> bestScore
@@ -743,7 +765,9 @@ sub main(){
 		if ( ($eval <= $minBLE && $bitSc >= $minScore)
 					&& ($AlLen >= $minAlLen)
 					&& ($id >= $minPid)
-					&& ($quCovFrac == 0 || $AlLen > $SbjLen*$quCovFrac) 
+					&& ( ($quCovFrac == 0 && $qCovFrac == 0)            #coverage: subject OR query coverage requirement met
+						|| ($quCovFrac > 0 && $AlLen > $SbjLen*$quCovFrac)
+						|| ($qCovFrac > 0 && $QryLen > 0 && $AlLen >= $QryLen*$qCovFrac) )
 					&& (!$fndCat || $noHardCatCheck || exists $c2CAT{$Subject})
 					&& ($tabCats!=5 ||  $bitSc >= ($cardFull{$Subject}->[3]*$AlLen/$SbjLen)  )  #$eval <= ($cardE{$Subject}**(1/$Card_leniet)) ) #Card
 					#&& ($tabCats!=5 || $Subject =~ m/^GI:/ )#ABRc specific
@@ -768,6 +792,7 @@ sub main(){
 						$bestReadCount = $blRes[$ii][-1]{read_count};
 						$bestAlLen=$AlLen;$bestE = $eval; $bestQuery = $Query;
 						$bestBitScpre=$bitSc;
+						$bestSbjLen = $SbjLen;
 						$bestID = $id;
 						$bestQseq = ">${bestQuery}__$qstart:$qend:$id\n".convertNT2AA($Qseq)."\n" if ($writeFastaOut);
 						#die "$bestQseq\n";
@@ -916,7 +941,7 @@ sub main(){
 
 	#all info parsed, now add up matrices
 	my $curCOG =  $curCOGs[0];
-	$score{"GLN"} = $bestAlLen / $DBlen{$bestSbj};# if ($normMethod eq "GLN"); #score for this hit, normed by prot length
+	$score{"GLN"} = $bestAlLen / ($bestSbjLen > 0 ? $bestSbjLen : $DBlen{$bestSbj});# if ($normMethod eq "GLN"); #score for this hit, normed by prot length
 	my $numCats = scalar @curCOGs;
 	foreach my $normMethod (@normMethods){
 		my $score2 = $score{$normMethod};
