@@ -5158,7 +5158,7 @@ sub prepDiamondDB($ $ $ $){#takes care of copying the respective DB over to scra
 			system "rm -f $CLrefDBD/PATRIC_VF2.tab";
 			$DBcmd .= "cp $DBpath/PATRIC_VF2.tab $CLrefDBD\n";
 		}
-		if ($curDB eq "VDB" && !-s "$CLrefDBD/VF.tab"){ 
+		if (($curDB eq "VDB" || $curDB eq "VFA" || $curDB eq "VFB") && !-s "$CLrefDBD/VF.tab"){
 			system "rm -f $CLrefDBD/VF.tab";
 			$DBcmd .= "cp $DBpath/VF.tab $CLrefDBD\n";
 		}
@@ -11792,7 +11792,7 @@ sub setDefaultMFconfig{
 	$MFopt{filterHostKr2QuickMode}{0} = "";$MFopt{filterHostKr2QuickMode}{1} = "";# 0/1 for is3rdGen? "--quick "; deactivated for now..
 	$MFopt{hostileIndex} = "human-t2t-hla";
 	$MFopt{globalKraTaxkDB} = "";
-	$MFopt{globalDiamondDependence} = {CZy=>"",MOH2 => "", MOH=>"",NOG=>"",ABR=>"",ABRc=>"",KGB=>"",KGE=>"",ACL=>"",KGM=>"", PTV=>"", PAB => "", URE=>"", URacc=>"", AMI=>""};
+	$MFopt{globalDiamondDependence} = {CZy=>"",MOH2 => "", MOH=>"",NOG=>"",ABR=>"",ABRc=>"",KGB=>"",KGE=>"",ACL=>"",KGM=>"", PTV=>"", PAB => "", VDB=>"", VFA=>"", VFB=>"", URE=>"", URacc=>"", AMI=>""};
 	
 
 

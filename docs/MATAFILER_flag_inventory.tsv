@@ -200,6 +200,8 @@ geneCat.pl	0.51	Flags for specific modes	-SmplBatch	integer	SmplBatch	-1	stable	
 geneCat.pl	0.51	Flags for functional assignment	-FuncMinBitSc	float	minBitSc	45	stable	See source/help for details.
 geneCat.pl	0.51	Flags for functional assignment	-FuncMinAlLeng	integer	minAlLeng	30	stable	See source/help for details.
 geneCat.pl	0.51	Flags for functional assignment	-FuncMinPercSbjCov	float	minPercSbjCov	0.5	stable	Minimum fraction of subject coverage for functional assignment.
+geneCat.pl	0.61	Flags for functional assignment	-FuncMinPercQueryCov	float	minPercQueryCov	0.8	stable	Minimum fraction of the catalog protein covered (alternative to subject coverage).
+geneCat.pl	0.61	Flags for functional assignment	-redoFunc	integer	redoFunc	0	stable	FuncAssign: 1 recomputes existing functional assignments and matrices.
 geneCat.pl	0.51	Flags for functional assignment	-FuncMinPerID	float	minPerID	25	stable	See source/help for details.
 geneCat.pl	0.51	Flags for functional assignment	-FuncMinEVal	float	minEVal	1e-8	stable	See source/help for details.
 MGS.pl	0.32	General options	-GCd	string	inD		stable	gene catalog dir

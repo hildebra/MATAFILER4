@@ -30,7 +30,8 @@ cLSUSSU_scr	perl [MFLRDir]/secScripts/miTag/catchLSUSSU.pl
 lotusLCA_cLSU_scr	[MFLRDir]/secScripts/miTag/lotus_LCA_blast3.pl
 krakCnts_scr	[MFLRDir]/secScripts/GC/krak_count_tax.pl
 genelength_scr	perl [MFLRDir]/secScripts/assemblies/geneLengthFasta.pl
-secCogBin_scr	[MFLRDir]/secScripts/functions/parseBlastFunct2.pl
+secCogBin_scr	perl [MFLRDir]/secScripts/functions/parseBlastFunct2.pl
+prepVFDB_scr	perl [MFLRDir]/secScripts/functions/prepVFDB.pl
 KrisABR_scr	perl [MFLRDir]/secScripts/functions/ABRblastFilter2.pl
 sepCts_scr	perl [MFLRDir]/secScripts/assemblies/separateContigs.pl
 assStat_scr	perl [MFLRDir]/secScripts/assemblies/assemblathon_stats.pl

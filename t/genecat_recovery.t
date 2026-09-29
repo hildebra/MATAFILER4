@@ -44,6 +44,9 @@ use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid read_checkpoint);
 use Mods::WorkflowResilience qw(retry_unlink retry_rename);
 use Mods::geneCat qw(readGeneIdxSpl attachProteins3);
+use Digest::MD5 ();
+use Cwd ();
+use Mods::FuncTools qw(calc_modules);
 our ($primaryClusterFNA, $primaryClusterCLS, $pigzBin, $catBin, $cpBin, $rmBin,
     $mkdirBin, $mvBin, $tmpDir, $cdhID, $numCor0, $totMem, $submitLocal, $COGdir,
     $GCdir, $GCscr, $checkpointWriter, $QSBoptHR, $clustMMseq, $avx2Constr,
@@ -56,7 +59,7 @@ my @helpers = qw(_shell_quote _checkpoint_command _stone_valid _sync_file
     _append_file_locked _reset_collation_outputs
     gzifelscat _catalog_backup_command _merged_catalog_backup_valid clusterFNA
     clusterSingleStep rewriteClusNumbers addCOGgenes mergeClsSam rewriteFastaHdIdx
-    combineClstr krakenTax geneCatFunc_emapper);
+    combineClstr krakenTax geneCatFunc_emapper _qsbCopy _gcTmpTag _emapSplitDir);
 for my $name (@helpers) {
     my ($helper) = $source =~ /^(sub \Q$name\E\b[^\n]*\{.*?^\})/ms;
     die "Missing $name" unless defined $helper;

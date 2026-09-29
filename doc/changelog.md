@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-09-29 — Gene-catalogue functional annotation and VFDB
+
+- `geneCat.pl` 0.61.
+- `eggNOG_split.sh` rewritten:
+  - one tab-aware pass; reads `.gz` input; rejects truncated rows;
+  - writes outputs atomically, leaving existing files untouched on failure;
+  - KEGG pathway IDs are no longer merged (`ko00500ko01100`); NOG works for non-numeric gene IDs;
+  - new `eggNOGmapper_KO` table.
+- **Coverage rule.** A hit passes if ≥ `-FuncMinPercSbjCov` (0.5) of the reference protein **or** ≥ `-FuncMinPercQueryCov` (0.8, new) of the catalog protein is aligned. Diamond/foldseek catalog searches now output `qlen slen` (14 columns); read-based 12-column input is unchanged. Foldseek now gets the e-value cutoff. **Recompute existing annotations with `-mode FuncAssign -redoFunc 1`** to apply the rule.
+- **KEGG.** eggNOG-mapper KOs now give `Anno/Func/emapper/EM.KOL0.txt` and KEGG modules (`Anno/Func/emapper/modules/`), next to the diamond KGM tables and modules.
+- **Checkpoint.** `10.func.stone` records `functDB`, `functAligner` and the cutoffs, so changing them triggers a re-run. `FuncAssign` checks every database before submitting anything.
+- **Robustness:**
+  - catalogue-specific temp/split directories; one split shared by all databases and removed by the final job;
+  - eggNOG-mapper merges an explicit chunk list; compressed annotations from an earlier run are reused;
+  - atomic writes and `.<db>.matrix.done` markers;
+  - node-local diamond/foldseek scratch;
+  - submission options copied per job;
+  - catalog splitting skipped when nothing runs;
+  - duplicate `-eggNOGmap` argument removed.
+- **VFDB.** New `-functDB` options `VFA` (set A) and `VFB` (set B); `VDB` stays as an alias for set B.
+  - `secScripts/functions/prepVFDB.pl` builds `VF.tab`.
+  - Outputs are `VF{A,B}L0-2.txt` (gene_VFID / virulence factor / VF category).
+  - Stricter per-database cutoffs (`%funcDBcutoffs`).
+
 ## 2026-09-25 — Audit follow-up decisions
 
 - **Paired unaligned BAM/SAM/CRAM input.** The layout of each alignment input is detected; sdm cleans paired files as true pairs (`-paired 2`, name-sorting first when the header is not `SO:queryname`), giving the usual `filtered.1/.2/.singl` files. Raw-read mapping and the raw FASTQ cache now keep every mate (mapped as unpaired reads) instead of none; `-uploadRawRds` stops for paired alignment input. See [mapping files](../docs/mapping_files.md#using-bam-files-as-primary-input).
