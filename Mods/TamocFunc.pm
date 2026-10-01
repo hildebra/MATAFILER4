@@ -456,6 +456,8 @@ sub getSpecificDBpaths($ $){
 	elsif ($curDB eq "URacc"){$DBpath = getProgPaths("URE_path_DB"); $refDB = "urease_accessory_gtdb_proteins.faa";$shrtDB = $curDB; }
 	elsif ($curDB eq "AMI"){$DBpath = getProgPaths("URE_path_DB"); $refDB = "amidohydrolase_gtdb_proteins.faa";$shrtDB = $curDB; }
 	else {die"Unknown DB for func assignments: $curDB\n";}
+	#callers build "$DBpath$refDB": a configured path without trailing slash would pass the checks below but not work
+	$DBpath .= "/" if (defined($DBpath) && $DBpath ne "" && $DBpath !~ m{/$});
 
 	#basic file checks
 	unless (-d $DBpath) {die "getSpecificDBpaths:: Specified DB ($curDB) did not have valid DBpath: $DBpath\n";}

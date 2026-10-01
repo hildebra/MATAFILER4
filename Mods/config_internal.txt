@@ -48,8 +48,8 @@ calcGC_scr	perl [MFLRDir]/secScripts/composition/calcGC.pl
 extre100_scr	perl [MFLRDir]/secScripts/GC/extrAllE100GC.pl
 decoyDB_scr	[MFLRDir]/secScripts/assemblies/deployMapDB.pl
 bamHdFilt_scr	[MFLRDir]/secScripts/assemblies/correctBamHD.pl
-# Legacy HMM best-hit helper uses Python 2 syntax.
-hmmBestHit_scr	python2 [MFLRDir]/secScripts/functions/bmn-HMMerBestHit.py
+# HMMER domtblout best hit per gene (FOAM/ABR modes of geneCat.pl).
+hmmBestHit_scr	perl [MFLRDir]/secScripts/functions/hmmBestHit.pl
 mrgDia_scr	[MFLRDir]/secScripts/functions/combine_DIA.pl
 mrgMiTag_scr	[MFLRDir]/secScripts/miTag/miTagTaxTable.pl
 mrgMOUT2_scr	perl [MFLRDir]/secScripts/composition/mrgMotu2.pl

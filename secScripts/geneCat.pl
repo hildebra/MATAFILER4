@@ -27,8 +27,9 @@ use Getopt::Long qw( GetOptions );
 use Cwd; use English;
 use Mods::FlagReference qw(printFlagHelp helpRequested);
 use Mods::GenoMetaAss qw( readFasta ensureFastaIndex fileGZe gzipopen gzipwrite splitFastas clenSplitFastas readMapS systemW readGFF getAssemblPath resolve_path);
-use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive
+use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive numLiveUserJobs
 	submissionDependencyDeferred submissionDependencyFailed);
+use Sys::Hostname qw(hostname);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
 use Mods::FuncTools qw(assignFuncPerGene calc_modules);
@@ -755,8 +756,8 @@ die "-FuncMinPercSbjCov must be between 0 and 1\n"
 die "-FuncMinPercQueryCov must be between 0 and 1\n"
 	unless $minPercQueryCov >= 0 && $minPercQueryCov <= 1;
 die "-redoFunc must be 0 or 1\n" unless $redoFunc == 0 || $redoFunc == 1;
-die "-fastaSplit must be a positive count or size such as 500M\n"
-	unless $fastaSplits =~ /^\d+(?:[KMG])?$/i && $fastaSplits !~ /^0+[KMG]?$/i;
+die "-fastaSplit must be a positive count or a size in M or G such as 500M\n" #splitFastas only knows upper-case M and G
+	unless $fastaSplits =~ /^\d+[MG]?$/ && $fastaSplits !~ /^0+[MG]?$/;
 die "-SNPcaller must be either MPI or FB\n"
 	unless $SNPcaller eq "MPI" || $SNPcaller eq "FB";
 die "-doMags must be 0 or 1\n" unless $doMags == 0 || $doMags == 1;
@@ -960,44 +961,59 @@ if ($mode eq "mergeCLs"){
 	print "NOTE: KGM is not in -functDB: no diamond KEGG KO/module tables (eggNOG-mapper KOs are produced by FuncEMAP)\n" unless (grep {$_ eq "KGM"} @DBs);
 	#check every database before submitting anything, so one missing database can't leave a partial run
 	my @missing;
-	foreach my $curDB (@DBs){ eval { getSpecificDBpaths($curDB,0); 1 } or push(@missing,"  $curDB: $@"); }
-	die "FuncAssign: missing/invalid functional databases, nothing submitted:\n".join("",@missing) if (@missing);
-	#all databases share one split of the catalog, in a catalog-specific directory; removed by the final job
-	my $query = "$GCdir/compl.incompl.$cdhID.prot.faa";
-	my $splitDir = _funcSplitDir();
-	my @oldSplits = glob("$splitDir/*");
-	if (@oldSplits && -e $query && (-M $oldSplits[0]) > (-M $query)){ #splits older than the catalog: stale
-		print "Removing stale catalog splits in $splitDir\n";
-		clenSplitFastas($query,$splitDir);
-	}
-	my @funcDeps; my @funcOuts;
 	foreach my $curDB (@DBs){
-		my $numCor2 = $numCor;
-		if ($curDB eq "mp3"){$numCor2=1;}
-		my ($funcDep,$geneAss) = geneCatFunc($GCdir,_funcTmpDir(),$curDB,$numCor2,$QSBoptHR);
-		push @funcDeps, $funcDep if defined($funcDep) && length($funcDep);
-		push @funcOuts, $geneAss;
+		if ($curDB eq "mp3"){ #no DB files, but needs the mp3 program
+			my $mp3P = eval { getProgPaths("mp3",0) };
+			push(@missing,"  mp3: program path 'mp3' is not configured\n") unless (defined($mp3P) && $mp3P ne "");
+			next;
+		}
+		eval { getSpecificDBpaths($curDB,0); 1 } or push(@missing,"  $curDB: $@");
 	}
-	#final job: runs only after every annotation/matrix job succeeded; removes the shared split and writes the stone
-	my $doneCmd = "$rmBin -rf $splitDir\n";
-	if (length $modeStone) {
-		#checkpoint fails if a per-gene assignment file is missing; records databases, aligner and cutoffs
-		my $stoneCmd = _checkpoint_command($checkpointWriter, $modeStone, $cdhID, 'functional-annotation', @funcOuts);
-		my %fp = _funcStoneParams();
-		my $extra = join(' ', map { _shell_quote($_) } map { ('--param', "$_=$fp{$_}") } sort keys %fp);
-		$stoneCmd =~ s/\n$/ $extra\n/;
-		$doneCmd .= $stoneCmd;
-	}
-	make_path("$qsubDir/Funct/") unless -d "$qsubDir/Funct/";
-	my ($doneDep, $doneQcmd) = qsubSystem("$qsubDir/Funct/FuncAssign.done.sh", $doneCmd,
-		1, "1G", "funcDone", join(";", @funcDeps), "", 1, [], $QSBoptHR);
-	print "All function-assignment jobs submitted\n";
+	die "FuncAssign: missing/invalid functional databases, nothing submitted:\n".join("",@missing) if (@missing);
+	#not again while jobs of an earlier submission are queued or running (see _submitStageOnce)
+	_submitStageOnce('FuncAssign', sub {
+		#all databases share one split of the catalog, in a catalog-specific directory; removed by the final job
+		my $query = "$GCdir/compl.incompl.$cdhID.prot.faa";
+		my $splitDir = _funcSplitDir();
+		my @oldSplits = glob("$splitDir/*");
+		if (@oldSplits && -e $query && (-M $oldSplits[0]) > (-M $query)){ #splits older than the catalog: stale
+			print "Removing stale catalog splits in $splitDir\n";
+			clenSplitFastas($query,$splitDir);
+		}
+		my @funcDeps; my @funcOuts;
+		foreach my $curDB (@DBs){
+			my $numCor2 = $numCor;
+			if ($curDB eq "mp3"){$numCor2=1;}
+			my ($funcDep,$geneAss) = geneCatFunc($GCdir,_funcTmpDir(),$curDB,$numCor2,$QSBoptHR);
+			push @funcDeps, $funcDep if defined($funcDep) && length($funcDep);
+			push @funcOuts, $geneAss;
+			push @funcOuts, "$GCdir/Anno/Func/.${curDB}.matrix.done"; #written last by the matrix job: no stone after a failed matrix
+		}
+		#final job: runs only after every annotation/matrix job succeeded; removes the shared split and writes the stone
+		my $doneCmd = "$rmBin -rf $splitDir\n";
+		if (length $modeStone) {
+			#checkpoint fails if a per-gene assignment file is missing; records databases, aligner and cutoffs
+			my $stoneCmd = _checkpoint_command($checkpointWriter, $modeStone, $cdhID, 'functional-annotation', @funcOuts);
+			my %fp = _funcStoneParams();
+			my $extra = join(' ', map { _shell_quote($_) } map { ('--param', "$_=$fp{$_}") } sort keys %fp);
+			$stoneCmd =~ s/\n$/ $extra\n/;
+			$doneCmd .= $stoneCmd;
+		}
+		$doneCmd .= "$rmBin -f "._inflightMarker('FuncAssign')."\n"; #stage finished
+		make_path("$qsubDir/Funct/") unless -d "$qsubDir/Funct/";
+		my ($doneDep, $doneQcmd) = qsubSystem("$qsubDir/Funct/FuncAssign.done.sh", $doneCmd,
+			1, "1G", "funcDone", join(";", @funcDeps), "", 1, [], $QSBoptHR);
+		print "All function-assignment jobs submitted\n";
+		return $doneDep;
+	});
 	exit(0);
 } elsif($mode eq "FuncEMAP"){ #eggNOG functional assignment
 	$QSBoptHR->{doSubmit} = 1;
 	my $clean=1;
 	if ($fastaSplits eq "500M"){$fastaSplits="150M";}
-	geneCatFunc_emapper($GCdir,$NodeTmpDir."/GCannoEMAP_"._gcTmpTag()."/",$numCor,$clean,$fastaSplits,$modeStone);
+	_submitStageOnce('FuncEMAP', sub {
+		return geneCatFunc_emapper($GCdir,$NodeTmpDir."/GCannoEMAP_"._gcTmpTag()."/",$numCor,$clean,$fastaSplits,$modeStone);
+	});
 	exit(0);
 } elsif ($mode eq "protExtract"){#
 	protExtract($GCdir,$extraRdsFAA,$out); #GCdir
@@ -1546,10 +1562,19 @@ sub geneCatFlow($ $ $ $ ){
 	}
 	
 	#functional annotations.. just run some by default
-	#a changed database list, aligner or cutoff invalidates the functional stone
-	unless (checkpoint_valid($funcStone, parameters => { cluster_id => $cdhID, _funcStoneParams() })) {
+	#a changed database list, aligner or cutoff invalidates the functional stone (per-database products are checked in geneCatFunc)
+	#legacy empty stones carry no parameters, so they no longer count as valid; -redoFunc 1 forces the stage
+	#the subprocess gets the scheduler and tmp dirs of this run, so its split/chunk dirs are the ones this run manages
+	my $funcFwd = " -tmp " . _shell_quote($tmpDir) . " -glbTmp " . _shell_quote($GLBtmp);
+	$funcFwd .= " -submSystem $submSys" if ($submSys ne "");
+	#a stage whose jobs from an earlier run are still queued or running is not submitted again (also not with -redoFunc)
+	my $funcBusy = _stageInFlight('FuncAssign');
+	my $emapBusy = _stageInFlight('FuncEMAP');
+	print "$funcBusy\n" if ($funcBusy ne "");
+	print "$emapBusy\n" if ($emapBusy ne "");
+	if ($funcBusy eq "" && ($redoFunc || !(-s $funcStone && checkpoint_valid($funcStone, parameters => { cluster_id => $cdhID, _funcStoneParams() })))) {
 		my $stageCmd = "#functional assignments of all genes via diamond\n";
-		$stageCmd .= "$GCscr -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPercQueryCov $minPercQueryCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -stone $funcStone\n";
+		$stageCmd .= "$GCscr -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPercQueryCov $minPercQueryCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -redoFunc $redoFunc$funcFwd -stone $funcStone\n";
 		if ($submitLocal) {
 			print "submitting diamond func abundance..\n";
 			my ($dep,$qcmd) = qsubSystem($qsubDir."func_GC.sh",$stageCmd,1,int($totMem3)."G","funcGC","","",1,[],$QSBoptHR);
@@ -1559,12 +1584,12 @@ sub geneCatFlow($ $ $ $ ){
 	}
 
 
-	unless (_stone_valid($emapStone, $cdhID)) {
+	if ($emapBusy eq "" && !(-s $emapStone && _stone_valid($emapStone, $cdhID))) { #legacy empty stone: rerun once to build the KO/module tables
 		retry_unlink($emapStone, label => 'invalidate stale eggNOG checkpoint')
 			if -e $emapStone;
 		my $stageCmd = "#functional assignments via eggNOGmapper\n";
 		#-c $numCor3 .. use max 6 cores for this due to single core emapper final step
-		$stageCmd .= "$GCscr -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID -stone $emapStone \n";
+		$stageCmd .= "$GCscr -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID$funcFwd -stone $emapStone \n";
 		if ($submitLocal) {
 			print "submitting eggNOGmapper func abundance..\n";
 			my ($dep,$qcmd) = qsubSystem($qsubDir."emap_GC.sh",$stageCmd,1,int($totMem3)."G","emapGC","","",1,[],$QSBoptHR);
@@ -1673,7 +1698,9 @@ sub geneCatFlow($ $ $ $ ){
 	#$cmd.= "$bgzipBin $OutD/Matrix.mat\n" ;
 	#$cmd.= "$tabixBin -S 1 -s 1 $OutD/Matrix.mat.gz\n";
 	#die $cmd."\n";
-	$cmd .= "$rmBin -f -r $tmpDir\n";
+	#with -submitLocal 0 the functional stages above only submitted their jobs, which may still be queued:
+	#keep their catalog split and chunk outputs (their own final jobs remove them)
+	$cmd .= "if [ -d $tmpDir ]; then find $tmpDir -mindepth 1 -maxdepth 1 ! -name 'funcSplit_*' ! -name 'GCanno_*' ! -name 'eggNOGmapper_*' -exec $rmBin -rf {} +; fi\n";
 	
 	$cmd .= "\n\necho \"=======================================\"\necho \"Finished Gene Catalog script\"\necho \"=======================================\"\n\n";
 	my $jobName = "CD_$nm";
@@ -3061,7 +3088,7 @@ sub geneCatFunc_emapper{
 		#setup cluster for diamond focused job
 		my $chunkQSB = _qsbCopy($QSB);
 		push(@{$chunkQSB->{constraint}}, $avx2Constr) if (defined($avx2Constr) && $avx2Constr ne "");#--constraint=sse4
-		$chunkQSB->{tmpSpace} = ($mem*1.4) . "G";
+		$chunkQSB->{tmpSpace} = "500G"; #eggNOG diamond temp files, same as the NOG/KEGG diamond jobs
 		print "Splitting FASTAs into $fastaSplits chunks in $splDir\n";
 		my $ar = splitFastas($query,$fastaSplits,$splDir);
 		my @subFls = @{$ar};
@@ -3071,9 +3098,12 @@ sub geneCatFunc_emapper{
 		foreach my $f (@subFls){
 			my $ccmd = "";
 			$ccmd .= "$mkdirBin -p $tmpD/$i/\n";
-			$ccmd .= "$emapper -m diamond --dbmem --override --itype proteins --temp_dir $tmpD/$i/ --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f;\n";
+			#eggNOG-mapper writes its annotations in place (no end marker with --no_file_comments): run under a .part
+			#prefix and rename on success, so a killed chunk never leaves a file the resume test accepts
+			$ccmd .= "$emapper -m diamond --dbmem --override --itype proteins --temp_dir $tmpD/$i/ --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f.part;\n";
+			$ccmd .= "$mvBin $f.part.emapper.annotations $f.emapper.annotations\n";
 			$ccmd .= "$rmBin -rf $tmpD/$i/\n";
-			my $outF = "$f.emapper.annotations"; #the file eggNOG-mapper writes
+			my $outF = "$f.emapper.annotations"; #complete chunk annotations
 			push(@chunkAnnos,$outF);
 			#resume: skip chunks whose annotations exist and are newer than the chunk FASTA
 			if (-s $outF && (-M $outF) <= (-M $f)){
@@ -3087,7 +3117,8 @@ sub geneCatFunc_emapper{
 		print "eggNOG-mapper: $nResumed of ".scalar(@subFls)." chunks already finished\n" if ($nResumed);
 		#merge only this run's chunks (explicit list, no glob), keep one "#query" header, write atomically
 		$cmd .= "#concatenating eggNOG-mapper chunks\n";
-		$cmd .= "{ grep -m 1 '^#query' $chunkAnnos[0] || true; grep -hv '^#' ".join(" ",@chunkAnnos)." || true; } > $tarAnno3.tmp\n";
+		#grep exit 1 (no rows) is fine, exit 2 (a chunk file is missing) aborts the job
+		$cmd .= "{ grep -m 1 '^#query' $chunkAnnos[0] || true; grep -hv '^#' ".join(" ",@chunkAnnos)." || [ \$? -eq 1 ]; } > $tarAnno3.tmp\n";
 		$cmd .= "$mvBin $tarAnno3.tmp $tarAnno3\n";
 		$annoIn = $tarAnno3;
 	}
@@ -3111,7 +3142,8 @@ sub geneCatFunc_emapper{
 			#KEGG modules from eggNOG-mapper KOs (diamond KGM modules are in Anno/Func/modules/)
 			$mcmd .= calc_modules("$outD/${shrt}L0.txt","$outD/modules/",0.5,0.5,0);
 		} else {
-			$mcmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$shrt -t $matThr -refD $outD/$EMC.geneAss $rtkFunDelims -extHiera -hieraSrtDown\n";
+			#no -extHiera: it splits "KOs;modules" on "," before the hierarchy, so L1 rows were KO;module paths, not module sums
+			$mcmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$shrt -t $matThr -refD $outD/$EMC.geneAss $rtkFunDelims\n";
 		}
 		$mcmd .= "echo \"DONE matrix creation\"\n";
 		my ($jobNameM,$mptCmdM) = qsubSystem($qsubDir2."$shrt.sh",$mcmd,$matThr,(50)."G","${shrt}_mat",$jdep,"",1,[],$QSB);
@@ -3126,11 +3158,11 @@ sub geneCatFunc_emapper{
 	$cmd .= "$pigzBin -f -p $clnCores ".join(" ",@toZip).";\n";
 	$cmd .= "$rmBin -f -r $splDir;\n";
 	$cmd .= _checkpoint_command($checkpointWriter, $stone, $cdhID, 'eggnog-annotation', "$tarAnno3.gz");
+	$cmd .= "$rmBin -f "._inflightMarker('FuncEMAP')."\n"; #stage finished
 	($jobName,$mptCmd) = qsubSystem($qsubDir2."CleanEMAP.sh",$cmd,$clnCores,(70)."G","${shrtDB}_CLN",join(";",@jdeps),"",1,[],$QSB);
 
 	print "Done geneCat FuncEMAP sub, submitted all jobs\n";
-
-
+	return $jobName; #final job of the stage
 }
 
 sub geneCatFunc{
@@ -3159,7 +3191,36 @@ sub geneCatFunc{
 	}
 	#matrix completion marker: written only by a successful matrix job (an existing L0 file alone can be partial)
 	my $matDone = "$outD/.${curDB}.matrix.done";
-	my $doMatrix = ($redoFunc || !-e $matDone) ? 1 : 0;
+	my $geneAssF = "$outD/DIAass_$curDB.srt.gzgeneAss.gz"; #name as in assignFuncPerGene
+	#per-database record of the aligner and cutoffs behind the existing products. The stage stone only says that
+	#something changed; here the database is realigned only if the aligner changed or the e-value became less strict
+	#(the alignments lack hits between the old and the new cutoff). Any other change, including a stricter e-value,
+	#re-interprets the existing alignments: the alignment e-value (alnEval) is kept and also used for chunks that are
+	#still to be aligned, so all alignments share it. Products without a record (older runs) are kept.
+	my $paramF = "$outD/.${curDB}.params";
+	my @parseKeys = qw(eval percID minBitScore minAlignLen minPercSbjCov minPercQueryCov);
+	my %cur = (aligner => $funcAligner, alnEval => $optsDia{eval}, map { $_ => $optsDia{$_} } @parseKeys);
+	my $old = _readFuncParams($paramF);
+	my $reparse = 0;
+	if (defined($old) && !$optsDia{redo}){
+		if ($old->{aligner} ne $cur{aligner} || $cur{eval} > $old->{alnEval}){
+			print "$curDB: aligner $old->{aligner} -> $cur{aligner}, alignment e-value $old->{alnEval} -> $cur{eval}: realigning\n";
+			$optsDia{redo} = 1;
+		} else {
+			$cur{alnEval} = $old->{alnEval};
+			my @changed = grep { "$old->{$_}" ne "$cur{$_}" } @parseKeys;
+			if (@changed){
+				print "$curDB: ".join(", ", map { "$_ $old->{$_} -> $cur{$_}" } @changed).": re-interpreting the existing alignments\n";
+				unlink($geneAssF, $matDone);
+				$reparse = 1;
+			}
+		}
+	}
+	$optsDia{alnEval} = $cur{alnEval}; #diamond/foldseek -e; the parser filters with $optsDia{eval}
+	#geneAss missing although the marker exists (intermediates deleted): recompute instead of dying in the stone job
+	my $doMatrix = ($optsDia{redo} || !-e $matDone || !-e $geneAssF) ? 1 : 0;
+	_writeFuncParams($paramF,\%cur) if ($doMatrix || !defined($old));
+	remove_tree("$outD/modules/") if ($curDB eq "KGM" && ($optsDia{redo} || $reparse) && -d "$outD/modules/"); #rtk module skips existing tables
 	my ($allAss,$jdep) = assignFuncPerGene($query,$outD,$tmpD,$curDB,\%optsDia,$QSB,$doMatrix) ;
 	my $tarAnno = "${allAss}geneAss"; #per-gene assignments are "$tarAnno.gz"
 	my $matThr = 4;
@@ -3175,8 +3236,7 @@ sub geneCatFunc{
 		}
 		$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$curDB -t $matThr -refD $tmpAnno $rtkFunDelims \n";
 		$cmd .= "$rmBin -f $tmpAnno\n";
-		if ($curDB eq "KGM"){ #KEGG modules from the diamond KO matrix
-			remove_tree("$outD/modules/") if ($redoFunc && -d "$outD/modules/");
+		if ($curDB eq "KGM"){ #KEGG modules from the diamond KO matrix (stale module tables were removed above)
 			$cmd .= calc_modules("$outD/${curDB}L0.txt","$outD/modules/",0.5,0.5,0);
 		}
 		$cmd .= "$touchBin $matDone\n";
@@ -3198,7 +3258,8 @@ sub FOAMassign{
 	my $query = "$GCd/compl.incompl.$cdhID.prot.faa";
 	die "Cannot find protein catalog $query\n" unless -s $query;
 	my $fastaSplits=10;
-	my $ar = splitFastas($query,$fastaSplits,"$GLBtmp/FOAMsplit_"._gcTmpTag()."/");
+	my $splitDir = "$GLBtmp/${DB}split_"._gcTmpTag()."/"; #per mode: FOAM and ABR may be queued at the same time
+	my $ar = splitFastas($query,$fastaSplits,$splitDir);
 	my @subFls = @{$ar};
 	my @jdeps; my @allFiles;
 	my $N = 20;my $jdep=""; my $colSel = 4;
@@ -3217,13 +3278,10 @@ sub FOAMassign{
 			$cmd .= "$hmmBin3 --cpu $N --domtblout $tmpOut --cut_ga $ABresHMM $subFls[$i] > /dev/null\n";
 			$colSel = 5;#select gene name
 		}
-		$cmd .= "$sortBin $tmpOut > $tmpOut.sort\n";
-		#DEBUG
-		#$cmd .= "cp $tmpOut.sort $GCd\n";
-		
-		$cmd .= "$hmmBestHitScr $tmpOut.sort > $tmpOut.sort.BH\n";
-		$cmd .= "$awkBin '{printf (\"%s\\t%s\\n\", \$1,\$$colSel)}' $tmpOut.sort.BH |$sortBin > $outF.tmp\n$mvBin $outF.tmp $outF\n";
-		$cmd .= "$rmBin -f -r $tmpOut* $subFls[$i]\n";
+		#best hit per gene (the helper does not need sorted input)
+		$cmd .= "$hmmBestHitScr $tmpOut > $tmpOut.BH\n";
+		$cmd .= "$awkBin '{printf (\"%s\\t%s\\n\", \$1,\$$colSel)}' $tmpOut.BH | LC_ALL=C $sortBin > $outF.tmp\n$mvBin $outF.tmp $outF\n";
+		$cmd .= "$rmBin -f -r $tmpOut*\n"; #the catalog chunks are removed by the collect job
 		my $jobName = "$DB"."_$i";
 		#die $cmd."\n";
 		my ($jobDep,$jobCmd) = qsubSystem($qsubDir."$DB$i.sh",$cmd,$N,"1G",$jobName,"","",1,[],$QSB);
@@ -3235,6 +3293,7 @@ sub FOAMassign{
 	my $assigns = "$GCd/$DB.assign.txt";
 	my $cmd= "$catBin ".join(" ",@allFiles). " > $assigns.tmp\n$mvBin $assigns.tmp $assigns\n";
 	$cmd .= "$rmBin -f ".join(" ",@allFiles) . "\n";
+	$cmd .= "$rmBin -rf $splitDir\n";
 	#tr [:blank:] \\t
 	$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $GCd/$DB.mat -t 1 -refD $assigns $rtkFunDelims \n";
 	$QSB->{tmpSpace} = "0";
@@ -3272,6 +3331,127 @@ sub _emapSplitDir{
 sub _funcStoneParams{
 	return (functDB => $curDB_o, functAligner => $funcAligner,
 		cutoffs => join(",", $minEVal, $minPerID, $minBitSc, $minAlLeng, $minPercSbjCov, $minPercQueryCov));
+}
+#------ in-progress markers of the functional stages (FuncAssign, FuncEMAP) ------
+#Before submitting, a stage creates Anno/Func/.<stage>.inflight (exclusively) and then records its final job in it;
+#that job removes the marker after writing the stage stone. While the final job is queued or running, the stage is
+#not submitted again (a second geneCat run would otherwise duplicate every job and the first run's final job would
+#delete the catalog split under the second run's jobs). A final job that can never run (Slurm
+#DependencyNeverSatisfied after a failed job), a finished one, or a submitter that died make the marker stale.
+sub _inflightMarker{
+	my ($stage) = @_;
+	return "$GCdir/Anno/Func/.$stage.inflight";
+}
+sub _readInflight{
+	my ($f) = @_;
+	open my $fh, '<', $f or return {};
+	my %r;
+	while (my $l = <$fh>){
+		$l =~ s/[\r\n]+$//;
+		my ($k,$v) = split /\t/, $l, 2;
+		$r{$k} = $v if (defined($v));
+	}
+	close $fh;
+	return \%r;
+}
+#state of a submitted job: 'alive' (queued or running), 'dead' (pending on a dependency that failed) or 'gone'
+sub _stageJobState{
+	my ($job) = @_;
+	my $qmode = $QSBoptHR->{qmode} // 'slurm';
+	return 'gone' if ($qmode eq 'bash');
+	my $id = $job;
+	my $rTag = $QSBoptHR->{rTag} // '';
+	$id =~ s/^\Q$rTag\E// if ($rTag ne '');
+	return 'gone' unless ($id =~ /^\d+$/);
+	if ($qmode eq 'slurm'){
+		my $out = `squeue -h -j $id -o "%T|%r" 2>&1`;
+		if ($? == 0){
+			return 'gone' unless ($out =~ /\S/);
+			return ($out =~ /DependencyNeverSatisfied/i) ? 'dead' : 'alive';
+		}
+		return 'gone' if ($out =~ /Invalid job id/i); #purged from the controller
+	}
+	return numLiveUserJobs($QSBoptHR, 0, $id) ? 'alive' : 'gone'; #other schedulers, or a transient squeue error
+}
+#"" if the stage may be submitted (a stale marker is removed), else why not
+sub _stageInFlight{
+	my ($stage) = @_;
+	my $f = _inflightMarker($stage);
+	return "" unless (-e $f);
+	my $r = _readInflight($f);
+	if (defined($r->{job}) && $r->{job} ne ""){
+		my $state = _stageJobState($r->{job});
+		return "$stage jobs from an earlier submission are still queued or running (final job $r->{job})" if ($state eq 'alive');
+		print "$stage: final job $r->{job} of an earlier submission waits on a failed job and can never run; cancel it with your scheduler\n" if ($state eq 'dead');
+	} else { #being submitted right now, or the submitter died before recording its final job
+		my $host = $r->{host} // ''; my $pid = $r->{pid} // '';
+		my $sameHost = ($host eq hostname() && $pid =~ /^\d+$/);
+		my @st = CORE::stat($f); #File::stat overrides stat in this script
+		my $age = time - ($st[9] // 0);
+		if (($sameHost && kill(0, $pid)) || (!$sameHost && $age < 7200)){
+			return "$stage is being submitted by another process ($host, pid $pid)";
+		}
+	}
+	print "Removing stale $stage in-progress marker $f\n";
+	unlink $f;
+	return "";
+}
+#creates the marker exclusively; 0 if another process created it first
+sub _inflightAcquire{
+	my ($stage) = @_;
+	my $f = _inflightMarker($stage);
+	make_path(dirname($f)) unless (-d dirname($f));
+	sysopen(my $fh, $f, O_WRONLY|O_CREAT|O_EXCL) or return 0;
+	print {$fh} "host\t".hostname()."\npid\t$$\ntime\t".time."\n";
+	close $fh;
+	return 1;
+}
+sub _inflightRecordJob{
+	my ($stage,$job) = @_;
+	my $f = _inflightMarker($stage);
+	return unless (-e $f); #already removed: the final job ran synchronously (local execution)
+	if (!defined($job) || $job eq ""){ unlink $f; return; }
+	open my $fh, '>>', $f or die "Cannot update $f: $!\n";
+	print {$fh} "job\t$job\n";
+	close $fh;
+}
+#runs a stage's submission under its marker; $submit returns the final job id
+sub _submitStageOnce{
+	my ($stage,$submit) = @_;
+	my $busy = _stageInFlight($stage);
+	if ($busy ne ""){ print "$busy: not submitting again\n"; return; }
+	unless (_inflightAcquire($stage)){ print "$stage was just submitted by another process: not submitting again\n"; return; }
+	my $finalJob = eval { $submit->() };
+	if ($@){ my $err = $@; unlink _inflightMarker($stage); die $err; }
+	_inflightRecordJob($stage, $finalJob);
+}
+
+#per-database parameter record (Anno/Func/.<DB>.params), "key<TAB>value" lines: aligner, alnEval (e-value the
+#alignments were made with) and the parser cutoffs. Returns a hash ref, or undef if missing or incomplete.
+sub _readFuncParams{
+	my ($f) = @_;
+	return undef unless (-s $f);
+	open my $fh, '<', $f or return undef;
+	my %r;
+	while (my $l = <$fh>){
+		$l =~ s/[\r\n]+$//;
+		my ($k,$v) = split /\t/, $l, 2;
+		$r{$k} = $v if (defined($v));
+	}
+	close $fh;
+	for my $k (qw(aligner alnEval eval percID minBitScore minAlignLen minPercSbjCov minPercQueryCov)){
+		return undef unless (defined($r{$k}) && $r{$k} ne "");
+	}
+	return undef unless ($r{alnEval} =~ /^[-+.eE\d]+$/); #compared numerically
+	return \%r;
+}
+sub _writeFuncParams{
+	my ($f,$p) = @_;
+	my $tmp = "$f.tmp.$$";
+	open my $fh, '>', $tmp or die "Cannot write $tmp: $!\n";
+	print {$fh} map { "$_\t$p->{$_}\n" } sort keys %{$p} or die "Cannot write $tmp: $!\n";
+	close $fh or die "Cannot close $tmp: $!\n";
+	rename($tmp, $f) or die "Cannot rename $tmp to $f: $!\n";
 }
 #copy of the qsub options hash: per-job settings (constraints, tmp space, qsubDir) don't leak into later jobs
 sub _qsbCopy{

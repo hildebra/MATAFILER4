@@ -56,7 +56,8 @@ open my $O, ">", $tmpF or die "Can't write $tmpF\n";
 foreach my $id (sort keys %B){
 	my $h = $B{$id};
 	my ($gene,$desc,$vfN,$vfID,$vfcN,$vfcID,$org) = ("","","","","","","");
-	if ($h =~ m/^>\S+\s+\(([^)]*)\)\s+(.*?)\s*\[(.+?)\s+\((VF\d+)\)(?:\s+-\s+(.+?)\s+\((VFC\d+)\))?\]\s*\[([^\]]*)\]\s*$/){
+	#VF/VFC names cannot contain brackets: a "[2Fe-2S]" in the description must not start the VF bracket
+	if ($h =~ m/^>\S+\s+\(([^)]*)\)\s+(.*?)\s*\[([^\[\]]+?)\s+\((VF\d+)\)(?:\s+-\s+([^\[\]]+?)\s+\((VFC\d+)\))?\]\s*\[([^\]]*)\]\s*$/){
 		($gene,$desc,$vfN,$vfID,$vfcN,$vfcID,$org) = ($1,$2,$3,$4,$5 // "",$6 // "",$7);
 	} else {
 		$unparsed++;

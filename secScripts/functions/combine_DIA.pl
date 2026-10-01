@@ -64,25 +64,34 @@ my %Taxs; #contains the subparts that the matrix is split into
 
 print "Working through ".@samples." samples\n";
 
+my %refDiaD; #per DB: diamond/ dir of the first sample with tables for it, used to find the table layout
+my @DBsFound;
 foreach my $DB (@DBs){
 	my @subDirs = ();
-	$testD = $map{$samples[0]}{wrdir}."/diamond/";
-	print $testD."\n";
-	opendir D,$testD or die "Can't open dir $testD\n";
-	my $cnt=0;
-	while (my $dd = readdir D){
-		if (-d $testD.$dd  && $dd !~ m/^\./){
-			my (@FList) = glob($testD.$dd."/$DB*");
-			#print "@FList\n";
-			next unless (@FList > 0);
-			#print $dd . " ".$testD.$dd."/$DB*\n";
-			push @subDirs, $dd ;
+	#the first map sample can lack diamond/ (empty sample, -from N, not yet profiled): use the first sample with tables
+	foreach my $smpl (@samples){
+		$testD = $map{$smpl}{wrdir}."/diamond/";
+		next unless (-d $testD);
+		opendir D,$testD or die "Can't open dir $testD\n";
+		my $cnt=0;
+		while (my $dd = readdir D){
+			if (-d $testD.$dd  && $dd !~ m/^\./){
+				my (@FList) = glob($testD.$dd."/$DB*");
+				#print "@FList\n";
+				next unless (@FList > 0);
+				#print $dd . " ".$testD.$dd."/$DB*\n";
+				push @subDirs, $dd ;
+			}
+			$cnt++;
+			if ($cnt > 1000){die "Abort while1\n";}
+			#print $dd if (-d $testD.$dd);
 		}
-		$cnt++;
-		if ($cnt > 1000){die "Abort while1\n";}
-		#print $dd if (-d $testD.$dd);
+		closedir D;
+		if (@subDirs){ $refDiaD{$DB} = $testD; last; }
 	}
-	closedir D;
+	unless (@subDirs){ print "No sample has $DB tables yet, skipping $DB\n"; next; }
+	print "$DB layout from $refDiaD{$DB}\n";
+	push @DBsFound, $DB;
 	#die "@subDirs\n\n";
 	$DBsD{$DB} = \@subDirs;
 
@@ -94,6 +103,7 @@ foreach my $DB (@DBs){
 	}
 
 }
+@DBs = @DBsFound;
 #die;
 #print "D1\n";
 #look in each subdir specific to DB for valid *cat file to get the TAXs available
@@ -103,7 +113,7 @@ foreach my $DB (@DBs){
 	if ($DB eq "KGM"){$Taxs{$DB} = ["EUK","BAC","UNC"]; $calcModules = 1; next;}
 	my @tmp2 = @{$DBsD{$DB}};# die "@tmp2\n";
 	print "@{$DBsD{$DB}}\n".@tmp2."\n";
-	$testD = $map{$samples[0]}{wrdir}."/diamond/".${$DBsD{$DB}}[0]."/";
+	$testD = $refDiaD{$DB}.${$DBsD{$DB}}[0]."/";
 	#die $testD;
 	opendir D,$testD or die "Can't open dir $testD\n";
 	my @files = readdir D;closedir D;
@@ -156,7 +166,8 @@ foreach my $DB (@DBs){
 					#print $DiaCATf."\n";
 					#MOHparse.MOH.gene.cnts.gz
 					if ($DB eq "CZy"){
-					}elsif ($DB ne "NOG" &&$DB ne "PTV" && $DB ne "PAB" &&$DB ne "PTV" &&  $DB ne "KGB" && $DB ne "KGE" && $DB ne "KGM"&& $DB ne "ABRc"){
+					#databases for which parseBlastFunct2.pl writes .CATcnts (tabCats != 0) instead of .gene.cnts
+					}elsif ($DB !~ m/^(NOG|PTV|PAB|KGB|KGE|KGM|ABRc|TCDB|VDB|VFA|VFB)$/){
 						$DiaCATf = "$dir2rd/diamond/$deepDir/$DB"."parse.$DB.$TAX.$NORM.gene.cnts.gz" ;
 					
 					} else {

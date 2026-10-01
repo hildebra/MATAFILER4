@@ -91,9 +91,9 @@ my @ena_bytes = map { -s File::Spec->catfile($fixtures, $_) } @ena_names;
 my $ena_report = File::Spec->catfile($fixtures, 'ena.tsv');
 write_file(
 	$ena_report,
-	join("\t", qw(run_accession instrument_platform library_layout fastq_ftp fastq_md5 fastq_bytes))."\n"
+	join("\t", qw(run_accession instrument_platform library_layout library_strategy fastq_ftp fastq_md5 fastq_bytes))."\n"
 	.join("\t",
-		'ERR900001', 'ILLUMINA', 'PAIRED',
+		'ERR900001', 'ILLUMINA', 'PAIRED', 'WGS',
 		join(';', map { "ftp.sra.ebi.ac.uk/vol1/fastq/$_" } @ena_names),
 		join(';', @ena_md5), join(';', @ena_bytes),
 	)."\n",
@@ -169,9 +169,9 @@ my $fake_validator = write_tool('vdb-validate', <<'PERL');
 use strict;
 use warnings;
 use File::Basename qw(basename);
-my $directory = $ARGV[0];
-my $run = basename($directory);
-exit((-s "$directory/$run.sra") ? 0 : 1);
+#receives the resolved SRA object (find_sra_path), not the prefetch cache directory
+my $object = $ARGV[0];
+exit((-f $object && -s $object && basename($object) =~ /^[SED]RR\d+(?:\.sra)?$/) ? 0 : 1);
 PERL
 my $fake_fasterq = write_tool('fasterq-dump', <<'PERL');
 #!/usr/bin/env perl
@@ -189,12 +189,13 @@ for (my $i = 0; $i < @ARGV; $i++) {
 	}
 }
 $source = $ARGV[-1];
-die "fasterq-dump did not receive an accession directory\n"
-	unless -d $source && basename($source) =~ /^[SED]RR\d+$/;
+#the resolved SRA object: given the prefetch cache directory, real fasterq-dump misses the QUALITY column
+die "fasterq-dump did not receive the resolved SRA object\n"
+	unless -f $source && basename($source) =~ /^([SED]RR\d+)(?:\.sra)?$/;
+my $run = $1;
 die "fasterq-dump thread or temporary-directory options are invalid\n"
 	unless defined($threads) && $threads > 0
 		&& defined($temporary) && $temporary eq $output;
-my $run = basename($source);
 open my $fh, '>', "$output/$run.fastq" or die $!;
 print {$fh} "\@ont1\nACGTA\n+\nIIIII\n";
 close $fh;

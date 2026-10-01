@@ -279,7 +279,7 @@ Add `VFA` and/or `VFB` to `geneCat.pl -functDB` (for example `-functDB KGM,TCDB,
 | `VFAL2.txt` / `VFBL2.txt` | Abundance per VF category (e.g. `VFC0086_Effector_delivery_system`). |
 | `DIAass_VFA.srt.gzgeneAss.gz` / `DIAass_VFB.srt.gzgeneAss.gz` | Gene-to-VF assignments (`gene<TAB>L0<TAB>L1<TAB>L2`). |
 
-**Database setup:** put `VFDB_setA_pro.fas` and `VFDB_setB_pro.fas` from the [VFDB download page](http://www.mgc.ac.cn/VFs/download.htm) (unzipped) into `VirDB_path_DB` (default `[DBDir]/Funct/VIRDB/`). Both files are needed even if only one set is used. On first use MATAFILER builds the diamond index and the `.length` file. `secScripts/functions/prepVFDB.pl` builds `VF.tab`, the table mapping each VFDB protein to its gene, virulence factor and VF category.
+**Database setup:** put `VFDB_setA_pro.fas` and `VFDB_setB_pro.fas` from the [VFDB download page](http://www.mgc.ac.cn/VFs/download.htm) (unzipped) into `VirDB_path_DB` (default `[DBDir]/Funct/VIRDB/`). Both files are needed even if only one set is used. On first use MATAFILER builds the diamond index and the `.length` file. `secScripts/functions/prepVFDB.pl` builds `VF.tab`, the table mapping each VFDB protein to its gene, virulence factor and VF category. Both the gene catalogue and read-based profiling (`-DiaDBs VFA`) build it, and rebuild it when a VFDB FASTA is newer or the table has the old column layout.
 
 **Cutoffs:** set A is a subset of set B, so `VFA` is the conservative profile and `VFB` the more sensitive one. Both use the same, stricter cutoffs: identity ≥ 60 %, e-value ≤ 1e-10, bit score ≥ 60 and alignment ≥ 50 aa. The hit must also cover either ≥ 70 % of the VFDB protein or ≥ 80 % of the catalog protein. The cutoffs are set in `%funcDBcutoffs` in `secScripts/geneCat.pl`. A VFDB hit shows homology to a known virulence factor, not that the organism is pathogenic.
 
@@ -289,13 +289,17 @@ Module-style outputs are written one directory per module database, each holding
 file set named after that database:
 
 ```text
-<gene_catalog>/Anno/Func/modules/   modKEEG.*   KEGG modules
-<gene_catalog>/Anno/Func/BSB/       modGMM.*    gut metabolic modules
-<gene_catalog>/Anno/Func/SEED/      modSEED.*   SEED subsystems
-<gene_catalog>/Anno/Func/GBM/       modGBM.*    gut brain modules
+<gene_catalog>/Anno/Func/modules/modules/   modKEEG.*   KEGG modules
+<gene_catalog>/Anno/Func/modules/BSB/       modGMM.*    gut metabolic modules
+<gene_catalog>/Anno/Func/modules/SEED/      modSEED.*   SEED subsystems
+<gene_catalog>/Anno/Func/modules/GBM/       modGBM.*    gut brain modules
 ```
 
-Taking `modules/` as the example, the files are:
+The eggNOG-mapper route writes the same layout under `Anno/Func/emapper/modules/`.
+The module definitions come from `Module_path_DB` and are not installed by the installer; a module set whose
+`.list`, `.descr` or `_hiera.txt` file is missing is skipped with a warning.
+
+Taking `modules/modules/` as the example, the files are:
 
 | File | Meaning |
 |---|---|
@@ -326,9 +330,15 @@ A hit is accepted when e-value ≤ `-FuncMinEVal` (1e-8), identity ≥ `-FuncMin
 - at least `-FuncMinPercSbjCov` (50 %) of the reference protein aligned, or
 - at least `-FuncMinPercQueryCov` (80 %) of the catalog protein aligned.
 
-The query-coverage alternative keeps partial (incomplete) genes. `-redoFunc 1` recomputes existing results after cutoffs or databases change. Changing `-functDB`, `-functAligner` or a cutoff invalidates `checkpoints/10.func.stone`.
+The query-coverage alternative keeps partial (incomplete) genes. Changing `-functDB`, `-functAligner` or a cutoff invalidates `checkpoints/10.func.stone`, and the next run recomputes only what the change affects. `Anno/Func/.<db>.params` records the aligner and cutoffs behind each database's results:
 
-`Anno/Func/.<db>.matrix.done` marks a completed matrix. A database without this marker gets its matrix rebuilt on the next `FuncAssign` run.
+- a changed aligner, or a less strict `-FuncMinEVal` than the alignments were made with, realigns that database;
+- any other change, including a stricter `-FuncMinEVal`, re-interprets its existing alignments (`DIAass_<db>.srt.gz`) and rebuilds its matrix. The alignment e-value stays recorded (`alnEval`) and is also used for chunks still to be aligned, so all alignments of a database share it;
+- results from runs before this record existed are kept as they are. Use `-redoFunc 1` (also forwarded from the main geneCat run) to recompute them.
+
+While a stage's jobs are queued or running, `Anno/Func/.FuncAssign.inflight` / `.FuncEMAP.inflight` holds its final job, and geneCat does not submit that stage again (also not with `-redoFunc 1`). The final job removes the marker. A marker whose final job has finished, can never run (Slurm `DependencyNeverSatisfied` after a failed job), or whose submitting process died is ignored and removed.
+
+`Anno/Func/.<db>.matrix.done` marks a completed matrix. A database without this marker, or without its `DIAass_<db>.srt.gzgeneAss.gz`, is recomputed on the next `FuncAssign` run. The stone records both files, so it is only written after every matrix succeeded.
 
 ### KEGG from diamond and from eggNOG-mapper
 
@@ -336,10 +346,10 @@ Both KEGG routes run by default and are kept separate:
 
 | Route | KO matrix | Modules |
 |---|---|---|
-| diamond against the KEGG database (`-functDB` containing `KGM`) | `Anno/Func/KGML0.txt` | `Anno/Func/modules/` |
-| eggNOG-mapper (`FuncEMAP`) | `Anno/Func/emapper/EM.KOL0.txt` | `Anno/Func/emapper/modules/` |
+| diamond against the KEGG database (`-functDB` containing `KGM`) | `Anno/Func/KGML0.txt` | `Anno/Func/modules/*/` |
+| eggNOG-mapper (`FuncEMAP`) | `Anno/Func/emapper/EM.KOL0.txt` | `Anno/Func/emapper/modules/*/` |
 
-The eggNOG-mapper tables `EM.KGM*` (KO;module) and `EM.KGP*` (KO;pathway) are still written. `eggNOGmapper_KO.geneAss.gz` holds the per-gene KOs from eggNOG-mapper.
+The eggNOG-mapper tables `EM.KGM*` (KO;module) and `EM.KGP*` (KO;pathway) are still written: level 0 holds KOs, level 1 the eggNOG-mapper module or pathway assignments, summed over genes (before 1 October 2026, level 1 held `KO;module` path names). `eggNOGmapper_KO.geneAss.gz` holds the per-gene KOs from eggNOG-mapper.
 
 ## Taxonomic annotation outputs
 

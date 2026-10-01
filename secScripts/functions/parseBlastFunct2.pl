@@ -429,7 +429,8 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 		if ($stopInMiddle==0){last;}
 		$lcnt=0;$stopInMiddle=0;
 	}
-	close $I;
+	close $I or die "Corrupt or truncated input $blInf (decompression failed)\n"; #a truncated .gz must not give a complete-looking result
+
 	if ($reportGeneCat){
 		close $O2 or die "Can't close $geneAssTmp.gz\n";
 		rename("$geneAssTmp.gz", $blInf."geneAss.gz") or die "Can't rename $geneAssTmp.gz to ${blInf}geneAss.gz\n";
@@ -477,6 +478,15 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 
 #print "all done\n";
 exit(0);
+
+#free-text descriptions in per-gene files: geneCat turns tabs into ";" and runs rtk with ";" (hierarchy), "," (AND)
+#and "|" (OR) as separators, so these characters inside a description would split it into extra features/levels
+sub hieraSafe{
+	my ($s) = @_;
+	$s = "" unless (defined($s));
+	$s =~ s/[;,|]/_/g;
+	return $s;
+}
 
 sub fixCardMeta($){
 	my ($hh)=@_; my %dd = %{$hh};
@@ -964,7 +974,7 @@ sub main(){
 			#print $O "$Query\t$Subject\t$bestID\t$bestE\t$bestAlLen\t$curCOG\t$curCat\t$curDef\n";
 			if ($lpCnt==1){
 				print $O2 "$bestQuery\t$curCOG\n" if ($reportGeneCat ==1);
-				print $O2 "$bestQuery\t$curCOG\t$curCat\t$curDef\n" if ($reportGeneCat ==2);
+				print $O2 "$bestQuery\t$curCOG\t$curCat\t".hieraSafe($curDef)."\n" if ($reportGeneCat ==2);
 			}
 		
 		} elsif ($tabCats == 2 ){ #KEGG
@@ -978,7 +988,7 @@ sub main(){
 			$COGabundance{$normMethod}{$curKgd}{$curCOG}+= $score2;
 			#print "$bestQuery\t$curCat\n";
 			if ($lpCnt==1 && $curCat ne "" ){
-				print $O2 "$bestQuery\t$curCOG\t$curDef\t$curCat\n" if ($reportGeneCat  );
+				print $O2 "$bestQuery\t$curCOG\t".hieraSafe($curDef)."\t".hieraSafe($curCat)."\n" if ($reportGeneCat  );
 			}
 		} elsif ($tabCats==5){#ABR CARD
 			$COGabundance{$normMethod}{$curKgd}{$curCOG}+= $score2;
@@ -996,7 +1006,7 @@ sub main(){
 			$CATabundance{$normMethod}{$curKgd}{$curCat}+= $score2;
 			if ($lpCnt==1){
 				print $O2 "$bestQuery\t$curCOG\n" if ($reportGeneCat ==1);
-				print $O2 "$bestQuery\t$curCOG\t$curDef\t$curCat\t$curCatDef\n" if ($reportGeneCat ==2);
+				print $O2 "$bestQuery\t$curCOG\t".hieraSafe($curDef)."\t$curCat\t".hieraSafe($curCatDef)."\n" if ($reportGeneCat ==2);
 			}
 		} elsif ($tabCats==7){#AB production PAB
 			#$COGabundance{$normMethod}{$curKgd}{$curCOG}+= $score2;
@@ -1028,8 +1038,9 @@ sub main(){
 			}
 			#print "@subs\n";
 			if ($lpCnt==1){
-				print $O2 "$bestQuery\t".join(";",@curCOGs)."\n" if ($reportGeneCat == 1 );
-				print $O2 "$bestQuery\t".join(";",@curCOGs)."\t".join(",",@subs2)."\n" if ($reportGeneCat == 2 );
+				#families joined by "," (rtk AND): ";" is the hierarchy separator and pushed the 2nd family into the substrate level
+				print $O2 "$bestQuery\t".join(",",@curCOGs)."\n" if ($reportGeneCat == 1 );
+				print $O2 "$bestQuery\t".join(",",@curCOGs)."\t".join(",",uniq(@subs2))."\n" if ($reportGeneCat == 2 );
 			}
 			
 		} else { #Moh / MOH2 / CAZY / ACL

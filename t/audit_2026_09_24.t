@@ -100,17 +100,17 @@ is_deeply([map { ena_role('PAIRED', $uris[$_], $_, 3) } 0 .. 2], [qw(single r1 r
 is_deeply([map { ena_role('PAIRED', "x/a$_.fq.gz", $_, 2) } 0, 1], [qw(r1 r2)],
 	'two unnamed paired files still fall back to their order');
 
-# geneCat sample batches cover every sample
+# geneCat sample batches cover every sample (bounds computed by _prep_batch_range since aff3b10)
 my $geneCat = read_file("$root/secScripts/geneCat.pl");
-my ($toExpr) = $geneCat =~ /my \$locTo = (int\([^;]+\));/;
-my ($fromExpr) = $geneCat =~ /my \$locFrom = (int\([^;]+\));/;
-ok(defined($toExpr) && defined($fromExpr), 'geneCat batch bounds were found');
+my $batchRange = eval { eval source_sub($geneCat, '_prep_batch_range'); die $@ if $@; 1 };
+ok($batchRange && defined(&_prep_batch_range) && $geneCat =~ /= _prep_batch_range\(\$b, \$maxSmpls, \$batchNum\);/,
+	'geneCat batch bounds were found');
 my $gaps = 0;
 for my $case ([2008, 11], [2019, 11], [1000, 19], [1000, 99], [7, 3]) {
-	our ($maxSmpls, $batchNum) = @{$case};
+	my ($maxSmpls, $batchNum) = @{$case};
 	my $next = 0;
-	for our $batch (0 .. $batchNum - 1) {
-		my $from = eval $fromExpr; my $to = eval $toExpr;
+	for my $batch (0 .. $batchNum - 1) {
+		my ($from, $to) = _prep_batch_range($batch, $maxSmpls, $batchNum);
 		$gaps++ if $from != $next;
 		$next = $to;
 	}

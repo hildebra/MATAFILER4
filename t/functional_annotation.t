@@ -87,7 +87,9 @@ is_deeply($res, {p3=>'C'}, 'without -minPercQueryCov only subject coverage appli
 my $gc = read_file(File::Spec->catfile($root,'secScripts','geneCat.pl'));
 like($gc, qr/-mode FuncAssign [^\n]*-stone \$funcStone/, 'functional stone is written by the FuncAssign job graph');
 unlike($gc, qr/_checkpoint_command\(\$checkpointWriter, \$funcStone/, 'no functional stone at submission time');
-like($gc, qr/\.emapper\.annotations"; #the file eggNOG-mapper writes/, 'eggNOG-mapper resume checks the real output file');
+like($gc, qr/my \$outF = "\$f\.emapper\.annotations";/, 'eggNOG-mapper resume checks the real output file');
+like($gc, qr/-o \$f\.part;\\n";\n\s*\$ccmd \.= "\$mvBin \$f\.part\.emapper\.annotations \$f\.emapper\.annotations\\n";/,
+	'eggNOG-mapper output is renamed into place only after a successful run');
 like($gc, qr/eggNOGmapper_KO/, 'eggNOG-mapper KO table is summarised');
 
 # ---------------- VFDB (VFA / VFB) ----------------

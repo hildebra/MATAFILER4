@@ -59,7 +59,7 @@ my @helpers = qw(_shell_quote _checkpoint_command _stone_valid _sync_file
     _append_file_locked _reset_collation_outputs
     gzifelscat _catalog_backup_command _merged_catalog_backup_valid clusterFNA
     clusterSingleStep rewriteClusNumbers addCOGgenes mergeClsSam rewriteFastaHdIdx
-    combineClstr krakenTax geneCatFunc_emapper _qsbCopy _gcTmpTag _emapSplitDir);
+    combineClstr krakenTax geneCatFunc_emapper _qsbCopy _gcTmpTag _emapSplitDir _inflightMarker);
 for my $name (@helpers) {
     my ($helper) = $source =~ /^(sub \Q$name\E\b[^\n]*\{.*?^\})/ms;
     die "Missing $name" unless defined $helper;
@@ -269,7 +269,7 @@ subtest 'Kraken accepts no classifications but propagates program failure' => su
 };
 
 subtest 'program registrations and configured command wrappers' => sub {
-    my %site_settings = map { $_ => 1 } qw(avx2_constraint globalTmpDir nodeTmpDir);
+    my %site_settings = map { $_ => 1 } qw(avx2_constraint globalTmpDir nodeTmpDir mp3); # mp3: optional tool, no default
     my $active = join("\n", grep { !/^\s*#/ } split /\n/, $source);
     my %keys = map { $_ => 1 } $active =~ /getProgPaths\(["']([^"']+)["']/g;
     for my $key (sort keys %keys) {
@@ -295,7 +295,9 @@ subtest 'program registrations and configured command wrappers' => sub {
     write_file("$catalogue/compl.incompl.97.prot.faa", ">1\nMKK\n");
     my $fake = "$tmp/configured-emapper.pl";
     write_file($fake, 'die "wrapper lost" unless $ENV{GENECAT_EMAPPER_WRAPPER}; '
-        . 'open my $out, ">", $ENV{GENECAT_EMAPPER_LOG} or die $!; print {$out} join("\n", @ARGV); close $out;');
+        . 'open my $out, ">", $ENV{GENECAT_EMAPPER_LOG} or die $!; print {$out} join("\n", @ARGV); close $out; '
+        . 'my ($o) = map { $ARGV[$_ + 1] } grep { $ARGV[$_] eq "-o" } 0 .. $#ARGV; '
+        . 'open my $an, ">", "$o.emapper.annotations" or die $!; print {$an} "#query\n"; close $an;');
     local $ENV{GENECAT_EMAPPER_LOG} = "$tmp/emapper-args.txt";
     my $configured = 'env GENECAT_EMAPPER_WRAPPER=1 ' . GCRecovery::_shell_quote($^X)
         . ' ' . GCRecovery::_shell_quote($fake);
@@ -321,6 +323,9 @@ subtest 'program registrations and configured command wrappers' => sub {
     is(GCRecovery::systemW($worker->[1], 0), 0, 'eggNOG worker executes the configured wrapper');
     like(read_file($ENV{GENECAT_EMAPPER_LOG}), qr/--cpu\n3\n-i\n\Q$catalogue\E\/compl\.incompl\.97\.prot\.faa/,
         'configured eggNOG command receives requested cores and catalogue identity');
+    ok(-e "$catalogue/compl.incompl.97.prot.faa.emapper.annotations"
+            && !-e "$catalogue/compl.incompl.97.prot.faa.part.emapper.annotations",
+        'eggNOG worker publishes its annotations only after the run');
 };
 
 subtest 'marker extraction reads the selected catalogue identity' => sub {

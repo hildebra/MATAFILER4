@@ -44,6 +44,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpa
 			buildMapperIdx mapperDBbuilt decideMapper  checkMapsDoneSH greaterComputeSpace);
 use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
+use Mods::FuncTools qw(vfTabStale);
 use Mods::FlagReference qw(printFlagHelp);
 use Mods::StatsLogReader qw(
 	read_stats_log_excerpt parse_bam_filter_counters
@@ -4645,15 +4646,9 @@ sub prepareDiamondRerun($){
 	my ($curOutDir) = @_;
 	return unless ($MFopt{DoDiamond});
 	my @alldbs = split /,/,$MFopt{reqDiaDB};
-	my $all_requested = @alldbs == $MFopt{maxReqDiaDB};
+	#always per database: the former shortcut for "maxReqDiaDB databases requested" (from when only six existed)
+	#removed all of diamond/ or every CNT* table, including those of databases whose parse markers survived
 
-	if ($MFopt{rewriteDiamond} && $all_requested) {
-		if (-d "$curOutDir/diamond/") {
-			system('rm', '-rf', '--', "$curOutDir/diamond/") == 0
-				or die "Failed to remove $curOutDir/diamond/ for Diamond rebuild\n";
-		}
-		return;
-	}
 	if ($MFopt{rewriteDiamond}) {
 		# runDiamond only realigns when a database's hits are absent, so remove
 		# the requested databases' hits and parse markers (as before 579c34c).
@@ -4664,12 +4659,6 @@ sub prepareDiamondRerun($){
 		}
 		return;
 	}
-	if ($MFopt{redoDiamondParse} && $all_requested) {
-		for my $target (glob("$curOutDir/diamond/CNT*")) {
-			system('rm', '-rf', '--', $target) == 0
-				or die "Failed to remove Diamond parse target $target\n";
-		}
-	}
 	return unless ($MFopt{redoDiamondParse});
 	my $secCogBin = getProgPaths("secCogBin_scr");
 	foreach my $term (@alldbs){
@@ -4679,7 +4668,8 @@ sub prepareDiamondRerun($){
 		}
 		# Preserve the legacy parser input until its XX layout is replaced by a
 		# declared stage artifact.
-		system("$secCogBin -i $curOutDir/diamond/XX -DB $term -eval $MFopt{diaEVal} -mode 4") == 0
+		#-percID selects the CNT_<eval>_<percID> table dir, as in the parse call of runDiamond
+		system("$secCogBin -i $curOutDir/diamond/XX -DB $term -eval $MFopt{diaEVal} -percID $MFopt{DiaPercID} -mode 4") == 0
 			or die "Diamond reparsing failed for database $term\n";
 		if ($term eq "ABR" && -d "$curOutDir/diamond/ABR/") {
 			system('rm', '-rf', '--', "$curOutDir/diamond/ABR/") == 0
@@ -4702,7 +4692,12 @@ sub IsDiaRunFinished($){
 		#die "$curOutDir/diamond/dia.$term.blast.gz\n$curOutDir/diamond/dia.$term.blast.srt.gz";
 		#|| !-e "$curOutDir/diamond/dia.$term.blast.srt.gz"
 		if (!$cD && (!-e "$curOutDir/diamond/dia.$term.blast.gz" && !-e "$curOutDir/diamond/dia.$term.blast.srt.gz" )){$cD = 1; }#system "rm $curOutDir/diamond/dia.$term.blas*.gz";}
-		$pD = 1 if (!-e "$curOutDir/diamond/dia.$term.blast.srt.gz.stone");#  <- last version always requires .srt.gz
+		my $termParse = !-e "$curOutDir/diamond/dia.$term.blast.srt.gz.stone";
+		$pD = 1 if ($termParse);#  <- last version always requires .srt.gz
+		#an old merged-read search without read-count provenance is realigned before it is parsed (runDiamond), which
+		#needs the merged library: that is only registered when the search stage (and so read merging) is scheduled
+		$cD = 1 if (!$cD && $termParse && $MFopt{doReadMerge} && $term ne 'ABR'
+			&& -e "$curOutDir/diamond/dia.$term.blast.srt.gz" && !-e "$curOutDir/diamond/dia.$term.blast.srt.gz.read-counts-v1.stone");
 		#print "$cD, $pD  $curOutDir/diamond/dia.$term.blast.gz\n";
 	}
 	#die "$cD, $pD\n";
@@ -5158,8 +5153,10 @@ sub prepDiamondDB($ $ $ $){#takes care of copying the respective DB over to scra
 			system "rm -f $CLrefDBD/PATRIC_VF2.tab";
 			$DBcmd .= "cp $DBpath/PATRIC_VF2.tab $CLrefDBD\n";
 		}
-		if (($curDB eq "VDB" || $curDB eq "VFA" || $curDB eq "VFB") && !-s "$CLrefDBD/VF.tab"){
+		if (($curDB eq "VDB" || $curDB eq "VFA" || $curDB eq "VFB") && (!-s "$CLrefDBD/VF.tab" || vfTabStale($DBpath))){
 			system "rm -f $CLrefDBD/VF.tab";
+			#VF.tab is derived from the VFDB FASTA headers; build it here too (before, only geneCat FuncAssign did)
+			$DBcmd .= getProgPaths("prepVFDB_scr")." $DBpath\n" if (vfTabStale($DBpath));
 			$DBcmd .= "cp $DBpath/VF.tab $CLrefDBD\n";
 		}
 		if ($curDB eq "PAB" && !-s "$CLrefDBD/all_species_data.txt"){
@@ -5750,6 +5747,8 @@ sub runDiamond(){
 		$progStats{$curDB}{DiaDBSearchIncomplete} = 0 unless (defined($progStats{$curDB}{DiaDBSearchIncomplete}));
 		#print "$curDB";
 		my ($refDB,$shrtDB,$clnCmd) = prepDiamondDB($curDB,$CLrefDBD,$ncore,$searchMode);
+		#per database: the databases' jobs of one sample run concurrently and each ends with removing its tmp dir
+		my $tmpPdb = "$tmpP/$shrtDB/";
 		my $doInterpret = 1;
 		#print "$refDB ,$shrtDB,$clnCmd\n";
 		#$doInterpret = 0 if ($shrtDB eq "ABR");
@@ -5759,18 +5758,18 @@ sub runDiamond(){
 		$diaOfmt2 .= " qseq" if ($getQSeq); #in case, I want to get the query sequence (matching)
 		#run actual diamond
 		my @collect = (); my @collectSingl=();
-		my $cmd ="mkdir -p $tmpP\n";
+		my $cmd ="mkdir -p $tmpPdb\n";
 		foreach my $kk (sort {$a <=> $b} keys %RdLibs){
 			my @rds = @{$RdLibs{$kk}};
 			for (my $ii=0;$ii<@rds;$ii++){
 				my $query = $rds[$ii];	
-				my $outF = "$tmpP/DiaAssignment.sub.$shrtDB.$kk.$ii";
+				my $outF = "$tmpPdb/DiaAssignment.sub.$shrtDB.$kk.$ii";
 				#my $tmpcnt = `grep -c '^>' $query`; chomp $tmpcnt
 				#--comp-based-stats 0
 				if ($searchMode==1){
-				$cmd .= "$diaBin blastx $diaOfmt2 --masking 0 --comp-based-stats 0 --compress 1 --quiet -t $tmpP --min-orf 25 -d $CLrefDBD$refDB.db -q $query -k 5 -e 1e-4 -o $outF $sensBlast -p $ncore\n"; #
+				$cmd .= "$diaBin blastx $diaOfmt2 --masking 0 --comp-based-stats 0 --compress 1 --quiet -t $tmpPdb --min-orf 25 -d $CLrefDBD$refDB.db -q $query -k 5 -e 1e-4 -o $outF $sensBlast -p $ncore\n"; #
 				} elsif ($searchMode==2){
-				$cmd .= "$mmseqs2Bin easy-search $query $CLrefDBD$refDB.db.mms2 $outF.gz $tmpP --threads $ncore --max-accept 500 --compressed 1 -s 4 $mmsOfmt \n";
+				$cmd .= "$mmseqs2Bin easy-search $query $CLrefDBD$refDB.db.mms2 $outF.gz $tmpPdb --threads $ncore --max-accept 500 --compressed 1 -s 4 $mmsOfmt \n";
 				}
 				
 				# The parser's reads mode already counts ordinary reads once. Only
@@ -5799,7 +5798,8 @@ sub runDiamond(){
 		#die "$outgz\n";
 		#unzip, sort, zip
 		if (@collect) {
-			$cmd .= "zcat ".join( " ",@collect) ." | sort -t\$'\\t' -k1 -T $tmpP | $pigzBin --stdout -p $ncore > $outgz \n";
+			#byte order: the parser groups hits by query, locale collation can interleave different reads' lines
+			$cmd .= "zcat ".join( " ",@collect) ." | LC_ALL=C sort -t\$'\\t' -k1 -T $tmpPdb | $pigzBin --stdout -p $ncore > $outgz \n";
 			$cmd .= "rm -f ". join( " ",@collect) . "\n";
 		} else {
 			$cmd .= "$pigzBin -c </dev/null > $outgz\n";
@@ -5809,13 +5809,15 @@ sub runDiamond(){
 			$cmd .= "cat ".join( " ",@collectSingl) ." >> $outgz\nrm -f " . join( " ",@collectSingl) ."\n"; #$out.srt
 		}
 		$cmd .= "touch $provenanceStone\n" if $curDB ne 'ABR';
-		$cmd.= "rm -r $tmpP\n";
+		$cmd.= "rm -r $tmpPdb\n";
 		#die $cmd."\n";
-		my $cmd2 = "$secCogBin -i $outgz -DB $shrtDB -eval $MFopt{diaEVal} -percID $MFopt{DiaPercID} -minAlignLen $MFopt{DiaMinAlignLen} -minPercSbjCov $MFopt{DiaMinFracQueryCov} -mode 0 -queryType reads -LF $CLrefDBD/$refDB.length -reportDomains $getQSeq -DButil $CLrefDBD -tmp $tmpP";
+		my $cmd2 = "$secCogBin -i $outgz -DB $shrtDB -eval $MFopt{diaEVal} -percID $MFopt{DiaPercID} -minAlignLen $MFopt{DiaMinAlignLen} -minPercSbjCov $MFopt{DiaMinFracQueryCov} -mode 0 -queryType reads -LF $CLrefDBD/$refDB.length -reportDomains $getQSeq -DButil $CLrefDBD -tmp $tmpPdb";
 		#$cmd2 .= " " if ($getQSeq);
 		if ($curDB eq "ABR"){
 			my $KrisABR = getProgPaths("KrisABR_scr");#"perl /g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/ABRblastFilter.pl";
-			$cmd2 = "$KrisABR $outgz $outD/ABR/ABR.genes.txt $outD/ABR/ABR.cats.txt $CLrefDBD\n";
+			#the ARDB tables are only in the database dir (prepDiamondDB copies index and length table to $CLrefDBD)
+			my ($abrDBpath) = getSpecificDBpaths($curDB,0);
+			$cmd2 = "$KrisABR $outgz $outD/ABR/ABR.genes.txt $outD/ABR/ABR.cats.txt $abrDBpath\n";
 		} elsif ($curDB eq "PAB" && $MFopt{PABtaxChk}){ #NOG assignments
 			$cmd2 .= " -NOGtaxChk $outD/dia.NOG.blast.srt ";
 		}
@@ -5833,7 +5835,9 @@ sub runDiamond(){
 		$globDep = "" if ($MFopt{globalDiamondDependence}->{$curDB} eq "$shrtDB-1");
 		
 		my $memu = $MFopt{diamondMem} . "G"; my $tmpCmd;
-		if ($needProvenance || !-d $outD || !(-e "$out" || -e "$out.gz"|| -e "$out.srt.gz") ){ #diamond alignments
+		#-rmRawDiamondHits deletes the raw hits after a successful parse: a finished database is not realigned for that
+		my $parseDone = (-e "$out.gz.stone" || -e "$out.srt.gz.stone" || -e "$out.stone");
+		if ($needProvenance || !-d $outD || (!$parseDone && !(-e "$out" || -e "$out.gz"|| -e "$out.srt.gz")) ){ #diamond alignments
 			$jobName = "_D$shrtDB$JNUM"; 
 			my @preConstr = @{$QSBoptHR->{constraint}};
 			push(@{$QSBoptHR->{constraint}}, $avx2Constr);

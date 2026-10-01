@@ -161,7 +161,7 @@ Some parsers also require annotation sidecars in the same directory:
 - `KGE`, `KGB`, or `KGM`: `genes_ko.list` and `kegg.tax.list`.
 - `ABRc`: the matching `card*.txt` and `card*.map` files.
 - `PTV`: `PATRIC_VF2.tab`.
-- `VDB`: `VF.tab`.
+- `VDB`, `VFA` or `VFB`: `VF.tab` (built from the VFDB FASTA headers when missing or outdated).
 - `TCDB`: `TCDBhir.txt`.
 - `PAB` with its taxonomy check enabled: `all_species_data.txt` from the
   configured `NOG` directory.
