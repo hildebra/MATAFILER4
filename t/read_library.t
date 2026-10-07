@@ -8,7 +8,7 @@ use Mods::ReadLibrary qw(
 	ensureSeqSetLibraries ensureCleanSeqSetLibraries
 	syncSeqSetLegacy syncCleanSeqSetLegacy replaceScopeLibraries
 	readLibrariesByScope libraryFiles libraryPairs legacyLibraryArrays
-	libraryTechnology singleShortReadPair
+	libraryTechnology protalReadInput
 );
 
 my $primary = readLibrariesFromArrays(
@@ -110,51 +110,71 @@ is(scalar(@{libraryPairs($primary)}), 2, 'paired-library selection operates on r
 my ($r1, $r2, $single, $labels, $technologies) = legacyLibraryArrays($primary, 1);
 is_deeply($technologies, [qw(ill ill)], 'aligned compatibility projection repeats per-record technology');
 
+# protal: one kind of reads per sample, every library of that kind, source paths.
 my $protal_pair = [newReadLibrary(
 	id => 'protal-pair', sample => 'S1', scope => 'primary', phase => 'staged',
-	technology => 'hiSeq', files => {r1 => 'protal.R1.fq.gz', r2 => 'protal.R2.fq.gz'},
+	technology => 'hiSeq', files => {r1 => 'staged.R1.fq.gz', r2 => 'staged.R2.fq.gz'},
+	source_files => {r1 => '/in/protal.R1.fq.gz', r2 => '/in/protal.R2.fq.gz'},
 )];
-my ($protal_r1, $protal_r2) = singleShortReadPair($protal_pair, 'Protal for S1');
-is_deeply([$protal_r1, $protal_r2], ['protal.R1.fq.gz', 'protal.R2.fq.gz'],
-	'single-short-pair helper returns the linked raw mates');
-eval { singleShortReadPair($primary, 'Protal for S1') };
-like($@, qr/Protal for S1 requires exactly one paired-end read library.*2 pair\(s\).*1 singleton/s,
-	'single-short-pair helper rejects multi-library and singleton input without dropping reads');
-my ($fallback_r1, $fallback_r2, $fallback_selection) = singleShortReadPair(
-	$primary, 'Protal for S1', {ignore_incompatible => 1});
-is_deeply([$fallback_r1, $fallback_r2],
-	['S1.L1.R1.fq.gz', 'S1.L1.R2.fq.gz'],
-	'tolerant short-pair selection uses the first linked compatible pair');
-is($fallback_selection->{ignored_pair_count}, 1,
-	'tolerant short-pair selection reports additional pairs');
-is($fallback_selection->{ignored_singleton_count}, 1,
-	'tolerant short-pair selection reports ignored singleton streams');
-like($fallback_selection->{warning}, qr/selected short paired library.*ignored/s,
-	'tolerant selection returns an explicit data-loss warning');
+my $protal = protalReadInput($protal_pair, 'Protal for S1');
+is($protal->{read_type}, 'pe', 'protal: a short pair is profiled as paired-end reads');
+is_deeply([$protal->{r1}, $protal->{r2}], [['/in/protal.R1.fq.gz'], ['/in/protal.R2.fq.gz']],
+	'protal: reads come from the source files, not the staged copies');
+ok(!$protal->{warning}, 'protal: nothing left out, no warning');
+
+my $two_runs = protalReadInput(readLibrariesFromArrays(
+	sample => 'S1', scope => 'primary', phase => 'staged', technology => 'ill', separate_roles => 1,
+	r1 => [qw(S1.L1.R1.fq.gz S1.L2.R1.fq.gz)], r2 => [qw(S1.L1.R2.fq.gz S1.L2.R2.fq.gz)],
+), 'Protal for S1');
+is_deeply([$two_runs->{r1}, $two_runs->{r2}],
+	[[qw(S1.L1.R1.fq.gz S1.L2.R1.fq.gz)], [qw(S1.L1.R2.fq.gz S1.L2.R2.fq.gz)]],
+	'protal: every paired library is profiled, mates in the same order (staged paths without source files)');
+eval { protalReadInput($primary, 'Protal for S1') };
+like($@, qr/Protal for S1 would leave out singleton reads of paired library/,
+	'protal: strict selection refuses to drop the singletons stored with a pair');
+my $tolerant = protalReadInput($primary, 'Protal for S1', {ignore_incompatible => 1});
+is(scalar(@{$tolerant->{r1}}), 2, 'protal: tolerant selection keeps both pairs');
+like($tolerant->{warning}, qr/profiles its 2 pe library record\(s\) and leaves out singleton reads/,
+	'protal: tolerant selection warns about what it leaves out');
+
+my $singles = protalReadInput([newReadLibrary(
+	id => 'protal-single', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'hiSeq', files => {single => 'protal.single.fq.gz'},
+)], 'Protal for S1');
+is($singles->{read_type}, 'se', 'protal: short single reads are profiled as single-end reads');
+is_deeply([$singles->{r1}, $singles->{r2}], [['protal.single.fq.gz'], []],
+	'protal: single-end reads have no second file');
+
+my $ont = protalReadInput([newReadLibrary(
+	id => 'protal-ont', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'ONT', files => {single => 'ont.fq.gz'},
+)], 'Protal for S1');
+is($ont->{read_type}, 'ont', 'protal: ONT reads keep their kind');
+my $pacbio = protalReadInput([newReadLibrary(
+	id => 'protal-pb', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'PB', files => {single => 'hifi.fq.gz'},
+)], 'Protal for S1');
+is($pacbio->{read_type}, 'pb', 'protal: PacBio reads keep their kind');
+
 my $long_pair = [newReadLibrary(
 	id => 'protal-long', sample => 'S1', scope => 'primary', phase => 'staged',
 	technology => 'ONT', files => {r1 => 'long.R1.fq.gz', r2 => 'long.R2.fq.gz'},
 )];
-eval { singleShortReadPair($long_pair, 'Protal for S1') };
-like($@, qr/Protal for S1 requires short paired-end reads.*protal-long/s,
-	'single-short-pair helper rejects long-read paired input explicitly');
-my ($mixed_r1, $mixed_r2, $mixed_selection) = singleShortReadPair(
-	[@{$long_pair}, @{$protal_pair}], 'Protal for S1', {ignore_incompatible => 1});
-is_deeply([$mixed_r1, $mixed_r2], ['protal.R1.fq.gz', 'protal.R2.fq.gz'],
-	'tolerant selection skips a long pair and uses the first compatible short pair');
-is($mixed_selection->{selected_library}, 'protal-pair',
-	'tolerant selection reports the selected library identity');
-my $singleton_only = [newReadLibrary(
-	id => 'protal-single', sample => 'S1', scope => 'primary', phase => 'staged',
-	technology => 'hiSeq', files => {single => 'protal.single.fq.gz'},
+eval { protalReadInput($long_pair, 'Protal for S1') };
+like($@, qr/Protal for S1 has no read library protal can profile.*long-read pair 'protal-long'/,
+	'protal: a long-read pair is not mistaken for paired-end reads');
+my $mixed = protalReadInput([@{$long_pair}, @{$protal_pair}], 'Protal for S1',
+	{ignore_incompatible => 1});
+is_deeply($mixed->{libraries}, ['protal-pair'],
+	'protal: tolerant selection skips the long pair and uses the short pair');
+my $bam_only = [newReadLibrary(
+	id => 'protal-bam', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'hiSeq', files => {single => 'cache.unbam.fq.gz', bam => 'in.bam'},
 )];
-my ($skip_r1, $skip_r2, $skip_selection) = singleShortReadPair(
-	$singleton_only, 'Protal for S1', {ignore_incompatible => 1});
-is_deeply([$skip_r1, $skip_r2], ['', ''],
-	'tolerant selection returns no fabricated mates when no short pair exists');
-ok($skip_selection->{skipped}, 'tolerant selection marks an incompatible sample for skipping');
-like($skip_selection->{reason}, qr/no compatible short paired-end read library.*1 singleton/s,
-	'skip metadata explains why no Protal input can be selected');
+my $skip = protalReadInput($bam_only, 'Protal for S1', {ignore_incompatible => 1});
+ok($skip->{skipped}, 'protal: a sample with only alignment input is skipped');
+like($skip->{reason}, qr/no read library protal can profile.*alignment input 'protal-bam'/,
+	'protal: the skip reason names what was found');
 
 eval { newReadLibrary(id => 'broken', scope => 'primary', files => {r1 => 'only.R1.fq.gz'}) };
 like($@, qr/only one mate/, 'half-paired records are rejected at construction');

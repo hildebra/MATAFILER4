@@ -6,7 +6,7 @@
 # Read-based profiling tutorial
 
 This tutorial covers RiboFind, DIAMOND functional profiling, MetaPhlAn 4,
-mOTUs 4, and both Protal modes in `MATAF4.pl`. These workflows can be run with
+mOTUs 4, and Protal in `MATAF4.pl`. These workflows can be run with
 `-assembleMG 0`; they do not require a metagenome assembly.
 
 ## What each profiler reads
@@ -17,11 +17,12 @@ mOTUs 4, and both Protal modes in `MATAF4.pl`. These workflows can be run with
 | Functional profiles | `-profileFunct 1 -DiaDBs ...` | Primary SDM-cleaned reads | Per sample and database, followed by run-level matrices |
 | MetaPhlAn | `-profileMetaphlan 1` | Primary SDM-cleaned reads | Per sample, followed by run-level matrices |
 | mOTUs | `-profileMOTU2 1` | Primary SDM-cleaned reads | Per sample, followed by run-level matrices |
-| Protal singular | `-profileProtal 1` | One compatible primary raw short-read pair per sample | Per sample, followed by one profile merge |
-| Protal combined | `-profileProtal 2` | One compatible primary raw short-read pair per sample | One generated map and one Protal job for the complete cohort |
+| Protal | `-profileProtal 1` | Every primary raw library of one kind (paired-end, single-end, PacBio or ONT), from the source files | A job per downloaded sample, batch map jobs for local samples, followed by one profile merge |
+| Protal with strains | `-profileProtal 2` | As mode 1 | As mode 1 but keeping each sample's SAM, then one job building the strain MSAs from them |
 
-Protal is deliberately the exception: it profiles staged raw reads. The other
-functions use the cleaned read set produced by the normal MATAFILER read stage.
+Protal is deliberately the exception: it profiles the raw reads, straight from the
+source files, so it needs no staging job. The other functions use the cleaned read
+set produced by the normal MATAFILER read stage.
 
 ## 1. Install or update the profilers
 
@@ -37,7 +38,7 @@ The versions checked against the upstream interfaces on 24 August 2026 are:
 |---|---:|---|---|
 | MetaPhlAn | 4.2.6 | `MF4checkm2` | `mpa_vJan25_CHOCOPhlAnSGB_202503` |
 | mOTUs | 4.1.0 | `MF4motus` | mOTUs marker-gene DB 4.1 |
-| Protal | 0.6.0a | `MF4` | A compatible Protal full or mini database |
+| Protal | 0.6.0a (MATAFILER needs 0.7.8 or later, see [configuration](configuration.md#protal-database)) | `MF4` | A compatible Protal full or mini database |
 
 MetaPhlAn 4.2.6 and mOTUs 4.1.0 were the current upstream releases at that
 audit date. See the [MetaPhlAn releases](https://github.com/biobakery/MetaPhlAn/releases)
@@ -243,30 +244,36 @@ abundance files remain in job scratch; only the compressed count profile is
 published. Paired files must still contain corresponding reads in the same
 order, as required by mOTUs.
 
-### Protal per sample
+### Protal profiles
 
 ```bash
 perl "$MF4DIR/MATAF4.pl" -map "$MAP" -assembleMG 0 \
   -profileProtal 1 -ProtalCores 4 -ProtalMem 100 -submit 1
 ```
 
-`-protalIgnoreErrors 1` is the default. It chooses the first compatible primary
-raw short-read pair, ignores additional pairs and singleton/BAM streams with a
-warning, and skips samples with no compatible pair. Set it to `0` for strict
-input validation. Mode 1 disables strain analysis and retains only the durable
-per-sample profiles required for the final merge.
+Each sample's profile is kept below `<sample>/Tax/Protal/profiles/`; its SAM is
+deleted after profiling. Downloaded samples are aligned by a job of their own once
+their download is ready (also in assembly groups), so their reads can be deleted with
+the sample's scratch; local samples are aligned together in a batch map job at the end
+of each pass (`-protalBatchSize` splits it).
+`-protalIgnoreErrors 1` is the default: every primary library of one kind of reads
+(paired-end, else single-end, else PacBio or ONT) is profiled, other reads are left
+out with a warning, and samples without usable reads are skipped. Set it to `0` to
+stop instead.
 
-### Protal combined cohort
+### Protal profiles and strain MSAs
 
 ```bash
 perl "$MF4DIR/MATAF4.pl" -map "$MAP" -assembleMG 0 \
   -profileProtal 2 -ProtalCores 4 -ProtalMem 100 -submit 1
 ```
 
-Mode 2 requires the complete mapped cohort, including all supplied mapping
-files, so omit `-from` and `-to`. MATAFILER generates one Protal map, holds the
-staged raw directories until the combined job finishes, retains strain MSAs in
-the final directory, and then runs its validated scratch-cleanup script.
+Mode 2 aligns and profiles as mode 1 but also keeps each sample's SAM
+(`<sample>/Tax/Protal/<sample>.sam.zst`), then builds the cohort's strain MSAs from
+the SAMs: Protal profiles them again without loading its index and writes an MSA per
+species found in two or more samples. The MSAs belong to the whole cohort, so they are
+built only in a run without `-from` and `-to`. Samples profiled in mode 1 have no SAM,
+so switching to mode 2 aligns them again.
 
 ## 5. Complete the run and merge profiles
 
@@ -284,8 +291,7 @@ Typical durable outputs are:
 | Functional | `<sample>/diamond/` | `pseudoGC/FUNCT/<DB_alias>/` |
 | MetaPhlAn | `pseudoGC/Phylo/MP2/<sample>.MP2.txt` | `pseudoGC/Phylo/MePh.all.<rank>.mat` |
 | mOTUs | `pseudoGC/Phylo/mOTU2/<sample>.motu2.tab.gz` | `pseudoGC/Phylo/m2.motu.txt` and `m2.<rank>.txt` |
-| Protal mode 1 | `<sample>/Tax/Protal/profiles/<sample>.profile` | `pseudoGC/protal_singular/Protal.abundance.tsv` |
-| Protal mode 2 | `pseudoGC/protal/profiles/` | `pseudoGC/protal/Protal.abundance.tsv` and retained `strains/` MSAs |
+| Protal | `<sample>/Tax/Protal/profiles/<sample>.profile`; mode 2 also `<sample>/Tax/Protal/<sample>.sam.zst` | `pseudoGC/protal/Protal.abundance.tsv`; mode 2 also `pseudoGC/protal/strains/` MSAs |
 
 ## Troubleshooting checks
 

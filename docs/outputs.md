@@ -465,7 +465,7 @@ Depending on flags, MATAFILER can write outputs from:
 | Kraken2 | Read-based taxonomic profiling. |
 | mOTUs | Marker-gene-based taxonomic profiling. |
 | MetaPhlAn | Marker-gene-based taxonomic profiling. |
-| Protal | Raw paired-short-read taxonomic profiling with a final multi-sample abundance table. |
+| Protal | Marker-gene taxonomic profiling of raw reads (paired-end, single-end, PacBio or ONT), with a multi-sample abundance table and, with `-profileProtal 2`, strain MSAs. |
 | miTAG / ribosomal profiling | Ribosomal small- or large-subunit profiling. |
 | DIAMOND functional profiling | Read-based functional profiling against selected databases. |
 
@@ -477,49 +477,38 @@ These outputs are commonly summarized in or near:
 
 and related run-level folders. The precise file names depend on flags such as `-profileFunct`, `-DiaDBs`, `-profileRibosome`, `-profileMOTU2`, `-profileMetaphlan` or `-profileKraken`.
 
-With `-profileProtal 1`, the durable outputs are:
+With `-profileProtal 1` or `2`, each sample has:
 
 | Output | Meaning |
 |---|---|
 | `<sample_output>/Tax/Protal/profiles/<sample>.profile` | Headerless per-sample species-abundance profile; it may legitimately be empty. |
-| `<sample_output>/Tax/Protal/<sample>.Protal.sto` | Successful per-sample completion evidence. |
-| `<sample_output>/Tax/Protal/<sample>.Protal.skip` | Request-scoped incompatible-input evidence written in tolerant mode. |
-| `<controller_base>/pseudoGC/protal_singular/Protal.abundance.tsv` | Merge of eligible profiles in the selected invocation range. |
-| `<controller_base>/pseudoGC/protal_singular/Protal.merge.sto` | Successful singular-merge evidence. |
+| `<sample_output>/Tax/Protal/<sample>.sam.zst` | Mode `2` only: Protal's alignments of the sample's reads to the marker genes (zstd-compressed SAM; `zstdcat` reads it), from which the strain MSAs are built. Protal profiles it again without aligning, e.g. for another `--knob` or model. In mode `1` the SAM is deleted after profiling. |
+| `<sample_output>/Tax/Protal/<sample>.sam.zst.err` | Mode `2` only: reads whose alignment does not fit the database; written only when there are any. |
+| `<sample_output>/Tax/Protal/<sample>.Protal.sto` | Completion evidence, written once the profile (and in mode `2` the SAM) exists. |
+| `<sample_output>/Tax/Protal/<sample>.Protal.skip` | Request-scoped evidence that the sample has no reads Protal can profile (tolerant mode). |
 
-The mode-`1` merge waits for submitted Protal sample jobs and is deferred if an
-eligible sample has neither a profile, current skip evidence, nor a submitted job.
-Strain analysis is disabled; SAM, miscellaneous output, profile diagnostics, and
-sample Protal scratch are removed after success.
-
-With `-profileProtal 2`, run-level outputs are under
-`<controller_base>/pseudoGC/protal/`:
+The profile logs (`.profile.log`, ...) and Protal's statistics (`misc/`) are not kept.
+The run-level outputs are under `<controller_base>/pseudoGC/protal/`:
 
 | Output | Meaning |
 |---|---|
-| `Protal.map.tsv` | Generated Protal map for all compatible samples in the full mapped cohort. |
-| `Protal.skipped.tsv` | Samples excluded by tolerant input selection and the reason for each exclusion. |
-| `profiles/<sample>.profile` | Durable profiles used as explicit merge inputs. |
-| `Protal.abundance.tsv` | Combined table written by `protal_profile_utils merge`. |
-| `strains/<cohort_signature>/` | Durable strain-analysis output, including Protal's MSAs, for that cohort. |
-| `strains/current` | Symlink to the active cohort's retained strain/MSA directory. |
-| `Protal.current` | Signature identifying which cohort owns the shared combined table. |
-| `Protal.<cohort_signature>.sto` | Completion evidence written only after merge and scratch cleanup succeed. |
-| `LOGandSUB/ProtalScratchCleanup.sh` | Generated, path-validated cleanup script invoked by the combined job. |
+| `Protal.abundance.tsv` | Profiles of the selected range merged by `protal_profile_utils merge`. |
+| `Protal.merge.sto` | Successful merge evidence. |
+| `strains/<cohort_signature>/` | Mode `2`: Protal's strain MSAs of the cohort (`<species>.raw.msa.fna`, the qcmsa-filtered `<species>.msa.fna`, `species.tsv`, ...). |
+| `strains/current` | Mode `2`: symlink to the latest cohort's strain directory. |
+| `Protal.strains.current` | Mode `2`: signature of that cohort. |
+| `Protal.strains.<cohort_signature>.sto` | Mode `2`: completion evidence of that cohort's MSAs; a later run over the same samples does not build them again. |
+| `LOGandSUB/ProtalBatch.*.map.tsv`, `.sh` | Map and job of each batch of local samples. |
+| `LOGandSUB/ProtalStrains.<cohort_signature>.map.tsv` | Mode `2`: the map of kept SAMs the strain job ran on. |
 
-Mode `2` requires the complete mapped cohort and can include samples from several
-mapping files. MATAF4 holds each participating sample's staged `raw/` scratch until
-the combined job finishes. That job keeps profiles and strain MSAs in the result
-directory, removes temporary SAM/miscellaneous output, runs the cleanup script, and
-then publishes `Protal.current` and the completion stone. A failed Protal, merge, or
-cleanup therefore leaves scratch available and does not mark the cohort complete.
-
-This uses one signature-aware run-level checkpoint rather than a generic per-sample
-"raw files may be deleted" sentinel. Sample completion accepts mode `2` only when
-that checkpoint matches the current cohort and the merged table plus MSA directory
-exist. `<controller_base>` is the stable run root derived from the first mapped
-sample, not whichever sample happens to be processed last. Samples explicitly ignored
-or marked `SMPL.empty` are excluded in both modes.
+The merge waits for the Protal jobs of the run and is deferred if a selected sample
+has neither a profile, current skip evidence, nor a submitted job. The strain MSAs are
+built only in a run over the complete mapped cohort, from the SAMs, by a Protal job that
+does not load the index. Their signature covers the samples, their SAMs and their
+request signatures, so adding or re-aligning a sample builds a new strain directory.
+`<controller_base>` is the stable run root derived from the first mapped sample, not
+whichever sample happens to be processed last. Samples explicitly ignored or marked
+`SMPL.empty` are excluded.
 
 ## Recommended files for common downstream questions
 

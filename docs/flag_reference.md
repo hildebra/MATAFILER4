@@ -37,7 +37,7 @@ becomes invisible to users.
 - `geneCat.pl` does **not** accept `-Binner`; use `-binSpeciesMG` for gene-catalog/MGS binning selection.
 - `MATAF4.pl` accepts `-Binner`, `-MetaBat2` and `-binSpeciesMG` as aliases for the sample-level binning option.
 - `-profileMetaphlan3` remains a compatibility alias for `-profileMetaphlan`.
-- `-profileProtal 1` and `2` both take the first compatible short-read pair and skip samples without one; `-protalIgnoreErrors 0` instead requires exactly one paired-end library and no singleton/BAM input. Mode `1` merges per-sample profiles under `pseudoGC/protal_singular/` (no strain analysis); mode `2` runs one cohort-wide map and publishes the merged table plus strain MSAs under `pseudoGC/protal/`.
+- `-profileProtal 1` keeps each sample's profile (`<sample>/Tax/Protal/profiles/`) and merges them under `pseudoGC/protal/`; the SAM is deleted. `-profileProtal 2` also keeps each sample's SAM (`<sample>/Tax/Protal/<sample>.sam.zst`) and builds the cohort's strain MSAs from them in a run over the complete mapped cohort; switching from `1` to `2` aligns the samples again for their SAMs. Downloaded (ENA/SRA) samples get a Protal job each, also in assembly groups; local samples are aligned together in batch map jobs (`-protalBatchSize`). Protal profiles every library of one kind of reads (paired-end, single-end, PacBio or ONT) and skips samples with none; `-protalIgnoreErrors 0` stops instead of leaving any primary reads out.
 - The strain workflow entry points are named `strain_within.pl` and `strain_within_2.2.pl` in the repository; spellings without underscores are not repository filenames.
 - `buildTree5.pl` accepts `-aa` for the amino-acid FASTA input; the older comment spelling `-faa` is not a parsed flag.
 - `geneCat.pl -MGset` and `MGS.pl -MGset` are constrained in source to `GTDB` or `FMG`.
@@ -284,10 +284,11 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-profileMetaphlan`, `-profileMetaphlan3` | integer | `0` | stable | Run MetaPhlAn taxonomic profiling. |
-| `-profileProtal` | integer | `0` | stable | 1: profile each sample separately and merge; 2: one map, Protal across the complete cohort |
-| `-ProtalCores` | integer | `4` | stable | CPU cores requested for a singular or combined Protal job. |
-| `-ProtalMem` | integer | `100` | stable | Total memory in GB requested for a singular or combined Protal job. |
-| `-protalIgnoreErrors` | integer | `1` | stable | 1: use the first compatible short-read pair and skip samples without one; 0: strict input validation |
+| `-profileProtal` | integer | `0` | stable | 1: Protal profile per sample (SAM deleted) and merged abundance table; 2: also keeps each sample's SAM and builds the cohort's strain MSAs from them |
+| `-ProtalCores` | integer | `4` | stable | CPU cores requested for each Protal job (per sample, batch map, strain MSAs). |
+| `-ProtalMem` | integer | `100` | stable | Total memory in GB requested for each Protal job. |
+| `-protalIgnoreErrors` | integer | `1` | stable | 1: leave out reads Protal cannot take (other kinds of reads, BAM input) with a warning, skip samples without usable reads; 0: stop instead |
+| `-protalBatchSize` | integer | `0` | stable | Local samples per Protal batch map job; 0: all local samples of a pass in one job. |
 | `-profileMOTU2` | integer | `0` | stable | Run mOTUs taxonomic profiling. |
 | `-profileKraken` | integer | `0` | stable | Run Kraken taxonomic profiling. |
 | `-profileTaxaTarget` | integer | `0` | stable | Run target-taxon profiling. |

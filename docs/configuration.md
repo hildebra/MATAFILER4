@@ -125,7 +125,13 @@ MetaPhlAn 4, mOTUs 4, and Protal are listed in the
 
 ### Protal database
 
-The base `MF4` environment includes Protal 0.6.0a and `protal_profile_utils`.
+MATAFILER needs Protal 0.7.8 or later (`.sam.zst` alignments, single-end and long
+reads, the `READ_TYPE` map column) and refuses an older `protal` at start. The
+base `MF4` environment still installs the Protal 0.6.0a package from bioconda, so
+until a newer package is released point the `protal` and `protalProfileUtils` keys
+in your config at a source build (`protal` and `scripts/protal_profile_utils` of the
+[protal repository](https://github.com/hildebra/protalFastHit)); `qcmsa`, which
+`-profileProtal 2` runs for the strain MSAs, has to be next to `protal` or on `PATH`.
 Download a compatible Protal database as described in the
 [official Protal documentation](https://protal.earlham.ac.uk/main.php?site=documentation#download-the-database),
 then use either of these configurations:
@@ -143,18 +149,22 @@ export PROTAL_DB_PATH=/path/to/protal_database
 The bundled `protal_db` setting is intentionally empty, so Protal falls back to
 `PROTAL_DB_PATH` unless the selected site/user config overrides it. A missing value
 is checked again inside each submitted job. `-ProtalMem` defaults to 100 GB and can
-be adjusted for the selected full or mini database; `-ProtalCores` defaults to 4.
-These resources apply to either a singular sample job or the one combined job.
-`-protalIgnoreErrors` defaults to `1` in both modes, selecting the first compatible
-primary raw short-read pair or explicitly excluding the sample if none exists. Set it
-to `0` for strict input validation. It does not suppress Protal execution failures.
+be adjusted for the selected full or mini database (a run on the full GTDB r226
+database peaks at about 37 GB); `-ProtalCores` defaults to 4. These resources apply
+to every Protal job: a downloaded sample's own job, a batch map of local samples
+and the strain-MSA job. Give the batch jobs more cores when many local samples are
+aligned together, or split them with `-protalBatchSize`.
+`-protalIgnoreErrors` defaults to `1`: reads Protal cannot take with the chosen kind
+of reads (other kinds, BAM input) are left out with a warning, and a sample without
+usable reads is skipped. Set it to `0` to stop instead. It does not suppress Protal
+execution failures.
 
-Because Protal materializes alignments before profiling, configure node-local scratch
-with roughly the capacity of a read-to-SAM mapping job. In `-profileProtal 2`, staged
-raw-read directories remain live until the combined job finishes. That job removes its
-temporary SAM/miscellaneous workspace, runs the generated scratch-cleanup script, and
-then writes the cohort completion marker. The profile table and strain MSAs remain in
-the final `pseudoGC/protal/` results.
+Protal reads the samples' source files (yours, or the downloaded ones) directly, so
+it needs no staging job and no node-local scratch. Its SAMs (zstd-compressed,
+marker-gene alignments only) are written to the run scratch and deleted, unless
+`-profileProtal 2` asks for strain MSAs: then each sample keeps its SAM
+(`<sample>/Tax/Protal/<sample>.sam.zst`); plan for that space next to the profiles.
+A batch of local samples holds all its SAMs in the run scratch until it finishes.
 
 ## Versioning
 

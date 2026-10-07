@@ -10,7 +10,7 @@ our @EXPORT_OK = qw(
 	ensureSeqSetLibraries ensureCleanSeqSetLibraries
 	syncSeqSetLegacy syncCleanSeqSetLegacy
 	readLibraries readLibrariesByScope libraryFiles libraryPairs
-	libraryTechnology singleShortReadPair legacyLibraryArrays replaceScopeLibraries
+	libraryTechnology protalReadInput legacyLibraryArrays replaceScopeLibraries
 );
 
 my @FILE_ROLES = qw(r1 r2 single bam);
@@ -281,65 +281,87 @@ sub libraryTechnology {
 	return $technology || '';
 }
 
-sub singleShortReadPair {
+# The reads protal profiles for one sample. protal takes one kind of reads per
+# sample (paired-end, single-end, PacBio or ONT), so the kind is chosen in that
+# order and every library of it is used, in library order: the runs of a
+# downloaded sample are profiled together. Libraries of the other kinds,
+# alignment (BAM/CRAM) inputs and mate-pair libraries are left out; with
+# ignore_incompatible that is a warning, without it an error. A sample with
+# nothing protal can read is returned as {skipped => 1, reason => ...}.
+# Paths are the libraries' source files (the user's or the downloaded files),
+# which exist before any staging job runs; staged paths are the fallback for
+# records without source files.
+sub protalReadInput {
 	my ($libraries, $context, $options) = @_;
-	$context = defined($context) && $context ne '' ? $context : 'this consumer';
+	$context = defined($context) && $context ne '' ? $context : 'Protal';
 	$options ||= {};
-	die "singleShortReadPair options must be a hash reference\n"
+	die "protalReadInput options must be a hash reference\n"
 		unless ref($options) eq 'HASH';
 	validateReadLibraries($libraries);
-	my $pairs = libraryPairs($libraries);
-	my @singletons = @{libraryFiles($libraries, 'single')};
-	my @bams = @{libraryFiles($libraries, 'bam')};
+	my (%byType, @ignored);
+	foreach my $library (@{$libraries}) {
+		my $id = $library->{id} || '<unnamed>';
+		my $files = $library->{files};
+		if (($files->{bam} || '') ne '') {
+			push @ignored, "alignment input '$id'";
+			next;
+		}
+		if (($library->{label} || '') =~ /mate/i) {
+			push @ignored, "mate-pair library '$id'";
+			next;
+		}
+		my $type;
+		if (($files->{r1} || '') ne '') {
+			if ($library->{is_long}) {
+				push @ignored, "long-read pair '$id'";
+				next;
+			}
+			$type = 'pe';
+			push @ignored, "singleton reads of paired library '$id'"
+				if ($files->{single} || '') ne '';
+		} elsif ($library->{is_long}) {
+			$type = ($library->{technology} || '') eq 'ONT' ? 'ont' : 'pb';
+		} else {
+			$type = 'se';
+		}
+		push @{$byType{$type}}, $library;
+	}
+	my ($readType) = grep { $byType{$_} } qw(pe se pb ont);
 	my $ignoreIncompatible = $options->{ignore_incompatible} ? 1 : 0;
-	if (!$ignoreIncompatible
-			&& (@{$pairs} != 1 || @singletons || @bams || @{$libraries} != 1)) {
-		die "$context requires exactly one paired-end read library and no "
-			."singleton or BAM inputs (found ".scalar(@{$pairs})." pair(s), "
-			.scalar(@singletons)." singleton stream(s), ".scalar(@bams)
-			." BAM input(s), and ".scalar(@{$libraries})." library record(s))\n";
+	if (!defined $readType) {
+		my $reason = "$context has no read library protal can profile";
+		$reason .= " (found ".join(', ', @ignored).")" if @ignored;
+		$reason .= " (found no primary reads)" unless @ignored;
+		die "$reason\n" unless $ignoreIncompatible;
+		return {skipped => 1, reason => $reason};
 	}
-	if (!$ignoreIncompatible) {
-		my $pair = $pairs->[0];
-		die "$context requires short paired-end reads; library '"
-			.($pair->{id} || '<unnamed>')."' is marked as long-read\n"
-			if $pair->{is_long};
-		return ($pair->{files}{r1}, $pair->{files}{r2});
+	for my $other (grep { $byType{$_} && $_ ne $readType } qw(pe se pb ont)) {
+		push @ignored, map { "$other library '".($_->{id} || '<unnamed>')."'" }
+			@{$byType{$other}};
 	}
+	die "$context would leave out ".join(', ', @ignored)
+		."; protal profiles one kind of reads per sample\n"
+		if @ignored && !$ignoreIncompatible;
 
-	# Select a linked record rather than independently choosing R1 and R2, so
-	# tolerant consumers cannot accidentally combine mates from different runs.
-	my @shortPairs = grep { !$_->{is_long} } @{$pairs};
-	my $longPairCount = scalar(@{$pairs}) - scalar(@shortPairs);
-	if (!@shortPairs) {
-		my $reason = "$context has no compatible short paired-end read library "
-			."(found ".scalar(@{$pairs})." pair(s), $longPairCount long-read pair(s), "
-			.scalar(@singletons)." singleton stream(s), and ".scalar(@bams)
-			." BAM input(s))";
-		return ('', '', {
-			skipped => 1, reason => $reason,
-			pair_count => scalar(@{$pairs}), long_pair_count => $longPairCount,
-			singleton_count => scalar(@singletons), bam_count => scalar(@bams),
-		});
-	}
-
-	my $pair = $shortPairs[0];
-	my $ignoredPairCount = scalar(@{$pairs}) - 1;
-	my @ignored;
-	push @ignored, "$ignoredPairCount additional paired library record(s)"
-		if $ignoredPairCount;
-	push @ignored, scalar(@singletons)." singleton stream(s)" if @singletons;
-	push @ignored, scalar(@bams)." BAM input(s)" if @bams;
-	my $selection = {
-		skipped => 0, selected_library => $pair->{id} || '<unnamed>',
-		ignored_pair_count => $ignoredPairCount,
-		ignored_singleton_count => scalar(@singletons),
-		ignored_bam_count => scalar(@bams),
+	my $source = sub {
+		my ($library, $role) = @_;
+		my $path = ref($library->{source_files}) eq 'HASH'
+			? ($library->{source_files}{$role} || '') : '';
+		return $path ne '' ? $path : ($library->{files}{$role} || '');
 	};
-	$selection->{warning} = "$context selected short paired library '"
-		.$selection->{selected_library}."' and ignored ".join(', ', @ignored)
+	my @selected = @{$byType{$readType}};
+	my $firstRole = $readType eq 'pe' ? 'r1' : 'single';
+	my $input = {
+		skipped => 0,
+		read_type => $readType,
+		libraries => [map { $_->{id} || '<unnamed>' } @selected],
+		r1 => [map { $source->($_, $firstRole) } @selected],
+		r2 => $readType eq 'pe' ? [map { $source->($_, 'r2') } @selected] : [],
+	};
+	$input->{warning} = "$context profiles its ".scalar(@selected)
+		." $readType library record(s) and leaves out ".join(', ', @ignored)
 		." because incompatible-input handling is enabled" if @ignored;
-	return ($pair->{files}{r1}, $pair->{files}{r2}, $selection);
+	return $input;
 }
 
 sub legacyLibraryArrays {

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-07 — Protal 0.7.8: per-sample jobs, batches of local samples, strain MSAs from kept SAMs
+
+- **Requires protal 0.7.8 or later** (`audit-fixes` build); the controller refuses an older `protal`. The MF4 environment still installs 0.6.0a from bioconda, so point the `protal` config key at a newer build until it is packaged.
+- **Downloaded samples** (ENA/SRA) get a Protal job each, also in assembly groups, reading the downloaded files; the sample's scratch is removed after it, as for any other job. **Local samples** are aligned together in one batch map job per pass (new `-protalBatchSize` to split it), which loads protal's index once. A sample whose runs need joining or whose reads are bzip2/xz gets a job of its own (process substitution, no copy).
+- Protal reads the source read files, not the staged copies: a sample waiting only for its Protal profile is no longer staged or SDM-cleaned again.
+- All libraries of a sample are profiled (before: the first pair only, which dropped every further run of a downloaded sample), and single-end, PacBio and ONT reads are profiled with their read type (before: skipped). `-protalIgnoreErrors 0` now stops whenever primary reads would be left out.
+- **SAMs are kept only with `-profileProtal 2`** (`<sample>/Tax/Protal/<sample>.sam.zst`); mode `1` keeps the profile and deletes the SAM. The profile logs are no longer kept.
+- **`-profileProtal 2`** no longer runs one map over the cohort holding every sample's staged reads until it finished. It profiles per sample like mode `1`, keeps the SAMs, and then builds the strain MSAs from them: protal profiles them again without loading its index (`pseudoGC/protal/strains/<cohort_signature>/`, in a run over the complete cohort). Switching from mode `1` to `2` aligns the samples again for their SAMs.
+- The merged table moved from `pseudoGC/protal_singular/` to `pseudoGC/protal/Protal.abundance.tsv`.
+- A batch job keeps the samples protal finished when another of its samples fails, and fails so the rest are aligned again in a later pass.
+- The sample signature records the new Protal contract, so existing samples are checked again once: in mode `2` they are aligned again to keep their SAM, and samples skipped for their read type are reconsidered.
+- `t/protal_workflow.t` runs the generated per-sample, batch and strain jobs of both modes against a Perl stand-in for protal; `t/read_library.t` covers the new read selection (`protalReadInput`, replacing `singleShortReadPair`).
+
 ## 2026-09-29 — Gene-catalogue functional annotation and VFDB
 
 - `geneCat.pl` 0.61.
