@@ -32,7 +32,7 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive numLiveUserJobs
 use Sys::Hostname qw(hostname);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
-use Mods::FuncTools qw(assignFuncPerGene calc_modules);
+use Mods::FuncTools qw(assignFuncPerGene calc_modules vfTabStale);
 use Digest::MD5 ();
 use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins3 );
 use Mods::Binning qw(getBinSubdirName);
@@ -63,7 +63,8 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.61; #0.61: functional annotation robustness, query-or-subject coverage, eggNOG-mapper KOs/modules, VFDB set A/B
+our $version = 0.62; #0.62: eggNOG-mapper v3 (eggNOG 7), VFDB sets in the default -functDB
+#0.61: functional annotation robustness, query-or-subject coverage, eggNOG-mapper KOs/modules, VFDB set A/B
 
 sub _print_help {
 	#option tables come from docs/flag_reference.md so this list cannot drift
@@ -667,7 +668,9 @@ my $tmpDirDef= $tmpDir;
 my $mode = "geneCat";
 my $fastaSplits="500M";
 my $funcAligner = "diamond"; #diamond or foldseek
-my $curDB_o = "KGM,TCDB,CZy,ABRc";#NOG,#,ACL"; #"mp3,PTV,KGM,TCDB,CZy,NOG,ABRc,ACL,VFA,VFB" #default databases to use in functional assignments
+my $curDB_o = ""; #-functDB; empty: $funcDBdefault
+my $funcDBdefault = "KGM,TCDB,CZy,ABRc,VFA,VFB";#NOG,#,ACL"; #"mp3,PTV,KGM,TCDB,CZy,NOG,ABRc,ACL,VFA,VFB" #default databases to use in functional assignments
+my %funcDBoptional = (VFA => 1, VFB => 1); #default databases that are skipped with a note if not installed (an explicit -functDB needs all of its databases)
 my $submitLocal = 1; #default mode now
 my $submSys = "";
 my $out = ""; my $refDB = ""; #for nt matches via minimap2
@@ -723,7 +726,7 @@ GetOptions(
 	"MGset=s" => \$useGTDBmg, #use either FMG or GTDB marker genes to compare and merge MAGs and calculate their abundance
 #flags for specific modes
 	"out=s" => \$out, #output dir, only used in modes protExtract ntMatchGC 
-	"functDB=s" => \$curDB_o, #for FuncAssign mode: functional DBs to annotate gene cat to (e.g. KGM,TCDB,CZy,ABRc,VFA,VFB)
+	"functDB=s" => \$curDB_o, #for FuncAssign mode: functional DBs to annotate gene cat to (default KGM,TCDB,CZy,ABRc,VFA,VFB; VFA/VFB skipped if VFDB is not installed)
 	"refDB=s" => \$refDB, #for ntMatchGC mode: reference fasta DB 
 	"fastaSplit=s" => \$fastaSplits, #for FuncAssign mode: target FASTA chunk size (for example 500M)
 	"functAligner=s" => \$funcAligner, #either "diamond" or "foldseek"
@@ -779,6 +782,11 @@ die "-doStrains 1 requires -doMags 1\n"
 
 checkMF(2);
 my $binnerShrt=getBinSubdirName($binSpeciesMG);
+#default -functDB: drop optional databases that are not installed. The main run forwards the resolved list to
+#FuncAssign, so it also decides the functional checkpoint (installing VFDB later adds VFA/VFB on the next run)
+if ($curDB_o eq ""){
+	$curDB_o = ($mode eq 'geneCat' || $mode eq 'FuncAssign') ? _defaultFuncDBs() : $funcDBdefault;
+}
 
 if ($numCor3 == -1){
 	$numCor3 = $numCor;
@@ -1584,7 +1592,11 @@ sub geneCatFlow($ $ $ $ ){
 	}
 
 
-	if ($emapBusy eq "" && !(-s $emapStone && _stone_valid($emapStone, $cdhID))) { #legacy empty stone: rerun once to build the KO/module tables
+	#annotations from other eggNOG-mapper data (eggNOGm_path_DB changed, e.g. eggNOG 5 -> 7) are redone
+	my $emapDataChanged = _emapDataChanged($GCdir);
+	print "eggNOG-mapper data (eggNOGm_path_DB) changed since the catalog was annotated: re-annotating\n"
+		if ($emapDataChanged && $emapBusy eq "");
+	if ($emapBusy eq "" && ($emapDataChanged || !(-s $emapStone && _stone_valid($emapStone, $cdhID)))) { #legacy empty stone: rerun once to build the KO/module tables
 		retry_unlink($emapStone, label => 'invalidate stale eggNOG checkpoint')
 			if -e $emapStone;
 		my $stageCmd = "#functional assignments via eggNOGmapper\n";
@@ -3070,6 +3082,9 @@ sub geneCatFunc_emapper{
 	my $outD = $GCd."/Anno/Func/emapper/";
 	my $curDB = getProgPaths("eggNOGm_path_DB");
 	my $emapper = getProgPaths("emapper");
+	#eggNOG-mapper v3 sizes its DIAMOND blocks from the node's total RAM, not from the job's allocation:
+	#set them for $mem (upstream bands; peak RAM ~ block size x 6 + 23 GB DB / index chunks + 0.5 GB per thread)
+	my ($dmndBlock,$dmndChunks) = ($mem >= 96) ? (8,1) : (($mem >= 64) ? (6,2) : (($mem >= 32) ? (4,2) : (2,4)));
 	my $qsubDir2 = "$qsubDir/Funct/";
 	my $shrtDB = "emap";
 	make_path($qsubDir2) unless -d $qsubDir2;
@@ -3082,9 +3097,26 @@ sub geneCatFunc_emapper{
 	my $tarAnno3 = "$outD/MF.emapper.annotations";
 	my $splDir = _emapSplitDir(); #catalog-specific, so catalogues can't pick up each other's chunks
 	my $cmd = "";
+	#annotations and chunk results are reused only if made with the configured eggNOG-mapper data
+	my $paramF = _emapParamF($GCd);
+	my $dataID = _emapDataID($curDB);
+	my $oldID = _readInflight($paramF)->{data_dir};
+	if (defined($oldID) && $oldID ne $dataID){
+		print "eggNOG-mapper data changed ($oldID -> $dataID): existing annotations are not reused\n";
+		unlink($tarAnno3, "$tarAnno3.gz");
+		remove_tree($splDir) if (-d $splDir);
+	}
 	#existing merged annotations: plain, or already compressed by a previous cleanup
 	my $annoIn = (-s $tarAnno3) ? $tarAnno3 : ((-s "$tarAnno3.gz") ? "$tarAnno3.gz" : "");
+	print "Reusing $annoIn (made before eggNOG-mapper data were recorded); delete it to re-annotate with $dataID\n"
+		if ($annoIn ne "" && !defined($oldID));
 	if ($annoIn eq ""){
+		#chunk results of an interrupted run from before the data were recorded: older eggNOG-mapper, not mixed in
+		if (!defined($oldID) && -d $splDir){
+			print "Removing unrecorded eggNOG-mapper chunk results in $splDir\n";
+			remove_tree($splDir);
+		}
+		_writeFuncParams($paramF, {data_dir => $dataID});
 		#setup cluster for diamond focused job
 		my $chunkQSB = _qsbCopy($QSB);
 		push(@{$chunkQSB->{constraint}}, $avx2Constr) if (defined($avx2Constr) && $avx2Constr ne "");#--constraint=sse4
@@ -3100,7 +3132,7 @@ sub geneCatFunc_emapper{
 			$ccmd .= "$mkdirBin -p $tmpD/$i/\n";
 			#eggNOG-mapper writes its annotations in place (no end marker with --no_file_comments): run under a .part
 			#prefix and rename on success, so a killed chunk never leaves a file the resume test accepts
-			$ccmd .= "$emapper -m diamond --dbmem --override --itype proteins --temp_dir $tmpD/$i/ --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f.part;\n";
+			$ccmd .= "$emapper -m diamond --dmnd_block_size $dmndBlock --dmnd_index_chunks $dmndChunks --override --itype proteins --temp_dir $tmpD/$i/ --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f.part;\n";
 			$ccmd .= "$mvBin $f.part.emapper.annotations $f.emapper.annotations\n";
 			$ccmd .= "$rmBin -rf $tmpD/$i/\n";
 			my $outF = "$f.emapper.annotations"; #complete chunk annotations
@@ -3327,10 +3359,59 @@ sub _funcTmpDir{
 sub _emapSplitDir{
 	return "$GLBtmp/eggNOGmapper_"._gcTmpTag()."/";
 }
+#record of the eggNOG-mapper data dir behind a catalog's eggNOG-mapper annotations ("data_dir<TAB>path"),
+#written when annotation jobs are submitted. Annotations without a record (older runs) are kept.
+sub _emapParamF{
+	my ($GCd) = @_;
+	return "$GCd/Anno/Func/emapper/.emapper.params";
+}
+sub _emapDataID{
+	my ($d) = @_;
+	my $p = Cwd::abs_path($d); $p = $d unless (defined $p);
+	$p =~ s{/+$}{};
+	return $p;
+}
+#1 if the catalog's eggNOG-mapper annotations were made with other data than the configured eggNOGm_path_DB
+sub _emapDataChanged{
+	my ($GCd) = @_;
+	my $old = _readInflight(_emapParamF($GCd))->{data_dir}; #plain "key<TAB>value" reader
+	return 0 unless (defined($old));
+	return ($old ne _emapDataID(getProgPaths("eggNOGm_path_DB"))) ? 1 : 0;
+}
 #parameters recorded in (and required by) the functional-annotation checkpoint
 sub _funcStoneParams{
 	return (functDB => $curDB_o, functAligner => $funcAligner,
 		cutoffs => join(",", $minEVal, $minPerID, $minBitSc, $minAlLeng, $minPercSbjCov, $minPercQueryCov));
+}
+#$funcDBdefault without the optional databases that are not installed
+sub _defaultFuncDBs{
+	my @keep;
+	foreach my $db (split /,/, $funcDBdefault){
+		if ($funcDBoptional{$db}){
+			my $why = _optionalFuncDBmissing($db);
+			if ($why ne ""){
+				print "NOTE: optional functional database $db not installed, skipped ($why)\n";
+				next;
+			}
+		}
+		push @keep, $db;
+	}
+	return join(",", @keep);
+}
+#"" if a -functDB database can be used, else why not
+sub _optionalFuncDBmissing{
+	my ($db) = @_;
+	my ($DBpath) = eval { getSpecificDBpaths($db,0) };
+	unless (defined($DBpath)){
+		my $e = $@; $e =~ s/^getSpecificDBpaths:: //; $e =~ s/\s+$//;
+		return $e;
+	}
+	if ($db =~ m/^(VDB|VFA|VFB)$/ && vfTabStale($DBpath)){ #VF.tab is built from both VFDB sets
+		foreach my $set (qw(VFDB_setA_pro.fas VFDB_setB_pro.fas)){
+			return "$DBpath$set is needed to build VF.tab" unless (-e "$DBpath$set" || -e "$DBpath$set.gz");
+		}
+	}
+	return "";
 }
 #------ in-progress markers of the functional stages (FuncAssign, FuncEMAP) ------
 #Before submitting, a stage creates Anno/Func/.<stage>.inflight (exclusively) and then records its final job in it;

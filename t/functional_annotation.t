@@ -49,6 +49,38 @@ write_file($bad, "1\tonly_two_columns\n");
 isnt(system("bash $split $bad 2>/dev/null"), 0, 'truncated annotation rows are rejected');
 ok(!-e File::Spec->catfile($tmp,'bad','eggNOGmapper_CAZy.geneAss'), 'no outputs written for rejected input');
 
+#eggNOG-mapper v3 (eggNOG 7): 22 columns, rows modelled on the v3.0.0-beta6 self-test output
+my @hdr3 = ('#query', qw(seed_ortholog evalue score eggNOG_OGs tax_ceiling farthest_donor_lineage COG_category Preferred_name GOs EC KEGG_ko KEGG_Pathway KEGG_Module KEGG_Reaction KEGG_rclass BRITE KEGG_TC CAZy BiGG_Reaction PFAMs annotation_confidence));
+sub emrow3 { my %v = @_; my @r = ('-') x 22; $r[0]=$v{q}; $r[4]=$v{og}//'-'; $r[7]=$v{cog}//'-'; $r[9]=$v{go}//'-'; $r[10]=$v{ec}//'-';
+	$r[11]=$v{ko}//'-'; $r[12]=$v{pw}//'-'; $r[13]=$v{mod}//'-'; $r[18]=$v{cazy}//'-'; $r[20]=$v{pfam}//'-'; $r[21]=$v{conf}//'h-hhhh--h---h'; return join("\t",@r); }
+my @v3rows = (
+	emrow3(q=>'1', og=>'EKR@131567|A-1,POR_N@131567|KJ-14,POR@131567|G-3', cog=>'COG0674', go=>'GO:0005737', ec=>'ec:1.2.7.1', ko=>'K03737',
+		pw=>'00010,00020,01100', mod=>'M00173,M00307', pfam=>'EKR_635_680,Fer4_7_692_762,POR_425_608,Fer4_7_800_870'),
+	emrow3(q=>'2', og=>'POR_N@131567|C-2!,Oxidored_nitro@145260|Bgs-26', ec=>'ec:1.18.6.1,ec:2.7.7.-', ko=>'K02586', cazy=>'GH13'),
+	emrow3(q=>'3', og=>'-', cog=>'-', ko=>'K00001'));
+my $v3Dir = File::Spec->catdir($tmp,'emap3'); mkdir $v3Dir;
+my $anno3 = File::Spec->catfile($v3Dir,'MF.emapper.annotations');
+write_file($anno3, join("\n", join("\t",@hdr3), @v3rows) . "\n");
+is(system('bash', $split, $anno3), 0, 'eggNOG_split.sh reads eggNOG-mapper v3 annotations');
+my %em3 = map { $_ => two_cols(read_file(File::Spec->catfile($v3Dir,"eggNOGmapper_$_.geneAss"))) } qw(CAZy EC GO PFAM KO KGM KGP NOG);
+is_deeply($em3{NOG}, {1=>'COG0674', 2=>'POR_N@131567.C-2'}, 'v3 NOG: COG from COG_category, else first OG without rtk separators');
+is_deeply($em3{EC}, {1=>'1.2.7.1', 2=>'1.18.6.1,2.7.7.-'}, 'v3 EC: "ec:" prefix removed');
+is($em3{PFAM}{1}, 'EKR,Fer4_7,POR', 'v3 PFAM: domain coordinates and repeated domains removed');
+is($em3{KGP}{1}, 'K03737;ko00010,ko00020,ko01100', 'v3 KEGG pathways get the ko prefix of the v2 tables');
+is($em3{KGM}{1}, 'K03737;M00173,M00307', 'v3 KO;module hierarchy');
+is_deeply($em3{KO}, {1=>'K03737', 2=>'K02586', 3=>'K00001'}, 'v3 KO table');
+is_deeply($em3{CAZy}, {2=>'GH13'}, 'v3 CAZy column');
+#without the "#query" header the layout is inferred from the confidence column
+my $v3nh = File::Spec->catdir($tmp,'emap3nh'); mkdir $v3nh;
+write_file(File::Spec->catfile($v3nh,'MF.emapper.annotations'), join("\n", @v3rows) . "\n");
+is(system('bash', $split, File::Spec->catfile($v3nh,'MF.emapper.annotations')), 0, 'headerless v3 annotations');
+is(two_cols(read_file(File::Spec->catfile($v3nh,'eggNOGmapper_NOG.geneAss')))->{1}, 'COG0674', 'headerless v3 detected by its confidence column');
+#a merge of v2 and v3 chunks (v2 header from the first chunk) is rejected
+my $mix = File::Spec->catdir($tmp,'emapmix'); mkdir $mix;
+write_file(File::Spec->catfile($mix,'MF.emapper.annotations'), join("\n", join("\t",@hdr), emrow(q=>'1', og=>'COG0366@1|root'), $v3rows[0]) . "\n");
+isnt(system("bash $split ".File::Spec->catfile($mix,'MF.emapper.annotations')." 2>/dev/null"), 0, 'v2 and v3 rows in one file are rejected');
+ok(!-e File::Spec->catfile($mix,'eggNOGmapper_NOG.geneAss'), 'no outputs written for mixed input');
+
 # ---------------- parseBlastFunct2.pl ----------------
 my $pb = File::Spec->catfile($root,'secScripts','functions','parseBlastFunct2.pl');
 my $lenF = File::Spec->catfile($tmp,'db.length');
@@ -120,5 +152,30 @@ write_file($vfLen, join("", map {"$_\t400\n"} keys %vf));
 	is_deeply($vfa, {v1 => "ssaQ_VF0036\tVF0036_TTSS_(SPI-2_encode)\tVFC0086_Effector_delivery_system"}, 'VFA: 3-level hierarchy, 45% identity hit rejected');
 }
 like($gc, qr/VFA => \{percID => 60, minPercSbjCov => 0\.7, minPercQueryCov => 0\.8/, 'VFDB-specific cutoffs defined');
+
+#VFA/VFB are in the default -functDB and skipped when VFDB is not installed
+like($gc, qr/my \$funcDBdefault = "KGM,TCDB,CZy,ABRc,VFA,VFB";/, 'VFDB sets are in the default -functDB');
+{
+	package FuncDBdefault;
+	our ($funcDBdefault, %funcDBoptional, %installed);
+	sub getSpecificDBpaths { my ($db) = @_; die "getSpecificDBpaths:: Specified DB ($db) did not have valid DBpath: /x/\n" unless $installed{$db}; return ("/db/$db/", "$db.faa", $db); }
+	sub vfTabStale { return 0; }
+	for my $name (qw(_defaultFuncDBs _optionalFuncDBmissing)) {
+		my ($src) = $gc =~ /^(sub \Q$name\E\b[^\n]*\{.*?^\})/ms;
+		die "Missing $name in geneCat.pl\n" unless defined $src;
+		eval $src; die $@ if $@;
+	}
+	package main;
+	($FuncDBdefault::funcDBdefault) = $gc =~ /my \$funcDBdefault = "([^"]+)";/;
+	%FuncDBdefault::funcDBoptional = (VFA => 1, VFB => 1);
+	%FuncDBdefault::installed = map { $_ => 1 } qw(KGM TCDB CZy ABRc);
+	my $out = '';
+	{ local *STDOUT; open STDOUT, '>', \$out or die; is(FuncDBdefault::_defaultFuncDBs(), 'KGM,TCDB,CZy,ABRc', 'VFA/VFB skipped when VFDB is not installed'); }
+	like($out, qr/NOTE: optional functional database VFA not installed, skipped \(Specified DB \(VFA\)/, 'skipped database is reported');
+	$FuncDBdefault::installed{$_} = 1 for qw(VFA VFB);
+	is(FuncDBdefault::_defaultFuncDBs(), 'KGM,TCDB,CZy,ABRc,VFA,VFB', 'VFA/VFB used when VFDB is installed');
+	delete $FuncDBdefault::installed{KGM};
+	is(FuncDBdefault::_defaultFuncDBs(), 'KGM,TCDB,CZy,ABRc,VFA,VFB', 'non-optional databases are kept (FuncAssign reports them missing)');
+}
 
 done_testing();

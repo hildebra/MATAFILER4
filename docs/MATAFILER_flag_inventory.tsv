@@ -190,7 +190,7 @@ geneCat.pl	0.51	Binning/MGS related	-doMags	integer	doMags	1	stable	1: start can
 geneCat.pl	0.51	Binning/MGS related	-canopyAutoCorr	float	canopyAutoCorr	0.15	stable	canopy clustering parameter to filter autocorrelated genes prior to canopy clustering
 geneCat.pl	0.51	Marker Genes/ taxonomy	-MGset	string	useGTDBmg	GTDB	stable	use either FMG or GTDB marker genes to compare and merge MAGs and calculate their abundance
 geneCat.pl	0.51	Flags for specific modes	-out	string	out		stable	output dir, only used in modes protExtract ntMatchGC
-geneCat.pl	0.51	Flags for specific modes	-functDB	string	curDB_o	KGM,TCDB,CZy,ABRc	stable	for FuncAssign mode: functional DBs to annotate gene cat to
+geneCat.pl	0.51	Flags for specific modes	-functDB	string	curDB_o	KGM,TCDB,CZy,ABRc,VFA,VFB	stable	for FuncAssign mode: functional DBs to annotate gene cat to
 geneCat.pl	0.51	Flags for specific modes	-refDB	string	refDB		stable	for ntMatchGC mode: reference fasta DB
 geneCat.pl	0.51	Flags for specific modes	-fastaSplit	string	fastaSplits	500M	stable	For FuncAssign mode: split gene catalog into chunks to parallelise jobs. Default: 500M.
 geneCat.pl	0.51	Flags for specific modes	-functAligner	string	funcAligner	diamond	stable	"either ""diamond"" or ""foldseek"""

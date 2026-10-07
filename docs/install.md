@@ -110,6 +110,27 @@ After updating `MF4` from `helpers/install/MF4.yml`, the installer verifies
 command stops installation immediately, preventing archive-backed samples from
 failing later inside a workflow.
 
+`MF4` installs eggNOG-mapper v3 (3.0.0-beta6) with pip from its GitHub release,
+because it is not on Bioconda yet. The build uses the environment's Cython and
+compilers. The pip line in `MF4.yml` sets the version; the installer reads it from there.
+
+- **Before updating `MF4`:** the installer removes the Bioconda
+  eggnog-mapper 2.x package of an earlier `MF4`. Its package record would
+  otherwise keep Python below 3.12 and let a later update reinstall or delete
+  v3's files.
+- **After updating:** it checks that the pinned version imports, including
+  its compiled modules, and reinstalls it if not.
+- **Newer release:** it prints a note when a newer eggNOG-mapper release
+  exists on GitHub. To switch, update the pip line in `MF4.yml`.
+
+v3 needs the eggNOG 7 data (about 45 GB), which the installer does not
+download. Fetch it into `eggNOGm_path_DB` before the first gene catalogue:
+
+```bash
+mkdir -p <DBDir>/Funct/eggNOGmapper/v3.0/
+download_eggnog_data.py -y --data_dir <DBDir>/Funct/eggNOGmapper/v3.0/
+```
+
 `MF4genomeface` is best-effort because its package metadata is hosted outside
 conda-forge and Bioconda. If that external channel is unavailable, the installer
 prints a warning and continues; rerun it later to install or update GenomeFace.

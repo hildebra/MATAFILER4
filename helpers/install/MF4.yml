@@ -9,7 +9,7 @@ dependencies:
 #  - rtk2>=2.11
 
 #sys dependencies
-  # eggnog-mapper 2.1.12 supports Python <3.12 in its current Bioconda build.
+  # eggnog-mapper v3 (pip section below) needs Python >=3.9; tested with 3.11.
   - python=3.11
   - perl=5.32.1
   - vim
@@ -72,7 +72,7 @@ dependencies:
 #  - scipy
 #  - cmseq>=1.0.4
 #  - colorama>=0.4.5
-  - bioconda::diamond=2.2.4
+  - bioconda::diamond=2.2.8
   - porechop=0.2.4
 
   - flash=1.2.11
@@ -102,9 +102,15 @@ dependencies:
   - trimmomatic=0.41
 #  - unicycler>=0.5.0
 #  - vsearch=2.22
-  # 2.1.15 requires DIAMOND <2.1 and conflicts with the modern toolchain.
-  - eggnog-mapper=2.1.12
   - bioconda::hostile>=2.0
+  # eggnog-mapper v3 is not on Bioconda/PyPI yet: pip-installed from the GitHub release below.
+  # Build needs Cython and the compilers above; v3 runs with DIAMOND 2.2.x (2.1.x needed DIAMOND <2.1).
+  - cython>=3.0
+  - biopython>=1.79
+  - psutil>=5.7.0
+  - xlsxwriter>=1.4.3
+  - pip:
+    - "eggnog-mapper @ https://github.com/eggnogdb/eggnog-mapper/archive/refs/tags/v3.0.0-beta6.tar.gz"
   
   
 # structural variants

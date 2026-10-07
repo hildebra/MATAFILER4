@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-07 — eggNOG-mapper v3 (eggNOG 7), DIAMOND 2.2.8, VFDB by default
+
+- `geneCat.pl` 0.62.
+- **eggNOG-mapper v3.0.0-beta6** replaces 2.1.12 in `MF4` (pip install from the GitHub release; not on Bioconda yet). It needs the **eggNOG 7 data** (~45 GB, `download_eggnog_data.py`); `eggNOGm_path_DB` now defaults to `[DBDir]/Funct/eggNOGmapper/v3.0/`.
+  - Tested with Python 3.11 and DIAMOND 2.2.8: the v3 self-test data give the upstream reference annotations. The bundled reference files still use the pre-beta6 column layout; only `annotation_confidence` differs, as documented for beta6.
+  - `FuncEMAP` drops `--dbmem` (removed in v3) and passes `--dmnd_block_size 4 --dmnd_index_chunks 2`. Without them, v3 sizes DIAMOND from the node's RAM (~76 GB peak on nodes with ≥ 96 GB), above the 55 GB jobs.
+  - `eggNOG_split.sh` reads columns by header name and handles v3 and v2.1.x output. v3 values get the v2 table formats: EC without `ec:`, PFAM names without domain coordinates, pathways as `ko…`. **NOG** now holds the gene's COG from v3's `COG_category`; genes without one get their broadest eggNOG 7 OG (`name@taxid.cluster`). A merge of chunks from different versions is rejected.
+  - `Anno/Func/emapper/.emapper.params` records the data directory. Changing `eggNOGm_path_DB` re-annotates the catalogue, and old chunk results are never mixed in. **Existing catalogues keep their eggNOG 5 annotations**; delete `checkpoints/10.emap.stone` and `Anno/Func/emapper/MF.emapper.annotations.gz` to re-annotate with v3.
+  - `installer.sh` takes the eggNOG-mapper version from the `MF4.yml` pip line.
+    - **Before the MF4 update:** it removes Bioconda's eggnog-mapper 2.x from an existing `MF4`. If pip has already replaced the files, micromamba logs that removal but keeps the record; the installer then drops the record itself.
+    - **After the update:** it checks that the pinned version and its compiled modules import, and reinstalls otherwise.
+    - It notes newer GitHub releases and prints how to download the eggNOG 7 data.
+    - Tested with micromamba 2.9.0 on a fresh `MF4`, an `MF4` with 2.1.12, one updated outside the installer, and a re-run.
+  - Why not 2.1.15: Bioconda pins 2.1.13–2.1.15 to DIAMOND < 2.1, because 2.1.x with newer DIAMOND was reported 10–20× slower with fewer hits ([bioconda-recipes#58351](https://github.com/bioconda/bioconda-recipes/issues/58351)). MF4 ran 2.1.12 with DIAMOND 2.2.4.
+- **DIAMOND 2.2.8** (was 2.2.4). MATAFILER's DIAMOND commands give byte-identical results with both versions on synthetic data, including 2.2.8 reading databases built by 2.2.4: catalogue `blastp`, read `blastx` (default and `--sensitive`), phylo all-vs-all and `-f tab`.
+- **VFDB by default.** `-functDB` defaults to `KGM,TCDB,CZy,ABRc,VFA,VFB`. Without the VFDB files the default skips `VFA`/`VFB` with a note; an explicit `-functDB` still requires every listed database. On existing catalogues the new default re-runs `FuncAssign`, but only VFA/VFB are aligned; the other databases' results are kept.
+
 ## 2026-10-07 — Protal 0.7.8: per-sample jobs, batches of local samples, strain MSAs from kept SAMs
 
 - **Requires protal 0.7.8 or later** (`audit-fixes` build); the controller refuses an older `protal`. The MF4 environment still installs 0.6.0a from bioconda, so point the `protal` config key at a newer build until it is packaged.

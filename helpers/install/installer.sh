@@ -195,6 +195,65 @@ database_current() {
 	((REFRESH_DATABASES == 0)) && [[ -f "$marker" ]] && [[ "$(<"$marker")" == "$expected" ]]
 }
 
+# eggNOG-mapper v3 is not on Bioconda: MF4.yml pip-installs a GitHub release, which also sets the version here.
+EMAPPER_SPEC="$(sed -n 's/^[[:space:]]*-[[:space:]]*"\{0,1\}\(eggnog-mapper @ [^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$INSTdir/MF4.yml" | head -n 1)"
+[[ -n "$EMAPPER_SPEC" ]] || die "No 'eggnog-mapper @ <release URL>' pip requirement found in $INSTdir/MF4.yml."
+EMAPPER_VERSION="${EMAPPER_SPEC##*/v}"
+EMAPPER_VERSION="${EMAPPER_VERSION%.tar.gz}"
+
+# An earlier MF4 has eggNOG-mapper 2.x from Bioconda. The pip update replaces its files but leaves its conda record,
+# which pins Python <3.12 and DIAMOND and lets conda later reinstall or delete files that now belong to v3.
+# Removed before the update, so the record never covers v3 files.
+remove_conda_eggnog_mapper() {
+	local prefix
+	env_exists MF4 || return 0
+	prefix="$("$MAMBA_E" run -n MF4 sh -c 'printf "%s\n" "$CONDA_PREFIX"')" || return 0
+	compgen -G "$prefix/conda-meta/eggnog-mapper-*.json" >/dev/null || return 0
+	echo "Removing the Bioconda eggnog-mapper package from MF4 (replaced by eggNOG-mapper $EMAPPER_VERSION via pip)"
+	"$MAMBA_E" remove --name MF4 -y --force eggnog-mapper >/dev/null \
+		|| echo "WARNING: micromamba could not remove eggnog-mapper from MF4; dropping its package record." >&2
+	# once pip has replaced the package's files (MF4 updated from MF4.yml outside this installer), micromamba
+	# logs the removal but keeps the record: drop it, the files belong to the pip install
+	if compgen -G "$prefix/conda-meta/eggnog-mapper-*.json" >/dev/null; then
+		rm -f -- "$prefix"/conda-meta/eggnog-mapper-*.json
+	fi
+}
+
+# installed eggNOG-mapper version, empty if missing or if its compiled (Cython) modules do not load
+emapper_installed_version() {
+	"$MAMBA_E" run -n MF4 python -c 'import eggnogmapper.annotator._codec, eggnogmapper.annotator._collect_inner
+from eggnogmapper.version import __VERSION__
+print(__VERSION__)' 2>/dev/null | tail -n 1
+}
+
+# pip leaves a requirement it considers satisfied untouched, also when its files were removed with the
+# Bioconda package: reinstall unless the pinned version imports
+ensure_eggnog_mapper() {
+	local installed
+	installed="$(emapper_installed_version || true)"
+	if [[ "$installed" != "$EMAPPER_VERSION" ]]; then
+		echo "Installing eggNOG-mapper $EMAPPER_VERSION in MF4 (found: ${installed:-none})"
+		retry_command "eggNOG-mapper installation" 3 15 \
+			"$MAMBA_E" run -n MF4 python -m pip install --force-reinstall --no-deps "$EMAPPER_SPEC" >/dev/null \
+			|| die "eggNOG-mapper $EMAPPER_VERSION could not be installed in MF4."
+		installed="$(emapper_installed_version || true)"
+		[[ "$installed" == "$EMAPPER_VERSION" ]] \
+			|| die "MF4 has eggNOG-mapper ${installed:-none} after reinstalling, expected $EMAPPER_VERSION."
+	fi
+	echo "Verified eggNOG-mapper $EMAPPER_VERSION in MF4"
+}
+
+# best effort: name a newer eggNOG-mapper release than the one MF4.yml pins
+report_newest_eggnog_mapper() {
+	local newest
+	command -v curl >/dev/null 2>&1 || return 0
+	newest="$(curl -fsSL --max-time 15 'https://api.github.com/repos/eggnogdb/eggnog-mapper/releases?per_page=1' 2>/dev/null \
+		| sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)" || return 0
+	if [[ -n "$newest" && "${newest#v}" != "$EMAPPER_VERSION" ]]; then
+		echo "NOTE: the newest eggNOG-mapper release is $newest; MF4.yml installs $EMAPPER_VERSION. Update its pip line to switch."
+	fi
+}
+
 echo "MATAFILER4 installer script"
 echo "Using micromamba version: $("$MAMBA_E" --version)"
 
@@ -245,11 +304,14 @@ fi
 export PIP_USER=false
 export PIP_NO_CACHE_DIR=1
 
+remove_conda_eggnog_mapper
 ensure_environment MF4 "$INSTdir/MF4.yml"
 verify_environment_tools MF4 "$INSTdir/MF4.yml" "ENA/SRA archive downloads" \
 	wget pigz prefetch fasterq-dump vdb-validate
 verify_environment_tools MF4 "$INSTdir/MF4.yml" "Protal profiling" \
 	protal protal_profile_utils
+ensure_eggnog_mapper
+report_newest_eggnog_mapper
 
 if "$MAMBA_E" run -n MF4 hostile --help >/dev/null 2>&1; then
 	echo "Installing/updating the Hostile human reference database"
@@ -361,6 +423,13 @@ echo
 echo "These databases are required for MAG classification. For example:"
 echo "    helpers/install/get_gtdb.pl all -v 226 -t /path/to/download -d /path/to/extract/to --tk split"
 echo "Run 'helpers/install/get_gtdb.pl -h' for all options."
+echo
+echo "How to download the eggNOG-mapper database"
+echo
+echo "eggNOG-mapper $EMAPPER_VERSION needs the eggNOG 7 data (about 45 GB) in the eggNOGm_path_DB directory"
+echo "of config.txt (default [DBDir]/Funct/eggNOGmapper/v3.0/). For example:"
+echo "    mkdir -p /path/to/DBDir/Funct/eggNOGmapper/v3.0/"
+echo "    micromamba run -n MF4 download_eggnog_data.py -y --data_dir /path/to/DBDir/Funct/eggNOGmapper/v3.0/"
 echo
 echo "Finished MATAFILER4 installation."
 echo "Activate the main environment with: micromamba activate MF4"

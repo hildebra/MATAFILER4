@@ -270,7 +270,7 @@ NOG.L1.txt
 
 ### VFDB (virulence factor) outputs
 
-Add `VFA` and/or `VFB` to `geneCat.pl -functDB` (for example `-functDB KGM,TCDB,CZy,ABRc,VFA,VFB`). Each set writes its own tables to `<gene_catalog>/Anno/Func/`:
+`VFA` and `VFB` are in the default `geneCat.pl -functDB` (`KGM,TCDB,CZy,ABRc,VFA,VFB`). Without the VFDB files (see *Database setup*) the default skips both sets and prints a note. Installing VFDB later adds them on the next run of an existing catalogue; only `VFA` and `VFB` are then aligned. An explicit `-functDB` that names `VFA` or `VFB` stops if the files are missing. Each set writes its own tables to `<gene_catalog>/Anno/Func/`:
 
 | File | Meaning |
 |---|---|
@@ -350,6 +350,29 @@ Both KEGG routes run by default and are kept separate:
 | eggNOG-mapper (`FuncEMAP`) | `Anno/Func/emapper/EM.KOL0.txt` | `Anno/Func/emapper/modules/*/` |
 
 The eggNOG-mapper tables `EM.KGM*` (KO;module) and `EM.KGP*` (KO;pathway) are still written: level 0 holds KOs, level 1 the eggNOG-mapper module or pathway assignments, summed over genes (before 1 October 2026, level 1 held `KO;module` path names). `eggNOGmapper_KO.geneAss.gz` holds the per-gene KOs from eggNOG-mapper.
+
+### eggNOG-mapper v3 (eggNOG 7)
+
+`FuncEMAP` runs eggNOG-mapper v3 (3.0.0-beta6) against the eggNOG 7 database in `eggNOGm_path_DB` (default `[DBDir]/Funct/eggNOGmapper/v3.0/`). v3 does not work with the eggNOG 5 data of eggNOG-mapper 2.1.x. To install the data (about 45 GB), run:
+
+```bash
+mkdir -p <DBDir>/Funct/eggNOGmapper/v3.0/
+download_eggnog_data.py -y --data_dir <DBDir>/Funct/eggNOGmapper/v3.0/
+```
+
+`secScripts/GC/eggNOG_split.sh` turns `MF.emapper.annotations` into the per-category `eggNOGmapper_<category>.geneAss` tables. It reads v3 and v2.1.x output, and gives the v3 values the v2 formats:
+
+| Table | v3 handling |
+|---|---|
+| `EC` | `ec:` prefix removed. |
+| `PFAM` | Domain names only: v3 coordinates (`POR_425_608`) and repeated domains removed. |
+| `KGP` | Pathways as `ko00010` (v3 lists bare numbers). |
+| `NOG` | The gene's COG (v3 `COG_category`, e.g. `COG0674`). eggNOG 7 OGs are domain families, so genes without a COG get their first, broadest OG, written as `name@taxid.cluster` (e.g. `Oxidored_nitro@131567.Zm-16`). In v2.1.x this was the root-level OG (`COG…`/`ENOG…`). |
+| `KO`, `KGM`, `GO`, `CAZy`, `BIGG` | Unchanged. |
+
+A merge of chunks annotated by different eggNOG-mapper versions is rejected. `Anno/Func/emapper/.emapper.params` records the data directory behind the annotations. Pointing `eggNOGm_path_DB` at other data re-annotates the catalogue on the next run; chunk results of an interrupted run are discarded rather than mixed in. Catalogues annotated before this record existed (eggNOG-mapper 2.1.x) keep their annotations. To re-annotate one with v3, delete `checkpoints/10.emap.stone` and `Anno/Func/emapper/MF.emapper.annotations.gz`.
+
+v3 picks its DIAMOND block size from the node's total RAM, not from the job's memory, so geneCat passes `--dmnd_block_size 4 --dmnd_index_chunks 2` (about 40 GB peak) for its 55 GB eggNOG jobs.
 
 ## Taxonomic annotation outputs
 

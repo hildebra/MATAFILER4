@@ -59,7 +59,8 @@ my @helpers = qw(_shell_quote _checkpoint_command _stone_valid _sync_file
     _append_file_locked _reset_collation_outputs
     gzifelscat _catalog_backup_command _merged_catalog_backup_valid clusterFNA
     clusterSingleStep rewriteClusNumbers addCOGgenes mergeClsSam rewriteFastaHdIdx
-    combineClstr krakenTax geneCatFunc_emapper _qsbCopy _gcTmpTag _emapSplitDir _inflightMarker);
+    combineClstr krakenTax geneCatFunc_emapper _qsbCopy _gcTmpTag _emapSplitDir _inflightMarker
+    _emapParamF _emapDataID _readInflight _writeFuncParams);
 for my $name (@helpers) {
     my ($helper) = $source =~ /^(sub \Q$name\E\b[^\n]*\{.*?^\})/ms;
     die "Missing $name" unless defined $helper;
@@ -323,6 +324,12 @@ subtest 'program registrations and configured command wrappers' => sub {
     is(GCRecovery::systemW($worker->[1], 0), 0, 'eggNOG worker executes the configured wrapper');
     like(read_file($ENV{GENECAT_EMAPPER_LOG}), qr/--cpu\n3\n-i\n\Q$catalogue\E\/compl\.incompl\.97\.prot\.faa/,
         'configured eggNOG command receives requested cores and catalogue identity');
+    my $emArgs = read_file($ENV{GENECAT_EMAPPER_LOG});
+    unlike($emArgs, qr/--dbmem/, 'no --dbmem (removed in eggNOG-mapper v3)');
+    like($emArgs, qr/--dmnd_block_size\n4\n--dmnd_index_chunks\n2\n/,
+        'DIAMOND block size set for the 55G job, not from the node RAM');
+    like(read_file("$catalogue/Anno/Func/emapper/.emapper.params"), qr/^data_dir\t\S/,
+        'eggNOG-mapper data dir is recorded with the submitted annotation');
     ok(-e "$catalogue/compl.incompl.97.prot.faa.emapper.annotations"
             && !-e "$catalogue/compl.incompl.97.prot.faa.part.emapper.annotations",
         'eggNOG worker publishes its annotations only after the run');

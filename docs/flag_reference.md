@@ -417,7 +417,7 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-out` | string |  | stable | output dir, only used in modes protExtract ntMatchGC |
-| `-functDB` | string | `KGM,TCDB,CZy,ABRc` | stable | for FuncAssign mode: functional DBs to annotate gene cat to. Optional VFDB sets: `VFA` (set A, core) and `VFB` (set B, full); `VDB` is a legacy alias for set B |
+| `-functDB` | string | `KGM,TCDB,CZy,ABRc,VFA,VFB` | stable | for FuncAssign mode: functional DBs to annotate gene cat to. VFDB sets: `VFA` (set A, core) and `VFB` (set B, full), skipped by the default when VFDB is not installed; `VDB` is a legacy alias for set B |
 | `-refDB` | string |  | stable | for ntMatchGC mode: reference fasta DB |
 | `-fastaSplit` | string | `500M` | stable | For FuncAssign mode: split gene catalog into chunks to parallelise jobs: a chunk count, or a chunk size ending in `M` or `G`. Default: 500M. |
 | `-functAligner` | string | `diamond` | stable | either "diamond" or "foldseek" |

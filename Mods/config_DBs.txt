@@ -52,7 +52,7 @@ FOAMhmm_DB	[DBDir]/Funct/FOAM/FOAM-hmm_rel1.hmm
 eggNOG_DB	[DBDir]/Funct/eggNOG10/eggnog4.proteins.all.fa
 ABresHMM_DB	[DBDir]/Funct/ABR_FORS/Resfams.hmm
 eggNOG40_path_DB	[DBDir]/Funct/eggNOG10/
-eggNOGm_path_DB	[DBDir]/Funct/eggNOGmapper/v2.12/
+eggNOGm_path_DB	[DBDir]/Funct/eggNOGmapper/v3.0/
 Moh_path_DB	[DBDir]/Funct/MohFuncts/
 test_DB	[DBDir]/Funct/MohFuncts/
 CAZy_path_DB	[DBDir]/Funct/CAZy/
