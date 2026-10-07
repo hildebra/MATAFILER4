@@ -240,6 +240,14 @@ ensure_eggnog_mapper() {
 		[[ "$installed" == "$EMAPPER_VERSION" ]] \
 			|| die "MF4 has eggNOG-mapper ${installed:-none} after reinstalling, expected $EMAPPER_VERSION."
 	fi
+	# 3.0.0-beta6 requires its built-in data dir (<site-packages>/data), which pip does not create:
+	# download_eggnog_data.py fails even with --data_dir, emapper.py without --data_dir crashes
+	# (eggnogdb/eggnog-mapper#612, fix proposed in #610)
+	local default_dir
+	default_dir="$("$MAMBA_E" run -n MF4 python -c 'from eggnogmapper.backends import resolve_backend, DEFAULT_BACKEND
+print(resolve_backend(DEFAULT_BACKEND))' | tail -n 1)" \
+		|| die "Could not locate the eggNOG-mapper default data directory in MF4."
+	mkdir -p -- "$default_dir" || die "Could not create the eggNOG-mapper default data directory $default_dir."
 	echo "Verified eggNOG-mapper $EMAPPER_VERSION in MF4"
 }
 

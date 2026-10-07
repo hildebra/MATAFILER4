@@ -10,7 +10,7 @@
   - `Anno/Func/emapper/.emapper.params` records the data directory. Changing `eggNOGm_path_DB` re-annotates the catalogue, and old chunk results are never mixed in. **Existing catalogues keep their eggNOG 5 annotations**; delete `checkpoints/10.emap.stone` and `Anno/Func/emapper/MF.emapper.annotations.gz` to re-annotate with v3.
   - `installer.sh` takes the eggNOG-mapper version from the `MF4.yml` pip line.
     - **Before the MF4 update:** it removes Bioconda's eggnog-mapper 2.x from an existing `MF4`. If pip has already replaced the files, micromamba logs that removal but keeps the record; the installer then drops the record itself.
-    - **After the update:** it checks that the pinned version and its compiled modules import, and reinstalls otherwise.
+    - **After the update:** it checks that the pinned version and its compiled modules import, and reinstalls otherwise. It creates the built-in data folder `site-packages/data`, which pip does not. Without it, 3.0.0-beta6's `download_eggnog_data.py` fails even with `--data_dir`, and a bare `emapper.py` crashes ([eggnogdb/eggnog-mapper#612](https://github.com/eggnogdb/eggnog-mapper/issues/612); upstream fix proposed in [#610](https://github.com/eggnogdb/eggnog-mapper/pull/610)).
     - It notes newer GitHub releases and prints how to download the eggNOG 7 data.
     - Tested with micromamba 2.9.0 on a fresh `MF4`, an `MF4` with 2.1.12, one updated outside the installer, and a re-run.
   - Why not 2.1.15: Bioconda pins 2.1.13–2.1.15 to DIAMOND < 2.1, because 2.1.x with newer DIAMOND was reported 10–20× slower with fewer hits ([bioconda-recipes#58351](https://github.com/bioconda/bioconda-recipes/issues/58351)). MF4 ran 2.1.12 with DIAMOND 2.2.4.

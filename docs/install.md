@@ -119,7 +119,13 @@ compilers. The pip line in `MF4.yml` sets the version; the installer reads it fr
   otherwise keep Python below 3.12 and let a later update reinstall or delete
   v3's files.
 - **After updating:** it checks that the pinned version imports, including
-  its compiled modules, and reinstalls it if not.
+  its compiled modules, and reinstalls it if not. It also creates
+  eggNOG-mapper's built-in data folder (`site-packages/data`), which pip does
+  not create. Without it, 3.0.0-beta6's `download_eggnog_data.py` fails even
+  with `--data_dir`, and `emapper.py` without `--data_dir` crashes
+  ([eggnogdb/eggnog-mapper#612](https://github.com/eggnogdb/eggnog-mapper/issues/612)).
+  If you built `MF4` from `MF4.yml` without the installer, create it yourself:
+  `mkdir -p "$(micromamba run -n MF4 python -c 'import site; print(site.getsitepackages()[0])')/data"`.
 - **Newer release:** it prints a note when a newer eggNOG-mapper release
   exists on GitHub. To switch, update the pip line in `MF4.yml`.
 
