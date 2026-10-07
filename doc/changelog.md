@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-07 — Smaller KEGG/eggNOG chunks for FuncAssign
+
+- `geneCat.pl` 0.63.
+- **New `-fastaSplitBigDB` (default 100M).** KEGG (`KGM`, `KGE`, `KGB`) and eggNOG (`NOG`) are aligned in 100M catalog chunks instead of 500M. These databases have their own split of the catalog; the other databases keep the shared `-fastaSplit` split, and the final FuncAssign job removes both.
+- **Why:** the KGM DIAMOND jobs ran out of their 500 GB node-local scratch. DIAMOND's temporary files grow with the query chunk and the number of homologs per gene, and DIAMOND unlinks them after opening, so they are invisible in `du`. In a test with KEGG-like data, halving the chunk roughly halved the temporary space. Filters barely helped: `--id` saved nothing, `-k 5` saved about a third but can lose KO assignments, and `--min-score` overrides `-e`.
+- An interrupted KGM run resumes on the new chunks: chunk outputs from the 500M split are older than the new chunks and are recomputed.
+- `bigFuncDB` in `FuncTools.pm` defines these databases for both the chunk size and the 500 GB scratch request.
+
 ## 2026-10-07 — eggNOG-mapper v3 (eggNOG 7), DIAMOND 2.2.8, VFDB by default
 
 - `geneCat.pl` 0.62.

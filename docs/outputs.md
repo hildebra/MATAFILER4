@@ -336,6 +336,8 @@ The query-coverage alternative keeps partial (incomplete) genes. Changing `-func
 - any other change, including a stricter `-FuncMinEVal`, re-interprets its existing alignments (`DIAass_<db>.srt.gz`) and rebuilds its matrix. The alignment e-value stays recorded (`alnEval`) and is also used for chunks still to be aligned, so all alignments of a database share it;
 - results from runs before this record existed are kept as they are. Use `-redoFunc 1` (also forwarded from the main geneCat run) to recompute them.
 
+The catalog is aligned in chunks, one job each: `-fastaSplit` (500M) for most databases, `-fastaSplitBigDB` (100M) for KEGG (`KGM`, `KGE`, `KGB`) and eggNOG (`NOG`). DIAMOND's temporary files on node-local scratch grow with the chunk size and with the number of homologs per gene. 500M chunks against KEGG exceeded the 500 GB scratch a job requests. DIAMOND deletes these files right after opening them, so they do not show up in `ls` or `du` while the job runs. Chunk size does not change the results. After a chunk size changes, chunk outputs from the old split are recomputed.
+
 While a stage's jobs are queued or running, `Anno/Func/.FuncAssign.inflight` / `.FuncEMAP.inflight` holds its final job, and geneCat does not submit that stage again (also not with `-redoFunc 1`). The final job removes the marker. A marker whose final job has finished, can never run (Slurm `DependencyNeverSatisfied` after a failed job), or whose submitting process died is ignored and removed.
 
 `Anno/Func/.<db>.matrix.done` marks a completed matrix. A database without this marker, or without its `DIAass_<db>.srt.gzgeneAss.gz`, is recomputed on the next `FuncAssign` run. The stone records both files, so it is only written after every matrix succeeded.

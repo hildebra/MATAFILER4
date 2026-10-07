@@ -32,7 +32,7 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive numLiveUserJobs
 use Sys::Hostname qw(hostname);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
-use Mods::FuncTools qw(assignFuncPerGene calc_modules vfTabStale);
+use Mods::FuncTools qw(assignFuncPerGene calc_modules vfTabStale bigFuncDB);
 use Digest::MD5 ();
 use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins3 );
 use Mods::Binning qw(getBinSubdirName);
@@ -63,7 +63,8 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.62; #0.62: eggNOG-mapper v3 (eggNOG 7), VFDB sets in the default -functDB
+our $version = 0.63; #0.63: smaller catalog chunks for the KEGG/eggNOG diamond searches (-fastaSplitBigDB)
+#0.62: eggNOG-mapper v3 (eggNOG 7), VFDB sets in the default -functDB
 #0.61: functional annotation robustness, query-or-subject coverage, eggNOG-mapper KOs/modules, VFDB set A/B
 
 sub _print_help {
@@ -667,6 +668,7 @@ my $tmpDir = $GLBtmp;#getProgPaths("nodeTmpDir") .  "/GC/";
 my $tmpDirDef= $tmpDir;
 my $mode = "geneCat";
 my $fastaSplits="500M";
+my $fastaSplitsBig="100M"; #chunks for the KEGG/eggNOG searches (bigFuncDB): DIAMOND's temporary files grow with the chunk
 my $funcAligner = "diamond"; #diamond or foldseek
 my $curDB_o = ""; #-functDB; empty: $funcDBdefault
 my $funcDBdefault = "KGM,TCDB,CZy,ABRc,VFA,VFB";#NOG,#,ACL"; #"mp3,PTV,KGM,TCDB,CZy,NOG,ABRc,ACL,VFA,VFB" #default databases to use in functional assignments
@@ -729,6 +731,7 @@ GetOptions(
 	"functDB=s" => \$curDB_o, #for FuncAssign mode: functional DBs to annotate gene cat to (default KGM,TCDB,CZy,ABRc,VFA,VFB; VFA/VFB skipped if VFDB is not installed)
 	"refDB=s" => \$refDB, #for ntMatchGC mode: reference fasta DB 
 	"fastaSplit=s" => \$fastaSplits, #for FuncAssign mode: target FASTA chunk size (for example 500M)
+	"fastaSplitBigDB=s" => \$fastaSplitsBig, #for FuncAssign mode: chunk size for the KEGG (KGM, KGE, KGB) and eggNOG (NOG) searches
 	"functAligner=s" => \$funcAligner, #either "diamond" or "foldseek"
 	"SmplStart=i" => \$SmplStart, #for subprepSmpls
 	"SmplStop=i" => \$SmplStop, #for subprepSmpls
@@ -761,6 +764,8 @@ die "-FuncMinPercQueryCov must be between 0 and 1\n"
 die "-redoFunc must be 0 or 1\n" unless $redoFunc == 0 || $redoFunc == 1;
 die "-fastaSplit must be a positive count or a size in M or G such as 500M\n" #splitFastas only knows upper-case M and G
 	unless $fastaSplits =~ /^\d+[MG]?$/ && $fastaSplits !~ /^0+[MG]?$/;
+die "-fastaSplitBigDB must be a positive count or a size in M or G such as 100M\n"
+	unless $fastaSplitsBig =~ /^\d+[MG]?$/ && $fastaSplitsBig !~ /^0+[MG]?$/;
 die "-SNPcaller must be either MPI or FB\n"
 	unless $SNPcaller eq "MPI" || $SNPcaller eq "FB";
 die "-doMags must be 0 or 1\n" unless $doMags == 0 || $doMags == 1;
@@ -980,13 +985,16 @@ if ($mode eq "mergeCLs"){
 	die "FuncAssign: missing/invalid functional databases, nothing submitted:\n".join("",@missing) if (@missing);
 	#not again while jobs of an earlier submission are queued or running (see _submitStageOnce)
 	_submitStageOnce('FuncAssign', sub {
-		#all databases share one split of the catalog, in a catalog-specific directory; removed by the final job
+		#databases with the same chunk size share one split of the catalog (catalog-specific directories: one for
+		#-fastaSplit, one for the KEGG/eggNOG -fastaSplitBigDB); removed by the final job
 		my $query = "$GCdir/compl.incompl.$cdhID.prot.faa";
-		my $splitDir = _funcSplitDir();
-		my @oldSplits = glob("$splitDir/*");
-		if (@oldSplits && -e $query && (-M $oldSplits[0]) > (-M $query)){ #splits older than the catalog: stale
-			print "Removing stale catalog splits in $splitDir\n";
-			clenSplitFastas($query,$splitDir);
+		my @splitDirs = do { my %seen; grep { !$seen{$_}++ } map { _funcSplitDir(_funcSplitSize($_)) } @DBs };
+		foreach my $splitDir (@splitDirs){
+			my @oldSplits = glob("$splitDir/*");
+			if (@oldSplits && -e $query && (-M $oldSplits[0]) > (-M $query)){ #splits older than the catalog: stale
+				print "Removing stale catalog splits in $splitDir\n";
+				clenSplitFastas($query,$splitDir);
+			}
 		}
 		my @funcDeps; my @funcOuts;
 		foreach my $curDB (@DBs){
@@ -997,8 +1005,8 @@ if ($mode eq "mergeCLs"){
 			push @funcOuts, $geneAss;
 			push @funcOuts, "$GCdir/Anno/Func/.${curDB}.matrix.done"; #written last by the matrix job: no stone after a failed matrix
 		}
-		#final job: runs only after every annotation/matrix job succeeded; removes the shared split and writes the stone
-		my $doneCmd = "$rmBin -rf $splitDir\n";
+		#final job: runs only after every annotation/matrix job succeeded; removes the shared splits and writes the stone
+		my $doneCmd = "$rmBin -rf ".join(" ", @splitDirs)."\n";
 		if (length $modeStone) {
 			#checkpoint fails if a per-gene assignment file is missing; records databases, aligner and cutoffs
 			my $stoneCmd = _checkpoint_command($checkpointWriter, $modeStone, $cdhID, 'functional-annotation', @funcOuts);
@@ -1582,7 +1590,7 @@ sub geneCatFlow($ $ $ $ ){
 	print "$emapBusy\n" if ($emapBusy ne "");
 	if ($funcBusy eq "" && ($redoFunc || !(-s $funcStone && checkpoint_valid($funcStone, parameters => { cluster_id => $cdhID, _funcStoneParams() })))) {
 		my $stageCmd = "#functional assignments of all genes via diamond\n";
-		$stageCmd .= "$GCscr -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPercQueryCov $minPercQueryCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -redoFunc $redoFunc$funcFwd -stone $funcStone\n";
+		$stageCmd .= "$GCscr -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -fastaSplitBigDB $fastaSplitsBig -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPercQueryCov $minPercQueryCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -redoFunc $redoFunc$funcFwd -stone $funcStone\n";
 		if ($submitLocal) {
 			print "submitting diamond func abundance..\n";
 			my ($dep,$qcmd) = qsubSystem($qsubDir."func_GC.sh",$stageCmd,1,int($totMem3)."G","funcGC","","",1,[],$QSBoptHR);
@@ -3212,10 +3220,11 @@ sub geneCatFunc{
 	my $QSB = _qsbCopy($QSBopt);
 	$QSB->{qsubDir} = $qsubDir2;
 		
+	my $splitSize = _funcSplitSize($curDB);
 	my %optsDia = (eval=>$minEVal,percID=>$minPerID,minPercSbjCov=>$minPercSbjCov,minPercQueryCov=>$minPercQueryCov,
-			fastaSplits => $fastaSplits,ncore=>$ncore,align=>$funcAligner,
-			#the catalog split is shared by all databases and removed by the final FuncAssign job
-			splitPath=>_funcSplitDir(),keepSplits=>1,redo=>$redoFunc, minAlignLen=>$minAlLeng, minBitScore=>$minBitSc);
+			fastaSplits => $splitSize,ncore=>$ncore,align=>$funcAligner,
+			#the catalog split is shared by all databases with this chunk size and removed by the final FuncAssign job
+			splitPath=>_funcSplitDir($splitSize),keepSplits=>1,redo=>$redoFunc, minAlignLen=>$minAlLeng, minBitScore=>$minBitSc);
 	if (exists $funcDBcutoffs{$curDB}){ #database specific cutoffs
 		my $cut = $funcDBcutoffs{$curDB};
 		$optsDia{$_} = $cut->{$_} foreach (keys %{$cut});
@@ -3349,9 +3358,17 @@ sub _gcTmpTag{
 	my $p = Cwd::abs_path($GCdir); $p = $GCdir unless (defined $p);
 	return substr(Digest::MD5::md5_hex("$p|$cdhID"),0,10);
 }
-#catalog split shared by all -functDB databases
+#catalog chunk size for a -functDB database: smaller for KEGG/eggNOG, whose DIAMOND temp files grow with the chunk
+sub _funcSplitSize{
+	my ($db) = @_;
+	return bigFuncDB($db) ? $fastaSplitsBig : $fastaSplits;
+}
+#catalog split shared by all -functDB databases with the same chunk size
 sub _funcSplitDir{
-	return "$GLBtmp/funcSplit_"._gcTmpTag()."/";
+	my ($size) = @_;
+	my $d = "$GLBtmp/funcSplit_"._gcTmpTag();
+	$d .= "_$size" if (defined($size) && $size ne $fastaSplits);
+	return "$d/";
 }
 sub _funcTmpDir{
 	return "$tmpDir/GCanno_"._gcTmpTag()."/";

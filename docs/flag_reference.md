@@ -419,7 +419,8 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 | `-out` | string |  | stable | output dir, only used in modes protExtract ntMatchGC |
 | `-functDB` | string | `KGM,TCDB,CZy,ABRc,VFA,VFB` | stable | for FuncAssign mode: functional DBs to annotate gene cat to. VFDB sets: `VFA` (set A, core) and `VFB` (set B, full), skipped by the default when VFDB is not installed; `VDB` is a legacy alias for set B |
 | `-refDB` | string |  | stable | for ntMatchGC mode: reference fasta DB |
-| `-fastaSplit` | string | `500M` | stable | For FuncAssign mode: split gene catalog into chunks to parallelise jobs: a chunk count, or a chunk size ending in `M` or `G`. Default: 500M. |
+| `-fastaSplit` | string | `500M` | stable | For FuncAssign mode: split gene catalog into chunks to parallelise jobs: a chunk count, or a chunk size ending in `M` or `G`. Default: 500M. KEGG and eggNOG use `-fastaSplitBigDB` instead. |
+| `-fastaSplitBigDB` | string | `100M` | stable | For FuncAssign mode: chunk size (or count) for the large, redundant references KEGG (`KGM`, `KGE`, `KGB`) and eggNOG (`NOG`). DIAMOND's temporary files grow with the chunk; 500M chunks against KEGG exceeded 500 GB of node-local scratch. |
 | `-functAligner` | string | `diamond` | stable | either "diamond" or "foldseek" |
 | `-SmplStart` | integer | `-1` | stable | for subprepSmpls |
 | `-SmplStop` | integer | `-1` | stable | for subprepSmpls |

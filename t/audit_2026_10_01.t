@@ -196,13 +196,13 @@ use strict; use warnings;
 use File::Path qw(make_path remove_tree);
 use Digest::MD5 ();
 use Cwd ();
-use Mods::FuncTools qw(assignFuncPerGene calc_modules);
+use Mods::FuncTools qw(assignFuncPerGene calc_modules bigFuncDB);
 our ($cdhID, $funcAligner, $qsubDir, $minEVal, $minPerID, $minPercSbjCov, $minPercQueryCov,
-	$fastaSplits, $redoFunc, $minAlLeng, $minBitSc, %funcDBcutoffs, $rmBin, $pigzBin, $sedBin,
+	$fastaSplits, $fastaSplitsBig, $redoFunc, $minAlLeng, $minBitSc, %funcDBcutoffs, $rmBin, $pigzBin, $sedBin,
 	$rareBin, $countMatrixF, $rtkFunDelims, $touchBin, $GLBtmp, $tmpDir, $GCdir, $curDB_o, @Q);
 sub qsubSystem { push @Q, [@_]; return ("J" . scalar(@Q), ""); }
 PKG
-$pkg .= source_sub($gcSrc, $_) . "\n" for qw(geneCatFunc _gcTmpTag _funcSplitDir _funcTmpDir _funcStoneParams _qsbCopy _readFuncParams _writeFuncParams);
+$pkg .= source_sub($gcSrc, $_) . "\n" for qw(geneCatFunc _gcTmpTag _funcSplitSize _funcSplitDir _funcTmpDir _funcStoneParams _qsbCopy _readFuncParams _writeFuncParams);
 eval "$pkg\n1;" or die $@;
 my @FQ;
 my $dbdir = "$tmp/kegg/"; make_path($dbdir, "$tmp/moddb");
@@ -218,7 +218,7 @@ touchf(map { "$dbdir$_" } qw(euk_pro.pep euk_pro.pep.db.dmnd euk_pro.pep.length)
 	no strict 'refs';
 	${"GCProbe::$_->[0]"} = $_->[1] for (
 		[cdhID => 95], [funcAligner => 'diamond'], [minEVal => 1e-8], [minPerID => 25], [minPercSbjCov => 0.5],
-		[minPercQueryCov => 0.8], [fastaSplits => 4], [redoFunc => 0], [minAlLeng => 30], [minBitSc => 45],
+		[minPercQueryCov => 0.8], [fastaSplits => 2], [fastaSplitsBig => 4], [redoFunc => 0], [minAlLeng => 30], [minBitSc => 45],
 		[rmBin => 'rm'], [pigzBin => 'pigz'], [sedBin => 'sed'], [rareBin => 'rtk'], [countMatrixF => 'Matrix.mat'],
 		[rtkFunDelims => ''], [touchBin => 'touch'], [curDB_o => 'KGM']);
 }
@@ -300,6 +300,23 @@ subtest 'FuncAssign: chunk outputs from an earlier split, collection dependencie
 	ok(defined($len) && defined($col), 'length and collection jobs submitted');
 	is($col->[5], 'F1', 'collection depends on the DB length job (first submitted job, id F1)');
 	touchf("$dbdir/euk_pro.pep.length");
+};
+#KEGG/eggNOG get smaller catalog chunks (DIAMOND temp files grow with the chunk), in a split of their own
+subtest 'FuncAssign: KEGG/eggNOG use -fastaSplitBigDB' => sub {
+	is(GCProbe::_funcSplitSize($_), 4, "$_ uses -fastaSplitBigDB") for qw(KGM KGE KGB NOG);
+	is(GCProbe::_funcSplitSize($_), 2, "$_ uses -fastaSplit") for qw(CZy TCDB ABRc VFA);
+	my $base = GCProbe::_funcSplitDir(2);
+	unlike($base, qr/_2\/$/, 'the -fastaSplit split keeps its directory');
+	(my $big = $base) =~ s{/$}{_4/};
+	is(GCProbe::_funcSplitDir(4), $big, 'the -fastaSplitBigDB split has its own directory');
+	unlink glob("$outD/DIAass_KGM*"), "$outD/.KGM.matrix.done";
+	runGCF();
+	my @c = chunkJobs();
+	is(scalar(@c), 4, 'KGM: one chunk job per -fastaSplitBigDB chunk');
+	like($c[0][1], qr/ -q \Q$big\E\S+ /, 'KGM chunks are read from the -fastaSplitBigDB split');
+	like(source_sub($gcSrc, 'geneCatFunc'), qr/fastaSplits => \$splitSize/, 'per-database chunk size reaches assignFuncPerGene');
+	like($gcSrc, qr/-fastaSplit \$fastaSplits -fastaSplitBigDB \$fastaSplitsBig /, 'main run forwards both chunk sizes to FuncAssign');
+	like($gcSrc, qr/my \$doneCmd = "\$rmBin -rf "\.join\(" ", \@splitDirs\)/, 'the final FuncAssign job removes every split');
 };
 subtest 'module definitions missing: modules skipped, matrix job not failed' => sub {
 	my $cmd = Mods::FuncTools::calc_modules("$tmp/x.L0.txt", "$tmp/mods/", 0.5, 0.5, 0);

@@ -14,7 +14,7 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt );
 
 
 use Exporter qw(import);
-our @EXPORT_OK = qw(mergeBlastPair passBlast lambdaBl assignFuncPerGene calc_modules readGene2Func readGene2COG vfTabStale);
+our @EXPORT_OK = qw(mergeBlastPair passBlast lambdaBl assignFuncPerGene calc_modules readGene2Func readGene2COG vfTabStale bigFuncDB);
 
 
 # Combine BLAST tabular statistics for two hits to the same subject. Subject
@@ -184,6 +184,13 @@ sub _qsbCopy{
 }
 
 #VF.tab (written by prepVFDB.pl) needs rebuilding: missing, older than a VFDB FASTA, or in the pre-0.61 layout (<7 columns)
+#large, redundant reference databases (KEGG, eggNOG): DIAMOND's temporary files grow with the catalog chunk and
+#the number of homologs per gene, so these get more node-local scratch and smaller chunks (geneCat -fastaSplitBigDB)
+sub bigFuncDB{
+	my ($db) = @_;
+	return ($db =~ m/^(NOG|KGM|KGE|KGB)$/) ? 1 : 0;
+}
+
 sub vfTabStale{
 	my ($DBpath) = @_;
 	my $vf = "$DBpath/VF.tab";
@@ -337,8 +344,8 @@ sub assignFuncPerGene{
 	print "$query assigned to $curDB ($fastaSplits splits, $ncore cores)\n" if ($calcDia || $interpDia);
 	my $mem = 20;
 	$mem = 160 if ($shrtDB eq "NOG" || $shrtDB eq "KGM");
-	#node-local scratch per chunk job (diamond -t temp files); KEGG and eggNOG are large, redundant DBs
-	my $tmpSpaceG = ($shrtDB =~ m/^(NOG|KGM|KGE|KGB)$/) ? 500 : 250;
+	#node-local scratch per chunk job (diamond -t temp files)
+	my $tmpSpaceG = bigFuncDB($shrtDB) ? 500 : 250;
 
 	my $tmpD2 = "$tmpD/$curDB/";
 	if ($calcDia && $exe){ #don't split the catalog if nothing will be run

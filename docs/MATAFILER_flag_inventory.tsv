@@ -193,6 +193,7 @@ geneCat.pl	0.51	Flags for specific modes	-out	string	out		stable	output dir, onl
 geneCat.pl	0.51	Flags for specific modes	-functDB	string	curDB_o	KGM,TCDB,CZy,ABRc,VFA,VFB	stable	for FuncAssign mode: functional DBs to annotate gene cat to
 geneCat.pl	0.51	Flags for specific modes	-refDB	string	refDB		stable	for ntMatchGC mode: reference fasta DB
 geneCat.pl	0.51	Flags for specific modes	-fastaSplit	string	fastaSplits	500M	stable	For FuncAssign mode: split gene catalog into chunks to parallelise jobs. Default: 500M.
+geneCat.pl	0.63	Flags for specific modes	-fastaSplitBigDB	string	fastaSplitsBig	100M	stable	For FuncAssign mode: chunk size for the KEGG (KGM, KGE, KGB) and eggNOG (NOG) searches. Default: 100M.
 geneCat.pl	0.51	Flags for specific modes	-functAligner	string	funcAligner	diamond	stable	"either ""diamond"" or ""foldseek"""
 geneCat.pl	0.51	Flags for specific modes	-SmplStart	integer	SmplStart	-1	stable	for subprepSmpls
 geneCat.pl	0.51	Flags for specific modes	-SmplStop	integer	SmplStop	-1	stable	for subprepSmpls
