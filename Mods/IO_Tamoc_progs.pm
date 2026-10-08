@@ -345,16 +345,16 @@ sub mapperDBbuilt( $ $){
 	$MapperProg2 = decideMapper($MapperProg2, "");
 	my $bwt2IdxFileSuffix = ".bw2";my $mini2IdxFileSuffix = ".mmi";
 	my $kmaIdxFileSuffix = ".kma";
-	if ($MapperProg2 == 5){return 1;} #strobealign doesn't need index..
+	#strobealign and minimap2 index the FASTA themselves, with the preset of the mapping call
+	if ($MapperProg2 == 5 || $MapperProg2 == 3){return 1;}
 	#print "($MapperProg2 == 1 || $MapperProg2 == -1) && !-s $DBbtRef$bwt2IdxFileSuffix.rev.2.bt2\n";
 	my @bt2_small = map { "$DBbtRef$bwt2IdxFileSuffix.$_.bt2" } qw(1 2 3 4 rev.1 rev.2);
 	my @bt2_large = map { "$DBbtRef$bwt2IdxFileSuffix.$_.bt2l" } qw(1 2 3 4 rev.1 rev.2);
 	my $bowtie_complete = !(grep { !-s $_ } @bt2_small) || !(grep { !-s $_ } @bt2_large);
-	if ( 
-		($MapperProg2 ==0 && !-e "$DBbtRef$bwt2IdxFileSuffix.0.sa") 
+	if (
+		($MapperProg2 ==0 && !-e "$DBbtRef$bwt2IdxFileSuffix.0.sa")
 		|| ( ($MapperProg2 == 1 || $MapperProg2 == -1) && !$bowtie_complete ) #bowtie2
-		||( $MapperProg2 == 2 && !-s "$DBbtRef.pac" ) #bwa
-		||( ($MapperProg2 == 3 || $MapperProg2 == -1 ) && !-s "$DBbtRef$mini2IdxFileSuffix" ) #minimap2
+		||( $MapperProg2 == 2 && !-s "$DBbtRef.sa" ) #bwa writes .sa last; an interrupted build leaves .pac
 		||( ($MapperProg2 == 4 ) && !-s "$DBbtRef$kmaIdxFileSuffix.seq.b" )#kma
 	) {
 		return 0;
@@ -366,24 +366,25 @@ sub buildMapperIdx($ $ $ $){
 	my ($REF,$ncore,$lrgDB,$MapperProg) = @_;
 	#1=bowtie2, 2=bwa, 3=minimap2
 	$MapperProg = decideMapper($MapperProg,"");
-	if ($MapperProg == 5){return ("",$REF,$REF);} #strobealign doesn't need index..
-	my $bwt2IdxFileSuffix = ".bw2";my $mini2IdxFileSuffix = ".mmi";
+	#strobealign and minimap2 map against the FASTA. A minimap2 .mmi fixes -k/-w/-H at build
+	#time and overrides the -x preset of the mapping call (sr, map-ont, map-hifi, asm20).
+	if ($MapperProg == 5 || $MapperProg == 3){return ("",$REF,$REF);}
+	my $bwt2IdxFileSuffix = ".bw2";
 	my $kmaIdxFileSuffix = ".kma";
 	my $bwtIdx = $REF.$bwt2IdxFileSuffix;
 	my $chkFi = $bwtIdx;
-	my @required_index_files;
+	my $missing_test;
 	if ($MapperProg==1){
 		my $extension = $lrgDB ? 'bt2l' : 'bt2';
-		@required_index_files = map { "$bwtIdx.$_.$extension" } qw(1 2 3 4 rev.1 rev.2);
-		$chkFi = $required_index_files[-1];
-	}elsif ($MapperProg==2){$chkFi = $REF.".pac";
-	} elsif ($MapperProg == 3){$chkFi = $REF.$mini2IdxFileSuffix;
+		$chkFi = "$bwtIdx.rev.2.$extension";
+		#bowtie2-build switches to .bt2l by itself for references over 4 Gbp
+		$missing_test = join(' && ', map { my $ext = $_;
+			'! { '.join(' && ', map { "[ -s $bwtIdx.$_.$ext ]" } qw(1 2 3 4 rev.1 rev.2)).'; }' } qw(bt2 bt2l));
+	}elsif ($MapperProg==2){$chkFi = $REF.".sa"; #written last by bwa index
 	} elsif ($MapperProg == 4){$chkFi = $REF.$kmaIdxFileSuffix.".seq.b";
 	}
 	my $dbCmd ="";
-	my $missing_test = @required_index_files
-		? join(' || ', map { "[ ! -s $_ ]" } @required_index_files)
-		: "[ ! -s $chkFi ]";
+	$missing_test //= "[ ! -s $chkFi ]";
 	$dbCmd .= "if $missing_test; then \n";
 	$dbCmd .= "echo \"Building index for mapper $MapperProg\"\n";
 	if ($MapperProg==1){
@@ -395,14 +396,9 @@ sub buildMapperIdx($ $ $ $){
 	} elsif($MapperProg==2) { 
 		my $bwaBin  = getProgPaths("bwa");
 		$dbCmd .= $bwaBin." index $REF\n";
-		if (-s $REF.".pac"){$dbCmd = "";} 
+		if (-s $REF.".sa"){$dbCmd = "";}
 		#die $dbCmd."\n";
-	} elsif ($MapperProg == 3){
-		$bwtIdx = $REF.$mini2IdxFileSuffix;
-		my $mini2  = getProgPaths("minimap2");
-		$dbCmd .= "$mini2 -t $ncore -H -d $bwtIdx $REF\n";
-		$dbCmd = "" if (-s $bwtIdx);
-	} elsif ($MapperProg==4){ 			
+	} elsif ($MapperProg==4){			
 		$bwtIdx = $REF.$kmaIdxFileSuffix;
 		my $kmaBin = getProgPaths("kma");
 		$dbCmd .= "$kmaBin index -i $REF -o $bwtIdx 2>/dev/null \n"; #-t $ncore 
