@@ -59,9 +59,13 @@ use Mods::SampleCompletion qw(
 	invalidate_sample_completion
 );
 use Mods::RibosomeState qw(
+	compress_ribosome_hierarchies
+	lca_reference_copy_current
 	normalise_ribosome_request
 	prepare_ribosome_rerun
 	ribosome_completion_evidence
+	ribosome_merge_cohort
+	ribosome_merge_manifest
 );
 use Mods::phyloTools qw(fixHDs4Phylo);
 use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
@@ -890,7 +894,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			my $evidence = $closedSample->{components}{$_[0]} || {};
 			return $status eq 'completed' && $evidence->{requested} && $evidence->{complete};
 		};
-		$progStats{riboFindComplCnts}++ if $closedComplete->('ribofind');
+		#RiboFind is not counted here: riboSummary checks every sample of the map itself
 		$progStats{mOTU2ComplCnts}++ if $closedComplete->('motus');
 		$progStats{metaPhl2ComplCnts}++ if $closedComplete->('metaphlan');
 		$progStats{taxTarComplCnts}++ if $closedComplete->('taxa_target');
@@ -1316,7 +1320,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	if ($MFopt{RedoRiboFind} || $MFopt{RedoRiboAssign}) {
 		$riboRedo = prepare_ribosome_rerun(
 			sample_root => $curOutDir,
-			central_root => $baseOut.$preDIRs{dir2RiboF},
+			central_root => riboCohortDir(),
 			sample => $SmplName,
 			redo_profile => $MFopt{RedoRiboFind},
 			redo_assignment => $MFopt{RedoRiboAssign},
@@ -1445,10 +1449,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	# profile is neither staged nor cleaned again.
 	my $stagedReadsAnalysisFlag = 0;
 	#$unpackZip simulates stagedReadsAnalysisFlag, just to get sdm running..
-	$stagedReadsAnalysisFlag=1 if ( $MFconfig{unpackZip} || $calcContamination || $MFopt{calcOrthoPlacement} || $scaffTarExternal ne "" || $assemblyFlag  
+	#The RiboFind LCA step reads the extracted reads in <sample>/ribos/: alone, it needs no staged reads either.
+	$stagedReadsAnalysisFlag=1 if ( $MFconfig{unpackZip} || $calcContamination || $MFopt{calcOrthoPlacement} || $scaffTarExternal ne "" || $assemblyFlag
 		|| $pseudAssFlag || $scaffoldFlag  || $nonPareilFlag || $calcGenoSize || $calcDiamond || $calcDiaParse
-		|| $MFopt{DoCalcD2s} || $calcKraken || $calcRibofind || $calcRiboAssign || $calcMOTU2 ||  $calcMetaPhlan || $calcTaxaTar );
-	my $dowstreamAnalysisFlag = ($stagedReadsAnalysisFlag || $calcProtal) ? 1 : 0;
+		|| $MFopt{DoCalcD2s} || $calcKraken || $calcRibofind || $calcMOTU2 ||  $calcMetaPhlan || $calcTaxaTar );
+	my $riboAssignOnly = ($calcRiboAssign && !$calcRibofind) ? 1 : 0;
+	my $dowstreamAnalysisFlag = ($stagedReadsAnalysisFlag || $calcProtal || $riboAssignOnly) ? 1 : 0;
 	my $requireRawReadsFlag = 0;#only list modules that really need raw reads
 	$requireRawReadsFlag = 1 if ( !$boolScndMappingOK || $calcContamination || $calcProtal);
 	
@@ -1767,6 +1773,12 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			add2SampleDeps(\@sampleDeps, [$protalJob]);
 		}
 	}
+	# Likewise the RiboFind LCA step when the reads are already extracted: it
+	# waits for no staging or cleaning job (e.g. after -reRibosomeLCA 1).
+	if ($riboAssignOnly) {
+		my $riboLCAJob = detectRibo($nodeSpTmpD."ITS/",$curOutDir."ribos/","",$SmplName,$baseOut."DB/");
+		add2SampleDeps(\@sampleDeps, [$riboLCAJob]);
+	}
 	if (deferLoopProducerWave(
 			'input staging', $jdep, $smplLockF, $cAssGrp, \@sampleDeps,
 	)) { next; }
@@ -1936,7 +1948,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		append_job_dependencies(\$AsGrps{$cAssGrp}{readDeps}, $krJdep);
 		
 	}
-	if ($calcRibofind || $calcRiboAssign){
+	if ($calcRibofind){ #extraction, then assignment; assignment alone was submitted with Protal above
 #		die "STOP ribo\n";
 		my $ITSrun = detectRibo($nodeSpTmpD."ITS/",$curOutDir."ribos/",$primaryDep,$SmplName,$baseOut."DB/");
 		#$AsGrps{$cAssGrp}{ITSDeps} .= $ITSrun.";";
@@ -4547,24 +4559,17 @@ sub postSubmQsub {
 
 sub RiboMeta($ $ $ $){
 	my ($calcRibofind,$calcRiboAssign,$curOutDir,$SmplName) = @_;
-	my $dir_RibFind = $baseOut.$preDIRs{dir2RiboF}; #ribofind dir
 
 	if ($calcRibofind || $calcRiboAssign){
 		if ($MFopt{RedoRiboThatFailed} ){
 			system "rm -r $curOutDir/ribos/";
 			$calcRibofind = 1;
 		}
-		$progStats{riboFindFailCnts} ++ ;
-	} elsif ($MFopt{DoRibofind} && !$calcRiboAssign) { #all done, copy files to central dir for postprocessing..
+	} elsif ($MFopt{DoRibofind} && !$calcRiboAssign) { #all done, compress the hierarchies the SSU/LSU merge reads..
 		my @RFtags = ("SSU","LSU");#"ITS",
-		foreach my $RFtag (@RFtags){
-			system "mkdir -p $dir_RibFind/$RFtag/" unless (-d "$dir_RibFind/$RFtag/"); #system "mkdir -p $dir_RibFind/SSU/" unless (-d "$dir_RibFind/SSU/"); system "mkdir -p $dir_RibFind/LSU/" unless (-d "$dir_RibFind/LSU/");
-			my $fromCp = "$curOutDir/ribos/ltsLCA/${RFtag}riboRun_bl.hiera.txt"; my $toCpy = "$dir_RibFind/$RFtag/$SmplName.$RFtag.hiera.txt";
-			my @sourceStat = stat($fromCp);
-			my @sourceGzipStat = stat("$fromCp.gz");
-			my @destinationStat = stat($toCpy);
-			my @destinationGzipStat = stat("$toCpy.gz");
-			if ($MFopt{checkRiboNonEmpty}){
+		if ($MFopt{checkRiboNonEmpty}){
+			foreach my $RFtag (@RFtags){
+				my $fromCp = "$curOutDir/ribos/ltsLCA/${RFtag}riboRun_bl.hiera.txt";
 				#pretty hard check
 				#A missing or unreadable file produces no count. Default to -1 so it
 				#forces a redo instead of inheriting a stale $1 from an earlier match.
@@ -4577,35 +4582,16 @@ sub RiboMeta($ $ $ $){
 					system "rm -r $curOutDir/ribos//ltsLCA $curOutDir/ribos/*.sto ";last;
 				}
 			}
-			my $sourceSize = @sourceStat ? $sourceStat[7]
-				: (@sourceGzipStat ? $sourceGzipStat[7] : undef);
-			my $destinationSize = @destinationStat ? $destinationStat[7]
-				: (@destinationGzipStat ? $destinationGzipStat[7] : undef);
-			if (!defined($destinationSize)
-					|| (defined($sourceSize) && $sourceSize != $destinationSize)){
-				unlink "$toCpy" if @destinationStat;
-				if (@sourceGzipStat){
-					#system "zcat $fromCp.gz > $toCpy" ;
-					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz";
-				} elsif (@sourceStat) {
-					system "gzip $fromCp";
-					system "rm -f $toCpy.gz;ln -s $fromCp.gz $toCpy.gz";
-				} elsif($RFtag eq "SSU") {#just redo.. SSU is only essential thing
-					system "rm -rf $curOutDir/ribos\n"; 
-					$calcRibofind = 1; $calcRiboAssign=1;
-					last;
-				}
-			}
-			#system "gzip $fromCp" unless (-e "$fromCp.gz");
+		}
+		unless ($calcRibofind || $calcRiboAssign){
+			my $missing = compress_ribosome_hierarchies(sample_root => $curOutDir);
+			#a hierarchy lost since the completion check: the extracted reads are intact, so only assign again
+			$calcRiboAssign = 1 if (@{$missing});
+		}
+		foreach my $RFtag (@RFtags){
 			system "rm -f $curOutDir/ribos/ltsLCA/inter${RFtag}riboRun_bl.fna" if (-e "$curOutDir/ribos/ltsLCA/inter${RFtag}riboRun_bl.fna");
 		}
-		#The checks above can invalidate a sample that looked complete on entry.
-		if ($calcRibofind || $calcRiboAssign){
-			$progStats{riboFindFailCnts} ++ ; #outputs were just removed
-		} else {
-			$progStats{riboFindComplCnts} ++; #completed already
-		}
-	} 
+	}
 	return ($calcRibofind,$calcRiboAssign);
 }
 
@@ -4690,7 +4676,7 @@ sub reduceProgStats{
 	my @undo = (
 		[DoMetaPhlan => 'metaPhl2FailCnts'], [DoProtal => 'protalFailCnts'],
 		[DoMOTU2 => 'mOTU2FailCnts'], [DoTaxaTarget => 'taxTarFailCnts'],
-		[DoRibofind => 'riboFindFailCnts'], [DoKraken => 'KrakTaxFailCnts'],
+		[DoKraken => 'KrakTaxFailCnts'],
 	);
 	for my $pair (@undo) {
 		my ($opt, $key) = @{$pair};
@@ -4766,49 +4752,76 @@ sub checkRawProgsFin{
 			$calcMetaPhlan, $calcMOTU2,$calcTaxaTar,$calcProtal) ;
 }
 
+#The SSU/LSU tables of a run: next to the first map sample's output, like the other cohort outputs.
+sub riboCohortDir{
+	return $controllerBaseOut.$preDIRs{dir2RiboF};
+}
+
+#A sample without reads to profile: empty input, or a skipped sample (its completion sentinel keeps the outcome)
+sub riboSampleExcluded{
+	my ($sampleRoot,$sampleName) = @_;
+	return 1 if (-e "$sampleRoot/SMPL.empty");
+	my ($closed) = read_sample_completion(
+		path => sample_completion_path($sampleRoot, $sampleName), sample => $sampleName,
+	);
+	return ($closed && ($closed->{outcome}{status} || "") =~ /^skipped_/) ? 1 : 0;
+}
+
+#The SSU/LSU tables hold exactly the samples of the map (all map files): also with -from/-to, and
+#wherever each sample's output lives (several #OutPath folders). They are merged once every sample is
+#profiled, and again whenever that input changes (samples added or removed, a sample re-assigned).
 sub riboSummary{
 	return if (!$MFopt{DoRibofind} );
-	if( $progStats{riboFindFailCnts}>0){
-		print "$progStats{riboFindFailCnts} / $progStats{riboFindComplCnts} samples with incomplete RiboFind\n";
+	my @mapSamples;
+	foreach my $sampleKey (@samples){
+		my $sampleName = defined($map{$sampleKey}{SmplID}) ? $map{$sampleKey}{SmplID} : $sampleKey;
+		next if sample_is_ignored($ignoredSamplesHR, $sampleName);
+		push @mapSamples, {name => $sampleName, root => $map{$sampleKey}{wrdir}};
+	}
+	my $status = ribosome_merge_cohort(
+		samples => \@mapSamples,
+		excluded => sub { riboSampleExcluded($_[0]{root}, $_[0]{name}) },
+	);
+	my @incomplete = @{$status->{incomplete}};
+	if (@incomplete){
+		my @preview = @incomplete; splice @preview, 10 if (@preview > 10);
+		print scalar(@incomplete)." of ".scalar(@mapSamples)." map samples have no complete RiboFind profile (first: "
+			.join(", ", @preview)."); the SSU/LSU tables are merged once all are complete.\n";
 		return;
 	}
-	if (($progStats{riboFindComplCnts} || 0) <= 0) {
-		print "No completed RiboFind samples; skipping SSU/LSU merge jobs\n";
+	my @cohort = @{$status->{cohort}};
+	if (!@cohort) {
+		print "No map sample has a RiboFind profile; skipping SSU/LSU merge jobs\n";
 		return;
 	}
-	my $dir_RibFind = $baseOut.$preDIRs{dir2RiboF};#"pseudoGC/Phylo/RiboFind/"; #ribofinder dir
-	my $prevItems = 0;
-	if ( -e "$dir_RibFind/SSU.cnt.stone"){
-		my $tmp = `cat $dir_RibFind/SSU.cnt.stone`;
-		chomp $tmp;  $prevItems = $tmp+0;
-	}
+	(my $dir_RibFind = riboCohortDir()) =~ s/\/+$//;
+	make_path($dir_RibFind) unless (-d $dir_RibFind);
 	my $mergeMiTagScript = getProgPaths("mrgMiTag_scr");#"/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/miTagTaxTable.pl";
-	print "All samples ($progStats{riboFindComplCnts}) have assigned RiboFinds\n";
-	my $ITSpres=0;
 	my @lvls = ("domain","phylum","class","order","family","genus","species","hit2db");
-	#unless (!-d "$dir_RibFind/ITS/"){$mrgCmd .= "$mergeMiTagScript ".join(",",@lvls)." $dir_RibFind/ITS.miTag $dir_RibFind/ITS/ \n"; $ITSpres=1;}
-	my $mrgCmd = "$mergeMiTagScript ".join(",",@lvls)." $dir_RibFind/SSU.miTag $dir_RibFind/SSU/ \n" unless (!-d "$dir_RibFind/SSU/");
-	$mrgCmd .= "echo \"$progStats{riboFindComplCnts}\" > $dir_RibFind/SSU.cnt.stone\n";
-	my $mrgCmd2 = "$mergeMiTagScript ".join(",",@lvls)." $dir_RibFind/LSU.miTag $dir_RibFind/LSU/ \n" unless (!-d "$dir_RibFind/LSU/");
-	$mrgCmd2 .= "echo \"$progStats{riboFindComplCnts}\" > $dir_RibFind/LSU.cnt.stone\n";
-	#die $mrgCmd."\n";
-	my $of_exist = 1;
-	foreach my $lvl (@lvls){ 
-		#miTagTaxTable.pl gzips its tables (SSU.miTag.<lvl>.txt.gz); a plain-name test resubmitted both merges on every pass
-		$of_exist=0 unless ((!$ITSpres || fileGZe("$dir_RibFind/ITS.miTag.$lvl.txt")) && fileGZe("$dir_RibFind/LSU.miTag.$lvl.txt") && fileGZe("$dir_RibFind/SSU.miTag.$lvl.txt"));
-		#die "$dir_RibFind/ITS.miTag.$lvl.txt\n$dir_RibFind/LSU.miTag.$lvl.txt\n$dir_RibFind/SSU.miTag.$lvl.txt\n" if (!$of_exist);
+	foreach my $tag ("SSU","LSU"){
+		my $manifest = ribosome_merge_manifest(cohort => \@cohort, tag => $tag, levels => \@lvls);
+		my $stone = "$dir_RibFind/$tag.miTag.sto";
+		my $merged = "";
+		if (-e $stone){
+			open my $stoneFH, "<", $stone or die "Cannot read $stone: $!\n";
+			$merged = <$stoneFH> // ""; chomp $merged;
+			close $stoneFH;
+		}
+		#miTagTaxTable.pl gzips its tables (SSU.miTag.<lvl>.txt.gz)
+		my $tablesExist = !grep { !fileGZe("$dir_RibFind/$tag.miTag.$_.txt") } @lvls;
+		if ($merged eq $manifest->{signature} && $tablesExist){
+			print "$tag table is current for ".scalar(@cohort)." samples\n" unless ($MFconfig{silent});
+			next;
+		}
+		my $sampleList = "$dir_RibFind/$tag.miTag.samples.tsv";
+		atomic_write_text($sampleList, $manifest->{text}, label => "publish $tag RiboFind sample list");
+		#the stone (written last) records which input the tables were merged from; SSU.cnt.stone is from older versions
+		my $mrgCmd = _shell_command('rm', '-f', '--', $stone, "$dir_RibFind/$tag.cnt.stone")."\n";
+		$mrgCmd .= "$mergeMiTagScript ".join(",",@lvls)." "._shell_quote("$dir_RibFind/$tag.miTag")." "._shell_quote($sampleList)."\n";
+		$mrgCmd .= "echo $manifest->{signature} > "._shell_quote($stone)."\n";
+		print "Merging the $tag table for ".scalar(@cohort)." samples into $dir_RibFind\n";
+		qsubSystem($controllerBaseOut."LOGandSUB/${tag}merge.sh",$mrgCmd,1,"80G","${tag}mrg","","",1,[],$QSBoptHR) ;
 	}
-	if ($prevItems < $progStats{riboFindComplCnts}){
-		print "Redoing ribo tables, as more samples currently available ($progStats{riboFindComplCnts}, prev:$prevItems)\n";
-		$of_exist = 0;
-	}
-	#die;
-	#system $mrgCmd."\n" ; die;
-	if ($of_exist == 0){
-		my ($jobN, $tmpCmd) = qsubSystem($baseOut."/LOGandSUB/SSUmerge.sh",$mrgCmd,1,"80G","SSUmrg","","",1,[],$QSBoptHR) ;
-		($jobN, $tmpCmd) = qsubSystem($baseOut."/LOGandSUB/LSUmerge.sh",$mrgCmd2,1,"80G","LSUmrg","","",1,[],$QSBoptHR) ;
-	}
-	#system "$mrgCmd";
 }
 
 # I've removed sortmerna (and ITS-related sortmerna) from this, since 
@@ -4816,38 +4829,21 @@ sub riboSummary{
 # add it back in. 
 sub detectRibo(){
 	my ( $tmpP,$outP,$jobd,$SMPN,$glbTmpDDB) = @_;
-	my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
-	my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
 	#print "DEP: $jobd\n";
 	my $numCore = 12;
 	my $numCore2 = 12;
-	my $cLSUSSUscript = getProgPaths("cLSUSSU_scr");#"perl /g/bork3/home/hildebra/dev/Perl/16Stools/catchLSUSSU.pl";
-	my $cLSUSSUconfig = $MFconfig{configFile} ne ""
-		? " -config "._shell_quote($MFconfig{configFile})
-		: "";
 	#my $lambdaIdxBin = getProgPaths("lambdaIdx");
 	my $lambdaBin = getProgPaths("lambda");#"/g/bork3/home/hildebra/dev/lotus//bin//lambda/lambda";
-	
-	
-	
-	my $pairs = libraryPairs($libraries);
-	my @re1 = map { $_->{files}{r1} } @{$pairs};
-	my @re2 = map { $_->{files}{r2} } @{$pairs};
-	my @singl = @{libraryFiles($libraries, 'single')};
-	#print "ri"; 
-	if (@re1 > 1 || @re2 > 1){
-		#print"\nWARNING::\nOnly the first read file will be searched for ribosomes\n";
-		#first create new tmp file
-	}
-	
+
 	#copy DB to server
 	my $DBrna = "$glbTmpDDB/rnaDB/";
 	my $DBrna2 = "$glbTmpDDB/LCADB/";
-	if ($MFopt{globalRiboDependence}->{DBcp} eq "" ){
+	#once per LCA DB dir: samples under several #OutPath folders each use their own
+	if (!exists($MFopt{globalRiboDependence}->{$DBrna2}) ){
 
 		my $DBcmd = "";
 		my $DBcores = 1;
-		$MFopt{globalRiboDependence}->{DBcp}="alreadyCopied";
+		$MFopt{globalRiboDependence}->{$DBrna2}="alreadyCopied";
 		#my $ITSfilePref = $1;
 
 
@@ -4899,24 +4895,23 @@ sub detectRibo(){
 
 
 		#and get flash DBs as well over to that dir
-		my @DBn = ("LSUdbFA","LSUtax","SSUdbFA","SSUtax");#,"PR2dbFA","PR2tax"); #"ITSdbFA","ITStax",
+		#PR2 is optional; when configured, lotus_LCA_blast3 also assigns SSU reads against it and reads it from $DBrna2
+		my @DBn = ("LSUdbFA","LSUtax","SSUdbFA","SSUtax","PR2dbFA","PR2tax"); #"ITSdbFA","ITStax",
 		my $LCAar = getProgPaths(\@DBn,0);
-		my @LCAdbs = @{$LCAar}; 
+		my @LCAdbs = @{$LCAar};
 #		die "@LCAdbs\n".@LCAdbs."\n";
 		#check first if the lambda DB was already built
-		my $doCopyDBtoScratch = 0;
 		$DBcmd .= "\nmkdir -p $DBrna2\n" if (!-d $DBrna2);
 		for (my $kk=0;$kk<@LCAdbs; $kk+=2){
-			my $DB = $LCAdbs[$kk];
-			#first test if already copied to scratch..
-			$LCAdbs[$kk] =~ m/\/([^\/]+)$/;
-			my $SLVtestNme = $1;
-			if (!-e $DBrna2."/$SLVtestNme.lba.gz"|| !-e $DBrna2."/$SLVtestNme" ){ #lambda3 index, copied with the DB below
-				$doCopyDBtoScratch = 1;
-			} else {next;}
-			#print "$DB\n";
-			unless (-e $DB){print "$DBn[$kk] not found, won't use it\n";next;}
+			my ($DB, $taxDB) = @LCAdbs[$kk, $kk+1];
+			next if ($DB eq ""); #optional reference that is not configured
+			#lotus_LCA_blast3 requires every configured reference: fail here rather than in every LCA job
+			die "$DBn[$kk] is configured as $DB, but that file does not exist\n" unless (-e $DB);
 			die "wrong DB checked for index built:$DB\n" if ($DB =~ m/\.tax$/);
+			#an empty name would also turn the copy's "$taxDB*" into every file of the job directory
+			die "$DBn[$kk+1] (taxonomy of $DBn[$kk]) is not configured or does not exist\n" if ($taxDB eq "" || !-e $taxDB);
+			#first test if already copied to scratch (FASTA, lambda3 index and taxonomy, by size)..
+			next if (lca_reference_copy_current(fasta => $DB, taxonomy => $taxDB, directory => $DBrna2));
 #			if (!-f $DB.".dna5.fm.sa.val"  ) { #old lambda 1.0x style
 			if (!-f "$DB.lba.gz" ){#new lambda3 style  # !-f $DB.".lambda/index.lf.drp"  ) { #new 1.9x style
 				print "Building LAMBDA index anew (may take up to an hour)..\n";
@@ -4927,10 +4922,7 @@ sub detectRibo(){
 
 				#die "$DBcmd\n";
 			}
-			if ($doCopyDBtoScratch){
-				#my $jstr = join("* ",@LCAdbs);$jstr =~ s/\s\*//g;	$jstr =~ s/^\*//g;
-				$DBcmd.= "\ncp -r $LCAdbs[$kk]* ".$LCAdbs[$kk+1]."* $DBrna2\n";
-			}
+			$DBcmd.= "\ncp -r $DB* $taxDB* $DBrna2\n";
 		}
 		#die "$DBcmd\n$DBrna2\n";
 		#die "$SLVlsuNme\n";
@@ -4943,35 +4935,15 @@ sub detectRibo(){
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
 			($jN, $tmpCmd) = qsubSystem($logDir."RiboDBprep.sh",$DBcmd,$DBcores,"10G",$jN,"","",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
 			$QSBoptHR->{tmpSpace} =$tmpSHDD;
-			$MFopt{globalRiboDependence}->{DBcp} = $jN;
+			$MFopt{globalRiboDependence}->{$DBrna2} = $jN;
 		}
 	}
 	#die;
-	
-	#first detect LSU/SSU/ITS in metag
-	my $tmpDY = "$tmpP/SMRNA/";
-	my $cmd = "";
-	#die "$MFconfig{readsRpairs}\n";
-	my $readConfig = 1;
-	if (@re1 > 0){
-		$cmd .= "\n$cLSUSSUscript$cLSUSSUconfig -R1 '".join(",",@re1)."' -R2 '". join(",",@re2)."' ";
-		if (@singl>0){
-			$cmd .= " -RS '".join(",",@singl) . "' "; #tmpP < scratch too slow
-		} else {
-			$cmd .=" -RS '-1' "; #tmpP < scratch too slow
-		}
-		$cmd .= "-tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n";#"$tmpDY $outP $numCore $SMPN $MFopt{doRiboAssembl} $DBrna\n\n";
-	} else {
-		$readConfig = 0; 
-		$cmd .= "\n$cLSUSSUscript$cLSUSSUconfig -R1 '-1' -R2 '-1' -RS '".join(",",@singl)."' -tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n\n"; #tmpP < scratch too slow
-	}
-	my $sto1 = "$outP/RibFnd.sto";
-	$cmd .= "touch $sto1\n" unless ($cmd eq "");
-	#this part assigns tax
-	my $tmpDX = "$tmpP/LCA/"; 
-	my $numCoreL2 = int($numCore2) ;  
-	#my $readConfig =$MFconfig{readsRpairs};
-	$readConfig=2 if (@singl>0 && $readConfig);
+	my $DBdep = $MFopt{globalRiboDependence}->{$DBrna2} eq "alreadyCopied" ? "" : $MFopt{globalRiboDependence}->{$DBrna2};
+
+	#this part assigns tax; it reads only the extracted reads in $outP
+	my $tmpDX = "$tmpP/LCA/";
+	my $numCoreL2 = int($numCore2) ;
 	#ver 2
 	#my $cmd2 = "$lotusLCA_cLSU $outP $SMPN $numCoreL2 $DBrna2 $tmpDX $readConfig\n\n";
 	#ver 3
@@ -4980,9 +4952,10 @@ sub detectRibo(){
 	my $lotusLCA_cLSU = getProgPaths("lotusLCA_cLSU_scr");#"perl /g/bork3/home/hildebra/dev/Perl/16Stools/lotus_LCA_blast2.pl";
 	my $cmd2 = "";
 	$cmd2 .= "rm -rf $tmpDX/*;\nmkdir -p $tmpDX\n\n";
-	$cmd2 .= "$lotusLCA_cLSU -dir $outP -smplID $SMPN -cores $numCoreL2 -DBdir $DBrna2 -tmpD $tmpDX -keepReads $MFopt{riboStoreRds} -pairedRds $readConfig $cfgstr -maxReadNum $MFopt{riboLCAmaxRds} -simMode 2 \n\n";
-	
-	
+	#-pairedRds 2: pairs and singletons are taken from whichever catchLSUSSU published with reads
+	$cmd2 .= "$lotusLCA_cLSU -dir $outP -smplID $SMPN -cores $numCoreL2 -DBdir $DBrna2 -tmpD $tmpDX -keepReads $MFopt{riboStoreRds} -pairedRds 2 $cfgstr -maxReadNum $MFopt{riboLCAmaxRds} -simMode 2 \n\n";
+
+
 	#die $cmd2."\n";
 	my $jobName="";
 	my $Scmd = "";
@@ -4995,16 +4968,32 @@ sub detectRibo(){
 	if ($riboEvidence->{complete}) {
 		$jobName = $jobd;
 	} else {
-		$jobd.=";".$MFopt{globalRiboDependence}->{DBcp} unless ($MFopt{globalRiboDependence}->{DBcp} eq "alreadyCopied");
 		my $tmpCmd; my $mem = "20G";
 		# Re-evaluate extraction and assignment from the same evidence contract
 		# used by the sample sentinel.
 		my $calcRiboFind = $riboEvidence->{profile_complete} ? 0 : 1;
 		if ($calcRiboFind) {
-			$jobName = "_RF$JNUM"; 
-			#die "RIBOFIND\n$outP/SSU_pull.sto\n"; 
+			#first detect LSU/SSU in metag; only this step reads the cleaned reads
+			my $cleanSeqSetHR = sampleReadSet($curSmpl, "clean");
+			my $libraries = readLibrariesByScope($cleanSeqSetHR, 'primary', 1, $curSmpl);
+			my $pairs = libraryPairs($libraries);
+			my @re1 = map { $_->{files}{r1} } @{$pairs};
+			my @re2 = map { $_->{files}{r2} } @{$pairs};
+			my @singl = @{libraryFiles($libraries, 'single')};
+			my $cLSUSSUscript = getProgPaths("cLSUSSU_scr");#"perl /g/bork3/home/hildebra/dev/Perl/16Stools/catchLSUSSU.pl";
+			my $cLSUSSUconfig = $MFconfig{configFile} ne ""
+				? " -config "._shell_quote($MFconfig{configFile})
+				: "";
+			my $tmpDY = "$tmpP/SMRNA/";
+			my $cmd = "\n$cLSUSSUscript$cLSUSSUconfig";
+			$cmd .= @re1 > 0 ? " -R1 '".join(",",@re1)."' -R2 '". join(",",@re2)."'" : " -R1 '-1' -R2 '-1'";
+			$cmd .= @singl > 0 ? " -RS '".join(",",@singl)."'" : " -RS '-1'";
+			$cmd .= " -tmpDir $tmpDY -alignDir $outP -cores $numCore -smplID $SMPN -assmblRibos $MFopt{doRiboAssembl} \n"; #tmpP < scratch too slow
+			$cmd .= "touch $outP/RibFnd.sto\n";
+			$jobName = "_RF$JNUM";
+			#die "RIBOFIND\n$outP/SSU_pull.sto\n";
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};
-			my $curSHFF = int($map{$SMPN}{inputFileSizeMB}/1024*17)+5;
+			my $curSHFF = int(($map{$curSmpl}{inputFileSizeMB} || 0)/1024*17)+5;
 			my $predefSHDD = $HDDspace{Ribos}; $predefSHDD =~ s/G$//;
 			# catchLSUSSU writes extracted reads and SortMeRNA work files below
 			# the node-local directory. Preserve the configured floor for small
@@ -5018,11 +5007,11 @@ sub detectRibo(){
 			$jobName = $jobd;
 		}
 		if ($calcRiboFind || !$riboEvidence->{taxonomy_complete}) {
-			$jobd=$jobName; $mem="16G";
-			$jobd .= ";".$MFopt{globalRiboDependence}->{DBcp} unless ($MFopt{globalRiboDependence}->{DBcp} eq "alreadyCopied");
+			$mem="16G";
+			my $lcaDep = normalise_job_dependencies($jobName, $DBdep);
 			$QSBoptHR->{useLongQueue} = 0;
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = $HDDspace{Ribos};
-			($jobName, $tmpCmd) = qsubSystem($logDir."RiboLCA.sh",$cmd2,$numCore2,$mem,"_RA$JNUM",$jobName,"",1,[],$QSBoptHR);
+			($jobName, $tmpCmd) = qsubSystem($logDir."RiboLCA.sh",$cmd2,$numCore2,$mem,"_RA$JNUM",$lcaDep,"",1,[],$QSBoptHR);
 			$QSBoptHR->{tmpSpace} =$tmpSHDD;
 			$QSBoptHR->{useLongQueue} = 0;
 		}
@@ -11703,7 +11692,6 @@ sub setDefaultMFconfig{
 	
 	#progStats
 	#progStats: object to track progress of programs/submissions
-	$progStats{riboFindFailCnts}=0; $progStats{riboFindComplCnts} = 0; 
 	$progStats{taxTarFailCnts}=0;  $progStats{taxTarComplCnts}=0; 
 	$progStats{mOTU2FailCnts}=0;  $progStats{mOTU2ComplCnts}=0; 
 	$progStats{metaPhl2FailCnts}=0; $progStats{metaPhl2ComplCnts}=0;
@@ -11754,7 +11742,7 @@ sub setDefaultMFconfig{
 	#my $riboLCAmaxRds = 250000; #set to 50k by default, larger gets slower too fast; MF0.45: 250k due to usage of lambda3
 	$MFopt{riboLCAmaxRds} = 250000;
 	$MFopt{riboStoreRds}=0;$MFopt{RedoRiboAssign}=0;$MFopt{RedoRiboThatFailed}=0;$MFopt{checkRiboNonEmpty}=0;
-	$MFopt{globalRiboDependence} = {DBcp => ""};
+	$MFopt{globalRiboDependence} = {}; #LCA DB dir => its copy job, or "alreadyCopied"
 
 	#Binning related options
 	$MFopt{useBinnerScratch} = 0;$MFopt{BinnerMem} = 0;$MFopt{useCheckM2} = 1;

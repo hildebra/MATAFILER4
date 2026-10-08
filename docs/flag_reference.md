@@ -272,7 +272,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
 | `-profileRibosome` | integer | `0` | stable | Run SSU/LSU read extraction and taxonomic assignment. |
-| `-riobsomalAssembly` | integer | `0` | stable | Assemble extracted ribosomal reads. |
+| `-riobsomalAssembly` | integer | `0` | deprecated/legacy | Ribosomal read assembly is no longer supported; a nonzero value stops MATAF4 at startup. |
 | `-reProfileRibosome` | integer | `0` | stable | delete RiboFind extraction, assignments and merged profiles, then rerun; implies -profileRibosome 1 |
 | `-reRibosomeLCA` | integer | `0` | stable | delete RiboFind assignments and merged results, then rerun LCA; implies -profileRibosome 1 |
 | `-riboMaxRds` | integer | `250000` | stable | Maximum extracted reads assigned per ribosomal marker. |

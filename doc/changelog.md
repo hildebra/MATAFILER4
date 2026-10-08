@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-08 — RiboFind audit
+
+- `catchLSUSSU.pl` 0.7. Full report: [`docs/audits/2026-10-08/report.md`](../docs/audits/2026-10-08/report.md).
+- **No more endless RiboFinder resubmission.** Pair-only samples extracted before 0.6 lacked the singleton read file that MATAF4 requires. `catchLSUSSU` called them complete, MATAF4 did not, and the SSU/LSU tables were never merged. `catchLSUSSU` now checks the same three files, and writes the empty container for a read role the input does not have, without a new SortMeRNA search.
+- **The new extraction is assigned.** `lotus_LCA_blast3.pl` preferred plain `reads_*.fq` files, left by early versions that unpacked the reads in place, over the newly published `.gz`. A rerun marker also removes those plain files. Assignment now requires the extraction checkpoint, instead of checkpointing missing reads as an empty profile.
+- **SSU/LSU tables hold exactly the samples of the map.** `riboSummary` checks every sample of all `-map` files, independent of `-from`/`-to`, wherever its `#OutPath` is. Samples that are ignored, empty or skipped are left out; all others must be profiled before anything is merged. `miTagTaxTable.pl` gets an explicit sample list (`<marker>.miTag.samples.tsv`) of the hierarchies in each sample's own folder, and the tables go beside the first map sample's output. A signature in `<marker>.miTag.sto` triggers a new merge whenever the map or a hierarchy changes. Before, the merge took whatever links were in the central folder of the last sample's output: tables were split across output folders, samples removed from the map stayed in, and lost links of closed samples dropped samples silently. The link folders are no longer written.
+- **`-reRibosomeLCA` no longer stages and cleans the reads.** An assignment pending without extraction is submitted like Protal, right after the empty-sample check and without a read dependency. It reads only `<sample>/ribos/`.
+- **LCA references.** A configured PR2 reference (`PR2dbFA`/`PR2tax`) is copied to `DB/LCADB/`; before, every LCA job died. The copy is checked by size (FASTA, LAMBDA index, taxonomy), so a truncated copy is redone, and tracked per output folder (a second `#OutPath` got no copy). A missing reference or taxonomy file stops MATAF4 at startup.
+- **SortMeRNA 7.0.0** (the version MF4 installs, and the latest release): `catchLSUSSU`'s options, output names and paired handling were checked against the source and with real runs. Index directories built with 4.x still work, and the `smr_v4.3` databases are current. In `lotus_LCA_blast3.pl -simMode 3`, SortMeRNA's BLAST table is rewritten so that `LCA` reads the query length in column 11; with the e-value there, `-cover` accepted every hit.
+- **`-riobsomalAssembly`** (no longer supported, but documented as stable) now stops MATAF4 at startup instead of failing every sample on every pass.
+- `docs/profiling_tutorial.md`: the SortMeRNA keys `SSUdbFAsrt`/`LSUdbFAsrt` are required (the tutorial said they were unused); how to build a SortMeRNA index directory; what the merged tables contain.
+- `t/audit_2026_10_08.t` (59 tests).
+
 ## 2026-10-08 — Supervised functional-annotation stages, OOM resubmission
 
 - `geneCat.pl` 0.64.

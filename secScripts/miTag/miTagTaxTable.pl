@@ -7,14 +7,17 @@ use Mods::GenoMetaAss qw(gzipopen systemW);
 
 sub shellQuote;
 
-die "Usage: $0 tax_level[,tax_level...] output_prefix input_directory\n" unless @ARGV == 3;
+# The input is a directory of <sample>.hiera.txt[.gz] files, or a sample list
+# with one "<column>\t<hierarchy file>" line per sample (MATAF4 writes one per
+# marker, for exactly the samples of its map).
+die "Usage: $0 tax_level[,tax_level...] output_prefix input_directory|sample_list\n" unless @ARGV == 3;
 my $taxLevelArg = lc shift @ARGV;
 my $outPrefix = shift @ARGV;
-my $inputDir = shift @ARGV;
+my $input = shift @ARGV;
 my @levels = grep { $_ ne "" } split(/,/, $taxLevelArg);
 die "At least one taxonomic level is required\n" unless @levels;
 die "Output prefix must not be empty\n" if $outPrefix eq "";
-die "Input directory does not exist: $inputDir\n" unless -d $inputDir;
+die "Input directory or sample list does not exist: $input\n" unless -e $input;
 
 my %seenLevel;
 die "Duplicate taxonomic levels are not supported\n" if grep { $seenLevel{$_}++ } @levels;
@@ -24,21 +27,44 @@ for my $level (@levels){
 	unlink "$outPrefix.$level.txt.gz" if -e "$outPrefix.$level.txt.gz";
 }
 
-opendir(my $dirHandle, $inputDir) or die "Cannot open directory $inputDir: $!\n";
-my @files = sort grep { /\.hiera\.txt(?:\.gz)?$/ && -f "$inputDir/$_" } readdir($dirHandle);
-closedir($dirHandle) or die "Cannot close directory $inputDir: $!\n";
+my @inputs; # [sample column, hierarchy file]
+if (-d $input) {
+	opendir(my $dirHandle, $input) or die "Cannot open directory $input: $!\n";
+	my @entries = grep { /\.hiera\.txt(?:\.gz)?$/ } readdir($dirHandle);
+	closedir($dirHandle) or die "Cannot close directory $input: $!\n";
+	# A link whose target is gone drops that sample from every table, so name it.
+	my @dangling = sort grep { -l "$input/$_" && !-e "$input/$_" } @entries;
+	warn "Skipping ".scalar(@dangling)." hierarchy link(s) whose sample output no longer exists: "
+		.join(', ', @dangling)."\n" if @dangling;
+	for my $file (sort grep { -f "$input/$_" } @entries) {
+		(my $tag = $file) =~ s/\.hiera\.txt(?:\.gz)?$//;
+		push @inputs, [$tag, "$input/$file"];
+	}
+} else {
+	open my $listHandle, '<', $input or die "Cannot read sample list $input: $!\n";
+	while (my $line = <$listHandle>) {
+		$line =~ s/\r?\n$//;
+		next if $line eq "";
+		my ($tag, $path) = split /\t/, $line, 2;
+		die "Sample list line $. needs a column name and a hierarchy file: $line\n"
+			unless defined($path) && $tag ne "" && $path ne "";
+		# every listed sample belongs in the tables; never drop one silently
+		die "Hierarchy of $tag does not exist: $path\n" unless -f $path;
+		push @inputs, [$tag, $path];
+	}
+	close $listHandle or die "Cannot close sample list $input: $!\n";
+}
 
-print "Detected ".scalar(@files)." input files in dir $inputDir\n";
-exit(0) unless @files;
+print "Detected ".scalar(@inputs)." input files in $input\n";
+exit(0) unless @inputs;
 
 my %sites;
 my %taxa;
 my %seenTag;
 
-for my $file (@files) {
-	my ($inputHandle,$readOk) = gzipopen("$inputDir/$file", "tax infile");
-	my $tag = $file;
-	$tag =~ s/\.hiera\.txt(?:\.gz)?$//;
+for my $entry (@inputs) {
+	my ($tag, $file) = @{$entry};
+	my ($inputHandle,$readOk) = gzipopen($file, "tax infile");
 	die "Duplicate sample tag '$tag' derived from hierarchy inputs\n" if $seenTag{$tag}++;
 
 	my %column;
@@ -46,7 +72,7 @@ for my $file (@files) {
 	# A zero-byte hierarchy is the producer's completed-empty representation.
 	# Keep its sample tag even though there are no taxa or header to parse.
 	unless (defined $header) {
-		close $inputHandle or die "Cannot close taxonomy input $inputDir/$file: $!\n";
+		close $inputHandle or die "Cannot close taxonomy input $file: $!\n";
 		next;
 	}
 	chomp $header;
@@ -88,7 +114,7 @@ for my $file (@files) {
 			$taxa{$level}{$lineage}++;
 		}
 	}
-	close $inputHandle or die "Cannot close taxonomy input $inputDir/$file: $!\n";
+	close $inputHandle or die "Cannot close taxonomy input $file: $!\n";
 }
 
 print "Read input files.\n";

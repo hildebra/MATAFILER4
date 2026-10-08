@@ -87,7 +87,13 @@ older tool-version suffix.
 ### Taxonomic profilers
 
 ```text
-# RiboFind: reference FASTA and matching LCA taxonomy file
+# RiboFind read extraction: SortMeRNA v4.3 reference databases and their index directories
+SSUdbFAsrt   [DBDir]/MarkerG/sortmerna_database/v4.3_sens_clean/ssu/smr_v4.3_sens_clean_db_ssu.fasta
+LSUdbFAsrt   [DBDir]/MarkerG/sortmerna_database/v4.3/lsu/smr_v4.3_default_db_lsu.fasta
+SSUidx       [DBDir]/MarkerG/sortmerna_database/v4.3_sens_clean/ssu/idx
+LSUidx       [DBDir]/MarkerG/sortmerna_database/v4.3/lsu/idx
+
+# RiboFind taxonomic assignment: reference FASTA and matching LCA taxonomy file
 LSUdbFA      [DBDir]/MarkerG/SILVA/138.1/SLV_138.1_LSU.fasta
 LSUtax       [DBDir]/MarkerG/SILVA/138.1/SLV_138.1_LSU.tax
 SSUdbFA      [DBDir]/MarkerG/KSGP/v4.0/KSGPv4.0.fasta
@@ -103,11 +109,28 @@ motus2_DB    [DBDir]/mOTUs
 protal_db    /path/to/protal_database
 ```
 
-Only `LSUdbFA`, `LSUtax`, `SSUdbFA`, and `SSUtax` are required by the current
-RiboFind implementation. The `SSUdbFAsrt`, `LSUdbFAsrt`, `SSUidx`, and `LSUidx`
-entries are retained for the older SortMeRNA path but are not read by the
-current `detectRibo()` workflow. If a LAMBDA nucleotide index is missing,
-MATAFILER builds it beside the configured FASTA before copying it to scratch;
+RiboFind needs both groups. The extraction job (`catchLSUSSU.pl`) runs
+SortMeRNA against `SSUdbFAsrt` and `LSUdbFAsrt` and fails if either reference
+is missing. `SSUidx` and `LSUidx` are optional. When set, the directory must
+exist and hold the index built from that reference, because the jobs run
+SortMeRNA with `--index 0`, which does not build one. When empty, every job
+indexes the reference in its own work directory. To build an index directory
+once (MF4 installs SortMeRNA 7.0.0; directories built with 4.3 also work):
+
+```bash
+sortmerna --ref "$SSU_SORTMERNA_FASTA" --idx-dir "$SSU_IDX_DIR" \
+  --workdir "$(mktemp -d)" --index 1 --task 5
+```
+
+SortMeRNA only checks that its four index files exist and are not empty, so
+rebuild an interrupted index into an empty directory.
+
+The assignment job (`lotus_LCA_blast3.pl`)
+needs `LSUdbFA`, `LSUtax`, `SSUdbFA` and `SSUtax`. Setting `PR2dbFA` and
+`PR2tax` adds PR2 as a second SSU reference.
+
+If a LAMBDA nucleotide index is missing, MATAFILER builds it beside the
+configured FASTA before copying it to `DB/LCADB/` in the output directory;
 the reference directory therefore needs to be writable for a first run.
 
 `metPhl2_db` is a compatibility key name. For MetaPhlAn 4.2 it must point to
@@ -287,11 +310,20 @@ Typical durable outputs are:
 
 | Function | Per-sample or source output | Run-level output |
 |---|---|---|
-| RiboFind | `<sample>/ribos/` | `pseudoGC/Phylo/RiboFind/SSU.miTag.<rank>.txt.gz` and `LSU.miTag.<rank>.txt.gz` |
+| RiboFind | `<sample>/ribos/` | `pseudoGC/Phylo/RiboFind/SSU.miTag.<rank>.txt.gz` and `LSU.miTag.<rank>.txt.gz`, beside the first map sample's output |
 | Functional | `<sample>/diamond/` | `pseudoGC/FUNCT/<DB_alias>/` |
 | MetaPhlAn | `pseudoGC/Phylo/MP2/<sample>.MP2.txt` | `pseudoGC/Phylo/MePh.all.<rank>.mat` |
 | mOTUs | `pseudoGC/Phylo/mOTU2/<sample>.motu2.tab.gz` | `pseudoGC/Phylo/m2.motu.txt` and `m2.<rank>.txt` |
 | Protal | `<sample>/Tax/Protal/profiles/<sample>.profile`; mode 2 also `<sample>/Tax/Protal/<sample>.sam.zst` | `pseudoGC/protal/Protal.abundance.tsv`; mode 2 also `pseudoGC/protal/strains/` MSAs |
+
+The SSU/LSU tables hold exactly the samples of the map (all files given to
+`-map`), wherever each sample's `#OutPath` is, and also when `-from`/`-to`
+selects only part of the map. They are merged once every map sample is
+profiled; samples without usable reads, skipped samples and `-ignoreSmpl`
+samples are left out. `<marker>.miTag.samples.tsv` lists the merged
+hierarchies. A new merge runs whenever the map or a sample's hierarchy
+changes. `-reRibosomeLCA 1` repeats only the assignment: it does not stage or
+clean the reads again.
 
 ## Troubleshooting checks
 

@@ -117,7 +117,7 @@ like($main, qr/\} elsif \(\$porechopFlag && \$is3rdGen\)\{/,
 like($main, qr/getRgStr\(\$outNms\[0\]/, 'the read group uses a single output name');
 like($main, qr/symlink\(\$refAbs, "\$bwt2outDl\/\$bwt2Name\[\$i\]\.fa"\)/,
 	'secondary-mapping SNP calling finds the reference under <name>.fa');
-like($main, qr/fileGZe\("\$dir_RibFind\/SSU\.miTag\.\$lvl\.txt"\)/,
+like($main, qr/fileGZe\("\$dir_RibFind\/\$tag\.miTag\.\$_\.txt"\)/,
 	'the RiboFind merge skip-check accepts the gzipped tables the merger writes');
 like($main, qr/\$MBcmd = "" if \(-e \$MetaBat2out && -s "\$BinDir\/Binning\.stone"\)/,
 	'a binner assignment is only reused together with the binner stone');

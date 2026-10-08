@@ -429,6 +429,8 @@ for my $tag (qw(SSU LSU)) {
 		File::Spec->catfile($badRibo, 'reads_'.$tag.'.fq.gz'),
 		$tag eq 'SSU' ? $badFastq : $fastq,
 	);
+	# the extraction checkpoint, so assignment reaches the FASTQ parser
+	write_file(File::Spec->catfile($badRibo, $tag.'_pull.sto'), '');
 }
 {
 	my ($status, $output, $errors) = run_script(

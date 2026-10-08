@@ -4,7 +4,6 @@ use strict;
 use warnings;
 
 use File::Basename qw(basename);
-use File::Copy qw(move);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
 use Getopt::Long qw(GetOptions);
@@ -102,6 +101,15 @@ my $assignmentOK = 1;
 for my $tag (@tags) {
 	next if markerAssignmentComplete($outputDir, $tag);
 	invalidateAssignmentOutput($outputDir, $tag);
+	# Missing reads would otherwise be read as a sample without ribosomal
+	# reads, and an empty hierarchy would be checkpointed as complete.
+	my $profileStone = File::Spec->catfile($inputDir, $tag.'_pull.sto');
+	unless (-e $profileStone) {
+		warn "$tag extraction checkpoint $profileStone is missing; "
+			."extract the reads again before assignment\n";
+		$assignmentOK = 0;
+		next;
+	}
 
 	my (@databases, @taxonomies);
 	if ($tag eq 'LSU') {
@@ -464,8 +472,8 @@ sub runSimilaritySearch {
 		my $blastOutput = $prefix.'.blast';
 		die "SortMeRNA produced no BLAST-format output $blastOutput\n"
 			unless -e $blastOutput;
-		move($blastOutput, $output)
-			or die "Cannot move $blastOutput to $output: $!\n";
+		writeQueryLengthTable($blastOutput, $query, $output);
+		unlinkChecked($blastOutput);
 		remove_tree($sortWork) if -d $sortWork;
 	} else {
 		my $sharedIndex = $database.'.vudb';
@@ -500,6 +508,41 @@ sub runSimilaritySearch {
 			'--threads', $cores,
 		);
 	}
+}
+
+
+# SortMeRNA writes BLAST -m8 (12 columns, ending in e-value and bit score).
+# LCA reads the 11th column as the query length for -cover, as LAMBDA and
+# VSEARCH write it here; with the e-value there, every hit passed -cover.
+sub writeQueryLengthTable {
+	my ($blastTable, $query, $output) = @_;
+	my %length;
+	open my $fasta, '<', $query or die "Cannot read query FASTA $query: $!\n";
+	my $id;
+	while (my $line = <$fasta>) {
+		chomp $line;
+		if ($line =~ /^>(\S+)/) {
+			$id = $1;
+			$length{$id} = 0;
+		} elsif (defined $id) {
+			$length{$id} += length($line);
+		}
+	}
+	close $fasta or die "Cannot close query FASTA $query: $!\n";
+	open my $input, '<', $blastTable or die "Cannot read $blastTable: $!\n";
+	open my $table, '>', $output or die "Cannot write $output: $!\n";
+	while (my $line = <$input>) {
+		chomp $line;
+		next if $line eq '';
+		my @fields = split /\t/, $line, -1;
+		die "Unexpected SortMeRNA BLAST line in $blastTable: $line\n" if @fields < 10;
+		die "SortMeRNA reported read $fields[0], which is not in $query\n"
+			unless exists $length{$fields[0]};
+		print {$table} join("\t", @fields[0 .. 9], $length{$fields[0]}), "\n"
+			or die "Cannot write $output: $!\n";
+	}
+	close $input or die "Cannot close $blastTable: $!\n";
+	close $table or die "Cannot close $output: $!\n";
 }
 
 
@@ -623,9 +666,12 @@ sub extractReads {
 
 sub materializeReadInput {
 	my ($plainPath, $destinationRoot) = @_;
-	return $plainPath if -e $plainPath;
+	# catchLSUSSU publishes .gz. A plain file was unpacked in place by older
+	# versions and goes stale as soon as the marker is extracted again.
 	my $gzipPath = $plainPath.'.gz';
-	return '' unless -e $gzipPath;
+	unless (-e $gzipPath) {
+		return -e $plainPath ? $plainPath : '';
+	}
 	my $inputDir = File::Spec->catdir($destinationRoot, 'inputs');
 	make_path($inputDir) unless -d $inputDir;
 	my $temporary = File::Spec->catfile(

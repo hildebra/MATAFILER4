@@ -1,5 +1,7 @@
 
-# SortMeRNA v4.3.x. Override these keys in the user configuration when the
+# SortMeRNA reference databases v4.3 (still the current set with SortMeRNA
+# 7.0.0, which MF4.yml installs). Index directories built with SortMeRNA 4.3
+# work with 7.0.0. Override these keys in the user configuration when the
 # databases live outside DBDir.
 #ITSdbFAsrt	[DBDir]/ # no longer using ITS
 SSUdbFAsrt	[DBDir]/MarkerG/sortmerna_database/v4.3_sens_clean/ssu/smr_v4.3_sens_clean_db_ssu.fasta
