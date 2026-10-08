@@ -12,6 +12,7 @@
 - **Recovering a stage stuck from an earlier run:** rerun geneCat. The stale marker is removed, finished chunks are reused, and the stage continues from the merge. Cancel the stale pending jobs with `scancel`.
   - The in-flight check now follows a pending final job's dependencies (`squeue %E`) down the chain. Before, it only recognised a final job whose own reason was `DependencyNeverSatisfied`. Slurm gives that reason only to the direct dependents of a failed job; jobs further down show "Dependency". So a stuck eggNOG-mapper stage (`CleanEMAP` waiting on `EM.*`, waiting on `CombineEMAP`) looked alive, and geneCat never resubmitted it.
 - **eggNOG-mapper chunk jobs use 12 cores** (was 6; also `emapper --cpu`). v3 annotates in parallel, unlike 2.x's single-core final step. The DIAMOND estimate (about 42 GB) fits the 55 GB jobs.
+- **Functional matrices use 8 threads** (`rtk2 sumMat -t 8`, 8 cores per job; was 4). This applies to the diamond databases and the eggNOG-mapper tables. rtk2 uses the threads to read the gzipped gene matrix in parallel and to parse its rows. The separate KEGG-module job requests 1 core, since `rtk2 module` is single-threaded.
 - `t/job_graph.t`: recording, prerequisite order, OOM retry with more memory, retry limit, blocking of dependents, outcome classification from `sacct`, and an end-to-end run through `qsubSystem` in local bash mode.
 
 ## 2026-10-07 — Smaller KEGG/eggNOG chunks for FuncAssign

@@ -3175,7 +3175,7 @@ sub geneCatFunc_emapper{
 	$jdep = $jobName;
 
 # create abundance tables now..
-	my $matThr = 4;
+	my $matThr = 8; #rtk2 sumMat threads (parallel gzip reading and row parsing) and cores of the matrix jobs
 	#KO: KO-only table, same layout as the diamond KGM table, used for KEGG modules
 	my @emapCats  = ("eggNOGmapper_CAZy","eggNOGmapper_EC","eggNOGmapper_GO","eggNOGmapper_NOG","eggNOGmapper_BIGG","eggNOGmapper_PFAM",
 	"eggNOGmapper_KGM", "eggNOGmapper_KGP", "eggNOGmapper_KO");
@@ -3270,7 +3270,7 @@ sub geneCatFunc{
 	remove_tree("$outD/modules/") if ($curDB eq "KGM" && ($optsDia{redo} || $reparse) && -d "$outD/modules/"); #rtk module skips existing tables
 	my ($allAss,$jdep) = assignFuncPerGene($query,$outD,$tmpD,$curDB,\%optsDia,$QSB,$doMatrix) ;
 	my $tarAnno = "${allAss}geneAss"; #per-gene assignments are "$tarAnno.gz"
-	my $matThr = 4;
+	my $matThr = 8; #rtk2 sumMat threads (parallel gzip reading and row parsing) and cores of the matrix jobs
 	$QSB->{tmpSpace} = "0";
 	my $matrixDep = $jdep;
 	if ($doMatrix){
@@ -3291,8 +3291,8 @@ sub geneCatFunc{
 		$matrixDep = $submittedDep if (defined($submittedDep) && $submittedDep ne "");
 	} elsif ($curDB eq "KGM"){ #matrix done, but module tables may be missing
 		my $modCmd = calc_modules("$outD/${curDB}L0.txt","$outD/modules/",0.5,0.5,0);
-		if ($modCmd ne ""){
-			my ($modDep,$modQcmd) = qsubSystem($qsubDir2."${curDB}_modules.sh",$modCmd,$matThr,"12G","${curDB}_mod",$jdep,"",1,[],$QSB);
+		if ($modCmd ne ""){ #rtk2 module runs single-threaded
+			my ($modDep,$modQcmd) = qsubSystem($qsubDir2."${curDB}_modules.sh",$modCmd,1,"12G","${curDB}_mod",$jdep,"",1,[],$QSB);
 			$matrixDep = $modDep if (defined($modDep) && $modDep ne "");
 		}
 	}
