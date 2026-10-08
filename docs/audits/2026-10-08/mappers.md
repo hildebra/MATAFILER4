@@ -74,32 +74,45 @@ Verification:
 - **`-mapper 4`** stops at startup.
 - **Unused `.mmi` files** next to assemblies are no longer built. Existing ones are ignored, and the finished-sample cleanup removes them.
 
+
+## Decided and implemented (MATAF4 4.48)
+
+The decisions taken on the open items, verified against the pinned sources: Kraken2 v2.17.1, DIAMOND 2.2.8, mOTUs 4.1.0, and TaxaTarget at its last commit, 35195a6. Tests: `t/audit_2026_10_08_decisions.t`, plus the geneCat cases in `t/audit_2026_10_01.t`.
+
+| Item | Change |
+|---|---|
+| DIAMOND read jobs | `-DiaMem` defaults to **16** (was 7). DIAMOND's blastx defaults use `-b 2` (about 12 GB) and a fixed 16 GB align budget; `--memory-limit` is not allowed for blastx. Node scratch stays at 80G. |
+| Long reads in `-profileFunct` | **Range-aware assignment.** ONT/PacBio libraries are searched with `--long-reads`, which means `--range-culling --top 10` plus `-F 15` unless `-DiaFrameshift` is set; `-k` is not passed, because DIAMOND ignores it with `--top`. Their hits are tagged `MF4:ranges=1`. `parseBlastFunct2.pl` splits a tagged read's hits into query ranges: a hit joins the range of a better hit it overlaps by at least half of the shorter one. Each range, i.e. each gene on the read, is assigned and counted on its own. Short reads are unchanged. |
+| Paired hits in the parser | Mate hits merged by `combineBlasts` are ranked by combined bit score (subject name breaks ties), instead of by subject name. |
+| geneCat FuncAssign | DIAMOND runs `--mid-sensitive` (the default mode is designed for >60 % identity, while the parser accepts 25 %). The mode is recorded in `Anno/Func/.<DB>.params`. Existing alignments are kept and recorded as `default-kept`, and chunks still to be aligned for them use the same mode. A recorded mode that differs from the current one triggers realignment. To realign existing databases in mid-sensitive mode, use geneCat's redo option. |
+| KGM/NOG chunk jobs | 32G (was 160G). Mid-sensitive keeps `-b 2 -c 4`; DIAMOND's own figures suggest 16–20 GB, and an OOM-killed chunk is resubmitted with 1.5× memory. Other databases stay at 20G. |
+| `-profileKraken` | **Ported to Kraken2.** Each library is classified once at `--confidence 0`, and the output streams into `krak2_count_tax.pl`. That script recomputes the call at each threshold 0.01–0.3 exactly as kraken2's `ResolveTree` does, from the per-read k-mer hit list and the database's own `taxo.k2d`. Output tables are unchanged (`krak.<t>.cnt.tax`, 7 ranks). Changes: no raw per-read files in scratch; memory is `hash.k2d` + 4 GB (was 20G); an empty table is a valid result. The cohort matrices are merged by the new `mrgKrakTax.pl`; the MetaPhlAn merge script used before cannot read these tables. `secScripts/GC/krak_count_tax.pl` (Kraken 1) is removed. |
+| TaxaTarget | Fixes:<ul><li>**Read names:** kaiju cuts read names at `/`, while TaxaTarget's read extraction keeps `/1`. With sdm's `@read/1` names, every sample therefore ended in "No reads mapped". Reads are now copied to node scratch with names cut at the first space, `/` or `#`.</li><li>**Singletons:** each singleton file gets its own single-end run. Before, a sample with singletons stopped the controller.</li><li>**No protist reads:** "No reads mapped to the marker genes" (exit 1) is accepted as an empty result (`no_reads_mapped.txt`).</li><li>**Missing profile:** an exit 0 without `Taxonomic_report.txt` (TaxaTarget ignores a failed classification) fails the job.</li><li>**Startup check:** the configured script path, the `environment.txt` entries, the kaiju index and `data/phylogroup_total_mgLen.txt` are checked when MF4 starts.</li><li>**Memory:** 6G (was 3G; the authors measured 2 GB).</li></ul> |
+| mOTUs | Memory is the size of the bwa index in `db_mOTU` + 6 GB, at least 16G (was 3G). The 4.1 index takes about 8.3 GB in RAM; the mOTUs maintainers report 16 GB as too little on one machine. |
+| Mosaic loci | `prepare_mosaic_loci.pl` 0.18: `minimap2 -x asm20 -s 40`. The preset's `-s200` needed about 400 aligned bp at 90 % identity and could never reach 80 %. |
+
 ## Found, not fixed
 
-These need a decision or testing on a cluster.
-
-- **DIAMOND read jobs request 7 GB.** `-DiaMem` defaults to 7, and no `-b/-c/--memory-limit` is passed. DIAMOND 2.2.8 blastx defaults to `-b 2.0`; the wiki says memory is "roughly six times" that number in GB, and the align stage budgets `--memory-limit` 16G. Suggest 16G, or pass `--memory-limit`.
-- **Scratch for read DIAMOND is 80G for every database.** For KGM/NOG, geneCat needed 500G with 100M-letter chunks; a read query block is up to 2 G letters. Suggest the `bigFuncDB` sizing.
-- **Long reads in `-profileFunct`.** They get the short-read search (`-k 5`, no `--range-culling`/`--long-reads`), and the parser keeps one function per read, so a 10 kb read counts one gene.
-- **Changing DIAMOND search or parse options never invalidates results.** This covers `-DiaParseEvals`, `-DiaPercID`, `-DiaMinAlignLen`, `-DiaMinFracQueryCov`, `-DiaSensitiveMode` and `-DiaFrameshift`. The stone records no parameters; geneCat got a `.params` record on 10-01.
-- **`--min-orf 25` for short reads.** DIAMOND's own default is no filter for frames under 30 aa and 20 aa below 100 aa; 25 masks reads under 75 nt completely.
-- **geneCat FuncAssign sensitivity.** It runs DIAMOND in default mode (designed for >60 % identity) while the parser accepts 25 %; the eggNOG route runs `--sensitive`.
-- **KGM/NOG chunk memory.** These jobs request 160G, but DIAMOND runs with its defaults (~12–20 GB).
+- **Decoy mapping in competitive modes 1/2.**
+  - *How decoy mapping works:* with `-decoyMapping 1` (the default), every sample gets its own mapping database. That database is the sample's assembly, minus contigs that BLAT matches to a reference over ≥ 80 % of their length at > 95 % identity, plus the reference genomes. Reads are mapped against it, and only alignments on the reference regions are kept. Reads from other community members that resemble a reference then land on their own contigs instead of inflating the reference's coverage and SNPs.
+  - *The problem:* in `mapReadsToRef`, `-competitive2ndmap 1` or `2` takes the combined reference FASTA and skips building the decoy (`if ($map2ndTogether) { combined DB } else { deployMapDB … }`). The run header still prints "Decoy", and `docs/common_workflows.md` shows `-competitive2ndmap 1 -decoyMapping 1`. So these runs map without the protection the user asked for, and nothing says so. Decoy mode with `-competitive2ndmap 0` already maps against all references at once (they all go into the decoy DB), so it is competitive as well.
+  - *Options:*
+    - (a) build the decoy from all references in modes 1/2 as well; `deployMapDB.pl` already takes a reference list. This costs a BLAT of every reference against each sample's assembly, plus an index of assembly + references per sample.
+    - (b) refuse or warn on that combination and fix the documentation.
 - **`-competitive2ndmap 2` adds bowtie2 `-a`.** Secondary alignments get MAPQ 255, the tied primary gets MAPQ 0/1 and is removed by bamFilter, and `samtools depth` skips secondaries. Coverage therefore equals mode 1, at extra cost.
-- **Decoy with competitive modes 1/2.** No decoy DB is built, although `docs/common_workflows.md` shows `-competitive2ndmap 1 -decoyMapping 1`.
-- **`-profileKraken` is hard-wired to Kraken 1** (`kraken --preload --fastq-input`, `kraken-filter`, `kraken-translate`). MF4 installs Kraken2 and a `.k2d` database, so every job fails on a standard install.
-- **TaxaTarget.** "No reads mapped" exits 1, so samples without protist hits are resubmitted on every pass.
-- **Mosaic loci.** `-x asm20` implies `-s200`. At 90 % identity that needs about 400 aligned bp, and 80 % never passes, so the 0.80–0.95 outgroup window is largely unreachable. Consider `-s 40` after `-x`.
+- **Changing DIAMOND search or parse options never invalidates read-based results.** This covers `-DiaParseEvals`, `-DiaPercID`, `-DiaMinAlignLen`, `-DiaMinFracQueryCov`, `-DiaSensitiveMode` and `-DiaFrameshift`.
+- **`--min-orf 25` for short reads.** DIAMOND's own default is no filter for frames under 30 aa and 20 aa below 100 aa; 25 masks reads under 75 nt completely.
 - **bcftools (`Mods/SNP.pm`).** `-X ont/pacbio-ccs` comes after `--min-BQ 30` and resets it to 5 for long reads.
 - **mmseqs linclust** (catalogue) matches both strands; CD-HIT is sense-only.
 - **FOAM hmmsearch** has no `-Z`, so `-E 1e-5` is applied per chunk.
-- **mOTUs and TaxaTarget** request 3G; measure before relying on it.
+- **TaxaTarget's database can no longer be downloaded.** `obj.umiacs.umd.edu/taxatarget/data.zip` returns 403, and the tool is unmaintained (last commit 2022). Its issue #3 (missing `phylogroup_total_mgLen.txt` in `data.zip`) is open.
 - **Lower priority:**
   - `getMapStats` parses only the first bowtie2 summary.
   - minimap2 above 8 Gbases builds a multi-part index.
   - `-mapUnmapped` dies in `seedUnzip2tmp`.
-  - The read group ID is the sample name for every library.
+  - The read group ID is the sample name for every library, and `PL` is ILLUMINA for AVITI/454.
   - The mapper and samtools both run `N` threads in an `N`-core job.
   - The CD-HIT `-M` exceeds its job.
   - `decluterGC.pl` always rebuilds its mmseqs DB.
   - The MMseqs2 branch of `runDiamond` was unreachable and broken (`fident` is 0–1; `--compressed` does not gzip `.m8`). It was removed with the mate change.
+  - `-DiaPercID` takes integers only.

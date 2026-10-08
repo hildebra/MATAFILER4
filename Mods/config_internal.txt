@@ -28,7 +28,8 @@ MAGpipe	perl [MFLRDir]/secScripts/MGS.pl
 fastHdChkENA	perl [MFLRDir]/secScripts/composition/checkFQhds4ENA.pl
 cLSUSSU_scr	perl [MFLRDir]/secScripts/miTag/catchLSUSSU.pl
 lotusLCA_cLSU_scr	[MFLRDir]/secScripts/miTag/lotus_LCA_blast3.pl
-krakCnts_scr	[MFLRDir]/secScripts/GC/krak_count_tax.pl
+krakCnts_scr	perl [MFLRDir]/secScripts/composition/krak2_count_tax.pl
+mrgKrak_scr	perl [MFLRDir]/secScripts/composition/mrgKrakTax.pl
 genelength_scr	perl [MFLRDir]/secScripts/assemblies/geneLengthFasta.pl
 secCogBin_scr	perl [MFLRDir]/secScripts/functions/parseBlastFunct2.pl
 prepVFDB_scr	perl [MFLRDir]/secScripts/functions/prepVFDB.pl
@@ -99,6 +100,7 @@ metPhl2Merge	merge_metaphlan_tables.py	env:MF4checkm2
 kraken2	kraken2
 hostile	hostile
 hostileDB	[DBDir]/hostile/	#installer.sh downloads it to DBDir (default $MF4DIR/data/DBs/)
+#-profileTaxaTarget: set the full path, <TaxaTarget dir>/run_pipeline_scripts/run_protist_pipeline_fda.py (MF4 reads environment.txt next to it)
 TaxaTarget	python run_protist_pipeline_fda.py
 motus2	motus	env:MF4motus
 #kaijuDir	[BINDir]/kaiju/bin/

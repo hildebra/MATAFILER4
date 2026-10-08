@@ -246,7 +246,11 @@ sub createConsSNPandSVs;
 #       DIAMOND searches both mates of a pair in one run (interleaved), so pairs count
 #       twice whatever the read names; MetaPhlAn maps mates unpaired (--nreads = reads)
 #       and requests memory for its bowtie2 index.
-my $MATFILER_ver = 4.47;
+#4.48: 8.10.26: -profileKraken runs Kraken2 (one confidence-0 run per library, the threshold
+#       series recomputed from the k-mer hits); long reads in -profileFunct are searched with
+#       DIAMOND --long-reads and assigned per query range; DIAMOND read jobs request 16 GB;
+#       TaxaTarget accepts samples without protist reads; mOTUs/TaxaTarget memory requests.
+my $MATFILER_ver = 4.48;
 my $matafWorkflowActive = 0;
 my $matafWorkflowStage = 'startup';
 my $matafHeartbeatPath = '';
@@ -501,6 +505,7 @@ my @grandDeps; #used for loop2completion , collects dependencies
 #profiler / human filtering preps
 my $krakDeps = prepKraken();
 prepMetaphlan();
+prepTaxaTarget();
 
 
 if ($runOptions{to} > @samples){
@@ -3663,12 +3668,13 @@ sub postprocess{
 		if( $progStats{KrakTaxFailCnts}){
 			print "$progStats{KrakTaxFailCnts} samples with incomplete KrakenTax\n";} 
 		else {print "All samples have assigned Kraken Taxonomy\n";
-			my $mergeTblScript = getProgPaths("metPhl2Merge");#"/g/bork3/home/hildebra/bin/metaphlan2/utils/merge_metaphlan_tables.py";
-			opendir D, $dir_KrakFind; my @krkF = grep {/0.*/ && -d $dir_KrakFind.$_} readdir(D); closedir D;
+			#per-sample "lineage<TAB>reads" tables (not MetaPhlAn profiles): merged by mrgKrakTax.pl
+			my $mergeTblScript = getProgPaths("mrgKrak_scr");
+			opendir D, $dir_KrakFind; my @krkF = grep {/^0.*/ && -d $dir_KrakFind.$_} readdir(D); closedir D;
 			my $mrgCmd = "";
 			foreach my $kf (@krkF){
 				#$kf =~ m/krak\.(.*)\.cnt\.tax/; my $thr = $1;# die $thr."  $kf\n";
-				$mrgCmd .= "$mergeTblScript $dir_KrakFind/$kf/*.krak.txt > $dir_KrakFind/Krak.$kf.mat\n";
+				$mrgCmd .= "$mergeTblScript .$kf.krak.txt $dir_KrakFind/Krak.$kf.mat $dir_KrakFind/$kf/*.krak.txt\n";
 			}
 			#die $mrgCmd."\n$dir_KrakFind\n";
 			if ($mrgCmd ne "") {
@@ -5690,6 +5696,8 @@ sub runDiamond(){
 	die "runDiamond: unequal numbers of mate files for $curSmpl\n" if (@mates1 != @mates2);
 	my @queries = ((map { [1, $mates1[$_], $mates2[$_]] } 0 .. $#mates1),
 		(map { [0, $_] } @{$RdLibs{0} || []}), (map { [3, $_] } @{$RdLibs{3} || []}));
+	#long reads (ONT/PacBio) hold several genes each
+	my %longReadFile = map { ($_->{files}{single} || '') => 1 } grep { $_->{is_long} } @{$libraries || []};
 
 	my $clnCmd="";my $jobN2="";
 	#die;
@@ -5728,8 +5736,12 @@ sub runDiamond(){
 		for (my $ii=0;$ii<@queries;$ii++){
 			my ($kk, @rds) = @{$queries[$ii]};
 			my $outF = "$tmpPdb/DiaAssignment.sub.$shrtDB.$kk.$ii";
+			#long reads: DIAMOND keeps the best hits of every query range (--long-reads = --range-culling
+			#--top 10, and -F 15 unless -DiaFrameshift is set), and the parser assigns each range of the read
+			my $isLong = $kk == 0 && $longReadFile{$rds[0]};
+			my $hitOpts = $isLong ? "--long-reads " : "$minOrf-k 5 ";
 			#--comp-based-stats 0
-			my $diaSearch = "$diaBin blastx $diaOfmt2 --masking 0 --comp-based-stats 0 --compress 1 --quiet -t $tmpPdb $minOrf-d $CLrefDBD$refDB.db -k 5 -e $searchEval -o $outF $sensBlast -p $ncore";
+			my $diaSearch = "$diaBin blastx $diaOfmt2 --masking 0 --comp-based-stats 0 --compress 1 --quiet -t $tmpPdb $hitOpts-d $CLrefDBD$refDB.db -e $searchEval -o $outF $sensBlast -p $ncore";
 			if ($kk == 1){ #mate pair: one run, queries from stdin
 				$cmd .= "$interleaveScr $rds[0] $rds[1] | $diaSearch\n";
 			} else {
@@ -5742,6 +5754,10 @@ sub runDiamond(){
 				my $readCount = 2;
 				$cmd .= "zcat $outF.gz | awk '{print \$0 \"\\tMF4:read_count=$readCount\"}' | $pigzBin -c > $outF.counted.gz\n";
 				$cmd .= "mv $outF.counted.gz $outF.gz\n";
+			}
+			if ($curDB ne 'ABR' && $isLong) { #the parser splits these reads' hits by query range
+				$cmd .= "zcat $outF.gz | awk '{print \$0 \"\\tMF4:ranges=1\"}' | $pigzBin -c > $outF.ranges.gz\n";
+				$cmd .= "mv $outF.ranges.gz $outF.gz\n";
 			}
 			push(@collect,$outF.".gz");
 		}
@@ -7671,7 +7687,11 @@ sub mOTU2Mapping{
 	my $previousTmpSpace = $QSBoptHR->{tmpSpace};
 	$QSBoptHR->{tmpSpace} =
 		int(($map{$curSmpl}{inputFileSizeMB} * 4) / 1024) + 15 ."G";
-	my ($jobN2,$tmpCmd) = qsubSystem($logDir."mOTU2_prof.sh",$cmd,$Ncore,"3G",$jobN,$deps,"",1,[],$QSBoptHR);
+	#bwa mem holds the mOTUs index in memory (bwt+sa+pac, ~8.3 GB for DB 4.1), next to the motus Python process
+	my $indexBytes = 0;
+	$indexBytes += (-s $_ || 0) for ($DBdir ne "" ? glob("$DBdir/db_mOTU/*.bwt $DBdir/db_mOTU/*.sa $DBdir/db_mOTU/*.pac") : ());
+	my $motuMem = int($indexBytes / 1024**3) + 6; $motuMem = 16 if ($motuMem < 16);
+	my ($jobN2,$tmpCmd) = qsubSystem($logDir."mOTU2_prof.sh",$cmd,$Ncore,"${motuMem}G",$jobN,$deps,"",1,[],$QSBoptHR);
 	$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	$jobN  = $jobN2;
 	return $jobN;
@@ -7709,6 +7729,10 @@ sub prepKraken(){
 	return "" if (keys %DBname == 0);
 	foreach my $kk (keys %DBname ){
 		if (!-d "$oriKrakDir$kk"){die "can't find kraken db $oriKrakDir$kk\n";}
+	}
+	#-profileKraken runs kraken2 and reads the database taxonomy (taxo.k2d)
+	if ($MFopt{DoKraken} && !(-s "$oriKrakDir$MFopt{globalKraTaxkDB}/hash.k2d" && -s "$oriKrakDir$MFopt{globalKraTaxkDB}/taxo.k2d")){
+		die "-krakenDB $MFopt{globalKraTaxkDB}: $oriKrakDir$MFopt{globalKraTaxkDB} is not a Kraken2 database (hash.k2d, taxo.k2d)\n";
 	}
 	return "";
 }
@@ -7868,60 +7892,38 @@ sub krakenTaxEst(){
 	return $jobd if (-d $outD && -e $krakStone);
 	my $numCore = $MFopt{krakenCores};
 	my @thrs = (0.01,0.02,0.04,0.06,0.1,0.2,0.3);
-	my $cmd = "mkdir -p $outD\nrm -rf $tmpD\nmkdir -p $tmpD\n";
-	my $it =0;
+	my $cmd = "mkdir -p $outD\n";
 	my $curDB = "$MFglobal{krakenDBDirGlobal}/$MFopt{globalKraTaxkDB}";
+	my $krk2Bin = getProgPaths("kraken2");
+	my $krakCnts = getProgPaths("krakCnts_scr");
 
-	my $krkBin = "";my $krak1 = 1;
-	$krkBin = getProgPaths("kraken") if ($krak1);
-
-	#die $curDB."\n";
-	#paired read tax assign
+	#Kraken2 has no kraken-filter: every library is classified once at confidence 0, and
+	#krak2_count_tax.pl recomputes the call at each confidence threshold from the per-read
+	#k-mer hits and the database taxonomy, as kraken2 itself would (per-read output on stdout)
+	my @runs;
 	for (my $i=0;$i<@{$pairs};$i++){
 		my $r1 = $pairs->[$i]{files}{r1}; my $r2 = $pairs->[$i]{files}{r2};
-		$cmd .= "$krkBin --paired --preload --threads $numCore --fastq-input  --db $curDB  $r1 $r2 >$tmpD/rawKrak.$it.out\n";
-		for (my $j=0;$j< @thrs;$j++){
-			$cmd .= "$krkBin-filter --db $curDB  --threshold $thrs[$j] $tmpD/rawKrak.$it.out | $krkBin-translate --mpa-format --db $curDB > $tmpD/krak_$thrs[$j]"."_$it.out\n";
-		}
-		$it++;
+		my $gzFlag = $r1 =~ m/\.gz$/ ? "--gzip-compressed " : "";
+		push @runs, "$krk2Bin --db $curDB --threads $numCore --confidence 0 --paired $gzFlag$r1 $r2";
 	}
-	$cmd .= "\n\n";
-	#single read tax assign
 	for (my $i=0;$i<@pas;$i++){
-		my $rs = $pas[$i]; 
-		$cmd .= "$krkBin --preload --threads $numCore --fastq-input  --db $curDB  $rs >$tmpD/rawKrak.$it.out\n";
-		#$cmd .= " | tee ";#$krkBin-filter --db $curDB  --threshold 0.01 | $krkBin-translate --mpa-format --db $curDB > $tmpD/krak$it.out\n";
-		for (my $j=0;$j< @thrs;$j++){
-			$cmd .= "$krkBin-filter --db $curDB  --threshold $thrs[$j] $tmpD/rawKrak.$it.out | $krkBin-translate --mpa-format --db $curDB > $tmpD/krak_$thrs[$j]"."_$it.out\n";
-		}
-		#overwrites input files
-		$it++;
+		my $gzFlag = $pas[$i] =~ m/\.gz$/ ? "--gzip-compressed " : "";
+		push @runs, "$krk2Bin --db $curDB --threads $numCore --confidence 0 $gzFlag$pas[$i]";
 	}
-	
-	#TODO: 1: make table; 2: copy to outD
-	$cmd .= "\n\n";
-	my $krakCnts1 = getProgPaths("krakCnts_scr");
-	for (my $j=0;$j< @thrs;$j++){
-		$cmd .= "cat $tmpD/krak_$thrs[$j]"."_*.out > $tmpD/allkrak$thrs[$j].out\n";
-		$cmd .= "$krakCnts1 $tmpD/allkrak$thrs[$j].out $outD/krak.$thrs[$j].cnt.tax\n";
-		$cmd .= "[ -s $outD/krak.$thrs[$j].cnt.tax ] || exit 4\n";
-	}
-
+	die "No reads for Kraken2 profiling of $name\n" unless @runs;
+	$cmd .= "{\n".join("", map { "\t$_\n" } @runs)."} | $krakCnts -db $curDB -thresholds ".join(",",@thrs)." -out $outD/krak\n";
+	#a sample without classified reads gives empty (but complete) tables
+	$cmd .= join("", map { "[ -e $outD/krak.$_.cnt.tax ] || exit 4\n" } @thrs);
 	$cmd .= "touch $krakStone\n";
-	$cmd .= "rm -fr $tmpD";
 
 	my $jobName = "_KT$JNUM"; my $tmpCmd;
 	if (!-d $outD || !-e $krakStone){
+		#kraken2 holds hash.k2d in memory; no per-read files are written any more
+		my $dbBytes = (-s "$curDB/hash.k2d") || 0;
+		my $krakMem = $dbBytes > 0 ? int($dbBytes / 1024**3) + 4 : 20;
 		my $previousTmpSpace = $QSBoptHR->{tmpSpace};
-		my $requestedTmpSpace = $HDDspace{kraken};
-		if ($map{$curSmpl}{inputFileSizeMB} > 10000) {
-			# raw classifications plus the translated threshold series coexist in
-			# $tmpD until the final count tables have been validated.
-			$requestedTmpSpace =
-				int(($map{$curSmpl}{inputFileSizeMB} * 6) / 1024) + 30 ."G";
-		}
-		$QSBoptHR->{tmpSpace} = $requestedTmpSpace;
-		($jobName,$tmpCmd) = qsubSystem($logDir."KrkTax.sh",$cmd,$numCore,"20G",$jobName,$jobd.";$krakDeps","",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
+		$QSBoptHR->{tmpSpace} = 0;
+		($jobName,$tmpCmd) = qsubSystem($logDir."KrkTax.sh",$cmd,$numCore,"${krakMem}G",$jobName,$jobd.";$krakDeps","",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
 		$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	}
 	return $jobName;
@@ -9646,30 +9648,84 @@ sub TaxaTarget{
 	my @car1 = map { $_->{files}{r1} } @{$pairs};
 	my @car2 = map { $_->{files}{r2} } @{$pairs};
 	my @sar = @{libraryFiles($libraries, 'single')};
-	die "TaxaTarget requires at least one paired-read library for sample $smp\n" if (!@car1);
-	die "TaxaTarget does not support singleton reads for sample $smp; disable it or provide paired reads only\n" if (@sar);
-	my $taxTBin = getProgPaths("TaxaTarget");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
-	my $taxTarDir = $taxTBin;
-	$taxTarDir =~ s/run_pipeline_scripts\/run_protist_pipeline_fda.py//;
-	$taxTarDir =~ s/python //;
+	die "TaxaTarget: no reads for sample $smp\n" if (!@car1 && !@sar);
+	my $taxTBin = getProgPaths("TaxaTarget");
+	my $envF = taxaTargetDir()."/run_pipeline_scripts/environment.txt";
 	my $sampleOut = "$finOutD/$smp";
 	my $cmd = "mkdir -p $sampleOut $tmpD\n";
-	my @library_outputs;
+	#kaiju cuts read names at the first '/', TaxaTarget's read extraction at ' ' and '#': with sdm's
+	#"@read/1" names no mapped read is ever found again. Reads are copied with names cut at ' ', '/' or '#'
+	my $stage = sub {
+		my ($in, $out) = @_;
+		return "$pigzBin -dc $in | awk 'NR%4==1{sub(/[ \\/#].*\$/,\"\")} {print}' | $pigzBin -c > $out\n";
+	};
+	my @runs; #[output dir, -r (and -r2) arguments]
 	for (my $i=0; $i<@car1; $i++) {
-		my $libraryOut = "$sampleOut/lib$i";
-		push @library_outputs, $libraryOut;
-		$cmd .= "mkdir -p $libraryOut\n";
-		$cmd .= "$taxTBin -r $car1[$i] -r2 $car2[$i] -e $taxTarDir/run_pipeline_scripts/environment.txt --tmp -t $Ncore -o $libraryOut\n";
-		$cmd .= "find $libraryOut -type f -size +0c -print -quit | grep -q .\n";
+		$cmd .= $stage->($car1[$i], "$tmpD/lib$i.1.fq.gz") . $stage->($car2[$i], "$tmpD/lib$i.2.fq.gz");
+		push @runs, ["$sampleOut/lib$i", "-r $tmpD/lib$i.1.fq.gz -r2 $tmpD/lib$i.2.fq.gz"];
 	}
-	$cmd .= "printf '%s\\n' '".join("' '", @library_outputs)."' > $stone\n";
+	for (my $i=0; $i<@sar; $i++) { #singletons: TaxaTarget's single-end mode
+		$cmd .= $stage->($sar[$i], "$tmpD/single$i.fq.gz");
+		push @runs, ["$sampleOut/single$i", "-r $tmpD/single$i.fq.gz"];
+	}
+	for my $run (@runs) {
+		my ($libraryOut, $reads) = @{$run};
+		$cmd .= "rm -rf $libraryOut\nmkdir -p $libraryOut\n";
+		$cmd .= "set +e\n$taxTBin $reads -e $envF --tmp -t $Ncore -o $libraryOut 2> $libraryOut/taxaTarget.log\nstatus=\$?\nset -e\n";
+		$cmd .= "cat $libraryOut/taxaTarget.log >&2\n";
+		#no protist marker-gene reads: TaxaTarget exits 1 with this message, a valid (empty) result
+		$cmd .= "if [ \$status -ne 0 ]; then\n\tgrep -q 'No reads mapped to the marker genes with' $libraryOut/taxaTarget.log || exit \$status\n";
+		$cmd .= "\techo 'no reads mapped to the protist marker genes' > $libraryOut/no_reads_mapped.txt\n";
+		#TaxaTarget exits 0 when its classification step fails (e.g. missing data files): require the report
+		$cmd .= "elif [ ! -s $libraryOut/Taxonomic_report.txt ]; then\n\techo 'TaxaTarget wrote no Taxonomic_report.txt' >&2\n\texit 5\nfi\n";
+	}
+	$cmd .= "rm -rf $tmpD\n";
+	$cmd .= "printf '%s\\n' '".join("' '", map { $_->[0] } @runs)."' > $stone\n";
 	my $jobN = "TT$JNUM";
 
+	#kaiju index + DIAMOND (one 0.5 G-letter block) + taxonomy: ~2 GB measured by the authors
+	my $previousTmpSpace = $QSBoptHR->{tmpSpace};
+	$QSBoptHR->{tmpSpace} = int(($map{$curSmpl}{inputFileSizeMB} * 1.2) / 1024) + 10 ."G";
 	my ($jobN2,$tmpCmd) = qsubSystem($logDir."taxtar.sh",
-			$cmd,$Ncore,"3G",$jobN,$deps,"",1,[],$QSBoptHR);
-			
-	#die $logDir;
+			$cmd,$Ncore,"6G",$jobN,$deps,"",1,[],$QSBoptHR);
+	$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	return $jobN2;
+}
+
+#TaxaTarget install directory, from the configured command (".../run_pipeline_scripts/run_protist_pipeline_fda.py")
+sub taxaTargetDir{
+	my ($script) = getProgPaths("TaxaTarget") =~ m{(\S*run_pipeline_scripts/run_protist_pipeline_fda\.py)};
+	return "" unless defined $script;
+	(my $dir = $script) =~ s{/?run_pipeline_scripts/run_protist_pipeline_fda\.py$}{};
+	return $dir eq "" ? "." : $dir;
+}
+
+#-profileTaxaTarget: the install must be complete, or TaxaTarget reports "no reads mapped" or writes no profile
+sub prepTaxaTarget{
+	return unless ($MFopt{DoTaxaTarget});
+	my $dir = taxaTargetDir();
+	die "-profileTaxaTarget: configure TaxaTarget with the path of <TaxaTarget>/run_pipeline_scripts/run_protist_pipeline_fda.py (now: \""
+		.getProgPaths("TaxaTarget")."\")\n" if ($dir eq "" || $dir eq ".");
+	my $envF = "$dir/run_pipeline_scripts/environment.txt";
+	open my $fh, '<', $envF or die "-profileTaxaTarget: cannot read $envF: $!\n";
+	my %env;
+	while (my $l = <$fh>){
+		next if ($l =~ /^#/ || $l !~ /=/);
+		$l =~ s/[\r\n]+$//; $l =~ s/'//g;
+		my ($k, $v) = split /=/, $l, 2;
+		$env{$k} = $v;
+	}
+	close $fh;
+	my @problems;
+	push @problems, "kaiju ($envF)" unless (defined $env{kaiju} && -e $env{kaiju});
+	push @problems, "diamond ($envF)" unless (defined $env{diamond} && -e $env{diamond});
+	if (!defined $env{taxatarget} || $env{taxatarget} !~ m{/$}){
+		push @problems, "taxatarget directory ending in / ($envF)";
+	} else {
+		push @problems, map { "$env{taxatarget}data/$_" } grep { !-s "$env{taxatarget}data/$_" }
+			qw(marker_geneDB.fasta.kaiju.fmi phylogroup_total_mgLen.txt);
+	}
+	die "-profileTaxaTarget: TaxaTarget install incomplete: ".join(", ", @problems)."\n" if (@problems);
 }
 
 
@@ -11861,7 +11917,7 @@ sub setDefaultMFconfig{
 	$MFopt{reqDiaDB} = "";#,NOG,MOH,ABR,ABRc,ACL,KGM,PTV,PAB";#,ACL,KGM,ABRc,CZy";#"NOG,CZy"; #"NOG,MOH,CZy,ABR,ABRc,ACL,KGM"   #old KGE,KGB
 	$MFopt{diaEVal} = "1e-7"; $MFopt{diaCores} = 12; ; $MFopt{DiaRmRawHits} = 0; $MFopt{diaRunSensitive} = 0;
 	$MFopt{diaFrameshift} = 0; #diamond -F/--frameshift penalty; 0 disables frameshift alignment mode (recommended for long, error-prone reads e.g. ONT/PacBio)
-	$MFopt{diamondMem} = 7; #GB memory to request for diamond jobs (qsub --mem)
+	$MFopt{diamondMem} = 16; #GB memory to request for diamond jobs (qsub --mem); DIAMOND blastx defaults (-b 2, align budget 16G) need about that
 	$MFopt{DiaMinAlignLen} = 20; $MFopt{DiaMinFracQueryCov} = 0.1; $MFopt{DiaPercID} =40;
 
 	#gene prediction related
@@ -12202,7 +12258,7 @@ sub getCmdLineOptions{
 		if $MFopt{SB_env} ne '' && $MFopt{DoMetaBat2} != 2;
 	#die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
 	die "ERROR:: \"-DiaMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
-	$MFopt{diamondMem} = 7 if ($MFopt{diamondMem} <= 0);
+	$MFopt{diamondMem} = 16 if ($MFopt{diamondMem} <= 0);
 	die "ERROR:: -mapper 4 (kma) was removed in MATAFILER 4.47; use 1 (bowtie2), 2 (bwa), 3 (minimap2) or 5 (strobealign)\n"
 		if ($MFopt{MapperProg} == 4);
 	if ($MFopt{MapperMemory} == -1 ){

@@ -64,7 +64,8 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.65; #0.65: marker-gene mmseqs clustering sized to its own job; -ntMatchGC maps with the asm20 preset (no prebuilt .mmi)
+our $version = 0.66; #0.66: FuncAssign DIAMOND --mid-sensitive (mode recorded in .<DB>.params); KGM/NOG chunks 32G
+#0.65: marker-gene mmseqs clustering sized to its own job; -ntMatchGC maps with the asm20 preset (no prebuilt .mmi)
 #0.64: functional stages supervised until done; OOM-killed jobs resubmitted with more memory
 #0.63: smaller catalog chunks for the KEGG/eggNOG diamond searches (-fastaSplitBigDB)
 #0.62: eggNOG-mapper v3 (eggNOG 7), VFDB sets in the default -functDB
@@ -673,6 +674,9 @@ my $mode = "geneCat";
 my $fastaSplits="500M";
 my $fastaSplitsBig="100M"; #chunks for the KEGG/eggNOG searches (bigFuncDB): DIAMOND's temporary files grow with the chunk
 my $funcAligner = "diamond"; #diamond or foldseek
+#DIAMOND mode of the functional searches: the parser accepts hits down to 25% identity, DIAMOND's default mode
+#targets >60%; mid-sensitive covers >40% at a moderate cost (recorded in Anno/Func/.<DB>.params)
+my $funcDiaSensitivity = "mid-sensitive";
 my $curDB_o = ""; #-functDB; empty: $funcDBdefault
 my $funcDBdefault = "KGM,TCDB,CZy,ABRc,VFA,VFB";#NOG,#,ACL"; #"mp3,PTV,KGM,TCDB,CZy,NOG,ABRc,ACL,VFA,VFB" #default databases to use in functional assignments
 my %funcDBoptional = (VFA => 1, VFB => 1); #default databases that are skipped with a note if not installed (an explicit -functDB needs all of its databases)
@@ -3250,15 +3254,23 @@ sub geneCatFunc{
 	#still to be aligned, so all alignments share it. Products without a record (older runs) are kept.
 	my $paramF = "$outD/.${curDB}.params";
 	my @parseKeys = qw(eval percID minBitScore minAlignLen minPercSbjCov minPercQueryCov);
-	my %cur = (aligner => $funcAligner, alnEval => $optsDia{eval}, map { $_ => $optsDia{$_} } @parseKeys);
+	#DIAMOND sensitivity of the alignments. Alignments made before it was recorded (DIAMOND default mode) are kept
+	#and recorded as "default-kept"; a recorded sensitivity that differs from the current one realigns
+	my %cur = (aligner => $funcAligner, alnEval => $optsDia{eval},
+		sensitivity => ($funcAligner eq "diamond" ? $funcDiaSensitivity : "none"),
+		map { $_ => $optsDia{$_} } @parseKeys);
 	my $old = _readFuncParams($paramF);
 	my $reparse = 0;
+	$cur{sensitivity} = 'default-kept' if (!defined($old) && !$optsDia{redo} && -e $geneAssF);
 	if (defined($old) && !$optsDia{redo}){
-		if ($old->{aligner} ne $cur{aligner} || $cur{eval} > $old->{alnEval}){
-			print "$curDB: aligner $old->{aligner} -> $cur{aligner}, alignment e-value $old->{alnEval} -> $cur{eval}: realigning\n";
+		my $oldSens = $old->{sensitivity} // 'default-kept';
+		if ($old->{aligner} ne $cur{aligner} || $cur{eval} > $old->{alnEval}
+				|| ($oldSens ne 'default-kept' && $oldSens ne $cur{sensitivity})){
+			print "$curDB: aligner $old->{aligner} -> $cur{aligner}, alignment e-value $old->{alnEval} -> $cur{eval}, sensitivity $oldSens -> $cur{sensitivity}: realigning\n";
 			$optsDia{redo} = 1;
 		} else {
 			$cur{alnEval} = $old->{alnEval};
+			$cur{sensitivity} = $oldSens; #chunks still to be aligned match the existing ones
 			my @changed = grep { "$old->{$_}" ne "$cur{$_}" } @parseKeys;
 			if (@changed){
 				print "$curDB: ".join(", ", map { "$_ $old->{$_} -> $cur{$_}" } @changed).": re-interpreting the existing alignments\n";
@@ -3268,6 +3280,7 @@ sub geneCatFunc{
 		}
 	}
 	$optsDia{alnEval} = $cur{alnEval}; #diamond/foldseek -e; the parser filters with $optsDia{eval}
+	$optsDia{sensitivity} = $cur{sensitivity}; #diamond sensitivity mode ("default-kept": no flag)
 	#geneAss missing although the marker exists (intermediates deleted): recompute instead of dying in the stone job
 	my $doMatrix = ($optsDia{redo} || !-e $matDone || !-e $geneAssF) ? 1 : 0;
 	_writeFuncParams($paramF,\%cur) if ($doMatrix || !defined($old));

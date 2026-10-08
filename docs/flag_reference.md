@@ -11,7 +11,7 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 
 | Script | Version in referenced source | Role |
 |---|---:|---|
-| `MATAF4.pl` | `4.47` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
+| `MATAF4.pl` | `4.48` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.59` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
 | `strain_within.pl` | `1.60` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
@@ -251,7 +251,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-reProfileFunct` | integer | `0` | stable | Remove and rebuild DIAMOND alignments and parsed profiles. |
 | `-reProfileFuncTogether` | integer | `0` | stable | if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..) |
 | `-DiaCores` | integer | `12` | stable | CPU cores requested for DIAMOND jobs. |
-| `-DiaMem` | integer | `7` | stable | memory in GB for diamond alignment jobs |
+| `-DiaMem` | integer | `16` | stable | memory in GB for diamond alignment jobs |
 | `-DiaParseEvals` | string | `"1e-7"` | stable | evalues at which to accept hits to func database |
 | `-DiaSensitiveMode` | integer | `0` | stable | Enable DIAMOND sensitive mode. |
 | `-DiaFrameshift` | integer | `0` | stable | diamond -F frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment |
@@ -290,10 +290,10 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-protalIgnoreErrors` | integer | `1` | stable | 1: leave out reads Protal cannot take (other kinds of reads, BAM input) with a warning, skip samples without usable reads; 0: stop instead |
 | `-protalBatchSize` | integer | `0` | stable | Local samples per Protal batch map job; 0: all local samples of a pass in one job. |
 | `-profileMOTU2` | integer | `0` | stable | Run mOTUs taxonomic profiling. |
-| `-profileKraken` | integer | `0` | stable | Run Kraken taxonomic profiling. |
-| `-profileTaxaTarget` | integer | `0` | stable | Run target-taxon profiling. |
+| `-profileKraken` | integer | `0` | stable | Run Kraken2 taxonomic profiling: read counts per lineage at confidence 0.01, 0.02, 0.04, 0.06, 0.1, 0.2 and 0.3 (one kraken2 run per library). |
+| `-profileTaxaTarget` | integer | `0` | stable | Run TaxaTarget protist profiling (paired and single-end libraries). Configure `TaxaTarget` with the full path of `run_pipeline_scripts/run_protist_pipeline_fda.py`; MF4 checks its `environment.txt`, kaiju index and `data/phylogroup_total_mgLen.txt` at startup. |
 | `-estGenoSize` | integer | `0` | stable | estimate average size of genomes in data |
-| `-krakenDB` | string | `""` | stable | "virusDB";#= "minikraken_2015/"; |
+| `-krakenDB` | string | `""` | stable | Kraken2 database for `-profileKraken`: a directory under the configured `Kraken2_path_DB` holding hash.k2d and taxo.k2d. |
 
 ## D2s distance
 

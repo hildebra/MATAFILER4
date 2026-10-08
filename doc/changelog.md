@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-10-08 — Mapper audit: decisions (MATAF4 4.48, geneCat 0.66)
+
+- Details: "Decided and implemented" in [`docs/audits/2026-10-08/mappers.md`](../docs/audits/2026-10-08/mappers.md).
+- **`-profileKraken` runs Kraken2.** It was still calling Kraken 1, and every job failed on a standard install.
+  - Each library is classified once at confidence 0. The new `krak2_count_tax.pl` recomputes the 0.01–0.3 threshold series exactly as kraken2 would, from the k-mer hits and the database's `taxo.k2d`. The count tables keep their format.
+  - Memory: `hash.k2d` + 4 GB.
+  - No raw per-read files in scratch.
+  - Cohort matrices come from the new `mrgKrakTax.pl`.
+- **Long reads in `-profileFunct`** are searched with DIAMOND `--long-reads` (range culling) and assigned per query range, so every gene on a read counts. Before, a 10 kb read counted only its best hit.
+- **TaxaTarget.**
+  - Read names are passed without `/1` and `/2`. kaiju and TaxaTarget's extractor disagreed on them, so samples ended in "No reads mapped".
+  - Singletons get their own single-end run, instead of stopping the controller.
+  - A sample without protist reads is a valid empty result, and a run without `Taxonomic_report.txt` fails.
+  - The install is checked at startup.
+  - Memory 6G.
+- **Memory requests.** DIAMOND read jobs 16G (`-DiaMem`, was 7); mOTUs the index size + 6 GB, at least 16G (was 3G); geneCat KGM/NOG chunks 32G (was 160G).
+- **geneCat FuncAssign runs DIAMOND `--mid-sensitive`.** The mode is recorded per database. Existing alignments are kept and recorded as `default-kept`; a changed mode realigns.
+- **Mosaic loci:** minimap2 `-s 40` after `-x asm20`. Genes under ~400 bp and outgroups below 85 % identity could not align before (`prepare_mosaic_loci.pl` 0.18).
+- **Mate hits in the parser** are ranked by combined bit score.
+- Tests: `t/audit_2026_10_08_decisions.t`.
+
 ## 2026-10-08 — Mapper and search-tool options audit
 
 - `MATAF4.pl` 4.47, `geneCat.pl` 0.65. Full report: [`docs/audits/2026-10-08/mappers.md`](../docs/audits/2026-10-08/mappers.md).

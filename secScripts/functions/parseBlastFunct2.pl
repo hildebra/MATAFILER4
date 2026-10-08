@@ -368,9 +368,14 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 			chomp $line; 
 			my @splX = split (/\t/,$line);
 			my $readCount = $queryType eq 'merged' ? 2 : 1;
-			# New MATAF4 searches append provenance from the actual input library.
-			if (@splX && $splX[-1] =~ /^MF4:read_count=([12])$/) {
-				$readCount = $1;
+			my $ranges = 0;
+			# New MATAF4 searches append provenance from the actual input library:
+			# MF4:read_count=2 (merged pair), MF4:ranges=1 (long read: assign each query range)
+			while (@splX && $splX[-1] =~ /^MF4:(\w+)=(\S+)$/) {
+				my ($tag, $value) = ($1, $2);
+				if ($tag eq 'read_count' && $value =~ /^[12]$/) { $readCount = $value; }
+				elsif ($tag eq 'ranges' && $value eq '1') { $ranges = 1; }
+				else { die "Unknown hit tag $splX[-1]: $line\n"; }
 				pop @splX;
 			}
 			die "Gene queries cannot represent merged read pairs\n" if $queryType eq 'genes' && $readCount != 1;
@@ -382,7 +387,7 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 				die "Invalid BLAST field count: $line\n";
 			}
 			my $mate = $queryType eq 'reads' && $readCount == 1 && $splX[0] =~ /\/([12])$/ ? $1 : 0;
-			push @splX, {read_count => $readCount, mate => $mate, qlen => $qlenCol, slen => $slenCol};
+			push @splX, {read_count => $readCount, mate => $mate, qlen => $qlenCol, slen => $slenCol, ranges => $ranges};
 			my $query = $splX[0];
 			$query =~ s/\/[12]$// if $mate;
 			#print $query."\n";
@@ -416,10 +421,14 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 
 		#die @blRes."\n";
 		#print "Read Assignments..\n";
-		for (my $i=0; $i<@aminBLE ; $i++){
-			main($whX,$aminBLE[$i],$aminPID[$i],$i,$reportEggMapp);
+		#a long read is assigned once per query range (one gene each); every other query once
+		my @assignments = (@{$whX} && $whX->[0][-1]{ranges}) ? queryRanges($whX) : ($whX);
+		for my $hitsOfAssignment (@assignments){
+			for (my $i=0; $i<@aminBLE ; $i++){
+				main($hitsOfAssignment,$aminBLE[$i],$aminPID[$i],$i,$reportEggMapp);
+			}
 		}
-		undef @wordv1;undef @wordv2; #undef @blRes; 
+		undef @wordv1;undef @wordv2; #undef @blRes;
 		if (@splNext) {
 			if ($splNext[-1]{mate} == 2) { push @wordv2, \@splNext; }
 			else { push @wordv1, \@splNext; }
@@ -1269,6 +1278,27 @@ sub readCzySubs($){#cazy_substrate_info.txt
 	return \%ret;
 }
 
+#hits of one long read (DIAMOND --long-reads keeps the best hits of each query range), split into
+#query ranges: a hit joins the range of a better-scoring hit if they overlap by at least half of the
+#shorter one. Returns one hit list per range, in read order; hits keep their DIAMOND order.
+sub queryRanges{
+	my ($hits) = @_;
+	my @order = sort { $hits->[$b][11] <=> $hits->[$a][11] || $a <=> $b } 0 .. $#{$hits};
+	my @ranges; #[start, end, [hit indices]]
+	for my $i (@order){
+		my ($s, $e) = sort { $a <=> $b } @{$hits->[$i]}[6, 7];
+		my $range;
+		for my $r (@ranges){
+			my $overlap = ($e < $r->[1] ? $e : $r->[1]) - ($s > $r->[0] ? $s : $r->[0]) + 1;
+			my $shorter = ($e - $s < $r->[1] - $r->[0] ? $e - $s : $r->[1] - $r->[0]) + 1;
+			if ($overlap > 0 && $overlap >= 0.5 * $shorter){ $range = $r; last; }
+		}
+		if ($range){ push @{$range->[2]}, $i; }
+		else { push @ranges, [$s, $e, [$i]]; }
+	}
+	return map { [ @{$hits}[ sort { $a <=> $b } @{$_->[2]} ] ] } sort { $a->[0] <=> $b->[0] } @ranges;
+}
+
 sub combineBlasts($ $){
 	my ($wh1, $wh2) = @_;
 	return $wh1 unless @$wh2;
@@ -1293,7 +1323,8 @@ sub combineBlasts($ $){
 		else { push @$hit, $metadata; }
 		push @ret, $hit;
 	}
-	return \@ret;
+	#best (combined) bit score first, as DIAMOND ranks single-read hits; ties stay in subject order
+	return [ sort { $b->[11] <=> $a->[11] || $a->[1] cmp $b->[1] } @ret ];
 }
 
 sub bestBlHit($){

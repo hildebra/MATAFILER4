@@ -342,10 +342,15 @@ sub assignFuncPerGene{
 	$otpsHR->{minPercSbjCov} = 0.3 if (!exists($otpsHR->{minPercSbjCov}));
 	$otpsHR->{minPercQueryCov} = 0 if (!exists($otpsHR->{minPercQueryCov})); #0 = subject coverage only
 	$otpsHR->{bacNOG} = 0 if (!exists($otpsHR->{bacNOG}));
+	#DIAMOND sensitivity mode; "default-kept" (alignments made in DIAMOND's default mode) and "none" pass no flag
+	my $diaSens = $otpsHR->{sensitivity} // "mid-sensitive";
+	my $diaSensFlag = $diaSens =~ /^(?:fast|mid-sensitive|sensitive|more-sensitive|very-sensitive|ultra-sensitive)$/ ? "--$diaSens " : "";
 
 	print "$query assigned to $curDB ($fastaSplits splits, $ncore cores)\n" if ($calcDia || $interpDia);
+	#DIAMOND default and mid-sensitive modes use -b 2 -c 4 (~12-20 GB); KGM/NOG get some headroom
+	#(was 160G); an OOM-killed chunk is resubmitted with 1.5x memory
 	my $mem = 20;
-	$mem = 160 if ($shrtDB eq "NOG" || $shrtDB eq "KGM");
+	$mem = 32 if ($shrtDB eq "NOG" || $shrtDB eq "KGM");
 	#node-local scratch per chunk job (diamond -t temp files)
 	my $tmpSpaceG = bigFuncDB($shrtDB) ? 500 : 250;
 
@@ -397,7 +402,7 @@ sub assignFuncPerGene{
 				(my $outTmp = $outF) =~ s/\.gz$/.tmp.\$\$.gz/; #job-unique: a duplicate submission can't write into the same file
 				#tabular output + qlen/slen, so query and subject coverage are computed per hit
 				$cmd .= "$diaBin blastp --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen ";
-				$cmd .= "--compress 1 --quiet -t $locChunk -d $DBpath$refDB.db -q $subFls[$i] -e $otpsHR->{alnEval} -o $outTmp -p $ncore\n";#--sensitive
+				$cmd .= "--compress 1 --quiet $diaSensFlag-t $locChunk -d $DBpath$refDB.db -q $subFls[$i] -e $otpsHR->{alnEval} -o $outTmp -p $ncore\n";
 				$cmd .= "mv $outTmp $outF\n";
 				#--memory-limit ". int($mem *0.8-0.8) ."
 				#$cmd = "$diaBin blastp -f tab --compress 1 --sensitive --quiet -d $eggDB.db -q $subFls[$i] -k 3 -e 0.001 -o $outF -p $ncore\n";

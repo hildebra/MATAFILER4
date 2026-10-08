@@ -198,7 +198,7 @@ use File::Path qw(make_path remove_tree);
 use Digest::MD5 ();
 use Cwd ();
 use Mods::FuncTools qw(assignFuncPerGene calc_modules bigFuncDB);
-our ($cdhID, $funcAligner, $qsubDir, $minEVal, $minPerID, $minPercSbjCov, $minPercQueryCov,
+our ($cdhID, $funcAligner, $funcDiaSensitivity, $qsubDir, $minEVal, $minPerID, $minPercSbjCov, $minPercQueryCov,
 	$fastaSplits, $fastaSplitsBig, $redoFunc, $minAlLeng, $minBitSc, %funcDBcutoffs, $rmBin, $pigzBin, $sedBin,
 	$rareBin, $countMatrixF, $rtkFunDelims, $touchBin, $GLBtmp, $tmpDir, $GCdir, $curDB_o, @Q);
 sub qsubSystem { push @Q, [@_]; return ("J" . scalar(@Q), ""); }
@@ -218,7 +218,7 @@ touchf(map { "$dbdir$_" } qw(euk_pro.pep euk_pro.pep.db.dmnd euk_pro.pep.length)
 {
 	no strict 'refs';
 	${"GCProbe::$_->[0]"} = $_->[1] for (
-		[cdhID => 95], [funcAligner => 'diamond'], [minEVal => 1e-8], [minPerID => 25], [minPercSbjCov => 0.5],
+		[cdhID => 95], [funcAligner => 'diamond'], [funcDiaSensitivity => 'mid-sensitive'], [minEVal => 1e-8], [minPerID => 25], [minPercSbjCov => 0.5],
 		[minPercQueryCov => 0.8], [fastaSplits => 2], [fastaSplitsBig => 4], [redoFunc => 0], [minAlLeng => 30], [minBitSc => 45],
 		[rmBin => 'rm'], [pigzBin => 'pigz'], [sedBin => 'sed'], [rareBin => 'rtk'], [countMatrixF => 'Matrix.mat'],
 		[rtkFunDelims => ''], [touchBin => 'touch'], [curDB_o => 'KGM']);
@@ -241,6 +241,7 @@ subtest 'FuncAssign: changed cutoffs or aligner recompute only what they affect'
 	is(scalar(@GCProbe::Q) + scalar(@FQ), 0, 'finished database without a parameter record (older run): kept, nothing submitted');
 	is_deeply([@{record()}{qw(aligner alnEval eval percID minBitScore minAlignLen minPercSbjCov minPercQueryCov)}],
 		['diamond', 1e-8, 1e-8, 25, 45, 30, 0.5, 0.8], 'record written for the current settings');
+	is(record()->{sensitivity}, 'default-kept', 'older alignments are recorded as made in DIAMOND default mode (2026-10-08)');
 	$GCProbe::minPerID = 40;
 	runGCF();
 	ok(!-e "$outD/DIAass_KGM.srt.gzgeneAss.gz" && -e "$outD/DIAass_KGM.srt.gz", 'changed identity cutoff: assignments removed, alignments kept');
@@ -260,6 +261,7 @@ subtest 'FuncAssign: changed cutoffs or aligner recompute only what they affect'
 	runGCF();
 	my ($chunk) = chunkJobs();
 	like($chunk->[1], qr/ -e 1e-08 /, 'chunks still to align use the recorded (looser) alignment e-value');
+	unlike($chunk->[1], qr/--mid-sensitive/, '... and the recorded DIAMOND mode of the existing chunks');
 	like(colJob()->[1], qr/-eval 1e-10\n/, 'and the parser the current one');
 	like($chunk->[1], qr/-o \S+\.tmp\.\$\$\.gz /, 'chunk output written under a job-unique temporary name');
 	touchf(@products);
@@ -268,7 +270,14 @@ subtest 'FuncAssign: changed cutoffs or aligner recompute only what they affect'
 	is(scalar(chunkJobs()), 4, 'less strict e-value: realigned');
 	ok(!-e "$outD/DIAass_KGM.srt.gz", 'old alignments removed');
 	like((chunkJobs())[0][1], qr/ -e 1e-06 /, 'with the new e-value');
-	is_deeply([@{record()}{qw(alnEval eval)}], [1e-6, 1e-6], 'record follows the new alignment e-value');
+	like((chunkJobs())[0][1], qr/ --mid-sensitive /, 'realigned in DIAMOND mid-sensitive mode');
+	is_deeply([@{record()}{qw(alnEval eval sensitivity)}], [1e-6, 1e-6, 'mid-sensitive'], 'record follows the new alignment e-value and mode');
+	touchf(@products);
+	$GCProbe::funcDiaSensitivity = 'sensitive';
+	runGCF();
+	is(scalar(chunkJobs()), 4, 'changed DIAMOND mode: realigned');
+	$GCProbe::funcDiaSensitivity = 'mid-sensitive';
+	runGCF(); #back to mid-sensitive: realigned again
 	touchf(@products);
 	$GCProbe::funcAligner = 'foldseek';
 	touchf("$dbdir/euk_pro.pep.DB3di");

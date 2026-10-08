@@ -137,7 +137,7 @@ perl $MF4DIR/MATAF4.pl -map $MAP -assembleMG 2 -assemblCores 12 -assemblyKmers "
 
  console output:
 ```
-        This is MATAFILER4 v4.47
+        This is MATAFILER4 v4.48
         Using qsubsystem: slurm
         Using qsubsystem: slurm
         /projects/data/results/mf4_test1/LOGandSUB/qsub.log
