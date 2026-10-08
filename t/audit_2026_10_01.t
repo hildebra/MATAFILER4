@@ -155,7 +155,8 @@ subtest 'read-based search: finished databases, temp dirs, ABR tables' => sub {
 	is_deeply([map { $_->[4] } @jobs], ['_DKGM1', '_DPKGM1'], '-rmRawDiamondHits: a parsed database is not realigned');
 	my ($search) = grep { $_->[4] eq '_DKGM1' } @jobs;
 	like($search->[1], qr{-t \Q$tmp\E/scr/KGM/}, 'per-database temp dir');
-	like($search->[1], qr/LC_ALL=C sort/, 'hits are sorted in byte order');
+	#since 2026-10-08 the mates go through one DIAMOND run and no sort is needed to bring them together
+	like($search->[1], qr/interleaveMates_scr r1\.fq\.gz r2\.fq\.gz \| prog_diamond blastx/, 'both mates go through one search run');
 	@jobs = ();
 	my $ab = "$tmp/rdabr/diamond/"; make_path($ab);
 	main::runDiamond($ab, "$tmp/db/", "$tmp/scr", 'dep', 'ABR');

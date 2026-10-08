@@ -235,7 +235,7 @@ like($submissions[0][1],qr/filtered\.lib1\.s\.fq\.gz/,'mixed-library filtered ou
 # Exercise complete mapping command construction and its runtime branches.
 my $ref="$tmp/reference.fa"; write_file($ref,">ref\nACGT\n");
 write_file("$ref.idx.1.bt2",'index');
-%MFcontstants=(bwt2IdxFileSuffix=>'.idx',kmaIdxFileSuffix=>'.kma');
+%MFcontstants=(bwt2IdxFileSuffix=>'.idx');
 my $lib=newReadLibrary(id=>'alignment',sample=>'sample',scope=>'primary',phase=>'staged',technology=>'PB',
     label=>'same',files=>{single=>"$tmp/nonexistent.fq.gz",bam=>$alignment},metadata=>{alignment_cache_required=>0});
 sub mapping {
@@ -249,7 +249,7 @@ sub mapping {
         glbTmp=>"$tmp/mapwork",outDir=>join(',',map {"$tmp/mapfinal$_"} 0..$#refs)},'stage');
     return $params->{mappingCommand};
 }
-for my $mapper (1,3,4,5) {
+for my $mapper (1,2,3,5) {
     my $mapping=mapping($mapper,$ref,[$lib]);
     is(run_command($mapping),0,"mapper $mapper complete streaming command executes");
     is(read_file("$tmp/mapwork/sample0.iniAlignment.bam"),$fastq,"mapper $mapper receives raw reads through stdin");
@@ -299,6 +299,50 @@ is(run_command($mapping),0,'Bowtie2 handles same-labelled FASTQ and alignment li
 is(read_file("$tmp/mapwork/sample0.iniAlignment.bam"),$fastq.$fastq,'mixed-library mapping retains both inputs');
 is(extraction_count(),$count+1,'mixed-library mapping extracts only the alignment library');
 unlink "$tmp/mapwork/sample0.iniAlignment.bam";
+
+# Audit 2026-10-08 (docs/audits/2026-10-08/mappers.md): every mapper maps each reference
+# of a list against that reference alone; bwa maps single-end reads.
+for my $mapper (2,3,5) {
+    $mapping=mapping($mapper,"$ref,$ref2",[$plain]);
+    unlike($mapping,qr/\Q$ref,$ref2\E/,"mapper $mapper never gets the reference list");
+    like($mapping,qr/ \Q$ref\E .*\n(?s:.*) \Q$ref2\E /,"mapper $mapper maps against each reference FASTA in turn");
+    is(run_command($mapping),0,"mapper $mapper multi-reference command executes");
+    is(read_file("$tmp/mapwork/sample1.iniAlignment.bam"),$fastq,"mapper $mapper fills the second reference's output");
+    unlink "$tmp/mapwork/sample0.iniAlignment.bam", "$tmp/mapwork/sample1.iniAlignment.bam";
+}
+$mapping=mapping(2,$ref,[$plain]);
+like($mapping,qr/ mem -t 1 +-R RG \Q$ref\E \Q$tmp\E\/plain\.fq/,'bwa maps a single-end library');
+like(getAlgnCmdBase(3,1,'PB',0,''),qr/-x map-hifi/,'PacBio (HiFi) reads use the map-hifi preset');
+{
+    make_path("$tmp/gzA","$tmp/gzB");
+    system("printf '>a\\nACGT\\n' | gzip -c > $tmp/gzA/ref.fa.gz") == 0 or die;
+    system("printf '>b\\nACGT\\n' | gzip -c > $tmp/gzB/ref.fa.gz") == 0 or die;
+    $mapping=mapping(5,"$tmp/gzA/ref.fa.gz,$tmp/gzB/ref.fa.gz",[$plain]);
+    like($mapping,qr{gzip -dc \Q$tmp\E/gzA/ref\.fa\.gz > \Q$tmp\E/mapnode_map/+ref\.fa\n},'first compressed reference is staged');
+    like($mapping,qr{gzip -dc \Q$tmp\E/gzB/ref\.fa\.gz > \Q$tmp\E/mapnode_map/+1\.ref\.fa\n},'a second reference with the same file name gets its own staged copy');
+    is(run_command($mapping),0,'compressed multi-reference command executes');
+    unlink "$tmp/mapwork/sample0.iniAlignment.bam", "$tmp/mapwork/sample1.iniAlignment.bam";
+}
+{
+    my $large="$tmp/large.fa"; write_file($large,">l\nACGT\n");
+    write_file("$large.idx.$_.bt2l",'index') for qw(1 2 3 4 rev.1 rev.2);
+    $mapping=mapping(1,$large,[$plain]);
+    is(run_command($mapping),0,'a bowtie2 index written as .bt2l is accepted without -mapperLargeRef');
+    unlink "$tmp/mapwork/sample0.iniAlignment.bam";
+    my $none="$tmp/noindex.fa"; write_file($none,">n\nACGT\n");
+    is(run_command(mapping(1,$none,[$plain])),23,'a missing bowtie2 index still stops the job');
+}
+{
+    local %make2ndMapDecoy=(Lib=>$ref,regions=>[],region_lcs=>[]);
+    $MFopt{MapperProg}=3; $MFopt{MapperMemory}=1; $MFopt{mapModeTogether}=0; $MFopt{DoMapModeDecoy}=1; $MFopt{largeMapperDB}=0;
+    my (undef,undef,$params)=mapReadsToRef({smplName=>'sample0',assGrp=>'group',is2ndMap=>0,cramAlig=>0,submNow=>0,unalDir=>'',
+        mapCores=>1,mapSupport=>0,sbj=>$ref,libraries=>[$plain],glbMapDir=>"$tmp/map0",nodeTmp=>"$tmp/mapnode",readTec=>'PB',
+        glbTmp=>"$tmp/mapwork",outDir=>"$tmp/mapfinal0"},'stage');
+    my $decoy=$params->{mappingCommand};
+    like($decoy,qr{decoyDB\.fna 1 sample0 \S+ 3\n},'the decoy database is indexed for the mapper of the sample');
+    like($decoy,qr{ -a \Q$tmp\E/mapnode_map/+reference\.decoyDB\.fna },'minimap2 maps against the decoy database');
+    $MFopt{DoMapModeDecoy}=0;
+}
 
 # Real bundled SDM: verify the actual generated cleaner command, with no cache.
 SKIP: {

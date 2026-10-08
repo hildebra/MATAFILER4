@@ -111,7 +111,7 @@ MATAFILER4 uses three primary phases to analyse metagenomes:
 	-kmerPerGene [0|1]			1: report kmer frequencies per gene (Default: 0)
 
 # mapping
-	-mapper [1|2|3|4]				1: bowtie2, 2:bwa, 3: minimap2, 4:kma, 5:strobealign -1:auto (bowtie2 short, minimap2 long reads), -2:auto(strobealign short, minimap2 long). (Default: -1)
+	-mapper [1|2|3|5]				1: bowtie2, 2:bwa, 3: minimap2, 5:strobealign -1:auto (bowtie2 short, minimap2 long reads), -2:auto(strobealign short, minimap2 long). (Default: -1)
 	-mappingCores [#]				cores # used for mapping
 	-mappingMem [#]				memory # used for mapping bwa/bwt2 in GB (Default: auto (-1))
 	-mapSortMem  [#]			memory # used for samtools sort in GB (Default: auto (-1))

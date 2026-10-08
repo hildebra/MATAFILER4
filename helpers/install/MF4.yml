@@ -57,7 +57,6 @@ dependencies:
 #  - blast>=2.13.0
   # Hostile 2.0.x requires Bowtie2 2.5.4 exactly.
   - bioconda::bowtie2=2.5.4
-#  - kma>=1.4.9
 #  - bwa=0.7.17
   - bioconda::cd-hit=4.8.1
 #  - wfmash>=0.6

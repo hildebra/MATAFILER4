@@ -90,7 +90,9 @@ sub lambdaBl{
 			$postCmd .= "mv $DB $DB1;mv $DB.lba.gz $DB1.lba.gz;\n";
 			#$postCmd .= "ln -s $DB1 $DB;mv $DB.lba.gz $DB1.lba.gz;\n";
 		}
-		$cmdIdx .=  "$lambdaBin mkindexn -t $BlastCores -d $DB ;\n";
+		#lambda 3.1 mkindexn accepts -t 2..1000 only
+		my $idxThreads = $BlastCores < 2 ? 2 : $BlastCores;
+		$cmdIdx .=  "$lambdaBin mkindexn -t $idxThreads -d $DB ;\n";
 		$cmdIdx .= "$pigzBin -p $BlastCores $DB.lba;\n";
 		$cmdIdx .= $postCmd;
 		$DB = $DB1;

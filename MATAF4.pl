@@ -240,7 +240,13 @@ sub createConsSNPandSVs;
 #       downloadQueue and defer dependent sample processing until validation.
 #4.46: 16.8.26: resolve archive tools through getProgPaths and propagate the
 #       selected MATAFILER config into acquisition jobs.
-my $MATFILER_ver = 4.46;
+#4.47: 8.10.26: mapper options audit. Secondary mapping with bwa/minimap2/strobealign
+#       maps each reference (or the decoy/combined DB) instead of the whole reference list;
+#       bwa maps single-end reads; kma (-mapper 4) removed; PacBio HiFi uses map-hifi.
+#       DIAMOND searches both mates of a pair in one run (interleaved), so pairs count
+#       twice whatever the read names; MetaPhlAn maps mates unpaired (--nreads = reads)
+#       and requests memory for its bowtie2 index.
+my $MATFILER_ver = 4.47;
 my $matafWorkflowActive = 0;
 my $matafWorkflowStage = 'startup';
 my $matafHeartbeatPath = '';
@@ -5670,24 +5676,38 @@ sub runDiamond(){
 	
 	my $secCogBin = getProgPaths("secCogBin_scr");
 	my $diaBin = getProgPaths("diamond");
-	my $mmseqs2Bin = getProgPaths("mmseqs2");
-	my $searchMode = 1;
-	
+	my $interleaveScr = getProgPaths("interleaveMates_scr");
+	my $searchMode = 1; #DIAMOND
+
 	my %RdLibs = getRdLibraries($libraries,$mergedLibrary);
-	
+
 	die "No reads found for sample $outD in runDiamond sub\n" if (scalar(keys(%RdLibs)) == 0);
-	
+	#queries: single-read files (key 0), merged pairs (key 3), and mate pairs (key 2 = R1, key 1 = R2).
+	#DIAMOND has no paired mode, so both mates of a pair go through one run, interleaved on stdin
+	#and named <read>/1, <read>/2. DIAMOND writes hits in query order: the hits of a pair stay
+	#together, ranked as DIAMOND ranked them, whatever the read names looked like
+	my @mates1 = @{$RdLibs{2} || []}; my @mates2 = @{$RdLibs{1} || []};
+	die "runDiamond: unequal numbers of mate files for $curSmpl\n" if (@mates1 != @mates2);
+	my @queries = ((map { [1, $mates1[$_], $mates2[$_]] } 0 .. $#mates1),
+		(map { [0, $_] } @{$RdLibs{0} || []}), (map { [3, $_] } @{$RdLibs{3} || []}));
+
 	my $clnCmd="";my $jobN2="";
 	#die;
 	system "mkdir -p $outD" unless (-d $outD && -d $tmpP);
 	#my $diaOfmt = "tab";#old
 	#$Query,$Subject,$id,$AlLen,$mistmatches,$gapOpe,$qstart,$qend,$sstart,$send,$eval,$bitSc
 	my $diaOfmt = "-f 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore "; #diamond
-	
-	my $mmsOfmt = "--format-output query,target,fident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"; #mmseqs
+
 	my $ncore = $MFopt{diaCores}; my $sensBlast = "";
 	$sensBlast = " --sensitive " if ($MFopt{diaRunSensitive});
 	$sensBlast .= " -F $MFopt{diaFrameshift} " if ($MFopt{diaFrameshift});
+	#an explicit --min-orf also applies in frameshift mode, where DIAMOND itself uses no ORF filter
+	my $minOrf = $MFopt{diaFrameshift} ? "" : "--min-orf 25 ";
+	#the search keeps hits up to the most permissive -DiaParseEvals cutoff (at least 1e-4)
+	my $searchEval = "1e-4";
+	for my $ev (split /,/, $MFopt{diaEVal}) {
+		$searchEval = $ev if ($ev =~ /^\d*\.?\d+(?:[eE][-+]?\d+)?$/ && $ev > $searchEval);
+	}
 	foreach my $curDB (split /,/,$curDB_o){
 		$progStats{$curDB}{DiaDBSearchCompl} = 0 unless (defined($progStats{$curDB}{DiaDBSearchCompl}));
 		$progStats{$curDB}{DiaDBSearchIncomplete} = 0 unless (defined($progStats{$curDB}{DiaDBSearchIncomplete}));
@@ -5703,56 +5723,42 @@ sub runDiamond(){
 		my $diaOfmt2 = $diaOfmt;
 		$diaOfmt2 .= " qseq" if ($getQSeq); #in case, I want to get the query sequence (matching)
 		#run actual diamond
-		my @collect = (); my @collectSingl=();
+		my @collect = ();
 		my $cmd ="mkdir -p $tmpPdb\n";
-		foreach my $kk (sort {$a <=> $b} keys %RdLibs){
-			my @rds = @{$RdLibs{$kk}};
-			for (my $ii=0;$ii<@rds;$ii++){
-				my $query = $rds[$ii];	
-				my $outF = "$tmpPdb/DiaAssignment.sub.$shrtDB.$kk.$ii";
-				#my $tmpcnt = `grep -c '^>' $query`; chomp $tmpcnt
-				#--comp-based-stats 0
-				if ($searchMode==1){
-				$cmd .= "$diaBin blastx $diaOfmt2 --masking 0 --comp-based-stats 0 --compress 1 --quiet -t $tmpPdb --min-orf 25 -d $CLrefDBD$refDB.db -q $query -k 5 -e 1e-4 -o $outF $sensBlast -p $ncore\n"; #
-				} elsif ($searchMode==2){
-				$cmd .= "$mmseqs2Bin easy-search $query $CLrefDBD$refDB.db.mms2 $outF.gz $tmpPdb --threads $ncore --max-accept 500 --compressed 1 -s 4 $mmsOfmt \n";
-				}
-				
-				# The parser's reads mode already counts ordinary reads once. Only
-				# merged pairs need an override; avoid rewriting every hit file.
-				if ($curDB ne 'ABR' && $kk == 3) {
-					my $readCount = 2;
-					$cmd .= "zcat $outF.gz | awk '{print \$0 \"\\tMF4:read_count=$readCount\"}' | $pigzBin -c > $outF.counted.gz\n";
-					$cmd .= "mv $outF.counted.gz $outF.gz\n";
-				}
-				#$cmd .= "$diaBin view -a $outF.tmp -o $outF -f tab\nrm $outF.tmp.daa\n";
-				if ($kk==0 || $kk == 3){#single or ext fragments, doesn't need to be sorted
-					push(@collectSingl,$outF.".gz");
-				} else {
-					push(@collect,$outF.".gz");
-				}
+		for (my $ii=0;$ii<@queries;$ii++){
+			my ($kk, @rds) = @{$queries[$ii]};
+			my $outF = "$tmpPdb/DiaAssignment.sub.$shrtDB.$kk.$ii";
+			#--comp-based-stats 0
+			my $diaSearch = "$diaBin blastx $diaOfmt2 --masking 0 --comp-based-stats 0 --compress 1 --quiet -t $tmpPdb $minOrf-d $CLrefDBD$refDB.db -k 5 -e $searchEval -o $outF $sensBlast -p $ncore";
+			if ($kk == 1){ #mate pair: one run, queries from stdin
+				$cmd .= "$interleaveScr $rds[0] $rds[1] | $diaSearch\n";
+			} else {
+				$cmd .= "$diaSearch -q $rds[0]\n";
 			}
+
+			# The parser's reads mode already counts ordinary reads once. Only
+			# merged pairs need an override; avoid rewriting every hit file.
+			if ($curDB ne 'ABR' && $kk == 3) {
+				my $readCount = 2;
+				$cmd .= "zcat $outF.gz | awk '{print \$0 \"\\tMF4:read_count=$readCount\"}' | $pigzBin -c > $outF.counted.gz\n";
+				$cmd .= "mv $outF.counted.gz $outF.gz\n";
+			}
+			push(@collect,$outF.".gz");
 		}
-		
+
 		#die "$cmd\n";
-		
+
 		my $out = $outD."dia.$shrtDB.blast";
 		my $outgz = "$out.srt.gz";
 		my $provenanceStone = "$outgz.read-counts-v1.stone";
 		# Old merged-library search files lack multiplicity; regenerate those hits.
 		my $needProvenance = $curDB ne 'ABR' && exists($RdLibs{3}) && !-e $provenanceStone;
 		#die "$outgz\n";
-		#unzip, sort, zip
+		#every query's hits are already contiguous (DIAMOND output order), so the gzip members are just joined
 		if (@collect) {
-			#byte order: the parser groups hits by query, locale collation can interleave different reads' lines
-			$cmd .= "zcat ".join( " ",@collect) ." | LC_ALL=C sort -t\$'\\t' -k1 -T $tmpPdb | $pigzBin --stdout -p $ncore > $outgz \n";
-			$cmd .= "rm -f ". join( " ",@collect) . "\n";
+			$cmd .= "cat ".join( " ",@collect) ." > $outgz\nrm -f " . join( " ",@collect) ."\n";
 		} else {
 			$cmd .= "$pigzBin -c </dev/null > $outgz\n";
-		}
-		if (@collectSingl >= 1){
-			#append on gzip, can be done with gzip
-			$cmd .= "cat ".join( " ",@collectSingl) ." >> $outgz\nrm -f " . join( " ",@collectSingl) ."\n"; #$out.srt
 		}
 		$cmd .= "touch $provenanceStone\n" if $curDB ne 'ABR';
 		$cmd.= "rm -r $tmpPdb\n";
@@ -6005,9 +6011,10 @@ sub scaffoldCtgs{
 		$refCtgs .= "$oldDir/scaffolds.fasta";
 		$clnCmd .="\ngzip $spadesDir/*";
 		$clnCmd .="\ngunzip $refCtgs";
-		($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx("$refCtgs",$Ncore,0,$MFopt{MapperProg});#$Ncore);
+		#the mate libraries below are always mapped with bowtie2, whatever -mapper says
+		($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx("$refCtgs",$Ncore,0,1);#$Ncore);
 	} elsif (!-e $bwtIdx){
-		($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx("$refCtgs",$Ncore,0,$MFopt{MapperProg});
+		($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx("$refCtgs",$Ncore,0,1);
 	}
 	
 	
@@ -6021,7 +6028,7 @@ sub scaffoldCtgs{
 		my $tmpOut = "$tmpD/tmpMateAlign$cnt.bam";
 		my $tmpBAM = "$tmpD/tmpMateAlign$cnt.srt.bam";
 		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx -X $MFconfig{mateInsertLength} -1 $pairs->[$i]{files}{r1} -2 $pairs->[$i]{files}{r2} | $smtBin view -b -F 4 - > $tmpOut\n";
-		$algCmd .= "$smtBin sort -@ $Ncore -T kk -O bam -o $tmpBAM $tmpOut; $smtBin index $tmpBAM\n";
+		$algCmd .= "$smtBin sort -@ $Ncore -T $tmpD/srt$cnt -O bam -o $tmpBAM $tmpOut; $smtBin index $tmpBAM\n";
 		#$algCmd .= "$novosrtBin --ram 50G -o $tmpBAM -i $tmpOut \n";
 		$algCmd .= "rm $tmpOut\n\n";
 		my $metadata = $pairs->[$i]{metadata} || {};
@@ -6036,7 +6043,7 @@ sub scaffoldCtgs{
 		my $tmpOut = "$tmpD/tmpMateAlign$cnt.bam";
 		my $tmpBAM = "$tmpD/tmpMateAlign$cnt.srt.bam";
 		$algCmd .= "$bwt2Bin --no-unal --end-to-end -p $Ncore -x $bwtIdx  -1 $externalPairs->[$i]{files}{r1} -2 $externalPairs->[$i]{files}{r2} | $smtBin view -b -F 4 - > $tmpOut\n";
-		$algCmd .= "$smtBin sort -@ $Ncore -T kk -O bam -o $tmpBAM $tmpOut; $smtBin index $tmpBAM\n";
+		$algCmd .= "$smtBin sort -@ $Ncore -T $tmpD/srt$cnt -O bam -o $tmpBAM $tmpOut; $smtBin index $tmpBAM\n";
 		#$algCmd .= "$novosrtBin --ram 50G -o $tmpBAM -i $tmpOut \n";
 		$algCmd .= "rm $tmpOut\n\n";
 		my $metadata = $externalPairs->[$i]{metadata} || {};
@@ -7005,9 +7012,9 @@ sub alignmentMappingCommand {
 	my $source = $library->{files}{bam};
 	my $cramRef = $library->{metadata}{cram_reference} || '';
 	my $paired = ($library->{metadata}{alignment_layout} || '') eq 'paired';
-	my $stdin = $mapper == 4 ? '--' : '-';
+	my $stdin = '-';
 	die "Alignment streaming is not supported for mapper $mapper\n"
-		unless $mapper == 1 || $mapper == 3 || $mapper == 4 || $mapper == 5;
+		unless $mapper == 1 || $mapper == 2 || $mapper == 3 || $mapper == 5;
 	my $stream = 'mf4_alignment_input='._shell_quote($stdin)."\n"
 		.alignmentFastqCommand($source, $cramRef, $samtools, 0, '-', $paired).' | '.$command;
 	my $cmd = "(\nset -eo pipefail\n";
@@ -7980,20 +7987,12 @@ sub getAlgnCmdBase{
 		if ($readTec eq "ONT"){
 			$algCmdBase .= " -x map-ont" ; #use nanopore optimzed for now..
 		} elsif ($readTec eq "PB"){
-			$algCmdBase .= " -x map-pb" ; #use nanopore optimzed for now..
+			$algCmdBase .= " -x map-hifi" ; #PB reads are HiFi throughout MF4 (metaMDBG --in-hifi, bcftools pacbio-ccs); map-pb is the CLR preset
 		} else {
 			print"Warning: Minimap2 used for short reads; not recommended\n";
 			$algCmdBase .= " -x sr" ;
 		}
 		#$algCmdBase .= " --sam-hit-only " unless ($unaligned); #deactivated as important for counting
-	} elsif ($MapperProg==4){ #kma 
-		my $kmaBin = getProgPaths("kma");
-		my $consID = 0.95;my $minPhred = 15; my $minMapQ = 20; my $minQueryCov = 0.2; #-bc $minPhred -tmp $nodeTmp/${baseN}.kmatmp/
-		$algCmdBase = "$kmaBin -nc -na -nf -sam 4 -apm p -mrc $minQueryCov -mq $minMapQ -bcd 1 -ID $consID -ref_fsa -t $NcoreL   ";
-		if ($readTec eq "ONT"){$algCmdBase .= " -bcNano -ont " ;
-		} elsif ($readTec eq "PB"){$algCmdBase .= " -mint3  " ;
-		} else {$algCmdBase .= " -mint2 " ;
-		}
 	} elsif ($MapperProg==5){ #strobealign
 		my $stroBin = getProgPaths("strobealign");
 		$algCmdBase = "$stroBin -t $NcoreL --no-progress ";
@@ -8046,7 +8045,6 @@ sub getMapProgNm{
 	if ($MapperProg==1){$mapProgNm = "bowtie2";
 	}elsif ($MapperProg==2){$mapProgNm = "bwa";
 	}elsif ($MapperProg==3){$mapProgNm = "minimap2";
-	}elsif ($MapperProg==4){$mapProgNm = "kma";
 	}elsif ($MapperProg==5){$mapProgNm = "strobealign";
 	} else {print "coult not recognize mapper $MapperProg!!\n";
 	}
@@ -8195,7 +8193,6 @@ sub mapReadsToRef{
 	if ($supportRds){for (my $ii=0;$ii<@outNms; $ii++){$outNms[$ii] = $outNms[$ii].$supTag;}}
 	#die "$baseN @outNms\n";
 	my @tmpOut22 = ($tmpOut."/$baseN.iniAlignment.bam");
-	my @tmpOutxtra = ($nodeTmp."/$baseN.iniAlignment.xtra");
 	#global value overwrites local value
 	if ($doCram){$doCram = $MFopt{doBam2Cram};}
 	#calculate total input size (to get handle on req disk space
@@ -8213,27 +8210,32 @@ sub mapReadsToRef{
 	$decoyModeActive=1 if ( $MFopt{DoMapModeDecoy} && exists($make2ndMapDecoy{Lib}) && -e $make2ndMapDecoy{Lib});
 	my $isSorted = 0;		$isSorted=1 if (@pa1==1 && @paS==0 && $MFopt{DoMapModeDecoy} && $decoyModeActive); #several libraries are joined with samtools cat (unsorted)
 #	die $REF;
+	#one reference FASTA per mapping target ($REF can be a ","-separated list); bowtie2 uses @bwtIdxs instead
+	my @mapFastas = split /,/,$REF;
 	if (!$decoyModeActive){
-		@bwtIdxs = split /,/,$REF;
-		for (my $kk=0;$kk<@bwtIdxs;$kk++){
-			$bwtIdxs[$kk] .= $MFcontstants{bwt2IdxFileSuffix};
-		}
+		@bwtIdxs = map { $_.$MFcontstants{bwt2IdxFileSuffix} } @mapFastas;
 	}
 	my $referencePreparationCommand = "";
-	if ($REF =~ /\.gz$/) {
-		my $compressedReference = $REF;
-		my $stagedReference = "$nodeTmp/".basename($compressedReference);
-		$stagedReference =~ s/\.gz$//;
-		$referencePreparationCommand .= "mkdir -p $nodeTmp\n";
+	my %stagedNames;
+	for my $kk (0 .. $#mapFastas) {
+		my $compressedReference = $mapFastas[$kk];
+		next unless ($compressedReference =~ /\.gz$/);
+		my $stagedName = basename($compressedReference);
+		$stagedName =~ s/\.gz$//;
+		$stagedName = "$kk.$stagedName" if ($stagedNames{$stagedName}++);
+		my $stagedReference = "$nodeTmp/$stagedName";
+		$referencePreparationCommand .= "mkdir -p $nodeTmp\n" if ($referencePreparationCommand eq "");
 		$referencePreparationCommand .= "$pigzBin -dc $compressedReference > $stagedReference\n";
 		$referencePreparationCommand .= "test -s $stagedReference\n";
-		if ($mapperProgLoc == 2 || $mapperProgLoc == 4) {
+		if ($mapperProgLoc == 2) {
 			$referencePreparationCommand .= "for f in $compressedReference.*; do [ -e \"\$f\" ] || continue; "
 				."suffix=\${f#$compressedReference}; cp \"\$f\" \"$stagedReference\$suffix\"; done\n";
 		}
-		$REF = $stagedReference;
+		$mapFastas[$kk] = $stagedReference;
 	}
-	$params{mappingReference} = $REF;
+	$REF = join(",",@mapFastas);
+	#with several references, bamDepth uses the reference of each output
+	$params{mappingReference} = $REF if (@mapFastas == 1);
 	$params{referencePreparationCommand} = $referencePreparationCommand;
 	$params{mappingInputSizeMB} = $mappingInputSizeMB;
 	#die "$isSorted\n";
@@ -8243,8 +8245,7 @@ sub mapReadsToRef{
 
 	my $outputExistsNEx = 0;
 	for (my $k=0;$k<@outNms;$k++){
-		$tmpOut22[$k] = $tmpOut."/$outNms[$k].iniAlignment.bam"; 
-		$tmpOutxtra[$k] = $tmpOut."/$outNms[$k].iniAlignment.xtra"; 
+		$tmpOut22[$k] = $tmpOut."/$outNms[$k].iniAlignment.bam";
 		#print "$tmpOut22[$k]\n";
 	}
 	for (my $k=0;$k<@outNms;$k++){
@@ -8306,10 +8307,11 @@ sub mapReadsToRef{
 		if ($map2ndTogether){
 			$bwtIdx = "$map2ndTogRefDB{DB}";
 		} else {
-			my $decoyDBscr = getProgPaths("decoyDB_scr"); 
-			$algCmd.= "\n$decoyDBscr $REF $make2ndMapDecoy{Lib} $bwtIdx $NcoreL $outName $finalD\n";
+			my $decoyDBscr = getProgPaths("decoyDB_scr");
+			$algCmd.= "\n$decoyDBscr $REF $make2ndMapDecoy{Lib} $bwtIdx $NcoreL $outName $finalD $mapperProgLoc\n";
 		}
 		#die "$algCmd\n";
+		@mapFastas = ($bwtIdx); #the combined (competitive) or decoy FASTA
 		$bwtIdx .= $MFcontstants{bwt2IdxFileSuffix};
 		
 		$xtraSamSteps1 = "$smtBin sort -@ $NcoreL -T $nodeTmp./$baseN.srt - |";
@@ -8317,8 +8319,9 @@ sub mapReadsToRef{
 		@reg_lcs =  @{$make2ndMapDecoy{region_lcs}};
 		@bwtIdxs = ($bwtIdx);
 	} 
-	my $bwt2DBsuf = "bt2"; $bwt2DBsuf = "bt2l" if ($MFopt{largeMapperDB}); 
-	$algCmd .= "if [ ! -e $bwtIdxs[0].1.$bwt2DBsuf ] ;then\n	echo \"Could not find assembly bowtie2 index: $bwtIdxs[0].1.$bwt2DBsuf\";\n	exit 23;\nfi\n" if ($mapperProgLoc == 1); #needs to exit on error
+	#bowtie2-build writes .bt2l by itself for references over 4 Gbp, whatever -mapperLargeRef says
+	$algCmd .= join("", map { "if [ ! -e $_.1.bt2 ] && [ ! -e $_.1.bt2l ] ;then\n	echo \"Could not find bowtie2 index: $_.1.bt2(l)\";\n	exit 23;\nfi\n" } @bwtIdxs)
+		if ($mapperProgLoc == 1); #needs to exit on error
 
 	
 	my $cntAli=0; my $totlRefs = scalar(@bwtIdxs);
@@ -8427,20 +8430,17 @@ sub mapReadsToRef{
 				}
 				$libraryCmd .= " $rgStr "; #--rg-id $rgID -> this is handled by getRgStr()
 			} elsif ($mapperProgLoc==2){ #bwa
-				die "single end mapping not implemented for bwa\n" if (!$usePairs);
-				$libraryCmd .= $algCmdBase." -R $rgStr $REF " . join(",",@accR1). " " . join(",",@accR2); ##$pa1[$i]." ".$pa2[$i];
+				$libraryCmd .= $algCmdBase." -R $rgStr $mapFastas[$kk] ";
+				if ($usePairs){ $libraryCmd .= join(",",@accR1). " " . join(",",@accR2); ##$pa1[$i]." ".$pa2[$i];
+				} else { $libraryCmd .= join(" ",@accRS);
+				}
 			} elsif ($mapperProgLoc==3){ #minimap2
-				$libraryCmd .= $algCmdBase.($stream ? ' $mf4_alignment_index' : '')." -R $rgStr -a $REF ";#$MFcontstants{mini2IdxFileSuffix} ";
+				$libraryCmd .= $algCmdBase.($stream ? ' $mf4_alignment_index' : '')." -R $rgStr -a $mapFastas[$kk] ";
 				if ($usePairs){ $libraryCmd .= join(",",@accR1) . " " . join(",",@accR2); #$pa1[$i]." ".$pa2[$i]
 				} else { $libraryCmd .= join(" ",@accRS)
 				}
-			}elsif ($mapperProgLoc==4){ #kma
-				$libraryCmd .= "$algCmdBase -t_db $REF$MFcontstants{kmaIdxFileSuffix}  ";
-				if ($usePairs) {$libraryCmd .= " -ipe " . join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] "
-				else {$libraryCmd .= " -i " . join(" ",@accRS) ;}
-				$libraryCmd .= " -o $tmpOutxtra[0].$kk.$i "; #one prefix per reference and library
 			}elsif ($mapperProgLoc==5){ #strobealign
-				$libraryCmd .= "$algCmdBase $rgStr $REF  ";
+				$libraryCmd .= "$algCmdBase $rgStr $mapFastas[$kk]  ";
 				if ($usePairs) {$libraryCmd .=  join(",",@accR1). " " . join(",",@accR2) ;}# $pa1[$i] $pa2[$i] "
 				else {$libraryCmd .= " " . join(" ",@accRS) ;}
 			}
@@ -8457,7 +8457,7 @@ sub mapReadsToRef{
 			my ($algCmdPost,$subBamAR) = alignPostTreat(\%postTreat, $i, $kk);
 			$libraryCmd .= $algCmdPost;
 			$algCmd .= $stream
-				? alignmentMappingCommand($singleLibraries[$iS], $mapperProgLoc, $REF,
+				? alignmentMappingCommand($singleLibraries[$iS], $mapperProgLoc, $mapFastas[$kk],
 					$smtBin, "$nodeTmp/alignment.$iS.fq.gz", $libraryCmd)
 				: $libraryCmd;
 			@subBams = @{$subBamAR};
@@ -9528,7 +9528,10 @@ sub prepMetaphlan{
 	my $metaPhlBin = getProgPaths("metPhl2");
 	print "Checking metaphlan version .. ";
 	my $vstr = "";
-	$vstr = `$metaPhlBin --version 2>/dev/null`;
+	#bash: the env: prologue of getProgPaths uses [[ ]], which /bin/sh (dash) lacks
+	if (open(my $vfh, '-|', 'bash', '-c', "$metaPhlBin --version 2>/dev/null")) {
+		local $/; $vstr = <$vfh> // ""; close($vfh);
+	}
 	die "Could not determine the MetaPhlAn version from: $vstr\n"
 		unless ($vstr =~ m/version\s+([\.\d]+)/i);
 	my $MPver = $1;
@@ -9596,11 +9599,13 @@ sub metphlanMapping{
 	my $qsubFile = $logDir."metaPhl$MFopt{DoMetaPhlan}.sh";
 	
 	#$ bowtie2 --sam-no-hd --sam-no-sq --no-unal --very-sensitive -S metagenome.sam -x metaphlan_databases/mpa_vJan21_CHOCOPhlAnSGB_202103  -U metagenome.fastq
-	my $cmd = "mkdir -p $tmpD\n$bwt2Bin --sam-no-hd --sam-no-sq --no-unal --very-sensitive -S $sam -p $Ncore -x $mpDB ";
-	$cmd .= "-1 $inF1 -2 $inF2 " if (@car1 > 0 );;
-	$cmd .= "-U $inFS " if (@sar > 0);
-	$cmd .= "\n\n";
-	$cmd .=  "sleep 1\nreadN=\$(grep -v 'Warning:' $qsubFile.etxt |  head -n1 | cut -f1 -d' ')\necho \$readN\n";
+	#MetaPhlAn ignores pairing and counts every SAM record as a read: map all mates unpaired, as
+	#MetaPhlAn does itself, so that bowtie2's read total (--nreads) counts reads and not pairs
+	my $bt2Log = "$tmpD/metph2.bowtie2.log";
+	my $cmd = "mkdir -p $tmpD\n";
+	$cmd .= "if ! $bwt2Bin --sam-no-hd --sam-no-sq --no-unal --very-sensitive -S $sam -p $Ncore -x $mpDB -U ".join(",",@car1,@car2,@sar)." 2> $bt2Log; then\n";
+	$cmd .= "\tcat $bt2Log >&2\n\texit 1\nfi\ncat $bt2Log >&2\n";
+	$cmd .= "readN=\$(grep -m1 ' reads; of these:' $bt2Log | cut -f1 -d' ')\necho \$readN\n";
 	$cmd .= "$metPhlaBin $sam --input_type sam $taxinfo $vXparams $finOut\n";
 	#$cmd .= "$metPhlaBin $sam --input_type sam $taxinfo $v2params $v3params $finOut_noV\n" if (!$MFopt{DoMetaPhlan3});
 	#$cmd .= "$metPhlaBin $sam --input_type sam --ignore_bacteria --ignore_archaea $taxinfo $v2params $v3params $finOut_noVB\n";
@@ -9617,8 +9622,12 @@ sub metphlanMapping{
 	my $previousTmpSpace = $QSBoptHR->{tmpSpace};
 	$QSBoptHR->{tmpSpace} =
 		int(($map{$curSmpl}{inputFileSizeMB} * 6) / 1024) + 15 ."G";
+	#bowtie2 holds the whole MetaPhlAn index in memory (about 33 GB for vJan25)
+	my $mpIndexBytes = 0;
+	$mpIndexBytes += (-s $_ || 0) for (glob("$mpDB.*.bt2l"), glob("$mpDB.*.bt2"));
+	my $mpMem = $mpIndexBytes > 0 ? int($mpIndexBytes / 1024**3) + 6 : 40;
 	my ($jobN2,$tmpCmd) = qsubSystem($qsubFile,
-			$cmd,$Ncore,"3G",$jobN,$deps,"",1,[],$QSBoptHR);
+			$cmd,$Ncore,"${mpMem}G",$jobN,$deps,"",1,[],$QSBoptHR);
 	$QSBoptHR->{tmpSpace} = $previousTmpSpace;
 	$jobN  = $jobN2;
 	return $jobN;
@@ -11716,8 +11725,6 @@ sub setDefaultMFconfig{
 
 	#MFcontstants: object to store essential paths/file endings
 	$MFcontstants{bwt2IdxFileSuffix} = ".bw2";
-	$MFcontstants{mini2IdxFileSuffix} = ".mmi";
-	$MFcontstants{kmaIdxFileSuffix} = ".kma";
 	#locking samples during processing (so no other jobs are started in these)
 	$MFcontstants{DefaultSampleLock} = "MGTK.locked";
 
@@ -11785,7 +11792,7 @@ sub setDefaultMFconfig{
 	$MFopt{scaffoldMinSize} = 500; #all scaffolds/contigs below this will be dropped
 
 	#mapping related options
-	$MFopt{MapperProg} = -1;#1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign, -1=auto (bowtie2 short, minimap2 long reads)
+	$MFopt{MapperProg} = -1;#1=bowtie2, 2=bwa, 3=minimap2, 5=strobealign, -1=auto (bowtie2 short, minimap2 long reads); 4 (kma) removed in 4.47
 	$MFopt{map2Assembly} = 1; $MFopt{mapSortMemGb} = -1; #in Gb
 	$MFopt{SaveUnalignedReads} =0; $MFopt{useUnmapped} = 0;
 	$MFopt{mapSupport2Assembly} = 1;
@@ -12063,10 +12070,10 @@ sub getCmdLineOptions{
 		"genePredGZenforce=i" => \$MFopt{genePredGZenforce},
 		"rewriteGenePred=i"   => \$MFopt{rewriteGenePred},
 	#mapping
-		"mapper=i" => \$MFopt{MapperProg}, ##1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long) 
+		"mapper=i" => \$MFopt{MapperProg}, ##1=bowtie2, 2=bwa, 3=minimap2, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
 		"mapUnmapped=i" => \$MFopt{useUnmapped},
 		"mappingCoverage=i" => \$MFopt{mapModeCovDo},
-		"mappingMem=i" => \$MFopt{MapperMemory}, #total mem for mini2/kma/bwa/bwt2 in GB
+		"mappingMem=i" => \$MFopt{MapperMemory}, #total mem for minimap2/bwa/bowtie2/strobealign in GB
 		"mapSortMem=i" => \$MFopt{mapSortMemGb}, #total mem for samtools sort in GB
 		"rmDuplicates=i" => \$MFopt{MapperRmDup},
 		"mappingCores=i" => \$MFopt{MapperCores},
@@ -12194,8 +12201,10 @@ sub getCmdLineOptions{
 	die "ERROR:: -SB_env is only valid with -Binner 2 (SemiBin)\n"
 		if $MFopt{SB_env} ne '' && $MFopt{DoMetaBat2} != 2;
 	#die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
-	die "ERROR:: \"-diamondMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
+	die "ERROR:: \"-DiaMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
 	$MFopt{diamondMem} = 7 if ($MFopt{diamondMem} <= 0);
+	die "ERROR:: -mapper 4 (kma) was removed in MATAFILER 4.47; use 1 (bowtie2), 2 (bwa), 3 (minimap2) or 5 (strobealign)\n"
+		if ($MFopt{MapperProg} == 4);
 	if ($MFopt{MapperMemory} == -1 ){
 		if($MFopt{MapperProg} >2){$MFopt{MapperMemory} = 35 ;
 		} else {$MFopt{MapperMemory} = 20 ;}	

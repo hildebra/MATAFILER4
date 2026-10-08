@@ -84,10 +84,10 @@ gene prediction on assembly	predictEukGenes	integer	0	stable	$MFopt{DoEukGenePre
 gene prediction on assembly	kmerPerGene	integer	0	stable	$MFopt{kmerPerGene}	calculate kmer frequencies for each gene instead of per scaffold
 gene prediction on assembly	genePredGZenforce	integer	1	stable	$MFopt{genePredGZenforce}	Require the canonical compressed gene-prediction outputs.
 gene prediction on assembly	rewriteGenePred	integer	0	stable	$MFopt{rewriteGenePred}	Remove and rebuild gene predictions and dependent statistics.
-mapping	mapper	integer	-1	stable	$MFopt{MapperProg}	#1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
+mapping	mapper	integer	-1	stable	$MFopt{MapperProg}	#1=bowtie2, 2=bwa, 3=minimap2, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
 mapping	mapUnmapped	integer	0	stable	$MFopt{useUnmapped}	Pass reads left unmapped by one reference to the next mapping.
 mapping	mappingCoverage	integer	1	stable	$MFopt{mapModeCovDo}	Calculate per-contig and per-gene coverage for reference mappings.
-mapping	mappingMem	integer	-1	stable	$MFopt{MapperMemory}	total mem for mini2/kma/bwa/bwt2 in GB
+mapping	mappingMem	integer	-1	stable	$MFopt{MapperMemory}	total mem for minimap2/bwa/bowtie2/strobealign in GB
 mapping	mapSortMem	integer	-1	stable	$MFopt{mapSortMemGb}	total mem for samtools sort in GB
 mapping	rmDuplicates	integer	1	stable	$MFopt{MapperRmDup}	Remove duplicate alignments before coverage calculation.
 mapping	mappingCores	integer	8	stable	$MFopt{MapperCores}	CPU cores requested for each mapping job.

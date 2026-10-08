@@ -108,7 +108,7 @@ while (<$blast_fh>) {
 	}
 	
 	#fill in array
-	if (@words > 10 && $words[0] =~ m/2$/){
+	if (@words > 10 && $words[0] =~ m/\/2$/){ #mate 2 (read IDs end in /1 or /2)
 		$wordv2{$words [1]} = \@words;
 	} elsif (@words > 10) {$wordv1{ $words [1]} = \@words;}
 }

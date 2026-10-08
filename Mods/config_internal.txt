@@ -33,6 +33,7 @@ genelength_scr	perl [MFLRDir]/secScripts/assemblies/geneLengthFasta.pl
 secCogBin_scr	perl [MFLRDir]/secScripts/functions/parseBlastFunct2.pl
 prepVFDB_scr	perl [MFLRDir]/secScripts/functions/prepVFDB.pl
 KrisABR_scr	perl [MFLRDir]/secScripts/functions/ABRblastFilter2.pl
+interleaveMates_scr	perl [MFLRDir]/secScripts/functions/interleaveMates.pl
 sepCts_scr	perl [MFLRDir]/secScripts/assemblies/separateContigs.pl
 assStat_scr	perl [MFLRDir]/secScripts/assemblies/assemblathon_stats.pl
 renameCtg_scr	[MFLRDir]/secScripts/assemblies/renameCtgs.pl
@@ -200,7 +201,6 @@ samtools	samtools
 bcftools	bcftools
 bwt2	bowtie2
 strobealign	strobealign
-kma	kma
 bwa	bwa
 minimap2	minimap2
 jgiDepth	jgi_summarize_bam_contig_depths	env:MF4binners #/g/bork3/home/hildebra/bin/metabat/./jgi_summarize_bam_contig_depths

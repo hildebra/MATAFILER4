@@ -6,10 +6,12 @@ use File::Basename qw(dirname);
 use File::Path qw(make_path);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 
-die "Usage: $0 <references[,references...]> <sample-dir> <output-db> <cores> <base-names> <final-dirs>\n"
-	unless @ARGV == 6;
-my ($reference_list, $sample_dir, $output_db, $cores, $base_names, $final_dirs) = @ARGV;
+die "Usage: $0 <references[,references...]> <sample-dir> <output-db> <cores> <base-names> <final-dirs> [mapper]\n"
+	unless @ARGV == 6 || @ARGV == 7;
+my ($reference_list, $sample_dir, $output_db, $cores, $base_names, $final_dirs, $mapper) = @ARGV;
+$mapper //= 1; #MATAF4 -mapper code: 1 bowtie2, 2 bwa; minimap2/strobealign map the FASTA
 die "Core count must be a positive integer\n" unless $cores =~ /^\d+$/ && $cores > 0;
+die "Mapper must be 1, 2, 3 or 5\n" unless $mapper =~ /^[1235]$/;
 my @references = split /,/, $reference_list;
 my @bases = split /,/, $base_names;
 my @destinations = split /,/, $final_dirs;
@@ -141,8 +143,8 @@ for my $reference (@references) {
 close $database or die "Cannot close $output_db: $!\n";
 print "Skipped $skipped_records FASTA entries ($skipped_bases bp); added ".scalar(@references)." reference FASTA(s).\n";
 
-# MATAF4 maps decoy databases with bowtie2 (it expects $output_db.bw2.*.bt2).
-my ($build_command) = buildMapperIdx($output_db, $cores, 0, 1);
+# Index for the mapper of the sample (bowtie2: $output_db.bw2.*.bt2, bwa: $output_db.*).
+my ($build_command) = buildMapperIdx($output_db, $cores, 0, $mapper);
 !length($build_command) or system($build_command) == 0
 	or die "Mapper index construction failed\n";
 exit 0;

@@ -64,7 +64,8 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.64; #0.64: functional stages supervised until done; OOM-killed jobs resubmitted with more memory
+our $version = 0.65; #0.65: marker-gene mmseqs clustering sized to its own job; -ntMatchGC maps with the asm20 preset (no prebuilt .mmi)
+#0.64: functional stages supervised until done; OOM-killed jobs resubmitted with more memory
 #0.63: smaller catalog chunks for the KEGG/eggNOG diamond searches (-fastaSplitBigDB)
 #0.62: eggNOG-mapper v3 (eggNOG 7), VFDB sets in the default -functDB
 #0.61: functional annotation robustness, query-or-subject coverage, eggNOG-mapper KOs/modules, VFDB set A/B
@@ -1296,6 +1297,11 @@ sub geneCatFlow($ $ $ $ ){
 		my $preclustMMseq = $clustMMseq;
 		my $useMMSEQs4COG = 1;
 		print "Using mmseqs2 for COG clustering: $useMMSEQs4COG\n";
+		#resources of the separate marker clustering job (submitLocal); mmseqs threads and
+		#--split-memory-limit must fit that job, not the main job
+		my $memCOG = int($totMemL/2);if ($memCOG < 50){$memCOG=50;}
+		my $cogCores = int($numCor/2); $cogCores = 1 if $cogCores < 1;
+		my ($cogThreads, $cogMem) = $submitLocal ? ($cogCores, $memCOG/2) : ($numCor3, $totMemL);
 		foreach my $cog ( @COGlst){
 			
 			die "can't find $cog in FMGcutoffs list\n" unless (exists $FMGcutoffs{$cog});
@@ -1304,7 +1310,7 @@ sub geneCatFlow($ $ $ $ ){
 			if (!-e $FMGFL2{$cog} || !-s  $FMGFL2{$cog}){#"$bdir/COG/$cog.$cdhID.fna"){
 				#$cmd .= $cdhitBin." -i $FMGfileList{$cog} -o $tmpDir/COG/$cog.$cdhID.fna -n 9 -G 1 -aS 0.95 -aL 0.6 -d 0 -c ". $FMGcutoffs{$cog}/100 ." -g 0 -T $numCor\n";
 				# $clustMMseq = 0; #use mmseq, and use it's slow mode instead..  
-				$cmd .= clusterFNA($FMGfileList{$cog},$FMGFL2{$cog},0.9,0.0,($FMGcutoffs{$cog}/100)-$relaxFMG,$numCor3,1,"$NodeTmpDir/$cog/",$useMMSEQs4COG,$totMemL);
+				$cmd .= clusterFNA($FMGfileList{$cog},$FMGFL2{$cog},0.9,0.0,($FMGcutoffs{$cog}/100)-$relaxFMG,$cogThreads,1,"$NodeTmpDir/$cog/",$useMMSEQs4COG,$cogMem);
 				$cpFromP=0;
 			} else {
 				$cpFromP = 1 if ($cpFromP == -1);
@@ -1323,8 +1329,6 @@ sub geneCatFlow($ $ $ $ ){
 				push(@{$QSBoptHR->{constraint}}, $avx2Constr) if ($useMMSEQs4COG);
 				my $preHDDspace = ${$QSBoptHR}{tmpSpace};
 				${$QSBoptHR}{tmpSpace} = "50G";#"${totMem}G"; #$totMem #doesn't need much, stores on scrach
-				my $memCOG = int($totMemL/2);if ($memCOG < 50){$memCOG=50;}
-				my $cogCores = int($numCor/2); $cogCores = 1 if $cogCores < 1;
 				my ($dep,$qcmd) = qsubSystem($qsubDir."cogCluster.sh",$cmd,$cogCores,($memCOG/2)."G","cCLGC","","",1,[],$QSBoptHR);
 				@{$QSBoptHR->{constraint}} = @preCons;
 				${$QSBoptHR}{tmpSpace} = $preHDDspace;

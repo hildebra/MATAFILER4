@@ -11,7 +11,7 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 
 | Script | Version in referenced source | Role |
 |---|---:|---|
-| `MATAF4.pl` | `4.46` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
+| `MATAF4.pl` | `4.47` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.59` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
 | `strain_within.pl` | `1.60` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
@@ -179,10 +179,10 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-mapper` | integer | `-1` | stable | 1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long) |
+| `-mapper` | integer | `-1` | stable | 1=bowtie2, 2=bwa, 3=minimap2, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long) |
 | `-mapUnmapped` | integer | `0` | stable | Pass reads left unmapped by one reference to the next mapping. |
 | `-mappingCoverage` | integer | `1` | stable | Calculate per-contig and per-gene coverage for reference mappings. |
-| `-mappingMem` | integer | `-1` | stable | total mem for mini2/kma/bwa/bwt2 in GB |
+| `-mappingMem` | integer | `-1` | stable | total mem for minimap2/bwa/bowtie2/strobealign in GB |
 | `-mapSortMem` | integer | `-1` | stable | total mem for samtools sort in GB |
 | `-rmDuplicates` | integer | `1` | stable | Remove duplicate alignments before coverage calculation. |
 | `-mappingCores` | integer | `8` | stable | CPU cores requested for each mapping job. |

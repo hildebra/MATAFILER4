@@ -29,19 +29,35 @@ sub read_gzip {
 my $fakeDiamond = "$tmp/diamond.pl";
 write_file($fakeDiamond, <<'FAKE');
 use strict; use warnings; use File::Copy qw(copy);
+use IO::Compress::Gzip qw(gzip $GzipError);
 my ($query,$out);
 while (@ARGV) {
     my $arg = shift @ARGV;
     $query = shift @ARGV if $arg eq '-q';
     $out = shift @ARGV if $arg eq '-o';
 }
-copy($query, "$out.gz") or die "Cannot copy fixture hits: $!";
+if (defined $query) { copy($query, "$out.gz") or die "Cannot copy fixture hits: $!"; exit 0; }
+#no -q: interleaved mate pairs on stdin, one hit per read
+my $hits = '';
+my $n = 0;
+while (my $line = <STDIN>) {
+    $hits .= "$1\tB\t90\t50\t0\t0\t1\t150\t1\t50\t1e-20\t100\n" if $n++ % 4 == 0 && $line =~ /^@(\S+)/;
+}
+gzip(\$hits => "$out.gz") or die $GzipError;
 FAKE
 my %libraries;
-for my $library ([0,'single'], [1,'pair/2'], [2,'pair/1'], [3,'merged']) {
+for my $library ([0,'single'], [3,'merged']) {
     my ($key,$query) = @$library;
     my $text = "$query\tB\t90\t50\t0\t0\t1\t150\t1\t50\t1e-20\t100\n";
     my $path = "$tmp/input$key.gz";
+    gzip(\$text => $path) or die $GzipError;
+    $libraries{$key} = [$path];
+}
+#mate files (key 2 = R1, key 1 = R2): read names without a mate suffix, as from fasterq-dump
+for my $library ([1,'pair length=150'], [2,'pair length=150']) {
+    my ($key,$head) = @$library;
+    my $text = "\@$head\nACGT\n+\nIIII\n";
+    my $path = "$tmp/input$key.fq.gz";
     gzip(\$text => $path) or die $GzipError;
     $libraries{$key} = [$path];
 }
@@ -64,6 +80,7 @@ sub getProgPaths {
     my ($name) = @_;
     return "$^X $fakeDiamond" if $name eq 'diamond';
     return "$^X $root/secScripts/functions/parseBlastFunct2.pl" if $name eq 'secCogBin_scr';
+    return "$^X $root/secScripts/functions/interleaveMates.pl" if $name eq 'interleaveMates_scr';
     return 'unused-mmseqs' if $name eq 'mmseqs2';
     die "Unexpected program lookup: $name";
 }

@@ -32,6 +32,8 @@ sub decideMapper($ $){
 			}
 		}
 	}
+	die "-mapper 4 (kma) is no longer supported; use 1 (bowtie2), 2 (bwa), 3 (minimap2) or 5 (strobealign)\n"
+		if ($MapperProg == 4);
 	if ($MapperProg<1 || $MapperProg>5){
 		die "IO_Tamoc_progs.pm::decideMapper:: unknown MapperProg provided: $MapperProg\n! Aborting..\n";
 	}
@@ -343,8 +345,7 @@ sub activateBase{
 sub mapperDBbuilt( $ $){
 	my ($DBbtRef, $MapperProg2) = @_;
 	$MapperProg2 = decideMapper($MapperProg2, "");
-	my $bwt2IdxFileSuffix = ".bw2";my $mini2IdxFileSuffix = ".mmi";
-	my $kmaIdxFileSuffix = ".kma";
+	my $bwt2IdxFileSuffix = ".bw2";
 	#strobealign and minimap2 index the FASTA themselves, with the preset of the mapping call
 	if ($MapperProg2 == 5 || $MapperProg2 == 3){return 1;}
 	#print "($MapperProg2 == 1 || $MapperProg2 == -1) && !-s $DBbtRef$bwt2IdxFileSuffix.rev.2.bt2\n";
@@ -355,7 +356,6 @@ sub mapperDBbuilt( $ $){
 		($MapperProg2 ==0 && !-e "$DBbtRef$bwt2IdxFileSuffix.0.sa")
 		|| ( ($MapperProg2 == 1 || $MapperProg2 == -1) && !$bowtie_complete ) #bowtie2
 		||( $MapperProg2 == 2 && !-s "$DBbtRef.sa" ) #bwa writes .sa last; an interrupted build leaves .pac
-		||( ($MapperProg2 == 4 ) && !-s "$DBbtRef$kmaIdxFileSuffix.seq.b" )#kma
 	) {
 		return 0;
 	}
@@ -364,13 +364,12 @@ sub mapperDBbuilt( $ $){
 
 sub buildMapperIdx($ $ $ $){
 	my ($REF,$ncore,$lrgDB,$MapperProg) = @_;
-	#1=bowtie2, 2=bwa, 3=minimap2
+	#1=bowtie2, 2=bwa, 3=minimap2, 5=strobealign
 	$MapperProg = decideMapper($MapperProg,"");
 	#strobealign and minimap2 map against the FASTA. A minimap2 .mmi fixes -k/-w/-H at build
 	#time and overrides the -x preset of the mapping call (sr, map-ont, map-hifi, asm20).
 	if ($MapperProg == 5 || $MapperProg == 3){return ("",$REF,$REF);}
 	my $bwt2IdxFileSuffix = ".bw2";
-	my $kmaIdxFileSuffix = ".kma";
 	my $bwtIdx = $REF.$bwt2IdxFileSuffix;
 	my $chkFi = $bwtIdx;
 	my $missing_test;
@@ -381,7 +380,6 @@ sub buildMapperIdx($ $ $ $){
 		$missing_test = join(' && ', map { my $ext = $_;
 			'! { '.join(' && ', map { "[ -s $bwtIdx.$_.$ext ]" } qw(1 2 3 4 rev.1 rev.2)).'; }' } qw(bt2 bt2l));
 	}elsif ($MapperProg==2){$chkFi = $REF.".sa"; #written last by bwa index
-	} elsif ($MapperProg == 4){$chkFi = $REF.$kmaIdxFileSuffix.".seq.b";
 	}
 	my $dbCmd ="";
 	$missing_test //= "[ ! -s $chkFi ]";
@@ -398,10 +396,6 @@ sub buildMapperIdx($ $ $ $){
 		$dbCmd .= $bwaBin." index $REF\n";
 		if (-s $REF.".sa"){$dbCmd = "";}
 		#die $dbCmd."\n";
-	} elsif ($MapperProg==4){			
-		$bwtIdx = $REF.$kmaIdxFileSuffix;
-		my $kmaBin = getProgPaths("kma");
-		$dbCmd .= "$kmaBin index -i $REF -o $bwtIdx 2>/dev/null \n"; #-t $ncore 
 	}
 
 	$dbCmd .= "fi\n" unless ($dbCmd eq "");

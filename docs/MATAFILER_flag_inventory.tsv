@@ -84,10 +84,10 @@ MATAF4.pl	4.38	Gene prediction on assembly	-predictEukGenes	integer	MFopt		stabl
 MATAF4.pl	4.38	Gene prediction on assembly	-kmerPerGene	integer	MFopt		stable	calculate kmer frequencies for each gene instead of per scaffold
 MATAF4.pl	4.38	Gene prediction on assembly	-genePredGZenforce	integer	MFopt		stable	Require the canonical compressed gene-prediction outputs.
 MATAF4.pl	4.38	Gene prediction on assembly	-rewriteGenePred	integer	MFopt		stable	Remove and rebuild gene predictions and dependent statistics.
-MATAF4.pl	4.38	Mapping	-mapper	integer	MFopt		stable	#1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
+MATAF4.pl	4.38	Mapping	-mapper	integer	MFopt		stable	#1=bowtie2, 2=bwa, 3=minimap2, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
 MATAF4.pl	4.38	Mapping	-mapUnmapped	integer	MFopt		stable	Pass reads left unmapped by one reference to the next mapping.
 MATAF4.pl	4.38	Mapping	-mappingCoverage	integer	MFopt		stable	Calculate per-contig and per-gene coverage for reference mappings.
-MATAF4.pl	4.38	Mapping	-mappingMem	integer	MFopt		stable	total mem for mini2/kma/bwa/bwt2 in GB
+MATAF4.pl	4.38	Mapping	-mappingMem	integer	MFopt		stable	total mem for minimap2/bwa/bowtie2/strobealign in GB
 MATAF4.pl	4.38	Mapping	-mapSortMem	integer	MFopt		stable	total mem for samtools sort in GB
 MATAF4.pl	4.38	Mapping	-rmDuplicates	integer	MFopt		stable	Remove duplicate alignments before coverage calculation.
 MATAF4.pl	4.38	Mapping	-mappingCores	integer	MFopt		stable	CPU cores requested for each mapping job.

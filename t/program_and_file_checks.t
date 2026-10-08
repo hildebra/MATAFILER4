@@ -114,7 +114,7 @@ is(system('bash', $runtime_script) >> 8, 42,
 	no warnings 'redefine';
 	local *Mods::IO_Tamoc_progs::getProgPaths = sub { return 'bwa' };
 	my (undef, undef, $check_path) = buildMapperIdx("$root/reference.fa", 2, 0, 2);
-	is($check_path, "$root/reference.fa.pac", 'BWA index check uses the actual .pac path');
+	is($check_path, "$root/reference.fa.sa", 'BWA index check uses .sa, the file bwa index writes last');
 }
 
 {

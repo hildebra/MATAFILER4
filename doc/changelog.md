@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-10-08 — Mapper and search-tool options audit
+
+- `MATAF4.pl` 4.47, `geneCat.pl` 0.65. Full report: [`docs/audits/2026-10-08/mappers.md`](../docs/audits/2026-10-08/mappers.md).
+- **Secondary mapping with bwa, minimap2 or strobealign works.** These mappers got the comma-joined list of all references, so map2tar failed with several references and in competitive modes, including every long-read sample under the default `-mapper -1`. They now map each reference, the combined DB, or the decoy DB. Decoy mapping no longer silently skips these mappers.
+- **bwa maps single-end reads.** Before, `-mapper 2` stopped the controller for any sample with singletons.
+- **kma removed.** Its SAM output lacked the NM tags `bamFilter.pl` needs, so every alignment was dropped. `-mapper 4` stops MATAF4 at startup.
+- **PacBio reads use minimap2 `-x map-hifi`** (was the CLR preset `map-pb`).
+- **bowtie2 indexes** are accepted as `.bt2` or `.bt2l`. A large reference no longer exits 23 on every pass.
+- **Read-based DIAMOND searches both mates of a pair in one run.**
+  - DIAMOND has no paired mode, so the new `interleaveMates.pl` interleaves R1/R2 on stdin as `<read>/1`, `<read>/2`.
+  - Pairs now count twice whatever the read names look like. SRA/ENA downloads used to count once. The hits of a pair keep DIAMOND's ranking, without a sort.
+  - The search e-value follows `-DiaParseEvals` when above 1e-4, and frameshift mode drops `--min-orf`.
+  - Existing searches are kept; rerun with `-reProfileFunct 1` to recount.
+- **MetaPhlAn.**
+  - Mates are mapped unpaired, so `--nreads` counts reads, not pairs. Paired samples had inflated abundances and too little UNCLASSIFIED.
+  - The read total comes from bowtie2's own log (the `.etxt` is missing in bash mode).
+  - The job requests the index size + 6 GB (was 3 GB).
+- **Smaller fixes:**
+  - geneCat marker-gene mmseqs clustering is sized to its own job.
+  - `-ntMatchGC` keeps its `asm20` seeding (no prebuilt `.mmi`).
+  - Scaffolding builds the bowtie2 index it uses.
+  - lambda3 `mkindexn` gets at least 2 threads.
+  - MetaPhlAn/GTDB-Tk version probes run in bash.
+  - ABR mate detection only matches `/2`.
+- `t/audit_2026_10_08_mappers.t` (44 tests); new mapping cases in `t/alignment_input.t`.
+
 ## 2026-10-08 — RiboFind audit
 
 - `catchLSUSSU.pl` 0.7. Full report: [`docs/audits/2026-10-08/report.md`](../docs/audits/2026-10-08/report.md).
