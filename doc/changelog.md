@@ -12,6 +12,7 @@
 - **Read groups:** `PL:ELEMENT` for AVITI and `PL:LS454` for 454 (were `ILLUMINA`).
 - **No thread oversubscription in mapping jobs.** samtools in the mapper's pipe (`view`, and `sort` in decoy/competitive mode) gets a quarter of the cores; steps after mapping keep all. The same applies to geneCat `-ntMatchGC`.
 - **geneCat CD-HIT** (`-mmseqC 0`): `-M` is 90 % of the job's memory (was the job memory + 30 GB).
+- **`-profileTaxaTarget` is deactivated:** a nonzero value stops MATAF4 at startup. TaxaTarget has been unmaintained since 2022, and its database (`obj.umiacs.umd.edu/taxatarget/data.zip`) returns 403. The job code, with the 4.48 fixes, stays in place.
 - Tests in `t/audit_2026_10_08_decisions.t`.
 
 ## 2026-10-08 — Mapper audit: decisions (MATAF4 4.48, geneCat 0.66)

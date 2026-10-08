@@ -124,3 +124,4 @@ Tests: `t/audit_2026_10_08_decisions.t`. All of them fail against the 4.48 code.
 | Read groups | `PL:ELEMENT` for AVITI and `PL:LS454` for 454, the SAM-spec names (were `ILLUMINA`). `proto` stays `ILLUMINA`; its platform is not documented. |
 | Thread oversubscription | samtools steps that run in the mapper's pipe get `max(1, N/4)` threads instead of `N` alongside the mapper's `N`: `view -b1` (all mappers) and `sort` (decoy and competitive modes). Steps after mapping keep `N`. geneCat `-ntMatchGC` does the same next to minimap2. |
 | CD-HIT memory | `-M` is 90 % of the job's memory (was job memory + 30 GB, so the scheduler killed the job before cd-hit's own check). |
+| TaxaTarget | `-profileTaxaTarget` is deactivated: a nonzero value stops MATAF4 at startup. The tool has been unmaintained since 2022 and its database can no longer be downloaded. The job code, with the 4.48 fixes, is kept for a possible replacement database. |

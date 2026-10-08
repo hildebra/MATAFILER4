@@ -151,6 +151,14 @@ subtest 'long reads: DIAMOND range culling and per-range assignment' => sub {
 
 # ---------------- TaxaTarget, mOTUs ----------------
 subtest 'TaxaTarget' => sub {
+	#deactivated: unmaintained, database no longer downloadable; the job code below is kept
+	write_file("$tmp/start.map", "#SmplID\tPath\nS1\tS1\n");
+	for my $case (['-profileTaxaTarget 1', qr/-profileTaxaTarget is deactivated/], ['-mapper 4', qr/-mapper 4 \(kma\) was removed/]) {
+		local $ENV{MF4_TEST_ROOT} = $root;
+		local $ENV{PERL5OPT} = "-I$root";
+		my $out = `$^X $root/MATAF4.pl -config $root/t/MATAFILERcfg.txt -map $tmp/start.map $case->[0] 2>&1`;
+		ok($? != 0 && $out =~ $case->[1], "MATAF4 $case->[0] stops at startup") or diag $out;
+	}
 	my $tt = "$tmp/taxaTarget"; make_path("$tt/run_pipeline_scripts", "$tt/data");
 	write_file("$tt/$_", "x\n") for qw(kaijux diamond data/marker_geneDB.fasta.kaiju.fmi data/phylogroup_total_mgLen.txt);
 	write_file("$tt/run_pipeline_scripts/environment.txt", "# paths\nkaiju='$tt/kaijux'\ndiamond='$tt/diamond'\ntaxatarget='$tt/'\n");

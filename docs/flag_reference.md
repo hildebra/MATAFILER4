@@ -292,7 +292,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-protalBatchSize` | integer | `0` | stable | Local samples per Protal batch map job; 0: all local samples of a pass in one job. |
 | `-profileMOTU2` | integer | `0` | stable | Run mOTUs taxonomic profiling. |
 | `-profileKraken` | integer | `0` | stable | Run Kraken2 taxonomic profiling: read counts per lineage at confidence 0.01, 0.02, 0.04, 0.06, 0.1, 0.2 and 0.3 (one kraken2 run per library). |
-| `-profileTaxaTarget` | integer | `0` | stable | Run TaxaTarget protist profiling (paired and single-end libraries). Configure `TaxaTarget` with the full path of `run_pipeline_scripts/run_protist_pipeline_fda.py`; MF4 checks its `environment.txt`, kaiju index and `data/phylogroup_total_mgLen.txt` at startup. |
+| `-profileTaxaTarget` | integer | `0` | deprecated/legacy | Deactivated: TaxaTarget is unmaintained and its database can no longer be downloaded; a nonzero value stops MATAF4 at startup. |
 | `-estGenoSize` | integer | `0` | stable | estimate average size of genomes in data |
 | `-krakenDB` | string | `""` | stable | Kraken2 database for `-profileKraken`: a directory under the configured `Kraken2_path_DB` holding hash.k2d and taxo.k2d. |
 

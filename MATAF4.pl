@@ -252,7 +252,8 @@ sub createConsSNPandSVs;
 #       TaxaTarget accepts samples without protist reads; mOTUs/TaxaTarget memory requests.
 #4.49: 8.10.26: mapping statistics sum every bowtie2 run; -DiaSearchTool mmseqs (working MMseqs2
 #       read search); -DiaPercID accepts decimals; read groups PL:ELEMENT (AVITI), PL:LS454 (454);
-#       samtools in the mapper's pipe gets a quarter of the cores.
+#       samtools in the mapper's pipe gets a quarter of the cores. -profileTaxaTarget deactivated
+#       (TaxaTarget unmaintained, database no longer downloadable).
 my $MATFILER_ver = 4.49;
 my $matafWorkflowActive = 0;
 my $matafWorkflowStage = 'startup';
@@ -12293,6 +12294,9 @@ sub getCmdLineOptions{
 	die "ERROR:: -mapper 4 (kma) was removed in MATAFILER 4.47; use 1 (bowtie2), 2 (bwa), 3 (minimap2) or 5 (strobealign)\n"
 		if ($MFopt{MapperProg} == 4);
 	die "ERROR:: -DiaSearchTool must be diamond or mmseqs\n" unless ($MFopt{diaSearchTool} =~ /^(?:diamond|mmseqs)$/);
+	#TaxaTarget: unmaintained since 2022, and its database (obj.umiacs.umd.edu/taxatarget/data.zip) can no longer be downloaded
+	die "ERROR:: -profileTaxaTarget is deactivated: TaxaTarget is unmaintained and its database is no longer available\n"
+		if ($MFopt{DoTaxaTarget});
 	warn "-DiaFrameshift has no MMseqs2 equivalent and is ignored with -DiaSearchTool mmseqs\n"
 		if ($MFopt{diaSearchTool} eq "mmseqs" && $MFopt{diaFrameshift} && $MFopt{DoDiamond});
 	if ($MFopt{MapperMemory} == -1 ){
