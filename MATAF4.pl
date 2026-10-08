@@ -250,7 +250,10 @@ sub createConsSNPandSVs;
 #       series recomputed from the k-mer hits); long reads in -profileFunct are searched with
 #       DIAMOND --long-reads and assigned per query range; DIAMOND read jobs request 16 GB;
 #       TaxaTarget accepts samples without protist reads; mOTUs/TaxaTarget memory requests.
-my $MATFILER_ver = 4.48;
+#4.49: 8.10.26: mapping statistics sum every bowtie2 run; -DiaSearchTool mmseqs (working MMseqs2
+#       read search); -DiaPercID accepts decimals; read groups PL:ELEMENT (AVITI), PL:LS454 (454);
+#       samtools in the mapper's pipe gets a quarter of the cores.
+my $MATFILER_ver = 4.49;
 my $matafWorkflowActive = 0;
 my $matafWorkflowStage = 'startup';
 my $matafHeartbeatPath = '';
@@ -5683,7 +5686,11 @@ sub runDiamond(){
 	my $secCogBin = getProgPaths("secCogBin_scr");
 	my $diaBin = getProgPaths("diamond");
 	my $interleaveScr = getProgPaths("interleaveMates_scr");
-	my $searchMode = 1; #DIAMOND
+	my $searchMode = ($MFopt{diaSearchTool} // "") eq "mmseqs" ? 2 : 1; #1: DIAMOND, 2: MMseqs2 (-DiaSearchTool)
+	my $mmseqs2Bin = $searchMode == 2 ? getProgPaths("mmseqs2") : "";
+	#pident is a percentage like DIAMOND's (fident would be a 0-1 fraction, compared with -DiaPercID)
+	my $mmsOfmt = "--format-output query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits";
+	my $mmsSens = $MFopt{diaRunSensitive} ? "-s 5.7" : "-s 4";
 
 	my %RdLibs = getRdLibraries($libraries,$mergedLibrary);
 
@@ -5741,11 +5748,18 @@ sub runDiamond(){
 			my $isLong = $kk == 0 && $longReadFile{$rds[0]};
 			my $hitOpts = $isLong ? "--long-reads " : "$minOrf-k 5 ";
 			#--comp-based-stats 0
-			my $diaSearch = "$diaBin blastx $diaOfmt2 --masking 0 --comp-based-stats 0 --compress 1 --quiet -t $tmpPdb $hitOpts-d $CLrefDBD$refDB.db -e $searchEval -o $outF $sensBlast -p $ncore";
-			if ($kk == 1){ #mate pair: one run, queries from stdin
-				$cmd .= "$interleaveScr $rds[0] $rds[1] | $diaSearch\n";
-			} else {
-				$cmd .= "$diaSearch -q $rds[0]\n";
+			if ($searchMode == 1){
+				my $diaSearch = "$diaBin blastx $diaOfmt2 --masking 0 --comp-based-stats 0 --compress 1 --quiet -t $tmpPdb $hitOpts-d $CLrefDBD$refDB.db -e $searchEval -o $outF $sensBlast -p $ncore";
+				if ($kk == 1){ #mate pair: one run, queries from stdin
+					$cmd .= "$interleaveScr $rds[0] $rds[1] | $diaSearch\n";
+				} else {
+					$cmd .= "$diaSearch -q $rds[0]\n";
+				}
+			} else { #MMseqs2: translated search, hits in query order; "stdin" as query reads the interleaved mates
+				my $mmsSearch = "$mmseqs2Bin easy-search ".($kk == 1 ? "stdin" : $rds[0])." $CLrefDBD$refDB.db.mms2 $outF $tmpPdb/mmseqs.$ii"
+					." --threads $ncore -e $searchEval $mmsSens --max-accept ".($isLong ? 100 : 5)." $mmsOfmt -v 1";
+				$cmd .= ($kk == 1 ? "$interleaveScr $rds[0] $rds[1] | " : "") . "$mmsSearch\n";
+				$cmd .= "$pigzBin -p $ncore $outF\n"; #--compressed only applies to database output
 			}
 
 			# The parser's reads mode already counts ordinary reads once. Only
@@ -7953,6 +7967,8 @@ sub getRgStr{
 	my $platform = 'ILLUMINA';
 	$platform = 'PACBIO' if (($readTechnology || '') eq 'PB');
 	$platform = 'ONT' if (($readTechnology || '') eq 'ONT');
+	$platform = 'ELEMENT' if (($readTechnology || '') eq 'AVITI'); #SAM spec platform names
+	$platform = 'LS454' if (($readTechnology || '') eq '454');
 	if ($mapper > 1 || $mapper == -2){ #bwa/minimap2 have same format..
 		$rgStr = '\'@RG\\tID:'.$smpl.'\\tSM:'.$smpl.'\\tPL:'.$platform;
 		$rgStr .= '\\tLB:'.$libsOri.'\'';
@@ -8065,7 +8081,9 @@ sub alignPostTreat{
 	
 	my $algCmd = "";
 	my ($MapperProg, $readTec, $NcoreL,$nodeTmp,$tmpOut21, $subBamsAR,$unaligned,$baseN) = ($postTreat{MapperProg}, $postTreat{readTec}, $postTreat{NcoreL},$postTreat{nodeTmp}, $postTreat{tmpOut21}, $postTreat{subBamsAR},$postTreat{unaligned},$postTreat{baseN});
-	my $xtraSamSteps1 = $postTreat{xtraSamSteps1}; 
+	my $xtraSamSteps1 = $postTreat{xtraSamSteps1};
+	#samtools steps that run in the mapper's pipe share its $NcoreL cores: a few compression threads suffice
+	my $pipeCores = int($NcoreL / 4); $pipeCores = 1 if ($pipeCores < 1);
 	
 	my $bamfilter = getProgPaths("bamFilter_scr");
 		#my $filterStep="";
@@ -8085,8 +8103,8 @@ sub alignPostTreat{
 	
 	my $iTO = "$tmpOut21.$i.$kk";
 	if ($unaligned ne "" ){ #basic sort of unmapped reads via samtools (general purpose step)
-		$algCmd .= " | $smtBin view -b1 -@ $NcoreL > $iTO.t\n";
-		$algCmd .= "$smtBin view -u -h $iTO.t | $xtraSamSteps1 $smtBin view -b1 -@ $NcoreL -F 4 -  > $iTO\n";
+		$algCmd .= " | $smtBin view -b1 -@ $pipeCores > $iTO.t\n";
+		$algCmd .= "$smtBin view -u -h $iTO.t | $xtraSamSteps1 $smtBin view -b1 -@ ".($xtraSamSteps1 eq "" ? $NcoreL : $pipeCores)." -F 4 -  > $iTO\n";
 		#sort out unaligned reads
 		#-0 catches single-end reads (neither READ1 nor READ2 flag), which samtools otherwise writes to stdout
 		$algCmd .= "$smtBin view -u -h -@ $NcoreL -f 4 $iTO.t | $smtBin fastq -0 $nodeTmp/$baseN.$i.0.fq.gz -1 $nodeTmp/$baseN.$i.1.fq.gz -2 $nodeTmp/$baseN.$i.2.fq.gz -s $nodeTmp/$baseN.$i.s.fq.gz - \n";
@@ -8095,7 +8113,7 @@ sub alignPostTreat{
 		#and remove all the temp files..
 		$algCmd .= "rm -f $nodeTmp/$baseN.$i.*fq.gz $iTO.t\n";
 	} else {
-		$algCmd .= " | $xtraSamSteps1  $smtBin view -b1 -@ $NcoreL -F 4 - > $iTO\n";
+		$algCmd .= " | $xtraSamSteps1  $smtBin view -b1 -@ $pipeCores -F 4 - > $iTO\n";
 	}
 	
 	if ($postTreat{decoyModeActive} || $postTreat{map2ndTogether}>0){#remove unnecessary reads & filter specific reads for each ref genome into separate bam
@@ -8316,7 +8334,9 @@ sub mapReadsToRef{
 		@mapFastas = ($bwtIdx); #the combined (competitive) or decoy FASTA
 		$bwtIdx .= $MFcontstants{bwt2IdxFileSuffix};
 		
-		$xtraSamSteps1 = "$smtBin sort -@ $NcoreL -T $nodeTmp./$baseN.srt - |";
+		#runs in the mapper's pipe (see alignPostTreat): a quarter of the cores
+		my $sortCores = int($NcoreL / 4); $sortCores = 1 if ($sortCores < 1);
+		$xtraSamSteps1 = "$smtBin sort -@ $sortCores -T $nodeTmp./$baseN.srt - |";
 		@regs = @{$make2ndMapDecoy{regions}};
 		@reg_lcs =  @{$make2ndMapDecoy{region_lcs}};
 		@bwtIdxs = ($bwtIdx);
@@ -10033,21 +10053,15 @@ sub getMapStats{
 		@spl = split(/\n/,$alignStats);
 	}
 	#die "$alignStats\n";
-	my $idx =-1;my $dobwtStat=0;
+	my @bwtBlocks;my $dobwtStat=0;
 	if ($alignStats =~ m/This is strobealign/){
 		$dobwtStat=3;
 	}elsif($alignStats =~ m/\[M::worker_pipeline/){
 		$dobwtStat=2;
 	}elsif ($alignStats =~ m/reads; of these:/){
-		$dobwtStat=1;
-		for my $candidate (0 .. $#spl) {
-			if ($spl[$candidate] =~ m/\d+ reads; of these:/) { $idx = $candidate; last; }
-		}
-		if ($idx>=0 && $spl[$idx+0] =~ m/(\d+) reads; of these:/){
-			$locStats{totReadPairs} = $1;
-		} else {
-			$dobwtStat=0;#die "wrong bwtOut: $inD/LOGandSUB/bwtMap.sh.etxt X $spl[2]";
-		}
+		#one bowtie2 summary per run: a paired library and its singletons, or several libraries
+		@bwtBlocks = grep { $spl[$_] =~ m/^\s*\d+ reads; of these:/ } 0 .. $#spl;
+		$dobwtStat = @bwtBlocks ? 1 : 0;
 	}
 	#die "$spl[$idx]\n$locStats{totReadPairs}\n";
 	my @columns = qw(ReadsPaired AlignedReads OverallAlignment UniqueAlgned MultAlign DisconcAlign SingleUniqAlign SingleMultiAlign);
@@ -10055,12 +10069,27 @@ sub getMapStats{
 	
 	my $filter = parse_bam_filter_counters($alignStats);
 	if ($dobwtStat == 1) {
-		my $rhr = bwtLogRd(\@spl, $idx, \%locStats);
-		%locStats = %$rhr;
 		# Bowtie's input total counts pairs for paired libraries and reads for SE.
-		# Preserve that total and the aligner's category rates in their original units.
+		# Totals and category counts are summed over all runs in their original units;
+		# the overall rate is aligned mates over all mates (a pair is two mates).
+		my %sum = (totReadPairs => 0); my ($mates, $alignedMates, $rateKnown) = (0, 0, 1);
+		for my $idx (@bwtBlocks) {
+			my ($total) = $spl[$idx] =~ m/(\d+) reads; of these:/;
+			my $block = bwtLogRd(\@spl, $idx, {});
+			$sum{totReadPairs} += $total;
+			for my $k (qw(notAlign uniqAlign multAlign DisconcAlign SinglAlign SinglAlignMult)) {
+				$sum{$k} += $block->{$k} if (defined($block->{$k}) && $block->{$k} >= 0);
+			}
+			my $blockMates = ($spl[$idx+1] // '') =~ m/\(100\.00%\) were unpaired/ ? $total : 2 * $total;
+			$mates += $blockMates;
+			if (defined($block->{AlignmRate}) && $block->{AlignmRate} >= 0) {
+				$alignedMates += $block->{AlignmRate} / 100 * $blockMates;
+			} else { $rateKnown = 0; }
+		}
+		$sum{AlignmRate} = ($rateKnown && $mates > 0) ? 100 * $alignedMates / $mates : -1;
+		%locStats = (%locStats, %sum);
 		$result{ReadsPaired} = $locStats{totReadPairs};
-		$result{OverallAlignment} = $locStats{AlignmRate} // '';
+		$result{OverallAlignment} = $locStats{AlignmRate} >= 0 ? $locStats{AlignmRate} : '';
 		if (($locStats{totReadPairs} || 0) > 0) {
 			my %categories = (UniqueAlgned => 'uniqAlign', MultAlign => 'multAlign',
 				DisconcAlign => 'DisconcAlign', SingleUniqAlign => 'SinglAlign',
@@ -11917,6 +11946,7 @@ sub setDefaultMFconfig{
 	$MFopt{reqDiaDB} = "";#,NOG,MOH,ABR,ABRc,ACL,KGM,PTV,PAB";#,ACL,KGM,ABRc,CZy";#"NOG,CZy"; #"NOG,MOH,CZy,ABR,ABRc,ACL,KGM"   #old KGE,KGB
 	$MFopt{diaEVal} = "1e-7"; $MFopt{diaCores} = 12; ; $MFopt{DiaRmRawHits} = 0; $MFopt{diaRunSensitive} = 0;
 	$MFopt{diaFrameshift} = 0; #diamond -F/--frameshift penalty; 0 disables frameshift alignment mode (recommended for long, error-prone reads e.g. ONT/PacBio)
+	$MFopt{diaSearchTool} = "diamond"; #read-based functional search: diamond or mmseqs (MMseqs2 easy-search)
 	$MFopt{diamondMem} = 16; #GB memory to request for diamond jobs (qsub --mem); DIAMOND blastx defaults (-b 2, align budget 16G) need about that
 	$MFopt{DiaMinAlignLen} = 20; $MFopt{DiaMinFracQueryCov} = 0.1; $MFopt{DiaPercID} =40;
 
@@ -12188,11 +12218,12 @@ sub getCmdLineOptions{
 		"DiaMem=i" => \$MFopt{diamondMem}, # memory in GB for diamond alignment jobs
 		"DiaParseEvals=s" => \$MFopt{diaEVal}, #evalues at which to accept hits to func database
 		"DiaSensitiveMode=i" => \$MFopt{diaRunSensitive},
+		"DiaSearchTool=s" => \$MFopt{diaSearchTool}, #diamond (default) or mmseqs: aligner of the read-based functional search
 		"DiaFrameshift=i" => \$MFopt{diaFrameshift}, #diamond -F/--frameshift penalty (e.g. 15); enables frameshift-aware alignment for long, error-prone reads. 0 = off (default)
 		"rmRawDiamondHits=i" => \$MFopt{DiaRmRawHits},
 		"DiaMinAlignLen=i" => \$MFopt{DiaMinAlignLen},
 		"DiaMinFracQueryCov=f" =>  \$MFopt{DiaMinFracQueryCov},
-		"DiaPercID=i" => \$MFopt{DiaPercID},
+		"DiaPercID=f" => \$MFopt{DiaPercID},
 		"DiaDBs=s" => \$MFopt{reqDiaDB},#NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 	#functional profiling (Jaime tree)
 		"orthoExtract=i" => \$MFopt{calcOrthoPlacement},
@@ -12261,6 +12292,9 @@ sub getCmdLineOptions{
 	$MFopt{diamondMem} = 16 if ($MFopt{diamondMem} <= 0);
 	die "ERROR:: -mapper 4 (kma) was removed in MATAFILER 4.47; use 1 (bowtie2), 2 (bwa), 3 (minimap2) or 5 (strobealign)\n"
 		if ($MFopt{MapperProg} == 4);
+	die "ERROR:: -DiaSearchTool must be diamond or mmseqs\n" unless ($MFopt{diaSearchTool} =~ /^(?:diamond|mmseqs)$/);
+	warn "-DiaFrameshift has no MMseqs2 equivalent and is ignored with -DiaSearchTool mmseqs\n"
+		if ($MFopt{diaSearchTool} eq "mmseqs" && $MFopt{diaFrameshift} && $MFopt{DoDiamond});
 	if ($MFopt{MapperMemory} == -1 ){
 		if($MFopt{MapperProg} >2){$MFopt{MapperMemory} = 35 ;
 		} else {$MFopt{MapperMemory} = 20 ;}	

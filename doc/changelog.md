@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-08 — Mapper audit: lower-priority fixes (MATAF4 4.49, geneCat 0.67)
+
+- **Mapping statistics sum every bowtie2 run.** A paired library and its singletons are two runs; before, only the first summary was read. `ReadsPaired` counts pairs + single reads, and the overall rate is aligned mates over all mates.
+- **`-DiaSearchTool mmseqs`** (new; default `diamond`): a working MMseqs2 read search.
+  - Percent identity like DIAMOND's (`pident`; the old branch used the 0–1 `fident`).
+  - The same search e-value as DIAMOND.
+  - Mates interleaved on `stdin`; hit tables gzipped for the parser.
+  - `-DiaSensitiveMode` gives `-s 5.7` instead of `-s 4`.
+- **`-DiaPercID` accepts decimals**, like the parser and geneCat.
+- **Read groups:** `PL:ELEMENT` for AVITI and `PL:LS454` for 454 (were `ILLUMINA`).
+- **No thread oversubscription in mapping jobs.** samtools in the mapper's pipe (`view`, and `sort` in decoy/competitive mode) gets a quarter of the cores; steps after mapping keep all. The same applies to geneCat `-ntMatchGC`.
+- **geneCat CD-HIT** (`-mmseqC 0`): `-M` is 90 % of the job's memory (was the job memory + 30 GB).
+- Tests in `t/audit_2026_10_08_decisions.t`.
+
 ## 2026-10-08 — Mapper audit: decisions (MATAF4 4.48, geneCat 0.66)
 
 - Details: "Decided and implemented" in [`docs/audits/2026-10-08/mappers.md`](../docs/audits/2026-10-08/mappers.md).

@@ -107,12 +107,20 @@ The decisions taken on the open items, verified against the pinned sources: Krak
 - **FOAM hmmsearch** has no `-Z`, so `-E 1e-5` is applied per chunk.
 - **TaxaTarget's database can no longer be downloaded.** `obj.umiacs.umd.edu/taxatarget/data.zip` returns 403, and the tool is unmaintained (last commit 2022). Its issue #3 (missing `phylogroup_total_mgLen.txt` in `data.zip`) is open.
 - **Lower priority:**
-  - `getMapStats` parses only the first bowtie2 summary.
   - minimap2 above 8 Gbases builds a multi-part index.
   - `-mapUnmapped` dies in `seedUnzip2tmp`.
-  - The read group ID is the sample name for every library, and `PL` is ILLUMINA for AVITI/454.
-  - The mapper and samtools both run `N` threads in an `N`-core job.
-  - The CD-HIT `-M` exceeds its job.
+  - The read group ID is the sample name for every library.
   - `decluterGC.pl` always rebuilds its mmseqs DB.
-  - The MMseqs2 branch of `runDiamond` was unreachable and broken (`fident` is 0–1; `--compressed` does not gzip `.m8`). It was removed with the mate change.
-  - `-DiaPercID` takes integers only.
+
+## Lower-priority fixes (MATAF4 4.49, geneCat 0.67)
+
+Tests: `t/audit_2026_10_08_decisions.t`. All of them fail against the 4.48 code.
+
+| Item | Change |
+|---|---|
+| `getMapStats` | Every bowtie2 summary in the log is summed: a paired library and its singletons are two runs, and so are several libraries. `ReadsPaired` is pairs + single reads. The overall rate is aligned mates over all mates; the categories are computed from the summed counts. |
+| MMseqs2 read search | New `-DiaSearchTool mmseqs` (default `diamond`); the branch could not be reached before and would have failed. MMseqs2 `easy-search` uses:<ul><li>`pident` (a percentage, as `-DiaPercID` expects) instead of `fident` (0–1);</li><li>the same search e-value as DIAMOND;</li><li>`-s 4`, or `-s 5.7` with `-DiaSensitiveMode`;</li><li>`--max-accept 5` (100 for long reads).</li></ul>Mates are interleaved on `stdin`, which MMseqs2 accepts as a query, and the hit tables are gzipped, since `--compressed` only applies to database output. `-DiaFrameshift` has no MMseqs2 equivalent and gives a warning. |
+| `-DiaPercID` | Takes decimals (`=f`), like the parser and geneCat. |
+| Read groups | `PL:ELEMENT` for AVITI and `PL:LS454` for 454, the SAM-spec names (were `ILLUMINA`). `proto` stays `ILLUMINA`; its platform is not documented. |
+| Thread oversubscription | samtools steps that run in the mapper's pipe get `max(1, N/4)` threads instead of `N` alongside the mapper's `N`: `view -b1` (all mappers) and `sort` (decoy and competitive modes). Steps after mapping keep `N`. geneCat `-ntMatchGC` does the same next to minimap2. |
+| CD-HIT memory | `-M` is 90 % of the job's memory (was job memory + 30 GB, so the scheduler killed the job before cd-hit's own check). |

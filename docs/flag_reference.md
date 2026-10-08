@@ -11,7 +11,7 @@ This page is validated against the repository Perl source files for `MATAF4.pl`,
 
 | Script | Version in referenced source | Role |
 |---|---:|---|
-| `MATAF4.pl` | `4.48` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
+| `MATAF4.pl` | `4.49` | Main sample-level pipeline: read detection, preprocessing, host filtering, assembly, mapping, binning, SNP/SV calling and read-based profiling. |
 | `geneCat.pl` | `0.59` | Gene catalog construction and downstream gene-catalog annotation/MGS orchestration. |
 | `MGS.pl` | `0.55` | MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestration. |
 | `strain_within.pl` | `1.60` | Within-MGS locus extraction, quality control, tree preparation/submission and downstream hand-off. |
@@ -253,12 +253,13 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-DiaCores` | integer | `12` | stable | CPU cores requested for DIAMOND jobs. |
 | `-DiaMem` | integer | `16` | stable | memory in GB for diamond alignment jobs |
 | `-DiaParseEvals` | string | `"1e-7"` | stable | evalues at which to accept hits to func database |
-| `-DiaSensitiveMode` | integer | `0` | stable | Enable DIAMOND sensitive mode. |
+| `-DiaSensitiveMode` | integer | `0` | stable | Enable DIAMOND sensitive mode (MMseqs2: `-s 5.7` instead of `-s 4`). |
+| `-DiaSearchTool` | string | `diamond` | stable | Aligner of the read-based functional search: `diamond`, or `mmseqs` (MMseqs2 easy-search, translated; no frameshift or range-culling mode). |
 | `-DiaFrameshift` | integer | `0` | stable | diamond -F frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment |
 | `-rmRawDiamondHits` | integer | `0` | stable | Delete raw DIAMOND hits after successful parsing. A parsed database is not searched again because its raw hits are gone; `-reParseFunct` then needs a new search. |
 | `-DiaMinAlignLen` | integer | `20` | stable | Minimum accepted DIAMOND alignment length. |
 | `-DiaMinFracQueryCov` | float | `0.1` | stable | Subject-coverage fraction threshold (legacy query-named flag). |
-| `-DiaPercID` | integer | `40` | stable | Minimum accepted DIAMOND percent identity. |
+| `-DiaPercID` | float | `40` | stable | Minimum accepted DIAMOND percent identity. |
 | `-DiaDBs` | string | `""` | stable | Comma-separated functional databases: NOG,MOH,MOH2,ABR,ABRc,ACL,KGM,KGB,KGE,CZy,PTV,PAB,URE,URacc,AMI. See the [profiling tutorial](profiling_tutorial.md) for the config key each one needs. |
 
 ## Functional profiling (jaime tree)

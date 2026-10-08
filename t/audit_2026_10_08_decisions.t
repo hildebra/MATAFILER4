@@ -228,4 +228,63 @@ subtest 'mosaic loci, geneCat DIAMOND resources' => sub {
 	like(read_file("$root/secScripts/geneCat.pl"), qr/my \$funcDiaSensitivity = "mid-sensitive";/, 'geneCat uses --mid-sensitive');
 };
 
+# ---------------- lower-priority fixes (MATAF4 4.49) ----------------
+subtest 'mapping statistics sum every bowtie2 run' => sub {
+	our (%locStats, $logText);
+	*main::read_stats_log_excerpt = sub { return $logText };
+	*main::parse_bam_filter_counters = sub { return undef };
+	eval source_sub($mfSrc, 'bwtLogRd') . "\n" . source_sub($mfSrc, 'getMapStats'); die $@ if $@;
+	my $pe = "10 reads; of these:\n  10 (100.00%) were paired; of these:\n    2 (20.00%) aligned concordantly 0 times\n"
+		. "    6 (60.00%) aligned concordantly exactly 1 time\n    2 (20.00%) aligned concordantly >1 times\n    ----\n"
+		. "    2 pairs aligned concordantly 0 times; of these:\n      1 (50.00%) aligned discordantly 1 time\n    ----\n"
+		. "    1 pairs aligned 0 times concordantly or discordantly; of these:\n      2 mates make up the pairs; of these:\n"
+		. "        1 (50.00%) aligned 0 times\n        1 (50.00%) aligned exactly 1 time\n        0 (0.00%) aligned >1 times\n95.00% overall alignment rate\n";
+	my $se = "4 reads; of these:\n  4 (100.00%) were unpaired; of these:\n    2 (50.00%) aligned 0 times\n"
+		. "    2 (50.00%) aligned exactly 1 time\n    0 (0.00%) aligned >1 times\n50.00% overall alignment rate\n";
+	$logText = $pe . $se; %locStats = ();
+	my $s = main::getMapStats($tmp);
+	is($s->{ReadsPaired}, 14, 'pairs of the paired run + reads of the singleton run');
+	cmp_ok(abs($s->{OverallAlignment} - 100 * (0.95 * 20 + 0.5 * 4) / 24), '<', 1e-9, 'overall rate over all mates of both runs');
+	cmp_ok(abs($s->{UniqueAlgned} - 100 * 6 / 14), '<', 1e-9, 'categories from the summed counts');
+	cmp_ok(abs($s->{SingleUniqAlign} - 100 * 3 / 14), '<', 1e-9, 'single-read alignments of both runs');
+};
+
+subtest 'MMseqs2 read search, options, read groups, threads, CD-HIT' => sub {
+	our (%LIBS, %progStats, $pigzBin, $avx2Constr);
+	%LIBS = (0 => ['s.fq.gz'], 1 => ['r2.fq.gz'], 2 => ['r1.fq.gz']); %progs = ();
+	*main::readLibrariesByScope = sub { return [] };
+	%MFopt = (diaCores => 4, diaRunSensitive => 0, diaFrameshift => 0, diaEVal => '1e-7', DiaPercID => 40, DiaMinAlignLen => 20,
+		DiaMinFracQueryCov => 0.1, DiaRmRawHits => 0, globalDiamondDependence => {KGM => 'KGM-1'}, diamondMem => 16,
+		diaSearchTool => 'mmseqs');
+	$pigzBin = 'pigz';
+	eval source_sub($mfSrc, 'runDiamond'); die $@ if $@;
+	@jobs = (); make_path("$tmp/rdm/diamond");
+	main::runDiamond("$tmp/rdm/diamond/", "$tmp/db/", "$tmp/scr", 'dep', 'KGM');
+	my ($search) = grep { $_->[4] =~ /^_DKGM/ } @jobs;
+	like($search->[1], qr/^prog_interleaveMates_scr r1\.fq\.gz r2\.fq\.gz \| prog_mmseqs2 easy-search stdin \S+KGM\.ref\.db\.mms2 (\S+) .* -e 1e-4 -s 4 --max-accept 5 --format-output query,target,pident,/m,
+		'-DiaSearchTool mmseqs: mates interleaved on stdin, percent identity, same e-value');
+	like($search->[1], qr/^prog_mmseqs2 easy-search s\.fq\.gz /m, 'single reads from their file');
+	like($search->[1], qr/^pigz -p 4 \S+DiaAssignment\.sub\.KGM\.1\.0$/m, 'hit table gzipped for the parser');
+	like($mfSrc, qr/"DiaPercID=f" => \\\$MFopt\{DiaPercID\}/, '-DiaPercID accepts decimals');
+
+	our %MFconfig = (mateInsertLength => 20000);
+	eval source_sub($mfSrc, 'getRgStr'); die $@ if $@;
+	like(main::getRgStr('S', 'lib', 'lib', 1, 1, 'AVITI'), qr/--rg PL:ELEMENT /, 'AVITI read group platform ELEMENT');
+	like(main::getRgStr('S', 'lib', 'lib', 1, 2, '454'), qr/\\tPL:LS454\\t/, '454 read group platform LS454');
+	like(main::getRgStr('S', 'lib', 'lib', 1, 1, 'hiSeq'), qr/--rg PL:ILLUMINA /, 'Illumina unchanged');
+
+	our $smtBin = 'samtools';
+	%MFopt = (bamfilterIll => '0.05 0.75 20 3');
+	%progs = (bamFilter_scr => 'bamfilter', bamHdFilt_scr => 'hdfilt');
+	eval source_sub($mfSrc, 'alignPostTreat'); die $@ if $@;
+	my ($post) = main::alignPostTreat({MapperProg => 1, readTec => 'hiSeq', NcoreL => 16, nodeTmp => "$tmp/n", tmpOut21 => "$tmp/o",
+		subBamsAR => [], unaligned => '', baseN => 'b', xtraSamSteps1 => '', decoyModeActive => 0, map2ndTogether => 0,
+		regsAR => [], reg_lcsAR => [], doCram => 0, finalDSar => [], outNmsAR => [], mappDirAR => []}, 0, 0);
+	like($post, qr/\|\s+samtools view -b1 -@ 4 -F 4 - >/, 'samtools in the 16-core mapping pipe gets 4 threads');
+	like(source_sub($mfSrc, 'mapReadsToRef'), qr/\$sortCores = int\(\$NcoreL \/ 4\).*sort -@ \$sortCores/s, 'in-pipe sort (decoy/competitive) too');
+	my $gc = read_file("$root/secScripts/geneCat.pl");
+	like($gc, qr/\$smtCores = int\(\$numCor \/ 4\).*view -b1 -@ \$smtCores -F 4/s, '-ntMatchGC: samtools beside minimap2');
+	like($gc, qr/-M "\.\(int\(\$totMemCl\*0\.9\*1024\) \|\| 1024\)/, 'CD-HIT -M within the job memory');
+};
+
 done_testing();

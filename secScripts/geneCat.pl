@@ -64,7 +64,8 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.66; #0.66: FuncAssign DIAMOND --mid-sensitive (mode recorded in .<DB>.params); KGM/NOG chunks 32G
+our $version = 0.67; #0.67: CD-HIT -M within its job; -ntMatchGC samtools threads beside minimap2
+#0.66: FuncAssign DIAMOND --mid-sensitive (mode recorded in .<DB>.params); KGM/NOG chunks 32G
 #0.65: marker-gene mmseqs clustering sized to its own job; -ntMatchGC maps with the asm20 preset (no prebuilt .mmi)
 #0.64: functional stages supervised until done; OOM-killed jobs resubmitted with more memory
 #0.63: smaller catalog chunks for the KEGG/eggNOG diamond searches (-fastaSplitBigDB)
@@ -1771,7 +1772,9 @@ sub ntMatchGC{
 	my $cmd = "";
 	$cmd .= "$tmpCmd\n";
 	my $mini2Base = "$mini2Bin -2 -a -t $numCor --secondary=no -Y -x asm20 "; #--sam-hit-only
-	$cmd .= "$mini2Base $bwtIdxT $geneFNA | $bamfilter $pctID $pctCov $mapQual | $smtBin view -b1 -@ $numCor -F 4 - > $iTO\n";
+	#samtools compresses alongside minimap2 in the same $numCor-core job: a quarter of the cores
+	my $smtCores = int($numCor / 4); $smtCores = 1 if ($smtCores < 1);
+	$cmd .= "$mini2Base $bwtIdxT $geneFNA | $bamfilter $pctID $pctCov $mapQual | $smtBin view -b1 -@ $smtCores -F 4 - > $iTO\n";
 	#die "$cmd\n\n";
 	#convert bam to txt file
 	$cmd .= "$smtBin view $iTO | $cutBin -f1,3 > $iTO2 \n";
@@ -3011,7 +3014,8 @@ sub clusterFNA($ $ $ $ $ $ $ $ $ $){
 		$cmd .= " $rmBin -f $oFNA ${oFNA}_all_seqs.fasta ${oFNA}_cluster.tsv;\n $mvBin ${oFNA}_rep_seq.fasta $oFNA;\n\n";
 	} else {
 		#	$defaultsCDH = "-d 0 -c 0.$cdhID -g 0 -T $numCor -M ".int(($totMem+30)*1024) if (@ARGV>3);
-		$cmd .= $cdhitBin." -i $inFNA -o $oFNA -n 9 -mask NX -G 1 -r 0 -aS $aS -aL $aL -d 0 -c $ID -g $gfac -T $numCor -M ".int(($totMemCl+30)*1024)."\n";
+		#-M (MB) within the job's memory: above it the scheduler kills the job before cd-hit's own check
+		$cmd .= $cdhitBin." -i $inFNA -o $oFNA -n 9 -mask NX -G 1 -r 0 -aS $aS -aL $aL -d 0 -c $ID -g $gfac -T $numCor -M ".(int($totMemCl*0.9*1024) || 1024)."\n";
 	}
 
 	return $cmd;
