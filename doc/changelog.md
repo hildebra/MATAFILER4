@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-08 — Supervised functional-annotation stages, OOM resubmission
+
+- `geneCat.pl` 0.64.
+- **Problem:** the `FuncAssign` and `FuncEMAP` controllers submitted all jobs with Slurm `afterok` dependencies and exited. Any chunk job that did not end `COMPLETED` (an OOM event, even after the job wrote its output) left the merge, matrix and stone jobs pending forever (`DependencyNeverSatisfied`). An eggNOG-mapper run then had all chunk annotations, but `CombineEMAP` never merged them.
+- **Supervision:** the controllers (`func_GC.sh`, `emap_GC.sh`, now on the long queue) stay alive until every job of their stage has finished.
+  - While the stage is built, `qsubSystem` records its jobs instead of submitting them (new `Mods/JobGraph.pm`, hook in `Mods/Subm.pm`). The controller then submits each job once its prerequisites have completed.
+  - A job counts as done when it wrote its completion marker (`<script>.done`).
+  - OOM-killed jobs (`OUT_OF_MEMORY`, signal 9) are resubmitted with 1.5× memory; jobs lost to node failures or preemption, with the same memory. At most `GENECAT_FUNC_ATTEMPTS` (3) attempts.
+  - A job that fails for good stops only its dependents; the controller then exits with a report and removes the in-flight marker. The marker holds the controller's job ID while it runs.
+- **Recovering a stage stuck from an earlier run:** rerun geneCat. The stale marker (final job `DependencyNeverSatisfied`) is removed, finished chunks are reused, and the stage continues from the merge. Cancel the stale pending jobs with `scancel`.
+- `t/job_graph.t`: recording, prerequisite order, OOM retry with more memory, retry limit, blocking of dependents, outcome classification from `sacct`, and an end-to-end run through `qsubSystem` in local bash mode.
+
 ## 2026-10-07 — Smaller KEGG/eggNOG chunks for FuncAssign
 
 - `geneCat.pl` 0.63.

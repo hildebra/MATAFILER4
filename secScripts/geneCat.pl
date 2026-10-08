@@ -33,6 +33,7 @@ use Sys::Hostname qw(hostname);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
 use Mods::FuncTools qw(assignFuncPerGene calc_modules vfTabStale bigFuncDB);
+use Mods::JobGraph qw(newJobGraph runJobGraph jobGraphReport);
 use Digest::MD5 ();
 use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins3 );
 use Mods::Binning qw(getBinSubdirName);
@@ -63,7 +64,8 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.63; #0.63: smaller catalog chunks for the KEGG/eggNOG diamond searches (-fastaSplitBigDB)
+our $version = 0.64; #0.64: functional stages supervised until done; OOM-killed jobs resubmitted with more memory
+#0.63: smaller catalog chunks for the KEGG/eggNOG diamond searches (-fastaSplitBigDB)
 #0.62: eggNOG-mapper v3 (eggNOG 7), VFDB sets in the default -functDB
 #0.61: functional annotation robustness, query-or-subject coverage, eggNOG-mapper KOs/modules, VFDB set A/B
 
@@ -983,8 +985,8 @@ if ($mode eq "mergeCLs"){
 		eval { getSpecificDBpaths($curDB,0); 1 } or push(@missing,"  $curDB: $@");
 	}
 	die "FuncAssign: missing/invalid functional databases, nothing submitted:\n".join("",@missing) if (@missing);
-	#not again while jobs of an earlier submission are queued or running (see _submitStageOnce)
-	_submitStageOnce('FuncAssign', sub {
+	#not again while jobs of an earlier submission are queued or running (see _submitStageOnce); supervised until done
+	_submitStageOnce('FuncAssign', sub { _superviseFuncStage('FuncAssign', sub {
 		#databases with the same chunk size share one split of the catalog (catalog-specific directories: one for
 		#-fastaSplit, one for the KEGG/eggNOG -fastaSplitBigDB); removed by the final job
 		my $query = "$GCdir/compl.incompl.$cdhID.prot.faa";
@@ -1019,17 +1021,18 @@ if ($mode eq "mergeCLs"){
 		make_path("$qsubDir/Funct/") unless -d "$qsubDir/Funct/";
 		my ($doneDep, $doneQcmd) = qsubSystem("$qsubDir/Funct/FuncAssign.done.sh", $doneCmd,
 			1, "1G", "funcDone", join(";", @funcDeps), "", 1, [], $QSBoptHR);
-		print "All function-assignment jobs submitted\n";
+		print "All function-assignment jobs prepared\n";
 		return $doneDep;
-	});
+	}); });
 	exit(0);
 } elsif($mode eq "FuncEMAP"){ #eggNOG functional assignment
 	$QSBoptHR->{doSubmit} = 1;
 	my $clean=1;
 	if ($fastaSplits eq "500M"){$fastaSplits="150M";}
-	_submitStageOnce('FuncEMAP', sub {
+	#supervised until done, see _superviseFuncStage
+	_submitStageOnce('FuncEMAP', sub { _superviseFuncStage('FuncEMAP', sub {
 		return geneCatFunc_emapper($GCdir,$NodeTmpDir."/GCannoEMAP_"._gcTmpTag()."/",$numCor,$clean,$fastaSplits,$modeStone);
-	});
+	}); });
 	exit(0);
 } elsif ($mode eq "protExtract"){#
 	protExtract($GCdir,$extraRdsFAA,$out); #GCdir
@@ -1593,6 +1596,7 @@ sub geneCatFlow($ $ $ $ ){
 		$stageCmd .= "$GCscr -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -fastaSplitBigDB $fastaSplitsBig -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPercQueryCov $minPercQueryCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -redoFunc $redoFunc$funcFwd -stone $funcStone\n";
 		if ($submitLocal) {
 			print "submitting diamond func abundance..\n";
+			$QSBoptHR->{useLongQueue} = 1; #the controller supervises the stage's jobs until all finished
 			my ($dep,$qcmd) = qsubSystem($qsubDir."func_GC.sh",$stageCmd,1,int($totMem3)."G","funcGC","","",1,[],$QSBoptHR);
 		} else {
 			$cmd .= $stageCmd;
@@ -1612,6 +1616,7 @@ sub geneCatFlow($ $ $ $ ){
 		$stageCmd .= "$GCscr -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID$funcFwd -stone $emapStone \n";
 		if ($submitLocal) {
 			print "submitting eggNOGmapper func abundance..\n";
+			$QSBoptHR->{useLongQueue} = 1; #the controller supervises the stage's jobs until all finished
 			my ($dep,$qcmd) = qsubSystem($qsubDir."emap_GC.sh",$stageCmd,1,int($totMem3)."G","emapGC","","",1,[],$QSBoptHR);
 		} else {
 			$cmd .= $stageCmd;
@@ -3512,6 +3517,25 @@ sub _inflightRecordJob{
 	open my $fh, '>>', $f or die "Cannot update $f: $!\n";
 	print {$fh} "job\t$job\n";
 	close $fh;
+}
+#runs a functional stage under supervision: while $build runs, qsubSystem records its jobs (Mods::JobGraph); they are
+#then submitted as their prerequisites complete, and jobs killed for lack of memory (or lost to a node failure) are
+#resubmitted, with 1.5x memory after an OOM, up to GENECAT_FUNC_ATTEMPTS (3) attempts. This process stays alive until
+#every job finished; the stage's final job writes the stone and removes the in-flight marker. Dies with a report if a
+#job failed for good (its dependents are not run, the others are).
+sub _superviseFuncStage{
+	my ($stage, $build) = @_;
+	my $graph = newJobGraph();
+	{
+		local $QSBoptHR->{jobGraph} = $graph;
+		$build->();
+	}
+	#a second geneCat run sees the stage busy while this controller job is alive
+	_inflightRecordJob($stage, $ENV{SLURM_JOB_ID}) if (defined($ENV{SLURM_JOB_ID}) && $ENV{SLURM_JOB_ID} =~ /^\d+$/);
+	my $res = runJobGraph($graph, $QSBoptHR, max_attempts => ($ENV{GENECAT_FUNC_ATTEMPTS} || 3), label => $stage);
+	die jobGraphReport($res) . "Fix the reported cause and rerun geneCat; finished jobs are not repeated.\n" unless ($res->{ok});
+	print "$stage: all jobs finished" . (@{$res->{retried}} ? " (" . scalar(@{$res->{retried}}) . " needed a resubmission)" : "") . "\n";
+	return "";
 }
 #runs a stage's submission under its marker; $submit returns the final job id
 sub _submitStageOnce{

@@ -338,7 +338,13 @@ The query-coverage alternative keeps partial (incomplete) genes. Changing `-func
 
 The catalog is aligned in chunks, one job each: `-fastaSplit` (500M) for most databases, `-fastaSplitBigDB` (100M) for KEGG (`KGM`, `KGE`, `KGB`) and eggNOG (`NOG`). DIAMOND's temporary files on node-local scratch grow with the chunk size and with the number of homologs per gene. 500M chunks against KEGG exceeded the 500 GB scratch a job requests. DIAMOND deletes these files right after opening them, so they do not show up in `ls` or `du` while the job runs. Chunk size does not change the results. After a chunk size changes, chunk outputs from the old split are recomputed.
 
-While a stage's jobs are queued or running, `Anno/Func/.FuncAssign.inflight` / `.FuncEMAP.inflight` holds its final job, and geneCat does not submit that stage again (also not with `-redoFunc 1`). The final job removes the marker. A marker whose final job has finished, can never run (Slurm `DependencyNeverSatisfied` after a failed job), or whose submitting process died is ignored and removed.
+**Supervision.** Each functional stage (`FuncAssign`: diamond databases, `FuncEMAP`: eggNOG-mapper) runs under a controller job (`func_GC.sh`, `emap_GC.sh`, on the long queue). The controller stays alive until all of the stage's jobs have finished:
+- It submits each job once its prerequisites have completed. There are no scheduler dependencies, so a failed job cannot leave the rest of the stage pending.
+- A job succeeds when it writes its completion marker (`<script>.done`) as its last command, whatever Slurm reports.
+- A job killed for exceeding its memory (Slurm `OUT_OF_MEMORY`, or killed by signal 9) is resubmitted with 1.5× the memory. A job lost to a node failure or preemption is resubmitted with the same memory. A job is tried at most `GENECAT_FUNC_ATTEMPTS` times (default 3); logs of failed attempts are kept as `<script>.etxt.attempt<n>`.
+- A job that fails for good only stops the jobs that depend on it; the rest of the stage still runs. The controller then exits with a report: failed jobs, their scheduler state and the last lines of their error log. Rerunning geneCat repeats only what is missing.
+
+While a stage runs, `Anno/Func/.FuncAssign.inflight` / `.FuncEMAP.inflight` holds the controller's job ID, and geneCat does not submit that stage again (also not with `-redoFunc 1`). The stage's final job removes the marker; so does a controller that stops on a failure. A marker whose job has finished, can never run (Slurm `DependencyNeverSatisfied`, left by runs before supervision), or whose submitting process died is ignored and removed.
 
 `Anno/Func/.<db>.matrix.done` marks a completed matrix. A database without this marker, or without its `DIAass_<db>.srt.gzgeneAss.gz`, is recomputed on the next `FuncAssign` run. The stone records both files, so it is only written after every matrix succeeded.
 

@@ -8,6 +8,7 @@ use File::Spec;
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths convert2Gb);
 use Mods::WorkflowControl qw(normalise_job_dependencies);
+use Mods::JobGraph qw(jobGraphRecord);
 
 
 use Exporter qw(import);
@@ -778,6 +779,8 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	# 8[0/1: excute in cwd?] 9[0/1: return qsub cmd or submit job to cluster]
 	# Falk Hildebrand, may 2015
 	my ($tmpsh,$cmd,$ncores,$memory,$jname,$waitJID,$cwd,$immSubm, $restrHostsAR, $optHR) = @_;
+	#a supervised stage (Mods::JobGraph) records its jobs here and submits them itself as their prerequisites finish
+	return jobGraphRecord($optHR->{jobGraph}, @_) if (ref($optHR) eq 'HASH' && ref($optHR->{jobGraph}) eq 'HASH');
 	my $requestedJobName = $jname;
 	#$doSync, 5th arg
 	#14,12G
