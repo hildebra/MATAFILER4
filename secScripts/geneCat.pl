@@ -1612,8 +1612,9 @@ sub geneCatFlow($ $ $ $ ){
 		retry_unlink($emapStone, label => 'invalidate stale eggNOG checkpoint')
 			if -e $emapStone;
 		my $stageCmd = "#functional assignments via eggNOGmapper\n";
-		#-c $numCor3 .. use max 6 cores for this due to single core emapper final step
-		$stageCmd .= "$GCscr -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID$funcFwd -stone $emapStone \n";
+		#-c: cores (and emapper --cpu) per chunk job. eggNOG-mapper v3 also annotates in parallel (2.x had a single-core
+		#final step); DIAMOND peak ~ 4 x 6 + 23 GB / 2 + 0.5 GB per thread = 41.5 GB with 12 threads, within the 55 GB jobs
+		$stageCmd .= "$GCscr -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 12 -clusterID $cdhID$funcFwd -stone $emapStone \n";
 		if ($submitLocal) {
 			print "submitting eggNOGmapper func abundance..\n";
 			$QSBoptHR->{useLongQueue} = 1; #the controller supervises the stage's jobs until all finished
@@ -3459,7 +3460,7 @@ sub _readInflight{
 }
 #state of a submitted job: 'alive' (queued or running), 'dead' (pending on a dependency that failed) or 'gone'
 sub _stageJobState{
-	my ($job) = @_;
+	my ($job, $seen) = @_;
 	my $qmode = $QSBoptHR->{qmode} // 'slurm';
 	return 'gone' if ($qmode eq 'bash');
 	my $id = $job;
@@ -3467,10 +3468,22 @@ sub _stageJobState{
 	$id =~ s/^\Q$rTag\E// if ($rTag ne '');
 	return 'gone' unless ($id =~ /^\d+$/);
 	if ($qmode eq 'slurm'){
-		my $out = `squeue -h -j $id -o "%T|%r" 2>&1`;
+		my $out = `squeue -h -j $id -o "%T|%r|%E" 2>&1`;
 		if ($? == 0){
 			return 'gone' unless ($out =~ /\S/);
-			return ($out =~ /DependencyNeverSatisfied/i) ? 'dead' : 'alive';
+			return 'dead' if ($out =~ /DependencyNeverSatisfied/i);
+			#runs before supervision chained a stage's jobs with afterok: behind a failed job, Slurm reports
+			#DependencyNeverSatisfied only for its direct dependents and "Dependency" for every job further down,
+			#so a final job waiting on a stuck job is stuck too
+			if ($out =~ /^PENDING\|Dependency\|(.*)$/m){
+				my $deps = $1;
+				$seen ||= { $id => 1 };
+				foreach my $dep ($deps =~ /(\d+)/g){
+					next if ($seen->{$dep}++);
+					return 'dead' if (_stageJobState($dep, $seen) eq 'dead');
+				}
+			}
+			return 'alive';
 		}
 		return 'gone' if ($out =~ /Invalid job id/i); #purged from the controller
 	}

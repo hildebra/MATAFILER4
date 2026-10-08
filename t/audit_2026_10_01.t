@@ -396,6 +396,30 @@ subtest 'functional stages are not submitted twice while in flight' => sub {
 	ok(!-e $marker, 'final job already ran (local execution): no marker recreated');
 	ok(GCInflight::_inflightAcquire('FuncEMAP') && !GCInflight::_inflightAcquire('FuncEMAP'), 'marker is created exclusively');
 };
+#runs before supervision chained jobs with afterok: Slurm reports DependencyNeverSatisfied only next to the failed job
+subtest 'a final job further down a chain behind a failed job is stale' => sub {
+	my $bin = "$tmp/fakebinChain"; make_path($bin);
+	write_file("$bin/squeue", "#!/usr/bin/env perl\nmy (\$id) = map { \$ARGV[\$_ + 1] } grep { \$ARGV[\$_] eq '-j' } 0 .. \$#ARGV;\n"
+		. "print \$ENV{\"FAKE_SQUEUE_\$id\"} // '';\n");
+	chmod 0755, "$bin/squeue";
+	local $ENV{PATH} = "$bin:$ENV{PATH}";
+	$GCInflight::QSBoptHR = {qmode => 'slurm', rTag => 'MF_'};
+	$GCInflight::GCdir = "$tmp/inflightChain";
+	my $calls = 0;
+	my $submit = sub { $calls++; return 'MF_4242' };
+	GCInflight::_submitStageOnce('FuncEMAP', $submit);
+	#final job 4242 (CleanEMAP) waits on matrix jobs 5001/5002, which wait on the merge job 6000
+	local $ENV{FAKE_SQUEUE_4242} = "PENDING|Dependency|afterok:5001(unfulfilled),afterok:5002(unfulfilled)\n";
+	local $ENV{FAKE_SQUEUE_5001} = "PENDING|Dependency|afterok:6000(unfulfilled)\n";
+	local $ENV{FAKE_SQUEUE_5002} = "PENDING|Dependency|afterok:6000(unfulfilled)\n";
+	local $ENV{FAKE_SQUEUE_6000} = "RUNNING|None|\n";
+	GCInflight::_submitStageOnce('FuncEMAP', $submit);
+	is($calls, 1, 'chain still progressing: stage not submitted again');
+	$ENV{FAKE_SQUEUE_6000} = "PENDING|DependencyNeverSatisfied|afterok:7000(failed)\n";
+	GCInflight::_submitStageOnce('FuncEMAP', $submit);
+	is($calls, 2, 'final job behind a job stuck on a failed dependency: stage resubmitted');
+	unlink GCInflight::_inflightMarker('FuncEMAP');
+};
 
 # ---------------- geneCat.pl stage wiring (static) ----------------
 subtest 'geneCat functional stage wiring' => sub {

@@ -9,7 +9,9 @@
   - A job counts as done when it wrote its completion marker (`<script>.done`).
   - OOM-killed jobs (`OUT_OF_MEMORY`, signal 9) are resubmitted with 1.5× memory; jobs lost to node failures or preemption, with the same memory. At most `GENECAT_FUNC_ATTEMPTS` (3) attempts.
   - A job that fails for good stops only its dependents; the controller then exits with a report and removes the in-flight marker. The marker holds the controller's job ID while it runs.
-- **Recovering a stage stuck from an earlier run:** rerun geneCat. The stale marker (final job `DependencyNeverSatisfied`) is removed, finished chunks are reused, and the stage continues from the merge. Cancel the stale pending jobs with `scancel`.
+- **Recovering a stage stuck from an earlier run:** rerun geneCat. The stale marker is removed, finished chunks are reused, and the stage continues from the merge. Cancel the stale pending jobs with `scancel`.
+  - The in-flight check now follows a pending final job's dependencies (`squeue %E`) down the chain. Before, it only recognised a final job whose own reason was `DependencyNeverSatisfied`. Slurm gives that reason only to the direct dependents of a failed job; jobs further down show "Dependency". So a stuck eggNOG-mapper stage (`CleanEMAP` waiting on `EM.*`, waiting on `CombineEMAP`) looked alive, and geneCat never resubmitted it.
+- **eggNOG-mapper chunk jobs use 12 cores** (was 6; also `emapper --cpu`). v3 annotates in parallel, unlike 2.x's single-core final step. The DIAMOND estimate (about 42 GB) fits the 55 GB jobs.
 - `t/job_graph.t`: recording, prerequisite order, OOM retry with more memory, retry limit, blocking of dependents, outcome classification from `sacct`, and an end-to-end run through `qsubSystem` in local bash mode.
 
 ## 2026-10-07 — Smaller KEGG/eggNOG chunks for FuncAssign
