@@ -407,6 +407,7 @@ sub runLca {
 		'-i', shellQuote(join(',', @similarityOutputs)),
 		'-r', shellQuote(join(',', @usedTaxonomies)),
 		'-o', shellQuote($hierarchy),
+		'-t', $cores,
 		$flags;
 	print "Running LCA for $marker\n";
 	systemW($command);

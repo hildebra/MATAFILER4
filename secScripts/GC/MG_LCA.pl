@@ -138,7 +138,7 @@ sub submitJobs{
 			#print "XX\n";
 			$cmd .= "\n\n#At $COG\n";
 			$cmd .= lambdaBl($ifna,"$SpecID/$COG${xtrLab}.fna",$m8file,$cores,!$subm)."\n" unless (-e $CogTaxF || -e $m8file); #.rep
-			$cmd .= "$LCAbin  -i $m8file -r $taxPerGene -o $CogTaxF  -LCAfrac 0.8  -cover 0.9 -minAlignLen 70 -id $FMGcutoffs{$COG},90,80,60,50,30,0;\n" unless (-e $CogTaxF);
+			$cmd .= "$LCAbin  -i $m8file -r $taxPerGene -o $CogTaxF -t $cores -LCAfrac 0.8  -cover 0.9 -minAlignLen 70 -id $FMGcutoffs{$COG},90,80,60,50,30,0;\n" unless (-e $CogTaxF);
 			$cmd .= "rm -f $MGdir/$COG.fa $m8file\n";
 			$collectJobs++;
 		}
