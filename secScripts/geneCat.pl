@@ -64,7 +64,8 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.68; #0.68: eggNOG-mapper chunks search, then annotate from a node-local eggnog.db; retried annotations skip the search
+our $version = 0.69; #0.69: the node-local eggnog.db copy reserves its disk space first; without it, the shared data dir
+#0.68: eggNOG-mapper chunks search, then annotate from a node-local eggnog.db; retried annotations skip the search
 #0.67: CD-HIT -M within its job; -ntMatchGC samtools threads beside minimap2
 #0.66: FuncAssign DIAMOND --mid-sensitive (mode recorded in .<DB>.params); KGM/NOG chunks 32G
 #0.65: marker-gene mmseqs clustering sized to its own job; -ntMatchGC maps with the asm20 preset (no prebuilt .mmi)
@@ -3164,16 +3165,24 @@ sub geneCatFunc_emapper{
 			$ccmd .= "  $emapper -m diamond --no_annot --dmnd_block_size $dmndBlock --dmnd_index_chunks $dmndChunks --override --itype proteins --temp_dir $wd --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f.srch\n";
 			$ccmd .= "  $mvBin $f.srch.emapper.seed_orthologs $seeds\n  $rmBin -f $f.srch.emapper.hits\nfi\n";
 			#2) annotation. Its workers read eggnog.db at random; on a network filesystem a sub-batch can exceed eggNOG-mapper's
-			#fixed per-task deadline (250 s), which aborts the chunk. Read a node-local copy of eggnog.db (~22 GB) instead,
+			#fixed per-task deadline (250 s), which aborts the chunk. Read a node-local copy of eggnog.db (~23 GB) instead,
 			#the other data files are linked
-			$ccmd .= "$rmBin -rf ${wd}data/\n$mkdirBin -p ${wd}data/\nln -s $curDB/* ${wd}data/\n$rmBin -f ${wd}data/eggnog.db\n$cpBin --preserve=timestamps $curDB/eggnog.db ${wd}data/eggnog.db\n";
-			#eggNOG-mapper finds a field-presence cache it built itself by the DB's size and mtime (kept by the copy) and the
-			#path of the GO OBO: name the data dir's OBO, so the copy uses the cache of the shared data dir instead of
+			$ccmd .= "$rmBin -rf ${wd}data/\n$mkdirBin -p ${wd}data/\nln -s $curDB/* ${wd}data/\n$rmBin -f ${wd}data/eggnog.db\n";
+			#the scratch request does not keep other jobs on the node off the disk: reserve the copy's space first (fallocate)
+			#and write into it, so jobs sharing a node cannot fill the disk between them. Without the space: the shared data
+			#dir (a timeout there is retried)
+			$ccmd .= "emapData=$curDB\n";
+			$ccmd .= "if fallocate -l \$(stat -L -c %s $curDB/eggnog.db) ${wd}data/eggnog.db; then\n";
+			$ccmd .= "  dd if=$curDB/eggnog.db of=${wd}data/eggnog.db bs=64M conv=notrunc status=none\n";
+			#eggNOG-mapper finds a field-presence cache it built itself by the DB's size and mtime (kept for the copy) and
+			#the path of the GO OBO: name the data dir's OBO, so the copy uses the cache of the shared data dir instead of
 			#rebuilding it in every chunk (~50 min on eggNOG 7)
+			$ccmd .= "  touch -r $curDB/eggnog.db ${wd}data/eggnog.db\n  emapData=${wd}data/\n";
+			$ccmd .= "else\n  echo \"No node-local space for eggnog.db on \$HOSTNAME: annotating from the shared data dir\" >&2\n  df -h $wd >&2 || true\nfi\n";
 			$ccmd .= "if [ -f $curDB/go-basic.obo ]; then export EGGNOG_GO_OBO=\"\$(readlink -f $curDB)/go-basic.obo\"; fi\n";
 			#eggNOG-mapper writes its annotations in place (no end marker with --no_file_comments): run under a .part
 			#prefix and rename on success, so a killed chunk never leaves a file the resume test accepts
-			$ccmd .= "$emapper -m no_search --annotate_hits_table $seeds --override --temp_dir $wd --data_dir ${wd}data/ --no_file_comments --cpu $ncore -o $f.part\n";
+			$ccmd .= "$emapper -m no_search --annotate_hits_table $seeds --override --temp_dir $wd --data_dir \$emapData --no_file_comments --cpu $ncore -o $f.part\n";
 			$ccmd .= "$mvBin $f.part.emapper.annotations $f.emapper.annotations\n";
 			$ccmd .= "$rmBin -rf $wd\n";
 			my $outF = "$f.emapper.annotations"; #complete chunk annotations

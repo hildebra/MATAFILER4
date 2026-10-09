@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-09 — eggNOG-mapper: reserved node-local space for eggnog.db (geneCat 0.69)
+
+- **Problem:** in the rerun, all 21 chunks failed at once while copying `eggnog.db` (22.9 GB) to node-local scratch, with `No space left on device`. Each chunk job requests `--localscratch=ssd:500`.
+  - The request evidently does not keep other jobs off the disk: 12-core jobs share nodes (e.g. a 512-core node), and their copies, about 480 GB for 21 jobs, filled it.
+  - Shared node disks may also explain earlier KEGG DIAMOND jobs running out of space despite their 500 GB request.
+- **The copy now reserves its space first** (`fallocate` with the database's size), then writes into it (`dd conv=notrunc`) and sets the original modification time (`touch -r`, for eggNOG-mapper's field-presence cache).
+  - Jobs on one node cannot overcommit the disk between them.
+  - A job that cannot reserve the space annotates from the shared data dir and logs `df` of its scratch. A worker timeout there is retried (0.68).
+- Test in `t/genecat_recovery.t`: annotation from the shared data dir when `fallocate` fails.
+
 ## 2026-10-09 — eggNOG-mapper annotation from a node-local eggnog.db (geneCat 0.68)
 
 - **Problem:** 21 of 24 eggNOG-mapper chunk jobs failed after their DIAMOND search, with `RuntimeError: Annotation worker timed out after 250s on a 125-seed sub-batch`.

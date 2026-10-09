@@ -384,7 +384,9 @@ v3 picks its DIAMOND block size from the node's total RAM, not from the job's me
 
 Each chunk job runs eggNOG-mapper in two steps:
 1. **Search.** The DIAMOND search (`--no_annot`) writes the chunk's seed orthologs to `<chunk>.seeds`. A resubmitted chunk that has this file skips the search.
-2. **Annotation.** The annotation (`-m no_search`) reads a copy of `eggnog.db` on node-local scratch. Its workers read the database at random, and eggNOG-mapper aborts a run when a worker needs more than 250 s for a batch of 125 seeds; reading over the network filesystem exceeded that. A run aborted this way is resubmitted. Chunks that failed this way in an earlier one-step run (geneCat ≤ 0.67) reuse their finished search.
+2. **Annotation.** The annotation (`-m no_search`) reads a copy of `eggnog.db` on node-local scratch. Its workers read the database at random, and eggNOG-mapper aborts a run when a worker needs more than 250 s for a batch of 125 seeds; reading over the network filesystem exceeded that. A run aborted this way is resubmitted.
+   - Jobs on the same node share its disk whatever scratch they requested, so the copy reserves its space (`fallocate`) before writing.
+   - A job that cannot reserve the space annotates from the shared data dir and writes `df` of its scratch to its error log. Chunks that failed this way in an earlier one-step run (geneCat ≤ 0.67) reuse their finished search.
 
 ## Taxonomic annotation outputs
 

@@ -366,6 +366,20 @@ FAKE
     @calls = grep { /\S/ } split /^--\n/m, read_file($ENV{GENECAT_EMAPPER_LOG});
     is(scalar(@calls), 1, 'with its seed orthologs kept, the search is not repeated');
     like($calls[0], qr/^-m\nno_search\n/, 'only the annotation runs');
+
+    #no node-local space for the copy (fallocate fails): annotation from the shared data dir
+    my $stubs = "$tmp/emapper-stubs";
+    make_path($stubs);
+    write_file("$stubs/fallocate", "#!/usr/bin/env perl\nprint STDERR \"fallocate: No space left on device\\n\";\nexit 1;\n");
+    chmod 0755, "$stubs/fallocate";
+    unlink("$chunk.emapper.annotations", $ENV{GENECAT_EMAPPER_LOG});
+    {
+        local $ENV{PATH} = "$stubs:$ENV{PATH}";
+        is(GCRecovery::systemW($worker->[1], 0), 0, 'eggNOG worker runs without node-local space');
+    }
+    @calls = grep { /\S/ } split /^--\n/m, read_file($ENV{GENECAT_EMAPPER_LOG});
+    like($calls[0], qr/--data_dir\n\Q$emapData\E\n/, 'and annotates from the shared data dir');
+    ok(-e "$chunk.emapper.annotations", 'annotations published');
 };
 
 subtest 'eggNOG-mapper: finished searches of chunks that failed in the one-step annotation are reused' => sub {
