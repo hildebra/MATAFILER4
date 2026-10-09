@@ -341,7 +341,7 @@ The catalog is aligned in chunks, one job each: `-fastaSplit` (500M) for most da
 **Supervision.** Each functional stage (`FuncAssign`: diamond databases, `FuncEMAP`: eggNOG-mapper) runs under a controller job (`func_GC.sh`, `emap_GC.sh`, on the long queue). The controller stays alive until all of the stage's jobs have finished:
 - It submits each job once its prerequisites have completed. There are no scheduler dependencies, so a failed job cannot leave the rest of the stage pending.
 - A job succeeds when it writes its completion marker (`<script>.done`) as its last command, whatever Slurm reports.
-- A job killed for exceeding its memory (Slurm `OUT_OF_MEMORY`, or killed by signal 9) is resubmitted with 1.5× the memory. A job lost to a node failure or preemption is resubmitted with the same memory. A job is tried at most `GENECAT_FUNC_ATTEMPTS` times (default 3); logs of failed attempts are kept as `<script>.etxt.attempt<n>`.
+- A job killed for exceeding its memory (Slurm `OUT_OF_MEMORY`, or killed by signal 9) is resubmitted with 1.5× the memory. A job lost to a node failure or preemption, or an eggNOG-mapper chunk whose annotation timed out, is resubmitted with the same memory. A job is tried at most `GENECAT_FUNC_ATTEMPTS` times (default 3); logs of failed attempts are kept as `<script>.etxt.attempt<n>`.
 - A job that fails for good only stops the jobs that depend on it; the rest of the stage still runs. The controller then exits with a report: failed jobs, their scheduler state and the last lines of their error log. Rerunning geneCat repeats only what is missing.
 
 While a stage runs, `Anno/Func/.FuncAssign.inflight` / `.FuncEMAP.inflight` holds the controller's job ID, and geneCat does not submit that stage again (also not with `-redoFunc 1`). The stage's final job removes the marker; so does a controller that stops on a failure. A marker whose job has finished, can never run (Slurm `DependencyNeverSatisfied`, left by runs before supervision), or whose submitting process died is ignored and removed.
@@ -381,6 +381,10 @@ download_eggnog_data.py -y --data_dir <DBDir>/Funct/eggNOGmapper/v3.0/
 A merge of chunks annotated by different eggNOG-mapper versions is rejected. `Anno/Func/emapper/.emapper.params` records the data directory behind the annotations. Pointing `eggNOGm_path_DB` at other data re-annotates the catalogue on the next run; chunk results of an interrupted run are discarded rather than mixed in. Catalogues annotated before this record existed (eggNOG-mapper 2.1.x) keep their annotations. To re-annotate one with v3, delete `checkpoints/10.emap.stone` and `Anno/Func/emapper/MF.emapper.annotations.gz`.
 
 v3 picks its DIAMOND block size from the node's total RAM, not from the job's memory, so geneCat passes `--dmnd_block_size 4 --dmnd_index_chunks 2` (about 40 GB peak) for its 55 GB eggNOG jobs.
+
+Each chunk job runs eggNOG-mapper in two steps:
+1. **Search.** The DIAMOND search (`--no_annot`) writes the chunk's seed orthologs to `<chunk>.seeds`. A resubmitted chunk that has this file skips the search.
+2. **Annotation.** The annotation (`-m no_search`) reads a copy of `eggnog.db` on node-local scratch. Its workers read the database at random, and eggNOG-mapper aborts a run when a worker needs more than 250 s for a batch of 125 seeds; reading over the network filesystem exceeded that. A run aborted this way is resubmitted. Chunks that failed this way in an earlier one-step run (geneCat ≤ 0.67) reuse their finished search.
 
 ## Taxonomic annotation outputs
 

@@ -60,7 +60,7 @@ my @helpers = qw(_shell_quote _checkpoint_command _stone_valid _sync_file
     gzifelscat _catalog_backup_command _merged_catalog_backup_valid clusterFNA
     clusterSingleStep rewriteClusNumbers addCOGgenes mergeClsSam rewriteFastaHdIdx
     combineClstr krakenTax geneCatFunc_emapper _qsbCopy _gcTmpTag _emapSplitDir _inflightMarker
-    _emapParamF _emapDataID _readInflight _writeFuncParams);
+    _emapParamF _emapDataID _readInflight _writeFuncParams _emapSalvageSeeds);
 for my $name (@helpers) {
     my ($helper) = $source =~ /^(sub \Q$name\E\b[^\n]*\{.*?^\})/ms;
     die "Missing $name" unless defined $helper;
@@ -295,16 +295,31 @@ subtest 'program registrations and configured command wrappers' => sub {
     make_path($catalogue);
     write_file("$catalogue/compl.incompl.97.prot.faa", ">1\nMKK\n");
     my $fake = "$tmp/configured-emapper.pl";
-    write_file($fake, 'die "wrapper lost" unless $ENV{GENECAT_EMAPPER_WRAPPER}; '
-        . 'open my $out, ">", $ENV{GENECAT_EMAPPER_LOG} or die $!; print {$out} join("\n", @ARGV); close $out; '
-        . 'my ($o) = map { $ARGV[$_ + 1] } grep { $ARGV[$_] eq "-o" } 0 .. $#ARGV; '
-        . 'open my $an, ">", "$o.emapper.annotations" or die $!; print {$an} "#query\n"; close $an;');
+    #logs each call (arguments, whether --data_dir holds a real eggnog.db file, EGGNOG_GO_OBO) and writes the outputs
+    #of a search-only (--no_annot) or an annotation-only run
+    write_file($fake, <<'FAKE');
+die "wrapper lost" unless $ENV{GENECAT_EMAPPER_WRAPPER};
+my %a; for my $i (0 .. $#ARGV - 1) { $a{$ARGV[$i]} = $ARGV[$i + 1] }
+my $db = "$a{'--data_dir'}/eggnog.db";
+open my $out, ">>", $ENV{GENECAT_EMAPPER_LOG} or die $!;
+print {$out} join("\n", @ARGV), "\nlocal_db=", ((-f $db && !-l $db) ? 1 : 0), "\ngo_obo=", ($ENV{EGGNOG_GO_OBO} // ''), "\n--\n";
+close $out;
+my @files = (grep { $_ eq '--no_annot' } @ARGV) ? ("$a{'-o'}.emapper.seed_orthologs", "$a{'-o'}.emapper.hits") : ("$a{'-o'}.emapper.annotations");
+for my $f (@files) { open my $fh, ">", $f or die $!; print {$fh} "#query\n"; close $fh; }
+FAKE
     local $ENV{GENECAT_EMAPPER_LOG} = "$tmp/emapper-args.txt";
     my $configured = 'env GENECAT_EMAPPER_WRAPPER=1 ' . GCRecovery::_shell_quote($^X)
         . ' ' . GCRecovery::_shell_quote($fake);
+    my $emapData = "$tmp/emapper-data/";
+    make_path($emapData);
+    write_file("$emapData/$_", "x\n") for qw(eggnog.db go-basic.obo eggnog_proteins.dmnd);
     no warnings 'redefine';
     my $real_get = \&GCRecovery::getProgPaths;
-    local *GCRecovery::getProgPaths = sub { return $configured if $_[0] eq 'emapper'; return $real_get->(@_) };
+    local *GCRecovery::getProgPaths = sub {
+        return $configured if $_[0] eq 'emapper';
+        return $emapData if $_[0] eq 'eggNOGm_path_DB';
+        return $real_get->(@_);
+    };
     local *GCRecovery::splitFastas = sub { return [$_[0]] };
     my @jobs;
     local *GCRecovery::qsubSystem = sub { push @jobs, [@_]; return ('job-' . scalar(@jobs), '') };
@@ -322,17 +337,57 @@ subtest 'program registrations and configured command wrappers' => sub {
     my ($worker) = grep { $_->[4] eq 'eMAP0' } @jobs;
     ok(defined($worker), 'eggNOG worker is submitted');
     is(GCRecovery::systemW($worker->[1], 0), 0, 'eggNOG worker executes the configured wrapper');
-    like(read_file($ENV{GENECAT_EMAPPER_LOG}), qr/--cpu\n3\n-i\n\Q$catalogue\E\/compl\.incompl\.97\.prot\.faa/,
+    my $chunk = "$catalogue/compl.incompl.97.prot.faa";
+    my @calls = grep { /\S/ } split /^--\n/m, read_file($ENV{GENECAT_EMAPPER_LOG});
+    is(scalar(@calls), 2, 'eggNOG-mapper runs twice: DIAMOND search, then annotation');
+    my ($search, $anno) = @calls;
+    like($search, qr/^-m\ndiamond\n--no_annot\n/, 'the first run only searches');
+    like($search, qr/--cpu\n3\n-i\n\Q$chunk\E\n-o\n\Q$chunk\E\.srch\n/,
         'configured eggNOG command receives requested cores and catalogue identity');
-    my $emArgs = read_file($ENV{GENECAT_EMAPPER_LOG});
-    unlike($emArgs, qr/--dbmem/, 'no --dbmem (removed in eggNOG-mapper v3)');
-    like($emArgs, qr/--dmnd_block_size\n4\n--dmnd_index_chunks\n2\n/,
+    like($search, qr/--data_dir\n\Q$emapData\E\n/, 'the search reads the configured data dir');
+    unlike($search, qr/--dbmem/, 'no --dbmem (removed in eggNOG-mapper v3)');
+    like($search, qr/--dmnd_block_size\n4\n--dmnd_index_chunks\n2\n/,
         'DIAMOND block size set for the 55G job, not from the node RAM');
+    like($anno, qr/^-m\nno_search\n--annotate_hits_table\n\Q$chunk\E\.seeds\n/, 'the second run annotates the kept seeds');
+    like($anno, qr/--data_dir\n\Q$tmp\E\/emapper-tmp\/0\/data\/\n/, 'from a node-local data dir');
+    like($anno, qr/^local_db=1$/m, 'which holds a copy of eggnog.db, not a link to the shared one');
+    like($anno, qr/^go_obo=\S+\/emapper-data\/go-basic\.obo$/m, 'GO OBO named by its shared path (field-presence cache key)');
+    ok(-s "$chunk.seeds" && !-e "$chunk.srch.emapper.seed_orthologs" && !-e "$chunk.srch.emapper.hits",
+        'seed orthologs kept under the chunk name, DIAMOND hits removed');
+    ok(!-e "$tmp/emapper-tmp/0", 'node-local copy removed');
     like(read_file("$catalogue/Anno/Func/emapper/.emapper.params"), qr/^data_dir\t\S/,
         'eggNOG-mapper data dir is recorded with the submitted annotation');
-    ok(-e "$catalogue/compl.incompl.97.prot.faa.emapper.annotations"
-            && !-e "$catalogue/compl.incompl.97.prot.faa.part.emapper.annotations",
+    ok(-e "$chunk.emapper.annotations" && !-e "$chunk.part.emapper.annotations",
         'eggNOG worker publishes its annotations only after the run');
+
+    #a resubmitted chunk (annotation failed) repeats only the annotation
+    unlink("$chunk.emapper.annotations", $ENV{GENECAT_EMAPPER_LOG});
+    is(GCRecovery::systemW($worker->[1], 0), 0, 'resubmitted eggNOG worker runs');
+    @calls = grep { /\S/ } split /^--\n/m, read_file($ENV{GENECAT_EMAPPER_LOG});
+    is(scalar(@calls), 1, 'with its seed orthologs kept, the search is not repeated');
+    like($calls[0], qr/^-m\nno_search\n/, 'only the annotation runs');
+};
+
+subtest 'eggNOG-mapper: finished searches of chunks that failed in the one-step annotation are reused' => sub {
+    my $d = "$tmp/emapper-salvage";
+    make_path($d);
+    my $f = "$d/chunk.3";
+    my $so = "$f.part.emapper.seed_orthologs";
+    my $now = time;
+    my $files = sub { my %t = @_; for my $p (sort keys %t){ write_file($p, "q\t1\t0.0\t9.0\n"); utime($t{$p}, $t{$p}, $p); } };
+    $files->($f => $now - 300, $so => $now - 200, "$so.sorted" => $now - 190);
+    is(GCRecovery::_emapSalvageSeeds($f), 1, 'complete seed file sorted after it was written: reused');
+    ok(-s "$f.seeds" && !-e "$so.sorted", 'sorted seeds renamed to the chunk seed file');
+    is(GCRecovery::_emapSalvageSeeds($f), 0, 'nothing to do once the chunk has its seed file');
+    unlink("$f.seeds");
+    $files->($f => $now - 300, $so => $now - 100, "$so.sorted" => $now - 200);
+    is(GCRecovery::_emapSalvageSeeds($f), 0, 'seed file newer than the sorted copy (killed while rewriting it): not reused');
+    $files->($f => $now - 50, $so => $now - 200, "$so.sorted" => $now - 190);
+    is(GCRecovery::_emapSalvageSeeds($f), 0, 'seeds older than the chunk FASTA: not reused');
+    unlink($so);
+    $files->($f => $now - 300, "$so.sorted" => $now - 190);
+    is(GCRecovery::_emapSalvageSeeds($f), 0, 'no seed file (removed by a later --override run): not reused');
+    ok(!-e "$f.seeds", 'no chunk seed file made');
 };
 
 subtest 'marker extraction reads the selected catalogue identity' => sub {

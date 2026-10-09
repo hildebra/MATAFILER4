@@ -132,6 +132,28 @@ subtest 'outcome: completion marker and Slurm accounting' => sub {
 	like($r->{scheduler}, qr/FAILED, exit code 1:0/, 'with the scheduler state');
 	$r = jobGraphOutcome($job, 'x', { qmode => 'sge' }, %fast);
 	ok($r->{retryable} && $r->{oom}, 'no accounting: retried with more memory');
+	write_file("$tmp/o/job.sh.etxt", "Traceback\nRuntimeError: Annotation worker timed out after 250s on a 125-seed sub-batch\n"
+		. "WARNING: annotation workers did not exit within 120 s; force-terminating.\n");
+	my $failed = $acc->("42|FAILED|1:0\n");
+	$r = jobGraphOutcome($job, '42', $failed, %fast);
+	ok(!$r->{retryable}, 'an error not declared transient is not retried');
+	$r = jobGraphOutcome($job, '42', $failed, %fast, transient => qr/Annotation worker timed out/);
+	ok($r->{retryable} && !$r->{oom}, 'a declared transient error is retried with the same memory');
+	is($r->{reason}, 'failed with a transient error', 'and reported as such');
+};
+
+subtest 'runJobGraph passes the transient pattern to the outcome check' => sub {
+	my $graph = newJobGraph();
+	Mods::JobGraph::jobGraphRecord($graph, "$tmp/t/T.sh", "echo T", 1, "10G", 'T', "", "", 1, [], { constraint => [] });
+	mkdir "$tmp/t";
+	write_file("$tmp/t/T.sh.etxt", "RuntimeError: Annotation worker timed out after 250s\n");
+	my $opt = { rTag => '', qmode => 'slurm', jobAccountingRunner => sub { ("1|FAILED|1:0\n", 0) } };
+	my @mem;
+	local $SIG{__WARN__} = sub {};
+	my $res = runJobGraph($graph, $opt, max_attempts => 2, transient => qr/Annotation worker timed out/, settle_tries => 0,
+		submit => sub { push @mem, $_[3]; return ('1', ''); }, wait => sub { [] }, pause => sub {});
+	ok(!$res->{ok}, 'still failing after the last attempt');
+	is_deeply(\@mem, ['10G', '10G'], 'resubmitted once, with the same memory');
 };
 
 subtest 'end to end through qsubSystem (local bash jobs)' => sub {
@@ -158,6 +180,7 @@ subtest 'geneCat runs both functional stages supervised' => sub {
 	like($gc, qr/useLongQueue\} = 1;[^\n]*\n\s*my \(\$dep,\$qcmd\) = qsubSystem\(\$qsubDir\."emap_GC\.sh"/, 'FuncEMAP controller on the long queue');
 	like($gc, qr/local \$QSBoptHR->\{jobGraph\} = \$graph;/, 'jobs are recorded only while the stage is built');
 	like($gc, qr/_inflightRecordJob\(\$stage, \$ENV\{SLURM_JOB_ID\}\)/, 'the in-flight marker names the live controller job');
+	like($gc, qr/runJobGraph\([^;]*transient => qr\/Annotation worker timed out\//, 'eggNOG-mapper annotation timeouts are retried');
 };
 
 done_testing();

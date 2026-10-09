@@ -92,6 +92,7 @@ sub _tail{
 }
 
 #outcome of a job that left the queue: {ok} or {ok => 0, retryable, oom, reason, scheduler, output}
+#%o: transient (regex): a failure whose error output ends with a matching line is retried with the same memory
 sub jobGraphOutcome{
 	my ($job, $jobId, $optHR, %o) = @_;
 	my $marker = "$job->{script}.done";
@@ -116,6 +117,10 @@ sub jobGraphOutcome{
 		$r{reason} = "lost to a scheduler/node problem";
 	} else {
 		$r{reason} = "failed";
+		if (defined($o{transient}) && grep { $_ =~ $o{transient} } _tail("$job->{script}.etxt", 40)){
+			$r{retryable} = 1;
+			$r{reason} = "failed with a transient error";
+		}
 	}
 	$r{scheduler} = $acc->{summary} if ($acc->{summary});
 	my @out = _tail("$job->{script}.etxt", 8);
@@ -126,7 +131,8 @@ sub jobGraphOutcome{
 }
 
 #submits the recorded jobs as their prerequisites complete and supervises them until the graph is finished.
-#%o: max_attempts (3), memory_factor (1.5), label, and for tests: submit, wait, outcome, pause
+#%o: max_attempts (3), memory_factor (1.5), label, transient (see jobGraphOutcome), and for tests: submit, wait, outcome,
+#pause, settle_tries
 sub runJobGraph{
 	my ($graph, $optHR, %o) = @_;
 	my $maxAttempts = $o{max_attempts} || 3;
@@ -136,7 +142,8 @@ sub runJobGraph{
 	require Mods::Subm;
 	my $submit = $o{submit} || sub { return &Mods::Subm::qsubSystem(@_); };
 	my $wait = $o{wait} || sub { return Mods::Subm::qsubSystemJobAlive($_[0], $optHR, 0, -1, 300) || []; };
-	my $outcome = $o{outcome} || sub { return jobGraphOutcome($_[0], $_[1], $optHR); };
+	my @outcomeOpts = map { defined($o{$_}) ? ($_ => $o{$_}) : () } qw(transient settle_tries);
+	my $outcome = $o{outcome} || sub { return jobGraphOutcome($_[0], $_[1], $optHR, @outcomeOpts); };
 	my $pause = $o{pause} || sub { sleep $_[0] };
 	my @jobs = @{$graph->{jobs}};
 	my %state = map { $_->{id} => 'pending' } @jobs;

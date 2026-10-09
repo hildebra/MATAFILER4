@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-09 — eggNOG-mapper annotation from a node-local eggnog.db (geneCat 0.68)
+
+- **Problem:** 21 of 24 eggNOG-mapper chunk jobs failed after their DIAMOND search, with `RuntimeError: Annotation worker timed out after 250s on a 125-seed sub-batch`.
+  - eggNOG-mapper v3 annotates in a pool of worker processes. Each worker reads `eggnog.db` (SQLite, about 22 GB) at random.
+  - eggNOG-mapper aborts the whole run when a worker takes longer than a fixed deadline, `max(120, 2 × --annot_batch_size)` seconds, for a sub-batch.
+  - With the database on the shared network filesystem and 24 chunks × 12 workers reading it at once, sub-batches exceeded that deadline.
+  - The supervisor did not retry these jobs. A retry would also have repeated the roughly 10-hour search.
+- **Chunks now run eggNOG-mapper in two steps** (the upstream two-step workflow; same annotations, checked on the eggNOG-mapper selftest data):
+  1. DIAMOND search (`--no_annot`). On success its seed orthologs are kept as `<chunk>.seeds`. A resubmitted chunk with this file skips the search.
+  2. Annotation (`-m no_search --annotate_hits_table <chunk>.seeds`) from a node-local data dir. It holds a copy of `eggnog.db` and links to the other data files. This needs about 22 GB more of the 500 GB node-local scratch the job requests.
+     - The copy keeps the database's modification time, and `EGGNOG_GO_OBO` names the shared `go-basic.obo`. eggNOG-mapper keys a field-presence cache it built itself on both, so the copy uses the shared data dir's cache instead of rebuilding it in every chunk (about 50 min on eggNOG 7).
+- **Annotation worker timeouts are retried** with the same memory (`runJobGraph`/`jobGraphOutcome` option `transient`), up to `GENECAT_FUNC_ATTEMPTS` attempts.
+- **Chunks that failed in the annotation keep their search.** When rerun, geneCat reuses the complete, sorted seed file that eggNOG-mapper wrote before annotating (`<chunk>.part.emapper.seed_orthologs.sorted`). Only the annotation of these chunks runs again.
+- Tests in `t/genecat_recovery.t` (both steps, node-local copy, retry without search, reuse of seed files) and `t/job_graph.t` (transient errors).
+
 ## 2026-10-08 — Mapper audit: lower-priority fixes (MATAF4 4.49, geneCat 0.67)
 
 - **Mapping statistics sum every bowtie2 run.** A paired library and its singletons are two runs; before, only the first summary was read. `ReadsPaired` counts pairs + single reads, and the overall rate is aligned mates over all mates.

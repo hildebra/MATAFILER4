@@ -64,7 +64,8 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.67; #0.67: CD-HIT -M within its job; -ntMatchGC samtools threads beside minimap2
+our $version = 0.68; #0.68: eggNOG-mapper chunks search, then annotate from a node-local eggnog.db; retried annotations skip the search
+#0.67: CD-HIT -M within its job; -ntMatchGC samtools threads beside minimap2
 #0.66: FuncAssign DIAMOND --mid-sensitive (mode recorded in .<DB>.params); KGM/NOG chunks 32G
 #0.65: marker-gene mmseqs clustering sized to its own job; -ntMatchGC maps with the asm20 preset (no prebuilt .mmi)
 #0.64: functional stages supervised until done; OOM-killed jobs resubmitted with more memory
@@ -3152,27 +3153,44 @@ sub geneCatFunc_emapper{
 		my @subFls = @{$ar};
 		die "FASTA splitting produced no inputs from $query\n" unless @subFls;
 		print "Done splitting, submitting ".scalar(@subFls)." jobs\n";
-		my $i=0; my @chunkAnnos; my $nResumed = 0;
+		my $i=0; my @chunkAnnos; my $nResumed = 0; my $nSalvaged = 0;
 		foreach my $f (@subFls){
 			my $ccmd = "";
-			$ccmd .= "$mkdirBin -p $tmpD/$i/\n";
+			my $wd = "$tmpD/$i/";
+			my $seeds = "$f.seeds"; #seed orthologs of the chunk's finished DIAMOND search
+			$ccmd .= "$mkdirBin -p $wd\n";
+			#1) DIAMOND search, renamed on success: a resubmitted chunk (e.g. after an annotation failure) only repeats the annotation
+			$ccmd .= "if [ ! -s $seeds ]; then\n";
+			$ccmd .= "  $emapper -m diamond --no_annot --dmnd_block_size $dmndBlock --dmnd_index_chunks $dmndChunks --override --itype proteins --temp_dir $wd --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f.srch\n";
+			$ccmd .= "  $mvBin $f.srch.emapper.seed_orthologs $seeds\n  $rmBin -f $f.srch.emapper.hits\nfi\n";
+			#2) annotation. Its workers read eggnog.db at random; on a network filesystem a sub-batch can exceed eggNOG-mapper's
+			#fixed per-task deadline (250 s), which aborts the chunk. Read a node-local copy of eggnog.db (~22 GB) instead,
+			#the other data files are linked
+			$ccmd .= "$rmBin -rf ${wd}data/\n$mkdirBin -p ${wd}data/\nln -s $curDB/* ${wd}data/\n$rmBin -f ${wd}data/eggnog.db\n$cpBin --preserve=timestamps $curDB/eggnog.db ${wd}data/eggnog.db\n";
+			#eggNOG-mapper finds a field-presence cache it built itself by the DB's size and mtime (kept by the copy) and the
+			#path of the GO OBO: name the data dir's OBO, so the copy uses the cache of the shared data dir instead of
+			#rebuilding it in every chunk (~50 min on eggNOG 7)
+			$ccmd .= "if [ -f $curDB/go-basic.obo ]; then export EGGNOG_GO_OBO=\"\$(readlink -f $curDB)/go-basic.obo\"; fi\n";
 			#eggNOG-mapper writes its annotations in place (no end marker with --no_file_comments): run under a .part
 			#prefix and rename on success, so a killed chunk never leaves a file the resume test accepts
-			$ccmd .= "$emapper -m diamond --dmnd_block_size $dmndBlock --dmnd_index_chunks $dmndChunks --override --itype proteins --temp_dir $tmpD/$i/ --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f.part;\n";
+			$ccmd .= "$emapper -m no_search --annotate_hits_table $seeds --override --temp_dir $wd --data_dir ${wd}data/ --no_file_comments --cpu $ncore -o $f.part\n";
 			$ccmd .= "$mvBin $f.part.emapper.annotations $f.emapper.annotations\n";
-			$ccmd .= "$rmBin -rf $tmpD/$i/\n";
+			$ccmd .= "$rmBin -rf $wd\n";
 			my $outF = "$f.emapper.annotations"; #complete chunk annotations
 			push(@chunkAnnos,$outF);
 			#resume: skip chunks whose annotations exist and are newer than the chunk FASTA
 			if (-s $outF && (-M $outF) <= (-M $f)){
 				$nResumed++;
 			} else {
+				unlink($seeds) if (-e $seeds && (-M $seeds) > (-M $f)); #search of an older chunk FASTA
+				$nSalvaged++ if (_emapSalvageSeeds($f));
 				my ($jobName,$mptCmd) = qsubSystem($qsubDir2."D$shrtDB.$i.sh",$ccmd,$ncore,($mem)."G","eMAP$i","","",1,[],$chunkQSB);
 				push(@jdeps,$jobName) if (defined($jobName) && $jobName ne "");
 			}
 			$i++;
 		}
 		print "eggNOG-mapper: $nResumed of ".scalar(@subFls)." chunks already finished\n" if ($nResumed);
+		print "eggNOG-mapper: reusing the finished DIAMOND search of $nSalvaged failed chunk(s)\n" if ($nSalvaged);
 		#merge only this run's chunks (explicit list, no glob), keep one "#query" header, write atomically
 		$cmd .= "#concatenating eggNOG-mapper chunks\n";
 		#grep exit 1 (no rows) is fine, exit 2 (a chunk file is missing) aborts the job
@@ -3422,6 +3440,16 @@ sub _emapDataChanged{
 	return 0 unless (defined($old));
 	return ($old ne _emapDataID(getProgPaths("eggNOGm_path_DB"))) ? 1 : 0;
 }
+#a chunk that failed in the annotation of a one-step run (geneCat 0.64) still has its finished DIAMOND search: before
+#annotating, eggNOG-mapper wrote the complete .seed_orthologs and sorted it (atomically) into .seed_orthologs.sorted.
+#Reused as the chunk's seed file if both are newer than the chunk FASTA, the sorted file the newer. 1 if reused
+sub _emapSalvageSeeds{
+	my ($f) = @_;
+	return 0 if (-s "$f.seeds");
+	my $so = "$f.part.emapper.seed_orthologs";
+	return 0 unless (-s "$so.sorted" && -e $so && (-M "$so.sorted") <= (-M $so) && (-M $so) <= (-M $f));
+	return rename("$so.sorted", "$f.seeds") ? 1 : 0;
+}
 #parameters recorded in (and required by) the functional-annotation checkpoint
 sub _funcStoneParams{
 	return (functDB => $curDB_o, functAligner => $funcAligner,
@@ -3554,9 +3582,10 @@ sub _inflightRecordJob{
 }
 #runs a functional stage under supervision: while $build runs, qsubSystem records its jobs (Mods::JobGraph); they are
 #then submitted as their prerequisites complete, and jobs killed for lack of memory (or lost to a node failure) are
-#resubmitted, with 1.5x memory after an OOM, up to GENECAT_FUNC_ATTEMPTS (3) attempts. This process stays alive until
-#every job finished; the stage's final job writes the stone and removes the in-flight marker. Dies with a report if a
-#job failed for good (its dependents are not run, the others are).
+#resubmitted, with 1.5x memory after an OOM, up to GENECAT_FUNC_ATTEMPTS (3) attempts; so are jobs that failed with a
+#known transient error (an eggNOG-mapper annotation worker timeout). This process stays alive until every job finished;
+#the stage's final job writes the stone and removes the in-flight marker. Dies with a report if a job failed for good
+#(its dependents are not run, the others are).
 sub _superviseFuncStage{
 	my ($stage, $build) = @_;
 	my $graph = newJobGraph();
@@ -3566,7 +3595,8 @@ sub _superviseFuncStage{
 	}
 	#a second geneCat run sees the stage busy while this controller job is alive
 	_inflightRecordJob($stage, $ENV{SLURM_JOB_ID}) if (defined($ENV{SLURM_JOB_ID}) && $ENV{SLURM_JOB_ID} =~ /^\d+$/);
-	my $res = runJobGraph($graph, $QSBoptHR, max_attempts => ($ENV{GENECAT_FUNC_ATTEMPTS} || 3), label => $stage);
+	my $res = runJobGraph($graph, $QSBoptHR, max_attempts => ($ENV{GENECAT_FUNC_ATTEMPTS} || 3), label => $stage,
+		transient => qr/Annotation worker timed out/);
 	die jobGraphReport($res) . "Fix the reported cause and rerun geneCat; finished jobs are not repeated.\n" unless ($res->{ok});
 	print "$stage: all jobs finished" . (@{$res->{retried}} ? " (" . scalar(@{$res->{retried}}) . " needed a resubmission)" : "") . "\n";
 	return "";
