@@ -3737,7 +3737,7 @@ sub postprocess{
 		my $handoffDoStrains = $handoffDoMags && $MFopt{DoConsSNP} ? 1 : 0;
 		my $handoffCheckM2 = $MFopt{useCheckM2} ? 1 : 0;
 		my $handoffCheckM1 = $handoffCheckM2 ? 0 : ($MFopt{useCheckM1} ? 1 : 0);
-		$gcmd .= "$gcScr -map $MFconfig{mapFile} -GCd [insert outdir] -mem $sugGCmem -cores $sugGCcores -clusterID 95 -doStrains $handoffDoStrains -SNPcaller $MFopt{SNPcallerFlag} -continue 1 -doMags $handoffDoMags -binSpeciesMG $MFopt{DoMetaBat2} -useCheckM2 $handoffCheckM2 -useCheckM1 $handoffCheckM1 -MGset GTDB \n";
+		$gcmd .= "$gcScr -map $MFconfig{mapFile} -GCd [insert outdir] -mem $sugGCmem -cores $sugGCcores -clusterID 95 -doStrains $handoffDoStrains -SNPcaller $MFopt{SNPcallerFlag} -continue 1 -doMags $handoffDoMags -binSpeciesMG $MFopt{DoMetaBat2} -useCheckM2 $handoffCheckM2 -useCheckM1 $handoffCheckM1 -MGset FMG \n";
 		print "\n\nNext step, create a genecatalog with call to (but modify .sh first!): \nsbatch $GCsub\n";
 		$QSBoptHR->{doSubmit} = 0;
 		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
@@ -8087,6 +8087,11 @@ sub alignPostTreat{
 	my $pipeCores = int($NcoreL / 4); $pipeCores = 1 if ($pipeCores < 1);
 	
 	my $bamfilter = getProgPaths("bamFilter_scr");
+	my $iTO = "$tmpOut21.$i.$kk";
+	if ($postTreat{keepDiscarded}){ #filter failures also go to a side BAM (QCFAIL-flagged), later merged into the CRAM
+		$bamfilter .= " --discarded $iTO.discarded.bam --samtools $smtBin";
+		push @{$postTreat{discardPartsAR}}, "$iTO.discarded.bam";
+	}
 		#my $filterStep="";
 	if ( ($MapperProg==3 || $MapperProg==5 ) && ($readTec eq "ONT" || $readTec eq "PB")){ #low id long reads...
 		if ($readTec eq "PB" ){
@@ -8102,7 +8107,6 @@ sub alignPostTreat{
 
 
 	
-	my $iTO = "$tmpOut21.$i.$kk";
 	if ($unaligned ne "" ){ #basic sort of unmapped reads via samtools (general purpose step)
 		$algCmd .= " | $smtBin view -b1 -@ $pipeCores > $iTO.t\n";
 		$algCmd .= "$smtBin view -u -h $iTO.t | $xtraSamSteps1 $smtBin view -b1 -@ ".($xtraSamSteps1 eq "" ? $NcoreL : $pipeCores)." -F 4 -  > $iTO\n";
@@ -8230,6 +8234,9 @@ sub mapReadsToRef{
 	my $map2ndTogether = $MFopt{mapModeTogether}; #map competetively among all reference genomes provided might change mapping result, if other genome set is used)
 	$decoyModeActive=1 if ( $MFopt{DoMapModeDecoy} && exists($make2ndMapDecoy{Lib}) && -e $make2ndMapDecoy{Lib});
 	my $isSorted = 0;		$isSorted=1 if (@pa1==1 && @paS==0 && $MFopt{DoMapModeDecoy} && $decoyModeActive); #several libraries are joined with samtools cat (unsorted)
+	#canonical CRAM keeps aligned-but-discarded reads flagged (0x200 filter fail, 0x400 duplicate); not for decoy/multi-ref mapping
+	my $keepDiscarded = ($doCram && !$decoyModeActive && !$map2ndTogether && $REF !~ /,/) ? 1 : 0;
+	my @discardParts;
 #	die $REF;
 	#one reference FASTA per mapping target ($REF can be a ","-separated list); bowtie2 uses @bwtIdxs instead
 	my @mapFastas = split /,/,$REF;
@@ -8475,6 +8482,7 @@ sub mapReadsToRef{
 										decoyModeActive => $decoyModeActive, map2ndTogether => $map2ndTogether,regsAR => \@regs, 
 										doCram => $doCram, finalDSar => \@finalDS, outNmsAR => \@outNms, mappDirAR => \@mappDir, 
 										reg_lcsAR => \@reg_lcs,
+										keepDiscarded => $keepDiscarded, discardPartsAR => \@discardParts,
 										strictHybridCoverage => ($dirsHr->{strictHybridCoverage} || 0));
 			
 			my ($algCmdPost,$subBamAR) = alignPostTreat(\%postTreat, $i, $kk);
@@ -8513,6 +8521,13 @@ sub mapReadsToRef{
 			} elsif (@bamParts == 1) {
 				$algCmd .=  "\nmv $bamParts[0] $tarBam\n";
 			}
+		}
+		if (@discardParts){
+			(my $discardedRes = $tmpOut22[$kk]) =~ s/\.bam$/.discarded.bam/;
+			$algCmd .= @discardParts > 1
+				? "\n$smtBin cat -o $discardedRes @discardParts\nrm -f @discardParts\n"
+				: "\nmv $discardParts[0] $discardedRes\n";
+			$params{discardedAlignment} = $discardedRes;
 		}
 	}
 	#die "$algCmd\n";
@@ -8593,6 +8608,7 @@ sub bamDepth{
 	$REF = $params{mappingReference} if (($params{mappingReference} || "") ne "");
 	my ($isSorted , $bamFresh,$is2ndMap, $usePairs) =($params{sortedbam},$params{bamIsNew},$params{is2ndMap},$params{usePairs});
 	my $mappingCommand = delete($mapparhr->{mappingCommand}) || "";
+	my $discardedRes = $mappingCommand ne "" ? ($params{discardedAlignment} || "") : ""; #only exists when this job also maps
 	my $mappingDependencies = $params{mappingDependencies} || $jDep;
 	my $referencePreparationCommand = $params{referencePreparationCommand} || "";
 	my $mappingInputSizeMB = $params{mappingInputSizeMB} || 0;
@@ -8773,7 +8789,8 @@ sub bamDepth{
 			$cmd .= "$smtBin sort -n -m ${sortMemoryMB}M -u -T $sortTMP -@ $numCore $mappingRes | $smtBin fixmate -m -@ $numCore -u - - | $smtBin sort -T $sortTMP2 -m ${sortMemoryMB}M -@ $numCore -o $nxtBAM.nf;\n";
 		}
 		$cmd .= "echo \"marking duplicates ...\"\n";
-		$cmd .= "$smtBin markdup --use-read-groups --no-multi-dup -d 1000 -T $sortTMP -s -r -O BAM -@ $numCore $nxtBAM.nf $nxtBAM;\n";
+		my $markdupRemove = $discardedRes eq "" ? "-r " : ""; #keeping discarded reads: flag duplicates (0x400) instead of removing
+		$cmd .= "$smtBin markdup --use-read-groups --no-multi-dup -d 1000 -T $sortTMP -s ${markdupRemove}-O BAM -@ $numCore $nxtBAM.nf $nxtBAM;\n";
 		$cmd .= "rm -f $nxtBAM.nf;\n";
 	} else {
 		if ($isSorted ){
@@ -8827,12 +8844,21 @@ sub bamDepth{
 	#die "$covCmd\n";
 	
 	#jgi depth profile - not required, different call to metabat
-	$covCmd .= jgi_depth_cmd([$nxtBAM],$nxtBAM,95) if ($MFopt{DoJGIcoverage});
+	$covCmd .= jgi_depth_cmd([$nxtBAM],$nxtBAM,95,$numCore,"",($discardedRes ne "" && $locDoRmDup)) if ($MFopt{DoJGIcoverage}); #drop flagged duplicates
 	#$covCmd .= "/g/bork5/hildebra/bin/bedtools2-2.21.0/bin/genomeCoverageBed -ibam $nxtBAM -bg  | ".'awk \'BEGIN {pc=""} {	c=$1;	if (c == pc) {		cov=cov+$2*$5;	} else {		print pc,cov;		cov=$2*$5;	pc=c}';
 	#$covCmd .= "} END {print pc,cov}\' $nxtBAM.coverage | tail -n +2 > $nxtBAM.coverage.percontig";
 	#$covCmd .= "rm -f $nxtBAM.bai;\n";
 	my ($CRAMcmd,$CRAMf) = bam2cram($nxtBAM,$REF,1,$doCram,"", $numCore);
 	$CRAMcmd = "echo \"Building .cram ...\"\n$CRAMcmd" if ($CRAMcmd ne "");
+	if ($discardedRes ne "" && $doCram){ #coverage/JGI above used retained reads only; now add the flagged ones
+		(my $retainedSize = $nxtBAM) =~ s/\.bam$/.cram.retained.size/; #CRAM size without flagged reads, for size heuristics
+		$CRAMcmd = "echo \"Merging discarded (QCFAIL-flagged) alignments ...\"\n"
+			."$smtBin view -@ $numCore -T $REF -C -F 0x600 $nxtBAM | wc -c > $retainedSize\ntest -s $retainedSize\n"
+			."$smtBin sort -@ $numCore -m ${sortMemoryMB}M -T $sortTMP.disc -o $nxtBAM.discarded.bam $discardedRes\n"
+			."$smtBin merge -c -p -f -@ $numCore -o $nxtBAM.all.bam $nxtBAM $nxtBAM.discarded.bam\n"
+			."mv -f $nxtBAM.all.bam $nxtBAM\nrm -f $nxtBAM.discarded.bam $discardedRes\n"
+			.$CRAMcmd;
+	}
 	my $publishStage = "$finalD/.$baseN.mapping-stage";
 	$CRAMcmd .= "\n# Publish the complete mapping from node-local work into its canonical directory.\n";
 	$CRAMcmd .= "rm -rf $publishStage\nmkdir -p $publishStage $finalD\n";
@@ -8862,6 +8888,7 @@ sub bamDepth{
 		$CRAMcmd .= "stat -c '%s %Y' \"$REF\" > $publishStage/$baseN-smd.reference.stat\n";
 		$CRAMcmd .= "test -s $publishStage/$baseN-smd.reference.stat\n";
 	}
+	$CRAMcmd .= "rm -f $finalD/$baseN-smd.cram.retained.size\n" if ($doCram); #never keep a stale size next to a new CRAM
 	$CRAMcmd .= "for f in $publishStage/*; do mv -f \"\$f\" $finalD/; done\nrmdir $publishStage\n";
 	if (($params{unalignedFinalDir} || "") ne "") {
 		my $unalignedStage = "$finalD/.$baseN.unaligned-stage";
@@ -10137,6 +10164,8 @@ sub optiDups{
 			if ($alignStats2 =~ m/PAIRED: (\d+)/){$Npairs=$1;}
 			if ($alignStats2 =~ m/SINGLE: (\d+)/){$Nsingle=$1;}
 			if ($alignStats2 =~ m/WRITTEN: (\d+)/){$locStats{duplPass}=$1;}
+			my ($mdRead) = $alignStats2 =~ m/^READ: (\d+)/m; my ($mdDupl) = $alignStats2 =~ m/^DUPLICATE TOTAL: (\d+)/m;
+			$locStats{duplPass} = $mdRead - $mdDupl if (defined $mdRead && defined $mdDupl); #same with or without markdup -r
 			if ($alignStats2 =~ m/DUPLICATE PAIR: (\d+)/){$pairDup=$1;}
 			if ($alignStats2 =~ m/DUPLICATE SINGLE: (\d+)/){$singlDup=$1;}
 			if ($alignStats2 =~ m/DUPLICATE PAIR OPTICAL: (\d+)/){$optiPairDup=$1;}
