@@ -147,7 +147,7 @@ my $nodeTmpD = getProgPaths("nodeTmpDir");
 my $useCheckM2 = 0; my $useCheckM1 = 1;
 my $binSpeciesMG = 2; #defaults to semibin
 my $ignoIncomplMAGs = 1; #if 1, will ignore if no Bin in MF3
-my $useGTDBmg = "GTDB";
+my $useGTDBmg = "FMG";
 my $wait4stone = "";
 my $wait4stoneTimeout = 86400;
 my $useWeightedMGSscores = 1;
@@ -167,7 +167,7 @@ GetOptions(
 	"canopies=s" => \$canopyF,			#location of canopy clustering output file (clusters.txt)
 	"smallCores=i" => \$numCore,		#cores used for normal jobs (not intensive)
 	"bottleneckCores=i" => \$canCore,	#cores for compute intensive jobs
-	"MGset=s" => \$useGTDBmg,			#GTDB or FMG, which marker genes are used? Default: GTDB
+	"MGset=s" => \$useGTDBmg,			#GTDB or FMG, which marker genes are used? Default: FMG
 	"wait4stone=s" => \$wait4stone,     #wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later
 	"wait4stoneTimeout=i" => \$wait4stoneTimeout, #maximum wait in seconds; 0 retains unlimited waiting
 	"mem=i" => \$memG,					#memory used for intensive jobs
