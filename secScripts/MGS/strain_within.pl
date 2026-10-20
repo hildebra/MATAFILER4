@@ -451,7 +451,7 @@ my $epaPendantOutlierFactor = 5;
 my $epaPendantMinThreshold = 0.02;
 my $redoEPAfilter = 0;
 my $presortGenes = 1200;
-my $useGTDBmg = "GTDB";
+my $useGTDBmg = "FMG";
 my $selfMemGb = 10;
 my $selfMemAuto = 0; #-selfMemGb auto (or -1): size Phase-I workers from the input
 #Phase-I worker memory model, consulted only in auto mode. A split worker holds
