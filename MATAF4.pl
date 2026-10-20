@@ -8235,7 +8235,7 @@ sub mapReadsToRef{
 	$decoyModeActive=1 if ( $MFopt{DoMapModeDecoy} && exists($make2ndMapDecoy{Lib}) && -e $make2ndMapDecoy{Lib});
 	my $isSorted = 0;		$isSorted=1 if (@pa1==1 && @paS==0 && $MFopt{DoMapModeDecoy} && $decoyModeActive); #several libraries are joined with samtools cat (unsorted)
 	#canonical CRAM keeps aligned-but-discarded reads flagged (0x200 filter fail, 0x400 duplicate); not for decoy/multi-ref mapping
-	my $keepDiscarded = ($doCram && !$decoyModeActive && !$map2ndTogether && $REF !~ /,/) ? 1 : 0;
+	my $keepDiscarded = ($MFopt{retainAllCRAM} && $doCram && !$decoyModeActive && !$map2ndTogether && $REF !~ /,/) ? 1 : 0;
 	my @discardParts;
 #	die $REF;
 	#one reference FASTA per mapping target ($REF can be a ","-separated list); bowtie2 uses @bwtIdxs instead
@@ -11924,6 +11924,7 @@ sub setDefaultMFconfig{
 	$MFopt{breakpointMinFlankDepth} = 1; $MFopt{breakpointMaxFlankFraction} = 0.10;
 	$MFopt{hybridSyntheticMaxDepth} = 20;
 	$MFopt{mapSaveCram} = 1; #by default, keep the back-mapping bams/crams 
+	$MFopt{retainAllCRAM} = 1; #assembly CRAM also keeps aligned-but-discarded reads, flagged 0x200 (filter fail) / 0x400 (duplicate)
 	$MFopt{MapperCores} = 8;  $MFopt{MapperRmDup} = 1; #mapping cores; ??? ; remove Dups (can be costly if many ref seqs present)
 	$MFopt{bamSortCores} = -1;
 	$MFopt{MapperMemory} = -1; #total mem for mapping job in Gb, Default -1
@@ -12207,6 +12208,7 @@ sub getCmdLineOptions{
 		"mapperFilterPB=s" => \$MFopt{bamfilterPB},
 		"mapperFilterONT=s" => \$MFopt{bamfilterONT},
 		"mapSaveCRAM=i" => \$MFopt{mapSaveCram},
+		"retainAllCRAM=i" => \$MFopt{retainAllCRAM},
 		#"redoMapping=i" =>\$MFopt{redoMapping},
 	#mapping related (2) (assembly)
 		"remap2assembly|redoMap2assembly|redoMapping=i" => \$MFopt{redoAssMapping},
