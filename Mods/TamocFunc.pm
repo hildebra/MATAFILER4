@@ -6,7 +6,7 @@ use strict;
 
 
 use Exporter qw(import);
-our @EXPORT_OK = qw( sortgzblast uniq  readTabbed readTabbed2 bam2cram cram2bsam checkMF
+our @EXPORT_OK = qw( sortgzblast uniq  readTabbed readTabbed2 bam2cram cram2bsam mappingRetainedBytes checkMF
 					readTabbed3 readTable getSpecificDBpaths  getFileStr displayPOTUS 
 					checkMFFInstall
 					);
@@ -251,8 +251,21 @@ sub bam2cram($ $ $ $ $ $){#save further space: convert the bam to cram
 	return ($ret,$nxtCRAM);
 }
 
+#size of a mapping without its discarded (FLAG 0x600) alignments, i.e. the size
+#MATAFILER's size heuristics were tuned on; written next to the CRAM by bamDepth
+sub mappingRetainedBytes{
+	my ($mapping) = @_;
+	return 0 unless -s $mapping; #a size record without its CRAM (e.g. after cleanup) is stale
+	if (open my $fh, '<', "$mapping.retained.size") {
+		my $bytes = <$fh>; close $fh;
+		return 0 + $1 if defined($bytes) && $bytes =~ /^\s*(\d+)\s*$/;
+	}
+	return -s $mapping || 0;
+}
+
 sub cram2bsam{
 	#doBAMSAM 1:bam 2:sam
+	#-F 0x600: drop alignments the CRAM only keeps as discarded (QCFAIL / duplicate)
 	my ($iCRAM,$REF,$oBSAM,$doBAMSAM, $numCore) = @_;
 	my $ret = "";
 	my $smtBin = getProgPaths("samtools");#"/g/bork5/hildebra/bin/samtools-1.2/samtools";
@@ -260,9 +273,9 @@ sub cram2bsam{
 	die "cram2bsam: output mode must be 1 (BAM) or 2 (SAM)\n"
 		unless ($doBAMSAM == 1 || $doBAMSAM == 2);
 	if ($doBAMSAM == 2){#SAM output
-		$ret.="$smtBin view -h -@ $numCore -T $REF -o $oBSAM $iCRAM\n";
+		$ret.="$smtBin view -h -F 0x600 -@ $numCore -T $REF -o $oBSAM $iCRAM\n";
 	} elsif ($doBAMSAM == 1){
-		$ret.="$smtBin view -h -@ $numCore -T $REF -bo $oBSAM $iCRAM\n";
+		$ret.="$smtBin view -h -F 0x600 -@ $numCore -T $REF -bo $oBSAM $iCRAM\n";
 	}
 	
 	return ($ret);
