@@ -200,6 +200,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-mapperFilterPB` | string | `"0.05 0.5 30 0"` | stable | PacBio alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping. |
 | `-mapperFilterONT` | string | `"0.15 0.5 10 0"` | stable | Nanopore alignment filter: maximum edit rate, minimum query coverage, mapping quality and clipping. |
 | `-mapSaveCRAM` | integer | `1` | stable | Retain assembly back-mapping alignments as CRAM files. |
+| `-retainAllCRAM` | integer | `1` | stable | 1: the assembly CRAM also holds every aligned read that MATAFILER discards, flagged 0x200 (failed the mapper filter) or 0x400 (duplicate). All MATAFILER steps ignore flagged reads; `samtools view -F 0x600` gives the reads MATAFILER uses. 0: original CRAM content. |
 
 ## Mapping related (2) (assembly)
 
@@ -411,7 +412,7 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-MGset` | string | `GTDB` | stable | use either FMG or GTDB marker genes to compare and merge MAGs and calculate their abundance |
+| `-MGset` | string | `FMG` | stable | use either FMG or GTDB marker genes to compare and merge MAGs and calculate their abundance |
 
 ### Flags for specific modes
 
@@ -455,7 +456,7 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-canopies` | string |  | stable | location of canopy clustering output file (clusters.txt) |
 | `-smallCores` | integer | `4` | stable | cores used for normal jobs (not intensive) |
 | `-bottleneckCores` | integer | `12` | stable | cores for compute intensive jobs |
-| `-MGset` | string | `GTDB` | stable | marker genes used for MAG merging/abundance: `GTDB` or `FMG` |
+| `-MGset` | string | `FMG` | stable | marker genes used for MAG merging/abundance: `GTDB` or `FMG` |
 | `-wait4stone` | string |  | stable | wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later |
 | `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; `0` waits indefinitely |
 | `-mem` | integer | `150` | stable | memory used for intensive jobs |
@@ -504,7 +505,7 @@ Phase-I input contracts use cross-node-stable file identity: canonical path, ino
 | `-map2` | string | `""` | stable | Sample metadata map forwarded to `strain_within_2.2.pl`. |
 | `-MGSabundance` | string | auto | stable | Explicit MGS abundance matrix, recommended for a nonstandard guide location. |
 | `-clusterID` | integer | `95` | stable | Gene-catalogue clustering identity; must be 1–100. |
-| `-MGset` | string | `GTDB` | stable | Marker-gene set; accepted values are `GTDB` and `FMG`. |
+| `-MGset` | string | `FMG` | stable | Marker-gene set; accepted values are `GTDB` and `FMG`. |
 | `-SNPcaller` | string | `MPI` | stable | Select caller-specific compressed consensus FASTA/VCF inputs; accepted values are `MPI` and `FB`. |
 | `-MGSphylo` | string | `""` | stable | Source MGS tree forwarded for fallback outgroup selection. |
 | `-tmpD` | string | `""` | stable | Node-local temporary directory. |
