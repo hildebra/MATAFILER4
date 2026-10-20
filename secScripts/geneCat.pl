@@ -543,7 +543,7 @@ my $modeStone = ""; #if a stone needs to be touched in that mode..
 my $numCor3 = -1; my $numCor0 = -1;
 my $totMem3=-1;
 my $totMem5=-1;
-my $useGTDBmg = "GTDB";#FMG, GTDB
+my $useGTDBmg = "FMG";#FMG, GTDB
 my $bactGenesOnly = 0; #set to zero if no double euk/bac predication was made
 my $canopyAutoCorr=0.15;
 my $minCanopySamples=10;
