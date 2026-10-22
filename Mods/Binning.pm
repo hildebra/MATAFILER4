@@ -15,7 +15,7 @@ use File::Basename;
 use File::Path qw(make_path);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw (systemW readFasta gzipopen gzipwrite getAssemblPath reverse_complement_IUPAC);
-use Mods::TamocFunc qw (cram2bsam);
+use Mods::TamocFunc qw (cram2bsam mappingRetainedBytes);
 
 
 
@@ -848,7 +848,7 @@ sub createBams{
 		$numBams++;
 		my @inputs;
 		if (-f $DDI && $DDI =~ /\.(?:bam|cram)$/i) {
-			push @inputs, $DDI if (-s $DDI > $minBamSiz);
+			push @inputs, $DDI if (-s $DDI && mappingRetainedBytes($DDI) > $minBamSiz);
 		} else {
 			$DDI =~ s{/$}{};
 			my $marker = "$DDI/mapping/done.sto";
@@ -875,7 +875,7 @@ sub createBams{
 					$candidate = $bam if (-e $bam);
 				}
 				push @inputs, $candidate
-					if (-s $candidate && -s $candidate > $minBamSiz && !$seen_inputs{$candidate}++);
+					if (-s $candidate && mappingRetainedBytes($candidate) > $minBamSiz && !$seen_inputs{$candidate}++);
 			}
 		}
 		for (my $input_no = 0; $input_no < @inputs; $input_no++) {

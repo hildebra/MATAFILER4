@@ -5,7 +5,7 @@ use strict;
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw( gzipopen systemW filsizeMB readFasta readGFF writeFasta reverse_complement_IUPAC fileGZs fileGZe );
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystem2);
-use Mods::TamocFunc qw (cram2bsam);
+use Mods::TamocFunc qw (cram2bsam mappingRetainedBytes);
 use Mods::SampleCompletion qw(invalidate_sample_completion);
 use File::Glob qw(bsd_glob);
 use File::Path qw(make_path);
@@ -363,7 +363,7 @@ sub SNPconsensus_vcf{
 		next unless $mappingSet->[0] && ref($mappingSet->[1]) eq 'ARRAY';
 		for my $mapping (@{$mappingSet->[1]}) {
 			next unless defined($mapping) && length($mapping) && -s $mapping;
-			my $sizeMB = filsizeMB($mapping);
+			my $sizeMB = mappingRetainedBytes($mapping) / (1024 * 1024); #size without discarded alignments
 			$consensusInputMB = $sizeMB if $sizeMB > $consensusInputMB;
 		}
 	}
@@ -513,6 +513,10 @@ sub SNPconsensus_vcf{
 		$xtra .= "test -s $contigDepthF\n" if $runPrimary && length($contigDepthF);
 	}
 	$xtra .= "$smtBin faidx $refFA;\n" unless -s "$refFA.fai";
+	#canonical CRAMs also hold discarded alignments (FLAG 0x200/0x400): planner and callers use a scratch copy without them
+	for my $scope (grep { $_->{run} } @snpScopes) {
+		$scope->{call_mapping} = $bamcram eq "cram" ? "$scrDir/$smplNm.$scope->{tag}retained.cram" : $scope->{mapping};
+	}
 	if ($myParL && $run2ctg) {
 		my $runtimeJobs = scalar(@curReg);
 		my $bedPrefix = "$qsubDirE/$smplNm.";
@@ -522,7 +526,7 @@ sub SNPconsensus_vcf{
 				? " --depth $contigDepthF" : "";
 			my $outputPrefix = $bedPrefix.$scope->{tag};
 			$scope->{region_cmd} =
-				"$regionPlanner --fai $refFA.fai --mapping $scope->{mapping}$depthArg "
+				"$regionPlanner --fai $refFA.fai --mapping $scope->{call_mapping}$depthArg "
 				."--jobs $runtimeJobs --output-prefix $outputPrefix "
 				."--samtools $smtBin --pigz $pigzBin\n";
 		}
@@ -530,8 +534,8 @@ sub SNPconsensus_vcf{
 	
 	my $memReqGB = 20; #memory requested overall
 	my $bcramSiz = 0; 
-	if ($hasPrimaryRds){$bcramSiz = filsizeMB($tar[0]);} 
-	if (@tarS){my $tmpSI = filsizeMB($tarS[0]); $bcramSiz = $tmpSI if ($tmpSI > $bcramSiz);}
+	if ($hasPrimaryRds){$bcramSiz = mappingRetainedBytes($tar[0]) / (1024 * 1024);} 
+	if (@tarS){my $tmpSI = mappingRetainedBytes($tarS[0]) / (1024 * 1024); $bcramSiz = $tmpSI if ($tmpSI > $bcramSiz);}
 	my $refSize = filsizeMB($refFA);
 	my @limits = (1500,3500,5500,7500,10000,12000); my @memRperLimit = (15,20,30,40,60,120);
 	if ($bamcram eq "bam"){ for (my $i=0;$i<@limits;$i++){$limits[$i] *= 1.7;}} #increase limits for bams..
@@ -559,9 +563,11 @@ sub SNPconsensus_vcf{
 			."|| [ ! -s $scope->{mapping}.$indexSuffix ]; then "
 			."rm -f $scope->{mapping}.$indexSuffix; "
 			."$smtBin index -@ $samcores  $scope->{mapping}; fi\n";
+		$scopeCmd .= "$smtBin view -@ $samcores -T $refFA -C -F 0x600 -o $scope->{call_mapping} $scope->{mapping}\n"
+			."$smtBin index -@ $samcores $scope->{call_mapping}\n" if $scope->{call_mapping} ne $scope->{mapping};
 		$scopeCmd .= $scope->{region_cmd} || "";
 		my ($deps, $chunks, $pileCmd) = pileupcall(
-			[$scope->{mapping}], $scope->{tag}, $SNPIHR, $QSBoptHR,
+			[$scope->{call_mapping}], $scope->{tag}, $SNPIHR, $QSBoptHR,
 			$scrDir, $scope->{tmp_out}, $myParL, \@curReg, $reportVCFonly,
 		);
 		push @allDeps2, @{$deps};
@@ -583,6 +589,7 @@ sub SNPconsensus_vcf{
 			$cmdAll .= "$bcftBin concat -a -Oz -o $scope->{vcf} "
 				.join(" ", @chunks)."\n";
 			my @chunkArtifacts = map { ($_, "$_.csi", "$_.tbi") } @chunks;
+			push @chunkArtifacts, $scope->{call_mapping}, "$scope->{call_mapping}.crai" if $scope->{call_mapping} ne $scope->{mapping};
 			$cmdAll .= "test -s $scope->{vcf}\nrm -f "
 				.join(" ", @chunkArtifacts)."\n";
 		}
