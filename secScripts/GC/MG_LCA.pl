@@ -23,7 +23,8 @@ my $LCAbin = getProgPaths("LCA");
 
 #0.1: 7.12.23: added lambda3 support
 #0.11: 13.2.26: version switching betweeen GTDB
-my $version = 0.11;
+#0.12: 23.10.26: FMG.tax built per marker gene (proGenomes3)
+my $version = 0.12;
 
 my $GCd ="";#$ARGV[0]."/";
 my $cores = 1;#$ARGV[1];
@@ -71,7 +72,7 @@ my $SpecID=getProgPaths($speciesDir);#directoy with all 40 SpecI marker genes
 my %FMGcutoffs = %{readTabbed3(getProgPaths($speciesCutoff,0),1)};
 
 my $taxPerGene = "$SpecID/$MGtag.tax";
-reformatGTDBtax($taxPerGene, $inSImap,$GTDBspecI);
+reformatGTDBtax($taxPerGene, $inSImap,$GTDBspecI,$SpecID,[sort keys %FMGcutoffs]);
 #die;
 
 #set up file structure
@@ -130,13 +131,15 @@ sub submitJobs{
 		$ifna = "$MGdir/$COG.fa";
 		#die $ifna." $SpecID/$COG${xtrLab}.fna $tmpD/$COG${xtrLab}.tmp.m8\n";
 		my $m8file = "$tmpD/$COG${xtrLab}.tmp.m8";
-		system "rm $m8file" if ($redo);
 		my $CogTaxF = $ifna; $CogTaxF =~ s/\.fn?a$/\.LCA/;
-		unless (-e $CogTaxF || -e $m8file){
+		# Without the LCA output a leftover .m8 is from an interrupted (possibly
+		# partial) job; it must not block the retry of this COG.
+		unlink $m8file if (-e $m8file && ($redo || !-e $CogTaxF));
+		unless (-e $CogTaxF){
 			#print "XX\n";
 			$cmd .= "\n\n#At $COG\n";
 			$cmd .= lambdaBl($ifna,"$SpecID/$COG${xtrLab}.fna",$m8file,$cores,!$subm)."\n" unless (-e $CogTaxF || -e $m8file); #.rep
-			$cmd .= "$LCAbin  -i $m8file -r $taxPerGene -o $CogTaxF  -LCAfrac 0.8  -cover 0.9 -minAlignLen 70 -id $FMGcutoffs{$COG},90,80,60,50,30,0;\n" unless (-e $CogTaxF);
+			$cmd .= "$LCAbin  -i $m8file -r $taxPerGene -o $CogTaxF -t $cores -LCAfrac 0.8  -cover 0.9 -minAlignLen 70 -id $FMGcutoffs{$COG},90,80,60,50,30,0;\n" unless (-e $CogTaxF);
 			$cmd .= "rm -f $MGdir/$COG.fa $m8file\n";
 			$collectJobs++;
 		}
@@ -175,21 +178,45 @@ sub submitJobs{
 
 
 sub reformatGTDBtax{
-	my ($taxPerGene, $inSImap,$GTDBspecI ) = @_;
-	return if (-e $taxPerGene);
-	my %sp2id = %{readTabbed3($inSImap,1)};
-	open O,">$taxPerGene";
-	open I, "<$GTDBspecI";
+	#LCA needs a lineage for every marker gene in the DB (fasta headers: <genome>.<gene>)
+	my ($taxPerGene, $inSImap,$GTDBspecI,$SpecID,$COGs) = @_;
+	return if (-s $taxPerGene); #empty file = failed earlier build
+	my %gen2sp;
+	open I, "<$inSImap" or die "MG_LCA::Can't open $inSImap\n";
+	while (my $line = <I>){
+		chomp $line; my @spl = split /\t/,$line;
+		next if (@spl < 2);
+		$gen2sp{$_} = $spl[0] foreach (split /;/,$spl[1]);
+	}
+	close I;
+	my %sp2tax; #the header line ends up as an unused entry
+	open I, "<$GTDBspecI" or die "MG_LCA::Can't open $GTDBspecI\n";
 	while (my $line = <I>){
 		chomp $line; my @spl = split /\t/,$line;
 		my $spec = shift @spl; shift @spl;
-		if (!exists $sp2id{$spec}){
-			die "MG_LCA::Can't find $spec\n";
-		}
-		print O $sp2id{$spec} . "\t" . join (";",@spl) . "\n";
+		$sp2tax{$spec} = join (";",@spl);
 	}
 	close I;
+	my $genes = 0; my $noTax = 0;
+	open O,">$taxPerGene.tmp" or die "MG_LCA::Can't write $taxPerGene.tmp\n";
+	foreach my $COG (@{$COGs}){
+		my $fna = "$SpecID/$COG.fna";
+		next unless (-e $fna);
+		open F, "grep '^>' $fna |" or die "MG_LCA::Can't read $fna\n";
+		while (my $line = <F>){
+			next unless ($line =~ m/^>(\S+)/);
+			my $gene = $1; my $gen = $gene;
+			$gen =~ s/\.[^\.]+$// while (!exists $gen2sp{$gen} && $gen =~ m/\./);
+			my $tax = exists $gen2sp{$gen} ? ($sp2tax{$gen2sp{$gen}} // "?") : "?";
+			$noTax++ if ($tax eq "?");
+			print O "$gene\t$tax\n";
+			$genes++;
+		}
+		close F;
+	}
 	close O;
-	print "Wrote $taxPerGene\n";
-	#die;
+	#genomes missing from the specI clustering get "?" (LCA aborts on subjects without taxonomy)
+	die "MG_LCA::$noTax of $genes marker genes without specI in $inSImap\n" if (!$genes || $noTax > 0.1 * $genes);
+	rename "$taxPerGene.tmp", $taxPerGene or die "MG_LCA::Can't write $taxPerGene\n";
+	print "Wrote $taxPerGene ($genes marker genes, $noTax without taxonomy)\n";
 }
