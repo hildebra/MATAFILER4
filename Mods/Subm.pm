@@ -597,6 +597,14 @@ sub reconcileSlurmDependencies {
 	return (join(';', @remaining), $error);
 }
 
+# A job submitted from inside another Slurm job (every MATAFILER controller and supervisor is one, and jobs are
+# submitted with --export=ALL) inherits that job's SPANK plugin options as *_SPANK_OPTION_* environment variables.
+# Some sites apply those instead of the new job's own #SBATCH request, e.g. the parent's --localscratch size: eggNOG
+# chunk jobs asking for 500 GB got the 15 GB of their supervisor. Each job states its own options, so drop them.
+sub _inherited_spank_options {
+	return grep { /SPANK_OPTION_/ } keys %ENV;
+}
+
 sub _run_slurm_submission {
 	my ($command, $optHR) = @_;
 	$command =~ s/\s+\z//;
@@ -605,6 +613,9 @@ sub _run_slurm_submission {
 	}
 	# Strip trailing whitespace so "2>&1" binds to the actual command.
 	(my $trimmed_command = $command) =~ s/\s+\z//;
+	my @spank = _inherited_spank_options();
+	local @ENV{@spank}; #restored on return
+	delete @ENV{@spank};
 	my $output = `$trimmed_command 2>&1`;
 	return ($output, $?);
 }
@@ -1485,6 +1496,9 @@ sub qsubSystem2{
 	} else {$qbin="bsub";$xtra="<";
 	}
 	my $qcm = "$qbin $xtra $tmpsh \n";
+	my @spank = _inherited_spank_options(); #see _run_slurm_submission
+	local @ENV{@spank};
+	delete @ENV{@spank};
 	system($qcm) == 0 or die "qsubSystem2 failed: $qcm";
 	return $qcm;
 }
