@@ -5023,13 +5023,9 @@ sub detectRibo(){
 			$jobName = $jobd;
 		}
 		if ($calcRiboFind || !$riboEvidence->{taxonomy_complete}) {
-<<<<<<< HEAD
-			$jobd=$jobName; $mem="16G";
-			$jobd .= ";".$MFopt{globalRiboDependence}->{DBcp} unless ($MFopt{globalRiboDependence}->{DBcp} eq "alreadyCopied");
-=======
+
 			$mem="16G";
 			my $lcaDep = normalise_job_dependencies($jobName, $DBdep);
->>>>>>> dev2
 			$QSBoptHR->{useLongQueue} = 0;
 			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = $HDDspace{Ribos};
 			($jobName, $tmpCmd) = qsubSystem($logDir."RiboLCA.sh",$cmd2,$numCore2,$mem,"_RA$JNUM",$lcaDep,"",1,[],$QSBoptHR);
