@@ -2,7 +2,7 @@ package Mods::geneCat;
 use warnings;
 use strict;
 use Mods::IO_Tamoc_progs qw(getProgPaths);
-use Mods::GenoMetaAss qw( fileGZe systemW gzipopen readFasta);
+use Mods::GenoMetaAss qw( fileGZe systemW gzipopen);
 use Mods::FuncTools qw( readGene2Func);
 use Mods::math qw( meanArray);
 use List::Util qw(sum);
@@ -53,36 +53,63 @@ sub readMG_LCA{
 }
 
 sub attachProteins3{
-	my ($curSmpl,$prF,$protIn,$hrGI,$SEP) = @_;
-	my %gene2num = %{$hrGI};
+	my ($curSmpl,$prF,$protIn,$hrGI,$SEP,$options) = @_;
+	$options ||= {};
 	die "Protein file does not exist: $protIn\n" unless (fileGZe($protIn));
-	my $hr = readFasta($protIn);
-	my %fas = %{$hr};
-	#print "$protIn\n";
-	#my $protStore = `cat $inT | xargs $samBin faidx $protIn`;
-	#die length($protStore)."\n";
-	#my @prots = @{$inT};
+
+	# Source protein files can be much larger than the representative set. Keep
+	# only selected sequences while streaming the FASTA, rather than materializing
+	# (and then copying) every protein sequence from the source assembly.
+	my ($in,$status) = gzipopen($protIn,"source protein fasta",1,0);
+	die "Can't open source protein fasta $protIn\n" unless ($status && defined $in);
+	my %selected;
+	my ($header_seen,$selected_id,$sequence) = (0,undef,undef);
+	my $prefix = $curSmpl.$SEP;
+	while (my $line = <$in>){
+		chomp $line;
+		if ($line =~ m/^>(.*)$/){
+			$selected{$selected_id} = $sequence if defined $selected_id;
+			$header_seen = 1;
+			my $header = $1;
+			$header =~ s/[|\s].*//;
+			$selected_id = undef;
+			if (index($header,$prefix) == 0){
+				my $candidate = substr($header,length($prefix));
+				$selected_id = $candidate if exists($hrGI->{$candidate});
+			}
+			$sequence = defined($selected_id) ? "" : undef;
+		} else {
+			die "Malformed FASTA file $protIn: sequence data appeared before the first header\n"
+				unless $header_seen;
+			$sequence .= $line if defined $selected_id;
+		}
+	}
+	$selected{$selected_id} = $sequence if defined $selected_id;
+	close $in or die "Cannot close source protein fasta $protIn: $!\n";
+
+	open my $out, ">>", $prF or die "Can't open $prF\n";
 	my $tmpStr = "";
-	foreach my $pr (keys %gene2num){
-		#$pr = substr $pr,1; #s/^>//;
+	my $flush_at = 4 * 1024 * 1024;
+	foreach my $pr (keys %{$hrGI}){
 		#1 identify protein
 		my $seq = "";
 		my $protHd = $curSmpl.$SEP.$pr;
-		if (!exists($fas{$protHd})){
+		if (!exists($selected{$pr})){
+			die "Cannot find required protein $protHd in $protIn\n" if $options->{require_all};
 			print "Can't find $protHd in $protIn\n";
 		} else {
-			$seq = $fas{$protHd};
+			$seq = $selected{$pr};
 		}
-		unless(exists($gene2num{$pr})){die "can not identify $pr gene in index file while rewritign prot names\n$protIn\n";}
-		#print "$gene2num{$spl[0]}\n $pr\n";
-		foreach my $prX (@{$gene2num{$pr}}){
+		foreach my $prX (@{$hrGI->{$pr}}){
 			$tmpStr .= ">".$prX."\n".$seq."\n";
+			if (length($tmpStr) >= $flush_at){
+				print {$out} $tmpStr or die "Can't write $prF: $!\n";
+				$tmpStr = "";
+			}
 		}
 	}
-	open Oe,">>$prF" or die "Can't open $prF\n";
-	print Oe $tmpStr;
-	close Oe;
-	$tmpStr="";
+	print {$out} $tmpStr or die "Can't write $prF: $!\n" if length $tmpStr;
+	close $out or die "Can't close $prF: $!\n";
 }
 
 
@@ -206,6 +233,15 @@ sub createGene2MGS{
 
 sub readGene2tax{
 	my $inF = $_[0];
+	my $progress = @_ > 3 ? $_[3] : undef;
+	my $options = @_ > 4 ? $_[4] : {};
+	die "readGene2tax progress callback must be a code reference\n"
+		if defined($progress) && ref($progress) ne "CODE";
+	die "readGene2tax options must be a hash reference\n"
+		if ref($options) ne "HASH";
+	my $allowedCogsByMGS = $options->{allowed_cogs_by_mgs};
+	die "readGene2tax allowed_cogs_by_mgs must be a hash reference\n"
+		if defined($allowedCogsByMGS) && ref($allowedCogsByMGS) ne "HASH";
 	my $limit = -1;  my %subset; my $doMGSsubset=0;
 	$limit = $_[1] if (@_ > 1);
 	if (@_ > 2){
@@ -229,6 +265,8 @@ sub readGene2tax{
 	while (my $line = <I>){
 		chomp $line;
 		$totalGenes++;
+		$progress->({ rows_scanned => $totalGenes, included_genes => $inclGenes })
+			if $progress && $totalGenes % 100_000 == 0;
 		my @spl = split (/\t/,$line,-1);
 		if (@spl < 3 || !defined($spl[0]) || $spl[0] eq "" || !defined($spl[1]) || $spl[1] eq "") {
 			$rowWarnings{malformed}++;
@@ -236,17 +274,25 @@ sub readGene2tax{
 				if $rowWarnings{malformed} <= $warningLimit;
 			next;
 		}
-		#only read a limited number of genes.. used for MGS to only take first few genes
 		my $MGS = $spl[1];
-		if ($limit>0 && exists($totalTax{$MGS}) && $totalTax{$MGS}  >= $limit){
-			next;
-		} 
 		if ($doMGSsubset && !exists($subset{$MGS})){
 			#print "N $MGS ";
 			next;
 		}
 	
 		my $OG = $spl[2];
+		# Apply a caller-supplied orthology demand before the per-MGS cap. This
+		# lets reference consumers retain requested loci even when unrelated
+		# catalogue rows occur first for the same MGS.
+		if (defined($allowedCogsByMGS)) {
+			my $allowed = $allowedCogsByMGS->{$MGS};
+			next unless defined($allowed) && ref($allowed) eq "HASH"
+				&& defined($OG) && length($OG) && $OG ne "-" && $allowed->{$OG};
+		}
+		# Only count retained rows towards the optional per-MGS limit.
+		if ($limit>0 && exists($totalTax{$MGS}) && $totalTax{$MGS} >= $limit){
+			next;
+		}
 		if ($OG eq "" || $OG eq "-"){ #make artificial OG
 			$uniqs{$spl[1]}++;
 			$OG="uniq$uniqs{$spl[1]}";
@@ -271,6 +317,8 @@ sub readGene2tax{
 		$totalTax{$MGS} ++;
 	}
 	close I;
+	$progress->({ rows_scanned => $totalGenes, included_genes => $inclGenes })
+		if $progress;
 	if (($rowWarnings{malformed} || 0) > $warningLimit) {
 		warn "Suppressed ".($rowWarnings{malformed} - $warningLimit)
 			." additional malformed gene-to-MGS row warnings in $inF "
@@ -364,9 +412,7 @@ sub readGeneIdxSpl($ $){
 		if (@spl2>1){
 			$pre = $spl2[0];$post = $spl2[1];
 		}
-		unless (exists($ret{$pre})){
-			keys %{$ret{$pre}} = 5e5;
-		}
+		$ret{$pre} //= {};
 		if (exists($ret{$pre}{$post})){
 			print "Double entry found: $spl[2]\n$line\n"; $dbl++;
 		}
@@ -404,7 +450,8 @@ sub read_matrix{
 		chomp; $cnt++;
 		my @row = split /$SEP/;
 		my $ID = shift @row;
-		next if ($doIncl && !exists($incl{$ID}));
+		# The header is always kept; the subset filter applies to data rows only.
+		next if ($cnt > 1 && $doIncl && !exists($incl{$ID}));
 		if ($cnt==1){
 			$oM{header} = \@row;
 		} else {

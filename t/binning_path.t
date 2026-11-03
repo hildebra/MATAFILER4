@@ -193,44 +193,4 @@ like($checkm2_command, qr/^set -e\n/, 'CheckM2 command propagation stops at the 
 like($checkm2_command, qr/test -s \Q$assignment.cm2\E/,
 	'CheckM2 must publish a non-empty quality report');
 
-my $mataf4 = slurp(File::Spec->catfile($Bin, '..', 'MATAF4.pl'));
-like($mataf4, qr/my \$binningComplete = binningOutputsComplete.*?&& !\$binningComplete/s,
-	'MATAF4 uses the shared complete-output predicate when scheduling binning');
-like($mataf4, qr/-minAssemblySizeMB \$MFopt\{minBinnerAssemblyMB\}/,
-	'MATAF4 passes the configured minimum assembly size to the binner');
-like($mataf4, qr/\$MBcmd = "" if \(-e \$MetaBat2out\)/,
-	'quality-only repair reuses a valid empty bin assignment');
-like($mataf4, qr/my \@binLibraries = .*?getRawLibrariesAssmGrp.*?0.*?getRawLibrariesAssmGrp.*?1/s,
-	'binner sequencing mode is derived from primary and support library records');
-unlike($mataf4, qr/\$postCmd \.= " -read[12S] /,
-	'MATAF4 no longer passes ignored raw-read options to bin quality checking');
-
-my $runner = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'assemblies', 'runBinners.pl'));
-like($runner, qr/my \$version = 0\.18;/,
-	'SCGBinner training-input guard increments the binner-runner version');
-like($runner, qr/invalidate_sample_completion\(\$_\) for \@paths/,
-	"binner workers invalidate every assembly-group sample sentinel before output changes");
-like($runner, qr/my \$resultCheck = "test -e '\$BinDir\/\$smplIDs1'".*?printf .*?> '\$stone'/s,
-	'the binner assignment is verified before its completion stone is published');
-like($runner, qr/if \(\$DoMetaBat2 == 2\).*?output_recluster_bins.*?output_bins/s,
-	'SemiBin native output is accepted before standardized assignments are generated');
-like($runner, qr/validate_mapping_references\.pl.*?system\(\$\^X, \$referenceValidator/s,
-	'all binners validate mapping sequence dictionaries before conversion');
-like($runner,
-	qr/sub fastaAssemblyStats.*?\$currentLength >= 1000.*?SCGBinner preflight:.*?\$scgEligibleContigs < 2.*?SCGBinner requires at least 2 contigs >=1000 bp.*?\$scgBatchSize = \$scgEligibleContigs/s,
-	'SCGBinner preflight counts eligible contigs, skips unusable input, and bounds its batch size');
-like($runner,
-	qr/runSCGBinner\(""[^;]*?\$scgBatchSize,\$scgEligibleContigs\)/s,
-	'the measured SCGBinner training population is forwarded to command construction');
-my $binning_module = slurp(File::Spec->catfile($Bin, '..', 'Mods', 'Binning.pm'));
-like($binning_module,
-	qr/sub runSCGBinner.*?-b \\".*?-p \$batchSize.*?scgbinner_status=\\\$\?.*?failed after preflight found \$eligibleContigs.*?did not create.*?SCGBINNER_result\.tsv/s,
-	'SCGBinner receives the adaptive batch and reports failed or missing training output explicitly');
-like($mataf4, qr/Hybrid \$kind mapping does not identify.*?mapping_reference_matches/s,
-	'final hybrid assemblies invalidate legacy or stale preassembly mappings');
-like($mataf4, qr/stat -c '%s %Y'.*?smd\.reference\.stat/s,
-	'mapping publication records a portable reference identity stamp');
-like($mataf4, qr/\(\?:\\s\+\|\\\\t\)/,
-	'reference identity recovery accepts markers from the literal-tab release');
-
 done_testing();

@@ -1,0 +1,57 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH --cpus-per-task=1
+#SBATCH -o 3.runMATAFILER_accessions.mfc.otxt
+#SBATCH -e 3.runMATAFILER_accessions.mfc.etxt
+#SBATCH --mem=22400
+#SBATCH --export=ALL
+#SBATCH -p "ei-medium,qib-medium,qib-long,ei-long"
+#SBATCH -J 3.MF4accessions
+
+set -euo pipefail
+ulimit -c 0
+
+if [ -z "${MF4DIR:-}" ]; then
+	echo "MF4DIR is unset; export it to the MATAFILER4 installation directory." >&2
+	exit 1
+fi
+
+local_read="$MF4DIR/examples/data/SRR8797712_2.fq.gz"
+if [ ! -s "$local_read" ]; then
+	echo "Local example input is missing: $local_read" >&2
+	echo "Run $MF4DIR/examples/0.getExmplData.sh first." >&2
+	exit 1
+fi
+
+for tool in wget prefetch fasterq-dump vdb-validate; do
+	if ! command -v "$tool" >/dev/null 2>&1; then
+		echo "Required archive tool is not available in PATH: $tool" >&2
+		echo "Activate the base MF4 Conda environment created by the installer." >&2
+		exit 1
+	fi
+done
+
+echo
+echo "Example 3: one existing local library plus small ENA and NCBI SRA WGS metagenomes."
+echo "ENA and SRA acquisition jobs use downloadQueue (nbi-download by default)."
+echo "Validated reads remain in shared scratch until each sample is completely processed."
+echo "The three biological samples are unrelated; this example tests workflow mechanics only."
+echo
+
+MAP="$MF4DIR/examples/maps/testAccessions.map"
+
+perl "$MF4DIR/MATAF4.pl" \
+	-map "$MAP" \
+	-inputFQregexSingle '.*\.f[^.]*q\.gz$' \
+	-inputFQregex1 '(.*_R1_001\.fastq\.gz)|(.*[_\.]1\.f[^\.]*q\.gz)$' \
+	-inputFQregex2 '(.*_R2_001\.fastq\.gz)|(.*[_\.]2\.f[^\.]*q\.gz)$' \
+	-mergeReads 0 -maxConcurrentJobs 100 \
+	-assembleMG 2 -assemblCores 4 -assemblyKmers "25,43,67" -assemblMemory 10 \
+	-Binner 0 -profileMetaphlan 0 \
+	-mapReadsOntoAssembly 1 -mappingCores 4 -mappingMem 5 \
+	-mapper 5 -mapSaveCRAM 1 -getAssemblConsSNP 0 -rmSmplLocks 0 \
+	-submit 1 -from 0 -to 3
+
+echo
+echo "Wait for submitted jobs to finish, then rerun this script until no work remains."
+echo "Archive provenance remains in each sample output as input_accession.json."

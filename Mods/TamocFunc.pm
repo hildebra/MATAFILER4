@@ -6,7 +6,7 @@ use strict;
 
 
 use Exporter qw(import);
-our @EXPORT_OK = qw( sortgzblast uniq  readTabbed readTabbed2 bam2cram cram2bsam checkMF
+our @EXPORT_OK = qw( sortgzblast uniq  readTabbed readTabbed2 bam2cram cram2bsam mappingRetainedBytes checkMF
 					readTabbed3 readTable getSpecificDBpaths  getFileStr displayPOTUS 
 					checkMFFInstall
 					);
@@ -148,6 +148,8 @@ sub checkMFFInstall{
 	#checkVersion("GTDBtk profiler MAGs","GTDBtk",1);
 	checkProg("MetaPhlan profiler","metPhl2",1);
 	checkProg("mOTUs profiler","motus2",0);
+	checkProg("Protal profiler","protal",0);
+	checkProg("Protal profile merger","protalProfileUtils",0);
 	
 	
 	
@@ -249,8 +251,21 @@ sub bam2cram($ $ $ $ $ $){#save further space: convert the bam to cram
 	return ($ret,$nxtCRAM);
 }
 
+#size of a mapping without its discarded (FLAG 0x600) alignments, i.e. the size
+#MATAFILER's size heuristics were tuned on; written next to the CRAM by bamDepth
+sub mappingRetainedBytes{
+	my ($mapping) = @_;
+	return 0 unless -s $mapping; #a size record without its CRAM (e.g. after cleanup) is stale
+	if (open my $fh, '<', "$mapping.retained.size") {
+		my $bytes = <$fh>; close $fh;
+		return 0 + $1 if defined($bytes) && $bytes =~ /^\s*(\d+)\s*$/;
+	}
+	return -s $mapping || 0;
+}
+
 sub cram2bsam{
 	#doBAMSAM 1:bam 2:sam
+	#-F 0x600: drop alignments the CRAM only keeps as discarded (QCFAIL / duplicate)
 	my ($iCRAM,$REF,$oBSAM,$doBAMSAM, $numCore) = @_;
 	my $ret = "";
 	my $smtBin = getProgPaths("samtools");#"/g/bork5/hildebra/bin/samtools-1.2/samtools";
@@ -258,9 +273,9 @@ sub cram2bsam{
 	die "cram2bsam: output mode must be 1 (BAM) or 2 (SAM)\n"
 		unless ($doBAMSAM == 1 || $doBAMSAM == 2);
 	if ($doBAMSAM == 2){#SAM output
-		$ret.="$smtBin view -h -@ $numCore -T $REF -o $oBSAM $iCRAM\n";
+		$ret.="$smtBin view -h -F 0x600 -@ $numCore -T $REF -o $oBSAM $iCRAM\n";
 	} elsif ($doBAMSAM == 1){
-		$ret.="$smtBin view -h -@ $numCore -T $REF -bo $oBSAM $iCRAM\n";
+		$ret.="$smtBin view -h -F 0x600 -@ $numCore -T $REF -bo $oBSAM $iCRAM\n";
 	}
 	
 	return ($ret);
@@ -447,11 +462,15 @@ sub getSpecificDBpaths($ $){
 	elsif ($curDB eq "TCDB"){$DBpath = getProgPaths("TCDB_path_DB"); $refDB = "tcdb.faa";$shrtDB = $curDB; }
 	elsif ($curDB eq "PTV"){$DBpath = getProgPaths("PATRIC_VIR_path_DB"); $refDB = "PATRIC_VF.faa";$shrtDB = $curDB; }
 	elsif ($curDB eq "PAB"){$DBpath = getProgPaths("ABprod_path_DB"); $refDB = "dedup_best_prod_predictions.faa";$shrtDB = $curDB; }
-	elsif ($curDB eq "VDB"){$DBpath = getProgPaths("VirDB_path_DB"); $refDB = "VFDB_setB_pro.fas";$shrtDB = $curDB; }
+	elsif ($curDB eq "VDB"){$DBpath = getProgPaths("VirDB_path_DB"); $refDB = "VFDB_setB_pro.fas";$shrtDB = $curDB; } #legacy name, same as VFB
+	elsif ($curDB eq "VFA"){$DBpath = getProgPaths("VirDB_path_DB"); $refDB = "VFDB_setA_pro.fas";$shrtDB = $curDB; } #VFDB set A: core, experimentally verified VFs
+	elsif ($curDB eq "VFB"){$DBpath = getProgPaths("VirDB_path_DB"); $refDB = "VFDB_setB_pro.fas";$shrtDB = $curDB; } #VFDB set B: full dataset (verified + predicted)
 	elsif ($curDB eq "URE"){$DBpath = getProgPaths("URE_path_DB"); $refDB = "ualpha_gtdb_proteins.faa";$shrtDB = $curDB; }
 	elsif ($curDB eq "URacc"){$DBpath = getProgPaths("URE_path_DB"); $refDB = "urease_accessory_gtdb_proteins.faa";$shrtDB = $curDB; }
 	elsif ($curDB eq "AMI"){$DBpath = getProgPaths("URE_path_DB"); $refDB = "amidohydrolase_gtdb_proteins.faa";$shrtDB = $curDB; }
 	else {die"Unknown DB for func assignments: $curDB\n";}
+	#callers build "$DBpath$refDB": a configured path without trailing slash would pass the checks below but not work
+	$DBpath .= "/" if (defined($DBpath) && $DBpath ne "" && $DBpath !~ m{/$});
 
 	#basic file checks
 	unless (-d $DBpath) {die "getSpecificDBpaths:: Specified DB ($curDB) did not have valid DBpath: $DBpath\n";}

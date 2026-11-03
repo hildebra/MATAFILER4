@@ -24,7 +24,7 @@ my ($hr,$hr2) = readMap($mapF);
 my %map = %{$hr};
 my @samples = @{$map{opt}{smpl_order}};
 
-print "Combining markers in ".@samples" samples..\n";
+print "Combining markers in ".scalar(@samples)." samples..\n";
 
 my @baseRiF = ("reads_SSU","reads_LSU","reads_ITS");
 my $rlogs="Sample\tSSU_RiboReads\t18S\t16Sbac\t16Sarc\tLSU_RiboReads\t28S\t23S_bac\t23S_arc\tITS\n";

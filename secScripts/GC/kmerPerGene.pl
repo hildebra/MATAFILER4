@@ -12,14 +12,35 @@ use Mods::CatalogPaths qw(resolve_catalog_maps);
 sub readKmers_Smpl;
 
 my $GCd = $ARGV[0];
+my $clusterID = @ARGV > 2 ? $ARGV[2] : 95;
+die "Invalid cluster identity\n" unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
 my $mapF = resolve_catalog_maps($GCd);
 my ($hr1,$hr2) = readMapS($mapF,-1);
 my %map = %{$hr1}; my %AsGrps = %{$hr2};
-my $kmerOut = "$GCd/compl.incompl.95.fna.kmer";
-system "rm -f $kmerOut" if (-e $kmerOut);
+my $kmerOut = "$GCd/compl.incompl.$clusterID.fna.kmer";
+unlink $kmerOut or die "Cannot remove $kmerOut: $!\n" if -e $kmerOut;
+
+# Per-gene k-mers only exist when MATAF4 ran with -kmerPerGene 1. geneCat adds
+# this step unconditionally, so check every assembly first and skip cleanly
+# (no output, exit 0) instead of dying half-way through a large catalogue.
+{
+	my (%seenAssembly, @missingKmers);
+	for my $smpl (@{$map{opt}{smpl_order}}) {
+		next if -e "$map{$smpl}{wrdir}/SMPL.empty";
+		my $metaGD = getAssemblPath("$map{$smpl}{wrdir}/", "", 0);
+		next if $metaGD eq '' || $seenAssembly{$metaGD}++;
+		push @missingKmers, $metaGD unless -s "$metaGD/ContigStats/scaff.pergene.4kmer.pm5.gz";
+	}
+	if (@missingKmers) {
+		print "Per-gene k-mers are missing for ".scalar(@missingKmers)." assembl"
+			.(@missingKmers == 1 ? "y" : "ies")." (e.g. $missingKmers[0]); run MATAF4 with -kmerPerGene 1 to compute them. "
+			."Skipping the catalogue k-mer table.\n";
+		exit(0);
+	}
+}
 
 #read gene clusters jsut to get an idea of which genes are present
-($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.95.fna.clstr.idx",0); $hr1 = {};
+($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0); $hr1 = {};
 my @totGenes = sort  { $a <=> $b } keys %{$hr2};
 print @totGenes."\n";
 #empty mem
@@ -36,7 +57,7 @@ for (my $subs = 0; $subs < int(scalar(@totGenes)/$binSize)+1; $subs++){
 		$subHs{$totGenes[$i]} = 1;
 		last if ($i+1 >= $numGenesT);
 	}
-	($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.95.fna.clstr.idx",0,\%subHs);my %cl2gene = %{$hr2}; $hr1 = {}; undef %subHs;
+	($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",0,\%subHs);my %cl2gene = %{$hr2}; $hr1 = {}; undef %subHs;
 	print scalar(keys %cl2gene)."\n";
 	my %cl2gene2; my $numGenesRep = 0;my $numKmerReps=0;
 	foreach my $gene (keys %cl2gene){

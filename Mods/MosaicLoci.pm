@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use Exporter qw(import);
+use Mods::math qw(medianArray);
 use Mods::GenoMetaAss qw(gzipopen);
 
 our @EXPORT_OK = qw(
@@ -197,7 +198,8 @@ sub read_paf_stream {
 		}
 	}
 	my %hits = map {
-		$_ => [values %{$best_hits{$_}}]
+		# Targets in sorted order keep downstream choices reproducible.
+		$_ => [ @{ $best_hits{$_} }{ sort keys %{ $best_hits{$_} } } ]
 	} keys %best_hits;
 	if ($statistics) {
 		$statistics->{queries_with_retained_alignments} = scalar(keys %queries_seen);
@@ -287,11 +289,7 @@ sub confirm_mosaic_candidates {
 }
 
 sub _median {
-	my @values = sort { $a <=> $b } @_;
-	return 0 unless @values;
-	my $middle = int(@values / 2);
-	return @values % 2 ? $values[$middle]
-		: ($values[$middle - 1] + $values[$middle]) / 2;
+	return @_ ? medianArray(@_) : 0;
 }
 
 sub select_outgroup_panel {
@@ -366,7 +364,9 @@ sub select_outgroup_panel {
 }
 
 sub read_mosaic_catalogue {
-	my ($path) = @_;
+	my ($path, $progress) = @_;
+	die "read_mosaic_catalogue progress callback must be a code reference\n"
+		if defined($progress) && ref($progress) ne "CODE";
 	my (%pairs, %outgroups, %outgroup_genes, %outgroup_gene_targets);
 	return (\%pairs, \%outgroups, \%outgroup_genes)
 		unless defined($path) && length($path) && -s $path;
@@ -397,8 +397,11 @@ sub read_mosaic_catalogue {
 		} else {
 			die "Unknown mosaic catalogue row type '$fields[0]' at $path line $line_number\n";
 		}
+		$progress->({ file => $path, rows_scanned => $line_number })
+			if $progress && $line_number % 100_000 == 0;
 	}
 	close $fh or die "Cannot close mosaic catalogue $path: $!\n";
+	$progress->({ file => $path, rows_scanned => $line_number }) if $progress;
 	for my $source (keys %outgroup_gene_targets) {
 		die "OUTGROUP_GENE rows exist without an OUTGROUP connection for $source in $path\n"
 			unless exists $outgroups{$source};

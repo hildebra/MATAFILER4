@@ -3,15 +3,13 @@
 use warnings;
 use strict;
 
-use Mods::GenoMetaAss qw(readGFF gzipopen);
+use Mods::GenoMetaAss qw(gzipopen);
 
-sub evalGC;
 
 my $inF = $ARGV[0];
 my $outF = $ARGV[1];
 my $isGenes = 0;
 $isGenes = 1 if (@ARGV > 2);
-#readGFF($ARGV[2]);
 
 
 #open I,"<$inF" or die "Can't open $inF";
@@ -29,99 +27,42 @@ if ($isGenes){
 	print OC3 "contig\tGC\n";
 }
 
-my $curTag = ""; my $GC=0; my $AT=0;
-my $GC3=0; my $AT3=0; my $line = "";
-my $GC3c=0; my $AT3c=0;my $curCtg="";
-my $cnt=0;
-while (my $lin = <$FAS>){
-	if ($lin =~ m/^>(.*)/){
-		my $ct1= $1;
-		if ($cnt > 0){
-			my $isSameCtg =0;
-			$isSameCtg =1 if ($ct1 !~ m/$curCtg/);
-			#die "$isSameCtg  $curCtg $ct1\n" if ($isSameCtg);
-			evalGC($isSameCtg);
-			if ($isSameCtg){
-				$curCtg = $ct1;
-				$curCtg =~ s/_\d+$//;
-			}
-		} else {#ini contig
-			$curCtg = $ct1;
-			$curCtg =~ s/_\d+$//;
-		}
-		$curTag = $ct1; $GC=0;$AT=0; $line = "";
-		
-		
-		
-		$cnt++; 
-		next;
-	}
-	chomp $lin; $line .= $lin;
-}
-evalGC(1);
-close O; close $FAS;
-if ($isGenes){
-close O3 ;close OC3 ;
-}
-
-
-
-exit(0);
-
-
-
-
-sub evalGC($){
-	my ($difCtg) = @_;
-	$GC += ($line =~ tr/G//);	$GC += ($line =~ tr/C//);
-	$AT += ($line =~ tr/A//);	$AT += ($line =~ tr/T//);
-	if ($GC + $AT == 0){
-		print O "$curTag\t-1";
+my ($curTag, $curCtg, $sequence) = ("", "", "");
+my ($contigGC3, $contigAT3) = (0, 0);
+while (my $line = <$FAS>) {
+	if ($line =~ /^>(\S+)/) {
+		my $tag = $1;
+		(my $ctg = $tag) =~ s/_\d+$//;
+		emit_sequence($ctg ne $curCtg) if $curTag ne "";
+		($curTag, $curCtg, $sequence) = ($tag, $ctg, "");
 	} else {
-		print O "$curTag\t". sprintf('%.3f', ($GC/($GC+$AT)*100)) ."\n";
+		chomp $line;
+		$sequence .= uc($line);
 	}
-	#get every third char
-	if ($isGenes){
-		my $line2="";
-		for (my $c=2;$c<length($line);$c+=3){$line2 .= substr $line, $c,1;}
-		if ((length($line)%3) != 0){die "$curTag $line $line2\n";}
-#		die "$line\n\n$line2\n" ."\n";
-		$GC3 += ($line2 =~ tr/G//);	$GC3 += ($line2 =~ tr/C//);
-		$AT3 += ($line2 =~ tr/A//);	$AT3 += ($line2 =~ tr/T//);		
-		if ($GC3 + $AT3 == 0){
-			print O3 "$curTag\t-1";
-		} else {
-			print O3 "$curTag\t". sprintf('%.3f', ($GC3/($GC3+$AT3)*100)) ."\n";
-		}
-		$GC3c+=$GC3;$AT3c+=$AT3;
-		$GC3=0;$AT3=0;
-	
-		if ($difCtg){#different contig
-			if ($GC3c + $AT3c == 0){
-				print OC3 "$curTag\t-1";
-			} else {
-				print OC3 "$curCtg\t". sprintf('%.3f', ($GC3c/($GC3c+$AT3c)*100)) ."\n";
-			}
-			$GC3c=0;$AT3c=0;
-		}
-	}
+}
+emit_sequence(1) if $curTag ne "";
+close O; close $FAS;
+if ($isGenes) { close O3; close OC3; }
 
+sub gc_row {
+	my ($handle, $tag, $gc, $at) = @_;
+	my $value = $gc + $at ? sprintf('%.3f', 100 * $gc / ($gc + $at)) : -1;
+	print {$handle} "$tag\t$value\n";
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+sub emit_sequence {
+	my ($endContig) = @_;
+	gc_row(\*O, $curTag, scalar($sequence =~ tr/GC//), scalar($sequence =~ tr/AT//));
+	return unless $isGenes;
+	die "Gene length is not a multiple of three: $curTag\n" if length($sequence) % 3;
+	my $third = "";
+	for (my $i = 2; $i < length($sequence); $i += 3) { $third .= substr($sequence, $i, 1); }
+	my $gc = $third =~ tr/GC//;
+	my $at = $third =~ tr/AT//;
+	gc_row(\*O3, $curTag, $gc, $at);
+	$contigGC3 += $gc; $contigAT3 += $at;
+	if ($endContig) {
+		gc_row(\*OC3, $curCtg, $contigGC3, $contigAT3);
+		($contigGC3, $contigAT3) = (0, 0);
+	}
+}

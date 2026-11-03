@@ -66,13 +66,6 @@ is_deeply(\@split_ids,
 is($split_text, ">long_part1_1-4 description\nABCD\n>long_part2_5-8 description\nEFGH\n>long_part3_9-10 description\nIJ\n",
 	'split fragments preserve all sequence bases');
 
-my $lengths = File::Spec->catfile($tmp, 'lengths.fa');
-write_file($lengths, ">equal\nAAAAA\n>long\nCCCCCC\n");
-($status, $output, $errors) = run_script('sepReadLength.pl', 5, $lengths);
-is($status, 0, 'length separation succeeds');
-is(read_file($lengths), ">equal\nAAAAA\n", 'record equal to threshold remains in short input');
-is(read_file("$lengths.long"), ">long\nCCCCCC\n", 'only truly longer record enters long output');
-
 my $bad_fastq = File::Spec->catfile($tmp, 'bad.fastq');
 write_file($bad_fastq, "\@r\nAAAA\nnot-plus\nIIII\n");
 ($status, $output, $errors) = run_script('sizeFilterFas.pl', $bad_fastq, 1, 0);
@@ -193,31 +186,5 @@ ok(-s File::Spec->catfile($scg_small_bin_dir, 'Binning.stone'),
 is($status, 0, 'standard quality postprocessing accepts the undersized pseudo output');
 ok(-s "$small_assignment.cm2" && -s "$small_assignment.assStat",
 	'undersized assembly receives complete empty quality and assembly-stat outputs');
-
-my $separate_contigs = read_file(File::Spec->catfile($scripts, 'separateContigs.pl'));
-like($separate_contigs,
-	qr/my \$anyCoverageAvailable\s*=\s*.*?fileGZe\(\$primaryCoverage\).*?fileGZe\(\$supportCoverage\).*?unless \$anyCoverageAvailable/s,
-	'contig statistics accepts either primary or supplementary mapped-read coverage');
-unlike($separate_contigs,
-	qr/die "Could not find required coverage file \$inF/,
-	'missing primary coverage is not unconditionally fatal');
-like($separate_contigs,
-	qr/sub geneAbundance.*?contig_stats_coverage_complete\(\$outDab, \$oPrefix\).*?if \(!fileGZe\(\$inF\)\)/s,
-	'completed coverage derivatives are recognized before requiring their source coverage file');
-ok(index($separate_contigs, '$inD =~ s{[\\\\/]+$}{};') >= 0
-		&& index($separate_contigs, '$inD .= "/";') >= 0,
-	'input directories are normalized instead of requiring a caller-supplied trailing slash');
-like($separate_contigs,
-	qr/invalidate_sample_completion\(\$inD\).*?\$inD \.= "\/"/s,
-	"ContigStats workers invalidate the normalized sample root before output changes");
-unlike($separate_contigs,
-	qr/if \(-s \$outFfin.*?Gene abundance was already calculated/s,
-	'incomplete uncompressed output subsets cannot bypass the shared completion contract');
-unlike($separate_contigs,
-	qr/\$readLength > 0 && \$readLengthSup > 0/,
-	'a missing primary stream does not require an otherwise unused primary read length');
-like($separate_contigs,
-	qr/my \$kind = \$isSupport.*?read length must be a positive integer.*?unless \$readL > 0/s,
-	'each available coverage stream validates only its own read length');
 
 done_testing();

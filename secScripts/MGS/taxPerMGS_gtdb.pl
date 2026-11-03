@@ -56,7 +56,11 @@ if ($GTDBtkBin =~ m/ activate /){
 
 
 #get GTDBtk version
-my $verSt = `$GTDBtkBin --version`;
+#bash: the env: prologue of getProgPaths uses [[ ]], which /bin/sh (dash) lacks
+my $verSt = "";
+if (open(my $vfh, '-|', 'bash', '-c', "$GTDBtkBin --version")) {
+	local $/; $verSt = <$vfh> // ""; close($vfh);
+}
 die "Could not run GTDB-Tk version command\n" if $? != 0;
 my ($version_text) = $verSt =~ /(\d+(?:\.\d+)+)/;
 die "Could not parse GTDB-Tk version from: $verSt\n" unless defined $version_text;

@@ -14,7 +14,7 @@ Usage: installer.sh [options]
 
 Options:
   --remove-legacy-envs  Remove obsolete MGTK-named micromamba environments.
-  --refresh-databases   Redownload the CheckM2 and MetaPhlAn databases.
+  --refresh-databases   Redownload the CheckM2, MetaPhlAn, and mOTUs databases.
   -h, --help            Show this help message.
 EOF
 }
@@ -132,13 +132,49 @@ find_in_bashrc() {
 ensure_environment() {
 	local name=$1
 	local definition=$2
+	local log="$MFdir/.install_${name}.log"
+	local action
+
 	if env_exists "$name"; then
+		action=install
 		echo "Updating $name environment"
-		"$MAMBA_E" install --name "$name" --channel-priority flexible -q -y -f "$definition"
 	else
+		action=create
 		echo "Creating $name environment"
-		"$MAMBA_E" create --name "$name" --channel-priority flexible -q -y -f "$definition"
 	fi
+
+	if "$MAMBA_E" "$action" --name "$name" --channel-priority flexible -y -f "$definition" \
+			>"$log" 2>&1; then
+		rm -f -- "$log"
+	else
+		local status=$?
+		echo "ERROR: micromamba $action failed for $name (exit $status). Last lines of the log:" >&2
+		tail -n 15 -- "$log" >&2
+		echo "Full log: $log" >&2
+		return "$status"
+	fi
+}
+
+verify_environment_tools() {
+	local environment=$1
+	local definition=$2
+	local purpose=$3
+	shift 3
+
+	local tool
+	local -a missing=()
+	for tool in "$@"; do
+		if ! "$MAMBA_E" run -n "$environment" "$tool" --version >/dev/null 2>&1 \
+				&& ! "$MAMBA_E" run -n "$environment" "$tool" --help >/dev/null 2>&1; then
+			missing+=("$tool")
+		fi
+	done
+
+	if ((${#missing[@]})); then
+		die "$purpose tools are missing from $environment after its Conda update: ${missing[*]}. Check $definition and rerun the installer."
+	fi
+
+	echo "Verified $purpose tools in $environment: $*"
 }
 
 ensure_optional_environment() {
@@ -157,6 +193,73 @@ database_current() {
 	local marker=$1
 	local expected=$2
 	((REFRESH_DATABASES == 0)) && [[ -f "$marker" ]] && [[ "$(<"$marker")" == "$expected" ]]
+}
+
+# eggNOG-mapper v3 is not on Bioconda: MF4.yml pip-installs a GitHub release, which also sets the version here.
+EMAPPER_SPEC="$(sed -n 's/^[[:space:]]*-[[:space:]]*"\{0,1\}\(eggnog-mapper @ [^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$INSTdir/MF4.yml" | head -n 1)"
+[[ -n "$EMAPPER_SPEC" ]] || die "No 'eggnog-mapper @ <release URL>' pip requirement found in $INSTdir/MF4.yml."
+EMAPPER_VERSION="${EMAPPER_SPEC##*/v}"
+EMAPPER_VERSION="${EMAPPER_VERSION%.tar.gz}"
+
+# An earlier MF4 has eggNOG-mapper 2.x from Bioconda. The pip update replaces its files but leaves its conda record,
+# which pins Python <3.12 and DIAMOND and lets conda later reinstall or delete files that now belong to v3.
+# Removed before the update, so the record never covers v3 files.
+remove_conda_eggnog_mapper() {
+	local prefix
+	env_exists MF4 || return 0
+	prefix="$("$MAMBA_E" run -n MF4 sh -c 'printf "%s\n" "$CONDA_PREFIX"')" || return 0
+	compgen -G "$prefix/conda-meta/eggnog-mapper-*.json" >/dev/null || return 0
+	echo "Removing the Bioconda eggnog-mapper package from MF4 (replaced by eggNOG-mapper $EMAPPER_VERSION via pip)"
+	"$MAMBA_E" remove --name MF4 -y --force eggnog-mapper >/dev/null \
+		|| echo "WARNING: micromamba could not remove eggnog-mapper from MF4; dropping its package record." >&2
+	# once pip has replaced the package's files (MF4 updated from MF4.yml outside this installer), micromamba
+	# logs the removal but keeps the record: drop it, the files belong to the pip install
+	if compgen -G "$prefix/conda-meta/eggnog-mapper-*.json" >/dev/null; then
+		rm -f -- "$prefix"/conda-meta/eggnog-mapper-*.json
+	fi
+}
+
+# installed eggNOG-mapper version, empty if missing or if its compiled (Cython) modules do not load
+emapper_installed_version() {
+	"$MAMBA_E" run -n MF4 python -c 'import eggnogmapper.annotator._codec, eggnogmapper.annotator._collect_inner
+from eggnogmapper.version import __VERSION__
+print(__VERSION__)' 2>/dev/null | tail -n 1
+}
+
+# pip leaves a requirement it considers satisfied untouched, also when its files were removed with the
+# Bioconda package: reinstall unless the pinned version imports
+ensure_eggnog_mapper() {
+	local installed
+	installed="$(emapper_installed_version || true)"
+	if [[ "$installed" != "$EMAPPER_VERSION" ]]; then
+		echo "Installing eggNOG-mapper $EMAPPER_VERSION in MF4 (found: ${installed:-none})"
+		retry_command "eggNOG-mapper installation" 3 15 \
+			"$MAMBA_E" run -n MF4 python -m pip install --force-reinstall --no-deps "$EMAPPER_SPEC" >/dev/null \
+			|| die "eggNOG-mapper $EMAPPER_VERSION could not be installed in MF4."
+		installed="$(emapper_installed_version || true)"
+		[[ "$installed" == "$EMAPPER_VERSION" ]] \
+			|| die "MF4 has eggNOG-mapper ${installed:-none} after reinstalling, expected $EMAPPER_VERSION."
+	fi
+	# 3.0.0-beta6 requires its built-in data dir (<site-packages>/data), which pip does not create:
+	# download_eggnog_data.py fails even with --data_dir, emapper.py without --data_dir crashes
+	# (eggnogdb/eggnog-mapper#612, fix proposed in #610)
+	local default_dir
+	default_dir="$("$MAMBA_E" run -n MF4 python -c 'from eggnogmapper.backends import resolve_backend, DEFAULT_BACKEND
+print(resolve_backend(DEFAULT_BACKEND))' | tail -n 1)" \
+		|| die "Could not locate the eggNOG-mapper default data directory in MF4."
+	mkdir -p -- "$default_dir" || die "Could not create the eggNOG-mapper default data directory $default_dir."
+	echo "Verified eggNOG-mapper $EMAPPER_VERSION in MF4"
+}
+
+# best effort: name a newer eggNOG-mapper release than the one MF4.yml pins
+report_newest_eggnog_mapper() {
+	local newest
+	command -v curl >/dev/null 2>&1 || return 0
+	newest="$(curl -fsSL --max-time 15 'https://api.github.com/repos/eggnogdb/eggnog-mapper/releases?per_page=1' 2>/dev/null \
+		| sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)" || return 0
+	if [[ -n "$newest" && "${newest#v}" != "$EMAPPER_VERSION" ]]; then
+		echo "NOTE: the newest eggNOG-mapper release is $newest; MF4.yml installs $EMAPPER_VERSION. Update its pip line to switch."
+	fi
 }
 
 echo "MATAFILER4 installer script"
@@ -209,7 +312,14 @@ fi
 export PIP_USER=false
 export PIP_NO_CACHE_DIR=1
 
+remove_conda_eggnog_mapper
 ensure_environment MF4 "$INSTdir/MF4.yml"
+verify_environment_tools MF4 "$INSTdir/MF4.yml" "ENA/SRA archive downloads" \
+	wget pigz prefetch fasterq-dump vdb-validate
+verify_environment_tools MF4 "$INSTdir/MF4.yml" "Protal profiling" \
+	protal protal_profile_utils
+ensure_eggnog_mapper
+report_newest_eggnog_mapper
 
 if "$MAMBA_E" run -n MF4 hostile --help >/dev/null 2>&1; then
 	echo "Installing/updating the Hostile human reference database"
@@ -244,14 +354,23 @@ ensure_environment MF4binners "$INSTdir/Binners.yml"
 ensure_optional_environment MF4genomeface "$INSTdir/MF4genomeface.yml"
 ensure_environment MF4scgbinner "$INSTdir/SCGBinner.yml"
 ensure_environment MF4checkm2 "$INSTdir/checkm2.yml"
+ensure_environment MF4motus "$INSTdir/motus.yml"
+verify_environment_tools MF4motus "$INSTdir/motus.yml" "mOTUs profiling" \
+	motus vsearch
 
 CHECKM2_VERSION="1.0.2"
-METAPHLAN_VERSION="4.1"
+METAPHLAN_VERSION="4.2.6"
+METAPHLAN_DB_INDEX="mpa_vJan25_CHOCOPhlAnSGB_202503"
+MOTUS_VERSION="4.1.0"
+MOTUS_DB_VERSION="4.1"
 CM2DB="$DBdir/CM2"
 MP4DB="$DBdir/MP4"
+MOTUSDB="$DBdir/mOTUs"
 CM2_DIAMOND_DB="$CM2DB/CheckM2_database/uniref100.KO.1.dmnd"
 CM2_MARKER="$CM2DB/.mf4-checkm2-version"
 MP4_MARKER="$MP4DB/.mf4-metaphlan-version"
+MOTUS_MARKER="$MOTUSDB/.mf4-motus-version"
+MOTUS_VERSION_FILE="$MOTUSDB/db_mOTU/mOTUsv${MOTUS_DB_VERSION}.versions"
 
 if ! database_current "$CM2_MARKER" "$CHECKM2_VERSION"; then
 	if ((REFRESH_DATABASES == 0)) && [[ -f "$CM2_DIAMOND_DB" ]] && \
@@ -269,11 +388,11 @@ if ! database_current "$CM2_MARKER" "$CHECKM2_VERSION"; then
 	fi
 fi
 
-if ! database_current "$MP4_MARKER" "$METAPHLAN_VERSION"; then
+if ! database_current "$MP4_MARKER" "$METAPHLAN_VERSION:$METAPHLAN_DB_INDEX"; then
 	echo "Installing MetaPhlAn $METAPHLAN_VERSION database"
 	if ensure_writable_directory "$MP4DB" && retry_command "MetaPhlAn database download" 5 15 \
-		"$MAMBA_E" run -n MF4checkm2 metaphlan --install --bowtie2db "$MP4DB"; then
-		printf '%s\n' "$METAPHLAN_VERSION" > "$MP4_MARKER"
+		"$MAMBA_E" run -n MF4checkm2 metaphlan --install --db_dir "$MP4DB" --index "$METAPHLAN_DB_INDEX"; then
+		printf '%s\n' "$METAPHLAN_VERSION:$METAPHLAN_DB_INDEX" > "$MP4_MARKER"
 	else
 		echo "WARNING: MetaPhlAn database installation failed; continuing without updating it." >&2
 		if [[ -e "$MP4DB" ]]; then
@@ -282,6 +401,25 @@ if ! database_current "$MP4_MARKER" "$METAPHLAN_VERSION"; then
 	fi
 fi
 
+
+if ! database_current "$MOTUS_MARKER" "$MOTUS_VERSION:$MOTUS_DB_VERSION"; then
+	if ((REFRESH_DATABASES == 0)) && [[ -f "$MOTUS_VERSION_FILE" ]]; then
+		echo "Using existing mOTUs $MOTUS_DB_VERSION database at $MOTUSDB"
+		printf '%s\n' "$MOTUS_VERSION:$MOTUS_DB_VERSION" > "$MOTUS_MARKER"
+	else
+		echo "Installing mOTUs $MOTUS_VERSION database $MOTUS_DB_VERSION"
+		motus_download=("$MAMBA_E" run -n MF4motus motus downloadMGDB -db "$MOTUSDB")
+		if [[ -d "$MOTUSDB/db_mOTU" ]]; then
+			motus_download+=(-f)
+		fi
+		if ensure_writable_directory "$MOTUSDB" && retry_command "mOTUs database download" 5 15 \
+			"${motus_download[@]}" && [[ -f "$MOTUS_VERSION_FILE" ]]; then
+			printf '%s\n' "$MOTUS_VERSION:$MOTUS_DB_VERSION" > "$MOTUS_MARKER"
+		else
+			echo "WARNING: mOTUs database installation failed; continuing without updating it." >&2
+		fi
+	fi
+fi
 ensure_environment MF4phylo "$INSTdir/phylo.yml"
 ensure_environment MF4_R "$INSTdir/MGTK_R.yml"
 "$MAMBA_E" run -n MF4_R Rscript --vanilla -e \
@@ -291,8 +429,15 @@ echo
 echo "How to download GTDB and GTDB-Tk databases"
 echo
 echo "These databases are required for MAG classification. For example:"
-echo "    helpers/install/get_gtdb.py all -v 226 -t /path/to/download -d /path/to/extract/to --tk split"
-echo "Run 'helpers/install/get_gtdb.py -h' for all options."
+echo "    helpers/install/get_gtdb.pl all -v 226 -t /path/to/download -d /path/to/extract/to --tk split"
+echo "Run 'helpers/install/get_gtdb.pl -h' for all options."
+echo
+echo "How to download the eggNOG-mapper database"
+echo
+echo "eggNOG-mapper $EMAPPER_VERSION needs the eggNOG 7 data (about 45 GB) in the eggNOGm_path_DB directory"
+echo "of config.txt (default [DBDir]/Funct/eggNOGmapper/v3.0/). For example:"
+echo "    mkdir -p /path/to/DBDir/Funct/eggNOGmapper/v3.0/"
+echo "    micromamba run -n MF4 download_eggnog_data.py -y --data_dir /path/to/DBDir/Funct/eggNOGmapper/v3.0/"
 echo
 echo "Finished MATAFILER4 installation."
 echo "Activate the main environment with: micromamba activate MF4"

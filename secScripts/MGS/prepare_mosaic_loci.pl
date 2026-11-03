@@ -18,7 +18,7 @@ use Mods::MosaicLoci qw(
 	select_outgroup_panel
 );
 
-my $VERSION = '0.17';
+my $VERSION = '0.18'; #0.18: minimap2 -s 40 (the asm presets' -s200 needs ~400 aligned bp at 90% identity)
 my %DEFAULT = (
 	cluster_id => 95,
 	threads => 20,
@@ -119,7 +119,7 @@ print "Loaded ".scalar(@{$records})." raw MGS genes for comprehensive mosaic "
 my %selected = map { $_->{gene} => 1 } @{$records};
 my $catalogue_fasta = resolveExistingFile("$GCd/compl.incompl.$cluster_id.fna")
 	or die "Catalogue nucleotide FASTA is missing for identity $cluster_id\n";
-my $sequences = readFasta($catalogue_fasta, 1, "\\s", \%selected);
+my $sequences = readFasta($catalogue_fasta, 1, "\\s", \%selected, { fai => 1 });
 die "No raw MGS genes had catalogue sequences in $catalogue_fasta\n"
 	unless keys %{$sequences};
 
@@ -159,8 +159,10 @@ if (defined($paf) && length($paf)) {
 		$maximum_targets = 1 if $maximum_targets < 1;
 		print "Self-aligning ".scalar(keys %{$sequences})." raw MGS genes before rtk2 "
 			."using $threads threads and at most $maximum_targets secondary targets\n";
+		#-s after -x: the asm presets set a minimal chaining score of 200 (+1/-4 scoring), which
+		#genes below ~400 bp at 90% identity, or any 80% outgroup, never reach
 		my @command = (
-			$minimap2, '-x', $DEFAULT{minimap_preset}, '-c', '-D',
+			$minimap2, '-x', $DEFAULT{minimap_preset}, '-s', 40, '-c', '-D',
 			'--secondary=yes', '-p', '0', '-N', $maximum_targets,
 			'-t', $threads, $query_fasta, $query_fasta,
 		);

@@ -7,3 +7,5 @@ CONDA	shell hook
 CONDAbaseEnv	base
 Rscript	Rscript
 pigz	[MFLRDir]/t/bin/pigz
+maxMF4mem	512
+downloadQueue	nbi-download

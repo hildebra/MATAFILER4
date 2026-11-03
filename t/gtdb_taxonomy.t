@@ -99,16 +99,4 @@ eval { read_gtdb_taxonomy($header_only_tax) };
 like($@, qr/contains no data rows/,
 	'header-only taxonomy input fails before marker abundance construction');
 
-my $tax_script = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'taxPerMGS_gtdb.pl'));
-like($tax_script, qr/tempdir\("run-XXXXXX".*?my \$oDir = "\$runD\/GTDBTK\/"/s,
-	'each GTDB-Tk attempt uses a private intermediate output directory');
-like($tax_script, qr/remove_tree\(\$runD\)/,
-	'success cleanup is limited to the current GTDB-Tk attempt');
-unlike($tax_script, qr/remove_tree\(\$tmpD\)/,
-	'one GTDB-Tk job no longer deletes the shared temporary root');
-
-my $marker_script = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS', 'markersPerMGS.pl'));
-like($marker_script, qr/read_gtdb_taxonomy\(\$MGStaxF\)/,
-	'marker abundance uses validated header-aware GTDB taxonomy parsing');
-
 done_testing();

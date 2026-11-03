@@ -19,83 +19,72 @@ use File::stat;
 use File::Path qw(make_path remove_tree);
 use File::Spec;
 use Fcntl qw(O_CREAT O_EXCL O_WRONLY);
-use Errno qw(EEXIST);
+use Errno qw(EEXIST ENOENT);
 use IO::Handle;
 
 use Getopt::Long qw( GetOptions );
 
 use Cwd; use English;
-use Mods::GenoMetaAss qw( readFasta fileGZe gzipopen gzipwrite splitFastas readMapS systemW readGFF getAssemblPath resolve_path);
-use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
+use Mods::FlagReference qw(printFlagHelp helpRequested);
+use Mods::GenoMetaAss qw( readFasta ensureFastaIndex fileGZe gzipopen gzipwrite splitFastas clenSplitFastas readMapS systemW readGFF getAssemblPath resolve_path);
+use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive numLiveUserJobs
+	submissionDependencyDeferred submissionDependencyFailed);
+use Sys::Hostname qw(hostname);
 use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
-use Mods::FuncTools qw(assignFuncPerGene calc_modules);
-use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins  attachProteins3 );
+use Mods::FuncTools qw(assignFuncPerGene calc_modules vfTabStale bigFuncDB);
+use Mods::JobGraph qw(newJobGraph runJobGraph jobGraphReport);
+use Digest::MD5 ();
+use Mods::geneCat qw(readGeneIdx  readGeneIdxSpl sortFNA attachProteins3 );
 use Mods::Binning qw(getBinSubdirName);
-use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
+use Mods::Checkpoint qw(write_checkpoint checkpoint_valid read_checkpoint);
+use Mods::WorkflowResilience qw(
+	retry_unlink retry_rename atomic_write_text write_workflow_record read_workflow_record
+	preflight_directory preflight_capacity
+);
 use Mods::CatalogPaths qw(catalog_identity catalog_map_specs_match resolve_catalog_maps write_catalog_maps);
 
 sub geneCatFlow;
 sub addingSmpls;
-sub readCDHITCls;#sub readFasta; 
-sub writeBucket;  sub announceGeneCat; sub printL;
-sub mergeClsSam; sub secondaryCls;
-sub cleanUpGC; sub nt2aa; sub clusterFNA;
+sub announceGeneCat; sub printL;
+sub mergeClsSam;
+sub clusterFNA;
 #sub systemW; #system execution (stops this program upon error)
 sub protExtract; #extracts proteins seqs for each cluster
 sub combineClstr;#rewrites cd-hit cluster names to my gene Idx numbers
 sub FOAMassign;
 sub geneCatFunc; sub geneCatFunc_emapper;
-sub readSam;
 sub collateGenes; #gets genes from single dirs, sorts into new files, prepares library layout
 sub getCanopyDir; sub canopyCluster; #MGS creation
 sub krakenTax; #assign tax to each gene via kraken
 sub kaijuTax; #assign tax to each gene via kraken
 sub specITax;
-sub writeMG_COGs; sub ntMatchGC;
-sub clusterSingleStep;sub clusterMultiStep;
+sub ntMatchGC;
+sub clusterSingleStep;
+
+#declared here (not next to the changelog) so -help can report it without
+#running the main body; the changelog entry for it is further down this file
+our $version = 0.68; #0.68: eggNOG-mapper chunks search, then annotate from a node-local eggnog.db; retried annotations skip the search
+#0.67: CD-HIT -M within its job; -ntMatchGC samtools threads beside minimap2
+#0.66: FuncAssign DIAMOND --mid-sensitive (mode recorded in .<DB>.params); KGM/NOG chunks 32G
+#0.65: marker-gene mmseqs clustering sized to its own job; -ntMatchGC maps with the asm20 preset (no prebuilt .mmi)
+#0.64: functional stages supervised until done; OOM-killed jobs resubmitted with more memory
+#0.63: smaller catalog chunks for the KEGG/eggNOG diamond searches (-fastaSplitBigDB)
+#0.62: eggNOG-mapper v3 (eggNOG 7), VFDB sets in the default -functDB
+#0.61: functional annotation robustness, query-or-subject coverage, eggNOG-mapper KOs/modules, VFDB set A/B
 
 sub _print_help {
-	print <<'HELP';
-Usage:
-  geneCat.pl --mode geneCat --map FILE[,FILE...] --GCd DIR [options]
-  geneCat.pl --mode MODE --GCd DIR [mode options]
-
-Build or operate on a MATAFILER gene catalog. Existing catalogs are resumed by
-default; --continue 0 deletes and rebuilds the selected catalog after validating
-the mapping input.
-
-Main modes:
-  geneCat       Build/resume the complete gene-catalog workflow (default)
-  subprepSmpls  Internal sample-batch collation mode
-  mergeCLs      Merge clustering stages
-  protExtract   Extract representative proteins; needs --map or stored map
-  FuncAssign    Functional annotation (--functDB, --functAligner)
-  FuncEMAP      eggNOG-mapper annotation
-  kraken        Taxonomic annotation
-  CANOPY        Canopy clustering
-  ntMatchGC     Map catalog genes to --refDB and write --out
-
-Common options:
-  -o, --GCd DIR              Gene-catalog directory (required)
-  --map FILE[,FILE...]       One or more mapping files
-  -m, --mode MODE            Operation mode
-  --clusterID INT            Clustering identity percentage, 1..100 (default 95)
-  --minGeneL INT             Minimum nucleotide gene length (default 100)
-  -c, --cores INT            Worker cores
-  --mem INT                  Memory budget in GiB
-  --tmp DIR                  Shared temporary directory
-  --continue 0|1             Rebuild (0) or resume (1, default)
-  --MGset GTDB|FMG           Marker-gene set
-  --extraGenesNT FASTA       External nucleotide genes
-  --extraGenesAA FASTA       Matching external proteins for protExtract
-  --sampleBatches INT        Parallel sample-collation batches
-  --requireAllAssemblies 0|1 Fail on missing assemblies (default 1)
-  --help, -h                 Show this help without loading site configuration
-
-Mode-specific options include --out, --refDB, --functDB, --functAligner,
---fastaSplit, --stone, --SmplStart, --SmplStop and --SmplBatch.
-HELP
+	#option tables come from docs/flag_reference.md so this list cannot drift
+	printFlagHelp(
+		script  => "geneCat.pl",
+		version => $version,
+		usage   => ["geneCat.pl -mode geneCat -map FILE[,FILE...] -GCd DIR [options]",
+			"geneCat.pl -mode MODE -GCd DIR [mode options]",
+			"geneCat.pl -help | -h | -?"],
+		summary => "Build or operate on a MATAFILER gene catalog. Existing catalogs are resumed "
+			."by default; -continue 0 deletes and rebuilds the selected catalog after "
+			."validating the mapping input.",
+	);
 }
 
 sub _preview_list {
@@ -108,7 +97,7 @@ sub _preview_list {
 	return $text;
 }
 
-if (grep { $_ eq '--help' || $_ eq '-h' || $_ eq '-?' } @ARGV) {
+if (helpRequested(@ARGV)) {
 	_print_help();
 	exit 0;
 }
@@ -125,14 +114,23 @@ sub _read_single_line_file {
 
 sub _validate_map_files {
 	my ($map_spec) = @_;
-	my @files = split /,/, $map_spec, -1;
-	die "No mapping file was specified\n" unless @files;
+	my @files = _map_spec_files($map_spec);
 	for my $file (@files) {
-		die "Empty mapping-file entry in: $map_spec\n" unless length $file;
 		die "Could not find supplied map: $file\n" unless -f $file;
 	}
 	return @files;
 }
+sub _map_spec_files {
+	my ($map_spec) = @_;
+	my @files = split /,\s*|\r?\n/, $map_spec, -1;
+	die "No mapping file was specified\n" unless @files;
+	for my $file (@files) {
+		$file =~ s/^\s+|\s+$//g;
+		die "Empty mapping-file entry in: $map_spec\n" unless length $file;
+	}
+	return @files;
+}
+
 
 sub _count_lines {
 	my ($file) = @_;
@@ -220,12 +218,39 @@ sub _shell_quote {
 	return "'$value'";
 }
 
+sub _command_option_value {
+	my ($command, $option) = @_;
+	return unless defined($command) && defined($option) && length($option);
+
+	if ($command =~ /(?:^|\s)\Q$option\E\s+(\x27(?:[^\x27\r\n]|\x27"\x27"\x27)*\x27)/) {
+		my $value = $1;
+		$value =~ s/^\x27|\x27$//g;
+		$value =~ s/\x27"\x27"\x27/\x27/g;
+		return $value;
+	}
+	if ($command =~ /(?:^|\s)\Q$option\E\s+(\S+)/) {
+		return $1 unless $1 =~ /^\x27/;
+	}
+	return;
+}
+
+sub _catalog_path_for_compare {
+	my ($path) = @_;
+	return unless defined($path) && length($path);
+
+	my $absolute = File::Spec->rel2abs($path);
+	my $resolved = -e $absolute ? Cwd::abs_path($absolute) : undef;
+	my $comparison = defined($resolved) ? $resolved : File::Spec->canonpath($absolute);
+	$comparison =~ s{/+$}{} unless $comparison eq File::Spec->rootdir();
+	return $comparison;
+}
+
 sub _checkpoint_command {
 	my ($writer, $stone, $cluster_id, $stage, @outputs) = @_;
-	my @args = ('perl', $writer, '--stone', $stone,
+	my @args = ('--stone', $stone,
 		'--param', "cluster_id=$cluster_id", '--param', "stage=$stage");
 	push @args, map { ('--output', $_) } @outputs;
-	return join(' ', map { _shell_quote($_) } @args) . "\n";
+	return $writer . ' ' . join(' ', map { _shell_quote($_) } @args) . "\n";
 }
 
 sub _sync_file {
@@ -239,7 +264,7 @@ sub _sync_file {
 sub _new_gzip_output {
 	my ($final_file) = @_;
 	my $partial_file = "$final_file.part.gz";
-	unlink $partial_file or die "Cannot remove stale partial file $partial_file: $!\n"
+	retry_unlink($partial_file, label => 'remove stale gene-catalog gzip partial')
 		if -e $partial_file;
 	my $gzip = gzipwrite(
 		$partial_file,
@@ -254,30 +279,113 @@ sub _publish_gzip_output {
 	close $gzip or die "pigz failed while writing $partial_file (status $?)\n";
 	die "gzip produced an empty file: $partial_file\n" unless -s $partial_file;
 	_sync_file($partial_file);
-	unless (rename $partial_file, $final_file) {
-		my $rename_error = $!;
-		# POSIX rename replaces atomically. This fallback is only for platforms
-		# (notably Windows) that refuse to replace an existing destination.
-		if (-e $final_file) {
-			unlink $final_file or die "Cannot replace old batch file $final_file: $!\n";
-			rename $partial_file, $final_file
-				or die "Cannot publish completed gzip file $partial_file as $final_file: $!\n";
-		} else {
-			die "Cannot publish completed gzip file $partial_file as $final_file: $rename_error\n";
-		}
+	retry_rename($partial_file, $final_file,
+		label => 'publish completed gene-catalog gzip batch');
+}
+
+# Appends are serialised with an O_EXCL lock file. The holder refreshes the
+# lock's mtime while it copies, so a lock is only "stale" once nothing has
+# touched it for _lock_stale_seconds() - i.e. its job was killed. Waiting behind a
+# live holder is never an error (the destination grows to many GB, so a queue of
+# batches legitimately waits for hours); only a lock that stopped being
+# refreshed is broken, after undoing whatever partial append it left behind.
+# The lock records the destination size before the first byte was written.
+sub _lock_stale_seconds { return $ENV{GENECAT_LOCK_STALE_SECONDS} || 1800; }
+sub _lock_heartbeat_seconds { return 30; }
+
+sub _lock_holder_label {
+	my ($record) = @_;
+	return 'unknown holder' unless $record && %{$record};
+	return join(' ', map { defined $record->{$_} ? "$_=$record->{$_}" : () } qw(host pid job));
+}
+
+sub _read_append_lock {
+	my ($lock_file) = @_;
+	open my $in, '<', $lock_file or return {};
+	my %record;
+	while (my $line = <$in>) {
+		chomp $line;
+		$record{$1} = $2 if $line =~ /^(\w+)=(.*)$/;
 	}
+	close $in;
+	return \%record;
+}
+
+# An append is complete once its marker exists, or (markerless callers) once
+# the source it consumed is gone.
+sub _append_complete {
+	my ($record) = @_;
+	return 1 if length($record->{marker} // '') && -e $record->{marker};
+	return 0 if length($record->{source} // '') && -e $record->{source};
+	return 1;
+}
+
+# Returns true when the lock was removed (or vanished), false if another
+# waiter is already breaking it or the holder turned out to be alive.
+sub _break_stale_append_lock {
+	my ($lock_file, $stale_seconds) = @_;
+	my $guard = "$lock_file.break";
+	my $guard_mtime = (stat $guard)[9];
+	unlink $guard if defined($guard_mtime) && time - $guard_mtime > 300;
+	my $guard_fh;
+	return 0 unless sysopen($guard_fh, $guard, O_CREAT | O_EXCL | O_WRONLY);
+	close $guard_fh;
+	my $broke = eval {
+		my $mtime = (stat $lock_file)[9];
+		return 1 unless defined $mtime;
+		return 0 if time - $mtime < $stale_seconds; # refreshed, or a new holder took over
+		my $record = _read_append_lock($lock_file);
+		my $destination = $record->{dest} // '';
+		if (length($destination) && defined($record->{size}) && $record->{size} =~ /^\d+$/
+				&& -e $destination && !_append_complete($record)) {
+			my $size = (-s $destination) || 0;
+			if ($size > $record->{size}) {
+				truncate($destination, $record->{size})
+					or die "Cannot roll back interrupted append to $destination: $!\n";
+				warn "Rolled back interrupted append to $destination ("
+					. ($size - $record->{size}) . " bytes from "
+					. _lock_holder_label($record) . ")\n";
+			}
+		}
+		warn "Removing stale append lock $lock_file left by " . _lock_holder_label($record)
+			. " (untouched for " . (time - $mtime) . "s)\n";
+		unlink $lock_file or ($! == ENOENT) or die "Cannot remove stale lock $lock_file: $!\n";
+		1;
+	};
+	my $error = $@;
+	unlink $guard;
+	die $error if $error;
+	return $broke;
 }
 
 sub _append_file_locked {
-	my ($source, $destination, $lock_file) = @_;
-	my $deadline = time + 3600;
+	my ($source, $destination, $lock_file, $marker) = @_;
+	$marker = '' unless defined $marker;
+	my $started = time;
 	my $lock_fh;
+	my $announced = 0;
 	while (!sysopen($lock_fh, $lock_file, O_CREAT | O_EXCL | O_WRONLY)) {
 		die "Cannot create lock $lock_file: $!\n" unless $! == EEXIST;
-		die "Timed out waiting for lock $lock_file\n" if time >= $deadline;
-		sleep 2;
+		my $mtime = (stat $lock_file)[9];
+		if (defined($mtime) && time - $mtime >= _lock_stale_seconds()) {
+			next if _break_stale_append_lock($lock_file, _lock_stale_seconds());
+		}
+		if (time - $started >= 24 * 3600) {
+			my $holder = _lock_holder_label(_read_append_lock($lock_file));
+			die "Gave up after 24h waiting for lock $lock_file (held by $holder, still refreshed)\n";
+		}
+		if (!$announced++ || ($announced % 120) == 0) {
+			print "Waiting for append lock $lock_file held by "
+				. _lock_holder_label(_read_append_lock($lock_file)) . "\n";
+		}
+		sleep 5;
 	}
-	print {$lock_fh} "$PROCESS_ID\n" or die "Cannot write lock $lock_file: $!\n";
+	my $destination_size = (-e $destination ? -s $destination : 0) || 0;
+	my $host = $ENV{HOSTNAME} || $ENV{HOST} || 'unknown';
+	my $job = $ENV{SLURM_JOB_ID} || $ENV{JOB_ID} || $ENV{LSB_JOBID} || '';
+	print {$lock_fh} "host=$host\npid=$PROCESS_ID\njob=$job\nsize=$destination_size\n"
+		. "dest=$destination\nsource=$source\nmarker=$marker\n"
+		or die "Cannot write lock $lock_file: $!\n";
 	close $lock_fh or die "Cannot close lock $lock_file: $!\n";
 
 	my $ok = eval {
@@ -287,22 +395,40 @@ sub _append_file_locked {
 		binmode $in;
 		binmode $out;
 		my $buffer;
+		my $last_beat = time;
 		while (1) {
 			my $bytes = read($in, $buffer, 1024 * 1024);
 			die "Cannot read $source: $!\n" unless defined $bytes;
 			last unless $bytes;
 			print {$out} $buffer or die "Cannot append to $destination: $!\n";
+			if (time - $last_beat >= _lock_heartbeat_seconds()) {
+				utime(undef, undef, $lock_file);
+				$last_beat = time;
+			}
 		}
 		close $in or die "Cannot close $source: $!\n";
 		$out->flush() or die "Cannot flush $destination: $!\n";
+		utime(undef, undef, $lock_file);
 		$out->sync() or die "Cannot synchronize $destination to storage: $!\n";
 		close $out or die "Cannot close $destination: $!\n";
+		if (length $marker) {
+			open my $done, '>', $marker or die "Cannot write append marker $marker: $!\n";
+			print {$done} "appended\n";
+			close $done or die "Cannot close append marker $marker: $!\n";
+		}
 		1;
 	};
 	my $error = $@;
-	unlink $lock_file or die "Cannot remove lock $lock_file: $!\n";
+	if (!$ok && ((-s $destination) || 0) > $destination_size
+			&& !(length($marker) && -e $marker)) {
+		# We are alive to see the failure: undo our partial append instead of
+		# leaving it for the next holder.
+		truncate($destination, $destination_size)
+			or warn "Cannot roll back failed append to $destination: $!\n";
+	}
+	retry_unlink($lock_file, label => 'release gene-catalog append lock');
 	die $error unless $ok;
-	unlink $source or die "Cannot remove transferred file $source: $!\n";
+	retry_unlink($source, label => 'remove transferred gene-catalog batch');
 }
 
 sub _merge_missed_sample_files {
@@ -373,14 +499,42 @@ sub _safe_reset_dir {
 #.51: 26.3.25: small fix to ensure preprocessing takes the right start sample (could skip large numbers sometimes, due to rounding errors)
 #.52: streamed FASTA collation, durable gzip publication, checkpoint manifests, and cluster-ID propagation
 #.53: use matrix cardinality for sparse-stage skips, preserve dry-run commands, and accept empty Canopy/Kraken results
-my $version = 0.55;
+#.56: lightweight HPC filesystem checks, stage/failure records, and bounded retries for
+#     recovery-critical catalogue publication
+#.57: do not preflight environment-wrapped executables; allow configured commands to run
+#.58: repair workflow dependency/recovery contracts and forward the selected strain SNP caller
+#$version is declared near the top of this file, so -help can print it before
+#the main body runs; keep it in sync with the changelog above.
 $| = 1;
+my $geneCatWorkflowActive = 0;
+my $geneCatWorkflowStage = 'startup';
+my $geneCatHeartbeatPath = '';
+my $geneCatFailurePath = '';
+
+
+END {
+	my $exitStatus = $?;
+	if ($geneCatWorkflowActive) {
+		if ($exitStatus == 0) {
+			write_workflow_record($geneCatHeartbeatPath,
+				status => 'completed', stage => $geneCatWorkflowStage);
+			retry_unlink($geneCatFailurePath, fatal => 0,
+				label => 'clear obsolete gene-catalog failure record');
+		} else {
+			my $reason = $@ || "controller exit status $exitStatus";
+			write_workflow_record($geneCatFailurePath,
+				status => 'failed', stage => $geneCatWorkflowStage,
+				reason => $reason);
+		}
+	}
+	$? = $exitStatus;
+}
 
 my $justCDhit = 1; #always set default to 0, to dangerous otherwise..
 my $doSubmit = 1; my $qsubNow = 1;
 my $doStrains = 0; #flag if SNP calling was done on metag (and should be processed here)
+my $SNPcaller = "MPI"; #consensus variant caller used by the downstream strain workflow
 my $doMags = 1; #flag whether to start canopy clustering, metabat2 & subsequent merging..
-my $allinClust = 1; #cluster 5P, 3P, inc and compl in the same step
 my $oldNameFolders= -1;
 my $doFMGseparation = 1; #cluster FMGs separately?
 my $doGeneMatrix =1; #in case of SOIL I really don't need to have a gene abudance matrix / sample
@@ -389,23 +543,33 @@ my $modeStone = ""; #if a stone needs to be touched in that mode..
 my $numCor3 = -1; my $numCor0 = -1;
 my $totMem3=-1;
 my $totMem5=-1;
-my $useGTDBmg = "GTDB";#FMG, GTDB
-my $toLclustering=1;#just write out, no sorting etc
+my $useGTDBmg = "FMG";#FMG, GTDB
 my $bactGenesOnly = 0; #set to zero if no double euk/bac predication was made
 my $canopyAutoCorr=0.15;
 my $minCanopySamples=10;
 my $ignoreIncompleteMAGs = 1;
 my $batchNum = -1;
 my $smplSep = "__"; #separator of samples and gene id in all MF fastas.. pretty static by now, do not modify!
-my $selfScript=Cwd::abs_path($PROGRAM_NAME);#dirname($0)."/".basename($0);
-my $checkpointWriter = dirname($selfScript)."/../helpers/writeCheckpoint.pl";
+
 my $rtkFunDelims = "-funcHieraSep \";\" -funcHAnnoAND \",\" -funcAnnoOR \"|\" "; #used to define for rtk how tax annotation strings treat hierachies, and annotations that should be summed (AND) or should be treated as equally likely (OR)
 
 
 #diamond func assigns:
 my $minBitSc = 45;
 my $minAlLeng=30;
-my $minPercSbjCov=0.5;
+my $minPercSbjCov=0.5; #fraction of the DB protein covered by the alignment
+my $minPercQueryCov=0.8; #fraction of the catalog protein covered. A hit passes if EITHER coverage cutoff is met,
+                         #so partial genes (incompl) that align over most of their length are kept
+my $redoFunc = 0; #FuncAssign: 1 = delete and recompute existing alignments, assignments and matrices
+#per-database overrides of the cutoffs above (keys as in -functDB; unlisted databases use the values above)
+#VFDB: many virulence factors are homologous to housekeeping proteins (flagella, pili, LPS, iron uptake, secretion),
+#so the permissive defaults would call "virulence factors" in most commensals. Set A and B use identical cutoffs,
+#so the two outputs differ only in the reference set.
+my %funcDBcutoffs = (
+	VFA => {percID => 60, minPercSbjCov => 0.7, minPercQueryCov => 0.8, eval => 1e-10, minBitScore => 60, minAlignLen => 50},
+	VFB => {percID => 60, minPercSbjCov => 0.7, minPercQueryCov => 0.8, eval => 1e-10, minBitScore => 60, minAlignLen => 50},
+);
+$funcDBcutoffs{VDB} = $funcDBcutoffs{VFB}; #legacy name for set B
 my $minPerID = 25;
 my $minEVal=1e-8;
 
@@ -420,29 +584,38 @@ checkMF();
 #--------------------------------------------------------------program Paths--------------------------------------------------------------
 my $magPi = getProgPaths("MAGpipe");
 my $mmseqs2Bin = getProgPaths("mmseqs2");
-my $cdhitBin = getProgPaths("cdhit");#/g/bork5/hildebra/bin/cd-hit-v4.6.1-2012-08-27/cd-hit
-my $vsearchBin = "";#"/g/bork5/hildebra/bin/vsearch1.0/bin/vsearch-1.0.0-linux-x86_64";
-my $bwt2Bin = getProgPaths("bwt2");#"/g/bork5/hildebra/bin/bowtie2-2.2.9/bowtie2";
-my $samBin = getProgPaths("samtools");#"/g/bork5/hildebra/bin/samtools-1.2/samtools";
+my $cdhitBin = getProgPaths("cdhit_est");#/g/bork5/hildebra/bin/cd-hit-v4.6.1-2012-08-27/cd-hit
 my $hmmBin3 = getProgPaths("hmmsearch");#  hmmer3  <- might need this explicit version if problem
 my $hmmBestHitScr = getProgPaths("hmmBestHit_scr");#needed for HMMer based func assignments
 #my $tabixBin = "/g/bork5/hildebra/bin/samtools-1.2/tabix-0.2.6/./tabix";
 #my $bgzipBin = "/g/bork5/hildebra/bin/samtools-1.2/tabix-0.2.6/./bgzip";
 my $pigzBin = getProgPaths("pigz");
+my $catBin = getProgPaths("cat");
+my $cpBin = getProgPaths("cp");
+my $mvBin = getProgPaths("mv");
+my $rmBin = getProgPaths("rm");
+my $mkdirBin = getProgPaths("mkdir");
+my $awkBin = getProgPaths("awk");
+my $sedBin = getProgPaths("sed");
+my $sortBin = getProgPaths("sort");
+my $headBin = getProgPaths("head");
+my $tailBin = getProgPaths("tail");
+my $cutBin = getProgPaths("cut");
+my $touchBin = getProgPaths("touch");
+my $envsubstBin = getProgPaths("envsubst");
 my $decluterGC = getProgPaths("decluterGC_scr");
 my $kmerScr = getProgPaths("kmerPerGene_scr");
 my $rareBin = getProgPaths("rare");#"/g/bork3/home/hildebra/dev/C++/rare/rare";
 my $GCcalc = getProgPaths("calcGC_scr");#"perl $thisDir/secScripts/calcGC.pl";
-my $sortSepScr = getProgPaths("sortSepReLen_scr");#"perl $thisDir/secScripts/sepReadLength.pl";
 my $extre100Scr = getProgPaths("extre100_scr");#"perl $thisDir/helpers/extrAllE100GC.pl";
 my $genelengthScript = getProgPaths("genelength_scr");#= "/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/geneLengthFasta.pl";
 my $GCscr = getProgPaths("geneCat_scr");
+my $checkpointWriter = getProgPaths("writeCheckpoint_scr");
 my $mini2Bin = getProgPaths("minimap2"); #a lot faster than bowtie2 and better suited..
 
 my $avx2Constr = getProgPaths("avx2_constraint",0); #"avx2"; #keyword that can be cluster specific
 
 # ---------------------------  general constants --------------------------------
-my $mini2IdxFileSuffix = ".mmi";
 my $countMatrixP = "Matrix";
 my $countMatrixF = "$countMatrixP.mat";
 
@@ -482,6 +655,7 @@ my %FMGfileList;
 my $mapF = "?";#$ARGV[0];#"/g/bork5/hildebra/data/metaGgutEMBL/MM.txt";
 my $GCdir = "";
 my $cdhID = 95; my $minGeneL = 100;
+my $clusterCov = 0.9; #fraction of the shorter (member) gene that must be covered by its alignment to the representative
 my $extraRdsFNA = "";
 #only used in MGS.pl script:
 my $useCheckM1= 0; my $useCheckM2 =1;
@@ -500,8 +674,14 @@ my $tmpDir = $GLBtmp;#getProgPaths("nodeTmpDir") .  "/GC/";
 my $tmpDirDef= $tmpDir;
 my $mode = "geneCat";
 my $fastaSplits="500M";
+my $fastaSplitsBig="100M"; #chunks for the KEGG/eggNOG searches (bigFuncDB): DIAMOND's temporary files grow with the chunk
 my $funcAligner = "diamond"; #diamond or foldseek
-my $curDB_o = "KGM,TCDB,CZy,ABRc";#NOG,#,ACL"; #"mp3,PTV,KGM,TCDB,CZy,NOG,ABRc,ACL" #default databases to use in functional assignments
+#DIAMOND mode of the functional searches: the parser accepts hits down to 25% identity, DIAMOND's default mode
+#targets >60%; mid-sensitive covers >40% at a moderate cost (recorded in Anno/Func/.<DB>.params)
+my $funcDiaSensitivity = "mid-sensitive";
+my $curDB_o = ""; #-functDB; empty: $funcDBdefault
+my $funcDBdefault = "KGM,TCDB,CZy,ABRc,VFA,VFB";#NOG,#,ACL"; #"mp3,PTV,KGM,TCDB,CZy,NOG,ABRc,ACL,VFA,VFB" #default databases to use in functional assignments
+my %funcDBoptional = (VFA => 1, VFB => 1); #default databases that are skipped with a note if not installed (an explicit -functDB needs all of its databases)
 my $submitLocal = 1; #default mode now
 my $submSys = "";
 my $out = ""; my $refDB = ""; #for nt matches via minimap2
@@ -523,13 +703,14 @@ GetOptions(
 	"m|mode=s" => \$mode, #possible modes: mergeCLs CANOPY specI kraken kaiju FMG_extr FOAM ABR FuncAssign protExtract ntMatchGC geneCat subprepSmpls
 #cluster options
 	"clusterID=i" => \$cdhID, #identity at which to cluster gene catalog, default: 0.95
+	"clusterCov=f" => \$clusterCov, #minimum fraction of the shorter gene that must be covered by its alignment to the cluster representative (mmseqs2 --cov-mode 1); fragments inside a longer gene still join it. 0 disables the coverage filter. Default: 0.9
 	"minGeneL=i" => \$minGeneL, #minimal gene length for gene to be included in gene catalog, default: 100
 	"extraGenesNT=s" => \$extraRdsFNA, #add genes (nt) from external sources, e.g. from complete genomes
 	"extraGenesAA=s" => \$extraRdsFAA, #add genes (AA) from external sources, e.g. from complete genomes
 	"mmseqC=i" => \$clustMMseq, #1: use mmseqs2 instead of CD-HIT for gene clustering
 	"decluterMatrix=i" => \$doDecluter, #declutering of gene matrix? by default deactivated, was more useful for canopy based MGS, can intro unwanted biases as long as gene/prots don't get removed
 #flow control
-	"1stepClust=i" => \$allinClust, #cluster incomplete genes separate?
+
 	"submitLocal=i" => \$submitLocal, #pretty important run mode switch, to submit jobs while geneCat is runnning single core 
 	"submSystem=s" => \$submSys,
 	"continue|justCDhit=i" => \$justCDhit, #flow control, 1: continue with found files 0: delete existing (partial) gene cat, start again
@@ -549,15 +730,17 @@ GetOptions(
 	"useCheckM2=i" => \$useCheckM2, #1: use checkM2 completeness predictions, Default: 1
 	"useCheckM1=i" => \$useCheckM1, #1: use checkM completeness predictions, Default: 0
 	"doStrains=i" => \$doStrains, #1: calculate intraSpecific phylogenies on each MGS
+	"SNPcaller=s" => \$SNPcaller, #MPI (mpileup) or FB (FreeBayes), matching MATAF4/strain_within
 	"doMags=i" => \$doMags, #1: start canopy clustering, metabat2 & subsequent merging into MGS
 	"canopyAutoCorr=f" => \$canopyAutoCorr, #canopy clustering parameter to filter autocorrelated genes prior to canopy clustering
 #Marker Genes/ taxonomy
 	"MGset=s" => \$useGTDBmg, #use either FMG or GTDB marker genes to compare and merge MAGs and calculate their abundance
 #flags for specific modes
 	"out=s" => \$out, #output dir, only used in modes protExtract ntMatchGC 
-	"functDB=s" => \$curDB_o, #for FuncAssign mode: functional DBs to annotate gene cat to 
+	"functDB=s" => \$curDB_o, #for FuncAssign mode: functional DBs to annotate gene cat to (default KGM,TCDB,CZy,ABRc,VFA,VFB; VFA/VFB skipped if VFDB is not installed)
 	"refDB=s" => \$refDB, #for ntMatchGC mode: reference fasta DB 
 	"fastaSplit=s" => \$fastaSplits, #for FuncAssign mode: target FASTA chunk size (for example 500M)
+	"fastaSplitBigDB=s" => \$fastaSplitsBig, #for FuncAssign mode: chunk size for the KEGG (KGM, KGE, KGB) and eggNOG (NOG) searches
 	"functAligner=s" => \$funcAligner, #either "diamond" or "foldseek"
 	"SmplStart=i" => \$SmplStart, #for subprepSmpls
 	"SmplStop=i" => \$SmplStop, #for subprepSmpls
@@ -566,6 +749,8 @@ GetOptions(
 	"FuncMinBitSc=f" => \$minBitSc,
 	"FuncMinAlLeng=i" => \$minAlLeng,
 	"FuncMinPercSbjCov=f" => \$minPercSbjCov,
+	"FuncMinPercQueryCov=f" => \$minPercQueryCov,
+	"redoFunc=i" => \$redoFunc,
 	"FuncMinPerID=f" => \$minPerID,
 	"FuncMinEVal=f" => \$minEVal,
 
@@ -579,15 +764,43 @@ die "-cores3 must be -1 or a positive integer\n" unless $numCor3 == -1 || $numCo
 die "-mem must be positive\n" unless $totMem > 0;
 die "-mem3 must be -1 or positive\n" unless $totMem3 == -1 || $totMem3 > 0;
 die "-clusterID must be between 1 and 100\n" unless $cdhID >= 1 && $cdhID <= 100;
+die "-clusterCov must be between 0 and 1\n" unless $clusterCov >= 0 && $clusterCov <= 1;
 die "-minGeneL must not be negative\n" unless $minGeneL >= 0;
 die "-FuncMinPercSbjCov must be between 0 and 1\n"
 	unless $minPercSbjCov >= 0 && $minPercSbjCov <= 1;
-die "-fastaSplit must be a positive count or size such as 500M\n"
-	unless $fastaSplits =~ /^\d+(?:[KMG])?$/i && $fastaSplits !~ /^0+[KMG]?$/i;
+die "-FuncMinPercQueryCov must be between 0 and 1\n"
+	unless $minPercQueryCov >= 0 && $minPercQueryCov <= 1;
+die "-redoFunc must be 0 or 1\n" unless $redoFunc == 0 || $redoFunc == 1;
+die "-fastaSplit must be a positive count or a size in M or G such as 500M\n" #splitFastas only knows upper-case M and G
+	unless $fastaSplits =~ /^\d+[MG]?$/ && $fastaSplits !~ /^0+[MG]?$/;
+die "-fastaSplitBigDB must be a positive count or a size in M or G such as 100M\n"
+	unless $fastaSplitsBig =~ /^\d+[MG]?$/ && $fastaSplitsBig !~ /^0+[MG]?$/;
+die "-SNPcaller must be either MPI or FB\n"
+	unless $SNPcaller eq "MPI" || $SNPcaller eq "FB";
+die "-doMags must be 0 or 1\n" unless $doMags == 0 || $doMags == 1;
+die "-doStrains must be 0 or 1\n" unless $doStrains == 0 || $doStrains == 1;
+die "-useCheckM1 and -useCheckM2 must each be 0 or 1\n"
+	unless ($useCheckM1 == 0 || $useCheckM1 == 1)
+		&& ($useCheckM2 == 0 || $useCheckM2 == 1);
+die "-binSpeciesMG must be one of 0..5\n"
+	unless $binSpeciesMG >= 0 && $binSpeciesMG <= 5;
+if ($mode eq 'geneCat' && $doMags) {
+	die "-doMags 1 requires -binSpeciesMG to select one of 1..5; use -doMags 0 when no binner was run\n"
+		unless $binSpeciesMG >= 1;
+	die "Select exactly one quality checker: -useCheckM1 1 -useCheckM2 0, or vice versa\n"
+		unless $useCheckM1 + $useCheckM2 == 1;
+}
+die "-doStrains 1 requires -doMags 1\n"
+	if $mode eq 'geneCat' && $doStrains && !$doMags;
 
 
 checkMF(2);
 my $binnerShrt=getBinSubdirName($binSpeciesMG);
+#default -functDB: drop optional databases that are not installed. The main run forwards the resolved list to
+#FuncAssign, so it also decides the functional checkpoint (installing VFDB later adds VFA/VFB on the next run)
+if ($curDB_o eq ""){
+	$curDB_o = ($mode eq 'geneCat' || $mode eq 'FuncAssign') ? _defaultFuncDBs() : $funcDBdefault;
+}
 
 if ($numCor3 == -1){
 	$numCor3 = $numCor;
@@ -647,6 +860,8 @@ if ($usesCatalogDefaultTmp) {
 	$tmpDir .= "$catalogIdentity/";
 	$GLBtmp .= "$catalogIdentity/";
 }
+$tmpDir = File::Spec->rel2abs(resolve_path($tmpDir));
+$tmpDir .= "/" unless $tmpDir =~ m{/$};
 $tmpDir = _safe_reset_dir($tmpDir, 'temporary') if $justCDhit == 0;
 
 my $primaryClusterFNA= "compl.incompl.$cdhID.fna";
@@ -656,6 +871,9 @@ my $primaryClusterCLS= "compl.incompl.$cdhID.fna.clstr";
 die "-MGset option has to be \"GTDB\" or \"FMG\"\n" unless ($useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG");
 my $speciesCutoff = "specI_cutoff";
 #my $speciesGTDB = "specI_GTDB"; my $speciesDir = "specIPath";my $speciesLink = "specI_lnks"; 
+if ($mapF !~ m/^\??$/) {
+	$mapF = join ',', _map_spec_files($mapF);
+}
 if ($useGTDBmg eq "GTDB"){ 
 	$path2FMGids = "ContigStats/GTDBmg/marker_genes_meta.tsv";
 	$COGdir = "GTDBmg";$speciesCutoff = "GTDB_cutoff";
@@ -676,13 +894,13 @@ if ($mapF =~ m/^\??$/){
 		|| catalog_map_specs_match($mapFInf, $mapF)) { #same as in input arg.. great, replace with local copies!
 		$mapF = $mapFInf;
 	} else {
-		die "input maps seems to have changed, neither\n$mapFInf\nnor\n$mapFOri\nAborting run..\n";
+		die "input maps changed. Catalog-local list:\n$mapFInf\nOriginal list:\n$mapFOri\nRequested list:\n$mapF\nAborting run..\n";
 		#die "Continuing run, but inmap does not seem to match!\nOriginal map: $mapFOri\n-map arg: $mapF\nExiting.. delete gene cat folder before proceeding (or use original map)\n";
 	}
 }
 
 my %map; my %AsGrps; my @samples; my $numSmpls=0;
-_validate_map_files($mapF);
+$mapF = join ',', _validate_map_files($mapF);
 my ($hr,$hr2) = readMapS($mapF,$oldNameFolders);
 %map = %{$hr};
 die "Mapping parser did not return assembly-group data\n" unless ref($hr2) eq 'HASH';
@@ -698,13 +916,31 @@ die "No samples were found in the mapping input: $mapF\n" unless $numSmpls;
 my $bucketCnt = 0; my $cnt = 0; my @bucketDirs = ();
 my $bdir = $GCdir."B$bucketCnt/";#dir where to write the output files..
 make_path($qsubDir) unless -d $qsubDir;
+my $geneCatRunTag = $mode eq 'geneCat' ? 'geneCat' : "geneCat.$mode";
+$geneCatRunTag .= ".batch-$SmplBatch" if $mode eq 'subprepSmpls' && $SmplBatch >= 0;
+$geneCatRunTag =~ s/[^A-Za-z0-9_.-]+/_/g;
+$geneCatHeartbeatPath = "$qsubDir/$geneCatRunTag.heartbeat.tsv";
+$geneCatFailurePath = "$qsubDir/$geneCatRunTag.failure.tsv";
+$geneCatWorkflowActive = 1;
+$SIG{TERM} = sub { die "geneCat controller received SIGTERM\n" };
+$SIG{INT} = sub { die "geneCat controller received SIGINT\n" };
+$SIG{HUP} = sub { die "geneCat controller received SIGHUP\n" };
+_gene_cat_workflow_stage('preflight');
+retry_unlink($geneCatFailurePath, fatal => 0, label => 'clear stale geneCat failure record');
 my $QSBoptHR = emptyQsubOpt($doSubmit,"",$submSys);#,"bash"
 $QSBoptHR->{qsubDir} = $qsubDir;
+if ($mode eq 'geneCat') {
+	preflight_directory($GCdir, 'gene-catalog output directory');
+	preflight_directory($tmpDir, 'gene-catalog temporary directory');
+	preflight_capacity($GCdir, 'gene-catalog output filesystem');
+	preflight_capacity($tmpDir, 'gene-catalog temporary filesystem');
+}
+_gene_cat_workflow_stage("mode-$mode");
 #my %QSBopt = %{$QSBoptHR};
 
 #$defaultsCDH = "-d 0 -c 0.$cdhID -g 0 -T $numCor -M ".int(($totMem+30)*1024) if (@ARGV>3);
 
-if ($mode eq "mergeCLs"){#was previously mergeCls.pl
+if ($mode eq "mergeCLs"){
 	mergeClsSam($tmpDir,$cdhID,$GCdir);
 	exit(0);
 } elsif ($mode eq "subprepSmpls"){ #subpart sample gene extractions..
@@ -715,7 +951,12 @@ if ($mode eq "mergeCLs"){#was previously mergeCls.pl
 	my $numCor2 = $numCor;
 	#if (@ARGV > 2){$numCor2 = $ARGV[2];}
 	#die "$numCor2\n";
-	canopyCluster($GCdir,$tmpDir,$numCor2);
+	my $canopyDep = canopyCluster($GCdir,$tmpDir,$numCor2,$modeStone);
+	if (length $modeStone) {
+		qsubSystemJobAlive([$canopyDep], $QSBoptHR) if length $canopyDep;
+		die "Canopy completed without a valid checkpoint: $modeStone\n"
+			unless _stone_valid($modeStone, $cdhID);
+	}
 	exit(0);
 }elsif ($mode eq "specI" || $mode eq "kraken" || $mode eq "kaiju" ){ #tax assigns
 	my $numCor2 = $numCor;
@@ -733,27 +974,72 @@ if ($mode eq "mergeCLs"){#was previously mergeCls.pl
 	writeMG_COGs($GCdir);
 	exit(0);
 } elsif($mode eq "FOAM" || $mode eq "ABR"){ #FOAM functional assignment
-	FOAMassign($GCdir,$tmpDir,$mode);
+	FOAMassign($GCdir,"$tmpDir/FOAM_"._gcTmpTag()."/",$mode);
 	exit(0);
 } elsif($mode eq "FuncAssign"){ #eggNOG/KEGG/CAZy functional assignment
 	$QSBoptHR->{doSubmit} = 1;
-	#die "$fastaSplits\n";
 	my @DBs = split /,/,$curDB_o;
-	my $clean=1;
 	@DBs = do { my %seen; grep { !$seen{$_}++ } @DBs };
+	print "NOTE: KGM is not in -functDB: no diamond KEGG KO/module tables (eggNOG-mapper KOs are produced by FuncEMAP)\n" unless (grep {$_ eq "KGM"} @DBs);
+	#check every database before submitting anything, so one missing database can't leave a partial run
+	my @missing;
 	foreach my $curDB (@DBs){
-		my $numCor2 = $numCor;
-		if ($curDB eq "mp3"){$numCor2=1;}
-		geneCatFunc($GCdir,$tmpDir."/GCanno/",$curDB,$numCor2,$clean);
-		$clean=0;
+		if ($curDB eq "mp3"){ #no DB files, but needs the mp3 program
+			my $mp3P = eval { getProgPaths("mp3",0) };
+			push(@missing,"  mp3: program path 'mp3' is not configured\n") unless (defined($mp3P) && $mp3P ne "");
+			next;
+		}
+		eval { getSpecificDBpaths($curDB,0); 1 } or push(@missing,"  $curDB: $@");
 	}
-	print "All function assigns done\n";
+	die "FuncAssign: missing/invalid functional databases, nothing submitted:\n".join("",@missing) if (@missing);
+	#not again while jobs of an earlier submission are queued or running (see _submitStageOnce); supervised until done
+	_submitStageOnce('FuncAssign', sub { _superviseFuncStage('FuncAssign', sub {
+		#databases with the same chunk size share one split of the catalog (catalog-specific directories: one for
+		#-fastaSplit, one for the KEGG/eggNOG -fastaSplitBigDB); removed by the final job
+		my $query = "$GCdir/compl.incompl.$cdhID.prot.faa";
+		my @splitDirs = do { my %seen; grep { !$seen{$_}++ } map { _funcSplitDir(_funcSplitSize($_)) } @DBs };
+		foreach my $splitDir (@splitDirs){
+			my @oldSplits = glob("$splitDir/*");
+			if (@oldSplits && -e $query && (-M $oldSplits[0]) > (-M $query)){ #splits older than the catalog: stale
+				print "Removing stale catalog splits in $splitDir\n";
+				clenSplitFastas($query,$splitDir);
+			}
+		}
+		my @funcDeps; my @funcOuts;
+		foreach my $curDB (@DBs){
+			my $numCor2 = $numCor;
+			if ($curDB eq "mp3"){$numCor2=1;}
+			my ($funcDep,$geneAss) = geneCatFunc($GCdir,_funcTmpDir(),$curDB,$numCor2,$QSBoptHR);
+			push @funcDeps, $funcDep if defined($funcDep) && length($funcDep);
+			push @funcOuts, $geneAss;
+			push @funcOuts, "$GCdir/Anno/Func/.${curDB}.matrix.done"; #written last by the matrix job: no stone after a failed matrix
+		}
+		#final job: runs only after every annotation/matrix job succeeded; removes the shared splits and writes the stone
+		my $doneCmd = "$rmBin -rf ".join(" ", @splitDirs)."\n";
+		if (length $modeStone) {
+			#checkpoint fails if a per-gene assignment file is missing; records databases, aligner and cutoffs
+			my $stoneCmd = _checkpoint_command($checkpointWriter, $modeStone, $cdhID, 'functional-annotation', @funcOuts);
+			my %fp = _funcStoneParams();
+			my $extra = join(' ', map { _shell_quote($_) } map { ('--param', "$_=$fp{$_}") } sort keys %fp);
+			$stoneCmd =~ s/\n$/ $extra\n/;
+			$doneCmd .= $stoneCmd;
+		}
+		$doneCmd .= "$rmBin -f "._inflightMarker('FuncAssign')."\n"; #stage finished
+		make_path("$qsubDir/Funct/") unless -d "$qsubDir/Funct/";
+		my ($doneDep, $doneQcmd) = qsubSystem("$qsubDir/Funct/FuncAssign.done.sh", $doneCmd,
+			1, "1G", "funcDone", join(";", @funcDeps), "", 1, [], $QSBoptHR);
+		print "All function-assignment jobs prepared\n";
+		return $doneDep;
+	}); });
 	exit(0);
 } elsif($mode eq "FuncEMAP"){ #eggNOG functional assignment
 	$QSBoptHR->{doSubmit} = 1;
 	my $clean=1;
 	if ($fastaSplits eq "500M"){$fastaSplits="150M";}
-	geneCatFunc_emapper($GCdir,$NodeTmpDir."/GCannoEMAP/",$numCor,$clean,$fastaSplits,$modeStone);
+	#supervised until done, see _superviseFuncStage
+	_submitStageOnce('FuncEMAP', sub { _superviseFuncStage('FuncEMAP', sub {
+		return geneCatFunc_emapper($GCdir,$NodeTmpDir."/GCannoEMAP_"._gcTmpTag()."/",$numCor,$clean,$fastaSplits,$modeStone);
+	}); });
 	exit(0);
 } elsif ($mode eq "protExtract"){#
 	protExtract($GCdir,$extraRdsFAA,$out); #GCdir
@@ -769,9 +1055,7 @@ if ($mode eq "mergeCLs"){#was previously mergeCls.pl
 #start logging big genecat run..
 make_path($qsubDir) unless -d $qsubDir;
 open LOG, ">", "$qsubDir/GeneCat.log" or die "Cannot open $qsubDir/GeneCat.log: $!\n";
-open my $version_fh, '>', "$GCdir/version.txt" or die "Cannot open $GCdir/version.txt: $!\n";
-print {$version_fh} "$version\n" or die "Cannot write $GCdir/version.txt: $!\n";
-close $version_fh or die "Cannot close $GCdir/version.txt: $!\n";
+atomic_write_text("$GCdir/version.txt", "$version\n", label => 'publish gene-catalog version');
 #autoset batchnum
 if ($batchNum <1){
 	$batchNum = int(scalar(@samples) / 200 )+1;
@@ -787,12 +1071,15 @@ make_path($stoneDir) unless -d $stoneDir;
 
 
 #copying genes from dirs into prep files..
+_gene_cat_workflow_stage('collate-genes');
 collateGenes();
 
 #big main step
+_gene_cat_workflow_stage('cluster-and-annotate-catalogue');
 geneCatFlow($bdir,$bucketCnt,$GCdir,$map{opt}{outDir});#,$GCdir);
 
 print "FInished GC step\n";
+_gene_cat_workflow_stage('controller-complete');
 close LOG;
 exit(0);
 
@@ -807,202 +1094,48 @@ exit(0);
 
 #####################################################################
 #####################################################################
-sub clusterMultiStep{
-	my ($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,$cmd,$dep1) = @_;
-	#cd-hit way
-	my $copycat=0;
-	my $REF = "$tmpDir/compl.$cdhID.fna";
-
-	if( _stone_valid($complStone, $cdhID) ||
-		(-s "$bdir/$primaryClusterFNA" && -s "$bdir/$primaryClusterCLS") ){ #even further along..
-	#-s 0.8
-		$cmd .= "cp $bdir/compl.$cdhID.fna* $tmpDir\n"; $copycat=1;
-		if (-s "$bdir/compl.$cdhID.fna.gz" ){#|| (-s "$bdir/compl.$cdhID.fna.clstr.gz" && -s "$bdir/compl.$cdhID.fna.ctsv.gz")){
-			$cmd .= "gunzip $tmpDir/compl.$cdhID.fna*\n" ;
-		} 
-	}else {
-		#$cmd .= sortFNA($bdir,"compl",$toLclustering,$tmpDir,$numCor);
-		#$cmd .= $cdhitBin."-est -i $bdir/compl.fna -o $tmpDir/compl.$cdhID.fna  -n 9 -G 1 -aS 0.95 -aL 0.6 $defaultsCDH \n" ;
-		$cmd .= clusterFNA( "$bdir/compl.fna", $REF ,0.9,0.6,"$cdhID",$numCor,0,$tmpDir."/mainCL/",$clustMMseq,$totMem);
-		$cmd .= _checkpoint_command($checkpointWriter, $complStone, $cdhID, 'complete-clustering');
-		$cmd .= "cp $tmpDir/compl.$cdhID.fna* $bdir\n" unless ($copycat);
-	}
-	if ($submitLocal){
-		if (!$copycat){
-			$QSBoptHR->{useLongQueue} = 1;
-			my @preCons = @{$QSBoptHR->{constraint}};
-			push(@{$QSBoptHR->{constraint}}, $avx2Constr) if ($clustMMseq);#--constraint=sse4
-			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-			my ($dep,$qcmd) = qsubSystem($qsubDir."mainCDhit.sh",$cmd,$numCor,int($totMem)."G","MCLGC","","",1,[],$QSBoptHR);
-			$QSBoptHR->{tmpSpace} =$tmpSHDD;
-			$QSBoptHR->{useLongQueue} = 0;
-			@{$QSBoptHR->{constraint}} = @preCons;
-
-			qsubSystemJobAlive( [$dep],$QSBoptHR ); 
-	die "Can't find valid Stone $complStone\n" unless _stone_valid($complStone, $cdhID);
-		} else { systemW $cmd;}
-		$cmd = "";
-	}
-
-	#5', 3' complete genes and incompletes
-	
-	my $bwtIdx = $REF.".bw2";
-	my $bwtIncLog = "$qsubDir/bowTie_incompl.log"; my $bwt35Log = "$qsubDir/bowTie_35.log";
-	my $bwtIdxB0 = "$bdir/SAM/compl.$cdhID.fna.bw2";
-	system "mkdir -p $bdir/SAM";
-	
-	my $bwtCore = $numCor;
-	
-	#$bwtCore=16;# if ($bwtCore > 25);
-	
-	my @miniParJobs = (); my $mapIdxJob="";
-	#build bowtie index?
-	if ( !-s "$bdir/SAM/35compl.$cdhID.align.sam"  || !-s "$bdir/SAM/P35compl.NAl.pre.$cdhID.fna" || 
-			!-s "$bdir/SAM/incompl.$cdhID.align.sam" || !-s "$bdir/SAM/incompl.NAl.pre.$cdhID.fna" ){
-		my ($tmpCmd,$bwtIdxT) =  buildMapperIdx($REF,$numCor3,1,3);
-		$cmd .=$tmpCmd;
-		$bwtIdx = $bwtIdxT;
-		if ($submitLocal){
-			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-			my ($dep,$qcmd) = qsubSystem($qsubDir."mapperIdx.sh",$cmd,$numCor3,int($totMem3)."G","IDXmGC","","",1,[],$QSBoptHR);
-			$QSBoptHR->{tmpSpace} =$tmpSHDD;
-			$cmd = ""; $mapIdxJob = $dep;
-		}
-
-		#unless (-e $bwtIdxB0.".rev.2.bt2" && -e $bwtIdxB0.".4.bt2"&& -e $bwtIdxB0.".2.bt2"){
-		#	$cmd .= $bwt2Bin."-build --threads $bwtCore -q $REF $bwtIdx\n" ;
-#			} else {
-#				$cmd .= "cp $bwtIdxB0* $tmpDir\n";
-#			}
-	}
-	#die "$bwtIdx \n $REF\n";
-	my $longbwt2opt = " -L 15 -i S,0,2.50 --local --norc  --no-hd --no-sq "; #--no-unal
-	my $stdBowtie2opt = " -sensitive --local --norc  --no-hd --no-sq "; #--no-unal
-	my $mini2Base = "$mini2Bin -2 -a -t $numCor3 --secondary=no -x asm20 "; #--sam-hit-only
-	my $xxtra = "";
-	#p35 incomplete genes
-	if ( !-s "$bdir/SAM/35compl.$cdhID.align.sam"  ){
-		if (-e "$bdir/5Pcompl.fna.gz" && !-e "$bdir/5Pcompl.fna"){
-			$cmd .= "zcat $bdir/5Pcompl.fna.gz > $tmpDir/35Pcompl.fna\n" 
-		} else {
-			$cmd .= "cat $bdir/5Pcompl.fna > $tmpDir/35Pcompl.fna\n";#>> $bdir/incompl.fna \n";
-		}
-		if (-e "$bdir/3Pcompl.fna.gz" && !-e "$bdir/3Pcompl.fna"){
-			$cmd .= "zcat $bdir/3Pcompl.fna.gz >> $tmpDir/35Pcompl.fna\n\n";
-		} else {
-			$cmd .= "cat $bdir/3Pcompl.fna >> $tmpDir/35Pcompl.fna\n\n";
-		}
-		$cmd .= "touch $tmpDir/35compl.$cdhID.align.sam \n";
-		if (0){
-			#take care of long reads - only needed for bowtie2
-			$cmd .= "$sortSepScr 8000 $tmpDir/35Pcompl.fna\n";
-			$cmd .= $bwt2Bin.$longbwt2opt;
-			$cmd .= "--un $tmpDir/P35compl.NAl.pre.$cdhID.fna.long -p 4 -x $bwtIdx -f -U  $tmpDir/35Pcompl.fna.long > $tmpDir/35compl.$cdhID.align.sam 2> $bwt35Log\n";
-			#and bulk of reads
-			$cmd .= $bwt2Bin.$stdBowtie2opt." -p $bwtCore ";
-			$cmd .= "--un $tmpDir/P35compl.NAl.pre.$cdhID.fna -x $bwtIdx -f -U  $tmpDir/35Pcompl.fna >> $tmpDir/35compl.$cdhID.align.sam 2>> $bwt35Log\n";
-			
-			#fix missing newlines
-			$cmd .= "cat $tmpDir/P35compl.NAl.pre.$cdhID.fna.long >> $tmpDir/P35compl.NAl.pre.$cdhID.fna\n rm $tmpDir/P35compl.NAl.pre.$cdhID.fna.long\n";
-			$cmd .= "\nsed -i -r 's/([ACGT])>/\\1\\n>/g' $tmpDir/P35compl.NAl.pre.$cdhID.fna\n";
-			$xxtra = "$tmpDir/P35compl.NAl.pre.$cdhID.fna";
-		} else {#mini2 way
-#				foreach my $cog ( @COGlst){#do COGs separate .. too complicated, just ignore for now..
-#					$cmd .= "$mini2Base $FMGFL2{$cog}$mini2IdxFileSuffix $tmpDir/35Pcompl.fna | grep -v '^\@' > $tmpDir/35compl.$cdhID.align.$cog.sam \n"; #$samBin view 
-#				}
-			$cmd .= "if [ -s $tmpDir/35Pcompl.fna ] ; then $mini2Base $bwtIdx $tmpDir/35Pcompl.fna | awk '!/^\@/' > $tmpDir/35compl.$cdhID.align.sam ; fi\n"; #$samBin view
-		}
-		$cmd .= "cp $xxtra $tmpDir/35compl.$cdhID.align.sam $bdir/SAM/\n" ;
-		
-		#$bwtCore=50 if ($bwtCore > 50);
-	 } else {
-		$cmd .= "cp $bdir/SAM/35compl*.sam  $tmpDir/\n"; # $bdir/SAM/P35compl.NAl.pre.$cdhID.fna
-		if ($submitLocal){systemW $cmd;$cmd="";}
-	 }
-	if ($submitLocal && $cmd ne ""){
-		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		my ($dep,$qcmd) = qsubSystem($qsubDir."mini35.sh",$cmd,$numCor3,int($totMem3)."G","m35GC",$mapIdxJob,"",1,[],$QSBoptHR);
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;
-		$cmd = ""; push(@miniParJobs,$dep); #qsubSystemJobAlive( [$dep],$QSBoptHR ); 
-	}
-
-	$xxtra = "";
-	if (!-s "$bdir/SAM/incompl.$cdhID.align.sam" ){
-		my $queryFNA = "$bdir/incompl.fna";
-		if (-e "$bdir/incompl.fna.gz" && !-e $queryFNA){
-			#$cmd .= "gunzip $bdir/incompl.fna.gz\n";
-			$queryFNA = "$bdir/incompl.fna.gz";
-		}
-		$cmd .= "touch $tmpDir/incompl.$cdhID.align.sam \n";
-		#take care of long reads
-		if (0){
-			$cmd .= "$sortSepScr 8000 $bdir/incompl.fna\n";
-			$cmd .= $bwt2Bin. $longbwt2opt;
-			$cmd .= "--un $tmpDir/incompl.NAl.pre.$cdhID.fna.long -x $bwtIdx -f -U $bdir/incompl.fna.long > $tmpDir/incompl.$cdhID.align.sam 2> $bwtIncLog\n";
-			$cmd .= $bwt2Bin.$stdBowtie2opt." -p $bwtCore ";
-			$cmd .= "--un $tmpDir/incompl.NAl.pre.$cdhID.fna -x $bwtIdx -f -U $bdir/incompl.fna >> $tmpDir/incompl.$cdhID.align.sam 2>> $bwtIncLog\n";
-			$cmd .= "cat $tmpDir/incompl.NAl.pre.$cdhID.fna.long >> $tmpDir/incompl.NAl.pre.$cdhID.fna\n rm $tmpDir/incompl.NAl.pre.$cdhID.fna.long\n";
-			$cmd .= "sed -i -r 's/([ACGT])>/\\1\\n>/g' $tmpDir/incompl.NAl.pre.$cdhID.fna\n";
-			$xxtra = "$tmpDir/incompl.NAl.pre.$cdhID.fna";
-		} else {#mini2 now
-			$cmd .= "if [ -s $queryFNA ]; then $mini2Base $bwtIdx $queryFNA | awk '!/^\@/' > $tmpDir/incompl.$cdhID.align.sam ; fi\n"; # $samBin view 2> $bwt35Log
-		}
-		$cmd .= "cp $xxtra $tmpDir/incompl.$cdhID.align.sam $bdir/SAM/\n" ;
-	 } else {
-		$cmd .= "cp $bdir/SAM/incompl*.sam  $tmpDir/\n"; #$bdir/SAM/incompl.NAl.pre.$cdhID.fna 
-		if ($submitLocal){systemW $cmd;$cmd="";}
-
-	 }
-
-	if ($submitLocal && $cmd ne ""){
-		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		my ($dep,$qcmd) = qsubSystem($qsubDir."miniIncom.sh",$cmd,$numCor3,int($totMem3)."G","mInGC",$mapIdxJob,"",1,[],$QSBoptHR); $cmd = "";
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;
-		push(@miniParJobs,$dep); #
-	}
-	
-	#merge cluster track files (as they all match to same ref DB set)
-	#$cmd .= "rm -f $bwtIdx"."*\n"; #<- leave in
-	#if (!-s "$bdir/SAM/incompl.NAl.pre.$cdhID.fna" || !-s "$bdir/SAM/P35compl.NAl.pre.$cdhID.fna" ){
-	$cmd .= "perl $selfScript -mode mergeCLs -o $OutD -MGset $useGTDBmg -tmp $tmpDir -1stepClust $allinClust -clusterID $cdhID -c $numCor -map $mapF\n"; #1 was BIG before.. but kinda useless paramenter now
-	#}
-	#die $cmd."\n";
-	$cmd .= "\nsed '/^\$/d' $tmpDir/$primaryClusterFNA > $tmpDir/$primaryClusterFNA.tmp;rm $tmpDir/$primaryClusterFNA;mv $tmpDir/$primaryClusterFNA.tmp $tmpDir/$primaryClusterFNA\n";
-	$cmd .= _checkpoint_command($checkpointWriter, $clnLnStone, $cdhID, 'clean-cluster-lines');
-	$cmd .= "$pigzBin -f -c -p $numCor $tmpDir/$primaryClusterFNA > $bdir/$primaryClusterFNA.gz\n"; #just make sure this is backed up..
-	$cmd .= "$pigzBin -f -c -p $numCor $tmpDir/$primaryClusterCLS > $bdir/$primaryClusterCLS.gz\n"; #just make sure this is backed up..
-#		$cmd .= "rm -r $bdir/SAM/\n"; #not really needed any longer, delete..
-	$cmd .= "mv $tmpDir/log/Cluster.log $qsubDir\n"; #this is from merge script..
-	$cmd .= _checkpoint_command($checkpointWriter, $incomplStone, $cdhID, 'incomplete-clustering');
-	#still multi Core..
-	if ($submitLocal){
-		$QSBoptHR->{useLongQueue} = 1;
-		my @preCons = @{$QSBoptHR->{constraint}};
-		push(@{$QSBoptHR->{constraint}}, $avx2Constr) if ($clustMMseq);
-		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		my ($dep,$qcmd) = qsubSystem($qsubDir."mergeIncom.sh",$cmd,$numCor,int($totMem3)."G","mEInGC",join(";",@miniParJobs,$dep1),"",1,[],$QSBoptHR); $cmd = "";
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;
-		$QSBoptHR->{useLongQueue} = 0;
-		@{$QSBoptHR->{constraint}} = @preCons;
-		qsubSystemJobAlive( [$dep],$QSBoptHR ) ; 
-	die "Can't find valid Stone $incomplStone\n" unless _stone_valid($incomplStone, $cdhID);
-	}
-	return $cmd;
+sub _gene_cat_workflow_stage {
+	$geneCatWorkflowStage = $_[0] if defined($_[0]) && length($_[0]);
+	return unless $geneCatWorkflowActive;
+	write_workflow_record($geneCatHeartbeatPath, status => 'running', stage => $geneCatWorkflowStage);
 }
+
 
 sub gzifelscat{
 	my ($inF) = @_;
 	if (-e "$inF.gz" && !-e "$inF"){
-		return "zcat $inF.gz";
+		return "$pigzBin -dc " . _shell_quote("$inF.gz");
 	} else {
-		return "cat $inF";
+		return "$catBin " . _shell_quote($inF);
 	}
 
 }
+sub _catalog_backup_command {
+	my ($source_dir, $backup_dir, $prefix, $cores) = @_;
+	my $move = getProgPaths("mv");
+	my $command = '';
+	for my $name ($primaryClusterFNA, $primaryClusterCLS) {
+		my $source = File::Spec->catfile($source_dir, $name);
+		my $destination = File::Spec->catfile($backup_dir, "$prefix$name.gz");
+		$command .= "$pigzBin -f -c -p $cores " . _shell_quote($source)
+			. ' > ' . _shell_quote("$destination.part.gz") . "\n";
+		$command .= "$move -- " . _shell_quote("$destination.part.gz") . ' '
+			. _shell_quote($destination) . "\n";
+	}
+	return $command;
+}
+
+sub _merged_catalog_backup_valid {
+	my ($stone, $cluster_id) = @_;
+	my $manifest = read_checkpoint($stone) or return 0;
+	return 0 unless ($manifest->{parameters}{stage} // '') eq 'merged-clustering';
+	return _stone_valid($stone, $cluster_id);
+}
+
 sub clusterSingleStep{
 	my ($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,$cmd,$dep1) = @_;
 	my $DB = "$tmpDir/compl.35inc.fna.gz";
-	return "" if _stone_valid($incomplStone, $cdhID);
+	return "" if _merged_catalog_backup_valid($incomplStone, $cdhID);
 	
 	#these steps dont use local SSD, tmpsapce is on scratch..
 	my $preHDDspace = ${$QSBoptHR}{tmpSpace};
@@ -1011,9 +1144,8 @@ sub clusterSingleStep{
 	
 	my $OFcompl = "$bdir/compl.fna.gz";my $OFincompl = "$bdir/incompl.fna.gz";my $OF5in = "$bdir/5Pcompl.fna.gz";my $OF3in = "$bdir/3Pcompl.fna.gz";
 	
-	$cmd .= "touch $tmpDir/compl.$cdhID.fna\n";
 	$cmd .= "echo \"Concatenating input files of complete & incomplete genes..\"\n";
-	$cmd .= "rm -f $DB; cp $OFcompl $DB; cat $OFincompl $OF5in $OF3in >> $DB\n";
+	$cmd .= "$rmBin -f $DB; $cpBin $OFcompl $DB; $catBin $OFincompl $OF5in $OF3in >> $DB\n";
 	#previously worked on unzipped files..
 	#$cmd .= gzifelscat("$bdir/compl.fna"). " > $DB;\n";$cmd .= gzifelscat("$bdir/5Pcompl.fna"). " >> $DB;\n";
 	#$cmd .= gzifelscat("$bdir/3Pcompl.fna"). " >> $DB;\n";$cmd .= gzifelscat("$bdir/incompl.fna"). " >> $DB;\n";
@@ -1036,16 +1168,15 @@ sub clusterSingleStep{
 		systemW $cmd;$cmd="";
 	}
 
-	$cmd .= clusterFNA( "$DB", "$tmpDir/$primaryClusterFNA" ,0.0,0.0,"$cdhID",$numCor0,0,$tmpDir."/fullCL/",$clustMMseq,$totMem);
+	$cmd .= clusterFNA( "$DB", "$tmpDir/$primaryClusterFNA" ,$clusterCov,0.0,"$cdhID",$numCor0,0,$tmpDir."/fullCL/",$clustMMseq,$totMem);
 	
-	$cmd .= "$pigzBin -f -c -p $numCor0 $tmpDir/$primaryClusterFNA > $bdir/$primaryClusterFNA.gz\n"; #just make sure this is backed up..
-	$cmd .= "$pigzBin -f -c -p $numCor0 $tmpDir/$primaryClusterCLS > $bdir/$primaryClusterCLS.gz\n"; #just make sure this is backed up..
-	$cmd .= "touch $qsubDir/Cluster.log\n";
-	$cmd .= _checkpoint_command($checkpointWriter, $complStone, $cdhID, 'complete-clustering');
+	$cmd .= _catalog_backup_command($tmpDir, $bdir, 'unmerged.', $numCor0);
+	$cmd .= _checkpoint_command($checkpointWriter, $complStone, $cdhID, 'complete-clustering',
+		"$bdir/unmerged.$primaryClusterFNA.gz", "$bdir/unmerged.$primaryClusterCLS.gz");
 	if (_stone_valid($complStone, $cdhID)){
-		$cmd = "mkdir -p $tmpDir\n" ;
-		$cmd .= gzifelscat("$bdir/$primaryClusterCLS"). " > $tmpDir/$primaryClusterCLS;\n";
-		$cmd .= gzifelscat("$bdir/$primaryClusterFNA"). " > $tmpDir/$primaryClusterFNA;\n";
+		$cmd = "$mkdirBin -p $tmpDir\n" ;
+		$cmd .= gzifelscat((-e "$bdir/unmerged.$primaryClusterCLS.gz" ? "$bdir/unmerged.$primaryClusterCLS" : "$bdir/$primaryClusterCLS")). " > $tmpDir/$primaryClusterCLS;\n";
+		$cmd .= gzifelscat((-e "$bdir/unmerged.$primaryClusterFNA.gz" ? "$bdir/unmerged.$primaryClusterFNA" : "$bdir/$primaryClusterFNA")). " > $tmpDir/$primaryClusterFNA;\n";
 		if ($submitLocal){systemW $cmd;$cmd="";}
 	}
 	
@@ -1064,11 +1195,14 @@ sub clusterSingleStep{
 	} elsif ($dep1 ne "") {
 		qsubSystemJobAlive( [$dep1],$QSBoptHR ) ; 
 	}
-	die "clustering failed\n" unless _stone_valid($complStone, $cdhID);
+	die "clustering failed\n" if $submitLocal && !_stone_valid($complStone, $cdhID);
 	${$QSBoptHR}{tmpSpace} = $preHDDspace;
 	
-	$cmd .= "\n\nperl $selfScript -mode mergeCLs -MGset $useGTDBmg -1stepClust $allinClust -o $OutD -tmp $tmpDir -clusterID $cdhID -c $numCor0 -map $mapF\n"; #still need to add the COG genes..
-	$cmd .= _checkpoint_command($checkpointWriter, $incomplStone, $cdhID, 'incomplete-clustering');
+	$cmd .= "$GCscr -mode mergeCLs -MGset $useGTDBmg -o " . _shell_quote($OutD)
+		. " -tmp " . _shell_quote($tmpDir) . " -clusterID $cdhID -c $numCor0 -map " . _shell_quote($mapF) . "\n";
+	$cmd .= _catalog_backup_command($tmpDir, $bdir, '', $numCor0);
+	$cmd .= _checkpoint_command($checkpointWriter, $incomplStone, $cdhID, 'merged-clustering',
+		"$bdir/$primaryClusterFNA.gz", "$bdir/$primaryClusterCLS.gz");
 
 	if ($submitLocal){
 	die "Can't find valid $cogStone\n" unless _stone_valid($cogStone, $cdhID);
@@ -1081,6 +1215,27 @@ sub clusterSingleStep{
 
 }
 
+
+sub _gene_matrix_commands {
+	my ($out_dir, $assembly_dirs, $cores) = @_;
+	my $base = "$rareBin geneMat -i " . _shell_quote("$out_dir/$primaryClusterCLS")
+		. " -t $cores -map " . _shell_quote($mapF)
+		. " -refD " . _shell_quote($assembly_dirs);
+	$base .= " -oldMapStyle" if $oldNameFolders > 0;
+	$base .= " -calcSupplCov" if $CalcgGneMatSuppl;
+
+	my @commands;
+	for my $variant ([$countMatrixP, ''], ['Mat.cov', '-useCoverage'], ['Mat.med', '-useCovMedian']) {
+		my ($prefix, $coverage_option) = @$variant;
+		my $command = "$base -o " . _shell_quote("$out_dir/$prefix");
+		$command .= " $coverage_option" if length $coverage_option;
+		$command .= " -gz\n";
+		$command .= "$rmBin " . _shell_quote("$out_dir/$prefix.genes2rows.txt") . "\n"
+			if length $coverage_option;
+		push @commands, $command;
+	}
+	return @commands;
+}
 
 sub geneCatFlow($ $ $ $ ){
 	my ($bdir,$nm,$OutD,$assDirs) = @_;
@@ -1134,8 +1289,8 @@ sub geneCatFlow($ $ $ $ ){
 
 
 		
-	$cmd .= "rm -rf $tmpDir\n" unless (_stone_valid($clnLnStone, $cdhID) && !_stone_valid($complStone, $cdhID));
-		$cmd .="mkdir -p $tmpDir\n";
+	$cmd .= "$rmBin -rf $tmpDir\n" unless (_stone_valid($clnLnStone, $cdhID) && !_stone_valid($complStone, $cdhID));
+		$cmd .="$mkdirBin -p $tmpDir\n";
 		#die "$clnLnStone\n$complStone\n$cmd\n";
 	if ($submitLocal && !_stone_valid($moveStone, $cdhID)){systemW $cmd;$cmd="";}
 		
@@ -1143,20 +1298,25 @@ sub geneCatFlow($ $ $ $ ){
 		my %FMGFL2 ; my $dirflag=0; my $cpFromP = -1;
 		@COGlst = keys %FMGfileList;
 		#die "@COGlst\n";
-		$cmd .= "mkdir -p $bdir/$COGdir/\n" ;
-		$cmd .= "mkdir -p $tmpDir/$COGdir/\n" ;
+		$cmd .= "$mkdirBin -p $bdir/$COGdir/\n" ;
+		$cmd .= "$mkdirBin -p $tmpDir/$COGdir/\n" ;
 		my $preclustMMseq = $clustMMseq;
 		my $useMMSEQs4COG = 1;
 		print "Using mmseqs2 for COG clustering: $useMMSEQs4COG\n";
+		#resources of the separate marker clustering job (submitLocal); mmseqs threads and
+		#--split-memory-limit must fit that job, not the main job
+		my $memCOG = int($totMemL/2);if ($memCOG < 50){$memCOG=50;}
+		my $cogCores = int($numCor/2); $cogCores = 1 if $cogCores < 1;
+		my ($cogThreads, $cogMem) = $submitLocal ? ($cogCores, $memCOG/2) : ($numCor3, $totMemL);
 		foreach my $cog ( @COGlst){
 			
 			die "can't find $cog in FMGcutoffs list\n" unless (exists $FMGcutoffs{$cog});
 			$FMGFL2{$cog} = "$bdir/$COGdir/$cog.$cdhID.fna";
 			#print "$FMGFL2{$cog} \n";
 			if (!-e $FMGFL2{$cog} || !-s  $FMGFL2{$cog}){#"$bdir/COG/$cog.$cdhID.fna"){
-				#$cmd .= $cdhitBin."-est -i $FMGfileList{$cog} -o $tmpDir/COG/$cog.$cdhID.fna -n 9 -G 1 -aS 0.95 -aL 0.6 -d 0 -c ". $FMGcutoffs{$cog}/100 ." -g 0 -T $numCor\n";
+				#$cmd .= $cdhitBin." -i $FMGfileList{$cog} -o $tmpDir/COG/$cog.$cdhID.fna -n 9 -G 1 -aS 0.95 -aL 0.6 -d 0 -c ". $FMGcutoffs{$cog}/100 ." -g 0 -T $numCor\n";
 				# $clustMMseq = 0; #use mmseq, and use it's slow mode instead..  
-				$cmd .= clusterFNA($FMGfileList{$cog},$FMGFL2{$cog},0.9,0.0,($FMGcutoffs{$cog}/100)-$relaxFMG,$numCor3,1,"$NodeTmpDir/$cog/",$useMMSEQs4COG,$totMemL);
+				$cmd .= clusterFNA($FMGfileList{$cog},$FMGFL2{$cog},0.9,0.0,($FMGcutoffs{$cog}/100)-$relaxFMG,$cogThreads,1,"$NodeTmpDir/$cog/",$useMMSEQs4COG,$cogMem);
 				$cpFromP=0;
 			} else {
 				$cpFromP = 1 if ($cpFromP == -1);
@@ -1165,7 +1325,7 @@ sub geneCatFlow($ $ $ $ ){
 		}
 		$clustMMseq = $preclustMMseq;
 		
-		$cmd .= "cp $bdir/$COGdir/*.$cdhID.fna* $tmpDir/$COGdir/\n"; 
+		$cmd .= "$cpBin $bdir/$COGdir/*.$cdhID.fna* $tmpDir/$COGdir/\n";
 		$cmd .= _checkpoint_command($checkpointWriter, $cogStone, $cdhID, 'marker-clustering');
 		$cmd .= "\n";
 		#die $cpFromP;
@@ -1175,8 +1335,6 @@ sub geneCatFlow($ $ $ $ ){
 				push(@{$QSBoptHR->{constraint}}, $avx2Constr) if ($useMMSEQs4COG);
 				my $preHDDspace = ${$QSBoptHR}{tmpSpace};
 				${$QSBoptHR}{tmpSpace} = "50G";#"${totMem}G"; #$totMem #doesn't need much, stores on scrach
-				my $memCOG = int($totMemL/2);if ($memCOG < 50){$memCOG=50;}
-				my $cogCores = int($numCor/2); $cogCores = 1 if $cogCores < 1;
 				my ($dep,$qcmd) = qsubSystem($qsubDir."cogCluster.sh",$cmd,$cogCores,($memCOG/2)."G","cCLGC","","",1,[],$QSBoptHR);
 				@{$QSBoptHR->{constraint}} = @preCons;
 				${$QSBoptHR}{tmpSpace} = $preHDDspace;
@@ -1194,48 +1352,49 @@ sub geneCatFlow($ $ $ $ ){
 
 	
 	
-	if (!_stone_valid($incomplStone, $cdhID)) { #map incompletes on complete clusters & merge sams to cdhit format
-		if ($allinClust){#default.. just cluster all genes (without marker genes) at 95% nt id
-			$cmd .= clusterSingleStep($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,$cmd,$COGdep);
-		} else {
-			$cmd .= clusterMultiStep($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,$cmd,$COGdep);
-		}
-	} elsif ($doDecluter && !_stone_valid($declStone, $cdhID)) { #restore files.. for post processing steps
-		$cmd .= "zcat $bdir/$primaryClusterFNA.gz > $tmpDir/$primaryClusterFNA;\n" unless (-e "$tmpDir/$primaryClusterFNA");
-		$cmd .= "zcat $bdir/$primaryClusterCLS.gz > $tmpDir/$primaryClusterCLS;\n" unless (-e "$tmpDir/$primaryClusterCLS");
+	my $published_catalog = -s "$OutD/$primaryClusterFNA" && -s "$OutD/$primaryClusterCLS"
+		&& (_stone_valid($moveStone, $cdhID) || _stone_valid($protStone, $cdhID));
+	if (!$published_catalog && (!_stone_valid($incomplStone, $cdhID)
+		|| ((!-s "$OutD/$primaryClusterFNA" || !-s "$OutD/$primaryClusterCLS")
+			&& !_merged_catalog_backup_valid($incomplStone, $cdhID)))) {
+		$cmd .= clusterSingleStep($complStone,$incomplStone,$clnLnStone,$cogStone,$bdir,$OutD,"",$COGdep);
+	} elsif (!-s "$OutD/$primaryClusterFNA" || !-s "$OutD/$primaryClusterCLS"
+			|| ($doDecluter && !_stone_valid($declStone, $cdhID))) { #restore files for publication/post-processing
+		$cmd .= "$pigzBin -dc $bdir/$primaryClusterFNA.gz > $tmpDir/$primaryClusterFNA;\n" unless (-e "$tmpDir/$primaryClusterFNA");
+		$cmd .= "$pigzBin -dc $bdir/$primaryClusterCLS.gz > $tmpDir/$primaryClusterCLS;\n" unless (-e "$tmpDir/$primaryClusterCLS");
 		if ($submitLocal){systemW $cmd;$cmd="";}
 	}
 	qsubSystemJobAlive( [$COGdep],$QSBoptHR ); 
 	#from now on all single core jobs..
 	#die;
 	
-	$cmd .= "cp $tmpDir/cluster.ids* $OutD 2>/dev/null || : \n" unless (-e "$OutD/cluster.ids.primary" || _stone_valid($matrixSton, $cdhID));
+	$cmd .= "$cpBin $tmpDir/cluster.ids* $OutD 2>/dev/null || : \n" unless (-e "$OutD/cluster.ids.primary" || _stone_valid($matrixSton, $cdhID));
 	if ($submitLocal){systemW $cmd; $cmd ="";}
 	#remove blank lines..
 #	if (!-e $clnLnStone){
 #		$cmd .= "\nsed '/^\$/d' $tmpDir/compl.incompl.$cdhID.fna > $tmpDir/compl.incompl.$cdhID.fna.tmp;rm $tmpDir/compl.incompl.$cdhID.fna;mv $tmpDir/compl.incompl.$cdhID.fna.tmp $tmpDir/compl.incompl.$cdhID.fna\n";
 #	}
 
-	if (!-e "$GCdir/LOGandSUB/${COGdir}.clusN.log"){
+	if ($submitLocal && !-e "$GCdir/LOGandSUB/${COGdir}.clusN.log"){
 		die "Can;t find $GCdir/LOGandSUB/${COGdir}.clusN.log\nDid merge happen?";
 	}
 	
 		#move to final location
-	if (!_stone_valid($moveStone, $cdhID)){
+	if (!_stone_valid($moveStone, $cdhID)
+			|| !-s "$OutD/$primaryClusterFNA" || !-s "$OutD/$primaryClusterCLS"){
 		$cmd .= "#cp relevant files to outdir and zip the rest\n";
-		$cmd .= "mv $tmpDir/${primaryClusterFNA}* $OutD\n" unless (-e "$OutD/$primaryClusterFNA");
-		$cmd .= "mkdir -p $qsubDir/${COGdir}\ncp $tmpDir/$COGdir/*.fna.c* $tmpDir/${COGdir}.clusN.log $qsubDir/${COGdir} 2>/dev/null || :\n" if (@COGlst > 0);
-		$cmd .= _checkpoint_command($checkpointWriter, $moveStone, $cdhID, 'publish-catalog', "$OutD/$primaryClusterFNA");
+		$cmd .= "$mvBin $tmpDir/${primaryClusterFNA}* $OutD\n"
+			unless (-s "$OutD/$primaryClusterFNA" && -s "$OutD/$primaryClusterCLS");
+		$cmd .= "$mkdirBin -p $qsubDir/${COGdir}\n$cpBin $tmpDir/$COGdir/*.fna.c* $tmpDir/${COGdir}.clusN.log $qsubDir/${COGdir} 2>/dev/null || :\n" if (@COGlst > 0);
+		$cmd .= _checkpoint_command($checkpointWriter, $moveStone, $cdhID, 'publish-catalog',
+			"$OutD/$primaryClusterFNA", "$OutD/$primaryClusterCLS");
 		if ($submitLocal){systemW $cmd;		$cmd = "";}
-		die "Can't find valid $moveStone\n" if ($submitLocal && !_stone_valid($moveStone, $cdhID));
-		my $cmdL = "$pigzBin -p $numCor $bdir/*\n";
-		if ($submitLocal){
-			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-			my ($dep,$qcmd) = qsubSystem($qsubDir."pigz1_GC.sh",$cmdL,$numCor3,int(20)."G","pigzGC","","",1,[],$QSBoptHR); 
-			$QSBoptHR->{tmpSpace} =$tmpSHDD;
-		} else {$cmd .= $cmdL;}
+		die "Can't find valid $moveStone\n"
+			if $submitLocal && !_stone_valid($moveStone, $cdhID);
+
 	}
-	if (!_stone_valid($moveStone, $cdhID)){
+	if ($submitLocal && (!_stone_valid($moveStone, $cdhID)
+			|| !-s "$OutD/$primaryClusterFNA" || !-s "$OutD/$primaryClusterCLS")) {
 		die "GC Files not found at final location $OutD; missing $moveStone\n";
 	}
 	
@@ -1245,39 +1404,30 @@ sub geneCatFlow($ $ $ $ ){
 	#calc gene matrix.. can as well be run later on finished file..
 	#requires genes2row file
 	if (!_stone_valid($matrixSton, $cdhID) && $doGeneMatrix){
-		my $numCorL = 4; 
-		my $geneMatSupplFlag = " -calcSupplCov "; if (!$CalcgGneMatSuppl){$geneMatSupplFlag="";}
+		my $numCorL = 4;
 		if ($submitLocal){die"Can;t find $OutD/$primaryClusterCLS" unless (-e "$OutD/$primaryClusterCLS");}
-		my $newMapp = ""; $newMapp = "-oldMapStyle" if ($oldNameFolders > 0);
-		my $cmd1 = "$rareBin geneMat -i $OutD/$primaryClusterCLS -t $numCorL -o $OutD/$countMatrixP $newMapp -map $mapF -refD $assDirs $geneMatSupplFlag -gz\n"; #add flag -useCoverage to get coverage estimates instead
-		#print "$cmd1\n";
-		my $cmd2 = "$rareBin geneMat -i $OutD/$primaryClusterCLS -t $numCorL -o $OutD/Mat.cov $newMapp -map $mapF -refD $assDirs $geneMatSupplFlag -useCoverage -gz\n\nrm $OutD/Mat.cov.genes2rows.txt"; #coverage mat
-		my $cmd3 = "$rareBin geneMat -i $OutD/$primaryClusterCLS -t $numCorL -o $OutD/Mat.med $newMapp -map $mapF -refD $assDirs $geneMatSupplFlag -useCovMedian -gz\nrm $OutD/Mat.med.genes2rows.txt"; #coverage mat
+		my @matrixCommands = _gene_matrix_commands($OutD, $assDirs, $numCorL);
+		my $doneCommand = _checkpoint_command($checkpointWriter, $matrixSton, $cdhID, 'gene-matrices',
+			"$OutD/$countMatrixF.gz", "$OutD/$countMatrixP.genes2rows.txt",
+			"$OutD/Mat.cov.mat.gz", "$OutD/Mat.med.mat.gz");
 		if ($submitLocal){
-			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-			my ($dep1,$qcmd1) = qsubSystem($qsubDir."genemat1.sh",$cmd1,$numCorL,int($totMem3)."G","GM1","","",1,[],$QSBoptHR);
-			my ($dep2,$qcmd2) = qsubSystem($qsubDir."genemat2.sh",$cmd2,$numCorL,int($totMem3)."G","GM2","","",1,[],$QSBoptHR);
-			my ($dep3,$qcmd3) = qsubSystem($qsubDir."genemat3.sh",$cmd3,$numCorL,int($totMem3)."G","GM3","","",1,[],$QSBoptHR);
-			$QSBoptHR->{tmpSpace} =$tmpSHDD;
-			my @matrix_jobs = ($dep1,$dep2,$dep3);
-			my ($done_dep,$done_cmd) = qsubSystem(
-				$qsubDir."genemat.done.sh", _checkpoint_command($checkpointWriter, $matrixSton, $cdhID, 'gene-matrices', "$OutD/$countMatrixF.gz", "$OutD/$countMatrixP.genes2rows.txt"), 1, "1G", "GMdone",
+			my $tmpSHDD = $QSBoptHR->{tmpSpace}; $QSBoptHR->{tmpSpace} = "0";
+			my @matrix_jobs;
+			for my $i (0 .. $#matrixCommands) {
+				my $job = $i + 1;
+				my ($dep, $qcmd) = qsubSystem($qsubDir."genemat$job.sh", $matrixCommands[$i],
+					$numCorL, int($totMem3)."G", "GM$job", "", "", 1, [], $QSBoptHR);
+				push @matrix_jobs, $dep;
+			}
+			$QSBoptHR->{tmpSpace} = $tmpSHDD;
+			my ($done_dep, $done_cmd) = qsubSystem(
+				$qsubDir."genemat.done.sh", $doneCommand, 1, "1G", "GMdone",
 				join(";", @matrix_jobs), "", 1, [], $QSBoptHR
 			);
 			@matDeps = ($done_dep);
-			#qsubSystemJobAlive( [$dep1,$dep2,$dep3],$QSBoptHR ); 
-			#systemW $cmd;$cmd = "";
 		} else {
-			$cmd .= $cmd1 . $cmd2 . $cmd3 . "\n" . _checkpoint_command($checkpointWriter, $matrixSton, $cdhID, 'gene-matrices', "$OutD/$countMatrixF.gz", "$OutD/$countMatrixP.genes2rows.txt");
+			$cmd .= join("\n", @matrixCommands, $doneCommand);
 		}
-
-		#die $cmd;
-		#$cmd .= "wait\n";
-		#$cmd .= "$pigzBin -p $numCor $OutD/Matrix.mat\n";
-		#$cmd .= "$pigzBin -p $numCor $OutD/Mat.cov* \n";
-		#$cmd .= "$pigzBin -p $numCor $OutD/Mat.med* \n";
-		
-		#die "Can't find $matrixSton\n" if ($submitLocal && !-e $matrixSton);
 	}
 
 
@@ -1285,7 +1435,8 @@ sub geneCatFlow($ $ $ $ ){
 	die "Matrices were not created or validated, $matrixSton\n" if ($submitLocal && !_stone_valid($matrixSton, $cdhID));
 	#check matrix..
 	my $matrixFile = "$OutD/$countMatrixF.gz";
-	my $matrixSampleCountKnown = -s $matrixFile ? 1 : 0;
+	my $matrixSampleCountKnown =
+		_stone_valid($matrixSton, $cdhID) && -s $matrixFile ? 1 : 0;
 	my $matrixSampleCount;
 	if ($matrixSampleCountKnown) {
 		$matrixSampleCount = _matrix_sample_count($matrixFile);
@@ -1303,7 +1454,7 @@ sub geneCatFlow($ $ $ $ ){
 
 	#get protein sequences for each gene & rewrite seq names to numbers
 	unless (-e "$OutD/compl.incompl.$cdhID.prot.faa" && _stone_valid($protStone, $cdhID)){
-		$cmd .= "perl $selfScript -mode protExtract -tmp $tmpDir -MGset $useGTDBmg -c $numCor3 -clusterID $cdhID -map \"?\" -o $OutD -extraGenesAA \"$extraRdsFAA\" -oldStyleFolders $oldNameFolders\n";
+		$cmd .= "$GCscr -mode protExtract -tmp $tmpDir -MGset $useGTDBmg -c $numCor3 -clusterID $cdhID -map \"?\" -o $OutD -extraGenesAA \"$extraRdsFAA\" -oldStyleFolders $oldNameFolders\n";
 		$cmd .= _checkpoint_command($checkpointWriter, $protStone, $cdhID, 'extract-proteins', "$OutD/compl.incompl.$cdhID.prot.faa");
 		#die "$cmd\n\n";
 		if ($submitLocal){
@@ -1317,22 +1468,30 @@ sub geneCatFlow($ $ $ $ ){
 	}
 	print "Waiting for protein extraction..\n";
 	qsubSystemJobAlive( \@matDeps,$QSBoptHR ); 
-	die "Prot extraction unsuccessful\n" unless (_stone_valid($protStone, $cdhID) && -e "$OutD/compl.incompl.$cdhID.prot.faa");
+	die "Prot extraction unsuccessful\n"
+		if $submitLocal && !(_stone_valid($protStone, $cdhID) && -e "$OutD/compl.incompl.$cdhID.prot.faa");
+	# Protein extraction rewrites both published core files to numeric identifiers.
+	my $publishedCommand = _checkpoint_command($checkpointWriter, $moveStone, $cdhID,
+		'publish-catalog', "$OutD/$primaryClusterFNA", "$OutD/$primaryClusterCLS");
+	if ($submitLocal) { systemW $publishedCommand; } else { $cmd .= $publishedCommand; }
 	#die;
 	
 	#now decluter based on proteins.
 	if (!$matrixSampleCountKnown && !_stone_valid($declStone, $cdhID) && $doDecluter) {
 		my $localExe = 1;
-		$cmd .= 'matrix_sample_count=$(' . _shell_quote($pigzBin) . ' -dc -- ' . _shell_quote($matrixFile)
-			. q{ | awk -F '\t' 'NR == 1 { print NF - 1; exit }')} . "\n";
+		# awk stops after the header, so pigz is killed by SIGPIPE. That is not an
+		# input failure, but "set -eo pipefail" in the submitted script would treat
+		# it as one, so absorb pigz's status before the pipe.
+		$cmd .= 'matrix_sample_count=$( { ' . $pigzBin . ' -dc -- ' . _shell_quote($matrixFile)
+			. ' || true; } | ' . $awkBin . q! -F '\t' 'NR == 1 { print NF - 1; exit }' )! . "\n";
 		$cmd .= "case \"\$matrix_sample_count\" in ''|*[!0-9]*) echo 'Cannot determine gene-matrix sample count' >&2; exit 1;; esac\n";
 		$cmd .= "if [ \"\$matrix_sample_count\" -gt 2 ]; then\n";
-		$cmd .= "  $decluterGC $OutD $tmpDir $numCor $localExe $totMem3 $declStone\n";
+		$cmd .= "  $decluterGC $OutD $tmpDir $numCor $localExe $totMem3 $declStone $cdhID\n";
 		$cmd .= "else\n  " . _checkpoint_command($checkpointWriter, $declStone, $cdhID, 'declutter-skipped-low-sample-count');
 		$cmd .= "fi\n";
 	} elsif ($matrixSampleCount > 2 && !_stone_valid($declStone, $cdhID) && $doDecluter){
 		my $localExe=1;$localExe=0 if ($submitLocal);
-		$cmd .= "$decluterGC $OutD $tmpDir $numCor $localExe $totMem3 $declStone\n";
+		$cmd .= "$decluterGC $OutD $tmpDir $numCor $localExe $totMem3 $declStone $cdhID\n";
 		#$cmd .= "touch $declStone\n";
 		if ($submitLocal){systemW $cmd;		$cmd = "";}
 		#$GCd/decluter/declut.stone
@@ -1347,15 +1506,16 @@ sub geneCatFlow($ $ $ $ ){
 	#get 100 marker genes
 	my $depExtr = "";
 	#single cores...
-	if ($submitLocal && !_stone_valid($FMGstone, $cdhID)){
+	if (!_stone_valid($FMGstone, $cdhID)){
 		$cmd .= "#get marker genes and create matrices for these\n";
-		$cmd .= "$extre100Scr $OutD $tmpDir/FMG1/\n";
+		$cmd .= "$extre100Scr $OutD $tmpDir/FMG1/ $cdhID\n";
 		$cmd .= _checkpoint_command($checkpointWriter, $FMGstone, $cdhID, 'extract-marker-genes');
-		#systemW $cmd;		$cmd = "";
-		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		my ($dep,$qcmd) = qsubSystem($qsubDir."GC_ExtrE100.sh",$cmd,1,int($totMem3*2)."G","GCe100","","",1,[],$QSBoptHR);
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;
-		$depExtr = $dep; $cmd = "";
+		if ($submitLocal) {
+			my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0";
+			my ($dep,$qcmd) = qsubSystem($qsubDir."GC_ExtrE100.sh",$cmd,1,int($totMem3*2)."G","GCe100","","",1,[],$QSBoptHR);
+			$QSBoptHR->{tmpSpace} =$tmpSHDD;
+			$depExtr = $dep; $cmd = "";
+		}
 	}
 	
 	#start LCA for marker genes..
@@ -1382,7 +1542,6 @@ sub geneCatFlow($ $ $ $ ){
 		my $siScr = getProgPaths("specIGC_scr");
 		$cmd .= "$siScr -GCd $OutD -cores $numCor3 -tmp $tmpDir/SI/ -MGset $useGTDBmg \n\n";
 
-		#$cmd .= "$selfScript -GCd $OutD -m specI -MGset $useGTDBmg -c $numCor3\n"; #-o $OutD 
 		$cmd .= _checkpoint_command($checkpointWriter, $SIstone, $cdhID, 'species-taxonomy');
 		if ($submitLocal && $cmd ne ""){
 			print "submitting specI tax abundance..\n";
@@ -1395,7 +1554,8 @@ sub geneCatFlow($ $ $ $ ){
 	#and calculate kmer per gene
 	if (!_stone_valid($geneStatsStone, $cdhID)){
 		my $cmd1="";my $cmd3="";my $cmd2="";
-		$cmd1 = "$kmerScr $OutD $numCor\ngzip $OutD/$primaryClusterFNA.kmer\n" unless (-e "$OutD/$primaryClusterFNA.kmer.gz");
+		# kmerPerGene.pl writes no table when MATAF4 did not compute per-gene k-mers
+		$cmd1 = "$kmerScr $OutD $numCor $cdhID\nif [ -e $OutD/$primaryClusterFNA.kmer ]; then $pigzBin $OutD/$primaryClusterFNA.kmer; fi\n" unless (-e "$OutD/$primaryClusterFNA.kmer.gz");
 		$cmd2 = "$GCcalc $OutD/$primaryClusterFNA $OutD/compl.incompl.$cdhID.fna.GC \n" unless (-e "$OutD/compl.incompl.$cdhID.fna.GC");
 		$cmd3 = "$genelengthScript $OutD/$primaryClusterFNA $OutD/$primaryClusterFNA.length \n" unless (-e "$OutD/$primaryClusterFNA.length");
 		if ($submitLocal){
@@ -1418,7 +1578,7 @@ sub geneCatFlow($ $ $ $ ){
 	#MAG related..
 	unless (_stone_valid($krakStone, $cdhID)) {
 		my $stageCmd = "#taxonomic assignments of all genes via kraken\n";
-		$stageCmd .= "$selfScript -mode kraken -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID\n";
+		$stageCmd .= "$GCscr -mode kraken -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID\n";
 		$stageCmd .= _checkpoint_command($checkpointWriter, $krakStone, $cdhID, 'kraken-annotation');
 		if ($submitLocal) {
 			print "submitting kraken tax abundance..\n";
@@ -1431,12 +1591,22 @@ sub geneCatFlow($ $ $ $ ){
 	}
 	
 	#functional annotations.. just run some by default
-	unless (_stone_valid($funcStone, $cdhID)) {
+	#a changed database list, aligner or cutoff invalidates the functional stone (per-database products are checked in geneCatFunc)
+	#legacy empty stones carry no parameters, so they no longer count as valid; -redoFunc 1 forces the stage
+	#the subprocess gets the scheduler and tmp dirs of this run, so its split/chunk dirs are the ones this run manages
+	my $funcFwd = " -tmp " . _shell_quote($tmpDir) . " -glbTmp " . _shell_quote($GLBtmp);
+	$funcFwd .= " -submSystem $submSys" if ($submSys ne "");
+	#a stage whose jobs from an earlier run are still queued or running is not submitted again (also not with -redoFunc)
+	my $funcBusy = _stageInFlight('FuncAssign');
+	my $emapBusy = _stageInFlight('FuncEMAP');
+	print "$funcBusy\n" if ($funcBusy ne "");
+	print "$emapBusy\n" if ($emapBusy ne "");
+	if ($funcBusy eq "" && ($redoFunc || !(-s $funcStone && checkpoint_valid($funcStone, parameters => { cluster_id => $cdhID, _funcStoneParams() })))) {
 		my $stageCmd = "#functional assignments of all genes via diamond\n";
-		$stageCmd .= "$selfScript -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner \n";
-		$stageCmd .= _checkpoint_command($checkpointWriter, $funcStone, $cdhID, 'functional-annotation');
+		$stageCmd .= "$GCscr -mode FuncAssign -MGset $useGTDBmg -o $OutD -c $numCor3 -clusterID $cdhID -functDB $curDB_o -functAligner $funcAligner -fastaSplit $fastaSplits -fastaSplitBigDB $fastaSplitsBig -FuncMinBitSc $minBitSc -FuncMinAlLeng $minAlLeng -FuncMinPercSbjCov $minPercSbjCov -FuncMinPercQueryCov $minPercQueryCov -FuncMinPerID $minPerID -FuncMinEVal $minEVal -redoFunc $redoFunc$funcFwd -stone $funcStone\n";
 		if ($submitLocal) {
 			print "submitting diamond func abundance..\n";
+			$QSBoptHR->{useLongQueue} = 1; #the controller supervises the stage's jobs until all finished
 			my ($dep,$qcmd) = qsubSystem($qsubDir."func_GC.sh",$stageCmd,1,int($totMem3)."G","funcGC","","",1,[],$QSBoptHR);
 		} else {
 			$cmd .= $stageCmd;
@@ -1444,12 +1614,20 @@ sub geneCatFlow($ $ $ $ ){
 	}
 
 
-	unless (_stone_valid($emapStone, $cdhID)) {
+	#annotations from other eggNOG-mapper data (eggNOGm_path_DB changed, e.g. eggNOG 5 -> 7) are redone
+	my $emapDataChanged = _emapDataChanged($GCdir);
+	print "eggNOG-mapper data (eggNOGm_path_DB) changed since the catalog was annotated: re-annotating\n"
+		if ($emapDataChanged && $emapBusy eq "");
+	if ($emapBusy eq "" && ($emapDataChanged || !(-s $emapStone && _stone_valid($emapStone, $cdhID)))) { #legacy empty stone: rerun once to build the KO/module tables
+		retry_unlink($emapStone, label => 'invalidate stale eggNOG checkpoint')
+			if -e $emapStone;
 		my $stageCmd = "#functional assignments via eggNOGmapper\n";
-		#-c $numCor3 .. use max 6 cores for this due to single core emapper final step
-		$stageCmd .= "$selfScript -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 6 -clusterID $cdhID -stone $emapStone \n";
+		#-c: cores (and emapper --cpu) per chunk job. eggNOG-mapper v3 also annotates in parallel (2.x had a single-core
+		#final step); DIAMOND peak ~ 4 x 6 + 23 GB / 2 + 0.5 GB per thread = 41.5 GB with 12 threads, within the 55 GB jobs
+		$stageCmd .= "$GCscr -mode FuncEMAP -MGset $useGTDBmg -o $OutD -c 12 -clusterID $cdhID$funcFwd -stone $emapStone \n";
 		if ($submitLocal) {
 			print "submitting eggNOGmapper func abundance..\n";
+			$QSBoptHR->{useLongQueue} = 1; #the controller supervises the stage's jobs until all finished
 			my ($dep,$qcmd) = qsubSystem($qsubDir."emap_GC.sh",$stageCmd,1,int($totMem3)."G","emapGC","","",1,[],$QSBoptHR);
 		} else {
 			$cmd .= $stageCmd;
@@ -1460,21 +1638,13 @@ sub geneCatFlow($ $ $ $ ){
 	
 	#die;
 
-	#$cmd .= "$selfScript -mode kaiju -MGset $useGTDBmg -o $OutD\n"; #kaiju is too instable.. don't use
 	
-	#$cmd .= cleanUpGC($bdir,$OutD,$cdhID);
 	my $CANdep="";
 	if (!$doMags && !_stone_valid($canopyStone, $cdhID)) {
 		_touch_file($canopyStone, $cdhID, 'canopy-disabled');
-	} elsif ($matrixSampleCount < $minCanopySamples && !_stone_valid($canopyStone, $cdhID)) {
-		my $skip_dir = getCanopyDir($OutD);
-		make_path($skip_dir) unless -d $skip_dir;
-		my $skip_file = "$skip_dir/SKIPPED.txt";
-		open my $skip_fh, '>', $skip_file or die "Cannot write $skip_file: $!\n";
-		print {$skip_fh} "Canopy clustering skipped: the gene matrix has $matrixSampleCount sample columns; at least $minCanopySamples are required.\n"
-			or die "Cannot write $skip_file: $!\n";
-		close $skip_fh or die "Cannot close $skip_file: $!\n";
-		_touch_file($canopyStone, $cdhID, 'canopy-skipped-low-sample-count', $skip_file);
+	} elsif ($matrixSampleCountKnown && $matrixSampleCount < $minCanopySamples
+			&& !_stone_valid($canopyStone, $cdhID)) {
+		$CANdep = canopyCluster($GCdir, "$tmpDir/cano/", $numCor, $canopyStone);
 		printL "Skipping Canopy clustering for $matrixSampleCount matrix samples (minimum $minCanopySamples)\n";
 	} elsif ($doMags && !_stone_valid($canopyStone, $cdhID)) {
 		if ($submitLocal) {
@@ -1482,8 +1652,7 @@ sub geneCatFlow($ $ $ $ ){
 			$CANdep = canopyCluster($GCdir,"$tmpDir/cano/",$numCor,$canopyStone);
 		} else {
 			$cmd .= "#Canopy clustering\n";
-			$cmd .= "$GCscr -mode CANOPY -o $OutD -c $numCor -tmp $tmpDir/MGS -clusterID $cdhID\n";
-			$cmd .= _checkpoint_command($checkpointWriter, $canopyStone, $cdhID, 'canopy-clustering');
+			$cmd .= "$GCscr -mode CANOPY -o $OutD -c $numCor -tmp $tmpDir/MGS -clusterID $cdhID -canopyAutoCorr $canopyAutoCorr -stone $canopyStone\n";
 		}
 		#this needs to call the canopy function here, in order to get the correct dependency for the canopy call..
 		#my ($dep,$qcmd) = qsubSystem($qsubDir."canopy_GC.sh",$cmd,$numCor,int($totMem3/$numCor)."G","canGC","","",1,[],$QSBoptHR);
@@ -1494,8 +1663,7 @@ sub geneCatFlow($ $ $ $ ){
 	#$cmd .= "#MetaBat2 single sample (sample group) MAGs\n";
 	#cross compare MB2, extract more genes via canopy, fix via correlation stats
 	$cmd .= "\n\n";
-	#$cmd .= "rm -f $bdir/SAM/compl.$cdhID.fna.b* $bdir/SAM/compl.$cdhID.fna$mini2IdxFileSuffix\n";
-	$cmd .= "echo \"cleaning up B0 tmp dir\"\nrm -rf $bdir\n"; #not really needed any longer
+	$cmd .= "echo \"cleaning up B0 tmp dir\"\n$rmBin -rf $bdir\n"; #not really needed any longer
 	#die $cmd;
 	#single cores...
 	if ($submitLocal){systemW $cmd;		$cmd = "";}
@@ -1507,15 +1675,40 @@ sub geneCatFlow($ $ $ $ ){
 	my $MGSoutD = "$OutD/Bin_${binnerShrt}/"; 
 	#if ($submitLocal){systemW $cmd;		$cmd = "";}
 	if (-e $qsubDir."MGS.sh"){
-		my $tmpS = `grep -v '^#' $qsubDir/MGS.sh`;
-		if ($tmpS =~ m/-outD\s+(\S+)/){
-			$MGSoutD = $1;
+		my $tmpS = "";
+		if (open my $old_mgs_fh, '<', $qsubDir."MGS.sh") {
+			$tmpS = join '', grep { !/^\s*#/ } <$old_mgs_fh>;
+			warn "Cannot close prior MGS submission script $qsubDir"."MGS.sh: $!\n"
+				unless close $old_mgs_fh;
+		} else {
+			warn "Cannot inspect prior MGS submission script $qsubDir"."MGS.sh: $!; using the current output directory\n";
+		}
+		my $oldOutD = _command_option_value($tmpS, '-outD');
+		if (defined $oldOutD) {
+			my $oldBinner = _command_option_value($tmpS, '-binSpeciesMG');
+			my $oldGCd = _command_option_value($tmpS, '-GCd');
+			my $oldClusterID = _command_option_value($tmpS, '-clusterID');
+			my $oldGCdIdentity = _catalog_path_for_compare($oldGCd);
+			my $currentGCdIdentity = _catalog_path_for_compare($OutD);
+			if (defined($oldBinner) && $oldBinner =~ /^\d+$/ && $oldBinner == $binSpeciesMG
+					&& defined($oldGCdIdentity) && defined($currentGCdIdentity)
+					&& $oldGCdIdentity eq $currentGCdIdentity
+					&& defined($oldClusterID) && $oldClusterID =~ /^\d+$/ && $oldClusterID == $cdhID) {
+				$MGSoutD = $oldOutD;
+			} else {
+				warn "Ignoring stale MGS output directory $oldOutD from a command with a different binner, catalogue, or cluster identity\n";
+			}
 		}
 	}
-	my $canoStr = "-canopies $canopyExpectedDir/clusters.txt ";
-	$canoStr = "" if ($matrixSampleCount < $minCanopySamples);
+	my $canoStr = "-canopies " . _shell_quote("$canopyExpectedDir/clusters.txt") . " ";
+	$canoStr = "" if ($matrixSampleCountKnown && $matrixSampleCount < $minCanopySamples);
 	#$cmd .= "#wait for eggnogmapper to finish\nuntil [ -f $emapStone ];do sleep 5; done\n" unless (-e $emapStone);
-	$cmd .= "$magPi -mem 150 -GCd $OutD -tmp $tmpDir/MAGs/ -bottleneckCores $numCor $canoStr -strains $doStrains -useCheckM2 $useCheckM2 -useCheckM1 $useCheckM1 -wait4stone $emapStone -binSpeciesMG $binSpeciesMG -ignoreIncompleteMAGs $ignoreIncompleteMAGs -MGset $useGTDBmg -clusterID $cdhID -outD $MGSoutD \n";
+	$cmd .= "$magPi -mem 150 -GCd " . _shell_quote($OutD)
+		. " -tmp " . _shell_quote("$tmpDir/MAGs/")
+		. " -bottleneckCores $numCor $canoStr-strains $doStrains -SNPcaller $SNPcaller"
+		. " -useCheckM2 $useCheckM2 -useCheckM1 $useCheckM1 -wait4stone " . _shell_quote($emapStone)
+		. " -binSpeciesMG $binSpeciesMG -ignoreIncompleteMAGs $ignoreIncompleteMAGs"
+		. " -MGset $useGTDBmg -clusterID $cdhID -outD " . _shell_quote($MGSoutD) . "\n";
 
 	if ($submitLocal && $cmd ne ""){
 		print "Submitting downstream MGS workflow\n";
@@ -1541,7 +1734,9 @@ sub geneCatFlow($ $ $ $ ){
 	#$cmd.= "$bgzipBin $OutD/Matrix.mat\n" ;
 	#$cmd.= "$tabixBin -S 1 -s 1 $OutD/Matrix.mat.gz\n";
 	#die $cmd."\n";
-	$cmd .= "rm -f -r $tmpDir\n";
+	#with -submitLocal 0 the functional stages above only submitted their jobs, which may still be queued:
+	#keep their catalog split and chunk outputs (their own final jobs remove them)
+	$cmd .= "if [ -d $tmpDir ]; then find $tmpDir -mindepth 1 -maxdepth 1 ! -name 'funcSplit_*' ! -name 'GCanno_*' ! -name 'eggNOGmapper_*' -exec $rmBin -rf {} +; fi\n";
 	
 	$cmd .= "\n\necho \"=======================================\"\necho \"Finished Gene Catalog script\"\necho \"=======================================\"\n\n";
 	my $jobName = "CD_$nm";
@@ -1578,10 +1773,12 @@ sub ntMatchGC{
 	my $cmd = "";
 	$cmd .= "$tmpCmd\n";
 	my $mini2Base = "$mini2Bin -2 -a -t $numCor --secondary=no -Y -x asm20 "; #--sam-hit-only
-	$cmd .= "$mini2Base $bwtIdxT $geneFNA | $bamfilter $pctID $pctCov $mapQual | $smtBin view -b1 -@ $numCor -F 4 - > $iTO\n";
+	#samtools compresses alongside minimap2 in the same $numCor-core job: a quarter of the cores
+	my $smtCores = int($numCor / 4); $smtCores = 1 if ($smtCores < 1);
+	$cmd .= "$mini2Base $bwtIdxT $geneFNA | $bamfilter $pctID $pctCov $mapQual | $smtBin view -b1 -@ $smtCores -F 4 - > $iTO\n";
 	#die "$cmd\n\n";
 	#convert bam to txt file
-	$cmd .= "$smtBin view $iTO | cut -f1,3 > $iTO2 \n";
+	$cmd .= "$smtBin view $iTO | $cutBin -f1,3 > $iTO2 \n";
 
 	$cmd .= "$rareBin sumMat -i $GCdir/$countMatrixF.gz -o $out.mat -t $numCor -refD $iTO2 \n"; #$rtkFunDelims
 	my ($dep,$qcmd) = qsubSystem($qsubDir."NucMap.sh",$cmd,$numCor,int($totMem5)."G","IDXmGC","","",1,[],$QSBoptHR);
@@ -1605,7 +1802,6 @@ sub addingSmpls{
 	my $combinedMembersSkipped = 0;
 	my $emptySamplesSkipped = 0;
 	my $processedAssemblies = 0;
-	my @OCOMPL = (); my @O3P=(); my @O5P = (); my @OINC = (); #these arrays store complete & incomplete fasta seqs
 	open QLOG, '>', "$qsubDir/GeneCompleteness.txt.$batch"
 		or die "Cannot open $qsubDir/GeneCompleteness.txt.$batch: $!\n";
 	#print QLOG "Smpl\tComplete\t3'_compl\t5'_compl\tIncomplete\tTotalGenes\n";
@@ -1814,12 +2010,7 @@ sub addingSmpls{
 		}
 		print QLOG "$SmplName\t$prevSmpID\t$scnts[0]\t$scnts[1]\t$scnts[2]\t$scnts[3]\t$totCnt\t$tooShrtCnt\n";
 		$cnt++;
-		if ( 0 && $cnt % 10 == 0) {#write out & submit cdhit job #not used any longer!
-			my $bdir = $GCdir."B$bucketCnt/";
-			writeBucket(\@OCOMPL,\@O3P,\@O5P,\@OINC,$bdir,$bucketCnt);
-			$bucketCnt++;push(@bucketDirs,$bdir);
-			@OCOMPL=();@O3P=();@O5P=();@OINC=();#clean old seqs
-		}
+
 	}
 	print "Batch $batch collation summary: $processedAssemblies assembly group(s) processed";
 	print ", $combinedMembersSkipped non-final combined-assembly member(s) skipped"
@@ -1887,7 +2078,6 @@ sub addingSmpls{
 		if @skippedSmpls;
 
 	#die();
-	#writeBucket(\@OCOMPL,\@O3P,\@O5P,\@OINC,$bdir,$bucketCnt);
 	#write marker genes separate
 	foreach my $cog (keys (%allFMGs)){
 		make_path("$bdir/$COGdir/") unless -d "$bdir/$COGdir/";
@@ -1912,14 +2102,245 @@ sub addingSmpls{
 		my $dest = $destFiles[$i];
 		my $lockFile = $curTransfer.".lock";
 		my $source = "$curTransfer.$batch";
+		# A resubmitted batch must not append the same genes twice.
+		my $marker = "$source.appended";
+		if (-e $marker) {
+			print "$source was already appended to $dest by an earlier attempt\n";
+			retry_unlink($source, label => 'remove already-transferred gene-catalog batch');
+			next;
+		}
 		print "Appending $source to $dest\n";
-		_append_file_locked($source, $dest, $lockFile);
+		_append_file_locked($source, $dest, $lockFile, $marker);
 	}
 	return 0;
 }
 
+sub _reset_collation_outputs {
+	my ($bucket_dir, $temporary_dir, $log_dir, $marker_dir) = @_;
+	_safe_reset_dir($bucket_dir, 'gene-catalog collation');
+	_safe_reset_dir(File::Spec->catdir($temporary_dir, $marker_dir), 'marker collation');
+	for my $kind (qw(compl incompl 5Pcompl 3Pcompl)) {
+		retry_unlink(File::Spec->catfile($temporary_dir, "$kind.fna.gz.$_"),
+			label => 'remove interrupted collation lock') for qw(lock lock.break);
+	}
+	if (opendir my $scratch, $temporary_dir) {
+		my @markers = grep { /^(?:compl|incompl|5Pcompl|3Pcompl)\.fna\.gz\.\d+\.appended$/ } readdir $scratch;
+		closedir $scratch;
+		retry_unlink(File::Spec->catfile($temporary_dir, $_), label => 'remove stale append marker')
+			for @markers;
+	}
+	opendir my $logs, $log_dir or die "Cannot open $log_dir: $!\n";
+	my @obsolete = grep { /^(?:GeneCompleteness\.txt\.\d+|Missed_samples\.txt(?:\.\d+)?)$/ } readdir $logs;
+	closedir $logs or die "Cannot close $log_dir: $!\n";
+	retry_unlink(File::Spec->catfile($log_dir, $_), label => 'remove interrupted batch report') for @obsolete;
+}
+
+# ---- supervision of the parallel sample-collation (subprepSmpls) batches ----
+# The controller itself watches every batch job instead of submitting a
+# dependent "check" job: a dependent job with afterok never starts when a single
+# batch fails, silently blocking the whole pipeline. Each batch job writes
+# geneCat.subprepSmpls.batch-N.heartbeat.tsv (status=completed on a clean exit,
+# see the END block) and .failure.tsv (with the die message) into $qsubDir, so
+# those records - not the scheduler's exit code - decide success. A job that
+# leaves the queue without a completed record was killed (OOM, time limit, node
+# failure) and is resubmitted, with more memory when it looks like an OOM kill.
+
+sub _prep_record_paths {
+	my ($batch) = @_;
+	my $tag = "geneCat.subprepSmpls.batch-$batch";
+	return ("$qsubDir/$tag.heartbeat.tsv", "$qsubDir/$tag.failure.tsv");
+}
+
+sub _prep_batch_range {
+	my ($batch, $total, $batches) = @_;
+	# Multiply before dividing: e.g. 2008/11*11 evaluates to 2007.99.. and
+	# int() then silently dropped the last sample.
+	return (int($total * $batch / $batches), int($total * (1 + $batch) / $batches));
+}
+
+sub _tail_lines {
+	my ($path, $count) = @_;
+	return () unless defined($path) && -s $path;
+	open my $in, '<', $path or return ();
+	my @ring;
+	while (my $line = <$in>) {
+		$line =~ s/[\r\n]+\z//;
+		next unless $line =~ /\S/;
+		$line = substr($line, 0, 300) . ' [...]' if length($line) > 300;
+		push @ring, $line;
+		shift @ring if @ring > $count;
+	}
+	close $in;
+	return @ring;
+}
+
+sub _prep_job_accounting {
+	my ($job_id, $optHR) = @_;
+	return {} unless ($optHR->{qmode} // '') eq 'slurm' && defined($job_id) && $job_id =~ /^\d+$/;
+	my $command = "sacct -X -n -P -j $job_id --format=State,ExitCode,Elapsed";
+	my ($output, $status);
+	if ($optHR->{jobAccountingRunner}) {
+		($output, $status) = $optHR->{jobAccountingRunner}->($command);
+	} else {
+		$output = `$command 2>&1`;
+		$status = $?;
+	}
+	return {} if $status || !defined($output);
+	my ($line) = grep { /\S/ } split /\n/, $output;
+	return {} unless defined $line;
+	my ($state, $exit, $elapsed) = map { defined $_ ? $_ : '' } split /\|/, $line, 3;
+	$state =~ s/^\s+//; $state =~ s/[\s+].*$//;
+	$state = uc $state;
+	return {
+		state => $state, exit => $exit, elapsed => $elapsed,
+		summary => "scheduler state $state, exit code $exit, run time $elapsed",
+	};
+}
+
+# Decide whether a batch whose job left the queue succeeded. Returns a hash:
+# ok, or reason/retryable/oom/scheduler/output for the report.
+sub _prep_batch_outcome {
+	my ($batch, $job_id, $script, %o) = @_;
+	my ($heartbeat_file, $failure_file) = _prep_record_paths($batch);
+	my ($heartbeat, $failure);
+	my $tries = defined $o{settle_tries} ? $o{settle_tries} : 4;
+	for my $try (0 .. $tries) {
+		$heartbeat = read_workflow_record($heartbeat_file);
+		$failure = read_workflow_record($failure_file);
+		last if $failure || ($heartbeat && $heartbeat->{status} eq 'completed');
+		# Shared filesystems can show a finished job's records a few seconds late.
+		sleep(defined $o{settle_seconds} ? $o{settle_seconds} : 5) if $try < $tries;
+	}
+	return {ok => 1} if !$failure && $heartbeat && $heartbeat->{status} eq 'completed';
+
+	my %result = (ok => 0, retryable => 1, oom => 0);
+	if ($failure) {
+		$result{reason} = "batch reported failure in stage '" . ($failure->{stage} // '?') . "': "
+			. (length($failure->{reason} // '') ? $failure->{reason} : 'no reason recorded');
+		# Exit 33 = data problem found while collating (sample-name conflicts,
+		# marker-gene mismatches); another attempt would fail identically.
+		$result{retryable} = 0 if $result{reason} =~ /controller exit status 33\b/;
+	} elsif ($heartbeat) {
+		$result{reason} = "job left the queue while still in stage '" . ($heartbeat->{stage} // '?')
+			. "' with no completion record (last heartbeat "
+			. scalar(localtime($heartbeat->{timestamp} || 0))
+			. "); it was most likely killed by the scheduler (memory, time limit or node failure)";
+		$result{oom} = 1;
+	} else {
+		$result{reason} = "job left the queue without ever starting the batch (no heartbeat written)";
+	}
+	my $accounting = _prep_job_accounting($job_id, $o{opts});
+	if ($accounting->{state}) {
+		$result{scheduler} = $accounting->{summary};
+		$result{oom} = 1 if $accounting->{state} =~ /^OUT_OF_M/;
+		$result{oom} = 0 if $accounting->{state} =~ /^(?:COMPLETED|TIMEOUT|NODE_FAIL|CANCELLED)/;
+	}
+	my @output = _tail_lines("$script.etxt", 8);
+	@output = _tail_lines("$script.otxt", 5) unless @output;
+	$result{output} = \@output;
+	$result{output_file} = "$script.etxt";
+	return \%result;
+}
+
+sub _prep_failure_report {
+	my ($batch, $state, $describe) = @_;
+	my $last = $state->{failures}[-1];
+	my @lines = ("Sample preprocessing batch $batch failed"
+		. " after $state->{attempts} attempt(s)" . ($describe ? " ($describe)" : '') . ":");
+	push @lines, "  job(s): " . join(', ', @{$state->{jobs}});
+	push @lines, "  reason: $last->{reason}";
+	push @lines, "  scheduler: $last->{scheduler}" if $last->{scheduler};
+	if (@{$last->{output} || []}) {
+		push @lines, "  last lines of $last->{output_file}:";
+		push @lines, map { "    | $_" } @{$last->{output}};
+	}
+	push @lines, "  retrying was skipped: this is not a transient error" unless $last->{retryable};
+	return join("\n", @lines) . "\n";
+}
+
+# %o: count, memory (GB), max_attempts, rtag, describe(batch), submit(batch,
+# attempt, memory_gb) -> job id, cleanup(batch, attempt), outcome(batch, job,
+# attempt) -> hash, wait(\@jobs) -> \@still_queued, pause(seconds).
+sub _supervise_prep_batches {
+	my (%o) = @_;
+	my $max_attempts = $o{max_attempts} || 3;
+	my $rtag = defined $o{rtag} ? $o{rtag} : '';
+	my %state = map { $_ => {attempts => 0, memory => $o{memory}, jobs => [], failures => []} }
+		0 .. $o{count} - 1;
+	my (%pending, %running, %failed, %done, %retried);
+	$pending{$_} = 1 for keys %state;
+	my $announced_done = -1;
+	while (%pending || %running) {
+		for my $batch (sort { $a <=> $b } keys %pending) {
+			my $s = $state{$batch};
+			$o{cleanup}->($batch, $s->{attempts});
+			$s->{attempts}++;
+			my $job = $o{submit}->($batch, $s->{attempts}, $s->{memory});
+			if (defined($job) && $job ne '' && submissionDependencyDeferred($job)) {
+				$s->{attempts}--; # postponed by the concurrent-job limit, not an attempt
+				next;
+			}
+			delete $pending{$batch};
+			if (!defined($job) || $job eq '' || submissionDependencyFailed($job)) {
+				my $result = {ok => 0, retryable => 0, reason => 'the scheduler rejected the submission'};
+				push @{$s->{failures}}, $result;
+				$failed{$batch} = 1;
+				next;
+			}
+			push @{$s->{jobs}}, do { (my $bare = $job) =~ s/^\Q$rtag\E//; $bare };
+			$running{$batch} = $job;
+		}
+		unless (%running) {
+			$o{pause}->(30) if %pending; # only deferred submissions are left
+			next;
+		}
+		my $queued = $o{wait}->([values %running]) || [];
+		my %alive = map { $_ => 1 } @{$queued};
+		for my $batch (sort { $a <=> $b } keys %running) {
+			(my $bare = $running{$batch}) =~ s/^\Q$rtag\E//;
+			next if $alive{$bare};
+			my $job = delete $running{$batch};
+			my $s = $state{$batch};
+			my $result = $o{outcome}->($batch, $bare, $s->{attempts});
+			if ($result->{ok}) {
+				$done{$batch} = 1;
+				next;
+			}
+			push @{$s->{failures}}, $result;
+			warn "Preprocessing batch $batch (job $bare) failed on attempt $s->{attempts}/$max_attempts: $result->{reason}\n";
+			if ($result->{retryable} && $s->{attempts} < $max_attempts) {
+				if ($result->{oom}) {
+					my $more = int($s->{memory} * 1.5 + 0.5);
+					$more = $o{max_memory} if $o{max_memory} && $more > $o{max_memory};
+					warn "  raising the memory request for batch $batch from $s->{memory}G to ${more}G\n"
+						if $more != $s->{memory};
+					$s->{memory} = $more;
+				}
+				warn "  resubmitting batch $batch (attempt " . ($s->{attempts} + 1) . "/$max_attempts)\n";
+				$retried{$batch} = 1;
+				$pending{$batch} = 1;
+			} else {
+				$failed{$batch} = 1;
+			}
+		}
+		if (scalar(keys %done) != $announced_done) {
+			$announced_done = scalar keys %done;
+			print "Preprocessing progress: $announced_done/$o{count} batches finished, "
+				. scalar(keys %running) . " running/queued"
+				. (%pending ? ", " . scalar(keys %pending) . " awaiting resubmission" : '')
+				. (%failed ? ", " . scalar(keys %failed) . " failed" : '') . "\n";
+		}
+	}
+	return {
+		ok => !%failed,
+		failed => [sort { $a <=> $b } keys %failed],
+		retried => [sort { $a <=> $b } keys %retried],
+		state => \%state,
+	};
+}
+
 sub collateGenes(){
-	
+
 	
 	my $prepStone = "$stoneDir/GenesCollated.stone";
 	my $prep_valid = _stone_valid($prepStone, $cdhID);
@@ -1938,7 +2359,7 @@ sub collateGenes(){
 	foreach my $mm (@maps){
 		#system "cp $mm $qsubDir/map.$cntMaps.txt"; 
 		#print "envsubst < $mm  > $qsubDir/map.$cntMaps.txt\n";
-		systemW "envsubst < $mm > $qsubDir/map.$cntMaps.txt"
+		systemW "$envsubstBin < $mm > $qsubDir/map.$cntMaps.txt"
 			unless -s "$qsubDir/map.$cntMaps.txt";
 		push (@newMaps,"$qsubDir/map.$cntMaps.txt"); $cntMaps++;
 	}
@@ -1965,7 +2386,11 @@ sub collateGenes(){
 			if ($map{$smpl}{SupportReads} ne ""){
 				$dir2rd = "$GCdir$smpl/";	
 			} else {
-				die "Can;t find valid path for $smpl\n";
+				if (!$requireAllAssemblies) {
+					push @probSample, $smpl;
+					next;
+				}
+				die "Can't find valid path for $smpl\n";
 			}
 		} 
 		if (-e "$dir2rd/SMPL.empty"){print "Sample $smpl marked as emtpy\n";next;}
@@ -2026,37 +2451,74 @@ sub collateGenes(){
 	} else {	print "All required input files seem to be presents.\n"; }
 
 	if ($justCDhit == 0 || !$prep_valid){ #recreate input files..
+		_reset_collation_outputs($bdir, $tmpDir, $qsubDir, $COGdir);
 	
 		my $maxSmpls = scalar(@samples);
 		print "Preparing splitting preprocessing of $maxSmpls metagenomes in $batchNum batches.\n";
-		my $batch = 0; my @jobs;
+		my $batch = 0;
+		if (!$QSBoptHR->{doSubmit} && $batchNum > 1) {
+			die "Job submission is disabled, so the sample preprocessing batches cannot run.\n";
+		}
 		make_path("$tmpDir/$COGdir") unless -d "$tmpDir/$COGdir";
 		make_path("$qsubDir/preprocess/") unless -d "$qsubDir/preprocess/";
-		unlink "$prepStone.1" if -e "$prepStone.1";
-		for ( $batch = 0; $batch < $batchNum;$batch ++){
-			my $locTo = int($maxSmpls/$batchNum*(1+$batch));
-			my $locFrom = int($maxSmpls/$batchNum*($batch));
-			#print "$locFrom,$locTo\n";
-			  
-			my $cmd = "$selfScript -mode subprepSmpls -GCd $GCdir -map $mapF -tmp $tmpDir -SmplStart $locFrom -SmplStop $locTo -SmplBatch $batch -minGeneL $minGeneL -clusterID $cdhID -MGset $useGTDBmg -oldStyleFolders $oldNameFolders -requireAllAssemblies $requireAllAssemblies";
-			$cmd .= " -extraGenesNT \"$extraRdsFNA\"" if $batch == 0 && length $extraRdsFNA;
-			#die "$cmd\n$batchNum : $maxSmpls\n";
-			if ($batchNum == 1){
-				systemW $cmd."\n";
-			} else {
-				my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-				my $numCor = 3;
-				my ($jdep,$txtBSUB) = qsubSystem($qsubDir."/preprocess/Preprocess.$batch.sh",$cmd,$numCor,int(30)."G","PrPr$batch","","",1,[],$QSBoptHR);
-				push(@jobs,$jdep);
-				$QSBoptHR->{tmpSpace} =$tmpSHDD;
+		my $batchCommand = sub {
+			my ($b) = @_;
+			my ($locFrom, $locTo) = _prep_batch_range($b, $maxSmpls, $batchNum);
+			my $cmd = "$GCscr -mode subprepSmpls -GCd $GCdir -map $mapF -tmp $tmpDir -SmplStart $locFrom -SmplStop $locTo -SmplBatch $b -minGeneL $minGeneL -clusterID $cdhID -MGset $useGTDBmg -oldStyleFolders $oldNameFolders -requireAllAssemblies $requireAllAssemblies";
+			$cmd .= " -extraGenesNT \"$extraRdsFNA\"" if $b == 0 && length $extraRdsFNA;
+			return $cmd;
+		};
+		if ($batchNum == 1){
+			systemW $batchCommand->(0)."\n";
+		} else {
+			my $prepMemGB = 30;
+			my $prepAttempts = $ENV{GENECAT_PREP_ATTEMPTS} || 3;
+			my $scriptOf = sub { "$qsubDir/preprocess/Preprocess.$_[0].sh" };
+			my $supervision = _supervise_prep_batches(
+				count => $batchNum, memory => $prepMemGB, max_memory => 400,
+				max_attempts => $prepAttempts, rtag => $QSBoptHR->{rTag},
+				submit => sub {
+					my ($b, $attempt, $memGB) = @_;
+					my $tmpSHDD = $QSBoptHR->{tmpSpace}; $QSBoptHR->{tmpSpace} = "0";
+					my ($jdep) = qsubSystem($scriptOf->($b), $batchCommand->($b), 3,
+						int($memGB)."G", "PrPr$b", "", "", 1, [], $QSBoptHR);
+					$QSBoptHR->{tmpSpace} = $tmpSHDD;
+					return $jdep;
+				},
+				# Fresh records per attempt; keep the failed attempt's logs, which the
+				# scheduler script would otherwise delete on resubmission.
+				cleanup => sub {
+					my ($b, $attemptsSoFar) = @_;
+					retry_unlink($_, fatal => 0, label => 'clear preprocessing batch record')
+						for _prep_record_paths($b);
+					return unless $attemptsSoFar;
+					for my $ext (qw(etxt otxt)) {
+						my $log = $scriptOf->($b) . ".$ext";
+						rename $log, "$log.attempt$attemptsSoFar" if -e $log;
+					}
+				},
+				outcome => sub {
+					my ($b, $job) = @_;
+					return _prep_batch_outcome($b, $job, $scriptOf->($b), opts => $QSBoptHR);
+				},
+				wait => sub { qsubSystemJobAlive($_[0], $QSBoptHR, 0, -1, 300) },
+				pause => sub { sleep $_[0] },
+			);
+			if (@{$supervision->{failed}}) {
+				for my $b (@{$supervision->{failed}}) {
+					my ($locFrom, $locTo) = _prep_batch_range($b, $maxSmpls, $batchNum);
+					warn _prep_failure_report($b, $supervision->{state}{$b},
+						"samples " . ($locFrom + 1) . "-$locTo of $maxSmpls; script "
+						. $scriptOf->($b));
+				}
+				die "Sample preprocessing failed for " . scalar(@{$supervision->{failed}}) . " of $batchNum batch(es): "
+					. join(", ", @{$supervision->{failed}})
+					. ". Fix the reported cause and rerun geneCat; the collation restarts cleanly from the assemblies.\n";
 			}
-
-			# addingSmpls($locFrom,$locTo,$batch);  subprepSmpls
+			print "All $batchNum preprocessing batches finished"
+				. (@{$supervision->{retried}} ? " (batches needing a resubmission: "
+					. join(", ", @{$supervision->{retried}}) . ")" : "") . ".\n";
 		}
-		my $cmd2 = "touch $prepStone.1";
-		my ($jdep,$txtBSUB) = qsubSystem($qsubDir."Preprocess.check.sh",$cmd2,1,"1G","CheckPrPr",join(";",@jobs),"",1,[],$QSBoptHR);
-		qsubSystemJobAlive( [@jobs,$jdep],$QSBoptHR ); 
-		die "Something went wrong in the sample prep..\nCheck $qsubDir/Preprocess.*.sh\n" unless (-e "$prepStone.1");
 		_merge_missed_sample_files($qsubDir);
 
 		#die;
@@ -2079,14 +2541,14 @@ sub collateGenes(){
 				$outfile =~ s/\.\d+$//;
 				next if (-e "$bdir/$COGdir/$outfile");
 				#print "$bdir/$COGdir/$outfile\n";
-				systemW "cat $tmpDir/$COGdir/$outfile.* > $bdir/$COGdir/$outfile; rm -f $tmpDir/$COGdir/$outfile.* ";
+				systemW "$catBin $tmpDir/$COGdir/$outfile.* > $bdir/$COGdir/$outfile; $rmBin -f $tmpDir/$COGdir/$outfile.* ";
 			}
 		}
 		
 		open QLOG,">$qsubDir/GeneCompleteness.txt";
 		print QLOG "Smpl\tinternalID\tComplete\t3'_compl\t5'_compl\tIncomplete\tTotalGenes\tGenesTooShort\n";
 		close QLOG;
-		systemW "cat $qsubDir/GeneCompleteness.txt.* >> $qsubDir/GeneCompleteness.txt; rm $qsubDir/GeneCompleteness.txt.*";
+		systemW "$catBin $qsubDir/GeneCompleteness.txt.* >> $qsubDir/GeneCompleteness.txt; $rmBin $qsubDir/GeneCompleteness.txt.*";
 		print "Done concatenating\n";
 		
 		# B0 FASTA files are intentionally removed after catalog publication, so
@@ -2120,14 +2582,20 @@ sub krakenTax{
 	my $cmd = "";
 	my $krak1= 1;	if ($krk2Bin ne ""){ $krak1=0; }
 	#only configured for kraken2
-	$cmd .= "$krk2Bin --threads $NC --db $curDB $geneFNA  --confidence 0.0  | grep '^C' | cut -f2,3 > $outD/krak2.out\n";
+	my $awkBin = getProgPaths("awk");
+	$cmd .= "$krk2Bin --threads $NC --db " . _shell_quote($curDB) . ' ' . _shell_quote($geneFNA)
+		. ' --confidence 0.0 | ' . $awkBin . q! 'BEGIN { FS=OFS="\t" } $1 == "C" { print $2, $3 }' > !
+		. _shell_quote("$outD/krak2.out.part") . "\n";
 
 	#die "$cmd\n";
 	#for (my $j=0;$j< @thrs;$j++){
 	#	$cmd .= "$krkBin-filter --db $curDB  --threshold $thrs[$j] $tmpD/rawKrak.out | $krkBin-translate --mpa-format --db $curDB > $outD/krak_$thrs[$j]".".out\n";
 	#}
 	print "Starting kraken assignments of the gene catalog\n";
-	systemW $cmd unless (-e "$outD/krak2.out");
+	unless (-e "$outD/krak2.out") {
+		systemW $cmd;
+		retry_rename("$outD/krak2.out.part", "$outD/krak2.out", label => 'publish Kraken classifications');
+	}
 	my $krakTaxFile = "$outD/krak2.txt";
 	if (!-e $krakTaxFile || -M $krakTaxFile > -M "$outD/krak2.out"){
 		my %allTaxs; my %gene2tax;
@@ -2139,11 +2607,17 @@ sub krakenTax{
 			if grep { !/^\d+$/ } @tax_ids;
 		my @taxLvl = qw( d__ p__ c__ o__ f__ g__ s__);
 		my @allTs;
-		while (@tax_ids) {
-			my @batch = splice(@tax_ids, 0, 500);
-			$cmd = "$ete3taxid ".join(" ", @batch);
+		if (@tax_ids) {
+			# taxid2ranks.pl reads the lineages from the same Kraken2 database
+			# (taxo.k2d) that assigned the IDs; one call parses it once.
+			my $idFile = "$outD/krak2.taxids.tmp";
+			open my $idFH, '>', $idFile or die "Cannot write $idFile: $!\n";
+			print {$idFH} join("\n", sort { $a <=> $b } @tax_ids), "\n";
+			close $idFH or die "Cannot close $idFile: $!\n";
+			$cmd = "$ete3taxid -db " . _shell_quote($curDB) . " -in " . _shell_quote($idFile);
 			my $strings = `$cmd`;
 			die "Taxonomy expansion failed: $cmd\n" if $CHILD_ERROR != 0;
+			unlink $idFile;
 			push @allTs, split /\n/, $strings;
 		}
 		print "All kraken assignments are done\n";
@@ -2198,13 +2672,14 @@ sub announceGeneCat{
 		. "; scheduler=$QSBoptHR->{qmode}\n";
 	printL "Inputs: map=$mapF; samples=$numSmpls; marker set=$useGTDBmg\n";
 	printL "Paths: output=$GCdir; temporary=$tmpDir; log=$qsubDir/GeneCat.log\n";
-	printL "Clustering: identity=$cdhID%; minimum gene length=$minGeneL nt; binner=$binnerShrt\n";
+	printL "Clustering: identity=$cdhID%; shorter-gene coverage=$clusterCov; minimum gene length=$minGeneL nt; binner=$binnerShrt\n";
 	printL "Resources: main cores=$numCor; clustering cores=$numCor0; small-job cores=$numCor3; "
 		. "main memory=${totMem}G; small-job memory=${totMem3}G\n";
 	printL "Batches: $batchNum; require all assemblies=" . ($requireAllAssemblies ? "yes" : "no")
 		. "; gene matrix=" . ($doGeneMatrix ? "yes" : "no") . "\n";
 	printL "Downstream: quality=" . ($useCheckM2 ? "CheckM2" : "CheckM1")
 		. "; strains=" . ($doStrains ? "yes" : "no")
+		. "; SNP caller=$SNPcaller"
 		. "; Canopy minimum samples=$minCanopySamples\n";
 	printL "===================================\n";
 	
@@ -2220,12 +2695,12 @@ sub specITax{
 }
 sub kaijuTax{#different tax assignment for gene catalog
 	my ($GCd,$tmpD,$NC) = @_;
-	my $kaijD = getProgPaths("kaijuDir");
-	my $kaijBin = "$kaijD/./kaiju";
+	my $kaijBin = getProgPaths("kaiju");
+	my $kaijTaxNames = getProgPaths("kaiju_addTaxonNames");
 	my $KaDir = getProgPaths("Kaiju_path_DB");
 	my $outD = $GCd."/Anno/Tax/";
-	system "mkdir -p $outD" unless (-d $outD);
-	system "mkdir -p $tmpD" unless (-d $tmpD);
+	make_path($outD) unless -d $outD;
+	make_path($tmpD) unless -d $tmpD;
 	my @thrs = (0.01,0.02,0.04,0.06,0.1,0.2,0.3);
 	my $geneFNA = "$GCd/$primaryClusterFNA";
 	#die $curDB."\n";
@@ -2233,8 +2708,8 @@ sub kaijuTax{#different tax assignment for gene catalog
 	my $kaDB = "-t $KaDir/nodes.dmp -f $KaDir/kaiju_db.fmi";
 	my $cmd = "$kaijBin $kaDB -z $NC -i  $geneFNA -o $tmpD/rawKaiju.out\n";
 	$kaDB = "-t $KaDir/nodes.dmp -n $KaDir/names.dmp";
-	$cmd .= "$kaijD/./addTaxonNames $kaDB -i $tmpD/rawKaiju.out -o $tmpD/Kaiju1.anno -u -p \n";
-	$cmd .= "sort $tmpD/Kaiju1.anno > $outD/Kaiju.anno\n";
+	$cmd .= "$kaijTaxNames $kaDB -i $tmpD/rawKaiju.out -o $tmpD/Kaiju1.anno -u -p \n";
+	$cmd .= "$sortBin $tmpD/Kaiju1.anno > $outD/Kaiju.anno\n";
 	print "Starting kaiju assignments of the gene catalog\n";
 	systemW $cmd;
 	die "Kaiju completed without producing $outD/Kaiju.anno\n" unless -s "$outD/Kaiju.anno";
@@ -2290,7 +2765,7 @@ sub canopyCluster{
 		if ($canopyAutoCorr > 0){
 			$xtra .= " --sampleDistMatFile $oD/smpl_dist.mat --sampleDistLog $oD/autocorr.log --sampleMinDist $canopyAutoCorr ";
 		}
-		$cmd .= "rm -f $oD/SKIPPED.txt\n";
+		$cmd .= "$rmBin -f $oD/SKIPPED.txt\n";
 		$cmd .= "$canBin -i $matF.gz -o $oD/clusters.txt -c $oD/profiles.txt -p MGS $xtra --dont_use_mmap -n $NC --progress_stat_file $oD/progress.txt --profile_measure 75Q -b --stop_criteria 100000 --filter_max_top3_sample_contribution 0.7 --max_canopy_dist 0.1 --max_merge_dist 0.1 || exit \$?\n\n";
 	}
 	$cmd .= "if [ -s $oD/clusters.txt ] && [ -s $oD/profiles.txt ]; then\n";
@@ -2304,7 +2779,7 @@ sub canopyCluster{
 	$cmd .= "  echo 'Canopy produced only one of clusters.txt and profiles.txt' >&2\n  exit 1\n";
 	$cmd .= "else\n";
 	$cmd .= "  echo 'Canopy clustering completed but found no clusters' > $oD/SKIPPED.txt\n";
-	$cmd .= "  rm -f $oD/clusters.txt $oD/profiles.txt $oD/guideMGS.txt\n";
+	$cmd .= "  $rmBin -f $oD/clusters.txt $oD/profiles.txt $oD/guideMGS.txt\n";
 	$cmd .= "fi\n";
 	#deep canopy prep
 	if ($doDeepCanopy && !-e "$oD/deepClus_spea.txt"){
@@ -2341,65 +2816,32 @@ sub canopyCluster{
 	#exit(0);
 }
 
-sub nt2aa(){#takes gene cluster fna and collects respective AA from file
-#probably better done with my C program
-}
 
-sub cleanUpGC(){#not used any longer
-	my ($bdir,$fdir,$cdhID) = @_;
-}
 
 
 
 #simply rewrites original fasta names to counts used in my genecats
-sub rewriteFastaHdIdx{ # #replaces ">MM2__C122;_23" with number from gene catalog
-	my ($inf,$gene2num,$sep) = @_;
-	#my $sep="";
-	#$sep = $_[2] if (@_ >2);
-	#my %gene2num = %{$hr};
-	#print $gene2num{"A6M74__C100239_L=3213=_3"}."\n";
-	my $numHd =0;my $cnts=0;
-	my $check = 1;
-	print "Rewriting $inf into $inf.tmp to add numeric headers\n";
-	open I,"<$inf" or die "Can't open fasta file $inf\n"; 
-	open O,">$inf.tmp" or die "can't open tmp fasta out $inf.tmp\n";
-	while (my $l = <I>){
-		if ($check && $numHd > 100){ 
-			if ($cnts == $numHd){
-				print "Seems like $inf heads were already reformated to number sheme!\n";
-				 close I; close O; system "rm $inf.tmp"; return;
-			} else {
-				print "Rewriting fna ($inf) headers to numeric scheme\n";
-				$check =0 ;
-			}
+sub rewriteFastaHdIdx {
+	my ($inf, $gene2num, $sep) = @_;
+	my $temporary = "$inf.tmp";
+	open my $out, '>', $temporary or die "Cannot create $temporary: $!\n";
+	_for_each_fasta_record($inf, qr/\s/, sub {
+		my ($name, $sequence) = @_;
+		my @parts = split /\Q$sep\E/, $name, 2;
+		my $ids = @parts == 2 ? $gene2num->{$parts[0]}{$parts[1]}
+			: $gene2num->{xtraSmpls}{$name};
+		$ids = [$name] if !defined($ids) && $name =~ /^\d+$/;
+		die "Cannot identify gene '$name' in the gene index while rewriting $inf\n"
+			unless ref($ids) eq 'ARRAY' && @$ids;
+		for my $id (@$ids) {
+			print {$out} ">$id\n$sequence\n" or die "Cannot write $temporary: $!\n";
 		}
-		
-		if ($l =~ m/^>/){
-			$cnts++;
-			#/\x00/
-		#print "$numHd  $cnts \n";
-			chomp $l;
-			my $name = substr($l,1); $name =~ s/\s+$//; #remove trailing spaces..
-			my @spl = split /$sep/,$name;
-			if ($name =~ m/^\d+$/ && (@spl < 2 || !exists($gene2num->{$spl[0]}{$spl[1]}))){ #$name})){
-				$numHd++;
-				print O ">".$name."\n";
-			} elsif (@spl < 2) {
-				die "Separator \'$sep\' not found in gene ID \'$name\', rewritign nt fna names $inf\nAborting..\n";
-			} else {
-				unless(exists($gene2num->{$spl[0]}{$spl[1]})){die "can not identify \'$name\' gene in index file while rewritign nt fna names $inf\nparts: \"$spl[0]\"  \"$spl[1]\"";}
-				#print O ">".$gene2num->{$name}."\n";
-				foreach my $pr (@{$gene2num->{$spl[0]}{$spl[1]}}){
-					print O ">".$pr."\n";#;.$seq."\n";
-				}
-			}
-		} else {
-			print O $l;
-		}
-	}
-	close I; close O;
-	systemW "rm -f $inf; mv $inf.tmp $inf";
+	});
+	close $out or die "Cannot close $temporary: $!\n";
+	_sync_file($temporary);
+	retry_rename($temporary, $inf, label => 'publish numbered nucleotide catalogue');
 }
+
 sub protExtract{
 	my ($inD,$protXtrF) =@_;
 	#gets the AA seqs for each "master" protein
@@ -2449,7 +2891,7 @@ sub protExtract{
 		my $metaGD = getAssemblPath($map{$curSmpl2}{wrdir});
 		my $protIn = $metaGD."/".$path2aa;
 		die "prot file $protIn doesnt exits\n" unless ( fileGZe( $protIn ));
-		attachProteins3($curSmpl,$protF,$protIn,$geneIdxH->{$curSmpl},"__");
+		attachProteins3($curSmpl,$protF,$protIn,$geneIdxH->{$curSmpl},"__", { require_all => 1 });
 		$cnt += scalar(keys(%{$geneIdxH->{$curSmpl}}));
 		$proteinSamplesDone++;
 		if ($proteinSamplesDone == 1 || $proteinSamplesDone % 25 == 0
@@ -2468,17 +2910,14 @@ sub protExtract{
 	if (ref($extra_index) eq 'HASH' && keys %{$extra_index}) {
 		die "The catalog contains external genes, but -extraGenesAA was not supplied\n"
 			unless length $protXtrF;
-		my $extra_list = "$inD/tmp.extra-protein-ids.txt";
-		open my $extra_fh, '>', $extra_list or die "Cannot open $extra_list: $!\n";
-		print {$extra_fh} join("\n", sort keys %{$extra_index}), "\n"
-			or die "Cannot write $extra_list: $!\n";
-		close $extra_fh or die "Cannot close $extra_list: $!\n";
-		attachProteins($extra_list,$protF,$protXtrF,$extra_index);
-		unlink $extra_list or die "Cannot remove $extra_list: $!\n";
+		attachProteins3('', $protF, $protXtrF, $extra_index, '', { require_all => 1 });
 	}
 
 	#new cluster numbers and one new file, my format, with Idx
 	combineClstr("$inD/compl.incompl.$cdhID.fna","$inD/$countMatrixP.genes2rows.txt") ;
+	print "Creating reusable indexes for final nucleotide and protein gene catalogues\n";
+	ensureFastaIndex($catalog_fasta);
+	ensureFastaIndex($protF);
 
 }
 sub combineClstr(){
@@ -2488,7 +2927,7 @@ sub combineClstr(){
 		$clusMode = 1;$clstr = $clstr1.".clstr";
 	}
 	
-	#currently can only be run first time!
+	#Accept original or already-numbered cluster headers when resuming.
 	print "Combining cluster strings.. $clstr\n$idx\n";
 	#tmp out files, copied over to correct locations later!
 	open I, '<', $clstr or die "Cannot open cluster file $clstr: $!\n";
@@ -2497,7 +2936,6 @@ sub combineClstr(){
 	open C, '<', $idx or die "Cannot open gene index $idx: $!\n";
 	my $chLine = <C>; my $newOil=0;
 	#counts if already formated?
-	my $evidence=0; my $eviNo=0;
 	my $oil = ""; #collects for current cluster genes
 	print Oi "#Gene	members\n";
 	while (my $line = <I>){
@@ -2510,20 +2948,10 @@ sub combineClstr(){
 			die "Gene index $idx ended before cluster file $clstr\n" unless defined $chLine;
 			my @spl = split(/\t/,$chLine);
 			die "Malformed gene-index line in $idx: $chLine" unless @spl >= 2;
-			if ($1 eq $spl[0]){
-				$evidence++;
-				if ($evidence>10 && $eviNo == 0){
-					print "It seems like index file was already created, aborting coversion..\n";
-					systemW "rm $clstr.idx2 $clstr.2";
-					return;
-				}
-			} else {
-				$eviNo ++;
-			}
-			if ($spl[1] ne $line){
-				die "Can;t match \n$line \n$spl[1]\n";
-			}
-			
+			chomp $spl[1];
+			die "Cannot match cluster '$line' to '$spl[1]' or numeric ID '$spl[0]' in $idx\n"
+				unless $line eq $spl[1] || $line eq ">$spl[0]";
+
 			$line = ">$spl[0]";
 			$oil = $spl[0]."\t";
 			$newOil = 1;
@@ -2546,10 +2974,10 @@ sub combineClstr(){
 	close O or die "Cannot close $clstr.2: $!\n";
 	close C or die "Cannot close $idx: $!\n";
 	close Oi or die "Cannot close $clstr.idx2: $!\n";
-	unlink $clstr or die "Cannot remove old cluster file $clstr: $!\n";
-	rename "$clstr.2", $clstr or die "Cannot replace $clstr: $!\n";
-	unlink "$clstr.idx" or die "Cannot remove old cluster index $clstr.idx: $!\n" if -e "$clstr.idx";
-	rename "$clstr.idx2", "$clstr.idx" or die "Cannot replace $clstr.idx: $!\n";
+	_sync_file("$clstr.2");
+	_sync_file("$clstr.idx2");
+	retry_rename("$clstr.2", $clstr, label => 'publish numbered cluster file');
+	retry_rename("$clstr.idx2", "$clstr.idx", label => 'publish cluster member index');
 	print "Done rewriting cluster numbers & creating cluster index\n";
 }
 
@@ -2563,83 +2991,38 @@ sub clusterFNA($ $ $ $ $ $ $ $ $ $){
 	
 	if ($useMMseqs){#mmseq2 clustering  #$clustMMseq
 		my $tmpD2 = "$tmpD/mmS/";
-		$cmd .= "rm -rf $tmpD2\nmkdir -p $tmpD2\n";
-		my $covMin = $aL; $covMin = $aS if ($aS < $aL);
+		$cmd .= "$rmBin -rf $tmpD2\n$mkdirBin -p $tmpD2\n";
+		# Coverage semantics follow CD-HIT: aS = fraction of the shorter sequence,
+		# aL = fraction of the longer sequence that must be aligned. mmseqs2 places
+		# the longer sequence as representative (query) and the shorter as member
+		# (target), so --cov-mode 1 (alnRes/member length) matches aS: a fragment
+		# contained in a longer gene still joins it, while genes that only share a
+		# local block do not. --cov-mode 0 (alnRes/longer length) matches aL.
+		my ($covMin, $covMode) = (0, 0);
+		if ($aL > 0) {
+			($covMin, $covMode) = ($aL, 0);
+			warn "clusterFNA: mmseqs2 cannot combine aS=$aS and aL=$aL; enforcing aL only\n" if ($aS > $aL);
+		} elsif ($aS > 0) {
+			($covMin, $covMode) = ($aS, 1);
+		}
 		if ($gfac){
-			$cmd .= "$mmseqs2Bin easy-cluster $inFNA $oFNA $tmpD2 -c $covMin --cov-mode 0  --min-seq-id $ID --alignment-mode 3 --threads $numCor --dbtype 2 --spaced-kmer-mode 1 --mask 0 --split-memory-limit ". int(${totMemCl}*0.85)."G --min-aln-len 100 --sort-results 1 --cluster-reassign 0 -v 3 \n";
+			$cmd .= "$mmseqs2Bin easy-cluster $inFNA $oFNA $tmpD2 -c $covMin --cov-mode $covMode  --min-seq-id $ID --alignment-mode 3 --threads $numCor --dbtype 2 --spaced-kmer-mode 1 --mask 0 --split-memory-limit ". (int(${totMemCl}*0.85) || 1)."G --min-aln-len 100 --sort-results 1 --cluster-reassign 0 -v 3 \n";
 		} else {
-			$cmd .= "$mmseqs2Bin easy-linclust $inFNA $oFNA $tmpD2 -c $covMin --cov-mode 0  --min-seq-id $ID --alignment-mode 3 --threads $numCor --dbtype 2 --spaced-kmer-mode 1 --mask 0 --split-memory-limit ". int(${totMemCl}*0.85)."G --min-aln-len 100 --sort-results 1 -v 3 \n"; #--cluster-reassign 1 
+			$cmd .= "$mmseqs2Bin easy-linclust $inFNA $oFNA $tmpD2 -c $covMin --cov-mode $covMode  --min-seq-id $ID --alignment-mode 3 --threads $numCor --dbtype 2 --spaced-kmer-mode 1 --mask 0 --split-memory-limit ". (int(${totMemCl}*0.85) || 1)."G --min-aln-len 100 --sort-results 1 -v 3 \n"; #--cluster-reassign 1 
 		}
 		$cmd .= "$mmS2clstr ${oFNA}_cluster.tsv $oFNA.clstr\n";
 		#die $cmd;
-		$cmd .= " rm -f $oFNA ${oFNA}_all_seqs.fasta ${oFNA}_cluster.tsv;\n mv ${oFNA}_rep_seq.fasta $oFNA;\n\n";
-	} elsif(1) {
-		#	$defaultsCDH = "-d 0 -c 0.$cdhID -g 0 -T $numCor -M ".int(($totMem+30)*1024) if (@ARGV>3);
-		$cmd .= $cdhitBin."-est -i $inFNA -o $oFNA -n 9 -mask NX -G 1 -r 0 -aS $aS -aL $aL -d 0 -c $ID -g $gfac -T $numCor -M ".int(($totMemCl+30)*1024)."\n";
+		$cmd .= " $rmBin -f $oFNA ${oFNA}_all_seqs.fasta ${oFNA}_cluster.tsv;\n $mvBin ${oFNA}_rep_seq.fasta $oFNA;\n\n";
 	} else {
-			die "no longer supported vsearch clustering\n";
-		$cmd .= "gunzip $bdir/compl.srt.fna.gz\n" if (-e "$bdir/compl.srt.fna.gz" && !-e "$bdir/compl.srt.fna");
-		$cmd .= $vsearchBin." --cluster_fast $bdir/compl.srt.fna --consout $tmpDir/compl.$cdhID.fna --id 0.$cdhID --strand plus --threads $numCor --uc $tmpDir/compl.$cdhID.uc";
+		#	$defaultsCDH = "-d 0 -c 0.$cdhID -g 0 -T $numCor -M ".int(($totMem+30)*1024) if (@ARGV>3);
+		#-M (MB) within the job's memory: above it the scheduler kills the job before cd-hit's own check
+		$cmd .= $cdhitBin." -i $inFNA -o $oFNA -n 9 -mask NX -G 1 -r 0 -aS $aS -aL $aL -d 0 -c $ID -g $gfac -T $numCor -M ".(int($totMemCl*0.9*1024) || 1024)."\n";
 	}
+
 	return $cmd;
 }
 
 
-sub writeBucket(){
-	my ($OCOMPLar,$O3Par,$O5Par,$OINCar,$bdir,$bnum) = @_;
-	if ($toLclustering){return;}
-	systemW("mkdir -p $bdir");
-	#my @OCOMPL = @{$OCOMPLar}; 
-	if (@{$OCOMPLar} ==0){die "no genes found!";}
-	if ($toLclustering){#no length sorting
-		#open O,">$bdir"."compl.fna"; foreach( @OCOMPL ){print O $_;} close O;
-		#open O,">$bdir"."5Pcompl.fna"; foreach( @O3P ){print O $_;} close O;
-		#open O,">$bdir"."3Pcompl.fna"; foreach( @O5P ){print O $_;} close O;
-		#open O,">$bdir"."incompl.fna";foreach( @OINC ){print O $_;} close O;
-	} else {
-		open O,">$bdir"."compl.fna" or die "Can't open B0 compl.fna\n"; 
-		foreach(sort {length $b <=> length $a} @{$OCOMPLar} ){print O $_;} close O; @{$OCOMPLar} = ();
-		my @O5P = @{$O5Par};
-		open O,">$bdir"."5Pcompl.fna" or die "Can't open B0 5P.fna\n"; foreach(sort {length $b <=> length $a} @O5P ){print O $_;} close O; @O5P=();
-		my @O3P = @{$O3Par};  
-		open O,">$bdir"."3Pcompl.fna" or die "Can't open B0 3P.fna\n"; foreach(sort {length $b <=> length $a} @O3P ){print O $_;} close O; @O3P=();
-		 my @OINC = @{$OINCar}; 
-		open O,">$bdir"."incompl.fna" or die "Can't open B0 incompl.fna\n";foreach(sort {length $b <=> length $a} @OINC ){print O $_;} close O;  @OINC=();
-	}
-}
-sub readFasta_notUsed($){
-  my ($fil) = @_;
-  my %Hseq;
-  if (-z $fil){ return \%Hseq;}
-  open(FAS,"<","$fil") || die("Couldn't open FASTA file $fil.");
-    
-     my $temp; 
-     my $line; my $hea=<FAS>; chomp ($hea);
-      my $trHe = ($hea);
-      #my @tmp = split(" ",$trHe);
-      #$trHe = substr($tmp[0],1);
-      # get sequence
-    while($line = <FAS>)
-    {
-      #next if($line =~ m/^;/);
-      if ($line =~ m/^>/){
-        chomp($line);
-        $Hseq{$trHe} = $temp;
-        $trHe = ($line);
-       # @tmp = split(" ",$trHe);
-		#$trHe = substr($tmp[0],1);
-		$trHe =~ s/\|//g;
-        $temp = "";
-        next;
-      }
-    chomp($line);
-    $line =~ s/\s//g;
-    $temp .= ($line);
-    }
-    $Hseq{$trHe} = $temp;
-  close (FAS);
-    return \%Hseq;
-}
 sub rewriteClusNumbers($ $ ){
 	my ($infna,$newCnt) = @_;
 	print "Rewriting Cluster numbers: $newCnt in $infna.clstr\n";
@@ -2660,18 +3043,9 @@ sub rewriteClusNumbers($ $ ){
 		}
 	}
 	close I; close O;
-	systemW("rm -f $incls\nmv $ocls $incls \n");
+	retry_rename($ocls, $incls, label => 'publish marker cluster numbers');
 	$newCnt--; #to keep accurate track of clus numbers..
 	return($newCnt,$mem);
-}
-sub writeIDs($ $){
-	my ($hr, $of) = @_;
-	my %ids = %{$hr};
-	open O,">$of" or die "can't open $of cluster id file\n";
-	foreach my $k (keys %ids){
-		print O $k."\t".$ids{$k}."\n";
-	}
-	close O;
 }
 
 sub addCOGgenes{
@@ -2691,8 +3065,8 @@ sub addCOGgenes{
 		my $cogFNA = $cogFNAcl; $cogFNA =~ s/\.clstr//;
 		($inCclN2,$inCclNmember) = rewriteClusNumbers("$inD/$COGdir/".$cogFNA,$inCclN);
 		#die "$cogFNA\ncogFNA\n";
-		systemW("cat $inD/$COGdir/$cogFNAcl >> $outFcls");
-		systemW("cat $inD/$COGdir/$cogFNA  >> $outFfna");
+		systemW("$catBin $inD/$COGdir/$cogFNAcl >> $outFcls");
+		systemW("$catBin $inD/$COGdir/$cogFNA  >> $outFfna");
 		$cogFNA =~ /([^\.]+)\./; my $cog = $1;
 		$logstr .= "$cog	$inCclN	$inCclN2\n";
 		my @tmpA = ($inCclN .. $inCclN2);
@@ -2706,199 +3080,19 @@ sub addCOGgenes{
 	open O,">$GCdir/LOGandSUB/${COGdir}.clusN.log" or die $!; print O $logstr; close O;
 }
 
-sub mergeClsSam(){
-	my ($inD,$idP,$GCd) = @_;
-	
-	my $outFfna = $inD.$primaryClusterFNA;
-	my $outFcls = $inD.$primaryClusterCLS;
-	
-	#single step clustering? only needs to have the FMG genes added..
-	if ($allinClust){
-		unless (-d "$inD/$COGdir/" || -d "$GCd/B0/$COGdir/"){print"No COG specific genes found\n$inD/$COGdir/\n$GCd/B0/$COGdir/\n";return;}
-		my $inCclN = 0;
-		die "Can't find $outFcls\n" unless (-e $outFcls);
-		my $tlW = `tail -n 800 $outFcls| grep '^>' | tail -n 1`;chomp $tlW;
-		if ($tlW !~ m/>Cluster (\d+)/){
-			$tlW = `tail -n 25000 $outFcls| grep '^>' | tail -n 1`;chomp $tlW;
-		}
-		$tlW =~ m/>Cluster (\d+)/;
-		$inCclN = $1;
-		
-		#main step...
-		addCOGgenes($inD,$GCd,$inCclN,$outFfna,$outFcls);
-		return;
+sub mergeClsSam {
+	my ($inD, $idP, $GCd) = @_;
+	my $outFfna = File::Spec->catfile($inD, $primaryClusterFNA);
+	my $outFcls = File::Spec->catfile($inD, $primaryClusterCLS);
+	open my $clusters, '<', $outFcls or die "Cannot read $outFcls: $!\n";
+	my $last_cluster;
+	while (my $line = <$clusters>) {
+		$last_cluster = $1 if $line =~ /^>Cluster (\d+)\s*$/;
 	}
-	
-	my @samFs = ($inD."incompl.$idP.align.sam",$inD."35compl.$idP.align.sam");
-	my $completeFNA = $inD."compl.$idP.fna";
-	my $clFile = $completeFNA.".clstr";
-	die "Can't find required input $completeFNA" unless (-e $completeFNA);
-	die "Can't find required input $clFile" unless (-e $clFile);
-
-	#system "cp $clFile $clFile.before"; #TODO, remove
-	my $logf = "$inD/log/Cluster.log";
-	systemW("mkdir -p $inD/log/");
-	open LOGf,">$logf";
-	#read current clusters.. this needs to be extended by sam hits
-	my ($hr1,$hr2,$totN,$totM,$idsHr) = readCDHITCls($clFile);
-	print LOGf "ComplGeneClus	$totN\nComplGeneClusMember	$totM\n";
-	my %lnk  = %{$hr2};
-	my %cls = %{$hr1};
-	my %idsDistr = %{$idsHr};
-	writeIDs($idsHr,"$inD/cluster.ids.primary");
-	my %Hitin; my $remSeqs;
-	my $totCnt = 0;
-	my @preTags = ("incompl","P35compl");
-	#read (both) sam with hits to complete clusterss.
-	my @unclusters;
-	my $finalUnclusterd = "$inD/incompl.NAl.fna";
-	for (my $k=0;$k<2;$k++){
-		my $preTag = $preTags[$k];
-		die "Can't find samfile $samFs[$k]\n" unless (-e $samFs[$k]);
-		my $unclusFna = "$inD/$preTag.NAl.$idP.fna";
-		push(@unclusters,$unclusFna);
-		systemW "rm -f $unclusFna" if (-e "$unclusFna");
-		#was another format previously..
-		systemW "cp $inD/$preTag.NAl.pre.$idP.fna $unclusFna" if (-e "$inD/$preTag.NAl.pre.$idP.fna");
-		#die();
-		open my $OO,">>","$unclusFna" or die "Can't open $unclusFna\n"; 
-		print $OO "\n";
-		$hr1 = readSam($samFs[$k],$OO); #,$remSeqs)
-	#	print OO $remSeqs;
-		close $OO;
-		
-		#sam read and identified genes without good hit..
-		%Hitin = %{$hr1};
-		#first, add hits to complete gene clusters
-		foreach my $hit (keys %Hitin){
-			unless (exists($lnk{$hit})){die "Can't find link $hit\n";}
-			my @splClusters = split(/\n/,$cls{$lnk{$hit}}) ;
-			my $clCnt = scalar(@splClusters);
-			foreach my $spl (split(/\n/,$Hitin{$hit})){
-				$cls{$lnk{$hit}} .= "\n$clCnt\t".$spl;
-				$totCnt++;$clCnt++;
-			}
-			#die "" if ($totCnt > 10);
-		}
-	}
-
-	#write the new clstr file out 
-	open O,">$outFcls"; my $totCls=0;
-	foreach my $cl (keys %cls){
-		$totCls++;
-		my $ostr = $cl."\n".$cls{$cl};
-		print O $ostr."\n";
-	}
-	close O;
-	#print LOGf "final Clusters (incomplete + complete) : $totCls\n";
-	print "Results $outFcls\n";
-	
-	
-	#now unclustered genes need to be clustered
-	systemW("cat ".join(" ",@unclusters)." > $finalUnclusterd");
-	my $remClus = "$inD/incompl.rem.$cdhID.fna";
-	my $cmd = clusterFNA( "$finalUnclusterd", "$remClus",0.7,0.3,"$cdhID",$numCor,0,$inD,$clustMMseq,$totMem);
-	systemW($cmd) unless (-e $remClus);
-	
-	#old routine, not needed (too convoluted programming flow)
-	#my $Cls2ndFNA = secondaryCls($inD,$idP);
-	
-	
-	my ($inCclN,$inCclNmember) = rewriteClusNumbers($remClus,$totCls);
-	print "Concatenating Cluster files\n";
-	systemW("cat $remClus.clstr >> $outFcls");
-	print "Concatenating Cluster Seed fna files\n";
-	systemW("cat $completeFNA $remClus > $outFfna");
-	print LOGf "IncomplComplGeneClus	$inCclN\n";
-	print LOGf "IncomplComplGeneClusMember	".($inCclNmember+$totM)."\n";
-	close LOGf;
-	
-	unless (-d "$inD/$COGdir/" || -d "$GCd/B0/$COGdir/"){print"No COG specific genes found\n";return;}
-	
-	addCOGgenes($inD,$GCd,$inCclN,$outFfna,$outFcls);
+	close $clusters or die "Cannot close $outFcls: $!\n";
+	die "Can't determine the last cluster number in $outFcls\n" unless defined $last_cluster;
+	addCOGgenes($inD, $GCd, $last_cluster, $outFfna, $outFcls);
 }
-
-sub writeMG_COGs{
-	my ($GCd) = @_;
-	die "cant' work, since ordering not given. used annotateMGwMotus.pl instead";
-	my $FMGd = "$GCd/FMG/";
-	system "mkdir -p $FMGd";
-	open I,"<$GCd/LOGandSUB/${COGdir}.clusN.log";
-	while (my $l = <I>){
-		chomp $l;
-		my @spl = split /\t/,$l;
-		my @range = $spl[1] .. $spl[2];
-		my $cmd = "$samBin faidx $GCd/compl.incompl.$cdhID.fna ". join (" ", @range) . " > $FMGd/$spl[0].gc.fna\n";
-		system $cmd;
-		$cmd = "$samBin faidx $GCd/compl.incompl.$cdhID.prot.faa ". join (" ", @range) . " > $FMGd/$spl[0].gc.faa";
-		system $cmd;
-	}
-	close I;
-}
-
-sub secondaryCls(){
-	my ($inD,$cdhID) = @_;
-	my $cmd="";
-	die "no longer used\nsecondaryCls\n";
-	my $outfna = "$inD/incompl.rem.$cdhID.fna";
-	if (-e $outfna){return($outfna);}
-	#$cmd .= $cdhitBin."-est -i $bdir/P35compl.NAl.$cdhID.fna -o $bdir/P35compl.$cdhID.fna -n 9 -G 0 -M 5000 -aL 0.5 -aS 0.95 $defaultsCDH\n";
-	#die("cdf\n");
-	#system("cat $inD/P35compl.NAl.$cdhID.fna >> $inD/incompl.NAl.$cdhID.fna\n");
-	#size sort
-	#my $suc = systemW("cat $inD/P35compl.NAl.$cdhID.fna $inD/incompl.NAl.$cdhID.fna | perl -e 'while (<>) {\$h=\$_; \$s=<>; \$seqs{\$h}=\$s;} foreach \$header (reverse sort {length(\$seqs{\$a}) <=> length(\$seqs{\$b})} keys \%seqs) {print \$header.\$seqs{\$header}}' > $inD/incompl.NAl.srt.$cdhID.fna");
-	my $suc = systemW("cat $inD/P35compl.NAl.$cdhID.fna $inD/incompl.NAl.$cdhID.fna  > $inD/incompl.NAl.fna");
-	#my $hr = readFasta("$inD/P35compl.NAl.$cdhID.fna");
-	#my $hr2 = readFasta("$inD/incompl.NAl.$cdhID.fna");
-	#my %remGenes = ( %{$hr}, %{$hr2} ); $hr=0;$hr2=0;
-	#my @keys = sort { length($remGenes{$a}) <=> length($remGenes{$b}) } keys(%h);
-
-#	systemW($cdhitBin."-est -i $inD/incompl.NAl.srt.$cdhID.fna -o $outfna -n 9 -G 0 -aL 0.3 -aS 0.8 $defaultsCDH\n") unless (-e $outfna);
-	$cmd ="";
-	#$cmd .= sortFNA($inD,"incompl.NAl",1,$tmpDir,$numCor);
-	#$cmd .= clusterFNA( "$inD/incompl.NAl.fna", "$outfna",0.7,0.3,"$cdhID",$numCor,1,$tmpD);
-	systemW($cmd);
-	#$cmd .= "rm -f $inD/incompl.NAl.$cdhID.fna\n";
-	#$cmd .= "rm -f $inD/P35compl.NAl.$cdhID.fna $inD/35compl.$cdhID.align.sam $inD/incompl.$cdhID.align.sam\n";
-	return($outfna);
-}
-
-sub readCDHITCls(){
-	my ($iF) = @_;
-	my %retCls; my %retRepSeq; my %clsIDs;
-	open I, '<', $iF or die "Cannot open cluster file $iF: $!\n";
-	my $clName = "";
-	my $clNum=0; my $totalStore=0;
-	
-	while (my $line = <I>){
-		chomp $line;
-		if ($line =~ m/^>/){#open new cluster
-			$clName = $line; $clNum++; $totalStore++; next;
-		}
-		$totalStore++;
-		if (exists($retCls{$clName})){
-			$retCls{$clName} .= "\n".$line;
-		} else {
-			$retCls{$clName} = $line;
-		}
-		if ($line =~ m/\*$/){#cluster seed
-			#my @tmp = split(/\s*/,$line);
-			$line =~ m/>(.*)\.\.\./;
-			#print $1."\n";;
-			$retRepSeq{$1} = $clName;
-		} else {
-			$line =~ m/>(.*)\.\.\. at .\/([0-9\.]+)%/;
-			if (!exists $clsIDs{$clName} ){
-				$clsIDs{$clName} = $2;
-			} else {
-				$clsIDs{$clName} .= ",".$2;
-			}
-		}
-	}
-	close I or die "Cannot close cluster file $iF: $!\n";
-	return(\%retCls,\%retRepSeq,$clNum, $totalStore,\%clsIDs);
-}
-
 
 
 sub geneCatFunc_emapper{
@@ -2915,260 +3109,253 @@ sub geneCatFunc_emapper{
 	my $outD = $GCd."/Anno/Func/emapper/";
 	my $curDB = getProgPaths("eggNOGm_path_DB");
 	my $emapper = getProgPaths("emapper");
+	#eggNOG-mapper v3 sizes its DIAMOND blocks from the node's total RAM, not from the job's allocation:
+	#set them for $mem (upstream bands; peak RAM ~ block size x 6 + 23 GB DB / index chunks + 0.5 GB per thread)
+	my ($dmndBlock,$dmndChunks) = ($mem >= 96) ? (8,1) : (($mem >= 64) ? (6,2) : (($mem >= 32) ? (4,2) : (2,4)));
 	my $qsubDir2 = "$qsubDir/Funct/";
 	my $shrtDB = "emap";
-	system "mkdir -p $qsubDir2" unless (-d $qsubDir2);
-	system "mkdir -p $outD" unless (-d $outD);
-	#use a different dir for qsub jobs to keep main qsub dir clean
-	$QSBoptHR->{qsubDir} = $qsubDir2;
-	my $doQsub = 1;my $calcDia = 1;my @jdeps;
+	make_path($qsubDir2) unless -d $qsubDir2;
+	make_path($outD) unless -d $outD;
+	#local copy of the submission options (use a different dir for qsub jobs to keep main qsub dir clean)
+	my $QSB = _qsbCopy($QSBoptHR);
+	$QSB->{qsubDir} = $qsubDir2;
+	my @jdeps;
 	my $jdep = "";
 	my $tarAnno3 = "$outD/MF.emapper.annotations";
-	my $splDir = "$GLBtmp/eggNOGmapper/";
-	if (!-e $tarAnno3 || !-s $tarAnno3){
+	my $splDir = _emapSplitDir(); #catalog-specific, so catalogues can't pick up each other's chunks
+	my $cmd = "";
+	#annotations and chunk results are reused only if made with the configured eggNOG-mapper data
+	my $paramF = _emapParamF($GCd);
+	my $dataID = _emapDataID($curDB);
+	my $oldID = _readInflight($paramF)->{data_dir};
+	if (defined($oldID) && $oldID ne $dataID){
+		print "eggNOG-mapper data changed ($oldID -> $dataID): existing annotations are not reused\n";
+		unlink($tarAnno3, "$tarAnno3.gz");
+		remove_tree($splDir) if (-d $splDir);
+	}
+	#existing merged annotations: plain, or already compressed by a previous cleanup
+	my $annoIn = (-s $tarAnno3) ? $tarAnno3 : ((-s "$tarAnno3.gz") ? "$tarAnno3.gz" : "");
+	print "Reusing $annoIn (made before eggNOG-mapper data were recorded); delete it to re-annotate with $dataID\n"
+		if ($annoIn ne "" && !defined($oldID));
+	if ($annoIn eq ""){
+		#chunk results of an interrupted run from before the data were recorded: older eggNOG-mapper, not mixed in
+		if (!defined($oldID) && -d $splDir){
+			print "Removing unrecorded eggNOG-mapper chunk results in $splDir\n";
+			remove_tree($splDir);
+		}
+		_writeFuncParams($paramF, {data_dir => $dataID});
 		#setup cluster for diamond focused job
-		my @preCons = @{$QSBoptHR->{constraint}};
-		push(@{$QSBoptHR->{constraint}}, $avx2Constr);#--constraint=sse4
-		my $preHDDspace=$QSBoptHR->{tmpSpace};
-		$QSBoptHR->{tmpSpace} = ($mem*1.4) . "G";
+		my $chunkQSB = _qsbCopy($QSB);
+		push(@{$chunkQSB->{constraint}}, $avx2Constr) if (defined($avx2Constr) && $avx2Constr ne "");#--constraint=sse4
+		$chunkQSB->{tmpSpace} = "500G"; #eggNOG diamond temp files, same as the NOG/KEGG diamond jobs
 		print "Splitting FASTAs into $fastaSplits chunks in $splDir\n";
 		my $ar = splitFastas($query,$fastaSplits,$splDir);
 		my @subFls = @{$ar};
 		die "FASTA splitting produced no inputs from $query\n" unless @subFls;
 		print "Done splitting, submitting ".scalar(@subFls)." jobs\n";
-		my $i=0;
+		my $i=0; my @chunkAnnos; my $nResumed = 0; my $nSalvaged = 0;
 		foreach my $f (@subFls){
-			#system "mkdir -p $tmpD/$i/" unless (-d "$tmpD/$i/");
-			#my $cmd = "emapper.py -m diamond --override --temp_dir $tmpD/$i/ --data_dir $curDB --no_annot --no_file_comments --cpu $ncore -i $f -o $f;"; 			my $outF = "$f.emapper.seed_orthologs";
-
-			my $cmd = "";
-			$cmd .= "mkdir -p $tmpD/$i/\n";
-			$cmd .= "emapper.py -m diamond --dbmem --override --itype proteins --temp_dir $tmpD/$i/ --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f;\n"; 
-			my $outF = "$f.emapper";
-
-			if ($calcDia && (!-e $outF || !-s $outF) ){
-				#print "$cmd\n";
-				if ($doQsub){
-					my ($jobName,$mptCmd) = qsubSystem($qsubDir2."D$shrtDB.$i.sh",$cmd,$ncore,($mem)."G","eMAP$i","","",1,[],$QSBoptHR); #$jdep.";".
-					push(@jdeps,$jobName);
-					#die "$jobName\n";
-				} else {
-					systemW $cmd;
-				}
-				#print $qsubDir."Diamond.sh\n";
+			my $ccmd = "";
+			my $wd = "$tmpD/$i/";
+			my $seeds = "$f.seeds"; #seed orthologs of the chunk's finished DIAMOND search
+			$ccmd .= "$mkdirBin -p $wd\n";
+			#1) DIAMOND search, renamed on success: a resubmitted chunk (e.g. after an annotation failure) only repeats the annotation
+			$ccmd .= "if [ ! -s $seeds ]; then\n";
+			$ccmd .= "  $emapper -m diamond --no_annot --dmnd_block_size $dmndBlock --dmnd_index_chunks $dmndChunks --override --itype proteins --temp_dir $wd --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f.srch\n";
+			$ccmd .= "  $mvBin $f.srch.emapper.seed_orthologs $seeds\n  $rmBin -f $f.srch.emapper.hits\nfi\n";
+			#2) annotation. Its workers read eggnog.db at random; on a network filesystem a sub-batch can exceed eggNOG-mapper's
+			#fixed per-task deadline (250 s), which aborts the chunk. Read a node-local copy of eggnog.db (~22 GB) instead,
+			#the other data files are linked
+			$ccmd .= "$rmBin -rf ${wd}data/\n$mkdirBin -p ${wd}data/\nln -s $curDB/* ${wd}data/\n$rmBin -f ${wd}data/eggnog.db\n$cpBin --preserve=timestamps $curDB/eggnog.db ${wd}data/eggnog.db\n";
+			#eggNOG-mapper finds a field-presence cache it built itself by the DB's size and mtime (kept by the copy) and the
+			#path of the GO OBO: name the data dir's OBO, so the copy uses the cache of the shared data dir instead of
+			#rebuilding it in every chunk (~50 min on eggNOG 7)
+			$ccmd .= "if [ -f $curDB/go-basic.obo ]; then export EGGNOG_GO_OBO=\"\$(readlink -f $curDB)/go-basic.obo\"; fi\n";
+			#eggNOG-mapper writes its annotations in place (no end marker with --no_file_comments): run under a .part
+			#prefix and rename on success, so a killed chunk never leaves a file the resume test accepts
+			$ccmd .= "$emapper -m no_search --annotate_hits_table $seeds --override --temp_dir $wd --data_dir ${wd}data/ --no_file_comments --cpu $ncore -o $f.part\n";
+			$ccmd .= "$mvBin $f.part.emapper.annotations $f.emapper.annotations\n";
+			$ccmd .= "$rmBin -rf $wd\n";
+			my $outF = "$f.emapper.annotations"; #complete chunk annotations
+			push(@chunkAnnos,$outF);
+			#resume: skip chunks whose annotations exist and are newer than the chunk FASTA
+			if (-s $outF && (-M $outF) <= (-M $f)){
+				$nResumed++;
+			} else {
+				unlink($seeds) if (-e $seeds && (-M $seeds) > (-M $f)); #search of an older chunk FASTA
+				$nSalvaged++ if (_emapSalvageSeeds($f));
+				my ($jobName,$mptCmd) = qsubSystem($qsubDir2."D$shrtDB.$i.sh",$ccmd,$ncore,($mem)."G","eMAP$i","","",1,[],$chunkQSB);
+				push(@jdeps,$jobName) if (defined($jobName) && $jobName ne "");
 			}
 			$i++;
 		}
-		my $ncore2 = 1;#$ncore;
-		@{$QSBoptHR->{constraint}} = @preCons;
-		$QSBoptHR->{tmpSpace} = $preHDDspace;
-		#my $tarAnno = "$outD/D$shrtDB.emapper.seed_orthologs";
-		#my $tarAnno2 = "$outD/D$shrtDB";
-		my $cmd = "";
-		#$cmd .= "#concatenating separate eggNOG-diamond output\n";
-		#$cmd .= "cat $GLBtmp/eggNOGmapper/*.emapper.seed_orthologs > $tarAnno\n";
-		#$cmd .=  "#emapper.py --data_dir $curDB --annotate_hits_table $tarAnno --no_file_comments -o $tarAnno2 --cpu $ncore2 --dbmem\n";
-		#$cmd .= "\nexit(1)\n";
-		#$cmd .= "cat $GLBtmp/eggNOGmapper/*.emapper.annotations > $tarAnno2\n ";
-		$cmd .= "head -q -n 1 " . $subFls[0] . ".emapper.annotations > $tarAnno3\n";
-		$cmd .= "tail -q -n +2 $GLBtmp/eggNOGmapper/*.emapper.annotations >> $tarAnno3\n";
-		my $eSpl = getProgPaths("eggNOGspl_scr");
-		$cmd .= "#splitting eggNOG annotations in multiple categories that can be summed up to matrices\n$eSpl $tarAnno3\n";
-		#run 
-		#$cmd = "" if (-e "$tarAnno3");
-		my ($jobName,$mptCmd) = qsubSystem($qsubDir2."CombineEMAP.sh",$cmd,$ncore2,(80)."G","${shrtDB}_comb",join(";",@jdeps),"",1,[],$QSBoptHR); 
-		#$jdep.";".
-		
-		$jdep = $jobName;
+		print "eggNOG-mapper: $nResumed of ".scalar(@subFls)." chunks already finished\n" if ($nResumed);
+		print "eggNOG-mapper: reusing the finished DIAMOND search of $nSalvaged failed chunk(s)\n" if ($nSalvaged);
+		#merge only this run's chunks (explicit list, no glob), keep one "#query" header, write atomically
+		$cmd .= "#concatenating eggNOG-mapper chunks\n";
+		#grep exit 1 (no rows) is fine, exit 2 (a chunk file is missing) aborts the job
+		$cmd .= "{ grep -m 1 '^#query' $chunkAnnos[0] || true; grep -hv '^#' ".join(" ",@chunkAnnos)." || [ \$? -eq 1 ]; } > $tarAnno3.tmp\n";
+		$cmd .= "$mvBin $tarAnno3.tmp $tarAnno3\n";
+		$annoIn = $tarAnno3;
 	}
+	my $eSpl = getProgPaths("eggNOGspl_scr");
+	#always (re)split, so the per-category files match the merged annotations
+	$cmd .= "#splitting eggNOG annotations in multiple categories that can be summed up to matrices\n$eSpl $annoIn\n";
+	my ($jobName,$mptCmd) = qsubSystem($qsubDir2."CombineEMAP.sh",$cmd,1,(80)."G","${shrtDB}_comb",join(";",@jdeps),"",1,[],$QSB);
+	$jdep = $jobName;
+
 # create abundance tables now..
-	my $matThr = 4;
+	my $matThr = 8; #rtk2 sumMat threads (parallel gzip reading and row parsing) and cores of the matrix jobs
+	#KO: KO-only table, same layout as the diamond KGM table, used for KEGG modules
 	my @emapCats  = ("eggNOGmapper_CAZy","eggNOGmapper_EC","eggNOGmapper_GO","eggNOGmapper_NOG","eggNOGmapper_BIGG","eggNOGmapper_PFAM",
-	#"eggNOGmapper_KGP","eggNOGmapper_KGM"
-	"eggNOGmapper_KGM", "eggNOGmapper_KGP");
+	"eggNOGmapper_KGM", "eggNOGmapper_KGP", "eggNOGmapper_KO");
 	@jdeps = ();
 	foreach my $EMC (@emapCats){
-		#"$EMC.geneAss.gz";
 		$EMC =~ m/_(\S+)/; my $shrt = "EM.$1";
-		my $cmd = "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$shrt -t $matThr -refD $outD/$EMC.geneAss $rtkFunDelims -extHiera -hieraSrtDown\n";
-		$cmd .= "echo \"DONE matrix creation\"\n";
-		#my $jobName = "sum$shrt";
-		my ($jobName,$mptCmd) = qsubSystem($qsubDir2."$shrt.sh",$cmd,$matThr,(50)."G","${shrt}_mat",$jdep,"",1,[],$QSBoptHR); #$jdep.";".
-		push(@jdeps,$jobName);
+		my $mcmd = "";
+		if ($shrt eq "EM.KO"){
+			$mcmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$shrt -t $matThr -refD $outD/$EMC.geneAss $rtkFunDelims \n";
+			#KEGG modules from eggNOG-mapper KOs (diamond KGM modules are in Anno/Func/modules/)
+			$mcmd .= calc_modules("$outD/${shrt}L0.txt","$outD/modules/",0.5,0.5,0);
+		} else {
+			#no -extHiera: it splits "KOs;modules" on "," before the hierarchy, so L1 rows were KO;module paths, not module sums
+			$mcmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$shrt -t $matThr -refD $outD/$EMC.geneAss $rtkFunDelims\n";
+		}
+		$mcmd .= "echo \"DONE matrix creation\"\n";
+		my ($jobNameM,$mptCmdM) = qsubSystem($qsubDir2."$shrt.sh",$mcmd,$matThr,(50)."G","${shrt}_mat",$jdep,"",1,[],$QSB);
+		push(@jdeps,$jobNameM);
 	}
 	#clean up and marking stone that all worked out fine..
 	my $clnCores = 4;
-	my $cmd = "";
-	$cmd .= "$pigzBin -p $clnCores $tarAnno3 $outD/*.geneAss;\n";
-	$cmd .= "rm -f -r $GLBtmp/eggNOGmapper  $splDir;\n" ; #unless (-e $tarAnno && -s $tarAnno)
+	$cmd = "";
+	#compress the merged annotations (if uncompressed) and the per-category tables (-f: replace .gz copies from an earlier run)
+	my @toZip = map { "$outD/$_.geneAss" } @emapCats;
+	unshift(@toZip, $tarAnno3) if ($annoIn eq $tarAnno3);
+	$cmd .= "$pigzBin -f -p $clnCores ".join(" ",@toZip).";\n";
+	$cmd .= "$rmBin -f -r $splDir;\n";
 	$cmd .= _checkpoint_command($checkpointWriter, $stone, $cdhID, 'eggnog-annotation', "$tarAnno3.gz");
-	my ($jobName,$mptCmd) = qsubSystem($qsubDir2."CleanEMAP.sh",$cmd,$clnCores,(70)."G","${shrtDB}_CLN",join(";",@jdeps),"",1,[],$QSBoptHR); #$jdep.";".
+	$cmd .= "$rmBin -f "._inflightMarker('FuncEMAP')."\n"; #stage finished
+	($jobName,$mptCmd) = qsubSystem($qsubDir2."CleanEMAP.sh",$cmd,$clnCores,(70)."G","${shrtDB}_CLN",join(";",@jdeps),"",1,[],$QSB);
 
 	print "Done geneCat FuncEMAP sub, submitted all jobs\n";
-
-
+	return $jobName; #final job of the stage
 }
 
 sub geneCatFunc{
-	my ($GCd,$tmpD, $DB, $ncore,$doClean) = @_;
+	#annotates the protein catalog against one database (diamond/foldseek) and submits the rtk matrix job
+	#returns (ID of the last submitted job, per-gene assignment file)
+	my ($GCd,$tmpD, $DB, $ncore,$QSBopt) = @_;
 	my $query = "$GCd/compl.incompl.$cdhID.prot.faa";
 	die "Cannot find protein catalog $query\n" unless -s $query;
 	my $outD = $GCd."/Anno/Func/";
 	die "-functAligner has to be \"diamond\" or \"foldseek\"!\n" if ($funcAligner ne "diamond" && $funcAligner ne "foldseek");
-	
-	#my $DB = "NOG";
-	#my $ncore = 40; 
-	
-	
 	my $curDB = $DB; #"NOG";#CZy,ABRc,KGM,NOG
 	my $qsubDir2 = "$qsubDir/Funct/";
-	system "mkdir -p $qsubDir2" unless (-d $qsubDir2);
-	$QSBoptHR->{qsubDir} = $qsubDir2;
+	make_path($qsubDir2) unless -d $qsubDir2;
+	#local copy of the submission options, so settings don't leak into other jobs
+	my $QSB = _qsbCopy($QSBopt);
+	$QSB->{qsubDir} = $qsubDir2;
 		
-	my %optsDia = (eval=>$minEVal,percID=>$minPerID,minPercSbjCov=>$minPercSbjCov,fastaSplits => $fastaSplits,ncore=>$ncore,align=>$funcAligner,
-			splitPath=>$GLBtmp,keepSplits=>!$doClean,redo=>$doClean, minAlignLen=>$minAlLeng, minBitScore=>$minBitSc);
-			
-			
-	my ($allAss,$jdep) = assignFuncPerGene($query,$outD,$tmpD,$curDB,\%optsDia,$QSBoptHR,(!-e "$outD/${curDB}L0.txt")) ;
-	my $tarAnno = "${allAss}geneAss.gz";
-	my $tmpP2 = "$tmpD/CNT_1e-8_25//";
-	#create actual COG table
-	my $cmd = "";
-	$tarAnno =~ s/\.gz$//;
-	
-	#$cmd	.= "gunzip $tarAnno.gz\n";
-	if ($curDB eq "ABRc"){
-		$cmd .= "zcat $tarAnno.gz | sed 's/,/\\|/g' |sed 's/\\t/;/g' | sed 's/;/\\t/' > $tarAnno\n";
-	} else {
-		$cmd .= "zcat $tarAnno.gz | sed 's/\\t/;/g' | sed 's/;/\\t/' > $tarAnno\n";
+	my $splitSize = _funcSplitSize($curDB);
+	my %optsDia = (eval=>$minEVal,percID=>$minPerID,minPercSbjCov=>$minPercSbjCov,minPercQueryCov=>$minPercQueryCov,
+			fastaSplits => $splitSize,ncore=>$ncore,align=>$funcAligner,
+			#the catalog split is shared by all databases with this chunk size and removed by the final FuncAssign job
+			splitPath=>_funcSplitDir($splitSize),keepSplits=>1,redo=>$redoFunc, minAlignLen=>$minAlLeng, minBitScore=>$minBitSc);
+	if (exists $funcDBcutoffs{$curDB}){ #database specific cutoffs
+		my $cut = $funcDBcutoffs{$curDB};
+		$optsDia{$_} = $cut->{$_} foreach (keys %{$cut});
+		print "$curDB cutoffs: ".join(", ", map {"$_=$optsDia{$_}"} sort keys %{$cut})."\n";
 	}
-	
-	#$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF -o $outD/${shrtDB}L1.mat -refD $GCd/NOGparse.NOG.GENE2NOG; gzip $GCd/NOGparse.NOG.GENE2NOG.gz\n";
-	my $matThr = 4;
-	$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$curDB -t $matThr -refD $tarAnno $rtkFunDelims \n";
-	$cmd .= "rm $tarAnno\n" if (length($tarAnno) > 2);
-	#gzip $tarAnno\n";
-	#copy interesting files to final dir
-	#if ($curDB eq "ABRc"){
-#		$cmd.= "zcat $tmpP2/ABRcparse.ALL.cnt.CATcnts.gz > $outD/ABR_res.txt\n" ;
-#	}
-#	if ($curDB eq "CZy"){
-#		$cmd.= "zcat $tmpP2/CZyparse.ALL.cnt.CATcnts.gz > $outD/CZySubstrates.txt\n";
-#		$cmd.= "zcat $tmpP2/CZyparse.CZy.ALL.cnt.cat.cnts.gz > $outD/CZyEnzymes.txt\n";
-#	}
-#	if ($curDB eq "TCDB"){
-#		$cmd.= "zcat $tmpP2/TCDBparse.ALL.cnt.CATcnts.gz > $outD/TCDB.cats.txt\n";
-#	}
-#systemW $cmd."\n";
-#die "$outD/${curDB}L0.txt\n";
-	my $modCmd = "";
-	if ($curDB eq "KGM"){
-		$modCmd = calc_modules("$outD/${curDB}L0.txt","$outD/modules/",0.5,0.5,0);#$ModCompl,$EnzCompl);
-	}
-	#die "$modCmd\n";
-
-	$cmd = "" if (-e "$outD/${curDB}L0.txt");
-	#die "$cmd.$modCmd\n";
-	if (0 && -e $tarAnno){ #already exists
-		systemW $cmd ;
-	} else {
-		my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-		($cmd,$jdep) = qsubSystem($qsubDir2."${curDB}_matrix.sh",$cmd.$modCmd,$matThr,"12G","${curDB}_mat",$jdep,"",1,[],$QSBoptHR);
-		$QSBoptHR->{tmpSpace} =$tmpSHDD;
-	}
-
-
-}
-
-sub readSam($$){
-	my ($iF,$OO) = @_;#$fref,
-	#my %fas = %{$fref};
-	open I,"<$iF" or die "Can't open $iF\n";
-	my $cnt = 0; my $totLines = 0;
-	my $add2file=0; my $add2cls=0;
-	my $bwt2sam = 0; #assumme bowtie2, switch to minimap2
-	my %ret; #my $fasStr = "";
-	print $OO "\n";
-	while (my $line = <I>){
-		chomp $line; $totLines++;
-		my @sam = split(/\t/,$line);
-		my $qu = $sam[0]; my $ref = $sam[2];
-		my $refL = length($sam[9]);
-		next if ($sam[1] & 0x2048); #completely ignore..
-		if ($sam[1] & 0x4 ){#not a hit, minimap2
-			#print "$sam[1]\n";
-			my $nqu = ">".$qu;
-			if ($refL > 100){ #too short hits don't need to be attached..
-				print $OO $nqu."\n".$sam[9]."\n";#$fas{$nqu}."\n";
-				$add2file++;
-			}
-			next;
-		}
-		#die "$sam[0] $sam[1] $sam[2] $sam[3]\n$line\n";
-		#if ($qu =~ m/MM28__C41733_L=413;_1/){print "TRHERE\n";}
-		my $xtrField = join("\t",@sam[11..$#sam]);
-		#die $xtrField;
-		my $pid = 100; my $acc=1;
-		if ($bwt2sam==1) {#bowtie2
-			if ($xtrField =~ m/XM:i:(\d+)\s.*XO:i:(\d+)\s.*XG:i:(\d+)/){
-				$pid = $1/($refL-$2-$3);
-				$acc = 0 if (($2+$3)/$refL > 0.1 || $pid > 0.05);
-			} else {$bwt2sam=0;}
-		}
-		if ($bwt2sam==0) {#mini2
-			if ($xtrField =~ m/NM:i:(\d+).*de:f:([0-9\.]+)/){
-				$pid = $2; #$mismatches = $1;
-				$acc = 0 if ($pid > 0.05);
-			} else {$bwt2sam=1;}
-		}
-		#print "$1 $2 $3 $refL ".$1/$refL." ".($2+$3)/$refL."\n";
-		#95% id || 90% seq length
-		if ( !$acc){ #not good enough hit criteria, attach to fasta
-			my $nqu = ">".$qu;
-			if ($refL > 100){ #too short hits don't need to be attached..
-				print $OO $nqu."\n".$sam[9]."\n";#$fas{$nqu}."\n";
-				$add2file++;
-			}
-			#die $nqu."\n".$sam[9]."\n";
-			next;
-		}
-		#my $mism = $1; my $gaps = $2+$3;
-		#$cnt++;
-		my $clsStr = $refL."nt, >".$qu."... at +\/". int(( (1.0-$pid)*100) ) .".00%";
-		if (exists($ret{$ref})){
-			$ret{$ref} .= "\n".$clsStr
+	#matrix completion marker: written only by a successful matrix job (an existing L0 file alone can be partial)
+	my $matDone = "$outD/.${curDB}.matrix.done";
+	my $geneAssF = "$outD/DIAass_$curDB.srt.gzgeneAss.gz"; #name as in assignFuncPerGene
+	#per-database record of the aligner and cutoffs behind the existing products. The stage stone only says that
+	#something changed; here the database is realigned only if the aligner changed or the e-value became less strict
+	#(the alignments lack hits between the old and the new cutoff). Any other change, including a stricter e-value,
+	#re-interprets the existing alignments: the alignment e-value (alnEval) is kept and also used for chunks that are
+	#still to be aligned, so all alignments share it. Products without a record (older runs) are kept.
+	my $paramF = "$outD/.${curDB}.params";
+	my @parseKeys = qw(eval percID minBitScore minAlignLen minPercSbjCov minPercQueryCov);
+	#DIAMOND sensitivity of the alignments. Alignments made before it was recorded (DIAMOND default mode) are kept
+	#and recorded as "default-kept"; a recorded sensitivity that differs from the current one realigns
+	my %cur = (aligner => $funcAligner, alnEval => $optsDia{eval},
+		sensitivity => ($funcAligner eq "diamond" ? $funcDiaSensitivity : "none"),
+		map { $_ => $optsDia{$_} } @parseKeys);
+	my $old = _readFuncParams($paramF);
+	my $reparse = 0;
+	$cur{sensitivity} = 'default-kept' if (!defined($old) && !$optsDia{redo} && -e $geneAssF);
+	if (defined($old) && !$optsDia{redo}){
+		my $oldSens = $old->{sensitivity} // 'default-kept';
+		if ($old->{aligner} ne $cur{aligner} || $cur{eval} > $old->{alnEval}
+				|| ($oldSens ne 'default-kept' && $oldSens ne $cur{sensitivity})){
+			print "$curDB: aligner $old->{aligner} -> $cur{aligner}, alignment e-value $old->{alnEval} -> $cur{eval}, sensitivity $oldSens -> $cur{sensitivity}: realigning\n";
+			$optsDia{redo} = 1;
 		} else {
-			$ret{$ref} = $clsStr;
+			$cur{alnEval} = $old->{alnEval};
+			$cur{sensitivity} = $oldSens; #chunks still to be aligned match the existing ones
+			my @changed = grep { "$old->{$_}" ne "$cur{$_}" } @parseKeys;
+			if (@changed){
+				print "$curDB: ".join(", ", map { "$_ $old->{$_} -> $cur{$_}" } @changed).": re-interpreting the existing alignments\n";
+				unlink($geneAssF, $matDone);
+				$reparse = 1;
+			}
 		}
-		$add2cls++;
-		#if ($qu =~ m/MM28__C41733_L=413;_1/){print "print\n";}
-
-		#print $ret{$ref}."\n";
-		#die if ($cnt == 10);
 	}
-	close I;
-	print LOG $add2cls." hits to clusters, $add2file added FNAs to be reclustered (of ".$totLines." lines) in $iF\n";
-	print $add2cls." hits to clusters, $add2file added FNAs to be reclustered (of ".$totLines." lines) in $iF\n";
-	#die;
-	return (\%ret);
+	$optsDia{alnEval} = $cur{alnEval}; #diamond/foldseek -e; the parser filters with $optsDia{eval}
+	$optsDia{sensitivity} = $cur{sensitivity}; #diamond sensitivity mode ("default-kept": no flag)
+	#geneAss missing although the marker exists (intermediates deleted): recompute instead of dying in the stone job
+	my $doMatrix = ($optsDia{redo} || !-e $matDone || !-e $geneAssF) ? 1 : 0;
+	_writeFuncParams($paramF,\%cur) if ($doMatrix || !defined($old));
+	remove_tree("$outD/modules/") if ($curDB eq "KGM" && ($optsDia{redo} || $reparse) && -d "$outD/modules/"); #rtk module skips existing tables
+	my ($allAss,$jdep) = assignFuncPerGene($query,$outD,$tmpD,$curDB,\%optsDia,$QSB,$doMatrix) ;
+	my $tarAnno = "${allAss}geneAss"; #per-gene assignments are "$tarAnno.gz"
+	my $matThr = 8; #rtk2 sumMat threads (parallel gzip reading and row parsing) and cores of the matrix jobs
+	$QSB->{tmpSpace} = "0";
+	my $matrixDep = $jdep;
+	if ($doMatrix){
+		my $tmpAnno = "$tarAnno.rtk.tmp"; #uncompressed, rtk-formatted copy
+		my $cmd = "$rmBin -f $matDone\n";
+		if ($curDB eq "ABRc"){
+			$cmd .= "$pigzBin -dc $tarAnno.gz | $sedBin 's/,/\\|/g' |$sedBin 's/\\t/;/g' | $sedBin 's/;/\\t/' > $tmpAnno\n";
+		} else {
+			$cmd .= "$pigzBin -dc $tarAnno.gz | $sedBin 's/\\t/;/g' | $sedBin 's/;/\\t/' > $tmpAnno\n";
+		}
+		$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $outD/$curDB -t $matThr -refD $tmpAnno $rtkFunDelims \n";
+		$cmd .= "$rmBin -f $tmpAnno\n";
+		if ($curDB eq "KGM"){ #KEGG modules from the diamond KO matrix (stale module tables were removed above)
+			$cmd .= calc_modules("$outD/${curDB}L0.txt","$outD/modules/",0.5,0.5,0);
+		}
+		$cmd .= "$touchBin $matDone\n";
+		my ($submittedDep,$submittedCmd) = qsubSystem($qsubDir2."${curDB}_matrix.sh",$cmd,$matThr,"12G","${curDB}_mat",$jdep,"",1,[],$QSB);
+		$matrixDep = $submittedDep if (defined($submittedDep) && $submittedDep ne "");
+	} elsif ($curDB eq "KGM"){ #matrix done, but module tables may be missing
+		my $modCmd = calc_modules("$outD/${curDB}L0.txt","$outD/modules/",0.5,0.5,0);
+		if ($modCmd ne ""){ #rtk2 module runs single-threaded
+			my ($modDep,$modQcmd) = qsubSystem($qsubDir2."${curDB}_modules.sh",$modCmd,1,"12G","${curDB}_mod",$jdep,"",1,[],$QSB);
+			$matrixDep = $modDep if (defined($modDep) && $modDep ne "");
+		}
+	}
+	return ($matrixDep, "$tarAnno.gz");
 }
+
 
 sub FOAMassign{
 	my ($GCd,$tmpD, $DB) = @_;
 	my $query = "$GCd/compl.incompl.$cdhID.prot.faa";
 	die "Cannot find protein catalog $query\n" unless -s $query;
 	my $fastaSplits=10;
-	my $ar = splitFastas($query,$fastaSplits,$GLBtmp."DB/");
+	my $splitDir = "$GLBtmp/${DB}split_"._gcTmpTag()."/"; #per mode: FOAM and ABR may be queued at the same time
+	my $ar = splitFastas($query,$fastaSplits,$splitDir);
 	my @subFls = @{$ar};
 	my @jdeps; my @allFiles;
 	my $N = 20;my $jdep=""; my $colSel = 4;
-	my $tmpSHDD = $QSBoptHR->{tmpSpace};
-	$QSBoptHR->{tmpSpace} = "150G"; #set option how much tmp space is required, and reset afterwards
+	my $QSB = _qsbCopy($QSBoptHR); #local copy of the submission options
+	$QSB->{tmpSpace} = "150G"; #tmp space required by the hmmsearch jobs
 
 	for (my $i =0 ; $i< @subFls;$i++){
 		my $tmpOut = "$tmpD/$DB.hmm.dom.$i";
 		my $outF = "$GCd/assig.$DB.$i";
-		my $cmd = "mkdir -p $tmpD\n";
+		my $cmd = "$mkdirBin -p $tmpD\n";
 		if ($DB eq "FOAM"){
 			$cmd .= "$hmmBin3 --cpu $N -E 1e-05 --noali --domtblout $tmpOut $FOAMhmm $subFls[$i] > /dev/null\n";
 			
@@ -3177,30 +3364,26 @@ sub FOAMassign{
 			$cmd .= "$hmmBin3 --cpu $N --domtblout $tmpOut --cut_ga $ABresHMM $subFls[$i] > /dev/null\n";
 			$colSel = 5;#select gene name
 		}
-		$cmd .= "sort $tmpOut > $tmpOut.sort\n";
-		#DEBUG
-		#$cmd .= "cp $tmpOut.sort $GCd\n";
-		
-		$cmd .= "python $hmmBestHitScr $tmpOut.sort > $tmpOut.sort.BH\n";
-		$cmd .= "awk '{printf (\"%s\\t%s\\n\", \$1,\$$colSel)}' $tmpOut.sort.BH |sort > $outF\n";
-		$cmd .= "rm -f -r $tmpOut* $subFls[$i]\n";
+		#best hit per gene (the helper does not need sorted input)
+		$cmd .= "$hmmBestHitScr $tmpOut > $tmpOut.BH\n";
+		$cmd .= "$awkBin '{printf (\"%s\\t%s\\n\", \$1,\$$colSel)}' $tmpOut.BH | LC_ALL=C $sortBin > $outF.tmp\n$mvBin $outF.tmp $outF\n";
+		$cmd .= "$rmBin -f -r $tmpOut*\n"; #the catalog chunks are removed by the collect job
 		my $jobName = "$DB"."_$i";
 		#die $cmd."\n";
-		my ($cmdRaw,$jdep) = qsubSystem($qsubDir."$DB$i.sh",$cmd,$N,"1G",$jobName,"","",1,[],$QSBoptHR);
-		push(@jdeps,$jdep);
+		my ($jobDep,$jobCmd) = qsubSystem($qsubDir."$DB$i.sh",$cmd,$N,"1G",$jobName,"","",1,[],$QSB);
+		push(@jdeps,$jobDep);
 		push(@allFiles,$outF);
 		#if ($i==5){die;}
 	}
-	$QSBoptHR->{tmpSpace} = $tmpSHDD; 
 	#last job that converges all
 	my $assigns = "$GCd/$DB.assign.txt";
-	my $cmd= "cat ".join(" ",@allFiles). " > $assigns\n";
-	$cmd .= "rm -f ".join(" ",@allFiles) . "\n";
+	my $cmd= "$catBin ".join(" ",@allFiles). " > $assigns.tmp\n$mvBin $assigns.tmp $assigns\n";
+	$cmd .= "$rmBin -f ".join(" ",@allFiles) . "\n";
+	$cmd .= "$rmBin -rf $splitDir\n";
 	#tr [:blank:] \\t
 	$cmd .= "$rareBin sumMat -i $GCd/$countMatrixF.gz -o $GCd/$DB.mat -t 1 -refD $assigns $rtkFunDelims \n";
-	$tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = "0"; 
-	($cmd,$jdep) = qsubSystem($qsubDir."collect$DB.sh",$cmd,1,"40G","$DB"."Col",join(";",@jdeps),"",1,[],$QSBoptHR);
-	$QSBoptHR->{tmpSpace} =$tmpSHDD;
+	$QSB->{tmpSpace} = "0";
+	my ($collectDep,$collectCmd) = qsubSystem($qsubDir."collect$DB.sh",$cmd,1,"40G","$DB"."Col",join(";",@jdeps),"",1,[],$QSB);
 	#return $jdep,$outF;
 }
 
@@ -3212,3 +3395,254 @@ sub FOAMassign{
 
 
 # /g/bork3/home/hildebra/bin/bbmap/./dedupe.sh in=/g/scb/bork/hildebra/SNP/GCs/SimuB/B0/compl.fna out=/g/scb/bork/hildebra/SNP/GCs/SimuB/X0/ddtest.compl.fna exact=f threads=20 outd=/g/scb/bork/hildebra/SNP/GCs/SimuB/X0/drop.fna minidentity=95 storename=t renameclusters=t usejni=t cluster=t k=18 -Xmx50g
+
+
+#--------------------------- functional annotation helpers ---------------------------
+#catalog-specific tag for shared temp dirs, so two catalogues never share split files
+sub _gcTmpTag{
+	my $p = Cwd::abs_path($GCdir); $p = $GCdir unless (defined $p);
+	return substr(Digest::MD5::md5_hex("$p|$cdhID"),0,10);
+}
+#catalog chunk size for a -functDB database: smaller for KEGG/eggNOG, whose DIAMOND temp files grow with the chunk
+sub _funcSplitSize{
+	my ($db) = @_;
+	return bigFuncDB($db) ? $fastaSplitsBig : $fastaSplits;
+}
+#catalog split shared by all -functDB databases with the same chunk size
+sub _funcSplitDir{
+	my ($size) = @_;
+	my $d = "$GLBtmp/funcSplit_"._gcTmpTag();
+	$d .= "_$size" if (defined($size) && $size ne $fastaSplits);
+	return "$d/";
+}
+sub _funcTmpDir{
+	return "$tmpDir/GCanno_"._gcTmpTag()."/";
+}
+sub _emapSplitDir{
+	return "$GLBtmp/eggNOGmapper_"._gcTmpTag()."/";
+}
+#record of the eggNOG-mapper data dir behind a catalog's eggNOG-mapper annotations ("data_dir<TAB>path"),
+#written when annotation jobs are submitted. Annotations without a record (older runs) are kept.
+sub _emapParamF{
+	my ($GCd) = @_;
+	return "$GCd/Anno/Func/emapper/.emapper.params";
+}
+sub _emapDataID{
+	my ($d) = @_;
+	my $p = Cwd::abs_path($d); $p = $d unless (defined $p);
+	$p =~ s{/+$}{};
+	return $p;
+}
+#1 if the catalog's eggNOG-mapper annotations were made with other data than the configured eggNOGm_path_DB
+sub _emapDataChanged{
+	my ($GCd) = @_;
+	my $old = _readInflight(_emapParamF($GCd))->{data_dir}; #plain "key<TAB>value" reader
+	return 0 unless (defined($old));
+	return ($old ne _emapDataID(getProgPaths("eggNOGm_path_DB"))) ? 1 : 0;
+}
+#a chunk that failed in the annotation of a one-step run (geneCat 0.64) still has its finished DIAMOND search: before
+#annotating, eggNOG-mapper wrote the complete .seed_orthologs and sorted it (atomically) into .seed_orthologs.sorted.
+#Reused as the chunk's seed file if both are newer than the chunk FASTA, the sorted file the newer. 1 if reused
+sub _emapSalvageSeeds{
+	my ($f) = @_;
+	return 0 if (-s "$f.seeds");
+	my $so = "$f.part.emapper.seed_orthologs";
+	return 0 unless (-s "$so.sorted" && -e $so && (-M "$so.sorted") <= (-M $so) && (-M $so) <= (-M $f));
+	return rename("$so.sorted", "$f.seeds") ? 1 : 0;
+}
+#parameters recorded in (and required by) the functional-annotation checkpoint
+sub _funcStoneParams{
+	return (functDB => $curDB_o, functAligner => $funcAligner,
+		cutoffs => join(",", $minEVal, $minPerID, $minBitSc, $minAlLeng, $minPercSbjCov, $minPercQueryCov));
+}
+#$funcDBdefault without the optional databases that are not installed
+sub _defaultFuncDBs{
+	my @keep;
+	foreach my $db (split /,/, $funcDBdefault){
+		if ($funcDBoptional{$db}){
+			my $why = _optionalFuncDBmissing($db);
+			if ($why ne ""){
+				print "NOTE: optional functional database $db not installed, skipped ($why)\n";
+				next;
+			}
+		}
+		push @keep, $db;
+	}
+	return join(",", @keep);
+}
+#"" if a -functDB database can be used, else why not
+sub _optionalFuncDBmissing{
+	my ($db) = @_;
+	my ($DBpath) = eval { getSpecificDBpaths($db,0) };
+	unless (defined($DBpath)){
+		my $e = $@; $e =~ s/^getSpecificDBpaths:: //; $e =~ s/\s+$//;
+		return $e;
+	}
+	if ($db =~ m/^(VDB|VFA|VFB)$/ && vfTabStale($DBpath)){ #VF.tab is built from both VFDB sets
+		foreach my $set (qw(VFDB_setA_pro.fas VFDB_setB_pro.fas)){
+			return "$DBpath$set is needed to build VF.tab" unless (-e "$DBpath$set" || -e "$DBpath$set.gz");
+		}
+	}
+	return "";
+}
+#------ in-progress markers of the functional stages (FuncAssign, FuncEMAP) ------
+#Before submitting, a stage creates Anno/Func/.<stage>.inflight (exclusively) and then records its final job in it;
+#that job removes the marker after writing the stage stone. While the final job is queued or running, the stage is
+#not submitted again (a second geneCat run would otherwise duplicate every job and the first run's final job would
+#delete the catalog split under the second run's jobs). A final job that can never run (Slurm
+#DependencyNeverSatisfied after a failed job), a finished one, or a submitter that died make the marker stale.
+sub _inflightMarker{
+	my ($stage) = @_;
+	return "$GCdir/Anno/Func/.$stage.inflight";
+}
+sub _readInflight{
+	my ($f) = @_;
+	open my $fh, '<', $f or return {};
+	my %r;
+	while (my $l = <$fh>){
+		$l =~ s/[\r\n]+$//;
+		my ($k,$v) = split /\t/, $l, 2;
+		$r{$k} = $v if (defined($v));
+	}
+	close $fh;
+	return \%r;
+}
+#state of a submitted job: 'alive' (queued or running), 'dead' (pending on a dependency that failed) or 'gone'
+sub _stageJobState{
+	my ($job, $seen) = @_;
+	my $qmode = $QSBoptHR->{qmode} // 'slurm';
+	return 'gone' if ($qmode eq 'bash');
+	my $id = $job;
+	my $rTag = $QSBoptHR->{rTag} // '';
+	$id =~ s/^\Q$rTag\E// if ($rTag ne '');
+	return 'gone' unless ($id =~ /^\d+$/);
+	if ($qmode eq 'slurm'){
+		my $out = `squeue -h -j $id -o "%T|%r|%E" 2>&1`;
+		if ($? == 0){
+			return 'gone' unless ($out =~ /\S/);
+			return 'dead' if ($out =~ /DependencyNeverSatisfied/i);
+			#runs before supervision chained a stage's jobs with afterok: behind a failed job, Slurm reports
+			#DependencyNeverSatisfied only for its direct dependents and "Dependency" for every job further down,
+			#so a final job waiting on a stuck job is stuck too
+			if ($out =~ /^PENDING\|Dependency\|(.*)$/m){
+				my $deps = $1;
+				$seen ||= { $id => 1 };
+				foreach my $dep ($deps =~ /(\d+)/g){
+					next if ($seen->{$dep}++);
+					return 'dead' if (_stageJobState($dep, $seen) eq 'dead');
+				}
+			}
+			return 'alive';
+		}
+		return 'gone' if ($out =~ /Invalid job id/i); #purged from the controller
+	}
+	return numLiveUserJobs($QSBoptHR, 0, $id) ? 'alive' : 'gone'; #other schedulers, or a transient squeue error
+}
+#"" if the stage may be submitted (a stale marker is removed), else why not
+sub _stageInFlight{
+	my ($stage) = @_;
+	my $f = _inflightMarker($stage);
+	return "" unless (-e $f);
+	my $r = _readInflight($f);
+	if (defined($r->{job}) && $r->{job} ne ""){
+		my $state = _stageJobState($r->{job});
+		return "$stage jobs from an earlier submission are still queued or running (final job $r->{job})" if ($state eq 'alive');
+		print "$stage: final job $r->{job} of an earlier submission waits on a failed job and can never run; cancel it with your scheduler\n" if ($state eq 'dead');
+	} else { #being submitted right now, or the submitter died before recording its final job
+		my $host = $r->{host} // ''; my $pid = $r->{pid} // '';
+		my $sameHost = ($host eq hostname() && $pid =~ /^\d+$/);
+		my @st = CORE::stat($f); #File::stat overrides stat in this script
+		my $age = time - ($st[9] // 0);
+		if (($sameHost && kill(0, $pid)) || (!$sameHost && $age < 7200)){
+			return "$stage is being submitted by another process ($host, pid $pid)";
+		}
+	}
+	print "Removing stale $stage in-progress marker $f\n";
+	unlink $f;
+	return "";
+}
+#creates the marker exclusively; 0 if another process created it first
+sub _inflightAcquire{
+	my ($stage) = @_;
+	my $f = _inflightMarker($stage);
+	make_path(dirname($f)) unless (-d dirname($f));
+	sysopen(my $fh, $f, O_WRONLY|O_CREAT|O_EXCL) or return 0;
+	print {$fh} "host\t".hostname()."\npid\t$$\ntime\t".time."\n";
+	close $fh;
+	return 1;
+}
+sub _inflightRecordJob{
+	my ($stage,$job) = @_;
+	my $f = _inflightMarker($stage);
+	return unless (-e $f); #already removed: the final job ran synchronously (local execution)
+	if (!defined($job) || $job eq ""){ unlink $f; return; }
+	open my $fh, '>>', $f or die "Cannot update $f: $!\n";
+	print {$fh} "job\t$job\n";
+	close $fh;
+}
+#runs a functional stage under supervision: while $build runs, qsubSystem records its jobs (Mods::JobGraph); they are
+#then submitted as their prerequisites complete, and jobs killed for lack of memory (or lost to a node failure) are
+#resubmitted, with 1.5x memory after an OOM, up to GENECAT_FUNC_ATTEMPTS (3) attempts; so are jobs that failed with a
+#known transient error (an eggNOG-mapper annotation worker timeout). This process stays alive until every job finished;
+#the stage's final job writes the stone and removes the in-flight marker. Dies with a report if a job failed for good
+#(its dependents are not run, the others are).
+sub _superviseFuncStage{
+	my ($stage, $build) = @_;
+	my $graph = newJobGraph();
+	{
+		local $QSBoptHR->{jobGraph} = $graph;
+		$build->();
+	}
+	#a second geneCat run sees the stage busy while this controller job is alive
+	_inflightRecordJob($stage, $ENV{SLURM_JOB_ID}) if (defined($ENV{SLURM_JOB_ID}) && $ENV{SLURM_JOB_ID} =~ /^\d+$/);
+	my $res = runJobGraph($graph, $QSBoptHR, max_attempts => ($ENV{GENECAT_FUNC_ATTEMPTS} || 3), label => $stage,
+		transient => qr/Annotation worker timed out/);
+	die jobGraphReport($res) . "Fix the reported cause and rerun geneCat; finished jobs are not repeated.\n" unless ($res->{ok});
+	print "$stage: all jobs finished" . (@{$res->{retried}} ? " (" . scalar(@{$res->{retried}}) . " needed a resubmission)" : "") . "\n";
+	return "";
+}
+#runs a stage's submission under its marker; $submit returns the final job id
+sub _submitStageOnce{
+	my ($stage,$submit) = @_;
+	my $busy = _stageInFlight($stage);
+	if ($busy ne ""){ print "$busy: not submitting again\n"; return; }
+	unless (_inflightAcquire($stage)){ print "$stage was just submitted by another process: not submitting again\n"; return; }
+	my $finalJob = eval { $submit->() };
+	if ($@){ my $err = $@; unlink _inflightMarker($stage); die $err; }
+	_inflightRecordJob($stage, $finalJob);
+}
+
+#per-database parameter record (Anno/Func/.<DB>.params), "key<TAB>value" lines: aligner, alnEval (e-value the
+#alignments were made with) and the parser cutoffs. Returns a hash ref, or undef if missing or incomplete.
+sub _readFuncParams{
+	my ($f) = @_;
+	return undef unless (-s $f);
+	open my $fh, '<', $f or return undef;
+	my %r;
+	while (my $l = <$fh>){
+		$l =~ s/[\r\n]+$//;
+		my ($k,$v) = split /\t/, $l, 2;
+		$r{$k} = $v if (defined($v));
+	}
+	close $fh;
+	for my $k (qw(aligner alnEval eval percID minBitScore minAlignLen minPercSbjCov minPercQueryCov)){
+		return undef unless (defined($r{$k}) && $r{$k} ne "");
+	}
+	return undef unless ($r{alnEval} =~ /^[-+.eE\d]+$/); #compared numerically
+	return \%r;
+}
+sub _writeFuncParams{
+	my ($f,$p) = @_;
+	my $tmp = "$f.tmp.$$";
+	open my $fh, '>', $tmp or die "Cannot write $tmp: $!\n";
+	print {$fh} map { "$_\t$p->{$_}\n" } sort keys %{$p} or die "Cannot write $tmp: $!\n";
+	close $fh or die "Cannot close $tmp: $!\n";
+	rename($tmp, $f) or die "Cannot rename $tmp to $f: $!\n";
+}
+#copy of the qsub options hash: per-job settings (constraints, tmp space, qsubDir) don't leak into later jobs
+sub _qsbCopy{
+	my ($h) = @_;
+	my %c = %{$h};
+	$c{constraint} = [ @{ $h->{constraint} || [] } ];
+	return \%c;
+}

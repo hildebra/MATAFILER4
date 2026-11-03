@@ -12,8 +12,6 @@ dependencies:
 #  - bioconda::mash=2.3
 #  - whokaryote=1.1.2 (downgrades pytorch etc..)
 #  - checkm2 >= 1 (downgrades pytorch etc..)
-  - motus=3.1
-#  - bioconda::metaphlan=4.1 (requires R, too many requirements.. separate package
   - gsl=2.6
 #  - samtools=1.16
 #  - bzip2=1.0.8

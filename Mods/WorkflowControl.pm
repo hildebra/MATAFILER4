@@ -130,6 +130,7 @@ sub commands_are_lightweight_filesystem {
 		return 0 if $command =~ /(?:\|\||&&|[|<>`]|\$\()/;
 		my ($program) = $command =~ /^(\S+)/;
 		return 0 unless defined $program;
+		$program =~ s/^'([^']*)'$/$1/; # words built by _shell_command are single-quoted
 		$program =~ s{.*/}{};
 		return 0 unless $program =~ /^(?:ln|mkdir|touch|rm|sleep|echo)$/;
 	}

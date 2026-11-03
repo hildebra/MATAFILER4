@@ -19,11 +19,11 @@ sub sample_row {
 	my (%override) = @_;
 	my %row = map { $_ => 0 } @columns;
 	@row{qw(
-		selected_mgs min_genes_per_mgs presort_genes max_genes qc_enabled
+		selected_mgs min_genes_per_mgs presort_genes max_genes tree_locus_budget qc_enabled
 		min_gene_depth min_bad_loci multi_gene_fraction_max csp_gene_fraction_max
 		csp_locus_score_max breakpoint_gene_flank abundance_min_loci
 		abundance_min_fold abundance_max_fold abundance_max_modified_z
-	)} = (230, 8, 1200, 400, 1, 1, 3, 0.25, 0.05, 0.1, 50, 8, 1 / 3, 3, 3.5);
+	)} = (230, 8, 1200, 600, 400, 1, 1, 3, 0.25, 0.05, 0.1, 50, 8, 1 / 3, 3, 3.5);
 	@row{keys %override} = values %override;
 	$row{used_mgs_loci_histogram} = encode_loci_histogram([], $row{min_genes_per_mgs})
 		unless exists $override{used_mgs_loci_histogram};
@@ -60,7 +60,8 @@ is($summary->{used_fraction}, '0.650000',
 is($summary->{retained_loci}, 9608, 'retained loci are summed');
 is($summary->{mean_loci_per_used_mgs}, '369.538',
 	'mean retained loci is calculated across all used MGS');
-is($summary->{max_genes}, 400, 'selected control parameters are retained');
+is($summary->{max_genes}, 600, 'the expanded extraction-pool control is retained');
+is($summary->{tree_locus_budget}, 400, 'the bounded final-tree budget is retained separately');
 is($summary->{used_mgs_loci_histogram},
 	'8-9=26,10-19=0,20-49=0,50-99=0,100-199=0,200-499=0,500-999=0,1000-1999=0,2000+=0',
 	'aggregate retains an exact binned count of used MGS by retained loci');

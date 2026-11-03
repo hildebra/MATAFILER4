@@ -12,7 +12,14 @@ use IO::Compress::Gzip qw(gzip $GzipError);
 use Mods::GenoMetaAss qw(systemW);
 use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile);
 
-my $VERSION = '0.6';
+my $VERSION = '0.7';
+# Every marker publishes all three read roles; MATAF4's completion evidence
+# (Mods::RibosomeState) requires each of them.
+my %PUBLISHED_SUFFIX = (
+	r1 => 'r1.fq.gz',
+	r2 => 'r2.fq.gz',
+	single => 'fq.gz',
+);
 my ($read1, $read2, $readS) = ('', '', '');
 my ($alignPath, $tmpRoot, $sample, $configFile) = ('', '', '', '');
 my $threads = 1;
@@ -72,11 +79,10 @@ my $tmpPath = File::Spec->catdir(
 make_path($tmpPath);
 
 for my $tag (qw(SSU LSU)) {
-	repairInvalidCheckpoint(
-		$alignPath, $tag, $hasPairs, $hasSingles,
-	);
+	backfillAbsentRoles($alignPath, $tag, $hasPairs, $hasSingles);
+	repairInvalidCheckpoint($alignPath, $tag);
 }
-if (allMarkersComplete($alignPath, $hasPairs, $hasSingles)) {
+if (allMarkersComplete($alignPath)) {
 	print "All RiboFind SortMeRNA targets are complete\n";
 	remove_tree($tmpPath);
 	exit 0;
@@ -88,7 +94,7 @@ announceSortmerna($sortmerna);
 
 print "Skipping ITS\n";
 for my $tag (qw(SSU LSU)) {
-	next if markerComplete($alignPath, $tag, $hasPairs, $hasSingles);
+	next if markerComplete($alignPath, $tag);
 
 	my $referenceKey = $tag eq 'SSU' ? 'SSUdbFAsrt' : 'LSUdbFAsrt';
 	my $indexKey = $tag eq 'SSU' ? 'SSUidx' : 'LSUidx';
@@ -112,7 +118,7 @@ for my $tag (qw(SSU LSU)) {
 	publishMarkerOutputs($tmpPath, $alignPath, $tag, \%outputs);
 	touchFile(File::Spec->catfile($alignPath, "${tag}_pull.sto"));
 	die "$tag checkpoint could not be validated after publication\n"
-		unless markerComplete($alignPath, $tag, $hasPairs, $hasSingles);
+		unless markerComplete($alignPath, $tag);
 }
 
 remove_tree($tmpPath) if -d $tmpPath;
@@ -127,44 +133,69 @@ sub parseReadList {
 }
 
 
+sub publishedPath {
+	my ($directory, $tag, $kind) = @_;
+	return File::Spec->catfile(
+		$directory, "reads_$tag.$PUBLISHED_SUFFIX{$kind}",
+	);
+}
+
+
 sub allMarkersComplete {
-	my ($directory, $hasPaired, $hasSingle) = @_;
+	my ($directory) = @_;
 	for my $tag (qw(SSU LSU)) {
-		return 0 unless markerComplete(
-			$directory, $tag, $hasPaired, $hasSingle,
-		);
+		return 0 unless markerComplete($directory, $tag);
 	}
 	return 1;
 }
 
 
+# The same contract MATAF4 checks before it closes a sample: a marker is
+# complete only with its stone and all three published read roles. Judging
+# by the current input layout alone let a marker count as complete here while
+# MATAF4 kept resubmitting it.
 sub markerComplete {
-	my ($directory, $tag, $hasPaired, $hasSingle) = @_;
+	my ($directory, $tag) = @_;
 	return 0 unless -e File::Spec->catfile(
 		$directory, "${tag}_pull.sto",
 	);
-	if ($hasPaired) {
-		return 0 unless -s File::Spec->catfile(
-			$directory, "reads_${tag}.r1.fq.gz",
-		);
-		return 0 unless -s File::Spec->catfile(
-			$directory, "reads_${tag}.r2.fq.gz",
-		);
-	}
-	if ($hasSingle) {
-		return 0 unless -s File::Spec->catfile(
-			$directory, "reads_${tag}.fq.gz",
-		);
+	for my $kind (qw(r1 r2 single)) {
+		return 0 unless -s publishedPath($directory, $tag, $kind);
 	}
 	return 1;
+}
+
+
+# Before 0.6 a marker published only the read roles its input had (no
+# singleton file for pair-only input), or a zero-byte placeholder. A fresh run
+# writes an empty gzip container for a role without input, so write that
+# instead of repeating the SortMeRNA search. Roles the input does have must
+# already be published; otherwise the marker is rerun.
+sub backfillAbsentRoles {
+	my ($directory, $tag, $hasPaired, $hasSingle) = @_;
+	return unless -e File::Spec->catfile($directory, "${tag}_pull.sto");
+	my %inInput = (r1 => $hasPaired, r2 => $hasPaired, single => $hasSingle);
+	for my $kind (grep { $inInput{$_} } qw(r1 r2 single)) {
+		return unless -s publishedPath($directory, $tag, $kind);
+	}
+	for my $kind (grep { !$inInput{$_} } qw(r1 r2 single)) {
+		my $path = publishedPath($directory, $tag, $kind);
+		next if -s $path;
+		my $staged = "$path.empty.$$";
+		my $empty = '';
+		gzip(\$empty => $staged)
+			or die "Cannot create empty gzip output $staged: $GzipError\n";
+		rename($staged, $path)
+			or die "Cannot install $path atomically: $!\n";
+	}
 }
 
 
 sub repairInvalidCheckpoint {
-	my ($directory, $tag, $hasPaired, $hasSingle) = @_;
+	my ($directory, $tag) = @_;
 	my $stone = File::Spec->catfile($directory, "${tag}_pull.sto");
 	return unless -e $stone;
-	return if markerComplete($directory, $tag, $hasPaired, $hasSingle);
+	return if markerComplete($directory, $tag);
 	warn "$tag profile checkpoint has missing or empty outputs; rerunning marker\n";
 	invalidateMarkerState($directory, $tag);
 }
@@ -174,6 +205,11 @@ sub invalidateMarkerState {
 	my ($directory, $tag) = @_;
 	my $lcaDir = File::Spec->catdir($directory, 'ltsLCA');
 	for my $path (
+		# Older versions unpacked the published reads in place; such plain
+		# files would outlive the rerun's output.
+		(map {
+			File::Spec->catfile($directory, "reads_$tag.$_")
+		} qw(r1.fq r2.fq fq)),
 		File::Spec->catfile($directory, "${tag}_pull.sto"),
 		File::Spec->catfile($lcaDir, "${tag}_ass.sto"),
 		File::Spec->catfile($lcaDir, 'Assigned.sto'),
@@ -282,14 +318,9 @@ sub assertGzipOutput {
 
 sub publishMarkerOutputs {
 	my ($workDir, $destinationDir, $tag, $outputs) = @_;
-	my %suffix = (
-		r1 => 'r1.fq.gz',
-		r2 => 'r2.fq.gz',
-		single => 'fq.gz',
-	);
 	for my $kind (qw(r1 r2 single)) {
 		my $staged = File::Spec->catfile(
-			$workDir, "reads_$tag.$suffix{$kind}.publish",
+			$workDir, "reads_$tag.$PUBLISHED_SUFFIX{$kind}.publish",
 		);
 		if (@{$outputs->{$kind}}) {
 			concatenateFiles($outputs->{$kind}, $staged);
@@ -299,10 +330,7 @@ sub publishMarkerOutputs {
 				or die "Cannot create empty gzip output $staged: $GzipError\n";
 		}
 		assertGzipOutput($staged);
-		my $destination = File::Spec->catfile(
-			$destinationDir, "reads_$tag.$suffix{$kind}",
-		);
-		installAtomically($staged, $destination);
+		installAtomically($staged, publishedPath($destinationDir, $tag, $kind));
 	}
 }
 

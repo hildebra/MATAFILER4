@@ -1,0 +1,43 @@
+{
+   "completed_empty_member_case" : {
+      "empty_members_accounted" : 0,
+      "final_hybrid_ready" : 0,
+      "packages" : 1,
+      "target_members" : 2,
+      "visited_members" : 2
+   },
+   "events" : [
+      {
+         "deps" : "run100",
+         "job" : "assembly"
+      },
+      {
+         "deps" : "run200",
+         "job" : "genes"
+      },
+      {
+         "deps" : "run200",
+         "job" : "mapping"
+      },
+      {
+         "deps" : "run202;run200;run201",
+         "job" : "binning",
+         "scratch" : "/scratch/empty"
+      },
+      {
+         "advance_loop" : 0,
+         "cleaned_empty" : 0,
+         "input_dependency" : "",
+         "job" : "empty-finalizer"
+      }
+   ],
+   "sample_dependencies" : [
+      "run200",
+      "run201",
+      "run202",
+      "run203"
+   ],
+   "trace" : "Final assembly-group member empty is terminally empty; releasing the shared assembly from earlier eligible members\nSubmitting deferred assembly-group mapping jobs\nSubmitting deferred assembly-group binner\nFIN: 1 (1 packages + 0 without-primary) >= 2\n",
+   "unreleased_statistics" : "statistics command",
+   "unreleased_variants" : "variant command"
+}

@@ -1,12 +1,12 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
 # Examples
 
 
-The example commands below use the current canonical MATAF4.pl option names. Several legacy aliases are still accepted by the uploaded `MATAF4.pl`; see [Flag reference](flag_reference.md) for aliases and exact argument types.
+The example commands below use the current canonical MATAF4.pl option names. Several legacy aliases are still accepted by `MATAF4.pl`; see [Flag reference](flag_reference.md) for aliases and exact argument types.
 
 ## Examples
 
@@ -16,18 +16,69 @@ After a run has completed, use [MATAFILER4 outputs](outputs.md) to identify the 
   
 ### MATAFILER4 example dataset
 
-We have prepared an example dataset that can be run directly after installing MATAFILER4 and configuring it (see above). This example will 1) download public short and long read metagenomes 2) assemble short reads and 3) assemble short+long reads (hybrid assembly).
+The `examples` directory contains three runnable MATAFILER workflows:
 
-Please go to the directory MATAFILER4/examples/
+| Script | Mapping file | Inputs demonstrated |
+|---|---|---|
+| `1.runMATAFILER_illumina.mfc` | `maps/testAG.map` | Local Illumina FASTQs |
+| `2.runMATAFILER_hybrid.mfc` | `maps/testPB.map` | Local Illumina plus PacBio reads |
+| `3.runMATAFILER_accessions.mfc` | `maps/testAccessions.map` | Local Illumina plus automatic ENA and NCBI SRA downloads |
 
-To download all required data, run first 
-```{sh}
+Start in the MATAFILER4 example directory and download the shared local input
+data used by all three workflows:
+
+```bash
+cd "$MF4DIR/examples"
 bash 0.getExmplData.sh
 ```
 
-After this is finished (check in the newly created MATAFILER4/examples/data/ dir for ~1.3Gb of data), you can either run `1.runMF4_illumina.mfc` (short read metagenomics) or `2.runMF4_hybrid.mfc` (short+long reads). Note that these are non-sensical examples, i.e. the short and long reads are from completely independent experiments, don't expect interpretable results, this is purely to check if the technical process can run to completion.
+When that finishes, check the newly created `examples/data` directory for about
+1.3 GB of data. Then run one of the scripts above with Bash. These are technical
+workflow tests, not biologically meaningful analyses: several reads are from
+independent experiments and should not be interpreted together.
 
-How do you know everything finished as it should? Wait until all submitted jobs have finished, run the 1. or 2. script again until it reports that nothing is left to do. (Note:kill eventual "DependencyNeverSatisified" jobs for 1-2 times, if persists there might be a problem with runnning certain programs, where you need to start checking error logs, see Q&A below). Once everything is finished, MATAFILER4's postprocessing should complete and you will be able to find metagStats.txt and metagStatsReport.html - browse these files to get an overview of the data. 
+### Example 3: mixed local, ENA, and SRA inputs
+
+Example 3 reuses the `SRR8797712` Illumina files downloaded by
+`0.getExmplData.sh`, then lets MATAF4 acquire one small public metagenome from
+each archive provider:
+
+| MATAFILER sample | Source | Accession | Archive description | Compressed FASTQ size |
+|---|---|---|---|---:|
+| `LocalEx1` | Local files | `SRR8797712` | Existing Example 1 Illumina input | already downloaded |
+| `ENApublic` | ENA/EBI | [`ERR10009595`](https://www.ebi.ac.uk/ena/browser/view/ERR10009595) | Paired Illumina MiSeq human-fecal WGS metagenome | about 57 MB |
+| `SRApublic` | SRA/NCBI | [`SRR10090860`](https://www.ncbi.nlm.nih.gov/sra/SRR10090860) | Paired Illumina NextSeq mud-microcosm shotgun WGS metagenome | about 19 MB |
+
+The public-run metadata and sizes were checked on 16 August 2026. Archive records
+can change, so treat a later provider-side withdrawal or file replacement as an
+external-data failure rather than silently changing the map to unrelated data.
+
+Activate the base `MF4` Conda environment so that `wget`, `prefetch`,
+`fasterq-dump`, and `vdb-validate` are available to submitted jobs, then run:
+
+```bash
+cd "$MF4DIR/examples"
+bash 3.runMATAFILER_accessions.mfc
+```
+
+On the first pass, MATAF4 submits the two archive acquisitions to
+`downloadQueue` (the shipped setting is `nbi-download`) and defers those
+samples. Wait for all submitted jobs to finish and rerun the script. Subsequent
+passes perform filtering, assembly, mapping, and cleanup. Repeat until MATAF4
+reports that no work remains.
+
+The map intentionally gives the archive samples a `SmplID` but leaves
+`SmplPrefix`, `Path`, and `SeqTech` unset. MATAF4 infers Illumina technology
+from provider metadata, keeps validated FASTQs in shared scratch, and writes
+`input_accession.json` to each permanent sample output. The archive reads are
+removed after that sample passes the finished-sample cleanup barrier. See
+[Downloading ENA and SRA samples from a mapping file](mapping_files.md#downloading-ena-and-sra-samples-from-a-mapping-file)
+for the complete mapping rules and failure/retry behavior.
+
+For Examples 1 and 2, follow the same wait-and-rerun pattern. If dependency
+failures persist, inspect the job error logs and see the [FAQ](FAQ.md). Once a
+workflow is complete, inspect `metagStats.txt` and `metagStatsReport.html` for
+an overview of the processed data.
 
 In the next section we will give examples on how to create your own MATAFILER4 runs.
   
@@ -82,11 +133,11 @@ perl $MF4DIR/MATAF4.pl -map $MAP -assembleMG 2 -assemblCores 12 -assemblyKmers "
 
 #### 4. Running MATAFILER4
 
-- Run with `bash run_mf4_mhit.sh` --> this will submit a lot of different jobs to the HPC queue
+- Run with `bash run_mf4_mhit.mfc` --> this will submit a lot of different jobs to the HPC queue
 
  console output:
 ```
-        This is MATAFILER4 0.33
+        This is MATAFILER4 v4.49
         Using qsubsystem: slurm
         Using qsubsystem: slurm
         /projects/data/results/mf4_test1/LOGandSUB/qsub.log
@@ -102,20 +153,20 @@ perl $MF4DIR/MATAF4.pl -map $MAP -assembleMG 2 -assemblCores 12 -assemblyKmers "
         SUB:_CS1
 ```
 
-- more advanced usage: run `sbatch run_mf4_mhit.sh`. This will submit the job to the cluster queue, and from there the .mfc job will submit more jobs. The output from MATAFILER4 will be stored in `#SBATCH -o [currentDir]/run_mf4_mhit.mfc.otxt` and `#SBATCH -e [currentDir]/run_mf4_mhit.mfc.etxt` defined above.
+- more advanced usage: run `sbatch run_mf4_mhit.mfc`. This will submit the job to the cluster queue, and from there the .mfc job will submit more jobs. The output from MATAFILER4 will be stored in `#SBATCH -o [currentDir]/run_mf4_mhit.mfc.otxt` and `#SBATCH -e [currentDir]/run_mf4_mhit.mfc.etxt` defined above.
 
 
 #### 5. rerun MATAFILER4
 
 MATAFILER4 is conceptualized to detect automatically if certain steps need to be run again (e.g. because the job crashed or some files from other subjobs were not yet available). Therefore you will usually need to rerun the same MATAFILER4 command several times. **However, before restarting MATAFILER4 make sure that all job submissions from your previous run have completed (or don't start due to job dependecies)!**
 
-- Once MATAFILER4 detects no further jobs to be submitted, it will let you know (check the output of the RUN.mfc command). At this point you can advance to creating a gene catalog. MATAFILER4 will create a `GeneCat.sh` script (detailed in RUN.mfc output).
+- Once MATAFILER4 detects no further jobs to be submitted, it will let you know (check the output of the RUN.mfc command). At this point you can advance to creating a gene catalog. MATAFILER4 will create a `GeneCat_pre.sh` script (detailed in RUN.mfc output).
 
-#### 6. building a gene catalog by running the `GeneCat.sh` script
+#### 6. building a gene catalog by running the `GeneCat_pre.sh` script
 
 - After every sample has successfully passed through the pipeline, MATAFILER4 produces `GeneCat_pre.sh` script that needs to be adapted:
 
-- In the `GeneCat.sh` script you need to specify an output directory, max memory usage and the cores you want to use. After that the script can look like this:
+- In the `GeneCat_pre.sh` script you need to specify an output directory, max memory usage and the cores you want to use. After that the script can look like this:
 
 ```{sh}
 #!/bin/bash
@@ -134,9 +185,9 @@ perl $MF4DIR/secScripts/geneCat.pl \
 		-Binner 2 -useCheckM1 0 -useCheckM2 1 -MGset GTDB 
 ```
 
-- now you have to run the GeneCat.sh script with `sbatch GeneCat.sh`, which will submit a lot of different jobs to the cluster.
+- now you have to run the adapted script with `sbatch GeneCat_pre.sh`, which will submit a lot of different jobs to the cluster.
 
-- This step of the pipeline calls `GeneCat.pl` and does:
+- This step of the pipeline calls `geneCat.pl` and does:
 
     - creates a gene catalog (at 95% id) from predicted genes using mmSeqs2
     - extracts proteins corresponding to genes in gen catalog
@@ -199,7 +250,7 @@ perl $MF4DIR/MATAF4.pl -map $MAP -inputFQregex1 '.*_1\.f[^\.]*q\.gz$' -inputFQre
 
 #### 4. rerun MATAFILER4  
 
-- wait till all current jobs are finished, then rerun `sbatch run_independent.mfc`. This will check all jobs completed, and if so, create the feature abundance tables requested. In the above case these are KEGG, eggNOG and CAZy functional tables, as well as metaphlan3 and miTAG taxonomic tables.
+- wait till all current jobs are finished, then rerun `sbatch run_independent.mfc`. This will check all jobs completed, and if so, create the feature abundance tables requested. In the above case these are KEGG, eggNOG and CAZy functional tables, as well as MetaPhlAn 4 and miTAG taxonomic tables.
 
 
 ### Hybrid assemblies

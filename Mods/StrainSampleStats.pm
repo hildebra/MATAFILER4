@@ -4,6 +4,8 @@ use strict;
 use warnings;
 
 use Exporter qw(import);
+use File::Basename qw(basename);
+use Mods::GenoMetaAss qw(gzipopen);
 
 our @EXPORT_OK = qw(
 	sample_stat_columns
@@ -11,12 +13,43 @@ our @EXPORT_OK = qw(
 	aggregate_sample_rows
 	encode_loci_histogram
 	loci_histogram_rows
+	count_msa_samples
 );
+
+# Count the union of samples with informative sequence in retained primary
+# loci. Protein checkpoints and synonymous-site subsets must not double count
+# nucleotide loci. This also supports pre-report MSA-only outputs on resume.
+sub count_msa_samples {
+	my ($artifacts, $outgroup) = @_;
+	$outgroup //= '';
+	my @primary = grep {
+		basename($_) !~ /^MSAli/ && !/\.(?:syn|nonsyn)\.fna(?:\.gz)?\z/
+	} @{$artifacts};
+	my @nucleotide = grep { /\.fna(?:\.gz)?\z/ } @primary;
+	my @paths = @nucleotide ? @nucleotide
+		: grep { /\.faa(?:\.gz)?\z/ } @primary;
+	my $informative = @nucleotide ? qr/[ACGTU]/i : qr/[ACDEFGHIKLMNPQRSTVWY]/i;
+	my %samples;
+	for my $path (@paths) {
+		my ($input) = gzipopen($path, 'retained locus sample counts');
+		my $sample;
+		while (my $line = <$input>) {
+			if ($line =~ /^>([^\s|]+)/) {
+				$sample = $1;
+			} elsif (defined($sample) && $line =~ $informative) {
+				$samples{$sample} = 1;
+			}
+		}
+		close $input or die "Cannot finish reading retained alignment $path: $!\n";
+	}
+	my $outgroups = length($outgroup) && delete($samples{$outgroup}) ? 1 : 0;
+	return { msa_samples => scalar(keys %samples), msa_outgroup_samples => $outgroups };
+}
 
 my @SAMPLE_STAT_COLUMNS = qw(
 	sample worker assembly_group status selected_mgs candidate_mgs candidate_loci consensus_proteins
 	used_mgs skipped_mgs unaccounted_mgs used_fraction
-	min_genes_per_mgs presort_genes max_genes qc_enabled min_gene_depth min_bad_loci
+	min_genes_per_mgs presort_genes max_genes tree_locus_budget qc_enabled min_gene_depth min_bad_loci
 	multi_gene_fraction_max csp_gene_fraction_max csp_locus_score_max breakpoint_gene_flank
 	abundance_min_loci abundance_min_fold abundance_max_fold abundance_max_modified_z
 	capped_mgs capped_loci skipped_within_2_loci_of_min
@@ -29,7 +62,7 @@ my @SAMPLE_STAT_COLUMNS = qw(
 );
 
 my @CONTROL_COLUMNS = qw(
-	selected_mgs min_genes_per_mgs presort_genes max_genes qc_enabled
+	selected_mgs min_genes_per_mgs presort_genes max_genes tree_locus_budget qc_enabled
 	min_gene_depth min_bad_loci multi_gene_fraction_max csp_gene_fraction_max
 	csp_locus_score_max breakpoint_gene_flank abundance_min_loci
 	abundance_min_fold abundance_max_fold abundance_max_modified_z

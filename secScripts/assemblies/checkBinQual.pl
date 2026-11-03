@@ -6,9 +6,8 @@ use strict;
 use Getopt::Long qw( GetOptions );
 
 use Mods::GenoMetaAss qw(  systemW readFasta);
-use Mods::Binning qw(runCheckM runCheckM2 MB2N50);
+use Mods::Binning qw(runCheckM runCheckM2 MB2N50 MB2assigns);
 use Mods::math qw(medianArray);
-sub MB2assigns; #sub MB2N50;
 sub createBinFAA;
 
 #0.11: 1.4.26: added getOpt interface, Pilea integration
@@ -191,23 +190,4 @@ sub createBinFAA($$){ #old version, no longer used
 		close O;
 	}
 	undef %FAS ;
-}
-
-
-sub MB2assigns($){
-	my ($inF) = @_;
-	my %ret;
-	open I,"<$inF" or die "Can't open maxbin2 output $inF\n";
-	while (<I>){
-		chomp;
-		next if /^\s*$/;
-		my @spl  = split /\t/, $_, -1;
-		die "Malformed bin assignment in $inF: $_\n"
-			unless @spl >= 2 && length($spl[0]) && length($spl[1]);
-		next if ($spl[1] eq "0");
-		next if ($spl[0] eq "Sequence ID");
-		push(@{$ret{$spl[1]}}, $spl[0]);
-	}
-	close I;
-	return \%ret;
 }

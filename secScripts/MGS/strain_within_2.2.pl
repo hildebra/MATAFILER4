@@ -8,22 +8,58 @@ use strict;
 use Getopt::Long qw( GetOptions );
 
 use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta gzipopen);
-use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs);
+use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive qsubSystemWaitMaxJobs slurmJobFailureSummary);
+use Mods::SlurmAccounting qw(slurm_tree_memory_summary next_oom_retry_memory_mb);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
+use Mods::FlagReference qw(printFlagHelp helpRequested);
 use Mods::geneCat qw(readGene2tax createGene2MGS);
 use Mods::TamocFunc qw ( getFileStr );
 use Mods::CatalogPaths qw(resolve_catalog_maps);
 use File::Path qw(make_path remove_tree);
-use File::Copy qw(copy);
-use File::Basename qw(basename dirname);
+use File::Basename qw(dirname);
+use Text::ParseWords qw(shellwords);
 
 sub sumSummaries;
 sub strainNetwork;
 sub treeWas;
 sub visualizeSignPhylos;
+sub combineResults;
+sub newickSampleCount;
+sub newickNodeCount;
+sub rAnalysisMemoryForCores;
+sub increaseRAnalysisMemory;
+sub reportRAnalysisSchedulerFailures;
+sub resolveOutgroup;
+sub loggedOutgroup;
+sub savedCommandOutgroup;
+sub mgsTreeOutgroup;
+
+#declared here (not next to the changelog) so -help can report it before the
+#first getProgPaths() below needs a site config; keep it in sync with that list
+our $version = 0.50;
+
+#-help is answered from docs/flag_reference.md, without a site config
+if (helpRequested(@ARGV)) {
+	printFlagHelp(
+		script  => "strain_within_2.2.pl",
+		version => $version,
+		usage   => ["strain_within_2.2.pl -GCd DIR -FMGdir DIR -map FILE -MGSmatrix FILE [options]",
+			"strain_within_2.2.pl -help | -h | -?"],
+		summary => "Within-MGS tree postprocessing, strain statistics and optional "
+			."population-genetic analysis. Normally launched by strain_within.pl; direct use "
+			."is mainly for targeted postprocessing restarts.",
+		exit    => 1,
+	);
+}
 
 my $MGSTKdir = getProgPaths("MGSTKDir");
-
+my $configuredMaxMF4mem = getProgPaths("maxMF4mem", 0);
+my $rAnalysisOOMMaxMemoryGB = 512;
+if (defined($configuredMaxMF4mem) && $configuredMaxMF4mem =~ /^([0-9]+(?:\.[0-9]+)?)$/ && $1 > 0) {
+	$rAnalysisOOMMaxMemoryGB = $1 + 0;
+} elsif (defined($configuredMaxMF4mem) && length($configuredMaxMF4mem)) {
+	warn "Ignoring invalid maxMF4mem setting '$configuredMaxMF4mem'; using 512 GiB\n";
+}
 #.21: added $DiscTests $ContTests
 #.22: R interface updated
 #.23: Perl interface updated
@@ -38,16 +74,54 @@ my $MGSTKdir = getProgPaths("MGSTKDir");
 #.32: preserve summary headers and require validated network and treeWAS outputs
 #.33: summarize per-tree progress and make runtime configuration explicit
 #.34: resolve catalog maps through LOGandSUB/inmap.txt
-my $version = 0.34;
+#.35: exclude MGS with terminal no-tree or retained placement-pending outcomes
+#.36: prioritize durable completed-tree evidence during postprocessing discovery
+#.37: recover missing outgroups from saved tree metadata or the source MGS tree
+#.38: combine versioned strainStats result stores instead of concatenating reports
+#.39: run and combine versioned population-genetics stores alongside strain summaries
+#.40: use durable RDS outputs directly as per-MGS completion evidence
+#.41: scale R-analysis memory with explicitly requested cores and report scheduler failures
+#.42: forward reproducible population-genetics settings and retain strict shell failures
+#.43: phase strainStats and PopGenStats independently and weight small-MGS R batches
+#.44: submit significant-phylogeny figures with the strain-only postprocessing phase
+#.45: retry incomplete R-analysis batches twice and double memory after Slurm OOMs
+#.46: independently redo strainStats or PopGenStats without resetting all postprocessing
+#.47: isolate each MGS analysis so one failure cannot abort its batch, and stop nounset from killing conda activation
+#.48: raise the PopGenStats memory request and add -popGenCategory for its sample groupings
+#.49: make PopGenStats opt-in so ordinary runs only produce strainStats
+#.50: follow MG-STK's Results directory contract for combined and downstream outputs
+#$version is declared near the top of this file so -help can print it
 
 my $rewriteRanalysis = 0; my $doSubmit = 1;
+my $redoStrainStats = 0;
+my $redoPopGenStats = 0;
 my $checkMaxNumJobs = 400;
+#PopGenStats is much slower than strainStats, so it is opt-in
+my $doPopGenStats = 0;
+my $popGenSubsample = "10,20,30,100,200,500";
+my $popGenCategory = "";
+my $popGenStrictOutgroup = 0;
+my $popGenGeneticCode = 1;
+my $popGenCodonStart = 1;
+my $popGenSeed = 1;
+my $popGenLegacyTextOutput = 0;
 
 my $DiscTests =""; my $ContTests = "";
 my $familyVar = ""; my $groupStabilityVars = "";
 my $GCd = "";#$ARGV[0];
 my $nCore = 4;#$ARGV[4];
 my $nCoreHeavy = 12;
+# strainStats parallelizes within a single R process. Its working memory grows
+# with that process's worker count, so a fixed request was prone to Slurm OOMs.
+my $rAnalysisMemoryBaseGB = 24;
+my $rAnalysisMemoryCoreThreshold = 4;
+my $rAnalysisMemoryPerExtraCoreGB = 1;
+# PopGenStats holds every MSA's codon matrices in its PSOCK workers, so it
+# needs more headroom than strainStats at the same core count.
+my $popGenMemoryFactor = 1.5;
+# Failed R-analysis batches are retried twice; an accounting-confirmed OOM
+# doubles that batch's Slurm memory request for its next attempt.
+my $rAnalysisRetryRounds = 2;
 my $refMap = "";#$ARGV[3];#"/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/maps/drama4.map";
 #my $FMGpD = "$GCd/MGS/phylo";
 my $FMGpD = "";#$ARGV[1];# if (@ARGV > 1);
@@ -57,11 +131,22 @@ my $abMatrix = "";#$ARGV[2];
 my $individualVar = "AssmblGrps";
 my $qsubSystem = "";
 
+my $MGSphylo = "";
 GetOptions(
 	"GCd=s"          => \$GCd,
 	"map=s"          => \$refMap,
 	"submit=i"       => \$doSubmit,
 	"reSubmit=i"     => \$rewriteRanalysis,
+	"redoStrainStats=i" => \$redoStrainStats,
+	"redoPopGenStats=i" => \$redoPopGenStats,
+	"popGenStats=i"  => \$doPopGenStats,
+	"popGenSubsample=s" => \$popGenSubsample,
+	"popGenCategory=s" => \$popGenCategory, #map columns passed to popGenStats.R --category
+	"popGenStrictOutgroup=i" => \$popGenStrictOutgroup,
+	"popGenGeneticCode=i" => \$popGenGeneticCode,
+	"popGenCodonStart=i" => \$popGenCodonStart,
+	"popGenSeed=i" => \$popGenSeed,
+	"popGenLegacyTextOutput=i" => \$popGenLegacyTextOutput,
 	"cores=i"        => \$nCore,
 	"Hcores=i"        => \$nCoreHeavy, #for heavy jobs (like scoary)
 	"FMGdir=s"     => \$FMGpD,
@@ -72,15 +157,29 @@ GetOptions(
 	"groupStabilityVars=s"      => \$groupStabilityVars, #column names of categories used for calculation of resilience and persistence
 	"individualVar=s"      => \$individualVar, #column name specifying individual IDs, AssmblGrps by default
 	"qsubSystem=s"    => \$qsubSystem, #optional queue backend override; dry runs default to bash
+	"MGSphylo=s"       => \$MGSphylo, #source MGS tree used by strain_within to choose fallback outgroups
 ) or die "Invalid strain_within_2.2.pl options\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "-GCd, -map, -FMGdir and -MGSmatrix are required\n"
 	unless length($GCd) && length($refMap) && length($FMGpD) && length($abMatrix);
 die "Gene-catalog and phylogeny directories must exist\n" unless -d $GCd && -d $FMGpD;
 die "Map or MGS abundance matrix is missing\n" unless -s $refMap && -s $abMatrix;
-die "Core requests must be positive\n" unless $nCore > 0 && $nCoreHeavy > 0;
-die "-submit and -reSubmit must be 0 or 1\n" unless $doSubmit =~ /^[01]$/ && $rewriteRanalysis =~ /^[01]$/;
+die "Core requests must be positive and R-analysis retry rounds must be at least two\n"
+	unless $nCore > 0 && $nCoreHeavy > 0 && $rAnalysisRetryRounds >= 2;
+die "-submit, -reSubmit, -redoStrainStats, and -redoPopGenStats must be 0 or 1\n"
+	unless $doSubmit =~ /^[01]$/ && $rewriteRanalysis =~ /^[01]$/
+		&& $redoStrainStats =~ /^[01]$/ && $redoPopGenStats =~ /^[01]$/;
+die "-popGenStats must be 0 or 1\n" unless $doPopGenStats =~ /^[01]$/;
+die "-redoPopGenStats requires -popGenStats 1\n" if $redoPopGenStats && !$doPopGenStats;
+die "-popGenCategory requires -popGenStats 1\n" if length($popGenCategory) && !$doPopGenStats;
+die "-popGenStrictOutgroup and -popGenLegacyTextOutput must be 0 or 1\n"
+	unless $popGenStrictOutgroup =~ /^[01]$/ && $popGenLegacyTextOutput =~ /^[01]$/;
+die "-popGenGeneticCode must be positive, -popGenCodonStart must be 1, 2, or 3, and -popGenSeed must be non-negative\n"
+	unless $popGenGeneticCode > 0 && $popGenCodonStart >= 1 && $popGenCodonStart <= 3
+		&& $popGenSeed >= 0;
 $FMGpD =~ s{/+$}{} unless $FMGpD eq "/";
+die "-MGSphylo does not exist or is empty: $MGSphylo\n"
+	if length($MGSphylo) && !-s $MGSphylo;
 
 
 my $cpDir = "";#$GCd/MGS/R_analysis/";
@@ -96,32 +195,44 @@ $queueMode = "bash" if !$doSubmit && $queueMode eq "";
 my $QSBoptHR = emptyQsubOpt($doSubmit,"",$queueMode);
 $QSBoptHR->{tmpSpace} = 0;
 my $bts = getProgPaths("buildTree_scr");
+my $neighborTree = length($MGSphylo) ? getProgPaths("neighborTree") : "";
 my $SaSe = "|";
 my $SaSe2 = "\|"; #for regex
 my $numCores = 40; #used for phylos..
-my $RsummaryTab = "$FMGpD/Rsummary.tab";
-my $existingSummaryHeader = '';
-if (!$rewriteRanalysis && -s $RsummaryTab) {
-	open my $old_summary, '<', $RsummaryTab or die "Cannot read $RsummaryTab: $!\n";
-	$existingSummaryHeader = <$old_summary> // '';
-	close $old_summary or die "Cannot close $RsummaryTab: $!\n";
-}
+my $resultsDir = "$FMGpD/Results";
+my $RsummaryTab = "$resultsDir/strainStats.tsv";
+my $popGenSummaryTab = "$resultsDir/popGenStats.tsv";
+my $popGenSubsampleSummaryTab = "$resultsDir/popGenStats.subsamples.tsv";
+my $legacyRsummaryTab = "$resultsDir/Rsummary.tab";
 
 
 my %dirs;my %destDs; my %baseD;
+my @nonTreeOutcomeMarkers = qw(
+	tooFewSamples.sto noRecoverableLoci.sto noTree.sto placementPending.sto
+);
+my $terminalTreeMGS = 0;
+my $completionMarkerFastPaths = 0;
 
 print "=====================================================\n";
 print "Strain postprocessing v$version\n";
 print "Mode: " . ($doSubmit ? "submit" : "dry run") . "; scheduler: $QSBoptHR->{qmode}; "
-	. "rewrite existing results: " . ($rewriteRanalysis ? "yes" : "no") . "\n";
+	. "rewrite all existing results: " . ($rewriteRanalysis ? "yes" : "no")
+	. "; redo strainStats: " . ($redoStrainStats ? "yes" : "no")
+	. "; redo PopGenStats: " . ($redoPopGenStats ? "yes" : "no") . "\n";
 print "Inputs: gene catalog=$GCd; phylogenies=$FMGpD; map=$refMap; abundance matrix=$abMatrix\n";
-print "Paths: summary=$RsummaryTab; toolkit=$MGSTKdir\n";
-print "Resources: standard cores=$nCore; heavy-analysis cores=$nCoreHeavy; queue throttle=$checkMaxNumJobs jobs\n";
+print "Fallback outgroup tree: ".(length($MGSphylo) ? $MGSphylo : "<none>")."\n";
+print "Paths: strain summary=$RsummaryTab; population summary=$popGenSummaryTab; subsampled population summary=$popGenSubsampleSummaryTab; toolkit=$MGSTKdir\n";
+print "Resources: standard cores=$nCore; heavy-analysis cores=$nCoreHeavy; R-analysis memory="
+	."${rAnalysisMemoryBaseGB}G + ${rAnalysisMemoryPerExtraCoreGB}G per core above $rAnalysisMemoryCoreThreshold; "
+	."retry rounds=$rAnalysisRetryRounds; OOM ceiling=${rAnalysisOOMMaxMemoryGB}G; queue throttle=$checkMaxNumJobs jobs; PopGenStats memory factor=${popGenMemoryFactor}x\n";
 print "Metadata: individual=" . ($individualVar || "<none>")
 	. "; family=" . ($familyVar || "<none>")
 	. "; stability groups=" . ($groupStabilityVars || "<none>") . "\n";
 print "Association tests: discrete=" . ($DiscTests || "<none>")
 	. "; continuous=" . ($ContTests || "<none>") . "\n";
+print "Population genetics: " . ($doPopGenStats
+	? "enabled (subsamples: ".($popGenSubsample || "<none>")."; seed=$popGenSeed; genetic code=$popGenGeneticCode; codon start=$popGenCodonStart; strict outgroup=$popGenStrictOutgroup; categories: ".($popGenCategory || "<none>").")"
+	: "disabled") . "\n";
 print "=====================================================\n";
 
 
@@ -131,56 +242,212 @@ if ($rewriteRanalysis){ #faster to do once for all..
 	if ($doSubmit) {
 		#print "Removing old strain2 analysis..\n";
 		for my $within (glob("$FMGpD/*/within")) { remove_tree($within) if -d $within; }
-		unlink $RsummaryTab or die "Cannot remove $RsummaryTab: $!\n" if -e $RsummaryTab;
-		for my $checkpoint ("$FMGpD/networks/networks.sto", "$FMGpD/GeneEnrich/treeWAS.sto") {
-			unlink $checkpoint or die "Cannot remove stale checkpoint $checkpoint: $!\n" if -e $checkpoint;
+		for my $summary ($RsummaryTab, $popGenSummaryTab, $popGenSubsampleSummaryTab, $legacyRsummaryTab) {
+			unlink $summary or die "Cannot remove $summary: $!\n" if -e $summary;
 		}
+		my $networkDir = "$resultsDir/networks";
+		remove_tree($networkDir) if -d $networkDir;
+		my $treeWasCheckpoint = "$resultsDir/GeneEnrich/treeWAS.sto";
+		unlink $treeWasCheckpoint or die "Cannot remove stale checkpoint $treeWasCheckpoint: $!\n" if -e $treeWasCheckpoint;
+		my $phyloFigureCheckpoint = "$resultsDir/phyloFigures.sto";
+		unlink $phyloFigureCheckpoint or die "Cannot remove stale checkpoint $phyloFigureCheckpoint: $!\n" if -e $phyloFigureCheckpoint;
 	} else {
 		print "Dry run: existing strain2 results and checkpoints will be preserved.\n";
 	}
+} elsif ($doSubmit) {
+	if ($redoStrainStats) {
+		warn "Redoing strainStats and dependent strain postprocessing because -redoStrainStats 1 was requested\n";
+		for my $summary ($RsummaryTab, $legacyRsummaryTab) {
+			unlink $summary or die "Cannot remove $summary: $!\n" if -e $summary;
+		}
+		my $networkDir = "$resultsDir/networks";
+		remove_tree($networkDir) if -d $networkDir;
+		my $treeWasCheckpoint = "$resultsDir/GeneEnrich/treeWAS.sto";
+		unlink $treeWasCheckpoint or die "Cannot remove stale checkpoint $treeWasCheckpoint: $!\n" if -e $treeWasCheckpoint;
+		my $phyloFigureCheckpoint = "$resultsDir/phyloFigures.sto";
+		unlink $phyloFigureCheckpoint or die "Cannot remove stale checkpoint $phyloFigureCheckpoint: $!\n" if -e $phyloFigureCheckpoint;
+	}
+	if ($redoPopGenStats) {
+		warn "Redoing PopGenStats because -redoPopGenStats 1 was requested\n";
+		for my $summary ($popGenSummaryTab, $popGenSubsampleSummaryTab) {
+			unlink $summary or die "Cannot remove $summary: $!\n" if -e $summary;
+		}
+	}
+} elsif ($redoStrainStats || $redoPopGenStats) {
+	print "Dry run: requested targeted statistic redo will not remove existing results or checkpoints.\n";
 }
 
+my $forceStrainStats = $rewriteRanalysis || $redoStrainStats;
+my $forcePopGenStats = $rewriteRanalysis || $redoPopGenStats;
 
 print "Scanning for completed within-MGS phylogenies\n";
 opendir DIR, $FMGpD or die "Cannot open $FMGpD: $!\n";
 #loop over intra-phylo dir and check for file presence..
-my %sizTrees;
+my %treeNodes;
+my %treeSamples;
 while ( my $entry = readdir DIR ) {
     next if $entry eq '.' or $entry eq '..';
     next unless -d $FMGpD . '/' . $entry;
-	next unless (-d "$FMGpD/$entry/phylo/");
+	my $phyloDirectory = "$FMGpD/$entry/phylo/";
+	next unless -d $phyloDirectory;
+	my $treeCompletion = "$FMGpD/$entry/treeDone.sto";
+	if (-s $treeCompletion) {
+		my $completedTreeSize = 0;
+		my $completedTreeIndex = 0;
+		my $completedTreePath = "";
+		while ($completedTreeSize == 0 && $completedTreeIndex < @defTreeFiles) {
+			# -s returns undef for a missing candidate; keep the numeric loop
+			# sentinel defined while trying the remaining tree formats.
+			$completedTreePath = "$phyloDirectory$defTreeFiles[$completedTreeIndex]";
+			$completedTreeSize = (-s $completedTreePath) // 0;
+			$completedTreeIndex++;
+		}
+		if ($completedTreeSize) {
+			# Match strain_within.pl: this atomic BuildTree completion marker is
+			# written only after the final primary tree validates successfully.
+			$dirs{$entry} = $phyloDirectory;
+			$baseD{$entry} = "$FMGpD/$entry";
+			$treeNodes{$entry} = newickNodeCount($completedTreePath);
+			$treeSamples{$entry} = newickSampleCount($completedTreePath);
+			$completionMarkerFastPaths++;
+			next;
+		}
+	}
+	my @outcomeMarkers = grep {
+		-s "$FMGpD/$entry/$_"
+	} @nonTreeOutcomeMarkers;
+	if (@outcomeMarkers) {
+		$terminalTreeMGS++;
+		next;
+	}
 	#my $destD = "$FMGpD/$entry/within/";
 	#system "cp $destD/$entry.nwk $FMGpD/$entry/phylo/IQtree.treefile " if (-e "$destD/$entry.nwk");
-	my $sizTree = 0; my $x=0;
-	while ($sizTree == 0 && $x < @defTreeFiles){
-		$sizTree = -s "$FMGpD/$entry/phylo/$defTreeFiles[$x]" if (-e "$FMGpD/$entry/phylo/$defTreeFiles[$x]");
+	my $legacyTreeSize = 0; my $x=0;
+	my $legacyTreePath = "";
+	while ($legacyTreeSize == 0 && $x < @defTreeFiles){
+		# A missing file is not an error: try the next supported tree format.
+		$legacyTreePath = "$phyloDirectory$defTreeFiles[$x]";
+		$legacyTreeSize = (-s $legacyTreePath) // 0;
 		$x++;
 	}
-	next unless ($sizTree);
-	#genuine MGS phylo dir-> store in %dirs %baseD
-	$dirs{$entry} = "$FMGpD/$entry/phylo/"; 
+	next unless ($legacyTreeSize);
+	#genuine legacy MGS phylo dir without a current completion marker
+	$dirs{$entry} = $phyloDirectory;
 	$baseD{$entry} = "$FMGpD/$entry";
-	$sizTrees{$entry} = $sizTree;
+	$treeNodes{$entry} = newickNodeCount($legacyTreePath);
+	$treeSamples{$entry} = newickSampleCount($legacyTreePath);
 }
 
-closedir DIR;
-print "Found ".scalar(keys %dirs)." MGS directories with a nonempty calculated tree\n";
-my $cnt=-1; my $curBatch=0; my $batchSize = 0; my $submitted=0;my @jobs;
+closedir DIR or die "Cannot close $FMGpD: $!\n";
+print "Found ".scalar(keys %dirs)." MGS directories with a nonempty calculated tree";
+print "; completion-marker fast paths=$completionMarkerFastPaths";
+print "; skipped $terminalTreeMGS MGS with valid no-tree or placement-pending markers"
+	if $terminalTreeMGS;
+print "\n";
 my $MGstats = "$GCd/metagStats.txt";
 $MGstats = "-1" unless (-e $MGstats);
 my $treeAbsent = 0;
-#my @k2d = sort keys %dirs;
-my @k2d = sort { $sizTrees{$b} <=> $sizTrees{$a} } keys(%sizTrees);
+my @k2d = sort { $treeSamples{$b} <=> $treeSamples{$a} || $a cmp $b } keys(%treeSamples);
 if (!@k2d) {
 	print "No nonempty phylogenies found; skipping strain postprocessing.\n";
 	exit 0;
 }
+my $largestMGS = $k2d[0];
+my $batchSampleBudget = $treeSamples{$largestMGS};
 
-my $cmdPrelude = "ulimit -s 20000\n";
-my $cmd = $cmdPrelude;my $destD =""; my $wrHead=1; my $headerOwner='';
-my %analysisAttempted; my $legacyCompleted = 0; my $reusedAnalysis = 0;
+# qsubSystem also enables -e and pipefail, but repeat the complete strict mode
+# in every generated R-analysis script so a Slurm OOM exit is never ignored.
+# No `set -u`: every path in these generated scripts is a shell-quoted literal
+# produced here, so nounset protects nothing, while the conda/micromamba
+# activation that getProgPaths prepends to each R command sources environment
+# hooks that are not nounset-clean. One such hook referencing an unset variable
+# aborted whole batches before any analysis started.
+# The stack limit is an optimisation, not a precondition: a compute node whose
+# hard limit is lower must not fail the job.
+my $cmdPrelude = "set -eo pipefail\nulimit -s 20000 2>/dev/null || true\n"
+	."MF_ANALYSIS_FAILURES=0\n";
+# Every MGS in a batch is attempted, but the batch still reports failure so that
+# Slurm accounting keeps seeing a failed job and the OOM memory escalation below
+# can act on it. Retry selection itself is driven by missing stores, so a batch
+# that failed only partly is retried and skips the MGS that already succeeded.
+my $cmdEpilogue = "if [ \"\$MF_ANALYSIS_FAILURES\" -gt 0 ]; then\n"
+	."echo \"\$MF_ANALYSIS_FAILURES analysis/analyses failed in this batch\" >&2\n"
+	."exit 1\n"
+	."fi\n";
+my %analysisAttempted;
+my ($reusedStrainStats, $reusedPopGenStats) = (0, 0);
 my $strainStatsR = getProgPaths("treeSubGrpsR");
+my $popGenStatsR = $doPopGenStats ? getProgPaths("pogenStats") : "";
+my $combineResultsR = getProgPaths("combineResults_R");
+my %outgroupSources;
+my %jobsByAnalysis;
+my %submittedRAnalysisJobs;
+my %submittedByAnalysis;
+my %rAnalysisBatches;
+my $wrHead=1;
+# One failing MGS must not end its batch. Running an analysis inside a subshell
+# whose exit status is tested suspends the batch-level `set -e` for everything
+# inside it, so the batch continues with the next MGS and the parent's per-store
+# audit then names exactly the MGS that failed, instead of every MGS that the
+# aborted batch never reached. The store remains the authoritative completion
+# artifact, so it is what the subshell's status is taken from.
+my $isolatedAnalysisBlock = sub {
+	my ($body, $store, $label, $logPath) = @_;
+	die "Isolated analysis body must end in a newline\n" unless $body =~ /\n\z/;
+	return "if (\n" . $body
+		. "test -s " . shellQuote($store) . "\n"
+		. "); then\n"
+		. "echo " . shellQuote("Completed $label") . "\n"
+		. "else\n"
+		. "echo " . shellQuote("FAILED $label; batch continues"
+			. (defined($logPath) && length($logPath) ? "; see $logPath" : "")) . " >&2\n"
+		. "MF_ANALYSIS_FAILURES=\$((MF_ANALYSIS_FAILURES + 1))\n"
+		. "fi\n";
+};
+my $recordRAnalysisJob = sub {
+	my ($analysisKind, $dependency, $label, $cores, $memory, $jobRecords) = @_;
+	return '' unless $doSubmit && ($QSBoptHR->{qmode} || '') eq 'slurm';
+	return '' unless defined($dependency) && length($dependency);
+	my $jobID = $dependency;
+	my $runTag = $QSBoptHR->{rTag} || '';
+	$jobID =~ s/^\Q$runTag\E// if length($runTag);
+	return '' unless $jobID =~ /^\d+$/;
+	$jobRecords ||= ($submittedRAnalysisJobs{$analysisKind} ||= {});
+	$jobRecords->{$jobID} = {
+		requested_name => "$analysisKind.$label",
+		cores => $cores,
+		memory => $memory,
+	};
+	return $jobID;
+};
+my $submitRAnalysisBatch = sub {
+	my ($analysisKind, $script, $batchCmd, $batchCores, $batchMemory, $batchLabel, $stores) = @_;
+	$batchCmd .= $cmdEpilogue;
+	my ($dep, $qcmd) = qsubSystem(
+		$script, $batchCmd, $batchCores, $batchMemory, $batchLabel, "", "", 1, [], $QSBoptHR);
+	my $jobID = $recordRAnalysisJob->(
+		$analysisKind, $dep, $batchLabel, $batchCores, $batchMemory);
+	push(@{$jobsByAnalysis{$analysisKind}}, $dep);
+	push(@{$rAnalysisBatches{$analysisKind}}, {
+		script => $script,
+		command => $batchCmd,
+		cores => $batchCores,
+		memory => $batchMemory,
+		label => $batchLabel,
+		stores => { %{$stores} },
+		dependency => $dep,
+		job_id => $jobID,
+	});
+	return $dep;
+};
 
+for my $analysisKind (qw(strainStats popGenStats)) {
+	next if $analysisKind eq 'popGenStats' && !$doPopGenStats;
+	my $cnt=-1; my $curBatch=0; my $curBatchSamples=0;
+	my $cmd = $cmdPrelude; my $destD = "";
+	my $batchDestD = ""; my $batchLabel = "";
+	my $phaseSubmitted = 0;
+	my $batchStores = {};
 foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	$cnt++;
 	$destD = $dirs{$d};
@@ -197,53 +464,103 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 		$x++;
 	}
 	if (!-s $treePath){
-		$treeAbsent++;
+		$treeAbsent++ if $analysisKind eq 'strainStats';
 		next;
 	}
-	if ($rewriteRanalysis && $doSubmit && -d $destD) {
+	if ($rewriteRanalysis && $analysisKind eq 'strainStats' && $doSubmit && -d $destD) {
 		unlink $_ or die "Cannot remove $_: $!\n" for grep { -f $_ || -l $_ } glob("$destD/*");
 		remove_tree($_) for grep { -d $_ } glob("$destD/*");
 	}
-	# Accept legacy log+report completions so existing successful runs are not
-	# needlessly repeated. New jobs also write an explicit success stone below.
+	# The versioned RDS stores are the authoritative completion artifacts.
 	my $analysisLog = "$destD/$d.Ranalysis.log";
 	my $analysisReport = "$destD/$d.analysis.txt";
-	my $analysisStone = "$destD/$d.Ranalysis.sto";
-	if (!$rewriteRanalysis && -s $analysisReport && (-e $analysisStone || -s $analysisLog)) {
-		$legacyCompleted++ if !-e $analysisStone;
-		$reusedAnalysis++;
-		next;
-	}
-	if ($doSubmit && -d $destD) {
-		unlink $_ or die "Cannot remove $_: $!\n" for grep { -f $_ || -l $_ } glob("$destD/*");
-		remove_tree($_) for grep { -d $_ } glob("$destD/*");
+	my $analysisStore = "$destD/strainStats.output.Rds";
+	my $popGenStore = "$destD/popGenStats.output.Rds";
+	my $strainStatsReady = -s $analysisStore;
+	my $popGenStatsReady = !$doPopGenStats || -s $popGenStore;
+	if (!(($analysisKind eq 'strainStats' && $forceStrainStats)
+		|| ($analysisKind eq 'popGenStats' && $forcePopGenStats))) {
+		if ($analysisKind eq 'strainStats' && $strainStatsReady) {
+			$reusedStrainStats++;
+			next;
+		}
+		if ($analysisKind eq 'popGenStats' && $popGenStatsReady) {
+			$reusedPopGenStats++;
+			next;
+		}
 	}
 	make_path($destD);
-	my $OG = "";
-	if (-e "$destBaseD/data.log" || -e "$destBaseD/data.log.gz") {
-		my ($log_fh) = gzipopen("$destBaseD/data.log", "strain outgroup log");
-		while (my $line = <$log_fh>) {
-			if ($line =~ /^OG:(.*)$/) { $OG = $1; chomp $OG; last; }
-		}
-		close $log_fh;
-	}
+	my (undef, $OG, $outgroupSource) = resolveOutgroup($d, $destBaseD);
+	$outgroupSources{$outgroupSource}++ if $analysisKind eq 'strainStats';
 	#system "cp $dirs{$d}/$defTreeFile $destD/$d.nwk";
 	my $BinN = 1000;
 	if ($d =~ m/MB2bin(\d+)/){$BinN = $1;}
+	# Use the requested standard core count for every R invocation. PopGenStats
+	# applies this deterministically as its per-MSA PSOCK worker count.
 	my $jobCores = $nCore;
-	
-	$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStone))."\n";
+	my $treeSampleCount = $treeSamples{$d};
+	my $batchSampleCost = $treeSampleCount < $batchSampleBudget
+		? 3 * $treeSampleCount : $treeSampleCount;
+	if ($curBatchSamples > 0 && $curBatchSamples + $batchSampleCost > $batchSampleBudget) {
+		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
+		my $batchCores = $nCore;
+		my $batchMemory = rAnalysisMemoryForCores($batchCores, $analysisKind);
+		my $batchCmd = $cmd;
+		$submitRAnalysisBatch->(
+			$analysisKind, $batchDestD."$analysisKind.Ranalysis.sh",
+			$batchCmd, $batchCores, $batchMemory, $batchLabel, $batchStores);
+		$phaseSubmitted++;
+		$curBatch = 0; $curBatchSamples = 0; $cmd=$cmdPrelude;
+		$batchStores = {};
+		$batchDestD = ""; $batchLabel = "";
+	}
 	$cmd .= "echo ".shellQuote("At tree $d")."\n";
 	my $OGstr = $OG ne "" ? "--outgroup ".shellQuote($OG)." " : "";
-	$cmd .= "$strainStatsR --path ".shellQuote($destD)." --tree ".shellQuote("../phylo/$defTree")." --taxN ".shellQuote($d)." $OGstr --map ".shellQuote($refMap)." --metagStats ".shellQuote($MGstats)." --abMat ".shellQuote($abMatrix)." --ncore $jobCores --siteMode 1 --MFDir ".shellQuote($MGSTKdir)." --wrColNms $wrHead --discPermTests ".shellQuote($DiscTests)." --contPermTests ".shellQuote($ContTests)." --familyCol ".shellQuote($familyVar)." --groupStabilityVars ".shellQuote($groupStabilityVars)." > ".shellQuote($analysisLog)."\n";
-	$cmd .= "test -s ".shellQuote($analysisReport)."\n";
-	$cmd .= "touch ".shellQuote($analysisStone)."\n";
-	$analysisAttempted{$d} = { report => $analysisReport, stone => $analysisStone };
-	$headerOwner = $d if $wrHead;
-	$wrHead=0;
-	if (0){#rerun popgen stats??
-		my $RpogenS = getProgPaths("pogenStats");
-		$cmd .= "$RpogenS $destBaseD $refMap $destBaseD/codeml/ $destBaseD/MSA/clnd/ 10,20,30,100,200,500\n";
+	if ($analysisKind eq 'strainStats' && (!$strainStatsReady || $forceStrainStats)) {
+		if ($forceStrainStats) {
+			$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStore))."\n";
+		}
+		$cmd .= "if ! test -s ".shellQuote($analysisStore)."; then\n";
+		$cmd .= "rm -f ".join(" ", map { shellQuote($_) } ($analysisLog, $analysisReport, $analysisStore))."\n";
+		$cmd .= "echo ".shellQuote("Starting strainStats for $d with $jobCores core(s)")."\n";
+		$cmd .= $isolatedAnalysisBlock->(
+			"$strainStatsR --path ".shellQuote($destD)." --tree ".shellQuote("../phylo/$defTree")." --taxN ".shellQuote($d)." $OGstr --map ".shellQuote($refMap)." --metagStats ".shellQuote($MGstats)." --abMat ".shellQuote($abMatrix)." --ncore $jobCores --siteMode 1 --MFDir ".shellQuote($MGSTKdir)." --wrColNms $wrHead --discPermTests ".shellQuote($DiscTests)." --contPermTests ".shellQuote($ContTests)." --familyCol ".shellQuote($familyVar)." --groupStabilityVars ".shellQuote($groupStabilityVars)." > ".shellQuote($analysisLog)."\n",
+			$analysisStore, "strainStats for $d", $analysisLog);
+		$cmd .= "fi\n";
+		$batchStores->{$d} = $analysisStore;
+		$analysisAttempted{$d}{strainStats} = { store => $analysisStore };
+		$wrHead=0;
+	}
+	if ($analysisKind eq 'popGenStats' && (!$popGenStatsReady || $forcePopGenStats)) {
+		$cmd .= "rm -f ".shellQuote($popGenStore)."\n" if $forcePopGenStats;
+		$cmd .= "if ! test -s ".shellQuote($popGenStore)."; then\n";
+		$cmd .= "rm -f ".shellQuote($popGenStore)."\n";
+		$cmd .= "echo ".shellQuote("Starting popGenStats for $d")."\n";
+		my $popGenCommand = "$popGenStatsR ".join(" ", map { shellQuote($_) }
+			($destBaseD, $refMap, $destD));
+		$popGenCommand .= " --subsample ".shellQuote($popGenSubsample)
+			if length($popGenSubsample);
+		$popGenCommand .= " --ncore $jobCores"
+			." --genetic-code $popGenGeneticCode"
+			." --codon-start $popGenCodonStart"
+			." --seed $popGenSeed"
+			." --individual-column ".shellQuote($individualVar);
+		# Optional sample groupings for the population statistics. Deliberately
+		# separate from -DiscTests: popGenStats.R runs one full analysis per
+		# category level, and its BLOCK keyword crosses columns rather than
+		# blocking on them as the strainStats permutation tests do.
+		$popGenCommand .= " --category ".shellQuote($popGenCategory) if length($popGenCategory);
+		$popGenCommand .= " --outgroup ".shellQuote($OG) if $OG ne "";
+		$popGenCommand .= " --strict-outgroup" if $popGenStrictOutgroup;
+		$popGenCommand .= " --legacy-text-output" if $popGenLegacyTextOutput;
+		my $strainFile = "$destD/IQtree_allsites.strains.txt";
+		# PopGenStats owns validation and fallback behavior for this optional input.
+		$cmd .= $isolatedAnalysisBlock->(
+			"$popGenCommand --strain-file ".shellQuote($strainFile)."\n",
+			$popGenStore, "popGenStats for $d");
+		$cmd .= "fi\n";
+		$batchStores->{$d} = $popGenStore;
+		$analysisAttempted{$d}{popGenStats} = { store => $popGenStore };
 	}
 	
 	#print $cmd;
@@ -251,56 +568,191 @@ foreach my $d (@k2d){#loop over MGS intra-phylo dirs, submit R analysis
 	#system $cmd."\n";
 	#$QSBoptHR->{useLongQueue} = 1;
 	$curBatch++;
-	if ($curBatch > $batchSize){
-		
+	$curBatchSamples += $batchSampleCost;
+	$batchDestD = $destD; $batchLabel = "$analysisKind.R$cnt";
+	if ($curBatchSamples >= $batchSampleBudget){
 		qsubSystemWaitMaxJobs($checkMaxNumJobs,0,$QSBoptHR) if $doSubmit;
-
-		my ($dep,$qcmd) = qsubSystem($destD."Ranalysis.sh",$cmd,$jobCores,"20G","R$cnt","","",1,[],$QSBoptHR);
-		#die " $destD\n";
-		push(@jobs,$dep);
-		$curBatch = 0; $cmd=$cmdPrelude;
-		$submitted++;
+		my $batchCores = $nCore;
+		my $batchMemory = rAnalysisMemoryForCores($batchCores, $analysisKind);
+		my $batchCmd = $cmd;
+		$submitRAnalysisBatch->(
+			$analysisKind, $batchDestD."$analysisKind.Ranalysis.sh",
+			$batchCmd, $batchCores, $batchMemory, $batchLabel, $batchStores);
+		$phaseSubmitted++;
+		$curBatch = 0; $curBatchSamples = 0; $cmd=$cmdPrelude;
+		$batchStores = {};
+		$batchDestD = ""; $batchLabel = "";
 	}
 	#die;
 	#last if ($cnt > 5);
 }
 if ($curBatch > 0){
-	my ($dep,$qcmd) = qsubSystem($destD."Ranalysis.sh",$cmd,$nCore,"20G","R$cnt","","",1,[],$QSBoptHR);
-	$curBatch = 0; $cmd=$cmdPrelude;
-	push(@jobs,$dep);
-	$submitted++;
+	my $batchCores = $nCore;
+	my $batchMemory = rAnalysisMemoryForCores($batchCores, $analysisKind);
+	my $batchCmd = $cmd;
+	$submitRAnalysisBatch->(
+		$analysisKind, $batchDestD."$analysisKind.Ranalysis.sh",
+		$batchCmd, $batchCores, $batchMemory, $batchLabel, $batchStores);
+	$curBatch = 0; $curBatchSamples = 0; $cmd=$cmdPrelude;
+	$batchStores = {};
+	$phaseSubmitted++;
+}
+	$submittedByAnalysis{$analysisKind} = $phaseSubmitted;
 }
 
-print "R-analysis plan: " . scalar(keys %analysisAttempted) . " MGS analyses prepared in "
-	. "$submitted job script(s), $reusedAnalysis existing result(s) reused";
+my $strainTaskCount = scalar grep { exists($analysisAttempted{$_}{strainStats}) } keys %analysisAttempted;
+my $popGenTaskCount = scalar grep { exists($analysisAttempted{$_}{popGenStats}) } keys %analysisAttempted;
+print "R-analysis plan: $strainTaskCount strainStats MGS analyses in "
+	. ($submittedByAnalysis{strainStats} || 0) . " job script(s); "
+	. "$popGenTaskCount PopGenStats MGS analyses in "
+	. ($submittedByAnalysis{popGenStats} || 0) . " job script(s); "
+	. "reused strainStats=$reusedStrainStats, reused PopGenStats=$reusedPopGenStats; "
+	. "sample budget=$batchSampleBudget (all smaller MGS count three times)";
 print ", $treeAbsent tree(s) became unavailable while planning" if $treeAbsent;
 print "\n";
 
+print "Outgroup recovery: ".join(", ", map {
+	"$_=$outgroupSources{$_}"
+} sort keys %outgroupSources)."\n" if %outgroupSources;
 if (!$doSubmit) {
 	print "Dry run: R-analysis submission scripts were prepared; summaries and downstream analyses were not run.\n";
 	exit 0;
 }
 
-if (@jobs){ #wait for all submitted R scripts, then continue in script
-	
-	#automate
-	
-	print "\n\nwaiting for R analysis to finish before subclustering step\n";
-	qsubSystemJobAlive( \@jobs,$QSBoptHR );
+my $verifyAnalysisStores = sub {
+	my ($analysisKind) = @_;
+	my @failed = grep {
+		exists($analysisAttempted{$_}{$analysisKind})
+			&& !-s $analysisAttempted{$_}{$analysisKind}{store};
+	} sort keys %analysisAttempted;
+	die "$analysisKind failed or produced incomplete RDS output for: ".join(", ", @failed)."\n"
+		if @failed;
+};
+my $batchHasMissingStores = sub {
+	my ($batch) = @_;
+	return scalar grep { !-s $batch->{stores}{$_} }
+		keys %{ $batch->{stores} || {} };
+};
+my $rAnalysisOOMBatches = sub {
+	my ($batches) = @_;
+	return {} unless $doSubmit && ($QSBoptHR->{qmode} || '') eq 'slurm';
+	my @records;
+	for my $batch (@{$batches}) {
+		next unless defined($batch->{job_id}) && $batch->{job_id} =~ /^\d+$/;
+		my $memory = $batch->{memory} || '';
+		my $requestedMB = 0;
+		$requestedMB = int($1 * 1024 + 0.5) if $memory =~ /^([\d.]+)G$/i;
+		$requestedMB = int($1 + 0.5) if $memory =~ /^([\d.]+)M$/i;
+		next unless $requestedMB > 0;
+		push @records, {
+			job_id => $batch->{job_id},
+			requested_mb => $requestedMB,
+			mgs => $batch->{label},
+		};
+	}
+	return {} unless @records;
+	my $summary = slurm_tree_memory_summary(\@records);
+	if (!$summary->{available}) {
+		warn "Could not query Slurm memory accounting for R-analysis OOM recovery: "
+			.($summary->{error} || 'unknown error')."\n";
+		return {};
+	}
+	return { map { $_->{job_id} => 1 } @{$summary->{oom_jobs} || []} };
+};
+my $waitForAnalysis = sub {
+	my ($analysisKind) = @_;
+	my @allBatches = @{$rAnalysisBatches{$analysisKind} || []};
+	my @roundBatches = @allBatches;
+	my $roundJobRecords = $submittedRAnalysisJobs{$analysisKind} || {};
+	my $round = 0;
+	while (1) {
+		my @roundJobs = grep { defined($_) && length($_) }
+			map { $_->{dependency} } @roundBatches;
+		if (@roundJobs) {
+			print "\n\nwaiting for $analysisKind ".($round ? "retry round $round" : "jobs")." to finish\n";
+			qsubSystemJobAlive(\@roundJobs, $QSBoptHR);
+		}
+		reportRAnalysisSchedulerFailures($roundJobRecords, $QSBoptHR, $analysisKind);
+		my @retryBatches = grep { $batchHasMissingStores->($_) } @allBatches;
+		last unless @retryBatches;
+		last if $round >= $rAnalysisRetryRounds;
+		$round++;
+		my $oomBatches = $rAnalysisOOMBatches->(\@roundBatches);
+		my $oomCount = scalar grep { $oomBatches->{$_->{job_id}} } @retryBatches;
+		print "Retrying $analysisKind round $round/$rAnalysisRetryRounds for ".scalar(@retryBatches)
+			." incomplete batch(es)".($oomCount ? "; increasing memory for $oomCount OOM batch(es)" : '')."\n";
+		my %retryJobRecords;
+		my @nextRoundBatches;
+		for my $batch (@retryBatches) {
+			my $retryMemory = $batch->{memory};
+			if ($oomBatches->{$batch->{job_id}}) {
+				my $increasedMemory = increaseRAnalysisMemory($batch->{memory});
+				if (defined($increasedMemory)) {
+					$retryMemory = $increasedMemory;
+				} else {
+					warn "R-analysis OOM retry memory ceiling reached for $batch->{label}; retaining $retryMemory\n";
+				}
+			}
+			qsubSystemWaitMaxJobs($checkMaxNumJobs, 0, $QSBoptHR) if $doSubmit;
+			my $retryScript = $batch->{script};
+			$retryScript =~ s/\.sh\z/.retry$round.sh/;
+			$retryScript .= ".retry$round.sh" if $retryScript eq $batch->{script};
+			my $retryLabel = "$batch->{label}.retry$round";
+			my ($dep, $qcmd) = qsubSystem(
+				$retryScript, $batch->{command}, $batch->{cores}, $retryMemory,
+				$retryLabel, "", "", 1, [], $QSBoptHR);
+			my $jobID = $recordRAnalysisJob->(
+				$analysisKind, $dep, $retryLabel, $batch->{cores}, $retryMemory, \%retryJobRecords);
+			$batch->{dependency} = $dep;
+			$batch->{job_id} = $jobID;
+			$batch->{memory} = $retryMemory;
+			$batch->{label} = $retryLabel;
+			push @nextRoundBatches, $batch;
+		}
+		@roundBatches = @nextRoundBatches;
+		$roundJobRecords = \%retryJobRecords;
+	}
+	$verifyAnalysisStores->($analysisKind);
+};
 
+$waitForAnalysis->('strainStats');
+my $shouldCombineStrainStats = $forceStrainStats || $strainTaskCount > 0 || !-s $RsummaryTab;
+if ($shouldCombineStrainStats) {
+	combineResults(0);
+} else {
+	print "Reusing existing combined strainStats overview: $RsummaryTab\n";
 }
 
-print "Accepted $legacyCompleted legacy R-analysis completions without success stones.\n"
-	if $legacyCompleted;
-my @failedAnalysis = grep {
-	!-s $analysisAttempted{$_}{report} || !-e $analysisAttempted{$_}{stone}
-} sort keys %analysisAttempted;
-die "R analysis failed or produced incomplete output for: ".join(", ", @failedAnalysis)."\n"
-	if @failedAnalysis;
+## Start strain-only downstream work while PopGenStats remains in the scheduler.
+my ($networkDep, $networkStone) = strainNetwork();
+my ($treeWasDep, $treeWasStone) = treeWas();
+my ($phyloFigureDep, $phyloFigureStone) = visualizeSignPhylos();
+
+if ($doPopGenStats) {
+	$waitForAnalysis->('popGenStats');
+	my $shouldCombinePopGenStats = $forcePopGenStats || $popGenTaskCount > 0 || !-s $popGenSummaryTab;
+	if ($shouldCombinePopGenStats) {
+		combineResults(1);
+	} else {
+		print "Reusing existing combined PopGenStats overview: $popGenSummaryTab\n";
+	}
+}
+
+my @postAnalysisJobs = grep { defined($_) && length($_) }
+	($networkDep, $treeWasDep, $phyloFigureDep);
+if (@postAnalysisJobs) {
+	print "Waiting for network, treeWAS, and phylogeny-figure analyses to finish\n";
+	qsubSystemJobAlive(\@postAnalysisJobs, $QSBoptHR);
+}
+my @missingPostAnalysisStones = grep { !-e $_ }
+	($networkStone, $treeWasStone, $phyloFigureStone);
+die "Downstream strain analyses failed or did not publish checkpoints: "
+	.join(", ", @missingPostAnalysisStones)."\n"
+	if @missingPostAnalysisStones;
 
 if (0){#get within strain nuc div
 	my $countStrains=0;
-	open O,">$FMGpD/withinStrain.tab";
+	open O,">$resultsDir/withinStrain.tab";
 	foreach my $d (@k2d){
 		my $destBaseD = $dirs{$d}; $destBaseD =~ s/(.*)\/phylo/$1\//; 
 		my $strainFile = "$destBaseD/within/IQtree_allsites.strains.txt";
@@ -328,90 +780,26 @@ my %TS;
 #summary of dnds
 if (0){
 	#fubar summaries
-	sumSummaries("hyphy.fubar.txt","$FMGpD/fubar.tab");
-	sumSummaries("hyphy.fubar.s10.txt","$FMGpD/fubar.s10.tab");
-	sumSummaries("hyphy.fubar.s20.txt","$FMGpD/fubar.s20.tab");
-	sumSummaries("hyphy.fubar.s30.txt","$FMGpD/fubar.s30.tab");
-	sumSummaries("hyphy.fubar.s100.txt","$FMGpD/fubar.s100.tab");
-	sumSummaries("hyphy.fubar.s200.txt","$FMGpD/fubar.s200.tab");
-	sumSummaries("hyphy.fubar.s500.txt","$FMGpD/fubar.s500.tab");
-	sumSummaries("hyphy.fubar.unID.txt","$FMGpD/fubar.unID.tab");
+	sumSummaries("hyphy.fubar.txt","$resultsDir/fubar.tab");
+	sumSummaries("hyphy.fubar.s10.txt","$resultsDir/fubar.s10.tab");
+	sumSummaries("hyphy.fubar.s20.txt","$resultsDir/fubar.s20.tab");
+	sumSummaries("hyphy.fubar.s30.txt","$resultsDir/fubar.s30.tab");
+	sumSummaries("hyphy.fubar.s100.txt","$resultsDir/fubar.s100.tab");
+	sumSummaries("hyphy.fubar.s200.txt","$resultsDir/fubar.s200.tab");
+	sumSummaries("hyphy.fubar.s500.txt","$resultsDir/fubar.s500.tab");
+	sumSummaries("hyphy.fubar.unID.txt","$resultsDir/fubar.unID.tab");
 	#popstats
-	sumSummaries("PopStats.txt","$FMGpD/PopStats.tab");
-	sumSummaries("PopStats.10.txt","$FMGpD/PopStats.10.tab");
-	sumSummaries("PopStats.20.txt","$FMGpD/PopStats.20.tab");
-	sumSummaries("PopStats.30.txt","$FMGpD/PopStats.30.tab");
-	sumSummaries("PopStats.100.txt","$FMGpD/PopStats.100.tab");
-	sumSummaries("PopStats.200.txt","$FMGpD/PopStats.200.tab");
-	sumSummaries("PopStats.500.txt","$FMGpD/PopStats.500.tab");
-	#sumSummaries("PopStats.500.txt","$FMGpD/PopStats.unID.tab");
-	sumSummaries("hyphy.Theta.log","$FMGpD/Theta.tab");
+	sumSummaries("PopStats.txt","$resultsDir/PopStats.tab");
+	sumSummaries("PopStats.10.txt","$resultsDir/PopStats.10.tab");
+	sumSummaries("PopStats.20.txt","$resultsDir/PopStats.20.tab");
+	sumSummaries("PopStats.30.txt","$resultsDir/PopStats.30.tab");
+	sumSummaries("PopStats.100.txt","$resultsDir/PopStats.100.tab");
+	sumSummaries("PopStats.200.txt","$resultsDir/PopStats.200.tab");
+	sumSummaries("PopStats.500.txt","$resultsDir/PopStats.500.tab");
+	#sumSummaries("PopStats.500.txt","$resultsDir/PopStats.unID.tab");
+	sumSummaries("hyphy.Theta.log","$resultsDir/Theta.tab");
 }
 
-#die;
-#summary  of R stats
-#create summary tables 
-if (1 || !-e $RsummaryTab){
-	my $summaryHeader = $existingSummaryHeader;
-	if ($summaryHeader eq '' && $headerOwner ne '') {
-		my $headerReport = "$destDs{$headerOwner}/${headerOwner}.analysis.txt";
-		open my $header_fh, '<', $headerReport or die "Cannot read header report $headerReport: $!\n";
-		$summaryHeader = <$header_fh> // '';
-		close $header_fh or die "Cannot close header report $headerReport: $!\n";
-	}
-	open my $summary_fh, ">", $RsummaryTab or die "Cannot reset $RsummaryTab: $!\n";
-	print {$summary_fh} $summaryHeader if $summaryHeader ne '';
-
-	foreach my $d (@k2d){
-		my $clsts = "$destDs{$d}/${d}.Ranalysis.log";
-		if ($cpDir ne ""){
-			make_path("$cpDir/$d");
-			foreach my $source (glob("$destDs{$d}/${d}*")) {
-				next unless -f $source;
-				copy($source, "$cpDir/$d/".basename($source))
-					or die "Cannot copy $source to $cpDir/$d: $!\n";
-			}
-		}
-		my $SCtrig=0;
-		
-		my $TXTreport = "$destDs{$d}/${d}.analysis.txt";
-
-		if (-e $TXTreport && -s $TXTreport){
-			open my $report_fh, "<", $TXTreport or die "Cannot read $TXTreport: $!\n";
-			while (my $line = <$report_fh>) {
-				next if $summaryHeader ne '' && $line eq $summaryHeader;
-				print {$summary_fh} $line;
-			}
-			close $report_fh or die "Cannot close $TXTreport: $!\n";
-		}
-	}
-	close $summary_fh or die "Cannot close $RsummaryTab: $!\n";
-}
-
-## run network of similar samples
-my ($networkDep, $networkStone) = strainNetwork();
-
-#die;
-
-# functional enrichments of strains in conditions defined by user
-my ($treeWasDep, $treeWasStone) = treeWas();
-
-my @postAnalysisJobs = grep { defined($_) && length($_) } ($networkDep, $treeWasDep);
-if (@postAnalysisJobs) {
-	print "Waiting for network and treeWAS analyses to finish\n";
-	qsubSystemJobAlive(\@postAnalysisJobs, $QSBoptHR);
-}
-my @missingPostAnalysisStones = grep { !-e $_ } ($networkStone, $treeWasStone);
-die "Downstream strain analyses failed or did not publish checkpoints: "
-	.join(", ", @missingPostAnalysisStones)."\n"
-	if @missingPostAnalysisStones;
-
-
-visualizeSignPhylos();
-
-
-
-#die "$FMGpD/Rsummary.tab";
 
 print "\nFinished with strain postprocessing\n";
 exit (0);
@@ -554,15 +942,21 @@ sub sumSummaries($ $){
 
 
 sub strainNetwork{ #submits Anthony's script to build a network
-	my $netDir = "$FMGpD/networks/";
+	my $netDir = "$resultsDir/networks/";
 	my $networkStone = "$netDir/networks.sto";
+	my $networkGraph = "$netDir/strain_graph.Rds";
 	my $dep = "";
+	if (-e $networkStone && !-s $networkGraph) {
+		warn "Ignoring incomplete network checkpoint $networkStone\n";
+		unlink $networkStone or die "Cannot remove incomplete network checkpoint $networkStone: $!\n";
+	}
 	if (!-e $networkStone){
 		my $networkScr = getProgPaths("runNetworks_R");#"Rscript $MGSTKdir/runNetworks.R";
 		make_path($netDir);
 		my $edgeTresh = 4;
 		my $cmd = "$networkScr -i ".shellQuote($FMGpD)." -o ".shellQuote($netDir)." -m ".shellQuote($refMap)." -e $edgeTresh\n";
 		$cmd .= "#consider the following options to change: -c [Column for clustering samples] -e [num shared strains for edges]\n";
+		$cmd .= "test -s ".shellQuote($networkGraph)."\n";
 		$cmd .= "touch ".shellQuote($networkStone)."\n";
 		print "Submitting shared-strain network analysis; output: $netDir\n";
 		#system $cmd;
@@ -582,10 +976,10 @@ sub treeWas{
 	my $funCmd = "";
 	my $treewasRun_R = getProgPaths("treewasRun_R");
 	my $processTreewas_R = getProgPaths("processTreewas_R");
-	my $treewasOut = "$FMGpD/GeneEnrich/";
+	my $treewasOut = "$resultsDir/GeneEnrich/";
 	my $treewasOutfile = "$treewasOut/treeWAS_results.csv";
 	my $summaryOutfile = "$treewasOut/treeWAS_results_functions.csv";
-	my $treeWasStone = "$FMGpD/GeneEnrich/treeWAS.sto";
+	my $treeWasStone = "$resultsDir/GeneEnrich/treeWAS.sto";
 	my $MGSd = dirname($FMGpD);
 	if (-e $treeWasStone && (!-s $treewasOutfile || !-s $summaryOutfile)) {
 		warn "Ignoring incomplete treeWAS checkpoint $treeWasStone\n";
@@ -617,10 +1011,189 @@ sub visualizeSignPhylos{
 	#my $taxFile = "$GCd/Anno/Tax/GTDBmg_MGS/specI.tax";
 	my $vizPhylos = getProgPaths("vizPhylosSign_R");
 	my $taxFile = "$FMGpD/../Annotation/MGS.GTDB.LCA.tax";
-	my $cmdPic = "$vizPhylos ".join(" ", map { shellQuote($_) } ($RsummaryTab,$taxFile,$FMGpD,"phylo",$MGSTKdir,$refMap,"-1"))."\n";
+	my $phyloFigureStone = "$resultsDir/phyloFigures.sto";
+	my $cmdPic = "$vizPhylos ".join(" ", map { shellQuote($_) }
+		($RsummaryTab, $taxFile, $FMGpD, "phylo", $MGSTKdir, $refMap, "-1"))."\n";
+	$cmdPic .= "touch ".shellQuote($phyloFigureStone)."\n";
 
-	print "Printing figures of most significant phylogenies\nThis might take several hours..\n";
-	systemW($cmdPic);
+	my $dep = "";
+	if (!-e $phyloFigureStone) {
+		print "Submitting figures of most significant phylogenies\nThis might take several hours..\n";
+		my ($submittedDep, $qcmd) = qsubSystem(
+			"$resultsDir/phyloFigures.sh", $cmdPic, 1, "24G", "phyloFigures", "", "", 1, [], $QSBoptHR);
+		$dep = $submittedDep;
+	}
+	return ($dep, $phyloFigureStone);
+}
+
+sub resolveOutgroup {
+	my ($mgs, $directory) = @_;
+	my ($logged, $outgroup) = loggedOutgroup($directory);
+	return (1, $outgroup, 'data.log') if $logged;
+
+	my ($saved, $savedOutgroup) = savedCommandOutgroup($directory);
+	return (1, $savedOutgroup, 'treeCmd.sh') if $saved;
+
+	$outgroup = mgsTreeOutgroup($mgs);
+	return (1, $outgroup, 'MGSphylo') if length($outgroup);
+	return (0, '', 'none');
+}
+
+sub loggedOutgroup {
+	my ($directory) = @_;
+	my $logPath = "$directory/data.log";
+	return (0, '') unless -e $logPath || -e "$logPath.gz";
+	my ($log_fh) = gzipopen($logPath, "strain outgroup log");
+	while (my $line = <$log_fh>) {
+		$line =~ s/[\r\n]+\z//;
+		if ($line =~ /^OG:(.*)\z/) {
+			close $log_fh or die "Cannot close strain outgroup log for $directory: $!\n";
+			return (1, $1);
+		}
+	}
+	close $log_fh or die "Cannot close strain outgroup log for $directory: $!\n";
+	return (0, '');
+}
+
+sub savedCommandOutgroup {
+	my ($directory) = @_;
+	my $commandPath = "$directory/treeCmd.sh";
+	return (0, '') unless -s $commandPath;
+	open my $command_fh, '<', $commandPath
+		or die "Cannot read saved tree command $commandPath: $!\n";
+	local $/;
+	my $command = <$command_fh> // '';
+	close $command_fh or die "Cannot close saved tree command $commandPath: $!\n";
+	my @tokens = eval { shellwords($command) };
+	return (0, '') if $@ || !@tokens;
+	return (0, '') unless grep { $_ eq '-withinSpecies' } @tokens;
+	for my $index (0 .. $#tokens - 1) {
+		next unless $tokens[$index] eq '-outgroup' || $tokens[$index] eq '--outgroup';
+		return (1, $tokens[$index + 1]);
+	}
+	# A saved within-species command without this option records an intentional
+	# ingroup-only tree, so do not replace it with a later heuristic.
+	return (1, '');
+}
+
+sub mgsTreeOutgroup {
+	my ($mgs) = @_;
+	return '' unless length($MGSphylo) && length($neighborTree);
+	my $call = "$neighborTree ".shellQuote($MGSphylo)." ".shellQuote($mgs);
+	my $candidates = `$call`;
+	if ($? != 0) {
+		warn "Cannot recover the outgroup for $mgs from $MGSphylo; command failed: $call\n";
+		return '';
+	}
+	for my $candidate (split /\s+/, $candidates) {
+		return $candidate
+			if $candidate =~ /\A[A-Za-z0-9][A-Za-z0-9_.:+-]*\z/;
+	}
+	warn "No usable outgroup candidate for $mgs was returned from $MGSphylo\n";
+	return '';
+}
+
+sub combineResults {
+	die "combineResults_R is not configured\n" unless length($combineResultsR);
+	my ($includePopGen) = @_;
+	$includePopGen = 0 unless defined($includePopGen);
+	my $command = "$combineResultsR --path ".shellQuote($FMGpD)
+		." --outDir ".shellQuote($FMGpD)."\n";
+	my $combinedKinds = $includePopGen ? 'strainStats and PopGenStats' : 'strainStats';
+	print "Combining per-MGS $combinedKinds result stores into $RsummaryTab\n";
+	systemW($command);
+	die "combineResults.R did not produce the overview table $RsummaryTab\n"
+		unless -s $RsummaryTab;
+	print "Combined strain overview: $RsummaryTab\n";
+	if ($includePopGen) {
+		die "combineResults.R did not produce the population overview table $popGenSummaryTab\n"
+			unless -s $popGenSummaryTab;
+		print "Combined population-genetics overview: $popGenSummaryTab\n";
+		if (length($popGenSubsample) && -s $popGenSubsampleSummaryTab) {
+			print "Combined subsampled population-genetics overview: $popGenSubsampleSummaryTab\n";
+		} elsif (length($popGenSubsample)) {
+			warn "No subsampled population-genetics rows were available for $popGenSubsampleSummaryTab\n";
+		}
+	}
+}
+
+sub newickSampleCount {
+	my ($treePath) = @_;
+	open my $tree_fh, '<', $treePath or die "Cannot read tree $treePath: $!\n";
+	local $/;
+	my $newick = <$tree_fh> // '';
+	close $tree_fh or die "Cannot close tree $treePath: $!\n";
+	$newick =~ s/\[[^\]]*\]//gs;
+	$newick =~ s/\s+//g;
+	return 1 unless length($newick);
+	my $commas = () = $newick =~ /,/g;
+	my $tips = $commas + 1;
+	return $tips > 0 ? $tips : 1;
+}
+
+sub newickNodeCount {
+	my ($treePath) = @_;
+	open my $tree_fh, '<', $treePath or die "Cannot read tree $treePath: $!\n";
+	local $/;
+	my $newick = <$tree_fh> // '';
+	close $tree_fh or die "Cannot close tree $treePath: $!\n";
+	$newick =~ s/\[[^\]]*\]//gs;
+	$newick =~ s/\s+//g;
+	return 1 unless length($newick);
+	my $internal = () = $newick =~ /\(/g;
+	my $commas = () = $newick =~ /,/g;
+	my $tips = $commas + 1;
+	my $nodes = $tips + $internal;
+	return $nodes > 0 ? $nodes : 1;
+}
+
+sub rAnalysisMemoryForCores {
+	my ($cores, $analysisKind) = @_;
+	die "R-analysis core count must be positive\n" unless defined($cores) && $cores > 0;
+	my $extraCores = $cores - $rAnalysisMemoryCoreThreshold;
+	$extraCores = 0 if $extraCores < 0;
+	my $memoryGB = $rAnalysisMemoryBaseGB
+		+ $extraCores * $rAnalysisMemoryPerExtraCoreGB;
+	$memoryGB = int($memoryGB * $popGenMemoryFactor + 0.5)
+		if defined($analysisKind) && $analysisKind eq 'popGenStats';
+	return $memoryGB."G";
+}
+
+sub increaseRAnalysisMemory {
+	my ($memory) = @_;
+	return undef unless defined($memory);
+	my $currentMB;
+	$currentMB = int($1 * 1024 + 0.5) if $memory =~ /^([\d.]+)G$/i;
+	$currentMB = int($1 + 0.5) if $memory =~ /^([\d.]+)M$/i;
+	return undef unless defined($currentMB) && $currentMB > 0;
+	my $maximumMB = int($rAnalysisOOMMaxMemoryGB * 1024 + 0.5);
+	my $nextMB = next_oom_retry_memory_mb($currentMB, $maximumMB);
+	return defined($nextMB) ? $nextMB.'M' : undef;
+}
+
+sub reportRAnalysisSchedulerFailures {
+	my ($jobs, $options, $analysisKind) = @_;
+	$analysisKind ||= 'R-analysis';
+	my $emptySummary = { failed => 0, categories => {} };
+	return $emptySummary unless $options->{doSubmit} && ($options->{qmode} || '') eq 'slurm';
+	return $emptySummary unless scalar(keys %{$jobs});
+	my $summary = slurmJobFailureSummary($jobs, $options);
+	if (!defined($summary)) {
+		warn "Could not query Slurm accounting for $analysisKind jobs\n";
+		return $emptySummary;
+	}
+	return $summary unless $summary->{failed};
+	my @failures;
+	for my $category (sort keys %{$summary->{categories}}) {
+		my $counts = $summary->{categories}{$category}{failures} || {};
+		push @failures, $category.": ".join(", ", map {
+			"$_=$counts->{$_}"
+		} sort keys %{$counts});
+	}
+	warn "Slurm reported failed $analysisKind job(s): ".join("; ", @failures)
+		.". Inspect the matching $analysisKind.Ranalysis.sh.etxt and *.Ranalysis.log files; "
+		."incomplete result batches will be retried and OOM batches receive additional memory.\n";
+	return $summary;
 }
 
 sub shellQuote {

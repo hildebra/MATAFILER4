@@ -3,9 +3,12 @@ package Mods::Subm;
 use warnings;
 use strict;
 use Fcntl qw(:flock);
+use File::Basename qw(dirname);
+use File::Spec;
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths convert2Gb);
 use Mods::WorkflowControl qw(normalise_job_dependencies);
+use Mods::JobGraph qw(jobGraphRecord);
 
 
 use Exporter qw(import);
@@ -13,10 +16,21 @@ our @EXPORT_OK = qw( findQsubSys emptyQsubOpt qsubSystem qsubSystem2 qsubSystemJ
 		qsubSystemWaitMaxJobs MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs reconcileSlurmDependencies
 		recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary
 		submitSlurmWithDependencyRecovery deferredSubmissionDependency
-		submissionDependencyDeferred handleSubmissionFailure);
+		submissionDependencyDeferred submissionDependencyFailed handleSubmissionFailure);
 
 my $FAILED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_FAILED__';
 my $DEFERRED_SUBMISSION_DEPENDENCY = '__MF4_SUBMISSION_DEFERRED__';
+
+# A moderate Slurm priority handicap keeps ordinary MATAFILER waves from
+# dominating the queue. Time-critical recovery callers explicitly use 0.
+my $DEFAULT_JOB_NICE = 2500;
+
+sub normaliseJobNice {
+	my ($value) = @_;
+	my $jobNice = defined($value) && $value ne ''
+		? int($value) : $DEFAULT_JOB_NICE;
+	return $jobNice < 0 ? 0 : $jobNice;
+}
 
 sub deferredSubmissionDependency { return $DEFERRED_SUBMISSION_DEPENDENCY; }
 sub submissionDependencyDeferred {
@@ -24,6 +38,10 @@ sub submissionDependencyDeferred {
 		split /;/, normalise_job_dependencies(@_);
 }
 
+sub submissionDependencyFailed {
+	return scalar grep { $_ eq $FAILED_SUBMISSION_DEPENDENCY }
+		split /;/, normalise_job_dependencies(@_);
+}
 
 sub recordSampleLockJobs {
 	my ($lock_file, $jobs, $optHR) = @_;
@@ -94,8 +112,43 @@ sub _run_scheduler_query {
 		$status ||= 0;
 		return ($output, $status);
 	}
-	my $output = `$command`;
+	# Keep Slurm controller diagnostics with the failed query.  In particular,
+	# squeue otherwise writes transient slurm_load_jobs errors straight to STDERR,
+	# leaving callers with only a generic non-zero status.
+	my $output = `$command 2>&1`;
 	return ($output, $?);
+}
+sub _run_slurm_accounting_query {
+	my ($runner, $command, $batch, $optHR) = @_;
+	$optHR ||= {};
+	my $retry_seconds = defined($optHR->{slurmQueryRetrySeconds})
+		? 0 + $optHR->{slurmQueryRetrySeconds} : 300;
+	my $maximum_error_seconds = defined($optHR->{slurmQueryMaxErrorSeconds})
+		? 0 + $optHR->{slurmQueryMaxErrorSeconds} : 1_200;
+	$retry_seconds = 1 if $retry_seconds < 1;
+	$maximum_error_seconds = 0 if $maximum_error_seconds < 0;
+	my $sleeper = $optHR->{schedulerSleeper} || sub { sleep($_[0]); };
+	my $clock = $optHR->{schedulerClock} || sub { time };
+	my $error_started_at;
+	while (1) {
+		my ($output, $status) = _run_scheduler_query($runner, $command, $batch);
+		return ($output, 0) if $status == 0;
+		my $now = $clock->();
+		$error_started_at = $now unless defined $error_started_at;
+		my $elapsed = $now - $error_started_at;
+		if ($elapsed >= $maximum_error_seconds) {
+			my $diagnostic = $output // '';
+			$diagnostic =~ s/\s+\z//;
+			warn "Slurm accounting query failed continuously for ${elapsed}s"
+				.($diagnostic ne '' ? ": $diagnostic" : '')."\n";
+			return ($output, $status);
+		}
+		my $diagnostic = $output // '';
+		$diagnostic =~ s/\s+\z//;
+		warn "Transient Slurm accounting failure after ${elapsed}s; retrying in ${retry_seconds}s"
+			.($diagnostic ne '' ? ": $diagnostic" : '')."\n";
+		$sleeper->($retry_seconds);
+	}
 }
 
 sub _scheduler_queue_command {
@@ -136,9 +189,41 @@ sub _scheduler_queue_snapshot {
 	}
 
 	my $command = _scheduler_queue_command($qmode);
-	my ($output, $status) = _run_scheduler_query($args{runner}, $command);
-	die($args{error} || "Failed to query scheduler jobs with: $command\n")
-		if $status != 0;
+	my $retry_seconds = defined($optHR->{slurmQueryRetrySeconds})
+		? 0 + $optHR->{slurmQueryRetrySeconds} : 300;
+	my $maximum_error_seconds = defined($optHR->{slurmQueryMaxErrorSeconds})
+		? 0 + $optHR->{slurmQueryMaxErrorSeconds} : 1_200;
+	$retry_seconds = 1 if $retry_seconds < 1;
+	$maximum_error_seconds = 0 if $maximum_error_seconds < 0;
+	my $sleeper = $optHR->{schedulerSleeper} || sub { sleep($_[0]); };
+	my $error_started_at;
+	my ($output, $status);
+	while (1) {
+		($output, $status) = _run_scheduler_query($args{runner}, $command);
+		last if $status == 0;
+		# Slurm occasionally returns controller/protocol errors such as
+		# "slurm_load_jobs error: Unexpected message received" while jobs continue
+		# normally.  A scheduler outage must not turn that into a workflow restart.
+		if ($qmode ne 'slurm') {
+			die($args{error} || "Failed to query scheduler jobs with: $command\n");
+		}
+		my $failure_now = $clock ? $clock->() : time;
+		$error_started_at = $failure_now unless defined $error_started_at;
+		my $elapsed = $failure_now - $error_started_at;
+		if ($elapsed >= $maximum_error_seconds) {
+			my $diagnostic = $output // '';
+			$diagnostic =~ s/\s+\z//;
+			die "Slurm scheduler query failed continuously for ${elapsed}s "
+				."(limit ${maximum_error_seconds}s): $command"
+				.($diagnostic ne '' ? "\n$diagnostic\n" : "\n");
+		}
+		my $diagnostic = $output // '';
+		$diagnostic =~ s/\s+\z//;
+		warn "Transient Slurm scheduler query failure after ${elapsed}s; "
+			."retrying in ${retry_seconds}s"
+			.($diagnostic ne '' ? ": $diagnostic" : '') . "\n";
+		$sleeper->($retry_seconds);
+	}
 	my (%jobs, %states);
 	for my $line (split /\n/, $output) {
 		$line =~ s/^\s+|\s+$//g;
@@ -192,7 +277,8 @@ sub _batched_slurm_accounting_lookup {
 	for my $batch (_slurm_job_batches($job_ids)) {
 		my $command = "sacct -X -n -P -j ".join(',', @{$batch})
 			." --format=JobIDRaw,State,ExitCode";
-		my ($output, $status) = _run_scheduler_query($runner, $command, $batch);
+		my ($output, $status) =
+			_run_slurm_accounting_query($runner, $command, $batch, $optHR);
 		return undef if $status != 0;
 		for my $line (split /\n/, $output) {
 			my ($job_id, $state, $exit_code) = split /\|/, $line, 3;
@@ -354,14 +440,8 @@ sub slurmJobFailureSummary {
 	for my $batch (_slurm_job_batches(\@job_ids)) {
 		my $command = "sacct -X -n -P -j ".join(',', @{$batch})
 			." --format=JobIDRaw,JobName,State,ExitCode,Reason";
-		my ($output, $status);
-		if (my $runner = $optHR->{jobAccountingRunner}) {
-			($output, $status) = $runner->($command, $batch);
-			$status ||= 0;
-		} else {
-			$output = `$command 2>/dev/null`;
-			$status = $?;
-		}
+		my ($output, $status) = _run_slurm_accounting_query(
+			$optHR->{jobAccountingRunner}, $command, $batch, $optHR);
 		return undef if $status != 0;
 		for my $line (split /\n/, $output) {
 			my ($job_id, $job_name, $state, $exit_code, $reason) =
@@ -517,15 +597,71 @@ sub reconcileSlurmDependencies {
 	return (join(';', @remaining), $error);
 }
 
+# A job submitted from inside another Slurm job (every MATAFILER controller and supervisor is one, and jobs are
+# submitted with --export=ALL) inherits that job's SPANK plugin options as *_SPANK_OPTION_* environment variables.
+# Some sites apply those instead of the new job's own #SBATCH request, e.g. the parent's --localscratch size: eggNOG
+# chunk jobs asking for 500 GB got the 15 GB of their supervisor. Each job states its own options, so drop them.
+sub _inherited_spank_options {
+	return grep { /SPANK_OPTION_/ } keys %ENV;
+}
+
 sub _run_slurm_submission {
 	my ($command, $optHR) = @_;
+	$command =~ s/\s+\z//;
 	if (my $runner = $optHR->{slurmSubmissionRunner}) {
 		return $runner->($command);
 	}
 	# Strip trailing whitespace so "2>&1" binds to the actual command.
 	(my $trimmed_command = $command) =~ s/\s+\z//;
+
 	my $output = `$trimmed_command 2>&1`;
 	return ($output, $?);
+}
+
+sub _transient_slurm_submission_error {
+	my ($output, $status) = @_;
+	return 0 unless $status != 0;
+	return defined($output) && $output =~ /(?:
+		Unexpected[ ]message[ ]received |
+		Unable[ ]to[ ]contact[ ]Slurm[ ]controller |
+		(?:Socket|Connection)[ ]timed[ ]out |
+		Connection[ ]refused |
+		Communication[ ]connection[ ]failure |
+		slurm_(?:send|receive)_msg |
+		Resource[ ]temporarily[ ]unavailable |
+		Protocol[ ]error |
+		Interrupted[ ]system[ ]call
+	)/ix;
+}
+
+sub _run_slurm_submission_with_retries {
+	my ($command, $optHR) = @_;
+	my $maximum_attempts = defined($optHR->{slurmSubmitMaxAttempts})
+		? int($optHR->{slurmSubmitMaxAttempts}) : 8;
+	$maximum_attempts = 1 if $maximum_attempts < 1;
+	my $delay = defined($optHR->{slurmSubmitRetrySeconds})
+		? 0 + $optHR->{slurmSubmitRetrySeconds} : 2;
+	$delay = 0 if $delay < 0;
+	my $maximum_delay = defined($optHR->{slurmSubmitRetryMaxSeconds})
+		? 0 + $optHR->{slurmSubmitRetryMaxSeconds} : 30;
+	$maximum_delay = $delay if $maximum_delay < $delay;
+	my $sleeper = $optHR->{schedulerSleeper} || sub { sleep($_[0]); };
+
+	for my $attempt (1 .. $maximum_attempts) {
+		my ($output, $status) = _run_slurm_submission($command, $optHR);
+		return ($output, $status, $attempt > 1 ? 1 : 0)
+			unless _transient_slurm_submission_error($output, $status)
+				&& $attempt < $maximum_attempts;
+		my $diagnostic = defined($output) ? $output : '';
+		$diagnostic =~ s/[\r\n]+/ /g;
+		$diagnostic =~ s/^\s+|\s+\z//g;
+		warn "Transient Slurm submission failure (attempt $attempt/$maximum_attempts)"
+			.(length($diagnostic) ? ": $diagnostic" : '')."; retrying in ${delay}s\n";
+		$sleeper->($delay) if $delay > 0;
+		$delay *= 2;
+		$delay = $maximum_delay if $delay > $maximum_delay;
+	}
+	die "Internal error: exhausted Slurm retry loop without returning\n";
 }
 
 sub _slurm_script_dependency {
@@ -577,8 +713,9 @@ sub _rewrite_slurm_script_dependency {
 sub submitSlurmWithDependencyRecovery {
 	my ($command, $script_path, $optHR) = @_;
 	$optHR ||= {};
-	my ($output, $status) = _run_slurm_submission($command, $optHR);
-	return ($output, $status, 0)
+	my ($output, $status, $transient_retry) =
+		_run_slurm_submission_with_retries($command, $optHR);
+	return ($output, $status, $transient_retry)
 		unless $status != 0 && $output =~ /Job dependency problem/i;
 
 	my ($dependency_type, @dependencies) = _slurm_script_dependency($script_path);
@@ -602,7 +739,8 @@ sub submitSlurmWithDependencyRecovery {
 		. ", and retrying once with "
 		. (@reconciled ? join(',', @reconciled) : 'no dependency directive')."\n";
 
-	my ($retry_output, $retry_status) = _run_slurm_submission($command, $optHR);
+	my ($retry_output, $retry_status) =
+		_run_slurm_submission_with_retries($command, $optHR);
 	return ($retry_output, $retry_status, 1);
 }
 
@@ -650,6 +788,8 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	# 8[0/1: excute in cwd?] 9[0/1: return qsub cmd or submit job to cluster]
 	# Falk Hildebrand, may 2015
 	my ($tmpsh,$cmd,$ncores,$memory,$jname,$waitJID,$cwd,$immSubm, $restrHostsAR, $optHR) = @_;
+	#a supervised stage (Mods::JobGraph) records its jobs here and submits them itself as their prerequisites finish
+	return jobGraphRecord($optHR->{jobGraph}, @_) if (ref($optHR) eq 'HASH' && ref($optHR->{jobGraph}) eq 'HASH');
 	my $requestedJobName = $jname;
 	#$doSync, 5th arg
 	#14,12G
@@ -681,6 +821,11 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	#my $tmpSpace2 = $optHR->{tmpMinG};
 	#my $wcKeysForJob = $optHR->{wcKeysForJob};
 	my $exclNodes = $optHR->{excludeNodes};
+	#Slurm subtracts --nice from the job priority, and any user may raise it.
+	#Submitting a bulk wave with a positive nice and its recovery jobs with nice 0
+	#lets the recovery jobs overtake a backlog that is already queued, which no
+	#amount of submission throttling can achieve on its own.
+	my $jobNice = normaliseJobNice($optHR->{jobNice});
 	
 	
 	#die ($memory."\n");
@@ -697,6 +842,9 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		$queues = "\"".$optHR->{gpuQueue}."\"";#"\"medium_priority\"";
 		#$time = "23:00:00";
 		$optHR->{useGPUQueue}=0;
+	} elsif (defined $optHR->{useDownloadQueue} && $optHR->{useDownloadQueue} == 1){
+		$queues = "\"".$optHR->{downloadQueue}."\"";
+		$optHR->{useDownloadQueue}=0;
 	} elsif (defined $optHR->{useNetQueue} && $optHR->{useNetQueue} ==1){
 		$queues = "\"".$optHR->{netQueue}."\"";
 		$time = $optHR->{longTime};
@@ -710,6 +858,14 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 	my @jspl = split /;/, $waitJID;
 	my $has_failed_dependency = grep { $_ eq $FAILED_SUBMISSION_DEPENDENCY } @jspl;
 	my $has_deferred_dependency = grep { $_ eq $DEFERRED_SUBMISSION_DEPENDENCY } @jspl;
+	# A postponed command has no scheduler ID yet. Preserve a blocked producer
+	# in its returned dependency instead of exporting a runnable command with
+	# that prerequisite stripped. The next controller pass can rebuild it.
+	if (!$immSubm && ($has_failed_dependency || $has_deferred_dependency)) {
+		return ($DEFERRED_SUBMISSION_DEPENDENCY, '') if $has_deferred_dependency;
+		return (handleSubmissionFailure($optHR,
+			"Skipping deferred submission for $tmpsh because an upstream submission failed"), '');
+	}
 	@jspl = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY
 		&& $_ ne $DEFERRED_SUBMISSION_DEPENDENCY } @jspl;
 	$waitJID = join(';', @jspl);
@@ -734,7 +890,20 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		}
 	}
 
-	if ($cwd ne "" && !-d $cwd){system "mkdir -p $cwd";}
+	# Slurm resolves --chdir and inherited TMPDIR before the shell body runs.
+	# A launcher can itself be in node-local scratch, which is gone by the time
+	# a dependent job starts.  Always begin Slurm jobs beside their globally
+	# visible generated script; node-local work is entered explicitly below.
+	my $slurmWorkdir = '';
+	if ($qmode eq 'slurm') {
+		$slurmWorkdir = File::Spec->canonpath(
+			dirname(File::Spec->rel2abs($tmpsh)));
+		if ($cwd ne '' && File::Spec->canonpath(File::Spec->rel2abs($cwd)) ne $slurmWorkdir) {
+			warn "Ignoring requested Slurm working directory $cwd; using stable script directory $slurmWorkdir\n";
+		}
+	} elsif ($cwd ne "" && !-d $cwd) {
+		system "mkdir -p $cwd";
+	}
 	#if ($memory > 250001){$queues = "\"scb\"";}
 	$tmpsh =~ m/^(.*\/)[^\/]+$/;
 	system "mkdir -p $1" unless (-d $1);
@@ -748,7 +917,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		print O "#!/bin/bash\n#SBATCH -N 1\n#SBATCH --cpus-per-task=$ncores\n#SBATCH -o $tmpsh.otxt\n"; #\n#SBATCH -n  $ncores
 		
 		if ($nthreads != $ncores ){print O "#SBATCH --threads-per-core=1\n#SBATCH --hint=compute_bound\n";} #  specifically for iqtree/raxml
-		print O "#SBATCH -e $tmpsh.etxt\n#SBATCH --mem=$memory\n#SBATCH --export=ALL\n";
+		print O "#SBATCH -e $tmpsh.etxt\n#SBATCH --mem=$memory\n#SBATCH --export=ALL,TMPDIR=/tmp\n";
 		#print O "#SBATCH --kill-on-invalid-dep=yes\n";
 		#print O "#SBATCH --tmp=$tmpSpace\n" if ($tmpSpace>0);#SBATCH --gres=ssd\n
 		foreach my $subTerm ( split /;/, $submissionConfig){
@@ -764,7 +933,8 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		print O "#SBATCH --time=$time\n" unless ($time eq "");
 		print O "#SBATCH --exclude=$exclNodes\n" unless ($exclNodes eq "");
 		#print O "#SBATCH --localscratch=ssd:50\n"; #for EI cluster
-		print O "#SBATCH --chdir=$cwd\n" if ($cwd ne "");
+		print O "#SBATCH --nice=$jobNice\n" if ($jobNice > 0);
+		print O "#SBATCH --chdir=$slurmWorkdir\n";
 		print O "#SBATCH -J $rTag$jname\n" if ($jname ne "");
 		print O "#SBATCH --wc=". $optHR->{wcKeysForJob} . "\n" if ($optHR->{wcKeysForJob} ne "");
 		if (@constrains){
@@ -792,7 +962,9 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		$qbin="bash";$LSF=3;
 		print O "#!/bin/bash\n";
 	} elsif ($qmode eq "sge"){
-		print O "#!/bin/bash\n#\$ -S /bin/bash\n#\$ -cwd\n#\$ -pe ".$optHR->{qsubPEenv}." $nthreads\n#\$ -o $tmpsh.otxt\n#\$ -e $tmpsh.etxt\n#\$ -l h_rss=$memory\n";#h_vmem=$mem\n";
+		# $memory is plain MB here; SGE reads a unitless value as bytes
+		my $sgeMemory = $memory =~ /^\d+$/ ? "${memory}M" : $memory;
+		print O "#!/bin/bash\n#\$ -S /bin/bash\n#\$ -cwd\n#\$ -pe ".$optHR->{qsubPEenv}." $nthreads\n#\$ -o $tmpsh.otxt\n#\$ -e $tmpsh.etxt\n#\$ -l h_rss=$sgeMemory\n";#h_vmem=$mem\n";
 		print O "#\$ -v LD_LIBRARY_PATH=".$optHR->{cpplib}."\n";#\$ -v TMPDIR=/dev/shm\n";
 #		print O "#\$ -v PERL5LIB=".$optHR->{perl5lib}."\n";
 		print O "#\$ -V\n";
@@ -912,8 +1084,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 			die $message;
 		}
 		if ($LSF == 2){#slurm get jobid
-			chomp $ret;
-			unless ($ret =~ /^Submitted batch job (\d+)\s*$/) {
+			unless ($ret =~ /^Submitted[ \t]+batch[ \t]+job[ \t]+(\d+)[ \t]*\r?$/m) {
 				delete $optHR->{liveJobThrottleState};
 				die "Could not parse Slurm job id from submission output: $ret\n";
 			}
@@ -1053,11 +1224,13 @@ sub emptyQsubOpt{
 	#die "$shortQ\n";
 	my $gpuQ = getProgPaths("gpuQueue",0);
 	my $netQ = getProgPaths("netQueue",0);
+	my $downloadQ = getProgPaths("downloadQueue",0);
 	my $himemQ = getProgPaths("highMemQueue",0);
 	if ($longQ eq ""){$longQ =  $medQ;}
 	if ($medQ eq "" ){die "FATAL: no medium queue defined!\n";};
 	if ($gpuQ eq "" ){$gpuQ = $medQ;};
 	if ($netQ eq "" ){$netQ = $medQ;};
+	if ($downloadQ eq "" ){$downloadQ = $medQ;};
 	if ($himemQ eq "" ){$himemQ = $medQ;};
 	if ($shortQ eq "" ){$shortQ = $medQ;};
 	my $xtraNodeCmds = getProgPaths("subXtraCmd",0);
@@ -1083,6 +1256,7 @@ sub emptyQsubOpt{
 		longQueue => $longQ,
 		gpuQueue => $gpuQ,
 		netQueue => $netQ,
+		downloadQueue => $downloadQ,
 		highMemQueue => $himemQ,
 		longTime => $longTime,#7days
 		medQueue => $medQ,
@@ -1092,6 +1266,7 @@ sub emptyQsubOpt{
 		useLongQueue => 0,
 		useGPUQueue => 0,
 		useNetQueue => 0,
+		useDownloadQueue => 0,
 		gpuCount => 0,
 		useShortQueue => 0,
 		useHiMemQueue => 0,
@@ -1108,6 +1283,9 @@ sub emptyQsubOpt{
 		submittedJobs => 0,
 		capacityCheckEverySubmissions => 10,
 		jobPollSeconds => 20,
+		#Priority handicap applied to ordinary bulk submissions; recovery jobs
+		#override it with 0 so they outrank a backlog that is already queued.
+		jobNice => $DEFAULT_JOB_NICE,
 		#tmpMinG => 10,
 		afterAny => 0,
 		excludeNodes => "",
@@ -1129,6 +1307,12 @@ sub qsubSystemJobAlive{
 	# historical behaviour of waiting for every queued dependency to disappear.
 	my $activeThreshold=-1;
 	$activeThreshold = $_[3] if (@_ > 3);
+	# A non-negative budget bounds a single wait: the call returns the
+	# dependencies still queued once that budget is spent, so a caller can act on
+	# the jobs that already finished - escalate accounting-confirmed OOM
+	# outcomes, for instance - and then resume waiting on the returned set.
+	my $maxWaitSeconds=-1;
+	$maxWaitSeconds = $_[4] if (@_ > 4 && defined $_[4]);
 	my @jobs = split /;/, normalise_job_dependencies($jAr);
 	@jobs = grep { $_ ne $FAILED_SUBMISSION_DEPENDENCY
 		&& $_ ne $DEFERRED_SUBMISSION_DEPENDENCY } @jobs;
@@ -1143,6 +1327,8 @@ sub qsubSystemJobAlive{
 	my %wanted = map { $_ => 1 } @jobs;
 	my $announced = 0;
 	my $first_poll = 1;
+	my $waitStarted = time;
+	my @remaining;
 	while (1) {
 		my $snapshot = _scheduler_queue_snapshot(
 			$optHR,
@@ -1151,7 +1337,7 @@ sub qsubSystemJobAlive{
 			error => "Failed to query active jobs\n",
 		);
 		$first_poll = 0;
-		my @remaining = grep { $snapshot->{jobs}{$_} } keys %wanted;
+		@remaining = grep { $snapshot->{jobs}{$_} } keys %wanted;
 		my @active = grep {
 			$snapshot->{jobs}{$_}
 				&& _scheduler_state_is_executing($qmode, $snapshot->{states}{$_})
@@ -1162,6 +1348,11 @@ sub qsubSystemJobAlive{
 			last;
 		}
 		last unless (@remaining);
+		if ($maxWaitSeconds >= 0 && time - $waitStarted >= $maxWaitSeconds) {
+			print scalar(@remaining)."/".scalar(@jobs)." job(s) still queued after "
+				.(time - $waitStarted)."s; handing control back for an intermediate check\n";
+			last;
+		}
 		my $waitDescription = $activeThreshold >= 0
 			? scalar(@active)." active job(s) among ".scalar(@remaining)."/".scalar(@jobs)." queued dependencies"
 			: scalar(@remaining)."/".scalar(@jobs)." jobs";
@@ -1174,11 +1365,16 @@ sub qsubSystemJobAlive{
 		my $pollSeconds = defined($optHR->{jobPollSeconds})
 			? 0 + $optHR->{jobPollSeconds} : 20;
 		$pollSeconds = 1 if ($pollSeconds < 1);
-		sleep($pollSeconds);
+		if ($maxWaitSeconds >= 0) {
+			my $budgetLeft = $maxWaitSeconds - (time - $waitStarted);
+			$budgetLeft = 0 if ($budgetLeft < 0);
+			$pollSeconds = $budgetLeft if ($budgetLeft < $pollSeconds);
+		}
+		sleep($pollSeconds) if ($pollSeconds > 0);
 	}
 	delete $optHR->{sampleLockActiveState};
 	delete $optHR->{schedulerQueueState};
-	return;
+	return [@remaining];
 }
 
 sub qsubDepNeverKill{
@@ -1266,7 +1462,11 @@ sub qsubSystem2{
 	if (exists($xtras{cores})){$ncores = $xtras{cores};}
 	my $nthreads= $ncores;
 	if ($ncores =~ m/,/){my @spl = split /,/,$ncores;$ncores = $spl[1]; $nthreads=$spl[0];}
-	if ($ncores != 0){#read in file, change it..
+	my $qmode = $optHR->{qmode};
+	my $jobNice = normaliseJobNice($optHR->{jobNice});
+	# Saved Slurm scripts from an earlier run can bypass qsubSystem. Add the
+	# default only when they do not already express an explicit priority.
+	if ($ncores != 0 || ($qmode eq 'slurm' && $jobNice > 0)){
 		open my $in,"<",$tmpsh or die "qsubSystem2: cant open $tmpsh\n";chomp(my @lines = <$in>); close $in;
 		for (my $i=0;$i<@lines;$i++){
 			if ($lines[$i] =~ m/--cpus-per-task/ || $lines[$i] =~ m/--mincpus/){
@@ -1275,19 +1475,28 @@ sub qsubSystem2{
 				$lines[$i] .= "\n#SBATCH --threads-per-core=1\n#SBATCH --hint=compute_bound" unless ($next_line =~ m/threads-per-core/);
 			}
 		}
+		if ($qmode eq 'slurm' && $jobNice > 0) {
+			my $hasNice = scalar grep { /^#SBATCH\s+--nice(?:=|\s)/ } @lines;
+			unless ($hasNice) {
+				my $insertAt = @lines && $lines[0] =~ /^#!/ ? 1 : 0;
+				splice @lines, $insertAt, 0, "#SBATCH --nice=$jobNice";
+			}
+		}
 		open my $out,">",$tmpsh or die "qsubSystem2: cant update $tmpsh\n";
 		print {$out} join("\n",@lines), "\n";
 		close $out or die "qsubSystem2: cant close updated $tmpsh\n";
 	}
 	my $xtra = "";
 	my $qbin = "qsub";
-	my $qmode = $optHR->{qmode};
 	if ($qmode eq "slurm"){$qbin="sbatch";
 	} elsif ($qmode eq "sge"){
 	} elsif ($qmode eq "bash"){$qbin="bash";
 	} else {$qbin="bsub";$xtra="<";
 	}
 	my $qcm = "$qbin $xtra $tmpsh \n";
+	my @spank = _inherited_spank_options(); #see _run_slurm_submission
+	local @ENV{@spank};
+	delete @ENV{@spank};
 	system($qcm) == 0 or die "qsubSystem2 failed: $qcm";
 	return $qcm;
 }

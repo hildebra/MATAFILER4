@@ -2,11 +2,15 @@ package Mods::GenoMetaAss;
 use warnings;
 #use Cwd 'abs_path';
 use strict;
-use Fcntl qw(S_ISDIR S_ISREG);
+use Fcntl qw(S_ISDIR S_ISREG :flock);
 use POSIX qw(_exit);
+use File::Spec;
+use File::Temp qw(tempfile);
 use Time::HiRes ();
+use Digest::SHA ();
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::math qw(medianArray);
 use Mods::ReadLibrary qw(
 	cloneReadLibraries ensureSeqSetLibraries ensureCleanSeqSetLibraries
 	syncCleanSeqSetLegacy readLibrariesByScope legacyLibraryArrays
@@ -15,7 +19,7 @@ use Mods::ReadLibrary qw(
 use Exporter qw(import);
 our @EXPORT_OK = qw(
 		gzipwrite gzipopen lcp prefix_find
-		fileGZe fileGZs filsizeMB resolveExistingFile contig_stats_coverage_complete
+		fileGZe fileGZs filsizeMB resolveExistingFile contig_stats_coverage_complete coverage_derivative_paths coverage_derivatives_complete
 		
 		readMap 
 		systemW
@@ -33,14 +37,16 @@ our @EXPORT_OK = qw(
 		renameFastHD  prefixFAhd parse_duration resolve_path
 		clenSplitFastas 
 		
-		readClstrRev  readClstrRevGenes readClstrRevContigSubset readClstrRevSmplCtgGenSubset
+		readClstrRev visitClstrRevRows writeClstrRevBinaryShards readClstrRevBinaryShard
+		writeSequenceBinaryCache readSequenceBinaryCache
+		readClstrRevGenes readClstrRevContigSubset readClstrRevSmplCtgGenSubset
 		unzipFileARezip  is_integer 
 		readGFF reverse_complement reverse_complement_IUPAC
 		
-		readFasta
+		readFasta ensureFastaIndex
 		writeFasta readFastHD splitFastas  renameFastaCnts renameFastqCnts
 		
-		readTabByKey convertNT2AA runDiamond median mean quantile
+		readTabByKey convertNT2AA median mean quantile
 		 );#Binning Related
 
 my %readDirectoryCache;
@@ -303,6 +309,28 @@ sub fileGZs{
 	return 0;
 }
 
+# rdCover strips compression from its input name before adding a derivative
+# suffix. Accept the historical .gz.<suffix> spelling and compressed derivatives
+# when inspecting existing runs, but put the calculator's spelling first.
+sub coverage_derivative_paths {
+	my ($coverage, $suffix) = @_;
+	(my $stem = $coverage) =~ s/\.gz$//;
+	return [map { ("$_.${suffix}", "$_.${suffix}.gz") } ($stem, "$stem.gz")];
+}
+
+sub coverage_derivatives_complete {
+	my ($coverage, @suffixes) = @_;
+	@suffixes = qw(pergene percontig median.percontig) unless @suffixes;
+	for my $suffix (@suffixes) {
+		my $found = 0;
+		for my $path (@{coverage_derivative_paths($coverage, $suffix)}) {
+			if (-s $path) { $found = 1; last; }
+		}
+		return 0 unless $found;
+	}
+	return 1;
+}
+
 # Keep the workflow planner and separateContigs worker on one completion
 # contract. The stone alone is insufficient because older/interrupted jobs may
 # have published only a subset of the coverage derivatives.
@@ -311,10 +339,8 @@ sub contig_stats_coverage_complete{
 	return 0 unless defined($dir) && defined($prefix) && length($prefix);
 	$dir =~ s{/+$}{};
 	return 0 unless -e "$dir/$prefix.stone";
-	foreach my $suffix (qw(percontig median.percontig pergene count_pergene)){
-		return 0 unless fileGZe("$dir/$prefix.$suffix");
-	}
-	return 1;
+	return coverage_derivatives_complete("$dir/$prefix",
+		qw(percontig median.percontig pergene count_pergene));
 }
 
 sub prefixFAhd{
@@ -457,14 +483,29 @@ sub splitFastas($ $ $){
 		symlink $inF, $nFiles[-1] or die "Can't link $nFiles[-1] to $inF: $!\n";
 		return \@nFiles;
 	}
-	if (-e $nFiles[-1] && -e "$path/$inF2.".($num-1).".$num" && !-e "$path/$inF2.$num.$num"){
-		print "seems to exist already\n";
-		for (my $i=1;$i<$num;$i++){
-			push(@nFiles,"$path/$inF2.$i.$num");
+	# Reuse an existing split only when its stone (written last) records this
+	# exact input and every listed chunk is still present: a split interrupted
+	# mid-way or made from an earlier catalogue must not be accepted as complete.
+	my $splitStone = "$path/$inF2.$num.split.sto";
+	my @inStat = stat($inF);
+	my $inSig = join(':', $inStat[7] // -1, $inStat[9] // -1);
+	if (-e $splitStone && open(my $sfh, '<', $splitStone)) {
+		my $sig = <$sfh>; chomp($sig //= '');
+		my @prev = map { chomp; [split /\t/, $_, 2] } grep { /\S/ } <$sfh>;
+		close $sfh;
+		my $intact = @prev && !grep { !defined($_->[1]) || !-s $_->[0] || -s $_->[0] != $_->[1] } @prev;
+		if ($sig eq $inSig && $intact) {
+			print "seems to exist already\n";
+			return [map { $_->[0] } @prev];
 		}
-		return \@nFiles;
 	}
-	unlink $nFiles[-1] or die "Can't remove old split $nFiles[-1]: $!\n" if (-e $nFiles[-1]);
+	unlink $splitStone if (-e $splitStone);
+	if (opendir(my $dh, $path)) { # stale chunks of an earlier split with the same name
+		for my $old (grep { /^\Q$inF2\E\.\d+\.\Q$num\E$/ } readdir($dh)) {
+			unlink "$path/$old" or die "Can't remove old split $path/$old: $!\n";
+		}
+		closedir $dh;
+	}
 	open my $count_fh, '<', $inF or die "Can't open FASTA $inF: $!\n";
 	my $protN = 0;
 	while (my $line = <$count_fh>) { $protN++ if ($line =~ /^>/); }
@@ -484,17 +525,268 @@ sub splitFastas($ $ $){
 		}
 		print $out $l;
 	}
-	close I; close $out;
+	close I; close $out or die "Can't close FASTA split $nFiles[-1]: $!\n";
+	open my $sout, '>', $splitStone or die "Can't write $splitStone: $!\n";
+	print $sout "$inSig\n", map { "$_\t".(-s $_)."\n" } @nFiles; #chunk sizes: a damaged chunk forces a re-split
+	close $sout or die "Can't close $splitStone: $!\n";
 	return \@nFiles;
-	
+
 }
 
 
+
+sub _fasta_command_error {
+	my ($label, $status) = @_;
+	return "$label failed from signal ".($status & 127)."\n" if $status & 127;
+	return "$label failed with exit code ".($status >> 8)."\n";
+}
+
+sub _fasta_run_command {
+	my @command = @_;
+	my $status = system { $command[0] } @command;
+	die "Cannot execute $command[0]: $!\n" if $status == -1;
+	die _fasta_command_error(join(' ', @command), $status) if $status != 0;
+}
+
+sub _fasta_slurp {
+	my ($path) = @_;
+	open my $input, '<', $path or die "Cannot read FASTA-index metadata $path: $!\n";
+	local $/;
+	my $contents = <$input> // '';
+	close $input or die "Cannot close FASTA-index metadata $path: $!\n";
+	return $contents;
+}
+
+sub _fasta_write_atomic {
+	my ($path, $contents) = @_;
+	my $temporary = "$path.tmp.$$";
+	open my $output, '>', $temporary
+		or die "Cannot create FASTA-index metadata $temporary: $!\n";
+	print {$output} $contents
+		or die "Cannot write FASTA-index metadata $temporary: $!\n";
+	close $output or die "Cannot close FASTA-index metadata $temporary: $!\n";
+	rename $temporary, $path
+		or die "Cannot publish FASTA-index metadata $path: $!\n";
+}
+
+
+sub _plain_fasta_index_complete {
+	my ($source, $index) = @_;
+	return 0 if $source =~ /\.gz\z/i || !-s $source || !-s $index;
+	open my $index_fh, '<', $index or return 0;
+	my ($records, $previous_offset, $last_end) = (0, -1, 0);
+	while (my $line = <$index_fh>) {
+		$line =~ s/[\r\n]+\z//;
+		my ($name, $length, $offset, $line_bases, $line_width, @extra)
+			= split /\t/, $line, -1;
+		unless (defined($name) && length($name)
+				&& defined($length) && $length =~ /\A\d+\z/
+				&& defined($offset) && $offset =~ /\A\d+\z/
+				&& defined($line_bases) && $line_bases =~ /\A\d+\z/
+				&& defined($line_width) && $line_width =~ /\A\d+\z/
+				&& $offset > $previous_offset) {
+			close $index_fh;
+			return 0;
+		}
+		if ($length > 0) {
+			unless ($line_bases > 0 && $line_width >= $line_bases) {
+				close $index_fh;
+				return 0;
+			}
+			$last_end = $offset
+				+ int(($length - 1) / $line_bases) * $line_width
+				+ (($length - 1) % $line_bases) + 1;
+		} else {
+			$last_end = $offset;
+		}
+		$previous_offset = $offset;
+		$records++;
+	}
+	close $index_fh or return 0;
+	return 0 unless $records && $last_end <= -s $source;
+	open my $source_fh, '<', $source or return 0;
+	seek($source_fh, $last_end, 0) or do { close $source_fh; return 0; };
+	my $buffer;
+	while (1) {
+		my $read = read($source_fh, $buffer, 64 * 1024);
+		unless (defined $read) {
+			close $source_fh;
+			return 0;
+		}
+		last unless $read;
+		if ($buffer =~ /\S/) {
+			close $source_fh;
+			return 0;
+		}
+	}
+	close $source_fh or return 0;
+	return 1;
+}
+# Create or reuse a samtools FASTA index without ever publishing a partial .fai.
+# Options: samtools => executable, force => rebuild, quiet => suppress build notice.
+sub ensureFastaIndex {
+	my ($source, $options) = @_;
+	$options ||= {};
+	die "ensureFastaIndex options must be a hash reference\n"
+		unless ref($options) eq 'HASH';
+	die "Cannot index a missing or empty FASTA: ".($source // '')."\n"
+		unless defined($source) && length($source) && -s $source;
+	die "Cannot index a FASTA glob: $source\n" if $source =~ /[*?\[]/;
+
+	my $index = "$source.fai";
+	my $completed = "$index.complete";
+	open my $lock, '>>', "$index.lock"
+		or die "Cannot open FASTA-index lock $index.lock: $!\n";
+	flock($lock, LOCK_EX) or die "Cannot lock FASTA index $index: $!\n";
+	my @source_stat = stat($source);
+	my $fingerprint = join("\t", 'fai-v1', File::Spec->rel2abs($source),
+		$source_stat[7], $source_stat[9])."\n";
+	my $valid = !$options->{force} && -s $index && -s $completed
+		&& _fasta_slurp($completed) eq $fingerprint;
+	if (!$valid && !$options->{force} && -s $index && !-s $completed
+			&& (stat($index))[9] >= $source_stat[9]
+			&& _plain_fasta_index_complete($source, $index)) {
+		_fasta_write_atomic($completed, $fingerprint);
+		$valid = 1;
+	}
+	return $index if $valid;
+
+	unlink $completed if -e $completed;
+	my $suffix = $source =~ /\.gz\z/ ? '.gz' : '.fasta';
+	my $temporary_source = "$source.faidx-build.$$.$suffix";
+	my $samtools = $options->{samtools} // getProgPaths('samtools');
+	die "Configured samtools command must be one executable path, not shell syntax: $samtools\n"
+		unless defined($samtools) && length($samtools)
+			&& $samtools !~ /[\r\n;]/;
+	my $temporary_index = "$temporary_source.fai";
+	my $temporary_gzi = "$temporary_source.gzi";
+	unlink $_ for grep { -e $_ }
+		($temporary_source, $temporary_index, $temporary_gzi);
+	symlink(File::Spec->rel2abs($source), $temporary_source)
+		or die "Cannot create temporary FASTA-index link $temporary_source: $!\n";
+	print STDERR "Creating FASTA index $index\n"
+		unless $options->{quiet};
+	my $built = eval {
+		_fasta_run_command($samtools, 'faidx', $temporary_source);
+		die "samtools did not create a nonempty FASTA index: $temporary_index\n"
+			unless -s $temporary_index;
+		my @source_after = stat($source);
+		die "FASTA changed while its index was being built: $source\n"
+			unless @source_after && $source_after[7] == $source_stat[7]
+				&& $source_after[9] == $source_stat[9];
+		rename $temporary_index, $index
+			or die "Cannot atomically publish FASTA index $index: $!\n";
+		if (-s $temporary_gzi) {
+			rename $temporary_gzi, "$source.gzi"
+				or die "Cannot atomically publish BGZF index $source.gzi: $!\n";
+		}
+		1;
+	};
+	my $error = $@;
+	unlink $_ for grep { -e $_ }
+		($temporary_source, $temporary_index, $temporary_gzi);
+	die $error unless $built;
+	_fasta_write_atomic($completed, $fingerprint);
+	return $index;
+}
+
+sub _readFastaIndexed {
+	my ($source, $subset, $progress, $options) = @_;
+	my $index = ensureFastaIndex($source, $options);
+	my $maximum_fraction = exists($options->{fai_max_fraction})
+		? $options->{fai_max_fraction} : 0.25;
+	die "readFasta fai_max_fraction must be between 0 and 1\n"
+		unless defined($maximum_fraction) && $maximum_fraction =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/
+			&& $maximum_fraction >= 0 && $maximum_fraction <= 1;
+	my ($identifier_fh, $identifier_file) = tempfile(
+		'mf4-faidx-XXXXXX', TMPDIR => 1, UNLINK => 1,
+	);
+	open my $index_fh, '<', $index
+		or die "Cannot read FASTA index $index: $!\n";
+	my ($records_scanned, $requested_available) = (0, 0);
+	while (my $line = <$index_fh>) {
+		$records_scanned++;
+		my ($identifier) = split /\t/, $line, 2;
+		if (defined($identifier) && exists($subset->{$identifier})) {
+			print {$identifier_fh} "$identifier\n"
+				or die "Cannot write indexed FASTA identifier list: $!\n";
+			$requested_available++;
+		}
+		$progress->({
+			file => $source, records_scanned => $records_scanned,
+			records_retained => $requested_available,
+			mode => 'fai',
+		}) if $progress && $records_scanned % 100_000 == 0;
+	}
+	close $index_fh or die "Cannot close FASTA index $index: $!\n";
+	close $identifier_fh
+		or die "Cannot close indexed FASTA identifier list $identifier_file: $!\n";
+	if (!$options->{require_fai} && $records_scanned
+			&& $requested_available / $records_scanned > $maximum_fraction) {
+		$progress->({
+			file => $source, records_scanned => $records_scanned,
+			records_retained => $requested_available,
+			mode => 'fai_streaming_preferred',
+		}) if $progress;
+		return;
+	}
+	unless ($requested_available) {
+		$progress->({
+			file => $source, records_scanned => $records_scanned,
+			records_retained => 0, mode => 'fai',
+		}) if $progress;
+		return {};
+	}
+
+	my $samtools = $options->{samtools} // getProgPaths('samtools');
+	my $pid = open my $pipe, '-|', $samtools, 'faidx', '-r',
+		$identifier_file, $source;
+	die "Cannot start samtools faidx for $source: $!\n" unless defined $pid;
+	my $sequences = {};
+	my ($identifier, $sequence);
+	my $store = sub {
+		return unless defined $identifier;
+		die "samtools faidx returned unrequested identifier '$identifier' from $source\n"
+			unless exists($subset->{$identifier});
+		$sequences->{$identifier} = $sequence;
+	};
+	while (my $line = <$pipe>) {
+		$line =~ s/[\r\n]+\z//;
+		if ($line =~ /^>(\S+)/) {
+			$store->();
+			($identifier, $sequence) = ($1, '');
+		} else {
+			die "Malformed indexed FASTA output for $source: sequence before header\n"
+				unless defined $identifier;
+			$sequence .= $line;
+		}
+	}
+	$store->();
+	my $closed = close $pipe;
+	my $status = $?;
+	die _fasta_command_error("samtools faidx indexed read for $source", $status)
+		unless $closed && $status == 0;
+	$progress->({
+		file => $source, records_scanned => $records_scanned,
+		records_retained => scalar(keys %{$sequences}), mode => 'fai',
+	}) if $progress;
+	return $sequences;
+}
+# Pass { fai => 1 } as the fifth argument (or sixth after a progress callback)
+# to use indexed extraction for a canonical-header subset when that is cheaper.
 sub readFasta{
 	my $fils = $_[0];
 	my $cutHd=0;
 	my $sepChr= "\\s";
 	my $subs; my $doSubs=0;
+	my $fifth = @_ > 4 ? $_[4] : undef;
+	my $progress = defined($fifth) && ref($fifth) eq 'CODE' ? $fifth : undef;
+	my $options = @_ > 5 ? $_[5]
+		: defined($fifth) && ref($fifth) eq 'HASH' ? $fifth : {};
+	die "readFasta fifth argument must be a progress callback or options hash reference\n"
+		if defined($fifth) && ref($fifth) ne 'CODE' && ref($fifth) ne 'HASH';
+	die "readFasta options must be a hash reference\n"
+		unless ref($options) eq 'HASH';
 	$cutHd = $_[1] if (@_ > 1);
 	$sepChr = $_[2] if (@_ > 2);
 	if (@_ > 3){
@@ -503,6 +795,30 @@ sub readFasta{
 		$doSubs = 1;
 	}
 	my $Hseq = {};
+	return $Hseq if $doSubs && !keys %{$subs};
+	my $maximum_unindexed_ids = exists($options->{fai_max_ids_without_index})
+		? $options->{fai_max_ids_without_index} : 250_000;
+	die "readFasta fai_max_ids_without_index must be a non-negative integer\n"
+		unless defined($maximum_unindexed_ids)
+			&& $maximum_unindexed_ids =~ /\A\d+\z/;
+	if ($options->{fai} && $doSubs && $cutHd && $sepChr eq "\\s"
+			&& $fils !~ /[*?\[]/ && -s $fils
+			&& ($options->{require_fai} || -s "$fils.fai"
+				|| keys(%{$subs}) <= $maximum_unindexed_ids)) {
+		my $indexed;
+		my $indexed_ok = eval {
+			$indexed = _readFastaIndexed($fils, $subs, $progress, $options);
+			1;
+		};
+		return $indexed if $indexed_ok && defined($indexed);
+		unless ($indexed_ok) {
+			my $error = $@ || 'unknown indexed FASTA read failure';
+			die $error if $options->{require_fai};
+			$error =~ s/\s+\z//;
+			warn "Indexed FASTA read unavailable for $fils ($error); using streaming scan\n";
+		}
+	}
+	my ($recordsScanned, $recordsRetained) = (0, 0);
 
 	my @files = glob $fils;
 	#if (-z $fil){ return \%Hseq;}
@@ -536,8 +852,16 @@ sub readFasta{
 		my ($trHe, $srcHe) = $prepare_header->($first_line);
 		my $temp = "";
 		my $store_record = sub {
-			return if $doSubs && !exists($subs->{$trHe}) && !exists($subs->{$srcHe});
-			$Hseq->{$trHe} = $temp;
+			$recordsScanned++;
+			my $selected = !$doSubs || exists($subs->{$trHe}) || exists($subs->{$srcHe});
+			if ($selected) {
+				$Hseq->{$trHe} = $temp;
+				$recordsRetained++;
+			}
+			$progress->({
+				file => $fil, records_scanned => $recordsScanned,
+				records_retained => $recordsRetained,
+			}) if $progress && $recordsScanned % 100_000 == 0;
 		};
 
 		while(my $line = <$FAS>){
@@ -552,6 +876,10 @@ sub readFasta{
 		}
 		$store_record->();
 		close ($FAS) or die "Cannot close FASTA file $fil: $!\n";
+		$progress->({
+			file => $fil, records_scanned => $recordsScanned,
+			records_retained => $recordsRetained,
+		}) if $progress;
 	}
 	return $Hseq;
 }
@@ -559,17 +887,8 @@ sub readFasta{
 
 sub median
 {
-    my @vals = sort {$a <=> $b} @_;
-	return 0 if (@vals == 0);
-    my $len = (scalar @vals)-1;
-    if($len%2) #odd?
-    {
-        return $vals[int($len/2)];
-    }
-    else #even
-    {
-        return ($vals[int($len/2)-1] + $vals[int($len/2)])/2;
-    }
+	# Preserve the legacy empty-input result while sharing the median algorithm.
+	return @_ ? medianArray(@_) : 0;
 }
 
 sub quantile #format: quantile(0.25,@values);
@@ -687,7 +1006,7 @@ sub convertNT2AA($){
 	#        $main =~ s/(...)/"$convertor{uc $1}" || "?"/eg;
 	#        print "$scrap$main\n";
 	#        }
-	$text =~ s/(...)/"$convertor{uc $1}" || "?"/eg;
+	$text =~ s{(...)}{$convertor{uc $1} // "X"}eg;
 	$text =~ s/[^ACDEFGHIKLMNPQRSTVWY*]/X/g;
 	#die $text;
 	return $text;
@@ -902,6 +1221,23 @@ sub readClstrRevContigSubset{ #gets the exact assembled genes clustered in GC ge
 }
 
 
+sub visitClstrRevRows {
+	my ($inF, $visitor) = @_;
+	die "visitClstrRevRows requires an input file and callback\n"
+		unless defined($inF) && length($inF) && ref($visitor) eq 'CODE';
+	print "Reading clstr $inF  .. \n";
+	my ($I,$OK) = gzipopen($inF,"ClstrFile");
+	while (my $lin = <$I>){
+		chomp $lin;
+		next if ($lin =~ m/^#/ || length($lin) < 5);
+		my @arr = split /\t/,$lin,-1;
+		$visitor->($arr[0], $arr[1]);
+	}
+	close $I or die "Cannot close cluster index $inF: $!\n";
+	print "done reading ClStr\n";
+	return 1;
+}
+
 sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version for my shortened index file
 	my $inF = $_[0];
 	my $createR = 1;
@@ -926,21 +1262,13 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 		}
 	}
 	my $retR={}; my %retF;
-	print "Reading clstr $inF  .. \n";
 	print "Restricting cluster members to a subset of " . scalar(keys %{$memberSubsHR}) . " samples\n"
 		if $memberSubsHR;
-	my ($I,$OK) = gzipopen($inF,"ClstrFile");
-	#open I,"<$inF" or die "Can't find rev clustering file $inF\n"; 
-	my $curCl=0;
-	while (my $lin = <$I>){
-		chomp $lin; 
-		next if ($lin =~ m/^#/ || length($lin) < 5);
-		my @arr = split /\t/,$lin,-1;
-		#my $pos = index($_, "\t");
-		$curCl = ($arr[0]);#substr($_,0,$pos);
+	visitClstrRevRows($inF, sub {
+		my ($curCl, $members) = @_;
 		
 		if ($doSubset == 1){
-			next unless (exists($$subsHR{$curCl}));
+			return unless (exists($$subsHR{$curCl}));
 		}
 		
 		#my $rem = $arr[1]; #substr($_,$pos+1);
@@ -948,7 +1276,7 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 		#foreach (split /,/,$rem){$retR{$_} = $curCl;}
 		my @tmpArr; my $tmpArrSplit = 0;
 		if ($createR > 0){
-			@tmpArr = split /,/,$arr[1]; $tmpArrSplit = 1;
+			@tmpArr = split /,/,$members; $tmpArrSplit = 1;
 			if ($doSubset == 1){
 				my $gogo=0;
 				foreach (@tmpArr) {
@@ -957,13 +1285,13 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 						 last;
 					 }
 				}
-				next unless ($gogo);
+				return unless ($gogo);
 			}
 			@{$retR}{@tmpArr} = ($curCl) x @tmpArr;
 		}
 		if ($createR != 2){
 			if ($memberSubsHR){
-				@tmpArr = split /,/,$arr[1] unless $tmpArrSplit;
+				@tmpArr = split /,/,$members unless $tmpArrSplit;
 				my @keep;
 				foreach my $mem (@tmpArr) {
 					my $m2 = $mem; $m2 =~ s/^>//;
@@ -972,15 +1300,259 @@ sub readClstrRev{ #gets the exact assembled genes clustered in GC genes #version
 				}
 				$retF{$curCl} = join(",", @keep) if @keep;
 			} else {
-				$retF{$curCl} = $arr[1];
+				$retF{$curCl} = $members;
 			}
 		}
-		@arr = ();
-
-	}
-	close $I;
-	print "done reading ClStr\n";
+	});
 	return ($retR,\%retF);
+}
+
+my $clstrShardMagic = 'M4P1IXB1';
+my $sequenceCacheMagic = 'M4P1SQB1';
+
+sub _writeBinaryCacheBytes {
+	my ($handle, $bytes, $path, $kind) = @_;
+	print {$handle} $bytes
+		or die "Cannot write $kind $path: $!\n";
+}
+
+sub writeClstrRevBinaryShards {
+	my ($inF, $selectedClusters, $workerForSample, $paths, $fingerprint) = @_;
+	die "writeClstrRevBinaryShards requires selected-cluster and worker maps\n"
+		unless ref($selectedClusters) eq 'HASH' && ref($workerForSample) eq 'HASH';
+	die "writeClstrRevBinaryShards requires one or more output paths\n"
+		unless ref($paths) eq 'ARRAY' && @{$paths};
+	die "Invalid cluster-index shard fingerprint\n"
+		unless defined($fingerprint) && $fingerprint =~ /\A[0-9a-f]{64}\z/;
+	my $workerCount = scalar(@{$paths});
+	my (@handles, @digests, @recordCounts);
+	for my $worker (0 .. $workerCount - 1) {
+		my $path = $paths->[$worker];
+		open my $handle, '>', $path
+			or die "Cannot create binary cluster-index shard $path: $!\n";
+		binmode $handle
+			or die "Cannot set binary mode for cluster-index shard $path: $!\n";
+		my $header = $clstrShardMagic
+			.pack('NN', $worker, $workerCount).pack('H*', $fingerprint);
+		_writeBinaryCacheBytes($handle, $header, $path,
+			'binary cluster-index shard');
+		push @handles, $handle;
+		push @digests, Digest::SHA->new(256);
+		push @recordCounts, 0;
+	}
+
+	visitClstrRevRows($inF, sub {
+		my ($cluster, $memberString) = @_;
+		return unless exists($selectedClusters->{$cluster});
+		my (@byWorker, @workersWithMembers, %workerSeen);
+		for my $member (split /,/, $memberString) {
+			my $unadorned = $member;
+			$unadorned =~ s/^>//;
+			my ($sample) = split /__/, $unadorned, 2;
+			next unless defined($sample) && exists($workerForSample->{$sample});
+			my $worker = $workerForSample->{$sample};
+			die "Invalid worker '$worker' for catalogue member $member\n"
+				unless defined($worker) && $worker =~ /\A\d+\z/
+					&& $worker < $workerCount;
+			push @workersWithMembers, $worker unless $workerSeen{$worker}++;
+			push @{$byWorker[$worker]}, $member;
+		}
+		for my $worker (@workersWithMembers) {
+			my $members = join(',', @{$byWorker[$worker]});
+			die "Cluster-index shard record is too large to encode\n"
+				if length($cluster) > 0xffffffff || length($members) > 0xffffffff;
+			my $record = pack('NN', length($cluster), length($members))
+				.$cluster.$members;
+			_writeBinaryCacheBytes($handles[$worker], $record, $paths->[$worker],
+				'binary cluster-index shard');
+			$digests[$worker]->add($record);
+			$recordCounts[$worker]++;
+		}
+	});
+
+	my @metadata;
+	for my $worker (0 .. $workerCount - 1) {
+		my $trailer = pack('NNN', 0, 0, $recordCounts[$worker])
+			.$digests[$worker]->digest;
+		_writeBinaryCacheBytes($handles[$worker], $trailer, $paths->[$worker],
+			'binary cluster-index shard');
+		close $handles[$worker]
+			or die "Cannot close binary cluster-index shard $paths->[$worker]: $!\n";
+		my $bytes = -s $paths->[$worker];
+		die "Binary cluster-index shard is empty after publication: $paths->[$worker]\n"
+			unless defined($bytes) && $bytes > 0;
+		push @metadata, {
+			worker => $worker, records => $recordCounts[$worker], bytes => $bytes,
+		};
+	}
+	return \@metadata;
+}
+
+sub _readBinaryCacheBytes {
+	my ($handle, $length, $path, $label, $kind) = @_;
+	my $bytes = '';
+	while (length($bytes) < $length) {
+		my $read = read($handle, $bytes, $length - length($bytes), length($bytes));
+		die "Cannot read $label from $kind $path: $!\n"
+			unless defined $read;
+		die "Truncated $label in $kind $path\n" if $read == 0;
+	}
+	return $bytes;
+}
+
+sub readClstrRevBinaryShard {
+	my ($path, $fingerprint, $expectedWorker, $expectedWorkerCount) = @_;
+	die "Invalid expected cluster-index shard fingerprint\n"
+		unless defined($fingerprint) && $fingerprint =~ /\A[0-9a-f]{64}\z/;
+	die "Invalid expected cluster-index shard worker coordinates\n"
+		unless defined($expectedWorker) && defined($expectedWorkerCount)
+			&& $expectedWorker =~ /\A\d+\z/ && $expectedWorkerCount =~ /\A\d+\z/
+			&& $expectedWorkerCount > 0 && $expectedWorker < $expectedWorkerCount;
+	open my $handle, '<', $path
+		or die "Cannot open binary cluster-index shard $path: $!\n";
+	binmode $handle
+		or die "Cannot set binary mode for cluster-index shard $path: $!\n";
+	my $header = _readBinaryCacheBytes($handle, 48, $path, 'header',
+		'binary cluster-index shard');
+	my ($magic, $worker, $workerCount, $recordedFingerprint) =
+		unpack('a8NNH64', $header);
+	die "Invalid binary cluster-index shard header in $path\n"
+		unless $magic eq $clstrShardMagic && $worker == $expectedWorker
+			&& $workerCount == $expectedWorkerCount
+			&& $recordedFingerprint eq $fingerprint;
+	my $fileBytes = -s $path;
+	die "Cannot determine binary cluster-index shard size for $path\n"
+		unless defined($fileBytes) && $fileBytes >= 92;
+	my $digest = Digest::SHA->new(256);
+	my (%clusters, $recordCount);
+	$recordCount = 0;
+	while (1) {
+		my $lengths = _readBinaryCacheBytes($handle, 8, $path, 'record header',
+			'binary cluster-index shard');
+		my ($clusterLength, $memberLength) = unpack('NN', $lengths);
+		if ($clusterLength == 0 && $memberLength == 0) {
+			my $trailer = _readBinaryCacheBytes($handle, 36, $path, 'trailer',
+				'binary cluster-index shard');
+			my ($recordedCount, $recordedDigest) = unpack('NH64', $trailer);
+			die "Cluster-index shard record-count mismatch in $path\n"
+				unless $recordedCount == $recordCount;
+			die "Cluster-index shard payload digest mismatch in $path\n"
+				unless $recordedDigest eq $digest->hexdigest;
+			my $extra = '';
+			my $extraRead = read($handle, $extra, 1);
+			die "Cannot verify cluster-index shard terminator in $path: $!\n"
+				unless defined $extraRead;
+			die "Trailing data after cluster-index shard terminator in $path\n"
+				if $extraRead;
+			last;
+		}
+		die "Invalid binary cluster-index shard record length in $path\n"
+			if $clusterLength == 0 || $memberLength == 0
+				|| $clusterLength > 16 * 1024 * 1024
+				|| $clusterLength + $memberLength > $fileBytes;
+		my $cluster = _readBinaryCacheBytes($handle, $clusterLength, $path,
+			'cluster identifier', 'binary cluster-index shard');
+		my $members = _readBinaryCacheBytes($handle, $memberLength, $path,
+			'member list', 'binary cluster-index shard');
+		die "Duplicate cluster '$cluster' in binary cluster-index shard $path\n"
+			if exists($clusters{$cluster});
+		$clusters{$cluster} = $members;
+		$digest->add($lengths, $cluster, $members);
+		$recordCount++;
+	}
+	close $handle or die "Cannot close binary cluster-index shard $path: $!\n";
+	return \%clusters;
+}
+
+sub writeSequenceBinaryCache {
+	my ($sequences, $path, $fingerprint) = @_;
+	die "writeSequenceBinaryCache requires a sequence hash\n"
+		unless ref($sequences) eq 'HASH';
+	die "Invalid binary sequence-cache fingerprint\n"
+		unless defined($fingerprint) && $fingerprint =~ /\A[0-9a-f]{64}\z/;
+	open my $handle, '>', $path
+		or die "Cannot create binary sequence cache $path: $!\n";
+	binmode $handle or die "Cannot set binary mode for sequence cache $path: $!\n";
+	_writeBinaryCacheBytes($handle,
+		$sequenceCacheMagic.pack('H*', $fingerprint), $path,
+		'binary sequence cache');
+	my $digest = Digest::SHA->new(256);
+	my $recordCount = 0;
+	for my $identifier (keys %{$sequences}) {
+		my $sequence = $sequences->{$identifier};
+		next unless defined($identifier) && length($identifier)
+			&& defined($sequence) && length($sequence);
+		die "Binary sequence-cache record is too large to encode\n"
+			if length($identifier) > 0xffffffff || length($sequence) > 0xffffffff;
+		my $record = pack('NN', length($identifier), length($sequence))
+			.$identifier.$sequence;
+		_writeBinaryCacheBytes($handle, $record, $path, 'binary sequence cache');
+		$digest->add($record);
+		$recordCount++;
+	}
+	my $trailer = pack('NNN', 0, 0, $recordCount).$digest->digest;
+	_writeBinaryCacheBytes($handle, $trailer, $path, 'binary sequence cache');
+	close $handle or die "Cannot close binary sequence cache $path: $!\n";
+	my $bytes = -s $path;
+	die "Binary sequence cache is empty after publication: $path\n"
+		unless defined($bytes) && $bytes > 0;
+	return { records => $recordCount, bytes => $bytes };
+}
+
+sub readSequenceBinaryCache {
+	my ($path, $fingerprint) = @_;
+	die "Invalid expected binary sequence-cache fingerprint\n"
+		unless defined($fingerprint) && $fingerprint =~ /\A[0-9a-f]{64}\z/;
+	open my $handle, '<', $path
+		or die "Cannot open binary sequence cache $path: $!\n";
+	binmode $handle or die "Cannot set binary mode for sequence cache $path: $!\n";
+	my $header = _readBinaryCacheBytes($handle, 40, $path, 'header',
+		'binary sequence cache');
+	my ($magic, $recordedFingerprint) = unpack('a8H64', $header);
+	die "Invalid binary sequence-cache header in $path\n"
+		unless $magic eq $sequenceCacheMagic && $recordedFingerprint eq $fingerprint;
+	my $fileBytes = -s $path;
+	die "Cannot determine binary sequence-cache size for $path\n"
+		unless defined($fileBytes) && $fileBytes >= 84;
+	my $digest = Digest::SHA->new(256);
+	my (%sequences, $recordCount);
+	$recordCount = 0;
+	while (1) {
+		my $lengths = _readBinaryCacheBytes($handle, 8, $path, 'record header',
+			'binary sequence cache');
+		my ($identifierLength, $sequenceLength) = unpack('NN', $lengths);
+		if ($identifierLength == 0 && $sequenceLength == 0) {
+			my $trailer = _readBinaryCacheBytes($handle, 36, $path, 'trailer',
+				'binary sequence cache');
+			my ($recordedCount, $recordedDigest) = unpack('NH64', $trailer);
+			die "Binary sequence-cache record-count mismatch in $path\n"
+				unless $recordedCount == $recordCount;
+			die "Binary sequence-cache payload digest mismatch in $path\n"
+				unless $recordedDigest eq $digest->hexdigest;
+			my $extra = '';
+			my $extraRead = read($handle, $extra, 1);
+			die "Cannot verify binary sequence-cache terminator in $path: $!\n"
+				unless defined $extraRead;
+			die "Trailing data after binary sequence-cache terminator in $path\n"
+				if $extraRead;
+			last;
+		}
+		die "Invalid binary sequence-cache record length in $path\n"
+			if $identifierLength == 0 || $sequenceLength == 0
+				|| $identifierLength > 16 * 1024 * 1024
+				|| $identifierLength + $sequenceLength > $fileBytes;
+		my $identifier = _readBinaryCacheBytes($handle, $identifierLength, $path,
+			'sequence identifier', 'binary sequence cache');
+		my $sequence = _readBinaryCacheBytes($handle, $sequenceLength, $path,
+			'sequence', 'binary sequence cache');
+		die "Duplicate sequence '$identifier' in binary sequence cache $path\n"
+			if exists($sequences{$identifier});
+		$sequences{$identifier} = $sequence;
+		$digest->add($lengths, $identifier, $sequence);
+		$recordCount++;
+	}
+	close $handle or die "Cannot close binary sequence cache $path: $!\n";
+	return \%sequences;
 }
 
 
@@ -1043,7 +1615,7 @@ sub reverse_complement_IUPAC ($) {
         my $revcomp = reverse($dna);
 
 	# complement the reversed DNA sequence
-        $revcomp =~ tr/ABCDGHMNRSTUVWXYabcdghmnrstuvwxy/TVGHCDKNYSAABWXRtvghcdknysaabwxr/;
+        $revcomp =~ tr/ABCDGHKMNRSTUVWXYabcdghkmnrstuvwxy/TVGHCDMKNYSAABWXRtvghcdmknysaabwxr/;
         return $revcomp;
 }
 
@@ -1282,6 +1854,7 @@ sub resetAsGrps{
 		$AsGrps->{$cAssGrp}{CleanSeqs} = {};
 		$AsGrps->{$cAssGrp}{RawSeqs} = {};
 		$AsGrps->{$cAssGrp}{InputOrder} = [];
+		$AsGrps->{$cAssGrp}{ClosedCompleted} = []; #members closed via the completion fast path in this pass
 		$AsGrps->{$cAssGrp}{SeqClnDeps} = "";
 		$AsGrps->{$cAssGrp}{prodRun} = "";
 		$AsGrps->{$cAssGrp}{AssemblJobName} = "";
@@ -1335,13 +1908,17 @@ sub getDirsPerAssmblGrp{
 	my @smpls = @{$map{opt}{smpl_order}};
 	my $cnt=0;
 	my %DOs;
+	my %mapGrpSeen;
 	foreach my $smpl (@smpls){
 		my $cntAim = $AsGrps{ $map{$smpl}{MapGroup} }{CntAimMap};
 		my $dir2rd = $map{$smpl}{wrdir};
 		my $cAssGrp = $map{$smpl}{AssGroup};
 		my $cMapGrp = $map{$smpl}{MapGroup};
-		$AsGrps{$cMapGrp}{CntMap} ++;
-		#next if ($AsGrps{$cMapGrp}{CntMap}  < $AsGrps{$cMapGrp}{CntAimMap} );
+		#Count map group members locally: %AsGrps is only a shallow copy of the
+		#caller object, so incrementing $AsGrps{..}{CntMap} here would advance the
+		#caller map group release counters as a side effect of listing directories.
+		$mapGrpSeen{$cMapGrp} ++;
+		#next if ($mapGrpSeen{$cMapGrp}  < $AsGrps{$cMapGrp}{CntAimMap} );
 
 		my $tar = "AssmblGrp_$cAssGrp";
 		if ($chkDirs && !-d "$dir2rd"){
@@ -1534,8 +2111,13 @@ sub readMap{
 			#die "MAP: $AssGroupCol\n";
 			#die "Only \"Path\" or \"SmplPrefix\" can be defined in mapping file. Both is not supported.\n" if ($dirCol != -1 && $SmplPrefixCol != -1);
 			die "Could not find \"#SmplID\" in input map\n" unless($smplCol> -1);
-			die "Expected to find at least \"SmplPrefix\" or \"Path\" as column headers in .map\n" if ($dirCol == -1 && $SmplPrefixCol == -1);
-			die "Either \"SmplPrefix\" or \"Path\" has to be second column in .map\n" unless ($dirCol == 1 || $SmplPrefixCol == 1);
+			die "Expected a primary-input column (\"SmplPrefix\", \"Path\", \"ENAdownload\", or \"SRAdownload\") in .map\n"
+				if ($dirCol == -1 && $SmplPrefixCol == -1
+					&& $ENA_DLcol == -1 && $SRA_DLcol == -1);
+			# Accession-only maps may omit both local-location columns.
+			die "Either \"SmplPrefix\" or \"Path\" has to be second column in .map\n"
+				if (($dirCol >= 0 || $SmplPrefixCol >= 0)
+					&& $dirCol != 1 && $SmplPrefixCol != 1);
 			next;
 		} #maybe later check for col labels etc
 		# Treat omitted trailing columns like explicitly empty tab-separated fields.
@@ -1546,12 +2128,17 @@ sub readMap{
 		$Scnt++;
 		#die "1 $GlbTmpD 2 $NodeTmpD map\n";
 		#die $spl[0]." ".$spl[1]."\n";
-		die "inPath has to be set in mapping file!\n" if ($dir2dirs eq "");
 		#die "$dir2out\n";
 		die "Provide tag \"#OutPath\" in map!\n" if ($dir2out eq "");
 		die "Provide tag \"#RunID\" in map!\n" if ($baseID eq "");
-		die "Provide tag \"#DirPath\" in map!\n" if ($dir2dirs eq "");
 		my $curSmp = $spl[$smplCol];
+		my $enaDownload = $ENA_DLcol >= 0 ? $spl[$ENA_DLcol] : "";
+		my $sraDownload = $SRA_DLcol >= 0 ? $spl[$SRA_DLcol] : "";
+		$enaDownload =~ s/^\s+|\s+$//g;
+		$sraDownload =~ s/^\s+|\s+$//g;
+		die "Sample $curSmp defines both ENAdownload and SRAdownload; select exactly one archive provider\n"
+			if ($enaDownload ne "" && $sraDownload ne "");
+		my $downloadUsed = ($enaDownload ne "" || $sraDownload ne "") ? 1 : 0;
 		
 		die"Error in .map, found empty sample id on line $cnt,: \"$line\"\n" if ($curSmp eq "");
 		my $altCurSmp = "";
@@ -1571,6 +2158,8 @@ sub readMap{
 		my $cdir = ""; 
 		#read in the path to sample
 		if ($dirCol >= 0 && @spl > $dirCol && $spl[$dirCol] ne ""){
+			die "Provide tag \"#DirPath\" for local Path input in sample $curSmp\n"
+				if ($dir2dirs eq "");
 			$cdir = resolve_path($spl[$dirCol]);
 			$samplePathUsed=1;
 			my $input_dir = _join_path($dir2dirs, $cdir);
@@ -1579,11 +2168,17 @@ sub readMap{
 		}
 		my $cdir2= $cdir;
 		$ret{$curSmp}{dir} = $cdir;#this one should stay without a tag
-		$ret{$curSmp}{rddir} = _join_path($dir2dirs, $cdir);
+		$ret{$curSmp}{rddir} = $cdir ne "" ? _join_path($dir2dirs, $cdir) : "";
 		$ret{$curSmp}{clip} = $illuminaClip;
-		$ret{$curSmp}{rddir} .="/" unless ($ret{$curSmp}{rddir} =~ m/\/$/);
+		$ret{$curSmp}{rddir} .="/"
+			if ($ret{$curSmp}{rddir} ne "" && $ret{$curSmp}{rddir} !~ m/\/$/);
 		#die "$ret{$curSmp}{rddir} $dirCol $cdir $curSmp\n $smplCol $dirCol\n";
 		if ($SmplPrefixCol>=0 && @spl > $SmplPrefixCol && $spl[$SmplPrefixCol] ne ""){
+			die "Provide tag \"#DirPath\" for local SmplPrefix input in sample $curSmp\n"
+				if ($dir2dirs eq "");
+			$ret{$curSmp}{rddir} = $dir2dirs;
+			$ret{$curSmp}{rddir} .= "/"
+				if ($ret{$curSmp}{rddir} ne "" && $ret{$curSmp}{rddir} !~ m/\/$/);
 			$cdir2 = $spl[$SmplPrefixCol];
 			$ret{$curSmp}{prefix} = $cdir2;
 			if ($DOWARN && exists($trackPrefixs{"$dir2dirs/$cdir2"}) ){ die "Warning: Found the sample path \"$cdir2\" more than once. This would lead to using reads twice, aborting.\n $warnDeactivateMsg";}
@@ -1592,14 +2187,20 @@ sub readMap{
 		} else {
 			$ret{$curSmp}{prefix} = "";
 		}
-		$cdir2.="/" unless ($cdir2 =~ m/\/$/);
+		$cdir2.="/" if ($cdir2 ne "" && $cdir2 !~ m/\/$/);
 		
 		#basic check that no twice usage..
 		if ($DOWARN && $smplPrefixUsed && $samplePathUsed){die"Warning: in mapping file both \"SmplPrefix\" and \"Path\" are set for sample $curSmp!\nThis is not supported\n$warnDeactivateMsg";}
 
 		
+		die "Sample $curSmp uses an archive download ID and a local Path/SmplPrefix; accession samples must leave local input locations empty\n"
+			if ($downloadUsed && ($smplPrefixUsed || $samplePathUsed));
 		#old MATAFILER versions, deprecated in MATAFILER
-		if ($folderStrClassical== -1){
+		if ($downloadUsed){
+			# Archive-backed samples have no local path from which a legacy output
+			# directory can be derived. Their durable output is always keyed by SmplID.
+			$ret{$curSmp}{wrdir} = $dir2out.$curSmp."/";
+		} elsif ($folderStrClassical== -1){
 			if (-d  $dir2out.$cdir2 && !-d $dir2out.$curSmp){
 				if ($infFoldClass==0){die "readMap: Inferring old/new folder structure failed, as both folders seem to be valid\n";}
 				$ret{$curSmp}{wrdir} = $dir2out.$cdir2;
@@ -1622,14 +2223,19 @@ sub readMap{
 		$ret{$curSmp}{assFinSmpl} = $curSmp;
 		#ONT,PB,proto,miSeq,GAII etc
 		if ($SeqTech >= 0) { 
-			my $RT=$spl[$SeqTech];checkSeqTech($RT);$ret{$curSmp}{SeqTech} = $RT; 
-			if ($RT ne "" && $ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq ""){
+			my $declaredRT=$spl[$SeqTech];
+			my $RT = ($downloadUsed && $declaredRT eq "") ? "ill" : $declaredRT;
+			checkSeqTech($RT);$ret{$curSmp}{SeqTech} = $RT;
+			$ret{$curSmp}{SeqTechDeclared} = $declaredRT;
+			if ($RT ne "" && $ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq "" && !$downloadUsed){
 				die "For sample $curSmp, found read tech, but no primary input file location given. This can lead to undescribed behaviour, please remove readTech entry (set to \"\"), before proceeding.\n";
 			}
-		} else {$ret{$curSmp}{SeqTech} = "ill";} #set by default to illumina
+		} else {$ret{$curSmp}{SeqTech} = "ill";$ret{$curSmp}{SeqTechDeclared} = "";} #set by default to illumina
 		if ($SeqTechS >= 0) { my $RT=$spl[$SeqTechS];checkSeqTech($RT);$ret{$curSmp}{SeqTechSingl} = $RT; } else {$ret{$curSmp}{SeqTechSingl} = "";}
 		
-		$ret{$curSmp}{hasPrimaryRds}= 1;$ret{$curSmp}{hasPrimaryRds} = 0 if ($ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq "");
+		$ret{$curSmp}{hasPrimaryRds}= 1;
+		$ret{$curSmp}{hasPrimaryRds} = 0
+			if ($ret{$curSmp}{prefix} eq "" && $ret{$curSmp}{dir} eq "" && !$downloadUsed);
 		
 		if ($rLenCol >= 0){$ret{$curSmp}{readLength} = $spl[$rLenCol];} else {$ret{$curSmp}{readLength} = 0;}
 		if ($ExcludeAssemble >= 0){$ret{$curSmp}{ExcludeAssem} = $spl[$ExcludeAssemble];} else {$ret{$curSmp}{ExcludeAssem} = 0;}
@@ -1669,8 +2275,8 @@ sub readMap{
 		if ($EstCovCol >= 0){$ret{$curSmp}{DoEstCoverage} = $spl[$EstCovCol];} else {$ret{$curSmp}{DoEstCoverage} = 0;}
 		
 		#download samples? this is the ENA/SRA ID
-		if ($ENA_DLcol >= 0){$ret{$curSmp}{ENA_download} = $spl[$ENA_DLcol];} else {$ret{$curSmp}{ENA_download} = "";}
-		if ($SRA_DLcol >= 0){$ret{$curSmp}{SRA_download} = $spl[$SRA_DLcol];} else {$ret{$curSmp}{SRA_download} = "";}
+		$ret{$curSmp}{ENA_download} = $enaDownload;
+		$ret{$curSmp}{SRA_download} = $sraDownload;
 
 		#create artifical assmblgrp based on counts..
 		my $curAG = $Scnt;
@@ -1831,26 +2437,42 @@ sub readTabByKey{
 	return %ret;
 }
 
+# The legacy third argument remains the record limit.  { fai => 1 } may be the
+# third argument, or the fourth after that limit, to publish an index on close.
 sub writeFasta{
 	my ($hr,$of) = ($_[0],$_[1]);
 	my $maxFs = -1;
-	$maxFs = $_[2] if (@_ > 2);
+	my $options = {};
+	if (@_ > 2 && ref($_[2]) eq 'HASH') {
+		$options = $_[2];
+	} else {
+		$maxFs = $_[2] if @_ > 2;
+		$options = $_[3] if @_ > 3;
+	}
+	die "writeFasta options must be a hash reference\n"
+		unless ref($options) eq 'HASH';
 	my %FA = %{$hr};
 	
 	if ($maxFs <0){	$maxFs =  scalar(keys %FA); } #$maxFs+=1000;}
 	#die "$maxFs\n";
 	my $cnt=0;
 	open O,">$of" or die "can't open out fasta $of\n";
-	foreach my $k (keys %FA){
-		$cnt++; 
+	# Sorted keys make the output reproducible between runs (hash order is random).
+	foreach my $k (sort keys %FA){
+		last if ($cnt >= $maxFs);
+		$cnt++;
 		if ($k =~ m/^>/){
 			print O $k."\n".$FA{$k}."\n";
 		} else {
 			print O ">".$k."\n".$FA{$k}."\n";
 		}
-		last if ( $cnt > $maxFs);
 	}
-	close O;
+	close O or die "Cannot close output FASTA $of: $!\n";
+	if ($options->{fai}) {
+		my %index_options = (%{$options}, force => 1);
+		ensureFastaIndex($of, \%index_options);
+	}
+	return $of;
 	#die $of;
 }
 

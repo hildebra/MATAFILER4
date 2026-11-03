@@ -26,17 +26,22 @@ opendir(DIR, $inD) or die "Can't find motu dir: $inD\n";
 			next if ($l =~ m/^#/);
 			chomp $l;
 			my @spl = split /\t/,$l;
+			next if (@spl < 3);
+			next if ($spl[0] eq "mOTU" && $spl[1] eq "Taxonomy");
 			next if ($spl[2] eq "0");
 			$specCnt{$spl[0]} += $spl[2];
 			my $taxo = $spl[1];
 			$mat{$spl[0]}{$smpl} = $spl[2];
 			#only needs to be done once
 			$taxo =~ s/\|/;/g;
-			$taxo =~s/[kpcofgs]__//g;
-			next if (exists $tax{$spl[0]});
-			$tax{$spl[0]} = $taxo;
-			my @lphy = split /;/,$taxo;
-			@lphy = ("?","?","?","?","?","?","?") if ($taxo eq "-1" || $taxo eq "unassigned");
+			$taxo =~s/[dkpcofgs]__//g;
+			unless (exists $tax{$spl[0]}) {
+				my @lineage = split /;/, $taxo, -1;
+				@lineage = ("?") x 7 if ($taxo eq "-1" || $taxo eq "unassigned");
+				$tax{$spl[0]} = \@lineage;
+			}
+			# The lineage is shared, but every sample contributes abundance.
+			my @lphy = @{$tax{$spl[0]}};
 			my $ntax = "";
 			die "mrgMotu2:: not enough tax levels for entry: @lphy , motu $spl[0]\n" if (@lphy != 7 );
 			for (my $lvl =0; $lvl < 7; $lvl ++){

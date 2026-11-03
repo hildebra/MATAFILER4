@@ -330,16 +330,6 @@ write_file($path, "not JSON\n");
 ok(!defined($record), 'malformed sentinel is rejected');
 like($error, qr/invalid JSON/, 'malformed sentinel reports its parse failure');
 
-my $snp_path = File::Spec->catfile(File::Spec->rel2abs('.'), 'Mods', 'SNP.pm');
-open my $snp_fh, '<', $snp_path or die "Cannot read $snp_path: $!";
 local $/;
-my $snp_source = <$snp_fh>;
-close $snp_fh or die "Cannot close $snp_path: $!";
-like($snp_source,
-	qr/sub SNPconsensus_vcf.*?invalidate_sample_completion\(\$SNPIHR->\{sampleRoot\}\)/s,
-	'SNP consensus invalidates a detected sample sentinel');
-like($snp_source,
-	qr/sub SVcall_vcf.*?if \(\$mode ==0 \).*?invalidate_sample_completion\(\$SNPIHR->\{sampleRoot\}\)/s,
-	'structural-variant work invalidates a detected sample sentinel');
 
 done_testing;

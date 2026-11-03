@@ -11,6 +11,7 @@ use Test::More;
 
 use lib File::Spec->catdir($Bin, '..');
 use Mods::Binning ();
+use Mods::Checkpoint qw(write_checkpoint checkpoint_valid);
 
 sub write_file {
 	my ($path, $contents) = @_;
@@ -45,6 +46,7 @@ write_file(File::Spec->catfile($tmp, 'groups.obs'), "MGS1\t10\n");
 my $sorter = File::Spec->catfile(
 	$Bin, '..', 'secScripts', 'MGS', 'resortMGSgenes4importance.pl',
 );
+
 my $sorter_err = gensym;
 my $sorter_pid = open3(
 	undef, my $sorter_out, $sorter_err,
@@ -61,6 +63,43 @@ is(
 	"MGS1\tmarkerZ,geneA\n",
 	'trimmed marker ID is prioritised and the final MGS is flushed at EOF',
 );
+like($sorter_stdout, qr/^MGS1 \(2\)::/m,
+	'sorter retains a per-MGS detail preview');
+like($sorter_stdout,
+	qr/MGS detail preview: 1\/1 shown.*?Sorting summary: MGS=1, input_rows=2.*?elapsed=\d+s/s,
+	'sorter follows its preview with aggregate totals and elapsed time');
+
+# Catalogue-scale runs used to print one long diagnostic row for every MGS.
+# Exercise more groups than the preview limit and pin both suppression and the
+# aggregate replacement so later workflow stages remain visible in stdout.
+my $preview_mgs = File::Spec->catfile($tmp, 'preview.core');
+write_file($preview_mgs, join('', map {
+	"MGS$_\tpreviewGene$_\t10\t0\t1\tunused\n"
+} 1 .. 7));
+write_file(File::Spec->catfile($tmp, 'preview.obs'), join('', map {
+	"MGS$_\t10\n"
+} 1 .. 7));
+my $preview_err = gensym;
+my $preview_pid = open3(
+	undef, my $preview_out, $preview_err,
+	$^X, '-I'.File::Spec->catdir($Bin, '..'),
+	$sorter, $gc, $preview_mgs, 'FMG', 'test', 95,
+);
+my $preview_stdout = do { local $/; <$preview_out> // '' };
+my $preview_stderr = do { local $/; <$preview_err> // '' };
+waitpid($preview_pid, 0);
+is($? >> 8, 0, 'gene-priority sorter completes a multi-MGS preview run')
+	or diag($preview_stdout, $preview_stderr);
+my @preview_details = $preview_stdout =~ /^(MGS\d+ \([^\n]+)$/mg;
+is(scalar(@preview_details), 5,
+	'sorter reports only the first five per-MGS detail rows');
+unlike($preview_stdout, qr/^MGS6 \(/m,
+	'sorter suppresses per-MGS detail after the preview');
+like($preview_stdout,
+	qr/MGS detail preview: 5\/7 shown; 2 omitted.*?Sorting summary: MGS=7, input_rows=7, unique_genes=7, ranked_genes=7, emitted_genes=7/s,
+	'sorter summarizes every MGS after the bounded preview');
+is(scalar(split /\n/, slurp("$preview_mgs.srt")), 7,
+	'output suppression does not remove any sorted guide records');
 
 # The per-family representative scan formerly flushed only at MGS transitions
 # and manufactured an undefined key/value when every candidate failed QC.
@@ -131,5 +170,157 @@ like(
 	qr/Found 2 GTDB marker genes.*?SKIPPED=too_few_marker_bearing_MGS:2/s,
 	'GTDB selection reaches the expected sparse-tree skip using GTDB marker-bearing MGS',
 );
+
+# MGS 0.55 changed only the strain launcher. A global release fingerprint used
+# to invalidate otherwise unchanged GTDB outputs written by 0.54.
+my $resume_core = File::Spec->catfile($tmp, 'resume.core');
+my $resume_tax = File::Spec->catfile($tmp, 'GTDBTK.tax');
+my $resume_summary = File::Spec->catfile($tmp, 'gtdbtk.summary.tsv');
+write_file($resume_core, "MGS1\tgene1\n");
+write_file($resume_tax, "MGS1\td__Bacteria\n");
+write_file($resume_summary, "user_genome\tclassification\nMGS1\td__Bacteria\n");
+my $legacy_gtdb_stone = File::Spec->catfile($tmp, 'GTDBTK.stone');
+my %legacy_gtdb_parameters = (
+	pipeline_version => '0.54',
+	stage => 'gtdb-taxonomy',
+	catalog_identity => 'catalog-A',
+	cluster_id => 95,
+	binner => 'SC',
+	catalog_fna_size => 123,
+	catalog_fna_mtime => 456,
+);
+write_checkpoint(
+	$legacy_gtdb_stone,
+	parameters => \%legacy_gtdb_parameters,
+	outputs => [$resume_tax, $resume_summary, $resume_core],
+);
+my %new_global_parameters = (%legacy_gtdb_parameters, pipeline_version => '0.55');
+ok(
+	!checkpoint_valid($legacy_gtdb_stone, parameters => \%new_global_parameters),
+	'a controller-only version bump invalidates the old whole-pipeline predicate',
+);
+my %gtdb_stage_parameters = map {
+	$_ => $legacy_gtdb_parameters{$_}
+} qw(stage catalog_identity cluster_id binner catalog_fna_size catalog_fna_mtime);
+ok(
+	checkpoint_valid($legacy_gtdb_stone, parameters => \%gtdb_stage_parameters),
+	'unchanged GTDB direct inputs and outputs remain resumable across that release bump',
+);
+
+# The same compatibility rule applies to downstream abundance checkpoints:
+# every current parameter except the release number must match, and the
+# checkpoint output records remain authoritative.
+my $legacy_ab_output = File::Spec->catfile($tmp, "MGS.matL7.txt");
+write_file($legacy_ab_output, "MGS1\t1\n");
+my $legacy_ab_stone = File::Spec->catfile($tmp, "abund.mgs_core.stone");
+my %legacy_ab_parameters = (
+	pipeline_version => "0.54",
+	stage => "marker-mgs-abundance",
+	catalog_identity => "catalog-A",
+	cluster_id => 95,
+	marker_set => "GTDB",
+	binner => "SC",
+	quality_checker => "checkm2",
+);
+write_checkpoint(
+	$legacy_ab_stone,
+	parameters => \%legacy_ab_parameters,
+	outputs => [$legacy_ab_output],
+);
+my %current_ab_parameters = (%legacy_ab_parameters, pipeline_version => "0.55");
+ok(
+	!checkpoint_valid($legacy_ab_stone, parameters => \%current_ab_parameters),
+	"the exact predicate rejects the otherwise compatible 0.54 abundance checkpoint",
+);
+delete $current_ab_parameters{pipeline_version};
+ok(
+	checkpoint_valid($legacy_ab_stone, parameters => \%current_ab_parameters),
+	"removing only the proven-compatible release field retains all abundance parameters",
+);
+write_file($legacy_ab_output, "MGS1\tchanged\n");
+ok(
+	!checkpoint_valid($legacy_ab_stone, parameters => \%current_ab_parameters),
+	"compatible-release reuse still rejects a changed recorded abundance output",
+);
+
+my $mgs_entrypoint = slurp(File::Spec->catfile($Bin, '..', 'secScripts', 'MGS.pl'));
+
+my ($mgs_assignment_helpers) = $mgs_entrypoint =~
+	/(sub _mgs_ids \{.*?\n\}\n\nsub _mgs_count \{.*?\n\})/s;
+ok(defined($mgs_assignment_helpers), 'MGS assignment helpers can be exercised independently');
+my $assignment_helpers_loaded = defined($mgs_assignment_helpers)
+	&& eval "package MGSResumeAssignmentProbe; use strict; use warnings; $mgs_assignment_helpers; 1;";
+ok($assignment_helpers_loaded, 'MGS assignment helpers compile for the resume regression')
+	or diag($@);
+if ($assignment_helpers_loaded) {
+	# Header emitted by bin/clusterMAGs (the default engine) for .clusters and
+	# .Wclusters, and by secScripts/MGS/clusterMAGs.pl for the -perlClusterMAGs
+	# compatibility path.  Both must be recognised: counting either as an MGS
+	# inflates every assignment count by one.
+	my $binary_header = "MGS\tGene\tOcc\tMultiCopy\tMultiBin\tisMarkerGene\n";
+	my $weighted_header = "MGS\tGene\tOcc\tW_MultiCopy\tW_MultiBin\tisMarkerGene\n";
+	my $compat_header = "Bin\tGene\tOcc\tMultiCopy\tMultiBin\tisMarkerGene\n";
+	my $assignment_row = sub {
+		my ($mgs, $gene) = @_;
+		return "$mgs\t$gene\t10\t0\t1\t0\n";
+	};
+
+	my %header_only = (
+		'clusterMAGs binary'      => $binary_header,
+		'weighted clusterMAGs'    => $weighted_header,
+		'Perl compatibility path' => $compat_header,
+	);
+	for my $engine (sort keys %header_only) {
+		my $header_only_assignments = File::Spec->catfile($tmp, "header-only.$engine.MGS");
+		write_file($header_only_assignments, $header_only{$engine});
+		is(
+			MGSResumeAssignmentProbe::_mgs_count($header_only_assignments, 1),
+			0,
+			"a header-only $engine assignment file cannot satisfy the Stage I resume gate",
+		);
+	}
+
+	# A genuine singleton must report exactly one MGS: MGS.pl synthesizes the
+	# missing observation table only for $activeMGSCount == 1, and
+	# _write_single_mgs_observations dies unless _mgs_ids returns one id.
+	my $singleton_assignments = File::Spec->catfile($tmp, 'singleton.MGS');
+	write_file($singleton_assignments, $binary_header.$assignment_row->('MGS.1', 'gene1'));
+	is(
+		MGSResumeAssignmentProbe::_mgs_count($singleton_assignments),
+		1,
+		'a single clustered MGS is counted once, not alongside its header',
+	);
+
+	my $multi_assignments = File::Spec->catfile($tmp, 'multi.MGS');
+	write_file($multi_assignments, $binary_header
+		.$assignment_row->('MGS.1', 'gene1')
+		.$assignment_row->('MGS.1', 'gene2')
+		.$assignment_row->('MGS.2', 'gene3'));
+	is(
+		MGSResumeAssignmentProbe::_mgs_count($multi_assignments),
+		2,
+		'distinct MGS are counted without the header contributing an extra id',
+	);
+
+	# The post-filtered .core table carries no header, so its leading row is a
+	# real assignment and must never be skipped.
+	my $core_assignments = File::Spec->catfile($tmp, 'core.MGS');
+	write_file($core_assignments, $assignment_row->('MGS.1', 'gene1')
+		.$assignment_row->('MGS.2', 'gene2'));
+	is(
+		MGSResumeAssignmentProbe::_mgs_count($core_assignments),
+		2,
+		'a headerless core table keeps its first assignment',
+	);
+
+	my $early_stop_assignments = File::Spec->catfile($tmp, 'early-stop.MGS');
+	write_file($early_stop_assignments,
+		$binary_header.$assignment_row->('MGS.1', 'gene1')."malformed\n");
+	is(
+		MGSResumeAssignmentProbe::_mgs_count($early_stop_assignments, 1),
+		1,
+		'the resume probe stops after the first assignment instead of rescanning the file',
+	);
+}
 
 done_testing;

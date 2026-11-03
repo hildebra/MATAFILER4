@@ -4,8 +4,101 @@ use strict;
 use warnings;
 use Exporter qw(import);
 
-our @EXPORT_OK = qw(slurm_tree_memory_summary format_slurm_tree_memory_summary);
+our @EXPORT_OK = qw(
+	slurm_tree_memory_summary format_slurm_tree_memory_summary
+	next_oom_retry_memory_mb slurm_oom_retry_plan
+	slurm_job_id_from_dependency
+);
 
+sub slurm_job_id_from_dependency {
+	my ($dependency, $run_tag) = @_;
+	return unless defined($dependency);
+	$dependency =~ s/^\Q$run_tag\E// if defined($run_tag) && length($run_tag);
+	return $dependency =~ /^\d+$/ ? $dependency : undef;
+}
+
+sub next_oom_retry_memory_mb {
+	my ($current_mb, $maximum_mb) = @_;
+	die "Current and maximum OOM-retry memory must be positive numbers\n"
+		unless defined($current_mb) && defined($maximum_mb)
+			&& $current_mb =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/
+			&& $maximum_mb =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/
+			&& $current_mb > 0 && $maximum_mb > 0;
+	return undef if $current_mb >= $maximum_mb;
+	my $next_mb = int($current_mb * 2 + 0.5);
+	$next_mb = int($maximum_mb + 0.5) if $next_mb > $maximum_mb;
+	return $next_mb;
+}
+
+sub slurm_oom_retry_plan {
+	my ($records, $maximum_mb, $options) = @_;
+	die "Maximum OOM-retry memory must be a positive number\n"
+		unless defined($maximum_mb)
+			&& $maximum_mb =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/
+			&& $maximum_mb > 0;
+	$options ||= {};
+	my $settleRetrySeconds = defined($options->{settle_retry_seconds})
+		? $options->{settle_retry_seconds} : 5;
+	my $settleMaximumSeconds = defined($options->{settle_maximum_seconds})
+		? $options->{settle_maximum_seconds} : 60;
+	my $sleeper = $options->{sleeper} || sub { sleep($_[0]); };
+	my $clock = $options->{clock} || sub { time };
+	my $settleStarted = $clock->();
+	my $summary;
+	while (1) {
+		$summary = slurm_tree_memory_summary($records, $options);
+		last unless $summary->{available};
+		my @unseen = grep { !$_->{seen} } @{$summary->{jobs} || []};
+		last unless @unseen;
+		last if $clock->() - $settleStarted >= $settleMaximumSeconds;
+		warn "Waiting ${settleRetrySeconds}s for Slurm accounting records for job(s) "
+			.join(",", map { $_->{job_id} } @unseen)."\n";
+		$sleeper->($settleRetrySeconds);
+	}
+	my %by_job_id;
+	if ($summary->{available}) {
+		for my $job (@{$summary->{oom_jobs} || []}) {
+			my $next_mb = next_oom_retry_memory_mb(
+				$job->{requested_mb}, $maximum_mb);
+			$by_job_id{$job->{job_id}} = {
+				%{$job}, next_mb => $next_mb,
+				ceiling_reached => defined($next_mb) ? 0 : 1,
+			};
+		}
+	}
+	return {
+		summary => $summary,
+		by_job_id => \%by_job_id,
+	};
+}
+
+sub _run_sacct {
+	my ($command, $options) = @_;
+	my $retrySeconds = defined($options->{retry_seconds}) ? $options->{retry_seconds} : 300;
+	my $maximumSeconds = defined($options->{maximum_error_seconds})
+		? $options->{maximum_error_seconds} : 1_200;
+	my $sleeper = $options->{sleeper} || sub { sleep($_[0]); };
+	my $clock = $options->{clock} || sub { time };
+	my $started;
+	while (1) {
+		my ($output, $status);
+		if (my $runner = $options->{runner}) {
+			($output, $status) = $runner->($command);
+			$status //= 0;
+		} else {
+			$output = `$command 2>/dev/null`;
+			$status = $?;
+		}
+		return ($output, 0) if $status == 0;
+		$started //= $clock->();
+		my $elapsed = $clock->() - $started;
+		return ($output, $status) if $elapsed >= $maximumSeconds;
+		my $diagnostic = $output // ''; $diagnostic =~ s/\s+\z//;
+		warn "Transient Slurm accounting failure after ${elapsed}s; retrying in ${retrySeconds}s"
+			.($diagnostic ne '' ? ": $diagnostic" : '')."\n";
+		$sleeper->($retrySeconds);
+	}
+}
 sub _memory_mb {
 	my ($value) = @_;
 	return unless defined $value;
@@ -39,14 +132,7 @@ sub slurm_tree_memory_summary {
 		my @batch = splice(@ids, 0, 1000);
 		my $command = "sacct -n -P -j ".join(',', @batch)
 			." --format=JobIDRaw,State,ExitCode,MaxRSS";
-		my ($output, $status);
-		if (my $runner = $options->{runner}) {
-			($output, $status) = $runner->($command);
-			$status //= 0;
-		} else {
-			$output = `$command 2>/dev/null`;
-			$status = $?;
-		}
+		my ($output, $status) = _run_sacct($command, $options);
 		return { available => 0, error => "sacct failed with status $status" }
 			if $status != 0;
 		for my $line (split /\n/, $output // '') {

@@ -1,5 +1,270 @@
 # Changelog
 
+## 2026-10-09 — eggNOG-mapper annotation from a node-local eggnog.db (geneCat 0.68)
+
+- **Problem:** 21 of 24 eggNOG-mapper chunk jobs failed after their DIAMOND search, with `RuntimeError: Annotation worker timed out after 250s on a 125-seed sub-batch`.
+  - eggNOG-mapper v3 annotates in a pool of worker processes. Each worker reads `eggnog.db` (SQLite, about 22 GB) at random.
+  - eggNOG-mapper aborts the whole run when a worker takes longer than a fixed deadline, `max(120, 2 × --annot_batch_size)` seconds, for a sub-batch.
+  - With the database on the shared network filesystem and 24 chunks × 12 workers reading it at once, sub-batches exceeded that deadline.
+  - The supervisor did not retry these jobs. A retry would also have repeated the roughly 10-hour search.
+- **Chunks now run eggNOG-mapper in two steps** (the upstream two-step workflow; same annotations, checked on the eggNOG-mapper selftest data):
+  1. DIAMOND search (`--no_annot`). On success its seed orthologs are kept as `<chunk>.seeds`. A resubmitted chunk with this file skips the search.
+  2. Annotation (`-m no_search --annotate_hits_table <chunk>.seeds`) from a node-local data dir. It holds a copy of `eggnog.db` and links to the other data files. This needs about 22 GB more of the 500 GB node-local scratch the job requests.
+     - The copy keeps the database's modification time, and `EGGNOG_GO_OBO` names the shared `go-basic.obo`. eggNOG-mapper keys a field-presence cache it built itself on both, so the copy uses the shared data dir's cache instead of rebuilding it in every chunk (about 50 min on eggNOG 7).
+- **Annotation worker timeouts are retried** with the same memory (`runJobGraph`/`jobGraphOutcome` option `transient`), up to `GENECAT_FUNC_ATTEMPTS` attempts.
+- **Chunks that failed in the annotation keep their search.** When rerun, geneCat reuses the complete, sorted seed file that eggNOG-mapper wrote before annotating (`<chunk>.part.emapper.seed_orthologs.sorted`). Only the annotation of these chunks runs again.
+- Tests in `t/genecat_recovery.t` (both steps, node-local copy, retry without search, reuse of seed files) and `t/job_graph.t` (transient errors).
+
+## 2026-10-08 — Mapper audit: lower-priority fixes (MATAF4 4.49, geneCat 0.67)
+
+- **Mapping statistics sum every bowtie2 run.** A paired library and its singletons are two runs; before, only the first summary was read. `ReadsPaired` counts pairs + single reads, and the overall rate is aligned mates over all mates.
+- **`-DiaSearchTool mmseqs`** (new; default `diamond`): a working MMseqs2 read search.
+  - Percent identity like DIAMOND's (`pident`; the old branch used the 0–1 `fident`).
+  - The same search e-value as DIAMOND.
+  - Mates interleaved on `stdin`; hit tables gzipped for the parser.
+  - `-DiaSensitiveMode` gives `-s 5.7` instead of `-s 4`.
+- **`-DiaPercID` accepts decimals**, like the parser and geneCat.
+- **Read groups:** `PL:ELEMENT` for AVITI and `PL:LS454` for 454 (were `ILLUMINA`).
+- **No thread oversubscription in mapping jobs.** samtools in the mapper's pipe (`view`, and `sort` in decoy/competitive mode) gets a quarter of the cores; steps after mapping keep all. The same applies to geneCat `-ntMatchGC`.
+- **geneCat CD-HIT** (`-mmseqC 0`): `-M` is 90 % of the job's memory (was the job memory + 30 GB).
+- **`-profileTaxaTarget` is deactivated:** a nonzero value stops MATAF4 at startup. TaxaTarget has been unmaintained since 2022, and its database (`obj.umiacs.umd.edu/taxatarget/data.zip`) returns 403. The job code, with the 4.48 fixes, stays in place.
+- Tests in `t/audit_2026_10_08_decisions.t`.
+
+## 2026-10-08 — Mapper audit: decisions (MATAF4 4.48, geneCat 0.66)
+
+- Details: "Decided and implemented" in [`docs/audits/2026-10-08/mappers.md`](../docs/audits/2026-10-08/mappers.md).
+- **`-profileKraken` runs Kraken2.** It was still calling Kraken 1, and every job failed on a standard install.
+  - Each library is classified once at confidence 0. The new `krak2_count_tax.pl` recomputes the 0.01–0.3 threshold series exactly as kraken2 would, from the k-mer hits and the database's `taxo.k2d`. The count tables keep their format.
+  - Memory: `hash.k2d` + 4 GB.
+  - No raw per-read files in scratch.
+  - Cohort matrices come from the new `mrgKrakTax.pl`.
+- **Long reads in `-profileFunct`** are searched with DIAMOND `--long-reads` (range culling) and assigned per query range, so every gene on a read counts. Before, a 10 kb read counted only its best hit.
+- **TaxaTarget.**
+  - Read names are passed without `/1` and `/2`. kaiju and TaxaTarget's extractor disagreed on them, so samples ended in "No reads mapped".
+  - Singletons get their own single-end run, instead of stopping the controller.
+  - A sample without protist reads is a valid empty result, and a run without `Taxonomic_report.txt` fails.
+  - The install is checked at startup.
+  - Memory 6G.
+- **Memory requests.** DIAMOND read jobs 16G (`-DiaMem`, was 7); mOTUs the index size + 6 GB, at least 16G (was 3G); geneCat KGM/NOG chunks 32G (was 160G).
+- **geneCat FuncAssign runs DIAMOND `--mid-sensitive`.** The mode is recorded per database. Existing alignments are kept and recorded as `default-kept`; a changed mode realigns.
+- **Mosaic loci:** minimap2 `-s 40` after `-x asm20`. Genes under ~400 bp and outgroups below 85 % identity could not align before (`prepare_mosaic_loci.pl` 0.18).
+- **Mate hits in the parser** are ranked by combined bit score.
+- Tests: `t/audit_2026_10_08_decisions.t`.
+
+## 2026-10-08 — Mapper and search-tool options audit
+
+- `MATAF4.pl` 4.47, `geneCat.pl` 0.65. Full report: [`docs/audits/2026-10-08/mappers.md`](../docs/audits/2026-10-08/mappers.md).
+- **Secondary mapping with bwa, minimap2 or strobealign works.** These mappers got the comma-joined list of all references, so map2tar failed with several references and in competitive modes, including every long-read sample under the default `-mapper -1`. They now map each reference, the combined DB, or the decoy DB. Decoy mapping no longer silently skips these mappers.
+- **bwa maps single-end reads.** Before, `-mapper 2` stopped the controller for any sample with singletons.
+- **kma removed.** Its SAM output lacked the NM tags `bamFilter.pl` needs, so every alignment was dropped. `-mapper 4` stops MATAF4 at startup.
+- **PacBio reads use minimap2 `-x map-hifi`** (was the CLR preset `map-pb`).
+- **bowtie2 indexes** are accepted as `.bt2` or `.bt2l`. A large reference no longer exits 23 on every pass.
+- **Read-based DIAMOND searches both mates of a pair in one run.**
+  - DIAMOND has no paired mode, so the new `interleaveMates.pl` interleaves R1/R2 on stdin as `<read>/1`, `<read>/2`.
+  - Pairs now count twice whatever the read names look like. SRA/ENA downloads used to count once. The hits of a pair keep DIAMOND's ranking, without a sort.
+  - The search e-value follows `-DiaParseEvals` when above 1e-4, and frameshift mode drops `--min-orf`.
+  - Existing searches are kept; rerun with `-reProfileFunct 1` to recount.
+- **MetaPhlAn.**
+  - Mates are mapped unpaired, so `--nreads` counts reads, not pairs. Paired samples had inflated abundances and too little UNCLASSIFIED.
+  - The read total comes from bowtie2's own log (the `.etxt` is missing in bash mode).
+  - The job requests the index size + 6 GB (was 3 GB).
+- **Smaller fixes:**
+  - geneCat marker-gene mmseqs clustering is sized to its own job.
+  - `-ntMatchGC` keeps its `asm20` seeding (no prebuilt `.mmi`).
+  - Scaffolding builds the bowtie2 index it uses.
+  - lambda3 `mkindexn` gets at least 2 threads.
+  - MetaPhlAn/GTDB-Tk version probes run in bash.
+  - ABR mate detection only matches `/2`.
+- `t/audit_2026_10_08_mappers.t` (44 tests); new mapping cases in `t/alignment_input.t`.
+
+## 2026-10-08 — RiboFind audit
+
+- `catchLSUSSU.pl` 0.7. Full report: [`docs/audits/2026-10-08/report.md`](../docs/audits/2026-10-08/report.md).
+- **No more endless RiboFinder resubmission.** Pair-only samples extracted before 0.6 lacked the singleton read file that MATAF4 requires. `catchLSUSSU` called them complete, MATAF4 did not, and the SSU/LSU tables were never merged. `catchLSUSSU` now checks the same three files, and writes the empty container for a read role the input does not have, without a new SortMeRNA search.
+- **The new extraction is assigned.** `lotus_LCA_blast3.pl` preferred plain `reads_*.fq` files, left by early versions that unpacked the reads in place, over the newly published `.gz`. A rerun marker also removes those plain files. Assignment now requires the extraction checkpoint, instead of checkpointing missing reads as an empty profile.
+- **SSU/LSU tables hold exactly the samples of the map.** `riboSummary` checks every sample of all `-map` files, independent of `-from`/`-to`, wherever its `#OutPath` is. Samples that are ignored, empty or skipped are left out; all others must be profiled before anything is merged. `miTagTaxTable.pl` gets an explicit sample list (`<marker>.miTag.samples.tsv`) of the hierarchies in each sample's own folder, and the tables go beside the first map sample's output. A signature in `<marker>.miTag.sto` triggers a new merge whenever the map or a hierarchy changes. Before, the merge took whatever links were in the central folder of the last sample's output: tables were split across output folders, samples removed from the map stayed in, and lost links of closed samples dropped samples silently. The link folders are no longer written.
+- **`-reRibosomeLCA` no longer stages and cleans the reads.** An assignment pending without extraction is submitted like Protal, right after the empty-sample check and without a read dependency. It reads only `<sample>/ribos/`.
+- **LCA references.** A configured PR2 reference (`PR2dbFA`/`PR2tax`) is copied to `DB/LCADB/`; before, every LCA job died. The copy is checked by size (FASTA, LAMBDA index, taxonomy), so a truncated copy is redone, and tracked per output folder (a second `#OutPath` got no copy). A missing reference or taxonomy file stops MATAF4 at startup.
+- **SortMeRNA 7.0.0** (the version MF4 installs, and the latest release): `catchLSUSSU`'s options, output names and paired handling were checked against the source and with real runs. Index directories built with 4.x still work, and the `smr_v4.3` databases are current. In `lotus_LCA_blast3.pl -simMode 3`, SortMeRNA's BLAST table is rewritten so that `LCA` reads the query length in column 11; with the e-value there, `-cover` accepted every hit.
+- **`-riobsomalAssembly`** (no longer supported, but documented as stable) now stops MATAF4 at startup instead of failing every sample on every pass.
+- `docs/profiling_tutorial.md`: the SortMeRNA keys `SSUdbFAsrt`/`LSUdbFAsrt` are required (the tutorial said they were unused); how to build a SortMeRNA index directory; what the merged tables contain.
+- `t/audit_2026_10_08.t` (59 tests).
+
+## 2026-10-08 — Supervised functional-annotation stages, OOM resubmission
+
+- `geneCat.pl` 0.64.
+- **Problem:** the `FuncAssign` and `FuncEMAP` controllers submitted all jobs with Slurm `afterok` dependencies and exited. Any chunk job that did not end `COMPLETED` (an OOM event, even after the job wrote its output) left the merge, matrix and stone jobs pending forever (`DependencyNeverSatisfied`). An eggNOG-mapper run then had all chunk annotations, but `CombineEMAP` never merged them.
+- **Supervision:** the controllers (`func_GC.sh`, `emap_GC.sh`, now on the long queue) stay alive until every job of their stage has finished.
+  - While the stage is built, `qsubSystem` records its jobs instead of submitting them (new `Mods/JobGraph.pm`, hook in `Mods/Subm.pm`). The controller then submits each job once its prerequisites have completed.
+  - A job counts as done when it wrote its completion marker (`<script>.done`).
+  - OOM-killed jobs (`OUT_OF_MEMORY`, signal 9) are resubmitted with 1.5× memory; jobs lost to node failures or preemption, with the same memory. At most `GENECAT_FUNC_ATTEMPTS` (3) attempts.
+  - A job that fails for good stops only its dependents; the controller then exits with a report and removes the in-flight marker. The marker holds the controller's job ID while it runs.
+- **Recovering a stage stuck from an earlier run:** rerun geneCat. The stale marker is removed, finished chunks are reused, and the stage continues from the merge. Cancel the stale pending jobs with `scancel`.
+  - The in-flight check now follows a pending final job's dependencies (`squeue %E`) down the chain. Before, it only recognised a final job whose own reason was `DependencyNeverSatisfied`. Slurm gives that reason only to the direct dependents of a failed job; jobs further down show "Dependency". So a stuck eggNOG-mapper stage (`CleanEMAP` waiting on `EM.*`, waiting on `CombineEMAP`) looked alive, and geneCat never resubmitted it.
+- **eggNOG-mapper chunk jobs use 12 cores** (was 6; also `emapper --cpu`). v3 annotates in parallel, unlike 2.x's single-core final step. The DIAMOND estimate (about 42 GB) fits the 55 GB jobs.
+- **Functional matrices use 8 threads** (`rtk2 sumMat -t 8`, 8 cores per job; was 4). This applies to the diamond databases and the eggNOG-mapper tables. rtk2 uses the threads to read the gzipped gene matrix in parallel and to parse its rows. The separate KEGG-module job requests 1 core, since `rtk2 module` is single-threaded.
+- `t/job_graph.t`: recording, prerequisite order, OOM retry with more memory, retry limit, blocking of dependents, outcome classification from `sacct`, and an end-to-end run through `qsubSystem` in local bash mode.
+
+## 2026-10-07 — Smaller KEGG/eggNOG chunks for FuncAssign
+
+- `geneCat.pl` 0.63.
+- **New `-fastaSplitBigDB` (default 100M).** KEGG (`KGM`, `KGE`, `KGB`) and eggNOG (`NOG`) are aligned in 100M catalog chunks instead of 500M. These databases have their own split of the catalog; the other databases keep the shared `-fastaSplit` split, and the final FuncAssign job removes both.
+- **Why:** the KGM DIAMOND jobs ran out of their 500 GB node-local scratch. DIAMOND's temporary files grow with the query chunk and the number of homologs per gene, and DIAMOND unlinks them after opening, so they are invisible in `du`. In a test with KEGG-like data, halving the chunk roughly halved the temporary space. Filters barely helped: `--id` saved nothing, `-k 5` saved about a third but can lose KO assignments, and `--min-score` overrides `-e`.
+- An interrupted KGM run resumes on the new chunks: chunk outputs from the 500M split are older than the new chunks and are recomputed.
+- `bigFuncDB` in `FuncTools.pm` defines these databases for both the chunk size and the 500 GB scratch request.
+
+## 2026-10-07 — eggNOG-mapper v3 (eggNOG 7), DIAMOND 2.2.8, VFDB by default
+
+- `geneCat.pl` 0.62.
+- **eggNOG-mapper v3.0.0-beta6** replaces 2.1.12 in `MF4` (pip install from the GitHub release; not on Bioconda yet). It needs the **eggNOG 7 data** (~45 GB, `download_eggnog_data.py`); `eggNOGm_path_DB` now defaults to `[DBDir]/Funct/eggNOGmapper/v3.0/`.
+  - Tested with Python 3.11 and DIAMOND 2.2.8: the v3 self-test data give the upstream reference annotations. The bundled reference files still use the pre-beta6 column layout; only `annotation_confidence` differs, as documented for beta6.
+  - `FuncEMAP` drops `--dbmem` (removed in v3) and passes `--dmnd_block_size 4 --dmnd_index_chunks 2`. Without them, v3 sizes DIAMOND from the node's RAM (~76 GB peak on nodes with ≥ 96 GB), above the 55 GB jobs.
+  - `eggNOG_split.sh` reads columns by header name and handles v3 and v2.1.x output. v3 values get the v2 table formats: EC without `ec:`, PFAM names without domain coordinates, pathways as `ko…`. **NOG** now holds the gene's COG from v3's `COG_category`; genes without one get their broadest eggNOG 7 OG (`name@taxid.cluster`). A merge of chunks from different versions is rejected.
+  - `Anno/Func/emapper/.emapper.params` records the data directory. Changing `eggNOGm_path_DB` re-annotates the catalogue, and old chunk results are never mixed in. **Existing catalogues keep their eggNOG 5 annotations**; delete `checkpoints/10.emap.stone` and `Anno/Func/emapper/MF.emapper.annotations.gz` to re-annotate with v3.
+  - `installer.sh` takes the eggNOG-mapper version from the `MF4.yml` pip line.
+    - **Before the MF4 update:** it removes Bioconda's eggnog-mapper 2.x from an existing `MF4`. If pip has already replaced the files, micromamba logs that removal but keeps the record; the installer then drops the record itself.
+    - **After the update:** it checks that the pinned version and its compiled modules import, and reinstalls otherwise. It creates the built-in data folder `site-packages/data`, which pip does not. Without it, 3.0.0-beta6's `download_eggnog_data.py` fails even with `--data_dir`, and a bare `emapper.py` crashes ([eggnogdb/eggnog-mapper#612](https://github.com/eggnogdb/eggnog-mapper/issues/612); upstream fix proposed in [#610](https://github.com/eggnogdb/eggnog-mapper/pull/610)).
+    - It notes newer GitHub releases and prints how to download the eggNOG 7 data.
+    - Tested with micromamba 2.9.0 on a fresh `MF4`, an `MF4` with 2.1.12, one updated outside the installer, and a re-run.
+  - Why not 2.1.15: Bioconda pins 2.1.13–2.1.15 to DIAMOND < 2.1, because 2.1.x with newer DIAMOND was reported 10–20× slower with fewer hits ([bioconda-recipes#58351](https://github.com/bioconda/bioconda-recipes/issues/58351)). MF4 ran 2.1.12 with DIAMOND 2.2.4.
+- **DIAMOND 2.2.8** (was 2.2.4). MATAFILER's DIAMOND commands give byte-identical results with both versions on synthetic data, including 2.2.8 reading databases built by 2.2.4: catalogue `blastp`, read `blastx` (default and `--sensitive`), phylo all-vs-all and `-f tab`.
+- **VFDB by default.** `-functDB` defaults to `KGM,TCDB,CZy,ABRc,VFA,VFB`. Without the VFDB files the default skips `VFA`/`VFB` with a note; an explicit `-functDB` still requires every listed database. On existing catalogues the new default re-runs `FuncAssign`, but only VFA/VFB are aligned; the other databases' results are kept.
+
+## 2026-10-07 — Protal 0.7.8: per-sample jobs, batches of local samples, strain MSAs from kept SAMs
+
+- **Requires protal 0.7.8 or later** (`audit-fixes` build); the controller refuses an older `protal`. The MF4 environment still installs 0.6.0a from bioconda, so point the `protal` config key at a newer build until it is packaged.
+- **Downloaded samples** (ENA/SRA) get a Protal job each, also in assembly groups, reading the downloaded files; the sample's scratch is removed after it, as for any other job. **Local samples** are aligned together in one batch map job per pass (new `-protalBatchSize` to split it), which loads protal's index once. A sample whose runs need joining or whose reads are bzip2/xz gets a job of its own (process substitution, no copy).
+- Protal reads the source read files, not the staged copies: a sample waiting only for its Protal profile is no longer staged or SDM-cleaned again.
+- All libraries of a sample are profiled (before: the first pair only, which dropped every further run of a downloaded sample), and single-end, PacBio and ONT reads are profiled with their read type (before: skipped). `-protalIgnoreErrors 0` now stops whenever primary reads would be left out.
+- **SAMs are kept only with `-profileProtal 2`** (`<sample>/Tax/Protal/<sample>.sam.zst`); mode `1` keeps the profile and deletes the SAM. The profile logs are no longer kept.
+- **`-profileProtal 2`** no longer runs one map over the cohort holding every sample's staged reads until it finished. It profiles per sample like mode `1`, keeps the SAMs, and then builds the strain MSAs from them: protal profiles them again without loading its index (`pseudoGC/protal/strains/<cohort_signature>/`, in a run over the complete cohort). Switching from mode `1` to `2` aligns the samples again for their SAMs.
+- The merged table moved from `pseudoGC/protal_singular/` to `pseudoGC/protal/Protal.abundance.tsv`.
+- A batch job keeps the samples protal finished when another of its samples fails, and fails so the rest are aligned again in a later pass.
+- The sample signature records the new Protal contract, so existing samples are checked again once: in mode `2` they are aligned again to keep their SAM, and samples skipped for their read type are reconsidered.
+- `t/protal_workflow.t` runs the generated per-sample, batch and strain jobs of both modes against a Perl stand-in for protal; `t/read_library.t` covers the new read selection (`protalReadInput`, replacing `singleShortReadPair`).
+
+## 2026-09-29 — Gene-catalogue functional annotation and VFDB
+
+- `geneCat.pl` 0.61.
+- `eggNOG_split.sh` rewritten:
+  - one tab-aware pass; reads `.gz` input; rejects truncated rows;
+  - writes outputs atomically, leaving existing files untouched on failure;
+  - KEGG pathway IDs are no longer merged (`ko00500ko01100`); NOG works for non-numeric gene IDs;
+  - new `eggNOGmapper_KO` table.
+- **Coverage rule.** A hit passes if ≥ `-FuncMinPercSbjCov` (0.5) of the reference protein **or** ≥ `-FuncMinPercQueryCov` (0.8, new) of the catalog protein is aligned. Diamond/foldseek catalog searches now output `qlen slen` (14 columns); read-based 12-column input is unchanged. Foldseek now gets the e-value cutoff. **Recompute existing annotations with `-mode FuncAssign -redoFunc 1`** to apply the rule.
+- **KEGG.** eggNOG-mapper KOs now give `Anno/Func/emapper/EM.KOL0.txt` and KEGG modules (`Anno/Func/emapper/modules/`), next to the diamond KGM tables and modules.
+- **Checkpoint.** `10.func.stone` records `functDB`, `functAligner` and the cutoffs, so changing them triggers a re-run. `FuncAssign` checks every database before submitting anything.
+- **Robustness:**
+  - catalogue-specific temp/split directories; one split shared by all databases and removed by the final job;
+  - eggNOG-mapper merges an explicit chunk list; compressed annotations from an earlier run are reused;
+  - atomic writes and `.<db>.matrix.done` markers;
+  - node-local diamond/foldseek scratch;
+  - submission options copied per job;
+  - catalog splitting skipped when nothing runs;
+  - duplicate `-eggNOGmap` argument removed.
+- **VFDB.** New `-functDB` options `VFA` (set A) and `VFB` (set B); `VDB` stays as an alias for set B.
+  - `secScripts/functions/prepVFDB.pl` builds `VF.tab`.
+  - Outputs are `VF{A,B}L0-2.txt` (gene_VFID / virulence factor / VF category).
+  - Stricter per-database cutoffs (`%funcDBcutoffs`).
+
+## 2026-09-25 — Audit follow-up decisions
+
+- **Paired unaligned BAM/SAM/CRAM input.** The layout of each alignment input is detected; sdm cleans paired files as true pairs (`-paired 2`, name-sorting first when the header is not `SO:queryname`), giving the usual `filtered.1/.2/.singl` files. Raw-read mapping and the raw FASTQ cache now keep every mate (mapped as unpaired reads) instead of none; `-uploadRawRds` stops for paired alignment input. See [mapping files](../docs/mapping_files.md#using-bam-files-as-primary-input).
+- **Shared assemblies are never built from a subset of members.** A group rewrite reopens every member, and a group assembly waits one pass when members were closed as complete in the same pass.
+- **Database defaults follow the installer:** `checkm2DB` is `[DBDir]/CM2/…`; `hostileDB` and `PtostT5_Weights` are under `[DBDir]`. Sites with their own settings are unaffected.
+- **No more Python helpers in the workflow:** `get_ranks.py` (ete3) is replaced by `secScripts/phylo/taxid2ranks.pl`, which reads the lineages from the Kraken2 database that assigned the IDs; `helpers/install/get_gtdb.py` is replaced by `helpers/install/get_gtdb.pl`.
+- MGS abundance checkpoints no longer rerun both jobs after a resume; `extrAllE100GC.pl` waits for its matrix jobs before geneCat's marker stone; `kmerPerGene.pl` skips cleanly without MATAF4 k-mers; `-perlClusterMAGs` uses `sample__bin` MAG ids.
+- Removed five broken `refs/codex/…` checkpoint references (paths too long for Windows) that broke `git fetch` and automatic repacking.
+- Details: [second-pass report, "Decisions applied"](../docs/audits/2026-09-25/report.md#decisions-applied-follow-up-25-september).
+
+## 2026-09-25 — Pipeline audit, second pass
+
+- Reviewed the 24 September fixes against their callers (no regression found) and re-audited the whole pipeline in eleven slices; see [the second-pass report](../docs/audits/2026-09-25/report.md) for every fix and the findings left open.
+- Secondary reference mapping (map2tar/map2DB) works again end to end: gene prediction on the reference no longer wipes the `GlbMap/<name>/` output directory, the intermediate BAMs are named per reference so the sort/coverage step finds them, and `-mapRefSNP` finds the reference under `<name>.fa`.
+- Read cleaning: singleton recovery no longer swallows the other libraries' or the support scope's singleton files (duplicated reads on a requeued job); porechop only runs for long-read samples.
+- `-autoStatePlan`: the preflight no longer deletes finished mapping outputs when the CRAM was removed on purpose (`-mapSaveCRAM 0` with a binner), and it inspects hybrid preassembly packages where MATAF4 actually stores them.
+- `splitFastas` only reuses a split that finished (stone with input and chunk sizes); the functional-annotation `.length` table is produced also for foldseek and pre-built DIAMOND databases; the between-MGS tree launcher keeps buildTree5's finished per-locus alignments across relaunches; GTDB taxonomy padding, `-FuncMinPerID` floats, the `-requireAllAssemblies 0` contract in `extrAllE100GC.pl`, profiler failure counters and the `/bin/sh` postprocess calls are fixed.
+- The RiboFind SSU/LSU cohort merges are no longer resubmitted on every pass (the skip check now sees the gzipped tables); a binner assignment file is only reused together with `Binning.stone`; `strain_within.pl -submit 0` no longer deletes finished trees or the output directory under `-redo tree`/`-redo all`.
+- New tests: `t/audit_2026_09_25.t` (23 checks); `t/workflow_plan.t` and `t/workflow_runner.t` updated for the package location.
+
+## 2026-09-24 — Pipeline audit fixes
+
+- Fixed about 50 defects found in a whole-pipeline audit; see [the audit report](../docs/audits/2026-09-24/report.md) for each one and for the findings left open.
+- Notable: the shipped `config.old` template now matches the installer (`$MF4DIR`, env `MF4`); decoy/competitive secondary mapping no longer crashes (`alignPostTreat`, `deployMapDB.pl`); eggNOG-mapper category tables keep their annotations; geneCat no longer drops the last sample for some cohort sizes; `-reProfileFunct` re-aligns again; cohort merges count already-closed samples and are no longer blocked by counts from earlier `-loopTillComplete` passes; interrupted buildTree5 runs keep their finished per-locus alignments.
+- `-loopTillComplete` now also rejects `-rewriteGenePred`, `-redoContigStats`, `-redo2ndmap`, `-reParseFunct`, `-redoKraken` and `-redoFails`, which delete outputs on every pass.
+- New tests: `t/audit_2026_09_24.t`, and two checks in `t/workflow_control.t`.
+- Actually removed the scripts retired on 2026-09-23 (they were still tracked and caused all `config_integrity.t`/`script_compile.t` failures), plus the other scripts whose configuration keys were dropped then. The full test suite now passes.
+
+## 2026-09-23 — Gene-catalogue clustering requires shorter-gene coverage
+
+- Updated `geneCat.pl` to 0.60. The default mmseqs2 clustering previously ran with `-c 0 --cov-mode 0`, so any two genes sharing a ≥100 nt block at ≥95% identity could be merged and their abundances summed. It now uses `--cov-mode 1 -c 0.9`: the shorter gene (the cluster member) must be ≥90% covered by its alignment to the representative. Fragments from fragmented assemblies still join the complete gene they belong to; genes that share only a local block (domains, IS-element flanks, fusion genes) stay separate. This matches the IGC-style criterion (95% identity, 90% coverage of the shorter gene) and the implicit behaviour of the CD-HIT back-end (`-G 1`).
+- New option `-clusterCov FLOAT` (default `0.9`); `-clusterCov 0` restores the previous behaviour. The value is printed in the geneCat run header.
+- Marker-gene clustering (`easy-cluster`, species-level cut-offs) now actually applies its intended 90% shorter-gene coverage; previously `min(aS, aL)` silently reduced it to 0.
+- `--split-memory-limit` is never written as `0G` for very small `-mem` values.
+- Existing catalogues are not rebuilt automatically; rerun the clustering step (`-continue 0`) to apply the new criterion.
+- `t/genecat_cluster_coverage.t` checks the generated commands and, when mmseqs2 is installed, runs them on a synthetic fixture (fragment joins its gene, 97% variant joins, block-sharing gene stays separate).
+
+## 2026-09-23 — Test-suite and repository clean-up
+
+- Added `helpers/runTests.pl`, a Perl runner for the unit tests with filtering, parallel jobs, a summary of skipped/failed files and an optional per-file report. See [installation](../docs/install.md#running-the-unit-tests).
+- Removed about 700 test assertions that only matched the source code text, and the test file that consisted solely of them (`t/protal_workflow.t`). Behavioural tests are unchanged.
+- New behavioural tests: `math_utils.t`, `sequence_utils.t`, `table_readers.t`, `phylo_locus_helpers.t`, `config_integrity.t` (every configured repository path exists and every `getProgPaths` key resolves), `script_compile.t` (every Perl script and module compiles) and `sdm_option_files.t` (shipped sdm option files keep full-length reads; the AVITI and MiSeq files are marked as a known issue for 150 bp reads).
+- Test shims are Perl only: the Python fake `samtools`/mapper in `t/alignment_input.t` were rewritten in Perl, and the Python audit demonstrator `docs/audits/2026-09-11/reproduce.py` was retired (its cases are covered by `t/local_algorithm_regressions.t`).
+- MSAfix-dependent tests (`post_alignment_locus_qc.t`, `build_tree5_taxon_aware_smoke.t`) now skip cleanly when `bin/MSAfix` is unavailable.
+- Retired unreferenced, broken or legacy scripts (e.g. `buildTree4.pl`, `strain_within_3.pl`, the old SNP/vcf2cons chain, `annotateMGwSpecIs.pl`/`2.pl`, `parseBlastFunct.pl`, `secScripts/unused/`, `helpers/deprecated/`, `helpers/documentation_old/`), leftover `.rej` patch files and two unused bundled modules, together with their configuration keys.
+- Small fixes found by the new tests: `reverse_complement_IUPAC` now complements K/M; `convertNT2AA` no longer warns on ambiguous codons; `writeFasta` writes records in sorted order (reproducible output) and honours its record limit exactly; `read_matrix` keeps the header when a gene subset is requested; `fixHDs4Phylo` now detects reserved characters (the check was an empty regex), also replaces parentheses and renames paired inputs identically; `read_paf_stream` returns hits per query in sorted target order.
+
+## 2026-09-04 — Publish strain postprocessing results consistently
+
+- Updated `strain_within_2.2.pl` to 0.50. Its aggregate-path checks now follow MG-STK's `<FMGdir>/Results/` contract, preventing a successful `combineResults.R` run from being misreported as missing `strainStats.tsv`.
+- Network, treeWAS, and significant-phylogeny plot outputs now also live under `<FMGdir>/Results/`; per-MGS trees and durable statistic stores remain in their existing MGS directories.
+
+## 2026-09-04 — Restore conservative strain-locus defaults
+
+- Updated `buildTree5.pl` to 5.88 and `strain_within.pl` to 1.60. `-GeneLengthMin`/`-NTfiltPerGene` now default to `0.4`, and `-GeneLengthIncludeMin` inherits that value unless it is explicitly overridden.
+- Taxon-aware locus selection now defaults off in both entry points. The ordinary path again applies the hard locus-prevalence filter, now at `-fracMaxGenes90pct 0.3` of the category-size Q90. Taxon-aware selection remains available with `-taxonAwareLocusSelection 1`.
+- Heterogeneity-dependent information rewards and excess-variation penalties are restored by default inside the optional taxon-aware selector; `-taxonAwareHeterogeneityScoring 0` explicitly disables them.
+- The default ambiguous/multigene-locus fraction allowed per sample is reduced from `0.25` to `0.10`; the independent three-bad-locus minimum is unchanged.
+- The strain workflow retains its 5,000-informative-nucleotide absolute per-sample floor and now checks all coverage thresholds again on the final overlap-filtered concatenation, after locus QC. `phylo/final_alignment_sample_qc.tsv` records the exact locus and position counts and each disposition. Backbone placement and its separate 10 kb overlap requirement remain opt-in.
+- MSAfix 2.16 now removes isolated, strongly divergent sequence records within a locus during the existing native post-alignment QC pass. This is on by default only for within-species trees and can be disabled with `-postAlignmentSequenceOutlierMask 0`; configured outgroup records are exempt. The conservative absolute-divergence, modified-Z, comparable-site, minimum-cohort, and 10%-maximum safeguards avoid treating supported subgroups as isolated errors. Decisions are recorded in `phylo/post_alignment_sequence_outliers.tsv`.
+
+
+## 2026-09-02 — Strain-tree filter-bias corrections
+
+- Added the buildTree5.pl 5.84 filter-correction set (retained in later versions). Ordinary taxon-aware concatenation no longer applies placementMinOverlap or another minimum-NT cutoff; placement-only options remain inactive unless backbone placement is enabled, and only an all-missing concatenated sequence is removed at that stage.
+- Outgroups no longer contribute to ingroup Q90 baselines for per-locus length QC, whole-sample gene/NT coverage, taxon-aware target projection, final coverage eligibility, or strict-backbone coverage deferral. A sole-sample fallback preserves defined behavior when no ingroup exists.
+- selection_attrition.tsv now derives final_samples from the concatenated alignment, reports concatenation_excluded_samples, and derives backbone_samples from the actual inference alignment/split.
+- Added -taxonAwareHeterogeneityScoring 0|1, default 0. With the default, variable/parsimony-information credit and excess-variation penalties are both absent from locus ranking; 1 restores the historical heterogeneity-dependent terms while leaving their diagnostics available in either mode.
+- Recovered-only lower-confidence observations remain present in the final alignment but no longer contribute to selector prevalence, occupancy, variable-site, or parsimony-informative-site metrics.
+
+## 2026-08-23 — Unified Phase II job sizing and priority
+
+- Updated `strain_within.pl` to 1.40. Phase II continues to use `ceil(sqrt(samples))`, with the existing four-core floor and `-maxCores` cap, for each ordinary BuildTree core request.
+- The sample and usable-gene counts returned by the required per-MGS input-finalization call are reused directly; no additional sizing scan is introduced. Their product is an approximate workload signal for submission ordering and memory planning.
+- Ordinary jobs are retained until preparation completes, then submitted by descending core request and descending sample-by-gene workload. EPA-only recovery retains its existing priority tier.
+- Memory planning takes the larger of the existing measured-input estimate and `samples * usable_genes / 1024` MB before applying the existing inference-engine multiplier, `-phyloMemMulti`, and memory bounds.
+
+## 2026-08-23 — Predetermined strain outgroups
+
+- Updated `strain_within.pl` to 1.39. The Mosaic-aware R lookup now returns one authoritative outgroup per MGS, and the controller no longer falls through across tree neighbours when that selection lacks locus coverage.
+- Outgroup demand viability is decided before candidate gene-map or reference-FASTA loading. A run in which every target is below `-outgroupCoreMinLoci` now exits reference preparation without opening those catalogues.
+- Candidate gene mappings are restricted to approved COGs for viable selected outgroups before the per-MGS cap is applied. Alternative homolog copies remain confined to the predetermined outgroup.
+- `buildTree5.pl` continues to receive the finalized outgroup overlay and performs no outgroup preselection.
+
+## 2026-08-22 — OOM-aware and sample-guided strain resources
+
+- Updated `strain_within.pl` to 1.38. Fresh and resumed Phase-I worker repair now use one retry routine backed by the shared Slurm accounting planner in `Mods/SlurmAccounting.pm`.
+- An accounting-confirmed Phase-I OOM doubles only the affected worker's memory request on its next bounded retry, capped by `-treeOOMMaxMemGB`; unclassified and non-OOM failures retain their previous request.
+- Strain-submitted BuildTree jobs now request node-local scratch at five times compressed input size with a 20 GiB floor, increased from four times with a 15 GiB floor.
+- Full BuildTree core requests now reuse the exact submitted-sample count collected during input preparation: `ceil(sqrt(samples))`, retaining the four-core floor and `-maxCores` cap. EPA-only recovery remains single-threaded.
+
+## 2026-08-19 — Post-QC recovery of partial strain loci
+
+- Updated `buildTree5.pl` to 5.77 and `strain_within.pl` to 1.25. `-GeneLengthMin` remains the high-confidence per-sample locus gate used for candidate selection and backbone/placement eligibility; the new `-GeneLengthIncludeMin` (default `0.03`) recovers lower-coverage observations only after that QC gate.
+- Recovered observations enter both the complete/backbone MSA and, when strict placement is explicitly enabled, the placement-query MSA. Final taxon-aware sample coverage metrics ignore recovered-only observations, while MSAfix masking and post-alignment occupancy/divergence QC evaluate the expanded alignments.
+- Added per-MGS `phylo/gene_length_filter.samples.tsv`, run-wide `LOGandSUB/strainGeneLengthFilter.samples.tsv`, and separate selection-attrition totals for observations dropped by either threshold or recovered into MSA input.
+- Backbone EPA placement remains disabled by default in both scripts and is enabled only with `-placeOnBackbone 1` (the historical `-strictBackbone` spelling is now a deprecated compatibility alias).
+
 ## 2026-08-06 — Legacy strain inference and placement eligibility
 
 - Updated `buildTree5.pl` to 5.36 and `strain_within.pl` to 0.80. The historical IQ-TREE command is again the strain default; `-legacyMGTK 0` selects the standard modern command, while `-iqPathogen 1` selects pathogen mode and disables the default automatically.

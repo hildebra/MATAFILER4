@@ -8,7 +8,7 @@ use Mods::ReadLibrary qw(
 	ensureSeqSetLibraries ensureCleanSeqSetLibraries
 	syncSeqSetLegacy syncCleanSeqSetLegacy replaceScopeLibraries
 	readLibrariesByScope libraryFiles libraryPairs legacyLibraryArrays
-	libraryTechnology
+	libraryTechnology protalReadInput
 );
 
 my $primary = readLibrariesFromArrays(
@@ -110,6 +110,72 @@ is(scalar(@{libraryPairs($primary)}), 2, 'paired-library selection operates on r
 my ($r1, $r2, $single, $labels, $technologies) = legacyLibraryArrays($primary, 1);
 is_deeply($technologies, [qw(ill ill)], 'aligned compatibility projection repeats per-record technology');
 
+# protal: one kind of reads per sample, every library of that kind, source paths.
+my $protal_pair = [newReadLibrary(
+	id => 'protal-pair', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'hiSeq', files => {r1 => 'staged.R1.fq.gz', r2 => 'staged.R2.fq.gz'},
+	source_files => {r1 => '/in/protal.R1.fq.gz', r2 => '/in/protal.R2.fq.gz'},
+)];
+my $protal = protalReadInput($protal_pair, 'Protal for S1');
+is($protal->{read_type}, 'pe', 'protal: a short pair is profiled as paired-end reads');
+is_deeply([$protal->{r1}, $protal->{r2}], [['/in/protal.R1.fq.gz'], ['/in/protal.R2.fq.gz']],
+	'protal: reads come from the source files, not the staged copies');
+ok(!$protal->{warning}, 'protal: nothing left out, no warning');
+
+my $two_runs = protalReadInput(readLibrariesFromArrays(
+	sample => 'S1', scope => 'primary', phase => 'staged', technology => 'ill', separate_roles => 1,
+	r1 => [qw(S1.L1.R1.fq.gz S1.L2.R1.fq.gz)], r2 => [qw(S1.L1.R2.fq.gz S1.L2.R2.fq.gz)],
+), 'Protal for S1');
+is_deeply([$two_runs->{r1}, $two_runs->{r2}],
+	[[qw(S1.L1.R1.fq.gz S1.L2.R1.fq.gz)], [qw(S1.L1.R2.fq.gz S1.L2.R2.fq.gz)]],
+	'protal: every paired library is profiled, mates in the same order (staged paths without source files)');
+eval { protalReadInput($primary, 'Protal for S1') };
+like($@, qr/Protal for S1 would leave out singleton reads of paired library/,
+	'protal: strict selection refuses to drop the singletons stored with a pair');
+my $tolerant = protalReadInput($primary, 'Protal for S1', {ignore_incompatible => 1});
+is(scalar(@{$tolerant->{r1}}), 2, 'protal: tolerant selection keeps both pairs');
+like($tolerant->{warning}, qr/profiles its 2 pe library record\(s\) and leaves out singleton reads/,
+	'protal: tolerant selection warns about what it leaves out');
+
+my $singles = protalReadInput([newReadLibrary(
+	id => 'protal-single', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'hiSeq', files => {single => 'protal.single.fq.gz'},
+)], 'Protal for S1');
+is($singles->{read_type}, 'se', 'protal: short single reads are profiled as single-end reads');
+is_deeply([$singles->{r1}, $singles->{r2}], [['protal.single.fq.gz'], []],
+	'protal: single-end reads have no second file');
+
+my $ont = protalReadInput([newReadLibrary(
+	id => 'protal-ont', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'ONT', files => {single => 'ont.fq.gz'},
+)], 'Protal for S1');
+is($ont->{read_type}, 'ont', 'protal: ONT reads keep their kind');
+my $pacbio = protalReadInput([newReadLibrary(
+	id => 'protal-pb', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'PB', files => {single => 'hifi.fq.gz'},
+)], 'Protal for S1');
+is($pacbio->{read_type}, 'pb', 'protal: PacBio reads keep their kind');
+
+my $long_pair = [newReadLibrary(
+	id => 'protal-long', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'ONT', files => {r1 => 'long.R1.fq.gz', r2 => 'long.R2.fq.gz'},
+)];
+eval { protalReadInput($long_pair, 'Protal for S1') };
+like($@, qr/Protal for S1 has no read library protal can profile.*long-read pair 'protal-long'/,
+	'protal: a long-read pair is not mistaken for paired-end reads');
+my $mixed = protalReadInput([@{$long_pair}, @{$protal_pair}], 'Protal for S1',
+	{ignore_incompatible => 1});
+is_deeply($mixed->{libraries}, ['protal-pair'],
+	'protal: tolerant selection skips the long pair and uses the short pair');
+my $bam_only = [newReadLibrary(
+	id => 'protal-bam', sample => 'S1', scope => 'primary', phase => 'staged',
+	technology => 'hiSeq', files => {single => 'cache.unbam.fq.gz', bam => 'in.bam'},
+)];
+my $skip = protalReadInput($bam_only, 'Protal for S1', {ignore_incompatible => 1});
+ok($skip->{skipped}, 'protal: a sample with only alignment input is skipped');
+like($skip->{reason}, qr/no read library protal can profile.*alignment input 'protal-bam'/,
+	'protal: the skip reason names what was found');
+
 eval { newReadLibrary(id => 'broken', scope => 'primary', files => {r1 => 'only.R1.fq.gz'}) };
 like($@, qr/only one mate/, 'half-paired records are rejected at construction');
 eval { validateReadLibraries([$primary->[0], $primary->[0]]) };
@@ -126,71 +192,5 @@ my $wrong_sample = {libraries => [newReadLibrary(
 )]};
 eval { ensureSeqSetLibraries($wrong_sample, 'S1') };
 like($@, qr/owned by 'S2'/, 'sample-scoped consumers reject a library owned by another sample');
-
-open(my $mataf_fh, '<', 'MATAF4.pl') or die "Cannot read MATAF4.pl: $!";
-my $mataf4 = do { local $/; <$mataf_fh> };
-close($mataf_fh);
-my $active_mataf4 = join("\n", grep { !/^\s*#/ } split /\n/, $mataf4);
-unlike($active_mataf4, qr/get(?:Raw|Clean)SeqsAssmGrp\s*\(/,
-	'MATAF4 no longer consumes assembly-group parallel-array getters');
-unlike($active_mataf4, qr/\$cleanSeqSetHR.*\{(?:arp1|arp2|singAr|arpX1|arpX2|singArX)\}/,
-	'MATAF4 functional consumers no longer read clean parallel-array state');
-my ($sdm_clean) = $mataf4 =~ /(sub sdmClean\(\)\{.*?)(?=^sub mocat_reorder)/ms;
-like($sdm_clean, qr/foreach|for \(my \$i = 0; \$i < \@\{\$libraries\}/,
-	'SDM cleaning iterates canonical library records');
-unlike($sdm_clean, qr/legacyLibraryArrays/,
-	'SDM cleaning no longer loses record associations through compact arrays');
-like($sdm_clean, qr/technology => \$technology.*?label => \$library->\{label\}.*?source_files => \$library->\{files\}/s,
-	'cleaned records retain label, technology, and source-file provenance');
-my ($upload_prep) = $mataf4 =~ /(sub uploadRawFilePrep\{.*?)(?=^sub mocatFileCpy)/ms;
-unlike($upload_prep, qr/legacyLibraryArrays/,
-	'raw upload preparation keeps mate, label, and technology associations on records');
-like($mataf4, qr/-1 \$pa1 -2 \$pa2 .*?pe2\} = "\$mateD\/mate\.\$\{mateC\}_R2\.pe/s,
-	'mate preprocessing uses R2 as the second input and output');
-like($upload_prep,
-	qr/my \$files = ref\(\$library->\{source_files\}\).*?\$files->\{r1\}.*?\$files->\{single\}/s,
-	'raw upload preparation selects authoritative sources rather than disposable staged reads');
-unlike($upload_prep, qr/ln -s/,
-	'raw upload preparation never exposes authoritative inputs through symlinks');
-like($upload_prep,
-	qr/_shell_command\('cp', '-L', '--reflink=auto', '--'.*?\$r1, \$tmp1.*?\$single, \$tmp/s,
-	'raw upload preparation creates private copy-on-write or copied working files');
-my ($seed_unzip) = $mataf4 =~ /(sub seedUnzip2tmp\{.*?)(?=^sub mOTU2Mapping)/ms;
-like($seed_unzip,
-	qr/source_input_files\(\$primarySourceDir, \@pa1\).*?\{source_files\}.*?\$sourcePa1\[\$i\]/s,
-	'unzip staging preserves map-resolved source paths on raw library records');
-like($mataf4, qr/\$flashBin .*?-o \$outTL .*?\$pairs->\[\$i\]\{files\}\{r1\} \$pairs->\[\$i\]\{files\}\{r2\}/s,
-	'FLASH uses the matching pair and a unique output prefix for each library');
-like($mataf4, qr/my \$platform = 'ILLUMINA'.*?'PACBIO'.*?'ONT'.*?PL:\$platform/s,
-	'mapper read groups derive platform metadata from record technology');
-like($mataf4, qr/my \@mappingLibraries = \(\@\{\$pairs\}, \@singleLibraries\);\s*
-	my \@libsOri = map \{ .*? \} \@mappingLibraries;/,
-	'mapper label projection cannot feed singleton labels back into a preceding map');
-like($mataf4, qr/sub cleanInput.*?ensureSeqSetLibraries\(sampleReadSet\(\$curSmpl, "raw"\)/s,
-	'raw-read cleanup covers both primary and support record scopes');
-like($mataf4,
-	qr/my \$stagedReadsMaterialized = ref\(\$rawReadSetHR\).*?&& \$stagedReadsMaterialized\)\{.*?cleanInput/s,
-	'early raw-read cleanup is submitted only when staging materialized data');
-like($seed_unzip,
-	qr/my \$stagedReadsMaterialized = 0;.*?Converting bam.*?\$stagedReadsMaterialized = 1;.*?\$stagedReadsMaterialized = 1 if \(\$LEloc==0\).*?stagedReadsMaterialized => \$stagedReadsMaterialized/s,
-	'copy, conversion, and transformation staging records materialized raw reads');
-like($seed_unzip,
-	qr/my \(\$tmpCmd,\$newF,\$LEloc\) = complexGunzCpMv\("",\$sourcePas\[\$i\].*?\$stagedReadsMaterialized = 1 if \(\$LEloc==0\)/s,
-	'single-read staging propagates the copy-versus-link result');
-like($mataf4,
-	qr/sub cleanInput.*?File::Spec->abs2rel.*?_shell_command\('rm', '-f', '--', \@temporary\)/s,
-	'deferred raw cleanup validates planned scratch paths and shell-quotes them');
-like($mataf4,
-	qr/sub sampleReadSet.*?\$map\{\$sample\}\{reads\}\{\$phase\} = \$replacement.*?sampleReadSet\(\$curSmpl, "raw", \\%seqSet\).*?sampleReadSet\(\$curSmpl, "clean", \$cleanSeqSetHR\)/s,
-	'raw and clean phases are stored together under the sample read-state object');
-unlike($active_mataf4, qr/\$map\{[^}]+\}\{(?:seqSet|cleanSeqSet)\}/,
-	'MATAF4 no longer maintains separate top-level raw and clean read hashes');
-like($sdm_clean, qr/my \$technology = \$library->\{technology\} \|\| "";/,
-	'SDM takes sequencing technology from the canonical library record');
-like($mataf4,
-	qr/my \$variantPrimaryTechnology = libraryTechnology\(.*?my \$variantSupportTechnology = libraryTechnology\(.*?SeqTech => \$variantPrimaryTechnology.*?SeqTechSuppl => \$variantSupportTechnology/s,
-	'variant calling derives primary and support technologies from read-library records');
-like($mataf4, qr/sub sdmStatsMany.*?my \@sdm_logs = glob\("\$inD\/LOGandSUB\/sdm\/filter\*\.log"\).*?my \@primary_logs = grep \{ \$_ !~ \/filterSuppl\/ \} \@sdm_logs.*?my \@support_logs = grep \{ \$_ =~ \/filterSuppl\/ \} \@sdm_logs/s,
-	'primary and support SDM statistics partition the shared per-library log list');
 
 done_testing();

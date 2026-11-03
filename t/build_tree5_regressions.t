@@ -2,229 +2,646 @@ use strict;
 use warnings;
 
 use File::Spec;
+use File::Temp qw(tempdir);
+use File::Path qw(remove_tree);
 use FindBin qw($Bin);
+use lib File::Spec->catdir($Bin, q{..});
 use Test::More;
 
-my $root = File::Spec->catdir($Bin, '..');
-my $script = File::Spec->catfile($root, 'secScripts', 'phylo', 'buildTree5.pl');
+my $root = File::Spec->catdir($Bin, q{..});
+my $script = File::Spec->catfile($root, q{secScripts}, q{phylo}, q{buildTree5.pl});
 
-open my $fh, '<', $script or die "Cannot read $script: $!";
-my $source = do { local $/; <$fh> };
-close $fh;
+open my $script_handle, '<', $script or die "Cannot read $script: $!";
+my $script_text = do { local $/; <$script_handle> };
+close $script_handle or die "Cannot close $script: $!";
 
-my $compile_status = system($^X, '-I'.$root, '-c', $script);
-is($compile_status, 0, 'buildTree5.pl compiles');
-
-like($source, qr/my \$version = 5\.38;/,
-	'EPA-ng backbone/placement policy separation increments the workflow version');
-like($source,
-	qr/"strainWithinPreset=i".*?if \(\$strainWithinPreset\) \{.*?\$withinSpecies = 1;.*?\$useAA4tree = 0;.*?\$ntCntTotal = 400;.*?\$strictBackbone = 1;.*?\$continue = 1;.*?\$doDNDS = 0;.*?\$doTheta = 0;/s,
-	"buildTree strain preset owns the fixed strain-tree settings and within-species mode");
-like($source,
-	qr/my \$treeAutoModel=1;.*?my \$treeAutoModelExplicit=0;.*?"AutoModel=i" => sub \{.*?\$treeAutoModel = \$_\[1\];.*?\$treeAutoModelExplicit = 1;.*?if \(\$strainWithinPreset\) \{.*?\$treeAutoModel = 0 unless \$treeAutoModelExplicit;/s,
-	'strain trees default to the fixed model while an explicit -AutoModel 1 remains an opt-in');
-like($source,
-	qr/my %RATE_MERGE_DEFAULT = \(.*?enabled => 0.*?maximum_bins => 8.*?target_sites_per_bin => 30_000.*?minimum_loci_per_bin => 20.*?minimum_sites_per_bin => 20_000.*?"rateMergePartitions=i" => sub \{.*?\$rateMergePartitionsExplicit = 1.*?if \(\$strainWithinPreset\) \{.*?\$rateMergePartitions = 1 unless \$rateMergePartitionsExplicit;/s,
-	'direct builds keep rate merging optional while strain presets enable it unless explicitly disabled');
-like($source,
-	qr/my \$withinSpecies = 0;.*?my \$minOverlapMSA;.*?"withinSpecies=i".*?\$minOverlapMSA = \$withinSpecies \? 2 : 0 unless defined \$minOverlapMSA;.*?\$postAlignmentLocusQC = \$withinSpecies.*?unless defined \$postAlignmentLocusQC;.*?\$postAlignmentDivergenceQC = \$withinSpecies \? 1 : 0/s,
-	"between-species locus retention is the default and within-species filtering is explicit");
-like($source,
-	qr/my \@divergenceArguments = \$postAlignmentDivergenceQC.*?"-maxMedianDivergence", 1,.*?"-maxP90Divergence", 1,.*?"-relativeModifiedZ", 1_000_001/s,
-	"explicit broad-tree QC disables strain-divergence rejection");
-like($source,
-	qr/"stagedInputDir=s".*?"tmpSubdir=s".*?"completionMarker=s".*?publishStagedTreeInputs\(\$stagedInputDir.*?for my \$input_spec/s,
-	"buildTree5 publishes staged inputs before validating its input paths");
-like($source,
-	qr/sub publishStagedTreeInputs.*?unless \(\@missing\).*?Using existing persistent tree inputs.*?opendir.*?sortFastaForCompression.*?move\(\$source, \$destination\).*?Tree inputs remain incomplete/s,
-	"persistent inputs take precedence and staged publication is validated in Perl");
-like($source,
-	qr/length\(\$tmpSubdir\).*?\$ENV\{TMPDIR\}.*?File::Spec->catdir\(\$temporaryRoot.*?prepareTemporaryBase/s,
-	"TMPDIR-relative work paths are resolved inside buildTree5");
-like($source,
-	qr/safeRemoveTree\(\$tmpD, \$tmpBase\).*?writeCompletionMarker\(\$completionMarker, \$\{\$trRetH\}\{nwk\}.*?sub writeCompletionMarker.*?nonempty primary tree.*?rename \$temporaryMarker, \$marker/s,
-	"buildTree5 atomically publishes a completion marker only after validating its primary tree");
-like($source,
-	qr/post_alignment_locus_qc\.tsv.*?sub runPostAlignmentLocusQC.*?getProgPaths\("MSAfix"\).*?-manifest.*?-report.*?-keep/s,
-	'buildTree invokes native MSAfix locus QC before concatenation and retains its report');
-unlike($source, qr/postAlignmentLocusQC_scr/,
-	'buildTree no longer invokes the Perl locus-QC script');
-like($source, qr/post-alignment-loci-XXXXXX.*?UNLINK => 1.*?post-alignment-keep-XXXXXX.*?UNLINK => 1/s,
-	'locus-QC manifest and keep-list temporaries are always scheduled for cleanup');
-like($source, qr/my \@temporaryFiles = \(.*?bsd_glob\(quotemeta\(\$reportFile\)\."\.tmp\.\*"\).*?bsd_glob\(quotemeta\(\$keepFile\)\."\.tmp\.\*"\).*?unlink \$temporaryFile/s,
-	'wrapper and partial native locus-QC files are explicitly deleted after every invocation');
-like($source,
-	qr/my %POST_ALIGNMENT_QC_DEFAULT = \(.*?between_species_enabled => 0.*?within_species_enabled => 1.*?minimum_occupancy => 0\.35.*?relative_modified_z => 5\.0.*?my \$postAlignmentLocusQC;/s,
-	'broad trees retain all loci by default while within-species trees reject stronger divergence outliers');
-like($source,
-	qr/post_alignment_locus_qc\.policy\.tsv.*?"schema=10".*?"enabled=\$postAlignmentLocusQC".*?"per_gene_length_fraction=\$ntFracGene".*?"minimum_category_q90_fraction=\$fracMaxGenes90pct".*?"backbone_gene_fraction=\$GeneFracPSpec".*?"placement_gene_fraction=\$placementGeneFracPSpec".*?"iqtree_auto_model=\$treeAutoModel".*?"iqtree_legacy=\$iqLegacy".*?"rate_partition_merge=\$rateMergePartitions".*?"rate_partition_maximum_bins=\$rateMergeMaxBins".*?"rate_partition_target_sites=\$rateMergeTargetSites".*?"taxon_aware=\$taxonAwareLocusSelection".*?\$legacyWithinSpeciesQCAudit = !\$taxonAwareLocusSelection.*?!\$rateMergePartitions && \$withinSpecies.*?!-e \$postAlignmentQCPolicyFile.*?\$postAlignmentQCAuditCurrent = \$postAlignmentQCPolicyMatches.*?!\$postAlignmentLocusQC.*?existing multi-locus alignment predates the current.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD/s,
-	'changed locus-retention policies rebuild stale checkpoints while legacy within-species audits remain compatible');
-like($source,
-	qr/sub writePostAlignmentQCPolicy.*?post-alignment-policy-XXXXXX.*?UNLINK => 1.*?rename \$temporaryPolicy, \$policyFile.*?writePostAlignmentQCPolicy\(\$policyFile, \$policyText\)/s,
-	'the exact locus-retention policy is published atomically');
-like($source,
-	qr/elsif \(\$cogCats ne ""\).*?Post-alignment locus QC disabled; retaining all \$candidateCount prepared loci.*?unlink \$postAlignmentQCReport.*?writePostAlignmentQCPolicy\(\$postAlignmentQCPolicyFile, \$postAlignmentQCPolicy\)/s,
-	'disabled locus QC retains all prepared alignments and replaces stale QC audit state');
-like($source,
-	qr/my \$minimumCategorySequences = \$GenesQtl90 \* \$fracMaxGenes90pct;.*?= 1 if \$minimumCategorySequences < 1;.*?if \(\@spl >= \$minimumCategorySequences\).*?minimum category sequences=\$minimumCategorySequences/s,
-	'a zero category-prevalence fraction retains every nonempty locus and reports the effective threshold');
-like($source,
-	qr/\@MSAs = grep \{ \$keepPath\{\$_\} \} \@MSAs.*?\@MSAsSyn = grep \{ \$keepStem\{alignmentFileStem\(\$_\)\} \} \@MSAsSyn/s,
-	'primary, synonymous, and nonsynonymous alignment sets stay locus-consistent');
-like($source,
-	qr/my %TAXON_AWARE_DEFAULT = \(.*?enabled => 1.*?maximum_loci => 500.*?core_loci => 400.*?candidate_extra => 150.*?target_loci_per_sample => 25.*?target_nt_per_sample => 7500.*?"taxonAwareLocusSelection=i"/s,
-	'taxon-aware locus selection is enabled by default and has bounded candidate/core defaults');
-like($source,
-	qr/if \(\$taxonAwareLocusSelection\) \{.*?selectTaxonAwareCandidateLoci\(.*?candidate_limit => \$taxonAwareMaxLoci \+ \$taxonAwareCandidateExtra.*?\@linesCats3 = \@\{\$candidateSelection->\{categories\}\}/s,
-	'the taxon-aware pre-MSA pass chooses robust, rescue, and QC-backfill candidates in buildTree5');
-like($source,
-	qr/sub chooseTaxonAwareLoci.*?robust_core.*?\$coverageGain.*?qc_backfill.*?taxon_rescue/s,
-	'locus choice combines a robust core with rarity-weighted taxon rescue and backfill');
-like($source,
-	qr/runPostAlignmentLocusQC\(.*?if \(\$taxonAwareLocusSelection && \$cogCats ne ""\).*?selectTaxonAwareFinalLoci\(.*?taxonAwareAlignmentMetrics.*?parsimony_informative_sites/s,
-	'the final selector runs after MSAfix QC and scores actual occupancy and informative sites');
-like($source,
-	qr/sub classifyTaxonAwareSamples.*?below_minimum_anchor_nt.*?backbone_candidate.*?placement_candidate/s,
-	'sparse but anchored taxa are retained for placement and final sample decisions are audited');
-like($source, qr/taxon_aware_locus_selection\.tsv.*?taxon_aware_sample_selection\.tsv/s,
-	'taxon-aware final locus and sample decisions have persistent audit tables');
-like($source,
-	qr/if \(\$taxonAwareLocusSelection && \$multAliF eq \$multAli\).*?\(\$num1 \* \$factor\) < \$minimumAnchorNT.*?else \{.*?\$qtl90NTcnts \* \$ntFrac/s,
-	'the final primary merge honors the absolute taxon-aware anchor instead of rerunning relative sample filtering');
-like($source,
-	qr/sub classifyTaxonAwareCoverageEligibility.*?minimumLociFloor.*?below_\$\{role\}_gene_fraction/s,
-	'backbone and placement coverage filters are separate, with a two-locus placement minimum and audits');
-like($source,
-	qr/sub readPostAlignmentRateMetrics.*?p90_consensus_divergence.*?sub alignmentGCMetric.*?sub deterministicRatePartitions.*?\$totalEffectiveSites.*?\$rateMergeTargetSites.*?\$desiredBins = \$rateMergeMaxBins.*?\$splitMetric.*?'rate_proxy'.*?'gc_fraction'.*?\$summary\{\$_\}\{loci\} < \$rateMergeMinLoci.*?\$summary\{\$_\}\{sites\} < \$rateMergeMinSites.*?rate_merged_partitions\.tsv/s,
-	'rate merging is targeted by effective sites, refines P90 and GC splits, collapses undersized bins, and audits assignments');
-like($source,
-	qr/my \@rescueLoci = grep.*?eq 'taxon_rescue'.*?my \@binningLoci = grep.*?ne 'taxon_rescue'.*?for my \$locus \(\@rescueLoci\).*?\$locus->\{initial_bin\} = 'taxon_rescue_to_'/s,
-	'taxon-rescue loci join their nearest robust rate/GC bin instead of defining sparse partitions');
-like($source,
-	qr/print O "\$TypeTag, \$partition->\{name\} = ".join\(", ", \@ranges\)/,
-	'grouped partitions use IQ-TREE-compatible comma-separated non-contiguous ranges');
-like($source,
-	qr/"iqMemMB=i" => \\\$iqMemMB.*?"iqPathogen=i" => \\\$iqPathogen.*?"iqLegacy=i" => sub \{.*?\$iqLegacyExplicit = 1.*?if \(\$strainWithinPreset\) \{.*?\$iqLegacy = 1 unless \$iqLegacyExplicit \|\| \$iqPathogen/s,
-	'buildTree exposes memory-capped pathogen mode and defaults strain presets to legacy IQ-TREE');
-like($source, qr/-iqPathogen and -iqLegacy are mutually exclusive/,
-	'buildTree rejects conflicting modern and legacy IQ-TREE modes');
-like($source,
-	qr/iqMemMB => \$iqMemMB.*?iqPathogen => \$iqPathogen.*?iqLegacy => \$iqLegacy/s,
-	'buildTree forwards IQ-TREE execution controls to phyloTools');
-like($source,
-	qr/BuildTree pipeline v\$version.*?Inputs:.*?Paths:.*?Mode:.*?Alignment:.*?Filtering:.*?Trees:.*?Additional analyses:/s,
-	'buildTree starts with a structured runtime configuration header');
-like($source, qr/sub limitedWarn.*?No more '\$category' warning examples/s,
-	'buildTree caps repetitive warning examples');
-like($source, qr/END \{.*?Suppressed \$suppressed additional/s,
-	'buildTree reports suppressed warning totals');
-like($source, qr/Per-locus alignment summary:.*?Synonymous-site classification summary:/s,
-	'buildTree reports aggregate alignment and site-classification progress');
-like($source, qr/Alignment merge summary:.*?Overlap filtering summary:/s,
-	'buildTree consolidates sequence and overlap filtering diagnostics');
-unlike($source, qr/print \$cmd\."\\n"|print \$cmd\."\\n\\n"/,
-	'buildTree does not echo routine execution commands');
-like($source, qr/-outD is required/, 'an output directory is explicitly required');
-like($source, qr/Refusing to use filesystem root/, 'filesystem roots are rejected as output directories');
-like($source, qr/buildTree5_\$\{tmpTag\}_\$\$/, 'work is isolated in a process-owned temporary directory');
-like($source,
-	qr/prepareTemporaryBase\(\$tmpBase\).*?Requested temporary path is unusable:.*?falling back to \$fallbackTmpBase.*?prepareTemporaryBase\(\$tmpBase\)/s,
-	'an unusable requested temporary path falls back to output-local workspace');
-like($source,
-	qr/sub prepareTemporaryBase .*?tempfile\(.*?DIR => \$path.*?print \{\$probeHandle\}.*?unlink \$probePath/s,
-	'a temporary base must pass a create, write, close, and cleanup probe');
-like($source,
-	qr/my \$primaryAlignmentReady = fileGZe\(\$multAli\).*?my \$siteAlignmentsReady =.*?my \$reusableAlignment = \$isAligned.*?if \(\$continue\).*?\$treesDone.*?\$reusableAlignment.*?no reusable alignment or complete tree checkpoint.*?safeRemoveTree\(\$MsaD.*?safeRemoveTree\(\$treeD.*?my \$calcMSA = !\$treesDone && !\$primaryAlignmentReady.*?\$doMSA = !\(/s,
-	'continue mode derives reporting and MSA recovery from one validated alignment state');
-like($source, qr/safeRemoveTree\(\$tmpD, \$tmpBase\)/, 'cleanup is limited to the owned temporary directory');
-
-unlike($source, qr/touch \$IQtreef/, 'an empty IQ-TREE checkpoint is not manufactured');
-unlike($source, qr/\$calcSyn\s*=\s*0\s*;\s*\$calcNonSyn\s*=\s*0\s*;\s*\n\s*if \(\$cogCats/, 
-	'synonymous and nonsynonymous tree options are retained');
-like($source, qr/my \$lengthInNt = .*\? \$totalNTs\{\$sp\} : \$totalNTs\{\$sp\} \* 3;/,
-	'NTfiltCount compares a nucleotide-equivalent length');
-like($source, qr/systemW\(\$cmd1\."\\n"\.\$cmd2\."\\n"\)/,
-	'alignment and post-filter commands use checked execution');
-like($source, qr/MSA command completed without producing/, 'alignment output is verified');
-like($source, qr/runMSAFix\(\$tmpOutMSA, \$maxGapPerCol\)/,
-	'per-locus nucleotide alignments use the guarded MSAfix path');
-like($source, qr/runMSAFix\(\$multAli, \$maxGapPerCol\)/,
-	'single-gene nucleotide alignments use the guarded MSAfix path');
-like($source,
-	qr/sub runMSAFix.*?\$tmpOutput = "\$alignment\.MSAfix\.\$\$\.fna".*?"-o", shellQuote\(\$tmpOutput\).*?if \(!-s \$tmpOutput\).*?rename \$tmpOutput, \$alignment/s,
-	'MSAfix writes a nonempty sibling temporary file before atomically replacing its input');
-like($source, qr/if \(!\$ok\).*?unlink \$tmpOutput if -e \$tmpOutput.*?die \$error/s,
-	'a failed MSAfix attempt removes its partial output and preserves the original alignment');
-like($source,
-	qr/my \$ntAlignmentOK = eval \{.*?runMSAFix\(\$tmpOutMSA, \$maxGapPerCol\).*?if \(!\$ntAlignmentOK\).*?excluding locus \$gene from future calculations.*?next;/s,
-	'a failed per-locus MSAfix or nucleotide conversion warns and excludes only that locus');
-like($source,
-	qr/my \$msaCommandOK = 1;.*?eval \{.*?systemW\(\$cmd1\."\\n"\.\$cmd2\."\\n"\).*?failed locus alignment.*?next;/s,
-	'a failed per-locus aligner command does not terminate the multi-locus run');
-like($source,
-	qr/Per-locus alignment summary:.*?\$failedLoci failed and were excluded/s,
-	'failed locus exclusions are included in the alignment summary');
-like($source,
-	qr/my \$distanceOK = eval \{.*?failed optional locus distance matrix.*?retaining locus \$gene/s,
-	'an optional distance-matrix failure retains the successfully aligned locus');
-like($source,
-	qr/my \@unequal = grep.*?invalid locus MSA.*?excluding alignment \$MSAf during merge.*?next;/s,
-	'a malformed unequal-length locus alignment is skipped before concatenation');
-like($source,
-	qr/\$excludedLoci\{\$gene\} = 1.*?\$excludedLoci\{\$geneF\}.*?skipping previously excluded locus/s,
-	'a failed alignment locus is excluded from later fastGEAR processing');
-like($source,
-	qr/my \$phylipOK = eval \{.*?failed optional per-locus PHYLIP conversion.*?next;/s,
-	'an optional per-locus PHYLIP conversion failure does not abort the run');
-like($source,
-	qr/my \$subtreeOK = eval \{.*?failed locus subtree.*?next;.*?No usable locus subtrees remain/s,
-	'individual subtree failures are skipped while an impossible empty supertree remains fatal');
-like($source,
-	qr/my \$fastgearOK = eval \{.*?failed fastGEAR locus.*?next;/s,
-	'an individual fastGEAR tool failure does not abort other loci');
-
-like($source, qr/\$pigzBin -d .*\$partiF\.gz/, 'compressed partition restoration names the gzip file');
-like($source,
-	qr/if \(\$gzipInput\).*?basename\(\$inputFile\).*?sortFastaForCompression\(\$inputFile\).*?allFAAs\.faa.*?allFNAs\.fna.*?\$pigzBin -p \$ncore/s,
-	'buildTree sorts only the named plain FNA/FAA inputs immediately before compressing them');
-like($source,
-	qr/sub fastaCompressionSortKey.*?parseSeqId\(\$identifier, "compression-sort FASTA header",1\).*?join\("\\t", \$gene, \$sample, \$identifier\).*?sub sortFastaForCompression.*?tempfile\(.*?DIR => dirname\(\$inputFile\).*?rename \$tmpFile, \$inputFile/s,
-	'compression sorting orders FASTA records locus-first and replaces the input atomically');
-unlike($source, qr/\$partiF\s*=\s*""\s+unless\s*\(-e \$partiF\)/,
-	'a fresh multi-locus run does not discard its not-yet-created partition path');
-like($source, qr/my \$partition = \$treeOpts\{partition\} \/\/ "";.*?\$treeOpts\{partition\} = "" unless \$partition ne "" && -s \$partition;/s,
-	'the partition path is resolved after alignment concatenation, immediately before tree execution');
-unlike($source, qr/\$continue && -e (?:\$treeOpts\{(?:fastTrOut|VfastTrOut|RAXNGtreeout|RAXtreeout)\}|"\$IQtree\.treefile")/,
-	'resume gates do not accept empty tree outputs');
-like($source,
-	qr/sub requestedTreeMethods.*?name => "IQ-TREE".*?iqtree => 1.*?sub treeMethodState.*?iqtreeOutputComplete\(\$hr->\{\$method->\{outputKey\}\}, \$hr->\{inMSA\}, \\\$validationReason\).*?checkpointComplete => \(\$continue && \$outputComplete/s,
-	'IQ-TREE resume uses the shared successful-log and exact-taxon-parity checkpoint state');
-like($source,
-	qr/sub treePresent.*?treeMethodState\(\$_, \$hr\).*?sub treeAtHeart.*?my %treeState = map.*?treeMethodState\(\$_, \\%treeOpts\)/s,
-	'tree recovery and execution derive completion from the same method-state helper');
-like($source,
-	qr/my %BACKBONE_DEFAULT = \(.*?coverage_fraction => 0\.35/s,
-	'strict strain backbones use the relaxed severe-outlier coverage threshold');
-like($source,
-	qr/\$tOhr->\{IQtreeout\} \.= "\.backbone" if \$strictBackbone && \$doIQTree/,
-	'strict IQ-TREE inference uses a dedicated backbone output prefix');
-like($source,
-	qr/my \$dedicatedBackbone = \$primaryTree =~ s\/\\\.backbone\\\.treefile\$\/\.treefile\/.*?runEpaNgPlacement\(.*?write_epa_placed_tree\(\$epaResult->\{tree\}, \$primaryTree, \$placements\).*?\$\{\$trRetH\}\{backbone_nwk\} = \$backboneTree;.*?\$\{\$trRetH\}\{nwk\} = \$primaryTree;/s,
-	'the EPA-ng placed tree becomes the primary .treefile while the ML tree remains .backbone.treefile');
-like($source, qr/unlink \$treeOpts\{RAXtreeout\}.*?if -e \$treeOpts\{RAXtreeout\} && !-s \$treeOpts\{RAXtreeout\}/s,
-	'an empty legacy RAxML tree cannot suppress continuation recovery');
-like($source,
-	qr/filter_alignment_by_overlap\(\\%MFAA, \$isAA, \$minOverlapMSA\).*?push\(\@lengthsParts,\$len\)/s,
-	'minimum taxon overlap is applied per locus before partition lengths are recorded');
-like($source, qr/for my \$disM \(\@subfls\)/, 'all discovered distance matrices are merged');
-like($source, qr/\$ffd\{\$k\} = 4/, 'fourfold degeneracy is classified by codon family');
-
-for my $config_key (qw(
-	gubbins clonalframeml fastgear fastgearSummary fastgearReorder
-	fastgearMatlab fastgearParam
-)) {
-	like($source, qr/requireConfiguredTool\("\Q$config_key\E"/,
-		"$config_key documents config-backed dormant-tool reactivation");
+my ($epa_resource_helper) = $script_text =~
+	/(sub epaResourcePlan \{.*?return \(\$threads, \$memoryMB\);\n\})/s;
+my ($iqtree_explicit_helper, $iqtree_model_helper, $iqtree_partition_helper) = $script_text =~
+	/(sub iqtreeExplicitEpaModel \{.*?\n\})\n\n(sub iqtreePlacementModel \{.*?\n\})\n\n(sub iqtreeGtrPartitionCount \{.*?\n\})\n\nsub epaModelArtifact/s;
+BAIL_OUT('Cannot extract EPA-ng helper functions')
+	unless defined($epa_resource_helper) && defined($iqtree_explicit_helper)
+		&& defined($iqtree_model_helper) && defined($iqtree_partition_helper);
+my $epa_helpers = "$epa_resource_helper\n$iqtree_explicit_helper\n$iqtree_model_helper\n$iqtree_partition_helper";
+my $helpers_loaded = eval "package TestBuildTreeEpaHelpers; $epa_helpers; 1;";
+ok($helpers_loaded, 'EPA-ng model and resource helpers load independently')
+	or diag($@);
+my ($classification_helper) = $script_text =~
+	/(sub readStrictBackboneClassification \{.*?\n\})\n\nsub runEpaOnlyPlacement/s;
+BAIL_OUT('Cannot extract strict-backbone classification reader')
+	unless defined $classification_helper;
+my $classification_helper_loaded = eval
+	"package TestBuildTreeEpaClassification; $classification_helper; 1;";
+ok($classification_helper_loaded,
+	'EPA-only strict-backbone classification reader loads independently')
+	or diag($@);
+my ($msa_lifecycle_helpers) = $script_text =~
+	/(sub copyStreamToPathAtomically \{.*?\n\})\n\nsub requireConfiguredTool/s;
+BAIL_OUT('Cannot extract MSA finalization helpers')
+	unless defined($msa_lifecycle_helpers);
+my $msa_helpers = <<'PERL';
+package TestBuildTreeMSAFinalizer;
+use Cwd qw(abs_path);
+use File::Basename qw(dirname);
+use File::Copy qw(copy);
+use File::Path qw(make_path remove_tree);
+use File::Spec;
+our ($pigzBin, $ncore, $removeMSA, $partiExt);
+sub retry_unlink {
+	my ($path, %options) = @_;
+	return 1 unless -e $path || -l $path;
+	unlink $path or die "Cannot unlink $path: $!\n";
+	return 1;
 }
+sub retry_operation {
+	my (%options) = @_;
+	return $options{code}->();
+}
+sub retry_rename {
+	my ($from, $to, %options) = @_;
+	rename $from, $to or die "Cannot rename $from to $to: $!\n";
+	return 1;
+}
+sub retry_open {
+	my ($mode, $path, %options) = @_;
+	open my $handle, $mode, $path or die "Cannot open $path: $!\n";
+	return $handle;
+}
+sub retry_close {
+	my ($handle, $label, %options) = @_;
+	close $handle or die "Cannot $label: $!\n";
+	return 1;
+}
+sub gzipopen {
+	my ($path) = @_;
+	my $resolved = -s $path ? $path : -s "$path.gz" ? "$path.gz" : '';
+	return (undef, 0, undef) unless length $resolved;
+	open my $handle, '<', $resolved or die "Cannot read $resolved: $!\n";
+	return ($handle, 1, $resolved);
+}
+sub safeRemoveTree {
+	my ($path, $parent) = @_;
+	remove_tree($path);
+	return 1;
+}
+PERL
+$msa_helpers .= "$msa_lifecycle_helpers\n1;";
+my $msa_helpers_loaded = eval $msa_helpers;
+ok($msa_helpers_loaded, 'MSA finalization helpers load independently')
+	or diag($@);
+my ($staged_category_helper, $staged_qc_helper) = $script_text =~
+	/(sub finalizeStagedStrainCategory \{.*?
+})
 
-done_testing();
+(sub finalizeStagedSampleQC \{.*?
+})
+
+sub stagedOverlayRecordsPresent/s;
+BAIL_OUT('Cannot extract staged strain finalization helpers')
+	unless defined($staged_category_helper) && defined($staged_qc_helper);
+my $staged_helpers = <<'PERL';
+package TestBuildTreeStagedInputs;
+use Mods::GenoMetaAss qw(fileGZs gzipopen);
+use Mods::StrainPlacement qw(canonical_sample_qc_status);
+sub retry_rename {
+	my ($from, $to, %options) = @_;
+	rename $from, $to or die "Cannot rename $from to $to: $!\n";
+	return 1;
+}
+PERL
+$staged_helpers .= "$staged_category_helper\n$staged_qc_helper\n1;";
+my $staged_helpers_loaded = eval $staged_helpers;
+ok($staged_helpers_loaded, 'staged strain category/QC finalizers load independently')
+	or diag($@);
+my ($staged_files_helper) = $script_text =~
+	/(sub stagedTreeInputFiles \{.*?
+})
+
+sub publishStagedTreeInputs/s;
+BAIL_OUT('Cannot extract staged tree-file listing helper') unless defined $staged_files_helper;
+my $staged_files_helper_loaded = eval
+	"package TestBuildTreeStagedFiles; $staged_files_helper; 1;";
+ok($staged_files_helper_loaded, 'staged tree-file listing helper loads independently')
+	or diag($@);
+
+my $temporary = tempdir(CLEANUP => 1);
+my $iqtree_prefix = File::Spec->catfile($temporary, 'IQtree_allsites.backbone');
+sub write_test_file {
+	my ($path, $contents) = @_;
+	open my $handle, '>', $path or die "Cannot write $path: $!";
+	print {$handle} $contents;
+	close $handle or die "Cannot close $path: $!";
+}
+my $fake_pigz = File::Spec->catfile($temporary, 'pigz');
+write_test_file($fake_pigz, <<'PIGZ');
+#!/bin/sh
+input=''
+for argument in "$@"; do
+	input="$argument"
+done
+cat "$input"
+PIGZ
+chmod 0755, $fake_pigz or die "Cannot mark $fake_pigz executable: $!";
+my $msa_directory = File::Spec->catdir($temporary, 'MSA');
+my $msa_cleaned = File::Spec->catdir($msa_directory, 'clnd');
+my $msa_work_directory = File::Spec->catdir($temporary, 'MSA-work');
+mkdir $msa_directory or die "Cannot create $msa_directory: $!";
+mkdir $msa_cleaned or die "Cannot create $msa_cleaned: $!";
+mkdir $msa_work_directory or die "Cannot create $msa_work_directory: $!";
+write_test_file(File::Spec->catfile($msa_directory, 'COG0001.0.fna'), "gene locus\n");
+write_test_file(File::Spec->catfile($msa_directory, 'COG0001.0.faa.gz'), "gene locus\n");
+write_test_file(File::Spec->catfile($msa_cleaned, 'COG0001.fna'), "cleaned locus\n");
+my $placement_work = File::Spec->catfile($msa_work_directory, 'MSAli.placement.fna');
+write_test_file($placement_work, "placement source\n");
+my $placement_link = File::Spec->catfile($msa_directory, 'MSAli.placement.fna');
+my $retained_alignment = File::Spec->catfile($msa_directory, 'MSAli.fna');
+my $retained_work = File::Spec->catfile($msa_work_directory, 'MSAli.fna');
+write_test_file($retained_work, "concatenated alignment\n");
+write_test_file("$retained_work.nxs", "NEXUS alignment\n");
+write_test_file("$retained_work.partition.RAXML", "DNA, part1 = 1-10\n");
+my $already_compressed = File::Spec->catfile($msa_directory, 'MSAli.syn.fna.gz');
+write_test_file($already_compressed, "retained compressed alignment\n");
+{
+	no warnings 'once';
+	$TestBuildTreeMSAFinalizer::pigzBin = $fake_pigz;
+	$TestBuildTreeMSAFinalizer::ncore = 1;
+	$TestBuildTreeMSAFinalizer::removeMSA = 1;
+	$TestBuildTreeMSAFinalizer::partiExt = '.partition.RAXML';
+}
+is(TestBuildTreeMSAFinalizer::finalizeMSAArtifacts(
+	$msa_directory, $msa_work_directory), 2,
+	'finalization publishes both scratch MSAli alignments as compressed checkpoints');
+ok(!-e File::Spec->catfile($msa_directory, 'COG0001.0.fna')
+		&& !-e File::Spec->catfile($msa_directory, 'COG0001.0.faa.gz'),
+	'finalization removes root-level single-locus nucleotide and amino-acid alignments');
+ok(!-d $msa_cleaned, 'finalization removes legacy persistent cleaned-locus artifacts');
+ok(!-e $retained_alignment && -s "$retained_alignment.gz"
+		&& !-e $placement_link && -s "$placement_link.gz"
+		&& -s $already_compressed,
+	'finalization leaves only durable compressed MSAli FASTA artifacts in persistent storage');
+ok(-s "$retained_alignment.nxs.gz"
+		&& !-e "$retained_alignment.partition.RAXML"
+		&& -s "$retained_alignment.partition.RAXML.gz",
+	'NEXUS data and the partition checkpoint are stored only in compressed form');
+ok(-s $retained_work && -s $placement_work,
+	'publishing and finalizing do not consume the active scratch alignments');
+my $restored_directory = File::Spec->catdir($temporary, 'MSA-restored');
+mkdir $restored_directory or die "Cannot create $restored_directory: $!";
+my $restored_alignment = File::Spec->catfile($restored_directory, 'MSAli.fna');
+is(TestBuildTreeMSAFinalizer::restoreCompressedMSAArtifact(
+	$retained_alignment, $restored_alignment), $restored_alignment,
+	'continuation restores the retained concatenated alignment into fresh scratch');
+ok(-s $restored_alignment && -s "$retained_alignment.gz"
+		&& !-e $retained_alignment && !-l $retained_alignment,
+	'restoration preserves the gzip checkpoint without exposing a persistent plain path');
+
+my $retained_locus_directory = File::Spec->catdir($temporary, 'MSA-retained-loci');
+mkdir $retained_locus_directory or die "Cannot create $retained_locus_directory: $!";
+my $retained_locus = File::Spec->catfile($retained_locus_directory, 'COG0002.0.fna');
+my $discarded_protein = File::Spec->catfile($retained_locus_directory, 'COG0002.0.faa');
+my $retained_locus_alignment = File::Spec->catfile($retained_locus_directory, 'MSAli.fna');
+write_test_file($retained_locus, "nucleotide locus\n");
+write_test_file($discarded_protein, "protein locus\n");
+write_test_file($retained_locus_alignment, "concatenated alignment\n");
+$TestBuildTreeMSAFinalizer::removeMSA = 0;
+is(TestBuildTreeMSAFinalizer::finalizeMSAArtifacts($retained_locus_directory), 1,
+	'MSA finalization still compresses the retained concatenated alignment in retention mode');
+ok(!-e $retained_locus && -s "$retained_locus.gz" && !-e $discarded_protein,
+	'-rmMSA 0 retains nucleotide sub-alignments as gzip checkpoints for later '
+		.'population-genetics work while removing unneeded protein alignments');
+my $publication_staging = File::Spec->catdir($temporary, 'publication-resume');
+
+mkdir $publication_staging or die "Cannot create $publication_staging: $!";
+write_test_file(File::Spec->catfile($publication_staging, '.strain_tree_input.plan.tsv'),
+	"strain-staged-input-v1\noutgroup\tMGS.2643\n");
+write_test_file(File::Spec->catfile($publication_staging, 'data.log'), "OG:MGS.2643\n");
+write_test_file(File::Spec->catfile($publication_staging, 'sampleQC.tsv'), "MGS\tsample\n");
+write_test_file(File::Spec->catfile($publication_staging, 'sampleQC.tsv.tmp'), "incomplete\n");
+write_test_file(File::Spec->catfile($publication_staging, 'allFNAs.fna.rewrite.123'), "partial\n");
+write_test_file(File::Spec->catfile($publication_staging, 'allFAAs.faa.sort.124'), "partial\n");
+write_test_file(File::Spec->catfile($publication_staging, 'allGeneCats.cat.write.125'), "partial\n");
+write_test_file(File::Spec->catfile($publication_staging, 'allFNAs.fna.0'), "worker shard\n");
+write_test_file(File::Spec->catfile($publication_staging, 'all.cat.tmp.0'), "worker shard\n");
+is_deeply(
+	[map { (File::Spec->splitpath($_))[2] }
+		TestBuildTreeStagedFiles::stagedTreeInputFiles($publication_staging)],
+	['data.log', 'sampleQC.tsv'],
+	'publication resume detects auxiliary staged files while ignoring unfinished sidecars and worker shards');
+my $staged_directory = File::Spec->catdir($temporary, 'staged-strain-inputs');
+mkdir $staged_directory or die "Cannot create $staged_directory: $!";
+my $raw_category = File::Spec->catfile($staged_directory, 'all.cat.tmp');
+my $overlay_category = File::Spec->catfile($staged_directory, '.strain_tree_input.outgroup.cat.tsv');
+my $final_category = File::Spec->catfile($staged_directory, 'all.cat');
+write_test_file($raw_category,
+	"MGS.2\tMGS.2|COG2|gene2\tsampleB\tsampleB|COG2|gene2\n"
+	. "MGS.2\tMGS.2|COG1|gene1\tsampleC\tsampleC|COG1|gene1\n"
+	. "MGS.2\tMGS.2|COG1|gene1\tsampleA\tsampleA|COG1|gene1\n");
+write_test_file($overlay_category,
+	"MGS.2|COG1|gene1\tMGS.2643\tMGS.2643|COG1|gene1\n");
+is_deeply(
+	[TestBuildTreeStagedInputs::finalizeStagedStrainCategory(
+		$raw_category, $overlay_category, $final_category, 'MGS.2')],
+	[2, 4],
+	'tree-side category finalization groups raw Stage-I rows and applies the compact outgroup overlay');
+open my $final_category_fh, '<', $final_category or die "Cannot read $final_category: $!";
+my $final_category_text = do { local $/; <$final_category_fh> };
+close $final_category_fh;
+is($final_category_text,
+	"MGS.2643|COG1|gene1\tsampleA|COG1|gene1\tsampleC|COG1|gene1\n"
+	. "sampleB|COG2|gene2\n",
+	'tree-side category finalization writes the deterministic locus/sample format consumed by buildTree5');
+my $mixed_category = File::Spec->catfile($staged_directory, 'mixed.cat.tmp');
+write_test_file($mixed_category,
+	"MGS.2\tMGS.2|COG1|gene1\tsampleA\tsampleA|COG1|gene1\n"
+	. "MGS.3\tMGS.3|COG1|gene1\tsampleB\tsampleB|COG1|gene1\n");
+my $mixed_category_ok = eval {
+	TestBuildTreeStagedInputs::finalizeStagedStrainCategory(
+		$mixed_category, $overlay_category, $final_category, 'MGS.2');
+	1;
+};
+ok(!$mixed_category_ok, 'tree-side category finalization rejects mixed-MGS staged input');
+like($@, qr/mixes MGS MGS\.2 and MGS\.3/,
+	'mixed-MGS category failure identifies both conflicting MGS values');
+my $wrong_category = File::Spec->catfile($staged_directory, 'wrong.cat.tmp');
+write_test_file($wrong_category,
+	"MGS.3\tMGS.3|COG1|gene1\tsampleB\tsampleB|COG1|gene1\n");
+my $wrong_category_ok = eval {
+	TestBuildTreeStagedInputs::finalizeStagedStrainCategory(
+		$wrong_category, $overlay_category, $final_category, 'MGS.2');
+	1;
+};
+ok(!$wrong_category_ok, 'tree-side category finalization rejects an MGS that differs from the plan');
+like($@, qr/belongs to MGS\.3, expected MGS\.2/,
+	'category MGS mismatch identifies the planned and observed MGS values');
+my $raw_qc = File::Spec->catfile($staged_directory, 'sampleQC.tsv.tmp');
+my $final_qc = File::Spec->catfile($staged_directory, 'sampleQC.tsv');
+write_test_file($raw_qc,
+	"MGS.2\tsampleA\tbackbone\t0.10\t0.20\t7\n"
+	. "MGS.2\tsampleA\tplacement\t0.30\t0.10\t9\n"
+	. "MGS.2\tsampleB\tbackbone\t0.01\t0.02\t8\n");
+is(TestBuildTreeStagedInputs::finalizeStagedSampleQC($raw_qc, $final_qc, 'MGS.2'), 2,
+	'tree-side QC finalization deduplicates the raw Stage-I sample rows');
+open my $final_qc_fh, '<', $final_qc or die "Cannot read $final_qc: $!";
+my $final_qc_text = do { local $/; <$final_qc_fh> };
+close $final_qc_fh;
+is($final_qc_text,
+	"MGS\tsample\tstatus\tambiguous_fraction\tcsp_fraction\tvalidated_loci\n"
+	. "MGS.2\tsampleA\tplacement\t0.30\t0.2\t9\n"
+	. "MGS.2\tsampleB\tbackbone\t0.01\t0.02\t8\n",
+	'tree-side QC finalization preserves the controller aggregation policy without catalogue data');
+my $mixed_qc = File::Spec->catfile($staged_directory, 'mixed.sampleQC.tsv.tmp');
+write_test_file($mixed_qc,
+	"MGS.2\tsampleA\tbackbone\t0.1\t0.2\t7\n"
+	. "MGS.3\tsampleB\tbackbone\t0.1\t0.2\t7\n");
+my $mixed_qc_ok = eval {
+	TestBuildTreeStagedInputs::finalizeStagedSampleQC($mixed_qc, $final_qc, 'MGS.2');
+	1;
+};
+ok(!$mixed_qc_ok, 'tree-side QC finalization rejects mixed-MGS staged input');
+like($@, qr/mixes MGS MGS\.2 and MGS\.3/,
+	'mixed-MGS QC failure identifies both conflicting MGS values');
+my $wrong_qc = File::Spec->catfile($staged_directory, 'wrong.sampleQC.tsv.tmp');
+write_test_file($wrong_qc,
+	"MGS.3\tsampleB\tbackbone\t0.1\t0.2\t7\n");
+my $wrong_qc_ok = eval {
+	TestBuildTreeStagedInputs::finalizeStagedSampleQC($wrong_qc, $final_qc, 'MGS.2');
+	1;
+};
+ok(!$wrong_qc_ok, 'tree-side QC finalization rejects an MGS that differs from the plan');
+like($@, qr/belongs to MGS\.3, expected MGS\.2/,
+	'QC MGS mismatch identifies the planned and observed MGS values');
+write_test_file("$iqtree_prefix.iqtree", <<'IQTREE');
+Best-fit model according to BIC: GTR+F+G2
+Rate parameter R:
+  A-C: 0.9
+  A-G: 3.1
+  A-T: 1.2
+  C-G: 0.8
+  C-T: 4.2
+  G-T: 1.0
+State frequencies: (empirical counts from alignment)
+  pi(A) = 0.29
+  pi(C) = 0.21
+  pi(G) = 0.23
+  pi(T) = 0.27
+Gamma shape alpha: 0.73
+IQTREE
+is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix),
+	'GTR{0.9/3.1/1.2/0.8/4.2/1}+FU{0.29/0.21/0.23/0.27}+G2{0.73}',
+	'IQ-TREE fitted GTR rates, base frequencies, and gamma shape are passed explicitly');
+
+my $invariantReport = <<'IQTREE';
+Rate parameter R:
+A-C: 1
+A-G: 2
+A-T: 3
+C-G: 4
+C-T: 5
+G-T: 1
+pi(A) = 0.1
+pi(C) = 0.2
+pi(G) = 0.3
+pi(T) = 0.4
+Proportion of invariable sites: 0.15
+Gamma shape alpha: 0.6
+IQTREE
+is(TestBuildTreeEpaHelpers::iqtreeExplicitEpaModel(
+	'GTR+F+I+G4', $invariantReport),
+	'GTR{1/2/3/4/5/1}+FU{0.1/0.2/0.3/0.4}+I{0.15}+G4{0.6}',
+	'invariant-site proportion and gamma categories are retained in the explicit descriptor');
+
+write_test_file("$iqtree_prefix.iqtree",
+	"Model of substitution: GTR+F+G2\n");
+write_test_file("$iqtree_prefix.log", <<'IQTREE_LOG');
+Rate parameter R:
+A-C: 0.7
+A-G: 2.8
+A-T: 1.1
+C-G: 0.6
+C-T: 3.9
+G-T: 1
+pi(A) = 0.22
+pi(C) = 0.28
+pi(G) = 0.31
+pi(T) = 0.19
+Gamma shape alpha: 0.44
+IQTREE_LOG
+is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix),
+	'GTR{0.7/2.8/1.1/0.6/3.9/1}+FU{0.22/0.28/0.31/0.19}+G2{0.44}',
+	'IQ-TREE model labels and fitted parameters can be combined across report artifacts');
+
+my $compactReport = <<'IQTREE_COMPACT';
+Substitution rates (ML): 1 2 3 4 5 1
+Base frequencies (empirical): 0.1 0.2 0.3 0.4
+Gamma shape alpha: 0.5
+IQTREE_COMPACT
+is(TestBuildTreeEpaHelpers::iqtreeExplicitEpaModel(
+	'GTR+F+G2', $compactReport),
+	'GTR{1/2/3/4/5/1}+FU{0.1/0.2/0.3/0.4}+G2{0.5}',
+	'compact IQ-TREE rate and frequency vectors are parsed in documented state order');
+my $iqtree3SinglePartition = <<'IQTREE3';
+SUBSTITUTION PROCESS
+--------------------
+  ID  Model           Speed  Parameters
+   1  GTR+F+G2       1.0000  GTR{1.65448,9.12038,1.58968,0.848991,17.5795}+F{0.259129,0.215778,0.267947,0.257146}+G2{0.0201622}
+IQTREE3
+write_test_file("$iqtree_prefix.iqtree", $iqtree3SinglePartition);
+write_test_file("$iqtree_prefix.log", '');
+is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix),
+	'GTR{1.65448/9.12038/1.58968/0.848991/17.5795/1}+FU{0.259129/0.215778/0.267947/0.257146}+G2{0.0201622}',
+	'IQ-TREE 3 compact single-partition GTR table is converted to an EPA-ng descriptor');
+is(TestBuildTreeEpaHelpers::iqtreeGtrPartitionCount($iqtree_prefix), 1,
+	'IQ-TREE 3 compact single-partition report is identified as one fitted GTR model');
+
+my @iqtree3PartitionRows = map {
+	sprintf(' %2d  GTR+F+G2       1.0000  GTR{1.65448,9.12038,1.58968,0.848991,17.5795}+F{0.259129,0.215778,0.267947,0.257146}+G2{0.0201622}', $_)
+} 1 .. 8;
+write_test_file("$iqtree_prefix.iqtree", join("\n",
+	'SUBSTITUTION PROCESS',
+	'  ID  Model           Speed  Parameters',
+	@iqtree3PartitionRows,
+	'',
+));
+write_test_file("$iqtree_prefix.log",
+	'Command: iqtree3 -s alignment.fna -m GTR+F+G2 -T 12');
+my $partitioned_model_warning = '';
+{
+	local $SIG{__WARN__} = sub { $partitioned_model_warning .= $_[0] };
+	is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix), 'GTR+F+G2',
+		'partitioned IQ-TREE 3 report retains the generic EPA-ng model rather than one parameter row');
+}
+like($partitioned_model_warning,
+	qr/reported 8 fitted GTR parameter sets for separate partitions/,
+	'partitioned IQ-TREE 3 fallback reports the actual number of fitted model rows');
+is(TestBuildTreeEpaHelpers::iqtreeGtrPartitionCount($iqtree_prefix), 8,
+	'IQ-TREE 3 compact partitioned report is identified for an unpartitioned EPA-ng refit');
+like($partitioned_model_warning, qr/will not silently use one partition's rates/,
+	'partitioned IQ-TREE 3 fallback makes the EPA-ng single-model limitation explicit');
+
+write_test_file("$iqtree_prefix.iqtree",
+	"Model of substitution: GTR+F+G2\n");
+write_test_file("$iqtree_prefix.log", "IQ-TREE log without fitted parameters\n");
+my $incomplete_model_warning = '';
+{
+	local $SIG{__WARN__} = sub { $incomplete_model_warning .= $_[0] };
+	is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix),
+		'GTR+F+G2',
+		'an incomplete fitted GTR report falls back to the generic descriptor');
+}
+like($incomplete_model_warning,
+	qr/using the generic symbolic descriptor instead\. EPA-ng does not refit missing parameters/,
+	'GTR parsing failure is reported as a visible warning');
+
+write_test_file("$iqtree_prefix.iqtree", "IQ-TREE report without a model label\n");
+write_test_file("$iqtree_prefix.log",
+	"Command: iqtree3 -s alignment.fna -m HKY+F+G4 -T 12\n");
+my $generic_model_warning = '';
+{
+	local $SIG{__WARN__} = sub { $generic_model_warning .= $_[0] };
+	is(TestBuildTreeEpaHelpers::iqtreePlacementModel($iqtree_prefix), 'HKY+F+G4',
+		'IQ-TREE command-line model is the final parser fallback');
+}
+like($generic_model_warning, qr/could not serialize fitted IQ-TREE parameters/,
+	'non-GTR generic model fallback is also reported as a warning');
+is_deeply(
+	[TestBuildTreeEpaHelpers::epaResourcePlan(12, 12, -1, 4500)],
+	[2, 2700],
+	'EPA threads are capped to one per GB of the derived planning budget');
+is_deeply(
+	[TestBuildTreeEpaHelpers::epaResourcePlan(4, 12, 0, 4500)],
+	[4, 0],
+	'zero planning memory keeps the requested core-capped thread count');
+
+my $classification = File::Spec->catfile($temporary, 'strict_backbone.samples.tsv');
+write_test_file($classification, join("\n",
+	join("\t", qw(sample tree_role reason informative_positions q90_informative
+		backbone_overlap_nt backbone_overlap_loci backbone_state_divergence)),
+	join("\t", qw(backbone1 backbone validated 1000 900 1000 8 0)),
+	join("\t", qw(query1 placement sparse 450 900 425 4 0.03)),
+	join("\t", qw(outlier1 excluded divergent 200 900 100 1 0.8)),
+)."\n");
+my $classification_state =
+	TestBuildTreeEpaClassification::readStrictBackboneClassification($classification);
+is_deeply($classification_state->{placement}, ['query1'],
+	'EPA-only recovery reuses exactly the samples classified for placement');
+is($classification_state->{backbone_overlap}{query1}{backbone_overlap_nt}, 425,
+	'EPA-only placement reporting retains the original backbone-overlap metric');
+
+my $redo_output = File::Spec->catdir($temporary, 'redo_output');
+my $redo_phylo = File::Spec->catdir($redo_output, 'phylo');
+my $redo_epa = File::Spec->catdir($redo_phylo, 'epa-ng');
+mkdir $redo_output or die "Cannot create $redo_output: $!";
+mkdir $redo_phylo or die "Cannot create $redo_phylo: $!";
+mkdir $redo_epa or die "Cannot create $redo_epa: $!";
+write_test_file(
+	File::Spec->catfile($redo_phylo, 'IQtree_allsites.backbone.treefile'),
+	"(A:0.1,B:0.1,C:0.1);\n",
+);
+write_test_file(
+	File::Spec->catfile($redo_phylo, 'strict_backbone.samples.tsv'),
+	join("\n",
+		join("\t", qw(sample tree_role reason informative_positions
+			q90_informative backbone_overlap_nt backbone_overlap_loci
+			backbone_state_divergence)),
+		(map { join("\t", $_, 'backbone', 'validated', 1000, 900, 1000, 8, 0) }
+			qw(A B C)),
+		join("\t", qw(query1 placement sparse 450 900 425 4 0.03)),
+	)."\n",
+);
+write_test_file(
+	File::Spec->catfile($redo_epa, 'epa_result.jplace'),
+	'{"tree":"(A:0.1{0},B:0.1{1},C:0.1{2});",'
+	.'"placements":[{"p":[[0,-10,1,0.05,0.01]],"n":["query1"]}],'
+	.'"metadata":{},"version":3,'
+	.'"fields":["edge_num","likelihood","like_weight_ratio",'
+	.'"distal_length","pendant_length"]}',
+);
+my $redo_completion = File::Spec->catfile($redo_output, 'treeDone.sto');
+my $redo_wrapper = File::Spec->catfile($temporary, 'run-redo-buildtree.pl');
+write_test_file($redo_wrapper, <<'PERL');
+use strict;
+use warnings;
+use Mods::IO_Tamoc_progs qw(setConfigFile);
+my $root = shift @ARGV;
+my $config = shift @ARGV;
+my $script = shift @ARGV;
+$ENV{MF4_TEST_ROOT} = $root;
+setConfigFile($config);
+my $result = do $script;
+die $@ if $@;
+die "Cannot execute $script: $!\n" unless defined $result;
+PERL
+is(system(
+	$^X, "-I$root", $redo_wrapper, $root,
+	File::Spec->catfile($Bin, 'MATAFILERcfg.txt'), $script,
+	'-fna', File::Spec->catfile($redo_output, 'deliberately_missing.fna'),
+	'-aa', File::Spec->catfile($redo_output, 'deliberately_missing.faa'),
+	'-cats', File::Spec->catfile($redo_output, 'deliberately_missing.cat'),
+	'-outD', $redo_output, '-runIQtree', 1, '-cores', 1,
+	'-withinSpecies', 1, '-strictBackbone', 1,
+	'-rateMergePartitions', 0, '-continue', 1, '-redoEPAfilter', 1,
+	'-completionMarker', $redo_completion,
+), 0, 'forced EPA filtering succeeds without opening missing sequence inputs');
+my $redo_primary =
+	File::Spec->catfile($redo_phylo, 'IQtree_allsites.treefile');
+ok(-s $redo_primary && -s $redo_completion,
+	'forced EPA filtering republishes the primary tree and completion marker');
+open my $redo_tree_handle, '<', $redo_primary
+	or die "Cannot read $redo_primary: $!";
+my $redo_tree_text = do { local $/; <$redo_tree_handle> };
+close $redo_tree_handle or die "Cannot close $redo_primary: $!";
+like($redo_tree_text, qr/query1/,
+	'forced EPA filtering grafts the retained query before exiting');
+
+my ($coverage_eligibility_helper) = $script_text =~
+	/(sub classifyTaxonAwareCoverageEligibility \{.*?\n\})\n\nsub taxonAwareLocusQualityScore/s;
+BAIL_OUT('Cannot extract taxon-aware coverage eligibility helper')
+	unless defined $coverage_eligibility_helper;
+my $coverage_helpers = <<'PERL';
+package TestBuildTreeCoverageEligibility;
+use Mods::GenoMetaAss qw(quantile);
+PERL
+$coverage_helpers .= "$coverage_eligibility_helper\n1;";
+my $coverage_helpers_loaded = eval $coverage_helpers;
+ok($coverage_helpers_loaded,
+	'taxon-aware coverage eligibility helper loads independently')
+	or diag($@);
+my $outgroup_neutral_coverage =
+	TestBuildTreeCoverageEligibility::classifyTaxonAwareCoverageEligibility(
+		sample_metrics => {
+			out => { selected_loci => 80, selected_nt => 80_000,
+				role => 'backbone_candidate' },
+			A => { selected_loci => 8, selected_nt => 5_000,
+				role => 'backbone_candidate' },
+			B => { selected_loci => 8, selected_nt => 5_000,
+				role => 'backbone_candidate' },
+			C => { selected_loci => 8, selected_nt => 5_000,
+				role => 'backbone_candidate' },
+		},
+		gene_fraction => 0.2, nt_fraction => 0.1, minimum_nt => 0,
+		minimum_overlap => 0, minimum_loci_floor => 1,
+		role => 'backbone', outgroup => 'out',
+	);
+is($outgroup_neutral_coverage->{minimum_loci}, 2,
+	'an unusually complete outgroup does not inflate the ingroup locus Q90 gate');
+is($outgroup_neutral_coverage->{minimum_nt}, 500,
+	'an unusually complete outgroup does not inflate the ingroup NT Q90 gate');
+ok($outgroup_neutral_coverage->{samples}{A}{eligible},
+	'an ordinary ingroup remains eligible under the ingroup-derived baseline');
+
+my ($quality_score_helper) = $script_text =~
+	/(sub taxonAwareLocusQualityScore \{.*?\n\})\n\nsub selectTaxonAwareFinalLoci/s;
+BAIL_OUT('Cannot extract taxon-aware locus quality score helper')
+	unless defined $quality_score_helper;
+my $quality_score_loaded = eval
+	"package TestBuildTreeLocusScore; $quality_score_helper\n1;";
+ok($quality_score_loaded, 'taxon-aware locus score helper loads independently')
+	or diag($@);
+my %stable_metric = (
+	robust_score => 0.8, occupancy => 0.8, prevalence => 0.8,
+	presort_score => 0.5, information_score => 0,
+	excess_variation_penalty => 0,
+);
+my %heterogeneous_metric = (
+	%stable_metric, information_score => 1, excess_variation_penalty => 1,
+);
+is(
+	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
+		\%stable_metric, 0, 0),
+	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
+		\%heterogeneous_metric, 0, 0),
+	'explicit scoring opt-out ignores both heterogeneity rewards and penalties',
+);
+cmp_ok(
+	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
+		\%heterogeneous_metric, 0, 1),
+	'>',
+	TestBuildTreeLocusScore::taxonAwareLocusQualityScore(
+		\%stable_metric, 0, 1),
+	'enabled scoring applies the heterogeneity-dependent terms',
+);
+
+my ($informative_length_helper) = $script_text =~
+	/(sub informativeSequenceLength \{.*?\n\})\n\nsub bestGeneSequencesBySample/s;
+my ($alignment_metric_helper) = $script_text =~
+	/(sub taxonAwareAlignmentMetrics \{.*?\n\})\n\nsub classifyTaxonAwareSamples/s;
+BAIL_OUT('Cannot extract taxon-aware alignment metric helpers')
+	unless defined($informative_length_helper) && defined($alignment_metric_helper);
+my $alignment_helpers = <<'PERL';
+package TestBuildTreeAlignmentMetrics;
+use Mods::GenoMetaAss qw(readFasta);
+sub parseSeqId {
+	my ($identifier) = @_;
+	my ($sample, $gene) = split /\|/, $identifier, 2;
+	return ($sample, $gene, '|');
+}
+PERL
+$alignment_helpers .=
+	"$informative_length_helper\n$alignment_metric_helper\n1;";
+my $alignment_helpers_loaded = eval $alignment_helpers;
+ok($alignment_helpers_loaded,
+	'taxon-aware alignment metric helpers load independently')
+	or diag($@);
+my $metric_alignment = File::Spec->catfile(
+	$temporary, 'qualification-only-metrics.fna');
+write_test_file($metric_alignment, join('',
+	">q1|g\nAAAAAA\n",
+	">q2|g\nAAAAAA\n",
+	">r1|g\nCC----\n",
+	">r2|g\nCC----\n",
+));
+my $qualified_metric =
+	TestBuildTreeAlignmentMetrics::taxonAwareAlignmentMetrics(
+		$metric_alignment, 0, 'g', {'q1|g' => 1, 'q2|g' => 1});
+is($qualified_metric->{sample_count}, 2,
+	'recovered-only calls do not contribute selector sample prevalence');
+is($qualified_metric->{called_cells}, 12,
+	'recovered-only calls do not contribute selector occupancy');
+is($qualified_metric->{variable_sites}, 0,
+	'recovered-only disagreements do not contribute variable-site scoring');
+is($qualified_metric->{parsimony_informative_sites}, 0,
+	'recovered-only disagreements do not contribute parsimony scoring');
+
+is(system($^X, q{-I}.$root, q{-c}, $script), 0, q{buildTree5.pl compiles});
+
+done_testing;

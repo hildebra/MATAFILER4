@@ -12,11 +12,25 @@ use lib File::Spec->catdir($Bin, '..');
 use lib File::Spec->catdir($Bin, 'lib');
 use MFTestConfig;
 use Mods::StrainParts qw(
-	balance_assembly_groups choose_auto_worker_count exact_worker_parts write_split_generation write_worker_completion
+	balance_assembly_groups choose_auto_worker_count choose_tree_core_count exact_worker_parts write_split_generation write_worker_completion
 	split_generation_complete clear_split_generation
 	resolve_fasta_artifact append_fasta_records_atomic
 	sort_fasta_by_locus
 );
+
+is(choose_tree_core_count(3, 45), 4,
+	'small accepted strain trees retain the historical four-core floor');
+is(choose_tree_core_count(100, 45), 10,
+	'tree cores scale with the square root of submitted samples');
+is(choose_tree_core_count(401, 45), 21,
+	'non-square sample counts round core guidance upward');
+is(choose_tree_core_count(2_500, 45), 45,
+	'sample-guided tree cores are capped by maxCores');
+is(choose_tree_core_count(100, 2), 2,
+	'a maxCores setting below the normal floor remains authoritative');
+eval { choose_tree_core_count(-1, 45) };
+like($@, qr/sample count must be a non-negative integer/,
+	'invalid submitted-sample counts fail clearly');
 
 is_deeply([choose_auto_worker_count(0, 0)], [0, 0],
 	'automatic splitting keeps an empty input in the main process');
@@ -37,16 +51,33 @@ my %unbalanced_groups = (
 );
 my ($group_worker, $worker_load) =
 	balance_assembly_groups(\%unbalanced_groups, 2);
-is_deeply($worker_load, [13, 12],
-	'sample-aware balancing includes one fixed unit per group and one per sample');
+is_deeply($worker_load, [11, 10],
+	'sample-aware balancing uses sample count as the Phase-I work unit');
 is_deeply($group_worker,
 	{ A_big => 0, B_small => 1, C_big => 1, D_small => 0 },
 	'largest assembly groups are assigned first to the currently lightest worker');
+
+my %estimated_work = (
+	A_big => 5,
+	B_small => 12,
+	C_big => 4,
+	D_small => 11,
+);
+my ($weighted_worker, $weighted_load) =
+	balance_assembly_groups(\%unbalanced_groups, 2, \%estimated_work);
+is_deeply($weighted_load, [16, 16],
+	'explicit Phase-I work estimates are balanced independently of sample count');
+is_deeply($weighted_worker,
+	{ A_big => 1, B_small => 0, C_big => 0, D_small => 1 },
+	'largest estimated workloads are assigned first to the lightest worker');
+eval { balance_assembly_groups(\%unbalanced_groups, 2, { A_big => 1 }) };
+like($@, qr/workload must be a positive number/,
+	'missing assembly-group workload estimates fail clearly');
+
 my @round_robin_load = (0, 0);
 my @sorted_groups = sort keys %unbalanced_groups;
 for my $index (0 .. $#sorted_groups) {
-	$round_robin_load[$index % 2] +=
-		1 + scalar(@{$unbalanced_groups{$sorted_groups[$index]}});
+	$round_robin_load[$index % 2] += scalar(@{$unbalanced_groups{$sorted_groups[$index]}});
 }
 cmp_ok(abs($worker_load->[0] - $worker_load->[1]), '<',
 	abs($round_robin_load[0] - $round_robin_load[1]),
@@ -127,10 +158,18 @@ is($gzip_contents, ">sample\nMPEP\n>outgroup\nMTEST\n",
 
 my $ambiguous = File::Spec->catfile($tmp, 'ambiguous.fna');
 write_file($ambiguous, ">plain\nAAAA\n");
-gzip \">gzip\nCCCC\n" => "$ambiguous.gz"
+gzip \">gzip1\nCCCC\n>gzip2\nGGGG\n" => "$ambiguous.gz"
 	or die "Cannot create ambiguous gzip fixture: $GzipError";
-eval { append_fasta_records_atomic($ambiguous, ">new\nGGGG\n") };
-like($@, qr/Ambiguous FASTA sidecars/, 'ambiguous plain/gzip sidecars fail instead of corrupting either copy');
+my $sidecar_warning = '';
+{
+	local $SIG{__WARN__} = sub { $sidecar_warning .= shift };
+	is(resolve_fasta_artifact($ambiguous), "$ambiguous.gz",
+		'ambiguous FASTA sidecars choose the candidate with the most records');
+}
+like($sidecar_warning, qr/Ambiguous FASTA sidecars.*?using .*?\.gz with the most FASTA records/s,
+	'ambiguous FASTA selection emits a recovery warning');
+is(append_fasta_records_atomic($ambiguous, ">new\nTTTT\n"), "$ambiguous.gz",
+	'ambiguous sidecars continue by appending to the fuller FASTA candidate');
 
 my $unsorted_fasta = File::Spec->catfile($tmp, 'unsorted.fna');
 write_file($unsorted_fasta,

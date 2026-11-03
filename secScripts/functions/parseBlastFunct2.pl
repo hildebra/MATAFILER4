@@ -6,7 +6,7 @@ use strict;
 use FileHandle;
 use Data::Dumper;
 
-use Mods::FuncTools qw(readGene2COG);
+use Mods::FuncTools qw(readGene2COG mergeBlastPair);
 use Mods::TamocFunc qw(sortgzblast readTabbed readTabbed2 readTabbed3 uniq);
 use Mods::GenoMetaAss qw(gzipwrite gzipopen convertNT2AA);
 use Mods::IO_Tamoc_progs qw(getProgPaths );
@@ -34,7 +34,10 @@ my $emBin = getProgPaths("emapper");
 my $blInf = "";#$ARGV[0];
 my $mode = 0;#ARGV[3]
 my $DBmode = "NOG";#$ARGV[1];
-my $quCovFrac = 0; #how much of the subject (DB) needs to be covered?
+my $queryType = "reads"; # reads, genes, or pre-merged pairs
+my $quCovFrac = 0; #fraction of the subject (DB protein) that needs to be covered (0 = no requirement)
+my $qCovFrac = 0; #fraction of the query that needs to be covered (0 = off). A hit passes if EITHER coverage requirement is met.
+                  #needs 14-column input (qlen slen); with 12-column input only subject coverage is used
 my $noHardCatCheck = 0; #select for the hit with KO assignment rather than the real best hit (w/o KO assignment)
 
 #$DBmode = uc $DBmode;
@@ -61,12 +64,14 @@ GetOptions(
 	"help|?" => \&help,
 	"i=s"      => \$blInf,
 	"DB=s"      => \$DBmode,
+	"queryType=s" => \$queryType,
 	"mode=i"      => \$mode,#0=normal, 1=normal and print per gene anno, 2=print extended per gene annotation, no summary,3=file check 4=remove outputfile
 	"eval=s"      => \$minBLE,
 	"minBitScore=f" => \$minScore,
 	"minAlignLen=i"      => \$minAlLen,
 	"minPercSbjCov=f"      => \$quCovFrac,
-	"minFractQueryCov=f"      => \$quCovFrac,
+	"minFractQueryCov=f"      => \$quCovFrac, #legacy name (MATAF4 read-based): historically applied to SUBJECT coverage, kept for identical results
+	"minPercQueryCov=f"      => \$qCovFrac,
 	"tmp=s"      => \$tmpD,
 	"DButil=s"	=> \$DButil,
 	"LF=s"	=> \$lengthF,
@@ -80,8 +85,10 @@ GetOptions(
 	"bacNOG=i" => \$useBacNOG,
 	"reportDomains=i" => \$writeFastaOut,
 	"NOGtaxChk=s" => \$checkTaxNog, 
-	"percID=i" => \$percID, #percent id similiarity, from 0 - 100
+	"percID=f" => \$percID, #percent id similiarity, from 0 - 100 (geneCat -FuncMinPerID is a float)
 ) or die("Error in command line arguments\n");
+
+die "queryType must be reads, genes, or merged\n" unless $queryType =~ /^(?:reads|genes|merged)$/;
 
 die "Database mode requires -tmp -minAlignLen -LF\n" if ( ($mode != 4 && $mode != 3) && ( $tmpD eq "" || $lengthF eq "" ) );
 #die "$writeSumTbls XX\n";
@@ -96,7 +103,7 @@ if ($lengthF ne "" ){#read the length of DB proteins
 		while (my $l = <I>){
 			chomp $l;
 			my @spl = split /\t/,$l;
-			$DBlen{$spl[0]} = int $spl[1];
+			$DBlen{$spl[0]} = $spl[1];
 		}
 		close I;
 	}
@@ -180,7 +187,7 @@ if ($mode == 3 || $mode == 4){ #scan for all reads finished
 	system "ln -s $DButil/NOG.descr $inP/NOG.descr" unless (-e "$inP/NOG.descr");
 
 
-} elsif ($DBmode eq "TCDB" || $DBmode eq "PTV"|| $DBmode eq "VDB" ){
+} elsif ($DBmode eq "TCDB" || $DBmode eq "PTV"|| $DBmode eq "VDB" || $DBmode eq "VFA" || $DBmode eq "VFB" ){
 	@kgdOpts = qw (3);
 	@kgdName = ("","","","ALL");
 	@kgdNameShrt = ("","","","ALL");
@@ -192,16 +199,18 @@ if ($mode == 3 || $mode == 4){ #scan for all reads finished
 		%TCdef = %{$hr};
 		print "transporter DB\n";
 	}
-	if ($DBmode eq "VDB"){
+	if ($DBmode eq "VDB" || $DBmode eq "VFA" || $DBmode eq "VFB"){
+		#VF.tab is written by prepVFDB.pl; per gene this reports L0 (gene_VFID) ; L1 (VF) ; L2 (VF category)
+		#via the PATRIC virulence (tabCats 8) code path: PTVgene = L0, PTVgene_def = L1, PTVcat = L2
 		$tabCats = 8;
-		print "VIRDB DB\n";
+		print "VFDB ($DBmode) DB\n";
 		my $hr = readTabbed3($VIRDBannp,4);
 		%PTVcat = %{$hr};
 		$hr = readTabbed3($VIRDBannp,1);
 		%PTVgene = %{$hr};
-		$hr = readTabbed3($VIRDBannp,2);
+		$hr = readTabbed3($VIRDBannp,3);
 		%PTVgene_def = %{$hr};
-		system "ln -s $VIRDBannp $inP/VirDB.anno" unless (-e "$inP/VirDB.anno");
+		system "ln -s $VIRDBannp $inP/$DBmode.anno" unless (-e "$inP/$DBmode.anno");
 
 	}
 	if ($DBmode eq "PTV"){
@@ -334,7 +343,9 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 	
 	my ($I,$OK) = gzipopen($blInf,"diamond output file [in]",1); 
 	my $OK2;
-	($O2,$OK2) = gzipwrite($blInf."geneAss","gene cat file [out]",1) if ($reportGeneCat);
+	#per-gene assignments are written under a temporary name and renamed once complete
+	my $geneAssTmp = $blInf."geneAss.tmp";
+	($O2,$OK2) = gzipwrite($geneAssTmp,"gene cat file [out]",1) if ($reportGeneCat);
 	if ($reportEggMapp){
 		system "mkdir -p $tmpD" unless (-d $tmpD);
 		foreach (my $j=0;$j<@kgdOpts;$j++){
@@ -356,9 +367,29 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 		while (my $line = <$I>){
 			chomp $line; 
 			my @splX = split (/\t/,$line);
-			if (@splX != 12 ){ die "something wrong with blast string!: \n$line\n@splX\n";}
-			my $query = $splX [0];
-			$query =~ s/\/[12]$// if ($query =~ m/\/[12]/);
+			my $readCount = $queryType eq 'merged' ? 2 : 1;
+			my $ranges = 0;
+			# New MATAF4 searches append provenance from the actual input library:
+			# MF4:read_count=2 (merged pair), MF4:ranges=1 (long read: assign each query range)
+			while (@splX && $splX[-1] =~ /^MF4:(\w+)=(\S+)$/) {
+				my ($tag, $value) = ($1, $2);
+				if ($tag eq 'read_count' && $value =~ /^[12]$/) { $readCount = $value; }
+				elsif ($tag eq 'ranges' && $value eq '1') { $ranges = 1; }
+				else { die "Unknown hit tag $splX[-1]: $line\n"; }
+				pop @splX;
+			}
+			die "Gene queries cannot represent merged read pairs\n" if $queryType eq 'genes' && $readCount != 1;
+			#12 columns (+ query sequence with -reportDomains), or 14 columns with qlen slen (gene catalog searches)
+			my ($qlenCol, $slenCol);
+			if (!$writeFastaOut && @splX == 14) {
+				($qlenCol, $slenCol) = splice(@splX, 12, 2);
+			} elsif (@splX != 12 + ($writeFastaOut ? 1 : 0)) {
+				die "Invalid BLAST field count: $line\n";
+			}
+			my $mate = $queryType eq 'reads' && $readCount == 1 && $splX[0] =~ /\/([12])$/ ? $1 : 0;
+			push @splX, {read_count => $readCount, mate => $mate, qlen => $qlenCol, slen => $slenCol, ranges => $ranges};
+			my $query = $splX[0];
+			$query =~ s/\/[12]$// if $mate;
 			#print $query."\n";
 #			$lcnt++;
 			
@@ -370,7 +401,7 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 				last;
 			}
 			
-			if ( $splX[0] =~ m/\/2$/){push(@wordv2, [@splX]);
+			if ($mate == 2){push(@wordv2, [@splX]);
 			} else {push(@wordv1, [@splX]);}
 
 		}
@@ -390,19 +421,29 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 
 		#die @blRes."\n";
 		#print "Read Assignments..\n";
-		for (my $i=0; $i<@aminBLE ; $i++){
-			main($whX,$aminBLE[$i],$aminPID[$i],$i,$reportEggMapp);
+		#a long read is assigned once per query range (one gene each); every other query once
+		my @assignments = (@{$whX} && $whX->[0][-1]{ranges}) ? queryRanges($whX) : ($whX);
+		for my $hitsOfAssignment (@assignments){
+			for (my $i=0; $i<@aminBLE ; $i++){
+				main($hitsOfAssignment,$aminBLE[$i],$aminPID[$i],$i,$reportEggMapp);
+			}
 		}
-		undef @wordv1;undef @wordv2; #undef @blRes; 
-		if ( $splNext[0] =~ m/\/2$/){push(@wordv2, \@splNext);
-		} else {push(@wordv1, \@splNext);}
+		undef @wordv1;undef @wordv2; #undef @blRes;
+		if (@splNext) {
+			if ($splNext[-1]{mate} == 2) { push @wordv2, \@splNext; }
+			else { push @wordv1, \@splNext; }
+		}
 
 		
 		if ($stopInMiddle==0){last;}
 		$lcnt=0;$stopInMiddle=0;
 	}
-	close $I;
-	close $O2 if ($reportGeneCat);
+	close $I or die "Corrupt or truncated input $blInf (decompression failed)\n"; #a truncated .gz must not give a complete-looking result
+
+	if ($reportGeneCat){
+		close $O2 or die "Can't close $geneAssTmp.gz\n";
+		rename("$geneAssTmp.gz", $blInf."geneAss.gz") or die "Can't rename $geneAssTmp.gz to ${blInf}geneAss.gz\n";
+	}
 	
 	if ($reportEggMapp){foreach my $kk (keys %OEM){	close $OEM{$kk}}}
 	
@@ -446,6 +487,15 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 
 #print "all done\n";
 exit(0);
+
+#free-text descriptions in per-gene files: geneCat turns tabs into ";" and runs rtk with ";" (hierarchy), "," (AND)
+#and "|" (OR) as separators, so these characters inside a description would split it into extra features/levels
+sub hieraSafe{
+	my ($s) = @_;
+	$s = "" unless (defined($s));
+	$s =~ s/[;,|]/_/g;
+	return $s;
+}
 
 sub fixCardMeta($){
 	my ($hh)=@_; my %dd = %{$hh};
@@ -687,8 +737,7 @@ sub main(){
 	@tmp = @{$blRes[0]};
 	#print "@tmp PP\n";
 	my $qold=$tmp[0];
-	die "Subject length not in length DB : $tmp[1]\n" unless (exists ($DBlen{$tmp[1]}));
-	my $SbjLen = $DBlen{$tmp[1]};
+	my $bestReadCount = 1;
 	my $COGfail=0; my $CATfail=0; my $totalCOG=0; my $CATexist=0;  my $ii=0;
 	
 	my $eggNOGmap =0;
@@ -702,7 +751,7 @@ sub main(){
 	
 	#my $arBhit = bestBlHit($whX); 
 
-	my $bestSbj="";my $bestID=0; my $bestAlLen=0;my $bestQuery = ""; my $bestIDever=0; my $bestAlLenEver = 0;
+	my $bestSbj="";my $bestID=0; my $bestAlLen=0;my $bestQuery = ""; my $bestIDever=0; my $bestAlLenEver = 0; my $bestSbjLen = 0;
 	my $COGexists=0; 
 	my $bestScore = 0; my $CBMmode = 0; my $bestE=1000; my $bestBitScpre=0;
 	my $bestQseq = "";
@@ -711,7 +760,18 @@ sub main(){
 		#print "@{$blRes[$ii]}\n";
 		my $Qseq = "";
 		my ($Query,$Subject,$id,$AlLen,$mistmatches,$gapOpe,$qstart,$qend,$sstart,$send,$eval,$bitSc) = @{$blRes[$ii]};
-		$Qseq = @{$blRes[$ii]}[-1] if ($writeFastaOut);
+		$Qseq = $blRes[$ii][12] if ($writeFastaOut);
+		#per-hit lengths: qlen/slen from 14-column input if present, else subject length from the -LF file
+		my $hitMeta = ref($blRes[$ii][-1]) eq 'HASH' ? $blRes[$ii][-1] : {};
+		my $QryLen = (defined($hitMeta->{qlen}) && $hitMeta->{qlen} =~ /^\d+$/) ? $hitMeta->{qlen} : 0;
+		my $SbjLen;
+		if (defined($hitMeta->{slen}) && $hitMeta->{slen} =~ /^\d+$/ && $hitMeta->{slen} > 0) {
+			$SbjLen = $hitMeta->{slen};
+		} else {
+			die "Missing or invalid subject length in length DB: $Subject\n"
+				unless defined($DBlen{$Subject}) && $DBlen{$Subject} =~ /^\d+$/ && $DBlen{$Subject} > 0;
+			$SbjLen = $DBlen{$Subject};
+		}
 		#print "$Subject\n";
 		#print $Query."  $bitSc\n";
 		#sort by eval #changed from bestE -> bestScore
@@ -724,7 +784,9 @@ sub main(){
 		if ( ($eval <= $minBLE && $bitSc >= $minScore)
 					&& ($AlLen >= $minAlLen)
 					&& ($id >= $minPid)
-					&& ($quCovFrac == 0 || $AlLen > $SbjLen*$quCovFrac) 
+					&& ( ($quCovFrac == 0 && $qCovFrac == 0)            #coverage: subject OR query coverage requirement met
+						|| ($quCovFrac > 0 && $AlLen > $SbjLen*$quCovFrac)
+						|| ($qCovFrac > 0 && $QryLen > 0 && $AlLen >= $QryLen*$qCovFrac) )
 					&& (!$fndCat || $noHardCatCheck || exists $c2CAT{$Subject})
 					&& ($tabCats!=5 ||  $bitSc >= ($cardFull{$Subject}->[3]*$AlLen/$SbjLen)  )  #$eval <= ($cardE{$Subject}**(1/$Card_leniet)) ) #Card
 					#&& ($tabCats!=5 || $Subject =~ m/^GI:/ )#ABRc specific
@@ -745,9 +807,11 @@ sub main(){
 					){   #convincing score
 						#print "ENTER! $id\n";
 						$fndCat =1 if (exists $c2CAT{$Subject}); 
-						$bestSbj =$Subject; 
+						$bestSbj =$Subject;
+						$bestReadCount = $blRes[$ii][-1]{read_count};
 						$bestAlLen=$AlLen;$bestE = $eval; $bestQuery = $Query;
 						$bestBitScpre=$bitSc;
+						$bestSbjLen = $SbjLen;
 						$bestID = $id;
 						$bestQseq = ">${bestQuery}__$qstart:$qend:$id\n".convertNT2AA($Qseq)."\n" if ($writeFastaOut);
 						#die "$bestQseq\n";
@@ -816,16 +880,10 @@ sub main(){
 	
 
 	##############################
-	# merged read pair? double the score!
-	my $lpCnt=0;
-	$score{"cnt"} = 0;
-	if ($bestQuery =~ m/\/[12]$/){
-		$noMerge++;
-		$score{"cnt"}=1;
-	} else {
-		$mergeDiaHit ++ ; $score{"cnt"}= 2 ;
-		#print "HIT";
-	}
+	# Multiplicity comes from the input library or from combining two mates.
+	my $lpCnt = 0;
+	$score{"cnt"} = $bestReadCount;
+	if ($bestReadCount == 2) { $mergeDiaHit++; } else { $noMerge++; }
 
 
 	
@@ -902,7 +960,7 @@ sub main(){
 
 	#all info parsed, now add up matrices
 	my $curCOG =  $curCOGs[0];
-	$score{"GLN"} = $bestAlLen / $SbjLen;# if ($normMethod eq "GLN"); #score for this hit, normed by prot length
+	$score{"GLN"} = $bestAlLen / ($bestSbjLen > 0 ? $bestSbjLen : $DBlen{$bestSbj});# if ($normMethod eq "GLN"); #score for this hit, normed by prot length
 	my $numCats = scalar @curCOGs;
 	foreach my $normMethod (@normMethods){
 		my $score2 = $score{$normMethod};
@@ -925,7 +983,7 @@ sub main(){
 			#print $O "$Query\t$Subject\t$bestID\t$bestE\t$bestAlLen\t$curCOG\t$curCat\t$curDef\n";
 			if ($lpCnt==1){
 				print $O2 "$bestQuery\t$curCOG\n" if ($reportGeneCat ==1);
-				print $O2 "$bestQuery\t$curCOG\t$curCat\t$curDef\n" if ($reportGeneCat ==2);
+				print $O2 "$bestQuery\t$curCOG\t$curCat\t".hieraSafe($curDef)."\n" if ($reportGeneCat ==2);
 			}
 		
 		} elsif ($tabCats == 2 ){ #KEGG
@@ -939,7 +997,7 @@ sub main(){
 			$COGabundance{$normMethod}{$curKgd}{$curCOG}+= $score2;
 			#print "$bestQuery\t$curCat\n";
 			if ($lpCnt==1 && $curCat ne "" ){
-				print $O2 "$bestQuery\t$curCOG\t$curDef\t$curCat\n" if ($reportGeneCat  );
+				print $O2 "$bestQuery\t$curCOG\t".hieraSafe($curDef)."\t".hieraSafe($curCat)."\n" if ($reportGeneCat  );
 			}
 		} elsif ($tabCats==5){#ABR CARD
 			$COGabundance{$normMethod}{$curKgd}{$curCOG}+= $score2;
@@ -957,7 +1015,7 @@ sub main(){
 			$CATabundance{$normMethod}{$curKgd}{$curCat}+= $score2;
 			if ($lpCnt==1){
 				print $O2 "$bestQuery\t$curCOG\n" if ($reportGeneCat ==1);
-				print $O2 "$bestQuery\t$curCOG\t$curDef\t$curCat\t$curCatDef\n" if ($reportGeneCat ==2);
+				print $O2 "$bestQuery\t$curCOG\t".hieraSafe($curDef)."\t$curCat\t".hieraSafe($curCatDef)."\n" if ($reportGeneCat ==2);
 			}
 		} elsif ($tabCats==7){#AB production PAB
 			#$COGabundance{$normMethod}{$curKgd}{$curCOG}+= $score2;
@@ -989,8 +1047,9 @@ sub main(){
 			}
 			#print "@subs\n";
 			if ($lpCnt==1){
-				print $O2 "$bestQuery\t".join(";",@curCOGs)."\n" if ($reportGeneCat == 1 );
-				print $O2 "$bestQuery\t".join(";",@curCOGs)."\t".join(",",@subs2)."\n" if ($reportGeneCat == 2 );
+				#families joined by "," (rtk AND): ";" is the hierarchy separator and pushed the 2nd family into the substrate level
+				print $O2 "$bestQuery\t".join(",",@curCOGs)."\n" if ($reportGeneCat == 1 );
+				print $O2 "$bestQuery\t".join(",",@curCOGs)."\t".join(",",uniq(@subs2))."\n" if ($reportGeneCat == 2 );
 			}
 			
 		} else { #Moh / MOH2 / CAZY / ACL
@@ -1219,70 +1278,53 @@ sub readCzySubs($){#cazy_substrate_info.txt
 	return \%ret;
 }
 
-sub combineBlasts($ $){
-	my ($wh1,$wh2) = @_;
-	return $wh1 if (@{$wh2} == 0);
-	
-	my @Pbl1 = @{$wh1}; my @Pbl2 = @{$wh2};
-	#basic dereplication procedure to only take first hit per read
-	my %bl1; my %bl2;
-	foreach my $li (@Pbl1){
-		$bl1{${$li}[1]} = $li unless (exists($bl1{${$li}[1]})); #only take first hit
-	}
-	foreach my $li (@Pbl2){
-		$bl2{${$li}[1]} = $li unless (exists($bl2{${$li}[1]})); #only take first hit
-	}
-	
-	my @ret;
-	
-	my @allKs = uniq ( keys %bl1, keys %bl2); #
-	#print "@allKs\n";
-	foreach my $k (@allKs){
-		unless (exists ($bl1{$k}) && exists ($bl2{$k}) ){
-			next;
-			if (exists ($bl1{$k})) {push (@ret,$bl1{$k});#$ret{$k} = $bl1{$k};
-			} else { push (@ret,$bl2{$k});}#$ret{$k} = $bl2{$k};}
+#hits of one long read (DIAMOND --long-reads keeps the best hits of each query range), split into
+#query ranges: a hit joins the range of a better-scoring hit if they overlap by at least half of the
+#shorter one. Returns one hit list per range, in read order; hits keep their DIAMOND order.
+sub queryRanges{
+	my ($hits) = @_;
+	my @order = sort { $hits->[$b][11] <=> $hits->[$a][11] || $a <=> $b } 0 .. $#{$hits};
+	my @ranges; #[start, end, [hit indices]]
+	for my $i (@order){
+		my ($s, $e) = sort { $a <=> $b } @{$hits->[$i]}[6, 7];
+		my $range;
+		for my $r (@ranges){
+			my $overlap = ($e < $r->[1] ? $e : $r->[1]) - ($s > $r->[0] ? $s : $r->[0]) + 1;
+			my $shorter = ($e - $s < $r->[1] - $r->[0] ? $e - $s : $r->[1] - $r->[0]) + 1;
+			if ($overlap > 0 && $overlap >= 0.5 * $shorter){ $range = $r; last; }
 		}
-#		die "$k" unless (exists $bl2{$k});
-		my @hit1 = @{$bl1{$k}};
-		my @hit2 = @{$bl2{$k}};
-		die "Unequal blast string length: \n@hit2 (".@hit2.") \n@hit1(".@hit1.")\n" if (@hit1 != @hit2);
-		#pair
-		#print "pair";
-		#$k =~ s/\/\d$/\/12/;
-		my @cur = @hit1;
-		$cur[0] =~ s/\/[12]$//;
-		
-		my @sbss1 = sort{ $a <=> $b }(($hit1[8],$hit1[9])); my @sbss2 = sort{ $a <=> $b }($hit2[8],$hit2[9]); #sort start/stop
-		#sort 
-		#print "$sbss1[0] > $sbss2[0]\n";
-		if ($sbss1[0] > $sbss2[0]){ #sort reads: read1 should start earlier in query than read2
-			#print"X $sbss1[0] > $sbss2[0]\n";
-			my @tmp = @hit1; @hit1 = @hit2; @hit2 = @tmp;
-			@tmp = @sbss1; @sbss1 = @sbss2; @sbss2 = @tmp;
-		}
-		
-		
-				#push (@ret,\@hit1); next; #DEBUG
+		if ($range){ push @{$range->[2]}, $i; }
+		else { push @ranges, [$s, $e, [$i]]; }
+	}
+	return map { [ @{$hits}[ sort { $a <=> $b } @{$_->[2]} ] ] } sort { $a->[0] <=> $b->[0] } @ranges;
+}
 
-		#query start/stop sorting..
-		my @quss1 = sort { $a <=> $b }($hit1[6],$hit1[7]);my @quss2 = sort { $a <=> $b }($hit2[6],$hit2[7]);
-		#overlap?
-		my $overlap = 0;
-		if ($sbss1[1] > $sbss2[0]){ $overlap= ( $sbss1[1] - $sbss2[0]);}# print "OVER $overlap\n";}#die "$cur[3] = $hit1[3] + $hit2[3] - ( $sbss1[1] - $sbss2[0])\n";}
-		$cur[3] = ($hit1[3] + $hit2[3]) - $overlap; #ALlength
-		if ($cur[3] <0){$cur[3]=$hit1[3];} #fatal.. recover with half useful value
-		
-		#print "$sbss1[1] > $sbss2[0] $sbss1[0]  $cur[3] $overlap\n";
-		$cur[2] = ($hit1[2] + $hit2[2] ) /2.0;#%id
-		$cur[11] = ($hit1[11] + $hit2[11]) * (1- $overlap/($hit1[3] + $hit2[3] ) );#bitscore
-		$cur[10] = ($hit1[10], $hit2[10])[$hit1[10] > $hit2[10]];  # min($hit1[10] + $hit2[10]); #eval
-		#die "@cur\n";
-		push (@ret,\@cur);
-		#print "$k \n@sbss1 @sbss2\n@hit1\n";
+sub combineBlasts($ $){
+	my ($wh1, $wh2) = @_;
+	return $wh1 unless @$wh2;
+	return $wh2 unless @$wh1;
+	my (%bl1, %bl2);
+	# Retain the first reported hit per subject, as before.
+	for my $hit (@$wh1) { $bl1{$hit->[1]} //= $hit; }
+	for my $hit (@$wh2) { $bl2{$hit->[1]} //= $hit; }
+	my @ret;
+	for my $subject (sort { $a cmp $b } uniq(keys %bl1, keys %bl2)) {
+		# A subject found by only one mate competes as a singleton candidate.
+		unless (exists($bl1{$subject}) && exists($bl2{$subject})) {
+			push @ret, $bl1{$subject} // $bl2{$subject};
+			next;
+		}
+		my $hit = mergeBlastPair($bl1{$subject}, $bl2{$subject});
+		$hit->[0] =~ s/\/[12]$//;
+		my $leftCount = ref($bl1{$subject}[-1]) eq 'HASH' ? $bl1{$subject}[-1]{read_count} : 1;
+		my $rightCount = ref($bl2{$subject}[-1]) eq 'HASH' ? $bl2{$subject}[-1]{read_count} : 1;
+		my $metadata = {read_count => $leftCount + $rightCount, mate => 0};
+		if (ref($hit->[-1]) eq 'HASH') { $hit->[-1] = $metadata; }
+		else { push @$hit, $metadata; }
+		push @ret, $hit;
 	}
-	#my @ret2 = values %ret;
-	return \@ret;
+	#best (combined) bit score first, as DIAMOND ranks single-read hits; ties stay in subject order
+	return [ sort { $b->[11] <=> $a->[11] || $a->[1] cmp $b->[1] } @ret ];
 }
 
 sub bestBlHit($){
@@ -1327,6 +1369,9 @@ sub bestBlHit($){
 sub help(){
 print "Routine to interpret diamond output files to specific datbases (CAZy, KEGG, eggNOG)\n";
 print "-i [diamond output]\n";
+print "-queryType reads|genes|merged (default reads; merged counts two reads per query)\n";
+print "Optional final input field MF4:read_count=1 or MF4:read_count=2 overrides the query multiplicity.\n";
+print "-minPercSbjCov [fraction of subject covered]; -minFractQueryCov is its legacy alias.\n";
 }
 
 

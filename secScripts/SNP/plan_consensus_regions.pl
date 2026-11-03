@@ -4,7 +4,12 @@ use warnings;
 
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
+use File::Spec;
+use FindBin qw($Bin);
 use Getopt::Long qw(GetOptions);
+
+use lib File::Spec->catdir($Bin, '..', '..');
+use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile);
 
 my %opt = (jobs => 1);
 GetOptions(
@@ -15,9 +20,13 @@ GetOptions(
 	'output-prefix=s' => \$opt{output_prefix},
 	'pigz=s'          => \$opt{pigz},
 	'samtools=s'      => \$opt{samtools},
+	'config=s'        => \$opt{config},
 ) or die "invalid region-planner arguments\n";
 
-for my $required (qw(fai mapping output_prefix samtools)) {
+setConfigFile($opt{config})
+	if defined($opt{config}) && length($opt{config});
+$opt{samtools} ||= getProgPaths('samtools');
+for my $required (qw(fai mapping output_prefix)) {
 	(my $flag = $required) =~ s/_/-/g;
 	die "--$flag is required\n" unless defined($opt{$required}) && length($opt{$required});
 }
@@ -45,8 +54,7 @@ my %depth_for;
 if (defined($opt{depth}) && length($opt{depth}) && -s $opt{depth}) {
 	my $depth_fh;
 	if ($opt{depth} =~ /\.gz$/) {
-		die "--pigz is required for compressed depth input\n"
-			unless defined($opt{pigz}) && length($opt{pigz});
+		$opt{pigz} ||= getProgPaths('pigz');
 		open $depth_fh, '-|', $opt{pigz}, '-dc', '--', $opt{depth}
 			or die "can't start $opt{pigz} for $opt{depth}: $!\n";
 	} else {

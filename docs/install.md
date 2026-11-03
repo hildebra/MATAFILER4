@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -94,15 +94,48 @@ export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 
 | Environment | Main purpose |
 |---|---|
-| `MF4` | Main MATAFILER4 environment |
+| `MF4` | Main MATAFILER4 environment, including ENA/SRA download tools |
 | `MF4gtdbtk` | GTDB-Tk-related tools |
 | `MF4semibin` | SemiBin |
 | `MF4binners` | Additional binning tools |
 | `MF4genomeface` | Optional GenomeFace functionality; uses an external NERSC package channel |
 | `MF4scgbinner` | SCG-based binning |
 | `MF4checkm2` | CheckM2 and MetaPhlAn dependencies |
+| `MF4motus` | mOTUs 4 and its isolated Python/dependency stack |
 | `MF4phylo` | Phylogenetic tools |
 | `MF4_R` | R-based helper scripts |
+
+After updating `MF4` from `helpers/install/MF4.yml`, the installer verifies
+`wget`, `pigz`, `prefetch`, `fasterq-dump`, and `vdb-validate`. A missing
+command stops installation immediately, preventing archive-backed samples from
+failing later inside a workflow.
+
+`MF4` installs eggNOG-mapper v3 (3.0.0-beta6) with pip from its GitHub release,
+because it is not on Bioconda yet. The build uses the environment's Cython and
+compilers. The pip line in `MF4.yml` sets the version; the installer reads it from there.
+
+- **Before updating `MF4`:** the installer removes the Bioconda
+  eggnog-mapper 2.x package of an earlier `MF4`. Its package record would
+  otherwise keep Python below 3.12 and let a later update reinstall or delete
+  v3's files.
+- **After updating:** it checks that the pinned version imports, including
+  its compiled modules, and reinstalls it if not. It also creates
+  eggNOG-mapper's built-in data folder (`site-packages/data`), which pip does
+  not create. Without it, 3.0.0-beta6's `download_eggnog_data.py` fails even
+  with `--data_dir`, and `emapper.py` without `--data_dir` crashes
+  ([eggnogdb/eggnog-mapper#612](https://github.com/eggnogdb/eggnog-mapper/issues/612)).
+  If you built `MF4` from `MF4.yml` without the installer, create it yourself:
+  `mkdir -p "$(micromamba run -n MF4 python -c 'import site; print(site.getsitepackages()[0])')/data"`.
+- **Newer release:** it prints a note when a newer eggNOG-mapper release
+  exists on GitHub. To switch, update the pip line in `MF4.yml`.
+
+v3 needs the eggNOG 7 data (about 45 GB), which the installer does not
+download. Fetch it into `eggNOGm_path_DB` before the first gene catalogue:
+
+```bash
+mkdir -p <DBDir>/Funct/eggNOGmapper/v3.0/
+download_eggnog_data.py -y --data_dir <DBDir>/Funct/eggNOGmapper/v3.0/
+```
 
 `MF4genomeface` is best-effort because its package metadata is hosted outside
 conda-forge and Bioconda. If that external channel is unavailable, the installer
@@ -114,8 +147,9 @@ prints a warning and continues; rerun it later to install or update GenomeFace.
    - the `hostile` human reference index `human-t2t-hla`, if `hostile` is available
    - the CheckM2 database
    - the MetaPhlAn database
+   - the mOTUs marker-gene database
 
-Successful CheckM2 and MetaPhlAn downloads receive tool-version marker files.
+Successful CheckM2, MetaPhlAn, and mOTUs downloads receive version marker files.
 Missing or mismatched markers cause the installer to try the database setup again;
 `--refresh-databases` forces a fresh download. Database downloads are best-effort:
 network or permission failures produce warnings but do not abort installation of the
@@ -142,17 +176,16 @@ GTDB and GTDB-Tk databases are required for MAG classification and GTDB marker-g
 Example:
 
 ```bash
-cd helpers/install
-./get_gtdb.py all -v 226 -t /path/to/download -d /path/to/extract/to --tk split
+helpers/install/get_gtdb.pl all -v 226 -t /path/to/download -d /path/to/extract/to --tk split
 ```
 
 The temporary download directory passed with `-t` can be removed after the database has been extracted and configured. See:
 
 ```bash
-./get_gtdb.py -h
+helpers/install/get_gtdb.pl -h
 ```
 
-for additional options, including workflows where download and extraction need to be run separately.
+for additional options, including workflows where download and extraction need to be run separately (`download` on a machine with internet access, `extract` where the database should live, then `configure`). `configure` (and `all` when run interactively) updates the GTDB keys in `Mods/config_DBs.txt` of the MATAFILER4 checkout named by `MF4DIR`, keeping a numbered backup (`Mods/config_DBs.bupN`). Keys set in your `config.txt` take precedence over `Mods/config_DBs.txt`, so remove or update GTDB entries there. The script needs GNU tar and wget (or curl for `--tk full`); it uses pigz when available.
 
 ## Updating MATAFILER4
 
@@ -170,6 +203,21 @@ bash helpers/install/installer.sh
 ```
 
 This is expected usage and is usually much faster than the initial installation.
+
+## Running the unit tests
+
+The Perl unit tests in `t/` check the pipeline code without submitting jobs or needing databases. Run them after installing or updating MATAFILER4, and before changing pipeline code:
+
+```bash
+cd /path/to/MATAFILER4
+perl helpers/runTests.pl            # all tests, 4 in parallel
+perl helpers/runTests.pl strain     # only test files whose name matches "strain"
+perl helpers/runTests.pl -jobs 1 -v sdm_cleaner   # one file, full output
+```
+
+The runner works from any directory and needs only Perl and the core module `TAP::Harness`. It prints a summary and exits with a non-zero status if any test fails. Tests that need a compiled helper from `bin/` (for example `MSAfix`) skip themselves when it is missing; the summary lists these. Tests marked `TODO` document known issues: they are reported but do not fail the run.
+
+New tests are plain Perl files named `t/<topic>.t` using `Test::More`. They should exercise behaviour (run a function or script on a small fixture and check the result) rather than match the source code text.
 
 ## Troubleshooting installation
 
@@ -191,7 +239,7 @@ Then rerun the installer.
 
 The installer already uses flexible channel priority for micromamba environment creation. If conflicts persist, update micromamba and rerun the installer. On managed HPC systems, it may be preferable to ask local support to inspect the failing environment YAML file in `helpers/install/`.
 
-### CheckM2 or MetaPhlAn database download fails
+### CheckM2, MetaPhlAn, or mOTUs database download fails
 
 The database downloads are optional during software installation. A failure leaves
 the corresponding version marker absent and the installer continues, so rerunning it
@@ -212,8 +260,14 @@ Activate the relevant environment and retry manually:
 ```bash
 micromamba activate MF4checkm2
 checkm2 database --download --path /path/to/MATAFILER4/data/DBs/CM2/
-metaphlan --install --bowtie2db /path/to/MATAFILER4/data/DBs/MP4/
+metaphlan --install --db_dir /path/to/MATAFILER4/data/DBs/MP4/ \
+  --index mpa_vJan25_CHOCOPhlAnSGB_202503
+
+micromamba activate MF4motus
+motus downloadMGDB -db /path/to/MATAFILER4/data/DBs/mOTUs/
 ```
+
+See the [profiling tutorial](profiling_tutorial.md) for the matching `config_DB` entries.
 
 ### Installation was interrupted
 

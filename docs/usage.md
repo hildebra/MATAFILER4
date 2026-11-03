@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -196,7 +196,7 @@ The pipeline expects a path to storage that is globally available on all nodes a
 
 The most important input is a mapping file that describes your samples and raw-read locations. See 'examples' dir for some map examples (also explaining how to do compound assemblies, compound mapping). These column names (headers) are reserved key words in the mapping file (other columns can be eg. metadata per sample etc):
 - **#SmplID** [STRING] MATAFILER4 maps always need to have the first column names *#SmplID*. The string in this column will be used in all subsequent analyses, intermediate files, sequence heads etc to uniquely identify samples, therefore choose with extreme care! Good practice would be to include some basic information about the sample in the SMPLID, but should be as short and descriptive as possible. *DO NOT USE SPECIAL CHARACTERS IN THE SMPLID, keep it basic*!  
-- **Path** [STRING] - is the relative path to primary read files for each sample (see #DirPath, this needs to be set to the absolute path). FASTQ files are selected with the `-inputFQregex*` options. Unpaired primary BAM reads, such as PacBio reads, can instead be selected with `-inputBAMregex '.*\.bam$'` and are converted to FASTQ with `samtools fastq`; see [Mapping files](mapping_files.md#using-bam-files-as-primary-input). 1 or 2 in paired FASTQ file names indicates the first or second read. E.g. al0-0_12s005629-2-1_lane3.2.fq.gz is the second read, here the pipeline expects to have al0-0_12s005629-2-1_lane3.1.fq.gz in the same dir.
+- **Path** [STRING] - is the relative path to primary read files for each sample (see #DirPath, this needs to be set to the absolute path). FASTQ files are selected with the `-inputFQregex*` options. Unpaired primary SAM/BAM/CRAM reads, such as PacBio reads, can instead be selected with `-inputBAMregex '.*\.(bam|sam|cram)$'` and are read directly by SDM; see [Mapping files](mapping_files.md#using-bam-files-as-primary-input). 1 or 2 in paired FASTQ file names indicates the first or second read. E.g. al0-0_12s005629-2-1_lane3.2.fq.gz is the second read, here the pipeline expects to have al0-0_12s005629-2-1_lane3.1.fq.gz in the same dir.
 Further, you can add the following specifics for each single sample:   
 - **AssmblGrps** [STRING] - set this to a number or string. all samples with the same tag will be assembled together (e.g. samples from the same patient at different time points).  
 - **MapGrps** [STRING] - set a tag here as in AssmblGrps. All reads from these samples will be thrown together, when mapping against target sequences (only works with option "map2tar" and "map2DB").
@@ -297,7 +297,7 @@ BERGmock	BERGmock	BERGmock
 ```{sh}
 MAP="/path/to/mapping_file.map"
 perl $MF4DIR/MATAF4.pl map2tar \
-	-map $MAP  -ref '/path/to/reference/mock_community/*.fasta' -filterHumanRds 0 -mappingCores 12 -mapperFilterIll '0.02 0.75 00'  -redo2ndmap 0 -mappingMem 15 -submit 1 -competitive2ndmap -1 -decoyMapping 0
+	-map $MAP  -ref '/path/to/reference/mock_community/*.fasta' -filterHostRds 0 -mappingCores 12 -mapperFilterIll '0.02 0.75 0 0'  -redo2ndmap 0 -mappingMem 15 -submit 1 -competitive2ndmap -1 -decoyMapping 0
 ```
 
 - Explanation: ref are the .fasta formatted reference genomes you want to map your metagenomic reads to, metagenomic reads are defined in the map, as in other runs. -mapperFilterIll defines how the mapped reads will be quality filtered. -competitive2ndmap defines if reads will be mapped against all references at once (competitive) or separately against each single reference. -decoyMapping determines if an already created read assembly will be used to "decoy" map reads against (useful if you suspect that most reads aligning to your reference would be false positive hits).

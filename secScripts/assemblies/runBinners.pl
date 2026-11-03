@@ -232,6 +232,8 @@ if ($GPUused){
 	my ($jID, $blank) = qsubSystem("$logDir/$BinnerName.GPU.sh", $BinCmd, $submitJob,"25G","$BinnerName.$smplIDs1","","",1,[],$QSBoptHR);
 	push(@jobDeps,$jID);
 	qsubSystemJobAlive(\@jobDeps, $QSBoptHR, 1);
+	# Leaving the queue is not success: the job writes $stone as its last step.
+	die "GPU binner job $jID did not publish $stone\n" unless -s $stone;
 	$GPUused = 0;
 } else {
 	systemW $BinCmd;

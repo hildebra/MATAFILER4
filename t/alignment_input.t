@@ -1,0 +1,429 @@
+use strict;
+use warnings;
+use Test::More;
+use File::Temp qw(tempdir);
+use File::Path qw(make_path);
+use File::Basename qw(basename dirname);
+use File::Spec;
+use File::Find ();
+use Cwd qw(abs_path);
+use FindBin qw($Bin);
+use List::Util qw(max sum);
+use IO::Uncompress::Gunzip ();
+use lib "$Bin/..", "$Bin/lib";
+use MFTestConfig;
+use Mods::SampleCompletion qw(completion_request_signature);
+use Mods::GenoMetaAss qw(iniCleanSeqSetHR checkSeqTech is3rdGenSeqTech parseSupportReads discoverReadFiles);
+use Mods::ReadLibrary qw(newReadLibrary readLibrariesFromArrays syncSeqSetLegacy readLibrariesByScope
+    replaceScopeLibraries libraryFiles libraryPairs libraryTechnology);
+use Mods::IO_Tamoc_progs qw(decideMapper);
+use Mods::WorkflowControl qw(source_input_files missing_input_files commands_are_lightweight_filesystem normalise_job_dependencies);
+
+sub read_file { open my $fh, '<', $_[0] or die $!; local $/; return <$fh>; }
+sub write_file { open my $fh, '>', $_[0] or die $!; print {$fh} $_[1]; close $fh or die $!; }
+my $sourceText = read_file("$Bin/../MATAF4.pl");
+our (%MFconfig, %MFopt, %map, %AsGrps, %MFcontstants, %HDDspace, %make2ndMapDecoy, %map2ndTogRefDB);
+our ($curSmpl, $QSBoptHR, $logDir, $JNUM, $pigzBin, $smtBin);
+for my $name (qw(_shell_quote _shell_command _staged_read_files_present _validate_sdm_integer_setting
+    outfiles_Bam alignmentCacheRequired alignmentFileStamp alignmentCacheIdentity alignmentCacheComplete alignmentInputLayout
+    alignmentFastqCommand alignmentCacheCommand alignmentMappingCommand complexGunzCpMv
+    discoverSampleInputs seedUnzip2tmp sdmClean getAlgnCmdBase mapReadsToRef)) {
+    my ($body) = $sourceText =~ /(^sub \Q$name\E[^\n]*\{.*?^\})/ms;
+    ($body) = $sourceText =~ /(^sub sdmClean\(\)\{.*?)(?=^sub mocat_reorder)/ms if $name eq 'sdmClean';
+    die "Missing helper $name" unless defined $body;
+    $body =~ s/^(sub \Q$name\E)\(\)/$1/;
+    eval $body; die "$name: $@" if $@;
+}
+my $tmp = tempdir(CLEANUP => 1);
+my $fastq = "\@read\nACGT\n+\nIIII\n";
+my $alignment = "$tmp/input 'quoted'.sam";
+write_file($alignment, $fastq);
+my $fakeSamtools = "$tmp/samtools";
+write_file($fakeSamtools, <<'FAKE');
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use IO::Compress::Gzip qw(gzip $GzipError);
+my @args = @ARGV;
+sub slurp_raw { my ($path) = @_; open my $fh, '<:raw', $path or die "$path: $!"; local $/; return scalar <$fh>; }
+sub value_after { my ($flag) = @_; for my $i (0 .. $#args - 1) { return $args[$i + 1] if $args[$i] eq $flag; } die "missing $flag\n"; }
+binmode STDOUT;
+if ($args[0] eq 'cat') { print slurp_raw($_) for @args[1 .. $#args]; exit 0; }
+# layout probe on non-SAM fixtures: no header, no records (i.e. a singleton file)
+if ($args[0] eq 'view') { exit 0; }
+die "unexpected samtools mode $args[0]\n" unless $args[0] eq 'fastq';
+my $interleaved = grep { $_ eq '-o' } @args;
+unless ($interleaved) {
+    die "-1 must be /dev/null\n" unless value_after('-1') eq '/dev/null';
+    die "-2 must be /dev/null\n" unless value_after('-2') eq '/dev/null';
+}
+open my $log, '>>', $ENV{EXTRACTION_LOG} or die $!; print {$log} "extract\n"; close $log;
+my $data = slurp_raw($args[-1]);
+my $out = value_after($interleaved ? '-o' : '-0');
+if ($out eq '-') { print $data; }
+else { gzip(\$data => $out) or die "gzip failed: $GzipError\n"; }
+exit 17 if $ENV{EXTRACTION_FAIL};
+FAKE
+chmod 0755, $fakeSamtools;
+$ENV{EXTRACTION_LOG} = "$tmp/extractions";
+write_file($ENV{EXTRACTION_LOG}, '');
+my $fakeMapper = "$tmp/mapper";
+write_file($fakeMapper, <<'FAKE');
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
+my @args = @ARGV;
+my $query;
+for my $i (0 .. $#args - 1) { if ($args[$i] eq '-U' || $args[$i] eq '-i') { $query = $args[$i + 1]; last; } }
+$query = $args[-1] unless defined $query;
+my $data;
+binmode STDIN; binmode STDOUT;
+if ($query eq '-' || $query eq '--') { local $/; $data = <STDIN>; }
+elsif ($query =~ /\.gz$/) { gunzip($query => \$data, MultiStream => 1) or die "gunzip failed: $GunzipError\n"; }
+else { open my $fh, '<:raw', $query or die "$query: $!"; local $/; $data = <$fh>; }
+open my $log, '>>', $ENV{MAPPING_LOG} or die $!; print {$log} "$query\n"; close $log;
+print $data;
+exit 18 if $ENV{MAPPING_FAIL};
+FAKE
+chmod 0755, $fakeMapper;
+$ENV{MAPPING_LOG} = "$tmp/mappings";
+write_file($ENV{MAPPING_LOG}, '');
+my %progs = (samtools=>$fakeSamtools, sdm=>abs_path("$Bin/../bin/sdm"));
+sub getProgPaths { return $progs{$_[0]} || $fakeMapper; }
+my @submissions;
+sub qsubSystem { push @submissions, [@_]; return ('job'.scalar(@submissions), ''); }
+sub systemW { die 'local staging failed' if system('bash', '-eo', 'pipefail', '-c', $_[0]); }
+my %readsets;
+sub sampleReadSet { my ($s,$phase,$value)=@_; $readsets{$s}{$phase}=$value if @_>2; return $readsets{$s}{$phase}; }
+sub sdmOptSet { return ("$Bin/../data/sdm_PacBio.txt", "$Bin/../data/sdm_PacBio.txt"); }
+sub cleaned_primary_libraries_empty { return 0; }
+sub check_map_done { return 0; }
+sub getRgStr { return 'RG'; }
+sub getMapProgNm { return 'testmapper'; }
+sub alignPostTreat {
+    my ($p,$i,$k)=@_;
+    my $file="$p->{nodeTmp}/part.$i.$k.bam";
+    my @parts=@{$p->{subBamsAR}};
+    $parts[0] = ($parts[0] || '')." $file";
+    return (" | cat > $file\n", \@parts);
+}
+my $runIndex=0;
+sub run_command {
+    my ($cmd)=@_;
+    my $script="$tmp/run".(++$runIndex).'.sh';
+    write_file($script, "#!/bin/bash\nset -eo pipefail\n".$cmd);
+    return system('bash','-c','bash "$1" >"$2" 2>&1','test',$script,"$script.log") >> 8;
+}
+sub extraction_count { return scalar(() = read_file($ENV{EXTRACTION_LOG}) =~ /extract/g); }
+
+ok(!alignmentCacheRequired({primary_passes=>1},'primary'), 'one raw mapping can stream');
+ok(alignmentCacheRequired({primary_passes=>2},'primary'), 'repeated raw mappings retain cache');
+ok(!alignmentCacheRequired({primary_passes=>2,support_passes=>1},'support'), 'support policy is independent');
+ok(alignmentCacheRequired({upload=>1},'support'), 'upload needs a file');
+ok(alignmentCacheRequired({unfiltered_files=>1},'primary'), 'SDM bypass needs files for clean consumers');
+is(outfiles_Bam('/cache','a.BAM'),'/cache/a.unbam.fq.gz','BAM cache naming remains compatible');
+is(outfiles_Bam('/cache','a.sam'),'/cache/a.unsam.fq.gz','SAM has a distinct cache name');
+is(outfiles_Bam('/cache','a.cram'),'/cache/a.uncram.fq.gz','CRAM has a distinct cache name');
+my $cache="$tmp/cache dir/reads.fq.gz";
+my ($cmd,$complete)=alignmentCacheCommand($alignment,'',$fakeSamtools,0,$cache);
+ok(!$complete,'new cache is incomplete');
+is(run_command($cmd),0,'quoted source and destination extract successfully');
+my ($signature)=alignmentCacheIdentity($alignment,'',$fakeSamtools);
+ok(alignmentCacheComplete($cache,$signature),'published cache passes local validation');
+my $count=extraction_count();
+is(run_command($cmd),0,'cache reuse succeeds');
+is(extraction_count(),$count,'cache reuse skips extraction');
+unlink $cache;
+is(run_command($cmd),0,'missing cache is recreated despite its marker');
+is(extraction_count(),++$count,'missing cache triggers extraction');
+write_file($cache,'truncated');
+is(run_command($cmd),0,'changed cache is regenerated');
+is(extraction_count(),++$count,'changed cache triggers extraction');
+write_file($alignment,$fastq.$fastq);
+isnt(run_command($cmd),0,'queued job rejects a changed source');
+($cmd,$complete)=alignmentCacheCommand($alignment,'',$fakeSamtools,0,$cache);
+ok(!$complete,'source change invalidates cache locally');
+is(run_command($cmd),0,'newly prepared job refreshes changed source');
+unlink "$cache.source.stone";
+{
+    local $ENV{EXTRACTION_FAIL}=1;
+    isnt(run_command($cmd),0,'failed extraction fails cache command');
+    ok(!-e "$cache.source.stone",'failed extraction publishes no marker');
+    ok(!-e "$cache.partial.gz",'failed extraction removes partial output');
+}
+write_file($alignment,$fastq);
+my $decodeRef="$tmp/decode.fa";
+write_file($decodeRef,">decode\nACGT\n"); write_file("$decodeRef.fai","decode\t4\t8\t4\t5\n");
+like(alignmentFastqCommand($alignment,$decodeRef,$fakeSamtools,0,'-'),
+    qr/'--reference' '\Q$decodeRef\E'/,'samtools receives the decode reference');
+my ($before)=alignmentCacheIdentity($alignment,$decodeRef,$fakeSamtools);
+write_file($decodeRef,">decode\nACGTACGT\n");
+my ($after)=alignmentCacheIdentity($alignment,$decodeRef,$fakeSamtools);
+isnt($after,$before,'decode reference participates in cache identity');
+
+# Use the real discovery and staging functions, mocking only job submission.
+make_path("$tmp/primary","$tmp/support","$tmp/log","$tmp/staged");
+write_file("$tmp/primary/a.sam",$fastq);
+write_file("$tmp/primary/a.fq",$fastq);
+write_file("$tmp/support/s.cram",$fastq);
+$curSmpl='sample'; $JNUM=1; $logDir="$tmp/log/"; $pigzBin='gzip'; $smtBin=$fakeSamtools;
+$QSBoptHR={tmpSpace=>0,General_Hosts=>[]};
+%MFconfig=(readsRpairs=>0,rawFileSrchStrSingl=>'\\.fq$',rawFileBamSrchSing=>'\\.(?:bam|sam|cram)$',
+    rawFileSrchStrXtra1=>'',rawFileSrchStrXtra2=>'',prefSinglFQgreps=>0,doDateFileCheck=>0,
+    filterFromSource=>0,splitFastaInput=>0,abortOnEmptyInput=>1,defaultReadLength=>400,defaultReadLengthX=>400,XfirstReads=>-1);
+%MFopt=(unzipCores=>1,useUnmapped=>0,sdmCores=>1,sdmMem=>'1G',gzipSDMOut=>1,trimAdapters=>0,SDMlogQualvsLen=>0);
+%map=(sample=>{hasPrimaryRds=>1,rddir=>"$tmp/primary",prefix=>'',SeqTech=>'PB',SupportReads=>"PB:$tmp/support",clip=>'',
+    cut5pR1=>0,cut5pR2=>0,firstXrdsRd=>0,firstXrdsWr=>0});
+my $found=discoverSampleInputs($curSmpl,"$tmp/primary");
+is_deeply($found->{primary}{bam},['a.sam'],'primary SAM discovered by inputBAMregex');
+is_deeply($found->{support}{bam},["$tmp/support/s.cram"],'support directory discovers CRAM');
+$map{sample}{SupportReads}="PB:$tmp/support/s.cram";
+$found=discoverSampleInputs($curSmpl,"$tmp/primary");
+is_deeply($found->{support}{bam},["$tmp/support/s.cram"],'explicit support CRAM classified as alignment');
+sub stage {
+    my ($policy)=@_;
+    @submissions=();
+    seedUnzip2tmp("$tmp/primary",'sample','',"$tmp/node","$tmp/staged",1,'',0,"$tmp/inputs.txt",$policy);
+}
+stage({primary_passes=>1,support_passes=>1});
+my $raw=sampleReadSet('sample','raw');
+is(scalar(@{$raw->{libraries}}),3,'mixed FASTQ, primary SAM, support CRAM keep separate libraries');
+is($raw->{libraries}[1]{files}{bam},"$tmp/primary/a.sam",'original alignment retained in raw library');
+is($raw->{libraries}[2]{scope},'support','support library scope retained');
+ok(!-e $raw->{libraries}[1]{files}{single},'direct mode creates no raw FASTQ cache');
+ok(!grep($_->[1] =~ /'fastq'/,@submissions),'direct staging submits no extraction');
+stage({primary_passes=>2,support_passes=>1});
+is(scalar(@submissions),1,'switch to repeated mapping invalidates staging marker');
+like($submissions[0][1],qr/'fastq'/,'repeated mapping schedules extraction');
+is(run_command($submissions[0][1]),0,'generated mixed staging command executes');
+$raw=sampleReadSet('sample','raw');
+ok(-s $raw->{libraries}[1]{files}{single},'primary repeated-mapping cache materialized');
+ok(!-e $raw->{libraries}[2]{files}{single},'single-pass support still avoids extraction');
+$count=extraction_count();
+stage({primary_passes=>2,support_passes=>1});
+is(scalar(@submissions),0,'completed cache and files reuse staging marker');
+unlink "$tmp/staged/rawRds/done.sto";
+stage({primary_passes=>2,support_passes=>1});
+is(run_command($submissions[0][1]),0,'restaging preserves reusable alignment cache');
+is(extraction_count(),$count,'restaging other inputs does not re-extract a valid cache');
+stage({primary_passes=>1,support_passes=>1});
+ok(sampleReadSet('sample','raw')->{libraries}[1]{metadata}{alignment_cache_required},
+    'a valid cache remains selected when only one mapping pass is left');
+is(scalar(@submissions),0,'remaining mapping pass reuses existing staging');
+$MFconfig{inputCramReference}=$decodeRef;
+stage({upload=>1});
+is(run_command($submissions[0][1]),0,'upload staging materializes both scopes');
+$raw=sampleReadSet('sample','raw');
+ok(-s $raw->{libraries}[2]{source_files}{single},'upload receives an existing support FASTQ');
+
+# SDM must prefer original alignment even when a raw cache is also present.
+is($raw->{libraries}[2]{metadata}{cram_reference},$decodeRef,'support decode reference inherits the primary setting');
+@submissions=();
+make_path("$tmp/result");
+sdmClean("$tmp/result","$tmp/clean",'upstream',1,1);
+like($submissions[0][1],qr{'-i' '\Q$tmp/support/s.cram\E'},'SDM consumes original CRAM');
+like($submissions[0][1],qr/'-cramRef' '\Q$decodeRef\E'/,'SDM receives the decode reference');
+unlike($submissions[0][1],qr/\.uncram\.fq/,'SDM ignores the raw cache');
+like($submissions[0][1],qr/filtered\.suppl\.s\.fq\.gz/,'support clean output name stays compatible');
+
+@submissions=();
+sdmClean("$tmp/result","$tmp/clean",'upstream',1,0);
+like($submissions[0][1],qr{'-i' '\Q$tmp/primary/a.sam\E'},'mixed primary SDM also selects original alignment');
+like($submissions[0][1],qr/filtered\.lib1\.s\.fq\.gz/,'mixed-library filtered output indexing stays compatible');
+
+# Exercise complete mapping command construction and its runtime branches.
+my $ref="$tmp/reference.fa"; write_file($ref,">ref\nACGT\n");
+write_file("$ref.idx.1.bt2",'index');
+%MFcontstants=(bwt2IdxFileSuffix=>'.idx');
+my $lib=newReadLibrary(id=>'alignment',sample=>'sample',scope=>'primary',phase=>'staged',technology=>'PB',
+    label=>'same',files=>{single=>"$tmp/nonexistent.fq.gz",bam=>$alignment},metadata=>{alignment_cache_required=>0});
+sub mapping {
+    my ($mapper,$refs,$libs)=@_;
+    $MFopt{MapperProg}=$mapper; $MFopt{MapperMemory}=1; $MFopt{mapModeTogether}=0;
+    $MFopt{DoMapModeDecoy}=0; $MFopt{largeMapperDB}=0;
+    my @refs=split /,/,$refs;
+    my (undef,undef,$params)=mapReadsToRef({smplName=>join(',',map {"sample$_"} 0..$#refs),assGrp=>'group',
+        is2ndMap=>0,cramAlig=>0,submNow=>0,unalDir=>'',mapCores=>1,mapSupport=>0,sbj=>$refs,libraries=>$libs,
+        glbMapDir=>join(',',map {"$tmp/map$_"} 0..$#refs),nodeTmp=>"$tmp/mapnode",readTec=>'PB',
+        glbTmp=>"$tmp/mapwork",outDir=>join(',',map {"$tmp/mapfinal$_"} 0..$#refs)},'stage');
+    return $params->{mappingCommand};
+}
+for my $mapper (1,2,3,5) {
+    my $mapping=mapping($mapper,$ref,[$lib]);
+    is(run_command($mapping),0,"mapper $mapper complete streaming command executes");
+    is(read_file("$tmp/mapwork/sample0.iniAlignment.bam"),$fastq,"mapper $mapper receives raw reads through stdin");
+    ok(!-e "$tmp/mapnode_map/alignment.0.fq.gz","mapper $mapper avoids cache on eligible pass");
+    unlink "$tmp/mapwork/sample0.iniAlignment.bam";
+    {
+        local $ENV{EXTRACTION_FAIL}=1;
+        isnt(run_command($mapping),0,"mapper $mapper propagates extraction failure");
+        ok(!-e "$tmp/mapwork/sample0.iniAlignment.bam","mapper $mapper cannot publish failed extraction");
+    }
+    {
+        local $ENV{MAPPING_FAIL}=1;
+        isnt(run_command($mapping),0,"mapper $mapper propagates mapper failure through post-treatment");
+        ok(!-e "$tmp/mapwork/sample0.iniAlignment.bam","mapper $mapper cannot publish failed mapping");
+    }
+}
+# A large sparse FASTA exercises the runtime size limit without allocating 1 GB.
+open my $large, '>', $ref or die $!;
+print {$large} ">large\n";
+truncate($large,1000000001) or die $!;
+close $large;
+my $largeMapping=mapping(3,$ref,[$lib]);
+is(run_command($largeMapping),0,'large FASTA uses minimap2 file fallback');
+ok(-s "$tmp/mapnode_map/alignment.0.fq.gz",'large FASTA gets replayable reads');
+unlink "$tmp/mapwork/sample0.iniAlignment.bam";
+write_file($ref,"MMI\0binary-index\n");
+my $mapping=mapping(3,$ref,[$lib]);
+is(run_command($mapping),0,'minimap2 unknown/binary reference uses file fallback');
+ok(-s "$tmp/mapnode_map/alignment.0.fq.gz",'minimap2 fallback materializes replayable FASTQ');
+is(read_file("$tmp/mapwork/sample0.iniAlignment.bam"),$fastq,'file fallback receives same raw reads');
+unlink "$tmp/mapwork/sample0.iniAlignment.bam";
+write_file($ref,">ref\nACGT\n");
+my $ref2="$tmp/ref2.fa"; write_file($ref2,">ref2\nACGT\n"); write_file("$ref2.idx.1.bt2",'index');
+$count=extraction_count();
+$mapping=mapping(1,"$ref,$ref2",[$lib]);
+is(run_command($mapping),0,'multiple references map from one extracted cache');
+is(extraction_count(),$count+1,'multiple references extract only once');
+is(read_file("$tmp/mapwork/sample1.iniAlignment.bam"),$fastq,'second reference reuses raw reads');
+unlink "$tmp/mapwork/sample0.iniAlignment.bam", "$tmp/mapwork/sample1.iniAlignment.bam";
+
+my $plain=newReadLibrary(id=>'plain',sample=>'sample',scope=>'primary',phase=>'staged',technology=>'PB',
+    label=>'same',files=>{single=>"$tmp/plain.fq"});
+write_file("$tmp/plain.fq",$fastq);
+$count=extraction_count();
+$mapping=mapping(1,$ref,[$plain,$lib]);
+is(run_command($mapping),0,'Bowtie2 handles same-labelled FASTQ and alignment libraries separately');
+is(read_file("$tmp/mapwork/sample0.iniAlignment.bam"),$fastq.$fastq,'mixed-library mapping retains both inputs');
+is(extraction_count(),$count+1,'mixed-library mapping extracts only the alignment library');
+unlink "$tmp/mapwork/sample0.iniAlignment.bam";
+
+# Audit 2026-10-08 (docs/audits/2026-10-08/mappers.md): every mapper maps each reference
+# of a list against that reference alone; bwa maps single-end reads.
+for my $mapper (2,3,5) {
+    $mapping=mapping($mapper,"$ref,$ref2",[$plain]);
+    unlike($mapping,qr/\Q$ref,$ref2\E/,"mapper $mapper never gets the reference list");
+    like($mapping,qr/ \Q$ref\E .*\n(?s:.*) \Q$ref2\E /,"mapper $mapper maps against each reference FASTA in turn");
+    is(run_command($mapping),0,"mapper $mapper multi-reference command executes");
+    is(read_file("$tmp/mapwork/sample1.iniAlignment.bam"),$fastq,"mapper $mapper fills the second reference's output");
+    unlink "$tmp/mapwork/sample0.iniAlignment.bam", "$tmp/mapwork/sample1.iniAlignment.bam";
+}
+$mapping=mapping(2,$ref,[$plain]);
+like($mapping,qr/ mem -t 1 +-R RG \Q$ref\E \Q$tmp\E\/plain\.fq/,'bwa maps a single-end library');
+like(getAlgnCmdBase(3,1,'PB',0,''),qr/-x map-hifi/,'PacBio (HiFi) reads use the map-hifi preset');
+{
+    make_path("$tmp/gzA","$tmp/gzB");
+    system("printf '>a\\nACGT\\n' | gzip -c > $tmp/gzA/ref.fa.gz") == 0 or die;
+    system("printf '>b\\nACGT\\n' | gzip -c > $tmp/gzB/ref.fa.gz") == 0 or die;
+    $mapping=mapping(5,"$tmp/gzA/ref.fa.gz,$tmp/gzB/ref.fa.gz",[$plain]);
+    like($mapping,qr{gzip -dc \Q$tmp\E/gzA/ref\.fa\.gz > \Q$tmp\E/mapnode_map/+ref\.fa\n},'first compressed reference is staged');
+    like($mapping,qr{gzip -dc \Q$tmp\E/gzB/ref\.fa\.gz > \Q$tmp\E/mapnode_map/+1\.ref\.fa\n},'a second reference with the same file name gets its own staged copy');
+    is(run_command($mapping),0,'compressed multi-reference command executes');
+    unlink "$tmp/mapwork/sample0.iniAlignment.bam", "$tmp/mapwork/sample1.iniAlignment.bam";
+}
+{
+    my $large="$tmp/large.fa"; write_file($large,">l\nACGT\n");
+    write_file("$large.idx.$_.bt2l",'index') for qw(1 2 3 4 rev.1 rev.2);
+    $mapping=mapping(1,$large,[$plain]);
+    is(run_command($mapping),0,'a bowtie2 index written as .bt2l is accepted without -mapperLargeRef');
+    unlink "$tmp/mapwork/sample0.iniAlignment.bam";
+    my $none="$tmp/noindex.fa"; write_file($none,">n\nACGT\n");
+    is(run_command(mapping(1,$none,[$plain])),23,'a missing bowtie2 index still stops the job');
+}
+{
+    local %make2ndMapDecoy=(Lib=>$ref,regions=>[],region_lcs=>[]);
+    $MFopt{MapperProg}=3; $MFopt{MapperMemory}=1; $MFopt{mapModeTogether}=0; $MFopt{DoMapModeDecoy}=1; $MFopt{largeMapperDB}=0;
+    my (undef,undef,$params)=mapReadsToRef({smplName=>'sample0',assGrp=>'group',is2ndMap=>0,cramAlig=>0,submNow=>0,unalDir=>'',
+        mapCores=>1,mapSupport=>0,sbj=>$ref,libraries=>[$plain],glbMapDir=>"$tmp/map0",nodeTmp=>"$tmp/mapnode",readTec=>'PB',
+        glbTmp=>"$tmp/mapwork",outDir=>"$tmp/mapfinal0"},'stage');
+    my $decoy=$params->{mappingCommand};
+    like($decoy,qr{decoyDB\.fna 1 sample0 \S+ 3\n},'the decoy database is indexed for the mapper of the sample');
+    like($decoy,qr{ -a \Q$tmp\E/mapnode_map/+reference\.decoyDB\.fna },'minimap2 maps against the decoy database');
+    $MFopt{DoMapModeDecoy}=0;
+}
+
+# Real bundled SDM: verify the actual generated cleaner command, with no cache.
+SKIP: {
+    skip 'bundled SDM executable unavailable', 4 unless -x $progs{sdm};
+    my $seq='ACGTTGCAAGTC' x 34;
+    my $qual='I' x length($seq);
+    my $sam="$tmp/real.sam";
+    write_file($sam,"\@HD\tVN:1.6\tSO:unknown\n\@SQ\tSN:ref\tLN:1000\nreal\t4\t*\t0\t0\t*\t*\t0\t0\t$seq\t$qual\n");
+    my $real=newReadLibrary(id=>'real',sample=>'sample',scope=>'primary',phase=>'staged',technology=>'PB',label=>'real',
+        files=>{single=>"$tmp/never-created.fq.gz",bam=>$sam});
+    sampleReadSet('sample','raw',{libraries=>[$real],samplReadLength=>length($seq)});
+    sampleReadSet('sample','clean',iniCleanSeqSetHR(sampleReadSet('sample','raw')));
+    @submissions=();
+    sdmClean("$tmp/result","$tmp/real-clean",'',1,0);
+    is(run_command($submissions[0][1]),0,'real SDM executes generated direct-SAM cleaner command');
+    ok(-s "$tmp/real-clean/filtered.s.fq.gz",'real SDM produces expected filtered output');
+    ok(-e "$tmp/real-clean/filterDone.stone",'real SDM publishes normal filtering checkpoint');
+    ok(!-e "$tmp/never-created.fq.gz",'real SDM needs no extraction cache');
+}
+
+# Paired alignment input: layout detection, raw extraction keeps every mate,
+# and quality filtering reads true pairs with sdm -paired 2.
+{
+    my $seq='ACGTTGCAAGTC' x 34;
+    my $qual='I' x length($seq);
+    my $pairs = join('', map { "p$_\t77\t*\t0\t0\t*\t*\t0\t0\t$seq\t$qual\np$_\t141\t*\t0\t0\t*\t*\t0\t0\t$seq\t$qual\n" } 1..3);
+    my $sorted = "$tmp/pairs.byname.sam";
+    write_file($sorted, "\@HD\tVN:1.6\tSO:queryname\n$pairs");
+    my $unsorted = "$tmp/pairs.unsorted.sam";
+    write_file($unsorted, "\@HD\tVN:1.6\tSO:unsorted\n$pairs");
+    my $single = "$tmp/single.sam";
+    write_file($single, "\@HD\tVN:1.6\tSO:unknown\nr1\t4\t*\t0\t0\t*\t*\t0\t0\t$seq\t$qual\n");
+    is_deeply(alignmentInputLayout($sorted, ''), {paired=>1,name_sorted=>1}, 'name-sorted paired SAM is detected');
+    is_deeply(alignmentInputLayout($unsorted, ''), {paired=>1,name_sorted=>0}, 'unsorted paired SAM is detected');
+    is_deeply(alignmentInputLayout($single, ''), {paired=>0,name_sorted=>0}, 'singleton SAM stays single');
+    write_file("$tmp/secondary-first.sam", "\@HD\tVN:1.6\n".
+        "p0\t256\tref\t1\t0\t4M\t*\t0\t0\tACGT\tIIII\n$pairs");
+    is(alignmentInputLayout("$tmp/secondary-first.sam", '')->{paired}, 1, 'secondary records are ignored by the probe');
+
+    my $raw = alignmentFastqCommand($sorted, '', $fakeSamtools, 0, '-', 1);
+    like($raw, qr/'-o' '-' '-0' '\/dev\/null'/, 'raw extraction of a paired file writes every mate to one stream');
+    unlike($raw, qr/'-1' '\/dev\/null'/, 'paired mates are no longer discarded');
+    isnt((alignmentCacheIdentity($sorted, '', $fakeSamtools, 1))[0], (alignmentCacheIdentity($sorted, '', $fakeSamtools, 0))[0],
+        'caches made before paired support (without mates) are rebuilt');
+
+    my $pairedLib = sub {
+        my ($file, $isSorted) = @_;
+        return newReadLibrary(id=>'pairedbam',sample=>'sample',scope=>'primary',phase=>'staged',technology=>'hiSeq',label=>'pairedbam',
+            files=>{single=>"$tmp/never-created-paired.fq.gz",bam=>$file},
+            metadata=>{alignment_layout=>'paired', alignment_name_sorted=>$isSorted});
+    };
+    sampleReadSet('sample','raw',{libraries=>[$pairedLib->($unsorted, 0)],samplReadLength=>length($seq)});
+    sampleReadSet('sample','clean',iniCleanSeqSetHR(sampleReadSet('sample','raw')));
+    @submissions=();
+    sdmClean("$tmp/result","$tmp/unsorted-clean",'',1,0);
+    my $cmd = $submissions[0][1];
+    like($cmd, qr/'sort' '-n' .*'-o' '\Q$tmp\/unsorted-clean\/filtered.byname.bam\E'.* '\Q$unsorted\E'/,
+        'a paired file without query-name order is name-sorted first');
+    like($cmd, qr/'-i' '\Q$tmp\/unsorted-clean\/filtered.byname.bam\E' '-o_fastq' '[^']*filtered\.1\.fq\.gz,[^']*filtered\.2\.fq\.gz' .*'-paired' '2'/,
+        'sdm reads the name-sorted copy as pairs');
+    like($cmd, qr/'rm' '-f' '--' '\Q$tmp\/unsorted-clean\/filtered.byname.bam\E'/, 'the name-sorted copy is removed afterwards');
+    my $clean = sampleReadSet('sample','clean');
+    ok(grep({ ($_->{files}{r1}||'') =~ /filtered\.1\.fq/ && ($_->{files}{r2}||'') =~ /filtered\.2\.fq/ } @{$clean->{libraries}}),
+        'the cleaned library is a paired FASTQ library');
+
+    SKIP: {
+        skip 'bundled SDM executable unavailable', 4 unless -x $progs{sdm};
+        sampleReadSet('sample','raw',{libraries=>[$pairedLib->($sorted, 1)],samplReadLength=>length($seq)});
+        sampleReadSet('sample','clean',iniCleanSeqSetHR(sampleReadSet('sample','raw')));
+        @submissions=();
+        sdmClean("$tmp/result","$tmp/paired-clean",'',1,0);
+        unlike($submissions[0][1], qr/'sort'/, 'a query-name sorted file is passed to sdm unchanged');
+        is(run_command($submissions[0][1]),0,'real SDM cleans a paired SAM with the generated command');
+        my $count_records = sub {
+            my ($file) = @_;
+            my $text = '';
+            IO::Uncompress::Gunzip::gunzip($file => \$text, MultiStream => 1) or return -1;
+            return scalar(() = $text =~ /^\+$/mg);
+        };
+        is($count_records->("$tmp/paired-clean/filtered.1.fq.gz"), 3, 'all read-1 mates reach filtered.1');
+        is($count_records->("$tmp/paired-clean/filtered.2.fq.gz"), 3, 'all read-2 mates reach filtered.2');
+    }
+}
+done_testing();

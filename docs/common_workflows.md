@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -92,6 +92,9 @@ Use `-outD` only if you do not want the default output directory below the gene 
 
 ## Assembly-independent profiling
 
+For database setup and individual RiboFind, functional, MetaPhlAn 4, mOTUs 4,
+and Protal commands, see the [read-based profiling tutorial](profiling_tutorial.md).
+
 This mode is useful for highly complex communities where assembly is not expected to be productive.
 
 ```bash
@@ -101,6 +104,70 @@ perl "$MF4DIR/MATAF4.pl"   -map "$MAP"   -inputFQregex1 '.*_1\.f[^\.]*q\.gz$'   
 ```
 
 Expected outputs are primarily in run-level profiling folders such as `pseudoGC/`, plus summary files such as `metagStats.txt` and `metagStatsReport.html`.
+
+### Protal profiling from raw reads
+
+For a profile per sample and the merged abundance table:
+
+```bash
+perl "$MF4DIR/MATAF4.pl" \
+  -map "$MAP" \
+  -assembleMG 0 \
+  -profileProtal 1 \
+  -ProtalCores 4 \
+  -ProtalMem 100 \
+  -submit 1
+```
+
+`-profileProtal 2` does the same, also keeps each sample's SAM and builds the strain
+MSAs of the cohort from them:
+
+```bash
+perl "$MF4DIR/MATAF4.pl" \
+  -map "$MAP" \
+  -assembleMG 0 \
+  -profileProtal 2 \
+  -ProtalCores 4 \
+  -ProtalMem 100 \
+  -submit 1
+```
+
+Protal reads each sample's source files (yours, or the downloaded ones) rather than
+staged or SDM-cleaned reads, and keeps the sample's profile
+(`<sample>/Tax/Protal/profiles/<sample>.profile`). Its SAM is kept
+(`<sample>/Tax/Protal/<sample>.sam.zst`) only with `-profileProtal 2`, which needs it
+for the strain MSAs; with `1` it is deleted after profiling. Switching from `1` to `2`
+therefore aligns the samples again. How a sample is aligned depends on where its
+reads come from:
+
+- **Downloaded samples** (`ENAdownload`/`SRAdownload` in the map) get a Protal job of
+  their own as soon as their download is ready, also when they belong to an assembly
+  group; the sample's scratch, and with it the download, is cleaned up after that
+  job, so a cohort is never held on disk at once. The runs of a sample are profiled
+  together.
+- **Local samples** are aligned together, in one batch map job per pass, which loads
+  Protal's index once. `-protalBatchSize N` splits a pass's local samples into jobs of
+  at most `N` samples. A local sample whose reads need joining (several libraries) or
+  decompressing (bzip2, xz) gets a job of its own.
+
+Each sample is profiled with the reads of one kind: paired-end, else single-end,
+else PacBio or ONT reads, using every library of that kind. With the default
+`-protalIgnoreErrors 1`, other kinds of reads and BAM input are left out with a
+warning, and a sample with nothing usable is skipped (`<sample>.Protal.skip`).
+`-protalIgnoreErrors 0` stops instead. A failed Protal job is never hidden: in a
+batch, the samples Protal finished are kept and the job fails for the others, which a
+later pass aligns again.
+
+The profiles of the selected `-from`/`-to` range are merged into
+`pseudoGC/protal/Protal.abundance.tsv`; a sample with neither a profile nor a
+submitted job defers the merge, preventing a partial table. In mode `2`, a run over
+the complete mapped cohort (no `-from`/`-to`) then has Protal profile the kept SAMs
+again, without aligning or loading its index, and write an MSA per species found in
+two or more samples to `pseudoGC/protal/strains/<cohort_signature>/`
+(`strains/current` points at the latest cohort). A run over part of the cohort
+builds no MSAs. The same can be done by hand on any set of kept SAMs, for example
+after adding samples: `protal --map` with a `SAM` column naming them, and no
+`--no_strains`.
 
 ## Hybrid assemblies
 

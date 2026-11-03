@@ -32,6 +32,8 @@ sub decideMapper($ $){
 			}
 		}
 	}
+	die "-mapper 4 (kma) is no longer supported; use 1 (bowtie2), 2 (bwa), 3 (minimap2) or 5 (strobealign)\n"
+		if ($MapperProg == 4);
 	if ($MapperProg<1 || $MapperProg>5){
 		die "IO_Tamoc_progs.pm::decideMapper:: unknown MapperProg provided: $MapperProg\n! Aborting..\n";
 	}
@@ -343,19 +345,17 @@ sub activateBase{
 sub mapperDBbuilt( $ $){
 	my ($DBbtRef, $MapperProg2) = @_;
 	$MapperProg2 = decideMapper($MapperProg2, "");
-	my $bwt2IdxFileSuffix = ".bw2";my $mini2IdxFileSuffix = ".mmi";
-	my $kmaIdxFileSuffix = ".kma";
-	if ($MapperProg2 == 5){return 1;} #strobealign doesn't need index..
+	my $bwt2IdxFileSuffix = ".bw2";
+	#strobealign and minimap2 index the FASTA themselves, with the preset of the mapping call
+	if ($MapperProg2 == 5 || $MapperProg2 == 3){return 1;}
 	#print "($MapperProg2 == 1 || $MapperProg2 == -1) && !-s $DBbtRef$bwt2IdxFileSuffix.rev.2.bt2\n";
 	my @bt2_small = map { "$DBbtRef$bwt2IdxFileSuffix.$_.bt2" } qw(1 2 3 4 rev.1 rev.2);
 	my @bt2_large = map { "$DBbtRef$bwt2IdxFileSuffix.$_.bt2l" } qw(1 2 3 4 rev.1 rev.2);
 	my $bowtie_complete = !(grep { !-s $_ } @bt2_small) || !(grep { !-s $_ } @bt2_large);
-	if ( 
-		($MapperProg2 ==0 && !-e "$DBbtRef$bwt2IdxFileSuffix.0.sa") 
+	if (
+		($MapperProg2 ==0 && !-e "$DBbtRef$bwt2IdxFileSuffix.0.sa")
 		|| ( ($MapperProg2 == 1 || $MapperProg2 == -1) && !$bowtie_complete ) #bowtie2
-		||( $MapperProg2 == 2 && !-s "$DBbtRef.pac" ) #bwa
-		||( ($MapperProg2 == 3 || $MapperProg2 == -1 ) && !-s "$DBbtRef$mini2IdxFileSuffix" ) #minimap2
-		||( ($MapperProg2 == 4 ) && !-s "$DBbtRef$kmaIdxFileSuffix.seq.b" )#kma
+		||( $MapperProg2 == 2 && !-s "$DBbtRef.sa" ) #bwa writes .sa last; an interrupted build leaves .pac
 	) {
 		return 0;
 	}
@@ -364,26 +364,25 @@ sub mapperDBbuilt( $ $){
 
 sub buildMapperIdx($ $ $ $){
 	my ($REF,$ncore,$lrgDB,$MapperProg) = @_;
-	#1=bowtie2, 2=bwa, 3=minimap2
+	#1=bowtie2, 2=bwa, 3=minimap2, 5=strobealign
 	$MapperProg = decideMapper($MapperProg,"");
-	if ($MapperProg == 5){return ("",$REF,$REF);} #strobealign doesn't need index..
-	my $bwt2IdxFileSuffix = ".bw2";my $mini2IdxFileSuffix = ".mmi";
-	my $kmaIdxFileSuffix = ".kma";
+	#strobealign and minimap2 map against the FASTA. A minimap2 .mmi fixes -k/-w/-H at build
+	#time and overrides the -x preset of the mapping call (sr, map-ont, map-hifi, asm20).
+	if ($MapperProg == 5 || $MapperProg == 3){return ("",$REF,$REF);}
+	my $bwt2IdxFileSuffix = ".bw2";
 	my $bwtIdx = $REF.$bwt2IdxFileSuffix;
 	my $chkFi = $bwtIdx;
-	my @required_index_files;
+	my $missing_test;
 	if ($MapperProg==1){
 		my $extension = $lrgDB ? 'bt2l' : 'bt2';
-		@required_index_files = map { "$bwtIdx.$_.$extension" } qw(1 2 3 4 rev.1 rev.2);
-		$chkFi = $required_index_files[-1];
-	}elsif ($MapperProg==2){$chkFi = $REF.".pac";
-	} elsif ($MapperProg == 3){$chkFi = $REF.$mini2IdxFileSuffix;
-	} elsif ($MapperProg == 4){$chkFi = $REF.$kmaIdxFileSuffix.".seq.b";
+		$chkFi = "$bwtIdx.rev.2.$extension";
+		#bowtie2-build switches to .bt2l by itself for references over 4 Gbp
+		$missing_test = join(' && ', map { my $ext = $_;
+			'! { '.join(' && ', map { "[ -s $bwtIdx.$_.$ext ]" } qw(1 2 3 4 rev.1 rev.2)).'; }' } qw(bt2 bt2l));
+	}elsif ($MapperProg==2){$chkFi = $REF.".sa"; #written last by bwa index
 	}
 	my $dbCmd ="";
-	my $missing_test = @required_index_files
-		? join(' || ', map { "[ ! -s $_ ]" } @required_index_files)
-		: "[ ! -s $chkFi ]";
+	$missing_test //= "[ ! -s $chkFi ]";
 	$dbCmd .= "if $missing_test; then \n";
 	$dbCmd .= "echo \"Building index for mapper $MapperProg\"\n";
 	if ($MapperProg==1){
@@ -395,17 +394,8 @@ sub buildMapperIdx($ $ $ $){
 	} elsif($MapperProg==2) { 
 		my $bwaBin  = getProgPaths("bwa");
 		$dbCmd .= $bwaBin." index $REF\n";
-		if (-s $REF.".pac"){$dbCmd = "";} 
+		if (-s $REF.".sa"){$dbCmd = "";}
 		#die $dbCmd."\n";
-	} elsif ($MapperProg == 3){
-		$bwtIdx = $REF.$mini2IdxFileSuffix;
-		my $mini2  = getProgPaths("minimap2");
-		$dbCmd .= "$mini2 -t $ncore -H -d $bwtIdx $REF\n";
-		$dbCmd = "" if (-s $bwtIdx);
-	} elsif ($MapperProg==4){ 			
-		$bwtIdx = $REF.$kmaIdxFileSuffix;
-		my $kmaBin = getProgPaths("kma");
-		$dbCmd .= "$kmaBin index -i $REF -o $bwtIdx 2>/dev/null \n"; #-t $ncore 
 	}
 
 	$dbCmd .= "fi\n" unless ($dbCmd eq "");
@@ -498,6 +488,7 @@ sub jgi_depth_cmd{
 	$numCores = $_[3] if (@_ > 3);
 	my $refFA = "";
 	$refFA = $_[4] if (@_ > 4);
+	my $filterBams = @_ > 5 ? $_[5] : 0; #1: BAM inputs may hold flagged (discarded) alignments
 	#die $dirs."\n";
 	my $smtBin = getProgPaths("samtools");
 	my $jgiScr = getProgPaths("jgiDepth");
@@ -508,8 +499,10 @@ sub jgi_depth_cmd{
 	my %seen_mapping;
 	my $isCram=0;
 	foreach my $DDI (@dirSS){
-		if (-f $DDI && $DDI =~ /\.(?:bam|cram)$/i) {
-			die "jgi_depth_cmd:::Empty mapping file $DDI\n" unless -s $DDI;
+		# A BAM/CRAM path may be produced by the same job this command is part of
+		# (MATAF4 mapping), so only an existing empty file is an error here.
+		if ($DDI =~ /\.(?:bam|cram)$/i) {
+			die "jgi_depth_cmd:::Empty mapping file $DDI\n" if -e $DDI && !-s $DDI;
 			push @mapping_files, $DDI unless $seen_mapping{$DDI}++;
 		} else {
 			$DDI =~ s{/$}{};
@@ -554,13 +547,15 @@ sub jgi_depth_cmd{
 	my $covCmd = "set -e\n";
 	my @temporary_bams;
 	$covCmd .= "rm -f $out.jgi.*\n";
-	if ($isCram){
-		die "jgi_depth_cmd:::No reference Fasta given for @dirSS\n" if ($refFA eq "");
-		# Convert all CRAMs to temp BAMs before activation (samtools is in the base env, not MF4binners)
+	if ($isCram || $filterBams){
+		die "jgi_depth_cmd:::No reference Fasta given for @dirSS\n" if ($isCram && $refFA eq "");
+		# Convert all CRAMs to temp BAMs before activation (samtools is in the base env, not MF4binners),
+		# dropping alignments the CRAM keeps only as discarded (FLAG 0x200 QCFAIL / 0x400 duplicate)
 		for (my $i=0;$i<@mapping_files;$i++){
-			next unless $mapping_files[$i] =~ /\.cram$/i;
+			my $isCramFile = $mapping_files[$i] =~ /\.cram$/i;
+			next unless $isCramFile || $filterBams;
 			my $tmpBam = "$out.jgi.tmp.$i.bam";
-			$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $mapping_files[$i] > $tmpBam\n";
+			$covCmd .= "$smtBin view ".($isCramFile ? "-T $refFA " : "")."-F 0x600 -@ $numCores -b $mapping_files[$i] > $tmpBam\n";
 			$mapping_files[$i] = $tmpBam;
 			push @temporary_bams, $tmpBam;
 		}

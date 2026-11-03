@@ -7,10 +7,45 @@ use IO::Uncompress::Gunzip qw($GunzipError);
 use Mods::GenoMetaAss qw(resolveExistingFile);
 
 our @EXPORT_OK = qw(
-	read_stats_log_excerpt
+	read_stats_log_excerpt parse_bam_filter_counters
 	reset_stats_log_sampling
 	stats_log_sampling_summary
 );
+
+# Parse complete per-process filter blocks, accepting current and legacy labels.
+# Missing/truncated counters remain unavailable instead of becoming zero rates.
+sub parse_bam_filter_counters {
+	my ($text) = @_;
+	my %labels = (
+		'Input records' => 'records', Inentries => 'records',
+		'Retained mapped records' => 'retained', TotalRetained => 'retained',
+		'Newly filtered records' => 'filtered', TotalRm => 'filtered',
+		'Already unmapped records' => 'unmapped',
+		'Malformed SAM records skipped' => 'malformed',
+	);
+	my @blocks;
+	my $block;
+	for my $line (split /\n/, $text // '') {
+		next unless $line =~ /^([^:]+):\s*(\d+)\s*$/ && exists $labels{$1};
+		my ($label, $count) = ($1, $2);
+		my $key = $labels{$label};
+		if ($key eq 'records') {
+			$block = {current => $label eq 'Input records' ? 1 : 0};
+			push @blocks, $block;
+		}
+		$block->{$key} = 0 + $count if $block;
+	}
+	return unless @blocks;
+	my %total = map { $_ => 0 } qw(records retained filtered unmapped malformed);
+	for my $entry (@blocks) {
+		my @required = qw(records retained filtered);
+		push @required, qw(unmapped malformed) if $entry->{current};
+		return if grep { !exists $entry->{$_} } @required;
+		return if $entry->{retained} > $entry->{records};
+		$total{$_} += $entry->{$_} // 0 for keys %total;
+	}
+	return \%total;
+}
 
 my %sampling_summary;
 

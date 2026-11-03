@@ -1,0 +1,268 @@
+package Mods::WorkflowResilience;
+
+use strict;
+use warnings;
+
+use Exporter qw(import);
+use Fcntl qw(:flock SEEK_SET);
+use File::Basename qw(dirname);
+use File::Path qw(make_path);
+
+our @EXPORT_OK = qw(
+	retry_operation retry_unlink retry_rename retry_open retry_close
+	atomic_write_text write_workflow_record read_workflow_record
+	acquire_workflow_lock
+	preflight_executable preflight_directory filesystem_capacity preflight_capacity
+);
+
+sub acquire_workflow_lock {
+	my ($path, %options) = @_;
+	die "acquire_workflow_lock requires a lock path\n"
+		unless defined($path) && length($path);
+	my $label = $options{label} || 'workflow';
+	my $parent = dirname($path);
+	make_path($parent) unless -d $parent;
+
+	open my $lock, '+>>', $path
+		or die "Cannot open $label lock $path: $!\n";
+	unless (flock($lock, LOCK_EX | LOCK_NB)) {
+		seek($lock, 0, SEEK_SET);
+		local $/;
+		my $owner = <$lock> // '';
+		close $lock;
+		$owner =~ s/[\t\r\n]+/ /g;
+		$owner =~ s/^\s+|\s+$//g;
+		die "$label is already active; refusing concurrent mutation of shared "
+			."workflow state at $path"
+			.(length($owner) ? "; owner: $owner" : '')
+			."\n";
+	}
+
+	my $owner = defined($options{owner}) ? $options{owner}
+		: join(' ', "pid=$$", 'started='.time);
+	$owner =~ s/[\t\r\n]+/ /g;
+	$owner =~ s/^\s+|\s+$//g;
+	$owner .= "\n";
+	truncate($lock, 0)
+		or die "Cannot reset $label lock owner at $path: $!\n";
+	seek($lock, 0, SEEK_SET)
+		or die "Cannot position $label lock owner at $path: $!\n";
+	my $offset = 0;
+	while ($offset < length($owner)) {
+		my $written = syswrite($lock, $owner, length($owner) - $offset, $offset);
+		die "Cannot record $label lock owner at $path: $!\n"
+			unless defined($written) && $written > 0;
+		$offset += $written;
+	}
+	return $lock;
+}
+
+sub retry_operation {
+	my (%options) = @_;
+	my $code = $options{code};
+	die "retry_operation requires a code reference\n" unless ref($code) eq 'CODE';
+	my $label = $options{label} || 'operation';
+	my $attempts = defined($options{attempts}) ? 0 + $options{attempts} : 5;
+	$attempts = 1 if $attempts < 1;
+	my $delays = $options{delays} || [1, 2, 5, 10];
+	my $sleeper = $options{sleeper} || sub { sleep($_[0]); };
+	my ($last_error, $result);
+	for my $attempt (1 .. $attempts) {
+		my $ok = eval {
+			$result = $code->($attempt);
+			die "$label returned an unsuccessful result\n" unless $result;
+			1;
+		};
+		return $result if $ok;
+		$last_error = $@ || "$label failed: $!";
+		$last_error =~ s/\s+\z//;
+		last if $attempt == $attempts;
+		my $delay = $delays->[$attempt - 1];
+		$delay = $delays->[-1] unless defined $delay;
+		$delay = 1 unless defined($delay) && $delay >= 0;
+		warn "$label failed on attempt $attempt/$attempts; retrying in ${delay}s: $last_error\n";
+		$sleeper->($delay);
+	}
+	my $message = "$label failed after $attempts attempt(s): $last_error\n";
+	if ($options{fatal} // 1) {
+		die $message;
+	}
+	warn $message;
+	return;
+}
+
+sub retry_unlink {
+	my ($path, %options) = @_;
+	return 1 unless defined($path) && (-e $path || -l $path);
+	return retry_operation(
+		%options,
+		label => $options{label} || "remove $path",
+		code => sub { return 1 unless -e $path || -l $path; return unlink($path) },
+	);
+}
+
+sub retry_rename {
+	my ($source, $destination, %options) = @_;
+	return retry_operation(
+		%options,
+		label => $options{label} || "publish $destination",
+		code => sub {
+			return 1 if -e $destination && !-e $source;
+			return 0 unless rename($source, $destination);
+			return -e $destination ? 1 : 0;
+		},
+	);
+}
+
+sub retry_open {
+	my ($mode, $path, %options) = @_;
+	my $handle;
+	retry_operation(
+		%options,
+		label => $options{label} || "open $path",
+		code => sub { return open($handle, $mode, $path) },
+	);
+	return $handle;
+}
+
+sub retry_close {
+	my ($handle, $label, %options) = @_;
+	return retry_operation(
+		%options,
+		label => $label || 'close file',
+		code => sub { return close($handle) },
+	);
+}
+
+sub atomic_write_text {
+	my ($path, $content, %options) = @_;
+	die "atomic_write_text requires an output path\n"
+		unless defined($path) && length($path);
+	$content = '' unless defined $content;
+	my $temporary = "$path.tmp.$$";
+	my $result = retry_operation(
+		%options,
+		label => $options{label} || "atomically publish $path",
+		code => sub {
+			unlink $temporary if -e $temporary || -l $temporary;
+			open my $handle, '>', $temporary or return;
+			my $written = print {$handle} $content;
+			my $closed = close $handle;
+			return unless $written && $closed;
+			return unless rename $temporary, $path;
+			return -e $path ? 1 : 0;
+		},
+	);
+	unlink $temporary if !$result && (-e $temporary || -l $temporary);
+	return $result;
+}
+
+sub write_workflow_record {
+	my ($path, %fields) = @_;
+	my @columns = qw(status stage timestamp pid reason);
+	$fields{status} = 'running' unless defined $fields{status};
+	$fields{stage} = 'unknown' unless defined $fields{stage};
+	$fields{timestamp} = time unless defined $fields{timestamp};
+	$fields{pid} = $$ unless defined $fields{pid};
+	$fields{reason} = '' unless defined $fields{reason};
+	for my $column (@columns) {
+		$fields{$column} =~ s/[\t\r\n]+/ /g;
+	}
+	my $text = join("\t", @columns)."\n"
+		.join("\t", @fields{@columns})."\n";
+	return atomic_write_text($path, $text,
+		fatal => 0,
+		label => "publish workflow record $path");
+}
+
+# Inverse of write_workflow_record: returns a hash reference of the record's
+# columns, or undef when the file is absent, empty or malformed.
+sub read_workflow_record {
+	my ($path) = @_;
+	return undef unless defined($path) && -f $path && -s _;
+	open my $in, '<', $path or return undef;
+	my $header = <$in>;
+	my $values = <$in>;
+	close $in;
+	return undef unless defined($header) && defined($values);
+	$header =~ s/[\r\n]+\z//;
+	$values =~ s/[\r\n]+\z//;
+	my @columns = split /\t/, $header, -1;
+	my @fields = split /\t/, $values, -1;
+	return undef unless @columns && $columns[0] eq 'status';
+	my %record;
+	@record{@columns} = map { defined $_ ? $_ : '' } @fields[0 .. $#columns];
+	return \%record;
+}
+
+sub preflight_executable {
+	my ($program, $label) = @_;
+	die "Missing configured program for $label\n" unless defined($program) && length($program);
+	if ($program =~ m{[\\/]}) {
+		die "Configured $label executable does not exist: $program\n" unless -e $program;
+		die "Configured $label executable is not executable: $program\n" unless -x $program;
+		return $program;
+	}
+	for my $directory (split /:/, $ENV{PATH} // '') {
+		next unless length $directory;
+		my $candidate = "$directory/$program";
+		return $candidate if -f $candidate && -x $candidate;
+	}
+	die "Configured $label executable is not available on PATH: $program\n";
+}
+
+sub preflight_directory {
+	my ($directory, $label) = @_;
+	$label ||= 'workflow directory';
+	make_path($directory) unless -d $directory;
+	die "$label is not a directory: $directory\n" unless -d $directory;
+	my $probe = "$directory/.matafiler-preflight-$$";
+	my $published = "$probe.published";
+	my $handle = retry_open('>', $probe, label => "$label write probe");
+	print {$handle} "preflight\n" or die "Cannot write $label probe $probe: $!\n";
+	retry_close($handle, "$label probe close");
+	retry_rename($probe, $published, label => "$label rename probe");
+	retry_unlink($published, label => "$label probe cleanup", fatal => 0);
+	return 1;
+}
+
+sub _df_value {
+	my ($flag, $directory) = @_;
+	open my $df, '-|', 'df', $flag, $directory or return;
+	my @lines = <$df>;
+	close $df or return;
+	return unless @lines >= 2;
+	my @field = split /\s+/, $lines[-1];
+	@field = grep { length } @field;
+	return unless @field >= 4 && $field[-3] =~ /^\d+$/;
+	return 0 + $field[-3];
+}
+
+sub filesystem_capacity {
+	my ($directory) = @_;
+	my $available_kb = _df_value('-Pk', $directory);
+	my $available_inodes = _df_value('-Pi', $directory);
+	return {
+		available_kb => $available_kb,
+		available_inodes => $available_inodes,
+	};
+}
+
+sub preflight_capacity {
+	my ($directory, $label, %options) = @_;
+	$label ||= 'workflow filesystem';
+	my $minimum_kb = defined($options{minimum_kb})
+		? 0 + $options{minimum_kb} : 2 * 1024 * 1024;
+	my $minimum_inodes = defined($options{minimum_inodes})
+		? 0 + $options{minimum_inodes} : 10_000;
+	my $capacity = filesystem_capacity($directory);
+	warn "$label has less than ".int($minimum_kb / 1024)." MiB available\n"
+		if defined($capacity->{available_kb})
+			&& $capacity->{available_kb} < $minimum_kb;
+	warn "$label has fewer than $minimum_inodes inodes available\n"
+		if defined($capacity->{available_inodes})
+			&& $capacity->{available_inodes} < $minimum_inodes;
+	return $capacity;
+}
+
+1;

@@ -2,6 +2,7 @@
 #extracts abundance of all essential marker genes, as well as FMGs
 #./extrAllE100GC.pl /g/scb/bork/hildebra/SNP/GCs/GNM3_ABR
 #./extrAllE100GC.pl /g/scb/bork/hildebra/SNP/GCs/
+use File::Path qw(make_path);
 use warnings;
 use strict;
 sub processSubGenes;sub getEgenes;
@@ -14,12 +15,16 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
 use Mods::CatalogPaths qw(resolve_catalog_maps);
 
 my $smtBin = getProgPaths("samtools");#/g/bork5/hildebra/bin/samtools-1.2/samtools";
-my $rarBin = getProgPaths("rare");#
+my $rarBin = getProgPaths("rare");
+my $rmBin = getProgPaths("rm");
 
 die "No input args \n" if (@ARGV < 1);
 
 my $GCd = $ARGV[0];
 my $tmpD = $ARGV[1];
+my $clusterID = @ARGV > 2 ? $ARGV[2] : 95;
+die "Cluster identity must be an integer between 1 and 100\n"
+	unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
 my $oldNameFolders = -1;#$ARGV[1];
 my $mapF = resolve_catalog_maps($GCd);
 print "Reading map(s): $mapF\n";
@@ -28,7 +33,7 @@ my %map = %{$hrm};
 my @samples = @{$map{opt}{smpl_order}};
 my $Nsmpls = scalar(@samples);
 $tmpD.="/FMGextras/";
-system "mkdir -p $tmpD";
+make_path($tmpD) unless -d $tmpD;
 $| = 1;
 
 my $doSubmit = 1;my $submSys = ""; my $qsubDir = "$GCd/LOGandSUB/";
@@ -45,9 +50,15 @@ my $cntSkips=0;my $cnt=0;
 my $bonSplit = 5;
 my %genesE1h; 
 my $genesFMGfilesHR = {}; my %genesFMGstreams;
-my $genesGTDBfilesHR = {};
-my %seenAssembls; 
-if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
+my $genesGTDBfilesHR = {}; my %genesGTDBstreams;
+my %seenAssembls;
+# Everything the marker-matrix step publishes; reuse only a complete set
+# (the old test named a non-existent "Mattrix.FMG.mat" and so never skipped).
+my @markerMatrixOutputs = map { ("$GCd/$_.subset.cats", "$GCd/Matrix.$_.mat",
+		"$GCd/Mat.cov.$_.mat.gz", "$GCd/Mat.med.$_.mat.gz") } qw(FMG GTDBmg);
+my $markerMatricesDone = !grep { !-s $_ } @markerMatrixOutputs;
+print "Marker gene matrices already complete; only re-extracting marker sequences\n" if $markerMatricesDone;
+if (!$markerMatricesDone){
 	#$genesE1h{1}{gg} = "falk";
 	#die $genesE1h{1}{gg};
 	print "Reading reference FMG/GTDBs from assemblies..\n";
@@ -62,7 +73,9 @@ if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 		my $SmplName = $map{$smpl}{SmplID};
 		#skip samples where no assembly happened..
 		if (-e "$map{$smpl}{wrdir}/SMPL.empty"){$cntSkips++;next;}
-		my $metaGD = getAssemblPath($map{$smpl}{wrdir});
+		# geneCat's collation tolerates unassembled samples (-requireAllAssemblies 0); do the same here
+		my $metaGD = getAssemblPath($map{$smpl}{wrdir},"",0);
+		if ($metaGD eq ""){$cntSkips++;next;}
 		next if (exists($seenAssembls{$metaGD}));
 		$seenAssembls{$metaGD} = 1;
 
@@ -84,20 +97,25 @@ if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 		#read in FMG genes in assembly
 		my $FMGf = "$metaGD/ContigStats/FMG/FMGids.txt";
 		#print STDERR " Extracting FMG genes..\n";
-		$genesFMGfilesHR = MGintoCats($FMGf, $genesFMGfilesHR);
+		$genesFMGfilesHR = MGintoCats($FMGf, $genesFMGfilesHR, \%genesFMGstreams, "FMG");
 		#print STDERR " Extracting GTDB genes..\n";
 		my $GTDBf = "$metaGD/ContigStats/GTDBmg/marker_genes_meta.tsv";
-		$genesGTDBfilesHR = MGintoCats($GTDBf, $genesGTDBfilesHR);
+		$genesGTDBfilesHR = MGintoCats($GTDBf, $genesGTDBfilesHR, \%genesGTDBstreams, "GTDBmg");
 		
 	}
+	# Keep the per-marker files open while scanning assemblies.  This avoids many
+	# thousands of small append operations on the shared filesystem, but they must
+	# be closed before the downstream readers consume them.
+	close $_ for values %genesFMGstreams;
+	close $_ for values %genesGTDBstreams;
 	print "Read ref dataset\n";
 	print "skipped $cntSkips samples\n" if ($cntSkips > 0);
 }
 #foreach my $cat (keys %genesFMGstreams){
 	#close $genesFMGstreams{$cat};
 #}
-if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
-	
+if (!$markerMatricesDone){
+
 	my $allGs = {};
 	$allGs = getEgenes($genesFMGfilesHR,$allGs);
 	$allGs = getEgenes($genesGTDBfilesHR,$allGs);
@@ -105,17 +123,24 @@ if (!fileGZe("$GCd/Mattrix.FMG.mat" )){
 	print STDERR "Subset of gene cats to read: " . scalar(keys %{$allGs}) . "\n";
 	
 	print STDERR "Reading cluster index\n";
-	my ($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.95.fna.clstr.idx",2,$allGs);
+	my ($hr1,$hr2) = readClstrRev("$GCd/compl.incompl.$clusterID.fna.clstr.idx",2,$allGs);
 	print STDERR "Done reading idx\n";
 
 	#print "@e1cat\n";
 	#Sort matrix genes into FMGs and extract matrix subset that contains these genes
 	print "Creating FMG gene matrix\n";
-	processSubGenes($genesFMGfilesHR,"FMG",$hr1);
+	my @matrixJobs;
+	push @matrixJobs, processSubGenes($genesFMGfilesHR,"FMG",$hr1);
 	#Sort matrix genes into FMGs and extract matrix subset that contains these genes
 	print "Creating GTDB gene matrix\n";
-	processSubGenes($genesGTDBfilesHR,"GTDBmg",$hr1);
+	push @matrixJobs, processSubGenes($genesGTDBfilesHR,"GTDBmg",$hr1);
 	undef $hr1 ;
+	# geneCat writes the marker stone as soon as this script exits, so the
+	# submitted matrix-subset jobs must have finished and published first.
+	@matrixJobs = grep { defined($_) && $_ ne '' } @matrixJobs;
+	qsubSystemJobAlive(\@matrixJobs, $QSBoptHR) if @matrixJobs;
+	my @missingMatrices = grep { !-s $_ } @markerMatrixOutputs;
+	die "Marker gene matrix jobs finished without publishing: @missingMatrices\n" if @missingMatrices;
 	#don't create for e100
 	#print "Creating e100 gene matrix\n";
 	#processSubGenes(\%genesE1h,"e100");
@@ -134,7 +159,7 @@ exit(0);
 
 
 sub MGintoCats{
-	my ($FMGf, $genesFMGfilesL) = @_;
+	my ($FMGf, $genesFMGfilesL, $streamsL, $sourceTag) = @_;
 	#my %genesFMGfilesL = %{$hr};
 	if (-f $FMGf){
 		#open my $I,"<$FMGf" or die "Can't open FMG file $FMGf\n";
@@ -150,91 +175,80 @@ sub MGintoCats{
 		}	
 		close $I;
 		#print "N=$gCnt ";
-		#store between runs..
+		# Store between runs.  Retain one stream per category for the complete
+		# assembly scan; repeatedly reopening these files is a major bottleneck on
+		# shared storage for large catalogues.
 		foreach my $cat (keys %genesFMG){
 			if (!exists($genesFMGfilesL->{$cat})){
-				my $tmpF = "$tmpD/cat.$cat.idx";
-				#print STDERR "Deleting $tmpF\n";
-				system "rm -f $tmpF";
+				# FMG and GTDB marker names may overlap; keep their temporary
+				# collection files separate.
+				my $tmpF = "$tmpD/$sourceTag.cat.$cat.idx";
 				$genesFMGfilesL->{$cat} = $tmpF;
-				#open ($genesFMGstreams{$cat},">$tmpF") or die "can't open $tmpF\n";
+				open my $stream, ">", $tmpF or die "Can't open write tmp $tmpF\n";
+				$streamsL->{$cat} = $stream;
 			}
-			open OOX,">>",$genesFMGfilesL->{$cat} or die "Can't opebn write tmp $genesFMGfilesL->{$cat}\n";
+			my $stream = $streamsL->{$cat};
 			foreach my $ge (keys %{$genesFMG{$cat}}){
-				print OOX "$ge\n";
+				print {$stream} "$ge\n";
 			}
-			close OOX;
 		}
 	} else {print "Can't find FMG file $FMGf\n";}
 	return $genesFMGfilesL;
 }
 
-sub getGeneSeqsSubGenes(){
+sub getGeneSeqsSubGenes {
 	my ($tag) = @_;
 	my $subF = "$GCd/$tag.subset.cats";
 	my $fmgOD = "$GCd/$tag/";
-	#die "TODO getGeneSeqsSubGenes\n";
-	system "mkdir -p $fmgOD"; 
-	my $hr = readFasta("$GCd/compl.incompl.95.fna",1);
-	my %FNA = %{$hr};
-	
-	print "Read FNA \n";
-	
-	open I,"<$subF" or die "can't open $subF\n"; 
-	while (my $line=<I>){
-		chomp $line;
-		my @spl = split /\t/,$line;
-		my @spl2 = split /,/,$spl[2];
-		#die "\n@spl2\n";
-		my $ofile = $fmgOD."/$spl[0]";
-		if (0){
-			system "$smtBin faidx $GCd/compl.incompl.95.fna ". join (" ", @spl2) . " > $ofile.fna";
-		} else {
-			open O1,"> $ofile.fna" or die $!;
-			foreach my $k (@spl2){
-				print O1 ">".$k."\n$FNA{$k}\n";
-			}
-			close O1; 
-		}
-	} 
-	close I;
-	%FNA = ();
-	
-	#split to lessen mem burden
-	$hr = readFasta("$GCd/compl.incompl.95.prot.faa",1);
-	my %FAA = %{$hr};
-	print "Read FAA \n";
-	open I,"<$subF" or die "can't open $subF\n"; 
-	while (my $line=<I>){
-		chomp $line;
-		my @spl = split /\t/,$line;
-		my @spl2 = split /,/,$spl[2];
-		#die "\n@spl2\n";
-		my $ofile = $fmgOD."/$spl[0]";
-		if (0){
-			system "$smtBin faidx $GCd/compl.incompl.95.prot.faa ". join (" ", @spl2) . " > $ofile.faa";
-		} else {
-			open O2,"> $ofile.faa" or die $!;
-			foreach my $k (@spl2){
-				print O2 ">".$k."\n$FAA{$k}\n";
-			}
-			close O2;
-		}
-	} 
-	close I;
+	make_path($fmgOD) unless -d $fmgOD;
 
+	open my $subset_input, '<', $subF or die "can't open $subF\n";
+	my (@categories, %wanted);
+	while (my $line = <$subset_input>) {
+		chomp $line;
+		next unless length $line;
+		my @fields = split /\t/, $line, -1;
+		die "Malformed marker subset row in $subF: $line\n"
+			unless @fields >= 3 && length($fields[0]) && length($fields[2]);
+		my @genes = grep { length } split /,/, $fields[2];
+		push @categories, [$fields[0], \@genes];
+		$wanted{$_} = 1 for @genes;
+	}
+	close $subset_input or die "Cannot close marker subset $subF: $!\n";
 
+	for my $type (
+		['fna', "$GCd/compl.incompl.$clusterID.fna"],
+		['faa', "$GCd/compl.incompl.$clusterID.prot.faa"],
+	) {
+		my ($suffix, $catalogue) = @{$type};
+		my $sequences = readFasta(
+			$catalogue, 1, "\\s", \%wanted, { fai => 1 },
+		);
+		print "Read ".scalar(keys %{$sequences})." indexed $suffix marker sequences\n";
+		for my $category (@categories) {
+			my ($name, $genes) = @{$category};
+			my $output_path = "$fmgOD/$name.$suffix";
+			open my $output, '>', $output_path
+				or die "Cannot create marker FASTA $output_path: $!\n";
+			for my $gene (@{$genes}) {
+				die "Marker gene $gene is absent from $catalogue\n"
+					unless exists($sequences->{$gene});
+				print {$output} ">$gene\n$sequences->{$gene}\n"
+					or die "Cannot write marker FASTA $output_path: $!\n";
+			}
+			close $output or die "Cannot close marker FASTA $output_path: $!\n";
+		}
+	}
 }
 
 
 sub getEgenes{
 	my ($ghr,$r1) = @_;
-	my %genesF = %{$ghr};
-	my @e1cat = keys %genesF;
+	my @e1cat = keys %{$ghr};
 
 	foreach my $e1c (@e1cat){
 		#my @spG = keys %{$genes{$e1c}};#my @spG;
-		open I,"<$genesF{$e1c}" or die "cant open tmp file $genesF{$e1c}\n";
+		open I,"<$ghr->{$e1c}" or die "cant open tmp file $ghr->{$e1c}\n";
 		while (<I>){chomp; ${$r1}{$_}=1;}
 		close I;
 	}
@@ -243,16 +257,15 @@ sub getEgenes{
 
 sub processSubGenes{
 	my ($ghr,$tag,$gene2cl) = @_;
-	my %genesF = %{$ghr};
 	#my %gene2cl = %{$hr1};
 	my $subF = "$GCd/$tag.subset.cats";
-	my @e1cat = keys %genesF;
+	my @e1cat = keys %{$ghr};
 	my %selC; open O ,">$subF" or die "Can't open $subF";
 	my $catCnt=0;my $geneCnt=0;my $fail_abort=0;
 	foreach my $e1c (@e1cat){
 		#my @spG = keys %{$genes{$e1c}};
 		my @spG;
-		open I,"<$genesF{$e1c}" or die "cant open tmp file $genesF{$e1c}\n";
+		open I,"<$ghr->{$e1c}" or die "cant open tmp file $ghr->{$e1c}\n";
 		while (<I>){chomp; push @spG,$_;}
 		close I;
 		#die "N=".@spG."  $spG[0]   $genesF{$e1c}\n";
@@ -274,7 +287,7 @@ sub processSubGenes{
 		#print $addD  ."    @keysHds\n";
 		print O $e1c."\t$size\t".$addD."\n";
 		$geneCnt += $size;
-		my %tmp = (%selC, %selD); %selC = %tmp;
+		$selC{$_} = 1 for keys %selD;
 		$catCnt++;
 	#die ( @spG."\n");
 	}
@@ -295,7 +308,7 @@ sub processSubGenes{
 	$cmdX .= "$rarBin lineExtr -i $GCd/Mat.cov.mat.gz -o $GCd/Mat.cov.$tag.mat -reference $GCd/$tag.lines -t $cores -checkRowName2Idx\n ";
 	$cmdX .= "$rarBin lineExtr -i $GCd/Mat.med.mat.gz -o $GCd/Mat.med.$tag.mat  -reference $GCd/$tag.lines -t $cores -checkRowName2Idx\n ";
 	$cmdX .= "$pigzBin -p 6 $GCd/Mat.cov.$tag.mat $GCd/Mat.med.$tag.mat\n";
-	$cmdX .= "rm $GCd/$tag.lines\n";
+	$cmdX .= "$rmBin $GCd/$tag.lines\n";
 	print $cmdX."\n";
 	#die $cmdX."\n";
 	#systemW $cmdX;
@@ -309,4 +322,5 @@ sub processSubGenes{
 	print "Submitted $tag\n";
 	print "Found $catCnt gene categories, with total of $geneCnt members\n";
 	#print "Done\n";
+	return $dep1;
 }

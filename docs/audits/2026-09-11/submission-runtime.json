@@ -1,0 +1,96 @@
+{
+   "coverage" : {
+      "after" : {
+         "checks" : 30000,
+         "file_tests_per_complete_check" : 3,
+         "median_seconds" : 0.222213983535767,
+         "seconds" : [
+            0.222404956817627,
+            0.222213983535767,
+            0.217145919799805
+         ]
+      },
+      "before" : {
+         "checks" : 30000,
+         "file_tests_per_complete_check" : 12,
+         "median_seconds" : 0.309329986572266,
+         "seconds" : [
+            0.309329986572266,
+            0.30605411529541,
+            0.310986995697021
+         ]
+      }
+   },
+   "description" : "Warm local filesystem and generated shell command microbenchmarks; not HPC wall time",
+   "diamond_collection" : {
+      "merged" : {
+         "after" : {
+            "counted_intermediate_files" : 1,
+            "hit_rows" : 50000,
+            "median_seconds" : 0.0809109210968018,
+            "seconds" : [
+               0.0831010341644287,
+               0.0809109210968018,
+               0.0798499584197998
+            ]
+         },
+         "before" : {
+            "counted_intermediate_files" : 1,
+            "hit_rows" : 50000,
+            "median_seconds" : 0.0873498916625977,
+            "seconds" : [
+               0.0738019943237305,
+               0.0902230739593506,
+               0.0873498916625977
+            ]
+         },
+         "same_hits_and_multiplicity" : true
+      },
+      "mixed" : {
+         "after" : {
+            "counted_intermediate_files" : 1,
+            "hit_rows" : 200000,
+            "median_seconds" : 0.155267953872681,
+            "seconds" : [
+               0.247809171676636,
+               0.155267953872681,
+               0.154315948486328
+            ]
+         },
+         "before" : {
+            "counted_intermediate_files" : 4,
+            "hit_rows" : 200000,
+            "median_seconds" : 0.347682952880859,
+            "seconds" : [
+               0.347682952880859,
+               0.327937126159668,
+               0.356261014938354
+            ]
+         },
+         "same_hits_and_multiplicity" : true
+      },
+      "unmerged" : {
+         "after" : {
+            "counted_intermediate_files" : 0,
+            "hit_rows" : 150000,
+            "median_seconds" : 0.134180068969727,
+            "seconds" : [
+               0.114128828048706,
+               0.138247013092041,
+               0.134180068969727
+            ]
+         },
+         "before" : {
+            "counted_intermediate_files" : 3,
+            "hit_rows" : 150000,
+            "median_seconds" : 0.298069000244141,
+            "seconds" : [
+               0.306960105895996,
+               0.273356914520264,
+               0.298069000244141
+            ]
+         },
+         "same_hits_and_multiplicity" : true
+      }
+   }
+}

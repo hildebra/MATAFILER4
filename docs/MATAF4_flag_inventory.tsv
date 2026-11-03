@@ -39,7 +39,9 @@ preprocessing (cleaning reads etc)	inputFQregex1	string	'.*1\.f[^\.]*q\.gz$'	sta
 preprocessing (cleaning reads etc)	inputFQregex2	string	'.*2\.f[^\.]*q\.gz$'	stable	$MFconfig{rawFileSrchStr2}	regex for detecting read pair 2 in input fastq files
 preprocessing (cleaning reads etc)	inputFQregexSingle	string	""""""	stable	$MFconfig{rawFileSrchStrSingl}	regex for detecting single end reads in input fastq files
 preprocessing (cleaning reads etc)	inputFQregexTrustSingle	integer	0	stable	$MFconfig{prefSinglFQgreps}	if grep of files (rawSrchString) has multi assignments, which grep to trust more?
-preprocessing (cleaning reads etc)	inputBAMregex	string	""""""	stable	$MFconfig{rawFileBamSrchSing}	bams that will be converted to fastq
+preprocessing (cleaning reads etc)	inputBAMregex	string	""""""	stable	$MFconfig{rawFileBamSrchSing}	singleton or paired SAM/BAM/CRAM inputs; direct SDM input (paired: -paired 2) with streaming or cached raw extraction
+preprocessing (cleaning reads etc)	inputCramReference	string	""""""	stable	$MFconfig{inputCramReference}	indexed FASTA used to decode input CRAM
+preprocessing (cleaning reads etc)	inputCramReferenceSuppl	string	""""""	stable	$MFconfig{inputCramReferenceSuppl}	support CRAM decode reference; defaults to primary
 preprocessing (cleaning reads etc)	splitFastaInput	integer	0	stable	$MFconfig{splitFastaInput}	Enable FASTA input splitting during read staging.
 preprocessing (cleaning reads etc)	mergeReads	integer	0	stable	$MFopt{doReadMerge}	merge read pair 1+2 before assembly etc? (usually doesn't help assembly, but useful for mapping to ref database in some rare instances)
 preprocessing (cleaning reads etc)	ProbRdFilter	integer	1	stable	$MFopt{sdmProbabilisticFilter}	Enable probabilistic SDM read filtering.
@@ -82,10 +84,10 @@ gene prediction on assembly	predictEukGenes	integer	0	stable	$MFopt{DoEukGenePre
 gene prediction on assembly	kmerPerGene	integer	0	stable	$MFopt{kmerPerGene}	calculate kmer frequencies for each gene instead of per scaffold
 gene prediction on assembly	genePredGZenforce	integer	1	stable	$MFopt{genePredGZenforce}	Require the canonical compressed gene-prediction outputs.
 gene prediction on assembly	rewriteGenePred	integer	0	stable	$MFopt{rewriteGenePred}	Remove and rebuild gene predictions and dependent statistics.
-mapping	mapper	integer	-1	stable	$MFopt{MapperProg}	#1=bowtie2, 2=bwa, 3=minimap2, 4=kma, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
+mapping	mapper	integer	-1	stable	$MFopt{MapperProg}	#1=bowtie2, 2=bwa, 3=minimap2, 5=strobealign -1=auto (bowtie2 short, minimap2 long reads), -2=auto(strobealign short, minimap2 long)
 mapping	mapUnmapped	integer	0	stable	$MFopt{useUnmapped}	Pass reads left unmapped by one reference to the next mapping.
 mapping	mappingCoverage	integer	1	stable	$MFopt{mapModeCovDo}	Calculate per-contig and per-gene coverage for reference mappings.
-mapping	mappingMem	integer	-1	stable	$MFopt{MapperMemory}	total mem for mini2/kma/bwa/bwt2 in GB
+mapping	mappingMem	integer	-1	stable	$MFopt{MapperMemory}	total mem for minimap2/bwa/bowtie2/strobealign in GB
 mapping	mapSortMem	integer	-1	stable	$MFopt{mapSortMemGb}	total mem for samtools sort in GB
 mapping	rmDuplicates	integer	1	stable	$MFopt{MapperRmDup}	Remove duplicate alignments before coverage calculation.
 mapping	mappingCores	integer	8	stable	$MFopt{MapperCores}	CPU cores requested for each mapping job.
@@ -124,14 +126,15 @@ functional profiling (diamond)	reParseFunct	integer	0	stable	$MFopt{redoDiamondP
 functional profiling (diamond)	reProfileFunct	integer	0	stable	$MFopt{rewriteDiamond}	Remove and rebuild DIAMOND alignments and parsed profiles.
 functional profiling (diamond)	reProfileFuncTogether	integer	0	stable	$MFopt{rewriteAllIfAnyDiamond}	if any func database needs to be redone, than redo all indicated databases (useful if number of reads used changes..)
 functional profiling (diamond)	DiaCores	integer	12	stable	$MFopt{diaCores}	CPU cores requested for DIAMOND jobs.
-functional profiling (diamond)	DiaMem	integer	7	stable	$MFopt{diamondMem}	memory in GB for diamond alignment jobs
+functional profiling (diamond)	DiaMem	integer	16	stable	$MFopt{diamondMem}	memory in GB for diamond alignment jobs
 functional profiling (diamond)	DiaParseEvals	string	"""1e-7"""	stable	$MFopt{diaEVal}	evalues at which to accept hits to func database
 functional profiling (diamond)	DiaSensitiveMode	integer	0	stable	$MFopt{diaRunSensitive}	Enable DIAMOND sensitive mode.
+functional profiling (diamond)	DiaSearchTool	string	diamond	stable	$MFopt{diaSearchTool}	Aligner of the read-based functional search: diamond or mmseqs.
 functional profiling (diamond)	DiaFrameshift	integer	0	stable	$MFopt{diaFrameshift}	DIAMOND frameshift penalty for long, error-prone reads; 0 disables frameshift-aware alignment.
 functional profiling (diamond)	rmRawDiamondHits	integer	0	stable	$MFopt{DiaRmRawHits}	Delete raw DIAMOND hits after successful parsing.
 functional profiling (diamond)	DiaMinAlignLen	integer	20	stable	$MFopt{DiaMinAlignLen}	Minimum accepted DIAMOND alignment length.
-functional profiling (diamond)	DiaMinFracQueryCov	float	0.1	stable	$MFopt{DiaMinFracQueryCov}	Minimum accepted fraction of the query aligned.
-functional profiling (diamond)	DiaPercID	integer	40	stable	$MFopt{DiaPercID}	Minimum accepted DIAMOND percent identity.
+functional profiling (diamond)	DiaMinFracQueryCov	float	0.1	stable	$MFopt{DiaMinFracQueryCov}	Subject-coverage fraction threshold (legacy query-named flag).
+functional profiling (diamond)	DiaPercID	float	40	stable	$MFopt{DiaPercID}	Minimum accepted DIAMOND percent identity.
 functional profiling (diamond)	DiaDBs	string	""""""	stable	$MFopt{reqDiaDB}	NOG,MOH,ABR,ABRc,ACL,KGM,CZy,PTV,PAB,MOH2,URE,URacc,AMI
 functional profiling (Jaime tree)	orthoExtract	integer	0	stable	$MFopt{calcOrthoPlacement}	Run translated-read orthologue placement.
 ribo profiling (miTag)	profileRibosome	integer	0	stable	$MFopt{DoRibofind}	Run SSU/LSU read extraction and taxonomic assignment.
@@ -142,9 +145,13 @@ ribo profiling (miTag)	riboMaxRds	integer	250000	stable	$MFopt{riboLCAmaxRds}	Ma
 ribo profiling (miTag)	saveRiboRds	integer	0	stable	$MFopt{riboStoreRds}	Retain reads used during ribosomal assignment.
 ribo profiling (miTag)	thoroughCheckRiboFinish	integer	0	stable	$MFopt{checkRiboNonEmpty}	Require non-empty RiboFind assignment output before accepting completion.
 other tax profilers..	profileMetaphlan,profileMetaphlan3	integer	0	stable	$MFopt{DoMetaPhlan}	Run MetaPhlAn taxonomic profiling.
+other tax profilers..	profileProtal	integer	0	stable	$MFopt{DoProtal}	Mode 1 profiles raw reads per sample and merges profiles; mode 2 runs one generated Protal map across the complete mapped cohort.
+other tax profilers..	ProtalCores	integer	4	stable	$MFopt{ProtalCores}	CPU cores requested for a singular or combined Protal job.
+other tax profilers..	ProtalMem	integer	100	stable	$MFopt{ProtalMem}	Total memory in GB requested for a singular or combined Protal job.
+other tax profilers..	protalIgnoreErrors	integer	1	stable	$MFopt{protalIgnoreErrors}	Use the first compatible raw short-read pair, ignore other pair/singleton/BAM streams, or skip an incompatible Protal sample; set to 0 for strict input validation.
 other tax profilers..	profileMOTU2	integer	0	stable	$MFopt{DoMOTU2}	Run mOTUs taxonomic profiling.
 other tax profilers..	profileKraken	integer	0	stable	$MFopt{DoKraken}	Run Kraken taxonomic profiling.
-other tax profilers..	profileTaxaTarget	integer	0	stable	$MFopt{DoTaxaTarget}	Run target-taxon profiling.
+other tax profilers..	profileTaxaTarget	integer	0	deprecated/legacy	$MFopt{DoTaxaTarget}	Deactivated (TaxaTarget unmaintained, database unavailable); a nonzero value stops MATAF4.
 other tax profilers..	estGenoSize	integer	0	stable	$MFopt{DoGenoSizeEst}	estimate average size of genomes in data
 other tax profilers..	krakenDB	string	""""""	stable	$MFopt{globalKraTaxkDB}	"""virusDB"";#= ""minikraken_2015/"";"
 D2s distance	calcInterMGdistance	integer	0	stable	$MFopt{DoCalcD2s}	Calculate the legacy inter-metagenome D2 distance matrix.

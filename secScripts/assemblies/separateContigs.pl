@@ -235,16 +235,6 @@ if (!-s "$outD/scaff.pergene.4kmer.pm5.gz" && $subparts =~ m/4/){
 }
 sleep(1);
 ###############################   binning  ###############################
-if ( !-s $inD."Binning/MaxBin/MB.summary" && $subparts =~ m/m/){
-	#runMaxBin(); #outdated, don't use any longer..
-}
-if ( ( !-s "$inD/Binning/MetaBat/MeBa.sto" || !-s "$inD/Binning/MetaBat/$SmplNm.cm" ) &&  $subparts =~ m/m/){
-#deactivated, needs to be in MATAFILER routine to take assembly groups into account
-#	my $compoundBinningScr = getProgPaths("cmpBinScr");#"/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/compoundBinning.pl";
-
-#systemW "perl $compoundBinningScr $inD $tmpD";
-}
-
 if ($subparts =~ m/s/ && (!-e "$outD/microsat.txt" || !-s "$outD/microsat.txt")){
 	findMicrSat($inScaffs,"$outD/microsat.txt");
 }

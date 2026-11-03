@@ -111,7 +111,7 @@ MATAFILER4 uses three primary phases to analyse metagenomes:
 	-kmerPerGene [0|1]			1: report kmer frequencies per gene (Default: 0)
 
 # mapping
-	-mapper [1|2|3|4]				1: bowtie2, 2:bwa, 3: minimap2, 4:kma, 5:strobealign -1:auto (bowtie2 short, minimap2 long reads), -2:auto(strobealign short, minimap2 long). (Default: -1)
+	-mapper [1|2|3|5]				1: bowtie2, 2:bwa, 3: minimap2, 5:strobealign -1:auto (bowtie2 short, minimap2 long reads), -2:auto(strobealign short, minimap2 long). (Default: -1)
 	-mappingCores [#]				cores # used for mapping
 	-mappingMem [#]				memory # used for mapping bwa/bwt2 in GB (Default: auto (-1))
 	-mapSortMem  [#]			memory # used for samtools sort in GB (Default: auto (-1))
@@ -158,7 +158,7 @@ MATAFILER4 uses three primary phases to analyse metagenomes:
 	-reProfileFunct [0|1]			redo diamond functional profiling  (Default: 0)
 	-reProfileFuncTogether [0|1]		if any func database needs to be redone, than redo all indicated databases (useful if number of reads changed)  (Default: 0)
 	-diamondCores [#]				number of cores ‘#’ used for diamond run (Default: 12)
-	-diamondMem [#]					memory for diamond run in GB (Default: 7)
+	-diamondMem [#]					memory for diamond run in GB (Default: 16)
 	-DiaParseEvals [#]				evalues at which to accept hits to func database (Default: 1e-7)
 	-DiaSensitiveMode [0|1]			1: run diamond in sensitive mode  (Default: 0)
 	-rmRawDiamondHits [0|1]		1: remove raw diamond hits  (Default: 0)
@@ -229,7 +229,6 @@ Comment: usually ‘0’ means switching a mode off, and ‘1’ means switching
 	"decluterMatrix=i" 		1: declutering of gene matrix. Can give an edge to canopy based MGS, but also introduce unwanted biases. Default: 0
 
 #flow control
-	"1stepClust=i" 			Cluster incomplete genes separately? Default: 0
 	"submitLocal=i"			Important run mode switch, to submit jobs while geneCat is runnning single core 
 	"submSystem=s"			SGE, slurm submission systems
 	"continue=i" 			Flow control, 1: continue with found files 0: delete existing (partial) gene cat, start again
@@ -332,14 +331,15 @@ Comment: usually ‘0’ means switching a mode off, and ‘1’ means switching
 
      #File operations
     -isAligned [0|1]				if input is already alligned (default 0)
-    -rmMSA [0|1]				remove MSA, to save diskspace (default 0)
-    -gzInput [0|1]				to save diskspace (default 0)
+    -rmMSA [0|1]				remove per-locus checkpoints at completion (default 1); 0 retains nucleotide loci as .fna.gz
+    -gzInput [0|1]				compress buildTree-owned inputs; retained MSAli aggregates are always stored as .gz
 
      #specific gene quality filters, useful for metagenomic data that is often incomplete
      -NTfilt [#]				fractions of nucleotides (NT) that need to be present in sequence to be included in final, combined MSA (default 0.8)
-    -NTfiltPerGene [#]				if several genes represent a tree tip, the fraction of NTs that need to be present for the gene to be accepted in the final, combined MSA (default 0.1)
+    -NTfiltPerGene [#]				if several genes represent a tree tip, the fraction of NTs required for locus QC (default 0.4)
+    -GeneLengthIncludeMin [#]			fraction admitted to the MSA; inherits NTfiltPerGene unless explicitly supplied (default 0.4)
     -GenesPerSpecies [#]				min fraction of genes present after filtering, if below the species will be excluded from phylogeny (default 0.1)
-    -fracMaxGenes90pct [#]				gene cats to keep, e.g. 25% of 90th percentile (default 0.25)
+    -fracMaxGenes90pct [#]				hard locus prevalence cutoff when taxon-aware selection is off (default 0.3 of category-size Q90)
     -NTfiltCount [0|1]					total NT count (default 0)
     -runLengthCheck [0|1]				check that sequence length can be divided by 3
 

@@ -9,7 +9,7 @@ use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::GenoMetaAss qw(readMap readClstrRev readClstrRevContigSubset readClstrRevSmplCtgGenSubset getDirsPerAssmblGrp  getAssemblPath systemW gzipopen parse_duration);
 use Mods::Binning qw (getBinSubdirName runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns minQualFilter calcLCAcompl readCMquals);
 use Mods::geneCat qw(readMG_LCA);
-use Mods::CatalogPaths qw(resolve_catalog_maps);
+use Mods::CatalogPaths qw(resolve_catalog_maps filter_catalog_maps);
 
 
 sub countUpBin;
@@ -72,26 +72,8 @@ sub mapsWithoutEmptySamples {
 		next unless defined($work_dir) && length($work_dir);
 		$empty{$sample} = 1 if -e "$work_dir/SMPL.empty";
 	}
-	return ($map_files, []) unless %empty;
-
-	make_path($target_dir);
-	my @filtered_maps;
-	my $map_index = 0;
-	for my $input_map (split /,/, $map_files) {
-		my $output_map = "$target_dir/map.$map_index.txt";
-		open my $input, '<', $input_map or die "Cannot open map $input_map: $!\n";
-		open my $output, '>', $output_map or die "Cannot write filtered map $output_map: $!\n";
-		while (my $line = <$input>) {
-			my ($sample) = split /\t/, $line, 2;
-			next if exists $empty{$sample};
-			print {$output} $line or die "Cannot write filtered map $output_map: $!\n";
-		}
-		close $input or die "Cannot close map $input_map: $!\n";
-		close $output or die "Cannot close filtered map $output_map: $!\n";
-		push @filtered_maps, $output_map;
-		$map_index++;
-	}
-	return (join(',', @filtered_maps), [sort keys %empty]);
+	my $empty_samples = [sort keys %empty];
+	return (filter_catalog_maps($map_files, $empty_samples, $target_dir), $empty_samples);
 }
 
 
@@ -459,7 +441,7 @@ sub clusterMB2{
 		#%MB = %{$hr1}; %MBQ = %{$hr2};
 		#log overall stats for bins..
 		foreach my $bin (keys %{$hr1}){
-			$uniqMBid = "$smplIDs[-1].$bin";
+			$uniqMBid = "$smplIDs[-1]__$bin"; #sample__bin (and Cano__x), as Binning.pm readers and the native clusterMAGs expect
 			$MAGq{$uniqMBid} = ${$hr2}{$bin}{compl};$MAGc{$uniqMBid} = ${$hr2}{$bin}{conta};
 			$BinsGlobal{$uniqMBid} = ${$hr1}{$bin};
 			foreach my $kk (@{$BinsGlobal{$uniqMBid}}){
@@ -506,7 +488,7 @@ sub clusterMB2{
 	#next: sort by qual
 	print "Loaded ". scalar(keys %MAgene) . "/" . scalar(keys %MAGc) . " unique high-qual MAGs. Sorting.. \n";
 	
-	my @order ; my %loggedBins; my $ocnt = 0; my @tierSw;
+	my @order ; my %loggedBins; my $ocnt = 0; my %tierOf;
 	#my @orderPre = sort { $MAGc{$a} <=> $MAGc{$b} } keys(%MAGc);
 	for (my $T=0;$T<$maxRounds;$T++){
 		#foreach my $bin (@orderPre ){
@@ -518,7 +500,9 @@ sub clusterMB2{
 		my %subH = %MAGc{@{$Tiers{$T}}};
 		#print " subhash size: " . scalar(keys %subH); #DEBUG
 		push(@order, sort { $subH{$a} <=> $subH{$b} } keys(%subH));
-		push (@tierSw,$order[-1]);
+		# Threshold arrays are indexed by the MAG's own tier, also when an
+		# earlier tier is empty or a tier's last MAG leaves the loop early.
+		$tierOf{$_} = $T for keys %subH;
 		print parse_duration((time - $startTime)) .  " - Sorted T$T " . scalar(keys %subH) . " MAGs\n";
 	}
 	%loggedBins = (); %Tiers = ();#@orderPre = ();
@@ -529,6 +513,10 @@ sub clusterMB2{
 	
 	my $locT = 0; #needs to increase with bins..
 	foreach my $bin (@order){
+		if ($tierOf{$bin} != $locT){
+			$locT = $tierOf{$bin};
+			print "\n". parse_duration((time - $startTime)) . "  ------------------------ At Tier $locT ------------------------\n";
+		}
 		my $isCanopy = 0;
 		my ($BinHR,$BinMGHR,$ar,$arMG, $totGenes,$assignedGenes,$nonMGgene) = countUpBin($MAgene{$bin},1);
 		my %BinCnt = %{$BinHR};my %BinMGcnt = %{$BinMGHR};
@@ -591,7 +579,8 @@ sub clusterMB2{
 		push(@{$Bin2MAG{$BinNumL}}, $bin);$BinObs{$BinNumL} ++;
 		#my $genesInseted=0;my $newGene=0;
 		my %genesInBin;
-		foreach my $curGene (@{$MAgene{$bin}}){
+		# Empty entries only separate contigs (see gene2GCg2); countUpBin skips them too.
+		foreach my $curGene (grep { length } @{$MAgene{$bin}}){
 			$gen2Bin{$curGene}{$BinNumL}++;$genesInBin{$curGene} ++;
 		}
 		#print "\n$genesInseted : $HiCnt : $newGene : $unknwnFrac\n" if ($unknwnFrac < 0.7);
@@ -599,11 +588,6 @@ sub clusterMB2{
 			if ($genesInBin{$k} > 1){
 				$GeneMultCopy{$k} ++;
 			}
-		}
-		#time to increase tier??
-		if ($bin eq $tierSw[$locT]){
-			 $locT ++;
-			 print "\n". parse_duration((time - $startTime)) . "  ------------------------ At Tier $locT ------------------------\n";
 		}
 	}
 	$scnt++;		
@@ -645,13 +629,14 @@ sub clusterMB2{
 	foreach my $MGS (keys %Bin2MAG){
 		my @listMAGs = @{$Bin2MAG{$MGS}}; my $hiScore=0; my $hiMAG="";
 		foreach my $uniqMBid (@listMAGs){
-			my @CCs = @{$MAgene{$uniqMBid}};
+			my @CCs = grep { length } @{$MAgene{$uniqMBid}};
 			my $N=0; my $sum=0;
 			foreach my $gen (@CCs){
 				my $fac=1;
 				$fac=2 if (exists($gene2COG{$gen}));#bit higher weight on marker genes..
 				$sum+=$gen2Bin{$gen}{$MGS}*$fac;$N++;
 			}
+			next unless $N;
 			my $sco = $sum/$N / $BinObs{$MGS};# if (exists($BinObs{$MGS}));
 			$sco += (.01 * ($MAGq{$uniqMBid} - 2*$MAGc{$uniqMBid}));
 			if ($sco > $hiScore){
@@ -916,7 +901,7 @@ sub summarizeMAGcontent{
 		my ($hr1,$hr2) = MB2assigns ($MBf,$MBfQual);
 		my %MB = %{$hr1};my %MBQ = %{$hr2};
 		foreach my $bin (keys %MB){
-			my $uniqMBid = "$smplIDs[-1].$bin";
+			my $uniqMBid = "$smplIDs[-1]__$bin"; #sample__bin (and Cano__x), as Binning.pm readers and the native clusterMAGs expect
 			next unless (exists($MAGlcaq{$uniqMBid}));
 			my $MGSid = "?";
 			if (exists($binName2{$uniqMBid})){ #$MAG2Bin{$uniqMBid})){

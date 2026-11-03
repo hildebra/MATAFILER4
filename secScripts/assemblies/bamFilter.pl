@@ -1,9 +1,10 @@
 #!/usr/bin/perl
 use warnings;
 use strict;
+use Getopt::Long qw(GetOptions);
 
 sub usage {
-	return "Usage: bamFilter.pl [max_edit_rate [min_query_coverage [min_mapq [min_end_clip]]]]\n";
+	return "Usage: bamFilter.pl [--discarded OUT.bam [--samtools PATH]] [max_edit_rate [min_query_coverage [min_mapq [min_end_clip]]]]\n";
 }
 
 sub fraction_arg {
@@ -35,6 +36,10 @@ sub parse_cigar {
 	return @operations;
 }
 
+# --discarded: alignments failing the thresholds are still set unmapped on STDOUT as before,
+# and are also written to OUT.bam with FLAG 0x200 (QCFAIL) so they can be kept, flagged, in the CRAM.
+my ($discarded_path, $samtools) = ('', 'samtools');
+GetOptions('discarded=s' => \$discarded_path, 'samtools=s' => \$samtools) or die usage();
 die usage() if @ARGV > 4;
 
 # Positional arguments are retained for compatibility with existing MATAFILER
@@ -57,12 +62,19 @@ my %counts = (
 	end_clipped      => 0,
 );
 
+my $discarded_fh;
+if ($discarded_path ne '') {
+	open($discarded_fh, '|-', $samtools, 'view', '-b1', '-o', $discarded_path, '-')
+		or die "bamFilter: cannot start $samtools for $discarded_path: $!\n";
+}
+
 my $malformed_report_limit = 10;
 my $input_line_number = 0;
 while (my $line = <STDIN>) {
 	$input_line_number++;
 	if ($line =~ /^\@/) {
 		print $line or die "bamFilter: cannot write SAM header: $!\n";
+		print {$discarded_fh} $line or die "bamFilter: cannot write discarded header: $!\n" if $discarded_fh;
 		next;
 	}
 
@@ -73,7 +85,7 @@ while (my $line = <STDIN>) {
 	$counts{records}++;
 
 	my @sam = split /\t/, $line, -1;
-	my $output_record;
+	my ($output_record, $discarded_record);
 	my $record_ok = eval {
 		die "bamFilter: malformed SAM at input line $input_line_number: expected at least 11 fields, found "
 			. scalar(@sam) . "\n"
@@ -165,6 +177,7 @@ while (my $line = <STDIN>) {
 			}
 
 			if ($failed) {
+				$discarded_record = join("\t", $sam[0], $flag | 0x200, @sam[2 .. $#sam]) . "\n" if $discarded_fh;
 				$sam[1] = $flag | 0x4;
 				$counts{filtered}++;
 			} else {
@@ -186,6 +199,11 @@ while (my $line = <STDIN>) {
 		next;
 	}
 	print $output_record or die "bamFilter: cannot write SAM record: $!\n";
+	print {$discarded_fh} $discarded_record or die "bamFilter: cannot write discarded record: $!\n"
+		if defined $discarded_record;
+}
+if ($discarded_fh) {
+	close($discarded_fh) or die "bamFilter: $samtools failed while writing $discarded_path\n";
 }
 
 print STDERR "BamFilter\n"

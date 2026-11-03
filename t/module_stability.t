@@ -25,6 +25,13 @@ $aviti_error = $@;
 is($aviti_error, '', 'AVITI is accepted as a sequencing technology');
 
 is(round(-1.5, 0), -2, 'round handles negative halves symmetrically');
+for my $case (
+	[[], 0], [[7], 7], [[1, 3], 2], [[9, 1, 3], 3], [[8, 2, 4, 6], 5],
+) {
+	is(Mods::GenoMetaAss::median(@{$case->[0]}), $case->[1],
+		'legacy median handles '.scalar(@{$case->[0]}).' values');
+}
+
 is(quantileArray(1, 1, 2, 3), 3, 'legacy quantile clamps the upper endpoint');
 ok(!defined meanArray([]), 'empty means are undefined instead of dividing by zero');
 is(correlation([1, 2, 3], [2, 4, 6]), '1.0000', 'Pearson correlation uses every value and the correct means');

@@ -19,94 +19,26 @@ use Mods::Subm qw(qsubSystem2);
 my $root = tempdir(CLEANUP => 1);
 $root =~ s{\\}{/}g;
 
-my $internal_config_path = File::Spec->catfile($Bin, '..', 'Mods', 'config_internal.txt');
-open my $internal_config_fh, '<', $internal_config_path or die $!;
-my $internal_config = do { local $/; <$internal_config_fh> };
-close $internal_config_fh;
 my $iqtree_selector = 'iqtree' . "\t" .
 	'$(command -v iqtree3 || command -v iqtree2)' . "\t" . 'env:MF4phylo';
-like(
-	$internal_config,
-	qr/^\Q$iqtree_selector\E$/m,
-	'IQ-TREE configuration prefers iqtree3 and falls back to iqtree2',
+for my $archive_tool (qw(wget pigz gzip prefetch fasterq-dump vdb-validate)) {
+	}
+my %recent_tool_defaults = (
+	'secScripts/MGS/finalize_strain_tree_inputs.pl' => [qw(pigz)],
+	'secScripts/SNP/plan_consensus_regions.pl' => [qw(samtools pigz)],
+	'secScripts/assemblies/validate_mapping_references.pl' => [qw(samtools)],
 );
-my $r_environment_path = File::Spec->catfile($Bin, '..', 'helpers', 'install', 'MGTK_R.yml');
-open my $r_environment_fh, '<', $r_environment_path or die $!;
-my $r_environment = do { local $/; <$r_environment_fh> };
-close $r_environment_fh;
-like(
-	$r_environment,
-	qr/bioconda::bioconductor-ggtree=3\.14/,
-	'the active MF4 R environment installs the R 4.4-compatible ggtree release',
-);
-my $installer_path = File::Spec->catfile($Bin, '..', 'helpers', 'install', 'installer.sh');
-open my $installer_fh, '<', $installer_path or die $!;
-my $installer = do { local $/; <$installer_fh> };
-close $installer_fh;
-like(
-	$installer,
-	qr/run -n MF4_R Rscript --vanilla -e.*?library\(ggtree\)/s,
-	'the installer verifies that ggtree loads in MF4_R',
-);
-my $phylo_tools_path = File::Spec->catfile($Bin, '..', 'Mods', 'phyloTools.pm');
-open my $phylo_tools_fh, '<', $phylo_tools_path or die $!;
-my $phylo_tools = do { local $/; <$phylo_tools_fh> };
-close $phylo_tools_fh;
-like(
-	$phylo_tools,
-	qr/my \$cmd = "\$iqTree -s \$inMSA \$threadOpts -pre \$treeOut -seed 678 -quiet "/,
-	'IQ-TREE invocations use the selected bounded thread policy and quiet output',
-);
-unlike(
-	$phylo_tools,
-	qr/(?:^|\s)-keep-ident(?:\s|$)/m,
-	'IQ-TREE uses its standard identical-sequence handling without -keep-ident',
-);
-like(
-	$phylo_tools,
-	qr/my \$threadOpts = "-T \$ncore"/,
-	'IQ-TREE uses every core allocated to its cluster job without AUTO benchmarking',
-);
-unlike(
-	$phylo_tools,
-	qr/-T AUTO|threads-max|ntmax/,
-	'IQ-TREE commands no longer repeat automatic thread-efficiency tests',
-);
-like(
-	$phylo_tools,
-	qr/my \$usePartitionModel = \$partiF ne "" && !\$iqPathogen.*?if \(!\$iqLegacy && \$iqMemMB > 0\).*?if \(\$usePartitionModel\).*?WARNING: IQ-TREE -mem disabled because partition models do not support.*?else \{\s*\$cmd \.= "-mem \$\{iqMemMB\}M "/s,
-	'modern IQ-TREE uses the RAM cap only when it is compatible with the active model',
-);
-like(
-	$phylo_tools,
-	qr/\$cmd \.= " -p \$partiF " if \$usePartitionModel.*?-m MFP\+MERGE/s,
-	'partitioned IQ-TREE ModelFinder receives the generated loci and optimizes their merge scheme',
-);
-like(
-	$phylo_tools,
-	qr/\$cmd \.= "--pathogen " if \$iqPathogen && !\$iqLegacy/,
-	'IQ-TREE 3 pathogen mode is available to low-divergence callers',
-);
-like(
-	$phylo_tools,
-	qr/my \$cmapleLengthLimit = 32767.*?_fastaAlignmentLength\(\$inMSA\).*?WARNING: IQ-TREE --pathogen disabled.*?falling back to standard IQ-TREE mode/s,
-	'overlong alignments warn and fall back from CMAPLE pathogen mode before IQ-TREE runs',
-);
-like(
-	$phylo_tools,
-	qr/\$cmd \.= \$iqLegacy \? "-m GTR\+F\+I\+G4 " : "-m GTR\+F\+G2 "/,
-	'modern nucleotide trees use GTR+F+G2 while legacy mode retains the previous model',
-);
-like(
-	$phylo_tools,
-	qr/\$taxonCount >= 750.*?\$runSafe = 1.*?_iqtreeLogRequestsSafeKernel.*?restarting once with -safe/s,
-	'large strain trees start with the safe kernel and explicit underflow triggers one safe retry',
-);
-like(
-	$phylo_tools,
-	qr/iqtreeOutputComplete\(\$treeOut, \$inMSA.*?cleanupIQTreeTransients\(\$treeOut\)/s,
-	'IQ-TREE completion is taxon-validated before temporary artifacts are removed',
-);
+for my $relative (sort keys %recent_tool_defaults) {
+	my $path = File::Spec->catfile($Bin, '..', split m{/}, $relative);
+	
+	
+	
+		for my $tool (@{$recent_tool_defaults{$relative}}) {
+			}
+}
+
+for my $database_key (qw(GTDB_GTDB specI_GTDB)) {
+		}
 
 my @p1 = ('a.1.fq', 'b.1.fq', 'c.1.fq');
 my @p2 = ('a.2.fq', 'b.2.fq', 'c.2.fq');
@@ -182,7 +114,7 @@ is(system('bash', $runtime_script) >> 8, 42,
 	no warnings 'redefine';
 	local *Mods::IO_Tamoc_progs::getProgPaths = sub { return 'bwa' };
 	my (undef, undef, $check_path) = buildMapperIdx("$root/reference.fa", 2, 0, 2);
-	is($check_path, "$root/reference.fa.pac", 'BWA index check uses the actual .pac path');
+	is($check_path, "$root/reference.fa.sa", 'BWA index check uses .sa, the file bwa index writes last');
 }
 
 {

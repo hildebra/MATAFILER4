@@ -7,7 +7,10 @@ die "Usage: $0 <genes.fasta[.gz]> <output-lengths.tsv>\n" unless @ARGV == 2;
 my ($input, $output) = @ARGV;
 my ($in, $ok) = gzipopen($input, 'gene FASTA', 1);
 die "Cannot open $input\n" unless $ok && $in;
-open my $out, '>', $output or die "Cannot open $output: $!\n";
+#written under a temporary name: callers only test that the table exists, so a killed job must not leave a partial one
+my $tmpOut = "$output.tmp.$$";
+END { unlink $tmpOut if (defined($tmpOut) && -e $tmpOut); } #no leftovers after a failure
+open my $out, '>', $tmpOut or die "Cannot open $tmpOut: $!\n";
 
 my ($id, $length, $records) = ('', 0, 0);
 while (my $line = <$in>) {
@@ -26,4 +29,5 @@ die "No FASTA records found in $input\n" unless $records;
 print {$out} "$id\t$length\n" or die "Cannot write $output: $!\n";
 close $out or die "Cannot close $output: $!\n";
 close $in or die "Cannot close $input: $!\n";
+rename($tmpOut, $output) or die "Cannot rename $tmpOut to $output: $!\n";
 print "Done\n";

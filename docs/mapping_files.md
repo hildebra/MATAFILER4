@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -11,7 +11,9 @@ Use Linux line endings where possible. The parser removes general newline charac
 
 ## Minimal valid map
 
-The first row must be the header and must contain `#SmplID`. The second column must be either `Path` or `SmplPrefix`. Other recognised columns can appear in any order.
+The first row must be the header and must contain `#SmplID`. For local inputs,
+the second column must be either `Path` or `SmplPrefix`. Accession-only maps
+can use `ENAdownload` or `SRAdownload` without either local-location column.
 
 ```text
 #SmplID	Path	AssmblGrps	SeqTech
@@ -44,8 +46,8 @@ Older MATAFILER folder layouts can still be inferred or forced by legacy options
 |---|---|
 | The first data row is interpreted as the header. | Do not put comments or metadata above the header. |
 | The header must contain `#SmplID`. | The parser stops if it cannot find this column. |
-| The header must contain at least one of `Path` or `SmplPrefix`. | The parser stops if neither is present. |
-| Either `Path` or `SmplPrefix` must be the second column. | The parser stops otherwise. |
+| The header must contain at least one of `Path`, `SmplPrefix`, `ENAdownload`, or `SRAdownload`. | The parser stops if no primary-input column is present. |
+| If `Path` or `SmplPrefix` is present, one of them must be the second column. | Accession-only headers do not need a local-location column. |
 | Other recognised columns can be elsewhere. | Their position is detected by column name. |
 
 Recommended header patterns are therefore:
@@ -70,7 +72,7 @@ The following tags are parsed from lines beginning with `#` after the header. Th
 |---|---:|---|
 | `#OutPath` | yes | Base output directory. MATAFILER4 appends `#RunID` unless it is already present. |
 | `#RunID` | yes | Run identifier and output subdirectory name below `#OutPath`. |
-| `#DirPath` | yes | Base input directory for following sample rows. Can be repeated; each occurrence applies to subsequent samples until the next `#DirPath`. |
+| `#DirPath` | local inputs only | Base input directory for following local sample rows. It may be omitted by accession-only maps. |
 
 Example with two input locations:
 
@@ -104,8 +106,8 @@ Sample04	Sample04_dir	Subject02
 | Column | Required | Meaning | Notes |
 |---|---:|---|---|
 | `#SmplID` | yes | Unique sample identifier used throughout output directories, sequence headers, and matrices. | Must not be empty or duplicated. |
-| `Path` | conditional | Relative sample directory under the current `#DirPath`. | Use when each sample has its own directory. |
-| `SmplPrefix` | conditional | File prefix under the current `#DirPath`. | Use when several samples share one directory. |
+| `Path` | conditional | Relative sample directory under the current `#DirPath`. | Required for local directory inputs; omit for accession-only maps. |
+| `SmplPrefix` | conditional | File prefix under the current `#DirPath`. | Required for local prefix inputs; omit for accession-only maps. |
 | `SeqTech` | no | Sequencing technology for primary reads. | Recognised values: `ONT`, `PB`, `ill`, `hiSeq`, `454`, `SLR`, `proto`, `miSeq`, `AVITI`, `GAII`, `GAII_solexa`, or empty. `AVITI` selects the AVITI-specific SDM filtering configuration. |
 | `SeqTechSingl` | no | Sequencing technology for single-read input. | Same recognised values as `SeqTech`. |
 | `ReadLength` | no | Expected read length. | Usually autodetected; set only if required. |
@@ -119,10 +121,129 @@ Sample04	Sample04_dir	Subject02
 | `cut5PR2` | no | Number of bases to trim from the 5′ end of read 2. | Defaults to `0`. |
 | `firstXreadsRd` | no | Read only the first X reads for this sample. | Defaults to `0`, meaning no per-sample limit. |
 | `firstXreadsWr` | no | Write only the first X reads for this sample after processing. | Defaults to `0`, meaning no per-sample limit. |
-| `ENAdownload` | no | ENA accession or download identifier. | Parsed into the map object; used by download-aware workflows. |
-| `SRAdownload` | no | SRA accession or download identifier. | Parsed into the map object; used by download-aware workflows. |
+| `ENAdownload` | conditional | ENA run, sample, study, or project accession. | Downloads archive FASTQs from EBI and validates ENA byte counts, MD5 checksums, gzip streams, and FASTQ records. |
+| `SRAdownload` | conditional | SRA run, sample, study, or project accession. | Downloads through NCBI SRA Toolkit, validates the SRA object, converts to gzip FASTQ, and validates FASTQ records. |
 
-`Path` and `SmplPrefix` are alternative ways to locate primary reads. At least one of these columns must exist in the header, but each sample row should fill only one of them.
+## Downloading ENA and SRA samples from a mapping file
+
+`ENAdownload` and `SRAdownload` let MATAFILER4 acquire public reads when an
+unfinished sample is reached. The download is performed by
+`secScripts/fileManage/ENASRAdl.pl` in the sample's shared scratch directory; the
+archive FASTQs are not copied into the permanent input directory.
+
+### Minimal archive-only maps
+
+An ENA-only map needs a sample ID and an ENA accession, but no `Path`,
+`SmplPrefix`, or `#DirPath`:
+
+```text
+#SmplID	ENAdownload	SeqTech	AssmblGrps
+#OutPath	/path/to/results
+#RunID	public_ena
+PublicGut1	ERR1234567		PublicGut1
+```
+
+The equivalent NCBI SRA map is:
+
+```text
+#SmplID	SRAdownload	SeqTech	AssmblGrps
+#OutPath	/path/to/results
+#RunID	public_sra
+PublicSoil1	SRR12345678		PublicSoil1
+```
+
+The empty `SeqTech` cells are intentional. Technology is inferred from archive
+metadata after the download has been validated.
+
+### Mixing local, ENA, and SRA inputs
+
+A single map may contain all three source types. Because this header contains a
+local `SmplPrefix` column, it remains the second column. Leave `SmplPrefix` blank
+on archive rows, and leave both archive columns blank on local rows:
+
+```text
+#SmplID	SmplPrefix	ENAdownload	SRAdownload	SeqTech	AssmblGrps
+#OutPath	/path/to/results
+#RunID	mixed_inputs
+#DirPath	/path/to/local_fastq
+LocalGut1	LocalGut1			hiSeq	LocalGut1
+PublicGut1		ERR1234567			PublicGut1
+PublicSoil1			SRR12345678		PublicSoil1
+```
+
+Each row must select exactly one primary-input mechanism:
+
+- a non-empty `Path` or `SmplPrefix` for local input;
+- a non-empty `ENAdownload` for retrieval from EBI; or
+- a non-empty `SRAdownload` for retrieval with the NCBI SRA Toolkit.
+
+Do not combine a local source with an archive accession on the same row, and do
+not set both archive columns. Archive-backed samples still require a unique
+`#SmplID`, but must not receive a `Path` or `SmplPrefix` value. An unused local
+column can remain in a mixed map as long as its archive-row cells are empty.
+
+### Accession and technology rules
+
+The download columns accept run, sample, study, or project accessions that the
+selected provider can resolve to public read runs. Comma-, semicolon-, or
+whitespace-separated accessions in one cell are treated as multiple libraries of
+the same MATAFILER sample. Duplicate accessions in that cell are ignored.
+
+When `SeqTech` is empty or absent, the archive platform is mapped to `ONT`, `PB`,
+`454`, or `ill`. Illumina platforms and unavailable or unknown platform metadata
+use `ill`. An explicitly supplied `SeqTech` takes precedence over inference. A
+set of accessions that resolves to incompatible technologies is rejected rather
+than silently combining unlike reads.
+
+### Download, validation, retry, and cleanup
+
+For an unfinished archive-backed sample, the MATAF4 controller submits a
+dedicated acquisition job and defers all of that sample's processing. The job
+runs on `downloadQueue`, which is `nbi-download` in the shipped internal
+configuration. A site can override it in its selected `config.txt`; an explicitly
+empty value falls back to `mediumQueue`. The selected partition's compute node,
+not the controller host, needs outbound HTTPS access.
+
+The download job is recorded in the normal sample lock, preventing a second
+controller pass from racing it. After the job finishes, rerun MATAF4; a
+`-loopTillComplete` run handles this later pass automatically. With `-submit 0`,
+MATAF4 writes `LOGandSUB/accession_download.sh` but neither submits it nor accesses
+the archive. Local `-submSystem bash` execution is synchronous and can continue
+in the same pass.
+
+Provider-specific validation is as follows:
+
+- ENA metadata and FASTQ locations are obtained from the ENA Portal API. Files
+  are accepted only from EBI HTTPS locations and must match ENA's byte counts and
+  MD5 checksums.
+- SRA runs are fetched with `prefetch`, validated with `vdb-validate`, converted
+  with `fasterq-dump --split-3`, and compressed with `pigz` or `gzip`.
+- For both providers, every gzip stream and every FASTQ record is read and
+  checked. Paired SRA outputs must contain the same number of records.
+
+A validated download is reused on a subsequent MATAF4 pass. If acquisition or
+validation fails, the scheduler job exits nonzero and retains the sample scratch
+area for diagnosis or retry. Inspect `accession_download.sh.etxt`, correct the
+network, accession, tool, or scratch-space problem, and rerun the same MATAF4
+command.
+
+The permanent sample output contains `input_accession.json`, recording the
+provider, requested and resolved accessions, platform, inferred technology,
+download time, and validated files. The FASTQs themselves remain temporary. They
+are removed only after the configured terminal outputs pass the finished-sample
+cleanup barrier; accession downloads are removed at that point even when general
+scratch retention is enabled with `-reduceScratchUse 0`.
+
+SRA conversion temporarily needs space for both the SRA object and uncompressed
+FASTQs, so size the shared scratch location accordingly. A standard installation
+puts `wget`, `pigz`, `prefetch`, `fasterq-dump`, and `vdb-validate` in the base
+`MF4` Conda environment. `ENASRAdl.pl` resolves these commands through
+`getProgPaths()` using the `wget`, `pigz`, `gzip`, `prefetch`, `fasterq-dump`,
+and `vdb-validate` configuration keys; the active MATAFILER `-config` file is
+passed to the download job. Activate the MF4 environment before launching MATAF4.
+
+See [Example 3](examples.md#example-3-mixed-local-ena-and-sra-inputs) for a
+runnable mixed-source map using small public WGS metagenomes.
 
 ## Sample-ID rules
 
@@ -217,15 +338,23 @@ perl "$MF4DIR/MATAF4.pl" \
 
 For the example above, MATAFILER4 searches `/data/pacbio/Sample01/` and `/data/pacbio/Sample02/` for matching BAM files. With `SmplPrefix`, it searches the shared `#DirPath` directory and requires the file name to match both the sample prefix and `-inputBAMregex`.
 
-Important limitations and behaviour:
+The same `-inputBAMregex` option accepts plain SAM and CRAM files. For all three formats, use `-inputBAMregex '.*\.(bam|sam|cram)$'`. Primary alignment discovery remains disabled when this option is empty. Support alignments can be listed in `SupportReads` or discovered in its directory alongside FASTQ/FASTA inputs.
 
-- BAM discovery is disabled by default because `-inputBAMregex` defaults to an empty string.
-- Primary BAM input is currently treated as unpaired/single-read data, for example PacBio reads.
-- Matching BAMs are converted to FASTQ with `samtools fastq` before normal read processing; they are not interpreted as read-to-reference alignments.
-- The regular expression applies to file names in the selected directory. Keep it anchored, for example `'.*\.bam$'`, to avoid unintended matches.
-- Set `SeqTech` to the technology represented by the reads, normally `PB` or `ONT` for long-read BAM input.
+Alignment inputs can hold **singleton** reads (normally `SeqTech` `PB` or `ONT`) or **paired** reads, for example unaligned Illumina BAMs. MATAFILER4 detects the layout from the first primary record (FLAG `0x1`) and the sort order from the `@HD SO:` header field. One file holds one layout: SDM rejects files that mix paired and singleton records or contain orphan mates. SDM requires sequence and quality values in the retained primary records; secondary and supplementary alignments are skipped, and reverse-strand reads are restored to their original orientation.
 
-Use `SupportReads` instead when BAM reads supplement primary short-read data for a hybrid assembly.
+Processing now selects input independently for each library:
+
+- **SDM filtering:** the bundled HTS-enabled SDM reads the original alignment directly. A paired file is read as true pairs (`-paired 2`) and produces the usual `filtered.1`/`filtered.2`/`filtered.singl` files, so assembly, mapping and profiling use it like paired FASTQ. SDM needs query-name order with adjacent mates; a paired file whose header does not declare `SO:queryname` is first name-sorted (`samtools sort -n`) into the cleaning directory, and the copy is removed afterwards. Filtered FASTQ names and filtering checkpoints stay unchanged.
+- **Paired files on raw-read paths:** the single-pass raw mapping and the raw FASTQ cache below write every mate of a paired file to one stream (names get `/1` and `/2`), so those mappers treat the mates as unpaired reads. Upload preparation (`-uploadRawRds`) stops for paired alignment input; convert it to paired FASTQ first.
+- **Single-pass raw mapping:** the mapping helper pipes `samtools fastq` into Bowtie2, BWA MEM, minimap2, or Strobealign. These commands remap the original reads to the requested reference.
+- **Repeated raw mapping or upload preparation:** staging retains a compressed raw FASTQ cache. Workflows that bypass SDM but require read files also retain extraction.
+- **Minimap2 fallback:** stdin is used only for a plain reference FASTA at most 1 GB in size, with an explicit 1G index batch. Larger or binary references get a node-local FASTQ cache because minimap2 may reopen the query for multiple index parts. Reference checks run in the mapping job, after any assembly or reference preparation.
+
+Raw caches preserve the existing `.unbam.fq.gz` name; SAM and CRAM use `.unsam.fq.gz` and `.uncram.fq.gz`. A sidecar records the source/reference file metadata and completed output metadata. Missing or changed caches are rebuilt, and legacy caches without this sidecar are rebuilt once. Removing other staged files does not force re-extraction of a valid cache. Validation uses file metadata, not a full input content hash.
+
+For CRAM requiring an external reference, pass `-inputCramReference /path/to/original-reference.fa` and supply its `.fai` index. `-inputCramReferenceSuppl` overrides the reference for support reads and otherwise inherits the primary setting. This is the reference used to **decode the input CRAM**; it can differ from the new mapping target. Without an explicit setting, decoding uses HTSlib's normal reference resolution.
+
+Use `SupportReads` when alignment reads supplement primary short-read data for a hybrid assembly.
 
 ### Duplicate read-location checks
 

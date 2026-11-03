@@ -4,6 +4,7 @@ use Cwd 'abs_path';
 #use File::chdir;
 
 use strict;
+use List::Util qw(min max);
 #use List::MoreUtils 'first_index'; 
 use Mods::IO_Tamoc_progs qw(getProgPaths);
 use Mods::TamocFunc qw( getSpecificDBpaths);
@@ -13,8 +14,41 @@ use Mods::Subm qw(qsubSystem emptyQsubOpt );
 
 
 use Exporter qw(import);
-our @EXPORT_OK = qw(passBlast lambdaBl assignFuncPerGene calc_modules readGene2Func readGene2COG);
+our @EXPORT_OK = qw(mergeBlastPair passBlast lambdaBl assignFuncPerGene calc_modules readGene2Func readGene2COG vfTabStale bigFuncDB);
 
+
+# Combine BLAST tabular statistics for two hits to the same subject. Subject
+# coordinates are inclusive and may run in either direction. For ungapped hits
+# this removes the exact shared length. For gapped hits, interval bounds cannot
+# recover shared columns: estimate them using the smaller column density, capped
+# by each hit's length. Keep the existing mean-identity and scaled-score policy.
+sub mergeBlastPair {
+	my ($left, $right) = @_;
+	die "Cannot merge BLAST hits to different subjects\n" unless $left->[1] eq $right->[1];
+	for my $hit ($left, $right) {
+		die "Invalid BLAST alignment length\n" unless defined($hit->[3]) && $hit->[3] > 0;
+		for my $index (8, 9) {
+			die "Invalid BLAST subject coordinate\n"
+				unless defined($hit->[$index]) && $hit->[$index] =~ /^\d+$/ && $hit->[$index] > 0;
+		}
+	}
+	my ($lstart, $lend) = sort { $a <=> $b } @$left[8, 9];
+	my ($rstart, $rend) = sort { $a <=> $b } @$right[8, 9];
+	my $overlap = max(0, min($lend, $rend) - max($lstart, $rstart) + 1);
+	my $shared = min($left->[3], $right->[3],
+		$overlap * min($left->[3] / ($lend - $lstart + 1),
+		              $right->[3] / ($rend - $rstart + 1)));
+	$shared = int($shared + 0.5);
+	my @merged = @$left;
+	my $total = $left->[3] + $right->[3];
+	$merged[3] = $total - $shared;
+	$merged[2] = ($left->[2] + $right->[2]) / 2;
+	$merged[11] = ($left->[11] + $right->[11]) * $merged[3] / $total;
+	$merged[10] = min($left->[10], $right->[10]);
+	# Downstream consumers of this synthetic hit need its full subject envelope.
+	@merged[8, 9] = (min($lstart, $rstart), max($lend, $rend));
+	return \@merged;
+}
 
 sub passBlast($ $ $){
 	my $spl = shift;my $reqID = shift; my $inM8 = shift;
@@ -56,7 +90,9 @@ sub lambdaBl{
 			$postCmd .= "mv $DB $DB1;mv $DB.lba.gz $DB1.lba.gz;\n";
 			#$postCmd .= "ln -s $DB1 $DB;mv $DB.lba.gz $DB1.lba.gz;\n";
 		}
-		$cmdIdx .=  "$lambdaBin mkindexn -t $BlastCores -d $DB ;\n";
+		#lambda 3.1 mkindexn accepts -t 2..1000 only
+		my $idxThreads = $BlastCores < 2 ? 2 : $BlastCores;
+		$cmdIdx .=  "$lambdaBin mkindexn -t $idxThreads -d $DB ;\n";
 		$cmdIdx .= "$pigzBin -p $BlastCores $DB.lba;\n";
 		$cmdIdx .= $postCmd;
 		$DB = $DB1;
@@ -139,9 +175,38 @@ sub readGene2COG{
 	close I;
 	return (\%g2c,\%c2cat);
 }
-sub min ($$) { $_[$_[0] > $_[1]] }
-sub max ($$) { $_[$_[0] < $_[1]] }
 
+
+#copy of the qsub options hash, so per-job settings (constraints, tmp space, qsubDir) don't leak to the caller
+sub _qsbCopy{
+	my ($h) = @_;
+	my %c = %{$h};
+	$c{constraint} = [ @{ $h->{constraint} || [] } ];
+	return \%c;
+}
+
+#VF.tab (written by prepVFDB.pl) needs rebuilding: missing, older than a VFDB FASTA, or in the pre-0.61 layout (<7 columns)
+#large, redundant reference databases (KEGG, eggNOG): DIAMOND's temporary files grow with the catalog chunk and
+#the number of homologs per gene, so these get more node-local scratch and smaller chunks (geneCat -fastaSplitBigDB)
+sub bigFuncDB{
+	my ($db) = @_;
+	return ($db =~ m/^(NOG|KGM|KGE|KGB)$/) ? 1 : 0;
+}
+
+sub vfTabStale{
+	my ($DBpath) = @_;
+	my $vf = "$DBpath/VF.tab";
+	return 1 unless (-s $vf);
+	foreach my $fa (map { ("$DBpath/$_", "$DBpath/$_.gz") } ("VFDB_setA_pro.fas","VFDB_setB_pro.fas")){
+		return 1 if (-e $fa && (-M $fa) < (-M $vf));
+	}
+	open my $fh, '<', $vf or return 1;
+	my $l = <$fh>; close $fh;
+	return 1 unless (defined($l));
+	$l =~ s/[\r\n]+$//;
+	my @cols = split /\t/, $l, -1;
+	return (@cols < 7) ? 1 : 0;
+}
 
 sub buildFSdb{
 	my ($DB, $DBout ,$ncore,$QSBoptHR,$qsubDir) = @_;
@@ -174,15 +239,17 @@ sub assignFuncPerGene{
 	my $qsubDir = $outD."qsubLOG/";;
 	if (@_ > 5 && $_[5] != 0){
 		$doQsub = 1;
-		$QSBoptHR = $_[5] ;
+		$QSBoptHR = _qsbCopy($_[5]) ; #local copy, caller's options stay unchanged
 		$qsubDir = $QSBoptHR->{qsubDir} if (exists($QSBoptHR->{qsubDir}) && $QSBoptHR->{qsubDir} ne "" );
 	}
 	my $exe = 0;
 	if (@_ > 6 && $_[6] != 0){
 		$exe = 1;
 	}
-	my $rstr = map { (q(a)..q(z))[rand(26)] } 1 .. 10;
-	my $locTmpD = getProgPaths("nodeTmpDir")."/diaFunc/$rstr/";#specific cache for diamond
+	my $rstr = join("", map { (q(a)..q(z))[rand(26)] } 1 .. 10); #map in scalar context returned the count ("10")
+	my $nodeTmp = getProgPaths("nodeTmpDir",0); #optional, as in geneCat/MATAF4: fall back to the shared tmp dir
+	$nodeTmp = $tmpD if (!defined($nodeTmp) || $nodeTmp eq "");
+	my $locTmpD = "$nodeTmp/diaFunc/$rstr/";#node-local scratch for diamond/foldseek
 
 	my $localTmp = 0;#local tmp, requires different file copying
 	#$localTmp = 1 if ($doQsub);
@@ -199,36 +266,49 @@ sub assignFuncPerGene{
 	my $redo = $otpsHR->{redo};
 	my $globalDiamondDependence = "";
 	system "mkdir -p $outD" unless (-d $outD);
-	if (!$otpsHR->{keepSplits}){
+	if (!$otpsHR->{keepSplits} && $exe){
 		clenSplitFastas($query,$otpsHR->{splitPath}."/");
 	}
 	
 	
 	#build DB
 	my ($DBpath ,$refDB ,$shrtDB) = getSpecificDBpaths($curDB,0);
-	die "Could not find required database $curDB\n" if ($DBpath eq "");
+	die "Could not find required database $curDB\n" if ($DBpath eq "" && $curDB ne "mp3"); #mp3 has no DB files
 	#die "$DBpath\n";
 	if ($exe && $DBpath ne "" ){
 		my $DBcmd = "";
+		# The .length table is read by parseBlastFunct2.pl (-LF) for every aligner;
+		# it must be produced also when the aligner's own index already exists.
+		my $lengthCmd = "";
 		unless (-e "$DBpath/$refDB.length"){
 			my $genelengthScript = getProgPaths("genelength_scr");#= "/g/bork3/home/hildebra/dev/Perl/reAssemble2Spec/secScripts/geneLengthFasta.pl";
-			$DBcmd .= "$genelengthScript $DBpath$refDB $DBpath$refDB.length\n";
+			$lengthCmd = "$genelengthScript $DBpath$refDB $DBpath$refDB.length\n";
 		}
+		if ($curDB =~ m/^(VDB|VFA|VFB)$/ && vfTabStale($DBpath)){ #VFDB annotation table (gene / VF / VF category)
+			$lengthCmd .= getProgPaths("prepVFDB_scr")." $DBpath\n";
+		}
+		my @dbDeps;
 		if($aligner eq "diamond" ){
-			$DBcmd .= "$diaBin makedb --in $DBpath$refDB -d $DBpath$refDB.db -p $ncore\n" ;
+			#only (re)build the diamond index if it is missing; built under a temporary name, so a killed job leaves no partial index
+			$DBcmd .= "$diaBin makedb --in $DBpath$refDB -d $DBpath$refDB.db.tmp -p $ncore\nmv $DBpath$refDB.db.tmp.dmnd $DBpath$refDB.db.dmnd\n" unless (-e "$DBpath$refDB.db.dmnd");
 			if (!-e "$DBpath$refDB.db.dmnd" && $doQsub){
-				my ($jN, $tmpCmd) = qsubSystem($qsubDir."DiamondDBprep.sh",$DBcmd,$ncore,"16G","diaDB","","",1,[],$QSBoptHR);
-				$globalDiamondDependence = $jN;
+				my ($jN, $tmpCmd) = qsubSystem($qsubDir."DiamondDBprep_$shrtDB.sh",$lengthCmd.$DBcmd,$ncore,"16G","diaDB","","",1,[],$QSBoptHR);
+				push @dbDeps, $jN; $lengthCmd = "";
 			}
-		} elsif ($aligner eq "foldseek" ){ 
+		} elsif ($aligner eq "foldseek" ){
 			if (!-e "$DBpath$refDB.DB3di"){
 				my $jns = buildFSdb("$DBpath$refDB", "$DBpath$refDB.DB3di",$ncore,$QSBoptHR,$qsubDir);
-				$globalDiamondDependence = $jns;
+				push @dbDeps, $jns;
 			}
 		} else {die"FuncTools.pm::assignFuncPerGene: Unknown aligner: $aligner\n";}
+		if ($doQsub && $lengthCmd ne ""){
+			my ($jL, $tmpCmd) = qsubSystem($qsubDir."DBlength_$shrtDB.sh",$lengthCmd,1,"4G","dbLen","","",1,[],$QSBoptHR);
+			push @dbDeps, $jL;
+		}
+		$globalDiamondDependence = join(";", grep { defined($_) && $_ ne "" } @dbDeps);
 
 		if (!$doQsub){
-			systemW $DBcmd;
+			systemW $lengthCmd.$DBcmd;
 		}
 		#die "$DBcmd\n";
 	}
@@ -238,9 +318,10 @@ sub assignFuncPerGene{
 	my @jdeps; my @allFiles;
 	my $allAss = "$outD/DIAass_$shrtDB.srt.gz";
 	my $tarAnno = "${allAss}geneAss.gz";
-	system "rm -f $allAss" if ($redo);
-	system "rm -f $tarAnno" if ($redo);
-	my $calcDia = 1;$calcDia = 0 if (-e $allAss);
+	#only remove previous results if this call will actually recompute them
+	system "rm -f $allAss" if ($redo && $exe);
+	system "rm -f $tarAnno" if ($redo && $exe);
+	my $calcDia = 1;$calcDia = 0 if (-e $allAss || -e $tarAnno); #per-gene assignments exist: no need to realign
 	my $interpDia = 1;$interpDia = 0 if (-e $tarAnno);
 	#my $N = 20;
 	my $jdep=""; my $qCmd = "";
@@ -252,24 +333,36 @@ sub assignFuncPerGene{
 	#die "$calcDia\n$allAss\n";
 	#alignment options (and defaults)
 	$otpsHR->{eval} = 1e-7 if (!exists($otpsHR->{eval}));
+	#e-value for the aligner (diamond/foldseek -e): the caller may keep a looser one than the parser cutoff, so that
+	#existing alignments stay valid when only the cutoff became stricter
+	$otpsHR->{alnEval} = $otpsHR->{eval} if (!defined($otpsHR->{alnEval}) || $otpsHR->{alnEval} eq "");
 	$otpsHR->{percID} = 25 if (!exists($otpsHR->{percID}));
 	$otpsHR->{minAlignLen} = 60 if (!exists($otpsHR->{minAlignLen}));
 	$otpsHR->{minBitScore} = 60 if (!exists($otpsHR->{minBitScore}));
 	$otpsHR->{minPercSbjCov} = 0.3 if (!exists($otpsHR->{minPercSbjCov}));
+	$otpsHR->{minPercQueryCov} = 0 if (!exists($otpsHR->{minPercQueryCov})); #0 = subject coverage only
 	$otpsHR->{bacNOG} = 0 if (!exists($otpsHR->{bacNOG}));
+	#DIAMOND sensitivity mode; "default-kept" (alignments made in DIAMOND's default mode) and "none" pass no flag
+	my $diaSens = $otpsHR->{sensitivity} // "mid-sensitive";
+	my $diaSensFlag = $diaSens =~ /^(?:fast|mid-sensitive|sensitive|more-sensitive|very-sensitive|ultra-sensitive)$/ ? "--$diaSens " : "";
 
 	print "$query assigned to $curDB ($fastaSplits splits, $ncore cores)\n" if ($calcDia || $interpDia);
+	#DIAMOND default and mid-sensitive modes use -b 2 -c 4 (~12-20 GB); KGM/NOG get some headroom
+	#(was 160G); an OOM-killed chunk is resubmitted with 1.5x memory
 	my $mem = 20;
-	$mem = 160 if ($shrtDB eq "NOG" || $shrtDB eq "KGM");
+	$mem = 32 if ($shrtDB eq "NOG" || $shrtDB eq "KGM");
+	#node-local scratch per chunk job (diamond -t temp files)
+	my $tmpSpaceG = bigFuncDB($shrtDB) ? 500 : 250;
 
 	my $tmpD2 = "$tmpD/$curDB/";
-	if ($calcDia){
-		print "Diamond pars: eval=$otpsHR->{eval}, percID=$otpsHR->{percID}, minAlLength=$otpsHR->{minAlignLen}, minBitScore=$otpsHR->{minBitScore}, minPercSbjCov=$otpsHR->{minPercSbjCov}}\n" if ($calcDia);
+	if ($calcDia && $exe){ #don't split the catalog if nothing will be run
+		print "Diamond pars: eval=$otpsHR->{eval} (alignment $otpsHR->{alnEval}), percID=$otpsHR->{percID}, minAlLength=$otpsHR->{minAlignLen}, minBitScore=$otpsHR->{minBitScore}, minPercSbjCov=$otpsHR->{minPercSbjCov}, minPercQueryCov=$otpsHR->{minPercQueryCov}\n";
 		my $ar = splitFastas($query,$fastaSplits,$otpsHR->{splitPath}."/");
 		@subFls = @{$ar};
 		for (my $i =0 ; $i< @subFls;$i++){
 			my $tmpD3 = "$tmpD2/R$i/";
-			my $cmd = "mkdir -p $tmpD3\nmkdir -p $locTmpD\n";
+			my $locChunk = "$locTmpD/$shrtDB.$i/"; #node-local scratch, removed at the end of the job
+			my $cmd = "mkdir -p $tmpD3\nmkdir -p $locChunk\n";
 			my $outF = "";
 			if ($curDB eq "mp3"){
 				my $mp3Dir = getProgPaths("mp3");
@@ -280,21 +373,25 @@ sub assignFuncPerGene{
 				$subFls[$i] =~ m/\/([^\/]+$)/; my $fnm=$1;
 				if ($localTmp){
 					$outF = "$outD/$fnm.Hybrid.result.gz"; #this is sometimes shared, sometimes local tmp
-					$cmd .= "$prsMP3_scr $subFls[$i].Hybrid.result $outF\n";
-					
 				} else {
 					$outF = "$subFls[$i].Hybrid.result.gz";
-					$cmd .= "$prsMP3_scr $subFls[$i].Hybrid.result $outF\n";
 				}
+				(my $outTmp = $outF) =~ s/\.gz$/.tmp.\$\$.gz/; #written under a job-unique temporary name ($$ expands in the job shell), renamed when complete
+				$cmd .= "$prsMP3_scr $subFls[$i].Hybrid.result $outTmp\nmv $outTmp $outF\n";
 				$cmd .= "rm $subFls[$i].Hybrid.result\n";
 			}elsif ($aligner eq "foldseek"){
 				my $prst5W = getProgPaths("PtostT5_Weights");
 				$outF = $localTmp
 					? "$outD/DiaAs.sub.$i.$shrtDB.gz"
 					: "$tmpD3/DiaAs.sub.$i.$shrtDB.gz";
-				my $raw_out = "$tmpD3/foldseek.$i.m8";
-				$cmd .= "$FSbin easy-search $subFls[$i] $DBpath$refDB.DB3di $raw_out $tmpD3 --threads $ncore --prostt5-model $prst5W\n";
-				$cmd .= "gzip -c $raw_out > $outF\nrm -f $raw_out\n";
+				my $raw_out = "$locChunk/foldseek.$i.m8";
+				(my $outTmp = $outF) =~ s/\.gz$/.tmp.\$\$.gz/;
+				# BLAST-like columns: the default 3rd column (fident) is a 0-1 fraction,
+				# but parseBlastFunct2.pl compares it with -percID as a percentage;
+				# qlen/tlen give per-hit query and subject lengths (same 14 columns as the diamond output)
+				$cmd .= "$FSbin easy-search $subFls[$i] $DBpath$refDB.DB3di $raw_out $locChunk --threads $ncore --prostt5-model $prst5W -e $otpsHR->{alnEval}"
+					." --format-output query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,qlen,tlen\n";
+				$cmd .= "gzip -c $raw_out > $outTmp\nmv $outTmp $outF\nrm -f $raw_out\n";
 			} else {
 				#my $outF = "$GCd/DiaAssignment.sub.$i";
 				if ($localTmp){
@@ -302,24 +399,31 @@ sub assignFuncPerGene{
 				} else {
 					$outF = "$tmpD3/DiaAs.sub.$i.$shrtDB.gz";
 				}
-				$cmd .= "$diaBin blastp -f tab --compress 1 --quiet -t $tmpD3 -d $DBpath$refDB.db -q $subFls[$i] -e $otpsHR->{eval} -o $outF -p $ncore\n";#--sensitive
+				(my $outTmp = $outF) =~ s/\.gz$/.tmp.\$\$.gz/; #job-unique: a duplicate submission can't write into the same file
+				#tabular output + qlen/slen, so query and subject coverage are computed per hit
+				$cmd .= "$diaBin blastp --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen ";
+				$cmd .= "--compress 1 --quiet $diaSensFlag-t $locChunk -d $DBpath$refDB.db -q $subFls[$i] -e $otpsHR->{alnEval} -o $outTmp -p $ncore\n";
+				$cmd .= "mv $outTmp $outF\n";
 				#--memory-limit ". int($mem *0.8-0.8) ."
 				#$cmd = "$diaBin blastp -f tab --compress 1 --sensitive --quiet -d $eggDB.db -q $subFls[$i] -k 3 -e 0.001 -o $outF -p $ncore\n";
 				#$cmd .= "$diaBin view -a $outF.tmp -o $outF -f tab\nrm $outF.tmp* $subFls[$i] \n";
 				$cmd .= "rm -r $tmpD3\n" if ($localTmp);
 			}
+			$cmd .= "rm -rf $locChunk\n";
 			#die "$cmd\n";
-			system "rm -f $outF" if ($redo);
+			system "rm -f $outF" if ($redo && $exe);
+			#outputs are named by chunk index only: one older than its chunk comes from an earlier split (other -fastaSplit)
+			if (-e $outF && (-M $outF) > (-M $subFls[$i]) && $exe){
+				print "Removing chunk output older than its catalog chunk (re-split): $outF\n";
+				unlink $outF;
+			}
 			if ($calcDia && !-e $outF && $exe){
 						#die "$cmd\n";
 				if ($doQsub){
-					my @preCons = @{$QSBoptHR->{constraint}};
-					push(@{$QSBoptHR->{constraint}}, $avx2Constr);#--constraint=sse4
-					my $preHDDspace=$QSBoptHR->{tmpSpace};
-					$QSBoptHR->{tmpSpace} = ($mem*2) . "G";
-					my ($jobName,$mptCmd) = qsubSystem($qsubDir."D$shrtDB.$i.sh",$cmd,$ncore,($mem)."G","D$shrtDB$i",$globalDiamondDependence,"",1,[],$QSBoptHR); #$jdep.";".
-					@{$QSBoptHR->{constraint}} = @preCons;
-					$QSBoptHR->{tmpSpace} = $preHDDspace;
+					my $chunkOpt = _qsbCopy($QSBoptHR);
+					push(@{$chunkOpt->{constraint}}, $avx2Constr) if (defined($avx2Constr) && $avx2Constr ne "");#--constraint=sse4
+					$chunkOpt->{tmpSpace} = "${tmpSpaceG}G";
+					my ($jobName,$mptCmd) = qsubSystem($qsubDir."D$shrtDB.$i.sh",$cmd,$ncore,($mem)."G","D$shrtDB$i",$globalDiamondDependence,"",1,[],$chunkOpt); #$jdep.";".
 					push(@jdeps,$jobName);
 					#die "$jobName\n";
 				} else {
@@ -340,7 +444,7 @@ sub assignFuncPerGene{
 		if ($allFiles[0] =~ m/\.gz$/){
 			$cmd .= "mv $allFiles[0] $allAss\n";
 		} else {
-			$cmd .= "gzip -c $allFiles[0] > $allAss\nrm $allFiles[0]\n";
+			$cmd .= "gzip -c $allFiles[0] > $allAss.tmp\nmv $allAss.tmp $allAss\nrm $allFiles[0]\n";
 		}
 	} else {
 		if ($allAss !~ m/\.gz$/ && $allFiles[0] =~ m/\.gz$/){
@@ -349,14 +453,14 @@ sub assignFuncPerGene{
 			$catcmd = "gzip -c";
 		}
 		#my $cmd= "cat ".join(" ",@allFiles). " > $allAss\n";   #
-		$cmd .= "$catcmd ".join(" ",@allFiles). " > $allAss\n";
+		$cmd .= "$catcmd ".join(" ",@allFiles). " > $allAss.tmp\nmv $allAss.tmp $allAss\n"; #existence of $allAss = complete
 		$cmd .= "rm -f ".join(" ",@allFiles) . "\n";
 	}
 	if ($curDB eq "mp3"){
 		$cmd .= "mv $allAss ${allAss}geneAss.gz\ntouch $allAss\n";
 	} else {
-		$cmd .= "$secCogBin -i $allAss -DB $shrtDB -singleSpecies 1  -bacNOG $otpsHR->{bacNOG} -KOfromNOG 0 -eggNOGmap 1 -calcGeneLengthNorm 0 -lenientCardAssignments 2 ";
-		$cmd .= "-mode 2 -CPU $ncore -percID $otpsHR->{percID} -LF $DBpath/$refDB.length -DButil $DBpath -tmp $tmpD2 -eggNOGmap 0 -minPercSbjCov $otpsHR->{minPercSbjCov} ";
+		$cmd .= "$secCogBin -i $allAss -DB $shrtDB -singleSpecies 1  -bacNOG $otpsHR->{bacNOG} -KOfromNOG 0 -calcGeneLengthNorm 0 -lenientCardAssignments 2 ";
+		$cmd .= "-mode 2 -queryType genes -CPU $ncore -percID $otpsHR->{percID} -LF $DBpath/$refDB.length -DButil $DBpath -tmp $tmpD2 -eggNOGmap 0 -minPercSbjCov $otpsHR->{minPercSbjCov} -minPercQueryCov $otpsHR->{minPercQueryCov} ";
 		$cmd .= "-minBitScore $otpsHR->{minBitScore} -minAlignLen $otpsHR->{minAlignLen} -eval $otpsHR->{eval}\n";
 	}
 
@@ -364,7 +468,8 @@ sub assignFuncPerGene{
 	$cmd .= "rm -f ".join(" ",@subFls)."\n" unless($otpsHR->{keepSplits});
 	if ($exe){
 		if ($interpDia && $doQsub){
-			($jdep,$qCmd) = qsubSystem($qsubDir."colDIA$shrtDB.sh",$cmd,1,"30G","ColDIA",join(";",@jdeps),"",1,[],$QSBoptHR);
+			#also wait for the DB length / VF.tab jobs: with all chunk outputs present no chunk job carries that dependency
+			($jdep,$qCmd) = qsubSystem($qsubDir."colDIA$shrtDB.sh",$cmd,1,"30G","ColDIA",join(";", grep { defined($_) && $_ ne "" } @jdeps, $globalDiamondDependence),"",1,[],$QSBoptHR);
 		} elsif ($interpDia) {
 			systemW $cmd;
 		}
@@ -392,6 +497,12 @@ sub calc_modules{
 		system "mkdir -p $outD2" unless (-d $outD2);
 		my $outMat = $outD2.$modShort[$k];
 		next if (-e $outD2."$modShort[$k].mat");
+		#module definitions are not installed by the installer: skip a missing set instead of failing the matrix job
+		my @missingMod = grep { !-s $_ } ($keggDB, "$modD/$modDescr[$k]", "$modD/$modHiera[$k]");
+		if (@missingMod){
+			print "WARNING: module set $modDBodir[$k] skipped, missing ".join(", ",@missingMod)."\n";
+			next;
+		}
 		#die "$inMat\n";
 		my $current_cmd = "$rareBin module -i $inMat -o $outMat -refMods $keggDB -description $modD/$modDescr[$k] -hiera  $modD/$modHiera[$k] -redundancy 5 -writeExtraModEstimates -moduleCompl $ModCompl -enzymeCompl $EnzCompl -collapseDblModules\n";
 		$cmdMod .= $current_cmd;

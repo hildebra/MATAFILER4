@@ -19,6 +19,7 @@ our @EXPORT_OK = qw(
 	catalog_map_specs_match
 	resolve_catalog_maps
 	write_catalog_maps
+	filter_catalog_maps
 );
 
 sub _catalog_root {
@@ -110,15 +111,36 @@ sub catalog_map_specs_match {
 	return 0 unless @left && @right;
 	return 0 unless @left == @right;
 	for my $index (0 .. $#left) {
-		return 0 unless $left[$index] eq $right[$index];
+		return 0 unless _map_entries_match($left[$index], $right[$index]);
 	}
 	return 1;
+}
+
+sub _map_entries_match {
+	my ($left, $right) = @_;
+	return 1 if $left eq $right;
+	return 0 unless -f $left && -f $right;
+	return 0 unless -s $left == -s $right;
+	return _map_file_digest($left) eq _map_file_digest($right);
+}
+
+sub _map_file_digest {
+	my ($path) = @_;
+	open my $fh, "<:raw", $path
+		or die "Cannot read mapping file $path: $!\n";
+	my $digest = Digest::SHA->new(256);
+	my $buffer;
+	while (read($fh, $buffer, 1024 * 1024)) {
+		$digest->add($buffer);
+	}
+	close $fh or die "Cannot close mapping file $path: $!\n";
+	return $digest->hexdigest;
 }
 
 sub _canonical_map_spec {
 	my ($spec) = @_;
 	my @maps;
-	for my $map (split /,/, $spec, -1) {
+	for my $map (split /,\s*|\r?\n/, $spec, -1) {
 		$map =~ s/^\s+|\s+$//g;
 		return () if $map eq '';
 		my $absolute = abs_path($map);
@@ -174,6 +196,48 @@ sub resolve_catalog_maps {
 	my @maps = _normalise_map_paths($catalog_dir, @nonempty);
 	_write_compatibility_map_log($manifest, @maps);
 	return join(',', @maps);
+}
+
+sub filter_catalog_maps {
+	my ($map_files, $excluded_samples, $target_dir) = @_;
+	die "Mapping files are required for MAG clustering\n"
+		unless defined($map_files) && length($map_files);
+	die "Excluded-sample list must be an array reference\n"
+		unless ref($excluded_samples) eq 'ARRAY';
+	return $map_files unless @{$excluded_samples};
+
+	die "A target directory is required for filtered mapping files\n"
+		unless defined($target_dir) && length($target_dir);
+	my %excluded = map { $_ => 1 } @{$excluded_samples};
+	make_path($target_dir);
+	my @filtered_maps;
+	my $map_index = 0;
+	for my $input_map (split /,/, $map_files) {
+		my $output_map = File::Spec->catfile($target_dir, "map.$map_index.txt");
+		my $temporary = "$output_map.tmp.$$";
+		my $ok = eval {
+			open my $input, '<', $input_map or die "Cannot open map $input_map: $!\n";
+			open my $output, '>', $temporary or die "Cannot write filtered map $temporary: $!\n";
+			while (my $line = <$input>) {
+				my ($sample) = split /\t/, $line, 2;
+				next if $excluded{$sample};
+				print {$output} $line or die "Cannot write filtered map $temporary: $!\n";
+			}
+			close $input or die "Cannot close map $input_map: $!\n";
+			close $output or die "Cannot close filtered map $temporary: $!\n";
+			rename $temporary, $output_map
+				or die "Cannot publish filtered map $output_map: $!\n";
+			1;
+		};
+		unless ($ok) {
+			my $error = $@;
+			unlink $temporary if -e $temporary;
+			die $error;
+		}
+		push @filtered_maps, $output_map;
+		$map_index++;
+	}
+	return join(',', @filtered_maps);
 }
 
 sub write_catalog_maps {

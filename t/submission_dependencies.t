@@ -158,6 +158,31 @@ is_deeply($failure_summary->{categories}{_GP}{failures},
 ok(!exists $failure_summary->{categories}{_MAP},
 	'pending dependency jobs are not reported as failures');
 
+my ($accounting_retry_now, $accounting_retry_calls, $accounting_retry_sleeps) = (0, 0, 0);
+my $accounting_retry_options = slurm_options();
+$accounting_retry_options->{schedulerClock} = sub { $accounting_retry_now };
+$accounting_retry_options->{schedulerSleeper} = sub {
+	$accounting_retry_sleeps++;
+	$accounting_retry_now += $_[0];
+};
+$accounting_retry_options->{slurmQueryRetrySeconds} = 300;
+$accounting_retry_options->{slurmQueryMaxErrorSeconds} = 1_200;
+$accounting_retry_options->{jobAccountingRunner} = sub {
+	$accounting_retry_calls++;
+	return $accounting_retry_calls <= 2
+		? ("slurm_load_jobs error: Unexpected message received\n", 1)
+		: ("806|abc_FT1|COMPLETED|0:0|None\n", 0);
+};
+my $accounting_retry_warning = '';
+my $retried_failure_summary;
+{
+	local $SIG{__WARN__} = sub { $accounting_retry_warning .= shift };
+	$retried_failure_summary = slurmJobFailureSummary({ 806 => 'FT1' }, $accounting_retry_options);
+}
+is($accounting_retry_calls, 3, 'Slurm failure accounting retries transient sacct errors');
+is($accounting_retry_sleeps, 2, 'Slurm failure accounting waits between transient errors');
+is($retried_failure_summary->{failed}, 0, 'successful accounting recovery preserves job results');
+
 my $large_accounting_calls = 0;
 my $large_accounting_options = slurm_options();
 $large_accounting_options->{jobAccountingRunner} = sub {
@@ -243,6 +268,78 @@ is($dependency_error, '', 'afterany accepts an unsuccessful terminal dependency'
 is($reconciled, '302',
 	'strict recovery removes a fulfilled aged-out dependency and retains a controller-known job');
 is($dependency_error, '', 'strict recovery accepts the verified dependency set');
+
+my $capture_script = File::Spec->catfile($root, 'slurm-stderr.pl');
+open my $capture_fh, '>', $capture_script or die $!;
+print {$capture_fh} "print STDERR qq{captured scheduler error\\n}; exit 7;\\n";
+close $capture_fh or die $!;
+my ($captured_error, $captured_status) = Mods::Subm::_run_slurm_submission(
+	"$^X $capture_script\n", {});
+is($captured_error, "captured scheduler error\n",
+	'a newline-terminated scheduler command still captures stderr');
+is($captured_status >> 8, 7,
+	'scheduler stderr capture preserves the real non-zero exit status');
+
+my ($transient_attempts, @transient_sleeps) = (0);
+my @transient_warnings;
+my ($transient_output, $transient_status, $transient_retried);
+{
+	local $SIG{__WARN__} = sub { push @transient_warnings, @_ };
+	($transient_output, $transient_status, $transient_retried) =
+		submitSlurmWithDependencyRecovery(
+			"sbatch transient.sh\n", $capture_script, {
+				slurmSubmitMaxAttempts => 3,
+				slurmSubmitRetrySeconds => 2,
+				slurmSubmitRetryMaxSeconds => 3,
+				schedulerSleeper => sub { push @transient_sleeps, $_[0] },
+				slurmSubmissionRunner => sub {
+					$transient_attempts++;
+					return $transient_attempts == 1
+						? ("sbatch: error: Batch job submission failed: Unexpected message received\n", 256)
+						: ("Submitted batch job 8111\n", 0);
+				},
+			},
+		);
+}
+is($transient_status, 0, 'a transient Slurm transport response is retried successfully');
+is($transient_output, "Submitted batch job 8111\n",
+	'transient recovery returns the accepted submission response');
+is($transient_retried, 1, 'transient submission recovery reports that it retried');
+is($transient_attempts, 2, 'the exact Unexpected-message failure causes one resubmission');
+is_deeply(\@transient_sleeps, [2], 'transient submission retry uses bounded backoff');
+like(join('', @transient_warnings), qr/Unexpected message received.*retrying in 2s/s,
+	'transient retry remains visible without terminating the controller');
+
+my $permanent_attempts = 0;
+my ($permanent_output, $permanent_status, $permanent_retried) =
+	submitSlurmWithDependencyRecovery(
+		'sbatch permanent.sh', $capture_script, {
+			slurmSubmitMaxAttempts => 8,
+			schedulerSleeper => sub { die 'permanent errors must not sleep' },
+			slurmSubmissionRunner => sub {
+				$permanent_attempts++;
+				return ("sbatch: error: Invalid account or account/partition combination specified\n", 256);
+			},
+		},
+	);
+is($permanent_status, 256, 'a permanent Slurm configuration error remains a failure');
+is($permanent_retried, 0, 'a permanent Slurm error is not retried');
+is($permanent_attempts, 1, 'permanent submission errors make exactly one attempt');
+like($permanent_output, qr/Invalid account/, 'permanent failure keeps its diagnostic');
+
+my $warning_script = File::Spec->catfile($root, 'warning-response.sh');
+my $warning_options = slurm_options();
+$warning_options->{doSubmit} = 1;
+$warning_options->{submittedJobs} = 0;
+$warning_options->{slurmSubmissionRunner} = sub {
+	return ("sbatch: warning: using default cluster\nSubmitted batch job 8123\n", 0);
+};
+my ($warning_job) = qsubSystem(
+	$warning_script, 'echo accepted', 1, '1G', 'warningParse',
+	'', '', 1, [], $warning_options,
+);
+is($warning_job, 'run8123',
+	'a valid Slurm job-ID line is parsed despite surrounding warning text');
 
 my $retry_script = File::Spec->catfile($root, 'retry-dependency.sh');
 open my $retry_fh, '>', $retry_script or die $!;
@@ -478,6 +575,52 @@ is(numLiveUserJobs($options), 4, 'live-job accounting counts running and pending
 is(numLiveUserJobs($options, 0, [qw(11 13 99)]), 2,
 	'live-job accounting can be restricted to IDs submitted by this invocation');
 unlike($live_command, qr/-t\s+PENDING/, 'the maxConcurrentJobs query is not restricted to pending jobs');
+
+my ($slurm_retry_now, $slurm_retry_calls, $slurm_retry_sleeps) = (0, 0, 0);
+$options = slurm_options();
+$options->{schedulerClock} = sub { $slurm_retry_now };
+$options->{schedulerSleeper} = sub {
+	$slurm_retry_sleeps++;
+	$slurm_retry_now += $_[0];
+};
+$options->{slurmQueryRetrySeconds} = 300;
+$options->{slurmQueryMaxErrorSeconds} = 1_200;
+$options->{liveJobRunner} = sub {
+	$slurm_retry_calls++;
+	return $slurm_retry_calls <= 2
+		? ("slurm_load_jobs error: Unexpected message received\n", 1)
+		: ("501|RUNNING\n", 0);
+};
+my $slurm_retry_warning = '';
+{
+	local $SIG{__WARN__} = sub { $slurm_retry_warning .= shift };
+	is(numLiveUserJobs($options), 1,
+		'transient Slurm controller failures are retried without treating jobs as lost');
+}
+is($slurm_retry_sleeps, 2, 'transient Slurm failures wait one full retry interval each time');
+like($slurm_retry_warning, qr/Transient Slurm scheduler query failure.*retrying in 300s/s,
+	'transient Slurm diagnostics identify the retry delay');
+
+my ($slurm_timeout_now, $slurm_timeout_sleeps) = (0, 0);
+$options = slurm_options();
+$options->{schedulerClock} = sub { $slurm_timeout_now };
+$options->{schedulerSleeper} = sub {
+	$slurm_timeout_sleeps++;
+	$slurm_timeout_now += $_[0];
+};
+$options->{slurmQueryRetrySeconds} = 300;
+$options->{slurmQueryMaxErrorSeconds} = 1_200;
+$options->{liveJobRunner} = sub {
+	return ("slurm_load_jobs error: Unexpected message received\n", 1);
+};
+my $slurm_timeout_error = '';
+{
+	local $SIG{__WARN__} = sub { };
+	eval { numLiveUserJobs($options); 1 } or $slurm_timeout_error = $@;
+}
+like($slurm_timeout_error, qr/failed continuously for 1200s.*Unexpected message received/s,
+	'continuous Slurm controller failures stop only after the 20-minute error budget');
+is($slurm_timeout_sleeps, 4, 'the 20-minute error budget has four five-minute waits');
 my ($shared_queue_calls, $wait_queue_calls) = (0, 0);
 $options = slurm_options();
 $options->{schedulerClock} = sub { 1000 };
@@ -518,12 +661,76 @@ like($threshold_output,
 	qr/1 active job\(s\) remain among 3 queued dependencies; loop threshold 3 reached/,
 	'dependency-pending jobs do not inflate the executing-job threshold');
 
+# A bounded wait lets the caller escalate accounting-confirmed OOM outcomes while
+# the rest of a submission wave is still queued, instead of blocking on its tail.
+$options = slurm_options();
+my $bounded_polls = 0;
+$options->{jobPollSeconds} = 1;
+$options->{jobStatusRunner} = sub {
+	$bounded_polls++;
+	return ("101|RUNNING\n102|PENDING\n", 0);
+};
+my ($bounded_remaining, $bounded_output);
+{
+	local *STDOUT;
+	open STDOUT, '>', \$bounded_output
+		or die "Cannot capture bounded-wait output: $!";
+	$bounded_remaining = qsubSystemJobAlive([qw(101 102 103)], $options, 0, -1, 0);
+}
+is_deeply([sort @{$bounded_remaining}], [qw(101 102)],
+	'a spent wait budget returns the dependencies that are still queued');
+is($bounded_polls, 1,
+	'the budget is checked after the poll, so one scheduler query is enough');
+like($bounded_output, qr/2\/3 job\(s\) still queued after \d+s; handing control back/,
+	'a bounded wait reports what it hands back to the caller');
+
+$options = slurm_options();
+$options->{jobPollSeconds} = 1;
+$options->{jobStatusRunner} = sub { return ("", 0); };
+is_deeply(qsubSystemJobAlive([qw(101 102)], $options, 0, -1, 3600), [],
+	'a wave that has fully drained returns an empty set well inside its budget');
+
 $options = slurm_options();
 $options->{activeJobRunner} = sub {
 	return ("101\n777\n", 0);
 };
 is(numActiveUserJobs($options, 0, [qw(101 102)]), 1,
 	'active-job counting ignores unrelated user jobs not submitted by this loop');
+
+# Slurm orders pending jobs by priority, so a recovery job submitted after a
+# large wave is simply the youngest and starts last. Handicapping the wave with
+# --nice, and submitting recovery at nice 0, is the only user-level lever that
+# reorders jobs the scheduler has already accepted.
+my $niced_script = File::Spec->catfile($root, 'niced-submission.sh');
+$options = slurm_options();
+$options->{jobNice} = 5000;
+qsubSystem($niced_script, 'echo niced', 1, '1G', 'niced', '', '', 1, [], $options);
+print "\n"; # qsubSystem's progress prefix intentionally has no trailing newline
+open my $niced_fh, '<', $niced_script or die "Cannot read $niced_script: $!";
+my $niced_text = do { local $/; <$niced_fh> };
+close $niced_fh;
+like($niced_text, qr/^#SBATCH --nice=5000$/m,
+	'a bulk submission carries its configured priority handicap');
+
+my $recovery_script = File::Spec->catfile($root, 'recovery-submission.sh');
+$options->{jobNice} = 0;
+qsubSystem($recovery_script, 'echo recovery', 1, '1G', 'recovery', '', '', 1, [], $options);
+print "\n";
+open my $recovery_fh, '<', $recovery_script or die "Cannot read $recovery_script: $!";
+my $recovery_text = do { local $/; <$recovery_fh> };
+close $recovery_fh;
+unlike($recovery_text, qr/--nice=/,
+	'a recovery submission asks for no handicap at all, outranking the niced wave');
+
+my $negative_script = File::Spec->catfile($root, 'negative-nice-submission.sh');
+$options->{jobNice} = -100;
+qsubSystem($negative_script, 'echo negative', 1, '1G', 'negative', '', '', 1, [], $options);
+print "\n";
+open my $negative_fh, '<', $negative_script or die "Cannot read $negative_script: $!";
+my $negative_text = do { local $/; <$negative_fh> };
+close $negative_fh;
+unlike($negative_text, qr/--nice=/,
+	'a negative nice is dropped rather than submitted, since raising priority needs an operator');
 
 my $bash_script = File::Spec->catfile($root, 'counted-submission.sh');
 $options = bash_options();

@@ -1,0 +1,15 @@
+# Line endings are LF everywhere in this project (Linux/HPC pipeline).
+# eol=lf overrides a user's core.autocrlf, so checkouts on any platform
+# keep LF instead of re-introducing CRLF.
+* text=auto eol=lf
+
+# Binary assets: never touch their contents.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.gz  binary
+*.bz2 binary
+*.zip binary
+*.bam binary
+*.cram binary

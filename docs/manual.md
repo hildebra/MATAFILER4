@@ -1,11 +1,11 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
 # MATAFILER4 manual
 
-This page is a compact manual and navigation point. The previous long manual was retained as [`manual_legacy.md`](manual_legacy.md) for comparison. Current command-line options are validated against the uploaded Perl source files in [Flag reference](flag_reference.md).
+This page is a compact manual and navigation point. The previous long manual was retained as [`manual_legacy.md`](manual_legacy.md) for comparison. Current command-line options are validated against the repository Perl sources in [Flag reference](flag_reference.md).
 
 ## Core pipeline phases
 
@@ -28,18 +28,21 @@ MATAFILER4 commonly runs in four script-level phases:
 
 ## Source-validated flag references
 
-The current reference now covers all uploaded Perl entry points:
+The reference covers every command-line entry point, and each script renders its own
+`-help` directly from it:
 
 - [`MATAF4.pl` flags](flag_reference.md#mataf4pl)
 - [`geneCat.pl` flags](flag_reference.md#genecatpl)
 - [`MGS.pl` flags](flag_reference.md#mgspl)
+- [`strain_within.pl` flags](flag_reference.md#strain_withinpl)
+- [`strain_within_2.2.pl` flags](flag_reference.md#strain_within_22pl)
 - [`buildTree5.pl` flags](flag_reference.md#buildtree5pl)
 
 ## Current vs legacy option names
 
 Prefer the clearer current names in new `MATAF4.pl` documentation and examples:
 
-| Prefer | Legacy alias still accepted by uploaded `MATAF4.pl` |
+| Prefer | Legacy alias still accepted by `MATAF4.pl` |
 |---|---|
 | `-assemblCores` | `-spadesCores` |
 | `-assemblMemory` | `-spadesMemory` |

@@ -7,6 +7,8 @@ use strict;
 
 use Exporter qw(import);
 use File::Copy qw(copy);
+use File::Temp qw(tempfile);
+use File::Basename qw(dirname);
 our @EXPORT_OK = qw(convertMSA2NXS runRaxMLng runRaxML readFMGdir prep40MGgenomes prepNOGSETgenomes
 			getE100 getGenoGenes getFMG renameFMGs readNCBItax
 			runFasttree runVeryFasttree runQItree iqtreeOutputComplete cleanupIQTreeTransients
@@ -95,6 +97,7 @@ sub zorroFilter{
 #builds an MSA, including filtering etc
 sub MSA{
 	my ($tmpInMSA,$tmpOutMSA2,$ncore,$clustalUse,$numSeq)  = @_;
+	($tmpInMSA, $tmpOutMSA2) = map { _shellQuote($_) } ($tmpInMSA, $tmpOutMSA2);
 	my $cmd = "";
 	if ($clustalUse==1){
 		my $clustaloBin = getProgPaths("clustalo");#= "/g/bork3/home/hildebra/bin/clustalo/clustalo-1.2.0-Ubuntu-x86_64";
@@ -107,10 +110,7 @@ sub MSA{
 		$cmd = "$mafftBin --thread $ncore --quiet $tmpInMSA > $tmpOutMSA2;";
 	} elsif ($clustalUse == 3) {
 		die "guidance: rework phyloTools.pm\n";
-		my $guid2Path = getProgPaths("guidance2");
-		#guidance has some strange results..
-		$cmd = " $guid2Path --seqFile $tmpInMSA --msaProgram MAFFT --seqType aa ;";
-		#$cmd .= " --dataset $spl2[1].$cnt --mafft $mafftBin --outDir $tmpD --proc_num $ncore\n";
+
 	} elsif ($clustalUse == 4) {
 		#my $nseqs = 0;
 		#`grep -c '^>' $tmpInMSA`;
@@ -155,41 +155,36 @@ sub filterMSA{ #pretty useless atm.. not really used
 
 
 sub getTreeLeafs($){
-	my ($nwkFile)  = @_;
-	my $nwk = `cat $nwkFile`;
-	my %nwLfs;
-	my @nwLfs1 = split /[\(\),;]+/,$nwk;
-	for (my $i=0;$i<@nwLfs1;$i++){
-		my @tmp = split /:/,$nwLfs1[$i];
-		next if (@tmp ==0 || $tmp[0] eq "" );
-		$nwLfs{$tmp[0]} = 1;
-	}
-	return(\%nwLfs);
+	my ($path) = @_;
+	my ($leaves, $duplicates) = _newickLeafIdentifiers($path);
+	die "Duplicate tree tip labels in $path: ".join(',', @{$duplicates})."\n" if @{$duplicates};
+	return $leaves;
 }
+
 sub fixHDs4Phylo ($){
-	#routine to check that headers of fastas don't contain ":", ",", ")", "(", ";", "]", "[", "'"
+	# Tree programs reject some characters in taxon names. If any header contains
+	# one of : , ( ) { } ; [ ] ' the file is rewritten to "<input>.fix" with these
+	# characters replaced by "|", names cut to 40 characters (RAxML limit) and a
+	# per-name counter appended to keep truncated names unique. Headers are
+	# processed in sorted order so paired NT and AA inputs are renamed identically.
 	my ($inF) = @_;
-	my $reqFix=0;
 	if ($inF eq ""){return "";}
 	my $hr = readFasta($inF,1); my %FAA = %{$hr};
-	foreach my $hd (keys %FAA){
-		if ($hd =~ m//){
-			$reqFix=1;last;
-		}
-	}
+	my $reqFix = grep { m/[:,(){};\[\]']/ } keys %FAA;
 	my $outF = $inF;
 	if ($reqFix){
 		$outF .= ".fix";
 		print "Fixing headers in input file (to $outF)\n";
 		my %newHDs;
-		open O,">$outF" or die "Can't write renamed phylogeny input $outF: $!\n";
-		foreach my $hd (keys %FAA){
+		open my $out, '>', $outF or die "Can't write renamed phylogeny input $outF: $!\n";
+		foreach my $hd (sort keys %FAA){
 			my $hd2 = substr $hd,0,40; #cut to raxml length
-			$hd2 =~ s/[:,\}\{;\]\[']/|/g;
+			$hd2 =~ s/[:,(){};\]\[']/|/g;
 			$newHDs{$hd2} ++;
 			$hd2 .= $newHDs{$hd2};
-			print O ">$hd2\n$FAA{$hd}\n";
+			print {$out} ">$hd2\n$FAA{$hd}\n";
 		}
+		close $out or die "Can't close renamed phylogeny input $outF: $!\n";
 	}
 	return $outF;
 }
@@ -368,8 +363,12 @@ sub runQItree{
 		print "IQ-TREE safe likelihood kernel enabled pre-emptively: "
 			."taxa=$taxonCount, alignment size=${inSize}MB\n";
 	}
-	my $constraintTree = $treeOpts{constraintTree};
+	my $constraintTree = $treeOpts{constraintTree} // "";
+	my $fixedTree = $treeOpts{fixedTree} // "";
 	die ("Constraint tree $constraintTree does not exist") if ($constraintTree ne "" && !-e $constraintTree);
+	die ("Fixed tree $fixedTree does not exist") if ($fixedTree ne "" && !-e $fixedTree);
+	die "IQ-TREE cannot use a constraint tree and a fixed tree in the same run\n"
+		if $constraintTree ne "" && $fixedTree ne "";
 	my $iqTree  = getProgPaths("iqtree");
 	my $vcheck = `$iqTree --version`;
 	$vcheck =~ m/version ([23])/
@@ -379,9 +378,20 @@ sub runQItree{
 		if $iqPathogen && $iqVersion != 3;
 	$treeOut =~ s/\.nwk$//;
 	my $treNM = "IQtree";
+	if (($treeOpts{restartIncomplete} // 0) && -s "$treeOut.ckp.gz") {
+		_archiveIQTreeLog($treeOut, 'prior_scratch') if -e "$treeOut.log";
+		_clearIQTreeAttempt($treeOut);
+		print "Restarting incomplete IQ-TREE search from the recovered scratch MSA; "
+			."the prior checkpoint referenced an earlier job's scratch path\n";
+	}
+
 	my $threadOpts = "-T $ncore";
 	my $usePartitionModel = $partiF ne "" && !$iqPathogen;
-	my $cmd = "$iqTree -s $inMSA $threadOpts -pre $treeOut -seed 678 -quiet ";
+	# BuildTree already knows the biological alphabet. Pass it explicitly so
+	# sparse/ambiguity-rich alignments do not depend on IQ-TREE 3 auto-detection.
+	my $sequenceType = $useAA ? 'AA' : 'DNA';
+	my $cmd = "$iqTree -s "._shellQuote($inMSA)." -st $sequenceType $threadOpts -pre "
+		._shellQuote($treeOut)." -seed 678 -quiet ";
 	if (!$iqLegacy && $iqMemMB > 0){
 		if ($usePartitionModel){
 			warn "WARNING: IQ-TREE -mem disabled because partition models do not support "
@@ -392,31 +402,23 @@ sub runQItree{
 	}
 	$cmd .= "--pathogen " if $iqPathogen && !$iqLegacy;
 	#$cmd .= " -Q $partiF --merge " unless ($partiF eq "");
-	$cmd .= " -p $partiF " if $usePartitionModel;
+	$cmd .= " -p "._shellQuote($partiF)." " if $usePartitionModel;
 	# IQ-TREE's -o affects only presentation under our reversible models.  Root
 	# downstream output after inference instead: -o can assert when the anchor
 	# is absent from an internal reduced or partition-specific tree.
-	$cmd .= "-g $constraintTree " unless ($constraintTree eq "");
+	$cmd .= "-g "._shellQuote($constraintTree)." " unless ($constraintTree eq "");
+	# -te fixes the topology while allowing IQ-TREE to re-estimate branch lengths
+	# and model parameters (IQ-TREE treats it as a no-tree-search invocation).
+	$cmd .= "-te "._shellQuote($fixedTree)." " unless ($fixedTree eq "");
 	unless ($fast == 0 || $iqPathogen){
 		$cmd .= "--fast ";
 		print "IQtree - fast\n";
 		$treNM .= "_fast";
 	}
 	if ($autoModel){$treNM .= "_autoMOD";}
-	if ($useAA){
-		if ($autoModel){
-			$cmd .= $usePartitionModel ? "-m MFP+MERGE " : "-m TEST ";
-		} else{
-			$cmd .= "-m LG+F+G "; #needs to be HKY for nts
-		}
-	} else {
-		if ($autoModel){
-			$cmd .= $usePartitionModel ? "-m MFP+MERGE " : "-m TEST ";
-		} else {
-			$cmd .= $iqLegacy ? "-m GTR+F+I+G4 " : "-m GTR+F+G2 ";
-			#$cmd .= "-m HKY+F+G ";
-		}
-	}
+	my $model = $autoModel ? ($usePartitionModel ? 'MFP+MERGE' : 'TEST')
+		: $useAA ? 'LG+F+G' : 'GTR+F+G2';
+	$cmd .= "-m $model ";
 	if ($bootStrap >0){
 		if ($bootStrap < 1000){
 			print "standard non parametric bootstrap ($bootStrap). Use >1000 bootstraps to do ultrafast bootstrap\n";
@@ -432,7 +434,7 @@ sub runQItree{
 		}
 		#also consider -b >=100 for std bootstrap
 	} else {
-		$cmd .= "--alrt 1000 ";
+		#$cmd .= "--alrt 1000 ";
 		$cmd .= ""; #no bootstrap at all..
 	}
 	#TODO: include booster for better bootstrap values
@@ -457,7 +459,7 @@ sub runQItree{
 		$attempt .= " -safe " if $safe;
 		systemW($attempt);
 	};
-	print $cmd;
+	print $cmd, ($cmd =~ /\n\z/ ? "" : "\n");
 	my $ok = eval {
 		$execute->($runSafe);
 		1;
@@ -486,23 +488,32 @@ sub runQItree{
 	#"mv $treeOut/IQtree_fast_allsites.treefile $treeOut/$treNM";
 }
 
-sub runVeryFasttree{
-	my ($inMSA,$treeOut,$isAA,$ncore) = @_;
-	my $vfsttreeBin  = getProgPaths("veryfasttree");
-	my $ntFlag = "";
-	$ntFlag = "-nt -gtr" if (!$isAA);
-	my $cmd = "$vfsttreeBin -threads $ncore $ntFlag $inMSA > $treeOut\n";
-	systemW $cmd;
+sub _shellQuote {
+	my ($value) = @_;
+	$value =~ s/'/'"'"'/g;
+	return "'$value'";
+}
 
+sub _runFastTree {
+	my ($program, $inMSA, $treeOut, $isAA, $ncore) = @_;
+	my $binary = getProgPaths($program);
+	my ($handle, $temporary) = tempfile('.fasttree-XXXXXX', DIR => dirname($treeOut), UNLINK => 1);
+	close $handle or die "Cannot close temporary tree $temporary: $!\n";
+	my $flags = $isAA ? '' : '-nt -gtr';
+	$flags .= " -threads $ncore" if $program eq 'veryfasttree';
+	my $ok = eval {
+		systemW("$binary $flags "._shellQuote($inMSA)." > "._shellQuote($temporary)."\n");
+		die "$program returned without a nonempty tree\n" unless -s $temporary;
+		rename $temporary, $treeOut or die "Cannot publish $treeOut: $!\n";
+		1;
+	};
+	my $error = $@;
+	unlink $temporary if -e $temporary;
+	die $error unless $ok;
 }
-sub runFasttree{
-	my ($inMSA,$treeOut,$isAA,$ncore) = @_;
-	my $fsttreeBin  = getProgPaths("fasttree");
-	my $ntFlag = "";
-	$ntFlag = "-nt -gtr" if (!$isAA);
-	my $cmd = "$fsttreeBin $ntFlag $inMSA > $treeOut\n";
-	systemW $cmd;
-}
+
+sub runVeryFasttree { return _runFastTree('veryfasttree', @_); }
+sub runFasttree { return _runFastTree('fasttree', @_); }
 
 
 sub getGenoName($){my $GenomeN = $_[0];$GenomeN =~ s/\.f[n]?a$//; $GenomeN =~ s/^.*\///;  $GenomeN =~ s/-/_/; return $GenomeN;}

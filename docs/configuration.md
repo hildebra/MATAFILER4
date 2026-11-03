@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -31,6 +31,12 @@ When a submitted job requests node-local scratch and `nodeTmpDir` is configured,
 the submission wrapper creates a job-specific directory below `nodeTmpDir`,
 exports it as `TMPDIR`, and runs the job from that directory. Generated submission
 scripts and scheduler logs remain in their persistent `LOGandSUB` locations.
+
+For Slurm, every job first starts in the persistent directory containing its generated
+`LOGandSUB` script and receives `TMPDIR=/tmp`. This prevents dependent jobs from
+inheriting a vanished parent-job node-scratch path. When node-local scratch is
+requested, the wrapper then creates and enters `nodeTmpDir/matafiler4.$SLURM_JOB_ID`
+before running the payload.
 
 With `-reduceScratchUse 1`, cleanup is released only after final assembly
 publication, ContigStats, configured binning, and configured ConsSNP/variant
@@ -73,27 +79,92 @@ continues, followed by a bounded scheduler polling delay and a retry of the same
 range. `-killDepNever 1` can remove Slurm jobs
 stuck in dependency states, but use it only when this matches your local scheduler policy.
 
-Sites where compute nodes do not normally have outbound network access can set
-`netQueue` in `config.txt` to a network-enabled queue or Slurm partition. Code
-that sets `useNetQueue` on its submission options will use that queue and the
-configured `longTime` wall time for the next job. If `netQueue` is empty or
-unset, MATAFILER4 falls back to `mediumQueue`.
+ENA and SRA acquisition jobs use the dedicated `downloadQueue` Slurm partition.
+Its default is set in the local `Mods/MATAFILERcfg.txt`, which the installer
+creates from `Mods/config.old`; the supplied value is `nbi-download`. To
+override it, edit the selected site `config.txt`:
+
+```text
+downloadQueue	my-network-partition
+```
+
+An explicitly empty `downloadQueue` value falls back to `mediumQueue`. This
+lets installations without a separate network partition retain the ordinary
+default. The queue choice is one-shot and applies only to the archive acquisition
+job; dependent filtering, assembly, and mapping jobs use their normal queues.
+
+`netQueue` remains available for other code paths that explicitly request a
+general network-enabled queue. It likewise falls back to `mediumQueue` when
+empty and uses the configured `longTime` wall time.
+
+`maxMF4mem` sets the maximum GiB requested by automatic OOM retries in the
+strain workflows. The supplied default is `512`; `-treeOOMMaxMemGB` remains an
+explicit per-run override for tree construction.
 
 ## Database setup
 
 GTDB and GTDB-Tk databases are used for MAG and MGS-related classification. The installer provides:
 
 ```bash
-helpers/install/get_gtdb.py
+helpers/install/get_gtdb.pl
 ```
 
 Example:
 
 ```bash
-./get_gtdb.py all -v 226 -t /path/to/download/to -d /path/to/extract/to --tk split
+helpers/install/get_gtdb.pl all -v 226 -t /path/to/download/to -d /path/to/extract/to --tk split
 ```
 
+`helpers/install/get_gtdb.pl configure -d /path/to/extract/to` points `GTDBPath`, `GTDB_GTDB`, `GTDB_lnks` and `GTDBtk_DB` in `Mods/config_DBs.txt` (of the checkout named by `MF4DIR`) at the extracted database, using `[DBDir]`-relative paths when it lies inside `DBDir`.
+
 Delete the download directory only after confirming that the extracted database paths are configured correctly.
+
+The exact `config_DB` keys required for RiboFind, functional profiling,
+MetaPhlAn 4, mOTUs 4, and Protal are listed in the
+[read-based profiling tutorial](profiling_tutorial.md#2-link-the-databases-in-config_db).
+
+### Protal database
+
+MATAFILER needs Protal 0.7.8 or later (`.sam.zst` alignments, single-end and long
+reads, the `READ_TYPE` map column) and refuses an older `protal` at start. The
+base `MF4` environment still installs the Protal 0.6.0a package from bioconda, so
+until a newer package is released point the `protal` and `protalProfileUtils` keys
+in your config at a source build (`protal` and `scripts/protal_profile_utils` of the
+[protal repository](https://github.com/hildebra/protalFastHit)); `qcmsa`, which
+`-profileProtal 2` runs for the strain MSAs, has to be next to `protal` or on `PATH`.
+Download a compatible Protal database as described in the
+[official Protal documentation](https://protal.earlham.ac.uk/main.php?site=documentation#download-the-database),
+then use either of these configurations:
+
+```text
+protal_db	/path/to/protal_database
+```
+
+or export the database path into the controller and compute-job environment:
+
+```bash
+export PROTAL_DB_PATH=/path/to/protal_database
+```
+
+The bundled `protal_db` setting is intentionally empty, so Protal falls back to
+`PROTAL_DB_PATH` unless the selected site/user config overrides it. A missing value
+is checked again inside each submitted job. `-ProtalMem` defaults to 100 GB and can
+be adjusted for the selected full or mini database (a run on the full GTDB r226
+database peaks at about 37 GB); `-ProtalCores` defaults to 4. These resources apply
+to every Protal job: a downloaded sample's own job, a batch map of local samples
+and the strain-MSA job. Give the batch jobs more cores when many local samples are
+aligned together, or split them with `-protalBatchSize`.
+`-protalIgnoreErrors` defaults to `1`: reads Protal cannot take with the chosen kind
+of reads (other kinds, BAM input) are left out with a warning, and a sample without
+usable reads is skipped. Set it to `0` to stop instead. It does not suppress Protal
+execution failures.
+
+Protal reads the samples' source files (yours, or the downloaded ones) directly, so
+it needs no staging job and no node-local scratch. Its SAMs (zstd-compressed,
+marker-gene alignments only) are written to the run scratch and deleted, unless
+`-profileProtal 2` asks for strain MSAs: then each sample keeps its SAM
+(`<sample>/Tax/Protal/<sample>.sam.zst`); plan for that space next to the profiles.
+A batch of local samples holds all its SAMs in the run scratch until it finishes.
 
 ## Versioning
 

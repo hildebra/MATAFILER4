@@ -2,14 +2,22 @@
 
 use warnings;
 use strict;
+use File::Spec;
+use FindBin qw($Bin);
 use Getopt::Long qw(GetOptions);
 
-my ($assembly, $samtools, $sample_dirs) = ('', 'samtools', '');
+use lib File::Spec->catdir($Bin, '..', '..');
+use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile);
+
+my ($assembly, $samtools, $sample_dirs, $config) = ('', '', '', '');
 GetOptions(
 	'assembly=s'    => \$assembly,
 	'samtools=s'    => \$samtools,
 	'sample-dirs=s' => \$sample_dirs,
+	'config=s'      => \$config,
 ) or die "Invalid options\n";
+setConfigFile($config) if length($config);
+$samtools ||= getProgPaths('samtools');
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 die "--assembly and --sample-dirs are required\n"
 	unless length($assembly) && length($sample_dirs);

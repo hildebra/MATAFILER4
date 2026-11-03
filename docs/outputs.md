@@ -1,5 +1,5 @@
 <!-- Documentation navigation -->
-[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
+[Home](../README.md) | [Quick start](quickstart.md) | [Installation](install.md) | [Configuration](configuration.md) | [Mapping files](mapping_files.md) | [Workflows](common_workflows.md) | [Examples](examples.md) | [Profiling tutorial](profiling_tutorial.md) | [Strain-within guide](strainwithin.md) | [Outputs](outputs.md) | [Flag reference](flag_reference.md) | [FAQ](FAQ.md) | [Glossary](glossary.md)
 
 ---
 
@@ -139,7 +139,9 @@ The `assemblies/` directory contains the metagenomic assembly and assembly stati
 | `scaffolds.fasta.filt.gz` | Scaffold FASTA after length filtering. |
 | `AssemblyStats.txt` | Assembly statistics for the full assembly. |
 | `AssemblyStats.500.txt` | Assembly statistics after filtering to scaffolds above the configured length threshold, often 500 bp. |
-| `Ass.done.sto` | Stone/checkpoint file indicating that the assembly step finished. |
+| `AssemblyStats.ini.txt` | Assembly statistics before scaffold length filtering. |
+| `ass.done.sto` | Stone/checkpoint file indicating that the assembly step finished. |
+| `preassmblDone.sto` | Stone written after the pre-assembly stage of a hybrid (`-assembleMG 5`) run. |
 | `metag/` | Main assembly post-processing directory. |
 
 ### `assemblies/metag/ContigStats/`
@@ -252,6 +254,7 @@ MATAFILER can summarize functional annotations from several databases. Common pr
 | `CZy` | CAZy carbohydrate-active enzymes |
 | `ABR` / `ABRc` | Antibiotic resistance annotations |
 | `TCDB` | Transporter Classification Database |
+| `VFA` / `VFB` | VFDB virulence factors: set A (core, experimentally verified) and set B (full dataset). Levels: L0 gene_VFID, L1 virulence factor, L2 VF category |
 | `PAB`, `PTV`, `ACL`, `MOH` | Other optional functional databases, depending on installation and flags |
 
 For hierarchical databases, MATAFILER writes one matrix per level, for example:
@@ -265,23 +268,50 @@ NOG.L1.txt
 
 `L0` is normally the most specific annotation level. Higher levels are broader summaries.
 
-### KEGG and module outputs
+### VFDB (virulence factor) outputs
 
-Module-style outputs can be found under:
-
-```text
-<gene_catalog>/Anno/Func/modules/
-```
-
-Common files include:
+`VFA` and `VFB` are in the default `geneCat.pl -functDB` (`KGM,TCDB,CZy,ABRc,VFA,VFB`). Without the VFDB files (see *Database setup*) the default skips both sets and prints a note. Installing VFDB later adds them on the next run of an existing catalogue; only `VFA` and `VFB` are then aligned. An explicit `-functDB` that names `VFA` or `VFB` stops if the files are missing. Each set writes its own tables to `<gene_catalog>/Anno/Func/`:
 
 | File | Meaning |
 |---|---|
-| `KEGG.mat` | Module abundance matrix. |
-| `KEGG.descr` | Module hierarchy and descriptions. |
-| `KEGG.KOused` | KEGG orthologs used to infer each module in each sample. |
-| `KEGG.MODscore` | Module completeness score per sample. |
-| `KGML0.txt` | KEGG ortholog abundance matrix. |
+| `VFAL0.txt` / `VFBL0.txt` | Abundance per VFDB gene, named `gene_VFID` (e.g. `ssaQ_VF0036`). |
+| `VFAL1.txt` / `VFBL1.txt` | Abundance per virulence factor (e.g. `VF0036_TTSS_(SPI-2_encode)`). |
+| `VFAL2.txt` / `VFBL2.txt` | Abundance per VF category (e.g. `VFC0086_Effector_delivery_system`). |
+| `DIAass_VFA.srt.gzgeneAss.gz` / `DIAass_VFB.srt.gzgeneAss.gz` | Gene-to-VF assignments (`gene<TAB>L0<TAB>L1<TAB>L2`). |
+
+**Database setup:** put `VFDB_setA_pro.fas` and `VFDB_setB_pro.fas` from the [VFDB download page](http://www.mgc.ac.cn/VFs/download.htm) (unzipped) into `VirDB_path_DB` (default `[DBDir]/Funct/VIRDB/`). Both files are needed even if only one set is used. On first use MATAFILER builds the diamond index and the `.length` file. `secScripts/functions/prepVFDB.pl` builds `VF.tab`, the table mapping each VFDB protein to its gene, virulence factor and VF category. Both the gene catalogue and read-based profiling (`-DiaDBs VFA`) build it, and rebuild it when a VFDB FASTA is newer or the table has the old column layout.
+
+**Cutoffs:** set A is a subset of set B, so `VFA` is the conservative profile and `VFB` the more sensitive one. Both use the same, stricter cutoffs: identity ≥ 60 %, e-value ≤ 1e-10, bit score ≥ 60 and alignment ≥ 50 aa. The hit must also cover either ≥ 70 % of the VFDB protein or ≥ 80 % of the catalog protein. The cutoffs are set in `%funcDBcutoffs` in `secScripts/geneCat.pl`. A VFDB hit shows homology to a known virulence factor, not that the organism is pathogenic.
+
+### KEGG and module outputs
+
+Module-style outputs are written one directory per module database, each holding a
+file set named after that database:
+
+```text
+<gene_catalog>/Anno/Func/modules/modules/   modKEEG.*   KEGG modules
+<gene_catalog>/Anno/Func/modules/BSB/       modGMM.*    gut metabolic modules
+<gene_catalog>/Anno/Func/modules/SEED/      modSEED.*   SEED subsystems
+<gene_catalog>/Anno/Func/modules/GBM/       modGBM.*    gut brain modules
+```
+
+The eggNOG-mapper route writes the same layout under `Anno/Func/emapper/modules/`.
+The module definitions come from `Module_path_DB` and are not installed by the installer; a module set whose
+`.list`, `.descr` or `_hiera.txt` file is missing is skipped with a warning.
+
+Taking `modules/modules/` as the example, the files are:
+
+| File | Meaning |
+|---|---|
+| `modKEEG.mat` | Module abundance matrix. |
+| `modKEEG.descr` | Module hierarchy and descriptions. |
+| `modKEEG.KOused` | KEGG orthologs used to infer each module in each sample. |
+| `modKEEG.MODscore` | Module completeness score per sample. |
+| `KGML0.txt` | KEGG ortholog abundance matrix (in `Anno/Func/`, not in `modules/`). |
+
+The metaCyc module set is currently skipped, so no `metaCyc/` directory is produced.
+`KEGG.descr`, a symlink to the KEGG ortholog descriptions, is placed next to the
+KEGG ortholog matrix rather than in a module directory.
 
 ### Gene-to-function assignments
 
@@ -292,6 +322,69 @@ Anno/Func/DIAass_<db>.srt.gzgeneAss.gz
 ```
 
 where `<db>` is the database of interest. These files list gene catalog IDs and their assigned lowest-level functional annotations. A single gene can have more than one annotation.
+
+### Assignment cutoffs (diamond / foldseek)
+
+A hit is accepted when e-value ≤ `-FuncMinEVal` (1e-8), identity ≥ `-FuncMinPerID` (25 %), bit score ≥ `-FuncMinBitSc` (45) and alignment length ≥ `-FuncMinAlLeng` (30 aa). It must also meet **either** coverage cutoff:
+
+- at least `-FuncMinPercSbjCov` (50 %) of the reference protein aligned, or
+- at least `-FuncMinPercQueryCov` (80 %) of the catalog protein aligned.
+
+The query-coverage alternative keeps partial (incomplete) genes. Changing `-functDB`, `-functAligner` or a cutoff invalidates `checkpoints/10.func.stone`, and the next run recomputes only what the change affects. `Anno/Func/.<db>.params` records the aligner and cutoffs behind each database's results:
+
+- a changed aligner, or a less strict `-FuncMinEVal` than the alignments were made with, realigns that database;
+- any other change, including a stricter `-FuncMinEVal`, re-interprets its existing alignments (`DIAass_<db>.srt.gz`) and rebuilds its matrix. The alignment e-value stays recorded (`alnEval`) and is also used for chunks still to be aligned, so all alignments of a database share it;
+- results from runs before this record existed are kept as they are. Use `-redoFunc 1` (also forwarded from the main geneCat run) to recompute them.
+
+The catalog is aligned in chunks, one job each: `-fastaSplit` (500M) for most databases, `-fastaSplitBigDB` (100M) for KEGG (`KGM`, `KGE`, `KGB`) and eggNOG (`NOG`). DIAMOND's temporary files on node-local scratch grow with the chunk size and with the number of homologs per gene. 500M chunks against KEGG exceeded the 500 GB scratch a job requests. DIAMOND deletes these files right after opening them, so they do not show up in `ls` or `du` while the job runs. Chunk size does not change the results. After a chunk size changes, chunk outputs from the old split are recomputed.
+
+**Supervision.** Each functional stage (`FuncAssign`: diamond databases, `FuncEMAP`: eggNOG-mapper) runs under a controller job (`func_GC.sh`, `emap_GC.sh`, on the long queue). The controller stays alive until all of the stage's jobs have finished:
+- It submits each job once its prerequisites have completed. There are no scheduler dependencies, so a failed job cannot leave the rest of the stage pending.
+- A job succeeds when it writes its completion marker (`<script>.done`) as its last command, whatever Slurm reports.
+- A job killed for exceeding its memory (Slurm `OUT_OF_MEMORY`, or killed by signal 9) is resubmitted with 1.5× the memory. A job lost to a node failure or preemption, or an eggNOG-mapper chunk whose annotation timed out, is resubmitted with the same memory. A job is tried at most `GENECAT_FUNC_ATTEMPTS` times (default 3); logs of failed attempts are kept as `<script>.etxt.attempt<n>`.
+- A job that fails for good only stops the jobs that depend on it; the rest of the stage still runs. The controller then exits with a report: failed jobs, their scheduler state and the last lines of their error log. Rerunning geneCat repeats only what is missing.
+
+While a stage runs, `Anno/Func/.FuncAssign.inflight` / `.FuncEMAP.inflight` holds the controller's job ID, and geneCat does not submit that stage again (also not with `-redoFunc 1`). The stage's final job removes the marker; so does a controller that stops on a failure. A marker whose job has finished, can never run (Slurm `DependencyNeverSatisfied`, left by runs before supervision), or whose submitting process died is ignored and removed.
+
+`Anno/Func/.<db>.matrix.done` marks a completed matrix. A database without this marker, or without its `DIAass_<db>.srt.gzgeneAss.gz`, is recomputed on the next `FuncAssign` run. The stone records both files, so it is only written after every matrix succeeded.
+
+### KEGG from diamond and from eggNOG-mapper
+
+Both KEGG routes run by default and are kept separate:
+
+| Route | KO matrix | Modules |
+|---|---|---|
+| diamond against the KEGG database (`-functDB` containing `KGM`) | `Anno/Func/KGML0.txt` | `Anno/Func/modules/*/` |
+| eggNOG-mapper (`FuncEMAP`) | `Anno/Func/emapper/EM.KOL0.txt` | `Anno/Func/emapper/modules/*/` |
+
+The eggNOG-mapper tables `EM.KGM*` (KO;module) and `EM.KGP*` (KO;pathway) are still written: level 0 holds KOs, level 1 the eggNOG-mapper module or pathway assignments, summed over genes (before 1 October 2026, level 1 held `KO;module` path names). `eggNOGmapper_KO.geneAss.gz` holds the per-gene KOs from eggNOG-mapper.
+
+### eggNOG-mapper v3 (eggNOG 7)
+
+`FuncEMAP` runs eggNOG-mapper v3 (3.0.0-beta6) against the eggNOG 7 database in `eggNOGm_path_DB` (default `[DBDir]/Funct/eggNOGmapper/v3.0/`). v3 does not work with the eggNOG 5 data of eggNOG-mapper 2.1.x. To install the data (about 45 GB), run:
+
+```bash
+mkdir -p <DBDir>/Funct/eggNOGmapper/v3.0/
+download_eggnog_data.py -y --data_dir <DBDir>/Funct/eggNOGmapper/v3.0/
+```
+
+`secScripts/GC/eggNOG_split.sh` turns `MF.emapper.annotations` into the per-category `eggNOGmapper_<category>.geneAss` tables. It reads v3 and v2.1.x output, and gives the v3 values the v2 formats:
+
+| Table | v3 handling |
+|---|---|
+| `EC` | `ec:` prefix removed. |
+| `PFAM` | Domain names only: v3 coordinates (`POR_425_608`) and repeated domains removed. |
+| `KGP` | Pathways as `ko00010` (v3 lists bare numbers). |
+| `NOG` | The gene's COG (v3 `COG_category`, e.g. `COG0674`). eggNOG 7 OGs are domain families, so genes without a COG get their first, broadest OG, written as `name@taxid.cluster` (e.g. `Oxidored_nitro@131567.Zm-16`). In v2.1.x this was the root-level OG (`COG…`/`ENOG…`). |
+| `KO`, `KGM`, `GO`, `CAZy`, `BIGG` | Unchanged. |
+
+A merge of chunks annotated by different eggNOG-mapper versions is rejected. `Anno/Func/emapper/.emapper.params` records the data directory behind the annotations. Pointing `eggNOGm_path_DB` at other data re-annotates the catalogue on the next run; chunk results of an interrupted run are discarded rather than mixed in. Catalogues annotated before this record existed (eggNOG-mapper 2.1.x) keep their annotations. To re-annotate one with v3, delete `checkpoints/10.emap.stone` and `Anno/Func/emapper/MF.emapper.annotations.gz`.
+
+v3 picks its DIAMOND block size from the node's total RAM, not from the job's memory, so geneCat passes `--dmnd_block_size 4 --dmnd_index_chunks 2` (about 40 GB peak) for its 55 GB eggNOG jobs.
+
+Each chunk job runs eggNOG-mapper in two steps:
+1. **Search.** The DIAMOND search (`--no_annot`) writes the chunk's seed orthologs to `<chunk>.seeds`. A resubmitted chunk that has this file skips the search.
+2. **Annotation.** The annotation (`-m no_search`) reads a copy of `eggnog.db` on node-local scratch. Its workers read the database at random, and eggNOG-mapper aborts a run when a worker needs more than 250 s for a batch of 125 seeds; reading over the network filesystem exceeded that. A run aborted this way is resubmitted. Chunks that failed this way in an earlier one-step run (geneCat ≤ 0.67) reuse their finished search.
 
 ## Taxonomic annotation outputs
 
@@ -407,6 +500,7 @@ Depending on flags, MATAFILER can write outputs from:
 | Kraken2 | Read-based taxonomic profiling. |
 | mOTUs | Marker-gene-based taxonomic profiling. |
 | MetaPhlAn | Marker-gene-based taxonomic profiling. |
+| Protal | Marker-gene taxonomic profiling of raw reads (paired-end, single-end, PacBio or ONT), with a multi-sample abundance table and, with `-profileProtal 2`, strain MSAs. |
 | miTAG / ribosomal profiling | Ribosomal small- or large-subunit profiling. |
 | DIAMOND functional profiling | Read-based functional profiling against selected databases. |
 
@@ -416,7 +510,40 @@ These outputs are commonly summarized in or near:
 #OutPath/#RunID/pseudoGC/
 ```
 
-and related run-level folders. The precise file names depend on flags such as `-profileFunct`, `-DiaDBs`, `-profileRibosome`, `-profileMOTU2`, `-profileMetaphlan2` or `-profileKraken`.
+and related run-level folders. The precise file names depend on flags such as `-profileFunct`, `-DiaDBs`, `-profileRibosome`, `-profileMOTU2`, `-profileMetaphlan` or `-profileKraken`.
+
+With `-profileProtal 1` or `2`, each sample has:
+
+| Output | Meaning |
+|---|---|
+| `<sample_output>/Tax/Protal/profiles/<sample>.profile` | Headerless per-sample species-abundance profile; it may legitimately be empty. |
+| `<sample_output>/Tax/Protal/<sample>.sam.zst` | Mode `2` only: Protal's alignments of the sample's reads to the marker genes (zstd-compressed SAM; `zstdcat` reads it), from which the strain MSAs are built. Protal profiles it again without aligning, e.g. for another `--knob` or model. In mode `1` the SAM is deleted after profiling. |
+| `<sample_output>/Tax/Protal/<sample>.sam.zst.err` | Mode `2` only: reads whose alignment does not fit the database; written only when there are any. |
+| `<sample_output>/Tax/Protal/<sample>.Protal.sto` | Completion evidence, written once the profile (and in mode `2` the SAM) exists. |
+| `<sample_output>/Tax/Protal/<sample>.Protal.skip` | Request-scoped evidence that the sample has no reads Protal can profile (tolerant mode). |
+
+The profile logs (`.profile.log`, ...) and Protal's statistics (`misc/`) are not kept.
+The run-level outputs are under `<controller_base>/pseudoGC/protal/`:
+
+| Output | Meaning |
+|---|---|
+| `Protal.abundance.tsv` | Profiles of the selected range merged by `protal_profile_utils merge`. |
+| `Protal.merge.sto` | Successful merge evidence. |
+| `strains/<cohort_signature>/` | Mode `2`: Protal's strain MSAs of the cohort (`<species>.raw.msa.fna`, the qcmsa-filtered `<species>.msa.fna`, `species.tsv`, ...). |
+| `strains/current` | Mode `2`: symlink to the latest cohort's strain directory. |
+| `Protal.strains.current` | Mode `2`: signature of that cohort. |
+| `Protal.strains.<cohort_signature>.sto` | Mode `2`: completion evidence of that cohort's MSAs; a later run over the same samples does not build them again. |
+| `LOGandSUB/ProtalBatch.*.map.tsv`, `.sh` | Map and job of each batch of local samples. |
+| `LOGandSUB/ProtalStrains.<cohort_signature>.map.tsv` | Mode `2`: the map of kept SAMs the strain job ran on. |
+
+The merge waits for the Protal jobs of the run and is deferred if a selected sample
+has neither a profile, current skip evidence, nor a submitted job. The strain MSAs are
+built only in a run over the complete mapped cohort, from the SAMs, by a Protal job that
+does not load the index. Their signature covers the samples, their SAMs and their
+request signatures, so adding or re-aligning a sample builds a new strain directory.
+`<controller_base>` is the stable run root derived from the first mapped sample, not
+whichever sample happens to be processed last. Samples explicitly ignored or marked
+`SMPL.empty` are excluded.
 
 ## Recommended files for common downstream questions
 

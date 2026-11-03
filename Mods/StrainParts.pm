@@ -10,7 +10,7 @@ use File::Path qw(make_path);
 use Mods::GenoMetaAss qw(gzipopen gzipwrite);
 
 our @EXPORT_OK = qw(
-	balance_assembly_groups choose_auto_worker_count
+	balance_assembly_groups choose_auto_worker_count choose_tree_core_count
 	exact_worker_parts
 	write_split_generation
 	write_worker_completion
@@ -20,6 +20,27 @@ our @EXPORT_OK = qw(
 	append_fasta_records_atomic
 	sort_fasta_by_locus
 );
+
+sub choose_tree_core_count {
+	my ($sample_count, $maximum_cores, $minimum_cores) = @_;
+	$minimum_cores //= 4;
+	die "tree sample count must be a non-negative integer\n"
+		unless defined($sample_count) && $sample_count =~ /^\d+$/;
+	die "maximum tree cores must be a positive integer\n"
+		unless defined($maximum_cores) && $maximum_cores =~ /^\d+$/
+			&& $maximum_cores > 0;
+	die "minimum tree cores must be a positive integer\n"
+		unless defined($minimum_cores) && $minimum_cores =~ /^\d+$/
+			&& $minimum_cores > 0;
+
+	# Likelihood work grows with the number of submitted taxa, but assigning one
+	# thread per sample rapidly over-allocates small and medium strain trees.
+	my $cores = int(sqrt($sample_count));
+	$cores++ if $cores * $cores < $sample_count;
+	$cores = $minimum_cores if $cores < $minimum_cores;
+	$cores = $maximum_cores if $cores > $maximum_cores;
+	return $cores;
+}
 
 sub choose_auto_worker_count {
 	my ($group_count, $sample_count) = @_;
@@ -48,29 +69,44 @@ sub choose_auto_worker_count {
 }
 
 sub balance_assembly_groups {
-	my ($samples_by_group, $worker_count) = @_;
+	my ($samples_by_group, $worker_count, $work_by_group) = @_;
 	die "assembly-group sample map must be a hash reference\n"
 		unless ref($samples_by_group) eq 'HASH';
 	die "worker count must be positive\n"
 		unless defined($worker_count) && $worker_count =~ /^\d+$/ && $worker_count > 0;
+	die "assembly-group workload map must be a hash reference\n"
+		if defined($work_by_group) && ref($work_by_group) ne 'HASH';
 
 	for my $group (keys %{$samples_by_group}) {
 		die "assembly-group '$group' samples must be an array reference\n"
 			unless ref($samples_by_group->{$group}) eq 'ARRAY';
+		if (defined $work_by_group) {
+			die "assembly-group '$group' workload must be a positive number\n"
+				unless defined($work_by_group->{$group})
+					&& $work_by_group->{$group} =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/
+					&& $work_by_group->{$group} > 0;
+		}
 	}
 	my @worker_load = (0) x $worker_count;
 	my %worker_for_group;
 	for my $group (sort {
-		scalar(@{$samples_by_group->{$b}}) <=> scalar(@{$samples_by_group->{$a}})
+		my $work_a = defined($work_by_group)
+			? $work_by_group->{$a} : scalar(@{$samples_by_group->{$a}});
+		my $work_b = defined($work_by_group)
+			? $work_by_group->{$b} : scalar(@{$samples_by_group->{$b}});
+		$work_b <=> $work_a
 			|| $a cmp $b
 	} keys %{$samples_by_group}) {
 		my ($worker) = sort {
 			$worker_load[$a] <=> $worker_load[$b] || $a <=> $b
 		} 0 .. $worker_count - 1;
 		$worker_for_group{$group} = $worker;
-		# One unit represents the fixed group-level work; the sample count
-		# represents sample-specific VCF/depth consensus work.
-		$worker_load[$worker] += 1 + scalar(@{$samples_by_group->{$group}});
+		# A group is indivisible because its members share an assembly reference,
+		# but Phase I's expensive VCF/depth/consensus work varies per sample.  The
+		# optional workload map can therefore account for input size/regeneration;
+		# sample counts remain the backwards-compatible default.
+		$worker_load[$worker] += defined($work_by_group)
+			? $work_by_group->{$group} : scalar(@{$samples_by_group->{$group}});
 	}
 	return (\%worker_for_group, \@worker_load);
 }
@@ -174,9 +210,49 @@ sub resolve_fasta_artifact {
 	my $plain_exists = -e $nominal_path;
 	my $gzip_path = "$nominal_path.gz";
 	my $gzip_exists = -e $gzip_path;
-	die "Ambiguous FASTA sidecars exist at $nominal_path and $gzip_path; refusing to choose one\n"
-		if $plain_exists && $gzip_exists;
+	if ($plain_exists && $gzip_exists) {
+		my @candidates;
+		for my $path ($nominal_path, $gzip_path) {
+			my $records = fasta_record_count($path);
+			push @candidates, [$path, $records] if defined $records;
+		}
+		unless (@candidates) {
+			warn "Ambiguous FASTA sidecars at $nominal_path and $gzip_path became unreadable; "
+				."continuing as if neither artifact is present\n";
+			return '';
+		}
+		@candidates = sort {
+			$b->[1] <=> $a->[1]
+				|| $a->[0] cmp $b->[0]
+		} @candidates;
+		my ($chosen, $chosen_records) = @{$candidates[0]};
+		my $counts = join(', ', map { "$_->[0]=$_->[1] record(s)" } @candidates);
+		warn "Ambiguous FASTA sidecars at $nominal_path and $gzip_path; "
+			."using $chosen with the most FASTA records ($counts)\n";
+		return $chosen;
+	}
 	return $plain_exists ? $nominal_path : $gzip_exists ? $gzip_path : '';
+}
+
+sub fasta_record_count {
+	my ($path) = @_;
+	return undef unless defined($path) && -e $path;
+	my ($fh, $ok);
+	if ($path =~ /\.gz\z/) {
+		($fh, $ok) = eval { gzipopen($path, 'FASTA sidecar record count', 1, 0) };
+		return undef unless $ok && defined $fh;
+	} else {
+		return undef unless open($fh, '<', $path);
+	}
+	my $records = 0;
+	my $read_ok = eval {
+		while (my $line = <$fh>) {
+			$records++ if $line =~ /^>/;
+		}
+		close $fh;
+		1;
+	};
+	return $read_ok ? $records : undef;
 }
 
 sub append_fasta_records_atomic {

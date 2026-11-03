@@ -15,10 +15,12 @@ clusterMAGs	[MFLRDir]/bin/./clusterMAGs
 vcf2fna	[MFLRDir]/bin/./vcf2fna
 consVCF_region_planner	perl [MFLRDir]/secScripts/SNP/plan_consensus_regions.pl
 finished_sample_cleanup	perl [MFLRDir]/secScripts/cleanup_finished_sample.pl
+ena_sra_downloader	perl [MFLRDir]/secScripts/fileManage/ENASRAdl.pl
 
 
 #elevated MF3 scripts (main routines)
 geneCat_scr	perl [MFLRDir]/secScripts/geneCat.pl
+writeCheckpoint_scr	perl [MFLRDir]/helpers/writeCheckpoint.pl
 MAGpipe	perl [MFLRDir]/secScripts/MGS.pl
 
 
@@ -26,10 +28,13 @@ MAGpipe	perl [MFLRDir]/secScripts/MGS.pl
 fastHdChkENA	perl [MFLRDir]/secScripts/composition/checkFQhds4ENA.pl
 cLSUSSU_scr	perl [MFLRDir]/secScripts/miTag/catchLSUSSU.pl
 lotusLCA_cLSU_scr	[MFLRDir]/secScripts/miTag/lotus_LCA_blast3.pl
-krakCnts_scr	[MFLRDir]/secScripts/GC/krak_count_tax.pl
-genelength_scr	[MFLRDir]/secScripts/assemblies/geneLengthFasta.pl
-secCogBin_scr	[MFLRDir]/secScripts/functions/parseBlastFunct2.pl
+krakCnts_scr	perl [MFLRDir]/secScripts/composition/krak2_count_tax.pl
+mrgKrak_scr	perl [MFLRDir]/secScripts/composition/mrgKrakTax.pl
+genelength_scr	perl [MFLRDir]/secScripts/assemblies/geneLengthFasta.pl
+secCogBin_scr	perl [MFLRDir]/secScripts/functions/parseBlastFunct2.pl
+prepVFDB_scr	perl [MFLRDir]/secScripts/functions/prepVFDB.pl
 KrisABR_scr	perl [MFLRDir]/secScripts/functions/ABRblastFilter2.pl
+interleaveMates_scr	perl [MFLRDir]/secScripts/functions/interleaveMates.pl
 sepCts_scr	perl [MFLRDir]/secScripts/assemblies/separateContigs.pl
 assStat_scr	perl [MFLRDir]/secScripts/assemblies/assemblathon_stats.pl
 renameCtg_scr	[MFLRDir]/secScripts/assemblies/renameCtgs.pl
@@ -41,26 +46,21 @@ buildTree_scr	perl [MFLRDir]/secScripts/phylo/buildTree5.pl	env:MF4phylo
 sizSplit_scr	[MFLRDir]/secScripts/assemblies/splitFNAbyLength.pl
 contigKgdSplit_scr	[MFLRDir]/secScripts/assemblies/sortCtgKingdom.pl
 contigKgdSplit_scr2	[MFLRDir]/secScripts/assemblies/sortCtgKingdom2.pl
-calcGC_scr	[MFLRDir]/secScripts/composition/calcGC.pl
-sortSepReLen_scr	[MFLRDir]/secScripts/assemblies/sepReadLength.pl
-extre100_scr	[MFLRDir]/secScripts/GC/extrAllE100GC.pl
+calcGC_scr	perl [MFLRDir]/secScripts/composition/calcGC.pl
+extre100_scr	perl [MFLRDir]/secScripts/GC/extrAllE100GC.pl
 decoyDB_scr	[MFLRDir]/secScripts/assemblies/deployMapDB.pl
 bamHdFilt_scr	[MFLRDir]/secScripts/assemblies/correctBamHD.pl
-hmmBestHit_scr	[MFLRDir]/secScripts/functions/bmn-HMMerBestHit.py
+# HMMER domtblout best hit per gene (FOAM/ABR modes of geneCat.pl).
+hmmBestHit_scr	perl [MFLRDir]/secScripts/functions/hmmBestHit.pl
 mrgDia_scr	[MFLRDir]/secScripts/functions/combine_DIA.pl
 mrgMiTag_scr	[MFLRDir]/secScripts/miTag/miTagTaxTable.pl
 mrgMOUT2_scr	perl [MFLRDir]/secScripts/composition/mrgMotu2.pl
 FMGrwk_scr	perl [MFLRDir]/secScripts/assemblies/FMG_rwk.pl
-growth_scr	perl [MFLRDir]/helpers/growthRate.pl
-consCntupVCF_scr	perl [MFLRDir]/secScripts/SNP/consFNA2vcf.pl
 mp3Prs	perl [MFLRDir]/secScripts/functions/parseMP3.pl
 unsplitKrak_scr	perl [MFLRDir]/secScripts/composition/unsplit_krak.pl
-specIGC_scr	perl [MFLRDir]/secScripts/GC/annotateMGwSpecIs2.pl
-specIGC_scr_v0	perl [MFLRDir]/secScripts/GC/annotateMGwSpecIs.pl
+specIGC_scr	perl [MFLRDir]/secScripts/GC/annotateMGwSpecIs3.pl
 MG_LCA_scr	perl [MFLRDir]/secScripts/GC/MG_LCA.pl
-progenomes_prep_scr	perl [MFLRDir]/secScripts/MGS/reformatProGenomes.pl
 clusterMGS_scr	perl [MFLRDir]/secScripts/MGS/clusterMAGs.pl
-specIphylo_scr	perl [MFLRDir]/secScripts/GC/FMGgenes2tree.pl
 kmerPerGene_scr	perl [MFLRDir]/secScripts/GC/kmerPerGene.pl
 bamFilter_scr	perl [MFLRDir]/secScripts/assemblies/bamFilter.pl
 decluterGC_scr	perl [MFLRDir]/secScripts/GC/decluterGC.pl
@@ -71,8 +71,8 @@ Binner_scr	perl [MFLRDir]/secScripts/assemblies/runBinners.pl
 
 samcov2bed	perl [MFLRDir]/helpers/samcovToBedGraph.pl
 
-#requries ete3...
-taxid2tax_scr	python [MFLRDir]/secScripts/phylo/get_ranks.py
+#taxid -> 7 ranks from the Kraken2 DB's own taxonomy (taxo.k2d); replaced get_ranks.py (ete3)
+taxid2tax_scr	perl [MFLRDir]/secScripts/phylo/taxid2ranks.pl
 
 #Python scripts
 FSTpy	fst_from_fasta.py
@@ -87,20 +87,22 @@ Rpath	[MFLRDir]/secScripts/R_scripts/
 filterMB2core	[Rscript] [Rpath]/filterMB2.R	env:MF4_R
 neighborTree	[Rscript] [Rpath]/neighborTree.R	env:MF4_R
 vizBtwPhylo_R	[Rscript] [Rpath]/MGSTree_visual.R	env:MF4_R
-normMiTag	[Rscript] [Rpath]/NormMiTag.R	env:MF4_R
 qcMakeHTMLReport	[Rscript] [Rpath]/QC_make_html.R	env:MF4_R
 
 
 ## taxonomic profiling, if requrested ##
 #can be metaphlan2 or metaphlan3 here
+protal	protal
+protalProfileUtils	protal_profile_utils
 metPhl2	metaphlan	env:MF4checkm2
 metPhl2Merge	merge_metaphlan_tables.py	env:MF4checkm2
 #kraken	kraken
 kraken2	kraken2
 hostile	hostile
-hostileDB	[MFLRDir]/data/DBs/hostile/
+hostileDB	[DBDir]/hostile/	#installer.sh downloads it to DBDir (default $MF4DIR/data/DBs/)
+#-profileTaxaTarget: set the full path, <TaxaTarget dir>/run_pipeline_scripts/run_protist_pipeline_fda.py (MF4 reads environment.txt next to it)
 TaxaTarget	python run_protist_pipeline_fda.py
-motus2	motus	env:MF4gtdbtk
+motus2	motus	env:MF4motus
 #kaijuDir	[BINDir]/kaiju/bin/
 #microCens	python [BINDir]/MicrobeCensus-1.1.0/scripts/run_microbe_census.py
 mTAGs	mtags
@@ -131,21 +133,14 @@ makeCanoGuides_scr	perl [MFLRDir]/secScripts/MGS/makeCanoGuides.pl
 mb2qualCheck_scr	perl [MFLRDir]/secScripts/assemblies/checkBinQual.pl
 taxPerMGS_scr	perl [MFLRDir]/secScripts/MGS/taxPerMGS.pl
 taxPerMGSgtdb_scr	perl [MFLRDir]/secScripts/MGS/taxPerMGS_gtdb.pl
-filtDeepCan	perl [MFLRDir]/secScripts/MGS/filterDeepCan.pl
 
 #SNPs / tree building - not public currently
 fasta2phylip_scr	perl [MFLRDir]/secScripts/phylo/fasta2phylip.pl
-vcfCons_scr	perl [MFLRDir]/secScripts/SNP/vcf2cons_mpi.pl
-vcfCons_FB_scr	perl [MFLRDir]/secScripts/SNP/vcf2cons.pl
-genRegions_scr	[MFLRDir]/secScripts/SNP/fasta_generate_regions.py
-contig2fast_scr	python [MFLRDir]/secScripts/SNP/contig2fasta.py
 MGS_strain1_scr	perl [MFLRDir]/secScripts/MGS/strain_within.pl
 MGS_strain2_scr	perl [MFLRDir]/secScripts/MGS/strain_within_2.2.pl
 MGS_mosaic_scr	perl [MFLRDir]/secScripts/MGS/prepare_mosaic_loci.pl
 MGSPhyloBetween_scr	perl [MFLRDir]/secScripts/MGS/phylo_MGS_between.pl
 
-#MAGs
-cmpBinScr	[MFLRDir]/secScripts/MGS/compoundBinning.pl
 
 #marker genes
 GTDBmg_scr	python [MFLRDir]/gits/XGTDB/extract_gtdb_mg.py
@@ -153,12 +148,6 @@ GTDBmg_scr	python [MFLRDir]/gits/XGTDB/extract_gtdb_mg.py
 
 
 ## options for filters etc	ESSENTIAL ##
-#baseSDMopt_rel	[MFLRDir]/data/sdm_opt_inifilter_relaxed_noProb.txt
-baseSDMopt_rel	[MFLRDir]/data/sdm_opt_inifilter_relaxed.txt
-baseSDMopt	[MFLRDir]/data/sdm_opt_inifilter.txt
-baseSDMoptMiSeq	[MFLRDir]/data/sdm_opt_miSeq.txt
-baseSDMoptMiSeq_rel	[MFLRDir]/data/sdm_opt_miSeq_relaxed.txt
-
 essentialHMM	[MFLRDir]/data/essential.hmm
 essentialEUK	[MFLRDir]/data/eukCore.hmm
 
@@ -183,13 +172,29 @@ mreps	mreps
 #more essential programs are usually listed first in the lists
 
 ## general purpose/OS ##
+cat	cat
+cp	cp
+mv	mv
+rm	rm
+mkdir	mkdir
+awk	awk
+sed	sed
+sort	sort
+head	head
+tail	tail
+cut	cut
+touch	touch
+envsubst	envsubst
+wget	wget
 pigz	pigz
+gzip	gzip
+prefetch	prefetch
+fasterq-dump	fasterq-dump
+vdb-validate	vdb-validate
 rsync	rsync
 trimomatic	[MFLRDir]/bin/trimmomatic-0.36.jar
 porechop	porechop
 bzip2	bzip2
-mergeRdScr	[MFLRDir]/helpers/merge-paired-reads.sh
-unmergeRdScr	[MFLRDir]/helpers/unmerge-paired-reads.sh
 #tabix	tabix
 
 
@@ -198,7 +203,6 @@ samtools	samtools
 bcftools	bcftools
 bwt2	bowtie2
 strobealign	strobealign
-kma	kma
 bwa	bwa
 minimap2	minimap2
 jgiDepth	jgi_summarize_bam_contig_depths	env:MF4binners #/g/bork3/home/hildebra/bin/metabat/./jgi_summarize_bam_contig_depths
@@ -255,7 +259,6 @@ macse	macse	env:MF4phylo
 gubbins	run_gubbins.py	env:MF4phylo
 clonalframeml	ClonalFrameML	env:MF4phylo
 hyphy	hyphy	env:MF4phylo
-wattersonTheta_scr	[MFLRDir]/secScripts/phylo/WattetrsonTheta.hyphy
 makeblastdb	makeblastdb
 blastn	blastn
 nucmer	nucmer
@@ -289,9 +292,6 @@ variantEffectPredictorDir
 snpEffJar
 snpEffConfig
 snpEffData
-concatVCF_scr	perl [MFLRDir]/secScripts/SNP/concatVCF.pl
-comDepWin_scr	perl [MFLRDir]/secScripts/SNP/comDepWins.pl
-collectStatsCons_scr	perl [MFLRDir]/secScripts/SNP/collectStatsCons.pl
 fastgearReconstr
 
 # Site-specific paths used only by retained legacy one-off scripts. They are
@@ -354,6 +354,8 @@ fastq2phylip_scr
 gapfiller
 growthP
 kaijuDir
+kaiju	kaiju
+kaiju_addTaxonNames	kaiju-addTaxonNames
 kraken	kraken
 lambdaIdx	lambda_indexer
 maxBin
@@ -394,6 +396,7 @@ metaMDBG	metaMDBG
 
 ## gene catalogue ##
 cdhit	cd-hit
+cdhit_est	cd-hit-est
 mmseqs2	mmseqs
 
 
@@ -433,6 +436,7 @@ lambda	lambda3
 ### MG-STK ###
 treeSubGrpsR	[Rscript] [MGSTKDir]/strainStats.R	env:MGSTK
 pogenStats	[Rscript] [MGSTKDir]/popGenStats.R	env:MGSTK
+combineResults_R	[Rscript] [MGSTKDir]/combineResults.R	env:MGSTK
 vizPhylosSign_R	[Rscript] [MGSTKDir]/plotPhylos.R	env:MGSTK
 treewasRun_R	[Rscript] [MGSTKDir]/runTreewas.R	env:MGSTK
 processTreewas_R	[Rscript] [MGSTKDir]/processTreewasResults.R	env:MGSTK
