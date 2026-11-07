@@ -182,6 +182,10 @@ ok(!workflow_members_match(['/run/A', '/run/B'], ['/run/A', '/run/C']),
 	'same-sized group with a replaced member is rejected');
 ok(!workflow_members_match(['/run/A'], ['/run/A', '/run/B']),
 	'group with an extra member is rejected');
+ok(workflow_members_match(['/ei/projects/8/uuid/data/NW/W2.35.ST/'], ['/ei/old/mount/NW/W2.35.ST/']),
+	'moved or remounted project keeps its members');
+ok(!workflow_members_match(['/run/W2.35.ST/'], ['/run/W2.36.ST/']),
+	'different sample directory name is still a membership change');
 
 my %map = (
 	opt => { smpl_order => ['A', 'B', 'C'] },

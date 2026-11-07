@@ -1081,6 +1081,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		if (!workflow_members_match($expectedMembers, \@actualMembers)){
 			print "$cAssGrp assembly-group membership has changed! (previous: "
 				.scalar(@actualMembers).", current: ".scalar(@{$expectedMembers}).")\n"
+				."  previous members: ".join(", ", @actualMembers)."\n"
+				."  current members:  ".join(", ", @{$expectedMembers})."\n"
 				."$finalCommAssDir\nRemoving assembly and all processed reads\n";
 			unless ($MFconfig{OKtoRWassGrps}) {print "Stopping MATAFILER, human intervention needed.. use the flag \"-OKtoRWassGrps 1\" to allow MATAFILER to delete files\n"; die;}
 			$locRewrite=1;
