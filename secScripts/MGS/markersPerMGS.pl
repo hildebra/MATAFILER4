@@ -13,7 +13,7 @@ use File::Path qw(make_path);
 
 
 my $MAGrep = ""; my $GCdir = "";
-my $useGTDBmg = "GTDB"; my $Binner = "SB";
+my $useGTDBmg = "FMG"; my $Binner = "SB";
 my $numCor = 4; my $MGStaxF = "";
 my $GC_bin_dir = "";
 

@@ -488,6 +488,7 @@ sub jgi_depth_cmd{
 	$numCores = $_[3] if (@_ > 3);
 	my $refFA = "";
 	$refFA = $_[4] if (@_ > 4);
+	my $filterBams = @_ > 5 ? $_[5] : 0; #1: BAM inputs may hold flagged (discarded) alignments
 	#die $dirs."\n";
 	my $smtBin = getProgPaths("samtools");
 	my $jgiScr = getProgPaths("jgiDepth");
@@ -546,13 +547,15 @@ sub jgi_depth_cmd{
 	my $covCmd = "set -e\n";
 	my @temporary_bams;
 	$covCmd .= "rm -f $out.jgi.*\n";
-	if ($isCram){
-		die "jgi_depth_cmd:::No reference Fasta given for @dirSS\n" if ($refFA eq "");
-		# Convert all CRAMs to temp BAMs before activation (samtools is in the base env, not MF4binners)
+	if ($isCram || $filterBams){
+		die "jgi_depth_cmd:::No reference Fasta given for @dirSS\n" if ($isCram && $refFA eq "");
+		# Convert all CRAMs to temp BAMs before activation (samtools is in the base env, not MF4binners),
+		# dropping alignments the CRAM keeps only as discarded (FLAG 0x200 QCFAIL / 0x400 duplicate)
 		for (my $i=0;$i<@mapping_files;$i++){
-			next unless $mapping_files[$i] =~ /\.cram$/i;
+			my $isCramFile = $mapping_files[$i] =~ /\.cram$/i;
+			next unless $isCramFile || $filterBams;
 			my $tmpBam = "$out.jgi.tmp.$i.bam";
-			$covCmd .= "$smtBin view -T $refFA -@ $numCores -b $mapping_files[$i] > $tmpBam\n";
+			$covCmd .= "$smtBin view ".($isCramFile ? "-T $refFA " : "")."-F 0x600 -@ $numCores -b $mapping_files[$i] > $tmpBam\n";
 			$mapping_files[$i] = $tmpBam;
 			push @temporary_bams, $tmpBam;
 		}
