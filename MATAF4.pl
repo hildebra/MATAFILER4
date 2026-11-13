@@ -504,7 +504,8 @@ my %d2Inputs = (
 );
 
 my @unzipjobs; 
-my @grandDeps; #used for loop2completion , collects dependencies 
+my @grandDeps; #used for loop2completion , collects dependencies
+my $hostileBt2Job; #run-wide job building hostile's bowtie2 index, see hostileBt2Dep
 
 #profiler / human filtering preps
 my $krakDeps = prepKraken();
@@ -7808,23 +7809,22 @@ sub hostRmBase{
 	return $cmd;
 }
 
-#Shell that builds hostile's bowtie2 index from its FASTA (<idx>.fa.gz, fetched for minimap2) when
-#missing. flock makes concurrent jobs wait for one build; built on node-local $TMPDIR, .1.bt2 moved last.
-sub hostileBt2IndexCmd{
-	my ($hostileDB, $idx, $numThr) = @_;
-	my $pre = "$hostileDB/$idx";
+#Hostile maps short reads with bowtie2, but the installer may fetch only its FASTA (<idx>.fa.gz).
+#If the bowtie2 index is missing, submit one build job per run; host-filter jobs depend on it.
+sub hostileBt2Dep{
+	my $pre = getProgPaths("hostileDB")."/$MFopt{hostileIndex}";
 	return "" if (-s "$pre.1.bt2");
+	return $hostileBt2Job if (defined $hostileBt2Job);
 	my $bt2Bin = getProgPaths("bwt2");
-	return <<"EOS";
-(
-flock 9
-if [ ! -s $pre.1.bt2 ]; then
-	echo "Building hostile bowtie2 index $pre"
-	${bt2Bin}-build --threads $numThr $pre.fa.gz \$TMPDIR/hostileBt2
-	for s in 2 3 4 rev.1 rev.2 1; do mv \$TMPDIR/hostileBt2.\$s.bt2 $pre.\$s.bt2; done
-fi
-) 9>>$pre.bt2build.lock
-EOS
+	my $numThr = 16;
+	#built on node-local $TMPDIR; .1.bt2 (what hostile checks) is moved in last
+	my $cmd = "${bt2Bin}-build --threads $numThr $pre.fa.gz \$TMPDIR/hostileBt2\n";
+	$cmd .= "for s in 2 3 4 rev.1 rev.2 1; do mv \$TMPDIR/hostileBt2.\$s.bt2 $pre.\$s.bt2; done\n";
+	my ($oldTmpSpace, $oldLockFile) = @{$QSBoptHR}{qw(tmpSpace LOCKfile)};
+	@{$QSBoptHR}{qw(tmpSpace LOCKfile)} = ("20G", ''); #a run-wide job, not tied to this sample
+	($hostileBt2Job) = qsubSystem($MFglobal{globalLogDir}."hostileBt2Build.sh",$cmd,$numThr,"40G","HostBt2","","",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
+	@{$QSBoptHR}{qw(tmpSpace LOCKfile)} = ($oldTmpSpace, $oldLockFile);
+	return $hostileBt2Job;
 }
 
 
@@ -7868,11 +7868,6 @@ sub removeHostSeqs($ $ $){
 		}
 	}
 	my $cmd = "\n\nmkdir -p $tmpD\n\n";
-	#hostile maps short reads with bowtie2 (--aligner auto); long reads use minimap2, indexed by hostile
-	my $bt2Cmd = "";
-	$bt2Cmd = hostileBt2IndexCmd(getProgPaths("hostileDB"), $MFopt{hostileIndex}, $numThr)
-		if ($MFopt{humanFilter} == 3 && grep { !$_->{is_long} } @{$libraries});
-	$cmd .= $bt2Cmd;
 
 	#loop around different DBs..
 	
@@ -7899,8 +7894,10 @@ sub removeHostSeqs($ $ $){
 		$QSBoptHR->{tmpSpace} = $reqSpace; #set option how much tmp space is required, and reset afterwards
 		#### 1 : UNZIP
 		$jobN = "_KR$JNUM";
-		my $krMem = $bt2Cmd eq "" ? "16G" : "40G"; #building hostile's human bowtie2 index needs >16G
-		($jobN, $tmpCmd) = qsubSystem($logDir."KrakHS.sh",$cmd,$numThr,$krMem,$jobN,$jDep.";$krakDeps","",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
+		my $krDeps = $jDep.";$krakDeps";
+		#hostile maps short reads with bowtie2 (--aligner auto); long reads use minimap2, indexed by hostile
+		$krDeps .= ";".hostileBt2Dep() if ($MFopt{humanFilter} == 3 && grep { !$_->{is_long} } @{$libraries});
+		($jobN, $tmpCmd) = qsubSystem($logDir."KrakHS.sh",$cmd,$numThr,"16G",$jobN,$krDeps,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 			$QSBoptHR->{tmpSpace} = $tmpSHDD;
 	}
 	return $jobN;
