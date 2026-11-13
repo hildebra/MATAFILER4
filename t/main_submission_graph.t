@@ -21,6 +21,7 @@ my $source = read_file("$Bin/../MATAF4.pl");
 my %runOptions = (submit => 1);
 my %MFconfig = (checkMaxNumJobs => 0, killDepNever => 0, silent => 1);
 my %MFopt = (DoAssembly => 5);
+my %MFcontstants = (DefaultSampleLock => 'MGTK.locked');
 my %checkpointNames = (preAssemblyDone => 'pre.done', assemblyDone => 'final.done');
 my (%AsGrps, %map);
 my $curSmpl = 'terminal';
@@ -120,6 +121,29 @@ like(read_file("$tmp/map1.sh"), qr/^#SBATCH --dependency=afterok:701:900$/m,
 like(read_file("$tmp/map2.sh"), qr/^#SBATCH --dependency=afterok:702:900$/m,
     'second mapping waits for its own staging and the shared assembly');
 is(scalar(@accepted), 2, 'independent group mappings each submit once');
+
+# The last sample of a group releases the deferred mappings of the other
+# members. Each job must lock the sample it maps as well as the releasing
+# sample, or a second MATAF4 start submits that member's mapping again.
+make_path("$tmp/member/LOGandSUB", "$tmp/last/LOGandSUB");
+$QSBoptHR = queue_options();
+$QSBoptHR->{qmode} = 'slurm';
+$QSBoptHR->{slurmSubmissionRunner} = sub { return ("Submitted batch job 811\n", 0); };
+my (undef, $member_command) = qsubSystem("$tmp/member//LOGandSUB/map.sh", 'echo mapped',
+    1, '1G', 'mapMember', '', '', 0, [], $QSBoptHR);
+$QSBoptHR->{LOCKfile} = "$tmp/last/LOGandSUB//MGTK.locked";
+is(postSubmQsub("$tmp/last/LOGandSUB/MultiMapper.sh", $member_command, 'run900'), 'run811',
+    'the last sample releases the deferred mapping of another member');
+is(read_file("$tmp/last/LOGandSUB/MGTK.locked"), "811\n",
+    'the releasing sample records the deferred mapping job');
+is(read_file("$tmp/member/LOGandSUB/MGTK.locked"), "811\n",
+    'the mapped sample records its own deferred mapping job');
+$QSBoptHR->{slurmSubmissionRunner} = sub { return ("Submitted batch job 812\n", 0); };
+my (undef, $own_command) = qsubSystem("$tmp/last/LOGandSUB/map.sh", 'echo mapped',
+    1, '1G', 'mapLast', '', '', 0, [], $QSBoptHR);
+postSubmQsub("$tmp/last/LOGandSUB/MultiMapper.sh", $own_command, 'run900');
+is(read_file("$tmp/last/LOGandSUB/MGTK.locked"), "811\n812\n",
+    'a deferred job of the releasing sample itself is recorded once');
 
 # Evaluate the actual early-exit bookkeeping, rather than reconstructing it.
 my @sampleDeps;

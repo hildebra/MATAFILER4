@@ -4562,9 +4562,22 @@ sub postSubmQsub {
 				requested_name => $slurmJobName || '',
 			};
 		}
-		recordSampleLockJobs(
-			$QSBoptHR->{LOCKfile}, [$scheduler_job_id], $QSBoptHR,
-		) if $scheduler_job_id ne "";
+		if ($scheduler_job_id ne "") {
+			recordSampleLockJobs(
+				$QSBoptHR->{LOCKfile}, [$scheduler_job_id], $QSBoptHR,
+			);
+			# A deferred script can belong to another sample of the group: its
+			# script sits in that sample's log directory. Record the job in that
+			# sample's lock too, or a later MATAF4 start finds the sample unlocked
+			# and submits the same work again while this job is queued or running.
+			my ($ownerLogDir) = $script_path =~ m{^(.*/LOGandSUB)/};
+			if (defined $ownerLogDir) {
+				(my $ownerLock = "$ownerLogDir/$MFcontstants{DefaultSampleLock}") =~ s{/+}{/}g;
+				(my $currentLock = $QSBoptHR->{LOCKfile} // '') =~ s{/+}{/}g;
+				recordSampleLockJobs($ownerLock, [$scheduler_job_id], $QSBoptHR)
+					if $ownerLock ne $currentLock;
+			}
+		}
 	}
 	open my $audit_fh, '>', $outf or die "Cannot write deferred submission audit $outf: $!\n";
 	print {$audit_fh} join("\n", @augmented_commands), "\n";
