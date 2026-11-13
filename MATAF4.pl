@@ -7793,6 +7793,8 @@ sub hostRmBase{
 		#	$MFopt{hostileIndex} = "human-t2t-hla";
 		system "rm $hostileDB/$MFopt{hostileIndex}.mmi" if (-z "$hostileDB/$MFopt{hostileIndex}.mmi");
 		$cmd .= "export HOSTILE_CACHE_DIR=$hostileDB\n";
+		#short reads go through bowtie2 (--aligner auto); long reads use minimap2, which hostile indexes itself
+		$cmd .= hostileBt2IndexCmd($hostileDB, $MFopt{hostileIndex}, $numThr) unless ($seqGen);
 		my $input = "--fastq1 $r1 "; $input .= "--fastq2 $r2 " if ($r2 ne "");
 		$cmd .= "$hostileBin clean $input --index $hostileDB/$MFopt{hostileIndex} --aligner auto --output $tmpD/ --threads $numThr --airplane --force\n";
 		if ($r2 ne ""){
@@ -7806,6 +7808,41 @@ sub hostRmBase{
 		}
 	}
 	return $cmd;
+}
+
+sub hostileBt2IndexComplete{
+	my ($pre) = @_;
+	return !grep { !-s "$pre.$_.bt2" } qw(1 2 3 4 rev.1 rev.2);
+}
+
+#Shell that builds the hostile bowtie2 index from its FASTA when it is missing (e.g. only the
+#minimap2 reference was fetched). Built once: concurrent jobs queue on an exclusive flock and
+#re-check after taking it; files are built under a temporary prefix and moved in, .1.bt2 last.
+sub hostileBt2IndexCmd{
+	my ($hostileDB, $idx, $numThr) = @_;
+	my $pre = "$hostileDB/$idx";
+	return "" if (hostileBt2IndexComplete($pre));
+	my $bt2Bin = getProgPaths("bwt2");
+	my $have = join(' && ', map {"[ -s $pre.$_.bt2 ]"} qw(1 2 3 4 rev.1 rev.2));
+	my $fastas = join(' ', map {"$pre$_"} qw(.fa.gz .fa .fasta.gz .fasta .fna.gz .fna));
+	my $lock = "$pre.bt2build.lock";
+	return <<"EOS";
+if ! { $have; }; then
+	(
+	flock -x 9 || exit 1
+	if ! { $have; }; then
+		ref=""
+		for f in $fastas; do if [ -s "\$f" ]; then ref="\$f"; break; fi; done
+		if [ -z "\$ref" ]; then echo "No bowtie2 index nor FASTA for hostile index $pre; cannot build it" >&2; exit 1; fi
+		tmpP="$pre.bt2build.\$(hostname).\$\$"
+		echo "Building hostile bowtie2 index $pre from \$ref (one-time)"
+		rm -f "\$tmpP".*
+		if ! ${bt2Bin}-build --threads $numThr -q "\$ref" "\$tmpP"; then rm -f "\$tmpP".*; exit 1; fi
+		for s in 2 3 4 rev.1 rev.2 1; do mv -f "\$tmpP.\$s.bt2" "$pre.\$s.bt2" || exit 1; done
+	fi
+	) 9>>"$lock" || { echo "Failed to build hostile bowtie2 index $pre (is $hostileDB writable?)" >&2; exit 23; }
+fi
+EOS
 }
 
 
@@ -7875,7 +7912,11 @@ sub removeHostSeqs($ $ $){
 		$QSBoptHR->{tmpSpace} = $reqSpace; #set option how much tmp space is required, and reset afterwards
 		#### 1 : UNZIP
 		$jobN = "_KR$JNUM";
-		($jobN, $tmpCmd) = qsubSystem($logDir."KrakHS.sh",$cmd,$numThr,"16G",$jobN,$jDep.";$krakDeps","",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
+		my $krMem = "16G";
+		#this job may have to build hostile's bowtie2 index (human: well above 16G)
+		$krMem = "40G" if ($MFopt{humanFilter} == 3 && (grep { !$_->{is_long} } @{$libraries})
+			&& !hostileBt2IndexComplete(getProgPaths("hostileDB")."/$MFopt{hostileIndex}"));
+		($jobN, $tmpCmd) = qsubSystem($logDir."KrakHS.sh",$cmd,$numThr,$krMem,$jobN,$jDep.";$krakDeps","",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 			$QSBoptHR->{tmpSpace} = $tmpSHDD;
 	}
 	return $jobN;
