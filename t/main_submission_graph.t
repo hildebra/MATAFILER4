@@ -145,6 +145,48 @@ postSubmQsub("$tmp/last/LOGandSUB/MultiMapper.sh", $own_command, 'run900');
 is(read_file("$tmp/last/LOGandSUB/MGTK.locked"), "811\n812\n",
     'a deferred job of the releasing sample itself is recorded once');
 
+# A script whose previous job Slurm killed for memory is written again with
+# 1.5x the memory of the killed job.
+$QSBoptHR = queue_options();
+$QSBoptHR->{qmode} = 'slurm';
+my $oom_script = "$tmp/oom.sh";
+my $oom_memory = sub {
+    my ($request) = @_;
+    open my $saved_stdout, '>&', \*STDOUT or die $!;
+    open STDOUT, '>', "$tmp/oom.stdout" or die $!;
+    qsubSystem($oom_script, 'echo work', 1, $request, 'oom', '', '', 0, [], $QSBoptHR);
+    open STDOUT, '>&', $saved_stdout or die $!;
+    my $script = read_file($oom_script);
+    my ($mb) = $script =~ /^#SBATCH --mem=(\d+)$/m;
+    my ($job) = $script =~ /^# OOM retry of job (\d+)$/m;
+    return [$mb, $job];
+};
+my $oom_log = sub {
+    write_file("$oom_script.etxt", "Done\nslurmstepd: error: Detected 1 oom_kill event in "
+        ."StepId=$_[0].batch. Some of the step tasks have been OOM Killed.\n");
+};
+is_deeply($oom_memory->('4G'), [4096, undef], 'a first submission requests what the caller asks for');
+write_file("$oom_script.etxt", "Done\n");
+is_deeply($oom_memory->('4G'), [4096, undef], 'a log without a memory kill leaves the request alone');
+$oom_log->(555);
+is_deeply($oom_memory->('4G'), [6144, 555], 'a memory kill raises the request 1.5x and names the killed job');
+like(read_file("$tmp/oom.stdout"), qr/Job 555 .* ran out of memory with 4096M; requesting 6144M/,
+    'the raise is reported');
+is_deeply($oom_memory->('4G'), [6144, 555], 'writing the script again for the same kill raises it only once');
+is(read_file("$tmp/oom.stdout"), '', 'the repeated write reports nothing');
+$oom_log->(556);
+is_deeply($oom_memory->('4G'), [9216, 556], 'a second memory kill raises the request again');
+is_deeply($oom_memory->('20G'), [20480, 556], 'a larger request from the caller is kept');
+$oom_log->(557);
+$QSBoptHR->{oomRetryMaxMemGB} = 24;
+is_deeply($oom_memory->('4G'), [24576, 557], 'the raise stops at the configured ceiling');
+$oom_log->(558);
+is_deeply($oom_memory->('4G'), [24576, 558], 'a kill at the ceiling does not lower or raise the request');
+like(read_file("$tmp/oom.stdout"), qr/the request stays at the 24576M ceiling/,
+    'reaching the ceiling is reported');
+write_file("$oom_script.etxt", "Done\n");
+is_deeply($oom_memory->('4G'), [4096, undef], 'after a clean run the request returns to normal');
+
 # Evaluate the actual early-exit bookkeeping, rather than reconstructing it.
 my @sampleDeps;
 my @EBIjobs;

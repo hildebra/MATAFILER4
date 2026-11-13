@@ -32,6 +32,49 @@ sub normaliseJobNice {
 	return $jobNice < 0 ? 0 : $jobNice;
 }
 
+# Slurm reports an out-of-memory kill in the stderr log of the killed job. When
+# the script of such a job is written again, it requests 1.5x the memory the
+# killed job had, up to oomRetryMaxMemGB, and never less than the caller asks
+# for. The returned comment line goes into the new script and names the killed
+# job, so writing the script several times before it runs raises the request
+# only once. $memory is in MB.
+my $OOM_RETRY_FACTOR = 1.5;
+
+sub oomRetryMemory {
+	my ($script, $memory, $optHR) = @_;
+	return ($memory, '')
+		unless $memory =~ /^\d+$/ && -s $script && -s "$script.etxt";
+	open my $log, '<', "$script.etxt" or return ($memory, '');
+	my $log_size = -s $log;
+	seek($log, $log_size - 65536, 0) if $log_size > 65536;
+	my $log_tail = do { local $/; <$log> };
+	close $log;
+	my ($killed_job) = $log_tail
+		=~ /Detected \d+ oom[-_]kill event\S* in (?:StepId=|step )(\d+)/i;
+	return ($memory, '') unless defined $killed_job;
+
+	open my $previous_fh, '<', $script or return ($memory, '');
+	my $previous = do { local $/; <$previous_fh> };
+	close $previous_fh;
+	my ($previous_mb) = $previous =~ /^#SBATCH --mem=(\d+)\s*$/m;
+	return ($memory, '') unless defined $previous_mb;
+	my ($handled_job) = $previous =~ /^# OOM retry of job (\d+)\b/m;
+
+	my $retry_mb = $previous_mb;
+	if (!defined($handled_job) || $handled_job != $killed_job) {
+		my $max_mb = int(($optHR->{oomRetryMaxMemGB} || 512) * 1024);
+		$retry_mb = int($previous_mb * $OOM_RETRY_FACTOR + 0.5);
+		$retry_mb = $max_mb if $retry_mb > $max_mb;
+		$retry_mb = $previous_mb if $retry_mb < $previous_mb;
+		my $new_mb = $retry_mb > $memory ? $retry_mb : $memory;
+		print "Job $killed_job ($script) ran out of memory with ${previous_mb}M; "
+			.($new_mb > $previous_mb ? "requesting ${new_mb}M\n"
+				: "the request stays at the ${new_mb}M ceiling\n");
+	}
+	$memory = $retry_mb if $retry_mb > $memory;
+	return ($memory, "# OOM retry of job $killed_job");
+}
+
 sub deferredSubmissionDependency { return $DEFERRED_SUBMISSION_DEPENDENCY; }
 sub submissionDependencyDeferred {
 	return scalar grep { $_ eq $DEFERRED_SUBMISSION_DEPENDENCY }
@@ -907,6 +950,10 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		system "mkdir -p $cwd";
 	}
 	#if ($memory > 250001){$queues = "\"scb\"";}
+	#must read the previous script and its log before the script is overwritten
+	my $oomRetryNote = '';
+	($memory, $oomRetryNote) = oomRetryMemory($tmpsh, $memory, $optHR)
+		if ($qmode eq 'slurm');
 	$tmpsh =~ m/^(.*\/)[^\/]+$/;
 	system "mkdir -p $1" unless (-d $1);
 	open O,">",$tmpsh or die "Can't open qsub bash script $tmpsh\n";
@@ -987,6 +1034,7 @@ sub qsubSystem($ $ $ $ $ $ $ $ $ $){
 		$xtra .= "rusage[tmp=$tmpSpace] " if ($tmpSpace>0);
 		$xtra .= "span[hosts=1]\" -R \"rusage[mem=$memory]\" "; #
 	}
+	print O "$oomRetryNote\n" if ($oomRetryNote ne '');
 	#set abortion on program fails
 	print O "echo \"SLURM job ID: \$SLURM_JOB_ID\"\n" if ($qmode eq "slurm");
 	print O "echo \$HOSTNAME;\n";
@@ -1247,6 +1295,9 @@ sub emptyQsubOpt{
 	}
 	chomp($subConfig);
 	@constr = grep(/\S/, @constr);
+	my $oomRetryMaxMemGB = getProgPaths("maxMF4mem",0);
+	$oomRetryMaxMemGB = 512
+		unless (defined($oomRetryMaxMemGB) && $oomRetryMaxMemGB =~ /^[0-9]+(?:\.[0-9]+)?$/ && $oomRetryMaxMemGB > 0);
 	#die "@constr\n$subConfig\nYW\n";
 	
 	#if ($qmode eq "slurm"){$shortQ = "htc"; $longQ="htc";}#$shortQ = "1day"; $longQ="1month";}
@@ -1288,6 +1339,8 @@ sub emptyQsubOpt{
 		#Priority handicap applied to ordinary bulk submissions; recovery jobs
 		#override it with 0 so they outrank a backlog that is already queued.
 		jobNice => $DEFAULT_JOB_NICE,
+		#ceiling (GiB) for the 1.5x memory raise after a Slurm out-of-memory kill
+		oomRetryMaxMemGB => $oomRetryMaxMemGB,
 		#tmpMinG => 10,
 		afterAny => 0,
 		excludeNodes => "",

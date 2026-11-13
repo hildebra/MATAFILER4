@@ -101,6 +101,12 @@ empty and uses the configured `longTime` wall time.
 strain workflows. The supplied default is `512`; `-treeOOMMaxMemGB` remains an
 explicit per-run override for tree construction.
 
+The same ceiling applies when MATAFILER resubmits a Slurm job that was killed
+for memory. If the `.etxt` log of a job script reports an out-of-memory kill,
+the next submission of that script requests 1.5 times the memory of the killed
+job, or the normally calculated request if that is larger. Each further
+out-of-memory kill raises the request by another factor of 1.5.
+
 ## Database setup
 
 GTDB and GTDB-Tk databases are used for MAG and MGS-related classification. The installer provides:
