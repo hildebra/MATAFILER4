@@ -9,8 +9,22 @@ use File::Copy qw(copy);
 use IO::Compress::Gzip qw(gzip $GzipError);
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use Test::More;
-use lib "$Bin/lib";
+use lib "$Bin/..", "$Bin/lib";
 use MFTestConfig;
+
+# geneCat flushes finished files through a read-only handle, which POSIX
+# allows and some non-Linux shells refuse.
+{
+    my $probe = File::Spec->catfile(tempdir(CLEANUP => 1), 'sync-probe');
+    open my $out, '>', $probe or die "$probe: $!";
+    print {$out} "probe\n";
+    close $out or die "$probe: $!";
+    open my $in, '<', $probe or die "$probe: $!";
+    my $synchronized = $in->sync();
+    close $in;
+    plan skip_all => 'this platform cannot synchronize a file opened read-only'
+        unless $synchronized;
+}
 
 my $root = File::Spec->rel2abs("$Bin/..");
 sub read_file {

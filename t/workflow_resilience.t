@@ -1,6 +1,7 @@
 use strict;
 use warnings;
 
+use Config;
 use File::Spec;
 use File::Temp qw(tempdir);
 use FindBin qw($Bin);
@@ -54,7 +55,9 @@ ok(-s $destination, 'retry_rename leaves a nonempty destination');
 ok(retry_unlink($destination), 'retry_unlink removes the published file');
 ok(!-e $destination, 'retry_unlink verifies the file is gone');
 
-is(preflight_executable($^X, 'Perl'), $^X,
+# $^X is a bare program name under some shells
+my $absolute_perl = File::Spec->file_name_is_absolute($^X) ? $^X : $Config::Config{perlpath};
+is(preflight_executable($absolute_perl, 'Perl'), $absolute_perl,
 	'preflight_executable accepts a configured absolute executable');
 my $capacity = filesystem_capacity($directory);
 ok(ref($capacity) eq 'HASH', 'filesystem_capacity returns structured capacity state');

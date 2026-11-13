@@ -38,7 +38,7 @@ write_file($raw_fastq_target, "authoritative raw bytes\n");
 my $raw_fastq_link = File::Spec->catfile($tmp, 'upload.fastq.gz');
 SKIP: {
 	skip 'symbolic links are unavailable on this platform', 2
-		unless symlink($raw_fastq_target, $raw_fastq_link);
+		unless symlink($raw_fastq_target, $raw_fastq_link) && -l $raw_fastq_link; # some shells copy instead of linking
 	my $status = system($^X, "-I$root", File::Spec->catfile($root, 'secScripts', 'composition', 'checkFQhds4ENA.pl'), $raw_fastq_link, 1);
 	isnt($status, 0, 'ENA header normalization refuses a symbolic-link input');
 	is(read_file($raw_fastq_target), "authoritative raw bytes\n", 'refused normalization leaves the raw target unchanged');

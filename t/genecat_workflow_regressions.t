@@ -30,8 +30,9 @@ SKIP: {
 	my $catalogue = File::Spec->catdir($tmp, 'catalogue');
 	mkdir $catalogue or die "Cannot create $catalogue: $!";
 	my $alias = File::Spec->catfile($tmp, 'catalogue-alias');
-	symlink($catalogue, $alias)
-		or skip "symlinks unavailable for catalogue identity regression: $!", 1;
+	# some shells copy instead of linking, so check that a link was really made
+	symlink($catalogue, $alias) && -l $alias
+		or skip "symlinks unavailable for catalogue identity regression", 1;
 	is($path_helper->($alias), $path_helper->($catalogue),
 		'existing symlink spellings resolve to the same catalogue identity');
 }
