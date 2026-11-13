@@ -6388,6 +6388,12 @@ sub adaptSDMopt{
 		$str = _set_sdm_option($str, 'TrimWindowWidth', $windowWidth);
 		$str = _set_sdm_option($str, 'TrimWindowThreshhold', $windowThreshold);
 		$str = _set_sdm_option($str, 'maxAmbiguousNT', $maxAmbiguous);
+		# An absolute minimum longer than the reads discards every read, e.g. the
+		# 200 bp minimum of the AVITI and MiSeq options on a 150 bp run. Use the
+		# relative minimum of the default Illumina options instead.
+		my ($minLength) = $str =~ /^minSeqLength\t([0-9.]+)/m;
+		$str = _set_sdm_option($str, 'minSeqLength', '0.7')
+			if (defined($minLength) && $minLength > $readLength);
 	}
 	$str = _set_sdm_option($str, 'BinErrorModelAlpha', -1)
 		unless $MFopt{sdmProbabilisticFilter};
