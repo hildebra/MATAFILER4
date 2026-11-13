@@ -134,6 +134,43 @@ like($depth_scale_result, qr/^low2x\t2000\t3000\t1000\t0\.0000\t2\.0000\t2\.0000
 like($depth_scale_result, qr/^high20x\t2000\t3000\t1000\t0\.0000\t20\.0000\t20\.0000$/m,
      'the equivalent breakpoint on a 20x contig is retained');
 
+# Coverage is evaluated one contig at a time as it is read.  The rows must
+# still follow the assembly order, and a contig whose intervals are split by
+# another contig cannot be evaluated and must be refused.
+my $reordered_coverage = File::Spec->catfile($tmp, 'reordered.coverage.gz');
+my $reordered_text = join '',
+    "high20x\t0\t2000\t20\n", "high20x\t2000\t3000\t0\n", "high20x\t3000\t5000\t20\n",
+    "low2x\t0\t2000\t2\n", "low2x\t2000\t3000\t0\n", "low2x\t3000\t5000\t2\n";
+gzip(\$reordered_text => $reordered_coverage)
+    or die "Cannot create $reordered_coverage: $GzipError";
+my $reordered_tsv = File::Spec->catfile($tmp, 'reordered.breakpoints.tsv.gz');
+is(system($^X, '-I' . $root, $breakpoint_detector,
+          '--assembly', $depth_scale_fasta, '--coverage', $reordered_coverage,
+          '--output', $reordered_tsv), 0,
+   'breakpoint detector accepts coverage in a different contig order');
+my $reordered_result = '';
+gunzip($reordered_tsv => \$reordered_result)
+    or die "Cannot read $reordered_tsv: $GunzipError";
+is($reordered_result, $depth_scale_result,
+   'breakpoint rows follow the assembly order, not the coverage order');
+
+my $split_coverage = File::Spec->catfile($tmp, 'split.coverage.gz');
+my $split_text = join '',
+    "low2x\t0\t2000\t2\n", "high20x\t0\t5000\t20\n", "low2x\t2000\t5000\t2\n";
+gzip(\$split_text => $split_coverage)
+    or die "Cannot create $split_coverage: $GzipError";
+my $split_tsv = File::Spec->catfile($tmp, 'split.breakpoints.tsv.gz');
+my $split_err = gensym;
+my $split_pid = open3(undef, my $split_out, $split_err, $^X, '-I' . $root,
+    $breakpoint_detector, '--assembly', $depth_scale_fasta,
+    '--coverage', $split_coverage, '--output', $split_tsv);
+my $split_stderr = do { local $/; <$split_err> };
+waitpid($split_pid, 0);
+isnt($? >> 8, 0, 'breakpoint detector refuses a contig split across the coverage');
+like($split_stderr, qr/Coverage for contig 'low2x' is not contiguous/,
+     'the refusal names the split contig');
+ok(!-e $split_tsv, 'no breakpoint TSV is written for refused coverage');
+
 my $simulator_err = gensym;
 my $simulator_pid = open3(undef, my $simulator_out, $simulator_err,
     $^X, '-I' . $root, $simulator,

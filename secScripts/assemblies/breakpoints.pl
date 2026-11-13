@@ -39,9 +39,13 @@ die "Invalid breakpoint parameters\n" unless $break_depth >= 0 && $min_length > 
 	&& $max_flank_fraction >= 0;
 
 my ($lengths, $order) = fasta_lengths($assembly);
-my %raw = map { $_ => [] } @$order;
 my ($fh) = gzipopen($coverage, 'mapping coverage', 1);
 my ($line_no, $matched, $unknown) = (0, 0, 0);
+my ($reported, $reported_bases, $candidate_count) = (0, 0, 0);
+# Coverage lists each contig's intervals together, so a contig is evaluated as
+# soon as the next one starts and only its TSV rows are kept. Memory then
+# follows the largest contig instead of the whole assembly.
+my (%rows, $current, @intervals);
 while (my $line = <$fh>) {
 	$line =~ s/[\r\n]+$//;
 	next if $line eq '' || $line =~ /^(?:#|track\b|browser\b)/;
@@ -54,20 +58,39 @@ while (my $line = <$fh>) {
 		unless $start =~ /^\d+$/ && $end =~ /^\d+$/ && $end > $start
 		&& $depth =~ /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/ && $depth >= 0;
 	if (!exists $lengths->{$id}) { $unknown++; next; }
+	if (!defined($current) || $id ne $current) {
+		$rows{$current} = contig_rows($current, \@intervals) if defined $current;
+		die "Coverage for contig '$id' is not contiguous (line $line_no)\n" if exists $rows{$id};
+		($current, @intervals) = ($id);
+	}
 	next if $start >= $lengths->{$id};
 	$end = $lengths->{$id} if $end > $lengths->{$id};
-	push @{$raw{$id}}, [0+$start, 0+$end, 0+$depth];
+	push @intervals, [0+$start, 0+$end, 0+$depth];
 	$matched++;
 }
+$rows{$current} = contig_rows($current, \@intervals) if defined $current;
 close $fh or die "Cannot close coverage '$coverage': $!\n";
 die "Coverage '$coverage' has no intervals matching the assembly\n" unless $matched;
 warn "Ignored $unknown coverage interval(s) for unknown contigs\n" if $unknown;
 
 my $out = gzipwrite($output, 'breakpoint TSV');
 print {$out} join("\t", qw(contig start end length mean_depth left_depth right_depth)), "\n";
-my ($reported, $reported_bases, $candidate_count) = (0, 0, 0);
+# Rows are written in assembly order; a contig without coverage is all zero depth.
 for my $id (@$order) {
-	my $runs = complete_runs($id, $lengths->{$id}, $raw{$id});
+	print {$out} $rows{$id} // contig_rows($id, []);
+}
+close $out or die "Cannot close breakpoint TSV '$output': $!\n";
+print STDERR "Breakpoint detection summary\n",
+	"  Low-coverage candidates: $candidate_count\n",
+	"  Supported breakpoints:   $reported\n",
+	"  Breakpoint bases:         $reported_bases\n",
+	"  Output TSV:               $output\n";
+
+# TSV rows of one contig's supported breakpoints; also updates the summary counts.
+sub contig_rows {
+	my ($id, $intervals) = @_;
+	my $rows = '';
+	my $runs = complete_runs($id, $lengths->{$id}, $intervals);
 	my @low = map { [$_->[0], $_->[1]] } grep { $_->[2] <= $break_depth } @$runs;
 	my @smoothed;
 	for my $low (@low) {
@@ -92,17 +115,12 @@ for my $id (@$order) {
 		my $supported_limit = $max_flank_fraction
 			* ($left_depth < $right_depth ? $left_depth : $right_depth);
 		next if $candidate_depth > $break_depth || $candidate_depth > $supported_limit;
-		print {$out} join("\t", $id, $start, $end, $end-$start,
-			map { sprintf('%.4f', $_) } ($candidate_depth, $left_depth, $right_depth)), "\n";
+		$rows .= join("\t", $id, $start, $end, $end-$start,
+			map { sprintf('%.4f', $_) } ($candidate_depth, $left_depth, $right_depth))."\n";
 		$reported++; $reported_bases += $end - $start;
 	}
+	return $rows;
 }
-close $out or die "Cannot close breakpoint TSV '$output': $!\n";
-print STDERR "Breakpoint detection summary\n",
-	"  Low-coverage candidates: $candidate_count\n",
-	"  Supported breakpoints:   $reported\n",
-	"  Breakpoint bases:         $reported_bases\n",
-	"  Output TSV:               $output\n";
 
 sub usage {
 	my ($error) = @_;
