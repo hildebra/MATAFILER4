@@ -11,7 +11,7 @@ use lib File::Spec->catdir($Bin, '..');
 use Mods::Binning ();
 use Mods::Binning qw(
 	MB2N50 binningOutputsComplete emptyBinnerAssignmentCommand
-	runCheckM runCheckM2 runSCGBinner runSemiBin
+	repairSCGBinnerLabels runCheckM runCheckM2 runSCGBinner runSemiBin
 );
 use Mods::IO_Tamoc_progs qw(checkMapsDoneSH jgi_depth_cmd);
 
@@ -135,6 +135,76 @@ like($scgbinner_command,
 	'SCGBinner command uses the preflight-derived batch size and quotes its BAM list');
 is(system('bash', '-n', '-c', $scgbinner_command), 0,
 	'SCGBinner failure-diagnostic command is valid Bash');
+
+# SCGBinner's first real bin is 0, which the rest of the pipeline reads as
+# "unbinned"; the published assignment must start at bin 1.
+{
+	my $fake_result_dir = "$root/scg-run-tmp/scgbinner_res";
+	# The stand-in writes SCGBinner's output (no trailing newline), then
+	# `true` swallows the real command-line arguments.
+	my $fake_scgbinner = "mkdir -p $fake_result_dir && "
+		. "printf 'c1\\t0\\nc2\\t0\\nc3\\t7' > $fake_result_dir/SCGBINNER_result.tsv && true";
+	no warnings 'redefine';
+	local *Mods::Binning::getProgPaths = sub { return $fake_scgbinner };
+	my $run_command = runSCGBinner(
+		'', "$root/scg-run-out", "$root/scg-run-tmp", 'sample',
+		"$root/ref.fa", 4, [$direct_bam], 17, 42,
+	);
+	is(system('bash', '-c', $run_command), 0, 'SCGBinner publishing command runs');
+	is(slurp("$root/scg-run-out/sample"), "c1\t1\nc2\t1\nc3\t8\n",
+		'SCGBinner bin labels are shifted so bin 0 is kept as bin 1');
+	ok(!-e "$root/scg-run-out/sample.tmp", 'no temporary assignment file is left behind');
+
+	my $bad_fake = "mkdir -p $fake_result_dir && "
+		. "printf 'c1\\tbinA\\n' > $fake_result_dir/SCGBINNER_result.tsv && true";
+	local *Mods::Binning::getProgPaths = sub { return $bad_fake };
+	my $bad_command = runSCGBinner(
+		'', "$root/scg-bad-out", "$root/scg-run-tmp", 'sample',
+		"$root/ref.fa", 4, [$direct_bam], 17, 42,
+	);
+	isnt(system('bash', '-c', "{\n$bad_command\n} 2>/dev/null"), 0,
+		'a non-numeric SCGBinner label fails instead of being published');
+	ok(!-e "$root/scg-bad-out/sample", 'no assignment is published after a bad label');
+}
+
+# -checkSCGbinnerLabels: repair SCGBinner outputs published before the shift.
+{
+	my $old = "$root/scg-old";
+	# Bin 0 is deliberately not on the first line: SCGBinner orders rows by contig.
+	write_file($old, "c1\t3\nc2\t0\nc3\t0\nc4\t12");
+	write_file("$old.$_", "stale\n") for qw(cm cm2 assStat);
+	is(repairSCGBinnerLabels($old), 1, 'an SCGBinner output with bin 0 is relabelled');
+	is(slurp($old), "c1\t4\nc2\t1\nc3\t1\nc4\t13\n",
+		'every SCGBinner label is shifted up by one, including bin 0 off the first line');
+	ok(!-e "$old.$_", "stale .$_ is removed so bin quality is recomputed")
+		for qw(cm cm2 assStat);
+	is(repairSCGBinnerLabels($old), 0, 'a relabelled output is not shifted a second time');
+	is(slurp($old), "c1\t4\nc2\t1\nc3\t1\nc4\t13\n", 'the second check leaves labels unchanged');
+
+	my $no_zero = "$root/scg-nozero";
+	write_file($no_zero, "c1\t1\nc2\t2\n");
+	write_file("$no_zero.cm2", "kept\n");
+	is(repairSCGBinnerLabels($no_zero), 0, 'an output without bin 0 is left alone');
+	ok(-e "$no_zero.cm2", 'quality files of untouched outputs are kept');
+
+	my $crlf = "$root/scg-crlf";
+	write_file($crlf, "c1\t0\r\nc2\t1\r\n");
+	is(repairSCGBinnerLabels($crlf), 1, 'CRLF line endings do not hide bin 0');
+	is(slurp($crlf), "c1\t1\nc2\t2\n", 'CRLF outputs are relabelled cleanly');
+
+	is(repairSCGBinnerLabels("$root/scg-missing"), 0, 'a missing assignment is not an error');
+	write_file("$root/scg-empty", '');
+	is(repairSCGBinnerLabels("$root/scg-empty"), 0, 'an empty assignment is left alone');
+
+	my $bad = "$root/scg-badlabel";
+	write_file($bad, "c1\t0\nc2\tbinX\n");
+	write_file("$bad.cm2", "kept\n");
+	eval { repairSCGBinnerLabels($bad) };
+	like($@, qr/Unexpected SCGBinner label/, 'a non-numeric label stops the repair');
+	is(slurp($bad), "c1\t0\nc2\tbinX\n", 'a failed repair leaves the assignment unchanged');
+	ok(-e "$bad.cm2", 'a failed repair keeps the quality files');
+	ok(!glob("$bad.relabel.*"), 'a failed repair leaves no temporary file');
+}
 
 my $large_bam = "$root/large.bam";
 open my $large_fh, '>', $large_bam or die "Cannot write $large_bam: $!";

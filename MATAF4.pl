@@ -68,7 +68,7 @@ use Mods::RibosomeState qw(
 	ribosome_merge_manifest
 );
 use Mods::phyloTools qw(fixHDs4Phylo);
-use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
+use Mods::Binning qw (getBinSubdirName binningOutputsComplete repairSCGBinnerLabels );
 use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred submissionDependencyFailed handleSubmissionFailure);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
@@ -1228,6 +1228,13 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			|| ($MFopt{BinnerRedoEmpty} && @binningBaseStat && $binningBaseStat[7] == 0) ) ){
 		print "redoing binning due to empty bins (flag -redoEmptyBins 1) ..\n";
 		system "rm -rf $binningDir";
+	}
+	# SCGBinner outputs published before labels were shifted still carry bin 0,
+	# which the pipeline reads as "unbinned". Relabel them; CheckM and assembly
+	# statistics are removed so the quality job below reruns on the fixed bins.
+	if ($MFopt{checkSCGbinnerLabels} && $MFopt{DoMetaBat2} == 5
+			&& repairSCGBinnerLabels($BinningOut)) {
+		print "Relabelled SCGBinner bins in $BinningOut (bin 0 -> 1, ...); bin quality will be recomputed\n";
 	}
 	if ( (!$doPreAssmFlag || !$ePreAssmblPck) && !$map{$curSmpl}{inputFilesEmpty} &&
 				((!$eFinMapCovGZ && $eCovAsssembly) || ($eSuppCovAsssembly && !$eFinSupMapCovGZ) ) #redo only contigstats related to coverage..
@@ -2611,7 +2618,7 @@ sub sampleCompletionForcedInvalidation {
 		push @requested, $key if $MFconfig{$key};
 	}
 	for my $key (qw(
-		redoAssembly redoAssMapping BinnerRedoAll BinnerRedoEmpty
+		redoAssembly redoAssMapping BinnerRedoAll BinnerRedoEmpty checkSCGbinnerLabels
 		redoSNPcons redoSNPgene rewriteGenePred rewriteDiamond
 		redoDiamondParse rewriteAllIfAnyDiamond RedoKraken
 		RedoRiboFind RedoRiboAssign MapRewrite2nd redoMapping
@@ -11913,6 +11920,7 @@ sub setDefaultMFconfig{
 	$MFopt{useBinnerScratch} = 0;$MFopt{BinnerMem} = 0;$MFopt{useCheckM2} = 1;
 	$MFopt{DoBinning} = 0;$MFopt{useCheckM1} = 0;$MFopt{BinnerCores} = 9;
 	$MFopt{DoMetaBat2} = 0; $MFopt{BinnerRedoEmpty} = 0;  $MFopt{SB_env} = "";
+	$MFopt{checkSCGbinnerLabels} = 0;
 	$MFopt{BinnerRedoAll} =0; $MFopt{minBinnerAssemblyMB} = 2;
 
 	#read preprocessing
@@ -12222,7 +12230,8 @@ sub getCmdLineOptions{
 		"BinnerScratchTmp=i" => \$MFopt{useBinnerScratch}, #very specific (undocumented) use of scratch instead of nodetmp dir
 		#"binSpeciesMG=i" => \$MFopt{DoBinning},#deactivated, replaced by MetaBat2
 		"redoEmptyBins=i" => \$MFopt{BinnerRedoEmpty}, #debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes
-		"redoBinning=i" => \$MFopt{BinnerRedoAll}, 
+		"redoBinning=i" => \$MFopt{BinnerRedoAll},
+		"checkSCGbinnerLabels=i" => \$MFopt{checkSCGbinnerLabels}, #1: relabel SCGBinner outputs that still contain bin 0 (shift all bins by +1) and recompute their bin quality
 		"SB_env=s"  => \$MFopt{SB_env}, #semiBin environment; if given, will avoid re-training de novo binning model. Default: "" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global
 	#gene prediction on assembly
 		"predictEukGenes=i" => \$MFopt{DoEukGenePred},#severely limits total predicted gene amount (~25% of total genes)
@@ -12362,6 +12371,8 @@ sub getCmdLineOptions{
 		if $MFopt{DoMetaBat2} && !$MFopt{useCheckM1} && !$MFopt{useCheckM2};
 	die "ERROR:: -SB_env is only valid with -Binner 2 (SemiBin)\n"
 		if $MFopt{SB_env} ne '' && $MFopt{DoMetaBat2} != 2;
+	die "ERROR:: -checkSCGbinnerLabels is only valid with -Binner 5 (SCGBinner)\n"
+		if $MFopt{checkSCGbinnerLabels} && $MFopt{DoMetaBat2} != 5;
 	#die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
 	die "ERROR:: \"-DiaMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
 	$MFopt{diamondMem} = 16 if ($MFopt{diamondMem} <= 0);

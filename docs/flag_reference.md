@@ -164,6 +164,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-BinnerScratchTmp` | integer | `0` | internal/advanced | very specific (undocumented) use of scratch instead of nodetmp dir |
 | `-redoEmptyBins` | integer | `0` | internal/advanced | debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes |
 | `-redoBinning` | integer | `0` | stable | Remove and rebuild requested binning results. |
+| `-checkSCGbinnerLabels` | integer | `0` | advanced | Relabel SCGBinner outputs (-Binner 5) that still contain bin 0, which older runs left out of quality checks and MGS: all bins are shifted up by one, and the stale CheckM/assembly statistics are removed so bin quality is recomputed. Files without a bin-0 row are left unchanged. |
 | `-SB_env` | string | `""` | stable | semiBin environment; if given, will avoid re-training de novo binning model. Default: "" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global |
 
 ## Gene prediction on assembly
