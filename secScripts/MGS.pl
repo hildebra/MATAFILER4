@@ -148,6 +148,7 @@ my $useCheckM2 = 0; my $useCheckM1 = 1;
 my $binSpeciesMG = 2; #defaults to semibin
 my $ignoIncomplMAGs = 1; #if 1, will ignore if no Bin in MF3
 my $useGTDBmg = "FMG";
+my $treeMGset = "FMG"; #between-MGS tree markers, independent of -MGset: 40 FMGs are far faster than GTDB's 120
 my $wait4stone = "";
 my $wait4stoneTimeout = 86400;
 my $useWeightedMGSscores = 1;
@@ -161,13 +162,14 @@ my $stopAfterCluster = 0; #DEBUG flag!!
 GetOptions(
 	"GCd=s"      => \$inD, 				#gene catalog dir
 	"clusterID=i" => \$clusterID,			#gene-catalog clustering identity percentage
-	"outD=s"     => \$outD,				#defaults to $inD/Bin_SB/
+	"outD=s"     => \$outD,				#defaults to $inD/Bin_<binner>/ (Bin_SB, Bin_SC, ... from -binSpeciesMG)
 	"tmp=s" => \$tmpD,					#temp dir
 	"submit=i" => \$doSubmit,			#1:submit jobs, 0: dry run. Default: 1
 	"canopies=s" => \$canopyF,			#location of canopy clustering output file (clusters.txt)
 	"smallCores=i" => \$numCore,		#cores used for normal jobs (not intensive)
 	"bottleneckCores=i" => \$canCore,	#cores for compute intensive jobs
 	"MGset=s" => \$useGTDBmg,			#GTDB or FMG, which marker genes are used? Default: FMG
+	"treeMGset=s" => \$treeMGset,		#FMG or GTDB markers for the between-MGS tree (independent of -MGset). Default: FMG
 	"wait4stone=s" => \$wait4stone,     #wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later
 	"wait4stoneTimeout=i" => \$wait4stoneTimeout, #maximum wait in seconds; 0 retains unlimited waiting
 	"mem=i" => \$memG,					#memory used for intensive jobs
@@ -207,6 +209,7 @@ my $strainRedo = $redo =~ /^(?:tree|input|all)$/ ? $redo : 'none';
 #die "$useCheckM2 $useCheckM1\n";
 
 die "-MGset option has to be \"GTDB\" or \"FMG\"\n" unless ($useGTDBmg eq "GTDB" || $useGTDBmg eq "FMG");
+die "-treeMGset option has to be \"GTDB\" or \"FMG\"\n" unless ($treeMGset eq "GTDB" || $treeMGset eq "FMG");
 
 %checkpointParameters = (
 	cluster_id             => $clusterID,
@@ -650,7 +653,7 @@ if ($numSamples > 2000){ #scale with the number of assembly groups
 	$treeMem = "200";
 }
 my $phyloBetween = getProgPaths("MGSPhyloBetween_scr");
-my $baseTreeCmd = "$phyloBetween -GCd $GCd -MGS $finalClustersFilt -MGset $useGTDBmg -mem $treeMem -c $canCore -MSAprogram 4 -fast 0 ";
+my $baseTreeCmd = "$phyloBetween -GCd $GCd -MGS $finalClustersFilt -MGset $treeMGset -mem $treeMem -c $canCore -MSAprogram 4 -fast 0 ";
 my $wait4tree = 2;
 my $outDphylo = "$outD/between_phylo/";
 my $iniTree = "$outDphylo/phylo/IQtree_allsites.treefile";
@@ -665,13 +668,13 @@ if ($coreMGSCount < 3) {
 } elsif (!-s $iniTree) {
 	printL "Preparing between-MGS phylogeny immediately after MGS creation in $outDphylo\n";
 
-	if ($useGTDBmg eq "FMG") {
+	if ($treeMGset eq "FMG") {
 		my $refTreeMsg = "\n################\n# If you want to include custom reference genomes, use\n# $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]\n################\n";
 		print $refTreeMsg;
 		$refTreeMsg = "#If you want to include custom reference genomes, use $baseTreeCmd -outD $outD/customRefs/ -refGenos [refs]";
 		$ph1Cmd .= " -xtraMsg \"$refTreeMsg\";";
 	} else {
-		printL "Custom reference genomes are unavailable for predefined GTDB-marker trees; use -MGset FMG for FMG extraction from references\n";
+		printL "Custom reference genomes are unavailable for predefined GTDB-marker trees; use -treeMGset FMG for FMG extraction from references\n";
 	}
 
 	if (!$doSubmit) {

@@ -9,6 +9,8 @@
 # v0.5 (2026-07-28): support predefined GTDB markers in addition to FMGs.
 # v0.6 (2026-08-04): retain all prepared marker loci in broad multi-phyla trees.
 # v0.7 (2026-08-04): retain rare lineage-specific loci and relax broad species filters.
+# v0.8 (2026-11-19): fixed LG+F+G partition models by default; IQ-TREE MFP+MERGE
+#                    partition testing is opt-in via -AutoModel 1 (too slow by default).
 #perl /hpc-home/hildebra/dev/Perl/MATAF3//secScripts/MGS/phylo_MGS_between.pl -GCd /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1/ -MGS /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//MB2.clusters.ext.can.Rhcl.filt -c 10 -outD /ei/projects/3/3c24aae4-5ce2-4156-a31a-82d4602c2176/data/GC_PDD1//Binning//customRefs/ -refGenos '/hpc-home/hildebra/geneCats/Chicken2/Cultured_genomes/99_ani_dRep/*.fasta'
 
 use warnings;
@@ -26,7 +28,7 @@ use Mods::phyloTools qw(calcDisPos2 getGenoGenes getFMG readFMGdir);
 use Mods::geneCat qw(calculate_spearman_correlation read_matrix correlation checkAntiOcc);
 
 if (@ARGV < 2){
-	die "Not enough input args: use \n./phylo_MGS_between.pl -GCd [path to GC] -MGS [MGS file] -MGset GTDB|FMG\n";
+	die "Not enough input args: use \n./phylo_MGS_between.pl -GCd [path to GC] -MGS [MGS file] -MGset FMG|GTDB -AutoModel 0|1\n";
 }
 
 my $wait4job = 0;#wait till tree is done? only neccessary in pipeline...
@@ -41,7 +43,8 @@ my $MSAprog = 4; #4:MUSCLE5, 2:mafft
 my $xtraMessageInSH = "";
 my $mem = 120; #memory request in GB
 my $visualize = 1;
-my $markerSet = "FMG";
+my $markerSet = "FMG"; #40 FMGs; GTDB (120 markers) is much slower
+my $autoModel = 0; #0: fixed LG+F+G per partition; 1: IQ-TREE MFP+MERGE (very slow)
 #$btout = $ARGV[3] if (@ARGV > 3);
 #$wait4job = $ARGV[4] if (@ARGV > 4);
 
@@ -60,6 +63,7 @@ GetOptions(
 	"mem=i" => \$mem,
 	"visualize=i" => \$visualize,
 	"MGset=s" => \$markerSet,
+	"AutoModel=i" => \$autoModel,
 ) or die "Invalid phylo_MGS_between.pl options\n";
 die "Unexpected positional arguments: @ARGV\n" if @ARGV;
 
@@ -69,6 +73,7 @@ die "MGS file missing or empty: $MGSfile\n" unless -s $MGSfile;
 die "Core and memory requests must be positive\n" unless $numCores > 0 && $mem > 0;
 die "Unsupported MSA program: $MSAprog\n" unless $MSAprog == 2 || $MSAprog == 4;
 die "-visualize must be 0 or 1\n" unless $visualize == 0 || $visualize == 1;
+die "-AutoModel must be 0 or 1\n" unless $autoModel == 0 || $autoModel == 1;
 die "-MGset option has to be \"GTDB\" or \"FMG\"\n"
 	unless $markerSet eq "GTDB" || $markerSet eq "FMG";
 die "-refGenos currently supports only -MGset FMG; GTDB trees use the predefined gene-catalog markers\n"
@@ -336,7 +341,7 @@ if (!-s $treeFile || !$broadLocusRetentionCurrent){
 		. "-NTfiltPerGene 0.4 -GenesPerSpecies 0.3 -fracMaxGenes90pct 0 "
 		. "-postAlignmentLocusQC 0 "
 		. "-MSAprogram $MSAprog "
-		. "-AutoModel 1 -iqFast 0 -continue 1\n";
+		. "-AutoModel $autoModel -iqFast 0 -continue 1\n";
 } else {
 	print "Found existing tree with current broad-locus retention policy, skipping tree building\n";
 }

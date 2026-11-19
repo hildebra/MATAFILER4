@@ -401,7 +401,7 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-binSpeciesMG` | integer | `2` | stable | use MAGs to create MGS? 1= metaBat2, 2=SemiBin, 3=metaDecoder, 4=GF, 5=SC |
+| `-binSpeciesMG` | integer | `-1` | stable | binner whose MAGs create the MGS: -1=auto (the binner found in the assemblies' `Binning/` folders, i.e. the one `MATAF4.pl -Binner` ran), 1= metaBat2, 2=SemiBin, 3=metaDecoder, 4=GF, 5=SC. MGS output goes to `<GCd>/Bin_<MB2|SB|MD|GF|SC>/` |
 | `-useCheckM2` | integer | `1` | stable | 1: use checkM2 completeness predictions, Default: 1 |
 | `-useCheckM1` | integer | `0` | stable | 1: use checkM completeness predictions, Default: 0 |
 | `-doStrains` | integer | `0` | advanced/internal | 1: calculate intraSpecific phylogenies on each MGS |
@@ -451,13 +451,14 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 |---|---:|---|---|---|
 | `-GCd` | string |  | stable | gene catalog dir |
 | `-clusterID` | integer | `95` | stable | gene-catalog clustering identity percentage |
-| `-outD` | string | `<GCd>/Bin_SB/` | stable | output dir |
+| `-outD` | string | `<GCd>/Bin_<binner>/` | stable | output dir |
 | `-tmp` | string |  | stable | temp dir |
 | `-submit` | integer | `1` | stable | 1:submit jobs, 0: dry run. Default: 1 |
 | `-canopies` | string |  | stable | location of canopy clustering output file (clusters.txt) |
 | `-smallCores` | integer | `4` | stable | cores used for normal jobs (not intensive) |
 | `-bottleneckCores` | integer | `12` | stable | cores for compute intensive jobs |
 | `-MGset` | string | `FMG` | stable | marker genes used for MAG merging/abundance: `GTDB` or `FMG` |
+| `-treeMGset` | string | `FMG` | stable | marker genes for the between-MGS tree, independent of `-MGset`: `FMG` (40 markers, fast) or `GTDB` (120 markers, much slower) |
 | `-wait4stone` | string |  | stable | wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later |
 | `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; `0` waits indefinitely |
 | `-mem` | integer | `150` | stable | memory used for intensive jobs |
