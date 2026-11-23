@@ -56,7 +56,14 @@ Do not hard-code tool or database paths. Look them up with `getProgPaths("key")`
 
 Values can contain `[MFLRDir]`, `[DBDir]`, `[BINDir]`, `[Rscript]` and similar placeholders, and `$ENV_VAR`. An entry with `env:<name>` comes back as a micromamba activation line followed by the command. Such a value is meant to be pasted into a job script, not used as a file path.
 
-When you add or rename a script, add its key to `Mods/config_internal.txt`. `t/config_integrity.t` checks that every key the code looks up resolves and that every repository path in the configs exists.
+### Adding tools, environments and databases
+
+Reuse what MATAFILER4 already installs before adding anything new:
+
+- **Check first.** Look for an existing key in `Mods/config_internal.txt` or `Mods/config_DBs.txt`, a binary in `bin/`, or a package in one of the micromamba environments defined in `helpers/install/*.yml` (`MF4`, `MF4_R`, `MF4phylo`, `MF4binners`, ...). On an installed system, `perl MATAF4.pl -checkInstall` reports what is present.
+- **Read tools from the config.** Call every tool through `getProgPaths("key")`. A new tool gets a key in `Mods/config_internal.txt` (a database: `Mods/config_DBs.txt`), with `env:<environment>` when it runs in an MF4 environment. Add its package to an existing environment's `.yml` where it fits; a new environment also needs an `ensure_environment` line in `helpers/install/installer.sh`. Add essential tools to the `-checkInstall` list (`checkMFFInstall` in `Mods/TamocFunc.pm`). A new or renamed repository script also gets a key; `t/config_integrity.t` checks that every key the code looks up resolves and that every repository path in the configs exists.
+- **Link an external toolkit through one directory key**, as is done for MG-STK: the site config sets `MGSTKDir` once (`MGSTKDir	$MF4DIR` in `Mods/config.old`), and `config_internal.txt` refers to its scripts as `[MGSTKDir]/strainStats.R` with `env:MGSTK`. A new directory key of this kind must also be added to `loadConfigs` in `Mods/IO_Tamoc_progs.pm` (the foundation-key list and the placeholder substitution).
+- **Find the MATAFILER4 directory with `$MF4DIR`.** The installer exports it in `~/.bashrc`. Config templates use it (`MFLRDir	$MF4DIR` and `DBDir	$MF4DIR/data/DBs/` in `Mods/config.old`), as do the command examples in `docs/` (`perl $MF4DIR/MATAF4.pl ...`). Inside config values, refer to the directory as `[MFLRDir]`.
 
 ### Command-line flags
 
