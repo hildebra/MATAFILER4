@@ -9,8 +9,22 @@ use File::Copy qw(copy);
 use IO::Compress::Gzip qw(gzip $GzipError);
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use Test::More;
-use lib "$Bin/lib";
+use lib "$Bin/..", "$Bin/lib";
 use MFTestConfig;
+
+# geneCat flushes finished files through a read-only handle, which POSIX
+# allows and some non-Linux shells refuse.
+{
+    my $probe = File::Spec->catfile(tempdir(CLEANUP => 1), 'sync-probe');
+    open my $out, '>', $probe or die "$probe: $!";
+    print {$out} "probe\n";
+    close $out or die "$probe: $!";
+    open my $in, '<', $probe or die "$probe: $!";
+    my $synchronized = $in->sync();
+    close $in;
+    plan skip_all => 'this platform cannot synchronize a file opened read-only'
+        unless $synchronized;
+}
 
 my $root = File::Spec->rel2abs("$Bin/..");
 sub read_file {
@@ -366,6 +380,20 @@ FAKE
     @calls = grep { /\S/ } split /^--\n/m, read_file($ENV{GENECAT_EMAPPER_LOG});
     is(scalar(@calls), 1, 'with its seed orthologs kept, the search is not repeated');
     like($calls[0], qr/^-m\nno_search\n/, 'only the annotation runs');
+
+    #no node-local space for the copy (fallocate fails): annotation from the shared data dir
+    my $stubs = "$tmp/emapper-stubs";
+    make_path($stubs);
+    write_file("$stubs/fallocate", "#!/usr/bin/env perl\nprint STDERR \"fallocate: No space left on device\\n\";\nexit 1;\n");
+    chmod 0755, "$stubs/fallocate";
+    unlink("$chunk.emapper.annotations", $ENV{GENECAT_EMAPPER_LOG});
+    {
+        local $ENV{PATH} = "$stubs:$ENV{PATH}";
+        is(GCRecovery::systemW($worker->[1], 0), 0, 'eggNOG worker runs without node-local space');
+    }
+    @calls = grep { /\S/ } split /^--\n/m, read_file($ENV{GENECAT_EMAPPER_LOG});
+    like($calls[0], qr/--data_dir\n\Q$emapData\E\n/, 'and annotates from the shared data dir');
+    ok(-e "$chunk.emapper.annotations", 'annotations published');
 };
 
 subtest 'eggNOG-mapper: finished searches of chunks that failed in the one-step annotation are reused' => sub {

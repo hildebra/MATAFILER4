@@ -165,8 +165,11 @@ sub _read_membership_file {
 sub _same_members {
 	my ($left, $right) = @_;
 	return 0 unless (@{$left} == @{$right});
-	my @left_sorted = sort @{$left};
-	my @right_sorted = sort @{$right};
+	# Compare sample directory names so a moved or remounted project still
+	# matches (same rule as WorkflowControl::workflow_members_match).
+	my $name = sub { my $p = $_[0]; $p =~ s{/+$}{}; $p =~ s{^.*/}{}; $p };
+	my @left_sorted = sort map { $name->($_) } @{$left};
+	my @right_sorted = sort map { $name->($_) } @{$right};
 	for (my $i = 0; $i < @left_sorted; $i++) {
 		return 0 if ($left_sorted[$i] ne $right_sorted[$i]);
 	}

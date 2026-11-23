@@ -63,10 +63,10 @@ Wait until submitted jobs finish, then rerun the same script. MATAFILER4 uses ma
 After sample assemblies and mapping have completed, run `secScripts/geneCat.pl` using the generated or adapted `GeneCat.sh` script.
 
 ```bash
-perl "$MF4DIR/secScripts/geneCat.pl"   -map /path/to/mapping_file.map   -GCd /path/to/results/genecat   -mem 200   -cores 24   -clusterID 95   -doStrains 0   -continue 1   -binSpeciesMG 2   -useCheckM1 0   -useCheckM2 1   -MGset GTDB
+perl "$MF4DIR/secScripts/geneCat.pl"   -map /path/to/mapping_file.map   -GCd /path/to/results/genecat   -mem 200   -cores 24   -clusterID 95   -doStrains 0   -continue 1   -useCheckM1 0   -useCheckM2 1   -MGset GTDB
 ```
 
-Note: `geneCat.pl` uses `-binSpeciesMG` for binning/MGS selection. `-Binner` is only a `MATAF4.pl` alias and is not parsed by `geneCat.pl`.
+Note: `geneCat.pl` uses `-binSpeciesMG` for binning/MGS selection. By default (`-1`) it uses the binner found in the assemblies' `Binning/` folders, so the MGS output folder follows it (for example `Bin_SC/` after `MATAF4.pl -Binner 5`). `-Binner` is only a `MATAF4.pl` alias and is not parsed by `geneCat.pl`.
 
 Expected outputs include:
 
@@ -76,7 +76,7 @@ Expected outputs include:
 <GCd>/Matrix.mat.gz
 <GCd>/Matrix.mat.scaled.gz
 <GCd>/Anno/
-<GCd>/Binning/ or <GCd>/Bin_SB/  # if MAG/MGS processing was enabled
+<GCd>/Bin_<binner>/ (e.g. Bin_SB/, Bin_SC/)  # if MAG/MGS processing was enabled
 ```
 
 ## Explicit MGS.pl run

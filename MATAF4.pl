@@ -68,7 +68,7 @@ use Mods::RibosomeState qw(
 	ribosome_merge_manifest
 );
 use Mods::phyloTools qw(fixHDs4Phylo);
-use Mods::Binning qw (getBinSubdirName binningOutputsComplete );
+use Mods::Binning qw (getBinSubdirName binningOutputsComplete repairSCGBinnerLabels );
 use Mods::Subm qw (qsubSystemWaitMaxJobs qsubSystem emptyQsubOpt findQsubSys qsubSystemJobAlive MFnext add2SampleDeps numUserJobs numLiveUserJobs numActiveUserJobs recordSampleLockJobs sampleLockActiveJobs primeSampleLockJobSnapshot slurmJobFailureSummary submitSlurmWithDependencyRecovery deferredSubmissionDependency submissionDependencyDeferred submissionDependencyFailed handleSubmissionFailure);
 use Mods::WorkflowState qw(inspect_workflow_state encode_state_report);
 use Mods::WorkflowPlan qw(build_workflow_plan encode_workflow_plan);
@@ -504,7 +504,8 @@ my %d2Inputs = (
 );
 
 my @unzipjobs; 
-my @grandDeps; #used for loop2completion , collects dependencies 
+my @grandDeps; #used for loop2completion , collects dependencies
+my $hostileBt2Job; #run-wide job building hostile's bowtie2 index, see hostileBt2Dep
 
 #profiler / human filtering preps
 my $krakDeps = prepKraken();
@@ -1081,6 +1082,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 		if (!workflow_members_match($expectedMembers, \@actualMembers)){
 			print "$cAssGrp assembly-group membership has changed! (previous: "
 				.scalar(@actualMembers).", current: ".scalar(@{$expectedMembers}).")\n"
+				."  previous members: ".join(", ", @actualMembers)."\n"
+				."  current members:  ".join(", ", @{$expectedMembers})."\n"
 				."$finalCommAssDir\nRemoving assembly and all processed reads\n";
 			unless ($MFconfig{OKtoRWassGrps}) {print "Stopping MATAFILER, human intervention needed.. use the flag \"-OKtoRWassGrps 1\" to allow MATAFILER to delete files\n"; die;}
 			$locRewrite=1;
@@ -1225,6 +1228,13 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			|| ($MFopt{BinnerRedoEmpty} && @binningBaseStat && $binningBaseStat[7] == 0) ) ){
 		print "redoing binning due to empty bins (flag -redoEmptyBins 1) ..\n";
 		system "rm -rf $binningDir";
+	}
+	# SCGBinner outputs published before labels were shifted still carry bin 0,
+	# which the pipeline reads as "unbinned". Relabel them; CheckM and assembly
+	# statistics are removed so the quality job below reruns on the fixed bins.
+	if ($MFopt{checkSCGbinnerLabels} && $MFopt{DoMetaBat2} == 5
+			&& repairSCGBinnerLabels($BinningOut)) {
+		print "Relabelled SCGBinner bins in $BinningOut (bin 0 -> 1, ...); bin quality will be recomputed\n";
 	}
 	if ( (!$doPreAssmFlag || !$ePreAssmblPck) && !$map{$curSmpl}{inputFilesEmpty} &&
 				((!$eFinMapCovGZ && $eCovAsssembly) || ($eSuppCovAsssembly && !$eFinSupMapCovGZ) ) #redo only contigstats related to coverage..
@@ -2608,7 +2618,7 @@ sub sampleCompletionForcedInvalidation {
 		push @requested, $key if $MFconfig{$key};
 	}
 	for my $key (qw(
-		redoAssembly redoAssMapping BinnerRedoAll BinnerRedoEmpty
+		redoAssembly redoAssMapping BinnerRedoAll BinnerRedoEmpty checkSCGbinnerLabels
 		redoSNPcons redoSNPgene rewriteGenePred rewriteDiamond
 		redoDiamondParse rewriteAllIfAnyDiamond RedoKraken
 		RedoRiboFind RedoRiboAssign MapRewrite2nd redoMapping
@@ -4559,9 +4569,22 @@ sub postSubmQsub {
 				requested_name => $slurmJobName || '',
 			};
 		}
-		recordSampleLockJobs(
-			$QSBoptHR->{LOCKfile}, [$scheduler_job_id], $QSBoptHR,
-		) if $scheduler_job_id ne "";
+		if ($scheduler_job_id ne "") {
+			recordSampleLockJobs(
+				$QSBoptHR->{LOCKfile}, [$scheduler_job_id], $QSBoptHR,
+			);
+			# A deferred script can belong to another sample of the group: its
+			# script sits in that sample's log directory. Record the job in that
+			# sample's lock too, or a later MATAF4 start finds the sample unlocked
+			# and submits the same work again while this job is queued or running.
+			my ($ownerLogDir) = $script_path =~ m{^(.*/LOGandSUB)/};
+			if (defined $ownerLogDir) {
+				(my $ownerLock = "$ownerLogDir/$MFcontstants{DefaultSampleLock}") =~ s{/+}{/}g;
+				(my $currentLock = $QSBoptHR->{LOCKfile} // '') =~ s{/+}{/}g;
+				recordSampleLockJobs($ownerLock, [$scheduler_job_id], $QSBoptHR)
+					if $ownerLock ne $currentLock;
+			}
+		}
 	}
 	open my $audit_fh, '>', $outf or die "Cannot write deferred submission audit $outf: $!\n";
 	print {$audit_fh} join("\n", @augmented_commands), "\n";
@@ -6373,6 +6396,12 @@ sub adaptSDMopt{
 		$str = _set_sdm_option($str, 'TrimWindowWidth', $windowWidth);
 		$str = _set_sdm_option($str, 'TrimWindowThreshhold', $windowThreshold);
 		$str = _set_sdm_option($str, 'maxAmbiguousNT', $maxAmbiguous);
+		# An absolute minimum longer than the reads discards every read, e.g. the
+		# 200 bp minimum of the AVITI and MiSeq options on a 150 bp run. Use the
+		# relative minimum of the default Illumina options instead.
+		my ($minLength) = $str =~ /^minSeqLength\t([0-9.]+)/m;
+		$str = _set_sdm_option($str, 'minSeqLength', '0.7')
+			if (defined($minLength) && $minLength > $readLength);
 	}
 	$str = _set_sdm_option($str, 'BinErrorModelAlpha', -1)
 		unless $MFopt{sdmProbabilisticFilter};
@@ -7807,6 +7836,24 @@ sub hostRmBase{
 	return $cmd;
 }
 
+#Hostile maps short reads with bowtie2, but the installer may fetch only its FASTA (<idx>.fa.gz).
+#If the bowtie2 index is missing, submit one build job per run; host-filter jobs depend on it.
+sub hostileBt2Dep{
+	my $pre = getProgPaths("hostileDB")."/$MFopt{hostileIndex}";
+	return "" if (-s "$pre.1.bt2");
+	return $hostileBt2Job if (defined $hostileBt2Job);
+	my $bt2Bin = getProgPaths("bwt2");
+	my $numThr = 16;
+	#built on node-local $TMPDIR; .1.bt2 (what hostile checks) is moved in last
+	my $cmd = "${bt2Bin}-build --threads $numThr $pre.fa.gz \$TMPDIR/hostileBt2\n";
+	$cmd .= "for s in 2 3 4 rev.1 rev.2 1; do mv \$TMPDIR/hostileBt2.\$s.bt2 $pre.\$s.bt2; done\n";
+	my ($oldTmpSpace, $oldLockFile) = @{$QSBoptHR}{qw(tmpSpace LOCKfile)};
+	@{$QSBoptHR}{qw(tmpSpace LOCKfile)} = ("20G", ''); #a run-wide job, not tied to this sample
+	($hostileBt2Job) = qsubSystem($MFglobal{globalLogDir}."hostileBt2Build.sh",$cmd,$numThr,"40G","HostBt2","","",1,$QSBoptHR->{General_Hosts},$QSBoptHR);
+	@{$QSBoptHR}{qw(tmpSpace LOCKfile)} = ($oldTmpSpace, $oldLockFile);
+	return $hostileBt2Job;
+}
+
 
 sub removeHostSeqs($ $ $){
 	my ($tmpD,$jDep,$checkIfExists) = @_;
@@ -7847,8 +7894,8 @@ sub removeHostSeqs($ $ $){
 			$DBname[$cnt] = $fhdb; $DBdir=""; $cnt++;
 		}
 	}
-	my $cmd = "\n\nmkdir -p $tmpD\n\n";  
-	
+	my $cmd = "\n\nmkdir -p $tmpD\n\n";
+
 	#loop around different DBs..
 	
 	for (my $j=0;$j<@DBname ; $j++){
@@ -7874,7 +7921,10 @@ sub removeHostSeqs($ $ $){
 		$QSBoptHR->{tmpSpace} = $reqSpace; #set option how much tmp space is required, and reset afterwards
 		#### 1 : UNZIP
 		$jobN = "_KR$JNUM";
-		($jobN, $tmpCmd) = qsubSystem($logDir."KrakHS.sh",$cmd,$numThr,"16G",$jobN,$jDep.";$krakDeps","",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
+		my $krDeps = $jDep.";$krakDeps";
+		#hostile maps short reads with bowtie2 (--aligner auto); long reads use minimap2, indexed by hostile
+		$krDeps .= ";".hostileBt2Dep() if ($MFopt{humanFilter} == 3 && grep { !$_->{is_long} } @{$libraries});
+		($jobN, $tmpCmd) = qsubSystem($logDir."KrakHS.sh",$cmd,$numThr,"16G",$jobN,$krDeps,"",1,$QSBoptHR->{General_Hosts},$QSBoptHR) ;
 			$QSBoptHR->{tmpSpace} = $tmpSHDD;
 	}
 	return $jobN;
@@ -11871,6 +11921,7 @@ sub setDefaultMFconfig{
 	$MFopt{useBinnerScratch} = 0;$MFopt{BinnerMem} = 0;$MFopt{useCheckM2} = 1;
 	$MFopt{DoBinning} = 0;$MFopt{useCheckM1} = 0;$MFopt{BinnerCores} = 9;
 	$MFopt{DoMetaBat2} = 0; $MFopt{BinnerRedoEmpty} = 0;  $MFopt{SB_env} = "";
+	$MFopt{checkSCGbinnerLabels} = 0;
 	$MFopt{BinnerRedoAll} =0; $MFopt{minBinnerAssemblyMB} = 2;
 
 	#read preprocessing
@@ -12180,7 +12231,8 @@ sub getCmdLineOptions{
 		"BinnerScratchTmp=i" => \$MFopt{useBinnerScratch}, #very specific (undocumented) use of scratch instead of nodetmp dir
 		#"binSpeciesMG=i" => \$MFopt{DoBinning},#deactivated, replaced by MetaBat2
 		"redoEmptyBins=i" => \$MFopt{BinnerRedoEmpty}, #debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes
-		"redoBinning=i" => \$MFopt{BinnerRedoAll}, 
+		"redoBinning=i" => \$MFopt{BinnerRedoAll},
+		"checkSCGbinnerLabels=i" => \$MFopt{checkSCGbinnerLabels}, #1: relabel SCGBinner outputs that still contain bin 0 (shift all bins by +1) and recompute their bin quality
 		"SB_env=s"  => \$MFopt{SB_env}, #semiBin environment; if given, will avoid re-training de novo binning model. Default: "" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global
 	#gene prediction on assembly
 		"predictEukGenes=i" => \$MFopt{DoEukGenePred},#severely limits total predicted gene amount (~25% of total genes)
@@ -12320,6 +12372,8 @@ sub getCmdLineOptions{
 		if $MFopt{DoMetaBat2} && !$MFopt{useCheckM1} && !$MFopt{useCheckM2};
 	die "ERROR:: -SB_env is only valid with -Binner 2 (SemiBin)\n"
 		if $MFopt{SB_env} ne '' && $MFopt{DoMetaBat2} != 2;
+	die "ERROR:: -checkSCGbinnerLabels is only valid with -Binner 5 (SCGBinner)\n"
+		if $MFopt{checkSCGbinnerLabels} && $MFopt{DoMetaBat2} != 5;
 	#die "ERROR:: \"-SNPmem\" argument contains characters: $MFopt{memSNPcall}" if ($MFopt{memSNPcall} !~ m/[\d-]+/);
 	die "ERROR:: \"-DiaMem\" argument contains characters: $MFopt{diamondMem}" if ($MFopt{diamondMem} !~ m/[\d-]+/);
 	$MFopt{diamondMem} = 16 if ($MFopt{diamondMem} <= 0);

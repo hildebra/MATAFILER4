@@ -41,7 +41,7 @@ MATAFILER4 creates many intermediate and final files. For most downstream analys
 <GCd>/Matrix.mat.gz
 <GCd>/Matrix.mat.scaled.gz
 <GCd>/Anno/
-<GCd>/Binning/ or <GCd>/Bin_SB/  # when MAG/MGS processing was enabled
+<GCd>/Bin_<binner>/ (e.g. Bin_SB/, Bin_SC/)  # when MAG/MGS processing was enabled
 ```
 
 
@@ -60,7 +60,7 @@ This page summarizes where MATAFILER4 writes its major outputs and which files a
 | Gene catalog | Path given to `geneCat.pl -GCd` | Non-redundant genes, gene abundance matrices, annotations and MGS outputs | Main integrated gene-level analysis |
 | Functional annotations | `<gene_catalog>/Anno/Func/` | KEGG, eggNOG, CAZy, ARG and other functional abundance matrices | Functional interpretation |
 | Taxonomic annotations | `<gene_catalog>/Anno/Tax/` | Taxonomic abundance matrices from gene-level or MGS-level assignments | Taxonomic interpretation |
-| MAG/MGS output | `<gene_catalog>/Bin_SB/` or `<gene_catalog>/Binning/` | MAG/MGS clusters, quality estimates, taxonomies, phylogenies, MGS abundance matrices | Genome-resolved analysis and strain/species tracking |
+| MAG/MGS output | `<gene_catalog>/Bin_<binner>/` (`Bin_SB/` for SemiBin, `Bin_SC/` for SCGBinner, ...; older catalogs: `Binning/`) | MAG/MGS clusters, quality estimates, taxonomies, phylogenies, MGS abundance matrices | Genome-resolved analysis and strain/species tracking |
 
 ## General conventions
 
@@ -384,7 +384,9 @@ v3 picks its DIAMOND block size from the node's total RAM, not from the job's me
 
 Each chunk job runs eggNOG-mapper in two steps:
 1. **Search.** The DIAMOND search (`--no_annot`) writes the chunk's seed orthologs to `<chunk>.seeds`. A resubmitted chunk that has this file skips the search.
-2. **Annotation.** The annotation (`-m no_search`) reads a copy of `eggnog.db` on node-local scratch. Its workers read the database at random, and eggNOG-mapper aborts a run when a worker needs more than 250 s for a batch of 125 seeds; reading over the network filesystem exceeded that. A run aborted this way is resubmitted. Chunks that failed this way in an earlier one-step run (geneCat ≤ 0.67) reuse their finished search.
+2. **Annotation.** The annotation (`-m no_search`) reads a copy of `eggnog.db` on node-local scratch. Its workers read the database at random, and eggNOG-mapper aborts a run when a worker needs more than 250 s for a batch of 125 seeds; reading over the network filesystem exceeded that. A run aborted this way is resubmitted.
+   - Jobs on the same node share its disk whatever scratch they requested, so the copy reserves its space (`fallocate`) before writing.
+   - A job that cannot reserve the space annotates from the shared data dir and writes `df` of its scratch to its error log. Chunks that failed this way in an earlier one-step run (geneCat ≤ 0.67) reuse their finished search.
 
 ## Taxonomic annotation outputs
 
@@ -452,7 +454,7 @@ Sparse runs can finish successfully without manufacturing cluster or tree data:
 
 These files represent completed, expected low-cardinality outcomes. Missing or partial paired outputs (for example, only one of the Canopy cluster and profile files) remain errors.
 
-The between-MGS tree starts immediately after Stage I publishes the MGS core set and runs concurrently with taxonomy and abundance. It is inferred from concatenated amino-acid FMG alignments with per-locus partitions, partition-aware ModelFinder, 1,000 ultrafast bootstrap replicates, and minimum marker/column occupancy filters. The topology is unrooted unless the standalone launcher is given suitable reference genomes and an explicit downstream rooting strategy.
+The between-MGS tree starts immediately after Stage I publishes the MGS core set and runs concurrently with taxonomy and abundance. It is inferred from concatenated amino-acid alignments of the 40 FMGs (independent of `-MGset`; `MGS.pl -treeMGset GTDB` uses the 120 GTDB markers instead) with per-locus partitions, a fixed `LG+F+G` model per partition (`phylo_MGS_between.pl -AutoModel 1` enables the much slower `MFP+MERGE` partition testing), 1,000 ultrafast bootstrap replicates, and minimum marker/column occupancy filters. The topology is unrooted unless the standalone launcher is given suitable reference genomes and an explicit downstream rooting strategy.
 
 ### MGS abundance matrices
 

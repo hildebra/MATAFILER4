@@ -6,6 +6,7 @@ use File::Spec;
 use File::Temp qw(tempdir);
 use JSON::PP qw(decode_json);
 use Test::More;
+use lib "$Bin/..";
 use Mods::GenoMetaAss qw(systemW);
 use Mods::Checkpoint qw(checkpoint_valid);
 

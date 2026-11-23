@@ -79,6 +79,7 @@ binning	checkM1	integer	0	stable	$MFopt{useCheckM1}	Assess recovered bins with C
 binning	BinnerScratchTmp	integer	0	internal/advanced	$MFopt{useBinnerScratch}	very specific (undocumented) use of scratch instead of nodetmp dir
 binning	redoEmptyBins	integer	0	internal/advanced	$MFopt{BinnerRedoEmpty}	debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes
 binning	redoBinning	integer	0	stable	$MFopt{BinnerRedoAll}	Remove and rebuild requested binning results.
+binning	checkSCGbinnerLabels	integer	0	advanced	$MFopt{checkSCGbinnerLabels}	Relabel SCGBinner outputs (-Binner 5) that still contain bin 0, which older runs left out of quality checks and MGS: all bins are shifted up by one, and the stale CheckM/assembly statistics are removed so bin quality is recomputed. Files without a bin-0 row are left unchanged.
 binning	SB_env	string	""""""	stable	$MFopt{SB_env}	"semiBin environment; if given, will avoid re-training de novo binning model. Default: """" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global"
 gene prediction on assembly	predictEukGenes	integer	0	stable	$MFopt{DoEukGenePred}	severely limits total predicted gene amount (~25% of total genes)
 gene prediction on assembly	kmerPerGene	integer	0	stable	$MFopt{kmerPerGene}	calculate kmer frequencies for each gene instead of per scaffold

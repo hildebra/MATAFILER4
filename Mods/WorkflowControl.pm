@@ -339,11 +339,20 @@ sub sample_is_ignored {
 	return exists($ignored->{$sample_id}) ? 1 : 0;
 }
 
+# Members are compared by sample directory name, not full path: a project
+# that was moved or is reached through another mount point keeps its samples,
+# and a full-path mismatch here would delete every sample folder.
+sub _sample_dir_name {
+	my $path = _normalise_path($_[0]);
+	$path =~ s{^.*/}{};
+	return $path;
+}
+
 sub workflow_members_match {
 	my ($expected, $actual) = @_;
 	return 0 unless (ref($expected) eq 'ARRAY' && ref($actual) eq 'ARRAY');
-	my @expected = sort map { _normalise_path($_) } @{$expected};
-	my @actual = sort map { _normalise_path($_) } @{$actual};
+	my @expected = sort map { _sample_dir_name($_) } @{$expected};
+	my @actual = sort map { _sample_dir_name($_) } @{$actual};
 	return 0 unless (@expected == @actual);
 	for (my $i = 0; $i < @expected; $i++) {
 		return 0 if ($expected[$i] ne $actual[$i]);

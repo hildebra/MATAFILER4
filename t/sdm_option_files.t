@@ -53,11 +53,6 @@ my %technology = (
 	miSeq => ['sdm_opt_miSeq.txt', [150, 250, 300]],
 	AVITI => ['sdm_AVITI.txt', [150, 300]],
 );
-my %known_issue = (
-	'miSeq:150' => 1,
-	'AVITI:150' => 1,
-);
-
 my $tmp = tempdir(CLEANUP => 1);
 for my $tech (sort keys %technology) {
 	my ($file, $lengths) = @{ $technology{$tech} };
@@ -66,13 +61,8 @@ for my $tech (sort keys %technology) {
 		my $options = options_of($adapted);
 		my $minimum = $options->{minSeqLength};
 		my $effective = $minimum <= 1 ? $minimum * $length : $minimum;
-		{
-			local $TODO = $known_issue{"$tech:$length"}
-				? "absolute minSeqLength $minimum in $file is not rescaled for $length bp reads"
-				: undef;
-			ok($effective <= $length,
-				"$tech $length bp: full-length reads pass minSeqLength ($minimum -> $effective bp)");
-		}
+		ok($effective <= $length,
+			"$tech $length bp: full-length reads pass minSeqLength ($minimum -> $effective bp)");
 		my $truncate = $options->{TruncateSequenceLength};
 		if (defined $truncate && $truncate > 0) {
 			ok($truncate >= $effective,

@@ -6,7 +6,7 @@ use File::Spec;
 use File::Path qw(make_path);
 use File::Temp qw(tempdir);
 use Test::More;
-use lib "$Bin/lib";
+use lib "$Bin/..", "$Bin/lib";
 use MFTestConfig;
 
 my $root = File::Spec->rel2abs("$Bin/..");

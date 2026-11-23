@@ -164,6 +164,7 @@ Main sample-level pipeline. `MATAF4.pl -help` prints the option tables below, so
 | `-BinnerScratchTmp` | integer | `0` | internal/advanced | very specific (undocumented) use of scratch instead of nodetmp dir |
 | `-redoEmptyBins` | integer | `0` | internal/advanced | debug option; redo bins that are empty (no bin detected). Note: this can sometimes happen for metagenomes |
 | `-redoBinning` | integer | `0` | stable | Remove and rebuild requested binning results. |
+| `-checkSCGbinnerLabels` | integer | `0` | advanced | Relabel SCGBinner outputs (-Binner 5) that still contain bin 0, which older runs left out of quality checks and MGS: all bins are shifted up by one, and the stale CheckM/assembly statistics are removed so bin quality is recomputed. Files without a bin-0 row are left unchanged. |
 | `-SB_env` | string | `""` | stable | semiBin environment; if given, will avoid re-training de novo binning model. Default: "" (autotrain). should be #human_gut/dog_gut/ocean/soil/cat_gut/human_oral/mouse_gut/pig_gut/built_environment/wastewater/chicken_caecum/global |
 
 ## Gene prediction on assembly
@@ -400,7 +401,7 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 
 | Aliases | Type | Default | Status | Description |
 |---|---:|---|---|---|
-| `-binSpeciesMG` | integer | `2` | stable | use MAGs to create MGS? 1= metaBat2, 2=SemiBin, 3=metaDecoder, 4=GF, 5=SC |
+| `-binSpeciesMG` | integer | `-1` | stable | binner whose MAGs create the MGS: -1=auto (the binner found in the assemblies' `Binning/` folders, i.e. the one `MATAF4.pl -Binner` ran), 1= metaBat2, 2=SemiBin, 3=metaDecoder, 4=GF, 5=SC. MGS output goes to `<GCd>/Bin_<MB2|SB|MD|GF|SC>/` |
 | `-useCheckM2` | integer | `1` | stable | 1: use checkM2 completeness predictions, Default: 1 |
 | `-useCheckM1` | integer | `0` | stable | 1: use checkM completeness predictions, Default: 0 |
 | `-doStrains` | integer | `0` | advanced/internal | 1: calculate intraSpecific phylogenies on each MGS |
@@ -450,13 +451,14 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 |---|---:|---|---|---|
 | `-GCd` | string |  | stable | gene catalog dir |
 | `-clusterID` | integer | `95` | stable | gene-catalog clustering identity percentage |
-| `-outD` | string | `<GCd>/Bin_SB/` | stable | output dir |
+| `-outD` | string | `<GCd>/Bin_<binner>/` | stable | output dir |
 | `-tmp` | string |  | stable | temp dir |
 | `-submit` | integer | `1` | stable | 1:submit jobs, 0: dry run. Default: 1 |
 | `-canopies` | string |  | stable | location of canopy clustering output file (clusters.txt) |
 | `-smallCores` | integer | `4` | stable | cores used for normal jobs (not intensive) |
 | `-bottleneckCores` | integer | `12` | stable | cores for compute intensive jobs |
 | `-MGset` | string | `FMG` | stable | marker genes used for MAG merging/abundance: `GTDB` or `FMG` |
+| `-treeMGset` | string | `FMG` | stable | marker genes for the between-MGS tree, independent of `-MGset`: `FMG` (40 markers, fast) or `GTDB` (120 markers, much slower) |
 | `-wait4stone` | string |  | stable | wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later |
 | `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; `0` waits indefinitely |
 | `-mem` | integer | `150` | stable | memory used for intensive jobs |

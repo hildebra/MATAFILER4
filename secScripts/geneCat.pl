@@ -64,7 +64,9 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.68; #0.68: eggNOG-mapper chunks search, then annotate from a node-local eggnog.db; retried annotations skip the search
+our $version = 0.70; #0.70: -binSpeciesMG defaults to the binner found in the assemblies' Binning/ folders (MGS output in Bin_<binner>/)
+#0.69: the node-local eggnog.db copy reserves its disk space first; without it, the shared data dir
+#0.68: eggNOG-mapper chunks search, then annotate from a node-local eggnog.db; retried annotations skip the search
 #0.67: CD-HIT -M within its job; -ntMatchGC samtools threads beside minimap2
 #0.66: FuncAssign DIAMOND --mid-sensitive (mode recorded in .<DB>.params); KGM/NOG chunks 32G
 #0.65: marker-gene mmseqs clustering sized to its own job; -ntMatchGC maps with the asm20 preset (no prebuilt .mmi)
@@ -216,6 +218,45 @@ sub _shell_quote {
 	$value = '' unless defined $value;
 	$value =~ s/'/'"'"'/g;
 	return "'$value'";
+}
+
+#binner that MATAF4.pl (-Binner) ran in the assembly phase: its MAGs are in <assembly>/Binning/<MB2|SB|MD|GF|SC>/<sample>
+#(one set per assembly group, named after its last sample). Returns the -binSpeciesMG number found in most assembly groups
+sub _detect_assembly_binner {
+	my ($mapHR, $samplesAR) = @_;
+	my %assemblyGroups; my %found;
+	foreach my $smpl (@{$samplesAR}) {
+		my $entry = $mapHR->{$smpl};
+		next unless ref($entry) eq 'HASH';
+		next if defined($entry->{ExcludeAssem}) && $entry->{ExcludeAssem} eq "1";
+		my $dir = $entry->{wrdir};
+		$dir = $entry->{prefix} if !defined($dir) || $dir eq "";
+		next if !defined($dir) || $dir eq "" || !-e "$dir/assemblies/metag/assembly.txt";
+		my $metaGD = getAssemblPath($dir, "", 0);
+		next if $metaGD eq "";
+		$assemblyGroups{$metaGD} = 1;
+		foreach my $binner (1 .. 5) {
+			my $base = "$metaGD/Binning/" . getBinSubdirName($binner) . "/$smpl";
+			$found{$binner}{$metaGD} = 1 if -e $base || -e "$base.assStat";
+		}
+	}
+	my $numGroups = scalar(keys %assemblyGroups);
+	my @binners = sort { scalar(keys %{$found{$b}}) <=> scalar(keys %{$found{$a}}) || $a <=> $b } keys %found;
+	unless (@binners) {
+		warn "-binSpeciesMG: no binner output found in the Binning/ folders of $numGroups assembly groups; "
+			. "using SemiBin (2). Set -binSpeciesMG to the binner used with MATAF4.pl -Binner\n";
+		return 2;
+	}
+	my $chosen = $binners[0];
+	my $hits = scalar(keys %{$found{$chosen}});
+	my $summary = join ", ", map { getBinSubdirName($_) . "=" . scalar(keys %{$found{$_}}) } @binners;
+	print "-binSpeciesMG: assembly-phase binner " . getBinSubdirName($chosen) . " ($chosen) found in $hits/$numGroups assembly groups; "
+		. "MGS output goes to Bin_" . getBinSubdirName($chosen) . "/\n";
+	warn "-binSpeciesMG: several binners have outputs (assembly groups: $summary); using "
+		. getBinSubdirName($chosen) . ". Set -binSpeciesMG to choose another\n" if @binners > 1;
+	warn "-binSpeciesMG: " . ($numGroups - $hits) . " of $numGroups assembly groups have no "
+		. getBinSubdirName($chosen) . " binning output\n" if $hits < $numGroups;
+	return $chosen;
 }
 
 sub _command_option_value {
@@ -660,7 +701,7 @@ my $extraRdsFNA = "";
 #only used in MGS.pl script:
 my $useCheckM1= 0; my $useCheckM2 =1;
 #only in MGS.pl:
-my $binSpeciesMG = 2;#0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder , ...
+my $binSpeciesMG = -1;#-1=auto (binner used in the assembly phase), 0=no, 1=metaBat2, 2=SemiBin, 3: MetaDecoder, 4: GenomeFace, 5: SCGBinner
 
 #$justCDhit = $ARGV[4] if (@ARGV > 4);
 #$extraRdsFNA = $ARGV[5] if (@ARGV > 5);#FNA with (predicted) genes, that are to be artificially added to the new gene catalog (and clutered with new genes)
@@ -726,7 +767,7 @@ GetOptions(
 	"requireAllAssemblies=i" => \$requireAllAssemblies, #normally not exposed, continues even if some assemblies not present..
 	"sampleBatches=i" => \$batchNum, #how many batches to use for initial accumulation of genes? (200-500 samples per batch recommended)
 #Binning/MGS related
-	"binSpeciesMG=i" => \$binSpeciesMG, #use MAGs to create MGS? 1= metaBat2, 2=SemiBin, 3=metaDecoder, 4=GF, 5=SC
+	"binSpeciesMG=i" => \$binSpeciesMG, #binner whose MAGs create the MGS: -1=auto (binner found in the assemblies' Binning/ folders), 1= metaBat2, 2=SemiBin, 3=metaDecoder, 4=GF, 5=SC
 	"useCheckM2=i" => \$useCheckM2, #1: use checkM2 completeness predictions, Default: 1
 	"useCheckM1=i" => \$useCheckM1, #1: use checkM completeness predictions, Default: 0
 	"doStrains=i" => \$doStrains, #1: calculate intraSpecific phylogenies on each MGS
@@ -782,11 +823,11 @@ die "-doStrains must be 0 or 1\n" unless $doStrains == 0 || $doStrains == 1;
 die "-useCheckM1 and -useCheckM2 must each be 0 or 1\n"
 	unless ($useCheckM1 == 0 || $useCheckM1 == 1)
 		&& ($useCheckM2 == 0 || $useCheckM2 == 1);
-die "-binSpeciesMG must be one of 0..5\n"
-	unless $binSpeciesMG >= 0 && $binSpeciesMG <= 5;
+die "-binSpeciesMG must be one of -1..5\n"
+	unless $binSpeciesMG >= -1 && $binSpeciesMG <= 5;
 if ($mode eq 'geneCat' && $doMags) {
-	die "-doMags 1 requires -binSpeciesMG to select one of 1..5; use -doMags 0 when no binner was run\n"
-		unless $binSpeciesMG >= 1;
+	die "-doMags 1 requires -binSpeciesMG -1 (auto) or one of 1..5; use -doMags 0 when no binner was run\n"
+		unless $binSpeciesMG != 0;
 	die "Select exactly one quality checker: -useCheckM1 1 -useCheckM2 0, or vice versa\n"
 		unless $useCheckM1 + $useCheckM2 == 1;
 }
@@ -795,7 +836,7 @@ die "-doStrains 1 requires -doMags 1\n"
 
 
 checkMF(2);
-my $binnerShrt=getBinSubdirName($binSpeciesMG);
+my $binnerShrt; #Bin_<binnerShrt>/ is the MGS output folder; set once the map is read (-binSpeciesMG -1 needs the assemblies)
 #default -functDB: drop optional databases that are not installed. The main run forwards the resolved list to
 #FuncAssign, so it also decides the functional checkpoint (installing VFDB later adds VFA/VFB on the next run)
 if ($curDB_o eq ""){
@@ -911,6 +952,10 @@ $oldNameFolders = $map{opt}{folderStruct};
 %AsGrps = %{$hr2};
 $numSmpls=scalar(@samples);
 die "No samples were found in the mapping input: $mapF\n" unless $numSmpls;
+if ($mode eq 'geneCat' && $binSpeciesMG == -1) {
+	$binSpeciesMG = _detect_assembly_binner(\%map, \@samples);
+}
+$binnerShrt = getBinSubdirName($binSpeciesMG);
 
 #my $defaultsCDH =""; 
 my $bucketCnt = 0; my $cnt = 0; my @bucketDirs = ();
@@ -3164,16 +3209,24 @@ sub geneCatFunc_emapper{
 			$ccmd .= "  $emapper -m diamond --no_annot --dmnd_block_size $dmndBlock --dmnd_index_chunks $dmndChunks --override --itype proteins --temp_dir $wd --data_dir $curDB --no_file_comments --cpu $ncore -i $f -o $f.srch\n";
 			$ccmd .= "  $mvBin $f.srch.emapper.seed_orthologs $seeds\n  $rmBin -f $f.srch.emapper.hits\nfi\n";
 			#2) annotation. Its workers read eggnog.db at random; on a network filesystem a sub-batch can exceed eggNOG-mapper's
-			#fixed per-task deadline (250 s), which aborts the chunk. Read a node-local copy of eggnog.db (~22 GB) instead,
+			#fixed per-task deadline (250 s), which aborts the chunk. Read a node-local copy of eggnog.db (~23 GB) instead,
 			#the other data files are linked
-			$ccmd .= "$rmBin -rf ${wd}data/\n$mkdirBin -p ${wd}data/\nln -s $curDB/* ${wd}data/\n$rmBin -f ${wd}data/eggnog.db\n$cpBin --preserve=timestamps $curDB/eggnog.db ${wd}data/eggnog.db\n";
-			#eggNOG-mapper finds a field-presence cache it built itself by the DB's size and mtime (kept by the copy) and the
-			#path of the GO OBO: name the data dir's OBO, so the copy uses the cache of the shared data dir instead of
+			$ccmd .= "$rmBin -rf ${wd}data/\n$mkdirBin -p ${wd}data/\nln -s $curDB/* ${wd}data/\n$rmBin -f ${wd}data/eggnog.db\n";
+			#the scratch request does not keep other jobs on the node off the disk: reserve the copy's space first (fallocate)
+			#and write into it, so jobs sharing a node cannot fill the disk between them. Without the space: the shared data
+			#dir (a timeout there is retried)
+			$ccmd .= "emapData=$curDB\n";
+			$ccmd .= "if fallocate -l \$(stat -L -c %s $curDB/eggnog.db) ${wd}data/eggnog.db; then\n";
+			$ccmd .= "  dd if=$curDB/eggnog.db of=${wd}data/eggnog.db bs=64M conv=notrunc status=none\n";
+			#eggNOG-mapper finds a field-presence cache it built itself by the DB's size and mtime (kept for the copy) and
+			#the path of the GO OBO: name the data dir's OBO, so the copy uses the cache of the shared data dir instead of
 			#rebuilding it in every chunk (~50 min on eggNOG 7)
+			$ccmd .= "  touch -r $curDB/eggnog.db ${wd}data/eggnog.db\n  emapData=${wd}data/\n";
+			$ccmd .= "else\n  echo \"No node-local space for eggnog.db on \$HOSTNAME: annotating from the shared data dir\" >&2\n  df -h $wd >&2 || true\nfi\n";
 			$ccmd .= "if [ -f $curDB/go-basic.obo ]; then export EGGNOG_GO_OBO=\"\$(readlink -f $curDB)/go-basic.obo\"; fi\n";
 			#eggNOG-mapper writes its annotations in place (no end marker with --no_file_comments): run under a .part
 			#prefix and rename on success, so a killed chunk never leaves a file the resume test accepts
-			$ccmd .= "$emapper -m no_search --annotate_hits_table $seeds --override --temp_dir $wd --data_dir ${wd}data/ --no_file_comments --cpu $ncore -o $f.part\n";
+			$ccmd .= "$emapper -m no_search --annotate_hits_table $seeds --override --temp_dir $wd --data_dir \$emapData --no_file_comments --cpu $ncore -o $f.part\n";
 			$ccmd .= "$mvBin $f.part.emapper.annotations $f.emapper.annotations\n";
 			$ccmd .= "$rmBin -rf $wd\n";
 			my $outF = "$f.emapper.annotations"; #complete chunk annotations

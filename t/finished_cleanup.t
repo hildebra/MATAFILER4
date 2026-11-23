@@ -233,19 +233,23 @@ ok(!-d $download_dir, 'validated archive downloads are removed after sample comp
 ok(-s File::Spec->catfile($download_temp, 'filtered.1.fq.gz'),
 	'non-download scratch remains available under --no-remove-temporary');
 
-my $scratch_alias = File::Spec->catdir($root, 'scratch-alias');
-symlink($scratch, $scratch_alias) or die "Cannot create scratch alias: $!";
-my $alias_temp_real = File::Spec->catdir($scratch, 'alias-sample');
-my $alias_temp_path = File::Spec->catdir($scratch_alias, 'alias-sample');
-make_path($alias_temp_real);
-write_file(File::Spec->catfile($alias_temp_real, 'temporary.fq'));
-is(run_cleaner(
-	sample => 'alias-sample', members => ['alias-sample'],
-	mapping_dir => $sample_paths{S1}{mapping_dir},
-	snp_log_dir => $sample_paths{S1}{snp_log_dir},
-	sample_temp => $alias_temp_path,
-), 0, 'cleanup accepts a sample temporary path through a scratch symlink alias');
-ok(!-d $alias_temp_real, 'scratch alias cleanup removes the canonical sample temporary directory');
+SKIP: {
+	my $scratch_alias = File::Spec->catdir($root, 'scratch-alias');
+	# some shells copy instead of linking, so check that a link was really made
+	skip 'symbolic links are unavailable on this platform', 2
+		unless symlink($scratch, $scratch_alias) && -l $scratch_alias;
+	my $alias_temp_real = File::Spec->catdir($scratch, 'alias-sample');
+	my $alias_temp_path = File::Spec->catdir($scratch_alias, 'alias-sample');
+	make_path($alias_temp_real);
+	write_file(File::Spec->catfile($alias_temp_real, 'temporary.fq'));
+	is(run_cleaner(
+		sample => 'alias-sample', members => ['alias-sample'],
+		mapping_dir => $sample_paths{S1}{mapping_dir},
+		snp_log_dir => $sample_paths{S1}{snp_log_dir},
+		sample_temp => $alias_temp_path,
+	), 0, 'cleanup accepts a sample temporary path through a scratch symlink alias');
+	ok(!-d $alias_temp_real, 'scratch alias cleanup removes the canonical sample temporary directory');
+}
 
 my $policy_sample = 'policy-only';
 my $policy_mapping = File::Spec->catdir($output, $policy_sample, 'mapping');

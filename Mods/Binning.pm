@@ -5,6 +5,7 @@ our @EXPORT_OK = qw(
 				runMetaBat runSemiBin  runMetaDecoder  runGenomeFace runSCGBinner
 				runCheckM runCheckM2 MB2N50
 				getBinSubdirName binningOutputsComplete emptyBinnerAssignmentCommand
+				repairSCGBinnerLabels
 				createBin2 createBinFAA createBinCtgs
 				readMGS readMGSrev deNovo16S readMGSrevRed minQualFilter 
 				filterMGS_CM MB2assigns MB2assignedBinIds calcLCAcompl readCMquals);
@@ -50,6 +51,61 @@ sub binningOutputsComplete {
 		my @checkM2Stat = stat("$base.cm2");
 		return 0 unless @checkM2Stat && $checkM2Stat[7] > 0;
 	}
+	return 1;
+}
+
+# SCGBinner numbers real bins from 0, but every reader here treats bin 0 as
+# "unbinned".  New runs shift labels at publication (runSCGBinner); this
+# repairs assignments published before that fix.  A file is relabelled only
+# if it still contains a bin-0 row, so the repair runs at most once per file.
+# The stale quality and statistics files are removed so that the next
+# MATAF4.pl pass reruns checkBinQual.pl on the relabelled bins.
+# Returns 1 if the file was relabelled, 0 otherwise.
+sub repairSCGBinnerLabels {
+	my ($base) = @_;
+	die "repairSCGBinnerLabels requires a bin assignment path\n"
+		unless defined($base) && length($base);
+	return 0 unless -s $base;
+
+	# SCGBinner writes bins in contig order, so bin 0 is not necessarily on the
+	# first line; stop at the first bin-0 row instead of reading everything.
+	my $hasBinZero = 0;
+	open my $scan, '<', $base or die "Cannot open bin assignments $base: $!\n";
+	while (my $line = <$scan>) {
+		$line =~ s/\r?\n\z//;
+		my @fields = split /\t/, $line, -1;
+		next unless @fields >= 2;
+		if ($fields[1] eq '0') { $hasBinZero = 1; last; }
+	}
+	close $scan;
+	return 0 unless $hasBinZero;
+
+	my $temporary = "$base.relabel.$$";
+	open my $in, '<', $base or die "Cannot open bin assignments $base: $!\n";
+	open my $out, '>', $temporary or die "Cannot write $temporary: $!\n";
+	while (my $line = <$in>) {
+		$line =~ s/\r?\n\z//;
+		next unless length $line;
+		my @fields = split /\t/, $line, -1;
+		if (@fields >= 2 && $fields[0] eq 'Sequence ID') {
+			print {$out} "$line\n" or die "Cannot write $temporary: $!\n";
+			next;
+		}
+		unless (@fields >= 2 && $fields[1] =~ /^\d+$/) {
+			close $out; unlink $temporary;
+			die "Unexpected SCGBinner label in $base at line $.: $line\n";
+		}
+		$fields[1]++;
+		print {$out} join("\t", @fields), "\n"
+			or die "Cannot write $temporary: $!\n";
+	}
+	close $in;
+	close $out or die "Cannot close $temporary: $!\n";
+	for my $stale ("$base.cm", "$base.cm2", "$base.assStat") {
+		next unless -e $stale;
+		unlink $stale or die "Cannot remove stale quality file $stale: $!\n";
+	}
+	rename $temporary, $base or die "Cannot replace $base with relabelled bins: $!\n";
 	return 1;
 }
 
@@ -1006,8 +1062,12 @@ sub runSCGBinner{
 	$cmd .= "if [[ ! -e $tmpDir/scgbinner_res/SCGBINNER_result.tsv ]]; then\n";
 	$cmd .= "  echo \"ERROR: SCGBinner exited successfully but did not create "
 		. "scgbinner_res/SCGBINNER_result.tsv\" >&2\n  exit 1\nfi\n";
-	# move result TSV, then clean intermediate dirs
-	$cmd .= "mv $tmpDir/scgbinner_res/SCGBINNER_result.tsv $outDir/$nm\n";
+	# SCGBinner numbers real bins from 0, but MATAFILER treats bin 0 as
+	# "unbinned" (MetaBAT2 convention), so shift every label up by one.
+	$cmd .= "awk -F'\\t' -v OFS='\\t' "
+		. q('NF { if (NF < 2 || $2 !~ /^[0-9]+$/) { print "ERROR: unexpected SCGBinner label at line " NR ": " $0 > "/dev/stderr"; exit 1 } $2 = $2 + 1 } { print }')
+		. " $tmpDir/scgbinner_res/SCGBINNER_result.tsv > $outDir/$nm.tmp\n";
+	$cmd .= "mv $outDir/$nm.tmp $outDir/$nm\n";
 	$cmd .= "rm -rf $tmpDir\n";##$outDir/scgbinner_res $outDir/data_augmentation\n";
 	return $cmd;
 }
