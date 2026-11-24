@@ -31,6 +31,7 @@ sub slurp {
 	use Mods::Binning qw(createBinFAA);
 	use Mods::Checkpoint qw(read_checkpoint checkpoint_valid write_checkpoint);
 	use Mods::WorkflowResilience qw(retry_unlink retry_rename);
+	use Mods::FuncTables qw(default_function_table_schemes function_table_scheme_names parse_function_table_list);
 	our ($GCd, $clusterID, $cmSuffix, $rewrClusterMAGs, $useCheckM2,
 		$canCore, $numCore, $nodeTmpD, $logDir, $failQC);
 	our (%QSBopt, @submissions, @qualityArgs, %paths);
