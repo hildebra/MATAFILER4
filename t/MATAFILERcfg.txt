@@ -10,3 +10,4 @@ pigz	[MFLRDir]/t/bin/pigz
 bgzip	[MFLRDir]/t/bin/bgzip
 maxMF4mem	512
 downloadQueue	nbi-download
+yoke	perl [MFLRDir]/t/bin/yoke

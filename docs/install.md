@@ -139,6 +139,23 @@ mkdir -p <DBDir>/Funct/eggNOGmapper/v3.0/
 download_eggnog_data.py -y --data_dir <DBDir>/Funct/eggNOGmapper/v3.0/
 ```
 
+`MF4` also holds [yoke](https://github.com/falklab/yoke), which makes the
+per-MAG function tables of each MGS (`MGS.pl -funcTables`). `MF4.yml` installs
+its dependencies from conda-forge. The installer then adds yoke itself with
+`pip install --no-deps`, at the version set by `YOKE_VERSION` in
+`helpers/install/installer.sh`, so pip never replaces conda's numpy or pandas.
+yoke is not part of `MF4.yml`: if it cannot be installed, the installer warns
+and `MF4` is still usable. Without yoke, run `geneCat.pl`/`MGS.pl` with
+`-funcTables 0`. To install it by hand:
+
+```bash
+micromamba run -n MF4 python -m pip install --no-deps "yoke @ git+https://github.com/falklab/yoke.git@v<version>"
+micromamba run -n MF4 yoke --version
+```
+
+yoke's module scores run `rtk module`; `MGS.pl` points that at MATAFILER's own
+`bin/rtk2`, so no separate rtk is needed.
+
 `MF4genomeface` is best-effort because its package metadata is hosted outside
 conda-forge and Bioconda. If that external channel is unavailable, the installer
 prints a warning and continues; rerun it later to install or update GenomeFace.

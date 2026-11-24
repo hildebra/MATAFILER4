@@ -110,6 +110,17 @@ dependencies:
   - biopython>=1.79
   - psutil>=5.7.0
   - xlsxwriter>=1.4.3
+  # yoke (per-MAG function tables of MGS.pl): its dependencies come from conda-forge here, so its pip
+  # install (installer.sh, --no-deps) cannot replace conda's numpy/pandas
+  - conda-forge::pandas>=2.2.2,<3
+  - conda-forge::scipy>=1.15
+  - conda-forge::matplotlib-base>=3.10.1
+  - conda-forge::statsmodels>=0.14.4
+  - conda-forge::plotnine>=0.14.5
+  - conda-forge::networkx>=3.3
+  - pyfastx>=2.3.0
+  - conda-forge::multimethod>=1.12
+  - conda-forge::tqdm>=4.66.5
   - pip:
     - "eggnog-mapper @ https://github.com/eggnogdb/eggnog-mapper/archive/refs/tags/v3.0.0-beta6.tar.gz"
   

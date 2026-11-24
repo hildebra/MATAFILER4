@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026-11-24 — MATAF4 4.1.0: semantic versioning; BGZF compression throughout the pipeline (geneCat 0.71, buildTree5 5.94)
+## 2026-11-24 — MATAF4 4.1.0: semantic versioning; BGZF compression throughout the pipeline (geneCat 0.72, buildTree5 5.94)
 
 - **Versioning:** `MATAF4.pl` versions are now `MAJOR.MINOR.PATCH`, held as a string. 4.1.0 follows 4.49. The version is only printed (start banner, `-help`); no output, checkpoint or completion record stores or compares it.
 - **Change:** every `.gz` the pipeline compresses itself is now BGZF, written by `bgzip` from htslib, instead of plain gzip from `gzip`/`pigz`/`IO::Compress::Gzip`.
@@ -16,6 +16,21 @@
 - **Readers:** `IO::Uncompress::Gunzip` readers that lacked `MultiStream => 1` now set it (`Mods/WorkflowControl.pm` and tests), since without it they read only the first 64 KB block of a BGZF file.
 - **Not converted:** files compressed by external tools themselves (`sdm` filtered reads, DIAMOND `--compress`, SortMeRNA, `rtk2`, R scripts) stay plain gzip.
 - Tests: `t/bgzf_compression.t` runs the generated commands with a BGZF-writing test `bgzip` (`t/bin/bgzip`) and reads multi-block output back through every Perl reader path; `t/pigz_io.t`, `t/ena_sra_download.t` and the buildTree5/strain/miTag tests check BGZF output.
+## 2026-11-23 — Per-MAG function tables for every MGS with yoke (MGS 0.56, geneCat 0.71)
+
+- **Problem:** functional annotations existed only for the whole gene catalogue (`Anno/Func/`), not for the MAGs of an MGS. [yoke](https://github.com/falklab/yoke) makes such tables from `MAGvsGC.txt.gz`, but MATAFILER files break its input assumptions:
+  - yoke reads MAGvsGC as a stream and starts a new MGS whenever the MGS column changes. The Perl `clusterMAGs` path writes MAGs in sample order, so the rows of an MGS are spread out, and each part would overwrite the table of the previous one.
+  - yoke treats `?` (MAGs without MGS) as an MGS, and needs the column `other_Genes` (Perl path: `other_genes`).
+  - An MGS whose MAGs all fail yoke's quality filter (completeness 0 or contamination 100) crashes yoke.
+  - `*.geneAss` files hold all functions of a gene in one field (`K00001,K00002`); yoke took that as one function ID.
+- **New stage in `MGS.pl`** (`-funcTables`, default all schemes; `-funcTablesModules`, default `BSB,GBM`): one job, `LOGandSUB/funcTablesMGS.sh`, runs `secScripts/MGS/funcTablesMGS.pl`. It prepares yoke's inputs (`Mods/FuncTables.pm`) and runs `yoke function_counts`, `module_score` (KEGG ortholog schemes) and `function_summarise` (when MAGvsGC has taxonomy). Outputs are in `Bin_<binner>/Annotation/FunctionTables/` (see outputs.md).
+  - Schemes: diamond `KEGG` (KGM), `CZy`, `TCDB`, `ABRc`, `VFA`, `VFB`; eggNOG-mapper `emKO`, `emNOG`. A scheme runs once its annotation stage has finished (`checkpoints/10.func.stone` or `10.emap.stone`) and its database was annotated.
+  - The stage starts after the strain kickoff, so waiting for the annotations never delays strains. geneCat passes both checkpoints (`-wait4funcStone` is new). When eggNOG-mapper does not finish within `-wait4stoneTimeout`, only its schemes are skipped.
+  - The job is not waited for. Its checkpoint (`funcTables.stone`) records the schemes, the MAG report and the annotation checkpoints, so a re-annotation, a new MAG report or a newly finished stage rebuilds the tables. `-redo cluster` deletes them.
+  - yoke's `module_score` calls `rtk module`; the job points that at `bin/rtk2`.
+- **Checkpoints of MGS 0.54 and 0.55 stay valid in 0.56.** The rule that let 0.55 reuse 0.54 checkpoints is now a list of compatible releases, so this release does not rerun the MGS stages.
+- **Installation:** `MF4.yml` adds yoke's dependencies from conda-forge. `installer.sh` pip-installs yoke (`YOKE_VERSION`) with `--no-deps`, outside `MF4.yml`, and only warns if that fails.
+- Tests: `t/func_tables_mgs.t` (input preparation on both MAGvsGC layouts; driver end to end against a yoke stand-in, `t/bin/yoke`, that fails on the inputs yoke cannot read) and `t/mgs_function_tables_controller.t` (schemes, waiting, checkpoint reuse and invalidation of the MGS.pl stage).
 
 ## 2026-10-09 — eggNOG-mapper: reserved node-local space for eggnog.db (geneCat 0.69)
 

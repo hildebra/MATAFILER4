@@ -66,6 +66,7 @@ bamFilter_scr	perl [MFLRDir]/secScripts/assemblies/bamFilter.pl
 decluterGC_scr	perl [MFLRDir]/secScripts/GC/decluterGC.pl
 sortMGSGeneImport_scr	perl [MFLRDir]/secScripts/MGS/resortMGSgenes4importance.pl
 MAGMGSLCA_scr	perl [MFLRDir]/secScripts/MGS/markersPerMGS.pl
+funcTablesMGS_scr	perl [MFLRDir]/secScripts/MGS/funcTablesMGS.pl
 eggNOGspl_scr	bash [MFLRDir]/secScripts/GC/eggNOG_split.sh
 Binner_scr	perl [MFLRDir]/secScripts/assemblies/runBinners.pl
 
@@ -108,6 +109,10 @@ motus2	motus	env:MF4motus
 mTAGs	mtags
 metaeuk	metaeuk #[BINDir]/metaeuk/bin/
 GTDBtk	gtdbtk	env:MF4gtdbtk
+
+## functional tables of MGS ##
+#yoke (github.com/falklab/yoke): per-MAG function tables for each MGS; pip-installed into the MF4 env
+yoke	yoke
 
 
 #options for filters etc	ESSENTIAL
