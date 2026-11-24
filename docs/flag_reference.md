@@ -408,6 +408,8 @@ Gene-catalog construction and downstream gene-catalog annotation/MGS orchestrati
 | `-SNPcaller` | string | `MPI` | stable | Consensus caller whose compressed MATAF4 outputs are used by the downstream strain workflow; accepted values are `MPI` and `FB`. |
 | `-doMags` | integer | `1` | stable | 1: start canopy clustering, metabat2 & subsequent merging into MGS |
 | `-canopyAutoCorr` | float | `0.15` | stable | canopy clustering parameter to filter autocorrelated genes prior to canopy clustering |
+| `-funcTables` | string list | `KEGG,CZy,TCDB,ABRc,VFA,VFB,emKO,emNOG` | stable | passed to `MGS.pl -funcTables`: annotation schemes for the per-MAG function tables of each MGS (yoke); `0`: none |
+| `-funcTablesModules` | string list | `BSB,GBM` | stable | passed to `MGS.pl -funcTablesModules`: yoke module sets scored for the KEGG ortholog schemes; `0`: none |
 
 ### Marker Genes/ taxonomy
 
@@ -459,8 +461,11 @@ MGS/MAG dereplication, abundance/taxonomy and optional strain workflow orchestra
 | `-bottleneckCores` | integer | `12` | stable | cores for compute intensive jobs |
 | `-MGset` | string | `FMG` | stable | marker genes used for MAG merging/abundance: `GTDB` or `FMG` |
 | `-treeMGset` | string | `FMG` | stable | marker genes for the between-MGS tree, independent of `-MGset`: `FMG` (40 markers, fast) or `GTDB` (120 markers, much slower) |
-| `-wait4stone` | string |  | stable | wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later |
-| `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; `0` waits indefinitely |
+| `-wait4stone` | string |  | stable | eggNOG-mapper checkpoint of the gene catalogue (geneCat.pl passes `checkpoints/10.emap.stone`). The strain workflow and the eggNOG-mapper function tables wait for it |
+| `-wait4stoneTimeout` | integer | `86400` | stable | maximum wait in seconds; `0` waits indefinitely. The strain workflow stops when it passes; the function tables skip the schemes of that annotation stage |
+| `-wait4funcStone` | string |  | stable | diamond FuncAssign checkpoint of the gene catalogue (geneCat.pl passes `checkpoints/10.func.stone`); the diamond function tables wait for it. Without it (and without `-wait4stone`), MGS.pl uses the annotation stages already finished under `<GCd>/checkpoints/` |
+| `-funcTables` | string list | `KEGG,CZy,TCDB,ABRc,VFA,VFB,emKO,emNOG` | stable | annotation schemes for the per-MAG function tables of each MGS, made with yoke in `Bin_<binner>/Annotation/FunctionTables/`. Diamond: `KEGG` (KGM), `CZy`, `TCDB`, `ABRc`, `VFA`, `VFB`; eggNOG-mapper: `emKO`, `emNOG`. Schemes whose database was not annotated are skipped. `0` or `none`: no function tables |
+| `-funcTablesModules` | string list | `BSB,GBM` | stable | yoke bundled module sets scored for each MAG of the KEGG ortholog schemes (`KEGG`, `emKO`); `0`: none |
 | `-mem` | integer | `150` | stable | memory used for intensive jobs |
 | `-strains` | integer | `0` | stable | 1: calc instra species strain phylogenies. Default: 0 |
 | `-redo` | string | `none` | stable | `none` resumes; `cluster` rebuilds clusters, Canopy and dependent products; `tax` rebuilds taxonomy/abundance; `tree`/`input` rebuild the enabled strain workflow at that stage; `all` rebuilds all enabled stages |

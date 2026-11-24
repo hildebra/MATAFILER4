@@ -251,6 +251,37 @@ print(resolve_backend(DEFAULT_BACKEND))' | tail -n 1)" \
 	echo "Verified eggNOG-mapper $EMAPPER_VERSION in MF4"
 }
 
+# yoke (github.com/falklab/yoke) makes MGS.pl's per-MAG function tables. MF4.yml provides its dependencies;
+# pip adds only yoke itself, outside MF4.yml, so a yoke that cannot be fetched never blocks the MF4 environment.
+YOKE_VERSION="0.2.0"
+YOKE_SPEC="yoke @ git+https://github.com/falklab/yoke.git@v$YOKE_VERSION"
+
+# installed yoke version, empty if missing or if it does not import ("yoke --version" loads its dependencies)
+yoke_installed_version() {
+	"$MAMBA_E" run -n MF4 yoke --version 2>/dev/null | sed -n 's/^yoke //p' | tail -n 1
+}
+
+ensure_yoke() {
+	local installed
+	installed="$(yoke_installed_version || true)"
+	if [[ "$installed" != "$YOKE_VERSION" ]]; then
+		echo "Installing yoke $YOKE_VERSION in MF4 (found: ${installed:-none})"
+		if ! retry_command "yoke installation" 3 15 \
+				"$MAMBA_E" run -n MF4 python -m pip install --force-reinstall --no-deps "$YOKE_SPEC" >/dev/null; then
+			echo "WARNING: yoke $YOKE_VERSION could not be installed in MF4; MGS function tables will fail until it is." \
+				"Run geneCat.pl/MGS.pl with -funcTables 0 to skip them." >&2
+			return 0
+		fi
+		installed="$(yoke_installed_version || true)"
+		if [[ "$installed" != "$YOKE_VERSION" ]]; then
+			echo "WARNING: MF4 has yoke ${installed:-none (it does not import)} after installing, expected $YOKE_VERSION." \
+				"Check its dependencies in $INSTdir/MF4.yml with: $MAMBA_E run -n MF4 python -m pip check" >&2
+			return 0
+		fi
+	fi
+	echo "Verified yoke $YOKE_VERSION in MF4"
+}
+
 # best effort: name a newer eggNOG-mapper release than the one MF4.yml pins
 report_newest_eggnog_mapper() {
 	local newest
@@ -320,6 +351,7 @@ verify_environment_tools MF4 "$INSTdir/MF4.yml" "Protal profiling" \
 	protal protal_profile_utils
 ensure_eggnog_mapper
 report_newest_eggnog_mapper
+ensure_yoke
 
 if "$MAMBA_E" run -n MF4 hostile --help >/dev/null 2>&1; then
 	echo "Installing/updating the Hostile human reference database"

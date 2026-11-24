@@ -491,6 +491,36 @@ At MGS level, features ending in `?` are taxa inferred through marker-gene LCA a
 
 This file is useful for linking MGS or MAGs to functional annotations from `Anno/Func/`.
 
+### MGS function tables (yoke)
+
+`MGS.pl` counts how many genes of each function every MAG carries, one table per MGS, using
+[yoke](https://github.com/falklab/yoke) on `MAGvsGC.txt.gz` and the catalogue annotations. The job
+(`LOGandSUB/funcTablesMGS.sh`) starts once the MGS are final and an annotation stage the tables use
+has finished: the diamond FuncAssign stage (`checkpoints/10.func.stone`) for `KEGG`, `CZy`, `TCDB`,
+`ABRc`, `VFA` and `VFB`, and eggNOG-mapper (`checkpoints/10.emap.stone`) for `emKO` and `emNOG`. A
+scheme whose database was not annotated is skipped, and a later run adds the schemes of an
+annotation stage that finished in the meantime. `-funcTables` selects the schemes (`0`: none),
+`-funcTablesModules` the module sets.
+
+Outputs, in `Bin_<binner>/Annotation/FunctionTables/`:
+
+| File | Meaning |
+|---|---|
+| `<scheme>/<MGS>.tsv.gz` | Genes per function (rows) in each MAG (columns) of the MGS. |
+| `<scheme>/presence.<MGS>.tsv.gz` | The same table as presence/absence. |
+| `<scheme>.tsv` | Mean count per MAG of each function, one column per MGS. |
+| `modules/<scheme>/<MGS>.<set>.MODscore` | Module completeness per MAG for the KEGG ortholog schemes (`KEGG`, `emKO`); `.mat`, `.KOused` and `.descr` as for the catalogue modules. Sets: yoke's bundled `BSB` (gut metabolic) and `GBM` (gut-brain). |
+| `summarised/<scheme>/<rank>.tsv`, `<rank>/<taxon>.tsv` | Mean counts per taxon at each rank from Domain to Species; needs the taxonomy columns of the `clusterMAGs` binary's report. |
+| `input/` | yoke's inputs: `MAGvsGC.byMGS.txt.gz` (MAGs grouped by MGS; MAGs without MGS, with 0 completeness or with 100% contamination left out) and per scheme one `gene<TAB>function` row per function. |
+| `function_tables.manifest.tsv` | What was made; written last. |
+
+yoke counts one function per gene. A gene annotated with several functions (e.g. two KOs) counts
+for one of them, so these tables can differ slightly from the catalogue matrices in `Anno/Func/`.
+For hierarchical annotations only the most specific level is used. Functions without a description
+in `KEGG.descr`, `NOG.descr` or `TCDB.anno` are described by their ID. A re-clustering
+(`-redo cluster`) deletes the tables; a re-annotation of the catalogue or a new `MAGvsGC.txt.gz`
+rebuilds them on the next run.
+
 ## Assembly-independent outputs
 
 Assembly-independent profiling uses raw or filtered reads directly and is useful when assemblies are not feasible, for example in highly complex soil metagenomes.
@@ -557,6 +587,7 @@ whichever sample happens to be processed last. Samples explicitly ignored or mar
 | What taxa are present? | Current MGS abundance matrices under `Bin_SB/Annotation/Abundance/`, or selected `Anno/Tax/` matrices. |
 | Which MGS are present? | `MGS.matL7.txt` and MGS taxonomy files such as `GTDBTK.tax`. |
 | Which genes belong to a MAG or MGS? | `Bin_SB/MAGvsGC.txt.gz` and `MB2.clusters.ext.can.Rhcl`. |
+| Which functions does each MAG of an MGS carry? | `Bin_SB/Annotation/FunctionTables/<scheme>/<MGS>.tsv.gz` and the module scores in `FunctionTables/modules/`. |
 | What is the taxonomy of MGS? | `GTDBTK.tax`, `kraken2.LCA`, and MGS abundance feature names. |
 | What are the proteins in an MGS? | `Binning/RhclClust/*.faa` or equivalent `Bin_SB` MGS protein folders. |
 

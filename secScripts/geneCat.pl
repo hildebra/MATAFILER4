@@ -43,6 +43,7 @@ use Mods::WorkflowResilience qw(
 	preflight_directory preflight_capacity
 );
 use Mods::CatalogPaths qw(catalog_identity catalog_map_specs_match resolve_catalog_maps write_catalog_maps);
+use Mods::FuncTables qw(default_function_table_schemes function_table_scheme_names parse_function_table_list);
 
 sub geneCatFlow;
 sub addingSmpls;
@@ -64,7 +65,8 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.70; #0.70: -binSpeciesMG defaults to the binner found in the assemblies' Binning/ folders (MGS output in Bin_<binner>/)
+our $version = 0.71; #0.71: forwards -funcTables/-funcTablesModules and the FuncAssign checkpoint to MGS.pl for per-MAG function tables (yoke)
+#0.70: -binSpeciesMG defaults to the binner found in the assemblies' Binning/ folders (MGS output in Bin_<binner>/)
 #0.69: the node-local eggnog.db copy reserves its disk space first; without it, the shared data dir
 #0.68: eggNOG-mapper chunks search, then annotate from a node-local eggnog.db; retried annotations skip the search
 #0.67: CD-HIT -M within its job; -ntMatchGC samtools threads beside minimap2
@@ -575,6 +577,8 @@ my $justCDhit = 1; #always set default to 0, to dangerous otherwise..
 my $doSubmit = 1; my $qsubNow = 1;
 my $doStrains = 0; #flag if SNP calling was done on metag (and should be processed here)
 my $SNPcaller = "MPI"; #consensus variant caller used by the downstream strain workflow
+my $funcTablesSpec = default_function_table_schemes(); #annotation schemes for the per-MAG function tables of each MGS (MGS.pl -funcTables)
+my $funcTablesModules = "BSB,GBM"; #yoke module sets scored for KEGG ortholog schemes (MGS.pl -funcTablesModules)
 my $doMags = 1; #flag whether to start canopy clustering, metabat2 & subsequent merging..
 my $oldNameFolders= -1;
 my $doFMGseparation = 1; #cluster FMGs separately?
@@ -774,6 +778,8 @@ GetOptions(
 	"SNPcaller=s" => \$SNPcaller, #MPI (mpileup) or FB (FreeBayes), matching MATAF4/strain_within
 	"doMags=i" => \$doMags, #1: start canopy clustering, metabat2 & subsequent merging into MGS
 	"canopyAutoCorr=f" => \$canopyAutoCorr, #canopy clustering parameter to filter autocorrelated genes prior to canopy clustering
+	"funcTables=s" => \$funcTablesSpec, #annotation schemes for per-MAG function tables of each MGS (yoke); 0: none
+	"funcTablesModules=s" => \$funcTablesModules, #yoke module sets scored for KEGG ortholog schemes; 0: none
 #Marker Genes/ taxonomy
 	"MGset=s" => \$useGTDBmg, #use either FMG or GTDB marker genes to compare and merge MAGs and calculate their abundance
 #flags for specific modes
@@ -820,6 +826,8 @@ die "-SNPcaller must be either MPI or FB\n"
 	unless $SNPcaller eq "MPI" || $SNPcaller eq "FB";
 die "-doMags must be 0 or 1\n" unless $doMags == 0 || $doMags == 1;
 die "-doStrains must be 0 or 1\n" unless $doStrains == 0 || $doStrains == 1;
+parse_function_table_list($funcTablesSpec, "-funcTables scheme", function_table_scheme_names()); #dies on an unknown scheme
+parse_function_table_list($funcTablesModules, "-funcTablesModules set");
 die "-useCheckM1 and -useCheckM2 must each be 0 or 1\n"
 	unless ($useCheckM1 == 0 || $useCheckM1 == 1)
 		&& ($useCheckM2 == 0 || $useCheckM2 == 1);
@@ -1752,6 +1760,8 @@ sub geneCatFlow($ $ $ $ ){
 		. " -tmp " . _shell_quote("$tmpDir/MAGs/")
 		. " -bottleneckCores $numCor $canoStr-strains $doStrains -SNPcaller $SNPcaller"
 		. " -useCheckM2 $useCheckM2 -useCheckM1 $useCheckM1 -wait4stone " . _shell_quote($emapStone)
+		. " -wait4funcStone " . _shell_quote($funcStone)
+		. " -funcTables " . _shell_quote($funcTablesSpec) . " -funcTablesModules " . _shell_quote($funcTablesModules)
 		. " -binSpeciesMG $binSpeciesMG -ignoreIncompleteMAGs $ignoreIncompleteMAGs"
 		. " -MGset $useGTDBmg -clusterID $cdhID -outD " . _shell_quote($MGSoutD) . "\n";
 

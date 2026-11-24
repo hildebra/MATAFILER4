@@ -54,15 +54,23 @@ use Cwd qw(abs_path);
 #.53: remove local executable checks that reject environment-wrapped tool commands
 #.54: consolidate controller lifecycle and no-usable-MGS state records
 #.55: enter tree-only strain resume only after durable Phase-I completion
+#.56: per-MAG function tables for every MGS with yoke (-funcTables), after the MGS and the
+#     catalogue annotations are final
 
-my $MGSpipelineVersion = 0.55;
+my $MGSpipelineVersion = 0.56;
+# Earlier releases whose checkpoints this release reuses unchanged: each changed only
+# controller steps downstream of the checkpointed stages (0.55: strain launcher;
+# 0.56: added the function table stage).
+my %compatibleCheckpointReleases = map { $_ => 1 } qw(0.54 0.55);
 my $clusterID = 95;
 my %checkpointParameters;
 my %stageCheckpointContract = (
 	'extract-bin-contigs' => 1,
 	'gtdb-taxonomy'       => 1,
+	'mgs-function-tables' => 1,
 );
 my %stageCheckpointCompatibilityLogged;
+my %funcTablesCheckpointParameters; #schemes and annotation fingerprints of the function table stage
 
 use Mods::FlagReference qw(printFlagHelp helpRequested);
 use Mods::IO_Tamoc_progs qw(getProgPaths);
@@ -76,6 +84,10 @@ use Mods::WorkflowResilience qw(
 	write_workflow_record acquire_workflow_lock preflight_directory preflight_capacity
 );
 use Mods::CatalogPaths qw(catalog_identity resolve_catalog_maps filter_catalog_maps);
+use Mods::FuncTables qw(
+	default_function_table_schemes function_table_scheme_names parse_function_table_list
+	function_table_scheme function_table_stage_stones plan_function_tables
+);
 
 sub getGoodMBstats;
 sub printL;
@@ -151,6 +163,9 @@ my $useGTDBmg = "FMG";
 my $treeMGset = "FMG"; #between-MGS tree markers, independent of -MGset: 40 FMGs are far faster than GTDB's 120
 my $wait4stone = "";
 my $wait4stoneTimeout = 86400;
+my $wait4funcStone = ""; #FuncAssign (diamond) checkpoint of the gene catalogue; geneCat.pl passes it
+my $funcTablesSpec = default_function_table_schemes(); #annotation schemes for per-MAG function tables (yoke); 0 = none
+my $funcTablesModules = "BSB,GBM"; #yoke bundled module sets scored for KEGG ortholog schemes; 0 = none
 my $useWeightedMGSscores = 1;
 my $doBinCtgsPerFam =0 ; #extract bins for each family (or assembly_grp/sample if family missing)
 my $customBinFile = ""; #overrides default per GC global behaviour
@@ -170,8 +185,11 @@ GetOptions(
 	"bottleneckCores=i" => \$canCore,	#cores for compute intensive jobs
 	"MGset=s" => \$useGTDBmg,			#GTDB or FMG, which marker genes are used? Default: FMG
 	"treeMGset=s" => \$treeMGset,		#FMG or GTDB markers for the between-MGS tree (independent of -MGset). Default: FMG
-	"wait4stone=s" => \$wait4stone,     #wait for these files to be created, refers currently exclusively to eggNOG annotations that are needed later
+	"wait4stone=s" => \$wait4stone,     #eggNOG-mapper checkpoint of the catalogue; the strain workflow and the eggNOG-mapper function tables wait for it
 	"wait4stoneTimeout=i" => \$wait4stoneTimeout, #maximum wait in seconds; 0 retains unlimited waiting
+	"wait4funcStone=s" => \$wait4funcStone, #wait for this FuncAssign (diamond) checkpoint before the function tables
+	"funcTables=s" => \$funcTablesSpec, #annotation schemes for per-MAG function tables of each MGS (yoke); 0: none
+	"funcTablesModules=s" => \$funcTablesModules, #yoke module sets scored for KEGG ortholog schemes; 0: none
 	"mem=i" => \$memG,					#memory used for intensive jobs
 	"strains=i" => \$doStrains,			#1: calc instra species strain phylogenies. Default: 0
 	"redo=s" => \$redo,				#rebuild mode: none, cluster, tax, tree, input, or all
@@ -202,6 +220,9 @@ die "-SNPcaller must be one of: MPI, FB\n"
 	unless $SNPcaller eq "MPI" || $SNPcaller eq "FB";
 die "-redo must be one of: none, cluster, tax, tree, input, all\n"
 	unless grep { $redo eq $_ } qw(none cluster tax tree input all);
+my @funcTableSchemes = parse_function_table_list($funcTablesSpec, '-funcTables scheme',
+	function_table_scheme_names());
+my @funcTableModuleSets = parse_function_table_list($funcTablesModules, '-funcTablesModules set');
 my $rewrClusterMAGs = $redo eq 'cluster' || $redo eq 'all';
 my $rewrTAX = $redo eq 'tax' || $redo eq 'all';
 my $strainRedo = $redo =~ /^(?:tree|input|all)$/ ? $redo : 'none';
@@ -267,6 +288,8 @@ my $st1ston = "$chkpDir/Stage1.stone";
 my $iniMB2sto = "$chkpDir/$BinnerShrt.cm.stone";
 my $GTDBtaxSto = "$chkpDir/GTDBTK.stone";
 my $BinExtrSto = "$chkpDir/BinExtr.stone";
+my $funcTablesSto = "$chkpDir/funcTables.stone";
+my $funcTablesDir = "$annoDir/FunctionTables/";
 $legacyNoMGSStone = "$chkpDir/no-usable-mgs.stone";
 my $noMGSReport = "$outD/NO_MGS.txt";
 
@@ -320,6 +343,12 @@ printL "Optional analyses: strains=" . ($doStrains ? "yes" : "no")
 	. "; mosaic checks=" . ($prepareMosaicLoci ? "yes" : "no")
 	. "; strain SNP caller=$SNPcaller"
 	. "; family genomes=" . ($doBinCtgsPerFam ? "yes" : "no") . "\n";
+printL "Function tables (yoke): "
+	. (@funcTableSchemes
+		? join(",", @funcTableSchemes) . "; module sets="
+			. (@funcTableModuleSets ? join(",", @funcTableModuleSets) : "none")
+		: "none")
+	. "\n";
 printL "Requested rebuilds: redo=$redo; clustering=" . ($rewrClusterMAGs ? "yes" : "no")
 	. "; taxonomy=" . ($rewrTAX ? "yes" : "no") . "; strains=$strainRedo\n";
 printL "Requested Canopy assignments: $canopyF\n" if $canopyF ne "";
@@ -433,13 +462,14 @@ my $invalidateMGSDerivatives = sub {
 		retry_unlink($derived, label => 'invalidate MGS assignment derivative')
 			if -e $derived;
 	}
-	for my $checkpoint ($st1ston, $GTDBtaxSto, $BinExtrSto, $ABmgsSton, $ABmgsSton2) {
+	for my $checkpoint ($st1ston, $GTDBtaxSto, $BinExtrSto, $ABmgsSton, $ABmgsSton2, $funcTablesSto) {
 		retry_unlink($checkpoint, label => 'invalidate downstream MGS checkpoint')
 			if -e $checkpoint;
 	}
 	# The Mosaic catalogue is derived from the invalidated MGS clusters and is
-	# otherwise reused verbatim by strain_within.pl.
-	for my $phyloDir ("$outD/between_phylo", "$outD/within_phylo", "$outD/mosaic") {
+	# otherwise reused verbatim by strain_within.pl. Function tables describe
+	# the MAGs of the old MGS.
+	for my $phyloDir ("$outD/between_phylo", "$outD/within_phylo", "$outD/mosaic", $funcTablesDir) {
 		remove_tree($phyloDir) if -d $phyloDir;
 	}
 };
@@ -923,6 +953,7 @@ if (!$betweenTreeSkipped && $visualizationMissing) {
 
 #process ends here unless strains need to be calculated
 if ($doStrains == 0){
+	_submit_function_tables();
 	printL "\n\nCompound Binning script finished.. no strain analysis set\n";
 	_mgs_workflow_stage('controller-complete');
 	close LOG;
@@ -931,17 +962,8 @@ if ($doStrains == 0){
 _mgs_workflow_stage('within-MGS-strain-submission');
 print "\n\n########################\nStarting strain delineation MGS\n########################\n";
 
-if ($wait4stone ne ""){
-	my $cntWaits=0;
-	my $waitStart = time;
-	while ( !-e $wait4stone){
-		if ($cntWaits == 0){print "\n\nWaiting for process generating $wait4stone\nIf the process aborted with error, please exit this routine as well\n\n";}
-		if ($wait4stoneTimeout > 0 && time - $waitStart >= $wait4stoneTimeout) {
-			die "Timed out after $wait4stoneTimeout seconds waiting for $wait4stone. Check the producing job before rerunning.\n";
-		}
-		$cntWaits++;
-		sleep(10);
-	}
+if ($wait4stone ne "" && !_wait_for_stone($wait4stone)){
+	die "Timed out after $wait4stoneTimeout seconds waiting for $wait4stone. Check the producing job before rerunning.\n";
 }
 #die "XX\n";
 
@@ -1011,7 +1033,10 @@ my ($jobName2, $tmpCmd) = qsubSystem($logDir."/strainMGS.sh",
 $QSBopt{tmpSpace} =$tmpSHDD;
 
 #get phylogenies intra-species.. this requires a lot of power and best called from big cluster..
-printL "Compound Binning script finished; within-MGS strain jobs were prepared in $logDir/strainMGS.sh\n";
+printL "Within-MGS strain jobs were prepared in $logDir/strainMGS.sh\n";
+#after the strain kickoff, so waiting for the annotation stages never delays strains
+_submit_function_tables();
+printL "Compound Binning script finished\n";
 _mgs_workflow_stage('controller-complete');
 close LOG;
 exit(0);
@@ -1166,14 +1191,19 @@ sub _checkpoint_parameters_for_stage {
 				catalog_identity cluster_id binner
 				catalog_fna_size catalog_fna_mtime
 			);
+		} elsif ($stage eq 'mgs-function-tables') {
+			# The tables depend on the MAG report (below), the schemes and the
+			# annotation stages behind them (set by _submit_function_tables).
+			@keys = qw(catalog_identity cluster_id binner);
+			%parameters = %funcTablesCheckpointParameters;
 		}
 		for my $key (@keys) {
 			$parameters{$key} = $checkpointParameters{$key}
 				if exists $checkpointParameters{$key};
 		}
-		if ($stage eq 'extract-bin-contigs') {
-			# Representative contigs depend directly on the selected MAG report,
-			# even when the core MGS table itself is unchanged.
+		if ($stage eq 'extract-bin-contigs' || $stage eq 'mgs-function-tables') {
+			# Representative contigs and function tables depend directly on the
+			# selected MAG report, even when the core MGS table itself is unchanged.
 			my @reportStat = stat("$outD/MAGvsGC.txt.gz");
 			$parameters{mag_report_size} = @reportStat ? 0 + $reportStat[7] : -1;
 			$parameters{mag_report_mtime} = @reportStat ? 0 + $reportStat[9] : -1;
@@ -1252,16 +1282,15 @@ sub _checkpoint_valid_for_stage {
 	my $parameters = _checkpoint_parameters_for_stage($stage);
 	return 1 if checkpoint_valid($file, parameters => $parameters);
 
-	# MGS 0.55 changed only the downstream strain-resume launcher. JSON
-	# checkpoints written by 0.54/0.55 therefore remain valid for these two
-	# unchanged stages when every direct parameter and recorded output still
-	# matches. Empty/older stones are deliberately not adopted here.
+	# JSON checkpoints written before stage contracts existed (0.54/0.55)
+	# remain valid for these unchanged stages when every direct parameter and
+	# recorded output still matches. Empty/older stones are deliberately not
+	# adopted here.
 	my $manifest = read_checkpoint($file) or return 0;
 	my $recordedParameters = $manifest->{parameters};
 	return 0 unless ref($recordedParameters) eq 'HASH';
 	return 0 if exists $recordedParameters->{stage_contract};
-	return 0 unless "$MGSpipelineVersion" eq '0.55';
-	return 0 unless ($recordedParameters->{pipeline_version} // '') =~ /\A0\.(?:54|55)\z/;
+	return 0 unless $compatibleCheckpointReleases{$recordedParameters->{pipeline_version} // ''};
 	return 0 unless ($recordedParameters->{stage} // '') eq $stage;
 
 	my %legacyParameters = %{$parameters};
@@ -1305,15 +1334,16 @@ sub _checkpoint_valid_for_compatible_release {
 	return 0 unless defined($file) && -s $file;
 	return 1 if checkpoint_valid($file, parameters => $parameters);
 
-	# Commit 458fc6a changed only the downstream strain launcher while bumping
-	# MGS 0.54 to 0.55.  Preserve JSON checkpoints across that one proven-safe
-	# transition when every biological parameter and recorded output still
-	# matches.  No older, future, or empty legacy checkpoint is accepted.
+	# Releases in %compatibleCheckpointReleases changed only downstream
+	# controller steps (0.55: strain launcher, commit 458fc6a; 0.56: function
+	# tables). Preserve their JSON checkpoints when every biological parameter
+	# and recorded output still matches. No older, future, or empty legacy
+	# checkpoint is accepted.
 	my $manifest = read_checkpoint($file) or return 0;
 	my $recordedParameters = $manifest->{parameters};
 	return 0 unless ref($recordedParameters) eq "HASH";
-	return 0 unless "$MGSpipelineVersion" eq "0.55";
-	return 0 unless ($recordedParameters->{pipeline_version} // "") eq "0.54";
+	my $recordedRelease = $recordedParameters->{pipeline_version} // "";
+	return 0 unless $compatibleCheckpointReleases{$recordedRelease};
 	return 0 unless length($recordedParameters->{stage} // "");
 
 	my %compatibleParameters = %{$parameters};
@@ -1321,7 +1351,7 @@ sub _checkpoint_valid_for_compatible_release {
 	return 0 unless checkpoint_valid($file, parameters => \%compatibleParameters);
 	unless ($stageCheckpointCompatibilityLogged{$file}++) {
 		printL "Reusing $recordedParameters->{stage} checkpoint from compatible "
-			."MGS 0.54 outputs\n";
+			."MGS $recordedRelease outputs\n";
 	}
 	return 1;
 }
@@ -1368,6 +1398,82 @@ sub _checkpoint_command {
 	}
 	push @args, map { ('--output', $_) } @outputs;
 	return join(' ', map { _shell_quote($_) } @args) . "\n";
+}
+
+# Waits until $stone exists. Returns 0 when -wait4stoneTimeout passes first.
+sub _wait_for_stone {
+	my ($stone) = @_;
+	my $waitStart = time;
+	my $announced = 0;
+	while (!-e $stone) {
+		unless ($announced++) {
+			print "\n\nWaiting for process generating $stone\nIf the process aborted with error, please exit this routine as well\n\n";
+		}
+		return 0 if $wait4stoneTimeout > 0 && time - $waitStart >= $wait4stoneTimeout;
+		sleep(10);
+	}
+	return 1;
+}
+
+# Per-MAG function tables for every MGS (yoke, secScripts/MGS/funcTablesMGS.pl).
+# Runs once the MGS are final and the catalogue annotations of a scheme are
+# complete, as one job the controller does not wait for. A checkpoint passed
+# by geneCat.pl (-wait4funcStone, -wait4stone) is waited for; without one, the
+# schemes whose annotation stage has already finished are used.
+sub _submit_function_tables {
+	return unless @funcTableSchemes;
+	_mgs_workflow_stage('function-table-submission');
+	my $stones = function_table_stage_stones($GCd);
+	my %passed = (func => $wait4funcStone, emap => $wait4stone);
+	for my $stage (sort keys %passed) {
+		next unless length $passed{$stage};
+		$stones->{$stage} = $passed{$stage};
+		next unless $doSubmit && grep { function_table_scheme($_)->{stage} eq $stage } @funcTableSchemes;
+		printL "Function tables: annotation stage '$stage' did not finish within ${wait4stoneTimeout}s "
+			. "($passed{$stage}); its schemes are skipped\n"
+			unless _wait_for_stone($passed{$stage});
+	}
+	my ($ready, $skipped) = plan_function_tables($GCd, \@funcTableSchemes, $stones);
+	printL "Function tables: $_->[0] skipped, $_->[1]\n" for @{$skipped};
+	unless (@{$ready}) {
+		printL "Function tables: no annotation scheme is ready; nothing submitted\n";
+		return;
+	}
+
+	# The checkpoint records the schemes and the annotation checkpoints behind
+	# them, so a re-annotated catalogue or a newly finished stage reruns it.
+	%funcTablesCheckpointParameters = (
+		schemes => join(',', @{$ready}),
+		module_sets => join(',', @funcTableModuleSets),
+	);
+	my %usedStages = map { function_table_scheme($_)->{stage} => 1 } @{$ready};
+	for my $stage (sort keys %usedStages) {
+		my @stat = stat($stones->{$stage});
+		$funcTablesCheckpointParameters{"${stage}_stone_size"} = @stat ? 0 + $stat[7] : -1;
+		$funcTablesCheckpointParameters{"${stage}_stone_mtime"} = @stat ? 0 + $stat[9] : -1;
+	}
+	if (_checkpoint_valid_for_stage($funcTablesSto, 'mgs-function-tables')) {
+		printL "Function tables (" . join(',', @{$ready}) . ") are up to date in $funcTablesDir\n";
+		return;
+	}
+
+	my $manifest = "$funcTablesDir/function_tables.manifest.tsv";
+	my @outputs = ($manifest, map { "$funcTablesDir/$_.tsv" } @{$ready});
+	my $cmd = "rm -f " . _shell_quote($manifest) . "\n";
+	# keep the configured launcher raw (it may set up an environment); quote the arguments
+	$cmd .= join(' ', getProgPaths("funcTablesMGS_scr"), map { _shell_quote($_) }
+		'-GCd', $GCd, '-binD', $outD, '-outD', $funcTablesDir,
+		'-schemes', join(',', @{$ready}),
+		'-modules', (@funcTableModuleSets ? join(',', @funcTableModuleSets) : '0')) . "\n";
+	$cmd .= "test -s " . _shell_quote($_) . "\n" for @outputs;
+	$cmd .= _checkpoint_command($checkpointWriter, $funcTablesSto, 'mgs-function-tables', @outputs);
+	retry_unlink($funcTablesSto, label => 'invalidate function table checkpoint') if -e $funcTablesSto;
+	my $tmpSHDD = $QSBopt{tmpSpace}; $QSBopt{tmpSpace} = "0";
+	my ($job) = qsubSystem($logDir."/funcTablesMGS.sh", $cmd, 1, "64G", "funcTabMGS", "", "", 1, [], \%QSBopt);
+	$QSBopt{tmpSpace} = $tmpSHDD;
+	printL "Function tables (" . join(',', @{$ready}) . ") "
+		. ($doSubmit ? "submitted" . (defined($job) && length($job) ? " as job $job" : "") : "prepared (dry run)")
+		. ": $logDir/funcTablesMGS.sh -> $funcTablesDir\n";
 }
 
 sub _bin_assignments_are_empty {

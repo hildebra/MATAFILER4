@@ -1,0 +1,168 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+# Test-only stand-in for yoke (github.com/falklab/yoke). It implements the
+# subcommands MATAFILER calls on small inputs, and fails like yoke would (or
+# louder) when an input breaks yoke's assumptions:
+#   - MAGvsGC rows of one MGS must be adjacent (yoke streams the file)
+#   - the gene list column is "other_Genes"; "?" is not an MGS
+#   - an annotation row holds exactly one function ID
+#   - the function_counts output directory must exist (yoke: mkdir(parents=False))
+# Calls are appended to $MF4_TEST_YOKE_LOG when it is set.
+
+use File::Basename qw(basename);
+use File::Path qw(make_path);
+use IO::Compress::Gzip qw(gzip $GzipError);
+use IO::Uncompress::Gunzip qw($GunzipError);
+
+if (defined($ENV{MF4_TEST_YOKE_LOG}) && length($ENV{MF4_TEST_YOKE_LOG})) {
+	open my $log, '>>', $ENV{MF4_TEST_YOKE_LOG} or die "Cannot open $ENV{MF4_TEST_YOKE_LOG}: $!\n";
+	print {$log} join("\t", @ARGV), "\n";
+	close $log;
+}
+
+my $command = shift @ARGV // '';
+if ($command eq '--version') { print "yoke 0.0.0-test\n"; exit 0; }
+die "fake yoke: failing on request\n" if ($ENV{MF4_TEST_YOKE_FAIL} // '') eq $command;
+my %opt = parse_options(@ARGV);
+if ($command eq 'function_counts') { function_counts(); }
+elsif ($command eq 'module_score') { module_score(); }
+elsif ($command eq 'function_summarise') { function_summarise(); }
+else { die "fake yoke: unknown command '$command'\n"; }
+exit 0;
+
+sub parse_options {
+	my (%o, $key);
+	for my $arg (@_) {
+		if ($arg =~ /^--?(\w+)$/) { $key = $1; $o{$key} //= []; next; }
+		die "fake yoke: value '$arg' without option\n" unless defined $key;
+		push @{$o{$key}}, $arg;
+	}
+	return %o;
+}
+
+sub one {
+	my ($key) = @_;
+	my $v = $opt{$key} or die "fake yoke: -$key is required\n";
+	die "fake yoke: -$key needs one value\n" unless @$v == 1;
+	return $v->[0];
+}
+
+sub read_lines {
+	my ($path) = @_;
+	my $fh = $path =~ /\.gz$/ ? IO::Uncompress::Gunzip->new($path) : undef;
+	die "fake yoke: cannot read $path: $GunzipError\n" if $path =~ /\.gz$/ && !$fh;
+	open($fh, '<', $path) or die "fake yoke: cannot read $path: $!\n" unless $fh;
+	my @lines = map { s/\r?\n\z//r } <$fh>;
+	close $fh;
+	return @lines;
+}
+
+sub write_table {
+	my ($path, $text) = @_;
+	if ($path =~ /\.gz$/) { gzip(\$text => $path) or die "fake yoke: $GzipError\n"; return; }
+	open my $fh, '>', $path or die "fake yoke: cannot write $path: $!\n";
+	print {$fh} $text;
+	close $fh;
+}
+
+# MGS => [ [MAG, [genes]] ... ], in file order; dies when an MGS reappears
+sub read_magvsgc {
+	my ($path) = @_;
+	die "fake yoke: MAGvsGC must be gzipped\n" unless $path =~ /\.gz$/;
+	my ($header, @rows) = read_lines($path);
+	my @col = split /\t/, $header;
+	my %i; @i{@col} = 0 .. $#col;
+	for my $need (qw(MAG MGS Representative4MGS Completeness Contamination other_Genes)) {
+		die "fake yoke: KeyError: '$need'\n" unless exists $i{$need};
+	}
+	my (@order, %mgs, %closed, $previous);
+	for my $row (@rows) {
+		my @f = split /\t/, $row, -1;
+		my $id = $f[$i{MGS}];
+		next unless length $id;
+		die "fake yoke: '?' is not an MGS\n" if $id eq '?';
+		die "fake yoke: MGS $id rows are not adjacent\n" if $closed{$id};
+		if (defined($previous) && $previous ne $id) { $closed{$previous} = 1; }
+		push @order, $id unless $mgs{$id};
+		push @{$mgs{$id}}, [$f[$i{MAG}], [grep { length && $_ ne '?' } split /,/, $f[$i{other_Genes}]]];
+		$previous = $id;
+	}
+	my %tax;
+	if (exists $i{Species}) {
+		for my $row (@rows) {
+			my @f = split /\t/, $row, -1;
+			$tax{$f[$i{MGS}]} //= { map { $_ => $f[$i{$_}] } grep { exists $i{$_} } qw(Domain Phylum Class Order Family Genus Species) };
+		}
+	}
+	return (\@order, \%mgs, \%tax);
+}
+
+sub function_counts {
+	my ($order, $mgs) = read_magvsgc(one('m'));
+	my %gene2func;
+	for my $line (read_lines(one('a'))) {
+		my @f = split /\t/, $line;
+		die "fake yoke: annotation rows need two columns: '$line'\n" unless @f == 2;
+		die "fake yoke: '$f[1]' is not a single function ID\n" if $f[1] =~ /[,;|]/;
+		die "fake yoke: gene IDs must be integers: '$f[0]'\n" unless $f[0] =~ /^\d+$/;
+		$gene2func{$f[0]} = $f[1]; # like yoke: one function per gene, the last row wins
+	}
+	for my $line (read_lines(one('d'))) {
+		die "fake yoke: description rows need two columns: '$line'\n" unless (split /\t/, $line) == 2;
+	}
+	my $out = one('o'); my $name = one('n');
+	die "fake yoke: FileNotFoundError: $out\n" unless -d $out;
+	mkdir "$out/$name" unless -d "$out/$name";
+	my $ext = exists $opt{compress} ? 'tsv.gz' : 'tsv';
+	my %means;
+	for my $id (@$order) {
+		my @mags = @{$mgs->{$id}};
+		my %count;
+		for my $m (0 .. $#mags) {
+			for my $gene (@{$mags[$m][1]}) {
+				$count{$gene2func{$gene}}[$m]++ if exists $gene2func{$gene};
+			}
+		}
+		my $text = join("\t", 'function', map { $_->[0] } @mags) . "\n";
+		my $presence = $text;
+		for my $f (sort keys %count) {
+			my @c = map { $count{$f}[$_] // 0 } 0 .. $#mags;
+			$text .= join("\t", $f, @c) . "\n";
+			$presence .= join("\t", $f, map { $_ > 0 ? 'True' : 'False' } @c) . "\n";
+			my $sum = 0; $sum += $_ for @c;
+			$means{$f}{$id} = $sum / @mags;
+		}
+		write_table("$out/$name/$id.$ext", $text);
+		write_table("$out/$name/presence.$id.$ext", $presence);
+	}
+	my $all = join("\t", '', @$order) . "\n";
+	for my $f (sort keys %means) { $all .= join("\t", $f, map { $means{$f}{$_} // 0 } @$order) . "\n"; }
+	write_table("$out/$name.tsv", $all);
+}
+
+sub module_score {
+	my $out = one('o'); my $set = one('m');
+	make_path($out);
+	for my $table (@{$opt{i} or die "fake yoke: -i is required\n"}) {
+		die "fake yoke: no table $table\n" unless -s $table;
+		my $base = basename($table) =~ s/\.gz$//r =~ s/\.[^.]+$//r;
+		write_table("$out/$base.$set.$_", "module\tscore\n") for qw(mat MODscore KOused descr);
+	}
+}
+
+sub function_summarise {
+	my (undef, $mgs, $tax) = read_magvsgc(one('m'));
+	my $counts = one('c'); my $out = one('o');
+	die "fake yoke: -r is required\n" unless $opt{r} && @{$opt{r}};
+	for my $id (keys %$mgs) {
+		die "fake yoke: no table for $id in $counts\n" unless -s "$counts/$id.tsv.gz" || -s "$counts/$id.tsv";
+	}
+	for my $rank (@{$opt{r}}) {
+		make_path("$out/$rank");
+		my %taxa = map { ($tax->{$_}{$rank} // '') => 1 } keys %$mgs;
+		write_table("$out/$rank/$_.tsv", "function\n") for keys %taxa;
+		write_table("$out/$rank.tsv", join("\t", '', sort keys %taxa) . "\n");
+	}
+}

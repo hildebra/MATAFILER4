@@ -9,3 +9,4 @@ Rscript	Rscript
 pigz	[MFLRDir]/t/bin/pigz
 maxMF4mem	512
 downloadQueue	nbi-download
+yoke	perl [MFLRDir]/t/bin/yoke
