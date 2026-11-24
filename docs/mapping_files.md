@@ -131,6 +131,34 @@ unfinished sample is reached. The download is performed by
 `secScripts/fileManage/ENASRAdl.pl` in the sample's shared scratch directory; the
 archive FASTQs are not copied into the permanent input directory.
 
+### Maps for a whole study
+
+A step-by-step guide, from inspecting a study to cleanup, is in
+[`public_data_download.md`](public_data_download.md).
+
+Each map row is one sample. A study or project accession in one row downloads
+every run of the study into that single sample, 16S amplicon runs included.
+For a study, write one row per BioSample with
+`secScripts/fileManage/makeAccessionMap.sh`:
+
+```text
+makeAccessionMap.sh PRJNA776530 PRJNA776530 /path/to/results/ > PRJNA776530.map
+```
+
+It resolves the study through the ENA Portal API (run it on a node with
+internet), lists all kept runs of a BioSample in its `ENAdownload` cell, and
+excludes runs whose `library_strategy` is `AMPLICON`, whose
+`library_selection` is `PCR`, or that report 0 reads. Excluded runs are listed
+on stderr. It never selects by `library_strategy` `WGS`, because shotgun runs
+are often submitted as `OTHER` or `WGA`. Inspect the study first; the script
+cannot recognise an amplicon run that is labelled neither `AMPLICON` nor `PCR`.
+
+With `-keepRawReads 1`, downloaded reads are stored in
+`<globalTmpDir>/<RunID>/accession_reads/<SmplID>/` and are not deleted when
+the sample finishes. Every run writes `<OutPath>/<RunID>/accession_manifest.tsv`
+listing each downloaded file with its accession, byte count, MD5, record count
+and current location.
+
 ### Minimal archive-only maps
 
 An ENA-only map needs a sample ID and an ENA accession, but no `Path`,

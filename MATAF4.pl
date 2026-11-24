@@ -254,7 +254,10 @@ sub createConsSNPandSVs;
 #       read search); -DiaPercID accepts decimals; read groups PL:ELEMENT (AVITI), PL:LS454 (454);
 #       samtools in the mapper's pipe gets a quarter of the cores. -profileTaxaTarget deactivated
 #       (TaxaTarget unmaintained, database no longer downloadable).
-my $MATFILER_ver = 4.49;
+#4.50: 12.10.26: -keepRawReads retains archive downloads outside sample temp;
+#       accession_manifest.tsv collects per-file archive provenance.
+my $MATFILER_ver = 4.50;
+my $keptAccessionReadsDir = 'accession_reads';
 my $matafWorkflowActive = 0;
 my $matafWorkflowStage = 'startup';
 my $matafHeartbeatPath = '';
@@ -562,7 +565,7 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 	my $smplTmpDir = "$MFglobal{runTmpDirGlobal}$SmplName/";
 	my ($accessionProvider, $accessionID) = sampleAccessionSource($curSmpl);
 	my $accessionDownloadDir = $accessionProvider ne ''
-		? "$smplTmpDir/accession_download/" : '';
+		? accessionDownloadDirFor($SmplName) : '';
 	my $accessionMetadataFile = $accessionProvider ne ''
 		? "$curOutDir/input_accession.json" : '';
 	loadSampleAccessionMetadata($curSmpl, $accessionMetadataFile, $accessionDownloadDir)
@@ -2426,7 +2429,8 @@ for ($JNUM=$from; $JNUM<$to;$JNUM++){
 			dependencies => $variantJobDep,
 		},
 	);
-	my $accessionOnlyCleanup = $accessionProvider ne '' && !$MFconfig{rmScratchTmp};
+	my $accessionOnlyCleanup = $accessionProvider ne ''
+		&& !$MFconfig{keepRawReads} && !$MFconfig{rmScratchTmp};
 	if ((($MFconfig{rmScratchTmp} && !$MFopt{DoCalcD2s}) || $accessionOnlyCleanup)
 			&& @sampleDeps) {
 		if ($cleanupBarrier->{ready}) {
@@ -3210,8 +3214,10 @@ sub finishedCleanupArguments {
 		'--snp-log-dir', "$sampleLogDir/SNP",
 	);
 	my ($accessionProvider) = sampleAccessionSource($sampleKey);
+	# -keepRawReads stores archive reads outside the sample temp directory, so
+	# cleanup is never handed a download directory to remove.
 	push @arguments, ('--download-temp', "$sampleTemp/accession_download")
-		if $accessionProvider ne '';
+		if $accessionProvider ne '' && !$MFconfig{keepRawReads};
 	push @arguments,
 		'--assembly', $assembly,
 		'--assembly-path-file', "$map{$sampleKey}{wrdir}/assemblies/metag/assembly.txt",
@@ -3715,6 +3721,7 @@ sub postprocess{
 		$totalScratchUse += ($map{$smpl}{inputXFileSizeMB}) *3 if (exists($map{$smpl}{inputXFileSizeMB}));
 	}
 	print "Estimated scratch use: " . int($totalScratchUse/1024)."G\n";
+	writeAccessionManifest(\@samples);
 	if (keys %{$runReport{empty_samples}} > 0){
 		print "Found empty-after-cleaning or too-small (<". $MFconfig{skipSmallSmplsMB} ."MB) samples (N=".
 			scalar(keys %{$runReport{empty_samples}}) . "):\n".
@@ -3874,6 +3881,69 @@ sub loadSampleAccessionMetadata {
 	$map{$sample}{inputXFileSizeMB} = 0
 		unless exists $map{$sample}{inputXFileSizeMB};
 	return 1;
+}
+
+# Archive downloads live inside the sample temp directory by default and are
+# removed with it once the sample is complete. With -keepRawReads they are
+# placed in a run-level directory beside the sample temp directories, which no
+# cleanup step targets, so reruns reuse them instead of downloading again.
+sub accessionDownloadDirFor {
+	my ($sampleName) = @_;
+	return "$MFglobal{runTmpDirGlobal}$sampleName//accession_download/"
+		unless $MFconfig{keepRawReads};
+	die "SmplID '$keptAccessionReadsDir' collides with the -keepRawReads directory; rename the sample\n"
+		if $sampleName eq $keptAccessionReadsDir;
+	return "$MFglobal{runTmpDirGlobal}$keptAccessionReadsDir/$sampleName/";
+}
+
+# One TSV row per archive file of every accession sample in this run. The
+# per-sample input_accession.json files sit in the output directory and
+# survive scratch cleanup; this table collects them so a run can be audited
+# or reproduced without opening each sample.
+sub writeAccessionManifest {
+	my ($samplesRef) = @_;
+	my @columns = qw(SmplID provider accession run role filename bytes md5
+		records downloaded_at path present retained);
+	my @rows;
+	for my $sample (@{$samplesRef}) {
+		my ($provider) = sampleAccessionSource($sample);
+		next if $provider eq '';
+		my $sampleName = $map{$sample}{SmplID};
+		my $metadataFile = "$map{$sample}{wrdir}/input_accession.json";
+		next unless -s $metadataFile;
+		open my $fh, '<', $metadataFile or do {
+			warn "Cannot read $metadataFile: $!\n"; next;
+		};
+		my $text = do { local $/; <$fh> };
+		close $fh;
+		my $metadata = eval { decode_json($text) };
+		next unless ref($metadata) eq 'HASH' && ref($metadata->{files}) eq 'ARRAY';
+		my $downloadDir = accessionDownloadDirFor($sampleName);
+		for my $file (@{$metadata->{files}}) {
+			next unless ref($file) eq 'HASH';
+			my $path = File::Spec->catfile($downloadDir, $file->{filename} || '');
+			my %row = (
+				SmplID => $sampleName, provider => $metadata->{provider},
+				accession => $metadata->{accession},
+				downloaded_at => $metadata->{downloaded_at},
+				path => File::Spec->canonpath($path),
+				present => (-s $path ? 'yes' : 'no'),
+				retained => ($MFconfig{keepRawReads} ? 'yes' : 'no'),
+				map { $_ => $file->{$_} } qw(run role filename bytes md5 records),
+			);
+			push @rows, join("\t", map {
+				my $v = defined($row{$_}) ? $row{$_} : '';
+				$v =~ s/[\t\r\n]+/ /g;
+				$v;
+			} @columns);
+		}
+	}
+	return unless @rows;
+	my $manifest = File::Spec->catfile($baseOut, 'accession_manifest.tsv');
+	atomic_write_text($manifest, join("\n", join("\t", @columns), @rows)."\n",
+		label => 'publish accession manifest');
+	print "Accession manifest: $manifest (".scalar(@rows)." file(s))\n"
+		unless $MFconfig{silent};
 }
 
 sub submitSampleAccessionDownload {
@@ -12092,6 +12162,7 @@ sub setDefaultMFconfig{
 	$MFconfig{filterFromSource}=1; #powerful option that skips the unzip step.. use careful
 	$MFconfig{doDateFileCheck} = 0; #very specific option for Moh's reads that were of different dates..
 	$MFconfig{DoFreeGlbTmp} = 0; 
+	$MFconfig{keepRawReads} = 0; #1: keep ENA/SRA downloads in <globalTmpDir>/<RunID>/accession_reads/<SmplID>/ after the sample finishes
 	$MFconfig{defaultReadLength} = 150; $MFconfig{defaultReadLengthX} = 5000;
 	$MFconfig{oldStylFolders} =0; #0=smpl name as out folder; 1=inputdir as out foler (legacy)
 	$MFconfig{mocatLinkDir} = "";
@@ -12173,6 +12244,7 @@ sub getCmdLineOptions{
 		"rm_tmpdir_reads=i" => \$MFconfig{remove_reads_tmpDir}, #Default 1, remove tmpdir with reads
 		"rm_tmpInput=i" => \$MFconfig{removeInputAgain},#remove raw, human / adaptor filtered reads, if sdm clean created? (and not needed any longer)
 		"reduceScratchUse=i" => \$MFconfig{rmScratchTmp}, #should always be 1, unless debugging..
+		"keepRawReads=i" => \$MFconfig{keepRawReads}, #1: do not delete ENA/SRA downloads; they are stored in <globalTmpDir>/<RunID>/accession_reads/<SmplID>/ instead of the sample temp dir
 		"globalTmpDir=s" => \$runOptions{sharedTmpDir},#absolute path to global shared tmp dir (like a scratch dir)
 		"nodeTmpDir=s" => \$runOptions{nodeTmpDir},#absolute path to tmp dir on local HDD of each executing node
 		"nodeHDDspace=s" => \$MFconfig{nodeHDDspace},#HDD tmp space to be requested for each node (in Gb). Some systems don't support this

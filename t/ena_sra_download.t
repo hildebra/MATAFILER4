@@ -255,4 +255,66 @@ ok(!-d File::Spec->catdir($sra_output, '.ncbi-cache')
 	&& !-d File::Spec->catdir($sra_output, '.fasterq'),
 	'SRA object and conversion intermediates are removed after validation');
 
+# Re-download after cleanup must reproduce the recorded archive content.
+{
+	unlink map { File::Spec->catfile($ena_output, $_->{filename}) } @{$ena->{files}};
+	unlink File::Spec->catfile($ena_output, 'download.json');
+	local $ENV{FAKE_ENA_REPORT} = $ena_report;
+	local $ENV{FAKE_ARCHIVE_DIR} = $fixtures;
+	is(system(
+		$^X, $downloader,
+		'--provider', 'ena', '--accession', 'ERR900001',
+		'--output-dir', $ena_output, '--metadata-out', $ena_metadata,
+		'--wget', $fake_wget,
+	), 0, 'an unchanged archive is downloaded again after cleanup');
+}
+my $drift_fixtures = File::Spec->catdir($root, 'fixtures-drift');
+make_path($drift_fixtures);
+my %drift_fastq = (
+	'ERR900001_1.fastq.gz' => "\@r1/1\nACGTA\n+\nIIIII\n",
+	'ERR900001_2.fastq.gz' => "\@r1/2\nTGCAT\n+\nIIIII\n",
+);
+for my $name (keys %drift_fastq) {
+	gzip \$drift_fastq{$name} => File::Spec->catfile($drift_fixtures, $name)
+		or die "Cannot gzip fixture: $GzipError";
+}
+my $drift_report = File::Spec->catfile($drift_fixtures, 'ena.tsv');
+write_file(
+	$drift_report,
+	join("\t", qw(run_accession instrument_platform library_layout library_strategy fastq_ftp fastq_md5 fastq_bytes))."\n"
+	.join("\t",
+		'ERR900001', 'ILLUMINA', 'PAIRED', 'WGS',
+		join(';', map { "ftp.sra.ebi.ac.uk/vol1/fastq/$_" } @ena_names),
+		join(';', map { md5_file(File::Spec->catfile($drift_fixtures, $_)) } @ena_names),
+		join(';', map { -s File::Spec->catfile($drift_fixtures, $_) } @ena_names),
+	)."\n",
+);
+my $recorded_md5 = read_json($ena_metadata)->{files}[0]{md5};
+{
+	unlink map { File::Spec->catfile($ena_output, $_->{filename}) } @{$ena->{files}};
+	unlink File::Spec->catfile($ena_output, 'download.json');
+	local $ENV{FAKE_ENA_REPORT} = $drift_report;
+	local $ENV{FAKE_ARCHIVE_DIR} = $drift_fixtures;
+	my $log = File::Spec->catfile($root, 'drift.log');
+	isnt(system(
+		"$^X '$downloader' --provider ena --accession ERR900001 "
+		."--output-dir '$ena_output' --metadata-out '$ena_metadata' "
+		."--wget '$fake_wget' >'$log' 2>&1"
+	), 0, 'changed archive content is refused on re-download');
+	open my $fh, '<', $log or die $!;
+	my $text = do { local $/; <$fh> };
+	close $fh;
+	like($text, qr/differs from the download recorded.*MD5 changed/s,
+		'the refusal names the changed file and checksum');
+	is(read_json($ena_metadata)->{files}[0]{md5}, $recorded_md5,
+		'the recorded manifest is not overwritten by drifted content');
+	unlink $ena_metadata;
+	is(system(
+		$^X, $downloader,
+		'--provider', 'ena', '--accession', 'ERR900001',
+		'--output-dir', $ena_output, '--metadata-out', $ena_metadata,
+		'--wget', $fake_wget,
+	), 0, 'deleting the manifest accepts the new archive content');
+}
+
 done_testing();

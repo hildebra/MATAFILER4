@@ -241,6 +241,48 @@ for my $candidate ($internal_manifest, $opt{metadata_out}) {
 	exit 0;
 }
 
+# Reproducibility guard. When this accession was downloaded before, the
+# previous manifest records what the archive delivered. A re-download (for
+# example after cleanup removed the reads) must deliver the same content, or
+# downstream results would silently change. ENA files are compared by archive
+# MD5. SRA files are compared by FASTQ record count, because the gzip stream
+# written by pigz/gzip embeds a timestamp and its MD5 differs on every run.
+my $previous_manifest = read_json($opt{metadata_out});
+undef $previous_manifest
+	unless ref($previous_manifest) eq 'HASH'
+		&& ($previous_manifest->{schema} || 0) == 1
+		&& ($previous_manifest->{provider} || '') eq $opt{provider}
+		&& ($previous_manifest->{accession} || '') eq $accession_key
+		&& ref($previous_manifest->{files}) eq 'ARRAY';
+
+sub archive_drift {
+	my ($previous, $current) = @_;
+	return () unless $previous;
+	my %before = map { ($_->{filename} || '') => $_ } @{$previous->{files}};
+	my %after = map { ($_->{filename} || '') => $_ } @{$current};
+	my @problems;
+	for my $name (sort keys %before) {
+		next if exists $after{$name};
+		push @problems, "$name was in the previous download but is no longer delivered";
+	}
+	for my $name (sort keys %after) {
+		my $old = $before{$name};
+		if (!$old) {
+			push @problems, "$name is new";
+			next;
+		}
+		if ($opt{provider} eq 'ena') {
+			push @problems, "$name MD5 changed (".($old->{md5} || '?')." -> $after{$name}{md5})"
+				if lc($old->{md5} || '') ne lc($after{$name}{md5} || '');
+		} else {
+			push @problems, "$name record count changed (".($old->{records} || '?')
+				." -> $after{$name}{records})"
+				if ($old->{records} || 0) != ($after{$name}{records} || 0);
+		}
+	}
+	return @problems;
+}
+
 my $wget;
 sub wget_tool {
 	$wget ||= configured_executable($opt{wget}, 'wget', 'wget');
@@ -609,6 +651,15 @@ my ($files, $platforms) = $opt{provider} eq 'ena'
 	? download_ena() : download_sra();
 die "Archive download produced no validated FASTQ files\n"
 	unless ref($files) eq 'ARRAY' && @{$files};
+
+my @drift = archive_drift($previous_manifest, $files);
+if (@drift) {
+	die "Archive content for $opt{provider}:$accession_key differs from the download recorded "
+		."on ".($previous_manifest->{downloaded_at} || 'an earlier run')." in $opt{metadata_out}:\n  "
+		.join("\n  ", @drift)."\n"
+		."Results built from the earlier download would not be reproducible. If the new archive "
+		."content is intended, delete $opt{metadata_out} and rerun.\n";
+}
 
 my %platform_seen;
 my @unique_platforms = grep { !$platform_seen{$_}++ } @{$platforms};
