@@ -39,6 +39,8 @@ dependencies:
 #  - conda-forge::ncurses=6.5
 #  - conda-forge::biopython=1.81
   - pigz=2.8
+  # bgzip: BGZF compression of all pipeline output (1.23 like samtools/bcftools, see GRIDSS below)
+  - htslib=1.23
   - pip=26.1.2
   - rsync=3.4.4
   - bioconda::strobealign=0.17.0

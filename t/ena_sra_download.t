@@ -227,6 +227,7 @@ write_file(
 		"fasterq-dump\t$fake_fasterq",
 		"vdb-validate\t$fake_validator",
 		"pigz\t$fake_gzip",
+		"bgzip\t" . File::Spec->catfile($Bin, 'bin', 'bgzip'),
 	), "\n",
 );
 
@@ -251,6 +252,12 @@ is($sra->{seqtech}, 'ONT', 'NCBI OXFORD_NANOPORE platform maps to ONT');
 is($sra->{files}[0]{role}, 'single', 'split-3 singleton output is explicit');
 ok(-s File::Spec->catfile($sra_output, 'SRR900001.fastq.gz'),
 	'validated SRA FASTQ is published as gzip');
+{
+	open my $published, '<:raw', File::Spec->catfile($sra_output, 'SRR900001.fastq.gz') or die $!;
+	read($published, my $header, 14);
+	close $published;
+	is(substr($header, 12, 2), 'BC', 'the published FASTQ is BGZF, compressed with the configured bgzip');
+}
 ok(!-d File::Spec->catdir($sra_output, '.ncbi-cache')
 	&& !-d File::Spec->catdir($sra_output, '.fasterq'),
 	'SRA object and conversion intermediates are removed after validation');

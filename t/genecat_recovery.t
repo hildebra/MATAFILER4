@@ -54,7 +54,7 @@ use Errno qw(EEXIST ENOENT);
 use IO::Handle;
 use English;
 use Mods::GenoMetaAss qw(gzipopen systemW readFasta);
-use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfCmd bgzfFilesCmd);
 use Mods::Checkpoint qw(write_checkpoint checkpoint_valid read_checkpoint);
 use Mods::WorkflowResilience qw(retry_unlink retry_rename);
 use Mods::geneCat qw(readGeneIdxSpl attachProteins3);

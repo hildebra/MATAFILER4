@@ -9,6 +9,7 @@ dependencies:
   - blas[build=openblas]
   - gtdbtk=2.6
   - pigz=2.8
+  - htslib=1.23 #bgzip (BGZF compression)
 #  - bioconda::mash=2.3
 #  - whokaryote=1.1.2 (downgrades pytorch etc..)
 #  - checkm2 >= 1 (downgrades pytorch etc..)

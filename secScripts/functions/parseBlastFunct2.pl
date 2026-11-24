@@ -9,7 +9,7 @@ use Data::Dumper;
 use Mods::FuncTools qw(readGene2COG mergeBlastPair);
 use Mods::TamocFunc qw(sortgzblast readTabbed readTabbed2 readTabbed3 uniq);
 use Mods::GenoMetaAss qw(gzipwrite gzipopen convertNT2AA);
-use Mods::IO_Tamoc_progs qw(getProgPaths );
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfCmd);
 use Getopt::Long qw( GetOptions );
 
 
@@ -337,7 +337,7 @@ if ($mode == 0 || $mode==1 || $mode == 2){ #mode1 = write gene assignment, mode 
 		#zcat dia.KGB.blast.gz dia.KGE.blast.gz | sort | gzip > dia.KGM.blast.gz
 		my $KGBf = $blInf; my $KGEf = $blInf; 
 		$KGBf =~ s/KGM/KGB/; $KGEf =~ s/KGM/KGE/;
-		my $cmd = "zcat $KGBf $KGEf | sort | gzip > $blInf\n";
+		my $cmd = "zcat $KGBf $KGEf | sort | ".bgzfCmd($ncore)." -c > $blInf\n";
 		system $cmd."\n";
 	}
 	

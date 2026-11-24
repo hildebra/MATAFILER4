@@ -9,6 +9,7 @@ use File::Glob qw(bsd_glob GLOB_NOSORT);
 use File::Path qw(remove_tree);
 use File::Spec;
 
+use Mods::IO_Tamoc_progs qw(bgzfArgs);
 use Mods::SampleCompletion qw(
 	completion_component_evidence completion_request_signature
 	invalidate_sample_completion
@@ -208,9 +209,9 @@ sub compress_ribosome_hierarchies {
 		my $source = File::Spec->catfile(
 			$args{sample_root}, 'ribos', 'ltsLCA', "${tag}riboRun_bl.hiera.txt",
 		);
-		# -f: a .gz beside the plain file is left by an interrupted gzip
+		# -f: a .gz beside the plain file is left by an interrupted bgzip
 		if (-e $source) {
-			system('gzip', '-f', $source) == 0
+			system(bgzfArgs(1), '-f', $source) == 0
 				or die "Cannot compress RiboFind hierarchy $source\n";
 		}
 		push @missing, $tag unless -e "$source.gz";

@@ -14,9 +14,9 @@ ok(-s $helper, 'standalone strain shard finalizer exists');
 
 my $staging = tempdir(CLEANUP => 1);
 my $published = tempdir(CLEANUP => 1);
-my $fake_pigz = File::Spec->catfile($staging, 'fake-pigz');
-write_file($fake_pigz, "#!/bin/sh\ncat\n");
-chmod 0755, $fake_pigz or die "Cannot mark $fake_pigz executable: $!";
+my $fake_bgzip = File::Spec->catfile($staging, 'fake-bgzip');
+write_file($fake_bgzip, "#!/bin/sh\ncat\n");
+chmod 0755, $fake_bgzip or die "Cannot mark $fake_bgzip executable: $!";
 
 my %part = (
 	'allFNAs.fna.0' => ">sA|COG2|g2\nATG2\n>sA|COG1|g1\nATG1\n",
@@ -67,7 +67,7 @@ for my $worker (0, 1) {
 write_file($manifest, join("\n", @manifest)."\n");
 
 my @prepare = ($^X, $helper, '-staging', $staging, '-manifest', $manifest,
-	'-mode', 'prepare', '-pigz', $fake_pigz, '-cores', 2);
+	'-mode', 'prepare', '-bgzip', $fake_bgzip, '-cores', 2);
 is(system(@prepare), 0, 'standalone helper fuses a valid two-worker shard handoff');
 ok(-s File::Spec->catfile($staging, '.strain_tree_input.prepared.tsv'),
 	'helper publishes its prepared marker last');

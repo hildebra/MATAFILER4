@@ -14,7 +14,7 @@ sub setConfigFile;
 #TAMOC programs related to IO to other programs, program paths .. not real subroutines that do anything
 
 use Exporter qw(import);
-our @EXPORT_OK = qw(getProgPaths truePath
+our @EXPORT_OK = qw(getProgPaths truePath bgzfArgs bgzfCmd bgzfFilesCmd bgzfTreeCmd
 					inputFmtSpades inputFmtSpadesLibraries inputFmtMegahit inputFmtMegahitLibraries inputFmtMegahitRuntimeLibraries jgi_depth_cmd createGapFillopt setConfigFile
 					buildMapperIdx mapperDBbuilt decideMapper checkMapsDoneSH greaterComputeSpace convert2Gb);
 
@@ -331,6 +331,69 @@ sub getProgPaths{
 	}
 	
 	return "";
+}
+
+#BGZF (blocked gzip, written by bgzip from htslib) is the compression for every file the pipeline writes.
+#Every gzip reader reads it, and it can be indexed (bgzip -r, samtools faidx) for random access.
+#bgzip is looked up like every other tool, through the "bgzip" config key.
+
+#The configured bgzip. A bare program name is resolved to its absolute path where the command is
+#generated (the controller runs in the MF4 environment), so job scripts find it even after they
+#activate another micromamba environment. An unresolvable name is returned unchanged.
+my %bgzipResolved;
+sub bgzipBin{
+	my $bgzip = getProgPaths("bgzip");
+	return $bgzip if $bgzip =~ m{/} || $bgzip =~ /\s/;
+	return $bgzipResolved{$bgzip} if exists $bgzipResolved{$bgzip};
+	my ($found) = grep { -f $_ && -x _ } map { "$_/$bgzip" } grep { length } split /:/, ($ENV{PATH} // '');
+	return $bgzipResolved{$bgzip} = defined($found) ? $found : $bgzip;
+}
+
+#bgzip and its options as an argument list, e.g. for exec or a pipe open
+sub bgzfArgs{
+	my ($threads, %options) = @_;
+	$threads = 1 unless defined($threads) && $threads =~ /^\d+$/ && $threads > 0;
+	my @args = (bgzipBin(), '-@', $threads);
+	if (defined($options{level}) && $options{level} ne '') {
+		die "invalid bgzip compression level: $options{level}\n"
+			unless $options{level} =~ /^-?\d$/;
+		push @args, '-l', $options{level};
+	}
+	return @args;
+}
+
+#bgzip and its options for a job script:
+#  "... | ".bgzfCmd($cores)." -c > out.gz"     compress a stream
+#  bgzfCmd($cores)." -c file > out.gz"          compress a copy
+#  bgzfCmd($cores)." -f file"                   compress in place (file -> file.gz, file removed)
+sub bgzfCmd{
+	return join(' ', bgzfArgs(@_));
+}
+
+#job-script lines compressing each path in place (file -> file.gz, original removed), replacing
+#"pigz -f -p N a b c". bgzip takes one file per call, so a path with shell wildcards becomes a loop;
+#like gzip/pigz, the loop leaves files already ending in .gz and anything but regular files alone.
+sub bgzfFilesCmd{
+	my ($threads, @paths) = @_;
+	my $bgzip = bgzfCmd($threads);
+	my $cmd = '';
+	for my $path (grep { defined && length } @paths) {
+		if ($path =~ /[*?\[]/) {
+			$cmd .= "for bgzfF in $path; do case \"\$bgzfF\" in *.gz) ;; *) [ ! -f \"\$bgzfF\" ] || $bgzip -f \"\$bgzfF\";; esac; done\n";
+		} else {
+			$cmd .= "$bgzip -f $path\n";
+		}
+	}
+	return $cmd;
+}
+
+#job-script line compressing every file below the given files/directories in place, replacing
+#"pigz -r": files already ending in .gz are left alone, as pigz -r does.
+sub bgzfTreeCmd{
+	my ($threads, @paths) = @_;
+	@paths = grep { defined && length } @paths;
+	return '' unless @paths;
+	return "find @paths -type f ! -name '*.gz' -exec " . bgzfCmd($threads) . " -f {} \\;\n";
 }
 
 sub activateBase{
@@ -708,3 +771,5 @@ sub createGapFillopt($ $ $){
 	 print O $opt;
 	 close O or die "Cannot close GapFiller options $ofile: $!\n";
 }
+
+1;

@@ -35,6 +35,11 @@ sub getRawLibrariesAssmGrp { return $libraries; }
 sub getCleanLibrariesAssmGrp { return $_[2] ? [] : $libraries; }
 sub spaceInAssGrp { return 100; }
 sub getProgPaths { return 'fixture-'.$_[0]; }
+#MATAF4.pl imports these BGZF helpers from Mods::IO_Tamoc_progs; here they build on the fixture lookup
+sub bgzfArgs { return (getProgPaths('bgzip'), '-@', $_[0] || 1); }
+sub bgzfCmd { return join(' ', bgzfArgs(@_)); }
+sub bgzfFilesCmd { my ($threads, @paths) = @_; return join('', map { bgzfCmd($threads)." -f $_\n" } @paths); }
+sub bgzfTreeCmd { my ($threads, @paths) = @_; return "find @paths -type f ! -name '*.gz' -exec ".bgzfCmd($threads)." -f {} \\;\n"; }
 sub buildMapperIdx { return ("fixture-index $_[0]\n", "$_[0].bw2", "$_[0].bw2.1.bt2"); }
 sub qsubSystem { push @jobs, [@_]; return ('run'.(600+@jobs), ''); }
 sub megahitAssembly { return 'run200'; }

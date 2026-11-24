@@ -85,6 +85,8 @@ sub getProgPaths {
     die "Unexpected program lookup: $name";
 }
 sub qsubSystem { push @jobs, [@_]; return ($_[4], $_[1]); }
+#MATAF4.pl imports bgzfCmd from Mods::IO_Tamoc_progs; the test stand-in writes real BGZF
+sub bgzfCmd { return "$root/t/bin/bgzip -@ " . ($_[0] || 1); }
 my $source = read_file("$root/MATAF4.pl");
 my ($runDiamond) = $source =~ /(^sub runDiamond\(\)\{.*?^\})/ms;
 ok(defined($runDiamond),'locate actual raw-read search caller');

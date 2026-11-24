@@ -16,7 +16,7 @@ use Mods::SampleCompletion qw(completion_request_signature);
 use Mods::GenoMetaAss qw(iniCleanSeqSetHR checkSeqTech is3rdGenSeqTech parseSupportReads discoverReadFiles);
 use Mods::ReadLibrary qw(newReadLibrary readLibrariesFromArrays syncSeqSetLegacy readLibrariesByScope
     replaceScopeLibraries libraryFiles libraryPairs libraryTechnology);
-use Mods::IO_Tamoc_progs qw(decideMapper);
+use Mods::IO_Tamoc_progs qw(decideMapper bgzfArgs bgzfCmd bgzfFilesCmd bgzfTreeCmd); #as imported by MATAF4.pl
 use Mods::WorkflowControl qw(source_input_files missing_input_files commands_are_lightweight_filesystem normalise_job_dependencies);
 
 sub read_file { open my $fh, '<', $_[0] or die $!; local $/; return <$fh>; }

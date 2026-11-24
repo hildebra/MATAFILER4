@@ -8,9 +8,8 @@ use File::Copy qw(copy);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
 use Getopt::Long qw(GetOptions);
-use IO::Compress::Gzip qw(gzip $GzipError);
 use Mods::GenoMetaAss qw(systemW);
-use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile);
+use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile bgzfCmd);
 
 my $VERSION = '0.7';
 # Every marker publishes all three read roles; MATAF4's completion evidence
@@ -182,9 +181,7 @@ sub backfillAbsentRoles {
 		my $path = publishedPath($directory, $tag, $kind);
 		next if -s $path;
 		my $staged = "$path.empty.$$";
-		my $empty = '';
-		gzip(\$empty => $staged)
-			or die "Cannot create empty gzip output $staged: $GzipError\n";
+		writeEmptyBgzf($staged);
 		rename($staged, $path)
 			or die "Cannot install $path atomically: $!\n";
 	}
@@ -325,9 +322,7 @@ sub publishMarkerOutputs {
 		if (@{$outputs->{$kind}}) {
 			concatenateFiles($outputs->{$kind}, $staged);
 		} else {
-			my $empty = '';
-			gzip(\$empty => $staged)
-				or die "Cannot create empty gzip output $staged: $GzipError\n";
+			writeEmptyBgzf($staged);
 		}
 		assertGzipOutput($staged);
 		installAtomically($staged, publishedPath($destinationDir, $tag, $kind));
@@ -412,6 +407,13 @@ sub announceSortmerna {
 	warn "Could not query the configured SortMeRNA version\n" if $status;
 }
 
+
+# An empty BGZF file: what bgzip writes for empty input.
+sub writeEmptyBgzf {
+	my ($path) = @_;
+	systemW(bgzfCmd(1).' -c < /dev/null > '.shellQuote($path));
+	die "Cannot create empty BGZF output $path\n" unless -s $path;
+}
 
 sub shellQuote {
 	my ($value) = @_;

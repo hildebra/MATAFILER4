@@ -46,7 +46,11 @@ use File::Basename qw(dirname);
 use File::Copy qw(copy);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
-our ($pigzBin, $ncore, $removeMSA, $partiExt);
+our ($bgzipBin, $ncore, $removeMSA, $partiExt);
+sub bgzfArgs {
+	my ($threads) = @_;
+	return ($bgzipBin, '-@', $threads);
+}
 sub retry_unlink {
 	my ($path, %options) = @_;
 	return 1 unless -e $path || -l $path;
@@ -163,7 +167,7 @@ my $already_compressed = File::Spec->catfile($msa_directory, 'MSAli.syn.fna.gz')
 write_test_file($already_compressed, "retained compressed alignment\n");
 {
 	no warnings 'once';
-	$TestBuildTreeMSAFinalizer::pigzBin = $fake_pigz;
+	$TestBuildTreeMSAFinalizer::bgzipBin = $fake_pigz;
 	$TestBuildTreeMSAFinalizer::ncore = 1;
 	$TestBuildTreeMSAFinalizer::removeMSA = 1;
 	$TestBuildTreeMSAFinalizer::partiExt = '.partition.RAXML';

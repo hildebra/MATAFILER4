@@ -6,7 +6,7 @@ use Cwd 'abs_path';
 use strict;
 use List::Util qw(min max);
 #use List::MoreUtils 'first_index'; 
-use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfCmd);
 use Mods::TamocFunc qw( getSpecificDBpaths);
 use Mods::GenoMetaAss qw( clenSplitFastas splitFastas systemW gzipopen);
 use Mods::Subm qw(qsubSystem emptyQsubOpt );
@@ -67,7 +67,6 @@ sub lambdaBl{
 	$exec = $_[4] if (@_ > 4);
 
 	my $cmd="";
-	my $pigzBin = getProgPaths("pigz");
 	my $lambdaBin = getProgPaths("lambda");#"/g/bork3/home/hildebra/dev/lotus//bin//lambda/lambda";
 	#my $lambdaIdxBin = $lambdaBin."_indexer";#getProgPaths("");#"/g/bork3/home/hildebra/dev/lotus//bin//lambda/lambda_indexer";
 #	if ($BlastCores > 20){$BlastCores = 20;}
@@ -93,7 +92,7 @@ sub lambdaBl{
 		#lambda 3.1 mkindexn accepts -t 2..1000 only
 		my $idxThreads = $BlastCores < 2 ? 2 : $BlastCores;
 		$cmdIdx .=  "$lambdaBin mkindexn -t $idxThreads -d $DB ;\n";
-		$cmdIdx .= "$pigzBin -p $BlastCores $DB.lba;\n";
+		$cmdIdx .= bgzfCmd($BlastCores)." $DB.lba;\n";
 		$cmdIdx .= $postCmd;
 		$DB = $DB1;
 		#die $cmdIdx."\n";
@@ -391,7 +390,7 @@ sub assignFuncPerGene{
 				# qlen/tlen give per-hit query and subject lengths (same 14 columns as the diamond output)
 				$cmd .= "$FSbin easy-search $subFls[$i] $DBpath$refDB.DB3di $raw_out $locChunk --threads $ncore --prostt5-model $prst5W -e $otpsHR->{alnEval}"
 					." --format-output query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,qlen,tlen\n";
-				$cmd .= "gzip -c $raw_out > $outTmp\nmv $outTmp $outF\nrm -f $raw_out\n";
+				$cmd .= bgzfCmd($ncore)." -c $raw_out > $outTmp\nmv $outTmp $outF\nrm -f $raw_out\n";
 			} else {
 				#my $outF = "$GCd/DiaAssignment.sub.$i";
 				if ($localTmp){
@@ -444,16 +443,17 @@ sub assignFuncPerGene{
 		if ($allFiles[0] =~ m/\.gz$/){
 			$cmd .= "mv $allFiles[0] $allAss\n";
 		} else {
-			$cmd .= "gzip -c $allFiles[0] > $allAss.tmp\nmv $allAss.tmp $allAss\nrm $allFiles[0]\n";
+			$cmd .= bgzfCmd($ncore)." -c $allFiles[0] > $allAss.tmp\nmv $allAss.tmp $allAss\nrm $allFiles[0]\n";
 		}
 	} else {
+		my $zipOut = "";
 		if ($allAss !~ m/\.gz$/ && $allFiles[0] =~ m/\.gz$/){
 			$allAss.=".gz" ;
-		} elsif($allAss =~ m/\.gz$/ && $allFiles[0] !~ m/\.gz$/){ #zip output
-			$catcmd = "gzip -c";
+		} elsif($allAss =~ m/\.gz$/ && $allFiles[0] !~ m/\.gz$/){ #zip output (bgzip takes one input, so the files are concatenated first)
+			$zipOut = " | ".bgzfCmd($ncore)." -c";
 		}
 		#my $cmd= "cat ".join(" ",@allFiles). " > $allAss\n";   #
-		$cmd .= "$catcmd ".join(" ",@allFiles). " > $allAss.tmp\nmv $allAss.tmp $allAss\n"; #existence of $allAss = complete
+		$cmd .= "$catcmd ".join(" ",@allFiles). "$zipOut > $allAss.tmp\nmv $allAss.tmp $allAss\n"; #existence of $allAss = complete
 		$cmd .= "rm -f ".join(" ",@allFiles) . "\n";
 	}
 	if ($curDB eq "mp3"){

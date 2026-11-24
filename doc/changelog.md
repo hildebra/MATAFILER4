@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-11-24 — MATAF4 4.1.0: semantic versioning; BGZF compression throughout the pipeline (geneCat 0.71, buildTree5 5.94)
+
+- **Versioning:** `MATAF4.pl` versions are now `MAJOR.MINOR.PATCH`, held as a string. 4.1.0 follows 4.49. The version is only printed (start banner, `-help`); no output, checkpoint or completion record stores or compares it.
+- **Change:** every `.gz` the pipeline compresses itself is now BGZF, written by `bgzip` from htslib, instead of plain gzip from `gzip`/`pigz`/`IO::Compress::Gzip`.
+  - BGZF is multi-member gzip, so every existing reader (`zcat`, `pigz -dc`, `gzipopen`, zlib-based tools) reads it unchanged.
+  - It can be indexed (`bgzip -r`, `samtools faidx` on `.fa.gz`) for random access.
+- **One way to compress**, in `Mods/IO_Tamoc_progs.pm`, all built on the `bgzip` config key:
+  - `bgzfCmd`/`bgzfArgs`: `bgzip -@ <threads>` for streams and single files.
+  - `bgzfFilesCmd`: several files or wildcards in place, replacing `pigz -f a b c`. Wildcards skip existing `.gz` files and non-files, as gzip/pigz do.
+  - `bgzfTreeCmd`: replaces `pigz -r`.
+  - `gzipwrite` now writes through `bgzip`.
+  - A bare `bgzip` name is resolved to its absolute path when the command is generated, so jobs that activate another micromamba environment still find it.
+- **Environments:** `htslib` (bgzip) is listed in `MF4` (1.23), `MF4phylo` (1.24, as bcftools) and `MF4gtdbtk`. The installer verifies `bgzip` in `MF4` and `MF4phylo`, and `-checkInstall` reports it. Rerun `helpers/install/installer.sh` to update existing environments.
+- **Readers:** `IO::Uncompress::Gunzip` readers that lacked `MultiStream => 1` now set it (`Mods/WorkflowControl.pm` and tests), since without it they read only the first 64 KB block of a BGZF file.
+- **Not converted:** files compressed by external tools themselves (`sdm` filtered reads, DIAMOND `--compress`, SortMeRNA, `rtk2`, R scripts) stay plain gzip.
+- Tests: `t/bgzf_compression.t` runs the generated commands with a BGZF-writing test `bgzip` (`t/bin/bgzip`) and reads multi-block output back through every Perl reader path; `t/pigz_io.t`, `t/ena_sra_download.t` and the buildTree5/strain/miTag tests check BGZF output.
+
 ## 2026-10-09 — eggNOG-mapper: reserved node-local space for eggnog.db (geneCat 0.69)
 
 - **Problem:** in the rerun, all 21 chunks failed at once while copying `eggnog.db` (22.9 GB) to node-local scratch, with `No space left on device`. Each chunk job requests `--localscratch=ssd:500`.

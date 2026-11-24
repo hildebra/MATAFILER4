@@ -6,7 +6,7 @@
 use warnings;
 use strict;
 use Getopt::Long qw( GetOptions );
-use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfCmd);
 use Mods::GenoMetaAss qw(getDirsPerAssmblGrp readTabByKey systemW readClstrRev readMapS getAssemblPath readFasta);
 use Mods::CatalogPaths qw(resolve_catalog_maps);
 
@@ -249,7 +249,8 @@ print "Zipping fastas..\n";
 #zipping of fnas..
 foreach my $cMGS (sort keys %Contigs){
 	my $oDir1 = $oDir."/$cMGS/";
-	systemW "gzip $oDir1/*.ctgs.fna";
+	#one bgzip per file; without -f, like gzip, an existing .gz is not overwritten
+	systemW "for bgzfF in $oDir1/*.ctgs.fna; do ".bgzfCmd(1).' "$bgzfF"; done';
 }
 
 print "Done with extracting contigs\n$oDir\n";

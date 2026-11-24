@@ -511,7 +511,9 @@ sub find_sra_path {
 sub compress_fastq {
 	my ($path, $compressor) = @_;
 	my $name = basename($compressor);
-	if ($name =~ /pigz/i) {
+	if ($name =~ /bgzip/i) {
+		run_checked($compressor, '-f', '-@', $opt{threads}, $path);
+	} elsif ($name =~ /pigz/i) {
 		run_checked($compressor, '-f', '-p', $opt{threads}, $path);
 	} else {
 		run_checked($compressor, '-f', $path);
@@ -540,7 +542,7 @@ sub download_sra {
 		$opt{vdb_validate}, 'vdb-validate', 'NCBI vdb-validate',
 	);
 	my $compressor = configured_executable(
-		$opt{compressor}, [qw(pigz gzip)], 'FASTQ compressor',
+		$opt{compressor}, [qw(bgzip pigz gzip)], 'FASTQ compressor',
 	);
 	my $runs = ncbi_run_info();
 	my $cache = File::Spec->catdir($opt{output_dir}, '.ncbi-cache');

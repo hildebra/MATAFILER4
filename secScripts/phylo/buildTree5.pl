@@ -110,7 +110,7 @@ use warnings;
 use strict;
 use Mods::StrainSampleStats qw(count_msa_samples);
 #use threads ('yield','stack_size' => 64*4096,'exit' => 'threads_only','stringify');
-use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfArgs bgzfCmd);
 use Mods::FlagReference qw(printFlagHelp helpRequested resolvePairedOptionDefault);
 use Mods::GenoMetaAss qw( fileGZe fileGZs gzipopen systemW readFasta readFastHD writeFasta quantile);
 use Mods::phyloTools qw(MSA filterMSA getTreeLeafs calcDisPos2 runRaxML runRaxMLng runQItree
@@ -252,7 +252,7 @@ sub writeBuildTreeState;
 sub cleanupLegacyBuildTreeStateFiles;
 sub writeWorkflowHeartbeat;
 sub writeWorkflowFailure;
-my $version = "5.93";
+my $version = "5.94"; #5.94: compressed inputs, checkpoints and logs are BGZF (bgzip)
 my %iqtreeValidationCache;
 my %limitedWarningCounts;
 my %limitedWarningLimits;
@@ -293,7 +293,7 @@ if (helpRequested(@ARGV)) {
 	);
 }
 
-my $pigzBin  = getProgPaths("pigz");
+my $bgzipBin = (bgzfArgs(1))[0]; #configured bgzip, resolved like in bgzfArgs/bgzfCmd: compressed outputs are BGZF
 #my $trDist = getProgPaths("treeDistScr");
 
 
@@ -3145,7 +3145,7 @@ if ($gzipInput){
 		my $inputBasename = basename($inputFile);
 		sortFastaForCompression($inputFile)
 			if $inputBasename eq "allFAAs.faa" || $inputBasename eq "allFNAs.fna";
-		systemW("$pigzBin -p $ncore ".shellQuote($inputFile));
+		systemW(bgzfCmd($ncore)." ".shellQuote($inputFile));
 	}
 }
 
@@ -5351,7 +5351,7 @@ sub hyphy{
 	my $hyphyBin=getProgPaths("hyphy");
 	my $cmd = "$hyphyBin CPU=$ncore fubar --alignment ".shellQuote($MSAfile2)
 		." --tree ".shellQuote($nwkFile_gene2)." > ".shellQuote($log)."\n";
-	$cmd .= "gzip -c ".shellQuote("$MSAfile2.FUBAR.json")." > ".shellQuote("$log.json.gz")."\n";
+	$cmd .= bgzfCmd(1)." -c ".shellQuote("$MSAfile2.FUBAR.json")." > ".shellQuote("$log.json.gz")."\n";
 	systemW($cmd);
 	retry_unlink($_, fatal => 0, label => 'clean HyPhy intermediate')
 		for bsd_glob("$MSAfile2.FUBAR.*");
@@ -7151,7 +7151,7 @@ sub runStagedStrainShardHelper {
 	my @command = ($^X, $helper,
 		'-staging', $staging, '-manifest', $manifest, '-mode', $mode);
 	if ($mode eq 'prepare') {
-		push @command, ('-pigz', $pigzBin, '-cores', $cores,
+		push @command, ('-bgzip', $bgzipBin, '-cores', $cores,
 			'-publishedDir', $output);
 	} elsif ($mode eq 'cleanup') {
 		push @command, ('-publishedDir', $output);
@@ -7488,10 +7488,11 @@ sub publishStagedTreeInputs {
 			my $sourceBasename = basename($source);
 			sortFastaForCompression($source)
 				if $sourceBasename eq "allFAAs.faa" || $sourceBasename eq "allFNAs.fna";
-			my $compressionStatus = system {$pigzBin} $pigzBin, "-p", $cores, "--", $source;
-			die "Could not execute pigz for staged tree input $source: $!\n"
+			my @bgzip = bgzfArgs($cores);
+			my $compressionStatus = system {$bgzip[0]} @bgzip, "--", $source;
+			die "Could not execute bgzip for staged tree input $source: $!\n"
 				if $compressionStatus == -1;
-			die "pigz failed for staged tree input $source with status $compressionStatus\n"
+			die "bgzip failed for staged tree input $source with status $compressionStatus\n"
 				if $compressionStatus != 0;
 			$source .= ".gz";
 			die "Compression did not produce staged tree input $source\n" unless -s $source;
@@ -7748,7 +7749,7 @@ sub publishCompressedMSAArtifact {
 	die "Cannot publish missing or empty scratch MSA $working\n" unless -s $working;
 	make_path(dirname($published)) unless -d dirname($published);
 	my $compressed = "$published.gz";
-	open my $compressor, '-|', $pigzBin, '-p', $ncore, '-c', '--', $working
+	open my $compressor, '-|', bgzfArgs($ncore), '-c', '--', $working
 		or die "Cannot start MSA compression for $working: $!\n";
 	copyStreamToPathAtomically(
 		$compressor, $compressed, "publish compressed MSA checkpoint $compressed");

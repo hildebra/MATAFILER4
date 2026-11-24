@@ -70,7 +70,7 @@ like($e100, qr/Marker gene matrix jobs finished without publishing/, 'and verifi
 
 # ---- item 16: no per-gene k-mers -> clean skip instead of a crash
 like(read_file("$root/secScripts/GC/kmerPerGene.pl"), qr/Skipping the catalogue k-mer table/, 'k-mer step skips without MATAF4 k-mers');
-like(read_file("$root/secScripts/geneCat.pl"), qr/if \[ -e \$OutD\/\$primaryClusterFNA\.kmer \]; then \$pigzBin/,
+like(read_file("$root/secScripts/geneCat.pl"), qr/if \[ -e \$OutD\/\$primaryClusterFNA\.kmer \]; then "\.bgzfCmd\(/,
 	'geneCat compresses the k-mer table only when it was written');
 
 # ---- item 18: -perlClusterMAGs uses the sample__bin convention

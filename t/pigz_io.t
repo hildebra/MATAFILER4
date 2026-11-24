@@ -12,10 +12,13 @@ use Mods::GenoMetaAss qw(gzipopen gzipwrite);
 my $root = tempdir(CLEANUP => 1);
 my $fake_pigz = File::Spec->catfile($Bin, 'bin', 'pigz');
 my $log = File::Spec->catfile($root, 'pigz.log');
+my $fake_bgzip = File::Spec->catfile($Bin, 'bin', 'bgzip');
+my $bgzip_log = File::Spec->catfile($root, 'bgzip.log');
 
 local $ENV{MF4_TEST_PIGZ_LOG} = $log;
+local $ENV{MF4_TEST_BGZIP_LOG} = $bgzip_log;
 local $Mods::IO_Tamoc_progs::CONFIG_LOADED = 1;
-local %Mods::IO_Tamoc_progs::CONFIG_HASH = (pigz => $fake_pigz);
+local %Mods::IO_Tamoc_progs::CONFIG_HASH = (pigz => $fake_pigz, bgzip => $fake_bgzip);
 
 my $first = File::Spec->catfile($root, 'first.txt.gz');
 my $first_writer = gzipwrite(
@@ -23,14 +26,14 @@ my $first_writer = gzipwrite(
 );
 print {$first_writer} "header\tS1\tS2\nrow1\t1\t2\n"
 	or die "Cannot write first test member: $!\n";
-ok(close($first_writer), 'pigz-backed writer closes successfully');
-ok(-s $first, 'pigz-backed writer creates a nonempty gzip file');
+ok(close($first_writer), 'bgzip-backed writer closes successfully');
+ok(-s $first, 'bgzip-backed writer creates a nonempty gzip file');
 
 my $second = File::Spec->catfile($root, 'second.txt.gz');
 my $second_writer = gzipwrite($second, 'second test member');
 print {$second_writer} "row2\t3\t4\n"
 	or die "Cannot write second test member: $!\n";
-ok(close($second_writer), 'a second pigz-backed writer closes successfully');
+ok(close($second_writer), 'a second bgzip-backed writer closes successfully');
 
 open my $second_input, '<', $second or die "Cannot open $second: $!\n";
 open my $first_append, '>>', $first or die "Cannot append to $first: $!\n";
@@ -56,8 +59,16 @@ is(
 open my $log_fh, '<', $log or die "Cannot open $log: $!\n";
 my $invocations = do { local $/; <$log_fh> };
 close $log_fh or die "Cannot close $log: $!\n";
-like($invocations, qr/-p\t2\t-3\t-c\t--/,
-	'gzipwrite passes compression settings to configured pigz');
+open my $bgzip_log_fh, '<', $bgzip_log or die "Cannot open $bgzip_log: $!\n";
+my $bgzip_invocations = do { local $/; <$bgzip_log_fh> };
+close $bgzip_log_fh or die "Cannot close $bgzip_log: $!\n";
+like($bgzip_invocations, qr/^-\@\t2\t-l\t3\t-c$/m,
+	'gzipwrite passes threads and level to the configured bgzip');
+open my $second_raw, '<:raw', $second or die "Cannot open $second: $!\n";
+read($second_raw, my $header, 18) or die "Cannot read $second: $!\n";
+close $second_raw;
+is(substr($header, 0, 4) . substr($header, 12, 2), "\x1f\x8b\x08\x04BC",
+	'gzipwrite writes BGZF (gzip members carrying the BC extra field)');
 like($invocations, qr/-dc\t--\t\Q$first\E/,
 	'gzipopen passes the compressed path to configured pigz without a shell');
 

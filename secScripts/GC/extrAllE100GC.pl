@@ -9,7 +9,7 @@ sub processSubGenes;sub getEgenes;
 sub getGeneSeqsSubGenes;
 sub MGintoCats;
 
-use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfCmd);
 use Mods::GenoMetaAss qw(readMapS systemW readClstrRev readFasta gzipopen getAssemblPath fileGZe);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive);
 use Mods::CatalogPaths qw(resolve_catalog_maps);
@@ -302,12 +302,12 @@ sub processSubGenes{
 	open O,">$GCd/$tag.lines" or die "Can't open output lines file\n";;print O join("\n",@rows);close O;
 	@rows = ();
 	#%gene2cl = ();
-	my $pigzBin = getProgPaths("pigz");
 	my $cores = 6;
+	my $bgzipCmd = bgzfCmd($cores);
 	my $cmdX= "$rarBin lineExtr -i $GCd/Matrix.mat.gz -o $GCd/Matrix.$tag.mat -reference $GCd/$tag.lines -t $cores -checkRowName2Idx\n "; #-checkRowName2Idx 
 	$cmdX .= "$rarBin lineExtr -i $GCd/Mat.cov.mat.gz -o $GCd/Mat.cov.$tag.mat -reference $GCd/$tag.lines -t $cores -checkRowName2Idx\n ";
 	$cmdX .= "$rarBin lineExtr -i $GCd/Mat.med.mat.gz -o $GCd/Mat.med.$tag.mat  -reference $GCd/$tag.lines -t $cores -checkRowName2Idx\n ";
-	$cmdX .= "$pigzBin -p 6 $GCd/Mat.cov.$tag.mat $GCd/Mat.med.$tag.mat\n";
+	$cmdX .= "$bgzipCmd $GCd/Mat.cov.$tag.mat\n$bgzipCmd $GCd/Mat.med.$tag.mat\n";
 	$cmdX .= "$rmBin $GCd/$tag.lines\n";
 	print $cmdX."\n";
 	#die $cmdX."\n";

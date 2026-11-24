@@ -83,7 +83,7 @@ is(system($^X, '-I' . $root, $breakpoint_detector,
           '--max-flank-fraction', 0.1), 0,
    'standalone breakpoint detector completes');
 my $breakpoint_text = '';
-gunzip($breakpoint_tsv => \$breakpoint_text)
+gunzip($breakpoint_tsv => \$breakpoint_text, MultiStream => 1)
     or die "Cannot read $breakpoint_tsv: $GunzipError";
 like($breakpoint_text, qr/^ctgA\t10000\t12000\t2000\t/m,
      'breakpoint TSV contains the supported internal low-coverage interval');
@@ -102,7 +102,7 @@ is(system($^X, '-I' . $root, $breakpoint_detector,
           '--output', $smooth_tsv, '--smooth-gap', 100), 0,
    'breakpoint smoothing run completes');
 my $smooth_result = '';
-gunzip($smooth_tsv => \$smooth_result)
+gunzip($smooth_tsv => \$smooth_result, MultiStream => 1)
     or die "Cannot read $smooth_tsv: $GunzipError";
 like($smooth_result, qr/^smooth\t2000\t3000\t1000\t/m,
      'a short noisy mapping island is smoothed into one supported breakpoint');
@@ -127,7 +127,7 @@ is(system($^X, '-I' . $root, $breakpoint_detector,
           '--output', $depth_scale_tsv), 0,
    'breakpoint detector accepts matched low- and high-depth contigs');
 my $depth_scale_result = '';
-gunzip($depth_scale_tsv => \$depth_scale_result)
+gunzip($depth_scale_tsv => \$depth_scale_result, MultiStream => 1)
     or die "Cannot read $depth_scale_tsv: $GunzipError";
 like($depth_scale_result, qr/^low2x\t2000\t3000\t1000\t0\.0000\t2\.0000\t2\.0000$/m,
      'a breakpoint on a 2x contig is retained');
@@ -149,7 +149,7 @@ is(system($^X, '-I' . $root, $breakpoint_detector,
           '--output', $reordered_tsv), 0,
    'breakpoint detector accepts coverage in a different contig order');
 my $reordered_result = '';
-gunzip($reordered_tsv => \$reordered_result)
+gunzip($reordered_tsv => \$reordered_result, MultiStream => 1)
     or die "Cannot read $reordered_tsv: $GunzipError";
 is($reordered_result, $depth_scale_result,
    'breakpoint rows follow the assembly order, not the coverage order');
@@ -190,7 +190,7 @@ like($simulator_stdout, qr/Breakpoints identified:\s+2 across 2 contig/,
 like($simulator_stdout, qr/Simulated reads:\s+19\b/,
      'simulation summary reports its output read count');
 my $synthetic_text = '';
-gunzip($synthetic_fastq => \$synthetic_text)
+gunzip($synthetic_fastq => \$synthetic_text, MultiStream => 1)
     or die "Cannot read $synthetic_fastq: $GunzipError";
 my @synthetic_headers = ($synthetic_text =~ /^\@([^\n]+)/mg);
 is(scalar @synthetic_headers, 19,
@@ -232,7 +232,7 @@ is(system($^X, '-I' . $root,
           '--read-length-sd', 300, '--seed', 7), 0,
    'older hybrid packages retain contig-wide coverage compatibility');
 my $legacy_text = '';
-gunzip($legacy_fastq => \$legacy_text)
+gunzip($legacy_fastq => \$legacy_text, MultiStream => 1)
     or die "Cannot read $legacy_fastq: $GunzipError";
 is(scalar(() = $legacy_text =~ /^\@/mg), 10,
 	'contig-wide fallback skips contigs shorter than the synthetic-read minimum');

@@ -1,0 +1,97 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+# Test-only bgzip stand-in for environments without htslib. It writes real BGZF:
+# gzip members of at most 64 KiB input, each with the "BC" extra field holding
+# the block size, followed by the BGZF end-of-file block. Supported options:
+# -@/--threads N (ignored), -c/--stdout, -f/--force, -k/--keep,
+# -l/--compress-level N, -d/--decompress, and one input file or standard input.
+use Compress::Raw::Zlib qw(Z_OK Z_STREAM_END Z_DEFAULT_COMPRESSION);
+use Compress::Zlib qw(crc32);
+
+if (defined($ENV{MF4_TEST_BGZIP_LOG}) && length($ENV{MF4_TEST_BGZIP_LOG})) {
+	open my $log, '>>', $ENV{MF4_TEST_BGZIP_LOG}
+		or die "Cannot open fake-bgzip log $ENV{MF4_TEST_BGZIP_LOG}: $!\n";
+	print {$log} join("\t", @ARGV), "\n";
+	close $log or die "Cannot close fake-bgzip log: $!\n";
+}
+
+my ($stdout, $force, $keep, $decompress, $level) = (0, 0, 0, 0, Z_DEFAULT_COMPRESSION);
+my @files;
+while (@ARGV) {
+	my $argument = shift @ARGV;
+	if ($argument eq '--') { push @files, @ARGV; last; }
+	if ($argument eq '-@' || $argument eq '--threads') {
+		die "fake bgzip is missing a thread count\n" unless @ARGV;
+		shift @ARGV;
+	} elsif ($argument eq '-l' || $argument eq '--compress-level') {
+		die "fake bgzip is missing a compression level\n" unless @ARGV;
+		$level = shift @ARGV;
+		$level = Z_DEFAULT_COMPRESSION if $level < 0;
+	} elsif ($argument eq '-c' || $argument eq '--stdout') { $stdout = 1;
+	} elsif ($argument eq '-f' || $argument eq '--force') { $force = 1;
+	} elsif ($argument eq '-k' || $argument eq '--keep') { $keep = 1;
+	} elsif ($argument eq '-d' || $argument eq '--decompress') { $decompress = 1;
+	} elsif ($argument =~ /^-./) { die "fake bgzip: unsupported option $argument\n";
+	} else { push @files, $argument; }
+}
+die "fake bgzip takes at most one file\n" if @files > 1;
+my ($input) = @files;
+
+if ($decompress) {
+	my @gzip = ('gzip', '-dc');
+	push @gzip, $input if defined $input;
+	if ($stdout || !defined $input) { exec @gzip or die "Cannot execute gzip: $!\n"; }
+	(my $output = $input) =~ s/\.gz$// or die "fake bgzip: $input has no .gz suffix\n";
+	die "fake bgzip: $output exists\n" if -e $output && !$force;
+	system("gzip -dc -- '$input' > '$output'") == 0 or die "fake bgzip: decompressing $input failed\n";
+	unlink $input or die "Cannot remove $input: $!\n" unless $keep;
+	exit 0;
+}
+
+my ($in, $out);
+if (defined $input) {
+	open $in, '<:raw', $input or die "fake bgzip: cannot open $input: $!\n";
+} else {
+	$in = \*STDIN;
+	binmode $in;
+}
+my $output = defined($input) && !$stdout ? "$input.gz" : undef;
+if (defined $output) {
+	die "fake bgzip: $output exists\n" if -e $output && !$force;
+	open $out, '>:raw', $output or die "fake bgzip: cannot write $output: $!\n";
+} else {
+	$out = \*STDOUT;
+	binmode $out;
+}
+
+sub block {
+	my ($data) = @_;
+	my ($deflate, $status) = Compress::Raw::Zlib::Deflate->new(
+		-Level => $level, -WindowBits => -15, -AppendOutput => 1);
+	die "fake bgzip: deflate init failed\n" unless $status == Z_OK;
+	my $compressed = '';
+	$deflate->deflate($data, $compressed) == Z_OK or die "fake bgzip: deflate failed\n";
+	$deflate->flush($compressed) == Z_OK or die "fake bgzip: deflate flush failed\n";
+	my $size = 18 + length($compressed) + 8;
+	die "fake bgzip: block too large\n" if $size > 65536;
+	return pack('C4 V C2 v A2 v v', 0x1f, 0x8b, 8, 4, 0, 0, 0xff, 6, 'BC', 2, $size - 1)
+		. $compressed . pack('V V', crc32($data), length($data));
+}
+
+my $buffer;
+while (1) {
+	my $read = read($in, $buffer, 65280);
+	die "fake bgzip: read failed: $!\n" unless defined $read;
+	last if $read == 0;
+	print {$out} block($buffer) or die "fake bgzip: write failed: $!\n";
+}
+print {$out} pack('H*', '1f8b08040000000000ff0600424302001b0003000000000000000000')
+	or die "fake bgzip: write failed: $!\n";
+close $out or die "fake bgzip: close failed: $!\n";
+if (defined($input) && !$stdout && !$keep) {
+	close $in;
+	unlink $input or die "Cannot remove $input: $!\n";
+}
+exit 0;

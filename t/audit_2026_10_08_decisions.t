@@ -82,6 +82,8 @@ our (%MFopt, %MFglobal, %map, %HDDspace, $curSmpl, $logDir, $JNUM, $krakDeps, $Q
 $curSmpl = 'S'; $logDir = "$tmp/log/"; $JNUM = 1; $krakDeps = ''; $QSBoptHR = {constraint => [], tmpSpace => 0, General_Hosts => []};
 *main::qsubSystem = sub { push @jobs, [@_]; return ("job" . scalar(@jobs), $_[1]) };
 *main::getProgPaths = sub { return $progs{$_[0]} // "prog_$_[0]" };
+#MATAF4.pl imports bgzfCmd from Mods::IO_Tamoc_progs; here it builds on the stubbed lookup
+*main::bgzfCmd = sub { return main::getProgPaths('bgzip') . ' -@ ' . ($_[0] || 1) };
 *main::sampleReadSet = sub { return {merged_library => {}} };
 
 subtest 'Kraken2 profiling job' => sub {
@@ -272,7 +274,7 @@ subtest 'MMseqs2 read search, options, read groups, threads, CD-HIT' => sub {
 	like($search->[1], qr/^prog_interleaveMates_scr r1\.fq\.gz r2\.fq\.gz \| prog_mmseqs2 easy-search stdin \S+KGM\.ref\.db\.mms2 (\S+) .* -e 1e-4 -s 4 --max-accept 5 --format-output query,target,pident,/m,
 		'-DiaSearchTool mmseqs: mates interleaved on stdin, percent identity, same e-value');
 	like($search->[1], qr/^prog_mmseqs2 easy-search s\.fq\.gz /m, 'single reads from their file');
-	like($search->[1], qr/^pigz -p 4 \S+DiaAssignment\.sub\.KGM\.1\.0$/m, 'hit table gzipped for the parser');
+	like($search->[1], qr/^prog_bgzip -\@ 4 \S+DiaAssignment\.sub\.KGM\.1\.0$/m, 'hit table BGZF-compressed for the parser');
 	like($mfSrc, qr/"DiaPercID=f" => \\\$MFopt\{DiaPercID\}/, '-DiaPercID accepts decimals');
 
 	our %MFconfig = (mateInsertLength => 20000);

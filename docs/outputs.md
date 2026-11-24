@@ -69,7 +69,7 @@ Most final result tables are tab-separated feature abundance matrices. Rows are 
 Common conventions:
 
 - `*.mat*` usually denotes a matrix.
-- `*.gz` files are gzip-compressed.
+- `*.gz` files are gzip-compressed. Files MATAFILER4 compresses itself are BGZF (written by `bgzip`): any gzip tool (`zcat`, `gzip -d`, `pigz -d`) reads them, and they can be indexed for random access (`bgzip -r`, `samtools faidx` for FASTA). Files written directly by external tools, such as `sdm`'s filtered reads, are plain gzip.
 - `L0`, `L1`, `L2`, etc. denote hierarchical levels. `L0` is usually the most specific level and higher numbers are broader summaries, unless a tool-specific file states otherwise.
 - `?` usually denotes an unknown or unresolved assignment at a given level.
 - `-1` usually denotes unassigned genes or reads.

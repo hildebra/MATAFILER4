@@ -41,7 +41,8 @@ use Mods::ReadLibrary qw(
 	readLibrariesByScope libraryFiles libraryPairs libraryTechnology protalReadInput
 );
 use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile jgi_depth_cmd inputFmtSpadesLibraries inputFmtMegahitRuntimeLibraries createGapFillopt
-			buildMapperIdx mapperDBbuilt decideMapper  checkMapsDoneSH greaterComputeSpace);
+			buildMapperIdx mapperDBbuilt decideMapper  checkMapsDoneSH greaterComputeSpace
+			bgzfArgs bgzfCmd bgzfFilesCmd bgzfTreeCmd);
 use Mods::SNP qw(SNPconsensus_vcf SVcall_vcf);
 use Mods::TamocFunc qw (cram2bsam getSpecificDBpaths getFileStr displayPOTUS bam2cram checkMF checkMFFInstall);
 use Mods::FuncTools qw(vfTabStale);
@@ -254,7 +255,10 @@ sub createConsSNPandSVs;
 #       read search); -DiaPercID accepts decimals; read groups PL:ELEMENT (AVITI), PL:LS454 (454);
 #       samtools in the mapper's pipe gets a quarter of the cores. -profileTaxaTarget deactivated
 #       (TaxaTarget unmaintained, database no longer downloadable).
-my $MATFILER_ver = 4.49;
+#4.1.0: 24.11.26: versions are now MAJOR.MINOR.PATCH (4.1.0 follows 4.49; a string, not a number).
+#       Compressed output is BGZF, written by bgzip (config key "bgzip", helpers bgzfCmd/
+#       bgzfFilesCmd/bgzfTreeCmd in Mods::IO_Tamoc_progs) instead of gzip/pigz; reading is unchanged.
+my $MATFILER_ver = "4.1.0";
 my $matafWorkflowActive = 0;
 my $matafWorkflowStage = 'startup';
 my $matafHeartbeatPath = '';
@@ -4957,7 +4961,7 @@ sub detectRibo(){
 				$DBcores = 12;
 				#$DBcmd .= "\n$lambdaIdxBin -p blastn -t $DBcores -d $DB\n";
 				$DBcmd .= "$lambdaBin mkindexn -t $DBcores -d $DB;\n";
-				$DBcmd .= "$pigzBin -p $DBcores $DB.lba;\n";
+				$DBcmd .= bgzfCmd($DBcores)." $DB.lba;\n";
 
 				#die "$DBcmd\n";
 			}
@@ -5783,18 +5787,18 @@ sub runDiamond(){
 				my $mmsSearch = "$mmseqs2Bin easy-search ".($kk == 1 ? "stdin" : $rds[0])." $CLrefDBD$refDB.db.mms2 $outF $tmpPdb/mmseqs.$ii"
 					." --threads $ncore -e $searchEval $mmsSens --max-accept ".($isLong ? 100 : 5)." $mmsOfmt -v 1";
 				$cmd .= ($kk == 1 ? "$interleaveScr $rds[0] $rds[1] | " : "") . "$mmsSearch\n";
-				$cmd .= "$pigzBin -p $ncore $outF\n"; #--compressed only applies to database output
+				$cmd .= bgzfCmd($ncore)." $outF\n"; #--compressed only applies to database output
 			}
 
 			# The parser's reads mode already counts ordinary reads once. Only
 			# merged pairs need an override; avoid rewriting every hit file.
 			if ($curDB ne 'ABR' && $kk == 3) {
 				my $readCount = 2;
-				$cmd .= "zcat $outF.gz | awk '{print \$0 \"\\tMF4:read_count=$readCount\"}' | $pigzBin -c > $outF.counted.gz\n";
+				$cmd .= "zcat $outF.gz | awk '{print \$0 \"\\tMF4:read_count=$readCount\"}' | ".bgzfCmd($ncore)." -c > $outF.counted.gz\n";
 				$cmd .= "mv $outF.counted.gz $outF.gz\n";
 			}
 			if ($curDB ne 'ABR' && $isLong) { #the parser splits these reads' hits by query range
-				$cmd .= "zcat $outF.gz | awk '{print \$0 \"\\tMF4:ranges=1\"}' | $pigzBin -c > $outF.ranges.gz\n";
+				$cmd .= "zcat $outF.gz | awk '{print \$0 \"\\tMF4:ranges=1\"}' | ".bgzfCmd($ncore)." -c > $outF.ranges.gz\n";
 				$cmd .= "mv $outF.ranges.gz $outF.gz\n";
 			}
 			push(@collect,$outF.".gz");
@@ -5812,7 +5816,7 @@ sub runDiamond(){
 		if (@collect) {
 			$cmd .= "cat ".join( " ",@collect) ." > $outgz\nrm -f " . join( " ",@collect) ."\n";
 		} else {
-			$cmd .= "$pigzBin -c </dev/null > $outgz\n";
+			$cmd .= bgzfCmd(1)." -c </dev/null > $outgz\n";
 		}
 		$cmd .= "touch $provenanceStone\n" if $curDB ne 'ABR';
 		$cmd.= "rm -r $tmpPdb\n";
@@ -6063,7 +6067,7 @@ sub scaffoldCtgs{
 		$spadesDir = "$refCtgs$oldDir"; 
 		$clnCmd .= "cp $spadesDir/smpls_used.txt $refCtgs\n";
 		$refCtgs .= "$oldDir/scaffolds.fasta";
-		$clnCmd .="\ngzip $spadesDir/*";
+		$clnCmd .="\n".bgzfFilesCmd($Ncore, "$spadesDir/*");
 		$clnCmd .="\ngunzip $refCtgs";
 		#the mate libraries below are always mapped with bowtie2, whatever -mapper says
 		($cmdDB,$bwtIdx,$chkFile) = buildMapperIdx("$refCtgs",$Ncore,0,1);#$Ncore);
@@ -6296,7 +6300,7 @@ sub mergeReads(){
 	my $jobName = "";
 	if (-e $stone && -e "$outdir/$outT.extendedFrags.fastq" && !-e "$outdir/$outT.extendedFrags.fastq.gz"){
 		#zip
-		$mergCmd = "$pigzBin -f -p $numCores $outdir/$outT.extendedFrags.fastq $outdir/$outT.notCombined_1.fastq $outdir/$outT.notCombined_2.fastq\n";
+		$mergCmd = bgzfFilesCmd($numCores, "$outdir/$outT.extendedFrags.fastq", "$outdir/$outT.notCombined_1.fastq", "$outdir/$outT.notCombined_2.fastq");
 		system "rm $stone";
 	}
 	if (!-e $stone){
@@ -6568,7 +6572,7 @@ sub sdmClean(){
 			$cmd .= 'if (( ${#recovered[@]} )); then cat -- "${recovered[@]}" > '
 				._shell_quote($outSingle).'; rm -f -- "${recovered[@]}"; else ';
 			$cmd .= $MFopt{gzipSDMOut}
-				? _shell_command($pigzBin, '-c').' </dev/null > '._shell_quote($outSingle)
+				? _shell_command(bgzfArgs(1), '-c').' </dev/null > '._shell_quote($outSingle)
 				: ': > '._shell_quote($outSingle);
 			$cmd .= "; fi\n";
 			push @requiredOutputs, $outR1, $outR2, $outSingle;
@@ -6890,7 +6894,7 @@ sub complexGunzCpMv($ $ $ $ $ $){
 		my $bzip2B  = getProgPaths("bzip2");
 		
 		$out =~ s/\.bz2$/\.gz/;
-		$unzipcmd .= "$bzip2B --decompress --stdout $fastap$in | $pigzBin  -f -p $ncore -c -f > $finDest$out";
+		$unzipcmd .= "$bzip2B --decompress --stdout $fastap$in | ".bgzfCmd($ncore)." -c > $finDest$out";
 		$lowEffort=0;
 	}elsif ($allowLinks){
 		$unzipcmd .= "ln -s $fastap$in $finDest/$out;\n";
@@ -7454,7 +7458,7 @@ sub seedUnzip2tmp{
 		} elsif ($porechopFlag && $is3rdGen){ #same condition as the $pas[$i] update below
 			#porechop is running really slow and instable, probably better to get fast5 and use modern basecaller, that will do this automatically..
 			my $porechBin = getProgPaths("porechop");
-			$unzipcmd .= "$porechBin -i $sourcePas[$i] -t $numCore  --adapter_threshold 90 |gzip -c >> $porechopped\n";
+			$unzipcmd .= "$porechBin -i $sourcePas[$i] -t $numCore  --adapter_threshold 90 | ".bgzfCmd($numCore)." -c >> $porechopped\n";
 			$stagedReadsMaterialized = 1;
 			if (@pa1 > 0 ){die "no paired end reads can be given together with porechopped long reads!\n";}
 		} else {
@@ -7721,7 +7725,7 @@ sub mOTU2Mapping{
 	$cmd .= "-f $inF1 -r $inF2 " if (@car1 > 0 );
 	$cmd .= "-s $inFS " if (@sar > 0);
 	$cmd .= "-n $smp $DBstr-t $Ncore -o $motuOut\n";
-	$cmd .= "gzip -c $motuOut > $finOutD/$smp.motu2.tab.gz\n";
+	$cmd .= bgzfCmd(1)." -c $motuOut > $finOutD/$smp.motu2.tab.gz\n";
 	$cmd .= "if [ -s $finOutD/$smp.motu2.tab.gz ] ; then touch  $stone ; fi\n";
 	#$cmd .= "touch  $stone\n";
 	my $jobN = "mOT$JNUM";
@@ -7799,7 +7803,7 @@ sub hostRmBase{
 		$r1 =~ s/\.gz$//; $r2 =~ s/\.gz$//;
 		$cmd .= "$unsplBin $tmpF $r1 $r2\nrm -f $tmpF*\n";
 		if ($gzFlag ne ""){
-			$cmd .= "$pigzBin -f -p $numThr $r1 $r2\n";
+			$cmd .= bgzfFilesCmd($numThr, $r1, $r2);
 		}
 	} elsif($hostRMVer==1) { #kraken2
 		my $krk2Bin = getProgPaths("kraken2");my $tmpF1 ;my $tmpF2 ; my $kr2flags= "";
@@ -7810,7 +7814,7 @@ sub hostRmBase{
 		}
 		my $kr2QuiMod = ""; $kr2QuiMod = $MFopt{filterHostKr2QuickMode}{$seqGen} if (exists($MFopt{filterHostKr2QuickMode}{$seqGen}));
 		$cmd .= "$krk2Bin --threads $numThr $gzFlag $kr2flags --unclassified-out $tmpF --db $krRefDB --output - $kr2QuiMod --confidence $MFopt{krakHostConf} $r1 $r2 \n";
-		$cmd .= "$pigzBin -f -p $numThr $tmpF1 $tmpF2\n" unless ($gzFlag eq "");
+		$cmd .= bgzfFilesCmd($numThr, $tmpF1, $tmpF2) unless ($gzFlag eq "");
 		$cmd .= "rm -f $r1 $r2; \n";
 		$cmd .= "mv $tmpF1$gzEnd $r1;\n ";
 		$cmd .= "mv $tmpF2$gzEnd $r2;\n" if ($r2 ne "");
@@ -8768,7 +8772,7 @@ sub bamDepth{
 		$repairCmd .= $referencePreparationCommand;
 		$repairCmd .= "test -s $canonicalAlignment\n$smtBin quickcheck $canonicalAlignment\n";
 		$repairCmd .= "$smtBin depth ${referenceOption}-aa $depthFilters -@ $numCore $canonicalAlignment "
-			."| $sam2bed | $pigzBin -p $numCore -c > $repairCoverage\n";
+			."| $sam2bed | ".bgzfCmd($numCore)." -c > $repairCoverage\n";
 		$repairCmd .= "test -s $repairCoverage\n$pigzBin -t $repairCoverage\n";
 		$repairCmd .= jgi_depth_cmd([$canonicalAlignment],$repairPrefix,95,$numCore,$REF)
 			if ($MFopt{DoJGIcoverage});
@@ -8873,7 +8877,7 @@ sub bamDepth{
 		my $sam2bed = getProgPaths("samcov2bed");
 		my $depthFilters = $dirsHr->{strictHybridCoverage}
 			? "-Q $MFopt{hybridMinMapQ} -q $MFopt{hybridMinBaseQ}" : "";
-		$covCmd .= "$smtBin depth -aa $depthFilters -@ $numCore $nxtBAM | $sam2bed | $pigzBin -p $numCore -c > $nxtBAM.coverage.gz\n";
+		$covCmd .= "$smtBin depth -aa $depthFilters -@ $numCore $nxtBAM | $sam2bed | ".bgzfCmd($numCore)." -c > $nxtBAM.coverage.gz\n";
 		#$covCmd .= "rm -f $nxtBAM.coverage.gz\n$pigzBin -f -p $numCore $nxtBAM.coverage\n";
 		if ($map2ndMpde == 3){ #map unmapped to genecat
 			$covCmd .= "$readCov_Bin $nxtBAM.coverage.gz - 100\n"; #read length doesn't matter, since no win is given out and no gene is present
@@ -10941,7 +10945,7 @@ sub spadesAssembly{
 	
 	#clean up
 	$cmd .= "echo \"Zipping non-essential files\"\n";
-	$cmd .= "\n $pigzBin -f -p $nCores -r $nodeTmp/scaffolds.fasta $nodeTmp/misc/\n $pigzBin -f -p $nCores -r $nodeTmp/contigs.paths  $nodeTmp/*contigs.fa* \n";
+	$cmd .= "\n".bgzfTreeCmd($nCores, "$nodeTmp/scaffolds.fasta", "$nodeTmp/misc/").bgzfTreeCmd($nCores, "$nodeTmp/contigs.paths", "$nodeTmp/*contigs.fa*");
 	$cmd .=  "rm -rf $nodeTmp/assembly_graph*.gfa $nodeTmp/corrected $nodeTmp/*.fastg $nodeTmp/before_rr*\n";
 	unless ($noTmpOnNode){
 		$cmd .=  "mkdir -p $stageOut\ncp -r $nodeTmp/* $stageOut\n" ;
@@ -11345,7 +11349,7 @@ sub longRdAssembly{
 	
 	#clean up
 	$cmd .= "echo \"Zipping non-essential files\"\n";
-	$cmd .= "\n $pigzBin -f -p $nCores $nodeTmp/scaffolds.fasta\n";
+	$cmd .= "\n".bgzfFilesCmd($nCores, "$nodeTmp/scaffolds.fasta");
 	$cmd .=  "mkdir -p $stageOut\ncp -r $nodeTmp/* $stageOut\n" ;
 	$cmd .= "rm -rf $nodeTmp\n";
 	my $jname = "";
@@ -11515,7 +11519,7 @@ sub megahitAssembly{
 	#print "DB:: $cmdDB\nMATE::$mateFlag\n";
 	#clean up
 	$cmd .= "echo \"Zipping non-essential files\"\n";
-	$cmd .= "\n $pigzBin -f -p $nCores $nodeTmp/scaffolds.fasta.filt2 $nodeTmp/scaffolds.fasta.lnk\n";
+	$cmd .= "\n".bgzfFilesCmd($nCores, "$nodeTmp/scaffolds.fasta.filt2", "$nodeTmp/scaffolds.fasta.lnk");
 	$cmd .= "rm -f $nodeTmp/scaffolds.fasta\n";
 	unless ($noTmpOnNode){
 		$cmd .=  "mkdir -p $stageOut\ncp -r $nodeTmp/* $stageOut\n" ;
@@ -11693,10 +11697,11 @@ sub genePredictions($ $ $ $ $) {
 		#check if protein/genes were already gzip'd
 		if ( $MFopt{GenePredGZ} && -e "$expectedD/genes$bacmark.gff" ){
 			my $cmd = "";
-			$cmd .= "rm -f $expectedD/proteins$bacmark.shrtHD.faa.gz ; $pigzBin -p $numThr $expectedD/proteins$bacmark.shrtHD.faa\n" if (-s "$expectedD/proteins$bacmark.shrtHD.faa");
-			$cmd .= "rm -f  $expectedD/genes$bacmark.shrtHD.fna.gz; $pigzBin -p $numThr $expectedD/genes$bacmark.shrtHD.fna\n" if (-s "$expectedD/genes$bacmark.shrtHD.fna") ;
-			$cmd .= "rm -f  $expectedD/genes$bacmark.per.ctg.gz; $pigzBin -p $numThr $expectedD/genes$bacmark.per.ctg\n" if (-s "$expectedD/genes$bacmark.per.ctg");
-			$cmd .= "rm -f  $expectedD/genes$bacmark.gff.gz; $pigzBin -p $numThr $expectedD/genes$bacmark.gff\n" if (-s "$expectedD/genes$bacmark.gff");
+			my $bgzfN = bgzfCmd($numThr);
+			$cmd .= "rm -f $expectedD/proteins$bacmark.shrtHD.faa.gz ; $bgzfN $expectedD/proteins$bacmark.shrtHD.faa\n" if (-s "$expectedD/proteins$bacmark.shrtHD.faa");
+			$cmd .= "rm -f  $expectedD/genes$bacmark.shrtHD.fna.gz; $bgzfN $expectedD/genes$bacmark.shrtHD.fna\n" if (-s "$expectedD/genes$bacmark.shrtHD.fna") ;
+			$cmd .= "rm -f  $expectedD/genes$bacmark.per.ctg.gz; $bgzfN $expectedD/genes$bacmark.per.ctg\n" if (-s "$expectedD/genes$bacmark.per.ctg");
+			$cmd .= "rm -f  $expectedD/genes$bacmark.gff.gz; $bgzfN $expectedD/genes$bacmark.gff\n" if (-s "$expectedD/genes$bacmark.gff");
 			#$cmd .= "$pigzBin -p $numThr $expectedD/proteins$bacmark.shrtHD.faa $expectedD/genes$bacmark.shrtHD.fna $expectedD/genes$bacmark.per.ctg $expectedD/genes$bacmark.gff;"; 
 			#my $tmpSHDD = $QSBoptHR->{tmpSpace};	$QSBoptHR->{tmpSpace} = 0; 
 			#my ($jname,$tmpCmd) = qsubSystem($logDir."prodigalGZ.sh",$cmd,$numThr,"2G","GZAA$JNUM","","",1,$QSBoptHR->{General_Hosts},$QSBoptHR); 
@@ -11730,7 +11735,7 @@ sub genePredictions($ $ $ $ $) {
 #die "toofar";
 #run prodigal on bacterial contigs..
 	my $gzCMD = "";
-	if ($gzOut eq ".gz"){ $gzCMD = " | $pigzBin --stdout -p $numThr ";}
+	if ($gzOut eq ".gz"){ $gzCMD = " | ".bgzfCmd($numThr)." -c ";}
 	my $prodigal_cmd = "";
 	$prodigal_cmd .= "rm -rf $outDir;\nmkdir -p $tmpGene $outDir;\n";
 	
@@ -11742,7 +11747,7 @@ sub genePredictions($ $ $ $ $) {
 	$prodigal_cmd .= "sleep 1;cut -f1 -d \" \" $tmpGene/proteins.faa $gzCMD > $tmpGene/proteins$bacmark.shrtHD.faa$gzOut\n" ;
 	$prodigal_cmd .= "cut -f1 -d \" \" $tmpGene/genes.fna $gzCMD > $tmpGene/genes$bacmark.shrtHD.fna$gzOut\n" ;
 	$prodigal_cmd .= "cut -f1 $tmpGene/genes$bacmark.gff | sort | uniq -c | grep -v '#' |  awk -v OFS='\\t' {'print \$2, \$1'} $gzCMD > $tmpGene/genes$bacmark.per.ctg$gzOut\n";
-	$prodigal_cmd .= "$pigzBin -p $numThr $tmpGene/genes$bacmark.gff;\n" if ($gzOut eq ".gz");
+	$prodigal_cmd .= bgzfCmd($numThr)." $tmpGene/genes$bacmark.gff;\n" if ($gzOut eq ".gz");
 	$prodigal_cmd .= "rm -f $tmpGene/proteins.faa $tmpGene/genes.fna\n";	
 	#copy everything to the right place (for now, might have to change this later to take care of Eukarya)
 	$prodigal_cmd .= "mkdir -p $expectedD\n";

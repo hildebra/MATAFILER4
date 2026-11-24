@@ -30,7 +30,7 @@ use Mods::GenoMetaAss qw( readFasta ensureFastaIndex fileGZe gzipopen gzipwrite 
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystemJobAlive numLiveUserJobs
 	submissionDependencyDeferred submissionDependencyFailed);
 use Sys::Hostname qw(hostname);
-use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
+use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx bgzfCmd bgzfFilesCmd);
 use Mods::TamocFunc qw(getSpecificDBpaths readTabbed3 checkMF);
 use Mods::FuncTools qw(assignFuncPerGene calc_modules vfTabStale bigFuncDB);
 use Mods::JobGraph qw(newJobGraph runJobGraph jobGraphReport);
@@ -64,7 +64,7 @@ sub clusterSingleStep;
 
 #declared here (not next to the changelog) so -help can report it without
 #running the main body; the changelog entry for it is further down this file
-our $version = 0.70; #0.70: -binSpeciesMG defaults to the binner found in the assemblies' Binning/ folders (MGS output in Bin_<binner>/)
+our $version = 0.71; #0.71: compressed outputs are BGZF (bgzip). 0.70: -binSpeciesMG defaults to the binner found in the assemblies' Binning/ folders (MGS output in Bin_<binner>/)
 #0.69: the node-local eggnog.db copy reserves its disk space first; without it, the shared data dir
 #0.68: eggNOG-mapper chunks search, then annotate from a node-local eggnog.db; retried annotations skip the search
 #0.67: CD-HIT -M within its job; -ntMatchGC samtools threads beside minimap2
@@ -317,7 +317,7 @@ sub _new_gzip_output {
 
 sub _publish_gzip_output {
 	my ($gzip, $partial_file, $final_file) = @_;
-	close $gzip or die "pigz failed while writing $partial_file (status $?)\n";
+	close $gzip or die "bgzip failed while writing $partial_file (status $?)\n";
 	die "gzip produced an empty file: $partial_file\n" unless -s $partial_file;
 	_sync_file($partial_file);
 	retry_rename($partial_file, $final_file,
@@ -1162,7 +1162,7 @@ sub _catalog_backup_command {
 	for my $name ($primaryClusterFNA, $primaryClusterCLS) {
 		my $source = File::Spec->catfile($source_dir, $name);
 		my $destination = File::Spec->catfile($backup_dir, "$prefix$name.gz");
-		$command .= "$pigzBin -f -c -p $cores " . _shell_quote($source)
+		$command .= bgzfCmd($cores) . " -f -c " . _shell_quote($source)
 			. ' > ' . _shell_quote("$destination.part.gz") . "\n";
 		$command .= "$move -- " . _shell_quote("$destination.part.gz") . ' '
 			. _shell_quote($destination) . "\n";
@@ -1600,7 +1600,7 @@ sub geneCatFlow($ $ $ $ ){
 	if (!_stone_valid($geneStatsStone, $cdhID)){
 		my $cmd1="";my $cmd3="";my $cmd2="";
 		# kmerPerGene.pl writes no table when MATAF4 did not compute per-gene k-mers
-		$cmd1 = "$kmerScr $OutD $numCor $cdhID\nif [ -e $OutD/$primaryClusterFNA.kmer ]; then $pigzBin $OutD/$primaryClusterFNA.kmer; fi\n" unless (-e "$OutD/$primaryClusterFNA.kmer.gz");
+		$cmd1 = "$kmerScr $OutD $numCor $cdhID\nif [ -e $OutD/$primaryClusterFNA.kmer ]; then ".bgzfCmd($numCor)." $OutD/$primaryClusterFNA.kmer; fi\n" unless (-e "$OutD/$primaryClusterFNA.kmer.gz");
 		$cmd2 = "$GCcalc $OutD/$primaryClusterFNA $OutD/compl.incompl.$cdhID.fna.GC \n" unless (-e "$OutD/compl.incompl.$cdhID.fna.GC");
 		$cmd3 = "$genelengthScript $OutD/$primaryClusterFNA $OutD/$primaryClusterFNA.length \n" unless (-e "$OutD/$primaryClusterFNA.length");
 		if ($submitLocal){
@@ -3284,7 +3284,7 @@ sub geneCatFunc_emapper{
 	#compress the merged annotations (if uncompressed) and the per-category tables (-f: replace .gz copies from an earlier run)
 	my @toZip = map { "$outD/$_.geneAss" } @emapCats;
 	unshift(@toZip, $tarAnno3) if ($annoIn eq $tarAnno3);
-	$cmd .= "$pigzBin -f -p $clnCores ".join(" ",@toZip).";\n";
+	$cmd .= bgzfFilesCmd($clnCores, @toZip);
 	$cmd .= "$rmBin -f -r $splDir;\n";
 	$cmd .= _checkpoint_command($checkpointWriter, $stone, $cdhID, 'eggnog-annotation', "$tarAnno3.gz");
 	$cmd .= "$rmBin -f "._inflightMarker('FuncEMAP')."\n"; #stage finished

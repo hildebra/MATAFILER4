@@ -9,7 +9,7 @@ use Getopt::Long qw( GetOptions );
 use File::Path qw(make_path remove_tree);
 use File::Spec;
 use Mods::GenoMetaAss qw(systemW is_integer reverse_complement_IUPAC gzipopen fileGZs fileGZe contig_stats_coverage_complete);
-use Mods::IO_Tamoc_progs qw(getProgPaths );
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfCmd bgzfFilesCmd);
 use Mods::phyloTools qw( getE100);
 use Mods::SampleCompletion qw(invalidate_sample_completion);
 
@@ -142,13 +142,13 @@ if ($subparts =~ m/a/){
 ###############################   GC content  ###############################
 if ((!-e "$outD/scaff.GC.gz" || !-e "$outD/scaff.pergene.GC.gz"|| !-e "$outD/scaff.pergene.GC3.gz") && $subparts =~ m/g/){
 	if (-s "$outD/scaff.GC" && -s "$outD/scaff.pergene.GC" && -s "$outD/scaff.pergene.GC3"){
-		systemW "$pigzBin -p $Nthreads $outD/scaff.*";
+		systemW bgzfFilesCmd($Nthreads, "$outD/scaff.*");
 	} else {
 		print "Analyzing GC content\n";
 		my $GCP = getProgPaths("calcGC_scr");
 		systemW "$GCP $inScaffs $outD/scaff.GC";
 		systemW "$GCP $genesNT $outD/scaff.pergene.GC $genesGFF"; 
-		systemW "$pigzBin -p $Nthreads $outD/scaff.*";
+		systemW bgzfFilesCmd($Nthreads, "$outD/scaff.*");
 		#systemW $cmd."\n";
 	}
 	
@@ -222,12 +222,12 @@ if (!-s "$outD/scaff.4kmer.gz" && $subparts =~ m/k/){
 	print "Analyzing kmer content\n";
 	my $KCPbin = getProgPaths("kmerFreqs");#"perl /g/bork5/hildebra/bin/multi-metagenome-master/R.data.generation/calc.kmerfreq.pl";
 	systemW "$KCPbin -i $inScaffs -m 100 -o $outD/scaff.4kmer";
-	systemW "$pigzBin -p $Nthreads  $outD/scaff.4kmer";
+	systemW bgzfCmd($Nthreads)." $outD/scaff.4kmer";
 }
 if (!-s "$outD/scaff.pergene.4kmer.gz" && $subparts =~ m/4/){
 	my $KCPbin = getProgPaths("kmerFreqs");#"perl /g/bork5/hildebra/bin/multi-metagenome-master/R.data.generation/calc.kmerfreq.pl";
 	systemW "$KCPbin -i $genesNT -m 100 -o $outD/scaff.pergene.4kmer";
-	systemW "$pigzBin -p $Nthreads  $outD/scaff.pergene.4kmer\n";
+	systemW bgzfCmd($Nthreads)." $outD/scaff.pergene.4kmer\n";
 }
 if (!-s "$outD/scaff.pergene.4kmer.pm5.gz" && $subparts =~ m/4/){
 	my $KperGenes = getProgPaths("kmerGeneWin");
@@ -341,7 +341,7 @@ sub geneAbundance{
 	}
 	print "Calculating coverage of assemblies..\n";
 	my $clnCmd = "";
-	if (!-e $inFG && -s $inF){systemW "$pigzBin -p $Nthreads $inF";}
+	if (!-e $inFG && -s $inF){systemW bgzfCmd($Nthreads)." $inF";}
 	if (-e $inFG && !-s $inF){system "rm -f $inF";}
 	
 	#no longer needed, rdCov can also read in .gz 
@@ -363,7 +363,7 @@ sub geneAbundance{
 	systemW $cmd;
 	#$cmd .= "gzip -f $outF $outF2 $outF3\nmv $outF.gz $outFfin\n mv $outF2.gz $outF2fin\nmv $outF3.gz $outF3fin\n";
 	
-	$cmd = "rm -f ${inFG}.*.gz;\n$pigzBin -p $Nthreads $outF $outF2 $outF3 $outF4 $outF5 $outF6 $outF7; \n"; $fileEnd2 = ".gz";
+	$cmd = "rm -f ${inFG}.*.gz;\n".bgzfFilesCmd($Nthreads, $outF, $outF2, $outF3, $outF4, $outF5, $outF6, $outF7); $fileEnd2 = ".gz";
 	systemW $cmd;
 	
 	$cmd =  "mv $outF$fileEnd2 $outFfin$fileEnd2\nmv $outF2$fileEnd2 $outF2fin$fileEnd2\nmv $outF3$fileEnd2 $outF3fin$fileEnd2\nmv $outF4$fileEnd2 $outF4fin$fileEnd2\nmv $outF5$fileEnd2 $outF5fin$fileEnd2\n";

@@ -5,7 +5,7 @@ use strict;
 use Data::Dumper;
 use Getopt::Long qw( GetOptions );
 use File::Path qw(make_path);
-use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfFilesCmd);
 use Mods::GenoMetaAss qw(readMap readClstrRev readClstrRevContigSubset readClstrRevSmplCtgGenSubset getDirsPerAssmblGrp  getAssemblPath systemW gzipopen parse_duration);
 use Mods::Binning qw (getBinSubdirName runMetaBat runCheckM runCheckM2 createBinFAA readMGS filterMGS_CM MB2assigns minQualFilter calcLCAcompl readCMquals);
 use Mods::geneCat qw(readMG_LCA);
@@ -939,11 +939,10 @@ sub summarizeMAGcontent{
 		}
 	}
 	close OX;
-	my $pigz = getProgPaths("pigz");
 	unlink "$outD/MAGvsGC.txt.gz"
 		or die "Cannot replace $outD/MAGvsGC.txt.gz: $!\n"
 		if -e "$outD/MAGvsGC.txt.gz";
-	systemW "$pigz -f $outD/MAGvsGC.txt\n";
+	systemW bgzfFilesCmd(1, "$outD/MAGvsGC.txt");
 	die "MAG report compression did not produce $outD/MAGvsGC.txt.gz\n"
 		unless -s "$outD/MAGvsGC.txt.gz";
 	print "Found $MAG2MGScnt MAGs with MGS assignment\n";

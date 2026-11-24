@@ -153,7 +153,7 @@ sub _fastq_file_has_records {
 	return undef unless defined($path) && -e $path && -s $path;
 	my $fh;
 	if ($path =~ /\.gz$/i) {
-		$fh = IO::Uncompress::Gunzip->new($path);
+		$fh = IO::Uncompress::Gunzip->new($path, MultiStream => 1);
 		return undef unless $fh;
 	} else {
 		open $fh, '<', $path or return undef;

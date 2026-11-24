@@ -27,7 +27,7 @@ sub write_file {
 sub read_gzip {
 	my ($path) = @_;
 	my $contents = '';
-	gunzip($path => \$contents) or die "Cannot read $path: $GunzipError";
+	gunzip($path => \$contents, MultiStream => 1) or die "Cannot read $path: $GunzipError";
 	return $contents;
 }
 

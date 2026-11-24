@@ -106,7 +106,9 @@ export PERL5LIB="$PERL5LIB:/path/to/MATAFILER4/"
 | `MF4_R` | R-based helper scripts |
 
 After updating `MF4` from `helpers/install/MF4.yml`, the installer verifies
-`wget`, `pigz`, `prefetch`, `fasterq-dump`, and `vdb-validate`. A missing
+`wget`, `pigz`, `prefetch`, `fasterq-dump`, `vdb-validate`, and `bgzip` (from
+`htslib`, which compresses all pipeline output as BGZF; it is also checked in
+`MF4phylo`). A missing
 command stops installation immediately, preventing archive-backed samples from
 failing later inside a workflow.
 

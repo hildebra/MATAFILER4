@@ -7,7 +7,7 @@ use warnings;
 use strict;
 use Mods::GenoMetaAss qw( readClstrRev systemW readMapS readFasta);
 use Mods::Subm qw(qsubSystem emptyQsubOpt qsubSystem2 qsubSystemJobAlive);
-use Mods::IO_Tamoc_progs qw(getProgPaths );
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfCmd);
 use Mods::geneCat qw(readGene2tax createGene2MGS sortFNA);
 
 die "not enough input args!\n" if (@ARGV<3);
@@ -24,7 +24,7 @@ my $clusterID = @ARGV > 6 ? $ARGV[6] : 95;
 die "Invalid cluster identity\n" unless $clusterID =~ /^\d+$/ && $clusterID >= 1 && $clusterID <= 100;
 my $cdhitBin = getProgPaths("cdhit_est");
 my $rareBin = getProgPaths("rare");
-my $pigzBin = getProgPaths("pigz");
+my $bgzipCmd = bgzfCmd($numCor);
 my $mvBin = getProgPaths("mv");
 my $rmBin = getProgPaths("rm");
 my $mkdirBin = getProgPaths("mkdir");
@@ -75,8 +75,8 @@ if ($clMode == 0){
 }
 $cmd .= "$mvBin $tmpD/mat.decl.mat.gz $GCd/Matrix.mat.gz\n";
 $cmd .= "$mvBin $tmpD/concat.list $c90d\n";
-$cmd .= "$pigzBin -p $numCor -c $GCd/compl.incompl.$clusterID.fna.clstr > $c90d/compl.incompl.$clusterID.fna.clstr.gz\n";
-$cmd .= "$pigzBin -p $numCor -c $GCd/compl.incompl.$clusterID.fna.clstr.idx > $c90d/compl.incompl.$clusterID.fna.clstr.idx.gz\n";
+$cmd .= "$bgzipCmd -c $GCd/compl.incompl.$clusterID.fna.clstr > $c90d/compl.incompl.$clusterID.fna.clstr.gz\n";
+$cmd .= "$bgzipCmd -c $GCd/compl.incompl.$clusterID.fna.clstr.idx > $c90d/compl.incompl.$clusterID.fna.clstr.idx.gz\n";
 $cmd .= "$rmBin $GCd/compl.incompl.$clusterID.fna.clstr*\n";
 $cmd .="$touchBin $stone";
 
@@ -120,7 +120,7 @@ system "$rmBin -f $primFastaAA.mms2";
 if (!-e $stone && (-e "$tmpD/mat.decl.mat.gz" || !-e "$c90d/concat.list")){
 	$cmd = "$mvBin $tmpD/mat.decl.mat.gz $GCd/Matrix.mat.gz\n";
 	$cmd .= "$mvBin $tmpD/concat.list $c90d\n";
-	$cmd .= "$mvBin $GCd/compl.incompl.$clusterID.fna.clstr* $c90d\n$pigzBin -p $numCor $c90d/compl.incompl.$clusterID.fna.clstr\n";
+	$cmd .= "$mvBin $GCd/compl.incompl.$clusterID.fna.clstr* $c90d\n$bgzipCmd $c90d/compl.incompl.$clusterID.fna.clstr\n";
 	$cmd .="$touchBin $stone";
 	systemW $cmd;
 }
@@ -163,7 +163,7 @@ foreach my $gene (@genes){
 }
 close O;
 #$cmd = "$pigzBin -p $numCor $c90d/compl.incompl.$clusterID.fna.clstr.idx\n" unless (-e "$c90d/compl.incompl.$clusterID.fna.clstr.idx.gz");
-$cmd = "$pigzBin $c90d/compl.incompl.$clusterID.fna.clstr.idx\n" unless (-e "$c90d/compl.incompl.$clusterID.fna.clstr.idx.gz");
+$cmd = "$bgzipCmd $c90d/compl.incompl.$clusterID.fna.clstr.idx\n" unless (-e "$c90d/compl.incompl.$clusterID.fna.clstr.idx.gz");
 systemW $cmd;
 
 

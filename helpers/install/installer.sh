@@ -316,6 +316,7 @@ remove_conda_eggnog_mapper
 ensure_environment MF4 "$INSTdir/MF4.yml"
 verify_environment_tools MF4 "$INSTdir/MF4.yml" "ENA/SRA archive downloads" \
 	wget pigz prefetch fasterq-dump vdb-validate
+verify_environment_tools MF4 "$INSTdir/MF4.yml" "BGZF compression" bgzip
 verify_environment_tools MF4 "$INSTdir/MF4.yml" "Protal profiling" \
 	protal protal_profile_utils
 ensure_eggnog_mapper
@@ -421,6 +422,7 @@ if ! database_current "$MOTUS_MARKER" "$MOTUS_VERSION:$MOTUS_DB_VERSION"; then
 	fi
 fi
 ensure_environment MF4phylo "$INSTdir/phylo.yml"
+verify_environment_tools MF4phylo "$INSTdir/phylo.yml" "BGZF compression" bgzip
 ensure_environment MF4_R "$INSTdir/MGTK_R.yml"
 "$MAMBA_E" run -n MF4_R Rscript --vanilla -e \
 	'suppressPackageStartupMessages(library(ggtree))'

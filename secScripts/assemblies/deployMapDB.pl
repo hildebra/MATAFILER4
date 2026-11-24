@@ -4,7 +4,7 @@ use warnings;
 use threads;
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
-use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx);
+use Mods::IO_Tamoc_progs qw(getProgPaths buildMapperIdx bgzfArgs);
 
 die "Usage: $0 <references[,references...]> <sample-dir> <output-db> <cores> <base-names> <final-dirs> [mapper]\n"
 	unless @ARGV == 6 || @ARGV == 7;
@@ -52,7 +52,7 @@ close $assembly_fh;
 die "No FASTA records in $assembly\n" unless @contig_order;
 
 my $blat = getProgPaths('blat');
-my $pigz = getProgPaths('pigz');
+my @bgzip = bgzfArgs($cores);
 my (@threads, @blast_files);
 for my $i (0 .. $#references) {
 	my $index = $i;
@@ -63,7 +63,7 @@ for my $i (0 .. $#references) {
 			'-out=blast8', $references[$index], $assembly, $blast_file);
 		return $status if $status != 0;
 		my $compressed = "$destinations[$index]/$bases[$index].b8.gz";
-		open my $gzip, '-|', $pigz, '-p', $cores, '-c', $blast_file or return 255;
+		open my $gzip, '-|', @bgzip, '-c', $blast_file or return 255;
 		open my $out, '>', $compressed or return 255;
 		while (my $chunk = <$gzip>) { print {$out} $chunk or return 255; }
 		close $gzip or return 255;

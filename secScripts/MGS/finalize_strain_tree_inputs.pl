@@ -12,7 +12,7 @@ use lib File::Spec->catdir($Bin, '..', '..');
 use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile);
 
 my $VERSION = '1.00';
-my ($staging, $manifest, $published_dir, $pigz, $mode, $config, $help);
+my ($staging, $manifest, $published_dir, $bgzip, $legacy_pigz, $mode, $config, $help);
 my $cores = 1;
 
 Configure(qw(no_auto_abbrev no_ignore_case));
@@ -20,7 +20,8 @@ GetOptions(
 	'staging=s' => \$staging,
 	'manifest=s' => \$manifest,
 	'publishedDir=s' => \$published_dir,
-	'pigz=s' => \$pigz,
+	'bgzip=s' => \$bgzip,
+	'pigz=s' => \$legacy_pigz, #accepted for older callers; outputs are always BGZF, written by bgzip
 	'cores=i' => \$cores,
 	'mode=s' => \$mode,
 	'config=s' => \$config,
@@ -46,13 +47,13 @@ if ($mode eq 'cleanup') {
 	cleanup_published_handoff($plan, $staging, $manifest, $published_dir);
 	exit 0;
 }
-$pigz = getProgPaths('pigz') unless defined($pigz) && length($pigz);
+$bgzip = getProgPaths('bgzip') unless defined($bgzip) && length($bgzip);
 die "-cores must be positive\n" unless $cores =~ /^\d+$/ && $cores > 0;
-prepare_handoff($plan, $staging, $manifest, $pigz, $cores, $published_dir);
+prepare_handoff($plan, $staging, $manifest, $bgzip, $cores, $published_dir);
 exit 0;
 
 sub prepare_handoff {
-	my ($plan, $directory, $manifest_path, $pigz_path, $threads, $published) = @_;
+	my ($plan, $directory, $manifest_path, $bgzip_path, $threads, $published) = @_;
 	if (defined($published) && length($published)) {
 		my $published_path = File::Spec->canonpath(
 			File::Spec->rel2abs($published));
@@ -69,23 +70,23 @@ sub prepare_handoff {
 	my $ok = eval {
 		my ($fna_tmp, $fna_digest, $fna_records, $overlay_fna_digest,
 			$overlay_fna_records) = prepare_fasta(
-			$plan, $directory, 'fna', $pigz_path, $threads);
+			$plan, $directory, 'fna', $bgzip_path, $threads);
 		push @temporary, $fna_tmp;
 		my ($faa_tmp, $faa_digest, $faa_records, $overlay_faa_digest,
 			$overlay_faa_records) = prepare_fasta(
-			$plan, $directory, 'faa', $pigz_path, $threads);
+			$plan, $directory, 'faa', $bgzip_path, $threads);
 		push @temporary, $faa_tmp;
 
 		my ($category_tmp, $category_digest, $category_records,
 			$category_loci, $category_samples, $category_sample_set,
 			$overlay_category_digest, $overlay_category_records) = prepare_category(
-			$plan, $directory, $pigz_path, $threads);
+			$plan, $directory, $bgzip_path, $threads);
 		push @temporary, $category_tmp;
 		my ($qc_tmp, $qc_samples, $qc_sample_set) = prepare_qc(
-			$plan, $directory, $pigz_path, $threads);
+			$plan, $directory, $bgzip_path, $threads);
 		push @temporary, $qc_tmp;
 		my ($link_tmp, $link_digest, $link_records) = prepare_links(
-			$plan, $directory, $pigz_path, $threads);
+			$plan, $directory, $bgzip_path, $threads);
 		push @temporary, $link_tmp;
 
 		my $expected_records = $plan->{expected_records};
@@ -122,7 +123,7 @@ sub prepare_handoff {
 		}
 
 		my $data_tmp = temporary_output($directory, $plan->{outputs}{data_log});
-		write_gzip($data_tmp, "OG:$plan->{outgroup}\n", $pigz_path, $threads);
+		write_gzip($data_tmp, "OG:$plan->{outgroup}\n", $bgzip_path, $threads);
 		push @temporary, $data_tmp;
 
 		my @types = qw(fna faa category qc link data_log);
@@ -153,7 +154,7 @@ sub prepare_handoff {
 }
 
 sub prepare_fasta {
-	my ($plan, $directory, $type, $pigz_path, $threads) = @_;
+	my ($plan, $directory, $type, $bgzip_path, $threads) = @_;
 	my (%records, %sort_key);
 	my $digest = Digest::SHA->new(256);
 	my $record_count = 0;
@@ -188,7 +189,7 @@ sub prepare_fasta {
 		});
 	}
 	my $temporary = temporary_output($directory, $plan->{outputs}{$type});
-	write_gzip_stream($temporary, $pigz_path, $threads, sub {
+	write_gzip_stream($temporary, $bgzip_path, $threads, sub {
 		my ($output) = @_;
 		for my $identifier (sort {
 			$sort_key{$a} cmp $sort_key{$b} || $a cmp $b
@@ -233,7 +234,7 @@ sub read_fasta {
 }
 
 sub prepare_category {
-	my ($plan, $directory, $pigz_path, $threads) = @_;
+	my ($plan, $directory, $bgzip_path, $threads) = @_;
 	my (%loci, %samples, %ingroup_samples);
 	my $digest = Digest::SHA->new(256);
 	my $records = 0;
@@ -293,7 +294,7 @@ sub prepare_category {
 		close $input or die "Cannot close category overlay $overlay: $!\n";
 	}
 	my $temporary = temporary_output($directory, $plan->{outputs}{category});
-	write_gzip_stream($temporary, $pigz_path, $threads, sub {
+	write_gzip_stream($temporary, $bgzip_path, $threads, sub {
 		my ($output) = @_;
 		for my $locus (sort keys %loci) {
 			print {$output} join("\t", map { $loci{$locus}{$_} }
@@ -307,7 +308,7 @@ sub prepare_category {
 }
 
 sub prepare_qc {
-	my ($plan, $directory, $pigz_path, $threads) = @_;
+	my ($plan, $directory, $bgzip_path, $threads) = @_;
 	my %sample;
 	for my $worker (@{$plan->{workers}}) {
 		my $part = part_for($plan, $worker->{id}, 'qc');
@@ -333,7 +334,7 @@ sub prepare_qc {
 			unless $rows == $worker->{rows};
 	}
 	my $temporary = temporary_output($directory, $plan->{outputs}{qc});
-	write_gzip_stream($temporary, $pigz_path, $threads, sub {
+	write_gzip_stream($temporary, $bgzip_path, $threads, sub {
 		my ($output) = @_;
 		print {$output} join("\t", qw(MGS sample status ambiguous_fraction csp_fraction validated_loci)), "\n";
 		for my $sample_id (sort keys %sample) {
@@ -346,11 +347,11 @@ sub prepare_qc {
 }
 
 sub prepare_links {
-	my ($plan, $directory, $pigz_path, $threads) = @_;
+	my ($plan, $directory, $bgzip_path, $threads) = @_;
 	my $digest = Digest::SHA->new(256);
 	my $records = 0;
 	my $temporary = temporary_output($directory, $plan->{outputs}{link});
-	write_gzip_stream($temporary, $pigz_path, $threads, sub {
+	write_gzip_stream($temporary, $bgzip_path, $threads, sub {
 		my ($output) = @_;
 		for my $worker (@{$plan->{workers}}) {
 			my $part = part_for($plan, $worker->{id}, 'link');
@@ -581,24 +582,24 @@ sub temporary_output {
 }
 
 sub write_gzip {
-	my ($path, $contents, $pigz_path, $threads) = @_;
-	write_gzip_stream($path, $pigz_path, $threads, sub {
+	my ($path, $contents, $bgzip_path, $threads) = @_;
+	write_gzip_stream($path, $bgzip_path, $threads, sub {
 		my ($output) = @_;
 		print {$output} $contents or die "Cannot write compressed output $path: $!\n";
 	});
 }
 
 sub write_gzip_stream {
-	my ($path, $pigz_path, $threads, $writer) = @_;
+	my ($path, $bgzip_path, $threads, $writer) = @_;
 	unlink $path or die "Cannot clear stale temporary output $path: $!\n" if -e $path;
 	open my $destination, '>', $path or die "Cannot create compressed output $path: $!\n";
 	binmode $destination;
 	my $pid = open(my $pipe, '|-');
-	die "Cannot fork compressor $pigz_path: $!\n" unless defined $pid;
+	die "Cannot fork compressor $bgzip_path: $!\n" unless defined $pid;
 	if ($pid == 0) {
 		open STDOUT, '>&', $destination or die "Cannot connect compressor output: $!\n";
-		exec {$pigz_path} $pigz_path, '-p', $threads, '-c', '--';
-		die "Cannot execute compressor $pigz_path: $!\n";
+		exec {$bgzip_path} $bgzip_path, '-@', $threads, '-c';
+		die "Cannot execute compressor $bgzip_path: $!\n";
 	}
 	close $destination or die "Cannot close compressed destination $path: $!\n";
 	my $ok = eval { $writer->($pipe); 1 };
@@ -648,7 +649,7 @@ sub usage {
 	my ($error) = @_;
 	my $text = <<'USAGE';
 Usage: finalize_strain_tree_inputs.pl -staging DIR -manifest FILE
-       -mode prepare [-pigz FILE] [-cores INT] [-publishedDir DIR] [-config FILE]
+       -mode prepare [-bgzip FILE] [-cores INT] [-publishedDir DIR] [-config FILE]
    or: finalize_strain_tree_inputs.pl -staging DIR -manifest FILE
        -mode cleanup -publishedDir DIR
 USAGE

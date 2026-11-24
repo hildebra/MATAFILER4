@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use Mods::GenoMetaAss qw(gzipopen systemW);
+use Mods::IO_Tamoc_progs qw(bgzfCmd);
 
 sub shellQuote;
 
@@ -135,7 +136,7 @@ for my $level (@levels){
 		print {$outputHandle} "\n";
 	}
 	close $outputHandle or die "Cannot close $output: $!\n";
-	systemW("gzip -f ".shellQuote($output));
+	systemW(bgzfCmd(1)." -f ".shellQuote($output));
 }
 
 

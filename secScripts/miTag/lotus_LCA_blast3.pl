@@ -10,7 +10,7 @@ use Getopt::Long qw(GetOptions);
 use Mods::GenoMetaAss qw(
 	readFasta reverse_complement_IUPAC systemW
 );
-use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile);
+use Mods::IO_Tamoc_progs qw(getProgPaths setConfigFile bgzfCmd);
 
 my $lengthTolerance = 0.85;
 my $maxReads = 50_000;
@@ -661,7 +661,7 @@ sub extractReads {
 	}
 	close $input or die "Cannot close hierarchy file $hierarchy: $!\n";
 	close $outputHandle or die "Cannot close extracted reads $output: $!\n";
-	systemW('gzip -f '.shellQuote($output));
+	systemW(bgzfCmd($cores).' -f '.shellQuote($output));
 }
 
 

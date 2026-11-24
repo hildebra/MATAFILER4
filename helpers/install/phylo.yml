@@ -23,6 +23,7 @@ dependencies:
   - vim
   - wget=1.25.0
   - pigz=2.8
+  - htslib=1.24 #bgzip (BGZF compression); same release as bcftools
   - perl=5.32.1
   - pal2nal=14.1
   - veryfasttree=4.0.5

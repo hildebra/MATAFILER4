@@ -151,7 +151,7 @@ is(append_fasta_records_atomic($gzip_nominal, ">outgroup\nMTEST\n"), "$gzip_nomi
 	'compressed FASTA append resolves and retains the gzip artifact');
 ok(!-e $gzip_nominal, 'compressed append does not create a shadowing plain sidecar');
 my $gzip_contents = '';
-gunzip "$gzip_nominal.gz" => \$gzip_contents
+gunzip "$gzip_nominal.gz" => \$gzip_contents, MultiStream => 1
 	or die "Cannot read gzip fixture: $GunzipError";
 is($gzip_contents, ">sample\nMPEP\n>outgroup\nMTEST\n",
 	'compressed FASTA rewrite preserves original and appended records');

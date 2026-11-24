@@ -9,7 +9,7 @@ use File::Temp qw(tempfile);
 use Time::HiRes ();
 use Digest::SHA ();
 #use List::MoreUtils 'first_index'; 
-use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfArgs bgzfFilesCmd);
 use Mods::math qw(medianArray);
 use Mods::ReadLibrary qw(
 	cloneReadLibraries ensureSeqSetLibraries ensureCleanSeqSetLibraries
@@ -366,17 +366,17 @@ sub gzipwrite{
 	$descr = "gzip output" unless defined($descr) && length($descr);
 	$options = {} unless ref($options) eq 'HASH';
 	my $threads = exists($options->{threads}) ? $options->{threads} : 1;
-	die "invalid pigz thread count for $descr: $threads\n"
+	die "invalid bgzip thread count for $descr: $threads\n"
 		unless defined($threads) && $threads =~ /^\d+$/ && $threads > 0;
-	my @pigzOptions = ('-p', $threads);
+	my $level;
 	if (exists($options->{level})) {
-		my $level = $options->{level};
-		die "invalid pigz compression level for $descr: $level\n"
+		$level = $options->{level};
+		die "invalid bgzip compression level for $descr: $level\n"
 			unless defined($level) && $level =~ /^\d+$/ && $level <= 9;
-		push @pigzOptions, "-$level";
 	}
 
-	my $pigz = getProgPaths("pigz");
+	#BGZF output (see bgzfArgs), read back like any gzip file
+	my ($bgzip, @bgzipOptions) = bgzfArgs($threads, level => $level);
 	open my $destination, '>', $outF
 		or die "error opening $descr file $outF: $!\n";
 	binmode $destination;
@@ -384,15 +384,15 @@ sub gzipwrite{
 	if (!defined($pid)) {
 		my $openError = $!;
 		close $destination;
-		die "error starting pigz for $descr file $outF: $openError\n";
+		die "error starting bgzip for $descr file $outF: $openError\n";
 	}
 	if ($pid == 0) {
 		open STDOUT, '>&', $destination or do {
-			syswrite(STDERR, "Cannot connect pigz output to $outF: $!\n");
+			syswrite(STDERR, "Cannot connect bgzip output to $outF: $!\n");
 			_exit(127);
 		};
-		exec {$pigz} $pigz, @pigzOptions, '-c', '--' or do {
-			syswrite(STDERR, "Cannot execute configured pigz $pigz: $!\n");
+		exec {$bgzip} $bgzip, @bgzipOptions, '-c' or do {
+			syswrite(STDERR, "Cannot execute configured bgzip $bgzip: $!\n");
 			_exit(127);
 		};
 	}
@@ -1595,17 +1595,17 @@ sub readClstrRevGenes{ #gets the exact assembled genes clustered in GC genes #ve
 sub unzipFileARezip($){
 	my ($inFar) = @_;
 	my @inFs = @{$inFar}; my $totCnt=0;
-	my $bef = "gunzip "; my $aft="gzip ";
+	my $bef = "gunzip "; my @rezip;
 	#print "$inF.gz\n";
 	foreach my $inF (@inFs){
 		if (-e "$inF.gz"){
-			$bef .= " $inF.gz"; $aft .= " $inF"; $totCnt++;
+			$bef .= " $inF.gz"; push @rezip, $inF; $totCnt++;
 		}
 	}
 	if ($totCnt==0) {
 		return ("","");
 	} else {
-		return $bef."\n",$aft."\n";
+		return $bef."\n", bgzfFilesCmd(1, @rezip);
 	}
 }
 sub reverse_complement_IUPAC ($) {

@@ -11,7 +11,7 @@ our @EXPORT_OK = qw( sortgzblast uniq  readTabbed readTabbed2 bam2cram cram2bsam
 					checkMFFInstall
 					);
 use Mods::GenoMetaAss qw(systemW readFasta renameFastHD gzipwrite gzipopen resolveExistingFile);
-use Mods::IO_Tamoc_progs qw(getProgPaths);
+use Mods::IO_Tamoc_progs qw(getProgPaths bgzfCmd bgzfFilesCmd);
 
 
 
@@ -104,6 +104,7 @@ sub checkMFFInstall{
 	checkProg("canopy clustering genome binner","canopy",0);
 	
 	checkProg("pigz","pigz",0);
+	checkProg("bgzip (BGZF compression)","bgzip",0);
 	checkProg("bzip2","bzip2",0);
 	checkProg("rsync","rsync",0);
 
@@ -530,18 +531,18 @@ sub sortgzblast{ #function that checks if the diamond output was already sorted 
 	unless ($input =~ m/\.srt\.gz$/){ #do sort (and maybe gz)
 		if ($input =~ m/\.srt$/){
 			$target = "$input.gz";
-			$cmd = "gzip $input";
+			$cmd = bgzfFilesCmd(1, $input);
 		} elsif ($input =~ m/\.gz$/) { #not sorted, but gz
 			system "mkdir -p $tmpd" unless (-d "$tmpd");
 			$target = "$input2.srt.gz";
 			my $tmpf = "$target.tmp.$randstring";
-			$cmd = "gzip -cd $input | sort | gzip -c > $tmpf\n";
+			$cmd = "gzip -cd $input | sort | ".bgzfCmd(1)." -c > $tmpf\n";
 			$cmd .= "test -s $tmpf\ngzip -t $tmpf\nmv $tmpf $target\nrm -f $input\n";
 			if (!-e $input){die "Wrong file as input provided: $input\n";}
 		} else { #not gz, not sort
 			$target = "$input.srt.gz";
 			my $tmpf = "$target.tmp.$randstring";
-			$cmd = "sort $input | gzip -c > $tmpf\n";
+			$cmd = "sort $input | ".bgzfCmd(1)." -c > $tmpf\n";
 			$cmd .= "test -s $tmpf\ngzip -t $tmpf\nmv $tmpf $target\nrm -f $input\n";
 		}
 	} else {
